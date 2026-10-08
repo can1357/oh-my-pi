@@ -836,15 +836,27 @@ function serializeRequestMessagesForTelemetry(
 ): string | undefined {
 	const serializer = telemetry.config.contentSerializer?.requestMessages;
 	if (serializer) return callContentSerializer(telemetry, "requestMessages", () => serializer(request));
+	const systemParts = normalizeSystemPromptParts(request.systemPrompt);
+	const requestMessages = request.messages ?? [];
+	const total = systemParts.length + requestMessages.length;
+	if (total === 0) return undefined;
+	// Summarize only what survives the message cap; the rest is counted.
 	const messages: TelemetryMessageSummary[] = [];
-	for (const text of normalizeSystemPromptParts(request.systemPrompt))
+	for (const text of systemParts) {
+		if (messages.length === MAX_TELEMETRY_MESSAGE_COUNT) break;
 		messages.push({ role: "system", content: summarizeTelemetryValue(text) });
-	if (request.messages) {
-		for (const message of request.messages) {
-			messages.push({ role: message.role, content: summarizeTelemetryValue(message.content) });
-		}
 	}
-	return messages.length === 0 ? undefined : stringifyJsonAttribute(limitTelemetryMessages(messages));
+	for (const message of requestMessages) {
+		if (messages.length === MAX_TELEMETRY_MESSAGE_COUNT) break;
+		messages.push({ role: message.role, content: summarizeTelemetryValue(message.content) });
+	}
+	if (total > MAX_TELEMETRY_MESSAGE_COUNT) {
+		messages.push({
+			role: "system",
+			content: { kind: "truncated", omittedMessages: total - MAX_TELEMETRY_MESSAGE_COUNT },
+		});
+	}
+	return stringifyJsonAttribute(messages);
 }
 
 function serializeResponseTextForTelemetry(telemetry: AgentTelemetry, message: AssistantMessage): string | undefined {
@@ -1020,17 +1032,6 @@ function callContentSerializer(
 		});
 		return undefined;
 	}
-}
-
-function limitTelemetryMessages(messages: readonly TelemetryMessageSummary[]): TelemetryMessageSummary[] {
-	const limited = messages.slice(0, MAX_TELEMETRY_MESSAGE_COUNT);
-	if (messages.length > MAX_TELEMETRY_MESSAGE_COUNT) {
-		limited.push({
-			role: "system",
-			content: { kind: "truncated", omittedMessages: messages.length - MAX_TELEMETRY_MESSAGE_COUNT },
-		});
-	}
-	return limited;
 }
 
 function limitTelemetryToolCalls(toolCalls: readonly TelemetryToolCallSummary[]): TelemetryToolCallSummary[] {

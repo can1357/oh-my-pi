@@ -316,6 +316,12 @@ describe("table charts in assistant Markdown", () => {
 			expect(tableEnd).toBeGreaterThanOrEqual(0);
 			expect(imageRow).toBeGreaterThan(tableEnd);
 			expect(after).toBeGreaterThan(imageRow);
+
+			// A subagent's transcript keeps the table bare and holds nothing back for a chart.
+			const subagent = new AssistantMessageComponent(message);
+			subagent.setTableChartsVisible(false);
+			expect(subagent.render(100).some(row => TERMINAL.isImageLine(row))).toBe(false);
+			expect(subagent.isTranscriptBlockPending()).toBe(false);
 		} finally {
 			setTerminalImageProtocol(protocol);
 		}

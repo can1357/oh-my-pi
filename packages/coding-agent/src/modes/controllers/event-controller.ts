@@ -140,6 +140,21 @@ interface ApprovalPreviewGate {
 	started: boolean;
 }
 
+/**
+ * Working-line text for a streamed tool intent, or `undefined` when unusable.
+ * Streamed JSON can deliver non-string `i` (object, number, boolean) before
+ * schema validation, so the type is guarded too.
+ */
+function normalizeIntent(intent: unknown): string | undefined {
+	if (typeof intent !== "string") return undefined;
+	return (
+		intent
+			.trim()
+			.replace(/\s*\.+$/, "")
+			.trim() || undefined
+	);
+}
+
 export class EventController {
 	#lastReadGroup: ReadToolGroupComponent | undefined = undefined;
 	/** Timestamp of the current turn's user prompt; drives the usage row's prompt→yield delta. */
@@ -715,13 +730,7 @@ export class EventController {
 
 	#updateWorkingMessageFromIntent(intent: unknown): void {
 		if (this.ctx.session.isAborting) return;
-		// Streamed JSON can deliver non-string `i` (object, number, boolean) before
-		// schema validation; `?.` only guards null/undefined, so guard the type too.
-		if (typeof intent !== "string") return;
-		const trimmed = intent
-			.trim()
-			.replace(/\s*\.+$/, "")
-			.trim();
+		const trimmed = normalizeIntent(intent);
 		if (!trimmed || trimmed === this.#lastIntent) return;
 		this.#lastIntent = trimmed;
 		this.ctx.setWorkingMessage(trimmed);
@@ -739,24 +748,31 @@ export class EventController {
 		// the listener's first await, preserving the timing the coalescing
 		// tests assert on. `message_update` enqueue is itself synchronous and
 		// needs no serialization.
-		this.ctx.unsubscribe = this.ctx.session.subscribe(async (event: AgentSessionEvent) => {
-			// Coalesce the cumulative `message_update` deltas of a streaming turn
-			// into at most one handler run per window. `#handleMessageUpdate` is
-			// synchronous, so without this every token re-runs the whole
-			// streaming rebuild (splitAssistantMessageToolTimeline, reveal
-			// setTarget, per-block tool-call reconciliation) even though the TUI
-			// paints at most ~30fps — at 40-100 tps the handler work then
-			// dominates the CPU profile of an idle-looking streaming session
-			// (issue #7443). Only the latest snapshot is meaningful; non-update
-			// events flush the pending snapshot first so ordering is preserved.
-			if (event.type === "message_update") {
-				this.#enqueueMessageUpdate(event);
-				return;
-			}
-			await this.#runSerialized(async () => {
-				await this.#flushPendingMessageUpdate();
-				await this.handleEvent(event);
-			});
+		this.ctx.unsubscribe = this.ctx.session.subscribe(event => this.dispatchSessionEvent(event));
+	}
+
+	/**
+	 * Route one session event through the same pipeline as the live
+	 * subscription: coalesce the cumulative `message_update` deltas of a
+	 * streaming turn into at most one handler run per window, and serialize
+	 * every other event behind any in-flight run.
+	 *
+	 * `#handleMessageUpdate` is synchronous, so without coalescing every token
+	 * re-runs the whole streaming rebuild (splitAssistantMessageToolTimeline,
+	 * reveal setTarget, per-block tool-call reconciliation) even though the TUI
+	 * paints at most ~30fps — at 40-100 tps the handler work then dominates the
+	 * CPU profile of an idle-looking streaming session (issue #7443). Only the
+	 * latest snapshot is meaningful; non-update events flush the pending
+	 * snapshot first so ordering is preserved.
+	 */
+	async dispatchSessionEvent(event: AgentSessionEvent): Promise<void> {
+		if (event.type === "message_update") {
+			this.#enqueueMessageUpdate(event);
+			return;
+		}
+		await this.#runSerialized(async () => {
+			await this.#flushPendingMessageUpdate();
+			await this.handleEvent(event);
 		});
 	}
 
@@ -1573,25 +1589,31 @@ export class EventController {
 				if (closed && component && !component.hasPendingTextDisplay()) component.markTranscriptBlockFinalized();
 			}
 
-			// Update working message with intent from streamed tool arguments
-			for (const content of this.ctx.streamingMessage.content) {
-				if (content.type !== "toolCall") continue;
-				const args = content.arguments;
+			// Update working message with the intent of the LAST intent-bearing
+			// streamed tool call. Scanning in reverse skips the redundant
+			// intermediate setWorkingMessage calls a forward pass would make
+			// (only the last one survives the flush anyway).
+			const blocks = this.ctx.streamingMessage.content;
+			for (let index = blocks.length - 1; index >= 0; index--) {
+				const block = blocks[index];
+				if (block?.type !== "toolCall") continue;
+				const args = block.arguments;
 				if (!args || typeof args !== "object") continue;
+				let intent: string | undefined;
 				if (INTENT_FIELD in args) {
-					this.#updateWorkingMessageFromIntent(args[INTENT_FIELD]);
-					continue;
-				}
-				const tool = this.ctx.viewSession.getToolByName(content.name);
-				if (typeof tool?.intent !== "function") continue;
-				try {
-					const derived = tool.intent(args as never)?.trim();
-					if (derived) {
-						this.#updateWorkingMessageFromIntent(derived);
+					intent = normalizeIntent(args[INTENT_FIELD]);
+				} else {
+					const tool = this.ctx.viewSession.getToolByName(block.name);
+					if (typeof tool?.intent !== "function") continue;
+					try {
+						intent = normalizeIntent(tool.intent(args as never));
+					} catch {
+						// intent function must never break the UI
 					}
-				} catch {
-					// intent function must never break the UI
 				}
+				if (!intent) continue;
+				this.#updateWorkingMessageFromIntent(intent);
+				break;
 			}
 
 			this.ctx.ui.requestRender();

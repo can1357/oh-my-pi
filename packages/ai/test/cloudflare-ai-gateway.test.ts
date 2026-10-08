@@ -238,4 +238,18 @@ describe("Cloudflare AI Gateway", () => {
 		expect(prepared?.model.requestModelId).toBe("claude-sonnet-4-5");
 		expect(prepared?.options.apiKey).toBe("legacy-token");
 	});
+
+	test("rebuilds the OpenAI-compat route when the source model's fields are replaced", () => {
+		const provider = getProviderDefinition("cloudflare-ai-gateway");
+		const model: Model = { ...WORKERS_MODEL, headers: { "x-test": "old" } };
+		const first = provider?.prepareModel?.(model);
+		expect(first?.api).toBe("openai-completions");
+		expect(first?.headers).toEqual({ "x-test": "old" });
+		expect(provider?.prepareModel?.(model)).toBe(first);
+
+		model.headers = { "x-test": "new" };
+		const second = provider?.prepareModel?.(model);
+		expect(second).not.toBe(first);
+		expect(second?.headers).toEqual({ "x-test": "new" });
+	});
 });

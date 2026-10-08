@@ -10,6 +10,8 @@ import { type ChartSegment, hasChartTable, splitTableCharts, TableChartFigure } 
 export interface FigureMarkdownOptions {
 	/** Markdown for one prose run (and a failed figure's code fallback); FigureMarkdown drives its transience. */
 	markdown: (text: string) => Markdown;
+	/** Draw charts under numeric tables; off for transcripts that are not the main session's. */
+	charts: boolean;
 	/** Shared inline-image budget for the figures. */
 	budget?: ImageBudget;
 	/** A figure's rows changed outside a text update (raster landed, fell back to code). */
@@ -143,7 +145,7 @@ export class FigureMarkdown extends Container {
 		const fences: FigureSegment[] = svgFigureRendering()
 			? splitSvgFences(this.#text)
 			: [{ kind: "markdown", text: this.#text }];
-		if (!hasChartTable(this.#text)) return fences;
+		if (!this.#options.charts || !hasChartTable(this.#text)) return fences;
 		const last = fences.length - 1;
 		return fences.flatMap((segment, index): (FigureSegment | ChartSegment)[] =>
 			segment.kind === "markdown" ? splitTableCharts(segment.text, this.#transient && index === last) : [segment],

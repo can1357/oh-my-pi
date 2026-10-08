@@ -114,6 +114,7 @@ import { loadAdvisorTranscriptCosts } from "../advisor";
 import { ASYNC_JOB_MANAGER_SHUTDOWN_REASON, type AsyncJob, AsyncJobManager } from "../async";
 import { reset as resetCapabilities } from "../capability";
 import type { EffectiveExtensionRoots } from "../capability/types";
+import type { SessionAccountPoolScope } from "../config/account-pools";
 import { shouldEnableAppendOnlyContext } from "../config/append-only-context-mode";
 import type { ModelRegistry } from "../config/model-registry";
 import {
@@ -164,7 +165,7 @@ import type { Skill, SkillWarning } from "../extensibility/skills";
 import { expandSlashCommand, type FileSlashCommand, loadSlashCommands } from "../extensibility/slash-commands";
 import { normalizeToolEventInput, resolveToolEventInput } from "../extensibility/tool-event-input";
 import { GoalRuntime } from "../goals/runtime";
-import type { GoalModeState } from "../goals/state";
+import type { GoalModeState, GoalTokenUsage } from "../goals/state";
 import type { HindsightSessionState } from "../hindsight/state";
 import { InternalUrlRouter, type LocalProtocolOptions } from "../internal-urls";
 import { type ChainJudge, hasNativeJudge, journalJudgmentUsage, resolveJudge, sharedJudgmentCache } from "../judgment";
@@ -193,6 +194,7 @@ import planModeToolDecisionReminderPrompt from "../prompts/system/plan-mode-tool
 import rewindReportTemplate from "../prompts/system/rewind-report.md" with { type: "text" };
 import sessionStopBlockedPrompt from "../prompts/system/session-stop-blocked.md" with { type: "text" };
 import sideChannelNoToolsReminder from "../prompts/system/side-channel-no-tools.md" with { type: "text" };
+import titleForkPrompt from "../prompts/system/title-fork.md" with { type: "text" };
 import skillfulNoticePrompt from "../prompts/system/skillful-notice.md" with { type: "text" };
 import vibeModeActivePrompt from "../prompts/system/vibe-mode-active.md" with { type: "text" };
 import {
@@ -251,7 +253,8 @@ import { extractFileMentions, generateFileMentionMessages } from "../utils/file-
 import { normalizeModelContextImages } from "../utils/image-loading";
 import { TokenRateMeter } from "../utils/token-rate";
 import { resumeCommand } from "../utils/resume-command";
-import { generateSessionTitle } from "../utils/title-generator";
+import { parseCardTitleReply, splitCardTitle } from "../utils/title-card";
+import { generateSessionTitle, nerdGlyphsActive } from "../utils/title-generator";
 import { buildNamedToolChoice, isToolChoiceActive } from "../utils/tool-choice";
 import type { VibeModeState } from "../vibe/state";
 import type { AgentSessionEvent, AgentSessionEventListener } from "./agent-session-events";
@@ -432,6 +435,10 @@ export type { AdvisorStats, AdvisorStatusOverviewEntry, PerAdvisorStat } from ".
 const SESSION_STOP_CONTINUATION_CAP = 8;
 /** Assistant thinking+reply words a deferred auto-title waits for before retitling from context. */
 const DEFERRED_TITLE_MIN_WORDS = 40;
+/** How long an armed title fork waits for the reply's first non-thinking block before the title model takes over. */
+const TITLE_FORK_START_TIMEOUT_MS = 30_000;
+/** Cap on the forked title request itself (measured p90 2.3s). */
+const TITLE_FORK_TIMEOUT_MS = 15_000;
 
 import { LoopGuards, type StreamGuardsHost, StreamingEditGuard } from "./stream-guards";
 import { TodoTracker, type TodoTrackerHost } from "./todo-tracker";
@@ -484,7 +491,7 @@ import {
 	cfgExtendedContext,
 	cfgWorkspaceAdditionalDirectories,
 } from "./context-settings";
-import { cfgTitleRefreshOnReplan } from "../goals/settings";
+import { cfgTitleGenerator, cfgTitleIcons, cfgTitleRefreshOnReplan } from "../utils/title-settings";
 import {
 	cfgArchiveEnabled,
 	cfgComputerEnabled,
@@ -659,6 +666,20 @@ type SetSessionNameWithTrigger = (
 	trigger?: SessionNameTrigger,
 ) => Promise<boolean>;
 
+/** A first-message title armed to fork the main reply. */
+interface TitleFork {
+	sessionId: string;
+	/** The message being titled, for the title model if the fork cannot name the session. */
+	input: string;
+	/** The message only points at an attachment the text-only title model cannot see. */
+	attachmentOnly: boolean;
+	/** Gives the session to the title model when the reply never starts. */
+	timer: NodeJS.Timeout;
+	/** Session-lifecycle signal at arming time: interruption cancels the title. */
+	signal: AbortSignal;
+	onAbort: () => void;
+}
+
 const kPersistedSessionEntryId = Symbol("persistedSessionEntryId");
 type PersistedAssistantMessage = AssistantMessage & { [kPersistedSessionEntryId]?: string };
 
@@ -832,6 +853,12 @@ export class AgentSession implements SettingsScope {
 	 *  e.g. a pasted image plus "help") AND the assistant has replied, the title is
 	 *  regenerated once from the recent user/assistant/thinking turns. */
 	#deferredTitle: { sessionId: string; declined: boolean; replied: boolean; words: number } | undefined;
+	/** Title waiting to fork the reply (see {@link maybeStartTitleGeneration}). */
+	#titleFork: TitleFork | undefined;
+	/** The latest message that arrived while a title request ran; it gets its own
+	 *  try if that request leaves the session unnamed (see {@link #retryWaitingTitle}).
+	 *  `signal` is the session-lifecycle signal at arrival: an interrupt since cancels it. */
+	#waitingTitle: { sessionId: string; input: string; signal: AbortSignal } | undefined;
 	#titleProviderSessionId: string | undefined;
 	#titleProviderParentSessionId: string | undefined;
 	/** Host hook invoked when a typed user prompt is dropped before dispatch;
@@ -879,6 +906,8 @@ export class AgentSession implements SettingsScope {
 	#scoutAllowedBySpawnPolicy = true;
 	#providerSessionId: string | undefined;
 	#freshProviderSessionId: string | undefined;
+	/** OAuth account pools enforced on this session's key lookups; lifted on dispose. */
+	#accountPoolScope: SessionAccountPoolScope | undefined;
 	#inheritedProviderPromptCacheKey: string | undefined;
 	#autolearnCaptureAbortController: AbortController | undefined;
 	#autolearnCaptureTask: Promise<void> | undefined;
@@ -2034,6 +2063,7 @@ export class AgentSession implements SettingsScope {
 		this.#textOutputCommitted = this.#agentKind === "main";
 		this.#scoutAllowedBySpawnPolicy = config.scoutAllowedBySpawnPolicy ?? true;
 		this.#providerSessionId = config.providerSessionId;
+		this.#accountPoolScope = config.accountPoolScope;
 		this.#inheritedProviderPromptCacheKey =
 			config.providerPromptCacheKeySource === "fork" ? this.agent.promptCacheKey : undefined;
 		// Owner-routed async delivery: completions for jobs this agent owns are
@@ -2069,15 +2099,7 @@ export class AgentSession implements SettingsScope {
 			setState: state => {
 				this.#goalModeState = state;
 			},
-			getCurrentUsage: () => {
-				const usage = this.getSessionStats().tokens;
-				return {
-					input: usage.input,
-					output: usage.output,
-					cacheRead: usage.cacheRead,
-					cacheWrite: usage.cacheWrite,
-				};
-			},
+			getCurrentUsage: () => this.#goalUsage(),
 			emit: event => {
 				if (event.type === "goal_updated") {
 					return this.#emitSessionEvent({ type: "goal_updated", goal: event.goal, state: event.state });
@@ -2157,6 +2179,7 @@ export class AgentSession implements SettingsScope {
 				this.#recovery.noteRetryFallbackCooldown(selector, retryAfterMs, errorMessage),
 			createCodexCompactionContext: createMaintenanceCodexCompactionContext,
 			sessionId: () => this.sessionId,
+			restrictOAuthAccounts: providerSessionId => this.#accountPoolScope?.restrict(providerSessionId),
 		};
 		this.#advisors = new SessionAdvisors(advisorsHost, {
 			enabled: cfgAdvisorEnabled.get(this.settings),
@@ -2655,19 +2678,20 @@ export class AgentSession implements SettingsScope {
 	}
 
 	/**
-	 * Re-anchor mode state to the session a branch just minted. Branching mints a
-	 * new session id/file (see {@link SessionManager.createBranchedSession}), so
-	 * without this the interactive-mode reconciler keeps the pre-branch vibe owner
-	 * scope and disabling vibe mode trips the stale-scope guard in
-	 * `VibeRuntime.#persistModeExit` (issue #10468). Mirrors the reconcile step
-	 * `switchSession` runs for the same reason. Best-effort: a reconcile failure
-	 * must not roll back an otherwise-successful branch.
+	 * Re-anchor mode state to the session a branch or `/new` just minted. Both
+	 * mint a new session id/file, so without this the interactive-mode reconciler
+	 * keeps the previous session's transient mode: a stale vibe owner scope trips
+	 * the guard in `VibeRuntime.#persistModeExit` after a branch (issue #10468),
+	 * and plan/goal mode keeps running in a new session that records no mode
+	 * (issue #14653). Mirrors the reconcile step `switchSession` runs for the same
+	 * reason. Best-effort: a reconcile failure must not roll back an
+	 * otherwise-successful transition.
 	 */
-	async #reconcileModeAfterBranch(): Promise<void> {
+	async #reconcileModeAfterTransition(): Promise<void> {
 		try {
 			await this.#sessionSwitchReconciler?.();
 		} catch (error) {
-			logger.warn("Failed to reconcile session mode after branch", {
+			logger.warn("Failed to reconcile session mode after session transition", {
 				sessionFile: this.sessionFile,
 				error: String(error),
 			});
@@ -3036,9 +3060,9 @@ export class AgentSession implements SettingsScope {
 
 	/** Emit an event to all listeners */
 	#emit(event: AgentSessionEvent): void {
-		// Copy array before iteration to avoid mutation during iteration.
-		const listeners = [...this.#eventListeners];
-		for (const l of listeners) {
+		// Listener array is copy-on-write (see `subscribe`), so iterating the
+		// current array is safe against (un)subscribes made by a listener.
+		for (const l of this.#eventListeners) {
 			try {
 				const result = l(event) as unknown;
 				// Listener may be an async function whose returned Promise we don't await;
@@ -3406,7 +3430,7 @@ export class AgentSession implements SettingsScope {
 
 	#buildPersistedMessageKeySet(): Set<string> {
 		const keys = new Set<string>();
-		for (const entry of this.sessionManager.getBranch()) {
+		for (const entry of this.sessionManager.getBranchView()) {
 			if (entry.type !== "message") continue;
 			const key = sessionMessagePersistenceKey(entry.message);
 			if (key !== undefined) keys.add(key);
@@ -3435,7 +3459,7 @@ export class AgentSession implements SettingsScope {
 		if (key === undefined) return false;
 		const keys = this.#ensurePersistedMessageKeys();
 		if (!keys.has(key)) return false;
-		const branch = this.sessionManager.getBranch();
+		const branch = this.sessionManager.getBranchView();
 		for (let index = branch.length - 1; index >= 0; index--) {
 			const entry = branch[index];
 			if (entry.type !== "message") continue;
@@ -3711,6 +3735,16 @@ export class AgentSession implements SettingsScope {
 				if (deferred.words >= DEFERRED_TITLE_MIN_WORDS) this.#advanceDeferredTitle("replied");
 			}
 		}
+		// Fork the title request synchronously, at the reply's first non-thinking
+		// block: the side turn snapshots the streaming reply before its first await.
+		if (this.#titleFork) {
+			if (event.type === "message_update") {
+				const kind = event.assistantMessageEvent.type;
+				if (kind === "text_start" || kind === "toolcall_start") this.#startTitleFork();
+			} else if (event.type === "agent_end") {
+				this.#abandonTitleFork("no-reply-block");
+			}
+		}
 		// Expected internal transitions stamp a structural suppression flag on the
 		// persisted message BEFORE the obfuscator's display-side copy below, so the
 		// streaming render and every history-replay path (resume, `/tree`, rebuild)
@@ -3819,13 +3853,7 @@ export class AgentSession implements SettingsScope {
 
 		if (event.type === "turn_start") {
 			this.#advisors.onPrimaryTurnStart();
-			const usage = this.getSessionStats().tokens;
-			this.#goalRuntime.onTurnStart(`turn-${++this.#goalTurnCounter}`, {
-				input: usage.input,
-				output: usage.output,
-				cacheRead: usage.cacheRead,
-				cacheWrite: usage.cacheWrite,
-			});
+			this.#goalRuntime.onTurnStart(`turn-${++this.#goalTurnCounter}`, this.#goalUsage());
 		}
 
 		if (event.type === "tool_execution_start") {
@@ -4055,18 +4083,10 @@ export class AgentSession implements SettingsScope {
 			const ttsrAbortPendingAtAgentEnd = this.#ttsr.abortPending;
 			const emitAgentEndNotification = (options?: AgentEndSettleOptions) =>
 				this.#settleAgentEnd(event, activeMessages, options);
-			const usage = this.getSessionStats().tokens;
-			await this.#goalRuntime.onAgentEnd({
-				currentUsage: {
-					input: usage.input,
-					output: usage.output,
-					cacheRead: usage.cacheRead,
-					cacheWrite: usage.cacheWrite,
-				},
-			});
-			const fallbackAssistant = [...settledMessages]
-				.reverse()
-				.find((message): message is AssistantMessage => message.role === "assistant");
+			await this.#goalRuntime.onAgentEnd({ currentUsage: () => this.#goalUsage() });
+			const fallbackAssistant = settledMessages.findLast(
+				(message): message is AssistantMessage => message.role === "assistant",
+			);
 			const msg = this.#lastAssistantMessage ?? fallbackAssistant;
 			this.#lastAssistantMessage = undefined;
 			if (!msg) {
@@ -5027,14 +5047,16 @@ export class AgentSession implements SettingsScope {
 	 * Multiple listeners can be added. Returns unsubscribe function for this listener.
 	 */
 	subscribe(listener: AgentSessionEventListener): () => void {
-		this.#eventListeners.push(listener);
+		// Copy-on-write: `#emit` iterates the array it read without copying it.
+		this.#eventListeners = [...this.#eventListeners, listener];
 
 		// Return unsubscribe function for this specific listener
 		return () => {
 			const index = this.#eventListeners.indexOf(listener);
-			if (index !== -1) {
-				this.#eventListeners.splice(index, 1);
-			}
+			if (index === -1) return;
+			const listeners = this.#eventListeners.slice();
+			listeners.splice(index, 1);
+			this.#eventListeners = listeners;
 		};
 	}
 
@@ -5293,6 +5315,9 @@ export class AgentSession implements SettingsScope {
 		this.agent.setMetadataResolver((provider: string) =>
 			buildSessionMetadata(sid, provider, this.#modelRegistry.authStorage),
 		);
+		// A fresh or reset id becomes the pool scope's primary id, restricted
+		// before restored pins are seeded so they cannot leave the pool.
+		this.#accountPoolScope?.adopt(sid);
 		// Restore the session's recorded provider accounts before the first
 		// request routes: sticky rows are process-local under a remote auth
 		// broker, and losing them re-ranks onto a different account, cold-missing
@@ -5692,20 +5717,28 @@ export class AgentSession implements SettingsScope {
 		// graph shed its heavy payloads even while the lifecycle adoption record's
 		// reviver closure still references the session object. Fixes #8003.
 		this.#releaseRetainedSessionMemory();
+		// A run past the deadline may still resolve keys, so the account pools
+		// are lifted only once the run has settled: here when it drained,
+		// otherwise in the deferred pass below. Each lease lifts only the
+		// restriction it installed, never one a revival has installed on the
+		// same provider session id since.
+		if (drained) this.#accountPoolScope?.release();
 
 		// The deadline does not cancel the drain: a handler parked in a slow
 		// extension hook resumes afterwards and would repopulate exactly the
 		// state released above. Its disk writes are already dead — the release
 		// SEALED the session manager (a revival may reopen the same JSONL
 		// through a new manager the moment dispose returns, and this manager
-		// must never race that writer) — so re-run only the in-memory reset
-		// once the pipeline genuinely settles. The extension runner bounds hook
-		// runtime, so this deferred pass is not unbounded.
+		// must never race that writer) — so re-run only the in-memory reset,
+		// and lift the account pools, once the pipeline genuinely settles. The
+		// extension runner bounds hook runtime, so this deferred pass is not
+		// unbounded.
 		if (!drained) {
 			void (async () => {
 				await this.agent.waitForIdle();
 				await this.#drainInFlightEventHandlers();
 				this.#releaseRetainedSessionMemory();
+				this.#accountPoolScope?.release();
 			})().catch(error => logger.warn("Deferred dispose finalization failed", { error: String(error) }));
 		}
 	}
@@ -8355,7 +8388,7 @@ export class AgentSession implements SettingsScope {
 	}
 
 	/**
-	 * Gate for idle-path queued-message auto-continue. See `#scheduleIdleQueueDrain` for rationale.
+	 * Gate for idle-path queued-message auto-continue (see `#scheduleQueuedMessageDrain`).
 	 */
 	#canAutoContinueForFollowUp(): boolean {
 		if (this.isStreaming) return false;
@@ -9218,6 +9251,19 @@ export class AgentSession implements SettingsScope {
 	 * Interactive and CLI-bootstrap submissions share this gate so every first
 	 * user message persists titles with the same environment, signal, and local
 	 * extension-command policy.
+	 *
+	 * Call before submitting each message: every message while the session is
+	 * unnamed gets a try. Under `title.generator: fork` the title comes from a fork
+	 * of the reply this message starts: at the reply's first non-thinking block,
+	 * the title request runs as an ephemeral side turn on the same model, system
+	 * prompt, tools and prompt-cache key, so it reads the whole prefix from cache
+	 * and sees the model's own reading of the task, and asks for a card (icon and
+	 * code, unless `title.icons` is `boring`) to head the title. The title
+	 * model ({@link generateTitle}) takes over when the fork cannot run, fails,
+	 * times out or declines, and is the only path under `tiny`.
+	 *
+	 * One title request runs at a time: a message arriving meanwhile waits for it
+	 * and gets its own try if that request leaves the session unnamed.
 	 */
 	maybeStartTitleGeneration(firstMessage: string): void {
 		const extensionCommandSpace = firstMessage.indexOf(" ");
@@ -9226,31 +9272,185 @@ export class AgentSession implements SettingsScope {
 			this.#extensionRunner?.getCommand(
 				extensionCommandSpace === -1 ? firstMessage.slice(1) : firstMessage.slice(1, extensionCommandSpace),
 			) !== undefined;
+		if (isLocalExtensionCommand || this.sessionName || $env.PI_NO_TITLE || isLowSignalTitleInput(firstMessage)) {
+			return;
+		}
 		const sessionId = this.sessionManager.getSessionId();
-		if (
-			isLocalExtensionCommand ||
-			this.sessionName ||
-			this.#titleGenerationInFlightFor === sessionId ||
-			$env.PI_NO_TITLE ||
-			isLowSignalTitleInput(firstMessage)
-		) {
+		if (this.#titleGenerationInFlightFor === sessionId) {
+			this.#waitingTitle = { sessionId, input: firstMessage, signal: this.#titleGenerationAbortController.signal };
 			return;
 		}
+		this.#startTitleAttempt(firstMessage, sessionId, { waited: false });
+	}
+
+	/**
+	 * Name the session from the user message `input`: fork its reply, else ask the
+	 * title model. A message that `waited` on an earlier title request already has
+	 * its reply under way or done, so its fork runs at that reply's next block, or
+	 * at once when the session is idle.
+	 */
+	#startTitleAttempt(input: string, sessionId: string, options: { waited: boolean }): void {
 		// A request that only points at an attachment ("fix [Image #1]") names no
-		// task the text-only title model can see; skip straight to retitling from
-		// the assistant's own description of it.
-		if (isAttachmentOnlyTitleInput(firstMessage)) {
-			this.#deferredTitle = { sessionId, declined: true, replied: false, words: 0 };
+		// task the text-only title model can see; without a fork, skip straight to
+		// retitling from the assistant's own description of it.
+		const attachmentOnly = isAttachmentOnlyTitleInput(input);
+		this.#deferredTitle = { sessionId, declined: false, replied: false, words: 0 };
+		// The fork gives way to a TITLE_SYSTEM.md override, which only the title
+		// model applies, and needs a reply to branch from: a busy session queues a
+		// fresh message behind another turn.
+		const forkable =
+			cfgTitleGenerator.get(this.settings) === "fork" &&
+			this.model !== undefined &&
+			this.#titleSystemPrompt === undefined &&
+			(options.waited || !this.isStreaming);
+		if (!forkable) {
+			this.#titleWithTitleModel(input, sessionId, attachmentOnly);
 			return;
 		}
-		this.#deferredTitle = { sessionId, declined: false, replied: false, words: 0 };
-		this.#startAutoTitle(firstMessage, sessionId);
+		this.#armTitleFork(input, sessionId, attachmentOnly);
+		if (options.waited && !this.isStreaming) this.#startTitleFork();
+	}
+
+	/**
+	 * A title request ended: start the message that waited on it while the session
+	 * is still unnamed and that message was not interrupted. False when none starts.
+	 */
+	#retryWaitingTitle(): boolean {
+		const waiting = this.#waitingTitle;
+		this.#waitingTitle = undefined;
+		if (
+			!waiting ||
+			waiting.signal.aborted ||
+			waiting.sessionId !== this.sessionManager.getSessionId() ||
+			this.sessionName
+		) {
+			return false;
+		}
+		this.#startTitleAttempt(waiting.input, waiting.sessionId, { waited: true });
+		return true;
+	}
+
+	/** The title model's turn at naming the session from `input`. */
+	#titleWithTitleModel(input: string, sessionId: string, attachmentOnly: boolean): void {
+		if (!attachmentOnly) this.#startAutoTitle(input, sessionId);
+		else if (!this.#retryWaitingTitle()) this.#advanceDeferredTitle("declined");
+	}
+
+	#armTitleFork(input: string, sessionId: string, attachmentOnly: boolean): void {
+		this.#titleGenerationInFlightFor = sessionId;
+		const signal = this.#titleGenerationAbortController.signal;
+		const timer = setTimeout(() => this.#abandonTitleFork("reply-not-started"), TITLE_FORK_START_TIMEOUT_MS);
+		timer.unref?.();
+		const fork: TitleFork = {
+			sessionId,
+			input,
+			attachmentOnly,
+			timer,
+			signal,
+			// An interrupted title is cancelled, not declined: no title model either.
+			onAbort: () => {
+				if (this.#titleFork !== fork) return;
+				this.#takeTitleFork();
+				this.#deferredTitle = undefined;
+			},
+		};
+		signal.addEventListener("abort", fork.onAbort, { once: true });
+		this.#titleFork = fork;
+	}
+
+	/** Disarm the armed title fork and release its in-flight claim. */
+	#takeTitleFork(): TitleFork | undefined {
+		const fork = this.#titleFork;
+		if (!fork) return undefined;
+		this.#titleFork = undefined;
+		clearTimeout(fork.timer);
+		fork.signal.removeEventListener("abort", fork.onAbort);
+		if (this.#titleGenerationInFlightFor === fork.sessionId) this.#titleGenerationInFlightFor = undefined;
+		return fork;
+	}
+
+	/** The armed fork never got a reply to branch from: the title model names the session. */
+	#abandonTitleFork(reason: string): void {
+		const fork = this.#takeTitleFork();
+		if (!fork) return;
+		logger.debug("title-generator: fork not started", { sessionId: fork.sessionId, reason });
+		this.#fallBackFromTitleFork(fork);
+	}
+
+	#fallBackFromTitleFork(fork: TitleFork): void {
+		if (fork.signal.aborted) {
+			this.#deferredTitle = undefined;
+			this.#retryWaitingTitle();
+			return;
+		}
+		if (this.sessionManager.getSessionId() !== fork.sessionId || this.sessionName) return;
+		this.#titleWithTitleModel(fork.input, fork.sessionId, fork.attachmentOnly);
+	}
+
+	/**
+	 * Fork the reply that just started into the title request. Synchronous up to
+	 * {@link runEphemeralTurn}'s snapshot, so the side turn branches from exactly
+	 * this point while the main turn streams on undisturbed.
+	 */
+	#startTitleFork(): void {
+		const fork = this.#takeTitleFork();
+		if (!fork) return;
+		const { sessionId } = fork;
+		if (this.sessionManager.getSessionId() !== sessionId || this.sessionName) return;
+		this.#titleGenerationInFlightFor = sessionId;
+		const started = performance.now();
+		// Ask only for the icons the title can show: an emoji without Nerd Fonts, no card when boring.
+		const configuredIcons = cfgTitleIcons.get(this.settings);
+		const icons = configuredIcons === "nf+emoji" && !nerdGlyphsActive() ? "emoji" : configuredIcons;
+		this.runEphemeralTurn({
+			promptText: prompt.render(titleForkPrompt, {
+				card: icons !== "boring",
+				nerdFonts: icons === "nf+emoji",
+			}),
+			signal: AbortSignal.any([fork.signal, AbortSignal.timeout(TITLE_FORK_TIMEOUT_MS)]),
+		})
+			.then(
+				async ({ replyText, assistantMessage }) => {
+					const title = parseCardTitleReply(replyText, icons, fork.input);
+					logger.debug("title-generator: fork reply", {
+						sessionId,
+						ms: Math.round(performance.now() - started),
+						usage: assistantMessage.usage,
+						reply: replyText.slice(0, 300),
+						title,
+					});
+					if (this.#titleGenerationInFlightFor === sessionId) this.#titleGenerationInFlightFor = undefined;
+					if (fork.signal.aborted || !title) {
+						this.#fallBackFromTitleFork(fork);
+						return;
+					}
+					if (this.sessionManager.getSessionId() !== sessionId || this.sessionName) return;
+					await this.sessionManager.setSessionName(title, "auto");
+					this.#deferredTitle = undefined;
+				},
+				(err: unknown) => {
+					logger.debug("title-generator: fork failed", {
+						sessionId,
+						ms: Math.round(performance.now() - started),
+						error: err instanceof Error ? err.message : String(err),
+					});
+					if (this.#titleGenerationInFlightFor === sessionId) this.#titleGenerationInFlightFor = undefined;
+					this.#fallBackFromTitleFork(fork);
+				},
+			)
+			.catch(err => {
+				logger.warn("title-generator: uncaught fork title error", {
+					sessionId,
+					error: err instanceof Error ? err.message : String(err),
+				});
+			});
 	}
 
 	/**
 	 * Run one automatic title generation for `sessionId`, applying the result
 	 * unless the session was renamed or replaced meanwhile. A settled request
-	 * that left the session unnamed advances {@link #deferredTitle}.
+	 * that left the session unnamed starts the message that waited on it, else
+	 * advances {@link #deferredTitle}.
 	 */
 	#startAutoTitle(input: string, sessionId: string): void {
 		this.#titleGenerationInFlightFor = sessionId;
@@ -9276,6 +9476,7 @@ export class AgentSession implements SettingsScope {
 				if (this.#titleGenerationInFlightFor === sessionId) {
 					this.#titleGenerationInFlightFor = undefined;
 				}
+				if (this.#retryWaitingTitle()) return;
 				// An interrupted request is cancelled inference, not a decline.
 				if (signal.aborted) this.#deferredTitle = undefined;
 				else this.#advanceDeferredTitle("declined");
@@ -9366,8 +9567,16 @@ export class AgentSession implements SettingsScope {
 		if (this.sessionManager.getSessionId() !== sessionId) return;
 		if (!cfgTitleRefreshOnReplan.get(this.settings)) return;
 		if (this.sessionManager.titleSource === "user") return;
+		// A replan refines the same task: the title keeps its card (the title
+		// model names none), so a card terminal's index stays stable.
+		const card = splitCardTitle(this.sessionManager.getSessionName() ?? "");
 		const setSessionName = this.sessionManager.setSessionName as SetSessionNameWithTrigger;
-		await setSessionName.call(this.sessionManager, title, "auto", "replan");
+		await setSessionName.call(
+			this.sessionManager,
+			card ? `${card.icon} ${card.code}: ${title}` : title,
+			"auto",
+			"replan",
+		);
 	}
 
 	/** Currently-applied {@link TITLE_SYSTEM.md} override, or undefined when the
@@ -9600,6 +9809,7 @@ export class AgentSession implements SettingsScope {
 			this.#advisors.resetSessionState();
 			advisorRecordersDetached = false;
 			this.#reconnectToAgent();
+			await this.#reconcileModeAfterTransition();
 			// Drop the process-lifetime context-file cache so the rebuild re-reads
 			// AGENTS.md and friends from disk: the user may have edited them since
 			// the previous session started, and refreshBaseSystemPrompt() re-runs
@@ -9634,6 +9844,12 @@ export class AgentSession implements SettingsScope {
 	setSessionName(name: string, source: "auto" | "user" = "auto", trigger?: SessionNameTrigger): Promise<boolean> {
 		const setSessionName = this.sessionManager.setSessionName as SetSessionNameWithTrigger;
 		return setSessionName.call(this.sessionManager, name, source, trigger);
+	}
+
+	/** Write pending bash output and every session entry to the session file, as {@link fork} does before copying it. */
+	async flushToDisk(): Promise<void> {
+		await this.#bash.flushPending();
+		await this.sessionManager.flush();
 	}
 
 	/**
@@ -9683,9 +9899,7 @@ export class AgentSession implements SettingsScope {
 			}
 		}
 
-		await this.#bash.flushPending();
-		// Flush current session to ensure all entries are written
-		await this.sessionManager.flush();
+		await this.flushToDisk();
 		// Work admitted during the hook or flush awaits would be copied mid-flight.
 		if (requireIdleFor) this.#assertIdleForSnapshot(requireIdleFor);
 		let advisorRecordersDetached = false;
@@ -11578,7 +11792,7 @@ export class AgentSession implements SettingsScope {
 
 			this.#advisors.reattachRecorderFeeds();
 			advisorRecordersDetached = false;
-			await this.#reconcileModeAfterBranch();
+			await this.#reconcileModeAfterTransition();
 			return true;
 		} finally {
 			if (advisorRecordersDetached) {
@@ -11694,7 +11908,7 @@ export class AgentSession implements SettingsScope {
 			this.#advisors.resetSessionState();
 			this.#closeCodexProviderSessionsForHistoryRewrite();
 			advisorRecordersDetached = false;
-			await this.#reconcileModeAfterBranch();
+			await this.#reconcileModeAfterTransition();
 
 			return { cancelled: false, sessionFile: this.sessionFile };
 		} finally {
@@ -12186,6 +12400,11 @@ export class AgentSession implements SettingsScope {
 	 */
 	getSessionStats(): SessionStats {
 		return this.#stats.getSessionStats();
+	}
+
+	#goalUsage(): GoalTokenUsage {
+		const { input, output, cacheRead, cacheWrite } = this.#stats.getTokenTotals();
+		return { input, output, cacheRead, cacheWrite };
 	}
 
 	/**
@@ -12734,8 +12953,9 @@ export class AgentSession implements SettingsScope {
 
 	/**
 	 * One process-wide salvage sweep handles both providers, but plans and asks
-	 * consent independently. Every candidate is refreshed through its live
-	 * listing before spend; a failed listing cannot fall back to stale usage.
+	 * consent independently. Last-chance expiry checks remain active even with
+	 * the broader salvage horizon disabled. Every candidate is refreshed through
+	 * its live listing before spend; a failed listing cannot fall back to stale usage.
 	 */
 	#maybeScheduleResetSweep(reports: UsageReport[]): void {
 		const coordinator = this.#resetCoordinator;
@@ -12743,12 +12963,9 @@ export class AgentSession implements SettingsScope {
 		const claudeCfg = cfgClaudeResets.get(this.settings);
 		const codexEnabled =
 			shouldEvaluateCodexAutoRedeem(codexCfg.autoRedeem) &&
-			codexCfg.salvageHorizonHours > 0 &&
 			reports.some(report => report.provider === "openai-codex");
 		const claudeEnabled =
-			shouldEvaluateCodexAutoRedeem(claudeCfg.autoRedeem) &&
-			claudeCfg.salvageHorizonHours > 0 &&
-			reports.some(report => report.provider === "anthropic");
+			shouldEvaluateCodexAutoRedeem(claudeCfg.autoRedeem) && reports.some(report => report.provider === "anthropic");
 		if (!codexEnabled && !claudeEnabled) return;
 		if (coordinator.sweepInFlight || coordinator.inFlightByAccount.size > 0) return;
 		const now = Date.now();

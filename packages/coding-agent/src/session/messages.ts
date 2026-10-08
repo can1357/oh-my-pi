@@ -127,16 +127,15 @@ export function dedupeEphemeralReply(text: string, maxBytes = EPHEMERAL_REPLY_MA
 		}
 		i = j;
 	}
-	let result = out.join("\n");
-	if (Buffer.byteLength(result, "utf8") > maxBytes) {
-		const suffix = "\n[…truncated]";
-		const budget = maxBytes - Buffer.byteLength(suffix, "utf8");
-		while (Buffer.byteLength(result, "utf8") > budget) {
-			result = result.slice(0, -1);
-		}
-		result += suffix;
-	}
-	return result;
+	const result = out.join("\n");
+	if (Buffer.byteLength(result, "utf8") <= maxBytes) return result;
+	const bytes = Buffer.from(result, "utf8");
+	const suffix = "\n[…truncated]";
+	// Cut on a UTF-8 character boundary: back off continuation bytes (10xxxxxx)
+	// so a multi-byte character straddling the budget is dropped whole.
+	let cut = Math.max(0, maxBytes - Buffer.byteLength(suffix, "utf8"));
+	while (cut > 0 && (bytes[cut] & 0xc0) === 0x80) cut--;
+	return bytes.toString("utf8", 0, cut) + suffix;
 }
 
 /**

@@ -82,4 +82,14 @@ describe("table charts on a TSP terminal", () => {
 		expect(light).not.toBe(dark);
 		expect(h.errors).toEqual([]);
 	});
+
+	it("sends a subagent's answer as one md node without a chart", async () => {
+		setTableCharts("always");
+		const component = new AssistantMessageComponent(answer(ANSWER));
+		component.setTableChartsVisible(false);
+		harness = await TspHarness.start();
+		harness.tui.addChild(component);
+		await harness.render();
+		expect(harness.findAll(node => node.k === "md" || node.k === "image").map(node => node.k)).toEqual(["md"]);
+	});
 });

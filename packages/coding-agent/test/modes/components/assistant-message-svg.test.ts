@@ -58,6 +58,8 @@ afterEach(() => {
 describe("AssistantMessageComponent svg figures", () => {
 	it("draws a finished svg fence as an inline image between its prose", async () => {
 		const { component, changed } = figureComponent(`Before\n\n\`\`\`svg\n${FIGURE}\n\`\`\`\n\nAfter`);
+		// A figure rasterizes for the room of its first render.
+		component.render(100);
 		await changed;
 
 		const rendered = component.render(100).join("\n");
@@ -81,6 +83,7 @@ describe("AssistantMessageComponent svg figures", () => {
 
 	it("falls back to the fenced code when the finished source does not render", async () => {
 		const { component, changed } = figureComponent("Bad:\n\n```svg\n<svg><rect width='x' </svg>\n```");
+		component.render(100);
 		await changed;
 
 		expect(plain(component)).toContain("```svg");

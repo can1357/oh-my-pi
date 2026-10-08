@@ -2,7 +2,7 @@ import { calculateCost } from "@oh-my-pi/pi-catalog/models";
 import { fetchWithRetry, parseStreamingJson, readJsonl } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error";
 import { parseToolCallArguments } from "../utils/tool-call-arguments";
-import { getEnvApiKey } from "../stream";
+import { getEnvApiKey } from "../env-api-key";
 import type {
 	Api,
 	AssistantMessage,

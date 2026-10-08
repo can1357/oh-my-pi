@@ -2,16 +2,84 @@
 
 ## [Unreleased]
 
+## [18.8.4] - 2026-10-08
+
+### Breaking Changes
+
+- `AuthBrokerClient.notifyUsageStale` and `UsageLedgerStore.invalidateUsageCache` (including `RemoteAuthCredentialStore.invalidateUsageCache`) now take an optional leading `provider` argument: the signature is `(provider?: string, signal?: AbortSignal)` instead of `(signal?: AbortSignal)` ([#14761](https://github.com/can1357/oh-my-pi/pull/14761) by [@will-bogusz](https://github.com/will-bogusz))
+
 ### Added
 
 - Added strict per-session OAuth account pins: `SessionsApi.pin({ strict: true })` prevents all credential fallback (sibling OAuth accounts, login keys, env vars) when the pinned account is blocked or unavailable; strict pins survive credential deletion, `/fresh`, and subagent inheritance. Added `SessionsApi.mode()` and `SessionsApi.automatic()` for routing-mode introspection and explicit opt-out.
 - Added `getOAuthCredentialProvider()` to resolve a login alias (such as `openai-codex-device`) to the provider its credentials are stored under ([#14588](https://github.com/can1357/oh-my-pi/pull/14588) by [@andrebrait](https://github.com/andrebrait))
+- Auth gateway route option `excludeProviders` leaves those providers' accounts out of `/v1/usage` and `/v1/credentials/check` ([#14755](https://github.com/can1357/oh-my-pi/pull/14755) by [@will-bogusz](https://github.com/will-bogusz))
 
 ### Fixed
 
-- Fixed Ultrafast service-tier turns being billed at standard rates; GPT-6 Astra now carries its published Ultrafast premium (6x on the OpenAI API, 8x included usage on Codex), and the premium-request counter counts them ([#14471](https://github.com/can1357/oh-my-pi/pull/14471) by [@eggpeat](https://github.com/eggpeat)).
-- Fixed Vertex AI on Windows ignoring credentials from `gcloud auth application-default login`, which gcloud writes to `%APPDATA%\gcloud\application_default_credentials.json` rather than `~/.config/gcloud` ([#14549](https://github.com/can1357/oh-my-pi/pull/14549) by [@jorgoose](https://github.com/jorgoose))
-- Fixed `auth.accountPolicies` and `/session pin` being unable to select a Cursor account by email: Cursor logins now store the account email, and accounts stored earlier gain it at their next token refresh ([#14511](https://github.com/can1357/oh-my-pi/pull/14511) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed a single-provider usage refresh from an auth broker client (`omp usage invalidate --provider`, Codex auto-redeem, a saved-reset redeem) wiping the broker's cached usage for every provider, so other accounts showed no usage on every client until their next successful probe ([#14761](https://github.com/can1357/oh-my-pi/pull/14761) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed Anthropic sessions missing the prompt cache a second time after the API dropped thinking blocks from a changed conversation ([#14748](https://github.com/can1357/oh-my-pi/pull/14748) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed Cursor logins never renewing: every refresh was rejected with "Invalid User API Key", so logins lapsed about 60 days after sign-in; a session Cursor has ended is now disabled with a re-login hint ([#14753](https://github.com/can1357/oh-my-pi/pull/14753) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed the auth broker logging caller-supplied `X-Forwarded-For` / `X-Real-IP` values and unknown request paths; peers come from the socket unless `trustProxyHeaders` is set ([#14762](https://github.com/can1357/oh-my-pi/pull/14762) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed false thinking-loop detections on Gemini, DeepSeek, and Grok when the model drafts or answers with repetitive code or markup (VRML, SVG, JSON); such output is no longer discarded and retried.
+- Fixed Cursor provider leaking conversation checkpoints, blob stores and abort listeners after requests end ([#14669](https://github.com/can1357/oh-my-pi/pull/14669) by [@H4vC](https://github.com/H4vC))
+- Fixed session-affinity pins growing without bound in long-lived gateways (now capped at 256 sessions per provider) ([#14672](https://github.com/can1357/oh-my-pi/pull/14672) by [@H4vC](https://github.com/H4vC))
+- Fixed completed Cursor turns failing with "Cursor stream ended before turnEnded" when the connection closed after the answer had fully arrived ([#14851](https://github.com/can1357/oh-my-pi/pull/14851) by [@kyle-elliott-asymptote](https://github.com/kyle-elliott-asymptote)).
+- Fixed Cursor provider errors that Cursor marks as not retryable being retried until the retry budget ran out ([#14851](https://github.com/can1357/oh-my-pi/pull/14851) by [@kyle-elliott-asymptote](https://github.com/kyle-elliott-asymptote)).
+
+## [18.8.3] - 2026-10-07
+
+### Added
+
+- Added `OAuthRefreshUnavailableError`, a retryable error that `keys.getWithCredential` and `oauth.access` reject with when every usable OAuth credential failed to refresh transiently; `keys.get` resolves `undefined` instead so availability probes move on to their next candidate ([#14843](https://github.com/can1357/oh-my-pi/pull/14843) by [@H4vC](https://github.com/H4vC))
+
+### Fixed
+
+- Fixed a single transient OAuth token-refresh failure (network blip, timeout, 5xx) ending a running session, including subagents restricted to an account pool, with a non-retryable "No API key for provider" error while the stored credential was still valid; the refresh error now surfaces and the request is retried ([#14843](https://github.com/can1357/oh-my-pi/pull/14843) by [@H4vC](https://github.com/H4vC))
+
+## [18.8.1] - 2026-10-07
+
+### Added
+
+- Added session restrictions for OAuth account pools via `AuthStorage.sessions.restrict`, limiting selection, fallback, rotation, and authentication to specified accounts until the returned lease is released with `sessions.unrestrict`. API keys and other accounts are not used when a session is restricted.
+- Exported `resolveCredentialIdentityKey` for determining the identity key used to match credentials with broker account pools and session restrictions.
+
+### Fixed
+
+- Fixed Codex Fast (`priority`) and Ultrafast usage being recorded, billed, and reported as Standard when the backend echoed a default service tier; the requested tier is now preserved in usage and performance records.
+
+## [18.8.0] - 2026-10-07
+
+### Breaking Changes
+
+- The environment API-key helpers (`getEnvApiKey`, `getEnvApiKeyName`, and `listProvidersWithEnvKey`) are no longer exported from `@oh-my-pi/pi-ai/stream`; import them from `@oh-my-pi/pi-ai` or `@oh-my-pi/pi-ai/env-api-key` instead.
+- `TranscriptionRequest.audio` now accepts `Uint8Array | Blob`. Consumers must handle `Blob` values when reading transcription requests.
+
+### Changed
+
+- Improved CPU and memory efficiency across streamed model responses, including Cursor, Devin, Codex, OpenAI Responses, and GitLab Duo Workflow.
+- Improved request and authentication performance, including account ranking, OAuth preflight, credential rate-limit checks, credential synchronization, and auth gateway requests.
+- Improved tool-call parsing performance for long calls and Apple Foundation Models requests.
+- Improved Cloudflare AI Gateway request performance and AWS credential-source detection.
+- Reduced memory usage when handling generated images and usage reports.
+
+### Fixed
+
+- Fixed false thinking-loop detections for Gemini, DeepSeek, and Grok when responses contain repetitive code or markup such as VRML, SVG, or JSON; valid output is no longer discarded and retried.
+- Fixed the Cursor provider retaining request resources after requests completed.
+- Fixed session-affinity pins growing without bound in long-lived gateways; pins are now capped at 256 sessions per provider.
+- Fixed Anthropic sessions failing every request with HTTP 400 ("role 'system' must precede an 'assistant' message") after a tool change coincided with compaction or an interrupted or failed reply; sessions already stuck this way recover on the next message ([#14746](https://github.com/can1357/oh-my-pi/issues/14746)).
+
+## [18.7.0] - 2026-10-06
+
+### Added
+
+- Added `getOAuthCredentialProvider()` to resolve login aliases, such as `openai-codex-device`, to the provider where their credentials are stored.
+
+### Fixed
+
+- Fixed Ultrafast service-tier billing and usage accounting: GPT-6 Astra now applies its published premium rates—6× on the OpenAI API and 8× included usage on Codex—and is counted toward the premium-request limit.
+- Fixed Vertex AI authentication on Windows when credentials are created with `gcloud auth application-default login`.
+- Fixed selecting Cursor accounts by email through `auth.accountPolicies` and `/session pin`; newly refreshed and existing accounts now retain the account email.
 
 ## [18.6.3] - 2026-10-06
 
@@ -2263,67 +2331,4 @@
 - Fixed `validateToolArguments` silently accepting JSON-encoded array strings (e.g. `'["a","b"]'`) against `union(string, array<string>)` schemas — providers that double-serialize tool-call arguments (Z.AI / GLM) caused tools like `search` to receive the literal `["a","b"]` as a single path, producing zero matches (single element) or glob parse errors (multi-element). A new pre-validation pass parses JSON-array-shaped strings when the schema explicitly accepts both shapes. ([#1788](https://github.com/can1357/oh-my-pi/issues/1788))
 - Fixed Anthropic thinking summaries that arrive wrapped in literal `<thinking>` tags so advisor/raw transcript dumps do not render nested thinking tags ([#2695](https://github.com/can1357/oh-my-pi/issues/2695)).
 
-## [16.0.0] - 2026-06-15
-
-### Breaking Changes
-
-- Renamed the public dialect entrypoint from `@oh-my-pi/pi-ai/grammar` to `@oh-my-pi/pi-ai/dialect`.
-- Renamed grammar dialect identifiers from `ToolCallSyntax` to `Dialect`, renamed the `Grammar` interface to `DialectDefinition`, and renamed `Grammar.syntax` to `DialectDefinition.dialect`.
-- Added `DialectDefinition.renderThinking` and `DialectDefinition.renderTranscript` so dialect implementations serialize complete native chat transcripts, not just tool call/result blocks.
-
-### Added
-
-- Added `renderTranscript` method to dialect definitions for serializing complete native chat transcripts
-- Added `renderThinking` method to dialect definitions for rendering thinking/reasoning blocks
-- Added support for 11 dialect implementations: Anthropic, DeepSeek, Gemini, Gemma, GLM, Harmony, Hermes, Kimi, Pi-native, Qwen3, and XML
-- Added `createInbandScanner` factory function to instantiate dialect-specific scanners
-- Added `getDialectDefinition` function to retrieve dialect implementations by name
-- Added `renderToolCatalog` and `renderInbandToolPrompt` functions for tool catalog rendering
-- Added `renderToolInventory` function to generate human-readable per-tool documentation with examples
-- Added `renderToolExamples` function to render tool usage examples in the model's native dialect
-- Added `encodeInbandToolHistory` function to encode tool call history in dialect-specific format
-- Added `wrapInbandToolStream` function to process streaming responses with in-band tool call parsing
-- Added `ThinkingInbandScanner` for parsing thinking/reasoning blocks across dialects
-- Added `OwnedStream` class for managing dialect-aware streaming with tool call events
-- Added in-band thinking channels to every dialect that was missing one: `gemini` (a ` ```thinking ` fence mirroring ` ```tool_code `), `gemma` (its native `<|channel>thought…<channel|>` reasoning channel), `kimi` (`<think>…</think>`), and `pi` (`<thinking>…</thinking>`). Each scanner now parses reasoning into thinking events instead of leaking chain-of-thought into the visible reply, and every dialect's `renderThinking` is a real channel that round-trips back through its scanner (no passthrough renderers).
-
-### Changed
-
-- Moved public dialect entrypoint from `@oh-my-pi/pi-ai/grammar` to `@oh-my-pi/pi-ai/dialect` in package exports
-- Updated internal imports in `stream-markup-healing.ts` to use new dialect module path
-- Changed `renderToolInventory` to demote a tool description's own markdown headers by one level when it contains a top-level `# ` header, so they nest under the wrapping `# Tool: <name>` heading instead of reading as sibling sections. Descriptions that already start at `##` and headers inside fenced code blocks are left untouched.
-
-### Fixed
-
-- Fixed Gemini, Gemma, Kimi, and Pi in-band scanners to respect `parseThinking: false`, leaving private reasoning markers in visible text when parsing is disabled
-- Fixed thinking-channel parsing for streaming Gemini, Gemma, Kimi, and Pi outputs so split or partial `<thinking>` blocks no longer leak into visible replies
-- Fixed in-band thinking finalization and Kimi stream-healing interactions so leaked `<think>` blocks are preserved when structured tool calls are present, not duplicated when explicit reasoning is present, and closed on stream flush.
-
-### Removed
-
-- Removed `src/grammar/factory.ts` (replaced by `src/dialect/factory.ts`)
-- Removed `src/grammar/rendering.ts` (functionality moved to `src/dialect/rendering.ts`)
-- Removed `src/grammar/xml.ts` (replaced by `src/dialect/xml.ts`)
-
-## [15.13.3] - 2026-06-15
-
-### Added
-
-- Added the `gemini` in-band tool-call syntax with Python-style `tool_code` blocks and `default_api` invocations
-- Added the `gemma` token-delimited in-band tool-call syntax using `<|tool_call>` and `<|tool_response>` blocks
-- Added `gemini` and `gemma` to owned stream tool-result token detection so their tool responses are recognized
-- Fixed truncated Gemini and Gemma tool blocks from being emitted as plain text during streaming
-- Added the Azure OpenAI provider definition (`azure`) to the registry; `AZURE_OPENAI_API_KEY` resolves as its env-var API key via the catalog provider table.
-
-### Changed
-
-- Gemini tool-call examples now render without the `default_api.` namespace prefix, keeping `<example>` blocks concise. The live wire format still uses `default_api.` per the Gemini grammar.
-
-### Fixed
-
-- Fixed duplicate tool call projections by deduplicating provider-native `toolCall` events against in-band `tool_code` calls and keeping only the first real channel
-- Dropped nameless native `toolCall` events so they no longer appear as surfaced tool calls in owned-mode streams
-- Fixed truncated Gemini and Gemma tool blocks from being emitted as plain text during streaming
-- Fixed Gemini/Gemma in-band tool-call parsing around Python comments, raw/unicode string literals, and Gemma close-token text inside string values.
-
-Older entries are archived in [packages/ai/CHANGELOG.md@a20cc0d04b64](https://github.com/can1357/oh-my-pi/blob/a20cc0d04b64f4a68fcc559cbd258743d984c50e/packages/ai/CHANGELOG.md).
+Older entries are archived in [packages/ai/CHANGELOG.md@d22e34333695](https://github.com/can1357/oh-my-pi/blob/d22e34333695d3dd9de7741ff45903681dba4606/packages/ai/CHANGELOG.md).

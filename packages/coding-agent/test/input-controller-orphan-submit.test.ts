@@ -316,6 +316,9 @@ describe("InputController orphaned submit", () => {
 				modelRegistry,
 				extensionRunner,
 			});
+			// A TITLE_SYSTEM.md override keeps automatic titles on the title model, so
+			// they start at submit instead of at a reply fork the mocked prompt never makes.
+			session.setTitleSystemPrompt("Name the session in 3-6 words.");
 			const titleSpy = vi.spyOn(session, "generateTitle").mockResolvedValue(null);
 			const { ctx, editor } = createContext(session);
 			ctx.sessionManager = sessionManager;

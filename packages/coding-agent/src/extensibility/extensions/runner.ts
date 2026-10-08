@@ -1954,6 +1954,7 @@ export class ExtensionRunner {
 		images: ImageContent[] | undefined,
 		source: "interactive" | "rpc" | "extension",
 	): Promise<InputEventResult> {
+		if (!this.hasHandlers("input")) return {};
 		const ctx = this.createContext();
 		let currentText = text;
 		let currentImages = images;
@@ -1981,17 +1982,10 @@ export class ExtensionRunner {
 	}
 
 	async emitContext(messages: AgentMessage[], signal?: AbortSignal): Promise<AgentMessage[]> {
+		// Check if any extensions actually have context handlers before building
+		// the context object or cloning; this runs on every provider request.
+		if (!this.hasHandlers("context")) return messages;
 		const ctx = this.createContext();
-
-		// Check if any extensions actually have context handlers before cloning
-		let hasContextHandlers = false;
-		for (const ext of this.extensions) {
-			if (ext.handlers.get("context")?.length) {
-				hasContextHandlers = true;
-				break;
-			}
-		}
-		if (!hasContextHandlers) return messages;
 
 		let currentMessages: AgentMessage[];
 		try {
@@ -2062,6 +2056,7 @@ export class ExtensionRunner {
 		model?: Model,
 		signal?: AbortSignal,
 	): Promise<BeforeProviderRequestEventResult> {
+		if (!this.hasHandlers("before_provider_request")) return payload;
 		const ctx = this.createContext(model);
 		let currentPayload = payload;
 
@@ -2098,6 +2093,7 @@ export class ExtensionRunner {
 		model?: Model,
 		signal?: AbortSignal,
 	): Promise<void> {
+		if (!this.hasHandlers("after_provider_response")) return;
 		const ctx = this.createContext(model);
 
 		for (const ext of this.extensions) {

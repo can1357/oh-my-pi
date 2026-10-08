@@ -83,6 +83,8 @@ export interface ChatTranscriptBuilderDeps {
 	expandThinkingBlocks?: () => boolean;
 	/** Session-scoped resolved destinations for model-authored Markdown links. */
 	linkTargets?: ReadonlyMap<string, string>;
+	/** Draw charts under numeric tables; false for transcripts that are not the main session's. Default: true. */
+	tableCharts?: boolean;
 	requestRender: () => void;
 }
 
@@ -420,6 +422,7 @@ export class ChatTranscriptBuilder {
 		);
 		assistantComponent.setImagesVisible(displayPreferences.showImages);
 		assistantComponent.setToolResultImagesVisible(!displayPreferences.hideToolActivity);
+		assistantComponent.setTableChartsVisible(this.#deps.tableCharts !== false);
 		this.#trackExpandable(assistantComponent);
 		assistantComponent.pickReactionTarget(this.container.children);
 		this.container.addChild(assistantComponent);
@@ -459,6 +462,7 @@ export class ChatTranscriptBuilder {
 			);
 			component.setImagesVisible(displayPreferences.showImages);
 			component.setToolResultImagesVisible(!displayPreferences.hideToolActivity);
+			component.setTableChartsVisible(this.#deps.tableCharts !== false);
 			this.#trackExpandable(component);
 			this.container.addChild(component);
 			lastAssistantComponent = component;

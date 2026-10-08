@@ -6,7 +6,9 @@ import { registerOAuthProvider, unregisterOAuthProvider, unregisterOAuthProvider
 import type { OAuthCredentials, OAuthLoginCallbacks } from "@oh-my-pi/pi-ai/oauth/types";
 import { setCodexAttestationProvider } from "@oh-my-pi/pi-ai/providers/openai-codex-attestation";
 import { getProviderDefinition } from "@oh-my-pi/pi-ai/registry";
-import { getEnvApiKey, isOfficialCodexApiUrl } from "@oh-my-pi/pi-ai/stream";
+import { getEnvApiKey } from "@oh-my-pi/pi-ai/env-api-key";
+import { OAuthRefreshUnavailableError } from "@oh-my-pi/pi-ai/error";
+import { isOfficialCodexApiUrl } from "@oh-my-pi/pi-ai/stream";
 import type {
 	Api,
 	Context,
@@ -126,7 +128,12 @@ export {
 	type ProviderDiscoveryStatus,
 } from "./model-provider-discovery";
 
-import { ModelsConfigFile, type ProviderValidationModel, validateProviderConfiguration } from "./models-config";
+import {
+	getUnknownCompatKeys,
+	ModelsConfigFile,
+	type ProviderValidationModel,
+	validateProviderConfiguration,
+} from "./models-config";
 import type { ModelOverride, ModelsConfig, ProviderAuthMode } from "./models-config-schema";
 import { type Settings, settings } from "./settings";
 
@@ -285,6 +292,8 @@ export class ModelRegistry {
 	// every rebuild does not log the same ignored override again.
 	#warnedUnservedOverrideKinds: Set<string> = new Set();
 	#configError: ConfigError | undefined = undefined;
+	#warnedCompatKeys = new Set<string>();
+	#configWarnings: string[] = [];
 	#modelsConfigFile: ConfigFile<ModelsConfig>;
 	#lastStaticLoadMtime: number | null = null;
 	#registeredProviderSources: Set<string> = new Set();
@@ -896,6 +905,13 @@ export class ModelRegistry {
 	 */
 	getError(): ConfigError | undefined {
 		return this.#configError;
+	}
+
+	/** Drain non-fatal file diagnostics, reporting each key path once per registry. */
+	drainConfigWarnings(): string[] {
+		const warnings = this.#configWarnings;
+		this.#configWarnings = [];
+		return warnings;
 	}
 
 	#loadModels() {
@@ -1599,6 +1615,14 @@ export class ModelRegistry {
 				configuredProviders: new Set(),
 				found: false,
 			};
+		}
+
+		for (const keyPath of getUnknownCompatKeys(value)) {
+			if (this.#warnedCompatKeys.has(keyPath)) continue;
+			this.#warnedCompatKeys.add(keyPath);
+			this.#configWarnings.push(
+				`Unknown compat key in ${this.#modelsConfigFile.path()}: ${keyPath} (configuration still loaded).`,
+			);
 		}
 
 		const overrides = new Map<string, ProviderOverride>();
@@ -2985,20 +3009,35 @@ export class ModelRegistry {
 	}
 
 	/**
-	 * Resolve a provider's request credential or the no-auth sentinel.
+	 * Resolve a provider's credential or the no-auth sentinel, for availability
+	 * checks. A transient OAuth refresh failure resolves `undefined` (like
+	 * `authStorage.keys.get`); request paths use
+	 * {@link getApiKeyWithCredentialForProvider}, which surfaces it.
 	 *
-	 * `options.forceRefresh` powers step (b) of the auth-retry policy — it
-	 * re-mints the session-sticky OAuth token even when the cached copy still
-	 * looks valid. `options.signal` is threaded into any broker-bound refresh.
+	 * `options.forceRefresh` re-mints the session-sticky OAuth token even when
+	 * the cached copy still looks valid. `options.signal` is threaded into any
+	 * broker-bound refresh.
 	 */
 	async getApiKeyForProvider(
 		provider: string,
 		sessionId?: string,
 		options?: AuthApiKeyOptions,
 	): Promise<string | undefined> {
-		return (await this.getApiKeyWithCredentialForProvider(provider, sessionId, options))?.apiKey;
+		try {
+			return (await this.getApiKeyWithCredentialForProvider(provider, sessionId, options))?.apiKey;
+		} catch (error) {
+			if (error instanceof OAuthRefreshUnavailableError) return undefined;
+			throw error;
+		}
 	}
 
+	/**
+	 * Resolve a provider's request credential or the no-auth sentinel.
+	 *
+	 * `options.forceRefresh` powers step (b) of the auth-retry policy. Rejects
+	 * with `OAuthRefreshUnavailableError` (transient, retryable) when OAuth
+	 * refresh failed with a retryable error and nothing else can serve.
+	 */
 	async getApiKeyWithCredentialForProvider(
 		provider: string,
 		sessionId?: string,

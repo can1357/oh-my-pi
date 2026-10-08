@@ -2188,6 +2188,7 @@ export async function runRootCommand(
 		sessionOptions.hasUI = isInteractive || mode === "rpc-ui";
 		sessionOptions.allowSessionModelFallback = isInteractive;
 		sessionOptions.settingsApproval = isInteractive;
+		sessionOptions.tuiTranscript = isInteractive;
 		sessionOptions.settings = settingsInstance;
 		sessionOptions.onPrewalkWarning = warning => {
 			if (isInteractive) notifs.push({ kind: "warn", message: warning });
@@ -2478,6 +2479,10 @@ export async function runRootCommand(
 			}
 
 			const modelRegistryError = modelRegistry.getError();
+			for (const warning of modelRegistry.drainConfigWarnings()) {
+				if (isInteractive) notifs.push({ kind: "warn", message: warning });
+				else process.stderr.write(`${chalk.yellow(`Warning: ${warning}`)}\n`);
+			}
 			if (modelRegistryError) {
 				notifs.push({ kind: "error", message: modelRegistryError.message });
 			}
