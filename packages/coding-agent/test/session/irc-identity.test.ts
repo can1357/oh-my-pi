@@ -9,7 +9,7 @@ import { messageResult } from "../../src/irc/messaging";
 import { AgentRegistry } from "../../src/registry/agent-registry";
 import { escapeHarnessTags } from "../../src/session/harness-tags";
 import { IrcBridge, type IrcBridgeHost } from "../../src/session/irc-bridge";
-import { convertToLlm, type CustomMessage } from "../../src/session/messages";
+import { convertToLlm, type CustomMessage, wrapSteeringForModel } from "../../src/session/messages";
 import { SessionManager } from "../../src/session/session-manager";
 import { sessionMessagePersistenceKey, planTurnPersistence } from "../../src/session/turn-persistence";
 import parentTemplate from "../../src/prompts/steering/parent-irc.md" with { type: "text" };
@@ -37,7 +37,9 @@ function recipient(manager = SessionManager.inMemory(), streaming = true) {
 		emitSessionEvent: async event => {
 			if (event.type === "irc_message") observations.push(event.message);
 		},
-		wakeForIrc: records => { wakes.push(records); },
+		wakeForIrc: records => {
+			wakes.push(records);
+		},
 	};
 	const bridge = new IrcBridge(host);
 	return { bridge, agent, host, observations, wakes };
@@ -46,15 +48,22 @@ function recipient(manager = SessionManager.inMemory(), streaming = true) {
 function persist(manager: SessionManager, bridge: IrcBridge, record: AgentMessage): void {
 	if (record.role === "custom") {
 		manager.appendCustomMessageEntry(
-			record.customType, record.content, record.display, record.details,
-			record.attribution, record.timestamp, record.steeringSource,
+			record.customType,
+			record.content,
+			record.display,
+			record.details,
+			record.attribution,
+			record.timestamp,
+			record.steeringSource,
 		);
 	} else if (record.role === "user") manager.appendMessage(record);
 	else throw new Error("Expected an incoming message");
 	bridge.releaseReservation(record);
 }
 
-afterEach(() => { vi.restoreAllMocks(); });
+afterEach(() => {
+	vi.restoreAllMocks();
+});
 
 describe("IRC identity at session consumers", () => {
 	it("delivers equal IDs from different senders but suppresses an in-flight repeat", async () => {
@@ -65,7 +74,8 @@ describe("IRC identity at session consumers", () => {
 		expect(target.observations).toHaveLength(2);
 		const pending = target.bridge.drainInboxMessages(mail.to);
 		expect(pending.map(message => [message.from, message.id])).toEqual([
-			["Peer", "shared-id"], ["OtherPeer", "shared-id"],
+			["Peer", "shared-id"],
+			["OtherPeer", "shared-id"],
 		]);
 	});
 
@@ -79,14 +89,19 @@ describe("IRC identity at session consumers", () => {
 		expect(target.observations).toHaveLength(1);
 		const snapshot = manager.captureState();
 		const file = path.join(temp.path(), "session.jsonl");
-		await Bun.write(file, [snapshot.header, ...snapshot.entries].map(entry => JSON.stringify(entry)).join("\n") + "\n");
+		await Bun.write(
+			file,
+			[snapshot.header, ...snapshot.entries].map(entry => JSON.stringify(entry)).join("\n") + "\n",
+		);
 		const reopened = await SessionManager.open(file, temp.path(), undefined, { suppressBreadcrumb: true });
 		try {
 			const restored = recipient(reopened);
 			await restored.bridge.deliver(mail);
 			await restored.bridge.deliver({ ...mail, from: "OtherPeer" });
 			expect(restored.bridge.drainInboxMessages(mail.to).map(message => message.from)).toEqual(["OtherPeer"]);
-		} finally { await reopened.close(); }
+		} finally {
+			await reopened.close();
+		}
 	});
 
 	it("wait consumes pending mail once and journals identity without a second provider injection", async () => {
@@ -95,7 +110,9 @@ describe("IRC identity at session consumers", () => {
 		await target.bridge.deliver({ ...mail, replyTo: "request-id", wakeRelay: true });
 		const [consumed] = target.bridge.drainInboxMessages(mail.to);
 		const result = messageResult(manager, mail.to, consumed!, manager.captureIrcConsumptionBoundary());
-		expect(result.content).toEqual([{ type: "text", text: "[shared-id] Peer (reply to request-id): synthetic status" }]);
+		expect(result.content).toEqual([
+			{ type: "text", text: "[shared-id] Peer (reply to request-id): synthetic status" },
+		]);
 		expect(result.details?.waited).toMatchObject({ to: mail.to, ts: 42, replyTo: "request-id", wakeRelay: true });
 		expect(convertToLlm(manager.buildSessionContext().messages)).toEqual([]);
 		const restored = recipient(manager.cloneCurrentSession({ persist: false }));
@@ -140,9 +157,20 @@ describe("IRC identity at session consumers", () => {
 		const manager = SessionManager.inMemory();
 		for (const [toolName, details] of [
 			["wait", { op: "wait", waited: mail }],
-			["write", { xdev: { mode: "execute", tool: "wait", inner: { op: "wait", waited: { ...mail, from: "OtherPeer" } } } }],
+			[
+				"write",
+				{ xdev: { mode: "execute", tool: "wait", inner: { op: "wait", waited: { ...mail, from: "OtherPeer" } } } },
+			],
 		] as const) {
-			manager.appendMessage({ role: "toolResult", toolName, toolCallId: toolName, content: [], isError: false, details, timestamp: 43 });
+			manager.appendMessage({
+				role: "toolResult",
+				toolName,
+				toolCallId: toolName,
+				content: [],
+				isError: false,
+				details,
+				timestamp: 43,
+			});
 		}
 		const target = recipient(manager);
 		await target.bridge.deliver(mail);
@@ -211,7 +239,9 @@ describe("IRC identity at session consumers", () => {
 
 	it("failed handoff rolls back its reservation and does not emit a delivered observation", async () => {
 		const target = recipient(SessionManager.inMemory(), false);
-		vi.spyOn(target.host, "wakeForIrc").mockImplementationOnce(() => { throw new Error("synthetic handoff failure"); });
+		vi.spyOn(target.host, "wakeForIrc").mockImplementationOnce(() => {
+			throw new Error("synthetic handoff failure");
+		});
 		await expect(target.bridge.deliver(mail)).rejects.toThrow("synthetic handoff failure");
 		expect(target.observations).toEqual([]);
 		expect(await target.bridge.deliver(mail)).toBe("woken");
@@ -227,8 +257,15 @@ describe("IRC identity at session consumers", () => {
 		const entries = manager.snapshotForReplication().entries;
 		const old = entries[0]!;
 		if (old.type !== "custom") throw new Error("Expected consumed identity metadata");
-		Object.defineProperty(old, "data", { get() { throw new Error("old journal entry revisited"); }, configurable: true });
-		vi.spyOn(manager, "getEntries").mockImplementation(() => { throw new Error("journal cloned"); });
+		Object.defineProperty(old, "data", {
+			get() {
+				throw new Error("old journal entry revisited");
+			},
+			configurable: true,
+		});
+		vi.spyOn(manager, "getEntries").mockImplementation(() => {
+			throw new Error("journal cloned");
+		});
 		for (let id = 0; id < 100; id++) {
 			const next = { ...mail, id: `new-${id}` };
 			manager.recordConsumedIrcMessage(next);
@@ -287,13 +324,23 @@ describe("source preservation without authority changes", () => {
 			await manager.close();
 			const reopened = await SessionManager.open(file, temp.path(), undefined, { suppressBreadcrumb: true });
 			try {
-				const [providerMessage] = convertToLlm(reopened.buildSessionContext().messages);
+				const restored = reopened.buildSessionContext().messages;
+				expect(restored[0]).toMatchObject({ role: "user", attribution: "agent", steering: true });
+				const [providerMessage] = convertToLlm(restored);
 				expect(providerMessage).toMatchObject({
 					role: "user",
 					attribution: "agent",
 					ircSource: ircSource(parentMail, true),
 				});
-				expect(providerMessage?.content).toBe(prompt.render(userInterjectionTemplate, { message: steer.content }));
+				// Direct transcript conversion does not run the SDK request transform.
+				expect(providerMessage?.content).toBe(steer.content);
+				const [requestMessage] = convertToLlm(wrapSteeringForModel(restored));
+				expect(requestMessage).toMatchObject({
+					role: "user",
+					attribution: "agent",
+					ircSource: ircSource(parentMail, true),
+				});
+				expect(requestMessage?.content).toBe(prompt.render(userInterjectionTemplate, { message: steer.content }));
 				const again = recipient(reopened);
 				await again.bridge.deliver(parentMail);
 				expect(again.agent.peekSteeringQueue()).toEqual([]);
@@ -307,7 +354,14 @@ describe("source preservation without authority changes", () => {
 	});
 
 	it("distinct native parent transport IDs do not collide in the turn-persistence consumer", () => {
-		const first: IrcSteeringMessage = { role: "user", content: "identical synthetic content", attribution: "agent", steering: true, timestamp: 42, ircSource: ircSource(mail, true) };
+		const first: IrcSteeringMessage = {
+			role: "user",
+			content: "identical synthetic content",
+			attribution: "agent",
+			steering: true,
+			timestamp: 42,
+			ircSource: ircSource(mail, true),
+		};
 		const second: IrcSteeringMessage = { ...first, ircSource: ircSource({ ...mail, id: "second-id" }, true) };
 		const other: IrcSteeringMessage = { ...first, ircSource: ircSource({ ...mail, from: "OtherPeer" }, true) };
 		const keys = [first, second, other].map(sessionMessagePersistenceKey);
