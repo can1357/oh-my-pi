@@ -13,7 +13,15 @@ import { describe, expect, it } from "bun:test";
 import { streamSimple } from "@oh-my-pi/pi-ai";
 import { streamAnthropic } from "@oh-my-pi/pi-ai/providers/anthropic";
 import { streamOpenAICompletions } from "@oh-my-pi/pi-ai/providers/openai-completions";
-import type { AssistantMessageEventStream, Context, FetchImpl, Model, ModelSpec } from "@oh-my-pi/pi-ai/types";
+import type {
+	AssistantMessageEventStream,
+	Context,
+	FetchImpl,
+	Model,
+	ModelSpec,
+	TJsonSchema,
+	Tool,
+} from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 
 const modelDefaults: Pick<ModelSpec, "id" | "name" | "reasoning" | "input" | "cost" | "contextWindow" | "maxTokens"> = {
@@ -226,6 +234,85 @@ describe("provider attempt budget", () => {
 		expect(requests).toBe(3);
 		expect(result.stopReason).toBe("stop");
 		expect(result.content).toEqual([{ type: "text", text: "recovered" }]);
+	});
+
+	it("does not send a second request when a strict-tools fallback re-enters with the allowance spent", async () => {
+		let requests = 0;
+		const fetchImpl: FetchImpl = async () => {
+			requests++;
+			// A rejection `shouldRetryWithoutStrictTools` accepts: the completions
+			// transport answers it by re-entering the stream without strict tools.
+			return new Response(
+				JSON.stringify({
+					error: {
+						message: "Invalid 'tools[0].function.strict': unsupported value",
+						type: "invalid_request_error",
+					},
+				}),
+				{ status: 400, headers: { "content-type": "application/json" } },
+			);
+		};
+		const tools: Tool[] = [
+			{
+				name: "get_weather",
+				description: "Get the weather",
+				strict: true,
+				parameters: {
+					type: "object",
+					properties: { city: { type: "string" } },
+					required: ["city"],
+				} as TJsonSchema,
+			},
+		];
+
+		const stream = streamOpenAICompletions(
+			model,
+			{ ...context, tools },
+			{
+				apiKey: "test-key",
+				fetch: fetchImpl,
+				providerMaxAttempts: 1,
+			},
+		);
+		const result = await stream.result();
+
+		// The strict-tools re-entry must not issue a second wire request.
+		expect(requests).toBe(1);
+		expect(result.stopReason).toBe("error");
+		// The failure that consumed the allowance surfaces, not a budget error.
+		expect(result.errorMessage ?? "").toMatch(/strict/);
+		expect(result.errorMessage ?? "").not.toMatch(/attempt budget/i);
+	});
+
+	it("issues no further Anthropic request when fast-mode recovery re-enters with the allowance spent", async () => {
+		let requests = 0;
+		const fetchImpl: FetchImpl = async () => {
+			requests++;
+			// `isFastModeUnsupported`: the Anthropic loop answers it by dropping
+			// fast mode and starting another wire attempt.
+			return new Response(
+				JSON.stringify({
+					type: "error",
+					error: { type: "invalid_request_error", message: "The 'speed' parameter is not supported" },
+				}),
+				{ status: 400, headers: { "content-type": "application/json" } },
+			);
+		};
+
+		const stream = streamAnthropic(anthropicModel, context, {
+			apiKey: "test-key",
+			fetch: fetchImpl,
+			serviceTier: "priority",
+			providerMaxAttempts: 1,
+			providerRetryWait: async () => {},
+		});
+		const result = await stream.result();
+
+		expect(requests).toBe(1);
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage ?? "").toMatch(/speed/i);
+		// The failure that consumed the allowance surfaces, not a budget error.
+		expect(result.errorMessage ?? "").not.toMatch(/attempt budget/i);
 	});
 
 	it("issues no further Anthropic request once the shared allowance is spent", async () => {
