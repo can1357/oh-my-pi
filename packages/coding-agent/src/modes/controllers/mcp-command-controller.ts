@@ -266,12 +266,13 @@ export { MCPOAuthCancelledError };
 const MCP_OAUTH_USER_CANCEL_REASON = "MCP OAuth flow cancelled by user";
 
 /**
- * Editor Escape handler each MCP OAuth flow installed, mapped to the handler it
- * displaced. A superseding flow restores past a still-installed predecessor
- * instead of to it, and a flow only restores while its own handler is current,
- * so a cancelled predecessor never strips the replacement's Escape.
+ * Escape handlers installed by MCP OAuth flows, each linked to the handler it
+ * displaced. Flows end out of order (a superseded login unwinds while its
+ * replacement waits; a cancelled preflight unwinds while the login it displaced
+ * is still live), so a release hands Escape to the nearest displaced handler
+ * that is still live, and does nothing while another flow's handler is on top.
  */
-const mcpOAuthEscapeHandlers = new WeakMap<() => void, (() => void) | undefined>();
+const mcpOAuthEscapeHandlers = new WeakMap<() => void, { displaced: (() => void) | undefined; released: boolean }>();
 
 type MCPAddScope = "user" | "project";
 type MCPAddTransport = "http" | "sse";
@@ -1152,12 +1153,20 @@ export class MCPCommandController {
 	 * paths keeps one consistent owner; see {@link mcpOAuthEscapeHandlers}.
 	 */
 	#claimOAuthEscape(onEscape: () => void): () => void {
-		const current = this.ctx.editor.onEscape;
-		const displaced = current && mcpOAuthEscapeHandlers.has(current) ? mcpOAuthEscapeHandlers.get(current) : current;
-		mcpOAuthEscapeHandlers.set(onEscape, displaced);
+		const entry = { displaced: this.ctx.editor.onEscape, released: false };
+		mcpOAuthEscapeHandlers.set(onEscape, entry);
 		this.ctx.editor.onEscape = onEscape;
 		return () => {
-			if (this.ctx.editor.onEscape === onEscape) this.ctx.editor.onEscape = displaced;
+			if (entry.released) return;
+			entry.released = true;
+			if (this.ctx.editor.onEscape !== onEscape) return;
+			let restore = entry.displaced;
+			while (restore) {
+				const link = mcpOAuthEscapeHandlers.get(restore);
+				if (!link?.released) break;
+				restore = link.displaced;
+			}
+			this.ctx.editor.onEscape = restore;
 		};
 	}
 

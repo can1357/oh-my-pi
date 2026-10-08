@@ -972,6 +972,51 @@ describe("/mcp auth commands", () => {
 		expect(editor.onEscape).toBe(preLogin);
 	});
 
+	test("cancelling a reauth during preflight hands Esc back to the login it did not supersede", async () => {
+		const authStorage = freshAuthStorage();
+		await authStorage.credentials.reload();
+		// First probe fails with an auth challenge so login A starts; the second
+		// probe (reauth B's preflight) never settles, so B never claims the slot.
+		const preflightEntered = Promise.withResolvers<void>();
+		vi.spyOn(mcpClient, "connectToServer")
+			.mockRejectedValueOnce(AUTH_ERROR)
+			.mockImplementationOnce(() => {
+				preflightEntered.resolve();
+				return new Promise<never>(() => {});
+			});
+		const loginEntered = Promise.withResolvers<void>();
+		vi.spyOn(oauthFlow.MCPOAuthFlow.prototype, "login").mockImplementation(function (this: oauthFlow.MCPOAuthFlow) {
+			const pending = Promise.withResolvers<never>();
+			this.ctrl.signal?.addEventListener("abort", () => pending.reject(new Error("OAuth callback cancelled")), {
+				once: true,
+			});
+			loginEntered.resolve();
+			return pending.promise;
+		});
+
+		const { controller, ctx, showError, editor } = createController(authStorage);
+		const preLogin = () => {};
+		editor.onEscape = preLogin;
+
+		const loginA = controller.handle("/mcp reauth envserver");
+		await loginEntered.promise;
+		const escapeA = editor.onEscape;
+		const reauthB = new MCPCommandController(ctx).handle("/mcp reauth envserver");
+		await preflightEntered.promise;
+		const escapeB = editor.onEscape;
+		expect(escapeB).not.toBe(escapeA);
+
+		escapeB?.();
+		await reauthB;
+		// A is still waiting for authorization and must keep its Escape.
+		expect(editor.onEscape).toBe(escapeA);
+
+		escapeA?.();
+		await loginA;
+		expect(showError).not.toHaveBeenCalled();
+		expect(editor.onEscape).toBe(preLogin);
+	});
+
 	test("/mcp reconnect treats a manager-loaded server as enabled despite its raw enabled:false", async () => {
 		const authStorage = freshAuthStorage();
 		const config: MCPServerConfig = { type: "http", url: EXPANDED_SERVER_URL, enabled: false };
