@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Devin models with a long-context price tier (GPT-5.6 standard lanes, GPT-6 through 6.1, Gemini Pro, and Grok 4.5+) now default to a 272K or 200K context window, where that pricing starts; run `/extended-context on` to use the full window at long-context rates ([#14891](https://github.com/can1357/oh-my-pi/pull/14891) by [@eggpeat](https://github.com/eggpeat)).
+
 ### Fixed
 
 - Fixed Devin Claude and GPT-5.6+ models pricing prompt-cache writes at $0; they now use Devin's published rate of 1.25x input ([#14891](https://github.com/can1357/oh-my-pi/pull/14891) by [@eggpeat](https://github.com/eggpeat)).
