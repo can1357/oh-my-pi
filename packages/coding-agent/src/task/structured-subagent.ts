@@ -28,7 +28,7 @@ import subagentUserPromptTemplate from "../prompts/system/subagent-user-prompt.m
 import isolationRecoveryHintTemplate from "../prompts/tools/isolation-recovery-hint.md" with { type: "text" };
 import salvagedChildHintTemplate from "../prompts/tools/salvaged-child-hint.md" with { type: "text" };
 import { MAIN_AGENT_ID } from "../registry/agent-registry";
-import type { TaskEffort } from "@oh-my-pi/pi-tui/thinking";
+import { concreteThinkingLevel, type TaskEffort } from "@oh-my-pi/pi-tui/thinking";
 import type { ToolSession } from "../tools";
 import { isIrcEnabled } from "../irc/messaging";
 import { buildOutputValidator } from "../tools/output-schema-validator";
@@ -436,6 +436,11 @@ export async function resolveEffectiveSubagentPolicy(
 	};
 }
 
+function hasNonEmptyModelOverride(value: unknown): boolean {
+	if (typeof value === "string") return value.trim().length > 0;
+	return Array.isArray(value) && value.some(pattern => typeof pattern === "string" && pattern.trim().length > 0);
+}
+
 /**
  * Fire `before_subagent_spawn` for an actual child dispatch. Kept out of
  * {@link resolveEffectiveSubagentPolicy} because frontends run that as a
@@ -452,11 +457,23 @@ async function applySpawnHook(
 		request.identity?.id ??
 		request.identity?.label ??
 		(request.parentToolCallId !== undefined ? `${request.parentToolCallId}:${request.index ?? 0}` : undefined);
+	const context = request.context?.trim();
+	const solutionSpace = request.invocationKind === "task" ? request.solutionSpace?.trim() : undefined;
+	const baselineThinkingLevel = concreteThinkingLevel(policy.effectiveAgent.thinkingLevel);
+	const agentModelOverrides = cfgTaskAgentModelOverrides.get(request.session.settings);
+	const modelLocked = hasNonEmptyModelOverride(agentModelOverrides[policy.agentName]);
+	const effortLocked = request.effort !== undefined || modelLocked;
 	const spawnResult = await emit(
 		{
 			type: "before_subagent_spawn",
 			agent: policy.agentName,
 			invocationKind: request.invocationKind,
+			assignment: request.assignment,
+			...(context ? { context } : {}),
+			...(solutionSpace ? { solutionSpace } : {}),
+			...(baselineThinkingLevel !== undefined ? { thinkingLevel: baselineThinkingLevel } : {}),
+			modelLocked,
+			effortLocked,
 			modelRole: policy.modelRole,
 			patterns: policy.modelOverride ?? [],
 			spawnKey,
@@ -466,7 +483,9 @@ async function applySpawnHook(
 	if (spawnResult?.block) {
 		throw new StructuredSubagentError("preflight", spawnResult.reason ?? "Subagent spawn blocked by extension.");
 	}
-	if (spawnResult?.model === undefined) return policy;
+	// Effort results do not exist until a handler can return a thinking level.
+	// modelLocked already sets effortLocked so that later result cannot rewrite a pinned agent.
+	if (modelLocked || spawnResult?.model === undefined) return policy;
 	const replacement = resolveConfiguredModelPatterns(spawnResult.model, request.session.settings);
 	if (replacement.length === 0) return policy;
 	return { ...policy, modelOverride: replacement, modelRoute: spawnResult.note };

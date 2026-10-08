@@ -1,3 +1,5 @@
+import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
+import { AUTO_THINKING } from "@oh-my-pi/pi-tui/thinking";
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
@@ -516,6 +518,9 @@ describe("structured subagent primitive", () => {
 				type: "before_subagent_spawn",
 				agent: "worker",
 				invocationKind: "task",
+				assignment: "Inspect the target.",
+				modelLocked: false,
+				effortLocked: false,
 				modelRole: "definition",
 				patterns: ["anthropic/claude-opus-4-5"],
 			},
@@ -533,6 +538,134 @@ describe("structured subagent primitive", () => {
 		expect(error as StructuredSubagentError).toMatchObject({ kind: "preflight", message: "pool exhausted" });
 		expect(run).not.toHaveBeenCalled();
 		expect(artifactsDirsFromRegistry()).toEqual([]);
+	});
+
+	it("forwards assignment, context, solutionSpace, and baseline thinking level, and omits solutionSpace for eval", async () => {
+		mockDiscovery({ ...AGENT, thinkingLevel: ThinkingLevel.High });
+		const events: BeforeSubagentSpawnEvent[] = [];
+		const childSession = session();
+		childSession.emitBeforeSubagentSpawn = async event => {
+			events.push(event);
+		};
+		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async () => result());
+
+		const taskSettled = await runStructuredSubagent(
+			request({
+				session: childSession,
+				assignment: "Rename the helper.",
+				context: "  shared batch  ",
+				solutionSpace: "  one fix: rename, names given  ",
+				retainArtifacts: true,
+			}),
+		);
+		const evalSettled = await runStructuredSubagent(
+			request({
+				session: childSession,
+				invocationKind: "eval",
+				assignment: "Classify this.",
+				context: "   ",
+				solutionSpace: "should not leak",
+				retainArtifacts: true,
+			}),
+		);
+		mockDiscovery({ ...AGENT, thinkingLevel: AUTO_THINKING });
+		const autoSettled = await runStructuredSubagent(
+			request({ session: childSession, solutionSpace: "still task", retainArtifacts: true }),
+		);
+
+		expect(events[0]).toMatchObject({
+			assignment: "Rename the helper.",
+			context: "shared batch",
+			solutionSpace: "one fix: rename, names given",
+			thinkingLevel: ThinkingLevel.High,
+			invocationKind: "task",
+		});
+		expect(events[0]).not.toHaveProperty("signal");
+		expect(events[1]).toMatchObject({ assignment: "Classify this.", invocationKind: "eval", thinkingLevel: "high" });
+		expect(events[1]).not.toHaveProperty("solutionSpace");
+		expect(events[1]).not.toHaveProperty("context");
+		expect(events[2]).toMatchObject({ invocationKind: "task", solutionSpace: "still task" });
+		expect(events[2]).not.toHaveProperty("thinkingLevel");
+		await fs.rm(taskSettled.artifactsDir, { recursive: true, force: true });
+		await fs.rm(evalSettled.artifactsDir, { recursive: true, force: true });
+		await fs.rm(autoSettled.artifactsDir, { recursive: true, force: true });
+	});
+
+	it("ignores a hook model when a per-agent override locks the spawn, and still honors block", async () => {
+		mockDiscovery({ ...AGENT, model: ["openai/gpt-4o"] });
+		const lockedSession = session();
+		cfgTaskAgentModelOverrides.override(lockedSession.settings, { worker: "anthropic/claude-sonnet-4-5" });
+		const events: BeforeSubagentSpawnEvent[] = [];
+		lockedSession.emitBeforeSubagentSpawn = async event => {
+			events.push(event);
+			return { model: "openai/gpt-4o-mini", note: "should ignore" };
+		};
+		const dispatched: executorModule.ExecutorOptions[] = [];
+		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+			dispatched.push(options);
+			return result();
+		});
+
+		const locked = await runStructuredSubagent(request({ session: lockedSession, retainArtifacts: true }));
+
+		expect(events[0]).toMatchObject({ modelLocked: true, effortLocked: true });
+		expect(dispatched[0]?.modelOverride).toEqual(["anthropic/claude-sonnet-4-5"]);
+		expect(dispatched[0]?.modelRoute).toBeUndefined();
+
+		const blockedSession = session();
+		cfgTaskAgentModelOverrides.override(blockedSession.settings, { worker: ["anthropic/claude-sonnet-4-5"] });
+		blockedSession.emitBeforeSubagentSpawn = async () => ({
+			block: true,
+			reason: "held",
+			model: "openai/gpt-4o-mini",
+		});
+		const error = await runStructuredSubagent(request({ session: blockedSession })).catch((cause: unknown) => cause);
+
+		expect(error).toBeInstanceOf(StructuredSubagentError);
+		expect(error as StructuredSubagentError).toMatchObject({ kind: "preflight", message: "held" });
+		expect(dispatched).toHaveLength(1);
+		await fs.rm(locked.artifactsDir, { recursive: true, force: true });
+	});
+
+	it("does not lock on request.model, explicit effort alone, or a blank override", async () => {
+		mockDiscovery({ ...AGENT, model: ["openai/gpt-4o"] });
+		const events: BeforeSubagentSpawnEvent[] = [];
+		const dispatched: executorModule.ExecutorOptions[] = [];
+		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+			dispatched.push(options);
+			return result();
+		});
+		const hook = async (event: BeforeSubagentSpawnEvent) => {
+			events.push(event);
+			return { model: "openai/gpt-4o-mini", note: "routed" };
+		};
+
+		const explicitModel = session();
+		explicitModel.emitBeforeSubagentSpawn = hook;
+		const explicitEffort = session();
+		explicitEffort.emitBeforeSubagentSpawn = hook;
+		const blank = session();
+		cfgTaskAgentModelOverrides.override(blank.settings, { worker: "   ", other: "" });
+		blank.emitBeforeSubagentSpawn = hook;
+
+		const explicitModelRun = await runStructuredSubagent(
+			request({ session: explicitModel, model: "anthropic/claude-sonnet-4-5", retainArtifacts: true }),
+		);
+		const explicitEffortRun = await runStructuredSubagent(
+			request({ session: explicitEffort, effort: "hi", retainArtifacts: true }),
+		);
+		const blankRun = await runStructuredSubagent(request({ session: blank, retainArtifacts: true }));
+
+		expect(events[0]).toMatchObject({ modelLocked: false, effortLocked: false });
+		expect(dispatched[0]?.modelOverride).toEqual(["openai/gpt-4o-mini"]);
+		expect(dispatched[0]?.modelRoute).toBe("routed");
+		expect(events[1]).toMatchObject({ modelLocked: false, effortLocked: true });
+		expect(dispatched[1]?.modelOverride).toEqual(["openai/gpt-4o-mini"]);
+		expect(events[2]).toMatchObject({ modelLocked: false, effortLocked: false });
+		expect(dispatched[2]?.modelOverride).toEqual(["openai/gpt-4o-mini"]);
+		await fs.rm(explicitModelRun.artifactsDir, { recursive: true, force: true });
+		await fs.rm(explicitEffortRun.artifactsDir, { recursive: true, force: true });
+		await fs.rm(blankRun.artifactsDir, { recursive: true, force: true });
 	});
 
 	it("does not assign a role when a child uses an explicit model selector", async () => {

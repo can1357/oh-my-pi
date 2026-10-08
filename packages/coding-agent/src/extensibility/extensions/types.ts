@@ -857,6 +857,26 @@ export interface BeforeSubagentSpawnEvent {
 	/** Agent definition name being spawned. */
 	agent: string;
 	invocationKind: "task" | "eval";
+	/** Assignment dispatched to this worker. */
+	assignment: string;
+	/** Shared batch or workpool context, trimmed. Omitted when blank. */
+	context?: string;
+	/** Task spawns only. Absent for eval `agent()` and workpool. */
+	solutionSpace?: string;
+	/** Baseline concrete thinking level. Omitted when the baseline is `auto` or unset. */
+	thinkingLevel?: ThinkingLevel;
+	/**
+	 * True when `task.agentModelOverrides` has a non-empty entry for this agent.
+	 * The internal `StructuredSubagentRequest.model` (SDK callers) is not a lock.
+	 */
+	modelLocked: boolean;
+	/** True when `modelLocked` or the caller set `effort`. Hook effort results are ignored. */
+	effortLocked: boolean;
+	/**
+	 * Aborts when this spawn is cancelled or this handler's timeout expires.
+	 * The runner sets a fresh signal per handler.
+	 */
+	signal?: AbortSignal;
 	/** Pre-expansion role alias the patterns came from (`@task` -> "task"); undefined for explicit selectors. */
 	modelRole?: string;
 	/** Expanded model patterns core would spawn with, in attempt order. */
