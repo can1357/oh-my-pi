@@ -1589,11 +1589,40 @@ class _ShellResult(list):
         return " ".join(self)
 
 
+def _shell_invocation(cmd: str) -> tuple[str | list[str], str | None, Any]:
+    """Return ``(args, executable, startupinfo)`` that run ``cmd`` in the shell.
+
+    ``!cmd`` is a shell command line by design (pipes, globs, ``&&``). This
+    spells out the same shell and command line CPython builds for
+    ``shell=True``, so the call site never passes that flag.
+    """
+    if os.name != "nt":
+        unix_shell = "/system/bin/sh" if hasattr(sys, "getandroidapilevel") else "/bin/sh"
+        return [unix_shell, "-c", cmd], None, None
+    comspec = os.environ.get("ComSpec") or os.path.join(
+        os.environ.get("SystemRoot", ""), "System32", "cmd.exe"
+    )
+    # Launch cmd.exe only by absolute path: a bare name is also searched in
+    # the cwd (CPython gh-101283).
+    if not os.path.isabs(comspec):
+        raise FileNotFoundError(
+            f"shell not found: {comspec!r} is not an absolute path (check %ComSpec%)"
+        )
+    startupinfo = subprocess.STARTUPINFO()
+    startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+    startupinfo.wShowWindow = subprocess.SW_HIDE
+    # cmd.exe parses its own command line, so pass it verbatim: a list would go
+    # through list2cmdline, whose \" escaping cmd.exe does not understand.
+    return f'{comspec} /c "{cmd}"', comspec, startupinfo
+
+
 def __omp_shell(cmd: str) -> _ShellResult:
+    args, executable, startupinfo = _shell_invocation(cmd)
     # stdin=DEVNULL: see _run_shell_body.
     proc = subprocess.Popen(
-        cmd,
-        shell=True,
+        args,
+        executable=executable,
+        startupinfo=startupinfo,
         stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,

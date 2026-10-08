@@ -15,8 +15,8 @@ const repoRoot = path.resolve(import.meta.dir, "../../../../..");
 const encoder = new TextEncoder();
 
 function shellQuote(value: string): string {
-	// `!cmd` runs through cmd.exe on Windows (shell=True) and a POSIX shell
-	// elsewhere; quote for the shell that will actually parse the command.
+	// `!cmd` runs through cmd.exe on Windows and a POSIX shell elsewhere;
+	// quote for the shell that will actually parse the command.
 	if (process.platform === "win32") {
 		return `"${value.replaceAll('"', '""')}"`;
 	}
@@ -166,6 +166,22 @@ describe("Python runner shell output streaming", () => {
 
 		expect(stdout).toContain("read=''");
 		expect(stdout).toContain("return=0");
+	});
+
+	it("parses !cmd with the platform shell so && runs both commands", async () => {
+		// Without a shell, `&&` would reach echo as a literal argument.
+		const frames = await runCell(
+			[
+				"result = !echo first && echo second",
+				"print('return=' + str(result.returncode) + ' lines=' + repr([line.strip() for line in result]))",
+			].join("\n"),
+		);
+		const stdout = frames
+			.filter(frame => frame.type === "stdout")
+			.map(frame => frame.data)
+			.join("");
+
+		expect(stdout).toContain("return=0 lines=['first', 'second']");
 	});
 
 	it("streams newline-free %%bash output without waiting for EOF", async () => {
