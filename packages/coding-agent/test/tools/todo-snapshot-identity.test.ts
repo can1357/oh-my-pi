@@ -9,7 +9,7 @@ import {
 	USER_TODO_EDIT_CUSTOM_TYPE,
 } from "@oh-my-pi/pi-coding-agent/tools/todo";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import type { TodoPhase, TodoStatus } from "@oh-my-pi/pi-tui/tools/todo";
+import type { TodoItem, TodoPhase, TodoStatus } from "@oh-my-pi/pi-tui/tools/todo";
 
 /** Commit a canonical todo edit and return the identity of the snapshot it produced. */
 function commitAndIdentify(manager: SessionManager, phases: readonly TodoPhase[]): TodoSnapshotIdentity {
@@ -33,26 +33,6 @@ function appendTodoResult(manager: SessionManager, toolName: string, details: un
 }
 
 describe("todo snapshot identity", () => {
-	it("honors a dismissal persisted from canonical phases when the live phases carry extra fields", () => {
-		const manager = SessionManager.inMemory();
-		const canonical: TodoPhase[] = [
-			{ name: "Implementation", tasks: [{ content: "Fix review comments", status: "completed" }] },
-		];
-		commitAndIdentify(manager, canonical);
-
-		const dismissal = createTodoHudStateData(manager.getBranch(), canonical, "dismissed");
-		expect(dismissal).toBeDefined();
-		manager.appendCustomEntry(TODO_HUD_STATE_CUSTOM_TYPE, dismissal);
-
-		const withExtras: TodoPhase[] = [
-			{
-				name: "Implementation",
-				tasks: [{ content: "Fix review comments", status: "completed", notes: ["pushed as a fixup"] }],
-			},
-		];
-		expect(getTodoHudVisibility(manager.getBranch(), withExtras)).toBe("dismissed");
-	});
-
 	it("treats a blocker note as part of the identity, but not its presence as a field", () => {
 		const manager = SessionManager.inMemory();
 		const noNote = commitAndIdentify(manager, [
@@ -77,49 +57,6 @@ describe("todo snapshot identity", () => {
 		expect(noNote.fingerprint).toBe(explicitUndefined.fingerprint);
 		expect(noNote.fingerprint).not.toBe(withNote.fingerprint);
 		expect(withNote.fingerprint).not.toBe(changedNote.fingerprint);
-	});
-
-	it("is sensitive to phase order, task order, and phase names", () => {
-		const manager = SessionManager.inMemory();
-		const first = commitAndIdentify(manager, [
-			{
-				name: "Implementation",
-				tasks: [
-					{ content: "Sweep call sites", status: "pending" },
-					{ content: "Update tests", status: "pending" },
-				],
-			},
-		]);
-		const reorderedTasks = commitAndIdentify(manager, [
-			{
-				name: "Implementation",
-				tasks: [
-					{ content: "Update tests", status: "pending" },
-					{ content: "Sweep call sites", status: "pending" },
-				],
-			},
-		]);
-		const renamedPhase = commitAndIdentify(manager, [
-			{
-				name: "Review",
-				tasks: [
-					{ content: "Sweep call sites", status: "pending" },
-					{ content: "Update tests", status: "pending" },
-				],
-			},
-		]);
-		const phasesInOrder = commitAndIdentify(manager, [
-			{ name: "Verification", tasks: [{ content: "Polish docs", status: "pending" }] },
-			{ name: "Implementation", tasks: [{ content: "Sweep call sites", status: "pending" }] },
-		]);
-		const phasesSwapped = commitAndIdentify(manager, [
-			{ name: "Implementation", tasks: [{ content: "Sweep call sites", status: "pending" }] },
-			{ name: "Verification", tasks: [{ content: "Polish docs", status: "pending" }] },
-		]);
-
-		expect(first.fingerprint).not.toBe(reorderedTasks.fingerprint);
-		expect(first.fingerprint).not.toBe(renamedPhase.fingerprint);
-		expect(phasesInOrder.fingerprint).not.toBe(phasesSwapped.fingerprint);
 	});
 
 	it("admits a successful todo result as the latest canonical snapshot", () => {
@@ -219,21 +156,26 @@ describe("todo snapshot identity", () => {
 });
 
 /**
- * Property layer over the same contract. Rules that must hold for any plan live
- * here rather than as examples above; these are the ones a consumer relies on — a dismissal must
- * survive for its own plan, must never apply to a different plan, and must never
- * be moved by a result that is not a real mutation — over generated plans of
- * varying shape. `fc.string()` only yields printable ASCII, so `contentArb` mixes
- * in JSON-hostile and non-ASCII task text (`","status":"pending"`, quotes,
- * newlines, emoji, zero-width space, 240-char tails) from a fixed list.
+ * Property layer over the same contract. Rules that must hold for any plan live here
+ * rather than as examples above: a dismissal must survive for its own plan, must never
+ * apply to a different plan, must never be moved by a result that is not a real
+ * mutation, and the fingerprint must react to every edit inside the projection —
+ * including reordering tasks or phases. `fc.string()` only yields printable ASCII, so
+ * `contentArb` mixes in JSON-hostile and non-ASCII task text (`","status":"pending"`,
+ * quotes, newlines, emoji, zero-width space, NUL, 240-char tails) from a fixed list.
  *
- * Seeded for CI determinism, so every run checks the same cases; fast-check
- * prints the seed plus the shrunk counterexample on failure.
+ * Seeded for CI determinism, so every run checks the same cases; fast-check prints the
+ * seed plus the shrunk counterexample on failure.
  */
 const PROPERTY_OPTIONS = { numRuns: 200, seed: 0x746f646f };
 
 const STATUSES: TodoStatus[] = ["pending", "in_progress", "completed", "abandoned", "blocked"];
-const EXTRA_TASK_CONTENT = "\u0000extra task";
+/** Task content the `add a task` mutator inserts; the leading NUL keeps it distinct from generated content. */
+const ADDED_TASK_CONTENT = "\u0000extra task";
+/** Long tail the content mutator appends; long enough that a prefix-only fingerprint cannot hide it. */
+const LONG_TAIL = "y".repeat(400);
+/** Long task body the generator can produce. */
+const LONG_TASK_TEXT = "x".repeat(240);
 
 const contentArb = fc.oneof(
 	fc.string(),
@@ -249,7 +191,7 @@ const contentArb = fc.oneof(
 		"日本",
 		"\u200b",
 		"🚀",
-		"x".repeat(240),
+		LONG_TASK_TEXT,
 		"null",
 		"[]",
 	),
@@ -276,37 +218,81 @@ function withRendererExtras(plan: readonly TodoPhase[]): TodoPhase[] {
 	}));
 }
 
-/** Number of distinct edits `projectChange` can make. */
-const PROJECTION_CHANGE_KINDS = 7;
-
 /**
- * Copy a plan with one edit inside the canonical projection, at the phase and task
- * picked by `phasePick`/`taskPick`: advance the status, append a long tail, add
- * leading whitespace, flip letter case, set an empty blocker, rename the phase, or
- * add a task. Each one changes the projection by construction.
+ * Edits inside the canonical projection, applied to the phase and task picked by
+ * `phasePick`/`taskPick`. Each changes the projection by construction, so a fingerprint
+ * that survives one is ignoring part of the projection. The label names the part and is
+ * reported when a mutator fails. `changeArb` samples this list's length, so adding a
+ * mutator extends coverage with no second number to keep in sync.
  */
-function projectChange(plan: readonly TodoPhase[], phasePick: number, taskPick: number, kind: number): TodoPhase[] {
+type ProjectionMutator = { label: string; apply: (phase: TodoPhase, task: TodoItem) => void };
+const PROJECTION_MUTATORS: ProjectionMutator[] = [
+	{
+		label: "advance the status",
+		apply: (_phase, task) => {
+			task.status = STATUSES[(STATUSES.indexOf(task.status) + 1) % STATUSES.length]!;
+		},
+	},
+	{
+		label: "append a long tail to the task content",
+		apply: (_phase, task) => {
+			task.content += LONG_TAIL;
+		},
+	},
+	{
+		label: "add leading whitespace to the task content",
+		apply: (_phase, task) => {
+			task.content = ` ${task.content}`;
+		},
+	},
+	{
+		label: "flip the letter case of the task content",
+		apply: (_phase, task) => {
+			const flipped =
+				task.content === task.content.toUpperCase() ? task.content.toLowerCase() : task.content.toUpperCase();
+			task.content = flipped === task.content ? `${task.content}Qq` : flipped;
+		},
+	},
+	{
+		label: "set an empty blocker note (empty against absent)",
+		apply: (_phase, task) => {
+			task.blocker = "";
+		},
+	},
+	{
+		label: "rename the phase",
+		apply: phase => {
+			phase.name = `${phase.name}!`;
+		},
+	},
+	{
+		label: "add a task",
+		apply: phase => {
+			phase.tasks.push({ content: ADDED_TASK_CONTENT, status: "pending" });
+		},
+	},
+];
+
+function projectChange(
+	plan: readonly TodoPhase[],
+	phasePick: number,
+	taskPick: number,
+	mutator: ProjectionMutator,
+): TodoPhase[] {
 	const next: TodoPhase[] = plan.map(phase => ({ ...phase, tasks: phase.tasks.map(task => ({ ...task })) }));
 	const phase = next[phasePick % next.length]!;
-	const task = phase.tasks[taskPick % phase.tasks.length]!;
-	if (kind === 0) task.status = STATUSES[(STATUSES.indexOf(task.status) + 1) % STATUSES.length]!;
-	else if (kind === 1) task.content = `${task.content}${"y".repeat(120)}`;
-	else if (kind === 2) task.content = ` ${task.content}`;
-	else if (kind === 3) {
-		const flipped =
-			task.content === task.content.toUpperCase() ? task.content.toLowerCase() : task.content.toUpperCase();
-		task.content = flipped === task.content ? `${task.content}Qq` : flipped;
-	} else if (kind === 4) task.blocker = "";
-	else if (kind === 5) phase.name = `${phase.name}!`;
-	else phase.tasks.push({ content: EXTRA_TASK_CONTENT, status: "pending" });
+	mutator.apply(phase, phase.tasks[taskPick % phase.tasks.length]!);
 	return next;
 }
 
-const changeArb = fc.record({
-	phasePick: fc.nat(),
-	taskPick: fc.nat(),
-	kind: fc.integer({ min: 0, max: PROJECTION_CHANGE_KINDS - 1 }),
-});
+// The label rides in the generated value so fast-check prints which mutator failed.
+const changeArb = fc.integer({ min: 0, max: PROJECTION_MUTATORS.length - 1 }).chain(index =>
+	fc.record({
+		phasePick: fc.nat(),
+		taskPick: fc.nat(),
+		mutator: fc.constant(PROJECTION_MUTATORS[index]!),
+	}),
+);
 
 describe("todo snapshot identity properties", () => {
 	it("identity is blind to renderer-only fields for any plan", () => {
@@ -323,11 +309,38 @@ describe("todo snapshot identity properties", () => {
 
 	it("plans that differ in the projection never share a fingerprint", () => {
 		fc.assert(
-			fc.property(planArb, changeArb, (plan, { phasePick, taskPick, kind }) => {
+			fc.property(planArb, changeArb, (plan, { phasePick, taskPick, mutator }) => {
 				const manager = SessionManager.inMemory();
 				const base = commitAndIdentify(manager, plan);
-				const changed = commitAndIdentify(manager, projectChange(plan, phasePick, taskPick, kind));
+				const changed = commitAndIdentify(manager, projectChange(plan, phasePick, taskPick, mutator));
 				return changed.fingerprint !== base.fingerprint;
+			}),
+			PROPERTY_OPTIONS,
+		);
+	});
+
+	it("reordering tasks within a phase, or phases within a plan, changes the fingerprint", () => {
+		fc.assert(
+			fc.property(contentArb, phaseNameArb, (content, name) => {
+				// The NUL tail makes the two tasks distinct by construction, so a
+				// reversal is always a real reorder and never a no-op.
+				const left: TodoItem = { content, status: "pending" };
+				const right: TodoItem = { content: `${content}${ADDED_TASK_CONTENT}`, status: "pending" };
+				const manager = SessionManager.inMemory();
+
+				const ordered = commitAndIdentify(manager, [{ name, tasks: [left, right] }]);
+				const reversedTasks = commitAndIdentify(manager, [{ name, tasks: [right, left] }]);
+				if (reversedTasks.fingerprint === ordered.fingerprint) return false;
+
+				const phases = commitAndIdentify(manager, [
+					{ name, tasks: [left] },
+					{ name, tasks: [right] },
+				]);
+				const reversedPhases = commitAndIdentify(manager, [
+					{ name, tasks: [right] },
+					{ name, tasks: [left] },
+				]);
+				return reversedPhases.fingerprint !== phases.fingerprint;
 			}),
 			PROPERTY_OPTIONS,
 		);
@@ -339,7 +352,7 @@ describe("todo snapshot identity properties", () => {
 				planArb,
 				changeArb,
 				fc.constantFrom("dismissed" as const, "revealed" as const),
-				(plan, { phasePick, taskPick, kind }, visibility) => {
+				(plan, { phasePick, taskPick, mutator }, visibility) => {
 					const manager = SessionManager.inMemory();
 					commitAndIdentify(manager, plan);
 					const data = createTodoHudStateData(manager.getBranch(), plan, visibility);
@@ -347,7 +360,7 @@ describe("todo snapshot identity properties", () => {
 					manager.appendCustomEntry(TODO_HUD_STATE_CUSTOM_TYPE, data);
 					if (getTodoHudVisibility(manager.getBranch(), withRendererExtras(plan)) !== visibility) return false;
 					return (
-						getTodoHudVisibility(manager.getBranch(), projectChange(plan, phasePick, taskPick, kind)) ===
+						getTodoHudVisibility(manager.getBranch(), projectChange(plan, phasePick, taskPick, mutator)) ===
 						undefined
 					);
 				},
