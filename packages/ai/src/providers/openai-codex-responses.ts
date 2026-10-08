@@ -1348,14 +1348,19 @@ function getCodexServiceTierCostMultiplier(
 }
 
 /**
- * The tier a Codex response was billed at. The response echo is authoritative
- * whenever it reports a tier (the backend may serve a requested priority/flex
- * turn as `default`); the requested tier is used only when the echo is absent.
- * The tier's identity is preserved even when it has no pricing entry (`scale`),
- * because the recorded tier also drives premium-request and speed accounting.
+ * The tier a Codex turn was served at. The Codex backend echoes
+ * `service_tier: "default"` on turns it serves at the sent tier (a `priority`
+ * turn decodes at Fast speed yet reports `default`), so a `default` or `auto`
+ * echo carries no information and, like an absent one, resolves to the sent
+ * tier, or `default` when none was sent. Any other echo (`flex`, `priority`,
+ * `ultrafast`, `scale`) is authoritative. The tier's identity is preserved even
+ * when it has no pricing entry (`scale`), because the recorded tier also drives
+ * premium-request and speed accounting. The echo cannot reveal a genuine
+ * downgrade, so a downgraded turn is recorded at the sent tier.
  */
 function resolveCodexCostServiceTier(res: ServiceTier | undefined, req?: unknown): ServiceTier {
-	return res ?? parseServiceTier(req) ?? "default";
+	if (res !== undefined && res !== "default" && res !== "auto") return res;
+	return parseServiceTier(req) ?? "default";
 }
 
 function applyCodexServiceTierPricing(
@@ -1921,13 +1926,19 @@ async function openCodexWebSocketTransport(
 	}
 	recordCodexTurnRequestDiagnostics(websocketState, websocketRequest, "websocket", canAppendBeforeRequest);
 	const requestBodyForState = cloneJsonTree(requestContext.transformedBody);
-	// `onPayload` may rewrite the outgoing frame (e.g. drop `stream_options`);
-	// recorded state must reflect what was actually sent — the sequential-cutoff
-	// summary decoder keys off it.
+	// `onPayload` may rewrite the outgoing frame (e.g. drop `stream_options` or
+	// change `service_tier`); recorded state must reflect what was actually
+	// sent — the sequential-cutoff summary decoder and the served-tier
+	// fallback key off it.
 	if (websocketRequest.stream_options === undefined) {
 		delete requestBodyForState.stream_options;
 	} else {
 		requestBodyForState.stream_options = websocketRequest.stream_options;
+	}
+	if (websocketRequest.service_tier === undefined) {
+		delete requestBodyForState.service_tier;
+	} else {
+		requestBodyForState.service_tier = websocketRequest.service_tier;
 	}
 	requestContext.rawRequestDump.body = websocketRequest;
 	CODEX_DEBUG &&

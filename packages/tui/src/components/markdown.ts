@@ -1173,6 +1173,120 @@ export function extractMarkdownLinks(text: string): MarkdownLink[] {
 	return links;
 }
 
+/**
+ * Offset just past the destination that starts at or after `start` in `raw`
+ * (CommonMark link destination grammar), plus where it begins. `null` when no
+ * destination is there.
+ */
+function scanLinkDestination(raw: string, start: number): { start: number; end: number } | null {
+	let i = start;
+	while (i < raw.length && (raw[i] === " " || raw[i] === "\t" || raw[i] === "\n" || raw[i] === "\r")) i++;
+	if (i >= raw.length) return null;
+	if (raw[i] === "<") {
+		for (let j = i + 1; j < raw.length; j++) {
+			if (raw[j] === "\\") j++;
+			else if (raw[j] === ">") return { start: i, end: j + 1 };
+			else if (raw[j] === "<" || raw[j] === "\n") return null;
+		}
+		return null;
+	}
+	let depth = 0;
+	let j = i;
+	for (; j < raw.length; j++) {
+		const ch = raw[j]!;
+		if (ch === "\\") {
+			j++;
+			continue;
+		}
+		if (ch === " " || ch === "\t" || ch === "\n" || ch === "\r" || ch.charCodeAt(0) < 0x20) break;
+		if (ch === "(") depth++;
+		else if (ch === ")") {
+			if (depth === 0) break;
+			depth--;
+		}
+	}
+	return j > i ? { start: i, end: j } : null;
+}
+
+/** A destination that stays one destination whatever bytes the target holds. */
+function formatLinkDestination(target: string): string {
+	return /[\s()<>\\]/.test(target) ? `<${target.replaceAll(/[<>\\]/g, ch => encodeURIComponent(ch))}>` : target;
+}
+
+function isListToken(token: Token): token is Tokens.List {
+	return token.type === "list";
+}
+
+function isTableToken(token: Token): token is Tokens.Table {
+	return token.type === "table";
+}
+
+/**
+ * Rewrite the destinations of inline links and link reference definitions in
+ * `text` to `resolve(href)`, leaving everything else byte-for-byte intact.
+ * Hosts that render the Markdown source themselves (a native terminal's `md`
+ * node) resolve relative destinations against their own idea of the working
+ * directory; handing them the session-resolved target keeps links pointing at
+ * what the author meant. Links inside code, images, autolinks and reference
+ * uses (`[x][ref]`, rewritten through their definition) are untouched; a link
+ * whose source cannot be located exactly is left as written.
+ */
+export function rewriteMarkdownLinkDestinations(text: string, resolve: (href: string) => string | undefined): string {
+	const edits: Array<{ start: number; end: number; target: string }> = [];
+	let cursor = 0;
+	const rewrite = (token: Token, labelEnd: number | undefined): void => {
+		const at = text.indexOf(token.raw, cursor);
+		if (at < 0) return;
+		cursor = at + token.raw.length;
+		const href = "href" in token && typeof token.href === "string" ? token.href : "";
+		if (!href || labelEnd === undefined) return;
+		const target = resolve(href);
+		if (!target || target === href) return;
+		const dest = scanLinkDestination(token.raw, labelEnd);
+		if (dest) edits.push({ start: at + dest.start, end: at + dest.end, target });
+	};
+	const walk = (tokens: readonly Token[] | undefined): void => {
+		if (!tokens) return;
+		for (const token of tokens) {
+			if (token.type === "link") {
+				const label = "text" in token && typeof token.text === "string" ? `[${token.text}](` : undefined;
+				rewrite(token, label && token.raw.startsWith(label) ? label.length : undefined);
+				continue;
+			}
+			if (token.type === "def") {
+				const close = token.raw.indexOf("]:");
+				rewrite(token, close < 0 ? undefined : close + 2);
+				continue;
+			}
+			const children = "tokens" in token && Array.isArray(token.tokens) ? token.tokens : undefined;
+			const items = isListToken(token) ? token.items : undefined;
+			const table = isTableToken(token) ? token : undefined;
+			if (token.type === "image" || (!children && !items && !table)) {
+				// A leaf (text, code span, fenced code, html, image…): step past it so a
+				// later link's source is never matched inside it.
+				const at = token.raw ? text.indexOf(token.raw, cursor) : -1;
+				if (at >= 0) cursor = at + token.raw.length;
+				continue;
+			}
+			walk(children);
+			walk(items);
+			if (table) {
+				for (const cell of table.header) walk(cell.tokens);
+				for (const row of table.rows) for (const cell of row) walk(cell.tokens);
+			}
+		}
+	};
+	walk(markdownParser.lexer(text));
+	if (edits.length === 0) return text;
+	let out = "";
+	let last = 0;
+	for (const edit of edits) {
+		out += text.slice(last, edit.start) + formatLinkDestination(edit.target);
+		last = edit.end;
+	}
+	return out + text.slice(last);
+}
+
 /** Drop all L2 cache entries. Call on theme change to prevent stale styled output. */
 export function clearRenderCache(): void {
 	renderCache.clear();

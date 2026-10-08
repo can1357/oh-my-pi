@@ -486,8 +486,14 @@ type AnthropicProviderSessionState = ProviderSessionState & {
 	 * this (baseUrl, modelId). Cleared on session close.
 	 */
 	thinkingReplayDisabled: boolean;
-	/** Thinking blocks the API permanently dropped after a prefix mismatch. */
+	/** Thinking blocks stripped after a prefix-binding 400 forced a retry without `drop_block`. */
 	prefixDroppedThinkingBlocks: Set<string>;
+	/**
+	 * Server-reported `prefix_binding_mismatch` drops already warned about. A
+	 * `drop_block` request replays dropped blocks verbatim, so the API reports
+	 * them again on every later request; only newly dropped blocks warn.
+	 */
+	reportedPrefixDroppedThinking: Set<string>;
 };
 
 function createAnthropicProviderSessionState(): AnthropicProviderSessionState {
@@ -497,12 +503,14 @@ function createAnthropicProviderSessionState(): AnthropicProviderSessionState {
 		replayUnsignedThinkingDisabled: false,
 		thinkingReplayDisabled: false,
 		prefixDroppedThinkingBlocks: new Set(),
+		reportedPrefixDroppedThinking: new Set(),
 		close: () => {
 			state.strictToolsDisabled = false;
 			state.fastModeDisabled = false;
 			state.replayUnsignedThinkingDisabled = false;
 			state.thinkingReplayDisabled = false;
 			state.prefixDroppedThinkingBlocks.clear();
+			state.reportedPrefixDroppedThinking.clear();
 		},
 	};
 	return state;
@@ -518,6 +526,7 @@ function getAnthropicProviderSessionState(
 	const existing = providerSessionState.get(key) as AnthropicProviderSessionState | undefined;
 	if (existing) {
 		existing.prefixDroppedThinkingBlocks ??= new Set();
+		existing.reportedPrefixDroppedThinking ??= new Set();
 		return existing;
 	}
 	const created = createAnthropicProviderSessionState();
@@ -1943,12 +1952,33 @@ function rememberPrefixBindingFailure(
 	return true;
 }
 
+/** Identify a reported drop by the dropped block's replay key, falling back to its wire path. */
+function reportedDropKey(params: MessageCreateParamsStreaming, path: string | undefined): string | undefined {
+	if (path === undefined) return undefined;
+	const match = INPUT_TRANSFORMATION_PATH_PATTERN.exec(path);
+	if (match) {
+		const content = params.messages[Number(match[1])]?.content;
+		const block = Array.isArray(content) ? content[Number(match[2])] : undefined;
+		const key = block ? thinkingReplayKey(block) : undefined;
+		if (key) return key;
+	}
+	return `path:${path}`;
+}
+
+/**
+ * Record server-reported input rewrites on the response. A `drop_block`
+ * request keeps replaying the transcript verbatim afterwards: the API drops
+ * the same invalid blocks again on every later request (unbilled), while
+ * omitting them client-side would change the bytes the drop request just
+ * cached and can cost another message-prefix cache miss from the first
+ * dropped block on. Repeat reports of an already-warned drop log at debug.
+ */
 function applyReportedInputTransformations(
 	output: AssistantMessage,
-	params: MessageCreateParamsStreaming,
-	state: AnthropicProviderSessionState | undefined,
 	value: unknown,
 	seen: Set<string>,
+	params: MessageCreateParamsStreaming,
+	state: AnthropicProviderSessionState | undefined,
 	replace = false,
 ): void {
 	if (value === undefined || value === null) return;
@@ -1965,12 +1995,26 @@ function applyReportedInputTransformations(
 	}
 	if (fresh.length === 0) return;
 	output.inputTransformations = [...(output.inputTransformations ?? []), ...fresh];
-	rememberPrefixDroppedThinking(params, fresh, state);
+	let repeated = 0;
 	for (const transformation of fresh) {
 		if (transformation.reason !== "prefix_binding_mismatch") continue;
+		const dropKey = reportedDropKey(params, transformation.path);
+		if (state && dropKey !== undefined) {
+			if (state.reportedPrefixDroppedThinking.has(dropKey)) {
+				repeated++;
+				continue;
+			}
+			state.reportedPrefixDroppedThinking.add(dropKey);
+		}
 		logger.warn("anthropic: dropped thinking block after conversation prefix changed", {
 			model: output.model,
 			path: transformation.path,
+		});
+	}
+	if (repeated > 0) {
+		logger.debug("anthropic: API re-dropped previously reported thinking blocks", {
+			model: output.model,
+			count: repeated,
 		});
 	}
 }
@@ -2661,10 +2705,10 @@ const streamAnthropicOnce = (
 							if (startMessage?.id) output.responseId = startMessage.id;
 							applyReportedInputTransformations(
 								output,
-								params,
-								providerSessionState,
 								startMessage?.input_transformations,
 								seenInputTransformations,
+								params,
+								providerSessionState,
 							);
 							const startUsage = startMessage?.usage;
 							if (startUsage) {
@@ -2978,10 +3022,10 @@ const streamAnthropicOnce = (
 							const delta = event.delta;
 							applyReportedInputTransformations(
 								output,
-								params,
-								providerSessionState,
 								event.input_transformations,
 								seenInputTransformations,
+								params,
+								providerSessionState,
 								true,
 							);
 							const rawStopReason = delta?.stop_reason;
@@ -5433,6 +5477,21 @@ export function convertAnthropicMessages(
 		}
 	}
 
+	// Queued compaction metadata lands before the passes below, which place
+	// `system` params by their neighbours.
+	if (opts?.compactionRequest) {
+		// Metadata due before `filesDueBefore` ends the summarized range; the
+		// rest replays with the retained tail and is carried by the new summary
+		// instead. Legacy metadata still pending here belongs after the first
+		// retained turn, outside this request.
+		flushCompactionFiles(opts.compactionRequest.filesDueBefore ?? Number.POSITIVE_INFINITY);
+	} else {
+		// A trailing compaction summary leaves its file metadata queued; emit it
+		// before the prefill check so the list ends the request as a user turn.
+		flushCompactionFiles(Number.POSITIVE_INFINITY);
+		flushLegacyCompactionFiles();
+	}
+
 	// Upgrade developer-origin params to mid-conversation `system` messages where
 	// Anthropic's placement rules allow it (Opus 4.8+ / Fable/Mythos 5 on first-party API).
 	// Rules: a system message must immediately follow a `user` turn and must be
@@ -5526,18 +5585,28 @@ export function convertAnthropicMessages(
 		params.splice(previous + 1, 0, { role: "user", content: "Continue." });
 		i = previous + 1;
 	}
-	if (opts?.compactionRequest) {
-		// Metadata due before `filesDueBefore` ends the summarized range; the
-		// rest replays with the retained tail and is carried by the new summary
-		// instead. Legacy metadata still pending here belongs after the first
-		// retained turn, outside this request.
-		flushCompactionFiles(opts.compactionRequest.filesDueBefore ?? Number.POSITIVE_INFINITY);
-		return params;
+	// A control carrying tool changes must precede an `assistant` turn or end
+	// the request (only the directive-only effort form is accepted anywhere),
+	// or every later request in the session fails with a 400. Its slot is the
+	// response of the request that sent it; when a `user` param follows instead
+	// — that response was an empty interrupted or failed turn `transformMessages`
+	// dropped, or compaction file metadata was flushed after it — it moves to
+	// the next assistant turn, the first response that saw the change. Every
+	// later request derives the same slot, so continuations stay cache-stable.
+	for (let i = 0; i < params.length; i++) {
+		const control = params[i];
+		if (!controlParams.has(control) || control.content.length === 0) continue;
+		const next = skipControls(i, 1);
+		if (params[next]?.role !== "user") continue;
+		let slot = next;
+		while (slot < params.length && params[slot].role !== "assistant") slot++;
+		// Controls already waiting for that turn came from later requests.
+		while (controlParams.has(params[slot - 1])) slot--;
+		params.splice(slot, 0, control);
+		params.splice(i, 1);
+		i--;
 	}
-	// A trailing compaction summary leaves its file metadata queued; emit it
-	// before the prefill check so the list ends the request as a user turn.
-	flushCompactionFiles(Number.POSITIVE_INFINITY);
-	flushLegacyCompactionFiles();
+	if (opts?.compactionRequest) return params;
 	const last = skipControls(params.length, -1);
 	if (params[last]?.role === "assistant") {
 		params.splice(last + 1, 0, { role: "user", content: "Continue." });

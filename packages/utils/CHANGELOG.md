@@ -2,25 +2,28 @@
 
 ## [Unreleased]
 
+## [18.8.1] - 2026-10-07
+
 ### Added
 
-- Added `ZipPackage` to `@oh-my-pi/pi-utils/ar`: a lazily inflated ZIP document package with a cap on total inflated bytes, and `DocxImage.readBytes()` for raw DOCX image bytes ([#14709](https://github.com/can1357/oh-my-pi/pull/14709) by [@H4vC](https://github.com/H4vC))
+- Added `PI_NATIVES_DIR` support to `getNativesDir()` for configuring the native addon directory.
+- Added `ZipPackage` for lazily reading ZIP-based document packages with a total decompressed-size limit, along with `DocxImage.readBytes()` for accessing raw DOCX image data.
+
+## [18.8.0] - 2026-10-07
+
+### Added
+
+- Added `ZipPackage` to `@oh-my-pi/pi-utils/ar` for lazily reading ZIP-based document packages with a configurable total-inflation limit, plus `DocxImage.readBytes()` for accessing raw DOCX image data.
 
 ### Changed
 
-- DOCX conversion inflates only the package members it reads ([#14709](https://github.com/can1357/oh-my-pi/pull/14709) by [@H4vC](https://github.com/H4vC))
-- Sped up Turndown HTML-to-Markdown on nested tables, long ordered lists and large pages ([#14668](https://github.com/can1357/oh-my-pi/pull/14668) by [@H4vC](https://github.com/H4vC))
-- Sped up Readability extraction ~5–10× on large pages and reduced parsed-DOM heap ~30% ([#14668](https://github.com/can1357/oh-my-pi/pull/14668) by [@H4vC](https://github.com/H4vC))
-- Sped up markdown lexing (`@oh-my-pi/pi-utils/marked`) from quadratic to linear in document size (199 KB: 1.6 s → 35 ms) ([#14667](https://github.com/can1357/oh-my-pi/pull/14667) by [@H4vC](https://github.com/H4vC))
-- Reduced vterm memory use ~5× and sped up parsing ~4× and resize reflow ~7× ([#14666](https://github.com/can1357/oh-my-pi/pull/14666) by [@H4vC](https://github.com/H4vC))
-- Sped up terminal styling, streaming tool-argument parsing and log writes ([#14665](https://github.com/can1357/oh-my-pi/pull/14665) by [@H4vC](https://github.com/H4vC))
+- Improved DOCX conversion to inflate only the package contents it needs, reducing unnecessary work and memory use.
+- Improved performance across HTML-to-Markdown conversion, Readability extraction, Markdown lexing, terminal emulation, terminal styling, streaming tool-argument parsing, and log writing. Large-page processing and terminal workloads now use substantially less time and memory.
 
 ### Fixed
 
-- Fixed `ptree` retaining all drained stderr for a child's lifetime, so long-lived children (LSP, DAP, daemons) no longer grow the heap ([#14664](https://github.com/can1357/oh-my-pi/pull/14664) by [@H4vC](https://github.com/H4vC))
-- Fixed `ConcatSink` readers (`readLines`/`readJsonl`/SSE) holding peak-size buffers for the stream's life ([#14664](https://github.com/can1357/oh-my-pi/pull/14664) by [@H4vC](https://github.com/H4vC))
-- Fixed unbounded growth of the `prompt.compile` template cache ([#14664](https://github.com/can1357/oh-my-pi/pull/14664) by [@H4vC](https://github.com/H4vC))
-- Fixed `fetchWithRetry` leaking the discarded response body when retrying a 429/5xx ([#14664](https://github.com/can1357/oh-my-pi/pull/14664) by [@H4vC](https://github.com/H4vC))
+- Fixed memory growth in long-lived child processes, streaming readers, prompt template compilation, and retried HTTP requests by releasing buffers, cache entries, and discarded response bodies promptly.
+- Fixed prompt templates rejecting `{{else if …}}` chains as unclosed blocks; a chain now closes with its opening block's single closing tag, as in Handlebars.
 
 ## [18.6.3] - 2026-10-06
 

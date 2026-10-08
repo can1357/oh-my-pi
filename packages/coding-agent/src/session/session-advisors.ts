@@ -510,6 +510,8 @@ export interface SessionAdvisorsHost {
 		phase: CodexCompactionContext["phase"];
 	}): CodexCompactionContext;
 	sessionId(): string;
+	/** Put an advisor's provider session under the primary session's account pools. */
+	restrictOAuthAccounts(providerSessionId: string): void;
 }
 
 /**
@@ -980,14 +982,24 @@ export class SessionAdvisors {
 		this.#advisorInterruptImmuneTurnStart = this.#advisorPrimaryTurnsCompleted + 1;
 	}
 
+	/**
+	 * One advisor's provider session id under the active primary conversation.
+	 * The primary's account pools follow it: an advisor is part of that session.
+	 */
+	#advisorProviderSessionId(slug: string): string | undefined {
+		const providerSessionId = getOrCreateAdvisorProviderSessionId(
+			this.#advisorProviderSessionIds,
+			this.#host.sessionId(),
+			slug,
+		);
+		if (providerSessionId) this.#host.restrictOAuthAccounts(providerSessionId);
+		return providerSessionId;
+	}
+
 	/** Rebind one advisor to the active primary conversation's provider identity. */
 	#refreshAdvisorProviderIdentity(advisor: ActiveAdvisor): void {
 		const primaryProviderSessionId = this.#host.sessionId();
-		const providerSessionId = getOrCreateAdvisorProviderSessionId(
-			this.#advisorProviderSessionIds,
-			primaryProviderSessionId,
-			advisor.slug,
-		);
+		const providerSessionId = this.#advisorProviderSessionId(advisor.slug);
 		advisor.providerSessionId = providerSessionId;
 		advisor.agent.sessionId = providerSessionId;
 		advisor.agent.promptCacheKey = this.#host.agent.promptCacheKey ?? providerSessionId;
@@ -1316,11 +1328,7 @@ export class SessionAdvisors {
 			const advisorSessionLabel = slug
 				? `${primaryProviderSessionId}-advisor-${slug}`
 				: `${primaryProviderSessionId}-advisor`;
-			const advisorProviderSessionId = getOrCreateAdvisorProviderSessionId(
-				this.#advisorProviderSessionIds,
-				primaryProviderSessionId,
-				slug,
-			);
+			const advisorProviderSessionId = this.#advisorProviderSessionId(slug);
 			const appendOnlyContext = new AppendOnlyContextManager();
 
 			// Thread the primary's telemetry into the advisor loop so the advisor
@@ -2399,11 +2407,7 @@ export class SessionAdvisors {
 			// No compaction candidates, fallback to re-prime
 			return true;
 		}
-		const advisorProviderSessionId = getOrCreateAdvisorProviderSessionId(
-			this.#advisorProviderSessionIds,
-			this.#host.sessionId(),
-			advisor.slug,
-		);
+		const advisorProviderSessionId = this.#advisorProviderSessionId(advisor.slug);
 		// Advisors no longer retain the pre-compaction originals. Prepare opaque
 		// history only for an eligible native writer, independently of whether the
 		// advisor reader itself can create a new compaction. Without such a writer,

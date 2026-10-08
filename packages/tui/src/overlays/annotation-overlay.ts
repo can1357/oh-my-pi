@@ -42,7 +42,15 @@ import { matchesAppExternalEditor } from "../keybinding-matchers";
 import type { KeyName } from "../key-hint-format";
 import { item, keyed, node, row as rowNode, span, text } from "../native/describe";
 import { leafKey, type NativeChild, type NativeNode, type NativeUiEvent } from "../native/node";
-import { hintsRow, itemIndex, type NativeHint, noteSpans, overlayCard, selectList } from "../native/overlay";
+import {
+	escCloseButton,
+	hintsRow,
+	itemIndex,
+	type NativeHint,
+	noteSpans,
+	overlayCard,
+	selectList,
+} from "../native/overlay";
 
 function fit(text: string, width: number): string {
 	if (width <= 0) return "";
@@ -317,7 +325,7 @@ export class AnnotationOverlay implements Focusable {
 			return;
 		}
 		if (this.#keybindings.matches(data, "tui.select.cancel")) {
-			this.#finish(undefined);
+			this.#escape();
 			return;
 		}
 		if (data === "A" && (this.#focus === "files" || this.#focus === "diff")) {
@@ -367,6 +375,13 @@ export class AnnotationOverlay implements Focusable {
 		} else {
 			(this.#callbacks as CodeReviewOverlayCallbacks).onComplete(result as CodeReviewOverlayResult | undefined);
 		}
+	}
+
+	/** Esc, by state: leave the note chooser, drop the note draft, else close the review. */
+	#escape(): void {
+		if (this.#annotationChooser) this.#annotationChooser = undefined;
+		else if (this.#annotating) this.#cancelAnnotation();
+		else this.#finish(undefined);
 	}
 
 	#cycleFocus(direction: number): void {
@@ -1263,7 +1278,10 @@ export class AnnotationOverlay implements Focusable {
 			role: this.#textSource ? "omp.overlay.annotateText.lines" : "omp.overlay.codeReview.diff",
 			tone: this.#focus === "diff" ? "accent" : undefined,
 		});
-		const main = node("col", { grow: 1 }, [this.#describeHeader(), lines], "main");
+		// The header row ends in a clickable `esc` at the top right.
+		const title = node("col", { grow: 1, min: { w: 0 } }, [this.#describeHeader()], "title");
+		const head = keyed(rowNode([title, escCloseButton()], { gap: "md", align: "center" }), "head");
+		const main = node("col", { grow: 1 }, [head, lines], "main");
 		if (this.#sidebarShown) {
 			const files = selectList(
 				"files",
@@ -1312,6 +1330,10 @@ export class AnnotationOverlay implements Focusable {
 
 	handleNativeEvent(event: NativeUiEvent): void {
 		if (this.#finished || this.#externalOperation) return;
+		if (event.type === "action" && event.act === "close") {
+			this.#escape();
+			return;
+		}
 		if (event.type !== "select" && event.type !== "activate") return;
 		const activate = event.type === "activate";
 		const leaf = leafKey(event.key);

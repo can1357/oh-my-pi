@@ -6,10 +6,30 @@
 
 - Added `quotaPercent` and `overageUsd` to `Usage.credits` for providers that report each turn's plan-quota share and overage charge ([#14759](https://github.com/can1357/oh-my-pi/pull/14759) by [@will-bogusz](https://github.com/will-bogusz))
 
+## [18.8.3] - 2026-10-07
+
+### Added
+
+- Added Claude Haiku 5.5 with adaptive thinking (low through max effort), image input, a 1M-token context window, 128K output, and its tiered pricing above 100K input tokens.
+
+## [18.8.2] - 2026-10-07
+
+### Fixed
+
+- Fixed Anthropic requests carrying too many inline screenshot bytes by exposing a provider image-byte budget, applied only on the official endpoint ([#14453](https://github.com/can1357/oh-my-pi/issues/14453)).
+
+## [18.8.1] - 2026-10-07
+
+### Fixed
+
+- Fixed Codex Fast (`priority`) pricing to use OpenAI’s 2.5× included-usage rate for supported models, excluding GPT-5.5 and GPT-6 Astra.
+- Fixed GitHub Copilot models with tier-specific prompt limits incorrectly defaulting to the long-context window.
+
+## [18.8.0] - 2026-10-07
+
 ### Changed
 
-- Sped up model cache reads from `models.db` (~6× faster for large rows) ([#14676](https://github.com/can1357/oh-my-pi/pull/14676) by [@H4vC](https://github.com/H4vC))
-- Sped up repeated catalog-wide model builds (~88→38 ms) ([#14676](https://github.com/can1357/oh-my-pi/pull/14676) by [@H4vC](https://github.com/H4vC))
+- Improved catalog performance by speeding up model cache reads and repeated catalog-wide model builds, especially for large catalogs.
 
 ## [18.7.0] - 2026-10-06
 

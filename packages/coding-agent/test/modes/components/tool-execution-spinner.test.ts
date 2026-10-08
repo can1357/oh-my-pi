@@ -782,7 +782,10 @@ describe("ToolExecutionComponent live preview spinners", () => {
 				ui: { requestRender: () => {} },
 				chatContainer,
 				resetObserverRegistry: () => {},
-				eventController: { takeDisplaceableComponents: () => [displaceableBlock], resetTranscriptAnchors: () => {} },
+				eventController: {
+					takeDisplaceableComponents: () => [displaceableBlock],
+					resetTranscriptAnchors: () => {},
+				},
 				renderInitialMessages: (options?: { clearTerminalHistory?: boolean }) =>
 					uiHelpers.renderInitialMessages(options),
 				renderSessionContext: (context: unknown, options: unknown) =>

@@ -204,9 +204,13 @@ describe("resource links in chat markdown", () => {
 		const file = path.join(tempDir, "gone.txt");
 		await Bun.write(file, "x");
 		const text = "[Gone](gone.txt)";
-		expect([...(await resolveMarkdownLinkHrefs(terminalCaps.getMarkdownLinkUrls(text), { cwd: tempDir })).keys()]).toEqual(["gone.txt"]);
+		expect([
+			...(await resolveMarkdownLinkHrefs(terminalCaps.getMarkdownLinkUrls(text), { cwd: tempDir })).keys(),
+		]).toEqual(["gone.txt"]);
 		await fs.rm(file);
-		expect([...(await resolveMarkdownLinkHrefs(terminalCaps.getMarkdownLinkUrls(text), { cwd: tempDir })).keys()]).toEqual([]);
+		expect([
+			...(await resolveMarkdownLinkHrefs(terminalCaps.getMarkdownLinkUrls(text), { cwd: tempDir })).keys(),
+		]).toEqual([]);
 	});
 
 	it("leaves missing, escaping, remote, and non-link destinations unexpanded", async () => {
