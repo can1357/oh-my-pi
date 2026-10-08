@@ -24,6 +24,7 @@ import {
 import { type EditMode, getEditInputPaths } from "@oh-my-pi/pi-tui/tools/edit";
 import {
 	formatModelStringWithRouting,
+	resolveAgentAdvisorRolePattern,
 	resolveAgentAdvisorSelection,
 	resolveAgentPrewalkPattern,
 	resolveConfiguredModelPatterns,
@@ -146,7 +147,11 @@ import {
 } from "../session/settings";
 import { cfgDisabledProviders } from "../config/model-settings";
 import { getRetryFallbackRole, installRetryFallbackRole } from "../session/retry-fallback-chains";
-import { cfgCompactionThresholdPercent, cfgCompactionThresholdTokens } from "../session/context-settings";
+import {
+	cfgCompactionModelThresholdsEnabled,
+	cfgCompactionThresholdPercent,
+	cfgCompactionThresholdTokens,
+} from "../session/context-settings";
 
 export type { YieldItem } from "@oh-my-pi/pi-tui/tools/task";
 
@@ -1063,17 +1068,26 @@ function inheritedSubagentServiceTiers(
 /**
  * Compaction thresholds of the root (non-subagent) settings a subagent chain
  * started from. Per-agent `task.agentCompactionThresholdOverrides` entries
- * replace `compaction.threshold*` only for the agent they name; every other
- * descendant resolves against these root values, not an ancestor's override.
+ * replace `compaction.threshold*` and switch off `compaction.modelThresholds`
+ * only for the agent they name; every other descendant resolves against these
+ * root values, not an ancestor's override.
  */
 const kRootCompactionThresholds = Symbol("task.rootCompactionThresholds");
 
-/** Settings from {@link createSubagentSettings}, tagged with its chain's root compaction thresholds. */
-interface SubagentChainSettings extends Settings {
-	[kRootCompactionThresholds]?: CompactionThresholdPair;
+interface RootCompactionThresholds extends CompactionThresholdPair {
+	modelThresholdsEnabled: boolean;
 }
 
-/** Settings overrides applying an exact-name compaction threshold entry to one subagent. */
+/** Settings from {@link createSubagentSettings}, tagged with its chain's root compaction thresholds. */
+interface SubagentChainSettings extends Settings {
+	[kRootCompactionThresholds]?: RootCompactionThresholds;
+}
+
+/**
+ * Settings overrides applying an exact-name compaction threshold entry to one
+ * subagent. The agent entry outranks `compaction.modelThresholds`, including
+ * entries added while the agent runs, so model entries are switched off for it.
+ */
 export function compactionThresholdSettings(
 	threshold: CompactionThresholdPair | undefined,
 ): Readonly<Record<string, unknown>> | undefined {
@@ -1082,6 +1096,7 @@ export function compactionThresholdSettings(
 		: {
 				"compaction.thresholdPercent": threshold.thresholdPercent,
 				"compaction.thresholdTokens": threshold.thresholdTokens,
+				"compaction.modelThresholdsEnabled": false,
 			};
 }
 
@@ -1102,10 +1117,15 @@ export function createSubagentSettings(
 	const rootThresholds = inheritedRootThresholds ?? {
 		thresholdPercent: cfgCompactionThresholdPercent.get(baseSettings),
 		thresholdTokens: cfgCompactionThresholdTokens.get(baseSettings),
+		modelThresholdsEnabled: cfgCompactionModelThresholdsEnabled.get(baseSettings),
 	};
 	// Every other setting reads through to the parent live; writes on the overlay stay local.
 	const subagentSettings: SubagentChainSettings = baseSettings.overlay({
-		...compactionThresholdSettings(inheritedRootThresholds),
+		...(inheritedRootThresholds && {
+			"compaction.thresholdPercent": inheritedRootThresholds.thresholdPercent,
+			"compaction.thresholdTokens": inheritedRootThresholds.thresholdTokens,
+			"compaction.modelThresholdsEnabled": inheritedRootThresholds.modelThresholdsEnabled,
+		}),
 		// A subagent's thinking level is chosen at spawn (agent definition, `effort`, or this
 		// snapshot of the parent default); a later parent default edit must not re-steer it.
 		defaultThinkingLevel: cfgDefaultThinkingLevel.get(baseSettings),
@@ -3738,7 +3758,7 @@ async function refreshSubagentIrcRoot(
 interface SubagentSettingsRecipe {
 	parent: Settings;
 	layers: OverlayLayers;
-	rootThresholds: CompactionThresholdPair | undefined;
+	rootThresholds: RootCompactionThresholds | undefined;
 }
 
 function captureSubagentSettings(parent: Settings, settings: SubagentChainSettings): SubagentSettingsRecipe {
@@ -3898,12 +3918,17 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 	// `task.agentAdvisor` settings override (agent name → "on"/"off"/model
 	// pattern) pairs the spawned session with an advisor. Subagents default to
 	// no advisor (createSubagentSettings forces `advisor.enabled` off); an
-	// explicit model pattern lands on the child's `modelRoles.advisor` so role
-	// aliases and `:level` suffixes resolve inside the spawned session.
+	// explicit model pattern is expanded against this owner's roles (a nested
+	// spawn's owner is its parent subagent) and lands on the child's
+	// `modelRoles.advisor`. The expanded pattern is also what the session
+	// contract persists, so cold revival under root settings reuses it.
 	const advisorSelection = resolveAgentAdvisorSelection({
 		settingsOverride: cfgTaskAgentAdvisor.get(settings)[agent.name],
 		agentAdvisor: agent.advisor,
 	});
+	const advisorRolePattern = advisorSelection?.model
+		? resolveAgentAdvisorRolePattern(advisorSelection.model, settings)
+		: undefined;
 	const subagentSettings = createSubagentSettings(
 		settings,
 		{
@@ -3912,8 +3937,8 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			// Isolated runs must not expose roots outside the worktree.
 			...(worktree !== undefined ? { "workspace.additionalDirectories": [] } : undefined),
 			...(advisorSelection ? { "advisor.enabled": true } : undefined),
-			...(advisorSelection?.model
-				? { modelRoles: { ...settings.getModelRoles(), advisor: advisorSelection.model } }
+			...(advisorRolePattern
+				? { modelRoles: { ...settings.getModelRoles(), advisor: advisorRolePattern } }
 				: undefined),
 		},
 		options.parentServiceTier,
@@ -4486,7 +4511,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				readOnly: isReadOnlyAgent(agent),
 				spawns: spawnsEnv,
 				readSummarize: agent.readSummarize,
-				advisor: advisorSelection ? (advisorSelection.model ?? "on") : undefined,
+				advisor: advisorSelection ? (advisorRolePattern ?? "on") : undefined,
 				compactionThreshold: options.compactionThresholdOverride,
 				outputSchema,
 				outputSchemaMode: options.outputSchemaMode,
