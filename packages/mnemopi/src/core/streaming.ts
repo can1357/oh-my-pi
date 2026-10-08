@@ -345,20 +345,30 @@ export class DeltaSync {
 		table: DeltaTable = "working_memory",
 	): { inserted: number; updated: number; skipped: number; filtered_keys: number } {
 		assertDeltaTable(table);
+		const lastRowid = this.getCheckpoint(peerId, table)?.lastRowid ?? 0;
 		let inserted = 0,
 			updated = 0,
 			skipped = 0,
 			filteredKeys = 0,
-			maxRowid = 0;
+			maxRowid = lastRowid;
 		const qname = QUALIFIED_TABLE_NAMES[table];
+		const appliedRowids = new Map<string, number>();
 		for (const row of delta) {
+			const remoteRowid = row.rowid;
+			const hasRemoteRowid = typeof remoteRowid === "number" && Number.isSafeInteger(remoteRowid) && remoteRowid > 0;
+			if (hasRemoteRowid && remoteRowid <= lastRowid) {
+				skipped++;
+				continue;
+			}
 			const id = row.id;
 			if (typeof id !== "string" || id.length === 0) {
 				skipped++;
 				continue;
 			}
-			const remoteRowid = typeof row.rowid === "number" ? row.rowid : 0;
-			if (remoteRowid > maxRowid) maxRowid = remoteRowid;
+			if (hasRemoteRowid && remoteRowid <= (appliedRowids.get(id) ?? 0)) {
+				skipped++;
+				continue;
+			}
 			const exists = this.db.query(`SELECT 1 FROM ${qname} WHERE id = ?`).get(id) !== null;
 			if (exists) {
 				const entries: [string, SQLQueryBindings][] = [];
@@ -397,6 +407,10 @@ export class DeltaSync {
 				const params: SQLQueryBindings[] = entries.map(([, value]) => value);
 				this.db.run(`INSERT INTO ${qname} (${columns.join(", ")}) VALUES (${placeholders})`, params);
 				inserted++;
+			}
+			if (hasRemoteRowid) {
+				appliedRowids.set(id, remoteRowid);
+				maxRowid = Math.max(maxRowid, remoteRowid);
 			}
 		}
 		this.saveCheckpoint(
