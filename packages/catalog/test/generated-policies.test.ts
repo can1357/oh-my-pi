@@ -315,31 +315,6 @@ describe("generated model policies", () => {
 		});
 	});
 
-	it("bands Claude Haiku 5.5 at 100K input tokens on non-Anthropic hosts from their own list price", () => {
-		const bedrock = buildModel(
-			createSpec({
-				id: "anthropic.claude-haiku-5-5",
-				api: "bedrock-converse-stream",
-				provider: "amazon-bedrock",
-				contextWindow: 1_000_000,
-				cost: { input: 0.2, output: 1, cacheRead: 0.02, cacheWrite: 0.25 },
-			}),
-		);
-		expect(bedrock.cost.longContext).toEqual({
-			inputThreshold: 100_000,
-			input: 1,
-			output: 5,
-			cacheRead: 0.1,
-			cacheWrite: 1.25,
-		});
-
-		// Zero-priced subscription rows have no band, so no 100K window cap.
-		const copilot = buildModel(
-			createSpec({ id: "claude-haiku-5.5", api: "anthropic-messages", provider: "github-copilot" }),
-		);
-		expect(copilot.cost.longContext).toBeUndefined();
-	});
-
 	it("preserves QwenCloud's provider-authored qwen3.8 effort ladders", () => {
 		const models: ModelSpec<Api>[] = [
 			createSpec({

@@ -9,7 +9,7 @@
  * through {@link buildAnthropicAuthConfig} for header/URL shaping.
  */
 import { $env } from "@oh-my-pi/pi-utils";
-import { buildAnthropicHeaders, mergeHeaders, resolveAnthropicCustomHeadersForBaseUrl } from "../providers/anthropic";
+import { buildAnthropicHeaders, resolveAnthropicCustomHeadersForBaseUrl } from "../providers/anthropic";
 import { normalizeAnthropicBaseUrl } from "../providers/anthropic-state";
 import { isFoundryEnabled } from "./foundry";
 
@@ -43,12 +43,6 @@ export function isOAuthToken(apiKey: string): boolean {
 	return apiKey.includes("sk-ant-oat");
 }
 
-/** Optional request-shaping overrides for an already-resolved Anthropic credential. */
-export interface AnthropicAuthOptions {
-	/** Override token detection; false explicitly disables OAuth-style request shaping. */
-	isOAuth?: boolean;
-}
-
 /**
  * Build an {@link AnthropicAuthConfig} from an already-resolved API key.
  *
@@ -57,50 +51,32 @@ export interface AnthropicAuthOptions {
  * env-derived base; pass `undefined` to fall back to FOUNDRY/ANTHROPIC env
  * resolution and finally `DEFAULT_BASE_URL`.
  *
- * `options.isOAuth` defaults to token detection. Pass the selected model's
- * `isOAuth` to match the streaming path, which lets the model override the
- * prefix (custom `anthropic-messages` providers default to OAuth shaping).
+ * `isOAuth` is derived from the token prefix so the helper stays pure: callers
+ * never have to thread the OAuth flag through their own resolution logic.
  */
-export function buildAnthropicAuthConfig(
-	apiKey: string,
-	baseUrl?: string,
-	options: AnthropicAuthOptions = {},
-): AnthropicAuthConfig {
+export function buildAnthropicAuthConfig(apiKey: string, baseUrl?: string): AnthropicAuthConfig {
 	return {
 		apiKey,
 		baseUrl: normalizeBaseUrl(baseUrl) ?? resolveAnthropicBaseUrlFromEnv() ?? DEFAULT_BASE_URL,
-		isOAuth: options.isOAuth ?? isOAuthToken(apiKey),
+		isOAuth: isOAuthToken(apiKey),
 	};
-}
-
-/** Configured headers and fingerprint override policy for Anthropic hosted web search. */
-export interface AnthropicSearchHeaderOptions {
-	/** The selected model's configured headers (`ModelRegistry.resolveModelHeaders`). */
-	modelHeaders?: Record<string, string>;
-	/** The selected model's `compat.allowAnthropicHeaderOverrides`. */
-	allowAnthropicHeaderOverrides?: boolean;
 }
 
 /**
  * Builds HTTP headers for Anthropic API requests (search variant).
  *
- * Model headers and `ANTHROPIC_CUSTOM_HEADERS` (when the resolver deems them
- * applicable: Foundry mode, or a non-Anthropic base URL such as an enterprise
- * gateway) go through the same case-insensitive merge and enforced-header
- * filtering as the streaming path, so web search behaves identically.
+ * Forwards `ANTHROPIC_CUSTOM_HEADERS` when the resolver deems them applicable
+ * (Foundry mode, or a non-Anthropic base URL — typically an enterprise
+ * gateway), matching the streaming path so web search behaves identically.
  */
-export function buildAnthropicSearchHeaders(
-	auth: AnthropicAuthConfig,
-	options: AnthropicSearchHeaderOptions = {},
-): Record<string, string> {
+export function buildAnthropicSearchHeaders(auth: AnthropicAuthConfig): Record<string, string> {
 	return buildAnthropicHeaders({
 		apiKey: auth.apiKey,
 		baseUrl: auth.baseUrl,
 		isOAuth: auth.isOAuth,
 		extraBetas: ["web-search-2025-03-05"],
 		stream: false,
-		modelHeaders: mergeHeaders(options.modelHeaders, resolveAnthropicCustomHeadersForBaseUrl(auth.baseUrl)),
-		allowAnthropicHeaderOverrides: options.allowAnthropicHeaderOverrides,
+		modelHeaders: resolveAnthropicCustomHeadersForBaseUrl(auth.baseUrl),
 	});
 }
 

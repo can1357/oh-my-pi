@@ -1514,58 +1514,6 @@ describe("RemoteAuthCredentialStore + AuthStorage integration", () => {
 		}
 	});
 
-	test("a client's single-provider usage refresh leaves the broker's other providers cached", async () => {
-		const credential = serverStore!.listAuthCredentials("anthropic")[0];
-		if (credential?.credential.type !== "oauth") throw new Error("expected OAuth credential");
-		serverStore!.updateAuthCredential(credential.id, {
-			...credential.credential,
-			expires: Date.now() + 3_600_000,
-		});
-		await serverStorage!.credentials.reload();
-
-		let calls = 0;
-		const fetchSpy = vi.spyOn(claudeUsage.claudeUsageProvider, "fetchUsage").mockImplementation(async () => {
-			calls += 1;
-			if (calls > 1) return null;
-			return {
-				provider: "anthropic",
-				fetchedAt: Date.now(),
-				limits: [
-					{
-						id: "anthropic:5h",
-						label: "Claude 5 Hour",
-						scope: { provider: "anthropic", windowId: "5h" },
-						amount: { used: 80, limit: 100, unit: "percent" },
-						status: "ok",
-					},
-				],
-				metadata: { accountId: "account-1", email: "a@example.com" },
-			};
-		});
-		const brokerClient = new AuthBrokerClient({ url: handle!.url, token });
-		const initialResult = await brokerClient.fetchSnapshot();
-		if (initialResult.status !== 200) throw new Error("expected snapshot");
-		const remoteStore = new RemoteAuthCredentialStore({
-			client: brokerClient,
-			initialSnapshot: initialResult.snapshot,
-		});
-		const clientStorage = new AuthStorage(remoteStore);
-		await clientStorage.credentials.reload();
-		try {
-			expect(await clientStorage.usage.reports()).toHaveLength(1);
-			await clientStorage.usage.invalidate("openai-codex");
-			const reports = await clientStorage.usage.reports();
-			expect(reports?.map(report => report.provider)).toEqual(["anthropic"]);
-			expect(fetchSpy).toHaveBeenCalledTimes(1);
-
-			await clientStorage.usage.invalidate("anthropic");
-			expect(await clientStorage.usage.reports()).toEqual([]);
-			expect(fetchSpy).toHaveBeenCalledTimes(2);
-		} finally {
-			clientStorage.close();
-		}
-	});
-
 	test("broker returns an upgraded plan through a delayed serialized Codex refresh", async () => {
 		const accountIds = ["account-free", "account-upgraded", "account-other"];
 		const refreshStarted = new Map<string, PromiseWithResolvers<void>>();

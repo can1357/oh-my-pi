@@ -262,7 +262,7 @@ export class ResetCredits implements ResetsApi {
 				resetSpentCredentialId: access.credentialId,
 			});
 			if (this.#deps.store.invalidateUsageCache) {
-				await this.#deps.store.invalidateUsageCache(provider, options.signal).catch(err => {
+				await this.#deps.store.invalidateUsageCache(options.signal).catch(err => {
 					logger.debug("Failed to notify store of stale usage", { err });
 				});
 			}

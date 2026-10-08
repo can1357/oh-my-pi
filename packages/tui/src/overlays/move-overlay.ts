@@ -15,8 +15,7 @@ import { formatKeyHint } from "../app-keybindings";
 import { editorKey, editorKeys } from "../chrome/keybinding-hints";
 import type { NativeNode, NativeUiEvent } from "../native/node";
 import { node, span } from "../native/describe";
-import { actionBar, actionButton, actionHint, overlayCard, statusHintsRow } from "../native/overlay";
-import { getKeybindings } from "../keybindings";
+import { actionHint, overlayCard, statusHintsRow } from "../native/overlay";
 
 export interface MoveOverlayResult {
 	directory: string;
@@ -123,7 +122,12 @@ export class MoveOverlay implements Component, Focusable {
 			return;
 		}
 		if (matchesKey(data, Key.tab)) {
-			this.#accept();
+			const selected = this.#results[this.#selectedIndex];
+			if (selected) {
+				this.#field.setValue(selected.value);
+				this.#selectedIndex = 0;
+				this.#updateResults();
+			}
 			return;
 		}
 		const before = this.#field.getValue();
@@ -188,28 +192,19 @@ export class MoveOverlay implements Component, Focusable {
 		);
 		const hints = statusHintsRow(
 			[span("Type to filter", "dim")],
-			[actionHint(["tui.select.up", "tui.select.down"], "navigate")],
+			[
+				actionHint(["tui.select.up", "tui.select.down"], "navigate"),
+				{ keys: ["tab"], label: "accept" },
+				{ keys: ["enter"], label: "confirm" },
+				actionHint("tui.select.cancel", "cancel"),
+			],
 		);
-		// Accept, Confirm and Cancel run what Tab, Enter and Esc run.
-		const actions = actionBar([
-			actionButton("Accept", "accept", { keys: "tab" }),
-			null,
-			// The bound cancel key; Esc also cancels when it is unbound.
-			actionButton("Cancel", "cancel", { keys: getKeybindings().getKeys("tui.select.cancel")[0] ?? "escape" }),
-			actionButton("Confirm", "confirm", { keys: "enter", tone: "accent" }),
-		]);
-		const described = overlayCard("omp.dialog.move", "Move to directory", [this.#field, list, hints, actions]);
+		const described = overlayCard("omp.dialog.move", "Move to directory", [this.#field, list, hints]);
 		this.#native = { revision: this.#revision, node: described };
 		return described;
 	}
 
 	handleNativeEvent(event: NativeUiEvent): void {
-		if (event.type === "action") {
-			if (event.act === "accept") this.#accept();
-			else if (event.act === "confirm") this.#field.submit();
-			else if (event.act === "cancel") this.#done(undefined);
-			return;
-		}
 		if (event.type !== "select" && event.type !== "activate") return;
 		const index = this.#results.findIndex(result => result.value === event.item);
 		if (index === -1) return;
@@ -219,15 +214,6 @@ export class MoveOverlay implements Component, Focusable {
 		}
 		// Enter submits the field, which confirms the highlighted suggestion.
 		if (event.type === "activate") this.#field.submit();
-	}
-
-	/** Tab: fill the field with the highlighted suggestion. */
-	#accept(): void {
-		const selected = this.#results[this.#selectedIndex];
-		if (!selected) return;
-		this.#field.setValue(selected.value);
-		this.#selectedIndex = 0;
-		this.#updateResults();
 	}
 
 	invalidate(): void {

@@ -5,7 +5,6 @@ import type { UsageReport } from "@oh-my-pi/pi-ai";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import {
 	buildRedactionMap,
-	collectHistoryIdentityStrings,
 	computeProviderWindowStats,
 	formatUsageBreakdown,
 	formatUsageHistory,
@@ -36,7 +35,6 @@ function makeLimit(opts: {
 	notes?: string[];
 	shared?: boolean;
 	sharedGroup?: string;
-	status?: UsageReport["limits"][number]["status"];
 }): UsageReport["limits"][number] {
 	return {
 		id: opts.id,
@@ -55,7 +53,6 @@ function makeLimit(opts: {
 				: undefined,
 		amount: { unit: "percent", usedFraction: opts.usedFraction },
 		...(opts.notes ? { notes: opts.notes } : {}),
-		...(opts.status ? { status: opts.status } : {}),
 	};
 }
 
@@ -378,22 +375,6 @@ describe("collectUnreportedAccounts", () => {
 		expect(collectUnreportedAccounts([aliceReport], [alice, bob, orgOnly])).toEqual([bob]);
 	});
 
-	it("does not let one Antigravity account's report cover a sibling on the same Google project", () => {
-		const project = "aicode-consumers";
-		const alice: UsageAccountIdentity = {
-			provider: "google-antigravity",
-			type: "oauth",
-			email: "alice@example.test",
-			projectId: project,
-		};
-		const bob: UsageAccountIdentity = { ...alice, email: "bob@example.test" };
-		const aliceReport = {
-			...makeReport("google-antigravity", alice.email!, []),
-			metadata: { email: alice.email, projectId: project },
-		};
-		expect(collectUnreportedAccounts([aliceReport], [alice, bob])).toEqual([bob]);
-	});
-
 	it("keeps an org-less account covered by its own org-less report when org-scoped siblings exist", () => {
 		// Live incident shape: legacy org-less rows (pre-org-capture logins)
 		// beside fresh org-scoped logins. Every account fetched successfully —
@@ -535,72 +516,6 @@ describe("formatUsageBreakdown", () => {
 		);
 		const inheritedSection = text.slice(text.indexOf("inherited@example.test"));
 		expect(inheritedSection).toContain("policy: priority 0 · reserve 10% (global) · inside reserve · 5.0% left");
-	});
-
-	it("reports an exhausted account as exhausted rather than inside a 0% reserve", () => {
-		const report = makeReport("openai-codex", "team@example.test", [
-			makeLimit({ id: "5h", provider: "openai-codex", usedFraction: 1, durationMs: FIVE_HOURS, windowId: "5h" }),
-		]);
-		const policyOptions: UsagePolicyDiagnosticsOptions = {
-			globalReservePct: 10,
-			getAccountPolicy: () => ({
-				provider: "openai-codex",
-				account: { email: "team@example.test" },
-				priority: 10,
-				reservePct: 0,
-			}),
-		};
-
-		const text = stripVTControlCharacters(
-			formatUsageBreakdown([report], [], Date.now(), undefined, [], policyOptions),
-		);
-
-		expect(text).toContain("policy: priority 10 · reserve 0% (override) · exhausted · 0.0% left");
-	});
-
-	it("reports an account sitting exactly on its reserve as inside reserve", () => {
-		const reports = [
-			makeReport("openai-codex", "boundary@example.test", [
-				makeLimit({
-					id: "5h",
-					provider: "openai-codex",
-					usedFraction: 0.7,
-					durationMs: FIVE_HOURS,
-					windowId: "5h",
-				}),
-			]),
-		];
-		const policyOptions: UsagePolicyDiagnosticsOptions = {
-			globalReservePct: 10,
-			getAccountPolicy: () => ({
-				provider: "openai-codex",
-				account: { email: "boundary@example.test" },
-				reservePct: 30,
-			}),
-		};
-
-		const text = stripVTControlCharacters(
-			formatUsageBreakdown(reports, [], Date.now(), undefined, [], policyOptions),
-		);
-		const policyLine = text.split("\n").find(line => line.includes("policy:"));
-		expect(policyLine).toContain("· inside reserve ·");
-		expect(policyLine).toContain("30.0% left");
-	});
-
-	it("reports a provider-flagged exhausted window as exhausted even with fractional quota left", () => {
-		const report = makeReport("anthropic", "flagged@example.test", [
-			makeLimit({ id: "5h", usedFraction: 0.995, durationMs: FIVE_HOURS, windowId: "5h", status: "exhausted" }),
-		]);
-		const policyOptions: UsagePolicyDiagnosticsOptions = {
-			globalReservePct: 0,
-			getAccountPolicy: () => ({ provider: "anthropic", account: { email: "flagged@example.test" }, priority: 0 }),
-		};
-
-		const text = stripVTControlCharacters(
-			formatUsageBreakdown([report], [], Date.now(), undefined, [], policyOptions),
-		);
-
-		expect(text).toContain("policy: priority 0 · reserve 0% (global) · exhausted · 0.5% left");
 	});
 
 	it("marks reserve state unknown when a configured account has no transient usage report", () => {
@@ -752,92 +667,6 @@ describe("formatUsageBreakdown", () => {
 		expect(accountASection).toContain("not reported");
 		expect(accountBSection).toContain("Claude 7 Day (Fable)");
 		expect(accountBSection).toContain("60.0% used");
-	});
-
-	it("aligns rows by window when accounts report the same window under different limit ids", () => {
-		// A Codex account without a 5-hour window reports its 7-day one as `primary`.
-		const codexLimit = (key: "primary" | "secondary", window: "5 hours" | "7 days", usedFraction: number) =>
-			makeLimit({
-				id: `openai-codex:${key}`,
-				label: window,
-				provider: "openai-codex",
-				usedFraction,
-				durationMs: window === "5 hours" ? FIVE_HOURS : SEVEN_DAYS,
-				windowId: window,
-			});
-		const providerReports = [
-			makeReport("openai-codex", "weekly-only@example.test", [codexLimit("primary", "7 days", 0.07)]),
-			makeReport("openai-codex", "both-windows@example.test", [
-				codexLimit("primary", "5 hours", 1),
-				codexLimit("secondary", "7 days", 0.16),
-			]),
-		];
-
-		const text = stripVTControlCharacters(formatUsageBreakdown(providerReports, [], Date.now()));
-		const limitRows = text
-			.split("\n")
-			.map(line =>
-				line
-					.trim()
-					.replace(/\s+[█░·]+\s+/, " ")
-					.replace(/\s+/g, " "),
-			)
-			.filter(line => /^[●○] /.test(line) && !line.includes("@"));
-		expect(limitRows).toEqual([
-			// weekly-only@example.test
-			"○ 5 hours not reported",
-			"● 7 days 7.0% used",
-			// both-windows@example.test
-			"● 5 hours 100.0% used",
-			"● 7 days 16.0% used",
-		]);
-	});
-
-	it("keeps one row per window for accounts on different plans", () => {
-		const dailyQuota = (tier: string, usedFraction: number) => ({
-			...makeLimit({ id: "devin:quota:daily", label: "Daily Quota", provider: "devin", usedFraction }),
-			window: { id: "1d", label: "Daily Quota", durationMs: 24 * HOUR },
-			scope: { provider: "devin", windowId: "1d", tier },
-		});
-		const providerReports = [
-			makeReport("devin", "free@example.test", [dailyQuota("Free", 0.1)]),
-			makeReport("devin", "pro@example.test", [dailyQuota("Pro", 0.2)]),
-		];
-
-		const text = stripVTControlCharacters(formatUsageBreakdown(providerReports, [], Date.now()));
-		expect(text).toContain("Daily Quota (Free)");
-		expect(text).toContain("Daily Quota (Pro)");
-		expect(text).not.toContain("not reported");
-	});
-
-	it("keeps one row per tier when a report repeats a meter per tier in the same window", () => {
-		const tierUsage = (tier: string, usedFraction: number) => ({
-			...makeLimit({ id: `antigravity:${tier}`, label: "Usage", provider: "google-antigravity", usedFraction }),
-			window: { id: "5h", label: "5 hours", durationMs: FIVE_HOURS },
-			scope: { provider: "google-antigravity", windowId: "5h", tier },
-		});
-		const providerReports = [
-			makeReport("google-antigravity", "both@example.test", [tierUsage("Pro", 0.1), tierUsage("Longer Tier", 0.2)]),
-			makeReport("google-antigravity", "one@example.test", [tierUsage("Longer Tier", 0.3)]),
-		];
-
-		const text = stripVTControlCharacters(formatUsageBreakdown(providerReports, [], Date.now()));
-		const rows = text.split("\n").filter(line => /^\s+[●○] /.test(line) && !line.includes("@"));
-		expect(
-			rows.map(line =>
-				line
-					.trim()
-					.replace(/\s+[█░·]+\s+/, " ")
-					.replace(/\s+/g, " "),
-			),
-		).toEqual([
-			"● Usage (Pro) (5 hours) 10.0% used",
-			"● Usage (Longer Tier) (5 hours) 20.0% used",
-			"○ Usage (Pro) (5 hours) not reported",
-			"● Usage (Longer Tier) (5 hours) 30.0% used",
-		]);
-		// Bars start in the same column on every row.
-		expect(new Set(rows.map(line => line.search(/[█░·]/))).size).toBe(1);
 	});
 
 	it("redacts account labels through the provided map without leaking the originals", () => {
@@ -1167,42 +996,6 @@ describe("formatUsageHistory", () => {
 		const text = stripVTControlCharacters(formatUsageHistory(entries, SINCE, NOW, redaction));
 		expect(text).not.toContain("dummy.primary@example.test");
 		expect(text).toContain("du*");
-	});
-
-	it("qualifies Codex accounts that share an email the way the main view does", () => {
-		const shared = { provider: "openai-codex", email: "dummy.shared@example.test", limitId: "openai-codex:primary" };
-		const text = stripVTControlCharacters(
-			formatUsageHistory(
-				[
-					historyEntry(NOW - HOUR, 0.1, { ...shared, accountKey: "codex|team", accountId: "acct-team" }),
-					historyEntry(NOW - HOUR, 0.5, { ...shared, accountKey: "codex|pro", accountId: "acct-pro" }),
-					// Anthropic multi-org logins share email and account uuid; the main view's qualifier is Codex-only.
-					historyEntry(NOW - HOUR, 0.3, { accountKey: "anthropic|org-a", accountId: "uuid-user" }),
-					historyEntry(NOW - HOUR, 0.4, { accountKey: "anthropic|org-b", accountId: "uuid-user" }),
-				],
-				SINCE,
-				NOW,
-			),
-		);
-		const accountLines = text.split("\n").filter(line => line.startsWith("  ") && !line.startsWith("    "));
-		expect(accountLines.toSorted()).toEqual([
-			"  dummy.primary@example.test",
-			"  dummy.primary@example.test",
-			"  dummy.shared@example.test · acct-pro",
-			"  dummy.shared@example.test · acct-team",
-		]);
-	});
-
-	it("redacts the Codex account ids shown as same-email qualifiers", () => {
-		const shared = { provider: "openai-codex", email: "dummy.shared@example.test", limitId: "openai-codex:primary" };
-		const history = [
-			historyEntry(NOW - HOUR, 0.1, { ...shared, accountKey: "codex|team", accountId: "acct-team" }),
-			historyEntry(NOW - HOUR, 0.5, { ...shared, accountKey: "codex|pro", accountId: "acct-pro" }),
-		];
-		const redaction = buildRedactionMap(collectHistoryIdentityStrings(history));
-		const text = stripVTControlCharacters(formatUsageHistory(history, SINCE, NOW, redaction));
-		for (const secret of ["dummy.shared@example.test", "acct-team", "acct-pro"]) expect(text).not.toContain(secret);
-		for (const id of ["acct-team", "acct-pro"]) expect(text).toContain(redaction.get(id) ?? id);
 	});
 });
 

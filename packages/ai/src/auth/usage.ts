@@ -871,7 +871,7 @@ export class UsageService implements UsageApi {
 		await this.#deps.cache.clearReports(provider, () => this.#collectUsageRequests());
 
 		if (this.#deps.store.invalidateUsageCache) {
-			await this.#deps.store.invalidateUsageCache(provider, signal).catch(err => {
+			await this.#deps.store.invalidateUsageCache(signal).catch(err => {
 				logger.debug("Failed to notify store of stale usage", { err });
 			});
 		}

@@ -528,7 +528,8 @@ mod platform {
 		/// command line even after the pid is reused.
 		pub fn args(&self) -> Vec<String> {
 			sys::command_line(&self.handle)
-				.map_or_default(|command_line| sys::split_command_line(&command_line))
+				.map(|command_line| sys::split_command_line(&command_line))
+				.unwrap_or_default()
 		}
 
 		pub fn children(&self) -> Vec<Self> {

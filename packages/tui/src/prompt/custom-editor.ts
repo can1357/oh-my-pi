@@ -20,6 +20,7 @@ import type { DescribeContext, NativeNode, NativeUiEvent } from "../native/node"
 import type { ComposerFacts, ComposerFactsSource } from "../status-line/types";
 import { allowsModelMentions, allowsSkillTokens, SKILL_TOKEN_RE } from "./skill-tokens";
 import { expandModelMentionTags, MODEL_MENTION_RE, modelMentionToken } from "./model-mention-syntax";
+import { imageAttachmentSource } from "./image-source";
 import { isVideoPath } from "./video";
 import {
 	attachmentSgr,
@@ -479,8 +480,8 @@ export class CustomEditor extends Editor {
 				chips: ComposerChipDescriptor[];
 		  }
 		| undefined;
-	/** Host-wired producer of per-image chip targets (a file on disk, or a session blob copy);
-	 *  drives clickable chip tokens for restored drafts (esc-esc, `/tree`, branch). */
+	/** Host-wired producer of per-image `file://` links (session blob store); drives clickable
+	 *  chip tokens for restored drafts (esc-esc, `/tree`, branch). */
 	draftImageLinkMaterializer?: (images: readonly ImageContent[]) => Promise<(string | undefined)[] | undefined>;
 
 	/**
@@ -790,7 +791,7 @@ export class CustomEditor extends Editor {
 		if (!materialize || images.length === 0) return;
 		const links = await materialize(images);
 		if (!links || this.pendingImages !== images) return;
-		this.pendingImageLinks = links;
+		this.pendingImageLinks = images.map((image, index) => imageAttachmentSource(image)?.path ?? links[index]);
 		this.imageLinks = this.pendingImageLinks;
 		this.#requestShimmerRepaint?.();
 	}

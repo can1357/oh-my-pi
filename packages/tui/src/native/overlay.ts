@@ -119,19 +119,6 @@ export function actionButton(label: string, act: string, options: ActionButtonOp
 	);
 }
 
-/**
- * A bare `esc` keycap button for a view's top-right corner: a click sends
- * `act` (default `close`), which the component routes to its Esc path.
- */
-export function escCloseButton(act = "close", key = "esc-close"): NativeNode {
-	return node(
-		"row",
-		{ role: "omp.btn", align: "center", actions: { click: act }, title: `Close  ${formatTooltipKey("escape")}` },
-		[kbd("escape")],
-		key,
-	);
-}
-
 /** A row of {@link actionButton}s (role `omp.actions`); `null` entries become the spacer that end-aligns what follows. */
 export function actionBar(buttons: readonly (NativeNode | null)[], key = "actions"): NativeNode {
 	const children = buttons.map(button => button ?? node("spacer", { grow: 1 }));

@@ -12,35 +12,6 @@ function jobDir(): string {
 	return dir;
 }
 
-function writeEditResult(dir: string, taskId: string): void {
-	fs.writeFileSync(
-		path.join(dir, "result.json"),
-		JSON.stringify({
-			tasks: [
-				{
-					id: taskId,
-					name: "Rename symbol",
-					runs: [
-						{
-							runIndex: 0,
-							success: true,
-							duration: 1200,
-							tokens: { input: 100, output: 20, reasoning: 5 },
-						},
-					],
-				},
-			],
-			summary: {
-				totalRuns: 1,
-				successfulRuns: 1,
-				taskSuccessRate: 1,
-				editSuccessRate: 0.75,
-				totalTokens: { input: 100, output: 20 },
-			},
-		}),
-	);
-}
-
 afterEach(() => {
 	for (const dir of cleanups.splice(0)) fs.rmSync(dir, { recursive: true, force: true });
 });
@@ -48,7 +19,32 @@ afterEach(() => {
 describe("benchmark adapters", () => {
 	it("normalizes edit attempts, traces, tokens, and declared metrics", () => {
 		const dir = jobDir();
-		writeEditResult(dir, "rename-symbol");
+		fs.writeFileSync(
+			path.join(dir, "result.json"),
+			JSON.stringify({
+				tasks: [
+					{
+						id: "rename-symbol",
+						name: "Rename symbol",
+						runs: [
+							{
+								runIndex: 0,
+								success: true,
+								duration: 1200,
+								tokens: { input: 100, output: 20, reasoning: 5 },
+							},
+						],
+					},
+				],
+				summary: {
+					totalRuns: 1,
+					successfulRuns: 1,
+					taskSuccessRate: 1,
+					editSuccessRate: 0.75,
+					totalTokens: { input: 100, output: 20 },
+				},
+			}),
+		);
 
 		const snapshot = readBenchmarkSnapshot("edit", dir);
 		expect(snapshot.metrics).toEqual({ task_success_rate: 1, edit_success_rate: 0.75 });
@@ -58,14 +54,6 @@ describe("benchmark adapters", () => {
 			tracePath: path.join("result.dump", "rename-symbol", "run-1.md"),
 		});
 		expect([snapshot.tokIn, snapshot.tokOut]).toEqual([100, 20]);
-	});
-
-	it("links edit traces to the runner's dump file for task ids containing unsafe characters", () => {
-		const dir = jobDir();
-		writeEditResult(dir, "task/weird");
-
-		const snapshot = readBenchmarkSnapshot("edit", dir);
-		expect(snapshot.traces[0]?.tracePath).toBe(path.join("result.dump", "task_weird", "run-1.md"));
 	});
 
 	it("normalizes SnapCompact records and weighted quality metrics", () => {

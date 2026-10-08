@@ -55,16 +55,12 @@ function configuration() {
 
 describe("Codex Security cloud client", () => {
 	test("pins one account and refreshes the same credential once after a 401", async () => {
-		const resolutions: Array<{ forceRefresh: boolean; refreshReason?: string }> = [];
+		const resolutions: boolean[] = [];
 		const requests: Array<{ authorization: string | null; accountId: string | null }> = [];
 		const storage = {
 			oauth: {
-				accessById: async (
-					_provider: string,
-					credentialId: number,
-					options: { forceRefresh: boolean; refreshReason?: string },
-				) => {
-					resolutions.push({ forceRefresh: options.forceRefresh, refreshReason: options.refreshReason });
+				accessById: async (_provider: string, credentialId: number, options: { forceRefresh: boolean }) => {
+					resolutions.push(options.forceRefresh);
 					return {
 						ok: true as const,
 						accessToken: options.forceRefresh ? "refreshed-token" : "initial-token",
@@ -93,10 +89,7 @@ describe("Codex Security cloud client", () => {
 
 		const page = await client.listConfigurations();
 
-		expect(resolutions).toEqual([
-			{ forceRefresh: false, refreshReason: undefined },
-			{ forceRefresh: true, refreshReason: "auth-recovery" },
-		]);
+		expect(resolutions).toEqual([false, true]);
 		expect(requests).toEqual([
 			{ authorization: "Bearer initial-token", accountId: "workspace-a" },
 			{ authorization: "Bearer refreshed-token", accountId: "workspace-a" },

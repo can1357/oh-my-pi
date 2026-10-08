@@ -152,8 +152,8 @@ export interface UsageLedgerStore {
 
 /** Broker-delegated OAuth refresh and usage-report operations. */
 export interface CredentialUpstream {
-	/** Optional hook to notify the underlying store that usage reports (one provider's, when given) are stale. */
-	invalidateUsageCache(provider?: string, signal?: AbortSignal): Promise<void>;
+	/** Optional hook to notify the underlying store that usage report cache is stale. */
+	invalidateUsageCache(signal?: AbortSignal): Promise<void>;
 	/**
 	 * Optional store-supplied OAuth refresh. When present, `AuthStorage` uses
 	 * it before the per-provider local refresh path. `RemoteAuthCredentialStore`

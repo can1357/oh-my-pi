@@ -6,9 +6,7 @@ import type { OAuthController, OAuthCredentials } from "./types";
 
 const CURSOR_LOGIN_URL = "https://cursor.com/loginDeepControl";
 const CURSOR_POLL_URL = "https://api2.cursor.sh/auth/poll";
-const CURSOR_REFRESH_URL = "https://api2.cursor.sh/oauth/token";
-/** OAuth client the Cursor IDE renews its login session with. */
-const CURSOR_CLIENT_ID = "KbZUR41cY7W6zRSdpSUJ7I7mLYBKOCmB";
+const CURSOR_REFRESH_URL = "https://api2.cursor.sh/auth/exchange_user_api_key";
 const CURSOR_PROFILE_URL = "https://cursor.com/api/auth/me";
 const CURSOR_PROFILE_TIMEOUT_MS = 3_000;
 
@@ -120,11 +118,14 @@ export async function loginCursorHook(callbacks: OAuthController): Promise<OAuth
 	return withCursorAccountEmail(credentials, callbacks.fetch ?? fetch, callbacks.signal);
 }
 
-export async function refreshCursorToken(refreshToken: string): Promise<OAuthCredentials> {
+export async function refreshCursorToken(apiKeyOrRefreshToken: string): Promise<OAuthCredentials> {
 	const response = await fetch(CURSOR_REFRESH_URL, {
 		method: "POST",
-		headers: { "Content-Type": "application/json" },
-		body: JSON.stringify({ grant_type: "refresh_token", client_id: CURSOR_CLIENT_ID, refresh_token: refreshToken }),
+		headers: {
+			Authorization: `Bearer ${apiKeyOrRefreshToken}`,
+			"Content-Type": "application/json",
+		},
+		body: "{}",
 	});
 
 	if (!response.ok) {
@@ -135,27 +136,17 @@ export async function refreshCursorToken(refreshToken: string): Promise<OAuthCre
 		});
 	}
 
-	const data = (await response.json()) as { access_token?: string; refresh_token?: string; shouldLogout?: boolean };
-	// Cursor answers a session it will not renew with 200, an empty token and `shouldLogout`.
-	if (data.shouldLogout === true) {
-		throw new AIError.OAuthError("invalid_grant: Cursor ended this session; run /login cursor again", {
-			kind: "token-refresh",
-			provider: "cursor",
-		});
-	}
-	if (!data.access_token) {
-		throw new AIError.OAuthError("Cursor token refresh returned no access token", {
-			kind: "token-refresh",
-			provider: "cursor",
-		});
-	}
+	const data = (await response.json()) as {
+		accessToken: string;
+		refreshToken: string;
+	};
 
-	// Cursor's renewal answers only an access token; the IDE keeps its stored refresh token, so do the same
-	// unless a rotated one is returned.
+	const expiresAt = getTokenExpiry(data.accessToken);
+
 	return {
-		access: data.access_token,
-		refresh: data.refresh_token || refreshToken,
-		expires: getTokenExpiry(data.access_token),
+		access: data.accessToken,
+		refresh: data.refreshToken || apiKeyOrRefreshToken,
+		expires: expiresAt,
 	};
 }
 

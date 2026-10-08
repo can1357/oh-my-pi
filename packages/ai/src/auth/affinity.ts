@@ -360,25 +360,19 @@ export class SessionAffinity implements SessionsApi {
 	}
 
 	/**
-	 * Copy stored credential affinities from one live session to another.
+	 * Copy every stored credential affinity from one live session to another.
 	 *
 	 * The target receives its own sticky entries, so request resolution, usage
 	 * blocking, credential rotation, metadata, and persisted pins all continue
 	 * through the target session id without retaining a live dependency on the
-	 * source session. `include` limits the copy to the providers it accepts,
-	 * given whether the source's affinity is an explicit user pin.
+	 * source session.
 	 */
-	inherit(
-		sourceSessionId: string,
-		targetSessionId: string,
-		include?: (provider: string, explicit: boolean) => boolean,
-	): number {
+	inherit(sourceSessionId: string, targetSessionId: string): number {
 		if (!sourceSessionId || !targetSessionId || sourceSessionId === targetSessionId) return 0;
 		let inherited = 0;
 		for (const provider of this.#pool.providers()) {
 			const credential = this.get(provider, sourceSessionId);
 			if (!credential || !this.#permits(provider, targetSessionId, credential.index)) continue;
-			if (include && !include(provider, credential.explicit === true)) continue;
 			this.record(
 				provider,
 				targetSessionId,

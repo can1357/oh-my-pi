@@ -309,11 +309,8 @@ export class AuthBrokerClient {
 		});
 	}
 
-	notifyUsageStale(provider?: string, signal?: AbortSignal): Promise<UsageStaleResponse> {
-		const params = new URLSearchParams();
-		if (provider) params.set("provider", provider);
-		const path = `/v1/usage/stale${params.size > 0 ? `?${params.toString()}` : ""}`;
-		return this.#request<UsageStaleResponse>("POST", path, {
+	notifyUsageStale(signal?: AbortSignal): Promise<UsageStaleResponse> {
+		return this.#request<UsageStaleResponse>("POST", "/v1/usage/stale", {
 			schema: "usageStaleResponseSchema",
 			signal,
 		});

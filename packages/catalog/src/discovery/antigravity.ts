@@ -154,28 +154,18 @@ export interface FetchAntigravityDiscoveryModelsOptions {
 }
 
 /**
- * A complete account roster, or a definitive 401/403 credential rejection.
- * `null` from {@link fetchAntigravityDiscoveryModels} instead means a transient
- * failure or invalid response, which must not replace an authoritative catalog.
- */
-export interface AntigravityModelDiscoveryResult {
-	models: ModelSpec<"google-gemini-cli">[];
-	rejectedStatus?: 401 | 403;
-}
-
-/**
  * Fetches discoverable Antigravity models and normalizes them into canonical model entries.
  *
- * Returns `null` on network, server, or payload failures; a 401/403 is reported
- * separately so multi-account discovery can skip a rejected credential.
- * A successful empty roster has `models: []` without `rejectedStatus`.
+ * Returns `null` on network/payload/auth failures.
+ * Returns `[]` only when the endpoint responds successfully with no usable models.
  */
 export async function fetchAntigravityDiscoveryModels(
 	options: FetchAntigravityDiscoveryModelsOptions,
-): Promise<AntigravityModelDiscoveryResult | null> {
+): Promise<ModelSpec<"google-gemini-cli">[] | null> {
 	const discovered = await fetchAntigravityDiscoveryResponse(options);
-	if (!discovered) return null;
-	if ("rejectedStatus" in discovered) return { models: [], rejectedStatus: discovered.rejectedStatus };
+	if (!discovered) {
+		return null;
+	}
 
 	const models: ModelSpec<"google-gemini-cli">[] = [];
 	const apiModels = discovered.payload.models;
@@ -218,7 +208,7 @@ export async function fetchAntigravityDiscoveryModels(
 		options.collapseTable === undefined ? undefined : { table: options.collapseTable },
 	);
 	collapsed.sort((a, b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id));
-	return { models: collapsed };
+	return collapsed;
 }
 
 /** Advertised image model and serving endpoint for one Antigravity account. */
@@ -232,14 +222,14 @@ export async function fetchAntigravityImageModel(
 	options: FetchAntigravityDiscoveryModelsOptions,
 ): Promise<AntigravityImageModel | null> {
 	const discovered = await fetchAntigravityDiscoveryResponse(options);
-	if (!discovered || "rejectedStatus" in discovered) return null;
-	const id = discovered.payload.imageGenerationModelIds?.find(modelId => modelId.length > 0);
-	return id ? { id, endpoint: discovered.endpoint } : null;
+	const id = discovered?.payload.imageGenerationModelIds?.find(modelId => modelId.length > 0);
+	return id && discovered ? { id, endpoint: discovered.endpoint } : null;
 }
 
-type AntigravityDiscoveryResponse =
-	| { payload: AntigravityDiscoveryApiResponse; endpoint: string }
-	| { rejectedStatus: 401 | 403 };
+interface AntigravityDiscoveryResponse {
+	payload: AntigravityDiscoveryApiResponse;
+	endpoint: string;
+}
 
 async function fetchAntigravityDiscoveryResponse(
 	options: FetchAntigravityDiscoveryModelsOptions,
@@ -253,8 +243,6 @@ async function fetchAntigravityDiscoveryResponse(
 		? [trimTrailingSlashes(options.endpoint)]
 		: DEFAULT_ANTIGRAVITY_DISCOVERY_ENDPOINTS.map(trimTrailingSlashes);
 
-	let rejectedStatus: 401 | 403 | undefined;
-	let transientFailure = false;
 	for (const endpoint of endpoints) {
 		let response: Response;
 		try {
@@ -269,14 +257,10 @@ async function fetchAntigravityDiscoveryResponse(
 				signal: options.signal,
 			});
 		} catch {
-			transientFailure = true;
 			continue;
 		}
 
 		if (!response.ok) {
-			if (response.status === 401) rejectedStatus = 401;
-			else if (response.status === 403) rejectedStatus = 403;
-			else transientFailure = true;
 			continue;
 		}
 
@@ -284,16 +268,16 @@ async function fetchAntigravityDiscoveryResponse(
 		try {
 			payload = await response.json();
 		} catch {
-			transientFailure = true;
 			continue;
 		}
 
 		const parsed = parseAntigravityDiscoveryResponse(payload);
-		if (parsed) return { payload: parsed, endpoint };
-		transientFailure = true;
+		if (parsed) {
+			return { payload: parsed, endpoint };
+		}
 	}
 
-	return rejectedStatus !== undefined && !transientFailure ? { rejectedStatus } : null;
+	return null;
 }
 
 function parseAntigravityDiscoveryResponse(value: unknown): AntigravityDiscoveryApiResponse | null {

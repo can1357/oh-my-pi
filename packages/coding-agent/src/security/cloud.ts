@@ -203,7 +203,6 @@ export class CodexSecurityCloudClient {
 		for (let attempt = 0; attempt < 2; attempt += 1) {
 			const access = await resolveExactSecurityOAuthAccess(this.#authStorage, this.#account, {
 				forceRefresh: attempt > 0,
-				refreshReason: attempt > 0 ? "auth-recovery" : undefined,
 				signal: options.signal,
 			});
 			const body = typeof options.body === "function" ? options.body(access.accessToken) : options.body;

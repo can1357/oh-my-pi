@@ -16,7 +16,6 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { $which } from "@oh-my-pi/pi-utils";
 import { theme } from "@oh-my-pi/pi-tui/theme";
-import { quotePosixArgument } from "../utils/shell-quote";
 import type { GallerySection } from "./gallery-cli";
 
 /** Nerd Font family so the gallery's icon glyphs (PUA) render instead of tofu. */
@@ -165,7 +164,7 @@ function buildTape(args: TapeArgs): string {
 	// is captured from the final visible frame. Setup is hidden so the typed
 	// `cat` command and shell prompt never appear in the capture, and a trailing
 	// `sleep` keeps the shell from drawing a fresh prompt under the output.
-	const shellCommand = `clear; cat ${quotePosixArgument(args.ansiPath)}; sleep 120`;
+	const shellCommand = `clear; cat ${shellSingleQuote(args.ansiPath)}; sleep 120`;
 	return `${[
 		`Output ${JSON.stringify(args.gifPath)}`,
 		`Set Width ${args.widthPx}`,
@@ -225,6 +224,11 @@ function parseAnsiRgb(ansi: string): string | undefined {
 	if (!match) return undefined;
 	const hex = (value: string) => Number(value).toString(16).padStart(2, "0");
 	return `#${hex(match[1])}${hex(match[2])}${hex(match[3])}`;
+}
+
+/** POSIX single-quote a path for embedding in the VHS shell command. */
+function shellSingleQuote(value: string): string {
+	return `'${value.replace(/'/g, `'\\''`)}'`;
 }
 
 /**

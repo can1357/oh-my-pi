@@ -4,7 +4,6 @@ import { getOAuthApiKey, getOAuthProvider } from "../registry/oauth";
 import type { OAuthCredentials, OAuthProvider } from "../registry/oauth/types";
 import type { Provider } from "../types";
 import type { CredentialRankingContext, CredentialRankingStrategy, PlanGate, UsageReport } from "../usage";
-import { isWithinUsageReserve } from "../usage";
 import type { RankingStrategyResolver } from "../usage/registry";
 import type { SessionAffinity } from "./affinity";
 import {
@@ -29,13 +28,12 @@ import {
 } from "./rank";
 import { mergeRefreshedCredential, OAUTH_REFRESH_SKEW_MS, type OAuthRefresher } from "./refresh";
 import type { AuthCredentialStore } from "./store";
-import {
-	type ApiKeyCredential,
-	type AuthApiKeyOptions,
-	type AuthCredential,
-	type OAuthCredential,
-	oauthAccountKey,
-	type StoredAuthCredential,
+import type {
+	ApiKeyCredential,
+	AuthApiKeyOptions,
+	AuthCredential,
+	OAuthCredential,
+	StoredAuthCredential,
 } from "./types";
 import type { UsageService } from "./usage";
 import {
@@ -477,9 +475,7 @@ export class CredentialSelector {
 				blocked,
 				blockedUntil,
 				inReserve:
-					reserveFraction !== undefined &&
-					remainingFraction !== undefined &&
-					isWithinUsageReserve(remainingFraction, reserveFraction),
+					reserveFraction !== undefined && remainingFraction !== undefined && remainingFraction <= reserveFraction,
 				reserveMeasured: reserveFraction !== undefined && remainingFraction !== undefined,
 				accountPriority: policy?.priority === undefined || !Number.isFinite(policy.priority) ? 0 : policy.priority,
 				allowanceSpent: remainingFraction === 0,
@@ -551,10 +547,9 @@ export class CredentialSelector {
 		const accountIds = options?.accountIds?.length ? new Set(options.accountIds) : undefined;
 		const enforceAccounts =
 			accountIds !== undefined &&
-			credentials.some(({ credential }) => {
-				const accountKey = oauthAccountKey(credential);
-				return accountKey !== undefined && accountIds.has(accountKey);
-			});
+			credentials.some(
+				({ credential }) => credential.accountId !== undefined && accountIds.has(credential.accountId),
+			);
 		const hasAccountPolicy = credentials.some(
 			({ credential }) => this.#deps.policies.forCredential(provider, credential) !== undefined,
 		);
@@ -888,8 +883,8 @@ export class CredentialSelector {
 		for (const pass of passes) {
 			for (const candidate of candidates) {
 				if (preflightFailures.has(candidate)) continue;
-				const candidateAccountKey = oauthAccountKey(candidate.selection.credential);
-				if (pass.enforceAccounts && (candidateAccountKey === undefined || !accountIds?.has(candidateAccountKey)))
+				const candidateAccountId = candidate.selection.credential.accountId;
+				if (pass.enforceAccounts && (candidateAccountId === undefined || !accountIds?.has(candidateAccountId)))
 					continue;
 				const resolved = await this.tryOAuth(provider, candidate.selection, providerKey, sessionId, options, {
 					checkUsage,

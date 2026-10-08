@@ -37,7 +37,7 @@ import { clampSelection, contentRowWidth, padLinesToHeight, renderScrollableList
 import type { TspScrollBy, TspSpan } from "@oh-my-pi/pi-wire";
 import type { NativeChild, NativeNode, NativeScroll, NativeUiEvent } from "../native/node";
 import { col, md, node, span, text } from "../native/describe";
-import { actionBar, actionButton, actionHint, hintsRow, type NativeHint, statusHintsRow } from "../native/overlay";
+import { actionHint, hintsRow, type NativeHint, statusHintsRow } from "../native/overlay";
 
 interface BtwHistoryPanelOptions {
 	records: readonly BtwHistoryRecord[];
@@ -485,13 +485,6 @@ export class BtwHistoryPanel implements Component, Focusable {
 			children.push(node("col", undefined, lines, "composer"));
 		}
 		children.push({ ...this.#describeFooter(record, canFollowUp, copied), key: "footer" });
-		// Clicking Close always dismisses the sheet; the Esc keycap only shows where Esc does too.
-		const running = record !== undefined && getBtwLatestTurn(record).status === "running";
-		const escapeCloses = !composer && !(running && !this.#options.escapeHides);
-		children.push({
-			...actionBar([null, actionButton("Close", "close", escapeCloses ? { keys: "escape" } : undefined)]),
-			key: "actions",
-		});
 		// The sheet is the frame (`nativeOverlay`): a borderless column.
 		const described = col(children, { gap: "md" });
 		this.#native = {
@@ -511,10 +504,6 @@ export class BtwHistoryPanel implements Component, Focusable {
 	}
 
 	handleNativeEvent(event: NativeUiEvent): void {
-		if (event.type === "action" && event.act === "close") {
-			this.#options.onClose();
-			return;
-		}
 		if ((event.type !== "select" && event.type !== "activate") || this.#composer) return;
 		const index = this.#records.findIndex(record => record.id === event.item);
 		if (index === -1) return;

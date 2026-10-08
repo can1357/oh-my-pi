@@ -480,50 +480,6 @@ describe("AuthStorage codex oauth ranking", () => {
 		expect(health.state).toBe("healthy");
 	});
 
-	test.each([
-		{ reservePct: 30, usedFraction: 0.7, inReserve: true },
-		{ reservePct: 30, usedFraction: 0.69, inReserve: false },
-	])(
-		"treats $usedFraction used against a $reservePct% reserve as inReserve=$inReserve",
-		async ({ reservePct, usedFraction, inReserve }) => {
-			if (!store) throw new Error("test setup failed");
-			authStorage = new AuthStorage(store, {
-				usageProviderResolver: provider => (provider === "openai-codex" ? usageProvider : undefined),
-				accountPolicies: [
-					{ provider: "openai-codex", account: { email: "protected@example.com" }, priority: 100, reservePct },
-					{ provider: "openai-codex", account: { email: "drain@example.com" }, priority: 10, reservePct: 0 },
-				],
-			});
-			await authStorage.credentials.set("openai-codex", [
-				{ type: "oauth", ...createCredential("acct-protected", "protected@example.com") },
-				{ type: "oauth", ...createCredential("acct-drain", "drain@example.com") },
-			]);
-			usageByAccount.set(
-				"acct-protected",
-				createCodexUsageReport({
-					accountId: "acct-protected",
-					primary: { usedFraction: 0.1, resetInMs: HOUR_MS },
-					secondary: { usedFraction, resetInMs: WEEK_MS },
-				}),
-			);
-			usageByAccount.set(
-				"acct-drain",
-				createCodexUsageReport({
-					accountId: "acct-drain",
-					primary: { usedFraction: 0.1, resetInMs: HOUR_MS },
-					secondary: { usedFraction: 0.5, resetInMs: WEEK_MS },
-				}),
-			);
-
-			const counts = await countApiKeySelections(authStorage, "openai-codex", `reserve-boundary-${reservePct}`);
-			const health = await authStorage.health.model("openai-codex", { reserveFraction: 0 });
-
-			if (inReserve) expectExclusivePreference(counts, "api-acct-drain", "api-acct-protected");
-			else expectExclusivePreference(counts, "api-acct-protected", "api-acct-drain");
-			expect(health.accounts.map(account => account.state)).toEqual([inReserve ? "reserve" : "healthy", "healthy"]);
-		},
-	);
-
 	test("applies the global reserve fallback to unconfigured siblings", async () => {
 		if (!store) throw new Error("test setup failed");
 		authStorage = new AuthStorage(store, {

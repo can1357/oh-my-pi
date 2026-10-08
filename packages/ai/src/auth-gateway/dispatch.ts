@@ -32,8 +32,6 @@ export interface AuthGatewayRouteOptions {
 	resolveModel: ModelResolver;
 	/** Optional supplier for `/v1/models` listing. Returns the full model array. */
 	listModels?: () => Iterable<Model<Api>>;
-	/** Providers the host does not serve; `/v1/usage` and `/v1/credentials/check` leave their accounts out. */
-	excludeProviders?: ReadonlySet<string>;
 	/** Upstream transport for every provider call; defaults to global `fetch`. Test seam. */
 	fetch?: FetchImpl;
 }

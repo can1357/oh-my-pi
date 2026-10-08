@@ -20,7 +20,7 @@ import { type GeneratedProvider, getBundledModel } from "@oh-my-pi/pi-catalog/mo
  *   metaharness harbor --help
  */
 import type { Server } from "bun";
-import { defaultJobName, harborRunnerArgs, type LaunchRequest } from "./launch-args";
+import { harborRunnerArgs, type LaunchRequest } from "./launch-args";
 
 // ────────────────────────────────────────────────────────────────────── config
 
@@ -1621,7 +1621,9 @@ async function runBenchmark(cfg: Config): Promise<BenchmarkRun> {
 		);
 	}
 
-	const jobName = cfg.jobName ?? defaultJobName(cfg.models[0] ?? "model");
+	const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+	const modelSlug = (cfg.models[0] ?? "model").replace(/[^a-zA-Z0-9]+/g, "-");
+	const jobName = cfg.jobName ?? `${modelSlug}-${stamp}`;
 	const jobDir = path.join(cfg.jobsDir, jobName);
 	const benchDir = path.join(cfg.jobsDir, "_bench", jobName);
 	fs.mkdirSync(benchDir, { recursive: true });

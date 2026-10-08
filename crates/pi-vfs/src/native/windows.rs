@@ -161,14 +161,16 @@ pub(crate) fn chown(
 }
 
 static PATHEXT: LazyLock<Vec<String>> = LazyLock::new(|| {
-	let parsed: Vec<String> = std::env::var_os("PATHEXT").map_or_default(|value| {
-		value
-			.to_string_lossy()
-			.split(';')
-			.map(|entry| entry.trim().trim_start_matches('.').to_ascii_lowercase())
-			.filter(|entry| !entry.is_empty())
-			.collect()
-	});
+	let parsed: Vec<String> = std::env::var_os("PATHEXT")
+		.map(|value| {
+			value
+				.to_string_lossy()
+				.split(';')
+				.map(|entry| entry.trim().trim_start_matches('.').to_ascii_lowercase())
+				.filter(|entry| !entry.is_empty())
+				.collect()
+		})
+		.unwrap_or_default();
 	if parsed.is_empty() {
 		["com", "exe", "bat", "cmd"].map(str::to_owned).to_vec()
 	} else {

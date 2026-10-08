@@ -527,14 +527,6 @@ describe("planCodexResetRedemptions: blocked-account", () => {
 		expect(plan.actions[0]).toMatchObject({ accountKey: ACCOUNT_KEY, active: true });
 	});
 
-	it("does not treat a Team seat sharing the workspace account id as the active account", () => {
-		// Team seats report the workspace account id; only the email tells them apart.
-		const active = report({ creditExpiries: [5 * DAY] });
-		const teammate = report({ email: "teammate@example.com", credentialId: 2, creditExpiries: [2 * DAY] });
-		const plan = planCodexResetRedemptions(input([active, teammate]));
-		expect(plan.actions[0]).toMatchObject({ accountKey: ACCOUNT_KEY, active: true });
-	});
-
 	it("breaks sibling ties by soonest credit expiry", () => {
 		const a = report({ accountId: "acct-a", email: "a@example.com", creditExpiries: [5 * DAY] });
 		const b = report({ accountId: "acct-b", email: "b@example.com", creditExpiries: [2 * DAY] });

@@ -360,52 +360,28 @@ async function nextMacrotask(): Promise<void> {
 }
 
 describe("EventController — terminal title across a non-terminal agent_end", () => {
-	it("keeps the working title and skips loader teardown but still flushes a deferred model switch during a scheduled continuation (isTerminal:false, not yielded), then tears down if it is cancelled before starting", async () => {
+	it("keeps the working title and skips loader teardown but still flushes a deferred model switch during a scheduled continuation (isTerminal:false, not yielded)", async () => {
 		const stateSpy = vi.spyOn(titleGenerator, "setTerminalTitleState").mockImplementation(() => {});
-		// The reminder/retry is scheduled post-prompt work the session still owes.
-		let continuationPending = true;
-		const continuation = Promise.withResolvers<void>();
-		const ctx = createInteractiveModeContext({
-			sessionManager: { getSessionName: () => "test-session" },
-			session: {
-				get hasPostPromptWork() {
-					return continuationPending;
-				},
-				waitForIdle: () => continuation.promise,
-			},
-		});
+		const ctx = makeTurnEndContext();
 		const markActivityEnd = vi.spyOn(ctx.statusLine, "markActivityEnd");
-		const tornDown = Promise.withResolvers<void>();
-		markActivityEnd.mockImplementation(() => tornDown.resolve());
 		const flushPendingModelSwitch = vi.spyOn(ctx, "flushPendingModelSwitch");
 		const controller = new EventController(ctx);
 		await controller.handleEvent({
 			...makeAgentEndEvent([makeAssistantMessage("stop")]),
 			isTerminal: false,
 		} as Extract<AgentSessionEvent, { type: "agent_end" }> & { isTerminal: false });
-		await nextMacrotask();
-		// The agent's own continuation follows: never drop to `idle`, never run #finishAgentEnd teardown.
+		// The agent's own continuation (reminder/retry) follows: never drop to `idle`, never run #finishAgentEnd teardown.
 		expect(stateSpy).not.toHaveBeenCalledWith("idle");
 		expect(markActivityEnd).not.toHaveBeenCalled();
 		// The automatic continuation must still pick up a queued plan-mode model switch.
 		expect(flushPendingModelSwitch).toHaveBeenCalledTimes(1);
-
-		// An abort cancels the continuation before its agent_start, so no terminal
-		// agent_end ever arrives: the settle itself must end the run.
-		continuationPending = false;
-		continuation.resolve();
-		await tornDown.promise;
-		expect(stateSpy).toHaveBeenCalledWith("idle");
 	});
 
 	it("keeps the working title on a queued steer/follow-up or IRC continuation (isTerminal:false, yielded:true, no awaitingAsyncWork)", async () => {
 		// `AgentSession#flushPendingAgentEnd` re-tags a built terminal end as
 		// non-terminal when queued input is about to drain; `yielded` stays true.
 		const stateSpy = vi.spyOn(titleGenerator, "setTerminalTitleState").mockImplementation(() => {});
-		const ctx = createInteractiveModeContext({
-			sessionManager: { getSessionName: () => "test-session" },
-			session: { queuedMessageCount: 1 },
-		});
+		const ctx = makeTurnEndContext();
 		const markActivityEnd = vi.spyOn(ctx.statusLine, "markActivityEnd");
 		const controller = new EventController(ctx);
 		await controller.handleEvent({
@@ -413,7 +389,6 @@ describe("EventController — terminal title across a non-terminal agent_end", (
 			isTerminal: false,
 			yielded: true,
 		} as Extract<AgentSessionEvent, { type: "agent_end" }>);
-		await nextMacrotask();
 		expect(stateSpy).not.toHaveBeenCalledWith("idle");
 		expect(markActivityEnd).not.toHaveBeenCalled();
 	});

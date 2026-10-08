@@ -8,7 +8,7 @@ import { DEFAULT_MAX_LINES, truncateHead, truncateTail } from "@oh-my-pi/pi-tui/
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { isEnoent } from "@oh-my-pi/pi-utils";
 import type { ToolSession } from "../sdk";
-import { quotePosixArgument } from "../utils/shell-quote";
+import { quotePosixPath } from "../ssh/utils";
 import { resolveReadPath } from "./path-utils";
 import { buildInMemorySelectorResult, prependSuffixResolutionNotice, toReadTruncationStats } from "./read-format";
 import {
@@ -244,7 +244,7 @@ async function runJq(
 	const stderrPath = path.join(os.tmpdir(), `omp-jq-${crypto.randomUUID()}.err`);
 	// jaq parses any argument starting with `-` as flags even when shell-quoted;
 	// `--` keeps filters such as `-.price` positional.
-	const command = `jq ${flags.join(" ")} -- ${quotePosixArgument(query)} ${quotePosixArgument(filePath)} 2>${quotePosixArgument(stderrPath)}`;
+	const command = `jq ${flags.join(" ")} -- ${quotePosixPath(query)} ${quotePosixPath(filePath)} 2>${quotePosixPath(stderrPath)}`;
 
 	let output = "";
 	let lines = 0;

@@ -2,12 +2,6 @@
 
 ## [Unreleased]
 
-## [18.8.4] - 2026-10-08
-
-### Fixed
-
-- Fixed long output from a failing `jq` command hiding its error message: the output minimizer now shortens `jq` output only when the command succeeded ([#14657](https://github.com/can1357/oh-my-pi/pull/14657) by [@will-bogusz](https://github.com/will-bogusz))
-
 ## [18.8.1] - 2026-10-07
 
 ### Added

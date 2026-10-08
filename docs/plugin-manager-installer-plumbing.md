@@ -268,7 +268,7 @@ Operationally, `doctor --fix` can repair some drift (`bun install`, orphaned con
   - install/list: tolerated (minimal manifest)
   - runtime enabled-plugin discovery: skipped as non-plugin
 - Unknown feature referenced by install spec or feature mutation: hard error with available feature list when the manifest declares a feature map; without a map, names can be retained without validation
-- Invalid or unreadable `plugin-overrides.json`: logged with its path and error, then ignored with fallback to the next project config path or `{}`. Missing files remain silent.
+- Invalid `plugin-overrides.json`: ignored with fallback to `{}` in both manager and loader paths
 - Missing tool/hook/command file paths referenced by manifest: silently ignored during resolver expansion; flagged as errors only by `doctor`
 
 ## Mode differences and precedence

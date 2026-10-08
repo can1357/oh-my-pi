@@ -4,8 +4,7 @@
  * to the session's `local://` root, and generated video contact-sheet previews.
  * Symbol metadata stays out of serialized/model-bound image data while traveling
  * with the draft object, until AgentSession creates the hidden companion message
- * that tells the model the path. The model keeps `local://` references across
- * `/move`; chips for internal URLs instead use a stable blob copy.
+ * that tells the model the path (and link materialization prefers it over a blob copy).
  */
 import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { isRecord } from "@oh-my-pi/pi-utils";

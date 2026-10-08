@@ -19,7 +19,6 @@ import {
 	InProcessClient,
 	type SharedInfra,
 } from "@oh-my-pi/typescript-edit-benchmark/in-process-client";
-import { conversationDumpRelativePath } from "./dump-path";
 import benchmarkRetryPrompt from "./prompts/benchmark-retry.md" with { type: "text" };
 import benchmarkSystemPrompt from "./prompts/benchmark-system.md" with { type: "text" };
 import benchmarkTaskPrompt from "./prompts/benchmark-task.md" with { type: "text" };
@@ -121,6 +120,14 @@ type ConversationDumpSnapshot = {
 	dumpTools?: Array<{ name: string; description: string; parameters: unknown; examples?: readonly ToolExample[] }>;
 };
 
+function sanitizeDumpPathSegment(value: string): string {
+	return value.replace(/[^a-zA-Z0-9._-]/g, "_");
+}
+
+function getConversationDumpPath(dumpDir: string, taskId: string, runIndex: number): string {
+	return path.join(dumpDir, sanitizeDumpPathSegment(taskId), `run-${runIndex + 1}.md`);
+}
+
 /** Artifacts directory for a session dump file (.md or legacy .jsonl). */
 function dumpArtifactsDir(dumpFilePath: string): string {
 	if (dumpFilePath.endsWith(".md")) {
@@ -152,7 +159,7 @@ export async function writeConversationDump(params: {
 	runIndex: number;
 	snapshot: ConversationDumpSnapshot;
 }): Promise<string> {
-	const dumpPath = path.join(params.dumpDir, conversationDumpRelativePath(params.taskId, params.runIndex + 1));
+	const dumpPath = getConversationDumpPath(params.dumpDir, params.taskId, params.runIndex);
 	await fs.promises.mkdir(path.dirname(dumpPath), { recursive: true });
 	const body = formatSessionDumpText({
 		messages: params.snapshot.messages,

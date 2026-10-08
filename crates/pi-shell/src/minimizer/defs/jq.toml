@@ -1,14 +1,10 @@
 # Ported from https://github.com/rtk-ai/rtk/blob/master/src/filters/jq.toml
 # match_command adapted for the local (program, subcommand) dispatch model.
-#
-# Gated on exit 0: `max_lines` keeps the head, and a failing run prints its
-# error last, after whatever output came before it.
 
 [filters.jq]
-description = "Compact jq output — truncate large JSON results (exit 0 only)"
+description = "Compact jq output — truncate large JSON results"
 match_command = "^jq$"
 strip_ansi = true
-only_on_exit = [0]
 strip_lines_matching = [
   "^\\s*$",
 ]

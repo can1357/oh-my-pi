@@ -1,5 +1,3 @@
-import * as fs from "node:fs";
-import * as path from "node:path";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, ImageContent, Usage } from "@oh-my-pi/pi-ai";
 import { getStreamingPartialJson } from "@oh-my-pi/pi-ai/utils/block-symbols";
@@ -8,7 +6,6 @@ import { StatusNotice } from "@oh-my-pi/pi-tui/chrome/status-notice";
 import { QueuedMessagesBand } from "@oh-my-pi/pi-tui/prompt/queued-messages";
 import { logger } from "@oh-my-pi/pi-utils";
 import type { AdvisorMessageDetails } from "../../advisor";
-import { InternalUrlRouter } from "../../internal-urls";
 import { COLLAB_PROMPT_MESSAGE_TYPE, type CollabPromptDetails } from "../../collab/protocol";
 import { settings } from "../../config/settings";
 import { createAdvisorMessageCard } from "@oh-my-pi/pi-tui/chat/advisor-message";
@@ -45,11 +42,7 @@ import { TranscriptBlock, TranscriptContainer } from "@oh-my-pi/pi-tui/chrome/tr
 import { createUsageRowBlock, turnElapsedMs } from "@oh-my-pi/pi-tui/overlays/usage-row";
 import { UserMessageComponent } from "@oh-my-pi/pi-tui/chat/user-message";
 import { decodeStreamedToolArgs, streamingStringKeysForTool } from "../../modes/controllers/tool-args-reveal";
-import {
-	materializeImageReferenceLinks,
-	materializeImageReferenceLinksSync,
-} from "@oh-my-pi/pi-tui/prompt/image-references";
-import { normalizeBlobExtension } from "@oh-my-pi/pi-tui/prompt/image-format";
+import { materializeImageReferenceLinksSync } from "@oh-my-pi/pi-tui/prompt/image-references";
 import { imageAttachmentSource } from "@oh-my-pi/pi-tui/prompt/image-source";
 import { theme } from "@oh-my-pi/pi-tui/theme";
 import type {
@@ -133,88 +126,13 @@ type AddMessageOptions = {
 	reuseSettledComponent?: boolean;
 };
 
-type ImageChipSessionManager = Pick<
-	InteractiveModeContext["sessionManager"],
-	"putBlob" | "putBlobSync" | "getArtifactsDir" | "getSessionId"
->;
-
-/** Where an image chip's bytes live: a file the chip opens directly, or the file behind an internal URL. */
-type ImageChipSource = { kind: "file"; path: string } | { kind: "internal"; path: string };
-
-/**
- * Internal URLs (`local://`) stay on the image for the model but resolve against the
- * session root, which `/move` relocates, so a chip cannot point at them. Their backing
- * file holds the original pasted bytes (the payload may be auto-resized), so the chip
- * opens a stable blob copy of that file. Undefined when no file backs the image.
- */
-function imageChipSource(image: ImageContent, sessionManager: ImageChipSessionManager): ImageChipSource | undefined {
-	const sourcePath = imageAttachmentSource(image)?.path;
-	if (!sourcePath) return undefined;
-	const router = InternalUrlRouter.instance();
-	if (!router.canHandle(sourcePath)) return { kind: "file", path: sourcePath };
-	try {
-		const located = router.locateSync(sourcePath, {
-			localProtocolOptions: {
-				getArtifactsDir: () => sessionManager.getArtifactsDir(),
-				getSessionId: () => sessionManager.getSessionId(),
-			},
-		});
-		return located === undefined ? undefined : { kind: "internal", path: located };
-	} catch {
-		return undefined;
-	}
-}
-
-/** Chip targets for attached images: each file on disk, else a blob copy of the original bytes (or the payload). */
-export async function materializeImageChipLinks(
-	images: readonly ImageContent[],
-	sessionManager: ImageChipSessionManager,
-): Promise<(string | undefined)[]> {
-	const putBlob = sessionManager.putBlob.bind(sessionManager);
-	return Promise.all(
-		images.map(async image => {
-			const source = imageChipSource(image, sessionManager);
-			if (source?.kind === "file") return source.path;
-			if (source) {
-				try {
-					const bytes = await fs.promises.readFile(source.path);
-					return (await putBlob(bytes, { extension: normalizeBlobExtension(path.extname(source.path)) }))
-						.displayPath;
-				} catch (error) {
-					logger.warn("Failed to copy original image for its chip", {
-						path: source.path,
-						error: error instanceof Error ? error.message : String(error),
-					});
-				}
-			}
-			return (await materializeImageReferenceLinks([image], putBlob))?.[0];
-		}),
-	);
-}
-
-/** Synchronous {@link materializeImageChipLinks} for transcript rebuilds. */
 function imageLinksForMessage(
 	images: readonly ImageContent[],
-	sessionManager: ImageChipSessionManager,
+	putBlobSync: InteractiveModeContext["sessionManager"]["putBlobSync"],
 ): (string | undefined)[] | undefined {
 	if (images.length === 0) return undefined;
-	const putBlobSync = sessionManager.putBlobSync.bind(sessionManager);
-	return images.map(image => {
-		const source = imageChipSource(image, sessionManager);
-		if (source?.kind === "file") return source.path;
-		if (source) {
-			try {
-				const bytes = fs.readFileSync(source.path);
-				return putBlobSync(bytes, { extension: normalizeBlobExtension(path.extname(source.path)) }).displayPath;
-			} catch (error) {
-				logger.warn("Failed to copy original image for its chip", {
-					path: source.path,
-					error: error instanceof Error ? error.message : String(error),
-				});
-			}
-		}
-		return materializeImageReferenceLinksSync([image], putBlobSync)?.[0];
-	});
+	const materialized = materializeImageReferenceLinksSync(images, putBlobSync);
+	return images.map((image, index) => imageAttachmentSource(image)?.path ?? materialized?.[index]);
 }
 
 export class UiHelpers {
@@ -380,7 +298,11 @@ export class UiHelpers {
 					} else {
 						const images = imageContent(message.content);
 						const imageLinks =
-							options?.imageLinks ?? imageLinksForMessage(images, this.ctx.viewSession.sessionManager);
+							options?.imageLinks ??
+							imageLinksForMessage(
+								images,
+								this.ctx.viewSession.sessionManager.putBlobSync.bind(this.ctx.viewSession.sessionManager),
+							);
 						userComponent = new UserMessageComponent(userText, {
 							synthetic: isSynthetic,
 							imageLinks,

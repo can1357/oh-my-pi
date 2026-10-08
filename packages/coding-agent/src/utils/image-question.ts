@@ -123,13 +123,8 @@ export async function askImageQuestion(
 
 	const configuredThinking = concreteThinkingLevel(
 		extractExplicitThinkingSelector(selectedPattern, session.settings, {
-			isLiteralModelId: (provider, id) => {
-				if (provider !== undefined) {
-					return availableModels.some(candidate => candidate.provider === provider && candidate.id === id);
-				}
-				const lowerId = id.toLowerCase();
-				return availableModels.some(candidate => candidate.id.toLowerCase() === lowerId);
-			},
+			isLiteralModelId: (provider, id) =>
+				availableModels.some(candidate => candidate.provider === provider && candidate.id === id),
 		}),
 	);
 	const reasoning = toReasoningEffort(resolveThinkingLevelForModel(model, configuredThinking));

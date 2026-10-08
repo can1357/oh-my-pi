@@ -495,13 +495,13 @@ async function fetchAntigravityModels(): Promise<ModelSpec<"google-gemini-cli">[
 			token: access.accessToken,
 			endpoint: ANTIGRAVITY_ENDPOINT,
 		});
-		if (discovered === null || discovered.rejectedStatus !== undefined) {
+		if (discovered === null) {
 			console.warn("Antigravity API fetch failed, will use previous models");
 			return [];
 		}
-		if (discovered.models.length > 0) {
-			console.log(`Fetched ${discovered.models.length} models from Antigravity API`);
-			return discovered.models;
+		if (discovered.length > 0) {
+			console.log(`Fetched ${discovered.length} models from Antigravity API`);
+			return discovered;
 		}
 		console.warn("Antigravity API returned no models, will use previous models");
 		return [];

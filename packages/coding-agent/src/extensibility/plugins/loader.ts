@@ -72,14 +72,7 @@ async function loadProjectOverrides(cwd: string): Promise<ProjectPluginOverrides
 			return await Bun.file(overridesPath).json();
 		} catch (err) {
 			if (isEnoent(err)) continue;
-			// Malformed or unreadable overrides would otherwise silently act
-			// as {} — project-disabled plugins re-enable and project settings
-			// vanish without a trace. Report it, then fall through like a
-			// missing file so plugin collection still degrades gracefully.
-			logger.warn("plugins: failed to load project plugin overrides, ignoring them", {
-				path: overridesPath,
-				error: String(err),
-			});
+			// JSON parse error - continue to next path
 		}
 	}
 	return {};

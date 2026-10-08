@@ -127,7 +127,7 @@ describe("google-gemini-cli effort-tier variant routing", () => {
 	it("discovers one Claude 5.5 model per family and routes its supported efforts to the served tiers", async () => {
 		const tiers = [Effort.Low, Effort.Medium, Effort.High] as const;
 		const families = ["claude-opus-5-5", "claude-sonnet-5-5"];
-		const result = await fetchAntigravityDiscoveryModels({
+		const specs = await fetchAntigravityDiscoveryModels({
 			token: "token",
 			userAgent: "test",
 			fetcher: async () =>
@@ -147,9 +147,8 @@ describe("google-gemini-cli effort-tier variant routing", () => {
 					),
 				}),
 		});
-		expect(result?.models.map(spec => spec.id)).toEqual(families);
-		if (!result || result.rejectedStatus !== undefined) throw new Error("discovery failed");
-		const specs = result.models;
+		expect(specs?.map(spec => spec.id)).toEqual(families);
+		if (!specs) throw new Error("discovery failed");
 
 		for (const id of families) {
 			const spec = specs.find(spec => spec.id === id);

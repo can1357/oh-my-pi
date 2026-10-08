@@ -539,7 +539,7 @@ Cursor's integration in `packages/ai` operates over an HTTP/2 Connect RPC transp
 - **PKCE OAuth & Polling**:
   - Deep-link PKCE login generates verifier/challenge and redirects to `https://cursor.com/loginDeepControl`.
   - Polls `https://api2.cursor.sh/auth/poll?uuid=...&verifier=...` with exponential backoff (1s to 10s delay, up to 150 attempts).
-  - Refresh renews the login session the way the Cursor IDE does: POST `https://api2.cursor.sh/oauth/token` with a `refresh_token` grant for the IDE's client id. The renewed session token is both access and refresh credential; `shouldLogout: true` means the session ended and the row is disabled.
+  - Refresh trades refresh token via POST `https://api2.cursor.sh/auth/exchange_user_api_key`.
   - Login, and any refresh of a credential still missing one, records the account email from `https://cursor.com/api/auth/me` (`fetchCursorAccountEmail`), so account policies and `/session pin` can name the account; a failed lookup leaves the credential usable without it.
 - **Usage & Quota Tracking (`packages/ai/src/usage/cursor.ts`)**:
   - Standard quota fetched from `https://api2.cursor.sh/auth/usage` (`parseCursorUsage`).

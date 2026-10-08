@@ -32,13 +32,8 @@ describe("MCPManager connection status events", () => {
 		const invalid: MCPServerConfig = { type: "stdio", command: "" };
 
 		try {
-			// Window 0 waits for every server to settle; the default 250ms window
-			// races the fixture's process spawn and flakes on loaded CI runners.
-			const result = await manager.connectServers(
-				{ alpha: success, broken: invalid },
-				{},
-				event => events.push(event),
-				0,
+			const result = await manager.connectServers({ alpha: success, broken: invalid }, {}, event =>
+				events.push(event),
 			);
 
 			expect(result.connectedServers).toContain("alpha");
@@ -76,7 +71,6 @@ describe("MCPManager connection status events", () => {
 					},
 				},
 				event => events.push(event),
-				0,
 			);
 
 			const message = result.errors.get("broken") ?? "";

@@ -385,47 +385,6 @@ describe("Cursor stream teardown", () => {
 		expect(paired[0].isError).toBe(true);
 	});
 
-	it("pairs a hosted web-fetch call the transport cut short", async () => {
-		// Hosted `web_fetch` blocks get the same `kCursorExecResolved` stamp at
-		// start as todo/connect-scm, so only their completion frame pairs a
-		// result. Without the interrupted result here a transport that died
-		// mid-fetch left the call dangling and stripped from rebuilt
-		// transcripts, exactly like the server-owned calls above.
-		const output = cursorAssistantMessage();
-		const stream = new AssistantMessageEventStream();
-		const paired: ToolResultMessage[] = [];
-		const state = newBlockState({ onToolResult: result => void paired.push(result) });
-
-		processInteractionUpdate(
-			{
-				message: {
-					case: "toolCallStarted",
-					value: {
-						callId: "envelope-fetch",
-						toolCall: {
-							tool: { case: "webFetchToolCall", value: { args: { url: "https://example.com" } } },
-						},
-					},
-				},
-			},
-			output,
-			stream,
-			state,
-			{ sawTokenDelta: false },
-		);
-
-		const block = output.content.find((b): b is ToolCallState => b.type === "toolCall");
-		if (!block) throw new Error("expected an open tool-call block");
-		expect(block.name).toBe("web_fetch");
-		expect(paired).toHaveLength(0);
-
-		flushOpenToolCalls(output, stream, state);
-
-		expect(paired).toHaveLength(1);
-		expect(paired[0].toolCallId).toBe(block.id);
-		expect(paired[0].isError).toBe(true);
-	});
-
 	it("leaves an exec-settled MCP call to the dispatch that owns its result", async () => {
 		// MCP blocks are also marked resolved, but by the exec dispatch, which
 		// already emitted their result and is awaited before teardown. Pairing

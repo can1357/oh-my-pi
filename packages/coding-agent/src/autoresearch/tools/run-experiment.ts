@@ -28,7 +28,6 @@ import {
 import { formatNum } from "@oh-my-pi/pi-tui/tools/autoresearch";
 import { formatElapsed } from "@oh-my-pi/pi-tui/apps/autoresearch-data";
 import { buildExperimentState } from "../state";
-import { quotePosixArgument } from "../../utils/shell-quote";
 import { openAutoresearchStorageIfExists } from "../storage";
 import type { AutoresearchToolFactoryOptions } from "../types";
 import type { ASIData, RunDetails, RunExperimentProgressDetails } from "@oh-my-pi/pi-tui/tools/autoresearch";
@@ -256,7 +255,7 @@ async function resolveHarnessExecLine(): Promise<string> {
 	if (process.platform !== "win32") return DEFAULT_HARNESS_COMMAND;
 	const { shell } = (await Settings.init()).getShellConfig();
 	if (!procmgr.isPosixShell(shell)) return DEFAULT_HARNESS_COMMAND;
-	return `${quotePosixArgument(shell)} ${HARNESS_FILENAME}`;
+	return `'${shell.replaceAll("'", "'\\''")}' ${HARNESS_FILENAME}`;
 }
 
 async function executeProcess(opts: {
