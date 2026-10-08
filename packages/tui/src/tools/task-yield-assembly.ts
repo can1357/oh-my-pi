@@ -105,7 +105,9 @@ function appendYieldSection(
 	} else if (count === 0) {
 		sections[label] = value;
 	} else if (Array.isArray(existing)) {
-		existing.push(value);
+		// A first unknown section borrows its payload; copy only when it becomes an accumulator.
+		if (count === 1) sections[label] = [...existing, value];
+		else existing.push(value);
 	} else {
 		sections[label] = [existing, value];
 	}

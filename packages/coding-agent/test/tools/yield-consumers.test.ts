@@ -307,6 +307,45 @@ describe("yield shape production consumers", () => {
 		expect(assembleYieldResult([pooled], undefined, yieldSectionShapes(undefined))?.data).toEqual({ entry: [1, 2] });
 	});
 
+	it("copies a borrowed unknown array only when repeated sections need a mutable accumulator", () => {
+		const first = Object.freeze([1, 2]);
+		const firstItem: YieldItem = { type: ["left", "right"], data: first, status: "success" };
+		const single = assembleYieldResult([firstItem], undefined, yieldSectionShapes(undefined))?.data;
+		if (!isRecord(single)) throw new Error("Expected assembled sections");
+		expect(single.left).toBe(first);
+		expect(single.right).toBe(first);
+
+		const items: YieldItem[] = [
+			firstItem,
+			{
+				type: ["left"],
+				data: [
+					[3, 4],
+					[5, 6],
+				],
+				status: "success",
+			},
+			{ type: ["left"], data: "last", status: "success" },
+			{ type: ["right"], data: [7, 8], status: "success" },
+		];
+		const original = structuredClone(items);
+		for (let repeat = 0; repeat < 2; repeat++) {
+			expect(assembleYieldResult(items, undefined, yieldSectionShapes(undefined))?.data).toEqual({
+				left: [
+					1,
+					2,
+					[
+						[3, 4],
+						[5, 6],
+					],
+					"last",
+				],
+				right: [1, 2, [7, 8]],
+			});
+			expect(items).toEqual(original);
+		}
+	});
+
 	it("exposes legal multi-label subsets and item batches to the provider parameter validator", async () => {
 		const declaration = {
 			...schema,

@@ -225,10 +225,12 @@ describe("task renderer: malformed yield slot (#1987)", () => {
 				},
 			],
 		};
+		const original = structuredClone(extractedToolData);
 		for (const render of [renderResultText, renderProgressText]) {
 			const text = await render(extractedToolData);
 			expect(text).toContain("yield+[rows]: [1,2]");
 			expect(text).toContain("yield+[rows]: [[3,4],[5,6]]");
+			expect(extractedToolData).toEqual(original);
 		}
 	});
 
@@ -240,11 +242,13 @@ describe("task renderer: malformed yield slot (#1987)", () => {
 				{ type: ["value"], data: [[9, 10]], status: "success" },
 			],
 		};
+		const original = structuredClone(extractedToolData);
 		for (const render of [renderResultText, renderProgressText]) {
 			const text = await render(extractedToolData);
 			expect(text).toContain("yield+[value]: scalar choice");
 			expect(text).toContain("yield+[value]: [7,8]");
 			expect(text).toContain("yield+[value]: [[9,10]]");
+			expect(extractedToolData).toEqual(original);
 		}
 	});
 });
