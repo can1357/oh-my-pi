@@ -319,6 +319,12 @@ export class MCPActionPanel implements Component {
 						text: sanitizeDisplayText(error instanceof Error ? error.message : String(error)),
 						color: "error",
 					};
+			// An interrupted action can still have changed live state without a lifecycle
+			// event (reconnect discards the old connection before connecting again), so
+			// never keep showing the pre-action status. The action's own outcome stays the
+			// message; a reload failure must not replace it.
+			await this.reloadState().catch(() => {});
+			this.onChanged?.();
 		} finally {
 			this.#running = undefined;
 			this.#rejectManualInput(new Error("OAuth input no longer required"));

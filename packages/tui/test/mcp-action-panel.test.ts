@@ -153,6 +153,47 @@ describe("MCPActionPanel", () => {
 		expect(panel.render(80).join("\n")).toContain("Action cancelled.");
 	});
 
+	test("shows live status after an action that is cancelled or fails mid-flight", async () => {
+		// Reconnect tears the old connection down before connecting again, so an
+		// interrupted reconnect leaves the server disconnected without any
+		// lifecycle event; the panel must not keep showing the pre-action status.
+		let live = state([action("reconnect")]);
+		let outcome: "cancel" | "fail" = "cancel";
+		const runtime: MCPActionPanelRuntime = {
+			loadState: async () => live,
+			runAction: async (_extension, _id, context) =>
+				await new Promise<string>((_resolve, reject) => {
+					live = { ...live, connectionStatus: "disconnected" };
+					if (outcome === "fail") {
+						reject(new Error("Reconnect failed"));
+						return;
+					}
+					context.signal.addEventListener("abort", () => reject(new DOMException("cancelled", "AbortError")), {
+						once: true,
+					});
+				}),
+		};
+		const panel = new MCPActionPanel(extension, state([action("reconnect")]), runtime, 24);
+
+		panel.handleInput("\r");
+		await flushAsyncWork();
+		panel.handleInput("\x1b");
+		await flushAsyncWork();
+		await flushAsyncWork();
+		let rendered = Bun.stripANSI(panel.render(80).join("\n"));
+		expect(rendered).toContain("Status: disconnected");
+		expect(rendered).toContain("Action cancelled.");
+
+		live = state([action("reconnect")]);
+		outcome = "fail";
+		panel.handleInput("\r");
+		await flushAsyncWork();
+		await flushAsyncWork();
+		rendered = Bun.stripANSI(panel.render(80).join("\n"));
+		expect(rendered).toContain("Status: disconnected");
+		expect(rendered).toContain("Reconnect failed");
+	});
+
 	test("Escape cancels pending OAuth input as cancellation", async () => {
 		const runtime: MCPActionPanelRuntime = {
 			loadState: async () => state([action("reauthenticate")]),
