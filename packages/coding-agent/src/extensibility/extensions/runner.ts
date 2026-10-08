@@ -2177,7 +2177,13 @@ export class ExtensionRunner {
 					ctx,
 					ext,
 					extensionHandlerTimeoutMs,
-					undefined,
+					(kind, message) => ({
+						block: true,
+						reason:
+							kind === "timeout"
+								? `before_subagent_spawn ${message}`
+								: `before_subagent_spawn handler failed: ${message}`,
+					}),
 					signal,
 				);
 				if (!handlerResult) continue;

@@ -505,6 +505,7 @@ and `/new`. Commands retain their explicit prefill and session-transition action
   A handler may return `thinkingLevel`. Core checks it with `getSupportedEfforts` against the applied model and, unless `effortLocked`, pins that model as an unsuffixed selector so a `:level` suffix cannot override the choice. Later patterns stay in the retry chain. The role identity is kept; the unsuffixed selector, not clearing `modelRole`, is what stops the role suffix. `inherit` is ignored. An unsupported level fails preflight.
   A later handler that returns `model` replaces the model and note, and clears an earlier `thinkingLevel` unless that same handler also returns one. A later `thinkingLevel` without a model still applies to the model already chosen.
   `SUBAGENT_ROUTING_API_VERSION` is `2`, the first exported marker for this field surface (spawn context, locks, per-handler signal, `thinkingLevel` result). It is not a policy version. `getSupportedEfforts` is exported because a local extension in a compiled binary cannot import the catalog package.
+  A handler that throws or times out blocks the spawn with a reason. That includes non-routing handlers. A returned model that expands to nothing, or that matches nothing in a present model registry, fails preflight. A session with no registry still accepts a literal selector when no thinking level is returned. An unsupported thinking level also fails preflight.
 
 ### Reliability/runtime signals
 

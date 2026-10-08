@@ -205,8 +205,44 @@ describe("ExtensionRunner", () => {
 			patterns: ["anthropic/claude-sonnet-4-5"],
 		});
 
-		expect(decision).toBeUndefined();
+		expect(decision).toMatchObject({ block: true, reason: expect.stringMatching(/timed out/) });
 		expect(fs.readFileSync(eventPath, "utf8")).toBe("aborted");
+	});
+
+	it("blocks the spawn when a before_subagent_spawn handler throws", async () => {
+		fs.writeFileSync(
+			path.join(extensionsDir, "throws.ts"),
+			`
+				export default function(pi) {
+					pi.on("before_subagent_spawn", () => {
+						throw new Error("router down");
+					});
+				}
+			`,
+		);
+		const result = await loadTestExtensions();
+		const runner = new ExtensionRunner(
+			result.extensions,
+			result.runtime,
+			tempDir.path(),
+			sessionManager,
+			modelRegistry,
+		);
+
+		const decision = await runner.emitBeforeSubagentSpawn({
+			type: "before_subagent_spawn",
+			invocationKind: "task",
+			assignment: "route this worker",
+			agent: "worker",
+			modelLocked: false,
+			effortLocked: false,
+			patterns: ["anthropic/claude-sonnet-4-5"],
+		});
+
+		expect(decision).toMatchObject({
+			block: true,
+			reason: expect.stringMatching(/router down/),
+		});
 	});
 
 	it("merges a model from one before_subagent_spawn handler with a thinking level from another", async () => {
