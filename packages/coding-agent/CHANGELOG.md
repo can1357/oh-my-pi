@@ -2,12 +2,22 @@
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- `SqlSessionStorage` with `createTable: false` refuses to start until the session table has a `byte_len` column and a `<table>_parts` table exists; docs/session.md gives the DDL, backfill, and rollback for each dialect. ([#13416](https://github.com/can1357/oh-my-pi/pull/13416) by [@sjawhar](https://github.com/sjawhar))
+- `SqlSessionStorage` refuses table names longer than 57 characters, leaving room for the `<table>_parts` table. ([#13416](https://github.com/can1357/oh-my-pi/pull/13416) by [@sjawhar](https://github.com/sjawhar))
+- An older Oh My Pi can no longer read a SQL session table this version has written until you run the rollback in docs/session.md. ([#13416](https://github.com/can1357/oh-my-pi/pull/13416) by [@sjawhar](https://github.com/sjawhar))
+
 ### Added
 
 - Sessions can now be stored in PostgreSQL, MySQL, or SQLite instead of JSONL files: set `session.storage: sql` and point `session.sql.dsnFile` at a file holding the connection string (or set `OMP_SESSION_STORAGE=sql` and `OMP_SESSION_SQL_DSN_FILE`); `--resume`, `--continue`, the session picker, and listing follow the same store, and joining a collab session needs file storage. ([#13416](https://github.com/can1357/oh-my-pi/pull/13416) by [@sjawhar](https://github.com/sjawhar))
 
 ### Fixed
 
+- SQL session storage appends write only the appended entry instead of rewriting the whole session. ([#13416](https://github.com/can1357/oh-my-pi/pull/13416) by [@sjawhar](https://github.com/sjawhar))
+- Long sessions in SQL session storage no longer fail to append as they approach PostgreSQL's 1 GB field limit. ([#13416](https://github.com/can1357/oh-my-pi/pull/13416) by [@sjawhar](https://github.com/sjawhar))
+- SQL session storage on SQLite waits for another process's write instead of failing with `database is locked`. ([#13416](https://github.com/can1357/oh-my-pi/pull/13416) by [@sjawhar](https://github.com/sjawhar))
+- Starting SQL session storage on PostgreSQL no longer waits for, and holds up, other processes' session writes. ([#13416](https://github.com/can1357/oh-my-pi/pull/13416) by [@sjawhar](https://github.com/sjawhar))
 - Fixed a `session.sql.dsnFile` whose contents are not a connection URL surfacing the driver's parse error (which embeds the connection string) instead of a refusal that names only the variable and the path. ([#13416](https://github.com/can1357/oh-my-pi/pull/13416) by [@sjawhar](https://github.com/sjawhar))
 
 ## [18.8.3] - 2026-10-07

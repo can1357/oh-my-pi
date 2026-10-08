@@ -13,6 +13,7 @@ import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manage
 import { SqlSessionStorage } from "@oh-my-pi/pi-coding-agent/session/sql-session-storage";
 import { SessionWriteConflictError } from "@oh-my-pi/pi-coding-agent/session/session-storage";
 import { SQL } from "bun";
+import { readStoredSession } from "../helpers/sql-session-storage";
 
 // Storage keys are platform paths; `/sessions/...` is only drive-relative on Windows,
 // so a resolved `open()` would address a different key than `create()` wrote.
@@ -59,11 +60,9 @@ describe("SessionManager + SqlSessionStorage (SQLite)", () => {
 		await storage.drain();
 		await manager.close();
 
-		const rows = (await client.unsafe(`SELECT content FROM omp_session_files WHERE path = ?`, [
-			sessionFilePath,
-		])) as Array<{ content: string }>;
-		expect(rows).toHaveLength(1);
-		const lines = rows[0].content.trim().split("\n");
+		const stored = await readStoredSession(client, "omp_session_files", sessionFilePath);
+		expect(stored).not.toBeNull();
+		const lines = (stored ?? "").trim().split("\n");
 		expect(lines.length).toBeGreaterThanOrEqual(3);
 		// The fixed-width title slot is always the first physical line; the session header follows.
 		const slot = JSON.parse(lines[0]);
