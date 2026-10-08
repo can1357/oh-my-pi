@@ -2,14 +2,19 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Scoped generic resource-exhaustion capacity backoff to Google Antigravity, preserving quota handling on other Google deployments ([#11713](https://github.com/can1357/oh-my-pi/pull/11713) by [@iliaal](https://github.com/iliaal)).
+
+## [18.8.6] - 2026-10-08
+
 ### Added
 
 - Added prompt-cache lookback support for Claude models across all hosts, including the public `prompt-cache-lookback` catalog axis and `resolvePromptCacheLookback` API.
 
 ### Fixed
 
-- Scoped generic resource-exhaustion capacity backoff to Google Antigravity, preserving quota handling on other Google deployments ([#11713](https://github.com/can1357/oh-my-pi/pull/11713) by [@iliaal](https://github.com/iliaal)).
-- Fixed model discovery failing when a newly published provider model was not yet recognized; unsupported models are now skipped with a warning so other available models remain discoverable.
+- Fixed model discovery when providers publish models before they are recognized by the catalog; unsupported models are now skipped with a warning so other available models remain discoverable.
 
 ## [18.8.5] - 2026-10-08
 
