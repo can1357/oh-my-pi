@@ -4221,8 +4221,11 @@ function resolveSyntheticThinking(wireEfforts: readonly string[]): ThinkingConfi
 	};
 }
 
-/** Synthetic quotes per-token USD as `"$0.000001"`; catalog cost is per-million. */
-function toSyntheticCostPerMillion(value: unknown): number | undefined {
+/**
+ * Per-token USD price (Pareto's OpenRouter-format `"0.000001"`, or Synthetic's
+ * `"$0.000001"`) as the catalog's per-million cost.
+ */
+function toPerTokenCostPerMillion(value: unknown): number | undefined {
 	const parsed = toNumber(typeof value === "string" ? value.trim().replace(/^\$/, "") : value);
 	if (parsed === undefined || parsed < 0) {
 		return undefined;
@@ -4239,16 +4242,16 @@ function resolveSyntheticCost(
 	if (!isRecord(pricing)) {
 		return fallback;
 	}
-	const input = toSyntheticCostPerMillion(pricing.prompt);
-	const output = toSyntheticCostPerMillion(pricing.completion);
+	const input = toPerTokenCostPerMillion(pricing.prompt);
+	const output = toPerTokenCostPerMillion(pricing.completion);
 	if (input === undefined || output === undefined) {
 		return fallback;
 	}
 	return {
 		input,
 		output,
-		cacheRead: toSyntheticCostPerMillion(pricing.input_cache_reads) ?? fallback.cacheRead,
-		cacheWrite: toSyntheticCostPerMillion(pricing.input_cache_writes) ?? fallback.cacheWrite,
+		cacheRead: toPerTokenCostPerMillion(pricing.input_cache_reads) ?? fallback.cacheRead,
+		cacheWrite: toPerTokenCostPerMillion(pricing.input_cache_writes) ?? fallback.cacheWrite,
 	};
 }
 
@@ -5135,6 +5138,54 @@ export function stepfunModelManagerOptions(
 			if (reference) return mapped;
 			const thinking = mapStepfunThinking(entry);
 			return thinking === undefined ? mapped : { ...mapped, reasoning: true, thinking };
+		},
+		// Must live on the manager options, not only the KDL descriptor:
+		// `createModelManager()` prunes the bundled slice from this flag.
+		dynamicModelsAuthoritative: true,
+	});
+}
+
+// ---------------------------------------------------------------------------
+// 16.95 Pareto Inference
+// ---------------------------------------------------------------------------
+
+export interface ParetoModelManagerConfig {
+	apiKey?: string;
+	baseUrl?: string;
+	fetch?: FetchImpl;
+}
+
+/**
+ * Pareto Inference model manager: OpenAI-compatible chat completions at
+ * `api.paretoinference.com/v1`. `/v1/models` carries only ids and the live
+ * per-token tariff (the key's own account rate when called with a key), so
+ * the bundled seed row (`providers/pareto.kdl`) supplies limits, modalities,
+ * and reasoning, and the endpoint's `pricing` replaces the bundled list price.
+ */
+export function paretoModelManagerOptions(
+	config?: ParetoModelManagerConfig,
+): ModelManagerOptions<"openai-completions"> {
+	return createOpenAICompatibleModelManagerOptions({
+		api: "openai-completions",
+		providerId: "pareto",
+		defaultBaseUrl: "https://api.paretoinference.com/v1",
+		config,
+		requireApiKey: true,
+		mapModel: (entry, defaults, reference) => {
+			const model = mapWithBundledReference(entry, defaults, reference);
+			// OpenRouter-format `pricing` (per-token USD strings). A missing or
+			// malformed rate keeps the bundled rate rather than reading as free.
+			const pricing = entry.pricing;
+			if (!isRecord(pricing)) return model;
+			return {
+				...model,
+				cost: {
+					input: toPerTokenCostPerMillion(pricing.prompt) ?? model.cost.input,
+					output: toPerTokenCostPerMillion(pricing.completion) ?? model.cost.output,
+					cacheRead: toPerTokenCostPerMillion(pricing.input_cache_read) ?? model.cost.cacheRead,
+					cacheWrite: model.cost.cacheWrite,
+				},
+			};
 		},
 		// Must live on the manager options, not only the KDL descriptor:
 		// `createModelManager()` prunes the bundled slice from this flag.

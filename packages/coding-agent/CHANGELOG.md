@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `PARETO_API_KEY` to the environment variables listed in `omp --help` ([#14965](https://github.com/can1357/oh-my-pi/pull/14965) by [@dylanduyvu](https://github.com/dylanduyvu))
+
 ## [18.8.5] - 2026-10-08
 
 ### Added

@@ -2236,6 +2236,20 @@ Provider-specific overrides in `packages/catalog/src/compat/rules/providers/zhip
 - **Authored seeds**: `muse-spark-1.1`, `muse-spark-1.2`, `muse-spark-1.2-contributor`, `muse-spark-1.3`, `muse-spark-1.3-contributor`; bundle policy `always`. Limits, capabilities, and prices are authored alongside these rows.
 - Runtime manager: `museCodeModelManagerOptions` in `packages/catalog/src/provider-models/openai-compat.ts`.
 
+## Pareto Inference (`pareto`)
+
+### Special casings
+- Uses `openai-completions` at `https://api.paretoinference.com/v1`. The endpoint serves streamed requests only and supports only its documented request parameters; Z.ai's native `thinking` field returns HTTP 400 `unsupported_parameter`. The host resolves to the `openai` thinking format, so GLM 5.3 Flash reasoning is sent only as `reasoning_effort` (`low`/`high`/`max` from the GLM lineage ladder); thinking-off sends the lowest effort.
+
+### Auth & usage
+- Login kind `api-key` is declared in `packages/catalog/src/compat/rules/auth/pareto.kdl`. Environment keys: `PARETO_API_KEY`. Validation uses `models-endpoint` against the authenticated `GET /v1/balance` route, because the public `/v1/models` endpoint accepts any key.
+
+### Catalog model handling
+- **Provider entry (`pareto`)**: `packages/catalog/src/compat/rules/providers/pareto.kdl` declares default model `z-ai/glm-5.3-flash`. Environment keys: `PARETO_API_KEY`.
+- **Discovery replacement**: Successful authoritative discovery replaces fallback provider rows rather than retaining retired seed models.
+- **Authored seeds**: `z-ai/glm-5.3-flash`; bundle policy `always`. Text input only; the context window is unset because Pareto does not publish one. `skip-cross-provider-reference-fills` keeps same-id rows on other hosts from backfilling it.
+- Runtime manager: `paretoModelManagerOptions` in `packages/catalog/src/provider-models/openai-compat.ts` reads the per-token `pricing` object (OpenRouter format) that `/v1/models` publishes and applies it as the live per-million cost.
+
 ## SingularityAPI (`singularityapi-dev`)
 
 ### Special casings
