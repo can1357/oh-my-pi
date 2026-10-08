@@ -226,6 +226,12 @@ function validateShapeParams(batchEnabled: boolean, params: TaskParams): string 
  * undefined when valid.
  */
 
+/** Reject invalid routing selectors on internal/stale-transcript calls that bypass the wire schema. */
+function validateRouting(routing: TaskParams["routing"] | undefined, label: string): string | undefined {
+	if (routing === undefined || routing === "auto" || routing === "off") return undefined;
+	return `${label} has an invalid \`routing\` value ${JSON.stringify(routing)}. Use "auto" or "off".`;
+}
+
 /** Reject an out-of-range `effort` selector on internal/stale-transcript calls that bypass the wire schema. */
 function validateEffort(effort: TaskEffort | undefined, label: string): string | undefined {
 	if (effort === undefined || TASK_EFFORTS.includes(effort)) return undefined;
@@ -249,6 +255,8 @@ function validateSpawnParams(params: TaskParams, batchEnabled: boolean): string 
 			}
 			const effortError = validateEffort(item.effort, `Task ${i + 1}${item.name ? ` (\`${item.name}\`)` : ""}`);
 			if (effortError) return effortError;
+			const routingError = validateRouting(item.routing, `Task ${i + 1}${item.name ? ` (\`${item.name}\`)` : ""}`);
+			if (routingError) return routingError;
 		}
 		const seen = new Map<string, string>();
 		for (const item of tasks) {
@@ -271,7 +279,7 @@ function validateSpawnParams(params: TaskParams, batchEnabled: boolean): string 
 			? "Missing `tasks`. Provide a `tasks` array (one subagent per item) with a shared `context`."
 			: "Missing `task`. Provide complete, self-contained instructions for the agent.";
 	}
-	return validateEffort(params.effort, "The call");
+	return validateRouting(params.routing, "The call") ?? validateEffort(params.effort, "The call");
 }
 
 /**
@@ -290,6 +298,7 @@ function resolveSpawnItems(params: TaskParams): TaskItem[] {
 	if ("schemaMode" in params) item.schemaMode = params.schemaMode;
 	if ("tools" in params) item.tools = params.tools;
 	if ("effort" in params) item.effort = params.effort;
+	if ("routing" in params) item.routing = params.routing;
 	if ("isolated" in params) item.isolated = params.isolated;
 	return [item];
 }
@@ -313,6 +322,7 @@ function spawnParamsFor(params: TaskParams, item: TaskItem, defaultAgent: string
 	if ("schemaMode" in item) spawn.schemaMode = item.schemaMode;
 	if ("tools" in item) spawn.tools = item.tools;
 	if ("effort" in item) spawn.effort = item.effort;
+	if ("routing" in item) spawn.routing = item.routing;
 	if (item.isolated !== undefined) {
 		spawn.isolated = item.isolated;
 	} else if ("isolated" in params) {
@@ -1618,6 +1628,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				assignment,
 				context,
 				agent: params.agent,
+				...(Object.hasOwn(params, "routing") ? { routing: params.routing } : {}),
 				...(Object.hasOwn(params, "outputSchema") ? { outputSchema: params.outputSchema } : {}),
 				...(Object.hasOwn(params, "schemaMode") ? { schemaMode: params.schemaMode } : {}),
 				...(params.effort !== undefined ? { effort: params.effort } : {}),

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Task parameters accept optional `routing: "auto" | "off"` ([#14936](https://github.com/can1357/oh-my-pi/pull/14936) by [@ff-zeno](https://github.com/ff-zeno))
+
 ## [18.8.4] - 2026-10-08
 
 ### Changed

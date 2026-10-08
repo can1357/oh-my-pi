@@ -224,6 +224,36 @@ describe("task spawn routing", () => {
 		expect(runSpy.mock.calls[0]?.[0].modelRoute).toBe("pool 1");
 	});
 
+	it("still emits before_subagent_spawn when a task item sets routing off and ignores a returned model", async () => {
+		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({
+			agents: [{ ...taskAgent, model: ["anthropic/claude-sonnet-4"] }],
+			projectAgentsDir: null,
+		});
+		const runSpy = vi
+			.spyOn(executorModule, "runSubprocess")
+			.mockImplementation(async options => makeResult(options.id ?? "?"));
+		const manager = createManager();
+		const session = createSession({ manager });
+		const events: Array<{ routing?: string }> = [];
+		session.emitBeforeSubagentSpawn = async event => {
+			events.push(event);
+			return { model: "openai/gpt-4.1-mini", note: "kept" };
+		};
+		const tool = await TaskTool.create(session);
+
+		const settled = await tool.execute("tc-off", {
+			agent: "task",
+			name: "Pinned",
+			task: "Do it.",
+			routing: "off",
+		} as TaskParams);
+		await manager.getJob(settled.details!.async!.jobId!)!.promise;
+
+		expect(events.map(event => event.routing)).toEqual(["off"]);
+		expect(runSpy.mock.calls[0]?.[0].modelOverride).toEqual(["anthropic/claude-sonnet-4"]);
+		expect(runSpy.mock.calls[0]?.[0].modelRoute).toBe("kept");
+	});
+
 	for (const { label, runnerOverrides, expectRetained } of [
 		{
 			label: "tells the parent an isolated agent cannot be messaged instead of calling it idle",

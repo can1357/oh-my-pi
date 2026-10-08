@@ -393,6 +393,23 @@ describe("WorkPool dispatch", () => {
 		expect(workpool.status().freshAgents).toBe(true);
 	});
 
+	it("forwards routing off onto each worker's first turn and defaults to auto", async () => {
+		const session = makeSession([], 2, true);
+		const runSpy = vi.spyOn(structured, "runStructuredSubagent").mockImplementation(async request => {
+			markIdle(request.identity?.id ?? "missing");
+			return execution(request.identity?.id ?? "missing");
+		});
+		const optedOut = new WorkPool(session, { name: "routed", policy: POLICY, routing: "off" });
+		optedOut.push(["one", "two"]);
+		await finishPool(session, optedOut);
+		const plain = new WorkPool(session, { name: "plain", policy: POLICY });
+		plain.push(["three"]);
+		await finishPool(session, plain);
+
+		expect(runSpy.mock.calls.slice(0, 2).map(([request]) => request.routing)).toEqual(["off", "off"]);
+		expect(runSpy.mock.calls.at(-1)?.[0].routing).toBe("auto");
+	});
+
 	it("close drops queued items but lets the in-flight turn finish", async () => {
 		const session = makeSession([], 1);
 		const first = Promise.withResolvers<void>();

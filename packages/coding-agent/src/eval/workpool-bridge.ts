@@ -55,6 +55,15 @@ function optionalTools(args: Record<string, unknown>): string[] | undefined {
 	return args.tools;
 }
 
+function optionalRouting(args: Record<string, unknown>): "auto" | "off" | undefined {
+	const value = args.routing;
+	if (value === undefined) return undefined;
+	if (value !== "auto" && value !== "off") {
+		throw new ToolError('workpool routing must be "auto" or "off"');
+	}
+	return value;
+}
+
 function getPool(options: EvalWorkpoolBridgeOptions, name: string) {
 	const ownerId = options.session.getAgentId?.() ?? MAIN_AGENT_ID;
 	const pool = WorkPoolRegistry.global().get(ownerId, name);
@@ -73,6 +82,7 @@ export async function runEvalWorkpool(args: unknown, options: EvalWorkpoolBridge
 		const requestedName = optionalString(record, "name");
 		const context = optionalString(record, "context");
 		const tools = optionalTools(record);
+		const routing = optionalRouting(record);
 		if (tools?.length && options.session.getPlanModeState?.()?.enabled === true) {
 			throw new ToolError("Eval-defined tools are unavailable in plan mode.");
 		}
@@ -81,6 +91,7 @@ export async function runEvalWorkpool(args: unknown, options: EvalWorkpoolBridge
 			invocationKind: "eval",
 			assignment: `Create workpool ${requestedName ?? agent ?? "worker"}`,
 			...(agent ? { agent } : {}),
+			...(routing !== undefined ? { routing } : {}),
 		});
 		const customTools = tools?.length
 			? createEvalCustomTools(options.session, await describeEvalTools(options.session, tools, options.signal))
@@ -100,6 +111,7 @@ export async function runEvalWorkpool(args: unknown, options: EvalWorkpoolBridge
 			policy,
 			...(context ? { context } : {}),
 			customTools,
+			...(routing !== undefined ? { routing } : {}),
 		});
 		options.emitStatus?.({ op: "workpool", action: "create", pool: name, count: pool.limit() });
 		return { name, agent: policy.agentName, limit: pool.limit() };

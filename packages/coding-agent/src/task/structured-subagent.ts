@@ -110,6 +110,8 @@ export interface StructuredSubagentRequest {
 	context?: string;
 	agent?: string;
 	model?: string | string[];
+	/** `off` keeps the configured model. The hook still runs; `block` and `note` still apply. */
+	routing?: "auto" | "off";
 	/** Presence, rather than truthiness, makes this the highest-priority schema. */
 	outputSchema?: unknown;
 	schemaMode?: StructuredSubagentSchemaMode;
@@ -448,6 +450,7 @@ async function applySpawnHook(
 ): Promise<EffectiveSubagentPolicy> {
 	const emit = request.session.emitBeforeSubagentSpawn;
 	if (!emit) return policy;
+	const routing = request.routing ?? "auto";
 	const spawnKey =
 		request.identity?.id ??
 		request.identity?.label ??
@@ -460,11 +463,16 @@ async function applySpawnHook(
 			modelRole: policy.modelRole,
 			patterns: policy.modelOverride ?? [],
 			spawnKey,
+			routing,
 		},
 		request.signal,
 	);
 	if (spawnResult?.block) {
 		throw new StructuredSubagentError("preflight", spawnResult.reason ?? "Subagent spawn blocked by extension.");
+	}
+	// This result type has no effort or thinkingLevel. `"off"` ignores `model` only.
+	if (routing === "off") {
+		return spawnResult?.note !== undefined ? { ...policy, modelRoute: spawnResult.note } : policy;
 	}
 	if (spawnResult?.model === undefined) return policy;
 	const replacement = resolveConfiguredModelPatterns(spawnResult.model, request.session.settings);
