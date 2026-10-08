@@ -6,7 +6,7 @@ import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { ModelRegistry } from "../../src/config/model-registry";
 import { Settings } from "../../src/config/settings";
-import type { LoadExtensionsResult } from "../../src/extensibility/extensions/types";
+import { ExtensionRuntime } from "../../src/extensibility/extensions/loader";
 import { AgentRegistry } from "../../src/registry/agent-registry";
 import type { CreateAgentSessionResult } from "../../src/sdk";
 import * as sdkModule from "../../src/sdk";
@@ -48,8 +48,13 @@ describe("yield through native AgentSession events", () => {
 					},
 					note: { type: "string" },
 					count: { type: "integer" },
+					sequence: {
+						type: "array",
+						prefixItems: [{ type: "string" }, { type: "integer" }],
+						items: { type: "integer" },
+					},
 				},
-				required: ["findings", "note", "count"],
+				required: ["findings", "note", "count", "sequence"],
 				additionalProperties: false,
 			};
 			const toolSession: ToolSession = {
@@ -71,7 +76,10 @@ describe("yield through native AgentSession events", () => {
 								type: "toolCall",
 								id: "native-item",
 								name: "yield",
-								arguments: { type: ["findings"], data: { title: "one", detail: null } },
+								arguments: {
+									type: ["findings", "sequence"],
+									data: { findings: { title: "one", detail: null }, sequence: ["start"] },
+								},
 							},
 						],
 					},
@@ -81,7 +89,10 @@ describe("yield through native AgentSession events", () => {
 								type: "toolCall",
 								id: "native-batch",
 								name: "yield",
-								arguments: { type: ["findings"], data: [{ title: "two" }, { title: "three", detail: null }] },
+								arguments: {
+									type: ["findings", "sequence"],
+									data: { findings: [{ title: "two" }, { title: "three", detail: null }], sequence: 1 },
+								},
 							},
 						],
 					},
@@ -91,7 +102,10 @@ describe("yield through native AgentSession events", () => {
 								type: "toolCall",
 								id: "native-map",
 								name: "yield",
-								arguments: { type: ["note", "count"], data: { note: "done", count: 3 } },
+								arguments: {
+									type: ["note", "count", "sequence"],
+									data: { note: "done", count: 3, sequence: 2 },
+								},
 							},
 						],
 					},
@@ -151,7 +165,7 @@ describe("yield through native AgentSession events", () => {
 			});
 			const factory = vi.spyOn(sdkModule, "createAgentSession").mockResolvedValue({
 				session: live,
-				extensionsResult: {} as unknown as LoadExtensionsResult,
+				extensionsResult: { extensions: [], errors: [], runtime: new ExtensionRuntime() },
 				setToolUIContext: () => {},
 				eventBus: new EventBus(),
 			} satisfies CreateAgentSessionResult);
@@ -202,6 +216,7 @@ describe("yield through native AgentSession events", () => {
 					findings: [{ title: "one" }, { title: "two" }, { title: "three" }],
 					note: "done",
 					count: 3,
+					sequence: ["start", 1, 2],
 				});
 				expect(discoveryRequests).toBe(0);
 			} finally {

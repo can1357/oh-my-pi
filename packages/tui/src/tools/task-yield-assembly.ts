@@ -10,10 +10,10 @@ import type { YieldItem } from "./task";
  */
 export interface YieldSectionShapes {
 	readonly shapes: ReadonlyMap<string, "array" | "scalar">;
-	/** Prefer a schema-valid array item over a batch when the input is ambiguous. */
-	readonly acceptsItem?: (label: string, value: unknown) => boolean;
+	/** Prefer a schema-valid item at the current append offset over an equally valid batch. */
+	readonly acceptsItem?: (label: string, value: unknown, offset?: number) => boolean;
 	/** Mixed sections append array items/batches but keep independently valid scalar alternatives direct. */
-	readonly acceptsArray?: (label: string, value: unknown) => boolean;
+	readonly acceptsArray?: (label: string, value: unknown, offset?: number) => boolean;
 }
 
 /** Outcome of folding a run's yield calls into one payload, with provenance flags. */
@@ -46,8 +46,9 @@ export function isYieldSectionBatch(
 	value: unknown,
 	label: string,
 	acceptsItem?: YieldSectionShapes["acceptsItem"],
+	offset = 0,
 ): value is unknown[] {
-	return Array.isArray(value) && acceptsItem?.(label, value) !== true;
+	return Array.isArray(value) && acceptsItem?.(label, value, offset) !== true;
 }
 
 function getYieldLabels(type: YieldItem["type"]): string[] {
@@ -93,6 +94,7 @@ function appendYieldSection(
 	value: unknown,
 	shape: "array" | "scalar" | undefined,
 	sectionShapes?: YieldSectionShapes,
+	offset = 0,
 ): void {
 	const ownsArray = sectionArrayOwnership.get(label);
 	const existing = sections[label];
@@ -100,7 +102,7 @@ function appendYieldSection(
 		sections[label] = value;
 		sectionArrayOwnership.set(label, false);
 	} else if (shape === "array") {
-		const values = isYieldSectionBatch(value, label, sectionShapes?.acceptsItem) ? value : [value];
+		const values = isYieldSectionBatch(value, label, sectionShapes?.acceptsItem, offset) ? value : [value];
 		if (ownsArray === undefined || !Array.isArray(existing)) {
 			sections[label] = values.slice();
 			sectionArrayOwnership.set(label, true);
@@ -177,11 +179,13 @@ export function assembleYieldResult(
 		for (const label of labels) {
 			const declaredShape = sectionShapes?.shapes.get(label);
 			const value = resolveYieldSectionValue(resolved.value, labels, label, sectionShapes);
+			const existing = sections[label];
+			const offset = Array.isArray(existing) ? existing.length : 0;
 			const shape =
-				declaredShape === "array" && sectionShapes?.acceptsArray?.(label, value) === false
+				declaredShape === "array" && sectionShapes?.acceptsArray?.(label, value, offset) === false
 					? "scalar"
 					: declaredShape;
-			appendYieldSection(sections, sectionArrayOwnership, label, value, shape, sectionShapes);
+			appendYieldSection(sections, sectionArrayOwnership, label, value, shape, sectionShapes, offset);
 			if (shape === "scalar") {
 				if (overridden) overriddenScalars.add(label);
 				else overriddenScalars.delete(label);

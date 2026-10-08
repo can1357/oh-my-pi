@@ -25,18 +25,18 @@ export interface OutputValidator {
 	/** Treat strict-provider nulls for optional non-nullable properties as omitted before validation and delivery. */
 	normalize(value: unknown): unknown;
 	/** Apply the same normalization to one incremental section item or batch. */
-	normalizeSection(label: string, value: unknown): unknown;
-	/** Whether the payload is a single section item after strict optional-null normalization. */
-	isSectionItem(label: string, value: unknown): boolean;
+	normalizeSection(label: string, value: unknown, offset?: number): unknown;
+	/** Whether the payload is a single item at the actual append position. */
+	isSectionItem(label: string, value: unknown, offset?: number): boolean;
 	/** Whether this payload is an array-branch item or batch, rather than a scalar alternative. */
-	isArraySectionValue(label: string, value: unknown): boolean;
+	isArraySectionValue(label: string, value: unknown, offset?: number): boolean;
 	/** Top-level required property names. Empty if the schema has no `required` array at root. */
 	readonly requiredFields: readonly string[];
 	/**
 	 * Per-label validators for incremental yields. Array-typed properties accept
 	 * an item or a batch; whole-array constraints apply at finalization.
 	 */
-	readonly validateSection: ReadonlyMap<string, (value: unknown) => JsonSchemaValidationResult>;
+	readonly validateSection: ReadonlyMap<string, (value: unknown, offset?: number) => JsonSchemaValidationResult>;
 	/** Whether top-level schema closure makes unknown incremental yield labels invalid. */
 	readonly rejectUnknownSections: boolean;
 	/** Finite top-level section labels declared directly by the schema. Pattern-backed labels are accepted via `isKnownSection`. */
@@ -130,45 +130,89 @@ function buildOutputValidatorUncached(schema: unknown): BuildOutputValidatorResu
 	const required = extractRequiredFields(labelSchema);
 	const sectionLabels = buildSectionLabelMetadata(labelSchema);
 	const sectionSchemas = buildSectionSchemas(labelSchema);
-	const sectionItemSchemas = new Map<string, unknown>();
-	const sectionBatchSchemas = new Map<string, unknown>();
-	const arraySections = new Set<string>();
-	for (const [label, schema] of sectionSchemas) {
-		if (yieldSectionShape(schema) !== "array") {
-			sectionItemSchemas.set(label, schema);
-			continue;
+	const arraySections = new Map<
+		string,
+		{
+			schema: unknown;
+			prefixLength: number;
+			tail: unknown;
+			scalar: unknown;
+			positions: Map<number, { item: unknown; batch: unknown }>;
 		}
-		arraySections.add(label);
-		const itemSchema = buildSectionItemSchema(buildArraySectionSchema(schema));
-		sectionItemSchemas.set(label, itemSchema);
-		sectionBatchSchemas.set(label, { type: "array", items: itemSchema });
+	>();
+	for (const [label, schema] of sectionSchemas) {
+		if (yieldSectionShape(schema) !== "array") continue;
+		const arraySchema = projectSectionDomain(schema, true);
+		const prefixLength = sectionPrefixLength(arraySchema);
+		arraySections.set(label, {
+			schema: arraySchema,
+			prefixLength,
+			tail: buildSectionItemSchema(arraySchema, prefixLength),
+			scalar: projectSectionDomain(schema, false),
+			positions: new Map(),
+		});
 	}
-	const acceptsSectionItem = (label: string, value: unknown): boolean => {
-		const itemSchema = sectionItemSchemas.get(label);
-		if (itemSchema === undefined) return false;
-		return validateJsonSchemaValue(itemSchema, normalizeStrictOutput(value, itemSchema)).success;
+	const schemasAt = (label: string, offset: number) => {
+		const section = arraySections.get(label);
+		if (!section) return undefined;
+		const position = Math.min(offset, section.prefixLength);
+		let schemas = section.positions.get(position);
+		if (schemas) return schemas;
+		const batch = buildSectionBatchSchema(section.schema, position, section.prefixLength, section.tail);
+		schemas = {
+			item: position === section.prefixLength ? section.tail : buildSectionItemSchema(section.schema, position),
+			batch,
+		};
+		section.positions.set(position, schemas);
+		return schemas;
 	};
-	const acceptsArrayValue = (label: string, value: unknown): boolean => {
+	const classifySection = (label: string, value: unknown, offset: number): "item" | "batch" | "scalar" | undefined => {
+		const sectionSchema = sectionSchemas.get(label);
+		const schemas = schemasAt(label, offset);
+		if (!schemas) return "scalar";
+		// A valid original branch wins before normalization can manufacture a different match.
+		if (validateJsonSchemaValue(schemas.item, value).success) return "item";
+		if (Array.isArray(value) && validateJsonSchemaValue(schemas.batch, value).success) return "batch";
+		const scalarSchema = arraySections.get(label)?.scalar;
+		const scalarAllowed = !Array.isArray(value) || validateJsonSchemaValue(scalarSchema, value).success;
+		if (scalarAllowed && validateJsonSchemaValue(sectionSchema, value).success) return "scalar";
+		const item = normalizeStrictOutput(value, schemas.item);
+		if (item !== value && validateJsonSchemaValue(schemas.item, item).success) return "item";
+		if (Array.isArray(value)) {
+			const batch = normalizeStrictOutput(value, schemas.batch);
+			if (batch !== value && validateJsonSchemaValue(schemas.batch, batch).success) return "batch";
+		}
+		if (scalarSchema !== false) {
+			const scalar = normalizeStrictOutput(value, sectionSchema);
+			if (
+				scalar !== value &&
+				(!Array.isArray(scalar) || validateJsonSchemaValue(scalarSchema, scalar).success) &&
+				validateJsonSchemaValue(sectionSchema, scalar).success
+			)
+				return "scalar";
+		}
+		return undefined;
+	};
+	const acceptsSectionItem = (label: string, value: unknown, offset = 0): boolean => {
+		if (arraySections.has(label)) return classifySection(label, value, offset) === "item";
+		const schema = sectionSchemas.get(label);
+		return schema !== undefined && validateJsonSchemaValue(schema, normalizeStrictOutput(value, schema)).success;
+	};
+	const acceptsArrayValue = (label: string, value: unknown, offset = 0): boolean => {
 		if (!arraySections.has(label)) return false;
-		if (acceptsSectionItem(label, value)) return true;
-		const batchSchema = sectionBatchSchemas.get(label);
-		return (
-			Array.isArray(value) && validateJsonSchemaValue(batchSchema, normalizeStrictOutput(value, batchSchema)).success
-		);
+		const kind = classifySection(label, value, offset);
+		return kind === "item" || kind === "batch";
 	};
-	const sectionValidators = new Map<string, (value: unknown) => JsonSchemaValidationResult>();
+	const sectionValidators = new Map<string, (value: unknown, offset?: number) => JsonSchemaValidationResult>();
 	for (const [label, sectionSchema] of sectionSchemas) {
-		sectionValidators.set(label, value => {
-			if (!arraySections.has(label)) return validateJsonSchemaValue(sectionSchema, value);
-			const itemResult = validateJsonSchemaValue(sectionItemSchemas.get(label), value);
-			if (itemResult.success) return itemResult;
-			const batchResult = Array.isArray(value)
-				? validateJsonSchemaValue(sectionBatchSchemas.get(label), value)
-				: undefined;
-			if (batchResult?.success) return batchResult;
-			const sectionResult = validateJsonSchemaValue(sectionSchema, value);
-			if (sectionResult.success) return sectionResult;
-			return batchResult ?? itemResult;
+		sectionValidators.set(label, (value, offset = 0) => {
+			const schemas = schemasAt(label, offset);
+			if (!schemas) return validateJsonSchemaValue(sectionSchema, value);
+			const kind = classifySection(label, value, offset);
+			if (kind === "scalar") return validateJsonSchemaValue(sectionSchema, value);
+			if (kind === "batch") return validateJsonSchemaValue(schemas.batch, value);
+			if (kind === "item") return validateJsonSchemaValue(schemas.item, value);
+			return validateJsonSchemaValue(Array.isArray(value) ? schemas.batch : schemas.item, value);
 		});
 	}
 	return {
@@ -178,15 +222,14 @@ function buildOutputValidatorUncached(schema: unknown): BuildOutputValidatorResu
 			requiredFields: required,
 			validate: value => validateJsonSchemaValue(jsonSchemaRecord, value),
 			normalize: value => normalizeStrictOutput(value, labelSchema),
-			normalizeSection: (label, value) =>
-				normalizeStrictOutput(
-					value,
-					arraySections.has(label) && acceptsSectionItem(label, value)
-						? sectionItemSchemas.get(label)
-						: acceptsArrayValue(label, value)
-							? sectionBatchSchemas.get(label)
-							: sectionSchemas.get(label),
-				),
+			normalizeSection: (label, value, offset = 0) => {
+				const kind = classifySection(label, value, offset);
+				const schemas = schemasAt(label, offset);
+				if (schemas && kind === undefined) return value;
+				const schema =
+					kind === "item" ? schemas?.item : kind === "batch" ? schemas?.batch : sectionSchemas.get(label);
+				return normalizeStrictOutput(value, schema);
+			},
 			isSectionItem: acceptsSectionItem,
 			isArraySectionValue: acceptsArrayValue,
 			validateSection: sectionValidators,
@@ -301,44 +344,99 @@ export function isArraySectionSchema(schema: unknown): boolean {
 	return false;
 }
 
-/** Keep declared array alternatives without letting an open/scalar branch become an unconstrained item. */
-function buildArraySectionSchema(schema: unknown, arrayConstrained = false): unknown {
+/** Static wire candidates cover every append position; runtime validation still uses the actual offset. */
+export function buildSectionInputSchemas(schema: unknown): unknown[] {
+	if (yieldSectionShape(schema) !== "array") return [];
+	const arraySchema = projectSectionDomain(schema, true);
+	const prefixLength = sectionPrefixLength(arraySchema);
+	const tail = buildSectionItemSchema(arraySchema, prefixLength);
+	const variants: unknown[] = [];
+	for (let offset = 0; offset <= prefixLength; offset++) {
+		const item = offset === prefixLength ? tail : buildSectionItemSchema(arraySchema, offset);
+		if (item !== false) variants.push(item);
+		variants.push(buildSectionBatchSchema(arraySchema, offset, prefixLength, tail));
+	}
+	return variants;
+}
+
+function buildSectionBatchSchema(
+	schema: unknown,
+	offset: number,
+	prefixLength: number,
+	tail: unknown,
+): Record<string, unknown> {
+	const batch: Record<string, unknown> = { type: "array", items: tail };
+	if (offset < prefixLength) {
+		const prefixItems: unknown[] = [];
+		for (let index = offset; index < prefixLength; index++) {
+			prefixItems.push(buildSectionItemSchema(schema, index));
+		}
+		batch.prefixItems = prefixItems;
+	}
+	return batch;
+}
+
+/** Project declared array and scalar alternatives without turning open branches into array items. */
+function projectSectionDomain(schema: unknown, arrayDomain: boolean, arrayConstrained = false): unknown {
 	if (!isRecord(schema)) return schema;
+	let domain = schema;
+	if (!arrayDomain) {
+		if (schema.type === "array") return false;
+		if (Array.isArray(schema.type) && schema.type.includes("array")) {
+			const types = schema.type.filter(type => type !== "array");
+			if (types.length === 0) return false;
+			domain = { ...domain, type: types.length === 1 ? types[0] : types };
+		}
+	}
 	arrayConstrained ||= sectionShapeMask(schema) === 1;
-	let arrays = schema;
-	if (Array.isArray(schema.type) && schema.type.includes("array")) arrays = { ...arrays, type: "array" };
+	if (arrayDomain && Array.isArray(schema.type) && schema.type.includes("array"))
+		domain = { ...domain, type: "array" };
 	for (const keyword of ["allOf", "oneOf", "anyOf"] as const) {
 		const branches = schema[keyword];
 		if (!Array.isArray(branches)) continue;
 		const applicable =
-			keyword === "allOf"
+			keyword === "allOf" || !arrayDomain
 				? branches
 				: branches.filter(branch =>
 						arrayConstrained ? (sectionShapeMask(branch) & 1) !== 0 : isArraySectionSchema(branch),
 					);
-		arrays = {
-			...arrays,
-			[keyword === "oneOf" ? "anyOf" : keyword]: applicable.map(branch =>
-				buildArraySectionSchema(branch, arrayConstrained),
-			),
-		};
-		if (keyword === "oneOf") delete arrays.oneOf;
+		const projected = applicable.map(branch => projectSectionDomain(branch, arrayDomain, arrayConstrained));
+		if (keyword === "allOf" && projected.some(branch => branch === false)) return false;
+		if (keyword !== "allOf" && projected.every(branch => branch === false)) return false;
+		domain = { ...domain, [keyword === "oneOf" ? "anyOf" : keyword]: projected };
+		if (keyword === "oneOf") delete domain.oneOf;
 	}
-	return arrays;
+	return domain;
 }
 
 /** Strip only the outer array layer, combining item constraints but deferring whole-array constraints. */
-function buildSectionItemSchema(schema: unknown): unknown {
+function buildSectionItemSchema(schema: unknown, offset: number): unknown {
 	if (!isRecord(schema)) return schema;
 	const constraints: unknown[] = [];
-	if (schema.items !== undefined) constraints.push(schema.items);
+	const prefix = Array.isArray(schema.prefixItems) ? schema.prefixItems : undefined;
+	if (prefix && offset < prefix.length) constraints.push(prefix[offset]);
+	else if (schema.items !== undefined) constraints.push(schema.items);
 	for (const keyword of ["allOf", "oneOf", "anyOf"] as const) {
 		const branches = schema[keyword];
 		if (!Array.isArray(branches)) continue;
-		constraints.push({ [keyword === "oneOf" ? "anyOf" : keyword]: branches.map(buildSectionItemSchema) });
+		constraints.push({
+			[keyword === "oneOf" ? "anyOf" : keyword]: branches.map(branch => buildSectionItemSchema(branch, offset)),
+		});
 	}
 	if (constraints.length === 0) return true;
 	return constraints.length === 1 ? constraints[0] : { allOf: constraints };
+}
+
+/** Positions beyond the last declared prefix all share the same tail schema. */
+function sectionPrefixLength(schema: unknown): number {
+	if (!isRecord(schema)) return 0;
+	let length = Array.isArray(schema.prefixItems) ? schema.prefixItems.length : 0;
+	for (const keyword of ["allOf", "oneOf", "anyOf"]) {
+		const branches = schema[keyword];
+		if (!Array.isArray(branches)) continue;
+		for (const branch of branches) length = Math.max(length, sectionPrefixLength(branch));
+	}
+	return length;
 }
 
 /** Required fields remain required across all conjuncts during optional-null normalization. */

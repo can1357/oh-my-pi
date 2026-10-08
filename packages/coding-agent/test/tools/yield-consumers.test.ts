@@ -438,6 +438,222 @@ describe("yield shape production consumers", () => {
 		}
 	});
 
+	it("preserves an originally valid mixed scalar before item normalization can manufacture a match", async () => {
+		const itemSchema = {
+			type: "object",
+			properties: { x: { type: "string" } },
+			additionalProperties: false,
+		};
+		const mixed = {
+			type: "object",
+			properties: {
+				value: {
+					anyOf: [
+						{ type: "array", items: itemSchema },
+						{ type: "object", properties: { x: { type: "null" } }, required: ["x"], additionalProperties: false },
+					],
+				},
+			},
+			required: ["value"],
+			additionalProperties: false,
+		};
+		const scalar = Object.freeze({ x: null });
+		const validator = buildOutputValidator(mixed).validator;
+		expect(validator?.normalizeSection("value", scalar)).toBe(scalar);
+		expect(validator?.isSectionItem("value", scalar)).toBe(false);
+		expect(validator?.isArraySectionValue("value", scalar)).toBe(false);
+		expect(validator?.validateSection.get("value")?.(scalar).success).toBe(true);
+		const tool = new YieldTool(session(mixed));
+		const item = await submit(tool, { type: ["value"], data: scalar }, false);
+		expect(item.data).toEqual({ x: null });
+		const original = structuredClone(item);
+		const context = yieldSectionShapes(mixed);
+		for (let repeat = 0; repeat < 2; repeat++) {
+			expect(assembleYieldResult([item], undefined, context)?.data).toEqual({ value: { x: null } });
+			const output = finalize([item], mixed);
+			expect(output.exitCode).toBe(0);
+			expect(JSON.parse(output.rawOutput)).toEqual({ value: { x: null } });
+			expect(item).toEqual(original);
+			expect(scalar).toEqual({ x: null });
+		}
+	});
+
+	it("uses prefix positions before an unconstrained tail and keeps genuinely ambiguous items first", async () => {
+		const prefixed = {
+			type: "object",
+			properties: { rows: { type: "array", prefixItems: [{ type: "string" }, { type: "integer" }] } },
+			required: ["rows"],
+			additionalProperties: false,
+		};
+		const tool = new YieldTool(session(prefixed));
+		const first = await submit(tool, { type: ["rows"], data: ["one"] }, false);
+		const second = await submit(tool, { type: ["rows"], data: 2 }, false);
+		const tail = await submit(tool, { type: ["rows"], data: { tail: true } }, false);
+		if (!Array.isArray(first.data)) throw new Error("Expected initial prefix batch");
+		Object.freeze(first.data);
+		const items = [first, second, tail];
+		const original = structuredClone(items);
+		for (let length = 1; length <= items.length; length++) {
+			const prefix = items.slice(0, length);
+			const expected = { rows: ["one", 2, { tail: true }].slice(0, length) };
+			for (let repeat = 0; repeat < 2; repeat++) {
+				expect(assembleYieldResult(prefix, undefined, yieldSectionShapes(prefixed))?.data).toEqual(expected);
+				const output = finalize(prefix, prefixed);
+				expect(output.exitCode).toBe(0);
+				expect(JSON.parse(output.rawOutput)).toEqual(expected);
+				expect(items).toEqual(original);
+			}
+		}
+
+		const nested = {
+			type: "object",
+			properties: { rows: { type: "array", prefixItems: [{ type: "array", items: {} }] } },
+			required: ["rows"],
+			additionalProperties: false,
+		};
+		const nestedTool = new YieldTool(session(nested));
+		const nestedValue = Object.freeze([Object.freeze([1, 2])]);
+		const context = yieldSectionShapes(nested);
+		expect(context.acceptsItem?.("rows", nestedValue, 0)).toBe(true);
+		expect(context.acceptsArray?.("rows", nestedValue, 0)).toBe(true);
+		expect(validateJsonSchemaValue(nested.properties.rows, nestedValue).success).toBe(true);
+		const nestedItem = await submit(nestedTool, { type: ["rows"], data: nestedValue }, false);
+		const nestedTail = await submit(nestedTool, { type: ["rows"], data: "tail" }, false);
+		const output = finalize([nestedItem, nestedTail], nested);
+		expect(output.exitCode).toBe(0);
+		expect(JSON.parse(output.rawOutput)).toEqual({ rows: [[[1, 2]], "tail"] });
+		expect(nestedValue).toEqual([[1, 2]]);
+	});
+
+	it("does not reinterpret a batch from an earlier prefix position as a scalar alternative", async () => {
+		const mixed = {
+			type: "object",
+			properties: {
+				rows: {
+					anyOf: [
+						{ type: "array", prefixItems: [{ type: "string" }], items: false },
+						{
+							type: "object",
+							properties: { reset: { type: "string" } },
+							required: ["reset"],
+							additionalProperties: false,
+						},
+					],
+				},
+			},
+			required: ["rows"],
+			additionalProperties: false,
+		};
+		const tool = new YieldTool(session(mixed));
+		const first = await submit(tool, { type: ["rows"], data: ["one"] }, false);
+		await expect(tool.execute("wrong-position", { type: ["rows"], data: ["two"] })).rejects.toThrow(
+			/does not match schema/,
+		);
+		const reset = await submit(tool, { type: ["rows"], data: { reset: "object" } }, false);
+		const fresh = await submit(tool, { type: ["rows"], data: ["fresh"] }, false);
+		const items = [first, reset, fresh];
+		expect(assembleYieldResult(items, undefined, yieldSectionShapes(mixed))?.data).toEqual({ rows: ["fresh"] });
+		expect(JSON.parse(finalize(items, mixed).rawOutput)).toEqual({ rows: ["fresh"] });
+	});
+
+	it("advances prefix positions only for accepted values and resets them with the monitored run", async () => {
+		const prefixed = {
+			type: "object",
+			properties: {
+				rows: {
+					type: "array",
+					prefixItems: [{ type: "string" }, { type: "integer" }],
+					items: false,
+					minItems: 2,
+				},
+			},
+			required: ["rows"],
+			additionalProperties: false,
+		};
+		const tool = new YieldTool(session(prefixed));
+		await expect(tool.execute("bad-first", { type: ["rows"], data: 1 })).rejects.toThrow(/does not match schema/);
+		const empty = await submit(tool, { type: ["rows"], data: [] }, false);
+		const first = await submit(tool, { type: ["rows"], data: ["one"] }, false);
+		await expect(tool.execute("bad-second", { type: ["rows"], data: "two" })).rejects.toThrow(
+			/does not match schema/,
+		);
+		const aborted = await submit(tool, { type: ["rows"], error: "synthetic aborted submission" }, true);
+		const second = await submit(tool, { type: ["rows"], data: 2 }, false);
+		await expect(tool.execute("forbidden-tail", { type: ["rows"], data: 3 })).rejects.toThrow(
+			/does not match schema/,
+		);
+		const emptyTail = await submit(tool, { type: ["rows"], data: [] }, false);
+		const items = [empty, first, aborted, second, emptyTail];
+		const original = structuredClone(items);
+		expect(finalize([empty, first], prefixed).exitCode).toBe(1);
+		expect(assembleYieldResult(items, undefined, yieldSectionShapes(prefixed))?.data).toEqual({ rows: ["one", 2] });
+		expect(finalize(items, prefixed).exitCode).toBe(0);
+		expect(items).toEqual(original);
+		const terminal = await submit(tool, { type: "result", data: { rows: ["replacement", 9] } }, true);
+		expect(JSON.parse(finalize([...items, terminal], prefixed).rawOutput)).toEqual({ rows: ["replacement", 9] });
+
+		tool.resetTurnState();
+		const fresh = await submit(tool, { type: ["rows"], data: ["fresh"] }, false);
+		const freshSecond = await submit(tool, { type: ["rows"], data: 4 }, false);
+		expect(JSON.parse(finalize([fresh, freshSecond], prefixed).rawOutput)).toEqual({ rows: ["fresh", 4] });
+	});
+
+	it("uses the accepted offset for concurrently invoked tool calls without an asynchronous gap", async () => {
+		const prefixed = {
+			type: "object",
+			properties: {
+				rows: { type: "array", prefixItems: [{ type: "string" }, { type: "integer" }], items: false },
+			},
+			required: ["rows"],
+			additionalProperties: false,
+		};
+		const tool = new YieldTool(session(prefixed));
+		const items = await Promise.all([
+			submit(tool, { type: ["rows"], data: ["one"] }, false),
+			submit(tool, { type: ["rows"], data: 2 }, false),
+		]);
+		expect(assembleYieldResult(items, undefined, yieldSectionShapes(prefixed))?.data).toEqual({ rows: ["one", 2] });
+		expect(JSON.parse(finalize(items, prefixed).rawOutput)).toEqual({ rows: ["one", 2] });
+	});
+
+	it("uses the actual array length after mixed scalar resets for subsequent prefix items", async () => {
+		const mixed = {
+			type: "object",
+			properties: {
+				rows: {
+					anyOf: [{ type: "array", prefixItems: [{ type: "integer" }, { type: "string" }], items: false }, {}],
+				},
+			},
+			required: ["rows"],
+			additionalProperties: false,
+		};
+		const tool = new YieldTool(session(mixed));
+		const first = await submit(tool, { type: ["rows"], data: ["scalar"] }, false);
+		if (!Array.isArray(first.data)) throw new Error("Expected borrowed scalar array");
+		Object.freeze(first.data);
+		const second = await submit(tool, { type: ["rows"], data: "at-one" }, false);
+		const reset = await submit(tool, { type: ["rows"], data: { reset: true } }, false);
+		const afterReset = await submit(tool, { type: ["rows"], data: 7 }, false);
+		const finalItem = await submit(tool, { type: ["rows"], data: "next" }, false);
+		const items = [first, second, reset, afterReset, finalItem];
+		const original = structuredClone(items);
+		const expected = [
+			{ rows: ["scalar"] },
+			{ rows: ["scalar", "at-one"] },
+			{ rows: { reset: true } },
+			{ rows: [7] },
+			{ rows: [7, "next"] },
+		];
+		for (let length = 1; length <= items.length; length++) {
+			const prefix = items.slice(0, length);
+			expect(assembleYieldResult(prefix, undefined, yieldSectionShapes(mixed))?.data).toEqual(expected[length - 1]);
+			const output = finalize(prefix, mixed);
+			expect(output.exitCode).toBe(0);
+			expect(JSON.parse(output.rawOutput)).toEqual(expected[length - 1]);
+			expect(items).toEqual(original);
+		}
+	});
+
 	it("exposes legal multi-label subsets and item batches to the provider parameter validator", async () => {
 		const declaration = {
 			...schema,
