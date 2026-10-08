@@ -293,6 +293,11 @@ Notes: ...
 ---
 ```
 
+- X URLs (`x.com`, `twitter.com`, and their `www.`/`mobile.` hosts) never reach `loadPage()`; X blocks scraping. `handleTwitter()` (`packages/coding-agent/src/web/scrapers/twitter.ts`) classifies the page with `parseXUrl()` (`packages/coding-agent/src/web/x.ts`) and has Grok's `x_search` tool read it with a fixed call plan and output format (`packages/coding-agent/src/prompts/system/x-read.md`):
+   - post (`/<handle>/status/<id>`, `/i/web/status/<id>`, trailing `/photo/N` etc.) → `x_thread_fetch`: the post, parent thread, quoted post, replies, metrics, and media URLs;
+   - profile (`/<handle>`, `/with_replies`, `/media`) → `x_user_search` plus a `from:<handle>` `x_keyword_search` (Latest, 10 posts), with `allowed_x_handles` pinned to the handle;
+   - search (`/search?q=`; `f=live` → Latest, `f=media` → `filter:media`, `f=user` → `x_user_search`) and hashtag (`/hashtag/<tag>`) → `x_keyword_search`.
+   - Models are tried in `xaiModelChain()` order (`web` role xAI candidates plus the provider default's `webSearchModel`, ranked by provider priority so `xai-oauth` runs before `xai` unless `modelProviderOrder` says otherwise) with `max_turns: 2` and low reasoning effort; the call bills the xAI account per post and profile fetched. The answer is the model's rendering of the tool output, which the API does not expose raw; the `Notes:` header names the model and fetch counts. Without xAI credentials, for other X pages (home, explore, followers, lists), or when every model fails, the result is a `text/plain` explanation with method `x-unavailable`.
 - `method` records the winning path (`json`, `feed`, `text`, `alternate-markdown`, `md-suffix`, `content-negotiation`, `image`, `markit`, `llms.txt`, `raw`, `raw-html`, etc.).
 - URL reads may return an inline image block when the fetched resource is a supported image and survives resizing.
 

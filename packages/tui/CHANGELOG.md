@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+## [18.8.6] - 2026-10-08
+
+### Changed
+
+- Improved rendering performance for streaming long Markdown lists while preserving nested items, numbering, and reference links.
+
+### Fixed
+
+- Added package exports for the native Tern/TSP modules, allowing extensions in compiled `omp` binaries to import them.
+- Fixed the Tern `/model` picker's Roles tab so typing and Backspace consistently edit the search field without triggering role commands.
+- Fixed the session picker so sessions retain and display their directory when switching between the current folder and all-project views.
+
 ## [18.8.5] - 2026-10-08
 
 ### Added
