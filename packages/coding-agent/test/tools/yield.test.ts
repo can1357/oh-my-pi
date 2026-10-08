@@ -724,7 +724,7 @@ describe("YieldTool", () => {
 			},
 		});
 
-		expect(shapes.get("blockers")).toBe("array");
+		expect(shapes.shapes.get("blockers")).toBe("array");
 	});
 
 	it("rejects missing success data unless a yield type requests last-turn mode", async () => {

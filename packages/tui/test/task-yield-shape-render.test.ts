@@ -189,7 +189,7 @@ describe("task renderer: malformed yield slot (#1987)", () => {
 			line_end: 1,
 		};
 		const second = { ...first, title: "Second batched finding", file_path: "src/second.ts" };
-		const text = await renderResultText({
+		const extractedToolData = {
 			yield: [
 				{
 					type: ["findings", "overall_correctness", "explanation", "confidence"],
@@ -202,9 +202,49 @@ describe("task renderer: malformed yield slot (#1987)", () => {
 					status: "success",
 				},
 			],
-		});
-		expect(text).toContain("Patch is incorrect");
-		expect(text).toContain("First batched finding");
-		expect(text).toContain("Second batched finding");
+		};
+		for (const render of [renderResultText, renderProgressText]) {
+			const text = await render(extractedToolData);
+			expect(text).toContain("Patch is incorrect");
+			expect(text).toContain("First batched finding");
+			expect(text).toContain("Second batched finding");
+		}
+	});
+
+	it("preserves nested-array items and batches in real task previews without caller schema metadata", async () => {
+		const extractedToolData = {
+			yield: [
+				{ type: ["rows"], data: [1, 2], status: "success" },
+				{
+					type: ["rows"],
+					data: [
+						[3, 4],
+						[5, 6],
+					],
+					status: "success",
+				},
+			],
+		};
+		for (const render of [renderResultText, renderProgressText]) {
+			const text = await render(extractedToolData);
+			expect(text).toContain("yield+[rows]: [1,2]");
+			expect(text).toContain("yield+[rows]: [[3,4],[5,6]]");
+		}
+	});
+
+	it("preserves mixed scalar and array payloads in real task previews without a schema predicate", async () => {
+		const extractedToolData = {
+			yield: [
+				{ type: ["value"], data: "scalar choice", status: "success" },
+				{ type: ["value"], data: [7, 8], status: "success" },
+				{ type: ["value"], data: [[9, 10]], status: "success" },
+			],
+		};
+		for (const render of [renderResultText, renderProgressText]) {
+			const text = await render(extractedToolData);
+			expect(text).toContain("yield+[value]: scalar choice");
+			expect(text).toContain("yield+[value]: [7,8]");
+			expect(text).toContain("yield+[value]: [[9,10]]");
+		}
 	});
 });

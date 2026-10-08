@@ -488,7 +488,8 @@ export class YieldTool implements AgentTool<TSchema, YieldDetails> {
 		// Incremental array-typed sections carry partial data (one finding, one
 		// field) that cannot satisfy the full output schema; the assembled result
 		// is validated as a whole at finalization (executor finalizeSubprocessOutput).
-		const isIncremental = Array.isArray(yieldType) && yieldType.length > 0;
+		const incrementalLabels = Array.isArray(yieldType) && yieldType.length > 0 ? yieldType : undefined;
+		const isIncremental = incrementalLabels !== undefined;
 
 		if (errorMessage !== undefined && data !== undefined) {
 			throw new Error("yield cannot contain both data and error");
@@ -523,13 +524,13 @@ export class YieldTool implements AgentTool<TSchema, YieldDetails> {
 		// would otherwise be accepted as a typed last-turn incremental yield, then a sibling
 		// section's MAX_SCHEMA_RETRIES override flips schemaOverridden in finalization and the
 		// stale section rides along untouched.
-		if (status === "success" && isIncremental && workPoolItemId === undefined) {
-			const unknownLabels = this.#unknownIncrementalLabels(yieldType as string[]);
+		if (status === "success" && incrementalLabels && workPoolItemId === undefined) {
+			const unknownLabels = this.#unknownIncrementalLabels(incrementalLabels);
 			if (unknownLabels.length > 0) {
 				const validLabels =
 					this.#knownSectionLabels.length > 0 ? formatYieldLabels(this.#knownSectionLabels) : "none";
 				throw new Error(
-					`Section ${formatYieldLabels(yieldType as string[])} uses unknown incremental yield label(s): ${formatYieldLabels(unknownLabels)}. Resubmit with one of the schema's labels: ${validLabels}.`,
+					`Section ${formatYieldLabels(incrementalLabels)} uses unknown incremental yield label(s): ${formatYieldLabels(unknownLabels)}. Resubmit with one of the schema's labels: ${validLabels}.`,
 				);
 			}
 		}
@@ -589,8 +590,8 @@ export class YieldTool implements AgentTool<TSchema, YieldDetails> {
 		}
 		const normalizeData = (value: unknown): unknown => {
 			if (workPoolItemId !== undefined) return value;
-			if (!isIncremental) return this.#normalizeData?.(value) ?? value;
-			const labels = yieldType as string[];
+			if (!incrementalLabels) return this.#normalizeData?.(value) ?? value;
+			const labels = incrementalLabels;
 			if (labels.length === 1) return this.#normalizeSection?.(labels[0], value) ?? value;
 			if (!isPlainRecord(value) || !labels.every(label => Object.hasOwn(value, label))) return value;
 			let normalized: Record<string, unknown> | undefined;
@@ -608,8 +609,8 @@ export class YieldTool implements AgentTool<TSchema, YieldDetails> {
 			const validateData = (value: unknown): JsonSchemaValidationResult | undefined =>
 				workPoolItemId !== undefined
 					? undefined
-					: isIncremental
-						? this.#validateIncrementalSection(yieldType as string[], value)
+					: incrementalLabels
+						? this.#validateIncrementalSection(incrementalLabels, value)
 						: this.#validate
 							? this.#validate(value)
 							: undefined;
@@ -641,7 +642,7 @@ export class YieldTool implements AgentTool<TSchema, YieldDetails> {
 						remaining > 0
 							? ` Call yield again with the corrected shape — ${remaining} retry attempt(s) remain before the schema constraint is dropped.`
 							: " Call yield again with the corrected shape — this is the final retry before the schema constraint is dropped.";
-					const scope = isIncremental ? `Section ${formatYieldLabels(yieldType as string[])}` : "Output";
+					const scope = incrementalLabels ? `Section ${formatYieldLabels(incrementalLabels)}` : "Output";
 					throw new Error(
 						`${scope} does not match schema: ${formatAllValidationIssues(sectionFailure.issues)}.${retryHint}`,
 					);

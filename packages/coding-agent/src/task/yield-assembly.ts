@@ -22,13 +22,14 @@ export function yieldSectionShapes(outputSchema: unknown): YieldSectionShapes {
 	// JTD `optionalProperties.findings.elements` becomes `properties.findings`
 	// with `type: "array"`, which raw `normalizeSchema` would not expose.
 	const { jsonSchema, validator } = buildOutputValidator(outputSchema);
-	if (jsonSchema === undefined) return shapes;
+	if (jsonSchema === undefined) return { shapes };
 	const dereferenced = dereferenceJsonSchema(jsonSchema);
 	for (const [label, schema] of buildSectionSchemas(isRecord(dereferenced) ? dereferenced : jsonSchema)) {
 		shapes.set(label, yieldSectionShape(schema));
 	}
-	return Object.assign(shapes, {
+	return {
+		shapes,
 		acceptsItem: validator?.isSectionItem,
 		acceptsArray: validator?.isArraySectionValue,
-	});
+	};
 }

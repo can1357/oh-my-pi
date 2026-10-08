@@ -1,17 +1,20 @@
+import { isRecord } from "@oh-my-pi/pi-utils";
 import type { YieldItem } from "./task";
 
 /**
  * Output-schema shape of each declared top-level property, keyed by incremental yield label.
+ * The read-only shape map is separate from optional schema-backed payload predicates.
  * `array` sections append items or batches into a list; `scalar` sections keep the
  * latest value. The item validator preserves arrays that themselves constitute one
  * valid item. Undeclared labels accumulate into a list only once repeated.
  */
-export type YieldSectionShapes = ReadonlyMap<string, "array" | "scalar"> & {
+export interface YieldSectionShapes {
+	readonly shapes: ReadonlyMap<string, "array" | "scalar">;
 	/** Prefer a schema-valid array item over a batch when the input is ambiguous. */
 	readonly acceptsItem?: (label: string, value: unknown) => boolean;
 	/** Mixed sections append array items/batches but keep independently valid scalar alternatives direct. */
 	readonly acceptsArray?: (label: string, value: unknown) => boolean;
-};
+}
 
 /** Outcome of folding a run's yield calls into one payload, with provenance flags. */
 interface AssembledYieldResult {
@@ -32,10 +35,10 @@ export function resolveYieldSectionValue(
 	label: string,
 	sectionShapes?: YieldSectionShapes,
 ): unknown {
-	if (labels.length <= 1 || !sectionShapes || (!sectionShapes.acceptsItem && sectionShapes.size === 0)) return data;
-	if (data === null || typeof data !== "object" || Array.isArray(data)) return data;
-	const record = data as Record<string, unknown>;
-	return labels.every(key => Object.hasOwn(record, key)) ? record[label] : data;
+	if (labels.length <= 1 || !sectionShapes || (!sectionShapes.acceptsItem && sectionShapes.shapes.size === 0))
+		return data;
+	if (!isRecord(data)) return data;
+	return labels.every(key => Object.hasOwn(data, key)) ? data[label] : data;
 }
 
 /** Arrays satisfying the item schema retain their original single-item meaning. */
@@ -43,7 +46,7 @@ export function isYieldSectionBatch(
 	value: unknown,
 	label: string,
 	acceptsItem?: YieldSectionShapes["acceptsItem"],
-): boolean {
+): value is unknown[] {
 	return Array.isArray(value) && acceptsItem?.(label, value) !== true;
 }
 
@@ -96,7 +99,7 @@ function appendYieldSection(
 	if (shape === "scalar") {
 		sections[label] = value;
 	} else if (shape === "array") {
-		const values = isYieldSectionBatch(value, label, sectionShapes?.acceptsItem) ? (value as unknown[]) : [value];
+		const values = isYieldSectionBatch(value, label, sectionShapes?.acceptsItem) ? value : [value];
 		if (count === 0 || !Array.isArray(existing)) sections[label] = values.slice();
 		else for (const element of values) existing.push(element);
 	} else if (count === 0) {
@@ -156,7 +159,7 @@ export function assembleYieldResult(
 		missingData ||= resolved.missingData;
 		if (labels.length === 0) schemaOverridden ||= overridden;
 		for (const label of labels) {
-			const declaredShape = sectionShapes?.get(label);
+			const declaredShape = sectionShapes?.shapes.get(label);
 			const value = resolveYieldSectionValue(resolved.value, labels, label, sectionShapes);
 			const shape =
 				declaredShape === "array" && sectionShapes?.acceptsArray?.(label, value) === false
