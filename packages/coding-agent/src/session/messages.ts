@@ -70,6 +70,9 @@ export {
 import { formatOutputNotice } from "@oh-my-pi/pi-tui/tools/output-meta";
 import { titleTextFromSkillPrompt } from "@oh-my-pi/pi-tui/chat/skill-title-input";
 
+/** Transcript reason for an abort initiated through an extension context. */
+export const EXTENSION_ABORT_LABEL = "Aborted by extension";
+
 /**
  * Logs provider-error turns so their actual cause is available outside the
  * session transcript. No-op for non-error stop reasons.

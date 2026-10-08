@@ -10,7 +10,7 @@ import { runExtensionCompact, runExtensionSetModel } from "../extensibility/exte
 import { getSessionSlashCommands } from "../extensibility/extensions/get-commands-handler";
 import type { ExtensionError, ExtensionMode, ExtensionUIContext } from "../extensibility/extensions/types";
 import type { AgentSession } from "../session/agent-session";
-import { USER_INTERRUPT_LABEL } from "../session/messages";
+import { EXTENSION_ABORT_LABEL } from "../session/messages";
 
 /** Action name for an extension-originated send failure. */
 export type ExtensionSendAction = "extension_send" | "extension_send_user";
@@ -141,7 +141,7 @@ export async function initializeExtensions(session: AgentSession, options: Initi
 		{
 			getModel: () => session.model,
 			isIdle: () => !session.isStreaming,
-			abort: () => session.abort({ reason: USER_INTERRUPT_LABEL }),
+			abort: () => session.abort({ reason: EXTENSION_ABORT_LABEL }),
 			hasPendingMessages: () => session.queuedMessageCount > 0,
 			shutdown,
 			getContextUsage: () => session.getContextUsage(),

@@ -64,7 +64,12 @@ import { normalizePlanTitle, type PlanApprovalDetails, resolveApprovedPlan } fro
 import { autosaveApprovedPlan } from "../../plan-mode/plan-autosave";
 import type { AgentSession, AgentSessionEvent } from "../../session/agent-session";
 import { BlobStore, resolveImageDataSync } from "../../session/blob-store";
-import { isSilentAbort, SKILL_PROMPT_MESSAGE_TYPE, USER_INTERRUPT_LABEL } from "../../session/messages";
+import {
+	EXTENSION_ABORT_LABEL,
+	isSilentAbort,
+	SKILL_PROMPT_MESSAGE_TYPE,
+	USER_INTERRUPT_LABEL,
+} from "../../session/messages";
 import type { UsageStatistics } from "../../session/session-entries";
 import type { SessionInfo as StoredSessionInfo } from "../../session/session-listing";
 import { SessionManager } from "../../session/session-manager";
@@ -2602,7 +2607,7 @@ export class AcpAgent implements Agent {
 				getModel: () => record.session.model,
 				isIdle: () => !record.session.isStreaming,
 				abort: () => {
-					void record.session.abort({ reason: USER_INTERRUPT_LABEL });
+					void record.session.abort({ reason: EXTENSION_ABORT_LABEL });
 				},
 				hasPendingMessages: () => record.session.queuedMessageCount > 0,
 				shutdown: () => {},

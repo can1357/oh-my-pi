@@ -19,6 +19,7 @@ import {
 	type TextContent,
 	type ToolCall,
 } from "@oh-my-pi/pi-ai";
+import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { streamSimple } from "@oh-my-pi/pi-ai/stream";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
@@ -41,7 +42,11 @@ import { createAgentSession, type ExtensionContext, type ExtensionFactory } from
 import { obfuscateProviderContext, SecretObfuscator } from "@oh-my-pi/pi-coding-agent/secrets";
 import { AgentSession, type AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
-import { convertToLlm, wrapSteeringForModel } from "@oh-my-pi/pi-coding-agent/session/messages";
+import {
+	convertToLlm,
+	shouldRenderAbortReason,
+	wrapSteeringForModel,
+} from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { TempDir } from "@oh-my-pi/pi-utils";
@@ -2058,6 +2063,65 @@ describe("AgentSession message pipeline", () => {
 			authStorage.close();
 		}
 	});
+	it("attributes an abort from an extension context hook in the persisted assistant turn", async () => {
+		using tempDir = TempDir.createSync("@pi-extension-abort-");
+		const manager = SessionManager.inMemory(tempDir.path());
+		const runtime = new ExtensionRuntime();
+		const authStorage = await AuthStorage.create(":memory:");
+		const modelRegistry = new ModelRegistry(authStorage, tempDir.join("models.yml"));
+		authStorage.keys.setRuntime("anthropic", "test-key");
+		const extension = await loadExtensionFromFactory(
+			api => {
+				api.on("context", (_event, ctx) => {
+					ctx.abort();
+				});
+			},
+			manager.getCwd(),
+			new EventBus(),
+			runtime,
+			"abort-context-test",
+		);
+		const runner = new ExtensionRunner([extension], runtime, manager.getCwd(), manager, modelRegistry);
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		const started = Promise.withResolvers<void>();
+		const mock = createMockModel({
+			responses: [
+				() => {
+					started.resolve();
+					return { content: ["unexpected provider response"], delayMs: 60_000 };
+				},
+			],
+		});
+		const session = new AgentSession({
+			agent: new Agent({
+				getApiKey: () => "test-key",
+				initialState: { model, systemPrompt: ["Test"], tools: [] },
+				streamFn: mock.stream,
+			}),
+			sessionManager: manager,
+			settings: Settings.isolated({ "compaction.enabled": false }),
+			modelRegistry,
+			extensionRunner: runner,
+		});
+		try {
+			await initializeExtensions(session, { reportSendError: () => {}, reportRuntimeError: () => {} });
+			const prompt = session.prompt("work");
+			await started.promise;
+			await runner.emitContext([]);
+			await prompt;
+			const assistant = manager.getEntries().findLast(entry => entry.type === "message");
+			expect(assistant?.type).toBe("message");
+			if (assistant?.type !== "message" || assistant.message.role !== "assistant") {
+				throw new Error("Expected persisted assistant turn");
+			}
+			expect(assistant.message).toMatchObject({ stopReason: "aborted", errorMessage: "Aborted by extension" });
+			expect(shouldRenderAbortReason(assistant.message)).toBe(true);
+		} finally {
+			await session.dispose();
+			authStorage.close();
+		}
+	});
+
 	it("rewrites finalized assistant text before it reaches history and session persistence", async () => {
 		using tempDir = TempDir.createSync("@pi-assistant-message-rewrite-");
 		const api = "test-assistant-message-rewrite";
