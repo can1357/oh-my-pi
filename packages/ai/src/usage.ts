@@ -135,6 +135,19 @@ export interface UsageResetCredits {
 	credits?: UsageResetCreditDetail[];
 }
 
+/**
+ * Account-wide usage credits, separate from quota windows and saved resets.
+ * These are provider usage units, not USD or API billing credits.
+ */
+export interface UsageCredits {
+	/** Exact provider decimal string; null means the balance was not reported. */
+	balance: string | null;
+	unit: "credits";
+	hasCredits?: boolean;
+	unlimited?: boolean;
+	overageLimitReached?: boolean;
+}
+
 /** Aggregated usage report for a provider. */
 export interface UsageReport {
 	provider: Provider;
@@ -142,6 +155,8 @@ export interface UsageReport {
 	limits: UsageLimit[];
 	/** Saved rate-limit resets the account can redeem, when the provider reports them. */
 	resetCredits?: UsageResetCredits;
+	/** Account credit balance and entitlement, when the provider reports them. */
+	credits?: UsageCredits;
 	/**
 	 * Provider-wide disclaimers shown once above per-account sections.
 	 * Use this for caveats that apply to every limit (e.g. "OMP-observed
@@ -344,11 +359,20 @@ export const usageResetCreditsSchema = type({
 	"credits?": usageResetCreditDetailSchema.array(),
 });
 
+export const usageCreditsSchema = type({
+	balance: "string | null",
+	unit: "'credits'",
+	"hasCredits?": "boolean",
+	"unlimited?": "boolean",
+	"overageLimitReached?": "boolean",
+});
+
 export const usageReportSchema = type({
 	provider: "string",
 	fetchedAt: "number",
 	limits: usageLimitSchema.array(),
 	"resetCredits?": usageResetCreditsSchema,
+	"credits?": usageCreditsSchema,
 	"notes?": "string[]",
 	"metadata?": { "[string]": "unknown" },
 	// `raw` is provider-specific and may be anything; the broker strips it before
