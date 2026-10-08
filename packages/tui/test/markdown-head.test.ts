@@ -23,27 +23,59 @@ describe("renderMarkdownHead", () => {
 	};
 	const bestOf3 = (render: () => void): number => Math.min(elapsed(render), elapsed(render), elapsed(render));
 
-	it("renders only the leading rows of a long document", () => {
-		const doc = `${paragraphs(5000)}\n`;
+	for (const [name, doc] of [
+		["a long document", `${paragraphs(5000)}\n`],
+		// The lexer gives a lone leading newline no token, so the probe's tokens
+		// start one byte into the window.
+		["a long document whose first line is empty", `\n${paragraphs(5000)}\n`],
+	] as const) {
+		it(`renders only the leading rows of ${name}`, () => {
+			const head = renderMarkdownHead(doc, 120, defaultMarkdownTheme, 12);
+			const full = new Markdown(doc, 0, 0, defaultMarkdownTheme).render(120);
+
+			expect(head.truncated).toBe(true);
+			expect(head.lines.length).toBeGreaterThan(12);
+			expect(head.lines.length).toBeLessThan(full.length);
+			expect(head.lines).toEqual(full.slice(0, head.lines.length));
+		});
+	}
+
+	it("renders only rows of the full render when a bare math environment's closing line goes on", () => {
+		// The lexer leaves the `.` after `\end{align}` out of every token, so
+		// offsets summed from the token raws misplace the tokens in front of it.
+		// The blank line after it ends the first probe window.
+		const intro = `${paragraphs(40)}\n\n`;
+		const env = "\\begin{align}\nx &= 1\n\\end{align}.\n\n";
+		const fill = "y".repeat(PROBE_WINDOW_BYTES - intro.length - env.length - 2);
+		const doc = `${intro}${fill}\n\n${env}${paragraphs(400)}\n`;
 		const head = renderMarkdownHead(doc, 120, defaultMarkdownTheme, 12);
 		const full = new Markdown(doc, 0, 0, defaultMarkdownTheme).render(120);
 
-		expect(head.truncated).toBe(true);
-		expect(head.lines.length).toBeGreaterThan(12);
-		expect(head.lines.length).toBeLessThan(full.length);
 		expect(head.lines).toEqual(full.slice(0, head.lines.length));
 	});
 
-	it("renders only the leading rows of a long document whose first line is empty", () => {
-		// The lexer gives a lone leading newline no token, so the probe's tokens
-		// start one byte into the window.
-		const doc = `\n${paragraphs(5000)}\n`;
+	it("renders only rows of the full render when the cut falls after a bare math environment's closing line", () => {
+		// The lexer leaves the text after `\end{aligned}` out of every token, so a
+		// token after it starts later than the raws before it add up to. Cutting
+		// there by summed offsets would end the head inside a paragraph.
+		const env = "\\begin{aligned}\nx &= 1\n\\end{aligned} where x is one.\n\n";
+		const doc = `${paragraphs(3)}\n\n${env}${paragraphs(2000)}\n`;
+		const head = renderMarkdownHead(doc, 120, defaultMarkdownTheme, 1);
+		const full = new Markdown(doc, 0, 0, defaultMarkdownTheme).render(120);
+
+		expect(head.truncated).toBe(true);
+		expect(head.lines).toEqual(full.slice(0, head.lines.length));
+	});
+
+	it("keeps a display-math block the first window cuts short whole after an empty first line", () => {
+		// The block opens inside the first 2,048-byte window and closes past it, with
+		// blank lines inside, so only the math check stops a cut inside it.
+		const body = Array.from({ length: 200 }, (_, i) => `x_${i} = y`).join("\n\n");
+		const doc = `\n${paragraphs(30)}\n\n$$\n${body}\n$$\n\n${paragraphs(2000)}\n`;
 		const head = renderMarkdownHead(doc, 120, defaultMarkdownTheme, 12);
 		const full = new Markdown(doc, 0, 0, defaultMarkdownTheme).render(120);
 
 		expect(head.truncated).toBe(true);
-		expect(head.lines.length).toBeGreaterThan(12);
-		expect(head.lines.length).toBeLessThan(full.length);
 		expect(head.lines).toEqual(full.slice(0, head.lines.length));
 	});
 
