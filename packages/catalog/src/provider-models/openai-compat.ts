@@ -1242,6 +1242,90 @@ export function cerebrasModelManagerOptions(
 }
 
 // ---------------------------------------------------------------------------
+// 3.5 SambaNova
+// ---------------------------------------------------------------------------
+
+/**
+ * Configuration for SambaNova Cloud's model manager. Constructed by the
+ * coding-agent runtime when the user selects SambaNova as their provider;
+ * `apiKey` is the resolved credential (env var or stored login), `baseUrl`
+ * overrides the default inference endpoint for self-hosted deployments.
+ */
+export interface SambaNovaModelManagerConfig {
+	apiKey?: string;
+	baseUrl?: string;
+	fetch?: FetchImpl;
+}
+
+/**
+ * SambaNova quotes per-token USD as decimal strings; catalog cost is
+ * per-million. A free tier and the common `cache_write: 0` are legitimate
+ * zero rates. Unparseable or negative values are treated as unpriced
+ * (returned as `undefined`) so a bad row doesn't silently display as free.
+ */
+function toSambaNovaRate(value: unknown): number | undefined {
+	const parsed = toNumber(typeof value === "string" ? value.trim().replace(/^\$/, "") : value);
+	return parsed !== undefined && parsed >= 0 ? parsed : undefined;
+}
+
+function resolveSambaNovaCost(pricing: unknown): ModelSpec<"openai-completions">["cost"] {
+	if (!isRecord(pricing)) {
+		return { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+	}
+	const input = toSambaNovaRate(pricing.prompt);
+	const output = toSambaNovaRate(pricing.completion);
+	const cacheRead = toSambaNovaRate(pricing.input_cache_read);
+	const cacheWrite = toSambaNovaRate(pricing.input_cache_write);
+	return {
+		input: input !== undefined ? input * 1_000_000 : 0,
+		output: output !== undefined ? output * 1_000_000 : 0,
+		cacheRead: cacheRead !== undefined ? cacheRead * 1_000_000 : 0,
+		cacheWrite: cacheWrite !== undefined ? cacheWrite * 1_000_000 : 0,
+	};
+}
+
+/**
+ * Builds SambaNova Cloud's model manager. Discovery fetches the live
+ * `/v1/models` roster (the gateway is OpenAI-compatible but reports
+ * per-token USD prices as decimal strings and carries no capability
+ * metadata — reasoning, vision, and tool support are resolved by the
+ * cascade from `providers/sambanova.kdl`). `fetchDynamicModels` is only
+ * available when an API key is configured; without one the manager falls
+ * back to the bundled seed row.
+ */
+export function sambanovaModelManagerOptions(
+	config?: SambaNovaModelManagerConfig,
+): ModelManagerOptions<"openai-completions"> {
+	const apiKey = config?.apiKey;
+	const baseUrl = config?.baseUrl ?? "https://api.sambanova.ai/v1";
+	return {
+		providerId: "sambanova",
+		dynamicModelsAuthoritative: true,
+		...(apiKey && {
+			fetchDynamicModels: () =>
+				fetchOpenAICompatibleModels({
+					api: "openai-completions",
+					provider: "sambanova",
+					baseUrl,
+					apiKey,
+					filterModel: (_entry, model) => !isExcludedModel("sambanova", model.id),
+					mapModel: (
+						entry: OpenAICompatibleModelRecord,
+						defaults: ModelSpec<"openai-completions">,
+					): ModelSpec<"openai-completions"> => ({
+						...defaults,
+						name: toModelName(entry.id, defaults.name),
+						cost: resolveSambaNovaCost(entry.pricing),
+						contextWindow: toPositiveNumber(entry.context_length, defaults.contextWindow),
+						maxTokens: toPositiveNumber(entry.max_completion_tokens, defaults.maxTokens),
+					}),
+					fetch: config?.fetch,
+				}),
+		}),
+	};
+}
+
+// ---------------------------------------------------------------------------
 // 4. Hugging Face
 // ---------------------------------------------------------------------------
 

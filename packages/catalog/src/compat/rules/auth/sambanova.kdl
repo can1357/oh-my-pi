@@ -1,0 +1,9 @@
+auth "sambanova" {
+	name "SambaNova"
+	login "api-key" {
+		auth-url "https://cloud.sambanova.ai/apis"
+		instructions "Copy your API key from the SambaNova Cloud dashboard"
+		prompt "Paste your SambaNova API key" placeholder="..."
+		validate "models-endpoint" label="SambaNova" url="https://api.sambanova.ai/v1/models"
+	}
+}

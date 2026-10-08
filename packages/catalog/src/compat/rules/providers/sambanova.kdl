@@ -1,0 +1,55 @@
+// Provider-wire compat for "sambanova"; SambaNova Cloud is an OpenAI-compatible
+// inference gateway whose model roster changes frequently (preview models are
+// added and removed on short notice), so discovery is authoritative.
+
+provider "sambanova" {
+	default-model "gpt-oss-120b"
+	env "SAMBANOVA_API_KEY"
+	discovery label="SambaNova"
+
+	dynamic-models-authoritative #true
+	skip-cross-provider-reference-fills #true
+
+	// `/v1/models` requires auth, so the provider is invisible in `/model` until
+	// the user logs in. One seed row keeps it visible beforehand; the live
+	// roster replaces it on first discovery and prunes anything SambaNova drops.
+	seed api="openai-completions" base-url="https://api.sambanova.ai/v1" bundle="fallback" {
+		model "gpt-oss-120b" name="GPT OSS 120B" {
+			reasoning #true
+			input "text"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits context=131072
+		}
+	}
+
+	// The wire carries no capability metadata; the cascade names the
+	// thinking-capable lineages SambaNova serves. Everything else stays
+	// non-reasoning so the effort dial is not fabricated for a route that
+	// rejects `reasoning_effort`.
+	thinking-mode "effort"
+	class "deepseek" {
+		revision ">=3.1 <4" {
+			thinking-efforts "low" "medium" "high"
+			thinking-upgrade-neutral #true
+		}
+	}
+	class "gpt-oss" {
+		thinking-efforts "low" "medium" "high"
+		thinking-upgrade-neutral #true
+	}
+	class "gemma" {
+		revision ">=4" {
+			thinking-efforts "low" "medium" "high"
+			thinking-upgrade-neutral #true
+			input-modalities "text" "image"
+		}
+	}
+	// MiniMax M3+ is reasoning-capable; M2 is not. The taxonomy's `m3`
+	// family glob (`*minimax-m3*`) covers M3 and any sub-versions.
+	class "minimax" {
+		family "m3" {
+			thinking-efforts "low" "medium" "high"
+			thinking-upgrade-neutral #true
+		}
+	}
+}
