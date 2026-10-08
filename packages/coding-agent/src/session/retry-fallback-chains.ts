@@ -13,7 +13,7 @@ import {
 import { resolveConfiguredModelPatterns, resolveModelRoleValue } from "../config/model-resolver";
 import { getRoleInfo, isKindRole } from "../config/model-roles";
 
-import { cfgRetryFallbackChains, cfgRetryFallbackRevertPolicy } from "./settings";
+import { cfgOrderedSubagentRoles, cfgRetryFallbackChains, cfgRetryFallbackRevertPolicy } from "./settings";
 
 /** Configured fallback chains keyed by role or model selector. */
 export type RetryFallbackChains = Record<string, string[]>;
@@ -182,6 +182,11 @@ export interface RetryFallbackRole {
 	primary: string;
 	/** Fallback selectors walked after the primary. */
 	chain: string[];
+	/**
+	 * True when the spawn selector listed backups after the selected model.
+	 * Absent on older files and on single-model installs, which keep main's precedence.
+	 */
+	orderedBackups?: boolean;
 }
 
 /** Reads the primary and non-empty chain installed for `role`, if any. */
@@ -216,6 +221,71 @@ export function installRetryFallbackRole(
 		if (key !== role) fallbackChains[key] = existingChains[key];
 	}
 	cfgRetryFallbackChains.override(settings, fallbackChains);
+}
+
+/** Records that `role` was installed from selector backups. Lives in the settings overlay. */
+export function markOrderedSubagentRole(settings: Settings, role: string): void {
+	const existing = cfgOrderedSubagentRoles.get(settings);
+	if (existing.includes(role)) return;
+	cfgOrderedSubagentRoles.override(settings, [...existing, role]);
+}
+
+/** Whether spawn installed `role` from an ordered selector list rather than a single model. */
+export function subagentSuppliedOrderedBackups(settings: Settings, role: string): boolean {
+	return cfgOrderedSubagentRoles.get(settings).includes(role);
+}
+
+
+function resolutionLookup(modelLookup: RetryFallbackModelLookup): RetryFallbackModelLookup {
+	return {
+		find: (provider, id) => (typeof modelLookup.find === "function" ? modelLookup.find(provider, id) : undefined),
+		hasProvider: provider =>
+			typeof modelLookup.hasProvider === "function" ? modelLookup.hasProvider(provider) : false,
+	};
+}
+
+/**
+ * Chain configured for the resolved primary under the same key resolution turn
+ * recovery uses: exact selector, effort-normalized, suffixless base, then a
+ * provider wildcard. Role and `default` keys are not the primary's chain.
+ */
+export function resolvePrimaryModelKeyChain(
+	settings: Settings,
+	modelLookup: RetryFallbackModelLookup,
+	selector: string,
+	model: Model | null | undefined,
+): string[] {
+	const chains = getRetryFallbackChains(settings);
+	const key = resolveRetryFallbackChainKey(
+		{
+			chains,
+			getModelRole: role => settings.getModelRole(role),
+			modelLookup: resolutionLookup(modelLookup),
+		},
+		selector,
+		model,
+	);
+	if (!key || !isRetryFallbackModelKey(key)) return [];
+	const chain = chains[key];
+	if (!Array.isArray(chain)) return [];
+	return chain.filter(entry => typeof entry === "string");
+}
+
+/** Ordered backups first, then the primary's model-key chain, earlier entry wins. */
+export function chainAfterOrderedBackups(backups: readonly string[], modelKeyChain: readonly string[]): string[] {
+	const seen = new Set<string>();
+	const chain: string[] = [];
+	for (const entry of backups) {
+		if (seen.has(entry)) continue;
+		seen.add(entry);
+		chain.push(entry);
+	}
+	for (const entry of modelKeyChain) {
+		if (seen.has(entry)) continue;
+		seen.add(entry);
+		chain.push(entry);
+	}
+	return chain;
 }
 
 /**

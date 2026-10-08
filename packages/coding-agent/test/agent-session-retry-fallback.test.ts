@@ -33,6 +33,8 @@ import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { AgentSession, type AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import {
+	installRetryFallbackRole,
+	markOrderedSubagentRole,
 	type ServingModel,
 	validateRetryFallbackChains,
 } from "@oh-my-pi/pi-coding-agent/session/retry-fallback-chains";
@@ -5633,6 +5635,172 @@ describe("AgentSession retry fallback", () => {
 		expect(session.model?.provider).toBe(primaryModel.provider);
 		expect(session.model?.id).toBe(primaryModel.id);
 		expect(session.thinkingLevel).toBeUndefined();
+	});
+
+	it("walks a subagent role chain before a matching model-key chain", async () => {
+		const routedModel = getBundledModel("openai-codex", "gpt-5.6-sol");
+		const configuredModel = getBundledModel("openai-codex", "gpt-5.6-luna");
+		if (!routedModel || !configuredModel) {
+			throw new Error("Expected bundled Codex rollover models to exist");
+		}
+		const primary = buildModel({
+			provider: "generic-test-provider",
+			id: "routing-test-model",
+			name: "Routing Test Model",
+			api: "openai-completions",
+			baseUrl: "https://generic-test-provider.example/v1",
+			reasoning: true,
+			thinking: {
+				mode: "effort",
+				efforts: [Effort.Low, Effort.Medium, Effort.High, Effort.XHigh, Effort.Max],
+			},
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 128_000,
+			maxTokens: 8192,
+		});
+		const primarySelector = `${primary.provider}/${primary.id}`;
+		const role = "subagent:ordered-rollover";
+		const requested: Array<{ selector: string; thinking: unknown }> = [];
+		const fallbackEfforts: Array<{ selector: string; thinking: unknown }> = [];
+		const transientError = (model: Model): AssistantMessageEventStream => {
+			const stream = new AssistantMessageEventStream();
+			queueMicrotask(() => {
+				const error: AssistantMessage = {
+					role: "assistant",
+					content: [],
+					api: model.api,
+					provider: model.provider,
+					model: model.id,
+					usage: emptyUsage(),
+					stopReason: "error",
+					errorMessage: "429 rate limit exceeded",
+					errorStatus: 429,
+					errorId: AIError.create(AIError.Flag.Transient),
+					timestamp: Date.now(),
+				};
+				stream.push({ type: "error", reason: "error", error });
+			});
+			return stream;
+		};
+		const agent = new Agent({
+			getApiKey: model => `${model.provider}-test-key`,
+			initialState: {
+				model: primary,
+				systemPrompt: ["Test"],
+				tools: [],
+				messages: [],
+			},
+			streamFn: (model, context, options) => {
+				requested.push({ selector: `${model.provider}/${model.id}`, thinking: options?.reasoning });
+				if (
+					(model.provider === primary.provider && model.id === primary.id) ||
+					(model.provider === routedModel.provider && model.id === routedModel.id)
+				) {
+					return transientError(model);
+				}
+				if (model.provider === configuredModel.provider && model.id === configuredModel.id) {
+					return recoveredTextStream(model, "Recovered on configured model-key fallback");
+				}
+				throw new Error(`Unexpected model requested: ${model.provider}/${model.id}`);
+			},
+		});
+		modelRegistry.registerProvider(
+			"generic-test-provider",
+			{
+				api: "openai-completions",
+				apiKey: "generic-test-provider-key",
+				baseUrl: "https://generic-test-provider.example/v1",
+				models: [primary as never],
+			},
+			"test:ordered-rollover",
+		);
+		try {
+			const settings = Settings.isolated({
+				"compaction.enabled": false,
+				"retry.baseDelayMs": 1,
+				"retry.fallbackChains": {
+					[role]: [
+						`${routedModel.provider}/${routedModel.id}:max`,
+						`${configuredModel.provider}/${configuredModel.id}:low`,
+					],
+					[primarySelector]: [`${configuredModel.provider}/${configuredModel.id}:low`],
+				},
+			});
+			settings.setModelRole(role, primarySelector);
+			markOrderedSubagentRole(settings, role);
+			const sessionManager = SessionManager.inMemory();
+			sessionManager.appendModelChange(primarySelector, role);
+			session = new AgentSession({
+				agent,
+				sessionManager,
+				settings,
+				modelRegistry,
+				thinkingLevel: Effort.Low,
+			});
+			session.subscribe(event => {
+				if (event.type === "retry_fallback_applied") {
+					fallbackEfforts.push({ selector: event.to, thinking: session?.thinkingLevel });
+				}
+			});
+
+			await session.prompt("Recover through the ordered chain");
+			await session.waitForIdle();
+
+			expect(requested.map(item => item.selector)).toEqual([
+				primarySelector,
+				`${routedModel.provider}/${routedModel.id}`,
+				`${configuredModel.provider}/${configuredModel.id}`,
+			]);
+			expect(fallbackEfforts).toEqual([
+				{ selector: `${routedModel.provider}/${routedModel.id}:max`, thinking: Effort.Max },
+				{ selector: `${configuredModel.provider}/${configuredModel.id}:low`, thinking: Effort.Low },
+			]);
+			expect(session.model?.provider).toBe(configuredModel.provider);
+			expect(session.model?.id).toBe(configuredModel.id);
+		} finally {
+			modelRegistry.unregisterProvider("generic-test-provider");
+		}
+	});
+
+	it("keeps model-key precedence for a single-model subagent", async () => {
+		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+		const inheritedModel = getBundledModel("openai-codex", "gpt-5.6-sol");
+		const modelKeyModel = getBundledModel("openai-codex", "gpt-5.6-luna");
+		if (!primaryModel || !inheritedModel || !modelKeyModel) {
+			throw new Error("Expected bundled test models to exist");
+		}
+		const requestedModels: string[] = [];
+		const agent = createFallbackAgent(primaryModel, requestedModels);
+		const primarySelector = `${primaryModel.provider}/${primaryModel.id}`;
+		const inheritedSelector = `${inheritedModel.provider}/${inheritedModel.id}`;
+		const modelKeySelector = `${modelKeyModel.provider}/${modelKeyModel.id}`;
+		const role = "subagent:single-model";
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.baseDelayMs": 1,
+			"retry.fallbackChains": {
+				default: [inheritedSelector],
+				[primarySelector]: [modelKeySelector],
+			},
+		});
+		installRetryFallbackRole(settings, role, { primary: primarySelector, chain: [inheritedSelector] });
+		const sessionManager = SessionManager.inMemory();
+		sessionManager.appendModelChange(primarySelector, role);
+		session = new AgentSession({
+			agent,
+			sessionManager,
+			settings,
+			modelRegistry,
+			thinkingLevel: Effort.Low,
+		});
+
+		await session.prompt("Recover through the model-key chain");
+		await session.waitForIdle();
+
+		expect(requestedModels[0]).toBe(primarySelector);
+		expect(requestedModels[1]).toBe(modelKeySelector);
+		expect(requestedModels).not.toContain(inheritedSelector);
 	});
 
 	it("clamps a fallback selector's explicit thinking level to the session effort ceiling", async () => {

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- A subagent whose selector lists several models keeps those backups ahead of the resolved primary's configured fallback chain when the child retries.
+
 ## [18.8.4] - 2026-10-08
 
 ### Changed

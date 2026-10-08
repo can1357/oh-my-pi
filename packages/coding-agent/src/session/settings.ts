@@ -817,6 +817,17 @@ export const cfgRetryFallbackChains = register({
 	},
 });
 
+/**
+ * Internal runtime state, not a user setting. Session-overlay roles whose selector
+ * listed ordered backups. Absent means main's chain precedence. The settings schema
+ * has no hide flag, so this id still appears in `omp config list`.
+ */
+export const cfgOrderedSubagentRoles = register({
+	id: "retry.orderedSubagentRoles",
+	type: "array",
+	default: EMPTY_STRING_ARRAY,
+});
+
 export const cfgRetryFallbackRevertPolicy = register({
 	id: "retry.fallbackRevertPolicy",
 	type: "enum",

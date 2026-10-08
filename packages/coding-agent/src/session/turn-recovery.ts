@@ -65,6 +65,7 @@ import {
 	type RetryFallbackRevertPolicy,
 	type RetryFallbackSelector,
 	resolveRetryFallbackChainKey,
+	subagentSuppliedOrderedBackups,
 	type ServingModel,
 	validateRetryFallbackChains,
 } from "./retry-fallback-chains";
@@ -1780,8 +1781,15 @@ export class TurnRecovery {
 		currentModel: Model | null | undefined = this.#host.model(),
 		options?: { pinnedRole?: string; roleHint?: string },
 	): string[] {
-		const pinned = options?.pinnedRole ?? this.#activeRetryFallback?.role;
-		const current = this.resolveRetryFallbackRole(currentSelector, currentModel, options?.roleHint);
+		const roleHint = options?.roleHint ?? this.#liveRetryRoleHint(currentModel);
+		// Pin only when the selector listed backups. The marker lives in the settings
+		// overlay, so warm revival keeps it. Absent marker is main's precedence.
+		const orderedSubagentRole =
+			roleHint?.startsWith("subagent:") && subagentSuppliedOrderedBackups(this.#host.settings, roleHint)
+				? roleHint
+				: undefined;
+		const pinned = options?.pinnedRole ?? this.#activeRetryFallback?.role ?? orderedSubagentRole;
+		const current = this.resolveRetryFallbackRole(currentSelector, currentModel, roleHint);
 		if (!pinned) return current ? [current] : [];
 		return current && current !== pinned ? [pinned, current] : [pinned];
 	}
