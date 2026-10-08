@@ -199,6 +199,10 @@ A stateless, tool-free one-shot model call that returns a `CompletionHandle` imm
 - JS: `completion(prompt, { model?, system?, schema? })`; Python: keyword form with `model`, `system`, and `schema`.
 - `model`: `"smol"`, `"default"`, or `"slow"` tier; default is the active/default tier.
 - `schema`: JSON Schema for a synthetic `respond` tool; `.wait()` then returns parsed data.
+- Completion handles expose `.metadata()` (async in JS, synchronous in Python). It returns `null` for a legacy handle with no metadata, otherwise a detached routing snapshot containing the requested role, expanded configured selector/effort, final adapter model, request effort/reasoning-disabled fields, fallback state, and per-candidate outcomes. `effortEvidence: "provider-options"` means only what the bridge supplied to the adapter; it does not prove the service's internal reasoning level.
+- `configuredEffort` follows the shared extractor: strict suffixes such as `:low` and `:off` take precedence even when model matching retains them in an exact model ID; literal-ID protection applies to `:max` and `:auto`. This field describes configuration parsing, not provider request behavior.
+- `.metadata()` uses the status path and does not wait for model completion; metadata is omitted from `wait()` items, whose shape and input order remain unchanged. Missing credentials are recorded as skipped candidates rather than provider requests, and retry-budget-truncated candidates are not listed.
+- Cancellation retains any options supplied to the adapter, including entry with an already-aborted signal after credential lookup finishes; adapter entry does not imply that an HTTP request was sent. Queued cancellation before adapter entry leaves request fields unset.
 - Unresolved tier and invalid arguments fail handle allocation; JS's immediate pending-handle wrapper exposes that rejection when awaited/used. Missing credentials, error/abort stops, empty output, and invalid structured output surface from `.wait()`.
 - Handles are process-local, owned by the calling agent, and evicted 30 minutes after settling (or when the owner session ends).
 

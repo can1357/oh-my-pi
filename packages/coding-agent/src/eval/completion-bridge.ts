@@ -21,6 +21,7 @@ import { extractTextContent, extractToolCall, parseJsonPayload } from "../commit
 
 import type { ModelRegistry } from "../config/model-registry";
 import {
+	extractExplicitThinkingSelector,
 	expandRoleAlias,
 	formatModelString,
 	formatModelStringWithRouting,
@@ -39,7 +40,7 @@ import {
 	type RetryFallbackResolutionContext,
 	resolveRetryFallbackChainKey,
 } from "../session/retry-fallback-chains";
-import { shouldDisableReasoning, toReasoningEffort } from "@oh-my-pi/pi-tui/thinking";
+import { shouldDisableReasoning, toReasoningEffort, type ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
 import type { JsStatusEvent } from "./js/shared/types";
 
 import { cfgDisabledProviders } from "../config/model-settings";
@@ -80,6 +81,25 @@ export interface EvalCompletionResult {
 	details: { model: string; tier?: CompletionTier; structured: boolean };
 }
 
+/** Provider-interface evidence retained for one completion handle. */
+export interface EvalCompletionMetadata {
+	requestedRole: CompletionTier;
+	configuredSelector: string;
+	configuredEffort: ConfiguredThinkingLevel | null;
+	finalModel: string | null;
+	requestEffort: Effort | null;
+	reasoningDisabled: boolean | null;
+	fallbackUsed: boolean;
+	effortEvidence: "provider-options";
+	attempts: Array<{
+		candidateIndex: number;
+		model: string;
+		requestEffort: Effort | null;
+		reasoningDisabled: boolean | null;
+		outcome: "skipped-no-credentials" | "running" | "succeeded" | "failed" | "cancelled";
+	}>;
+}
+
 /** Handle returned immediately after an eval completion starts. */
 export interface EvalCompletionHandleResult {
 	id: string;
@@ -93,6 +113,7 @@ export interface CompletionHandleEntry {
 	settled: boolean;
 	result?: EvalCompletionResult;
 	error?: string;
+	metadata?: EvalCompletionMetadata;
 	evictionTimer?: NodeJS.Timeout;
 }
 
@@ -297,6 +318,7 @@ async function executeCompletion(
 	candidates: CompletionCandidate[],
 	session: ToolSession,
 	signal: AbortSignal,
+	metadata?: EvalCompletionMetadata,
 ): Promise<EvalCompletionResult> {
 	const registry = session.modelRegistry;
 	if (!registry) throw new ToolError("completion() has no model registry.");
@@ -322,20 +344,44 @@ async function executeCompletion(
 	let lastError: unknown;
 	let retriesUsed = 0;
 	let completed = false;
+	let activeAttempt: EvalCompletionMetadata["attempts"][number] | undefined;
 	for (const [index, candidate] of candidates.entries()) {
 		if (index > 0 && retriesUsed >= maxRetries) break;
 		model = candidate.model;
+		const attempt: EvalCompletionMetadata["attempts"][number] | undefined = metadata
+			? {
+					candidateIndex: index,
+					model: formatModelStringWithRouting(candidate.model),
+					requestEffort: null,
+					reasoningDisabled: null,
+					outcome: "running",
+				}
+			: undefined;
+		activeAttempt = attempt;
+		if (attempt) metadata?.attempts.push(attempt);
 		try {
 			// Forward the session id so session-sticky OAuth credentials
 			// resolve (see #5325); without it a usable fallback looks keyless.
 			const apiKey = await registry.getApiKey(model, session.getSessionId?.() ?? undefined, { signal });
 			if (!apiKey) {
+				if (attempt) attempt.outcome = "skipped-no-credentials";
 				lastError = new ToolError(
 					`completion() has no API key for ${formatModelString(model)}. Configure credentials for this provider or choose another tier.`,
 				);
 				continue;
 			}
 			if (index > 0) retriesUsed += 1;
+			const requestEffort = candidate.reasoning ?? null;
+			if (attempt) {
+				attempt.requestEffort = requestEffort;
+				attempt.reasoningDisabled = candidate.disableReasoning;
+			}
+			if (metadata) {
+				metadata.finalModel = formatModelStringWithRouting(model);
+				metadata.requestEffort = requestEffort;
+				metadata.reasoningDisabled = candidate.disableReasoning;
+				if (index > 0) metadata.fallbackUsed = true;
+			}
 			response = await instrumentedCompleteSimple(
 				model,
 				{
@@ -353,14 +399,17 @@ async function executeCompletion(
 				{ telemetry, oneshotKind: "eval_completion" },
 			);
 		} catch (error) {
+			if (attempt) attempt.outcome = signal.aborted ? "cancelled" : "failed";
 			lastError = error;
 			if (signal.aborted || index === candidates.length - 1) throw error;
 			continue;
 		}
 		if (response.stopReason === "aborted") {
+			if (attempt) attempt.outcome = "cancelled";
 			throw new ToolError("completion() request aborted.");
 		}
 		if (response.stopReason === "error") {
+			if (attempt) attempt.outcome = signal.aborted ? "cancelled" : "failed";
 			lastError = new ToolError(response.errorMessage ?? "completion() request failed.");
 			if (!signal.aborted && index < candidates.length - 1) continue;
 			throw lastError;
@@ -381,18 +430,26 @@ async function executeCompletion(
 			value = call.arguments;
 		} else {
 			const text = extractTextContent(response);
-			if (!text) throw new ToolError("completion() returned no structured response.");
+			if (!text) {
+				if (activeAttempt) activeAttempt.outcome = signal.aborted ? "cancelled" : "failed";
+				throw new ToolError("completion() returned no structured response.");
+			}
 			try {
 				value = parseJsonPayload(text);
 			} catch {
+				if (activeAttempt) activeAttempt.outcome = signal.aborted ? "cancelled" : "failed";
 				throw new ToolError("completion() did not return a structured response matching the schema.");
 			}
 		}
 		resultText = JSON.stringify(value);
 	} else {
 		resultText = extractTextContent(response);
-		if (!resultText) throw new ToolError("completion() returned no text output.");
+		if (!resultText) {
+			if (activeAttempt) activeAttempt.outcome = signal.aborted ? "cancelled" : "failed";
+			throw new ToolError("completion() returned no text output.");
+		}
 	}
+	if (activeAttempt) activeAttempt.outcome = "succeeded";
 
 	return {
 		text: resultText,
@@ -418,8 +475,29 @@ export async function runEvalCompletion(
 		);
 	}
 
-	return retainCompletionHandle("cmp", options, signal =>
-		executeCompletion(prompt, finalTier, system, schema, candidates, options.session, signal),
+	const primary = candidates[0]!;
+	const available = options.session.modelRegistry?.getAvailable() ?? [];
+	const isLiteralModelId = (provider: string | undefined, id: string): boolean =>
+		provider === undefined
+			? available.some(candidate => candidate.id.toLowerCase() === id.toLowerCase())
+			: available.some(candidate => candidate.provider === provider && candidate.id === id);
+	const metadata: EvalCompletionMetadata = {
+		requestedRole: finalTier,
+		configuredSelector: primary.selector,
+		configuredEffort:
+			extractExplicitThinkingSelector(primary.selector, options.session.settings, { isLiteralModelId }) ?? null,
+		finalModel: null,
+		requestEffort: null,
+		reasoningDisabled: null,
+		fallbackUsed: false,
+		effortEvidence: "provider-options",
+		attempts: [],
+	};
+	return retainCompletionHandle(
+		"cmp",
+		options,
+		signal => executeCompletion(prompt, finalTier, system, schema, candidates, options.session, signal, metadata),
+		metadata,
 	);
 }
 
@@ -433,6 +511,7 @@ export function retainCompletionHandle(
 	prefix: string,
 	options: EvalCompletionBridgeOptions,
 	execute: (signal: AbortSignal) => Promise<EvalCompletionResult>,
+	metadata?: EvalCompletionMetadata,
 ): EvalCompletionHandleResult {
 	const id = `${prefix}-${Snowflake.next()}`;
 	const ownerId = options.session.getAgentId?.() ?? MAIN_AGENT_ID;
@@ -443,6 +522,7 @@ export function retainCompletionHandle(
 		controller,
 		promise: Promise.resolve(),
 		settled: false,
+		metadata,
 	};
 	completionHandles.set(id, entry);
 	const run = async (): Promise<EvalCompletionResult> => {

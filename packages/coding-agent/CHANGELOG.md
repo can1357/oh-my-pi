@@ -5,6 +5,7 @@
 ### Added
 
 - Added per-model auto-compaction points: the `/models` preview shows where each model compacts, and in the Roles view `k` (or the **Compaction limit** button) sets it for the selected role's or fallback's model (`90000`, `90k`, `1M`, `80%`; empty resets). Also configurable as `compaction.modelThresholds` with `provider/model-id` or `provider/*` keys ([#14952](https://github.com/can1357/oh-my-pi/pull/14952) by [@H4vC](https://github.com/H4vC))
+- Added `metadata()` to JavaScript and Python completion handles to inspect model routing, request effort, and fallback attempts without changing completion results.
 
 ### Fixed
 
