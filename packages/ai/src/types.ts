@@ -405,6 +405,8 @@ export function coerceServiceTierByFamily(value: unknown): ServiceTierByFamily |
 
 export interface ProviderSessionState {
 	close(): void;
+	/** Release one routing session after its final request, preserving shared provider fallbacks. */
+	releaseSession?(sessionId: string): void;
 }
 
 export interface ProviderResponseMetadata {

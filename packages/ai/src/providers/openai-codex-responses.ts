@@ -102,6 +102,7 @@ export { setCodexAttestationProvider } from "./openai-codex-attestation";
 export type { CodexAttestationProvider } from "./openai-codex-attestation";
 import {
 	getOpenAIEffortControlState,
+	releaseOpenAIEffortControlSession,
 	type OpenAIEffortControlState,
 	planStableOpenAIEffort,
 } from "./openai-configuration-update";
@@ -434,6 +435,7 @@ export interface OpenAICodexWebSocketDebugStats {
  * is historical — SSE-only sessions use it too.
  */
 type CodexWebSocketSessionState = {
+	sessionId: string;
 	disableWebsocket: boolean;
 	lastRequest?: RequestBody;
 	/** Last completed response; an in-progress response cannot replace the retry baseline. */
@@ -1058,6 +1060,20 @@ function createCodexProviderSessionState(): CodexProviderSessionState {
 		webSocketPublicToPrivate: new Map(),
 		metadataSessions: new Map(),
 		effortControls: new Map(),
+		releaseSession: sessionId => {
+			const normalizedSessionId = normalizeOpenAIPromptCacheKey(sessionId);
+			if (!normalizedSessionId) return;
+			for (const [key, session] of state.webSocketSessions) {
+				if (session.sessionId !== normalizedSessionId) continue;
+				session.connection?.close("session_disposed");
+				state.webSocketSessions.delete(key);
+				for (const [publicKey, privateKey] of state.webSocketPublicToPrivate) {
+					if (privateKey === key) state.webSocketPublicToPrivate.delete(publicKey);
+				}
+			}
+			state.metadataSessions.delete(normalizedSessionId);
+			releaseOpenAIEffortControlSession(state.effortControls, normalizedSessionId);
+		},
 		close: () => {
 			for (const session of state.webSocketSessions.values()) {
 				session.connection?.close("session_disposed");
@@ -1472,14 +1488,14 @@ function createCodexRequestContext(
 		transportProviderSessionState?.webSocketPublicToPrivate.set(publicSessionKey, sessionKey);
 	}
 	const sharedWebsocketState =
-		sessionKey && providerSessionState
+		sessionKey && transportSessionId && providerSessionState
 			? isolatedTransportState
 				? providerSessionState.webSocketSessions.get(sessionKey)
-				: getCodexWebSocketSessionState(sessionKey, providerSessionState)
+				: getCodexWebSocketSessionState(sessionKey, transportSessionId, providerSessionState)
 			: undefined;
 	const websocketState =
-		sessionKey && isolatedTransportState
-			? getCodexWebSocketSessionState(sessionKey, isolatedTransportState)
+		sessionKey && transportSessionId && isolatedTransportState
+			? getCodexWebSocketSessionState(sessionKey, transportSessionId, isolatedTransportState)
 			: sharedWebsocketState;
 	if (isolatedTransportState && websocketState && sharedWebsocketState) {
 		websocketState.disableWebsocket = sharedWebsocketState.disableWebsocket;
@@ -1616,7 +1632,7 @@ function applyCodexStableEffort(
 	const providerState = getCodexProviderSessionState(options?.providerSessionState);
 	const sessionId = normalizeOpenAIPromptCacheKey(options?.sessionId);
 	if (!providerState || !sessionId) return;
-	const state = getOpenAIEffortControlState(providerState.effortControls, `${model.id}\u0000${sessionId}`);
+	const state = getOpenAIEffortControlState(providerState.effortControls, `${model.id}\u0000${sessionId}`, sessionId);
 	body.reasoning = { ...body.reasoning, effort: planStableOpenAIEffort(state, body.input, effort) };
 }
 
@@ -3361,13 +3377,10 @@ export async function prewarmOpenAICodexResponses(
 	if (publicSessionKey && sessionKey) {
 		providerSessionState?.webSocketPublicToPrivate.set(publicSessionKey, sessionKey);
 	}
-	if (!sessionKey || !providerSessionState) return;
-	const state = getCodexWebSocketSessionState(sessionKey, providerSessionState);
+	if (!sessionKey || !transportSessionId || !providerSessionState) return;
+	const state = getCodexWebSocketSessionState(sessionKey, transportSessionId, providerSessionState);
 	if (!shouldUseCodexWebSocket(model, state, options?.preferWebsockets)) return;
-	const metadataSession = getOrCreateCodexMetadataSessionState(
-		transportSessionId ?? crypto.randomUUID(),
-		providerSessionState,
-	);
+	const metadataSession = getOrCreateCodexMetadataSessionState(transportSessionId, providerSessionState);
 	const turnState = getOrCreateCodexTurnState(metadataSession, sessionKey);
 	const codexClientVersion = CODEX_CLIENT_VERSION;
 	const requestIdentity = createCodexCompatibilityIdentity(metadataSession);
@@ -3418,11 +3431,13 @@ function getCodexWebSocketSessionKey(
 
 function getCodexWebSocketSessionState(
 	sessionKey: string,
+	sessionId: string,
 	providerSessionState: CodexProviderSessionState,
 ): CodexWebSocketSessionState {
 	const existing = providerSessionState.webSocketSessions.get(sessionKey);
 	if (existing) return existing;
 	const created: CodexWebSocketSessionState = {
+		sessionId,
 		disableWebsocket: false,
 		canAppend: false,
 		fallbackCount: 0,
