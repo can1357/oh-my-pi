@@ -92,6 +92,14 @@ export interface AdvisorRuntimeHost {
 	 *  hard-stops), so the host can repaint UI that reflects whether the
 	 *  advisor is still going to comment on the current yield. */
 	notifyIdle?(): void;
+	/**
+	 * Experimental review gate for in-progress updates. Return `undefined` to
+	 * dispatch normally; otherwise the update is held and dispatched (with every
+	 * earlier held update) only if the promise resolves `true` or rejects.
+	 * Final (non-`willContinue`) updates are never gated.
+	 */
+	// ponytail: judges only the newest update, so cross-update loops surface at the final review; pass held text if that proves too late.
+	gateReview?(update: string): Promise<boolean> | undefined;
 }
 
 /**
@@ -238,6 +246,8 @@ interface PendingDelta {
 	/** Whether the primary was mid-turn (willContinue:true) when this delta was rendered. */
 	wip: boolean;
 	overflowRecovery?: boolean;
+	/** Pending `advisor.judgeGate` verdict on this held delta; survives the copies `#held` entries go through. */
+	gate?: Promise<boolean>;
 }
 
 /** Updates a review cadence captured but has not sent, and the primary cursor they end at. */
@@ -435,16 +445,42 @@ export class AdvisorRuntime {
 			this.#releaseFailureWaiters();
 			logger.warn("advisor delta render failed", { err: String(err) });
 		}
-		if (opts?.dispatch === false) {
+		// The experimental gate may hold an in-progress update the cadence scheduled.
+		const verdict = opts?.dispatch !== false && rendered && wip ? this.host.gateReview?.(rendered.text) : undefined;
+		if (opts?.dispatch === false || verdict) {
 			if (!rendered) return;
 			// The batch renders from `rawMessages` only when a later boundary
 			// dispatches it, after the primary's per-turn prune may have elided
 			// these tool results in place. Detach the held copies so the review
 			// sees what the primary saw at this boundary.
-			this.#held.push({ ...rendered, rawMessages: rendered.rawMessages.map(message => ({ ...message })), turns: 1 });
+			this.#held.push({
+				...rendered,
+				rawMessages: rendered.rawMessages.map(message => ({ ...message })),
+				turns: 1,
+				gate: verdict,
+			});
+			if (verdict) void this.#dispatchIfGatePasses(verdict);
 			return;
 		}
 		this.#dispatch(rendered ? { ...rendered, turns: 1 } : undefined);
+	}
+
+	/**
+	 * Once the gate says review, dispatch the update it judged with the updates
+	 * held before it; a gate error fails open. Later holds stay held: a late
+	 * verdict must not review updates it never judged, and an update a later
+	 * review already sent is done.
+	 */
+	async #dispatchIfGatePasses(verdict: Promise<boolean>): Promise<void> {
+		let review = true;
+		try {
+			review = await verdict;
+		} catch (err) {
+			logger.debug("advisor review gate failed; reviewing", { err: String(err) });
+		}
+		if (!review || this.disposed || this.#quotaExhausted || this.#halted) return;
+		const index = this.#held.findIndex(delta => delta.gate === verdict);
+		if (index !== -1) this.#dispatch(undefined, index + 1);
 	}
 
 	/**
@@ -477,10 +513,13 @@ export class AdvisorRuntime {
 		this.#held = [...held.deltas];
 	}
 
-	/** Queue held deltas plus `latest` as ONE review: one backlog unit, however many updates it carries. */
-	#dispatch(latest: PendingDelta | undefined): void {
-		const parts = latest ? [...this.#held, latest] : this.#held;
-		this.#held = [];
+	/**
+	 * Queue the first `heldCount` held deltas plus `latest` as ONE review: one
+	 * backlog unit, however many updates it carries.
+	 */
+	#dispatch(latest: PendingDelta | undefined, heldCount = this.#held.length): void {
+		const parts = this.#held.splice(0, heldCount);
+		if (latest) parts.push(latest);
 		if (parts.length === 0) return;
 		const last = parts[parts.length - 1]!;
 		this.#pending.push(

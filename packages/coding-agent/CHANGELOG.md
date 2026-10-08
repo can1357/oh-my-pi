@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added experimental `advisor.judgeGate`: the `judge` model role (e.g. TypeSafe Jev) screens each in-progress advisor update, and low-risk updates wait for the next review instead of costing a full advisor turn ([#14279](https://github.com/can1357/oh-my-pi/pull/14279) by [@LaansDole](https://github.com/LaansDole))
+
 ### Fixed
 
 - Fixed Tern showing an agent as finished when automatic context maintenance ends partway through a turn; omp now keeps reporting the turn's working state until the turn actually ends ([#14917](https://github.com/can1357/oh-my-pi/pull/14917) by [@wolfiesch](https://github.com/wolfiesch))
