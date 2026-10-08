@@ -444,6 +444,19 @@ export async function resolveEffectiveSubagentPolicy(
 	};
 }
 
+function requireResolvableRoutingModel(request: StructuredSubagentRequest, model: string | string[]): string[] {
+	const expanded = resolveConfiguredModelPatterns(model, request.session.settings);
+	const label = Array.isArray(model) ? model.join(", ") : model;
+	if (expanded.length === 0) {
+		throw new StructuredSubagentError("preflight", `before_subagent_spawn returned unresolvable model "${label}"`);
+	}
+	const registry = request.session.modelRegistry;
+	if (registry && !resolveModelOverride(expanded, registry, request.session.settings).model) {
+		throw new StructuredSubagentError("preflight", `before_subagent_spawn returned unsupported model "${label}"`);
+	}
+	return expanded;
+}
+
 function hasNonEmptyModelOverride(value: unknown): boolean {
 	if (typeof value === "string") return value.trim().length > 0;
 	return Array.isArray(value) && value.some(pattern => typeof pattern === "string" && pattern.trim().length > 0);
@@ -580,9 +593,10 @@ async function applySpawnHook(
 	if (spawnResult === undefined) return policy;
 
 	const returnedModel = modelLocked ? undefined : spawnResult.model;
-	const expanded =
-		returnedModel === undefined ? undefined : resolveConfiguredModelPatterns(returnedModel, request.session.settings);
-	const replacement = expanded && expanded.length > 0 ? expanded : undefined;
+	let replacement: string[] | undefined;
+	if (returnedModel !== undefined) {
+		replacement = requireResolvableRoutingModel(request, returnedModel);
+	}
 	const routedThinkingLevel =
 		effortLocked || spawnResult.thinkingLevel === undefined || spawnResult.thinkingLevel === ThinkingLevel.Inherit
 			? undefined

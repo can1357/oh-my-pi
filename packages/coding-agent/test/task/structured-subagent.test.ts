@@ -821,6 +821,19 @@ describe("structured subagent primitive", () => {
 		expect(dispatch).not.toHaveBeenCalled();
 	});
 
+	it("fails preflight when a returned model expands to nothing or matches no registry model", async () => {
+		mockDiscovery();
+		const dispatch = vi.spyOn(executorModule, "runSubprocess").mockImplementation(async () => result());
+		const empty = routingSession({ model: "   " });
+		const missing = routingSession({ model: "openai/not-a-real-model" });
+
+		await expect(runStructuredSubagent(request({ session: empty.session }))).rejects.toThrow(/unresolvable model/);
+		await expect(runStructuredSubagent(request({ session: missing.session }))).rejects.toThrow(
+			/unsupported model "openai\/not-a-real-model"/,
+		);
+		expect(dispatch).not.toHaveBeenCalled();
+	});
+
 	it("does not assign a role when a child uses an explicit model selector", async () => {
 		mockDiscovery();
 		const childSession = session({ modelRoles: { reviewer: "openai/gpt-4o" } });
