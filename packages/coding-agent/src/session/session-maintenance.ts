@@ -60,6 +60,7 @@ import type {
 	ProviderSessionState,
 } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
+import { resolvePromptCacheLookback } from "@oh-my-pi/pi-catalog/compat/prompt-cache-lookback";
 import { preferredDialect } from "@oh-my-pi/pi-catalog/identity";
 import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
 import { isRecord, logger, prompt, Snowflake } from "@oh-my-pi/pi-utils";
@@ -681,6 +682,7 @@ export class SessionMaintenance {
 	async #pruneToolOutputs(): Promise<{ prunedCount: number; tokensSaved: number } | undefined> {
 		const branchEntries = this.#host.sessionManager.getBranchView();
 		const keepBoundaryId = getLatestCompactionEntry(branchEntries)?.firstKeptEntryId;
+		const model = this.#host.model();
 		const result = pruneToolOutputs(
 			branchEntries,
 			this.#tokenizer,
@@ -691,8 +693,9 @@ export class SessionMaintenance {
 				// (deep stale/age victims) or summarized-away entries every turn.
 				keepBoundaryId,
 				// Prefix-bound thinking cannot survive rewrites inside a warm provider prefix.
-				cacheWarmSuffixTokens:
-					this.#host.model()?.thinking?.prefixBinding === true ? 0 : PRUNE_CACHE_WARM_SUFFIX_TOKENS,
+				cacheWarmSuffixTokens: model?.thinking?.prefixBinding === true ? 0 : PRUNE_CACHE_WARM_SUFFIX_TOKENS,
+				cacheLookbackPositions: model ? resolvePromptCacheLookback(model) : undefined,
+				convertToLlm,
 			}),
 		);
 		if (result.prunedCount === 0) {
@@ -726,6 +729,7 @@ export class SessionMaintenance {
 		if (!supersedeReads && !dropUseless) return undefined;
 		const branchEntries = this.#host.sessionManager.getBranchView();
 		const keepBoundaryId = getLatestCompactionEntry(branchEntries)?.firstKeptEntryId;
+		const model = this.#host.model();
 		const result = pruneSupersededToolResults(
 			branchEntries,
 			this.#tokenizer,
@@ -739,7 +743,9 @@ export class SessionMaintenance {
 				keepBoundaryId,
 				idleFlushMs: PRUNE_IDLE_FLUSH_MS,
 				// Prefix-bound thinking cannot survive rewrites inside a warm provider prefix.
-				suffixTokenLimit: this.#host.model()?.thinking?.prefixBinding === true ? 0 : undefined,
+				suffixTokenLimit: model?.thinking?.prefixBinding === true ? 0 : undefined,
+				cacheLookbackPositions: model ? resolvePromptCacheLookback(model) : undefined,
+				convertToLlm,
 			}),
 		);
 		if (result.prunedCount === 0) {
