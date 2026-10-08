@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Reduced memory retained after merging unchanged discovered and cached models ([#14252](https://github.com/can1357/oh-my-pi/pull/14252) by [@iliaal](https://github.com/iliaal)).
+
 ### Fixed
 
 - LSP shutdown and disconnected-session cleanup use bounded waits for stalled servers, and shutdown reports incomplete process termination instead of returning success, including when it joins a stop already in flight for an idle server and when that server was already retired by its own root's exit while its helper sweep was still running. Connections that arrive once shutdown has begun are refused instead of spawning a language server nothing will stop and holding the listener open. Helper termination no longer abandons the rest of the batch when one native call fails before returning a promise, and a stop that failed before any shutdown is still reported by the shutdown that follows it. ([#11226](https://github.com/can1357/oh-my-pi/pull/11226) by [@iliaal](https://github.com/iliaal)).
