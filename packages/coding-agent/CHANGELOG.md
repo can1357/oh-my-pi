@@ -847,6 +847,8 @@
 - Fixed Nix flake and NixOS module builds failing because the native package version stamp was not recognized.
 - Fixed Nix dependency-lock checks failing after obsolete stats chart dependencies were removed.
 
+- Added an `x_search` tool that searches live X/Twitter posts through xAI's Responses `x_search` server tool, using the same credentials as `web_search` on xAI (SuperGrok OAuth or `XAI_API_KEY`); it runs on a dedicated `xsearch` model role (`xai/grok-4.6`, then `xai-oauth/grok-4.6`) with handle/date filters and flags answers that come back without citations ([#3341](https://github.com/can1357/oh-my-pi/issues/3341)).
+
 ## [18.3.5] - 2026-09-27
 
 ### Added

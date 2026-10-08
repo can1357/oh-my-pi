@@ -48,7 +48,11 @@ describe("createTools", () => {
 	it("creates all builtin tools by default", async () => {
 		// xdev mounting (default-on) would unmount discoverables like lsp and
 		// web_search into xd://; disable it to assert the full builtin set.
-		const session = createTestSession({ settings: createSettingsWithOverrides({ "tools.xdev": false }) });
+		// x_search defaults to `auto` (credential-gated); pin it on to assert
+		// registration, covered separately by the auto test below.
+		const session = createTestSession({
+			settings: createSettingsWithOverrides({ "tools.xdev": false, "x_search.enabled": "on" }),
+		});
 		const tools = await createTools(session);
 		const names = tools.map(t => t.name);
 
@@ -64,8 +68,38 @@ describe("createTools", () => {
 		expect(names).toContain("task");
 		expect(names).toContain("todo");
 		expect(names).toContain("web_search");
+		expect(names).toContain("x_search");
 		expect(names).not.toContain("fetch");
 		expect(names).not.toContain("vim");
+	});
+
+	it("auto-enables x_search only when an xAI credential resolves", async () => {
+		const credentialed = (providers: string[]) =>
+			({
+				keys: {
+					source: (provider: string) =>
+						providers.includes(provider) ? { kind: "api_key" as const, concrete: true } : undefined,
+				},
+			}) as unknown as ToolSession["authStorage"];
+		const unauthed = { keys: { source: () => undefined } } as unknown as ToolSession["authStorage"];
+		const isolated = { "tools.xdev": false };
+
+		// API key on `xai` and OAuth on `xai-oauth` are both sufficient — the
+		// xsearch chain tries xai/grok-4.6 then xai-oauth/grok-4.6.
+		for (const storage of [credentialed(["xai"]), credentialed(["xai-oauth"])]) {
+			const tools = await createTools(
+				createTestSession({ settings: createSettingsWithOverrides(isolated), authStorage: storage }),
+			);
+			expect(tools.map(t => t.name)).toContain("x_search");
+		}
+
+		const without = await createTools(
+			createTestSession({ settings: createSettingsWithOverrides(isolated), authStorage: unauthed }),
+		);
+		expect(without.map(t => t.name)).not.toContain("x_search");
+
+		const noStorage = await createTools(createTestSession({ settings: createSettingsWithOverrides(isolated) }));
+		expect(noStorage.map(t => t.name)).not.toContain("x_search");
 	});
 
 	it("normalizes legacy explicit tool names", async () => {
@@ -237,6 +271,7 @@ describe("createTools", () => {
 				"bash.enabled": false,
 				"launch.enabled": false,
 				"web_search.enabled": false,
+				"x_search.enabled": "off",
 				"browser.enabled": false,
 			}),
 		});
@@ -250,6 +285,7 @@ describe("createTools", () => {
 		expect(names).not.toContain("ast_grep");
 		expect(names).not.toContain("ast_edit");
 		expect(names).not.toContain("web_search");
+		expect(names).not.toContain("x_search");
 		expect(names).not.toContain("browser");
 
 		const requestedTools = await createTools(createTestSession({ settings: session.settings }), ["bash", "read"]);

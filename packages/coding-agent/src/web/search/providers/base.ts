@@ -80,6 +80,23 @@ export interface SearchParams {
 	 */
 	sessionId?: string;
 	antigravityEndpointMode?: "auto" | "production" | "sandbox";
+	/**
+	 * When set, the xAI adapter calls the Responses `x_search` server tool
+	 * instead of `web_search`. Absent on every other provider.
+	 */
+	xSearch?: XSearchOptions;
+}
+
+/** Narrowing filters for xAI's `x_search` server tool. Handles are mutually exclusive. */
+export interface XSearchOptions {
+	allowedHandles?: readonly string[];
+	excludedHandles?: readonly string[];
+	/** Inclusive start, `YYYY-MM-DD`. */
+	fromDate?: string;
+	/** Inclusive end, `YYYY-MM-DD`. */
+	toDate?: string;
+	enableImageUnderstanding?: boolean;
+	enableVideoUnderstanding?: boolean;
 }
 
 /** Base class for web search providers. */
