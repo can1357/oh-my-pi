@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Fixed incremental subagent results rejecting legal array batches or open-union values, mixing values from multiple labels, and dropping required nulls in combined output schemas.
+- Fixed incremental subagent results rejecting legal array batches or open-union values, mixing values from multiple labels, and dropping required nulls in combined output schemas ([#14925](https://github.com/can1357/oh-my-pi/pull/14925) by [@vavilonska](https://github.com/vavilonska))
 
 ## [18.8.4] - 2026-10-08
 
