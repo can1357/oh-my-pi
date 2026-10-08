@@ -148,6 +148,11 @@ export interface ClientCapabilities {
 	terminal?: boolean;
 	auth?: { terminal?: boolean };
 	elicitation?: { form?: Record<string, unknown>; url?: Record<string, unknown> };
+	/**
+	 * **UNSTABLE** (RFD "Subagent Sessions"). Non-null means the client
+	 * understands `subagent_update` and session-directed message updates.
+	 */
+	subagents?: Meta | null;
 	_meta?: Record<string, unknown>;
 }
 /** Implementation identity sent during initialization. */
@@ -316,6 +321,22 @@ export interface PlanEntry extends Meta {
 	priority: "high" | "medium" | "low";
 	status: "pending" | "in_progress" | "completed";
 }
+/**
+ * **UNSTABLE** Current-work snapshot of a subagent session (RFD "Subagent
+ * Sessions"). A replacement snapshot, not a lifecycle outcome: `idle` means
+ * foreground work stopped and the parent may assign more. Covers the states
+ * the RFD defines; the schema's open extension states and idle `usage` are
+ * not modelled.
+ */
+export type SubagentWorkState =
+	| ({ state: "running" } & Meta)
+	| ({ state: "requires_action" } & Meta)
+	| ({ state: "unknown" } & Meta)
+	| ({
+			state: "idle";
+			stopReason?: StopReason | "error" | null;
+			error?: { code: number; message: string; data?: unknown } | null;
+	  } & Meta);
 /** Session update payload. */
 export type SessionUpdate =
 	| ({
@@ -335,6 +356,22 @@ export type SessionUpdate =
 			size: number;
 			used: number;
 			cost?: { amount: number; currency: string } | null;
+	  } & Meta)
+	| ({
+			/** **UNSTABLE** Announces (first time) or patches a child session owned by the enclosing session. */
+			sessionUpdate: "subagent_update";
+			sessionId: SessionId;
+			title?: string | null;
+			description?: string | null;
+			state?: SubagentWorkState | null;
+	  } & Meta)
+	| ({
+			/** **UNSTABLE** Upserts an inter-session message in the enclosing session's transcript. */
+			sessionUpdate: "session_message";
+			messageId: string;
+			senderSessionId?: SessionId | null;
+			recipientSessionId?: SessionId | null;
+			content?: ContentBlock[] | null;
 	  } & Meta);
 /** Notification containing a session update. */
 export interface SessionNotification extends Meta {

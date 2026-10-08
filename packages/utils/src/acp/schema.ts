@@ -115,6 +115,15 @@ function sessionNotification(value: unknown): boolean {
 			return update.title === undefined || update.title === null || typeof update.title === "string";
 		case "usage_update":
 			return typeof update.size === "number" && typeof update.used === "number";
+		case "subagent_update":
+			return typeof update.sessionId === "string" && update.sessionId !== notification.sessionId;
+		case "session_message":
+			return (
+				typeof update.messageId === "string" &&
+				(update.content === undefined ||
+					update.content === null ||
+					(Array.isArray(update.content) && update.content.every(contentBlock)))
+			);
 		default:
 			return false;
 	}

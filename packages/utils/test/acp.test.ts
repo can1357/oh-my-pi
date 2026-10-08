@@ -210,4 +210,23 @@ describe("ACP runtime schemas", () => {
 			}).success,
 		).toBe(false);
 	});
+
+	it("validates the unstable subagent session updates", () => {
+		const valid = (update: Record<string, unknown>) =>
+			schema.zSessionNotification.safeParse({ sessionId: "parent", update }).success;
+		expect(valid({ sessionUpdate: "subagent_update", sessionId: "child", state: { state: "running" } })).toBe(true);
+		// A session cannot own itself.
+		expect(valid({ sessionUpdate: "subagent_update", sessionId: "parent" })).toBe(false);
+		expect(
+			valid({
+				sessionUpdate: "session_message",
+				messageId: "m",
+				recipientSessionId: "child",
+				content: [{ type: "text", text: "hi" }],
+			}),
+		).toBe(true);
+		expect(valid({ sessionUpdate: "session_message", messageId: "m", content: null })).toBe(true);
+		expect(valid({ sessionUpdate: "session_message", content: [{ type: "text", text: "hi" }] })).toBe(false);
+		expect(valid({ sessionUpdate: "session_message", messageId: "m", content: [{ type: "text" }] })).toBe(false);
+	});
 });
