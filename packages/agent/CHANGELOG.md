@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `cacheLookbackPositions` and `convertToLlm` to `PruneConfig` and `SupersedePruneConfig` so warm-cache pruning stays within the model's prompt-cache lookback, counting app messages as they are sent, and `getMessageFromEntry` to the compaction exports ([#14751](https://github.com/can1357/oh-my-pi/pull/14751) by [@will-bogusz](https://github.com/will-bogusz))
+
+### Fixed
+
+- Fixed warm-cache tool-result pruning re-writing a whole Anthropic prompt cache when the pruned result sat behind many small turns ([#14751](https://github.com/can1357/oh-my-pi/pull/14751) by [@will-bogusz](https://github.com/will-bogusz))
+
 ## [18.8.1] - 2026-10-07
 
 ### Added
