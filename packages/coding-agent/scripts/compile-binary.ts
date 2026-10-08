@@ -77,7 +77,10 @@ export async function compileCodingAgent(options: CodingAgentCompileOptions): Pr
 				autoloadBunfig: false,
 				autoloadDotenv: false,
 				autoloadTsconfig: false,
-				autoloadPackageJson: false,
+				// Runtime resolution of on-disk deps (extensions, their workers, eval)
+				// needs package.json `main`/`exports`/`type`; with this off Bun only
+				// finds `index.js` entries (issue #14911).
+				autoloadPackageJson: true,
 			},
 			throw: false,
 		});

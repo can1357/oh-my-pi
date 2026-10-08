@@ -72,6 +72,34 @@ it("runs compiled bytecode containing dependency import.meta.resolve calls", asy
 	expect(result.exitCode).toBe(0);
 	expect(result.text().trim()).toBe("node:fs");
 }, 30_000);
+
+it("resolves on-disk packages through package.json main and exports at runtime", async () => {
+	using temp = TempDir.createSync("@omp-package-json-");
+	const entrypoint = temp.join("entry.ts");
+	const outfile = temp.join(process.platform === "win32" ? "probe.exe" : "probe");
+	await Bun.write(temp.join("node_modules/with-main/package.json"), '{"name":"with-main","main":"lib.js"}');
+	await Bun.write(temp.join("node_modules/with-main/lib.js"), 'module.exports = "main";\n');
+	await Bun.write(
+		temp.join("node_modules/with-exports/package.json"),
+		'{"name":"with-exports","exports":{".":"./entry.js"}}',
+	);
+	await Bun.write(temp.join("node_modules/with-exports/entry.js"), 'module.exports = "exports";\n');
+	// Runtime-computed specifiers stay unbundled, like extension imports.
+	await Bun.write(
+		entrypoint,
+		"for (const name of process.argv.slice(2)) console.log((await import(name)).default, require(name));\n",
+	);
+	await compileCodingAgent({
+		repoRoot: temp.path(),
+		entrypoint,
+		outfile,
+		transformersVersion: "unused",
+		native: null,
+	});
+	const result = await $`${outfile} with-main with-exports`.cwd(temp.path()).quiet().nothrow();
+	expect(result.stderr.toString()).toBe("");
+	expect(result.text().trim().split("\n")).toEqual(["main main", "exports exports"]);
+}, 30_000);
 describe("macOS release binary entitlements", () => {
 	it("allows Xcode MCP automation through Apple Events", async () => {
 		const entitlements = await Bun.file(path.join(repoRoot, "scripts/macos-entitlements.plist")).text();

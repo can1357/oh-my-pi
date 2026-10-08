@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed extensions (and workers they start) in the compiled binary failing to `import()`/`require()` packages whose entry comes from `package.json` `main` or `exports`, such as napi-rs native bindings ([#14911](https://github.com/can1357/oh-my-pi/issues/14911))
+
 ## [18.8.4] - 2026-10-08
 
 ### Changed
