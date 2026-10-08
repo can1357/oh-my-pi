@@ -472,8 +472,7 @@ fn refuse_protected_default(scheme: &str) -> Result<()> {
 		.get_raw_value("ProgId")
 		.ok()
 		.and_then(|value| decode_reg_sz(&value))
-		.map(|value| format!(" ({})", value.to_string_lossy()))
-		.unwrap_or_default();
+		.map_or_default(|value| format!(" ({})", value.to_string_lossy()));
 	bail!(
 		"Windows has a protected default-app selection for {scheme:?}{prog_id}; use manual callback \
 		 input or change the default app in Windows Settings"

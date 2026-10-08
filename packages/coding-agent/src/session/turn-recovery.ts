@@ -2647,7 +2647,18 @@ export class TurnRecovery {
 				!this.#isFirstAttemptMidStreamSocketDrop(message, id, retryBudgetExhausted)
 			) {
 				if (!classifierRefusal) {
-					this.noteRetryFallbackCooldown(currentSelector, parsedRetryAfterMs, errorMessage, currentModel);
+					// A usage-limit wait already knows when this provider can serve
+					// the session again (report reset, merged credential block,
+					// sibling unblock); cooling down for less sends the revert back
+					// to a still-exhausted primary. A switched credential means a
+					// sibling is free now, and that wait covers only the spent one.
+					const usageCooldownMs = recordedUsageLimitOutcome?.switchedCredential ? undefined : usageLimitWaitMs;
+					this.noteRetryFallbackCooldown(
+						currentSelector,
+						usageCooldownMs ?? parsedRetryAfterMs,
+						errorMessage,
+						currentModel,
+					);
 				}
 				switchedModel = await this.#tryRetryModelFallback(currentSelector, message, {
 					excludeProvider: longUsageLimitFallback ? currentModel.provider : undefined,

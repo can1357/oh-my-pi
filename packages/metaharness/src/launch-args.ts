@@ -44,6 +44,12 @@ export interface LaunchRequest {
 	extraArgs?: string[];
 }
 
+/** Default `<model-slug>-<UTC stamp>` job name used when a launch does not name its job. */
+export function defaultJobName(model: string): string {
+	const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+	return `${model.replace(/[^a-zA-Z0-9]+/g, "-")}-${stamp}`;
+}
+
 /** Runner CLI flags (sans the `bun src/runner.ts` prefix) for a harbor launch. */
 export function harborRunnerArgs(
 	request: LaunchRequest,

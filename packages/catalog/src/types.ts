@@ -1485,11 +1485,11 @@ export interface Model<TApi extends Api = Api> {
 	cursorMaxModeRoutes?: Readonly<Record<string, boolean>>;
 	/**
 	 * Per-account availability recorded by multi-account discovery: provider
-	 * account id (Codex: ChatGPT `chatgpt_account_id`) → that account's
-	 * entitlements on this model. An account appears only when its own catalog
-	 * lists the model, so credential selection can route account-gated models
-	 * (e.g. `gpt-daybreak-blue-latest`) straight to eligible accounts. Absent on
-	 * bundled/config rows and on single-account discovery.
+	 * account key (Codex: ChatGPT `chatgpt_account_id`; Antigravity: login
+	 * email) → that account's entitlements on this model. An account appears
+	 * only when its own catalog lists the model, so credential selection can
+	 * route account-gated models (e.g. `gpt-daybreak-blue-latest`, Antigravity
+	 * Claude 5.5) straight to eligible accounts. Absent on bundled/config rows.
 	 */
 	accountAccess?: Readonly<Record<string, ModelAccountAccess>>;
 	/** Cursor `RequestedModel.parameters` for this model's default variant. */

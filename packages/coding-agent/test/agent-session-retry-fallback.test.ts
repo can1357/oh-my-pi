@@ -1973,6 +1973,69 @@ describe("AgentSession retry fallback", () => {
 		expect(modelRegistry.isSelectorSuppressed(primarySelector)).toBe(false);
 	});
 
+	it("retries generic Antigravity advisor exhaustion without a fallback", async () => {
+		const mainModel = getBundledModel("openai", "gpt-4o-mini");
+		const advisorModel = getBundledModel("google-antigravity", "gemini-3.7-flash");
+		if (!mainModel || !advisorModel) throw new Error("Expected bundled advisor models to exist");
+		const advisorSelector = `${advisorModel.provider}/${advisorModel.id}`;
+		const mainMock = createMockModel({ responses: [{ content: ["Primary complete"] }] });
+		const advisorMock = createMockModel({
+			responses: [
+				{
+					throw: JSON.stringify({
+						error: {
+							code: 429,
+							status: "RESOURCE_EXHAUSTED",
+							message: "Resource has been exhausted (e.g. check quota).",
+						},
+					}),
+				},
+				{ content: ["Advisor recovered"] },
+			],
+		});
+		const requestedAdvisorModels: string[] = [];
+		const markUsageLimitReached = vi.spyOn(authStorage.limits, "markReached");
+		mockSchedulerWaitWithClock();
+		const agent = new Agent({
+			getApiKey: model => `${model.provider}-test-key`,
+			initialState: { model: mainModel, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: mainMock.stream,
+		});
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.fallbackChains": {},
+			"advisor.syncBacklog": "1",
+		});
+		settings.setModelRole("advisor", advisorSelector);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+			advisorTools: [],
+			advisorConfigs: [{ name: "capacity-recovery", model: advisorSelector }],
+			advisorStreamFn: (model, context, options) => {
+				requestedAdvisorModels.push(`${model.provider}/${model.id}`);
+				return advisorMock.stream(model, context, options);
+			},
+		});
+		const advisorYielded = Promise.withResolvers<void>();
+		session.subscribe(event => {
+			if (event.type === "advisor_yielded") advisorYielded.resolve();
+		});
+		session.setAdvisorEnabled(true);
+		await session.prompt("Recover the advisor after a generic Antigravity 429");
+		await session.waitForIdle();
+		await advisorYielded.promise;
+
+		const markOptions = markUsageLimitReached.mock.calls[0]?.[2];
+		expect(markOptions?.retryAfterMs).toBeGreaterThanOrEqual(45_000);
+		expect(markOptions?.retryAfterMs).toBeLessThanOrEqual(75_000);
+		expect(markOptions?.providerTimed).toBe(false);
+		expect(session.getAdvisorStatusOverview().advisors[0]).toMatchObject({ status: "running", yielded: true });
+		expect(requestedAdvisorModels).toEqual([advisorSelector, advisorSelector]);
+	});
+
 	it("keeps advisor fallback recovery on its role chain when another role shares its model", async () => {
 		const mainModel = getBundledModel("openai", "gpt-4o-mini");
 		const advisorPrimary = getBundledModel("anthropic", "claude-sonnet-4-5");
