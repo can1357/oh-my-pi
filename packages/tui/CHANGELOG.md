@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added a "Plan review" waiting overlay that names the extension reviewing a proposed plan; Esc hands the decision back to the built-in plan picker ([#12982](https://github.com/can1357/oh-my-pi/pull/12982) by [@consegrado](https://github.com/consegrado))
+
 ## [18.8.4] - 2026-10-08
 
 ### Changed

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added the `plan_review` extension event, letting an external reviewer approve, refine, or dismiss a plan instead of the built-in plan-mode picker (interactive and ACP) ([#12982](https://github.com/can1357/oh-my-pi/pull/12982) by [@consegrado](https://github.com/consegrado)).
+
 ### Fixed
 
 - Fixed Claude Opus 5.5 and Sonnet 5.5 disappearing with mixed-access Google Antigravity accounts; models now route to accounts that serve them, and revoked accounts no longer block catalog refresh ([#14924](https://github.com/can1357/oh-my-pi/issues/14924)).

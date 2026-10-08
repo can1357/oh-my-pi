@@ -62,6 +62,7 @@ import { loadAllExtensions } from "../../modes/components/extensions/state-manag
 import { theme } from "@oh-my-pi/pi-tui/theme";
 import { normalizePlanTitle, type PlanApprovalDetails, resolveApprovedPlan } from "../../plan-mode/approved-plan";
 import { autosaveApprovedPlan } from "../../plan-mode/plan-autosave";
+import type { PlanModeState } from "../../plan-mode/state";
 import type { AgentSession, AgentSessionEvent } from "../../session/agent-session";
 import { BlobStore, resolveImageDataSync } from "../../session/blob-store";
 import { isSilentAbort, SKILL_PROMPT_MESSAGE_TYPE, USER_INTERRUPT_LABEL } from "../../session/messages";
@@ -600,6 +601,10 @@ export class AcpAgent implements Agent {
 	#clientCapabilities: ClientCapabilities | undefined;
 	#cancelCleanupTimeoutMs = ACP_CANCEL_CLEANUP_TIMEOUT_MS;
 	#blobs = new BlobStore(getBlobsDir());
+	/** Pending plan review per session. A `plan_review` handler runs unbounded, so a mode
+	 *  switch, a newer proposal, or closing the session aborts it explicitly — the tool
+	 *  call's own signal only covers turn cancellation. */
+	#planReviews = new WeakMap<AgentSession, AbortController>();
 
 	constructor(connection: AgentSideConnection, createSession: CreateAcpSession, initialSession?: AgentSession) {
 		this.#connection = connection;
@@ -1848,6 +1853,7 @@ export class AcpAgent implements Agent {
 		if (!availableModes.some(mode => mode.id === modeId)) {
 			throw new Error(`Unsupported ACP mode: ${modeId}`);
 		}
+		this.#abortAcpPlanReview(session, "ACP session mode changed");
 		if (modeId === ACP_PLAN_MODE_ID) {
 			const previous = session.getPlanModeState();
 			session.setPlanModeState({
@@ -1860,7 +1866,9 @@ export class AcpAgent implements Agent {
 			// handler that consumes `xd://propose` writes from plan mode. Without
 			// this, proposal dispatch falls through and plan mode has no approval
 			// path (issue #1869).
-			session.setPlanProposalHandler?.(title => this.#handleAcpPlanProposal(session, title));
+			session.setPlanProposalHandler?.((title, signal, toolCallId) =>
+				this.#handleAcpPlanProposal(session, title, signal, toolCallId),
+			);
 		} else {
 			session.setPlanProposalHandler?.(null);
 			session.setPlanModeState(undefined);
@@ -1880,7 +1888,39 @@ export class AcpAgent implements Agent {
 	 * get an auto-approve so plan mode is never stranded — the agent always has
 	 * a way out.
 	 */
-	async #handleAcpPlanProposal(session: AgentSession, title: string): Promise<AgentToolResult<unknown>> {
+	async #handleAcpPlanProposal(
+		session: AgentSession,
+		title: string,
+		signal?: AbortSignal,
+		toolCallId?: string,
+	): Promise<AgentToolResult<unknown>> {
+		// A newer proposal supersedes the one still under review.
+		this.#abortAcpPlanReview(session, "Superseded by a newer plan proposal");
+		const review = new AbortController();
+		this.#planReviews.set(session, review);
+		try {
+			const reviewSignal = signal ? AbortSignal.any([signal, review.signal]) : review.signal;
+			return await this.#reviewAcpPlanProposal(session, title, reviewSignal, toolCallId);
+		} finally {
+			if (this.#planReviews.get(session) === review) this.#planReviews.delete(session);
+		}
+	}
+
+	#abortAcpPlanReview(session: AgentSession, reason: string): void {
+		const review = this.#planReviews.get(session);
+		if (!review) return;
+		this.#planReviews.delete(session);
+		review.abort(new DOMException(reason, "AbortError"));
+	}
+
+	/** Body of {@link #handleAcpPlanProposal}; `signal` covers turn cancellation and every
+	 *  host-side reason the review went stale. */
+	async #reviewAcpPlanProposal(
+		session: AgentSession,
+		title: string,
+		signal: AbortSignal,
+		toolCallId?: string,
+	): Promise<AgentToolResult<unknown>> {
 		const state = session.getPlanModeState();
 		if (!state?.enabled) {
 			throw new ToolError("Plan mode is not active.");
@@ -1895,12 +1935,76 @@ export class AcpAgent implements Agent {
 			readPlan: url => this.#readAcpPlanFile(session, url),
 			listPlanFiles: () => this.#listAcpLocalPlanFiles(session),
 		});
-		const approved = await this.#requestAcpPlanApprovalChoice(session.sessionId, resolvedTitle, planContent);
+		// Re-check after every await: an ACP client can switch the session's mode
+		// out from under a review, and a decision about a mode that no longer
+		// exists must not take effect.
+		this.#assertAcpPlanReviewCurrent(session, state, signal);
 		const details: PlanApprovalDetails = {
 			planFilePath,
 			title: resolvedTitle,
 			planExists: true,
 		};
+
+		// A `plan_review` extension decides before — and instead of — the client
+		// elicitation. `ctx.mode` is `"rpc"` for ACP handlers; no other RPC surface
+		// emits this event, so that is the ACP marker.
+		const runner = session.extensionRunner;
+		const decision = runner?.hasHandlers("plan_review")
+			? await runner.emitPlanReview(
+					{
+						type: "plan_review",
+						planFilePath,
+						resolvedPlanPath: this.#resolveAcpPlanFilePath(session, planFilePath),
+						title: resolvedTitle,
+						planContent,
+						signal,
+					},
+					{ signal },
+				)
+			: undefined;
+		// Checked BEFORE the elicitation below: a client without `elicitation.form`
+		// auto-approves, so falling through on an aborted turn would grant write
+		// access on a turn the user already cancelled.
+		this.#assertAcpPlanReviewCurrent(session, state, signal);
+
+		if (decision?.action === "refine" || decision?.action === "dismiss") {
+			// Keep plan mode active for another planning turn. Promote the reviewed
+			// path into plan-mode state so the next `#buildPlanModeMessage()` targets
+			// the plan just reviewed, not the stale state path.
+			if (state.planFilePath !== planFilePath) {
+				session.setPlanModeState({ ...state, planFilePath });
+			}
+			if (decision.action === "dismiss") {
+				// ACP has no "return to the user" signal inside a tool result, so stop
+				// the turn itself — otherwise the model reads the text and immediately
+				// proposes again. The abort waits for this dispatch's own
+				// `tool_execution_end` so the dismissal text is recorded first.
+				this.#abortAfterPlanDismissal(session, toolCallId);
+				return {
+					content: [{ type: "text" as const, text: "Plan review dismissed; stop and wait for the user." }],
+					details,
+				};
+			}
+			return {
+				content: [
+					{
+						type: "text" as const,
+						// ACP can only return refinement feedback as tool-result text: the
+						// decision is made inside the tool call, so there is no user-turn
+						// channel to deliver it on. Documented protocol limitation.
+						text: `Plan refinement requested:\n\n${decision.feedback ?? ""}\n\nUpdate the plan file, then write ${
+							normalizePlanTitle(resolvedTitle).title
+						} to xd://propose again when ready.`,
+					},
+				],
+				details,
+			};
+		}
+
+		const approved =
+			decision?.action === "approve" ||
+			(await this.#requestAcpPlanApprovalChoice(session.sessionId, resolvedTitle, planContent, signal));
+		this.#assertAcpPlanReviewCurrent(session, state, signal);
 		if (!approved) {
 			// Rejection keeps plan mode active for another planning turn. Promote the
 			// reviewed path into plan-mode state so the next `#buildPlanModeMessage()`
@@ -1919,6 +2023,10 @@ export class AcpAgent implements Agent {
 				details,
 			};
 		}
+		// Execute the revision on disk: an external reviewer may have rewritten the
+		// plan while it held the decision.
+		const approvedContent = (await this.#readAcpPlanFile(session, planFilePath)) ?? planContent;
+		this.#assertAcpPlanReviewCurrent(session, state, signal);
 		// Approved. Set the plan reference so the next turn injects the plan
 		// content as context (the file keeps its agent-chosen name — no rename),
 		session.setPlanReferencePath(planFilePath);
@@ -1930,7 +2038,7 @@ export class AcpAgent implements Agent {
 				settings: session.settings,
 				cwd: session.sessionManager.getCwd(),
 				title: resolvedTitle,
-				planContent,
+				planContent: approvedContent,
 			});
 		} catch (error) {
 			logger.warn("Failed to autosave approved plan", {
@@ -1962,6 +2070,55 @@ export class AcpAgent implements Agent {
 			],
 			details,
 		};
+	}
+
+	/**
+	 * Stop the turn a dismissed plan proposal belongs to, once that proposal's own
+	 * tool result has been recorded.
+	 *
+	 * Aborting from inside the handler would race the result into the transcript;
+	 * waiting for `tool_execution_end` of this exact dispatch guarantees the model
+	 * (and the client) keep the dismissal text. `agent_end` means the turn ended on
+	 * its own, so there is nothing left to stop.
+	 */
+	#abortAfterPlanDismissal(session: AgentSession, toolCallId: string | undefined): void {
+		let unsubscribe: (() => void) | undefined;
+		const stop = (): void => {
+			unsubscribe?.();
+			unsubscribe = undefined;
+		};
+		unsubscribe = session.subscribe(event => {
+			if (event.type === "agent_end") {
+				stop();
+				return;
+			}
+			if (event.type !== "tool_execution_end") return;
+			if (toolCallId !== undefined && event.toolCallId !== toolCallId) return;
+			stop();
+			if (!session.isStreaming) return;
+			session.abort({ reason: "Plan review dismissed" }).catch((error: unknown) => {
+				logger.warn("Failed to stop the turn after a dismissed plan review", {
+					sessionId: session.sessionId,
+					error,
+				});
+			});
+		});
+	}
+
+	/**
+	 * Guard every resumption point in an ACP plan review: the turn may have been
+	 * cancelled, or the client may have switched the session mode, while a
+	 * `plan_review` handler or an elicitation was pending. Either way the
+	 * decision is stale and must not reach the approval side effects. A mode
+	 * switch also aborts `signal`, so the mode check runs first to name it.
+	 */
+	#assertAcpPlanReviewCurrent(session: AgentSession, state: PlanModeState, signal: AbortSignal): void {
+		if (session.getPlanModeState() !== state) {
+			throw new ToolError("Plan mode changed during review — the proposal was not applied.");
+		}
+		if (signal.aborted) {
+			throw new ToolError("Plan review cancelled");
+		}
 	}
 
 	#resolveAcpPlanFilePath(session: AgentSession, planFilePath: string): string {
@@ -2015,7 +2172,12 @@ export class AcpAgent implements Agent {
 	 * confirmation surface available; without that, plan mode would strand
 	 * the agent (the bug this method exists to fix).
 	 */
-	async #requestAcpPlanApprovalChoice(sessionId: string, title: string, planContent: string): Promise<boolean> {
+	async #requestAcpPlanApprovalChoice(
+		sessionId: string,
+		title: string,
+		planContent: string,
+		signal?: AbortSignal,
+	): Promise<boolean> {
 		const supportsForm = this.#clientCapabilities?.elicitation?.form != null;
 		if (!supportsForm) return true;
 		// Include a short preview of the plan so the user has context in the
@@ -2030,7 +2192,7 @@ export class AcpAgent implements Agent {
 			"select",
 			message,
 			{ type: "string", enum: [APPROVE_OPTION, REFINE_OPTION] },
-			undefined,
+			signal ? { signal } : undefined,
 		);
 		// Approve ONLY on the explicit approve selection. Dismissal, cancel,
 		// timeout, or any other non-approve response falls through to refine
@@ -2767,6 +2929,7 @@ export class AcpAgent implements Agent {
 	}
 
 	async #disposeSessionRecord(record: ManagedSessionRecord, reason?: postmortem.Reason): Promise<void> {
+		this.#abortAcpPlanReview(record.session, "ACP session closed");
 		record.lifetimeUnsubscribe?.();
 		if (record.mcpManager) {
 			try {
