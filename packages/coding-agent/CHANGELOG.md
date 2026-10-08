@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Models configuration accepts `supportsPromptCacheBreakpoints` for custom OpenAI-compatible gateways ([#12880](https://github.com/can1357/oh-my-pi/pull/12880) by [@ZenAlexa](https://github.com/ZenAlexa)).
 ### Fixed
 
 - Fixed Claude Opus 5.5 and Sonnet 5.5 disappearing with mixed-access Google Antigravity accounts; models now route to accounts that serve them, and revoked accounts no longer block catalog refresh ([#14924](https://github.com/can1357/oh-my-pi/issues/14924)).

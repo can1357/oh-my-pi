@@ -4,6 +4,7 @@
 
 ### Changed
 
+- OpenAI prompt-cache breakpoints now cover stable assistant, tool, and function-output boundaries, with nested gateway markers rejected ([#12880](https://github.com/can1357/oh-my-pi/pull/12880) by [@ZenAlexa](https://github.com/ZenAlexa)).
 - `AuthApiKeyOptions.accountIds` also matches the login email, or else the project id, of credentials that carry no account id (see `oauthAccountKey`), so Antigravity requests prefer accounts that serve the requested model ([#14924](https://github.com/can1357/oh-my-pi/issues/14924)).
 
 ### Added
