@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `todo.sticky` setting (default on). Turn it off to stop pinning the todo list above the editor so it scrolls away with the transcript.
+
 ### Changed
 
 - Reduced memory retained after merging unchanged discovered and cached models ([#14252](https://github.com/can1357/oh-my-pi/pull/14252) by [@iliaal](https://github.com/iliaal)).
