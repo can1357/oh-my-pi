@@ -572,12 +572,20 @@ describe("devin native display filtering", () => {
 		expect(find("fusion-kimi-k3-sidekick-swe-2-high")).toBeUndefined();
 		expect(wireId("fusion-sidekick-swe-2-high")).toBeUndefined();
 		expect(wireId("fusion")).toBeUndefined();
-		// Only the lead runs, so limits and pricing are the lead's, not the composite card's.
+		// Only the lead runs, so limits and pricing are the lead's — including
+		// the lead's own cache-write rate and long-context tier — not the
+		// composite card's.
 		const routed = find("fusion-gpt-6-sol-high-sidekick-swe-2-high");
 		expect(routed?.contextWindow).toBe(400_000);
 		expect(routed?.maxTokens).toBe(128_000);
 		expect(routed?.input).toEqual(["text", "image"]);
-		expect(routed?.cost).toEqual({ input: 2, output: 8, cacheRead: 0, cacheWrite: 0 });
+		expect(routed?.cost).toEqual({
+			input: 2,
+			output: 8,
+			cacheRead: 0,
+			cacheWrite: 2.5,
+			longContext: { inputThreshold: 272_000, input: 4, output: 12, cacheRead: 0, cacheWrite: 5 },
+		});
 	});
 
 	it("stops composite pricing at the Sidekick marker even with a sparse headline card", () => {
