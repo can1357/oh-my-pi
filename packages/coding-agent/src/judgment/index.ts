@@ -148,16 +148,22 @@ const kRejections = Symbol("judgment.rejections");
 const kRoleChain = Symbol("judgment.roleChain");
 interface RegistryWithRejections extends ModelRegistry {
 	[kRejections]?: Map<string, number>;
-	[kRoleChain]?: { settings: Settings; list: RoleChainCandidate[]; expiresAt: number };
+	[kRoleChain]?: { settings: Settings; revision: number; list: RoleChainCandidate[]; expiresAt: number };
 }
 
-/** {@link judgeRoleChain}, reused for {@link CANDIDATE_TTL_MS} across judges over the same settings and registry. */
+/**
+ * {@link judgeRoleChain}, reused for {@link CANDIDATE_TTL_MS} across judges over the same settings and registry.
+ * A settings change (e.g. a new judge role) resolves afresh, so a judge never disagrees with {@link hasNativeJudge}.
+ */
 function cachedJudgeRoleChain(settings: Settings, registry: RegistryWithRejections): RoleChainCandidate[] {
 	const now = Date.now();
+	const revision = settings.revision;
 	const cached = registry[kRoleChain];
-	if (cached && cached.settings === settings && now < cached.expiresAt) return cached.list;
+	if (cached && cached.settings === settings && cached.revision === revision && now < cached.expiresAt) {
+		return cached.list;
+	}
 	const list = judgeRoleChain(settings, registry);
-	registry[kRoleChain] = { settings, list, expiresAt: now + CANDIDATE_TTL_MS };
+	registry[kRoleChain] = { settings, revision, list, expiresAt: now + CANDIDATE_TTL_MS };
 	return list;
 }
 
