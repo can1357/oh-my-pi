@@ -6,6 +6,10 @@
 
 - Added the `prompt-cache-lookback` catalog axis and `resolvePromptCacheLookback`, giving Claude models on every host their 20-position prompt-cache lookback ([#14751](https://github.com/can1357/oh-my-pi/pull/14751) by [@will-bogusz](https://github.com/will-bogusz))
 
+### Fixed
+
+- Fixed one newly published model this build cannot resolve hiding every other discovered model of its provider (a new Claude Haiku 5.5 made Claude Sonnet 5.5 unknown); it is now skipped with a warning
+
 ## [18.8.5] - 2026-10-08
 
 ### Breaking Changes
