@@ -100,6 +100,49 @@ export const cfgWorktreeCleanSource = register({
 	},
 });
 
+export const cfgWorktreeOnStart = register({
+	id: "worktree.onStart",
+	protocolDefault: ["rpc", "acp"],
+	type: "enum",
+	values: ["off", "ask", "create"] as const,
+	default: "off",
+	ui: {
+		tab: "tasks",
+		group: "Isolation",
+		label: "Worktree on Start",
+		description: "Whether fresh interactive sessions start in a new linked worktree",
+		options: [
+			{ value: "off", label: "Off", description: "Start in the current checkout" },
+			{ value: "ask", label: "Ask", description: "Ask at session start" },
+			{ value: "create", label: "Create", description: "Always start in a new worktree on a `wt/*` branch" },
+		],
+	},
+});
+
+export const cfgWorktreeOnExit = register({
+	id: "worktree.onExit",
+	protocolDefault: ["rpc", "acp"],
+	type: "enum",
+	values: ["keep", "ask", "remove"] as const,
+	default: "keep",
+	ui: {
+		tab: "tasks",
+		group: "Isolation",
+		label: "Worktree on Exit",
+		description: "What to do on exit with worktrees created since omp started (on start or with `/wt`)",
+		options: [
+			{ value: "keep", label: "Keep", description: "Leave worktrees in place" },
+			{ value: "ask", label: "Ask", description: "Ask on exit" },
+			{
+				value: "remove",
+				label: "Remove",
+				description:
+					"Remove clean worktrees; ask when they have uncommitted changes or new commits. Gitignored files (e.g. `.env`) are deleted too",
+			},
+		],
+	},
+});
+
 export const cfgTaskIsolationApply = register({
 	id: "task.isolation.apply",
 	protocolDefault: ["rpc", "acp"],

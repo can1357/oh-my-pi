@@ -1928,6 +1928,10 @@ export class AgentSession implements SettingsScope {
 		this.agent.hasBackgroundCompletions = () =>
 			this.yieldQueue.hasDeliverable(LAUNCH_COMPLETION_MESSAGE_TYPE) ||
 			this.yieldQueue.hasDeliverable(ASYNC_RESULT_MESSAGE_TYPE);
+		// Passive asides (`deliverAs: "aside"`) also end an interruptible `wait`
+		// instead of sitting behind it. Deferred wakes are not peeked: no
+		// boundary injection would drain them. Foreground tools are unaffected.
+		this.agent.hasQueuedAsides = () => this.#irc.hasAsides();
 		this.agent.setAsideMessageProvider(() => {
 			const thunks: AsideMessage[] = this.#irc.drainPending().map(record => () => record);
 			thunks.push(...this.yieldQueue.drainLazy());
@@ -5404,6 +5408,7 @@ export class AgentSession implements SettingsScope {
 		this.agent.setAsideMessageProvider(undefined);
 		this.agent.hasIrcInterrupts = undefined;
 		this.agent.hasBackgroundCompletions = undefined;
+		this.agent.hasQueuedAsides = undefined;
 		this.#advisors.stopRuntime();
 		this.#eval.beginDispose();
 	}
