@@ -1520,8 +1520,10 @@ export class ExtensionRunner {
 								handlerSignal,
 								event.type === "tool_call" ? budget : undefined,
 							);
+							const handlerEvent =
+								event.type === "before_subagent_spawn" ? ({ ...event, signal: handlerSignal } as TEvent) : event;
 							result = await this.#toolRegistrationScope.run(registrationScope, () =>
-								handler(event, handlerContext),
+								handler(handlerEvent, handlerContext),
 							);
 						} catch (error) {
 							handlerFailure = { error };

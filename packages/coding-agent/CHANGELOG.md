@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- `before_subagent_spawn` now includes the assignment, shared context, task-only solution space, baseline thinking level, and a per-handler abort signal.
+
 ## [18.8.4] - 2026-10-08
 
 ### Changed
