@@ -359,12 +359,16 @@ interface MergedSyncPayloads {
 	usage?: Usage;
 	outputPaths?: string[];
 	projectAgentsDir: string | null;
+	/** Some spawn returned an error result. */
+	isError: boolean;
 }
 
 /**
  * Merge per-spawn sync payloads into one result view. `index` is each spawn's
  * position in the original call so batch rows keep stable ordering; a missing
- * payload (cancelled before start) becomes an explanatory content line.
+ * payload (cancelled before start) becomes an explanatory content line. An
+ * error payload from any spawn makes the merged view an error too, the way a
+ * one-spawn call returns that payload as is.
  */
 function mergeSyncPayloads(
 	spawns: SyncSpawnRef[],
@@ -376,6 +380,7 @@ function mergeSyncPayloads(
 	const usageTotals = createUsageTotals();
 	let hasUsage = false;
 	let projectAgentsDir: string | null = null;
+	let isError = false;
 	for (let position = 0; position < spawns.length; position++) {
 		const payload = payloads[position];
 		const { item, index } = spawns[position];
@@ -383,6 +388,7 @@ function mergeSyncPayloads(
 			contentParts.push(`Task ${item.name?.trim() || `#${index + 1}`}: cancelled before start.`);
 			continue;
 		}
+		isError ||= payload.isError === true;
 		projectAgentsDir ??= payload.details?.projectAgentsDir ?? null;
 		const text = payload.content.find(part => part.type === "text")?.text;
 		if (text) contentParts.push(text);
@@ -401,6 +407,7 @@ function mergeSyncPayloads(
 		usage: hasUsage ? usageTotals : undefined,
 		outputPaths: outputPaths.length > 0 ? outputPaths : undefined,
 		projectAgentsDir,
+		isError,
 	};
 }
 
@@ -1231,6 +1238,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			.join("\n\n");
 		return withAdvisory({
 			content: [{ type: "text", text: text.length > 0 ? text : "No results." }],
+			...(merged.isError ? { isError: true } : {}),
 			details: buildAsyncDetails(),
 		});
 	}
@@ -1304,6 +1312,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 							? nextProgress.resolvedModelIsFallback
 							: undefined;
 						progress.advisor = nextProgress.advisor ?? progress.advisor;
+						progress.completionPercent = nextProgress.completionPercent ?? progress.completionPercent;
 						progress.resolvedModelRoute = nextProgress.resolvedModelRoute ?? progress.resolvedModelRoute;
 						progress.tokens = nextProgress.tokens;
 						progress.requests = nextProgress.requests;
@@ -1312,6 +1321,10 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 						progress.cost = nextProgress.cost;
 						progress.toolCount = nextProgress.toolCount;
 						progress.currentTool = nextProgress.currentTool;
+						progress.currentToolArgs = nextProgress.currentToolArgs;
+						progress.currentToolArgsKey = nextProgress.currentToolArgsKey;
+						progress.currentToolIntent = nextProgress.currentToolIntent;
+						progress.currentToolStartMs = nextProgress.currentToolStartMs;
 						progress.lastIntent = nextProgress.lastIntent;
 						progress.recentTools = nextProgress.recentTools.slice();
 						progress.recentOutput = nextProgress.recentOutput.slice();
@@ -1441,8 +1454,9 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 	/**
 	 * Sync fan-out (async unavailable, or every item's agent type is
 	 * `blocking: true`): run every spawn to completion inline and merge the
-	 * per-spawn payloads into a single tool result. The session-scoped
-	 * semaphore still bounds concurrency across parallel task calls.
+	 * per-spawn payloads into a single tool result, an error when any spawn's
+	 * payload is. The session-scoped semaphore still bounds concurrency across
+	 * parallel task calls.
 	 */
 	async #executeSyncFanout(
 		toolCallId: string,
@@ -1500,6 +1514,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		const merged = mergeSyncPayloads(spawns, payloads);
 		return {
 			content: [{ type: "text", text: merged.contentParts.join("\n\n") }],
+			...(merged.isError ? { isError: true } : {}),
 			details: {
 				projectAgentsDir: merged.projectAgentsDir,
 				results: merged.results,

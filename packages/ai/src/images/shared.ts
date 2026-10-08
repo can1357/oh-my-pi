@@ -164,17 +164,25 @@ export async function decodeImageResponse(
 		if (item === null || typeof item !== "object") continue;
 		const image = item as { b64_json?: unknown; url?: unknown; media_type?: unknown };
 		if (typeof image.b64_json === "string" && image.b64_json.length > 0) {
-			const bytes = Buffer.from(image.b64_json, "base64");
 			const mimeType =
 				typeof image.media_type === "string"
 					? image.media_type
-					: (parseImageMetadata(bytes)?.mimeType ?? "image/png");
+					: (sniffBase64ImageMimeType(image.b64_json) ?? "image/png");
 			images.push({ data: image.b64_json, mimeType });
 		} else if (typeof image.url === "string" && image.url.length > 0) {
 			images.push(await imageFromUrl(image.url, fetch, signal));
 		}
 	}
 	return { images, usage: usageFromWire(root.usage) };
+}
+
+/**
+ * Mime type of a base64 image, read from its header only. 64 base64 chars
+ * decode to 48 bytes, past every magic number `parseImageMetadata` checks, so
+ * multi-MB payloads are never fully decoded just to be labelled.
+ */
+export function sniffBase64ImageMimeType(base64: string): string | undefined {
+	return parseImageMetadata(Buffer.from(base64.slice(0, 64), "base64"))?.mimeType;
 }
 
 export function toDataUrl(image: GeneratedImage): string {

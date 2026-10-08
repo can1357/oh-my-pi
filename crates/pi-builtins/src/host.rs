@@ -77,6 +77,11 @@ pub(crate) trait Utility: clap::Parser + Send + Sync + 'static {
 	/// skips that cost.
 	const RUNS_COMMANDS: bool = false;
 
+	/// Whether the utility asks [`Host::path_is_stdout`] (`rg`, which must not
+	/// read the file its own output lands in). Only then does the host keep a
+	/// handle on stdout's identity; every other utility skips the dup.
+	const CHECKS_STDOUT_PATH: bool = false;
+
 	/// Rewrites raw `argv` before clap parses it.
 	///
 	/// A few utilities accept syntax clap cannot model — GNU's obsolete
@@ -114,10 +119,16 @@ pub(crate) struct Host {
 	/// same serialized writer [`Host::stdout_writer`] returns, so interleaving
 	/// follows write order exactly.
 	pub stderr: StreamWriter,
-	/// Unwrapped stdout retained for provider-aware self-read detection.
+	/// Whether stdout is a regular file, sampled before the SIGPIPE guard hid
+	/// its descriptor; picks [`Host::stdout_writer`]'s buffering.
+	stdout_is_file:        bool,
+	/// Unwrapped stdout retained for provider-aware self-read detection; only
+	/// kept for [`Utility::CHECKS_STDOUT_PATH`] utilities.
 	stdout_handle:         Option<OpenFile>,
 	/// Populated on the utility worker, where virtual handle queries may block.
 	stdout_metadata:       OnceLock<Option<Metadata>>,
+	/// The effective umask, read once per invocation (see [`Host::umask`]).
+	umask:                 OnceLock<u32>,
 
 	name:                  String,
 	paths:                 ShellPaths,
@@ -448,6 +459,37 @@ fn virtual_descriptor_path(fd: brush_core::ShellFd) -> PathBuf {
 	PathBuf::from(format!("omp-descriptor://{fd}"))
 }
 
+/// The host process umask, which builtins must never change: they run on
+/// threads of a process that other shells and the host share.
+///
+/// Linux reads it race-free from `/proc/self/status`. Elsewhere the only way to
+/// read it is to set it and set it back, which briefly unmasks other threads'
+/// creations, so that happens once per process.
+#[cfg(unix)]
+pub(crate) fn process_umask() -> u32 {
+	use std::sync::LazyLock;
+
+	use nix::sys::stat::{Mode, umask};
+
+	#[allow(clippy::useless_conversion, reason = "`mode_t` is u16 on some targets")]
+	static TOGGLED: LazyLock<u32> = LazyLock::new(|| {
+		let mask = umask(Mode::empty());
+		umask(mask);
+		u32::from(mask.bits())
+	});
+	cfg_if::cfg_if! {
+		if #[cfg(any(target_os = "linux", target_os = "android"))] {
+			procfs::process::Process::myself()
+				.ok()
+				.and_then(|me| me.status().ok())
+				.and_then(|status| status.umask)
+				.unwrap_or_else(|| *TOGGLED)
+		} else {
+			*TOGGLED
+		}
+	}
+}
+
 impl Host {
 	/// The name the utility was invoked as. Differs from [`Utility::NAME`] when
 	/// one implementation backs several builtins (`grep` and `rg`).
@@ -485,7 +527,24 @@ impl Host {
 		self.paths.fs()
 	}
 
+	/// The file mode creation mask for new files: the shell's `umask` once one
+	/// was set, else the host process's. `0` where there is no umask. Read
+	/// once per invocation.
+	pub fn umask(&self) -> u32 {
+		*self.umask.get_or_init(|| {
+			#[cfg(unix)]
+			{
+				self.fs().creation_mask().unwrap_or_else(process_umask)
+			}
+			#[cfg(not(unix))]
+			{
+				0
+			}
+		})
+	}
+
 	/// Whether `path` identifies the regular file currently backing stdout.
+	/// Always `false` unless the utility set [`Utility::CHECKS_STDOUT_PATH`].
 	pub fn path_is_stdout(&self, path: &Path) -> bool {
 		self.stdout_metadata
 			.get_or_init(|| self.stdout_handle.as_ref().and_then(output_metadata))
@@ -521,6 +580,25 @@ impl Host {
 	/// callbacks.
 	pub fn cancel_flag(&self) -> Arc<AtomicBool> {
 		Arc::clone(&self.cancel)
+	}
+
+	/// A `pi_walker` heartbeat that fails with `Interrupted` once the host
+	/// cancels. Without it the walker's per-entry heartbeat never sees the
+	/// flag, and a cancelled walk traverses the whole tree before the utility
+	/// notices (#3949, #3933). The walker surfaces the error as
+	/// `WalkError::Interrupted`; `grep`, `rg`, and `fd` tell it from a real
+	/// failure with [`Host::is_cancelled`] and stay silent, since the shell
+	/// adapter owns the cancellation status (130), while `find` prints it as
+	/// `Error: cancelled`.
+	pub fn cancel_heartbeat(&self) -> impl Fn() -> io::Result<()> + Send + Sync + 'static {
+		let cancel = Arc::clone(&self.cancel);
+		move || {
+			if cancel.load(Ordering::Relaxed) {
+				Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled"))
+			} else {
+				Ok(())
+			}
+		}
 	}
 
 	/// Whether stdin is a shell pipe, virtual file, or custom stream, and so should be treated
@@ -575,8 +653,14 @@ impl Host {
 		self.stderr.dup_file()
 	}
 
+	/// Whether stdout is a regular file, where output is only observed once
+	/// the utility exits.
+	pub const fn stdout_is_regular_file(&self) -> bool {
+		self.stdout_is_file
+	}
+
 	/// A buffered stdout with a flush policy chosen by the destination of
-	/// fd 1; see [`StdoutWriter`].
+	/// fd 1; see [`StreamWriter`].
 	///
 	/// Utilities that emit output progressively — stream filters (`grep`,
 	/// `sed`, `cut`) and directory walkers (`ls`, `fd`) — must write through
@@ -586,7 +670,7 @@ impl Host {
 	pub fn stdout_writer(&self) -> StreamWriter {
 		match &self.merged_out {
 			Some(shared) => StreamWriter::Shared(Arc::clone(shared)),
-			None => StreamWriter::new(self.stdout.clone()),
+			None => StreamWriter::new(self.stdout.clone(), self.stdout_is_file),
 		}
 	}
 
@@ -909,7 +993,7 @@ async fn wait_status(
 /// observes the output until the utility exits, so writes are block-buffered
 /// for throughput. Everywhere else — a pipe to the next pipeline stage, the
 /// harness capture pipe behind the TUI's live tool output (a pipe fd wrapped
-/// in `OpenFile::File`, hence the `fstat` in [`is_regular_file`] rather than
+/// in `OpenFile::File`, hence the `fstat` in [`Destination::of`] rather than
 /// a variant match), or an in-memory stream — writes are line-buffered so
 /// each completed line is visible as soon as it is produced rather than when
 /// the utility exits.
@@ -934,9 +1018,11 @@ impl StreamWriter {
 	const BLOCK_CAPACITY: usize = 64 * 1024;
 	const LINE_CAPACITY: usize = 16 * 1024;
 
-	/// Picks the policy for `file`: block for regular files, line otherwise.
-	pub fn new(file: OpenFile) -> Self {
-		if is_regular_file(&file) { Self::block(file) } else { Self::line(file) }
+	/// Picks the policy for a destination: block for a regular file, line
+	/// otherwise. `regular_file` comes from the stream's [`Destination`],
+	/// sampled before any wrapper hides the descriptor.
+	pub fn new(file: OpenFile, regular_file: bool) -> Self {
+		if regular_file { Self::block(file) } else { Self::line(file) }
 	}
 
 	/// Forces line buffering regardless of destination.
@@ -996,67 +1082,86 @@ impl Write for StreamWriter {
 			Self::Shared(shared) => shared.lock().write_vectored(bufs),
 		}
 	}
+
+	// `write_all` and `write_fmt` must reach the inner writer's own versions:
+	// the defaults loop over `write`, and `LineWriter::write` flushes a
+	// buffered prefix before writing the newline-terminated rest, so a line
+	// written in pieces (`cat -n`'s number, then the content) would cost two
+	// syscalls instead of one. Under one lock, a `Shared` line also stays
+	// whole against concurrent stderr writes.
+	fn write_all(&mut self, buf: &[u8]) -> io::Result<()> {
+		match self {
+			Self::Block(w) => w.write_all(buf),
+			Self::Line(w) => w.write_all(buf),
+			Self::Shared(shared) => shared.lock().write_all(buf),
+		}
+	}
+
+	fn write_fmt(&mut self, args: std::fmt::Arguments<'_>) -> io::Result<()> {
+		match self {
+			Self::Block(w) => w.write_fmt(args),
+			Self::Line(w) => w.write_fmt(args),
+			Self::Shared(shared) => shared.lock().write_fmt(args),
+		}
+	}
 }
 
-/// Whether writes to `file` land in a regular file, where output is only ever
-/// observed after the utility exits.
-///
-/// A pipe wrapped in `std::fs::File` (how the shell hands the capture pipe to
-/// a command) reports a fifo file type, and `metadata` on exotic handles can
-/// fail outright; both classify as "not a regular file" and get line
-/// buffering, the visibility-safe default. The check goes through the
-/// descriptor rather than the variant so a [`SigpipeGuard`] around a file
-/// still block-buffers.
-pub(crate) fn is_regular_file(file: &OpenFile) -> bool {
+/// What a standard stream's descriptor points at, sampled once per
+/// invocation before the stream is wrapped.
+#[derive(Clone, Copy)]
+struct Destination {
+	/// A regular file: nothing observes it until the utility exits, so writes
+	/// block-buffer. A pipe wrapped in `std::fs::File` (how the shell hands
+	/// the capture pipe to a command) reports a fifo, and a handle that cannot
+	/// be queried counts as not a file: line buffering is the
+	/// visibility-safe default.
+	regular_file: bool,
+	/// Device and inode of a non-seekable destination (pipe, fifo, terminal,
+	/// socket), which has no offset, so equal ids mean one object (`2>&1`).
+	/// Regular files never carry one: `cmd >f 2>f` opens two descriptions
+	/// with independent offsets, and one writer would change where bytes land.
 	#[cfg(unix)]
-	{
-		let Ok(fd) = file.try_borrow_as_fd() else {
-			return false;
-		};
-		let Ok(dup) = fd.try_clone_to_owned() else {
-			return false;
-		};
-		std::fs::File::from(dup).metadata().is_ok_and(|m| m.is_file())
-	}
-	#[cfg(not(unix))]
-	{
-		match file {
-			OpenFile::File(f) => f.metadata().is_ok_and(|m| m.is_file()),
-			_ => false,
-		}
-	}
+	id:           Option<(u64, u64)>,
 }
 
-/// Whether two open files refer to the same non-seekable destination — the
-/// `2>&1` case (and the harness default, where one capture pipe backs both
-/// fds).
-///
-/// Matching is by `fstat` device+inode and deliberately excludes regular
-/// files: `cmd >f 2>f` opens two descriptions with independent offsets, and
-/// funneling them through one writer would change where the bytes land.
-/// Pipes, fifos, terminals, and sockets have no offset, so a device+inode
-/// match identifies the same object.
-#[cfg(unix)]
-fn same_destination(a: &OpenFile, b: &OpenFile) -> bool {
-	use std::os::unix::fs::MetadataExt;
-	fn id(file: &OpenFile) -> Option<(u64, u64)> {
-		let fd = file.try_borrow_as_fd().ok()?;
-		let dup = fd.try_clone_to_owned().ok()?;
-		let meta = std::fs::File::from(dup).metadata().ok()?;
-		if meta.file_type().is_file() {
-			return None;
+impl Destination {
+	fn of(file: &OpenFile) -> Self {
+		#[cfg(unix)]
+		{
+			let Some(stat) = file
+				.try_borrow_as_fd()
+				.ok()
+				.and_then(|fd| rustix::fs::fstat(fd).ok())
+			else {
+				return Self { regular_file: false, id: None };
+			};
+			let regular_file =
+				rustix::fs::FileType::from_raw_mode(stat.st_mode) == rustix::fs::FileType::RegularFile;
+			#[allow(clippy::unnecessary_cast, reason = "dev_t and ino_t widths vary by target")]
+			let id = (!regular_file).then_some((stat.st_dev as u64, stat.st_ino as u64));
+			Self { regular_file, id }
 		}
-		Some((meta.dev(), meta.ino()))
+		#[cfg(not(unix))]
+		{
+			Self {
+				regular_file: matches!(file, OpenFile::File(f) if f.metadata().is_ok_and(|m| m.is_file())),
+			}
+		}
 	}
-	match (id(a), id(b)) {
-		(Some(a), Some(b)) => a == b,
-		_ => false,
-	}
-}
 
-#[cfg(not(unix))]
-fn same_destination(_a: &OpenFile, _b: &OpenFile) -> bool {
-	false
+	/// Whether `self` and `other` are the same non-seekable object (`2>&1`,
+	/// and the harness default, where one capture pipe backs both fds).
+	fn shares_with(&self, other: &Self) -> bool {
+		#[cfg(unix)]
+		{
+			self.id.is_some() && self.id == other.id
+		}
+		#[cfg(not(unix))]
+		{
+			let _ = other;
+			false
+		}
+	}
 }
 
 /// A shell-faithful launcher for child processes started by a utility builtin.
@@ -1247,6 +1352,58 @@ pub(crate) fn format_usage(usage: &str) -> String {
 	usage.replace('\n', "\n       ")
 }
 
+/// Renders an I/O error the way GNU utilities print `strerror(errno)`: without
+/// Rust's ` (os error N)` suffix, and with POSIX wording for OS errors whose
+/// kind maps to a single errno. Windows reports `ERROR_FILE_NOT_FOUND` as
+/// "The system cannot find the file specified.", which a GNU-emulating
+/// diagnostic must spell "No such file or directory" like everywhere else.
+pub(crate) fn strip_errno(error: &io::Error) -> String {
+	if error.raw_os_error().is_some()
+		&& let Some(text) = posix_strerror(error.kind())
+	{
+		return text.to_owned();
+	}
+	let mut message = error.to_string();
+	if let Some(position) = message.find(" (os error ") {
+		message.truncate(position);
+	}
+	message
+}
+
+/// POSIX `strerror` text for an OS error kind. Kinds that cover several errnos
+/// on unix (`PermissionDenied` is both `EPERM` and `EACCES`) keep the native
+/// text there, which is already exact.
+fn posix_strerror(kind: io::ErrorKind) -> Option<&'static str> {
+	use io::ErrorKind;
+	Some(match kind {
+		ErrorKind::NotFound => "No such file or directory",
+		ErrorKind::AlreadyExists => "File exists",
+		ErrorKind::NotADirectory => "Not a directory",
+		ErrorKind::IsADirectory => "Is a directory",
+		ErrorKind::DirectoryNotEmpty => "Directory not empty",
+		#[cfg(not(unix))]
+		ErrorKind::PermissionDenied => "Permission denied",
+		_ => return None,
+	})
+}
+
+/// Forward-slash spelling of a Windows display path, or `None` when the path
+/// already displays as-is (non-Windows, no backslashes, verbatim prefix, or
+/// non-Unicode names that must stay native).
+///
+/// Utilities that print paths they built themselves (`find`, `rg`, `diff -r`)
+/// render them the way the bash they emulate does, with `/` separators, so
+/// output does not change spelling with the host platform.
+pub(crate) fn forward_slash_display(path: &Path) -> Option<PathBuf> {
+	if !cfg!(windows) || path.to_str().is_none() {
+		return None;
+	}
+	match pi_walker::normalize_path(path) {
+		std::borrow::Cow::Owned(text) => Some(PathBuf::from(text)),
+		std::borrow::Cow::Borrowed(_) => None,
+	}
+}
+
 /// Borrows an `OsStr` as raw bytes.
 ///
 /// Unix strings are arbitrary byte sequences, so this is free there. On Windows
@@ -1421,7 +1578,7 @@ async fn run_utility<U: Utility, SE: ShellExtensions>(
 		},
 	};
 
-	let mut host = build_host(&context, U::NAME)?;
+	let mut host = build_host(&context, U::NAME, U::CHECKS_STDOUT_PATH)?;
 	let cancel = context.cancel_token();
 	let cancel_flag = host.cancel_flag();
 	let _cancel_on_drop = CancelOnDrop(Arc::clone(&cancel_flag));
@@ -1546,6 +1703,7 @@ pub(crate) fn run_caught<U: Utility>(parsed: U, host: &mut Host) -> i32 {
 fn build_host<SE: ShellExtensions>(
 	context: &ExecutionContext<'_, SE>,
 	name: &str,
+	checks_stdout_path: bool,
 ) -> Result<Host, Error> {
 	let stdin = context.try_fd(OpenFiles::STDIN_FD);
 	// The `OpenFile` is kept alive by the `Stdin` below, so the fd stays valid.
@@ -1572,20 +1730,26 @@ fn build_host<SE: ShellExtensions>(
 	let cancel = Arc::new(AtomicBool::new(false));
 
 	let stdout = or_null(context.try_fd(OpenFiles::STDOUT_FD))?;
-	let stdout_handle = output_handle(&stdout);
+	let stdout_handle = if checks_stdout_path { output_handle(&stdout) } else { None };
 	let stderr_file = or_null(context.try_fd(OpenFiles::STDERR_FD))?;
+	// Classified before the SIGPIPE guard wraps them: the guard is an opaque
+	// stream, so a file behind it can no longer be told from a pipe on
+	// Windows, and one sample per stream serves every writer below.
+	let stdout_destination = Destination::of(&stdout);
+	let stderr_destination = Destination::of(&stderr_file);
 	let sigpipe = Arc::new(Sigpipe::default());
 	// `2>&1` (and the default capture pipe): one shared writer keeps
 	// diagnostics and output in exact write order. It carries stdout output,
 	// so it takes the stdout guard: once the reader is gone every write fails
 	// and nothing is observable either way.
-	let (merged_out, stderr) = if same_destination(&stdout, &stderr_file) {
+	let (merged_out, stderr) = if stdout_destination.shares_with(&stderr_destination) {
 		let guarded = SigpipeGuard::wrap(stderr_file, GuardedStream::Stdout, &sigpipe);
-		let shared = Arc::new(Mutex::new(StreamWriter::new(guarded)));
+		let shared =
+			Arc::new(Mutex::new(StreamWriter::new(guarded, stderr_destination.regular_file)));
 		(Some(Arc::clone(&shared)), StreamWriter::Shared(shared))
 	} else {
 		let guarded = SigpipeGuard::wrap(stderr_file, GuardedStream::Stderr, &sigpipe);
-		(None, StreamWriter::new(guarded))
+		(None, StreamWriter::new(guarded, stderr_destination.regular_file))
 	};
 	let stdout = SigpipeGuard::wrap(stdout, GuardedStream::Stdout, &sigpipe);
 
@@ -1597,8 +1761,10 @@ fn build_host<SE: ShellExtensions>(
 		},
 		stdout,
 		stderr,
+		stdout_is_file: stdout_destination.regular_file,
 		stdout_handle,
 		stdout_metadata: OnceLock::new(),
+		umask: OnceLock::new(),
 		name: invoked,
 		paths: ShellPaths::new(context),
 		env,
@@ -1743,13 +1909,15 @@ mod testing {
 					cancel: Arc::clone(&cancel),
 				},
 				stdout:                SigpipeGuard::wrap(stdout, GuardedStream::Stdout, &sigpipe),
-				stderr:                StreamWriter::new(SigpipeGuard::wrap(
+				stderr:                StreamWriter::line(SigpipeGuard::wrap(
 					stderr,
 					GuardedStream::Stderr,
 					&sigpipe,
 				)),
+				stdout_is_file:        false,
 				stdout_handle:         None,
 				stdout_metadata:       Default::default(),
+				umask:                 Default::default(),
 				name:                  name.to_string(),
 				paths:                 ShellPaths::with_cwd(cwd),
 				env:                   HashMap::new(),
@@ -1763,11 +1931,12 @@ mod testing {
 			(host, capture)
 		}
 
-		/// Replaces stdout on a test host, keeping it under the SIGPIPE guard
-		/// like the stream [`build_host`](super::build_host) installs. Tests
-		/// that model a departed reader (`… | head`) hand in the write end of a
+		/// Replaces stdout on a test host, classifying and guarding it like
+		/// the stream [`build_host`](super::build_host) installs. Tests that
+		/// model a departed reader (`… | head`) hand in the write end of a
 		/// pipe whose read end is already dropped.
 		pub(crate) fn set_test_stdout(&mut self, file: OpenFile) {
+			self.stdout_is_file = super::Destination::of(&file).regular_file;
 			self.stdout_handle = output_handle(&file);
 			self.stdout_metadata.take();
 			self.stdout = SigpipeGuard::wrap(file, GuardedStream::Stdout, &self.sigpipe);
@@ -1781,6 +1950,12 @@ mod testing {
 		/// Requests cancellation on a test host.
 		pub(crate) fn cancel_for_test(&self) {
 			self.cancel.store(true, super::Ordering::Relaxed);
+		}
+
+		/// The cancellation flag of a test host, for a test that cancels
+		/// from another thread while a utility runs.
+		pub(crate) fn cancel_flag_for_test(&self) -> Arc<AtomicBool> {
+			Arc::clone(&self.cancel)
 		}
 	}
 
@@ -1880,11 +2055,13 @@ mod testing {
 	}
 
 	/// An in-memory [`openfiles::Stream`]: a cursor over fixed input, or an
-	/// appending writer over a shared buffer.
+	/// appending writer over a shared buffer that can also record each
+	/// `write` call separately.
 	#[derive(Clone)]
 	struct MemStream {
 		input:  Arc<Mutex<io::Cursor<Vec<u8>>>>,
 		output: Arc<Mutex<Vec<u8>>>,
+		writes: Option<Arc<Mutex<Vec<Vec<u8>>>>>,
 	}
 
 	impl MemStream {
@@ -1892,11 +2069,17 @@ mod testing {
 			Self {
 				input:  Arc::new(Mutex::new(io::Cursor::new(data))),
 				output: Arc::new(Mutex::new(Vec::new())),
+				writes: None,
 			}
 		}
 
 		fn writer(output: Arc<Mutex<Vec<u8>>>) -> Self {
-			Self { input: Arc::new(Mutex::new(io::Cursor::new(Vec::new()))), output }
+			Self { input: Arc::new(Mutex::new(io::Cursor::new(Vec::new()))), output, writes: None }
+		}
+
+		/// A writer that keeps every `write` call's bytes as one entry.
+		fn recording(writes: Arc<Mutex<Vec<Vec<u8>>>>) -> Self {
+			Self { writes: Some(writes), ..Self::writer(Arc::default()) }
 		}
 	}
 
@@ -1909,6 +2092,9 @@ mod testing {
 	impl Write for MemStream {
 		fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
 			self.output.lock().extend_from_slice(buf);
+			if let Some(writes) = &self.writes {
+				writes.lock().push(buf.to_vec());
+			}
 			Ok(buf.len())
 		}
 
@@ -1937,7 +2123,7 @@ mod testing {
 		use parking_lot::Mutex;
 
 		use super::MemStream;
-		use crate::host::{Arc, OpenFile, StreamWriter, Write};
+		use crate::host::{Arc, Destination, Host, OpenFile, StreamWriter, Write};
 
 		/// Contract: on a non-file destination, a completed line is visible to
 		/// the consumer before any explicit flush; a partial line is held back.
@@ -1945,7 +2131,8 @@ mod testing {
 		fn line_policy_flushes_completed_lines_immediately() {
 			let buf = Arc::new(Mutex::new(Vec::new()));
 			let stream = OpenFile::Stream(Box::new(MemStream::writer(Arc::clone(&buf))));
-			let mut out = StreamWriter::new(stream);
+			let regular_file = Destination::of(&stream).regular_file;
+			let mut out = StreamWriter::new(stream, regular_file);
 			assert!(matches!(out, StreamWriter::Line(_)));
 
 			out.write_all(b"hit\n").unwrap();
@@ -1958,14 +2145,29 @@ mod testing {
 			assert_eq!(buf.lock().as_slice(), b"hit\npartial");
 		}
 
-		/// Contract: a regular-file destination stays block-buffered — bytes
-		/// reach the file only on flush, not per line.
+		/// Contract: a line written in pieces (`write!` with several
+		/// arguments) reaches a line-buffered destination as one write, so a
+		/// reader never sees half a line.
 		#[test]
-		fn regular_file_gets_block_buffering() {
+		fn line_policy_writes_a_piecewise_line_once() {
+			let writes = Arc::new(Mutex::new(Vec::new()));
+			let stream = OpenFile::Stream(Box::new(MemStream::recording(Arc::clone(&writes))));
+			let mut out = StreamWriter::line(stream);
+			write!(out, "{:>6}\t", 1).unwrap();
+			writeln!(out, "{}", "content").unwrap();
+			assert_eq!(*writes.lock(), vec![b"     1\tcontent\n".to_vec()]);
+		}
+
+		/// Contract: a regular-file stdout stays block-buffered behind the
+		/// SIGPIPE guard — bytes reach the file only on flush, not per line.
+		#[test]
+		fn regular_file_stdout_gets_block_buffering() {
 			let dir = tempfile::tempdir().unwrap();
 			let path = dir.path().join("out.txt");
 			let file = std::fs::File::create(&path).unwrap();
-			let mut out = StreamWriter::new(OpenFile::File(file));
+			let (mut host, _) = Host::for_test("cat", "", ".");
+			host.set_test_stdout(OpenFile::File(file));
+			let mut out = host.stdout_writer();
 			assert!(matches!(out, StreamWriter::Block(_)));
 
 			out.write_all(b"hit\n").unwrap();
@@ -1982,8 +2184,8 @@ mod testing {
 		#[test]
 		fn pipe_wrapped_as_file_gets_line_buffering() {
 			let (reader, writer) = std::io::pipe().unwrap();
-			let file = std::fs::File::from(std::os::fd::OwnedFd::from(writer));
-			assert!(matches!(StreamWriter::new(OpenFile::File(file)), StreamWriter::Line(_)));
+			let file = OpenFile::File(std::fs::File::from(std::os::fd::OwnedFd::from(writer)));
+			assert!(!Destination::of(&file).regular_file);
 			drop(reader);
 		}
 
@@ -2012,23 +2214,23 @@ mod testing {
 		#[cfg(unix)]
 		#[test]
 		fn same_destination_detects_dup_pipes_only() {
-			use crate::host::same_destination;
+			let shared = |a: &OpenFile, b: &OpenFile| Destination::of(a).shares_with(&Destination::of(b));
 
 			let (reader, writer) = std::io::pipe().unwrap();
 			let dup = writer.try_clone().unwrap();
 			let a = OpenFile::File(std::fs::File::from(std::os::fd::OwnedFd::from(writer)));
 			let b = OpenFile::File(std::fs::File::from(std::os::fd::OwnedFd::from(dup)));
-			assert!(same_destination(&a, &b));
+			assert!(shared(&a, &b));
 
 			let (reader2, writer2) = std::io::pipe().unwrap();
 			let c = OpenFile::File(std::fs::File::from(std::os::fd::OwnedFd::from(writer2)));
-			assert!(!same_destination(&a, &c));
+			assert!(!shared(&a, &c));
 
 			let dir = tempfile::tempdir().unwrap();
 			let path = dir.path().join("out.txt");
 			let f1 = OpenFile::File(std::fs::File::create(&path).unwrap());
 			let f2 = OpenFile::File(std::fs::File::create(&path).unwrap());
-			assert!(!same_destination(&f1, &f2));
+			assert!(!shared(&f1, &f2));
 
 			drop((reader, reader2));
 		}
@@ -2100,3 +2302,4 @@ mod testing {
 #[cfg(test)]
 #[allow(unused_imports, reason = "used by utility test modules, which are feature-gated")]
 pub(crate) use testing::{Capture, run_script, run_util};
+

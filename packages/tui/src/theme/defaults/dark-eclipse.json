@@ -87,5 +87,15 @@
 		"pageBg": "#08070d",
 		"cardBg": "#101018",
 		"infoBg": "#1a1523"
+	},
+	"terminal": {
+		"background": "#08070d",
+		"foreground": "silver",
+		"chrome": "void",
+		"widget": "obsidian",
+		"ansi": [
+			"#26232e", "error", "success", "corona", "#7096bf", "#a77cc9", "#5fb3b8", "silver",
+			"dim", "#e57584", "#83d4a3", "#f9d877", "#98b6d6", "#c6a0e0", "#86cdd1", "#f3eee4"
+		]
 	}
 }

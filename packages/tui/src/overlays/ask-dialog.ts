@@ -117,45 +117,32 @@ const DIALOG_HEIGHT_RATIO = 0.7;
 const MIN_DIALOG_ROWS = 12;
 const MIN_BODY_ROWS = 5;
 const MAX_HEADER_CHIP_WIDTH = 16;
-/** Maximum number of title lines shown in the prompt editor overlay, so a
- *  long or multi-line question cannot push the input row off-screen. Mirrors
- *  the bounded-title pattern from the legacy ask path without its option-window
- *  coupling. */
-const MAX_PROMPT_TITLE_ROWS = 3;
-/** Border (2) + padX (2) columns consumed by the HookEditor chrome. */
-const PROMPT_TITLE_CHROME_COLUMNS = 4;
 /** Maximum number of wrapped lines for an in-body question header, so a long
  *  or multi-line question cannot push the option list off-screen. Mirrors the
- *  row-cap pattern used by boundPromptTitle for the prompt editor overlay. */
+ *  row-cap pattern of the prompt editor's title (`boundPromptTitle`). */
 const MAX_HEADER_ROWS = 4;
 /** Maximum number of wrapped lines shown for an option description before
  *  Ctrl+O expansion. Mirrors the header row-cap above so long descriptions
  *  cannot push later options off-screen. */
 const MAX_DESC_ROWS = 2;
 
-function promptTitleContentWidth(): number {
-	const cols = process.stdout.columns ?? 80;
-	return Math.max(1, cols - PROMPT_TITLE_CHROME_COLUMNS);
-}
-
-/** Bound a prompt editor title to a fixed row/width budget so long or
- *  multi-line questions stay usable inside the small prompt overlay. */
-export function boundPromptTitle(prefix: string, question: string): string {
-	const width = promptTitleContentWidth();
-	const flat = normalizedInlineInput(`${prefix}${question}`);
-	const wrapped = wrapTextWithAnsi(flat, width);
-	if (wrapped.length <= MAX_PROMPT_TITLE_ROWS) return wrapped.join("\n");
-	const kept = wrapped.slice(0, MAX_PROMPT_TITLE_ROWS - 1);
-	const last = truncateToWidth(wrapped[MAX_PROMPT_TITLE_ROWS - 1] ?? "", width, Ellipsis.Unicode);
-	return [...kept, last].join("\n");
+/** What a custom-answer or note prompt asks: the host shows `title` over `question` (`HookEditorOptions.question`). */
+export interface AskDialogPrompt {
+	/** `Custom answer`, `Note for <option>`. */
+	title: string;
+	/** The question being answered, verbatim. */
+	question: string;
 }
 
 interface AskDialogCallbacks {
 	onSubmit(result: ExtensionAskDialogSubmitResult): void;
 	onCancel(): void;
-	onPrompt(title: string, prefill?: string): Promise<string | undefined>;
+	onPrompt(prompt: AskDialogPrompt, prefill?: string): Promise<string | undefined>;
 	/** Prompt that accepts pasted images; without it, prompts use `onPrompt`. */
-	onImagePrompt?(title: string, prefill: AskDialogPromptValue | undefined): Promise<AskDialogPromptValue | undefined>;
+	onImagePrompt?(
+		prompt: AskDialogPrompt,
+		prefill: AskDialogPromptValue | undefined,
+	): Promise<AskDialogPromptValue | undefined>;
 }
 
 interface AskDialogInputGuard {
@@ -225,11 +212,7 @@ function questionTabLabel(question: ExtensionAskDialogQuestion, index: number): 
 }
 
 function wrapQuestionTitle(question: ExtensionAskDialogQuestion, width: number): string[] {
-	const mdTheme = getMarkdownTheme();
-	const questionText = renderInlineMarkdown(replaceTabs(sanitizeCarriageReturns(question.question)), mdTheme, t =>
-		theme.fg("text", t),
-	);
-	return wrapTextWithAnsi(questionText, Math.max(1, width));
+	return renderPreviewContent(sanitizeCarriageReturns(question.question), Math.max(1, width), "text");
 }
 
 function renderQuestionTitle(question: ExtensionAskDialogQuestion, width: number, maxRows = MAX_HEADER_ROWS): string[] {
@@ -312,10 +295,10 @@ function splitPreviewSegments(preview: string): PreviewSegment[] {
 	return segments;
 }
 
-function renderPreviewContent(preview: string, width: number): string[] {
+function renderPreviewContent(preview: string, width: number, textColor: "muted" | "text" = "muted"): string[] {
 	const out: string[] = [];
 	const mdTheme = getMarkdownTheme();
-	const accentStyle = { color: (text: string) => theme.fg("muted", text) };
+	const accentStyle = { color: (text: string) => theme.fg(textColor, text) };
 	for (const segment of splitPreviewSegments(preview)) {
 		if (segment.kind === "code") {
 			const highlighted = highlightCode(segment.text, segment.language);
@@ -541,6 +524,7 @@ export function normalizeDialogQuestions(questions: ExtensionAskDialogQuestion[]
 }
 
 export class AskDialogComponent implements Component {
+	readonly retireDisplacedTranscript = true;
 	#states: QuestionState[];
 	#activeTabIndex = 0;
 	#submitScrollOffset = 0;
@@ -727,8 +711,11 @@ export class AskDialogComponent implements Component {
 	}
 
 	/**
-	 * A bottom-anchored glass sheet over the composer (the `overlay` hoists into
-	 * the terminal's layer; the dialog's own slot in the dock stays empty).
+	 * In the dock, in the composer's place and framed as the composer is: a
+	 * `col` with the prompt editor's root role (`omp.editor`), so the terminal
+	 * gives it the composer's insets and spacing. Not a modal `overlay` sheet:
+	 * one anchored at the bottom covered the transcript rows that explain the
+	 * question and blocked scrolling until the question was answered.
 	 */
 	describe(cx: DescribeContext): NativeNode {
 		const inputGuard = this.options.inputGuard;
@@ -744,13 +731,7 @@ export class AskDialogComponent implements Component {
 		if (this.#isSubmitTab()) this.#describeSubmitBody(children);
 		else this.#describeQuestionBody(children);
 		children.push(this.#describeActions(blocked));
-		const sheet = node(
-			"overlay",
-			{ role: "omp.overlay.ask", anchor: "bottom", size: "md", modal: true },
-			[col(children, { gap: "md" })],
-			"sheet",
-		);
-		this.#native = col([sheet]);
+		this.#native = col(children, { role: "omp.editor", gap: "md" });
 		this.#nativeBlocked = blocked;
 		return this.#native;
 	}
@@ -1148,7 +1129,7 @@ export class AskDialogComponent implements Component {
 		const action = question?.multi
 			? `${formatKeyHint("space")} toggle · ${enter} ${enterAction}`
 			: `${enter} select · ${formatKeyHint("n")} note`;
-		const tabs = this.#hasSubmitTab() ? ` · ${formatKeyHints(["tab", "left", "right"])}` : "";
+		const tabs = this.#hasSubmitTab() ? ` · ${formatKeyHints(["tab", "left", "right"])} question` : "";
 		const expand = this.#expandHint();
 		if (this.#questionCanPage && indicator) {
 			const pageKeys = editorKeys("tui.select.pageUp", "tui.select.pageDown");
@@ -1296,12 +1277,12 @@ export class AskDialogComponent implements Component {
 	 * caller keeps one `await` before clearing `#promptActive`, which the host's restore relies on.
 	 */
 	#openPrompt(
-		title: string,
+		prompt: AskDialogPrompt,
 		prefill: AskDialogPromptValue | undefined,
 	): Promise<string | AskDialogPromptValue | undefined> {
 		return this.callbacks.onImagePrompt
-			? this.callbacks.onImagePrompt(title, prefill)
-			: this.callbacks.onPrompt(title, prefill?.text);
+			? this.callbacks.onImagePrompt(prompt, prefill)
+			: this.callbacks.onPrompt(prompt, prefill?.text);
 	}
 
 	async #promptForCustomInput(
@@ -1311,10 +1292,9 @@ export class AskDialogComponent implements Component {
 	): Promise<void> {
 		this.#promptActive = true;
 		try {
-			const title = boundPromptTitle("Custom answer: ", question.question);
 			const prefill =
 				state.customInput === undefined ? undefined : { text: state.customInput, images: state.customInputImages };
-			const result = await this.#openPrompt(title, prefill);
+			const result = await this.#openPrompt({ title: "Custom answer", question: question.question }, prefill);
 			if (result === undefined || this.#closed) return;
 			const input = splitPromptInput(result);
 			if (input.text.trim() === "") {
@@ -1350,11 +1330,13 @@ export class AskDialogComponent implements Component {
 	): Promise<void> {
 		this.#promptActive = true;
 		try {
-			const title = boundPromptTitle(`Note for ${rowItem.label}: `, question.question);
 			const isReedit = state.noteRowKey === rowItem.key;
 			const prefill =
 				isReedit && state.note !== undefined ? { text: state.note, images: state.noteImages } : undefined;
-			const result = await this.#openPrompt(title, prefill);
+			const result = await this.#openPrompt(
+				{ title: `Note for ${rowItem.label}`, question: question.question },
+				prefill,
+			);
 			if (result === undefined || this.#closed) return;
 			const note = splitPromptInput(result);
 			state.note = note.text;

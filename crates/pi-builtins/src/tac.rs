@@ -4,18 +4,16 @@
 
 use std::{
 	ffi::{OsStr, OsString},
-	io::{BufWriter, Read, Write},
+	io::{BufWriter, Read, Seek, SeekFrom, Write},
 };
 
 use brush_core::{ShellExtensions, builtins::Registration};
 use clap::{Arg, ArgAction, ArgMatches, Command};
 use memchr::memmem;
-use memmap2::Mmap;
-use pi_vfs::File;
 use thiserror::Error;
 use uucore::display::Quotable;
 
-use crate::host::{Host, Utility, format_usage, matches_parser, util};
+use crate::host::{Host, Utility, format_usage, matches_parser, strip_errno, util};
 
 mod options {
 	pub static BEFORE: &str = "before";
@@ -38,14 +36,6 @@ enum TacError {
 	/// An error writing the reversed contents of a file or stdin.
 	#[error("failed to write to stdout: {}", strip_errno(.0))]
 	Write(std::io::Error),
-}
-
-fn strip_errno(error: &std::io::Error) -> String {
-	let mut message = error.to_string();
-	if let Some(position) = message.find(" (os error ") {
-		message.truncate(position);
-	}
-	message
 }
 
 /// Parsed `tac` invocation.
@@ -190,24 +180,56 @@ fn buffer_tac_regex(
 	out.flush()
 }
 
-/// Writes lines from `data` to stdout in reverse.
-fn buffer_tac(data: &[u8], before: bool, separator: &OsStr, host: &mut Host) -> std::io::Result<()> {
-	let mut out = BufWriter::new(&mut host.stdout);
-	let separator_len = separator.len();
-	let mut following_line_start = data.len();
+/// Input read per step when a file is read backwards.
+const BLOCK: usize = 128 * 1024;
+/// Output gathered per write: lines come out short and scattered.
+const OUTPUT_BUFFER: usize = 64 * 1024;
 
-	for i in memmem::rfind_iter(data, separator.as_encoded_bytes()) {
-		if before {
-			out.write_all(&data[i..following_line_start])?;
-			following_line_start = i;
+/// Writes the input's lines to stdout in reverse, split on a literal separator.
+///
+/// `window` holds the input from offset `start` to its end. While no separator
+/// is left in it and `start` is not 0, `read_before(offset, buffer)` fills
+/// `buffer` with the input bytes that end at `offset`, so a file read backwards
+/// keeps only one block and its unfinished line in memory. Separators match as
+/// `memmem::rfind_iter` over the whole input would: each search ends where the
+/// previously found separator starts.
+fn reverse_lines(
+	mut window: Vec<u8>,
+	mut start: usize,
+	before: bool,
+	separator: &[u8],
+	host: &mut Host,
+	mut read_before: impl FnMut(usize, &mut [u8]) -> Result<(), TacError>,
+) -> Result<(), TacError> {
+	let finder = memmem::FinderRev::new(separator);
+	let mut out = BufWriter::with_capacity(OUTPUT_BUFFER, &mut host.stdout);
+	// `window[..end]` is not written yet; separators are searched in `window[..limit]`.
+	let mut end = window.len();
+	let mut limit = end;
+	loop {
+		if let Some(i) = finder.rfind(&window[..limit]) {
+			let line_start = if before { i } else { i + separator.len() };
+			out.write_all(&window[line_start..end]).map_err(TacError::Write)?;
+			end = line_start;
+			limit = i;
+		} else if start == 0 {
+			break;
 		} else {
-			out.write_all(&data[i + separator_len..following_line_start])?;
-			following_line_start = i + separator_len;
+			// Prepend the input before the window, at least as much as the
+			// unfinished line holds, so a long line costs linear time.
+			let read = BLOCK.max(end).min(start);
+			if window.len() < read + end {
+				window.resize(read + end, 0);
+			}
+			window.copy_within(..end, read);
+			read_before(start, &mut window[..read])?;
+			start -= read;
+			end += read;
+			limit += read;
 		}
 	}
-
-	out.write_all(&data[..following_line_start])?;
-	out.flush()
+	out.write_all(&window[..end]).map_err(TacError::Write)?;
+	out.flush().map_err(TacError::Write)
 }
 
 /// Makes the GNU basic regular-expression flavor compatible with `regex`.
@@ -319,19 +341,14 @@ fn tac(
 		if host.is_cancelled() {
 			break;
 		}
-		let mmap;
-		let buffer;
-		let data: &[u8] = if filename == "-" {
-			let mut contents = Vec::new();
-			match host.stdin.read_to_end(&mut contents) {
-				Ok(_) => {
-					buffer = contents;
-					&buffer
-				},
-				Err(error) => {
-					show(host, &TacError::Read(OsString::from("stdin"), error));
-					continue;
-				},
+		// Never map the input: a concurrent truncation would SIGBUS the whole
+		// host process through the mapping (and on Windows the mapping makes the
+		// writer's SetEndOfFile fail).
+		let mut data = Vec::new();
+		if filename == "-" {
+			if let Err(error) = host.stdin.read_to_end(&mut data) {
+				show(host, &TacError::Read(OsString::from("stdin"), error));
+				continue;
 			}
 		} else {
 			let path = host.resolve(filename);
@@ -342,43 +359,50 @@ fn tac(
 					continue;
 				},
 			};
-
-			if let Some(mapping) = try_mmap_file(&file) {
-				mmap = mapping;
-				&mmap
-			} else {
-				let mut contents = Vec::new();
-				match file.read_to_end(&mut contents) {
-					Ok(_) => {
-						buffer = contents;
-						&buffer
+			// A regular host file larger than a block is read backwards instead
+			// of whole. Smaller files include pseudo-files (procfs, sysfs) whose
+			// reported size is not their content's.
+			if maybe_pattern.is_none()
+				&& let Some(mut native) = file.native()
+				&& let Some(len) = native
+					.metadata()
+					.ok()
+					.filter(std::fs::Metadata::is_file)
+					.and_then(|metadata| usize::try_from(metadata.len()).ok())
+					.filter(|len| *len > BLOCK)
+			{
+				let result = reverse_lines(
+					Vec::new(),
+					len,
+					before,
+					separator.as_encoded_bytes(),
+					host,
+					|offset, buffer| {
+						native
+							.seek(SeekFrom::Start((offset - buffer.len()) as u64))
+							.and_then(|_| native.read_exact(buffer))
+							.map_err(|error| TacError::Read(filename.clone(), error))
 					},
-					Err(error) => {
-						show(host, &TacError::Read(filename.clone(), error));
-						continue;
-					},
+				);
+				match result {
+					Err(error @ TacError::Read(..)) => show(host, &error),
+					result => result?,
 				}
+				continue;
 			}
-		};
+			if let Err(error) = file.read_to_end(&mut data) {
+				show(host, &TacError::Read(filename.clone(), error));
+				continue;
+			}
+		}
 
-		let result = match &maybe_pattern {
-			Some(pattern) => buffer_tac_regex(data, pattern, before, host),
-			None => buffer_tac(data, before, separator, host),
-		};
-		if let Err(error) = result {
-			return Err(TacError::Write(error));
+		match &maybe_pattern {
+			Some(pattern) => buffer_tac_regex(&data, pattern, before, host).map_err(TacError::Write)?,
+			// The whole input is in the window, so nothing is read before it.
+			None => reverse_lines(data, 0, before, separator.as_encoded_bytes(), host, |_, _| Ok(()))?,
 		}
 	}
 	Ok(())
-}
-
-/// Maps `file` when its provider exposes a native host handle; provider-backed
-/// files are read into memory instead.
-fn try_mmap_file(file: &File) -> Option<Mmap> {
-	let native = file.native()?;
-	// SAFETY: If the file is truncated while mapped, SIGBUS terminates the
-	// process before invalid memory can be accessed.
-	unsafe { Mmap::map(native).ok() }
 }
 
 /// Creates the `tac` builtin registration.
@@ -422,7 +446,7 @@ mod regex_flavor_tests {
 mod tests {
 	use std::{ffi::OsString, fs, path::PathBuf};
 
-	use super::{Tac, run_argv};
+	use super::{BLOCK, Tac, run_argv};
 	use crate::host::{Host, run_util};
 
 	fn run(cwd: PathBuf, stdin: &str, args: &[&str]) -> (i32, String, String) {
@@ -519,5 +543,34 @@ mod tests {
 		);
 		assert_eq!(code, 1);
 		assert!(capture.err().starts_with("tac: failed to open 'missing' for reading:"));
+	}
+
+	/// Contract: a file larger than a block, read backwards block by block,
+	/// reverses exactly like the same bytes read whole from stdin, including
+	/// multi-byte and overlapping separators across block boundaries and a line
+	/// longer than a block.
+	#[test]
+	fn backward_block_reads_match_whole_input() {
+		let (_dir, root) = canonical_tempdir();
+		let mut state = 0x2545_f491_4f6c_dd1d_u64;
+		let mut noise = |len: usize| -> Vec<u8> {
+			(0..len)
+				.map(|_| {
+					state ^= state << 13;
+					state ^= state >> 7;
+					state ^= state << 17;
+					b"ab\n,"[(state % 4) as usize]
+				})
+				.collect()
+		};
+		let data = [noise(BLOCK + 5), vec![b'x'; 2 * BLOCK], noise(2 * BLOCK + 17)].concat();
+		fs::write(root.join("input"), &data).unwrap();
+		let stdin = String::from_utf8(data).unwrap();
+		for args in [&[][..], &["-b"], &["-s", "ab"], &["-b", "-s", "aa"], &["-s", "x\n"]] {
+			let from_file = run(root.clone(), "", &[args, &["input"][..]].concat());
+			let from_stdin = run(root.clone(), &stdin, args);
+			assert_eq!(from_file.0, 0, "{args:?}");
+			assert!(from_file == from_stdin, "{args:?}: file and stdin output differ");
+		}
 	}
 }

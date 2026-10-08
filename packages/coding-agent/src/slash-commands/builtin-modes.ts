@@ -10,11 +10,24 @@ import {
 	type ResolveCliModelResult,
 } from "../config/model-resolver";
 import type { Settings } from "../config/settings";
+import {
+	applyModelPreset,
+	deleteModelPreset,
+	formatModelPresetSwitch,
+	getModelPresetNames,
+	isCleanModelPresetSwitch,
+	isValidModelPresetName,
+	modelPresetSavedMessage,
+	type ModelPresetSession,
+	saveModelPreset,
+} from "../config/model-presets";
 import { describeLoopCondition } from "../modes/loop-condition";
 import { describeLoopLimitRuntime } from "../modes/loop-limit";
 import type { InteractiveModeContext } from "../modes/types";
 import ratchetKickoffPrompt from "../prompts/ratchet-kickoff.md" with { type: "text" };
 import type { AgentSession } from "../session/agent-session";
+import { CLI_THINKING_LEVELS, getConfiguredThinkingLevelMetadata } from "@oh-my-pi/pi-tui/thinking";
+import { noThinkingMessage, resolveThinkingArgument } from "./helpers/effort";
 import { commandConsumed, errorMessage, usage } from "./helpers/parse";
 import { handleSecurityCommand } from "./helpers/security";
 import type { ParsedSlashCommand, SlashCommandSpec, TuiSlashCommandRuntime } from "./types";
@@ -753,14 +766,27 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 	{
 		name: "prewalk",
 		icon: "prewalk",
-		description: "Arm or restart a one-shot model handoff",
+		description: "Arm, restart, or cancel a one-shot model handoff",
 		allowArgs: true,
-		acpDescription: "Arm or restart prewalk",
-		acpInputHint: "[restart]",
-		subcommands: [{ name: "restart", description: "Return to @default and re-arm the handoff to @smol" }],
+		acpDescription: "Arm, restart, or cancel prewalk",
+		acpInputHint: "[restart|off]",
+		subcommands: [
+			{ name: "restart", description: "Return to @default and re-arm the handoff to @smol" },
+			{ name: "off", description: "Cancel this session's handoff without changing the active model" },
+		],
 		handle: async (command, runtime) => {
 			const arg = command.args.trim().toLowerCase();
-			if (arg && arg !== "restart") return usage("Usage: /prewalk [restart]", runtime);
+			if (arg && arg !== "restart" && arg !== "off") return usage("Usage: /prewalk [restart|off]", runtime);
+			if (arg === "off") {
+				const armed = runtime.session.getPrewalkState() !== undefined;
+				runtime.session.disarmPrewalk();
+				await runtime.output(
+					armed
+						? "Prewalk off: canceled this session's pending handoff; keeping the active model."
+						: "Prewalk already off for this session; keeping the active model.",
+				);
+				return commandConsumed();
+			}
 			const target = resolveSessionModelSelector("@smol", runtime.session, runtime.settings);
 			if (target.error || !target.model) {
 				return usage(target.error ?? 'Model "@smol" not found', runtime);
@@ -800,4 +826,171 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 			return commandConsumed();
 		},
 	},
+	{
+		name: "modelpreset",
+		icon: "model",
+		description: "Save and switch model presets (role models + thinking level)",
+		acpDescription: "Manage model presets",
+		acpInputHint: "[list|save|switch|delete] [name]",
+		inlineHint: "[save|switch|delete|list] [name]",
+		subcommands: [
+			{ name: "list", description: "List saved presets" },
+			{ name: "save", description: "Save the current role models and thinking level", usage: "<name>" },
+			{ name: "switch", description: "Apply a saved preset", usage: "<name>" },
+			{ name: "delete", description: "Delete a saved preset", usage: "<name>" },
+		],
+		allowArgs: true,
+		getTuiAutocompleteDescription: runtime => {
+			const count = getModelPresetNames(runtime.ctx.settings).length;
+			return count > 0 ? `Presets: ${count} saved` : "Presets: none saved";
+		},
+		handle: async (command, runtime) => {
+			const outcome = await runPresetsCommand(command.args, runtime.settings, runtime.session);
+			if (outcome.usage) return usage(outcome.message, runtime);
+			await runtime.output(outcome.message);
+			if (outcome.switched) await runtime.notifyTitleChanged?.();
+			if (outcome.changedConfig) await runtime.notifyConfigChanged?.();
+			return commandConsumed();
+		},
+		handleTui: async (command, runtime) => {
+			clearSubmittedText(runtime);
+			const { ctx } = runtime;
+			let args = command.args;
+			if (!args.trim()) {
+				const names = getModelPresetNames(ctx.settings);
+				if (names.length === 0) {
+					ctx.showStatus(NO_PRESETS_MESSAGE);
+					return;
+				}
+				const picked = await ctx.showHookSelector("Switch to model preset", names);
+				if (picked === undefined) return;
+				args = `switch ${picked}`;
+			}
+			const outcome = await runPresetsCommand(args, ctx.settings, ctx.session);
+			if (outcome.switched) {
+				ctx.statusLine.invalidate();
+				ctx.updateEditorBorderColor();
+			}
+			if (outcome.failed || outcome.usage) ctx.showWarning(outcome.message);
+			else ctx.showStatus(outcome.message);
+			ctx.ui.requestRender();
+		},
+	},
+	{
+		name: "effort",
+		icon: "gauge",
+		get description() {
+			return `Set reasoning effort (thinking level, intelligence) for this session; ${formatKeyHint("shift+tab")} cycles levels`;
+		},
+		acpDescription: "Set or show reasoning effort (thinking level, intelligence)",
+		acpInputHint: "[level]",
+		inlineHint: "[level]",
+		allowArgs: true,
+		subcommands: CLI_THINKING_LEVELS.map(level => ({
+			name: level,
+			description: getConfiguredThinkingLevelMetadata(level).description,
+		})),
+		getTuiAutocompleteDescription: runtime =>
+			`Thinking: ${runtime.ctx.session.configuredThinkingLevel() ?? "model default"}`,
+		handle: async (command, runtime) => {
+			const session = runtime.session;
+			if (!command.args.trim()) {
+				await runtime.output(
+					session.model?.reasoning
+						? `Thinking: ${session.configuredThinkingLevel() ?? "model default"}\nAvailable: ${session.getAvailableEffortSelectors().join(", ")}`
+						: noThinkingMessage(session),
+				);
+				return commandConsumed();
+			}
+			const resolved = resolveThinkingArgument(session, command.args);
+			if ("error" in resolved) return usage(resolved.error, runtime);
+			session.setThinkingLevel(resolved.level);
+			await runtime.output(`Thinking set to ${resolved.level}.`);
+			// `setThinkingLevel` emits `thinking_level_changed`, which hosts with a
+			// session-lifetime subscription (ACP) already turn into a config push.
+			await runtime.notifyConfigChanged?.({ handledBySessionEvent: true });
+			return commandConsumed();
+		},
+		handleTui: (command, runtime) => {
+			clearSubmittedText(runtime);
+			const { ctx } = runtime;
+			if (!command.args.trim()) {
+				if (ctx.session.model?.reasoning) ctx.showThinkingSelector();
+				else ctx.showStatus(noThinkingMessage(ctx.session));
+				return;
+			}
+			const resolved = resolveThinkingArgument(ctx.session, command.args);
+			if ("error" in resolved) {
+				ctx.showError(resolved.error);
+				return;
+			}
+			// thinking_level_changed refreshes the status line and editor border.
+			ctx.session.setThinkingLevel(resolved.level);
+			ctx.showStatus(`Thinking set to ${resolved.level}.`);
+		},
+	},
 ];
+
+const PRESETS_USAGE = "Usage: /modelpreset [list | save <name> | switch <name> | delete <name>]";
+const NO_PRESETS_MESSAGE = "No model presets saved. Use /modelpreset save <name> to create one.";
+
+interface PresetsCommandOutcome {
+	message: string;
+	usage?: boolean;
+	failed?: boolean;
+	switched?: boolean;
+	changedConfig?: boolean;
+}
+
+/** Shared by the ACP and TUI handlers of `/modelpreset`; `args` is everything after the command name. */
+async function runPresetsCommand(
+	args: string,
+	settings: Settings,
+	session: ModelPresetSession,
+): Promise<PresetsCommandOutcome> {
+	const [sub = "list", ...rest] = args.trim().split(/\s+/).filter(Boolean);
+	const name = rest.join(" ");
+	switch (sub) {
+		case "list": {
+			const names = getModelPresetNames(settings);
+			return { message: names.length > 0 ? `Model presets: ${names.join(", ")}` : NO_PRESETS_MESSAGE };
+		}
+		case "save": {
+			if (!name) return { message: "Usage: /modelpreset save <name>", usage: true };
+			if (!isValidModelPresetName(name)) {
+				return {
+					message: `Invalid preset name "${name}": use a letter, then letters, digits, - or _`,
+					usage: true,
+				};
+			}
+			saveModelPreset(settings, name);
+			return { message: modelPresetSavedMessage(settings, name), changedConfig: true };
+		}
+		case "switch": {
+			if (!name) return { message: "Usage: /modelpreset switch <name>", usage: true };
+			const result = await applyModelPreset(settings, session, name);
+			const message = formatModelPresetSwitch(name, result);
+			const wroteRoles = result.kind === "switched" || result.kind === "failed";
+			return {
+				message,
+				failed: !isCleanModelPresetSwitch(result),
+				switched: result.kind === "switched",
+				changedConfig: wroteRoles,
+			};
+		}
+		case "delete": {
+			if (!name) return { message: "Usage: /modelpreset delete <name>", usage: true };
+			const result = deleteModelPreset(settings, name);
+			if (result === "deleted") return { message: `Deleted model preset "${name}"`, changedConfig: true };
+			if (result === "project") {
+				return {
+					message: `Preset "${name}" is defined by a project or --config file; remove it there`,
+					failed: true,
+				};
+			}
+			return { message: `Preset not found: ${name}`, failed: true };
+		}
+		default:
+			return { message: PRESETS_USAGE, usage: true };
+	}
+}

@@ -8,7 +8,7 @@ import { beforeAll, describe, expect, test } from "bun:test";
 import { Effort } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import type { TspPickerProps } from "@oh-my-pi/pi-wire";
-import { AgentsHubComponent, type HubAgent } from "../src/overlays/agents-hub";
+import { AgentsHubComponent, type HubAgent, parseGeneratedAgentSpec } from "../src/overlays/agents-hub";
 import { initTheme } from "../src/theme";
 import type { TUI } from "../src/index";
 import type { DescribeContext, NativeChild, NativeNode } from "../src/native/node";
@@ -398,5 +398,29 @@ describe("AgentsHub native events", () => {
 		hub.handleInput("\x1b"); // close the strip
 		const list = mustFind(hub, "agents").node;
 		expect(list.k === "list" && list.p?.selected).toBe("agent:project:dev");
+	});
+});
+
+describe("parseGeneratedAgentSpec", () => {
+	const spec = {
+		identifier: "code-reviewer",
+		whenToUse: "Use this agent when reviewing code.",
+		systemPrompt: "Review the diff.",
+	};
+
+	test("parses plain JSON", () => {
+		expect(parseGeneratedAgentSpec(JSON.stringify(spec))).toEqual(spec);
+	});
+
+	test("parses JSON wrapped in a json code fence", () => {
+		const fence = "```";
+		const raw = `Here you go:\n${fence}json\n${JSON.stringify(spec)}\n${fence}\n`;
+		expect(parseGeneratedAgentSpec(raw)).toEqual(spec);
+	});
+
+	test("keeps a code fence inside a JSON string value", () => {
+		const systemPrompt = "Emit this report:\n```\n# Report\n```\nThen stop.";
+		const raw = JSON.stringify({ ...spec, systemPrompt });
+		expect(parseGeneratedAgentSpec(raw).systemPrompt).toBe(systemPrompt);
 	});
 });

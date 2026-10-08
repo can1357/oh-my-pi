@@ -1,7 +1,6 @@
-import type { Effort } from "@oh-my-pi/pi-ai";
+import { AUTO_THINKING, type ConfiguredThinkingLevel, getConfiguredThinkingLevelMetadata } from "../thinking";
 import { type SelectItem, SelectList, type SgrMouseEvent } from "../index";
 import { getSelectListTheme } from "../theme/theme";
-import { getThinkingLevelMetadata } from "../thinking";
 import { OverlayPanel } from "../chrome/overlay-box";
 import { routeSelectListMouseWithTopBorder } from "../chrome/select-list-mouse-routing";
 import type { DescribeContext, NativeNode, NativeUiEvent } from "../native/node";
@@ -15,14 +14,14 @@ export class ThinkingSelectorComponent extends OverlayPanel {
 	#sheet: SelectListSheet;
 
 	constructor(
-		currentLevel: Effort,
-		availableLevels: Effort[],
-		onSelect: (level: Effort) => void,
+		currentLevel: ConfiguredThinkingLevel | undefined,
+		availableLevels: ConfiguredThinkingLevel[],
+		onSelect: (level: ConfiguredThinkingLevel) => void,
 		onCancel: () => void,
 	) {
 		super("Thinking Level", "omp.overlay.thinking");
 
-		const thinkingLevels: SelectItem[] = availableLevels.map(getThinkingLevelMetadata);
+		const thinkingLevels: SelectItem[] = availableLevels.map(getConfiguredThinkingLevelMetadata);
 
 		// Create selector
 		this.#selectList = new SelectList(thinkingLevels, thinkingLevels.length, getSelectListTheme());
@@ -34,7 +33,7 @@ export class ThinkingSelectorComponent extends OverlayPanel {
 		}
 
 		this.#selectList.onSelect = item => {
-			onSelect(item.value as Effort);
+			onSelect(item.value as ConfiguredThinkingLevel);
 		};
 
 		this.#selectList.onCancel = () => {
@@ -46,10 +45,11 @@ export class ThinkingSelectorComponent extends OverlayPanel {
 			title: "Thinking level",
 			icon: "brain",
 			noun: "levels",
-			current: [currentLevel],
-			decorate: item => ({
-				chips: [{ text: "", dot: `thinking${item.value.charAt(0).toUpperCase()}${item.value.slice(1)}` }],
-			}),
+			current: currentLevel ? [currentLevel] : [],
+			decorate: item =>
+				item.value === AUTO_THINKING
+					? {}
+					: { chips: [{ text: "", dot: `thinking${item.value.charAt(0).toUpperCase()}${item.value.slice(1)}` }] },
 		});
 	}
 

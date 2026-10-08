@@ -2,8 +2,10 @@
  * Content-addressed binary blobs (images) for `image` nodes.
  *
  * `describe()` registers the bytes and puts the returned id in `image.p.blob`;
- * the native backend uploads each referenced blob once per surface with verb
- * `b` before the frame that first references it.
+ * the native backend delivers each referenced blob once per terminal
+ * connection (asking the terminal first which it holds, or through its blob
+ * cache), else uploads it with verb `b` before the frame that first
+ * references it.
  */
 import type { TspProps } from "@oh-my-pi/pi-wire";
 import { getImageDimensions } from "../terminal-capabilities";
@@ -48,7 +50,7 @@ export function getNativeBlob(id: string): NativeBlob | undefined {
 export function base64ImageNode(
 	data: string,
 	mimeType: string,
-	p?: Omit<TspProps<"image">, "blob" | "w" | "h">,
+	p?: Omit<TspProps<"image">, "blob" | "builtin" | "w" | "h">,
 	key?: string,
 ): NativeNode {
 	const blob = registerNativeBlob(Buffer.from(data, "base64"), mimeType);

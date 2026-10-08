@@ -74,7 +74,7 @@ function buildGlobalMatch(cwd: string): { session: SessionInfo; scope: "global" 
 	return {
 		scope: "global",
 		session: {
-			path: `${cwd}/019e84ed-b4cc-7000-9c87-5afe6df992c1.jsonl`,
+			path: path.join(cwd, "019e84ed-b4cc-7000-9c87-5afe6df992c1.jsonl"),
 			id: "019e84ed-b4cc-7000-9c87-5afe6df992c1",
 			cwd,
 			title: "in-other-project",

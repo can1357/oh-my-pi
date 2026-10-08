@@ -88,6 +88,24 @@ collapse {
 		mode "budget"
 		efforts "minimal" "low" "medium" "high"
 	}
+	variant-family "google-antigravity" "claude-opus-5-5" name="Claude Opus 5.5" {
+		members "claude-opus-5-5-low" "claude-opus-5-5-medium" "claude-opus-5-5-high"
+		route "low" "claude-opus-5-5-low"
+		route "medium" "claude-opus-5-5-medium"
+		route "high" "claude-opus-5-5-high"
+		mode "budget"
+		efforts "low" "medium" "high"
+		requires-effort #true
+	}
+	variant-family "google-antigravity" "claude-sonnet-5-5" name="Claude Sonnet 5.5" {
+		members "claude-sonnet-5-5-low" "claude-sonnet-5-5-medium" "claude-sonnet-5-5-high"
+		route "low" "claude-sonnet-5-5-low"
+		route "medium" "claude-sonnet-5-5-medium"
+		route "high" "claude-sonnet-5-5-high"
+		mode "budget"
+		efforts "low" "medium" "high"
+		requires-effort #true
+	}
 	variant-family "google-antigravity" "claude-sonnet-4-6" name="Claude Sonnet 4.6" {
 		members "claude-sonnet-4-6" "claude-sonnet-4-6-thinking"
 		mode "budget"
@@ -639,6 +657,12 @@ collapse {
 	// Retired id: the Codex image model was relabeled to what the backend runs
 	// (gpt-image-2-codex); keep saved `openai-codex/gpt-image-1` roles resolving.
 	provider-alias "openai-codex" "gpt-image-1" "gpt-image-2"
+	// Retired rich-lane ids: AvailableModels discovery named Grok 4.5/4.6 lanes
+	// after the unprefixed model name before they adopted these family ids
+	// (#14164). Family `aliases` (not `provider-alias`) so saved selectors and
+	// models.yml `modelOverrides` keyed by the old ids both migrate. Grok 4.6
+	// is spelled out instead of riding the `cursor-grok-{rev}` template: a
+	// templated `grok-{rev}` alias would also claim the live Grok 4.7+ ids.
 	variant-family "cursor" "cursor-grok-4.5" name="Grok 4.5" {
 		members "cursor-grok-4.5-low" "cursor-grok-4.5-medium" "cursor-grok-4.5-high"
 		route "low" "cursor-grok-4.5-low"
@@ -648,6 +672,7 @@ collapse {
 		efforts "low" "medium" "high"
 		requires-effort #true
 		default-member "cursor-grok-4.5-medium"
+		aliases "grok-4.5"
 	}
 	variant-family "cursor" "cursor-grok-4.5-fast" name="Grok 4.5 Fast" {
 		members "cursor-grok-4.5-low-fast" "cursor-grok-4.5-medium-fast" "cursor-grok-4.5-high-fast"
@@ -658,6 +683,7 @@ collapse {
 		efforts "low" "medium" "high"
 		requires-effort #true
 		default-member "cursor-grok-4.5-medium-fast"
+		aliases "grok-4.5-fast"
 	}
 	variant-family "cursor" "cursor-grok-4.6" name="Grok 4.6" {
 		members "cursor-grok-4.6-low" "cursor-grok-4.6-medium" "cursor-grok-4.6-high" "cursor-grok-4.6-xhigh"
@@ -669,6 +695,7 @@ collapse {
 		efforts "low" "medium" "high" "xhigh"
 		requires-effort #true
 		default-member "cursor-grok-4.6-medium"
+		aliases "grok-4.6"
 	}
 	variant-family "cursor" "cursor-grok-4.6-fast" name="Grok 4.6 Fast" {
 		members "cursor-grok-4.6-low-fast" "cursor-grok-4.6-medium-fast" "cursor-grok-4.6-high-fast" "cursor-grok-4.6-xhigh-fast"
@@ -680,6 +707,51 @@ collapse {
 		efforts "low" "medium" "high" "xhigh"
 		requires-effort #true
 		default-member "cursor-grok-4.6-medium-fast"
+		aliases "grok-4.6-fast"
+	}
+	variant-family "cursor" "cursor-grok-{rev}" name="Grok {rev}" revision=">=4.7" {
+		members "cursor-grok-{rev}-low" "cursor-grok-{rev}-medium" "cursor-grok-{rev}-high" "cursor-grok-{rev}-xhigh"
+		route "low" "cursor-grok-{rev}-low"
+		route "medium" "cursor-grok-{rev}-medium"
+		route "high" "cursor-grok-{rev}-high"
+		route "xhigh" "cursor-grok-{rev}-xhigh"
+		mode "effort"
+		efforts "low" "medium" "high" "xhigh"
+		requires-effort #true
+		default-member "cursor-grok-{rev}-medium"
+	}
+	variant-family "cursor" "cursor-grok-{rev}-fast" name="Grok {rev} Fast" revision=">=4.7" {
+		members "cursor-grok-{rev}-low-fast" "cursor-grok-{rev}-medium-fast" "cursor-grok-{rev}-high-fast" "cursor-grok-{rev}-xhigh-fast"
+		route "low" "cursor-grok-{rev}-low-fast"
+		route "medium" "cursor-grok-{rev}-medium-fast"
+		route "high" "cursor-grok-{rev}-high-fast"
+		route "xhigh" "cursor-grok-{rev}-xhigh-fast"
+		mode "effort"
+		efforts "low" "medium" "high" "xhigh"
+		requires-effort #true
+		default-member "cursor-grok-{rev}-medium-fast"
+	}
+	variant-family "cursor" "grok-{rev}" name="Grok {rev}" revision=">=4.7" {
+		members "grok-{rev}-low" "grok-{rev}-medium" "grok-{rev}-high" "grok-{rev}-xhigh"
+		route "low" "grok-{rev}-low"
+		route "medium" "grok-{rev}-medium"
+		route "high" "grok-{rev}-high"
+		route "xhigh" "grok-{rev}-xhigh"
+		mode "effort"
+		efforts "low" "medium" "high" "xhigh"
+		requires-effort #true
+		default-member "grok-{rev}-medium"
+	}
+	variant-family "cursor" "grok-{rev}-fast" name="Grok {rev} Fast" revision=">=4.7" {
+		members "grok-{rev}-low-fast" "grok-{rev}-medium-fast" "grok-{rev}-high-fast" "grok-{rev}-xhigh-fast"
+		route "low" "grok-{rev}-low-fast"
+		route "medium" "grok-{rev}-medium-fast"
+		route "high" "grok-{rev}-high-fast"
+		route "xhigh" "grok-{rev}-xhigh-fast"
+		mode "effort"
+		efforts "low" "medium" "high" "xhigh"
+		requires-effort #true
+		default-member "grok-{rev}-medium-fast"
 	}
 	variant-family "cursor" "gpt-5.6-luna" name="GPT-5.6 Luna" {
 		members "gpt-5.6-luna-none" "gpt-5.6-luna-low" "gpt-5.6-luna-medium" "gpt-5.6-luna-high" "gpt-5.6-luna-xhigh" "gpt-5.6-luna-max"

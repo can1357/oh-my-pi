@@ -92,5 +92,15 @@
 		"pageBg": "base",
 		"cardBg": "surface",
 		"infoBg": "overlay"
+	},
+	"terminal": {
+		"background": "base",
+		"foreground": "text",
+		"chrome": "base",
+		"widget": "surface",
+		"ansi": [
+			"overlay", "love", "pine", "gold", "foam", "iris", "rose", "text",
+			"subtle", "love", "pine", "gold", "foam", "iris", "rose", "text"
+		]
 	}
 }

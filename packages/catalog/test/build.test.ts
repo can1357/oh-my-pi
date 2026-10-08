@@ -356,6 +356,58 @@ describe("buildModel", () => {
 	});
 });
 
+describe("Responses native-resolution image compatibility", () => {
+	it.each([
+		["custom loopback", "custom", "openai-responses", "http://127.0.0.1:8080/v1", false],
+		["OpenAI routed through a custom host", "openai", "openai-responses", "https://proxy.example/v1", false],
+		["official OpenAI", "openai", "openai-responses", "https://api.openai.com/v1", true],
+		["OpenAI host with a custom provider name", "custom", "openai-responses", "https://api.openai.com/v1", true],
+		["Codex subscription", "openai-codex", "openai-codex-responses", "https://chatgpt.com/backend-api", true],
+		["Codex legacy backend", "openai-codex", "openai-codex-responses", "https://chat.openai.com/backend-api", true],
+		[
+			"Codex routed through a custom host",
+			"openai-codex",
+			"openai-codex-responses",
+			"http://127.0.0.1:8080/v1",
+			false,
+		],
+		["custom Codex proxy", "cc-switch", "openai-codex-responses", "http://127.0.0.1:8080/v1", false],
+		["Azure runtime endpoint", "azure", "azure-openai-responses", "", true],
+		["Azure host", "custom", "openai-responses", "https://resource.openai.azure.com/openai/v1", true],
+		[
+			"Azure provider routed through a custom host",
+			"azure",
+			"azure-openai-responses",
+			"http://127.0.0.1:8080/v1",
+			false,
+		],
+		["Copilot", "github-copilot", "openai-responses", "https://api.githubcopilot.com", false],
+		["xAI", "xai", "openai-responses", "https://api.x.ai/v1", false],
+	] as const)("uses only supported image detail on %s", (_label, provider, api, baseUrl, supported) => {
+		const model = buildModel({ ...responsesSpec({ input: ["text", "image"] }), provider, api, baseUrl });
+		expect(model.compat.supportsImageDetailOriginal).toBe(supported);
+	});
+
+	it.each([
+		["custom opt-in", "custom", "openai-responses", "http://127.0.0.1:8080/v1", true],
+		["OpenAI opt-out", "openai", "openai-responses", "https://api.openai.com/v1", false],
+		["Codex opt-out", "openai-codex", "openai-codex-responses", "https://chatgpt.com/backend-api", false],
+		["xAI wire-rule opt-in", "xai-oauth", "openai-responses", "https://api.x.ai/v1", true],
+	] as const)(
+		"lets explicit image-detail compat win over detection and wire rules: %s",
+		(_label, provider, api, baseUrl, supported) => {
+			const model = buildModel({
+				...responsesSpec({ id: "grok-4.3", input: ["text", "image"] }),
+				provider,
+				api,
+				baseUrl,
+				compat: { supportsImageDetailOriginal: supported },
+			});
+			expect(model.compat.supportsImageDetailOriginal).toBe(supported);
+		},
+	);
+});
+
 describe("xAI Responses reasoning-effort suppression", () => {
 	const grokResponsesSpec = (
 		id: string,
@@ -860,6 +912,20 @@ describe("openai-completions wire-quirk compat detection", () => {
 				}),
 			).compat.streamMarkupHealingPattern,
 		).toBe("dsml");
+	});
+
+	it("selects the DSML healer for DeepSeek models on any host", () => {
+		// DSML is the model's own tool-call grammar: any server running its chat
+		// template without a working tool parser leaks it, whatever the provider.
+		const pattern = (provider: string, id: string, baseUrl: string) =>
+			resolveModelPolicy(completionsSpec({ provider, id, baseUrl })).compat.streamMarkupHealingPattern;
+		expect(pattern("llama.cpp", "deepseek-v4-flash", "http://192.168.1.20:8080/v1")).toBe("dsml");
+		expect(pattern("vllm", "deepseek-ai/DeepSeek-V4-Flash", "http://10.0.0.5:8000/v1")).toBe("dsml");
+		// User-configured providers, local or remote.
+		expect(pattern("my-box", "deepseek-v4-pro", "http://127.0.0.1:9000/v1")).toBe("dsml");
+		expect(pattern("my-box", "deepseek-v4-pro", "https://inference.example.com/v1")).toBe("dsml");
+		// Other model classes keep the generic healer.
+		expect(pattern("llama.cpp", "qwen3-coder", "http://127.0.0.1:8080/v1")).toBe("thinking");
 	});
 
 	it("derives Responses obfuscation opt-out and wire mode per surface", () => {
@@ -1412,24 +1478,32 @@ describe("model cache materialized round trip", () => {
 		}
 	});
 
-	it("invalidates rows materialized under a stale build or rules policy", async () => {
+	it("ignores rows materialized under a stale build or rules policy without deleting them", async () => {
 		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-catalog-stale-policy-cache-"));
 		const dbPath = path.join(tempDir, "models.db");
 		const model = buildModel(completionsSpec({ provider: "stale-policy-cache-test" }));
 		try {
 			writeModelCache("stale-policy-cache-test", Date.now(), [model], true, "", dbPath);
+			writeModelCache("other-policy-cache-test", Date.now(), [model], true, "", dbPath);
 			const db = new Database(dbPath);
-			db.run("UPDATE model_cache SET materialization_policy = ? WHERE provider_id = ?", [
-				"stale-builder:stale-rules",
-				"stale-policy-cache-test",
-			]);
+			db.run("UPDATE model_cache SET materialization_policy = ?", ["stale-builder:stale-rules"]);
 			db.close();
 
+			// Another app version's rows read as absent but are not mass-deleted on
+			// open; each provider's next write replaces its own row lazily.
 			expect(readModelCache("stale-policy-cache-test", Infinity, Date.now, dbPath)).toBeNull();
-			const verified = new Database(dbPath, { readonly: true });
-			const row = verified.query<{ count: number }, []>("SELECT COUNT(*) AS count FROM model_cache").get();
-			verified.close();
-			expect(row?.count).toBe(0);
+			const countRows = () => {
+				const verified = new Database(dbPath, { readonly: true });
+				const row = verified.query<{ count: number }, []>("SELECT COUNT(*) AS count FROM model_cache").get();
+				verified.close();
+				return row?.count;
+			};
+			expect(countRows()).toBe(2);
+
+			writeModelCache("stale-policy-cache-test", Date.now(), [model], true, "", dbPath);
+			expect(readModelCache("stale-policy-cache-test", Infinity, Date.now, dbPath)?.models).toHaveLength(1);
+			expect(readModelCache("other-policy-cache-test", Infinity, Date.now, dbPath)).toBeNull();
+			expect(countRows()).toBe(2);
 		} finally {
 			await fs.rm(tempDir, { recursive: true, force: true });
 		}
@@ -1461,6 +1535,44 @@ describe("model cache materialized round trip", () => {
 			const row = verified.query<{ count: number }, []>("SELECT COUNT(*) AS count FROM model_cache").get();
 			verified.close();
 			expect(row?.count).toBe(0);
+		} finally {
+			await fs.rm(tempDir, { recursive: true, force: true });
+		}
+	});
+
+	it("keeps header-free v11/v12 rows until their own provider is rewritten", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-catalog-v12-cache-"));
+		const dbPath = path.join(tempDir, "models.db");
+		const model = buildModel(completionsSpec({ provider: "v12-cache-test" }));
+		try {
+			writeModelCache("v11-cache-test", Date.now(), [model], true, "", dbPath);
+			writeModelCache("v12-cache-test", Date.now(), [model], true, "", dbPath);
+			writeModelCache("current-cache-test", Date.now(), [model], true, "", dbPath);
+			const db = new Database(dbPath);
+			db.run("UPDATE model_cache SET version = 11 WHERE provider_id = ?", ["v11-cache-test"]);
+			db.run("UPDATE model_cache SET version = 12 WHERE provider_id = ?", ["v12-cache-test"]);
+			db.close();
+			const versions = () => {
+				const verified = new Database(dbPath, { readonly: true });
+				const rows = verified
+					.query<{ provider_id: string; version: number }, []>(
+						"SELECT provider_id, version FROM model_cache ORDER BY provider_id",
+					)
+					.all();
+				verified.close();
+				return Object.fromEntries(rows.map(row => [row.provider_id, row.version]));
+			};
+
+			const current = versions()["current-cache-test"];
+
+			// Opening the cache for an unrelated provider must not purge them.
+			expect(readModelCache("current-cache-test", Infinity, Date.now, dbPath)?.models).toHaveLength(1);
+			expect(readModelCache("v12-cache-test", Infinity, Date.now, dbPath)).toBeNull();
+			expect(versions()).toEqual({ "current-cache-test": current, "v11-cache-test": 11, "v12-cache-test": 12 });
+
+			writeModelCache("v12-cache-test", Date.now(), [model], true, "", dbPath);
+			expect(readModelCache("v12-cache-test", Infinity, Date.now, dbPath)?.models).toHaveLength(1);
+			expect(versions()).toEqual({ "current-cache-test": current, "v11-cache-test": 11, "v12-cache-test": current });
 		} finally {
 			await fs.rm(tempDir, { recursive: true, force: true });
 		}
@@ -1975,5 +2087,32 @@ describe("isOfficialAnthropicApiUrl", () => {
 
 	it("rejects lookalike hostnames", () => {
 		expect(isOfficialAnthropicApiUrl("https://api.anthropic.com.evil.com")).toBe(false);
+	});
+});
+
+describe("explicit thinking ladders", () => {
+	it("inherit rule effort budgets without replacing explicit budgets", () => {
+		const spec: ModelSpec<"google-generative-ai"> = {
+			id: "gemini-2.5-pro",
+			name: "Gemini 2.5 Pro",
+			provider: "google",
+			api: "google-generative-ai",
+			baseUrl: "https://generativelanguage.googleapis.com/v1beta",
+			reasoning: true,
+			input: ["text"],
+			contextWindow: 1000000,
+			maxTokens: 65536,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			thinking: { mode: "budget", efforts: [Effort.Low, Effort.High] },
+		};
+		const inherited = resolveModelPolicy(spec).thinking?.effortBudgets;
+		expect(inherited?.low).toBeNumber();
+		expect(inherited?.high).toBeNumber();
+		expect(
+			resolveModelPolicy({
+				...spec,
+				thinking: { mode: "budget", efforts: [Effort.Low, Effort.High], effortBudgets: { high: 1234 } },
+			}).thinking?.effortBudgets,
+		).toEqual({ high: 1234 });
 	});
 });

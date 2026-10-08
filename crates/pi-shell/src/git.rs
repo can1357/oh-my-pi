@@ -95,9 +95,9 @@ impl builtins::Command for GitCommand {
 			{
 				let cwd = context.shell.working_dir().to_owned();
 				let filesystem = context.shell.filesystem().clone();
-				// Planning and cloning are synchronous filesystem work. They are not
-				// abandoned on cancellation: a half-registered worktree is worse than a
-				// late one.
+				// Planning and cloning are synchronous filesystem work. They are
+				// not abandoned on cancellation: a half-registered
+				// worktree is worse than a late one.
 				let outcome = tokio::task::spawn_blocking(move || request.create(&cwd, &filesystem))
 					.await
 					.map_err(|err| Error::from(ErrorKind::ThreadingError(err)))?;
@@ -303,7 +303,8 @@ impl AddRequest {
 			return Ok(None);
 		}
 		let worktrees = repo.worktrees()?;
-		// A registered worktree whose directory is gone needs git's `-f` handling.
+		// A registered worktree whose directory is gone needs git's `-f`
+		// handling.
 		if worktrees.iter().any(|entry| entry.path == path) {
 			return Ok(None);
 		}
@@ -314,7 +315,8 @@ impl AddRequest {
 				.any(|entry| entry.branch.as_deref() == Some(full.as_str()))
 		};
 		let branch_exists = |branch: &str| repo.ref_exists(&format!("refs/heads/{branch}"));
-		// Whether creating a branch at `start` stays untracked, as pi-vcs creates it.
+		// Whether creating a branch at `start` stays untracked, as pi-vcs creates
+		// it.
 		let untracked = |start: &str| match self.track {
 			Some(false) => Ok(true),
 			_ => creates_untracked_branch(&repo, start),
@@ -376,7 +378,8 @@ impl AddRequest {
 				(Some(branch), name.clone(), false, Preparing::NewBranch(name))
 			}
 		};
-		// Covers unborn HEAD and names that are not commits (trees, blobs, typos).
+		// Covers unborn HEAD and names that are not commits (trees, blobs,
+		// typos).
 		let start = branch
 			.as_ref()
 			.map_or(target.as_str(), |branch| branch.start.as_str());
@@ -598,7 +601,8 @@ fn creates_untracked_branch(repo: &GitRepo, start: &str) -> pi_vcs::Result<bool>
 	if matches!(repo.config_get("branch.autoSetupMerge")?.as_deref(), Some("always" | "inherit")) {
 		return Ok(false);
 	}
-	// `@{upstream}` forms and remote-tracking branches set up tracking by default.
+	// `@{upstream}` forms and remote-tracking branches set up tracking by
+	// default.
 	Ok(!start.contains("@{")
 		&& !start.starts_with("refs/remotes/")
 		&& !repo.ref_exists(&format!("refs/remotes/{start}"))?)
@@ -728,11 +732,21 @@ mod tests {
 		}
 	}
 
+	/// Runs `git` reading the same config sources the builtin's gix does: the
+	/// real global/system files at their default paths (gix ignores
+	/// `GIT_CONFIG_GLOBAL`/`SYSTEM`/`NOSYSTEM`, ignoring these matches it),
+	/// and never `GIT_CONFIG_PARAMETERS` (gix does not read it at all).
+	/// `GIT_CONFIG_COUNT`/`KEY_n`/`VALUE_n` are left alone: gix reads those
+	/// from the process environment, so the helper must see them too.
 	#[cfg(unix)]
 	fn git(dir: &Path, args: &[&str]) -> String {
 		let output = std::process::Command::new("git")
 			.args(args)
 			.current_dir(dir)
+			.env_remove("GIT_CONFIG_GLOBAL")
+			.env_remove("GIT_CONFIG_SYSTEM")
+			.env_remove("GIT_CONFIG_NOSYSTEM")
+			.env_remove("GIT_CONFIG_PARAMETERS")
 			.output()
 			.expect("run git");
 		assert!(output.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&output.stderr));
@@ -753,13 +767,27 @@ mod tests {
 		git(&repo, &["init", "-q", "-b", "main"]);
 		git(&repo, &["config", "user.name", "t"]);
 		git(&repo, &["config", "user.email", "t@t"]);
+		// Pin what a developer's global config would change, locally so the
+		// builtin's gix reads see it too: signing makes `git commit` and
+		// `git tag` need a key (and a tag a message), and a global
+		// `core.hooksPath` would skip the hook below. Absolute, because
+		// `hook_path` joins a relative one onto the linked worktree's root.
+		let hooks = repo.join(".git/hooks");
+		git(&repo, &["config", "commit.gpgSign", "false"]);
+		git(&repo, &["config", "tag.gpgSign", "false"]);
+		git(&repo, &["config", "core.hooksPath", &hooks.to_string_lossy()]);
+		// The builtin hands a form to git when these change worktree or branch
+		// behavior, so the parity cases below need git's defaults.
+		git(&repo, &["config", "worktree.useRelativePaths", "false"]);
+		git(&repo, &["config", "worktree.guessRemote", "false"]);
+		git(&repo, &["config", "branch.autoSetupMerge", "true"]);
 		std::fs::write(repo.join(".gitignore"), "cache/\n").expect("write gitignore");
 		std::fs::write(repo.join("tracked.txt"), "tracked\n").expect("write tracked");
 		git(&repo, &["add", "."]);
 		git(&repo, &["commit", "-q", "-m", "first commit"]);
 		std::fs::create_dir(repo.join("cache")).expect("create cache");
 		std::fs::write(repo.join("cache/blob"), "warm").expect("write cache");
-		let hook = repo.join(".git/hooks/post-checkout");
+		let hook = hooks.join("post-checkout");
 		std::fs::write(&hook, "#!/bin/sh\necho \"$* $PWD\" > ../hook.log\necho hook-out\n")
 			.expect("write hook");
 		std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).expect("chmod hook");
@@ -768,12 +796,17 @@ mod tests {
 
 	/// Runs `command` in a one-shot shell, with the builtin enabled through
 	/// `PI_SMART_GIT` when `smart`.
+	///
+	/// The shell exports the test process's environment, where any
+	/// `GIT_CONFIG*` variable would hand every `git` call to the binary and
+	/// leave the builtin untested, so the command unsets them first. Setting
+	/// the process environment instead would race the other tests' threads.
 	#[cfg(unix)]
 	async fn run_with(repo: &Path, command: &str, smart: bool) -> (Option<i32>, String) {
 		let (tx, rx) = flume::unbounded::<String>();
 		let flag = if smart { "1" } else { "0" };
 		let options = crate::ShellExecuteOptions {
-			command: command.to_owned(),
+			command: format!("unset -v \"${{!GIT_CONFIG@}}\"; {command}"),
 			cwd: Some(repo.to_string_lossy().into_owned()),
 			session_env: Some([("PI_SMART_GIT".to_owned(), flag.to_owned())].into()),
 			..Default::default()

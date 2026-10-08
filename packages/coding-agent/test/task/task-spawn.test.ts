@@ -249,13 +249,7 @@ describe("task spawn routing", () => {
 				projectAgentsDir: null,
 			});
 			const repoRoot = "/repo-root";
-			vi.spyOn(isolationRunner, "prepareIsolationContext").mockResolvedValue({
-				repoRoot,
-				baseline: {
-					root: { repoRoot, headCommit: "HEAD", staged: "", unstaged: "", untracked: [], untrackedPatch: "" },
-					nested: [],
-				},
-			});
+			vi.spyOn(isolationRunner, "prepareIsolationContext").mockResolvedValue({ repoRoot });
 			vi.spyOn(isolationRunner, "runIsolatedSubprocess").mockImplementation(async opts => ({
 				...makeResult(opts.agentId),
 				isolated: true,
@@ -391,6 +385,69 @@ describe("task spawn routing", () => {
 			expect(snapshotJobs(session, [job])[0]?.advisor).toBe(expectedAdvisor);
 		});
 	}
+
+	it("forwards the running call's arguments, key, start time and intent from detached progress", async () => {
+		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({ agents: [taskAgent], projectAgentsDir: null });
+		const gate = deferred();
+		let publishProgress: ((metadata: Partial<AgentProgress>) => void) | undefined;
+		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+			const progress: AgentProgress = {
+				...makeResult(options.id ?? "?"),
+				status: "running",
+				recentTools: [],
+				recentOutput: [],
+				toolCount: 0,
+				cost: 0,
+			};
+			options.onProgress?.(progress);
+			publishProgress = metadata => options.onProgress?.({ ...progress, ...metadata });
+			await gate.promise;
+			return makeResult(options.id ?? "?");
+		});
+		const manager = createManager();
+		const session = createSession({ manager });
+		const tool = await TaskTool.create(session);
+		const result = await tool.execute("tc-tool-preview", {
+			agent: "task",
+			name: "Preview",
+			task: "work",
+		} as TaskParams);
+		const job = manager.getJob(result.details!.async!.jobId)!;
+		try {
+			await pollUntil(() => publishProgress !== undefined);
+			publishProgress!({
+				currentTool: "grep",
+				currentToolArgs: "needle",
+				currentToolArgsKey: "pattern",
+				currentToolIntent: "Searching for the symbol",
+				currentToolStartMs: 1234,
+				lastIntent: "Searching for the symbol",
+			});
+			await pollUntil(() => getJobProgress(job)?.currentTool === "grep");
+			expect(getJobProgress(job)).toMatchObject({
+				currentToolArgs: "needle",
+				currentToolArgsKey: "pattern",
+				currentToolIntent: "Searching for the symbol",
+				currentToolStartMs: 1234,
+			});
+
+			// A following call without an intent must not keep the previous call's.
+			publishProgress!({
+				currentTool: "read",
+				currentToolArgs: "src/one.ts",
+				currentToolArgsKey: "path",
+				currentToolIntent: undefined,
+				currentToolStartMs: 5678,
+				lastIntent: "Searching for the symbol",
+			});
+			await pollUntil(() => getJobProgress(job)?.currentTool === "read");
+			expect(getJobProgress(job)?.currentToolIntent).toBeUndefined();
+			expect(getJobProgress(job)).toMatchObject({ currentToolArgsKey: "path", currentToolStartMs: 5678 });
+		} finally {
+			gate.resolve();
+			await job.promise;
+		}
+	});
 
 	it("clears stale model metadata and fallback state from detached progress", async () => {
 		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({ agents: [taskAgent], projectAgentsDir: null });

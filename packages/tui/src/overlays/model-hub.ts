@@ -23,11 +23,12 @@ import type {
 import type { KeysApi, Model } from "@oh-my-pi/pi-ai";
 import { getOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
 import { getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
+import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
 import { providerEntry } from "@oh-my-pi/pi-catalog/compat/providers";
 import { MODEL_KINDS, modelKind, type ModelKind } from "@oh-my-pi/pi-catalog/types";
 import type { Component, TUI } from "../tui";
 import { extractPrintableText, matchesKey } from "../keys";
-import { fuzzyFilter } from "../fuzzy";
+import { FuzzyCorpus } from "../fuzzy";
 import { formatKeyHint, formatKeyHints } from "../app-keybindings";
 import { boundKeys, editorKey, editorKeys } from "../chrome/keybinding-hints";
 import type { KeyName } from "../key-hint-format";
@@ -73,6 +74,8 @@ import {
 } from "./hub-frame";
 import { renderSegmentTrack } from "../chrome/segment-track";
 
+const MODEL_HUB_BODY_MIN_WIDTH = 28;
+
 /**
  * A row of the Roles view: a role, a model/wildcard chain-key header, one of a
  * chain's fallback entries, or the trailing "+ New role…". Fallback rows under
@@ -106,6 +109,11 @@ export interface ModelHubSource extends ModelBrowserSource {
 	getProjectModelRole(role: string): string | undefined;
 	getGlobalModelRole(role: string): string | undefined;
 	getModelRoleSource(role: string): "global" | "project" | "default";
+	/**
+	 * Saved model presets (in switch order) and the one the current role setup
+	 * matches, if any. Absent hosts have no presets to switch between.
+	 */
+	getModelPresets?(): { names: readonly string[]; active: string | undefined };
 }
 
 /** Catalog capabilities required by the model hub. */
@@ -152,6 +160,14 @@ export interface ModelHubCallbacks {
 	onFallbackChainChange?: (role: string, chain: string[]) => void;
 	/** Locked provider activation: forward to the /login flow. */
 	onLoginRequest?: (providerId: string) => void;
+	/** Save the current role assignments and default thinking level as a named model preset. */
+	onSavePreset?: (name: string) => void;
+	/**
+	 * Apply a saved model preset (ctrl+←/→ or p/⇧P in the Roles view) and report
+	 * the outcome itself. A switch that writes nothing (a refused preset) still
+	 * advances the hub's preset cursor, so the next press moves past it.
+	 */
+	onSwitchPreset?: (name: string) => void | Promise<void>;
 	/** Persist a new quick-switch cycle order (the ctrl+p role cycle). */
 	onCycleOrderChange?: (order: string[]) => void;
 	onCancel: () => void;
@@ -204,13 +220,25 @@ type StripState =
 			initialThinkingLevel?: ConfiguredThinkingLevel;
 	  })
 	| {
-			/** Footer text input naming a new custom role. */
-			kind: "roleName";
+			/** Footer text input naming a new role, or saving a model preset. */
+			kind: "name";
+			purpose: "role" | "preset";
 			input: Input;
 	  };
 
 /** A Roles-view command; keys and the picker's action bar both run {@link ModelHubComponent}'s `#runRolesAction`. */
-type RolesAction = "pick" | "clear" | "fallback" | "cycle" | "earlier" | "later" | "new" | "thinking";
+type RolesAction =
+	| "pick"
+	| "clear"
+	| "fallback"
+	| "cycle"
+	| "earlier"
+	| "later"
+	| "new"
+	| "thinking"
+	| "save"
+	| "nextPreset"
+	| "prevPreset";
 
 /** Printable keys of the Roles view and the command each runs. */
 const ROLES_ACTION_KEYS: Record<string, RolesAction> = {
@@ -221,6 +249,10 @@ const ROLES_ACTION_KEYS: Record<string, RolesAction> = {
 	"]": "later",
 	n: "new",
 	t: "thinking",
+	s: "save",
+	// Letter twins of ctrl+←/→, which macOS reserves for switching Spaces.
+	p: "nextPreset",
+	P: "prevPreset",
 };
 
 /** Picker fact columns of the Roles view. */
@@ -302,7 +334,15 @@ export class ModelHubComponent implements Component {
 	#roles: RoleAssignments = {};
 	#availableItems: ModelBrowserItem[] = [];
 	#recentItems: ModelBrowserItem[] = [];
+	/** Selectors of {@link #recentItems}, rebuilt with it, for search hit counts. */
+	#recentSelectors: ReadonlySet<string> = new Set();
 	#candidateItems: ModelBrowserItem[] = [];
+	/** {@link #availableItems} when the candidates are that whole catalog (All scope, no role filter). */
+	#candidateCatalog: readonly ModelBrowserItem[] | undefined;
+	/** {@link #availableItems} when the browser's base items are that whole catalog; its query ranking then covers every count. */
+	#browserCatalog: readonly ModelBrowserItem[] | undefined;
+	/** Fuzzy index over {@link #availableItems}, for match counts while the browser holds a narrower scope. */
+	#catalogCorpus: { items: readonly ModelBrowserItem[]; corpus: FuzzyCorpus<ModelBrowserItem> } | undefined;
 	#modelKindTab: "all" | ModelKind = "all";
 	#roleTab: RoleTab = "all";
 	#configError: string | undefined;
@@ -338,6 +378,12 @@ export class ModelHubComponent implements Component {
 	#assigning: AssignTarget | null = null;
 	#strip: StripState | null = null;
 	#assignmentPending = false;
+	/**
+	 * Last preset ctrl+←/→ tried in this hub, with the settings revision after the
+	 * attempt; steps from it while nothing matches the setup or nothing changed since.
+	 */
+	#presetCursor: { name: string; revision: number } | undefined;
+	#presetsMemo: { revision: number; names: readonly string[]; active: string | undefined } | undefined;
 	#disposed = false;
 	/** Per-provider fuzzy match counts while a query is active; null when not searching. */
 	#searchCounts: Map<string, number> | null = null;
@@ -371,6 +417,7 @@ export class ModelHubComponent implements Component {
 		{ min: 18, max: 26 },
 		(width, rows) => this.#renderSidebar(width, rows),
 		this.#renderBodyPane,
+		{ bodyMinWidth: MODEL_HUB_BODY_MIN_WIDTH, preserveSidebar: true },
 	);
 	#lockedLoginLine: number | null = null;
 	#rolesRowStart = 1;
@@ -479,6 +526,22 @@ export class ModelHubComponent implements Component {
 		return this.#settings.knownRoleIds.filter(role => !this.#settings.getRoleInfo(role).hidden);
 	}
 
+	/**
+	 * Models a `--models`/`enabledModels` scope exposes. The scope only resolves
+	 * chat models (it feeds Ctrl+P cycling), so available non-chat runners
+	 * (judge, search, image, …) join from the registry — runtime role
+	 * resolution ignores the scope for them as well.
+	 */
+	#scopedPool(): Model[] {
+		const pool = this.#scopedModels.map(scoped => scoped.model);
+		for (const model of this.#registry.getAvailable("all")) {
+			if (modelKind(model) === "chat") continue;
+			if (this.#scopedModels.some(scoped => modelsAreEqual(scoped.model, model))) continue;
+			pool.push(model);
+		}
+		return pool;
+	}
+
 	/** Resolve every known role: configured values first, auto-selection for the rest. */
 	#reloadRoles(autoCandidates: ReadonlyArray<Model>): void {
 		const allModels = this.#scopedModels.length > 0 ? autoCandidates : this.#registry.getAll("all");
@@ -495,9 +558,14 @@ export class ModelHubComponent implements Component {
 		let allModels: ReadonlyArray<Model>;
 		let availableModels: ReadonlyArray<Model>;
 		if (this.#scopedModels.length > 0) {
-			allModels = this.#scopedModels.map(scoped => scoped.model);
-			availableModels = allModels;
 			this.#configError = undefined;
+			try {
+				allModels = this.#scopedPool();
+			} catch (error) {
+				this.#configError = error instanceof Error ? error.message : String(error);
+				allModels = this.#scopedModels.map(scoped => scoped.model);
+			}
+			availableModels = allModels;
 		} else {
 			const loadError = this.#registry.getError();
 			this.#configError = loadError ? String(loadError) : undefined;
@@ -527,6 +595,7 @@ export class ModelHubComponent implements Component {
 			if (item) this.#recentItems.push(item);
 			if (this.#recentItems.length >= RECENT_LIMIT) break;
 		}
+		this.#recentSelectors = new Set(this.#recentItems.map(item => item.selector));
 
 		this.#buildSidebar(allModels, availableModels);
 		this.#restoreSidebarAnchor(anchor);
@@ -749,13 +818,27 @@ export class ModelHubComponent implements Component {
 		}
 	}
 
+	/**
+	 * Push the active scope's items into the browser. While assigning a role,
+	 * the role's `accepts` predicate is re-applied here so a scope hop
+	 * (provider/all/recent) can never surface a model the role rejects — role
+	 * resolution and the runtime candidate pool filter the same way, so an
+	 * unaccepted pick would persist a selector that never resolves.
+	 */
 	#setCandidateItems(items: ReadonlyArray<ModelBrowserItem>): void {
-		this.#candidateItems = [...items];
+		const assigning = this.#assigning;
+		const scoped =
+			assigning?.kind === "role"
+				? items.filter(item => this.#settings.getRoleInfo(assigning.role).accepts(item.model))
+				: items;
+		this.#candidateItems = [...scoped];
+		this.#candidateCatalog = scoped === this.#availableItems ? this.#availableItems : undefined;
 		this.#applyModelKind();
 	}
 
 	#applyModelKind(): void {
 		const kind = this.#modelKindTab;
+		this.#browserCatalog = kind === "all" ? this.#candidateCatalog : undefined;
 		this.#browser.setItems(
 			kind === "all"
 				? [...this.#candidateItems]
@@ -864,16 +947,14 @@ export class ModelHubComponent implements Component {
 			this.#composeEntries();
 			return;
 		}
-		const matches = fuzzyFilter(this.#availableItems, query, modelSearchText);
+		const matches = this.#catalogMatches(query);
 		const counts = new Map<string, number>();
+		let recentCount = 0;
 		for (const item of matches) {
 			counts.set(item.provider, (counts.get(item.provider) ?? 0) + 1);
+			if (this.#recentSelectors.has(item.selector)) recentCount++;
 		}
-		const recentSelectors = new Set(this.#recentItems.map(item => item.selector));
-		this.#recentSearchCount = matches.reduce(
-			(total, item) => total + (recentSelectors.has(item.selector) ? 1 : 0),
-			0,
-		);
+		this.#recentSearchCount = recentCount;
 		this.#searchTotal = matches.length;
 		this.#searchCounts = counts;
 		this.#composeEntries();
@@ -885,6 +966,24 @@ export class ModelHubComponent implements Component {
 		) {
 			this.#setActiveEntry("all");
 		}
+	}
+
+	/**
+	 * Catalog items matching a non-blank `query`. When the browser holds the
+	 * whole catalog its ranking for this query already ran, so reuse it;
+	 * otherwise scan a catalog index kept across keystrokes.
+	 */
+	#catalogMatches(query: string): readonly ModelBrowserItem[] {
+		if (this.#browserCatalog === this.#availableItems && this.#browser.query === query) {
+			const ranked = this.#browser.queryMatches;
+			if (ranked) return ranked;
+		}
+		let cached = this.#catalogCorpus;
+		if (cached?.items !== this.#availableItems) {
+			cached = { items: this.#availableItems, corpus: new FuzzyCorpus(this.#availableItems, modelSearchText) };
+			this.#catalogCorpus = cached;
+		}
+		return cached.corpus.rank(query).map(result => result.item);
 	}
 
 	/**
@@ -1077,8 +1176,7 @@ export class ModelHubComponent implements Component {
 	#roleForScope(role: string, scope: ModelRoleSelectionScope): ResolvedModelRoleValue {
 		const roleValue =
 			scope === "project" ? this.#settings.getProjectModelRole(role) : this.#settings.getGlobalModelRole(role);
-		const allModels =
-			this.#scopedModels.length > 0 ? this.#scopedModels.map(scoped => scoped.model) : this.#registry.getAll("all");
+		const allModels = this.#scopedModels.length > 0 ? this.#scopedPool() : this.#registry.getAll("all");
 		const roleLookup: ModelRoleLookup = {
 			getModelRole: scopedRole =>
 				scope === "project"
@@ -1429,7 +1527,7 @@ export class ModelHubComponent implements Component {
 
 	#activateStripChip(): void {
 		const strip = this.#strip;
-		if (!strip || strip.kind === "roleName") return;
+		if (!strip || strip.kind === "name") return;
 		const chip = strip.chips[strip.index];
 		if (!chip) return;
 		switch (chip.action) {
@@ -1496,14 +1594,15 @@ export class ModelHubComponent implements Component {
 		}
 	}
 
-	/** Switch the body into assign mode for `role`: full catalog, cleared query, current model preselected. */
+	/**
+	 * Switch the body into assign mode for `role`: full catalog, cleared query, current model preselected.
+	 * Arrows land on the model rows (the next step of the flow); ← still reaches the provider scopes.
+	 */
 	#startAssign(role: string): void {
 		this.#assigning = { kind: "role", role };
-		this.#focus = "scope";
+		this.#focus = "list";
 		this.#browser.setShowProvider(true);
-		this.#setCandidateItems(
-			this.#availableItems.filter(item => this.#settings.getRoleInfo(role).accepts(item.model)),
-		);
+		this.#setCandidateItems(this.#availableItems);
 		this.#browser.setQuery("");
 		const current = this.#roles[role];
 		if (current) {
@@ -1514,7 +1613,7 @@ export class ModelHubComponent implements Component {
 	/** Browse the catalog to fill a fallback-chain slot: `index` replaces an entry, `null` appends. */
 	#startAssignFallback(role: string, index: number | null): void {
 		this.#assigning = { kind: "fallback", role, index };
-		this.#focus = "scope";
+		this.#focus = "list";
 		this.#browser.setShowProvider(true);
 		this.#setCandidateItems(this.#availableItems);
 		this.#browser.setQuery("");
@@ -1532,7 +1631,7 @@ export class ModelHubComponent implements Component {
 	/** Browse the catalog for the primary model a brand-new fallback chain protects. */
 	#startAssignFallbackKey(): void {
 		this.#assigning = { kind: "fallbackKey" };
-		this.#focus = "scope";
+		this.#focus = "list";
 		this.#browser.setShowProvider(true);
 		this.#setCandidateItems(this.#availableItems);
 		this.#browser.setQuery("");
@@ -1654,21 +1753,44 @@ export class ModelHubComponent implements Component {
 		this.#refreshAfterMutation();
 	}
 
-	/** Open the footer name input that creates a new custom role. */
-	#openRoleNameStrip(): void {
-		this.#strip = { kind: "roleName", input: new Input() };
+	/** Open the footer name input: a new custom role, or saving the current setup as a model preset. */
+	#openNameStrip(purpose: "role" | "preset"): void {
+		this.#strip = { kind: "name", purpose, input: new Input() };
+	}
+
+	/** Validate and commit the name strip: a new role jumps into assigning it, a preset name saves it. */
+	#submitNameStrip(): void {
+		const strip = this.#strip;
+		if (strip?.kind !== "name") return;
+		if (strip.purpose === "preset") {
+			this.#submitPresetName();
+			return;
+		}
+		this.#submitRoleName();
 	}
 
 	/** Validate and commit the new-role name: jump straight into assigning it. */
 	#submitRoleName(): void {
 		const strip = this.#strip;
-		if (strip?.kind !== "roleName") return;
+		if (strip?.kind !== "name" || strip.purpose !== "role") return;
 		const name = strip.input.getValue().trim();
 		if (!/^[a-zA-Z][\w-]*$/.test(name)) return;
 		if (this.#visibleRoleIds().includes(name)) return;
 		this.#strip = null;
 		this.#frame.chipRanges = [];
 		this.#startAssign(name);
+	}
+
+	/** Validate and commit the preset name: save the current setup under it (overwrites). */
+	#submitPresetName(): void {
+		const strip = this.#strip;
+		if (strip?.kind !== "name" || strip.purpose !== "preset") return;
+		const name = strip.input.getValue().trim();
+		if (!/^[a-zA-Z][\w-]*$/.test(name)) return;
+		this.#strip = null;
+		this.#frame.chipRanges = [];
+		this.#callbacks.onSavePreset?.(name);
+		this.#refreshAfterMutation();
 	}
 
 	// ═══════════════════════════════════════════════════════════════════════
@@ -1689,6 +1811,52 @@ export class ModelHubComponent implements Component {
 		this.#roleIndex = 0;
 		this.#roleScrollStart = 0;
 		this.#buildRolesRows();
+	}
+
+	/** Saved presets and the one the setup matches; empty unless the host can both list and switch. */
+	#presets(): { names: readonly string[]; active: string | undefined } {
+		if (!this.#callbacks.onSwitchPreset || !this.#settings.getModelPresets) return { names: [], active: undefined };
+		const revision = this.#settings.revision;
+		if (this.#presetsMemo?.revision !== revision) {
+			const { names, active } = this.#settings.getModelPresets();
+			this.#presetsMemo = { revision, names, active };
+		}
+		return this.#presetsMemo;
+	}
+
+	/**
+	 * The preset ctrl+←/→ steps from: the last one tried here while settings are
+	 * unchanged since (a refused switch writes nothing, so the next press moves
+	 * past it) or nothing matches; otherwise the preset the setup matches.
+	 */
+	#presetBase(active: string | undefined): string | undefined {
+		const cursor = this.#presetCursor;
+		if (cursor && (active === undefined || cursor.revision === this.#settings.revision)) return cursor.name;
+		return active;
+	}
+
+	/** Apply the previous/next saved preset (wrapping), as `/modelpreset switch` does. */
+	#switchPreset(delta: -1 | 1): void {
+		const onSwitchPreset = this.#callbacks.onSwitchPreset;
+		const { names, active } = this.#presets();
+		if (!onSwitchPreset || names.length === 0) return;
+		const base = this.#presetBase(active);
+		const current = base === undefined ? -1 : names.indexOf(base);
+		const next = current < 0 ? (delta > 0 ? 0 : names.length - 1) : (current + delta + names.length) % names.length;
+		const name = names[next];
+		if (name === undefined) return;
+		const settle = () => {
+			this.#presetCursor = { name, revision: this.#settings.revision };
+			this.#refreshAfterMutation();
+		};
+		// Stepping onto the preset already in effect has nothing to apply.
+		if (name === active) {
+			settle();
+			return;
+		}
+		// The host reports refusals itself, so the cursor moves once the switch
+		// resolves, refused or not (`#presetBase` sees a refusal left the revision alone).
+		this.#finishAssignment(onSwitchPreset(name), settle);
 	}
 
 	handleInput(data: string): void {
@@ -1724,6 +1892,11 @@ export class ModelHubComponent implements Component {
 			if (entry.kind === "provider" && !entry.locked) {
 				this.#scheduleProviderRefresh(entry.providerId ?? "", { force: true });
 			}
+			return;
+		}
+		// Ctrl+←/→ in the Roles view steps through saved model presets, wrapping.
+		if (rolesView && (matchesKey(data, "ctrl+left") || matchesKey(data, "ctrl+right"))) {
+			this.#switchPreset(matchesKey(data, "ctrl+left") ? -1 : 1);
 			return;
 		}
 		// Alt+←/→ cycles whichever tab strip is on screen: role tabs in the
@@ -1841,9 +2014,9 @@ export class ModelHubComponent implements Component {
 			this.#closeStrip();
 			return;
 		}
-		if (strip.kind === "roleName") {
+		if (strip.kind === "name") {
 			if (matchesKey(data, "enter") || matchesKey(data, "return") || data === "\n") {
-				this.#submitRoleName();
+				this.#submitNameStrip();
 				return;
 			}
 			strip.input.handleInput(data);
@@ -1895,7 +2068,7 @@ export class ModelHubComponent implements Component {
 				this.#startAssignFallbackKey();
 				return;
 			case "newRole":
-				this.#openRoleNameStrip();
+				this.#openNameStrip("role");
 				return;
 			case "separator":
 				return;
@@ -2001,7 +2174,14 @@ export class ModelHubComponent implements Component {
 				return;
 			}
 			case "new":
-				this.#openRoleNameStrip();
+				this.#openNameStrip("role");
+				return;
+			case "save":
+				if (this.#callbacks.onSavePreset) this.#openNameStrip("preset");
+				return;
+			case "nextPreset":
+			case "prevPreset":
+				this.#switchPreset(action === "nextPreset" ? 1 : -1);
 				return;
 			case "thinking":
 				if (role) {
@@ -2036,7 +2216,7 @@ export class ModelHubComponent implements Component {
 		// Footer strip chips (columns stay in frame coordinates).
 		if (footerColumn !== undefined && this.#strip) {
 			const strip = this.#strip;
-			if (event.leftClick && strip.kind !== "roleName" && this.#frame.selectChipAt(strip, footerColumn)) {
+			if (event.leftClick && strip.kind !== "name" && this.#frame.selectChipAt(strip, footerColumn)) {
 				this.#activateStripChip();
 			}
 			return true;
@@ -2201,8 +2381,13 @@ export class ModelHubComponent implements Component {
 			ROLE_TABS.map(tab => ({ label: tab === "kind" ? "kinds" : tab })),
 			Math.max(0, active),
 		);
+		const { names, active: activePreset } = this.#presets();
+		const preset =
+			names.length > 0
+				? `   ${theme.fg("dim", "Preset:")} ${activePreset ? theme.fg("accent", activePreset) : theme.fg("muted", "custom")}  ${theme.fg("dim", `${formatKeyHints(["ctrl+left", "ctrl+right"])} · ${formatKeyHints(["p", "shift+p"])}`)}`
+				: "";
 		return truncateToWidth(
-			` ${theme.fg("dim", "Roles:")} ${track}  ${theme.fg("dim", formatKeyHints(["alt+left", "alt+right"]))}`,
+			` ${theme.fg("dim", "Roles:")} ${track}  ${theme.fg("dim", formatKeyHints(["alt+left", "alt+right"]))}${preset}`,
 			width,
 		);
 	}
@@ -2472,7 +2657,10 @@ export class ModelHubComponent implements Component {
 		const altLeftRight = formatKeyHints(["alt+left", "alt+right"]);
 		const strip = this.#strip;
 		if (strip) {
-			if (strip.kind === "roleName") {
+			if (strip.kind === "name") {
+				if (strip.purpose === "preset") {
+					return `${enter} save preset · ${cancel} cancel`;
+				}
 				return `${enter} create + pick model · ${cancel} cancel`;
 			}
 			if (strip.kind === "role") return `${leftRight} choose · ${enter} assign/clear · ${cancel} cancel`;
@@ -2496,7 +2684,9 @@ export class ModelHubComponent implements Component {
 		const entry = this.#activeEntry();
 		if (entry.kind === "roles") {
 			if (this.#focus !== "list") {
-				return `${upDown} providers · ${enterRight} roles · ${altLeftRight} tabs · ${cancel} close`;
+				const presets =
+					this.#presets().names.length > 0 ? ` · ${formatKeyHints(["ctrl+left", "ctrl+right"])} preset` : "";
+				return `${upDown} providers · ${enterRight} roles · ${altLeftRight} tabs${presets} · ${cancel} close`;
 			}
 			const row = this.#rolesRows[this.#roleIndex];
 			if (row?.kind === "fallback") {
@@ -2517,7 +2707,9 @@ export class ModelHubComponent implements Component {
 			// open — an assigned role whose model has thinking levels to offer.
 			const editable = row?.kind === "role" && this.#roleThinkingTarget(row.role) !== undefined;
 			const thinking = editable ? ` · ${formatKeyHint("t")} thinking` : "";
-			return `${upDown} rows · ${enter} pick · ${formatKeyHint("f")} fallback · ${formatKeyHint("x")} clear${thinking} · ${formatKeyHint("c")} cycle · [/] reorder · ${formatKeyHint("n")} new`;
+			const savePreset = this.#callbacks.onSavePreset ? ` · ${formatKeyHint("s")} save preset` : "";
+			const switchPreset = this.#presets().names.length > 0 ? ` · ${formatKeyHints(["p", "shift+p"])} preset` : "";
+			return `${upDown} rows · ${enter} pick · ${formatKeyHint("f")} fallback · ${formatKeyHint("x")} clear${thinking} · ${formatKeyHint("c")} cycle · [/] reorder · ${formatKeyHint("n")} new${savePreset}${switchPreset}`;
 		}
 		if (entry.kind === "provider" && entry.locked) {
 			return entry.oauth
@@ -2541,9 +2733,11 @@ export class ModelHubComponent implements Component {
 	}
 
 	#renderStrip(width: number, strip: StripState): string {
-		if (strip.kind === "roleName") {
-			const label = theme.fg("accent", "New role name:");
-			const inputWidth = Math.max(8, Math.min(32, width - visibleWidth("New role name:") - 24));
+		if (strip.kind === "name") {
+			const preset = strip.purpose === "preset";
+			const labelText = preset ? "Preset name:" : "New role name:";
+			const label = theme.fg("accent", labelText);
+			const inputWidth = Math.max(8, Math.min(32, width - visibleWidth(labelText) - 24));
 			const inputLine = strip.input.render(inputWidth)[0] ?? "";
 			return truncateToWidth(`${label} ${inputLine} ${theme.fg("dim", "(letters, digits, - and _)")}`, width);
 		}
@@ -2668,7 +2862,7 @@ export class ModelHubComponent implements Component {
 					// A chip click picks and applies it, like the footer mouse path.
 					const strip = this.#strip;
 					const index = Number(event.item);
-					if (!strip || strip.kind === "roleName" || !Number.isInteger(index) || !strip.chips[index]) return;
+					if (!strip || strip.kind === "name" || !Number.isInteger(index) || !strip.chips[index]) return;
 					strip.index = index;
 					this.#activateStripChip();
 					break;
@@ -3073,6 +3267,17 @@ export class ModelHubComponent implements Component {
 		if (entry.kind === "provider" && entry.providerId && this.#refreshingProviders.has(entry.providerId)) {
 			return `${entry.label} · refreshing model list…`;
 		}
+		const presets = rolesView ? this.#presets() : undefined;
+		if (presets && presets.names.length > 0) {
+			return [
+				span("Preset ", "muted"),
+				presets.active ? span(presets.active, "strong") : span("custom", "muted"),
+				span(
+					this.#scopedModels.length > 0 ? " · --models scope" : " · Cleared roles fall back to auto-selection",
+					"muted",
+				),
+			];
+		}
 		if (this.#scopedModels.length > 0) return "--models scope";
 		if (rolesView) return "Cleared roles fall back to auto-selection";
 		return undefined;
@@ -3184,8 +3389,13 @@ export class ModelHubComponent implements Component {
 		if (this.#assignmentPending) return [CLOSE_ACTION];
 		if (strip) {
 			const apply =
-				strip.kind === "roleName"
-					? pickerAction("roleName", "Create role", "enter", { primary: true })
+				strip.kind === "name"
+					? pickerAction(
+							strip.purpose === "preset" ? "presetName" : "roleName",
+							strip.purpose === "preset" ? "Save preset" : "Create role",
+							"enter",
+							{ primary: true },
+						)
 					: pickerAction(
 							"stripApply",
 							strip.kind === "thinking" ? "Apply" : strip.kind === "scope" ? "Save to scope" : "Assign / clear",
@@ -3220,6 +3430,8 @@ export class ModelHubComponent implements Component {
 						this.#roleThinkingTarget(row.role) ? roleAction("thinking", "Thinking", "t") : undefined,
 						roleAction("cycle", this.#cycleOrder().includes(row.role) ? "Leave cycle" : "Add to cycle", "c"),
 						roleAction("new", "New role", "n"),
+						this.#callbacks.onSavePreset ? roleAction("save", "Save preset", "s") : undefined,
+						this.#presets().names.length > 0 ? roleAction("nextPreset", "Next preset", "p") : undefined,
 					);
 					break;
 				}
@@ -3266,9 +3478,13 @@ export class ModelHubComponent implements Component {
 
 	/** The open strip as the picker's chip strip (role assignment, save scope, thinking level, new role name). */
 	#pickerStrip(strip: StripState): NonNullable<TspPickerProps["strip"]> {
-		if (strip.kind === "roleName") {
+		if (strip.kind === "name") {
 			return {
-				label: [span("New role name ", "muted"), span(strip.input.getValue(), "mono"), span("▏", "accent")],
+				label: [
+					span(strip.purpose === "preset" ? "Preset name " : "New role name ", "muted"),
+					span(strip.input.getValue(), "mono"),
+					span("▏", "accent"),
+				],
 				items: [],
 			};
 		}
@@ -3562,7 +3778,7 @@ export class ModelHubComponent implements Component {
 			case "strip": {
 				const strip = this.#strip;
 				const index = Number(value);
-				if (!strip || strip.kind === "roleName" || !Number.isInteger(index) || !strip.chips[index]) return;
+				if (!strip || strip.kind === "name" || !Number.isInteger(index) || !strip.chips[index]) return;
 				strip.index = index;
 				this.#activateStripChip();
 				return;
@@ -3572,6 +3788,9 @@ export class ModelHubComponent implements Component {
 				return;
 			case "roleName":
 				this.#submitRoleName();
+				return;
+			case "presetName":
+				this.#submitPresetName();
 				return;
 			case "cancel":
 				if (this.#strip) this.#closeStrip();
@@ -3622,16 +3841,17 @@ export class ModelHubComponent implements Component {
 	#describeStrip(): NativeNode | undefined {
 		const strip = this.#strip;
 		if (!strip) return undefined;
-		if (strip.kind === "roleName") {
+		if (strip.kind === "name") {
+			const preset = strip.purpose === "preset";
 			return node(
 				"row",
 				{ gap: "sm", align: "center" },
 				[
-					text([span("New role name:", "accent")]),
+					text([span(preset ? "Preset name:" : "New role name:", "accent")]),
 					col([strip.input], { grow: 1 }),
 					text([span("(letters, digits, - and _)", "dim")]),
 				],
-				"roleName",
+				preset ? "presetName" : "roleName",
 			);
 		}
 		let prefix: TspSpan[];
@@ -3674,8 +3894,10 @@ export class ModelHubComponent implements Component {
 		const strip = this.#strip;
 		if (strip) {
 			switch (strip.kind) {
-				case "roleName":
-					return [keys("create + pick model", "enter"), cancel("cancel")];
+				case "name":
+					return strip.purpose === "preset"
+						? [keys("save preset", "enter"), cancel("cancel")]
+						: [keys("create + pick model", "enter"), cancel("cancel")];
 				case "role":
 					return [keys("choose", "left", "right"), keys("assign/clear", "enter"), cancel("cancel")];
 				case "scope":
@@ -3696,6 +3918,7 @@ export class ModelHubComponent implements Component {
 						: "assign";
 			return [keys(pick, "enter"), upDown("models"), keys("providers", "left"), search, kind, cancel("cancel")];
 		}
+		const presetHint = this.#presets().names.length > 0 ? keys("preset", "ctrl+left", "ctrl+right") : undefined;
 		const entry = this.#activeEntry();
 		if (entry.kind === "roles") {
 			if (this.#focus !== "list") {
@@ -3703,6 +3926,7 @@ export class ModelHubComponent implements Component {
 					upDown("providers"),
 					keys("roles", "enter", "right"),
 					keys("tabs", "alt+left", "alt+right"),
+					presetHint,
 					cancel("close"),
 				];
 			}
@@ -3741,6 +3965,8 @@ export class ModelHubComponent implements Component {
 				keys("cycle", "c"),
 				reorder,
 				keys("new", "n"),
+				this.#callbacks.onSavePreset ? keys("save preset", "s") : undefined,
+				this.#presets().names.length > 0 ? keys("preset", "ctrl+left", "ctrl+right", "p", "shift+p") : undefined,
 			];
 		}
 		if (entry.kind === "provider" && entry.locked) {

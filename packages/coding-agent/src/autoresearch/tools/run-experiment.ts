@@ -4,7 +4,8 @@ import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
 
-import { formatBytes } from "@oh-my-pi/pi-utils";
+import { formatBytes, procmgr } from "@oh-my-pi/pi-utils";
+import { Settings } from "../../config/settings";
 import { executeBash } from "../../exec/bash-executor";
 import type { ToolDefinition } from "../../extensibility/extensions";
 
@@ -12,6 +13,7 @@ import {
 	DEFAULT_MAX_BYTES,
 	DEFAULT_MAX_LINES,
 	TailBuffer,
+	type TruncationResult,
 	truncateTail,
 } from "@oh-my-pi/pi-tui/tools/streaming-output";
 
@@ -19,8 +21,7 @@ import { parseWorkDirDirtyPaths } from "../git";
 import {
 	EXPERIMENT_MAX_BYTES,
 	EXPERIMENT_MAX_LINES,
-	parseAsiLines,
-	parseMetricLines,
+	ExperimentOutputScanner,
 	tryGitPrefix,
 	tryGitStatus,
 } from "../helpers";
@@ -29,8 +30,8 @@ import { formatElapsed } from "@oh-my-pi/pi-tui/apps/autoresearch-data";
 import { buildExperimentState } from "../state";
 import { openAutoresearchStorageIfExists } from "../storage";
 import type { AutoresearchToolFactoryOptions } from "../types";
-import type { RunDetails, RunExperimentProgressDetails } from "@oh-my-pi/pi-tui/tools/autoresearch";
-import { DEFAULT_HARNESS_COMMAND } from "@oh-my-pi/pi-tui/tools/autoresearch";
+import type { ASIData, RunDetails, RunExperimentProgressDetails } from "@oh-my-pi/pi-tui/tools/autoresearch";
+import { DEFAULT_HARNESS_COMMAND, HARNESS_FILENAME } from "@oh-my-pi/pi-tui/tools/autoresearch";
 
 const runExperimentSchema = type({
 	"timeout_seconds?": type("number").describe("timeout in seconds (default 600)"),
@@ -40,7 +41,12 @@ interface ProcessExecutionResult {
 	exitCode: number | null;
 	killed: boolean;
 	logPath: string;
-	output: string;
+	/** Tail truncation for the LLM preview ({@link EXPERIMENT_MAX_BYTES}/{@link EXPERIMENT_MAX_LINES}). */
+	llmTruncation: TruncationResult;
+	/** Tail truncation for the rendered output (default budgets). */
+	displayTruncation: TruncationResult;
+	metrics: Map<string, number>;
+	asi: ASIData | null;
 }
 
 interface ProgressSnapshot {
@@ -124,7 +130,7 @@ export function createRunExperimentTool(
 			let execution: ProcessExecutionResult;
 			try {
 				execution = await executeProcess({
-					command: resolvedCommand,
+					command: await resolveHarnessExecLine(),
 					cwd: ctx.cwd,
 					logPath: benchmarkLogPath,
 					timeoutMs,
@@ -153,19 +159,11 @@ export function createRunExperimentTool(
 			const durationSeconds = durationMs / 1000;
 			runtime.lastRunDuration = durationSeconds;
 
-			const llmTruncation = truncateTail(execution.output, {
-				maxBytes: EXPERIMENT_MAX_BYTES,
-				maxLines: EXPERIMENT_MAX_LINES,
-			});
-			const displayTruncation = truncateTail(execution.output, {
-				maxBytes: DEFAULT_MAX_BYTES,
-				maxLines: DEFAULT_MAX_LINES,
-			});
-
-			const parsedMetricsMap = parseMetricLines(execution.output);
+			const { llmTruncation, displayTruncation } = execution;
+			const parsedMetricsMap = execution.metrics;
 			const parsedMetrics = parsedMetricsMap.size > 0 ? Object.fromEntries(parsedMetricsMap.entries()) : null;
 			const parsedPrimary = parsedMetricsMap.get(session.primaryMetric) ?? null;
-			const parsedAsi = parseAsiLines(execution.output);
+			const parsedAsi = execution.asi;
 			runtime.lastRunAsi = parsedAsi;
 
 			storage.markRunCompleted({
@@ -244,6 +242,22 @@ export function createRunExperimentTool(
 		},
 	};
 }
+
+/**
+ * Shell line that actually runs the harness; the recorded command stays
+ * {@link DEFAULT_HARNESS_COMMAND}. On Windows a bare `bash` resolves through
+ * PATH to the WSL launcher (`WindowsApps\bash.exe` / `System32\bash.exe`),
+ * which runs the harness inside a Linux VM with a different toolchain and env,
+ * or fails outright when WSL is unavailable. Use the resolved host shell (Git
+ * Bash, or the configured `shellPath`) when it is POSIX.
+ */
+async function resolveHarnessExecLine(): Promise<string> {
+	if (process.platform !== "win32") return DEFAULT_HARNESS_COMMAND;
+	const { shell } = (await Settings.init()).getShellConfig();
+	if (!procmgr.isPosixShell(shell)) return DEFAULT_HARNESS_COMMAND;
+	return `'${shell.replaceAll("'", "'\\''")}' ${HARNESS_FILENAME}`;
+}
+
 async function executeProcess(opts: {
 	command: string;
 	cwd: string;
@@ -252,7 +266,11 @@ async function executeProcess(opts: {
 	signal?: AbortSignal;
 	onProgress?(details: ProgressSnapshot): void;
 }): Promise<ProcessExecutionResult> {
+	// Holds 2× the largest truncation budget, so tail truncations of it equal those of the full log.
 	const tailBuffer = new TailBuffer(DEFAULT_MAX_BYTES * 2);
+	const scanner = new ExperimentOutputScanner();
+	let totalBytes = 0;
+	let newlineCount = 0;
 
 	const startedAt = Date.now();
 	const snapshot = (): ProgressSnapshot => {
@@ -292,6 +310,11 @@ async function executeProcess(opts: {
 			onChunk: chunk => {
 				tailBuffer.append(chunk);
 				logSink.write(chunk);
+				scanner.append(chunk);
+				totalBytes += Buffer.byteLength(chunk, "utf-8");
+				for (let index = chunk.indexOf("\n"); index !== -1; index = chunk.indexOf("\n", index + 1)) {
+					newlineCount += 1;
+				}
 			},
 		});
 		await closeLogSink();
@@ -299,13 +322,23 @@ async function executeProcess(opts: {
 			throw new Error("aborted");
 		}
 
-		const output = await fs.promises.readFile(opts.logPath, "utf8");
-
+		const tail = tailBuffer.text();
+		const totals = { totalLines: newlineCount + 1, totalBytes };
+		const { metrics, asi } = scanner.finish();
 		return {
 			exitCode: result.exitCode ?? null,
 			killed: result.cancelled,
 			logPath: opts.logPath,
-			output,
+			llmTruncation: {
+				...truncateTail(tail, { maxBytes: EXPERIMENT_MAX_BYTES, maxLines: EXPERIMENT_MAX_LINES }),
+				...totals,
+			},
+			displayTruncation: {
+				...truncateTail(tail, { maxBytes: DEFAULT_MAX_BYTES, maxLines: DEFAULT_MAX_LINES }),
+				...totals,
+			},
+			metrics,
+			asi,
 		};
 	} finally {
 		if (progressTimer) clearInterval(progressTimer);

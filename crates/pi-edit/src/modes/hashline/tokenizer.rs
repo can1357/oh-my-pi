@@ -103,16 +103,20 @@ impl Tokenizer {
 			return Ok(Vec::new());
 		}
 		self.buffer.push_str(chunk);
+		// Classify complete rows in place, then drop them with one drain:
+		// draining per row shifted the rest of the buffer each time, quadratic
+		// in the rows of a large chunk.
 		let mut tokens = Vec::new();
-		while let Some(index) = self.buffer.find('\n') {
-			let mut line = self.buffer[..index].to_string();
-			if line.ends_with('\r') {
-				line.pop();
-			}
-			self.buffer.drain(..=index);
-			tokens.push(classify_line(&line, self.next_line_num));
+		let mut start = 0;
+		while let Some(offset) = self.buffer[start..].find('\n') {
+			let end = start + offset;
+			let line = &self.buffer[start..end];
+			let line = line.strip_suffix('\r').unwrap_or(line);
+			tokens.push(classify_line(line, self.next_line_num));
 			self.next_line_num = self.next_line_num.saturating_add(1);
+			start = end + 1;
 		}
+		self.buffer.drain(..start);
 		Ok(tokens)
 	}
 

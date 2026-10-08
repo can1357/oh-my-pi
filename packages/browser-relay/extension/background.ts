@@ -66,6 +66,7 @@ import {
 	invalidatesHelloReconciliation,
 	shouldSuppressHelloSnapshot,
 } from "./hello-refresh";
+import { ownedDebuggerTabs } from "./debugger-ownership";
 
 const DEFAULT_PORT = 9224;
 const PING_INTERVAL_MS = 20_000;
@@ -696,6 +697,7 @@ function snapshot(tab: ChromeTab): TabSnapshot | null {
 		url: tab.url ?? tab.pendingUrl ?? "",
 		title: tab.title ?? "",
 		active: tab.active,
+		discarded: tab.discarded === true,
 		windowId: tab.windowId,
 		pinned: tab.pinned,
 		groupId: tab.groupId,
@@ -1083,7 +1085,15 @@ async function buildHello(): Promise<
 	// debuggers too. Only persisted extension-owned ids are safe to advertise as
 	// relay attachments; promoting every attached target would resurrect a user
 	// takeover that onDetach deliberately removed from recovery state.
-	const attachedTabIds = extensionOwnedAttachedTabIds(targets, liveOwnedTabIds);
+	// Probe ownership as well so a service-worker restart can recover an attachment
+	// whose in-memory live marker was lost without claiming DevTools-owned tabs.
+	const probedOwnedTabIds = await ownedDebuggerTabs(targets, tabId =>
+		chrome.debugger.sendCommand({ tabId }, "Target.getTargetInfo"),
+	);
+	const attachedTabIds = extensionOwnedAttachedTabIds(
+		targets,
+		new Set([...liveOwnedTabIds, ...probedOwnedTabIds]),
+	);
 	await flushRecoverableUpdates();
 	const versionMatch = /Chrome\/[\d.]+/.exec(navigator.userAgent);
 	const hardwareConcurrency =
@@ -1097,6 +1107,7 @@ async function buildHello(): Promise<
 		userAgent: navigator.userAgent,
 		browserVersion: versionMatch?.[0] ?? "Chrome/unknown",
 		hardwareConcurrency,
+		discardedTabsProtocol: 1, // Keep in sync with the relay protocol version.
 		tabs: snapshots,
 		attachedTabIds,
 		recoverableTabIds: [...recoverableTabIds],
@@ -1647,6 +1658,18 @@ chrome.tabs.onUpdated.addListener((_tabId, changeInfo, tab) => {
 		else invalidateHelloMeta();
 		post({ t: "tabUpdated", tab: snap });
 	}
+});
+
+chrome.tabs.onActivated.addListener(({ tabId }) => {
+	void chrome.tabs
+		.get(tabId)
+		.then(tab => {
+			const snap = snapshot(tab);
+			if (snap) post({ t: "tabUpdated", tab: snap });
+		})
+		.catch(() => {
+			// The tab may have closed before Chrome answered.
+		});
 });
 
 chrome.tabs.onRemoved.addListener((tabId) => {

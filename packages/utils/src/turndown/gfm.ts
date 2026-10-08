@@ -1,17 +1,25 @@
 import type { TurndownNode, TurndownPlugin, TurndownServiceLike } from "./types";
 
-function descendantElements(node: TurndownNode, name: string): TurndownNode[] {
+/** Elements named `name` below `node` in document order, not descending into nested tables. */
+function descendantElements(node: TurndownNode, name: string, limit = Number.POSITIVE_INFINITY): TurndownNode[] {
 	const matches: TurndownNode[] = [];
-	for (const child of Array.from(node.children)) {
+	const stack: TurndownNode[] = [];
+	const pushChildren = (parent: TurndownNode): void => {
+		const children = parent.children;
+		for (let index = children.length - 1; index >= 0; index--) stack.push(children[index]!);
+	};
+	pushChildren(node);
+	while (stack.length > 0 && matches.length < limit) {
+		const child = stack.pop()!;
 		if (child.nodeName === name) matches.push(child);
-		if (child.nodeName !== "TABLE") matches.push(...descendantElements(child, name));
+		if (child.nodeName !== "TABLE") pushChildren(child);
 	}
 	return matches;
 }
 
 function isHeadingTable(node: TurndownNode): boolean {
 	if (node.nodeName !== "TABLE") return false;
-	const firstRow = descendantElements(node, "TR")[0];
+	const firstRow = descendantElements(node, "TR", 1)[0];
 	if (!firstRow) return false;
 	const cells = Array.from(firstRow.children);
 	return cells.length > 0 && cells.every(cell => cell.nodeName === "TH");
@@ -50,12 +58,13 @@ function renderTable(service: TurndownServiceLike, table: TurndownNode): string 
 /** Install GitHub fenced code blocks selected by `highlight-source-*` wrappers. */
 export const highlightedCodeBlock: TurndownPlugin = service => {
 	service.addRule("highlightedCodeBlock", {
+		skipContent: true,
 		filter(node) {
 			return node.nodeName === "DIV" && /(?:^|\s)highlight-source-([^\s]+)/.test(node.getAttribute("class") ?? "");
 		},
 		replacement(_content, node, options) {
 			const language = /(?:^|\s)highlight-source-([^\s]+)/.exec(node.getAttribute("class") ?? "")?.[1] ?? "";
-			const text = descendantElements(node, "PRE")[0]?.textContent ?? "";
+			const text = descendantElements(node, "PRE", 1)[0]?.textContent ?? "";
 			return `\n\n${options.fence}${language}\n${text}\n${options.fence}\n\n`;
 		},
 	});
@@ -74,6 +83,7 @@ export const strikethrough: TurndownPlugin = service => {
 /** Install GFM task-list checkbox conversion. */
 export const taskListItems: TurndownPlugin = service => {
 	service.addRule("taskListItems", {
+		skipContent: true,
 		filter(node) {
 			return (
 				node.nodeName === "INPUT" &&
@@ -90,6 +100,7 @@ export const taskListItems: TurndownPlugin = service => {
 /** Install GFM table conversion for tables with a heading row. */
 export const tables: TurndownPlugin = service => {
 	service.addRule("table", {
+		skipContent: true,
 		filter: isHeadingTable,
 		replacement(_content, node) {
 			return renderTable(service, node);
