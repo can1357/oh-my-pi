@@ -155,10 +155,13 @@ if [ "$NO_SYNC" -eq 0 ]; then
 		step "upstream remote: $UPSTREAM_REMOTE ($(git remote get-url "$UPSTREAM_REMOTE"))"
 	else
 		step "add $UPSTREAM_REMOTE remote ($UPSTREAM_URL)"
-		git remote add "$UPSTREAM_REMOTE" "$UPSTREAM_URL"
+		git remote add -t "$UPSTREAM_BRANCH" "$UPSTREAM_REMOTE" "$UPSTREAM_URL"
 	fi
-	step "fetch $UPSTREAM_REMOTE"
-	git fetch "$UPSTREAM_REMOTE"
+	# Pin the upstream remote to UPSTREAM_BRANCH only: rewrite any stale
+	# wildcard fetch refspec so no other upstream branch is ever pulled.
+	git config "remote.$UPSTREAM_REMOTE.fetch" "+refs/heads/$UPSTREAM_BRANCH:refs/remotes/$UPSTREAM_REMOTE/$UPSTREAM_BRANCH"
+	step "fetch $UPSTREAM_REMOTE/$UPSTREAM_BRANCH (main only)"
+	git fetch "$UPSTREAM_REMOTE" "$UPSTREAM_BRANCH"
 fi
 
 step "fetch origin"
