@@ -318,13 +318,16 @@ describe("broker discovery and session generations", () => {
 		}));
 	test("hung-discovery-does-not-block-real-message", () =>
 		withBroker(async f => {
-			const registry = AgentRegistry.global();
+			const registry = new AgentRegistry();
 			registry.register({ id: f.owner, displayName: "isolated waiter", kind: "sub", session: null });
 			f.session.agentRegistry = registry;
 			const gate = holdResponse(f.client, "list");
 			const controller = new AbortController();
 			const installed = Promise.withResolvers<void>();
-			const bus = IrcBus.global();
+			// A global bus retains its construction-time registry; other test
+			// fixtures can replace that registry without replacing the bus.
+			const bus = new IrcBus(registry);
+			vi.spyOn(IrcBus, "global").mockReturnValue(bus);
 			const original = bus.wait.bind(bus);
 			vi.spyOn(bus, "wait").mockImplementation((agentId, filter, timeoutMs, signal) => {
 				const result = original(agentId, filter, timeoutMs, signal);
@@ -336,10 +339,11 @@ describe("broker discovery and session generations", () => {
 				await gate.received;
 				const driven = (async () => {
 					await installed.promise;
-					await bus.send(
+					const receipt = await bus.send(
 						{ from: "isolated-peer", to: f.owner, body: "directly consumed" },
 						{ suppressRelay: true },
 					);
+					expect(receipt).toMatchObject({ to: f.owner, outcome: "injected" });
 					return waiting;
 				})();
 				const result = await beforeRelease(gate.release, driven);
