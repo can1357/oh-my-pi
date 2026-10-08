@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- A subagent whose selector lists several models keeps those backups ahead of the resolved primary's configured fallback chain when the child retries ([#14934](https://github.com/can1357/oh-my-pi/pull/14934) by [@ff-zeno](https://github.com/ff-zeno))
+
 ## [18.8.4] - 2026-10-08
 
 ### Changed

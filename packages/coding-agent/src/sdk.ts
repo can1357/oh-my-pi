@@ -199,11 +199,14 @@ import {
 	dropUnreadableContextImages,
 } from "./session/provider-image-budget";
 import {
+	chainAfterOrderedBackups,
 	expandDefaultRetryFallbackChains,
 	findRetryFallbackCandidates,
 	installRetryFallbackRole,
-	type RetryFallbackResolutionContext,
+	markOrderedSubagentRole,
+	resolvePrimaryModelKeyChain,
 	resolveRetryFallbackChainKey,
+	type RetryFallbackResolutionContext,
 } from "./session/retry-fallback-chains";
 import { describeUsageFallback } from "./session/retry-fallback-reason";
 import { getRestorableSessionModels } from "./session/session-context";
@@ -3067,7 +3070,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 						seenSelectors.add(fallbackSelector);
 						fallbackSelectors.push(fallbackSelector);
 					}
-					if (fallbackSelectors.length === 0) {
+					const orderedBackups = fallbackSelectors.length > 0;
+					if (!orderedBackups) {
 						for (const selector of options.modelPatternDefaultFallbackChain ?? []) {
 							if (typeof selector !== "string" || seenSelectors.has(selector)) continue;
 							seenSelectors.add(selector);
@@ -3075,10 +3079,17 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 						}
 					}
 					if (fallbackSelectors.length > 0) {
+						const chain = orderedBackups
+							? chainAfterOrderedBackups(
+									fallbackSelectors,
+									resolvePrimaryModelKeyChain(settings, modelRegistry, primarySelector, primary.model),
+								)
+							: fallbackSelectors;
 						installRetryFallbackRole(settings, options.modelPatternFallbackRole, {
 							primary: primarySelector,
-							chain: fallbackSelectors,
+							chain,
 						});
+						if (orderedBackups) markOrderedSubagentRole(settings, options.modelPatternFallbackRole);
 					}
 				}
 				model = selectedModel;

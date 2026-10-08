@@ -145,7 +145,14 @@ import {
 	cfgDefaultThinkingLevel,
 } from "../session/settings";
 import { cfgDisabledProviders } from "../config/model-settings";
-import { getRetryFallbackRole, installRetryFallbackRole } from "../session/retry-fallback-chains";
+import {
+	chainAfterOrderedBackups,
+	getRetryFallbackRole,
+	installRetryFallbackRole,
+	markOrderedSubagentRole,
+	resolvePrimaryModelKeyChain,
+	subagentSuppliedOrderedBackups,
+} from "../session/retry-fallback-chains";
 import { cfgCompactionThresholdPercent, cfgCompactionThresholdTokens } from "../session/context-settings";
 
 export type { YieldItem } from "@oh-my-pi/pi-tui/tools/task";
@@ -301,9 +308,10 @@ function installSubagentRetryFallbackChain(args: {
 	candidates: SubagentRetryFallbackCandidate[];
 	inheritedFallbackChain: string[] | undefined;
 	model: Model<Api> | undefined;
+	modelRegistry: ModelRegistry;
 	authFallbackUsed: boolean;
 }): string | undefined {
-	const { settings, id, candidates, inheritedFallbackChain, model, authFallbackUsed } = args;
+	const { settings, id, candidates, inheritedFallbackChain, model, modelRegistry, authFallbackUsed } = args;
 	if (!model || authFallbackUsed || candidates.length === 0) return undefined;
 
 	const selectedIndex = candidates.findIndex(
@@ -311,8 +319,15 @@ function installSubagentRetryFallbackChain(args: {
 	);
 	if (selectedIndex < 0) return undefined;
 	const fallbackSelectors = candidates.slice(selectedIndex + 1).map(candidate => candidate.selector);
-	// A single configured model may reuse its role's (or the default) configured chain, but never an implicit parent fallback.
-	const fallbackChain = fallbackSelectors.length > 0 ? fallbackSelectors : inheritedFallbackChain;
+	const selected = candidates[selectedIndex];
+	// A single model reuses its inherited chain. Ordered backups stay first, then the model-key chain.
+	const fallbackChain =
+		fallbackSelectors.length > 0
+			? chainAfterOrderedBackups(
+					fallbackSelectors,
+					resolvePrimaryModelKeyChain(settings, modelRegistry, selected.selector, selected.model),
+				)
+			: inheritedFallbackChain;
 	if (
 		!Array.isArray(fallbackChain) ||
 		fallbackChain.length === 0 ||
@@ -322,7 +337,8 @@ function installSubagentRetryFallbackChain(args: {
 	}
 
 	const role = subagentRetryFallbackRole(id);
-	installRetryFallbackRole(settings, role, { primary: candidates[selectedIndex].selector, chain: fallbackChain });
+	installRetryFallbackRole(settings, role, { primary: selected.selector, chain: fallbackChain });
+	if (fallbackSelectors.length > 0) markOrderedSubagentRole(settings, role);
 	return role;
 }
 
@@ -4151,6 +4167,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				candidates: resolveSubagentRetryFallbackCandidates(modelPatterns, modelRegistry, subagentSettings),
 				inheritedFallbackChain: inheritedRetryFallbackChain,
 				model,
+				modelRegistry,
 				authFallbackUsed,
 			});
 			if (retryFallbackRole) {
@@ -4399,6 +4416,16 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				formatModelStringWithRouting(session.model) === formatModelStringWithRouting(model)
 			) {
 				sessionManager.appendModelChange(formatModelStringWithRouting(model), retryFallbackRole);
+			} else if (
+				!hasExistingModelRole &&
+				!model &&
+				session.model &&
+				subagentSuppliedOrderedBackups(subagentSettings, subagentRetryFallbackRole(id))
+			) {
+				sessionManager.appendModelChange(
+					formatModelStringWithRouting(session.model),
+					subagentRetryFallbackRole(id),
+				);
 			}
 			sessionCreatedAt = performance.now();
 
@@ -4480,9 +4507,15 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				agent: agent.name,
 				modelRole: modelRole ?? resolveExplicitModelRole(modelOverride ?? agent.model, subagentSettings),
 				resolvedModel: progress.resolvedModel,
-				// Deferred model resolution installs this role inside createAgentSession,
-				// so read it back from the settings both install paths write.
-				retryFallback: getRetryFallbackRole(subagentSettings, subagentRetryFallbackRole(id)),
+				// Deferred resolution installs this role inside createAgentSession.
+				retryFallback: (() => {
+					const role = subagentRetryFallbackRole(id);
+					const installed = getRetryFallbackRole(subagentSettings, role);
+					if (!installed) return undefined;
+					return subagentSuppliedOrderedBackups(subagentSettings, role)
+						? { ...installed, orderedBackups: true }
+						: installed;
+				})(),
 				readOnly: isReadOnlyAgent(agent),
 				spawns: spawnsEnv,
 				readSummarize: agent.readSummarize,
