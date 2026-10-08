@@ -707,6 +707,11 @@ export class TurnRecovery {
 		return this.#runRecoveryCompactionWithRollback(reason, message, options);
 	}
 
+	/** Selected model beneath an unfinished request-scoped refusal fallback. */
+	get requestScopedFallbackPrimarySelector(): string | undefined {
+		return this.#activeRetryFallback?.restoreAfterSuccess ? this.#activeRetryFallback.originalSelector : undefined;
+	}
+
 	/**
 	 * Restores the previous model after fallback cooldown expiry or request-scoped success.
 	 * @returns true when the active model was actually switched back to the

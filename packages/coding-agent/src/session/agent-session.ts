@@ -9788,6 +9788,16 @@ export class AgentSession implements SettingsScope {
 			advisorRecordersDetached = false;
 			this.#reconnectToAgent();
 			await this.#reconcileModeAfterTransition();
+			// Match SDK startup: persist the selected model before a fallback response
+			// can become the legacy-inferred default on resume. Mode teardown may
+			// restore the pre-plan model, so record the baseline after it settles.
+			const model = this.model;
+			const selectedModel =
+				this.#recovery.requestScopedFallbackPrimarySelector ??
+				(model ? `${model.provider}/${model.id}` : undefined);
+			if (selectedModel) {
+				this.sessionManager.appendModelChange(selectedModel);
+			}
 			// Drop the process-lifetime context-file cache so the rebuild re-reads
 			// AGENTS.md and friends from disk: the user may have edited them since
 			// the previous session started, and refreshBaseSystemPrompt() re-runs
@@ -11528,6 +11538,12 @@ export class AgentSession implements SettingsScope {
 			if (modelFallbackWarning) {
 				if (options?.onModelFallback) options.onModelFallback(modelFallbackWarning);
 				else this.emitNotice("warning", modelFallbackWarning);
+			}
+			// The target selection owns this transcript, not an unfinished fallback
+			// from the outgoing session. Clear only after commit so rollback retains
+			// the outgoing conversation's restoration state.
+			if (switchingToDifferentSession || explicitModel) {
+				this.#recovery.clearActiveRetryFallback();
 			}
 			return true;
 		} catch (error) {

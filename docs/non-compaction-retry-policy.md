@@ -227,6 +227,21 @@ Explicit model changes take precedence. Response attribution stays with the mode
 that produced it. The restored model receives the continued conversation, so a
 later invocation can trigger another refusal and fallback.
 
+`/new` saves the selected-model baseline for resume, including the previous model
+when a request-scoped refusal fallback is still unfinished. A fallback answer must
+not become the new transcript's selected model just because it answered last.
+Switching to a different session, or supplying an explicit model while switching,
+discards the outgoing session's fallback ownership only after the switch commits;
+a rejected switch preserves its pending restoration.
+
+The refusal policy is recorded when the fallback is entered. Enabling
+`after-success` does not retroactively unpin a fallback entered under `default`;
+reselect the desired model with `/switch` to take ownership immediately.
+
+To distinguish routing from attribution, inspect the Provider section of
+`/session`. Agent Hub and task progress can still credit the fallback's successful
+answer after the active model has already restored.
+
 Programmatic toggles in session:
 
 - `setAutoRetryEnabled(enabled, persist = false)` applies a session-scoped `retry.enabled` override; pass `true` as the second argument to write the global setting
