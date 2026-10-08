@@ -14,6 +14,7 @@ import { type Type, type } from "@oh-my-pi/omptype";
 import { logger } from "@oh-my-pi/pi-utils";
 import type { AuthCredentialSnapshotEntry, AuthStorage, StoredCredentialBlock } from "../auth-storage";
 import { parseBind } from "../utils/parse-bind";
+import { resolvePeer } from "../utils/resolve-peer";
 import { AuthBrokerRefresher, type AuthBrokerRefresherSchedule } from "./refresher";
 import type {
 	ClientUsageReportRequest,
@@ -62,6 +63,8 @@ export interface AuthBrokerServerOptions {
 	bind?: string;
 	/** Accept any of these bearer tokens. Empty disables auth (loopback only). */
 	bearerTokens: string[];
+	/** Honor forwarded peer headers only when the connecting proxy is trusted. Default false. */
+	trustProxyHeaders?: boolean;
 	/** Broker version string surfaced on `/v1/healthz`. */
 	version?: string;
 	/** Refresh credentials expiring within this window. Default 5 min. */
@@ -156,6 +159,24 @@ const REFRESH_ROUTE = /^\/v1\/credential\/(\d+)\/refresh$/;
 const DISABLE_ROUTE = /^\/v1\/credential\/(\d+)\/disable$/;
 const BLOCK_ROUTE = /^\/v1\/credential\/(\d+)\/block$/;
 const BLOCKS_ROUTE = /^\/v1\/credential\/(\d+)\/blocks$/;
+const STATIC_ROUTES: Record<string, true> = {
+	"/v1/snapshot/stream": true,
+	"/v1/snapshot": true,
+	"/v1/usage": true,
+	"/v1/usage/history": true,
+	"/v1/usage/observed": true,
+	"/v1/usage/clients": true,
+	"/v1/usage/stale": true,
+	"/v1/credentials/disabled": true,
+	"/v1/credential": true,
+};
+
+/** Only known routes reach logs verbatim; unknown paths may carry caller-supplied secrets. */
+function loggablePath(pathname: string): string {
+	if (Object.hasOwn(STATIC_ROUTES, pathname)) return pathname;
+	const dynamic = [REFRESH_ROUTE, DISABLE_ROUTE, BLOCK_ROUTE, BLOCKS_ROUTE].some(route => route.test(pathname));
+	return dynamic ? pathname : "<unrouted>";
+}
 
 const MAX_SNAPSHOT_WAIT_MS = 30_000;
 const DISABLED_NEXT_SWEEP_IN_MS = Number.MAX_SAFE_INTEGER;
@@ -808,20 +829,24 @@ export function startAuthBroker(opts: AuthBrokerServerOptions): AuthBrokerServer
 		hostname: bind.hostname,
 		port: bind.port,
 		idleTimeout: DEFAULT_SERVER_IDLE_TIMEOUT_S,
-		fetch: async (req): Promise<Response> => {
+		fetch: async (req, server): Promise<Response> => {
 			const url = new URL(req.url);
 			const pathname = url.pathname;
-			const peer =
-				req.headers.get("x-forwarded-for")?.split(",")[0].trim() || req.headers.get("x-real-ip") || "unknown";
+			const socketPeer = server.requestIP(req)?.address ?? "unknown";
 			try {
 				if (req.method === "GET" && pathname === "/v1/healthz") {
 					const body: HealthzResponse = { ok: true, version };
 					return json(200, body);
 				}
 				if (!isAuthorized(req, tokens)) {
-					logger.info("auth-broker request unauthorized", { method: req.method, path: pathname, peer });
+					logger.info("auth-broker request unauthorized", {
+						method: req.method,
+						path: loggablePath(pathname),
+						peer: socketPeer,
+					});
 					return json(401, { error: "unauthorized" });
 				}
+				const peer = resolvePeer(req, socketPeer, opts.trustProxyHeaders);
 				if (req.method === "GET" && pathname === "/v1/snapshot/stream") {
 					return serveSnapshotStream(req, snapshotSource, streamHub, peer, streamKeepaliveMs);
 				}
@@ -887,9 +912,10 @@ export function startAuthBroker(opts: AuthBrokerServerOptions): AuthBrokerServer
 					return json(200, { generatedAt: Date.now(), clients: summary.clients });
 				}
 				if (req.method === "POST" && pathname === "/v1/usage/stale") {
+					const provider = url.searchParams.get("provider") || undefined;
 					try {
-						await opts.storage.usage.invalidate?.();
-						logger.info("auth-broker usage cache invalidated", { peer });
+						await opts.storage.usage.invalidate?.(provider);
+						logger.info("auth-broker usage cache invalidated", { peer, provider });
 						return json(200, { ok: true });
 					} catch (error) {
 						const message = error instanceof Error ? error.message : String(error);
@@ -1046,7 +1072,7 @@ export function startAuthBroker(opts: AuthBrokerServerOptions): AuthBrokerServer
 			} catch (error) {
 				logger.error("auth-broker handler crashed", {
 					method: req.method,
-					path: pathname,
+					path: loggablePath(pathname),
 					error: String(error),
 				});
 				return json(500, { error: "internal error" });

@@ -36,7 +36,7 @@ describe("Cloud Code Assist Claude tool schema conversion", () => {
 			},
 		} as unknown;
 
-		// normalizeTypeArrayToNullable converts type array to scalar + nullable,
+		// scalarizeTypeArrays converts type array to scalar + nullable,
 		// then stripNullableKeyword removes the nullable marker.
 		expect(normalizeSchemaForCCA(schema)).toEqual({
 			type: "object",
@@ -381,6 +381,21 @@ describe("Cloud Code Assist Claude tool schema conversion", () => {
 				},
 			},
 		});
+	});
+
+	it("splits a multi-type array into typed anyOf branches instead of leaving `items` on a string", () => {
+		// Stencil Carly's canvas_edit `from`/`to`: a shape ref or an [x, y] point. Collapsing to
+		// `{ type: "string", items }` made Gemini reject the request (`items: field predicate
+		// failed: $type == Type.ARRAY`).
+		const end = { type: ["string", "array", "null"], items: { type: "number" }, description: "Ref or point." };
+
+		expect(normalizeSchemaForGoogle(end)).toEqual({
+			description: "Ref or point.",
+			nullable: true,
+			anyOf: [{ type: "string" }, { type: "array", items: { type: "number" } }],
+		});
+		// CCA cannot carry anyOf: the first type wins without the array branch's keywords.
+		expect(normalizeSchemaForCCA(end)).toEqual({ type: "string", description: "Ref or point." });
 	});
 
 	it("normalizes schemas for gemini models using normalizeSchemaForGoogle", () => {

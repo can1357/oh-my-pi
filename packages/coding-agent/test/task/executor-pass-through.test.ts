@@ -381,6 +381,27 @@ describe("runSubprocess parent-discovery pass-through (issue #2190)", () => {
 		expect(appendSessionInit).toHaveBeenCalledWith(expect.objectContaining({ tools: ["read", "write", "yield"] }));
 	});
 
+	it("persists @advisor expanded against the spawning owner's roles so cold revival keeps its model", async () => {
+		const session = yieldEmittingSession();
+		const appendSessionInit = vi.spyOn(session.sessionManager, "appendSessionInit");
+		const spy = vi.spyOn(sdkModule, "createAgentSession").mockResolvedValue(createSessionResult(session));
+		// A nested spawn's owner is a parent subagent whose advisor role overrides the root's.
+		const parentSettings = Settings.isolated({ modelRoles: { advisor: "anthropic/claude-sonnet-4-5" } });
+
+		const result = await runSubprocess({
+			...baseOptions,
+			id: "nested-advised-child",
+			settings: parentSettings,
+			agent: { ...baseAgent, advisor: "@advisor:high" },
+		});
+
+		expect(result.exitCode).toBe(0);
+		expect(spy.mock.calls[0]?.[0]?.settings?.getModelRole("advisor")).toBe("anthropic/claude-sonnet-4-5:high");
+		expect(appendSessionInit).toHaveBeenCalledWith(
+			expect.objectContaining({ advisor: "anthropic/claude-sonnet-4-5:high" }),
+		);
+	});
+
 	it("retains inherited MCP proxy tools for normal children", async () => {
 		const session = yieldEmittingSession();
 		const spy = vi.spyOn(sdkModule, "createAgentSession").mockResolvedValue(createSessionResult(session));
