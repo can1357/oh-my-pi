@@ -3253,6 +3253,12 @@ pub struct SessionCredits {
 	pub committed_cost: f64,
 	#[serde(rename = "acuCost")]
 	pub acu_cost: f64,
+	/// Summed plan-quota share in percent; absent until a turn reports it.
+	#[serde(rename = "quotaPercent", default, skip_serializing_if = "Option::is_none")]
+	pub quota_percent: Option<f64>,
+	/// Summed overage charge in USD; absent until a turn reports it.
+	#[serde(rename = "overageUsd", default, skip_serializing_if = "Option::is_none")]
+	pub overage_usd: Option<f64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

@@ -532,6 +532,10 @@ export interface SessionStats {
 		cost: number;
 		committedCost: number;
 		acuCost: number;
+		/** Summed plan-quota share, in percent; present once a turn reported it. */
+		quotaPercent?: number;
+		/** Summed overage charge in USD; present once a turn reported it. */
+		overageUsd?: number;
 	};
 	/** Concrete provider-routed model ids with finalized turn counts. */
 	routedModels?: Record<string, number>;

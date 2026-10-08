@@ -468,12 +468,25 @@ export const streamDevin: StreamFunction<"devin-agent"> = (
 						output.usage.totalTokens =
 							output.usage.input + output.usage.output + output.usage.cacheRead + output.usage.cacheWrite;
 					}
-					if (msg.creditCost || msg.committedCreditCost || msg.committedAcuCost) {
+					if (
+						msg.creditCost ||
+						msg.committedCreditCost ||
+						msg.committedAcuCost ||
+						msg.committedQuotaCostBasisPoints !== undefined ||
+						msg.committedOverageCostCents !== undefined
+					) {
 						output.usage.credits ??= {};
 						const credits = output.usage.credits;
 						if (msg.creditCost) credits.cost = msg.creditCost;
 						if (msg.committedCreditCost) credits.committedCost = msg.committedCreditCost;
 						if (msg.committedAcuCost) credits.acuCost = msg.committedAcuCost;
+						// Present-but-zero is kept: it says the turn billed nothing to that meter.
+						if (msg.committedQuotaCostBasisPoints !== undefined) {
+							credits.quotaPercent = Number(msg.committedQuotaCostBasisPoints) / 100;
+						}
+						if (msg.committedOverageCostCents !== undefined) {
+							credits.overageUsd = Number(msg.committedOverageCostCents) / 100;
+						}
 					}
 				}
 

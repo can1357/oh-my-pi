@@ -792,6 +792,10 @@ class SessionCredits:
     cost: float
     committed_cost: float
     acu_cost: float
+    quota_percent: float | None = None
+    """Summed plan-quota share in percent; absent until a turn reports it."""
+    overage_usd: float | None = None
+    """Summed overage charge in USD; absent until a turn reports it."""
 
 
 @dataclass(slots=True, frozen=True, kw_only=True)
@@ -2084,6 +2088,8 @@ def parse_session_credits(value: object, path: str = "SessionCredits") -> Sessio
         cost=required(payload, "cost", decode_float, path),
         committed_cost=required(payload, "committedCost", decode_float, path),
         acu_cost=required(payload, "acuCost", decode_float, path),
+        quota_percent=optional(payload, "quotaPercent", decode_float, path),
+        overage_usd=optional(payload, "overageUsd", decode_float, path),
     )
 
 

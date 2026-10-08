@@ -53,6 +53,8 @@ interface ChatResponseFields {
 	creditCost?: number;
 	committedCreditCost?: number;
 	committedAcuCost?: number;
+	committedQuotaCostBasisPoints?: bigint;
+	committedOverageCostCents?: bigint;
 }
 
 interface RecordedTurn {
@@ -254,6 +256,26 @@ describe("streamDevin router assignment", () => {
 		const result = await streamDevin(devinModel({}), context, { apiKey: "token", fetch: fetchImpl }).result();
 
 		expect(result.usage.credits).toEqual({ cost: 3, committedCost: 2, acuCost: 0.25 });
+	});
+
+	it("records the quota share and overage charge the turn committed", async () => {
+		const { fetch: fetchImpl } = fakeDevin({
+			chat: { committedQuotaCostBasisPoints: 35n, committedOverageCostCents: 12n },
+		});
+
+		const result = await streamDevin(devinModel({}), context, { apiKey: "token", fetch: fetchImpl }).result();
+
+		expect(result.usage.credits).toEqual({ quotaPercent: 0.35, overageUsd: 0.12 });
+	});
+
+	it("keeps a reported zero overage so a quota-paid turn reads as no overage", async () => {
+		const { fetch: fetchImpl } = fakeDevin({
+			chat: { committedQuotaCostBasisPoints: 20n, committedOverageCostCents: 0n },
+		});
+
+		const result = await streamDevin(devinModel({}), context, { apiKey: "token", fetch: fetchImpl }).result();
+
+		expect(result.usage.credits).toEqual({ quotaPercent: 0.2, overageUsd: 0 });
 	});
 
 	it("leaves credits unset when the response reports no billing", async () => {
