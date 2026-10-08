@@ -767,6 +767,28 @@ describe("runEvalCompletion", () => {
 		]);
 	});
 
+	it.each(["p/slow:max", "P/Slow:max", "P/slow:max", "P/slow:auto"])(
+		"does not report configured effort for the case-insensitive literal selector %s",
+		async selector => {
+			const literalId = selector.endsWith(":auto") ? "Slow:auto" : "Slow:max";
+			const session = makeSession({
+				available: [makeModel("p", literalId)],
+				roles: { smol: selector },
+			});
+			vi.spyOn(ai, "completeSimple").mockResolvedValue(assistant({ text: "literal answer" }));
+
+			const handle = await runEvalCompletion({ prompt: "q", model: "smol" }, { session });
+			const waited = await runEvalWait({ items: [{ kind: "completion", id: handle.id }] }, { session });
+			expect(waited.items[0]).toMatchObject({ status: "completed", text: "literal answer" });
+			expect(runEvalStatus({ item: { kind: "completion", id: handle.id } }, { session }).metadata).toMatchObject({
+				configuredSelector: selector,
+				configuredEffort: null,
+				finalModel: `p/${literalId}`,
+				requestEffort: null,
+			});
+		},
+	);
+
 	it("records primary failure and fallback success without claiming an unused request", async () => {
 		const fallback = makeModel("p", "fallback");
 		const session = makeSession({ available: [SMOL, fallback] });

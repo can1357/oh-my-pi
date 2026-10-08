@@ -477,10 +477,15 @@ export async function runEvalCompletion(
 
 	const primary = candidates[0]!;
 	const available = options.session.modelRegistry?.getAvailable() ?? [];
-	const isLiteralModelId = (provider: string | undefined, id: string): boolean =>
-		provider === undefined
-			? available.some(candidate => candidate.id.toLowerCase() === id.toLowerCase())
-			: available.some(candidate => candidate.provider === provider && candidate.id === id);
+	const isLiteralModelId = (provider: string | undefined, id: string): boolean => {
+		const normalizedProvider = provider?.trim().toLowerCase();
+		const normalizedId = id.trim().toLowerCase();
+		return available.some(
+			candidate =>
+				(normalizedProvider === undefined || candidate.provider.trim().toLowerCase() === normalizedProvider) &&
+				candidate.id.trim().toLowerCase() === normalizedId,
+		);
+	};
 	const metadata: EvalCompletionMetadata = {
 		requestedRole: finalTier,
 		configuredSelector: primary.selector,
