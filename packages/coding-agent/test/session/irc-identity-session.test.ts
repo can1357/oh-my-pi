@@ -63,7 +63,7 @@ describe("IRC identity through AgentSession", () => {
 			getApiKey: () => "synthetic-key",
 			initialState: { model: mock.model, tools: [], messages: [] },
 			convertToLlm,
-			transformContext: messages => wrapSteeringForModel(messages),
+			transformContext: async messages => wrapSteeringForModel(messages),
 			streamFn: mock.stream,
 		});
 		const settings = Settings.isolated({ "compaction.enabled": false, "todo.enabled": false });
@@ -105,7 +105,10 @@ describe("IRC identity through AgentSession", () => {
 					message => message.role === "developer" && JSON.stringify(message.content).includes("IrcIdentityPeer"),
 				);
 				expect(peerMessages).toHaveLength(1);
-				expect(peerMessages[0]?.attribution).toBe("agent");
+				const peerMessage = peerMessages[0];
+				if (!peerMessage || peerMessage.role !== "developer")
+					throw new Error("Expected the peer developer message");
+				expect(peerMessage.attribution).toBe("agent");
 				const providerView = mock.calls.at(-1)!.context.messages;
 				const providerParents = providerView.filter(message => message.role === "user" && "ircSource" in message);
 				expect(providerParents).toHaveLength(2);
@@ -115,14 +118,18 @@ describe("IRC identity through AgentSession", () => {
 				});
 				const requestEnvelope = prompt.render(userInterjectionTemplate, { message: parentEnvelope });
 				for (const message of providerParents) {
+					if (message.role !== "user") throw new Error("Expected a parent user-role message");
 					expect(message.attribution).toBe("agent");
-					const text =
-						typeof message.content === "string"
-							? message.content
-							: message.content
-									.filter(part => part.type === "text")
-									.map(part => part.text)
-									.join("\n");
+					let text: string;
+					if (typeof message.content === "string") {
+						text = message.content;
+					} else {
+						const parts: string[] = [];
+						for (const part of message.content) {
+							if (part.type === "text") parts.push(part.text);
+						}
+						text = parts.join("\n");
+					}
 					expect(text).toBe(requestEnvelope);
 				}
 				const callCount = mock.calls.length;
@@ -183,7 +190,7 @@ describe("IRC identity through AgentSession", () => {
 				getApiKey: () => "synthetic-key",
 				initialState: { model: mock.model, tools: [], messages: [] },
 				convertToLlm,
-				transformContext: messages => wrapSteeringForModel(messages),
+				transformContext: async messages => wrapSteeringForModel(messages),
 				streamFn: mock.stream,
 			});
 			const removeGate = agent.addBeforeModelCallHook(async () => {
@@ -268,7 +275,7 @@ describe("IRC identity through AgentSession", () => {
 		const agent = new Agent({
 			initialState: { model: mock.model, tools: [], messages: [] },
 			convertToLlm,
-			transformContext: messages => wrapSteeringForModel(messages),
+			transformContext: async messages => wrapSteeringForModel(messages),
 			streamFn: mock.stream,
 		});
 		const settings = Settings.isolated({ "compaction.enabled": false, "todo.enabled": false });
