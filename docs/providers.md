@@ -150,6 +150,7 @@ The variables below supply credentials after runtime/config overrides and stored
 | `moonshot`                       | `MOONSHOT_API_KEY`, then `KIMI_API_KEY`                                       |
 | `stepfun`                        | `STEPFUN_API_KEY`                                                             |
 | `helmcode`                       | `HELMCODE_API_KEY`                                                            |
+| `pareto`                         | `PARETO_API_KEY`                                                              |
 | `meta`                           | `MODEL_API_KEY`, then `META_API_KEY`                                          |
 | `nanogpt`                        | `NANO_GPT_API_KEY`                                                            |
 | `novita`                         | `NOVITA_API_KEY`                                                              |

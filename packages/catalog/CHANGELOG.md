@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added Pareto Inference as a built-in provider (`pareto`) with API-key login and `PARETO_API_KEY`, serving GLM 5.3 Flash with `reasoning_effort` low, high, or max; prices refresh from the provider's live model list.
+
 ## [18.8.5] - 2026-10-08
 
 ### Breaking Changes

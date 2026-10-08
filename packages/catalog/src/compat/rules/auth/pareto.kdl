@@ -1,0 +1,15 @@
+// `/v1/models` is public: it answers 200 to a missing or bogus key. Login
+// therefore validates against `GET /v1/balance`, a documented, authenticated
+// route that bills nothing (docs.paretoinference.com/balance-and-usage) and
+// answers 401 to a missing or bogus key (verified 2026-10-08). The route has
+// its own rate limit, so the probe is optional: only an auth failure rejects
+// the pasted key.
+auth "pareto" {
+	name "Pareto Inference"
+	login "api-key" {
+		auth-url "https://paretoinference.com/dashboard"
+		instructions "Create or copy an API key from the Pareto dashboard"
+		prompt "Paste your Pareto API key" placeholder="sk-..."
+		validate "models-endpoint" label="Pareto" url="https://api.paretoinference.com/v1/balance" optional=#true
+	}
+}

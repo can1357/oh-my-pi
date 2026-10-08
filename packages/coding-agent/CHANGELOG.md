@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `PARETO_API_KEY` to the environment variables listed in `omp --help`.
+
 ## [18.8.5] - 2026-10-08
 
 ### Added

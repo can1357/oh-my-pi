@@ -1,0 +1,38 @@
+// Provider-wire compat for "pareto": Pareto Inference serves GLM 5.3 Flash on
+// an OpenAI-compatible chat-completions endpoint
+// (docs.paretoinference.com/api-reference). The endpoint accepts streamed
+// requests only and supports only its documented parameters; Z.ai's native
+// `thinking` field returns HTTP 400 `unsupported_parameter`. Reasoning is
+// steered with `reasoning_effort`; this host resolves to the `openai` thinking
+// format, and the GLM 5.3 lineage ladder in classes/glm.kdl (low/high/max,
+// effort always sent) applies unchanged.
+
+provider "pareto" {
+	default-model "z-ai/glm-5.3-flash"
+	env "PARETO_API_KEY"
+	// A successful `/v1/models` snapshot is the deployment truth: it replaces the
+	// bundled seed rather than merging, so a model Pareto retires leaves the
+	// picker instead of lingering as a dead seed row.
+	dynamic-models-authoritative #true
+	// Same-id `z-ai/glm-5.3-flash` rows on other hosts advertise image input and
+	// a context window this deployment does not publish, so the generator must
+	// not backfill names, modalities, or limits from them.
+	skip-cross-provider-reference-fills #true
+	// No `discovery` node: the roster and per-token tariff are read live from
+	// `/v1/models` by `paretoModelManagerOptions` once a key is configured, so a
+	// regen never freezes an account-specific price into models.json.
+
+	// Bundled so the provider is selectable before the first discovery call.
+	// Cost is the public per-million list price, which `/v1/models` also
+	// publishes per token in OpenRouter's `pricing` format. The output cap is
+	// the documented `max_tokens` ceiling. Pareto does not publish a context
+	// window, so it stays unset. Pareto documents text input only.
+	seed api="openai-completions" base-url="https://api.paretoinference.com/v1" {
+		model "z-ai/glm-5.3-flash" name="GLM 5.3 Flash" {
+			reasoning #true
+			input "text"
+			cost input=0.06 output=0.2 cache-read=0.012 cache-write=0
+			limits max-tokens=131072
+		}
+	}
+}
