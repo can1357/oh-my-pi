@@ -2,8 +2,13 @@
 
 ## [Unreleased]
 
+### Added
+
+- Extensions can call `ctx.getContextBreakdown()` to read the same per-category context usage that `/context` shows, including free space, the auto-compaction buffer, and the snapcompact wire savings ([#14208](https://github.com/can1357/oh-my-pi/pull/14208) by [@listellm](https://github.com/listellm)).
+
 ### Fixed
 
+- Fixed `/context` crashing instead of degrading when a malformed system-prompt section makes the snapcompact savings estimate throw ([#9331](https://github.com/can1357/oh-my-pi/issues/9331)).
 - Fixed tool-result pruning re-writing the whole Anthropic prompt cache when the pruned result sat behind many small turns ([#14751](https://github.com/can1357/oh-my-pi/pull/14751) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed resumed Claude sessions losing earlier thinking and prompt-cache reuse when extension or MCP tools they last ran with register before the first message; applies to sessions saved by this version or later ([#14754](https://github.com/can1357/oh-my-pi/pull/14754) by [@will-bogusz](https://github.com/will-bogusz))
 ## [18.8.5] - 2026-10-08
