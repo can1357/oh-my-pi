@@ -872,6 +872,13 @@ export interface BeforeSubagentSpawnEvent {
 	/** Agent's concrete thinking level. Omitted when `effort` is set or the level is `auto` or unset. */
 	thinkingLevel?: ThinkingLevel;
 	/**
+	 * True when `task.agentModelOverrides` has a non-empty entry for this agent.
+	 * The internal `StructuredSubagentRequest.model` (SDK callers) is not a lock.
+	 */
+	modelLocked: boolean;
+	/** True when `modelLocked` or the caller set `effort`. Hook effort results are ignored. */
+	effortLocked: boolean;
+	/**
 	 * Set by the runner for each handler: aborts when this spawn is cancelled or this handler's timeout expires.
 	 * A value passed to `emitBeforeSubagentSpawn` is not forwarded; it is composed into the spawn's cancellation.
 	 */

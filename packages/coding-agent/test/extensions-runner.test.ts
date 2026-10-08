@@ -147,6 +147,8 @@ describe("ExtensionRunner", () => {
 				solutionSpace: "one fix: rename, names given",
 				agent: "worker",
 				thinkingLevel: ThinkingLevel.Medium,
+				modelLocked: false,
+				effortLocked: false,
 				modelRole: "task",
 				patterns: ["anthropic/claude-sonnet-4-5"],
 			},
@@ -207,6 +209,8 @@ describe("ExtensionRunner", () => {
 				invocationKind: "task",
 				assignment: "route this worker",
 				agent: "worker",
+				modelLocked: false,
+				effortLocked: false,
 				patterns: ["anthropic/claude-sonnet-4-5"],
 				signal: caller.signal,
 			},
@@ -253,6 +257,8 @@ describe("ExtensionRunner", () => {
 			invocationKind: "task",
 			assignment: "route this worker",
 			agent: "worker",
+			modelLocked: false,
+			effortLocked: false,
 			patterns: ["anthropic/claude-sonnet-4-5"],
 		});
 
