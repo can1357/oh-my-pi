@@ -2,9 +2,14 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Reduced rendering work while long Markdown lists stream, preserving nested items, numbering, and reference links ([#13701](https://github.com/can1357/oh-my-pi/pull/13701) by [@iliaal](https://github.com/iliaal)).
+
 ### Fixed
 
 - Exposed `@oh-my-pi/pi-tui/native/*` as a package export so extensions in the compiled `omp` binary can import the native Tern/TSP modules ([#14834](https://github.com/can1357/oh-my-pi/issues/14834), [#14835](https://github.com/can1357/oh-my-pi/pull/14835) by [@carterlasalle](https://github.com/carterlasalle))
+- Fixed typing in the Tern `/model` picker's Roles tab firing role commands (`s` saved a preset while searching "sonnet"): the Roles tab shows no search field until a search is under way, and while one is, typing and Backspace keep editing it
 
 ## [18.8.5] - 2026-10-08
 
