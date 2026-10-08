@@ -4,7 +4,7 @@
 
 ### Added
 
-- Callers can pass `routing: "off"` on a task item, eval `agent()`, or `workpool()` to keep that spawn on the configured model. The hook still runs; a returned model is ignored, and an extension block still blocks.
+- Callers can pass `routing: "off"` on a task item, eval `agent()`, or `workpool()` to keep that spawn on the configured model. The hook still runs; a returned model is ignored, and an extension block still blocks ([#14936](https://github.com/can1357/oh-my-pi/pull/14936) by [@ff-zeno](https://github.com/ff-zeno))
 
 ## [18.8.4] - 2026-10-08
 
