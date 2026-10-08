@@ -3461,10 +3461,16 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 						}
 					}
 					if (fallbackSelectors.length > 0 || options.modelPatternDefaultFallbackChain?.length === 0) {
-						installRetryFallbackRole(settings, options.modelPatternFallbackRole, {
-							primary: primarySelector,
-							chain: fallbackSelectors,
-						});
+						installRetryFallbackRole(
+							settings,
+							options.modelPatternFallbackRole,
+							{
+								primary: primarySelector,
+								chain: fallbackSelectors,
+								shadowPrimaryKeys: fallbackSelectors.length > 0,
+							},
+							modelRegistry,
+						);
 						modelPatternRetryFallbackRole = options.modelPatternFallbackRole;
 					}
 				}
