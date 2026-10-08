@@ -11,6 +11,65 @@ const RPC_CHUNK_PAYLOAD_BYTES = 256 * 1024;
 
 export type RpcProtocolVersion = 1 | 2;
 
+/** Stands in for a `message_update`'s shared snapshot while its frame skeleton serializes. */
+const SHARED_MESSAGE_PLACEHOLDER = `\u0000omp-rpc-shared-message-${crypto.randomUUID()}\u0000`;
+const SHARED_MESSAGE_PLACEHOLDER_JSON = JSON.stringify(SHARED_MESSAGE_PLACEHOLDER);
+
+/**
+ * Serialize-once only beats a plain `JSON.stringify` when object structure, not
+ * string bytes, dominates the snapshot: JSC copies plain strings nearly at memcpy
+ * speed, so splicing a string-heavy or few-block snapshot twice costs more than
+ * serializing it twice. Measured in Bun: 1–12 blocks or >512 string chars per block
+ * ran 10–90% slower via the splice; ≥16 small blocks ran 10–45% faster.
+ */
+const SHARED_MESSAGE_MIN_BLOCKS = 16;
+const SHARED_MESSAGE_MAX_STRING_CHARS_PER_BLOCK = 512;
+
+/** Whether a snapshot's `content` is block-heavy and string-light enough to serialize once. */
+function isStructureHeavy(content: unknown): boolean {
+	if (!Array.isArray(content) || content.length < SHARED_MESSAGE_MIN_BLOCKS) return false;
+	const budget = content.length * SHARED_MESSAGE_MAX_STRING_CHARS_PER_BLOCK;
+	let chars = 0;
+	for (const block of content) {
+		if (!isRecord(block)) continue;
+		for (const key in block) {
+			const value = block[key];
+			if (typeof value === "string") {
+				chars += value.length;
+			} else if (isRecord(value)) {
+				for (const nestedKey in value) {
+					const nested = value[nestedKey];
+					if (typeof nested === "string") chars += nested.length;
+				}
+			}
+		}
+		if (chars >= budget) return false;
+	}
+	return true;
+}
+
+/**
+ * `JSON.stringify(frame)`, byte for byte. A streaming `message_update` aliases
+ * one cumulative snapshot as both `message` and `assistantMessageEvent.partial`;
+ * when that snapshot is structure-heavy it is serialized once and spliced into
+ * both positions instead of being re-serialized per position on every token.
+ */
+function serializeFrame(frame: object): string {
+	if (isRecord(frame) && frame.type === "message_update" && isRecord(frame.message)) {
+		const event = frame.assistantMessageEvent;
+		if (isRecord(event) && event.partial === frame.message && isStructureHeavy(frame.message.content)) {
+			const messageJson = JSON.stringify(frame.message);
+			const skeleton = JSON.stringify({
+				...frame,
+				message: SHARED_MESSAGE_PLACEHOLDER,
+				assistantMessageEvent: { ...event, partial: SHARED_MESSAGE_PLACEHOLDER },
+			});
+			return skeleton.split(SHARED_MESSAGE_PLACEHOLDER_JSON).join(messageJson);
+		}
+	}
+	return JSON.stringify(frame);
+}
+
 interface PendingRpcChunks {
 	chunkId: string;
 	count: number;
@@ -265,7 +324,7 @@ function encodeRpcFrameFromJson(
 
 /** Serialize a complete JSONL frame while enforcing the transport byte ceiling. */
 export function encodeRpcFrame(frame: object, streamedMessageCount = 0, streamedMessages?: readonly unknown[]): string {
-	return encodeRpcFrameFromJson(frame, JSON.stringify(frame), streamedMessageCount, streamedMessages);
+	return encodeRpcFrameFromJson(frame, serializeFrame(frame), streamedMessageCount, streamedMessages);
 }
 
 /** Stateful encoder that tracks which messages a client has already received. */
@@ -280,6 +339,14 @@ export class RpcFrameEncoder {
 	}
 
 	/**
+	 * Largest UTF-8 JSON size (excluding the newline) of a `response` frame delivered intact under the
+	 * negotiated protocol. A larger response is replaced by a transport-limit error.
+	 */
+	get maxResponseBytes(): number {
+		return this.#protocolVersion === 2 ? MAX_RPC_REASSEMBLED_BYTES : MAX_RPC_FRAME_BYTES - 1;
+	}
+
+	/**
 	 * Encode one logical frame into physical JSONL lines. Encoder bookkeeping runs
 	 * eagerly; only chunk emission is lazy, so a chunked result can be streamed to
 	 * stdout with backpressure without holding the whole transport in memory. The
@@ -287,7 +354,7 @@ export class RpcFrameEncoder {
 	 */
 	encodeFrames(frame: object): Iterable<string> {
 		if (isRecord(frame) && frame.type === "agent_start") this.#streamedMessages = [];
-		const json = JSON.stringify(frame);
+		const json = serializeFrame(frame);
 		let frames: Iterable<string>;
 		let singleFrame: string | undefined;
 		if (this.#protocolVersion === 2 && serializedFrameBytes(json) > MAX_RPC_FRAME_BYTES) {

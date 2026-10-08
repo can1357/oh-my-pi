@@ -107,11 +107,12 @@ class IdentityFacts {
 		return this.is("kimi") && this.family("k2.7-code", "k3");
 	}
 
-	/** Adaptive-thinking Claude generation floor (Opus ≥ min; Sonnet/Fable/Mythos ≥ 5). */
+	/** Adaptive-thinking Claude generation floor (Opus ≥ min; Sonnet/Fable/Mythos ≥ 5; Haiku ≥ 5.5). */
 	anthropicAdaptiveGenAtLeast(opusMin: string): boolean {
 		if (!this.is("anthropic")) return false;
 		if (this.family("opus")) return this.revGte(opusMin);
 		if (this.family("sonnet", "fable", "mythos")) return this.revGte("5");
+		if (this.family("haiku")) return this.revGte("5.5");
 		return false;
 	}
 }
@@ -598,26 +599,12 @@ function detectOpenAICompat(
 	};
 }
 
-const DSML_HEALING_PROVIDERS: Record<string, true> = {
-	ollama: true,
-	"ollama-cloud": true,
-	nvidia: true,
-	deepseek: true,
-	fireworks: true,
-	nanogpt: true,
-	"opencode-go": true,
-	openrouter: true,
-	// Transparent gateways / user-configured hosts forward the upstream model's
-	// native chat template unchanged, so a deepseek-classed model behind them
-	// still emits DSML tool-call envelopes and needs the DSML healer.
-	litellm: true,
-	nous: true,
-};
-
 /**
  * Default leaked-markup healer. Kimi/DeepSeek dedicated grammars are keyed on
  * identity class; official OpenAI heals nothing; everything else defaults to
- * the generic `thinking` healer.
+ * the generic `thinking` healer. DSML is DeepSeek's own tool-call grammar, so
+ * every host serving a DeepSeek model gets it — gateways, local backends, and
+ * custom providers alike.
  */
 function detectStreamMarkupHealing(
 	provider: string,
@@ -628,7 +615,7 @@ function detectStreamMarkupHealing(
 	// Kimi ids keep the generic healer, matching the census.
 	const isKimiK2 = facts.is("kimi") && facts.identity.family?.startsWith("k2") === true;
 	if (provider === "kimi-code" || provider === "moonshot" || isKimiK2) return "kimi";
-	if (facts.is("deepseek") && DSML_HEALING_PROVIDERS[provider] === true) return "dsml";
+	if (facts.is("deepseek")) return "dsml";
 	if (isOfficialOpenAIEndpoint(provider, baseUrl)) return undefined;
 	return "thinking";
 }
@@ -749,8 +736,15 @@ function resolveOpenAIResponsesPolicy(
 		supportsPromptCacheBreakpoints,
 		promptCacheBreakpointTtl: supportsPromptCacheBreakpoints ? "30m" : undefined,
 		strictResponsesPairing: isAzure || provider === "github-copilot",
-		supportsImageDetailOriginal: !isXaiHost && !modelMatchesHost(hostModel, "githubCopilot"),
+		// Azure's provider id alone only implies support while its endpoint is
+		// resolved at runtime; an explicit non-Azure baseUrl is a proxy, like Codex.
+		supportsImageDetailOriginal:
+			isOpenAIUrl ||
+			hostMatchesUrl(baseUrl, "azureOpenAI") ||
+			(isAzure && !baseUrl) ||
+			hostMatchesUrl(baseUrl, "openaiCodex"),
 		supportsReasoningSummary: !isXaiHost,
+		statefulResponses: undefined,
 		supportsAllTurnsReasoningContext: false,
 		supportsConfigurationUpdate: false,
 		supportsSteering: false,
@@ -798,6 +792,7 @@ function resolveOpenAIResponsesPolicy(
 			PROXY_OPENAI_COMPAT_PROVIDERS[backendProvider] !== true &&
 			(LOCAL_OPENAI_COMPAT_PROVIDERS[backendProvider] === true || hasLocalLoopbackBaseUrl(baseUrl)),
 		supportsObfuscationOptOut: isOpenAIUrl || provider === "openai",
+		storeResponses: false,
 		officialEndpoint: isOfficialOpenAIEndpoint(provider, baseUrl),
 		harmonyLeakMitigation: false,
 		rejectRootObjectUnion: false,
@@ -859,6 +854,7 @@ function pickResponsesOnly(compat: ResolvedOpenAIResponsesCompat): ResponsesOnly
 		strictResponsesPairing: compat.strictResponsesPairing,
 		supportsImageDetailOriginal: compat.supportsImageDetailOriginal,
 		supportsObfuscationOptOut: compat.supportsObfuscationOptOut,
+		storeResponses: compat.storeResponses,
 		supportsAllTurnsReasoningContext: compat.supportsAllTurnsReasoningContext,
 		supportsConfigurationUpdate: compat.supportsConfigurationUpdate,
 		supportsSteering: compat.supportsSteering,
@@ -867,6 +863,7 @@ function pickResponsesOnly(compat: ResolvedOpenAIResponsesCompat): ResponsesOnly
 		cacheControlFormat: compat.cacheControlFormat,
 		requiresReasoningOffJuiceInstruction: compat.requiresReasoningOffJuiceInstruction,
 		supportsReasoningSummary: compat.supportsReasoningSummary,
+		statefulResponses: compat.statefulResponses,
 		isVercelGatewayHost: compat.isVercelGatewayHost,
 	} satisfies ResponsesOnlyCompat;
 }
@@ -1013,7 +1010,8 @@ function defaultThinkingMode<TApi extends Api>(spec: ModelSpec<TApi>, facts: Ide
 				return "anthropic-budget-effort";
 			}
 			if (facts.is("anthropic")) {
-				if (facts.revGte("4.6") && !facts.family("haiku")) return "anthropic-adaptive";
+				// Haiku stays on budget thinking until 5.5, its first adaptive generation.
+				if (facts.revGte(facts.family("haiku") ? "5.5" : "4.6")) return "anthropic-adaptive";
 				if (facts.family("opus") && facts.revGte("4.5")) return "anthropic-budget-effort";
 			}
 			return "budget";

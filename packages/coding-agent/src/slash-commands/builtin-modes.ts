@@ -15,6 +15,7 @@ import {
 	deleteModelPreset,
 	formatModelPresetSwitch,
 	getModelPresetNames,
+	isCleanModelPresetSwitch,
 	isValidModelPresetName,
 	modelPresetSavedMessage,
 	type ModelPresetSession,
@@ -765,14 +766,27 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 	{
 		name: "prewalk",
 		icon: "prewalk",
-		description: "Arm or restart a one-shot model handoff",
+		description: "Arm, restart, or cancel a one-shot model handoff",
 		allowArgs: true,
-		acpDescription: "Arm or restart prewalk",
-		acpInputHint: "[restart]",
-		subcommands: [{ name: "restart", description: "Return to @default and re-arm the handoff to @smol" }],
+		acpDescription: "Arm, restart, or cancel prewalk",
+		acpInputHint: "[restart|off]",
+		subcommands: [
+			{ name: "restart", description: "Return to @default and re-arm the handoff to @smol" },
+			{ name: "off", description: "Cancel this session's handoff without changing the active model" },
+		],
 		handle: async (command, runtime) => {
 			const arg = command.args.trim().toLowerCase();
-			if (arg && arg !== "restart") return usage("Usage: /prewalk [restart]", runtime);
+			if (arg && arg !== "restart" && arg !== "off") return usage("Usage: /prewalk [restart|off]", runtime);
+			if (arg === "off") {
+				const armed = runtime.session.getPrewalkState() !== undefined;
+				runtime.session.disarmPrewalk();
+				await runtime.output(
+					armed
+						? "Prewalk off: canceled this session's pending handoff; keeping the active model."
+						: "Prewalk already off for this session; keeping the active model.",
+				);
+				return commandConsumed();
+			}
 			const target = resolveSessionModelSelector("@smol", runtime.session, runtime.settings);
 			if (target.error || !target.model) {
 				return usage(target.error ?? 'Model "@smol" not found', runtime);
@@ -959,7 +973,7 @@ async function runPresetsCommand(
 			const wroteRoles = result.kind === "switched" || result.kind === "failed";
 			return {
 				message,
-				failed: result.kind !== "switched" || result.shadowed.length > 0 || result.shadowedThinking !== undefined,
+				failed: !isCleanModelPresetSwitch(result),
 				switched: result.kind === "switched",
 				changedConfig: wroteRoles,
 			};

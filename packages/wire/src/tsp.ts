@@ -11,9 +11,11 @@
  * `q` query, `o` open, `f` frame, `b` blob, `t` palette, `x` close. Terminal →
  * program: `r` reply, `e` event (on the pty's input side).
  *
- * The normative spec is `crates/tern/SURFACE_PROTOCOL.md` in the Stencil
- * repository; these types mirror it. Unknown fields and verbs are ignored in
- * both directions, so every addition here is optional.
+ * The normative spec is the Tern SDK's Surface Protocol and Elements reference
+ * (`docs/sdk/src/protocol` and `docs/sdk/src/elements` in the Stencil
+ * repository, https://docs.stencil.so/tern/protocol/); these types mirror it.
+ * Unknown fields and verbs are ignored in both directions, so every addition
+ * here is optional.
  */
 
 /** Protocol version this build speaks. */
@@ -350,7 +352,8 @@ export interface TspEditorProps {
 	decor?: readonly TspEditorDecoration[];
 	/** Inline completion suffix drawn after the caret. */
 	ghost?: string;
-	placeholder?: string;
+	/** Dim text while `text` is empty; spans style it (`em` for italics). */
+	placeholder?: TspText;
 	prompt?: TspText;
 	/** Mode label (vim). */
 	mode?: string;
@@ -436,7 +439,7 @@ export interface TspPickerItem {
 export interface TspPickerColumn {
 	id: string;
 	head?: string;
-	/** `elapsed`: the value is an age in ms at send; Tern clocks it (spec §9). */
+	/** `elapsed`: the value is an age in ms at send; Tern clocks it. */
 	format?: "text" | "num" | "price" | "bar" | "time" | "elapsed" | "dim";
 	/** Lower priorities hide first when narrow. */
 	priority?: number;
@@ -923,6 +926,8 @@ export type TspReply =
 			cell?: { w: number; h: number };
 			dark?: boolean;
 			reduceMotion?: boolean;
+			/** The user's system reads a 12-hour clock (`false`: 24-hour); absent from older terminals. */
+			hour12?: boolean;
 	  }
 	| { r: "blobs"; have: readonly string[] };
 

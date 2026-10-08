@@ -13,7 +13,7 @@ import {
 	stripRetentionProtocolMarkers,
 	truncateRecallQuery,
 } from "../hindsight/content";
-import { extractMessages } from "../hindsight/transcript";
+import { countUserTurns, extractMessages } from "../hindsight/transcript";
 import type { MemoryPromptPreparation } from "../memory-backend/types";
 import { redactMemorySecrets, redactRememberWrite } from "../memory-backend/redact";
 import type { AgentSession, AgentSessionEvent } from "../session/agent-session";
@@ -532,10 +532,11 @@ export class MnemopiSessionState {
 
 	async maybeRetainOnAgentEnd(_messages: AgentMessage[]): Promise<void> {
 		if (!this.config.autoRetain || this.aliasOf) return;
-		const flat = extractMessages(this.session.sessionManager);
 		this.#restoreRetainedTurnCursor();
-		const userTurns = flat.filter(message => message.role === "user").length;
+		// Cheap gate first: most agent_end events are not retain turns, so skip text extraction.
+		const userTurns = countUserTurns(this.session.sessionManager);
 		if (userTurns - this.lastRetainedTurn < this.config.retainEveryNTurns) return;
+		const flat = extractMessages(this.session.sessionManager);
 		await this.retainMessages(
 			sliceUnretainedMessages(flat, this.lastRetainedTurn),
 			`${this.sessionId}-${Date.now()}`,

@@ -23,6 +23,7 @@ import { providerEntries, providerEntry, seedModels } from "../src/compat/provid
 import type { CompiledProvider } from "../src/compat/types";
 import { ANTIGRAVITY_PRIMARY_ENDPOINT, fetchAntigravityDiscoveryModels } from "../src/discovery/antigravity";
 import { createModelManager } from "../src/model-manager";
+import { resolveModelTokenizer } from "../src/model-tokenizer";
 import prevModelsJson from "../src/models.json" with { type: "json" };
 import { toModelSpec } from "../src/provider-models/bundled-references";
 import {
@@ -494,13 +495,13 @@ async function fetchAntigravityModels(): Promise<ModelSpec<"google-gemini-cli">[
 			token: access.accessToken,
 			endpoint: ANTIGRAVITY_ENDPOINT,
 		});
-		if (discovered === null) {
+		if (discovered === null || discovered.rejectedStatus !== undefined) {
 			console.warn("Antigravity API fetch failed, will use previous models");
 			return [];
 		}
-		if (discovered.length > 0) {
-			console.log(`Fetched ${discovered.length} models from Antigravity API`);
-			return discovered;
+		if (discovered.models.length > 0) {
+			console.log(`Fetched ${discovered.models.length} models from Antigravity API`);
+			return discovered.models;
 		}
 		console.warn("Antigravity API returned no models, will use previous models");
 		return [];
@@ -776,12 +777,16 @@ function canonicalizeModelCompat(model: ModelSpec<Api>): void {
  * Materialize one bundled row. Prompt-cache lifetimes are rule-owned output,
  * not snapshot input: stale lifetimes and configuration provenance from a
  * previous snapshot (or a copied reference row) are dropped so `buildModel`
- * reapplies only the current KDL policy.
+ * reapplies only the current KDL policy. A tokenizer the row's own id resolves
+ * is policy output too; a copied one survives only for ids policy cannot
+ * classify (e.g. GitLab Duo aliases of Claude models).
  */
 export function buildGeneratedModel(model: ModelSpec<Api>): Model<Api> {
 	const spec = { ...model };
+	if (resolveModelTokenizer(spec.requestModelId ?? spec.id, spec.provider) !== undefined) delete spec.tokenizer;
 	delete spec.promptCache;
 	delete spec.promptCacheConfig;
+	delete spec.kindConfig;
 	return buildModel(spec);
 }
 

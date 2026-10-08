@@ -20,7 +20,7 @@ that terminal protocol.
 ## Usage
 
 ```typescript
-import { encodeSixel, grep, pdfToMarkdown } from "@oh-my-pi/pi-natives";
+import { encodeSixelAsync, grep, pdfToMarkdown } from "@oh-my-pi/pi-natives";
 
 // Grep for a pattern
 const results = await grep({
@@ -37,8 +37,9 @@ const files = await find({
 	fileType: "file",
 });
 
-// SIXEL encode for a terminal cell box (px)
-const sequence = encodeSixel(pngBytes, widthPx, heightPx);
+// SIXEL encode for a terminal cell box (px), off the JS thread
+// (`encodeSixel` is the synchronous form)
+const sequence = await encodeSixelAsync(pngBytes, widthPx, heightPx);
 
 // Extract PDF text and identify pages that still need OCR
 const pdf = await pdfToMarkdown(pdfBytes);
@@ -76,7 +77,7 @@ crates/pi-natives/       # Rust source (workspace member)
 native/                  # Core loader files and local/CI native build outputs
   index.js               # Public native export surface
   loader-state.js        # Platform, ISA variant, and addon resolution
-  embedded-addon.js      # Standalone binary embed stub/generated metadata
+  embedded-addon.js      # Null embed stub; binary builds replace it in memory
   pi_natives.<platform>-<arch>-modern.node   # x64 modern ISA (local/CI artifact)
   pi_natives.<platform>-<arch>-baseline.node # x64 baseline ISA (local/CI artifact)
   pi_natives.<platform>-<arch>.node          # non-x64 build artifact

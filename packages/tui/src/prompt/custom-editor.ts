@@ -10,17 +10,16 @@ import {
 } from "../components/editor";
 import { addKeyAliases, canonicalKeyId, getKeybindings } from "../keybindings";
 import { type KeyId, parseKey, parseKittySequence } from "../keys";
-import { SpaceHoldGesture } from "../space-hold";
+import { getSpaceHoldText, SpaceHoldGesture } from "../space-hold";
 import { type Component, TUI } from "../tui";
 import type { AppKeybinding } from "../app-keybindings";
-import { formatKeyHint } from "../key-hint-format";
+import { formatTooltipKey } from "../key-hint-format";
 import { MAIN_AGENT_ID } from "../overlays/agent-hub-types";
 import { compact, keyed, node, row, span } from "../native/describe";
 import type { DescribeContext, NativeNode, NativeUiEvent } from "../native/node";
 import type { ComposerFacts, ComposerFactsSource } from "../status-line/types";
 import { allowsModelMentions, allowsSkillTokens, SKILL_TOKEN_RE } from "./skill-tokens";
 import { expandModelMentionTags, MODEL_MENTION_RE, modelMentionToken } from "./model-mention-syntax";
-import { imageAttachmentSource } from "./image-source";
 import { isVideoPath } from "./video";
 import {
 	attachmentSgr,
@@ -41,7 +40,7 @@ import {
 } from "./composer-attachments";
 import { type MacOSSpellingFeatures, MacOSSpellingProvider } from "./macos-spelling";
 import { hasMagicKeyword, highlightMagicKeywords, magicKeywordRanges } from "./magic-keywords";
-import type { TspEditorDecoration } from "@oh-my-pi/pi-wire";
+import type { TspEditorDecoration, TspText } from "@oh-my-pi/pi-wire";
 import { isNativeRendering } from "../native/state";
 import { isQueuedMessageList, parseQueueShorthand, QUEUE_LIST_MARKER_RE } from "./queue-input";
 import { type WordCompletionMethod, WordCompletionProvider } from "./word-completion";
@@ -50,8 +49,8 @@ import { fgOrPlain, theme } from "../theme/theme";
 /** A shell-mode draft's sigil (`!`, `!!`, `$`, `$$`) with its surrounding blanks; the mode chip stands in for it natively. */
 const SHELL_SIGIL_RE = /^\s*(?:!!?|\$\$?)[ \t]?/;
 
-/** The composer's TSP placeholder; the rotating ANSI hints (thinking effort, …) move into control tooltips. */
-const NATIVE_COMPOSER_PLACEHOLDER = "Ask omp — / commands · @ files · ! bash";
+/** The untitled session's TSP placeholder; the rotating ANSI hints (thinking effort, …) move into control tooltips. */
+const NATIVE_COMPOSER_PLACEHOLDER = "What are we cooking?";
 
 /** Live composer state the TSP layout shows; the interactive host wires {@link CustomEditor.composerState}. */
 export interface ComposerNativeState {
@@ -59,16 +58,31 @@ export interface ComposerNativeState {
 	readonly shell?: { readonly kind: "bash" | "python"; readonly excluded: boolean };
 	/** Thinking effort word (`high`, `off`, `auto`); undefined when the model has no thinking. */
 	readonly thinking?: string;
+	/** The thinking level draws as the model chip's icon instead of its own chip (where the terminal has `effort`). */
+	readonly thinkingInModel?: boolean;
+	/** Generation tok/s after the thinking level (live while running, else the last reading); undefined hides it. */
+	readonly rate?: number;
 	/** A turn is running: the send keycap becomes a Stop button. */
 	readonly running: boolean;
 	/** The viewed subagent's lineage, outermost first and the viewed agent last; undefined on the main session. */
 	readonly viewing?: readonly string[];
+	/** The session's title, quoted in italics as the TSP placeholder; undefined until it has one. */
+	readonly title?: string;
 }
 
 /** Action code prefix of the viewing header's links: `focus:<agent id>`, {@link MAIN_AGENT_ID} for the main session. */
 const FOCUS_ACTION = "focus:";
 
 const IDLE_COMPOSER: ComposerNativeState = { running: false };
+
+/** The composer's controls around the input, rebuilt when what they show changes; the bar adds the rate and facts. */
+interface ComposerControls {
+	readonly focus: NativeNode | undefined;
+	readonly mode: NativeNode | undefined;
+	readonly model: NativeNode | undefined;
+	readonly effort: NativeNode | undefined;
+	readonly submit: NativeNode;
+}
 
 /**
  * Filled steps (of four) of the effort chip's fallback meter, for terminals without the `effort`
@@ -207,7 +221,7 @@ function normalizePastedPath(path: string): string {
 			}
 		}
 	}
-	return unquoted.replace(SHELL_ESCAPED_PATH_CHAR_REGEX, "$1");
+	return (unquoted.startsWith("\\~/") ? unquoted.slice(1) : unquoted).replace(SHELL_ESCAPED_PATH_CHAR_REGEX, "$1");
 }
 
 function isExplicitPastedPath(path: string): boolean {
@@ -465,8 +479,8 @@ export class CustomEditor extends Editor {
 				chips: ComposerChipDescriptor[];
 		  }
 		| undefined;
-	/** Host-wired producer of per-image `file://` links (session blob store); drives clickable
-	 *  chip tokens for restored drafts (esc-esc, `/tree`, branch). */
+	/** Host-wired producer of per-image chip targets (a file on disk, or a session blob copy);
+	 *  drives clickable chip tokens for restored drafts (esc-esc, `/tree`, branch). */
 	draftImageLinkMaterializer?: (images: readonly ImageContent[]) => Promise<(string | undefined)[] | undefined>;
 
 	/**
@@ -776,7 +790,7 @@ export class CustomEditor extends Editor {
 		if (!materialize || images.length === 0) return;
 		const links = await materialize(images);
 		if (!links || this.pendingImages !== images) return;
-		this.pendingImageLinks = images.map((image, index) => imageAttachmentSource(image)?.path ?? links[index]);
+		this.pendingImageLinks = links;
 		this.imageLinks = this.pendingImageLinks;
 		this.#requestShimmerRepaint?.();
 	}
@@ -785,10 +799,21 @@ export class CustomEditor extends Editor {
 	 *  indivisible: a stray backspace deletes the whole token instead of corrupting it. */
 	override atomicTokenPattern = COMPOSER_TOKEN_REGEX;
 
+	/** Atom-table revision and pattern the composer token matcher was last built for. */
+	#tokenPatternAtomsRevision = -1;
+	#tokenPattern: RegExp | undefined;
+
 	#syncComposerTokenPattern(): void {
-		const labels = [...this.atoms].filter(([, expansion]) => expansion.startsWith("^")).map(([label]) => label);
+		// Rebuild only when the atom table changed or someone replaced the pattern since the last sync.
+		if (this.#tokenPatternAtomsRevision === this.atomsRevision && this.#tokenPattern === this.atomicTokenPattern) {
+			return;
+		}
+		const labels: string[] = [];
+		for (const [label, expansion] of this.atoms) if (expansion.startsWith("^")) labels.push(label);
 		const next = composerTokenRegex(labels);
 		if (next.source !== this.atomicTokenPattern.source) this.atomicTokenPattern = next;
+		this.#tokenPatternAtomsRevision = this.atomsRevision;
+		this.#tokenPattern = this.atomicTokenPattern;
 	}
 
 	/** Magic-keyword shimmer cadence — drives one editor repaint every 70 ms while
@@ -806,27 +831,35 @@ export class CustomEditor extends Editor {
 	 *  timer to request the next animation frame. Undefined when nobody is
 	 *  listening (tests, headless callers); the timer chain still self-cleans. */
 	#requestShimmerRepaint: (() => void) | undefined;
-	#queueDecorationText: string | undefined;
+	/** Text revision the per-revision decoration inputs below were computed for. */
+	#decorationRevision = -1;
+	#decorationText = "";
 	#decorationLines: readonly string[] = [""];
 	#queueShorthandActive = false;
 	#queueListActive = false;
 
 	/** Decorate magic keywords, attachments, and the queue-composer header/list markers.
 	 *  Queue shorthand reserves its first logical line as a dim `Queueing` label; sequential
-	 *  item markers use the accent color so separate follow-ups remain visible while composing. */
+	 *  item markers use the accent color so separate follow-ups remain visible while composing.
+	 *  Called once per layout segment, so whole-buffer inputs are computed once per text revision. */
 	override decorateText = (text: string, context: EditorTextDecorationContext): string => {
 		this.#syncComposerTokenPattern();
-		const editorText = this.getText();
+		if (this.#decorationRevision !== this.textRevision) {
+			this.#decorationRevision = this.textRevision;
+			const editorText = this.getText();
+			if (this.#decorationText !== editorText) {
+				this.#decorationText = editorText;
+				this.#decorationLines = this.getLines();
+				const queueBody = parseQueueShorthand(editorText);
+				this.#queueShorthandActive = queueBody !== undefined;
+				this.#queueListActive = queueBody !== undefined && isQueuedMessageList(queueBody);
+			}
+		}
+		// One string instance per revision: whole-buffer memos downstream hit on identity.
+		const editorText = this.#decorationText;
 		const animated = this.focused && this.#shimmerEnabled() && hasMagicKeyword(editorText);
 		const phase = animated ? (Date.now() % CustomEditor.SHIMMER_PERIOD_MS) / CustomEditor.SHIMMER_PERIOD_MS : 0;
 		if (animated) this.#scheduleShimmerFrame();
-		if (this.#queueDecorationText !== editorText) {
-			this.#queueDecorationText = editorText;
-			this.#decorationLines = this.getLines();
-			const queueBody = parseQueueShorthand(editorText);
-			this.#queueShorthandActive = queueBody !== undefined;
-			this.#queueListActive = queueBody !== undefined && isQueuedMessageList(queueBody);
-		}
 		let sourceSearchOffset = 0;
 		const locateSource = (value: string): number => {
 			const offset = text.indexOf(value, sourceSearchOffset);
@@ -1005,10 +1038,18 @@ export class CustomEditor extends Editor {
 	protected override get nativeSendable(): boolean {
 		return this.onSubmit !== undefined && !this.disableSubmit;
 	}
-	/** Viewing a subagent, the draft goes to it: the placeholder names it. */
-	override describePlaceholder = (): string => {
-		const agent = this.composerState().viewing?.at(-1);
-		return agent === undefined ? NATIVE_COMPOSER_PLACEHOLDER : `Message ${agent}`;
+	/** The quoted-title placeholder, kept while the title stands so the editor node stays reused. */
+	#titlePlaceholder: { title: string; text: TspText } | undefined;
+	/** Viewing a subagent, the draft goes to it: the placeholder names it; else the session's title, quoted in italics. */
+	override describePlaceholder = (): TspText => {
+		const { viewing, title } = this.composerState();
+		const agent = viewing?.at(-1);
+		if (agent !== undefined) return `Message ${agent}`;
+		if (!title) return NATIVE_COMPOSER_PLACEHOLDER;
+		if (this.#titlePlaceholder?.title !== title) {
+			this.#titlePlaceholder = { title, text: [{ t: `“${title}”`, s: "em" }] };
+		}
+		return this.#titlePlaceholder.text;
 	};
 	/** A shell-mode draft highlights as its language. */
 	override describeLanguage = (): string | undefined => this.composerState().shell?.kind;
@@ -1024,8 +1065,8 @@ export class CustomEditor extends Editor {
 				facts: ComposerFacts | undefined;
 				chips: Component | undefined;
 				input: NativeNode;
-				focus: NativeNode | undefined;
-				mode: NativeNode | undefined;
+				rate: number | undefined;
+				controls: ComposerControls;
 				bar: NativeNode;
 				layout: NativeEditorLayout;
 		  }
@@ -1035,7 +1076,8 @@ export class CustomEditor extends Editor {
 	 * The TSP composer: role `omp.editor[.bash|.python]` (tone `pending` while
 	 * a turn runs) over the context hairline, the viewing header while a
 	 * subagent is focused, the attachment chips, a `line` row of the
-	 * shell-mode chip and the input, and the `bar`: model chip, effort chip,
+	 * shell-mode chip and the input, and the `bar`: model chip, effort chip
+	 * (or the effort glyph as the model chip's icon), the generation rate,
 	 * the other status facts, usage, then send (Stop while a turn runs).
 	 * Clicks come back as `status.model`, `thinking.cycle`, `submit`,
 	 * `interrupt` and `focus:<id>` actions.
@@ -1058,24 +1100,61 @@ export class CustomEditor extends Editor {
 			interruptKey,
 			state.viewing?.join("\u0001"),
 			effortGlyph,
+			state.thinkingInModel,
 		].join("\0");
+		const rate = state.rate;
 		const chips = this.attachmentChips;
 		const memo = this.#nativeComposer;
-		if (memo && memo.key === key && memo.facts === facts && memo.input === input && memo.chips === chips) {
+		if (
+			memo &&
+			memo.key === key &&
+			memo.rate === rate &&
+			memo.facts === facts &&
+			memo.input === input &&
+			memo.chips === chips
+		) {
 			return memo.layout;
 		}
-		const { focus, mode, bar } =
+		const controls =
 			memo?.key === key && memo.facts === facts
-				? memo
+				? memo.controls
 				: this.#describeComposerControls(state, facts, thinkingKey, modelKey, interruptKey, effortGlyph);
-		const line = keyed(row(compact([mode, input]), { role: "omp.composer.line", align: "start", gap: "sm" }), "line");
+		// The rate ticks while a turn streams: only the bar follows it.
+		const bar =
+			memo?.controls === controls && memo.rate === rate
+				? memo.bar
+				: keyed(
+						row(
+							compact([
+								controls.model,
+								controls.effort,
+								rate !== undefined &&
+									node(
+										"rate",
+										{ value: rate, unit: "tok/s", role: "omp.composer.rate", title: "Generation rate" },
+										undefined,
+										"rate",
+									),
+								// The status facts are the bar's flexible space; without them a spacer keeps send at the end.
+								facts?.extras ?? node("row", { grow: 1 }, [], "gap"),
+								facts?.usage,
+								controls.submit,
+							]),
+							{ role: "omp.composer.bar", gap: "sm", align: "center" },
+						),
+						"bar",
+					);
+		const line = keyed(
+			row(compact([controls.mode, input]), { role: "omp.composer.line", align: "start", gap: "sm" }),
+			"line",
+		);
 		const layout: NativeEditorLayout = {
 			role: shell ? `omp.editor.${shell.kind}` : "omp.editor",
 			tone: state.running ? "pending" : undefined,
-			children: compact([facts?.context, focus, chips, line, bar]),
+			children: compact([facts?.context, controls.focus, chips, line, bar]),
 			caret: "line/input",
 		};
-		this.#nativeComposer = { key, facts, chips, input, focus, mode, bar, layout };
+		this.#nativeComposer = { key, facts, chips, input, rate, controls, bar, layout };
 		return layout;
 	};
 
@@ -1088,7 +1167,7 @@ export class CustomEditor extends Editor {
 	#describeViewing(viewing: readonly string[], interruptKey: KeyId): NativeNode | undefined {
 		const agent = viewing.at(-1);
 		if (agent === undefined) return undefined;
-		const back = interruptKey === "escape" ? "esc" : formatKeyHint(interruptKey);
+		const back = formatTooltipKey(interruptKey);
 		const crumbs = viewing.slice(0, -1).map(id =>
 			node(
 				"text",
@@ -1137,7 +1216,7 @@ export class CustomEditor extends Editor {
 		);
 	}
 
-	/** The viewing header over the text, the shell-mode chip before the input, and the bar under it. */
+	/** The viewing header over the text, the shell-mode chip before the input, and the bar's controls under it. */
 	#describeComposerControls(
 		state: ComposerNativeState,
 		facts: ComposerFacts | undefined,
@@ -1145,9 +1224,26 @@ export class CustomEditor extends Editor {
 		modelKey: KeyId | undefined,
 		interruptKey: KeyId,
 		effortGlyph: boolean,
-	): { focus: NativeNode | undefined; mode: NativeNode | undefined; bar: NativeNode } {
+	): ComposerControls {
 		const shell = state.shell;
 		const focus = state.viewing && this.#describeViewing(state.viewing, interruptKey);
+		const thinking = state.thinking;
+		const thinkingHint = thinkingKey ? `  ${formatTooltipKey(thinkingKey)}` : "";
+		// The level collapses into the model chip's icon; its own tooltip and click stay.
+		const modelIcon =
+			facts && thinking !== undefined && effortGlyph && state.thinkingInModel
+				? node(
+						"effort",
+						{
+							level: thinking,
+							role: "omp.composer.model.effort",
+							title: `Thinking effort: ${thinking}${thinkingHint}`,
+							actions: { click: "thinking.cycle" },
+						},
+						undefined,
+						"effort",
+					)
+				: undefined;
 		const model =
 			facts &&
 			node(
@@ -1157,42 +1253,42 @@ export class CustomEditor extends Editor {
 					gap: "xs",
 					align: "center",
 					tone: facts.model.tone,
-					title: modelKey ? `Switch model  ${formatKeyHint(modelKey)}` : "Switch model",
+					title: modelKey ? `Switch model  ${formatTooltipKey(modelKey)}` : "Switch model",
 					actions: { click: "status.model" },
 				},
 				[
-					node("icon", { name: "model" }, undefined, "icon"),
+					modelIcon ?? node("icon", { name: "model" }, undefined, "icon"),
 					node("text", { spans: facts.model.spans, wrap: "none" }, undefined, "name"),
 					node("icon", { name: "chev" }, undefined, "chev"),
 				],
 				"model",
 			);
-		const thinking = state.thinking;
 		const effortSteps = thinking === undefined ? undefined : EFFORT_STEPS[thinking];
 		const effort =
-			thinking !== undefined &&
-			node(
-				"row",
-				{
-					role: "omp.composer.effort",
-					gap: "xs",
-					align: "center",
-					title: thinkingKey ? `Thinking effort  ${formatKeyHint(thinkingKey)}` : "Thinking effort",
-					actions: { click: "thinking.cycle" },
-				},
-				[
-					effortGlyph
-						? node("effort", { level: thinking }, undefined, "glyph")
-						: node(
-								"meter",
-								{ value: effortSteps === undefined ? null : effortSteps / 4, style: "blocks", steps: 4 },
-								undefined,
-								"meter",
-							),
-					node("text", { text: thinking, wrap: "none" }, undefined, "level"),
-				],
-				"effort",
-			);
+			thinking !== undefined && !modelIcon
+				? node(
+						"row",
+						{
+							role: "omp.composer.effort",
+							gap: "xs",
+							align: "center",
+							title: `Thinking effort${thinkingHint}`,
+							actions: { click: "thinking.cycle" },
+						},
+						[
+							effortGlyph
+								? node("effort", { level: thinking }, undefined, "glyph")
+								: node(
+										"meter",
+										{ value: effortSteps === undefined ? null : effortSteps / 4, style: "blocks", steps: 4 },
+										undefined,
+										"meter",
+									),
+							node("text", { text: thinking, wrap: "none" }, undefined, "level"),
+						],
+						"effort",
+					)
+				: undefined;
 		const submit = state.running
 			? node(
 					"text",
@@ -1200,7 +1296,7 @@ export class CustomEditor extends Editor {
 						role: "omp.composer.stop",
 						text: "Stop",
 						tone: "error",
-						title: `Stop  ${interruptKey === "escape" ? "esc" : formatKeyHint(interruptKey)}`,
+						title: `Stop  ${formatTooltipKey(interruptKey)}`,
 						actions: { click: "interrupt" },
 					},
 					undefined,
@@ -1211,22 +1307,13 @@ export class CustomEditor extends Editor {
 					{
 						role: "omp.composer.send",
 						keys: ["enter"],
-						title: `Send  ${formatKeyHint("enter")}`,
+						title: `Send  ${formatTooltipKey("enter")}`,
 						actions: { click: "submit" },
 					},
 					undefined,
 					"send",
 				);
-		// The status facts are the bar's flexible space; without them a spacer keeps send at the end.
-		const bar = keyed(
-			row(compact([model, effort, facts?.extras ?? node("row", { grow: 1 }, [], "gap"), facts?.usage, submit]), {
-				role: "omp.composer.bar",
-				gap: "sm",
-				align: "center",
-			}),
-			"bar",
-		);
-		if (!shell) return { focus, mode: undefined, bar };
+		if (!shell) return { focus, mode: undefined, model, effort, submit };
 		const runs = shell.kind === "bash" ? "Runs in your shell" : "Runs in Python";
 		const mode = keyed(
 			row(
@@ -1249,7 +1336,7 @@ export class CustomEditor extends Editor {
 			),
 			"mode",
 		);
-		return { focus, mode, bar };
+		return { focus, mode, model, effort, submit };
 	}
 
 	/**
@@ -1322,12 +1409,17 @@ export class CustomEditor extends Editor {
 	/** Called when the viewing header asks to view agent `id` ({@link MAIN_AGENT_ID}: the main session). */
 	onFocusAgent?: (id: string) => void;
 
-	/** Space-bar push-to-talk; set its `handler` to enable it. It is a text-composition gesture, so it
-	 *  stays out of Vim's Normal/Visual modes (where the space bar is the `l` motion) and away from an
-	 *  open autocomplete menu. */
+	#spaceHoldSnapshot: { revision: number; line: number; col: number } | undefined;
+
+	/** Configurable push-to-talk; set its `handler` to enable it. It is a text-composition gesture, so
+	 *  it stays out of Vim's Normal/Visual modes (where the space bar is the `l` motion), away from an
+	 *  open autocomplete menu, and out of a pending character jump (whose target may be the key). */
 	readonly spaceHold = new SpaceHoldGesture(
-		count => this.deleteBeforeCursor(count),
-		() => this.vimMode === "insert" && !this.isShowingAutocomplete(),
+		count => {
+			this.#spaceHoldSnapshot = undefined;
+			if (count > 0) this.deleteBeforeCursor(count);
+		},
+		() => this.vimMode === "insert" && !this.isShowingAutocomplete() && !this.isJumpPending,
 	);
 
 	/** Custom key handlers from extensions and non-built-in app actions. */
@@ -1438,6 +1530,10 @@ export class CustomEditor extends Editor {
 		void promise.then(this.#onPasteSettled, this.#onPasteSettled);
 	}
 
+	capturesInput(data: string): boolean {
+		return this.spaceHold.shouldRoute(data);
+	}
+
 	override handleInput(data: string): void {
 		// Serialize behind any in-flight async paste so a trailing Enter / follow-up key can't
 		// submit before the clipboard image reaches `pendingImages` (Codex PR #3602 review).
@@ -1504,21 +1600,74 @@ export class CustomEditor extends Editor {
 		const parsedKey = parseKey(data);
 		const canonical = parsedKey !== undefined ? canonicalKeyId(parsedKey) : undefined;
 
+		// Space-hold push-to-talk runs before editor shortcuts so a reserved binding can never
+		// delete, move, submit, or invoke an app action while the gesture is enabled.
+		const spaceHoldText = getSpaceHoldText(data, canonical);
+		const priorSnapshot = this.#spaceHoldSnapshot;
+		if (priorSnapshot) {
+			const cursor = this.getCursor();
+			if (
+				this.textRevision !== priorSnapshot.revision ||
+				cursor.line !== priorSnapshot.line ||
+				cursor.col !== priorSnapshot.col
+			) {
+				this.spaceHold.process(undefined);
+				this.#spaceHoldSnapshot = undefined;
+			}
+		}
+
+		switch (this.spaceHold.process(canonical, spaceHoldText?.length ?? 0)) {
+			case "type": {
+				const text = spaceHoldText!;
+				const beforeCursor = this.getCursor();
+				const beforeLine = this.getLines()[beforeCursor.line] ?? "";
+				const beforeRevision = this.textRevision;
+				this.typeCharacter(text);
+				this.#collapseSkillTokens();
+				this.#collapseModelMentions();
+				this.#normalizeQueuePrefix(hadBareQueuePrefix);
+
+				const afterCursor = this.getCursor();
+				const afterLine = this.getLines()[afterCursor.line] ?? "";
+				const noInsertion =
+					this.textRevision === beforeRevision &&
+					afterCursor.line === beforeCursor.line &&
+					afterCursor.col === beforeCursor.col &&
+					afterLine === beforeLine;
+				const literalInsertion =
+					afterCursor.line === beforeCursor.line &&
+					afterCursor.col === beforeCursor.col + text.length &&
+					afterLine === beforeLine.slice(0, beforeCursor.col) + text + beforeLine.slice(beforeCursor.col);
+				if (noInsertion) {
+					this.spaceHold.recordTyped(0);
+				} else if (literalInsertion) {
+					this.spaceHold.recordTyped(text.length);
+				} else {
+					// Typing hooks rewrote the candidate (e.g. autocorrect/inline replacement).
+					// Commit that edit and start a fresh cadence rather than deleting its suffix later.
+					this.spaceHold.process(undefined);
+					this.#spaceHoldSnapshot = undefined;
+					return;
+				}
+				const cursor = this.getCursor();
+				this.#spaceHoldSnapshot = {
+					revision: this.textRevision,
+					line: cursor.line,
+					col: cursor.col,
+				};
+				return;
+			}
+			case "swallow":
+				return;
+		}
+		this.#spaceHoldSnapshot = undefined;
+
 		// Left-arrow on an empty editor: surface for the agent-hub double-tap
 		// gesture. Plain "left" only — modified arrows and any in-text cursor
 		// movement fall through to normal handling.
 		if (canonical === "left" && this.onLeftAtStart && this.getText().trim() === "") {
 			this.onLeftAtStart();
 			return;
-		}
-
-		// Space-hold push-to-talk: a sustained space bar starts/stops STT instead of typing spaces.
-		switch (this.spaceHold.process(canonical === "space")) {
-			case "type":
-				this.#forwardInput(data);
-				return;
-			case "swallow":
-				return;
 		}
 
 		// One union probe decides whether any per-action interception below can

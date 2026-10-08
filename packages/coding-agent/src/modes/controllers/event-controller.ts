@@ -140,6 +140,21 @@ interface ApprovalPreviewGate {
 	started: boolean;
 }
 
+/**
+ * Working-line text for a streamed tool intent, or `undefined` when unusable.
+ * Streamed JSON can deliver non-string `i` (object, number, boolean) before
+ * schema validation, so the type is guarded too.
+ */
+function normalizeIntent(intent: unknown): string | undefined {
+	if (typeof intent !== "string") return undefined;
+	return (
+		intent
+			.trim()
+			.replace(/\s*\.+$/, "")
+			.trim() || undefined
+	);
+}
+
 export class EventController {
 	#lastReadGroup: ReadToolGroupComponent | undefined = undefined;
 	/** Timestamp of the current turn's user prompt; drives the usage row's prompt→yield delta. */
@@ -255,10 +270,17 @@ export class EventController {
 	#prevHideThinking = false;
 	#handlers: AgentSessionEventHandlers;
 	#terminalProgressActive = false;
-	/** Bumped at every `agent_start`; an async-wait watch stands down once a new run begins. */
+	/**
+	 * Whether the running auto-compaction turned terminal progress on itself.
+	 * Only then does its end turn progress off: a compaction inside a live turn
+	 * leaves the turn's progress for that turn's `agent_end`, so Tern (which
+	 * reads progress as busy state) never sees the agent stop mid-run.
+	 */
+	#compactionOwnsProgress = false;
+	/** Bumped at every `agent_start`; a settle watch stands down once a new run begins. */
 	#runEpoch = 0;
-	/** Epoch of the in-flight {@link #finishWhenAsyncWorkDrains} watch, if any. */
-	#asyncDrainWatchEpoch: number | undefined = undefined;
+	/** Epoch of the in-flight {@link #finishWhenRunSettles} watch, if any. */
+	#settleWatchEpoch: number | undefined = undefined;
 	// Coalescing window for `message_update` events at the subscription boundary.
 	// `message_update` carries the CUMULATIVE assistant message (every update
 	// re-lists all content blocks), so when a burst of deltas arrives faster than
@@ -715,13 +737,7 @@ export class EventController {
 
 	#updateWorkingMessageFromIntent(intent: unknown): void {
 		if (this.ctx.session.isAborting) return;
-		// Streamed JSON can deliver non-string `i` (object, number, boolean) before
-		// schema validation; `?.` only guards null/undefined, so guard the type too.
-		if (typeof intent !== "string") return;
-		const trimmed = intent
-			.trim()
-			.replace(/\s*\.+$/, "")
-			.trim();
+		const trimmed = normalizeIntent(intent);
 		if (!trimmed || trimmed === this.#lastIntent) return;
 		this.#lastIntent = trimmed;
 		this.ctx.setWorkingMessage(trimmed);
@@ -739,24 +755,31 @@ export class EventController {
 		// the listener's first await, preserving the timing the coalescing
 		// tests assert on. `message_update` enqueue is itself synchronous and
 		// needs no serialization.
-		this.ctx.unsubscribe = this.ctx.session.subscribe(async (event: AgentSessionEvent) => {
-			// Coalesce the cumulative `message_update` deltas of a streaming turn
-			// into at most one handler run per window. `#handleMessageUpdate` is
-			// synchronous, so without this every token re-runs the whole
-			// streaming rebuild (splitAssistantMessageToolTimeline, reveal
-			// setTarget, per-block tool-call reconciliation) even though the TUI
-			// paints at most ~30fps — at 40-100 tps the handler work then
-			// dominates the CPU profile of an idle-looking streaming session
-			// (issue #7443). Only the latest snapshot is meaningful; non-update
-			// events flush the pending snapshot first so ordering is preserved.
-			if (event.type === "message_update") {
-				this.#enqueueMessageUpdate(event);
-				return;
-			}
-			await this.#runSerialized(async () => {
-				await this.#flushPendingMessageUpdate();
-				await this.handleEvent(event);
-			});
+		this.ctx.unsubscribe = this.ctx.session.subscribe(event => this.dispatchSessionEvent(event));
+	}
+
+	/**
+	 * Route one session event through the same pipeline as the live
+	 * subscription: coalesce the cumulative `message_update` deltas of a
+	 * streaming turn into at most one handler run per window, and serialize
+	 * every other event behind any in-flight run.
+	 *
+	 * `#handleMessageUpdate` is synchronous, so without coalescing every token
+	 * re-runs the whole streaming rebuild (splitAssistantMessageToolTimeline,
+	 * reveal setTarget, per-block tool-call reconciliation) even though the TUI
+	 * paints at most ~30fps — at 40-100 tps the handler work then dominates the
+	 * CPU profile of an idle-looking streaming session (issue #7443). Only the
+	 * latest snapshot is meaningful; non-update events flush the pending
+	 * snapshot first so ordering is preserved.
+	 */
+	async dispatchSessionEvent(event: AgentSessionEvent): Promise<void> {
+		if (event.type === "message_update") {
+			this.#enqueueMessageUpdate(event);
+			return;
+		}
+		await this.#runSerialized(async () => {
+			await this.#flushPendingMessageUpdate();
+			await this.handleEvent(event);
 		});
 	}
 
@@ -1058,6 +1081,8 @@ export class EventController {
 		this.#cancelIdleCompaction();
 		this.#cancelIdleRecap();
 		this.ctx.statusLine.markActivityStart();
+		// The turn owns progress from here; a compaction that started it hands it over.
+		this.#compactionOwnsProgress = false;
 		this.#setTerminalProgress(true);
 		this.ctx.ensureLoadingAnimation();
 		setTerminalTitleState("working");
@@ -1570,25 +1595,31 @@ export class EventController {
 				if (closed) component?.markTranscriptBlockFinalized();
 			}
 
-			// Update working message with intent from streamed tool arguments
-			for (const content of this.ctx.streamingMessage.content) {
-				if (content.type !== "toolCall") continue;
-				const args = content.arguments;
+			// Update working message with the intent of the LAST intent-bearing
+			// streamed tool call. Scanning in reverse skips the redundant
+			// intermediate setWorkingMessage calls a forward pass would make
+			// (only the last one survives the flush anyway).
+			const blocks = this.ctx.streamingMessage.content;
+			for (let index = blocks.length - 1; index >= 0; index--) {
+				const block = blocks[index];
+				if (block?.type !== "toolCall") continue;
+				const args = block.arguments;
 				if (!args || typeof args !== "object") continue;
+				let intent: string | undefined;
 				if (INTENT_FIELD in args) {
-					this.#updateWorkingMessageFromIntent(args[INTENT_FIELD]);
-					continue;
-				}
-				const tool = this.ctx.viewSession.getToolByName(content.name);
-				if (typeof tool?.intent !== "function") continue;
-				try {
-					const derived = tool.intent(args as never)?.trim();
-					if (derived) {
-						this.#updateWorkingMessageFromIntent(derived);
+					intent = normalizeIntent(args[INTENT_FIELD]);
+				} else {
+					const tool = this.ctx.viewSession.getToolByName(block.name);
+					if (typeof tool?.intent !== "function") continue;
+					try {
+						intent = normalizeIntent(tool.intent(args as never));
+					} catch {
+						// intent function must never break the UI
 					}
-				} catch {
-					// intent function must never break the UI
 				}
+				if (!intent) continue;
+				this.#updateWorkingMessageFromIntent(intent);
+				break;
 			}
 
 			this.ctx.ui.requestRender();
@@ -2186,24 +2217,20 @@ export class EventController {
 		// A non-terminal settle (`isTerminal: false`) is a scheduling pause, not the
 		// end of the run: the agent's own continuation (reminder, retry, queued
 		// steer/follow-up, IRC wake) follows, or background work may re-wake it.
-		// Skip the idle title/loader teardown; the later terminal `agent_end`
-		// performs it. Still flush a deferred model switch — the plan-mode
-		// reconciler queues it to apply once the current stream ends, and
-		// `#finishAgentEnd` is otherwise its only flush site, so the automatic
-		// continuation would otherwise run on the old model/thinking level until
-		// the terminal settle.
+		// Skip the idle title/loader teardown; the continuation's terminal
+		// `agent_end` performs it, or the settle watch does when that continuation
+		// never starts (an abort cancels it, background work ends without a wake).
+		// Still flush a deferred model switch — the plan-mode reconciler queues it
+		// to apply once the current stream ends, and `#finishAgentEnd` is otherwise
+		// its only flush site, so the automatic continuation would otherwise run
+		// on the old model/thinking level until the terminal settle.
 		if (event.isTerminal === false) {
 			// `awaitingAsyncWork`: the model handed control back and only a
 			// background-job result can resume it. The title tracks the model, so it
 			// goes idle now — before any await, so a wake landing mid-flush keeps the
-			// `working` its `agent_start` sets. That wake is not guaranteed (a
-			// cancelled job enqueues no delivery; acknowledged/watched ones are
-			// suppressed), so the loader/progress teardown waits out the background
-			// work instead of a terminal `agent_end` that may never come.
-			if (event.awaitingAsyncWork === true) {
-				setTerminalTitleState("idle");
-				void this.#finishWhenAsyncWorkDrains(event);
-			}
+			// `working` its `agent_start` sets.
+			if (event.awaitingAsyncWork === true) setTerminalTitleState("idle");
+			void this.#finishWhenRunSettles(event);
 			await this.ctx.flushPendingModelSwitch();
 			// Reaching here means the first guard passed, so `isStreaming` is already
 			// false: a command issued from now on mounts immediately. Leaving earlier
@@ -2222,35 +2249,48 @@ export class EventController {
 	}
 
 	/**
-	 * Terminal teardown for an async-wait settle whose wake never arrives. Mirrors
-	 * `RpcSessionSettleWatcher`: wait out owner-scoped background work, then — if
-	 * no new run started and the session is quiet — run the same teardown a
-	 * terminal `agent_end` would. A real wake starts a run (bumping the epoch)
-	 * whose own `agent_end` finalizes it instead.
+	 * Terminal teardown for a non-terminal settle whose continuation never
+	 * starts. Its terminal `agent_end` is not guaranteed: an abort cancels a
+	 * scheduled retry or compaction continuation before its `agent_start`, and a
+	 * cancelled background job enqueues no wake (acknowledged/watched ones are
+	 * suppressed). Mirrors `RpcSessionSettleWatcher`: wait out retries, scheduled
+	 * continuations, and owner-scoped background work, then — if no new run
+	 * started and the session is quiet — run the same teardown a terminal
+	 * `agent_end` would. A continuation that does start bumps the epoch and its
+	 * own `agent_end` finalizes the run instead.
 	 */
-	async #finishWhenAsyncWorkDrains(event: Extract<AgentSessionEvent, { type: "agent_end" }>): Promise<void> {
+	async #finishWhenRunSettles(event: Extract<AgentSessionEvent, { type: "agent_end" }>): Promise<void> {
 		const epoch = this.#runEpoch;
-		if (this.#asyncDrainWatchEpoch === epoch) return;
-		this.#asyncDrainWatchEpoch = epoch;
+		if (this.#settleWatchEpoch === epoch) return;
+		this.#settleWatchEpoch = epoch;
 		const session = this.ctx.session;
 		// No `hasAdmittedSubmission` gate: this very settle is emitted while the
 		// prompt that produced it is still admitted, and a new submission starts a
 		// run whose `agent_start` bumps the epoch anyway.
 		const superseded = () => this.#runEpoch !== epoch || this.ctx.session !== session || session.isStreaming;
 		try {
-			while (!superseded() && session.hasPendingAsyncWork()) {
+			while (!superseded()) {
+				await session.waitForIdle();
+				if (superseded() || !session.hasPendingAsyncWork()) break;
 				await session.settleAsyncWork();
 			}
 			await this.#runSerialized(async () => {
-				if (superseded() || session.hasPendingAsyncWork()) return;
+				if (
+					superseded() ||
+					session.hasPendingAsyncWork() ||
+					session.hasPostPromptWork ||
+					session.queuedMessageCount > 0
+				) {
+					return;
+				}
 				setTerminalTitleState("idle");
 				await this.#finishAgentEnd(event);
 				if (this.ctx.shutdownRequested) this.ctx.requestShutdown();
 			});
 		} catch (error) {
-			logger.warn("Async-wait settle teardown failed", { error: String(error) });
+			logger.warn("Non-terminal settle teardown failed", { error: String(error) });
 		} finally {
-			if (this.#asyncDrainWatchEpoch === epoch) this.#asyncDrainWatchEpoch = undefined;
+			if (this.#settleWatchEpoch === epoch) this.#settleWatchEpoch = undefined;
 		}
 	}
 
@@ -2340,7 +2380,10 @@ export class EventController {
 	): Promise<void> {
 		this.#cancelIdleCompaction();
 		this.#cancelIdleRecap();
-		this.#setTerminalProgress(true);
+		if (!this.#terminalProgressActive) {
+			this.#setTerminalProgress(true);
+			this.#compactionOwnsProgress = this.#terminalProgressActive;
+		}
 		this.#stopWorkingLoader();
 		this.ctx.statusContainer.disposeChildren();
 		const reasonText =
@@ -2385,7 +2428,10 @@ export class EventController {
 	async #handleAutoCompactionEnd(event: Extract<AgentSessionEvent, { type: "auto_compaction_end" }>): Promise<void> {
 		this.#cancelIdleCompaction();
 		this.#cancelIdleRecap();
-		this.#setTerminalProgress(false);
+		if (this.#compactionOwnsProgress) {
+			this.#compactionOwnsProgress = false;
+			this.#setTerminalProgress(false);
+		}
 		if (this.ctx.autoCompactionLoader) {
 			this.ctx.autoCompactionLoader.stop();
 			this.ctx.autoCompactionLoader = undefined;

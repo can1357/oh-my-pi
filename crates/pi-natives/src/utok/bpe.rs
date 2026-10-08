@@ -21,8 +21,9 @@
 
 use std::{
 	borrow::Cow,
-	collections::HashMap,
-	hash::{BuildHasherDefault, Hasher},
+	cmp::Reverse,
+	collections::{BinaryHeap, HashMap},
+	hash::{BuildHasherDefault, Hash, Hasher},
 };
 
 use crate::utok::{
@@ -65,14 +66,35 @@ impl Hasher for FxHasher {
 type Fx = BuildHasherDefault<FxHasher>;
 type FxMap = HashMap<Box<[u8]>, u32, Fx>;
 
-/// Pack a key of ≤15 bytes losslessly into a `u128`: bytes little-endian
+/// A [`pack`]ed short key as four `u32` words. A `u128` key is 16-byte
+/// aligned, which pads every `(key, rank)` bucket from 20 to 32 bytes; the
+/// rank table holds one bucket per short token, ~6 MB of padding on o200k
+/// and Qwen3 combined.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct ShortKey([u32; 4]);
+
+impl Hash for ShortKey {
+	/// Two word-sized writes: the same Fx mixing a `u128` key got.
+	#[inline]
+	fn hash<H: Hasher>(&self, state: &mut H) {
+		let [a, b, c, d] = self.0;
+		state.write_u64(u64::from(a) | u64::from(b) << 32);
+		state.write_u64(u64::from(c) | u64::from(d) << 32);
+	}
+}
+
+/// Pack a key of ≤15 bytes losslessly into 128 bits: bytes little-endian
 /// at bits 0..len*8, zero padding, length tag at bits 120..128 (a
 /// 15-byte key leaves the top byte free, so equal packs imply equal keys
 /// even across lengths and with NUL bytes). Built from two overlapping
 /// unaligned reads — a variable-length memcpy here benched slower than
 /// hashing the raw bytes; the overlap region ORs identical bits.
 #[inline]
-fn pack(key: &[u8]) -> Option<u128> {
+#[allow(
+	clippy::cast_possible_truncation,
+	reason = "splits the packed u128 into its four u32 words"
+)]
+fn pack(key: &[u8]) -> Option<ShortKey> {
 	let n = key.len();
 	if n > 15 {
 		return None;
@@ -88,7 +110,8 @@ fn pack(key: &[u8]) -> Option<u128> {
 	} else {
 		0
 	};
-	Some(v | (n as u128) << 120)
+	let v = v | (n as u128) << 120;
+	Some(ShortKey([v as u32, (v >> 32) as u32, (v >> 64) as u32, (v >> 96) as u32]))
 }
 
 /// Token bytes → rank map decoded from a UTOK1 blob.
@@ -99,7 +122,7 @@ fn pack(key: &[u8]) -> Option<u128> {
 ///
 /// - 2 bytes — direct-indexed table: the merge seed loop queries every adjacent
 ///   byte pair, so over half of all lookups land here as one array load.
-/// - other ≤15 bytes — [`pack`]ed `u128` keys in an Fx map: KV inline in the
+/// - other ≤15 bytes — [`pack`]ed [`ShortKey`]s in an Fx map: KV inline in the
 ///   table, no `Box` pointer chase, no byte-wise compare.
 /// - >15 bytes — plain byte-keyed Fx map (~3% of vocab; spans this long are
 ///   > almost always misses).
@@ -108,7 +131,7 @@ pub struct RankTable {
 	/// absent (ranks are vocab indices, far below the sentinel).
 	pairs:             Box<[u32; 65536]>,
 	/// Tokens of 1 or 3..=15 bytes, keyed by [`pack`].
-	short:             HashMap<u128, u32, Fx>,
+	short:             HashMap<ShortKey, u32, Fx>,
 	/// Tokens longer than 15 bytes.
 	long:              FxMap,
 	/// Longest token in bytes; callers may use it to bound scans.
@@ -116,6 +139,11 @@ pub struct RankTable {
 }
 
 impl RankTable {
+	/// Pieces longer than this merge through
+	/// [`merge_long`](Self::merge_long): [`merge`](Self::merge) rescans every
+	/// pair after each merge, quadratic in the piece length.
+	const LONG_PIECE: usize = 128;
+
 	/// Parse a zstd-compressed UTOK1 blob. Panics on malformed data — the
 	/// blobs are compile-time embedded, so corruption is a build error.
 	///
@@ -124,42 +152,56 @@ impl RankTable {
 	/// those ranks must never be produced.
 	pub fn parse(zst: &[u8]) -> Self {
 		let raw = zstd::decode_all(zst).expect("utoken: zstd decode failed");
-		let mut p = &raw[..];
-		assert_eq!(&p[..6], b"UTOK1\n", "utoken: bad magic");
-		p = &p[6..];
-		let n = u32::from_le_bytes(p[..4].try_into().unwrap()) as usize;
-		p = &p[4..];
+		assert_eq!(&raw[..6], b"UTOK1\n", "utoken: bad magic");
+		let n = u32::from_le_bytes(raw[6..10].try_into().unwrap()) as usize;
+		assert!(n > 0 || raw.len() == 10, "utoken: trailing bytes in UTOK1 blob");
+		// One (length, bytes) record per rank; zero length marks a dead slot.
+		let entries = || {
+			let mut p = &raw[10..];
+			(0..n as u32).map(move |rank| {
+				let mut len = 0usize;
+				let mut shift = 0;
+				loop {
+					let b = p[0];
+					p = &p[1..];
+					len |= ((b & 0x7f) as usize) << shift;
+					if b < 0x80 {
+						break;
+					}
+					shift += 7;
+				}
+				let key = &p[..len];
+				p = &p[len..];
+				assert!(rank as usize + 1 < n || p.is_empty(), "utoken: trailing bytes in UTOK1 blob");
+				(rank, key)
+			})
+		};
+		// Size `short` to its real population: dead slots and pair/long
+		// tokens would otherwise round a sparse table up a power of two. A
+		// sparse subset table (Jev's base set: 49k short tokens over 200k
+		// ranks) still keeps half the container's slots: it answers mostly
+		// misses, which at a ~0.75 load cost Jev ~12% of its count time.
+		let short_count = entries()
+			.filter(|(_, key)| !key.is_empty() && key.len() != 2 && key.len() <= 15)
+			.count();
 		let mut pairs: Box<[u32; 65536]> =
 			vec![u32::MAX; 65536].into_boxed_slice().try_into().unwrap();
-		let mut short = HashMap::with_capacity_and_hasher(n, Fx::default());
+		let mut short = HashMap::with_capacity_and_hasher(short_count.max(n / 2), Fx::default());
 		let mut long = FxMap::default();
 		let mut max_token_len = 0usize;
-		for rank in 0..n as u32 {
-			let mut len = 0usize;
-			let mut shift = 0;
-			loop {
-				let b = p[0];
-				p = &p[1..];
-				len |= ((b & 0x7f) as usize) << shift;
-				if b < 0x80 {
-					break;
-				}
-				shift += 7;
+		for (rank, key) in entries() {
+			if key.is_empty() {
+				continue;
 			}
-			if len > 0 {
-				let key = &p[..len];
-				if let [a, b] = key {
-					pairs[usize::from(*a) << 8 | usize::from(*b)] = rank;
-				} else if let Some(k) = pack(key) {
-					short.insert(k, rank);
-				} else {
-					long.insert(key.into(), rank);
-				}
-				max_token_len = max_token_len.max(len);
-				p = &p[len..];
+			if let [a, b] = key {
+				pairs[usize::from(*a) << 8 | usize::from(*b)] = rank;
+			} else if let Some(k) = pack(key) {
+				short.insert(k, rank);
+			} else {
+				long.insert(key.into(), rank);
 			}
+			max_token_len = max_token_len.max(key.len());
 		}
-		assert!(p.is_empty(), "utoken: trailing bytes in UTOK1 blob");
 		Self { pairs, short, long, max_token_len }
 	}
 
@@ -185,13 +227,17 @@ impl RankTable {
 			out.push(rank);
 			return;
 		}
-		self.merge(piece, |start, end| {
-			out.push(
-				self
-					.rank(&piece[start..end])
-					.expect("utoken: unreachable merge state"),
-			);
-		});
+		Self::merge(
+			piece,
+			|p| self.rank(p).unwrap_or(u32::MAX),
+			|start, end| {
+				out.push(
+					self
+						.rank(&piece[start..end])
+						.expect("utoken: unreachable merge state"),
+				);
+			},
+		);
 	}
 
 	/// Token count of one pre-tokenized piece without materializing ids.
@@ -203,7 +249,7 @@ impl RankTable {
 			return 1;
 		}
 		let mut n = 0u32;
-		self.merge(piece, |_, _| n += 1);
+		Self::merge(piece, |p| self.rank(p).unwrap_or(u32::MAX), |_, _| n += 1);
 		n
 	}
 
@@ -217,21 +263,25 @@ impl RankTable {
 			return 0;
 		}
 		let mut n = 0u32;
-		self.merge(piece, |_, _| n += 1);
+		Self::merge(piece, |p| self.rank(p).unwrap_or(u32::MAX), |_, _| n += 1);
 		n
 	}
 
 	/// tiktoken's `byte_pair_merge`: start from single bytes, repeatedly
 	/// merge the adjacent pair with the lowest rank, then emit each final
-	/// span via `emit(start, end)`.
-	fn merge(&self, piece: &[u8], mut emit: impl FnMut(usize, usize)) {
+	/// span via `emit(start, end)`. `rank_of` prices a span, `u32::MAX` when
+	/// it is no token.
+	fn merge(piece: &[u8], rank_of: impl Fn(&[u8]) -> u32, mut emit: impl FnMut(usize, usize)) {
+		if piece.len() > Self::LONG_PIECE {
+			return Self::merge_long(piece, rank_of, emit);
+		}
 		// parts[k] = (start offset, rank of merging part k with part k+1).
 		// Two sentinels keep `parts[i + 3].0` in-bounds when recomputing
 		// the rank of the pair formed after a merge at the end.
 		let mut parts: Vec<(usize, u32)> = Vec::with_capacity(piece.len() + 1);
 		let mut min_rank: (u32, usize) = (u32::MAX, usize::MAX);
 		for i in 0..piece.len() - 1 {
-			let rank = self.rank(&piece[i..i + 2]).unwrap_or(u32::MAX);
+			let rank = rank_of(&piece[i..i + 2]);
 			if rank < min_rank.0 {
 				min_rank = (rank, i);
 			}
@@ -245,9 +295,7 @@ impl RankTable {
 		// the fused pair spans parts[k].0 .. parts[k + 3].0).
 		let get_rank = |parts: &[(usize, u32)], k: usize| -> u32 {
 			if k + 3 < parts.len() {
-				self
-					.rank(&piece[parts[k].0..parts[k + 3].0])
-					.unwrap_or(u32::MAX)
+				rank_of(&piece[parts[k].0..parts[k + 3].0])
 			} else {
 				u32::MAX
 			}
@@ -272,6 +320,65 @@ impl RankTable {
 			emit(w[0].0, w[1].0);
 		}
 	}
+
+	/// [`merge`](Self::merge) in O(n log n) for long pieces. Pending pairs sit
+	/// in a min-heap keyed by (rank, start): the lowest rank still merges
+	/// first, and among equal ranks the leftmost pair, exactly as the linear
+	/// rescan picks. A merge leaves the heap entries of the pairs it changed
+	/// stale; they are skipped when popped.
+	fn merge_long(piece: &[u8], rank_of: impl Fn(&[u8]) -> u32, mut emit: impl FnMut(usize, usize)) {
+		const NONE: usize = usize::MAX;
+		let len = piece.len();
+		// Parts are named by their start offset. `next[s]` is the start of
+		// the part after `s` (`len` past the last), `prev[s]` the start of the
+		// part before it, and `rank[s]` the rank of merging `s` with its
+		// successor (`u32::MAX` when impossible or once `s` was merged away).
+		let mut next: Vec<usize> = (1..=len).collect();
+		let mut prev: Vec<usize> = (0..len).map(|s| s.checked_sub(1).unwrap_or(NONE)).collect();
+		let mut rank = vec![u32::MAX; len];
+		let mut heap = BinaryHeap::with_capacity(len);
+		for s in 0..len - 1 {
+			rank[s] = rank_of(&piece[s..s + 2]);
+			if rank[s] != u32::MAX {
+				heap.push(Reverse((rank[s], s)));
+			}
+		}
+		let pair_rank = |next: &[usize], s: usize| -> u32 {
+			let successor = next[s];
+			if successor >= len {
+				return u32::MAX;
+			}
+			rank_of(&piece[s..next[successor]])
+		};
+
+		while let Some(Reverse((pair, s))) = heap.pop() {
+			if rank[s] != pair {
+				continue;
+			}
+			let absorbed = next[s];
+			next[s] = next[absorbed];
+			if next[s] < len {
+				prev[next[s]] = s;
+			}
+			rank[absorbed] = u32::MAX;
+			rank[s] = pair_rank(&next, s);
+			if rank[s] != u32::MAX {
+				heap.push(Reverse((rank[s], s)));
+			}
+			let before = prev[s];
+			if before != NONE {
+				rank[before] = pair_rank(&next, before);
+				if rank[before] != u32::MAX {
+					heap.push(Reverse((rank[before], before)));
+				}
+			}
+		}
+		let mut s = 0;
+		while s < len {
+			emit(s, next[s]);
+			s = next[s];
+		}
+	}
 }
 
 /// A full BPE tokenizer: piece splitter + rank table + family flags.
@@ -291,54 +398,59 @@ pub struct BpeEncoding {
 impl BpeEncoding {
 	pub fn count<U: Unit>(&self, units: &[U]) -> u32 {
 		let mut n = 0u32;
-		self.run(units, &mut |t, p| n += t.count_piece(p));
+		for_each_piece(&self.splitter, self.nfc, units, &mut |p| n += self.table.count_piece(p));
 		n
 	}
 
 	pub fn encode<U: Unit>(&self, units: &[U]) -> Vec<u32> {
 		let mut out = Vec::new();
-		self.run(units, &mut |t, p| t.encode_piece(p, &mut out));
+		for_each_piece(&self.splitter, self.nfc, units, &mut |p| {
+			self.table.encode_piece(p, &mut out);
+		});
 		out
 	}
+}
 
-	/// Normalize/transcode as required, split, and feed each piece's
-	/// UTF-8 bytes to `f` alongside the rank table. Crate-visible so
-	/// count-only families that price pieces differently (Jev) reuse the
-	/// normalization and splitting unchanged.
-	pub(crate) fn run<U: Unit>(&self, units: &[U], f: &mut impl FnMut(&RankTable, &[u8])) {
-		if let Some(bytes) = U::as_utf8(units) {
-			// UTF-8 flavor: valid by construction (`str`/`String` input).
-			if self.nfc
-				&& let Ok(text) = std::str::from_utf8(bytes)
-				&& let Cow::Owned(norm) = pretoken::nfc(text)
-			{
-				return self.scan(norm.as_bytes(), f);
-			}
-			return self.scan(bytes, f);
+/// Normalize/transcode as required, split with `splitter`, and feed each
+/// piece's UTF-8 bytes to `f`. Crate-visible so count-only families that
+/// price pieces differently (Jev) reuse the normalization and splitting
+/// unchanged.
+pub(crate) fn for_each_piece<U: Unit>(
+	splitter: &Splitter,
+	nfc: bool,
+	units: &[U],
+	f: &mut impl FnMut(&[u8]),
+) {
+	if let Some(bytes) = U::as_utf8(units) {
+		// UTF-8 flavor: valid by construction (`str`/`String` input).
+		if nfc
+			&& let Ok(text) = std::str::from_utf8(bytes)
+			&& let Cow::Owned(norm) = pretoken::nfc(text)
+		{
+			return scan(splitter, norm.as_bytes(), f);
 		}
-		// Non-UTF-8 flavors: owned UTF-8 needed only when NFC actually has
-		// work to do, or while the test-only regex oracle is active.
-		#[cfg(test)]
-		let regex_splitter = self.splitter.is_regex();
-		#[cfg(not(test))]
-		let regex_splitter = false;
-		if (self.nfc && !nfc_quick(units)) || regex_splitter {
-			let s = decode_lossy(units);
-			let s = match pretoken::nfc(&s) {
-				Cow::Owned(o) if self.nfc => o,
-				_ => s,
-			};
-			return self.scan(s.as_bytes(), f);
-		}
-		self.scan(units, f);
+		return scan(splitter, bytes, f);
 	}
+	// Non-UTF-8 flavors: owned UTF-8 needed only when NFC actually has
+	// work to do, or while the test-only regex oracle is active.
+	#[cfg(test)]
+	let regex_splitter = splitter.is_regex();
+	#[cfg(not(test))]
+	let regex_splitter = false;
+	if (nfc && !nfc_quick(units)) || regex_splitter {
+		let s = decode_lossy(units);
+		let s = match pretoken::nfc(&s) {
+			Cow::Owned(o) if nfc => o,
+			_ => s,
+		};
+		return scan(splitter, s.as_bytes(), f);
+	}
+	scan(splitter, units, f);
+}
 
-	fn scan<U: Unit>(&self, units: &[U], f: &mut impl FnMut(&RankTable, &[u8])) {
-		let mut buf = Vec::new();
-		self
-			.splitter
-			.for_each_piece(units, |piece| f(&self.table, piece_bytes(piece, &mut buf)));
-	}
+fn scan<U: Unit>(splitter: &Splitter, units: &[U], f: &mut impl FnMut(&[u8])) {
+	let mut buf = Vec::new();
+	splitter.for_each_piece(units, |piece| f(piece_bytes(piece, &mut buf)));
 }
 
 /// UTF-8 bytes of one piece: identity for `u8`, otherwise re-encoded into

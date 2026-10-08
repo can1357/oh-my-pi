@@ -194,4 +194,36 @@ describe("vterm xterm-compatible golden streams", () => {
 			cursorY: 3,
 		});
 	});
+
+	test("keeps ASCII bases joined to combining marks and keycap sequences", async () => {
+		const terminal = new Terminal({ cols: 8, rows: 2 });
+		await write(terminal, "xa\u0301y1\uFE0F\u20E3z");
+		const line = terminal.buffer.active.getLine(0)!;
+		expect(line.getCell(0)!.getChars()).toBe("x");
+		expect(line.getCell(1)!.getChars()).toBe("a\u0301");
+		expect(line.getCell(2)!.getChars()).toBe("y");
+		expect(line.getCell(3)!.getChars()).toBe("1\uFE0F\u20E3");
+		expect(line.getCell(5)!.getChars()).toBe("z");
+		expect(terminal.buffer.active.cursorX).toBe(6);
+	});
+
+	test("attaches a combining mark from a later write to the previous cell", async () => {
+		const terminal = new Terminal({ cols: 6, rows: 2 });
+		await write(terminal, "aa");
+		await write(terminal, "\u0301b");
+		const line = terminal.buffer.active.getLine(0)!;
+		expect(line.getCell(0)!.getChars()).toBe("a");
+		expect(line.getCell(1)!.getChars()).toBe("a\u0301");
+		expect(line.getCell(2)!.getChars()).toBe("b");
+		expect(terminal.buffer.active.cursorX).toBe(3);
+	});
+
+	test("a retained line cannot alter live output after reflow", async () => {
+		const terminal = new Terminal({ cols: 4, rows: 2 });
+		await write(terminal, "\u00e9\u00e9\u00e9\u00e9");
+		const retained = terminal.buffer.active.getLine(0)!;
+		terminal.resize(5, 2);
+		Reflect.set(retained.cells[0]!, "chars", "X");
+		expect(terminal.buffer.active.getLine(0)!.translateToString(true)).toBe("\u00e9\u00e9\u00e9\u00e9");
+	});
 });

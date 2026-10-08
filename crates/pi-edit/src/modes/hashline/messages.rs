@@ -6,6 +6,7 @@ use std::{
 	fmt::Write,
 };
 
+use super::format::format_numbered_line;
 pub use super::types::BlockSpan;
 
 const HL_FILE_PREFIX: &str = "[";
@@ -15,12 +16,6 @@ const HL_PUT_KEYWORD: &str = "PUT";
 const HL_CUT_KEYWORD: &str = "CUT";
 const HL_FILE_HASH_SEP: &str = "#";
 const HL_RANGE_SEP: &str = ".=";
-const HL_LINE_BODY_SEP: &str = ":";
-
-#[inline]
-fn format_numbered_line(line_number: u32, line: &str) -> String {
-	format!("{line_number}{HL_LINE_BODY_SEP}{line}")
-}
 
 /// Tiny JS-compatible `JSON.stringify(str)` that escapes `"`, `\`, and control
 /// characters, emitting other UTF-8 characters as-is.

@@ -6135,6 +6135,56 @@ describe("advisor", () => {
 			expect(promptText(promptInputs.at(-1) as string | AgentMessage[])).toContain("quota-turn");
 		});
 
+		it("renders the quota-requeued batch against the advisor regex values it was prepared under", async () => {
+			// The requeued single-block text is rendered lazily on the quota path. It
+			// must be rendered BEFORE the advisor seen-state (and its retained regex
+			// values) is cleared; rendering after the clear would mint a
+			// friendly-prefixed placeholder that collides with a previously
+			// delivered replace-regex value.
+			const obfuscator = new SecretObfuscator([
+				{ type: "plain", content: "OTHERSECRET", friendlyName: "TOKABC123" },
+				{ type: "regex", content: "tok_[a-z0-9]+", mode: "replace" },
+			]);
+			const obfuscate = vi.spyOn(obfuscator, "obfuscate");
+			const promptInputs: Array<string | AgentMessage[]> = [];
+			let shouldFail = false;
+			const agent: AdvisorAgent = {
+				prompt: async input => {
+					promptInputs.push(input);
+					if (shouldFail) throw new Error("insufficient_quota: rate limit exceeded");
+				},
+				abort: () => {},
+				reset: () => {},
+				state: { messages: [] },
+			};
+			const messages: AgentMessage[] = [{ role: "user", content: "first tok_abc123", timestamp: 1 } as AgentMessage];
+			const host: AdvisorRuntimeHost = {
+				snapshotMessages: () => messages,
+				obfuscator,
+				notifyQuotaExhausted: () => {},
+			};
+			const runtime = new AdvisorRuntime(agent, host, 0);
+			runtime.onTurnEnd();
+			await runtime.waitForCatchup(1000, 1);
+			expect(promptInputs).toHaveLength(1);
+
+			shouldFail = true;
+			obfuscate.mockClear();
+			messages.push({ role: "user", content: "then OTHERSECRET", timestamp: 2 } as AgentMessage);
+			runtime.onTurnEnd();
+			await settleUntil(() => runtime.quotaExhausted && promptInputs.length === 2);
+
+			const rendered = obfuscate.mock.results.flatMap(result =>
+				result.type === "return" && typeof result.value === "string" ? [result.value] : [],
+			);
+			const requeued = rendered.findLast(text => obfuscator.deobfuscate(text).includes("then OTHERSECRET"));
+			expect(requeued).toBeDefined();
+			expect(requeued).not.toContain("OTHERSECRET");
+			expect(requeued).not.toContain("TOKABC123_");
+			expect(promptText(promptInputs[1])).not.toContain("TOKABC123_");
+			runtime.dispose();
+		});
+
 		it("resolves waitForCatchup immediately when quota is exhausted", async () => {
 			const agent: AdvisorAgent = {
 				prompt: async () => {
