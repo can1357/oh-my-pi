@@ -32,7 +32,7 @@ import {
 	normalizeConnectedCdpUrl,
 	releaseBrowser,
 } from "@oh-my-pi/pi-coding-agent/tools/browser/registry";
-import { acquireTab } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-supervisor";
+import { acquireTab, getTab } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-supervisor";
 import { Process, ProcessStatus } from "@oh-my-pi/pi-natives";
 import type { Browser, HTTPRequest, Page, Target } from "puppeteer-core";
 import { rejectionOf } from "../helpers/rejection";
@@ -201,6 +201,94 @@ describe("pickElectronTarget", () => {
 
 		await expect(pickElectronTarget(browser)).resolves.toBe(page);
 	});
+
+	test.skipIf(!CHROMIUM_AVAILABLE)(
+		"waits for a real attached Chromium's first page before opening the managed tab",
+		async () => {
+			const exe = await ensureChromiumExecutable();
+			if (!exe) throw new Error("Expected a Chromium executable");
+			const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-attach-page-readiness-"));
+			const port = await findFreeCdpPort();
+			const child = Bun.spawn(
+				[
+					exe,
+					"--headless=new",
+					"--no-sandbox",
+					"--no-startup-window",
+					"--no-first-run",
+					"--no-default-browser-check",
+					"--use-mock-keychain",
+					"--password-store=basic",
+					`--user-data-dir=${root}`,
+					`--remote-debugging-port=${port}`,
+				],
+				{ stdin: "ignore", stdout: "ignore", stderr: "ignore" },
+			);
+			const session = makeSession();
+			const prelude = createBrowserPrelude(session);
+			const context = { session, toolCallId: "attach-page-readiness" };
+			const name = `page-readiness-${crypto.randomUUID()}`;
+			const controller = new AbortController();
+			let attached: BrowserHandle | undefined;
+			let restoreWait: (() => void) | undefined;
+			try {
+				const cdpUrl = `http://127.0.0.1:${port}`;
+				await waitForCdp(cdpUrl, 15_000);
+				attached = await acquireBrowser({ kind: "connected", cdpUrl }, { cwd: process.cwd() });
+				if (!("browser" in attached)) throw new Error("Expected a Puppeteer browser");
+				const browser = attached.browser;
+				expect(await browser.pages()).toHaveLength(0);
+				const waiting = Promise.withResolvers<void>();
+				const waitForTarget = browser.waitForTarget.bind(browser);
+				// Observe the real waiter starting, without replacing its CDP behavior.
+				// The first page is then created externally, not by browser.open.
+				const waitSpy = vi.spyOn(browser, "waitForTarget").mockImplementation((predicate, options) => {
+					waiting.resolve();
+					return waitForTarget(predicate, options);
+				});
+				restoreWait = () => waitSpy.mockRestore();
+				const opening = prelude
+					.invoke(
+						{
+							action: "open",
+							name,
+							url: "data:text/html,<title>First attached page</title>",
+							timeout: 15,
+							app: { cdp_url: cdpUrl },
+						},
+						{ ...context, signal: controller.signal },
+					)
+					.then(
+						result => ({ result }),
+						(error: unknown) => ({ error }),
+					);
+				await Promise.race([
+					waiting.promise,
+					opening.then(outcome => {
+						if ("error" in outcome) throw outcome.error;
+						throw new Error("Attached open finished before an external page was created");
+					}),
+				]);
+				expect(await browser.pages()).toHaveLength(0);
+				await browser.newPage();
+				const outcome = await opening;
+				if ("error" in outcome) throw outcome.error;
+				const title = await prelude.invoke({ action: "run", name, code: "return await tab.title();" }, context);
+				expect(title.details).toMatchObject({ value: "First attached page" });
+				await prelude.invoke({ action: "close", name, kill: true }, context);
+				expect(await probeCdpStatus(`${cdpUrl}/json/version`, { timeoutMs: 1500 })).toBe(200);
+			} finally {
+				controller.abort();
+				restoreWait?.();
+				await prelude.invoke({ action: "close", name }, context).catch(() => {});
+				if (attached) await releaseBrowser(attached, { kill: false });
+				child.kill();
+				await child.exited;
+				await fs.rm(root, { recursive: true, force: true });
+			}
+		},
+		30_000,
+	);
 
 	test("reports available pages when the matcher misses", async () => {
 		const page = fakePage({ url: "https://example.com/", title: "Example" });
@@ -426,6 +514,16 @@ describe("pickElectronTarget", () => {
 					url: "data:text/html,<title>Owned</title>",
 					app: { path: exe, args: [...flags, "--user-data-dir", path.join(root, "owned")] },
 				});
+				const borrowedTab = getTab(borrowedName);
+				const ownedTab = getTab(ownedName);
+				if (borrowedTab?.backend !== "worker" || ownedTab?.backend !== "worker")
+					throw new Error("Expected Chromium worker tabs");
+				expect(borrowedTab.browser).not.toBe(ownedTab.browser);
+				expect(borrowedTab.targetId).not.toBe(ownedTab.targetId);
+				expect(borrowedTab.browser.subprocess).toBeUndefined();
+				expect(ownedTab.browser.subprocess).toBeDefined();
+				const ownedTitle = await invoke({ action: "run", name: ownedName, code: "return await tab.title();" });
+				expect(ownedTitle.details).toMatchObject({ value: "Owned" });
 				const title = await invoke({ action: "run", name: borrowedName, code: "return await tab.title();" });
 				expect(title.details).toMatchObject({ value: "Borrowed" });
 				await invoke({ action: "close", name: borrowedName, kill: true });
@@ -433,6 +531,68 @@ describe("pickElectronTarget", () => {
 			} finally {
 				await invoke({ action: "close", name: ownedName, kill: true }).catch(() => {});
 				await invoke({ action: "close", name: borrowedName, kill: true }).catch(() => {});
+				child.kill();
+				await child.exited;
+				await fs.rm(root, { recursive: true, force: true });
+			}
+		},
+		30_000,
+	);
+
+	test.skipIf(!CHROMIUM_AVAILABLE)(
+		"reports a connected browser's own viewport on open and observe",
+		async () => {
+			const exe = await ensureChromiumExecutable();
+			if (!exe) throw new Error("Expected a Chromium executable");
+			const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-connected-viewport-"));
+			const port = await findFreeCdpPort();
+			const child = Bun.spawn(
+				[
+					exe,
+					"--headless=new",
+					"--no-sandbox",
+					"--no-first-run",
+					"--use-mock-keychain",
+					"--window-size=900,700",
+					"--force-device-scale-factor=2",
+					`--user-data-dir=${root}`,
+					`--remote-debugging-port=${port}`,
+				],
+				{ stdin: "ignore", stdout: "ignore", stderr: "ignore" },
+			);
+			const session = makeSession();
+			const prelude = createBrowserPrelude(session);
+			const invoke = (parameters: unknown) =>
+				prelude.invoke(parameters, { session, toolCallId: "connected-viewport" });
+			const name = `connected-viewport-${crypto.randomUUID()}`;
+			try {
+				await waitForCdp(`http://127.0.0.1:${port}`, 15_000);
+				const opened = await invoke({
+					action: "open",
+					name,
+					url: "data:text/html,<title>Viewport</title>",
+					app: { cdp_url: `http://127.0.0.1:${port}` },
+				});
+				const result = await invoke({
+					action: "run",
+					name,
+					code: `return {
+	observed: (await tab.observe()).viewport,
+	window: await tab.evaluate(() => ({ width: innerWidth, height: innerHeight, deviceScaleFactor: devicePixelRatio })),
+};`,
+				});
+				const details = result.details;
+				if (!details || typeof details !== "object" || !("value" in details))
+					throw new Error("run returned no value");
+				// `run` details carry the cell's return value untyped.
+				const { observed, window } = details.value as { observed: unknown; window: unknown };
+				// The window's chrome eats into --window-size differently per OS, so pin only the forced
+				// pixel ratio; it differs from DEFAULT_VIEWPORT's 1.25, which main reported here.
+				expect(window).toMatchObject({ deviceScaleFactor: 2 });
+				expect(observed).toEqual(window);
+				expect(opened.details).toMatchObject({ viewport: window });
+			} finally {
+				await invoke({ action: "close", name }).catch(() => {});
 				child.kill();
 				await child.exited;
 				await fs.rm(root, { recursive: true, force: true });
@@ -508,6 +668,7 @@ describe("pickElectronTarget", () => {
 			let attached: BrowserHandle | undefined;
 
 			let attempted = false;
+			const tabName = `attach-failure-${process.pid}-${Math.random().toString(36).slice(2)}`;
 			try {
 				attached = await acquireBrowser(
 					{ kind: "connected", cdpUrl: `http://${endpoint.host}` },
@@ -519,7 +680,7 @@ describe("pickElectronTarget", () => {
 				// this thread's CDP socket, so the paused request never reaches
 				// `onRequest` and worker init times out instead.
 				const error = await rejectionOf(
-					acquireTab(`attach-failure-${process.pid}-${Math.random().toString(36).slice(2)}`, attached, {
+					acquireTab(tabName, attached, {
 						// Loopback keeps a hypothetical interception miss local and
 						// loud (instant connection refusal, count 0) instead of
 						// wandering into DNS or a proxy.
@@ -531,6 +692,9 @@ describe("pickElectronTarget", () => {
 				expect(error).toBeInstanceOf(Error);
 				expect(error).toMatchObject({ message: expect.stringMatching(/net::ERR_FAILED/) });
 				expect(requestCount).toBe(1);
+				// The failed open rolls back its tab, and with it the tab's hold on the attached browser.
+				expect(getTab(tabName)).toBeUndefined();
+				expect(attached.refCount).toBe(0);
 			} finally {
 				targetPage.off("request", onRequest);
 				await targetPage.setRequestInterception(false);
@@ -539,6 +703,40 @@ describe("pickElectronTarget", () => {
 		},
 		30_000,
 	);
+
+	test("names the refused CDP websocket instead of reporting [object ErrorEvent]", async () => {
+		// `/json/version` answers, but its debugger websocket refuses the upgrade.
+		const cdp = Bun.serve({
+			hostname: "127.0.0.1",
+			port: 0,
+			fetch: (request, server) =>
+				new URL(request.url).pathname === "/json/version"
+					? Response.json({ webSocketDebuggerUrl: `ws://127.0.0.1:${server.port}/devtools/browser/gone` })
+					: new Response("gone", { status: 404 }),
+		});
+		const session = makeSession();
+		const prelude = createBrowserPrelude(session);
+		try {
+			const error = await rejectionOf(
+				prelude.invoke(
+					{
+						action: "open",
+						name: `refused-${crypto.randomUUID()}`,
+						app: { cdp_url: `http://127.0.0.1:${cdp.port}` },
+					},
+					{ session, toolCallId: "refused-websocket" },
+				),
+			);
+			expect(error).toBeInstanceOf(Error);
+			expect(error).toMatchObject({
+				message: expect.stringContaining(
+					`WebSocket connection to 'ws://127.0.0.1:${cdp.port}/devtools/browser/gone'`,
+				),
+			});
+		} finally {
+			cdp.stop(true);
+		}
+	});
 });
 
 describe("resolveSpawnArgs", () => {

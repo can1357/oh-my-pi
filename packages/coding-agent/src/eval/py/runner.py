@@ -1669,6 +1669,18 @@ def _mime_bundle(value: Any) -> dict:
     Honors ``_repr_mimebundle_`` first, falls back to individual ``_repr_*_``
     accessors, and always provides ``text/plain``.
     """
+    # Match JS display({type: "image", ...}) without losing detail or remote
+    # references in a plain PNG/JPEG MIME representation.
+    if (
+        isinstance(value, dict)
+        and value.get("type") == "image"
+        and isinstance(value.get("mimeType"), str)
+        and isinstance(value.get("data"), (str, bytes, bytearray))
+    ):
+        image = dict(value)
+        image["data"] = _coerce_image_bytes(image["data"])
+        return {"application/x-omp-image": image}
+
     bundle: dict[str, Any] = {}
     matplotlib_png = _matplotlib_figure_png(value)
     if matplotlib_png is not None:

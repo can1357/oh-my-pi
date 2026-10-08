@@ -283,40 +283,56 @@ fn acl_default_perm_bits(filesystem: &BlockingFs, path: &Path) -> u32 {
 	})
 }
 
-// Uses an iterative approach instead of recursion to avoid stack overflow with
-// deep nesting.
+/// Creates `path`; with `-p`, also its missing ancestors.
 fn create_dir(
 	path: &Path,
 	is_parent: bool,
 	config: &Config,
 	host: &mut Host,
 ) -> Result<(), MkdirError> {
-	let path_exists = host.fs().exists(host.resolve(path));
-	if path_exists && !config.recursive {
-		return Err(MkdirError::Message(format!("{}: File exists", path.maybe_quote())));
-	}
-	if path == Path::new("") {
-		return Ok(());
-	}
-
-	if config.recursive {
-		let mut dirs_to_create = Vec::with_capacity(16);
-		let mut current = path;
-		while let Some(parent) = parent_path(current) {
-			if parent == Path::new("") {
-				break;
-			}
-			dirs_to_create.push(parent);
-			current = parent;
+	if !config.recursive {
+		if host.fs().exists(host.resolve(path)) {
+			return Err(MkdirError::Message(format!("{}: File exists", path.maybe_quote())));
 		}
+		return create_single_dir(path, is_parent, config, host);
+	}
 
-		for dir in dirs_to_create.iter().rev() {
-			if !host.fs().exists(host.resolve(dir)) {
-				create_single_dir(dir, true, config, host)?;
-			}
+	// A `..` component names a directory only once the one before it exists,
+	// and Windows folds it away before looking, so such a path is created
+	// ancestor by ancestor, as GNU does.
+	let has_parent_dir = path
+		.components()
+		.any(|component| matches!(component, std::path::Component::ParentDir));
+	if !has_parent_dir {
+		// `mkdir -p` of a directory that exists, the common case, takes one
+		// stat; GNU prints nothing for it, even with -v.
+		if path == Path::new("") || host.fs().is_dir(host.resolve(path)) {
+			return Ok(());
+		}
+		// The leaf is tried first; its ancestors are looked at only when it
+		// reports one missing.
+		match create_single_dir(path, is_parent, config, host) {
+			Err(MkdirError::Io { source, .. }) if source.kind() == io::ErrorKind::NotFound => {},
+			result => return result,
 		}
 	}
 
+	// Iterative rather than recursive, so deep nesting cannot overflow the
+	// stack.
+	let mut dirs_to_create = Vec::with_capacity(16);
+	let mut current = path;
+	while let Some(parent) = parent_path(current) {
+		if parent == Path::new("") {
+			break;
+		}
+		dirs_to_create.push(parent);
+		current = parent;
+	}
+	for dir in dirs_to_create.iter().rev() {
+		if !host.fs().exists(host.resolve(dir)) {
+			create_single_dir(dir, true, config, host)?;
+		}
+	}
 	create_single_dir(path, is_parent, config, host)
 }
 
@@ -328,8 +344,6 @@ fn create_single_dir(
 ) -> Result<(), MkdirError> {
 	let filesystem = host.fs().clone();
 	let fs_path = host.resolve(path);
-	#[cfg(all(unix, target_os = "linux"))]
-	let path_exists = filesystem.exists(&fs_path);
 
 	#[cfg(unix)]
 	let create_mode = if is_parent {
@@ -363,9 +377,9 @@ fn create_single_dir(
 				writeln!(host.stdout, "mkdir: created directory {}", path.quote())
 					.map_err(MkdirError::io)?;
 			}
-
+			// Reaching here proves the directory is new.
 			#[cfg(all(unix, target_os = "linux"))]
-			if !path_exists {
+			{
 				let acl_perm_bits = acl_default_perm_bits(&filesystem, &fs_path);
 				if acl_perm_bits != 0 {
 					chmod(&filesystem, &fs_path, path, create_mode | acl_perm_bits)?;
@@ -374,7 +388,8 @@ fn create_single_dir(
 
 			Ok(())
 		},
-		Err(_) if filesystem.is_dir(&fs_path) => {
+		// A missing ancestor cannot leave `path` a directory; `-p` creates it.
+		Err(source) if source.kind() != io::ErrorKind::NotFound && filesystem.is_dir(&fs_path) => {
 			let ends_with_parent_dir =
 				matches!(path.components().next_back(), Some(std::path::Component::ParentDir));
 			if config.verbose && is_parent && config.recursive && !ends_with_parent_dir {

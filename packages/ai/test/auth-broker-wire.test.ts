@@ -16,6 +16,7 @@ import {
 	startAuthBroker,
 } from "@oh-my-pi/pi-ai/auth-broker";
 import * as oauthUtils from "@oh-my-pi/pi-ai/registry/oauth";
+import { logger } from "@oh-my-pi/pi-utils";
 import { removeWithRetries } from "../../utils/src/temp";
 
 const ANTHROPIC_ENV = ["ANTHROPIC_API_KEY", "ANTHROPIC_OAUTH_TOKEN"] as const;
@@ -635,6 +636,62 @@ describe("auth-broker wire surface", () => {
 			headers: { Authorization: `Bearer ${token}` },
 		});
 		expect(res.status).toBe(404);
+	});
+
+	test("logs the socket peer and never header-supplied peers or unknown paths", async () => {
+		const events: logger.LogEvent[] = [];
+		const dispose = logger.registerLogSink(event => {
+			if (
+				event.message === "auth-broker request unauthorized" ||
+				event.message === "auth-broker usage history served"
+			)
+				events.push(event);
+		});
+		try {
+			const spoofed = { "x-forwarded-for": "leaked-secret", "x-real-ip": "leaked-secret" };
+			for (const pathname of ["/v1/leaked-secret", "/v1/usage/history"]) {
+				const res = await fetch(`${handle!.url}${pathname}`, {
+					headers: { Authorization: "Bearer wrong", ...spoofed },
+				});
+				expect(res.status).toBe(401);
+			}
+			const ok = await fetch(`${handle!.url}/v1/usage/history`, {
+				headers: { Authorization: `Bearer ${token}`, ...spoofed },
+			});
+			expect(ok.status).toBe(200);
+			expect(events.map(event => [event.message, event.context?.path, event.context?.peer])).toEqual([
+				["auth-broker request unauthorized", "<unrouted>", "127.0.0.1"],
+				["auth-broker request unauthorized", "/v1/usage/history", "127.0.0.1"],
+				["auth-broker usage history served", undefined, "127.0.0.1"],
+			]);
+			expect(JSON.stringify(events)).not.toContain("leaked-secret");
+		} finally {
+			dispose();
+		}
+	});
+
+	test("logs the forwarded peer when trustProxyHeaders is set", async () => {
+		const proxied = startAuthBroker({
+			storage: storage!,
+			bind: "127.0.0.1:0",
+			bearerTokens: [token],
+			disableRefresher: true,
+			trustProxyHeaders: true,
+		});
+		const peers: unknown[] = [];
+		const dispose = logger.registerLogSink(event => {
+			if (event.message === "auth-broker usage history served") peers.push(event.context?.peer);
+		});
+		try {
+			const res = await fetch(`${proxied.url}/v1/usage/history`, {
+				headers: { Authorization: `Bearer ${token}`, "x-forwarded-for": "203.0.113.7, 10.0.0.1" },
+			});
+			expect(res.status).toBe(200);
+			expect(peers).toEqual(["203.0.113.7"]);
+		} finally {
+			dispose();
+			await proxied.close();
+		}
 	});
 
 	test("GET /v1/snapshot/stream requires bearer", async () => {

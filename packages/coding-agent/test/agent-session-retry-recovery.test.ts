@@ -3,7 +3,7 @@ import * as path from "node:path";
 import { Agent, AgentBusyError } from "@oh-my-pi/pi-agent-core";
 import type { ApiKey, AssistantMessage, AssistantRetryRecovery, Model, Usage } from "@oh-my-pi/pi-ai";
 import { createMockModel, type MockResponse } from "@oh-my-pi/pi-ai/providers/mock";
-import * as aiStream from "@oh-my-pi/pi-ai/stream";
+import * as envApiKey from "@oh-my-pi/pi-ai/env-api-key";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -137,7 +137,7 @@ describe("AgentSession retry recovery", () => {
 
 	beforeEach(async () => {
 		tempDir = TempDir.createSync("@pi-retry-recovery-");
-		vi.spyOn(aiStream, "getEnvApiKey").mockReturnValue(undefined);
+		vi.spyOn(envApiKey, "getEnvApiKey").mockReturnValue(undefined);
 		await authStorage.credentials.remove("anthropic");
 		authStorage.keys.removeRuntime("anthropic");
 		modelRegistry.clearSuppressedSelectors();
@@ -417,6 +417,55 @@ describe("AgentSession retry recovery", () => {
 			role: "assistant",
 			stopReason: "stop",
 			content: [{ type: "text", text: "recovered after local overlap" }],
+		});
+	});
+
+	it("does not issue another provider request when a retry races session abort", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!model) throw new Error("Expected bundled Anthropic test model to exist");
+		authStorage.keys.setRuntime("anthropic", "test-key");
+		const mock = createMockModel({
+			responses: [{ throw: RETRIABLE_SERVER_ERROR }, { content: ["resumed on request"], stopReason: "stop" }],
+		});
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: mock.stream,
+		});
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.baseDelayMs": 5,
+			"retry.maxDelayMs": 100,
+			"retry.maxRetries": 4,
+			"retry.modelFallback": false,
+		});
+		settings.setModelRole("default", `${model.provider}/${model.id}`);
+		const session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
+		sessions.push(session);
+		mockSchedulerWaitWithClock();
+		const abortCompleted = Promise.withResolvers<void>();
+		const unsubscribeAbort = agent.subscribe(event => {
+			if (event.type === "agent_end") {
+				void session.abort().then(abortCompleted.resolve, abortCompleted.reject);
+			}
+		});
+
+		await session.prompt("Stop after the provider failure");
+		await abortCompleted.promise;
+		await session.waitForIdle();
+		expect(mock.calls).toHaveLength(1);
+		unsubscribeAbort();
+		await session.prompt("Resume explicitly after abort");
+		await session.waitForIdle();
+		expect(mock.calls).toHaveLength(2);
+		expect(agent.state.messages.at(-1)).toMatchObject({
+			role: "assistant",
+			content: [{ type: "text", text: "resumed on request" }],
 		});
 	});
 

@@ -135,9 +135,13 @@ export function createComputerPrelude(
 			if (closed) return;
 			closed = true;
 			unregisterOwner();
+			unregisterDisposal?.();
 			await controller.close();
 		},
 	};
+	const unregisterDisposal = session.registerDisposeCallback?.(() => {
+		void lifetime.close();
+	});
 
 	return {
 		name: "computer",
@@ -193,7 +197,7 @@ async function invokeComputer(
 		case "run":
 		case "call":
 			if (lifetime.isClosed()) throw new ToolError("Computer session is closed");
-			return await runComputer(session, controller, params, context.signal);
+			return await runComputer(session, controller, params, context);
 		case "capabilities": {
 			const capabilities = lifetime.isClosed()
 				? undefined
@@ -257,14 +261,15 @@ async function runComputer(
 	session: ToolSession,
 	controller: ComputerController,
 	params: ComputerRunParams | ComputerCallParams,
-	signal?: AbortSignal,
+	context: EvalPreludeContext,
 ): Promise<AgentToolResult<unknown>> {
+	const signal = context.signal;
 	const code = resolveComputerRunCode(params);
 	// Direct inspection calls run read-only so the desktop guard backs the read approval tier.
 	const readOnly = params.action === "call" ? isReadOnlyComputerCall(params.chain) : (params.read_only ?? false);
 	const timeoutSeconds = clampTimeout("computer", params.timeout, cfgToolsMaxTimeout.get(session.settings));
 	const snapshot = buildComputerSnapshot(session, readOnly);
-	const run = await controller.run(code, timeoutSeconds * 1000, snapshot, signal);
+	const run = await controller.run(code, timeoutSeconds * 1000, snapshot, signal, context.context);
 	throwIfAborted(signal);
 
 	const details: ComputerPreludeDetails = {

@@ -570,52 +570,81 @@ pub struct WalkOutcome {
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct WalkOptions {
 	/// Include dot-prefixed entries.
-	pub include_hidden:    bool,
+	pub include_hidden:      bool,
 	/// Honor `.ignore`, `.gitignore`, repository excludes, and global gitignore.
-	pub use_gitignore:     bool,
+	pub use_gitignore:       bool,
 	/// Prune `.git` directories during traversal.
-	pub skip_git:          bool,
+	pub skip_git:            bool,
 	/// Prune `node_modules` directories during traversal.
-	pub skip_node_modules: bool,
+	pub skip_node_modules:   bool,
 	/// Symbolic-link traversal policy.
-	pub follow_links:      FollowLinks,
+	pub follow_links:        FollowLinks,
 	/// Metadata detail requested for each yielded entry.
-	pub detail:            WalkDetail,
+	pub detail:              WalkDetail,
+	/// Deepest entry depth that receives `detail`; deeper entries are listed
+	/// with [`WalkDetail::Minimal`] so callers that only need names past a
+	/// depth skip per-entry metadata syscalls there.
+	pub detail_max_depth:    usize,
+	/// File (or symlink) name exempt from ignore-file matching, so callers can
+	/// find a well-known file even when a file-level rule ignores it. Ignored
+	/// directories are still pruned.
+	pub unignored_file_name: Option<&'static str>,
 	/// Per-directory visit order.
-	pub order:             WalkOrder,
+	pub order:               WalkOrder,
 	/// Yield the traversal root as a depth-0 entry before its children.
-	pub emit_root:         bool,
+	pub emit_root:           bool,
 	/// Minimum depth yielded to the visitor. Root depth is 0.
-	pub min_depth:         usize,
+	pub min_depth:           usize,
 	/// Maximum depth traversed and yielded. Root depth is 0.
-	pub max_depth:         usize,
+	pub max_depth:           usize,
 	/// Yield directory entries after their children.
-	pub contents_first:    bool,
+	pub contents_first:      bool,
 	/// Directory-open error handling policy.
-	pub directory_errors:  DirectoryErrorMode,
+	pub directory_errors:    DirectoryErrorMode,
 	/// Stay on the root filesystem when supported by the platform.
-	pub same_file_system:  bool,
+	pub same_file_system:    bool,
 	/// Use the shared scan cache when collecting owned entries.
-	pub cache:             bool,
+	pub cache:               bool,
+}
+
+impl WalkOptions {
+	/// Detail used when listing a directory at `depth`; its entries sit one
+	/// level deeper.
+	const fn listing_detail(&self, depth: usize) -> WalkDetail {
+		if depth >= self.detail_max_depth {
+			WalkDetail::Minimal
+		} else {
+			self.detail
+		}
+	}
+
+	fn is_unignored_file(&self, name: &OsStr, file_type: FileType) -> bool {
+		matches!(file_type, FileType::File | FileType::Symlink)
+			&& self
+				.unignored_file_name
+				.is_some_and(|unignored| name == OsStr::new(unignored))
+	}
 }
 
 impl Default for WalkOptions {
 	fn default() -> Self {
 		Self {
-			include_hidden:    true,
-			use_gitignore:     false,
-			skip_git:          false,
-			skip_node_modules: false,
-			follow_links:      FollowLinks::Never,
-			detail:            WalkDetail::Minimal,
-			order:             WalkOrder::Path,
-			emit_root:         false,
-			min_depth:         1,
-			max_depth:         usize::MAX,
-			contents_first:    false,
-			directory_errors:  DirectoryErrorMode::Visit,
-			same_file_system:  false,
-			cache:             false,
+			include_hidden:      true,
+			use_gitignore:       false,
+			skip_git:            false,
+			skip_node_modules:   false,
+			follow_links:        FollowLinks::Never,
+			detail:              WalkDetail::Minimal,
+			detail_max_depth:    usize::MAX,
+			unignored_file_name: None,
+			order:               WalkOrder::Path,
+			emit_root:           false,
+			min_depth:           1,
+			max_depth:           usize::MAX,
+			contents_first:      false,
+			directory_errors:    DirectoryErrorMode::Visit,
+			same_file_system:    false,
+			cache:               false,
 		}
 	}
 }
@@ -758,6 +787,18 @@ impl WalkRequest {
 	pub const fn depth(mut self, min_depth: usize, max_depth: usize) -> Self {
 		self.options.min_depth = min_depth;
 		self.options.max_depth = max_depth;
+		self
+	}
+
+	/// Collect `detail` only for entries at depth `max_depth` or shallower.
+	pub const fn detail_max_depth(mut self, max_depth: usize) -> Self {
+		self.options.detail_max_depth = max_depth;
+		self
+	}
+
+	/// Exempt files named `name` from ignore-file matching.
+	pub const fn unignored_file_name(mut self, name: Option<&'static str>) -> Self {
+		self.options.unignored_file_name = name;
 		self
 	}
 
@@ -1255,7 +1296,8 @@ impl WalkRequest {
 			SizeHintPolicy::FromDetail => {},
 			SizeHintPolicy::Never => options.detail = WalkDetail::Minimal,
 			SizeHintPolicy::WhenCheap => {
-				// Provider-backed listings pay one metadata call per entry for sizes.
+				// Provider-backed listings pay one metadata call per entry for
+				// sizes.
 				options.detail =
 					if supports_cheap_size_hints() && self.filesystem.is_native_local(&self.root) {
 						WalkDetail::Full
@@ -1656,7 +1698,7 @@ fn walk_parallel_dir<'scope, E, S, H>(
 	let ignore_entries = match collect_directory_entries(
 		&context.fs,
 		&dir,
-		context.options.detail,
+		context.options.listing_detail(depth),
 		&mut scratch,
 		&context.matcher,
 		derive_ignore_from_entries,
@@ -1718,7 +1760,9 @@ fn walk_parallel_dir<'scope, E, S, H>(
 		let parent = enter_child_path(&mut absolute, name, context.url_root);
 		push_relative_name(&mut relative, &name_str);
 		let is_dir = entry.file_type == FileType::Dir;
-		if !context.matcher.is_ignored(&dir_ignore, &absolute, is_dir) {
+		if context.options.is_unignored_file(name, entry.file_type)
+			|| !context.matcher.is_ignored(&dir_ignore, &absolute, is_dir)
+		{
 			let decision = {
 				let meta = EntryMeta {
 					root:          &context.root,
@@ -2067,18 +2111,31 @@ enum DirectoryIdentity {
 	Canonical(PathBuf),
 }
 
+/// Ancestor slot whose identity is resolved only when a followed symlink needs
+/// the loop check, so symlink-free trees never pay a `file_id` per directory.
+enum AncestorIdentity {
+	Pending(PathBuf),
+	/// `None` when the identity lookup failed; such an ancestor never matches.
+	Resolved(Option<DirectoryIdentity>),
+}
+
 #[derive(Default)]
 struct SymlinkAncestorStack {
-	stack: Vec<DirectoryIdentity>,
+	stack: Vec<AncestorIdentity>,
 }
 
 impl SymlinkAncestorStack {
-	fn contains(&self, identity: &DirectoryIdentity) -> bool {
-		self.stack.contains(identity)
+	fn contains(&mut self, fs: &BlockingFs, identity: &DirectoryIdentity) -> bool {
+		self.stack.iter_mut().any(|slot| {
+			if let AncestorIdentity::Pending(path) = slot {
+				*slot = AncestorIdentity::Resolved(directory_identity(fs, path).ok());
+			}
+			matches!(slot, AncestorIdentity::Resolved(Some(id)) if id == identity)
+		})
 	}
 
-	fn push(&mut self, identity: DirectoryIdentity) {
-		self.stack.push(identity);
+	fn push(&mut self, path: PathBuf) {
+		self.stack.push(AncestorIdentity::Pending(path));
 	}
 
 	fn pop(&mut self) {
@@ -2753,14 +2810,6 @@ impl<H> WalkContext<'_, H> {
 			return Ok(WalkStatus::Complete);
 		};
 
-		// Seed the ancestor stack only when descendant symlink traversal can
-		// loop.
-		if self.options.follow_links == FollowLinks::Always
-			&& let Ok(id) = directory_identity(self.fs, root)
-		{
-			self.symlink_ancestors.push(id);
-		}
-
 		let meta = EntryMeta {
 			root,
 			absolute_path: Cow::Borrowed(root),
@@ -2876,10 +2925,8 @@ impl<H> WalkContext<'_, H> {
 		V: EntryVisitor,
 		H: FnMut() -> std::result::Result<(), V::Error>,
 	{
-		if self.options.follow_links == FollowLinks::Always
-			&& let Ok(identity) = directory_identity(self.fs, &self.absolute_path)
-		{
-			self.symlink_ancestors.push(identity);
+		if self.options.follow_links == FollowLinks::Always {
+			self.symlink_ancestors.push(self.absolute_path.clone());
 			let result = self.walk_dir_inner(depth, ignore_state, derive_ignore_from_entries, visitor);
 			self.symlink_ancestors.pop();
 			return result;
@@ -2903,7 +2950,7 @@ impl<H> WalkContext<'_, H> {
 		let ignore_entries = match collect_directory_entries(
 			self.fs,
 			&self.absolute_path,
-			self.options.detail,
+			self.options.listing_detail(depth),
 			&mut scratch,
 			&self.matcher,
 			derive_ignore_from_entries,
@@ -3023,7 +3070,7 @@ impl<H> WalkContext<'_, H> {
 				is_dir = false;
 				descend = false;
 			}
-			if self.options.detail == WalkDetail::Full {
+			if self.options.listing_detail(next_depth - 1) == WalkDetail::Full {
 				if target_file_type == FileType::File {
 					size = Some(target_metadata.len() as f64);
 				} else {
@@ -3033,9 +3080,10 @@ impl<H> WalkContext<'_, H> {
 			}
 		}
 
-		if self
-			.matcher
-			.is_ignored(dir_ignore, &self.absolute_path, is_dir)
+		if !self.options.is_unignored_file(name, file_type)
+			&& self
+				.matcher
+				.is_ignored(dir_ignore, &self.absolute_path, is_dir)
 		{
 			return Ok(false);
 		}
@@ -3054,7 +3102,7 @@ impl<H> WalkContext<'_, H> {
 		if followed_symlink_dir && descend {
 			match directory_identity(self.fs, &self.absolute_path) {
 				Ok(target_id) => {
-					if self.symlink_ancestors.contains(&target_id) {
+					if self.symlink_ancestors.contains(self.fs, &target_id) {
 						let loop_err = io::Error::other("filesystem loop detected");
 						if self.options.directory_errors == DirectoryErrorMode::Visit {
 							match visitor
@@ -4844,20 +4892,22 @@ mod tests {
 
 	fn test_options() -> WalkOptions {
 		WalkOptions {
-			include_hidden:    true,
-			use_gitignore:     false,
-			skip_git:          true,
-			skip_node_modules: true,
-			follow_links:      FollowLinks::Never,
-			detail:            WalkDetail::Minimal,
-			order:             WalkOrder::Path,
-			emit_root:         false,
-			min_depth:         1,
-			max_depth:         usize::MAX,
-			contents_first:    false,
-			directory_errors:  DirectoryErrorMode::SkipSkippable,
-			same_file_system:  false,
-			cache:             false,
+			include_hidden:      true,
+			use_gitignore:       false,
+			skip_git:            true,
+			skip_node_modules:   true,
+			follow_links:        FollowLinks::Never,
+			detail:              WalkDetail::Minimal,
+			detail_max_depth:    usize::MAX,
+			unignored_file_name: None,
+			order:               WalkOrder::Path,
+			emit_root:           false,
+			min_depth:           1,
+			max_depth:           usize::MAX,
+			contents_first:      false,
+			directory_errors:    DirectoryErrorMode::SkipSkippable,
+			same_file_system:    false,
+			cache:               false,
 		}
 	}
 
@@ -5577,6 +5627,104 @@ mod tests {
 			paths.iter().any(|path| path == "link/child.txt"),
 			"FollowLinks::Always should yield descendants through symlink paths, got: {paths:?}"
 		);
+	}
+
+	#[cfg(unix)]
+	struct LoopVisitor {
+		seen:   Vec<String>,
+		errors: Vec<(PathBuf, String)>,
+	}
+
+	#[cfg(unix)]
+	impl EntryVisitor for LoopVisitor {
+		type Error = Infallible;
+
+		fn visit(&mut self, entry: Entry<'_>) -> std::result::Result<WalkControl, Self::Error> {
+			self.seen.push(entry.relative.to_string());
+			Ok(WalkControl::Continue)
+		}
+
+		fn visit_directory_error(
+			&mut self,
+			error: DirectoryError<'_>,
+		) -> std::result::Result<WalkControl, Self::Error> {
+			self
+				.errors
+				.push((error.path.to_path_buf(), error.error.to_string()));
+			Ok(WalkControl::Continue)
+		}
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn walk_entries_always_reports_symlink_cycles_to_ancestors() {
+		let tree = temp_tree("follow-always-cycle");
+		let a = tree.path().join("a");
+		fs::create_dir_all(&a).expect("a dir should be created");
+		fs::write(a.join("file.txt"), "ok").expect("file should be written");
+		// One link back to the walk root and one back to its own parent: both
+		// resolve to an ancestor on the follow stack and must not be descended.
+		std::os::unix::fs::symlink("..", a.join("to_root")).expect("root link should be created");
+		std::os::unix::fs::symlink(".", a.join("to_parent")).expect("parent link should be created");
+
+		let mut visitor = LoopVisitor { seen: Vec::new(), errors: Vec::new() };
+		let status = walk_entries(
+			tree.path(),
+			WalkOptions {
+				follow_links: FollowLinks::Always,
+				directory_errors: DirectoryErrorMode::Visit,
+				..test_options()
+			},
+			&mut visitor,
+			|| Ok::<(), Infallible>(()),
+		)
+		.expect("walk should not fail");
+		assert_eq!(status, WalkStatus::Complete);
+
+		let mut seen = visitor.seen;
+		seen.sort();
+		// Loop links are reported as directory errors instead of yielded: the
+		// ancestor check runs before the entry reaches the visitor.
+		assert_eq!(seen, vec!["a", "a/file.txt"]);
+		let mut errors = visitor.errors;
+		errors.sort();
+		assert_eq!(errors, vec![
+			(a.join("to_parent"), "filesystem loop detected".to_string()),
+			(a.join("to_root"), "filesystem loop detected".to_string()),
+		]);
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn unignored_file_name_does_not_exempt_followed_symlink_directories() {
+		let tree = temp_tree("unignored-symlink-dir");
+		fs::write(tree.path().join(".gitignore"), "AGENTS.md\n")
+			.expect(".gitignore should be written");
+		fs::create_dir_all(tree.path().join("real")).expect("real dir should be created");
+		fs::write(tree.path().join("real").join("inner.txt"), "ok").expect("inner should be written");
+		std::os::unix::fs::symlink("real", tree.path().join("AGENTS.md"))
+			.expect("dir link should be created");
+		fs::create_dir_all(tree.path().join("sub")).expect("sub dir should be created");
+		fs::write(tree.path().join("sub").join("AGENTS.md"), "rules")
+			.expect("file should be written");
+
+		let mut visitor = PathsVisitor { seen: Vec::new() };
+		walk_entries(
+			tree.path(),
+			WalkOptions {
+				follow_links: FollowLinks::Always,
+				use_gitignore: true,
+				unignored_file_name: Some("AGENTS.md"),
+				..test_options()
+			},
+			&mut visitor,
+			|| Ok::<(), Infallible>(()),
+		)
+		.expect("walk should not fail");
+
+		let mut seen = visitor.seen;
+		seen.sort();
+		assert_eq!(seen, vec![".gitignore", "real", "real/inner.txt", "sub", "sub/AGENTS.md"]);
 	}
 
 	#[cfg(unix)]

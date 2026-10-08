@@ -1,15 +1,14 @@
-import type { AssistantMessage, Message } from "@oh-my-pi/pi-ai";
+import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { type OverlayHandle, replaceTabs } from "@oh-my-pi/pi-tui";
-import { logger, prompt, Snowflake, toError, withTimeout } from "@oh-my-pi/pi-utils";
-import btwUserPrompt from "../../prompts/system/btw-user.md" with { type: "text" };
+import { logger, toError, withTimeout } from "@oh-my-pi/pi-utils";
 import {
 	type BtwHistoryRecord,
 	type BtwHistoryTurn,
 	BtwHistoryStore,
 	getBtwCopyText,
 	getBtwLatestTurn,
-	getBtwTurns,
 } from "../../session/btw-history";
+import { beginBtwTurn, patchLatestBtwTurn, runBtwTurn } from "../../session/btw-turn";
 import { TRUNCATE_LENGTHS } from "@oh-my-pi/pi-tui/render/render-utils";
 import { copyToClipboard } from "../../utils/clipboard";
 import { BtwHistoryPanel } from "@oh-my-pi/pi-tui/overlays/btw-history-panel";
@@ -420,22 +419,8 @@ export class BtwController {
 			if (!previous) this.#closeHistory();
 			this.#activeRequest?.component.close();
 			this.#clearCompletedState();
-			const now = Date.now();
 			const leafId = this.#sessionManager.getLeafId();
-			const turn: BtwHistoryTurn = {
-				question: trimmedQuestion,
-				answer: "",
-				status: "running",
-				createdAt: now,
-				updatedAt: now,
-			};
-			const record: BtwHistoryRecord = previous
-				? { ...previous, followUps: [...(previous.followUps ?? []), turn] }
-				: { ...turn, id: Snowflake.next(), leafId };
-			const history = previous ? getBtwTurns(previous) : undefined;
-			// A cancelled/failed transport may still be unwinding. Start a fresh
-			// lineage after that boundary, while successful follow-ups share one.
-			const transportEpoch = (history?.findLastIndex(item => item.status !== "complete") ?? -1) + 1;
+			const { record, history, conversationKey } = beginBtwTurn(trimmedQuestion, leafId, previous);
 			const request: BtwRequest = {
 				component: new BtwPanelComponent({
 					question: trimmedQuestion,
@@ -452,7 +437,7 @@ export class BtwController {
 				store,
 				record,
 				history,
-				conversationKey: `btw:${record.id}:${transportEpoch}`,
+				conversationKey,
 				persisted: false,
 			};
 			this.#activeRequest = request;
@@ -609,58 +594,15 @@ export class BtwController {
 	}
 
 	#updateRequest(request: BtwRequest, patch: Partial<BtwHistoryTurn>): void {
-		const followUps = request.record.followUps;
-		if (followUps?.length) {
-			request.record = {
-				...request.record,
-				followUps: [...followUps.slice(0, -1), { ...followUps[followUps.length - 1]!, ...patch }],
-			};
-		} else {
-			request.record = { ...request.record, ...patch };
-		}
+		request.record = patchLatestBtwTurn(request.record, patch);
 	}
 
 	async #runRequest(request: BtwRequest): Promise<void> {
 		try {
-			const promptText = prompt.render(btwUserPrompt, { question: request.question });
-			const model = request.session.model;
-			if (!model) throw new Error("No active model available for /btw.");
-			const history: Message[] = [];
-			for (const turn of request.history ?? []) {
-				history.push({
-					role: "user",
-					content: [{ type: "text", text: prompt.render(btwUserPrompt, { question: turn.question }) }],
-					attribution: "agent",
-					timestamp: turn.createdAt,
-				});
-				if (!turn.answer) continue;
-				// Saved BTW history contains visible text, not provider-native reasoning
-				// or replay signatures. These are context messages, not new billed turns.
-				history.push({
-					role: "assistant",
-					content: [{ type: "text", text: turn.answer }],
-					api: model.api,
-					provider: model.provider,
-					model: model.id,
-					usage: {
-						input: 0,
-						output: 0,
-						cacheRead: 0,
-						cacheWrite: 0,
-						totalTokens: 0,
-						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-					},
-					stopReason: "stop",
-					timestamp: turn.updatedAt,
-				});
-			}
-			const { replyText, assistantMessage } = await request.session.runEphemeralTurn({
-				promptText,
-				history,
+			const { replyText, assistantMessage } = await runBtwTurn(request.session, {
+				question: request.question,
+				history: request.history,
 				conversationKey: request.conversationKey,
-				// /btw answers are read in full and saved to history: keep the
-				// repeated-line collapse, but not the 4 KiB cap meant for one-liners.
-				replyMaxBytes: Number.POSITIVE_INFINITY,
 				onTextDelta: delta => {
 					const latest = getBtwLatestTurn(request.record);
 					if (latest.status !== "running") return;

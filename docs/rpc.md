@@ -91,9 +91,10 @@ Clients MUST continue reading stdout after closing stdin. Normal EOF and extensi
 9. Prompt completion (`{ type: "prompt_result", id?, agentInvoked, status, error?, sessionSettled }`), unless the response already completed the prompt locally; see [`prompt` payload](#prompt-payload)
 10. Session quiescence (`{ type: "session_settled" }`); see [Yield vs settled](#yield-vs-settled)
 11. Subagent frames (`subagent_lifecycle`, `subagent_progress`, `subagent_event`), gated by `set_subagent_subscription`
-12. Builtin slash-command side channels (`command_output`, `session_info_update`, `config_update`)
-13. Transport overflow notifications (`rpc_frame_error`), when an event cannot fit within the transport limits
-14. Live voice frames (`live_phase`, `live_levels`, `live_transcript`, `live_end`); see [Live Voice Sub-Protocol](#live-voice-sub-protocol)
+12. Side-question frames (`btw_delta`, `btw_record`); see [Side questions](#side-questions-btw)
+13. Builtin slash-command side channels (`command_output`, `session_info_update`, `config_update`)
+14. Transport overflow notifications (`rpc_frame_error`), when an event cannot fit within the transport limits
+15. Live voice frames (`live_phase`, `live_levels`, `live_transcript`, `live_end`); see [Live Voice Sub-Protocol](#live-voice-sub-protocol)
 
 Protocol v2 may wrap oversized logical frames from these categories in `rpc_chunk` frames.
 
@@ -131,6 +132,7 @@ Important edge behavior from runtime:
 - `{ id?, type: "promote_queued_message", message: string }`
 - `{ id?, type: "abort" }`
 - `{ id?, type: "abort_and_prompt", message: string, images?: ImageContent[] }`
+- `{ id?, type: "abort_and_restore_queue" }`
 - `{ id?, type: "new_session", parentSession?: string }`
 - `{ id?, type: "open_session", sessionDir: string, provider?: string, modelId?: string }`
 
@@ -142,6 +144,7 @@ Important edge behavior from runtime:
 
 - `{ id?, type: "get_state" }`
 - `{ id?, type: "set_fast_mode", enabled: boolean }`
+- `{ id?, type: "set_slow_mode", enabled: boolean }`
 - `{ id?, type: "goal", op: "get" | "create" | "resume" | "pause" | "drop", objective?: string, token_budget?: number }`
 - `{ id?, type: "set_ask_dialog", enabled: boolean }`
 - `{ id?, type: "get_available_commands" }`
@@ -247,11 +250,21 @@ The bundled TypeScript `RpcClient.getMessages()` and Python `RpcClient.get_messa
 
 - `{ id?, type: "get_login_providers" }`
 - `{ id?, type: "login", providerId: string }`
+- `{ id?, type: "get_logout_accounts", providerId: string }` → `data: { accounts: LogoutAccount[] }`
+- `{ id?, type: "logout", providerId: string, credentialId: number }` → `data: { remainingSource?: string }`
 
 Login forwards ordinary OAuth input prompts only after the provider emits an
 authorization URL. Prompts marked `secret: true` are always rejected with a
 failed `login` response directing the user to the terminal UI; no ordinary
 `input` request is emitted. RPC does not negotiate secret-input support.
+
+Logout works per stored credential, as `/logout` does in the TUI, because one
+provider can hold several accounts. `get_logout_accounts` lists them (`credentialId`,
+`provider`, `label`, `detail`, `type`, and `active` for credentials the session may
+be using), active first. `logout` removes one and refreshes that provider's models;
+it fails when the credential is no longer stored. `remainingSource` names the source
+that still authenticates the provider: another stored credential, an environment
+variable, or a config key.
 
 ### Word prediction
 
@@ -279,6 +292,14 @@ fast for about 30 seconds while the daemon is backed off. Treat failures as
 Send `predict_word_feedback` with the `text` and `cursor` at which a
 suggestion was shown: `accepted: true` when the user took it, `false` when
 they typed past it. Feedback tunes the engine's learned state.
+
+### Side questions
+
+- `{ id?, type: "btw", question: string, recordId?: string }` → `data: { record: BtwHistoryRecord }`
+- `{ id?, type: "btw_cancel", recordId?: string }` → `data: { cancelled: boolean }`
+- `{ id?, type: "get_btw_history" }` → `data: { records: BtwHistoryRecord[] }`
+
+See [Side questions (`/btw`)](#side-questions-btw).
 
 ## Response Schema
 
@@ -368,7 +389,9 @@ Agent-authored entries never match, including internal handoffs with `role: "use
 
 The check and removal are synchronous: `data.removed: false` means no matching user message is pending in that queue at dispatch time. Already-dequeued messages and inputs still being preprocessed cannot be cancelled by this command. Live-steered input may remain visible in queue snapshots until the transcript records it, even though it has already left the removable pending queue. It does not resend input, abort a turn, or change interruption behavior. Non-string `message` values and missing or invalid `queue` values produce an error response.
 
-A removal request may hide the chip or restore its draft only after `removed: true`; normal delivery still removes chips through queue snapshots. Older runtimes reject this command; clients must not fall back to aborting or resending queued messages. The TypeScript client exposes `removeQueuedMessage(message, queue): Promise<{ removed: boolean }>`.
+A removal request may hide the chip or restore its draft only after `removed: true`; normal delivery still removes chips through queue snapshots. Older runtimes reject this command; clients must not fall back to aborting or resending queued messages. The TypeScript client exposes `removeQueuedMessage(message, queue): Promise<{ removed, images?, imagesDropped? }>`.
+
+When the removed message carried images, `data.images` lists them (the same `ImageContent` entries `abort_and_restore_queue` returns), so a client can restore the draft with its attachments; text-only messages and `removed: false` responses omit it. If the images would exceed the negotiated transport limit (see `abort_and_restore_queue`), the server omits them and sets `data.imagesDropped: true` instead of failing; the message is still removed. Older runtimes return neither field.
 
 The official Python client exposes `remove_queued_message(message, queue) -> RemoveQueuedMessageResult`; inspect its `.removed` boolean rather than the result object's truthiness.
 
@@ -389,6 +412,21 @@ Since `prompt` acknowledges only once the message is admitted (see above), a `pr
 
 The official Python client exposes `promote_queued_message(message) -> PromoteQueuedMessageResult`; inspect its `.promoted` boolean rather than the result object's truthiness.
 
+### `abort_and_restore_queue` payload
+
+Take queued user input back and abort, atomically — the RPC equivalent of pressing Esc in the TUI:
+
+```json
+{"id":"req_4","type":"abort_and_restore_queue"}
+{"id":"req_4","type":"response","command":"abort_and_restore_queue","success":true,"data":{"steering":[{"text":"Use the existing parser"}],"followUp":[{"text":"Then run the tests","images":[{"type":"image","mimeType":"image/png","data":"..."}]}]}}
+```
+
+Before aborting, the server withdraws every user-authored steering and follow-up message, including input the run already took from the queue but never recorded in the transcript: steering the aborted response claimed live, and steering or follow-ups dequeued for its next model call. Non-user internal steers (goal/plan/budget notices, IRC and extension asides) are dropped, except advisor cards, which the abort keeps as visible advice. Nothing withdrawn runs after the abort, so no new turn starts from the old queue. A plain `abort` instead requeues stranded steers and drains them into a fresh turn; withdrawing them first with `remove_queued_message` races the agent loop.
+
+`data.steering` and `data.followUp` list the withdrawn messages oldest first, as `{ text, images? }` with `text` being the queue-chip text, so a client can put them back in its editor. The command otherwise behaves like `abort`: it stops goal continuation, cancels input received before it that is not yet admitted (that input is dropped, not returned), and responds after the abort completes. Older runtimes reject this command. The TypeScript client exposes `abortAndRestoreQueue(): Promise<{ steering, followUp }>`.
+
+The response always succeeds, even when the withdrawn input is too large for one response under the negotiated protocol (1 MiB per frame on v1, 64 MiB reassembled on v2). Instead of failing with a transport-limit error, which would lose the already-withdrawn input, the server first omits every entry's `images` and sets `data.imagesDropped: true`, keeping all texts. If the texts alone still do not fit, it returns only the oldest entries that fit (steering first, then follow-ups) and sets `data.truncated: true`; entries after the last one listed are gone. Neither flag is present when the full result fits.
+
 ### `get_state` payload
 
 `tokensPerSecond` is a number when output throughput is available and `null`
@@ -403,6 +441,26 @@ fallback scoped by the resolved endpoint and exact model: `fastModeEnabled` may
 remain `true` while `fastModeActive` is `false`. An explicit `set_fast_mode`
 enable expresses retry intent and clears that fallback so the provider attempt
 is re-armed.
+
+`slowModeSupported` reports whether `/slow` applies to the active model: the
+`flex` service tier on OpenAI- and Google-family models, or the low-priority
+lane on direct Anthropic models. `slowModeEnabled` reports whether it is on for
+the active model, so it is always `false` when `slowModeSupported` is `false`.
+That does not mean a persisted setting was turned off. `slowModeScope` says
+where the active model's setting lives: `global` for persisted config that
+survives model switches and applies to every session and terminal (Claude low
+priority, `providers.anthropic.slowMode`), or `session` for this session's
+per-family flex tier. It is absent when unsupported. Re-read all three after a
+model change; a `global` change made by another session emits no event.
+
+`usageLimit` reports the active model's account past its usage limit, in a
+provider-neutral shape. `stage` is `wrap_up` during a short allowance after the
+limit or `low_priority` once the account is served on spare capacity.
+`resetsAtSec` is an epoch timestamp for client-local formatting; low priority
+may also report `allowanceLeftPercent`, while wrap-up reports whether
+`extraUsage` follows. Claude subscriptions are the only producer today. The
+field is absent outside both stages. No event carries it, so re-read
+`get_state` while a run is active, after `agent_end`, and after slash commands.
 
 ```json
 {
@@ -419,6 +477,14 @@ is re-armed.
   "fastModeEnabled": false,
   "tokensPerSecond": null,
   "fastModeActive": false,
+  "slowModeSupported": true,
+  "slowModeEnabled": true,
+  "slowModeScope": "global",
+  "usageLimit": {
+    "stage": "low_priority",
+    "resetsAtSec": 1770000000,
+    "allowanceLeftPercent": 62
+  },
   "autoCompactionEnabled": true,
   "messageCount": 0,
   "queuedMessageCount": 0,
@@ -510,6 +576,39 @@ turn, sent as a hidden `goal-continuation` message.
 
 When the agent completes the goal, the goal tool is removed again and
 `get_state.goal` becomes `null`.
+
+### `set_slow_mode` payload
+
+`set_slow_mode` turns `/slow` on or off for the active model, exactly like the
+slash command: on OpenAI/Google models it sets or clears this session's `flex`
+tier for that family; on direct Anthropic models it writes the persisted global
+`providers.anthropic.slowMode` setting (`auto`/`off`), entering an offered
+low-priority window on enable and stopping an active one on disable.
+
+```json
+{ "id": "req_slow_on", "type": "set_slow_mode", "enabled": true }
+```
+
+On success, `data.enabled` reports whether `/slow` is now on for the active
+model:
+
+```json
+{
+  "id": "req_slow_on",
+  "type": "response",
+  "command": "set_slow_mode",
+  "success": true,
+  "data": { "enabled": true }
+}
+```
+
+Enabling on a model without a slow mode fails with
+`"Slow mode is unavailable for the current model."`. Disabling on such a model
+succeeds with `{ "enabled": false }` and changes nothing, so it never clears
+another provider's persisted setting. A non-boolean `enabled` is rejected with
+`"set_slow_mode requires boolean enabled"`. A change made mid-run applies from
+the next request (stopping an active Claude low-priority window takes effect
+immediately); no event announces it, so re-read `get_state`.
 
 ### `set_fast_mode` payload
 
@@ -774,7 +873,7 @@ Extension runner errors are emitted separately as:
 
 `message_start`, `message_update`, and `message_end` carry a `messageId` string assigned by RPC mode. One message keeps the same id from its start through every update to its end; ids are unique within the process. Records injected mid-stream (advisor cards, IRC messages) get their own id and do not disturb the id of the reply streaming around them.
 
-`set_event_filter` restricts which session event frames are written: pass the event `type` strings to forward, or `null` to forward everything (the default). The response echoes the active selection as `{ events, messageUpdates }`. The filter applies to all events emitted through the session subscription, not just the common types listed above; every other outbound category (responses, `prompt_result`, `session_settled`, extension UI and host tool/URI requests, `extension_error`, `available_commands_update`, subagent frames, builtin slash-command side channels, and session-persistence `notice` frames) is unaffected by this filter. Hosts that fail closed on unknown event kinds can pin the set they understand here instead of breaking when OMP adds an event.
+`set_event_filter` restricts which session event frames are written: pass the event `type` strings to forward, or `null` to forward everything (the default). The response echoes the active selection as `{ events, messageUpdates }`. The filter applies to all events emitted through the session subscription, not just the common types listed above; every other outbound category (responses, `prompt_result`, `session_settled`, extension UI and host tool/URI requests, `extension_error`, `available_commands_update`, subagent frames, side-question frames, builtin slash-command side channels, and session-persistence and `btw-history` `notice` frames) is unaffected by this filter. Hosts that fail closed on unknown event kinds can pin the set they understand here instead of breaking when OMP adds an event.
 
 The optional `messageUpdates: "delta"` projects only `message_update` frames to `{ type: "message_update", messageId, message: { role }, assistantMessageEvent }`: `assistantMessageEvent.partial` is omitted, while all other event fields (including subtype, `delta`, and `contentIndex`) are preserved. `message_start`, `message_end`, and all other frames are unchanged; `message_end` still carries the full message. Block-ending events such as `text_end`, `thinking_end`, and `toolcall_end` retain their block content or tool call, so hosts must still accept chunked protocol-v2 frames for large blocks and full messages. Switching modes mid-message does not change its `messageId`. The projection applies to the session's own frames only: `subagent_event` payloads forwarded under `set_subagent_subscription` level `"events"` keep their full `message_update` snapshots.
 
@@ -966,6 +1065,74 @@ Failure responses:
 - the subagent drops or rejects the message before accepting it (for example
   an abort or a usage-limit preflight denial lands first) →
   `error: "Subagent refused the message: <reason>"`
+
+### Side questions (`/btw`)
+
+`btw` asks the TUI's `/btw` side question: one ephemeral model turn over the
+current session's context (including a turn still streaming), answered as
+text with no tool use. The question and answer are never added to the
+transcript; they are checkpointed in the session's BTW history sidecar, which
+the TUI `/btw` history reads too. With `recordId`, the question is a follow-up
+in that topic and its earlier turns are replayed as context.
+
+```ts
+type BtwStatus = "running" | "complete" | "cancelled" | "error" | "interrupted";
+interface BtwHistoryTurn { question: string; answer: string; status: BtwStatus; createdAt: number; updatedAt: number; error?: string }
+interface BtwHistoryRecord extends BtwHistoryTurn { id: string; leafId: string | null; followUps?: BtwHistoryTurn[] }
+```
+
+A record's latest turn is its last follow-up, else the record itself.
+`interrupted` marks a turn whose process died while it ran.
+
+```json
+{ "id": "req_1", "type": "btw", "question": "why does this test need a lock?" }
+{ "type": "btw_record", "record": { "id": "1596…", "question": "why does this test need a lock?", "answer": "", "status": "running", "leafId": "a1b2c3d4", … } }
+{ "id": "req_1", "type": "response", "command": "btw", "success": true, "data": { "record": { … } } }
+{ "type": "btw_delta", "recordId": "1596…", "delta": "Two workers " }
+{ "type": "btw_record", "record": { "id": "1596…", "answer": "Two workers …", "status": "complete", … } }
+```
+
+The `btw_record` frame for the started turn and then the response arrive once
+the question is checkpointed as running; the turn starts only after that, so
+every `btw_delta` and later `btw_record` follows the response. A `btw_record`
+frame carries the full record at every lifecycle change (started, complete,
+cancelled, error); the last one for an id wins. Side questions run beside the
+main agent: they neither wait for nor block a running prompt.
+
+One side question runs at a time per session. `btw_cancel` bypasses the
+command queue and cancels the running question, or a `btw` still starting
+(which then fails), only if it is topic `recordId` when given. It answers
+`cancelled: false` when nothing matching is running, including for a `btw`
+still queued behind other commands. `new_session`, `switch_session`,
+`branch`, `fork`, `open_session`, extension-initiated session changes and shutdown
+cancel a running question and wait for its checkpoint first, even if the
+change is then vetoed.
+
+`get_btw_history` lists the current session's records newest first; a running
+record carries its partial answer, so a host that reconnects can rebuild its
+view. While nothing runs it re-reads the history from disk, so topics the TUI
+added are listed and can take follow-ups; a topic another process is still
+answering reads as `interrupted`. The list is not paged: a history larger than
+the transport limit fails like any oversized response (protocol v2 chunks it).
+
+Failure responses for `btw`:
+
+- blank `question`
+- another side question is still running or starting
+- `recordId` is unknown
+- no active model
+- the history cannot be saved (including a topic another process still holds)
+- cancelled by `btw_cancel` or a session change before it started
+
+A checkpoint that fails after the response is reported as a
+`{ type: "notice", level: "error", source: "btw-history", message }` frame.
+The answer is kept in memory: the next `btw` and every session change retry
+it first, and while it still cannot be saved they fail with
+`/btw history could not be saved: …` and the session stays where it is. At
+shutdown the process exits anyway and reports the loss as another such notice.
+If the retry finds the topic deleted or rewritten on disk (for example by
+another process), it can never succeed: the answer is reported lost as another
+such notice and dropped, and the `btw` or session change proceeds.
 
 ## Prompt/Queue Concurrency and Ordering
 
@@ -1458,7 +1625,7 @@ Current helper characteristics:
 - Supports host-owned custom tools via `setCustomTools()` and automatic handling of `host_tool_call` / `host_tool_cancel`
 - Drives live voice sessions with `liveStart()`, `liveStop()`, `liveMute()`, and delivers live frames through `onLive()`
 - `promptAndWait()` waits for that prompt's result (or synchronous local completion); `waitForSettled()` also waits for session quiescence. `waitForIdle()` and `collectEvents()` stop at the next `agent_end`, including a non-terminal one, and are not settle barriers.
-- Wraps common protocol commands including OAuth `getLoginProviders()` / `login(...)`; use raw protocol frames for unwrapped surfaces such as host-URI registration or delta-only message updates.
+- Wraps common protocol commands including OAuth `getLoginProviders()` / `login(...)` and `getLogoutAccounts(...)` / `logout(...)`; use raw protocol frames for unwrapped surfaces such as host-URI registration or delta-only message updates.
 
 ### Python package
 
