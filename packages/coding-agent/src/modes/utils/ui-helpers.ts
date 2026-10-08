@@ -6,6 +6,7 @@ import { StatusNotice } from "@oh-my-pi/pi-tui/chrome/status-notice";
 import { QueuedMessagesBand } from "@oh-my-pi/pi-tui/prompt/queued-messages";
 import { logger } from "@oh-my-pi/pi-utils";
 import type { AdvisorMessageDetails } from "../../advisor";
+import { InternalUrlRouter } from "../../internal-urls";
 import { COLLAB_PROMPT_MESSAGE_TYPE, type CollabPromptDetails } from "../../collab/protocol";
 import { settings } from "../../config/settings";
 import { createAdvisorMessageCard } from "@oh-my-pi/pi-tui/chat/advisor-message";
@@ -42,7 +43,10 @@ import { TranscriptBlock, TranscriptContainer } from "@oh-my-pi/pi-tui/chrome/tr
 import { createUsageRowBlock, turnElapsedMs } from "@oh-my-pi/pi-tui/overlays/usage-row";
 import { UserMessageComponent } from "@oh-my-pi/pi-tui/chat/user-message";
 import { decodeStreamedToolArgs, streamingStringKeysForTool } from "../../modes/controllers/tool-args-reveal";
-import { materializeImageReferenceLinksSync } from "@oh-my-pi/pi-tui/prompt/image-references";
+import {
+	materializeImageReferenceLinks,
+	materializeImageReferenceLinksSync,
+} from "@oh-my-pi/pi-tui/prompt/image-references";
 import { imageAttachmentSource } from "@oh-my-pi/pi-tui/prompt/image-source";
 import { theme } from "@oh-my-pi/pi-tui/theme";
 import type {
@@ -126,13 +130,35 @@ type AddMessageOptions = {
 	reuseSettledComponent?: boolean;
 };
 
+/**
+ * The on-disk file an image chip should open, or undefined when the chip needs a blob copy.
+ * Internal URLs (`local://`) stay on the image for the model but resolve against the
+ * session root, so a chip pointing at one breaks (and goes stale across `/move`).
+ */
+function imageChipSourcePath(image: ImageContent): string | undefined {
+	const sourcePath = imageAttachmentSource(image)?.path;
+	return sourcePath && !InternalUrlRouter.instance().canHandle(sourcePath) ? sourcePath : undefined;
+}
+
+/** Chip targets for attached images: each file on disk, else a blob copy written only for images that need one. */
+export async function materializeImageChipLinks(
+	images: readonly ImageContent[],
+	putBlob: InteractiveModeContext["sessionManager"]["putBlob"],
+): Promise<(string | undefined)[]> {
+	const sources = images.map(imageChipSourcePath);
+	const needBlob = images.filter((_, index) => sources[index] === undefined);
+	const blobs = needBlob.length > 0 ? await materializeImageReferenceLinks(needBlob, putBlob) : undefined;
+	let next = 0;
+	return sources.map(source => source ?? blobs?.[next++]);
+}
+
 function imageLinksForMessage(
 	images: readonly ImageContent[],
 	putBlobSync: InteractiveModeContext["sessionManager"]["putBlobSync"],
 ): (string | undefined)[] | undefined {
 	if (images.length === 0) return undefined;
 	const materialized = materializeImageReferenceLinksSync(images, putBlobSync);
-	return images.map((image, index) => imageAttachmentSource(image)?.path ?? materialized?.[index]);
+	return images.map((image, index) => imageChipSourcePath(image) ?? materialized?.[index]);
 }
 
 export class UiHelpers {
