@@ -151,7 +151,9 @@ describe("wait", () => {
 		const registry = AgentRegistry.global();
 		const transcript = SessionManager.inMemory();
 		registry.register({
-			id: "Main", displayName: "Main", kind: "main",
+			id: "Main",
+			displayName: "Main",
+			kind: "main",
 			session: { sessionManager: transcript } as AgentSession,
 		});
 		registry.register({ id: "Peer", displayName: "Peer", kind: "sub", parentId: "Main", session: null });
@@ -165,7 +167,9 @@ describe("wait", () => {
 			const waited = result.details?.waited;
 			if (!waited) throw new Error("Expected an IRC wait result");
 			expect(result.content).toEqual([{ type: "text", text: `[${waited.id}] Peer: synthetic message` }]);
-			expect(transcript.cloneCurrentSession({ persist: false }).hasReceivedIrcMessage(waited.from, waited.id)).toBe(true);
+			expect(transcript.cloneCurrentSession({ persist: false }).hasReceivedIrcMessage(waited.from, waited.id)).toBe(
+				true,
+			);
 			expect(transcript.buildSessionContext().messages).toEqual([]);
 			expect(manager.getJob(id)?.status).toBe("running");
 		} finally {
@@ -186,7 +190,9 @@ describe("wait", () => {
 				isStreaming: () => true,
 				planModeEnabled: () => false,
 				emitSessionEvent: async () => {},
-				wakeForIrc: () => { throw new Error("Unexpected idle wake"); },
+				wakeForIrc: () => {
+					throw new Error("Unexpected idle wake");
+				},
 			};
 			const bridge = new IrcBridge(host);
 			const facade = {
@@ -211,8 +217,8 @@ describe("wait", () => {
 			const manager = new AsyncJobManager({ onJobComplete: () => {} });
 			const work = Promise.withResolvers<string>();
 			const id = manager.register("bash", "unfinished", async () => work.promise, { ownerId: "Main" });
-			const waiting = new WaitTool(session(manager, "Main", true)).execute(
-				"old-wait", {}, undefined, () => blocked.resolve(),
+			const waiting = new WaitTool(session(manager, "Main", true)).execute("old-wait", {}, undefined, () =>
+				blocked.resolve(),
 			);
 			try {
 				await refreshStarted.promise;
@@ -225,14 +231,15 @@ describe("wait", () => {
 					facade.sessionManager = transcript;
 				}
 				const incoming: IrcMessage = {
-					id: "new-inbox", from: "Peer", to: "Main", body: "synthetic new inbox", ts: 42,
+					id: "new-inbox",
+					from: "Peer",
+					to: "Main",
+					body: "synthetic new inbox",
+					ts: 42,
 				};
 				await bridge.deliver(incoming);
 				releaseRefresh.resolve();
-				const stillWaiting = await Promise.race([
-					blocked.promise.then(() => true),
-					waiting.then(() => false),
-				]);
+				const stillWaiting = await Promise.race([blocked.promise.then(() => true), waiting.then(() => false)]);
 				expect(stillWaiting).toBe(true);
 				await IrcBus.global().send({ from: "Peer", to: "Main", body: "synthetic later inbox" });
 				work.resolve("synthetic old work completed");
@@ -241,7 +248,8 @@ describe("wait", () => {
 				expect(result.details?.jobs?.[0]).toMatchObject({ id, resultText: "synthetic old work completed" });
 				expect(transcript.hasReceivedIrcMessage(incoming.from, incoming.id)).toBe(false);
 				expect(bridge.drainInboxMessages("Main").map(message => message.body)).toEqual([
-					"synthetic new inbox", "synthetic later inbox",
+					"synthetic new inbox",
+					"synthetic later inbox",
 				]);
 			} finally {
 				releaseRefresh.resolve();

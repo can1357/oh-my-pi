@@ -8664,7 +8664,9 @@ export class AgentSession implements SettingsScope {
 			display: normalizedPayload.display,
 			details,
 			attribution: normalizedPayload.attribution,
-			...(normalizedPayload.steeringSource !== undefined ? { steeringSource: normalizedPayload.steeringSource } : {}),
+			...(normalizedPayload.steeringSource !== undefined
+				? { steeringSource: normalizedPayload.steeringSource }
+				: {}),
 			timestamp: Date.now(),
 		};
 		const normalizedAppMessage = await this.#normalizeAgentMessageImages(appMessage);
