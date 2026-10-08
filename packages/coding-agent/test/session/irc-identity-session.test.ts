@@ -1,4 +1,4 @@
-import { describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
@@ -14,9 +14,21 @@ import { SessionManager } from "../../src/session/session-manager";
 
 // These tests use only the synthetic stream function. No provider request or task is started.
 describe("IRC identity through AgentSession", () => {
+	beforeEach(() => {
+		vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("External requests are forbidden in this synthetic fixture"));
+	});
+	afterEach(() => {
+		try {
+			expect(globalThis.fetch).not.toHaveBeenCalled();
+		} finally {
+			vi.restoreAllMocks();
+		}
+	});
+
 	it("persists both parent IDs and a same-ID peer through the real message_end path", async () => {
 		using temp = TempDir.createSync("@omp-irc-session-");
 		const auth = await AuthStorage.create(path.join(temp.path(), "auth.db"));
+		auth.keys.setRuntime("openai", "synthetic-irc-fixture-key");
 		const manager = SessionManager.inMemory(temp.path());
 		const recipient = "IrcIdentityRecipient";
 		const parent = "IrcIdentityParent";
@@ -85,6 +97,7 @@ describe("IRC identity through AgentSession", () => {
 		it(`interrupt discards ${delivery} parent steering without blocking a same-identity resend`, async () => {
 			using temp = TempDir.createSync("@omp-irc-interrupt-");
 			const auth = await AuthStorage.create(path.join(temp.path(), "auth.db"));
+			auth.keys.setRuntime("openai", "synthetic-irc-fixture-key");
 			const manager = SessionManager.inMemory(temp.path());
 			const recipient = `IrcInterrupt-${delivery}`;
 			const parent = "IrcInterruptParent";
@@ -184,6 +197,7 @@ describe("IRC identity through AgentSession", () => {
 	it("public custom-message dispatch persists source without promoting developer content to a user", async () => {
 		using temp = TempDir.createSync("@omp-irc-source-");
 		const auth = await AuthStorage.create(path.join(temp.path(), "auth.db"));
+		auth.keys.setRuntime("openai", "synthetic-irc-fixture-key");
 		const manager = SessionManager.inMemory(temp.path());
 		const mock = createMockModel({ provider: "openai", id: "synthetic-source-model", handler: { content: ["unused"] } });
 		const agent = new Agent({ initialState: { model: mock.model, tools: [], messages: [] }, convertToLlm, streamFn: mock.stream });
