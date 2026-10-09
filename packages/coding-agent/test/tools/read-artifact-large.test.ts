@@ -68,6 +68,19 @@ function streamedMultiRangeArtifact(): string {
 	).join("\n");
 }
 
+/** 400 lines of 699 bytes: several budget pages, all addressable from memory. */
+function wideMultiRangeArtifact(): string {
+	return Array.from(
+		{ length: 400 },
+		(_, index) => `line-${String(index + 1).padStart(3, "0")} ${"x".repeat(690)}`,
+	).join("\n");
+}
+
+/** Same scale, but the first line alone is 70 KB: wider than any per-range cap. */
+function streamedOversizedFirstLineArtifact(): string {
+	return [`oversized-first ${"x".repeat(70_000)}`, streamedMultiRangeArtifact()].join("\n");
+}
+
 describe("read tool large artifact handling", () => {
 	let testDir: string;
 	let artifactDir: string;
@@ -207,8 +220,30 @@ describe("read tool large artifact handling", () => {
 		expect(output).not.toContain("line-093");
 		expect(output).not.toContain("line-100");
 		expect(output).toContain("Read budget of 50.0KB");
-		expect(output).toContain("Use artifact://0:93- to continue");
+		expect(output).toContain("Use artifact://0:93-100 to continue");
 		expect(result.details?.meta?.source).toEqual({ type: "internal", value: "artifact://0" });
+	});
+
+	it("keeps the remaining ranges in the continuation hint", async () => {
+		await Bun.write(path.join(artifactDir, "0.mcp.log"), wideMultiRangeArtifact());
+
+		const result = await tool.execute("call-multi-range-ranges-kept", { path: "artifact://0:1-200,300-310" });
+		const output = getTextOutput(result);
+
+		// The budget runs out inside the first range. A hint that restarts at
+		// an open offset would page through the unrequested gap and skip the
+		// requested tail, so the hint carries the rest of this range plus the
+		// later ones.
+		expect(output).toContain("Read budget of 50.0KB");
+		expect(output).toContain("Use artifact://0:74-200,300-310 to continue");
+		expect(output).not.toContain("line-074");
+
+		// Following the hint shows the cut line: nothing requested is skipped.
+		const followed = getTextOutput(
+			await tool.execute("call-multi-range-follow", { path: "artifact://0:74-200,300-310" }),
+		);
+		expect(followed).toContain("line-074");
+		expect(followed).toContain("300-310");
 	});
 
 	it("applies the same per-call budget when the artifact is too large to buffer", async () => {
@@ -227,20 +262,58 @@ describe("read tool large artifact handling", () => {
 		expect(output).not.toContain("line-00092");
 		expect(output).not.toContain("line-00100");
 		expect(output).toContain("Read budget of 50.0KB");
-		expect(output).toContain("Use artifact://0:92- to continue");
+		expect(output).toContain("Use artifact://0:92-100 to continue");
 	});
 
-	it("keeps raw multi-range artifact chunks out of the per-call budget", async () => {
+	it("bounds raw multi-range artifact reads at the same per-call budget", async () => {
 		await Bun.write(path.join(artifactDir, "0.mcp.log"), multiRangeBudgetArtifact());
 
 		const result = await tool.execute("call-raw-multi-range", { path: "artifact://0:raw:1-40,60-100" });
 		const output = getTextOutput(result);
 
-		// Raw chunks are for copy/paste back into a tool; a budget cut in the
-		// middle of one would corrupt the paste, so the whole selection returns.
+		// The issue's own repro is a raw read: raw:1-300 must also fit one
+		// finite bound. The cut stays on a line boundary and the hint stays
+		// raw, so the continuation is the same kind of read.
 		expect(output).toContain("line-001");
-		expect(output).toContain("line-100");
-		expect(output).not.toContain("Read budget of");
+		expect(output).toContain("line-092");
+		expect(output).not.toContain("line-093");
+		expect(output).toContain("Read budget of 50.0KB");
+		expect(output).toContain("Use artifact://0:raw:93-100 to continue");
+
+		const followed = getTextOutput(
+			await tool.execute("call-raw-multi-range-follow", { path: "artifact://0:raw:93-100" }),
+		);
+		expect(followed).toContain("line-093");
+		expect(followed).toContain("line-100");
+	});
+
+	it("names an oversized first line instead of leaving a silent hole", async () => {
+		await Bun.write(path.join(artifactDir, "0.mcp.log"), streamedOversizedFirstLineArtifact());
+
+		const result = await tool.execute("call-streamed-oversized-first", { path: "artifact://0:1-2,4-5" });
+		const output = getTextOutput(result);
+
+		// The 70 KB first line fits no per-range cap, so the window collects
+		// nothing for range 1-2 — not even line 2. The page must say line 1 is
+		// missing and carry the unattempted remainder in the hint.
+		expect(output).not.toContain("oversized-first");
+		expect(output).toContain("Line 1 is");
+		expect(output).toContain("exceeds the 50.0KB per-read budget");
+		expect(output).toContain("Use artifact://0:raw:1-1");
+		expect(output).toContain("artifact://0:2-2,4-5");
+		// The later range still renders in the same page.
+		expect(output).toContain("line-00003");
+
+		const raw = getTextOutput(
+			await tool.execute("call-streamed-oversized-first-raw", { path: "artifact://0:raw:1-1" }),
+		);
+		expect(raw).toContain("oversized-first");
+
+		const rest = getTextOutput(
+			await tool.execute("call-streamed-oversized-first-rest", { path: "artifact://0:2-2,4-5" }),
+		);
+		expect(rest).toContain("line-00001");
+		expect(rest).toContain("line-00003");
 	});
 
 	it("keeps raw oversized-line reads context-free and byte-capped", async () => {
