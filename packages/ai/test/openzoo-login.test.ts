@@ -33,4 +33,8 @@ describe("openzoo login", () => {
 		Bun.env.OPENZOO_API_KEY = "oz_tunnel-bearer";
 		expect(resolve()).toBe("oz_tunnel-bearer");
 	});
+
+	it("leaves the caller's OPENZOO_API_KEY in place for later tests", () => {
+		expect(Bun.env.OPENZOO_API_KEY).toBe(ORIGINAL_OPENZOO_API_KEY);
+	});
 });
