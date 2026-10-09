@@ -27,6 +27,7 @@
 
 ### Fixed
 
+- Fixed resuming a session saved on `openzoo/auto` when the OpenZoo model cache is empty.
 - Explicit CLI model selection now discovers a requested live-only provider when its cache is empty.
 - Reduced memory growth after one-shot side requests without interrupting ongoing conversations ([#14334](https://github.com/can1357/oh-my-pi/pull/14334) by [@iliaal](https://github.com/iliaal)).
 - Fixed sessions staying untitled when you interrupted the first reply to send a queued steer message.

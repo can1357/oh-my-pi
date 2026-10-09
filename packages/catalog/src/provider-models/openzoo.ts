@@ -178,11 +178,16 @@ export function mapOpenzooModel(
 	const supportsTools = liveOpenzooSupportsTools(entry);
 	const toolSupport = supportsTools === false ? { supportsTools } : {};
 	if (family) {
+		// Same live capability fields as an ordinary row. The family return
+		// used to keep the generic reasoning:false / input:["text"] defaults,
+		// so openzoo/auto hid a roster that advertised them.
 		return {
 			...defaults,
 			...toolSupport,
 			id: family.id,
 			name: family.name,
+			reasoning: liveOpenzooReasoning(entry),
+			input: liveOpenzooInput(entry) ?? defaults.input,
 			cost: mapOpenzooCost(entry.pricing),
 			contextWindow: toPositiveNumber(entry.max_model_len, null),
 			maxTokens: toPositiveNumber(entry.max_output_tokens, null),
@@ -215,6 +220,14 @@ export function mapOpenzooModel(
 	};
 }
 
+/** Image input sticks once any router alias advertises it; a text-only alias does not clear it. */
+function mergeOpenzooAdvertisedInput(
+	previous: ModelSpec<"openai-completions">["input"],
+	next: ModelSpec<"openai-completions">["input"],
+): ModelSpec<"openai-completions">["input"] {
+	return previous.includes("image") || next.includes("image") ? ["text", "image"] : previous;
+}
+
 /**
  * Per-fetch mapper. Discovery dedupes by mapped id (last row wins), and the
  * backend publishes the router under several alias spellings, so router rows
@@ -223,6 +236,8 @@ export function mapOpenzooModel(
  * that supplies only the number an earlier row omitted still contributes it.
  * An alias whose parameter list omits `tools` marks the folded model not
  * tool-capable; an alias with no list does not clear that mark.
+ * Advertised reasoning and image input are a union: a later alias that
+ * reports either keeps it, and an alias that omits them does not clear it.
  */
 export function createOpenzooModelMapper(
 	references: ModelReferenceIndex,
@@ -240,6 +255,8 @@ export function createOpenzooModelMapper(
 		const merged = previous
 			? {
 					...previous,
+					reasoning: previous.reasoning || row.reasoning,
+					input: mergeOpenzooAdvertisedInput(previous.input, row.input),
 					cost: {
 						input: previous.cost.input > 0 ? previous.cost.input : row.cost.input,
 						output: previous.cost.output > 0 ? previous.cost.output : row.cost.output,

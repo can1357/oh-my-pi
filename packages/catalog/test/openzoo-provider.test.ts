@@ -259,6 +259,10 @@ describe("openzoo built-in provider", () => {
 		expect(auto?.maxTokens).toBe(8_192);
 		// The alias spellings themselves never surface as separate rows.
 		expect(models?.some(model => ["openzoo/auto", "openzoo-auto"].includes(model.id))).toBe(false);
+		// The router rows in this fixture advertise neither reasoning nor image
+		// input, so the folded auto model keeps the discovery defaults.
+		expect(auto?.reasoning).toBe(false);
+		expect(auto?.input).toEqual(["text"]);
 	});
 
 	test("sends the bearer and honours a configured base URL", async () => {
@@ -312,6 +316,40 @@ describe("openzoo built-in provider", () => {
 		expect(withTools && buildModel(withTools).supportsTools).toBeUndefined();
 		expect(silent?.supportsTools).toBeUndefined();
 		expect(silent && buildModel(silent).supportsTools).toBeUndefined();
+	});
+
+	test("a folded router alias keeps reasoning and image input advertised on any alias row", async () => {
+		// The family return used to keep reasoning:false and input:["text"]
+		// even when an alias row reported them, and the fold kept the first
+		// row's defaults, so openzoo/auto hid capabilities the proxy advertised.
+		// Each alias contributes one field; a following alias that omits both
+		// must not clear them.
+		const options = openzooModelManagerOptions({
+			fetch: async () =>
+				Response.json({
+					data: [
+						{
+							id: "auto",
+							owned_by: "openzoo",
+							pricing: { prompt: 1e-7, completion: 2e-7 },
+							supported_parameters: ["reasoning"],
+						},
+						{
+							id: "openzoo/auto",
+							owned_by: "openzoo",
+							architecture: { input_modalities: ["text", "image"] },
+						},
+						{ id: "openzoo-auto", owned_by: "openzoo" },
+					],
+				}),
+		});
+		const models = await options.fetchDynamicModels?.();
+		expect(models?.map(model => model.id)).toEqual(["auto"]);
+		const auto = models?.[0];
+		expect(auto?.reasoning).toBe(true);
+		expect(auto?.input).toEqual(["text", "image"]);
+		expect(auto && buildModel(auto).reasoning).toBe(true);
+		expect(auto && buildModel(auto).input).toEqual(["text", "image"]);
 	});
 
 	test("a folded router alias whose parameter list omits tools is not tool-capable", async () => {
