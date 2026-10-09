@@ -161,7 +161,8 @@ function formatMs(ms: number): string {
 /** Render the resolved session and report timings. Returns the exit code. */
 export async function runRenderCommand(args: RenderCommandArgs): Promise<number> {
 	const cwd = getProjectDir();
-	const settings = await Settings.init({ cwd });
+	// `omp render` draws the entire thread, not the live redraw window.
+	const settings = await Settings.init({ cwd, overrides: { "display.transcriptReplayLimit": 0 } });
 	await initTheme();
 
 	const sourcePath = await resolveTargetSession(args.session, cwd);

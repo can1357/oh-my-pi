@@ -1,7 +1,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
-import type { AssistantMessage, ImageContent, Usage } from "@oh-my-pi/pi-ai";
+import type { AssistantMessage, ImageContent, ToolResultMessage, Usage } from "@oh-my-pi/pi-ai";
 import { getStreamingPartialJson } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { type Component, Spacer, Text } from "@oh-my-pi/pi-tui";
 import { StatusNotice } from "@oh-my-pi/pi-tui/chrome/status-notice";
@@ -17,6 +17,7 @@ import { createBackgroundTanDispatchBlock } from "@oh-my-pi/pi-tui/chat/backgrou
 import { BashExecutionComponent } from "@oh-my-pi/pi-tui/chat/bash-execution";
 import { detectCacheInvalidation } from "@oh-my-pi/pi-tui/chat/cache-invalidation-marker";
 import { ServedModelTracker } from "@oh-my-pi/pi-tui/chat/served-model-marker";
+import { HiddenHistoryNotice } from "@oh-my-pi/pi-tui/chat/hidden-history-notice";
 import { CollabPromptMessageComponent } from "@oh-my-pi/pi-tui/chat/collab-prompt-message";
 import {
 	BranchSummaryMessageComponent,
@@ -95,6 +96,7 @@ import {
 	cfgDisplayCollapseCompacted,
 	cfgDisplayShowTokenUsage,
 	cfgDisplayShowTurnTime,
+	cfgDisplayTranscriptReplayLimit,
 	cfgTerminalShowImages,
 } from "../settings";
 import { cfgReadToolResultPreview } from "../../tools/settings";
@@ -465,14 +467,28 @@ export class UiHelpers {
 	): Generator<void, void, void> {
 		// Preserved: message_start handler owns this lifecycle (see #783)
 		this.ctx.pendingTools.clear();
-		const activeToolExecutionUpdates = this.ctx.viewSession.activeToolExecutionUpdates?.() ?? [];
-		const runningAsyncJobs = this.ctx.viewSession.getAsyncJobSnapshot?.()?.running ?? [];
+		const isLiveBackgroundTask = this.#liveBackgroundTaskCheck();
+		const messages = sessionContext.messages;
+		const start = this.#transcriptWindowStart(messages, isLiveBackgroundTask);
 		// Reseed the cache-invalidation baseline: this rebuild re-derives every
 		// turn's marker from usage, and the last turn becomes the live baseline.
 		this.ctx.lastAssistantUsage = undefined;
 		// Same for the served-model tracker: replaying history re-flags the first
 		// occurrence of each substitution and carries the memory forward live.
 		this.ctx.servedModelTracker = new ServedModelTracker();
+		// History above the redrawn window still feeds both, so the first drawn
+		// turn gets the marker a full redraw would give it. Its settled
+		// components are dropped: session entries keep messages reachable, so a
+		// retained mapping would pin layout caches the redraw no longer shows.
+		for (let i = 0; i < start; i++) {
+			const message = messages[i]!;
+			this.ctx.transcriptMessageComponents.delete(message);
+			if (message.role !== "assistant") continue;
+			const usage = message.usage;
+			if (usage.cacheRead + usage.cacheWrite + usage.input > 0) this.ctx.lastAssistantUsage = usage;
+			this.ctx.servedModelTracker.check(message);
+		}
+		if (start > 0) this.ctx.chatContainer.addChild(new HiddenHistoryNotice(start));
 
 		if (options.updateFooter) {
 			this.ctx.statusLine.invalidate();
@@ -570,9 +586,8 @@ export class UiHelpers {
 		// (not finalized) so replayed and live frames still route to the card;
 		// the ids are handed back to the controller after the loop (#10447).
 		const backgroundTaskCallIds = new Set<string>();
-		const messages = sessionContext.messages;
 		const count = messages.length;
-		for (let i = 0; i < count; i++) {
+		for (let i = start; i < count; i++) {
 			// Yield BEFORE each message (except the first) rather than after: the
 			// per-message body has several early `continue` paths (preserved live
 			// results, image-only and grouped `read` results), and a trailing yield
@@ -580,7 +595,7 @@ export class UiHelpers {
 			// such results, so an after-body yield never trips the chunk counter and
 			// the whole batch replays in one event-loop turn. Yielding at the top of
 			// the next iteration is reached no matter how the prior message exited.
-			if (i > 0) yield;
+			if (i > start) yield;
 			const message = messages[i]!;
 			if (message.role !== "toolResult") flushPendingUsage();
 			// Assistant messages need special handling for tool calls
@@ -794,13 +809,7 @@ export class UiHelpers {
 				// Match tool results to pending tool components
 				const component = this.ctx.pendingTools.get(message.toolCallId);
 				if (component) {
-					const asyncDetails = (message.details as { async?: { state?: string; jobId?: string } } | undefined)
-						?.async;
-					const isBackgroundTask =
-						message.toolName === "task" &&
-						asyncDetails?.state === "running" &&
-						(activeToolExecutionUpdates.some(event => event.toolCallId === message.toolCallId) ||
-							runningAsyncJobs.some(job => job.id === asyncDetails.jobId));
+					const isBackgroundTask = isLiveBackgroundTask(message);
 					// A detached task's persisted result is only its "still running"
 					// snapshot. Keep the card partial, parked, and in `pendingTools` so
 					// the snapshot replay and later live progress frames land on it
@@ -928,6 +937,59 @@ export class UiHelpers {
 	}
 
 	/**
+	 * Snapshot of detached `task` calls whose persisted result is only the
+	 * "still running" state while the job keeps streaming progress (#10447).
+	 */
+	#liveBackgroundTaskCheck(): (message: ToolResultMessage) => boolean {
+		const activeToolExecutionUpdates = this.ctx.viewSession.activeToolExecutionUpdates?.() ?? [];
+		const runningAsyncJobs = this.ctx.viewSession.getAsyncJobSnapshot?.()?.running ?? [];
+		return message => {
+			if (message.toolName !== "task") return false;
+			const asyncDetails = (message.details as { async?: { state?: string; jobId?: string } } | undefined)?.async;
+			return (
+				asyncDetails?.state === "running" &&
+				(activeToolExecutionUpdates.some(event => event.toolCallId === message.toolCallId) ||
+					runningAsyncJobs.some(job => job.id === asyncDetails.jobId))
+			);
+		};
+	}
+
+	/**
+	 * First message a transcript redraw draws. Past `display.transcriptReplayLimit`
+	 * messages, the redraw starts at the user request opening the turn that
+	 * contains the limit, so tool calls stay with their results, and reaches
+	 * further back to any still-running background task so its card keeps
+	 * receiving progress. Clearing native scrollback means every drawn row is
+	 * re-sent to the terminal; earlier history stays browsable in /tree. A
+	 * focused subagent view is drawn in full: /tree browses the main session.
+	 */
+	#transcriptWindowStart(
+		messages: readonly AgentMessage[],
+		isLiveBackgroundTask: (message: ToolResultMessage) => boolean,
+	): number {
+		if (messages.length === 0 || this.ctx.focusedAgentId) return 0;
+		// Config accepts any finite number; a fractional limit would index between messages.
+		const limit = Math.trunc(cfgDisplayTranscriptReplayLimit.get(this.ctx.settings));
+		if (limit <= 0 || messages.length <= limit) return 0;
+		// Same turn anchors as the replay's turn timer: an agent-attributed
+		// `user` message (a mid-run steer) does not open a turn.
+		const turnStartAtOrBefore = (index: number): number => {
+			for (let i = index; i > 0; i--) {
+				const message = messages[i]!;
+				if (message.role === "user" && message.attribution !== "agent") return i;
+				if (message.role === "custom" && isUserTurnInitiator(message as CustomMessage)) return i;
+			}
+			return 0;
+		};
+		const start = turnStartAtOrBefore(messages.length - limit);
+		for (let i = 0; i < start; i++) {
+			const message = messages[i]!;
+			if (message.role === "toolResult" && isLiveBackgroundTask(message)) return turnStartAtOrBefore(i);
+		}
+		return start;
+	}
+
+	/**
 	 * Fast-path history rewind (esc-esc branch, /tree rewind to an ancestor):
 	 * drop the rendered components at/after `message` in place instead of the
 	 * destructive clear-scrollback replay. Rows already committed to native
@@ -969,6 +1031,17 @@ export class UiHelpers {
 		});
 		for (const remaining of context.messages) {
 			if (remaining === message) return false;
+		}
+		// A windowed transcript keeps its window only if the shorter surviving
+		// transcript would start at the same message; otherwise only a full
+		// redraw shows the history that now belongs above the cut. Without a
+		// window, a shorter transcript never gains one.
+		const notice = chat.children.find((child): child is HiddenHistoryNotice => child instanceof HiddenHistoryNotice);
+		if (
+			notice &&
+			this.#transcriptWindowStart(context.messages, this.#liveBackgroundTaskCheck()) !== notice.hiddenMessages
+		) {
+			return false;
 		}
 		const dropped = chat.children.slice(index);
 		for (let i = dropped.length - 1; i >= 0; i--) {

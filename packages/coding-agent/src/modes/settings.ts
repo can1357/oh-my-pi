@@ -715,6 +715,26 @@ export const cfgDisplayCollapseCompacted = register({
 	},
 });
 
+export const cfgDisplayTranscriptReplayLimit = register({
+	id: "display.transcriptReplayLimit",
+	type: "number",
+	default: 600,
+	ui: {
+		tab: "appearance",
+		group: "Display",
+		label: "Redrawn History",
+		description:
+			"When the transcript is redrawn (resume, /tree, rewind, display changes), draw about this many recent messages, starting at a user message; earlier history stays browsable in /tree. 0 redraws the full history.",
+		options: [
+			{ value: "0", label: "Full history" },
+			{ value: "300", label: "300 messages" },
+			{ value: "600", label: "600 messages" },
+			{ value: "1000", label: "1000 messages" },
+			{ value: "2000", label: "2000 messages" },
+		],
+	},
+});
+
 export const cfgShowHardwareCursor = register({
 	id: "showHardwareCursor",
 	type: "boolean",

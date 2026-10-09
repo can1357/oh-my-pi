@@ -17,6 +17,7 @@
 - The default `smol` model now prefers Claude Haiku 5.5 when it is available.
 - Automatic session titles now start when the agent's reply begins rather than when you submit, so a slow-thinking first reply gets a card title (icon and code) instead of a plain fallback title.
 - Agents whose tool list omits `write` but still get it to run `xd://` tools can now also write `local://` files (reports, notes) outside plan mode; working-tree writes stay blocked.
+- Rewinding from `/tree` or Esc-Esc, resuming, and changing display settings on long sessions now redraw only the most recent ~600 messages under an "N earlier messages not shown" note; set `display.transcriptReplayLimit` to `0` to redraw the full history ([#14988](https://github.com/can1357/oh-my-pi/pull/14988) by [@azain47](https://github.com/azain47)).
 
 ### Fixed
 

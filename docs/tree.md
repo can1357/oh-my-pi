@@ -9,7 +9,7 @@ This is an in-file leaf move, not a new session export.
 - Builds a tree from current session entries (`SessionManager.getTree()`)
 - Opens `TreeSelectorComponent` with keyboard navigation, filters, and search
 - On selection, calls `AgentSession.navigateTree(targetId, { summarize, customInstructions })`
-- Rebuilds visible chat from the new leaf path
+- Rebuilds visible chat from the new leaf path. Rows already in native scrollback cannot be edited, so a rewind into history clears the scrollback and redraws; past `display.transcriptReplayLimit` messages (default 600, `0` for all), the redraw starts at the user request opening that turn, under a "N earlier messages not shown" note. Earlier history stays browsable here.
 - Optionally prefills editor text when selecting a user/custom message
 
 Primary implementation:
