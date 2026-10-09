@@ -1,6 +1,6 @@
 import { logger } from "@oh-my-pi/pi-utils";
 import picomatch from "picomatch";
-import { sanitizeMCPToolNamePart } from "./name-sanitize";
+import { sanitizeFilterNamePart } from "./name-sanitize";
 import type { MCPToolDefinition } from "./types";
 
 /** A tool filter rule set for one server, with the raw advertised tool names. */
@@ -86,7 +86,7 @@ const PARSE_OPTIONS = {
  * this sanitized second domain, never the minted registry key.
  */
 function sanitizeToolName(name: string): string {
-	return sanitizeMCPToolNamePart(name, name, true);
+	return sanitizeFilterNamePart(name, name, true);
 }
 
 /** Per-pattern matcher over sanitized tool names; cached across filter calls. */

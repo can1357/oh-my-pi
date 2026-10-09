@@ -263,10 +263,19 @@ export function parseMCPToolFilterEntry(serverName: string, value: unknown): str
  * `MCPServer` object: `...parseMCPToolFilters(name, config)`. Undefined
  * members are omitted, so the spread adds only configured filters.
  */
+const NEAR_MISS_FILTER_KEYS = ["enabledTool", "enableTools", "disableTools", "disabledTool", "enable_tools", "disable_tools"];
 export function parseMCPToolFilters(
 	serverName: string,
 	config: { enabledTools?: unknown; disabledTools?: unknown },
 ): Pick<MCPServer, "enabledTools" | "disabledTools"> {
+	for (const key of NEAR_MISS_FILTER_KEYS) {
+		if ((config as Record<string, unknown>)[key] !== undefined) {
+			logger.warn(
+				`MCP server "${serverName}": unknown filter key "${key}" — did you mean "${key.startsWith("disable") || key.startsWith("disabled") ? "disabledTools" : "enabledTools"}"? All tools load until it is fixed.`,
+			);
+			break;
+		}
+	}
 	const enabledTools = parseMCPToolFilterEntry(serverName, config.enabledTools);
 	const disabledTools = parseMCPToolFilterEntry(serverName, config.disabledTools);
 	return {

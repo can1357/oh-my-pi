@@ -17,7 +17,7 @@
  *   description, annotations, original ordering, and the raw name.
  */
 import { expect, test } from "bun:test";
-import { sanitizeMCPToolNamePart } from "../../src/mcp/name-sanitize";
+import { sanitizeFilterNamePart } from "../../src/mcp/name-sanitize";
 import { createMCPToolName } from "../../src/mcp/tool-bridge";
 import { applyMCPToolFilter, filterMCPTools } from "../../src/mcp/tool-filter";
 import type { MCPToolDefinition } from "../../src/mcp/types";
@@ -119,11 +119,11 @@ test("the mint domain still collapses and trims underscores", () => {
 	// mint domain: `createMCPToolName` builds `mcp__<server>_<tool>`, where a
 	// doubled underscore would corrupt the server/tool boundary and change the
 	// registered name for a server that always minted `mcp__foo_bar_…`.
-	expect(sanitizeMCPToolNamePart("foo__bar", "server")).toBe("foo_bar");
-	expect(sanitizeMCPToolNamePart("foo_", "server")).toBe("foo");
+	expect(sanitizeFilterNamePart("foo__bar", "server")).toBe("foo_bar");
+	expect(sanitizeFilterNamePart("foo_", "server")).toBe("foo");
 	expect(createMCPToolName("foo__bar", "foo_bar_baz")).toBe("mcp__foo_bar_baz");
 	// The filter domain keeps them verbatim, which is the whole point of the split.
-	expect(sanitizeMCPToolNamePart("foo__bar", "server", true)).toBe("foo__bar");
+	expect(sanitizeFilterNamePart("foo__bar", "server", true)).toBe("foo__bar");
 });
 
 test("a literal entry does not admit an underscore-variant sibling", () => {

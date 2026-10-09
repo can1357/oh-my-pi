@@ -15,7 +15,7 @@
  * has its runs collapsed and its leading/trailing `_` stripped to reach a
  * spelling both domains can address.
  */
-export function sanitizeMCPToolNamePart(value: string, fallback: string, keepHyphen = false): string {
+export function sanitizeFilterNamePart(value: string, fallback: string, keepHyphen = false): string {
 	const folded = keepHyphen ? value : value.toLowerCase().replaceAll("-", "_");
 	// FILTER domain only: a value already inside the advertised-name alphabet is
 	// returned byte-identical. That domain must stay injective over the names it
