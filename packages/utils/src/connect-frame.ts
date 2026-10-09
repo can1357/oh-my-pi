@@ -121,7 +121,10 @@ export async function* readConnectFrames(
 ): AsyncGenerator<ConnectFrame> {
 	const reader = body.getReader();
 	const decoder = new ConnectFrameDecoder({
-		limit: { maxPayloadBytes: maxFrameBytes, error: () => new Error("Connect envelope exceeds the configured size limit") },
+		limit: {
+			maxPayloadBytes: maxFrameBytes,
+			error: () => new Error("Connect envelope exceeds the configured size limit"),
+		},
 	});
 	try {
 		while (true) {

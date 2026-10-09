@@ -5,9 +5,7 @@
 ### Added
 
 - Added account-scoped Grok Bot model discovery and explicit Opus 5.5 effort selectors without implying inference entitlement ([#10175](https://github.com/can1357/oh-my-pi/pull/10175) by [@jroth1111](https://github.com/jroth1111)).
-- Added the text-only `grokbot-chat/host-managed` route without claiming a specific backend model.
-- Added explicit Grok Bot Opus 5.5 low, medium, high, and xhigh selectors backed by canonical Sand effort parameters.
-- Added the `sand-default-preferred` Grok Bot router and captured Claude models to offline fallback catalogs, with Opus 5.5 as the default selector.
+- Added the text-only `grokbot-chat/host-managed` route without claiming a specific backend model ([#10175](https://github.com/can1357/oh-my-pi/pull/10175) by [@jroth1111](https://github.com/jroth1111)).
 
 ### Fixed
 

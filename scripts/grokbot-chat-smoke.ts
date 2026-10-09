@@ -7,7 +7,7 @@ import { isRecord, prompt } from "@oh-my-pi/pi-utils";
 import { streamSimple } from "../packages/ai/src/stream";
 import { getEnvApiKey } from "../packages/ai/src/env-api-key";
 import { grokbotChatUsageProvider } from "../packages/ai/src/usage/grokbot";
-import challengePrompt from "./grokbot-catalog-matrix/text-user.md" with { type: "text" };
+import challengePrompt from "./grokbot-chat-smoke.md" with { type: "text" };
 
 const outputPath = process.argv[2];
 if (outputPath && (await Bun.file(outputPath).exists()))
