@@ -13,13 +13,17 @@ import * as path from "node:path";
 import { unregisterCustomApis } from "@oh-my-pi/pi-ai/api-registry";
 import { createMockModel, registerMockApi } from "@oh-my-pi/pi-ai/providers/mock";
 import { closeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
+import type { TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
-import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
+import { AgentRegistry, MAIN_AGENT_ID } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import { cfgContextPromotionEnabled } from "@oh-my-pi/pi-coding-agent/session/context-settings";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { readActiveTime } from "@oh-my-pi/pi-coding-agent/session/active-time";
+import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { StallReportCollector } from "@oh-my-pi/pi-coding-agent/session/stall-report";
 import { runSubprocess } from "@oh-my-pi/pi-coding-agent/task/executor";
 import { __resetDirsFromEnvForTests, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
 import { createInMemoryAuthStorage } from "../helpers/agent-session-setup";
@@ -100,7 +104,7 @@ function writeAndObserveLiveSettings(id: string): WeakRef<Settings> {
 }
 
 /** Runs `AGENT_ID` to a finished keep-alive state; `release` drops the mock's session-bound recordings. */
-async function runKeptAliveSubagent(): Promise<{ release(): void; close(): void }> {
+async function runKeptAliveSubagent(parentAgentId?: string): Promise<{ release(): void; close(): void }> {
 	// Under the isolated HOME: project discovery walks up from cwd and stops at os.homedir(). On Windows
 	// os.tmpdir() lives under the real home, so a cwd outside the fake HOME would walk into the real
 	// ~/.omp and load the developer's installed plugins as project plugins.
@@ -130,6 +134,7 @@ async function runKeptAliveSubagent(): Promise<{ release(): void; close(): void 
 			task: "report done",
 			index: 0,
 			id: AGENT_ID,
+			parentAgentId,
 			modelOverride: "mock/mock-model",
 			authStorage,
 			modelRegistry,
@@ -196,5 +201,70 @@ it("parks without retaining the run's settings overlay and revives with the sett
 		expect(cfgContextPromotionEnabled.get(revived)).toBe(true);
 	} finally {
 		run.close();
+	}
+}, 30_000);
+
+it("retains report receipts and persisted metrics without retaining a parked subagent's live session", async () => {
+	const ownerManager = SessionManager.inMemory(root);
+	const todoListeners = new Set<(phases: TodoPhase[]) => void>();
+	// Only the report owner is a fixture; the observed child uses the real executor and AgentSession.
+	const owner = {
+		sessionManager: ownerManager,
+		isStreaming: false,
+		getAgentId: () => MAIN_AGENT_ID,
+		getTodoPhases: () => [],
+		getStallReportToolSession: () => undefined,
+		subscribeTodoChanges(listener: (phases: TodoPhase[]) => void) {
+			todoListeners.add(listener);
+			return () => todoListeners.delete(listener);
+		},
+	} as unknown as AgentSession;
+	const registry = AgentRegistry.global();
+	const ownerRef = registry.register({
+		id: MAIN_AGENT_ID,
+		displayName: "Main",
+		kind: "main",
+		session: owner,
+		status: "idle",
+	});
+	const collector = new StallReportCollector(owner);
+	let run: { release(): void; close(): void } | undefined;
+	try {
+		run = await runKeptAliveSubagent(MAIN_AGENT_ID);
+		const sessionRef = weakRefToLiveSession(AGENT_ID);
+		const settingsRef = writeAndObserveLiveSettings(AGENT_ID);
+		await AgentLifecycleManager.global().park(AGENT_ID);
+		run.release();
+		expect(await collected(settingsRef, COLLECT_DEADLINE_MS)).toBe(true);
+		expect(await collected(sessionRef, COLLECT_DEADLINE_MS)).toBe(true);
+		expect(AgentLifecycleManager.global().has(AGENT_ID)).toBe(true);
+
+		const parked = registry.get(AGENT_ID)!;
+		expect(parked).toMatchObject({ status: "parked", session: null });
+		const persisted = await SessionManager.open(parked.sessionFile!);
+		try {
+			expect(readActiveTime(persisted.getBranch())).toEqual(parked.activeTime!);
+			expect(parked.activeTime?.historicalUnavailable).toBe(false);
+		} finally {
+			await persisted.close();
+		}
+		const receipt = await collector.collect();
+		expect(receipt.text).toContain(`status_changed: “${AGENT_ID}” → parked`);
+		expect(receipt.text).toContain(`### “${AGENT_ID}”`);
+		expect(receipt.text).toMatch(
+			/TOTAL turns [1-9]\d*; tool calls [1-9]\d*; active time \d+s total observed running windows/,
+		);
+		// Collection is read-only: pending receipts survive until their actual delivery is committed.
+		expect((await collector.collect()).text).toContain(`### “${AGENT_ID}”`);
+		receipt.commit();
+		expect((await collector.collect()).text).not.toContain(`### “${AGENT_ID}”`);
+		const revived = await AgentLifecycleManager.global().ensureLive(AGENT_ID);
+		expect(cfgContextPromotionEnabled.get(revived)).toBe(true);
+	} finally {
+		collector.dispose();
+		expect(todoListeners.size).toBe(0);
+		registry.unregister(MAIN_AGENT_ID, ownerRef);
+		await ownerManager.close();
+		run?.close();
 	}
 }, 30_000);
