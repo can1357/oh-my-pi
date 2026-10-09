@@ -1569,6 +1569,15 @@ export function generateTaskName(): string {
 	}
 }
 
+/** Agent id from a user-supplied label: keeps `[A-Za-z0-9_-]`, max 48 chars; `undefined` when nothing survives. */
+export function sanitizeAgentId(value: string | undefined): string | undefined {
+	const sanitized = value
+		?.trim()
+		.replace(/[^A-Za-z0-9_-]+/g, "")
+		.slice(0, 48);
+	return sanitized || undefined;
+}
+
 /**
  * Reset name generator state (for testing).
  */

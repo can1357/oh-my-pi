@@ -45,7 +45,7 @@ import {
 	renderIsolationSummary,
 	runIsolatedSubprocess,
 } from "./isolation-runner";
-import { generateTaskName } from "./name-generator";
+import { generateTaskName, sanitizeAgentId } from "./name-generator";
 import { AgentOutputManager } from "./output-manager";
 import { resolveSpawnPolicy } from "./spawn-policy";
 import { type AgentDefinition, canSpawnAtDepth } from "./types";
@@ -216,12 +216,6 @@ function renderSubagentPrompt(assignment: string): string {
 function trimToUndefined(value: string | undefined): string | undefined {
 	const trimmed = value?.trim();
 	return trimmed || undefined;
-}
-
-function sanitizeAgentId(value: string | undefined): string | undefined {
-	const trimmed = trimToUndefined(value);
-	const sanitized = trimmed?.replace(/[^A-Za-z0-9_-]+/g, "").slice(0, 48);
-	return sanitized || undefined;
 }
 
 function resolveSchema(request: StructuredSubagentRequest, agent: AgentDefinition): StructuredSubagentSchemaResolution {

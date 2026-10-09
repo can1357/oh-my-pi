@@ -1,7 +1,7 @@
 import { Buffer } from "node:buffer";
 import { planRequirementFor, quotaTierFor } from "@oh-my-pi/pi-catalog/compat/behavior";
 import { toNumber } from "@oh-my-pi/pi-catalog/utils";
-import { USER_AGENT } from "@oh-my-pi/pi-utils";
+import { slugify, USER_AGENT } from "@oh-my-pi/pi-utils";
 import type {
 	CredentialRankingContext,
 	CredentialRankingStrategy,
@@ -393,12 +393,7 @@ function additionalLimitSlug(args: { limitName?: string; meteredFeature?: string
 	const probe = `${args.limitName ?? ""} ${args.meteredFeature ?? ""}`.toLowerCase();
 	if (probe.includes("spark") || probe.includes("bengalfox")) return "spark";
 	const source = (args.meteredFeature ?? args.limitName ?? "extra").toLowerCase();
-	return (
-		source
-			.replace(/^codex[-_]/, "")
-			.replace(/[^a-z0-9]+/g, "-")
-			.replace(/^-+|-+$/g, "") || "extra"
-	);
+	return slugify(source.replace(/^codex[-_]/, "")) || "extra";
 }
 
 function additionalDisplayName(slug: string, limitName?: string): string {

@@ -4,7 +4,7 @@ import * as path from "node:path";
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import type { IsoBackendKind, VcsGitRepo, VcsWorktreeEntry } from "@oh-my-pi/pi-natives";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
-import { getWorktreeDir, hashPath, isEnoent, logger } from "@oh-my-pi/pi-utils";
+import { getWorktreeDir, hashPath, isEnoent, logger, slugify } from "@oh-my-pi/pi-utils";
 import { github } from "../utils/github";
 import { formatIsolationBackend, parseIsolationBackend } from "../task/worktree";
 import { withRepoLock } from "../utils/repo-lock";
@@ -50,11 +50,7 @@ export const GH_PR_CHECKOUT_FIELDS = [
 const PR_FETCH_TIMEOUT_MS = 30 * 60 * 1000;
 
 export function sanitizeRemoteName(value: string): string {
-	const sanitized = value
-		.toLowerCase()
-		.replace(/[^a-z0-9]+/g, "-")
-		.replace(/^-+/g, "")
-		.replace(/-+$/g, "");
+	const sanitized = slugify(value);
 	return sanitized.length > 0 ? `fork-${sanitized}` : "fork";
 }
 
