@@ -8255,12 +8255,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		// intersect path runs (cliGrant null → leave explicit.tools undefined).
 		const cliGrant = this.session.getToolPolicy()?.cliGrant ?? null;
 		const explicitOverrides: PersonaExplicitOverrides = cliGrant ? { tools: [...cliGrant] } : {};
-		try {
-			await this.#applyPersonaSwitch(agent, explicitOverrides);
-		} catch (error) {
-			this.showError(error instanceof Error ? error.message : String(error));
-			return;
-		}
+		await this.#applyPersonaSwitch(agent, explicitOverrides);
 		// Caller-owned journal persistence (runtime stays pure; resume reconcile reads).
 		// j2g: the runtime's captured pre-persona baseline rides the entry so a
 		// resume can re-enter with it as the authoritative exit baseline.

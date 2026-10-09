@@ -731,7 +731,13 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 			runtime.ctx.editor.setText("");
 			const name = command.args.trim();
 			if (name) {
-				await runtime.ctx.switchAgentPersona(name);
+				// Error boundary: a failed enter throws (the runtime rolls back),
+				// and nothing above catches — surface it instead of bubbling.
+				try {
+					await runtime.ctx.switchAgentPersona(name);
+				} catch (error) {
+					runtime.ctx.showError(error instanceof Error ? error.message : String(error));
+				}
 				return;
 			}
 			if (runtime.ctx.session.getToolPolicy()?.isPersonaActive()) {
