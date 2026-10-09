@@ -17,7 +17,6 @@ import {
 	formatMoreItems,
 	formatStatusIcon,
 	PREVIEW_LIMITS,
-	releaseRenderedStringCache,
 	type RenderedStringCache,
 	replaceTabs,
 	shortenPath,
