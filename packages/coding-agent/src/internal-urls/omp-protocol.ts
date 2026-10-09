@@ -7,17 +7,46 @@
  * - omp:// - Lists all available documentation files
  * - omp://<file>.md - Reads a specific documentation file
  */
+import * as path from "node:path";
+import { resolveContainedPathSync } from "../discovery/contained-path";
 import ompDoc from "../prompts/internal-urls/omp.md" with { type: "text" };
 import { getDocFilenames, getEmbeddedDoc } from "./docs-index";
 import { ompDocFilename, ompDocRel, ompDocsScopeEntries } from "./omp-scope";
 import type {
 	InternalResource,
 	InternalUrl,
+	LocateOptions,
 	ProtocolHandler,
 	ResolveContext,
 	SchemeSpec,
 	UrlCompletion,
 } from "./types";
+
+/**
+ * Repo `docs/` tree the embedded corpus is generated from. This mirrors the
+ * on-disk fallback in `docs-index`, and reaches a real directory only in a
+ * source checkout: a compiled binary or the npm bundle carries the corpus as an
+ * embed, so four levels up from here is `node_modules/`.
+ */
+const DOCS_ROOT = path.resolve(import.meta.dir, "../../../../docs");
+
+/**
+ * File the doc is read from in a source checkout, or `undefined` when no file
+ * backs it. The filename must be part of the corpus (`getDocFilenames`) and
+ * the file must still exist inside `docs/`, so a link always names a doc
+ * `omp://<doc>.md` resolves. Symlinks escaping the tree resolve to `outside`.
+ */
+function docFileOnDisk(docPath: string): string | undefined {
+	if (!getDocFilenames().includes(docPath)) return undefined;
+	const resolution = resolveContainedPathSync(DOCS_ROOT, path.resolve(DOCS_ROOT, docPath));
+	return resolution.status === "ok" ? resolution.realPath : undefined;
+}
+
+/** File a doc URL may link to, or `undefined` for the docs root and doc-less URLs. */
+function docFileFor(url: InternalUrl): string | undefined {
+	const docPath = ompDocRel(url);
+	return docPath.length > 0 ? docFileOnDisk(docPath) : undefined;
+}
 
 /**
  * Handler for omp:// URLs.
@@ -26,7 +55,7 @@ import type {
  */
 export class OmpProtocolHandler implements ProtocolHandler {
 	readonly scheme = "omp";
-	readonly spec: SchemeSpec = { backing: "virtual", selectors: "lines", immutable: true };
+	readonly spec: SchemeSpec = { backing: "virtual", selectors: "lines", immutable: true, linkable: true };
 
 	/** Always advertised: harness docs are embedded in every build. */
 	promptDoc(): string {
@@ -62,6 +91,25 @@ export class OmpProtocolHandler implements ProtocolHandler {
 
 	async complete(): Promise<UrlCompletion[]> {
 		return getDocFilenames().map(value => ({ value }));
+	}
+
+	/**
+	 * File a doc is read from in a source checkout, so `omp://` links open it.
+	 * The shipped corpus is embedded, so most installs have nothing to link and
+	 * the URL stays plain text rather than being materialized on the fly.
+	 */
+	locateSync(url: InternalUrl): string | undefined {
+		try {
+			return docFileFor(url);
+		} catch {
+			// Malformed URLs locate to nothing, never throw, in a render path.
+			return undefined;
+		}
+	}
+
+	/** Async counterpart of {@link locateSync}; null instead of undefined. */
+	async locate(url: InternalUrl, _context?: ResolveContext, _options?: LocateOptions): Promise<string | null> {
+		return docFileFor(url) ?? null;
 	}
 
 	async #listDocs(url: InternalUrl): Promise<InternalResource> {
