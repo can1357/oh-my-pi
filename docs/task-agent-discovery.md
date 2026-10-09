@@ -354,7 +354,11 @@ omp --agent reviewer --resume <id>
   (memory and conventions still apply); its `tools:` frontmatter restricts the effective tool set
   (intersected with any `--tools` grant you pass, never widened by it).
 - `spawns:` frontmatter controls which subagents the session may spawn: `*`,
-  a CSV list, or an array restricts to those names. An omitted `spawns` with a
+  a CSV list, or an array restricts to those names. The persona itself is a UX
+  scoping device, not a safety boundary: subagent children inherit the session
+  baseline grant (not the persona grant), so a read-only persona can still
+  delegate writes to a child. `spawns:` gates which agents may spawn, not what
+  tools the children receive. An omitted `spawns` with a
   `tools:` list including `task` defaults to `*` per the discovery
   backward-compat rule. Empty spellings (`spawns: ""`, `[]`) parse as omitted
   rather than deny-all — disable the `task` tool instead.

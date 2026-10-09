@@ -1034,6 +1034,10 @@ async function runPresetsCommand(
  * the pre-mode presentation snapshot; a persona restore would clobber it.
  */
 function personaModeBlocker(session: AgentSession): string | undefined {
+	// Mutual exclusion mirrors the TUI (switchAgentPersona/exitAgentPersona refuse
+	// when plan/goal are enabled OR paused). Pause is TUI-local state with no
+	// session-visible flag and no ACP/text equivalent, so `enabled` covers every
+	// mode this surface can observe.
 	const plan = typeof session.getPlanModeState === "function" ? session.getPlanModeState() : undefined;
 	if (plan?.enabled) return "Exit plan mode before switching or clearing the agent persona.";
 	const goal = typeof session.getGoalModeState === "function" ? session.getGoalModeState() : undefined;

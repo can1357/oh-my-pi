@@ -1869,7 +1869,8 @@ export async function buildSessionOptions(
 		// in a target workspace. The factory re-discovers against each session/new
 		// cwd; a miss there simply leaves the session persona-less.
 		if (!agent && parsed.mode !== "acp") {
-			throw new Error(`Unknown --agent "${parsed.agent}". Run "omp agents" to list discovered agents.`);
+			const available = agents.map(candidate => candidate.name).join(", ") || "none";
+			throw new Error(`Unknown --agent "${parsed.agent}". Available: ${available}.`);
 		}
 		options.pendingPersonaAgent = agent;
 		// Explicit CLI flags win over the persona's frontmatter: the persona model

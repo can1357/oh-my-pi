@@ -180,5 +180,10 @@ export async function discoverAgents(
  * Get an agent by name from discovered agents.
  */
 export function getAgent(agents: AgentDefinition[], name: string): AgentDefinition | undefined {
-	return agents.find(a => a.name === name);
+	const exact = agents.find(a => a.name === name);
+	if (exact) return exact;
+	// Case-insensitive fallback: `--agent Reviewer` resolves like the slash
+	// picker suggests, instead of hard-failing on capitalization.
+	const lowered = name.toLowerCase();
+	return agents.find(a => a.name.toLowerCase() === lowered);
 }
