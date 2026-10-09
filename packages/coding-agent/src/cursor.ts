@@ -103,6 +103,8 @@ interface CursorExecBridgeOptions {
 	 * adapter's own filtering and this handler gate must agree.
 	 */
 	allowToollessMcpServers?: (serverName: string) => boolean;
+	/** Live manager tool records for dual-source resource gating (dedup losers stay visible). */
+	mcpManagerTools?: () => Iterable<McpOwnedToolRef>;
 	/**
 	 * The `replace`-mode `edit` instance `pi_edit` must run, when the session
 	 * granted `edit` at all.
@@ -636,7 +638,7 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 	 */
 	#serverScopedIn(serverName: string): boolean {
 		return mcpServerResourcesAllowed(
-			[this.options.tools.values()],
+			[this.options.tools.values(), this.options.mcpManagerTools?.() ?? []],
 			this.options.isToolExecutable,
 			this.options.allowToollessMcpServers,
 			serverName,

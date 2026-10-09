@@ -2000,6 +2000,7 @@ export class AgentSession implements SettingsScope {
 			createThinkTool: config.createThinkTool,
 			builtInToolNames: config.builtInToolNames,
 			mcpManagerToolNames: config.mcpManagerToolNames,
+			mcpManagerTools: config.mcpManagerTools,
 			presentationPinnedToolNames: config.presentationPinnedToolNames,
 			enforceToolAllowlist: config.enforceToolAllowlist,
 			allowedToolNames: config.allowedToolNames,
@@ -6182,6 +6183,15 @@ export class AgentSession implements SettingsScope {
 		return this.#tools.hasEditTool;
 	}
 
+	/** Whether a tool survives this session's tool scope (allowlist + disallow patterns). */
+	isToolScopedIn(name: string): boolean {
+		return this.#tools.isToolScopedIn(name);
+	}
+
+	/** Whether an MCP server's resources may be listed/read under this session's tool scope. */
+	isMCPServerResourceAllowed(serverName: string): boolean {
+		return this.#tools.isMCPServerResourceAllowed(serverName);
+	}
 	/** Looks up a registered tool by name. */
 	getToolByName(name: string): AgentTool | undefined {
 		return this.#tools.getToolByName(name);

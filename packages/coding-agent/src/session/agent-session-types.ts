@@ -261,6 +261,8 @@ export interface AgentSessionConfig {
 	builtInToolNames?: Iterable<string>;
 	/** MCP names whose initial registry entries came from the manager snapshot. */
 	mcpManagerToolNames?: Iterable<string>;
+	/** Live manager tool records (carry raw mcpServerName) for dual-source resource gating. */
+	mcpManagerTools?: () => Iterable<{ readonly name?: string; readonly mcpServerName?: unknown }>;
 	/** Reconcile browser MCP connections after browser prelude availability changes. */
 	reconcileBrowserMcpFilter?: (enabled: boolean) => Promise<CustomTool[]>;
 	/** Updates tool-session predicates from the live active tool set. */

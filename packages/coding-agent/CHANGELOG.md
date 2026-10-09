@@ -9,7 +9,6 @@
 ### Added
 
 - Added the `disallowedTools:` frontmatter field for agent definitions: it removes tools by exact name, `mcp__*` / `mcp__<server>_*` wildcard, or bare `*` deny-all ([#8599](https://github.com/can1357/oh-my-pi/issues/8599)).
-### Added
 
 - Added `/jobs kill <id>|all` to cancel a running background job (or every one this session owns) from the command line, even while the agent is busy ([#14160](https://github.com/can1357/oh-my-pi/pull/14160) by [@KanwarGill](https://github.com/KanwarGill))
 

@@ -1376,6 +1376,10 @@ export class SessionAdvisors {
 				cwd: this.#host.sessionManager.getCwd(),
 				getCwd: () => this.#host.sessionManager.getCwd(),
 				tools: bridgeToolMap(advisorToolMap, this.#advisorCreateEditTool),
+				// The advisor roster is its grant: frames cannot execute tools outside
+				// it. `todo` is absent from advisor rosters, so the in-band todo-mirror
+				// suppression engages via the same predicate.
+				isToolExecutable: name => advisorToolMap.has(name),
 				// Approval mode, per-tool policies and `autoApprove` live only on
 				// this context; without it every bridge tool fails closed to
 				// `always-ask`.

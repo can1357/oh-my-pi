@@ -2533,6 +2533,11 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		const enableMCP = !restrictToolNames && (options.enableMCP ?? true);
 		let mcpManager: MCPManager | undefined = enableMCP ? options.mcpManager : undefined;
 		toolSession.mcpManager = mcpManager;
+		// Per-session MCP resource scope for the process-global mcp:// router (see
+		// internal-urls/mcp-protocol.ts): judge the owning server against this
+		// session, or a scoped subagent reads any connected server's resources.
+		toolSession.isMCPServerResourceAllowed = serverName => session?.isMCPServerResourceAllowed(serverName) ?? true;
+		toolSession.isToolScopedIn = name => session?.isToolScopedIn(name) ?? true;
 		toolSession.enableMCP = enableMCP;
 		const deferMCPDiscoveryForUI = enableMCP && !mcpManager && options.hasUI === true;
 		const customTools: CustomTool[] = [];
@@ -3740,6 +3745,13 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			// bridge already passes one.
 			getCwd: () => sessionManager.getCwd(),
 			tools: toolRegistry,
+			// Subagent tool scoping: frames resolve through the session scope, so a
+			// scoped subagent on the Cursor provider cannot execute scoped-out tools.
+			// Closures read the live session (built below); frames run after it exists.
+			isToolExecutable: name => session?.isToolScopedIn(name) ?? true,
+			isToolActive: name => toolSession.isToolActive?.(name) === true,
+			allowToollessMcpServers: serverName => session?.isMCPServerResourceAllowed(serverName) ?? true,
+			mcpManagerTools: () => toolSession.mcpManager?.getTools() ?? [],
 			getExecutableTool: resolveDeviceTool,
 			// `pi_edit` needs the `replace`-mode instance specifically, and the
 			// registry may still hold the session's own `edit` (any mode) when
@@ -4153,7 +4165,11 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// Session-managed builtins may be force-included by createTools. Keep the
 		// active set consistent with that registry decision, using built-in
 		// provenance so same-named extension tools are never force-activated.
-		if (!restrictToolNames && explicitlyRequestedToolNames) {
+		// Skipped under an enforced `tools:` allowlist: these are user-visible
+		// tools (not hidden protocol tools like `yield` above), so silently
+		// widening the declared list would contradict the hard-allowlist
+		// contract — an agent that wants them lists them.
+		if (!restrictToolNames && !enforceToolAllowlist && explicitlyRequestedToolNames) {
 			for (const name of SESSION_MANAGED_BUILTIN_TOOL_NAMES) {
 				if (builtInToolNames.includes(name) && !explicitlyRequestedToolNames.includes(name)) {
 					explicitlyRequestedToolNames.push(name);
@@ -4165,12 +4181,12 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// drop it from the ACTIVE set — leaving the agent able to checkpoint but
 		// unable to rewind (or vice versa). Mirror the pairing here. Unlike the
 		// manage_skill/learn mirror above, this is a safety pairing — it applies
-		// to restricted sessions too.
-		if (explicitlyRequestedToolNames) {
-			if (builtInToolNames.includes("checkpoint") && !explicitlyRequestedToolNames.includes("rewind")) {
-				explicitlyRequestedToolNames.push("rewind");
-			} else if (builtInToolNames.includes("rewind") && !explicitlyRequestedToolNames.includes("checkpoint")) {
-				explicitlyRequestedToolNames.push("checkpoint");
+		// to restricted sessions too, but not under an enforced `tools:`
+		// allowlist: the declared list is exact (mirroring `parseAgentFields`,
+		// which applies no such pairing). Uses the shared sibling helper.
+		if (explicitlyRequestedToolNames && !enforceToolAllowlist) {
+			for (const name of withSiblingTools(explicitlyRequestedToolNames)) {
+				if (!explicitlyRequestedToolNames.includes(name)) explicitlyRequestedToolNames.push(name);
 			}
 		}
 		const requestedToolNames = explicitlyRequestedToolNames ?? toolNamesFromRegistry;
@@ -4822,6 +4838,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					: undefined,
 			builtInToolNames: builtInRegistryToolNames,
 			mcpManagerToolNames: initialMcpManagerToolNames,
+			mcpManagerTools: () => toolSession.mcpManager?.getTools() ?? [],
 			transformContext,
 			transformProviderContext,
 			onPayload,
@@ -5019,11 +5036,12 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 						if (entry.endsWith("*")) return entry;
 						return (
 							resolveMCPToolAlias(entry, candidate =>
-								toolRegistry.has(candidate) ? { name: candidate } : undefined,
+								candidate === name || toolRegistry.has(candidate) ? { name: candidate } : undefined,
 							)?.name ?? entry
 						);
 					};
-					// Canonicalize the declared entries against the live registry (not the tool
+					// Canonicalize the declared entries against the live registry plus the
+					// incoming registration (probed directly):
 					// name): a Claude-spelled `tools:` entry stays raw in the set when the tool
 					// was absent at startup, and only resolves now that this registration
 					// populated it — toolRegistry.set ran above, so the entry resolves against

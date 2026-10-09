@@ -373,6 +373,8 @@ export interface ToolSession {
 	 * session the read tool is bound to — otherwise a scoped subagent can read
 	 * any connected server's resources by URI despite the scope.
 	 */
+	/** Whether a tool survives this session's tool scope (allowlist + disallow patterns). */
+	isToolScopedIn?: (name: string) => boolean;
 	isMCPServerResourceAllowed?: (serverName: string) => boolean;
 	/** Update the active built-in tool predicate when a session changes tools mid-run. */
 	setActiveToolNames?: (names: Iterable<string>) => void;

@@ -2213,14 +2213,51 @@ describe("createAgentSession defaultInactive tool activation", () => {
 			enforceToolAllowlist: true,
 		});
 
+
 		try {
-			const active = session.getActiveToolNames();
-			expect(active).toEqual(expect.arrayContaining(["read", "yield"]));
-			expect(active).not.toContain("mcp__db_query");
-			expect(active).not.toContain("default_active_tool");
-			expect(active).not.toContain("sdk_custom_tool");
+			// Closed set: a leaked extra tool (e.g. a force-added managed
+			// builtin) fails here — `arrayContaining` would not catch it.
+			expect(session.getActiveToolNames()).toEqual(["read", "yield"]);
 			// Unlisted tools are not mounted under xd:// either.
 			expect(session.getXdevToolEntries().map(entry => entry.name)).not.toContain("mcp__db_query");
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	it("drops MCP/extension tools for bundled agents that declare tools:", async () => {
+		// Bundled scout/reviewer/security-reviewer declare `tools:`, so under
+		// the hard allowlist they lose MCP/extension/custom tools they previously
+		// inherited — the most visible behavior change of this PR (see #8599).
+		const tempDir = makeTempDir();
+		const mcpProxy: CustomTool = {
+			name: "mcp__db_query",
+			label: "DB Query",
+			description: "MCP proxy tool",
+			parameters: type({}),
+			mcpServerName: "db",
+			mcpToolName: "query",
+			async execute() {
+				return { content: [{ type: "text", text: "ok" }] };
+			},
+		};
+		const { session } = await createAgentSession({
+			...baseOptions(tempDir),
+			extensions: [toolActivationExtension],
+			customTools: [mcpProxy, sdkCustomTool],
+			// Mirrors the bundled scout's declared list minus `find` (extension-provided,
+			// absent with disableExtensionDiscovery).
+			toolNames: ["read", "grep", "glob", "web_search"],
+			requireYieldTool: true,
+			enforceToolAllowlist: true,
+		});
+		try {
+			expect(session.getActiveToolNames()).toEqual(
+				expect.arrayContaining(["read", "grep", "glob", "web_search", "yield"]),
+			);
+			expect(session.getActiveToolNames()).not.toContain("mcp__db_query");
+			expect(session.getActiveToolNames()).not.toContain("sdk_custom_tool");
+			expect(session.getActiveToolNames()).not.toContain("default_active_tool");
 		} finally {
 			await session.dispose();
 		}
@@ -3612,12 +3649,14 @@ describe("createAgentSession defaultInactive tool activation", () => {
 		});
 
 		try {
-			// The checkpoint/rewind safety pairing activates both tools even though
-			// only `checkpoint` was declared; the Cursor frame gate is built from
-			// this same finalized grant set, so a native frame for the paired tool
-			// resolves instead of being refused as unadvertised.
+			// Under an enforced `tools:` allowlist the declared list is exact:
+			// the checkpoint/rewind safety pairing does not widen it, so only
+			// `checkpoint` activates. The Cursor frame gate is built from this
+			// same finalized grant set, so a native frame for the unlisted
+			// sister is refused as unadvertised.
 			const active = session.getActiveToolNames();
-			expect(active).toEqual(expect.arrayContaining(["checkpoint", "rewind"]));
+			expect(active).toContain("checkpoint");
+			expect(active).not.toContain("rewind");
 			expect(active).not.toContain("bash");
 		} finally {
 			await session.dispose();
