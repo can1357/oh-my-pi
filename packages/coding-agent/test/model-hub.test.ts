@@ -1614,6 +1614,10 @@ describe("ModelHub", () => {
 			});
 
 			enterRolesView(hub);
+			// The footer tells the two orderings apart on a role row.
+			const footer = footerLine(hub.render(260));
+			expect(footer).toContain("[/] models");
+			expect(footer).toContain("⇧↑/⇧↓ cycle order");
 			hub.handleInput("[");
 			hub.handleInput("]");
 			expect(changes).toEqual([]);

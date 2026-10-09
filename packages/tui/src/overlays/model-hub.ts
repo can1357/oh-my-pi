@@ -2892,7 +2892,7 @@ export class ModelHubComponent implements Component {
 			const thinking = editable ? ` · ${formatKeyHint("t")} thinking` : "";
 			const savePreset = this.#callbacks.onSavePreset ? ` · ${formatKeyHint("s")} save preset` : "";
 			const switchPreset = this.#presets().names.length > 0 ? ` · ${formatKeyHints(["p", "shift+p"])} preset` : "";
-			return `${upDown} rows · ${enter} pick · ${formatKeyHint("f")} fallback · ${formatKeyHint("x")} clear${thinking}${compaction} · ${formatKeyHint("c")} cycle · [/] reorder · ${formatKeyHint("n")} new${savePreset}${switchPreset}`;
+			return `${upDown} rows · ${enter} pick · ${formatKeyHint("f")} fallback · ${formatKeyHint("x")} clear${thinking}${compaction} · ${formatKeyHint("c")} cycle · [/] models · ${formatKeyHints(["shift+up", "shift+down"])} cycle order · ${formatKeyHint("n")} new${savePreset}${switchPreset}`;
 		}
 		if (entry.kind === "provider" && entry.locked) {
 			return entry.oauth
@@ -4225,7 +4225,8 @@ export class ModelHubComponent implements Component {
 				editable ? keys("thinking", "t") : undefined,
 				compaction,
 				keys("cycle", "c"),
-				reorder,
+				keys("models", "[", "]"),
+				keys("cycle order", "shift+up", "shift+down"),
 				keys("new", "n"),
 				this.#callbacks.onSavePreset ? keys("save preset", "s") : undefined,
 				this.#presets().names.length > 0 ? keys("preset", "ctrl+left", "ctrl+right", "p", "shift+p") : undefined,
