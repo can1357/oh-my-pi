@@ -47,7 +47,12 @@ import type {
 	ModelRoleLookup,
 	ResolvedModelRoleValue,
 } from "./model-browser";
-import { AUTO_THINKING, type ConfiguredThinkingLevel, getConfiguredThinkingLevelMetadata } from "../thinking";
+import {
+	AUTO_THINKING,
+	type ConfiguredThinkingLevel,
+	getConfiguredThinkingLevelMetadata,
+	isAutoThinking,
+} from "../thinking";
 import { thinkingLevelGlyph } from "../render/render-utils";
 import { theme } from "../theme/theme";
 import { matchesSelectCancel, matchesSelectDown, matchesSelectUp } from "../keybinding-matchers";
@@ -1250,7 +1255,8 @@ export class ModelHubComponent implements Component {
 			level = current.thinkingLevel;
 		}
 		const supported = this.#thinkingOptionsFor(item.model);
-		if (!supported.includes(level)) level = ThinkingLevel.Inherit;
+		if (!supported.some(opt => opt === level || (isAutoThinking(opt) && isAutoThinking(level))))
+			level = ThinkingLevel.Inherit;
 		const result = this.#callbacks.onAssign(item.model, role, level, item.selector, scope);
 		this.#finishAssignment(result, () => {
 			this.#refreshAfterMutation();
@@ -1383,7 +1389,7 @@ export class ModelHubComponent implements Component {
 				? this.#thinkingLevelForScope(role, scope)
 				: (this.#roles[role]?.thinkingLevel ?? ThinkingLevel.Inherit));
 		const chips = this.#thinkingChips(options);
-		const preselect = options.indexOf(current);
+		const preselect = options.findIndex(opt => opt === current || (isAutoThinking(opt) && isAutoThinking(current)));
 		this.#strip = {
 			kind: "thinking",
 			item,
@@ -1496,7 +1502,7 @@ export class ModelHubComponent implements Component {
 			...getSupportedEfforts(item.model),
 		];
 		const current =
-			resolved.thinkingLevel === undefined || resolved.thinkingLevel === AUTO_THINKING
+			resolved.thinkingLevel === undefined || isAutoThinking(resolved.thinkingLevel)
 				? ThinkingLevel.Inherit
 				: resolved.thinkingLevel;
 		const chips = this.#thinkingChips(options);

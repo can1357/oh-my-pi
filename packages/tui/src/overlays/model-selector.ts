@@ -1,5 +1,5 @@
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core/thinking";
-import { AUTO_THINKING, type ConfiguredThinkingLevel, parseThinkingLevel } from "../thinking";
+import { AUTO_THINKING, type ConfiguredThinkingLevel, parseAutoThinkingFloor, parseThinkingLevel } from "../thinking";
 
 /** Opt-in selectors that can otherwise be literal model-id suffixes. */
 export interface ThinkingSuffixOptions {
@@ -27,7 +27,13 @@ export function parseThinkingSuffix(
 	const level = parseThinkingLevel(value);
 	if (level === ThinkingLevel.Max) return options?.allowMaxSuffix === true ? level : undefined;
 	if (level !== undefined) return level;
-	if (options?.allowAutoAlias === true && value === AUTO_THINKING) return AUTO_THINKING;
+	if (options?.allowAutoAlias === true) {
+		if (value === AUTO_THINKING) return AUTO_THINKING;
+		if (value.startsWith("auto:")) {
+			const floor = parseAutoThinkingFloor(value);
+			return floor ? `auto:${floor}` : undefined;
+		}
+	}
 	return undefined;
 }
 
@@ -46,6 +52,19 @@ export function splitThinkingSuffix(
 	minColonIndex = -1,
 	options?: ThinkingSuffixOptions,
 ): { base: string; level?: ConfiguredThinkingLevel } {
+	if (options?.allowAutoAlias === true) {
+		const autoMatch = /:auto(?::([a-zA-Z]+))?$/i.exec(pattern);
+		if (autoMatch && autoMatch.index > minColonIndex) {
+			const floorPart = autoMatch[1];
+			if (!floorPart) {
+				return { base: pattern.slice(0, autoMatch.index), level: AUTO_THINKING };
+			}
+			const floor = parseAutoThinkingFloor(`auto:${floorPart}`);
+			if (floor) {
+				return { base: pattern.slice(0, autoMatch.index), level: `auto:${floor}` };
+			}
+		}
+	}
 	const colonIdx = pattern.lastIndexOf(":");
 	if (colonIdx <= minColonIndex) return { base: pattern };
 	const level = parseThinkingSuffix(pattern.slice(colonIdx + 1), options);

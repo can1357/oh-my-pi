@@ -1959,6 +1959,12 @@
 		"ConfiguredThinkingLevel": {
 			"enum": [
 				"auto",
+				"auto:minimal",
+				"auto:low",
+				"auto:medium",
+				"auto:high",
+				"auto:xhigh",
+				"auto:max",
 				"inherit",
 				"off",
 				"minimal",

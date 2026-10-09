@@ -195,7 +195,7 @@ export type AgentEvent =
 	| { type: "auto_compaction_end"; aborted: boolean; willRetry: boolean; errorMessage?: string; skipped?: boolean }
 	| { type: "auto_retry_start"; attempt: number; maxAttempts: number; delayMs: number; errorMessage: string }
 	| { type: "auto_retry_end"; success: boolean; attempt: number; finalError?: string }
-	| { type: "thinking_level_changed"; thinkingLevel?: string };
+	| { type: "thinking_level_changed"; thinkingLevel?: string; configured?: string; resolved?: string };
 
 // ═══════════════════════════════════════════════════════════════════════════
 // State & agents

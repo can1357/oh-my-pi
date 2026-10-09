@@ -56,9 +56,9 @@ _THINKING_LEVEL_VALUES: Final[frozenset[str]] = frozenset({"inherit", "off", "mi
 _decode_thinking_level = cast("Decoder[ThinkingLevel]", literal(_THINKING_LEVEL_VALUES))
 
 
-ConfiguredThinkingLevel: TypeAlias = Literal["auto", "inherit", "off", "minimal", "low", "medium", "high", "xhigh", "max"]
+ConfiguredThinkingLevel: TypeAlias = Literal["auto", "auto:minimal", "auto:low", "auto:medium", "auto:high", "auto:xhigh", "auto:max", "inherit", "off", "minimal", "low", "medium", "high", "xhigh", "max"]
 """User-configured thinking selector, including automatic selection."""
-_CONFIGURED_THINKING_LEVEL_VALUES: Final[frozenset[str]] = frozenset({"auto", "inherit", "off", "minimal", "low", "medium", "high", "xhigh", "max"})
+_CONFIGURED_THINKING_LEVEL_VALUES: Final[frozenset[str]] = frozenset({"auto", "auto:minimal", "auto:low", "auto:medium", "auto:high", "auto:xhigh", "auto:max", "inherit", "off", "minimal", "low", "medium", "high", "xhigh", "max"})
 _decode_configured_thinking_level = cast("Decoder[ConfiguredThinkingLevel]", literal(_CONFIGURED_THINKING_LEVEL_VALUES))
 
 
