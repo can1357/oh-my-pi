@@ -74,6 +74,28 @@ describe("runSkillsCommand", () => {
 		}
 	});
 
+	test("lists tilde custom directories alongside absolute directories", async () => {
+		const directory = path.join(tempHome, "work");
+		const skillPath = path.join(tempHome, "custom-skills", "demo", "SKILL.md");
+		await fs.mkdir(directory);
+		await Bun.write(skillPath, "---\nname: demo\ndescription: Read the demo fixture.\n---\nDemo fixture body.\n");
+
+		const tilde = await runSkillsCommand({
+			cwd: directory,
+			skillsSettings: { customDirectories: ["~/custom-skills"] },
+		});
+		const absolute = await runSkillsCommand({
+			cwd: directory,
+			skillsSettings: { customDirectories: [path.join(tempHome, "custom-skills")] },
+		});
+
+		expect(tilde.skills).toEqual(absolute.skills);
+		expect(tilde.skills.map(skill => ({ name: skill.name, filePath: skill.filePath, source: skill.source }))).toEqual(
+			[{ name: "demo", filePath: skillPath, source: "custom:user" }],
+		);
+		expect(tilde.warnings).toEqual([]);
+	});
+
 	test("resolves relative custom directories against the requested directory", async () => {
 		const directory = await fs.mkdtemp(path.join(os.tmpdir(), `omp-skills-rel-${Snowflake.next()}-`));
 		await fs.mkdir(path.join(directory, "rel-root", "calendar"), { recursive: true });

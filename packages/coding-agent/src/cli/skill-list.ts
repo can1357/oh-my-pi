@@ -7,6 +7,7 @@ import type { EffectiveExtensionRoots } from "../capability/types";
 import { initializeWithSettings } from "../discovery";
 import { cfgDisabledExtensions, cfgExtensions, cfgSkills, type SkillsSettings } from "../extensibility/settings";
 import { loadSkills, type SkillWarning } from "../extensibility/skills";
+import { expandTilde } from "../tools/path-utils";
 
 /** Public skill listing entry: the fields a machine consumer may rely on. */
 export interface SkillSummary {
@@ -56,13 +57,14 @@ export async function runSkillsCommand(
 		};
 	}
 	if (skillsSettings.customDirectories?.length) {
-		// Relative entries are config-relative to the inspected directory, not
-		// to wherever the command happens to run.
+		// Resolve relative entries against the inspected directory after expanding
+		// home-relative entries, as the session loader does.
 		skillsSettings = {
 			...skillsSettings,
-			customDirectories: skillsSettings.customDirectories.map(dir =>
-				path.isAbsolute(dir) ? dir : path.resolve(cwd, dir),
-			),
+			customDirectories: skillsSettings.customDirectories.map(dir => {
+				const expanded = expandTilde(dir);
+				return path.isAbsolute(expanded) ? expanded : path.resolve(cwd, expanded);
+			}),
 		};
 	}
 	const { skills, warnings } = await loadSkills({
