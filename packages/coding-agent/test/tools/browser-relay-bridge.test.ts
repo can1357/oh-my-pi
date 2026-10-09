@@ -4768,7 +4768,7 @@ describe("RelayBridge tab grouping", () => {
 		expect(cdp.messages.find(message => message.id === commandId)?.error).toBeUndefined();
 	});
 
-	it("evaluates changed nested OOPIF frames in their exact default contexts", async () => {
+	it("keeps preserved sessions when a changed OOPIF disappears during temporary Runtime cleanup", async () => {
 		const bridge = new RelayBridge({});
 		const ext = new FakeExtSocket();
 		connect(bridge, ext, [tab({ tabId: 1 })]);
@@ -4886,12 +4886,32 @@ describe("RelayBridge tab grouping", () => {
 		await waitFor(() =>
 			ext2.pending("send").some(rpc => rpc.method === "Runtime.disable" && rpc.sessionId === "oopif-session"),
 		);
-		ack(bridge, ext2, "send");
+		bridge.extMessage(
+			ext2,
+			JSON.stringify({
+				t: "cdpEvent",
+				tabId: 1,
+				method: "Target.detachedFromTarget",
+				params: { sessionId: "oopif-session", targetId: "oopif" },
+			}),
+		);
+		nack(bridge, ext2, "send", "Session with given id not found");
 		await waitFor(() => ext2.pending("send").some(rpc => rpc.method === "Runtime.disable" && !rpc.sessionId));
 		ack(bridge, ext2, "send");
 		await waitFor(() => ext2.pending("send").some(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument"));
 		ack(bridge, ext2, "send", { identifier: "root-script-marker-only" });
 		await flush();
+		expect(ext2.rpcs("detach")).toEqual([]);
+		expect(
+			cdp.messages.some(
+				message =>
+					message.method === "Target.detachedFromTarget" &&
+					typeof message.params === "object" &&
+					message.params !== null &&
+					"sessionId" in message.params &&
+					message.params.sessionId === pageSession,
+			),
+		).toBeFalse();
 	});
 
 	it("runs a preload once and clears its marker in every existing frame during handoff", async () => {

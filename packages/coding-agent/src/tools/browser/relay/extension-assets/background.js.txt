@@ -384,6 +384,14 @@ function applyHelloTabChanges(tabs, changes) {
   }
   return [...current.values()];
 }
+function applyHelloTabActivation(tabs, windowId, activeTabId) {
+  return tabs.map((tab) => {
+    if (tab.windowId !== windowId)
+      return tab;
+    const active = tab.tabId === activeTabId;
+    return tab.active === active ? tab : { ...tab, active };
+  });
+}
 function filterHelloTabIds(tabIds, tabs) {
   const current = new Set(tabs.map((tab) => tab.tabId));
   return tabIds.filter((tabId) => current.has(tabId));
@@ -871,6 +879,7 @@ function refreshHello(onSent) {
       socket,
       structuralDirty: false,
       tabChanges: new Map,
+      tabActivations: new Map,
       reconciliationDirty: false,
       allowStaleReconciliation,
       metaDirty: false,
@@ -880,6 +889,9 @@ function refreshHello(onSent) {
     entry.done = buildHello().then(async (hello) => {
       const applyTabChanges = () => {
         hello.tabs = applyHelloTabChanges(hello.tabs, entry.tabChanges);
+        for (const [windowId, activeTabId] of entry.tabActivations) {
+          hello.tabs = applyHelloTabActivation(hello.tabs, windowId, activeTabId);
+        }
         hello.attachedTabIds = filterHelloTabIds(hello.attachedTabIds, hello.tabs);
         hello.recoverableTabIds = filterHelloTabIds(hello.recoverableTabIds ?? [], hello.tabs);
         hello.relayDetachedTabIds = filterHelloTabIds(hello.relayDetachedTabIds ?? [], hello.tabs);
@@ -926,6 +938,12 @@ function updateHelloTabSnapshot(tabId, tab) {
   if (!helloRefresh)
     return;
   helloRefresh.tabChanges.set(tabId, tab);
+  helloRefresh.metaDirty = true;
+}
+function updateHelloTabActivation(tabId, windowId) {
+  if (!helloRefresh)
+    return;
+  helloRefresh.tabActivations.set(windowId, tabId);
   helloRefresh.metaDirty = true;
 }
 function invalidateHelloReconciliation() {
@@ -1275,11 +1293,14 @@ chrome.tabs.onUpdated.addListener((_tabId, changeInfo, tab) => {
     post({ t: "tabUpdated", tab: snap });
   }
 });
-chrome.tabs.onActivated.addListener(({ tabId }) => {
+chrome.tabs.onActivated.addListener(({ tabId, windowId }) => {
+  updateHelloTabActivation(tabId, windowId);
   chrome.tabs.get(tabId).then((tab) => {
     const snap = snapshot(tab);
-    if (snap)
+    if (snap) {
+      updateHelloTabSnapshot(snap.tabId, snap);
       post({ t: "tabUpdated", tab: snap });
+    }
   }).catch(() => {});
 });
 chrome.tabs.onRemoved.addListener((tabId) => {

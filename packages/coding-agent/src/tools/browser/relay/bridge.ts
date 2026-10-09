@@ -4212,6 +4212,23 @@ export class RelayBridge {
 		const contexts = enabledForProbe ? new Map<number, Record<string, unknown>>() : tab.runtimeContexts;
 		let probeEnabled = false;
 		const temporarilyEnabledChildSessions = new Set<string>();
+		const disableTemporaryChildRuntime = async (sessionId: string): Promise<void> => {
+			if (!tab.realSessions.has(sessionId)) return;
+			this.#assertExtensionCurrent(expectedExt);
+			try {
+				await this.#rpc(
+					{ op: "send", tabId: tab.tabId, sessionId, method: "Runtime.disable" },
+					this.#instanceFor(tab),
+				);
+			} catch (err) {
+				if (isExtensionTransportInterrupted(err)) throw err;
+				this.#assertExtensionCurrent(expectedExt);
+				// The targeted replay has already completed. If Chrome detached this
+				// child while the cleanup RPC was in flight, the vanished Runtime
+				// domain needs no further cleanup and must not retract the page session.
+				if (tab.realSessions.has(sessionId)) throw err;
+			}
+		};
 		try {
 			if (enabledForProbe) {
 				tab.preloadContextProbe = contexts;
@@ -4321,12 +4338,7 @@ export class RelayBridge {
 			}
 		} finally {
 			for (const sessionId of temporarilyEnabledChildSessions) {
-				if (!tab.realSessions.has(sessionId)) continue;
-				this.#assertExtensionCurrent(expectedExt);
-				await this.#rpc(
-					{ op: "send", tabId: tab.tabId, sessionId, method: "Runtime.disable" },
-					this.#instanceFor(tab),
-				);
+				await disableTemporaryChildRuntime(sessionId);
 			}
 			for (const sessionId of new Set([...temporarilyEnabledChildSessions, ...tab.childRuntimeEnabled])) {
 				tab.childPreloadContextProbes.delete(sessionId);
