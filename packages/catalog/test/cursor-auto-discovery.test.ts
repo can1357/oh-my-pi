@@ -3,6 +3,8 @@ import * as http2 from "node:http2";
 import { fetchCursorUsableModels } from "../src/discovery/cursor";
 import { buildModel } from "../src/build";
 import { collapseBuiltVariants } from "../src/compat/collapse";
+import { Effort } from "../src/effort";
+import { resolveWireModelId } from "../src/model-thinking";
 import { GetUsableModelsResponseSchema, ModelDetailsSchema } from "../src/discovery/cursor-proto";
 import { create, toBinary } from "../src/discovery/protobuf";
 import type { ModelSpec } from "../src/types";
@@ -17,6 +19,10 @@ beforeAll(async () => {
 			create(ModelDetailsSchema, { modelId: "composer-2.5" }),
 			create(ModelDetailsSchema, { modelId: "novel-low" }),
 			create(ModelDetailsSchema, { modelId: "novel-high" }),
+			create(ModelDetailsSchema, { modelId: "grok-4.8" }),
+			...["low", "medium", "high", "xhigh"].map(effort =>
+				create(ModelDetailsSchema, { modelId: `grok-4.8-${effort}` }),
+			),
 		],
 	});
 	const payload = Buffer.from(toBinary(GetUsableModelsResponseSchema, response));
@@ -72,5 +78,17 @@ describe("cursor discovery auto sentinel", () => {
 		expect(collapsed).toHaveLength(1);
 		expect(collapsed[0]?.id).toBe("novel");
 		expect(collapsed[0]?.thinking?.effortRouting).toEqual({ low: "novel-low", high: "novel-high" });
+	});
+
+	it("routes efforts to reviewed tier siblings when the roster also contains a same-ID logical base", async () => {
+		const byId = await discover();
+		const members = ["grok-4.8", "grok-4.8-low", "grok-4.8-medium", "grok-4.8-high", "grok-4.8-xhigh"].map(id =>
+			buildModel(byId.get(id)!),
+		);
+		const collapsed = collapseBuiltVariants(members);
+		expect(collapsed).toHaveLength(1);
+		const model = collapsed[0];
+		expect(resolveWireModelId(model, Effort.Low)).toBe("grok-4.8-low");
+		expect(resolveWireModelId(model, Effort.XHigh)).toBe("grok-4.8-xhigh");
 	});
 });
