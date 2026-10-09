@@ -116,6 +116,14 @@ function singleLineOversizedArtifact(): string {
 	return `solo-${"x".repeat(60_000)}-end`;
 }
 
+/** ~4.4 MiB of ~1.1 KiB lines: past the 4 MiB snapshot cap, so reads stream. */
+function hugeArtifact(): string {
+	return Array.from(
+		{ length: 4000 },
+		(_, index) => `line-${String(index + 1).padStart(5, "0")} ${"x".repeat(1090)}`,
+	).join("\n");
+}
+
 /** Streamed scale with a 200 KB line 70: per-range cap stops mid-range. */
 function streamedStuckRangeArtifact(): string {
 	const lines = Array.from({ length: 69 }, (_, index) => `s-${String(index + 1).padStart(3, "0")} ${"x".repeat(693)}`);
@@ -694,5 +702,43 @@ describe("read tool large artifact handling", () => {
 		expect(output).toContain("artifact://0:raw:1-1");
 		expect(output).toContain("Range 4-5 is beyond end of file");
 		expect(output).not.toContain("2-2,4-5");
+	});
+
+	it("drops raw multi-range recovery past the buffered EOF", async () => {
+		await Bun.write(path.join(artifactDir, "0.mcp.log"), singleLineOversizedArtifact());
+
+		// Raw reads never set `fullLines`, but the buffered collector still knows
+		// the exact count: `raw:1-2,4-5` on a one-line file must not advertise
+		// `raw:2-2,4-5`, whose follow-up returns only out-of-bounds notices.
+		const result = await tool.execute("call-raw-multi-eof", { path: "artifact://0:raw:1-2,4-5" });
+		const output = getTextOutput(result);
+
+		expect(output).toContain("raw:1-1");
+		expect(output).not.toContain("raw:2-2,4-5");
+	});
+
+	it("keeps the bound on numbered streamed continuations", async () => {
+		await Bun.write(path.join(artifactDir, "0.mcp.log"), hugeArtifact());
+
+		// A bare `:N` means "from N onward": the recovery page for `1-300` must
+		// carry its end, or following it reads past line 300.
+		const result = await tool.execute("call-streamed-bound", { path: "artifact://0:1-300" });
+		const output = getTextOutput(result);
+
+		expect(output).toMatch(/Use artifact:\/\/0:\d+-300 to continue/);
+	});
+
+	it("ends the page when a streamed range stops incomplete", async () => {
+		await Bun.write(path.join(artifactDir, "0.mcp.log"), hugeArtifact());
+
+		// The first window stops ~line 47 and names `47-100,200-200`. Visiting
+		// line 200 next with less than a line of budget left appended a second
+		// `200-200` hint whose follow-up skips 47-100.
+		const result = await tool.execute("call-streamed-stop", { path: "artifact://0:1-100,200-200" });
+		const output = getTextOutput(result);
+
+		expect(output).toContain("47-100,200-200");
+		expect(output).not.toContain("Use artifact://0:200-200 to continue");
+		expect(output).not.toContain("line-00200");
 	});
 });

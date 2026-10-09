@@ -1589,12 +1589,17 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			const clampRangePartsToKnownEof = (
 				parts: Array<{ startLine: number; endLine: number | undefined }>,
 			): string[] => {
-				if (fullLines === undefined) return parts.map(part => formatRangePart(part.startLine, part.endLine));
-				const total = fullLines.length;
+				// Raw multi-range reads never set `fullLines`, but a buffered
+				// collector still knows the exact line count, so use it too. A
+				// streamed window may only know a lower bound, so its hints stay
+				// as requested rather than risk dropping real lines.
+				const knownTotal =
+					fullLines !== undefined ? fullLines.length : buffered !== undefined ? totalFileLines : undefined;
+				if (knownTotal === undefined) return parts.map(part => formatRangePart(part.startLine, part.endLine));
 				const out: string[] = [];
 				for (const part of parts) {
-					if (part.startLine > total) continue;
-					const end = part.endLine !== undefined ? Math.min(part.endLine, total) : undefined;
+					if (part.startLine > knownTotal) continue;
+					const end = part.endLine !== undefined ? Math.min(part.endLine, knownTotal) : undefined;
 					if (end !== undefined && end < part.startLine) continue;
 					out.push(formatRangePart(part.startLine, end));
 				}
@@ -1695,6 +1700,12 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 				notices.push(
 					`[Range collection stopped at line ${stuckLine} (${formatBytes(byteLimitLine.byteLength)} exceeds the per-range window); lines were left unread. Use ${budget.url}:${rawSelector ? "raw:" : ""}${rest.join(",")} to continue]`,
 				);
+				// The current range is incomplete and its hint already carries
+				// every later range: visiting them now would either duplicate
+				// them on the follow-up or, with less than a line of shared
+				// budget left, append a second hint whose continuation skips the
+				// first suffix. End the page like the budget cut does.
+				budgetSpent = true;
 			}
 
 			// Column truncation is display-only; clone before stamping ellipsis so
@@ -2762,15 +2773,22 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 						}
 					} else if (!reachedEof) {
 						const nextOffset = startLine + userLimitedLines + 1;
-						// Artifact raw pages keep their bound so paging cannot
-						// read past the requested end; other reads keep the
-						// existing open offset.
+						// Artifact pages keep their bound so paging cannot read past
+						// the requested end; other reads keep the existing open
+						// offset. A bare `:N` means "from N onward", so a bounded
+						// numbered request must carry its end too.
+						const artifactBoundedEnd =
+							located?.spec.artifactStore === true && limit !== undefined
+								? requestedStart + effectiveLimit
+								: undefined;
 						const continueFrom =
-							rawSelector && located?.spec.artifactStore === true && limit !== undefined
-								? `${selectorBase}:raw:${nextOffset}-${startLine + effectiveLimit}`
+							rawSelector && artifactBoundedEnd !== undefined
+								? `${selectorBase}:raw:${nextOffset}-${artifactBoundedEnd}`
 								: rawSelector
 									? `${selectorBase}:raw:${nextOffset}-`
-									: `${selectorBase}:${nextOffset}`;
+									: artifactBoundedEnd !== undefined
+										? `${selectorBase}:${nextOffset}-${artifactBoundedEnd}`
+										: `${selectorBase}:${nextOffset}`;
 						outputText = formatBracketAwareText() ?? formatText(selectedContent, startLineDisplay);
 						if (omittedSelectedLine) {
 							const lineNumber = omittedSelectedLine.index + 1;
