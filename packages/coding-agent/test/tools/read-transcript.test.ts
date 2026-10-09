@@ -18,6 +18,7 @@ import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
 import * as videoUtils from "@oh-my-pi/pi-coding-agent/utils/video";
 import { $which, removeWithRetries } from "@oh-my-pi/pi-utils";
+import { rejectionOf } from "../helpers/rejection";
 
 const hasFfmpeg = Boolean($which("ffmpeg") && $which("ffprobe"));
 const SAMPLE_RATE = 16_000;
@@ -137,7 +138,7 @@ describe.skipIf(!hasFfmpeg)("read transcript", () => {
 		const second = tool.execute("call", { path: `${audio}:2-2:raw` });
 		await firstCall.promise;
 		aborted.abort();
-		await expect(first).rejects.toThrow();
+		expect(await rejectionOf(first)).toBeInstanceOf(Error);
 		release.resolve();
 
 		expect(textOf(await second)).toContain("[0:33.5-0:34.5] tone");
@@ -151,7 +152,7 @@ describe.skipIf(!hasFfmpeg)("read transcript", () => {
 		const transcribe = spyOn(sttClient, "transcribe");
 		const tool = new ReadTool(makeSession(testDir));
 
-		await expect(tool.execute("call", { path: audio })).rejects.toThrow("Run `omp setup speech`");
+		expect(String(await rejectionOf(tool.execute("call", { path: audio })))).toContain("Run `omp setup speech`");
 		expect(transcribe).not.toHaveBeenCalled();
 	});
 
@@ -160,7 +161,7 @@ describe.skipIf(!hasFfmpeg)("read transcript", () => {
 		await ffmpeg("-f", "lavfi", "-i", "testsrc=duration=2:size=160x120:rate=10", "-pix_fmt", "yuv420p", clip);
 		const tool = new ReadTool(makeSession(testDir));
 
-		await expect(tool.execute("call", { path: `${clip}:transcript` })).rejects.toThrow(
+		expect(String(await rejectionOf(tool.execute("call", { path: `${clip}:transcript` })))).toContain(
 			"'silent.mp4' has no audio stream to transcribe.",
 		);
 	});
@@ -189,7 +190,7 @@ describe.skipIf(!hasFfmpeg)("read transcript", () => {
 		const transcribe = spyOn(sttClient, "transcribe").mockResolvedValue([]);
 		const tool = new ReadTool(makeSession(testDir, false));
 
-		await expect(tool.execute("call", { path: `${clip}:transcript` })).rejects.toThrow("not found");
+		expect(String(await rejectionOf(tool.execute("call", { path: `${clip}:transcript` })))).toContain("not found");
 		expect(transcribe).not.toHaveBeenCalled();
 	});
 });
