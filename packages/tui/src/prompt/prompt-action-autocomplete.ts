@@ -22,6 +22,8 @@ import {
 	type ModelMentionCandidateSource,
 } from "./model-mention-autocomplete";
 import { subsequenceMatch, subsequenceScore } from "../autocomplete";
+import { sanitizeDisplaySingleLine } from "../overlays/extensions/display-text";
+import { previewLine, TRUNCATE_LENGTHS } from "../render/render-utils";
 
 let emojiAutocompleteEnabled = true;
 
@@ -173,8 +175,8 @@ export class PromptActionAutocompleteProvider implements AutocompleteProvider {
 				.filter(session => subsequenceMatch(query, session.name.toLowerCase()))
 				.map(session => ({
 					value: `@${/^[A-Za-z0-9_-]+$/.test(session.name) ? session.name : `"${session.name.replace(/"/g, '\\"')}"`}`,
-					label: `@${session.name}`,
-					description: `session · ${session.cwd}`,
+					label: previewLine(sanitizeDisplaySingleLine(`@${session.name}`), TRUNCATE_LENGTHS.LINE),
+					description: previewLine(sanitizeDisplaySingleLine(`session · ${session.cwd}`), TRUNCATE_LENGTHS.LINE),
 					sessionName: session.name,
 				}));
 			return base || items.length

@@ -3,6 +3,7 @@ import type { IrcMessage } from "@oh-my-pi/pi-tui/tools/irc";
 import type { CoordinationDetails } from "@oh-my-pi/pi-tui/tools/wait";
 import type { Settings } from "../config/settings";
 import type { MessagingService, SessionCandidate } from "../messaging/service";
+import { peerDisplayText } from "../messaging/names";
 import { IrcBus } from "./bus";
 import { type AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
 import { ensurePersistedRoster } from "../registry/persisted-agents";
@@ -71,11 +72,14 @@ export async function executeSend(
 			return coordinationErrorResult("That is this session's own name.", { op: "send", from: senderId, to });
 		}
 		if (resolution.kind === "incompatible") {
-			return coordinationErrorResult(`Not sent: ${resolution.name} runs an incompatible omp version.`, {
-				op: "send",
-				from: senderId,
-				to,
-			});
+			return coordinationErrorResult(
+				`Not sent: ${peerDisplayText(resolution.name)} runs an incompatible omp version.`,
+				{
+					op: "send",
+					from: senderId,
+					to,
+				},
+			);
 		}
 		const sessions: SessionCandidate[] =
 			resolution.kind === "found" || resolution.kind === "offline"
@@ -85,11 +89,12 @@ export async function executeSend(
 					: [];
 		if (sessions.length + (localCandidate ? 1 : 0) > 1) {
 			const rows = sessions.map(
-				session => `- ${session.name ?? "(unnamed)"} (session ${session.shortId}, ${session.cwd})`,
+				session =>
+					`- ${peerDisplayText(session.name ?? "(unnamed)")} (session ${session.shortId}, ${peerDisplayText(session.cwd)})`,
 			);
-			if (localCandidate) rows.push(`- ${to} (local agent)`);
+			if (localCandidate) rows.push(`- ${peerDisplayText(to)} (local agent)`);
 			return coordinationErrorResult(
-				`Not sent: "${to}" matches more than one agent:\n${rows.join("\n")}\nAddress one by its session short id.`,
+				`Not sent: "${peerDisplayText(to)}" matches more than one agent:\n${rows.join("\n")}\nAddress one by its session short id.`,
 				{ op: "send", from: senderId, to },
 			);
 		}

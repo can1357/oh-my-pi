@@ -3,6 +3,8 @@ import { Container, Spacer, Text } from "@oh-my-pi/pi-tui";
 import type { CollabUiRequestDraft, CollabUiSelectItem } from "@oh-my-pi/pi-wire";
 import type { CollabHost } from "../../collab/host";
 import type { HeldMessageView } from "../../messaging/service";
+import { peerDisplayText } from "../../messaging/names";
+import { sanitizeText } from "@oh-my-pi/pi-utils";
 import { formatKeyHint, formatKeyHints, KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
 import type {
 	CompactOptions,
@@ -39,7 +41,7 @@ import { HookSelectorComponent, type HookSelectorSlider } from "@oh-my-pi/pi-tui
 import { getAvailableThemesWithPaths, getThemeByName, setTheme, type Theme, theme } from "@oh-my-pi/pi-tui/theme";
 import type { InteractiveModeContext, InteractiveSelectorDialogOptions } from "../../modes/types";
 import { normalizeCustomMessagePayload, USER_INTERRUPT_LABEL } from "../../session/messages";
-import { disambiguateDisplayLabels, sanitizeCarriageReturns } from "@oh-my-pi/pi-tui/render/render-utils";
+import { disambiguateDisplayLabels, previewLine, sanitizeCarriageReturns } from "@oh-my-pi/pi-tui/render/render-utils";
 import { setExtensionTerminalTitle, setSessionTerminalTitle } from "../../utils/title-generator";
 import { getEditorCommand, openInEditor } from "../../utils/external-editor";
 
@@ -975,9 +977,13 @@ export class ExtensionUiController {
 		onPresented: () => void,
 	): Promise<"approve" | "deny" | undefined> {
 		if (signal.aborted) return undefined;
-		const preview = sanitizeCarriageReturns(view.body).split("\n").slice(0, 12).join("\n");
+		const preview = sanitizeText(sanitizeCarriageReturns(view.body))
+			.split("\n")
+			.slice(0, 12)
+			.map(line => previewLine(line, 512))
+			.join("\n");
 		const result = await this.showHookSelector(
-			`Message from another session: @${sanitizeCarriageReturns(view.from.address)}\n------------\n${preview}\n------------`,
+			`Message from another session: @${peerDisplayText(view.from.address)}\n------------\n${preview}\n------------`,
 			[{ label: "Approve" }, { label: "Deny" }],
 			{ signal },
 			{ onPresented },

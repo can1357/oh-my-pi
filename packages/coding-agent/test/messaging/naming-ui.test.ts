@@ -4,7 +4,7 @@ import type { InteractiveModeContext } from "../../src/modes/types";
 import { generateNameSuffix, generateTaskName, resetTaskNames } from "../../src/task/name-generator";
 import type { HeldMessageView } from "../../src/messaging/service";
 import { executeBuiltinSlashCommand } from "../../src/slash-commands/builtin-registry";
-import type { MessagingService } from "../../src/messaging/service";
+import type { MessagingService, SessionResolution } from "../../src/messaging/service";
 import type { AgentSession } from "../../src/session/agent-session";
 import { SessionManager } from "../../src/session/session-manager";
 import { Settings } from "../../src/config/settings";
@@ -44,6 +44,43 @@ describe("cross-session naming UI", () => {
 			expect(claimSessionName(name, new Set())).toBe(name);
 			expect(sessionAddress({ ...title, sessionName: name })).toBe(name);
 		}
+	});
+	it("refuses local names over 4000 characters before adding collision suffixes", () => {
+		const name = "x".repeat(4000);
+		expect(claimSessionName(name, new Set())).toBe(name);
+		expect(() => claimSessionName(`${name}x`, new Set())).toThrow("Session names can be at most 4000 characters.");
+		expect(claimSessionName(name, new Set([name])).length).toBeLessThanOrEqual(4096);
+	});
+
+	it("sanitizes ambiguous and incompatible peer displays without changing the routing identity", async () => {
+		const attack = "\x1b]0;PWNED\x07\x1b]52;c;SGVsbG8=\x07\x1b[31mpeer\x1b[0m\nrow\rreturn";
+		const resolve = vi.fn(async (): Promise<SessionResolution> => ({
+			kind: "ambiguous",
+			candidates: [1, 2].map(() => ({ name: attack, shortId: "12345678", cwd: attack })),
+		}));
+		const deps = {
+			registry: new AgentRegistry(),
+			senderId: "Main",
+			messaging: { resolve } as unknown as MessagingService,
+		};
+		const result = await executeSend(deps, { to: attack, message: "hello" });
+		const text = result.content
+			.filter(item => item.type === "text")
+			.map(item => item.text)
+			.join("\n");
+		expect(text).not.toContain("\x1b");
+		expect(text.split("\n")).toHaveLength(4);
+		expect(text).toContain("peer row return");
+		expect(result.details?.to).toBe(attack);
+		expect(resolve).toHaveBeenCalledWith(attack, { includeOffline: true });
+		resolve.mockResolvedValue({ kind: "incompatible", name: attack });
+		const incompatible = await executeSend(deps, { to: attack, message: "hello" });
+		const display = incompatible.content
+			.filter(item => item.type === "text")
+			.map(item => item.text)
+			.join("\n");
+		expect(display).not.toContain("\x1b");
+		expect(display).not.toContain("\n");
 	});
 
 	it("retains local broadcast routing for all instead of resolving a session name", async () => {
@@ -137,6 +174,26 @@ describe("cross-session naming UI", () => {
 			return "Approve";
 		});
 		expect(await controller.askCrossSessionApproval(view, signal.signal, () => {})).toBeUndefined();
+	});
+	it("strips peer terminal escapes and caps each of the twelve approval preview lines", async () => {
+		const attack = "\x1b]0;PWNED\x07\x1b]52;c;SGVsbG8=\x07\x1b[31mpeer\x1b[0m\nrow\rreturn";
+		const controller = new ExtensionUiController({} as InteractiveModeContext);
+		const select = vi.spyOn(controller, "showHookSelector").mockResolvedValue("Approve");
+		const view: HeldMessageView = {
+			from: { name: attack, address: attack, shortId: "12345678", cwd: "/project" },
+			body: [attack, "x".repeat(5000), ...Array.from({ length: 14 }, (_, i) => `line ${i}`)].join("\n"),
+		};
+		expect(await controller.askCrossSessionApproval(view, new AbortController().signal, () => {})).toBe("approve");
+		const title = select.mock.calls[0]![0];
+		expect(title).not.toContain("\x1b");
+		expect(title).not.toContain("\r");
+		const lines = title.split("\n");
+		expect(lines).toHaveLength(15);
+		expect(lines.slice(2, -1)).toHaveLength(12);
+		expect(lines[0]).toContain("peer row return");
+		expect(Math.max(...lines.map(line => line.length))).toBeLessThanOrEqual(512);
+		expect(view.body).toContain("\x1b");
+		expect(view.from.address).toBe(attack);
 	});
 
 	it("keeps /status opening the extensions dashboard", async () => {

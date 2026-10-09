@@ -1,6 +1,7 @@
 import { logger } from "@oh-my-pi/pi-utils";
 import { ManagedTimers } from "../extensibility/extensions/managed-timers";
 import type { OutgoingNotice } from "./inbound";
+import { peerDisplayText } from "./names";
 import type { InboundDecision } from "./policy";
 import {
 	ACCEPTED_QUEUE_CAP,
@@ -21,11 +22,14 @@ export function droppedMessageText(address: string, reason: DropReason): string 
 		repeat: "it repeated your previous message",
 		relay_loop: "a relay loop between sessions was cut",
 	};
-	return `Cross-session message was dropped at the recipient session's inbox (recipient: ${address}) and not delivered — ${reasons[reason]}. Do not resend right away.`;
+	return `Cross-session message was dropped at the recipient session's inbox (recipient: ${peerDisplayText(address)}) and not delivered — ${reasons[reason]}. Do not resend right away.`;
 }
 
 export class IdleSubscriptions {
-	readonly #watched = new Map<string, { sender: SenderInfo; receiver: SenderInfo | undefined; id: string }>();
+	readonly #watched = new Map<
+		string,
+		{ sender: SenderInfo; receiver: SenderInfo | undefined; id: string; timer: Timer }
+	>();
 	readonly #asking = new Map<string, { timer: Timer; target: RemoteSender; id: string }>();
 	readonly #timers = new ManagedTimers((_event, error) => logger.warn("Messaging timer failed", { error }));
 
@@ -46,12 +50,20 @@ export class IdleSubscriptions {
 			const dropped = this.checkTraffic(sender, JSON.stringify(["subscribe", id]));
 			if (dropped) return dropped;
 		}
-		this.#watched.set(sender.entryId, {
+		const previous = this.#watched.get(sender.entryId);
+		if (previous) this.#timers.clear(previous.timer);
+		const watcher = {
 			sender,
 			receiver: this.ownSender?.(),
 			id,
-		});
-		this.host.showNotice(`@${sender.name ?? sender.shortId} asked to be told when this session is next idle.`);
+			timer: this.#timers.setTimeout(() => {
+				if (this.#watched.get(sender.entryId) === watcher) this.#watched.delete(sender.entryId);
+			}, IDLE_SUBSCRIPTION_TTL_MS),
+		};
+		this.#watched.set(sender.entryId, watcher);
+		this.host.showNotice(
+			`@${peerDisplayText(sender.name ?? sender.shortId)} asked to be told when this session is next idle.`,
+		);
 		if (!this.host.isBusy()) void this.#flush("idle");
 		return { ok: true, outcome: "subscribed" };
 	}
@@ -62,7 +74,7 @@ export class IdleSubscriptions {
 			this.#asking.delete(entryId);
 			const own = this.ownSender?.();
 			const decision = own ? this.decision(own) : "accept";
-			const text = `No idle notice from @${target.address} within 12 hours; the subscription was dropped.`;
+			const text = `No idle notice from @${peerDisplayText(target.address)} within 12 hours; the subscription was dropped.`;
 			if (decision === "accept" && this.host.pendingRemoteCount() < ACCEPTED_QUEUE_CAP)
 				void this.host.deliverNotice(target, text, this.host.sessionId());
 			else if (decision !== "refuse") this.host.showNotice(text);
@@ -103,10 +115,10 @@ export class IdleSubscriptions {
 		const time = `${String(finished.getHours()).padStart(2, "0")}:${String(finished.getMinutes()).padStart(2, "0")}`;
 		const text =
 			notice.kind === "retired"
-				? `@${from.address} switched to a different conversation; the idle notice was cancelled.`
+				? `@${peerDisplayText(from.address)} switched to a different conversation; the idle notice was cancelled.`
 				: notice.kind === "exited"
-					? `@${from.address} exited.`
-					: `@${from.address} is idle (turn finished ${time})${notice.status ? `: ${notice.status}` : "."}`;
+					? `@${peerDisplayText(from.address)} exited.`
+					: `@${peerDisplayText(from.address)} is idle (turn finished ${time})${notice.status ? `: ${peerDisplayText(notice.status)}` : "."}`;
 		if (decision === "accept") void this.host.deliverNotice(from, text, this.host.sessionId());
 		else if (decision !== "refuse") this.host.showNotice(text);
 		return ignored;
@@ -121,7 +133,8 @@ export class IdleSubscriptions {
 		this.#watched.clear();
 		const finished = this.host.lastFinished();
 		await Promise.all(
-			subscribers.map(({ sender, receiver, id }) => {
+			subscribers.map(({ sender, receiver, id, timer }) => {
+				this.#timers.clear(timer);
 				const decision = this.decision(sender);
 				if (decision === "refuse") return;
 				return this.reply(
