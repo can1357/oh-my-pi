@@ -565,11 +565,7 @@ export class StallReportCollector {
 	}
 
 	#sessionHistory(session: AgentSession): History {
-		const summary = scanEntries(
-			session.sessionManager.getBranch(),
-			this.#liveHistory.get(session),
-			this.#quote,
-		);
+		const summary = scanEntries(session.sessionManager.getBranch(), this.#liveHistory.get(session), this.#quote);
 		this.#liveHistory.set(session, summary);
 		const header = session.sessionManager.getHeader();
 		summary.sessionId = header?.id;
