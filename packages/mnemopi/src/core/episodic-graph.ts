@@ -1,5 +1,5 @@
 import type { Database } from "bun:sqlite";
-import { closeQuietly, type DatabasePath, openDatabase } from "../db";
+import { closeQuietly, type DatabasePath, openDatabase, transaction } from "../db";
 
 export interface Gist {
 	readonly id: string;
@@ -506,83 +506,92 @@ export class EpisodicGraph {
 		const extractEntities = options.extractEntities ?? true;
 		const gist = this.extractGist(content, memoryId);
 		const facts = extractEntities ? this.extractFacts(content, memoryId) : [];
-		const edges: GraphEdge[] = [];
-		const timestamp = nowIso();
+		// One transaction for every gist/fact/edge write: autocommitted, each
+		// `addEdge` paid its own WAL commit (an fsync), so linking a memory
+		// against a large bank blocked the caller's event loop for seconds (#14998).
+		return transaction(this.db, () => {
+			const edges: GraphEdge[] = [];
+			const timestamp = nowIso();
 
-		const previousMemoryIds = linkExisting ? this.knownMemoryIds(memoryId) : [];
-		this.storeGist(gist, memoryId);
-		const gistEdge = { source: memoryId, target: gist.id, edgeType: "ctx", weight: 1, timestamp };
-		this.addEdge(gistEdge);
-		edges.push(gistEdge);
+			const previousMemoryIds = linkExisting ? this.knownMemoryIds(memoryId) : [];
+			this.storeGist(gist, memoryId);
+			const gistEdge = { source: memoryId, target: gist.id, edgeType: "ctx", weight: 1, timestamp };
+			this.addEdge(gistEdge);
+			edges.push(gistEdge);
 
-		for (const fact of facts) {
-			this.storeFact(fact, memoryId, sessionId);
-			const edge = {
-				source: gist.id,
-				target: fact.id,
-				edgeType: "rel",
-				weight: fact.confidence,
-				timestamp,
-			};
-			this.addEdge(edge);
-			edges.push(edge);
-		}
+			for (const fact of facts) {
+				this.storeFact(fact, memoryId, sessionId);
+				const edge = {
+					source: gist.id,
+					target: fact.id,
+					edgeType: "rel",
+					weight: fact.confidence,
+					timestamp,
+				};
+				this.addEdge(edge);
+				edges.push(edge);
+			}
 
-		if (linkExisting) {
-			const sourceTokens = contentTokenSet(content);
-			for (const otherId of previousMemoryIds) {
-				const otherContent = this.memoryContent(otherId, timestamp);
-				const lexicalScore = Math.round(jaccard(sourceTokens, contentTokenSet(otherContent)) * 1000) / 1000;
-				let wroteCtxEdge = false;
-				if (lexicalScore >= minLinkScore) {
-					const edge = {
-						source: memoryId,
-						target: otherId,
-						edgeType: "related_to",
-						weight: lexicalScore,
-						timestamp,
-					};
-					this.addEdge(edge);
-					edges.push(edge);
-					const ctxEdge = {
-						source: memoryId,
-						target: otherId,
-						edgeType: "ctx",
-						weight: lexicalScore,
-						timestamp,
-					};
-					this.addEdge(ctxEdge);
-					edges.push(ctxEdge);
-					wroteCtxEdge = true;
-				}
-				const entityScore = this.entityOverlapScore(memoryId, otherId);
-				if (entityScore > 0) {
-					const edge = {
-						source: memoryId,
-						target: otherId,
-						edgeType: "references",
-						weight: entityScore,
-						timestamp,
-					};
-					this.addEdge(edge);
-					edges.push(edge);
-				}
-				const contextualScore = Math.max(lexicalScore, entityScore, this.temporalContextScore(memoryId, otherId));
-				if (!wroteCtxEdge && contextualScore >= minLinkScore) {
-					const ctxEdge = {
-						source: memoryId,
-						target: otherId,
-						edgeType: "ctx",
-						weight: contextualScore,
-						timestamp,
-					};
-					this.addEdge(ctxEdge);
-					edges.push(ctxEdge);
+			if (linkExisting) {
+				const sourceTokens = contentTokenSet(content);
+				for (const otherId of previousMemoryIds) {
+					const otherContent = this.memoryContent(otherId, timestamp);
+					const lexicalScore = Math.round(jaccard(sourceTokens, contentTokenSet(otherContent)) * 1000) / 1000;
+					let wroteCtxEdge = false;
+					if (lexicalScore >= minLinkScore) {
+						const edge = {
+							source: memoryId,
+							target: otherId,
+							edgeType: "related_to",
+							weight: lexicalScore,
+							timestamp,
+						};
+						this.addEdge(edge);
+						edges.push(edge);
+						const ctxEdge = {
+							source: memoryId,
+							target: otherId,
+							edgeType: "ctx",
+							weight: lexicalScore,
+							timestamp,
+						};
+						this.addEdge(ctxEdge);
+						edges.push(ctxEdge);
+						wroteCtxEdge = true;
+					}
+					const entityScore = this.entityOverlapScore(memoryId, otherId);
+					if (entityScore > 0) {
+						const edge = {
+							source: memoryId,
+							target: otherId,
+							edgeType: "references",
+							weight: entityScore,
+							timestamp,
+						};
+						this.addEdge(edge);
+						edges.push(edge);
+					}
+					const contextualScore = Math.max(
+						lexicalScore,
+						entityScore,
+						this.temporalContextScore(memoryId, otherId),
+					);
+					if (!wroteCtxEdge && contextualScore >= minLinkScore) {
+						const ctxEdge = {
+							source: memoryId,
+							target: otherId,
+							edgeType: "ctx",
+							weight: contextualScore,
+							timestamp,
+						};
+						this.addEdge(ctxEdge);
+						edges.push(ctxEdge);
+					}
 				}
 			}
-		}
 
-		return { memoryId, gist, facts, edges };
+			return { memoryId, gist, facts, edges };
+		});
 	}
 	getStats(): GraphStats {
 		const gists = this.count("gists");

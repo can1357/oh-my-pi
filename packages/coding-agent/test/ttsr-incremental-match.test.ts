@@ -59,30 +59,29 @@ describe("TTSR incremental stream matching", () => {
 		expect(manager.checkSnapshot("clean", TEXT)).toEqual([]);
 	});
 
-	it("finds a late snapshot match without repeatedly scanning the full text", () => {
-		const chunk = "const value = compute(input);\n";
-		const condition = "FORBIDDEN_\\w+\\(";
+	it("matches a condition that arrives late in a snapshot growing in small chunks, scanning each chunk once", () => {
 		const manager = new TtsrManager({ enabled: true });
-		manager.addRule(rule("forbidden", condition));
-		let scannedCharacters = 0;
-		const originalTest = RegExp.prototype.test;
-		const scan = vi.spyOn(RegExp.prototype, "test").mockImplementation(function (this: RegExp, text: string) {
-			if (this.source === condition) scannedCharacters += text.length;
-			return originalTest.call(this, text);
+		manager.addRule(rule("forbidden", "FORBIDDEN_\\w+\\("));
+		// Count regex input instead of timing it: wall-clock ratios flake under load.
+		const test = RegExp.prototype.test;
+		let scanned = 0;
+		const spy = vi.spyOn(RegExp.prototype, "test").mockImplementation(function (this: RegExp, input: string) {
+			if (this.source.includes("FORBIDDEN_")) scanned += input.length;
+			return test.call(this, input);
 		});
 		try {
 			let snapshot = "";
 			for (let index = 0; index < 2_000; index++) {
-				snapshot += chunk;
+				snapshot += "const value = compute(input);\n";
 				expect(manager.checkSnapshot(snapshot, TEXT, { final: false })).toEqual([]);
 			}
 			snapshot += "FORBIDDEN_api(1);\n";
 			expect(names(manager.checkSnapshot(snapshot, TEXT))).toEqual(["forbidden"]);
-			// Bound regex work, not snapshot-prefix comparisons or runtime warmup.
-			// Allow one incremental pass plus one final whole-buffer scan.
-			expect(scannedCharacters).toBeLessThanOrEqual(2 * snapshot.length);
+			// Every chunk is read; a whole-buffer rescan per update would read the stream ~1000 times over.
+			expect(scanned).toBeGreaterThanOrEqual(snapshot.length);
+			expect(scanned).toBeLessThan(2 * snapshot.length);
 		} finally {
-			scan.mockRestore();
+			spy.mockRestore();
 		}
 	});
 });

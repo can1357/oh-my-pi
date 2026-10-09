@@ -102,18 +102,23 @@ export interface FrameApiHooks {
 	captureScreenshot(frame: Frame, selector: string, signal: AbortSignal): Promise<string>;
 }
 
+/** A frame's DevTools identifier, the id CDP events name it by. */
+export function devtoolsFrameId(frame: Frame): string {
+	// Puppeteer keeps the DevTools id on an internal field its public types omit.
+	const internal = frame as unknown as { _id: string };
+	return internal._id;
+}
+
 /** List the page's current main and child frames with stable DevTools identifiers. */
 export async function listFrames(page: Page, signal?: AbortSignal): Promise<BrowserFrameInfo[]> {
 	const result: BrowserFrameInfo[] = [];
 	for (const frame of page.frames()) {
 		const parent = frame.parentFrame();
-		const internalFrame = frame as unknown as { _id: string };
-		const internalParent = parent as unknown as { _id: string } | null;
 		const info: BrowserFrameInfo = {
-			id: internalFrame._id,
+			id: devtoolsFrameId(frame),
 			name: frame.name(),
 			url: frame.url(),
-			parentId: internalParent?._id ?? null,
+			parentId: parent ? devtoolsFrameId(parent) : null,
 		};
 		if (parent) {
 			let element: ElementHandle | null = null;

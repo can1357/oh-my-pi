@@ -170,6 +170,24 @@ class SafeToolRendererComponent implements Component {
 		invalidate.call(this.#component);
 	}
 
+	releaseRenderCaches(): void {
+		const release = this.#component.releaseRenderCaches;
+		if (release === undefined) return;
+		try {
+			release.call(this.#component);
+		} catch (err) {
+			if (!this.#warned) {
+				this.#warned = true;
+				logger.warn("Tool renderer failed", {
+					tool: this.#toolName,
+					stage: this.#stage,
+					phase: "releaseRenderCaches",
+					error: String(err),
+				});
+			}
+		}
+	}
+
 	setIgnoreTight(ignore: boolean): void {
 		const setIgnoreTight = this.#component.setIgnoreTight;
 		if (setIgnoreTight === undefined) return;

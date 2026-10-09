@@ -125,6 +125,7 @@ xkeysym = "=0.2.1"
 [build-dependencies]
 napi-build.workspace = true
 shlex.workspace = true
+syntect.workspace = true
 
 # Transitive-only pin: see find-msvc-tools in the root workspace manifest.
 # `cfg(false)` is cargo's documented home for a version pin that no target
