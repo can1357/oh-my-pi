@@ -670,7 +670,7 @@ describe("ACP builtin slash commands", () => {
 		expect(output[0]).toContain("  subagents/Scout.md");
 		expect(output[0]).toContain("Subagent transcripts unavailable: EACCES: permission denied");
 		expect(output[1]).toBe("Session content here");
-		expect(output[2]).toContain("Usage: /dump [all]");
+		expect(output[2]).toContain("Usage: /dump [all|anon]");
 	});
 
 	// /model
