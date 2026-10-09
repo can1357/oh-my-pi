@@ -3998,14 +3998,15 @@ mod platform {
 		FileType, RawDirEntry, ReadDirControl, ReadDirError, WalkDetail, WalkError, mtime_millis,
 	};
 
-	/// `getattrlistbulk` can return data length in the same batch, but
-	/// requesting full-detail attributes (size + mtime) measurably slows the
-	/// bulk scan (~+50% walk time on APFS), which outweighs saving one fstat
-	/// per opened file. Benchmarked via `perf_walk_collect_full_detail` vs
-	/// minimal detail.
+	/// Full listings (`getattrlistbulk` with mtime + size) walk ~25–35%
+	/// slower on APFS than minimal `readdir` listings (`perf_walk_*` tree,
+	/// collect with gitignore), about what skipping one fstat per searched
+	/// file saves, so size hints are not requested by default.
 	pub const CHEAP_SIZE_HINTS: bool = false;
 
 	const BUFFER_SIZE: usize = 256 * 1024;
+	/// Attributes every record must carry to be listed.
+	const REQUIRED_COMMON_ATTRS: libc::attrgroup_t = libc::ATTR_CMN_NAME | libc::ATTR_CMN_OBJTYPE;
 	const VREG: u32 = 1;
 	const VDIR: u32 = 2;
 	const VLNK: u32 = 5;
@@ -4020,9 +4021,151 @@ mod platform {
 		}
 	}
 
+	/// Directory stream that owns the descriptor it was opened from.
+	struct DirGuard(*mut libc::DIR);
+
+	impl DirGuard {
+		fn from_fd(fd: FdGuard) -> io::Result<Self> {
+			// SAFETY: `fd` is an open directory descriptor; on success the
+			// stream takes ownership of it.
+			let dir = unsafe { libc::fdopendir(fd.0) };
+			if dir.is_null() {
+				return Err(io::Error::last_os_error());
+			}
+			std::mem::forget(fd);
+			Ok(Self(dir))
+		}
+	}
+
+	impl Drop for DirGuard {
+		fn drop(&mut self) {
+			// SAFETY: `DirGuard` owns this stream (and its descriptor) and
+			// closes it exactly once.
+			unsafe { libc::closedir(self.0) };
+		}
+	}
+
+	/// List one directory, opening it once.
+	///
+	/// Minimal listings go through `readdir`: libc fills its buffer with
+	/// `__getdirentries64`, which flags end-of-directory in the same call,
+	/// so a typical directory costs one listing syscall. A names-and-types
+	/// `getattrlistbulk` needs a trailing empty call and collected the
+	/// `perf_walk_*` tree 20–30% slower. Full listings use
+	/// `getattrlistbulk`, which returns mtimes and sizes without a stat per
+	/// entry.
 	pub fn read_dir_entries<F, E>(
 		path: &Path,
 		detail: WalkDetail,
+		buffer: &mut Vec<u8>,
+		mut emit: F,
+	) -> std::result::Result<ReadDirControl, ReadDirError<E>>
+	where
+		F: FnMut(RawDirEntry<'_>) -> std::result::Result<ReadDirControl, WalkError<E>>,
+	{
+		if detail == WalkDetail::Minimal {
+			return read_dirent_entries(path, emit);
+		}
+		let mut emitted = false;
+		let result = read_bulk_entries(path, buffer, |entry| {
+			emitted = true;
+			emit(entry)
+		});
+		match result {
+			// Fall back only before any entry was emitted, so a late failure
+			// cannot deliver entries twice.
+			Err(ReadDirError::Io(err)) if !emitted && is_unsupported_dir_scan(&err) => {
+				read_dir_entries_std(path, detail, emit)
+			},
+			result => result,
+		}
+	}
+
+	fn read_dirent_entries<F, E>(
+		path: &Path,
+		mut emit: F,
+	) -> std::result::Result<ReadDirControl, ReadDirError<E>>
+	where
+		F: FnMut(RawDirEntry<'_>) -> std::result::Result<ReadDirControl, WalkError<E>>,
+	{
+		let dir = DirGuard::from_fd(open_dir(path)?)?;
+		loop {
+			// `readdir` reports errors only through errno.
+			// SAFETY: `__error` returns this thread's errno slot.
+			unsafe { *libc::__error() = 0 };
+			// SAFETY: `dir` owns a valid open directory stream.
+			let entry = unsafe { libc::readdir(dir.0) };
+			if entry.is_null() {
+				let err = io::Error::last_os_error();
+				return match err.raw_os_error() {
+					Some(0) => Ok(ReadDirControl::Continue),
+					_ => Err(err.into()),
+				};
+			}
+			// SAFETY: `readdir` returned a valid entry that stays valid until
+			// the next `readdir` or `closedir` on `dir`.
+			let entry = unsafe { &*entry };
+			// SAFETY: `d_name` holds `d_namlen` name bytes followed by a NUL.
+			let name = unsafe {
+				std::slice::from_raw_parts(entry.d_name.as_ptr().cast::<u8>(), entry.d_namlen.into())
+			};
+			if name == b"." || name == b".." {
+				continue;
+			}
+			let file_type = match entry.d_type {
+				libc::DT_REG => FileType::File,
+				libc::DT_DIR => FileType::Dir,
+				libc::DT_LNK => FileType::Symlink,
+				libc::DT_UNKNOWN => match stat_file_type(&dir, entry) {
+					Ok(Some(file_type)) => file_type,
+					Ok(None) => continue,
+					Err(err) if is_skippable_entry_error(&err) => continue,
+					Err(err) => return Err(err.into()),
+				},
+				_ => continue,
+			};
+			let raw_entry = RawDirEntry {
+				name: OsStr::from_bytes(name).into(),
+				file_type,
+				mtime: None,
+				size: None,
+			};
+			if emit(raw_entry).map_err(ReadDirError::Walk)? == ReadDirControl::Stop {
+				return Ok(ReadDirControl::Stop);
+			}
+		}
+	}
+
+	/// Resolve the type of an entry whose listing reported `DT_UNKNOWN`.
+	fn stat_file_type(dir: &DirGuard, entry: &libc::dirent) -> io::Result<Option<FileType>> {
+		// SAFETY: `libc::stat` is plain old data filled by `fstatat`.
+		let mut stat = unsafe { std::mem::zeroed::<libc::stat>() };
+		// SAFETY: `dir` is an open stream, `d_name` is NUL-terminated, and
+		// `stat` is writable.
+		let rc = unsafe {
+			libc::fstatat(
+				libc::dirfd(dir.0),
+				entry.d_name.as_ptr(),
+				&raw mut stat,
+				libc::AT_SYMLINK_NOFOLLOW,
+			)
+		};
+		if rc != 0 {
+			return Err(io::Error::last_os_error());
+		}
+		Ok(match stat.st_mode & libc::S_IFMT {
+			libc::S_IFREG => Some(FileType::File),
+			libc::S_IFDIR => Some(FileType::Dir),
+			libc::S_IFLNK => Some(FileType::Symlink),
+			_ => None,
+		})
+	}
+
+	/// List `path` with names, types, mtimes, and file sizes from
+	/// `getattrlistbulk`, returning volume-support errors instead of falling
+	/// back to `std::fs::read_dir`.
+	pub(super) fn read_bulk_entries<F, E>(
+		path: &Path,
 		buffer: &mut Vec<u8>,
 		mut emit: F,
 	) -> std::result::Result<ReadDirControl, ReadDirError<E>>
@@ -4033,16 +4176,17 @@ mod platform {
 		let mut attrs = libc::attrlist {
 			bitmapcount: libc::ATTR_BIT_MAP_COUNT,
 			reserved:    0,
-			commonattr:  libc::ATTR_CMN_NAME | libc::ATTR_CMN_OBJTYPE,
+			// getattrlistbulk fails with EINVAL unless ATTR_CMN_RETURNED_ATTRS
+			// is requested.
+			commonattr:  libc::ATTR_CMN_RETURNED_ATTRS
+				| libc::ATTR_CMN_NAME
+				| libc::ATTR_CMN_OBJTYPE
+				| libc::ATTR_CMN_MODTIME,
 			volattr:     0,
 			dirattr:     0,
-			fileattr:    0,
+			fileattr:    libc::ATTR_FILE_DATALENGTH,
 			forkattr:    0,
 		};
-		if detail == WalkDetail::Full {
-			attrs.commonattr |= libc::ATTR_CMN_MODTIME;
-			attrs.fileattr |= libc::ATTR_FILE_DATALENGTH;
-		}
 
 		if buffer.len() != BUFFER_SIZE {
 			buffer.resize(BUFFER_SIZE, 0);
@@ -4068,9 +4212,6 @@ mod platform {
 				if err.kind() == io::ErrorKind::Interrupted {
 					continue;
 				}
-				if is_unsupported_dir_scan(&err) {
-					return read_dir_entries_std(path, detail, emit);
-				}
 				return Err(ReadDirError::Io(err));
 			}
 
@@ -4088,7 +4229,7 @@ mod platform {
 					return Err(invalid_data("invalid getattrlistbulk record length").into());
 				}
 				let record = &buffer[offset..offset + record_len];
-				if let Some(entry) = parse_record(record, detail)?
+				if let Some(entry) = parse_record(record)?
 					&& emit(entry).map_err(ReadDirError::Walk)? == ReadDirControl::Stop
 				{
 					return Ok(ReadDirControl::Stop);
@@ -4172,17 +4313,29 @@ mod platform {
 		}
 	}
 
-	fn parse_record(record: &[u8], detail: WalkDetail) -> io::Result<Option<RawDirEntry<'_>>> {
+	/// Parse one record: its length, the returned `attribute_set_t`, then each
+	/// returned attribute in bitmap order. Attributes that do not apply to an
+	/// entry (such as `ATTR_FILE_DATALENGTH` for directories) are omitted, so
+	/// every read past the name is gated on its returned bit.
+	fn parse_record(record: &[u8]) -> io::Result<Option<RawDirEntry<'_>>> {
 		let mut cursor = size_of::<u32>();
+		let returned = read_value::<libc::attribute_set_t>(record, &mut cursor)?;
+		if returned.commonattr & REQUIRED_COMMON_ATTRS != REQUIRED_COMMON_ATTRS {
+			return Err(invalid_data("getattrlistbulk record without name or type"));
+		}
 		let name_ref_start = cursor;
 		let name_ref = read_value::<libc::attrreference_t>(record, &mut cursor)?;
 		let obj_type = read_value::<u32>(record, &mut cursor)?;
-		let (mtime, data_length) = if detail == WalkDetail::Full {
+		let mtime = if returned.commonattr & libc::ATTR_CMN_MODTIME != 0 {
 			let modified = read_value::<libc::timespec>(record, &mut cursor)?;
-			let data_length = read_value::<u64>(record, &mut cursor)?;
-			(mtime_millis(modified.tv_sec as i64, modified.tv_nsec as i64), Some(data_length))
+			mtime_millis(modified.tv_sec, modified.tv_nsec)
 		} else {
-			(None, None)
+			None
+		};
+		let data_length = if returned.fileattr & libc::ATTR_FILE_DATALENGTH != 0 {
+			Some(read_value::<u64>(record, &mut cursor)?)
+		} else {
+			None
 		};
 
 		let name_start = checked_attr_offset(name_ref_start, name_ref.attr_dataoffset)?;
@@ -5775,5 +5928,41 @@ mod tests {
 			!paths.iter().any(|path| path == "child.txt"),
 			"FollowLinks::Never should not traverse a symlink root, got: {paths:?}"
 		);
+	}
+
+	/// The `std::fs::read_dir` fallback hides a broken bulk request: listings
+	/// stay correct while every directory is opened twice. Call the bulk path
+	/// directly so a rejected request fails here.
+	#[cfg(target_os = "macos")]
+	#[test]
+	fn getattrlistbulk_lists_types_sizes_and_mtimes() {
+		let tree = temp_tree("getattrlistbulk");
+		fs::write(tree.path().join("five"), "12345").expect("file should be written");
+		fs::create_dir(tree.path().join("sub")).expect("subdirectory should be created");
+		std::os::unix::fs::symlink("five", tree.path().join("link"))
+			.expect("symlink should be created");
+
+		let mut buffer = Vec::new();
+		let mut entries = Vec::new();
+		platform::read_bulk_entries::<_, Infallible>(tree.path(), &mut buffer, |entry| {
+			entries.push((
+				entry.name.to_string_lossy().into_owned(),
+				entry.file_type,
+				entry.size,
+				entry.mtime.is_some(),
+			));
+			Ok(ReadDirControl::Continue)
+		})
+		.unwrap_or_else(|err| match err {
+			ReadDirError::Io(err) => panic!("getattrlistbulk should list the directory: {err}"),
+			ReadDirError::Walk(_) => unreachable!("the visitor never fails"),
+		});
+		entries.sort_by(|left, right| left.0.cmp(&right.0));
+
+		assert_eq!(entries, vec![
+			("five".to_string(), FileType::File, Some(5.0), true),
+			("link".to_string(), FileType::Symlink, None, true),
+			("sub".to_string(), FileType::Dir, None, true),
+		]);
 	}
 }

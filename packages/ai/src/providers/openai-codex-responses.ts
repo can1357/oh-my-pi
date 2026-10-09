@@ -1,4 +1,3 @@
-import * as fs from "node:fs/promises";
 import { scheduler } from "node:timers/promises";
 import { type } from "@oh-my-pi/omptype";
 import { calculateCost } from "@oh-my-pi/pi-catalog/models";
@@ -1926,17 +1925,28 @@ async function openCodexWebSocketTransport(
 			isCodexAppendCandidateValid(websocketState, candidateGeneration, candidateConnection, candidateResponseId) &&
 			liveSteers.every(steer => !attachOwner.hasFailedSteer([steer.id]));
 		if (attachIsValid) {
+			const assertAttachCurrent = (): void => {
+				const stillValid =
+					websocketState.connection === attachOwner &&
+					isCodexAppendCandidateValid(
+						websocketState,
+						candidateGeneration,
+						candidateConnection,
+						candidateResponseId,
+					) &&
+					liveSteers.every(steer => !attachOwner.hasFailedSteer([steer.id]));
+				if (!stillValid) {
+					if (websocketState.connection === attachOwner) {
+						closeCodexSteeringOwner(websocketState, attachOwner);
+					}
+					throw new CodexSteerCommitError("accepted steering was not committed to a current successor");
+				}
+			};
 			const attachRequest = chainedBody;
-			recordCodexTurnRequestDiagnostics(
-				websocketState,
-				attachRequest,
-				"websocket",
-				typeof attachRequest.previous_response_id === "string",
-			);
 			requestContext.rawRequestDump.body = attachRequest;
 			return {
 				eventStream: websocketConnection.streamRequest(
-					{ attachSteerIds: liveSteers.map(steer => steer.id) },
+					{ attachSteerIds: liveSteers.map(steer => steer.id), beforeAttach: assertAttachCurrent },
 					timeouts,
 					requestSetup.requestSignal,
 					onSseEvent,
@@ -2013,9 +2023,14 @@ async function openCodexWebSocketTransport(
 		...chainedBody,
 		client_metadata: websocketClientMetadata,
 	};
+	const approvedContinuationId =
+		typeof chainedBody.previous_response_id === "string" && chainedBody.previous_response_id.length > 0
+			? chainedBody.previous_response_id
+			: undefined;
 	let effectiveRequestBody: RequestBody | undefined;
 	let websocketRequest: Record<string, unknown>;
 	let prefixLength = 0;
+	let hookRequestsContinuation = false;
 	if (Array.isArray(fullInput) && Array.isArray(chainedBody.input) && chainedBody.previous_response_id) {
 		prefixLength = Math.max(0, fullInput.length - chainedBody.input.length);
 	}
@@ -2026,6 +2041,11 @@ async function openCodexWebSocketTransport(
 			replacementWebsocketRequest === undefined
 				? hookRequest
 				: (replacementWebsocketRequest as Record<string, unknown>);
+		hookRequestsContinuation =
+			approvedContinuationId !== undefined &&
+			typeof finalHookRequest.previous_response_id === "string" &&
+			finalHookRequest.previous_response_id.length > 0 &&
+			finalHookRequest.previous_response_id === approvedContinuationId;
 		effectiveRequestBody = buildCodexEffectiveRequestBody(fullInput, prefixLength, finalHookRequest);
 		websocketRequest = {
 			...effectiveRequestBody,
@@ -2098,8 +2118,10 @@ async function openCodexWebSocketTransport(
 	}
 
 	if (hasPayloadHook && appendCandidateValid && effectiveRequestBody) {
-		const reconciledBody = buildCodexChainedRequestBody(effectiveRequestBody, websocketState);
-		if (reconciledBody.previous_response_id && prefixLength > 0) {
+		const reconciledBody = hookRequestsContinuation
+			? buildCodexChainedRequestBody(effectiveRequestBody, websocketState)
+			: undefined;
+		if (reconciledBody?.previous_response_id && prefixLength > 0) {
 			// Keep the hook-adjusted suffix from an originally chained preview.
 			// Running the steering planner again here would erase a newly added
 			// item equal to an accepted steer.
@@ -2160,7 +2182,7 @@ async function openCodexWebSocketTransport(
 		let steeringOwner = steeringSource;
 		let steeringIds = liveSteers.map(steer => steer.id);
 		for (;;) {
-			const beforeSend = (): void => {
+			const validateBeforeSend = (): void => {
 				const connectionIsCurrent = websocketState.connection === connection;
 				const continuationIsCurrent =
 					!usesContinuation || isCodexAppendCandidateValid(websocketState, generation, connection, responseId);
@@ -2171,26 +2193,32 @@ async function openCodexWebSocketTransport(
 				if (!connectionIsCurrent || !continuationIsCurrent || !steeringIsCurrent) {
 					throw new CodexWebSocketContinuationInvalidatedError();
 				}
-				if (!hasPayloadHook) {
-					const clientMetadata = request.client_metadata as Record<string, string> | undefined;
-					if (clientMetadata) {
-						if (requestContext.responsesLite) {
-							clientMetadata[CODEX_WS_RESPONSES_LITE_CLIENT_METADATA_KEY] = "true";
-						} else {
-							delete clientMetadata[CODEX_WS_RESPONSES_LITE_CLIENT_METADATA_KEY];
-						}
-						if (requestContext.turnState.value) {
-							clientMetadata[X_CODEX_TURN_STATE_HEADER] = requestContext.turnState.value;
-						} else {
-							delete clientMetadata[X_CODEX_TURN_STATE_HEADER];
-						}
-					}
+			};
+			const refreshRequestMetadata = (): void => {
+				if (hasPayloadHook) return;
+				const clientMetadata = request.client_metadata as Record<string, string> | undefined;
+				if (!clientMetadata) return;
+				if (requestContext.responsesLite) {
+					clientMetadata[CODEX_WS_RESPONSES_LITE_CLIENT_METADATA_KEY] = "true";
+				} else {
+					delete clientMetadata[CODEX_WS_RESPONSES_LITE_CLIENT_METADATA_KEY];
 				}
+				if (requestContext.turnState.value) {
+					clientMetadata[X_CODEX_TURN_STATE_HEADER] = requestContext.turnState.value;
+				} else {
+					delete clientMetadata[X_CODEX_TURN_STATE_HEADER];
+				}
+			};
+			const beforeSend = (): void => {
+				validateBeforeSend();
+				refreshRequestMetadata();
+			};
+			const afterSend = (): void => {
 				recordCodexTurnRequestDiagnostics(websocketState, request, "websocket", usesContinuation);
 			};
 			try {
 				yield* connection.streamRequest(
-					{ send: request, beforeSend },
+					{ send: request, beforeSend, validateBeforeSend, afterSend },
 					timeouts,
 					requestSetup.requestSignal,
 					onSseEvent,
@@ -4197,9 +4225,14 @@ interface CodexWebSocketRequestTimeouts {
 
 /** What {@link CodexWebSocketConnection.streamRequest} puts on the wire before reading a response. */
 type CodexWebSocketExchange =
-	| { send: Record<string, unknown>; beforeSend?: () => void }
+	| {
+			send: Record<string, unknown>;
+			beforeSend?: () => void;
+			validateBeforeSend?: () => void;
+			afterSend?: () => void;
+	  }
 	/** Read the successor the server creates from accepted steering; nothing is sent. */
-	| { attachSteerIds: readonly string[] };
+	| { attachSteerIds: readonly string[]; beforeAttach?: () => void };
 
 interface CodexSteerWaiter {
 	previousResponseId: string;
@@ -4485,8 +4518,6 @@ class CodexWebSocketConnection {
 		// the death signal instead of writing into a dead socket.
 		if ("send" in exchange) {
 			this.#dropStaleFrames();
-		} else {
-			this.#attachSteerIds = new Set(exchange.attachSteerIds);
 		}
 		const onAbort = () => {
 			this.#push(new CodexWebSocketTransportError(`request was aborted`, { cause: signal?.reason }));
@@ -4511,16 +4542,20 @@ class CodexWebSocketConnection {
 					? await debugSession.openResponseLog("WebSocket 101 Switching Protocols", this.#handshakeHeaders)
 					: undefined;
 
-				try {
-					exchange.beforeSend?.();
-				} catch (error) {
-					if (error instanceof CodexWebSocketContinuationInvalidatedError) {
-						this.#debugResponseLog?.write("request not sent: continuation invalidated\n");
+				const runSendGuard = (guard: (() => void) | undefined): void => {
+					try {
+						guard?.();
+					} catch (error) {
+						if (error instanceof CodexWebSocketContinuationInvalidatedError) {
+							this.#debugResponseLog?.write("request not sent: continuation invalidated\n");
+						}
+						throw error;
 					}
-					throw error;
-				}
+				};
+				runSendGuard(exchange.beforeSend);
 				const requestPayload = JSON.stringify(request);
 				notifyCodexWebSocketOutbound(onSseEvent, request, requestPayload);
+				runSendGuard(exchange.validateBeforeSend);
 				// Re-check liveness: the debug-session await above can outlive the socket.
 				// Preserve the abort cause: onAbort already queued a caused error, but this
 				// throw would otherwise mask it before #nextMessage() drains the queue.
@@ -4540,14 +4575,10 @@ class CodexWebSocketConnection {
 						`websocket send failed: ${error instanceof Error ? error.message : String(error)}`,
 					);
 				}
+				exchange.afterSend?.();
 				if (debugSession) {
 					try {
-						const debugDump = JSON.parse(await fs.readFile(debugSession.requestPath, "utf8")) as Record<
-							string,
-							unknown
-						>;
-						debugDump.body = JSON.parse(requestPayload);
-						await fs.writeFile(debugSession.requestPath, `${JSON.stringify(debugDump, null, 2)}\n`, "utf8");
+						await debugSession.updateRequestBody(JSON.parse(requestPayload));
 					} catch (error) {
 						logger.warn("Codex websocket request debug dump update failed", {
 							path: debugSession.requestPath,
@@ -4555,8 +4586,12 @@ class CodexWebSocketConnection {
 						});
 					}
 				}
-			} else if (this.hasFailedSteer(exchange.attachSteerIds)) {
-				throw new CodexSteerCommitError("accepted steering was not committed to a successor response");
+			} else {
+				exchange.beforeAttach?.();
+				this.#attachSteerIds = new Set(exchange.attachSteerIds);
+				if (this.hasFailedSteer(exchange.attachSteerIds)) {
+					throw new CodexSteerCommitError("accepted steering was not committed to a successor response");
+				}
 			}
 			let sawFirstEvent = false;
 			const { idleTimeoutMs, firstEventTimeoutMs } = timeouts;

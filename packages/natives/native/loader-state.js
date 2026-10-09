@@ -832,6 +832,18 @@ function installNativeTokioRuntime(bindings) {
 	}
 }
 
+/**
+ * Point the addon at `<nativesDir>/grammars`, where the agent downloads the
+ * tree-sitter grammars that load as WebAssembly on demand (pi-utils
+ * `getNativeGrammarsDir()` resolves the same path). Version cleanup never
+ * touches it: only release-version directories are removed. Older addons
+ * predating the export link every grammar and need no directory.
+ */
+function configureGrammarDir(bindings, nativesDir) {
+	const setGrammarDir = bindings.__ompSetGrammarDir;
+	if (typeof setGrammarDir === "function") setGrammarDir(path.join(nativesDir, "grammars"));
+}
+
 
 function buildHelpMessage(ctx) {
 	if (ctx.isCompiledBinary) {
@@ -957,6 +969,7 @@ export function loadNative() {
 			const bindings = require_(candidate);
 			validateLoadedBindings(ctx, bindings, candidate);
 			installNativeTokioRuntime(bindings);
+			configureGrammarDir(bindings, ctx.nativesDir);
 			loadedAddon = describeLoadedAddon(bindings, candidate, ctx);
 	        cleanupStaleNativeVersions({ nativesDir: ctx.nativesDir, currentVersion: ctx.packageVersion });
 			startupMarker("native:loadNative:done");

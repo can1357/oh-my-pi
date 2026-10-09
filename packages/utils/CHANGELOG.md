@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `getNativeGrammarsDir()`, where the native addon loads downloaded tree-sitter grammars from (`~/.omp/natives/grammars`).
+
 ## [18.8.1] - 2026-10-07
 
 ### Added
