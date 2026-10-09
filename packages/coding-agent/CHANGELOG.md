@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- With the Hindsight memory backend, `retain` and `learn` can now store a memory with `scope: "global"` so every project recalls it (under `global` or `per-project-tagged` scoping).
+
 ### Changed
 
 - Web search now tells the agent about its X post operators (`site:x.com`, `from:<handle>`) when you are logged in to xAI, so questions about reactions on X reach X search.
