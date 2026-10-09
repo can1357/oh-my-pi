@@ -328,6 +328,16 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 * background.
 	 */
 	hasBackgroundCompletions?: () => boolean | Promise<boolean>;
+	/**
+	 * Peeks whether a passive aside (an extension or user message queued with
+	 * `deliverAs: "aside"`) is waiting for injection at the next boundary.
+	 *
+	 * Same rules as {@link hasBackgroundCompletions}: non-consuming, ends only
+	 * *interruptible* waits, never raises {@link ToolCallContext.steeringSignal}.
+	 * The host still injects the aside once at the boundary; ordinary running
+	 * tools finish first.
+	 */
+	hasQueuedAsides?: () => boolean | Promise<boolean>;
 
 	/**
 	 * Returns follow-up messages to process after the agent would otherwise stop.
@@ -341,7 +351,8 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 * Returns non-interrupting "aside" messages to inject at a step boundary.
 	 *
 	 * Polled after each tool batch (before the next LLM call) AND at the yield
-	 * check. Unlike steering, these NEVER abort in-flight tools — they are passive
+	 * check. Unlike steering, these never abort foreground tools (only an
+	 * interruptible `wait` ends early, via the peek hooks) — they are passive
 	 * notifications (e.g. background-job completions, late LSP diagnostics) that
 	 * should reach the model between requests without waiting for the agent to
 	 * fully stop. Returned messages are appended to the context with normal

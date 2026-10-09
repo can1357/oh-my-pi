@@ -143,6 +143,25 @@ override matching model tags. These fields do not configure the Anthropic Messag
 
 `typesafe` and `openrouter-decisions` are judgment APIs, not chat transports: a model declared with one answers System One judgment requests (`{baseUrl}/v1/systemone` and `{baseUrl}/decisions` respectively) and is selected by the `judge` model role. Its `headers` carry gateway routing or custom authentication headers for that traffic.
 
+A model or `modelOverrides` entry may also use a runner API, which serves one model `kind`; `RUNNER_API_KINDS` in `packages/catalog/src/types.ts` lists them (for example `openai-images` serves `image`, `openai-embeddings` serves `embedding`, `openai-speech` serves `tts`). `web-search` is built in and cannot be named here, so neither can `kind: search`. `kind` defaults to the api's kind (`chat` for chat transports), and an explicit `kind` must be one its api serves. Chat transports serve `chat` and `tiny` (small models for the `tiny`, `memory`, and `judge` roles); those that `generate_image` runs (`openai-responses`, `openai-codex-responses`, `google-generative-ai`, `google-gemini-cli`) also serve `image`: on `openai-responses`, the image is generated through the Responses `image_generation` tool, carried by a GPT-5+ chat model on the same provider, instead of `/images/generations`. This moves discovered gateway models to the image role:
+
+```yaml
+providers:
+  my-gateway:
+    api: openai-responses
+    discovery:
+      type: openai-models-list
+    modelOverrides:
+      gpt-image-2:
+        api: openai-images # kind: image, generated via /images/generations
+      gpt-image-1.5:
+        kind: image # stays on openai-responses, generated via the hosted image tool
+```
+
+A configured `kind`, explicit or implied by a runner API, outranks the bundled catalog's classification of the same id and survives `modelOverrides` and refreshes.
+
+Loading models.yml checks a `modelOverrides` `kind` only against an api the file names: the override's own `api`, or that of a `models` entry with the same id. A built-in or discovered model gets its api later, so its override `kind` is checked against that api when the override applies; a kind the api does not serve is ignored and logged. An `api` override without `kind` takes a runner API's kind, keeps a kind the new api still serves, and otherwise makes the model `chat`. A `models` entry that redefines a built-in id on a different api follows the same rule, so redefining an image row on `openai-completions` makes it `chat`.
+
 ### Allowed auth/discovery values
 
 - `auth`: `apiKey` (default), `none`, or `oauth`. `none` and `oauth` waive the custom-provider `apiKey` requirement, but `oauth` does not create credentials or register a login flow. It forces OAuth-style request shaping; a usable credential must come from stored auth, environment, or a configured key. Custom `anthropic-messages` models also use OAuth-style shaping when `auth` is omitted; set `auth: apiKey` for plain API-key shaping.
@@ -202,6 +221,14 @@ the V1 `/responses/compact` request. See [compaction](./compaction.md).
 - `id` is required and non-empty; optional `name`, model `baseUrl`, `contextPromotionTarget`, and `compactionModel` must also be non-empty
 - custom `models` entries require positive `contextWindow` and `maxTokens` when provided; the current auxiliary positivity check does not cover `modelOverrides`
 - on both custom models and overrides, `maxContextWindow` must be a positive safe integer no smaller than `contextWindow` when both are set
+
+### Unknown compatibility keys
+
+Unknown keys in provider, model, and `modelOverrides` `compat` blocks produce non-fatal warnings: a notification at interactive startup, and a stderr line in print and RPC modes and when listing models (including JSON output; stdout is unchanged). Each warning names the config file and the dotted key path; model array entries use zero-based indices, as schema errors do. The configuration still loads and unknown keys are preserved for forward compatibility. A registry reports each unknown key path only once, even after forced refreshes or re-reading an unchanged file.
+
+Known record-level keys, at the top level of `compat` and inside its `whenThinking` override, come from both the models.yml compatibility schemas and the runtime compatibility vocabulary (wire axes). The schemas validate only a curated subset, so a runtime-recognized key such as `streamFirstEventTimeoutMs` does not warn merely because the file schema omits it. A nested `whenThinking.whenThinking` still warns: a thinking override cannot contain another thinking override. Thinking and catalog axes belong outside `compat` and are not included. Other nested checking follows only schema-declared fixed-field objects, including routing blocks and `reasoningEffortMap`; open maps such as `extraBody` accept arbitrary keys and nested payloads. Runtime extension provider registrations are not checked against the file schema: they can register custom APIs with their own compatibility fields.
+
+The runtime vocabulary is not filtered by the provider's `api`: a wire key that only another API family reads (for example an Anthropic-only key in an `openai-completions` provider) does not warn, even though it has no effect there.
 
 ### Command-resolved secrets
 
@@ -265,10 +292,10 @@ Provider defaults vs per-model overrides:
 
 - Provider `headers`, `compat`, and `remoteCompaction` are baselines.
 - Model `headers` override provider header keys.
-- `modelOverrides` can override model metadata (`name`, `reasoning`, `thinking`, `input`, `imageInputDecoder`,
-  `tokenizer`, `supportsTools`, `cost`, `promptCache`, `premiumMultiplier`, `contextWindow`, `maxContextWindow`, `maxTokens`,
-  `omitMaxOutputTokens`, `preferWebsockets`, `headers`, `compat`, `contextPromotionTarget`, `compactionModel`, and
-  `remoteCompaction`).
+- `modelOverrides` can override model metadata (`name`, `api`, `kind`, `reasoning`, `thinking`, `input`,
+  `imageInputDecoder`, `tokenizer`, `supportsTools`, `cost`, `promptCache`, `premiumMultiplier`, `contextWindow`,
+  `maxContextWindow`, `maxTokens`, `omitMaxOutputTokens`, `preferWebsockets`, `headers`, `compat`,
+  `contextPromotionTarget`, `compactionModel`, and `remoteCompaction`).
 - `compat` is deep-merged for nested routing blocks (`openRouterRouting`, `vercelGatewayRouting`,
   `extraBody`, and `whenThinking`).
 
@@ -388,8 +415,11 @@ This path also works for local OpenAI-compatible servers that are not LM Studio.
 On Apple Silicon macOS, an unconfigured, non-disabled `apple` provider is probed through the
 in-process Foundation Models bridge. When the bridge reports it usable, `apple/on-device` is
 available without credentials, with context size, reasoning, image input, and tool support derived
-from bridge metadata. Ineligible devices, disabled Apple Intelligence, and builds without the
-bridge yield no models. Its internal API is `apple-foundation-models`; no HTTP endpoint is used.
+from bridge metadata. It is not selected automatically: its on-device context window may be
+smaller than the default coding-agent prompt and project instructions. Select it deliberately with
+`--model apple/on-device` or `/model`; otherwise use `/login` or configure another local model.
+Ineligible devices, disabled Apple Intelligence, and builds without the bridge yield no models.
+Its internal API is `apple-foundation-models`; no HTTP endpoint is used.
 
 ### LiteLLM provider discovery
 
@@ -781,12 +811,16 @@ Request shaping:
 - `disableReasoningWithTools` — suppress reasoning when tools are present even without forced tool choice. Default: `false` unless catalog policy overrides it.
 - `alwaysSendMaxTokens` — always send a max-token field when the caller did not provide one. Default: auto (Kimi-family models derive TPM limits from `max_tokens`).
 - `strictResponsesPairing` — Responses-API tool-call/result history must be strictly paired. Default: auto (Azure OpenAI, GitHub Copilot).
+- `statefulResponses` — enable or disable stored `previous_response_id` chaining for `openai-responses`. Enabling it sends `store: true` and delta input on later turns; disabling it replays full context with `store: false`. Precedence: call option > `PI_OPENAI_STATEFUL` > `compat.statefulResponses` > `compat.officialEndpoint` (on for official OpenAI, off elsewhere). This key does not enable `officialEndpoint` or official-only fields such as `text.verbosity`; it does not change Codex or Azure Responses behavior.
 - `streamIdleTimeoutMs` — stream-watchdog idle-timeout floor in ms for slow reasoning hosts. Default: auto (GLM coding-plan hosts, direct DeepSeek reasoning).
 - `streamMarkupHealingPattern` — recover leaked stream control markup with the `kimi`, `dsml`, `qwen`, or `thinking` grammar. Default: endpoint/model policy.
 - `cacheControlFormat` — `"anthropic"` to include Anthropic-style prompt-cache markers in chat-completions payloads. Default: auto (OpenRouter `anthropic/*` models).
 - `supportsLongPromptCacheRetention` — host honors `prompt_cache_retention: "24h"` on the Responses API. Default: auto (api.openai.com).
 - `supportsImageDetailOriginal` — allow the Responses API's nonstandard `detail: "original"` image
-  mode where the endpoint supports it.
+  mode where the endpoint supports it. Default: `true` for OpenAI, Azure OpenAI, and Codex;
+  `false` for other hosts, including custom/local endpoints, xAI, and Copilot. Custom hosts receive
+  `auto` for snapcompact frames and computer screenshots unless they opt in with
+  `compat.supportsImageDetailOriginal: true`. An explicit `false` also overrides the known-host default.
 - `supportsConfigurationUpdate` — let the Responses API change `reasoning.effort` mid-session through a `configuration_update` input item while the request-level effort stays pinned for prompt caching (GPT-6 Astra). Default: auto (`true` for `gpt-6-astra` on every host, `false` otherwise). Set `false` for custom `openai-responses` / `openai-codex-responses` endpoints that reject the item type with HTTP 400; effort changes are then sent as the top-level `reasoning.effort` and no update items are emitted.
 - `supportsSteering` — let the Codex WebSocket transport send `response.steer`, so a message typed while the model responds joins that response instead of waiting for the next request. Default: auto (`true` for the GPT-6 family). Set `false` for proxies that reject the event.
 - `extraBody` — extra top-level fields merged into every request body (gateway hints, controller selectors, etc.).
@@ -977,7 +1011,7 @@ not acquire that capability just from `bedrockMessagesApi`.
 
 ### Strict tool schemas (`disableStrictTools`)
 
-Anthropic's API supports a `strict` field on tool definitions that forces the model to always follow the provided schema exactly. OMP enables it by default for a small allowlist of high-frequency built-in `anthropic-messages` tools (`bash`, `python`, `edit`, and `find`) whose schemas fit Anthropic's strict grammar limits; other tools still send normalized schemas but omit `strict`.
+Anthropic's API supports a `strict` field on tool definitions that forces the model to always follow the provided schema exactly. OMP enables it by default for a small allowlist of high-frequency built-in `anthropic-messages` tools (`python`, `edit`, and `find`) whose schemas fit Anthropic's strict grammar limits; other tools still send normalized schemas but omit `strict`. `bash` is left out: strict decoding fixes property order, so once a call has written `async`, the `timeout` declared before it can no longer be emitted.
 
 Third-party providers that front the Anthropic API (AWS Bedrock, Azure, self-hosted proxies) do not always implement this field and will reject requests that include it. Set `disableStrictTools: true` at the provider level to opt out of strict mode for the allowlisted tools:
 

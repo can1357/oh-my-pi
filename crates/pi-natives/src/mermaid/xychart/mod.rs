@@ -959,7 +959,13 @@ fn nice_tick_values(minimum: f64, maximum: f64) -> Vec<f64> {
 	let mut ticks = Vec::new();
 	while value <= maximum + interval * 0.001 {
 		ticks.push((value * 1e10).round() / 1e10);
-		value += interval;
+		// Past 2^53 an interval below the value's ULP no longer moves it; the
+		// loop would grow `ticks` until memory ran out.
+		let next = value + interval;
+		if next <= value {
+			break;
+		}
+		value = next;
 	}
 	ticks
 }
@@ -1151,6 +1157,20 @@ mod tests {
 		assert_eq!(js_to_fixed(1.005, 2), "1.00");
 		assert_eq!(js_to_fixed(0.15, 1), "0.1");
 		assert_eq!(js_number_to_string(-0.0), "0");
+	}
+
+	/// An axis whose span is below the spacing of representable values must
+	/// still render: a tick step that no longer advances ends the tick list.
+	#[test]
+	fn axis_finer_than_float_spacing_renders() {
+		assert_eq!(nice_tick_values(1e17, 1e17 + 16.0).len(), 1);
+		let output = render(
+			"xychart-beta\nx-axis [a]\ny-axis 100000000000000000 --> 100000000000000016",
+			&config(true),
+			ColorMode::None,
+			&Theme::default(),
+		);
+		assert!(output.contains("100000000000000000"), "{output}");
 	}
 
 	#[test]

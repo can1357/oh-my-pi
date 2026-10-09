@@ -2,6 +2,7 @@
  * Settings declared by this domain (see `config/registry.ts`). Declaration order is the
  * settings-panel order; `config/all-settings.ts` registers every domain.
  */
+import { type OAuthAccountPools, validateAgentAccountPools } from "../config/account-pools";
 import {
 	type AgentCompactionThresholdOverride,
 	validateAgentCompactionThresholdOverrides,
@@ -15,6 +16,7 @@ import { getThinkingLevelMetadata } from "@oh-my-pi/pi-tui/thinking";
 
 const EMPTY_AGENT_SERVICE_TIER_OVERRIDES: Record<string, ServiceTierInheritSettingValue> = {};
 const EMPTY_AGENT_COMPACTION_THRESHOLD_OVERRIDES: Record<string, AgentCompactionThresholdOverride> = {};
+const EMPTY_AGENT_ACCOUNT_POOLS: Record<string, OAuthAccountPools> = {};
 
 const DEFAULT_AGENT_MODEL_OVERRIDES: Record<string, string | string[]> = {};
 
@@ -95,6 +97,49 @@ export const cfgWorktreeCleanSource = register({
 		label: "Clean Source Checkout on /wt",
 		description:
 			"When creating a worktree with `/wt`, reset tracked changes and remove untracked files from the original checkout after carrying them over",
+	},
+});
+
+export const cfgWorktreeOnStart = register({
+	id: "worktree.onStart",
+	protocolDefault: ["rpc", "acp"],
+	type: "enum",
+	values: ["off", "ask", "create"] as const,
+	default: "off",
+	ui: {
+		tab: "tasks",
+		group: "Isolation",
+		label: "Worktree on Start",
+		description: "Whether fresh interactive sessions start in a new linked worktree",
+		options: [
+			{ value: "off", label: "Off", description: "Start in the current checkout" },
+			{ value: "ask", label: "Ask", description: "Ask at session start" },
+			{ value: "create", label: "Create", description: "Always start in a new worktree on a `wt/*` branch" },
+		],
+	},
+});
+
+export const cfgWorktreeOnExit = register({
+	id: "worktree.onExit",
+	protocolDefault: ["rpc", "acp"],
+	type: "enum",
+	values: ["keep", "ask", "remove"] as const,
+	default: "keep",
+	ui: {
+		tab: "tasks",
+		group: "Isolation",
+		label: "Worktree on Exit",
+		description: "What to do on exit with worktrees created since omp started (on start or with `/wt`)",
+		options: [
+			{ value: "keep", label: "Keep", description: "Leave worktrees in place" },
+			{ value: "ask", label: "Ask", description: "Ask on exit" },
+			{
+				value: "remove",
+				label: "Remove",
+				description:
+					"Remove clean worktrees; ask when they have uncommitted changes or new commits. Gitignored files (e.g. `.env`) are deleted too",
+			},
+		],
 	},
 });
 
@@ -322,22 +367,16 @@ export const cfgTaskMaxRuntimeMs = register({
 	},
 });
 
-export const cfgTaskCompletionProbeMs = register({
-	id: "task.completionProbeMs",
-	type: "number",
-	default: 120_000,
+export const cfgTaskCompletionProbe = register({
+	id: "task.completionProbe",
+	type: "boolean",
+	default: true,
 	ui: {
 		tab: "tasks",
 		group: "Subagents",
 		label: "Subagent Completion Probe",
 		description:
-			"How often (ms) a working subagent is asked, through a cached side request like /btw, to estimate how complete its task is. The estimate shows next to the subagent in wait and task views. 0 disables it.",
-		options: [
-			{ value: "0", label: "Disabled" },
-			{ value: "120000", label: "2 minutes", description: "Default" },
-			{ value: "300000", label: "5 minutes" },
-			{ value: "600000", label: "10 minutes" },
-		],
+			"Ask a working subagent, through a cached side request like /btw, to estimate how complete its task is: after 2, 5, 10 and 30 more minutes, then hourly. The estimate shows next to the subagent in wait and task views. Only subagents spawned by the main agent of an interactive session are asked; print, RPC, ACP and SDK runs never probe.",
 	},
 });
 
@@ -429,6 +468,14 @@ export const cfgTaskAgentCompactionThresholdOverrides = register({
 	type: "record",
 	default: EMPTY_AGENT_COMPACTION_THRESHOLD_OVERRIDES,
 	validate: validateAgentCompactionThresholdOverrides,
+});
+
+export const cfgTaskAgentAccountPools = register({
+	id: "task.agentAccountPools",
+	protocolDefault: ["rpc", "acp"],
+	type: "record",
+	default: EMPTY_AGENT_ACCOUNT_POOLS,
+	validate: validateAgentAccountPools,
 });
 
 export const cfgTaskAgentPrewalk = register({

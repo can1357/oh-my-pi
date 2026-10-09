@@ -2,6 +2,13 @@ import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import path from "node:path";
+import {
+	disableProvider,
+	enableProvider,
+	getDisabledProviders,
+	isProviderEnabled,
+	setDisabledProviders,
+} from "@oh-my-pi/pi-coding-agent/capability";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { AgentCompactionThresholdOverride } from "@oh-my-pi/pi-coding-agent/config/compaction-threshold";
 import type { BeforeSubagentSpawnEvent } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
@@ -10,6 +17,7 @@ import {
 	resetRegisteredArtifactDirsForTests,
 } from "@oh-my-pi/pi-coding-agent/internal-urls/registry-helpers";
 import * as planHandoff from "@oh-my-pi/pi-coding-agent/plan-mode/plan-handoff";
+import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import * as discoveryModule from "@oh-my-pi/pi-coding-agent/task/discovery";
 import { createEvalCustomTools } from "@oh-my-pi/pi-coding-agent/task/eval-tools";
 import * as executorModule from "@oh-my-pi/pi-coding-agent/task/executor";
@@ -138,6 +146,35 @@ describe("structured subagent primitive", () => {
 		taggedSession.getSessionAgents = () => [{ ...AGENT, name: "m1", model: ["a/x"] }];
 		const policy = await resolveEffectiveSubagentPolicy(request({ session: taggedSession, agent: "m1" }));
 		expect(policy.modelOverride).toEqual(["b/y"]);
+	});
+
+	it("rescans agents when a plugin provider is disabled while an earlier discovery is in flight", async () => {
+		const previouslyDisabled = getDisabledProviders();
+		enableProvider("omp-plugins");
+		const firstEntered = Promise.withResolvers<void>();
+		const releaseFirst = Promise.withResolvers<void>();
+		let scans = 0;
+		vi.spyOn(discoveryModule, "discoverAgents").mockImplementation(async () => {
+			const pluginsEnabled = isProviderEnabled("omp-plugins");
+			if (++scans === 1) {
+				firstEntered.resolve();
+				await releaseFirst.promise;
+			}
+			const agents = pluginsEnabled ? [AGENT, { ...AGENT, name: "plugin-worker" }] : [AGENT];
+			return { agents, projectAgentsDir: null };
+		});
+		try {
+			const first = resolveEffectiveSubagentPolicy(request({ agent: "plugin-worker" }));
+			await firstEntered.promise;
+			disableProvider("omp-plugins");
+			const second = resolveEffectiveSubagentPolicy(request({ agent: "plugin-worker" }));
+			releaseFirst.resolve();
+
+			expect((await first).agent.name).toBe("plugin-worker");
+			await expect(second).rejects.toThrow('Unknown agent "plugin-worker"');
+		} finally {
+			setDisabledProviders(previouslyDisabled);
+		}
 	});
 
 	it("uses caller, agent, then session schemas in precedence order", async () => {
@@ -271,6 +308,8 @@ describe("structured subagent primitive", () => {
 			expect(cfgRetryModelFallback.get(liveSettings)).toBe(false);
 		} finally {
 			liveSettings.cancelPendingSaves();
+			// `Settings.loadIsolated` opened `<agentDir>/agent.db`; Windows cannot delete it while open.
+			AgentStorage.close();
 			await fs.rm(root, { recursive: true, force: true });
 		}
 	});
@@ -325,6 +364,7 @@ describe("structured subagent primitive", () => {
 			expect(second.serviceTierOverride).toBe("none");
 		} finally {
 			liveSettings.cancelPendingSaves();
+			AgentStorage.close();
 			await fs.rm(root, { recursive: true, force: true });
 		}
 	});

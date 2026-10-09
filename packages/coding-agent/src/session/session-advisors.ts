@@ -100,7 +100,7 @@ import {
 import type { AgentSessionEvent } from "./agent-session-events";
 import type { ClientBridge } from "./client-bridge";
 import { resolveCompactionMethodOrder, resolveMethodSettings } from "./compaction-methods";
-import { type CustomMessage, type CustomMessagePayload, isUserTurnInitiator } from "./messages";
+import { type CustomMessage, type CustomMessagePayload, isUserAuthoredMessage, isUserTurnInitiator } from "./messages";
 import { isAdvisorCard, isTerminalTextAssistantAnswer } from "./queued-messages";
 import {
 	calculateRetryBackoffDelayMs,
@@ -126,6 +126,7 @@ import {
 	cfgAdvisorSyncBacklog,
 } from "../advisor/settings";
 import { cfgCompaction, cfgContextPromotionEnabled } from "./context-settings";
+import { resolveModelCompactionSettings } from "./model-compaction-threshold";
 import { cfgRetry, cfgTierAdvisor } from "./settings";
 
 const ADVISOR_CODEX_SSE_MAX_ATTEMPTS = 1;
@@ -181,9 +182,8 @@ export function planAdvisorUsageLimitWait(args: {
 	// matching the primary retry path's exhausted-budget semantics.
 	if (attempt >= retry.maxRetries) return undefined;
 	// Retry as soon as either the just-blocked credential frees or a temporarily
-	// blocked sibling does — the next attempt's getApiKey re-ranks and picks up
-	// whichever is available first.
-	const candidates: number[] = [];
+	// blocked sibling does. The sibling's post-deadline buffer makes selection
+	// see an expired block, but does not extend the provider wait budget.
 	let credentialUnblockAtMs: number | undefined;
 	if (retryAfterMs !== undefined) {
 		// Provider-stated retry hint, merged with any longer persisted/shared block.
@@ -214,17 +214,20 @@ export function planAdvisorUsageLimitWait(args: {
 	}
 	// Hintless with no complete report → blockedUntilMs is only the default
 	// heuristic (e.g. a permanent 402 balance/spend cap). Never wait on it: a
-	// sibling unblock (retryAtMs) may still authorize a wait, otherwise the
-	// empty-candidate decline below latches immediately instead of retrying the
-	// dead credential every minute until the budget drains.
-	if (credentialUnblockAtMs !== undefined) candidates.push(Math.max(0, credentialUnblockAtMs - nowMs));
-	if (retryAtMs !== undefined) candidates.push(Math.max(0, retryAtMs - nowMs) + ADVISOR_SIBLING_UNBLOCK_BUFFER_MS);
-	if (candidates.length === 0) return undefined;
-	const providerWaitMs = Math.min(...candidates);
+	// sibling unblock (retryAtMs) may still authorize a wait, otherwise decline
+	// instead of retrying the dead credential until the budget drains.
+	const credentialWaitMs =
+		credentialUnblockAtMs === undefined ? undefined : Math.max(0, credentialUnblockAtMs - nowMs);
+	const siblingWaitMs = retryAtMs === undefined ? undefined : Math.max(0, retryAtMs - nowMs);
+	if (credentialWaitMs === undefined && siblingWaitMs === undefined) return undefined;
 	const retryBackoffMs = calculateRetryBackoffDelayMs(retry.baseDelayMs, attempt + 1);
-	const waitMs = Math.max(providerWaitMs, retryBackoffMs);
-	if (retry.maxDelayMs > 0 && waitMs > retry.maxDelayMs) return undefined;
-	return waitMs;
+	const earliestUnblockMs = Math.min(credentialWaitMs ?? Infinity, siblingWaitMs ?? Infinity);
+	if (retry.maxDelayMs > 0 && Math.max(earliestUnblockMs, retryBackoffMs) > retry.maxDelayMs) return undefined;
+	const providerWaitMs = Math.min(
+		credentialWaitMs ?? Infinity,
+		siblingWaitMs === undefined ? Infinity : siblingWaitMs + ADVISOR_SIBLING_UNBLOCK_BUFFER_MS,
+	);
+	return Math.max(providerWaitMs, retryBackoffMs);
 }
 /**
  * Header prepended to the merged terminal-boundary delivery, sourced from
@@ -508,6 +511,8 @@ export interface SessionAdvisorsHost {
 		phase: CodexCompactionContext["phase"];
 	}): CodexCompactionContext;
 	sessionId(): string;
+	/** Put an advisor's provider session under the primary session's account pools. */
+	restrictOAuthAccounts(providerSessionId: string): void;
 }
 
 /**
@@ -701,7 +706,7 @@ export class SessionAdvisors {
 			// The merge window covers only this callback. With advisor.syncBacklog
 			// off the review drain can still emit after it returns; those late notes
 			// deliver individually through #routeAdvice, and `#terminalUnwindActive`
-			// (held until the next real agent start), not the merge window, is what
+			// (held until the next primary turn starts), not the merge window, is what
 			// keeps them from steering finished work — only a blocker or an
 			// agent-end reviewer's concern may still request a continuation.
 			if (!terminalBoundary) this.#terminalUnwindActive = false;
@@ -978,14 +983,24 @@ export class SessionAdvisors {
 		this.#advisorInterruptImmuneTurnStart = this.#advisorPrimaryTurnsCompleted + 1;
 	}
 
+	/**
+	 * One advisor's provider session id under the active primary conversation.
+	 * The primary's account pools follow it: an advisor is part of that session.
+	 */
+	#advisorProviderSessionId(slug: string): string | undefined {
+		const providerSessionId = getOrCreateAdvisorProviderSessionId(
+			this.#advisorProviderSessionIds,
+			this.#host.sessionId(),
+			slug,
+		);
+		if (providerSessionId) this.#host.restrictOAuthAccounts(providerSessionId);
+		return providerSessionId;
+	}
+
 	/** Rebind one advisor to the active primary conversation's provider identity. */
 	#refreshAdvisorProviderIdentity(advisor: ActiveAdvisor): void {
 		const primaryProviderSessionId = this.#host.sessionId();
-		const providerSessionId = getOrCreateAdvisorProviderSessionId(
-			this.#advisorProviderSessionIds,
-			primaryProviderSessionId,
-			advisor.slug,
-		);
+		const providerSessionId = this.#advisorProviderSessionId(advisor.slug);
 		advisor.providerSessionId = providerSessionId;
 		advisor.agent.sessionId = providerSessionId;
 		advisor.agent.promptCacheKey = this.#host.agent.promptCacheKey ?? providerSessionId;
@@ -1314,11 +1329,7 @@ export class SessionAdvisors {
 			const advisorSessionLabel = slug
 				? `${primaryProviderSessionId}-advisor-${slug}`
 				: `${primaryProviderSessionId}-advisor`;
-			const advisorProviderSessionId = getOrCreateAdvisorProviderSessionId(
-				this.#advisorProviderSessionIds,
-				primaryProviderSessionId,
-				slug,
-			);
+			const advisorProviderSessionId = this.#advisorProviderSessionId(slug);
 			const appendOnlyContext = new AppendOnlyContextManager();
 
 			// Thread the primary's telemetry into the advisor loop so the advisor
@@ -2301,12 +2312,12 @@ export class SessionAdvisors {
 		if (!configuredCompaction.enabled || methods.length === 0) {
 			return false;
 		}
-		const compactionSettings = resolveMethodSettings(
-			configuredCompaction,
-			methods.includes("remote") ? "remote" : "soft",
-		);
-
+		const compactionMethod = methods.includes("remote") ? "remote" : "soft";
 		let advisorModel = agent.state.model;
+		let compactionSettings = resolveMethodSettings(
+			resolveModelCompactionSettings(this.#host.settings, advisorModel),
+			compactionMethod,
+		);
 		const contextWindow = advisorModel.contextWindow ?? 0;
 		if (contextWindow <= 0) return false;
 
@@ -2331,8 +2342,12 @@ export class SessionAdvisors {
 
 		// 1. Try promotion first
 		if (await this.#promoteAdvisorContextModel(advisor, advisorModel, signal)) {
-			// Promotion succeeded, check if new model has enough space
+			// Promotion succeeded, check if new model has enough space under its own compaction point
 			const newModel = agent.state.model;
+			compactionSettings = resolveMethodSettings(
+				resolveModelCompactionSettings(this.#host.settings, newModel),
+				compactionMethod,
+			);
 			const newWindow = newModel.contextWindow ?? 0;
 			if (newWindow > 0) {
 				const stillNeedsCompaction = shouldCompact(contextTokens, newWindow, compactionSettings);
@@ -2397,11 +2412,7 @@ export class SessionAdvisors {
 			// No compaction candidates, fallback to re-prime
 			return true;
 		}
-		const advisorProviderSessionId = getOrCreateAdvisorProviderSessionId(
-			this.#advisorProviderSessionIds,
-			this.#host.sessionId(),
-			advisor.slug,
-		);
+		const advisorProviderSessionId = this.#advisorProviderSessionId(advisor.slug);
 		// Advisors no longer retain the pre-compaction originals. Prepare opaque
 		// history only for an eligible native writer, independently of whether the
 		// advisor reader itself can create a new compaction. Without such a writer,
@@ -2476,6 +2487,7 @@ export class SessionAdvisors {
 					{
 						thinkingLevel: advisorCompactionThinkingLevel,
 						convertToLlm: messages => this.#host.convertToLlmForSideRequest(messages),
+						isUserAuthored: isUserAuthoredMessage,
 						telemetry,
 						tools: agent.state.tools,
 						// The advisor's own live prompt, so a provider-native compaction
@@ -2582,13 +2594,14 @@ export class SessionAdvisors {
 		this.#preserveTerminalYieldAdvice = true;
 	}
 
-	/** Clear terminal-unwind delivery only when a real primary run starts. */
+	/** Clear terminal-unwind delivery when a new primary run starts. */
 	onPrimaryAgentStart(): void {
 		this.#terminalUnwindActive = false;
 	}
 
-	/** Restore normal advisor routing when a kept-alive subagent starts new work. */
+	/** Restore normal advisor routing when the primary starts or continues work. */
 	onPrimaryTurnStart(): void {
+		this.#terminalUnwindActive = false;
 		if (!this.#preserveTerminalYieldAdvice) return;
 		this.#preserveTerminalYieldAdvice = false;
 		this.#preserveAdvisorAdvice = false;

@@ -590,7 +590,7 @@ describe("TanCommandController", () => {
 
 		expect(result).toBe("done");
 		expect(appendSessionInit).toHaveBeenCalledWith({
-			systemPrompt: "system prompt",
+			systemPrompt: ["system prompt"],
 			task: "park me",
 			tools: ["read", "bash"],
 			isIsolated: false,
