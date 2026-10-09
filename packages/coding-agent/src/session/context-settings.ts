@@ -161,6 +161,8 @@ export const cfgCompactionThresholdTokens = register({
  * Per-model compaction points that replace `compaction.thresholdPercent`/`thresholdTokens`
  * for the models they match: `provider/model-id` exactly, else the longest `…*` prefix.
  * Edited from the /models hub; a per-agent `task.agentCompactionThresholdOverrides` entry still wins.
+ * A token entry at or past a model's standard window opts that model into its extended
+ * window (`ModelRegistry.contextWindowTiers`).
  */
 export const cfgCompactionModelThresholds = register({
 	id: "compaction.modelThresholds",
