@@ -433,7 +433,11 @@ function deriveCursorEffortFamilies<TSpec extends VariantSpecLike>(specs: readon
 			byId.has(`${baseId}-thinking`) ||
 			byId.has(`${baseId}-thinking-fast`) ||
 			byId.has(`${baseId}-fast-thinking`) ||
-			group.some(member => member.spec.thinking !== undefined || member.spec.requestModelId !== undefined) ||
+			group.some(
+				member =>
+					member.spec.thinking !== undefined ||
+					(member.spec.requestModelId !== undefined && member.spec.requestModelId !== member.spec.id),
+			) ||
 			group.some(member => candidateBases.has(`${baseId}-${member.tier}`))
 		) {
 			unsafeBases.add(baseId);

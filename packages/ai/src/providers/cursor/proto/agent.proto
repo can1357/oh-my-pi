@@ -1085,8 +1085,7 @@ message GetDefaultModelForCliRequest {
 }
 
 message GetDefaultModelForCliResponse {
-   string model_id = 1;
-   string display_name = 2;
+   ModelDetails model = 1;
 }
 
 // Internal endpoint: returns all allowed model intents for devs

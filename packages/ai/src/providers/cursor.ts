@@ -434,6 +434,8 @@ interface CursorGrpcRequest {
 }
 
 interface CursorTransportRequest extends CursorGrpcRequest {
+	/** Final serialized run ID, including a caller's onPayload replacement. */
+	runId: string;
 	/** Exact discovery id eligible for a retry because the normalized effort payload was serialized unchanged. */
 	fallbackWireModelId?: string;
 }
@@ -1209,7 +1211,7 @@ function streamCursorWithWireMode(
 
 			const baseUrl = model.baseUrl || CURSOR_API_URL;
 			const requestPath = transportMode === "http2" ? CURSOR_RUN_PATH : CURSOR_RUN_SSE_PATH;
-			const requestId = crypto.randomUUID();
+			const requestId = builtRequest.runId;
 			originalRequestId = retryContext?.originalRequestId ?? requestId;
 			const callerHeaders = sanitizeCursorCallerHeaders(options?.headers);
 			const sharedRequestHeaders = {
@@ -5408,6 +5410,10 @@ export function processInteractionUpdate(
 				{ model: output.model, messageTimestamp: output.timestamp },
 			);
 		}
+	} else if (updateCase === "routedModel") {
+		const routed = update.message.value;
+		const modelId = typeof routed?.modelId === "string" ? routed.modelId.trim() : "";
+		if (modelId) output.upstreamModel = modelId;
 	} else if (updateCase === "tokenDelta") {
 		const tokenDelta = update.message.value;
 		usageState.sawTokenDelta = true;
@@ -6221,14 +6227,7 @@ function resolveCursorWireModel(
 	/** The pair came verbatim from a server-declared discovery route. */
 	discoveredRoute: boolean;
 } {
-	const rawWireModelId = requestModelId ?? model.requestModelId ?? model.id;
-	// Synthetic catalog id `auto` is the Cursor router sentinel; without roster
-	// proof the wire contract expects `default` (and gateway SSE already treats
-	// both as auto intent). An explicitly resolved `requestModelId` of "auto" —
-	// from discovery or an exact caller override — echoes the roster verbatim,
-	// matching what the CLI itself sends.
-	const rosterEchoedAuto = rawWireModelId === "auto" && (requestModelId === "auto" || model.requestModelId === "auto");
-	const wireModelId = !rosterEchoedAuto && rawWireModelId === "auto" ? "default" : rawWireModelId;
+	const wireModelId = requestModelId ?? model.requestModelId ?? model.id;
 	const maxMode = resolveCursorMaxMode(model, wireModelId);
 	const discoveredRoute = model.cursorModelRoutes?.[wireModelId];
 	if (discoveredRoute) {
@@ -6377,6 +6376,7 @@ async function buildGrpcRequestForWireMode(
 		modelDetails,
 		requestedModel,
 		conversationId: state.conversationId,
+		conversationGroupId: state.conversationId,
 	});
 
 	// Apply customSystemPrompt BEFORE the hook so the onPayload replacement is the
@@ -6389,7 +6389,7 @@ async function buildGrpcRequestForWireMode(
 	runRequest.clientSupportsInlineImages = options?.cursorClientSupportsInlineImages === true;
 	runRequest.clientSupportsRoutedModelUpdate = options?.cursorClientSupportsRoutedModelUpdate === true;
 	runRequest.clientSupportsPromptContextUsageRpc = options?.cursorClientSupportsPromptContextUsageRpc === true;
-	runRequest.runId = options?.cursorRunId ?? "";
+	runRequest.runId = options?.cursorRunId ?? crypto.randomUUID();
 	runRequest.agentSessionId = options?.cursorAgentSessionId ?? "";
 
 	// Tools are sent later via requestContext (exec handshake)
@@ -6432,7 +6432,7 @@ async function buildGrpcRequestForWireMode(
 		detail: detail || undefined,
 	});
 
-	return { requestBytes, blobStore, conversationState, fallbackWireModelId };
+	return { requestBytes, blobStore, conversationState, fallbackWireModelId, runId: runRequest.runId };
 }
 
 /**

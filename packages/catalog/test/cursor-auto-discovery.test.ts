@@ -1,6 +1,8 @@
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import * as http2 from "node:http2";
 import { fetchCursorUsableModels } from "../src/discovery/cursor";
+import { buildModel } from "../src/build";
+import { collapseBuiltVariants } from "../src/compat/collapse";
 import { GetUsableModelsResponseSchema, ModelDetailsSchema } from "../src/discovery/cursor-proto";
 import { create, toBinary } from "../src/discovery/protobuf";
 import type { ModelSpec } from "../src/types";
@@ -13,6 +15,8 @@ beforeAll(async () => {
 		models: [
 			create(ModelDetailsSchema, { modelId: "auto", displayName: "auto" }),
 			create(ModelDetailsSchema, { modelId: "composer-2.5" }),
+			create(ModelDetailsSchema, { modelId: "novel-low" }),
+			create(ModelDetailsSchema, { modelId: "novel-high" }),
 		],
 	});
 	const payload = Buffer.from(toBinary(GetUsableModelsResponseSchema, response));
@@ -30,7 +34,9 @@ beforeAll(async () => {
 			stream.end(payload);
 		});
 	});
-	await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+	const { promise, resolve } = Promise.withResolvers<void>();
+	server.listen(0, "127.0.0.1", resolve);
+	await promise;
 	const address = server.address();
 	if (!address || typeof address === "string") {
 		throw new Error("expected http2 fixture server to bind a tcp port");
@@ -54,8 +60,17 @@ describe("cursor discovery auto sentinel", () => {
 		expect(byId.get("auto")?.requestModelId).toBe("auto");
 	});
 
-	it("leaves requestModelId unset on concrete roster entries", async () => {
+	it("preserves concrete roster wire identity without a model-specific mapper exception", async () => {
 		const byId = await discover();
-		expect(byId.get("composer-2.5")?.requestModelId).toBeUndefined();
+		expect(byId.get("composer-2.5")?.requestModelId).toBe("composer-2.5");
+	});
+
+	it("same-ID roster identity does not disable dynamic effort-family collapsing", async () => {
+		const byId = await discover();
+		const members = [byId.get("novel-low")!, byId.get("novel-high")!].map(buildModel);
+		const collapsed = collapseBuiltVariants(members);
+		expect(collapsed).toHaveLength(1);
+		expect(collapsed[0]?.id).toBe("novel");
+		expect(collapsed[0]?.thinking?.effortRouting).toEqual({ low: "novel-low", high: "novel-high" });
 	});
 });
