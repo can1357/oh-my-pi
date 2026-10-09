@@ -1,9 +1,19 @@
-import { describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it } from "bun:test";
 import { getProviderDefinition } from "@oh-my-pi/pi-ai/registry/registry";
 
 const OPENZOO_LOCAL_TOKEN = "openzoo-local";
 const openzoo = getProviderDefinition("openzoo")!;
 const loginOpenzoo = openzoo.login!;
+
+const ORIGINAL_OPENZOO_API_KEY = Bun.env.OPENZOO_API_KEY;
+
+afterEach(() => {
+	if (ORIGINAL_OPENZOO_API_KEY === undefined) {
+		delete Bun.env.OPENZOO_API_KEY;
+	} else {
+		Bun.env.OPENZOO_API_KEY = ORIGINAL_OPENZOO_API_KEY;
+	}
+});
 
 describe("openzoo login", () => {
 	it("stores the keyless local placeholder when no bearer is entered", async () => {
@@ -22,6 +32,5 @@ describe("openzoo login", () => {
 		expect(resolve()).toBe(OPENZOO_LOCAL_TOKEN);
 		Bun.env.OPENZOO_API_KEY = "oz_tunnel-bearer";
 		expect(resolve()).toBe("oz_tunnel-bearer");
-		delete Bun.env.OPENZOO_API_KEY;
 	});
 });
