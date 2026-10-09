@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `providers.autoThinkingMinEffort` setting and `auto:<floor>` selector syntax to configure a minimum thinking effort floor for auto thinking ([#13836](https://github.com/can1357/oh-my-pi/pull/13836) by [@tuandinh0801](https://github.com/tuandinh0801)).
+
 ### Changed
 
 - Web search now tells the agent about its X post operators (`site:x.com`, `from:<handle>`) when you are logged in to xAI, so questions about reactions on X reach X search.
@@ -610,6 +614,10 @@
 - Added queued-message controls to the RPC clients and session API, including promotion of queued follow-ups to steering messages without duplicating text or losing attachments, plus explicit steering or follow-up behavior for prompts sent while the agent is busy.
 - Added support for keeping Claude prompt caches warm on Amazon Bedrock and Bedrock Mantle according to configured model cache lifetimes and retention settings.
 - In Tern terminals, the effort indicator now visualizes the selected thinking level and becomes a fireball at the maximum level.
+- RPC hosts can send `messageUpdates: "delta"` with `set_event_filter` to receive `message_update` frames without the accumulated message snapshots (`message` shrinks to `{ role }` and `assistantMessageEvent.partial` is omitted); the response echoes the active mode ([#13716](https://github.com/can1357/oh-my-pi/pull/13716) by [@alphastorm](https://github.com/alphastorm))
+- RPC hosts can follow each cache-warming refresh through `cache_warming_start` and `cache_warming_end` events (also written by `--mode json`), which report the outcome and the recorded usage, and can set the session's warming mode with `set_cache_warming` without changing `config.yml`; the Python client gains `set_cache_warming()` ([#13717](https://github.com/can1357/oh-my-pi/pull/13717) by [@alphastorm](https://github.com/alphastorm))
+- Pinned Subagents rows can show each agent's current (or most recent) tool call with a one-line detail and an elapsed marker; enable with `display.subagentLivePreview` (off by default) ([#3821](https://github.com/can1357/oh-my-pi/pull/3821) by [@abilliontokens](https://github.com/abilliontokens))
+- Added `providers.autoThinkingMinEffort` setting and `auto:<floor>` selector syntax to configure a minimum thinking effort floor for auto thinking ([#13836](https://github.com/can1357/oh-my-pi/pull/13836) by [@tuandinh0801](https://github.com/tuandinh0801))
 
 ### Changed
 
