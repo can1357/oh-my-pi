@@ -4,7 +4,7 @@
 
 ### Added
 
-- Added opt-in advisor final-answer review (`advisor.reviewFinalAnswer`) to hold candidate terminal text and run one same-request correction on concerns or blockers.
+- Added opt-in final-answer review with `advisor.reviewFinalAnswer`. Concerns and blockers can trigger one same-request correction ([#15025](https://github.com/can1357/oh-my-pi/pull/15025) by [@aliefe04](https://github.com/aliefe04)).
 
 ### Changed
 
