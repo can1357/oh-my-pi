@@ -3882,7 +3882,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					name =>
 						!isToolScopedIn(name, disallowedPatterns, {
 							enforceToolAllowlist,
-							allowedToolNames: explicitlyRequestedToolNameSet,
+							allowedToolNames: canonicalRequestedToolNames,
 							isBuiltIn: true,
 						}),
 				);
@@ -3994,7 +3994,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 								disallowedPatterns,
 								{
 									enforceToolAllowlist,
-									allowedToolNames: explicitlyRequestedToolNameSet,
+									allowedToolNames: canonicalRequestedToolNames,
 								},
 								typeof mcpServerName === "string" ? mcpServerName : undefined,
 							)
@@ -4203,6 +4203,21 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		const explicitlyRequestedToolNameSet = explicitlyRequestedToolNames
 			? new Set(explicitlyRequestedToolNames)
 			: undefined;
+		// Canonical grant shared by every allow-side judgment below (advisor roster,
+		// server-instructions filter, mount split, late registrations): a
+		// Claude-spelled entry resolves against the startup registry once, so no
+		// path drops a server the declaration named.
+		const canonicalRequestedToolNames: ReadonlySet<string> | undefined = (() => {
+			if (explicitlyRequestedToolNameSet === undefined) return undefined;
+			const resolved = new Set<string>(explicitlyRequestedToolNameSet);
+			for (const entry of explicitlyRequestedToolNameSet) {
+				if (entry.endsWith("*")) continue;
+				const canonical =
+					resolveMCPToolAlias(entry, candidate => (toolRegistry.has(candidate) ? { name: candidate } : undefined))?.name ?? entry;
+				if (canonical !== entry) resolved.add(canonical);
+			}
+			return resolved;
+		})();
 		// Warn on allowlist entries that match nothing: a wildcard on the allow
 		// side (wildcards expand only in `disallowedTools`) or a typo silently
 		// grants nothing, which reads as deny-all. Warn once at startup; late
@@ -4312,15 +4327,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			const mountedNames: string[] = [];
 			for (const name of initialToolNames) {
 				const tool = toolRegistry.get(name);
-				// A Claude-spelled allowlist entry counts as explicitly requested for
-				// the mount split too (mirrors the late handler's canonicalRequested).
-				const explicitlyRequested =
-					explicitlyRequestedToolNameSet?.has(name) === true ||
-					[...(explicitlyRequestedToolNameSet ?? [])].some(
-						entry =>
-							!entry.endsWith("*") &&
-							(resolveMCPToolAlias(entry, candidate => (toolRegistry.has(candidate) ? { name: candidate } : undefined))?.name ?? entry) === name,
-					);
+				const explicitlyRequested = canonicalRequestedToolNames?.has(name) === true;
 				if (tool && xdevReadAvailable && xdevWriteAvailable && !explicitlyRequested && isMountableUnderXdev(tool))
 					mountedNames.push(name);
 				else topLevelToolNames.push(name);
@@ -4761,7 +4768,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				name =>
 					!isToolScopedIn(name, disallowedPatterns, {
 						enforceToolAllowlist,
-						allowedToolNames: explicitlyRequestedToolNameSet,
+						allowedToolNames: canonicalRequestedToolNames,
 					}),
 			),
 		);
