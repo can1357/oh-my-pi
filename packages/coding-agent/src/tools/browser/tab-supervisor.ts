@@ -19,9 +19,10 @@ import { gracefulKillTreeOnce, pickElectronTarget, shouldPreserveConnectedBrowse
 import { CmuxTab } from "./cmux/cmux-tab";
 import { mapWaitUntil } from "./cmux/rpc";
 import { runInProcessTab } from "./in-process-run";
-import { DEFAULT_VIEWPORT } from "./launch";
+import { browserConnection, DEFAULT_VIEWPORT } from "./launch";
 import {
 	closeCdpTarget,
+	closeTargetVia,
 	forgetSharedTarget,
 	forgetSharedTargets,
 	recordSharedTarget,
@@ -122,6 +123,8 @@ export interface WorkerTabSession extends TabSessionBase<PuppeteerBrowserHandle>
 	backend: "worker";
 	worker: WorkerHandle;
 	activateForScreenshot: boolean;
+	/** omp created this page (headless, or a relay open without a target): closing the tab closes it. */
+	ownsPage: boolean;
 }
 
 export interface CmuxTabSession extends TabSessionBase<CmuxBrowserHandle> {
@@ -525,6 +528,7 @@ async function acquireTabImpl(
 		allowedDomains: opts.allowedDomains ? [...opts.allowedDomains] : undefined,
 		kindTag: browser.kind.kind,
 		activateForScreenshot: initPayload.mode === "headless" || initPayload.activateForScreenshot !== false,
+		ownsPage: initPayload.mode === "headless" || initPayload.page.kind !== "borrowed",
 		ownerSessionId: opts.ownerSessionId,
 		persist: opts.persist ?? false,
 		lastActivityAt: Date.now(),
@@ -1095,7 +1099,9 @@ async function releaseTabInner(tab: TabSession, name: string, opts: ReleaseTabOp
 		}
 	}
 	await tab.worker.terminate().catch(() => undefined);
-	if (forced && tab.kindTag === "headless") {
+	// The relay retracts a target whose debugger the user dismissed, so the worker
+	// cannot close an owned relay tab itself then; close it by id as well.
+	if (tab.ownsPage && (forced || tab.kindTag === "relay")) {
 		try {
 			// `false` is "not confirmed closed" (the CDP session could not be
 			// created, or `Target.getTargets` failed) — the same unconfirmed
@@ -1512,23 +1518,32 @@ async function buildInitPayload(browser: PuppeteerBrowserHandle, opts: AcquireTa
 			ignoreHttpsErrors: opts.ignoreHttpsErrors,
 		};
 	}
-	// Connected and relay browsers are user-driven. When no target is requested,
-	// adopt the visible tab and avoid raising it before screenshots. An explicit
-	// target may be backgrounded, so retain activation for target-correct pixels.
 	const userDriven = browser.kind.kind === "connected" || browser.kind.kind === "relay";
-	const activateForScreenshot = !userDriven || !shouldPreserveConnectedBrowserFocus(opts.target);
-	const page = await pickElectronTarget(browser.browser, {
-		matcher: opts.target,
-		preferVisible: !activateForScreenshot,
-		relayJson: browser.kind.kind === "relay" ? browser.kind.cdpUrl : undefined,
-		signal: opts.signal,
-	});
-	const targetId = await targetIdForPage(page);
+	let page: Extract<WorkerInitPayload, { mode: "attach" }>["page"];
+	let activateForScreenshot: boolean;
+	if (browser.kind.kind === "relay" && !opts.target) {
+		// A relay open without a target gets its own background tab, leaving the user's
+		// selected tab alone. Focus emulation keeps it capturable without raising it.
+		page = { kind: "create" };
+		activateForScreenshot = false;
+	} else {
+		// A connected browser without a target adopts the visible tab and avoids raising
+		// it before screenshots. An explicit target may be backgrounded, so retain
+		// activation for target-correct pixels.
+		activateForScreenshot = !userDriven || !shouldPreserveConnectedBrowserFocus(opts.target);
+		const picked = await pickElectronTarget(browser.browser, {
+			matcher: opts.target,
+			preferVisible: !activateForScreenshot,
+			relayJson: browser.kind.kind === "relay" ? browser.kind.cdpUrl : undefined,
+			signal: opts.signal,
+		});
+		page = { kind: "borrowed", targetId: await targetIdForPage(picked) };
+	}
 	return {
 		mode: "attach",
 		browserWSEndpoint,
 		safeDir,
-		targetId,
+		page,
 		dialogs: opts.dialogs,
 		allowedDomains: opts.allowedDomains,
 		initScripts: opts.initScripts,
@@ -1623,13 +1638,12 @@ async function recycleTimedOutWorkerTab(tab: WorkerTabSession, timeoutMs: number
 		mode: "attach",
 		browserWSEndpoint,
 		safeDir: getPuppeteerDir(),
-		targetId: tab.targetId,
+		page: { kind: tab.ownsPage ? "owned" : "borrowed", targetId: tab.targetId },
 		dialogs: tab.dialogPolicy,
 		allowedDomains: tab.allowedDomains,
 		// Unblock a wedged page (open JS dialog, hung navigation) before adopting it —
 		// otherwise init stalls, times out, and the tab gets force-killed.
 		recover: true,
-		emulateFocus: tab.kindTag === "headless",
 		activateForScreenshot: tab.activateForScreenshot,
 		userDriven: tab.kindTag === "connected" || tab.kindTag === "relay",
 	};
@@ -1718,7 +1732,7 @@ async function forceKillSurfaceTab(tab: CmuxTabSession | TernTabSession, name: s
 async function forceKillTabTeardown(tab: WorkerTabSession): Promise<void> {
 	await tab.worker.terminate().catch(() => undefined);
 	let targetClosed = true;
-	if (tab.kindTag === "headless") {
+	if (tab.ownsPage) {
 		targetClosed = await waitForTabCleanup(
 			tab,
 			DEFAULT_TAB_CLOSE_TIMEOUT_MS,
@@ -1742,6 +1756,7 @@ async function forceKillTabTeardown(tab: WorkerTabSession): Promise<void> {
  * protocol timeout, retaining the cleanup hold for tens of seconds.
  */
 async function closeTargetById(browser: PuppeteerBrowserHandle, targetId: string): Promise<boolean> {
+	if (browser.kind.kind === "relay") return await closeTargetVia(browserConnection(browser.browser), targetId);
 	return await closeCdpTarget(browser.browser, targetId);
 }
 

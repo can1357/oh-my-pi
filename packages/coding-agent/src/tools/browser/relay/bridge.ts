@@ -291,6 +291,23 @@ export class RelayBridge {
 		return undefined;
 	}
 
+	/**
+	 * The browser a new tab opens in: the one holding a tab this client drives, else the one
+	 * showing the first selected tab (the tab an open without a target used to adopt), else the
+	 * last hello. A reconnecting extension's hello must not move new tabs to another browser.
+	 */
+	#instanceForNewTab(conn: CdpConnection): ExtInstance | undefined {
+		const candidates = [
+			...[...conn.claims].map(tabKey => this.#tabs.get(tabKey)),
+			...[...this.#tabs.values()].filter(tab => tab.active && !tab.discarded && this.#eligible(tab)),
+		];
+		for (const tab of candidates) {
+			const inst = tab && this.#instances.get(tab.instanceId);
+			if (inst?.socket) return inst;
+		}
+		return this.#lastHello();
+	}
+
 	/** True after the first hello, and stays true: separates a reaped service worker from an absent extension. */
 	get extensionSeen(): boolean {
 		return this.#extensionSeen;
@@ -920,12 +937,14 @@ export class RelayBridge {
 			case "Target.createTarget": {
 				const url =
 					typeof msg.params?.url === "string" && msg.params.url.length > 0 ? msg.params.url : "about:blank";
-				const inst = this.#lastHello();
+				const inst = this.#instanceForNewTab(conn);
 				if (!inst || !inst.socket) {
 					this.#replyError(conn, msg, "relay extension is not connected");
 					return;
 				}
-				const result = (await this.#rpc({ op: "createTab", url }, inst)) as { tab: TabSnapshot };
+				// CDP `background: true` creates the tab without selecting it; an extension that predates `active` ignores it.
+				const active = msg.params?.background === true ? false : undefined;
+				const result = (await this.#rpc({ op: "createTab", url, active }, inst)) as { tab: TabSnapshot };
 				this.#onTabUpsert(result.tab, inst.instanceId);
 				// Creating a tab is an explicit act of driving it.
 				const createdKey = tabKeyOf(inst.code, result.tab.tabId);

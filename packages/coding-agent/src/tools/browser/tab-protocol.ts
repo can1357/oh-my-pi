@@ -66,7 +66,11 @@ export type WorkerInitPayload =
 			mode: "attach";
 			browserWSEndpoint: string;
 			safeDir: string;
-			targetId: string;
+			/**
+			 * `create`: open a background tab and own it. `owned`: a tab omp created, adopted again after a recycle.
+			 * `borrowed`: a page the user has open; never closed, never focus-emulated.
+			 */
+			page: { kind: "create" } | { kind: "owned" | "borrowed"; targetId: string };
 			dialogs?: "accept" | "dismiss";
 			/** Hostname patterns allowed for every page request. */
 			allowedDomains?: string[];
@@ -84,8 +88,6 @@ export type WorkerInitPayload =
 			 * previously force-killed the tab). Never set for first-time Electron attach.
 			 */
 			recover?: boolean;
-			/** Restore focus emulation when recycling an OMP-owned tab, never a borrowed user tab. */
-			emulateFocus?: boolean;
 			/**
 			 * Whether the worker may raise this tab before capturing a screenshot. Unset
 			 * behaves as `true`; the supervisor clears it for browsers we did not launch.

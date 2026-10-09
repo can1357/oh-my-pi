@@ -23,7 +23,7 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { isEnoent, logger } from "@oh-my-pi/pi-utils";
-import type { Browser } from "puppeteer-core";
+import type { Browser, CDPSession } from "puppeteer-core";
 import { daemonRuntimeDir } from "../../launch/paths";
 
 /** Identifies one shared-browser daemon's target registry. */
@@ -225,21 +225,26 @@ export async function closeCdpTarget(browser: Browser, targetId: string): Promis
 		.catch(() => null);
 	if (!session) return false;
 	try {
-		try {
-			const result = await session.send("Target.closeTarget", { targetId });
-			if (result.success) return true;
-		} catch {
-			// A concurrent reaper or the page itself may already have closed the
-			// target. Confirm absence before treating the cleanup as complete.
-		}
-		try {
-			const { targetInfos } = await session.send("Target.getTargets");
-			return !targetInfos.some(info => info.targetId === targetId);
-		} catch {
-			return false;
-		}
+		return await closeTargetVia(session, targetId);
 	} finally {
 		await session.detach().catch(() => undefined);
+	}
+}
+
+/** {@link closeCdpTarget} over a channel that already answers browser-level `Target.*` commands. */
+export async function closeTargetVia(channel: Pick<CDPSession, "send">, targetId: string): Promise<boolean> {
+	try {
+		const result = await channel.send("Target.closeTarget", { targetId });
+		if (result.success) return true;
+	} catch {
+		// A concurrent reaper or the page itself may already have closed the
+		// target. Confirm absence before treating the cleanup as complete.
+	}
+	try {
+		const { targetInfos } = await channel.send("Target.getTargets");
+		return !targetInfos.some(info => info.targetId === targetId);
+	} catch {
+		return false;
 	}
 }
 
