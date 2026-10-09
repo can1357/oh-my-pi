@@ -2,6 +2,8 @@ import { describe, expect, test } from "bun:test";
 import * as path from "node:path";
 import { isRecord, readJsonl, TempDir } from "@oh-my-pi/pi-utils";
 import { selectRpcEntries } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-compat";
+import { RpcWordPredictor } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-mode";
+import type { TextPrediction } from "@oh-my-pi/pi-coding-agent/predict/client";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { FileSessionStorage } from "@oh-my-pi/pi-coding-agent/session/session-storage";
 import type { SessionEntry, SessionTreeNode } from "@oh-my-pi/pi-coding-agent/session/session-entries";
@@ -50,8 +52,8 @@ describe("RPC durable history (persisted SessionManager)", () => {
 	// across close/reopen breaks `get_entries(since)` consumers. No LLM is
 	// involved — the history is built with canonical SessionManager APIs.
 	test("linear history, branch siblings, and resume preserve IDs/parentage/tree/leaf", async () => {
-		await using cwdDir = await TempDir.create("rpc-durable-cwd-");
-		await using sessionsDir = await TempDir.create("rpc-durable-sessions-");
+		await using cwdDir = await TempDir.create("@rpc-durable-cwd-");
+		await using sessionsDir = await TempDir.create("@rpc-durable-sessions-");
 		const cwd = cwdDir.path();
 		const sessionDir = sessionsDir.path();
 
@@ -193,6 +195,58 @@ async function withRpcServer<T>(
 	}
 }
 
+describe("RpcWordPredictor", () => {
+	const answer = (suffix: string | null): TextPrediction => ({
+		engine: "ngram",
+		suggestion: suffix === null ? null : { suffix, confidence: 0.9 },
+	});
+
+	test("asks the engine for the prose word ending the line and returns its suffix", async () => {
+		const calls: unknown[][] = [];
+		const draft = "Check it\nthe weath";
+		const predictor = new RpcWordPredictor(async (...args) => {
+			calls.push(args);
+			return answer("er");
+		});
+		expect(await predictor.predict("ngram", draft, draft.length)).toBe("er");
+		expect(calls).toEqual([["ngram", "Check it\nthe ", "weath"]]);
+	});
+
+	test("never asks the engine mid-line or when completion is off", async () => {
+		const predictor = new RpcWordPredictor(async () => {
+			throw new Error("engine must not be asked");
+		});
+		expect(await predictor.predict("ngram", "the weath and more", 9)).toBeNull();
+		expect(await predictor.predict("off", "the weath", 9)).toBeNull();
+	});
+
+	test("no suggestion is null and an unreachable daemon rejects", async () => {
+		expect(await new RpcWordPredictor(async () => answer(null)).predict("ngram", "the weath", 9)).toBeNull();
+		const down = new RpcWordPredictor(async () => {
+			throw new Error("text-predict daemon unavailable");
+		});
+		await expect(down.predict("ngram", "the weath", 9)).rejects.toThrow("text-predict daemon unavailable");
+	});
+
+	test("a burst keeps one request in flight and only the newest waiting one reaches the engine", async () => {
+		const first = Promise.withResolvers<TextPrediction>();
+		const prefixes: string[] = [];
+		const predictor = new RpcWordPredictor(async (_engine, _before, prefix) => {
+			prefixes.push(prefix);
+			return prefixes.length === 1 ? first.promise : answer(`${prefix}!`);
+		});
+		const a = predictor.predict("ngram", "w", 1);
+		const b = predictor.predict("ngram", "we", 2);
+		const c = predictor.predict("ngram", "wea", 3);
+		expect(await b).toBeNull();
+		expect(prefixes).toEqual(["w"]);
+		first.resolve(answer("hat"));
+		expect(await a).toBe("hat");
+		expect(await c).toBe("wea!");
+		expect(prefixes).toEqual(["w", "wea"]);
+	});
+});
+
 describe("RPC Pi-compatible primitives (live server)", () => {
 	test("rejects invalid cache warming modes and accepts a subsequent session-scoped mode change", async () => {
 		await withRpcServer(async (send, next) => {
@@ -211,6 +265,22 @@ describe("RPC Pi-compatible primitives (live server)", () => {
 				command: "set_cache_warming",
 				success: true,
 				data: { mode: "off" },
+			});
+		});
+	}, 60000);
+
+	test("set_slow_mode rejects a non-boolean enabled before touching the persisted Claude setting", async () => {
+		await withRpcServer(async (send, next) => {
+			send({ type: "get_state", id: "slow-state" });
+			const state = (await next()).data as { slowModeSupported: unknown; slowModeScope: unknown };
+			expect([state.slowModeSupported, state.slowModeScope]).toEqual([true, "global"]);
+			send({ type: "set_slow_mode", id: "slow-bad", enabled: "false" });
+			expect(await next()).toEqual({
+				id: "slow-bad",
+				type: "response",
+				command: "set_slow_mode",
+				success: false,
+				error: "set_slow_mode requires boolean enabled",
 			});
 		});
 	}, 60000);
@@ -303,6 +373,32 @@ describe("RPC Pi-compatible primitives (live server)", () => {
 			const ok = await next();
 			expect(ok.id).toBe("after-malformed");
 			expect(ok.success).toBe(true);
+		});
+	}, 60000);
+
+	test("predict_word gates non-prose words and rejects cursors outside the text", async () => {
+		await withRpcServer(async (send, next) => {
+			// The cursor ends a word inside a fenced block on the third line: code
+			// never gets ghost text, so the answer is null without asking an engine.
+			const fenced = "Look:\n```ts\nconst val";
+			send({ type: "predict_word", id: "fenced", text: fenced, cursor: fenced.length });
+			const gated = await next();
+			expect(gated).toMatchObject({ id: "fenced", command: "predict_word", success: true, data: { suffix: null } });
+
+			send({ type: "predict_word", id: "past-end", text: "hello", cursor: 6 });
+			const pastEnd = await next();
+			expect(pastEnd).toMatchObject({ id: "past-end", command: "predict_word", success: false });
+
+			send({
+				type: "predict_word_feedback",
+				id: "fb-bad",
+				text: "hi",
+				cursor: 1.5,
+				suggestion: "x",
+				accepted: true,
+			});
+			const badFeedback = await next();
+			expect(badFeedback).toMatchObject({ id: "fb-bad", command: "predict_word_feedback", success: false });
 		});
 	}, 60000);
 });

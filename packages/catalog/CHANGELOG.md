@@ -2,6 +2,199 @@
 
 ## [Unreleased]
 
+## [18.8.7] - 2026-10-09
+
+### Added
+
+- Added built-in CoralBricks support with `/login`, live model discovery, per-model reasoning levels and off controls, and bundled offline fallbacks. ([#14146](https://github.com/can1357/oh-my-pi/pull/14146) by [@ryan-brosas](https://github.com/ryan-brosas))
+- Added `gen:models --provider <id>` to update one provider without changing other providers' catalog snapshots. ([#14146](https://github.com/can1357/oh-my-pi/pull/14146) by [@ryan-brosas](https://github.com/ryan-brosas))
+
+### Fixed
+
+- Fixed Claude Haiku 5.5 thinking Off to request explicitly disabled thinking on every host serving its adaptive thinking ([#14996](https://github.com/can1357/oh-my-pi/pull/14996) by [@bse-ai](https://github.com/bse-ai)).
+
+## [18.8.6] - 2026-10-08
+
+### Added
+
+- Added prompt-cache lookback support for Claude models across all hosts, including the public `prompt-cache-lookback` catalog axis and `resolvePromptCacheLookback` API.
+
+### Fixed
+
+- Fixed model discovery when providers publish models before they are recognized by the catalog; unsupported models are now skipped with a warning so other available models remain discoverable.
+
+## [18.8.5] - 2026-10-08
+
+### Breaking Changes
+
+- `googleAntigravityModelManagerOptions` takes `resolveAccounts` instead of `oauthToken`, and `fetchAntigravityDiscoveryModels` returns a roster or credential-rejection result instead of a bare list ([#14924](https://github.com/can1357/oh-my-pi/issues/14924)).
+
+### Fixed
+
+- Fixed Claude Haiku 5.5 on Cursor showing as unpriced; it now uses Cursor's $0.10/$0.50 rate card and 5x long-context tier above 100K input tokens ([#14890](https://github.com/can1357/oh-my-pi/pull/14890) by [@eggpeat](https://github.com/eggpeat)).
+- Fixed Claude Haiku 5.5 on GitHub Copilot pricing cache reads and writes at $0 on both the standard and `-1m` long-context rows, and the `-1m` row billing the 5x long-context band a second time above 100K input tokens ([#14890](https://github.com/can1357/oh-my-pi/pull/14890) by [@eggpeat](https://github.com/eggpeat)).
+
+## [18.8.4] - 2026-10-08
+
+### Fixed
+
+- Fixed Claude Haiku 5.5 opening at its full 1M window on Amazon Bedrock, Google Vertex, and other non-Anthropic hosts: every priced host now carries the 5x pricing band above 100K input tokens, so the window stays at 100K unless extended context is on ([#14903](https://github.com/can1357/oh-my-pi/pull/14903) by [@H4vC](https://github.com/H4vC)).
+
+## [18.8.3] - 2026-10-07
+
+### Added
+
+- Added Claude Haiku 5.5 with adaptive thinking (low through max effort), image input, a 1M-token context window, 128K output, and its tiered pricing above 100K input tokens.
+
+## [18.8.2] - 2026-10-07
+
+### Fixed
+
+- Fixed Anthropic requests carrying too many inline screenshot bytes by exposing a provider image-byte budget, applied only on the official endpoint ([#14453](https://github.com/can1357/oh-my-pi/issues/14453)).
+
+## [18.8.1] - 2026-10-07
+
+### Fixed
+
+- Fixed Codex Fast (`priority`) pricing to use OpenAI’s 2.5× included-usage rate for supported models, excluding GPT-5.5 and GPT-6 Astra.
+- Fixed GitHub Copilot models with tier-specific prompt limits incorrectly defaulting to the long-context window.
+
+## [18.8.0] - 2026-10-07
+
+### Changed
+
+- Improved catalog performance by speeding up model cache reads and repeated catalog-wide model builds, especially for large catalogs.
+
+## [18.7.0] - 2026-10-06
+
+### Added
+
+- Added Mistral Large 4 with reasoning support, image input, a 1M-token context window, and preview pricing.
+- Added configurable thinking levels from low through maximum for MiniMax-M3.1-Flash-Preview; because the model always reasons, requests that disable thinking use the low level.
+- Added Google Antigravity pricing and model support for Claude Opus 5.5 and Sonnet 5.5.
+
+### Changed
+
+- MiniMax Token Plan providers (`minimax-code` and `minimax-code-cn`) now use MiniMax's recommended Anthropic-compatible API for model requests and login key validation.
+- Google Antigravity now exposes Claude Opus 5.5 and Sonnet 5.5 once each, with selectable low, medium, and high thinking levels.
+
+### Fixed
+
+- Added the correct published pricing for GPT-6 Astra's Ultrafast service tier: a 6× multiplier on the OpenAI API and an 8× multiplier on the Codex card.
+
+## [18.6.3] - 2026-10-06
+
+### Added
+
+- Added an optional `statefulResponses` compat field for OpenAI Responses models, kept through OpenRouter's Responses dispatch ([#13686](https://github.com/can1357/oh-my-pi/pull/13686) by [@alphastorm](https://github.com/alphastorm)).
+- Added 15 Snowflake Cortex models with account-specific endpoints, Cortex compatibility rules, and estimated account-billed pricing ([#14507](https://github.com/can1357/oh-my-pi/pull/14507) by [@jorgoose](https://github.com/jorgoose)).
+- Added the `image-tokenization` axis, which declares how GPT-5.2+, Claude and Gemini 3 lines bill input images on every host, with wire-API fallback rules for other models, plus `imageTokens()` to price one image ([#14286](https://github.com/can1357/oh-my-pi/pull/14286) by [@will-bogusz](https://github.com/will-bogusz)).
+
+### Changed
+
+- Changed OpenAI Responses endpoints other than OpenAI, Azure OpenAI, and Codex (custom and local servers, proxies including `azure`/`openai-codex` providers pointed at a non-Azure/non-Codex `baseUrl`, OpenRouter) to default `supportsImageDetailOriginal` to `false`, so snapcompact frames and computer screenshots go out as `detail: "auto"` instead of failing on servers that reject `original`; set `compat.supportsImageDetailOriginal: true` to opt a host in ([#13687](https://github.com/can1357/oh-my-pi/pull/13687) by [@alphastorm](https://github.com/alphastorm)).
+
+### Fixed
+
+- Muse Code can now store Responses results on Meta's side (`store-responses`), so a turn whose connection drops can be recovered instead of re-run. Storage is opt-in via the omp setting `providers.muse-code.storeResponses` or `PI_MUSE_STORE_RESPONSES=1` ([#14293](https://github.com/can1357/oh-my-pi/pull/14293) and [#14534](https://github.com/can1357/oh-my-pi/pull/14534) by [@abilliontokens](https://github.com/abilliontokens)).
+
+## [18.6.2] - 2026-10-04
+
+### Fixed
+
+- Fixed Google Antigravity listing models the signed-in account cannot use, such as Claude Opus 5.5 and Sonnet 5.5 on plans without them, which failed every request with `404 Requested entity was not found`. After a successful model refresh and on subsequent restarts, only models in the account's own Antigravity model list are offered ([#14328](https://github.com/can1357/oh-my-pi/issues/14328)).
+
+## [18.6.0] - 2026-10-03
+
+### Fixed
+
+- Fixed DeepSeek V4 model IDs and the V4.1 Flash alias lacking version information in model identity and dashboards ([#14194](https://github.com/can1357/oh-my-pi/issues/14194)).
+- Fixed Antigravity models such as Claude Opus 5.5 and Sonnet 5.5 disappearing after `omp models refresh`. When the update check failed, omp reported an outdated Antigravity client version (2.8.0), so the server left the newer models out of the list. The fallback version is now 2.19.1.
+- DSML tool calls from DeepSeek models are now parsed on every host. This includes local servers (llama.cpp, LM Studio, vLLM), custom providers from `models.yml`, and gateways that weren't on the old list of supported hosts. Before, a complete `<｜DSML｜tool_calls>` envelope from these hosts showed up as plain text and the tool never ran ([#14202](https://github.com/can1357/oh-my-pi/pull/14202) by [@H4vC](https://github.com/H4vC)).
+
+## [18.5.1] - 2026-10-03
+
+### Added
+
+- Added support for listing models from Codex-compatible gateways through openaiCodexModelManagerOptions.baseUrl, with discovery caches isolated per endpoint.
+- Exposed the max reasoning-effort tier for Muse Spark 1.3 contributor models on Meta and Muse Code providers.
+
+### Changed
+
+- Added full configurable reasoning-effort ladders for ClinePass DeepSeek V4.1 Flash Free and Muse Spark 1.3 Contributor Free models.
+- Recognize bare and provider-qualified k3 and k3-256k selectors as Kimi K3, enabling K3-specific catalog policies and replace-edit fallback behavior while preserving explicit edit-mode overrides.
+- Updated Fireworks model pricing to use Fireworks-specific rates, correcting missing and inaccurate costs for supported models.
+- Updated Fireworks fast-model listings to replace retired models with glm-5.3-fast and kimi-k3-fast; GLM-5.3 Fast now exposes low, high, and max reasoning levels on Fireworks, Baseten, and Vercel AI Gateway.
+
+### Fixed
+
+- Fixed image input for OpenAI models used through custom Amazon Bedrock Converse providers when images are read through tools.
+- Fixed local Ollama thinking models continuing to reason when thinking was disabled, reducing delays such as slow session-title generation.
+- Fixed reasoning-level availability for OpenCode Go models so unsupported levels are no longer offered and reasoning can be disabled where supported.
+- Fixed Anthropic-compatible Claude Opus 5.5 sessions failing after tool use or system-prompt changes.
+- Fixed Cursor Grok 4.5 and 4.6 model selectors and overrides intermittently resolving to inconsistent model IDs.
+- Fixed Google Antigravity Gemini 3.1 Flash Image being recognized as an image-capable model for image roles and fallback chains.
+- Fixed GitHub Copilot base models reporting an incorrect long-context window when a separate -1m model is available.
+- Fixed newer OpenAI and Anthropic model families being incorrectly marked as accepting sampling parameters when accessed through compatible providers such as Amazon Bedrock, Google, Devin, or OpenRouter; explicit compatibility overrides continue to take precedence.
+
+## [18.5.0] - 2026-10-03
+
+### Added
+
+- Added `closeModelCache()` (`@oh-my-pi/pi-catalog/model-cache`) to release the shared default `models.db` handle so an agent directory can be deleted on Windows; the next cache access reopens it
+
+## [18.4.11] - 2026-10-02
+
+### Fixed
+
+- Fixed new Fireworks sessions failing on the first turn by updating the default model to `kimi-k3`, which is currently supported by Fireworks.
+
+## [18.4.10] - 2026-10-02
+
+### Fixed
+
+- Fixed MiniMax Token Plan (`minimax-code`, `minimax-code-cn`) usage showing as free; turns now show the pay-as-you-go equivalent cost, with MiniMax-M3.1-Flash-Preview estimated at the MiniMax-M3 rate since it has no published price ([#13695](https://github.com/can1357/oh-my-pi/pull/13695) by [@eggpeat](https://github.com/eggpeat))
+- Fixed namespaced LiteLLM models such as `azure/gpt-5.6-sol-pro` showing raw IDs instead of catalog display names when the proxy supplies no friendly name ([#13964](https://github.com/can1357/oh-my-pi/pull/13964) by [@gabrielrinaldi](https://github.com/gabrielrinaldi)).
+- Bundled prompt-cache lifetimes are recomputed from current policy instead of being inherited from previous generated models ([#13966](https://github.com/can1357/oh-my-pi/pull/13966) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy)).
+- Fixed HTTP 400 `messages.N.output_config: Extra inputs are not permitted` on later turns with Claude Sonnet 5.5, Opus 5, Opus 5.5, and Fable 5.1 on Google Vertex AI ([#13994](https://github.com/can1357/oh-my-pi/issues/13994))
+- Fixed Claude Opus 5.5 conversations failing with a "bound to a different conversation" 400 after the system prompt changed. Opus 5.5 now gets Sonnet 5.5's prefix-bound thinking handling on every provider, and Bedrock asks the server to drop stale signed thinking instead of rejecting the request ([#14019](https://github.com/can1357/oh-my-pi/pull/14019) by [@nick-maderight](https://github.com/nick-maderight))
+
+## [18.4.9] - 2026-10-01
+
+### Fixed
+
+- Fixed model catalog caching so unchanged catalogs refresh without unnecessary rewrites, and offline snapshots for endpoint-less models (such as Azure models) are now handled correctly across startups.
+
+## [18.4.6] - 2026-10-01
+
+### Added
+
+- Added configurable catalog cache-warming lifetimes for cache-capable Claude models on Amazon Bedrock Converse, Bedrock Runtime, and Mantle, with 5-minute defaults and a 1-hour Converse option where supported.
+
+### Fixed
+
+- Fixed forced tool calls for Claude Opus 5.5 and Sonnet 5.5 on Amazon Bedrock Converse.
+- Fixed the thinking-off setting for Command Code models served through the Responses API so they no longer produce reasoning when disabled.
+
+## [18.4.5] - 2026-09-30
+
+### Added
+
+- Added the hand-maintained Factory Droid catalog with account policy and regional discovery, upstream-specific reasoning controls, and base credit rates ([#8577](https://github.com/can1357/oh-my-pi/pull/8577) by [@will-bogusz](https://github.com/will-bogusz), continued in [#13276](https://github.com/can1357/oh-my-pi/pull/13276) by [@DusKing1](https://github.com/DusKing1)).
+
+### Changed
+
+- Cursor's model list now comes from the account's own catalog: one entry per model lane with its real context window, image support, and effort ladder, only models the account can run, and Cursor's account default marked ([#11613](https://github.com/can1357/oh-my-pi/pull/11613) by [@will-bogusz](https://github.com/will-bogusz)).
+
+### Fixed
+
+- Fixed OpenRouter decision models that report no context/output limits (`respan/span-01`, `respan/span-01-lite`, `respan/span-01-lite:free`) missing from the judge model list ([#13888](https://github.com/can1357/oh-my-pi/issues/13888))
+- Fixed every `google-vertex/claude-sonnet-5-5` request failing with 400 `thinking.adaptive.block_binding: Extra inputs are not permitted` ([#13795](https://github.com/can1357/oh-my-pi/issues/13795))
+- Fixed Cursor Grok 4.7 appearing as separate `grok-4.7-{low,medium,high,xhigh}` and `-fast` models that each also offered an effort selector; they now show as `grok-4.7` and `grok-4.7-fast` with effort picked separately ([#12773](https://github.com/can1357/oh-my-pi/issues/12773))
+- Cursor fast lanes whose bundled rate card lists only the base rate now bill at Cursor's declared fast multiplier instead of the base rate ([#11613](https://github.com/can1357/oh-my-pi/pull/11613) by [@will-bogusz](https://github.com/will-bogusz)).
+- Cursor's `default` (Auto) router is marked as variably priced instead of free ([#11613](https://github.com/can1357/oh-my-pi/pull/11613) by [@will-bogusz](https://github.com/will-bogusz)).
+- Switching Cursor accounts no longer shows the previous account's cached model list ([#11613](https://github.com/can1357/oh-my-pi/pull/11613) by [@will-bogusz](https://github.com/will-bogusz)).
+
 ## [18.4.4] - 2026-09-29
 
 ### Added
@@ -31,6 +224,7 @@
 - Added support for Claude Sonnet 5.5 model with image and text inputs
 - Added new compatibility rules for Anthropic Sonnet family enabling mid‑conversation system features and disabling forced tool choice
 - Added the `web-search-model`, `hosted-image`, and `image-model` catalog axes (`Model.webSearchModel`, `hostedImage`, `imageModel`). `web-search` now comes from the model's lineage and API (GPT-5+ Responses, Claude 4+ Messages, Gemini 2+), so proxies and gateways that expose these models inherit it.
+- Added Helmcode as a built-in provider with API-key login and live model discovery. Its open-weight models use Helmcode's documented reasoning levels, and its resold Claude, GPT, and Gemini models show their context window, image input, pricing, and reasoning levels ([#13630](https://github.com/can1357/oh-my-pi/pull/13630) by [@alexcerezo](https://github.com/alexcerezo)).
 
 ### Changed
 

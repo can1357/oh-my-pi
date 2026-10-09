@@ -6,6 +6,7 @@ import {
 	enforceStrictSchema,
 	mergeCompatibleEnumSchemas,
 	normalizeSchemaForCCA,
+	normalizeSchemaForFactoryDroid,
 	normalizeSchemaForGoogle,
 	normalizeSchemaForMCP,
 	normalizeSchemaForMoonshot,
@@ -397,6 +398,56 @@ describe("normalizeSchemaForGoogle", () => {
 			type: "object",
 			dependentSchemas: { hasFoo: true, hasBar: false },
 		});
+	});
+
+	it("strips uniqueItems and unsupported array/content validation keywords for Google and CCA", () => {
+		const input = {
+			type: "object",
+			properties: {
+				tags: {
+					type: "array",
+					items: { type: "string" },
+					uniqueItems: true,
+					description: "List of tags",
+				},
+				data: {
+					type: "string",
+					contentEncoding: "base64",
+					contentMediaType: "image/png",
+				},
+			},
+		};
+
+		const googleExpected = {
+			type: "object",
+			properties: {
+				tags: {
+					type: "array",
+					items: { type: "string" },
+					description: "List of tags\n\n{uniqueItems: true}",
+				},
+				data: {
+					type: "string",
+				},
+			},
+			propertyOrdering: ["tags", "data"],
+		};
+		const ccaExpected = {
+			type: "object",
+			properties: {
+				tags: {
+					type: "array",
+					items: { type: "string" },
+					description: "List of tags\n\n{uniqueItems: true}",
+				},
+				data: {
+					type: "string",
+				},
+			},
+		};
+
+		expect(normalizeSchemaForGoogle(input)).toEqual(googleExpected);
+		expect(normalizeSchemaForCCA(input)).toEqual(ccaExpected);
 	});
 
 	it("falls back when a false subschema produces unsupported `not` on the CCA wire", () => {
@@ -1439,5 +1490,57 @@ describe("normalizeSchemaForMoonshot", () => {
 		}) as Record<string, unknown>;
 		expect(normalized.enum).toBeUndefined();
 		expect(normalized.type).toBe("boolean");
+	});
+});
+
+// ---------------------------------------------------------------------------
+// normalizeSchemaForFactoryDroid
+// ---------------------------------------------------------------------------
+
+describe("normalizeSchemaForFactoryDroid", () => {
+	it("keeps parent properties/required when collapsing an anyOf of object branches", () => {
+		const normalized = normalizeSchemaForFactoryDroid({
+			type: "object",
+			properties: { mode: { type: "string" } },
+			required: ["mode"],
+			anyOf: [
+				{ properties: { x: { type: "string" } }, required: ["x"] },
+				{ properties: { y: { type: "number" } }, required: ["y"] },
+			],
+		}) as { properties: Record<string, unknown>; required: string[] };
+		expect(normalized.properties).toEqual({
+			mode: { type: "string" },
+			x: { type: "string" },
+			y: { type: "number" },
+		});
+		expect(normalized.required).toEqual(["mode"]);
+	});
+
+	it("requires a union field only when every branch requires it", () => {
+		const normalized = normalizeSchemaForFactoryDroid({
+			type: "object",
+			properties: { mode: { type: "string" } },
+			required: ["mode"],
+			oneOf: [
+				{ properties: { id: { type: "string" }, x: { type: "string" } }, required: ["id", "x"] },
+				{ properties: { id: { type: "string" }, y: { type: "number" } }, required: ["y", "id"] },
+			],
+		}) as { properties: Record<string, unknown>; required: string[] };
+		expect(Object.keys(normalized.properties).sort()).toEqual(["id", "mode", "x", "y"]);
+		expect(normalized.required).toEqual(["mode", "id"]);
+	});
+
+	it("still unions required across allOf branches", () => {
+		const normalized = normalizeSchemaForFactoryDroid({
+			type: "object",
+			properties: { mode: { type: "string" } },
+			required: ["mode"],
+			allOf: [
+				{ properties: { x: { type: "string" } }, required: ["x"] },
+				{ properties: { y: { type: "number" } }, required: ["y"] },
+			],
+		}) as { properties: Record<string, unknown>; required: string[] };
+		expect(Object.keys(normalized.properties).sort()).toEqual(["mode", "x", "y"]);
+		expect(normalized.required).toEqual(["mode", "x", "y"]);
 	});
 });

@@ -2,6 +2,7 @@ import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { afterEach, beforeAll, describe, expect, it, type Mock, vi } from "bun:test";
 import { KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
 import { HookEditorComponent } from "@oh-my-pi/pi-tui/overlays/hook-editor";
+import type { DescribeContext } from "@oh-my-pi/pi-tui/native/node";
 import { ExtensionUiController } from "@oh-my-pi/pi-coding-agent/modes/controllers/extension-ui-controller";
 import { getThemeByName, setThemeInstance } from "@oh-my-pi/pi-tui/theme";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
@@ -194,6 +195,30 @@ describe("HookEditorComponent default (hook) mode", () => {
 });
 
 describe("HookEditorComponent prompt-style mode", () => {
+	it("cuts a long question to the terminal title but gives native hosts all of it", () => {
+		const question = `${"Which of these directions should the effort meter take? ".repeat(12)}FINAL-WORDS`;
+		const component = new HookEditorComponent(createTui(), "Custom answer", undefined, vi.fn(), vi.fn(), {
+			promptStyle: true,
+			question,
+		});
+
+		const terminal = renderText(component);
+		expect(terminal).toContain("Custom answer: Which of these");
+		expect(terminal).toContain("…");
+		expect(terminal).not.toContain("FINAL-WORDS");
+
+		const cx: DescribeContext = {
+			cols: 100,
+			reduceMotion: false,
+			dark: true,
+			supports: () => true,
+			feature: () => true,
+		};
+		const card = component.describe(cx);
+		expect(card.p).toMatchObject({ head: "Custom answer" });
+		expect(card.c?.[0]).toMatchObject({ k: "md", p: { text: question, role: "omp.ask.question" } });
+	});
+
 	it("refuses image attachments unless the prompt opted in and is still open", () => {
 		const image: ImageContent = { type: "image", data: "image", mimeType: "image/png" };
 		const plain = new HookEditorComponent(createTui(), "Prompt", undefined, vi.fn(), vi.fn(), { promptStyle: true });

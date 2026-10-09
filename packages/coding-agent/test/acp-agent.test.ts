@@ -20,6 +20,7 @@ import type {
 	UsageFallbackConfirmation,
 } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { SILENT_ABORT_MARKER } from "@oh-my-pi/pi-coding-agent/session/messages";
+import { resetSessionIndexForTests } from "@oh-my-pi/pi-coding-agent/session/session-index";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TaskTool } from "@oh-my-pi/pi-coding-agent/task";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
@@ -176,6 +177,10 @@ class FakeAgentSession {
 
 	getAvailableModels(): Model[] {
 		return this.models;
+	}
+
+	getAvailableEffortSelectors(): ReadonlyArray<string> {
+		return ["off", "auto", ...this.getAvailableThinkingLevels()];
 	}
 
 	getAvailableThinkingLevels(): ReadonlyArray<string> {
@@ -474,6 +479,8 @@ afterEach(async () => {
 	}
 	resetSettingsForTest();
 
+	// Renames index titles in the process-wide `<agentDir>/history.db`; Windows cannot delete it while open.
+	resetSessionIndexForTests();
 	for (const root of cleanupRoots.splice(0)) {
 		await fs.promises.rm(root, { recursive: true, force: true });
 	}
@@ -1012,6 +1019,118 @@ describe("ACP agent", () => {
 		await Bun.sleep(0);
 	});
 
+	it("emits a single config_option_update per /effort change", async () => {
+		// `/effort <level>` calls AgentSession.setThinkingLevel, which fires
+		// `thinking_level_changed`; the lifetime subscription turns that into a
+		// `config_option_update`. The command's explicit notifyConfigChanged
+		// must not add a second identical push, or clients redraw their config
+		// UI twice per change.
+		const harness = await createHarness();
+		vi.useFakeTimers();
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const session = harness.findSession(created.sessionId)!;
+		await advanceBootstrapGuard();
+
+		const updatesBefore = harness.updates.length;
+		await harness.agent.prompt({
+			sessionId: created.sessionId,
+			prompt: [{ type: "text", text: "/effort high" }],
+		});
+
+		const configUpdates = harness.updates
+			.slice(updatesBefore)
+			.filter(
+				notification =>
+					notification.sessionId === created.sessionId &&
+					notification.update.sessionUpdate === "config_option_update",
+			);
+		expect(session.thinkingLevel).toBe("high");
+		expect(configUpdates.length).toBe(1);
+		expectAcpNotifications(configUpdates);
+		const update = configUpdates[0]!.update;
+		if (update.sessionUpdate !== "config_option_update") {
+			throw new Error("expected config_option_update");
+		}
+		const thinkingOption = update.configOptions.find(option => option.id === "thinking") as
+			| { currentValue?: unknown }
+			| undefined;
+		expect(thinkingOption?.currentValue).toBe("high");
+
+		vi.useRealTimers();
+		harness.abortController.abort();
+		await Bun.sleep(0);
+	});
+
+	it("delivers the thinking config update before resolving the command", async () => {
+		const blocked = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		let holdConfig = false;
+		const harness = await createHarness({
+			sessionUpdateHook: async notification => {
+				if (holdConfig && notification.update.sessionUpdate === "config_option_update") {
+					blocked.resolve();
+					await release.promise;
+				}
+			},
+		});
+		vi.useFakeTimers();
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		await advanceBootstrapGuard();
+		vi.useRealTimers();
+		holdConfig = true;
+		const baseline = harness.updates.length;
+		const prompt = harness.agent.prompt({
+			sessionId: created.sessionId,
+			prompt: [{ type: "text", text: "/effort high" }],
+		});
+		await blocked.promise;
+		try {
+			expect(await Promise.race([prompt.then(() => true), Bun.sleep(0).then(() => false)])).toBe(false);
+			release.resolve();
+			expect((await prompt).stopReason).toBe("end_turn");
+			const updates = harness.updates.slice(baseline).filter(n => n.update.sessionUpdate === "config_option_update");
+			expect(updates).toHaveLength(1);
+			const update = updates[0]!.update;
+			if (update.sessionUpdate !== "config_option_update") throw new Error("Expected config update");
+			expect(update.configOptions.find(option => option.id === "thinking")?.currentValue).toBe("high");
+		} finally {
+			release.resolve();
+			await prompt;
+			harness.abortController.abort();
+			await Bun.sleep(0);
+		}
+	});
+
+	it("still pushes config_option_update for /effort before the lifetime subscription exists", async () => {
+		// Pre-bootstrap there is no lifetime subscription, so the explicit
+		// notifyConfigChanged is the only path that tells the client — same
+		// contract as `setSessionConfigOption`'s pre-bootstrap push.
+		const harness = await createHarness();
+		vi.useFakeTimers();
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		// Deliberately do not advance the 50ms bootstrap guard: the lifetime
+		// subscription is not installed yet.
+
+		const updatesBefore = harness.updates.length;
+		await harness.agent.prompt({
+			sessionId: created.sessionId,
+			prompt: [{ type: "text", text: "/effort high" }],
+		});
+
+		const configUpdates = harness.updates
+			.slice(updatesBefore)
+			.filter(
+				notification =>
+					notification.sessionId === created.sessionId &&
+					notification.update.sessionUpdate === "config_option_update",
+			);
+		expect(configUpdates.length).toBe(1);
+
+		vi.useRealTimers();
+		harness.abortController.abort();
+		await Bun.sleep(0);
+	});
+
 	it("pushes config_option_update when the model changes internally", async () => {
 		// Internal callers (prewalk hand-offs, retry-fallback, model cycling)
 		// change AgentSession's model directly without going through the ACP
@@ -1098,7 +1217,11 @@ describe("ACP agent", () => {
 
 		const result = (await harness.agent.extMethod("speech.models.list", {})) as Record<string, unknown> & {
 			speechToText: { models: Array<{ value: string }> };
-			textToSpeech: { models: Array<{ value: string; voices: unknown[] }>; voices: unknown[] };
+			textToSpeech: {
+				models: Array<{ value: string; voices: unknown[] }>;
+				voices: unknown[];
+				speeds: Array<{ value: unknown }>;
+			};
 		};
 
 		expect(result).toMatchObject({
@@ -1107,11 +1230,14 @@ describe("ACP agent", () => {
 				textToSpeechModel: "modelRoles.speech",
 				textToSpeechVoice: "tts.localVoice",
 				speechVoice: "speech.voice",
+				textToSpeechSpeed: "tts.localSpeed",
+				speechSpeed: "speech.speed",
 			},
 			defaults: {
 				speechToTextModel: "local/parakeet-tdt-0.6b-v3",
 				textToSpeechModel: "local/kokoro",
 				voice: "af_heart",
+				speed: 1,
 			},
 			speechToText: {
 				setting: "modelRoles.dictation",
@@ -1121,8 +1247,12 @@ describe("ACP agent", () => {
 				modelSetting: "modelRoles.speech",
 				voiceSetting: "tts.localVoice",
 				speechVoiceSetting: "speech.voice",
+				speedSetting: "tts.localSpeed",
+				speechSpeedSetting: "speech.speed",
 				defaultModel: "local/kokoro",
 				defaultVoice: "af_heart",
+				defaultSpeed: 1,
+				speedRange: { min: 0.5, max: 2.5 },
 			},
 		});
 		expect(result.speechToText.models.map(model => model.value)).toEqual([
@@ -1133,6 +1263,8 @@ describe("ACP agent", () => {
 		]);
 		expect(result.textToSpeech.models.map(model => model.value)).toEqual(["local/kokoro"]);
 		expect(result.textToSpeech.models[0]?.voices).toEqual(result.textToSpeech.voices);
+		// Speed presets are numbers so clients can write them straight into the numeric settings.
+		expect(result.textToSpeech.speeds.map(speed => speed.value)).toEqual([0.5, 0.75, 1, 1.25, 1.5, 1.75, 2, 2.5]);
 
 		harness.abortController.abort();
 		await Bun.sleep(0);
@@ -2446,7 +2578,9 @@ describe("ACP agent", () => {
 			Object.assign(session, {
 				messages: session.sessionManager.buildSessionContext().messages,
 				titleGenerationSignal: new AbortController().signal,
-				generateTitle: (_context: string, _systemPrompt?: string, signal?: AbortSignal) => {
+				renameTitle: (_title?: string, signal?: AbortSignal) => {
+					// A generating rename reserves a title revision, as `AgentSession.renameTitle` does.
+					session.sessionManager.reserveTitleRevision();
 					const inference = inferences[inferenceIndex++];
 					titleSignals.push(signal);
 					inference.started.resolve();

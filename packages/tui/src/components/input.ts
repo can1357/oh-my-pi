@@ -1,13 +1,20 @@
 import { BracketedPasteHandler, decodeReencodedPasteControls } from "../bracketed-paste";
-import { getKeybindings } from "../keybindings";
-import { extractPrintableText, matchesKey } from "../keys";
+import { canonicalKeyId, getKeybindings } from "../keybindings";
+import { extractPrintableText, parseKey } from "../keys";
 import { KillRing } from "../kill-ring";
 import type { TspInputProps } from "@oh-my-pi/pi-wire";
 import { node } from "../native/describe";
 import { sameProps } from "../native/memo";
 import { plainText } from "../native/spans";
-import type { DescribeContext, NativeNode } from "../native/node";
-import { SpaceHoldGesture } from "../space-hold";
+import {
+	clampTextOffset,
+	type DescribeContext,
+	type NativeNode,
+	type NativeTextEdit,
+	type NativeUiEvent,
+	resolveTextEdit,
+} from "../native/node";
+import { getSpaceHoldText, SpaceHoldGesture } from "../space-hold";
 import { type Component, CURSOR_MARKER, type Focusable } from "../tui";
 import { cursorColumnWindow } from "./scroll-viewport";
 import {
@@ -127,6 +134,10 @@ export class Input implements Component, Focusable {
 		return this.#useTerminalCursor;
 	}
 
+	capturesInput(data: string): boolean {
+		return this.spaceHold.shouldRoute(data);
+	}
+
 	/**
 	 * Apply one key: the editor's text bindings (motion, deletion, kill ring,
 	 * undo), pastes and printable text. Returns whether the key was the
@@ -147,10 +158,14 @@ export class Input implements Component, Focusable {
 			return true;
 		}
 
-		// Space-hold push-to-talk: a sustained space bar starts/stops STT instead of typing spaces.
-		switch (this.spaceHold.process(matchesKey(data, "space"))) {
+		// Reserve configured keys before text bindings or submit/delete handlers can consume them.
+		const parsedKey = parseKey(data);
+		const canonical = parsedKey !== undefined ? canonicalKeyId(parsedKey) : undefined;
+		const spaceHoldText = getSpaceHoldText(data, canonical);
+		switch (this.spaceHold.process(canonical, spaceHoldText?.length ?? 0)) {
 			case "type":
-				this.#insertCharacter(" ");
+				this.#insertCharacter(spaceHoldText!);
+				this.spaceHold.recordTyped(spaceHoldText!.length);
 				return true;
 			case "swallow":
 				return true;
@@ -275,6 +290,56 @@ export class Input implements Component, Focusable {
 	 *  (e.g. kitty's OSC 5522 enhanced clipboard read). Mirrors `Editor.pasteText`. */
 	pasteText(text: string): void {
 		this.#handlePaste(text);
+	}
+
+	/** Terminal-side selection edits and undo on the `input` node (see {@link applyHostEdit}). */
+	handleNativeEvent(event: NativeUiEvent): void {
+		if (event.type === "edit") this.applyHostEdit(event);
+		else if (event.type === "undo") this.#undo();
+	}
+
+	/**
+	 * Apply an edit the terminal made over its own selection (TSP `edit`):
+	 * replace `[from, to)` with `text` (newlines stripped, as a paste) and put
+	 * the caret at `cursor`, as one undo unit. Offsets are in the described
+	 * text, so a masked field's count bullets, one per grapheme. Stale edits
+	 * (`len` no longer the described length) are dropped.
+	 */
+	applyHostEdit(edit: NativeTextEdit): void {
+		let valueEdit = edit;
+		if (this.mask) {
+			// Bullet offsets → value offsets through the grapheme starts.
+			const starts = Array.from(segmenter.segment(this.#value), grapheme => grapheme.index);
+			starts.push(this.#value.length);
+			const bullets = starts.length - 1;
+			if (edit.len !== bullets) return;
+			let from = clampTextOffset(edit.from, bullets);
+			let to = clampTextOffset(edit.to, bullets);
+			if (to < from) [from, to] = [to, from];
+			const text = typeof edit.text === "string" ? edit.text : "";
+			const cursor = clampTextOffset(edit.cursor, bullets - (to - from) + text.length);
+			const after = cursor - from - text.length;
+			valueEdit = {
+				from: starts[from]!,
+				to: starts[to]!,
+				text,
+				cursor:
+					cursor <= from
+						? starts[cursor]!
+						: after >= 0
+							? starts[from]! + text.length + starts[to + after]! - starts[to]!
+							: starts[from]! + cursor - from,
+				len: this.#value.length,
+			};
+		}
+		const resolved = resolveTextEdit(this.#value, valueEdit, toSingleLine);
+		if (!resolved) return;
+		this.#lastAction = null;
+		if (resolved.changed) {
+			this.#pushUndo();
+			this.#value = resolved.text;
+		}
+		this.#cursor = resolved.cursor;
 	}
 
 	/** Programmatically trigger submission (e.g. for voice submit). */
@@ -526,6 +591,7 @@ export class Input implements Component, Focusable {
 		const props: TspInputProps = {
 			text: value,
 			cursor,
+			sendable: false,
 			prompt: prompt || undefined,
 			placeholder: this.placeholder,
 		};

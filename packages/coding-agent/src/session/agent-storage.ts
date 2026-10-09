@@ -4,7 +4,9 @@ import * as path from "node:path";
 import {
 	type AuthCredential,
 	type AuthCredentialStore,
+	parseServiceTier,
 	SqliteAuthCredentialStore,
+	type ServiceTier,
 	type StoredAuthCredential,
 } from "@oh-my-pi/pi-ai";
 import {
@@ -50,6 +52,8 @@ type StatsMessageRow = {
 	output_tokens: number;
 	duration: number;
 	ttft: number | null;
+	/** Served service tier; absent on stats databases written before the column existed. */
+	service_tier?: string | null;
 };
 
 /** Per-model running sums accumulated during a backfill walk. */
@@ -97,15 +101,40 @@ export interface ModelPerfStats {
  */
 const MODEL_PERF_DECAY_AT = 256;
 /** meta-table marker set once historical stats.db rows have been imported into model_perf. */
-const MODEL_PERF_BACKFILL_KEY = "model_perf_backfill";
-/** Batch window for deferred model_perf writes; matches prompt-history's drain cadence. */
-const MODEL_PERF_FLUSH_DELAY_MS = 100;
+const MODEL_PERF_BACKFILL_KEY = "model_perf_backfill_v2";
+/**
+ * Marker the v1 import wrote. Its presence means the aggregates already hold
+ * the stats history (tierless, so blended into the bare rows), so the v2 pass
+ * keeps the live aggregates and only records itself complete instead of adding
+ * the same history again.
+ */
+const MODEL_PERF_BACKFILL_V1_KEY = "model_perf_backfill";
+/**
+ * Batch window for deferred model_perf writes. Perf aggregates are advisory, so
+ * one transaction per minute replaces one per turn; the timer is unref'd and the
+ * pending batch is flushed by {@link AgentStorage.close}, which the exit-only
+ * postmortem hook runs on every real exit (normal, signal, fatal), and by
+ * {@link AgentStorage.getModelPerf}, so in-process reads never lag the window.
+ */
+const MODEL_PERF_FLUSH_DELAY_MS = 60_000;
 /** Backfill ignores stats.db history older than this; decay makes stale provider speeds worthless anyway. */
 const MODEL_PERF_BACKFILL_MAX_AGE_MS = 90 * 86_400_000;
 /** Rows fetched per synchronous backfill chunk — keeps per-chunk event-loop blocking under ~20ms even on cold I/O. */
 const MODEL_PERF_BACKFILL_CHUNK = 2048;
 /** Hard ceiling on rows scanned per backfill run, whatever the age cutoff admits — bounds total CPU on very high-volume databases (models only seen earlier than the newest N measurable rows get no backfill). */
 const MODEL_PERF_BACKFILL_MAX_ROWS = 250_000;
+
+/**
+ * `model_perf` row key: the model, plus the service tier when the turn ran on a
+ * non-default one (`provider/model@ultrafast`). Tier rows keep a fast serving
+ * path's throughput from blending into the standard average — a 300 t/s
+ * ultrafast turn and a 25 t/s standard turn are different measurements, not one
+ * 160 t/s model. Readers that do not know the tier read the bare
+ * `provider/model` row, which stays the standard/default-tier aggregate.
+ */
+export function modelPerfKey(modelKey: string, serviceTier?: ServiceTier | null): string {
+	return serviceTier && serviceTier !== "auto" && serviceTier !== "default" ? `${modelKey}@${serviceTier}` : modelKey;
+}
 
 /**
  * Validates one request timing and shapes it for the model_perf upsert.
@@ -162,7 +191,7 @@ export class AgentStorage {
 	/** One backfill *check* per process; the persistent gate is the meta marker. */
 	#perfBackfillChecked = false;
 	/** Coalesces per-turn perf samples into one deferred transaction off the turn's hot path. */
-	#perfDrain = new AsyncDrain<ModelPerfInsert>(MODEL_PERF_FLUSH_DELAY_MS);
+	#perfDrain = new AsyncDrain<ModelPerfInsert>(MODEL_PERF_FLUSH_DELAY_MS, { unref: true });
 	#closing = false;
 
 	private constructor(db: Database, dbPath: string) {
@@ -193,8 +222,10 @@ ON CONFLICT(model_key) DO UPDATE SET
 	ttft_ms = (CASE WHEN model_perf.samples >= ${MODEL_PERF_DECAY_AT} THEN model_perf.ttft_ms * 0.5 ELSE model_perf.ttft_ms END) + excluded.ttft_ms,
 	updated_at = ${SQLITE_NOW_EPOCH}`,
 		);
+		// `model_key TEXT PRIMARY KEY` admits NULL (SQLite rowid-table quirk); a NULL
+		// key would break every consumer that treats perf keys as selectors.
 		this.#listModelPerfStmt = this.#db.prepare(
-			"SELECT model_key, samples, output_tokens, gen_ms, ttft_samples, ttft_ms FROM model_perf",
+			"SELECT model_key, samples, output_tokens, gen_ms, ttft_samples, ttft_ms FROM model_perf WHERE model_key IS NOT NULL",
 		);
 		this.#usageStmts = {
 			command: this.#prepareUsageStatements("command"),
@@ -327,9 +358,11 @@ CREATE TABLE settings (
 		}
 		if (schemaVersion < SCHEMA_VERSION) {
 			this.#migrateSchema(schemaVersion);
+			// Only an upgrade (or a fresh db) records the version; rewriting the same
+			// row on every open was a write transaction per process start.
+			using recordVersionStmt = this.#db.prepare("INSERT OR REPLACE INTO schema_version(version) VALUES (?)");
+			recordVersionStmt.run(SCHEMA_VERSION);
 		}
-		using recordVersionStmt = this.#db.prepare("INSERT OR REPLACE INTO schema_version(version) VALUES (?)");
-		recordVersionStmt.run(SCHEMA_VERSION);
 	}
 
 	#migrateSchema(fromVersion: number): void {
@@ -551,9 +584,11 @@ FROM model_usage_legacy
 	 * the turn-completion hot path. Fire-and-forget safe — flush failures are
 	 * logged, never thrown; await the returned promise only to observe the flush.
 	 * @param modelKey - Model key in "provider/modelId" format
+	 * @param serviceTier - Tier the turn ran on; non-default tiers aggregate in
+	 * their own row (see {@link modelPerfKey})
 	 */
-	recordModelPerf(modelKey: string, sample: ModelPerfSample): Promise<void> {
-		const row = normalizeModelPerfSample(modelKey, sample);
+	recordModelPerf(modelKey: string, sample: ModelPerfSample, serviceTier?: ServiceTier | null): Promise<void> {
+		const row = normalizeModelPerfSample(modelPerfKey(modelKey, serviceTier), sample);
 		if (!row) return Promise.resolve();
 		return this.#perfDrain.push(row, rows => this.#flushModelPerf(rows));
 	}
@@ -579,9 +614,12 @@ FROM model_usage_legacy
 	 * Returns recency-weighted TPS/TTFT averages for every model with recorded
 	 * requests, keyed by "provider/modelId". Read by the /models browser.
 	 * Also kicks the one-time background stats.db import; until it completes,
-	 * models without live samples are simply absent.
+	 * models without live samples are simply absent. Drains the pending perf
+	 * batch first so reads reflect every sample this process has recorded.
 	 */
 	getModelPerf(): Map<string, ModelPerfStats> {
+		// The drain handler runs synchronously, so the batch is committed before the read.
+		void this.#perfDrain.flush();
 		this.#kickModelPerfBackfill();
 		const stats = new Map<string, ModelPerfStats>();
 		try {
@@ -616,6 +654,15 @@ FROM model_usage_legacy
 			using markerStmt = this.#db.prepare("SELECT value FROM meta WHERE key = ?");
 			const marker = markerStmt.get(MODEL_PERF_BACKFILL_KEY);
 			if (marker) return;
+			// The v1 import already folded the stats history into the bare rows, and no
+			// stats row written before the served-tier field carries a tier, so
+			// re-importing would only double-count it. Keep the live aggregates (blended
+			// history decays out of them) and just record v2.
+			if (markerStmt.get(MODEL_PERF_BACKFILL_V1_KEY)) {
+				using markCompleteStmt = this.#db.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)");
+				markCompleteStmt.run(MODEL_PERF_BACKFILL_KEY, "complete");
+				return;
+			}
 			const statsDbPath = getStatsDbPath();
 			if (!fs.existsSync(statsDbPath)) return;
 			void this.backfillModelPerfFromStats(statsDbPath)
@@ -651,8 +698,14 @@ FROM model_usage_legacy
 		const statsDb = new Database(statsDbPath, { readonly: true });
 		try {
 			statsDb.run(`PRAGMA busy_timeout = ${getDbBusyTimeoutMs()}`);
+			// Stats databases written before the served-tier column existed cannot
+			// separate a fast serving path's samples from standard ones; those rows
+			// import as standard-tier history.
+			const hasTier = (statsDb.prepare("PRAGMA table_info(messages)").all() as { name: string }[]).some(
+				column => column.name === "service_tier",
+			);
 			using select = statsDb.prepare(
-				`SELECT rowid, timestamp, provider, model, output_tokens, duration, ttft
+				`SELECT rowid, timestamp, provider, model, output_tokens, duration, ttft${hasTier ? ", service_tier" : ""}
 FROM messages
 WHERE (timestamp < ?1 OR (timestamp = ?1 AND rowid < ?2))
 	AND timestamp >= ?3
@@ -675,7 +728,7 @@ LIMIT ?4`,
 				cursorTimestamp = last.timestamp;
 				cursorRowid = last.rowid;
 				for (const row of rows) {
-					const key = `${row.provider}/${row.model}`;
+					const key = modelPerfKey(`${row.provider}/${row.model}`, parseServiceTier(row.service_tier));
 					let accum = sums.get(key);
 					if (accum && accum.samples >= MODEL_PERF_DECAY_AT) continue;
 					const normalized = normalizeModelPerfSample(key, {
@@ -845,19 +898,30 @@ ON CONFLICT(model_key) DO UPDATE SET
 		this.#authStore.cleanExpiredCache();
 	}
 
+	/**
+	 * Restricts the agent dir to 0700 and the db to 0600, touching each only when
+	 * its mode differs. POSIX modes are meaningless on Windows, so it is a no-op there.
+	 */
 	#hardenPermissions(dbPath: string): void {
+		if (process.platform === "win32") return;
 		const dir = path.dirname(dbPath);
-		try {
-			fs.chmodSync(dir, 0o700);
-		} catch (error) {
-			logger.warn("AgentStorage failed to chmod agent dir", { path: dir, error: String(error) });
-		}
+		AgentStorage.#chmodIfNeeded(dir, 0o700, "AgentStorage failed to chmod agent dir");
+		AgentStorage.#chmodIfNeeded(dbPath, 0o600, "AgentStorage failed to chmod db file");
+	}
 
-		if (!fs.existsSync(dbPath)) return;
+	static #chmodIfNeeded(target: string, mode: number, failureMessage: string): void {
+		let current: number;
 		try {
-			fs.chmodSync(dbPath, 0o600);
+			current = fs.statSync(target).mode & 0o777;
+		} catch {
+			// Missing target (e.g. db not yet materialized): nothing to harden.
+			return;
+		}
+		if (current === mode) return;
+		try {
+			fs.chmodSync(target, mode);
 		} catch (error) {
-			logger.warn("AgentStorage failed to chmod db file", { path: dbPath, error: String(error) });
+			logger.warn(failureMessage, { path: target, error: String(error) });
 		}
 	}
 }

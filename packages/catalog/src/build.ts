@@ -76,6 +76,11 @@ function isInputModalities(value: unknown): value is ("text" | "image")[] {
 function applyCatalogAssignments<TApi extends Api>(model: Model<TApi>, catalog: Record<string, unknown>): void {
 	const kind = MODEL_KINDS.find(value => value === catalog.kind);
 	if (kind !== undefined) model.kind = kind;
+	if (catalog.contextWindowAuthoritative === true) {
+		model.contextWindowAuthoritative = true;
+	} else {
+		delete model.contextWindowAuthoritative;
+	}
 	const webSearch = catalog.webSearch;
 	if (
 		webSearch === "gemini" ||
@@ -96,9 +101,11 @@ function applyCatalogAssignments<TApi extends Api>(model: Model<TApi>, catalog: 
 	if (serviceTierCost !== undefined) {
 		const flex = numberField(serviceTierCost, "flex");
 		const priorityTier = numberField(serviceTierCost, "priority");
+		const ultrafast = numberField(serviceTierCost, "ultrafast");
 		model.serviceTierCost = {
 			...(flex !== undefined && { flex }),
 			...(priorityTier !== undefined && { priority: priorityTier }),
+			...(ultrafast !== undefined && { ultrafast }),
 		};
 	}
 	const priority = catalog.priority;
@@ -120,6 +127,15 @@ function applyCatalogAssignments<TApi extends Api>(model: Model<TApi>, catalog: 
 	if (editPromptVariant === "full" || editPromptVariant === "compact") {
 		model.editPromptVariant = editPromptVariant;
 	}
+	const pricingStatus = catalog.pricingStatus;
+	if (
+		pricingStatus === "free" ||
+		pricingStatus === "included" ||
+		pricingStatus === "variable" ||
+		pricingStatus === "unknown"
+	) {
+		model.pricingStatus = pricingStatus;
+	}
 	const requiresCursorToolSchemaProjection = catalog.requiresCursorToolSchemaProjection;
 	if (requiresCursorToolSchemaProjection === true) {
 		model.requiresCursorToolSchemaProjection = true;
@@ -136,6 +152,11 @@ function applyCatalogAssignments<TApi extends Api>(model: Model<TApi>, catalog: 
 		model.supportsAssistantPrefill = true;
 	} else {
 		delete model.supportsAssistantPrefill;
+	}
+	// The same KDL output-cap contract gates host options and the Responses
+	// transport. Materialize it because the transport consumes the model field.
+	if (typeof catalog.omitMaxOutputTokens === "boolean" && model.omitMaxOutputTokens === undefined) {
+		model.omitMaxOutputTokens = catalog.omitMaxOutputTokens;
 	}
 	const contextPromotionTarget = catalog.contextPromotionTarget;
 	if (typeof contextPromotionTarget === "string" && model.contextPromotionTarget === undefined) {
@@ -155,40 +176,6 @@ export function applyCatalogCorrections(
 	model: Pick<ModelSpec<Api>, "cost" | "contextWindow" | "maxTokens" | "input">,
 	catalog: Record<string, unknown>,
 ): void {
-	const longContext = objectPayload(catalog.longContext);
-	if (longContext !== undefined) {
-		const inputThreshold = numberField(longContext, "inputThreshold");
-		const inclusive = Reflect.get(longContext, "inputThresholdInclusive") === true;
-		const multiplier = numberField(longContext, "multiplier");
-		const input = numberField(longContext, "input");
-		const output = numberField(longContext, "output");
-		const cacheRead = numberField(longContext, "cacheRead");
-		const cacheWrite = numberField(longContext, "cacheWrite");
-		const base = model.cost;
-		const hasTokenPrice = base.input !== 0 || base.output !== 0 || base.cacheRead !== 0 || base.cacheWrite !== 0;
-		if (inputThreshold !== undefined && multiplier !== undefined && hasTokenPrice) {
-			// Multiplier form: tier rates derive from the row's live list price.
-			model.cost = {
-				...base,
-				longContext: {
-					inputThreshold,
-					...(inclusive && { inputThresholdInclusive: true }),
-					input: base.input * multiplier,
-					output: base.output * multiplier,
-					cacheRead: base.cacheRead * multiplier,
-					cacheWrite: base.cacheWrite * multiplier,
-				},
-			};
-		} else if (
-			inputThreshold !== undefined &&
-			input !== undefined &&
-			output !== undefined &&
-			cacheRead !== undefined &&
-			cacheWrite !== undefined
-		) {
-			model.cost = { ...model.cost, longContext: { inputThreshold, input, output, cacheRead, cacheWrite } };
-		}
-	}
 	const patch = objectPayload(catalog.costPatch);
 	if (patch !== undefined) {
 		model.cost = { ...model.cost };
@@ -223,6 +210,41 @@ export function applyCatalogCorrections(
 			// them in `timeBased` with empty peak windows would report
 			// permanent off-peak and never wake at the dated boundary.
 			applyEffectiveFallbackRates(model.cost, Reflect.get(fallback, "effectiveRates"));
+		}
+	}
+	const longContext = objectPayload(catalog.longContext);
+	if (longContext !== undefined) {
+		const inputThreshold = numberField(longContext, "inputThreshold");
+		const inclusive = Reflect.get(longContext, "inputThresholdInclusive") === true;
+		const multiplier = numberField(longContext, "multiplier");
+		const input = numberField(longContext, "input");
+		const output = numberField(longContext, "output");
+		const cacheRead = numberField(longContext, "cacheRead");
+		const cacheWrite = numberField(longContext, "cacheWrite");
+		const base = model.cost;
+		const hasTokenPrice = base.input !== 0 || base.output !== 0 || base.cacheRead !== 0 || base.cacheWrite !== 0;
+		if (inputThreshold !== undefined && multiplier !== undefined && hasTokenPrice) {
+			// Multiplier form: tier rates derive from the row's final base card,
+			// after `cost-patch`/`cost-fallback` corrected the live list price.
+			model.cost = {
+				...base,
+				longContext: {
+					inputThreshold,
+					...(inclusive && { inputThresholdInclusive: true }),
+					input: base.input * multiplier,
+					output: base.output * multiplier,
+					cacheRead: base.cacheRead * multiplier,
+					cacheWrite: base.cacheWrite * multiplier,
+				},
+			};
+		} else if (
+			inputThreshold !== undefined &&
+			input !== undefined &&
+			output !== undefined &&
+			cacheRead !== undefined &&
+			cacheWrite !== undefined
+		) {
+			model.cost = { ...model.cost, longContext: { inputThreshold, input, output, cacheRead, cacheWrite } };
 		}
 	}
 	if (catalog.cacheReadAtInputRate === true) {
@@ -344,5 +366,8 @@ export function buildModel<TApi extends Api>(spec: ModelSpec<TApi>): Model<TApi>
 	};
 	applyCatalogAssignments(model, policy.catalog);
 	applyCatalogCorrections(model, policy.catalog);
+	// Configured kinds and lifetimes replace catalog values rather than merging with them.
+	if (spec.kindConfig !== undefined) model.kind = spec.kindConfig;
+	if (spec.promptCacheConfig !== undefined) model.promptCache = { ...spec.promptCacheConfig };
 	return model;
 }

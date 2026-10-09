@@ -11,6 +11,7 @@
  */
 import type { Effort } from "../effort";
 import { MODEL_KINDS, type ThinkingControlMode } from "../types";
+import { FACTORY_DROID_UPSTREAMS } from "../wire/factory-droid";
 
 /** Value shape a directive accepts (see `rules/README.md`). */
 export type AxisShape = "scalar" | "array" | "object";
@@ -19,7 +20,7 @@ export type AxisShape = "scalar" | "array" | "object";
 export type AxisSet = "wire" | "thinking" | "catalog";
 
 /** Resolved compat record families a wire axis may be assigned onto. */
-export type CompatRecordName = "openai" | "openai-responses" | "anthropic" | "bedrock" | "devin" | "google";
+export type CompatRecordName = "openai" | "openai-responses" | "anthropic" | "bedrock" | "devin" | "google" | "request";
 
 /** One axis definition: resolved key, namespace, shape, and applicability. */
 export interface AxisDef {
@@ -37,6 +38,8 @@ export interface AxisDef {
 	 * that compile to camelCase resolved keys.
 	 */
 	verbatimKeys?: true;
+	/** Array axes only: a bare directive assigns an empty list (an explicit "none"). */
+	emptyArray?: true;
 }
 
 const OAI = ["openai", "openai-responses"] as const;
@@ -86,6 +89,34 @@ function wire(
  * blocks.
  */
 export const AXES: Readonly<Record<string, AxisDef>> = {
+	// Selected-route request shaping, resolved alongside shared adapter compat.
+	"completions-reasoning-mode": wire("completionsReasoningMode", ["request"], "scalar", [
+		"none",
+		"effort",
+		"opt-in",
+		"forced-on",
+	]),
+	"completions-reasoning-history": wire("completionsReasoningHistory", ["request"], "scalar", [
+		"omit",
+		"preserved",
+		"interleaved",
+	]),
+	"anthropic-thinking": wire("anthropicThinking", ["request"], "scalar", [
+		"adaptive",
+		"adaptive-summarized",
+		"budget-interleaved",
+		"budget-effort",
+	]),
+	"anthropic-tool-streaming-beta": wire("anthropicToolStreamingBeta", ["request"]),
+	"openai-platform-header": wire("openaiPlatformHeader", ["request"]),
+	"responses-cache-retention": wire("responsesCacheRetention", ["request"]),
+	"responses-verbosity": wire("responsesVerbosity", ["request"], "scalar", ["low"]),
+	"responses-service-tier": wire("responsesServiceTier", ["request"], "scalar", ["priority"]),
+	"responses-parallel-tool-calls": wire("responsesParallelToolCalls", ["request"]),
+	"responses-safety-identifier": wire("responsesSafetyIdentifier", ["request"]),
+	"responses-tool-choice-auto": wire("responsesToolChoiceAuto", ["request"]),
+	"routing-session-lock": wire("routingSessionLock", ["request"]),
+	"google-thinking": wire("googleThinking", ["request"], "scalar", ["level", "level-medium"]),
 	// ── wire: OpenAI-compatible surfaces (chat completions + Responses) ──
 	"allows-synthetic-reasoning-content-for-tool-calls": wire("allowsSyntheticReasoningContentForToolCalls", OAI),
 	"always-send-max-tokens": wire("alwaysSendMaxTokens", OAI),
@@ -101,6 +132,7 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	"include-encrypted-reasoning": wire("includeEncryptedReasoning", OAI),
 	"kimi-api-format": wire("kimiApiFormat", ["openai"], "scalar", ["openai", "anthropic"]),
 	"max-tokens-field": wire("maxTokensField", ["openai"], "scalar", ["max_completion_tokens", "max_tokens"]),
+	"mistral-reasoning-content-parts": wire("mistralReasoningContentParts", ["openai"]),
 	"native-kimi-k3-reasoning": wire("nativeKimiK3Reasoning", ["openai"]),
 	"omit-reasoning-effort": wire("omitReasoningEffort", OAI),
 	"prompt-cache-breakpoint-ttl": wire("promptCacheBreakpointTtl", OAI, "scalar", ["30m"]),
@@ -128,6 +160,7 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	]),
 	"reasoning-effort-map": wire("reasoningEffortMap", OAI, "object"),
 	"replay-reasoning-content": wire("replayReasoningContent", ["openai"]),
+	"synthetic-reasoning-content-fallback": wire("syntheticReasoningContentFallback", ["openai"]),
 	"requires-assistant-after-tool-result": wire("requiresAssistantAfterToolResult", ["openai"]),
 	"requires-assistant-content-for-tool-calls": wire("requiresAssistantContentForToolCalls", OAI),
 	"requires-mistral-tool-ids": wire("requiresMistralToolIds", ["openai"]),
@@ -136,6 +169,7 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	"requires-thinking-as-text": wire("requiresThinkingAsText", ["openai"]),
 	"requires-tool-result-name": wire("requiresToolResultName", ["openai"]),
 	"strict-responses-pairing": wire("strictResponsesPairing", ["openai-responses"]),
+	"stateful-responses": wire("statefulResponses", ["openai-responses"]),
 	"requires-reasoning-off-juice-instruction": wire("requiresReasoningOffJuiceInstruction", ["openai-responses"]),
 	"supports-all-turns-reasoning-context": wire("supportsAllTurnsReasoningContext", ["openai-responses"]),
 	"supports-configuration-update": wire("supportsConfigurationUpdate", ["openai-responses"]),
@@ -161,6 +195,7 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	"supports-reasoning-effort": wire("supportsReasoningEffort", OAI),
 	"supports-reasoning-params": wire("supportsReasoningParams", OAI),
 	"supports-reasoning-summary": wire("supportsReasoningSummary", ["openai-responses"]),
+	"store-responses": wire("storeResponses", ["openai-responses"]),
 	"supports-store": wire("supportsStore", ["openai"]),
 	"supports-strict-mode": wire("supportsStrictMode", OAI),
 	"supports-tool-choice": wire("supportsToolChoice", OAI),
@@ -194,7 +229,10 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	"allow-anthropic-header-overrides": wire("allowAnthropicHeaderOverrides", ["anthropic"]),
 	"disable-adaptive-thinking": wire("disableAdaptiveThinking", ["anthropic"]),
 	"disable-strict-tools": wire("disableStrictTools", ["anthropic"]),
+	"disabled-thinking": wire("disabledThinking", ["anthropic", "bedrock"], "scalar", ["omit", "disabled", "adaptive"]),
+	"effort-beta": wire("effortBeta", ["anthropic"]),
 	"escape-builtin-tool-names": wire("escapeBuiltinToolNames", ["anthropic"]),
+	"fast-mode": wire("fastMode", ["anthropic"]),
 	"first-party-provider": wire("firstPartyProvider", ["anthropic"]),
 	"inject-claude-code-instruction": wire("injectClaudeCodeInstruction", ["anthropic"]),
 	"official-endpoint": wire("officialEndpoint", ["anthropic", "openai-responses"]),
@@ -202,6 +240,7 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	"requires-thinking-enabled": wire("requiresThinkingEnabled", ["anthropic"]),
 	"requires-tool-result-id": wire("requiresToolResultId", ["anthropic"]),
 	"signing-endpoint": wire("signingEndpoint", ["anthropic"]),
+	"strip-thinking-history": wire("stripThinkingHistory", ["anthropic"]),
 	"supports-context-management": wire("supportsContextManagement", ["anthropic"]),
 	"supports-output-effort": wire("supportsOutputEffort", ["anthropic"]),
 	"supports-eager-tool-input-streaming": wire("supportsEagerToolInputStreaming", ["anthropic"]),
@@ -222,7 +261,7 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	// ── wire: devin-agent ──
 	"model-router": wire("modelRouter", ["devin"]),
 	"supports-parallel-tool-calls": wire("supportsParallelToolCalls", ["devin"]),
-	"trust-explicit-thinking-only": wire("trustExplicitThinkingOnly", ["devin"]),
+	"trust-explicit-thinking-only": wire("trustExplicitThinkingOnly", [...OAI, "devin"]),
 
 	// ── wire: google APIs ──
 	"antigravity-claude-tool-mode": wire("antigravityClaudeToolMode", ["google"]),
@@ -255,8 +294,8 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	"stream-first-event-timeout-ms": wire("streamFirstEventTimeoutMs", [...OAI, "google"]),
 	"stream-idle-timeout-ms": wire("streamIdleTimeoutMs", [...OAI, "anthropic", "bedrock", "google"]),
 	"strip-image-input": wire("stripImageInput", [...OAI, "anthropic", "google"]),
-	"supports-forced-tool-choice": wire("supportsForcedToolChoice", [...OAI, "anthropic"]),
-	"supports-sampling-params": wire("supportsSamplingParams", [...OAI, "anthropic"]),
+	"supports-forced-tool-choice": wire("supportsForcedToolChoice", [...OAI, "anthropic", "bedrock"]),
+	"supports-sampling-params": wire("supportsSamplingParams", [...OAI, "anthropic", "bedrock", "devin", "google"]),
 	"thinking-loop-guard": wire("thinkingLoopGuard", [...OAI, "anthropic", "google"], "scalar", [
 		"gemini",
 		"deepseek",
@@ -267,7 +306,7 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	"thinking-default-level": { key: "defaultLevel", set: "thinking", shape: "scalar", values: EFFORTS },
 	"thinking-effort-budgets": { key: "effortBudgets", set: "thinking", shape: "object" },
 	"thinking-effort-map": { key: "effortMap", set: "thinking", shape: "object" },
-	"thinking-efforts": { key: "efforts", set: "thinking", shape: "array", values: EFFORTS },
+	"thinking-efforts": { key: "efforts", set: "thinking", shape: "array", values: EFFORTS, emptyArray: true },
 	"thinking-mode": {
 		key: "mode",
 		set: "thinking",
@@ -321,6 +360,12 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	"clamp-context-override": { key: "clampContextOverride", set: "catalog", shape: "scalar" },
 	"context-promotion-target": { key: "contextPromotionTarget", set: "catalog", shape: "scalar" },
 	"context-window-floor": { key: "contextWindowFloor", set: "catalog", shape: "scalar" },
+	"context-window-authoritative": {
+		key: "contextWindowAuthoritative",
+		set: "catalog",
+		shape: "scalar",
+		values: [true, false],
+	},
 	"cost-patch": { key: "costPatch", set: "catalog", shape: "object" },
 	"cost-fallback": { key: "costFallback", set: "catalog", shape: "object" },
 	/**
@@ -347,12 +392,27 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	},
 	"web-search-model": { key: "webSearchModel", set: "catalog", shape: "scalar" },
 	"hosted-image": { key: "hostedImage", set: "catalog", shape: "scalar", values: [true, false] },
+	/** How the model line bills an input image; shape and formulas in `./image-tokenization`. */
+	"image-tokenization": { key: "imageTokenization", set: "catalog", shape: "object" },
 	"image-model": { key: "imageModel", set: "catalog", shape: "scalar" },
+	"inline-image-byte-budget": { key: "inlineImageByteBudget", set: "catalog", shape: "scalar" },
 	"limits-patch": { key: "limitsPatch", set: "catalog", shape: "object" },
 	"long-context-cost": { key: "longContext", set: "catalog", shape: "object" },
 	"prompt-cache": { key: "promptCache", set: "catalog", shape: "object" },
+	/**
+	 * Prompt-cache lookback in block positions: how far back from a cache
+	 * breakpoint the provider looks for an earlier request's cache entry.
+	 * Unassigned: no known lookback bound.
+	 */
+	"prompt-cache-lookback": { key: "promptCacheLookback", set: "catalog", shape: "scalar" },
 	"long-usage-limit-fallback": { key: "longUsageLimitFallback", set: "catalog", shape: "scalar" },
 	"max-context-window": { key: "maxContextWindow", set: "catalog", shape: "scalar" },
+	"pricing-status": {
+		key: "pricingStatus",
+		set: "catalog",
+		shape: "scalar",
+		values: ["free", "included", "variable", "unknown"],
+	},
 	"requires-cursor-tool-schema-projection": {
 		key: "requiresCursorToolSchemaProjection",
 		set: "catalog",
@@ -379,6 +439,68 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	priority: { key: "priority", set: "catalog", shape: "scalar" },
 	"service-tier-cost": { key: "serviceTierCost", set: "catalog", shape: "object" },
 	"time-based-cost": { key: "timeBased", set: "catalog", shape: "object" },
+
+	// ── catalog: routed-subscription registry ──
+	// A gateway whose proxy fans one model out to several upstreams (Factory
+	// Droid). Consumed through `./factory-droid`; `api-routes` picks the wire
+	// and `quota-tiers` the billing pool.
+	/** Ordered upstream rotation; the first entry is the default `x-api-provider`. */
+	"upstream-rotation": { key: "upstreamRotation", set: "catalog", shape: "array", values: FACTORY_DROID_UPSTREAMS },
+	/**
+	 * Upstreams eligible to serve one inference region. The provider-wide rule
+	 * is the upstream serving table; a model rule replaces it (the native
+	 * region override), and a bare directive means the region never serves it.
+	 */
+	"region-upstreams-global": {
+		key: "regionUpstreamsGlobal",
+		set: "catalog",
+		shape: "array",
+		values: FACTORY_DROID_UPSTREAMS,
+		emptyArray: true,
+	},
+	"region-upstreams-us": {
+		key: "regionUpstreamsUs",
+		set: "catalog",
+		shape: "array",
+		values: FACTORY_DROID_UPSTREAMS,
+		emptyArray: true,
+	},
+	"region-upstreams-eu": {
+		key: "regionUpstreamsEu",
+		set: "catalog",
+		shape: "array",
+		values: FACTORY_DROID_UPSTREAMS,
+		emptyArray: true,
+	},
+	/** EU inference limits (`context-window`, `max-tokens`) where the region narrows the default. */
+	"region-limits-eu": { key: "regionLimitsEu", set: "catalog", shape: "object" },
+	/**
+	 * Subscription credit rates: `input` is the per-token credit weight shown
+	 * as the model's multiplier; `output` and `cache-read` multiply it.
+	 */
+	"credit-rates": { key: "creditRates", set: "catalog", shape: "object" },
+	/**
+	 * List price borrowed from a bundled catalog row: provider id, then the
+	 * row id when it differs from the model's own. Absent means no list price.
+	 */
+	"list-price-from": { key: "listPriceFrom", set: "catalog", shape: "array" },
+	/** Provider family whose live routing defaults apply to the model. */
+	"routing-family": {
+		key: "routingFamily",
+		set: "catalog",
+		shape: "scalar",
+		values: ["anthropic", "openai", "google", "factory", "xai"],
+	},
+	/** Other ids organization policy may use for the model. */
+	"policy-aliases": { key: "policyAliases", set: "catalog", shape: "array" },
+	/**
+	 * Account gates: `feature-flag` must be on to list the model,
+	 * `deprecation-flag` hides it once on, `requires-explicit-opt-in` hides it
+	 * without an org policy, and `base-variant` marks a fast tier of that model.
+	 */
+	entitlement: { key: "entitlement", set: "catalog", shape: "object" },
+	/** The native default when the caller picks no effort is thinking off. */
+	"default-reasoning-off": { key: "defaultReasoningOff", set: "catalog", shape: "scalar", values: [true, false] },
 };
 
 /** Records applicable to each API family; used by `resolve.ts` when applying wire axes. */

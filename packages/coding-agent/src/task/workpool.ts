@@ -8,6 +8,7 @@ import type { CustomMessage } from "../session/messages";
 import type { ToolSession } from "../tools";
 import { isIrcEnabled } from "../irc/messaging";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { isCompletionProbeEnabled } from "./completion-probe";
 import { runSubagentFollowUpTurn } from "./executor";
 import {
 	type EffectiveSubagentPolicy,
@@ -410,6 +411,7 @@ export class WorkPool {
 							subagentEventBus: this.session.subagentEventBus,
 							artifactsDir: this.session.getSessionFile()?.slice(0, -6),
 							maxRuntimeMs: cfgTaskMaxRuntimeMs.get(this.session.settings),
+							completionProbe: isCompletionProbeEnabled(this.session.settings, this.session.taskDepth ?? 0),
 						});
 					}
 				} catch (error) {

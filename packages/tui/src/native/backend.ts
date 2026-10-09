@@ -14,8 +14,18 @@
  * render while blocked only marks the surface dirty; the next `ack` reconciles
  * once against the last sent state, so every intermediate change coalesces
  * into one frame (`set`s merged, `text append`s joined).
+ *
+ * Blobs. Each image's bytes reach the terminal once per connection. A
+ * terminal with the `blobs` feature is asked first which it already holds:
+ * under `TERN_BLOB_DIR` (Tern's on-disk blob cache, on this machine) every new
+ * blob is written there and then asked about, so its bytes never cross the
+ * pty; otherwise the first pass after (re)connecting asks, so a resumed
+ * session doesn't resend what the terminal kept. Whatever the reply lacks
+ * (or a reply that never comes) is sent inline with `b`. Frames never wait:
+ * the terminal draws an image whose blob arrives after the frame.
  */
 import * as fs from "node:fs";
+import * as path from "node:path";
 import * as logger from "@oh-my-pi/pi-utils/logger";
 import {
 	TSP_DEFAULT_APC_LIMIT,
@@ -38,9 +48,9 @@ import {
 	type NativeThemePalette,
 	setNativeSymbolPreset,
 } from "../theme/theme";
-import type { Component, OverlayOptions } from "../tui";
+import type { Component, OverlayOptions, RenderScheduler, RenderTimer } from "../tui";
 import { TspDocument } from "./apply";
-import { getNativeBlob } from "./blobs";
+import { getNativeBlob, type NativeBlob } from "./blobs";
 import { node } from "./describe";
 import { encodeTspJson, encodeTspMessage, type TspHello, TspReader, splitTspMessage } from "./encode";
 import type { DescribeContext, NativeChild, NativeNode, NativeSurface, NativeUiEvent } from "./node";
@@ -64,6 +74,18 @@ export interface NativeHost {
 	overlays(): readonly NativeOverlay[];
 	/** Component receiving keyboard input. */
 	focused(): Component | null;
+	/**
+	 * The user clicked into a node described by `owners[0]` (then the
+	 * components containing it, innermost first): move keyboard focus there.
+	 * `field` is the outermost owner that takes keys and whose focus target is
+	 * the clicked `editor`/`input`, if any; `sheet` tells the overlays that
+	 * don't hold the keys while the user works beside them.
+	 */
+	focusFromPointer(
+		owners: readonly Component[],
+		field: Component | null,
+		sheet: (overlay: Component) => boolean,
+	): void;
 	requestRender(): void;
 	/** The terminal switched appearance. */
 	appearanceChanged(dark: boolean): void;
@@ -80,18 +102,73 @@ export interface NativeBackendOptions {
 	readonly recordPath?: string;
 	/** Log the `rows` fallback count per frame. Defaults to `PI_TUI_NATIVE_STATS=1`. */
 	readonly stats?: boolean;
-	readonly now?: () => number;
+	/** Clock and timers (stall wake-up); defaults to `Date.now` and unref'd `setTimeout`. */
+	readonly scheduler?: RenderScheduler;
 }
+
+/** Real clock and timers that never keep the process alive on their own. */
+const DEFAULT_SCHEDULER: RenderScheduler = {
+	now: () => Date.now(),
+	scheduleImmediate: callback => {
+		setImmediate(callback);
+	},
+	scheduleRender: (callback, delayMs) => {
+		const timer = setTimeout(callback, delayMs);
+		timer.unref();
+		return { cancel: () => clearTimeout(timer) };
+	},
+};
 
 /** Frames kept for the debug `tsp` op. */
 const RECENT_FRAMES = 64;
 /** An unanswered frame older than this no longer holds rendering back. */
 const STALLED_ACK_MS = 5000;
+/** Role of the session's surfaces; a screen page may name its own. */
+const SESSION_ROLE = "omp.session";
+/** A `blobs` query unanswered this long counts its ids as missing: they go inline. */
+const BLOB_REPLY_MS = 3000;
+/** Expired queries kept to pair late replies with their queries, at most. */
+const MAX_BLOB_QUERIES = 16;
+
+/** A `blobs` query awaiting its reply; `timer` is unset once its ids no longer depend on it. */
+interface BlobQuery {
+	readonly ids: readonly string[];
+	timer: RenderTimer | undefined;
+}
+
+/**
+ * Save `blob` in the terminal's blob cache as `<dir>/<id>` (written aside,
+ * then renamed; skipped when present). A failure only means the terminal
+ * won't find it, so the blob goes inline.
+ */
+async function cacheBlob(dir: string, blob: NativeBlob): Promise<void> {
+	const target = path.join(dir, blob.id);
+	const temp = `${target}.tmp${process.pid}`;
+	try {
+		if (await Bun.file(target).exists()) return;
+		// Not `Bun.write`: it would create a missing folder, which only Tern may.
+		await fs.promises.writeFile(temp, blob.bytes);
+		await fs.promises.rename(temp, target);
+	} catch (error) {
+		logger.debug("TSP: could not save a blob to the terminal's cache", { dir, id: blob.id, error: String(error) });
+		await fs.promises.rm(temp, { force: true }).catch(() => {});
+	}
+}
+
+/**
+ * A `b` message's parameters. Tern names a blob by the sha256 of the bytes it
+ * receives and ignores `id`, but Tern 0.5.3 and earlier reject a blob without
+ * it, so it stays until those are gone.
+ */
+function blobParams(blob: NativeBlob): Record<string, string> {
+	return { id: blob.id, mime: blob.mime };
+}
 
 class NativeContext implements DescribeContext {
 	cols: number;
 	reduceMotion: boolean;
 	dark: boolean;
+	hour12: boolean | undefined;
 	#kinds: ReadonlySet<string>;
 	#features: ReadonlySet<string>;
 
@@ -99,6 +176,7 @@ class NativeContext implements DescribeContext {
 		this.cols = cols;
 		this.reduceMotion = hello.reduceMotion === true;
 		this.dark = hello.dark !== false;
+		this.hour12 = hello.hour12;
 		this.#kinds = new Set(hello.kinds);
 		this.#features = new Set(hello.features);
 	}
@@ -128,7 +206,8 @@ function sameSet(a: ReadonlySet<string>, b: ReadonlySet<string>): boolean {
  * The reply a v1 terminal is assumed to give before its real `hello` arrives
  * (the `TERM_PROGRAM=tern` optimistic start): the whole vocabulary, the
  * default APC limit and credits, the terminal's width, the appearance omp
- * already detected, and full motion.
+ * already detected, full motion, and `blobs`, so a resumed session's images
+ * are asked about rather than resent before the reply comes.
  */
 export function assumedTspHello(terminal: Terminal): TspHello {
 	const appearance = terminal.appearance;
@@ -137,6 +216,7 @@ export function assumedTspHello(terminal: Terminal): TspHello {
 		v: TSP_VERSION,
 		term: "tern",
 		kinds: TSP_KINDS,
+		features: ["blobs"],
 		apc: TSP_DEFAULT_APC_LIMIT,
 		credits: TSP_DEFAULT_CREDITS,
 		cols: terminal.columns,
@@ -148,19 +228,21 @@ export function assumedTspHello(terminal: Terminal): TspHello {
 class Surface {
 	readonly id: string;
 	readonly mode: "inline" | "screen";
+	/** The `o` role: `omp.session`, or a screen page's own (`NativeScreen.role`). */
+	readonly role: string;
 	readonly reconciler: Reconciler;
 	readonly doc: TspDocument | null;
 	seq = 0;
 	acked = 0;
 	/** Send times of unacknowledged frames, oldest first. */
 	unacked: number[] = [];
-	uploaded = new Set<string>();
 	focus: string | null = null;
 	dirty = false;
 
-	constructor(id: string, mode: "inline" | "screen", mirror: boolean) {
+	constructor(id: string, mode: "inline" | "screen", role: string, mirror: boolean) {
 		this.id = id;
 		this.mode = mode;
+		this.role = role;
 		this.reconciler = new Reconciler(id);
 		this.doc = mirror ? new TspDocument(id) : null;
 	}
@@ -211,7 +293,9 @@ export class NativeBackend {
 	#mirror: boolean;
 	#recordPath: string | undefined;
 	#stats: boolean;
-	#now: () => number;
+	#scheduler: RenderScheduler;
+	/** Wakes a render when the oldest unacked frame of a credit-blocked surface turns stalled. */
+	#stallTimer: RenderTimer | undefined;
 	#recent: TspFrame[] = [];
 	#sawResize = false;
 	#live = false;
@@ -221,6 +305,14 @@ export class NativeBackend {
 	#paletteKey: string | undefined;
 	/** Serialized palette last sent, to skip resends of an unchanged theme. */
 	#paletteSent: string | undefined;
+	/** Pending delivery owns bytes until sent or confirmed held; settled descriptions may already be released. */
+	#blobs = new Map<string, NativeBlob | "sent">();
+	/** `blobs` queries sent, oldest first: the terminal answers each once, in order. */
+	#blobQueries: BlobQuery[] = [];
+	/** The next pass with new blobs asks the terminal which it holds (a fresh connection). */
+	#askHeld = true;
+	/** Bumped when the connection resets or stops, so blob cache writes finishing later are dropped. */
+	#blobEpoch = 0;
 
 	constructor(host: NativeHost, hello: TspHello, options: NativeBackendOptions = {}) {
 		this.#host = host;
@@ -232,7 +324,7 @@ export class NativeBackend {
 		this.#mirror = options.mirror === true;
 		this.#recordPath = options.recordPath ?? (Bun.env.PI_TUI_TSP_RECORD || undefined);
 		this.#stats = options.stats ?? Bun.env.PI_TUI_NATIVE_STATS === "1";
-		this.#now = options.now ?? Date.now;
+		this.#scheduler = options.scheduler ?? DEFAULT_SCHEDULER;
 		this.#inline = this.#newSurface("inline");
 	}
 
@@ -333,6 +425,10 @@ export class NativeBackend {
 		this.#unbindTheme?.();
 		this.#unbindTheme = undefined;
 		this.#useNerdSymbols(false);
+		this.#clearStallTimer();
+		// Replies no longer reach the backend: forget the queries outright.
+		this.#resetBlobs();
+		this.#blobQueries = [];
 	}
 
 	/**
@@ -347,13 +443,14 @@ export class NativeBackend {
 		this.#live = true;
 		this.#useNerdSymbols(true);
 		this.#watchTheme();
+		this.#resetBlobs();
 		const surface = this.#inline;
 		surface.reconciler.detachLive();
 		surface.unacked = [];
 		surface.acked = surface.seq;
 		surface.focus = null;
 		surface.dirty = false;
-		this.#write("o", { id: surface.id, mode: "inline", title: "omp", role: "omp.session", adopt: true });
+		this.#write("o", { id: surface.id, mode: "inline", title: "omp", role: SESSION_ROLE, adopt: true });
 		this.#sendPalette(surface);
 		// After the `o`, as in `start()`.
 		setNativeRendering(true);
@@ -364,8 +461,8 @@ export class NativeBackend {
 	 * The terminal's real `hello` reply after an optimistic start: adopt its
 	 * APC limit, credits, cell size, kinds, appearance and motion preference.
 	 * A width the terminal already reported in a `resize` event wins over the
-	 * reply's. A different vocabulary or motion preference re-describes every
-	 * component, so kinds the terminal lacks fall back.
+	 * reply's. A different vocabulary, motion preference or clock re-describes
+	 * every component, so kinds the terminal lacks fall back.
 	 */
 	confirm(hello: TspHello): void {
 		const before = this.#cx;
@@ -377,7 +474,12 @@ export class NativeBackend {
 			this.#sawResize = true;
 		}
 		if (this.#cx.dark !== before.dark) this.#host.appearanceChanged(this.#cx.dark);
-		if (this.#cx.reduceMotion !== before.reduceMotion || !this.#cx.sameVocabulary(before)) this.#host.invalidate();
+		if (
+			this.#cx.reduceMotion !== before.reduceMotion ||
+			this.#cx.hour12 !== before.hour12 ||
+			!this.#cx.sameVocabulary(before)
+		)
+			this.#host.invalidate();
 		this.#host.requestRender();
 	}
 
@@ -408,13 +510,18 @@ export class NativeBackend {
 		let dock: readonly NativeChild[];
 		let layer: NativeChild[];
 		if (fullscreen >= 0) {
-			if (!this.#screen) {
-				this.#screen = this.#newSurface("screen");
+			const component = overlays[fullscreen]!.component;
+			const page = component.describeScreen?.(this.#cx);
+			const role = page?.role ?? SESSION_ROLE;
+			if (this.#screen?.role !== role) {
+				// A page with another role is another surface: its styling keys off the `o`.
+				if (this.#screen) this.#close(this.#screen, false);
+				this.#screen = this.#newSurface("screen", role);
 				this.#open(this.#screen);
 			}
 			surface = this.#screen;
-			main = [overlays[fullscreen]!.component];
-			dock = [];
+			main = page?.main ?? [component];
+			dock = page?.dock ?? [];
 			layer = overlays.slice(fullscreen + 1).map(overlay => this.#overlayNode(overlay));
 		} else {
 			if (this.#screen) {
@@ -430,6 +537,7 @@ export class NativeBackend {
 		this.#pruneOverlayNodes(overlays);
 		if (!this.#hasCredit(surface)) {
 			surface.dirty = true;
+			this.#armStallTimer(surface);
 			return;
 		}
 		surface.dirty = false;
@@ -444,7 +552,7 @@ export class NativeBackend {
 			logger.debug("TSP frame", { sf: surface.id, ops: ops.length, rows: surface.reconciler.fallbackCount });
 		}
 		if (ops.length === 0) return;
-		this.#uploadBlobs(surface, ops);
+		this.#uploadBlobs(ops);
 		this.#sendFrame(surface, ops);
 	}
 
@@ -458,6 +566,7 @@ export class NativeBackend {
 		this.#record("in", raw.verb, raw.params, raw.body);
 		const message = this.#reader.feed(sequence);
 		if (message?.verb === "e") this.#handleEvent(message.event);
+		else if (message?.reply.r === "blobs") this.#onBlobsReply(message.reply.have);
 		return true;
 	}
 
@@ -478,12 +587,12 @@ export class NativeBackend {
 		this.#sawResize = false;
 	}
 
-	#newSurface(mode: "inline" | "screen"): Surface {
-		return new Surface(`s:${this.#nextSurface++}`, mode, this.#mirror);
+	#newSurface(mode: "inline" | "screen", role = SESSION_ROLE): Surface {
+		return new Surface(`s:${this.#nextSurface++}`, mode, role, this.#mirror);
 	}
 
 	#open(surface: Surface): void {
-		this.#write("o", { id: surface.id, mode: surface.mode, title: "omp", role: "omp.session" });
+		this.#write("o", { id: surface.id, mode: surface.mode, title: "omp", role: surface.role });
 		this.#sendPalette(surface);
 	}
 
@@ -494,7 +603,7 @@ export class NativeBackend {
 	#hasCredit(surface: Surface): boolean {
 		if (surface.unacked.length < this.#credits) return true;
 		const oldest = surface.unacked[0]!;
-		if (this.#now() - oldest < STALLED_ACK_MS) return false;
+		if (this.#scheduler.now() - oldest < STALLED_ACK_MS) return false;
 		logger.warn("TSP: terminal stopped acknowledging frames; resuming without credits", {
 			sf: surface.id,
 			s: surface.seq,
@@ -505,9 +614,27 @@ export class NativeBackend {
 		return true;
 	}
 
+	/** Render again once `surface`'s oldest unacked frame counts as stalled, in case no ack ever arrives. */
+	#armStallTimer(surface: Surface): void {
+		if (this.#stallTimer) return;
+		const delay = surface.unacked[0]! + STALLED_ACK_MS - this.#scheduler.now();
+		this.#stallTimer = this.#scheduler.scheduleRender(
+			() => {
+				this.#stallTimer = undefined;
+				this.#host.requestRender();
+			},
+			Math.max(0, delay),
+		);
+	}
+
+	#clearStallTimer(): void {
+		this.#stallTimer?.cancel();
+		this.#stallTimer = undefined;
+	}
+
 	#sendFrame(surface: Surface, ops: readonly TspOp[]): void {
 		surface.seq++;
-		surface.unacked.push(this.#now());
+		surface.unacked.push(this.#scheduler.now());
 		const frame: TspFrame = { sf: surface.id, s: surface.seq, ops };
 		if (surface.doc) {
 			const errors = surface.doc.applyFrame(frame);
@@ -518,25 +645,118 @@ export class NativeBackend {
 		this.#write("f", frame);
 	}
 
-	#uploadBlobs(surface: Surface, ops: readonly TspOp[]): void {
+	/** Deliver the blobs `ops` reference that this connection hasn't handled yet (see the module doc). */
+	#uploadBlobs(ops: readonly TspOp[]): void {
 		const ids = new Set<string>();
 		for (const op of ops) collectBlobs(op, ids);
+		const fresh: NativeBlob[] = [];
 		for (const id of ids) {
-			if (surface.uploaded.has(id)) continue;
+			if (this.#blobs.has(id)) continue;
 			const blob = getNativeBlob(id);
-			if (!blob) {
-				logger.warn("TSP: image references an unregistered blob", { id });
-				continue;
+			if (blob) fresh.push(blob);
+			else logger.warn("TSP: image references an unregistered blob", { id });
+		}
+		if (fresh.length === 0) return;
+		if (!this.#cx.feature("blobs")) {
+			for (const blob of fresh) this.#sendBlob(blob);
+			return;
+		}
+		const dir = Bun.env.TERN_BLOB_DIR;
+		if (dir) {
+			for (const blob of fresh) this.#blobs.set(blob.id, blob);
+			void this.#cacheBlobs(dir, fresh);
+			return;
+		}
+		if (this.#askHeld) {
+			this.#askHeld = false;
+			this.#askBlobs(fresh);
+			return;
+		}
+		for (const blob of fresh) this.#sendBlob(blob);
+	}
+
+	/** Write `blobs` to the terminal's cache, then ask about the ones still pending. */
+	async #cacheBlobs(dir: string, blobs: readonly NativeBlob[]): Promise<void> {
+		const epoch = this.#blobEpoch;
+		await Promise.all(blobs.map(blob => cacheBlob(dir, blob)));
+		if (epoch !== this.#blobEpoch) return;
+		const pending = blobs.filter(blob => this.#blobs.get(blob.id) === blob);
+		if (pending.length > 0) this.#askBlobs(pending);
+	}
+
+	/** Ask the terminal which of `blobs` it holds; the reply (or its absence) settles them. */
+	#askBlobs(blobs: readonly NativeBlob[]): void {
+		for (const blob of blobs) this.#blobs.set(blob.id, blob);
+		const ids = blobs.map(blob => blob.id);
+		const query: BlobQuery = { ids, timer: undefined };
+		query.timer = this.#scheduler.scheduleRender(() => {
+			query.timer = undefined;
+			logger.warn("TSP: no reply to a blobs query; sending its blobs inline", { ids: ids.length });
+			this.#sendMissing(ids);
+		}, BLOB_REPLY_MS);
+		// Expired queries stay only to pair late replies; a terminal that never answers mustn't grow the list.
+		while (this.#blobQueries.length >= MAX_BLOB_QUERIES && !this.#blobQueries[0]!.timer) this.#blobQueries.shift();
+		this.#blobQueries.push(query);
+		this.#write("q", { q: "blobs", ids });
+	}
+
+	/**
+	 * The reply to the oldest outstanding query. Any `have` id still asked
+	 * about is held by the terminal (whichever query asked); the query's other
+	 * ids go inline.
+	 */
+	#onBlobsReply(have: readonly string[]): void {
+		const query = this.#blobQueries.shift();
+		for (const id of have) {
+			const blob = this.#blobs.get(id);
+			if (blob === undefined || blob === "sent") continue;
+			// The bytes went another way; a recording still carries them so a replay without them shows the image.
+			if (this.#recordPath) {
+				const body = Buffer.from(blob.bytes.buffer, blob.bytes.byteOffset, blob.bytes.byteLength).toString(
+					"base64",
+				);
+				this.#record("out", "b", blobParams(blob), body);
 			}
-			surface.uploaded.add(id);
-			const body = Buffer.from(blob.bytes.buffer, blob.bytes.byteOffset, blob.bytes.byteLength).toString("base64");
-			// The full body, so a replay (Tern's `surface-play`) shows the image.
-			this.#record("out", "b", { id, mime: blob.mime }, body);
-			this.#host.terminal.write(encodeTspMessage("b", body, { id, mime: blob.mime }, this.#limit));
+			this.#blobs.set(id, "sent");
+		}
+		if (!query?.timer) return;
+		query.timer.cancel();
+		query.timer = undefined;
+		this.#sendMissing(query.ids);
+	}
+
+	/** Send inline every id of `ids` still waiting on a query. */
+	#sendMissing(ids: readonly string[]): void {
+		for (const id of ids) {
+			const blob = this.#blobs.get(id);
+			if (blob !== undefined && blob !== "sent") this.#sendBlob(blob);
 		}
 	}
 
-	#write(verb: "o" | "f" | "t" | "x", body: unknown): void {
+	#sendBlob(blob: NativeBlob): void {
+		this.#blobs.set(blob.id, "sent");
+		const body = Buffer.from(blob.bytes.buffer, blob.bytes.byteOffset, blob.bytes.byteLength).toString("base64");
+		// The full body, so a replay (Tern's `surface-play`) shows the image.
+		this.#record("out", "b", blobParams(blob), body);
+		this.#host.terminal.write(encodeTspMessage("b", body, blobParams(blob), this.#limit));
+	}
+
+	/**
+	 * A new connection (resume, or a fresh inline surface after `gone`): the
+	 * terminal is asked again. Outstanding queries stay, without their
+	 * deadlines, only to pair their replies.
+	 */
+	#resetBlobs(): void {
+		this.#blobEpoch++;
+		this.#blobs.clear();
+		this.#askHeld = true;
+		for (const query of this.#blobQueries) {
+			query.timer?.cancel();
+			query.timer = undefined;
+		}
+	}
+
+	#write(verb: "o" | "f" | "t" | "x" | "q", body: unknown): void {
 		this.#record("out", verb, undefined, body);
 		this.#host.terminal.write(encodeTspJson(verb, body, undefined, this.#limit));
 	}
@@ -553,7 +773,7 @@ export class NativeBackend {
 			}
 		}
 		try {
-			fs.appendFileSync(path, `${JSON.stringify({ t: this.#now(), dir, verb, params, body: payload })}\n`);
+			fs.appendFileSync(path, `${JSON.stringify({ t: this.#scheduler.now(), dir, verb, params, body: payload })}\n`);
 		} catch (error) {
 			logger.warn("TSP: recording failed; disabling", { path, error: String(error) });
 			this.#recordPath = undefined;
@@ -573,6 +793,7 @@ export class NativeBackend {
 				const newly = Math.min(event.s, surface.seq) - surface.acked;
 				surface.acked = Math.min(event.s, surface.seq);
 				surface.unacked.splice(0, newly);
+				this.#clearStallTimer();
 				if (surface.dirty) this.#host.requestRender();
 				return;
 			}
@@ -599,6 +820,7 @@ export class NativeBackend {
 			case "gone":
 				if (event.ids.includes(this.#inline.id)) {
 					// Adopt found nothing (evicted, or another pane): start over.
+					this.#resetBlobs();
 					this.#inline = this.#newSurface("inline");
 					if (this.#live) this.#open(this.#inline);
 					this.#host.requestRender();
@@ -611,15 +833,36 @@ export class NativeBackend {
 			case "activate":
 			case "action":
 			case "change":
+			case "edit":
+			case "undo":
+			case "send":
 				this.#routeUiEvent(event);
 				return;
+			case "focus": {
+				const reconciler = this.#surfaceFor(event.sf)?.reconciler;
+				const owners = reconciler?.owners(event.id) ?? [];
+				if (!reconciler || owners.length === 0) return;
+				const field =
+					owners.findLast(owner => owner.handleInput && reconciler.focusTarget(owner) === event.id) ?? null;
+				this.#host.focusFromPointer(owners, field, overlay => overlay.nativeSheet?.(this.#cx) === true);
+				this.#host.requestRender();
+				return;
+			}
 		}
 	}
 
-	#routeUiEvent(event: Extract<TspEvent, { ev: "toggle" | "select" | "activate" | "action" | "change" }>): void {
+	#routeUiEvent(
+		event: Extract<
+			TspEvent,
+			{ ev: "toggle" | "select" | "activate" | "action" | "change" | "edit" | "undo" | "send" }
+		>,
+	): void {
 		const reconciler = this.#surfaceFor(event.sf)?.reconciler;
 		const target = reconciler?.target(event.id);
 		if (!reconciler || !target?.component.handleNativeEvent) return;
+		// Explicit sends must address the live editor, not a stale or invented
+		// descendant id that merely shares the component's namespace.
+		if (event.ev === "send" && (!this.#live || reconciler.focusTarget(target.component) !== event.id)) return;
 		// A list's items are nodes (`<list>/<key>`, or a component's root id) and
 		// map back to their described key. Data-first kinds (picker, prefs) send
 		// the program's own item ids (model ids, paths), which pass through.
@@ -643,6 +886,17 @@ export class NativeBackend {
 				break;
 			case "change":
 				ui = { type: "change", key: target.keypath, item: event.item, value: event.value };
+				break;
+			case "edit": {
+				const { from, to, text, cursor, len } = event;
+				ui = { type: "edit", key: target.keypath, from, to, text, cursor, len };
+				break;
+			}
+			case "undo":
+				ui = { type: "undo", key: target.keypath };
+				break;
+			case "send":
+				ui = { type: "send", key: target.keypath, text: event.text };
 				break;
 		}
 		target.component.handleNativeEvent(ui);

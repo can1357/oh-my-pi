@@ -266,6 +266,7 @@ export type {
 	SessionBeforeSwitchEvent,
 	SessionBeforeTreeEvent,
 	SessionBranchEvent,
+	SessionBranchReason,
 	SessionCompactEvent,
 	SessionCompactingEvent,
 	SessionEvent,

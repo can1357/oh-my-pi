@@ -3,11 +3,10 @@
  * (`~/.omp/agent/cache/composer.db`).
  *
  * Each row is one JSON payload keyed by project (the resolved cwd) and kind.
- * Settings-derived kinds (theme/composer preferences, welcome model labels,
- * status-bar inputs) are also written under the empty project, so a folder that
- * never ran omp still paints with the user's theme and status bar: those are
- * rarely project-specific, and path/branch render live. Recent sessions and LSP
- * rows stay per project.
+ * Settings-derived kinds (theme/composer preferences, status-bar inputs) are
+ * also written under the empty project, so a folder that never ran omp still
+ * paints with the user's theme and status bar: those are rarely
+ * project-specific, and path/branch render live.
  *
  * ```text
  * entries (project TEXT, kind TEXT, value TEXT JSON, PRIMARY KEY (project, kind))
@@ -25,7 +24,6 @@ import * as logger from "@oh-my-pi/pi-utils/logger";
 import * as postmortem from "@oh-my-pi/pi-utils/postmortem";
 import { openSqliteDatabaseSync } from "@oh-my-pi/pi-utils/sqlite";
 import { isRecord } from "@oh-my-pi/pi-utils/type-guards";
-import type { LspServerInfo, RecentSession } from "./welcome";
 import type { ComposerPreferences, ComposerStatusCache } from "./composer";
 import { readStatusLineStartupData } from "../status-line/startup";
 import type { SymbolPreset } from "../theme/theme";
@@ -35,7 +33,6 @@ import { isWordCompletionMethod } from "./word-completion";
 const FORMAT_VERSION = 1;
 /** Project key of rows that serve every project lacking its own. */
 const ANY_PROJECT = "";
-const RECENT_SESSION_LIMIT = 4;
 
 const SCHEMA = `
 PRAGMA journal_mode=WAL;
@@ -48,9 +45,8 @@ CREATE TABLE IF NOT EXISTS entries (
 ) WITHOUT ROWID;
 `;
 
-type EntryKind = "ui" | "welcome" | "recent-sessions" | "lsp-servers" | "status";
-/** Kinds mirrored under {@link ANY_PROJECT} as the fallback for projects without their own row. */
-type SharedEntryKind = "ui" | "welcome" | "status";
+/** Every kind is mirrored under {@link ANY_PROJECT} as the fallback for projects without their own row. */
+type EntryKind = "ui" | "status";
 
 /** Theme inputs cached from the last resolved settings load for stable prepaint colors. */
 export interface ComposerThemePreferences {
@@ -60,20 +56,10 @@ export interface ComposerThemePreferences {
 	readonly lightTheme?: string;
 }
 
-/** Last authoritative model labels shown in the welcome component. */
-export interface ComposerWelcomeCache {
-	readonly modelName: string;
-	readonly providerName: string;
-}
-
 /** Speculative composer state read before the settings/session graph is available. */
 export interface ComposerStartupCache {
 	readonly preferences?: ComposerPreferences;
 	readonly theme?: ComposerThemePreferences;
-	readonly welcome?: ComposerWelcomeCache;
-	readonly recentSessions: RecentSession[];
-	/** `null` when the last run had LSP disabled. */
-	readonly lspServers: LspServerInfo[] | null;
 	readonly status?: ComposerStatusCache;
 }
 
@@ -84,44 +70,6 @@ function parseJson(value: string | undefined): unknown {
 	} catch {
 		return undefined;
 	}
-}
-
-function parseRecentSessions(value: unknown): RecentSession[] {
-	if (!Array.isArray(value)) return [];
-	const sessions: RecentSession[] = [];
-	for (const item of value) {
-		if (!isRecord(item)) continue;
-		const { name, timeAgo } = item;
-		if (typeof name === "string" && typeof timeAgo === "string") sessions.push({ name, timeAgo });
-		if (sessions.length === RECENT_SESSION_LIMIT) break;
-	}
-	return sessions;
-}
-
-function parseLspServers(value: unknown): LspServerInfo[] | null {
-	if (value === null) return null;
-	if (!Array.isArray(value)) return [];
-	const servers: LspServerInfo[] = [];
-	for (const item of value) {
-		if (!isRecord(item)) continue;
-		const { name, status, fileTypes } = item;
-		if (
-			typeof name !== "string" ||
-			(status !== "ready" && status !== "error" && status !== "connecting" && status !== "available") ||
-			!Array.isArray(fileTypes) ||
-			!fileTypes.every(fileType => typeof fileType === "string")
-		) {
-			continue;
-		}
-		servers.push({ name, status, fileTypes });
-	}
-	return servers;
-}
-
-function parseWelcome(value: unknown): ComposerWelcomeCache | undefined {
-	if (!isRecord(value)) return undefined;
-	const { modelName, providerName } = value;
-	return typeof modelName === "string" && typeof providerName === "string" ? { modelName, providerName } : undefined;
 }
 
 function parseStatus(value: unknown): ComposerStatusCache | undefined {
@@ -226,6 +174,13 @@ export class ComposerCache {
 	readonly #db: Database;
 	readonly #select: Statement<{ project: string; kind: EntryKind; value: string }, [string, string]>;
 	readonly #upsert: Statement<unknown, [string, EntryKind, string]>;
+	/**
+	 * Value this connection last read or wrote per `project\0kind`. Startup and
+	 * model/status events re-send identical payloads; matching ones skip the
+	 * write transaction entirely. Another process may have replaced a row since;
+	 * that only lets its (equally speculative) value win until ours changes.
+	 */
+	readonly #known = new Map<string, string>();
 
 	private constructor(db: Database) {
 		this.#db = db;
@@ -236,8 +191,9 @@ export class ComposerCache {
 			db.run(`PRAGMA user_version = ${FORMAT_VERSION}`);
 		}
 		this.#select = db.prepare("SELECT project, kind, value FROM entries WHERE project IN (?, ?)");
+		// The WHERE turns a byte-identical upsert into a no-op instead of a page rewrite.
 		this.#upsert = db.prepare(
-			"INSERT INTO entries (project, kind, value) VALUES (?, ?, ?) ON CONFLICT (project, kind) DO UPDATE SET value = excluded.value",
+			"INSERT INTO entries (project, kind, value) VALUES (?, ?, ?) ON CONFLICT (project, kind) DO UPDATE SET value = excluded.value WHERE value IS NOT excluded.value",
 		);
 	}
 
@@ -258,6 +214,7 @@ export class ComposerCache {
 		try {
 			for (const row of this.#select.all(project, ANY_PROJECT)) {
 				(row.project === project ? own : anyProject)[row.kind] = row.value;
+				this.#known.set(`${row.project}\0${row.kind}`, row.value);
 			}
 		} catch (error) {
 			logger.debug("composer cache read failed", { error: String(error) });
@@ -266,9 +223,6 @@ export class ComposerCache {
 		return {
 			preferences: ui?.preferences,
 			theme: ui?.theme,
-			welcome: parseWelcome(parseJson(own.welcome)) ?? parseWelcome(parseJson(anyProject.welcome)),
-			recentSessions: parseRecentSessions(parseJson(own["recent-sessions"])),
-			lspServers: own["lsp-servers"] === undefined ? [] : parseLspServers(parseJson(own["lsp-servers"])),
 			status: parseStatus(parseJson(own.status)) ?? parseStatus(parseJson(anyProject.status)),
 		};
 	}
@@ -278,47 +232,35 @@ export class ComposerCache {
 		this.#putShared(cwd, "ui", { preferences, theme });
 	}
 
-	/** Authoritative model/provider labels for the next welcome prepaint. */
-	writeWelcome(cwd: string, welcome: ComposerWelcomeCache): void {
-		this.#putShared(cwd, "welcome", welcome);
-	}
-
-	/** The latest recent-session rows (first four). */
-	writeRecentSessions(cwd: string, sessions: readonly RecentSession[]): void {
-		this.#put(cwd, "recent-sessions", sessions.slice(0, RECENT_SESSION_LIMIT));
-	}
-
-	/** The latest detected project LSP rows; `null` records that LSP is disabled. */
-	writeLspServers(cwd: string, servers: readonly LspServerInfo[] | null): void {
-		this.#put(cwd, "lsp-servers", servers);
-	}
-
 	/** Status-bar inputs for the next prepaint's startup status line. */
 	writeStatus(cwd: string, status: ComposerStatusCache): void {
 		this.#putShared(cwd, "status", status);
 	}
 
 	close(): void {
+		// Unfinalized statements keep the file handle open on Windows.
+		this.#select.finalize();
+		this.#upsert.finalize();
 		this.#db.close();
 	}
 
-	/** Best-effort upsert: a failed write only costs the next launch its speculation. */
-	#put(cwd: string, kind: EntryKind, value: unknown): void {
-		try {
-			this.#upsert.run(path.resolve(cwd), kind, JSON.stringify(value));
-		} catch (error) {
-			logger.debug("composer cache write failed", { kind, error: String(error) });
-		}
-	}
-
-	/** {@link #put} for this project plus the any-project fallback row, atomically. */
-	#putShared(cwd: string, kind: SharedEntryKind, value: unknown): void {
+	/**
+	 * Best-effort upsert of this project's row plus the any-project fallback row,
+	 * atomically: a failed write only costs the next launch its speculation.
+	 */
+	#putShared(cwd: string, kind: EntryKind, value: unknown): void {
+		const project = path.resolve(cwd);
 		const json = JSON.stringify(value);
+		const ownKey = `${project}\0${kind}`;
+		const anyKey = `${ANY_PROJECT}\0${kind}`;
+		if (this.#known.get(ownKey) === json && this.#known.get(anyKey) === json) return;
 		try {
 			this.#db.transaction(() => {
-				this.#upsert.run(path.resolve(cwd), kind, json);
+				this.#upsert.run(project, kind, json);
 				this.#upsert.run(ANY_PROJECT, kind, json);
 			})();
+			this.#known.set(ownKey, json);
+			this.#known.set(anyKey, json);
 		} catch (error) {
 			logger.debug("composer cache write failed", { kind, error: String(error) });
 		}

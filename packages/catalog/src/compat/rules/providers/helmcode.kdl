@@ -1,0 +1,120 @@
+// Provider-wire compat for "helmcode": Helmcode is an OpenAI-compatible gateway
+// for private EU inference (helmcode.com/docs). One base URL serves three
+// plan-covered open-weight chat models, the per-key GLM 5.3 add-on, and nine
+// resold frontier models (Claude/GPT/Gemini). Non-chat rows on `/v1/models`
+// (embeddings, rerank, kokoro TTS, whisper STT) are excluded via
+// runtime/behavior.kdl.
+
+provider "helmcode" {
+	default-model "deepseek-v4-flash"
+	env "HELMCODE_API_KEY"
+	dynamic-models-authoritative #true
+	// Helmcode's own endpoint and docs are the deployment truth: same-id rows on
+	// other hosts carry different output ceilings and effort ladders, so the
+	// generator must not backfill names, limits, or capabilities from them.
+	// Runtime discovery still resolves resold frontier ids (Claude, GPT,
+	// Gemini) against the first-party vendor's bundled row for context, output
+	// cap, modalities, and list price; Helmcode passes that list price through
+	// with no markup, converted to EUR (helmcode.com/docs/models, "Frontier
+	// models"), so the surfaced USD cost is the vendor's rate card.
+	skip-cross-provider-reference-fills #true
+	discovery label="Helmcode"
+
+	// Bundled fallback so the provider is usable before the first authoritative
+	// discovery call. The open-weight chat models are flat-rate under the plan
+	// and GLM 5.3 is a per-key monthly add-on, so neither has a per-token price
+	// (surfaced as 0). Resold frontier models are priced per token in the
+	// console only; they arrive through runtime discovery.
+	seed api="openai-completions" base-url="https://api.helmcode.com/v1" bundle="fallback" {
+		model "deepseek-v4-flash" name="DeepSeek V4 Flash" {
+			reasoning #true
+			input "text"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits context=1000000
+		}
+		model "qwen3.6" name="Qwen3.6" {
+			reasoning #true
+			input "text" "image"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits context=262144
+		}
+		model "gemma4" name="Gemma 4" {
+			reasoning #true
+			input "text" "image"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits context=262144
+		}
+		model "glm5.3" name="GLM 5.3" {
+			reasoning #true
+			input "text"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits context=1000000
+		}
+	}
+
+	// `reasoning_effort` ladders per helmcode.com/docs/models ("Controlling
+	// reasoning"). Provider-scoped rather than seed-only so rows discovered at
+	// runtime resolve the same ladder, and no class-level host ladder (which
+	// sends `xhigh`, a value Helmcode does not document) applies. `/v1/models`
+	// carries no capability data, so a discovered id with no bundled row, no
+	// vendor row, and no ladder below arrives as non-reasoning.
+	thinking-mode "effort"
+	// residue: taxonomy extracts no revision from Helmcode's dotless ids.
+	// `minimal` through `max` only steer this adaptive model; `none` is the
+	// one value that skips reasoning, so thinking-off sends it.
+	models "deepseek-v4-flash" {
+		thinking-upgrade-neutral #true
+		thinking-efforts "minimal" "low" "medium" "high" "max"
+		reasoning-disable-mode "none-effort"
+	}
+	// residue: taxonomy extracts no revision from Helmcode's dotless ids.
+	// Helmcode serves Qwen3.6 on the OpenAI `reasoning_effort` field, not the
+	// Qwen class's `enable_thinking` toggle, which would drop the chosen tier.
+	// `none` and `minimal` both skip reasoning, so `minimal` is not a tier and
+	// thinking-off sends `none`. With no field both default to a 16,384 token
+	// budget, which is the `high` tier.
+	models "qwen3.6" "gemma4" {
+		thinking-upgrade-neutral #true
+		thinking-efforts "low" "medium" "high" "max"
+		thinking-default-level "high"
+		thinking-format "openai"
+		reasoning-disable-mode "none-effort"
+	}
+	// residue: taxonomy extracts no revision from Helmcode's dotless ids.
+	models "glm5.3" "glm5.3-flash" "glm5.2" {
+		thinking-upgrade-neutral #true
+		thinking-efforts "low" "medium" "high" "max"
+		thinking-default-level "max"
+	}
+
+	// The resold frontier models run on their vendors behind this same
+	// chat-completions surface, and Helmcode documents no `reasoning_effort`
+	// values for them. Keep them to the core low/medium/high tiers of that
+	// field so the inherited vendor ladders never send `minimal`, `xhigh`, or
+	// `max`, nor a vendor-native thinking shape, to this host. priority=1
+	// outranks the equally scoped lineage ladders in classes/*.kdl; Gemini's
+	// ladders are family-scoped there, so the override is too.
+	class "anthropic" priority=1 {
+		thinking-mode "effort"
+		thinking-efforts "low" "medium" "high"
+	}
+	// Helmcode bills cache writes only for Anthropic models; OpenAI and Google
+	// cache creation is free there, so the inherited OpenAI write rate is zeroed.
+	class "openai" priority=1 {
+		thinking-mode "effort"
+		thinking-efforts "low" "medium" "high"
+		cost-patch {
+			cache-write 0.0
+		}
+	}
+	class "gemini" {
+		family "flash" priority=1 {
+			thinking-mode "effort"
+			thinking-efforts "low" "medium" "high"
+		}
+		family "lite" priority=1 {
+			thinking-mode "effort"
+			thinking-efforts "low" "medium" "high"
+		}
+	}
+}

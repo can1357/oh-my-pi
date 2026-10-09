@@ -60,7 +60,6 @@ async function createHarness(factory: ExtensionFactory) {
 		followUp: vi.fn(async (_text: string, _images?: ImageContent[]) => {}),
 		promptCustomMessage: vi.fn(async () => true),
 		abort: vi.fn(async () => {}),
-		maybeStartTitleGeneration: vi.fn(),
 	};
 	const ctx = {
 		editor,
@@ -88,6 +87,7 @@ async function createHarness(factory: ExtensionFactory) {
 		hasActiveBtw: () => false,
 		hasActiveOmfg: () => false,
 		hasActiveCleanse: () => false,
+		dismissCommandReport: () => false,
 		updateEditorBorderColor: vi.fn(),
 		updatePendingMessagesDisplay: vi.fn(),
 		flushPendingBashComponents: vi.fn(),

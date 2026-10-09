@@ -13,7 +13,13 @@ import {
 	truncateTailBytes,
 } from "@oh-my-pi/pi-tui/tools/streaming-output";
 import { workerEnvFromParent } from "../subprocess/worker-client";
-import { daemonBrokerEndpoint, writeDaemonScopeMeta } from "./paths";
+import {
+	DAEMON_META_FILE,
+	DAEMON_SPEC_FILE,
+	daemonBrokerEndpoint,
+	readStoredDaemonRecord,
+	writeDaemonScopeMeta,
+} from "./paths";
 import type { DaemonReadySpec, DaemonSnapshot, DaemonSpec } from "@oh-my-pi/pi-tui/tools/daemon";
 import { hasLiveDaemonProjectPresence, pruneDeadDaemonRuntimeDirs } from "./presence";
 import {
@@ -34,6 +40,7 @@ import {
 } from "./protocol";
 import { resolveDaemonSpawnOptions } from "./spawn-options";
 import { renderTerminalOutput } from "./terminal-output";
+import { quotePosixArgv } from "../utils/shell-quote";
 
 const DEFAULT_IDLE_GRACE_MS = 3_000;
 const MAX_REQUEST_BYTES = 1024 * 1024;
@@ -57,7 +64,6 @@ const PID_FILE = "broker.pid";
 const LEASE_HANDOFF_GRACE_MS = 500;
 /** Connect budget for the endpoint probe that answers "is a broker serving this scope?". */
 const LEASE_PROBE_TIMEOUT_MS = 250;
-const META_FILE = "meta.json";
 const LOG_FILE = "output.log";
 const PREVIOUS_LOG_FILE = "output.previous.log";
 const DAEMON_SPAWN_OPTIONS = resolveDaemonSpawnOptions({
@@ -100,6 +106,10 @@ interface ManagedDaemon {
 	pendingCompletions: DaemonCompletionNotification[];
 	completionSubscriptionId?: string;
 	persistQueue: Promise<void>;
+	/** Serialized spec last written (or recovered); a write is skipped while unchanged. */
+	persistedSpec?: string;
+	/** Serialized metadata last written (or recovered); a write is skipped while unchanged. */
+	persistedMeta?: string;
 }
 
 interface BrokerLease {
@@ -112,10 +122,6 @@ interface DaemonLogRead {
 	text: string;
 	terminalOutput: string;
 	cursor: number;
-}
-
-function quoteShellArg(value: string): string {
-	return `'${value.replaceAll("'", `'\\''`)}'`;
 }
 
 function terminalState(state: DaemonSnapshot["state"]): boolean {
@@ -175,6 +181,13 @@ function syncReadyPending(record: ManagedDaemon): void {
 	if (!record.logReady) pending.push("log");
 	if (!record.portReady) pending.push("port");
 	record.snapshot.readyPending = pending.length > 0 ? pending : undefined;
+}
+
+/** Replace `filePath` via a pid-scoped temp file so readers never see a partial write. */
+async function writeFileAtomic(filePath: string, content: string): Promise<void> {
+	const tempPath = `${filePath}.${process.pid}.tmp`;
+	await Bun.write(tempPath, content);
+	await fs.rename(tempPath, filePath);
 }
 
 async function fileTextSlice(filePath: string, head: boolean): Promise<string> {
@@ -647,7 +660,9 @@ class DaemonBroker {
 				return this.#send(operation);
 			case "stop": {
 				const record = this.#record(operation.name);
-				await this.#stopRecord(record, operation.timeoutMs);
+				if (operation.id === undefined || operation.id === record.snapshot.id) {
+					await this.#stopRecord(record, operation.timeoutMs);
+				}
 				return { op: "stop", daemon: record.snapshot };
 			}
 			case "restart":
@@ -805,7 +820,19 @@ class DaemonBroker {
 		// Nothing plays terminal for a supervised PTY, so a program probing for
 		// cursor position or device attributes would block on the reply. Answer
 		// the queries from the output stream and write the replies to its stdin.
-		const responder = new TerminalQueryResponder();
+		//
+		// On Windows ConPTY sits in between and forwards a program's probes
+		// rather than answering them (current conhost leaves replies to the
+		// terminal; older builds answer from the console buffer and never put
+		// the probe on this stream). ConPTY also sends queries of its own and
+		// consumes their replies: device attributes at session start and cursor
+		// resyncs later, all answered here. The one exception is its
+		// INHERIT_CURSOR handshake, the first `CSI 6 n` on the stream, which the
+		// PTY layer answers before the child owns stdin
+		// (crates/pi-natives/src/pty.rs). ConPTY consumes one report for it;
+		// replying again would put a second report on the program's stdin,
+		// where the console decodes it as a keypress.
+		const responder = new TerminalQueryResponder({ hostCursorHandshake: process.platform === "win32" });
 		const onChunk = (error: Error | null, chunk: string): void => {
 			if (generation !== record.generation) return;
 			if (error) record.log?.append(`PTY output error: ${error.message}\n`);
@@ -842,7 +869,7 @@ class DaemonBroker {
 			);
 		} else {
 			const argv = [record.spec.application, ...record.spec.args];
-			const command = `exec ${argv.map(quoteShellArg).join(" ")}`;
+			const command = `exec ${quotePosixArgv(argv)}`;
 			const shell = procmgr.getShellConfig().shell;
 			run = session.start({ command, shell, ...options }, onChunk, onStart);
 		}
@@ -1315,7 +1342,6 @@ class DaemonBroker {
 	#serializeMetadata(record: ManagedDaemon): string {
 		return JSON.stringify({
 			daemon: { ...record.snapshot },
-			spec: record.spec,
 			completionEvents: record.completionCapable,
 			completionSubscriptionId: record.completionSubscriptionId,
 			completionPending: record.pendingCompletions.length > 0,
@@ -1328,15 +1354,23 @@ class DaemonBroker {
 	}
 
 	#persist(record: ManagedDaemon): void {
-		const metaPath = path.join(record.dir, META_FILE);
-		const tempPath = `${metaPath}.${process.pid}.tmp`;
+		const spec = JSON.stringify(record.spec);
 		const metadata = this.#serializeMetadata(record);
+		const writeSpec = spec !== record.persistedSpec;
+		const writeMeta = metadata !== record.persistedMeta;
+		if (!writeSpec && !writeMeta) return;
+		record.persistedSpec = spec;
+		record.persistedMeta = metadata;
 		record.persistQueue = record.persistQueue
 			.then(async () => {
-				await Bun.write(tempPath, metadata);
-				await fs.rename(tempPath, metaPath);
+				// Spec first: recovery must never find metadata whose spec is not on disk.
+				if (writeSpec) await writeFileAtomic(path.join(record.dir, DAEMON_SPEC_FILE), spec);
+				if (writeMeta) await writeFileAtomic(path.join(record.dir, DAEMON_META_FILE), metadata);
 			})
 			.catch(error => {
+				// Unknown on-disk state: force the next persist to write both files.
+				record.persistedSpec = undefined;
+				record.persistedMeta = undefined;
 				logger.warn("Failed to persist daemon metadata", {
 					name: record.snapshot.name,
 					error: error instanceof Error ? error.message : String(error),
@@ -1379,12 +1413,11 @@ class DaemonBroker {
 			if (!entry.isDirectory()) continue;
 			const dir = path.join(root, entry.name);
 			try {
-				const decoded: unknown = await Bun.file(path.join(dir, META_FILE)).json();
-				if (typeof decoded !== "object" || decoded === null || !("daemon" in decoded) || !("spec" in decoded)) {
-					continue;
-				}
+				const stored = await readStoredDaemonRecord(dir);
+				if (!stored) continue;
+				const { meta: decoded, spec: storedSpec, legacyLayout } = stored;
 				const snapshot = parseDaemonSnapshot(decoded.daemon);
-				const spec = parseDaemonSpec(decoded.spec);
+				const spec = parseDaemonSpec(storedSpec);
 				const processRef = snapshot.pid === undefined ? null : Process.fromPid(snapshot.pid);
 				const recoverableExit = !terminalState(snapshot.state) && snapshot.state !== "stopping";
 				const detached = spec.detached && recoverableExit && processRef?.status() === "running";
@@ -1415,6 +1448,9 @@ class DaemonBroker {
 					readyPattern: spec.ready?.log ? new RegExp(spec.ready.log, "u") : undefined,
 					consecutiveFailures: 0,
 					persistQueue: Promise.resolve(),
+					// Legacy files are rewritten once into the split layout.
+					persistedSpec: legacyLayout ? undefined : JSON.stringify(storedSpec),
+					persistedMeta: legacyLayout ? undefined : JSON.stringify(decoded),
 					completionCapable: "completionEvents" in decoded && decoded.completionEvents === true,
 					completionSubscriptionId:
 						"completionSubscriptionId" in decoded && typeof decoded.completionSubscriptionId === "string"
@@ -1473,9 +1509,9 @@ class DaemonBroker {
 						});
 					});
 				}
-				// Recovery may only change a subset of records. In particular, a
-				// terminal record already stored in the current format needs no write.
-				if (JSON.stringify(decoded) !== this.#serializeMetadata(record)) this.#persist(record);
+				// Recovery may only change a subset of records; #persist writes only
+				// the files whose serialized form differs from what was read.
+				this.#persist(record);
 			} catch (error) {
 				logger.warn("Failed to recover daemon record", {
 					name: entry.name,

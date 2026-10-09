@@ -328,6 +328,16 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 * background.
 	 */
 	hasBackgroundCompletions?: () => boolean | Promise<boolean>;
+	/**
+	 * Peeks whether a passive aside (an extension or user message queued with
+	 * `deliverAs: "aside"`) is waiting for injection at the next boundary.
+	 *
+	 * Same rules as {@link hasBackgroundCompletions}: non-consuming, ends only
+	 * *interruptible* waits, never raises {@link ToolCallContext.steeringSignal}.
+	 * The host still injects the aside once at the boundary; ordinary running
+	 * tools finish first.
+	 */
+	hasQueuedAsides?: () => boolean | Promise<boolean>;
 
 	/**
 	 * Returns follow-up messages to process after the agent would otherwise stop.
@@ -341,7 +351,8 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 * Returns non-interrupting "aside" messages to inject at a step boundary.
 	 *
 	 * Polled after each tool batch (before the next LLM call) AND at the yield
-	 * check. Unlike steering, these NEVER abort in-flight tools — they are passive
+	 * check. Unlike steering, these never abort foreground tools (only an
+	 * interruptible `wait` ends early, via the peek hooks) — they are passive
 	 * notifications (e.g. background-job completions, late LSP diagnostics) that
 	 * should reach the model between requests without waiting for the agent to
 	 * fully stop. Returned messages are appended to the context with normal
@@ -906,6 +917,13 @@ export interface AfterToolCallResult {
 	isError?: boolean;
 	/** If provided, replaces the contextually-useless flag carried with the tool result. */
 	useless?: boolean;
+	/**
+	 * Trusted post-tool instructions for the next provider request. Delivered
+	 * outside the tool result, after all calls in the batch settle. Unlike
+	 * `BeforeToolCallResult.additionalContext`, this is retained for error
+	 * results because the callback receives the finalized outcome.
+	 */
+	additionalContext?: string;
 }
 
 /** Context passed to `beforeToolCall`. */
@@ -1136,7 +1154,7 @@ export interface AgentTool<
 	 * before ordinary dispatch commits its result.
 	 */
 	speculation?: ToolSpeculationPolicy;
-	/** If true, argument validation errors are non-fatal: raw args are passed to execute() instead of returning an error to the LLM. */
+	/** If true, schema validation errors are non-fatal: raw args are passed to execute() instead of returning an error to the LLM. Malformed argument JSON still returns the parse error. */
 	lenientArgValidation?: boolean;
 	/**
 	 * Whether the agent loop may abort this tool mid-execution — or skip it

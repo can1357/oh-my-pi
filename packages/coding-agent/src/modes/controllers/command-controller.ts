@@ -10,7 +10,16 @@ import {
 	type UsageLimit,
 	type UsageReport,
 } from "@oh-my-pi/pi-ai";
-import { Loader, Markdown, padding, Spacer, Text, visibleWidth } from "@oh-my-pi/pi-tui";
+import {
+	type Component,
+	Loader,
+	Markdown,
+	padding,
+	Spacer,
+	Text,
+	visibleWidth,
+	wrapTextWithAnsi,
+} from "@oh-my-pi/pi-tui";
 import { formatDuration, logger, Snowflake, sanitizeText } from "@oh-my-pi/pi-utils";
 import { shouldEnableAppendOnlyContext } from "../../config/append-only-context-mode";
 import { type BashResult, isPersistentShellCdCommand } from "../../exec/bash-executor";
@@ -32,15 +41,15 @@ import { memoryStatsUnavailableMessage, resolveMemoryBackend } from "../../memor
 import { BashExecutionComponent, bashPtyViewport } from "@oh-my-pi/pi-tui/chat/bash-execution";
 import { appKey } from "@oh-my-pi/pi-tui/chrome/keybinding-hints";
 import { BorderedLoader } from "@oh-my-pi/pi-tui/overlays/bordered-loader";
-import { DynamicBorder } from "@oh-my-pi/pi-tui/chrome/dynamic-border";
 import { EvalExecutionComponent } from "@oh-my-pi/pi-tui/chat/eval-execution";
 import { MoveOverlay, type MoveOverlayResult } from "@oh-my-pi/pi-tui/overlays/move-overlay";
 import { moveDirectorySource } from "../move-directory-source";
-import { TranscriptBlock } from "@oh-my-pi/pi-tui/chrome/transcript-container";
 import { getMarkdownTheme, getSymbolTheme, theme, type Theme } from "@oh-my-pi/pi-tui/theme";
 import type { InteractiveModeContext } from "../../modes/types";
-import { ContextUsageView } from "@oh-my-pi/pi-tui/status-line/context-usage";
-import { JobsPanel } from "@oh-my-pi/pi-tui/overlays/jobs-panel";
+import { ContextUsageView, contextUsageHead } from "@oh-my-pi/pi-tui/status-line/context-usage";
+import type { OverlayHandle } from "@oh-my-pi/pi-tui";
+import { ReportPanel } from "@oh-my-pi/pi-tui/overlays/report-panel";
+import type { TspText } from "@oh-my-pi/pi-wire";
 import { computeSessionContextBreakdown } from "../../session/context-usage-runtime";
 import { buildHotkeysMarkdown, HotkeysSheetComponent } from "@oh-my-pi/pi-tui/hotkeys-markdown";
 import { isNativeRendering } from "@oh-my-pi/pi-tui/native/state";
@@ -65,6 +74,8 @@ import {
 } from "../../slash-commands/helpers/active-oauth-account";
 import { formatProviderName } from "@oh-my-pi/pi-tui/chrome/format";
 import { formatCompactQuota } from "@oh-my-pi/pi-tui/overlays/advisor-config";
+import { resolveTernPane } from "../../tools/browser/tern/kind";
+import { TernError, type TernErrorKind, TernSocketClient } from "../../tools/browser/tern/wire";
 import { outputMeta } from "../../tools/output-meta";
 import { resolveToCwd, stripOuterDoubleQuotes } from "../../tools/path-utils";
 import { replaceTabs, truncateToWidth } from "@oh-my-pi/pi-tui/render/render-utils";
@@ -76,6 +87,7 @@ import {
 	selectChangelogEntries,
 } from "../../utils/changelog";
 import { copyToClipboard } from "../../utils/clipboard";
+import { formatDumpArchiveReport } from "../../session/session-dump-format";
 import { openPath } from "../../utils/open";
 import { resumeCommand } from "../../utils/resume-command";
 import { setSessionTerminalTitle } from "../../utils/title-generator";
@@ -91,22 +103,117 @@ import { cfgTerminalShowImages } from "../settings";
 import { cfgProviderAppendOnlyContext } from "../../session/settings";
 import { cfgShareRedactSecrets, cfgShareServerUrl, cfgShareStore } from "../../commands/settings";
 
+/** How long `/fork` waits for Tern to open the fork's pane. */
+const TERN_FORK_TIMEOUT_MS = 10_000;
+
+/** Fork failures after which Tern may still open the pane, so `/fork` must not also fork in place. */
+const TERN_FORK_UNCONFIRMED: Partial<Record<TernErrorKind, true>> = { closed: true, timeout: true, protocol: true };
+
 function formatCreditValue(value: number): string {
 	return value.toLocaleString(undefined, { maximumFractionDigits: 4 });
 }
 
-function showMarkdownPanel(ctx: InteractiveModeContext, title: string, markdown: string): void {
-	const block = new TranscriptBlock();
-	block.addChild(new DynamicBorder());
-	block.addChild(new Text(theme.bold(theme.fg("accent", title)), 1, 0));
-	block.addChild(new Spacer(1));
-	block.addChild(new Markdown(markdown.trim(), 1, 1, getMarkdownTheme()));
-	block.addChild(new DynamicBorder());
-	ctx.presentCommandOutput(block);
-}
-
 export class CommandController {
+	/** The open native report sheet. */
+	#reportSheet: OverlayHandle | undefined;
+	/** The editor sat on the bottom row when the text-mode report above it opened. */
+	#reportOpenedAtBottom = false;
+
 	constructor(private readonly ctx: InteractiveModeContext) {}
+
+	/**
+	 * Esc: take away the report shown above the editor (text mode); false when
+	 * none is shown. While open it may have pushed rows into the terminal's
+	 * scrollback that cannot come back, so an editor that sat on the bottom
+	 * row before is pinned there again instead of jumping up the screen.
+	 */
+	dismissCommandReport(): boolean {
+		if (!this.#clearReport()) return false;
+		if (this.#reportOpenedAtBottom) this.ctx.pinComposerToBottom();
+		this.#reportOpenedAtBottom = false;
+		return true;
+	}
+
+	/**
+	 * Drop any report — the one above the editor, or a focused sheet/page —
+	 * without pinning anything: the transcript or session under it was reset,
+	 * and its contents describe what is gone.
+	 */
+	clearCommandReport(): void {
+		this.#clearReport();
+		this.#closeReportSheet();
+		this.#reportOpenedAtBottom = false;
+	}
+
+	#clearReport(): boolean {
+		const docked = this.ctx.reportContainer;
+		if (docked.children.length === 0) return false;
+		docked.dispose();
+		docked.clear();
+		this.ctx.ui.requestRender();
+		return true;
+	}
+
+	#closeReportSheet(): void {
+		const sheet = this.#reportSheet;
+		if (!sheet) return;
+		this.#reportSheet = undefined;
+		sheet.hide();
+		this.ctx.ui.setFocus(this.ctx.editorContainer.children[0] ?? this.ctx.editor);
+		this.ctx.ui.requestRender();
+	}
+
+	/**
+	 * Show a read-only report, replacing the previous one. In text mode one that
+	 * fits the rows above the editor shows there like `/btw`: the editor keeps
+	 * focus and its Esc takes the report away. A taller one opens as a
+	 * full-screen page on the terminal's alternate screen, scrolled with the
+	 * arrow/page keys and the wheel, so the main screen is never touched and
+	 * Esc returns to it as it was. Natively it is a focused sheet like
+	 * `/usage`, its body scrolled by the terminal once it is long, closed by
+	 * Esc or Close.
+	 */
+	showCommandReport(options: { title: string; head?: TspText; body: Component }): void {
+		// A replacement keeps where the editor sat before the first report.
+		const openedAtBottom =
+			this.ctx.reportContainer.children.length > 0 ? this.#reportOpenedAtBottom : this.ctx.composerInputAtBottom();
+		this.#clearReport();
+		this.#closeReportSheet();
+		const terminal = this.ctx.ui.terminal;
+		const inline = this.ctx.commandReportRows() ?? terminal.rows;
+		let fullScreen = false;
+		const report = new ReportPanel({
+			...options,
+			closeKey: appKey(this.ctx.keybindings, "app.interrupt"),
+			onClose: () => this.#closeReportSheet(),
+			maxRows: () => (fullScreen ? terminal.rows : this.ctx.commandReportRows()),
+		});
+		if (isNativeRendering()) {
+			report.holdFocus();
+			this.#reportSheet = this.ctx.ui.showOverlay(report, { anchor: "center", width: "90%", maxHeight: "90%" });
+			this.ctx.ui.setFocus(report);
+		} else if (report.heightAt(terminal.columns) > inline) {
+			fullScreen = true;
+			report.holdFocus();
+			this.#reportSheet = this.ctx.ui.showOverlay(report, {
+				anchor: "bottom-center",
+				width: "100%",
+				maxHeight: "100%",
+				margin: 0,
+				fullscreen: true,
+			});
+			this.ctx.ui.setFocus(report);
+		} else {
+			this.ctx.reportContainer.addChild(report);
+			this.#reportOpenedAtBottom = openedAtBottom;
+		}
+		this.ctx.ui.requestRender();
+	}
+
+	/** A titled markdown report; see {@link showCommandReport}. */
+	#showMarkdownPanel(title: string, markdown: string): void {
+		this.showCommandReport({ title, body: new Markdown(markdown.trim(), 0, 0, getMarkdownTheme()) });
+	}
 
 	async #restoreAfterMoveFailure(
 		previousState: Parameters<InteractiveModeContext["sessionManager"]["rollbackMove"]>[0],
@@ -224,6 +331,22 @@ export class CommandController {
 			this.ctx.showStatus(statusParts.join("\n"));
 		} catch (error: unknown) {
 			this.ctx.showError(`Failed to copy session: ${error instanceof Error ? error.message : "Unknown error"}`);
+		}
+	}
+
+	async handleDumpAllCommand(): Promise<void> {
+		try {
+			const archive = await this.ctx.session.dumpSessionArchiveToTmpDir();
+			if (!archive) {
+				this.ctx.showError("No messages to dump yet.");
+				return;
+			}
+			await copyToClipboard(archive.path);
+			this.ctx.showStatus([...formatDumpArchiveReport(archive), "Archive path copied to clipboard"].join("\n"));
+		} catch (error: unknown) {
+			this.ctx.showError(
+				`Failed to write session dump: ${error instanceof Error ? error.message : "Unknown error"}`,
+			);
 		}
 	}
 
@@ -484,7 +607,7 @@ export class CommandController {
 	async handleAdvisorStatusCommand(): Promise<void> {
 		const stats = this.ctx.session.getAdvisorStats();
 		if (!stats.configured) {
-			this.ctx.presentCommandOutput([new Spacer(1), new Text("Advisor is disabled.", 1, 0)]);
+			this.showCommandReport({ title: "Advisor Status", body: new Text("Advisor is disabled.", 0, 0) });
 			return;
 		}
 		// Fetch live quota data (cached 5 min by the auth-gateway) so we can show
@@ -507,7 +630,7 @@ export class CommandController {
 		// none are live (all paused/no-model). The old code returned a generic
 		// message that hid the per-advisor state the user needs to act on.
 		if (stats.advisors.length > 1 || (stats.configured && !stats.active)) {
-			let info = `${theme.bold("Advisor Status")} (${stats.advisors.length} advisors)\n`;
+			let info = "";
 			for (const a of stats.advisors) {
 				const glyph = CommandController.#advisorStatusGlyph[a.status] ?? "?";
 				const label = CommandController.#advisorStatusLabel[a.status] ?? a.status;
@@ -548,12 +671,15 @@ export class CommandController {
 				info += `${theme.fg("dim", "Tokens:")} ${stats.tokens.total.toLocaleString()}\n`;
 				if (stats.cost > 0) info += `${theme.fg("dim", "Cost:")} $${stats.cost.toFixed(4)}\n`;
 			}
-			this.ctx.presentCommandOutput([new Spacer(1), new Text(info, 1, 0)]);
+			this.showCommandReport({
+				title: `Advisor Status (${stats.advisors.length} advisors)`,
+				body: new Text(info.trim(), 0, 0),
+			});
 			return;
 		}
 		// Single active advisor — detailed view.
 		const model = stats.model;
-		let info = `${theme.bold("Advisor Status")}\n\n`;
+		let info = "";
 		if (stats.advisors.length === 1) {
 			const a = stats.advisors[0];
 			const glyph = CommandController.#advisorStatusGlyph[a.status] ?? "?";
@@ -595,32 +721,53 @@ export class CommandController {
 			info += `${theme.fg("dim", "Cache Read:")} ${stats.tokens.cacheRead.toLocaleString()}\n`;
 		}
 		if (stats.cost > 0) info += `${theme.fg("dim", "Cost:")} $${stats.cost.toFixed(4)}\n`;
-		this.ctx.presentCommandOutput([new Spacer(1), new Text(info, 1, 0)]);
+		this.showCommandReport({ title: "Advisor Status", body: new Text(info.trim(), 0, 0) });
 	}
 
-	async handleJobsCommand(): Promise<void> {
+	/**
+	 * `/jobs`: natively the live jobs sheet the jobs pill opens (inspect and
+	 * cancel included); `/jobs full`, and text mode, a report of the running
+	 * and recent jobs (see {@link showCommandReport}).
+	 */
+	async handleJobsCommand(options?: { full?: boolean }): Promise<void> {
+		const full = options?.full === true;
 		const snapshot = this.ctx.session.getAsyncJobSnapshot({ recentLimit: 5 });
 		if (!snapshot) {
 			this.ctx.showWarning("Async background jobs are unavailable in this session.");
 			return;
 		}
-
-		const now = Date.now();
-		const lineWidth = Math.max(24, (this.ctx.ui.terminal.columns ?? 100) - 24);
-		let info = `${theme.bold("Background Jobs")}\n\n`;
-		info += `${theme.fg("dim", "Running:")} ${snapshot.running.length}\n`;
-
-		if (snapshot.running.length === 0 && snapshot.recent.length === 0) {
-			info += `\n${theme.fg("dim", "No async jobs yet.")}\n`;
-			this.ctx.presentCommandOutput(new JobsPanel(snapshot, now, [new Spacer(1), new Text(info, 1, 0)]));
+		if (isNativeRendering() && !full) {
+			this.ctx.showJobsSheet();
 			return;
 		}
+
+		const now = Date.now();
+		const columns = this.ctx.ui.terminal.columns ?? 100;
+		const lineWidth = Math.max(24, columns - 24);
+		let info = `${theme.fg("dim", "Running:")} ${snapshot.running.length}\n`;
+		if (snapshot.running.length === 0 && snapshot.recent.length === 0) {
+			info += `\n${theme.fg("dim", "No async jobs yet.")}`;
+			this.showCommandReport({ title: "Background Jobs", body: new Text(info, 0, 0) });
+			return;
+		}
+
+		// Full mode wraps here so every line, including heredoc lines and wrap
+		// continuations, keeps the two-column indent under its job row inside the
+		// report box.
+		const commandWidth = Math.max(1, columns - 6);
+		const describe = (job: AsyncJobSnapshotItem): string => {
+			if (!full) return `  ${theme.fg("dim", truncateJobLabel(job.label, lineWidth))}`;
+			const command = replaceTabs(sanitizeText(job.command ?? job.label));
+			return wrapTextWithAnsi(command, commandWidth)
+				.map(line => `  ${theme.fg("dim", line)}`)
+				.join("\n");
+		};
 
 		if (snapshot.running.length > 0) {
 			info += `\n${theme.bold("Running Jobs")}\n`;
 			for (const job of snapshot.running) {
 				info += `${renderJobLine(job, now)}\n`;
-				info += `  ${theme.fg("dim", truncateJobLabel(job.label, lineWidth))}\n`;
+				info += `${describe(job)}\n`;
 			}
 		}
 
@@ -628,11 +775,11 @@ export class CommandController {
 			info += `\n${theme.bold("Recent Jobs")}\n`;
 			for (const job of snapshot.recent) {
 				info += `${renderJobLine(job, now)}\n`;
-				info += `  ${theme.fg("dim", truncateJobLabel(job.label, lineWidth))}\n`;
+				info += `${describe(job)}\n`;
 			}
 		}
 
-		this.ctx.presentCommandOutput(new JobsPanel(snapshot, now, [new Spacer(1), new Text(info.trimEnd(), 1, 0)]));
+		this.showCommandReport({ title: "Background Jobs", body: new Text(info.trimEnd(), 0, 0) });
 	}
 
 	async handleUsageCommand(reports?: UsageReport[] | null): Promise<void> {
@@ -679,19 +826,13 @@ export class CommandController {
 				? ""
 				: `\n\n${theme.fg("dim", "Use")} ${theme.bold("/changelog full")} ${theme.fg("dim", "to view the complete changelog.")}`;
 
-		const block = new TranscriptBlock();
-		block.addChild(new DynamicBorder());
-		block.addChild(new Text(theme.bold(theme.fg("accent", title)), 1, 0));
-		block.addChild(new Spacer(1));
-		block.addChild(new Markdown(changelogMarkdown + hint, 1, 1, getMarkdownTheme()));
-		block.addChild(new DynamicBorder());
-		this.ctx.presentCommandOutput(block);
+		this.#showMarkdownPanel(title, changelogMarkdown + hint);
 	}
 
 	handleHotkeysCommand(): void {
 		const bindings = { keybindings: this.ctx.keybindings };
 		if (isNativeRendering()) {
-			// A native terminal gets a dismissable sheet with keycaps instead of a transcript table.
+			// A native terminal gets a dismissable sheet with keycaps instead of a markdown table.
 			const sheet = new HotkeysSheetComponent(bindings, () => {
 				handle.hide();
 				this.ctx.ui.setFocus(this.ctx.editorContainer.children[0] ?? this.ctx.editor);
@@ -702,7 +843,7 @@ export class CommandController {
 			this.ctx.ui.requestRender();
 			return;
 		}
-		showMarkdownPanel(this.ctx, "Keyboard Shortcuts", buildHotkeysMarkdown(bindings));
+		this.#showMarkdownPanel("Keyboard Shortcuts", buildHotkeysMarkdown(bindings));
 	}
 
 	handleToolsCommand(): void {
@@ -710,7 +851,7 @@ export class CommandController {
 			tools: this.ctx.session.agent.state.tools,
 			xdevTools: this.ctx.session.getXdevToolEntries(),
 		});
-		showMarkdownPanel(this.ctx, "Available Tools", tools);
+		this.#showMarkdownPanel("Available Tools", tools);
 	}
 
 	handleContextCommand(): void {
@@ -719,7 +860,12 @@ export class CommandController {
 			this.ctx.showWarning("Context usage is unavailable: no model is selected for this session.");
 			return;
 		}
-		this.ctx.presentCommandOutput(new ContextUsageView(breakdown, theme));
+		// Natively the body is `/context`'s own card (meters, legend, compaction mark).
+		this.showCommandReport({
+			title: "Context Usage",
+			head: contextUsageHead(breakdown),
+			body: new ContextUsageView(breakdown, theme),
+		});
 	}
 
 	async handleMemoryCommand(text: string): Promise<void> {
@@ -734,13 +880,7 @@ export class CommandController {
 				this.ctx.showWarning("Memory payload is empty (memory backend off, disabled, or no memory available).");
 				return;
 			}
-			const block = new TranscriptBlock();
-			block.addChild(new DynamicBorder());
-			block.addChild(new Text(theme.bold(theme.fg("accent", "Memory Injection Payload")), 1, 0));
-			block.addChild(new Spacer(1));
-			block.addChild(new Markdown(payload, 1, 1, getMarkdownTheme()));
-			block.addChild(new DynamicBorder());
-			this.ctx.presentCommandOutput(block);
+			this.#showMarkdownPanel("Memory Injection Payload", payload);
 			return;
 		}
 
@@ -775,7 +915,7 @@ export class CommandController {
 					this.ctx.showWarning(`Memory queue is not available for the ${backend.id} backend.`);
 					return;
 				}
-				showMarkdownPanel(this.ctx, "Memory Queue", payload);
+				this.#showMarkdownPanel("Memory Queue", payload);
 			} catch (error) {
 				this.ctx.showError(`Memory queue failed: ${error instanceof Error ? error.message : String(error)}`);
 			}
@@ -800,7 +940,7 @@ export class CommandController {
 					this.ctx.showWarning(memoryStatsUnavailableMessage(backend.id, action));
 					return;
 				}
-				showMarkdownPanel(this.ctx, `Memory ${action === "stats" ? "Stats" : "Diagnostics"}`, payload);
+				this.#showMarkdownPanel(`Memory ${action === "stats" ? "Stats" : "Diagnostics"}`, payload);
 			} catch (error) {
 				this.ctx.showError(`Memory ${action} failed: ${error instanceof Error ? error.message : String(error)}`);
 			}
@@ -876,7 +1016,7 @@ export class CommandController {
 				.slice()
 				.sort((a, b) => a.id.localeCompare(b.id))
 				.map(summarizeMentalModel);
-			showMarkdownPanel(this.ctx, `Mental Models — ${state.bankId}`, lines.join("\n"));
+			this.#showMarkdownPanel(`Mental Models — ${state.bankId}`, lines.join("\n"));
 		} catch (error) {
 			this.ctx.showError(`mm list failed: ${error instanceof Error ? error.message : String(error)}`);
 		}
@@ -893,11 +1033,7 @@ export class CommandController {
 			const refreshed = model.last_refreshed_at ? `\n_last refreshed: ${model.last_refreshed_at}_` : "";
 			const sourceQuery = model.source_query ? `\n\n**Source query:** ${model.source_query}` : "";
 			const content = (model.content ?? "_(empty — background reflect may still be running)_").trim();
-			showMarkdownPanel(
-				this.ctx,
-				model.name,
-				`**id:** \`${model.id}\`${tags}${refreshed}${sourceQuery}\n\n${content}`,
-			);
+			this.#showMarkdownPanel(model.name, `**id:** \`${model.id}\`${tags}${refreshed}${sourceQuery}\n\n${content}`);
 		} catch (error) {
 			this.ctx.showError(`mm show failed: ${error instanceof Error ? error.message : String(error)}`);
 		}
@@ -984,7 +1120,7 @@ export class CommandController {
 				const diff = diffMentalModelContent(before, after);
 				sections.push(`### ${history[i].changed_at}\n\n\`\`\`diff\n${diff}\n\`\`\``);
 			}
-			showMarkdownPanel(this.ctx, `History — ${model.name}`, sections.join("\n\n"));
+			this.#showMarkdownPanel(`History — ${model.name}`, sections.join("\n\n"));
 		} catch (error) {
 			this.ctx.showError(`mm history failed: ${error instanceof Error ? error.message : String(error)}`);
 		}
@@ -1156,6 +1292,8 @@ export class CommandController {
 		}
 		this.ctx.statusContainer.disposeChildren();
 
+		if (await this.#forkIntoTernPane()) return;
+
 		// After a `/fork`, the current session ID is changed to the forked one,
 		// so the session ID before the fork is the one we want to show in the hint.
 		const previousSessionId = this.ctx.sessionManager.isSessionOnDisk()
@@ -1184,6 +1322,52 @@ export class CommandController {
 				1,
 			),
 		]);
+	}
+
+	/**
+	 * `/fork` inside a Tern pane: ask Tern to run `omp --fork` of this session in a new pane beside
+	 * this one, which keeps the original session. False means fork in place instead: outside Tern,
+	 * an unsaved session, a Tern without `fork`, or Tern refusing it. Once the request is out, an
+	 * unconfirmed one is reported rather than retried in place, since Tern may still open the pane.
+	 */
+	async #forkIntoTernPane(): Promise<boolean> {
+		const tern = resolveTernPane();
+		if (!tern || !this.ctx.sessionManager.isSessionOnDisk()) return false;
+		const client = new TernSocketClient({ socketPath: tern.socketPath });
+		try {
+			try {
+				await client.connect();
+			} catch (error) {
+				logger.debug("Tern unreachable for /fork; forking in place", {
+					error: error instanceof Error ? error.message : String(error),
+				});
+				return false;
+			}
+			if (!client.supports("fork")) return false;
+			// The new pane's omp reads the session file as it starts.
+			await this.ctx.session.flushToDisk();
+			try {
+				await client.fork({ block: tern.pane }, { timeoutMs: TERN_FORK_TIMEOUT_MS });
+			} catch (error) {
+				if (error instanceof TernError && !TERN_FORK_UNCONFIRMED[error.kind]) {
+					const details = { kind: error.kind, error: error.message };
+					if (error.kind === "failed") logger.warn("Tern could not open the fork pane; forking in place", details);
+					else logger.debug("Tern refused the fork; forking in place", details);
+					return false;
+				}
+				this.ctx.showError(
+					`Tern did not confirm the fork: ${error instanceof Error ? error.message : String(error)}`,
+				);
+				return true;
+			}
+		} finally {
+			client.close();
+		}
+		this.ctx.present([
+			new Spacer(1),
+			new Text(theme.fg("accent", `${theme.status.success} Session forked into a new pane`), 1, 1),
+		]);
+		return true;
 	}
 
 	/**
@@ -1270,14 +1454,19 @@ export class CommandController {
 
 	/**
 	 * `/wt [<branch>]` — fork the checkout into a new linked git worktree on
-	 * `branch` (default `wt/<timestamp>`), carrying uncommitted changes along,
-	 * then relocate the session there like `/move`.
+	 * `branch` (default `wt/<timestamp>`), carrying uncommitted changes along
+	 * unless `keepChanges` is false, then relocate the session there like `/move`.
+	 * Returns the worktree only when the session now lives in it.
 	 */
-	async handleWorktreeCommand(branch?: string): Promise<void> {
+	async handleWorktreeCommand(
+		branch?: string,
+		options: { keepChanges?: boolean } = {},
+	): Promise<SessionWorktree | undefined> {
 		if (this.ctx.session.isStreaming) {
 			this.ctx.showWarning("Wait for the current response to finish or abort it before creating a worktree.");
-			return;
+			return undefined;
 		}
+		let created: SessionWorktree | undefined;
 		await this.#withSessionMove(async () => {
 			const branchName = branch?.trim() || defaultSessionWorktreeBranch();
 			const cwd = this.ctx.sessionManager.getCwd();
@@ -1293,7 +1482,7 @@ export class CommandController {
 			this.ctx.ui.requestRender();
 			let worktree: SessionWorktree;
 			try {
-				worktree = await createSessionWorktree(cwd, this.ctx.settings, branchName);
+				worktree = await createSessionWorktree(cwd, this.ctx.settings, branchName, options);
 			} catch (err) {
 				this.ctx.showError(`Worktree creation failed: ${err instanceof Error ? err.message : String(err)}`);
 				return false;
@@ -1308,7 +1497,10 @@ export class CommandController {
 				});
 			}
 			if (!(await this.#relocateSession(worktree.path))) return false;
-			const cleanup = await cleanSourceCheckoutIfConfigured(cwd, this.ctx.settings);
+			created = worktree;
+			const cleanup = worktree.keptChanges
+				? await cleanSourceCheckoutIfConfigured(cwd, this.ctx.settings)
+				: { cleaned: false, errorMessage: undefined };
 			if (cleanup.errorMessage !== undefined) {
 				this.ctx.showWarning(`Worktree created, but cleaning source checkout failed: ${cleanup.errorMessage}`);
 			}
@@ -1322,6 +1514,7 @@ export class CommandController {
 			]);
 			return true;
 		});
+		return created;
 	}
 
 	/** Save source settings before acquiring the gate for a complete relocation operation. */
@@ -1758,6 +1951,7 @@ export class CommandController {
 			}
 		} finally {
 			this.#finishHandoffUi(handoffLoader);
+			await this.ctx.flushCompactionQueue({ willRetry: false });
 		}
 		this.ctx.ui.requestRender(true, { clearScrollback: true });
 	}

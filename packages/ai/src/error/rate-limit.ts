@@ -37,6 +37,12 @@ const CREDITS_EXHAUSTED_PATTERN =
 // in unrelated diagnostics ("Failed to fetch usage credits from billing
 // service"), which must not rotate a healthy credential.
 const ANTHROPIC_CREDITS_REQUIRED_PATTERN = /\busage credits are required\b|\bcredits_required\b/i;
+// Prepaid-balance exhaustion: Cursor ERROR_USAGE_PRICING_REQUIRED (code 44,
+// surfaced as 429) "Your prepaid balance is used up: Add funds or enable auto
+// top-up …". Account-local until topped up, so rotate to a sibling. The `\b`
+// after the code keeps USAGE_PRICING_REQUIRED_CHANGEABLE out.
+const PREPAID_BALANCE_EXHAUSTED_PATTERN =
+	/\busage_pricing_required\b|\bprepaid balance\b[^\n]{0,40}\b(?:used up|exhausted|depleted)\b/i;
 // Account billing ceilings: Anthropic "monthly spend limit" (#4787) and Google
 // "Your project has exceeded its monthly spending cap" (#13090). The `\b` after
 // `cap` keeps "spending capacity" — a throttle, not a billing ceiling — out.
@@ -72,15 +78,17 @@ const ACCOUNT_SCOPED_403_PATTERN =
 	/\b(?:overall|account|organization|team|workspace)\b[^\n]{0,40}\b(?:message |request )?rate.?limit\b|\byour\b[^\n]{0,30}\b(?:limit )?will reset\b/i;
 // Simplified Chinese account-quota exhaustion phrasing. Zhipu Coding Plan
 // returns e.g. "429 已达到 5 小时的使用上限。您的限额将在 2026-08-06 20:06:00 重置。"
-// (type=1308) when the 5h window is spent; other CN providers use 额度已用完 /
+// (type=1308) when the 5h window is spent; MiniMax CN returns
+// "当前已达到 Token Plan 用量上限。…" (2067); other CN providers use 额度已用完 /
 // 配额已耗尽 / 余额不足. These are persistent account-local caps that must
 // rotate to a sibling credential, not transient rate limits, so they are
 // matched before the RATE_LIMIT_EXCEEDED branch. The 上限 arm is anchored on
-// the 使用 token: a rate/concurrency cap phrased as 每分钟请求数已达上限 /
-// 并发请求数已达上限 / 速率达到上限 (no 使用) must NOT match, or it would burn a
-// healthy sibling credential as a false quota. "速率限制" is absent for the
-// same reason.
-const CN_QUOTA_EXHAUSTED_PATTERN = /使用.{0,30}?上限|(?:额度|配额)已?(?:用|耗)(?:完|尽)|限额.{0,30}重置|余额不足/;
+// the 使用 / 用量 tokens: a rate/concurrency cap phrased as 每分钟请求数已达上限 /
+// 并发请求数已达上限 / 速率达到上限 (neither token) must NOT match, or it would
+// burn a healthy sibling credential as a false quota. "速率限制" is absent for
+// the same reason.
+const CN_QUOTA_EXHAUSTED_PATTERN =
+	/(?:使用|用量).{0,30}?上限|(?:额度|配额)已?(?:用|耗)(?:完|尽)|限额.{0,30}重置|余额不足/;
 // Simplified Chinese rate/concurrency caps can contain both 使用 and 上限, but
 // remain transient rather than account quota exhaustion.
 const CN_TRANSIENT_CAP_PATTERN =
@@ -260,6 +268,10 @@ export function parseRateLimitReason(errorMessage: string): RateLimitReason {
 		return "QUOTA_EXHAUSTED";
 	}
 
+	if (PREPAID_BALANCE_EXHAUSTED_PATTERN.test(errorMessage)) {
+		return "QUOTA_EXHAUSTED";
+	}
+
 	if (
 		lower.includes("per minute") ||
 		lower.includes("rate limit") ||
@@ -434,6 +446,7 @@ export function matchesUsageLimitText(errorMessage: string): boolean {
 	return (
 		USAGE_LIMIT_PATTERN.test(errorMessage) ||
 		ANTHROPIC_CREDITS_REQUIRED_PATTERN.test(errorMessage) ||
+		PREPAID_BALANCE_EXHAUSTED_PATTERN.test(errorMessage) ||
 		CREDITS_EXHAUSTED_PATTERN.test(errorMessage) ||
 		(CN_QUOTA_EXHAUSTED_PATTERN.test(errorMessage) && !CN_TRANSIENT_CAP_PATTERN.test(errorMessage)) ||
 		SPEND_LIMIT_PATTERN.test(errorMessage) ||

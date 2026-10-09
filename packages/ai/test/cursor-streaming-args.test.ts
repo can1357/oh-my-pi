@@ -11,6 +11,7 @@ import {
 import type { AssistantMessage, AssistantMessageEvent } from "@oh-my-pi/pi-ai/types";
 import { getStreamingPartialJson, kCursorExecResolved } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
+import { validateToolArguments } from "@oh-my-pi/pi-ai/utils/validation";
 
 interface Harness {
 	output: AssistantMessage;
@@ -130,6 +131,36 @@ function pushTextDelta(h: Harness, text: string): void {
 		h.usageState,
 	);
 }
+
+describe("Cursor final tool-call arguments", () => {
+	it("refuses truncated arguments on completion", () => {
+		const h = newHarness();
+		const raw = '{"path":"repaired.txt","content":"hello';
+		startMcpToolCall(h, "write");
+		pushArgsTextDelta(h, raw);
+		completeMcpToolCall(h, { path: new TextEncoder().encode('"repaired.txt"') });
+		const call = h.output.content.find(block => block.type === "toolCall");
+		if (!call) throw new Error("Expected tool call");
+		expect(call.arguments).toEqual({ __parseError: expect.any(String), __rawJson: raw });
+		expect(() =>
+			validateToolArguments({ name: "write", description: "", parameters: { type: "object" } }, call),
+		).toThrow("Tool call arguments are not valid JSON");
+	});
+
+	it("uses the completion frame when a rewritten snapshot breaks the buffer without truncating it", () => {
+		const h = newHarness();
+		startMcpToolCall(h, "write");
+		pushArgsTextDelta(h, '{"path":"draft.txt"}');
+		pushArgsTextDelta(h, '{"path":"final.txt","content":"complete"}');
+		completeMcpToolCall(h, {
+			path: new TextEncoder().encode('"final.txt"'),
+			content: new TextEncoder().encode('"complete"'),
+		});
+		const call = h.output.content.find(block => block.type === "toolCall");
+		if (!call) throw new Error("Expected tool call");
+		expect(call.arguments).toEqual({ path: "final.txt", content: "complete" });
+	});
+});
 
 describe("mergeCursorMcpToolCallArgs", () => {
 	it("returns streamed args unchanged when completion is undefined", () => {
@@ -318,11 +349,11 @@ describe("processInteractionUpdate args_text_delta handling", () => {
 		// throttle threshold. block.arguments must NOT be re-parsed; if it were,
 		// the O(N²) regression would resurface for a long stream of small deltas.
 		pushArgsTextDelta(h, `{"agent":"task","note":"initial","step":1`);
-		pushArgsTextDelta(h, `{"agent":"task","note":"initial","step":12`);
+		pushArgsTextDelta(h, `{"agent":"task","note":"initial","step":12}`);
 		expect(block.arguments).toBe(argsAfterFirst);
 
 		// The full buffer is still accumulated for the authoritative final parse.
-		expect(getStreamingPartialJson(block)).toBe(`{"agent":"task","note":"initial","step":12`);
+		expect(getStreamingPartialJson(block)).toBe(`{"agent":"task","note":"initial","step":12}`);
 
 		// toolCallCompleted re-parses the full buffer unconditionally; the merged
 		// arguments reflect every byte streamed, including the throttled tail.

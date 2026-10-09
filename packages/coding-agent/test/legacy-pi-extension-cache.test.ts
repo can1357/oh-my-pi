@@ -14,6 +14,13 @@ async function runProbe(cacheRoot: string, script: string = probePath, args: str
 	for (const key of ["PI_CODING_AGENT_DIR", "OMP_PROFILE", "PI_PROFILE", "PI_CONFIG_DIR"]) {
 		delete env[key];
 	}
+	// XDG is honored only on Linux/macOS; elsewhere point the config root
+	// (home/PI_CONFIG_DIR) at the same `<cacheRoot>/omp` layout.
+	if (process.platform === "win32") {
+		env.HOME = cacheRoot;
+		env.USERPROFILE = cacheRoot;
+		env.PI_CONFIG_DIR = "omp";
+	}
 	const proc = Bun.spawn([process.execPath, script, ...args], {
 		cwd: path.resolve(import.meta.dir, "../.."),
 		env,

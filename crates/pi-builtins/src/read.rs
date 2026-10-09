@@ -1,27 +1,25 @@
 use std::{
 	collections::VecDeque,
-	io::{Read, Write},
+	io::Write,
 	time::{Duration, Instant},
 };
 
-use brush_core::{ErrorKind, builtins, env, error, variables};
+use brush_core::{ErrorKind, builtins, env, error, openfiles::OpenFile, variables};
 use clap::Parser;
 use itertools::Itertools;
+
+use crate::line_input::{CTRL_C, CTRL_D, LineInput, ReadAhead, decode_line};
 
 /// Exit code returned when `read` times out.
 /// This is 128 + SIGALRM (14) = 142, matching bash behavior.
 const TIMEOUT_EXIT_CODE: u8 = 142;
 
-/// ASCII control character for Ctrl+C (ETX - End of Text).
-const CTRL_C: char = '\x03';
-/// ASCII control character for Ctrl+D (EOT - End of Transmission).
-const CTRL_D: char = '\x04';
 /// Backslash character used for escape processing.
-const BACKSLASH: char = '\\';
+const BACKSLASH: u8 = b'\\';
 /// Default line delimiter (newline).
-const DEFAULT_DELIMITER: char = '\n';
+const DEFAULT_DELIMITER: u8 = b'\n';
 /// NUL character used as delimiter when `-d ''` is specified.
-const NUL_DELIMITER: char = '\0';
+const NUL_DELIMITER: u8 = b'\0';
 
 /// Parse standard input.
 #[derive(Parser)]
@@ -294,25 +292,20 @@ enum ReadResult {
 	InputNotReady,
 }
 
-/// Helper struct that encapsulates the state for reading input character by
-/// character.
+/// Low-level input reader that handles timeouts and control characters.
 ///
-/// This separates the concerns of character-level I/O with timeout handling
+/// This separates the concerns of byte-level I/O with timeout handling
 /// from the higher-level logic of line building and escape processing.
 struct InputReader {
-	/// The input source.
-	input:      brush_core::openfiles::OpenFile,
+	/// The input source: a regular file is read ahead, and what lies past
+	/// the line is given back when `read` returns.
+	source:     LineInput,
 	/// Optional deadline for timeout.
 	deadline:   Option<Instant>,
-	/// Single-byte read buffer.
-	///
-	/// TODO(utf-8): This only handles ASCII correctly. Multi-byte UTF-8
-	/// characters will be read as separate bytes and incorrectly interpreted.
-	/// To fix this, we would need to buffer up to 4 bytes and decode
-	/// incrementally using `std::str::from_utf8`. Note that bash's `-n` counts
-	/// bytes, not Unicode codepoints, so the fix needs to preserve that
-	/// behavior.
-	buffer:     [u8; 1],
+	/// Terminal input: Ctrl-C and Ctrl-D bytes are keys, not data.
+	terminal:   bool,
+	/// Bytes a stream reported ready, readable without waiting for input.
+	ready:      u64,
 	/// Terminal mode guard - kept alive for RAII cleanup on drop.
 	/// The guard restores original terminal settings when dropped, even though
 	/// we don't access the field directly after construction.
@@ -324,8 +317,8 @@ struct InputReader {
 
 /// Events that can occur when reading input.
 enum InputEvent {
-	/// A regular character was read.
-	Char(char),
+	/// A data byte was read.
+	Byte(u8),
 	/// End of file was reached.
 	Eof,
 	/// The read operation timed out.
@@ -350,14 +343,16 @@ where
 impl InputReader {
 	/// Creates a new input reader with optional timeout.
 	fn new(
-		input: brush_core::openfiles::OpenFile,
+		input: OpenFile,
 		timeout: Option<Duration>,
 		term_mode: Option<brush_core::terminal::AutoModeGuard>,
 	) -> Self {
+		let terminal = input.is_terminal();
 		Self {
-			input,
+			source: LineInput::new(input, ReadAhead::Seekable),
 			deadline: timeout.map(|t| Instant::now() + t),
-			buffer: [0; 1],
+			terminal,
+			ready: 0,
 			_term_mode: term_mode,
 		}
 	}
@@ -365,7 +360,7 @@ impl InputReader {
 	/// Checks if input is immediately available (for `-t 0`). Returns `false` if
 	/// an error occurs while checking for available input.
 	fn check_input_available(&self) -> bool {
-		brush_core::sys::poll::poll_for_input(&self.input, Duration::ZERO).unwrap_or(false)
+		brush_core::sys::poll::poll_for_input(self.source.input(), Duration::ZERO).unwrap_or(false)
 	}
 
 	#[cfg(unix)]
@@ -375,7 +370,7 @@ impl InputReader {
 	{
 		const INPUT_POLL_INTERVAL_MS: u64 = 100;
 
-		if self.deadline.is_none() && self.input.try_borrow_as_fd().is_err() {
+		if self.deadline.is_none() && self.source.input().try_borrow_as_fd().is_err() {
 			ensure_not_cancelled(is_cancelled)?;
 			return Ok(None);
 		}
@@ -394,7 +389,7 @@ impl InputReader {
 				Duration::from_millis(INPUT_POLL_INTERVAL_MS)
 			};
 
-			match brush_core::sys::poll::poll_for_input(&self.input, timeout) {
+			match brush_core::sys::poll::poll_for_input(self.source.input(), timeout) {
 				Ok(true) => return Ok(None),
 				Ok(false) => continue,
 				Err(e) => return Err(e.into()),
@@ -415,7 +410,7 @@ impl InputReader {
 				return Ok(Some(InputEvent::Timeout));
 			}
 
-			match brush_core::sys::poll::poll_for_input(&self.input, remaining) {
+			match brush_core::sys::poll::poll_for_input(self.source.input(), remaining) {
 				Ok(true) => {},
 				Ok(false) => return Ok(Some(InputEvent::Timeout)),
 				Err(e) => return Err(e.into()),
@@ -425,41 +420,95 @@ impl InputReader {
 		Ok(None)
 	}
 
+	/// Bytes readable from a stream right now without blocking; at least 1
+	/// once the stream polled readable (an EOF reports 0 ready but must
+	/// still be read to be seen).
+	fn bytes_ready(&self) -> u64 {
+		#[cfg(unix)]
+		let ready = self
+			.source
+			.input()
+			.try_borrow_as_fd()
+			.ok()
+			.and_then(|fd| rustix::io::ioctl_fionread(fd).ok())
+			.unwrap_or(0);
+		#[cfg(not(unix))]
+		let ready = 0;
+		ready.max(1)
+	}
+
 	/// Reads the next input event, handling timeout and control characters.
 	fn read_event<F>(&mut self, is_cancelled: &F) -> Result<InputEvent, brush_core::Error>
 	where
 		F: Fn() -> bool,
 	{
-		if let Some(event) = self.wait_for_input(is_cancelled)? {
-			return Ok(event);
+		if !self.source.reads_ahead() {
+			if self.ready == 0 {
+				if let Some(event) = self.wait_for_input(is_cancelled)? {
+					return Ok(event);
+				}
+				// Once a stream polls readable, learn how much is buffered so
+				// the bytes after this one skip the poll (and the descriptor
+				// classification it repeats) entirely.
+				self.ready = self.bytes_ready();
+			} else if self.deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+				return Ok(InputEvent::Timeout);
+			}
+			self.ready -= 1;
 		}
-
 		ensure_not_cancelled(is_cancelled)?;
-
-		let n = self.input.read(&mut self.buffer)?;
-		if n == 0 {
+		let Some(byte) = self.source.next_byte()? else {
+			self.ready = 0;
 			return Ok(InputEvent::Eof);
-		}
+		};
 
-		let ch = self.buffer[0] as char;
-
-		// Map control characters to events.
-		Ok(match ch {
-			CTRL_C => InputEvent::CtrlC,
-			CTRL_D => InputEvent::CtrlD,
-			_ => InputEvent::Char(ch),
+		// Control keys only mean something on a terminal; in a file or pipe
+		// they are data.
+		Ok(match byte {
+			CTRL_C if self.terminal => InputEvent::CtrlC,
+			CTRL_D if self.terminal => InputEvent::CtrlD,
+			_ => InputEvent::Byte(byte),
 		})
 	}
 }
 
 /// Configuration for line reading behavior.
 struct LineReaderConfig {
-	/// Character that terminates input (None for -N mode).
-	delimiter:       Option<char>,
+	/// Byte that terminates input (None for -N mode).
+	delimiter:       Option<u8>,
 	/// Maximum characters to read (for -n or -N).
 	char_limit:      Option<usize>,
 	/// Whether to process backslash escapes (false for -r mode).
 	process_escapes: bool,
+}
+
+/// Characters read toward a `-n`/`-N` limit. Bash counts characters, not
+/// bytes: a UTF-8 lead byte starts one, and the limit is reached only once
+/// its continuation bytes are in, so a multibyte character is never split.
+#[derive(Default)]
+struct CharCount {
+	chars:        usize,
+	continuation: u8,
+}
+
+impl CharCount {
+	fn push(&mut self, byte: u8) {
+		if self.continuation > 0 && byte & 0xC0 == 0x80 {
+			self.continuation -= 1;
+		} else {
+			self.chars += 1;
+			self.continuation = match byte {
+				0xC0..=0xDF => 1,
+				0xE0..=0xEF => 2,
+				0xF0..=0xF7 => 3,
+				_ => 0,
+			};
+		}
+	}
+
+	fn reached(&self, limit: Option<usize>) -> bool {
+		self.continuation == 0 && limit.is_some_and(|limit| self.chars >= limit)
+	}
 }
 
 /// Reads a complete line of input using the given reader and configuration.
@@ -480,7 +529,8 @@ fn read_line_with_reader<F>(
 where
 	F: Fn() -> bool,
 {
-	let mut line = String::new();
+	let mut line = Vec::new();
+	let mut count = CharCount::default();
 	let mut pending_backslash = false;
 
 	loop {
@@ -489,7 +539,7 @@ where
 		match event {
 			InputEvent::Eof => {
 				// Bash discards pending backslash on EOF.
-				return Ok(ReadResult::Eof(if line.is_empty() { None } else { Some(line) }));
+				return Ok(ReadResult::Eof((!line.is_empty()).then(|| decode_line(line))));
 			},
 
 			InputEvent::Timeout => {
@@ -497,7 +547,7 @@ where
 				if pending_backslash {
 					line.push(BACKSLASH);
 				}
-				return Ok(ReadResult::TimedOut(if line.is_empty() { None } else { Some(line) }));
+				return Ok(ReadResult::TimedOut((!line.is_empty()).then(|| decode_line(line))));
 			},
 
 			InputEvent::CtrlC => {
@@ -510,60 +560,54 @@ where
 				return Ok(if line.is_empty() && !pending_backslash {
 					ReadResult::Eof(None)
 				} else {
-					ReadResult::Line(line)
+					ReadResult::Line(decode_line(line))
 				});
 			},
 
-			InputEvent::Char(ch) => {
+			InputEvent::Byte(byte) => {
 				// Handle backslash escape processing (when enabled).
 				if config.process_escapes {
 					if pending_backslash {
 						pending_backslash = false;
 
 						// Backslash-delimiter is line continuation.
-						if let Some(delim) = config.delimiter
-							&& ch == delim
-						{
+						if config.delimiter == Some(byte) {
 							continue; // Line continuation.
 						}
 
-						// For other chars, add char literally (backslash consumed).
-						line.push(ch);
+						// For other bytes, add the byte literally (backslash consumed).
+						line.push(byte);
+						count.push(byte);
 
 						// Check character limit (based on output length).
-						if let Some(limit) = config.char_limit
-							&& line.len() >= limit
-						{
-							return Ok(ReadResult::Line(line));
+						if count.reached(config.char_limit) {
+							return Ok(ReadResult::Line(decode_line(line)));
 						}
 						continue;
 					}
 
-					if ch == BACKSLASH {
+					if byte == BACKSLASH {
 						pending_backslash = true;
 						continue;
 					}
 				}
 
 				// Check for delimiter.
-				if let Some(delim) = config.delimiter
-					&& ch == delim
-				{
-					return Ok(ReadResult::Line(line));
+				if config.delimiter == Some(byte) {
+					return Ok(ReadResult::Line(decode_line(line)));
 				}
 
 				// Ignore non-whitespace control characters.
-				if ch.is_ascii_control() && !ch.is_ascii_whitespace() {
+				if byte.is_ascii_control() && !byte.is_ascii_whitespace() {
 					continue;
 				}
 
-				line.push(ch);
+				line.push(byte);
+				count.push(byte);
 
 				// Check character limit (based on output length).
-				if let Some(limit) = config.char_limit
-					&& line.len() >= limit
-				{
-					return Ok(ReadResult::Line(line));
+				if count.reached(config.char_limit) {
+					return Ok(ReadResult::Line(decode_line(line)));
 				}
 			},
 		}
@@ -598,15 +642,12 @@ impl ReadCommand {
 			}
 		}
 
-		// Determine delimiter based on options.
+		// Determine delimiter based on options. Input is matched byte by byte,
+		// so a multi-byte `-d` delimiter splits at its first byte.
 		let delimiter = if self.return_after_n_chars_no_delimiter.is_some() {
 			None
 		} else if let Some(delimiter_str) = &self.delimiter {
-			if delimiter_str.is_empty() {
-				Some(NUL_DELIMITER)
-			} else {
-				delimiter_str.chars().next()
-			}
+			Some(delimiter_str.as_bytes().first().copied().unwrap_or(NUL_DELIMITER))
 		} else {
 			Some(DEFAULT_DELIMITER)
 		};
@@ -638,6 +679,11 @@ impl ReadCommand {
 		&self,
 		file: &brush_core::openfiles::OpenFile,
 	) -> Result<Option<brush_core::terminal::AutoModeGuard>, brush_core::Error> {
+		// The guard dups the descriptor and reads its terminal attributes; a
+		// pipe or file has none, so skip it in every `while read` iteration.
+		if !file.is_terminal() {
+			return Ok(None);
+		}
 		let mode = brush_core::terminal::AutoModeGuard::new(file.to_owned()).ok();
 		if let Some(mode) = &mode {
 			let config = brush_core::terminal::Settings::builder()

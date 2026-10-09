@@ -6,7 +6,8 @@
  *   the recent-session fallback scan. Lets the welcome "Recent sessions" list
  *   resolve names from a stat + lookup instead of content-scanning every session
  *   file in the project directory (multi-hundred-ms on dirs with thousands of
- *   sessions).
+ *   sessions). A title has no life beyond its session; `omp gc` drops rows of
+ *   archived sessions.
  * - `session_recaps`: append-only journal of idle recaps
  *   ({@link SessionManager.recordRecap}). Recaps are side-channel output that
  *   never enters the session JSONL or LLM context; this table is their only
@@ -18,7 +19,7 @@
  * against the right file. Never versions the db — `PRAGMA user_version` is
  * owned by HistoryStorage's rebuild pass, which drops only its own tables.
  */
-import { Database, type Statement } from "bun:sqlite";
+import { Database, type SQLQueryBindings, type Statement } from "bun:sqlite";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { getHistoryDbPath } from "@oh-my-pi/pi-utils/dirs";
@@ -135,6 +136,74 @@ export function recordSessionRecap(sessionId: string, cwd: string, recap: string
 		index.insertRecap.run(sessionId, cwd, recap);
 	} catch (error) {
 		logger.debug("Session recap journal write failed", { sessionId, error: String(error) });
+	}
+}
+
+/** One journaled idle recap. */
+export interface SessionRecap {
+	sessionId: string;
+	/** Working directory of the session that produced the recap. */
+	cwd: string;
+	recap: string;
+	/** Unix seconds. */
+	createdAt: number;
+}
+
+/** Narrows {@link listSessionRecaps}; omitted fields match everything. */
+export interface SessionRecapQuery {
+	/** Recaps of these sessions only; empty matches nothing. */
+	sessionIds?: readonly string[];
+	/** Recaps produced in this exact working directory. */
+	cwd?: string;
+	/** Maximum rows returned. */
+	limit?: number;
+}
+
+interface SessionRecapRow {
+	session_id: string;
+	cwd: string;
+	recap: string;
+	created_at: number;
+}
+
+/**
+ * Journaled recaps matching `query`, newest first. Best-effort like the
+ * writers: an unavailable index or failed read yields an empty list.
+ */
+export function listSessionRecaps(query: SessionRecapQuery = {}): SessionRecap[] {
+	if (query.sessionIds?.length === 0) return [];
+	const index = openSessionIndex();
+	if (!index) return [];
+	const where: string[] = [];
+	const params: SQLQueryBindings[] = [];
+	if (query.sessionIds) {
+		where.push(`session_id IN (${query.sessionIds.map(() => "?").join(", ")})`);
+		params.push(...query.sessionIds);
+	}
+	if (query.cwd !== undefined) {
+		where.push("cwd = ?");
+		params.push(query.cwd);
+	}
+	let sql = "SELECT session_id, cwd, recap, created_at FROM session_recaps";
+	if (where.length > 0) sql += ` WHERE ${where.join(" AND ")}`;
+	sql += " ORDER BY created_at DESC, id DESC";
+	if (query.limit !== undefined) {
+		sql += " LIMIT ?";
+		params.push(query.limit);
+	}
+	try {
+		// Ad-hoc SQL (the IN list varies), so prepare and finalize per call
+		// instead of growing the connection's statement cache.
+		using statement = index.db.prepare(sql);
+		return (statement.all(...params) as SessionRecapRow[]).map(row => ({
+			sessionId: row.session_id,
+			cwd: row.cwd,
+			recap: row.recap,
+			createdAt: row.created_at,
+		}));
+	} catch (error) {
+		logger.debug("Session recap journal read failed", { error: String(error) });
+		return [];
 	}
 }
 

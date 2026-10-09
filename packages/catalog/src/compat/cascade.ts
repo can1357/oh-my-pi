@@ -3,7 +3,7 @@
  * for one structured model target from the compiled rule tree.
  *
  * Faithful port of the o2 reference resolver (`cascade.rs`): rules are
- * conjunctions over `(class, provider, api, family, revision, models)`; per axis
+ * conjunctions over `(class, provider, api, upstream, family, revision, models)`; per axis
  * the matching rule with the greatest `(model-selector exactness,
  * constrained-dimension count, priority)` tuple wins, and an equal-tuple
  * same-axis contest throws {@link AmbiguousOverlapError}. Declaration and
@@ -129,6 +129,7 @@ function buildRuleIndex(cascade: CompiledCascade): RuleIndex {
 				Number(compiled.class !== undefined) +
 				Number(compiled.providers !== undefined) +
 				Number(compiled.apis !== undefined) +
+				Number(compiled.upstreams !== undefined) +
 				Number(compiled.family !== undefined) +
 				Number(compiled.revision !== undefined) +
 				Number(compiled.models !== undefined),
@@ -215,6 +216,11 @@ function rankRule(rule: IndexedRule, prepared: PreparedTarget): readonly [number
 	const { compiled } = rule;
 	const { target } = prepared;
 	if (compiled.apis !== undefined && !compiled.apis.includes(target.api)) return undefined;
+	if (
+		compiled.upstreams !== undefined &&
+		(target.upstream === undefined || !compiled.upstreams.includes(target.upstream))
+	)
+		return undefined;
 	if (compiled.family !== undefined && compiled.family !== target.family) return undefined;
 	if (rule.revision !== undefined && (!prepared.revision || !revisionSatisfies(prepared.revision, rule.revision))) {
 		return undefined;
@@ -282,7 +288,12 @@ function collect(winners: WinnerTable, pick: (rule: CompiledRule) => Record<stri
 	return out;
 }
 
-const resolveCache = new LRUCache<string, ResolvedAxes>({ max: 512 });
+/**
+ * Sized above the bundled catalog (~5.6k targets) plus discovered rows so a
+ * catalog-wide buildModel pass (discovery, then merge rebuilding the same ids)
+ * hits instead of thrashing. Entries share rule values: a few hundred bytes each.
+ */
+const resolveCache = new LRUCache<string, ResolvedAxes>({ max: 16384 });
 
 function keyPart(value: string | undefined): string {
 	return value === undefined ? "-1:" : `${value.length}:${value}`;
@@ -292,6 +303,7 @@ function targetKey(target: ResolveTarget): string {
 	return (
 		keyPart(target.provider) +
 		keyPart(target.api) +
+		keyPart(target.upstream) +
 		keyPart(target.class) +
 		keyPart(target.family) +
 		keyPart(target.revision) +

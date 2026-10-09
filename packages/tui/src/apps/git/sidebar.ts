@@ -1003,10 +1003,23 @@ export class Sidebar {
 	 * Pointer actions on the changes sheet: list clicks select (a folder also
 	 * folds, a second click on the selected file stages it, as the ANSI click
 	 * does), double clicks activate, the segmented control switches Path/Tree,
-	 * and the quiet buttons run their row's action. False when not the
-	 * sidebar's event.
+	 * and the quiet buttons run their row's action; selection edits go to the
+	 * text field being edited. False when not the sidebar's event.
 	 */
 	handleNativeEvent(event: NativeUiEvent): boolean {
+		if (event.type === "edit" || event.type === "undo") {
+			const editing = this.editing ? this.selected?.kind : undefined;
+			const field =
+				editing === "summary"
+					? this.summary.input
+					: editing === "stage-ai-input"
+						? this.aiInput.input
+						: editing === "description"
+							? this.description
+							: undefined;
+			field?.handleNativeEvent(event);
+			return field !== undefined;
+		}
 		if (event.type === "select" || event.type === "activate") {
 			if (event.item === "path" || event.item === "tree") {
 				this.viewStyle = event.item;
@@ -1686,7 +1699,12 @@ export class Sidebar {
 					png,
 					"image/png",
 					{ fallbackColor: text => theme.fg("dim", text) },
-					{ maxHeightCells: 3, budget: this.#imageBudget, imageKey: `git-avatar:${email}` },
+					{
+						maxHeightCells: 3,
+						budget: this.#imageBudget,
+						imageKey: `git-avatar:${email}`,
+						requestRender: this.#requestRender,
+					},
 				),
 			};
 		}

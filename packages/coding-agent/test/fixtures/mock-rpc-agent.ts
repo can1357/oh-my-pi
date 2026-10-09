@@ -94,6 +94,25 @@ for await (const raw of console) {
 			}
 			if (Bun.env.MOCK_RPC_IGNORE_COMMANDS === "1") continue;
 			const id = typeof frame.id === "string" ? frame.id : undefined;
+			if (Bun.env.MOCK_RPC_LATE_PROMPT_ERROR === "1" && frame.type === "prompt") {
+				writeFrame({ id, type: "response", command: "prompt", success: true });
+				writeFrame({
+					id,
+					type: "response",
+					command: "prompt",
+					success: false,
+					error: "skill file was deleted",
+				});
+				writeFrame({
+					type: "prompt_result",
+					id,
+					agentInvoked: false,
+					status: "error",
+					error: { message: "skill file was deleted", retryable: false },
+					sessionSettled: true,
+				});
+				continue;
+			}
 			if (frame.type === "negotiate_protocol" && frame.protocolVersion === 2) {
 				writeFrame({
 					id,

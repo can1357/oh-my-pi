@@ -52,6 +52,10 @@ class AdvisorHeader implements Component {
 		this.#uiTheme = uiTheme;
 	}
 
+	releaseRenderCaches(): void {
+		this.#cache = undefined;
+	}
+
 	invalidate(): void {
 		this.#cache = undefined;
 	}
@@ -82,6 +86,10 @@ class AdvisorNotes implements Component {
 		this.#uiTheme = uiTheme;
 	}
 
+	releaseRenderCaches(): void {
+		this.#cache = undefined;
+	}
+
 	invalidate(): void {
 		this.#cache = undefined;
 	}
@@ -110,12 +118,14 @@ function renderAdvisorNote(entry: AdvisorNote, width: number, uiTheme: Theme): s
 	// single ("default") advisor renders unlabeled, as before.
 	const who =
 		entry.advisor && entry.advisor !== "default" ? `${uiTheme.fg("dim", `[${replaceTabs(entry.advisor)}]`)} ` : "";
+	const age = entry.turnsAgo !== undefined ? `${uiTheme.fg("dim", `T-${entry.turnsAgo}`)} ` : "";
 	const railGlyph = uiTheme.symbol("advisor.rail");
 	const rail = uiTheme.fg(severityColor(entry.severity), railGlyph);
 	const quoteWidth = visibleWidth(`  ${railGlyph} `);
 	const badgeWidth = visibleWidth(badge);
+	const ageWidth = visibleWidth(age);
 	const whoWidth = visibleWidth(who);
-	const w1 = Math.max(10, Math.min(NOTE_LINE_WIDTH, width) - quoteWidth - badgeWidth - whoWidth);
+	const w1 = Math.max(10, Math.min(NOTE_LINE_WIDTH, width) - quoteWidth - badgeWidth - ageWidth - whoWidth);
 	const w2 = Math.max(10, Math.min(NOTE_LINE_WIDTH, width) - quoteWidth);
 
 	const paragraphs = entry.note.split("\n").filter(p => p.trim());
@@ -131,7 +141,7 @@ function renderAdvisorNote(entry: AdvisorNote, width: number, uiTheme: Theme): s
 
 	return bodyLines.map(
 		(line, index) =>
-			`  ${rail} ${index === 0 ? `${badge}${who}` : ""}${uiTheme.fg("customMessageText", replaceTabs(line))}`,
+			`  ${rail} ${index === 0 ? `${badge}${age}${who}` : ""}${uiTheme.fg("customMessageText", replaceTabs(line))}`,
 	);
 }
 
@@ -233,6 +243,9 @@ export function createAdvisorMessageCard(
 		},
 		invalidate(): void {
 			disclosure.invalidate();
+		},
+		releaseRenderCaches(): void {
+			disclosure.releaseRenderCaches();
 		},
 		dispose(): void {
 			disclosure.dispose();

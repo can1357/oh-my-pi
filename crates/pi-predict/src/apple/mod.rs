@@ -25,10 +25,9 @@ pub mod appkit;
 /// Open the Apple engine.
 ///
 /// # Errors
-/// Returns an error when `AppKit` cannot be initialized.
+/// Never on macOS; the result type matches the other platforms' `open`.
 #[cfg(target_os = "macos")]
 pub fn open(config: &Config) -> anyhow::Result<Box<dyn Predictor>> {
-	appkit::run_blocking(appkit::ensure_available)?;
 	Ok(Box::new(macos::Apple {
 		show_threshold: config
 			.show_threshold

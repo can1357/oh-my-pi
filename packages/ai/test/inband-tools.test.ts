@@ -1,5 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import type { AssistantMessage, Context, ToolCall, ToolResultMessage, Usage } from "@oh-my-pi/pi-ai";
+import { validateToolArguments } from "@oh-my-pi/pi-ai/utils/validation";
 import {
 	createInbandScanner,
 	type Dialect,
@@ -9,6 +10,71 @@ import {
 	type InbandScanEvent,
 	parseInbandToolMessage,
 } from "@oh-my-pi/pi-ai/dialect";
+
+describe("final in-band JSON arguments", () => {
+	const raw = '{"path":"repaired.txt","content":"hello';
+	const wrapped = "<tool_call>" + JSON.stringify({ name: "write", arguments: raw }) + "</tool_call>";
+	const cases: [Dialect, string][] = [
+		[
+			"kimi",
+			"<|tool_calls_section_begin|><|tool_call_begin|>functions.write:0<|tool_call_argument_begin|>" +
+				raw +
+				"<|tool_call_end|><|tool_calls_section_end|>",
+		],
+		["harmony", "<|start|>assistant<|channel|>commentary to=functions.write<|message|>" + raw + "<|call|>"],
+		[
+			"deepseek",
+			"<｜tool▁calls▁begin｜><｜tool▁call▁begin｜>write<｜tool▁sep｜>" +
+				raw +
+				"<｜tool▁call▁end｜><｜tool▁calls▁end｜>",
+		],
+		["hermes", wrapped],
+		["qwen3", wrapped],
+	];
+	it.each(cases)("refuses truncated final JSON in %s", (dialect, text) => {
+		const parsed = parseInbandToolMessage(assistant([{ type: "text", text }]), dialect, TOOLS);
+		expect(parsed.stopReason).toBe("toolUse");
+		const call = parsed.content.find(block => block.type === "toolCall");
+		if (!call) throw new Error("Expected tool call");
+		expect(call.arguments).toEqual({ __parseError: expect.any(String), __rawJson: raw });
+		expect(() => validateToolArguments(TOOLS[1]!, call)).toThrow("Tool call arguments are not valid JSON");
+	});
+
+	it.each([
+		["kimi", "<|tool_calls_section_begin|><|tool_call_begin|>functions.write:0<|tool_call_argument_begin|>" + raw],
+		["hermes", '<tool_call>{"name":"write","arguments":' + raw],
+		["qwen3", '<tool_call>{"name":"write","arguments":' + raw],
+		[
+			"anthropic",
+			'<function_calls><invoke name="write"><parameter name="path">repaired.txt</parameter><parameter name="content">hello',
+		],
+	] as const)("refuses unfinished %s envelopes instead of executing the preview", (dialect, text) => {
+		const parsed = parseInbandToolMessage(assistant([{ type: "text", text }]), dialect, TOOLS);
+		const call = parsed.content.find(block => block.type === "toolCall");
+		if (!call) throw new Error("Expected tool call");
+		expect(call.arguments).toEqual({ __parseError: expect.any(String), __rawJson: text });
+		expect(() => validateToolArguments(TOOLS[1]!, call)).toThrow("Tool call arguments are not valid JSON");
+	});
+
+	it("reports the unfinished envelope, not earlier prose, in the diagnostic", () => {
+		const envelope =
+			"<|tool_calls_section_begin|><|tool_call_begin|>functions.write:0<|tool_call_argument_begin|>" + raw;
+		const text = "Planning the edit. ".repeat(40) + envelope;
+		const parsed = parseInbandToolMessage(assistant([{ type: "text", text }]), "kimi", TOOLS);
+		const call = parsed.content.find(block => block.type === "toolCall");
+		if (!call) throw new Error("Expected tool call");
+		expect(call.arguments).toEqual({ __parseError: expect.any(String), __rawJson: text.slice(-512) });
+	});
+
+	it("keeps a fabricated tool response out of the diagnostic", () => {
+		const envelope = '<tool_call>{"name":"write","arguments":' + raw;
+		const text = envelope + "<tool_response>" + "fabricated output ".repeat(40);
+		const parsed = parseInbandToolMessage(assistant([{ type: "text", text }]), "hermes", TOOLS);
+		const call = parsed.content.find(block => block.type === "toolCall");
+		if (!call) throw new Error("Expected tool call");
+		expect(call.arguments).toEqual({ __parseError: expect.any(String), __rawJson: envelope });
+	});
+});
 
 const TOOLS = [
 	{
@@ -426,5 +492,50 @@ describe("GLM value-closer healing", () => {
 		const ends = toolEnds(events);
 		expect(ends).toHaveLength(1);
 		expect(ends[0]?.arguments).toEqual({ path: "a.ts", content });
+	});
+});
+
+describe("long in-band tool calls fed in many deltas", () => {
+	const CLOSE_WAIT_DIALECTS: Dialect[] = ["deepseek", "gemini", "hermes", "kimi", "qwen3"];
+	const content = "line of generated file content\n".repeat(1_000);
+	const call: ToolCall = {
+		type: "toolCall",
+		id: "functions.write:0",
+		name: "write",
+		arguments: { path: "a.ts", content },
+	};
+
+	function feedChunks(dialect: Dialect, text: string, size: number): InbandScanEvent[] {
+		const scanner = createInbandScanner(dialect, { tools: TOOLS, parseThinking: true });
+		const events: InbandScanEvent[] = [];
+		for (let index = 0; index < text.length; index += size)
+			events.push(...scanner.feed(text.slice(index, index + size)));
+		events.push(...scanner.flush());
+		return events;
+	}
+
+	function visibleText(events: readonly InbandScanEvent[]): string {
+		return events.map(event => (event.type === "text" ? event.text : "")).join("");
+	}
+
+	it.each(CLOSE_WAIT_DIALECTS)(
+		"parses a %s call whose close splits across deltas and keeps the trailing text",
+		dialect => {
+			const rendered = getDialectDefinition(dialect).renderAssistantToolCalls([call], { tools: TOOLS });
+			// Odd chunk sizes split the multi-character close token at different offsets.
+			for (const size of [7, 13, 64]) {
+				const events = feedChunks(dialect, `${rendered} Done writing.`, size);
+				const ends = toolEnds(events);
+				expect(ends, `${dialect}/${size}`).toHaveLength(1);
+				expect(ends[0]!.arguments, `${dialect}/${size}`).toEqual({ path: "a.ts", content });
+				expect(visibleText(events).trim(), `${dialect}/${size}`).toBe("Done writing.");
+			}
+		},
+	);
+
+	it.each(CLOSE_WAIT_DIALECTS)("flush drops a %s call body that never closes", dialect => {
+		const rendered = getDialectDefinition(dialect).renderAssistantToolCalls([call], { tools: TOOLS });
+		const truncated = rendered.slice(0, rendered.length / 2);
+		expect(toolEnds(feedChunks(dialect, truncated, 7))).toEqual([]);
 	});
 });

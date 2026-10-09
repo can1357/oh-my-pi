@@ -34,11 +34,11 @@ Programmatic API options use separate contracts, not CLI flags; see [Programmati
 
 That empty literal suppresses discovered `SYSTEM.md` and `SYSTEM_TEMPLATE.md`, but does not disable OMP-generated instructions; only the programmatic `CreateAgentSessionOptions.systemPrompt` full-replacement option does that.
 
-Without an explicit custom source, discovery is project-first, then user-level. Within each scope a literal beats a template: project `SYSTEM.md` beats project `SYSTEM_TEMPLATE.md`, which beats user `SYSTEM.md`, which beats user `SYSTEM_TEMPLATE.md`. `SYSTEM.md` is the long-established override, so an existing literal keeps working until its author deliberately removes it in favor of a template. Both filenames resolve through the same capability providers, so ancestor walk-up (repo-root `.omp` from a nested cwd) and `.agent` / `.agents` directories apply to templates exactly as they do to literals. `.claude`, `.codex`, and `.gemini` bases resolve at the launch cwd and user home.
+Without an explicit custom source, discovery is project-first, then user-level. Within each scope a literal beats a template: project `SYSTEM.md` beats project `SYSTEM_TEMPLATE.md`, which beats user `SYSTEM.md`, which beats user `SYSTEM_TEMPLATE.md`. `SYSTEM.md` is the long-established override, so an existing literal keeps working until its author deliberately removes it in favor of a template. Both filenames resolve through the same capability providers, so ancestor walk-up (repo-root `.omp` from a nested cwd) and `.agent` / `.agents` directories apply to templates exactly as they do to literals. `.claude`, `.codex`, and `.gemini` project bases resolve at the launch cwd. Foreign user bases require `enabledProviders` opt-in; `CLAUDE_CONFIG_DIR` also opts in and relocates the Claude user base.
 
-The native user path follows the active profile: with `omp --profile work`, `~/.omp/agent` becomes `~/.omp/profiles/work/agent`. `PI_CONFIG_DIR` changes the native config-directory name. This shared config lookup does not use `PI_CODING_AGENT_DIR` as an arbitrary replacement base. An explicit CLI flag or programmatic API option still wins over every discovered file. See [Configuration usage](./config-usage.md) for the shared config-directory contract.
+The native user path follows the active profile: with `omp --profile work`, `~/.omp/agent` becomes `~/.omp/profiles/work/agent`. `PI_CONFIG_DIR` changes the native config-directory name. Capability discovery for `SYSTEM.md` and `SYSTEM_TEMPLATE.md` uses `getAgentDir()` and therefore honors `PI_CODING_AGENT_DIR`. The shared config-base lookup for `APPEND_SYSTEM.md` and `TITLE_SYSTEM.md` does not use that variable as an arbitrary replacement base. An explicit CLI flag or programmatic API option still wins over every discovered file. See [Configuration usage](./config-usage.md) for the shared config-directory contract.
 
-`--system-prompt-template <path>` is a strict file path: a missing, unreadable, empty, or malformed template is an error, never a literal prompt. Discovered `SYSTEM_TEMPLATE.md` files degrade instead of bricking startup: an empty discovered template is skipped (the discovered literal, if any, already won discovery), and a malformed discovered template without a same-scope literal warns and renders the bundled prompt. A same-scope literal always wins discovery, so a malformed template beside a literal is never rendered. Discovered templates are read once through capability discovery; later runtime rebuilds re-render that in-memory source.
+`--system-prompt-template <path>` is a strict file path: a missing, unreadable, empty, or malformed template is an error, never a literal prompt. An empty discovered `SYSTEM_TEMPLATE.md` is skipped (the discovered literal, if any, already won discovery). Malformed templates discovered directly by `buildSystemPrompt()` warn and render the bundled prompt. CLI discovery forwards the loaded source as an explicit SDK template, so a malformed discovered template fails CLI startup. A same-scope literal always wins discovery, so a malformed template beside a literal is never rendered. Discovered templates are read once through capability discovery; later runtime rebuilds re-render that in-memory source.
 
 ### Text or file resolution
 
@@ -91,7 +91,7 @@ Which automatic inputs reach each kind of session. An input applies only when it
 | Advisor/watchdog | Inherited     | Inherited                 | No                                            | No        | No                      | Yes           | None        |
 
 1. Task spawning drops inherited context files whose basename is `agents.md` (case-insensitive). Text pulled in through `@` imports is not filtered, and additional workspace roots are discovered separately.
-2. Context discovery selects one user file and one project file per directory depth, and higher-priority providers win. A standalone `CLAUDE.md` is supported; `GEMINI.md` is read from the user and project `.gemini` directories.
+2. Context discovery selects one user file and one project file per directory depth, and higher-priority providers win. Foreign user files require `enabledProviders` opt-in. A standalone `CLAUDE.md` is supported; `GEMINI.md` is read from the user and project `.gemini` directories.
 3. A task agent's `tools:` list does not remove MCP tools or server instructions: the tools stay available top-level or under `xd://`. Plan-mode tasks and children of restricted sessions run with `restrictToolNames`, which drops both.
 
 ## Handlebars template route
@@ -102,7 +102,7 @@ Generated blocks that are outside block 0 remain normal: the `<project-context>`
 
 The generated project/footer route already renders `contextFiles` and `appendPrompt` once. A template SHOULD NOT render those fields in block 0 unless it intentionally wants duplicate copies.
 
-Use effective session settings and live tool data rather than copying today's rendered prose. `eagerTasks` and `eagerTasksAlways` reflect task settings captured when the session starts, while `xdevDocs`, `toolInventory`, and `toolRefs` reflect mounted devices and tool state whenever the prompt rebuilds. `xdevDocs` also reflects the `tools.xdevDocs` / `tools.xdevInlineDevices` settings used for that rebuild.
+Use effective session settings and live tool data rather than copying today's rendered prose. `subagent` is true when rendering a task subagent's prompt; the bundled templates use it to replace verification duties with a hand-off to the main agent. `eagerTasks` and `eagerTasksAlways` reflect task settings captured when the session starts, while `xdevDocs`, `toolInventory`, and `toolRefs` reflect mounted devices and tool state whenever the prompt rebuilds. `xdevDocs` also reflects the `tools.xdevDocs` / `tools.xdevInlineDevices` settings used for that rebuild.
 
 The template has the same helper set used by the bundled prompt (`if`, `each`, `unless`, `list`, `when`, `has`, `ifAny`, `includes`, and the other registered helpers). No extra helper is created for a user file. Values inserted into a template are data, not a second template pass: Handlebars-looking text inside `xdevDocs`, context files, tool descriptions, or other values is not recursively rendered.
 
@@ -122,9 +122,9 @@ on
 {{#if internalUrls.length}}Internal URLs available.{{/if}}
 ```
 
-those characters reach the model literally. Internal values such as `cwd`, `skills`, `rules`, and `toolRefs` remain private implementation details for the plain route. The calendar date is deliberately not exposed as a template value anymore — it rides the per-request first-turn reminder instead (see above).
+those characters reach the model literally. Internal values such as `cwd`, `skills`, `rules`, and `toolRefs` remain private implementation details for the plain route. The calendar date is not exposed as a template value — it rides a per-request reminder on the first user turn together with the session cwd.
 
-Only the opt-in `SYSTEM_TEMPLATE.md` / `--system-prompt-template` / programmatic `CreateAgentSessionOptions.systemPromptTemplate` and `buildSystemPrompt({ systemPromptTemplate })` routes compile Handlebars. A malformed template or an empty template fails clearly; it is never silently downgraded to plain text.
+Only the opt-in `SYSTEM_TEMPLATE.md` / `--system-prompt-template` / programmatic `CreateAgentSessionOptions.systemPromptTemplate` and `buildSystemPrompt({ systemPromptTemplate })` routes compile Handlebars. An explicit malformed or empty template fails clearly and is never downgraded to plain text. Discovered empty templates are skipped. Malformed templates discovered by `buildSystemPrompt()` warn and fall back to the bundled prompt; CLI-discovered source is forwarded as explicit SDK input and therefore fails on malformed Handlebars.
 
 ## Recipes
 
@@ -205,7 +205,7 @@ Generate a session name using lowercase `<type>:<primary-objective>`.
 If the message has no concrete task, output exactly `none`.
 ```
 
-`TITLE_SYSTEM.md` uses the same project-first, config-base discovery and no-ancestor-walk behavior. When absent, OMP uses its bundled title prompt. The override is used for both initial automatic titles and replan-driven title refreshes.
+`TITLE_SYSTEM.md` uses project-first config-base discovery with no ancestor walk. Foreign user bases require `enabledProviders` opt-in (or `CLAUDE_CONFIG_DIR` for Claude). When absent, OMP titles a new session from a fork of its first reply (the session's own model, on the cached prompt) with the bundled tiny-model title prompt as the fallback. The override is used for both initial automatic titles and replan-driven title refreshes, and turns the reply fork off: titles come from the tiny title model.
 
 Generated title output has an enforced normalization contract even with a custom prompt. OMP considers only the first trimmed line, strips surrounding quotes, `<title>...</title>` markers, and terminal punctuation, and treats `none` or `<title/>` as “no title yet.” A result longer than 80 characters or 12 words is rejected rather than truncated. Empty, deferred, or rejected output leaves the session unnamed, so a later eligible title attempt can name it.
 
@@ -237,5 +237,5 @@ The CLI flags and files do **not** set `systemPrompt`: they select the plain/tem
 | Use `{{cwd}}` or other internal variables in a plain user file             | Not supported; plain user content is inserted verbatim                                                           |
 | Include live settings, tool inventory, or xdev docs in a template          | Reference the corresponding Handlebars fields, such as `{{eagerTasks}}`, `{{toolInventory}}`, and `{{xdevDocs}}` |
 | Inherit selected default-template sections automatically                   | Not supported; a template must reference the data it needs                                                       |
-| Per-directory override                                                     | A supported config base directly under the cwd used to launch OMP                                                |
+| Per-directory override                                                     | A supported project config base; native `.omp` and `.agent` / `.agents` custom prompts also support ancestor discovery |
 | Global override                                                            | The active native agent directory, or another supported user config base                                         |

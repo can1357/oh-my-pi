@@ -1,4 +1,13 @@
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+/**
+ * Tests for relay-safe target adoption in `pickElectronTarget`
+ * (discarded-tab hangs, "Requesting main frame too early!" race):
+ * - relay /json metadata chooses a page before probing its frame,
+ * - discarded matches fail with actionable guidance,
+ * - per-target attach deadlines never hang,
+ * - mainFrame readiness is polled past the frameTree race.
+ */
+
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, test, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -6,6 +15,7 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import { createBrowserPrelude } from "@oh-my-pi/pi-coding-agent/tools/browser";
 import {
+	attachPageWithTimeout,
 	findFreeCdpPort,
 	findReusableCdp,
 	pickElectronTarget,
@@ -13,6 +23,7 @@ import {
 	resolveSpawnArgs,
 	shouldPreserveConnectedBrowserFocus,
 	waitForCdp,
+	waitForMainFrame,
 } from "@oh-my-pi/pi-coding-agent/tools/browser/attach";
 import { ensureChromiumExecutable } from "@oh-my-pi/pi-coding-agent/tools/browser/launch";
 import {
@@ -21,9 +32,10 @@ import {
 	normalizeConnectedCdpUrl,
 	releaseBrowser,
 } from "@oh-my-pi/pi-coding-agent/tools/browser/registry";
-import { acquireTab } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-supervisor";
+import { acquireTab, getTab } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-supervisor";
 import { Process, ProcessStatus } from "@oh-my-pi/pi-natives";
 import type { Browser, HTTPRequest, Page, Target } from "puppeteer-core";
+import { rejectionOf } from "../helpers/rejection";
 import { chromiumAvailable } from "./chromium-probe";
 
 const CHROMIUM_AVAILABLE = await chromiumAvailable();
@@ -41,6 +53,64 @@ function makeSession(): ToolSession {
 		}),
 	};
 }
+
+function makePage(urlCalls: Array<() => void>, finalUrl = "https://example.com/") {
+	let calls = 0;
+	const page = {
+		url: () => {
+			urlCalls[Math.min(calls, urlCalls.length - 1)]?.();
+			calls += 1;
+			if (calls < urlCalls.length) {
+				throw new Error("Requesting main frame too early!");
+			}
+			return finalUrl;
+		},
+		title: async () => "Example",
+	} as unknown as Page;
+	return { page, calls: () => calls };
+}
+
+function makeTarget(id: string, page: Page | null = null, pageDelayMs = 0) {
+	const pageSpy = vi.fn(async (): Promise<Page | null> => {
+		if (pageDelayMs > 0) await new Promise(resolve => setTimeout(resolve, pageDelayMs));
+		return page;
+	});
+	const target = {
+		_targetId: id,
+		type: () => "page",
+		page: pageSpy,
+	} as unknown as Target & { _targetId: string };
+	return { target, pageSpy };
+}
+
+function makeBrowser(targets: Array<Target & { _targetId: string }>) {
+	return {
+		targets: () => targets,
+		pages: vi.fn(async (): Promise<Page[]> =>
+			(await Promise.all(targets.map(t => t.page()))).filter((page): page is Page => page !== null),
+		),
+	} as unknown as Browser;
+}
+
+const RELAY_ENTRIES = [
+	{ id: "PAGE10", type: "page", title: "Docs", url: "https://docs.example.com", active: "false", discarded: "false" },
+	{
+		id: "PAGE11",
+		type: "page",
+		title: "Whole Foods Market Shopping Cart",
+		url: "https://www.amazon.com/cart/localmarket?almBrandId=x",
+		active: "true",
+		discarded: "false",
+	},
+	{
+		id: "PAGE12",
+		type: "page",
+		title: "Old cart",
+		url: "https://www.amazon.com/cart",
+		active: "false",
+		discarded: "true",
+	},
+];
 
 interface FakePageOptions {
 	url: string;
@@ -131,6 +201,94 @@ describe("pickElectronTarget", () => {
 
 		await expect(pickElectronTarget(browser)).resolves.toBe(page);
 	});
+
+	test.skipIf(!CHROMIUM_AVAILABLE)(
+		"waits for a real attached Chromium's first page before opening the managed tab",
+		async () => {
+			const exe = await ensureChromiumExecutable();
+			if (!exe) throw new Error("Expected a Chromium executable");
+			const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-attach-page-readiness-"));
+			const port = await findFreeCdpPort();
+			const child = Bun.spawn(
+				[
+					exe,
+					"--headless=new",
+					"--no-sandbox",
+					"--no-startup-window",
+					"--no-first-run",
+					"--no-default-browser-check",
+					"--use-mock-keychain",
+					"--password-store=basic",
+					`--user-data-dir=${root}`,
+					`--remote-debugging-port=${port}`,
+				],
+				{ stdin: "ignore", stdout: "ignore", stderr: "ignore" },
+			);
+			const session = makeSession();
+			const prelude = createBrowserPrelude(session);
+			const context = { session, toolCallId: "attach-page-readiness" };
+			const name = `page-readiness-${crypto.randomUUID()}`;
+			const controller = new AbortController();
+			let attached: BrowserHandle | undefined;
+			let restoreWait: (() => void) | undefined;
+			try {
+				const cdpUrl = `http://127.0.0.1:${port}`;
+				await waitForCdp(cdpUrl, 15_000);
+				attached = await acquireBrowser({ kind: "connected", cdpUrl }, { cwd: process.cwd() });
+				if (!("browser" in attached)) throw new Error("Expected a Puppeteer browser");
+				const browser = attached.browser;
+				expect(await browser.pages()).toHaveLength(0);
+				const waiting = Promise.withResolvers<void>();
+				const waitForTarget = browser.waitForTarget.bind(browser);
+				// Observe the real waiter starting, without replacing its CDP behavior.
+				// The first page is then created externally, not by browser.open.
+				const waitSpy = vi.spyOn(browser, "waitForTarget").mockImplementation((predicate, options) => {
+					waiting.resolve();
+					return waitForTarget(predicate, options);
+				});
+				restoreWait = () => waitSpy.mockRestore();
+				const opening = prelude
+					.invoke(
+						{
+							action: "open",
+							name,
+							url: "data:text/html,<title>First attached page</title>",
+							timeout: 15,
+							app: { cdp_url: cdpUrl },
+						},
+						{ ...context, signal: controller.signal },
+					)
+					.then(
+						result => ({ result }),
+						(error: unknown) => ({ error }),
+					);
+				await Promise.race([
+					waiting.promise,
+					opening.then(outcome => {
+						if ("error" in outcome) throw outcome.error;
+						throw new Error("Attached open finished before an external page was created");
+					}),
+				]);
+				expect(await browser.pages()).toHaveLength(0);
+				await browser.newPage();
+				const outcome = await opening;
+				if ("error" in outcome) throw outcome.error;
+				const title = await prelude.invoke({ action: "run", name, code: "return await tab.title();" }, context);
+				expect(title.details).toMatchObject({ value: "First attached page" });
+				await prelude.invoke({ action: "close", name, kill: true }, context);
+				expect(await probeCdpStatus(`${cdpUrl}/json/version`, { timeoutMs: 1500 })).toBe(200);
+			} finally {
+				controller.abort();
+				restoreWait?.();
+				await prelude.invoke({ action: "close", name }, context).catch(() => {});
+				if (attached) await releaseBrowser(attached, { kill: false });
+				child.kill();
+				await child.exited;
+				await fs.rm(root, { recursive: true, force: true });
+			}
+		},
+		30_000,
+	);
 
 	test("reports available pages when the matcher misses", async () => {
 		const page = fakePage({ url: "https://example.com/", title: "Example" });
@@ -356,6 +514,16 @@ describe("pickElectronTarget", () => {
 					url: "data:text/html,<title>Owned</title>",
 					app: { path: exe, args: [...flags, "--user-data-dir", path.join(root, "owned")] },
 				});
+				const borrowedTab = getTab(borrowedName);
+				const ownedTab = getTab(ownedName);
+				if (borrowedTab?.backend !== "worker" || ownedTab?.backend !== "worker")
+					throw new Error("Expected Chromium worker tabs");
+				expect(borrowedTab.browser).not.toBe(ownedTab.browser);
+				expect(borrowedTab.targetId).not.toBe(ownedTab.targetId);
+				expect(borrowedTab.browser.subprocess).toBeUndefined();
+				expect(ownedTab.browser.subprocess).toBeDefined();
+				const ownedTitle = await invoke({ action: "run", name: ownedName, code: "return await tab.title();" });
+				expect(ownedTitle.details).toMatchObject({ value: "Owned" });
 				const title = await invoke({ action: "run", name: borrowedName, code: "return await tab.title();" });
 				expect(title.details).toMatchObject({ value: "Borrowed" });
 				await invoke({ action: "close", name: borrowedName, kill: true });
@@ -363,6 +531,68 @@ describe("pickElectronTarget", () => {
 			} finally {
 				await invoke({ action: "close", name: ownedName, kill: true }).catch(() => {});
 				await invoke({ action: "close", name: borrowedName, kill: true }).catch(() => {});
+				child.kill();
+				await child.exited;
+				await fs.rm(root, { recursive: true, force: true });
+			}
+		},
+		30_000,
+	);
+
+	test.skipIf(!CHROMIUM_AVAILABLE)(
+		"reports a connected browser's own viewport on open and observe",
+		async () => {
+			const exe = await ensureChromiumExecutable();
+			if (!exe) throw new Error("Expected a Chromium executable");
+			const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-connected-viewport-"));
+			const port = await findFreeCdpPort();
+			const child = Bun.spawn(
+				[
+					exe,
+					"--headless=new",
+					"--no-sandbox",
+					"--no-first-run",
+					"--use-mock-keychain",
+					"--window-size=900,700",
+					"--force-device-scale-factor=2",
+					`--user-data-dir=${root}`,
+					`--remote-debugging-port=${port}`,
+				],
+				{ stdin: "ignore", stdout: "ignore", stderr: "ignore" },
+			);
+			const session = makeSession();
+			const prelude = createBrowserPrelude(session);
+			const invoke = (parameters: unknown) =>
+				prelude.invoke(parameters, { session, toolCallId: "connected-viewport" });
+			const name = `connected-viewport-${crypto.randomUUID()}`;
+			try {
+				await waitForCdp(`http://127.0.0.1:${port}`, 15_000);
+				const opened = await invoke({
+					action: "open",
+					name,
+					url: "data:text/html,<title>Viewport</title>",
+					app: { cdp_url: `http://127.0.0.1:${port}` },
+				});
+				const result = await invoke({
+					action: "run",
+					name,
+					code: `return {
+	observed: (await tab.observe()).viewport,
+	window: await tab.evaluate(() => ({ width: innerWidth, height: innerHeight, deviceScaleFactor: devicePixelRatio })),
+};`,
+				});
+				const details = result.details;
+				if (!details || typeof details !== "object" || !("value" in details))
+					throw new Error("run returned no value");
+				// `run` details carry the cell's return value untyped.
+				const { observed, window } = details.value as { observed: unknown; window: unknown };
+				// The window's chrome eats into --window-size differently per OS, so pin only the forced
+				// pixel ratio; it differs from DEFAULT_VIEWPORT's 1.25, which main reported here.
+				expect(window).toMatchObject({ deviceScaleFactor: 2 });
+				expect(observed).toEqual(window);
+				expect(opened.details).toMatchObject({ viewport: window });
+			} finally {
+				await invoke({ action: "close", name }).catch(() => {});
 				child.kill();
 				await child.exited;
 				await fs.rm(root, { recursive: true, force: true });
@@ -438,14 +668,19 @@ describe("pickElectronTarget", () => {
 			let attached: BrowserHandle | undefined;
 
 			let attempted = false;
+			const tabName = `attach-failure-${process.pid}-${Math.random().toString(36).slice(2)}`;
 			try {
 				attached = await acquireBrowser(
 					{ kind: "connected", cdpUrl: `http://${endpoint.host}` },
 					{ cwd: process.cwd() },
 				);
 				attempted = true;
-				await expect(
-					acquireTab(`attach-failure-${process.pid}-${Math.random().toString(36).slice(2)}`, attached, {
+				// Plain await, not `.rejects`: on Windows, once an earlier test has
+				// spawned a piped child, Bun's `.rejects` loop spin stops servicing
+				// this thread's CDP socket, so the paused request never reaches
+				// `onRequest` and worker init times out instead.
+				const error = await rejectionOf(
+					acquireTab(tabName, attached, {
 						// Loopback keeps a hypothetical interception miss local and
 						// loud (instant connection refusal, count 0) instead of
 						// wandering into DNS or a proxy.
@@ -453,8 +688,13 @@ describe("pickElectronTarget", () => {
 						waitUntil: "domcontentloaded",
 						timeoutMs: 15_000,
 					}),
-				).rejects.toThrow(/net::ERR_FAILED/);
+				);
+				expect(error).toBeInstanceOf(Error);
+				expect(error).toMatchObject({ message: expect.stringMatching(/net::ERR_FAILED/) });
 				expect(requestCount).toBe(1);
+				// The failed open rolls back its tab, and with it the tab's hold on the attached browser.
+				expect(getTab(tabName)).toBeUndefined();
+				expect(attached.refCount).toBe(0);
 			} finally {
 				targetPage.off("request", onRequest);
 				await targetPage.setRequestInterception(false);
@@ -463,6 +703,40 @@ describe("pickElectronTarget", () => {
 		},
 		30_000,
 	);
+
+	test("names the refused CDP websocket instead of reporting [object ErrorEvent]", async () => {
+		// `/json/version` answers, but its debugger websocket refuses the upgrade.
+		const cdp = Bun.serve({
+			hostname: "127.0.0.1",
+			port: 0,
+			fetch: (request, server) =>
+				new URL(request.url).pathname === "/json/version"
+					? Response.json({ webSocketDebuggerUrl: `ws://127.0.0.1:${server.port}/devtools/browser/gone` })
+					: new Response("gone", { status: 404 }),
+		});
+		const session = makeSession();
+		const prelude = createBrowserPrelude(session);
+		try {
+			const error = await rejectionOf(
+				prelude.invoke(
+					{
+						action: "open",
+						name: `refused-${crypto.randomUUID()}`,
+						app: { cdp_url: `http://127.0.0.1:${cdp.port}` },
+					},
+					{ session, toolCallId: "refused-websocket" },
+				),
+			);
+			expect(error).toBeInstanceOf(Error);
+			expect(error).toMatchObject({
+				message: expect.stringContaining(
+					`WebSocket connection to 'ws://127.0.0.1:${cdp.port}/devtools/browser/gone'`,
+				),
+			});
+		} finally {
+			cdp.stop(true);
+		}
+	});
 });
 
 describe("resolveSpawnArgs", () => {
@@ -488,7 +762,371 @@ describe("resolveSpawnArgs", () => {
 		expect(owned).not.toContain("--password-store=basic");
 
 		const borrowed = resolveSpawnArgs("/usr/bin/google-chrome-stable", ["--user-data-dir=/home/me/.config/chrome"]);
-		expect(borrowed).toEqual(["--user-data-dir=/home/me/.config/chrome"]);
+		expect(borrowed).toEqual([`--user-data-dir=${path.resolve("/home/me/.config/chrome")}`]);
+	});
+});
+describe("pickElectronTarget relay path", () => {
+	let relay: Bun.Server<undefined>;
+	let relayJson: string;
+	let available = true;
+	let relayEntries = RELAY_ENTRIES;
+	beforeEach(() => {
+		available = true;
+		relayEntries = RELAY_ENTRIES;
+		relay = Bun.serve({
+			hostname: "127.0.0.1",
+			port: 0,
+			fetch(req) {
+				if (new URL(req.url).pathname !== "/json") return new Response("Not found", { status: 404 });
+				return available ? Response.json(relayEntries) : new Response("unavailable", { status: 503 });
+			},
+		});
+		relayJson = `http://127.0.0.1:${relay.port}`;
+	});
+	afterEach(async () => {
+		await relay.stop(true);
+		vi.restoreAllMocks();
+	});
+
+	it("adopts the active tab from /json metadata without attaching any other target", async () => {
+		const pages = new Map<string, { page: Page; calls: () => number }>();
+		const targets: Array<Target & { _targetId: string }> = [];
+		for (const entry of RELAY_ENTRIES) {
+			const made = makePage([() => {}]);
+			pages.set(entry.id, made);
+			const { target, pageSpy } = makeTarget(entry.id, made.page);
+			Object.assign(target, { page: pageSpy });
+			targets.push(target as Target & { _targetId: string });
+		}
+		const browser = makeBrowser(targets);
+
+		const picked = await pickElectronTarget(browser, { relayJson });
+
+		expect(picked).toBe(pages.get("PAGE11")!.page);
+		const attachCalls = targets.map(
+			t => (t as unknown as { page: { mock: { calls: unknown[] } } }).page.mock.calls.length,
+		);
+		expect(attachCalls).toEqual([0, 1, 0]);
+	});
+
+	it("matcher skips a discarded matching tab", async () => {
+		const made = makePage([() => {}]);
+		const { target } = makeTarget("PAGE11", made.page);
+		const made12 = makePage([() => {}]);
+		const { target: target12 } = makeTarget("PAGE12", made12.page);
+		const browser = makeBrowser([target, target12]);
+
+		const picked = await pickElectronTarget(browser, {
+			relayJson,
+			matcher: "cart",
+		});
+
+		expect(picked).toBe(made.page);
+		expect((target12 as unknown as { page: { mock: { calls: unknown[] } } }).page.mock.calls.length).toBe(0);
+	});
+
+	it("chooses the first of two live matching tabs", async () => {
+		relayEntries = [
+			{
+				id: "PAGE_A",
+				type: "page",
+				title: "Cart A",
+				url: "https://example.com/cart/a",
+				active: "false",
+				discarded: "false",
+			},
+			{
+				id: "PAGE_B",
+				type: "page",
+				title: "Cart B",
+				url: "https://example.com/cart/b",
+				active: "false",
+				discarded: "false",
+			},
+		];
+		const firstPage = makePage([() => {}], relayEntries[0]!.url).page;
+		const secondPage = makePage([() => {}], relayEntries[1]!.url).page;
+		const first = makeTarget("PAGE_A", firstPage);
+		const second = makeTarget("PAGE_B", secondPage);
+		const picked = await pickElectronTarget(makeBrowser([first.target, second.target]), {
+			relayJson,
+			matcher: "cart",
+		});
+		expect(picked).toBe(firstPage);
+		expect(second.pageSpy).not.toHaveBeenCalled();
+	});
+
+	it("does not adopt another live tab when the selected tab is unreadable", async () => {
+		const other = makeTarget("PAGE10", fakePage({ url: "https://docs.example.com", title: "Docs" }));
+		const unreadable = makeTarget("PAGE11", {
+			url: () => {
+				throw new Error("Page frame unavailable");
+			},
+			title: async () => "Cart",
+		} as unknown as Page);
+
+		await expect(
+			pickElectronTarget(makeBrowser([other.target, unreadable.target]), { relayJson, preferVisible: true }),
+		).rejects.toThrow(/selected tab.*not ready/i);
+		expect(other.pageSpy).not.toHaveBeenCalled();
+	});
+
+	it("skips an active service worker page unless explicitly targeted", async () => {
+		relayEntries = [
+			{
+				id: "PAGE_A",
+				type: "page",
+				title: "Service Worker",
+				url: "https://example.com/a",
+				active: "true",
+				discarded: "false",
+			},
+			{
+				id: "PAGE_B",
+				type: "page",
+				title: "Home",
+				url: "https://example.com/b",
+				active: "false",
+				discarded: "false",
+			},
+		];
+		const skippedPage = makePage([() => {}], relayEntries[0]!.url).page;
+		const homePage = makePage([() => {}], relayEntries[1]!.url).page;
+		const skipped = makeTarget("PAGE_A", skippedPage);
+		const home = makeTarget("PAGE_B", homePage);
+		const browser = makeBrowser([skipped.target, home.target]);
+		expect(await pickElectronTarget(browser, { relayJson, preferVisible: true })).toBe(homePage);
+		expect(skipped.pageSpy).not.toHaveBeenCalled();
+		expect(await pickElectronTarget(browser, { relayJson, matcher: "Service Worker" })).toBe(skippedPage);
+	});
+
+	it("prefers the visible tab among active tabs in different windows", async () => {
+		relayEntries = [
+			{
+				id: "PAGE_A",
+				type: "page",
+				title: "Window A",
+				url: "https://example.com/a",
+				active: "true",
+				discarded: "false",
+			},
+			{
+				id: "PAGE_B",
+				type: "page",
+				title: "Window B",
+				url: "https://example.com/b",
+				active: "true",
+				discarded: "false",
+			},
+		];
+		const firstPage = {
+			url: () => relayEntries[0]!.url,
+			title: async () => "Window A",
+			evaluate: async () => false,
+		} as unknown as Page;
+		const visiblePage = {
+			url: () => relayEntries[1]!.url,
+			title: async () => "Window B",
+			evaluate: async () => true,
+		} as unknown as Page;
+		const first = makeTarget("PAGE_A", firstPage);
+		const second = makeTarget("PAGE_B", visiblePage);
+		const picked = await pickElectronTarget(makeBrowser([first.target, second.target]), {
+			relayJson,
+			preferVisible: true,
+		});
+		expect(picked).toBe(visiblePage);
+	});
+
+	it("does not choose a hidden window when another active tab is unreadable", async () => {
+		relayEntries = RELAY_ENTRIES.map(entry => (entry.id === "PAGE10" ? { ...entry, active: "true" } : entry));
+		const unreadable = makeTarget("PAGE10", {
+			url: () => {
+				throw new Error("Page frame unavailable");
+			},
+			title: async () => "Docs",
+		} as unknown as Page);
+		const hidden = makeTarget("PAGE11", {
+			url: () => relayEntries[1]!.url,
+			title: async () => "Cart",
+			evaluate: async () => false,
+		} as unknown as Page);
+
+		await expect(
+			pickElectronTarget(makeBrowser([unreadable.target, hidden.target]), { relayJson, preferVisible: true }),
+		).rejects.toThrow(/tab.*not ready/i);
+	});
+
+	it("does not select a hidden page when another connected-browser page is unreadable", async () => {
+		const unreadable = makeTarget("PAGE_A", {
+			url: () => {
+				throw new Error("Page frame unavailable");
+			},
+			title: async () => "Active tab",
+		} as unknown as Page);
+		const hidden = makeTarget("PAGE_B", {
+			url: () => "https://example.com/hidden",
+			title: async () => "Background tab",
+			evaluate: async () => false,
+		} as unknown as Page);
+
+		await expect(
+			pickElectronTarget(makeBrowser([unreadable.target, hidden.target]), { preferVisible: true }),
+		).rejects.toThrow(/tab.*not ready/i);
+	});
+
+	it("does not satisfy a connected-browser matcher from another page when one is unreadable", async () => {
+		const unreadable = makeTarget("PAGE_A", {
+			url: () => {
+				throw new Error("Page frame unavailable");
+			},
+			title: async () => "Cart",
+		} as unknown as Page);
+		const otherMatch = makeTarget("PAGE_B", fakePage({ url: "https://example.com/cart", title: "Cart" }));
+
+		await expect(
+			pickElectronTarget(makeBrowser([unreadable.target, otherMatch.target]), { matcher: "cart" }),
+		).rejects.toThrow(/tab.*not ready/i);
+	});
+
+	it("aborts target discovery when the caller cancels", async () => {
+		const controller = new AbortController();
+		const page = Promise.withResolvers<Page | null>();
+		const { target } = makeTarget("PAGE_CANCEL");
+		Object.assign(target, { page: () => page.promise });
+		const selection = pickElectronTarget(makeBrowser([target]), { preferVisible: true, signal: controller.signal });
+
+		controller.abort(new Error("user cancelled"));
+		page.resolve(null);
+		await expect(selection).rejects.toThrow("Operation aborted");
+	});
+
+	it("aborts frame-readiness polling when the caller cancels", async () => {
+		const controller = new AbortController();
+		const page = {
+			url: () => {
+				throw new Error("Requesting main frame too early!");
+			},
+		} as unknown as Page;
+		const readiness = waitForMainFrame(page, 100, controller.signal);
+
+		controller.abort();
+		await expect(readiness).rejects.toThrow("Operation aborted");
+	});
+
+	it("fails with guidance when the only match is a discarded tab", async () => {
+		const made = makePage([() => {}]);
+		const { target } = makeTarget("PAGE12", made.page);
+		const browser = makeBrowser([target]);
+
+		const picking = pickElectronTarget(browser, {
+			relayJson,
+			matcher: "old cart",
+		});
+
+		await expect(picking).rejects.toThrow(/discarded .* Chrome/i);
+	});
+
+	it("falls back to target enumeration when /json is unavailable", async () => {
+		available = false;
+		const made = makePage([() => {}]);
+		const { target } = makeTarget("PAGE11", made.page);
+		const browser = makeBrowser([target]);
+
+		const picked = await pickElectronTarget(browser, { relayJson });
+
+		expect(picked).toBe(made.page);
+	});
+});
+
+it("uses relay metadata through a proxy without corrupting UTF-8 titles", async () => {
+	const entries = [
+		{ id: "PAGE_A", type: "page", title: "Other", url: "https://example.com/a", active: "false", discarded: "false" },
+		{ id: "PAGE_B", type: "page", title: "Café", url: "https://example.com/b", active: "true", discarded: "false" },
+	];
+	let relayHits = 0;
+	let proxyHits = 0;
+	const relay = Bun.serve({
+		hostname: "127.0.0.1",
+		port: 0,
+		fetch: () => {
+			relayHits++;
+			return Response.json(entries);
+		},
+	});
+	const proxy = Bun.serve({
+		hostname: "127.0.0.1",
+		port: 0,
+		fetch: () => {
+			proxyHits++;
+			return new Response("Bad Gateway", { status: 502 });
+		},
+	});
+	const saved = {
+		HTTP_PROXY: process.env.HTTP_PROXY,
+		http_proxy: process.env.http_proxy,
+		NO_PROXY: process.env.NO_PROXY,
+		no_proxy: process.env.no_proxy,
+	};
+	process.env.HTTP_PROXY = `http://127.0.0.1:${proxy.port}`;
+	process.env.http_proxy = process.env.HTTP_PROXY;
+	process.env.NO_PROXY = "";
+	process.env.no_proxy = "";
+	try {
+		const firstPage = { url: () => entries[0]!.url, title: async () => "Other" } as unknown as Page;
+		const chosenPage = { url: () => entries[1]!.url, title: async () => "Café" } as unknown as Page;
+		const first = makeTarget(entries[0]!.id, firstPage);
+		const chosen = makeTarget(entries[1]!.id, chosenPage);
+		const picked = await pickElectronTarget(makeBrowser([first.target, chosen.target]), {
+			relayJson: `http://127.0.0.1:${relay.port}`,
+			matcher: "Café",
+		});
+		expect(picked).toBe(chosenPage);
+		expect(first.pageSpy).not.toHaveBeenCalled();
+		expect(relayHits).toBe(1);
+		expect(proxyHits).toBe(0);
+	} finally {
+		for (const key of ["HTTP_PROXY", "http_proxy", "NO_PROXY", "no_proxy"] as const) {
+			process.env[key] = saved[key] ?? "";
+			if (saved[key] === undefined) delete process.env[key];
+		}
+		await proxy.stop(true);
+		await relay.stop(true);
+	}
+});
+
+describe("attach hardening", () => {
+	afterEach(() => {
+		vi.restoreAllMocks();
+	});
+
+	it("attachPageWithTimeout resolves null when the target never becomes a page", async () => {
+		const { target } = makeTarget("PAGE1", null, 10_000);
+		expect(await attachPageWithTimeout(target, 30)).toBeNull();
+	});
+
+	it("waitForMainFrame tolerates the frameTree race until the frame serves", async () => {
+		const { page } = makePage([() => {}, () => {}]);
+		expect(await waitForMainFrame(page, 2_000)).toBe(true);
+	});
+
+	it("waitForMainFrame gives up on non-race errors and on the deadline", async () => {
+		const bad = {
+			url: () => {
+				throw new Error("boom");
+			},
+		} as unknown as Page;
+		expect(await waitForMainFrame(bad, 100)).toBe(false);
+
+		let n = 0;
+		const racy = {
+			url: () => {
+				n += 1;
+				throw new Error("Requesting main frame too early!");
+			},
+		} as unknown as Page;
+		expect(await waitForMainFrame(racy, 150)).toBe(false);
+		expect(n).toBeGreaterThan(1);
 	});
 });
 

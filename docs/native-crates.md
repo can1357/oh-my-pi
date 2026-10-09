@@ -2,38 +2,45 @@
 
 Contributor map for Rust workspace members under `crates/`. They are implementation details behind `@oh-my-pi/pi-natives` and its embedded shell; package consumers use JavaScript entrypoints, not these crate APIs.
 
-The root `Cargo.toml` lists every crate under `crates/` explicitly in `workspace.members` — add new crates there. It also patches crates.io `brush-core` to the vendored copy.
+The root `Cargo.toml` lists every crate under `crates/` explicitly in `workspace.members` — add new crates there. Its `[patch.crates-io]` selects vendored `brush-core`, `brush-parser`, `cfg_aliases`, `napi`, and `tree-sitter-go`.
 
 ## First-party crates
 
 | Crate           | Path                                              | Role and consumers                                                                                                                                              |
 | --------------- | ------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `pi-natives`    | [`crates/pi-natives`](../crates/pi-natives)       | Top-level N-API `cdylib`. It exposes the JS-visible API and depends on `pi-ast`, `pi-iso`, `pi-shell`, `pi-vcs`, `pi-voice`, and `pi-walker`.                    |
+| `pi-natives`    | [`crates/pi-natives`](../crates/pi-natives)       | Top-level N-API `cdylib`. It exposes the JS-visible API and depends on `pi-ast`, `pi-diff`, `pi-edit`, `pi-iso`, `pi-predict`, `pi-shell`, `pi-vcs`, `pi-vfs`, `pi-voice`, and `pi-walker`.                    |
 | `pi-builtins`   | [`crates/pi-builtins`](../crates/pi-builtins)     | Every builtin the embedded shell installs: a patched fork of brush's POSIX/bash builtins, plus one module per in-process command-line utility (`cat`, `grep`/`rg`, `sed`, `ls`, `find`, `jq`, `fd`, `diff`, `ps`, `top`, `kill`, the moreutils set, …). `src/host.rs` holds the `Utility` trait and the `Host` view of the shell (stdio, working directory, exported environment, cancellation) that the utilities run against. Ports of uutils coreutils/findutils/sed and jaq live here too; see the crate `LICENSE` for third-party notices. |
-| `pi-shell`      | [`crates/pi-shell`](../crates/pi-shell)           | Persistent embedded brush shell, command execution/minimization, process plumbing, filesystem walking, and in-process command integration used by `pi-natives`. |
+| `pi-diff` | [`crates/pi-diff`](../crates/pi-diff) | N-API-free jsdiff-compatible Myers, line, word, and structured-patch primitives, consumed by native diff bindings and the edit engine. |
+| `pi-edit` | [`crates/pi-edit`](../crates/pi-edit) | Edit-mode parsing, matching, staging, streaming previews, snapshots, and host-writer application; wrapped by native `EditSession` / `EditStore`. |
+| `pi-predict` | [`crates/pi-predict`](../crates/pi-predict) | N-API-free ngram, SmolLM, and macOS spelling-backed word-completion engines, wrapped by `TextPredictor`. |
+| `pi-vfs` | [`crates/pi-vfs`](../crates/pi-vfs) | Injectable async filesystem plus a blocking facade, native host fast paths, and URL-preserving lexical helpers shared by shell, builtins, and traversal. |
+| `pi-shell`      | [`crates/pi-shell`](../crates/pi-shell)           | Persistent embedded brush shell, command execution/minimization, process plumbing, and in-process command integration used by `pi-natives`; traversal and injectable filesystem primitives live in `pi-walker` and `pi-vfs`. |
 | `pi-voice`      | [`crates/pi-voice`](../crates/pi-voice)           | Cross-platform microphone/playback and Opus/WebRTC support used by the `AudioCapture`, `AudioPlayback`, and `LiveWebRtcPeer` bindings.                          |
-| `pi-ast`        | [`crates/pi-ast`](../crates/pi-ast)               | tree-sitter/ast-grep language registry, matching/editing, block analysis, and summarization support across the workspace grammar set.                           |
-| `pi-iso`        | [`crates/pi-iso`](../crates/pi-iso)               | Isolation backend implementations and diffing for APFS, Linux/Windows clone/reflink paths, overlayfs, ProjFS, and recursive copy fallback.                      |
-| `pi-walker`     | [`crates/pi-walker`](../crates/pi-walker)         | Parallel, cache-aware filesystem walker using ignore rules and globsets; shared by native grep/glob/workspace paths and shell commands.                         |
-| `pi-vcs`        | [`crates/pi-vcs`](../crates/pi-vcs)               | In-process version control: git on gitoxide (the git binary survives only for credential-bound network transfers and reftable repos) and Jujutsu on jj-lib; unified discovery and operations used by the `vcs*` native bindings. |
+| `pi-ast`        | [`crates/pi-ast`](../crates/pi-ast)               | tree-sitter/ast-grep language registry, matching/editing, block analysis, and summarization. Common grammars are linked in; the rest load as WebAssembly modules the agent downloads on first use (`src/language/grammar.rs`). They are built and published by [stencil-hq/wasm-grammars](https://github.com/stencil-hq/wasm-grammars); `bun run gen:grammars` pins the latest release in `src/language/wasm_grammars.rs`. |
+| `pi-iso`        | [`crates/pi-iso`](../crates/pi-iso)               | Isolation backend implementations and diffing for APFS, btrfs, ZFS, Linux reflinks, overlayfs, Windows block clones, and ProjFS; fallback uses a Git worktree for Git repositories and recursive copy otherwise.                      |
+| `pi-walker`     | [`crates/pi-walker`](../crates/pi-walker)         | Parallel filesystem walker using ignore rules and globsets, shared by native scans and shell commands. Reads go through `pi-vfs`; bulk syscalls require native-local paths and the shared cache requires no provider.                         |
+| `pi-vcs`        | [`crates/pi-vcs`](../crates/pi-vcs)               | In-process version control: git on gitoxide (the git binary also handles credential-bound network transfers, reftable repos, and whole-worktree status/untracked walks) and Jujutsu on jj-lib; unified discovery and operations used by the `vcs*` native bindings. |
 
 ## Vendored workspace crates
 
 | Group | Paths | Purpose |
 | ----- | ----- | ------- |
 | Brush | [`crates/vendor/brush-core`](../crates/vendor/brush-core), [`crates/vendor/brush-parser`](../crates/vendor/brush-parser) | Vendored shell engine and its tokenizer/parser, consumed by `pi-shell` and `pi-builtins`. Their manifests retain upstream package metadata; workspace patches select these local forks. |
+| Build/runtime compatibility | [`crates/vendor/cfg_aliases`](../crates/vendor/cfg_aliases), [`crates/vendor/napi`](../crates/vendor/napi), [`crates/vendor/tree-sitter-go`](../crates/vendor/tree-sitter-go) | Workspace patches fix macro compatibility, N-API environment teardown, and Go grammar support respectively. |
 
-`pi_builtins::utility_builtins()` and `pi_builtins::process_builtins()` are the authoritative lists of the commands linked into the embedded shell; `pi-shell` decides which of them to register. A directory being a workspace member does not by itself mean that `pi-natives` exposes it as a JavaScript API.
+`pi_builtins::default_builtins()`, `pi_builtins::utility_builtins()`, and `pi_builtins::process_builtins()` (defined in `src/factory.rs`) are the authoritative builtin sets; `pi-shell` decides which of them to register. A directory being a workspace member does not by itself mean that `pi-natives` exposes it as a JavaScript API.
 
 ## Boundary map
 
 ```text
 @oh-my-pi/pi-natives JS entrypoints
   -> pi-natives (N-API conversion, platform bindings, task boundaries)
-       -> pi-ast / pi-iso / pi-vcs / pi-voice / pi-walker
+       -> pi-ast / pi-diff / pi-edit / pi-iso / pi-predict / pi-vcs / pi-voice
+       -> pi-walker / pi-vfs
        -> pi-shell
             -> brush-core (parser, expansion, interpreter)
             -> pi-builtins (bash builtins + utility builtins; host.rs: per-invocation I/O and cwd)
+            -> pi-vfs / pi-walker (filesystem provider and traversal)
 ```
 
 For the loader and JS boundary, see:

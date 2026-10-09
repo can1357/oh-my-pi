@@ -23,6 +23,7 @@ import {
 } from "../tiny/dtype";
 import { DEFAULT_WEB_SEARCH_TIMEOUT_SECONDS, MAX_WEB_SEARCH_TIMEOUT_SECONDS } from "../web/search/types";
 import { DEFAULT_USAGE_RESERVE_PCT } from "@oh-my-pi/pi-ai/auth-storage";
+import { configureProviderStoreResponses } from "@oh-my-pi/pi-ai/providers/openai-responses";
 import { configureProviderMaxInFlightRequests } from "@oh-my-pi/pi-ai/stream";
 import { THINKING_EFFORTS } from "@oh-my-pi/pi-catalog/effort";
 import { formatKeyHint } from "@oh-my-pi/pi-tui/app-keybindings";
@@ -216,6 +217,19 @@ export const cfgHideThinkingBlock = register({
 		group: "Thinking",
 		label: "Hide Thinking Blocks",
 		description: "Hide thinking blocks in assistant responses",
+	},
+});
+
+export const cfgExpandThinkingBlocks = register({
+	id: "expandThinkingBlocks",
+	type: "boolean",
+	default: false,
+	ui: {
+		tab: "model",
+		group: "Thinking",
+		label: "Expand Thinking Blocks",
+		description: "Keep finished thinking blocks expanded instead of collapsing them when the turn ends",
+		condition: "nativeRendering",
 	},
 });
 
@@ -1084,6 +1098,23 @@ export const cfgProvidersOpenaiLiveSteering = register({
 	},
 });
 
+export const cfgProvidersMuseCodeStoreResponses = register({
+	id: "providers.muse-code.storeResponses",
+	type: "boolean",
+	default: false,
+	env: "PI_MUSE_STORE_RESPONSES",
+	ui: {
+		tab: "providers",
+		group: "Protocol",
+		label: "Muse Code Stored Responses",
+		description:
+			"Store Muse Code results on Meta's servers so a turn whose connection drops is recovered instead of re-run. Stored runs keep prompts and outputs on Meta's side.",
+	},
+});
+// Process-wide too, so side requests that call `completeSimple`/`streamSimple`
+// directly (titles, commit messages, memories) follow the setting.
+effect(cfgProvidersMuseCodeStoreResponses, enabled => configureProviderStoreResponses({ "muse-code": enabled }));
+
 export const cfgProvidersCacheRetention = register({
 	id: "providers.cacheRetention",
 	type: "enum",
@@ -1295,7 +1326,7 @@ export const cfgCodexResetsSalvageHorizonHours = register({
 		group: "Services",
 		label: "Codex Reset Salvage Horizon",
 		description:
-			"Spend a saved Codex reset automatically when it would otherwise expire within this many hours and either chat window (5h or weekly) has meaningful usage to restore (0 disables expiry salvage).",
+			"With auto-redeem enabled, spend a saved Codex reset within this many hours of expiry when either chat window has meaningful usage. 0 disables early salvage; credits expiring within 5 minutes are still attempted regardless of usage.",
 	},
 });
 
@@ -1356,7 +1387,7 @@ export const cfgClaudeResetsKeepCredits = register({
 		group: "Services",
 		label: "Claude Auto-Redeem Reserve",
 		description:
-			"Keep at least this many Claude resets banked (0 allows the last eligible reset to be spent automatically). The reserve also applies to expiry salvage.",
+			"Keep at least this many Claude resets banked (0 allows the last eligible reset to be spent automatically). The reserve applies to early salvage, but not to eligible resets expiring within 5 minutes.",
 	},
 });
 
@@ -1369,7 +1400,7 @@ export const cfgClaudeResetsSalvageHorizonHours = register({
 		group: "Services",
 		label: "Claude Reset Salvage Horizon",
 		description:
-			"Use a server-selected Cedar reset within this many hours of expiry only when its covered windows have meaningful usage to restore and the grant permits early use or a covered window is exhausted (0 disables salvage).",
+			"With auto-redeem enabled, use a server-selected Cedar reset within this many hours of expiry when its covered windows have meaningful usage. 0 disables early salvage; eligible Cedar or Juniper resets expiring within 5 minutes are still attempted regardless of usage or reserve. Provider limit requirements still apply.",
 	},
 });
 

@@ -127,15 +127,18 @@ export class OAuthAccounts implements OAuthApi {
 	 * `enterpriseUrl`). For pure "give me the bytes for `Authorization`"
 	 * scenarios, prefer API-key resolution.
 	 *
-	 * Returns `undefined` when no OAuth credential is available, the
-	 * credential fails to refresh, or runtime/config overrides have replaced
-	 * OAuth with an explicit API key.
+	 * Returns `undefined` when no usable OAuth credential is available
+	 * (none stored, or every one definitively failed to refresh) or
+	 * runtime/config overrides have replaced OAuth with an explicit API key.
+	 * Rejects with {@link AIError.OAuthRefreshUnavailableError} (transient,
+	 * retryable) when a retryable refresh failure left no usable credential.
 	 */
 	async access(provider: string, sessionId?: string, options?: AuthApiKeyOptions): Promise<OAuthAccess | undefined> {
 		// Runtime / config overrides intentionally short-circuit OAuth: when the
 		// user has pinned an API key, they expect the OAuth identity to be
-		// suppressed (same contract as account identity lookup).
-		if (this.#deps.overrides.has(provider)) {
+		// suppressed (same contract as account identity lookup). A session
+		// restricted to an account pool never uses a runtime key.
+		if (this.#deps.overrides.suppressesOAuth(provider, this.#deps.affinity.isRestricted(provider, sessionId))) {
 			return undefined;
 		}
 		const resolved = await this.#deps.selector.resolveOAuth(provider, sessionId, options);
@@ -151,6 +154,8 @@ export class OAuthAccounts implements OAuthApi {
 			apiEndpoint: credential.apiEndpoint,
 			orgId: credential.orgId,
 			orgName: credential.orgName,
+			region: credential.region,
+			inferenceRegion: credential.inferenceRegion,
 		};
 	}
 
@@ -174,9 +179,20 @@ export class OAuthAccounts implements OAuthApi {
 		options: AuthApiKeyOptions | undefined,
 	): Promise<OAuthAccessResolution> {
 		try {
+			// tryOAuth refreshes only expired tokens; it resyncs this row from the store after a forced re-mint.
+			let index = selection.index;
+			if (options?.forceRefresh) {
+				await this.refresh(selection.credentialId, options.signal, {
+					reuseRecentMint: options.refreshReason === "auth-recovery",
+					reason: options.refreshReason,
+				});
+				// The refresh re-lists rows, so a concurrently removed row can shift this one's position.
+				index = this.#deps.pool.entries(provider).findIndex(entry => entry.id === selection.credentialId);
+				if (index === -1) throw new Error(`OAuth credential ${selection.credentialId} was removed during refresh`);
+			}
 			const resolved = await this.#deps.selector.tryOAuth(
 				provider,
-				{ credential: selection.credential, index: selection.index },
+				{ credential: selection.credential, index },
 				providerKey,
 				undefined,
 				options,
@@ -206,6 +222,8 @@ export class OAuthAccounts implements OAuthApi {
 				enterpriseUrl: credential.enterpriseUrl,
 				orgId: credential.orgId,
 				orgName: credential.orgName,
+				region: credential.region,
+				inferenceRegion: credential.inferenceRegion,
 			};
 		} catch (error) {
 			return {
@@ -232,7 +250,7 @@ export class OAuthAccounts implements OAuthApi {
 	 * credential.
 	 */
 	accounts(provider: string, sessionId?: string): OAuthAccountSummary[] {
-		if (this.#deps.overrides.has(provider)) {
+		if (this.#deps.overrides.suppressesOAuth(provider, this.#deps.affinity.isRestricted(provider, sessionId))) {
 			return [];
 		}
 		const sessionCredential = this.#deps.affinity.get(provider, sessionId);
@@ -240,17 +258,22 @@ export class OAuthAccounts implements OAuthApi {
 			sessionCredential?.type === "oauth"
 				? this.#deps.pool.entries(provider)[sessionCredential.index]?.id
 				: undefined;
-		return this.#getStoredOAuthSelections(provider).map((selection, position) => ({
-			position,
-			credentialId: selection.credentialId,
-			accountId: selection.credential.accountId,
-			email: selection.credential.email,
-			projectId: selection.credential.projectId,
-			enterpriseUrl: selection.credential.enterpriseUrl,
-			orgId: selection.credential.orgId,
-			orgName: selection.credential.orgName,
-			active: selection.credentialId === activeCredentialId,
-		}));
+		const activeLastUsedAtMs = activeCredentialId !== undefined ? sessionCredential?.lastUsedAtMs : undefined;
+		return this.#getStoredOAuthSelections(provider).map((selection, position) => {
+			const active = selection.credentialId === activeCredentialId;
+			return {
+				position,
+				credentialId: selection.credentialId,
+				accountId: selection.credential.accountId,
+				email: selection.credential.email,
+				projectId: selection.credential.projectId,
+				enterpriseUrl: selection.credential.enterpriseUrl,
+				orgId: selection.credential.orgId,
+				orgName: selection.credential.orgName,
+				active,
+				...(active && activeLastUsedAtMs !== undefined ? { lastUsedAtMs: activeLastUsedAtMs } : {}),
+			};
+		});
 	}
 
 	/**
@@ -277,9 +300,10 @@ export class OAuthAccounts implements OAuthApi {
 	 * Resolve one stored OAuth credential by its durable storage row id.
 	 *
 	 * Unlike the normal session resolver, this method never ranks, rotates, or
-	 * falls back to sibling credentials. A forced refresh re-mints only the
-	 * requested row, preserving exact-account affinity for operations whose
-	 * provenance and policy boundary are tied to one workspace.
+	 * falls back to sibling credentials. A generic forced refresh re-mints only the
+	 * requested row; with `refreshReason: "auth-recovery"` it may instead reuse a
+	 * still-usable recent mint of that row. Either way exact-account affinity holds
+	 * for operations whose provenance and policy boundary are tied to one workspace.
 	 *
 	 * Returns `undefined` when the row does not exist for `provider` or an
 	 * explicit runtime/config API-key override suppresses OAuth.

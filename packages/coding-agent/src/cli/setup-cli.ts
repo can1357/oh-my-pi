@@ -293,7 +293,7 @@ async function handleSpeechSetup(flags: { json?: boolean; check?: boolean }): Pr
 	console.log(chalk.green(`\n${theme.status.success} Speech is ready`));
 	console.log(
 		chalk.dim(
-			`Enable speech-to-text via stt.enabled, then hold ${formatKeyHint("space")} to talk (or bind app.stt.toggle); let read transcribe audio and video files via stt.transcribeFiles; enable the speech-generation tool via speechgen.enabled; speak replies aloud via speech.enabled.`,
+			`Enable speech-to-text via stt.enabled, then hold ${formatKeyHint("space")} by default to talk (remap or disable it with app.stt.pushToTalk, or bind app.stt.toggle separately); let read transcribe audio and video files via stt.transcribeFiles; enable the speech-generation tool via speechgen.enabled; speak replies aloud via speech.enabled.`,
 		),
 	);
 }

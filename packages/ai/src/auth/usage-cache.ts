@@ -6,6 +6,7 @@ import type { UsageCredential, UsageProvider, UsageReport } from "../usage";
 
 const USAGE_CACHE_PREFIX = "usage_cache:";
 const USAGE_FORCE_REFRESH_CACHE_PREFIX = "force-refresh:";
+const USAGE_REPORT_KEY_PREFIX = "report:";
 /** Minimum interval between non-exhausted header snapshots; used by UsageService. */
 export const USAGE_HEADER_INGEST_INTERVAL_MS = 60_000;
 const USAGE_LAST_GOOD_RETENTION_MS = 24 * 60 * 60_000;
@@ -45,6 +46,13 @@ function parseUsageCacheEntry<T>(raw: string): UsageCacheEntry<T> | undefined {
 	}
 }
 
+/** Cached reports drop the provider's upstream `raw` payload; only a fresh fetch carries it. */
+function withoutRawPayload(value: unknown): unknown {
+	if (value === null || typeof value !== "object" || !("raw" in value)) return value;
+	const { raw: _raw, ...rest } = value;
+	return rest;
+}
+
 /** Convert a stored credential for usage providers; used by usage and health services. */
 export function buildUsageCredential(credential: AuthCredential): UsageCredential {
 	if (credential.type === "api_key") {
@@ -65,6 +73,9 @@ export function buildUsageCredential(credential: AuthCredential): UsageCredentia
 		orgName: credential.orgName,
 		enterpriseUrl: credential.enterpriseUrl,
 		apiEndpoint: credential.apiEndpoint,
+		region: credential.region,
+		inferenceRegion: credential.inferenceRegion,
+		activeOrganizationId: credential.activeOrganizationId,
 	};
 }
 
@@ -81,6 +92,9 @@ export function usageCacheIdentity(credential: UsageCredential): string {
 	if (projectId) parts.push(`project:${projectId}`);
 	const enterpriseUrl = credential.enterpriseUrl?.trim().toLowerCase();
 	if (enterpriseUrl) parts.push(`enterprise:${enterpriseUrl}`);
+	if (credential.region) parts.push(`region:${credential.region}`);
+	if (credential.inferenceRegion) parts.push(`inference:${credential.inferenceRegion}`);
+	if (credential.activeOrganizationId) parts.push(`selected-org:${credential.activeOrganizationId}`);
 	// Only fall back to a secret-derived key when a stable account identifier is
 	// unavailable. Including the token hash when accountId/email/orgId are present
 	// causes cache misses on every OAuth refresh — usage data is per-account (or
@@ -190,12 +204,13 @@ export class UsageCache {
 	}
 
 	set<T>(key: string, entry: UsageCacheEntry<T>): void {
+		const value = withoutRawPayload(entry.value);
 		const payload = JSON.stringify({
-			value: entry.value,
+			value,
 			expiresAt: entry.expiresAt,
 		});
 		const durableExpiresAt =
-			entry.value === null ? entry.expiresAt : Math.max(entry.expiresAt, Date.now() + USAGE_LAST_GOOD_RETENTION_MS);
+			value === null ? entry.expiresAt : Math.max(entry.expiresAt, Date.now() + USAGE_LAST_GOOD_RETENTION_MS);
 		this.#store.setCache(`${USAGE_CACHE_PREFIX}${key}`, payload, Math.floor(durableExpiresAt / 1000));
 	}
 
@@ -266,7 +281,7 @@ export class UsageCache {
 		const baseUrl = this.#normalizeUsageBaseUrl(request.baseUrl) || "default";
 		const identity = usageCacheIdentity(request.credential);
 		const providerKey = this.#usageCacheProviderKey(request.provider);
-		const cacheKey = `report:${providerKey}:${baseUrl}:${identity}`;
+		const cacheKey = `${USAGE_REPORT_KEY_PREFIX}${providerKey}:${baseUrl}:${identity}`;
 		const cacheKeys = this.#usageReportCacheKeysByProvider.get(request.provider) ?? new Set<string>();
 		cacheKeys.add(cacheKey);
 		this.#usageReportCacheKeysByProvider.set(request.provider, cacheKeys);
@@ -328,7 +343,7 @@ export class UsageCache {
 		this.#epoch += 1;
 		this.#bumpRefreshEpoch(provider);
 		const expired = Date.now() - 1;
-		const prefix = `report:${this.#usageCacheProviderKey(provider)}:`;
+		const prefix = `${USAGE_REPORT_KEY_PREFIX}${this.#usageCacheProviderKey(provider)}:`;
 		if (this.deletePrefix(prefix)) return;
 		const cacheKeys = new Set(this.#usageReportCacheKeysByProvider.get(provider));
 		for (const entry of this.#pool.entries(provider)) {
@@ -355,7 +370,9 @@ export class UsageCache {
 	): Promise<void> {
 		this.#epoch += 1;
 		this.#bumpRefreshEpoch(provider);
-		const prefix = provider ? `report:${this.#usageCacheProviderKey(provider)}:` : "report:";
+		const prefix = provider
+			? `${USAGE_REPORT_KEY_PREFIX}${this.#usageCacheProviderKey(provider)}:`
+			: USAGE_REPORT_KEY_PREFIX;
 		if (!this.deletePrefix(prefix)) {
 			// Third-party stores may not support prefix deletion. Clear every active
 			// request key instead, including API-key and environment credentials.
