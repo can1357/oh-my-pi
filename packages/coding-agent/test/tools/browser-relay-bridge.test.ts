@@ -1277,6 +1277,37 @@ describe("RelayBridge multiple extension instances", () => {
 		expect(chromeSends).toEqual([1]);
 		expect(edgeSends).toEqual([1]);
 	});
+
+	it("opens new tabs in the browser showing the first selected tab, not the one that reconnected last", () => {
+		const bridge = new RelayBridge({});
+		const chrome = new FakeExtSocket();
+		connectInstance(bridge, chrome, "chrome", [tab({ tabId: 1, active: true })]);
+		connectInstance(bridge, new FakeExtSocket(), "edge", [tab({ tabId: 1, active: true })]);
+		// Edge's service worker restarts and says hello again.
+		const edge = new FakeExtSocket();
+		connectInstance(bridge, edge, "edge", [tab({ tabId: 1, active: true })]);
+		const connId = bridge.cdpConnected(new FakeCdpSocket());
+		bridge.cdpMessage(connId, JSON.stringify({ id: ++msgSeq, method: "Target.createTarget", params: {} }));
+		expect(chrome.rpcs("createTab")).toHaveLength(1);
+		expect(edge.rpcs("createTab")).toHaveLength(0);
+	});
+
+	it("opens new tabs in the browser of a tab the client already drives", async () => {
+		const bridge = new RelayBridge({});
+		const chrome = new FakeExtSocket();
+		const edge = new FakeExtSocket();
+		connectInstance(bridge, edge, "edge", [tab({ tabId: 1 })]);
+		// Chrome both shows the selected tab and said hello last.
+		connectInstance(bridge, chrome, "chrome", [tab({ tabId: 1, active: true })]);
+		const cdp = new FakeCdpSocket();
+		const connId = bridge.cdpConnected(cdp);
+		const sessionId = await attachPage(bridge, edge, cdp, connId, 1, "edge");
+		bridge.cdpMessage(connId, JSON.stringify({ id: ++msgSeq, sessionId, method: "OMP.claimTarget" }));
+		await flush();
+		bridge.cdpMessage(connId, JSON.stringify({ id: ++msgSeq, method: "Target.createTarget", params: {} }));
+		expect(edge.rpcs("createTab")).toHaveLength(1);
+		expect(chrome.rpcs("createTab")).toHaveLength(0);
+	});
 });
 
 describe("RelayBridge last-hello fallback and offline instance pruning", () => {
