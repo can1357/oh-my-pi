@@ -87,7 +87,7 @@ const BACKOFF_MAX_MS = 5_000;
 
 interface SystemOneResponse {
 	model: string;
-	answers: Record<string, Answer>;
+	answers: Record<string, Record<string, unknown> | undefined>;
 	/** OpenRouter adds the billed `cost` in USD; some routes omit token counts. */
 	usage: { input_tokens?: number; output_tokens?: number; cost?: number } & Record<string, unknown>;
 }
@@ -127,11 +127,11 @@ export class TypeSafeJudge implements Judge {
 	async judge<Q extends Questions>(request: JudgmentRequest<Q>, options?: JudgeOptions): Promise<JudgmentResult<Q>> {
 		const judgment = this.#judgment;
 		const typeField = judgment?.typeField ?? "type";
-		let questions: unknown = request.questions;
+		let questions: Record<string, Record<string, unknown>> | Questions = request.questions;
 		if (judgment?.typeMap !== undefined || typeField !== "type") {
-			const wireQuestions: Record<string, unknown> = {};
+			const wireQuestions: Record<string, Record<string, unknown>> = {};
 			for (const id in request.questions) {
-				const question = request.questions[id] as unknown as Record<string, unknown> & { type: string };
+				const question = request.questions[id];
 				const wireQuestion: Record<string, unknown> = {
 					...question,
 					[typeField]: judgment?.typeMap?.[question.type] ?? question.type,
@@ -151,7 +151,7 @@ export class TypeSafeJudge implements Judge {
 		for (const id in request.questions) {
 			const canonical = request.questions[id].type;
 			const expectedWire = judgment?.typeMap?.[canonical] ?? canonical;
-			const raw = response.answers[id] as unknown as (Record<string, unknown> & { type?: unknown }) | undefined;
+			const raw = response.answers[id];
 			if (raw === undefined || raw[typeField] !== expectedWire) {
 				throw new AIError.ProviderResponseError(
 					`${this.label} response is missing a "${canonical}" answer for question "${id}"`,
@@ -161,24 +161,36 @@ export class TypeSafeJudge implements Judge {
 			const normalized: Record<string, unknown> = { ...raw, type: canonical };
 			if (typeField !== "type") delete normalized[typeField];
 			const valueMap: Record<string, string> | undefined = judgment?.valueMap;
-			for (const canonicalKey in valueMap ?? {}) {
-				const wireKey = (valueMap as Record<string, string>)[canonicalKey];
-				if (normalized[canonicalKey] === undefined && normalized[wireKey] !== undefined) {
-					normalized[canonicalKey] = normalized[wireKey];
+			if (valueMap !== undefined) {
+				for (const canonicalKey in valueMap) {
+					const wireKey = valueMap[canonicalKey];
+					if (
+						normalized[canonicalKey] === undefined &&
+						wireKey !== undefined &&
+						normalized[wireKey] !== undefined
+					) {
+						normalized[canonicalKey] = normalized[wireKey];
+					}
 				}
 			}
+			// Validated envelope: the discriminator matched `expectedWire` above and
+			// canonical value keys were copied over, so the shape is an Answer.
 			answers[id] = normalized as unknown as Answer;
 		}
 		const usage = response.usage ?? {};
+		const usageNumber = (key: string): number | undefined => {
+			const value = usage[key];
+			return typeof value === "number" ? value : undefined;
+		};
 		return {
 			api: this.api,
 			provider: this.provider,
 			model: response.model,
 			answers: answers as JudgmentResult<Q>["answers"],
 			usage: tokenUsage(
-				usage[judgment?.usageMap?.input ?? "input_tokens"] as number | undefined,
-				usage[judgment?.usageMap?.output ?? "output_tokens"] as number | undefined,
-				(usage[judgment?.usageMap?.cost ?? "cost"] as number | undefined) ?? 0,
+				usageNumber(judgment?.usageMap?.input ?? "input_tokens"),
+				usageNumber(judgment?.usageMap?.output ?? "output_tokens"),
+				usageNumber(judgment?.usageMap?.cost ?? "cost") ?? 0,
 			),
 		};
 	}

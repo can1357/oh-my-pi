@@ -180,16 +180,16 @@ Supported keys:
   absent and the configured wire key is present, its value is copied over.
 - `usageMap` — renames usage fields: `input` (default `input_tokens`),
   `output` (default `output_tokens`), `cost` (default `cost`). Missing
-  counts read as 0; a missing cost stays unset so ChainJudge reprices from the
-  catalog. Endpoints that report cost outside the usage object (e.g. Vercel's
-  `providerMetadata.gateway.*`) are out of scope — cost then reprices from
-  the catalog as usual.
+  counts read as 0, and a missing cost reads as 0 before ChainJudge reprices
+  it from the catalog. Endpoints that report cost outside the usage object
+  (e.g. Vercel's `providerMetadata.gateway.*`) are out of scope — cost then
+  reprices from the catalog as usual.
 
 Vercel AI Gateway worked example (boolean judgments on `/v1/evaluate`).
 Discovery maps the gateway's `type: "evaluation"` rows (e.g.
-`vercel-ai-gateway/typesafe-ai/jev`) to `api: typesafe` judge models with
-the `/v1/evaluate` judgment defaults baked in, so the discovered id works
-with no config:
+`vercel-ai-gateway/typesafe-ai/jev`) to `api: typesafe` judge models, and the
+provider's catalog rules supply the `/v1/evaluate` judgment defaults, so the
+discovered id works with no config:
 
 ```yaml
 providers:
@@ -200,7 +200,12 @@ providers:
 The model posts to `https://ai-gateway.vercel.sh/v1/evaluate` with `boolean` question types;
 `{type: boolean, probability: 0.9}` answers normalize to
 `{type: noul, noul: 0.9}`, and camelCase usage is read from `inputTokens` /
-`outputTokens`. To override the baked defaults (e.g. a custom judgment
+`outputTokens`. The catalog `typeMap`/`valueMap` cover `noul` only
+(`boolean`/`probability`); `choice` and `score` questions go out — and come
+back — with their canonical types and keys, which the gateway answers
+natively (verified live against `/v1/evaluate`). Billed cost is reported in
+`providerMetadata.gateway.*`, outside the usage object, so cost always
+reprices from the catalog. To override the catalog defaults (e.g. a custom judgment
 route), set `judgment` on a `modelOverrides` entry:
 
 ```yaml
@@ -220,7 +225,21 @@ providers:
             output: outputTokens
 ```
 
-A Bifrost-style endpoint that renames the discriminator
+A Bifrost-style endpoint that renames the discriminator sends `kind` instead
+of `type` on the wire (`{kind: noul}` answers normalize to `{type: noul}`):
+
+```yaml
+providers:
+  bifrost:
+    api: typesafe
+    baseUrl: https://bifrost.example
+    apiKey: BIFROST_KEY
+    judgment:
+      typeField: kind
+    models:
+      - id: judge-model
+        name: Bifrost Judge
+```
 
 Ollama System One example (local daemon — the default `typesafe` route
 posts to `{baseUrl}/v1/systemone`, so no `judgment` override is needed):

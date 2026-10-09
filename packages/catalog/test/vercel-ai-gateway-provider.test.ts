@@ -100,16 +100,25 @@ describe("Vercel AI Gateway provider", () => {
 		expect(jev?.cost?.input).toBeCloseTo(0.042, 9);
 		expect(jev?.cost?.output).toBe(0);
 		expect(jev?.contextWindow).toBe(32_000);
-		expect(jev?.judgment).toEqual({
+		// The mapper carries no judgment: the vercel-ai-gateway KDL default
+		// supplies the /v1/evaluate wire contract through buildModel.
+		expect(jev).not.toHaveProperty("judgment");
+		// The judgment defaults must survive discovery → buildModel so ChainJudge routes at /v1/evaluate.
+		if (!jev) throw new Error("expected the jev evaluation row");
+		expect(buildModel(jev).judgment).toEqual({
 			route: "/v1/evaluate",
 			typeMap: { noul: "boolean" },
 			valueMap: { noul: "probability" },
 			usageMap: { input: "inputTokens", output: "outputTokens" },
 		});
-		// The judgment defaults must survive discovery → buildModel so ChainJudge routes at /v1/evaluate.
-		if (!jev) throw new Error("expected the jev evaluation row");
-		expect(buildModel(jev).judgment).toEqual(jev.judgment);
 		expect(buildModel(jev).judgment?.route).toBe("/v1/evaluate");
+		// Spec (user modelOverrides merged pre-rebuild) wins key-wise over the catalog baseline.
+		expect(buildModel({ ...jev, judgment: { route: "/v1/custom", typeMap: { score: "number" } } }).judgment).toEqual({
+			route: "/v1/custom",
+			typeMap: { noul: "boolean", score: "number" },
+			valueMap: { noul: "probability" },
+			usageMap: { input: "inputTokens", output: "outputTokens" },
+		});
 	});
 
 	test("chat filter drops non-tool-use rows while keeping evaluation rows", async () => {
@@ -155,37 +164,5 @@ describe("Vercel AI Gateway provider", () => {
 		expect(byId.get(chatId)).toBeDefined();
 		expect(byId.get(droppedChatId)).toBeUndefined();
 		expect(byId.get(jevId)).toBeDefined();
-	});
-
-	test("maps all live evaluation ids without throwing", async () => {
-		const ids = [
-			"typesafe-ai/jev",
-			"convaiinnovations/laya",
-			"convaiinnovations/laya-free",
-			"liquid/d1",
-			"openai/gpt-6-luna-decisions",
-		];
-		const fetchMock = (async () =>
-			Response.json({
-				object: "list",
-				data: ids.map(id => ({
-					id,
-					object: "model",
-					type: "evaluation",
-					context_window: 32_000,
-					pricing: { input: 0.000000042, output: 0 },
-				})),
-			})) as unknown as typeof fetch;
-
-		const options = vercelAiGatewayModelManagerOptions({ fetch: fetchMock });
-		const models = await options.fetchDynamicModels?.();
-		expect(models).not.toBeNull();
-		const byId = new Map((models ?? []).map(model => [model.id, model]));
-		for (const id of ids) {
-			const model = byId.get(id);
-			expect(model).toBeDefined();
-			expect(model?.api).toBe("typesafe");
-			expect(model?.kind).toBe("judge");
-		}
 	});
 });

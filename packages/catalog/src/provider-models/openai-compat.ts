@@ -4038,12 +4038,6 @@ export function vercelAiGatewayModelManagerOptions(
 							contextWindow:
 								typeof entry.context_window === "number" ? entry.context_window : defaults.contextWindow,
 							maxTokens: typeof entry.max_tokens === "number" ? entry.max_tokens : defaults.maxTokens,
-							judgment: {
-								route: "/v1/evaluate",
-								typeMap: { noul: "boolean" },
-								valueMap: { noul: "probability" },
-								usageMap: { input: "inputTokens", output: "outputTokens" },
-							},
 						};
 					}
 					const pricing = entry.pricing as Record<string, unknown> | undefined;

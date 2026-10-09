@@ -7,6 +7,26 @@ provider "vercel-ai-gateway" {
 		env "VERCEL_AI_GATEWAY_API_KEY"
 	}
 
+	// residue: evaluation rows are runtime-discovered ids no selector can
+	// isolate; the gateway-wide /v1/evaluate wire facts cover them all.
+	on-api "typesafe" {
+		models "*" {
+			judgment {
+				route "/v1/evaluate"
+				type-map {
+					noul "boolean"
+				}
+				value-map {
+					noul "probability"
+				}
+				usage-map {
+					input "inputTokens"
+					output "outputTokens"
+				}
+			}
+		}
+	}
+
 	// residue: the bare `deepseek/*` namespace rides the Anthropic route, whose
 	// ladder is the generic five-tier scale.
 	models "deepseek/*" {

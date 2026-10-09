@@ -11,7 +11,7 @@ import { resolveDiscoveryApi, resolveModelPolicy } from "./compat/resolve";
 import type { ModelIdentity } from "./compat/types";
 import { resolveModelTokenizer } from "./model-tokenizer";
 import { materializeTimeBasedCost } from "./pricing";
-import { type Api, MODEL_KINDS, type Model, type ModelSpec } from "./types";
+import { type Api, MODEL_KINDS, type JudgmentConfig, type JudgmentUsageMap, type Model, type ModelSpec } from "./types";
 import { cleanModelName } from "./utils";
 
 function numberField(source: object, key: string): number | undefined {
@@ -64,6 +64,47 @@ function isInputModalities(value: unknown): value is ("text" | "image")[] {
 	return Array.isArray(value) && value.every(entry => entry === "text" || entry === "image");
 }
 
+/** Narrow an unknown compiled-axis payload to a string→string record. */
+function stringRecord(value: unknown): Record<string, string> | undefined {
+	const payload = objectPayload(value);
+	if (payload === undefined) return undefined;
+	const record: Record<string, string> = {};
+	for (const [key, entry] of Object.entries(payload)) {
+		if (typeof entry !== "string") return undefined;
+		record[key] = entry;
+	}
+	return record;
+}
+
+/**
+ * Narrow a compiled `judgment` axis value to a JudgmentConfig. Unknown keys
+ * are ignored; `undefined` (absent, non-object, or no recognized field)
+ * leaves the spec value in place.
+ */
+function judgmentConfig(value: unknown): JudgmentConfig | undefined {
+	const payload = objectPayload(value);
+	if (payload === undefined) return undefined;
+	const config: JudgmentConfig = {};
+	const route = Reflect.get(payload, "route");
+	if (typeof route === "string" && route.startsWith("/")) config.route = route;
+	const typeField = Reflect.get(payload, "typeField");
+	if (typeof typeField === "string" && typeField !== "") config.typeField = typeField;
+	const typeMap = stringRecord(Reflect.get(payload, "typeMap"));
+	if (typeMap !== undefined) config.typeMap = typeMap;
+	const valueMap = stringRecord(Reflect.get(payload, "valueMap"));
+	if (valueMap !== undefined) config.valueMap = valueMap;
+	const usagePayload = objectPayload(Reflect.get(payload, "usageMap"));
+	if (usagePayload !== undefined) {
+		const usage: JudgmentUsageMap = {};
+		for (const key of ["input", "output", "cost"] as const) {
+			const entry = Reflect.get(usagePayload, key);
+			if (typeof entry === "string" && entry !== "") usage[key] = entry;
+		}
+		if (Object.keys(usage).length > 0) config.usageMap = usage;
+	}
+	return Object.keys(config).length > 0 ? config : undefined;
+}
+
 /**
  * Applies resolved catalog-data axes onto the model: reviewed metadata
  * corrections (`cost-patch`, `limits-patch`, `long-context-cost`,
@@ -76,6 +117,19 @@ function isInputModalities(value: unknown): value is ("text" | "image")[] {
 function applyCatalogAssignments<TApi extends Api>(model: Model<TApi>, catalog: Record<string, unknown>): void {
 	const kind = MODEL_KINDS.find(value => value === catalog.kind);
 	if (kind !== undefined) model.kind = kind;
+	// Catalog judgment wire facts are the baseline; spec values (discovery and
+	// user modelOverrides, merged before this rebuild) win key-wise.
+	const judgment = judgmentConfig(catalog.judgment);
+	if (judgment !== undefined) {
+		const prior = model.judgment;
+		model.judgment = {
+			...judgment,
+			...prior,
+			...((judgment.typeMap ?? prior?.typeMap) ? { typeMap: { ...judgment.typeMap, ...prior?.typeMap } } : {}),
+			...((judgment.valueMap ?? prior?.valueMap) ? { valueMap: { ...judgment.valueMap, ...prior?.valueMap } } : {}),
+			...((judgment.usageMap ?? prior?.usageMap) ? { usageMap: { ...judgment.usageMap, ...prior?.usageMap } } : {}),
+		};
+	}
 	if (catalog.contextWindowAuthoritative === true) {
 		model.contextWindowAuthoritative = true;
 	} else {

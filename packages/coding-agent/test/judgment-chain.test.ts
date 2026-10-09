@@ -1,5 +1,3 @@
-import * as fs from "node:fs";
-import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import { Database } from "bun:sqlite";
@@ -385,39 +383,39 @@ describe("ChainJudge", () => {
 	});
 
 	it("loads judgment overrides from real config through ChainJudge", async () => {
-		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-test-judgment-chain-"));
-		try {
-			const configPath = path.join(dir, "models.json");
-			fs.writeFileSync(
-				configPath,
-				JSON.stringify({
-					providers: {
-						"judge-proxy": {
-							baseUrl: "https://judge-proxy.example",
-							apiKey: "JUDGE_KEY",
-							api: "typesafe",
-							judgment: {
-								route: "/v1/evaluate",
-								typeMap: { noul: "boolean" },
-								valueMap: { noul: "probability" },
-								usageMap: { input: "inputTokens", output: "outputTokens" },
-							},
-							models: [
-								{
-									id: "judge-model",
-									name: "Judge Model",
-									reasoning: false,
-									input: ["text"],
-									cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-									contextWindow: 128000,
-									maxTokens: 4096,
-								},
-							],
+		using tempDir = TempDir.createSync("@omp-judgment-chain-");
+		const configPath = tempDir.join("models.json");
+		await Bun.write(
+			configPath,
+			JSON.stringify({
+				providers: {
+					"judge-proxy": {
+						baseUrl: "https://judge-proxy.example",
+						apiKey: "JUDGE_KEY",
+						api: "typesafe",
+						judgment: {
+							route: "/v1/evaluate",
+							typeMap: { noul: "boolean" },
+							valueMap: { noul: "probability" },
+							usageMap: { input: "inputTokens", output: "outputTokens" },
 						},
+						models: [
+							{
+								id: "judge-model",
+								name: "Judge Model",
+								reasoning: false,
+								input: ["text"],
+								cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+								contextWindow: 128000,
+								maxTokens: 4096,
+							},
+						],
 					},
-				}),
-			);
-			const authStorage = createInMemoryAuthStorage();
+				},
+			}),
+		);
+		const authStorage = createInMemoryAuthStorage();
+		try {
 			const registry = new ModelRegistry(authStorage, configPath);
 			const urls: string[] = [];
 			const bodies: { questions: Record<string, { type: string }> }[] = [];
@@ -442,9 +440,8 @@ describe("ChainJudge", () => {
 			expect(result.answers.urgent).toMatchObject({ type: "noul", noul: 0.9 });
 			expect(result.usage.input).toBe(12);
 			expect(result.usage.totalTokens).toBe(15);
-			authStorage.close();
 		} finally {
-			fs.rmSync(dir, { recursive: true, force: true });
+			authStorage.close();
 		}
 	});
 
