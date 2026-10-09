@@ -501,7 +501,12 @@ export const CURSOR_SHAPE_CODES: Record<CursorShape, number> = {
 	bar: 6,
 };
 export interface Terminal {
-	// Start the terminal with input, resize, and host-disconnect handlers.
+	/**
+	 * Start the terminal with input, resize, and host-disconnect handlers.
+	 * Unless input is deferred, this sends capability probes; a terminal that
+	 * cannot parse one may leave concealed bytes on the cursor row, so the
+	 * caller repaints after starting.
+	 */
 	start(
 		onInput: (data: string) => void,
 		onResize: () => void,
@@ -513,8 +518,10 @@ export interface Terminal {
 	 * Take ownership of stdin after a `deferInput` start: enable raw mode,
 	 * attach input handlers, and run the capability probes start() skipped.
 	 * Bytes the user typed in cooked mode meanwhile are replayed through
-	 * `onInput`. No-op when input was never deferred. Optional so custom
-	 * Terminals built against older pi-tui versions keep working.
+	 * `onInput`. No-op when input was never deferred. Like {@link start}, the
+	 * probes may leave concealed bytes on the cursor row, so the caller
+	 * repaints afterwards. Optional so custom Terminals built against older
+	 * pi-tui versions keep working.
 	 */
 	enableInput?(): void;
 
@@ -707,6 +714,17 @@ function parseOsc99KeyValues(section: string): Map<string, string> {
 	}
 	return values;
 }
+/**
+ * Brackets the startup capability probes. A terminal that cannot parse a probe
+ * prints it as text at the cursor (Apple Terminal drops `ESC _`/`ESC \` and
+ * prints APC payloads, and abandons DECRQM at its `$`, printing the final `p`).
+ * DECSC, autowrap off, and SGR 8 (conceal) keep that text invisible and on the
+ * cursor row, so it can neither wrap nor scroll the screen; DECRC puts the
+ * cursor back. The screen owner repaints the row afterwards (see
+ * {@link Terminal.start} / {@link Terminal.enableInput}).
+ */
+const PROBE_GUARD_BEGIN = "\x1b7\x1b[?7l\x1b[8m";
+const PROBE_GUARD_END = "\x1b[28m\x1b[?7h\x1b8";
 const XTERM_SCROLL_TO_BOTTOM_MODES = [1010, 1011] as const;
 type Osc11QueryRoute = "direct" | "tmux";
 const TMUX_OSC11_CACHE_REFRESH_DELAY_MS = 100;
@@ -1099,6 +1117,8 @@ export class ProcessTerminal implements Terminal {
 		// events that lose modifier information. Must run after setRawMode(true)
 		// since that resets console mode flags.
 		this.#enableWindowsVTInput();
+		// Every response-eliciting probe goes out inside the leak guard.
+		this.#safeWrite(PROBE_GUARD_BEGIN);
 		// Query and enable Kitty keyboard protocol
 		// The query handler intercepts input temporarily, then installs the user's handler
 		// See: https://sw.kovidgoyal.net/kitty/keyboard-protocol/
@@ -1161,6 +1181,7 @@ export class ProcessTerminal implements Terminal {
 		for (const mode of XTERM_SCROLL_TO_BOTTOM_MODES) {
 			this.#queryPrivateMode(mode);
 		}
+		this.#safeWrite(PROBE_GUARD_END);
 	}
 
 	/**

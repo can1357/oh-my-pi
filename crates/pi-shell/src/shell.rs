@@ -6,7 +6,10 @@ use std::{
 	collections::HashMap,
 	fs,
 	io::{self},
-	sync::Arc,
+	sync::{
+		Arc,
+		atomic::{AtomicBool, Ordering},
+	},
 	time::Duration,
 };
 
@@ -31,7 +34,7 @@ use tokio_util::sync::CancellationToken;
 use crate::windows::configure_windows_path;
 use crate::{
 	cancel::{AbortReason, AbortToken, CancelToken},
-	git::git_builtin,
+	git::{GitLayers, git_builtin},
 	minimizer,
 	output_decode::OutputDecoder,
 	process,
@@ -42,12 +45,6 @@ struct ShellSessionCore {
 	/// Session filesystem; each run installs a cancellation-scoped view of it
 	/// (or of the run's own override) and restores it afterwards.
 	filesystem: Fs,
-}
-
-impl Drop for ShellSessionCore {
-	fn drop(&mut self) {
-		terminate_internal_background_jobs(&mut self.shell);
-	}
 }
 
 #[derive(Clone, Default)]
@@ -864,11 +861,15 @@ async fn create_session_for_run(
 		}
 	}
 
-	// Opt-in via PI_SMART_GIT: `git worktree add` becomes a copy-on-write clone
-	// through pi-vcs; every other git invocation reaches the binary unchanged
-	// (see `crate::git`).
-	if env_flag(config, "PI_SMART_GIT") {
-		shell.register_builtin("git", git_builtin());
+	// Opt-in `git` layers (see `crate::git`): PI_SMART_GIT makes `git worktree
+	// add` a copy-on-write clone through pi-vcs; PI_GIT_GUARD refuses commands
+	// that discard or move work in a shared checkout. Anything a layer does not
+	// take reaches the binary unchanged.
+	if let Some(git) = git_builtin(GitLayers {
+		smart_worktree: env_flag(config, "PI_SMART_GIT"),
+		guard:          env_flag(config, "PI_GIT_GUARD"),
+	}) {
+		shell.register_builtin("git", git);
 	}
 
 	copy_env_into_shell(&mut shell, std::env::vars_os())?;
@@ -937,8 +938,10 @@ enum CommandCaptureMode {
 }
 
 struct CommandRunOutput {
-	result:   ExecutionResult,
-	buffered: Option<BufferedOutput>,
+	result:         ExecutionResult,
+	buffered:       Option<BufferedOutput>,
+	/// A command reported an error yet went on, so the exit status hides it.
+	reported_error: bool,
 }
 
 struct ChainCapture {
@@ -1128,7 +1131,10 @@ async fn run_shell_command_single(
 		// `too-large` result with empty `text`/`original_text` was emitted, which
 		// a consumer keying off `minimized` presence could mistake for a real
 		// rewrite that produced empty output.
-		if !buffered.exceeded {
+		// A command that reported an error yet exited 0 (jq after an input that
+		// fails) is left whole: a filter may cut the error, and its exit-code
+		// gate cannot see it.
+		if !buffered.exceeded && !command_run.reported_error {
 			let minimized = match minimizer_mode {
 				minimizer::engine::MinimizerMode::WholeCommand => minimizer::apply(
 					&options.command,
@@ -1259,7 +1265,11 @@ async fn run_shell_command_segmented_chain(
 				if next_input_bytes > max_capture_bytes {
 					aggregate = None;
 				} else {
-					let minimized = minimizer::apply(&segment.command, &buffered.text, exit, config);
+					let minimized = if command_run.reported_error {
+						minimizer::MinimizerOutput::passthrough(&buffered.text)
+					} else {
+						minimizer::apply(&segment.command, &buffered.text, exit, config)
+					};
 					capture.push(
 						&buffered.text,
 						buffered.input_bytes,
@@ -1338,6 +1348,12 @@ async fn run_shell_command_once(
 	params.process_group_policy = ProcessGroupPolicy::NewProcessGroup;
 	params.set_cancel_token(cancel_token.clone());
 	params.set_spawn_observer(spawn_registry.clone());
+	// Only a buffered capture can be minimized, so only it asks for the report.
+	let reported_error = matches!(capture_mode, CommandCaptureMode::Buffered { .. })
+		.then(|| Arc::new(AtomicBool::new(false)));
+	if let Some(flag) = &reported_error {
+		params.set_reported_error(Arc::clone(flag));
+	}
 	let reader_cancel = CancellationToken::new();
 	let (activity_tx, activity_rx) = flume::bounded::<()>(1);
 	let reader_callback = on_chunk;
@@ -1453,7 +1469,8 @@ async fn run_shell_command_once(
 		Some(OutputRead::Buffered(output)) => Some(output),
 		Some(OutputRead::Streaming) | None => None,
 	};
-	Ok(CommandRunOutput { result, buffered })
+	let reported_error = reported_error.is_some_and(|flag| flag.load(Ordering::Relaxed));
+	Ok(CommandRunOutput { result, buffered, reported_error })
 }
 
 async fn run_shell_command_streams(
@@ -1724,15 +1741,12 @@ async fn terminate_run(registry: &process::SpawnRegistry) {
 		}
 	}
 }
-fn terminate_internal_background_jobs(shell: &mut BrushShell) {
-	for job in &mut shell.jobs_mut().jobs {
-		job.abort_internal_tasks();
-	}
-}
 
 fn terminate_background_jobs(shell: &mut BrushShell) {
 	let mut targets = process::TerminationTargets::new();
-	terminate_internal_background_jobs(shell);
+	for job in &mut shell.jobs_mut().jobs {
+		job.abort_internal_tasks();
+	}
 	for job in &shell.jobs().jobs {
 		if let Some(pgid) = job.process_group_id() {
 			targets.add_pgid(pgid);
@@ -2175,9 +2189,9 @@ fn nohup_builtin_disabled(config: &ShellConfig) -> bool {
 	env_flag(config, "PI_DISABLE_NOHUP_BUILTIN")
 }
 
-/// Reads a boolean builtin switch (`PI_DISABLE_*`, `PI_SMART_GIT`) from the
-/// session environment (preferred) then the process environment. Truthy =
-/// present and not "", "0", or "false".
+/// Reads a boolean builtin switch (`PI_DISABLE_*`, `PI_SMART_GIT`,
+/// `PI_GIT_GUARD`) from the session environment (preferred) then the process
+/// environment. Truthy = present and not "", "0", or "false".
 fn env_flag(config: &ShellConfig, key: &str) -> bool {
 	let raw = config
 		.session_env
@@ -6211,6 +6225,56 @@ replace = [{ pattern = "hello", replacement = "HI" }]
 		);
 	}
 
+	/// Lets in-flight writes land, empties `path`, and reports whether anything
+	/// wrote to it again: a background `yes` still running refills it within
+	/// milliseconds.
+	async fn still_written(path: &std::path::Path) -> bool {
+		time::sleep(Duration::from_millis(300)).await;
+		std::fs::File::options()
+			.write(true)
+			.open(path)
+			.and_then(|file| file.set_len(0))
+			.expect("truncate output");
+		time::sleep(Duration::from_millis(300)).await;
+		std::fs::metadata(path).expect("stat output").len() > 0
+	}
+
+	/// A background builtin started in a subshell ends with the subshell, as an
+	/// external one does. Left running it was out of reach — no process for
+	/// `pkill`, no job for `kill %N` — and spun for the life of the host.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn subshell_exit_ends_its_background_builtins() {
+		let _guard = shell_test_lock().lock().await;
+		let output = tempfile::NamedTempFile::new().expect("output file");
+		let shell = Shell::new(None);
+		let command = format!("(yes > {} &)", quote_arg(&output.path().to_string_lossy()));
+
+		shell
+			.run(ShellRunOptions { command, ..Default::default() }, None, CancelToken::default())
+			.await
+			.expect("run subshell");
+
+		assert!(!still_written(output.path()).await, "background `yes` outlived its subshell");
+	}
+
+	/// `kill %N` ends a background job running inside the shell, which has no
+	/// process to deliver the signal to.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn kill_jobspec_ends_in_process_background_job() {
+		let _guard = shell_test_lock().lock().await;
+		let output = tempfile::NamedTempFile::new().expect("output file");
+		let shell = Shell::new(None);
+		let command = format!("yes > {} & kill %1", quote_arg(&output.path().to_string_lossy()));
+
+		let result = shell
+			.run(ShellRunOptions { command, ..Default::default() }, None, CancelToken::default())
+			.await
+			.expect("run kill");
+
+		assert_eq!(result.exit_code, Some(0), "kill %1 failed");
+		assert!(!still_written(output.path()).await, "`yes` kept running after kill %1");
+	}
+
 	/// `live_background_job_count` reports 0 when the session has no live
 	/// external background jobs and 1 while one is running. The host relies on
 	/// this to retain a per-call shell whose `&`/`nohup` child is still alive
@@ -6343,6 +6407,58 @@ replace = [{ pattern = "hello", replacement = "HI" }]
 		assert_eq!(minimized.filter, "chain");
 		assert_eq!(minimized.original_text, expected);
 		assert_eq!(minimized.text, "HI\n".repeat(200));
+	}
+
+	/// Like jq, the built-in jq reports an input that fails and exits 0 when it
+	/// is not the last. Such a run is never shortened, even when the error does
+	/// not start a line; long successful output that only looks like an error
+	/// still is.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn jq_run_that_reported_an_error_is_not_minimized() {
+		let root = unique_temp_dir("jq-error");
+		std::fs::write(root.join("in.jsonl"), "1\n2\n3\n").expect("write input");
+		let _guard = shell_test_lock().lock().await;
+		let run = async |command: &str| {
+			let (tx, rx) = flume::unbounded::<String>();
+			let options = ShellExecuteOptions {
+				command: command.to_string(),
+				cwd: Some(root.to_string_lossy().into_owned()),
+				// the built-in jq even when the environment turns builtins off
+				session_env: Some(HashMap::from([(
+					"PI_DISABLE_UUTILS_BUILTINS".to_string(),
+					"0".to_string(),
+				)])),
+				minimizer: Some(minimizer::MinimizerOptions {
+					enabled: Some(true),
+					..Default::default()
+				}),
+				..Default::default()
+			};
+			let result = execute_shell(options, Some(tx), CancelToken::default())
+				.await
+				.expect("execute_shell");
+			let output: String = rx.drain().collect();
+			(result, output)
+		};
+		let rows = r#"range(0; 100) | "row with many fields and a longer string value""#;
+		// `stderr` writes no newline, so the error lands mid-line
+		let failing = format!(
+			r#"jq -r 'if . == 2 then "prefix" | stderr | error("boom") else {rows} end' in.jsonl"#
+		);
+		for command in [failing.clone(), format!("cd . && {failing}")] {
+			let (result, output) = run(&command).await;
+			assert_eq!(result.exit_code, Some(0), "{command}");
+			assert!(output.contains("prefixError: \"boom\""), "{command}: {output:?}");
+			assert!(result.minimized.is_none(), "{command}: {:?}", result.minimized);
+		}
+		for value in ["Error: expected user data", "jq: error is data"] {
+			let command = format!(r#"jq -nr 'range(0; 200) | "{value}"'"#);
+			let (result, _) = run(&command).await;
+			assert_eq!(result.exit_code, Some(0), "{command}");
+			assert!(result.minimized.is_some(), "{command} is shortened");
+		}
+		let _ = std::fs::remove_dir_all(&root);
 	}
 
 	#[cfg(unix)]

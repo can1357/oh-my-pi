@@ -2,11 +2,95 @@ import { afterEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { TempDir } from "@oh-my-pi/pi-utils/temp";
 import { registerNativeBlob } from "@oh-my-pi/pi-tui/native/blobs";
 import { node } from "@oh-my-pi/pi-tui/native/describe";
 import type { NativeNode } from "@oh-my-pi/pi-tui/native/node";
 import type { Component } from "@oh-my-pi/pi-tui/tui";
 import { TspHarness } from "./tsp-harness";
+
+describe("native image blob lifetime", () => {
+	const cases = [
+		...["base64", "image", "attachment", "snapcompact"].map(source => ({
+			name: `releases discarded ${source} payloads after uploading them`,
+			fixture: "blob-lifetime.ts",
+			source,
+		})),
+		...[
+			["reply", "delivers a settled image after a deferred missing-blob reply and releases its bytes"],
+			["timeout", "delivers a settled image after an unanswered first query and releases its bytes"],
+			["cache-timeout", "retains a settled image through a cache write and unanswered query"],
+			["cache-held", "records a settled image held in the terminal cache before releasing its bytes"],
+			["reset", "releases pending settled-image bytes when the connection resets"],
+			["stop", "releases pending settled-image bytes when the backend stops"],
+		].map(([source, name]) => ({ name, fixture: "pending-blob-delivery.ts", source })),
+		{
+			name: "releases evicted chart payloads while retaining cached and live native images",
+			fixture: "table-chart-blob-lifetime.ts",
+			source: "eviction",
+		},
+		{
+			name: "releases replaced theme and cleared-cache chart payloads",
+			fixture: "table-chart-blob-lifetime.ts",
+			source: "theme",
+		},
+		{
+			name: "keeps pending, shared, remounted, and replayed images available",
+			fixture: "blob-replay.ts",
+			source: "",
+		},
+		{
+			name: "releases deleted attachment thumbnails while preserving undo and live chips",
+			fixture: "attachment-blob-lifetime.ts",
+			source: "",
+		},
+	];
+	for (const { name, fixture, source } of cases) {
+		it(
+			name,
+			async () => {
+				await using root = await TempDir.create("@omp-native-blobs-");
+				const env: NodeJS.ProcessEnv = {
+					...process.env,
+					PI_CONFIG_DIR: path.relative(os.homedir(), root.join("config")),
+					PI_CODING_AGENT_DIR: root.join("agent"),
+					PI_TEST_SESSION_OWNERS_DIR: root.join("session-owners"),
+					XDG_CONFIG_HOME: root.join("xdg-config"),
+					XDG_DATA_HOME: root.join("data"),
+					XDG_STATE_HOME: root.join("state"),
+					XDG_CACHE_HOME: root.join("cache"),
+					PI_TUI_NATIVE: "1",
+				};
+				delete env.OMP_PROFILE;
+				delete env.PI_PROFILE;
+				await Promise.all(
+					["config", "agent", "session-owners", "xdg-config", "data/omp", "state/omp", "cache/omp"].map(dir =>
+						fs.promises.mkdir(root.join(dir), { recursive: true }),
+					),
+				);
+				const child = Bun.spawn([process.execPath, path.join(import.meta.dir, "fixtures", fixture), source], {
+					stdout: "pipe",
+					stderr: "pipe",
+					env,
+				});
+				const timeout = setTimeout(() => child.kill(), 10_000);
+				try {
+					const [stdout, stderr, exitCode] = await Promise.all([
+						new Response(child.stdout).text(),
+						new Response(child.stderr).text(),
+						child.exited,
+					]);
+					expect({ exitCode, stderr, stdout }).toEqual({ exitCode: 0, stderr: "", stdout: "verified\n" });
+				} finally {
+					clearTimeout(timeout);
+					child.kill();
+					await child.exited;
+				}
+			},
+			15_000,
+		);
+	}
+});
 
 class Probe implements Component {
 	current: NativeNode;

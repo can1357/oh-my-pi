@@ -45,7 +45,13 @@ export type DaemonOperation =
 	  }
 	| { op: "wait"; name: string; for: "ready" | "exit"; pattern?: string; timeoutMs: number }
 	| { op: "send"; name: string; data?: string; signal?: DaemonSignal }
-	| { op: "stop"; name: string; timeoutMs: number }
+	| {
+			op: "stop";
+			name: string;
+			timeoutMs: number;
+			/** Stop only this generation (`DaemonSnapshot.id`); another one is left running. Legacy brokers ignore it. */
+			id?: string;
+	  }
 	| { op: "restart"; name: string }
 	| { op: "mode"; name: string; mode: "persist" | "session" | "detached" }
 	| { op: "describe"; name: string }
@@ -349,6 +355,7 @@ function parseDaemonOperation(value: unknown): DaemonOperation {
 				op,
 				name: stringValue(source.name, "operation.name"),
 				timeoutMs: numberValue(source.timeoutMs, "operation.timeoutMs"),
+				id: optionalString(source.id, "operation.id"),
 			};
 		case "restart":
 		case "describe":

@@ -8,7 +8,15 @@ interface FakePage {
 	eventBatches: Array<Array<Record<string, unknown>>>;
 	/** Kit method stubs (isolated-world `__ompTernKit` calls). */
 	kit: Record<string, (args: unknown[]) => unknown>;
+	/** Which `events` answer (0-based) first reports the PiP's initial about:blank load (default 0). */
+	blankLoadPoll?: number;
 }
+
+/** The events of the initial about:blank load every PiP makes after `open`. */
+const BLANK_LOAD = [
+	{ type: "committed", url: "about:blank" },
+	{ type: "loaded", url: "about:blank" },
+];
 
 let daemon: FakeDaemon | undefined;
 let client: TernSocketClient | undefined;
@@ -22,12 +30,14 @@ afterEach(async () => {
 
 async function startPage(page: FakePage): Promise<FakeDaemon> {
 	let seq = 0;
+	let polls = 0;
 	daemon = await startFakeDaemon((op): FakeAnswer => {
 		switch (op.op) {
 			case "open":
 				return { ok: { block: 7, url: "about:blank" } };
 			case "events": {
 				const batch = page.eventBatches.shift() ?? [];
+				if (polls++ === (page.blankLoadPoll ?? 0)) batch.unshift(...BLANK_LOAD);
 				return { ok: { events: batch.map(event => ({ seq: ++seq, ...event })), next: seq, dropped: 0 } };
 			}
 			case "state":
@@ -91,9 +101,13 @@ async function openTab(
 }
 
 describe("TernTab", () => {
-	it("configures the PiP before its first navigation and waits for the load event", async () => {
-		const fake = await startPage({
+	it("configures the PiP before its first navigation and resolves on that navigation's own load", async () => {
+		// Tern reports the initial about:blank load only in its third events answer: a goto sent
+		// before it would take that late `loaded` for its own and resolve before the page loads.
+		const page: FakePage = {
+			blankLoadPoll: 2,
 			eventBatches: [
+				[],
 				[],
 				[],
 				[],
@@ -101,7 +115,8 @@ describe("TernTab", () => {
 				[{ type: "loaded", url: "https://example.test/" }],
 			],
 			kit: {},
-		});
+		};
+		const fake = await startPage(page);
 		const tab = await openTab(fake, { url: "https://example.test/", dialogs: "accept" });
 		const ops = opsOf(fake);
 		expect(fake.requests[0]!.op).toMatchObject({ op: "open", owner: 3, url: "about:blank", width: 800, height: 600 });
@@ -114,8 +129,8 @@ describe("TernTab", () => {
 		const gotoAt = ops.indexOf("goto");
 		expect(scripts).toBeGreaterThan(0);
 		expect(gotoAt).toBeGreaterThan(scripts);
-		// goto resolved only once the polled events delivered `loaded`.
-		expect(ops.slice(gotoAt).filter(op => op === "events").length).toBeGreaterThanOrEqual(2);
+		// open resolved only once Tern reported the document's own `loaded`.
+		expect(page.eventBatches).toEqual([]);
 		expect(tab.url()).toBe("https://example.test/");
 	});
 
@@ -325,7 +340,10 @@ describe("TernTab", () => {
 		const names = ["a", "b"];
 		daemon = await startFakeDaemon(op => {
 			if (op.op === "open") return { ok: { block: 7, url: "about:blank" } };
-			if (op.op === "events") return { ok: { events: [], next: 0, dropped: 0 } };
+			if (op.op === "events") {
+				const events = BLANK_LOAD.map((event, index) => ({ seq: index + 1, ...event }));
+				return { ok: { events, next: events.length, dropped: 0 } };
+			}
 			const source = String(op.function);
 			if (op.op !== "eval" || !source.includes("localStorage")) return { ok: {} };
 			// The page: the helper's function runs against a stand-in Web Storage area.

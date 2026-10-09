@@ -823,6 +823,108 @@ describe("RemoteAuthCredentialStore + AuthStorage integration", () => {
 		}
 	});
 
+	test("hands a provider's lone usage report only to a credential its identity cannot contradict", async () => {
+		// Bob's fetch succeeded and Alice's failed, so the aggregate holds one
+		// Antigravity report. The shared project must not give Alice Bob's
+		// exhausted pool, and her header overlay must not land on his row.
+		const brokerClient = new AuthBrokerClient({ url: "http://127.0.0.1:9", token: "unused" });
+		const now = Date.now();
+		const projectId = "shared-project";
+		const weeklyLimit = (usedFraction: number): UsageLimit => ({
+			id: "google-antigravity:weekly",
+			label: "Weekly",
+			scope: { provider: "google-antigravity", projectId, windowId: "weekly" },
+			window: { id: "weekly", label: "Weekly" },
+			amount: { usedFraction, unit: "percent" },
+			status: usedFraction >= 1 ? "exhausted" : "ok",
+		});
+		const bobReport: UsageReport = {
+			provider: "google-antigravity",
+			fetchedAt: now,
+			limits: [weeklyLimit(1)],
+			metadata: { email: "bob@example.com", projectId },
+		};
+		// Lone reports stay usable when they share no identity field with the
+		// credential, or match one Gemini copied verbatim into a limit scope.
+		const cursorReport: UsageReport = {
+			provider: "cursor",
+			fetchedAt: now,
+			limits: [],
+			metadata: { email: "carol@example.com" },
+		};
+		const geminiReport: UsageReport = {
+			provider: "google-gemini-cli",
+			fetchedAt: now,
+			limits: [
+				{
+					id: "google-gemini-cli:pro",
+					label: "Pro",
+					scope: { provider: "google-gemini-cli", accountId: " account-dave " },
+					amount: { usedFraction: 0.2, unit: "percent" },
+				},
+			],
+			metadata: { currentTierId: "standard-tier" },
+		};
+		vi.spyOn(brokerClient, "fetchUsage").mockResolvedValue({
+			generatedAt: now,
+			reports: [bobReport, cursorReport, geminiReport],
+		});
+		const remoteStore = new RemoteAuthCredentialStore({
+			client: brokerClient,
+			streamSnapshots: false,
+			initialSnapshot: {
+				generation: 1,
+				generatedAt: now,
+				serverNowMs: now,
+				refresher: { enabled: false, intervalMs: 0, skewMs: 0, nextSweepInMs: Number.MAX_SAFE_INTEGER },
+				credentials: [],
+			},
+		});
+		const credential = (identity: { email?: string; accountId?: string; projectId?: string }) => ({
+			type: "oauth" as const,
+			access: `remote-access-${identity.email ?? "anonymous"}`,
+			refresh: REMOTE_REFRESH_SENTINEL,
+			expires: now + 120_000,
+			...identity,
+		});
+		const alice = credential({ email: "alice@example.com", projectId });
+		try {
+			expect(await remoteStore.getUsageReport("google-antigravity", alice)).toBeNull();
+			const bob = await remoteStore.getUsageReport(
+				"google-antigravity",
+				credential({ email: "bob@example.com", projectId }),
+			);
+			expect(bob?.metadata?.email).toBe("bob@example.com");
+			const cursor = await remoteStore.getUsageReport("cursor", credential({}));
+			expect(cursor?.metadata?.email).toBe("carol@example.com");
+			for (const dave of [
+				{ email: "dave@example.com" },
+				{ email: "dave@example.com", accountId: " account-dave " },
+			]) {
+				const gemini = await remoteStore.getUsageReport("google-gemini-cli", credential(dave));
+				expect(gemini?.metadata?.currentTierId).toBe("standard-tier");
+			}
+
+			const aliceOverlay: UsageReport = {
+				provider: "google-antigravity",
+				fetchedAt: now,
+				limits: [weeklyLimit(0.1)],
+				metadata: { email: "alice@example.com", projectId },
+			};
+			expect(remoteStore.ingestUsageReport("google-antigravity", alice, aliceOverlay)).toBe(true);
+			const antigravityRows = (await remoteStore.fetchUsageReports())
+				?.filter(report => report.provider === "google-antigravity")
+				.map(report => [report.metadata?.email, requireLimit(report, "google-antigravity:weekly").status])
+				.toSorted();
+			expect(antigravityRows).toEqual([
+				["alice@example.com", "ok"],
+				["bob@example.com", "exhausted"],
+			]);
+		} finally {
+			remoteStore.close();
+		}
+	});
+
 	test("applies block upserts before broker acknowledgement and retains them when persistence is rejected", async () => {
 		const futureBlock = Date.now() + 60_000;
 		const laterBlock = futureBlock + 60_000;
@@ -1507,6 +1609,58 @@ describe("RemoteAuthCredentialStore + AuthStorage integration", () => {
 		try {
 			expect(await clientStorage.usage.reports()).toHaveLength(1);
 			await clientStorage.usage.invalidate();
+			expect(await clientStorage.usage.reports()).toEqual([]);
+			expect(fetchSpy).toHaveBeenCalledTimes(2);
+		} finally {
+			clientStorage.close();
+		}
+	});
+
+	test("a client's single-provider usage refresh leaves the broker's other providers cached", async () => {
+		const credential = serverStore!.listAuthCredentials("anthropic")[0];
+		if (credential?.credential.type !== "oauth") throw new Error("expected OAuth credential");
+		serverStore!.updateAuthCredential(credential.id, {
+			...credential.credential,
+			expires: Date.now() + 3_600_000,
+		});
+		await serverStorage!.credentials.reload();
+
+		let calls = 0;
+		const fetchSpy = vi.spyOn(claudeUsage.claudeUsageProvider, "fetchUsage").mockImplementation(async () => {
+			calls += 1;
+			if (calls > 1) return null;
+			return {
+				provider: "anthropic",
+				fetchedAt: Date.now(),
+				limits: [
+					{
+						id: "anthropic:5h",
+						label: "Claude 5 Hour",
+						scope: { provider: "anthropic", windowId: "5h" },
+						amount: { used: 80, limit: 100, unit: "percent" },
+						status: "ok",
+					},
+				],
+				metadata: { accountId: "account-1", email: "a@example.com" },
+			};
+		});
+		const brokerClient = new AuthBrokerClient({ url: handle!.url, token });
+		const initialResult = await brokerClient.fetchSnapshot();
+		if (initialResult.status !== 200) throw new Error("expected snapshot");
+		const remoteStore = new RemoteAuthCredentialStore({
+			client: brokerClient,
+			initialSnapshot: initialResult.snapshot,
+		});
+		const clientStorage = new AuthStorage(remoteStore);
+		await clientStorage.credentials.reload();
+		try {
+			expect(await clientStorage.usage.reports()).toHaveLength(1);
+			await clientStorage.usage.invalidate("openai-codex");
+			const reports = await clientStorage.usage.reports();
+			expect(reports?.map(report => report.provider)).toEqual(["anthropic"]);
+			expect(fetchSpy).toHaveBeenCalledTimes(1);
+
+			await clientStorage.usage.invalidate("anthropic");
 			expect(await clientStorage.usage.reports()).toEqual([]);
 			expect(fetchSpy).toHaveBeenCalledTimes(2);
 		} finally {

@@ -147,6 +147,27 @@ describe("auth broker OAuth refresh backoff", () => {
 		expect(delegatedCalls).toBe(2);
 	});
 
+	test("auth-recovery refresh by id on a broker client reuses the broker's recent mint", async () => {
+		if (!handle) throw new Error("test setup failed");
+		const client = new AuthBrokerClient({ url: handle.url, token: TOKEN });
+		const initial = await client.fetchSnapshot();
+		if (initial.status !== 200) throw new Error("expected broker snapshot");
+		const id = initial.snapshot.credentials[0]!.id;
+		await client.refreshCredential(id);
+		const minted = await client.fetchSnapshot();
+		if (minted.status !== 200) throw new Error("expected minted snapshot");
+		remote = new RemoteAuthCredentialStore({ client, initialSnapshot: minted.snapshot, streamSnapshots: false });
+		clientStorage = new AuthStorage(remote);
+		await clientStorage.credentials.reload();
+
+		const recovered = await clientStorage.oauth.refresh(id, undefined, { reason: "auth-recovery" });
+		expect(recovered.credential.type === "oauth" && recovered.credential.access).toBe("access-1");
+		expect(refreshCalls).toBe(1);
+		const generic = await clientStorage.oauth.refresh(id);
+		expect(generic.credential.type === "oauth" && generic.credential.access).toBe("access-2");
+		expect(refreshCalls).toBe(2);
+	});
+
 	test("generic forced refresh mints while only a provider 401 opts into reuse", async () => {
 		if (!handle) throw new Error("test setup failed");
 		const client = new AuthBrokerClient({ url: handle.url, token: TOKEN });

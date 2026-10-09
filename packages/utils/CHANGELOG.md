@@ -2,6 +2,21 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `getNativeGrammarsDir()`, where the native addon loads downloaded tree-sitter grammars from (`~/.omp/natives/grammars`).
+
+### Fixed
+
+- Fixed the virtual terminal misreading private CSI sequences such as kitty keyboard `CSI < u` and modifyOtherKeys `CSI > 4;1 m` as cursor restores or text styling, which garbled replayed PTY output.
+
+## [18.8.1] - 2026-10-07
+
+### Added
+
+- Added `PI_NATIVES_DIR` support to `getNativesDir()` for configuring the native addon directory.
+- Added `ZipPackage` for lazily reading ZIP-based document packages with a total decompressed-size limit, along with `DocxImage.readBytes()` for accessing raw DOCX image data.
+
 ## [18.8.0] - 2026-10-07
 
 ### Added

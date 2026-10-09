@@ -12,6 +12,7 @@ import type {
 import { createSyntheticToolResultMessage } from "@oh-my-pi/pi-agent-core";
 import {
 	directoryIsEnterable,
+	directoryIsMissing,
 	getBlobsDir,
 	getProjectDir,
 	getSessionsDir,
@@ -62,7 +63,6 @@ import {
 	type SessionHeader,
 	type SessionInitEntry,
 	type SessionMessageEntry,
-	type SessionTitleCard,
 	type SessionTitleSource,
 	type SessionTreeNode,
 	type ThinkingLevelChangeEntry,
@@ -96,6 +96,7 @@ import {
 	hasPositiveMovedProjectEvidence,
 	readTerminalBreadcrumbEntry,
 	resolveManagedSessionRoot,
+	worktreeSessionDirs,
 	writeTerminalBreadcrumb,
 } from "./session-paths";
 import { forgetExternalizedImages, prepareEntryForPersistence } from "./session-persistence";
@@ -3213,22 +3214,6 @@ export class SessionManager {
 		return this.#sessionName;
 	}
 
-	/**
-	 * The card index of the current title, if it has one. Read from the latest
-	 * title change rather than stored beside the title (header, title slot,
-	 * listings): a rename that passes no card drops it, and a resumed session
-	 * gets it back from its own entries.
-	 */
-	getSessionTitleCard(): SessionTitleCard | undefined {
-		const title = this.#sessionName;
-		if (!title) return undefined;
-		for (let i = this.#entries.length - 1; i >= 0; i--) {
-			const entry = this.#entries[i]!;
-			if (entry.type === TITLE_CHANGE_ENTRY_TYPE) return entry.title === title ? entry.card : undefined;
-		}
-		return undefined;
-	}
-
 	onSessionNameChanged(cb: () => void): () => void {
 		this.#sessionNameChangedCallbacks.add(cb);
 		return () => {
@@ -3272,14 +3257,8 @@ export class SessionManager {
 	 * Set the session display name.
 	 * @param source "user" for explicit renames; "auto" for generated titles.
 	 *   Auto titles are ignored once the user has set a name.
-	 * @param card The card index generated with this title (see {@link getSessionTitleCard}).
 	 */
-	async setSessionName(
-		name: string,
-		source: SessionTitleSource = "auto",
-		trigger?: string,
-		card?: SessionTitleCard,
-	): Promise<boolean> {
+	async setSessionName(name: string, source: SessionTitleSource = "auto", trigger?: string): Promise<boolean> {
 		if (this.#released) return false;
 		if (this.#titleSource === "user" && source === "auto") return false;
 
@@ -3304,7 +3283,6 @@ export class SessionManager {
 		};
 		if (previousTitle) entry.previousTitle = previousTitle;
 		if (trigger) entry.trigger = trigger;
-		if (card) entry.card = card;
 		this.#entries.push(entry);
 		this.#index.insert(entry);
 		this.#notifyEntryAppended(entry);
@@ -4129,6 +4107,49 @@ export class SessionManager {
 	}
 
 	/**
+	 * Whether `session` was recorded in a worktree of `cwd`'s repository that no
+	 * longer exists, e.g. a `/wt` worktree removed since. Resume such a session
+	 * through {@link openRelocated} into `cwd`: its own directory cannot be entered.
+	 * @param sessionDir `cwd`'s session directory; defaults to the cwd-derived one.
+	 */
+	static async isFromRemovedWorktree(
+		session: Pick<SessionInfo, "path" | "cwd">,
+		cwd: string,
+		sessionDir?: string,
+	): Promise<boolean> {
+		if (!session.cwd || !(await directoryIsMissing(session.cwd))) return false;
+		const dir = sessionDir ?? SessionManager.getDefaultSessionDir(cwd);
+		const home = path.resolve(path.dirname(session.path));
+		return (await worktreeSessionDirs(cwd, dir)).some(sibling => path.resolve(sibling) === home);
+	}
+
+	/**
+	 * Open a session whose recorded directory `recordedCwd` is gone and move it,
+	 * artifacts included, into `cwd` so it resumes from there.
+	 * @param sessionDir Target session directory; defaults to `cwd`'s.
+	 * @throws {SessionMoveRefusedError} when another live omp process writes the session.
+	 */
+	static async openRelocated(
+		sessionPath: string,
+		recordedCwd: string,
+		cwd: string,
+		sessionDir?: string,
+	): Promise<SessionManager> {
+		// Anchor at the missing recorded cwd: `open` otherwise falls back to the
+		// launch cwd, which would make the `moveTo` below a no-op whenever the move
+		// target equals it. moveTo never chdirs, so the stale cwd is only the
+		// relocation source, not a directory we enter.
+		const manager = await SessionManager.open(sessionPath, sessionDir, undefined, { initialCwd: recordedCwd });
+		try {
+			await manager.moveTo(cwd, sessionDir);
+		} catch (error) {
+			await manager.close();
+			throw error;
+		}
+		return manager;
+	}
+
+	/**
 	 * Lock-free peek for cold subagent revival: returns the recorded working
 	 * directory (session header) and the latest `session_init` contract (system
 	 * prompt / tools / output schema) WITHOUT taking the single-writer lock that
@@ -4308,6 +4329,8 @@ export class SessionManager {
 	/**
 	 * Picker-facing project list: pinned sessions first, untitled empties
 	 * dropped. Titled empties stay — a title is user intent worth resuming.
+	 * Includes the same folder in the repository's other git worktrees, so a
+	 * session `/wt` moved stays reachable from the checkout it left.
 	 */
 	static async listForPicker(
 		cwd: string,
@@ -4315,8 +4338,8 @@ export class SessionManager {
 		storage: SessionStorage = new FileSessionStorage(),
 	): Promise<SessionInfo[]> {
 		const dir = sessionDir ?? SessionManager.getDefaultSessionDir(cwd, undefined, storage);
-		const pinned = await loadPinnedSessionIds();
-		return sortPinnedFirst(filterSessionsForPicker(await listSessions(dir, storage), pinned), pinned);
+		const [pinned, siblingDirs] = await Promise.all([loadPinnedSessionIds(), worktreeSessionDirs(cwd, dir)]);
+		return sortPinnedFirst(filterSessionsForPicker(await listSessions(dir, storage, siblingDirs), pinned), pinned);
 	}
 
 	/** Picker-facing cross-project list, same empty-session rule as {@link listForPicker}. */
