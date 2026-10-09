@@ -4,7 +4,7 @@ import * as path from "node:path";
 import { isEnoent, withFileLock } from "@oh-my-pi/pi-utils";
 import { assertPrivateDir, ensurePrivateDir } from "../ipc/local-endpoint-registry";
 import { listLocalSessionsWithRegisteredFiles, type SessionInfo } from "../session/session-listing";
-import { defaultSessionName, sessionShortId } from "./names";
+import { sessionAddress, sessionShortId } from "./names";
 import {
 	type InboxRequest,
 	isMailboxSessionId,
@@ -68,10 +68,14 @@ export async function listOfflineSessions(options?: {
 			sessionId: session.id,
 			path: session.path,
 			shortId: sessionShortId(session.id),
-			name:
-				session.titleSource === "user" && session.title !== undefined
-					? session.title
-					: defaultSessionName(session.cwd, session.id),
+			// Never null: directPrint is false, so an unnamed or reserved title falls back to the default name.
+			name: sessionAddress({
+				cwd: session.cwd,
+				sessionId: session.id,
+				sessionName: session.title,
+				titleSource: session.titleSource,
+				directPrint: false,
+			})!,
 			cwd: session.cwd,
 			title: session.title ?? null,
 			modified: session.modified.getTime(),
