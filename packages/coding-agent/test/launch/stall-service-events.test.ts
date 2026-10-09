@@ -221,6 +221,34 @@ describe("diagnostic service event protocol", () => {
 });
 
 describe("diagnostic observation coverage gaps", () => {
+	it("publishes acknowledged diagnostic scopes separately from owned subscriptions and clears the cached scope", async () => {
+		await withProtocolServer(async ({ client, requests }) => {
+			client.onCompletion("regular-owner", () => undefined);
+			const unsubscribe = client.observeOwners(["child-owner"], () => undefined);
+			await client.request({ op: "ping" });
+			await client.request({ op: "ping" });
+			const registrations = () => requests.filter(request => request.observedOwners !== undefined);
+			expect(registrations().map(request => request.observedOwners)).toEqual([["child-owner"]]);
+			for (const request of registrations()) {
+				expect(request.owners).toBeUndefined();
+				expect(request.detachedOwners).toBeUndefined();
+				expect(request.completionEvents).toBeUndefined();
+				expect(request.completionAcks).toBeUndefined();
+				expect(request.completionUnsubscribes).toBeUndefined();
+				expect(request.completionSubscriptionId).toBeUndefined();
+			}
+			unsubscribe();
+			await client.request({ op: "ping" });
+			await client.request({ op: "ping" });
+			expect(registrations().map(request => request.observedOwners)).toEqual([["child-owner"], []]);
+			const unsubscribeAgain = client.observeOwners(["child-owner"], () => undefined);
+			await client.request({ op: "ping" });
+			expect(registrations().map(request => request.observedOwners)).toEqual([["child-owner"], [], ["child-owner"]]);
+			unsubscribeAgain();
+			await client.request({ op: "ping" });
+		});
+	}, 10_000);
+
 	it("reports lost coverage once per registration and exposes reconnect registration failures without acking observations", async () => {
 		await withProtocolServer(async ({ client, requests, currentSocket, rejectNextRequest }) => {
 			const gaps: string[] = [];
