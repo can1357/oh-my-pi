@@ -31,6 +31,7 @@ import {
 	type Args,
 	reportInvalidFlagValues,
 	reportUnrecognizedFlags,
+	validateAgentLaunch,
 	validateGoalLaunch,
 	validateGoalStartup,
 	validateToolNames,
@@ -569,6 +570,14 @@ export function createAcpSessionFactory(args: AcpSessionFactoryOptions): AcpSess
 			if (args.parsedArgs.agent) {
 				const { agents } = await discoverAgents(cwd, undefined, roots);
 				pendingPersonaAgent = getAgent(agents, args.parsedArgs.agent) ?? undefined;
+				if (!pendingPersonaAgent) {
+					// ACP degrades to persona-less (the name may exist only in
+					// another workspace), but never silently: the miss is logged
+					// with the names this workspace does offer.
+					logger.warn(`Unknown --agent "${args.parsedArgs.agent}" for this workspace; starting without a persona`, {
+						available: agents.map(candidate => candidate.name),
+					});
+				}
 			}
 			// fwdEb/fwu7x: pin the workspace-scoped view on the CREATED session
 			// too — baseOptions.extensionRoots is a sync closure serving the
@@ -1861,7 +1870,6 @@ export async function buildSessionOptions(
 	// → sdk.ts constructs the runtime + enter() after the session exists but before
 	// the first user turn). Unresolvable names are a hard launch error.
 	if (parsed.agent) {
-		const options_cwd = parsed.cwd ?? getProjectDir();
 		const { agents } = await discoverAgents(options_cwd, undefined, agentResolutionRoots);
 		const agent = getAgent(agents, parsed.agent);
 		// ACP defers persona validation to the per-client workspace: the server
@@ -2020,6 +2028,7 @@ export async function runRootCommand(
 		// Before session resolution: resume, fork, and import act on these same
 		// startup-parse flags, so rejecting later would leave forked or imported
 		// transcripts (or an opened picker) behind a usage error.
+		validateAgentLaunch(parsedArgs);
 		validateGoalLaunch(parsedArgs, isInteractive);
 		// Without piped text the prompt must come from argv, which only the
 		// post-extension reparse can settle: an extension string flag's value
@@ -2762,8 +2771,9 @@ export async function runRootCommand(
 				// runner, unlike the TUI (InteractiveMode constructor) and ACP
 				// (reconcileAcpSessionPersona), so a persona recorded in a resumed
 				// journal is re-entered here. `--agent X` already entered during
-				// construction (sdk.ts) and this is a no-op for it.
-				await session.reconcilePersistedPersona();
+				// construction (sdk.ts) and this is a no-op for it. Optional
+				// call: headless test doubles stub AgentSession without it.
+				await session.reconcilePersistedPersona?.();
 				logger.endTiming();
 				await runRpcMode(session, {
 					setToolUIContext: mode === "rpc-ui" ? setToolUIContext : undefined,

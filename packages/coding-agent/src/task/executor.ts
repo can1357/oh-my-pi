@@ -4047,6 +4047,10 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 	// without it they `sleep`. Runs after `exec` expansion and the max-depth `task` strip.
 	// `createTools` still drops it when no wake source (async/IRC/services) is enabled.
 	// Restricted sessions own their explicit list and are never widened.
+	// Keys off the presentation flag, not the derivation flag: a direct
+	// runSubprocess caller with restrictToolNames suppresses wait even when the
+	// legacy-bridge derivation runs unrestricted (pinned by
+	// executor-pass-through). The structured path sets both consistently.
 	if (
 		toolNames &&
 		!options.restrictToolNames &&

@@ -8332,6 +8332,10 @@ export class InteractiveMode implements InteractiveModeContext {
 			return;
 		}
 		await this.#loadPersonaPickerAgents();
+		if (this.#personaPickerAgents.length === 0) {
+			this.showWarning("No agents discovered. Add definitions under .omp/agents (project) or ~/.omp/agent/agents (user).");
+			return;
+		}
 		this.#selectorController.showSelector(done => {
 			const picker = new AgentPersonaPickerComponent(
 				this.#personaPickerAgents,

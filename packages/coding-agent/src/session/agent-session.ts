@@ -2627,6 +2627,11 @@ export class AgentSession implements SettingsScope {
 
 	/** Installs the session's persona runtime (called once by the session factory). */
 	setPersonaRuntime(runtime: PersonaRuntime): void {
+		// A mismatched pair silently mutates a foreign policy while snapshotting
+		// this session — fail loudly instead.
+		if (runtime.policy !== this.toolPolicy || runtime.session !== this) {
+			throw new Error("PersonaRuntime/policy/session mismatch: runtime must own this session's tool policy.");
+		}
 		this.#personaRuntime = runtime;
 	}
 
