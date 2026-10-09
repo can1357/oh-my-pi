@@ -1,7 +1,7 @@
 /**
  * Snapcompact inline imaging: per-request transform that swaps the system
- * prompt, loaded context-file instructions, and/or large historical tool
- * results for dense PNG frames on vision-capable models.
+ * prompt, loaded context-file instructions, and/or large tool results for
+ * dense PNG frames on vision-capable models.
  * Runs inside the agent loop's `transformProviderContext` hook — after the
  * persisted history is converted to the outgoing `Context`, before the
  * provider stream call. It only ever builds NEW message objects/arrays; the
@@ -15,7 +15,7 @@
  */
 
 import { Tokenizer } from "@oh-my-pi/pi-agent-core";
-import type { Context, ImageContent, Model, TextContent, ToolResultMessage, UserMessage } from "@oh-my-pi/pi-ai";
+import type { Context, ImageContent, Message, Model, TextContent, UserMessage } from "@oh-my-pi/pi-ai";
 import * as snapcompact from "@oh-my-pi/snapcompact";
 import type { SnapcompactFrameSink } from "../blob-broker/service";
 import contextFramesNote from "../prompts/system/snapcompact-context-frames-note.md" with { type: "text" };
@@ -59,14 +59,12 @@ const SAVINGS_MARGIN = 0.9;
 /** Loose block-array view shared by live contexts and session-history estimates. */
 type BlockViews = ReadonlyArray<{ type?: unknown; text?: unknown }>;
 
-/** Count image blocks already present across message contents. */
-function countMessageImages(messages: readonly { content?: unknown }[]): number {
+/** Count image blocks in one message's content. */
+function messageImageCount(message: { content?: unknown }): number {
+	if (!Array.isArray(message.content)) return 0;
 	let count = 0;
-	for (const message of messages) {
-		if (!Array.isArray(message.content)) continue;
-		for (const block of message.content as BlockViews) {
-			if (block.type === "image") count++;
-		}
+	for (const block of message.content as BlockViews) {
+		if (block.type === "image") count++;
 	}
 	return count;
 }
@@ -141,18 +139,24 @@ export interface InlineToolResultCandidate {
 	frames: number;
 	/** Error tool results must stay text-only for provider API validation. */
 	isError?: boolean;
+	/** Images in the context up to and including this tool result (its own source images count). */
+	imagesThrough: number;
 }
 
 export interface InlineSystemPromptCandidate {
 	textTokens: number;
 	frames: number;
+	/** Images up to and including the first user message, which carries the frames. */
+	imagesThrough: number;
 }
 
 export interface InlinePlanInput {
 	options: SnapcompactInlineOptions;
 	shape: snapcompact.Shape;
-	/** Provider image-count budget minus images already present in the context. */
-	budget: number;
+	/** Provider per-request image cap (`providerImageBudget`). */
+	imageLimit: number;
+	/** Images already in the context, across all messages. */
+	existingImages: number;
 	/** All tool results in context order, INCLUDING the most recent one. */
 	toolResults: readonly InlineToolResultCandidate[];
 	/** Selected prompt text; undefined when system-prompt imaging is off or empty. */
@@ -164,48 +168,161 @@ export interface InlinePlanInput {
 export interface InlineSwapPlan {
 	/** Tool results to swap, oldest first. */
 	toolResults: Array<{ id: string; textTokens: number; frames: number }>;
-	/** Set when the system prompt should swap to frames (uses leftover budget). */
+	/** Set when the system prompt should swap to frames (claims frames before any tool result). */
 	systemPrompt: InlineSystemPromptCandidate | undefined;
+	/**
+	 * Swaps the provider-cap backstop gave back to text. An earlier request may
+	 * have sent them as frames, so the transform treats them as a history rewrite.
+	 */
+	retracted: {
+		toolResults: Array<{ id: string; frames: number }>;
+		systemPrompt: InlineSystemPromptCandidate | undefined;
+	};
 }
 
 /**
  * Decide which content gets swapped for frames. Pure — the same rules drive
  * the provider-request transform and the /context savings estimate.
+ *
+ * Every decision depends only on content at or before the item it swaps, so
+ * appending turns never changes how an already-sent item goes out. A change
+ * there would void the provider prompt cache from that point on and
+ * invalidate every later signed thinking block on providers that bind
+ * thinking to the exact bytes before it (Anthropic `block_binding`). Hence:
+ * - a tool result is decided the first time it ships, the most recent one
+ *   included, and keeps that form while it stays in context;
+ * - the system prompt, whose frames ride the first user message, claims its
+ *   frames before any tool result;
+ * - the only revision is the provider-cap backstop at the end, which the
+ *   transform stamps as a history rewrite (`stampCapRetractions`).
  */
 export function planInlineSwaps(input: InlinePlanInput): InlineSwapPlan {
-	let budget = input.budget;
-
-	const toolResults: InlineSwapPlan["toolResults"] = [];
-	if (input.options.renderToolResults) {
-		// Oldest-first for cache-stable bytes; skip the LAST tool result so the
-		// freshest output stays crisp text. A candidate too big for the
-		// remaining budget is skipped, not a stop — later smaller ones may fit.
-		for (let k = 0; k < input.toolResults.length - 1 && budget > 0; k++) {
-			const candidate = input.toolResults[k];
-			if (candidate.isError) continue;
-			if (candidate.textTokens < MIN_TOOL_RESULT_TOKENS) continue;
-			if (candidate.frames === 0 || candidate.frames > budget) continue;
-			if (!passesSavingsGate(candidate.frames, input.shape, candidate.textTokens)) continue;
-			toolResults.push({ id: candidate.id, textTokens: candidate.textTokens, frames: candidate.frames });
-			budget -= candidate.frames;
-		}
-	}
+	const { imageLimit } = input;
 
 	let systemPrompt: InlineSystemPromptCandidate | undefined;
+	const promptCandidate = input.systemPrompt;
 	if (
 		input.options.renderSystemPrompt !== "none" &&
-		input.systemPrompt &&
-		budget > 0 &&
-		input.systemPrompt.frames > 0 &&
-		input.systemPrompt.frames <= Math.min(budget, MAX_SYSTEM_PROMPT_FRAMES) &&
-		passesSavingsGate(input.systemPrompt.frames, input.shape, input.systemPrompt.textTokens) &&
+		promptCandidate &&
+		promptCandidate.frames > 0 &&
+		promptCandidate.frames <= Math.min(imageLimit - promptCandidate.imagesThrough, MAX_SYSTEM_PROMPT_FRAMES) &&
+		passesSavingsGate(promptCandidate.frames, input.shape, promptCandidate.textTokens) &&
 		// No user message to carry the frames → leave the prompt as text.
 		input.hasUserMessage
 	) {
-		systemPrompt = input.systemPrompt;
+		systemPrompt = promptCandidate;
 	}
 
-	return { toolResults, systemPrompt };
+	let frames = systemPrompt?.frames ?? 0;
+	const toolResults: InlineSwapPlan["toolResults"] = [];
+	if (input.options.renderToolResults) {
+		// A candidate too big for the cap at its position is skipped, not a
+		// stop — later smaller ones may fit.
+		for (const candidate of input.toolResults) {
+			if (candidate.isError) continue;
+			if (candidate.textTokens < MIN_TOOL_RESULT_TOKENS) continue;
+			if (candidate.frames === 0 || candidate.imagesThrough + frames + candidate.frames > imageLimit) continue;
+			if (!passesSavingsGate(candidate.frames, input.shape, candidate.textTokens)) continue;
+			toolResults.push({ id: candidate.id, textTokens: candidate.textTokens, frames: candidate.frames });
+			frames += candidate.frames;
+		}
+	}
+
+	// Images that arrived after a swapped item (a pasted screenshot, an image
+	// tool result) can push the request over the cap. Give back the newest
+	// swaps first: reverting them to text keeps every real image, whereas the
+	// downstream clamp would drop the oldest ones.
+	const retracted: InlineSwapPlan["retracted"] = { toolResults: [], systemPrompt: undefined };
+	while (input.existingImages + frames > imageLimit) {
+		const swap = toolResults.pop();
+		if (!swap) break;
+		retracted.toolResults.push({ id: swap.id, frames: swap.frames });
+		frames -= swap.frames;
+	}
+	if (systemPrompt && input.existingImages + frames > imageLimit) {
+		retracted.systemPrompt = systemPrompt;
+		systemPrompt = undefined;
+	}
+
+	return { toolResults, systemPrompt, retracted };
+}
+
+/**
+ * Stamp the cap backstop's retractions as a history rewrite, the way pruning
+ * stamps `prunedAt`. A retracted item may have gone out as frames in an
+ * earlier request, and signed thinking after it is bound to those bytes; the
+ * stamp makes `transformMessages` drop that thinking instead of the provider
+ * rejecting it. Each item's rewrite time is the message that retracted it:
+ * the backstop is replayed on every prefix of the history (the request that
+ * message arrived in), newest swaps first, so an item that survived an
+ * earlier crossing gets the later message that pushed it out, and thinking
+ * minted while it was still frames is dropped. Items with no assistant turn
+ * between them and that message were never followed by thinking in their
+ * framed form and stay unstamped.
+ */
+function stampCapRetractions(
+	messages: Message[],
+	{
+		original,
+		plan,
+		scan,
+		imageLimit,
+	}: { original: readonly Message[]; plan: InlineSwapPlan; scan: InlineContextScan; imageLimit: number },
+): boolean {
+	if (plan.retracted.toolResults.length === 0 && !plan.retracted.systemPrompt) return false;
+	const toolResultIndex = new Map(scan.toolResults.map(built => [built.candidate.id, built.index]));
+	// Every tool-result swap before the backstop ran, in context order. The
+	// first pass decides each item from what precedes it, so a prefix holds
+	// exactly the swaps at or before its end.
+	const swaps: Array<{ index: number; frames: number; retracted: boolean }> = [];
+	for (const swap of plan.toolResults) {
+		const index = toolResultIndex.get(swap.id);
+		if (index !== undefined) swaps.push({ index, frames: swap.frames, retracted: false });
+	}
+	for (const swap of plan.retracted.toolResults) {
+		const index = toolResultIndex.get(swap.id);
+		if (index !== undefined) swaps.push({ index, frames: swap.frames, retracted: true });
+	}
+	swaps.sort((a, b) => a.index - b.index);
+	const prompt = plan.systemPrompt ?? plan.retracted.systemPrompt;
+	const promptIndex = prompt ? scan.firstUserIndex : -1;
+
+	// Message index of each retracted item → index of the message that retracted it.
+	const retractedBy = new Map<number, number>();
+	let images = 0;
+	let next = 0;
+	for (let end = 0; end < original.length; end++) {
+		images += messageImageCount(original[end]);
+		if (prompt && end === promptIndex) images += prompt.frames;
+		while (next < swaps.length && swaps[next].index === end) images += swaps[next++].frames;
+		let excess = images - imageLimit;
+		for (let swap = next - 1; swap >= 0 && excess > 0; swap--) {
+			excess -= swaps[swap].frames;
+			if (swaps[swap].retracted && !retractedBy.has(swaps[swap].index)) retractedBy.set(swaps[swap].index, end);
+		}
+		const promptSent = promptIndex >= 0 && promptIndex <= end;
+		if (excess > 0 && plan.retracted.systemPrompt && promptSent && !retractedBy.has(promptIndex)) {
+			retractedBy.set(promptIndex, end);
+		}
+	}
+
+	let stamped = false;
+	for (const [index, by] of retractedBy) {
+		if (!original.slice(index + 1, by).some(message => message.role === "assistant")) continue;
+		const rewriteAt = original[by].timestamp;
+		const message = messages[index];
+		if (message.role === "toolResult") {
+			messages[index] = { ...message, prunedAt: Math.max(message.prunedAt ?? rewriteAt, rewriteAt) };
+			stamped = true;
+		} else if (message.role === "user") {
+			messages[index] = {
+				...message,
+				historyRewriteAt: Math.max(message.historyRewriteAt ?? rewriteAt, rewriteAt),
+			};
+			stamped = true;
+		}
+	}
+	return stamped;
 }
 
 // ============================================================================
@@ -237,6 +354,7 @@ function buildInlineToolResultCandidate(
 	toolCallId: string,
 	content: unknown,
 	messageIsError: boolean | undefined,
+	imagesThrough: number,
 	tokenizer: Tokenizer,
 	shape: snapcompact.Shape,
 ): BuiltInlineToolResultCandidate {
@@ -260,8 +378,58 @@ function buildInlineToolResultCandidate(
 			textTokens,
 			frames: !isError && textTokens >= MIN_TOOL_RESULT_TOKENS ? snapcompact.frames(text, { shape }) : 0,
 			isError,
+			imagesThrough,
 		},
 		text,
+	};
+}
+
+interface InlineContextScan {
+	toolResults: Array<BuiltInlineToolResultCandidate & { index: number }>;
+	totalImages: number;
+	/** The system-prompt frame carrier, or -1. */
+	firstUserIndex: number;
+	/** Images through the first user message; all of them when there is none yet. */
+	imagesThroughFirstUser: number;
+}
+
+/**
+ * One pass over the outgoing history, stamping each tool result with the
+ * images that precede it so the planner can decide from the prefix alone.
+ */
+function scanInlineContext(
+	messages: readonly InlineMessageView[],
+	renderToolResults: boolean,
+	tokenizer: Tokenizer,
+	shape: snapcompact.Shape,
+): InlineContextScan {
+	const toolResults: InlineContextScan["toolResults"] = [];
+	let images = 0;
+	let firstUserIndex = -1;
+	let imagesThroughFirstUser: number | undefined;
+	for (let index = 0; index < messages.length; index++) {
+		const message = messages[index];
+		images += messageImageCount(message);
+		if (message.role === "user" && firstUserIndex < 0) {
+			firstUserIndex = index;
+			imagesThroughFirstUser = images;
+		}
+		if (!renderToolResults || message.role !== "toolResult" || typeof message.toolCallId !== "string") continue;
+		const built = buildInlineToolResultCandidate(
+			message.toolCallId,
+			message.content,
+			message.isError,
+			images,
+			tokenizer,
+			shape,
+		);
+		toolResults.push({ ...built, index });
+	}
+	return {
+		toolResults,
+		totalImages: images,
+		firstUserIndex,
+		imagesThroughFirstUser: imagesThroughFirstUser ?? images,
 	};
 }
 
@@ -317,23 +485,9 @@ export function estimateInlineSavings(input: {
 
 	const shape = snapcompact.resolveShape(model, options.shape);
 	const tokenizer = new Tokenizer(model);
-	const existingImages = countMessageImages(input.messages);
-	const budget = snapcompact.providerImageBudget(model.provider) - existingImages;
-
-	const candidates: InlineToolResultCandidate[] = [];
-	if (options.renderToolResults) {
-		for (const message of input.messages) {
-			if (message.role !== "toolResult" || typeof message.toolCallId !== "string") continue;
-			const built = buildInlineToolResultCandidate(
-				message.toolCallId,
-				message.content,
-				message.isError,
-				tokenizer,
-				shape,
-			);
-			candidates.push(built.candidate);
-		}
-	}
+	const imageLimit = snapcompact.providerImageBudget(model.provider);
+	const scan = scanInlineContext(input.messages, options.renderToolResults, tokenizer, shape);
+	const candidates = scan.toolResults.map(built => built.candidate);
 
 	let systemPromptTarget: SystemPromptImageTarget | undefined;
 	let systemPromptCandidate: InlineSystemPromptCandidate | undefined;
@@ -343,6 +497,7 @@ export function estimateInlineSavings(input: {
 			systemPromptCandidate = {
 				textTokens: tokenizer.countTokens(systemPromptTarget.text),
 				frames: snapcompact.frames(systemPromptTarget.text, { shape }),
+				imagesThrough: scan.imagesThroughFirstUser,
 			};
 		}
 	}
@@ -350,7 +505,8 @@ export function estimateInlineSavings(input: {
 	const plan = planInlineSwaps({
 		options,
 		shape,
-		budget,
+		imageLimit,
+		existingImages: scan.totalImages,
 		toolResults: candidates,
 		systemPrompt: systemPromptCandidate,
 		hasUserMessage: true,
@@ -365,10 +521,13 @@ export function estimateInlineSavings(input: {
 		const saved = applied ? Math.max(0, candidate.textTokens - imageTokens) : 0;
 		let reason: "empty" | "margin" | "budget" | undefined;
 		if (!applied) {
-			const leftover = budget - plan.toolResults.reduce((sum, swap) => sum + swap.frames, 0);
 			if (candidate.frames === 0) reason = "empty";
-			else if (candidate.frames > Math.min(leftover, MAX_SYSTEM_PROMPT_FRAMES)) reason = "budget";
-			else reason = "margin";
+			else if (
+				candidate.frames <= MAX_SYSTEM_PROMPT_FRAMES &&
+				!passesSavingsGate(candidate.frames, shape, candidate.textTokens)
+			)
+				reason = "margin";
+			else reason = "budget";
 		}
 		systemPromptEstimate = {
 			applied,
@@ -459,32 +618,13 @@ export class SnapcompactInlineTransformer {
 		const shape = snapcompact.resolveShape(model, options.shape);
 		const shapeKey = JSON.stringify(shape);
 		const tokenizer = new Tokenizer(model);
-		const budget = snapcompact.providerImageBudget(model.provider) - countMessageImages(context.messages);
-		if (budget <= 0) return context;
-
+		const imageLimit = snapcompact.providerImageBudget(model.provider);
 		const messages = [...context.messages];
 
-		// Collect tool-result candidates (in order) for the planner, plus the
-		// text/index needed to apply swaps and the live ids for cache eviction.
-		const candidates: InlineToolResultCandidate[] = [];
-		const targets = new Map<string, { index: number; message: ToolResultMessage; text: string }>();
-		const liveToolCallIds = new Set<string>();
-		if (options.renderToolResults) {
-			for (let i = 0; i < messages.length; i++) {
-				const message = messages[i];
-				if (message.role !== "toolResult") continue;
-				liveToolCallIds.add(message.toolCallId);
-				const built = buildInlineToolResultCandidate(
-					message.toolCallId,
-					message.content,
-					message.isError,
-					tokenizer,
-					shape,
-				);
-				candidates.push(built.candidate);
-				targets.set(message.toolCallId, { index: i, message, text: built.text });
-			}
-		}
+		// Tool-result candidates (in order) for the planner, plus the text/index
+		// needed to apply swaps and the live ids for cache eviction.
+		const scan = scanInlineContext(messages, options.renderToolResults, tokenizer, shape);
+		const targets = new Map(scan.toolResults.map(built => [built.candidate.id, built]));
 
 		let systemPromptTarget: SystemPromptImageTarget | undefined;
 		let systemPromptCandidate: InlineSystemPromptCandidate | undefined;
@@ -494,16 +634,18 @@ export class SnapcompactInlineTransformer {
 				systemPromptCandidate = {
 					textTokens: tokenizer.countTokens(systemPromptTarget.text),
 					frames: snapcompact.frames(systemPromptTarget.text, { shape }),
+					imagesThrough: scan.imagesThroughFirstUser,
 				};
 			}
 		}
 
-		const userIndex = messages.findIndex(message => message.role === "user");
+		const userIndex = scan.firstUserIndex;
 		const plan = planInlineSwaps({
 			options,
 			shape,
-			budget,
-			toolResults: candidates,
+			imageLimit,
+			existingImages: scan.totalImages,
+			toolResults: scan.toolResults.map(built => built.candidate),
 			systemPrompt: systemPromptCandidate,
 			hasUserMessage: userIndex >= 0,
 		});
@@ -513,10 +655,12 @@ export class SnapcompactInlineTransformer {
 		for (const swap of plan.toolResults) {
 			const target = targets.get(swap.id);
 			if (!target) continue;
+			const message = messages[target.index];
+			if (message.role !== "toolResult") continue;
 			const frames = await this.#framesFor(this.#toolCache, swap.id, target.text, shape, shapeKey);
 			const content: (TextContent | ImageContent)[] = [{ type: "text", text: toolResultNote }, ...frames];
 			let sourceImageIndex = 0;
-			for (const block of target.message.content) {
+			for (const block of message.content) {
 				if (block.type !== "image") continue;
 				sourceImageIndex++;
 				content.push({
@@ -525,7 +669,7 @@ export class SnapcompactInlineTransformer {
 				});
 				content.push(block);
 			}
-			messages[target.index] = { ...target.message, content };
+			messages[target.index] = { ...message, content };
 			changed = true;
 			savings.push({
 				toolCallId: swap.id,
@@ -537,7 +681,7 @@ export class SnapcompactInlineTransformer {
 			// Drop cache entries for tool calls no longer in the context
 			// (compacted away) so the cache stays bounded by live history.
 			for (const key of this.#toolCache.keys()) {
-				if (!liveToolCallIds.has(key)) this.#toolCache.delete(key);
+				if (!targets.has(key)) this.#toolCache.delete(key);
 			}
 		}
 
@@ -571,6 +715,8 @@ export class SnapcompactInlineTransformer {
 			systemPrompt = systemPromptTarget.replacement;
 			changed = true;
 		}
+
+		if (stampCapRetractions(messages, { original: context.messages, plan, scan, imageLimit })) changed = true;
 
 		if (!changed) return context;
 		return { ...context, systemPrompt, messages };

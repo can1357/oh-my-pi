@@ -529,7 +529,7 @@ Defined in `packages/coding-agent/src/session/context-settings.ts`:
 - `compaction.supersedeReads` = `true`
 - `compaction.dropUseless` = `true`
 - `snapcompact.systemPrompt` = `"none"` (`"agents-md"` and `"all"` opt into transient system-prompt imaging)
-- `snapcompact.toolResults` = `false` (transient imaging of large historical tool results)
+- `snapcompact.toolResults` = `false` (transient imaging of large tool results, the newest one included; the planner keeps a result in the form it was first sent in until the `snapcompact.*` settings, the model or earlier history change, or later images push the request past the provider's image cap; a downstream request-byte limit can still drop older inline frames, as it can any inline image)
 - `snapcompact.shape` = `"auto"`
 - `branchSummary.enabled` = `false`
 - `branchSummary.reserveTokens` = `16384`
