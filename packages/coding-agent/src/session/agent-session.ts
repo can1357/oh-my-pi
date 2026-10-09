@@ -2663,7 +2663,7 @@ export class AgentSession implements SettingsScope {
 
 	/** Sets the persona-owned spawn policy override (`null` clears it back to the host config). */
 	setSessionSpawns(spawns: string[] | "*" | null): void {
-		this.#sessionSpawns = spawns;
+		this.#sessionSpawns = Array.isArray(spawns) ? [...spawns] : spawns;
 	}
 
 	/** Applies (or clears, with `undefined`) the persona identity append prompt. */

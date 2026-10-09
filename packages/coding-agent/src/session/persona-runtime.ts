@@ -11,6 +11,11 @@ import type { AgentSession } from "./agent-session";
 import type { PersonaExplicitOverrides, PersonaModelApplyHooks } from "./persona-model-hooks";
 import type { DiscoveredAgent, PolicySnapshot, SessionToolPolicy } from "./tool-policy";
 
+/** Defensive copy of a spawn policy: the live array is caller-owned after this. */
+function snapshotSpawns(spawns: string[] | "*" | null): string[] | "*" | null {
+	return Array.isArray(spawns) ? [...spawns] : spawns;
+}
+
 /** A persona switch attempted while the session is mid-turn. */
 export class PersonaSwitchError extends Error {
 	constructor(message: string) {
@@ -218,7 +223,9 @@ export class PersonaRuntime {
 				thinkingLevel: this.session.configuredThinkingLevel(),
 			},
 			appendPrompt: this.session.getPersonaAppendPrompt(),
-			spawns: this.session.getSessionSpawns(),
+			// Copy: getSessionSpawns returns the live array by reference; a snapshot
+			// restored after the source mutated would corrupt the rollback.
+			spawns: snapshotSpawns(this.session.getSessionSpawns()),
 			activeBaseline: this.#activeBaseline,
 			deferredExitBaseline: this.#deferredExitBaseline,
 			activePresentationSnapshot: this.#activePresentationSnapshot,
@@ -289,13 +296,24 @@ export class PersonaRuntime {
 		const readOwed = hooks.getSurfaceDeferredRestore ?? (() => this.session.getDeferredModelRestore?.());
 		const dropOwed = hooks.clearSurfaceDeferredRestore ?? (() => this.session.clearDeferredModelRestore?.());
 		const owed = deferModel ? undefined : readOwed();
-		if (owed?.model) dropOwed();
+		// Stage the drop: the entry is consumed only once the fallible apply
+		// below succeeds. A failed enter restores the transaction snapshot, and
+		// the snapshot never captured the surface queue — dropping eagerly would
+		// delete the only copy of a true-first-enter baseline (see above).
+		const dropOwedAfterApply = owed?.model ? dropOwed : undefined;
 		// Capture pre-persona baseline if not already active (or overridden on resume)
 		if (!this.#activeBaseline) {
 			const deferred = deferModel ? this.#deferredExitBaseline : undefined;
+			// An empty override (dropped model + no recorded thinking) carries no
+			// baseline: fall through to the live capture instead of stranding the
+			// exit restore on nothing.
+			const usableOverride =
+				baselineOverride && (baselineOverride.model !== undefined || baselineOverride.thinkingLevel !== undefined)
+					? baselineOverride
+					: undefined;
 			this.#deferredExitBaseline = undefined;
 			this.#activeBaseline =
-				baselineOverride ??
+				usableOverride ??
 				deferred ??
 				(owed?.model && !exitedInTransaction
 					? { model: owed.model, thinkingLevel: owed.thinkingLevel }
@@ -316,13 +334,18 @@ export class PersonaRuntime {
 			this.session.getEnabledToolNames().filter(name => this.policy.granted(name)),
 			this.session.getMountedXdevToolNames().filter(name => this.policy.granted(name)),
 		);
-		this.session.setSessionSpawns(agent.spawns ?? null);
+		// Copy: agent.spawns is discovery-owned; the session must own its array.
+		this.session.setSessionSpawns(snapshotSpawns(agent.spawns ?? null));
 		this.session.applyPersonaAppendPrompt(agent.systemPrompt);
 		if (deferModel) {
 			hooks.deferModelSwitchWhileStreaming?.(agent);
 		} else {
 			await hooks.apply(agent, explicit);
 		}
+		// The staged surface-queue drop commits only now that apply succeeded —
+		// a throw above skips it, so the catch's restore finds the owed entry
+		// still queued (the snapshot never captured it).
+		dropOwedAfterApply?.();
 		await this.session.refreshBaseSystemPrompt();
 	}
 

@@ -382,7 +382,7 @@ export async function reconcileSessionPersona(
 			// same persona) must still adopt the target branch's baseline —
 			// the later activation's `activeBaseline` would otherwise restore
 			// the wrong model on exit.
-			if (baselineOverride) {
+			if (baselineOverride && (baselineOverride.model !== undefined || baselineOverride.thinkingLevel !== undefined)) {
 				runtime.adoptBaselineOverride(baselineOverride);
 			}
 			return { entered: true };

@@ -5057,9 +5057,16 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				// journal and pass it through `enter`, exactly as
 				// reconcileSessionPersona does for the resume path.
 				const persisted = readPersistedAgentPersona(sessionManager.getEntries());
-				const baselineOverride = persisted?.baseline
+				const deserialized = persisted?.baseline
 					? deserializePersonaBaseline(session, persisted.baseline)
 					: undefined;
+				// An empty deserialization (dropped model + no recorded thinking) must
+				// not clobber the live-captured pre-persona baseline: enter falls back
+				// to the live capture when no override is passed.
+				const baselineOverride =
+					deserialized && (deserialized.model !== undefined || deserialized.thinkingLevel !== undefined)
+						? deserialized
+						: undefined;
 				await personaRuntime.enter(
 					options.pendingPersonaAgent,
 					options.pendingPersonaExplicit ?? {},
