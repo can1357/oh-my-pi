@@ -1,5 +1,10 @@
 import { describe, expect, it } from "bun:test";
-import { parseCardTitleReply, splitCardTitle } from "@oh-my-pi/pi-coding-agent/utils/title-card";
+import {
+	keepTitleCard,
+	parseCardReply,
+	parseCardTitleReply,
+	splitCardTitle,
+} from "@oh-my-pi/pi-coding-agent/utils/title-card";
 
 describe("parseCardTitleReply", () => {
 	const reply = '<title nf="nf-md-flask" emoji="🧪" code="FLAKY">Fix flaky park tests</title>';
@@ -90,5 +95,46 @@ describe("splitCardTitle", () => {
 		["a code longer than 6", "🧪 FLAKIEST: Fix flaky park tests"],
 	])("leaves %s whole", (_case, title) => {
 		expect(splitCardTitle(title)).toBeUndefined();
+	});
+});
+
+describe("parseCardReply", () => {
+	it("picks the icon the style allows", () => {
+		expect(parseCardReply("nf-md-flask 🧪 FLAKY", "nf+emoji")).toEqual({ icon: "\u{f0093}", code: "FLAKY" });
+		expect(parseCardReply("nf-md-flask 🧪 FLAKY", "emoji")).toEqual({ icon: "🧪", code: "FLAKY" });
+		expect(parseCardReply("nf-md-not-a-glyph 🧪 FLAKY", "nf+emoji")).toEqual({ icon: "🧪", code: "FLAKY" });
+	});
+
+	it("finds a Nerd Fonts name written with dashes for underscores", () => {
+		expect(parseCardReply("nf-md-text-box 📝 BLUR", "nf+emoji")).toEqual({ icon: "\u{f021a}", code: "BLUR" });
+	});
+
+	it("repairs a lowercase code and ignores the title echoed after it", () => {
+		expect(parseCardReply("🗄 seed: Create seed data", "emoji")).toEqual({ icon: "🗄️", code: "SEED" });
+	});
+
+	it.each([
+		["no icon", "FLAKY"],
+		["no code", "🧪"],
+		["a code longer than 6", "🧪 FLAKIEST"],
+		["a word before the icon", "Card 🧪 FLAKY"],
+	])("names no card for %s", (_case, reply) => {
+		expect(parseCardReply(reply, "emoji")).toBeUndefined();
+	});
+
+	it("names no card when the style is boring", () => {
+		expect(parseCardReply("🧪 FLAKY", "boring")).toBeUndefined();
+	});
+});
+
+describe("keepTitleCard", () => {
+	it("heads the new title with the current card, replacing one the new title brings", () => {
+		expect(keepTitleCard("🧪 CACHE: Fix cache writes", "Repair cache")).toBe("🧪 CACHE: Repair cache");
+		expect(keepTitleCard("🧪 CACHE: Fix cache writes", "🔥 NEW: Repair cache")).toBe("🧪 CACHE: Repair cache");
+	});
+
+	it("leaves the new title alone when the current title has no card", () => {
+		expect(keepTitleCard("Fix cache writes", "🔥 NEW: Repair cache")).toBe("🔥 NEW: Repair cache");
+		expect(keepTitleCard(undefined, "Repair cache")).toBe("Repair cache");
 	});
 });
