@@ -3709,8 +3709,10 @@ message BidiRequestId {
 // Agent Service with bidirectional streaming
 service AgentService {
    rpc Run(AgentClientMessage) returns (AgentServerMessage);
-   rpc RunSSE(RunSSERequest) returns (stream AgentServerMessage);
-   rpc RunPoll(RunPollRequest) returns (stream RunPollResponse);
+   // The CLI opens the stream by Bidi request id; AgentClientMessage data
+   // (including the run request) is sent separately through BidiAppend.
+   rpc RunSSE(BidiRequestId) returns (stream AgentServerMessage);
+   rpc RunPoll(BidiPollRequest) returns (stream BidiPollResponse);
    // Generate a very short, succinct agent name from the provided user message.
    rpc NameAgent(NameAgentRequest) returns (NameAgentResponse);
    rpc GetUsableModels(GetUsableModelsRequest) returns (GetUsableModelsResponse);
@@ -3720,16 +3722,15 @@ service AgentService {
    rpc GetPromptContextUsage(GetPromptContextUsageRequest) returns (GetPromptContextUsageResponse);
 }
 
-message RunSSERequest {
-   AgentRunRequest run_request = 1;
+message BidiPollRequest {
+   BidiRequestId request_id = 1;
+   optional bool start_request = 2;
 }
 
-message RunPollRequest {
-   AgentRunRequest run_request = 1;
-}
-
-message RunPollResponse {
-   repeated AgentServerMessage messages = 1;
+message BidiPollResponse {
+   int64 seqno = 1;
+   string data = 2;
+   optional bool eof = 3;
 }
 
 message GetPromptContextUsageRequest {
