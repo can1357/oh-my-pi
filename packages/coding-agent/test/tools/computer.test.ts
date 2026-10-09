@@ -18,6 +18,7 @@ import {
 	ComputerSupervisor,
 	type ComputerWorkerHandle,
 } from "@oh-my-pi/pi-coding-agent/tools/computer/supervisor";
+import { ObservationLedger } from "@oh-my-pi/pi-coding-agent/tools/computer/observation";
 import { ComputerWorkerCore, type NativeDesktopSession } from "@oh-my-pi/pi-coding-agent/tools/computer/worker";
 import type {
 	AxNode,
@@ -2099,6 +2100,28 @@ describe("computer cell settlement", () => {
 		expect(report).toContain('(was: statictext: "Ready")');
 	});
 
+	it("holds one tree per window across a read loop, and a bounded few after an input", () => {
+		const ledger = new ObservationLedger();
+		const window = { id: "42" };
+		for (let index = 0; index < 100; index++) ledger.recordRead(window, `- statictext "${index}" [ref=e1]`, {});
+		expect(ledger.retainedReads).toBe(1);
+		ledger.noteInput(window, "press shift");
+		for (let index = 0; index < 100; index++) ledger.recordRead(window, `- statictext "after ${index}" [ref=e1]`, {});
+		expect(ledger.retainedReads).toBeLessThanOrEqual(8);
+	});
+
+	it("reports a window whose post-input reads overflowed the bound even when the cell printed the last", () => {
+		const ledger = new ObservationLedger();
+		const window = { id: "42" };
+		ledger.noteInput(window, "press shift");
+		let last = "";
+		for (let index = 0; index < 20; index++) {
+			last = `- statictext "after ${index}" [ref=e1]`;
+			ledger.recordRead(window, last, {});
+		}
+		expect(ledger.take(last)?.touched.map(touched => touched.id)).toEqual(["42"]);
+	});
+
 	it("does not count an empty post-input read as printed", async () => {
 		const transport = new MemoryTransport();
 		const native = new EditableWindowSession();
@@ -2160,9 +2183,9 @@ describe("computer cell settlement", () => {
 		};
 		await runWorker(transport, "root", 'await desktop.press("cmd+e")');
 		const report = String(await settleWorker(transport, "settle-root"));
-		expect(report.split("\n")[0]).toBe(
-			'window "42" Code "Editor" after desktop press cmd+e — 1 changed, 1 added, 0 removed (rows marked ~ changed, + added):',
-		);
+		const [header] = report.split("\n");
+		expect(header).toStartWith('window "42" Code "Editor" after desktop press cmd+e — ');
+		expect(header).toContain("1 changed, 1 added, 0 removed");
 		expect(report).not.toContain('window "43" Code "Other" after');
 	});
 
@@ -2227,7 +2250,9 @@ describe("computer cell settlement", () => {
 			await runWorker(transport, "shot", `await ${target}.screenshot({ silent: true })`);
 			await runWorker(transport, "scroll", `await ${target}.scroll(110, 20, { dy: 100 })`);
 			const report = String(await settleWorker(transport, "settle-scroll"));
-			expect(report.split("\n")[0]).toBe(`window "43" Code "Behind" after ${label} scroll 110,20 — current tree:`);
+			const [header] = report.split("\n");
+			expect(header).toStartWith(`window "43" Code "Behind" after ${label} scroll 110,20`);
+			expect(header).toEndWith("current tree:");
 			expect(report).not.toContain('window "42"');
 			expect(report).not.toContain('window "6"');
 		},

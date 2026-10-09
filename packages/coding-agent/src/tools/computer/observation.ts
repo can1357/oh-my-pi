@@ -66,6 +66,33 @@ interface WindowRecord {
 	options: AxReadOptions;
 }
 
+interface CellRead {
+	window: InputWindow;
+	text: string;
+	hash: number | bigint;
+	options: AxReadOptions;
+	sequence: number;
+}
+
+/** A cell's `ax()`/`observe()` reads of one window, bounded so a read loop cannot pile up trees. */
+interface CellReads {
+	/** The latest read before the window's last input, then reads since, newest last; only the latest while it has had none. */
+	recent: CellRead[];
+	recentChars: number;
+	/** Hashes of texts read since the window's last input, including reads `recent` no longer holds. */
+	since: Set<number | bigint>;
+	/** Hashes of texts read before the window's last input. */
+	before: Set<number | bigint>;
+	/** A post-input read or a hash was dropped by the bounds: printed output cannot settle the window. */
+	lost: boolean;
+}
+
+/** Most reads, and characters of tree text, kept per window since its last input. */
+const MAX_RECENT_READS = 8;
+const MAX_RECENT_CHARS = 1024 * 1024;
+/** Most distinct tree hashes remembered per window in one cell. */
+const MAX_READ_HASHES = 4096;
+
 /**
  * Bytes one window's tree may take in a cell's report. Larger trees are
  * elided structurally, dropping unmarked subtrees without controls first, so
@@ -240,8 +267,8 @@ export class ObservationLedger {
 	readonly #refs = new Map<string, string>();
 	/** Windows input or a failure touched since the last settle; `sequence` orders them against reads. */
 	#touched = new Map<string, { labels: string[]; failure?: string; sequence: number }>();
-	/** `ax()`/`observe()` reads the cell made, per window in order; they count as shown once the cell's output carries them. */
-	#reads = new Map<string, Array<{ window: InputWindow; text: string; options: AxReadOptions; sequence: number }>>();
+	/** `ax()`/`observe()` reads the cell made, per window; they count as shown once the cell's output carries them. */
+	#reads = new Map<string, CellReads>();
 	#sequence = 0;
 	#pids = new Set<number>();
 	#unattributed: string[] = [];
@@ -294,10 +321,55 @@ export class ObservationLedger {
 	 */
 	recordRead(window: InputWindow, text: string, options: AxReadOptions): void {
 		this.recordRefs(window.id, treeRefs(text));
-		const read = { window, text, options: { ...options }, sequence: this.#sequence };
-		const reads = this.#reads.get(window.id);
-		if (reads) reads.push(read);
-		else this.#reads.set(window.id, [read]);
+		let reads = this.#reads.get(window.id);
+		if (!reads) {
+			reads = { recent: [], recentChars: 0, since: new Set(), before: new Set(), lost: false };
+			this.#reads.set(window.id, reads);
+		}
+		const read: CellRead = { window, text, hash: Bun.hash(text), options: { ...options }, sequence: this.#sequence };
+		reads.since.add(read.hash);
+		if (reads.since.size > MAX_READ_HASHES) {
+			reads.since.clear();
+			reads.lost = true;
+		}
+		// Before any input to the window only the latest read matters: it is what the model saw if printed.
+		const touched = this.#touched.get(window.id);
+		if (!touched) {
+			reads.recent = [];
+			reads.recentChars = 0;
+		}
+		reads.recent.push(read);
+		reads.recentChars += text.length;
+		while (
+			reads.recent.length > 1 &&
+			(reads.recent.length > MAX_RECENT_READS || reads.recentChars > MAX_RECENT_CHARS)
+		) {
+			const dropped = reads.recent.shift()!;
+			reads.recentChars -= dropped.text.length;
+			if (touched && dropped.sequence >= touched.sequence) reads.lost = true;
+		}
+	}
+
+	/** Input or a failure reached the window: everything it read so far was read before that input. */
+	#readsBeforeInput(id: string): void {
+		const reads = this.#reads.get(id);
+		if (!reads) return;
+		for (const hash of reads.since) reads.before.add(hash);
+		if (reads.before.size > MAX_READ_HASHES) {
+			reads.before.clear();
+			reads.lost = true;
+		}
+		reads.since.clear();
+		// The latest earlier read stays: printed, it is what the model saw before the input.
+		reads.recent = reads.recent.slice(-1);
+		reads.recentChars = reads.recent[0]?.text.length ?? 0;
+	}
+
+	/** Tree texts held for the current cell's reads, across windows. */
+	get retainedReads(): number {
+		let count = 0;
+		for (const reads of this.#reads.values()) count += reads.recent.length;
+		return count;
 	}
 
 	/** Whether no input since the last settle has claimed the roster-before read yet. */
@@ -331,6 +403,7 @@ export class ObservationLedger {
 			record.pid = pid;
 			this.#pids.add(pid);
 		}
+		this.#readsBeforeInput(window.id);
 		const touched = this.#touched.get(window.id);
 		if (touched) {
 			touched.labels.push(label);
@@ -350,6 +423,7 @@ export class ObservationLedger {
 			this.#unattributed.push(failure);
 			return;
 		}
+		this.#readsBeforeInput(window.id);
 		const touched = this.#touched.get(window.id);
 		if (touched) {
 			touched.failure = failure;
@@ -361,26 +435,26 @@ export class ObservationLedger {
 	 * Take what the cell left to settle, or undefined when it sent no input and
 	 * nothing failed. First, the latest `ax()` read of each window whose tree the
 	 * cell's `output` carries becomes what the model saw, and settles its window
-	 * only if it was read after the window's last input and its text was not
-	 * also seen before that input (the printed copy could be the earlier one).
+	 * only if it was read after the window's last input, its text was not also
+	 * seen before that input (the printed copy could be the earlier one), and
+	 * no read of the window was dropped by the bounds.
 	 */
 	take(output: string): PendingSettle | undefined {
 		for (const [id, reads] of this.#reads) {
 			// Printed verbatim, or JSON-escaped inside a `display(...)`. Refs alone do not tell:
 			// an element keeps its ref across reads, so an earlier printed tree names them too.
-			const printed = reads.findLast(
+			const printed = reads.recent.findLast(
 				read =>
 					read.text.trim() !== "" &&
 					(output.includes(read.text) || output.includes(JSON.stringify(read.text).slice(1, -1))),
 			);
 			if (!printed) continue;
 			const touched = this.#touched.get(id);
-			const seenBefore =
+			const ambiguous =
 				touched !== undefined &&
-				(this.#windows.get(id)?.shown === printed.text ||
-					reads.some(read => read.sequence < touched.sequence && read.text === printed.text));
+				(reads.lost || reads.before.has(printed.hash) || this.#windows.get(id)?.shown === printed.text);
 			this.recordShown(printed.window, printed.text, printed.options);
-			if (touched && (touched.sequence > printed.sequence || seenBefore)) this.#touched.set(id, touched);
+			if (touched && (touched.sequence > printed.sequence || ambiguous)) this.#touched.set(id, touched);
 		}
 		this.#reads.clear();
 		if (this.#inputs === 0 && this.#touched.size === 0 && this.#unattributed.length === 0) return undefined;
