@@ -6,8 +6,8 @@ import { isHindsightConfigured, loadHindsightConfig } from "../hindsight/config"
 import retainDescription from "../prompts/tools/retain.md" with { type: "text" };
 import type { ToolSession } from ".";
 
+import { isGlobalMemoryScopeAvailable } from "../memory-backend/global-scope";
 import { cfgMemoryBackend } from "../memory-backend/settings";
-import { isGlobalMemoryScopeAvailable } from "../mnemopi/settings";
 
 const memoryRetainSchemaBase = type({
 	items: type({
@@ -126,8 +126,9 @@ export class MemoryRetainTool implements AgentTool<MemoryRetainSchema, MemoryRet
 		if (!state) {
 			throw new Error("Hindsight backend is not initialised for this session.");
 		}
+		// Check before queueing anything, so an unsupported scoping mode rejects the whole batch.
 		if (params.items.some(item => item.scope === "global")) {
-			throw new Error("Global memory scope is only available with the Mnemopi backend.");
+			state.assertGlobalRetainAvailable();
 		}
 
 		// Push every item onto the session-owned queue and return immediately.
@@ -135,7 +136,7 @@ export class MemoryRetainTool implements AgentTool<MemoryRetainSchema, MemoryRet
 		// its debounce timer fires. If the eventual batch fails, the queue
 		// surfaces a UI-only warning notice — the LLM is not informed.
 		for (const item of params.items) {
-			state.enqueueRetain(item.content, item.context);
+			state.enqueueRetain(item.content, item.context, item.scope);
 		}
 
 		const count = params.items.length;

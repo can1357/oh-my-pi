@@ -96,6 +96,7 @@ interface RegisterStateOptions {
 	retainTags?: string[];
 	recallTags?: string[];
 	recallTagsMatch?: "any" | "all" | "any_strict" | "all_strict";
+	config?: Partial<HindsightConfig>;
 	sessionOverrides?: Record<string, unknown>;
 }
 
@@ -107,7 +108,7 @@ function registerState(client: HindsightApi, settings?: Settings, opts: Register
 		retainTags: opts.retainTags,
 		recallTags: opts.recallTags,
 		recallTagsMatch: opts.recallTagsMatch,
-		config: makeConfig(),
+		config: makeConfig(opts.config),
 		session: {
 			sessionId: TEST_SESSION_ID,
 			sessionManager: { getEntries: () => [] } as never,
@@ -318,19 +319,131 @@ describe("retain.execute", () => {
 		expect(registeredState?.retainQueue.depth).toBe(1);
 	});
 
-	it("rejects global scope instead of silently queueing it in Hindsight", async () => {
+	it("retains global items untagged, in a request separate from project-tagged items", async () => {
 		const settings = Settings.isolated({ "memory.backend": "hindsight" });
 		const client = new HindsightApi({ baseUrl: "http://localhost:8888" });
-		registerState(client, settings);
+		const retainBatchSpy = vi.spyOn(HindsightApi.prototype, "retainBatch").mockResolvedValue({} as never);
+		vi.spyOn(HindsightApi.prototype, "createBank").mockResolvedValue({} as never);
+		registerState(client, settings, { retainTags: ["project:pi"], config: { scoping: "per-project-tagged" } });
+
+		const tool = MemoryRetainTool.createIf(makeSession(settings))!;
+		const result = await tool.execute("call-mixed", {
+			items: [
+				{ content: "pi uses tabs" },
+				{ content: "the user prefers zsh across projects", scope: "global" },
+				{ content: "pi builds with bun", scope: "project" },
+			],
+		});
+		expect(result.content[0]).toEqual({ type: "text", text: "3 memories queued." });
+		await registeredState?.flushRetainQueue();
+
+		expect(retainBatchSpy).toHaveBeenCalledTimes(2);
+		const requests = retainBatchSpy.mock.calls.map(([, items]) =>
+			items.map(item => ({ content: item.content, tags: item.tags })),
+		);
+		expect(requests).toEqual(
+			expect.arrayContaining([
+				[
+					{ content: "pi uses tabs", tags: ["project:pi"] },
+					{ content: "pi builds with bun", tags: ["project:pi"] },
+				],
+				[{ content: "the user prefers zsh across projects", tags: undefined }],
+			]),
+		);
+	});
+
+	it("sends global and project items in one untagged request when the scope has no project tags", async () => {
+		const settings = Settings.isolated({ "memory.backend": "hindsight" });
+		const client = new HindsightApi({ baseUrl: "http://localhost:8888" });
+		const retainBatchSpy = vi.spyOn(HindsightApi.prototype, "retainBatch").mockResolvedValue({} as never);
+		vi.spyOn(HindsightApi.prototype, "createBank").mockResolvedValue({} as never);
+		registerState(client, settings, { config: { scoping: "global" } });
+
+		await MemoryRetainTool.createIf(makeSession(settings))!.execute("call-global-mode", {
+			items: [{ content: "shared fact" }, { content: "explicitly global fact", scope: "global" }],
+		});
+		await registeredState?.flushRetainQueue();
+
+		expect(retainBatchSpy).toHaveBeenCalledTimes(1);
+		expect(retainBatchSpy.mock.calls[0][1].map(item => ({ content: item.content, tags: item.tags }))).toEqual([
+			{ content: "shared fact", tags: undefined },
+			{ content: "explicitly global fact", tags: undefined },
+		]);
+	});
+
+	it("retains items queued through the two-argument enqueue as project-scoped", async () => {
+		const settings = Settings.isolated({ "memory.backend": "hindsight" });
+		const client = new HindsightApi({ baseUrl: "http://localhost:8888" });
+		const retainBatchSpy = vi.spyOn(HindsightApi.prototype, "retainBatch").mockResolvedValue({} as never);
+		vi.spyOn(HindsightApi.prototype, "createBank").mockResolvedValue({} as never);
+		registerState(client, settings, { retainTags: ["project:pi"], config: { scoping: "per-project-tagged" } });
+
+		registeredState!.retainQueue.enqueue("legacy caller fact", "legacy context");
+		await registeredState?.flushRetainQueue();
+
+		expect(retainBatchSpy).toHaveBeenCalledTimes(1);
+		expect(retainBatchSpy.mock.calls[0][1].map(item => ({ content: item.content, tags: item.tags }))).toEqual([
+			{ content: "legacy caller fact", tags: ["project:pi"] },
+		]);
+	});
+
+	it("rejects a global item enqueued directly on the queue under per-project scoping", () => {
+		const client = new HindsightApi({ baseUrl: "http://localhost:8888" });
+		registerState(client, undefined, { config: { scoping: "per-project" } });
+
+		expect(() => registeredState!.retainQueue.enqueue("cross-project fact", undefined, "global")).toThrow(
+			/requires global or per-project-tagged scoping/i,
+		);
+		expect(registeredState?.retainQueue.depth).toBe(0);
+	});
+
+	it("rejects a batch with a global item under per-project scoping before queueing anything", async () => {
+		const settings = Settings.isolated({ "memory.backend": "hindsight" });
+		const client = new HindsightApi({ baseUrl: "http://localhost:8888" });
+		registerState(client, settings, { config: { scoping: "per-project" } });
 
 		const tool = MemoryRetainTool.createIf(makeSession(settings))!;
 		await expect(
 			tool.execute("call-global", {
-				items: [{ content: "global preference", scope: "global" }],
+				items: [{ content: "project fact" }, { content: "global preference", scope: "global" }],
 			}),
-		).rejects.toThrow(/only available with the Mnemopi backend/i);
+		).rejects.toThrow(/requires global or per-project-tagged scoping/i);
 		expect(registeredState?.retainQueue.depth).toBe(0);
 	});
+
+	it.each([
+		["project", /failed for 2 memories: HTTP 503/, "global one"],
+		["global", /failed for 1 global memory: HTTP 503/, "project one"],
+	] as const)(
+		"still sends the other request and names the lost items when the %s request fails",
+		async (failing, notice, delivered) => {
+			const settings = Settings.isolated({ "memory.backend": "hindsight" });
+			const client = new HindsightApi({ baseUrl: "http://localhost:8888" });
+			const sent: string[] = [];
+			vi.spyOn(HindsightApi.prototype, "retainBatch").mockImplementation(async (_bankId, items) => {
+				const scope = items[0].tags ? "project" : "global";
+				if (scope === failing) throw new Error("HTTP 503");
+				sent.push(...items.map(item => item.content));
+				return {} as never;
+			});
+			vi.spyOn(HindsightApi.prototype, "createBank").mockResolvedValue({} as never);
+			const noticeSpy = vi.fn();
+			registerState(client, settings, {
+				retainTags: ["project:pi"],
+				config: { scoping: "per-project-tagged" },
+				sessionOverrides: { emitNotice: noticeSpy },
+			});
+
+			await MemoryRetainTool.createIf(makeSession(settings))!.execute("call-partial", {
+				items: [{ content: "project one" }, { content: "project two" }, { content: "global one", scope: "global" }],
+			});
+			await registeredState?.flushRetainQueue();
+
+			expect(sent).toContain(delivered);
+			expect(noticeSpy).toHaveBeenCalledTimes(1);
+			expect(noticeSpy.mock.calls[0][1]).toMatch(notice);
+		},
+	);
 
 	it("flushes a multi-item tool call as a single retainBatch call with per-item context", async () => {
 		const settings = Settings.isolated({ "memory.backend": "hindsight" });
@@ -636,16 +749,19 @@ describe("global memory scope exposure", () => {
 		["mnemopi", "per-project", false],
 		["mnemopi", "per-project-tagged", true],
 		["mnemopi", "global", true],
+		["hindsight", "per-project", false],
+		["hindsight", "per-project-tagged", true],
 		["local", "per-project-tagged", false],
 	] as const)("%s backend with %s scoping offers scope: %p", (backend, scoping, offered) => {
 		const settings = Settings.isolated({
 			"memory.backend": backend,
-			"mnemopi.scoping": scoping,
+			[backend === "hindsight" ? "hindsight.scoping" : "mnemopi.scoping"]: scoping,
+			"hindsight.apiUrl": "http://localhost:8888",
 			"autolearn.enabled": true,
 		});
 		const session = makeSession(settings);
 		expect(offersScope(LearnTool.createIf(session)!)).toEqual({ schema: offered, prompt: offered });
-		if (backend === "mnemopi") {
+		if (backend !== "local") {
 			expect(offersScope(MemoryRetainTool.createIf(session)!)).toEqual({ schema: offered, prompt: offered });
 		}
 	});
@@ -735,6 +851,82 @@ describe("learn.execute (Mnemopi backend)", () => {
 		expect((error as Error).message).toMatch(/requires global or per-project-tagged scoping/i);
 		expect((error as Error).message).not.toContain("Mnemopi did not store the lesson");
 		expect(state.memory.beam.db.query("SELECT content FROM working_memory").all()).toEqual([]);
+		expect(await Bun.file(path.join(getManagedSkillsDir(), "global-lesson", "SKILL.md")).exists()).toBe(false);
+	});
+});
+
+describe("learn.execute (Hindsight backend)", () => {
+	let originalAgentDir: string;
+	let agentTempDir: TempDir;
+
+	beforeEach(() => {
+		resetSettingsForTest();
+		registeredState = undefined;
+		agentTempDir = TempDir.createSync("@hindsight-learn-");
+		originalAgentDir = getAgentDir();
+		setAgentDir(agentTempDir.join("agent"));
+	});
+
+	afterEach(async () => {
+		vi.restoreAllMocks();
+		setAgentDir(originalAgentDir);
+		registeredState = undefined;
+		await agentTempDir.remove();
+	});
+
+	const hindsightSettings = () =>
+		Settings.isolated({
+			"memory.backend": "hindsight",
+			"hindsight.apiUrl": "http://localhost:8888",
+			"autolearn.enabled": true,
+		});
+
+	it("retains a global lesson untagged while project lessons keep the project tag", async () => {
+		const settings = hindsightSettings();
+		const retainBatchSpy = vi.spyOn(HindsightApi.prototype, "retainBatch").mockResolvedValue({} as never);
+		vi.spyOn(HindsightApi.prototype, "createBank").mockResolvedValue({} as never);
+		registerState(new HindsightApi({ baseUrl: "http://localhost:8888" }), settings, {
+			retainTags: ["project:alpha"],
+			config: { scoping: "per-project-tagged" },
+		});
+		const learn = LearnTool.createIf(makeSession(settings))!;
+
+		await learn.execute("learn-project", { memory: "alpha pins bun 1.3" });
+		await learn.execute("learn-global", {
+			memory: "Use isolated temporary directories when verifying file writes across projects.",
+			scope: "global",
+		});
+		await registeredState?.flushRetainQueue();
+
+		const retained = retainBatchSpy.mock.calls.flatMap(([, items]) =>
+			items.map(item => ({ content: item.content, tags: item.tags })),
+		);
+		expect(retained).toHaveLength(2);
+		expect(retained).toEqual(
+			expect.arrayContaining([
+				{ content: "alpha pins bun 1.3", tags: ["project:alpha"] },
+				{
+					content: "Use isolated temporary directories when verifying file writes across projects.",
+					tags: undefined,
+				},
+			]),
+		);
+	});
+
+	it("rejects a global lesson under per-project scoping before queueing or minting a skill", async () => {
+		const settings = hindsightSettings();
+		registerState(new HindsightApi({ baseUrl: "http://localhost:8888" }), settings, {
+			config: { scoping: "per-project" },
+		});
+
+		await expect(
+			LearnTool.createIf(makeSession(settings))!.execute("learn-unsupported-global", {
+				memory: "A cross-project lesson must not become project-local.",
+				scope: "global",
+				skill: { action: "create", name: "global-lesson", description: "Shared lesson.", body: "# Shared lesson" },
+			}),
+		).rejects.toThrow(/requires global or per-project-tagged scoping/i);
+		expect(registeredState?.retainQueue.depth).toBe(0);
 		expect(await Bun.file(path.join(getManagedSkillsDir(), "global-lesson", "SKILL.md")).exists()).toBe(false);
 	});
 });
