@@ -30,6 +30,7 @@ import {
 	DAEMON_PTY_ROWS,
 	DAEMON_RUNTIME_DIR_ENV,
 	type DaemonCompletionNotification,
+	type DaemonObservationNotification,
 	type DaemonOperation,
 	type DaemonRpcResult,
 	type DaemonSignal,
@@ -444,6 +445,7 @@ class DaemonBroker {
 	readonly #ownerSockets = new Map<string, { socket: IpcConnection; subscriptionId: string | undefined }>();
 	readonly #completionSubscriptions = new Map<string, string | undefined>();
 	readonly #pendingCompletions = new Map<string, Map<string, DaemonCompletionNotification>>();
+	readonly #observerOwners = new Map<IpcConnection, Set<string>>();
 	readonly #finished = Promise.withResolvers<void>();
 	readonly #sockets = new Set<IpcConnection>();
 	/** Abortable `wait`/follow-`logs` requests, keyed by wire request id, so a client can cancel its own poll. */
@@ -501,6 +503,7 @@ class DaemonBroker {
 			await record.persistQueue;
 		}
 		this.#ownerSockets.clear();
+		this.#observerOwners.clear();
 		for (const socket of this.#sockets) socket.destroy();
 		this.#sockets.clear();
 		this.#clients.clear();
@@ -525,6 +528,7 @@ class DaemonBroker {
 			() => {
 				this.#sockets.delete(socket);
 				if (!authenticated) return;
+				this.#observerOwners.delete(socket);
 				this.#clients.delete(socket);
 				this.#scheduleIdleShutdown();
 				for (const [owner, registration] of this.#ownerSockets) {
@@ -551,6 +555,12 @@ class DaemonBroker {
 			const request = parseDaemonWireRequest(decoded);
 			if (request.token !== this.#token) throw new Error("Daemon broker authentication failed");
 			onAuthenticated();
+			// Apply the diagnostic scope before owned registration can yield to persistence.
+			// An awaited request is therefore a barrier for observing every later settlement.
+			if (request.observedOwners !== undefined) {
+				if (request.observedOwners.length === 0) this.#observerOwners.delete(socket);
+				else this.#observerOwners.set(socket, new Set(request.observedOwners));
+			}
 			for (const owner of request.completionUnsubscribes ?? []) {
 				const subscriptionId = this.#completionSubscriptions.get(owner);
 				if (
@@ -1058,6 +1068,28 @@ class DaemonBroker {
 		registration.socket.send(JSON.stringify(completion));
 	}
 
+	#notifyObservers(snapshot: DaemonSnapshot, completion?: DaemonCompletionNotification): void {
+		const owner = snapshot.owner;
+		if (owner === undefined) return;
+		let line: string | undefined;
+		for (const [socket, owners] of this.#observerOwners) {
+			if (socket.closed || !owners.has(owner)) continue;
+			if (line === undefined) {
+				const observation: DaemonObservationNotification = {
+					event: "daemon-observed",
+					notification: completion ?? {
+						event: "daemon-completed",
+						completionId: crypto.randomUUID(),
+						owner,
+						daemon: { ...snapshot },
+					},
+				};
+				line = JSON.stringify(observation);
+			}
+			socket.send(line);
+		}
+	}
+
 	async #settle(record: ManagedDaemon, generation: number, exitCode?: number, error?: string): Promise<void> {
 		// `restarting` is a settled state (child exited, relaunch timer armed). Any op that
 		// runs #refreshDetached on such a record must not re-settle it: re-entry double-counts
@@ -1097,6 +1129,7 @@ class DaemonBroker {
 				`\n[daemon exited${exitCode === undefined ? "" : ` with code ${exitCode}`}; restarting in ${delay}ms]\n`,
 			);
 			this.#persist(record);
+			this.#notifyObservers(record.snapshot);
 			record.restartTimer = setTimeout(() => {
 				record.restartTimer = undefined;
 				void this.#launch(record);
@@ -1116,6 +1149,7 @@ class DaemonBroker {
 					} satisfies DaemonCompletionNotification)
 				: undefined;
 		if (completion) record.pendingCompletions.push(completion);
+		this.#notifyObservers(record.snapshot, completion);
 		this.#persist(record);
 		await record.log?.close();
 		record.log = undefined;
@@ -1279,6 +1313,7 @@ class DaemonBroker {
 			record.snapshot.state = "exited";
 			record.snapshot.exitedAt = Date.now();
 			this.#persist(record);
+			this.#notifyObservers(record.snapshot);
 			await record.log?.close();
 			record.log = undefined;
 			return;
@@ -1477,7 +1512,9 @@ class DaemonBroker {
 						if ("pendingCompletions" in decoded && Array.isArray(decoded.pendingCompletions)) {
 							return decoded.pendingCompletions.map(value => {
 								const message = parseDaemonWireMessage(value);
-								if (!("event" in message)) throw new Error("Pending daemon completion is not an event");
+								if (!("event" in message) || message.event !== "daemon-completed") {
+									throw new Error("Pending daemon completion is not an owned completion");
+								}
 								return message;
 							});
 						}
