@@ -7,6 +7,7 @@ import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
+import { USER_INTERRUPT_LABEL } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { createAssistantMessage } from "./helpers/agent-session-setup";
 
@@ -39,6 +40,7 @@ async function createSession(
 	main: MockModel,
 	side: MockModel,
 	settings: Record<string, unknown> = {},
+	autoTitle = true,
 ): Promise<AgentSession> {
 	authStorage = await AuthStorage.create(":memory:");
 	authStorage.keys.setRuntime("anthropic", "test-key");
@@ -59,6 +61,7 @@ async function createSession(
 		}),
 		modelRegistry: new ModelRegistry(authStorage),
 		sideStreamFn: side.stream,
+		autoTitle,
 	});
 	return session;
 }
@@ -81,7 +84,6 @@ describe("AgentSession title fork", () => {
 		const titleModel = vi.spyOn(ai, "completeSimple");
 		const titled = nextTitle(target);
 
-		target.maybeStartTitleGeneration(FIRST_MESSAGE);
 		await target.prompt(FIRST_MESSAGE);
 		await titled;
 
@@ -101,7 +103,6 @@ describe("AgentSession title fork", () => {
 	it.each<[string, MockResponse, MockResponse]>([
 		["the fork declines", { content: ["Reading the park tests first."] }, { content: ["<title/>"] }],
 		["the fork request fails", { content: ["Reading the park tests first."] }, { throw: "overloaded" }],
-		["the reply never starts a block to fork", { throw: "invalid request" }, { content: [CARD_REPLY] }],
 	])("falls back to the title model when %s", async (_case, mainResponse, sideResponse) => {
 		const main = createMockModel({ responses: [mainResponse] });
 		const side = createMockModel({ handler: sideResponse });
@@ -114,8 +115,7 @@ describe("AgentSession title fork", () => {
 		});
 		const titled = nextTitle(target);
 
-		target.maybeStartTitleGeneration(FIRST_MESSAGE);
-		await target.prompt(FIRST_MESSAGE).catch(() => {});
+		await target.prompt(FIRST_MESSAGE);
 		await titled;
 
 		expect(target.sessionName).toBe("Fix flaky park tests");
@@ -135,11 +135,9 @@ describe("AgentSession title fork", () => {
 		});
 
 		// The first message's fork declines, so the title model takes over and is still running...
-		target.maybeStartTitleGeneration("look at the park tests");
 		await target.prompt("look at the park tests");
 		await titleModelStarted.promise;
-		// ...when the second message arrives; the title model then declines too.
-		target.maybeStartTitleGeneration(FIRST_MESSAGE);
+		// ...when the second message's reply begins; the title model then declines too.
 		await target.prompt(FIRST_MESSAGE);
 		const titled = nextTitle(target);
 		titleModelReply.resolve(createAssistantMessage("<title/>"));
@@ -157,7 +155,6 @@ describe("AgentSession title fork", () => {
 		vi.spyOn(ai, "completeSimple").mockResolvedValue(createAssistantMessage("<title>Fix flaky park tests</title>"));
 		const titled = nextTitle(target);
 
-		target.maybeStartTitleGeneration(FIRST_MESSAGE);
 		await target.prompt(FIRST_MESSAGE);
 		await titled;
 
@@ -165,21 +162,57 @@ describe("AgentSession title fork", () => {
 		expect(side.calls).toHaveLength(0);
 	});
 
-	it("cancels an armed fork on interrupt without blocking the next message's title", async () => {
-		const main = createMockModel({ responses: [{ content: ["Reading the park tests first."] }] });
-		const side = createMockModel({ handler: { content: [CARD_REPLY] } });
+	it("retitles from the steer an interrupt flushes after it cancelled the first message's fork", async () => {
+		const steer = "move the park fixture into a helper";
+		const main = createMockModel({
+			// The reply starts (forking the title), then a tool call keeps the run going...
+			responses: [{ content: ["Reading the park tests first.", { type: "toolCall", name: "read", arguments: {} }] }],
+			// ...streaming until the interrupt delivers the steer, which gets a prompt reply.
+			handler: context => {
+				const last = context.messages.at(-1);
+				const text = typeof last?.content === "string" ? last.content : JSON.stringify(last?.content);
+				return last?.role === "user" && text.includes(steer)
+					? { content: ["Moving the park fixture into a helper."] }
+					: { content: ["Still reading."], delayMs: 60_000 };
+			},
+		});
+		const firstForkStarted = Promise.withResolvers<void>();
+		const side = createMockModel({
+			responses: [
+				() => {
+					firstForkStarted.resolve();
+					return { content: [CARD_REPLY], delayMs: 60_000 };
+				},
+			],
+			handler: { content: [CARD_REPLY] },
+		});
 		const target = await createSession(main, side);
 		const titleModel = vi.spyOn(ai, "completeSimple");
-
-		target.maybeStartTitleGeneration("look at the park tests");
-		await target.abort();
 		const titled = nextTitle(target);
-		target.maybeStartTitleGeneration(FIRST_MESSAGE);
-		await target.prompt(FIRST_MESSAGE);
+
+		const run = target.prompt(FIRST_MESSAGE);
+		await firstForkStarted.promise;
+		await target.prompt(steer, { streamingBehavior: "steer" });
+		// Empty Enter with a queued steer: interrupt the turn and deliver the steer.
+		await target.abort({ reason: USER_INTERRUPT_LABEL });
 		await titled;
+		await run;
 
 		expect(target.sessionName).toBe("🧪 FLAKY: Fix flaky park tests");
-		expect(side.calls).toHaveLength(1);
+		expect(side.calls).toHaveLength(2);
+		expect(titleModel).not.toHaveBeenCalled();
+	});
+
+	it("leaves sessions without autoTitle unnamed", async () => {
+		const main = createMockModel({ responses: [{ content: ["Reading the park tests first."] }] });
+		const side = createMockModel({ handler: { content: [CARD_REPLY] } });
+		const target = await createSession(main, side, {}, false);
+		const titleModel = vi.spyOn(ai, "completeSimple");
+
+		await target.prompt(FIRST_MESSAGE);
+
+		expect(target.sessionName).toBeUndefined();
+		expect(side.calls).toHaveLength(0);
 		expect(titleModel).not.toHaveBeenCalled();
 	});
 });

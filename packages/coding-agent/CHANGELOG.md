@@ -4,11 +4,15 @@
 
 ### Changed
 
+- Web search now tells the agent about its X post operators (`site:x.com`, `from:<handle>`) when you are logged in to xAI, so questions about reactions on X reach X search.
 - Reduced memory retained after merging unchanged discovered and cached models ([#14252](https://github.com/can1357/oh-my-pi/pull/14252) by [@iliaal](https://github.com/iliaal)).
+- The default `smol` model now prefers Claude Haiku 5.5 when it is available.
+- Automatic session titles now start when the agent's reply begins rather than when you submit, so a slow-thinking first reply gets a card title (icon and code) instead of a plain fallback title.
 
 ### Fixed
 
 - Reduced memory growth after one-shot side requests without interrupting ongoing conversations ([#14334](https://github.com/can1357/oh-my-pi/pull/14334) by [@iliaal](https://github.com/iliaal)).
+- Fixed sessions staying untitled when you interrupted the first reply to send a queued steer message.
 
 ## [18.8.6] - 2026-10-08
 
