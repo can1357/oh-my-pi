@@ -156,7 +156,10 @@ describe("stall report collection", () => {
 		register(registry, main);
 		const child = fixture(registry, "RemovedMemory");
 		const childRef = register(registry, child, "Main", main.sessionManager.getSessionId());
-		cleanups.push(() => main.sessionManager.close(), () => child.sessionManager.close());
+		cleanups.push(
+			() => main.sessionManager.close(),
+			() => child.sessionManager.close(),
+		);
 		const report = collector(main);
 		for (let index = 1; index <= 6; index++) child.append(`removed-response-${index}`, { tool: "read" });
 		child.sessionManager.appendCustomEntry(ACTIVE_TIME_CUSTOM_TYPE, {
