@@ -525,12 +525,12 @@ class SessionList<T extends SessionSelectorEntry> implements Component {
 	readonly #getCurrentSessionPath: () => string | undefined;
 	readonly #historyMatcher?: SessionHistoryMatcher;
 	#historyMergeTimer: NodeJS.Timeout | undefined;
-	/** Re-render hook for async list updates (fuzzy scan chunks, history merge). */
+	/** Re-render hook for async list updates (fuzzy scan completion, history merge). */
 	onRequestRender?: () => void;
 
 	// ── Incremental search state ──────────────────────────────────────────
 	// The menu's visible list is always composed from these three inputs (see
-	// #composeFiltered), so late-arriving fuzzy chunks and the debounced
+	// #composeFiltered), so a late-finishing fuzzy scan and the debounced
 	// history merge can land in any order without clobbering each other.
 	/** Recency-ranked sessions whose text contains every query token verbatim. */
 	#literalRanked: RankedSessionMatch<T>[] = [];
@@ -543,8 +543,8 @@ class SessionList<T extends SessionSelectorEntry> implements Component {
 	#scanTimer: NodeJS.Timeout | undefined;
 	/**
 	 * True once the user moved the selection for the current query; blocks the
-	 * history merge from reordering the list under their cursor. (Fuzzy chunks
-	 * only append below the literal group, which never shifts existing rows.)
+	 * history merge from reordering the list under their cursor. (The fuzzy scan
+	 * only appends below the literal group, which never shifts existing rows.)
 	 */
 	#selectionMoved = false;
 	/** True after a nonempty query; empty refilter restores current only then. */
@@ -687,38 +687,48 @@ class SessionList<T extends SessionSelectorEntry> implements Component {
 		// Fuzzy pass: building a fuzzy index per session is too expensive to run
 		// across a huge listing inside one keystroke, so scan a bounded slice now
 		// and spill the remainder into async chunks.
-		this.#scanFuzzySlice(this.#scanGeneration, tokens, rest, 0, FUZZY_SCAN_INLINE_COUNT);
+		const inlineEnd = Math.min(rest.length, FUZZY_SCAN_INLINE_COUNT);
+		this.#scoreFuzzy(tokens, rest, 0, inlineEnd);
 		this.#composeFiltered();
+		if (inlineEnd < rest.length) {
+			this.#scheduleFuzzyScan(this.#scanGeneration, tokens, rest, inlineEnd, this.#fuzzyRanked.length);
+		}
 		// New query rebuilds ranking from scratch. Same-query refilter (delete)
-		// and async compose (fuzzy chunks / history merge) only clamp so an
+		// and async compose (fuzzy scan / history merge) only clamp so an
 		// arrow selection survives. A live-session index > 0 would otherwise
 		// land on a lower-ranked match after the first keystroke.
 		if (queryChanged) this.#menu.setSelectedIndex(0);
 		this.#scheduleHistoryMerge(query);
 	}
 
-	/**
-	 * Score up to `budget` sessions from `rest[start..]` (indexes into the
-	 * unfiltered list), then schedule the remainder on a macrotask so pending
-	 * input events run first. Chunks that added matches recompose the visible
-	 * list and request a render; a stale generation aborts silently.
-	 */
-	#scanFuzzySlice(generation: number, tokens: string[], rest: number[], start: number, budget: number): void {
+	/** Fuzzy-score `rest[start..end)` (indexes into the unfiltered list) into {@link #fuzzyRanked}. */
+	#scoreFuzzy(tokens: string[], rest: number[], start: number, end: number): void {
 		const all = this.#allSessions;
-		const end = Math.min(rest.length, start + budget);
 		for (let i = start; i < end; i++) {
 			const index = rest[i]!;
 			const session = all[index]!;
 			const match = scoreFuzzySession(session, index, tokens, new FuzzyText(sessionTextLower(session)));
 			if (match) this.#fuzzyRanked.push(match);
 		}
-		if (end >= rest.length) return;
+	}
+
+	/**
+	 * Score `rest[start..]` in {@link FUZZY_SCAN_CHUNK_COUNT}-session macrotask
+	 * chunks so pending input runs between them, then recompose the visible
+	 * list once if the scan matched more than the `shown` fuzzy hits already
+	 * composed. Publishing per chunk reorders the list dozens of times per
+	 * keystroke on a large listing, and the native picker replays its
+	 * row-arrival animation on every reorder. A stale generation aborts silently.
+	 */
+	#scheduleFuzzyScan(generation: number, tokens: string[], rest: number[], start: number, shown: number): void {
 		this.#scanTimer = setTimeout(() => {
 			this.#scanTimer = undefined;
 			if (generation !== this.#scanGeneration) return;
-			const before = this.#fuzzyRanked.length;
-			this.#scanFuzzySlice(generation, tokens, rest, end, FUZZY_SCAN_CHUNK_COUNT);
-			if (this.#fuzzyRanked.length > before) {
+			const end = Math.min(rest.length, start + FUZZY_SCAN_CHUNK_COUNT);
+			this.#scoreFuzzy(tokens, rest, start, end);
+			if (end < rest.length) {
+				this.#scheduleFuzzyScan(generation, tokens, rest, end, shown);
+			} else if (this.#fuzzyRanked.length > shown) {
 				this.#composeFiltered();
 				this.onRequestRender?.();
 			}
@@ -740,7 +750,7 @@ class SessionList<T extends SessionSelectorEntry> implements Component {
 			tokenizeSessionQuery(this.#searchInput.getValue()),
 			this.#literalRanked,
 		);
-		// Async chunks and the history merge only clamp the cursor so an arrow
+		// The fuzzy scan and the history merge only clamp the cursor so an arrow
 		// selection survives recomposition; the query path resets explicitly.
 		const keepIndex = Math.min(this.#menu.selectedIndex, Math.max(0, composed.length - 1));
 		this.#menu.setItems(composed, keepIndex >= 0 ? composed[keepIndex]?.path : undefined);
@@ -1330,7 +1340,11 @@ export interface SessionSelectorOptions<T extends SessionSelectorEntry = Session
 	title?: string;
 	/** Fixed scope label, or false to omit the scope suffix. */
 	scopeLabel?: string | false;
-	/** Show each session's working directory in the list. */
+	/**
+	 * Show each session's working directory in the list. Defaults to on when
+	 * the session files live in more than one directory (e.g. the folder scope
+	 * merging a repository's worktrees).
+	 */
 	showCwd?: boolean;
 	/**
 	 * Reads the live terminal height so the visible window fits the viewport.
@@ -1374,6 +1388,7 @@ export class SessionSelectorComponent<T extends SessionSelectorEntry = SessionSe
 	#onRequestRender?: () => void;
 	readonly #loadAllSessions?: () => Promise<T[]>;
 	#folderSessions: T[];
+	readonly #folderShowCwd: boolean;
 	#globalSessions: T[] | null = null;
 	#scope: "folder" | "all" = "folder";
 	#toggling = false;
@@ -1440,6 +1455,9 @@ export class SessionSelectorComponent<T extends SessionSelectorEntry = SessionSe
 		this.#onDelete = options.onDelete;
 		this.#loadAllSessions = options.loadAllSessions;
 		this.#folderSessions = sessions;
+		// Storage directory, not recorded cwd: one folder's sessions may record
+		// symlink aliases of the same path, which must not turn the column on.
+		this.#folderShowCwd = options.showCwd ?? new Set(sessions.map(session => path.dirname(session.path))).size > 1;
 		this.#globalSessions = options.allSessions ?? null;
 		this.#getTerminalRows = options.getTerminalRows ?? (() => 24);
 		this.#fillHeight = options.fillHeight ?? false;
@@ -1457,7 +1475,7 @@ export class SessionSelectorComponent<T extends SessionSelectorEntry = SessionSe
 		// projects' history (issue #3099).
 		this.#sessionList = new SessionList(
 			sessions,
-			options.showCwd ?? false,
+			this.#folderShowCwd,
 			options.historyMatcher,
 			options.getTerminalRows,
 			options.pinnedIds,
@@ -1530,7 +1548,7 @@ export class SessionSelectorComponent<T extends SessionSelectorEntry = SessionSe
 			this.#sessionList.setSessions(global, true);
 		} else {
 			this.#scope = "folder";
-			this.#sessionList.setSessions(this.#folderSessions, false);
+			this.#sessionList.setSessions(this.#folderSessions, this.#folderShowCwd);
 		}
 		this.title = this.#headerLabel();
 		this.#onRequestRender?.();

@@ -1617,7 +1617,168 @@ export function deepinfraModelManagerOptions(
 	return {
 		providerId: "deepinfra",
 		dynamicModelsAuthoritative: true,
+		// `vision`/`vlm` tags are the whole truth for modality on this host.
+		dynamicInputAuthoritative: true,
 		fetchDynamicModels: () => fetchDeepinfraModels({ baseUrl, apiKey, fetch: config?.fetch, references }),
+	};
+}
+
+// ---------------------------------------------------------------------------
+// CoralBricks
+// ---------------------------------------------------------------------------
+
+export const CORALBRICKS_BASE_URL = "https://inference.coralbricks.ai/v1";
+
+/** CoralBricks OpenAI-compatible discovery configuration. */
+export interface CoralbricksModelManagerConfig {
+	apiKey?: string;
+	baseUrl?: string;
+	fetch?: FetchImpl;
+}
+
+/**
+ * The CoralBricks-specific fields of a `GET /v1/models` row: per-million USD
+ * pricing and the capability flags Coral documents as authoritative
+ * (https://www.coralbricks.ai/docs.md).
+ */
+interface CoralbricksModelRecord extends OpenAICompatibleModelRecord {
+	context_length?: unknown;
+	pricing?: unknown;
+	supports_chat?: unknown;
+	supports_image_input?: unknown;
+	supports_tools?: unknown;
+	supports_reasoning?: unknown;
+	reasoning?: unknown;
+}
+
+/**
+ * Read one live per-million price; a missing or negative field falls back to
+ * the bundled reference. An explicit `0` is a real price: the manager keeps it
+ * because `coralbricksModelManagerOptions` declares `dynamicCostAuthoritative`.
+ */
+function coralRate(value: unknown, fallback: number): number {
+	const parsed = toNumber(value);
+	return parsed !== undefined && parsed >= 0 ? parsed : fallback;
+}
+
+/**
+ * Map one CoralBricks catalog row to a chat model spec; non-chat rows
+ * (`supports_chat: false`) are dropped. Pricing arrives in Coral's own
+ * per-million field names; `cached_input_per_m` is $0 on every model and a
+ * missing field falls back to the bundled reference.
+ * Live reasoning capabilities and controls override the bundled fallback.
+ * The endpoint publishes no output cap, so `maxTokens` keeps its reference
+ * value rather than being invented from the context window.
+ */
+function mapCoralbricksModel(
+	entry: CoralbricksModelRecord,
+	defaults: ModelSpec<"openai-completions">,
+	reference: ModelSpec<"openai-completions"> | undefined,
+): ModelSpec<"openai-completions"> | null {
+	if (entry.supports_chat === false) {
+		return null;
+	}
+	const pricing = isRecord(entry.pricing) ? entry.pricing : {};
+	// A bundled reference may lend metadata, but its runner kind is not
+	// evidence the chat roster advertised it.
+	const { kind: _inheritedKind, ...chatReference } = reference ?? {};
+	const hasReasoningFlag = typeof entry.supports_reasoning === "boolean";
+	const reasoning = hasReasoningFlag
+		? entry.supports_reasoning === true
+		: (reference?.reasoning ?? defaults.reasoning);
+	const controls = isRecord(entry.reasoning) ? entry.reasoning : undefined;
+	const wireEfforts = controls?.supported_efforts;
+	let thinking = reasoning ? reference?.thinking : undefined;
+	let compat = reference?.compat;
+	if (reasoning && Array.isArray(wireEfforts)) {
+		const efforts = THINKING_EFFORTS.filter(effort => wireEfforts.includes(effort));
+		// `none` is the server's off default, not an Effort (nor `minimal`).
+		const defaultLevel = efforts.find(effort => effort === controls?.default_effort);
+		thinking =
+			efforts.length > 0
+				? {
+						mode: "effort",
+						efforts,
+						...(defaultLevel !== undefined && { defaultLevel }),
+						...(typeof controls?.mandatory === "boolean" && { requiresEffort: controls.mandatory }),
+					}
+				: undefined;
+	}
+	if (hasReasoningFlag || Array.isArray(wireEfforts)) {
+		// An explicit empty/unknown vocabulary must not regrow a guessed dial
+		// from identity or KDL. Missing legacy metadata still uses the reference.
+		compat = { ...compat, trustExplicitThinkingOnly: true };
+	}
+	if (reasoning && controls) {
+		if (controls.mandatory === true || controls.disable === null) {
+			compat = { ...compat, reasoningDisableMode: "lowest-effort" };
+		} else if (isRecord(controls.disable) && controls.disable.reasoning_effort === "none") {
+			compat = { ...compat, reasoningDisableMode: "none-effort" };
+		}
+	}
+	const input: ("text" | "image")[] =
+		entry.supports_image_input === true
+			? ["text", "image"]
+			: entry.supports_image_input === false
+				? ["text"]
+				: (reference?.input ?? defaults.input);
+	return {
+		...defaults,
+		...chatReference,
+		id: defaults.id,
+		name: reference?.name ?? defaults.name,
+		api: defaults.api,
+		provider: defaults.provider,
+		baseUrl: defaults.baseUrl,
+		reasoning,
+		thinking,
+		compat,
+		input,
+		...(typeof entry.supports_tools === "boolean" ? { supportsTools: entry.supports_tools } : {}),
+		cost: {
+			input: coralRate(pricing.input_per_m, reference?.cost.input ?? 0),
+			output: coralRate(pricing.output_per_m, reference?.cost.output ?? 0),
+			cacheRead: coralRate(pricing.cached_input_per_m, reference?.cost.cacheRead ?? 0),
+			cacheWrite: coralRate(pricing.cache_write_per_m, reference?.cost.cacheWrite ?? 0),
+		},
+		contextWindow: toPositiveNumber(entry.context_length, reference?.contextWindow ?? null),
+		maxTokens: reference?.maxTokens ?? null,
+	};
+}
+
+/**
+ * Builds CoralBricks' model-discovery manager. `/v1/models` is key-protected
+ * (401 without a bearer key), so a keyless config serves only the bundled
+ * reviewed seed rows; with a key, live rows are authoritative over the bundle.
+ */
+export function coralbricksModelManagerOptions(
+	config?: CoralbricksModelManagerConfig,
+): ModelManagerOptions<"openai-completions"> {
+	const apiKey = config?.apiKey;
+	const baseUrl = config?.baseUrl ?? CORALBRICKS_BASE_URL;
+	const references = createBundledReferenceMap<"openai-completions">("coralbricks");
+	return {
+		providerId: "coralbricks",
+		dynamicModelsAuthoritative: true,
+		dynamicReasoningAuthoritative: true,
+		// `supports_image_input` is the row's whole truth for modality (Coral
+		// answers unsupported content with `400 unsupported_content_type`).
+		dynamicInputAuthoritative: true,
+		// Coral's `pricing` block is the deployment tariff; an explicit live `0`
+		// (a free model or no cache-write charge) must not revert to the bundle.
+		dynamicCostAuthoritative: true,
+		...(apiKey && {
+			fetchDynamicModels: () =>
+				fetchOpenAICompatibleModels({
+					api: "openai-completions",
+					provider: "coralbricks",
+					baseUrl,
+					apiKey,
+					fetch: config?.fetch,
+					mapModel: (entry, defaults) =>
+						mapCoralbricksModel(entry as CoralbricksModelRecord, defaults, references.get(defaults.id)),
+				}),
+		}),
 	};
 }
 
@@ -4263,6 +4424,7 @@ export function syntheticModelManagerOptions(
 	return {
 		providerId: "synthetic",
 		dynamicModelsAuthoritative: true,
+		dynamicReasoningAuthoritative: true,
 		...(apiKey && {
 			fetchDynamicModels: () =>
 				fetchOpenAICompatibleModels({
@@ -6186,7 +6348,7 @@ function parseCopilotTokenPriceTier(value: unknown): CopilotTokenPriceTier | und
 		return undefined;
 	}
 	return {
-		contextMax: toNumber(value.context_max),
+		contextMax: toNumber(value.max_prompt_tokens) ?? toNumber(value.context_max),
 		inputPrice: toNumber(value.input_price),
 		outputPrice: toNumber(value.output_price),
 		cachePrice: toNumber(value.cache_price),
@@ -6302,6 +6464,9 @@ export function githubCopilotModelManagerOptions(config?: GithubCopilotModelMana
 	return {
 		providerId: "github-copilot",
 		cacheProviderId: resolveModelCacheProviderId("github-copilot", { apiKey: rawApiKey, baseUrl }),
+		// Copilot discovery pre-applies the correct image fallback for omitted
+		// `supports.vision`; the live row's modality is authoritative.
+		dynamicInputAuthoritative: true,
 		dropCachedModelIdsOnStaticMismatch: COPILOT_CACHE_INVALIDATED_MODEL_IDS,
 		// COPILOT_API_HEADERS are compile-time wire identity constants, not
 		// credentials. The cache omits all request headers for
@@ -6372,12 +6537,12 @@ export function githubCopilotModelManagerOptions(config?: GithubCopilotModelMana
 									? ["text"]
 									: (reference?.input ?? defaults.input);
 						// With COPILOT_API_HEADERS the served window is the long-context
-						// ceiling; the default tier ends at token_prices.default.context_max
-						// prompt tokens. Cap the base entry to the default tier — the long
-						// tier is the opt-in `-1m` sibling below. On tiered rows
-						// max_prompt_tokens is the default lane's prompt budget, and the
-						// billed default ceiling can overlap the long lane (#13912), so the
-						// tighter of the two bounds the base entry.
+						// ceiling; the default tier reports its prompt boundary in
+						// token_prices.default.max_prompt_tokens (or legacy context_max).
+						// Cap the base entry to the default tier — the long tier is
+						// the opt-in `-1m` sibling below. On tiered legacy rows the
+						// model-wide max_prompt_tokens may be tighter than the billed
+						// default ceiling (#13912), so use the smaller bound.
 						const tokenPrices = extractCopilotTokenPrices(entry);
 						const billedDefaultMax = tokenPrices.defaultTier?.contextMax;
 						const tieredPromptBudget =
