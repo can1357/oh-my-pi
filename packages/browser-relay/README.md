@@ -13,7 +13,7 @@ The companion relay server lives in the omp CLI (`omp browser-relay`, see `packa
 
 That's it: the relay server auto-starts under omp's profile-independent global daemon broker the first time Eval's browser API needs it. Every relay consumer holds a broker lease, so one project exiting cannot interrupt another; the server stops after the last consumer across all projects exits. The extension badge turns **on** when connected. Run `omp browser-relay` manually only for `--token`, `--no-group`, or a non-default port — a relay already serving the port is adopted, never fought over.
 
-`app.target` borrows a specific tab by URL/title substring; without it, omp opens its own tab in the background, leaving your selected tab and focus alone, and closes it when the omp tab is closed. Tabs omp is **actively driving** are gathered into a per-window **"omp" tab group** (cyan) — released when omp lets go of the tab and dissolved on disconnect; the rest of your tabs, pinned tabs, tabs in your own groups, and tabs you drag out are left alone. Disable with `omp browser-relay --no-group`.
+`app.target` borrows a specific tab by URL/title substring; without it, omp opens its own tab in the background, leaving your selected tab and focus alone, and closes it when the omp tab is closed (an extension installed by an older omp selects that tab instead; re-run `omp browser-relay install` and reload it). Tabs omp is **actively driving** are gathered into a per-window **"omp" tab group** (cyan) — released when omp lets go of the tab and dissolved on disconnect; the rest of your tabs, pinned tabs, tabs in your own groups, and tabs you drag out are left alone. Disable with `omp browser-relay --no-group`.
 
 ## Development
 
