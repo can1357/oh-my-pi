@@ -6,7 +6,6 @@ import { formatDuration, replaceTabs } from "@oh-my-pi/pi-tui/render/render-util
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { getDaemonRuntimeDir, logger, sanitizeText } from "@oh-my-pi/pi-utils";
 import { type DaemonBrokerClient, daemonClientForProject } from "./client";
-import { awaitServiceObservationBarrier } from "./diagnostic-observers";
 import { canonicalProjectDir } from "./paths";
 import type { DaemonOperation, DaemonRpcResult } from "./protocol";
 import { renderTerminalOutputIsolated } from "./terminal-output-worker-client";
@@ -14,6 +13,7 @@ import type { ToolSession } from "../tools";
 import { resolveToCwd } from "../tools/path-utils";
 import { isSharedBrowserDaemonName } from "../tools/browser/shared-daemon";
 
+import { awaitServiceObservationBarrier } from "./diagnostic-observers";
 import { cfgLaunchEnabled } from "../tools/settings";
 
 export interface ServiceReady {
@@ -108,12 +108,11 @@ function subscribe(session: ToolSession, client: DaemonBrokerClient): void {
 	});
 }
 
-async function request(
+async function requestAfterObservation(
 	session: ToolSession,
 	operation: DaemonOperation,
 	signal?: AbortSignal,
 ): Promise<DaemonRpcResult> {
-	await awaitServiceObservationBarrier(serviceOwner(session));
 	const client = await daemonClientForProject(session.cwd);
 	subscribe(session, client);
 	const result = await client.request(operation, signal);
@@ -123,6 +122,13 @@ async function request(
 		for (const daemon of result.daemons) if (daemon.owner === owner) track(session, daemon);
 	} else if ("daemon" in result) track(session, result.daemon);
 	return result;
+}
+
+async function request(
+	...args: Parameters<typeof requestAfterObservation>
+): Promise<DaemonRpcResult> {
+	await awaitServiceObservationBarrier(serviceOwner(args[0]));
+	return requestAfterObservation(...args);
 }
 
 export async function listServices(session: ToolSession, signal?: AbortSignal): Promise<DaemonSnapshot[]> {
