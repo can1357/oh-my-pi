@@ -2643,6 +2643,18 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 								firstLineBytes,
 							)}, exceeds ${formatBytes(maxBytesForRead)} limit. Unable to display a valid UTF-8 snippet.]`;
 						}
+						if (located?.spec.artifactStore === true && totalFileLines > startLineDisplay) {
+							// A capped first line ends the page at line 1: without an
+							// explicit hint the remaining selected lines would have
+							// no continuation (the partial-line metadata carries none).
+							// No hint when nothing remains selected (e.g. `raw:2-2`).
+							const resumeFrom = startLineDisplay + 1;
+							const resumeEnd = limit !== undefined ? startLine + effectiveLimit : undefined;
+							if (resumeEnd === undefined || resumeEnd >= resumeFrom) {
+								const resumePart = resumeEnd !== undefined ? `${resumeFrom}-${resumeEnd}` : `${resumeFrom}-`;
+								outputText += `\n\n[More lines in file. Use ${selectorBase}:${rawSelector ? `raw:${resumePart}` : resumePart} to continue]`;
+							}
+						}
 						sourcePath = renderAbsolutePath;
 						if (truncation) {
 							details = { truncation: toReadTruncationStats(truncation) };
