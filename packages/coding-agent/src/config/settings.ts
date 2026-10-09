@@ -63,6 +63,13 @@ import { cfgShellPath } from "../exec/settings";
 /** Settings layer that supplies an effective value; see {@link Settings.getProvenance}. */
 export type SettingProvenance = "env" | "runtime" | "overlay" | "project" | "global" | "default";
 
+/** Persisted layer whose value may safely seed another process's speculative startup cache. */
+export function settingCacheScope(provenance: SettingProvenance): "global" | "project" | undefined {
+	if (provenance === "project") return "project";
+	if (provenance === "global" || provenance === "default") return "global";
+	return undefined;
+}
+
 /** Raw settings object as stored in YAML */
 export interface RawSettings {
 	[key: string]: unknown;

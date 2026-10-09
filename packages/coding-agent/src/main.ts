@@ -58,7 +58,7 @@ import {
 import { ModelsConfigFile } from "./config/models-config";
 import { serviceTierSettingToTier } from "./config/service-tier";
 import { all, combine, type ProtocolHost, type SettingValueOf } from "./config/registry";
-import { Settings, settings } from "./config/settings";
+import { settingCacheScope, Settings, settings } from "./config/settings";
 import { initializeWithSettings } from "./discovery";
 import {
 	clearPluginRootsAndCaches,
@@ -1948,7 +1948,7 @@ export async function runRootCommand(
 
 		applyStartupComposerPreferences({
 			autoResume: cfgAutoResume.get(settingsInstance),
-			autoResumeProjectScoped: cfgAutoResume.provenance(settingsInstance) === "project",
+			autoResumeCacheScope: settingCacheScope(cfgAutoResume.provenance(settingsInstance)),
 			quiet: cfgStartupQuiet.get(settingsInstance),
 			composerShape: cfgComposerShape.get(settingsInstance),
 			showHardwareCursor: cfgShowHardwareCursor.get(settingsInstance),

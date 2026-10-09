@@ -3320,6 +3320,12 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		// At least one accent cell: a fresh session still shows the session-accent
 		// line starting at the left instead of a fully dim bar.
 		const usedCount = Math.min(scaleWidth, Math.max(1, Math.round((clampedPct / 100) * scaleWidth)));
+		const clampedPlacementPercent =
+			placementPercent === null ? clampedPct : Math.min(100, Math.max(0, placementPercent));
+		const placementUsedCount = Math.min(
+			scaleWidth,
+			Math.max(1, Math.round((clampedPlacementPercent / 100) * scaleWidth)),
+		);
 		const unusedColor = theme.getFgAnsi("border");
 
 		// Boundary markers are only meaningful when auto-compaction can fire and
@@ -3344,7 +3350,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 			const maxStart = renderWindowLabel
 				? scaleWidth - percentPlacementWidth - 1
 				: scaleWidth - percentPlacementWidth;
-			const preferredStart = Math.min(maxStart, Math.max(minStart, usedCount));
+			const preferredStart = Math.min(maxStart, Math.max(minStart, placementUsedCount));
 			const overlapsBoundary = (start: number): boolean => {
 				const end = start + percentPlacementWidth;
 				return (speculationIdx >= start && speculationIdx < end) || (thresholdIdx >= start && thresholdIdx < end);

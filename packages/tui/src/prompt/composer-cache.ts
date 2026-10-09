@@ -301,11 +301,11 @@ export class ComposerCache {
 		cwd: string,
 		preferences: ComposerPreferences,
 		theme: ComposerThemePreferences,
-		autoResume: boolean,
+		autoResume?: boolean,
 		autoResumeProjectScoped = false,
 	): void {
 		this.#putShared(cwd, "ui", { preferences, theme });
-		this.writeAutoResume(cwd, autoResume, autoResumeProjectScoped);
+		if (autoResume !== undefined) this.writeAutoResume(cwd, autoResume, autoResumeProjectScoped);
 	}
 
 	/** Refresh the live auto-resume setting without replacing the cached UI snapshot. */

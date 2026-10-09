@@ -83,6 +83,41 @@ describe("status line startup layout", () => {
 		}
 	});
 
+	it("reserves a representative live compact width for a fresh standalone segment", () => {
+		const model = {
+			id: "startup-model",
+			name: "Model",
+			provider: "test",
+			api: "test",
+			contextWindow: 100_000,
+		} as Model;
+		const line = createStartupStatusLine({
+			settings: {
+				preset: "custom",
+				leftSegments: ["model", "context_pct"],
+				rightSegments: [],
+				separator: "none",
+				contextLine: "off",
+				segmentOptions: { context_pct: { compact: true } },
+			},
+			gitEnabled: false,
+			model,
+			autoThinking: false,
+			fastMode: false,
+			usingSubscription: false,
+			autoCompactEnabled: false,
+			compactionBoundaries: null,
+		});
+
+		try {
+			const narrow = Bun.stripANSI(line.getTopBorder(11).content);
+			expect(narrow).not.toContain("ctx:?");
+			expect(narrow).toContain("Model");
+		} finally {
+			line.dispose();
+		}
+	});
+
 	it("paints the cached compact width so the opposite startup group stays aligned", () => {
 		const model = {
 			id: "startup-model",
@@ -188,6 +223,42 @@ describe("status line startup layout", () => {
 			expect(rendered).toContain("ctx:?");
 			expect(rendered).not.toContain("120%");
 			expect(rendered.indexOf("100K")).toBeLessThan(rendered.indexOf("ctx:?"));
+		} finally {
+			line.dispose();
+		}
+	});
+
+	it("places a masked compact label at its cached live percentage", () => {
+		const model = {
+			id: "startup-model",
+			name: "Model",
+			provider: "test",
+			api: "test",
+			contextWindow: 100_000,
+		} as Model;
+		const line = createStartupStatusLine({
+			settings: {
+				preset: "custom",
+				leftSegments: ["model", "context_pct"],
+				rightSegments: [],
+				separator: "none",
+				contextLine: "embedded",
+				segmentOptions: { context_pct: { compact: true } },
+			},
+			gitEnabled: false,
+			model,
+			autoThinking: false,
+			fastMode: false,
+			usingSubscription: false,
+			contextPercent: 50,
+			autoCompactEnabled: false,
+			compactionBoundaries: null,
+		});
+
+		try {
+			const rendered = Bun.stripANSI(line.getTopBorder(30).content);
+			expect(rendered).toContain("ctx:?");
+			expect(rendered.indexOf("ctx:?")).toBeGreaterThanOrEqual(12);
 		} finally {
 			line.dispose();
 		}

@@ -380,6 +380,25 @@ export function parseTerminalBreadcrumb(content: string): ParsedTerminalBreadcru
 }
 
 /**
+ * Resolve a breadcrumb's recorded session file to its interactive root. Subagent
+ * (and other artifact) sessions live inside a parent session's artifacts dir —
+ * `<parent>.jsonl` strips its suffix to `<parent>/`, and a child writes
+ * `<parent>/<agentId>.jsonl`. Normalize that identity before comparing or
+ * resuming it.
+ */
+export function resolveBreadcrumbToInteractiveRoot(sessionFile: string): string {
+	let current = path.resolve(sessionFile);
+	// Walk up while the containing dir is itself a session's artifacts dir
+	// (`<dir>.jsonl` exists). Capped to defend against pathological layouts.
+	for (let depth = 0; depth < 8; depth++) {
+		const parentSessionFile = `${path.dirname(current)}.jsonl`;
+		if (!fs.existsSync(parentSessionFile)) return current;
+		current = parentSessionFile;
+	}
+	return current;
+}
+
+/**
  * Storage facts about the writing session manager that decide whether the
  * custom-files registry can usefully record its transcript.
  *

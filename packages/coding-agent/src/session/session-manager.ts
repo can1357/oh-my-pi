@@ -95,6 +95,7 @@ import {
 	computeDefaultSessionDir,
 	hasPositiveMovedProjectEvidence,
 	readTerminalBreadcrumbEntry,
+	resolveBreadcrumbToInteractiveRoot,
 	resolveManagedSessionRoot,
 	worktreeSessionDirs,
 	writeTerminalBreadcrumb,
@@ -357,27 +358,6 @@ async function relocateArtifactsDirectory(source: string, destination: string): 
 		logger.info("Merged session artifacts into an existing directory", { source, destination });
 	}
 	return "merged";
-}
-
-/**
- * Resolve a breadcrumb's recorded session file to its interactive root. Subagent
- * (and other artifact) sessions live inside a parent session's artifacts dir —
- * `<parent>.jsonl` strips its suffix to `<parent>/`, and a child writes
- * `<parent>/<agentId>.jsonl`. A breadcrumb that points at such a child — a
- * pre-fix poisoned crumb left by a subagent that opened in the parent's TTY, or
- * any nested artifact — must resolve back up to the top-level session so
- * `--continue` resumes the real conversation instead of a subagent transcript.
- */
-function resolveBreadcrumbToInteractiveRoot(sessionFile: string): string {
-	let current = path.resolve(sessionFile);
-	// Walk up while the containing dir is itself a session's artifacts dir
-	// (`<dir>.jsonl` exists). Capped to defend against pathological layouts.
-	for (let depth = 0; depth < 8; depth++) {
-		const parentSessionFile = `${path.dirname(current)}.jsonl`;
-		if (!fs.existsSync(parentSessionFile)) return current;
-		current = parentSessionFile;
-	}
-	return current;
 }
 
 function emptyUsageStatistics(): UsageStatistics {

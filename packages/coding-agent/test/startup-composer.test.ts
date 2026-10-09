@@ -9,7 +9,7 @@ import * as registry from "@oh-my-pi/pi-coding-agent/collab/registry";
 import { CollabSocket } from "@oh-my-pi/pi-coding-agent/collab/relay-client";
 import { KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
-import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { resetSettingsForTest, settingCacheScope, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import * as pluginHelpers from "@oh-my-pi/pi-coding-agent/discovery/helpers";
 import { runRootCommand } from "@oh-my-pi/pi-coding-agent/main";
 import { Composer, type ComposerPreferences } from "@oh-my-pi/pi-tui/prompt/composer";
@@ -50,6 +50,46 @@ import {
 } from "@oh-my-pi/pi-coding-agent/modes/settings";
 
 describe("startup composer terminal session identity", () => {
+	it("selects the newest nonempty transcript instead of the last cache writer", () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "omp-startup-newest-session-"));
+		const agentDir = path.join(root, "agent");
+		const project = path.join(root, "project");
+		const sessions = path.join(root, "sessions");
+		const olderSessionFile = path.join(sessions, "2026-01-01T00-00-00_old.jsonl");
+		const newerSessionFile = path.join(sessions, "2026-01-02T00-00-00_new.jsonl");
+		const originalAgentDir = getAgentDir();
+		const originalTmuxPane = process.env.TMUX_PANE;
+		fs.mkdirSync(project);
+		fs.mkdirSync(sessions);
+		for (const [file, id] of [
+			[olderSessionFile, "old"],
+			[newerSessionFile, "new"],
+		] as const) {
+			fs.writeFileSync(
+				file,
+				`${JSON.stringify({ type: "session", id, cwd: project })}\n${JSON.stringify({
+					type: "message",
+					message: { role: "user", content: `${id} work` },
+				})}\n`,
+			);
+		}
+		fs.utimesSync(olderSessionFile, new Date("2026-01-01T00:00:00Z"), new Date("2026-01-01T00:00:00Z"));
+		fs.utimesSync(newerSessionFile, new Date("2026-01-02T00:00:00Z"), new Date("2026-01-02T00:00:00Z"));
+		process.env.TMUX_PANE = "%startup-newest-session";
+		setAgentDir(agentDir);
+		try {
+			expect(resolveTerminalSessionPrepaint(project, olderSessionFile)).toEqual({
+				cacheCwd: project,
+				sessionFile: newerSessionFile,
+			});
+		} finally {
+			setAgentDir(originalAgentDir);
+			if (originalTmuxPane === undefined) delete process.env.TMUX_PANE;
+			else process.env.TMUX_PANE = originalTmuxPane;
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
 	it("uses the cached current-project session when a new terminal has no breadcrumb", () => {
 		const root = fs.mkdtempSync(path.join(os.tmpdir(), "omp-startup-fallback-session-"));
 		const agentDir = path.join(root, "agent");
@@ -71,6 +111,35 @@ describe("startup composer terminal session identity", () => {
 			expect(resolveTerminalSessionPrepaint(project, sessionFile)).toEqual({
 				cacheCwd: project,
 				sessionFile,
+			});
+		} finally {
+			setAgentDir(originalAgentDir);
+			if (originalTmuxPane === undefined) delete process.env.TMUX_PANE;
+			else process.env.TMUX_PANE = originalTmuxPane;
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("normalizes an artifact breadcrumb to the interactive parent session", () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "omp-startup-artifact-breadcrumb-"));
+		const agentDir = path.join(root, "agent");
+		const project = path.join(root, "project");
+		const parentSessionFile = path.join(root, "2026-01-01T00-00-00_parent.jsonl");
+		const artifactDir = parentSessionFile.slice(0, -".jsonl".length);
+		const childSessionFile = path.join(artifactDir, "agent.jsonl");
+		const originalAgentDir = getAgentDir();
+		const originalTmuxPane = process.env.TMUX_PANE;
+		fs.mkdirSync(project);
+		fs.mkdirSync(artifactDir);
+		fs.writeFileSync(parentSessionFile, `${JSON.stringify({ type: "session", id: "parent", cwd: project })}\n`);
+		fs.writeFileSync(childSessionFile, `${JSON.stringify({ type: "session", id: "child", cwd: project })}\n`);
+		process.env.TMUX_PANE = "%startup-artifact-breadcrumb";
+		setAgentDir(agentDir);
+		try {
+			writeTerminalBreadcrumb(project, childSessionFile);
+			expect(resolveTerminalSessionPrepaint(project)).toEqual({
+				cacheCwd: project,
+				sessionFile: parentSessionFile,
 			});
 		} finally {
 			setAgentDir(originalAgentDir);
@@ -176,6 +245,17 @@ describe("startup composer terminal session identity", () => {
 			else process.env.TMUX_PANE = originalTmuxPane;
 			fs.rmSync(root, { recursive: true, force: true });
 		}
+	});
+});
+
+describe("startup settings cache scope", () => {
+	it("caches only persisted auto-resume settings", () => {
+		expect(settingCacheScope("default")).toBe("global");
+		expect(settingCacheScope("global")).toBe("global");
+		expect(settingCacheScope("project")).toBe("project");
+		expect(settingCacheScope("env")).toBeUndefined();
+		expect(settingCacheScope("runtime")).toBeUndefined();
+		expect(settingCacheScope("overlay")).toBeUndefined();
 	});
 });
 

@@ -74,7 +74,7 @@ import type { CollabHost } from "../collab/host";
 import { KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
 import { appKey, editorKey, rawKeyHint } from "@oh-my-pi/pi-tui/chrome/keybinding-hints";
 import { formatModelString, type ResolvedModelRoleValue } from "../config/model-resolver";
-import { isSettingsInitialized, Settings, settings } from "../config/settings";
+import { isSettingsInitialized, settingCacheScope, Settings, settings } from "../config/settings";
 import { clearClaudePluginRootsCache } from "../discovery/helpers";
 import type {
 	AutocompleteProviderFactory,
@@ -3438,11 +3438,14 @@ export class InteractiveMode implements InteractiveModeContext {
 		let resetDisplay = false;
 
 		if (any("autoResume")) {
-			sharedComposerCache()?.writeAutoResume(
-				this.sessionManager.getCwd(),
-				cfgAutoResume.get(this.settings),
-				cfgAutoResume.provenance(this.settings) === "project",
-			);
+			const cacheScope = settingCacheScope(cfgAutoResume.provenance(this.settings));
+			if (cacheScope) {
+				sharedComposerCache()?.writeAutoResume(
+					this.sessionManager.getCwd(),
+					cfgAutoResume.get(this.settings),
+					cacheScope === "project",
+				);
+			}
 		}
 
 		if (

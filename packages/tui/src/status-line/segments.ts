@@ -934,9 +934,7 @@ const contextPctSegment: StatusLineSegment = {
 		const text = theme.fg(color, display);
 		const startupPercent = ctx.session.startupContextPercent;
 		const startupDisplay =
-			compact && pct === null && startupPercent !== null && startupPercent !== undefined
-				? `ctx:${formatCompactContextPercent(startupPercent)}`
-				: undefined;
+			compact && pct === null ? `ctx:${formatCompactContextPercent(startupPercent ?? 100)}` : undefined;
 		const startupPadding = startupDisplay ? " ".repeat(Math.max(0, startupDisplay.length - display.length)) : "";
 		const content = compact
 			? `${text}${startupPadding}${autoIcon}`

@@ -14,7 +14,11 @@ import {
 } from "@oh-my-pi/pi-tui/prompt/composer-cache";
 import { setMagicKeywords } from "@oh-my-pi/pi-tui/prompt/magic-keywords";
 import { initThemeSync } from "@oh-my-pi/pi-tui/theme";
-import { hasPositiveMovedProjectEvidence, readTerminalBreadcrumbEntrySync } from "../session/session-paths";
+import {
+	hasPositiveMovedProjectEvidence,
+	readTerminalBreadcrumbEntrySync,
+	resolveBreadcrumbToInteractiveRoot,
+} from "../session/session-paths";
 import { MAGIC_KEYWORDS } from "./magic-keywords";
 
 /** Inputs available at the CLI prepaint boundary before command modules load. */
@@ -37,7 +41,8 @@ export interface PrepaintComposerOptions {
 export interface PrepaintComposerPreferences extends ComposerPreferences {
 	readonly theme: ComposerThemePreferences;
 	readonly autoResume: boolean;
-	readonly autoResumeProjectScoped?: boolean;
+	/** Persisted settings layer that may safely seed the next launch. */
+	readonly autoResumeCacheScope?: "global" | "project";
 }
 
 interface PendingComposer {
@@ -122,10 +127,9 @@ function hasResumableSessionContent(sessionFile: string): boolean {
 	}
 }
 
-/** Resolve the project-local target `continueRecent()` will choose after skipping empty `/new` stubs. */
+/** Resolve the newest project-local target `continueRecent()` will choose after skipping empty `/new` stubs. */
 function resolveCurrentProjectSession(currentSessionFile: string | undefined): string | undefined {
 	if (!currentSessionFile || !fs.existsSync(currentSessionFile)) return undefined;
-	if (hasResumableSessionContent(currentSessionFile)) return currentSessionFile;
 	try {
 		const sessionDir = path.dirname(currentSessionFile);
 		return fs
@@ -158,13 +162,14 @@ export function resolveTerminalSessionPrepaint(
 	// first frame reserve its usage widths before the session graph loads.
 	if (!breadcrumb) return currentSession;
 	const breadcrumbCwd = path.resolve(breadcrumb.cwd);
-	if (breadcrumbCwd === resolvedCwd) return { cacheCwd: resolvedCwd, sessionFile: breadcrumb.sessionFile };
+	const breadcrumbSessionFile = resolveBreadcrumbToInteractiveRoot(breadcrumb.sessionFile);
+	if (breadcrumbCwd === resolvedCwd) return { cacheCwd: resolvedCwd, sessionFile: breadcrumbSessionFile };
 	// continueRecent() gives an existing current-project session precedence over
 	// relocating a missing-cwd breadcrumb. Mirror that choice in prepaint.
 	if (currentSession) return currentSession;
 	if (fs.existsSync(breadcrumbCwd)) return undefined;
 	if (!hasPositiveMovedProjectEvidence(breadcrumb.cwdIdentity, resolvedCwd)) return undefined;
-	return { cacheCwd: breadcrumbCwd, sessionFile: breadcrumb.sessionFile };
+	return { cacheCwd: breadcrumbCwd, sessionFile: breadcrumbSessionFile };
 }
 
 /** Ownership token that transfers one already-started Composer to InteractiveMode. */
@@ -264,5 +269,8 @@ export function applyStartupComposerPreferences(update: PrepaintComposerPreferen
 	// responsive again: take raw-input ownership now. The kernel echoed (and
 	// buffered) everything typed during the load; the editor replays it here.
 	pending.composer.enableInput();
-	pending.cache?.writeUi(pending.cwd, preferences, update.theme, update.autoResume, update.autoResumeProjectScoped);
+	pending.cache?.writeUi(pending.cwd, preferences, update.theme);
+	if (update.autoResumeCacheScope) {
+		pending.cache?.writeAutoResume(pending.cwd, update.autoResume, update.autoResumeCacheScope === "project");
+	}
 }
