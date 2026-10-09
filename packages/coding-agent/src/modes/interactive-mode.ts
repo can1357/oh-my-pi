@@ -3628,6 +3628,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	#persistComposerStatus(): void {
 		if (!this.sessionManager.getSessionFile()) return;
 		const model = this.session.model;
+		const usage = this.sessionManager.getUsageStatistics();
 		// Recover the border's ANSI wrapper by coloring a sentinel and splitting around it.
 		const marker = "\0";
 		const colored = this.editor.borderColor(marker);
@@ -3649,6 +3650,13 @@ export class InteractiveMode implements InteractiveModeContext {
 				fastMode: this.session.isFastModeActive(),
 				usingSubscription: model ? this.session.modelRegistry.isUsingOAuth(model) : false,
 				contextPercent: this.session.getContextUsage()?.percent,
+				tokenBreakdown: {
+					input: usage.input,
+					output: usage.output,
+					cacheWrite: usage.cacheWrite,
+					orchestrationInput: usage.orchestrationInput,
+					orchestrationOutput: usage.orchestrationOutput,
+				},
 				autoCompactEnabled: this.session.autoCompactionEnabled,
 				compactionBoundaries: model?.contextWindow
 					? statusLineHost.computeCompactionBoundaries(this.session, model.contextWindow, model)

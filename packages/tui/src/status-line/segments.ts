@@ -28,7 +28,7 @@ import {
 import type { TspSpan, TspTone } from "@oh-my-pi/pi-wire";
 import { node, span } from "../native/describe";
 import { thinkingLevelToken } from "../theme/theme-class";
-import type { StatusLineSession } from "./host";
+import type { StatusLineSession, StatusLineTokenBreakdown } from "./host";
 import type { RenderedSegment, SegmentContext, SegmentView, StatusLineSegment, StatusLineSegmentId } from "./types";
 
 export type { SegmentContext } from "./types";
@@ -759,15 +759,23 @@ const tokenInSegment: StatusLineSegment = singleStatSegment("token_in", "input",
 
 const tokenOutSegment: StatusLineSegment = singleStatSegment("token_out", "output", "output", "statusLineOutput");
 
-function tokenTotalBreakdown(ctx: SegmentContext): string | null {
-	const { input, output, cacheWrite, orchestrationInput, orchestrationOutput } = ctx.usageStats;
+function tokenTotalBreakdown(
+	usage: StatusLineTokenBreakdown,
+	formatValue: (value: number) => string = formatNumber,
+): string | null {
+	const { input, output, cacheWrite, orchestrationInput, orchestrationOutput } = usage;
 	const parts: string[] = [];
 	const inTotal = input + cacheWrite;
 	const orchTotal = orchestrationInput + orchestrationOutput;
-	if (inTotal > 0) parts.push(`in:${formatNumber(inTotal)}`);
-	if (output > 0) parts.push(`out:${formatNumber(output)}`);
-	if (orchTotal > 0) parts.push(`orch:${formatNumber(orchTotal)}`);
+	if (inTotal > 0) parts.push(`in:${formatValue(inTotal)}`);
+	if (output > 0) parts.push(`out:${formatValue(output)}`);
+	if (orchTotal > 0) parts.push(`orch:${formatValue(orchTotal)}`);
 	return parts.length > 0 ? parts.join(" ") : null;
+}
+
+function maskedTokenValue(value: number): string {
+	const formatted = formatNumber(value);
+	return `…${" ".repeat(Math.max(0, Bun.stringWidth(formatted) - 1))}`;
 }
 
 const tokenTotalSegment: StatusLineSegment = {
@@ -780,13 +788,23 @@ const tokenTotalSegment: StatusLineSegment = {
 		// label in the breakdown rather than folded into in:/out:).
 		const { input, output, cacheWrite, orchestrationInput, orchestrationOutput } = ctx.usageStats;
 		const total = input + output + cacheWrite + orchestrationInput + orchestrationOutput;
-		if (!total) return { content: "", visible: false };
 
 		if (ctx.options.token_total?.breakdown === true) {
-			const breakdown = tokenTotalBreakdown(ctx);
+			if (!total && ctx.session.startupTokenBreakdown) {
+				const widthHint = tokenTotalBreakdown(ctx.session.startupTokenBreakdown);
+				const masked = tokenTotalBreakdown(ctx.session.startupTokenBreakdown, maskedTokenValue);
+				if (!widthHint || !masked) return { content: "", visible: false };
+				return {
+					content: theme.fg("statusLineSpend", masked),
+					visible: true,
+					widthHint: theme.fg("statusLineSpend", widthHint),
+				};
+			}
+			const breakdown = tokenTotalBreakdown(ctx.usageStats);
 			if (!breakdown) return { content: "", visible: false };
 			return { content: theme.fg("statusLineSpend", breakdown), visible: true };
 		}
+		if (!total) return { content: "", visible: false };
 
 		const content = formatMetric({
 			leading: theme.icon.tokens || undefined,
@@ -799,7 +817,7 @@ const tokenTotalSegment: StatusLineSegment = {
 		const total = input + output + cacheWrite + orchestrationInput + orchestrationOutput;
 		if (!total) return null;
 		if (ctx.options.token_total?.breakdown === true) {
-			const breakdown = tokenTotalBreakdown(ctx);
+			const breakdown = tokenTotalBreakdown(ctx.usageStats);
 			return breakdown ? segView([span(breakdown, "statusLineSpend")], "tokens") : null;
 		}
 		return segView([span(formatNumber(total), "statusLineSpend")], "tokens");

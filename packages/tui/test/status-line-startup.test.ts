@@ -118,4 +118,54 @@ describe("status line startup layout", () => {
 			line.dispose();
 		}
 	});
+
+	it("reserves cached token-breakdown width while masking stale startup values", () => {
+		const model = {
+			id: "startup-model",
+			name: "Model",
+			provider: "test",
+			api: "test",
+			contextWindow: 100_000,
+		} as Model;
+		const line = createStartupStatusLine({
+			settings: {
+				preset: "custom",
+				leftSegments: ["model"],
+				rightSegments: ["token_total"],
+				separator: "none",
+				contextLine: "off",
+				segmentOptions: {
+					model: { showThinkingLevel: false },
+					token_total: { breakdown: true },
+				},
+			},
+			gitEnabled: false,
+			model,
+			autoThinking: false,
+			fastMode: false,
+			usingSubscription: false,
+			tokenBreakdown: {
+				input: 25_000,
+				output: 5,
+				cacheWrite: 0,
+				orchestrationInput: 0,
+				orchestrationOutput: 0,
+			},
+			autoCompactEnabled: false,
+			compactionBoundaries: null,
+		});
+
+		try {
+			const boundary = Bun.stripANSI(line.getTopBorder(24).content);
+			expect(boundary).toContain("Model");
+			expect(boundary).toContain("in:…  ");
+			expect(boundary).toContain("out:…");
+			expect(boundary).not.toContain("25K");
+			const belowBoundary = Bun.stripANSI(line.getTopBorder(23).content);
+			expect(belowBoundary).toContain("Model");
+			expect(belowBoundary).not.toContain("in:");
+		} finally {
+			line.dispose();
+		}
+	});
 });

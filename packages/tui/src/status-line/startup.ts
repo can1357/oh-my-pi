@@ -19,7 +19,7 @@ import { isRecord } from "@oh-my-pi/pi-utils/type-guards";
 import { parseThinkingLevel } from "../thinking";
 import { StatusLineComponent } from "./component";
 import type { CompactionBoundaries } from "./context-usage";
-import type { StatusLineHost, StatusLineSession } from "./host";
+import type { StatusLineHost, StatusLineSession, StatusLineTokenBreakdown } from "./host";
 import {
 	CONTEXT_LINE_MODE_VALUES,
 	STATUS_LINE_PRESET_VALUES,
@@ -41,6 +41,8 @@ export interface StatusLineStartupData {
 	readonly usingSubscription: boolean;
 	/** Last live percent; reserves its formatted width without displaying stale usage in the startup frame. */
 	readonly contextPercent?: number | null;
+	/** Last live token breakdown; reserves its formatted width while displaying masked values at startup. */
+	readonly tokenBreakdown?: StatusLineTokenBreakdown;
 	readonly autoCompactEnabled: boolean;
 	readonly compactionBoundaries: CompactionBoundaries | null;
 }
@@ -68,6 +70,7 @@ export function createStartupStatusLine(data: StatusLineStartupData): StatusLine
 		isStreaming: false,
 		isAutoThinking: data.autoThinking,
 		startupContextPercent: data.contextPercent,
+		startupTokenBreakdown: data.tokenBreakdown,
 		sessionManager: {
 			getSessionName: () => undefined,
 			getSessionId: () => "",
@@ -152,6 +155,21 @@ function readCompactionBoundaries(value: unknown): CompactionBoundaries | null |
 	return { thresholdPercent: value.thresholdPercent, speculationPercent };
 }
 
+function readTokenBreakdown(value: unknown): StatusLineTokenBreakdown | undefined {
+	if (!isRecord(value)) return undefined;
+	const { input, output, cacheWrite, orchestrationInput, orchestrationOutput } = value;
+	if (
+		typeof input !== "number" ||
+		typeof output !== "number" ||
+		typeof cacheWrite !== "number" ||
+		typeof orchestrationInput !== "number" ||
+		typeof orchestrationOutput !== "number"
+	) {
+		return undefined;
+	}
+	return { input, output, cacheWrite, orchestrationInput, orchestrationOutput };
+}
+
 /** Validate persisted {@link StatusLineStartupData}; `undefined` for anything malformed. */
 export function readStatusLineStartupData(value: unknown): StatusLineStartupData | undefined {
 	if (!isRecord(value) || !isStatusLineSettings(value.settings)) return undefined;
@@ -161,12 +179,14 @@ export function readStatusLineStartupData(value: unknown): StatusLineStartupData
 	if (value.thinkingLevel !== undefined && thinkingLevel === undefined) return undefined;
 	const compactionBoundaries = readCompactionBoundaries(value.compactionBoundaries);
 	const contextPercent = value.contextPercent;
+	const tokenBreakdown = value.tokenBreakdown === undefined ? undefined : readTokenBreakdown(value.tokenBreakdown);
 	if (
 		typeof value.gitEnabled !== "boolean" ||
 		typeof value.autoThinking !== "boolean" ||
 		typeof value.fastMode !== "boolean" ||
 		typeof value.usingSubscription !== "boolean" ||
 		(contextPercent !== undefined && contextPercent !== null && typeof contextPercent !== "number") ||
+		(value.tokenBreakdown !== undefined && tokenBreakdown === undefined) ||
 		typeof value.autoCompactEnabled !== "boolean" ||
 		compactionBoundaries === undefined
 	) {
@@ -181,6 +201,7 @@ export function readStatusLineStartupData(value: unknown): StatusLineStartupData
 		fastMode: value.fastMode,
 		usingSubscription: value.usingSubscription,
 		contextPercent,
+		tokenBreakdown,
 		autoCompactEnabled: value.autoCompactEnabled,
 		compactionBoundaries,
 	};

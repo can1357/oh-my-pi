@@ -30,7 +30,7 @@ import type { SymbolPreset } from "../theme/theme";
 import { isWordCompletionMethod } from "./word-completion";
 
 /** Bump whenever any payload format changes; older stores are cleared on open. */
-const FORMAT_VERSION = 1;
+const FORMAT_VERSION = 2;
 /** Project key of rows that serve every project lacking its own. */
 const ANY_PROJECT = "";
 

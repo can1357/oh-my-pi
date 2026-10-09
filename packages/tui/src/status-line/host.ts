@@ -19,6 +19,15 @@ export interface ActiveRepoContext {
 	source: "single-direct-child-repo";
 }
 
+/** Usage fields whose formatted token-total breakdown affects startup layout. */
+export interface StatusLineTokenBreakdown {
+	input: number;
+	output: number;
+	cacheWrite: number;
+	orchestrationInput: number;
+	orchestrationOutput: number;
+}
+
 export interface StatusLineSession {
 	state: { model?: Model; thinkingLevel?: ThinkingLevel; messages: readonly AgentMessage[] };
 	model?: Model;
@@ -28,6 +37,8 @@ export interface StatusLineSession {
 	isAutoThinking: boolean;
 	/** Last live context percent used only to reserve startup layout width while the displayed percent is unknown. */
 	startupContextPercent?: number | null;
+	/** Last live token breakdown used only to reserve and mask the startup segment. */
+	startupTokenBreakdown?: StatusLineTokenBreakdown;
 	contextUsageRevision?: number;
 	systemPrompt?: readonly string[];
 	agent?: { state?: { tools?: readonly Pick<Tool, "name" | "description" | "parameters">[] }; tokenizer?: unknown };
