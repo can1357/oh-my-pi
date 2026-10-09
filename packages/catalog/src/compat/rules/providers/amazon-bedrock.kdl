@@ -1,17 +1,12 @@
 // Provider-wire compat for "amazon-bedrock"; regenerated from the frozen census using deployment contract selectors.
 
 provider "amazon-bedrock" {
-	default-model "us.anthropic.claude-opus-4-8"
+	default-model "us.anthropic.claude-opus-5-5"
 
 	// The Converse assembler positions content blocks by wire index
 	// (`amazon-bedrock.ts`), so a block can land above text already rendered.
 	stream-revision "possible"
 	class "anthropic" {
-		family "fable" {
-			revision ">=5.1 <5.2" {
-				thinking-efforts "low" "medium" "high" "xhigh" "max"
-			}
-		}
 		family "opus" {
 			revision ">=4.6 <4.7" {
 				thinking-mode "anthropic-adaptive"
@@ -22,11 +17,25 @@ provider "amazon-bedrock" {
 			stream-idle-timeout-ms 900000
 			thinking-efforts "low" "medium" "high" "max"
 		}
+		// First-party >=4.7 xhigh/max omits amazon-bedrock: the host rule
+		// above is a shorter ladder. From 5.1 the host accepts the full set.
+		revision ">=5.1" {
+			thinking-efforts "low" "medium" "high" "xhigh" "max"
+		}
+	}
+	class "xai" {
+		family "grok" {
+			// Converse accepts reasoning.effort for Grok 4.6; budget_tokens is
+			// the Anthropic path and the unknown-class default. Older Groks
+			// are unverified and keep budget.
+			revision ">=4.6" {
+				thinking-mode "effort"
+				thinking-efforts "low" "medium" "high" "xhigh"
+			}
+		}
 	}
 	class "openai" {
 		thinking-mode "effort"
-		// OpenAI models reject Converse image blocks nested inside toolResult content.
-		requires-tool-result-image-hoisting #true
 	}
 	class "deepseek" {
 		requires-reasoning-content-for-all-assistant-turns #true
@@ -40,11 +49,6 @@ provider "amazon-bedrock" {
 	class "unknown" {
 		thinking-efforts "minimal" "low" "medium" "high"
 		thinking-mode "budget"
-		// Opaque application-inference-profile ARNs carry no vendor signal, so an
-		// OpenAI-backed profile classifies here and would otherwise nest images in
-		// toolResult content and hit the same rejection. Hoisting is accepted by
-		// every Converse model measured, so it is the safe default for unknowns.
-		requires-tool-result-image-hoisting #true
 	}
 	// residue: taxonomy ranks and exact globs do not isolate these models.
 	models "moonshot.kimi-k2-thinking" {

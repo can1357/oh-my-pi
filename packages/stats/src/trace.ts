@@ -13,8 +13,9 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { getBundledModel, type GeneratedProvider } from "@oh-my-pi/pi-catalog/models";
 import { getSessionsDir, isEnoent } from "@oh-my-pi/pi-utils";
-import { getSessionRollups, getToolCallCountsBySession, isScheduledCatalogModel } from "./db";
+import { initDb, isScheduledCatalogModel } from "./db";
 import { extractFolderFromPath, parseAllSessionEntries, resolveUsageTotal } from "./parser";
+import { getSessionRollups } from "./rollup";
 import type {
 	SessionEntry,
 	SessionSummary,
@@ -113,6 +114,15 @@ interface PendingToolCall {
 	argsPreview?: string;
 	assistantEntryId: string;
 	modelEnd: number;
+}
+
+/** Background job opened by an async-running tool result. */
+interface PendingBackgroundJob {
+	jobId: string;
+	start: number;
+	label: string;
+	entryId?: string;
+	end?: number;
 }
 
 /** Task tool result row, used to place subagent spans on the parent track. */
@@ -280,8 +290,8 @@ function scanTranscript(
 	const pendingTools: PendingToolCall[] = [];
 	const toolStarts = new Map<string, ToolStartFact>();
 	const toolResults = new Map<string, { end: number; isError: boolean; entryId?: string; toolName: string }>();
-	const backgroundOpens: Array<{ jobId: string; start: number; label: string; entryId?: string }> = [];
-	const asyncCloses = new Map<string, number>();
+	const backgroundJobs: PendingBackgroundJob[] = [];
+	const activeBackgroundJobs = new Map<string, PendingBackgroundJob>();
 	const turns: Array<{ time: number; label: string; entryId?: string }> = [];
 	const taskResults: TaskResultFact[] = [];
 
@@ -467,12 +477,14 @@ function scanTranscript(
 				"jobId" in asyncInfo &&
 				typeof asyncInfo.jobId === "string"
 			) {
-				backgroundOpens.push({
+				const job: PendingBackgroundJob = {
 					jobId: asyncInfo.jobId,
 					start: end,
 					label: headText(`${msg.toolName ?? "tool"} job`, LABEL_MAX),
 					entryId: entry.id,
-				});
+				};
+				backgroundJobs.push(job);
+				activeBackgroundJobs.set(job.jobId, job);
 			}
 			if (msg.toolName === "task" && Array.isArray(details?.results)) {
 				for (const result of details.results) {
@@ -499,7 +511,10 @@ function scanTranscript(
 			if (closeAt !== undefined && Array.isArray(jobs)) {
 				for (const job of jobs) {
 					if (!job || typeof job !== "object" || !("jobId" in job) || typeof job.jobId !== "string") continue;
-					if (!asyncCloses.has(job.jobId)) asyncCloses.set(job.jobId, closeAt);
+					const targetJob = activeBackgroundJobs.get(job.jobId);
+					if (!targetJob || targetJob.end !== undefined) continue;
+					targetJob.end = closeAt;
+					activeBackgroundJobs.delete(job.jobId);
 				}
 			}
 			continue;
@@ -549,19 +564,18 @@ function scanTranscript(
 		spans.push(span);
 	}
 
-	// Background spans: opened by an async-running tool result, closed by async-result delivery.
-	for (const open of backgroundOpens) {
-		const close = asyncCloses.get(open.jobId);
-		const end = close ?? (lastChainTs || open.start);
+	// Background spans: opened by an async-running tool result, closed by the async-result delivery.
+	for (const [backgroundIndex, job] of backgroundJobs.entries()) {
+		const end = job.end ?? (lastChainTs || job.start);
 		const span: TraceSpan = {
-			id: `${trackId}:bg:${open.jobId}`,
+			id: `${trackId}:bg:${backgroundIndex}:${job.jobId}`,
 			kind: "background",
-			start: open.start,
-			end: Math.max(open.start, end),
-			label: open.label,
+			start: job.start,
+			end: Math.max(job.start, end),
+			label: job.label,
 		};
-		if (open.entryId) span.entryId = open.entryId;
-		if (close === undefined) span.unterminated = true;
+		if (job.entryId) span.entryId = job.entryId;
+		if (job.end === undefined) span.unterminated = true;
 		spans.push(span);
 	}
 
@@ -736,11 +750,6 @@ async function buildTrackTree(
 // ---------------------------------------------------------------------------
 // Public surface
 
-/**
- * Assemble the full span tree for one root session transcript.
- * Throws {@link TracePathError} for paths outside the sessions root; ENOENT
- * passes through for the caller's 404 mapping.
- */
 // Single-entry memo: the dashboard polls one open trace every 15s. Keyed on
 // the root file's mtime PLUS a fingerprint of the child-transcript SET under
 // the root's artifacts tree (one cheap readdir+stat walk, no parse). A
@@ -774,35 +783,46 @@ async function childTranscriptsFingerprint(rootFile: string, depth = 0): Promise
 		return "";
 	}
 	names.sort();
+	const dir = transcriptStem(rootFile);
 	const transcriptNames = names.filter(name => name.endsWith(".jsonl") || name.endsWith(".jsonl.gz"));
-	const parts: string[] = [`n=${transcriptNames.length}`];
-	for (const name of transcriptNames) {
-		const childFile = path.join(transcriptStem(rootFile), name);
-		try {
-			const stat = await fs.stat(childFile);
-			parts.push(`${name}@${stat.mtimeMs}`);
-			// Recurse like the builder (nested subagents), without parsing.
-			const nested = await childTranscriptsFingerprint(childFile, depth + 1);
-			if (nested) parts.push(`${name}/{${nested}}`);
-		} catch {
-			parts.push(`${name}@gone`);
-		}
-	}
-	return parts.join(",");
+	const childParts = await Promise.all(
+		transcriptNames.map(async name => {
+			const childFile = path.join(dir, name);
+			try {
+				const stat = await fs.stat(childFile);
+				// Recurse like the builder (nested subagents), without parsing.
+				const nested = await childTranscriptsFingerprint(childFile, depth + 1);
+				return nested ? `${name}@${stat.mtimeMs},${name}/{${nested}}` : `${name}@${stat.mtimeMs}`;
+			} catch {
+				return `${name}@gone`;
+			}
+		}),
+	);
+	return [`n=${transcriptNames.length}`, ...childParts].join(",");
+}
+
+/** Freshness of a root trace: root mtime plus the child-transcript set fingerprint. */
+export interface TraceFingerprint {
+	rootMtimeMs: number;
+	childFingerprint: string;
+}
+
+/** Stat the root and walk its child transcripts (readdir+stat, no parse). */
+async function readTraceFingerprint(resolved: string): Promise<TraceFingerprint> {
+	const rootMtimeMs = (await fs.stat(resolved)).mtimeMs;
+	const childFingerprint = await childTranscriptsFingerprint(resolved);
+	return { rootMtimeMs, childFingerprint };
 }
 
 /**
- * Freshness fingerprint for the trace ETag pre-check: root mtime plus the
- * child-transcript set fingerprint (readdir+stat walk, no parse). Returns
- * undefined when the path is rejected or missing (the caller falls through
- * to the full build, which maps those to 400/404).
+ * Freshness fingerprint for the trace ETag pre-check; `SessionTrace.etag` is
+ * `${rootMtimeMs}:${childFingerprint}` for an unraced build. Returns undefined
+ * when the path is rejected or missing (the caller falls through to the full
+ * build, which maps those to 400/404).
  */
-export async function traceFingerprintForEtag(fileParam: string): Promise<string | undefined> {
+export async function traceFingerprintForEtag(fileParam: string): Promise<TraceFingerprint | undefined> {
 	try {
-		const resolved = resolveSessionPath(fileParam);
-		const rootMs = (await fs.stat(resolved)).mtimeMs;
-		const childFp = await childTranscriptsFingerprint(resolved);
-		return `${rootMs}:${childFp}`;
+		return await readTraceFingerprint(resolveSessionPath(fileParam));
 	} catch {
 		return undefined;
 	}
@@ -813,16 +833,22 @@ export function traceMemoForTests(): { file: string; mtimeMs: number } | undefin
 	return { file: traceMemo.file, mtimeMs: traceMemo.entry.mtimeMs };
 }
 
-export async function buildSessionTrace(fileParam: string): Promise<SessionTrace> {
+/**
+ * Assemble the full span tree for one root session transcript.
+ * Throws {@link TracePathError} for paths outside the sessions root; ENOENT
+ * passes through for the caller's 404 mapping. `fingerprint` may carry the
+ * {@link traceFingerprintForEtag} value the caller just computed for the same
+ * file (its ETag pre-check), sparing a second walk.
+ */
+export async function buildSessionTrace(fileParam: string, fingerprint?: TraceFingerprint): Promise<SessionTrace> {
 	const resolved = resolveSessionPath(fileParam);
-	const rootStat = await fs.stat(resolved);
 	const memo = traceMemo?.file === resolved ? traceMemo.entry : undefined;
 	// Pre-build child fingerprint on EVERY path (hit check and rebuild
 	// alike): the post-build race guard compares against this, so a child
 	// append landing mid-parse is detected even on first builds and
 	// memo-less rebuilds, where no prior fingerprint exists to compare.
-	const preChildFingerprint = await childTranscriptsFingerprint(resolved);
-	if (memo && memo.mtimeMs === rootStat.mtimeMs) {
+	const { rootMtimeMs, childFingerprint: preChildFingerprint } = fingerprint ?? (await readTraceFingerprint(resolved));
+	if (memo && memo.mtimeMs === rootMtimeMs) {
 		// Equality, not <=: a LOWER mark (delete/older-mtime replace) is
 		// also stale — only an identical child set may reuse the trace.
 		if (preChildFingerprint === memo.childFingerprint) return memo.trace;
@@ -887,7 +913,7 @@ export async function buildSessionTrace(fileParam: string): Promise<SessionTrace
 		else if (span.kind === "turn") turns++;
 	}
 
-	const start = startedAt ?? rootScan.headerTs ?? rootStat.mtimeMs;
+	const start = startedAt ?? rootScan.headerTs ?? rootMtimeMs;
 	const end = endedAt ?? start;
 	const wallMs = end - start;
 
@@ -911,7 +937,7 @@ export async function buildSessionTrace(fileParam: string): Promise<SessionTrace
 	// neither the trace nor the key.
 	const childFingerprint = await childTranscriptsFingerprint(resolved);
 	// Root rewritten mid-build: same no-cache rule as the child race below.
-	const rootChanged = (await fs.stat(resolved).catch(() => null))?.mtimeMs !== rootStat.mtimeMs;
+	const rootChanged = (await fs.stat(resolved).catch(() => null))?.mtimeMs !== rootMtimeMs;
 	const raced = childFingerprint !== preChildFingerprint;
 	// Raced builds keep the PRE-build fingerprint as their ETag: the parsed
 	// bytes predate the racy write, so claiming the post-write state would
@@ -927,15 +953,15 @@ export async function buildSessionTrace(fileParam: string): Promise<SessionTrace
 		cwd: rootScan.cwd,
 		startedAt: start,
 		endedAt: end,
-		mtimeMs: rootStat.mtimeMs,
-		etag: `${rootStat.mtimeMs}:${etagFingerprint}`,
+		mtimeMs: rootMtimeMs,
+		etag: `${rootMtimeMs}:${etagFingerprint}`,
 		tracks,
 		summary,
 	};
 	if (!raced && !rootChanged) {
 		traceMemo = {
 			file: resolved,
-			entry: { mtimeMs: rootStat.mtimeMs, childFingerprint, trace },
+			entry: { mtimeMs: rootMtimeMs, childFingerprint, trace },
 		};
 	}
 	return trace;
@@ -1054,19 +1080,25 @@ function basenameTimestamp(base: string): number | undefined {
 // Short-TTL memo for the disk sweep behind /api/sessions (30s poll): the
 // session list changes only on create/edit, so readdir+stat of every file per
 // poll is pure syscall churn. TTL is deliberately short so a just-created
-// session appears within seconds.
+// session appears within seconds. Only the newest `limit` roots are kept, so
+// the memo stays small however many sessions exist.
 let diskRootsMemo:
-	| { atMs: number; limit: number; roots: Array<{ file: string; mtimeMs: number; startedAt: number }> }
+	| {
+			atMs: number;
+			sessionsDir: string;
+			limit: number;
+			roots: Array<{ file: string; mtimeMs: number; startedAt: number }>;
+	  }
 	| undefined;
 const DISK_ROOTS_TTL_MS = 5_000;
 
 async function scanDiskRoots(limit: number): Promise<Array<{ file: string; mtimeMs: number; startedAt: number }>> {
 	const now = Date.now();
+	const sessionsDir = getSessionsDir();
 	const memo = diskRootsMemo;
-	if (memo && memo.limit >= limit && now - memo.atMs < DISK_ROOTS_TTL_MS) {
+	if (memo && memo.sessionsDir === sessionsDir && memo.limit >= limit && now - memo.atMs < DISK_ROOTS_TTL_MS) {
 		return memo.roots.slice(0, limit);
 	}
-	const sessionsDir = getSessionsDir();
 	let projects: string[] = [];
 	try {
 		projects = await fs.readdir(sessionsDir);
@@ -1098,8 +1130,9 @@ async function scanDiskRoots(limit: number): Promise<Array<{ file: string; mtime
 		}),
 	);
 	roots.sort((a, b) => b.mtimeMs - a.mtimeMs);
-	if (roots.length <= 1000) diskRootsMemo = { atMs: Date.now(), limit, roots };
-	return roots.slice(0, limit);
+	const newest = roots.slice(0, limit);
+	diskRootsMemo = { atMs: Date.now(), sessionsDir, limit, roots: newest };
+	return newest.slice();
 }
 
 /**
@@ -1107,8 +1140,9 @@ async function scanDiskRoots(limit: number): Promise<Array<{ file: string; mtime
  * transcript (subagents, advisors) into its root row.
  */
 export async function listSessionSummaries(limit = 100, q?: string): Promise<SessionSummary[]> {
+	// The Traces page may be the first thing a dashboard serves.
+	await initDb();
 	const sessionsDir = getSessionsDir();
-	const toolCounts = getToolCallCountsBySession();
 	const byRoot = new Map<string, SummaryFold>();
 
 	for (const row of getSessionRollups()) {
@@ -1139,7 +1173,7 @@ export async function listSessionSummaries(limit = 100, q?: string): Promise<Ses
 			byRoot.set(rootFile, fold);
 		}
 		fold.requests += row.requests;
-		fold.toolCalls += toolCounts.get(row.sessionFile) ?? 0;
+		fold.toolCalls += row.toolCalls;
 		if (isChild) fold.subagents++;
 		if (row.startedAt < fold.startedAt) fold.startedAt = row.startedAt;
 		if (row.endedAt > fold.endedAt) fold.endedAt = row.endedAt;

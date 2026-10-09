@@ -10,6 +10,8 @@ import { extractWithParallel, findParallelApiKey, getParallelExtractContent } fr
 import type { RenderResult, SpecialHandler } from "./types";
 import { buildResult, formatMediaDuration, formatNumber } from "./types";
 
+import { cfgProvidersFetch } from "../../session/settings";
+
 interface YouTubeUrl {
 	videoId: string;
 	playlistId?: string;
@@ -114,7 +116,7 @@ export const handleYouTube: SpecialHandler = async (
 	const videoUrl = `https://www.youtube.com/watch?v=${yt.videoId}`;
 
 	// Prefer Parallel extract when it sits in the reader chain and creds exist
-	const fetchPreference = settings.get("providers.fetch");
+	const fetchPreference = cfgProvidersFetch.get(settings);
 	if ((fetchPreference === "auto" || fetchPreference === "parallel") && findParallelApiKey(storage)) {
 		try {
 			const parallelResult = await extractWithParallel(

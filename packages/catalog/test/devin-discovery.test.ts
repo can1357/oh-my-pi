@@ -430,6 +430,42 @@ describe("devin native discovery request", () => {
 		expect(requestMetadata?.apiKey).toBe("devin-session-token$fixture-token");
 	});
 
+	it("falls back to the legacy Windsurf identity when native discovery returns only the seed", async () => {
+		const nativePayload = toBinary(
+			GetCliModelConfigsResponseSchema,
+			create(GetCliModelConfigsResponseSchema, {
+				clientModelConfigs: [config({ uid: "swe-1-6" }), config({ uid: "swe-1-6-fast" })],
+			}),
+		);
+		const legacyPayload = toBinary(
+			GetCliModelConfigsResponseSchema,
+			create(GetCliModelConfigsResponseSchema, {
+				clientModelConfigs: [
+					config({ uid: "swe-1-6" }),
+					config({ uid: "swe-1-6-fast" }),
+					config({ uid: "glm-5-2" }),
+				],
+			}),
+		);
+		const requests: Metadata[] = [];
+		const fetchImpl: FetchImpl = async (_input, init) => {
+			const metadata = fromBinary(
+				GetCliModelConfigsRequestSchema,
+				new Uint8Array(init?.body as Uint8Array),
+			).metadata;
+			if (metadata === undefined) throw new Error("expected discovery metadata");
+			requests.push(metadata);
+			const payload = metadata.ideName === "windsurf" ? legacyPayload : nativePayload;
+			return new Response(payload, { status: 200, headers: { "content-type": "application/proto" } });
+		};
+
+		const discovered = await fetchDevinModels({ apiKey: "legacy-key", fetch: fetchImpl });
+
+		expect(discovered?.map(entry => entry.id)).toEqual(["glm-5-2", "swe-1-6", "swe-1-6-fast"]);
+		expect(requests.map(metadata => metadata.ideName)).toEqual(["chisel", "windsurf"]);
+		expect(requests[1]?.apiKey).toBe("legacy-key");
+	});
+
 	it("treats an empty-but-200 catalog as failed discovery so the seed survives", async () => {
 		const emptyPayload = toBinary(
 			GetCliModelConfigsResponseSchema,
@@ -479,6 +515,69 @@ describe("devin native display filtering", () => {
 		// Composite dims flatten the composite card plus each component's card;
 		// only the headline card is the model's own rate.
 		expect(fusion.cost).toEqual({ input: 10, output: 50, cacheRead: 0.25, cacheWrite: 0 });
+	});
+
+	it("sends Fusion pairings through an available lead rather than the composite uid", async () => {
+		const pairing = (uid: string, init: Partial<ConfigInit> = {}) =>
+			config({ uid, isModelRouter: true, harnessUids: ["fusion"], ...init });
+		const configs = [
+			config({
+				uid: "gpt-6-sol-high",
+				contextWindow: 400_000,
+				maxOutputTokens: 128_000,
+				features: { supportsToolCalls: true, supportsImages: true },
+				dimensions: [
+					{ label: "Input", value: 2 },
+					{ label: "Output", value: 8 },
+				],
+			}),
+			config({ uid: "gpt-6-sol-high-priority" }),
+			config({ uid: "claude-opus-5-high" }),
+			config({ uid: "claude-opus-5-high-priority", disabled: true }),
+			config({ uid: "swe-1-6-fast" }),
+			config({ uid: "swe-1-6-priority" }),
+			config({ uid: "swe-2-high" }),
+			config({ uid: "kimi-k3", disabled: true }),
+			pairing("fusion-gpt-6-sol-high-sidekick-swe-2-high", {
+				contextWindow: 1_000_000,
+				maxOutputTokens: 256_000,
+				dimensions: [
+					{ label: "Input", value: 10 },
+					{ label: "Output", value: 50 },
+				],
+			}),
+			pairing("fusion-gpt-6-sol-high-fast-sidekick-swe-2-high"),
+			pairing("fusion-claude-opus-5-high-fast-sidekick-swe-2-high"),
+			pairing("fusion-swe-1-6-fast-sidekick-swe-2-high"),
+			pairing("fusion-kimi-k3-sidekick-swe-2-high"),
+			pairing("fusion-sidekick-swe-2-high"),
+			pairing("fusion"),
+		];
+		const payload = toBinary(
+			GetCliModelConfigsResponseSchema,
+			create(GetCliModelConfigsResponseSchema, { clientModelConfigs: configs }),
+		);
+		const fetched = await fetchDevinModels({
+			apiKey: "fixture-token",
+			fetch: async () => new Response(payload, { status: 200, headers: { "content-type": "application/proto" } }),
+		});
+		const find = (id: string) => fetched?.find(entry => entry.id === id);
+		const wireId = (id: string) => find(id)?.requestModelId;
+		expect(wireId("fusion-gpt-6-sol-high-sidekick-swe-2-high")).toBe("gpt-6-sol-high");
+		expect(wireId("fusion-gpt-6-sol-high-fast-sidekick-swe-2-high")).toBe("gpt-6-sol-high-priority");
+		expect(wireId("fusion-claude-opus-5-high-fast-sidekick-swe-2-high")).toBe("claude-opus-5-high");
+		// A lead whose own uid ends in `-fast` routes as written, not to a `-priority` lane.
+		expect(wireId("fusion-swe-1-6-fast-sidekick-swe-2-high")).toBe("swe-1-6-fast");
+		// No live lead: the composite uid is unservable, so the pairing is not listed.
+		expect(find("fusion-kimi-k3-sidekick-swe-2-high")).toBeUndefined();
+		expect(wireId("fusion-sidekick-swe-2-high")).toBeUndefined();
+		expect(wireId("fusion")).toBeUndefined();
+		// Only the lead runs, so limits and pricing are the lead's, not the composite card's.
+		const routed = find("fusion-gpt-6-sol-high-sidekick-swe-2-high");
+		expect(routed?.contextWindow).toBe(400_000);
+		expect(routed?.maxTokens).toBe(128_000);
+		expect(routed?.input).toEqual(["text", "image"]);
+		expect(routed?.cost).toEqual({ input: 2, output: 8, cacheRead: 0, cacheWrite: 0 });
 	});
 
 	it("stops composite pricing at the Sidekick marker even with a sparse headline card", () => {

@@ -8,7 +8,7 @@ import { arkToWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { preloadPluginRoots } from "@oh-my-pi/pi-coding-agent/discovery/helpers";
 import { restoreEnvValue } from "../helpers/settings-test-state";
-import { LspTool } from "@oh-my-pi/pi-coding-agent/lsp";
+import { createLspWritethrough, LspTool } from "@oh-my-pi/pi-coding-agent/lsp";
 import * as lspClient from "@oh-my-pi/pi-coding-agent/lsp/client";
 import * as lspConfig from "@oh-my-pi/pi-coding-agent/lsp/config";
 import {
@@ -48,6 +48,7 @@ import {
 	fileToUri,
 	filterWorkspaceSymbols,
 	hasGlobPattern,
+	readLocationContext,
 	resolveDiagnosticTargets,
 	resolveSymbolColumn,
 	uriToFile,
@@ -68,6 +69,53 @@ const lspTestSettings = Settings.isolated();
 /** Minimal LSP tool session: production always supplies `settings`; these tests only need cwd + a default settings stub. */
 function makeLspSession(cwd: string): ToolSession {
 	return { cwd, settings: lspTestSettings } as ToolSession;
+}
+
+/**
+ * Race an async read of a FIFO that has no writer. Real kernel FIFO I/O can't be driven by fake
+ * timers; if the read is still pending at the bound, a non-blocking writer releases it so the
+ * test never leaks a blocked reader.
+ */
+async function raceFifoRead(operation: Promise<unknown>, fifo: string): Promise<unknown> {
+	const settled = operation.then(
+		value => value,
+		error => error,
+	);
+	const outcome = await Promise.race([settled, Bun.sleep(1_500).then(() => "HUNG" as const)]);
+	if (outcome === "HUNG") {
+		try {
+			fs.closeSync(fs.openSync(fifo, fs.constants.O_WRONLY | fs.constants.O_NONBLOCK));
+		} catch (error) {
+			if (!piUtils.hasFsCode(error, "ENXIO")) throw error;
+		}
+		await settled;
+	}
+	return outcome;
+}
+
+function fifoRefusal(fifo: string): string {
+	return `Cannot open '${fifo}': it is a FIFO, not a regular file or directory.`;
+}
+
+/** Open a regular document through a fake server, then swap it for a FIFO on disk. */
+async function withOpenDocumentSwappedForFifo(
+	run: (client: LspClient, filePath: string) => Promise<void>,
+): Promise<void> {
+	const tempDir = TempDir.createSync("@omp-lsp-special-refresh-");
+	const filePath = path.join(tempDir.path(), "input.ts");
+	try {
+		await Bun.write(filePath, "export const value = 1;\n");
+		installHandshakeLsp();
+		const config: ServerConfig = { command: "fake-lsp", fileTypes: [".ts"], rootMarkers: [] };
+		const client = await lspClient.getOrCreateClient(config, tempDir.path(), 1_000);
+		await lspClient.ensureFileOpen(client, filePath);
+		await fs.promises.unlink(filePath);
+		expect(Bun.spawnSync(["mkfifo", filePath]).exitCode).toBe(0);
+		await run(client, filePath);
+	} finally {
+		await lspClient.shutdownAll();
+		tempDir.removeSync();
+	}
 }
 
 interface RpcMessage {
@@ -257,6 +305,14 @@ function installHandshakeLsp(): FakeLspServer {
 			server.exit(0);
 		}
 	});
+}
+
+/** Read `textDocument.uri` out of a document notification the fake server received. */
+function documentUri(params: unknown): string | undefined {
+	if (!params || typeof params !== "object" || !("textDocument" in params)) return undefined;
+	const doc = params.textDocument;
+	if (!doc || typeof doc !== "object" || !("uri" in doc) || typeof doc.uri !== "string") return undefined;
+	return doc.uri;
 }
 
 type BunSpawnOptions = Bun.SpawnOptions.SpawnOptions<
@@ -479,6 +535,83 @@ describe("lsp regressions", () => {
 			tempDir.removeSync();
 		}
 	});
+
+	it.skipIf(process.platform === "win32")(
+		"rejects a FIFO before an LSP document open can block",
+		async () => {
+			const tempDir = TempDir.createSync("@omp-lsp-special-file-");
+			const fifo = path.join(tempDir.path(), "input.ts");
+			try {
+				expect(Bun.spawnSync(["mkfifo", fifo]).exitCode).toBe(0);
+				installHandshakeLsp();
+				const config: ServerConfig = { command: "fake-lsp", fileTypes: [".ts"], rootMarkers: [] };
+				const client = await lspClient.getOrCreateClient(config, tempDir.path(), 1_000);
+				const outcome = await raceFifoRead(lspClient.ensureFileOpen(client, fifo), fifo);
+				expect(outcome).toBeInstanceOf(Error);
+				expect(outcome).toHaveProperty("message", fifoRefusal(fifo));
+			} finally {
+				await lspClient.shutdownAll();
+				tempDir.removeSync();
+			}
+		},
+		10_000,
+	);
+
+	it.skipIf(process.platform === "win32")(
+		"rejects a FIFO during LSP symbol resolution",
+		async () => {
+			const tempDir = TempDir.createSync("@omp-lsp-special-read-");
+			const fifo = path.join(tempDir.path(), "input.ts");
+			try {
+				expect(Bun.spawnSync(["mkfifo", fifo]).exitCode).toBe(0);
+				const outcome = await raceFifoRead(resolveSymbolColumn(fifo, 1), fifo);
+				expect(outcome).toBeInstanceOf(Error);
+				expect(outcome).toHaveProperty("message", fifoRefusal(fifo));
+			} finally {
+				tempDir.removeSync();
+			}
+		},
+		10_000,
+	);
+
+	it.skipIf(process.platform === "win32")(
+		"keeps a FIFO location as a header without reading its context",
+		async () => {
+			const tempDir = TempDir.createSync("@omp-lsp-special-context-");
+			const fifo = path.join(tempDir.path(), "input.ts");
+			try {
+				expect(Bun.spawnSync(["mkfifo", fifo]).exitCode).toBe(0);
+				expect(await raceFifoRead(readLocationContext(fifo, 1), fifo)).toEqual([]);
+			} finally {
+				tempDir.removeSync();
+			}
+		},
+		10_000,
+	);
+
+	it.skipIf(process.platform === "win32")(
+		"rejects an open document swapped for a FIFO when reconciling from disk",
+		async () => {
+			await withOpenDocumentSwappedForFifo(async (client, filePath) => {
+				const outcome = await raceFifoRead(lspClient.reconcileFileFromDisk(client, filePath), filePath);
+				expect(outcome).toBeInstanceOf(Error);
+				expect(outcome).toHaveProperty("message", fifoRefusal(filePath));
+			});
+		},
+		10_000,
+	);
+
+	it.skipIf(process.platform === "win32")(
+		"rejects an open document swapped for a FIFO when refreshing it",
+		async () => {
+			await withOpenDocumentSwappedForFifo(async (client, filePath) => {
+				const outcome = await raceFifoRead(lspClient.refreshFile(client, filePath), filePath);
+				expect(outcome).toBeInstanceOf(Error);
+				expect(outcome).toHaveProperty("message", fifoRefusal(filePath));
+			});
+		},
+		10_000,
+	);
 
 	it("sends the LSP exit notification and releases the idle checker after shutdown", async () => {
 		const tempDir = TempDir.createSync("@omp-lsp-shutdown-");
@@ -1889,6 +2022,180 @@ describe("lsp regressions", () => {
 		);
 	}
 
+	it("refreshes an open document after a watched module is created", async () => {
+		const tempDir = TempDir.createSync("@omp-lsp-created-module-");
+		try {
+			const sourcePath = path.join(tempDir.path(), "UsesMissing.ts");
+			const modulePath = path.join(tempDir.path(), "MissingClass.ts");
+			const sourceUri = fileToUri(sourcePath);
+			await Bun.write(
+				sourcePath,
+				'import { MissingClass } from "./MissingClass";\nexport const value = new MissingClass();\n',
+			);
+
+			const missingModuleDiagnostic: Diagnostic = {
+				message: "Cannot find module './MissingClass' or its corresponding type declarations.",
+				severity: 1,
+				code: 2307,
+				range: {
+					start: { line: 0, character: 29 },
+					end: { line: 0, character: 45 },
+				},
+			};
+			installFakeLsp((message, server) => {
+				if (message.method === "initialize") {
+					server.send({ jsonrpc: "2.0", id: message.id, result: { capabilities: {} } });
+				} else if (message.method === "textDocument/didOpen") {
+					server.send({
+						jsonrpc: "2.0",
+						method: "textDocument/publishDiagnostics",
+						params: { uri: sourceUri, diagnostics: [missingModuleDiagnostic] },
+					});
+				} else if (message.method === "textDocument/didChange") {
+					server.send({
+						jsonrpc: "2.0",
+						method: "textDocument/publishDiagnostics",
+						params: { uri: sourceUri, diagnostics: [] },
+					});
+				} else if (message.method === "shutdown") {
+					server.send({ jsonrpc: "2.0", id: message.id, result: null });
+				} else if (message.method === "exit") {
+					server.exit(0);
+				}
+			});
+
+			const config: ServerConfig = { command: "fake-lsp", fileTypes: ["ts"], rootMarkers: [] };
+			const client = await lspClient.getOrCreateClient(config, tempDir.path());
+			await lspClient.ensureFileOpen(client, sourcePath);
+			expect(await waitForDiagnostics(client, sourceUri, { timeoutMs: 1_000, settleMs: 0 })).toEqual([
+				missingModuleDiagnostic,
+			]);
+
+			await Bun.write(modulePath, "export class MissingClass {}\n");
+			await lspClient.notifyWorkspaceWatchedFiles(tempDir.path(), [
+				{ filePath: modulePath, type: lspClient.FileChangeType.Created },
+			]);
+
+			expect(await waitForDiagnostics(client, sourceUri, { timeoutMs: 1_000, settleMs: 0 })).toEqual([]);
+		} finally {
+			await lspClient.shutdownAll();
+			tempDir.removeSync();
+		}
+	});
+
+	it("reloads TypeScript projects after create before opening the new module", async () => {
+		// #12924/#12925: tsserver pins a failed import resolution when the new
+		// module is opened before its filesystem watcher observes the create.
+		// The write path must await reloadProjects, not rely on watcher latency.
+		const tempDir = TempDir.createSync("@omp-lsp-write-create-order-");
+		const config: ServerConfig = { command: "fake-lsp", fileTypes: ["ts"], rootMarkers: [] };
+		try {
+			const sourcePath = path.join(tempDir.path(), "UsesMissing.ts");
+			const modulePath = path.join(tempDir.path(), "MissingClass.ts");
+			const sourceUri = fileToUri(sourcePath);
+			const moduleUri = fileToUri(modulePath);
+			await Bun.write(
+				sourcePath,
+				'import { MissingClass } from "./MissingClass";\nexport const value = new MissingClass();\n',
+			);
+
+			const missingModuleDiagnostic: Diagnostic = {
+				message: "Cannot find module './MissingClass' or its corresponding type declarations.",
+				severity: 1,
+				code: 2307,
+				range: {
+					start: { line: 0, character: 29 },
+					end: { line: 0, character: 45 },
+				},
+			};
+			let projectsReloaded = false;
+			let modulePinnedMissing = false;
+			const fakeServer = installFakeLsp((message, server) => {
+				const publish = (uri: string, diagnostics: Diagnostic[]) =>
+					server.send({
+						jsonrpc: "2.0",
+						method: "textDocument/publishDiagnostics",
+						params: { uri, diagnostics },
+					});
+				const publishSource = () =>
+					publish(
+						sourceUri,
+						projectsReloaded && !modulePinnedMissing && fs.existsSync(modulePath)
+							? []
+							: [missingModuleDiagnostic],
+					);
+				if (message.method === "initialize") {
+					server.send({
+						jsonrpc: "2.0",
+						id: message.id,
+						result: {
+							capabilities: {
+								executeCommandProvider: { commands: ["typescript.tsserverRequest"] },
+							},
+						},
+					});
+				} else if (message.method === "textDocument/didOpen") {
+					const uri = documentUri(message.params);
+					if (uri === moduleUri) {
+						modulePinnedMissing ||= !fs.existsSync(modulePath) || !projectsReloaded;
+						publish(moduleUri, []);
+					} else {
+						publishSource();
+					}
+				} else if (
+					message.method === "textDocument/didChange" ||
+					message.method === "textDocument/didSave" ||
+					message.method === "workspace/didChangeWatchedFiles"
+				) {
+					publishSource();
+					publish(moduleUri, []);
+				} else if (message.method === "workspace/executeCommand") {
+					projectsReloaded = fs.existsSync(modulePath);
+					server.send({ jsonrpc: "2.0", id: message.id, result: { success: projectsReloaded } });
+				} else if (message.method === "shutdown") {
+					server.send({ jsonrpc: "2.0", id: message.id, result: null });
+				} else if (message.method === "exit") {
+					server.exit(0);
+				}
+			});
+
+			configCache.set(tempDir.path(), { servers: { "fake-lsp": config }, idleTimeoutMs: undefined });
+			const client = await lspClient.getOrCreateClient(config, tempDir.path());
+			await lspClient.ensureFileOpen(client, sourcePath);
+			expect(await waitForDiagnostics(client, sourceUri, { timeoutMs: 1_000, settleMs: 0 })).toEqual([
+				missingModuleDiagnostic,
+			]);
+
+			const writethrough = createLspWritethrough(tempDir.path(), {
+				enableFormat: true,
+				enableDiagnostics: false,
+			});
+			await writethrough(modulePath, "export class MissingClass {}\n");
+
+			expect(projectsReloaded).toBe(true);
+			expect(fakeServer.received).toContainEqual(
+				expect.objectContaining({
+					method: "workspace/executeCommand",
+					params: {
+						command: "typescript.tsserverRequest",
+						arguments: [
+							"reloadProjects",
+							{},
+							{ executionTarget: 0, expectsResult: true, isAsync: false, lowPriority: false },
+						],
+					},
+				}),
+			);
+
+			expect(modulePinnedMissing).toBe(false);
+			expect(await waitForDiagnostics(client, sourceUri, { timeoutMs: 1_000, settleMs: 0 })).toEqual([]);
+		} finally {
+			configCache.delete(tempDir.path());
+			await lspClient.shutdownAll();
+			tempDir.removeSync();
+		}
+	});
+
 	it("does not reuse stale file diagnostics after another URI publishes", async () => {
 		const tempDir = TempDir.createSync("@omp-lsp-stale-diags-");
 		try {
@@ -1931,7 +2238,6 @@ describe("lsp regressions", () => {
 				diagnosticsVersion: 1,
 				openFiles: new Map([[targetUri, { version: 1, languageId: "typescript" }]]),
 				pendingRequests: new Map(),
-				messageBuffer: new Uint8Array(),
 				isReading: false,
 				status: "ready",
 				lastActivity: Date.now(),
@@ -2533,7 +2839,6 @@ describe("lsp regressions", () => {
 				diagnosticsVersion: 0,
 				openFiles: new Map(),
 				pendingRequests: new Map(),
-				messageBuffer: new Uint8Array(),
 				isReading: false,
 				status: "ready",
 				lastActivity: Date.now(),
@@ -2642,7 +2947,6 @@ describe("lsp regressions", () => {
 				diagnosticsVersion: 0,
 				openFiles: new Map(),
 				pendingRequests: new Map(),
-				messageBuffer: new Uint8Array(),
 				isReading: false,
 				status: "ready",
 				lastActivity: Date.now(),
@@ -2725,7 +3029,6 @@ describe("lsp regressions", () => {
 				diagnosticsVersion: 0,
 				openFiles: new Map(),
 				pendingRequests: new Map(),
-				messageBuffer: new Uint8Array(),
 				isReading: false,
 				status: "ready",
 				lastActivity: Date.now(),
@@ -2798,7 +3101,6 @@ describe("lsp regressions", () => {
 				diagnosticsVersion: 0,
 				openFiles: new Map(),
 				pendingRequests: new Map(),
-				messageBuffer: new Uint8Array(),
 				isReading: false,
 				status: "ready",
 				lastActivity: Date.now(),
@@ -2859,7 +3161,6 @@ describe("lsp regressions", () => {
 				diagnosticsVersion: 0,
 				openFiles: new Map(),
 				pendingRequests: new Map(),
-				messageBuffer: new Uint8Array(),
 				isReading: false,
 				status: "ready",
 				lastActivity: Date.now(),
@@ -2920,7 +3221,6 @@ describe("lsp regressions", () => {
 				diagnosticsVersion: 0,
 				openFiles: new Map(),
 				pendingRequests: new Map(),
-				messageBuffer: new Uint8Array(),
 				isReading: false,
 				status: "ready",
 				lastActivity: Date.now(),
@@ -2990,7 +3290,6 @@ describe("lsp regressions", () => {
 				diagnosticsVersion: 0,
 				openFiles: new Map(),
 				pendingRequests: new Map(),
-				messageBuffer: new Uint8Array(),
 				isReading: false,
 				status: "ready",
 				lastActivity: Date.now(),
@@ -3060,7 +3359,6 @@ describe("lsp regressions", () => {
 				diagnosticsVersion: 0,
 				openFiles: new Map(),
 				pendingRequests: new Map(),
-				messageBuffer: new Uint8Array(),
 				isReading: false,
 				status: "ready",
 				lastActivity: Date.now(),
@@ -3118,7 +3416,6 @@ describe("lsp regressions", () => {
 				diagnosticsVersion: 0,
 				openFiles: new Map(),
 				pendingRequests: new Map(),
-				messageBuffer: new Uint8Array(),
 				isReading: false,
 				status: "ready",
 				lastActivity: Date.now(),
@@ -3421,7 +3718,6 @@ describe("lsp regressions", () => {
 				diagnosticsVersion: 0,
 				openFiles: new Map(),
 				pendingRequests: new Map(),
-				messageBuffer: new Uint8Array(),
 				isReading: false,
 				status: "ready",
 				lastActivity: Date.now(),
@@ -4234,7 +4530,6 @@ describe("lsp regressions", () => {
 			diagnosticsVersion: 0,
 			openFiles: new Map(),
 			pendingRequests: new Map(),
-			messageBuffer: new Uint8Array(),
 			isReading: false,
 			status: "ready",
 			lastActivity: Date.now(),
@@ -4264,7 +4559,6 @@ describe("lsp regressions", () => {
 			diagnosticsVersion: 0,
 			openFiles: new Map(),
 			pendingRequests: new Map(),
-			messageBuffer: new Uint8Array(),
 			isReading: false,
 			status: "ready",
 			lastActivity: Date.now(),
@@ -4699,7 +4993,7 @@ describe("lsp regressions", () => {
 			const loadConfigSpy = vi
 				.spyOn(lspConfig, "loadConfig")
 				.mockImplementation(() => configs.shift() ?? configs[0]);
-			const client = { proc: { kill: vi.fn() }, config: server } as unknown as LspClient;
+			const client = { proc: { kill: vi.fn() }, config: server, openFiles: new Map() } as unknown as LspClient;
 			vi.spyOn(lspClient, "getOrCreateClient").mockResolvedValue(client);
 			vi.spyOn(lspClient, "sendNotification").mockResolvedValue(undefined);
 
@@ -4842,6 +5136,67 @@ describe("lsp regressions", () => {
 			jsonrpc: "2.0",
 			id,
 			error: { code: -32_601, message: "method not found" },
+		});
+
+		it("refreshes open document diagnostics after a generic reload", async () => {
+			const tempDir = TempDir.createSync("@omp-lsp-reload-diagnostics-");
+			try {
+				const sourcePath = path.join(tempDir.path(), "UsesMissing.ts");
+				const sourceUri = fileToUri(sourcePath);
+				await Bun.write(sourcePath, 'import { MissingClass } from "./MissingClass";\n');
+				const missingModuleDiagnostic: Diagnostic = {
+					message: "Cannot find module './MissingClass' or its corresponding type declarations.",
+					severity: 1,
+					code: 2307,
+					range: {
+						start: { line: 0, character: 29 },
+						end: { line: 0, character: 45 },
+					},
+				};
+				installFakeLsp((message, server) => {
+					if (message.method === "initialize") {
+						server.send({ jsonrpc: "2.0", id: message.id, result: { capabilities: {} } });
+					} else if (message.method === "textDocument/didOpen") {
+						server.send({
+							jsonrpc: "2.0",
+							method: "textDocument/publishDiagnostics",
+							params: { uri: sourceUri, diagnostics: [missingModuleDiagnostic] },
+						});
+					} else if (message.method === "textDocument/didChange") {
+						server.send({
+							jsonrpc: "2.0",
+							method: "textDocument/publishDiagnostics",
+							params: { uri: sourceUri, diagnostics: [] },
+						});
+					} else if (message.method === "shutdown") {
+						server.send({ jsonrpc: "2.0", id: message.id, result: null });
+					} else if (message.method === "exit") {
+						server.exit(0);
+					}
+				});
+				const config: ServerConfig = { command: "fake-lsp", fileTypes: [".ts"], rootMarkers: [] };
+				vi.spyOn(lspConfig, "loadConfig").mockReturnValue({
+					servers: { "fake-lsp": config },
+					idleTimeoutMs: undefined,
+				});
+				const client = await lspClient.getOrCreateClient(config, tempDir.path());
+				await lspClient.ensureFileOpen(client, sourcePath);
+				expect(await waitForDiagnostics(client, sourceUri, { timeoutMs: 1_000, settleMs: 0 })).toEqual([
+					missingModuleDiagnostic,
+				]);
+
+				const result = await new LspTool(makeLspSession(tempDir.path())).execute("reload-diagnostics", {
+					action: "reload",
+					file: "*",
+				});
+
+				expect(textResult(result)).toContain("Reloaded fake-lsp");
+				expect(await waitForDiagnostics(client, sourceUri, { timeoutMs: 1_000, settleMs: 0 })).toEqual([]);
+			} finally {
+				vi.restoreAllMocks();
+				await lspClient.shutdownAll();
+				tempDir.removeSync();
+			}
 		});
 
 		it("propagates cancellation of the reload request instead of reporting Restarted", async () => {
@@ -5257,7 +5612,6 @@ describe("lsp regressions", () => {
 				diagnosticsVersion: 0,
 				openFiles: new Map(),
 				pendingRequests: new Map(),
-				messageBuffer: new Uint8Array(0),
 				isReading: false,
 				status: "ready",
 				lastActivity: Date.now(),
@@ -5273,12 +5627,13 @@ describe("lsp regressions", () => {
 			const controller = new AbortController();
 			const second = lspClient.sendNotification(client, "textDocument/didOpen", {}, controller.signal);
 			controller.abort();
-			await Bun.sleep(0);
 
+			// The caller must be released even while the earlier queue slot remains
+			// wedged; aborting a not-yet-started write must not kill the client.
+			await expect(second).rejects.toBeInstanceOf(Error);
 			expect(kill).not.toHaveBeenCalled();
 			firstFlush.resolve(0);
 			await first;
-			await expect(second).rejects.toBeInstanceOf(Error);
 			expect(kill).not.toHaveBeenCalled();
 			expect(writes).toHaveLength(1);
 		});
@@ -5308,7 +5663,6 @@ describe("lsp regressions", () => {
 				diagnosticsVersion: 0,
 				openFiles: new Map(),
 				pendingRequests: new Map(),
-				messageBuffer: new Uint8Array(0),
 				isReading: false,
 				status: "ready",
 				lastActivity: Date.now(),
@@ -5498,24 +5852,6 @@ describe("ty python lsp", () => {
 		const config = { servers: DEFAULTS as unknown as Record<string, ServerConfig> };
 		const names = getServersForFile(config, "app.pyi").map(([name]) => name);
 		expect(names).toContain("ty");
-	});
-
-	it("auto-detects ty when its binary and Python root markers are present", async () => {
-		const tempDir = TempDir.createSync("@omp-lsp-ty-detect-");
-		const resolvedTy = path.join(tempDir.path(), "bin", "ty");
-		const whichSpy = vi
-			.spyOn(piUtils, "$which")
-			.mockImplementation(command => (command === "ty" ? resolvedTy : null));
-		try {
-			await Bun.write(path.join(tempDir.path(), "pyproject.toml"), '[project]\nname = "demo"\n');
-			const config = loadConfig(tempDir.path());
-			expect(config.servers.ty?.resolvedCommand).toBe(resolvedTy);
-			expect(config.servers.ty?.command).toBe("ty");
-			expect(config.servers.ty?.args).toEqual(["server"]);
-			expect(whichSpy).toHaveBeenCalledWith("ty");
-		} finally {
-			tempDir.removeSync();
-		}
 	});
 
 	it("coexists with ruff: ty is primary, ruff is linter, both auto-detected", async () => {

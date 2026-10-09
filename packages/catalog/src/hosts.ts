@@ -25,6 +25,8 @@ interface HostClassSpec {
 
 export const KNOWN_HOSTS = {
 	openai: { providers: ["openai"], urlMarkers: ["api.openai.com"] },
+	/** URL-only: a Codex provider rerouted through a proxy does not imply the subscription backend's capabilities. */
+	openaiCodex: { urlMarkers: ["chatgpt.com/backend-api", "chat.openai.com/backend-api"] },
 	azureOpenAI: {
 		providers: ["azure"],
 		urlMarkers: [".openai.azure.com", "azure.com/openai", "models.inference.ai.azure.com"],
@@ -167,6 +169,53 @@ export function isVertexRawPredictUrl(baseUrl: string): boolean {
 /** Azure OpenAI deployment-scoped path (`…/deployments/<name>/…`). */
 export function isAzureDeploymentsUrl(baseUrl: string): boolean {
 	return baseUrl.includes("/deployments/");
+}
+
+// Bedrock inference endpoints, per AWS's endpoint and PrivateLink docs:
+// - bedrock-runtime: `bedrock-runtime.<region>.amazonaws.com`, FIPS `bedrock-runtime-fips.<region>.amazonaws.com`
+// - bedrock-mantle: `bedrock-mantle.<region>.api.aws`; the bundled provider keeps a `{region}`
+//   template until request preparation fills it in
+// - PrivateLink endpoint-specific names for either service, Regional or zonal:
+//   `<vpce-id>[-<az>].<service>.<region>.vpce.amazonaws.com`
+// With private DNS enabled, a VPC endpoint answers on the public names above.
+const BEDROCK_PUBLIC_HOST =
+	/^(?:(?<runtime>bedrock-runtime(?:-fips)?)\.[a-z0-9-]+\.amazonaws\.com|bedrock-mantle\.(?:[a-z0-9-]+|\{region\})\.api\.aws)$/;
+const BEDROCK_PRIVATELINK_HOST =
+	/^vpce-[a-z0-9-]+\.(?:(?<runtime>bedrock-runtime(?:-fips)?)|bedrock-mantle)\.[a-z0-9-]+\.vpce\.amazonaws\.com$/;
+
+function hasPathPrefix(pathname: string, prefix: string): boolean {
+	return pathname === prefix || pathname.startsWith(`${prefix}/`);
+}
+
+/**
+ * Amazon Bedrock API route on a bedrock-runtime or bedrock-mantle endpoint
+ * (public, FIPS, or PrivateLink hostname):
+ * - `anthropic`: the Anthropic Messages API under `/anthropic`.
+ * - `openai`: the OpenAI-compatible APIs under `/openai`, plus Mantle's
+ *   documented `/v1` base (`https://bedrock-mantle.<region>.api.aws/v1`).
+ *
+ * Hostnames are parsed strictly so proxies that embed these hosts in a path
+ * do not match.
+ */
+export function isBedrockRouteUrl(baseUrl: string | undefined, route: "openai" | "anthropic"): boolean {
+	if (!baseUrl) return false;
+	let url: URL;
+	try {
+		url = new URL(baseUrl);
+	} catch {
+		return false;
+	}
+	if (url.protocol !== "https:") return false;
+	const host = BEDROCK_PUBLIC_HOST.exec(url.hostname) ?? BEDROCK_PRIVATELINK_HOST.exec(url.hostname);
+	if (!host) return false;
+	if (route === "anthropic") return hasPathPrefix(url.pathname, "/anthropic");
+	const isMantle = host.groups?.runtime === undefined;
+	return hasPathPrefix(url.pathname, "/openai") || (isMantle && hasPathPrefix(url.pathname, "/v1"));
+}
+
+/** Amazon Bedrock's OpenAI-compatible routes; see {@link isBedrockRouteUrl}. */
+export function isBedrockOpenAIUrl(baseUrl: string | undefined): boolean {
+	return isBedrockRouteUrl(baseUrl, "openai");
 }
 
 /** Alibaba DashScope consumer `compatible-mode` endpoint (rejects multimodal arrays for some text-only SKUs). */

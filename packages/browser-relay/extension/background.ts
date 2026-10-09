@@ -10,6 +10,7 @@
  * and re-dials after Chrome reaps it while disconnected.
  */
 import type { ExtToRelayMessage, RelayToExtMessage, TabSnapshot } from "../../coding-agent/src/tools/browser/relay/protocol";
+import { ownedDebuggerTabs } from "./debugger-ownership";
 
 const DEFAULT_PORT = 9224;
 const PING_INTERVAL_MS = 20_000;
@@ -20,6 +21,23 @@ let ws: WebSocket | null = null;
 let reconnectDelay = RECONNECT_MIN_MS;
 let pingTimer: NodeJS.Timeout | null = null;
 const relayInitiatedDetachTabs = new Set<number>();
+
+/**
+ * Stable per-install browser identity, persisted in `chrome.storage.local` and
+ * sent in every hello. The relay namespaces tab registries per instance, so
+ * several browsers can share one relay and a service-worker restart keeps the
+ * browser's tab registry instead of replacing another browser's connection.
+ */
+let instanceId: string | null = null;
+async function ensureInstanceId(): Promise<string> {
+	if (instanceId) return instanceId;
+	const key = "relayInstanceId";
+	const stored = await chrome.storage.local.get({ [key]: "" });
+	const existing = stored[key];
+	instanceId = typeof existing === "string" && existing.length > 0 ? existing : crypto.randomUUID();
+	await chrome.storage.local.set({ [key]: instanceId } as Record<string, string>);
+	return instanceId;
+}
 
 interface RelaySettings {
 	port: number;
@@ -42,6 +60,7 @@ function snapshot(tab: ChromeTab): TabSnapshot | null {
 		url: tab.url ?? tab.pendingUrl ?? "",
 		title: tab.title ?? "",
 		active: tab.active,
+		discarded: tab.discarded === true,
 		windowId: tab.windowId,
 		pinned: tab.pinned,
 		groupId: tab.groupId,
@@ -138,15 +157,17 @@ async function buildHello(): Promise<ExtToRelayMessage> {
 		const snap = snapshot(tab);
 		if (snap) snapshots.push(snap);
 	}
-	const attachedTabIds: number[] = [];
-	for (const target of targets) {
-		if (target.attached && target.tabId !== undefined) attachedTabIds.push(target.tabId);
-	}
+	// `attached` is true for DevTools or another extension too; only our own attachment answers a command.
+	const attachedTabIds = await ownedDebuggerTabs(targets, tabId =>
+		chrome.debugger.sendCommand({ tabId }, "Target.getTargetInfo"),
+	);
 	const versionMatch = /Chrome\/[\d.]+/.exec(navigator.userAgent);
 	return {
 		t: "hello",
+		instanceId: await ensureInstanceId(),
 		userAgent: navigator.userAgent,
 		browserVersion: versionMatch?.[0] ?? "Chrome/unknown",
+		discardedTabsProtocol: 1, // Keep in sync with the relay protocol version.
 		tabs: snapshots,
 		attachedTabIds,
 	};
@@ -269,6 +290,15 @@ chrome.tabs.onCreated.addListener(tab => {
 chrome.tabs.onUpdated.addListener((_tabId, _changeInfo, tab) => {
 	const snap = snapshot(tab);
 	if (snap) post({ t: "tabUpdated", tab: snap });
+});
+
+chrome.tabs.onActivated.addListener(({ tabId }) => {
+	void chrome.tabs.get(tabId).then(tab => {
+		const snap = snapshot(tab);
+		if (snap) post({ t: "tabUpdated", tab: snap });
+	}).catch(() => {
+		// The tab may have closed before Chrome answered.
+	});
 });
 
 chrome.tabs.onRemoved.addListener(tabId => {

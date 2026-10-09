@@ -2,6 +2,24 @@
 
 ## [Unreleased]
 
+## [18.6.3] - 2026-10-06
+
+### Fixed
+
+- Fixed the extension reporting tabs that DevTools or another debugger extension is inspecting as its own attachments, which made the relay skip attaching to them ([#14224](https://github.com/can1357/oh-my-pi/pull/14224) by [@will-bogusz](https://github.com/will-bogusz))
+
+## [18.5.1] - 2026-10-03
+
+### Fixed
+
+- Fixed tab adoption stalling when Chrome discards background tabs.
+
+## [18.3.1] - 2026-09-25
+
+### Fixed
+
+- Fixed browser relay support when multiple browser instances, such as Chrome and Edge, are connected simultaneously, ensuring tabs and relay requests remain associated with the correct browser while preserving single-browser compatibility for extensions without an instance identifier.
+
 ## [18.0.7] - 2026-08-26
 
 ### Changed

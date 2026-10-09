@@ -5,6 +5,15 @@ export interface CredentialPattern {
 	name: string;
 	source: string;
 	flags?: string;
+	/**
+	 * Literal substrings at least one of which every match of `source`
+	 * contains. The obfuscator skips the regex over text containing none of
+	 * them (`includes` beats a lookbehind regex by orders of magnitude, and the
+	 * whole provider context is scanned on every request). Must be exhaustive
+	 * for the pattern's alternatives; a pattern without this field is always
+	 * scanned. Case-insensitive patterns are matched case-insensitively.
+	 */
+	literalPrefixes?: readonly string[];
 }
 
 const B = "(?<![A-Za-z0-9_-])"; // left boundary
@@ -50,16 +59,38 @@ export const CREDENTIAL_PREFIX_RULES: readonly CredentialPrefixRule[] = [
 
 /** Anchored vendor-prefix credential shapes. No generic keyword/entropy rules: a coding agent must still be able to read identifiers like `token_expiry_seconds`. */
 export const CREDENTIAL_PATTERNS: readonly CredentialPattern[] = [
-	{ name: "Credential", source: SENSITIVE_TOKEN_RE.source, flags: "i" },
-	{ name: "AWSAccessKey", source: `${B}(?:AKIA|ASIA)[A-Z0-9]{16}${E}` },
-	{ name: "GoogleAPIKey", source: `${B}AIza[A-Za-z0-9_-]{30,}${E}` },
-	{ name: "SlackToken", source: `${B}xox[abprs]-[A-Za-z0-9-]{10,}${E}` },
-	{ name: "NpmToken", source: `${B}npm_[A-Za-z0-9]{30,}${E}` },
-	{ name: "StripeKey", source: `${B}(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{20,}${E}` },
-	{ name: "StripeWebhookSecret", source: `${B}whsec_[A-Za-z0-9]{20,}${E}` },
-	{ name: "HuggingFaceToken", source: `${B}hf_[A-Za-z0-9]{30,}${E}` },
-	{ name: "SendGridKey", source: `${B}SG\\.[A-Za-z0-9_-]{22}\\.[A-Za-z0-9_-]{43}${E}` },
-	{ name: "JWT", source: `${B}eyJ[A-Za-z0-9_-]{10,}\\.eyJ[A-Za-z0-9_-]{10,}\\.[A-Za-z0-9_-]{10,}${E}` },
-	{ name: "BearerToken", source: `(?<=\\bBearer )[A-Za-z0-9._~+/=-]{20,}${E}`, flags: "i" },
-	{ name: "PrivateKey", source: PEM_PRIVATE_KEY_SOURCE },
+	{
+		name: "Credential",
+		source: SENSITIVE_TOKEN_RE.source,
+		flags: "i",
+		literalPrefixes: ["gho_", "ghp_", "ghu_", "ghs_", "ghr_", "github_pat_", "glpat-", "sk-"],
+	},
+	{ name: "AWSAccessKey", source: `${B}(?:AKIA|ASIA)[A-Z0-9]{16}${E}`, literalPrefixes: ["AKIA", "ASIA"] },
+	{ name: "GoogleAPIKey", source: `${B}AIza[A-Za-z0-9_-]{30,}${E}`, literalPrefixes: ["AIza"] },
+	{
+		name: "SlackToken",
+		source: `${B}xox[abprs]-[A-Za-z0-9-]{10,}${E}`,
+		literalPrefixes: ["xoxa-", "xoxb-", "xoxp-", "xoxr-", "xoxs-"],
+	},
+	{ name: "NpmToken", source: `${B}npm_[A-Za-z0-9]{30,}${E}`, literalPrefixes: ["npm_"] },
+	{
+		name: "StripeKey",
+		source: `${B}(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{20,}${E}`,
+		literalPrefixes: ["sk_live_", "sk_test_", "rk_live_", "rk_test_"],
+	},
+	{ name: "StripeWebhookSecret", source: `${B}whsec_[A-Za-z0-9]{20,}${E}`, literalPrefixes: ["whsec_"] },
+	{ name: "HuggingFaceToken", source: `${B}hf_[A-Za-z0-9]{30,}${E}`, literalPrefixes: ["hf_"] },
+	{ name: "SendGridKey", source: `${B}SG\\.[A-Za-z0-9_-]{22}\\.[A-Za-z0-9_-]{43}${E}`, literalPrefixes: ["SG."] },
+	{
+		name: "JWT",
+		source: `${B}eyJ[A-Za-z0-9_-]{10,}\\.eyJ[A-Za-z0-9_-]{10,}\\.[A-Za-z0-9_-]{10,}${E}`,
+		literalPrefixes: ["eyJ"],
+	},
+	{
+		name: "BearerToken",
+		source: `(?<=\\bBearer )[A-Za-z0-9._~+/=-]{20,}${E}`,
+		flags: "i",
+		literalPrefixes: ["Bearer "],
+	},
+	{ name: "PrivateKey", source: PEM_PRIVATE_KEY_SOURCE, literalPrefixes: ["-----BEGIN "] },
 ];

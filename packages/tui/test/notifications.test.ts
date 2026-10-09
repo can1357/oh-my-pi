@@ -149,7 +149,7 @@ describe("terminal notifications", () => {
 		});
 
 		expect(out).toBe(
-			"\x1b]99;i=complete-1:f=T2ggTXkgUGk=:a=focus:u=1:t=Y29tcGxldGlvbg==:n=aW5mbw==:s=aW5mbw==:w=5000:d=0;Session\x1b\\" +
+			"\x1b]99;i=complete-1:f=b21w:a=focus:u=1:t=Y29tcGxldGlvbg==:n=aW5mbw==:s=aW5mbw==:w=5000:d=0;Session\x1b\\" +
 				"\x1b]99;i=complete-1:p=body;Complete\x1b\\",
 		);
 	});
@@ -158,7 +158,7 @@ describe("terminal notifications", () => {
 		setOsc99Supported(true);
 		const terminal = getTerminalInfo("kitty");
 		const out = terminal.formatNotification({ title: "Line 1\nLine 2", id: "unsafe" });
-		expect(out).toBe("\x1b]99;i=unsafe:f=T2ggTXkgUGk=:e=1;TGluZSAxCkxpbmUgMg==\x1b\\");
+		expect(out).toBe("\x1b]99;i=unsafe:f=b21w:e=1;TGluZSAxCkxpbmUgMg==\x1b\\");
 	});
 
 	it("queries and confirms OSC 99 support before rich notifications", () => {
@@ -304,7 +304,7 @@ describe("terminal notifications", () => {
 		TERMINAL.sendNotification({ title: "-x session", body: "Complete", type: "completion" });
 
 		const titles = spawn.mock.calls.map(call => (call[0] as unknown as { cmd: string[] }).cmd[3]);
-		expect(titles).toEqual(["Oh My Pi", "-x session"]);
+		expect(titles).toEqual(["omp", "-x session"]);
 	});
 
 	it("keeps the OSC fallback when the Herdr pane id is absent", () => {
@@ -550,4 +550,36 @@ describe("terminal notifications", () => {
 			terminal.stop();
 		}
 	});
+
+	// While a TUI owns stdout, its frames go through an off-thread pump; a
+	// notification written straight to stdout could split a frame's escape
+	// sequence. Each of the three write sites must take the terminal's path;
+	// each row's bytes prove which site it reached.
+	it.each([
+		["direct", undefined, "\x1b]9;ping\x1b\\"],
+		["tmux", "TMUX", "\x1bPtmux;\x1b\x1b]9;ping\x1b\x1b\\\x1b\\\x07"],
+		["Zellij", "ZELLIJ", "\x1b]9;ping\x1b\\\x07"],
+	] as const)(
+		"routes a %s notification through the active terminal, never straight to stdout",
+		(_host, envKey, sequence) => {
+			if (envKey === "TMUX") Bun.env.TMUX = "/tmp/tmux-1000/default,1234,0";
+			if (envKey === "ZELLIJ") Bun.env.ZELLIJ = "0";
+			mutableTerminal.notifyProtocol = NotifyProtocol.Osc9;
+			const { terminal, writes } = setupProcessTerminal();
+			try {
+				const routed: string[] = [];
+				vi.spyOn(terminal, "write").mockImplementation(data => {
+					routed.push(data);
+				});
+				writes.length = 0;
+
+				TERMINAL.sendNotification("ping");
+
+				expect(routed).toEqual([sequence]);
+				expect(writes.join("")).not.toContain("]9;");
+			} finally {
+				terminal.stop();
+			}
+		},
+	);
 });

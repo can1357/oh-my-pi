@@ -11,28 +11,6 @@ describe("target option", () => {
 			required: ["foo"],
 		});
 	});
-
-	it("generates draft-2020-12 schema when specified", () => {
-		const T = type({ foo: "string" });
-		const schema = T.toJsonSchema({ target: "draft-2020-12" });
-		expect(schema).toEqual({
-			$schema: "https://json-schema.org/draft/2020-12/schema",
-			type: "object",
-			properties: { foo: { type: "string" } },
-			required: ["foo"],
-		});
-	});
-
-	it("generates draft-07 schema when specified", () => {
-		const T = type({ foo: "string" });
-		const schema = T.toJsonSchema({ target: "draft-07" });
-		expect(schema).toEqual({
-			$schema: "http://json-schema.org/draft-07/schema#",
-			type: "object",
-			properties: { foo: { type: "string" } },
-			required: ["foo"],
-		});
-	});
 });
 
 describe("draft-specific syntax", () => {

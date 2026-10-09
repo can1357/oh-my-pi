@@ -5,7 +5,6 @@
 use std::{
 	cell::RefCell,
 	ffi::OsString,
-	fs::File,
 	io::{self, BufRead, BufReader, Read, Write},
 	iter::Cycle,
 	rc::Rc,
@@ -14,9 +13,10 @@ use std::{
 
 use brush_core::{ShellExtensions, builtins::Registration};
 use clap::{Arg, ArgAction, ArgMatches, Command};
+use pi_vfs::File;
 use uucore::{display::Quotable, i18n::charmap::mb_char_len};
 
-use crate::host::{Host, Stdin, Utility, format_usage, matches_parser, os_bytes, util};
+use crate::host::{Host, Stdin, Utility, format_usage, matches_parser, os_bytes, strip_errno, util};
 
 mod options {
 	pub const DELIMITER: &str = "delimiters";
@@ -118,13 +118,16 @@ fn paste(
 		if filename == "-" {
 			prepared.push(PreparedSource::StandardInput);
 		} else {
-			let file = File::open(host.resolve(&filename)).map_err(|err| {
+			let file = host.fs().open(host.resolve(&filename)).map_err(|err| {
 				format!("{}: {}", filename.to_string_lossy(), strip_errno(&err))
 			})?;
 			prepared.push(PreparedSource::File(BufReader::new(file)));
 		}
 	}
 
+	// Writer first: `stdout_writer` method-borrows `host`, which must not
+	// overlap the `&mut host.stdin` held by the readers.
+	let mut stdout = host.stdout_writer();
 	let stdin = Rc::new(RefCell::new(BufReader::new(&mut host.stdin)));
 	let mut sources = prepared
 		.into_iter()
@@ -135,9 +138,9 @@ fn paste(
 		.collect::<Vec<_>>();
 
 	let source_count = sources.len();
-	let stdout = &mut host.stdout;
 	if !serial && source_count == 1 {
-		return write_single_input_source(stdout, sources.pop().unwrap(), line_ending)
+		return write_single_input_source(&mut stdout, sources.pop().unwrap(), line_ending)
+			.and_then(|()| stdout.flush())
 			.map_err(|err| strip_errno(&err));
 	}
 
@@ -156,8 +159,8 @@ fn paste(
 				delimiter_state.write_delimiter(&mut output);
 			}
 			delimiter_state.remove_trailing_delimiter(&mut output);
+			output.push(line_ending);
 			stdout.write_all(&output).map_err(|err| strip_errno(&err))?;
-			stdout.write_all(&[line_ending]).map_err(|err| strip_errno(&err))?;
 		}
 	} else {
 		let mut eof = vec![false; source_count];
@@ -183,12 +186,12 @@ fn paste(
 				break;
 			}
 			delimiter_state.remove_trailing_delimiter(&mut output);
+			output.push(line_ending);
 			stdout.write_all(&output).map_err(|err| strip_errno(&err))?;
-			stdout.write_all(&[line_ending]).map_err(|err| strip_errno(&err))?;
 			delimiter_state.reset_to_first_delimiter();
 		}
 	}
-	Ok(())
+	stdout.flush().map_err(|err| strip_errno(&err))
 }
 
 fn write_single_input_source(
@@ -359,14 +362,6 @@ impl BufRead for InputSource<'_> {
 			Self::StandardInput(stdin) => stdin.borrow_mut().read_until(byte, buf),
 		}
 	}
-}
-
-fn strip_errno(error: &io::Error) -> String {
-	let mut message = error.to_string();
-	if let Some(position) = message.find(" (os error ") {
-		message.truncate(position);
-	}
-	message
 }
 
 /// Creates the `paste` builtin registration.

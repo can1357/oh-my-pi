@@ -7,7 +7,7 @@
 import { timingSafeEqual as nodeTimingSafeEqual } from "node:crypto";
 import * as os from "node:os";
 import { getInstallId } from "@oh-my-pi/pi-utils";
-import type { Api, AssistantMessage, Model } from "../types";
+import type { Api, Model } from "../types";
 import type { ClientUsageIdentity } from "../usage";
 
 const JSON_HEADERS = {
@@ -28,14 +28,13 @@ export function json(status: number, body: unknown, headers?: Record<string, str
  * `request-id` (surfaced as `_request_id` by the OpenAI and Anthropic SDKs,
  * matches the gateway log line), LiteLLM's model-resolution and cost headers,
  * and OpenAI's `openai-processing-ms`. Model/request-id headers are always
- * present; `message` — the final assistant message, available only on
- * non-streaming responses — adds the computed cost, and `startedAt` the wall
- * time. Streaming responses send headers before usage exists, so they carry
- * only the identity headers.
+ * present; `costUsd` — known only once a non-streaming response has settled —
+ * adds the computed cost, and `startedAt` the wall time. Streaming responses
+ * send headers before usage exists, so they carry only the identity headers.
  */
 export function gatewayResponseHeaders(
 	model: Model<Api>,
-	info: { requestId: string; message?: AssistantMessage; startedAt?: number },
+	info: { requestId: string; costUsd?: number; startedAt?: number },
 ): Record<string, string> {
 	const headers: Record<string, string> = {
 		"x-request-id": info.requestId,
@@ -43,7 +42,7 @@ export function gatewayResponseHeaders(
 		"x-litellm-model-id": model.id,
 	};
 	if (model.baseUrl) headers["x-litellm-model-api-base"] = model.baseUrl;
-	if (info.message) headers["x-litellm-response-cost"] = info.message.usage.cost.total.toString();
+	if (info.costUsd !== undefined) headers["x-litellm-response-cost"] = info.costUsd.toString();
 	if (info.startedAt !== undefined) {
 		const elapsed = (performance.now() - info.startedAt).toFixed(0);
 		headers["x-litellm-response-duration-ms"] = elapsed;
@@ -52,10 +51,44 @@ export function gatewayResponseHeaders(
 	return headers;
 }
 
-export function resolvePeer(req: Request): string {
-	const fwd = req.headers.get("x-forwarded-for");
-	if (fwd) return fwd.split(",")[0].trim();
-	return req.headers.get("x-real-ip") ?? "unknown";
+/**
+ * Decode each run of percent-escapes on its own, so one malformed escape
+ * elsewhere in the URL cannot hide an encoded token. A run that is not valid
+ * UTF-8 still has its ASCII escapes decoded.
+ */
+function decodeUrlLeniently(location: string): string {
+	return location.replace(/(?:%[0-9A-Fa-f]{2})+/g, run => {
+		try {
+			return decodeURIComponent(run);
+		} catch {
+			return run.replace(/%([0-7][0-9A-Fa-f])/g, (_, hex: string) => String.fromCharCode(Number.parseInt(hex, 16)));
+		}
+	});
+}
+
+/** Keep configured gateway credentials out of URL and forwarded/logged request fields. */
+export function hasMisplacedBearer(req: Request, url: URL, tokens: ReadonlySet<string>): boolean {
+	if (tokens.size === 0) return false;
+	const location = url.pathname + url.search;
+	const decodedLocation = decodeUrlLeniently(location);
+	const headers = req.headers;
+	for (const token of tokens) {
+		if (location.includes(token) || decodedLocation.includes(token)) return true;
+		for (const [name, value] of headers) {
+			if (
+				(PASSTHROUGH_HEADER_NAMES[name] ||
+					name.startsWith("x-stainless-") ||
+					name.startsWith("x-omp-") ||
+					name === "x-forwarded-for" ||
+					name === "x-real-ip" ||
+					name === "forwarded") &&
+				value.includes(token)
+			) {
+				return true;
+			}
+		}
+	}
+	return false;
 }
 
 /**
@@ -105,6 +138,7 @@ export function isAuthorized(req: Request, tokens: ReadonlySet<string>): boolean
 const PASSTHROUGH_HEADER_NAMES: Record<string, true> = {
 	"anthropic-beta": true,
 	"anthropic-version": true,
+	"anthropic-user-profile-id": true,
 	"openai-organization": true,
 	"openai-project": true,
 	"openai-beta": true,
@@ -223,7 +257,7 @@ const CORS_HEADERS: Record<string, string> = {
 	"Access-Control-Allow-Origin": "*",
 	"Access-Control-Allow-Methods": "GET, POST, OPTIONS",
 	"Access-Control-Allow-Headers":
-		"authorization, content-type, anthropic-version, anthropic-beta, openai-organization, openai-project, x-stainless-*, x-api-key",
+		"authorization, content-type, anthropic-version, anthropic-beta, anthropic-user-profile-id, openai-organization, openai-project, x-stainless-*, x-api-key",
 	"Access-Control-Expose-Headers":
 		"x-request-id, request-id, x-litellm-model-id, x-litellm-model-api-base, x-litellm-response-cost, x-litellm-response-duration-ms, openai-processing-ms",
 	"Access-Control-Max-Age": "86400",

@@ -11,6 +11,7 @@ import * as path from "node:path";
 import { describe, expect, it, spyOn } from "bun:test";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { postmortem, TempDir } from "@oh-my-pi/pi-utils";
+import { Settings } from "../../src/config/settings";
 import { runPrintMode } from "../../src/modes/print-mode";
 import type { AgentSession } from "../../src/session/agent-session";
 import * as telemetryExport from "../../src/telemetry-export";
@@ -32,12 +33,13 @@ describe("print mode disposes the session before terminating", () => {
 		const session = {
 			extensionRunner: undefined,
 			subscribe: () => {},
-			settings: { get: () => false },
+			settings: Settings.isolated(),
 			sessionManager: {
 				buildSessionContext: () => ({ messages: [] }),
 				getEntries: () => [],
-				// Print mode subscribes to store failures (issue #11493).
+				// Print mode subscribes to store failures (issue #11493) and session moves.
 				onPersistenceError: () => () => {},
+				onPersistenceNotice: () => () => {},
 			},
 			state: { messages: [errorMsg] },
 			getLastAssistantMessage: () => errorMsg,
@@ -75,7 +77,8 @@ describe("print mode disposes the session before terminating", () => {
 		expect(stderrLines.join("")).toContain("boom");
 	});
 
-	it("disposes an active print session before SIGTERM exits", async () => {
+	// Windows cannot deliver a catchable SIGTERM via process.kill: libuv terminates the process outright.
+	it.skipIf(process.platform === "win32")("disposes an active print session before SIGTERM exits", async () => {
 		using tempDir = TempDir.createSync("@omp-print-signal-");
 		const marker = tempDir.join("disposed");
 		const fixture = path.join(import.meta.dir, "..", "fixtures", "print-mode-signal.js");
@@ -111,11 +114,12 @@ describe("print mode disposes the session before terminating", () => {
 		const session = {
 			extensionRunner: undefined,
 			subscribe: () => {},
-			settings: { get: () => false },
+			settings: Settings.isolated(),
 			sessionManager: {
 				buildSessionContext: () => ({ messages: [] }),
 				getEntries: () => [],
 				onPersistenceError: () => () => {},
+				onPersistenceNotice: () => () => {},
 			},
 			getLastAssistantMessage: () => abortedMsg,
 			prepareForHeadlessAdvisorDrain: () => {},

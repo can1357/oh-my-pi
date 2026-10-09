@@ -1,9 +1,12 @@
 {
+  addDriverRunpath,
   autoPatchelfHook,
   alsa-lib,
   bun,
   bun2nix,
   cmake,
+  config,
+  cudaPackages_13 ? null,
   darwin,
   lib,
   libpulseaudio,
@@ -18,6 +21,14 @@
   stdenv,
   stdenvNoCC,
   unzip,
+  # onnxruntime-node (downloaded into the agent cache on first use) ships CUDA
+  # execution providers that dlopen vendor libraries absent from the NixOS
+  # loader path. Enabling this appends them to the inference workers'
+  # LD_LIBRARY_PATH so the GPU provider loads instead of quietly degrading to
+  # CPU. Mirrors nixpkgs' `cudaSupport` convention (sunshine, obs-studio,
+  # btop). Note the closure cost — libcublas ~745 MB, libcurand ~136 MB,
+  # cuda_cudart ~74 MB — so this stays opt-in and off by default.
+  cudaSupport ? config.cudaSupport,
   # Wayland screencast support links libpipewire, whose runtime closure adds
   # ~750 MB (gstreamer, ffmpeg, systemd, ...). Official npm/Bazel addons ship
   # without it, so default to the lean build; opt in via `.override`.
@@ -52,9 +63,37 @@ let
     _: patch: source + "/${patch}"
   ) rootPackageJson.patchedDependencies;
   patchOverrides = bun2nix.patchedDependenciesToOverrides { inherit patchedDependencies; };
-  runtimeNativeLibraries = lib.optionals stdenv.hostPlatform.isLinux (
-    [ stdenv.cc.cc.lib ] ++ lib.optional (stdenv.cc.cc ? libgcc) stdenv.cc.cc.libgcc
-  );
+  # Vendor libraries the on-demand onnxruntime-node CUDA execution provider
+  # dlopens. These are not needed for the addon itself to load (postFixup's
+  # DT_NEEDED covers libstdc++/libgcc), but the provider is its own .so whose
+  # dependencies sit outside the NixOS loader path, so the worker needs them on
+  # LD_LIBRARY_PATH to load a GPU provider instead of degrading to CPU.
+  #
+  # CUDA 13 specifically: the shipped provider's sonames are libcublasLt.so.13 /
+  # libcublas.so.13 / libcurand.so.10 / libcudart.so.13. CUDA 12 (nixpkgs'
+  # default `cudaPackages`) only provides .so.12, so taking this build's
+  # `cudaPackages` would silently fail to resolve them; pin the 13.x series.
+  # Verified by dlopen: without these the provider dies on libcublasLt.so.13.
+  cudaRuntimeLibraries =
+    let
+      # The driver itself (libcuda.so.1) is not a redistributable: it only
+      # exists at the host's driver link, which is stable across driver
+      # upgrades and present exactly when the machine can run CUDA at all.
+      driver = addDriverRunpath.driverLink;
+      libDirs = lib.concatMap (p: [ (lib.getLib p) ]) [
+        cudaPackages_13.libcublas
+        cudaPackages_13.libcurand
+        cudaPackages_13.cuda_cudart
+      ];
+    in
+    lib.optionals (cudaSupport && stdenv.hostPlatform.isLinux && cudaPackages_13 != null) (
+      [ driver ] ++ libDirs
+    );
+  runtimeNativeLibraries =
+    lib.optionals stdenv.hostPlatform.isLinux (
+      [ stdenv.cc.cc.lib ] ++ lib.optional (stdenv.cc.cc ? libgcc) stdenv.cc.cc.libgcc
+    )
+    ++ cudaRuntimeLibraries;
   bunRuntimeTemplate = stdenvNoCC.mkDerivation {
     pname = "omp-bun-runtime-template";
     inherit (bun) version;
@@ -134,6 +173,12 @@ stdenv.mkDerivation {
     cargo build --release -p pi-natives ${lib.optionalString withWaylandScreencast "--features wayland-pipewire"}
     install -Dm755 "target/release/${platform.nativeLibrary}" \
       "packages/natives/native/${platform.addon}"
+    # The loader and embed-native.ts require the release version, which is
+    # written into the addon after linking (build-bindings.ts does this for
+    # local builds; this raw cargo build must do it itself). Darwin re-signs
+    # through signIfRequired below; the sandbox has no system codesign.
+    bun scripts/stamp-native-version.ts --no-sign \
+      "packages/natives/native/${platform.addon}"
     ${lib.optionalString stdenv.hostPlatform.isLinux ''
       # The loader extracts this archived addon at runtime, so fix its
       # interpreter-independent Nix RPATH before Bun embeds it.
@@ -151,8 +196,16 @@ stdenv.mkDerivation {
         "packages/natives/native/${platform.addon}"
     ''}
     ${lib.optionalString stdenv.hostPlatform.isDarwin ''
+      # The darwin stdenv links C code against darwin.libiconv, whose install
+      # name is an absolute /nix/store path. The addon is gzip-embedded in the
+      # bun binary, so that reference is invisible to the output scanner and the
+      # library is absent from the runtime closure on target machines. Repoint
+      # it at the system libiconv (dyld shared cache, same ABI).
+      install_name_tool -change "${darwin.libiconv}/lib/libiconv.2.dylib" \
+        /usr/lib/libiconv.2.dylib "packages/natives/native/${platform.addon}"
       # arm64 Darwin requires even locally-built Mach-O addons to carry an
-      # ad-hoc signature. Sign before Bun archives the file.
+      # ad-hoc signature. The install-name rewrite invalidates it, so sign
+      # after the change and before Bun archives the file.
       signIfRequired "packages/natives/native/${platform.addon}"
     ''}
 
@@ -246,6 +299,30 @@ stdenv.mkDerivation {
       # main process dlopen's directly fail to resolve libstdc++.so.6 on NixOS.
       # wrapProgram moved the real ELF to .omp-wrapped.
       patchelf --print-needed "$out/bin/.omp-wrapped" | grep -q '^libstdc++\.so\.6$'
+    ''}${
+      lib.optionalString (cudaSupport && stdenv.hostPlatform.isLinux && cudaPackages_13 != null) ''
+        # The CUDA provider must actually resolve, not merely be advertised: the
+        # wrong CUDA major is invisible at runtime (onnxruntime silently falls
+        # back to CPU), so assert the exact sonames the provider dlopens. Only the
+        # redistributable libraries are checked here — the driver's libcuda.so.1
+        # lives at the host's driver link, which does not exist in this sandbox
+        # and is not a property of the build.
+        env -u LD_LIBRARY_PATH BUN_BE_BUN=1 "$out/bin/omp" -e \
+          'const {dlopen}=require("bun:ffi");const dirs=(process.env.OMP_NATIVE_LIBRARY_PATH||"").split(":").filter(Boolean);const need={"libcublasLt.so.13":{cublasLtGetVersion:{args:[],returns:"ptr"}},"libcublas.so.13":{cublasGetVersion:{args:[],returns:"ptr"}},"libcurand.so.10":{curandGetVersion:{args:["ptr"],returns:"i32"}},"libcudart.so.13":{cudaRuntimeGetVersion:{args:["ptr"],returns:"i32"}}};for(const lib of Object.keys(need)){let ok=false;for(const d of dirs){try{dlopen(d+"/"+lib,need[lib]);ok=true;break}catch(e){}}if(!ok){console.error("unresolved: "+lib);process.exit(1)}}'
+      ''
+    }
+    ${lib.optionalString stdenv.hostPlatform.isDarwin ''
+      # The smoke test above can pass in the build sandbox because
+      # darwin.libiconv is present there, while a Mac after GC is not. Fail
+      # the build if the embedded addon references any /nix/store path.
+      # Capture, don't pipe: under `set -o pipefail` a failing otool would
+      # take the false branch and the check would silently pass.
+      addonDeps="$(otool -L "packages/natives/native/${platform.addon}")"
+      if grep -q "/nix/store/" <<<"$addonDeps"; then
+        echo "embedded addon references /nix/store paths:" >&2
+        echo "$addonDeps" >&2
+        exit 1
+      fi
     ''}
     runHook postInstallCheck
   '';

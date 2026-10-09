@@ -9,6 +9,7 @@ import { type FetchImpl, getEnvApiKey, type ImageContent, type TextContent } fro
 import { htmlToMarkdown, notebookToEditableText } from "@oh-my-pi/pi-natives";
 import { $which, ptree } from "@oh-my-pi/pi-utils";
 import { type ArchiveFormat, listArchiveRoot, sniffArchiveFormat } from "@oh-my-pi/pi-utils/ar";
+import type { ModelRegistry } from "../config/model-registry";
 import type { Settings } from "../config/settings";
 import type { ToolSession } from "../sdk";
 import type { AgentStorage } from "../session/agent-storage";
@@ -21,7 +22,7 @@ import { findFirecrawlApiKey, scrapeWithFirecrawl } from "../web/firecrawl";
 import { extractWithParallel, findParallelApiKey, getParallelExtractContent } from "../web/parallel";
 import type { RenderResult, SpecialHandler } from "../web/scrapers/types";
 import { finalizeOutput, loadPage, looksLikeHtml, MAX_BYTES, MAX_OUTPUT_CHARS } from "../web/scrapers/types";
-import { convertWithMarkit, fetchBinary } from "../web/scrapers/utils";
+import { type BinaryFetchResult, convertWithMarkit, fetchBinary } from "../web/scrapers/utils";
 import { findCredential } from "../web/search/providers/utils";
 import { applyListLimit } from "@oh-my-pi/pi-tui/tools/list-limit";
 import { parseTailCount } from "./path-utils";
@@ -34,6 +35,9 @@ import { ToolAbortError } from "./tool-errors";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { toolResult } from "./tool-result";
 import { clampTimeout } from "./tool-timeouts";
+
+import { cfgFetchEnabled, cfgToolsMaxTimeout } from "./settings";
+import { cfgProvidersFetch } from "../session/settings";
 
 // =============================================================================
 // Types and Constants
@@ -540,6 +544,25 @@ function parseJinaReaderContent(responseBody: string): string | null {
 	return content;
 }
 
+/**
+ * Markdown image whose destination is an inline `data:` URI. The label allows
+ * backslash escapes (converters emit `\]` inside titles). The scheme is matched
+ * case-insensitively, the destination may be bare or `<…>`-wrapped, and an
+ * optional `"…"`, `'…'`, or `(…)` title is consumed; base64 payloads never
+ * contain `)` or whitespace.
+ */
+const DATA_URI_IMAGE_RE =
+	/!\[((?:\\.|[^\\\]])*)\]\(\s*(?:<data:[^>]*>|data:[^)\s]*)(?:\s+(?:"(?:\\.|[^\\"])*"|'(?:\\.|[^\\'])*'|\((?:\\.|[^\\)])*\)))?\s*\)/gi;
+
+/**
+ * Drop inline `data:` image payloads (inline `<svg>` icons, base64 `<img>`)
+ * from reader-mode markdown. They are unreadable to the model and routinely
+ * dwarf the article text; the alt text is kept when present.
+ */
+function stripDataUriImages(markdown: string): string {
+	return markdown.replace(DATA_URI_IMAGE_RE, (_match, alt: string) => (alt.trim() ? `![${alt}]` : ""));
+}
+
 /** Reader backends for {@link renderHtmlToText}, in default priority order. */
 export type FetchProvider = "native" | "trafilatura" | "lynx" | "parallel" | "firecrawl" | "jina";
 
@@ -643,7 +666,7 @@ export async function renderHtmlToText(
 		},
 	};
 
-	const preference = settings.get("providers.fetch");
+	const preference = cfgProvidersFetch.get(settings);
 	const order: readonly FetchProvider[] =
 		preference === "auto"
 			? FETCH_PROVIDER_ORDER
@@ -660,8 +683,10 @@ export async function renderHtmlToText(
 		// overall-budget timeouts still fall through to later (local) renderers.
 		userSignal?.throwIfAborted();
 		try {
-			const content = await runners[method]();
-			if (!content || content.trim().length <= 100) continue;
+			const rendered = await runners[method]();
+			if (!rendered) continue;
+			const content = stripDataUriImages(rendered);
+			if (content.trim().length <= 100) continue;
 			if (!isLowQualityOutput(content)) {
 				return { content, ok: true, method };
 			}
@@ -770,6 +795,13 @@ function shouldSkipBodyDownload(contentType: string): boolean {
 	);
 }
 
+/** Generic MIME types servers use for downloads whose real type is only known from the URL extension. */
+const GENERIC_BINARY_MIMES: Record<string, true> = {
+	"application/octet-stream": true,
+	"binary/octet-stream": true,
+	"application/x-download": true,
+};
+
 function getArchiveFormatHint(mime: string, extensionHint: string): ArchiveFormat | undefined {
 	if (extensionHint === ".zip" || mime === "application/zip" || mime === "application/x-zip-compressed") {
 		return "zip";
@@ -870,6 +902,8 @@ async function tryRenderBinaryPayload(
 	signal: AbortSignal | undefined,
 	fetchedAt: string,
 	notes: readonly string[],
+	/** The convertible-document download already made for this URL; reused instead of downloading again. */
+	prefetched?: BinaryFetchResult,
 ): Promise<FetchRenderResult | null> {
 	const hasNotebookHint = isNotebookHint(mime, extHint);
 	const hasSqliteHint = isSqliteHint(mime, extHint);
@@ -880,9 +914,10 @@ async function tryRenderBinaryPayload(
 	}
 
 	const resultNotes = [...notes];
-	const binary = await fetchBinary(finalUrl, timeout, signal);
+	const binary = prefetched ?? (await fetchBinary(finalUrl, timeout, signal));
 	if (!binary.ok) {
-		resultNotes.push(binary.error ? `Binary fetch failed: ${binary.error}` : "Binary fetch failed");
+		// A prefetched failure was already noted by the conversion step.
+		if (!prefetched) resultNotes.push(binary.error ? `Binary fetch failed: ${binary.error}` : "Binary fetch failed");
 		return buildBinaryPayloadResult(
 			url,
 			finalUrl,
@@ -1012,13 +1047,14 @@ async function handleSpecialUrls(
 	timeout: number,
 	signal: AbortSignal | undefined,
 	storage: AgentStorage | null,
+	modelRegistry: ModelRegistry | undefined,
 ): Promise<FetchRenderResult | null> {
 	const specialHandlers = await loadSpecialHandlers();
 	for (const handler of specialHandlers) {
 		if (signal?.aborted) {
 			throw new ToolAbortError();
 		}
-		const result = await handler(url, timeout, signal, storage);
+		const result = await handler(url, timeout, signal, storage, modelRegistry);
 		if (result) return result;
 	}
 	return null;
@@ -1038,6 +1074,7 @@ async function renderUrl(
 	settings: Settings,
 	signal: AbortSignal | undefined,
 	storage: AgentStorage | null,
+	modelRegistry: ModelRegistry | undefined,
 	fetchOverride?: FetchImpl,
 	excludeWebP?: true,
 ): Promise<FetchRenderResult> {
@@ -1066,12 +1103,27 @@ async function renderUrl(
 
 	// Step 1: Try special handlers for known sites (unless raw mode)
 	if (!raw) {
-		const specialResult = await handleSpecialUrls(url, timeout, signal, storage);
+		const specialResult = await handleSpecialUrls(url, timeout, signal, storage, modelRegistry);
 		if (specialResult) return specialResult;
 	}
 
 	// Step 2: Fetch page
-	const response = await loadPage(url, { timeout, signal, skipBodyForContentType: shouldSkipBodyDownload });
+	// Generic-MIME responses for convertible extensions (e.g. octet-stream .pdf) are re-fetched
+	// via fetchBinary below, so skip the first body read to download the bytes only once.
+	const requestExtHint = getExtensionHint(url);
+	const skipBody = (contentType: string): boolean =>
+		shouldSkipBodyDownload(contentType) ||
+		(GENERIC_BINARY_MIMES[normalizeMime(contentType)] === true && CONVERTIBLE_EXTENSIONS.has(requestExtHint));
+	let response = await loadPage(url, { timeout, signal, skipBodyForContentType: skipBody });
+	if (
+		response.ok &&
+		response.bodySkipped &&
+		!shouldSkipBodyDownload(response.contentType) &&
+		!CONVERTIBLE_EXTENSIONS.has(getExtensionHint(response.finalUrl))
+	) {
+		// Redirect dropped the convertible extension; the body is needed after all.
+		response = await loadPage(url, { timeout, signal, skipBodyForContentType: shouldSkipBodyDownload });
+	}
 	if (signal?.aborted) {
 		throw new ToolAbortError();
 	}
@@ -1200,8 +1252,10 @@ async function renderUrl(
 	}
 
 	// Step 3: Handle convertible binary files (PDF, DOCX, etc.)
+	let convertibleBinary: BinaryFetchResult | undefined;
 	if (!skipConvertibleBinaryRetry && isConvertible(mime, extHint)) {
 		const binary = await fetchBinary(finalUrl, timeout, signal);
+		convertibleBinary = binary;
 		if (binary.ok) {
 			const ext = getExtensionHint(finalUrl, binary.contentDisposition) || extHint;
 			const converted = await convertWithMarkit(binary.buffer, ext, timeout, signal);
@@ -1244,6 +1298,7 @@ async function renderUrl(
 		signal,
 		fetchedAt,
 		notes,
+		convertibleBinary,
 	);
 	if (binaryPayloadResult) return binaryPayloadResult;
 
@@ -1594,7 +1649,7 @@ export async function fetchReadUrl(
 ): Promise<ReadUrlEntry> {
 	const { path: url, raw = false } = params;
 
-	const effectiveTimeout = clampTimeout("fetch", 30, session.settings.get("tools.maxTimeout"));
+	const effectiveTimeout = clampTimeout("fetch", 30, cfgToolsMaxTimeout.get(session.settings));
 
 	if (signal?.aborted) {
 		throw new ToolAbortError();
@@ -1608,6 +1663,7 @@ export async function fetchReadUrl(
 		session.settings,
 		signal,
 		storage,
+		session.modelRegistry,
 		session.fetch,
 		webpExclusionForModel(session.getActiveModel?.()),
 	);
@@ -1638,7 +1694,7 @@ export async function materializeReadUrlToFile(
 	params: { path: string; raw?: boolean },
 	signal?: AbortSignal,
 ): Promise<{ path: string; details: ReadUrlToolDetails }> {
-	if (!session.settings.get("fetch.enabled")) {
+	if (!cfgFetchEnabled.get(session.settings)) {
 		throw new ToolError("URL reads are disabled by settings.");
 	}
 	const entry = await fetchReadUrl(session, params, signal);

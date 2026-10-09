@@ -8,28 +8,43 @@ import type {
 	SpeculativeCommitDecision,
 	SpeculativeDiscardContext,
 	SpeculativeExecutionHost,
+	SpeculativeLaunchContext,
 	SpeculativeOperationContext,
 	SpeculativeToolExecutionConfig,
+	SpeculativeToolReference,
 } from "@oh-my-pi/pi-agent-core";
-import { BINARY_SNIFF_BYTES, isProbablyBinaryHeader, readImageMetadata } from "@oh-my-pi/pi-utils";
+import {
+	BINARY_SNIFF_BYTES,
+	IMAGE_METADATA_HEADER_BYTES,
+	isProbablyBinaryHeader,
+	parseImageMetadata,
+} from "@oh-my-pi/pi-utils";
 import type { Settings } from "../config/settings";
-import { normalizeToLF } from "../edit/normalize";
 import type { ToolSession } from "../tools";
-import { type ApprovalMode, resolveApproval } from "../tools/approval";
+import { resolveApproval } from "../tools/approval";
 import { CONVERTIBLE_EXTENSIONS } from "../utils/markit";
-import { type LocalReadSpeculationEvidence, resolveSpeculativeReadTarget, SNAPSHOT_MAX_BYTES } from "../tools/read";
+import {
+	digestLocalReadBytes,
+	type LocalReadSpeculationEvidence,
+	resolveSpeculativeReadTarget,
+	SNAPSHOT_MAX_BYTES,
+} from "../tools/read";
 import { isCpuProfilePath } from "../utils/cpuprofile";
 import { isSampleProfilePath } from "../utils/sample-profile";
 import { isVideoPath } from "@oh-my-pi/pi-tui/prompt/video";
+import { cfgTaskSpeculativeLaunch } from "../task/settings";
+
+import {
+	cfgToolsApproval,
+	cfgToolsApprovalMode,
+	cfgToolsSpeculativeExecutionEnabled,
+	cfgToolsSpeculativeExecutionMaxInFlight,
+} from "../tools/settings";
 
 type LocalReadEvidence = {
 	path: string;
-	device: number;
-	inode: number;
-	mtimeMs: number;
-	size: number;
+	/** {@link digestLocalReadBytes} of the captured bytes; execution and commit must reproduce it. */
 	digest: string;
-	snapshotDigest: string;
 };
 
 function isLocalReadSpeculationEvidence(value: unknown): value is LocalReadSpeculationEvidence {
@@ -71,26 +86,30 @@ function sameResourceState(left: nodeFs.Stats, right: nodeFs.Stats): boolean {
 	);
 }
 
-async function digestTargetEvidence(target: string): Promise<LocalReadEvidence | undefined> {
+/** Whether the captured bytes would leave the plain-text read path (image, binary, PDF, SQLite). */
+function isNonTextContent(bytes: Buffer): boolean {
+	if (parseImageMetadata(bytes.subarray(0, IMAGE_METADATA_HEADER_BYTES))) return true;
+	const header = bytes.subarray(0, BINARY_SNIFF_BYTES);
+	return (
+		isProbablyBinaryHeader(header) ||
+		header.subarray(0, 5).toString("ascii") === "%PDF-" ||
+		(header.length >= 16 && header.subarray(0, 15).toString("ascii") === "SQLite format 3" && header[15] === 0)
+	);
+}
+
+/**
+ * Read `target` once while its identity holds still and digest the bytes.
+ * Returns `undefined` for links, non-files, oversized files, unstable reads and
+ * — when `gateContent` is set — content the plain-text read path would not serve.
+ */
+async function digestTargetEvidence(target: string, gateContent: boolean): Promise<LocalReadEvidence | undefined> {
 	try {
 		const state = await fs.lstat(target);
 		if (state.isSymbolicLink() || !state.isFile() || state.size > SNAPSHOT_MAX_BYTES) return undefined;
 		const bytes = await fs.readFile(target);
 		if (!sameResourceState(state, await fs.lstat(target))) return undefined;
-		const digest = new Bun.CryptoHasher("sha256").update(bytes).digest("hex");
-		const rawText = bytes.toString("utf8");
-		const strippedText = rawText.charCodeAt(0) === 0xfeff ? rawText.slice(1) : rawText;
-		const normalizedText = strippedText.includes("\r") ? normalizeToLF(strippedText) : strippedText;
-		const snapshotDigest = new Bun.CryptoHasher("sha256").update(normalizedText).digest("hex");
-		return {
-			path: target,
-			device: state.dev,
-			inode: state.ino,
-			mtimeMs: state.mtimeMs,
-			size: state.size,
-			digest,
-			snapshotDigest,
-		};
+		if (gateContent && isNonTextContent(bytes)) return undefined;
+		return { path: target, digest: digestLocalReadBytes(bytes) };
 	} catch {
 		return undefined;
 	}
@@ -112,41 +131,46 @@ export class CodingAgentSpeculativeExecutionHost implements SpeculativeExecution
 	) {}
 
 	async authorize(context: SpeculativeOperationContext): Promise<SpeculativeAuthorization> {
-		if (!this.settings.get("tools.speculativeExecution.enabled")) {
-			return { allowed: false, reason: "speculative execution is disabled" };
+		return (await this.#authorizeRead(context)).authorization;
+	}
+
+	/** {@link authorize}, also reporting the resolved target an allowed read binds. */
+	async #authorizeRead(
+		context: SpeculativeOperationContext,
+	): Promise<{ authorization: SpeculativeAuthorization; resolved?: string }> {
+		if (!cfgToolsSpeculativeExecutionEnabled.get(this.settings)) {
+			return { authorization: { allowed: false, reason: "speculative execution is disabled" } };
 		}
 		const operation = operationGrant(context);
-		if (!operation) {
-			return { allowed: false, reason: "tool and effect pair is not supported for speculative execution" };
+		if (!operation || context.effect.kind !== "local_read") {
+			return {
+				authorization: {
+					allowed: false,
+					reason: "tool and effect pair is not supported for speculative execution",
+				},
+			};
 		}
-		if (context.effect.kind !== "local_read") {
-			return { allowed: false, reason: "tool and effect pair is not supported for speculative execution" };
-		}
-		if (hasLifecycleHandlers(this.extensionRunner)) {
-			return { allowed: false, reason: "active extension lifecycle handler" };
-		}
-		const approvalMode = this.settings.get("tools.approvalMode") as ApprovalMode;
-		const policies = this.settings.get("tools.approval") as Record<string, unknown>;
-		const approval = resolveApproval(context.tool, context.args, approvalMode, policies);
-		if (approval.policy !== "allow") return { allowed: false, reason: "tool approval is not auto-allow" };
+		const gate = this.#policyGate(context.tool, context.args);
+		if (!gate.allowed) return { authorization: gate };
 		const resource = context.effect.resources[0];
 		if (!resource || context.effect.resources.length !== 1 || resource.access !== "read") {
-			return { allowed: false, reason: "local read must have one read resource" };
+			return { authorization: { allowed: false, reason: "local read must have one read resource" } };
 		}
-		if (typeof context.args.path !== "string") return { allowed: false, reason: "local read path is invalid" };
+		if (typeof context.args.path !== "string") {
+			return { authorization: { allowed: false, reason: "local read path is invalid" } };
+		}
 		// The assessment is metadata-only, so the effect carries the lexical
 		// resolution of the requested path. Bind it here before touching disk:
 		// anything else means the candidate no longer describes this call.
-		if (!path.isAbsolute(resource.path)) return { allowed: false, reason: "local read resource changed" };
-		if (path.resolve(this.toolSession.cwd, context.args.path) !== resource.path) {
-			return { allowed: false, reason: "local read resource changed" };
+		if (!path.isAbsolute(resource.path) || path.resolve(this.toolSession.cwd, context.args.path) !== resource.path) {
+			return { authorization: { allowed: false, reason: "local read resource changed" } };
 		}
 		// Content inspection starts here — after the lifecycle, approval, and
 		// shape gates above have allowed the candidate — so a denied read
 		// never touches the filesystem. The resolver is shared with speculative
 		// execution so both bind the same target (see resolveSpeculativeReadTarget).
 		const target = await resolveSpeculativeReadTarget(this.toolSession.cwd, resource.path);
-		if (!target.ok) return { allowed: false, reason: target.reason };
+		if (!target.ok) return { authorization: { allowed: false, reason: target.reason } };
 		const resolved = target.resolved;
 		if (
 			resolved.toLowerCase().endsWith(".ipynb") ||
@@ -164,7 +188,7 @@ export class CodingAgentSpeculativeExecutionHost implements SpeculativeExecution
 			// lexical path exactly like an ordinary read, so decline either.
 			isVideoPath(resource.path)
 		) {
-			return { allowed: false, reason: "local read target is unsafe" };
+			return { authorization: { allowed: false, reason: "local read target is unsafe" } };
 		}
 		// Defer execution until the finalized call survives the `beforeToolCall`
 		// gate. The coordinator only honors this flag when a `beforeToolCall`
@@ -180,7 +204,31 @@ export class CodingAgentSpeculativeExecutionHost implements SpeculativeExecution
 		// admission time, but content inspection runs in `captureEvidence`
 		// immediately before execution — after the hook gate for deferred
 		// candidates — and nothing commits without passing validation below.
-		return { allowed: true, deferBeforeToolCall: true };
+		return { authorization: { allowed: true, deferBeforeToolCall: true }, resolved };
+	}
+
+	/**
+	 * Stream-session launches (e.g. `task` subagents started from streamed
+	 * items) pass the same lifecycle and approval gate as reads: work that a
+	 * handler could block or a user must approve never starts early.
+	 */
+	authorizeLaunch(context: SpeculativeLaunchContext): SpeculativeAuthorization {
+		return this.#policyGate(context.tool, context.args);
+	}
+
+	/** Extension lifecycle handlers and non-auto-allow approval both veto early execution. */
+	#policyGate(tool: SpeculativeToolReference, args: unknown): SpeculativeAuthorization {
+		if (hasLifecycleHandlers(this.extensionRunner)) {
+			return { allowed: false, reason: "active extension lifecycle handler" };
+		}
+		const approval = resolveApproval(
+			tool,
+			args,
+			cfgToolsApprovalMode.get(this.settings),
+			cfgToolsApproval.get(this.settings),
+		);
+		if (approval.policy !== "allow") return { allowed: false, reason: "tool approval is not auto-allow" };
+		return { allowed: true };
 	}
 
 	/**
@@ -201,18 +249,8 @@ export class CodingAgentSpeculativeExecutionHost implements SpeculativeExecution
 		if (path.resolve(this.toolSession.cwd, context.args.path) !== resource.path) return false;
 		const target = await resolveSpeculativeReadTarget(this.toolSession.cwd, resource.path);
 		if (!target.ok) return false;
-		const resolved = target.resolved;
-		if (await readImageMetadata(resolved)) return false;
-		const sniffed = await Bun.file(resolved).slice(0, BINARY_SNIFF_BYTES).bytes();
-		const header = Buffer.from(sniffed.buffer, sniffed.byteOffset, sniffed.byteLength);
-		if (
-			isProbablyBinaryHeader(header) ||
-			header.subarray(0, 5).toString("ascii") === "%PDF-" ||
-			(header.length >= 16 && header.subarray(0, 15).toString("ascii") === "SQLite format 3" && header[15] === 0)
-		) {
-			return false;
-		}
-		const evidence = await digestTargetEvidence(resolved);
+		// One read serves the content gates and the digest.
+		const evidence = await digestTargetEvidence(target.resolved, true);
 		if (!evidence) return false;
 		this.#evidence.set(context.candidateId, evidence);
 		return true;
@@ -228,27 +266,23 @@ export class CodingAgentSpeculativeExecutionHost implements SpeculativeExecution
 		if (
 			!isLocalReadSpeculationEvidence(consumed) ||
 			consumed.resource !== expected.path ||
-			consumed.snapshotDigest !== expected.snapshotDigest
+			consumed.snapshotDigest !== expected.digest
 		) {
 			return false;
 		}
-		const authorization = await this.authorize(context);
-		if (!authorization.allowed) return false;
-		// Re-resolve the current lexical target: a symlink swapped after execution
-		// resolves to a new target that re-authorization above happily gates, while
-		// the digest below would still read the old one. All three resolutions
-		// (capture, execution, commit) must agree, or the commit is for bytes the
-		// authoritative dispatch would never read.
-		if (typeof context.args.path !== "string") return false;
-		const current = await resolveSpeculativeReadTarget(this.toolSession.cwd, context.args.path);
-		if (!current.ok || current.resolved !== expected.path) return false;
-		// pre-execution, so anything that changed afterwards (edit, swap,
-		// restore) must veto the commit even though the execution digest matches
-		// the capture. Byte equality also re-binds the type gates — swapped-in
-		// content can never commit without passing them on its own bytes.
-		const fresh = await digestTargetEvidence(consumed.resource);
-		if (!fresh) return false;
-		return fresh.digest === expected.digest && fresh.snapshotDigest === expected.snapshotDigest;
+		// Re-authorize against the current lexical target: a symlink swapped after
+		// execution resolves to a new target that re-authorization happily gates,
+		// while the digest below would still read the old one. All three
+		// resolutions (capture, execution, commit) must agree, or the commit is for
+		// bytes the authoritative dispatch would never read.
+		const { authorization, resolved } = await this.#authorizeRead(context);
+		if (!authorization.allowed || resolved !== expected.path) return false;
+		// Evidence was captured pre-execution, so anything that changed afterwards
+		// (edit, swap, restore) must veto the commit even though the execution
+		// digest matches the capture. Byte equality also re-binds the type gates —
+		// swapped-in content can never commit without passing them on its own bytes.
+		const fresh = await digestTargetEvidence(consumed.resource, false);
+		return fresh?.digest === expected.digest;
 	}
 
 	async commit(
@@ -284,6 +318,9 @@ export class CodingAgentSpeculativeExecutionHost implements SpeculativeExecution
  * while the single shared host preserves accumulated evidence across toggles.
  * The host's own `authorize` re-checks the enabled flag per operation, so a
  * lingering coordinator from before a disable still vetoes new candidates.
+ * `task.speculativeLaunch` also keeps the coordinator alive: reads and eval
+ * stay gated by `tools.speculativeExecution.enabled`, while the task tool's
+ * stream session gates itself on its own flag.
  */
 export function createSpeculativeToolExecutionConfig(
 	settings: Settings,
@@ -293,10 +330,10 @@ export function createSpeculativeToolExecutionConfig(
 	const host = new CodingAgentSpeculativeExecutionHost(settings, toolSession, extensionRunner);
 	return {
 		get enabled() {
-			return settings.get("tools.speculativeExecution.enabled");
+			return cfgToolsSpeculativeExecutionEnabled.get(settings) || cfgTaskSpeculativeLaunch.get(settings);
 		},
 		get maxInFlight() {
-			return settings.get("tools.speculativeExecution.maxInFlight");
+			return cfgToolsSpeculativeExecutionMaxInFlight.get(settings);
 		},
 		host,
 	};

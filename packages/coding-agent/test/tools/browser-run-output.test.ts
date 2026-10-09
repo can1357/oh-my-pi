@@ -72,6 +72,7 @@ describe("browser handle enrichment — fill()", () => {
 					focus: () => {
 						node.focused = true;
 					},
+					matches: () => false,
 				});
 			},
 			type: async (text: string) => {
@@ -82,7 +83,7 @@ describe("browser handle enrichment — fill()", () => {
 
 		await toActionableHandle(stub).fill("fresh");
 
-		expect(calls).toEqual(["evaluate", "type"]);
+		expect(calls).toEqual(["evaluate", "evaluate", "type"]);
 		expect(node.focused).toBe(true);
 		expect(node.value).toBe("fresh");
 	});
@@ -108,14 +109,23 @@ describe("browser handle enrichment — guarded actions", () => {
 		return { guard, labels };
 	};
 
+	// handle.click() resolves a stable, unoccluded click point (boundingBox + the
+	// actionability probe) and then dispatches through the page mouse, so a stub
+	// stands in for those three seams rather than a raw `click` method.
+	const clickableStub = (mouseClick: () => Promise<void>, extra: Record<string, unknown> = {}): ElementHandle =>
+		({
+			boundingBox: async () => ({ x: 10, y: 10, width: 20, height: 20 }),
+			evaluate: async () => ({ ok: true, x: 20, y: 20 }),
+			frame: { page: () => ({ mouse: { click: mouseClick } }) },
+			type: async () => {},
+			dispose: async () => {},
+			...extra,
+		}) as unknown as ElementHandle;
+
 	it("fails a stalled handle.click() fast with a named error instead of hanging", async () => {
 		const stalled = Promise.withResolvers<void>();
-		const stub = {
-			click: () => stalled.promise, // never settles — a busy popup/navigation stall
-			type: async () => {},
-			evaluate: async () => {},
-			dispose: async () => {},
-		} as unknown as ElementHandle;
+		// never settles — a busy popup/navigation stall
+		const stub = clickableStub(() => stalled.promise);
 		const { guard, labels } = makeGuard(50);
 
 		await expect(toActionableHandle(stub, guard).click()).rejects.toThrow("handle.click() timed out after 50ms");
@@ -127,17 +137,17 @@ describe("browser handle enrichment — guarded actions", () => {
 		let disposed = false;
 		let cacheCleared = false;
 		const stalled = Promise.withResolvers<void>();
-		const stub = {
-			click: () => {
+		const stub = clickableStub(
+			() => {
 				clicks++;
 				return stalled.promise;
 			},
-			type: async () => {},
-			evaluate: async () => {},
-			dispose: async () => {
-				disposed = true;
+			{
+				dispose: async () => {
+					disposed = true;
+				},
 			},
-		} as unknown as ElementHandle;
+		);
 		const { guard } = makeGuard(50);
 		const handle = toActionableHandle(stub, guard, async () => {
 			cacheCleared = true;
@@ -158,7 +168,7 @@ describe("browser handle enrichment — guarded actions", () => {
 		const stub = {
 			type: async () => {},
 			evaluate: async (fn: (el: unknown) => unknown) => {
-				fn({ focus: () => {} });
+				fn({ focus: () => {}, matches: () => false });
 			},
 			frame: {
 				page: () => ({
@@ -188,20 +198,20 @@ describe("browser handle enrichment — guarded actions", () => {
 	});
 
 	it("passes arguments and return values through the guarded method unchanged", async () => {
-		let calls = 0;
+		const received: unknown[][] = [];
 		const stub = {
-			select: async (...values: string[]) => {
-				calls++;
-				return values;
+			drag: async (...args: unknown[]) => {
+				received.push(args);
+				return { items: [], dragOperationsMask: 1 };
 			},
 			type: async () => {},
 			evaluate: async () => {},
 		} as unknown as ElementHandle;
 		const { guard, labels } = makeGuard(1_000);
 
-		expect(await toActionableHandle(stub, guard).select("a", "b")).toEqual(["a", "b"]);
-		expect(calls).toBe(1);
-		expect(labels).toEqual(["handle.select()"]);
+		expect(await toActionableHandle(stub, guard).drag({ x: 1, y: 2 })).toEqual({ items: [], dragOperationsMask: 1 });
+		expect(received).toEqual([[{ x: 1, y: 2 }]]);
+		expect(labels).toEqual(["handle.drag()"]);
 	});
 
 	it("guards drag and touch input methods, not just click/type", async () => {
@@ -238,6 +248,7 @@ describe("browser handle enrichment — guarded actions", () => {
 					focus: () => {
 						node.focused = true;
 					},
+					matches: () => false,
 				});
 			},
 			type: async () => {},
@@ -263,13 +274,9 @@ describe("browser handle enrichment — guarded actions", () => {
 
 	it("rewraps a cached handle from its original methods for each browser run", async () => {
 		let clicks = 0;
-		const stub = {
-			click: async () => {
-				clicks++;
-			},
-			type: async () => {},
-			evaluate: async () => {},
-		} as unknown as ElementHandle;
+		const stub = clickableStub(async () => {
+			clicks++;
+		});
 		const firstLabels: string[] = [];
 		const firstGuard: HandleOpGuard = (label, fn) => {
 			firstLabels.push(label);

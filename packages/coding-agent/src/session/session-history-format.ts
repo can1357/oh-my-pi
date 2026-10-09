@@ -8,7 +8,7 @@
  */
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, ImageContent, TextContent, ToolResultMessage } from "@oh-my-pi/pi-ai";
-import { escapeXmlText } from "@oh-my-pi/pi-utils";
+import { countNewlines, escapeXmlText } from "@oh-my-pi/pi-utils";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
 import type {
 	BashExecutionMessage,
@@ -42,9 +42,12 @@ export interface HistoryFormatOptions {
 	 */
 	expandPrimaryContext?: boolean;
 	/**
-	 * Append the full unified diff (from a tool result's `details.diff`) below
+	 * Append the unified diff (from a tool result's `details.diff`) below
 	 * edit/apply_patch tool lines, instead of just the path. The advisor sets
-	 * this so it sees what changed without re-reading the file.
+	 * this so it sees what changed without re-reading the file. Bounded by the
+	 * same byte budget as expanded tool IO but its own, higher line cap
+	 * ({@link EXPANDED_DIFF_MAX_LINES}): a huge diff is middle-truncated rather
+	 * than admitted whole.
 	 */
 	expandEditDiffs?: boolean;
 	/**
@@ -79,6 +82,8 @@ const PRIMARY_ARG_MAX = 120;
 /** Per-tool budget for expanded advisor input/output. */
 const EXPANDED_TOOL_IO_MAX_BYTES = 8 * 1024;
 const EXPANDED_TOOL_IO_MAX_LINES = 80;
+/** Diffs get more lines than generic tool IO (same byte cap) so mid-edit hunks reach the advisor. */
+const EXPANDED_DIFF_MAX_LINES = 300;
 const EXPANDED_ASK_FIELD_MAX_BYTES = 2 * 1024;
 const EXPANDED_ASK_FIELD_MAX_LINES = 20;
 
@@ -124,7 +129,7 @@ function contentToText(content: string | readonly (TextContent | ImageContent)[]
 
 function lineCount(text: string): number {
 	if (!text) return 0;
-	return text.split("\n").length;
+	return countNewlines(text) + 1;
 }
 
 function primaryArgValue(value: unknown): string {
@@ -204,11 +209,6 @@ function fencedText(text: string, language: string): string {
 	return `${fence}${language}\n${text}\n${fence}`;
 }
 
-/** Wrap a diff in the shared adaptive Markdown fence. */
-function fenceDiff(diff: string): string {
-	return fencedText(diff, "diff");
-}
-
 function boundedToolContext(text: string): string {
 	return truncateMiddle(text, {
 		maxBytes: EXPANDED_TOOL_IO_MAX_BYTES,
@@ -232,7 +232,7 @@ function boundedAskJson(value: unknown, transform?: (text: string) => string): s
 	);
 }
 
-function boundedFencedToolContext(text: string, language: string): string {
+function boundedFencedToolContext(text: string, language: string, maxLines = EXPANDED_TOOL_IO_MAX_LINES): string {
 	const longestFence = text.match(/`+/g)?.reduce((max, run) => Math.max(max, run.length), 0) ?? 0;
 	// A pathological run can make Markdown fences larger than the whole budget.
 	// Use indented code in that case: constant wrapper cost and no delimiter collision.
@@ -240,7 +240,7 @@ function boundedFencedToolContext(text: string, language: string): string {
 		const marker = "[…content elided to fit advisor context…]";
 		const truncated = truncateMiddle(text, {
 			maxBytes: EXPANDED_TOOL_IO_MAX_BYTES - Buffer.byteLength(marker) - 2,
-			maxLines: EXPANDED_TOOL_IO_MAX_LINES,
+			maxLines,
 		});
 		const bounded = truncated.truncated ? `${marker}\n${truncated.content}` : truncated.content;
 		return bounded.replace(/^/gm, "    ");
@@ -249,7 +249,7 @@ function boundedFencedToolContext(text: string, language: string): string {
 	return fencedText(
 		truncateMiddle(text, {
 			maxBytes: Math.max(1, EXPANDED_TOOL_IO_MAX_BYTES - fenceBytes),
-			maxLines: EXPANDED_TOOL_IO_MAX_LINES,
+			maxLines,
 		}).content,
 		language,
 	);
@@ -329,7 +329,7 @@ function toolCallLine(
 	if (expandEditDiffs) {
 		const diff = (result?.details as { diff?: unknown } | undefined)?.diff;
 		if (typeof diff === "string" && diff.trim()) {
-			base = `${base}\n${fenceDiff(diff)}`;
+			base = `${base}\n${boundedFencedToolContext(transformExpandedToolIO?.(diff) ?? diff, "diff", EXPANDED_DIFF_MAX_LINES)}`;
 		}
 	}
 
@@ -388,10 +388,21 @@ function executionLine(
  */
 export const PRIMARY_CONTEXT_CUSTOM_TYPES: ReadonlySet<string> = new Set(["plan-mode-context", "plan-mode-reference"]);
 
-/** Hidden non-primary custom messages whose content is needed to understand visible transcript entries. */
+/**
+ * Hidden non-primary custom messages whose content is needed to understand visible transcript entries:
+ * vision descriptions and the source file behind an `[image]` a user pasted or dropped.
+ */
 const CONTEXTUAL_NON_PRIMARY_HIDDEN_CUSTOM_TYPES: Record<string, true> = {
 	"image-attachment-description": true,
+	"image-attachment": true,
 };
+
+/**
+ * Notices persisted before they carried `{ index, path }` details hold only the text rendered
+ * from `prompts/system/image-attachment.md`; these recover both fields from it.
+ */
+const LEGACY_IMAGE_ATTACHMENT_INDEX = /`\[Image #(\d+)\]`/;
+const LEGACY_IMAGE_ATTACHMENT_PATH = /^Source path: `(.+)`$/m;
 
 /** One-liner for custom/hook messages: `[irc] A → B: body…`. */
 function customOneLiner(msg: CustomMessage | HookMessage): string {
@@ -413,6 +424,16 @@ function customOneLiner(msg: CustomMessage | HookMessage): string {
 				})
 				.join(", ");
 			return `[async-result] ${oneLine(labels)}`;
+		}
+		case "image-attachment": {
+			// The notice body is model-facing boilerplate; its path would be cut by `oneLine`.
+			// Emit the full path so a reader of the transcript can `read` the file.
+			const text = contentToText(msg.content);
+			const path = str("path") || LEGACY_IMAGE_ATTACHMENT_PATH.exec(text)?.[1];
+			if (!path) return `[${msg.customType}] ${oneLine(text)}`;
+			const index =
+				typeof details.index === "number" ? details.index : (LEGACY_IMAGE_ATTACHMENT_INDEX.exec(text)?.[1] ?? "?");
+			return `[image-attachment] Image #${index}: ${path}`;
 		}
 		default:
 			return `[${msg.customType}] ${oneLine(contentToText(msg.content))}`;

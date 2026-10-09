@@ -8,7 +8,7 @@
  * send, and the loop never broke ("/collab disconnects when session is too
  * large").
  *
- * The fixed host runs every replicated entry through `shrinkReplicatedEntry`
+ * The fixed host runs every replicated entry through `serializeReplicatedEntry`
  * so a head-truncated mirror ships instead. The test stands up a real
  * Bun.serve relay with `maxPayloadLength` set tight, hosts a snapshot
  * containing one ~5 MB entry, and asserts:
@@ -29,6 +29,7 @@
  * `id`/`parentId` so the guest's branch chain stays connected.
  */
 import { afterEach, describe, expect, it } from "bun:test";
+import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { importRoomKey } from "@oh-my-pi/pi-coding-agent/collab/crypto";
 import { CollabHost } from "@oh-my-pi/pi-coding-agent/collab/host";
 import {
@@ -43,12 +44,12 @@ import {
 	COLLAB_ENTRY_OMITTED_CUSTOM_TYPE,
 	copyForReplication,
 	MAX_REPLICATED_PAYLOAD_BYTES,
-	oversizedEntryNotice,
 	type ReplicatedEntry,
 	replicationByteLength,
-	shrinkReplicatedEntry,
-	shrinkReplicatedEvent,
+	serializeReplicatedEntry,
+	serializeReplicatedEvent,
 } from "@oh-my-pi/pi-coding-agent/collab/replication-shrink";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import type { AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
@@ -188,13 +189,13 @@ interface HostHarness {
 /**
  * The slice of `SessionManager` the host actually drives. Narrowing it here is
  * what lets a case supply either a fixture snapshot or the real manager — and
- * the real manager is the interesting one, because it owns the deep copy the
- * host performs before the shrinker runs.
+ * the real manager is the interesting one, because the host reads its live
+ * entries without a copy and must leave them untouched.
  */
 interface HostReplicationSource {
 	getSessionId(): string;
 	getCwd(): string;
-	snapshotForReplication(copy?: <T>(value: T) => T): HostSnapshot;
+	snapshotForReplication(): { header: HostSnapshot["header"]; entries: readonly SessionEntry[] };
 	onEntryAppended?: ((entry: SessionEntry) => void) | undefined;
 }
 
@@ -210,7 +211,7 @@ function makeHostContext(snapshot: HostSnapshot): HostHarness {
 function makeHostHarness(sessionManager: HostReplicationSource): HostHarness {
 	const statusMessages: string[] = [];
 	const ctx = {
-		settings: { get: () => "" },
+		settings: Settings.isolated(),
 		sessionManager,
 		session: {
 			isStreaming: false,
@@ -287,11 +288,25 @@ function expectBounded(value: unknown): number {
 	return bytes;
 }
 
+/** The bounded entry, after checking its JSON is exactly what the frame would carry. */
+function boundEntry(entry: ReplicatedEntry): ReplicatedEntry {
+	const { value, json } = serializeReplicatedEntry(entry);
+	expect(json).toBe(JSON.stringify(value));
+	return value;
+}
+
+/** The bounded event, after checking its JSON is exactly what the frame would carry. */
+function boundEvent(event: AgentSessionEvent): AgentSessionEvent {
+	const { value, json } = serializeReplicatedEvent(event);
+	expect(json).toBe(JSON.stringify(value));
+	return value;
+}
+
 // ── Fixture ────────────────────────────────────────────────────────────────
 
 /**
  * 5 MB single-entry payload is comfortably above the 1 MB replication ceiling
- * the host's `shrinkReplicatedEntry` enforces but well below the relay's
+ * the host's `serializeReplicatedEntry` enforces but well below the relay's
  * `maxPayloadLength` here (8 MB). Pre-#3739 this entry shipped as its own
  * ~5 MB chunk through the relay; today it ships head-truncated to ~64 KB.
  */
@@ -347,13 +362,13 @@ describe("collab replication shrinking (#3739)", () => {
 	});
 });
 
-describe("shrinkReplicatedEntry (#11433)", () => {
+describe("serializeReplicatedEntry (#11433)", () => {
 	it("does not substitute a placeholder for an entry that already fits", () => {
 		// Negative contract: the ceiling may only rewrite a payload it cannot
 		// bound. An entry under it must reach the guest verbatim — substituting
 		// here would show every ordinary entry as "too large to replicate".
 		const small = userMessage("m1", null, "2026-09-13T00:00:00Z", "hi");
-		const shrunk = shrinkReplicatedEntry(small);
+		const shrunk = boundEntry(small);
 		expect(shrunk.type).toBe("message");
 		const serialized = JSON.stringify(shrunk);
 		expect(serialized).not.toContain(COLLAB_ENTRY_OMITTED_CUSTOM_TYPE);
@@ -362,7 +377,7 @@ describe("shrinkReplicatedEntry (#11433)", () => {
 
 	it("clamps a single giant string under the ceiling with an elision marker", () => {
 		const entry = userMessage("m1", null, "2026-09-13T00:00:00Z", "x".repeat(5 * 1024 * 1024));
-		const shrunk = shrinkReplicatedEntry(entry);
+		const shrunk = boundEntry(entry);
 		expect(shrunk).not.toBe(entry);
 		expectBounded(shrunk);
 		if (shrunk.type !== "message" || shrunk.message.role !== "user") throw new Error("expected user message");
@@ -383,7 +398,7 @@ describe("shrinkReplicatedEntry (#11433)", () => {
 		} as unknown as ReplicatedEntry;
 		expect(replicationByteLength(entry) ?? 0).toBeGreaterThan(MAX_REPLICATED_PAYLOAD_BYTES);
 
-		const shrunk = shrinkReplicatedEntry(entry);
+		const shrunk = boundEntry(entry);
 		expectBounded(shrunk);
 		if (shrunk.type !== "message") throw new Error("expected message entry");
 		const shrunkContent = (shrunk.message as unknown as { content: unknown[] }).content;
@@ -405,7 +420,7 @@ describe("shrinkReplicatedEntry (#11433)", () => {
 			message: { role: "user", content: "", timestamp: 0, blob: { [giantKey]: 1 } },
 		} as unknown as ReplicatedEntry;
 
-		const shrunk = shrinkReplicatedEntry(entry);
+		const shrunk = boundEntry(entry);
 		expect(shrunk.type).toBe("custom_message");
 		expectBounded(shrunk);
 		if (shrunk.type !== "custom_message") throw new Error("expected typed placeholder");
@@ -427,7 +442,7 @@ describe("shrinkReplicatedEntry (#11433)", () => {
 			message: { role: "user", content: "", timestamp: 0, blob },
 		} as unknown as ReplicatedEntry;
 
-		const shrunk = shrinkReplicatedEntry(entry);
+		const shrunk = boundEntry(entry);
 		expect(shrunk.type).toBe("custom_message");
 		expectBounded(shrunk);
 		expect(shrunk.id).toBe("m2");
@@ -448,7 +463,7 @@ describe("shrinkReplicatedEntry (#11433)", () => {
 			message: { role: "user", content: "", timestamp: 0, blob: deep },
 		} as unknown as ReplicatedEntry;
 
-		const shrunk = shrinkReplicatedEntry(entry);
+		const shrunk = boundEntry(entry);
 		// The depth cap is what makes this serializable at all: the engine's own
 		// `JSON.stringify`/`structuredClone` throw at ~40,000 levels, so the
 		// walk must emit a shallower clone than it was given.
@@ -467,7 +482,7 @@ describe("shrinkReplicatedEntry (#11433)", () => {
 		expect(asJson.length).toBeLessThanOrEqual(MAX_REPLICATED_PAYLOAD_BYTES);
 		expect(Buffer.byteLength(asJson, "utf8")).toBeGreaterThan(MAX_REPLICATED_PAYLOAD_BYTES);
 
-		const shrunk = shrinkReplicatedEntry(entry);
+		const shrunk = boundEntry(entry);
 		expect(shrunk).not.toBe(entry);
 		expectBounded(shrunk);
 	});
@@ -491,7 +506,7 @@ describe("shrinkReplicatedEntry (#11433)", () => {
 		// returning it by reference.
 		expect(replicationByteLength(entry)).toBeNull();
 
-		const shrunk = shrinkReplicatedEntry(entry);
+		const shrunk = boundEntry(entry);
 		expectBounded(shrunk);
 		expect(shrunk.id).toBe("m5");
 		if (shrunk.type !== "message") throw new Error("expected the message entry to survive");
@@ -515,17 +530,17 @@ describe("shrinkReplicatedEntry (#11433)", () => {
 
 		const manager = SessionManager.inMemory();
 		manager.ingestReplicatedEntry(userMessage("prior", null, "2026-09-13T00:00:00Z", "before"));
-		manager.ingestReplicatedEntry(shrinkReplicatedEntry(omitted));
+		manager.ingestReplicatedEntry(boundEntry(omitted));
 		manager.ingestReplicatedEntry(successor);
 
 		expect(manager.getBranch().map(entry => entry.id)).toEqual(["prior", "omitted", "successor"]);
 	});
 });
 
-describe("shrinkReplicatedEvent (#11433)", () => {
+describe("serializeReplicatedEvent (#11433)", () => {
 	it("does not substitute a notice for an event that already fits", () => {
 		const event: AgentSessionEvent = { type: "agent_end", messages: [] } as unknown as AgentSessionEvent;
-		const shrunk = shrinkReplicatedEvent(event);
+		const shrunk = boundEvent(event);
 		expect(shrunk.type).toBe("agent_end");
 		expect(JSON.stringify(shrunk)).not.toContain("Host event omitted");
 	});
@@ -538,7 +553,7 @@ describe("shrinkReplicatedEvent (#11433)", () => {
 			result: { text: "x".repeat(8 * 1024 * 1024) },
 		} as unknown as AgentSessionEvent;
 
-		const shrunk = shrinkReplicatedEvent(event);
+		const shrunk = boundEvent(event);
 		expect(shrunk).not.toBe(event);
 		expect(shrunk.type).toBe("tool_execution_end");
 		expectBounded(shrunk);
@@ -556,7 +571,7 @@ describe("shrinkReplicatedEvent (#11433)", () => {
 			result: { [giantKey]: 1 },
 		} as unknown as AgentSessionEvent;
 
-		const shrunk = shrinkReplicatedEvent(event);
+		const shrunk = boundEvent(event);
 		expect(shrunk.type).toBe("notice");
 		expectBounded(shrunk);
 		if (shrunk.type !== "notice") throw new Error("expected notice event");
@@ -581,8 +596,8 @@ describe("collab snapshot train over a real SessionManager (#11433)", () => {
 
 		// Every other host case injects a snapshot object literal, which skips
 		// `snapshotForReplication` entirely. This one runs the real manager, so
-		// the host's own deep copy of the entries is on the path being tested —
-		// the copy that used to throw before the shrinker could bound anything.
+		// the host serializes the live entries itself — the path where a copy
+		// used to throw before the shrinker could bound anything.
 		const manager = SessionManager.inMemory();
 		manager.ingestReplicatedEntry(userMessage("small-1", null, "2026-09-13T00:00:00Z", "hi"));
 		manager.ingestReplicatedEntry({
@@ -620,6 +635,55 @@ describe("collab snapshot train over a real SessionManager (#11433)", () => {
 		const replica = SessionManager.inMemory();
 		for (const entry of chunkEntries) replica.ingestReplicatedEntry(entry);
 		expect(replica.getBranch().map(entry => entry.id)).toEqual(["small-1", "deep-1"]);
+	});
+});
+
+describe("collab welcome image strip over a real SessionManager", () => {
+	it("strips images from the guest's snapshot without touching the host's live entry", async () => {
+		const relay = startTestRelay(RELAY_MAX_PAYLOAD);
+		cleanups.push(() => relay.stop());
+
+		// The host reads the manager's live entries without a copy, so stripping
+		// must happen on a private copy: an in-place strip would delete the image
+		// from the host's own transcript (and its next model request) just
+		// because a guest joined a large session.
+		const manager = SessionManager.inMemory();
+		// 25 MB of filler pushes the snapshot past the host's 24 MB welcome
+		// threshold; the entry itself ships head-truncated.
+		manager.ingestReplicatedEntry(
+			userMessage("filler-1", null, "2026-09-13T00:00:00Z", "x".repeat(25 * 1024 * 1024)),
+		);
+		const image: ImageContent = { type: "image", data: "iVBORw0KGgo", mimeType: "image/png" };
+		const imageEntry: ReplicatedEntry = {
+			type: "message",
+			id: "image-1",
+			parentId: "filler-1",
+			timestamp: "2026-09-13T00:00:01Z",
+			message: { role: "user", content: [{ type: "text", text: "look" }, image], timestamp: 0 },
+		};
+		manager.ingestReplicatedEntry(imageEntry);
+
+		const harness = makeHostHarness(manager);
+		const host = new CollabHost(harness.ctx);
+		await host.start(relay.url);
+		cleanups.push(() => host.stop("test done"));
+
+		const { frames, closes } = await collectSnapshotTrain(host);
+		expect(closes).toEqual([]);
+
+		const chunkEntries: SessionEntry[] = [];
+		for (const f of frames) if (f.t === "snapshot-chunk") chunkEntries.push(...f.entries);
+		expect(chunkEntries.map(entry => entry.id)).toEqual(["filler-1", "image-1"]);
+		const shipped = chunkEntries.find(entry => entry.id === "image-1");
+		if (shipped?.type !== "message" || shipped.message.role !== "user") throw new Error("expected the image message");
+		const shippedContent = shipped.message.content;
+		if (!Array.isArray(shippedContent)) throw new Error("expected array content");
+		expect(shippedContent.some(block => block.type === "image")).toBe(false);
+		expect(shippedContent).toContainEqual({ type: "text", text: "look" });
+
+		const live = manager.getEntry("image-1");
+		if (live?.type !== "message" || live.message.role !== "user") throw new Error("expected the live image message");
+		expect(live.message.content).toEqual([{ type: "text", text: "look" }, image]);
 	});
 });
 
@@ -701,35 +765,5 @@ describe("copyForReplication JSON contract (PR #11999 review)", () => {
 		const copy = copyForReplication(value) as { details: { at: unknown; label: string } };
 		expect(JSON.stringify(copy)).toBe('{"details":{"at":"2026-09-13T12:00:00.000Z","label":"x"}}');
 		expect(replicationByteLength(copy)).not.toBe(null);
-	});
-});
-
-describe("live oversized-entry substitution is guest-visible (PR #11999 review)", () => {
-	it("accompanies a live placeholder with a notice event on the event stream", () => {
-		// Guests only apply `message` entries to their live agent context, so
-		// the placeholder entry alone would be silently invisible there. The
-		// host must emit a notice with the same visible text; notices never
-		// enter agent state, so this stays display-only.
-		const giantKey = "k".repeat(2 * MAX_REPLICATED_PAYLOAD_BYTES);
-		const entry = {
-			type: "message",
-			id: "huge-live-1",
-			parentId: null,
-			timestamp: "2026-09-13T00:00:00Z",
-			message: { role: "user", content: "", timestamp: 0, blob: { [giantKey]: 1 } },
-		} as unknown as ReplicatedEntry;
-
-		const shrunk = shrinkReplicatedEntry(entry);
-		expect(shrunk.type).toBe("custom_message");
-		if (shrunk.type !== "custom_message") throw new Error("expected the typed placeholder");
-		expect(shrunk.customType).toBe(COLLAB_ENTRY_OMITTED_CUSTOM_TYPE);
-		expectBounded(shrunk);
-
-		const notice = oversizedEntryNotice("message");
-		expect(notice.type).toBe("notice");
-		expect(notice.level).toBe("warning");
-		expect(notice.source).toBe("collab");
-		expect(notice.message).toContain("too large to replicate");
-		expect(notice.message).toContain("(message)");
 	});
 });

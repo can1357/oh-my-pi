@@ -11,7 +11,7 @@ import { TempDir } from "@oh-my-pi/pi-utils";
 import { type DaemonBrokerStartOptions, startDaemonBrokerFromEnvironment } from "../../src/launch/broker";
 import { createDaemonBrokerClient, type DaemonBrokerClient } from "../../src/launch/client";
 import { DAEMON_IDLE_GRACE_ENV, DAEMON_PROJECT_DIR_ENV, DAEMON_RUNTIME_DIR_ENV } from "../../src/launch/protocol";
-import { type DaemonSnapshot } from "@oh-my-pi/pi-tui/tools/hub";
+import { type DaemonSnapshot } from "@oh-my-pi/pi-tui/tools/daemon";
 
 const RESTART_BACKOFF_BASE_MS = 250;
 const INITIAL_RESTART_DELAY_MS = RESTART_BACKOFF_BASE_MS * 2;

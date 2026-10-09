@@ -20,10 +20,14 @@ function makeBridge() {
 describe("IrcBridge wake-relay marking", () => {
 	it("marks relay messages so the peer never relays them back", async () => {
 		const { bridge, woken } = makeBridge();
-		const outcome = await bridge.deliver(
-			{ id: "irc-1", from: "B", to: "A", body: "You hang up", ts: Date.now(), wakeRelay: true },
-			undefined,
-		);
+		const outcome = await bridge.deliver({
+			id: "irc-1",
+			from: "B",
+			to: "A",
+			body: "You hang up",
+			ts: Date.now(),
+			wakeRelay: true,
+		});
 
 		expect(outcome).toBe("woken");
 		expect(woken).toHaveLength(1);
@@ -35,7 +39,7 @@ describe("IrcBridge wake-relay marking", () => {
 
 	it("still advertises the stop relay for genuine messages", async () => {
 		const { bridge, woken } = makeBridge();
-		await bridge.deliver({ id: "irc-2", from: "B", to: "A", body: "status?", ts: Date.now() }, undefined);
+		await bridge.deliver({ id: "irc-2", from: "B", to: "A", body: "status?", ts: Date.now() });
 
 		const record = woken[0][0] as CustomMessage;
 		expect(record.details).not.toHaveProperty("wakeRelay");

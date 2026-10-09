@@ -33,7 +33,7 @@ describe("AgentSession dispose releases retained memory", () => {
 	beforeEach(() => {
 		tempDir = TempDir.createSync("@omp-dispose-release-");
 		authStorage = createInMemoryAuthStorage();
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		authStorage.keys.setRuntime("anthropic", "test-key");
 	});
 
 	afterEach(async () => {
@@ -101,6 +101,28 @@ describe("AgentSession dispose releases retained memory", () => {
 		expect(current.rawSseDebugBuffer.toRawText()).toBe("");
 		expect(current.agent.appendOnlyContext).toBeUndefined();
 		expect(current.rawSseDebugBuffer.snapshot().records).toHaveLength(0);
+	});
+
+	it("rejects late artifact writes while dispose is waiting for its final close", async () => {
+		const current = createSession();
+		expect(await current.sessionManager.saveArtifact("live spill", "read")).toBe("0");
+		const reachedClose = Promise.withResolvers<void>();
+		const finishClose = Promise.withResolvers<void>();
+		const close = current.sessionManager.close.bind(current.sessionManager);
+		vi.spyOn(current.sessionManager, "close").mockImplementation(async () => {
+			reachedClose.resolve();
+			await finishClose.promise;
+			await close();
+		});
+		const disposing = current.dispose();
+		try {
+			await reachedClose.promise;
+			expect(await current.sessionManager.saveArtifact(`late-${crypto.randomUUID()}`, "read")).toBeUndefined();
+		} finally {
+			finishClose.resolve();
+			await disposing;
+			session = undefined;
+		}
 	});
 
 	it("waits for the active turn to settle before releasing memory", async () => {

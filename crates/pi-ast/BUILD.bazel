@@ -5,7 +5,8 @@ package(default_visibility = ["//visibility:public"])
 
 exports_files(["Cargo.toml"])
 
-# Owns every tree-sitter grammar dependency edge (56 grammar crates + core).
+# Owns every linked tree-sitter grammar (17 crates + runtime); the other
+# languages load WebAssembly grammars at runtime (src/language/grammar.rs).
 rust_library(
     name = "pi-ast",
     srcs = glob(["src/**/*.rs"]),
@@ -14,11 +15,14 @@ rust_library(
     edition = "2024",
     proc_macro_deps = all_crate_deps(proc_macro = True),
     version = "17.1.5",
-    deps = all_crate_deps(normal = True),
+    deps = all_crate_deps(normal = True) + [
+        "//crates/vendor/tree-sitter-go",
+    ],
 )
 
 rust_test(
     name = "pi-ast_test",
+    compile_data = ["src/language/testdata/ini.wasm"],
     crate = ":pi-ast",
     edition = "2024",
     proc_macro_deps = all_crate_deps(proc_macro_dev = True),

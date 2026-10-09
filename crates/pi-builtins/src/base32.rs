@@ -5,7 +5,6 @@
 use std::{
 	fmt,
 	ffi::OsString,
-	fs::File,
 	io::{self, BufRead, BufReader, Write},
 };
 
@@ -191,7 +190,7 @@ pub(crate) fn run_base(matches: &ArgMatches, format: Format, host: &mut Host) ->
 	};
 
 	let result = if let Some(name) = config.to_read.clone() {
-		match File::open(host.resolve(&name)) {
+		match host.fs().open(host.resolve(&name)) {
 			Ok(file) => {
 				let mut input = BufReader::with_capacity(DEFAULT_BUF_SIZE, file);
 				handle_input(&mut input, &mut host.stdout, format, config)
@@ -779,15 +778,19 @@ mod fast_decode {
 				return Err(BaseError::new("error: invalid input"));
 			}
 
+			// Decode a full chunk at a time: flushing every complete block as it
+			// arrives would write 5 bytes per 8 input characters.
 			if supports_partial_decode {
-				flush_ready_chunks(
-					&mut buffer,
-					decode_in_chunks_of_size,
-					valid_multiple,
-					supports_fast_decode_and_encode,
-					&mut decoded_buffer,
-					output,
-				)?;
+				if buffer.len() >= decode_in_chunks_of_size {
+					flush_ready_chunks(
+						&mut buffer,
+						decode_in_chunks_of_size,
+						valid_multiple,
+						supports_fast_decode_and_encode,
+						&mut decoded_buffer,
+						output,
+					)?;
+				}
 			} else if buffer.len() == decode_in_chunks_of_size {
 				decode_in_chunks_to_buffer(
 					supports_fast_decode_and_encode,
@@ -896,15 +899,19 @@ mod fast_decode {
 					return Err(BaseError::new("error: invalid input"));
 				}
 
+				// Decode a full chunk at a time: flushing every complete block as
+				// it arrives would write 5 bytes per 8 input characters.
 				if supports_partial_decode {
-					flush_ready_chunks(
-						&mut buffer,
-						decode_in_chunks_of_size,
-						valid_multiple,
-						supports_fast_decode_and_encode,
-						&mut decoded_buffer,
-						output,
-					)?;
+					if buffer.len() >= decode_in_chunks_of_size {
+						flush_ready_chunks(
+							&mut buffer,
+							decode_in_chunks_of_size,
+							valid_multiple,
+							supports_fast_decode_and_encode,
+							&mut decoded_buffer,
+							output,
+						)?;
+					}
 				} else if buffer.len() == decode_in_chunks_of_size {
 					decode_in_chunks_to_buffer(
 						supports_fast_decode_and_encode,

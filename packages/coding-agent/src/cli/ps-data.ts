@@ -4,7 +4,7 @@
  *
  * Collection never spawns a broker: live scopes are queried over the broker
  * socket, dead scopes are read from the persisted per-daemon `meta.json`
- * snapshots.
+ * snapshots and `spec.json` launch specs.
  */
 import type { Dirent } from "node:fs";
 import * as fs from "node:fs/promises";
@@ -17,9 +17,9 @@ import {
 	isEnoent,
 } from "@oh-my-pi/pi-utils";
 import { createDaemonBrokerClient, type DaemonBrokerClient } from "../launch/client";
-import { canonicalProjectDir, daemonRuntimeDir, readDaemonScopeMeta } from "../launch/paths";
+import { canonicalProjectDir, daemonRuntimeDir, readDaemonScopeMeta, readStoredDaemonRecord } from "../launch/paths";
 import { readLiveDaemonBrokerPid } from "../launch/presence";
-import type { DaemonSnapshot, DaemonSpec } from "@oh-my-pi/pi-tui/tools/hub";
+import type { DaemonSnapshot, DaemonSpec } from "@oh-my-pi/pi-tui/tools/daemon";
 import {
 	formatCommand,
 	TERMINAL_STATES,
@@ -138,7 +138,11 @@ export async function scopeClient(scope: PsScope): Promise<DaemonBrokerClient | 
 	return createDaemonBrokerClient(connectDir, { runtimeDir: scope.runtimeDir });
 }
 
-/** Persisted `{snapshot, spec}` pairs from `<runtimeDir>/daemons/<name>/meta.json`. */
+/**
+ * Persisted `{snapshot, spec}` pairs from `<runtimeDir>/daemons/<name>/`: the
+ * spec lives in `spec.json`, or inside `meta.json` for records written by
+ * older brokers.
+ */
 async function readPersistedDaemons(
 	runtimeDir: string,
 ): Promise<Map<string, { snapshot: DaemonSnapshot; spec: DaemonSpec }>> {
@@ -147,11 +151,10 @@ async function readPersistedDaemons(
 	for (const entry of await readdirQuiet(root)) {
 		if (!entry.isDirectory()) continue;
 		try {
-			const decoded: unknown = await Bun.file(path.join(root, entry.name, "meta.json")).json();
-			if (typeof decoded !== "object" || decoded === null || !("daemon" in decoded) || !("spec" in decoded))
-				continue;
-			const snapshot = parseDaemonSnapshot(decoded.daemon);
-			persisted.set(snapshot.name, { snapshot, spec: parseDaemonSpec(decoded.spec) });
+			const stored = await readStoredDaemonRecord(path.join(root, entry.name));
+			if (!stored) continue;
+			const snapshot = parseDaemonSnapshot(stored.meta.daemon);
+			persisted.set(snapshot.name, { snapshot, spec: parseDaemonSpec(stored.spec) });
 		} catch {
 			// Malformed or torn metadata is skipped; the broker rewrites it on next start.
 		}
@@ -228,9 +231,29 @@ function compareRows(a: PsDaemonRow, b: PsDaemonRow): number {
 	return a.snapshot.name.localeCompare(b.snapshot.name);
 }
 
-/** Collect the scopes selected by `all`/`target`, hiding empty dead scopes in the all view. */
+/**
+ * Collect the scopes selected by `all`/`target`: every scope with `all`; one
+ * scope for an explicit `--dir`/`--global` target; otherwise the current
+ * project plus the machine-global services (shared by all projects, e.g. the
+ * text-prediction daemon) that have a live process — their exited history
+ * only shows with `--all` or `--global`. Discovered scopes that are empty and
+ * brokerless are hidden; the current project always shows.
+ */
 export async function collectReports(all: boolean, target: PsTarget): Promise<PsScopeReport[]> {
-	const scopes = all ? await discoverScopes() : [await targetScope(target)];
-	const reports = await Promise.all(scopes.map(collectScope));
-	return reports.filter(report => !all || report.daemons.length > 0 || report.scope.brokerPid !== undefined);
+	if (!all && (target.dir !== undefined || target.global !== undefined)) {
+		return [await collectScope(await targetScope(target))];
+	}
+	if (all) {
+		const reports = await Promise.all((await discoverScopes()).map(collectScope));
+		return reports.filter(report => report.daemons.length > 0 || report.scope.brokerPid !== undefined);
+	}
+	const globals = (await discoverScopes()).filter(scope => scope.kind === "global");
+	const [current, globalReports] = await Promise.all([
+		targetScope(target).then(collectScope),
+		Promise.all(globals.map(collectScope)),
+	]);
+	const liveGlobals = globalReports
+		.map(report => ({ ...report, daemons: report.daemons.filter(row => !TERMINAL_STATES[row.snapshot.state]) }))
+		.filter(report => report.daemons.length > 0);
+	return [current, ...liveGlobals];
 }

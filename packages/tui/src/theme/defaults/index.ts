@@ -25,6 +25,7 @@ import dark_midnight from "./dark-midnight.json" with { type: "json" };
 import dark_monochrome from "./dark-monochrome.json" with { type: "json" };
 import dark_monokai from "./dark-monokai.json" with { type: "json" };
 import dark_nebula from "./dark-nebula.json" with { type: "json" };
+import dark_neon_noir from "./dark-neon-noir.json" with { type: "json" };
 import dark_nord from "./dark-nord.json" with { type: "json" };
 import dark_ocean from "./dark-ocean.json" with { type: "json" };
 import dark_one from "./dark-one.json" with { type: "json" };
@@ -126,6 +127,7 @@ export const defaultThemes = {
 	"dark-monochrome": dark_monochrome,
 	"dark-monokai": dark_monokai,
 	"dark-nebula": dark_nebula,
+	"dark-neon-noir": dark_neon_noir,
 	"dark-nord": dark_nord,
 	"dark-ocean": dark_ocean,
 	"dark-one": dark_one,

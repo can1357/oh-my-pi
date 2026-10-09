@@ -1,9 +1,10 @@
 import type { CompiledProviderDiscovery } from "../compat/types";
 import type { ModelManagerOptions } from "../model-manager";
 import type { Api, FetchImpl } from "../types";
+import type { AccountScope } from "../wire/factory-droid";
 
 /** Config passed to a provider's runtime model-manager factory. */
-export type ModelManagerConfig = {
+export type ModelManagerConfig = AccountScope & {
 	apiKey?: string;
 	baseUrl?: string;
 	fetch?: FetchImpl;

@@ -20,6 +20,7 @@ use pi_edit::{
 			types::FileOp,
 		},
 	},
+	path_policy::canonical_key,
 	store::{Clipboard, EditStore, file_hash},
 	stream_json::snapshot_from_text,
 	text::{LineEnding, detect_line_ending},
@@ -188,6 +189,9 @@ fn check_apply(source: &str, case_name: &str, call: &Value) {
 
 #[test]
 fn legacy_parser_and_applier_cases_match_byte_for_byte() {
+	// The Lua boundary-repair cases need a grammar; Lua's is downloaded on
+	// demand in production, so link the native crate instead.
+	pi_ast::language::wasm_grammars::LUA.register(tree_sitter_lua::LANGUAGE.into());
 	let mut covered_names = 0_usize;
 	let mut calls = 0_usize;
 	for fixture_name in FIXTURES {
@@ -358,7 +362,8 @@ fn snapshot_store_matches_snapshot_contract_cases() {
 		snapshot
 			.seen_lines
 			.expect("seen")
-			.into_iter()
+			.iter()
+			.copied()
 			.collect::<Vec<_>>(),
 		vec![1]
 	);
@@ -367,11 +372,7 @@ fn snapshot_store_matches_snapshot_contract_cases() {
 	let shared_text = "shared\n";
 	let shared_tag = shared.record(&path, shared_text, None);
 	shared.record(&other, shared_text, None);
-	let mut matches = shared
-		.find_by_hash(&shared_tag)
-		.into_iter()
-		.map(|snapshot| snapshot.path)
-		.collect::<Vec<_>>();
+	let mut matches = shared.paths_with_hash(&shared_tag);
 	matches.sort();
 	assert_eq!(
 		matches,
@@ -407,7 +408,7 @@ fn snapshot_store_matches_snapshot_contract_cases() {
 		.seen_lines
 		.expect("seen lines");
 	assert_eq!(
-		seen.into_iter().collect::<Vec<_>>(),
+		seen.iter().copied().collect::<Vec<_>>(),
 		vec![1, 2],
 		"still fuses identical repeated reads of one colliding text onto one snapshot"
 	);
@@ -788,6 +789,42 @@ async fn coding_agent_hashline_executor_cases_run_through_session() {
 			"L10\n",
 		))
 	);
+
+	// The session sandbox is a plan-writable root outside the working tree.
+	let sandbox = tempfile::tempdir().expect("sandbox");
+	let sandbox_root = sandbox.path().canonicalize().expect("canonical sandbox");
+	let mut plan = Workspace::new(EditMode::Hashline);
+	plan.config.policy.plan_active = true;
+	plan.config.policy.plan_writable_roots = vec![sandbox_root.clone()];
+	let artifact = sandbox_root.join("cfg-module-hygiene-plan.md");
+	let source = "# Plan\n\n## Context\n- old\n";
+	std::fs::write(&artifact, source).expect("write sandbox artifact");
+	let tag = plan.store.record(&canonical_key(&artifact), source, None);
+	let args =
+		json!({ "input": format!("[cfg-module-hygiene-plan.md#{tag}]\nPUT 4.=4:\n+- new\n") });
+	let outcome = plan
+		.apply_json(&args, &common::DiskWriter::default())
+		.await
+		.expect("recovers a bare plan-file name onto the plan-writable sandbox in plan mode");
+	assert_eq!(
+		std::fs::read_to_string(&artifact).expect("artifact"),
+		"# Plan\n\n## Context\n- new\n"
+	);
+	assert!(plan.read("cfg-module-hygiene-plan.md").is_none());
+	assert!(outcome.text.contains("does not exist"), "{}", outcome.text);
+
+	let mut working_tree = Workspace::new(EditMode::Hashline);
+	working_tree.config.policy.plan_active = true;
+	working_tree.config.policy.plan_writable_roots = vec![sandbox_root];
+	working_tree.write("real.ts", "a\nb\nc\n");
+	let tag = working_tree.snapshot("real.ts", "a\nb\nc\n", None);
+	let args = json!({ "input": format!("[real.ts#{tag}]\nPUT 2.=2:\n+B\n") });
+	let error = working_tree
+		.apply_json(&args, &common::DiskWriter::default())
+		.await
+		.expect_err("plan mode still rejects an existing working-tree edit");
+	assert!(error.to_string().contains("working tree is read-only"), "{error}");
+	assert_eq!(working_tree.read("real.ts").as_deref(), Some("a\nb\nc\n"));
 }
 
 #[tokio::test]
@@ -899,6 +936,31 @@ async fn block_replace_cases_resolve_syntax_end_to_end() {
 }
 
 #[tokio::test]
+async fn block_cut_on_leading_go_statement_keeps_following_siblings() {
+	let source = "package p\n\nfunc f() error {\n\tif err := step(); err != nil {\n\t\treturn \
+	              err\n\t}\n\tother()\n\treturn nil\n}\n";
+	let workspace = Workspace::new(EditMode::Hashline);
+	workspace.write("x.go", source);
+	let tag = workspace.snapshot("x.go", source, None);
+	let args = json!({ "input": format!("[x.go#{tag}]\nCUT 4*") });
+	let result = workspace
+		.apply_json(&args, &common::DiskWriter::default())
+		.await
+		.expect("deletes the leading `if` block");
+	assert_eq!(
+		workspace.read("x.go").as_deref(),
+		Some("package p\n\nfunc f() error {\n\tother()\n\treturn nil\n}\n")
+	);
+	assert!(
+		result
+			.text
+			.contains("CUT 4* → resolved lines 4-6 (3 lines)"),
+		"{}",
+		result.text
+	);
+}
+
+#[tokio::test]
 async fn seen_line_guard_rejects_hidden_anchors_and_accepts_seen_anchors() {
 	let root = fixture("parity_seen_line_guard.json");
 	assert_eq!(root["cases"].as_array().expect("seen line cases").len(), 15);
@@ -926,6 +988,180 @@ async fn seen_line_guard_rejects_hidden_anchors_and_accepts_seen_anchors() {
 		.await
 		.expect("applies an edit on a displayed line");
 	assert_eq!(seen.read("a.txt").as_deref(), Some("one\nTWO\nthree\n"));
+}
+
+#[tokio::test]
+async fn edit_results_register_displayed_lines_as_snapshot_provenance() {
+	const SOURCE: &str =
+		"line1\nline2\nline3\nline4\nline5\nline6\nline7\nline8\nline9\nline10\nline11\nline12\n";
+	const EDITED: &str =
+		"line1\nLINE2\nline3\nline4\nline5\nline6\nline7\nline8\nline9\nline10\nline11\nline12\n";
+
+	let mut workspace = Workspace::new(EditMode::Hashline);
+	workspace.config.enforce_seen_lines = true;
+	workspace.write("a.txt", SOURCE);
+	let original_tag = workspace.snapshot("a.txt", SOURCE, Some(&[1, 2]));
+	let writer = common::DiskWriter::default();
+
+	let first = workspace
+		.apply_json(
+			&json!({ "input": format!("[a.txt#{original_tag}]\nPUT 2.=2:\n+LINE2") }),
+			&writer,
+		)
+		.await
+		.expect("applies the first edit");
+	assert!(first.text.contains("3:line3"), "edit result displays line 3: {}", first.text);
+
+	let edited_tag = file_hash(EDITED);
+	let hidden_error = workspace
+		.apply_json(
+			&json!({ "input": format!("[a.txt#{edited_tag}]\nPUT 12.=12:\n+LINE12") }),
+			&writer,
+		)
+		.await
+		.expect_err("rejects a line the edit result did not display");
+	assert!(hidden_error.to_string().contains("lines 12"), "{hidden_error}");
+
+	let reverted = workspace
+		.apply_json(&json!({ "input": format!("[a.txt#{edited_tag}]\nPUT 2.=2:\n+line2") }), &writer)
+		.await
+		.expect("reverts through the edited snapshot");
+	assert!(reverted.text.contains("3:line3"), "revert result displays line 3: {}", reverted.text);
+
+	workspace
+		.apply_json(
+			&json!({ "input": format!("[a.txt#{original_tag}]\nPUT 3.=3:\n+LINE3") }),
+			&writer,
+		)
+		.await
+		.expect("applies an edit anchored to a line the revert result displayed");
+	assert_eq!(
+		workspace.read("a.txt").as_deref(),
+		Some(
+			"line1\nline2\nLINE3\nline4\nline5\nline6\nline7\nline8\nline9\nline10\nline11\nline12\n"
+		)
+	);
+}
+
+#[tokio::test]
+async fn edit_results_carry_unshifted_prior_provenance_only() {
+	let source = (1..=40)
+		.map(|n| format!("line{n}\n"))
+		.collect::<Vec<_>>()
+		.concat();
+	let all_lines = (1..=40).collect::<Vec<u32>>();
+
+	let mut workspace = Workspace::new(EditMode::Hashline);
+	workspace.config.enforce_seen_lines = true;
+	workspace.write("a.txt", &source);
+	let read_tag = workspace.snapshot("a.txt", &source, Some(&all_lines));
+	let writer = common::DiskWriter::default();
+
+	let inserted = workspace
+		.apply_json(
+			&json!({ "input": format!("[a.txt#{read_tag}]\nPUT >30:\n+new-a\n+new-b") }),
+			&writer,
+		)
+		.await
+		.expect("inserts after line 30");
+	assert!(
+		!inserted.text.contains("\n2:line2"),
+		"insert result must not display line 2: {}",
+		inserted.text
+	);
+	let inserted_source = workspace.read("a.txt").expect("inserted file");
+	let inserted_tag = file_hash(&inserted_source);
+
+	let stale = workspace
+		.apply_json(
+			&json!({ "input": format!("[a.txt#{inserted_tag}]\nPUT 40.=40:\n+LINE40") }),
+			&writer,
+		)
+		.await
+		.expect_err("old line numbers below the insertion shifted and must not carry");
+	assert!(stale.to_string().contains("lines 40"), "{stale}");
+
+	workspace
+		.apply_json(
+			&json!({ "input": format!("[a.txt#{inserted_tag}]\nPUT 2.=2:\n+LINE2") }),
+			&writer,
+		)
+		.await
+		.expect("line 2 kept its number and content, so the full read still covers it");
+	let expected =
+		source
+			.replacen("line2\n", "LINE2\n", 1)
+			.replacen("line30\n", "line30\nnew-a\nnew-b\n", 1);
+	assert_eq!(workspace.read("a.txt").as_deref(), Some(expected.as_str()));
+}
+
+#[tokio::test]
+async fn edit_results_carry_prior_provenance_past_line_neutral_hunks() {
+	let source = (1..=40)
+		.map(|n| format!("line{n}\n"))
+		.collect::<Vec<_>>()
+		.concat();
+	let all_lines = (1..=40).collect::<Vec<u32>>();
+
+	let mut workspace = Workspace::new(EditMode::Hashline);
+	workspace.config.enforce_seen_lines = true;
+	workspace.write("a.txt", &source);
+	let read_tag = workspace.snapshot("a.txt", &source, Some(&all_lines));
+	let writer = common::DiskWriter::default();
+
+	// One inserted row and one cut row: lines 21-40 keep number and content.
+	workspace
+		.apply_json(
+			&json!({ "input": format!("[a.txt#{read_tag}]\nPUT >10:\n+new\nCUT 20.=20") }),
+			&writer,
+		)
+		.await
+		.expect("line-neutral edit applies");
+	let edited_source = workspace.read("a.txt").expect("edited file");
+	let edited_tag = file_hash(&edited_source);
+
+	let shifted = workspace
+		.apply_json(
+			&json!({ "input": format!("[a.txt#{edited_tag}]\nPUT 16.=16:\n+LINE16") }),
+			&writer,
+		)
+		.await
+		.expect_err("line 16 now holds old line 15, so its number must not carry");
+	assert!(shifted.to_string().contains("lines 16"), "{shifted}");
+
+	workspace
+		.apply_json(
+			&json!({ "input": format!("[a.txt#{edited_tag}]\nPUT 35.=35:\n+LINE35") }),
+			&writer,
+		)
+		.await
+		.expect("line 35 kept its number and content, so the full read still covers it");
+	let expected = source
+		.replacen("line10\n", "line10\nnew\n", 1)
+		.replacen("line20\n", "", 1)
+		.replacen("line35\n", "LINE35\n", 1);
+	assert_eq!(workspace.read("a.txt").as_deref(), Some(expected.as_str()));
+}
+
+#[tokio::test]
+async fn edit_of_first_line_with_prior_read_applies() {
+	let source: String = (1..=5).map(|n| format!("line{n}\n")).collect();
+	let all_lines = (1..=5).collect::<Vec<u32>>();
+
+	let mut workspace = Workspace::new(EditMode::Hashline);
+	workspace.config.enforce_seen_lines = true;
+	workspace.write("a.txt", &source);
+	let read_tag = workspace.snapshot("a.txt", &source, Some(&all_lines));
+	let writer = common::DiskWriter::default();
+
+	workspace
+		.apply_json(&json!({ "input": format!("[a.txt#{read_tag}]\nPUT 1.=1:\n+LINE1") }), &writer)
+		.await
+		.expect("first-line edit with a prior read applies");
+	assert_eq!(
+		workspace.read("a.txt").as_deref(),
+		Some(source.replacen("line1\n", "LINE1\n", 1).as_str())
+	);
 }
 
 fn preview_for(

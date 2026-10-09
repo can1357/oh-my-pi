@@ -40,12 +40,32 @@ import {
 	markStage1Failed,
 	markStage1SucceededNoOutput,
 	markStage1SucceededWithOutput,
+	normalizeScopeCwd,
 	openMemoryDb,
 	type Stage1Claim,
 	type Stage1OutputRow,
 	tryClaimGlobalPhase2Job,
 	upsertThreads,
 } from "./storage";
+
+import {
+	cfgMemoriesFallbackTokenLimit,
+	cfgMemoriesMaxRawMemoriesForGlobal,
+	cfgMemoriesMaxRolloutAgeDays,
+	cfgMemoriesMaxRolloutsPerStartup,
+	cfgMemoriesMinRolloutIdleHours,
+	cfgMemoriesPhase1InputTokenLimit,
+	cfgMemoriesPhase2HeartbeatSeconds,
+	cfgMemoriesPhase2LeaseSeconds,
+	cfgMemoriesPhase2RetryDelaySeconds,
+	cfgMemoriesRolloutPayloadPercent,
+	cfgMemoriesStage1Concurrency,
+	cfgMemoriesStage1LeaseSeconds,
+	cfgMemoriesStage1RetryDelaySeconds,
+	cfgMemoriesSummaryInjectionTokenLimit,
+	cfgMemoriesThreadScanLimit,
+} from "./settings";
+import { cfgMemoryBackend } from "../memory-backend/settings";
 
 interface MemoryRuntimeConfig {
 	enabled: boolean;
@@ -65,25 +85,6 @@ interface MemoryRuntimeConfig {
 	fallbackTokenLimit: number;
 	summaryInjectionTokenLimit: number;
 }
-
-const DEFAULTS: MemoryRuntimeConfig = {
-	enabled: false,
-	maxRolloutsPerStartup: 64,
-	maxRolloutAgeDays: 30,
-	minRolloutIdleHours: 12,
-	threadScanLimit: 300,
-	maxRawMemoriesForGlobal: 200,
-	stage1Concurrency: 8,
-	stage1LeaseSeconds: 120,
-	stage1RetryDelaySeconds: 120,
-	phase2LeaseSeconds: 180,
-	phase2RetryDelaySeconds: 180,
-	phase2HeartbeatSeconds: 30,
-	rolloutPayloadPercent: 0.7,
-	phase1InputTokenLimit: 4_000,
-	fallbackTokenLimit: 16_000,
-	summaryInjectionTokenLimit: 5_000,
-};
 
 interface Stage1Stats {
 	claimed: number;
@@ -161,11 +162,18 @@ export function startMemoryStartupTask(options: {
 
 interface MemoryInstructionSession {
 	sessionManager: Pick<AgentSession["sessionManager"], "getSessionFile">;
+	agent?: { state: { messages: readonly unknown[] } };
 }
 
 interface MemoryToolDeveloperInstructionsSnapshot {
 	summary: string;
 	learned: string;
+}
+
+// The first user message means a request was built from the current prompt,
+// and any signed thinking it returns is bound to that prompt.
+function memoryConversationStarted(session: MemoryInstructionSession): boolean {
+	return (session.agent?.state.messages.length ?? 0) > 0;
 }
 
 interface CachedMemoryToolDeveloperInstructions {
@@ -259,19 +267,23 @@ export function clearMemoryToolDeveloperInstructionsCache(session: MemoryInstruc
 /**
  * Refresh the active session's consolidated-memory snapshot after startup maintenance.
  *
- * Startup may finish after the first prompt build and write `memory_summary.md`;
- * the active session should see that summary. It must not reread `learned.md`,
- * because a `learn` call racing with startup belongs to the next session's
- * memory prompt, not the active prompt-cache prefix.
+ * Startup may finish after the first prompt build and write `memory_summary.md`.
+ * The session adopts that summary only while it holds no messages: once a
+ * request went out, signed thinking is bound to the prompt it carried, so the
+ * new summary waits for the next session, whose cache key (session file) differs.
+ * It must not reread `learned.md`, because a `learn` call racing with startup
+ * belongs to the next session's memory prompt, not the active prompt-cache prefix.
  */
 export async function refreshMemoryToolDeveloperInstructionsCacheAfterStartup(
 	session: MemoryInstructionSession,
 	agentDir: string,
 	settings: Settings,
 ): Promise<void> {
+	if (memoryConversationStarted(session)) return;
 	const sessionFile = getMemoryInstructionSessionFile(session);
 	const cached = memoryToolDeveloperInstructionsBySession.get(session);
 	const current = await readMemoryToolDeveloperInstructionsSnapshot(agentDir, settings);
+	if (memoryConversationStarted(session)) return;
 	const root = getMemoryInstructionRoot(agentDir, settings);
 	const baseline = memoryToolDeveloperInstructionsByRoot.get(root);
 	const cachedLearned = cached && cached.sessionFile === sessionFile ? cached.snapshot?.learned : undefined;
@@ -337,7 +349,7 @@ interface MemoryStartupOptions {
 }
 
 function isMemoryStartupActive(options: MemoryStartupOptions): boolean {
-	return !options.signal.aborted && !options.session.isDisposed && options.settings.get("memory.backend") === "local";
+	return !options.signal.aborted && !options.session.isDisposed && cfgMemoryBackend.get(options.settings) === "local";
 }
 
 async function runMemoryStartup(options: MemoryStartupOptions): Promise<void> {
@@ -348,6 +360,7 @@ async function runMemoryStartup(options: MemoryStartupOptions): Promise<void> {
 	if (!isMemoryStartupActive(options)) return;
 	await refreshMemoryToolDeveloperInstructionsCacheAfterStartup(options.session, options.agentDir, options.settings);
 	if (!isMemoryStartupActive(options)) return;
+	if (memoryConversationStarted(options.session)) return;
 	await options.session.refreshBaseSystemPrompt?.();
 }
 
@@ -747,6 +760,92 @@ function extractPersistableMessages(payload: string): AgentMessage[] {
 	return messages;
 }
 
+/** Byte window used when streaming rollout head/tail for stage-1 input. */
+const STAGE1_ROLLOUT_WINDOW_BYTES = 1024 * 1024;
+
+/** Persistable messages from the start of the rollout, in file order, read window by window. */
+async function* persistableMessagesFromFront(file: Bun.BunFile, size: number): AsyncGenerator<AgentMessage> {
+	const decoder = new TextDecoder();
+	let carry: Uint8Array | undefined;
+	let offset = 0;
+	while (offset < size) {
+		const end = Math.min(size, offset + STAGE1_ROLLOUT_WINDOW_BYTES);
+		const window = await file.slice(offset, end).bytes();
+		offset = end;
+		const bytes = carry ? Buffer.concat([carry, window]) : window;
+		const cut = offset >= size ? bytes.length : bytes.lastIndexOf(0x0a) + 1;
+		carry = cut < bytes.length ? bytes.subarray(cut) : undefined;
+		if (cut > 0) yield* extractPersistableMessages(decoder.decode(bytes.subarray(0, cut)));
+	}
+}
+
+/** Persistable messages from the end of the rollout, in reverse file order, read window by window. */
+async function* persistableMessagesFromBack(file: Bun.BunFile, size: number): AsyncGenerator<AgentMessage> {
+	const decoder = new TextDecoder();
+	let carry: Uint8Array | undefined;
+	let end = size;
+	while (end > 0) {
+		const start = Math.max(0, end - STAGE1_ROLLOUT_WINDOW_BYTES);
+		const window = await file.slice(start, end).bytes();
+		end = start;
+		const bytes = carry ? Buffer.concat([window, carry]) : window;
+		// Bytes before the first newline belong to a line that starts in an earlier window.
+		const cut = start === 0 ? 0 : bytes.indexOf(0x0a) + 1;
+		if (start > 0 && cut === 0) {
+			carry = bytes;
+			continue;
+		}
+		carry = cut > 0 ? bytes.subarray(0, cut) : undefined;
+		const messages = extractPersistableMessages(decoder.decode(bytes.subarray(cut)));
+		for (let i = messages.length - 1; i >= 0; i--) yield messages[i];
+	}
+}
+
+/**
+ * Build the stage-1 `response_items_json` payload for a rollout file.
+ *
+ * Equivalent to `truncateByApproxTokens(JSON.stringify(persistableMessages), tokenLimit)`, but
+ * streams the rollout in byte windows and serializes messages from the front and back only until
+ * the head/tail budgets fill. Peak memory is bounded by the window size plus the largest single
+ * JSONL record (a record spanning windows is carried until its newline), not by rollout size.
+ */
+export async function buildStage1RolloutItems(rolloutPath: string, tokenLimit: number): Promise<string> {
+	const file = Bun.file(rolloutPath);
+	// stat() throws for a missing rollout, matching the previous Bun.file().text() failure.
+	const { size } = await file.stat();
+	if (tokenLimit <= 0) return "";
+	const maxChars = tokenLimit * 4;
+	const headChars = Math.floor(maxChars * 0.6);
+	const tailChars = maxChars - headChars;
+
+	let head = "[";
+	let truncated = false;
+	for await (const message of persistableMessagesFromFront(file, size)) {
+		head += head.length === 1 ? JSON.stringify(message) : `,${JSON.stringify(message)}`;
+		if (head.length > maxChars) {
+			truncated = true;
+			break;
+		}
+	}
+	if (!truncated) {
+		const full = `${head}]`;
+		if (full.length <= maxChars) return full;
+	}
+
+	let tail = "]";
+	let exhausted = true;
+	for await (const message of persistableMessagesFromBack(file, size)) {
+		tail = `,${JSON.stringify(message)}${tail}`;
+		if (tail.length >= tailChars) {
+			exhausted = false;
+			break;
+		}
+	}
+	// Every message consumed: the leading separator is really the array opener.
+	if (exhausted) tail = `[${tail.slice(1)}`;
+	return `${head.slice(0, headChars)}\n\n...[truncated]...\n\n${tail.slice(-tailChars)}`;
+}
+
 async function runStage1Job(options: {
 	claim: Stage1Claim;
 	model: Model;
@@ -766,14 +865,11 @@ async function runStage1Job(options: {
 > {
 	const { claim, model, apiKey, modelMaxTokens, config } = options;
 	try {
-		const rolloutRaw = await Bun.file(claim.rolloutPath).text();
-		const persisted = extractPersistableMessages(rolloutRaw);
-		const serializedItems = JSON.stringify(persisted);
 		const budgetTokens = Math.min(
 			config.phase1InputTokenLimit,
 			Math.floor(modelMaxTokens * config.rolloutPayloadPercent),
 		);
-		const truncatedItems = truncateByApproxTokens(serializedItems, budgetTokens);
+		const truncatedItems = await buildStage1RolloutItems(claim.rolloutPath, budgetTokens);
 		const inputPrompt = prompt.render(stageOneInputTemplate, {
 			thread_id: claim.threadId,
 			response_items_json: truncatedItems,
@@ -1268,28 +1364,27 @@ async function resolveMemoryModel(options: {
 
 function loadMemoryConfig(settings: Settings): MemoryRuntimeConfig {
 	return {
-		enabled: settings.get("memory.backend") === "local",
-		maxRolloutsPerStartup: settings.get("memories.maxRolloutsPerStartup") ?? DEFAULTS.maxRolloutsPerStartup,
-		maxRolloutAgeDays: settings.get("memories.maxRolloutAgeDays") ?? DEFAULTS.maxRolloutAgeDays,
-		minRolloutIdleHours: settings.get("memories.minRolloutIdleHours") ?? DEFAULTS.minRolloutIdleHours,
-		threadScanLimit: settings.get("memories.threadScanLimit") ?? DEFAULTS.threadScanLimit,
-		maxRawMemoriesForGlobal: settings.get("memories.maxRawMemoriesForGlobal") ?? DEFAULTS.maxRawMemoriesForGlobal,
-		stage1Concurrency: settings.get("memories.stage1Concurrency") ?? DEFAULTS.stage1Concurrency,
-		stage1LeaseSeconds: settings.get("memories.stage1LeaseSeconds") ?? DEFAULTS.stage1LeaseSeconds,
-		stage1RetryDelaySeconds: settings.get("memories.stage1RetryDelaySeconds") ?? DEFAULTS.stage1RetryDelaySeconds,
-		phase2LeaseSeconds: settings.get("memories.phase2LeaseSeconds") ?? DEFAULTS.phase2LeaseSeconds,
-		phase2RetryDelaySeconds: settings.get("memories.phase2RetryDelaySeconds") ?? DEFAULTS.phase2RetryDelaySeconds,
-		phase2HeartbeatSeconds: settings.get("memories.phase2HeartbeatSeconds") ?? DEFAULTS.phase2HeartbeatSeconds,
-		rolloutPayloadPercent: settings.get("memories.rolloutPayloadPercent") ?? DEFAULTS.rolloutPayloadPercent,
-		phase1InputTokenLimit: settings.get("memories.phase1InputTokenLimit") ?? DEFAULTS.phase1InputTokenLimit,
-		fallbackTokenLimit: settings.get("memories.fallbackTokenLimit") ?? DEFAULTS.fallbackTokenLimit,
-		summaryInjectionTokenLimit:
-			settings.get("memories.summaryInjectionTokenLimit") ?? DEFAULTS.summaryInjectionTokenLimit,
+		enabled: cfgMemoryBackend.get(settings) === "local",
+		maxRolloutsPerStartup: cfgMemoriesMaxRolloutsPerStartup.get(settings),
+		maxRolloutAgeDays: cfgMemoriesMaxRolloutAgeDays.get(settings),
+		minRolloutIdleHours: cfgMemoriesMinRolloutIdleHours.get(settings),
+		threadScanLimit: cfgMemoriesThreadScanLimit.get(settings),
+		maxRawMemoriesForGlobal: cfgMemoriesMaxRawMemoriesForGlobal.get(settings),
+		stage1Concurrency: cfgMemoriesStage1Concurrency.get(settings),
+		stage1LeaseSeconds: cfgMemoriesStage1LeaseSeconds.get(settings),
+		stage1RetryDelaySeconds: cfgMemoriesStage1RetryDelaySeconds.get(settings),
+		phase2LeaseSeconds: cfgMemoriesPhase2LeaseSeconds.get(settings),
+		phase2RetryDelaySeconds: cfgMemoriesPhase2RetryDelaySeconds.get(settings),
+		phase2HeartbeatSeconds: cfgMemoriesPhase2HeartbeatSeconds.get(settings),
+		rolloutPayloadPercent: cfgMemoriesRolloutPayloadPercent.get(settings),
+		phase1InputTokenLimit: cfgMemoriesPhase1InputTokenLimit.get(settings),
+		fallbackTokenLimit: cfgMemoriesFallbackTokenLimit.get(settings),
+		summaryInjectionTokenLimit: cfgMemoriesSummaryInjectionTokenLimit.get(settings),
 	};
 }
 
 export function getMemoryRoot(agentDir: string, cwd: string): string {
-	return path.join(getMemoriesDir(agentDir), encodeProjectPath(cwd));
+	return path.join(getMemoriesDir(agentDir), encodeProjectPath(normalizeScopeCwd(cwd)));
 }
 
 /**

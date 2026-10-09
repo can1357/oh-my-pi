@@ -3,17 +3,19 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { AuthStorage } from "@oh-my-pi/pi-ai";
+import { closeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { USER_APPEND_HEADING } from "@oh-my-pi/pi-coding-agent/system-prompt";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 import { getAgentDir, setAgentDir } from "@oh-my-pi/pi-utils/dirs";
 import {
 	BOUNDED_GUIDANCE_MODE,
+	BOUNDED_GUIDANCE_TOOL_COUNT,
 	CONTEXT_MODE_NO_INSTRUCTIONS_MODE,
+	OVERSIZED_SCHEMA_MODE,
 	SERVER_INSTRUCTIONS,
 	TOOL_RESULT,
 } from "./fixtures/instructions-mcp";
@@ -32,6 +34,18 @@ const CONTEXT_MODE_ROUTE = '- "ctx_execute" → `xd://mcp__context_mode_ctx_exec
 const CONTEXT_MODE_MCP_TOOL_NAME = "mcp__context_mode_ctx_execute";
 /** Sentinel proving the user's append prompt stays a block of its own. */
 const USER_APPEND_MARKER = "USER_APPEND_SENTINEL_7d13f2: prefer Bun APIs over Node APIs.";
+/** Heading that opens the user's append section, asserted literally rather than imported. */
+const USER_APPEND_SECTION_HEADING = "## User Instructions";
+/** The route section's instruction to read an `xd://` path before first use. */
+const READ_FIRST_CLAUSE = "for docs + JSON schema before first use";
+
+/** The rendered `## MCP Tool Routes` section, up to the next heading. */
+function routeSection(prompt: string): string {
+	const start = prompt.indexOf(MCP_ROUTE_SECTION);
+	if (start === -1) return "";
+	const end = prompt.indexOf("\n#", start + MCP_ROUTE_SECTION.length);
+	return prompt.slice(start, end === -1 ? undefined : end);
+}
 
 describe("createAgentSession MCP server instructions (deferred UI)", () => {
 	let tempDir: string;
@@ -57,6 +71,9 @@ describe("createAgentSession MCP server instructions (deferred UI)", () => {
 
 	afterAll(() => {
 		authStorage.close();
+		// The model registry opened the shared `<isolatedAgentDir>/models.db` cache;
+		// release it so Windows can delete the isolated home.
+		closeModelCache();
 		setAgentDir(originalAgentDir);
 		for (const dir of [isolatedHome]) {
 			if (dir && fs.existsSync(dir)) {
@@ -85,6 +102,78 @@ describe("createAgentSession MCP server instructions (deferred UI)", () => {
 		}
 		mock.restore();
 	});
+
+	it("omits an opted-out server's instructions and the empty heading, and keeps its tools", async () => {
+		await Bun.write(
+			path.join(tempDir, ".mcp.json"),
+			JSON.stringify({
+				mcpServers: {
+					instr: { type: "stdio", command: process.execPath, args: [FIXTURE_PATH], instructions: false },
+				},
+			}),
+		);
+		const { session } = await createAgentSession({
+			cwd: tempDir,
+			agentDir: tempDir,
+			modelRegistry,
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated({ "mcp.startupTimeoutMs": 0 }),
+			model: getBundledModel("openai", "gpt-4o-mini"),
+			disableExtensionDiscovery: true,
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableLsp: false,
+			skipPythonPreflight: true,
+			enableMCP: true,
+		});
+		try {
+			const prompt = session.systemPrompt.join("\n");
+			expect(prompt).not.toContain(SERVER_INSTRUCTIONS);
+			expect(prompt).not.toContain("## MCP Server Instructions");
+			const result = await session.getToolByName(MCP_TOOL_NAME)?.execute("opted-out-instructions-call", {});
+			expect(result?.content.find(part => part.type === "text")?.text).toBe(TOOL_RESULT);
+		} finally {
+			await session.dispose();
+		}
+	}, 20_000);
+
+	it("keeps other servers' instructions when one server opts out", async () => {
+		await Bun.write(
+			path.join(tempDir, ".mcp.json"),
+			JSON.stringify({
+				mcpServers: {
+					instr: { type: "stdio", command: process.execPath, args: [FIXTURE_PATH], instructions: false },
+					other: { type: "stdio", command: process.execPath, args: [FIXTURE_PATH, "--other"] },
+				},
+			}),
+		);
+		const { session } = await createAgentSession({
+			cwd: tempDir,
+			agentDir: tempDir,
+			modelRegistry,
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated({ "mcp.startupTimeoutMs": 0 }),
+			model: getBundledModel("openai", "gpt-4o-mini"),
+			disableExtensionDiscovery: true,
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableLsp: false,
+			skipPythonPreflight: true,
+			enableMCP: true,
+		});
+		try {
+			const prompt = session.systemPrompt.join("\n");
+			expect(prompt).toContain(`### other\n${SERVER_INSTRUCTIONS}`);
+			expect(prompt).not.toContain("### instr");
+			expect(prompt.split(SERVER_INSTRUCTIONS)).toHaveLength(2);
+		} finally {
+			await session.dispose();
+		}
+	}, 20_000);
 
 	it("folds server instructions into the prompt once deferred discovery connects", async () => {
 		const { session } = await createAgentSession({
@@ -161,7 +250,7 @@ describe("createAgentSession MCP server instructions (deferred UI)", () => {
 			expect(prompt).toContain(SERVER_INSTRUCTIONS);
 			// The user's append prompt is its own block, never the trailing
 			// paragraph of the server-controlled section above it.
-			const boundary = prompt.indexOf(USER_APPEND_HEADING);
+			const boundary = prompt.indexOf(`\n${USER_APPEND_SECTION_HEADING}\n\n`);
 			expect(boundary).toBeGreaterThan(prompt.indexOf(SERVER_INSTRUCTIONS));
 			expect(prompt.slice(prompt.indexOf("## MCP Server Instructions"), boundary)).not.toContain(USER_APPEND_MARKER);
 			expect(prompt.slice(boundary)).toContain(USER_APPEND_MARKER);
@@ -270,11 +359,93 @@ describe("createAgentSession MCP server instructions (deferred UI)", () => {
 			expect(prompt).toContain(SERVER_INSTRUCTIONS);
 			const renderedMappings = prompt.split("\n").filter(line => line.startsWith('- "row_'));
 			expect(renderedMappings).toHaveLength(64);
-			expect(renderedMappings[0]).toBe('- "row_aa" → `xd://mcp__instr_row_aa`');
-			expect(renderedMappings[63]).toBe('- "row_cl" → `xd://mcp__instr_row_cl`');
+			expect(renderedMappings[0]).toBe('- "row_aa" → `xd://mcp__instr_row_aa` — Bounded guidance fixture tool aa.');
+			expect(renderedMappings[63]).toBe('- "row_cl" → `xd://mcp__instr_row_cl` — Bounded guidance fixture tool cl.');
 			expect(prompt).not.toContain('- "row_cm" → `xd://mcp__instr_row_cm`');
 			// Truncation notice present (row_cm absent above proves the cap applied).
 			expect(prompt).toContain("omitted");
+			// Every mounted MCP tool is listed exactly once: routed tools on their
+			// route line with the catalog summary, and the tool the bound omits on
+			// its xd:// catalog line.
+			expect(prompt).toContain("- xd://mcp__instr_row_cm — Bounded guidance fixture tool cm.");
+			const mountedRows = session
+				.getXdevToolEntries()
+				.map(entry => entry.name)
+				.filter(name => name.startsWith("mcp__instr_row_"));
+			expect(mountedRows).toHaveLength(BOUNDED_GUIDANCE_TOOL_COUNT);
+			expect(mountedRows.filter(name => prompt.split(`xd://${name}`).length !== 2)).toEqual([]);
+		} finally {
+			await session.dispose();
+		}
+	}, 20_000);
+
+	it("adds no route summary for an MCP tool whose docs are inlined", async () => {
+		const { session } = await createAgentSession({
+			cwd: tempDir,
+			agentDir: tempDir,
+			modelRegistry,
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated({ "tools.xdevDocs": "inline", "mcp.startupTimeoutMs": 0 }),
+			model: getBundledModel("openai", "gpt-4o-mini"),
+			disableExtensionDiscovery: true,
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableLsp: false,
+			skipPythonPreflight: true,
+			enableMCP: true,
+		});
+		try {
+			// Without `hasUI` and with a zero startup window, discovery settles
+			// before the first prompt is built. The inlined docs hold the
+			// description and schema, so the route line keeps only the name
+			// mapping and the section asks for no discovery read.
+			const prompt = session.systemPrompt.join("\n");
+			expect(prompt).toContain("## mcp__instr_do_thing");
+			expect(prompt.split("\n")).toContain('- "do\\u0060thing" → `xd://mcp__instr_do_thing`');
+			expect(routeSection(prompt)).not.toContain(READ_FIRST_CLAUSE);
+		} finally {
+			await session.dispose();
+		}
+	}, 20_000);
+
+	it("lists an inline-policy MCP tool whose docs overflow the cap once, on its route line", async () => {
+		await Bun.write(
+			path.join(tempDir, ".mcp.json"),
+			JSON.stringify({
+				mcpServers: {
+					instr: { type: "stdio", command: process.execPath, args: [FIXTURE_PATH, OVERSIZED_SCHEMA_MODE] },
+				},
+			}),
+		);
+		const { session } = await createAgentSession({
+			cwd: tempDir,
+			agentDir: tempDir,
+			modelRegistry,
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated({ "tools.xdevDocs": "inline", "mcp.startupTimeoutMs": 0 }),
+			model: getBundledModel("openai", "gpt-4o-mini"),
+			disableExtensionDiscovery: true,
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableLsp: false,
+			skipPythonPreflight: true,
+			enableMCP: true,
+		});
+		try {
+			// The schema exceeds the per-device docs cap, so the docs fall back to
+			// a one-line entry even under the inline policy. That entry is the
+			// route line, and the section asks for a read before first use.
+			const prompt = session.systemPrompt.join("\n");
+			expect(prompt).not.toContain("## mcp__instr_do_thing");
+			expect(prompt.split("\n")).toContain(
+				'- "do\\u0060thing" → `xd://mcp__instr_do_thing` — Fixture tool returning a deterministic sentinel.',
+			);
+			expect(prompt.split("xd://mcp__instr_do_thing")).toHaveLength(2);
+			expect(routeSection(prompt)).toContain(READ_FIRST_CLAUSE);
 		} finally {
 			await session.dispose();
 		}

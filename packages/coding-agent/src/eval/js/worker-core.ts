@@ -304,12 +304,14 @@ export class WorkerCore {
 		this.#syncProcessCwd(snapshot.cwd, currentRunId);
 		if (this.#runtime) {
 			this.#runtime.setCwd(snapshot.cwd);
+			this.#runtime.setPackageRoot(snapshot.packageRoot);
 			return this.#runtime;
 		}
 		this.#runtime = new JsRuntime({
 			initialCwd: snapshot.cwd,
 			sessionId: snapshot.sessionId,
 			localRoots: snapshot.localRoots,
+			packageRoot: snapshot.packageRoot,
 		});
 		return this.#runtime;
 	}

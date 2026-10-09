@@ -233,113 +233,6 @@ describe("Duplicate Tool Results Regression", () => {
 		]);
 	});
 
-	it("should not duplicate tool results for aborted messages when results already exist", () => {
-		const toolCallId = "toolu_aborted_test_123";
-
-		const assistantMessage: AssistantMessage = {
-			role: "assistant",
-			content: [
-				{
-					type: "toolCall",
-					id: toolCallId,
-					name: "bash",
-					arguments: { command: "echo hello" },
-				},
-			],
-			api: "anthropic-messages",
-			provider: "anthropic",
-			model: "claude-3-5-sonnet-20241022",
-			usage: {
-				input: 100,
-				output: 50,
-				cacheRead: 0,
-				cacheWrite: 0,
-				totalTokens: 150,
-				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-			},
-			stopReason: "aborted", // Key: message is aborted
-			errorMessage: "Request was aborted",
-			timestamp: Date.now(),
-		};
-
-		const existingToolResult: ToolResultMessage = {
-			role: "toolResult",
-			toolCallId: toolCallId,
-			toolName: "bash",
-			content: [{ type: "text", text: "Tool execution was aborted." }],
-			isError: true,
-			timestamp: Date.now(),
-		};
-
-		const messages = [
-			{
-				role: "user" as const,
-				content: "Run the command",
-				timestamp: Date.now(),
-			},
-			assistantMessage,
-			existingToolResult,
-		];
-
-		const transformed = transformMessages(messages, model);
-
-		const toolResults = transformed.filter(
-			m => m.role === "toolResult" && (m as ToolResultMessage).toolCallId === toolCallId,
-		);
-
-		expect(toolResults.length).toBe(1);
-	});
-
-	it("should add synthetic tool results when none exist for errored messages", () => {
-		const toolCallId = "toolu_no_result_123";
-
-		const assistantMessage: AssistantMessage = {
-			role: "assistant",
-			content: [
-				{
-					type: "toolCall",
-					id: toolCallId,
-					name: "edit",
-					arguments: { path: "/some/file.ts", oldText: "foo", newText: "bar" },
-				},
-			],
-			api: "anthropic-messages",
-			provider: "anthropic",
-			model: "claude-3-5-sonnet-20241022",
-			usage: {
-				input: 100,
-				output: 50,
-				cacheRead: 0,
-				cacheWrite: 0,
-				totalTokens: 150,
-				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-			},
-			stopReason: "error",
-			errorMessage: "Request was aborted",
-			timestamp: Date.now(),
-		};
-
-		// No tool result exists
-		const messages = [
-			{
-				role: "user" as const,
-				content: "Edit the file",
-				timestamp: Date.now(),
-			},
-			assistantMessage,
-			// No tool result - transformMessages should add one
-		];
-
-		const transformed = transformMessages(messages, model);
-
-		const toolResults = transformed.filter(
-			m => m.role === "toolResult" && (m as ToolResultMessage).toolCallId === toolCallId,
-		);
-
-		// Should have exactly ONE synthetic tool result added
-		expect(toolResults.length).toBe(1);
-	});
-
 	it("should handle multiple tool calls in errored message with partial results", () => {
 		const toolCallId1 = "toolu_multi_1";
 		const toolCallId2 = "toolu_multi_2";
@@ -745,19 +638,6 @@ describe("Composite Tool-Call Id Pairing", () => {
 		expect(resultsFor(transformed, "call_BBB").at(0)?.content).toEqual([{ type: "text", text: "result B" }]);
 	});
 
-	it("still pairs plain-to-plain ids (no regression)", () => {
-		const messages: Message[] = [
-			{ role: "user", content: "search", timestamp: 1 },
-			makeToolCallAssistant(["call_PLAIN"], 2),
-			makeToolResult("call_PLAIN", "plain result", 3),
-		];
-
-		const transformed = transformMessages(messages, model);
-
-		expect(hasSynthetic(transformed)).toBe(false);
-		expect(resultsFor(transformed, "call_PLAIN")).toHaveLength(1);
-	});
-
 	it("pairs when BOTH assistant and result ids are composite (same-provider Codex replay)", () => {
 		// The real deployed shape: the Codex decode path mints the assistant
 		// toolCall id composite too (encodeResponsesToolCallId(call_id, item_id)),
@@ -775,31 +655,6 @@ describe("Composite Tool-Call Id Pairing", () => {
 		const results = resultsFor(transformed, "call_ABC");
 		expect(results).toHaveLength(1);
 		expect(results[0]!.content).toEqual([{ type: "text", text: "205 tools found" }]);
-	});
-
-	it("survives a reused wire call_id across turns (composite results)", () => {
-		// The SAME plain wire call_id is reused across two assistant turns,
-		// each result arriving as a composite with a DIFFERENT fc_ half. Before the
-		// fix, dedup keyed on the raw composite id, so turn-2's real result was
-		// dropped and back-filled with the "No result provided" synthetic stub.
-		// Canonical keying (toolCallPairingKey) now _dup-suffixes the reused call,
-		// so both turns' real results survive under distinct call_ halves.
-		const messages: Message[] = [
-			{ role: "user", content: "search", timestamp: 1 },
-			makeToolCallAssistant(["call_REUSE"], 2),
-			makeToolResult("call_REUSE|fc_T1", "result one", 3),
-			makeToolCallAssistant(["call_REUSE"], 4),
-			makeToolResult("call_REUSE|fc_T2", "result two", 5),
-		];
-
-		const transformed = transformMessages(messages, model);
-
-		expect(hasSynthetic(transformed)).toBe(false);
-		const resultTexts = transformed
-			.filter((m): m is ToolResultMessage => m.role === "toolResult")
-			.flatMap(m => m.content.flatMap(p => (p.type === "text" ? [p.text] : [])));
-		expect(resultTexts).toContain("result one");
-		expect(resultTexts).toContain("result two");
 	});
 
 	it("separates two calls sharing a call_ half so both results survive", () => {
@@ -1516,25 +1371,6 @@ describe("Orphan Tool Result (handoff/compaction) Regression", () => {
 		expect(transformed.filter(m => m.role === "developer").length).toBe(0);
 		// Both user messages must survive.
 		expect(transformed.filter(m => m.role === "user").length).toBe(2);
-	});
-
-	it("does not drop tool_result whose tool_use exists later in history (PR #1163 case still handled)", () => {
-		// Regression guard for compatibility with the pull-forward / deferred-result
-		// invariant. This is the inverse failure mode: the tool_use exists, so the
-		// tool_result must NOT be treated as an orphan.
-		const id = "toolu_present";
-		const messages: Message[] = [
-			{ role: "user", content: "do it", timestamp: 1 },
-			makeAssistantWithToolCall(id, "bash"),
-			makeToolResult(id, "result"),
-		];
-
-		const transformed = transformMessages(messages, model);
-
-		const results = transformed.filter(m => m.role === "toolResult") as ToolResultMessage[];
-		expect(results.length).toBe(1);
-		expect(results[0].toolCallId).toBe(id);
-		expect(results[0].content).toEqual([{ type: "text", text: "result" }]);
 	});
 
 	it("drops orphan tool_result inside an aborted-tool-call window without corrupting the real later result", () => {

@@ -18,7 +18,7 @@ import {
 	resolveSeedsForScope,
 	tryLoadMentalModelsBlock,
 } from "./mental-models";
-import { extractMessages } from "./transcript";
+import { countUserTurns, extractMessages } from "./transcript";
 
 const RETAIN_FLUSH_BATCH_SIZE = 16;
 const RETAIN_FLUSH_INTERVAL_MS = 5_000;
@@ -188,10 +188,12 @@ export class HindsightRetainQueue {
 	}
 }
 
-/** Rolling hash of messages[0, count) for retention-cache validation (see #lastRetainedPrefixKey). */
-function retentionPrefixKey(messages: HindsightMessage[], count: number): string {
-	let key = "";
-	for (let i = 0; i < count; i++) {
+/**
+ * Rolling hash of messages[0, to) for retention-cache validation (see #lastRetainedPrefixKey),
+ * continued from `key` = the rolling hash of messages[0, from).
+ */
+function extendRetentionPrefixKey(key: string, messages: HindsightMessage[], from: number, to: number): string {
+	for (let i = from; i < to; i++) {
 		const m = messages[i];
 		if (m === undefined) break;
 		key = Bun.hash(`${key}\u0000${m.role}\u0000${m.content}\u0000${m.timestamp ?? ""}`).toString(36);
@@ -240,12 +242,6 @@ export class HindsightSessionState {
 	mentalModelsLoadPromise?: Promise<void>;
 	#mentalModelsLoadGeneration = 0;
 	unsubscribe?: () => void;
-	/**
-	 * Releases the `onHindsightScopeChanged` subscription that drives live
-	 * rebuilds when `hindsight.bankId` / `bankIdPrefix` / `scoping` change.
-	 * Only set on primary states; aliases inherit the parent's subscription.
-	 */
-	unsubscribeScope?: () => void;
 	/** Alias states delegate persistence config to a primary parent state. */
 	aliasOf?: HindsightSessionState;
 	readonly retainQueue: HindsightRetainQueue;
@@ -303,6 +299,7 @@ export class HindsightSessionState {
 				types: this.config.recallTypes.length > 0 ? this.config.recallTypes : undefined,
 				tags: this.recallTags,
 				tagsMatch: this.recallTagsMatch,
+				signal,
 			});
 			if (signal?.aborted) return { context: null, ok: false };
 			const results = response.results ?? [];
@@ -335,16 +332,21 @@ export class HindsightSessionState {
 		let documentId: string;
 		let transcript: string;
 		let nextCachedTranscript: string | undefined;
+		let prefixKey = "";
+		let hashedThrough = 0;
 
 		if (retainFullWindow) {
 			documentId = this.sessionId;
 			const boundary = this.#lastRetainedMessageIndex;
-			if (boundary > messages.length || retentionPrefixKey(messages, boundary) !== this.#lastRetainedPrefixKey) {
+			if (boundary <= messages.length) prefixKey = extendRetentionPrefixKey("", messages, 0, boundary);
+			if (boundary > messages.length || prefixKey !== this.#lastRetainedPrefixKey) {
 				this.#lastRetainedMessageIndex = 0;
 				this.#cachedTranscript = "";
 				this.#lastRetainedPrefixKey = "";
+				prefixKey = "";
 			}
-			const newMessages = messages.slice(this.#lastRetainedMessageIndex);
+			hashedThrough = this.#lastRetainedMessageIndex;
+			const newMessages = messages.slice(hashedThrough);
 			const { transcript: newPart } = prepareRetentionTranscript(newMessages, true, { includeTimestamps: true });
 			if (!newPart) return;
 			nextCachedTranscript = this.#cachedTranscript ? `${this.#cachedTranscript}\n\n${newPart}` : newPart;
@@ -372,17 +374,19 @@ export class HindsightSessionState {
 		});
 		if (nextCachedTranscript !== undefined) {
 			this.#cachedTranscript = nextCachedTranscript;
+			// prefixKey hashes [0, hashedThrough) of this same snapshot; extend it instead of rehashing from 0.
+			this.#lastRetainedPrefixKey = extendRetentionPrefixKey(prefixKey, messages, hashedThrough, messages.length);
 			this.#lastRetainedMessageIndex = messages.length;
-			this.#lastRetainedPrefixKey = retentionPrefixKey(messages, messages.length);
 		}
 	}
 
 	async maybeRetainOnAgentEnd(): Promise<void> {
 		if (!this.config.autoRetain) return;
+		// Cheap gate first: most agent_end events are not retain turns, so skip text extraction.
+		const userTurns = countUserTurns(this.session.sessionManager);
+		if (userTurns - this.lastRetainedTurn < this.config.retainEveryNTurns) return;
 		const messages = extractMessages(this.session.sessionManager);
 		if (messages.length === 0) return;
-		const userTurns = messages.filter(m => m.role === "user").length;
-		if (userTurns - this.lastRetainedTurn < this.config.retainEveryNTurns) return;
 
 		try {
 			await this.retainSession(messages);
@@ -427,7 +431,10 @@ export class HindsightSessionState {
 		}
 	}
 
-	async beforeAgentStartPrompt(promptText: string): Promise<MemoryPromptPreparation | undefined> {
+	async beforeAgentStartPrompt(
+		promptText: string,
+		signal?: AbortSignal,
+	): Promise<MemoryPromptPreparation | undefined> {
 		if (this.config.mentalModelsEnabled && this.mentalModelsLoadPromise && this.mentalModelsLoadedAt === undefined) {
 			await Promise.race([this.mentalModelsLoadPromise, Bun.sleep(MENTAL_MODEL_FIRST_TURN_DEADLINE_MS)]);
 		}
@@ -442,7 +449,7 @@ export class HindsightSessionState {
 		const queryMessages = [...history, { role: "user" as const, content: latestPrompt }];
 		const query = composeRecallQuery(latestPrompt, queryMessages, this.config.recallContextTurns);
 		const truncated = truncateRecallQuery(query, latestPrompt, this.config.recallMaxQueryChars);
-		const { context, ok } = await this.recallForContext(truncated);
+		const { context, ok } = await this.recallForContext(truncated, signal);
 		if (!ok) return undefined;
 
 		return {
@@ -599,8 +606,6 @@ export class HindsightSessionState {
 		this.#mentalModelsLoadGeneration++;
 		this.unsubscribe?.();
 		this.unsubscribe = undefined;
-		this.unsubscribeScope?.();
-		this.unsubscribeScope = undefined;
 		this.retainQueue.dispose();
 	}
 

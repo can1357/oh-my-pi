@@ -14,6 +14,7 @@ import {
 	type HookMessage,
 	type FileMentionMessage,
 	isUserInvokedSkillPrompt,
+	isUserTurnInitiator,
 } from "@oh-my-pi/pi-tui/chat/messages";
 export {
 	SKILL_PROMPT_MESSAGE_TYPE,
@@ -56,6 +57,7 @@ import { isRecord, logger, prompt } from "@oh-my-pi/pi-utils";
 import { COLLAB_PROMPT_MESSAGE_TYPE } from "@oh-my-pi/pi-wire";
 import userInterjectionTemplate from "../prompts/steering/user-interjection.md" with { type: "text" };
 import { formatTitleConversationContext, type TitleConversationTurn } from "../tiny/message-preproc";
+import { stripXdUrlPrefix } from "@oh-my-pi/pi-tui/tools/xd-url";
 
 export {
 	type BranchSummaryMessage,
@@ -85,6 +87,8 @@ export function logProviderTurnError(msg: AssistantMessage): void {
 
 const EPHEMERAL_REPLY_MAX_BYTES = 4096;
 const REPLAN_TITLE_CONTEXT_TURN_LIMIT = 6;
+/** Max chars kept from each anchored user request in the replan title context. */
+const REPLAN_TITLE_ANCHOR_CHARS = 400;
 
 /**
  * Removes replay-bound provider state before reparenting an assistant message
@@ -105,9 +109,9 @@ export function sanitizeAssistantForReparentedHistory(message: AssistantMessage)
 
 /**
  * Collapses degenerate repeated lines and bounds an ephemeral side-channel
- * reply to 4 KiB.
+ * reply to `maxBytes` (4 KiB unless the caller reads replies in full).
  */
-export function dedupeEphemeralReply(text: string): string {
+export function dedupeEphemeralReply(text: string, maxBytes = EPHEMERAL_REPLY_MAX_BYTES): string {
 	if (!text) return text;
 	const lines = text.split("\n");
 	const out: string[] = [];
@@ -123,29 +127,73 @@ export function dedupeEphemeralReply(text: string): string {
 		}
 		i = j;
 	}
-	let result = out.join("\n");
-	if (Buffer.byteLength(result, "utf8") > EPHEMERAL_REPLY_MAX_BYTES) {
-		const suffix = "\n[…truncated]";
-		const budget = EPHEMERAL_REPLY_MAX_BYTES - Buffer.byteLength(suffix, "utf8");
-		while (Buffer.byteLength(result, "utf8") > budget) {
-			result = result.slice(0, -1);
-		}
-		result += suffix;
-	}
-	return result;
+	const result = out.join("\n");
+	if (Buffer.byteLength(result, "utf8") <= maxBytes) return result;
+	const bytes = Buffer.from(result, "utf8");
+	const suffix = "\n[…truncated]";
+	// Cut on a UTF-8 character boundary: back off continuation bytes (10xxxxxx)
+	// so a multi-byte character straddling the budget is dropped whole.
+	let cut = Math.max(0, maxBytes - Buffer.byteLength(suffix, "utf8"));
+	while (cut > 0 && (bytes[cut] & 0xc0) === 0x80) cut--;
+	return bytes.toString("utf8", 0, cut) + suffix;
 }
 
-/** Builds the recent user/assistant context supplied to title regeneration. */
+/**
+ * Builds the recent user/assistant context supplied to title regeneration.
+ * The session's opening request and the latest user request always lead the
+ * context: in a long tool loop the recent window is all assistant notes, and
+ * follow-ups ("fix all") rarely restate the goal, so without them title models
+ * name the current micro-step (a file or symbol) instead of the session goal.
+ */
 export function buildReplanTitleContext(messages: AgentMessage[]): string {
-	const turns: TitleConversationTurn[] = [];
-	for (let i = messages.length - 1; i >= 0 && turns.length < REPLAN_TITLE_CONTEXT_TURN_LIMIT; i--) {
+	const recent: TitleConversationTurn[] = [];
+	let i = messages.length - 1;
+	for (; i >= 0 && recent.length < REPLAN_TITLE_CONTEXT_TURN_LIMIT; i--) {
 		const message = messages[i];
 		if (!message) continue;
 		const turn = titleConversationTurnFromMessage(message);
-		if (turn) turns.push(turn);
+		if (turn) recent.push(turn);
 	}
-	turns.reverse();
-	return formatTitleConversationContext(turns);
+	recent.reverse();
+	// Earlier user turns outside the window, oldest first.
+	const earlierUsers: TitleConversationTurn[] = [];
+	for (let j = 0; j <= i; j++) {
+		const message = messages[j];
+		const turn = message && titleConversationTurnFromMessage(message);
+		if (turn?.role === "user") earlierUsers.push(turn);
+	}
+	const anchors: TitleConversationTurn[] = [];
+	const opening = earlierUsers[0];
+	if (opening) anchors.push(opening);
+	const latest = earlierUsers.at(-1);
+	if (latest && latest !== opening && !recent.some(turn => turn.role === "user")) anchors.push(latest);
+	// Bound anchors so a long pasted request cannot crowd the recent turns out
+	// of the shared truncation budget.
+	const bounded = anchors.map(turn => ({ ...turn, text: turn.text?.slice(0, REPLAN_TITLE_ANCHOR_CHARS) }));
+	return formatTitleConversationContext([...bounded, ...recent]);
+}
+
+/**
+ * Title text of a message the operator wrote: a typed prompt, or a `/skill:`
+ * invocation as its chip (never the expanded skill body). `undefined` for
+ * agent-attributed and non-user messages, which automatic titles never name.
+ */
+export function operatorTitleText(message: AgentMessage): string | undefined {
+	if (message.role === "custom") return titleTextFromSkillPrompt(message);
+	if (message.role !== "user" || message.attribution !== "user") return undefined;
+	return textFromContent(message.content) || undefined;
+}
+
+/**
+ * Words of thinking plus reply text a settled assistant message contributes to
+ * {@link buildReplanTitleContext}. Deferred auto-titling accumulates these and
+ * retitles once the assistant has said enough to reveal the task; aborted and
+ * errored turns count zero.
+ */
+export function titleContextWordCount(message: AssistantMessage): number {
+	if (message.stopReason === "aborted" || message.stopReason === "error") return 0;
+	const text = `${thinkingFromContent(message.content)} ${textFromContent(message.content)}`;
+	return text.match(/\S+/g)?.length ?? 0;
 }
 
 /**
@@ -427,6 +475,25 @@ function stripDemotedThinkingForLlm(message: AssistantMessage): AssistantMessage
 	return demoted ? { ...message, content: demoted.strippedContent } : message;
 }
 
+/**
+ * Replay `xd://<device>` tool-call names under their bare device name. Sessions
+ * saved before the agent loop canonicalized fallback-resolved names persist the
+ * alias, which providers reject as a function name (#13352). Call ids are kept,
+ * so call/result pairing is unchanged.
+ */
+function canonicalizeXdToolCallNames(message: AssistantMessage): AssistantMessage {
+	let content: AssistantMessage["content"] | undefined;
+	for (let i = 0; i < message.content.length; i++) {
+		const block = message.content[i]!;
+		if (block.type !== "toolCall") continue;
+		const name = stripXdUrlPrefix(block.name);
+		if (name === block.name) continue;
+		content ??= message.content.slice();
+		content[i] = { ...block, name };
+	}
+	return content ? { ...message, content } : message;
+}
+
 /** A provider-rejection turn carrying nothing but the error flag: stopReason
  *  "error" with no text, thinking, or tool calls — e.g. a request the provider
  *  rejected before any output (an oversized 413 payload). Persisting it writes an
@@ -485,6 +552,11 @@ function isActionableContent(content: AssistantMessage["content"][number] | unde
 	}
 }
 
+/** Output the user or the agent loop can act on: reasoning alone does not count. */
+function isDeliverableContent(content: AssistantMessage["content"][number] | undefined): boolean {
+	return content?.type === "toolCall" || content?.type === "image" || (content?.type === "text" && hasText(content));
+}
+
 /** A `stop`/`toolUse` turn that produced nothing actionable. Any other stop
  *  reason is not an "empty stop": an `error`/`aborted` turn is a failure rather
  *  than an empty completion, and a `length` stop was cut off mid-output. */
@@ -522,6 +594,17 @@ export function isEmptyAssistantStop(message: Pick<AssistantMessage, "stopReason
 export function assistantTurnProducedOutput(message: Pick<AssistantMessage, "stopReason" | "content">): boolean {
 	if (message.stopReason === "error" || message.stopReason === "aborted") return false;
 	return !isEmptyAssistantStop(message) && message.content.some(isActionableContent);
+}
+
+/**
+ * True when the turn emitted text, a tool call, or an image. Stricter than
+ * {@link assistantTurnProducedOutput}: signed reasoning is replay-worthy but
+ * delivers nothing, so length-stop recovery in `checkCompaction` treats a
+ * reasoning-only truncation as budget burned (retry) rather than a truncated
+ * deliverable (keep), and only a delivered turn resets its retry cap.
+ */
+export function assistantTurnDelivered(message: Pick<AssistantMessage, "content">): boolean {
+	return message.content.some(isDeliverableContent);
 }
 
 /** Extract the optional `__queueChipText` field from a CustomMessage's
@@ -636,6 +719,11 @@ function wrapSteeringUserMessage(message: SteeringUserMessage): UserMessage {
 	return { ...userMessage, content };
 }
 
+// One wrapper per steering message. Per-request transforms key on identity (the
+// date/cwd reminder treats an unseen user turn as new), so a fresh wrapper each
+// request would read as a never-sent turn. Owner edits evict it below.
+const steeringWrapperCache = new WeakMap<AgentMessage, UserMessage>();
+
 export function wrapSteeringForModel(messages: AgentMessage[]): AgentMessage[] {
 	// Wrap EVERY steering message, not just a trailing run. The wire bytes of a
 	// steering message must be a pure function of the message itself, independent
@@ -647,7 +735,11 @@ export function wrapSteeringForModel(messages: AgentMessage[]): AgentMessage[] {
 	for (let i = 0; i < messages.length; i++) {
 		const message = messages[i];
 		if (!isSteeringUserMessage(message)) continue;
-		const wrappedMessage = wrapSteeringUserMessage(message);
+		let wrappedMessage = steeringWrapperCache.get(message);
+		if (wrappedMessage === undefined) {
+			wrappedMessage = wrapSteeringUserMessage(message);
+			steeringWrapperCache.set(message, wrappedMessage);
+		}
 		if (wrappedMessage === message) continue;
 		if (wrappedMessages === undefined) {
 			wrappedMessages = messages.slice();
@@ -953,6 +1045,7 @@ export function invalidateConvertToLlmArrayCache(messages: AgentMessage[]): void
 }
 
 registerMessageCacheInvalidator(message => {
+	steeringWrapperCache.delete(message);
 	convertCache.delete(message);
 	convertGeneration++;
 });
@@ -1058,19 +1151,29 @@ function convertOne(m: AgentMessage, interruptedNext: boolean): Message[] {
 			// stripped whether or not they were long enough for a continuity note.
 			const userInterrupted = m.stopReason === "aborted" && isUserInterruptAbort(m);
 			const source = interruptedNext || userInterrupted ? stripDemotedThinkingForLlm(m) : m;
-			if (userInterrupted && !interruptedNext && source.content.length === 0) return [];
-			const converted = convertMessageToLlm(source);
+			// An empty interrupted response still carries the controls its request
+			// sent (e.g. an Anthropic `tool_removal`); later requests replay them from it.
+			if (userInterrupted && !interruptedNext && source.content.length === 0 && m.requestControls === undefined) {
+				return [];
+			}
+			const converted = convertMessageToLlm(canonicalizeXdToolCallNames(source));
 			return converted ? [converted] : [];
 		}
 		case "branchSummary":
 		case "compactionSummary":
 		case "user":
-		case "developer":
-		case "toolResult": {
+		case "developer": {
 			// Core roles share one transformer with agent-core —
 			// duplicating them here is how snapcompact frames once
 			// silently fell off the provider request.
 			const converted = convertMessageToLlm(m);
+			return converted ? [converted] : [];
+		}
+		case "toolResult": {
+			// Same pre-canonicalization history as `canonicalizeXdToolCallNames`;
+			// Gemini replays the result under this name.
+			const toolName = stripXdUrlPrefix(m.toolName);
+			const converted = convertMessageToLlm(toolName === m.toolName ? m : { ...m, toolName });
 			return converted ? [converted] : [];
 		}
 		default:
@@ -1088,6 +1191,11 @@ function convertOneCached(m: AgentMessage, interruptedNext: boolean): Message[] 
 	for (const message of fragment) copyPerCallContextMessage(message, m);
 	convertCache.set(m, { interruptedNext, fragment });
 	return fragment;
+}
+
+/** A turn the user wrote: a user message, or a user-initiated custom prompt (`/skill:`, collab). */
+export function isUserAuthoredMessage(message: AgentMessage): boolean {
+	return message.role === "user" || (message.role === "custom" && isUserTurnInitiator(message));
 }
 
 /**

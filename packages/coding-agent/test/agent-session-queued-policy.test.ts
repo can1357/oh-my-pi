@@ -31,6 +31,8 @@ import { SessionProviderBoundary } from "@oh-my-pi/pi-coding-agent/session/sessi
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { createAssistantMessage } from "./helpers/agent-session-setup";
 
+import { cfgMnemopiInjectionTokenLimit } from "@oh-my-pi/pi-coding-agent/mnemopi/settings";
+
 const BASE = ["base identity", "base tools"];
 
 function extension(name: string, handler: (event: BeforeAgentStartEvent) => Promise<unknown>): Extension {
@@ -206,7 +208,7 @@ describe("queued user delivery policy", () => {
 			const state = new HindsightSessionState({
 				sessionId: session.sessionId,
 				session,
-				config: loadHindsightConfig(settings, {}),
+				config: loadHindsightConfig(settings),
 				client,
 				bankId: "test-bank",
 				banksSet: new Set(["test-bank"]),
@@ -485,7 +487,7 @@ describe("queued user delivery policy", () => {
 			recalls++;
 			return `recall prefix ${"memory detail ".repeat(500)}recall overflow`;
 		});
-		session.settings.set("mnemopi.injectionTokenLimit", limit);
+		cfgMnemopiInjectionTokenLimit.set(session.settings, limit);
 		await session.refreshBaseSystemPrompt();
 		await session.prompt("bounded first recall");
 		// The fixture's base/tool blocks precede the backend-owned instruction blocks.
@@ -498,7 +500,7 @@ describe("queued user delivery policy", () => {
 			expect(memoryPrompt).toContain("recall prefix");
 		}
 
-		session.settings.set("mnemopi.injectionTokenLimit", 6000);
+		cfgMnemopiInjectionTokenLimit.set(session.settings, 6000);
 		await session.refreshBaseSystemPrompt();
 		await session.prompt("use the committed full recall");
 		expect(recalls).toBe(1);
@@ -1084,5 +1086,127 @@ describe("queued user delivery policy", () => {
 		expect(events.map(event => event.prompt)).toEqual(["user task"]);
 		expect(requests).toHaveLength(2);
 		expect(requests[1].systemPrompt).toEqual(requests[0].systemPrompt);
+	});
+
+	it.each(["steering", "followUp"] as const)(
+		"withdraws %s input already dequeued for the next model call when interrupted",
+		async queue => {
+			const { agent, delivered } = setup();
+			const image: ImageContent = { type: "image", mimeType: "image/png", data: "AAAA" };
+			const reached = Promise.withResolvers<void>();
+			const release = Promise.withResolvers<void>();
+			let calls = 0;
+			// The first model call queues the input; the run dequeues it once that call ends and
+			// holds the next call here, before the transcript records it.
+			const removeGate = agent.addBeforeModelCallHook(async () => {
+				if (calls++ === 0) {
+					if (queue === "steering") await session.steer("dequeued input", [image]);
+					else await session.followUp("dequeued input", [image]);
+					return;
+				}
+				reached.resolve();
+				await release.promise;
+			});
+			const ends: AgentMessage[][] = [];
+			session.subscribe(event => {
+				if (event.type === "agent_end") ends.push(event.messages);
+			});
+			const run = session.prompt("first task");
+			await reached.promise;
+			expect([...agent.peekSteeringQueue(), ...agent.peekFollowUpQueue()]).toEqual([]);
+			if (queue === "steering") await session.steer("queued after", [image]);
+			else await session.followUp("queued after", [image]);
+
+			const restored = session.clearQueue({ forInterrupt: true });
+			const abort = session.abort();
+			release.resolve();
+			await abort;
+			await run;
+			removeGate();
+
+			// Neither the aborted turn nor a requeue records it or its prepared context, and the
+			// run's agent_end does not report it either.
+			expect(ends).not.toEqual([]);
+			expect(
+				[...delivered, ...ends.flat()].filter(message =>
+					/dequeued input|queued after/.test(JSON.stringify(message)),
+				),
+			).toEqual([]);
+			// The input dequeued first is restored first.
+			expect(restored).toEqual({
+				steering: [],
+				followUp: [],
+				[queue]: [
+					{ text: "dequeued input", images: [image] },
+					{ text: "queued after", images: [image] },
+				],
+			});
+			expect(agent.hasQueuedMessages()).toBe(false);
+			expect(agent.peekUndeliveredQueuedMessages()).toEqual([]);
+		},
+	);
+
+	it("withdraws dequeued steering and follow-up into their own queues when interrupted", async () => {
+		const { agent, delivered } = setup();
+		const reached = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		let calls = 0;
+		const removeGate = agent.addBeforeModelCallHook(async () => {
+			if (calls++ === 0) return;
+			reached.resolve();
+			await release.promise;
+		});
+		// Queued as the first response yields, so the yield-point drain dequeues both together for
+		// the next model call.
+		agent.setOnBeforeYield(async () => {
+			agent.setOnBeforeYield(undefined);
+			await session.steer("dequeued steer");
+			await session.followUp("dequeued follow-up");
+		});
+		const run = session.prompt("first task");
+		await reached.promise;
+		expect([...agent.peekSteeringQueue(), ...agent.peekFollowUpQueue()]).toEqual([]);
+
+		const restored = session.clearQueue({ forInterrupt: true });
+		const abort = session.abort();
+		release.resolve();
+		await abort;
+		await run;
+		removeGate();
+
+		expect(delivered.filter(message => JSON.stringify(message).includes("dequeued"))).toEqual([]);
+		expect(restored).toEqual({
+			steering: [{ text: "dequeued steer" }],
+			followUp: [{ text: "dequeued follow-up" }],
+		});
+		expect(agent.hasQueuedMessages()).toBe(false);
+	});
+
+	it("leaves input dequeued for the next model call to the continuing run on a plain queue clear", async () => {
+		const { agent, delivered } = setup();
+		const reached = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		let calls = 0;
+		const removeGate = agent.addBeforeModelCallHook(async () => {
+			if (calls++ === 0) {
+				await session.steer("dequeued input");
+				return;
+			}
+			if (calls === 2) reached.resolve();
+			await release.promise;
+		});
+		const run = session.prompt("first task");
+		await reached.promise;
+
+		// Alt+Up only takes back what is still queued; the run keeps the batch it already took.
+		expect(session.clearQueue()).toEqual({ steering: [], followUp: [] });
+		release.resolve();
+		await run;
+		removeGate();
+
+		expect(delivered.filter(message => message.role === "user").map(message => JSON.stringify(message))).toEqual([
+			expect.stringContaining("first task"),
+			expect.stringContaining("dequeued input"),
+		]);
 	});
 });

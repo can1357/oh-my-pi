@@ -350,7 +350,12 @@ export interface ServerConfig {
 		statusRequestTimeoutMs?: number;
 	};
 	capabilities?: ServerCapabilities;
-	/** If true, this is a linter/formatter server (e.g., Biome) - used only for diagnostics/actions, not type intelligence */
+	/**
+	 * Marks a dedicated linter/formatter server (e.g. Biome, efm-langserver, ruff).
+	 * Excluded from type-intelligence (definition, hover, references), but preferred
+	 * over type-checkers when selecting the `formatOnWrite` formatter, so a configured
+	 * external formatter wins for file types a type-checker also claims.
+	 */
 	isLinter?: boolean;
 	/** Resolved absolute path to the command binary (set during config loading) */
 	resolvedCommand?: string;
@@ -433,12 +438,13 @@ export interface LspClient {
 	dynamicCapabilityRegistrations?: Map<string, string>;
 	openFiles: Map<string, OpenFile>;
 	pendingRequests: Map<number | string, PendingRequest>;
-	messageBuffer: Uint8Array;
 	isReading: boolean;
 	/** Lifecycle state: "connecting" until initialize completes, then "ready"; "error" on init failure or reader death. */
 	status: "connecting" | "ready" | "error";
 	serverCapabilities?: LspServerCapabilities;
 	lastActivity: number;
+	/** Wall-clock time when this server process started; absent only on external test doubles. */
+	startedAt?: number;
 	/** Serializes outbound JSON-RPC writes to the server process. */
 	writeQueue: Promise<void>;
 	/** Tracks active work-done progress tokens from the server */

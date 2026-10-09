@@ -9,12 +9,11 @@ import {
 	isExcludedModel,
 	isLikelyOpenAIResponsesId,
 	modelLimitsFor,
-	pricingPeerFor,
 } from "../compat/behavior";
 import { xaiResponsesReasoningEffortMap } from "../compat/openai";
 import { hasModelScopedEffortLadder, resolveModelPolicy } from "../compat/resolve";
 import { compareRevision, parseRevision } from "../compat/revision";
-import { seedModels } from "../compat/providers";
+import { providerEntries, seedModels } from "../compat/providers";
 import { billingVariantPlain, classifyModel, discoveryVocabulary } from "../compat/taxonomy";
 import {
 	DEFAULT_OPENAI_COMPATIBLE_DISCOVERY_TIMEOUT_MS,
@@ -25,10 +24,22 @@ import {
 import { Effort, THINKING_EFFORTS } from "../effort";
 import { FIREWORKS_FAST_SUFFIX, toFireworksPublicModelId } from "../fireworks-model-id";
 import { getBundledModelReferenceIndex } from "../identity/bundled";
+import { bareModelId } from "../identity/id";
 import { resolveModelReference } from "../identity/reference";
 import type { ModelManagerOptions, ModelsDevFallback } from "../model-manager";
 import { type GeneratedProvider, getBundledModels } from "../models";
-import type { Api, FetchImpl, Model, ModelSpec, OpenAICompat, Provider, ThinkingConfig } from "../types";
+import {
+	KIND_API_KINDS,
+	MODEL_KINDS,
+	type Api,
+	type FetchImpl,
+	type Model,
+	type ModelKind,
+	type ModelSpec,
+	type OpenAICompat,
+	type Provider,
+	type ThinkingConfig,
+} from "../types";
 import { discoveryFetch, isAnthropicOAuthToken, isRecord, toBoolean, toNumber, toPositiveNumber } from "../utils";
 import { ALIBABA_TOKEN_PLAN_BASE_URL, parseAlibabaTokenPlanCredential } from "../wire/alibaba-token-plan";
 import { normalizeCharmHyperBaseUrl } from "../wire/charm-hyper";
@@ -44,6 +55,11 @@ import {
 	mergeCopilotApiHeaders,
 	parseGitHubCopilotApiKey,
 } from "../wire/github-copilot";
+import {
+	SINGULARITYAPI_DEV_API_BASE_URL,
+	SINGULARITYAPI_TECH_API_BASE_URL,
+	normalizeSingularityApiBaseUrl,
+} from "../wire/singularityapi";
 import { createBundledReferenceMap, createReferenceResolver, toModelSpec } from "./bundled-references";
 import { getDefaultModelDiscoveryBaseUrl, resolveModelCacheProviderId } from "./cache-provider-id";
 import { getClinePassModelMetadata } from "./cline-pass";
@@ -96,6 +112,7 @@ const ANTHROPIC_OAUTH_BETA =
 export interface ModelsDevModel {
 	id?: string;
 	name?: string;
+	kind?: string;
 	tool_call?: boolean;
 	reasoning?: boolean;
 	reasoning_options?: Array<{ type?: string; values?: string[]; min?: number; max?: number }>;
@@ -111,6 +128,7 @@ export interface ModelsDevModel {
 	};
 	modalities?: {
 		input?: string[];
+		output?: string[];
 	};
 	status?: string;
 	provider?: { npm?: string };
@@ -517,8 +535,11 @@ function mapWithBundledReference<TApi extends Api>(
 			name,
 		};
 	}
+	// Generic `/models` rows describe the chat roster. Do not make a bundled
+	// runner kind look endpoint-authored merely because its metadata is reused.
+	const { kind: _inheritedKind, ...chatReference } = reference;
 	return {
-		...reference,
+		...chatReference,
 		id: defaults.id,
 		name,
 		api: defaults.api,
@@ -1237,6 +1258,81 @@ export function huggingfaceModelManagerOptions(
 }
 
 // ---------------------------------------------------------------------------
+// 4.5 Helmcode
+// ---------------------------------------------------------------------------
+
+export interface HelmcodeModelManagerConfig {
+	apiKey?: string;
+	baseUrl?: string;
+	fetch?: FetchImpl;
+}
+
+/**
+ * First-party hosts of the models Helmcode resells (helmcode.com/docs/models,
+ * "Frontier models"). Resold ids resolve only against these rows: the global
+ * bare-id index picks whichever gateway row wins a context/output tie, which
+ * can carry a zero or marked-up price instead of the vendor list price.
+ */
+const HELMCODE_RESOLD_VENDORS = ["anthropic", "openai", "google"] as const satisfies readonly GeneratedProvider[];
+
+function createHelmcodeVendorReferenceMap(): Map<string, ModelSpec<"openai-completions">> {
+	const references = new Map<string, ModelSpec<"openai-completions">>();
+	for (const vendor of HELMCODE_RESOLD_VENDORS) {
+		for (const [id, reference] of createBundledReferenceMap<"openai-completions">(vendor)) {
+			if (!references.has(id)) references.set(id, reference);
+		}
+	}
+	return references;
+}
+
+/**
+ * Helmcode model manager: OpenAI-compatible chat completions at
+ * `api.helmcode.com/v1`. `/v1/models` also lists embedding, rerank, TTS, and
+ * STT models; the exclusion policy lives in `runtime/behavior.kdl`
+ * (`exclude-models provider="helmcode"`).
+ *
+ * `/v1/models` carries no capability data. Resold frontier ids (Claude, GPT,
+ * Gemini) take only capability facts from the first-party vendor's bundled
+ * row: reasoning, modalities, context window, output cap, and list price. The
+ * rest of that row (thinking shape, compat, native web search, tool dialects,
+ * cache semantics) describes the vendor's own API, not this chat-completions
+ * proxy; the host's `reasoning_effort` ladders and cache-write pricing live in
+ * `providers/helmcode.kdl`. Ids with no Helmcode or vendor row (e.g. a new
+ * open-weight model) inherit nothing from other gateways.
+ */
+export function helmcodeModelManagerOptions(
+	config?: HelmcodeModelManagerConfig,
+): ModelManagerOptions<"openai-completions"> {
+	let vendorReferences: Map<string, ModelSpec<"openai-completions">> | undefined;
+	const resolveVendorReference = (id: string) => (vendorReferences ??= createHelmcodeVendorReferenceMap()).get(id);
+	return createOpenAICompatibleModelManagerOptions({
+		api: "openai-completions",
+		providerId: "helmcode",
+		defaultBaseUrl: "https://api.helmcode.com/v1",
+		config,
+		requireApiKey: true,
+		filterModel: (_entry, model) => !isExcludedModel("helmcode", model.id),
+		mapModel: (entry, defaults, helmcodeReference) => {
+			if (helmcodeReference) return mapWithBundledReference(entry, defaults, helmcodeReference);
+			const vendor = resolveVendorReference(defaults.id);
+			if (!vendor) return mapWithBundledReference(entry, defaults, undefined);
+			return {
+				...defaults,
+				name: toModelName(entry.name, vendor.name),
+				reasoning: vendor.reasoning,
+				input: vendor.input,
+				cost: vendor.cost,
+				contextWindow: toPositiveNumber(entry.context_length, vendor.contextWindow),
+				maxTokens: toPositiveNumber(entry.max_completion_tokens, vendor.maxTokens),
+			};
+		},
+		// Must live on the manager options, not only the KDL descriptor:
+		// `createModelManager()` prunes the bundled slice from this flag.
+		dynamicModelsAuthoritative: true,
+	});
+}
+
+// ---------------------------------------------------------------------------
 // 5. NVIDIA
 // ---------------------------------------------------------------------------
 
@@ -1434,8 +1530,11 @@ function mapDeepinfraModel(
 		: referenceMaxTokens !== null && contextWindow !== null
 			? Math.min(referenceMaxTokens, contextWindow)
 			: referenceMaxTokens;
+	// This endpoint is filtered to `chat`; a same-id runner reference may lend
+	// metadata, but its kind is not evidence that chat discovery advertised it.
+	const { kind: _inheritedKind, ...chatReference } = reference ?? {};
 	return {
-		...reference,
+		...chatReference,
 		id,
 		name: reference?.name ?? id,
 		api: "openai-completions",
@@ -1530,35 +1629,6 @@ export interface XaiModelManagerConfig {
 	apiKey?: string;
 	baseUrl?: string;
 	fetch?: FetchImpl;
-}
-
-// SuperGrok surfaces a few models under IDs that differ from their public
-// `xai` catalog equivalent, so the exact-ID price fallback misses them. Map
-// the OAuth ID to the paid ID it mirrors.
-// The alias map lives in the `pricing-peer` behavior rule.
-function hasTokenPrice(cost: ModelSpec["cost"]): boolean {
-	return cost.input !== 0 || cost.output !== 0 || cost.cacheRead !== 0 || cost.cacheWrite !== 0;
-}
-
-/**
- * Mirrors exact public-model prices onto matching SuperGrok catalog rows.
- * The >200K long-context tier itself is rule-owned (`classes/xai.kdl`
- * `long-context-cost` multiplier axis) and derives at build time.
- */
-export function applyXaiCatalogPricing(models: readonly ModelSpec[]): ModelSpec[] {
-	const publicCosts = new Map(
-		models
-			.filter(model => model.provider === "xai" && hasTokenPrice(model.cost))
-			.map(model => [model.id, model.cost]),
-	);
-
-	return models.map(model => {
-		if (model.provider !== "xai-oauth" || hasTokenPrice(model.cost)) return model;
-		const peer = pricingPeerFor("xai-oauth", model.id);
-		const publicCost =
-			publicCosts.get(model.id) ?? (peer && peer.peerId !== model.id ? publicCosts.get(peer.peerId) : undefined);
-		return publicCost ? { ...model, cost: { ...publicCost } } : model;
-	});
 }
 
 export function xaiModelManagerOptions(config?: XaiModelManagerConfig): ModelManagerOptions<"openai-responses"> {
@@ -1691,8 +1761,7 @@ function mergeCuratedIntoModel(
  * window, reasoning flags, or the effort-dial allowlist.
  *
  * Three passes:
- *   1. Filter `XAI_NON_CHAT_PREFIXES` (picker pollution defense for tool
- *      surfaces routed through dedicated tools — generate_image, tts).
+ *   1. Filter KDL exclusions and runner seed ids out of the chat roster.
  *   2. Overlay curated metadata onto dynamic-fetch matches. xAI's /v1/models
  *      does not return context_window or reasoning metadata, so without
  *      this overlay the runtime falls back to the bundled-reference default
@@ -1708,8 +1777,13 @@ function mergeCuratedIntoModel(
  * in original order.
  */
 function applyXAIOAuthCuration(dynamic: readonly ModelSpec<"openai-responses">[]): ModelSpec<"openai-responses">[] {
-	const filtered = dynamic.filter(e => !isExcludedModel("xai-oauth", e.id));
-	const curatedModels = seedModels<"openai-responses">("xai-oauth");
+	const curatedModels: ModelSpec<"openai-responses">[] = [];
+	const runnerIds = new Set<string>();
+	for (const seed of seedModels("xai-oauth")) {
+		if (isResponsesSeed(seed)) curatedModels.push(seed);
+		else runnerIds.add(seed.id);
+	}
+	const filtered = dynamic.filter(e => !runnerIds.has(e.id) && !isExcludedModel("xai-oauth", e.id));
 
 	const byId = new Map<string, ModelSpec<"openai-responses">>(filtered.map(e => [e.id, e]));
 	for (const curated of curatedModels) {
@@ -1737,13 +1811,20 @@ function applyXAIOAuthCuration(dynamic: readonly ModelSpec<"openai-responses">[]
 	return [...curatedFirst, ...rest];
 }
 
+function isResponsesSeed(seed: ModelSpec<Api>): seed is ModelSpec<"openai-responses"> {
+	return seed.api === "openai-responses";
+}
+
 /**
  * Render the xai-oauth KDL seed as the static runtime fallback consumed by
  * {@link xaiOAuthModelManagerOptions}.
  */
-export function buildXaiOAuthStaticSeed(baseUrl?: string): ModelSpec<"openai-responses">[] {
+export function buildXaiOAuthStaticSeed(baseUrl?: string): ModelSpec<Api>[] {
 	const resolvedBaseUrl = baseUrl ?? "https://api.x.ai/v1";
-	return seedModels<"openai-responses">("xai-oauth").map(seed => {
+	return seedModels("xai-oauth").map(seed => {
+		if (!isResponsesSeed(seed)) {
+			return { ...seed, baseUrl: resolvedBaseUrl };
+		}
 		const base: ModelSpec<"openai-responses"> = {
 			...seed,
 			baseUrl: resolvedBaseUrl,
@@ -1753,9 +1834,7 @@ export function buildXaiOAuthStaticSeed(baseUrl?: string): ModelSpec<"openai-res
 	});
 }
 
-export function xaiOAuthModelManagerOptions(
-	config?: XaiOAuthModelManagerConfig,
-): ModelManagerOptions<"openai-responses"> {
+export function xaiOAuthModelManagerOptions(config?: XaiOAuthModelManagerConfig): ModelManagerOptions<Api> {
 	const defaultBaseUrl = "https://api.x.ai/v1";
 	const resolvedBaseUrl = config?.baseUrl ?? defaultBaseUrl;
 	const base = createOpenAICompatibleModelManagerOptions({
@@ -2100,21 +2179,24 @@ export function clampKimiK27CodeMaxTokens(modelId: string, candidate: number | n
 }
 
 /**
- * Fireworks Fast variants we surface. Each inherits the base model's
- * limits/modalities/thinking and overrides only the cost with the Standard-column
- * Fast prices from the Serverless pricing table; `cacheWrite` stays 0 (Fireworks
- * bills no cache-write). Derived from the bundled base entries so metadata stays
- * in lockstep, and the runtime auto-falls back to the base id on a failed fast
- * request. See https://docs.fireworks.ai/serverless/pricing.
+ * Fireworks Fast variants we surface: the Fast table on
+ * https://docs.fireworks.ai/serverless/serverless-modes, minus the US-only
+ * router (it needs the `us.api.fireworks.ai` host). That table, not a request
+ * outcome, decides membership: add or drop a row when Fireworks changes it.
+ * Each inherits the base model's limits/modalities/thinking and overrides
+ * only the cost with the Fast prices from the Serverless pricing table;
+ * `cacheWrite` stays 0 (Fireworks bills no cache-write). Derived from the
+ * bundled base entries so metadata stays in lockstep, and the runtime
+ * auto-falls back to the base id on a failed fast request.
+ * See https://docs.fireworks.ai/serverless/pricing.
  */
 const FIREWORKS_FAST_VARIANT_SPECS: ReadonlyArray<{
 	base: string;
 	name: string;
 	cost: { input: number; output: number; cacheRead: number };
 }> = [
-	{ base: "kimi-k2.7-code", name: "Kimi K2.7 Code Fast", cost: { input: 1.9, output: 8, cacheRead: 0.38 } },
-	{ base: "kimi-k2.6", name: "Kimi K2.6 Fast", cost: { input: 2, output: 8, cacheRead: 0.3 } },
-	{ base: "glm-5.1", name: "GLM-5.1 Fast", cost: { input: 2.8, output: 8.8, cacheRead: 0.52 } },
+	{ base: "kimi-k3", name: "Kimi K3 Fast", cost: { input: 4.5, output: 22.5, cacheRead: 0.45 } },
+	{ base: "glm-5.3", name: "GLM-5.3 Fast", cost: { input: 2.1, output: 6.6, cacheRead: 0.39 } },
 	{ base: "glm-5.2", name: "GLM-5.2 Fast", cost: { input: 2.1, output: 6.6, cacheRead: 0.21 } },
 ];
 
@@ -2219,6 +2301,7 @@ function mapFireworksControlPlaneModel(
 	publicModelId: string,
 	reference: ModelSpec<"openai-completions"> | undefined,
 	baseUrl: string,
+	cost: ModelSpec<"openai-completions">["cost"] | undefined,
 ): ModelSpec<"openai-completions"> {
 	const name = toModelName(record.displayName, reference?.name ?? publicModelId);
 	const supportsImage = toBoolean(record.supportsImageInput) === true;
@@ -2252,6 +2335,7 @@ function mapFireworksControlPlaneModel(
 		provider: "fireworks",
 		baseUrl,
 		name,
+		cost: cost ?? base.cost,
 		// The control plane exposes capability flags but no reasoning bit. Every
 		// serverless chat LLM Fireworks ships reasons, and `buildModel` derives
 		// the Fireworks effort map from the id at build time — so default
@@ -2275,6 +2359,7 @@ async function fetchFireworksServerlessModels(options: {
 	baseUrl: string;
 	apiKey: string;
 	resolveReference: (publicModelId: string) => ModelSpec<"openai-completions"> | undefined;
+	resolveCost: (publicModelId: string) => ModelSpec<"openai-completions">["cost"] | undefined;
 	fetch?: FetchImpl;
 }): Promise<ModelSpec<"openai-completions">[] | null> {
 	const listUrl = toFireworksControlPlaneModelsUrl(options.baseUrl, FIREWORKS_CONTROL_PLANE_ACCOUNT);
@@ -2321,6 +2406,7 @@ async function fetchFireworksServerlessModels(options: {
 					publicModelId,
 					options.resolveReference(publicModelId),
 					options.baseUrl,
+					options.resolveCost(publicModelId),
 				),
 			);
 		}
@@ -2369,6 +2455,39 @@ async function loadModelsDevReferences<TApi extends Api>(fetchImpl?: FetchImpl):
 		return new Map<string, ModelSpec<TApi>>();
 	}
 }
+
+/**
+ * Fireworks' own models.dev rows, consulted only for pricing during dynamic
+ * discovery. A bare-id reference comes from whichever host carries the id with
+ * the largest window, so its price is often another host's, and Fireworks-only
+ * models have none. models.dev keys these rows by wire id
+ * (`accounts/fireworks/models/glm-5p3`), so they are re-keyed to public ids.
+ * Rows that publish no price are skipped so the reference price stays; a
+ * published zero is Fireworks' price and wins. Absent from
+ * `MODELS_DEV_PROVIDER_DESCRIPTORS`: the control plane alone decides which
+ * models exist.
+ */
+const FIREWORKS_MODELS_DEV_DESCRIPTORS: readonly ModelsDevProviderDescriptor[] = [
+	openAiCompletionsDescriptor("fireworks-ai", "fireworks", "https://api.fireworks.ai/inference/v1", {
+		// `mapModelsDevToModels` maps an absent price to zeros, so tell them apart on the raw row.
+		filterModel: (_id, raw) => typeof raw.cost?.input === "number" || typeof raw.cost?.output === "number",
+	}),
+];
+
+async function loadFireworksModelsDevCosts(
+	fetchImpl?: FetchImpl,
+): Promise<Map<string, ModelSpec<"openai-completions">["cost"]>> {
+	const costs = new Map<string, ModelSpec<"openai-completions">["cost"]>();
+	try {
+		const payload = await fetchWellKnownModels(fetchImpl);
+		for (const model of mapModelsDevToModels(payload as Record<string, unknown>, FIREWORKS_MODELS_DEV_DESCRIPTORS)) {
+			costs.set(toFireworksPublicModelId(model.id), model.cost);
+		}
+	} catch {
+		// Optional enrichment: without it, discovered rows keep their reference price.
+	}
+	return costs;
+}
 export function fireworksModelManagerOptions(
 	config?: FireworksModelManagerConfig,
 ): ModelManagerOptions<"openai-completions"> {
@@ -2381,12 +2500,17 @@ export function fireworksModelManagerOptions(
 		providerId: "fireworks",
 		...(apiKey && {
 			fetchDynamicModels: async () => {
-				const modelsDevReferences = await loadModelsDevReferences<"openai-completions">(config?.fetch);
+				// Both loaders share one in-flight models.dev request.
+				const [modelsDevReferences, fireworksCosts] = await Promise.all([
+					loadModelsDevReferences<"openai-completions">(config?.fetch),
+					loadFireworksModelsDevCosts(config?.fetch),
+				]);
 				return fetchFireworksServerlessModels({
 					baseUrl,
 					apiKey,
 					resolveReference: publicModelId =>
 						modelsDevReferences.get(publicModelId) ?? bundledReferences(publicModelId),
+					resolveCost: publicModelId => fireworksCosts.get(publicModelId),
 					fetch: config?.fetch,
 				});
 			},
@@ -2924,7 +3048,7 @@ function openCodeBaseUrlForApi(api: Api, basePath: string): string {
 // rules (`runtime/behavior.kdl`; #887, #1617, #8957).
 // Runtime-discovered rows cached before model-identity corrections retain
 // stale capability metadata until the authoritative catalog TTL expires.
-const OPENCODE_CACHE_MIGRATION_MODEL_IDS = ["glm-5.3-flash"] as const;
+const OPENCODE_CACHE_MIGRATION_MODEL_IDS = ["glm-5.3-flash", "longcat-2.5-preview-free", "space-bunny-free"] as const;
 const OPENCODE_ZEN_CACHE_MIGRATION_MODEL_IDS = ["gemini-3.7-flash", "gemini-3.8-flash"] as const;
 
 // Billing-variant suffixes the OpenCode gateways append to a base model id
@@ -3161,6 +3285,14 @@ export interface OpenRouterModelManagerConfig {
 	fetch?: FetchImpl;
 }
 
+/**
+ * OpenRouter's Decisions API lives at `/api/alpha`, a sibling of the `/api/v1`
+ * chat root; derive it so a custom gateway base URL keeps both aligned.
+ */
+function openrouterDecisionsBaseUrl(chatBaseUrl: string): string {
+	return chatBaseUrl.endsWith("/v1") ? `${chatBaseUrl.slice(0, -"/v1".length)}/alpha` : `${chatBaseUrl}/alpha`;
+}
+
 function mapOpenRouterThinking(entry: OpenAICompatibleModelRecord): ThinkingConfig | undefined {
 	const reasoning = entry.reasoning;
 	if (!isRecord(reasoning)) return undefined;
@@ -3180,11 +3312,10 @@ function mapOpenRouterThinking(entry: OpenAICompatibleModelRecord): ThinkingConf
 	};
 }
 
-export function openrouterModelManagerOptions(
-	config?: OpenRouterModelManagerConfig,
-): ModelManagerOptions<"openrouter"> {
+export function openrouterModelManagerOptions(config?: OpenRouterModelManagerConfig): ModelManagerOptions<Api> {
 	const apiKey = config?.apiKey;
-	const baseUrl = config?.baseUrl ?? "https://openrouter.ai/api/v1";
+	const baseUrl = (config?.baseUrl ?? "https://openrouter.ai/api/v1").replace(/\/+$/g, "");
+	const decisionsBaseUrl = openrouterDecisionsBaseUrl(baseUrl);
 	const references = createBundledReferenceMap<"openrouter">("openrouter");
 	return {
 		providerId: "openrouter",
@@ -3192,55 +3323,248 @@ export function openrouterModelManagerOptions(
 		// Namespace the refreshed pseudo-API cache separately so those rows cannot
 		// override bundled `api: "openrouter"` models during online-if-uncached startup.
 		cacheProviderId: resolveModelCacheProviderId("openrouter"),
-		fetchDynamicModels: () =>
-			fetchOpenAICompatibleModels({
-				api: "openrouter",
-				provider: "openrouter",
-				baseUrl,
-				apiKey,
-				filterModel: (entry: OpenAICompatibleModelRecord) => {
-					const params = entry.supported_parameters;
-					return Array.isArray(params) && params.includes("tools");
-				},
-				mapModel: (
-					entry: OpenAICompatibleModelRecord,
-					defaults: ModelSpec<"openrouter">,
-					_context: OpenAICompatibleModelMapperContext<"openrouter">,
-				): ModelSpec<"openrouter"> => {
-					const reference = references.get(defaults.id);
-					const baseModel = mapWithBundledReference(entry, defaults, reference);
-					const pricing = entry.pricing as Record<string, unknown> | undefined;
-					const params = Array.isArray(entry.supported_parameters) ? (entry.supported_parameters as string[]) : [];
-					const thinking = mapOpenRouterThinking(entry);
-					const modality = String((entry.architecture as Record<string, unknown> | undefined)?.modality ?? "");
-					const topProvider = entry.top_provider as Record<string, unknown> | undefined;
-
-					const supportsToolChoice = params.includes("tool_choice");
-
-					return {
-						...baseModel,
-						reasoning: params.includes("reasoning"),
-						...(thinking !== undefined ? { thinking } : {}),
-						input: modality.includes("image") ? ["text", "image"] : ["text"],
-						cost: {
-							input: parseFloat(String(pricing?.prompt ?? "0")) * 1_000_000,
-							output: parseFloat(String(pricing?.completion ?? "0")) * 1_000_000,
-							cacheRead: parseFloat(String(pricing?.input_cache_read ?? "0")) * 1_000_000,
-							cacheWrite: parseFloat(String(pricing?.input_cache_write ?? "0")) * 1_000_000,
+		fetchDynamicModels: async () => {
+			const [chatModels, imageModels, decisionModels, rerankModels, videoModels, embeddingModels] =
+				await Promise.all([
+					fetchOpenAICompatibleModels({
+						api: "openrouter",
+						provider: "openrouter",
+						baseUrl,
+						apiKey,
+						filterModel: (entry: OpenAICompatibleModelRecord) => {
+							const params = entry.supported_parameters;
+							return Array.isArray(params) && params.includes("tools");
 						},
-						contextWindow:
-							typeof entry.context_length === "number" ? entry.context_length : baseModel.contextWindow,
-						maxTokens:
-							typeof topProvider?.max_completion_tokens === "number"
-								? topProvider.max_completion_tokens
-								: baseModel.maxTokens,
-						...(!supportsToolChoice && {
-							compat: { ...baseModel.compat, supportsToolChoice: false },
+						mapModel: (
+							entry: OpenAICompatibleModelRecord,
+							defaults: ModelSpec<"openrouter">,
+							_context: OpenAICompatibleModelMapperContext<"openrouter">,
+						): ModelSpec<"openrouter"> => {
+							const reference = references.get(defaults.id);
+							const baseModel = mapWithBundledReference(entry, defaults, reference);
+							const pricing = isRecord(entry.pricing) ? entry.pricing : undefined;
+							const params = Array.isArray(entry.supported_parameters)
+								? entry.supported_parameters.filter((value): value is string => typeof value === "string")
+								: [];
+							const thinking = mapOpenRouterThinking(entry);
+							const architecture = isRecord(entry.architecture) ? entry.architecture : undefined;
+							const input: ("text" | "image")[] = Array.isArray(architecture?.input_modalities)
+								? toInputCapabilities(architecture.input_modalities)
+								: String(architecture?.modality ?? "").includes("image")
+									? ["text", "image"]
+									: ["text"];
+							const topProvider = isRecord(entry.top_provider) ? entry.top_provider : undefined;
+
+							const supportsToolChoice = params.includes("tool_choice");
+
+							return {
+								...baseModel,
+								reasoning: params.includes("reasoning"),
+								...(thinking !== undefined ? { thinking } : {}),
+								input,
+								cost: {
+									input: parseFloat(String(pricing?.prompt ?? "0")) * 1_000_000,
+									output: parseFloat(String(pricing?.completion ?? "0")) * 1_000_000,
+									cacheRead: parseFloat(String(pricing?.input_cache_read ?? "0")) * 1_000_000,
+									cacheWrite: parseFloat(String(pricing?.input_cache_write ?? "0")) * 1_000_000,
+								},
+								contextWindow: toPositiveNumber(entry.context_length, baseModel.contextWindow),
+								maxTokens: toPositiveNumber(topProvider?.max_completion_tokens, baseModel.maxTokens),
+								...(!supportsToolChoice && {
+									compat: { ...baseModel.compat, supportsToolChoice: false },
+								}),
+							};
+						},
+						fetch: config?.fetch,
+					}),
+					fetchOpenAICompatibleModels({
+						api: "openrouter-images",
+						provider: "openrouter",
+						baseUrl: `${baseUrl}/images`,
+						apiKey,
+						filterModel: entry => {
+							const architecture = isRecord(entry.architecture) ? entry.architecture : undefined;
+							return (
+								Array.isArray(architecture?.output_modalities) &&
+								architecture.output_modalities.includes("image")
+							);
+						},
+						mapModel: (_entry, defaults): ModelSpec<"openrouter-images"> => ({
+							...defaults,
+							baseUrl,
+							kind: "image",
+							reasoning: false,
+							input: ["text", "image"],
+							supportsTools: false,
+							cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+							contextWindow: null,
+							maxTokens: null,
 						}),
-					};
-				},
-				fetch: config?.fetch,
-			}),
+						fetch: config?.fetch,
+					}),
+					// Decision models (`text->decisions`) are absent from the default roster
+					// and answer only through the Decisions API, outside the `/v1` prefix.
+					fetchOpenAICompatibleModels({
+						api: "openrouter-decisions",
+						provider: "openrouter",
+						baseUrl,
+						apiKey,
+						query: { output_modalities: "decisions" },
+						filterModel: entry => {
+							const architecture = isRecord(entry.architecture) ? entry.architecture : undefined;
+							return (
+								Array.isArray(architecture?.output_modalities) &&
+								architecture.output_modalities.includes("decisions")
+							);
+						},
+						mapModel: (entry, defaults): ModelSpec<"openrouter-decisions"> => {
+							const pricing = isRecord(entry.pricing) ? entry.pricing : undefined;
+							const topProvider = isRecord(entry.top_provider) ? entry.top_provider : undefined;
+							return {
+								...defaults,
+								baseUrl: decisionsBaseUrl,
+								kind: "judge",
+								reasoning: false,
+								input: ["text"],
+								supportsTools: false,
+								cost: {
+									input: parseFloat(String(pricing?.prompt ?? "0")) * 1_000_000,
+									output: parseFloat(String(pricing?.completion ?? "0")) * 1_000_000,
+									cacheRead: 0,
+									cacheWrite: 0,
+								},
+								// Some rows (e.g. respan/span-01) advertise `0` for unknown limits.
+								contextWindow: toPositiveNumber(entry.context_length, null),
+								maxTokens: toPositiveNumber(topProvider?.max_completion_tokens, null),
+							};
+						},
+						fetch: config?.fetch,
+					}),
+					fetchOpenAICompatibleModels({
+						api: "openrouter-rerank",
+						provider: "openrouter",
+						baseUrl,
+						apiKey,
+						query: { output_modalities: "rerank" },
+						filterModel: entry => {
+							const architecture = isRecord(entry.architecture) ? entry.architecture : undefined;
+							return (
+								Array.isArray(architecture?.output_modalities) &&
+								architecture.output_modalities.includes("rerank")
+							);
+						},
+						mapModel: (entry, defaults): ModelSpec<"openrouter-rerank"> => {
+							const architecture = isRecord(entry.architecture) ? entry.architecture : undefined;
+							const topProvider = isRecord(entry.top_provider) ? entry.top_provider : undefined;
+							return {
+								...defaults,
+								baseUrl,
+								kind: "rerank",
+								reasoning: false,
+								input: Array.isArray(architecture?.input_modalities)
+									? toInputCapabilities(architecture.input_modalities)
+									: ["text"],
+								supportsTools: false,
+								// OpenRouter bills reranking per search; ModelCost has no search-unit axis.
+								cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+								contextWindow: toPositiveNumber(entry.context_length, null),
+								maxTokens: toPositiveNumber(topProvider?.max_completion_tokens, null),
+							};
+						},
+						fetch: config?.fetch,
+					}),
+					fetchOpenAICompatibleModels({
+						api: "openrouter-video",
+						provider: "openrouter",
+						baseUrl: `${baseUrl}/videos`,
+						apiKey,
+						mapModel: (_entry, defaults): ModelSpec<"openrouter-video"> => ({
+							...defaults,
+							baseUrl,
+							kind: "video",
+							reasoning: false,
+							input: ["text", "image"],
+							supportsTools: false,
+							// OpenRouter bills video by output second/SKU; ModelCost has no duration axis.
+							cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+							contextWindow: null,
+							maxTokens: null,
+						}),
+						fetch: config?.fetch,
+					}),
+					fetchOpenAICompatibleModels({
+						api: "openai-embeddings",
+						provider: "openrouter",
+						baseUrl: `${baseUrl}/embeddings`,
+						apiKey,
+						mapModel: (entry, defaults): ModelSpec<"openai-embeddings"> => {
+							const pricing = isRecord(entry.pricing) ? entry.pricing : undefined;
+							return {
+								...defaults,
+								baseUrl,
+								kind: "embedding",
+								reasoning: false,
+								input: ["text"],
+								supportsTools: false,
+								cost: {
+									input: parseFloat(String(pricing?.prompt ?? "0")) * 1_000_000,
+									output: 0,
+									cacheRead: 0,
+									cacheWrite: 0,
+								},
+								contextWindow: toPositiveNumber(entry.context_length, null),
+								maxTokens: null,
+							};
+						},
+						fetch: config?.fetch,
+					}),
+				]);
+
+			if (imageModels === null) {
+				logger.warn("OpenRouter image model discovery unavailable; preserving chat model discovery", {
+					endpoint: `${baseUrl}/images/models`,
+				});
+			}
+			if (decisionModels === null) {
+				logger.warn("OpenRouter decision model discovery unavailable; preserving chat model discovery", {
+					endpoint: `${baseUrl}/models?output_modalities=decisions`,
+				});
+			}
+			if (rerankModels === null) {
+				logger.warn("OpenRouter rerank model discovery unavailable; preserving other model discovery", {
+					endpoint: `${baseUrl}/models?output_modalities=rerank`,
+				});
+			}
+			if (videoModels === null) {
+				logger.warn("OpenRouter video model discovery unavailable; preserving other model discovery", {
+					endpoint: `${baseUrl}/videos/models`,
+				});
+			}
+			if (embeddingModels === null) {
+				logger.warn("OpenRouter embedding model discovery unavailable; preserving other model discovery", {
+					endpoint: `${baseUrl}/embeddings/models`,
+				});
+			}
+			if (
+				chatModels === null &&
+				imageModels === null &&
+				decisionModels === null &&
+				rerankModels === null &&
+				videoModels === null &&
+				embeddingModels === null
+			) {
+				return null;
+			}
+
+			const models = new Map<string, ModelSpec<Api>>();
+			for (const model of chatModels ?? []) models.set(model.id, model);
+			for (const model of imageModels ?? []) models.set(model.id, model);
+			for (const model of decisionModels ?? []) models.set(model.id, model);
+			for (const model of rerankModels ?? []) models.set(model.id, model);
+			for (const model of videoModels ?? []) models.set(model.id, model);
+			for (const model of embeddingModels ?? []) models.set(model.id, model);
+			return Array.from(models.values()).sort((left, right) => left.id.localeCompare(right.id));
+		},
 	};
 }
 
@@ -4197,8 +4521,8 @@ const META_MUSE_MODEL_BY_ID: Partial<Record<string, ModelSpec<"openai-responses"
  * text-only model with no limits. Only ids that classify into the
  * `muse-spark` family with a revision qualify. The template's explicit
  * `thinking` is dropped: only reviewed seed rows may advertise `max` (1.3
- * standard), so an unknown revision takes the provider's five-tier ladder
- * from `providers/meta.kdl` at build time.
+ * standard and contributor), so an unknown revision takes the provider's
+ * five-tier ladder from `providers/meta.kdl` at build time.
  */
 function museSparkLineageSpec(id: string): ModelSpec<"openai-responses"> | undefined {
 	const identity = classifyModel("meta", id, { lenient: true });
@@ -4468,8 +4792,8 @@ export function sakanaModelManagerOptions(config?: SakanaModelManagerConfig): Mo
 
 const AIAND_DEFAULT_BASE_URL = "https://api.aiand.com/v1";
 
-/** `reasoning_efforts` wire values ai& reports, mapped onto pi effort levels. */
-const AIAND_EFFORT_BY_WIRE_VALUE: Record<string, Effort> = {
+/** Effort wire values discovery endpoints report (`reasoning_efforts`, `thinking`), mapped onto pi effort levels. */
+const EFFORT_BY_WIRE_VALUE: Record<string, Effort> = {
 	minimal: Effort.Minimal,
 	low: Effort.Low,
 	medium: Effort.Medium,
@@ -4486,18 +4810,23 @@ function normalizeAiandBaseUrl(baseUrl: string | undefined): string {
 
 const AIAND_STATIC_MODEL_IDS = seedModels("aiand").map(model => model.id);
 
-function mapAiandThinking(entry: OpenAICompatibleModelRecord): ThinkingConfig | undefined {
-	const efforts = Array.isArray(entry.reasoning_efforts)
-		? entry.reasoning_efforts.flatMap(value =>
-				typeof value === "string" && AIAND_EFFORT_BY_WIRE_VALUE[value] ? [AIAND_EFFORT_BY_WIRE_VALUE[value]] : [],
+/** Parse a discovered effort list, dropping unknown wire values; empty when absent or unrecognized. */
+function parseWireEfforts(value: unknown): Effort[] {
+	return Array.isArray(value)
+		? value.flatMap(item =>
+				typeof item === "string" && EFFORT_BY_WIRE_VALUE[item] ? [EFFORT_BY_WIRE_VALUE[item]] : [],
 			)
 		: [];
+}
+
+function mapAiandThinking(entry: OpenAICompatibleModelRecord): ThinkingConfig | undefined {
+	const efforts = parseWireEfforts(entry.reasoning_efforts);
 	if (efforts.length === 0) {
 		return undefined;
 	}
 	const defaultLevel =
 		typeof entry.reasoning_effort_default === "string"
-			? AIAND_EFFORT_BY_WIRE_VALUE[entry.reasoning_effort_default]
+			? EFFORT_BY_WIRE_VALUE[entry.reasoning_effort_default]
 			: undefined;
 	return {
 		mode: "effort",
@@ -4654,8 +4983,26 @@ function mapYoloAutoModel(
 	reference: ModelSpec<"openai-completions"> | undefined,
 ): ModelSpec<"openai-completions"> {
 	const model = mapWithBundledReference(entry, defaults, reference);
+	// `/v1/models` advertises each reasoning model's accepted effort ladder in
+	// `thinking`; it is authoritative over the seed/reference ladder. Rows
+	// without the field (e.g. `yolo-small`) keep the reference surface.
+	const efforts = parseWireEfforts(entry.thinking);
+	const thinking: ThinkingConfig | undefined =
+		efforts.length > 0
+			? {
+					...model.thinking,
+					mode: model.thinking?.mode ?? "effort",
+					efforts,
+					defaultLevel:
+						model.thinking?.defaultLevel && efforts.includes(model.thinking.defaultLevel)
+							? model.thinking.defaultLevel
+							: undefined,
+				}
+			: model.thinking;
 	return {
 		...model,
+		...(efforts.length > 0 && { reasoning: true }),
+		thinking,
 		// Flat-rate and no-store are provider-wide: they must win whether the
 		// reference came from the yolo bundle, the global index, or nowhere.
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
@@ -4714,6 +5061,86 @@ export function yoloAutoModelManagerOptions(
 }
 
 // ---------------------------------------------------------------------------
+// 16.9 StepFun
+// ---------------------------------------------------------------------------
+
+/**
+ * StepFun discovery configuration: the API key plus optional base-URL and
+ * fetch overrides. Consumed by {@link stepfunModelManagerOptions}, and exported
+ * for extensions and tests that construct the manager directly.
+ */
+export interface StepfunModelManagerConfig {
+	apiKey?: string;
+	baseUrl?: string;
+	fetch?: FetchImpl;
+}
+
+/** StepFun's `/v1/models` row shape beyond the generic OpenAI-compatible fields. */
+interface StepfunModelRecord extends OpenAICompatibleModelRecord {
+	/** Reasoning tiers the endpoint advertises for the model, e.g. `["low","medium","high"]`. */
+	reasoning_effort_support_list?: unknown;
+}
+
+/**
+ * Translate StepFun's per-model `reasoning_effort_support_list` into a ladder.
+ * Every advertised value that names an OMP tier maps verbatim, in OMP's tier
+ * order; a row advertising nothing (or only tiers this client does not know)
+ * resolves to no thinking, so the wire path never sends a `reasoning_effort`
+ * the endpoint rejects. Same shape as `mapOpenRouterThinking` for OpenRouter's
+ * `reasoning.supported_efforts`.
+ */
+function mapStepfunThinking(entry: StepfunModelRecord): ThinkingConfig | undefined {
+	const advertised = Array.isArray(entry.reasoning_effort_support_list)
+		? entry.reasoning_effort_support_list.filter((value): value is string => typeof value === "string")
+		: [];
+	const efforts = THINKING_EFFORTS.filter(effort => advertised.includes(effort));
+	return efforts.length === 0 ? undefined : { mode: "effort", efforts };
+}
+
+/**
+ * Whether a StepFun `/v1/models` id is a chat model omp can route. StepFun's
+ * roster interleaves its audio and image SKUs with the chat models; the
+ * exclusion policy itself lives in `runtime/behavior.kdl` (`exclude-models
+ * provider="stepfun"`), not here.
+ */
+export function isStepfunChatModelId(id: string): boolean {
+	const normalized = id.trim().toLowerCase();
+	if (!normalized) return false;
+	return !isExcludedModel("stepfun", normalized);
+}
+
+/**
+ * StepFun model manager: plain OpenAI-compatible chat completions at
+ * `api.stepfun.ai/v1`. A successful `/v1/models` snapshot is authoritative over
+ * the bundled seed rows (`providers/stepfun.kdl`), so a model StepFun retires
+ * leaves the picker instead of lingering as a dead seed row, while models added
+ * later become selectable without an omp release.
+ */
+export function stepfunModelManagerOptions(
+	config?: StepfunModelManagerConfig,
+): ModelManagerOptions<"openai-completions"> {
+	return createOpenAICompatibleModelManagerOptions({
+		api: "openai-completions",
+		providerId: "stepfun",
+		defaultBaseUrl: "https://api.stepfun.ai/v1",
+		config,
+		requireApiKey: true,
+		filterModel: (_entry, model) => isStepfunChatModelId(model.id),
+		mapModel: (entry, model, reference) => {
+			const mapped = mapWithBundledReference(entry, model, reference);
+			// A model StepFun ships later has no bundled reference, so it starts
+			// from the generic defaults (`reasoning: false`, no thinking) and
+			// `mergeDynamicModels` adds it verbatim — the endpoint's own tiers are
+			// then the only thing that can give it a reasoning dial.
+			if (reference) return mapped;
+			const thinking = mapStepfunThinking(entry);
+			return thinking === undefined ? mapped : { ...mapped, reasoning: true, thinking };
+		},
+		// Must live on the manager options, not only the KDL descriptor:
+		// `createModelManager()` prunes the bundled slice from this flag.
+		dynamicModelsAuthoritative: true,
+	});
+}
 
 // ---------------------------------------------------------------------------
 // 17. Qwen Portal
@@ -4811,6 +5238,9 @@ export function xiaomiModelManagerOptions(
 	// would incorrectly pin to the standard endpoint (api.xiaomimimo.com).
 	const baseUrl = isTokenPlanKey ? tokenPlanBaseUrls[0] : (config?.baseUrl ?? XIAOMI_STANDARD_BASE_URL);
 	const references = createBundledReferenceMap<"openai-completions">("xiaomi");
+	for (const seed of seedModels<"openai-completions">(providerId)) {
+		references.set(seed.id, seed);
+	}
 	const fetchModels = (url: string) =>
 		fetchOpenAICompatibleModels({
 			api: "openai-completions",
@@ -5533,18 +5963,18 @@ export function litellmModelManagerOptions(config?: LiteLLMModelManagerConfig): 
 	const baseUrl = config?.baseUrl ?? getDefaultModelDiscoveryBaseUrl("litellm")!;
 	return {
 		providerId: "litellm",
-		// rich-v11 invalidates rows that inherited ClinePass gateway metadata
-		// through generic models.dev bare-id enrichment (issue #10932). rich-v10
-		// filtered known non-conversational LiteLLM modes, keyed the deployment's
-		// `supports_vision` declaration into cached compat, and unioned compat
-		// across management endpoints instead of letting a later endpoint retract
-		// what an earlier one reported (issue #11982). Earlier versions fixed
-		// provider-specific transport leakage, added bundled reference fallback,
-		// moved OpenAI models to Responses, continued past incomplete vision/API
-		// metadata and endpoints omitting cache pricing, stripped reseller usage
-		// suffixes, filtered placeholder rows, and mapped rich pricing. Bump the
-		// version whenever these mappers change, or warm authoritative caches keep
-		// serving pre-change rows for the full TTL.
+		// rich-v12 invalidates namespaced proxy ids that missed bare catalog
+		// references. rich-v11 excluded ClinePass gateway metadata (issue #10932).
+		// rich-v10 filtered known non-conversational LiteLLM modes, keyed the
+		// deployment's `supports_vision` declaration into cached compat, and
+		// unioned compat across management endpoints instead of letting a later
+		// endpoint retract what an earlier one reported (issue #11982). Earlier
+		// versions fixed provider-specific transport leakage, added bundled
+		// reference fallback, moved OpenAI models to Responses, continued past
+		// incomplete vision/API metadata and endpoints omitting cache pricing,
+		// stripped reseller usage suffixes, filtered placeholder rows, and mapped
+		// rich pricing. Bump the version whenever these mappers change, or warm
+		// authoritative caches keep serving pre-change rows for the full TTL.
 		cacheProviderId: resolveModelCacheProviderId("litellm", { baseUrl }),
 		// litellm is a local-only proxy and is never bundled in models.json (that
 		// would leak the machine's localhost catalog). Prefer the proxy's richer
@@ -5563,17 +5993,23 @@ export function litellmModelManagerOptions(config?: LiteLLMModelManagerConfig): 
 				resolveApi: resolveLiteLLMApi,
 				timeoutMs: 10_000,
 			});
-			if (richModels !== null) {
-				return richModels;
-			}
-			return fetchOpenAICompatibleModels<Api>({
-				api: "openai-completions",
-				provider: "litellm",
-				baseUrl,
-				apiKey,
-				mapModel: (entry, defaults) =>
-					mapLiteLLMOpenAICompatibleModel(entry, defaults, resolveReference(defaults.id)),
-				fetch: config?.fetch,
+			const models =
+				richModels ??
+				(await fetchOpenAICompatibleModels<Api>({
+					api: "openai-completions",
+					provider: "litellm",
+					baseUrl,
+					apiKey,
+					mapModel: (entry, defaults) =>
+						mapLiteLLMOpenAICompatibleModel(entry, defaults, resolveReference(defaults.id)),
+					fetch: config?.fetch,
+				}));
+			// Bare catalog names can label proxy namespaces, but their pricing,
+			// limits and request routing must never enrich a different deployment.
+			if (models === null) return null;
+			return models.map(model => {
+				const name = toLiteLLMDisplayName(model.name, resolveReference(bareModelId(model.id))?.name, model.id);
+				return name === model.name ? model : { ...model, name };
 			});
 		},
 	};
@@ -5691,6 +6127,9 @@ export interface GithubCopilotModelManagerConfig {
 	fetch?: FetchImpl;
 }
 
+// Copilot ids whose cached route predates the Responses pin: a cache written by
+// an older build still says openai-completions, which Copilot answers with 400
+// unsupported_api_for_model (#7096, #8807, #12901).
 const COPILOT_CACHE_INVALIDATED_MODEL_IDS = [
 	"gpt-6-astra",
 	"gpt-6-astra-1m",
@@ -5698,6 +6137,8 @@ const COPILOT_CACHE_INVALIDATED_MODEL_IDS = [
 	"grok-4.5-1m",
 	"grok-4.6",
 	"grok-4.6-1m",
+	"grok-4.7",
+	"grok-4.7-1m",
 	"mai-code-1-flash-picker",
 ];
 
@@ -5745,7 +6186,7 @@ function parseCopilotTokenPriceTier(value: unknown): CopilotTokenPriceTier | und
 		return undefined;
 	}
 	return {
-		contextMax: toNumber(value.context_max),
+		contextMax: toNumber(value.max_prompt_tokens) ?? toNumber(value.context_max),
 		inputPrice: toNumber(value.input_price),
 		outputPrice: toNumber(value.output_price),
 		cachePrice: toNumber(value.cache_price),
@@ -5931,11 +6372,21 @@ export function githubCopilotModelManagerOptions(config?: GithubCopilotModelMana
 									? ["text"]
 									: (reference?.input ?? defaults.input);
 						// With COPILOT_API_HEADERS the served window is the long-context
-						// ceiling; the default tier ends at token_prices.default.context_max
-						// prompt tokens. Cap the base entry to the default tier — the long
-						// tier is the opt-in `-1m` sibling below.
+						// ceiling; the default tier reports its prompt boundary in
+						// token_prices.default.max_prompt_tokens (or legacy context_max).
+						// Cap the base entry to the default tier — the long tier is
+						// the opt-in `-1m` sibling below. On tiered legacy rows the
+						// model-wide max_prompt_tokens may be tighter than the billed
+						// default ceiling (#13912), so use the smaller bound.
 						const tokenPrices = extractCopilotTokenPrices(entry);
-						const defaultContextMax = tokenPrices.defaultTier?.contextMax;
+						const billedDefaultMax = tokenPrices.defaultTier?.contextMax;
+						const tieredPromptBudget =
+							(tokenPrices.longContext?.contextMax ?? 0) > 0 ? (copilotLimits.maxPromptTokens ?? 0) : 0;
+						const defaultContextMax =
+							tieredPromptBudget > 0 &&
+							(billedDefaultMax === undefined || billedDefaultMax <= 0 || tieredPromptBudget < billedDefaultMax)
+								? tieredPromptBudget
+								: billedDefaultMax;
 						const defaultTierWindow =
 							defaultContextMax !== undefined &&
 							defaultContextMax > 0 &&
@@ -5966,7 +6417,13 @@ export function githubCopilotModelManagerOptions(config?: GithubCopilotModelMana
 													supportsReasoningEffort: false,
 												},
 											}
-										: {}),
+										: // The bundled row for an id whose route later moved to
+											// Responses/Messages still carries this chat-completions
+											// block, and `supportsReasoningEffort: false` suppresses
+											// the effort dial on a transport that supports it
+											// (grok-4.7, #12901). Compat is transport-scoped: let the
+											// rules resolve it for the route actually in use.
+											{ compat: undefined }),
 								}
 							: {
 									...defaults,
@@ -6174,32 +6631,70 @@ export function mapModelsDevToModels(
 	descriptors: readonly ModelsDevProviderDescriptor[],
 ): ModelSpec<Api>[] {
 	const models: ModelSpec<Api>[] = [];
+	const providers = providerEntries();
 	for (const desc of descriptors) {
-		const providerData = (data as Record<string, Record<string, unknown>>)[desc.modelsDevKey];
+		const providerData = data[desc.modelsDevKey];
 		if (!isRecord(providerData) || !isRecord(providerData.models)) continue;
 
-		for (const [modelId, rawModel] of Object.entries(providerData.models)) {
+		for (const modelId in providerData.models) {
+			const rawModel = providerData.models[modelId];
 			if (!isRecord(rawModel)) continue;
 			const m = rawModel as ModelsDevModel;
+			const name = toModelName(m.name, modelId);
+			let kind: ModelKind | undefined;
+			let kindApi: Api | undefined;
 
-			// Default filter: tool_call must be true
-			if (desc.filterModel) {
-				if (!desc.filterModel(modelId, m)) continue;
-			} else {
-				if (m.tool_call !== true) continue;
+			if (m.kind !== undefined) {
+				const policy = resolveModelPolicy({
+					id: modelId,
+					name,
+					api: desc.api,
+					provider: desc.providerId,
+					baseUrl: desc.baseUrl,
+					reasoning: false,
+					input: ["text"],
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+					contextWindow: null,
+					maxTokens: null,
+				});
+				const normalizedKind = policy.catalog.kind ?? m.kind;
+				if (typeof normalizedKind !== "string" || !MODEL_KINDS.some(value => value === normalizedKind)) continue;
+				if (normalizedKind !== "chat") {
+					const kindApiKind = KIND_API_KINDS.find(value => value === normalizedKind);
+					if (kindApiKind === undefined) continue;
+					kindApi = providers[desc.providerId]?.kindApis?.[kindApiKind];
+					if (kindApi === undefined) continue;
+					kind = kindApiKind;
+				}
 			}
 
-			// Resolve API and baseUrl (may be per-model for providers like OpenCode)
-			const resolved = desc.resolveApi?.(modelId, m) ?? { api: desc.api, baseUrl: desc.baseUrl };
+			if (kind === undefined) {
+				// Ordinary chat rows retain the provider-specific/default tool filter.
+				if (desc.filterModel) {
+					if (!desc.filterModel(modelId, m)) continue;
+				} else if (m.tool_call !== true) {
+					continue;
+				}
+			}
+
+			// Non-chat rows use the provider-authored runner API; chat rows retain
+			// per-model API/base URL resolution (for example OpenCode route pins).
+			let resolved: { api: Api; baseUrl: string } | null;
+			if (kind === undefined) {
+				resolved = desc.resolveApi?.(modelId, m) ?? { api: desc.api, baseUrl: desc.baseUrl };
+			} else {
+				if (kindApi === undefined) continue;
+				resolved = { api: kindApi, baseUrl: desc.baseUrl };
+			}
 			if (!resolved) continue;
 
 			const mapped: ModelSpec<Api> = {
 				id: modelId,
-				name: toModelName(m.name, modelId),
+				name,
 				api: resolved.api,
-				provider: desc.providerId as ModelSpec<Api>["provider"],
+				provider: desc.providerId,
 				baseUrl: resolved.baseUrl,
-				reasoning: m.reasoning === true,
+				reasoning: kind === undefined && m.reasoning === true,
 				input: toInputCapabilities(m.modalities?.input),
 				cost: {
 					input: toNumber(m.cost?.input) ?? 0,
@@ -6209,15 +6704,19 @@ export function mapModelsDevToModels(
 				},
 				contextWindow: toPositiveNumber(m.limit?.context, desc.defaultContextWindow ?? null),
 				maxTokens: toPositiveNumber(m.limit?.output, desc.defaultMaxTokens ?? null),
+				...(kind !== undefined ? { kind, supportsTools: false } : {}),
 				...(m.int != null ? { int: m.int } : {}),
 				...(m.tps != null ? { tps: m.tps } : {}),
-				...(m.tool_call === false ? { supportsTools: false } : {}),
+				...(kind === undefined && m.tool_call === false ? { supportsTools: false } : {}),
 				...(desc.compat && { compat: desc.compat }),
 				...(desc.headers && { headers: { ...desc.headers } }),
 			};
 
-			// Apply per-model transform
-			if (desc.transformModel) {
+			// Provider transforms are chat-specific. Normalized non-chat rows are
+			// complete once their authored runner API has been assigned.
+			if (kind !== undefined) {
+				models.push(mapped);
+			} else if (desc.transformModel) {
 				const result = desc.transformModel(mapped, modelId, m);
 				if (result === null) continue;
 				if (Array.isArray(result)) {
@@ -6648,23 +7147,12 @@ const MODELS_DEV_PROVIDER_DESCRIPTORS_CODING_PLANS: readonly ModelsDevProviderDe
 			allowsSyntheticReasoningContentForToolCalls: false,
 		},
 	}),
-	// --- MiniMax Coding Plan ---
-	openAiCompletionsDescriptor("minimax-coding-plan", "minimax-code", "https://api.minimax.io/v1", {
-		compat: {
-			supportsStore: false,
-			supportsDeveloperRole: false,
-			supportsReasoningEffort: false,
-			reasoningContentField: "reasoning_content",
-		},
-	}),
-	openAiCompletionsDescriptor("minimax-cn-coding-plan", "minimax-code-cn", "https://api.minimaxi.com/v1", {
-		compat: {
-			supportsStore: false,
-			supportsDeveloperRole: false,
-			supportsReasoningEffort: false,
-			reasoningContentField: "reasoning_content",
-		},
-	}),
+	// --- MiniMax Token Plan ---
+	// MiniMax documents its Anthropic-compatible API as the recommended
+	// protocol: signed thinking blocks, `output_config.effort` depth control,
+	// and prompt-cache usage reporting.
+	anthropicMessagesDescriptor("minimax-coding-plan", "minimax-code", "https://api.minimax.io/anthropic"),
+	anthropicMessagesDescriptor("minimax-cn-coding-plan", "minimax-code-cn", "https://api.minimaxi.com/anthropic"),
 	// --- Alibaba Coding Plan ---
 	openAiCompletionsDescriptor(
 		"alibaba-coding-plan",
@@ -6895,7 +7383,8 @@ export function modelsDevCatalogFallback(
  * `baseUrl` overrides the Provider API base path for testing; it is
  * normalized to the shared `/provider` root (a trailing `/v1` is stripped)
  * so Claude ids route to the Anthropic-compatible Messages endpoint at the
- * root while every other id uses chat completions under `/v1`.
+ * root, the ten GPT ids listed in the `api-routes` table to the Responses
+ * endpoint under `/v1`, and every other id to chat completions under `/v1`.
  */
 export interface CommandCodeModelManagerConfig {
 	apiKey?: string;
@@ -6914,12 +7403,14 @@ function normalizeCommandCodeBasePath(baseUrl: string | undefined): string {
  * Builds the Command Code model manager: a mixed-protocol OpenAI-compatible
  * discovery client. The public `/v1/models` catalog is fetched once per
  * options instance; `mapModel` pins each row's transport from the
- * `api-routes` table (Claude ids to `anthropic-messages`, everything else to
- * `openai-completions`) and seeds neutral capability defaults. Reviewed
- * Command Code policy (effort ladders, pricing, limits, modalities) is
- * applied later by `buildModel` from `providers/commandcode.kdl` — the
- * mapper never inherits another provider's reasoning, rates, image support,
- * or context window.
+ * `api-routes` table (Claude ids to `anthropic-messages`, the listed GPT ids
+ * to `openai-responses`, everything else to `openai-completions`) and seeds
+ * neutral capability defaults. Reviewed Command Code policy (effort ladders,
+ * pricing, limits, modalities) is applied later by `buildModel` from
+ * `providers/commandcode.kdl` — the mapper never inherits another provider's
+ * reasoning, rates, image support, or context window. A successful fetch also
+ * appends the KDL `seed` rows (typesafe/jev), rebased onto the configured
+ * base, because `dynamicModelsAuthoritative` would prune `staticModels`.
  */
 export function commandCodeModelManagerOptions(config?: CommandCodeModelManagerConfig): ModelManagerOptions<Api> {
 	const basePath = normalizeCommandCodeBasePath(config?.baseUrl);
@@ -6931,8 +7422,8 @@ export function commandCodeModelManagerOptions(config?: CommandCodeModelManagerC
 			baseUrl: discoveryBaseUrl,
 		}),
 		dynamicModelsAuthoritative: true,
-		fetchDynamicModels: () => {
-			return fetchOpenAICompatibleModels<Api>({
+		fetchDynamicModels: async () => {
+			const discovered = await fetchOpenAICompatibleModels<Api>({
 				api: "openai-completions",
 				provider: "commandcode",
 				baseUrl: discoveryBaseUrl,
@@ -6941,8 +7432,9 @@ export function commandCodeModelManagerOptions(config?: CommandCodeModelManagerC
 				// inference. The helper only sends Authorization when set.
 				apiKey: config?.apiKey,
 				mapModel: (entry, defaults) => {
-					const route = apiRouteFor("commandcode", defaults.id);
-					const api = route?.api === "anthropic-messages" ? route.api : "openai-completions";
+					const route = apiRouteFor("commandcode", defaults.id)?.api;
+					const api =
+						route === "anthropic-messages" || route === "openai-responses" ? route : "openai-completions";
 					return {
 						...defaults,
 						name: toModelName(entry.name, defaults.name),
@@ -6972,6 +7464,10 @@ export function commandCodeModelManagerOptions(config?: CommandCodeModelManagerC
 				},
 				fetch: config?.fetch,
 			});
+			if (!discovered) return null;
+			const seeds = seedModels("commandcode").map(seed => ({ ...seed, baseUrl: basePath }));
+			const seedIds = new Set(seeds.map(seed => seed.id));
+			return [...discovered.filter(model => !seedIds.has(model.id)), ...seeds];
 		},
 	};
 }
@@ -7120,4 +7616,155 @@ export function charmHyperModelManagerOptions(
 				fetch: config?.fetch,
 			}),
 	};
+}
+
+// ---------------------------------------------------------------------------
+// SingularityAPI
+// ---------------------------------------------------------------------------
+
+export interface SingularityApiModelManagerConfig {
+	apiKey?: string;
+	baseUrl?: string;
+	fetch?: FetchImpl;
+}
+
+interface SingularityApiCapability extends Record<string, unknown> {
+	endpoint?: unknown;
+	context_window_tokens?: unknown;
+	maximum_output_tokens?: unknown;
+	default_output_tokens?: unknown;
+	pricing?: unknown;
+}
+
+/** Endpoints that decide which transport serves a `/v1/models` row. */
+const SINGULARITYAPI_CHAT_ENDPOINT = "/v1/chat/completions";
+const SINGULARITYAPI_IMAGE_ENDPOINT = "/v1/images/generations";
+
+function singularityApiCapabilities(entry: OpenAICompatibleModelRecord): readonly SingularityApiCapability[] {
+	const capabilities = entry.capabilities;
+	if (!Array.isArray(capabilities)) return [];
+	return capabilities.filter((capability): capability is SingularityApiCapability => isRecord(capability));
+}
+
+function toSingularityApiRate(value: unknown): number {
+	const parsed = toNumber(value);
+	return parsed !== undefined && parsed >= 0 ? parsed : 0;
+}
+
+function resolveSingularityApiCost(capability: SingularityApiCapability | undefined): ModelSpec<Api>["cost"] {
+	const pricing = capability !== undefined && isRecord(capability.pricing) ? capability.pricing : undefined;
+	if (!pricing) return { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+	return {
+		input: toSingularityApiRate(pricing.input_per_million_usd),
+		output: toSingularityApiRate(pricing.output_per_million_usd),
+		cacheRead: 0,
+		cacheWrite: 0,
+	};
+}
+
+/**
+ * Map one `/v1/models` row onto its serving transport.
+ *
+ * The wire's own `capabilities` list decides the transport: a row that serves
+ * chat completions is a chat model, and a row whose only surface is
+ * `/v1/images/generations` is routed to `openai-images` so
+ * `generateImage`-style dispatch can reach it. Without that assignment the row
+ * kept the discovery default (`openai-completions`) while still being marked
+ * as an image model, so it was offered as an image target and then rejected by
+ * every image client. The gateway bills image requests per request, never by
+ * tokens, so those rows carry no token tariff.
+ */
+function mapSingularityApiModel(entry: OpenAICompatibleModelRecord, defaults: ModelSpec<Api>): ModelSpec<Api> {
+	const capabilities = singularityApiCapabilities(entry);
+	const capability = capabilities.find(candidate => candidate.endpoint === SINGULARITYAPI_CHAT_ENDPOINT);
+	if (
+		capability === undefined &&
+		capabilities.some(candidate => candidate.endpoint === SINGULARITYAPI_IMAGE_ENDPOINT)
+	) {
+		return {
+			...defaults,
+			api: "openai-images",
+			name: toModelName(entry.name, defaults.name),
+			kind: "image",
+			reasoning: false,
+			input: ["text", "image"],
+			supportsTools: false,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: null,
+			maxTokens: null,
+		};
+	}
+	return {
+		...defaults,
+		name: toModelName(entry.name, defaults.name),
+		contextWindow: toPositiveNumber(capability?.context_window_tokens, defaults.contextWindow),
+		maxTokens: toPositiveNumber(capability?.maximum_output_tokens, defaults.maxTokens),
+		cost: resolveSingularityApiCost(capability),
+	};
+}
+/**
+ * Core options shared by both SingularityAPI products. `mapModel` is supplied
+ * only by the universal gateway, whose rows publish capability metadata; the
+ * lane roster answers with bare ids and keeps the discovery defaults.
+ */
+function singularityApiModelManagerOptions(
+	providerId: "singularityapi-dev" | "singularityapi-tech",
+	canonical: string,
+	config: SingularityApiModelManagerConfig | undefined,
+	mapModel?: (entry: OpenAICompatibleModelRecord, defaults: ModelSpec<Api>) => ModelSpec<Api>,
+): ModelManagerOptions<Api> {
+	const apiKey = config?.apiKey;
+	const baseUrl = normalizeSingularityApiBaseUrl(config?.baseUrl, canonical);
+	return {
+		providerId,
+		cacheProviderId: resolveModelCacheProviderId(providerId, { apiKey, baseUrl }),
+		dynamicModelsAuthoritative: true,
+		...(apiKey && {
+			fetchDynamicModels: () =>
+				fetchOpenAICompatibleModels<Api>({
+					api: "openai-completions",
+					provider: providerId,
+					baseUrl,
+					apiKey,
+					...(mapModel && { mapModel }),
+					fetch: config?.fetch,
+				}),
+		}),
+	};
+}
+
+/**
+ * `singularityapi-dev` — SingularityAPI's pay-as-you-go universal gateway
+ * (`api.singularityapi.dev`): chat completions over a 300+ model catalog,
+ * plus image generation for the rows that advertise it.
+ * `GET /v1/models` publishes each row's per-endpoint capabilities — context
+ * window, max output tokens, and per-million pricing as 12-decimal strings —
+ * with `cache-control: no-store`, so discovery reads limits and tariffs
+ * straight off the wire and the endpoint list picks each row's transport.
+ * Rows without a reasoning vocabulary stay non-reasoning; reviewed KDL rules
+ * own the ladders the gateway leaves implicit (DeepSeek Flash/Pro, GPT-5.6
+ * flagships), because a model discovered as non-reasoning never sends a
+ * `reasoning_effort` and the gateway requires one alongside tools.
+ */
+export function singularityApiDevModelManagerOptions(
+	config?: SingularityApiModelManagerConfig,
+): ModelManagerOptions<Api> {
+	return singularityApiModelManagerOptions(
+		"singularityapi-dev",
+		SINGULARITYAPI_DEV_API_BASE_URL,
+		config,
+		mapSingularityApiModel,
+	);
+}
+
+/**
+ * `singularityapi-tech` — SingularityAPI's slot-reserved DeepSeek lanes
+ * (`api.singularityapi.tech`). `/v1/models` answers with bare `{id}` rows and
+ * no capability metadata, so rows keep the discovery defaults and the
+ * reviewed KDL rules own the wire shape, limits patch, and effort ladder.
+ */
+export function singularityApiTechModelManagerOptions(
+	config?: SingularityApiModelManagerConfig,
+): ModelManagerOptions<Api> {
+	return singularityApiModelManagerOptions("singularityapi-tech", SINGULARITYAPI_TECH_API_BASE_URL, config);
 }

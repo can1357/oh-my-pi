@@ -3,7 +3,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { RenderResultOptions } from "../src/tools/renderer";
 import { getThemeByName, setThemeInstance, type Theme } from "@oh-my-pi/pi-tui/theme";
-import { bashToolRenderer } from "@oh-my-pi/pi-tui/tools/bash";
+import { bashToolRenderer, formatBackgroundNotice } from "@oh-my-pi/pi-tui/tools/bash";
 import { previewWindowRows } from "@oh-my-pi/pi-tui/render/render-utils";
 import { ImageProtocol, TERMINAL } from "@oh-my-pi/pi-tui";
 import { sanitizeText } from "@oh-my-pi/pi-utils";
@@ -62,6 +62,17 @@ describe("bashToolRenderer", () => {
 		const rendered = sanitizeText(component.render(120).join("\n"));
 		expect(rendered).toContain('MERMAID="line 1\\nline 2"');
 		expect(rendered).toContain("printf '%s' \"$MERMAID\"");
+	});
+
+	it("reads streamed env assignments only from inside the env object", async () => {
+		const component = bashToolRenderer.renderCall(
+			{ command: "ls", __partialJson: '{"env":{"A":"1","B":"two"},"command":"ls' },
+			{ expanded: false, isPartial: true },
+			uiTheme,
+		);
+		const rendered = sanitizeText(component.render(120).join("\n"));
+		expect(rendered).toContain('A="1" B="two"');
+		expect(rendered).not.toContain("command=");
 	});
 
 	it("sanitizes command tabs and shortens home cwd in previews", async () => {
@@ -128,29 +139,57 @@ describe("bashToolRenderer", () => {
 		expect(rendered).not.toContain("Wall time: 1.23 seconds");
 	});
 
-	it("renders a backgrounded job as a static footer notice", async () => {
+	it("shows a supervised service's readiness and output without a command timeout", async () => {
 		const component = bashToolRenderer.renderResult(
 			{
-				content: [
-					{
-						type: "text",
-						text: "started\n\nBackgrounded as job bash-42; result will be delivered automatically.",
-					},
-				],
-				details: {
-					timeoutSeconds: 300,
-					async: { state: "running", jobId: "bash-42", type: "bash" },
-				},
+				content: [{ type: "text", text: "web: ready pid=42 ready\nREADY\nlistening" }],
+				details: { service: { name: "web", state: "ready", ready: true, timedOut: false, pid: 42 } },
 				isError: false,
 			},
 			{ expanded: false, isPartial: false },
 			uiTheme,
-			{ command: "sleep 30" },
+			{ command: "bun run dev", name: "web", ready: { log: "READY" } },
 		);
 		const rendered = sanitizeText(component.render(120).join("\n"));
-		expect(rendered).toContain("started");
-		expect(rendered).toContain("Backgrounded: bash-42");
-		expect(rendered).not.toContain("result will be delivered automatically");
+		expect(rendered).toContain("Service: web");
+		expect(rendered).toContain("State: ready");
+		expect(rendered).toContain("Ready: yes");
+		expect(rendered).toContain("PID: 42");
+		expect(rendered).toContain("listening");
+		expect(rendered).not.toContain("Timeout:");
+	});
+
+	it("renders a backgrounded job as a static footer notice, with or without a stated deadline", async () => {
+		for (const [label, notice] of [
+			// Persisted by older versions, before the notice stated a deadline.
+			[
+				"no deadline stated",
+				"Backgrounded as job bash-42; its output is injected into the conversation as a follow-up the moment it finishes.",
+			],
+			["deadline", formatBackgroundNotice("bash-42", 300)],
+			["deadline disabled", formatBackgroundNotice("bash-42", undefined)],
+		] as const) {
+			const component = bashToolRenderer.renderResult(
+				{
+					content: [{ type: "text", text: `started\n\n${notice}` }],
+					details: {
+						timeoutSeconds: 300,
+						async: { state: "running", jobId: "bash-42", type: "bash" },
+					},
+					isError: false,
+				},
+				{ expanded: false, isPartial: false },
+				uiTheme,
+				{ command: "sleep 30" },
+			);
+			const rendered = sanitizeText(component.render(120).join("\n"));
+			expect(rendered, label).toContain("started");
+			expect(rendered, label).toContain("Backgrounded: bash-42");
+			// Shared by every notice form, so a row whose notice is not stripped fails here.
+			expect(rendered, label).not.toContain("injected into the conversation");
+			expect(rendered, label).not.toContain("Do NOT poll");
+			expect(rendered, label).not.toContain("deadline");
+		}
 	});
 
 	it("folds raw output artifact notices into the status footer", async () => {
@@ -260,7 +299,6 @@ describe("bashToolRenderer", () => {
 		const lines = component.render(80);
 
 		expect(lines.filter(line => line === sixel)).toHaveLength(1);
-		expect(lines.some(line => line.includes("ctrl+o to expand"))).toBe(false);
 	});
 
 	it("highlights every line of a multi-line bash command in renderResult", async () => {

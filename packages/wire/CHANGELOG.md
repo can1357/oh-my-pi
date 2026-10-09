@@ -2,6 +2,49 @@
 
 ## [Unreleased]
 
+## [18.8.0] - 2026-10-07
+
+### Changed
+
+- Updated `TspEditorProps.placeholder` and `TspInputProps.placeholder` to accept `TspText`, enabling styled placeholder text.
+
+## [18.5.1] - 2026-10-03
+
+### Added
+
+- Added support for submitting explicit prompts to live editable composers without simulating keyboard input.
+
+## [18.4.11] - 2026-10-02
+
+### Added
+
+- Added support for agent completion estimates in the wire protocol.
+
+## [18.4.9] - 2026-10-01
+
+### Added
+
+- Added terminal scrolling support through the TSP scroll operation, allowing keyboard scrolling of the terminal scroller when supported.
+- Added a terminal focus event for requesting keyboard focus on editors and inputs, or returning focus to the preferences sheet.
+
+## [18.4.6] - 2026-10-01
+
+### Added
+
+- Added the `TspMeterMark` component for marking a position on a meter track with a custom icon and a total value that defines the full span of the track.
+
+## [18.4.4] - 2026-09-29
+
+### Added
+
+- Added the Tern Surface Protocol wire contract (`@oh-my-pi/pi-wire`): message framing constants, the component vocabulary, document ops, frames, the handshake and terminal events that let omp render natively in terminals that speak it
+
+## [18.2.11] - 2026-09-23
+
+### Added
+
+- Added public API contract and authentication schemas for the Skillshare registry.
+
 ## [18.2.5] - 2026-09-17
 
 ### Added

@@ -47,12 +47,17 @@ export function modelChipStyle(label: string, restore = "\x1b[39m\x1b[49m"): str
 /** Every glyph a skill chip may start with, across all symbol presets. */
 const SKILL_ICONS = [...new Set(Object.values(SYMBOL_PRESETS).map(m => m["icon.extensionSkill"]))];
 
-/** Skill names as they appear in chips: word characters and dashes, dots only between segments. */
-const SKILL_NAME_SOURCE = "[\\w-]+(?:\\.[\\w-]+)*";
+/** Skill names as they appear in chips: word characters and dashes, dots only between segments,
+ *  optionally behind one collision namespace (`<namespace>/<name>`). */
+const SKILL_NAME_SEGMENT_SOURCE = "[\\w-]+(?:\\.[\\w-]+)*";
+const SKILL_NAME_SOURCE = `${SKILL_NAME_SEGMENT_SOURCE}(?:/${SKILL_NAME_SEGMENT_SOURCE})?`;
 
-const SKILL_CHIP_SOURCE = `(?:${SKILL_ICONS.map(icon =>
-	/^[a-z]+$/i.test(icon) ? `(?<![A-Za-z])${RegExp.escape(icon)}` : RegExp.escape(icon),
-).join("|")}) (${SKILL_NAME_SOURCE})(?![\\w-])`;
+/** Regex source for a chip glyph; word glyphs (ASCII preset) must not continue a preceding word. */
+function glyphSource(icon: string): string {
+	return /^[a-z]+$/i.test(icon) ? `(?<![A-Za-z])${RegExp.escape(icon)}` : RegExp.escape(icon);
+}
+
+const SKILL_CHIP_SOURCE = `(?:${SKILL_ICONS.map(glyphSource).join("|")}) (${SKILL_NAME_SOURCE})(?![\\w-])`;
 
 /**
  * Replaces `/skill:<name>` tokens for known skills with compact chip labels and
@@ -96,11 +101,16 @@ export function collapseModelMentions(
 
 const CHIP_ICON_KEY = { image: "chip.image", video: "chip.video", paste: "chip.paste" } as const;
 
+/** Chip glyph the active theme renders for `kind`, including `symbols.overrides`. */
+function activeChipIcon(kind: ChipKind): string {
+	return typeof theme === "undefined"
+		? SYMBOL_PRESETS.unicode[CHIP_ICON_KEY[kind]]
+		: theme.symbol(CHIP_ICON_KEY[kind]);
+}
+
 /** Compact atomic composer token for attachment `n` in the active symbol preset. */
 export function chipLabel(kind: ChipKind, n: number): string {
-	const icon =
-		typeof theme === "undefined" ? SYMBOL_PRESETS.unicode[CHIP_ICON_KEY[kind]] : theme.symbol(CHIP_ICON_KEY[kind]);
-	return `${icon} #${n}`;
+	return `${activeChipIcon(kind)} #${n}`;
 }
 
 /** Every glyph a chip token may start with, across all symbol presets. */
@@ -111,7 +121,7 @@ const CHIP_ICONS: Record<ChipKind, readonly string[]> = {
 };
 
 const CHIP_TOKEN_SOURCE = `(?:${[...CHIP_ICONS.image, ...CHIP_ICONS.video, ...CHIP_ICONS.paste]
-	.map(icon => (/^[a-z]+$/i.test(icon) ? `(?<![A-Za-z])${RegExp.escape(icon)}` : RegExp.escape(icon)))
+	.map(glyphSource)
 	.join("|")}) #[1-9]\\d*`;
 
 /** Infers an attachment kind from a chip label emitted by any configured symbol preset. */
@@ -155,6 +165,47 @@ export const COMPOSER_TOKEN_REGEX = new RegExp(
 	"gu",
 );
 
+/** Last compiled {@link referencedAttachments} scanner, keyed by its source (labels and glyphs rarely change). */
+let cachedScanner: { source: string; scanner: RegExp } | undefined;
+
+/**
+ * Attachment indices referenced by a composer buffer, per kind. Image/video count compact chips
+ * and expanded markers; paste counts compact chips only, since `[Paste #N]` markers number the
+ * base editor's separate paste buffer. Registered labels take precedence over theme glyphs so
+ * tokens created before a theme switch keep their kind; full numbers prevent `#1` matching `#10`.
+ */
+export function referencedAttachments(
+	text: string,
+	recorded: ReadonlyMap<string, ChipKind>,
+): Record<ChipKind, Set<number>> {
+	const kinds: readonly ChipKind[] = ["image", "video", "paste"];
+	const kindByIcon = new Map<string, ChipKind>();
+	for (const kind of kinds) for (const icon of CHIP_ICONS[kind]) kindByIcon.set(icon, kind);
+	for (const kind of kinds) kindByIcon.set(activeChipIcon(kind), kind);
+	const icons = [...kindByIcon.keys()].sort((a, b) => b.length - a.length).map(glyphSource);
+	const labels = [...recorded.keys()].sort((a, b) => b.length - a.length).map(label => RegExp.escape(label));
+	const recordedSource = labels.length > 0 ? labels.join("|") : "(?!)";
+	const source = `${PLACEHOLDER_REGEX.source}|(${recordedSource})(?!\\d)|(${icons.join("|")}) #([1-9]\\d*)`;
+	if (cachedScanner?.source !== source) cachedScanner = { source, scanner: new RegExp(source, "gu") };
+	const { scanner } = cachedScanner;
+
+	const refs: Record<ChipKind, Set<number>> = { image: new Set(), video: new Set(), paste: new Set() };
+	for (const match of text.matchAll(scanner)) {
+		if (match[1] === "Image") refs.image.add(Number(match[2]));
+		else if (match[1] === "Video") refs.video.add(Number(match[2]));
+		const label = match[3];
+		if (label !== undefined) {
+			const kind = recorded.get(label);
+			if (kind !== undefined) refs[kind].add(Number(label.slice(label.lastIndexOf("#") + 1)));
+		} else {
+			const icon = match[4];
+			const kind = icon === undefined ? undefined : kindByIcon.get(icon);
+			if (kind !== undefined) refs[kind].add(Number(match[5]));
+		}
+	}
+	return refs;
+}
+
 /** Add the registered model-chip labels to the composer placeholder matcher. */
 export function composerTokenRegex(mentionLabels: Iterable<string>): RegExp {
 	const labels = [...new Set(mentionLabels)].sort((a, b) => b.length - a.length);
@@ -167,12 +218,26 @@ export function composerTokenRegex(mentionLabels: Iterable<string>): RegExp {
 
 const VISION_MARKER_REGEX = /\[(Image|Video) #([1-9]\d*)((?:,[^\]\n]*)?)\](?: attachment:\/\/(\2))?/g;
 
-/** Offsets image marker indices, including matching `attachment://` references. */
-export function shiftImageMarkers(text: string, offset: number): string {
-	if (offset === 0) return text;
+/** Marker for the Nth attached image or video preview: `[Image #N, WxH]`, or `[Image #N]` without dims. */
+export function formatVisionMarker(
+	kind: "image" | "video",
+	n: number,
+	dims?: { width: number; height: number },
+): string {
+	const label = `${kind === "video" ? "Video" : "Image"} #${n}`;
+	return dims ? `[${label}, ${dims.width}x${dims.height}]` : `[${label}]`;
+}
+
+/**
+ * Offsets image marker indices, including matching `attachment://` references. With `imageCount`,
+ * markers above it are left alone: like `compactImageMarkers`, they are not this text's attachments.
+ */
+export function shiftImageMarkers(text: string, offset: number, imageCount?: number): string {
+	if (offset === 0 || imageCount === 0) return text;
 	return text.replace(
 		VISION_MARKER_REGEX,
-		(_match, kind: string, idx: string, tail: string, attachmentIdx: string | undefined) => {
+		(match, kind: string, idx: string, tail: string, attachmentIdx: string | undefined) => {
+			if (imageCount !== undefined && Number(idx) > imageCount) return match;
 			const marker = `[${kind} #${Number(idx) + offset}${tail}]`;
 			return attachmentIdx === undefined ? marker : `${marker} attachment://${Number(attachmentIdx) + offset}`;
 		},
@@ -202,8 +267,14 @@ export function collapseImageMarkers(
 /**
  * Drops unreferenced vision attachments from a submission and densely remaps
  * retained image/video markers. Returns `null` when no compaction is needed.
+ * With `byAppearance`, retained markers are also renumbered in the order they first
+ * appear, for editors whose images attach out of order (concurrent path loads).
  */
-export function compactImageMarkers(text: string, imageCount: number): { text: string; keep: number[] } | null {
+export function compactImageMarkers(
+	text: string,
+	imageCount: number,
+	options?: { byAppearance?: boolean },
+): { text: string; keep: number[] } | null {
 	if (imageCount === 0) return null;
 	const referenced = new Set<number>();
 	const scanner = new RegExp(VISION_MARKER_REGEX.source, "g");
@@ -213,8 +284,8 @@ export function compactImageMarkers(text: string, imageCount: number): { text: s
 		const n = Number(match[2]);
 		if (n <= imageCount) referenced.add(n);
 	}
-	if (referenced.size === imageCount) return null;
-	const keep = [...referenced].sort((a, b) => a - b);
+	const keep = options?.byAppearance ? [...referenced] : [...referenced].sort((a, b) => a - b);
+	if (keep.length === imageCount && keep.every((n, i) => n === i + 1)) return null;
 	const remap = new Map<number, number>(keep.map((n, i) => [n, i + 1]));
 	const rewritten = text.replace(
 		VISION_MARKER_REGEX,

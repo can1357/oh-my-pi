@@ -6,6 +6,8 @@ import type { AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-
 import { Loader } from "@oh-my-pi/pi-tui";
 import { createInteractiveModeContext } from "../../helpers/interactive-mode-context";
 
+import { cfgTerminalShowProgress } from "@oh-my-pi/pi-coding-agent/modes/settings";
+
 /**
  * Faithful model of the shared `statusContainer` + working-loader invariant that
  * InteractiveMode owns:
@@ -21,14 +23,24 @@ import { createInteractiveModeContext } from "../../helpers/interactive-mode-con
  * the next `agent_start` recreates and re-attaches it.
  */
 function createContext(options: { terminalProgress?: boolean } = {}) {
-	const streamState = { isStreaming: false };
-	if (options.terminalProgress) settings.set("terminal.showProgress", true);
-	const setProgress = vi.fn((_active: boolean) => {});
+	// `continuation`: a scheduled retry/continuation the session still owes.
+	const streamState: { isStreaming: boolean; continuation?: PromiseWithResolvers<void> } = { isStreaming: false };
+	if (options.terminalProgress) cfgTerminalShowProgress.set(settings, true);
+	const progressCleared = Promise.withResolvers<void>();
+	const setProgress = vi.fn((active: boolean) => {
+		if (!active) progressCleared.resolve();
+	});
 	const ctx = createInteractiveModeContext({
 		ui: { terminal: { setProgress } },
 		session: {
 			get isStreaming() {
 				return streamState.isStreaming;
+			},
+			get hasPostPromptWork() {
+				return streamState.continuation !== undefined;
+			},
+			waitForIdle: async () => {
+				await streamState.continuation?.promise;
 			},
 		},
 	});
@@ -48,11 +60,12 @@ function createContext(options: { terminalProgress?: boolean } = {}) {
 		ctx.loadingAnimation = working;
 		statusContainer.addChild(working);
 	});
-	return { ctx, streamState, statusContainer, workingLoaders, setProgress };
+	return { ctx, streamState, statusContainer, workingLoaders, setProgress, progressCleared: progressCleared.promise };
 }
 
 const AGENT_START = { type: "agent_start" } as unknown as AgentSessionEvent;
 const AGENT_END = { type: "agent_end", messages: [] } as unknown as AgentSessionEvent;
+const NON_TERMINAL_AGENT_END = { type: "agent_end", messages: [], isTerminal: false } as unknown as AgentSessionEvent;
 const COMPACTION_START = {
 	type: "auto_compaction_start",
 	reason: "overflow",
@@ -64,6 +77,14 @@ const COMPACTION_END = {
 	result: { summary: "s", shortSummary: "s", tokensBefore: 10, details: {}, firstKeptEntryId: undefined },
 	willRetry: true,
 } as unknown as AgentSessionEvent;
+
+/** One macrotask hop: every microtask continuation queued so far has run. */
+async function nextMacrotask(): Promise<void> {
+	const { promise, resolve } = Promise.withResolvers<void>();
+	setImmediate(resolve);
+	await promise;
+}
+
 const RETRY_START = {
 	type: "auto_retry_start",
 	attempt: 1,
@@ -220,23 +241,102 @@ describe("EventController loader recovery after overflow maintenance", () => {
 		expect(statusContainer.children).toHaveLength(0);
 	});
 
-	it("mirrors agent and auto-compaction activity to OSC 9;4 when enabled", async () => {
+	it("keeps OSC 9;4 progress on through auto-compaction inside a live turn", async () => {
 		const { ctx, setProgress } = createContext({ terminalProgress: true });
 		const controller = new EventController(ctx);
 
 		await controller.handleEvent(AGENT_START);
-		expect(setProgress).toHaveBeenCalledTimes(1);
-		expect(setProgress).toHaveBeenLastCalledWith(true);
-
 		await controller.handleEvent(COMPACTION_START);
-		expect(setProgress).toHaveBeenCalledTimes(1);
-
 		await controller.handleEvent(COMPACTION_END);
-		expect(setProgress).toHaveBeenCalledTimes(2);
-		expect(setProgress).toHaveBeenLastCalledWith(false);
+		// Clearing here would tell Tern the agent finished while it keeps working.
+		expect(setProgress.mock.calls.map(call => call[0])).toEqual([true]);
 
+		// The overflow retry's own agent_start/agent_end bracket ends the busy state once.
 		await controller.handleEvent(AGENT_START);
 		await controller.handleEvent(AGENT_END);
-		expect(setProgress.mock.calls.map(call => call[0])).toEqual([true, false, true, false]);
+		expect(setProgress.mock.calls.map(call => call[0])).toEqual([true, false]);
+	});
+
+	it("brackets OSC 9;4 progress around auto-compaction outside a turn", async () => {
+		const { ctx, setProgress } = createContext({ terminalProgress: true });
+		const controller = new EventController(ctx);
+
+		await controller.handleEvent(COMPACTION_START);
+		await controller.handleEvent(COMPACTION_END);
+		expect(setProgress.mock.calls.map(call => call[0])).toEqual([true, false]);
+	});
+
+	it("leaves OSC 9;4 progress to a turn that starts during auto-compaction", async () => {
+		const { ctx, setProgress } = createContext({ terminalProgress: true });
+		const controller = new EventController(ctx);
+
+		await controller.handleEvent(COMPACTION_START);
+		await controller.handleEvent(AGENT_START);
+		await controller.handleEvent(COMPACTION_END);
+		expect(setProgress.mock.calls.map(call => call[0])).toEqual([true]);
+
+		await controller.handleEvent(AGENT_END);
+		expect(setProgress.mock.calls.map(call => call[0])).toEqual([true, false]);
+	});
+
+	it("ends OSC 9;4 progress when an abort cancels the overflow retry before it starts", async () => {
+		const { ctx, streamState, setProgress, progressCleared } = createContext({ terminalProgress: true });
+		const controller = new EventController(ctx);
+
+		await controller.handleEvent(AGENT_START);
+		await controller.handleEvent(COMPACTION_START);
+		await controller.handleEvent(COMPACTION_END);
+		// Recovery scheduled the retry, so the overflowed turn settles non-terminally.
+		const retry = Promise.withResolvers<void>();
+		streamState.continuation = retry;
+		await controller.handleEvent(NON_TERMINAL_AGENT_END);
+		await nextMacrotask();
+		expect(setProgress.mock.calls.map(call => call[0])).toEqual([true]);
+
+		// Esc cancels the scheduled retry: no agent_start or terminal agent_end follows.
+		streamState.continuation = undefined;
+		retry.resolve();
+		await progressCleared;
+		expect(setProgress.mock.calls.map(call => call[0])).toEqual([true, false]);
+	});
+
+	it("leaves OSC 9;4 progress to a scheduled continuation that does start", async () => {
+		const { ctx, streamState, setProgress } = createContext({ terminalProgress: true });
+		const controller = new EventController(ctx);
+
+		await controller.handleEvent(AGENT_START);
+		const retry = Promise.withResolvers<void>();
+		streamState.continuation = retry;
+		await controller.handleEvent(NON_TERMINAL_AGENT_END);
+
+		// The retry runs: its agent_start supersedes the settle watch.
+		await controller.handleEvent(AGENT_START);
+		streamState.continuation = undefined;
+		retry.resolve();
+		await nextMacrotask();
+		expect(setProgress.mock.calls.map(call => call[0])).toEqual([true]);
+
+		await controller.handleEvent(AGENT_END);
+		expect(setProgress.mock.calls.map(call => call[0])).toEqual([true, false]);
+	});
+
+	it("reports OSC 9;4 activity to Tern even when the setting is off", async () => {
+		const program = Bun.env.TERM_PROGRAM;
+		try {
+			Bun.env.TERM_PROGRAM = "vscode";
+			const outside = createContext();
+			await new EventController(outside.ctx).handleEvent(AGENT_START);
+			expect(outside.setProgress).not.toHaveBeenCalled();
+
+			Bun.env.TERM_PROGRAM = "tern";
+			const { ctx, setProgress } = createContext();
+			const controller = new EventController(ctx);
+			await controller.handleEvent(AGENT_START);
+			await controller.handleEvent(AGENT_END);
+			expect(setProgress.mock.calls.map(call => call[0])).toEqual([true, false]);
+		} finally {
+			if (program === undefined) delete Bun.env.TERM_PROGRAM;
+			else Bun.env.TERM_PROGRAM = program;
+		}
 	});
 });

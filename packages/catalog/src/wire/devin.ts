@@ -22,9 +22,9 @@ const DEVIN_LOCALE = "en";
 const DEVIN_CLI_METADATA = {
 	ideName: "devin-cli",
 	ideType: "chisel",
-	ideVersion: "3000.6.2",
+	ideVersion: "3000.11.3",
 	extensionName: "chisel",
-	extensionVersion: "3000.6.2",
+	extensionVersion: "3000.11.3",
 	locale: DEVIN_LOCALE,
 	os: DEVIN_OS,
 } as const;
@@ -50,17 +50,21 @@ export function normalizeDevinSessionToken(apiKey: string | undefined): string {
 	return apiKey.startsWith(DEVIN_SESSION_TOKEN_PREFIX) ? apiKey : `${DEVIN_SESSION_TOKEN_PREFIX}${apiKey}`;
 }
 
-/**
- * Fields for `Metadata` on released-CLI calls (`GetUserJwt`, `AssignModel`,
- * `GetChatMessage`, `GetUserStatus`). `userJwt` stays empty for the calls the
- * CLI makes with the session token alone (auth, model assignment, usage).
- */
-export function devinCliMetadata(apiKey: string | undefined, userJwt = "") {
+/** Released-CLI metadata with credential bytes already encoded for the wire. */
+export function devinWireMetadata(apiKey: string | undefined, userJwt = "") {
 	return {
-		apiKey: normalizeDevinSessionToken(apiKey),
+		apiKey: apiKey ?? "",
 		userJwt,
 		...DEVIN_CLI_METADATA,
 	};
+}
+
+/**
+ * Fields for `Metadata` on released-CLI calls (`GetUserJwt`, `AssignModel`,
+ * `GetChatMessage`, `GetUserStatus`) authenticated by a Devin session token.
+ */
+export function devinCliMetadata(apiKey: string | undefined, userJwt = "") {
+	return devinWireMetadata(normalizeDevinSessionToken(apiKey), userJwt);
 }
 
 /** Fields for `Metadata` on the dev-channel `GetCliModelConfigs` call. */

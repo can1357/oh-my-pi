@@ -2,12 +2,12 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { getProjectAgentDir } from "@oh-my-pi/pi-utils";
 import type { Settings } from "../config/settings";
+
 import { expandTilde } from "../tools/path-utils";
+import { cfgPlanAutosave, cfgPlanAutosaveDir } from "./settings";
 
 const PLAN_SAVE_STEM_MAX_LENGTH = 32;
 const MAX_AUTOSAVE_CANDIDATES = 1000;
-
-type PlanAutosaveSettings = Pick<Settings, "get">;
 
 /** Suggested save filename for an approved plan: `<TOPIC>_PLAN.md` from the
  *  tiny-model topic (e.g. `PYO3_METHODS_PLAN.md`), trimmed to a word boundary
@@ -34,17 +34,17 @@ export function defaultPlanAutosaveDir(cwd: string): string {
 
 /** Resolve the autosave directory: `plan.autosaveDir` (`~`/absolute/cwd-relative)
  *  or the project-local default when unset/blank. */
-export function resolvePlanAutosaveDir(settings: PlanAutosaveSettings, cwd: string): string {
-	const raw = settings.get("plan.autosaveDir");
+export function resolvePlanAutosaveDir(settings: Settings, cwd: string): string {
+	const raw = cfgPlanAutosaveDir.get(settings);
 	if (typeof raw !== "string" || raw.trim() === "") return defaultPlanAutosaveDir(cwd);
 	const expanded = expandTilde(raw.trim());
 	if (path.isAbsolute(expanded)) return path.normalize(expanded);
 	return path.resolve(cwd, expanded);
 }
 
-export function isPlanAutosaveEnabled(settings: PlanAutosaveSettings): boolean {
+export function isPlanAutosaveEnabled(settings: Settings): boolean {
 	try {
-		return settings.get("plan.autosave") === true;
+		return cfgPlanAutosave.get(settings) === true;
 	} catch {
 		return false;
 	}
@@ -79,7 +79,7 @@ async function claimAutosavePath(dir: string, filename: string, planContent: str
 /** Best-effort copy of an approved plan into the autosave dir.
  *  Returns the destination path, or null when autosave is disabled/empty. */
 export async function autosaveApprovedPlan(input: {
-	settings: PlanAutosaveSettings;
+	settings: Settings;
 	cwd: string;
 	title: string;
 	planContent: string;

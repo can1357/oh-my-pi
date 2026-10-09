@@ -1,4 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { cfgEditFuzzyMatch } from "@oh-my-pi/pi-coding-agent/edit/settings";
 import { type EditMode } from "@oh-my-pi/pi-tui/tools/edit";
 import { type EditModeSessionLike, resolveEditMode } from "@oh-my-pi/pi-coding-agent/utils/edit-mode";
 
@@ -20,16 +22,17 @@ function restoreEnv(): void {
 
 function createSession(args: {
 	activeModel?: string;
-	modelVariant?: EditMode | null;
+	/** Configured `edit.modelVariants` entry keyed by the whole active model selector. */
+	modelVariant?: EditMode;
 	settingsMode?: EditMode;
 }): EditModeSessionLike {
-	return {
-		getActiveModelString: () => args.activeModel,
-		settings: {
-			get: () => args.settingsMode ?? "hashline",
-			getEditVariantForModel: () => args.modelVariant ?? null,
-		},
-	};
+	const settings = Settings.isolated({
+		"edit.mode": args.settingsMode ?? "hashline",
+		...(args.modelVariant && args.activeModel
+			? { "edit.modelVariants": { [args.activeModel]: args.modelVariant } }
+			: {}),
+	});
+	return { getActiveModelString: () => args.activeModel, settings };
 }
 
 describe("resolveEditMode", () => {
@@ -46,6 +49,38 @@ describe("resolveEditMode", () => {
 		delete Bun.env.PI_EDIT_VARIANT;
 
 		expect(resolveEditMode(createSession({ activeModel: "openrouter/moonshotai/Kimi-K2-Instruct" }))).toBe("replace");
+	});
+
+	test("falls back for K3 SKUs without changing ordinary or near-miss model edit mode", () => {
+		for (const activeModel of [
+			"k3",
+			"kimi-code/k3",
+			"kimi-coding/K3",
+			"k3-256k",
+			"K3-256K",
+			"kimi-code/k3-256k",
+			"kimi-coding/K3-256K",
+		]) {
+			expect(resolveEditMode(createSession({ activeModel }))).toBe("replace");
+		}
+		for (const activeModel of ["openai/gpt-5.5", "k30", "k3-custom", "k3-256kb", "kimi-code/k3-256k-custom"]) {
+			expect(resolveEditMode(createSession({ activeModel }))).toBe("hashline");
+		}
+	});
+
+	test("keeps explicit K3 edit-mode overrides ahead of the fallback", () => {
+		for (const activeModel of ["kimi-code/k3", "kimi-coding/K3-256K"]) {
+			expect(resolveEditMode(createSession({ activeModel, modelVariant: "hashline" }))).toBe("hashline");
+			expect(resolveEditMode(createSession({ activeModel, settingsMode: "apply_patch" }))).toBe("apply_patch");
+
+			Bun.env.PI_EDIT_VARIANT = "hashline";
+			expect(resolveEditMode(createSession({ activeModel }))).toBe("hashline");
+			delete Bun.env.PI_EDIT_VARIANT;
+
+			Bun.env.PI_STRICT_EDIT_MODE = "1";
+			expect(resolveEditMode(createSession({ activeModel }))).toBe("hashline");
+			delete Bun.env.PI_STRICT_EDIT_MODE;
+		}
 	});
 
 	test("falls back from hashline to replace for MiMo models", () => {
@@ -128,5 +163,28 @@ describe("resolveEditMode", () => {
 		expect(resolveEditMode(createSession({ activeModel: "openrouter/moonshotai/Kimi-K2-Instruct" }))).toBe(
 			"hashline",
 		);
+	});
+});
+
+describe("PI_EDIT_FUZZY", () => {
+	const originalEditFuzzy = Bun.env.PI_EDIT_FUZZY;
+
+	afterEach(() => {
+		if (originalEditFuzzy === undefined) delete Bun.env.PI_EDIT_FUZZY;
+		else Bun.env.PI_EDIT_FUZZY = originalEditFuzzy;
+	});
+
+	test("forces fuzzy matching with 1/true and 0/false, deferring to edit.fuzzyMatch for auto or other text", () => {
+		const fuzzyWith = (raw: string, configured: boolean) => {
+			Bun.env.PI_EDIT_FUZZY = raw;
+			return cfgEditFuzzyMatch.get(Settings.isolated({ "edit.fuzzyMatch": configured }));
+		};
+		expect(fuzzyWith("1", false)).toBe(true);
+		expect(fuzzyWith("true", false)).toBe(true);
+		expect(fuzzyWith("0", true)).toBe(false);
+		expect(fuzzyWith("false", true)).toBe(false);
+		expect(fuzzyWith("auto", true)).toBe(true);
+		expect(fuzzyWith("auto", false)).toBe(false);
+		expect(fuzzyWith("bogus", true)).toBe(true);
 	});
 });

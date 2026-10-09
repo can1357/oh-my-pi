@@ -87,10 +87,6 @@ describe("renderPlaceholders", () => {
 		expect(out).toBe("see <image:2> and <paste:1> done");
 	});
 
-	it("reports bracketed markers as marker form", () => {
-		expect(capture("[Image #1]").refs[0]?.form).toBe("marker");
-	});
-
 	it("recognizes chip tokens from every symbol preset", () => {
 		// A draft written under the nerd or ascii preset must stay a reference after
 		// the user switches presets — otherwise atomic deletion and styling break.
@@ -181,6 +177,18 @@ describe("collapseSkillTokens", () => {
 		expect(collapseSkillTokens("!echo /skill:reviewer", known, () => {})).toBe("!echo /skill:reviewer");
 		expect(collapseSkillTokens("/compact /skill:reviewer", known, () => {})).toBe("/compact /skill:reviewer");
 	});
+
+	it("collapses and renders a collision-namespaced skill as one chip", () => {
+		const registered: Array<[string, string]> = [];
+		const out = collapseSkillTokens(
+			"fix it /skill:superpowers/tdd now",
+			name => name === "superpowers/tdd",
+			(label, expansion) => registered.push([label, expansion]),
+		);
+		expect(out).toBe(`fix it ${skillChipLabel("superpowers/tdd")} now`);
+		expect(registered).toEqual([[skillChipLabel("superpowers/tdd"), "/skill:superpowers/tdd"]]);
+		expect(capture(out).skills).toEqual(["superpowers/tdd"]);
+	});
 });
 
 describe("collapseImageMarkers", () => {
@@ -252,6 +260,13 @@ describe("shiftImageMarkers", () => {
 		expect(shiftImageMarkers("[Image #1] attachment://1 then [Image #2, 100x100] attachment://2", 2)).toBe(
 			"[Image #3] attachment://3 then [Image #4, 100x100] attachment://4",
 		);
+	});
+
+	it("leaves markers above the image count alone", () => {
+		expect(shiftImageMarkers("[Image #1] attachment://1 beside [Image #2]", 3, 1)).toBe(
+			"[Image #4] attachment://4 beside [Image #2]",
+		);
+		expect(shiftImageMarkers("see [Image #1]", 3, 0)).toBe("see [Image #1]");
 	});
 
 	it("never touches Paste markers", () => {

@@ -13,7 +13,7 @@ import * as net from "node:net";
 import * as os from "node:os";
 import * as path from "node:path";
 import { logger, ptree } from "@oh-my-pi/pi-utils";
-import { MessageFramer } from "../../jsonrpc/message-framing";
+import { encodeMessageFrame, MessageFramer } from "../../jsonrpc/message-framing";
 import { daemonClientForProject } from "../../launch/client";
 import { describeQuietly, stopQuietly, waitReady } from "../../launch/ensure";
 import { daemonRuntimeDir } from "../../launch/paths";
@@ -114,8 +114,7 @@ function requestOnSocket(
 	socket.on("data", onData);
 	socket.once("close", onClose);
 	socket.once("error", onClose);
-	const content = JSON.stringify(request);
-	socket.write(`Content-Length: ${Buffer.byteLength(content, "utf-8")}\r\n\r\n${content}`);
+	socket.write(encodeMessageFrame(request));
 	return promise;
 }
 

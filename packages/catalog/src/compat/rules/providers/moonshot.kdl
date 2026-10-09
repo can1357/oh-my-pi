@@ -31,6 +31,17 @@ provider "moonshot" {
 			input-modalities "text" "image"
 		}
 	}
+	// stencil.so reports a $3 K3 cache write; Moonshot bills only cache hits
+	// ($0.30) and misses (the $3 input rate), with no cache-write charge.
+	// https://platform.moonshot.ai/docs/pricing/chat-k3
+	models "kimi-k3" {
+		cost-patch {
+			input 3.0
+			output 15.0
+			cache-read 0.3
+			cache-write 0.0
+		}
+	}
 	// The /models roster carries no modality metadata for the named vision/vl
 	// SKUs; the bounded id token is the census signal.
 	models token="vision" {

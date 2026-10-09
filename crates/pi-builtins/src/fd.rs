@@ -5,7 +5,6 @@
 use std::{
 	collections::HashMap,
 	ffi::{OsStr, OsString},
-	fs::{self, Metadata},
 	io::{self, BufWriter, Write},
 	path::{Path, PathBuf},
 	sync::{
@@ -18,6 +17,7 @@ use std::{
 use brush_core::{ShellExtensions, builtins::Registration};
 use clap::{ArgAction, Parser, ValueEnum};
 use globset::{GlobBuilder, GlobMatcher};
+use pi_vfs::{BlockingFs, Metadata};
 use pi_walker::CollectedEntry;
 use regex::{Regex, RegexBuilder};
 
@@ -322,6 +322,7 @@ impl Excludes {
 }
 
 struct FdIgnoreMatcher {
+	fs:      BlockingFs,
 	enabled: bool,
 	root:    PathBuf,
 	global:  Vec<ignore::gitignore::Gitignore>,
@@ -334,23 +335,24 @@ struct FdIgnoreState {
 }
 
 impl FdIgnoreMatcher {
-	fn new(base_dir: &Path, root: &Path, cli: &FdCli) -> io::Result<Self> {
+	fn new(fs: &BlockingFs, base_dir: &Path, root: &Path, cli: &FdCli) -> io::Result<Self> {
 		let root = normalize_fdignore_path(root);
 		let enabled = !no_ignore(cli);
-		let mut matcher =
-			Self { enabled, root: root.clone(), global: Vec::new(), states: HashMap::new() };
+		let mut matcher = Self {
+			fs: fs.clone(),
+			enabled,
+			root: root.clone(),
+			global: Vec::new(),
+			states: HashMap::new(),
+		};
 		if !enabled {
 			return Ok(matcher);
 		}
 
 		for ignore_file in &cli.ignore_files {
-			let path = if ignore_file.is_absolute() {
-				ignore_file.clone()
-			} else {
-				base_dir.join(ignore_file)
-			};
+			let path = pi_vfs::absolute_path(base_dir, ignore_file);
 			let mut builder = ignore::gitignore::GitignoreBuilder::new(base_dir);
-			if let Some(err) = builder.add(&path) {
+			if let Some(err) = pi_walker::add_ignore_file(&mut builder, fs, &path) {
 				return Err(io::Error::other(err.to_string()));
 			}
 			let ignore = builder
@@ -364,9 +366,9 @@ impl FdIgnoreMatcher {
 		let parent = if cli.no_ignore_parent {
 			None
 		} else {
-			build_fdignore_parent_states(root.parent())
+			build_fdignore_parent_states(fs, &root)
 		};
-		let root_state = load_fdignore_state(&root, parent);
+		let root_state = load_fdignore_state(fs, &root, parent);
 		matcher.states.insert(root, root_state);
 		Ok(matcher)
 	}
@@ -376,7 +378,7 @@ impl FdIgnoreMatcher {
 			return false;
 		}
 		let path = normalize_fdignore_path(path);
-		let state_dir = path.parent().unwrap_or(&self.root).to_path_buf();
+		let state_dir = pi_vfs::parent_path(&path).unwrap_or(&self.root).to_path_buf();
 		let state = self.state_for_dir(&state_dir);
 		if let Some(ignored) = fdignore_state_match(&state, &path, is_dir) {
 			return ignored;
@@ -404,36 +406,48 @@ impl FdIgnoreMatcher {
 				.get(&self.root)
 				.and_then(|state| state.parent.as_ref().map(Arc::clone))
 		} else {
-			dir.parent().map(|parent| self.state_for_dir(parent))
+			pi_vfs::parent_path(dir).map(|parent| self.state_for_dir(parent))
 		};
-		let state = load_fdignore_state(dir, parent);
+		let state = load_fdignore_state(&self.fs, dir, parent);
 		self.states.insert(dir.to_path_buf(), Arc::clone(&state));
 		state
 	}
 }
 
-fn build_fdignore_parent_states(mut dir: Option<&Path>) -> Option<Arc<FdIgnoreState>> {
+/// Load `.fdignore` state for every ancestor of `root`, outermost first.
+fn build_fdignore_parent_states(fs: &BlockingFs, root: &Path) -> Option<Arc<FdIgnoreState>> {
 	let mut ancestors = Vec::new();
+	let mut dir = pi_vfs::parent_path(root);
 	while let Some(path) = dir {
 		ancestors.push(path);
-		dir = path.parent();
+		dir = pi_vfs::parent_path(path);
 	}
 	let mut parent = None;
 	for ancestor in ancestors.into_iter().rev() {
-		parent = Some(load_fdignore_state(ancestor, parent));
+		parent = Some(load_fdignore_state(fs, ancestor, parent));
 	}
 	parent
 }
 
 fn normalize_fdignore_path(path: &Path) -> PathBuf {
-	path.components().collect()
+	// Component normalization collapses `scheme://` to `scheme:/`; virtual
+	// paths already compare component-wise, so keep their spelling intact.
+	if pi_vfs::is_virtual_path(path) {
+		path.to_path_buf()
+	} else {
+		path.components().collect()
+	}
 }
 
-fn load_fdignore_state(dir: &Path, parent: Option<Arc<FdIgnoreState>>) -> Arc<FdIgnoreState> {
-	let file = dir.join(".fdignore");
-	let matcher = if file.is_file() {
+fn load_fdignore_state(
+	fs: &BlockingFs,
+	dir: &Path,
+	parent: Option<Arc<FdIgnoreState>>,
+) -> Arc<FdIgnoreState> {
+	let file = pi_vfs::join_path(dir, Path::new(".fdignore"));
+	let matcher = if fs.is_file(&file) {
 		let mut builder = ignore::gitignore::GitignoreBuilder::new(dir);
-		let _ = builder.add(&file);
+		let _ = pi_walker::add_ignore_file(&mut builder, fs, &file);
 		builder.build().ok().filter(|ignore| !ignore.is_empty())
 	} else {
 		None
@@ -489,10 +503,6 @@ impl TypeFilter {
 			|| self.block
 			|| self.character
 	}
-
-	const fn is_empty(&self) -> bool {
-		!self.has_kind() && !self.executable && !self.empty
-	}
 }
 
 #[derive(Clone, Copy)]
@@ -508,14 +518,12 @@ struct SizeFilter {
 	bytes:    u64,
 }
 
-#[cfg_attr(not(unix), allow(dead_code))]
 #[derive(Clone, Copy)]
 enum OwnerSide {
 	Include(u32),
 	Exclude(u32),
 }
 
-#[cfg_attr(not(unix), allow(dead_code))]
 #[derive(Clone, Copy)]
 struct OwnerMatcher {
 	user:  Option<OwnerSide>,
@@ -524,6 +532,7 @@ struct OwnerMatcher {
 
 #[derive(Clone)]
 struct SearchConfig {
+	fs:             BlockingFs,
 	base_dir:       PathBuf,
 	absolute_roots: Vec<PathBuf>,
 	matcher:        Arc<SearchMatcher>,
@@ -562,13 +571,7 @@ impl Utility for FdCli {
 		self.ignore_files = self
 			.ignore_files
 			.iter()
-			.map(|path| {
-				if path.is_absolute() {
-					host.resolve(path)
-				} else {
-					host.resolve(base_dir.join(path))
-				}
-			})
+			.map(|path| host.resolve(pi_vfs::absolute_path(&base_dir, path)))
 			.collect();
 		let cancelled = host.cancel_flag();
 
@@ -617,7 +620,7 @@ fn search(
 	let search_paths = resolve_search_paths(&cli, &base_dir, host)?;
 	let absolute_roots = search_paths
 		.iter()
-		.filter(|path| path.original.is_absolute())
+		.filter(|path| path.original.is_absolute() || pi_vfs::is_virtual_path(&path.original))
 		.map(|path| path.resolved.clone())
 		.collect::<Vec<_>>();
 	let matcher = Arc::new(build_matcher(&cli)?);
@@ -640,11 +643,9 @@ fn search(
 	} else {
 		cli.max_results
 	};
-	let separator = cli
-		.path_separator
-		.clone()
-		.unwrap_or_else(|| std::path::MAIN_SEPARATOR.to_string());
+	let separator = cli.path_separator.clone().unwrap_or_else(|| "/".to_string());
 	let config = SearchConfig {
+		fs: host.fs().clone(),
 		base_dir,
 		absolute_roots,
 		matcher,
@@ -665,6 +666,7 @@ fn search(
 		prune: cli.prune,
 	};
 
+	let heartbeat = host.cancel_heartbeat();
 	if let Some(state) = try_search_fast(
 		&cli,
 		&search_paths,
@@ -673,6 +675,7 @@ fn search(
 		&mut host.stdout,
 		&mut host.stderr,
 		cancelled,
+		&heartbeat,
 	)? {
 		return Ok(state);
 	}
@@ -684,10 +687,16 @@ fn search(
 		if cancelled.load(Ordering::Relaxed) || max_results.is_some_and(|max| state.matches >= max) {
 			break;
 		}
-		let mut fd_ignores = FdIgnoreMatcher::new(&config.base_dir, &search_path.resolved, &cli)?;
-		let request =
-			fd_walk_request(&search_path.resolved, &cli, use_gitignore, cli.one_file_system);
-		let outcome = match request.collect_with_heartbeat(cancel_heartbeat(cancelled)) {
+		let mut fd_ignores =
+			FdIgnoreMatcher::new(&config.fs, &config.base_dir, &search_path.resolved, &cli)?;
+		let request = fd_walk_request(
+			&config.fs,
+			&search_path.resolved,
+			&cli,
+			use_gitignore,
+			cli.one_file_system,
+		);
+		let outcome = match request.collect_with_heartbeat(&heartbeat) {
 			Ok(outcome) => outcome,
 			Err(pi_walker::WalkError::Interrupted(_)) if cancelled.load(Ordering::Relaxed) => break,
 			Err(err) => return Err(walker_collect_error_to_io(err)),
@@ -715,6 +724,7 @@ fn search(
 }
 
 fn fd_walk_request(
+	fs: &BlockingFs,
 	root: &Path,
 	cli: &FdCli,
 	use_gitignore: bool,
@@ -723,6 +733,7 @@ fn fd_walk_request(
 	let min_depth = cli.exact_depth.or(cli.min_depth).unwrap_or(0);
 	let max_depth = cli.exact_depth.or(cli.max_depth).unwrap_or(usize::MAX);
 	pi_walker::WalkRequest::new(root)
+		.filesystem(fs.clone())
 		.hidden(include_hidden(cli))
 		.gitignore(use_gitignore)
 		.skip_git(false)
@@ -746,6 +757,7 @@ fn try_search_fast(
 	stdout: &mut impl Write,
 	stderr: &mut impl Write,
 	cancelled: &AtomicBool,
+	heartbeat: &(impl Fn() -> io::Result<()> + Sync),
 ) -> io::Result<Option<SearchState>> {
 	if !can_use_fast_search(cli, config) {
 		return Ok(None);
@@ -760,9 +772,9 @@ fn try_search_fast(
 		}
 		let mut matches = state.matches;
 		let mut had_error = state.had_error;
-		let request = fd_walk_request(&search_path.resolved, cli, false, false);
+		let request = fd_walk_request(&config.fs, &search_path.resolved, cli, false, false);
 		let status = request.for_each_entry_with_heartbeat(
-			cancel_heartbeat(cancelled),
+			heartbeat,
 			|entry| {
 				if cancelled.load(Ordering::Relaxed) || max_results.is_some_and(|max| matches >= max) {
 					return Ok(pi_walker::WalkDecision::Stop);
@@ -837,7 +849,7 @@ fn process_walker_entry<W: Write>(
 		});
 	}
 	if is_directory {
-		if ignore_contains.iter().any(|name| path.join(name).exists()) {
+		if contains_ignore_marker(&config.fs, path, ignore_contains) {
 			return Ok(pi_walker::WalkDecision::SkipDescend);
 		}
 		if config.prune
@@ -849,12 +861,7 @@ fn process_walker_entry<W: Write>(
 		}
 	}
 
-	let metadata = fs::symlink_metadata(path).ok();
-	if !matches_walker_filters(config, path, file_type, metadata.as_ref()) {
-		return Ok(pi_walker::WalkDecision::Skip);
-	}
-	let target = match_target(path, &config.base_dir, config.full_path);
-	if !config.matcher.matches(&target) {
+	if !matches_entry(config, path, file_type) {
 		return Ok(pi_walker::WalkDecision::Skip);
 	}
 
@@ -877,16 +884,42 @@ fn process_walker_entry<W: Write>(
 	Ok(pi_walker::WalkDecision::Include)
 }
 
-fn matches_walker_filters(
-	config: &SearchConfig,
-	path: &Path,
-	file_type: pi_walker::FileType,
-	metadata: Option<&Metadata>,
-) -> bool {
-	if !matches_walker_type_filter(&config.types, path, file_type, metadata) {
+/// Whether an entry passes every filter: the ones the listing answers (kind,
+/// extension, the pattern) first, then, only if the command asked for one,
+/// those that need the entry's metadata, so a plain `fd foo` stats nothing.
+fn matches_entry(config: &SearchConfig, path: &Path, file_type: pi_walker::FileType) -> bool {
+	let filter = &config.types;
+	if filter.has_kind()
+		&& !((filter.regular && file_type == pi_walker::FileType::File)
+			|| (filter.directory && file_type == pi_walker::FileType::Dir)
+			|| (filter.symlink && file_type == pi_walker::FileType::Symlink))
+	{
 		return false;
 	}
 	if !config.extensions.is_empty() && !matches_extension(path, &config.extensions) {
+		return false;
+	}
+	if !config
+		.matcher
+		.matches(&match_target(path, &config.base_dir, config.full_path))
+	{
+		return false;
+	}
+	let needs_metadata = filter.executable
+		|| filter.empty
+		|| !config.sizes.is_empty()
+		|| config.changed_after.is_some()
+		|| config.changed_before.is_some()
+		|| !config.owners.is_empty();
+	if !needs_metadata {
+		return true;
+	}
+	let metadata = config.fs.symlink_metadata(path).ok();
+	let metadata = metadata.as_ref();
+	if filter.executable && !is_executable(metadata) {
+		return false;
+	}
+	if filter.empty && !is_empty_entry(&config.fs, path, metadata, filter) {
 		return false;
 	}
 	if !config.sizes.is_empty() && !matches_size_filters(&config.sizes, metadata) {
@@ -901,56 +934,6 @@ fn matches_walker_filters(
 		return false;
 	}
 	true
-}
-
-fn matches_walker_type_filter(
-	filter: &TypeFilter,
-	path: &Path,
-	file_type: pi_walker::FileType,
-	metadata: Option<&Metadata>,
-) -> bool {
-	if filter.is_empty() {
-		return true;
-	}
-	let kind_matches = if filter.has_kind() {
-		(filter.regular && file_type == pi_walker::FileType::File)
-			|| (filter.directory && file_type == pi_walker::FileType::Dir)
-			|| (filter.symlink && file_type == pi_walker::FileType::Symlink)
-	} else {
-		true
-	};
-	if !kind_matches {
-		return false;
-	}
-	if filter.executable && !is_executable(metadata) {
-		return false;
-	}
-	if filter.empty && !is_empty_entry(path, metadata, filter) {
-		return false;
-	}
-	true
-}
-
-/// Builds a walker heartbeat closure that observes the host cancel flag.
-///
-/// The shared utility adapter flips `cancelled` when the shell cancellation
-/// token fires, then awaits the blocking task. Without this closure,
-/// `pi_walker`'s per-entry heartbeat never checks the flag and a cancelled walk
-/// keeps traversing until the whole tree is collected.
-/// Returning [`io::ErrorKind::Interrupted`] surfaces as
-/// [`pi_walker::WalkError::Interrupted`], which the callers translate to a
-/// silent break — the shared adapter owns the user-visible exit code (130), so
-/// no `fd:` diagnostic is emitted.
-///
-/// Regression cover for #3949 (fd) and #3933 (grep/rg — same class of defect).
-fn cancel_heartbeat(cancelled: &AtomicBool) -> impl Fn() -> io::Result<()> + Sync + '_ {
-	move || {
-		if cancelled.load(Ordering::Relaxed) {
-			Err(io::Error::from(io::ErrorKind::Interrupted))
-		} else {
-			Ok(())
-		}
-	}
 }
 
 fn walker_error_to_io(err: pi_walker::WalkError<io::Error>) -> io::Error {
@@ -1003,7 +986,7 @@ fn process_collected_entry<W: Write>(
 		return Ok(());
 	}
 	if is_directory {
-		if ignore_contains.iter().any(|name| path.join(name).exists()) {
+		if contains_ignore_marker(&config.fs, &path, ignore_contains) {
 			pruned_dirs.push(path);
 			return Ok(());
 		}
@@ -1017,12 +1000,7 @@ fn process_collected_entry<W: Write>(
 		}
 	}
 
-	let metadata = fs::symlink_metadata(&path).ok();
-	if !matches_walker_filters(config, &path, entry.file_type, metadata.as_ref()) {
-		return Ok(());
-	}
-	let target = match_target(&path, &config.base_dir, config.full_path);
-	if !config.matcher.matches(&target) {
+	if !matches_entry(config, &path, entry.file_type) {
 		return Ok(());
 	}
 
@@ -1045,9 +1023,15 @@ fn process_collected_entry<W: Write>(
 	Ok(())
 }
 
+/// Whether directory `path` contains any `--ignore-contains` marker entry.
+fn contains_ignore_marker(fs: &BlockingFs, path: &Path, markers: &[OsString]) -> bool {
+	markers
+		.iter()
+		.any(|name| fs.exists(pi_vfs::join_path(path, Path::new(name))))
+}
+
 #[cfg(unix)]
 fn is_executable(metadata: Option<&Metadata>) -> bool {
-	use std::os::unix::fs::PermissionsExt;
 	metadata.is_some_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
 }
 
@@ -1056,7 +1040,12 @@ fn is_executable(metadata: Option<&Metadata>) -> bool {
 	metadata.is_some_and(|meta| meta.is_file())
 }
 
-fn is_empty_entry(path: &Path, metadata: Option<&Metadata>, filter: &TypeFilter) -> bool {
+fn is_empty_entry(
+	fs: &BlockingFs,
+	path: &Path,
+	metadata: Option<&Metadata>,
+	filter: &TypeFilter,
+) -> bool {
 	let Some(metadata) = metadata else {
 		return false;
 	};
@@ -1064,7 +1053,7 @@ fn is_empty_entry(path: &Path, metadata: Option<&Metadata>, filter: &TypeFilter)
 		return metadata.len() == 0;
 	}
 	if metadata.is_dir() && (!filter.has_kind() || filter.directory) {
-		return fs::read_dir(path).is_ok_and(|mut entries| entries.next().is_none());
+		return fs.read_dir(path).is_ok_and(|mut entries| entries.next().is_none());
 	}
 	false
 }
@@ -1107,9 +1096,8 @@ fn matches_time_filters(config: &SearchConfig, metadata: Option<&Metadata>) -> b
 	true
 }
 
-#[cfg(unix)]
+/// Owner filters never match entries whose filesystem reports no owner.
 fn matches_owner_filters(filters: &[OwnerMatcher], metadata: Option<&Metadata>) -> bool {
-	use std::os::unix::fs::MetadataExt;
 	let Some(metadata) = metadata else {
 		return false;
 	};
@@ -1123,13 +1111,10 @@ fn matches_owner_filters(filters: &[OwnerMatcher], metadata: Option<&Metadata>) 
 	})
 }
 
-#[cfg(not(unix))]
-fn matches_owner_filters(filters: &[OwnerMatcher], _metadata: Option<&Metadata>) -> bool {
-	filters.is_empty()
-}
-
-#[cfg(unix)]
-const fn owner_side_matches(side: OwnerSide, actual: u32) -> bool {
+fn owner_side_matches(side: OwnerSide, actual: Option<u32>) -> bool {
+	let Some(actual) = actual else {
+		return false;
+	};
 	match side {
 		OwnerSide::Include(expected) => actual == expected,
 		OwnerSide::Exclude(expected) => actual != expected,
@@ -1157,11 +1142,7 @@ fn resolve_search_paths(
 	Ok(raw_paths
 		.into_iter()
 		.map(|original| {
-			let resolved = if original.is_absolute() {
-				host.resolve(&original)
-			} else {
-				host.resolve(base_dir.join(&original))
-			};
+			let resolved = host.resolve(pi_vfs::absolute_path(base_dir, &original));
 			SearchPath { original, resolved }
 		})
 		.collect())
@@ -1498,17 +1479,16 @@ fn root_was_absolute(path: &Path, roots: &[PathBuf]) -> bool {
 }
 
 fn normalize_display_path(path: &Path) -> String {
-	path.to_string_lossy().replace('\\', "/")
+	pi_walker::normalize_path(path).into_owned()
 }
 
 fn normalize_os_str(value: &OsStr) -> String {
-	value.to_string_lossy().replace('\\', "/")
+	normalize_display_path(Path::new(value))
 }
 
 fn format_path(template: &str, path: &Path, display: &str) -> String {
-	let basename = path.file_name().map(normalize_os_str).unwrap_or_default();
-	let parent = path
-		.parent()
+	let basename = pi_vfs::file_name(path).map(|name| normalize_os_str(&name)).unwrap_or_default();
+	let parent = pi_vfs::parent_path(path)
 		.map(normalize_display_path)
 		.unwrap_or_default();
 	let without_extension = remove_extension(display);
@@ -1568,15 +1548,12 @@ fn remove_extension(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-	use std::{
-		fs,
-		sync::atomic::AtomicBool,
-	};
+	use std::fs;
 
 	use tempfile::{Builder, TempDir};
 
-	use super::{FdCli, cancel_heartbeat};
-	use crate::host::run_util;
+	use super::FdCli;
+	use crate::host::{Host, run_util};
 
 	/// Build a fresh temp directory containing a single matchable file plus a
 	/// filler file, so the walker has more than one entry to iterate. Both the
@@ -1605,27 +1582,34 @@ mod tests {
 			.emit_root(true)
 	}
 
+	/// A host whose cancellation has already fired.
+	fn cancelled_host(tree: &std::path::Path) -> Host {
+		let (host, _) = Host::for_test("fd", "", tree);
+		host.cancel_for_test();
+		host
+	}
+
 	// Regression note (#3949): both call sites in this file feed the walker
-	// `cancel_heartbeat(cancelled)` — one via `collect_with_heartbeat` in the
+	// `Host::cancel_heartbeat` — one via `collect_with_heartbeat` in the
 	// gitignore-respecting fallback path, one via `for_each_entry_with_heartbeat`
 	// in the fast path. `search`/`try_search_fast` also carry an outer
 	// pre-loop `if cancelled { break }` guard that fires when the flag is
 	// already set before search runs, so a pre-set-flag test at the `search()`
 	// level never reaches the walker (the outer guard short-circuits first) and
 	// therefore does not protect the regression. The tests below drive both
-	// walker APIs directly with `cancel_heartbeat` so a revert to the pre-fix
-	// no-op heartbeat fails immediately.
+	// walker APIs directly with the host heartbeat so a revert to a no-op
+	// heartbeat fails immediately.
 
 	#[test]
 	fn cancel_heartbeat_aborts_collect_with_heartbeat() {
-		// Covers the fallback path's walker call: without `cancel_heartbeat`,
+		// Covers the fallback path's walker call: without the cancel heartbeat,
 		// `collect_with_heartbeat` returns `Ok(outcome)` even after
 		// cancellation and the fd builtin drains the whole tree before
 		// observing the flag — the exact bug #3949 reports.
 		let tree = seeded_tree("collect");
-		let cancelled = AtomicBool::new(true);
+		let host = cancelled_host(tree.path());
 		let err = walk_request(tree.path())
-			.collect_with_heartbeat(cancel_heartbeat(&cancelled))
+			.collect_with_heartbeat(host.cancel_heartbeat())
 			.expect_err("walker must surface the cancel flag as an error");
 		assert!(
 			matches!(err, pi_walker::WalkError::Interrupted(_)),
@@ -1640,10 +1624,10 @@ mod tests {
 		// must never see any entry (proving the abort happened at the
 		// heartbeat, not after entries were already delivered).
 		let tree = seeded_tree("stream");
-		let cancelled = AtomicBool::new(true);
+		let host = cancelled_host(tree.path());
 		let visited = std::cell::Cell::new(0_usize);
 		let result = walk_request(tree.path()).for_each_entry_with_heartbeat(
-			cancel_heartbeat(&cancelled),
+			host.cancel_heartbeat(),
 			|_entry| {
 				visited.set(visited.get() + 1);
 				Ok::<_, std::io::Error>(pi_walker::WalkDecision::Include)

@@ -17,6 +17,7 @@ target/
 
 # Environment
 .env
+.venv
 
 # Editors
 .vscode/
@@ -65,8 +66,8 @@ pi-*.html
 packages/coding-agent/src/export/html/tool-views.generated.js
 packages/natives/npm/
 /runs/
-python/omp-rpc/src/omp_rpc.egg-info/
-python/omp-rpc/build/
+sdk/python/omp-rpc/src/omp_rpc.egg-info/
+sdk/python/omp-rpc/build/
 # parallel-agent worktrees
 .wt/
 CPU*.md

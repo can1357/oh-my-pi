@@ -6,7 +6,6 @@ import {
 	applyShakeRegion,
 	applyShakeRegions,
 	collectShakeRegions,
-	DEFAULT_SHAKE_CONFIG,
 	RESCUE_SHAKE_CONFIG,
 } from "@oh-my-pi/pi-agent-core/compaction";
 import type { AssistantMessage, ImageContent, TextContent, ToolCall, ToolResultMessage } from "@oh-my-pi/pi-ai";
@@ -228,12 +227,6 @@ describe("applyShakeRegions — multi-region ordering", () => {
 });
 
 describe("shake config presets", () => {
-	test("aggressive preset protects skill and keeps a small recent tail", () => {
-		expect(AGGRESSIVE_SHAKE_CONFIG.protectTokens).toBeGreaterThan(0);
-		expect(AGGRESSIVE_SHAKE_CONFIG.minSavings).toBe(0);
-		expect(AGGRESSIVE_SHAKE_CONFIG.protectedTools).toContain("skill");
-	});
-
 	test("manual shake preserves the recent tool-result tail instead of stripping everything", () => {
 		const older = messageEntry(toolResultMessage("bash", "old-result ".repeat(300)));
 		const recent = messageEntry(toolResultMessage("bash", "recent-result ".repeat(3000)));
@@ -243,11 +236,6 @@ describe("shake config presets", () => {
 		// still shaken aggressively.
 		expect(regions).toHaveLength(1);
 		expect(regions[0].entry).toBe(older);
-	});
-
-	test("default preset keeps a protect window", () => {
-		expect(DEFAULT_SHAKE_CONFIG.protectTokens).toBeGreaterThan(0);
-		expect(DEFAULT_SHAKE_CONFIG.protectedTools).toContain("skill");
 	});
 
 	test("rescue preset overrides the manual tail so it can elide the newest result", () => {

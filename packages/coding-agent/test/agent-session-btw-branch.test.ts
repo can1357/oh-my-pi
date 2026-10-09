@@ -90,7 +90,7 @@ describe("AgentSession.branchFromBtw", () => {
 		const settings = Settings.isolated({ "compaction.enabled": false });
 		authStorage = await AuthStorage.create(":memory:");
 		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "models.yml"));
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		authStorage.keys.setRuntime("anthropic", "test-key");
 		session = new AgentSession({
 			agent,
 			sessionManager,
@@ -208,6 +208,7 @@ describe("AgentSession.branchFromBtw", () => {
 		expect(activeSession.sessionFile).toBe(originalFile);
 		expect(emit).toHaveBeenCalledWith({
 			type: "session_before_branch",
+			reason: "btw",
 			entryId: activeSession.sessionManager.getLeafId(),
 		});
 	});

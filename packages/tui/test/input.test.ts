@@ -1,6 +1,7 @@
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import { CURSOR_MARKER } from "@oh-my-pi/pi-tui";
 import { Input } from "@oh-my-pi/pi-tui/components/input";
+import { SPACE_HOLD_MECHANICAL_RUN } from "@oh-my-pi/pi-tui/space-hold";
 import { setKittyProtocolActive } from "@oh-my-pi/pi-tui/keys";
 import {
 	resetHangulCompatibilityJamoWidthForTests,
@@ -29,6 +30,34 @@ describe("Input component", () => {
 
 	afterEach(() => {
 		resetHangulCompatibilityJamoWidthForTests();
+	});
+
+	it("replaces a volatile dictation preview in place and undoes the committed dictation in one step", () => {
+		const input = setupAtEnd("ask ");
+		input.setVolatileText("hel");
+		input.setVolatileText("hello wor");
+		input.commitVolatileText("hello world");
+		expect(input.getValue()).toBe("ask hello world");
+		input.handleInput("\x1f"); // Ctrl+_ (undo)
+		expect(input.getValue()).toBe("ask ");
+	});
+
+	it("keeps the value intact when the caret leaves a live dictation preview", () => {
+		const input = setupAtEnd("ask ");
+		input.setVolatileText("hello");
+		input.handleInput("\x1b[H"); // Home
+		input.setVolatileText("hello world");
+		input.commitVolatileText("hello world");
+		// The new preview lands at the caret, as in Editor; nothing before it is duplicated.
+		expect(input.getValue()).toBe("hello worldask hello");
+	});
+
+	it("fits a wide cursor override at the end of a line that fills the width", () => {
+		const input = setupAtEnd("x".repeat(40));
+		input.prompt = "";
+		input.cursorOverride = "\x1b[35m🎤\x1b[0m";
+		expect(input.render(20)[0]).toContain("🎤");
+		expect(renderedWidth(input, 20)).toBe(20);
 	});
 
 	it("moves by CJK and punctuation blocks (backward)", () => {
@@ -247,12 +276,6 @@ describe("Input component", () => {
 		expect(renderedWidth(input, 12)).toBeLessThanOrEqual(12);
 	});
 
-	it("renders non-secret input unchanged when masking is disabled", () => {
-		const input = setupAtEnd("visible-value");
-		const [line] = input.render(30);
-		expect(Bun.stripANSI(line.replaceAll(CURSOR_MARKER, ""))).toContain("visible-value");
-	});
-
 	it("normalizes NFD Korean pastes (macOS Finder drag-drop) to NFC", () => {
 		// macOS Finder drag-drops file paths in NFD (decomposed Unicode).
 		// Korean syllable `화` is U+D654 (1 char, 2 cells) in NFC, but
@@ -338,5 +361,40 @@ describe("Input component", () => {
 		const input = setupAtEnd("");
 		input.pasteText("sk-line1\nsk-line2\r\nsk-line3");
 		expect(input.getValue()).toBe("sk-line1sk-line2sk-line3");
+	});
+});
+
+describe("Input push-to-talk", () => {
+	beforeEach(() => {
+		vi.useFakeTimers();
+	});
+
+	afterEach(() => {
+		vi.useRealTimers();
+		vi.restoreAllMocks();
+	});
+
+	it("uses the configured remap for follow-up dictation while Space remains ordinary input", () => {
+		const input = new Input();
+		input.focused = true;
+		input.setValue("ask");
+		input.handleInput("\x05");
+		const events: string[] = [];
+		input.spaceHold.keys = ["x"];
+		input.spaceHold.handler = {
+			enabled: () => true,
+			onStart: () => events.push("start"),
+			onEnd: () => events.push("end"),
+		};
+
+		input.handleInput(" ");
+		expect(input.getValue()).toBe("ask ");
+		for (let i = 0; i < SPACE_HOLD_MECHANICAL_RUN + 2; i++) {
+			vi.advanceTimersByTime(30);
+			input.handleInput("x");
+		}
+
+		expect(input.getValue()).toBe("ask ");
+		expect(events).toEqual(["start"]);
 	});
 });

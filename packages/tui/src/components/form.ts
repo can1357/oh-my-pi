@@ -1,6 +1,10 @@
 import { getKeybindings } from "../keybindings";
 import { matchesKey } from "../keys";
 import type { MouseRoutable, SgrMouseEvent } from "../mouse";
+import { col, node, span } from "../native/describe";
+import { plainText } from "../native/spans";
+import type { DescribeContext, NativeChild, NativeNode, NativeUiEvent } from "../native/node";
+import { type SelectPickerOptions, SelectListSheet } from "../native/picker";
 import { Container, type Component, type Focusable } from "../tui";
 import { replaceTabs, truncateToWidth } from "../utils";
 import { Input } from "./input";
@@ -48,10 +52,13 @@ function hasMouseRouter(component: FormControl): component is FormControl & Mous
 class StyledText implements Component {
 	readonly #text: Text;
 	#value: string;
+	#native: NativeNode | undefined;
 
 	constructor(
 		value: string,
 		private readonly style: (text: string) => string,
+		/** Span token standing in for `style` on a TSP terminal. */
+		private readonly token?: string,
 	) {
 		this.#value = value;
 		this.#text = new Text(this.style(value), 0, 0);
@@ -60,7 +67,13 @@ class StyledText implements Component {
 	setText(value: string): void {
 		if (value === this.#value) return;
 		this.#value = value;
+		this.#native = undefined;
 		this.#text.setText(this.style(value));
+	}
+
+	describe(_cx: DescribeContext): NativeNode {
+		this.#native ??= node("text", { spans: [span(plainText(this.#value), this.token)] });
+		return this.#native;
 	}
 
 	render(width: number): readonly string[] {
@@ -77,9 +90,14 @@ class OptionalText implements Component {
 	readonly #text: StyledText;
 	#value = "";
 	readonly #empty: readonly string[] = [];
+	readonly #hidden = node("text", { text: "", hidden: true });
 
-	constructor(style: (text: string) => string) {
-		this.#text = new StyledText("", style);
+	constructor(style: (text: string) => string, token?: string) {
+		this.#text = new StyledText("", style, token);
+	}
+
+	describe(cx: DescribeContext): NativeNode {
+		return this.#value ? this.#text.describe(cx) : this.#hidden;
 	}
 
 	setText(value: string): void {
@@ -114,37 +132,67 @@ export class FormField implements Component, Focusable, MouseRoutable {
 	#memoControl: readonly string[] | undefined;
 	#memoAfter: readonly string[] | undefined;
 	#memoLines: readonly string[] = [];
+	/** Fixed described structure: every child is a component or a static node, so it never changes. */
+	readonly #native: NativeNode;
 
 	constructor(control: FormControl, options: FormFieldOptions) {
 		this.control = control;
-		this.#error = new OptionalText(options.theme.error);
+		this.#error = new OptionalText(options.theme.error, "error");
+		// Spacing is the terminal's (`gap`); only content becomes native children.
+		const native: NativeChild[] = [];
 
 		if (options.leadingSpace) this.#beforeControl.addChild(new Spacer(1));
 		if (options.label) {
-			this.#beforeControl.addChild(new StyledText(options.label, options.theme.label));
+			const label = new StyledText(options.label, options.theme.label, "strong");
+			this.#beforeControl.addChild(label);
+			native.push(label);
 		}
 		if (options.description) {
 			if (options.label) this.#beforeControl.addChild(new Spacer(1));
-			this.#beforeControl.addChild(new StyledText(options.description, options.theme.description));
+			const description = new StyledText(options.description, options.theme.description, "muted");
+			this.#beforeControl.addChild(description);
+			native.push(description);
 		}
-		for (const detail of options.details ?? []) this.#beforeControl.addChild(detail);
+		for (const detail of options.details ?? []) {
+			this.#beforeControl.addChild(detail);
+			native.push(detail);
+		}
 		if (options.preview) {
 			this.#beforeControl.addChild(new Spacer(1));
 			if (options.previewLabel) {
-				this.#beforeControl.addChild(new StyledText(options.previewLabel, options.theme.description));
+				const previewLabel = new StyledText(options.previewLabel, options.theme.description, "muted");
+				this.#beforeControl.addChild(previewLabel);
+				native.push(previewLabel);
 			}
 			this.#beforeControl.addChild(options.preview);
+			native.push(options.preview);
 		}
 		if (options.spaceBeforeControl !== false) this.#beforeControl.addChild(new Spacer(1));
+		native.push(control);
 
 		if (options.spaceAfterControl !== false) this.#afterControl.addChild(new Spacer(1));
 		this.#afterControl.addChild(this.#error);
-		for (const summary of options.summary ?? []) this.#afterControl.addChild(summary);
-		if (options.hint) this.#afterControl.addChild(new StyledText(options.hint, options.theme.hint));
+		native.push(this.#error);
+		for (const summary of options.summary ?? []) {
+			this.#afterControl.addChild(summary);
+			native.push(summary);
+		}
+		if (options.hint) {
+			const hint = new StyledText(options.hint, options.theme.hint, "muted");
+			this.#afterControl.addChild(hint);
+			native.push(hint);
+		}
 		if (options.footer) {
 			this.#afterControl.addChild(new Spacer(1));
 			this.#afterControl.addChild(options.footer);
+			native.push(options.footer);
 		}
+		this.#native = col(native, { gap: "sm", role: "omp.form.field" });
+	}
+
+	/** Label, description, details, preview, the control, error, summary, hint and footer as one column. */
+	describe(_cx: DescribeContext): NativeNode {
+		return this.#native;
 	}
 
 	get focused(): boolean {
@@ -346,7 +394,12 @@ export interface SelectFormFieldOptions extends Omit<FormFieldOptions, "preview"
 	onCancel(): void;
 	/** Schedule a frame after an asynchronous preview update settles. */
 	requestRender?: () => void;
+	/** The picker sheet a long choice (> {@link PICKER_MIN_ITEMS} items) describes as; defaults to the label. */
+	picker?: SelectPickerOptions;
 }
+
+/** Choices longer than this describe as a `picker md` sheet where the terminal draws one (spec §5 controls). */
+const PICKER_MIN_ITEMS = 12;
 
 /** SelectList field that centralizes selection, cancellation, preview refresh, and mouse routing. */
 export class SelectFormField extends FormField {
@@ -354,6 +407,9 @@ export class SelectFormField extends FormField {
 	readonly #previewText: StyledText | undefined;
 	readonly #getPreview: (() => string) | undefined;
 	readonly #requestRender: (() => void) | undefined;
+	readonly #sheet: SelectListSheet;
+	/** Number of choices (before filtering). */
+	readonly itemCount: number;
 	#previewRequestId = 0;
 
 	constructor(options: SelectFormFieldOptions) {
@@ -375,6 +431,16 @@ export class SelectFormField extends FormField {
 		this.#previewText = previewText;
 		this.#getPreview = options.getPreview;
 		this.#requestRender = options.requestRender;
+		this.itemCount = options.items.length;
+		this.#sheet = new SelectListSheet(
+			selectList,
+			options.picker ?? {
+				title: options.label ?? "Select",
+				...(options.description ? { subtitle: options.description } : {}),
+				searchable: true,
+			},
+			{ docked: false },
+		);
 
 		selectList.onSelect = item => {
 			try {
@@ -420,7 +486,18 @@ export class SelectFormField extends FormField {
 
 	override invalidate(): void {
 		this.#updatePreview();
+		this.#sheet.invalidate();
 		super.invalidate();
+	}
+
+	/** Long choices describe as a picker sheet where supported; the host places it (layer or prefs editor). */
+	override describe(cx: DescribeContext): NativeNode {
+		return this.itemCount > PICKER_MIN_ITEMS && cx.supports("picker") ? this.#sheet.describe() : super.describe(cx);
+	}
+
+	/** Picker pointer events drive the list as its keys do (preview, pick, cancel). */
+	handleNativeEvent(event: NativeUiEvent): void {
+		this.#sheet.handle(event);
 	}
 
 	#finishPreview(requestId: number): void {
@@ -467,11 +544,18 @@ export class Form implements Component, Focusable, MouseRoutable {
 	#memoWidth = -1;
 	#memoFieldLines: (readonly string[])[] = [];
 	#memoLines: readonly string[] = [];
+	readonly #native: NativeNode;
 
 	constructor(options: FormOptions) {
 		this.#options = options;
 		this.#fields = options.fields;
+		this.#native = col(this.#fields, { gap: "md", role: "omp.form" });
 		this.#syncFocus();
+	}
+
+	/** The fields as one column; focus traversal stays keyboard-driven. */
+	describe(_cx: DescribeContext): NativeNode {
+		return this.#native;
 	}
 
 	get focused(): boolean {

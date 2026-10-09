@@ -36,7 +36,11 @@ impl Compressor {
 		stdout: impl Into<Stdio>,
 		decompress: bool,
 	) -> SortResult<(Child, thread::JoinHandle<()>)> {
-		let mut command = self.env.command(&self.prog);
+		let mut command = self.env.command(&self.prog)
+			.map_err(|error| SortError::CompressProgExecutionFailed {
+				prog: self.prog.clone(),
+				error,
+			})?;
 		command.stdin(stdin).stdout(stdout);
 		if decompress {
 			command.arg("-d");
@@ -61,11 +65,13 @@ mod buffer_hint {
 // file that was distributed with this source code.
 
 //! Heuristics for determining buffer size for external sorting.
-use std::ffi::OsString;
+use std::{ffi::OsString, path::Path};
+
+use pi_vfs::BlockingFs;
 
 // Heuristics to size the external sort buffer without overcommit memory.
-pub(crate) fn automatic_buffer_size(files: &[OsString]) -> usize {
-	let file_hint = file_size_hint(files);
+pub(crate) fn automatic_buffer_size(fs: &BlockingFs, files: &[OsString]) -> usize {
+	let file_hint = file_size_hint(fs, files);
 	let mem_hint = available_memory_hint();
 
 	// Prefer the tighter bound when both hints exist, otherwise fall back to
@@ -78,7 +84,7 @@ pub(crate) fn automatic_buffer_size(files: &[OsString]) -> usize {
 	}
 }
 
-fn file_size_hint(files: &[OsString]) -> Option<usize> {
+fn file_size_hint(fs: &BlockingFs, files: &[OsString]) -> Option<usize> {
 	// Estimate total bytes across real files; non-regular inputs are skipped.
 	let mut total_bytes: u128 = 0;
 
@@ -87,7 +93,7 @@ fn file_size_hint(files: &[OsString]) -> Option<usize> {
 			continue;
 		}
 
-		let Ok(metadata) = std::fs::metadata(file) else {
+		let Ok(metadata) = fs.metadata(Path::new(file)) else {
 			continue;
 		};
 
@@ -218,6 +224,7 @@ use std::{cmp::Ordering, ffi::OsStr, io::Read, iter, thread};
 
 use flume::{Receiver, Sender};
 use itertools::Itertools;
+use pi_vfs::BlockingFs;
 
 use super::{
 	AtomicOrdering, GlobalSettings, SortError, SortResult,
@@ -230,7 +237,7 @@ use super::{
 /// # Returns
 ///
 /// The code we should exit with.
-pub fn check(path: &OsStr, settings: &GlobalSettings) -> SortResult<()> {
+pub fn check(fs: &BlockingFs, path: &OsStr, settings: &GlobalSettings) -> SortResult<()> {
 	let max_allowed_cmp = if settings.unique {
 		// If `unique` is enabled, the previous line must compare _less_ to the next
 		// one.
@@ -240,7 +247,7 @@ pub fn check(path: &OsStr, settings: &GlobalSettings) -> SortResult<()> {
 		// one.
 		Ordering::Equal
 	};
-	let file = open(path)?;
+	let file = open(fs, path)?;
 	let (recycled_sender, recycled_receiver) = flume::bounded(2);
 	let (loaded_sender, loaded_receiver) = flume::bounded(2);
 	thread::spawn({
@@ -919,9 +926,7 @@ mod threaded {
 
 use std::{
 	cmp::Ordering,
-	fs::File,
 	io::{Read, Write},
-	path::PathBuf,
 	thread,
 };
 
@@ -934,7 +939,7 @@ use super::super::{
 	compare_by, merge,
 	merge::{WriteableCompressedTmpFile, WriteablePlainTmpFile, WriteableTmpFile},
 	print_sorted, sort_by, strip_errno,
-	tmp_dir::TmpDirWrapper,
+	tmp_dir::{TmpDirWrapper, TmpFile},
 	AtomicOrdering,
 };
 
@@ -969,12 +974,14 @@ pub fn ext_sort(
 	// compressor installed only for the shell would be wrongly rejected.
 	let mut effective_settings = settings.clone();
 	if let Some(compress) = &settings.compress {
-		let mut probe = compress.env.command(&compress.prog);
-		probe
-			.stdin(std::process::Stdio::null())
-			.stdout(std::process::Stdio::null())
-			.stderr(std::process::Stdio::null());
-		match probe.spawn() {
+		let probe = compress.env.command(&compress.prog).and_then(|mut probe| {
+			probe
+				.stdin(std::process::Stdio::null())
+				.stdout(std::process::Stdio::null())
+				.stderr(std::process::Stdio::null())
+				.spawn()
+		});
+		match probe {
 			Ok(mut child) => {
 				// Kill the test process immediately
 				let _ = child.kill();
@@ -1214,7 +1221,7 @@ fn read_write_loop<I: WriteableTmpFile>(
 /// `compress` optionally pipes file contents through `--compress-program`.
 fn write<I: WriteableTmpFile>(
 	chunk: &Chunk,
-	file: (File, PathBuf),
+	file: TmpFile,
 	compress: Option<&Compressor>,
 	separator: u8,
 ) -> SortResult<I::Closed> {
@@ -1233,6 +1240,8 @@ fn write_lines<T: Write>(lines: &[Line], writer: &mut T, separator: u8) {
 #[cfg(test)]
 mod tests {
 	use std::io::{Cursor, Read};
+
+	use pi_vfs::BlockingFs;
 
 	use super::*;
 
@@ -1253,8 +1262,9 @@ mod tests {
 
 		let mut files =
 			std::iter::once(Ok(Box::new(Cursor::new(input.into_bytes())) as Box<dyn Read + Send>));
-		let output = Output::new(Some(out_path.as_os_str()), None).expect("open output");
-		let mut tmp_dir = TmpDirWrapper::new(std::env::temp_dir());
+		let fs = BlockingFs::native();
+		let output = Output::new(&fs, Some(out_path.as_os_str()), None).expect("open output");
+		let mut tmp_dir = TmpDirWrapper::new(fs, std::env::temp_dir());
 
 		ext_sort(
 			&mut files,
@@ -1362,8 +1372,7 @@ mod merge {
 use std::{
 	cmp::Ordering,
 	ffi::{OsStr, OsString},
-	fs::{self, File},
-	io::{BufWriter, Read, Write},
+	io::{self, BufWriter, Read, Write},
 	iter,
 	path::{Path, PathBuf},
 	process::{Child, ChildStdin, ChildStdout, Stdio},
@@ -1373,32 +1382,36 @@ use std::{
 
 use compare::Compare;
 use flume::{Receiver, Sender};
+use pi_vfs::{BlockingFs, File};
 
 use super::{
 	AtomicOrdering, Compressor, GlobalSettings, Output, SortError, SortResult,
 	chunks::{self, Chunk, RecycledChunk},
-	compare_by, current_open_fd_count, fd_soft_limit, open,
-	tmp_dir::TmpDirWrapper,
+	StdinOperand, compare_by, current_open_fd_count, fd_soft_limit, open_operand,
+	tmp_dir::{TmpDirWrapper, TmpFile},
 };
 
 /// If the output file occurs in the input files as well, copy the contents of
 /// the output file and replace its occurrences in the inputs with that copy.
 fn replace_output_file_in_input_files(
+	fs: &BlockingFs,
 	files: &mut [OsString],
 	output: Option<&OsStr>,
 	tmp_dir: &mut TmpDirWrapper,
 ) -> SortResult<()> {
 	let mut copy: Option<PathBuf> = None;
-	if let Some(Ok(output_path)) = output.map(|path| Path::new(path).canonicalize()) {
-		for file in files {
-			if let Ok(file_path) = Path::new(file.as_os_str()).canonicalize()
+	if let Some(Ok(output_path)) = output.map(|path| fs.canonicalize(Path::new(path))) {
+		for file in files.iter_mut().filter(|file| *file != super::STDIN_FILE) {
+			if let Ok(file_path) = fs.canonicalize(Path::new(file.as_os_str()))
 				&& file_path == output_path
 			{
 				if let Some(copy) = &copy {
 					*file = copy.clone().into_os_string();
 				} else {
-					let (_file, copy_path) = tmp_dir.next_file()?;
-					fs::copy(file_path, &copy_path)
+					let TmpFile { file: mut temp, path: copy_path, .. } = tmp_dir.next_file()?;
+					fs.open(&file_path)
+						.and_then(|mut source| io::copy(&mut source, &mut temp))
+						.and_then(|_| temp.close())
 						.map_err(|error| SortError::OpenTmpFileFailed { error })?;
 					*file = copy_path.clone().into_os_string();
 					copy = Some(copy_path);
@@ -1443,15 +1456,17 @@ fn effective_merge_batch_size(settings: &GlobalSettings) -> usize {
 /// intermediate files will be used. If `settings.compress` is `Some`,
 /// intermediate files will be compressed with it.
 pub fn merge(
+	fs: &BlockingFs,
+	stdin: &StdinOperand,
 	files: &mut [OsString],
 	settings: &GlobalSettings,
 	output: Output,
 	tmp_dir: &mut TmpDirWrapper,
 ) -> SortResult<()> {
-	replace_output_file_in_input_files(files, output.as_output_name(), tmp_dir)?;
+	replace_output_file_in_input_files(fs, files, output.as_output_name(), tmp_dir)?;
 	let files = files
 		.iter()
-		.map(|file| open(file).map(|file| PlainMergeInput { inner: file }));
+		.map(|file| open_operand(fs, stdin, file).map(|file| PlainMergeInput { inner: file }));
 	if settings.compress.is_none() {
 		merge_with_file_limit::<_, _, WriteablePlainTmpFile>(files, settings, output, tmp_dir)
 	} else {
@@ -1636,8 +1651,13 @@ struct FileMerger<'a> {
 impl FileMerger<'_> {
 	/// Write the merged contents to the output file.
 	fn write_all(self, settings: &GlobalSettings, output: Output) -> SortResult<()> {
-		let mut out = output.into_write();
-		self.write_all_to(settings, &mut out)
+		let output_name = output.display_name();
+		let mut out = output
+			.into_write()
+			.map_err(|error| SortError::WriteFailed { path: output_name.clone(), error })?;
+		self.write_all_to(settings, &mut out)?;
+		super::OutputSink::finish(out)
+			.map_err(|error| SortError::WriteFailed { path: output_name, error })
 	}
 
 	fn write_all_to(mut self, settings: &GlobalSettings, out: &mut impl Write) -> SortResult<()> {
@@ -1752,7 +1772,7 @@ fn check_child_success(mut child: Child, program: &str) -> SortResult<()> {
 pub trait WriteableTmpFile: Sized {
 	type Closed: ClosedTmpFile;
 	type InnerWrite: Write;
-	fn create(file: (File, PathBuf), compress: Option<&Compressor>) -> SortResult<Self>;
+	fn create(file: TmpFile, compress: Option<&Compressor>) -> SortResult<Self>;
 	/// Closes the temporary file.
 	fn finished_writing(self) -> SortResult<Self::Closed>;
 	fn as_write(&mut self) -> &mut Self::InnerWrite;
@@ -1774,25 +1794,38 @@ pub trait MergeInput: Send {
 
 pub struct WriteablePlainTmpFile {
 	path: PathBuf,
+	fs:   BlockingFs,
 	file: BufWriter<File>,
 }
 pub struct ClosedPlainTmpFile {
 	path: PathBuf,
+	fs:   BlockingFs,
 }
 pub struct PlainTmpMergeInput {
 	path: PathBuf,
+	fs:   BlockingFs,
 	file: File,
 }
 impl WriteableTmpFile for WriteablePlainTmpFile {
 	type Closed = ClosedPlainTmpFile;
 	type InnerWrite = BufWriter<File>;
 
-	fn create((file, path): (File, PathBuf), _: Option<&Compressor>) -> SortResult<Self> {
-		Ok(Self { file: BufWriter::new(file), path })
+	fn create(TmpFile { file, path, fs }: TmpFile, _: Option<&Compressor>) -> SortResult<Self> {
+		Ok(Self { file: BufWriter::new(file), path, fs })
 	}
 
 	fn finished_writing(self) -> SortResult<Self::Closed> {
-		Ok(ClosedPlainTmpFile { path: self.path })
+		// Flush and close now: a filesystem may report write errors only on
+		// close, and the file is reopened for reading later.
+		self.file
+			.into_inner()
+			.map_err(io::IntoInnerError::into_error)
+			.and_then(File::close)
+			.map_err(|error| SortError::WriteFailed {
+				path:  self.path.clone().into_os_string(),
+				error,
+			})?;
+		Ok(ClosedPlainTmpFile { path: self.path, fs: self.fs })
 	}
 
 	fn as_write(&mut self) -> &mut Self::InnerWrite {
@@ -1804,8 +1837,12 @@ impl ClosedTmpFile for ClosedPlainTmpFile {
 
 	fn reopen(self) -> SortResult<Self::Reopened> {
 		Ok(PlainTmpMergeInput {
-			file: File::open(&self.path).map_err(|error| SortError::OpenTmpFileFailed { error })?,
+			file: self
+				.fs
+				.open(&self.path)
+				.map_err(|error| SortError::OpenTmpFileFailed { error })?,
 			path: self.path,
+			fs:   self.fs,
 		})
 	}
 }
@@ -1816,7 +1853,10 @@ impl MergeInput for PlainTmpMergeInput {
 		// we ignore failures to delete the temporary file,
 		// because there is a race at the end of the execution and the whole
 		// temporary directory might already be gone.
-		let _ = fs::remove_file(self.path);
+		// Close before unlinking so the provider has released the handle;
+		// removal must still happen after cancellation.
+		let _ = self.file.close();
+		let _ = self.fs.for_cleanup().remove_file(&self.path);
 		Ok(())
 	}
 
@@ -1825,42 +1865,83 @@ impl MergeInput for PlainTmpMergeInput {
 	}
 }
 
+/// Copies bytes between a compressor pipe and a temporary file that has no
+/// host descriptor to hand the compressor directly.
+struct Pump(thread::JoinHandle<io::Result<()>>);
+
+impl Pump {
+	fn spawn(copy: impl FnOnce() -> io::Result<()> + Send + 'static) -> Self {
+		Self(thread::spawn(copy))
+	}
+
+	fn join(self) -> io::Result<()> {
+		self.0
+			.join()
+			.unwrap_or_else(|_| Err(io::Error::other("temporary file copy thread panicked")))
+	}
+}
+
 pub struct WriteableCompressedTmpFile {
 	path:        PathBuf,
+	fs:          BlockingFs,
 	compress:    Compressor,
 	child:       Child,
 	child_stdin: BufWriter<ChildStdin>,
 	/// Drains the compressor's stderr onto the command's; joined once the child
 	/// has exited so its diagnostics land before we report a result.
 	forwarder:   thread::JoinHandle<()>,
+	/// Copies compressor output into a temporary file without a host
+	/// descriptor; `None` when the compressor writes the file directly.
+	pump:        Option<Pump>,
 }
 pub struct ClosedCompressedTmpFile {
 	path:     PathBuf,
+	fs:       BlockingFs,
 	compress: Compressor,
 }
 pub struct CompressedTmpMergeInput {
 	path:         PathBuf,
+	fs:           BlockingFs,
 	compress:     Compressor,
 	child:        Child,
 	child_stdout: ChildStdout,
 	forwarder:    thread::JoinHandle<()>,
+	/// Feeds a temporary file without a host descriptor to the decompressor;
+	/// `None` when the decompressor reads the file directly.
+	pump:         Option<Pump>,
 }
 impl WriteableTmpFile for WriteableCompressedTmpFile {
 	type Closed = ClosedCompressedTmpFile;
 	type InnerWrite = BufWriter<ChildStdin>;
 
-	fn create((file, path): (File, PathBuf), compress: Option<&Compressor>) -> SortResult<Self> {
+	fn create(TmpFile { file, path, fs }: TmpFile, compress: Option<&Compressor>) -> SortResult<Self> {
 		let compress = compress
 			.expect("WriteableCompressedTmpFile is only selected when a compressor is configured")
 			.clone();
-		let (mut child, forwarder) = compress.spawn(Stdio::piped(), file, false)?;
+		let (mut child, forwarder, pump) = match file.into_native() {
+			Ok(native) => {
+				let (child, forwarder) = compress.spawn(Stdio::piped(), native, false)?;
+				(child, forwarder, None)
+			},
+			Err(mut file) => {
+				let (mut child, forwarder) = compress.spawn(Stdio::piped(), Stdio::piped(), false)?;
+				let mut child_stdout = child.stdout.take().expect("compressor stdout is piped");
+				let pump = Pump::spawn(move || {
+					io::copy(&mut child_stdout, &mut file)?;
+					file.close()
+				});
+				(child, forwarder, Some(pump))
+			},
+		};
 		let child_stdin = child.stdin.take().expect("compressor stdin is piped");
 		Ok(Self {
 			path,
+			fs,
 			compress,
 			child,
 			child_stdin: BufWriter::new(child_stdin),
 			forwarder,
+			pump,
 		})
 	}
 
@@ -1868,8 +1949,13 @@ impl WriteableTmpFile for WriteableCompressedTmpFile {
 		drop(self.child_stdin);
 		let result = check_child_success(self.child, &self.compress.prog);
 		let _ = self.forwarder.join();
+		let copied = self.pump.map_or(Ok(()), Pump::join);
 		result?;
-		Ok(ClosedCompressedTmpFile { path: self.path, compress: self.compress })
+		copied.map_err(|error| SortError::WriteFailed {
+			path: self.path.clone().into_os_string(),
+			error,
+		})?;
+		Ok(ClosedCompressedTmpFile { path: self.path, fs: self.fs, compress: self.compress })
 	}
 
 	fn as_write(&mut self) -> &mut Self::InnerWrite {
@@ -1881,15 +1967,39 @@ impl ClosedTmpFile for ClosedCompressedTmpFile {
 
 	fn reopen(self) -> SortResult<Self::Reopened> {
 		// mirroring what is done for ClosedPlainTmpFile
-		let file = File::open(&self.path).map_err(|error| SortError::OpenTmpFileFailed { error })?;
-		let (mut child, forwarder) = self.compress.spawn(file, Stdio::piped(), true)?;
+		let file = self
+			.fs
+			.open(&self.path)
+			.map_err(|error| SortError::OpenTmpFileFailed { error })?;
+		let (mut child, forwarder, pump) = match file.into_native() {
+			Ok(native) => {
+				let (child, forwarder) = self.compress.spawn(native, Stdio::piped(), true)?;
+				(child, forwarder, None)
+			},
+			Err(mut file) => {
+				let (mut child, forwarder) =
+					self.compress.spawn(Stdio::piped(), Stdio::piped(), true)?;
+				let mut child_stdin = child.stdin.take().expect("decompressor stdin is piped");
+				let pump = Pump::spawn(move || {
+					match io::copy(&mut file, &mut child_stdin) {
+						// A decompressor may stop reading once its stream ends;
+						// its exit status reports whether that was an error.
+						Err(error) if error.kind() == io::ErrorKind::BrokenPipe => Ok(()),
+						result => result.map(drop),
+					}
+				});
+				(child, forwarder, Some(pump))
+			},
+		};
 		let child_stdout = child.stdout.take().expect("compressor stdout is piped");
 		Ok(CompressedTmpMergeInput {
 			path: self.path,
+			fs: self.fs,
 			compress: self.compress,
 			child,
 			child_stdout,
 			forwarder,
+			pump,
 		})
 	}
 }
@@ -1902,8 +2012,10 @@ impl MergeInput for CompressedTmpMergeInput {
 		drop(self.child_stdout);
 		let result = check_child_success(self.child, &self.compress.prog);
 		let _ = self.forwarder.join();
+		let copied = self.pump.map_or(Ok(()), Pump::join);
 		result?;
-		let _ = fs::remove_file(self.path);
+		copied.map_err(|error| SortError::ReadFailed { path: self.path.clone(), error })?;
+		let _ = self.fs.for_cleanup().remove_file(&self.path);
 		Ok(())
 	}
 
@@ -2359,71 +2471,92 @@ mod tmp_dir {
 // For the full copyright and license information, please view the LICENSE
 // file that was distributed with this source code.
 
-use std::{fs::File, path::PathBuf};
+use std::path::{Path, PathBuf};
 
-use tempfile::TempDir;
+use pi_vfs::{BlockingFs, File, OpenOptions, TempOptions};
 
 use super::{SortError, SortResult};
 
-/// A wrapper around [`TempDir`] that handles the allocation of new temporary
-/// files in the temporary directory.
+/// A freshly created temporary file, with the filesystem that holds it.
+pub struct TmpFile {
+	pub file: File,
+	pub path: PathBuf,
+	pub fs:   BlockingFs,
+}
+
+/// A private temporary directory on the shell's filesystem that hands out new
+/// temporary files.
 ///
-/// The directory is only created once the first file is requested. Cleanup
-/// happens automatically when the [`TempDir`] is dropped.
+/// The directory is only created once the first file is requested. It and
+/// everything in it are removed when the wrapper is dropped.
 ///
-/// The host owns signal handling; `TempDir` cleanup remains scoped to this
-/// invocation through its `Drop` implementation.
+/// The host owns signal handling; cleanup remains scoped to this invocation
+/// through the `Drop` implementation.
 pub struct TmpDirWrapper {
-	temp_dir:    Option<TempDir>,
+	fs:          BlockingFs,
+	temp_dir:    Option<PathBuf>,
 	parent_path: PathBuf,
 	size:        usize,
 }
 
 impl TmpDirWrapper {
-	pub fn new(path: PathBuf) -> Self {
-		Self { parent_path: path, size: 0, temp_dir: None }
+	pub fn new(fs: BlockingFs, path: PathBuf) -> Self {
+		Self { fs, parent_path: path, size: 0, temp_dir: None }
 	}
 
 	fn init_tmp_dir(&mut self) -> SortResult<()> {
 		assert!(self.temp_dir.is_none());
 		assert_eq!(self.size, 0);
-		self.temp_dir = Some(
-			tempfile::Builder::new()
-				.prefix("uutils_sort")
-				.tempdir_in(&self.parent_path)
-				.map_err(|_| SortError::TmpFileCreationFailed { path: self.parent_path.clone() })?,
-		);
+		let dir = self
+			.fs
+			.create_temp_dir(&self.parent_path, &TempOptions::new().prefix("uutils_sort"))
+			.map_err(|_| SortError::TmpFileCreationFailed { path: self.parent_path.clone() })?;
+		self.temp_dir = Some(dir);
 		Ok(())
 	}
 
-	pub fn next_file(&mut self) -> SortResult<(File, PathBuf)> {
+	pub fn next_file(&mut self) -> SortResult<TmpFile> {
 		if self.temp_dir.is_none() {
 			self.init_tmp_dir()?;
 		}
-
-		let file_name = self.size.to_string();
+		let dir = self.temp_dir.as_deref().expect("temporary directory was created");
+		let path = pi_vfs::join_path(dir, Path::new(&self.size.to_string()));
+		let file = self
+			.fs
+			.open_with(&path, OpenOptions::new().write(true).create_new(true))
+			.map_err(|error| SortError::OpenTmpFileFailed { error })?;
 		self.size += 1;
-		let path = self.temp_dir.as_ref().unwrap().path().join(file_name);
-		Ok((File::create(&path).map_err(|error| SortError::OpenTmpFileFailed { error })?, path))
+		Ok(TmpFile { file, path, fs: self.fs.clone() })
+	}
+}
+
+impl Drop for TmpDirWrapper {
+	fn drop(&mut self) {
+		if let Some(dir) = &self.temp_dir {
+			// Best-effort cleanup, as `tempfile::TempDir` does on drop. The
+			// operation filesystem may already be cancelled; cleanup is not.
+			let filesystem = self.fs.for_cleanup();
+			let _ = filesystem.drain_closes();
+			let _ = filesystem.remove_dir_all(dir);
+		}
 	}
 }
 
 }
 
-#[cfg(not(target_os = "wasi"))]
-use std::num::NonZero;
 #[cfg(unix)]
 use std::os::unix::ffi::OsStrExt;
+#[cfg(not(target_os = "wasi"))]
+use std::num::NonZero;
 use std::{
 	cmp::Ordering,
 	ffi::{OsStr, OsString},
-	fs::{File, OpenOptions},
 	hash::{Hash, Hasher},
 	io::{BufRead, BufReader, BufWriter, Read, Write},
 	num::IntErrorKind,
 	ops::Range,
 	path::{Path, PathBuf},
-	sync::{Arc, OnceLock, atomic::{AtomicBool, Ordering as AtomicOrdering}},
+	sync::{Arc, LazyLock, OnceLock, atomic::{AtomicBool, Ordering as AtomicOrdering}},
 };
 
 use bigdecimal::BigDecimal;
@@ -2433,17 +2566,24 @@ use clap::{Arg, ArgAction, ArgMatches, Command, CommandFactory, FromArgMatches, 
 use custom_str_cmp::custom_str_cmp;
 use ext_sort::ext_sort;
 use foldhash::{HashMap, SharedSeed, fast::FoldHasher};
+use icu_collator::{
+	CollatorBorrowed,
+	options::{AlternateHandling, CollatorOptions, Strength},
+};
+use icu_decimal::provider::{Baked, DecimalSymbolsV1};
+use icu_locale_core::Locale;
+use icu_provider::{DataIdentifierBorrowed, DataLocale, DataProvider, DataRequest};
 use numeric_str_cmp::{NumInfo, NumInfoParseSettings, human_numeric_str_cmp, numeric_str_cmp};
+use parking_lot::Mutex;
+use pi_vfs::{BlockingFs, File, OpenOptions};
 use rand::{RngExt as _, rng};
 #[cfg(not(target_os = "wasi"))]
 use rayon::slice::ParallelSliceMut;
 use thiserror::Error;
-use uucore::i18n::collator::{compute_sort_key_utf8, locale_cmp};
 use uucore::{
 	display::Quotable,
 	extendedbigdecimal::ExtendedBigDecimal,
-	i18n,
-	i18n::{datetime::get_locale_months, decimal::locale_decimal_separator},
+	i18n::datetime::get_locale_months,
 	line_ending::LineEnding,
 	parser::{
 		num_parser::{ExtendedParser, ExtendedParserError},
@@ -2456,7 +2596,10 @@ use uucore::{
 
 use crate::{
 	host::{Host, Utility, format_usage, rayon_global_pool_available, util},
-	sort::{buffer_hint::automatic_buffer_size, tmp_dir::TmpDirWrapper},
+	sort::{
+		buffer_hint::automatic_buffer_size,
+		tmp_dir::{TmpDirWrapper, TmpFile},
+	},
 };
 
 type SortResult<T> = Result<T, SortError>;
@@ -2509,11 +2652,15 @@ fn materialize_stdin(
 ) -> SortResult<()> {
 	let mut stdin = Some(&mut host.stdin);
 	for file in files.iter_mut().filter(|file| file.as_os_str() == OsStr::new(STDIN_FILE)) {
-		let (mut temp, path) = tmp_dir.next_file()?;
+		let TmpFile { file: mut temp, path, .. } = tmp_dir.next_file()?;
 		if let Some(reader) = stdin.take() {
 			std::io::copy(reader, &mut temp)
 				.map_err(|error| SortError::ReadFailed { path: PathBuf::from(STDIN_FILE), error })?;
 		}
+		temp.close().map_err(|error| SortError::WriteFailed {
+			path: path.clone().into_os_string(),
+			error,
+		})?;
 		*file = path.into_os_string();
 	}
 	Ok(())
@@ -2566,14 +2713,6 @@ mod options {
 }
 
 const DECIMAL_PT: u8 = b'.';
-
-fn locale_decimal_pt() -> u8 {
-	match locale_decimal_separator().as_bytes().first().copied() {
-		Some(b'.') => b'.',
-		Some(b',') => b',',
-		_ => DECIMAL_PT,
-	}
-}
 
 const NEGATIVE: &u8 = &b'-';
 const POSITIVE: &u8 = &b'+';
@@ -2674,15 +2813,17 @@ pub struct Output {
 }
 
 impl Output {
-	fn new(name: Option<impl AsRef<OsStr>>, stdout: Option<OpenFile>) -> SortResult<Self> {
+	fn new(
+		fs: &BlockingFs,
+		name: Option<impl AsRef<OsStr>>,
+		stdout: Option<OpenFile>,
+	) -> SortResult<Self> {
 		let file = if let Some(name) = name {
 			let path = Path::new(name.as_ref());
-			// This is different from `File::create()` because we don't truncate the output
+			// This is different from `create()` because we don't truncate the output
 			// yet. This allows using the output file as an input file.
-			let file = OpenOptions::new()
-				.write(true)
-				.create(true)
-				.open(path)
+			let file = fs
+				.open_with(path, OpenOptions::new().write(true).create(true))
 				.map_err(|error| SortError::OpenFailed { path: path.to_owned(), error })?;
 			Some((name.as_ref().to_owned(), file))
 		} else {
@@ -2691,21 +2832,67 @@ impl Output {
 		Ok(Self { file, stdout })
 	}
 
-	fn into_write(mut self) -> BufWriter<Box<dyn Write>> {
-		BufWriter::new(match self.file {
+	fn into_write(mut self) -> std::io::Result<BufWriter<OutputSink>> {
+		Ok(BufWriter::new(match self.file {
 			Some((_name, file)) => {
-				// truncate the file
-				let _ = file.set_len(0);
-				Box::new(file)
+				// Truncate the file. Special files (devices, pipes) cannot be
+				// truncated and need not be; a regular file that keeps stale
+				// trailing bytes would be corrupt output.
+				if let Err(error) = file.set_len(0)
+					&& file.metadata().map_or(true, |metadata| metadata.is_file())
+				{
+					return Err(error);
+				}
+				OutputSink::File(file)
 			},
-			None => Box::new(self.stdout.take().expect("stdout is present")),
-		})
+			None => OutputSink::Stdout(self.stdout.take().expect("stdout is present")),
+		}))
 	}
 
 	fn as_output_name(&self) -> Option<&OsStr> {
 		match &self.file {
 			Some((name, _file)) => Some(name.as_os_str()),
 			None => None,
+		}
+	}
+
+	/// The output file's name, or "standard output", for diagnostics.
+	fn display_name(&self) -> OsString {
+		self.as_output_name()
+			.unwrap_or(OsStr::new("standard output"))
+			.to_owned()
+	}
+}
+
+/// Where sorted output is written: the `-o` file or standard output.
+pub enum OutputSink {
+	File(File),
+	Stdout(OpenFile),
+}
+
+impl OutputSink {
+	/// Flushes buffered output and closes an output file, so errors a
+	/// filesystem reports only on close are not lost.
+	fn finish(writer: BufWriter<Self>) -> std::io::Result<()> {
+		match writer.into_inner().map_err(std::io::IntoInnerError::into_error)? {
+			Self::File(file) => file.close(),
+			Self::Stdout(mut stdout) => stdout.flush(),
+		}
+	}
+}
+
+impl Write for OutputSink {
+	fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+		match self {
+			Self::File(file) => file.write(buf),
+			Self::Stdout(stdout) => stdout.write(buf),
+		}
+	}
+
+	fn flush(&mut self) -> std::io::Result<()> {
+		match self {
+			Self::File(file) => file.flush(),
+			Self::Stdout(stdout) => stdout.flush(),
 		}
 	}
 }
@@ -2728,7 +2915,6 @@ pub struct GlobalSettings {
 	random_source:           Option<PathBuf>,
 	selectors:               Vec<FieldSelector>,
 	separator:               Option<u8>,
-	threads:                 String,
 	line_ending:             LineEnding,
 	buffer_size:             usize,
 	buffer_size_is_explicit: bool,
@@ -2737,8 +2923,25 @@ pub struct GlobalSettings {
 	compress:                Option<Compressor>,
 	merge_batch_size:        usize,
 	numeric_locale:          NumericLocaleSettings,
+	/// ICU collator for the shell's LC_COLLATE; `None` compares text by bytes.
+	collator:                Option<Arc<CollatorBorrowed<'static>>>,
+	parallelism:             Parallelism,
 	precomputed:             Precomputed,
 	cancel:                  Arc<AtomicBool>,
+}
+
+/// The pool `sort_by` runs on.
+#[derive(Clone)]
+enum Parallelism {
+	/// No `--parallel`: Rayon's process-global pool, when the embedder made it
+	/// available.
+	Global,
+	/// `--parallel=1`, or a requested pool whose workers could not be spawned.
+	Sequential,
+	/// `--parallel=N`: a pool owned by this call, so the limit never leaks into
+	/// the shared global pool other commands use.
+	#[cfg(not(target_os = "wasi"))]
+	Pool(Arc<rayon::ThreadPool>),
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -2803,10 +3006,9 @@ impl GlobalSettings {
 	/// This function **must** be called before starting to sort, and
 	/// `GlobalSettings` may not be altered afterwards.
 	///
-	/// When i18n-collator is enabled, `disable_fast_lexicographic` should be set
-	/// to true if we're in a UTF-8 locale (to force locale-aware collation
-	/// instead of byte comparison).
-	fn init_precomputed(&mut self, disable_fast_lexicographic: bool) {
+	/// `collator` must already hold the shell's collation choice: text keys
+	/// compare with it when set, and by bytes otherwise.
+	fn init_precomputed(&mut self) {
 		self.precomputed.needs_tokens = self.selectors.iter().any(|s| s.needs_tokens);
 		self.precomputed.selections_per_line =
 			self.selectors.iter().filter(|s| s.needs_selection).count();
@@ -2835,18 +3037,16 @@ impl GlobalSettings {
 		self.precomputed.tokenize_allow_unit_after_blank =
 			self.precomputed.tokenize_blank_thousands_sep && uses_human_numeric;
 
-		self.precomputed.fast_lexicographic =
-			!disable_fast_lexicographic && self.can_use_fast_lexicographic();
+		let locale_collation = self.collator.is_some();
+		self.precomputed.fast_lexicographic = !locale_collation && self.can_use_fast_lexicographic();
 		self.precomputed.fast_locale_collation =
-			disable_fast_lexicographic && self.can_use_fast_lexicographic();
+			locale_collation && self.can_use_fast_lexicographic();
 		self.precomputed.fast_ascii_insensitive = self.can_use_fast_ascii_insensitive();
 	}
 
 	/// Returns true when the fast lexicographic path can be used safely.
-	/// Note: When i18n-collator is enabled, the caller must have already
-	/// determined whether locale-aware collation is needed (via checking if
-	/// we're in a UTF-8 locale). This check is performed in uumain() before
-	/// init_precomputed() is called.
+	/// Whether that path compares bytes or collation keys depends on
+	/// `collator`, chosen before `init_precomputed` runs.
 	fn can_use_fast_lexicographic(&self) -> bool {
 		self.mode == SortMode::Default
 			&& !self.ignore_case
@@ -2904,13 +3104,14 @@ impl Default for GlobalSettings {
 			random_source:           None,
 			selectors:               vec![],
 			separator:               None,
-			threads:                 String::new(),
 			line_ending:             LineEnding::Newline,
 			buffer_size:             FALLBACK_AUTOMATIC_BUF_SIZE,
 			buffer_size_is_explicit: false,
 			compress:                None,
 			merge_batch_size:        default_merge_batch_size(),
 			numeric_locale:          NumericLocaleSettings::default(),
+			collator:                None,
+			parallelism:             Parallelism::Global,
 			cancel:                  Arc::new(AtomicBool::new(false)),
 			precomputed:             Precomputed::default(),
 		}
@@ -3080,8 +3281,10 @@ impl<'a> Line<'a> {
 		token_buffer: &mut Vec<Field>,
 		settings: &GlobalSettings,
 	) -> Self {
-				if settings.precomputed.fast_locale_collation {
-			compute_sort_key_utf8(line, &mut line_data.collation_key_buffer);
+		if settings.precomputed.fast_locale_collation
+			&& let Some(collator) = &settings.collator
+		{
+			let Ok(()) = collator.write_sort_key_utf8_to(line, &mut line_data.collation_key_buffer);
 			line_data
 				.collation_key_ends
 				.push(line_data.collation_key_buffer.len());
@@ -3206,7 +3409,7 @@ impl<'a> Line<'a> {
 				},
 				SortMode::GeneralNumeric => {
 					let initial_selection = &self.line[selection.clone()];
-					let decimal_pt = locale_decimal_pt();
+					let decimal_pt = settings.numeric_locale.decimal_pt.unwrap_or(DECIMAL_PT);
 					let leading = get_leading_gen(initial_selection, decimal_pt);
 
 					// Shorten selection to leading.
@@ -3624,7 +3827,7 @@ impl FieldSelector {
 		} else if self.settings.mode == SortMode::GeneralNumeric {
 			// Parse this number as BigDecimal, as this is the requirement for general
 			// numeric sorting.
-			let decimal_pt = locale_decimal_pt();
+			let decimal_pt = numeric_locale.decimal_pt.unwrap_or(DECIMAL_PT);
 			Selection::AsBigDecimal(general_bd_parse(
 				&range_str[get_leading_gen(range_str, decimal_pt)],
 				decimal_pt,
@@ -3731,30 +3934,106 @@ impl FieldSelector {
 	}
 }
 
-fn detect_numeric_locale() -> NumericLocaleSettings {
-	let numeric_locale = i18n::get_numeric_locale();
-	let locale = &numeric_locale.0;
-	let encoding = numeric_locale.1;
-	let is_c_locale = encoding == i18n::UEncoding::Ascii && locale.to_string() == "und";
+/// The shell's value for locale category `category`: LC_ALL, then the
+/// category, then LANG, with empty values treated as unset (POSIX). Read per
+/// invocation from the shell environment because uucore's getters read the
+/// process environment once and cache it, ignoring `LC_ALL=C sort`.
+fn shell_locale<'h>(host: &'h Host, category: &str) -> Option<&'h str> {
+	["LC_ALL", category, "LANG"]
+		.into_iter()
+		.find_map(|key| host.var(key).filter(|value| !value.is_empty()))
+}
 
-	if is_c_locale {
-		return NumericLocaleSettings { decimal_pt: Some(DECIMAL_PT), thousands_sep: None };
+/// Parses a shell locale name the way uucore parses the process one:
+/// `language_TERRITORY[.codeset][@modifier]` becomes a BCP 47 locale plus
+/// whether the codeset is UTF-8. `None` means the C locale: C/POSIX, or a name
+/// ICU cannot read.
+fn parse_locale_name(name: &str) -> Option<(Locale, bool)> {
+	let mut parts = name.split(['.', '@']);
+	let language = parts
+		.next()
+		.filter(|language| !matches!(*language, "C" | "POSIX"))?;
+	let locale = Locale::try_from_str(&language.replace('_', "-"))
+		.ok()
+		.filter(|locale| *locale != Locale::UNKNOWN)?;
+	let utf8 = parts.next().is_some_and(|codeset| {
+		codeset.eq_ignore_ascii_case("utf-8") || codeset.eq_ignore_ascii_case("utf8")
+	});
+	Some((locale, utf8))
+}
+
+/// Collators built so far, by locale. Building one resolves the locale's
+/// tailoring through ICU's fallback chain, which repeated calls skip. `None`
+/// records a locale ICU could not build a collator for.
+static COLLATORS: LazyLock<Mutex<HashMap<Locale, Option<Arc<CollatorBorrowed<'static>>>>>> =
+	LazyLock::new(Default::default);
+
+/// The collator for the shell's LC_COLLATE, or `None` to compare text by
+/// bytes: the locale must be UTF-8 (uucore's rule) and loadable by the system
+/// (GNU falls back to byte order otherwise).
+fn shell_collator(host: &Host) -> Option<Arc<CollatorBorrowed<'static>>> {
+	let (locale, utf8) = parse_locale_name(shell_locale(host, "LC_COLLATE")?)?;
+	if !utf8 || locale_failed_to_set(host) {
+		return None;
 	}
+	COLLATORS
+		.lock()
+		.entry(locale)
+		.or_insert_with_key(|locale| {
+			// Shift punctuation behind letters, but retain its quaternary
+			// distinctions for `-u` and `-c` instead of treating paths as equal.
+			let mut options = CollatorOptions::default();
+			options.alternate_handling = Some(AlternateHandling::Shifted);
+			options.strength = Some(Strength::Quaternary);
+			CollatorBorrowed::try_new(locale.into(), options)
+				.ok()
+				.map(Arc::new)
+		})
+		.clone()
+}
 
-	let grouping = i18n::decimal::locale_grouping_separator();
+/// Decimal point and thousands separator for the shell's LC_NUMERIC, from
+/// ICU's CLDR data for that locale (the data uucore reads for the process
+/// locale). C rules apply when it names C, or on Unix a locale the system
+/// cannot load (GNU's fallback); Windows has no system locale to probe, so any
+/// locale ICU parses uses its CLDR rules.
+fn detect_numeric_locale(host: &Host) -> NumericLocaleSettings {
+	let Some(name) = shell_locale(host, "LC_NUMERIC") else {
+		return NumericLocaleSettings::default();
+	};
+	let Some((locale, utf8)) = parse_locale_name(name) else {
+		return NumericLocaleSettings::default();
+	};
+	#[cfg(unix)]
+	if !locale_loadable(name, nix::libc::LC_NUMERIC_MASK) {
+		return NumericLocaleSettings::default();
+	}
+	let data_locale = DataLocale::from(&locale);
+	let request = DataRequest {
+		id:       DataIdentifierBorrowed::for_locale(&data_locale),
+		metadata: Default::default(),
+	};
+	let Ok(response) = DataProvider::<DecimalSymbolsV1>::load(&Baked, request) else {
+		return NumericLocaleSettings::default();
+	};
+	let symbols = response.payload.get();
 	NumericLocaleSettings {
-		decimal_pt:    Some(locale_decimal_pt()),
+		decimal_pt:    match symbols.decimal_separator().as_bytes().first() {
+			Some(b',') => Some(b','),
+			_ => Some(DECIMAL_PT),
+		},
 		// Upstream GNU coreutils ignore multibyte thousands separators
 		// (FIXME in C source). We keep the same single-byte behavior.
-		thousands_sep: match grouping.as_bytes() {
+		thousands_sep: match symbols.grouping_separator().as_bytes() {
 			[b] => Some(*b),
 			// ICU returns NBSP as UTF-8 (0xC2 0xA0). In non-UTF8 locales like ISO-8859-1,
 			// the input byte is 0xA0, so map it to a single-byte separator.
-			[0xc2, 0xa0] if encoding != i18n::UEncoding::Utf8 => Some(0xa0),
+			[0xc2, 0xa0] if !utf8 => Some(0xa0),
 			_ => None,
 		},
 	}
 }
+
 /// Creates an `Arg` for a sort mode flag.
 fn make_sort_mode_arg(mode: &'static str, short: char, help: String) -> Arg {
 	Arg::new(mode)
@@ -4163,15 +4442,35 @@ fn default_merge_batch_size() -> usize {
 }
 
 #[cfg(not(unix))]
-fn locale_failed_to_set() -> bool {
-	use std::env;
-	env::var_os("LC_ALL").as_deref() == Some(OsStr::new("missing"))
+fn locale_failed_to_set(host: &Host) -> bool {
+	host.var("LC_ALL") == Some("missing")
 }
 
 #[cfg(unix)]
-fn locale_failed_to_set() -> bool {
+fn locale_failed_to_set(host: &Host) -> bool {
+	shell_locale(host, "LC_COLLATE")
+		.is_some_and(|locale| !locale_loadable(locale, nix::libc::LC_COLLATE_MASK))
+}
+
+/// Whether the system can load `locale` for the categories in `mask`, probed
+/// with `newlocale` rather than `setlocale`, which would change the C locale
+/// of the whole host process.
+#[cfg(unix)]
+fn locale_loadable(locale: &str, mask: nix::libc::c_int) -> bool {
 	use nix::libc;
-	unsafe { libc::setlocale(libc::LC_COLLATE, c"".as_ptr()).is_null() }
+	let Ok(locale) = std::ffi::CString::new(locale) else {
+		return false;
+	};
+	// SAFETY: `locale` is a valid NUL-terminated string; a non-null result is
+	// a fresh locale object owned here and freed immediately.
+	unsafe {
+		let handle = libc::newlocale(mask, locale.as_ptr(), std::ptr::null_mut());
+		if handle.is_null() {
+			return false;
+		}
+		libc::freelocale(handle);
+	}
+	true
 }
 
 fn key_zero_width(selector: &FieldSelector) -> bool {
@@ -4212,15 +4511,17 @@ fn emit_debug_warnings(
 	flags: &GlobalOptionFlags,
 	legacy_warnings: &[LegacyKeyWarning],
 ) {
-	if locale_failed_to_set() {
+	if locale_failed_to_set(host) {
 		show_error!(&mut host.stderr, "{}", "failed to set locale");
 	}
 
-	let (locale, encoding) = i18n::get_collating_locale();
-
-	if matches!(encoding, i18n::UEncoding::Utf8) {
-		let locale_as_posix = format!("{}.UTF-8", locale.to_string().replace('-', "_"));
-		show_error!(&mut host.stderr, "{}", format!("text ordering performed using ‘{locale_as_posix}’ sorting rules"));
+	// GNU names the locale as selected (`setlocale(LC_COLLATE, NULL)`), so this
+	// is the shell's value, not ICU's spelling of it.
+	let collation_message = shell_locale(host, "LC_COLLATE")
+		.filter(|_| settings.collator.is_some())
+		.map(|locale| format!("text ordering performed using ‘{locale}’ sorting rules"));
+	if let Some(message) = collation_message {
+		show_error!(&mut host.stderr, "{}", message);
 	} else {
 		show_error!(&mut host.stderr, "{}", "text ordering performed using simple byte comparison");
 	}
@@ -4432,8 +4733,9 @@ impl Utility for Sort {
 
 #[allow(clippy::cognitive_complexity)]
 fn uu_sort(host: &mut Host, matches: &ArgMatches, legacy_warnings: &[LegacyKeyWarning]) -> SortResult<()> {
+	let fs = host.fs().clone();
 	let mut settings = GlobalSettings {
-		numeric_locale: detect_numeric_locale(),
+		numeric_locale: detect_numeric_locale(host),
 		cancel: host.cancel_flag(),
 		..Default::default()
 	};
@@ -4474,7 +4776,7 @@ fn uu_sort(host: &mut Host, matches: &ArgMatches, legacy_warnings: &[LegacyKeyWa
 				.map_err(|error| SortError::ReadFailed { path: PathBuf::from(STDIN_FILE), error })?;
 			Box::new(std::io::Cursor::new(bytes))
 		} else {
-			open_with_open_failed_error(&files0_from)?
+			open_with_open_failed_error(&fs, &files0_from)?
 		};
 		let buf_reader = BufReader::new(reader);
 		for (line_num, line_res) in buf_reader.split(b'\0').enumerate() {
@@ -4558,32 +4860,17 @@ fn uu_sort(host: &mut Host, matches: &ArgMatches, legacy_warnings: &[LegacyKeyWa
 	settings.dictionary_order = dictionary_order;
 	settings.ignore_non_printing = ignore_non_printing;
 	settings.ignore_case = ignore_case;
-	if matches.contains_id(options::PARALLEL) {
-		// "0" is default - threads = num of cores
-		settings.threads = matches
-			.get_one::<String>(options::PARALLEL)
-			.map_or_else(|| "0".to_string(), String::from);
-		#[cfg(not(target_os = "wasi"))]
-		{
-			if rayon_global_pool_available() {
-				let num_threads = match settings.threads.parse::<usize>() {
-					Ok(0) | Err(_) => std::thread::available_parallelism().map_or(1, NonZero::get),
-					Ok(n) => n,
-				};
-				let _ = rayon::ThreadPoolBuilder::new()
-					.num_threads(num_threads)
-					.build_global();
-			}
-		}
-	}
-
+	let parallel = matches
+		.get_one::<String>(options::PARALLEL)
+		.map(|threads| parse_parallel(threads))
+		.transpose()?;
 	if let Some(size_str) = matches.get_one::<String>(options::BUF_SIZE) {
 		settings.buffer_size = GlobalSettings::parse_byte_count(size_str).map_err(|e| {
 			SortError::message(format_error_message(&e, size_str, options::BUF_SIZE))
 		})?;
 		settings.buffer_size_is_explicit = true;
 	} else {
-		settings.buffer_size = automatic_buffer_size(&files);
+		settings.buffer_size = automatic_buffer_size(&fs, &files);
 		settings.buffer_size_is_explicit = false;
 	}
 
@@ -4592,7 +4879,7 @@ fn uu_sort(host: &mut Host, matches: &ArgMatches, legacy_warnings: &[LegacyKeyWa
 		.map(PathBuf::from)
 		.or_else(|| host.var("TMPDIR").map(PathBuf::from))
 		.unwrap_or_else(|| PathBuf::from("/tmp"));
-	let mut tmp_dir = TmpDirWrapper::new(host.resolve(tmp_base));
+	let mut tmp_dir = TmpDirWrapper::new(fs.clone(), host.resolve(tmp_base));
 
 	settings.compress = matches
 		.get_one::<String>(options::COMPRESS_PROG)
@@ -4719,37 +5006,58 @@ fn uu_sort(host: &mut Host, matches: &ArgMatches, legacy_warnings: &[LegacyKeyWa
 			.any(|selector| selector.settings.mode == SortMode::Random);
 	if needs_random {
 		settings.salt = Some(match settings.random_source.as_deref() {
-			Some(path) => salt_from_random_source(path)?,
+			Some(path) => salt_from_random_source(&fs, path)?,
 			None => get_rand_string(),
 		});
 	}
 
-	materialize_stdin(host, &mut files, &mut tmp_dir)?;
+	// `-c` reads its input on a detached thread, so it gets a private copy of
+	// stdin. A merge with `-o` truncates the output file before it has read
+	// all of its inputs, and stdin may be that file (`sort -m -o f - < f`), so
+	// it copies stdin first too. Every other mode reads the shell's stdin
+	// directly; spilling it to a temporary file first would cost a disk round
+	// trip on every `| sort`.
+	if settings.check || (settings.merge && matches.contains_id(options::OUTPUT)) {
+		materialize_stdin(host, &mut files, &mut tmp_dir)?;
+	}
+	let stdin_operand = if files.iter().any(|file| file == STDIN_FILE) {
+		let stdin = host
+			.stdin
+			.try_clone()
+			.map_err(|error| SortError::ReadFailed { path: PathBuf::from(STDIN_FILE), error })?;
+		StdinOperand::new(Some(stdin))
+	} else {
+		StdinOperand::new(None)
+	};
 
 	// Verify that we can open all input files. They are reopened later to avoid
 	// holding every descriptor while the output file is prepared.
-	for file in &files {
-		open(file)?;
+	for file in files.iter().filter(|file| *file != STDIN_FILE) {
+		open(&fs, file)?;
 	}
 
 	let output_path = matches
 		.get_one::<OsString>(options::OUTPUT)
 		.map(|path| host.resolve(path).into_os_string());
-	let output = Output::new(output_path.as_ref(), Some(host.stdout_clone()))?;
+	let output = Output::new(&fs, output_path.as_ref(), Some(host.stdout_clone()))?;
 
+	// Only a sort runs `sort_by`; `-c` and `-m` never need the pool's workers.
+	if let Some(requested) = parallel
+		&& !settings.check
+		&& !settings.merge
+	{
+		settings.parallelism = invocation_parallelism(requested);
+	}
+
+	settings.collator = shell_collator(host);
 	if settings.debug {
 		let global_flags = GlobalOptionFlags::from_matches(matches);
 		emit_debug_warnings(host, &settings, &global_flags, legacy_warnings);
 	}
 
-	// Initialize locale collation if needed (UTF-8 locales)
-	// This MUST happen before init_precomputed() to avoid the performance
-	// regression
-	let needs_locale_collation = i18n::collator::init_locale_collation();
+	settings.init_precomputed();
 
-	settings.init_precomputed(needs_locale_collation);
-
-	exec(&mut files, &settings, output, &mut tmp_dir, host.stderr_clone())
+	exec(&fs, &stdin_operand, &mut files, &settings, output, &mut tmp_dir, host.stderr_clone())
 }
 
 fn uu_app() -> Command {
@@ -4999,6 +5307,8 @@ pub(crate) fn sort_builtin<SE: ShellExtensions>() -> Registration<SE> {
 }
 
 fn exec(
+	fs: &BlockingFs,
+	stdin: &StdinOperand,
 	files: &mut [OsString],
 	settings: &GlobalSettings,
 	output: Output,
@@ -5006,44 +5316,86 @@ fn exec(
 	stderr: OpenFile,
 ) -> SortResult<()> {
 	if settings.merge {
-		merge::merge(files, settings, output, tmp_dir)
+		merge::merge(fs, stdin, files, settings, output, tmp_dir)
 	} else if settings.check {
 		if files.len() > 1 {
 			Err(SortError::message("only one file allowed with -c"))
 		} else {
-			check::check(files.first().unwrap(), settings)
+			check::check(fs, files.first().unwrap(), settings)
 		}
 	} else {
-		let mut lines = files.iter().map(open);
+		let mut lines = files.iter().map(|file| open_operand(fs, stdin, file));
 		ext_sort(&mut lines, settings, output, tmp_dir, stderr)
 	}
 }
 
 fn sort_by<'a>(unsorted: &mut Vec<Line<'a>>, settings: &GlobalSettings, line_data: &LineData<'a>) {
 	let cmp = |a: &Line<'a>, b: &Line<'a>| compare_by(a, b, settings, line_data, line_data);
-	// WASI does not support threads, so use non-parallel sort to avoid
-	// rayon's thread pool which triggers an unreachable trap. Windows can also
-	// force sequential sort when pi-natives could not safely configure Rayon's
-	// process-global worker pool under commit pressure.
-	if settings.stable || settings.unique {
-		#[cfg(not(target_os = "wasi"))]
-		if rayon_global_pool_available() {
+	let stable = settings.stable || settings.unique;
+	// WASI has no threads (rayon's pool hits an unreachable trap there), and
+	// Windows leaves the global pool unavailable when pi-natives could not
+	// safely configure it under commit pressure; both sort sequentially.
+	#[cfg(not(target_os = "wasi"))]
+	let sort_parallel = |unsorted: &mut Vec<Line<'a>>| {
+		if stable {
 			unsorted.par_sort_by(cmp);
 		} else {
-			unsorted.sort_by(cmp);
-		}
-		#[cfg(target_os = "wasi")]
-		unsorted.sort_by(cmp);
-	} else {
-		#[cfg(not(target_os = "wasi"))]
-		if rayon_global_pool_available() {
 			unsorted.par_sort_unstable_by(cmp);
-		} else {
-			unsorted.sort_unstable_by(cmp);
 		}
-		#[cfg(target_os = "wasi")]
-		unsorted.sort_unstable_by(cmp);
+	};
+	match &settings.parallelism {
+		#[cfg(not(target_os = "wasi"))]
+		Parallelism::Pool(pool) => pool.install(|| sort_parallel(unsorted)),
+		#[cfg(not(target_os = "wasi"))]
+		Parallelism::Global if rayon_global_pool_available() => sort_parallel(unsorted),
+		_ if stable => unsorted.sort_by(cmp),
+		_ => unsorted.sort_unstable_by(cmp),
 	}
+}
+
+/// Parses `--parallel`'s NUM_THREADS like GNU's `xstrtoumax`: optional
+/// leading whitespace and `+`, then decimal digits and nothing else. Values
+/// past `usize` saturate, as GNU's do; zero is rejected.
+fn parse_parallel(arg: &str) -> SortResult<usize> {
+	let number = arg.trim_start_matches([' ', '\t', '\n', '\x0b', '\x0c', '\r']);
+	let digits = number.strip_prefix('+').unwrap_or(number);
+	let digit_count = digits.bytes().take_while(u8::is_ascii_digit).count();
+	if digit_count == 0 {
+		return Err(SortError::message(format!("invalid --parallel argument {}", arg.quote())));
+	}
+	if digit_count != digits.len() {
+		return Err(SortError::message(format!(
+			"invalid suffix in --parallel argument {}",
+			arg.quote()
+		)));
+	}
+	match digits.parse::<usize>() {
+		Ok(0) => Err(SortError::message("number in parallel must be nonzero")),
+		Ok(threads) => Ok(threads),
+		Err(_) => Ok(usize::MAX),
+	}
+}
+
+/// How a sort with `--parallel=N` runs: on a pool of its own, so the limit
+/// stays local to this call instead of resizing the process-global pool.
+#[cfg(not(target_os = "wasi"))]
+fn invocation_parallelism(requested: usize) -> Parallelism {
+	// Rayon spawns every worker up front, and more workers than cores cannot
+	// speed up the sort, so the request is capped at the core count.
+	let threads = requested.min(std::thread::available_parallelism().map_or(1, NonZero::get));
+	if threads == 1 {
+		return Parallelism::Sequential;
+	}
+	// Spawning fails under memory pressure; the sort then runs on its own thread.
+	rayon::ThreadPoolBuilder::new()
+		.num_threads(threads)
+		.build()
+		.map_or(Parallelism::Sequential, |pool| Parallelism::Pool(Arc::new(pool)))
+}
+
+#[cfg(target_os = "wasi")]
+fn invocation_parallelism(_requested: usize) -> Parallelism {
+	Parallelism::Sequential
 }
 
 fn compare_by<'a>(
@@ -5175,8 +5527,10 @@ fn compare_by<'a>(
 						settings.dictionary_order,
 						settings.ignore_case,
 					)
+				} else if let Some(collator) = &global_settings.collator {
+					collator.compare_utf8(a_str, b_str)
 				} else {
-					locale_cmp(a_str, b_str)
+					a_str.cmp(b_str)
 				}
 			},
 		};
@@ -5367,8 +5721,8 @@ const U64_LEN: usize = 8;
 const RANDOM_SOURCE_TAG: &[u8] = b"uutils-sort-random-source"; // Domain separation tag
 
 /// Create a 128-bit salt by hashing up to 1 MiB from the given file.
-fn salt_from_random_source(path: &Path) -> SortResult<[u8; SALT_LEN]> {
-	let mut reader = open_with_open_failed_error(path)?;
+fn salt_from_random_source(fs: &BlockingFs, path: &Path) -> SortResult<[u8; SALT_LEN]> {
+	let mut reader = open_with_open_failed_error(fs, path)?;
 	let mut buf = [0u8; BUF_LEN];
 	let mut total = 0usize;
 	// freeze seed for --random-source
@@ -5528,34 +5882,61 @@ fn print_sorted<'a, T: Iterator<Item = &'a Line<'a>>>(
 	settings: &GlobalSettings,
 	output: Output,
 ) -> SortResult<()> {
-	let output_name = output
-		.as_output_name()
-		.unwrap_or(OsStr::new("standard output"))
-		.to_owned();
+	let output_name = output.display_name();
 
-	let mut writer = output.into_write();
+	let mut writer = output
+		.into_write()
+		.map_err(|error| SortError::WriteFailed { path: output_name.clone(), error })?;
 	for line in iter {
 		line.print(&mut writer, settings)
 			.map_err(|error| SortError::WriteFailed { path: output_name.clone(), error })?;
 	}
-	writer
-		.flush()
+	OutputSink::finish(writer)
 		.map_err(|error| SortError::WriteFailed { path: output_name, error })?;
 	Ok(())
 }
 
-fn open(path: impl AsRef<OsStr>) -> SortResult<Box<dyn Read + Send>> {
+/// The shell's stdin as the input of `-` operands. Only the first `-` reads
+/// it; later ones are empty, as stdin is already at end of file by then.
+struct StdinOperand(std::cell::Cell<Option<crate::host::Stdin>>);
+
+impl StdinOperand {
+	const fn new(stdin: Option<crate::host::Stdin>) -> Self {
+		Self(std::cell::Cell::new(stdin))
+	}
+
+	fn take(&self) -> Box<dyn Read + Send> {
+		match self.0.take() {
+			Some(stdin) => Box::new(stdin),
+			None => Box::new(std::io::empty()),
+		}
+	}
+}
+
+/// Open an input operand: `-` reads the shell's stdin, anything else a file.
+fn open_operand(
+	fs: &BlockingFs,
+	stdin: &StdinOperand,
+	path: impl AsRef<OsStr>,
+) -> SortResult<Box<dyn Read + Send>> {
+	if path.as_ref() == OsStr::new(STDIN_FILE) { Ok(stdin.take()) } else { open(fs, path) }
+}
+
+fn open(fs: &BlockingFs, path: impl AsRef<OsStr>) -> SortResult<Box<dyn Read + Send>> {
 	let path = Path::new(path.as_ref());
-	match File::open(path) {
+	match fs.open(path) {
 		Ok(file) => Ok(Box::new(file)),
 		Err(error) => Err(SortError::ReadFailed { path: path.to_owned(), error }),
 	}
 }
 
-fn open_with_open_failed_error(path: impl AsRef<OsStr>) -> SortResult<Box<dyn Read + Send>> {
+fn open_with_open_failed_error(
+	fs: &BlockingFs,
+	path: impl AsRef<OsStr>,
+) -> SortResult<Box<dyn Read + Send>> {
 	// On error, returns an OpenFailed error instead of a ReadFailed error
 	let path = Path::new(path.as_ref());
-	match File::open(path) {
+	match fs.open(path) {
 		Ok(file) => Ok(Box::new(file)),
 		Err(error) => Err(SortError::OpenFailed { path: path.to_owned(), error }),
 	}
@@ -5708,6 +6089,22 @@ mod tests {
 	}
 
 	#[test]
+	fn reads_standard_input_once_across_repeated_dash_operands() {
+		let (code, capture) = run_util::<Sort>(&["-", "-"], "beta\nalpha\n", "/");
+		assert_eq!(code, 0, "{}", capture.err());
+		assert_eq!(capture.out(), "alpha\nbeta\n");
+	}
+
+	#[test]
+	fn merges_standard_input_with_files() {
+		let dir = tempfile::tempdir().expect("temp dir");
+		std::fs::write(dir.path().join("evens"), "b\nd\n").expect("fixture");
+		let (code, capture) = run_util::<Sort>(&["-m", "-", "evens"], "a\nc\n", dir.path());
+		assert_eq!(code, 0, "{}", capture.err());
+		assert_eq!(capture.out(), "a\nb\nc\nd\n");
+	}
+
+	#[test]
 	fn check_mode_preserves_disorder_statuses() {
 		let (code, capture) = run_util::<Sort>(&["-c"], "beta\nalpha\n", "/");
 		assert_eq!(code, 1);
@@ -5729,4 +6126,142 @@ mod tests {
 		assert_eq!(std::fs::read_to_string(path).expect("output"), "alpha\nbeta\n");
 	}
 
+	#[test]
+	fn shell_lc_all_c_selects_byte_order_on_every_call() {
+		// The process environment may carry a UTF-8 locale; the shell's
+		// `LC_ALL=C` must still win, for whole-line and keyed sorts alike.
+		for args in [&["sort"][..], &["sort", "-k1,1"], &["sort"]] {
+			let (mut host, capture) = Host::for_test("sort", b"b\nA\na\n".to_vec(), "/");
+			host.set_test_var("LC_ALL", "C");
+			let parsed = <Sort as clap::Parser>::try_parse_from(args).expect("parse");
+			assert_eq!(parsed.run(&mut host), 0, "{}", capture.err());
+			assert_eq!(capture.out(), "A\na\nb\n", "{args:?}");
+		}
+	}
+
+	/// Runs `args` (after `sort`) with the shell variable `var=locale`.
+	fn sort_in_locale(var: &str, locale: &str, args: &[&str], input: &str) -> (i32, String, String) {
+		let (mut host, capture) = Host::for_test("sort", input, "/");
+		host.set_test_var(var, locale);
+		let parsed = <Sort as clap::Parser>::try_parse_from(std::iter::once("sort").chain(args.iter().copied()))
+			.expect("parse");
+		(parsed.run(&mut host), capture.out(), capture.err())
+	}
+
+	/// Whether the system can load `locale`; Unix sort falls back to the C
+	/// locale (as GNU does) for one that is not installed.
+	#[cfg(unix)]
+	fn locale_installed(locale: &str) -> bool {
+		locale_loadable(locale, nix::libc::LC_ALL_MASK)
+	}
+
+	/// Windows sort reads ICU's data for any locale name: nothing to install.
+	#[cfg(not(unix))]
+	fn locale_installed(_locale: &str) -> bool {
+		true
+	}
+
+	// Failure mode: collation used uucore's single collator, built from the
+	// omp process's locale, so `LC_ALL=sv_SE.UTF-8 sort` ordered text by the
+	// process locale (or by bytes) and `--debug` named the process locale.
+	#[test]
+	fn collation_follows_the_shell_locale() {
+		// Swedish puts å and ä after z, å first; English keeps them beside a;
+		// byte order would put ä (C3 A4) before å (C3 A5).
+		let input = "z\nä\nå\na\n";
+		for (locale, expected) in [("sv_SE.UTF-8", "a\nz\nå\nä\n"), ("en_US.UTF-8", "a\nå\nä\nz\n")] {
+			if !locale_installed(locale) {
+				eprintln!("skipping {locale}: not installed");
+				continue;
+			}
+			for args in [&[][..], &["-k1,1"]] {
+				let (code, out, err) = sort_in_locale("LC_ALL", locale, args, input);
+				assert_eq!(code, 0, "{err}");
+				assert_eq!(out, expected, "{locale} {args:?}");
+			}
+			let (_, _, err) = sort_in_locale("LC_ALL", locale, &["--debug"], input);
+			let rules = format!("text ordering performed using ‘{locale}’ sorting rules");
+			assert!(err.contains(&rules), "{err}");
+		}
+	}
+
+	// Failure mode: shifted collation at tertiary strength treated distinct
+	// punctuation-bearing paths as equal, so `sort -u` discarded records.
+	#[test]
+	fn locale_unique_preserves_punctuation_unless_the_key_ignores_it() {
+		if !locale_installed("en_US.UTF-8") {
+			eprintln!("skipping: en_US.UTF-8 not installed");
+			return;
+		}
+		let input = "src/a-b.ts\nsrc/ab.ts\nsrc/a_b.ts\nsrc/a.b.ts\n";
+		for args in [&["-u"][..], &["-u", "-k1,1"]] {
+			for _ in 0..2 {
+				let (code, out, err) = sort_in_locale("LANG", "en_US.UTF-8", args, input);
+				assert_eq!(code, 0, "{err}");
+				let mut lines: Vec<_> = out.lines().collect();
+				lines.sort_unstable();
+				assert_eq!(lines, ["src/a-b.ts", "src/a.b.ts", "src/a_b.ts", "src/ab.ts"], "{args:?}");
+			}
+		}
+		let (code, out, err) = sort_in_locale(
+			"LANG",
+			"en_US.UTF-8",
+			&["-u", "-k1,1"],
+			"group src/a-b.ts\ngroup src/ab.ts\n",
+		);
+		assert_eq!(code, 0, "{err}");
+		assert_eq!(out, "group src/a-b.ts\n");
+		let (code, out, err) = sort_in_locale("LANG", "en_US.UTF-8", &["-d", "-u"], input);
+		assert_eq!(code, 0, "{err}");
+		assert_eq!(out, "src/a-b.ts\n");
+	}
+
+	// Failure mode: the decimal point and grouping came from the process
+	// locale, so `LC_NUMERIC=de_DE.UTF-8 sort -n` read `2,5` as 2 (C process)
+	// or 25 (en_US process, `,` grouping) instead of 2.5.
+	#[test]
+	fn numeric_sorts_read_the_shell_numeric_locale() {
+		if !locale_installed("de_DE.UTF-8") {
+			eprintln!("skipping: de_DE.UTF-8 not installed");
+			return;
+		}
+		for mode in ["-n", "-g"] {
+			let (code, out, err) = sort_in_locale("LC_NUMERIC", "de_DE.UTF-8", &["-s", mode], "2,5\n3\n2,1\n");
+			assert_eq!(code, 0, "{err}");
+			assert_eq!(out, "2,1\n2,5\n3\n", "{mode}");
+		}
+	}
+
+	// Failure mode: `--parallel` was accepted and ignored, so invalid thread
+	// counts sorted silently instead of failing as GNU sort does.
+	#[test]
+	fn parallel_validates_the_thread_count_like_gnu() {
+		for (value, message) in [
+			("0", "number in parallel must be nonzero"),
+			("abc", "invalid --parallel argument 'abc'"),
+			("", "invalid --parallel argument ''"),
+			("-1", "invalid --parallel argument '-1'"),
+			("4x", "invalid suffix in --parallel argument '4x'"),
+		] {
+			let (code, capture) = run_util::<Sort>(&[&format!("--parallel={value}")], "b\na\n", "/");
+			assert_eq!(code, 2, "{value:?}");
+			assert_eq!(capture.err(), format!("sort: {message}\n"), "{value:?}");
+			assert_eq!(capture.out(), "", "{value:?}");
+		}
+	}
+
+	#[test]
+	fn parallel_sorts_on_its_own_pool() {
+		let input: String = (0..5000).rev().map(|n| format!("{n:05}\n")).collect();
+		let expected: String = (0..5000).map(|n| format!("{n:05}\n")).collect();
+		for value in ["1", "2", " 4", "+4", "99999999999999999999999"] {
+			for stable in [&[][..], &["-s"]] {
+				let parallel = format!("--parallel={value}");
+				let args: Vec<&str> = stable.iter().copied().chain([parallel.as_str()]).collect();
+				let (code, capture) = run_util::<Sort>(&args, &input, "/");
+				assert_eq!(code, 0, "{value:?}: {}", capture.err());
+				assert!(capture.out() == expected, "{value:?} {stable:?}");
+			}
+		}
+	}
 }

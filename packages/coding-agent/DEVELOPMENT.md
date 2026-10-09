@@ -26,6 +26,10 @@ Never invoke `tsc`/`npx tsc` directly — `bun run check` is the typecheck gate.
 changing the React tool renderers under `collab-web/src/tool-render/`, rebuild them
 with `bun run gen:tool-views`.
 
+Scope fake timers to the deadline a test exercises, then restore real timers
+before real socket listeners are started. Bun's mocked clock can defer
+`server.listen` callbacks, leaving registry publication and teardown waiting.
+
 ## Boot flow
 
 ```text
@@ -107,16 +111,16 @@ Top-level entry modules: `cli.ts`, `main.ts`, `sdk.ts`, `index.ts` (SDK barrel),
 - Authoring + registry: [custom-tools.md](../../docs/custom-tools.md)
 - Output/artifacts: [blob-artifact-architecture.md](../../docs/blob-artifact-architecture.md)
 - Gating/approval: [approval-mode.md](../../docs/approval-mode.md), [resolve-tool-runtime.md](../../docs/resolve-tool-runtime.md)
-- Per-tool reference: [`docs/tools/`](../../docs/tools/) — `read`, `write`, `edit`, `ast-edit`, `ast-grep`, `grep`, `glob`, `bash`, `eval`, `hub`, `lsp`, `debug`, `task`, `web_search`, `browser`, `github`, `ask`, `todo`, `recall`, `retain`, `reflect`, `checkpoint`, `rewind`
+- Per-tool reference: [`docs/tools/`](../../docs/tools/) — `read`, `write`, `edit`, `ast-edit`, `ast-grep`, `grep`, `glob`, `bash`, `eval`, `wait`, `lsp`, `debug`, `task`, `web_search`, `browser`, `github`, `ask`, `todo`, `recall`, `retain`, `reflect`, `checkpoint`, `rewind`
 
 ### Execution backends
 - [bash-tool-runtime.md](../../docs/bash-tool-runtime.md), [tools/bash.md](../../docs/tools/bash.md)
-- [python-repl.md](../../docs/python-repl.md), [notebook-tool-runtime.md](../../docs/notebook-tool-runtime.md), [tools/eval.md](../../docs/tools/eval.md), [tools/hub.md](../../docs/tools/hub.md)
+- [python-repl.md](../../docs/python-repl.md), [notebook-tool-runtime.md](../../docs/notebook-tool-runtime.md), [tools/eval.md](../../docs/tools/eval.md), [tools/wait.md](../../docs/tools/wait.md)
 - [tools/debug.md](../../docs/tools/debug.md), [tools/lsp.md](../../docs/tools/lsp.md), [lsp-config.md](../../docs/lsp-config.md)
 
 ### Task delegation and subagents
 - [task-agent-discovery.md](../../docs/task-agent-discovery.md), [tools/task.md](../../docs/tools/task.md)
-- [collab.md](../../docs/collab.md), [tools/hub.md](../../docs/tools/hub.md)
+- [collab.md](../../docs/collab.md), [agent-hub.md](../../docs/agent-hub.md), [tools/wait.md](../../docs/tools/wait.md)
 
 ### Web I/O and retrieval
 - [tools/web_search.md](../../docs/tools/web_search.md), [tools/browser.md](../../docs/tools/browser.md), [tools/github.md](../../docs/tools/github.md)

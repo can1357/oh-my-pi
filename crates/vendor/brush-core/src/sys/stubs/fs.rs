@@ -2,18 +2,6 @@
 
 use crate::error;
 
-pub(crate) trait MetadataExt {
-	fn gid(&self) -> u32 {
-		0
-	}
-
-	fn uid(&self) -> u32 {
-		0
-	}
-}
-
-impl MetadataExt for std::fs::Metadata {}
-
 pub(crate) fn get_default_executable_search_paths() -> Vec<std::path::PathBuf> {
 	vec![]
 }
@@ -123,18 +111,4 @@ pub fn push_path_for_pattern(path: &mut std::path::PathBuf, component: &str) {
 /// In the stub implementation, this is a no-op.
 pub const fn normalize_path_separators(s: &str) -> std::borrow::Cow<'_, str> {
 	std::borrow::Cow::Borrowed(s)
-}
-
-/// Resolves an owned path to the actual on-disk executable file, if any.
-///
-/// In the stub implementation, returns the path unchanged if it is
-/// executable (per the stub `PathExt`, which considers every path
-/// executable).
-pub fn resolve_executable(path: std::path::PathBuf) -> Option<std::path::PathBuf> {
-	use crate::sys::fs::PathExt;
-	if path.as_path().executable() {
-		Some(path)
-	} else {
-		None
-	}
 }

@@ -72,8 +72,14 @@ mod count_fast {
 	///      size for regular files
 	///   3. Otherwise, we just read normally, but without the overhead of counting
 	///      other things such as lines and words.
+	///
+	/// The descriptor shortcuts apply only to handles backed by a native host
+	/// file; provider-backed files always take the `read` path.
 	#[inline]
-	pub(crate) fn count_bytes_fast<T: WordCountable>(handle: &mut T) -> (usize, Option<io::Error>) {
+	pub(crate) fn count_bytes_fast<T: WordCountable>(
+		handle: &mut T,
+		buffer: &mut AlignedBuffer,
+	) -> (usize, Option<io::Error>) {
 		let mut byte_count = 0;
 	
 		#[cfg(unix)]
@@ -111,23 +117,30 @@ mod count_fast {
 	
 		#[cfg(windows)]
 		{
-			if let Some(file) = handle.inner_file() {
-				if let Ok(metadata) = file.metadata() {
-					let attributes = metadata.file_attributes();
-	
-					if (attributes & FILE_ATTRIBUTE_ARCHIVE) != 0
-						|| (attributes & FILE_ATTRIBUTE_NORMAL) != 0
+			use std::io::{Seek as _, SeekFrom};
+
+			if let Some(mut file) = handle.native_file()
+				&& let Ok(metadata) = file.metadata()
+			{
+				let attributes = metadata.file_attributes();
+
+				if (attributes & FILE_ATTRIBUTE_ARCHIVE) != 0
+					|| (attributes & FILE_ATTRIBUTE_NORMAL) != 0
+				{
+					// Count from the current offset (`{ head -c2; wc -c; } < f`) and
+					// leave the handle at EOF, as reading it would, like the unix path.
+					if let Ok(current) = file.stream_position()
+						&& file.seek(SeekFrom::End(0)).is_ok()
 					{
-						return (metadata.file_size() as usize, None);
+						return (metadata.file_size().saturating_sub(current) as usize, None);
 					}
 				}
 			}
 		}
 	
 		// Fall back on `read`, but without the overhead of counting words and lines.
-		let mut buf = [0_u8; BUF_SIZE];
 		loop {
-			match handle.read(&mut buf) {
+			match handle.read(&mut buffer.data) {
 				Ok(0) => return (byte_count, None),
 				Ok(n) => {
 					byte_count += n;
@@ -138,18 +151,20 @@ mod count_fast {
 		}
 	}
 	
-	/// A simple structure used to align a [`BUF_SIZE`] buffer to 32-byte boundary.
+	/// A [`BUF_SIZE`] read buffer aligned to a 32-byte boundary.
 	///
 	/// This is useful as bytecount uses 256-bit wide vector operations that run
-	/// much faster on aligned data (at least on x86 with AVX2 support).
+	/// much faster on aligned data (at least on x86 with AVX2 support). One
+	/// serves every input of an invocation: zero-filling 256 KiB per file
+	/// dwarfs counting a small one.
 	#[repr(align(32))]
-	struct AlignedBuffer {
+	pub(crate) struct AlignedBuffer {
 		data: [u8; BUF_SIZE],
 	}
 	
-	impl Default for AlignedBuffer {
-		fn default() -> Self {
-			Self { data: [0; BUF_SIZE] }
+	impl AlignedBuffer {
+		pub(crate) fn boxed() -> Box<Self> {
+			Box::new(Self { data: [0; BUF_SIZE] })
 		}
 	}
 	
@@ -168,9 +183,10 @@ mod count_fast {
 		const COUNT_LINES: bool,
 	>(
 		handle: &mut R,
+		buffer: &mut AlignedBuffer,
 	) -> (WordCount, Option<io::Error>) {
 		let mut total = WordCount::default();
-		let buf: &mut [u8] = &mut AlignedBuffer::default().data;
+		let buf: &mut [u8] = &mut buffer.data;
 		let policy = SimdPolicy::detect();
 		let simd_allowed = wc_simd_allowed(policy);
 		loop {
@@ -208,22 +224,23 @@ mod countable {
 	//! This module provides a [`WordCountable`] trait and implementations
 	//! for some common file-like objects. Use the [`WordCountable::buffered`]
 	//! method to get an iterator over lines of a file-like object.
-	use std::{
-		fs::File,
-		io::{BufRead, BufReader, Read},
-	};
+	use std::io::{BufRead, BufReader, Read};
 	#[cfg(unix)]
 	use std::os::fd::{AsFd, BorrowedFd};
+
+	use pi_vfs::File;
 
 	use crate::host::Stdin;
 
 	pub trait WordCountable: Read {
 		type Buffered: BufRead;
 		fn buffered(self) -> Self::Buffered;
+		/// The host descriptor behind this input, when it has one.
 		#[cfg(unix)]
 		fn inner_fd(&self) -> Option<BorrowedFd<'_>>;
+		/// The native host file behind this input, when it has one.
 		#[cfg(windows)]
-		fn inner_file(&mut self) -> Option<&mut File>;
+		fn native_file(&self) -> Option<&std::fs::File>;
 	}
 
 	impl WordCountable for &mut Stdin {
@@ -239,7 +256,7 @@ mod countable {
 		}
 
 		#[cfg(windows)]
-		fn inner_file(&mut self) -> Option<&mut File> {
+		fn native_file(&self) -> Option<&std::fs::File> {
 			None
 		}
 	}
@@ -253,12 +270,12 @@ mod countable {
 
 		#[cfg(unix)]
 		fn inner_fd(&self) -> Option<BorrowedFd<'_>> {
-			Some(self.as_fd())
+			self.native().map(|file| file.as_fd())
 		}
 
 		#[cfg(windows)]
-		fn inner_file(&mut self) -> Option<&mut File> {
-			Some(self)
+		fn native_file(&self) -> Option<&std::fs::File> {
+			self.native()
 		}
 	}
 }
@@ -525,7 +542,6 @@ use std::{
 	borrow::Cow,
 	cmp::max,
 	ffi::{OsStr, OsString},
-	fs::{self, File},
 	io::{self, Write},
 	iter,
 	path::{Path, PathBuf},
@@ -543,7 +559,7 @@ use uucore::{
 };
 
 use self::{
-	count_fast::{count_bytes_chars_and_lines_fast, count_bytes_fast},
+	count_fast::{AlignedBuffer, count_bytes_chars_and_lines_fast, count_bytes_fast},
 	countable::WordCountable,
 	word_count::WordCount,
 };
@@ -669,7 +685,9 @@ impl Inputs {
 			(None, Some(path)) => {
 				let input = Input::from(PathBuf::from(path));
 				let small = match &input {
-					Input::Path(path) => fs::metadata(host.resolve(path))
+					Input::Path(path) => host
+						.fs()
+						.metadata(host.resolve(path))
 						.is_ok_and(|meta| meta.is_file() && meta.len() <= (10 << 20)),
 					Input::Stdin(_) => false,
 				};
@@ -925,6 +943,7 @@ fn app() -> Command {
 fn word_count_from_reader<T: WordCountable>(
 	mut reader: T,
 	settings: &Settings,
+	buffer: &mut AlignedBuffer,
 ) -> (WordCount, Option<io::Error>) {
 	match (
 		settings.show_bytes,
@@ -939,34 +958,34 @@ fn word_count_from_reader<T: WordCountable>(
 		// show_bytes
 		(true, false, false, false, false) => {
 			// Fast path when only show_bytes is true.
-			let (bytes, error) = count_bytes_fast(&mut reader);
+			let (bytes, error) = count_bytes_fast(&mut reader, buffer);
 			(WordCount { bytes, ..WordCount::default() }, error)
 		},
 
 		// Fast paths that can be computed without Unicode decoding.
 		// show_lines
 		(false, false, true, false, false) => {
-			count_bytes_chars_and_lines_fast::<_, false, false, true>(&mut reader)
+			count_bytes_chars_and_lines_fast::<_, false, false, true>(&mut reader, buffer)
 		},
 		// show_chars
 		(false, true, false, false, false) => {
-			count_bytes_chars_and_lines_fast::<_, false, true, false>(&mut reader)
+			count_bytes_chars_and_lines_fast::<_, false, true, false>(&mut reader, buffer)
 		},
 		// show_chars, show_lines
 		(false, true, true, false, false) => {
-			count_bytes_chars_and_lines_fast::<_, false, true, true>(&mut reader)
+			count_bytes_chars_and_lines_fast::<_, false, true, true>(&mut reader, buffer)
 		},
 		// show_bytes, show_lines
 		(true, false, true, false, false) => {
-			count_bytes_chars_and_lines_fast::<_, true, false, true>(&mut reader)
+			count_bytes_chars_and_lines_fast::<_, true, false, true>(&mut reader, buffer)
 		},
 		// show_bytes, show_chars
 		(true, true, false, false, false) => {
-			count_bytes_chars_and_lines_fast::<_, true, true, false>(&mut reader)
+			count_bytes_chars_and_lines_fast::<_, true, true, false>(&mut reader, buffer)
 		},
 		// show_bytes, show_chars, show_lines
 		(true, true, true, false, false) => {
-			count_bytes_chars_and_lines_fast::<_, true, true, true>(&mut reader)
+			count_bytes_chars_and_lines_fast::<_, true, true, true>(&mut reader, buffer)
 		},
 		// show_words
 		(_, false, false, false, true) => word_count_from_reader_specialized::<
@@ -1190,11 +1209,16 @@ enum CountResult {
 ///
 /// Therefore, the reading implementations always return a total and sometimes
 /// return an error: ([`WordCount`], `Option<io::Error>`).
-fn word_count_from_input(input: &Input, settings: &Settings, host: &mut Host) -> CountResult {
+fn word_count_from_input(
+	input: &Input,
+	settings: &Settings,
+	host: &mut Host,
+	buffer: &mut AlignedBuffer,
+) -> CountResult {
 	let (total, maybe_err) = match input {
-		Input::Stdin(_) => word_count_from_reader(&mut host.stdin, settings),
-		Input::Path(path) => match File::open(host.resolve(path)) {
-			Ok(file) => word_count_from_reader(file, settings),
+		Input::Stdin(_) => word_count_from_reader(&mut host.stdin, settings, buffer),
+		Input::Path(path) => match host.fs().open(host.resolve(path)) {
+			Ok(file) => word_count_from_reader(file, settings, buffer),
 			Err(error) => return CountResult::Failure(error),
 		},
 	};
@@ -1239,7 +1263,7 @@ fn compute_number_width(inputs: &Inputs, settings: &Settings, host: &Host) -> us
 				match input {
 					Input::Stdin(_) => minimum_width = MINIMUM_WIDTH,
 					Input::Path(path) => {
-						if let Ok(meta) = fs::metadata(host.resolve(path)) {
+						if let Ok(meta) = host.fs().metadata(host.resolve(path)) {
 							if meta.is_file() {
 								total += meta.len();
 							} else {
@@ -1276,7 +1300,7 @@ fn files0_iter_file(
 	path: &Path,
 	host: &Host,
 ) -> Result<impl Iterator<Item = InputIterItem>, WcError> {
-	let file = File::open(host.resolve(path)).map_err(|source| WcError::Io {
+	let file = host.fs().open(host.resolve(path)).map_err(|source| WcError::Io {
 		context: format!(
 			"cannot open {} for reading",
 			quoting_style::locale_aware_escape_name(
@@ -1460,7 +1484,12 @@ fn wc(inputs: &Inputs, settings: &Settings, host: &mut Host) {
 		}
 	}
 
+	let mut buffer = AlignedBuffer::boxed();
 	for maybe_input in inputs.iter() {
+		// An aborted invocation prints no partial total.
+		if host.is_cancelled() {
+			return;
+		}
 		num_inputs += 1;
 		let input = match maybe_input {
 			Ok(input) => input,
@@ -1470,7 +1499,7 @@ fn wc(inputs: &Inputs, settings: &Settings, host: &mut Host) {
 			},
 		};
 
-		let (word_count, deferred_error) = match word_count_from_input(&input, settings, host) {
+		let (word_count, deferred_error) = match word_count_from_input(&input, settings, host, &mut buffer) {
 			CountResult::Success(word_count) => (word_count, None),
 			CountResult::Interrupted(word_count, source) => (
 				word_count,
@@ -1539,17 +1568,22 @@ fn print_stats(
 		(settings.show_max_line_length, result.max_line_length),
 	];
 
+	// Rendered whole, then written once: the raw stdout would otherwise take
+	// a write per column, space and title, and a concurrent writer could tear
+	// the line.
+	let mut line = Vec::with_capacity(64);
 	let mut space = "";
 	for (_, num) in maybe_cols.iter().filter(|(show, _)| *show) {
-		write!(stdout, "{space}{num:number_width$}")?;
+		write!(line, "{space}{num:number_width$}")?;
 		space = " ";
 	}
 
 	if let Some(title) = title {
-		write!(stdout, "{space}")?;
-		stdout.write_all(&os_bytes_lossy(title))?;
+		line.extend_from_slice(space.as_bytes());
+		line.extend_from_slice(&os_bytes_lossy(title));
 	}
-	writeln!(stdout)
+	line.push(b'\n');
+	stdout.write_all(&line)
 }
 
 /// Creates the `wc` builtin registration.
@@ -1559,12 +1593,13 @@ pub(crate) fn wc_builtin<SE: ShellExtensions>() -> Registration<SE> {
 
 #[cfg(test)]
 mod tests {
-	use std::io::{BufRead, Seek, SeekFrom, Write};
+	use std::io::{Seek, SeekFrom};
+
+	use pi_vfs::BlockingFs;
 
 	use super::{
 		Wc,
-		count_fast::count_bytes_fast,
-		countable::WordCountable,
+		count_fast::{AlignedBuffer, count_bytes_fast},
 		word_count::WordCount,
 	};
 	use crate::host::run_util;
@@ -1612,21 +1647,14 @@ mod tests {
 
 	#[test]
 	fn count_fast_counts_from_the_current_file_position() {
-		let mut file = tempfile::tempfile().unwrap();
-		file.write_all(b"abcdef").unwrap();
+		let directory = tempfile::tempdir().unwrap();
+		let path = directory.path().join("input");
+		std::fs::write(&path, b"abcdef").unwrap();
+		let mut file = BlockingFs::default().open(&path).unwrap();
 		file.seek(SeekFrom::Start(2)).unwrap();
-		let (bytes, error) = count_bytes_fast(&mut file);
+		let (bytes, error) = count_bytes_fast(&mut file, &mut AlignedBuffer::boxed());
 		assert_eq!(bytes, 4);
 		assert!(error.is_none());
-	}
-
-	#[test]
-	fn countable_buffers_files() {
-		let mut file = tempfile::tempfile().unwrap();
-		file.write_all(b"first\nsecond\n").unwrap();
-		file.seek(SeekFrom::Start(0)).unwrap();
-		let lines: Vec<_> = file.buffered().lines().collect::<Result<_, _>>().unwrap();
-		assert_eq!(lines, ["first", "second"]);
 	}
 
 	#[test]

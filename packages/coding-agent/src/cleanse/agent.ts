@@ -3,6 +3,8 @@ import { ModelRegistry } from "../config/model-registry";
 import { formatModelString, resolveCliModel } from "../config/model-resolver";
 import { Settings } from "../config/settings";
 import { IrcBus } from "../irc/bus";
+import { setSharedLspEnabled } from "../lsp/client";
+import { cfgLspShared } from "../lsp/settings";
 import { MAIN_AGENT_ID } from "../registry/agent-registry";
 import { discoverAuthStorage } from "../sdk";
 import { SessionManager } from "../session/session-manager";
@@ -77,7 +79,11 @@ export async function createCleanseAgentRuntime(options: {
 	hooks?: CleanseAgentHooks;
 }): Promise<CleanseAgentRuntime> {
 	const cwd = options.cwd ?? getProjectDir();
-	const [settings, authStorage] = await Promise.all([Settings.init({ cwd }), discoverAuthStorage()]);
+	const settings = await Settings.init({ cwd });
+	// Cleanse workers are all subagents, and only a session that binds process state
+	// sets the process-wide shared-LSP flag, so the runtime sets it for them.
+	setSharedLspEnabled(cfgLspShared.get(settings));
+	const authStorage = await discoverAuthStorage(undefined, { settings });
 	const modelRegistry = new ModelRegistry(authStorage);
 	await modelRegistry.refresh();
 	const resolved = resolveCliModel({ cliModel: options.model, modelRegistry, settings });

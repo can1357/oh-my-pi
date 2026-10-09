@@ -298,6 +298,39 @@ async fn cancellation_prevents_start_and_wait_claims_once() {
 	fs::remove_dir_all(home).unwrap();
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn wait_wakes_on_callback_published_after_it_starts() {
+	let _serial = TEST_SERIAL.lock().await;
+	let home = temp_home("late-callback");
+	fs::create_dir_all(&home).unwrap();
+	let callback = home.join("callback.url");
+	let publisher = {
+		let callback = callback.clone();
+		tokio::spawn(async move {
+			// Lets the wait fail its first claim and park on the watch.
+			tokio::time::sleep(Duration::from_millis(50)).await;
+			let published = std::time::Instant::now();
+			publication::publish_once(&callback, b"omp-test://callback?code=late").unwrap();
+			published
+		})
+	};
+	let url = wait_for_callback_async(
+		&callback,
+		"omp-test",
+		"0123456789abcdef0123456789abcdef",
+		1,
+		&CancelToken::default(),
+	)
+	.await
+	.unwrap();
+	let latency = publisher.await.unwrap().elapsed();
+	assert_eq!(url, "omp-test://callback?code=late");
+	// Well under POLL_INTERVAL: only the directory watch can wake the wait this
+	// fast.
+	assert!(latency < POLL_INTERVAL / 4, "callback claimed {latency:?} after publication");
+	fs::remove_dir_all(home).unwrap();
+}
+
 #[test]
 fn journal_rejects_traversal_and_unknown_fields() {
 	let _serial = TEST_SERIAL.blocking_lock();
@@ -351,4 +384,17 @@ fn darwin_compiler_selection_respects_cc_and_wrappers() {
 	assert_eq!(empty.get_program(), "/usr/bin/xcrun");
 	let empty_args: Vec<_> = empty.get_args().collect();
 	assert_eq!(empty_args, vec![OsStr::new("clang")]);
+}
+
+#[test]
+fn darwin_sdk_root_prefers_explicit_sdkroot() {
+	use std::{ffi::OsStr, path::Path};
+
+	let explicit = super::darwin_compiler::darwin_sdk_root(Some(OsStr::new("/custom/MacOSX.sdk")));
+	assert_eq!(explicit.as_deref(), Some(Path::new("/custom/MacOSX.sdk")));
+
+	// Empty SDKROOT must not pin an empty sysroot; it falls through to xcrun
+	// discovery.
+	let empty = super::darwin_compiler::darwin_sdk_root(Some(OsStr::new("")));
+	assert_ne!(empty.as_deref(), Some(Path::new("")));
 }

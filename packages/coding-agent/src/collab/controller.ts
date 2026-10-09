@@ -1,10 +1,11 @@
 /**
  * Owns collaboration hosting for one interactive process: manual `/collab`,
  * the opt-in `collab.autoStart` policy, and room rotation when the active
- * session changes.
+ * session changes or a room ends on its own.
  *
- * Every room this process hosts shares one random `instanceId` and gets the
- * next `generation`, which is what the local registry keys capabilities by.
+ * Every room the relay opens for this process shares one random `instanceId`
+ * and gets the next `generation`, which is what the local registry keys
+ * capabilities by; a room the relay never opened gives its generation back.
  * A session change stops the current room — withdrawing its registry entry
  * and telling guests goodbye — before a replacement room for the new session
  * is started, so a card that names generation N can never reach session N+1.
@@ -14,13 +15,23 @@ import { logger } from "@oh-my-pi/pi-utils";
 import { sanitizeDisplayLine } from "@oh-my-pi/pi-tui/overlays/extensions/display-text";
 import type { InteractiveModeContext } from "../modes/types";
 import { TRUNCATE_LENGTHS, truncateToWidth } from "@oh-my-pi/pi-tui/render/render-utils";
-import { CollabHost, CollabHostStoppedError } from "./host";
+import { CollabHost, CollabHostStoppedError, CollabRelayUnavailableError } from "./host";
 import type { CollabAccess } from "./registry";
+
+import { cfgCollabAutoStart, cfgCollabRelayUrl, cfgCollabWebUrl } from "./settings";
 
 export type CollabAutoStart = "off" | CollabAccess;
 
 const SESSION_SWITCH_REASON =
 	"session switched; prompts not shown in the conversation were not submitted. Rejoin and resend them";
+/**
+ * First relaunch after a room ends on its own, or after the relay was unavailable
+ * for a policy launch, is immediate; repeats back off from this delay.
+ */
+const RELAUNCH_BACKOFF_BASE_MS = 1_000;
+const RELAUNCH_BACKOFF_MAX_MS = 60_000;
+/** A relaunch cause this long after the previous one counts as healthy and resets the backoff. */
+const RELAUNCH_BACKOFF_RESET_MS = 5 * 60_000;
 
 export interface CollabStartOptions {
 	/** Highest access the registry may hand out for the new room. */
@@ -44,6 +55,13 @@ export class CollabController {
 	#startupComplete = false;
 	#shutdown = false;
 	#shutdownWake: PromiseWithResolvers<void> | undefined;
+	/**
+	 * Consecutive relaunch causes — rooms that ended on their own, policy launches
+	 * the relay never opened — within {@link RELAUNCH_BACKOFF_RESET_MS} of each other.
+	 */
+	#relaunchStreak = 0;
+	#lastRelaunchCauseAt: number | undefined;
+	#relaunchTimer: Timer | undefined;
 
 	constructor(ctx: InteractiveModeContext) {
 		this.#ctx = ctx;
@@ -63,14 +81,16 @@ export class CollabController {
 	}
 
 	get autoStartMode(): CollabAutoStart {
-		return this.#ctx.settings.get("collab.autoStart");
+		return cfgCollabAutoStart.get(this.#ctx.settings);
 	}
 
 	/**
 	 * Apply `collab.autoStart` for the current session. The room object is
 	 * installed synchronously so dialogs raised before the relay connects are
 	 * retained for the first writer; the connection itself proceeds in the
-	 * background and a failure is reported without disturbing the session.
+	 * background and a failure is reported without disturbing the session. A
+	 * relay that is unavailable is retried on the relaunch backoff, so hosting
+	 * starts once it answers.
 	 * Until {@link startupComplete} is called, guests can join and answer
 	 * dialogs but cannot prompt, interrupt, or command agents.
 	 */
@@ -174,6 +194,8 @@ export class CollabController {
 	async shutdown(reason: string): Promise<void> {
 		this.#shutdown = true;
 		this.#shutdownWake?.resolve();
+		clearTimeout(this.#relaunchTimer);
+		this.#relaunchTimer = undefined;
 		this.#unsubscribeSessionChange?.();
 		this.#unsubscribeSessionChange = undefined;
 		// Stop before draining the chain: a room still connecting is aborted at
@@ -183,7 +205,7 @@ export class CollabController {
 	}
 
 	#resolveRelayUrl(relay?: string): string {
-		const input = relay?.trim() || this.#ctx.settings.get("collab.relayUrl") || "";
+		const input = relay?.trim() || cfgCollabRelayUrl.get(this.#ctx.settings) || "";
 		if (!input) {
 			throw new Error(
 				"No relay configured. Set collab.relayUrl in /settings or pass one: /collab relay.example.com",
@@ -213,14 +235,15 @@ export class CollabController {
 		if (stopEpoch !== this.#stopEpoch) throw new CollabHostStoppedError("collab controller stopped");
 		if (this.#ctx.collabGuest) throw new CollabHostStoppedError("collab guest owns the session");
 		const relayUrl = this.#resolveRelayUrl(relay);
-		const webUrl = this.#ctx.settings.get("collab.webUrl") || "";
+		const webUrl = cfgCollabWebUrl.get(this.#ctx.settings) || "";
 		this.#observeSessionChanges();
 		const previous = this.#host;
-		const host = new CollabHost(this.#ctx, {
+		const host: CollabHost = new CollabHost(this.#ctx, {
 			instanceId: this.instanceId,
 			generation: ++this.#generation,
 			access,
 			guestActionsReady: () => this.#startupComplete && !this.#ctx.session.isSessionTransitioning,
+			onEnded: () => this.#onHostEnded(host),
 		});
 		this.#host = host;
 		this.#ctx.collabHost = host;
@@ -232,6 +255,9 @@ export class CollabController {
 		} catch (err) {
 			if (this.#host === host) this.#host = undefined;
 			if (this.#ctx.collabHost === host) this.#ctx.collabHost = undefined;
+			// No guest or registry reader ever saw this room, so its successor takes
+			// its generation: a recovered process still publishes generation 1 first.
+			if (err instanceof CollabRelayUnavailableError && this.#generation === host.generation) this.#generation--;
 			throw err;
 		}
 		return host;
@@ -241,13 +267,17 @@ export class CollabController {
 	 * Background start: a failure is logged and shown, never thrown. A room
 	 * that this controller (or `/collab stop`) deliberately stopped while it
 	 * was still connecting — session switch, access upgrade, shutdown — is not
-	 * a failure; its replacement, if any, is already on its way.
+	 * a failure; its replacement, if any, is already on its way. A relay that
+	 * never opened the room (unreachable, connect timeout) is retried on the
+	 * relaunch backoff; any other failure waits for the next session change or
+	 * `/collab`.
 	 */
 	async #launchReporting(access: CollabAccess, stopEpoch: number): Promise<void> {
 		try {
 			await this.#launch(access, stopEpoch);
 		} catch (err) {
 			this.#reportFailure(err);
+			if (!this.#shutdown && err instanceof CollabRelayUnavailableError) this.#scheduleRelaunch(stopEpoch);
 		}
 	}
 
@@ -269,10 +299,52 @@ export class CollabController {
 	#onSessionChanged(): void {
 		const previous = this.#host;
 		if (this.host) return;
-		const stopEpoch = this.#stopEpoch;
 		// Stop synchronously so a room still connecting is aborted now rather than
 		// after the queued start settles; the chain then waits for that stop.
-		const stopping = previous && this.#stopHost(previous, SESSION_SWITCH_REASON);
+		this.#reapplyAutoStart(previous && this.#stopHost(previous, SESSION_SWITCH_REASON));
+	}
+
+	/**
+	 * The relay ended the current room without `stop()` (fatal close, e.g. send
+	 * backlog). The policy still applies to this session, so host a successor;
+	 * `#launch` waits for the ended room to finish withdrawing first.
+	 */
+	#onHostEnded(host: CollabHost): void {
+		if (host !== this.#host) return;
+		this.#scheduleRelaunch(this.#stopEpoch);
+	}
+
+	/**
+	 * Re-apply the policy after a room ended on its own or the relay never opened
+	 * a policy launch. Causes that keep repeating back off exponentially so a
+	 * persistently failing relay cannot spin; `/collab`, a session change,
+	 * `/collab stop`, or shutdown during the wait take precedence over the
+	 * delayed relaunch.
+	 */
+	#scheduleRelaunch(stopEpoch: number): void {
+		const now = Date.now();
+		const repeated =
+			this.#lastRelaunchCauseAt !== undefined && now - this.#lastRelaunchCauseAt < RELAUNCH_BACKOFF_RESET_MS;
+		this.#relaunchStreak = repeated ? this.#relaunchStreak + 1 : 0;
+		this.#lastRelaunchCauseAt = now;
+		if (this.#relaunchStreak === 0) {
+			this.#reapplyAutoStart(undefined, stopEpoch);
+			return;
+		}
+		const delay = Math.min(RELAUNCH_BACKOFF_BASE_MS * 2 ** (this.#relaunchStreak - 1), RELAUNCH_BACKOFF_MAX_MS);
+		clearTimeout(this.#relaunchTimer);
+		this.#relaunchTimer = setTimeout(() => {
+			this.#relaunchTimer = undefined;
+			this.#reapplyAutoStart(undefined, stopEpoch);
+		}, delay);
+	}
+
+	/**
+	 * Queue a policy launch for the current session once `stopping` settles,
+	 * unless shutdown, a stop after `stopEpoch` was taken, a live room, or a
+	 * guest intervened.
+	 */
+	#reapplyAutoStart(stopping: Promise<void> | undefined, stopEpoch = this.#stopEpoch): void {
 		this.#ops = this.#ops
 			.then(async () => {
 				await stopping;

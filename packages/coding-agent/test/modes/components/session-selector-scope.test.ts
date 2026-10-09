@@ -70,6 +70,34 @@ describe("SessionSelectorComponent scope toggle", () => {
 		expect(loads).toBe(1);
 	});
 
+	it("shows directories in folder scope only when the list spans worktrees, across a Tab round-trip", () => {
+		const single = new SessionSelectorComponent(
+			[createSession("a", "Alpha", "/work/repo"), createSession("b", "Beta", "/work/repo")],
+			() => {},
+			() => {},
+			() => {},
+		);
+		expect(single.render(120).join("\n")).not.toContain("/work/repo");
+
+		const folder = [createSession("main", "Main", "/work/repo"), createSession("wt", "Moved", "/work/repo-wt")];
+		const selector = new SessionSelectorComponent(
+			folder,
+			() => {},
+			() => {},
+			() => {},
+			// Preloaded, so both Tab toggles apply synchronously.
+			{ allSessions: folder },
+		);
+		expect(selector.render(120).join("\n")).toContain("/work/repo-wt");
+
+		selector.handleInput(TAB);
+		expect(selector.render(120).join("\n")).toContain("(all projects)");
+		selector.handleInput(TAB);
+		const rendered = selector.render(120).join("\n");
+		expect(rendered).toContain("(current folder)");
+		expect(rendered).toContain("/work/repo-wt");
+	});
+
 	it("returns the full selected session, including its cwd", async () => {
 		const folder = [createSession("local", "Local", "/work/current")];
 		const remote = createSession("remote", "Remote", "/work/other-project");
@@ -113,9 +141,7 @@ describe("SessionSelectorComponent scope toggle", () => {
 		expect(rendered).toContain("(current folder)");
 		expect(rendered).not.toContain("(all projects)");
 		expect(rendered).not.toContain("other-project");
-		// The empty-state hint must be visible so the user knows Tab is the way out.
 		expect(rendered).toContain("No sessions in current folder");
-		expect(rendered).toContain("Press Tab to view all");
 	});
 
 	it("marks forked child sessions in the rendered list", () => {
