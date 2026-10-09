@@ -14,8 +14,8 @@ import { createAssistantMessage } from "./helpers/agent-session-setup";
 let session: AgentSession | undefined;
 let authStorage: AuthStorage | undefined;
 // Earlier full-suite files that boot main() in ACP/RPC mode set PI_NO_TITLE=1
-// process-wide (main.ts) and never restore it; maybeStartTitleGeneration gates
-// on it, so these tests would silently skip titling and time out.
+// process-wide (main.ts) and never restore it; automatic titling gates on it,
+// so these tests would silently skip titling and time out.
 let previousNoTitle: string | undefined;
 
 beforeEach(() => {
@@ -32,6 +32,12 @@ afterEach(async () => {
 	session = undefined;
 	authStorage = undefined;
 });
+
+/**
+ * Side turns decline: a first message's title fork answers `<title/>`, so the
+ * title model takes over (the path these tests cover).
+ */
+const declineTitleFork = createMockModel({ handler: { content: ["<title/>"] } }).stream;
 
 /** Assistant reply long enough (>= 40 words) to trigger a deferred retitle. */
 const TOKENIZER_REPLY =
@@ -68,7 +74,7 @@ describe("AgentSession title generation disposal", () => {
 		const agent = new Agent({
 			getApiKey: () => "test-key",
 			initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
-			streamFn: createMockModel({ responses: [{ content: ["Done"] }] }).stream,
+			streamFn: createMockModel({ handler: { content: ["Done"] } }).stream,
 		});
 		const pinnedAccount = storage.oauth.accounts("anthropic").find(account => account.accountId === "account-b");
 		if (!pinnedAccount) throw new Error("Expected account-b credential");
@@ -130,13 +136,15 @@ describe("AgentSession title generation disposal", () => {
 		const agent = new Agent({
 			getApiKey: () => "test-key",
 			initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
-			streamFn: createMockModel({ responses: [{ content: ["Done"] }] }).stream,
+			streamFn: createMockModel({ handler: { content: ["Done"] } }).stream,
 		});
 		session = new AgentSession({
 			agent,
 			sessionManager: SessionManager.inMemory(),
 			settings,
 			modelRegistry: new ModelRegistry(authStorage),
+			sideStreamFn: declineTitleFork,
+			autoTitle: true,
 		});
 		const started = Promise.withResolvers<void>();
 		const response = Promise.withResolvers<ai.AssistantMessage>();
@@ -145,9 +153,9 @@ describe("AgentSession title generation disposal", () => {
 			return response.promise;
 		});
 
-		session.maybeStartTitleGeneration("/skill:implement issues/07-manual-llm.md");
+		await session.prompt("implement issues/07-manual-llm.md");
 		await started.promise;
-		session.maybeStartTitleGeneration("/skill:implement issues/08-app-settings.md");
+		await session.prompt("implement issues/08-app-settings.md");
 		expect(completeSimple).toHaveBeenCalledTimes(1);
 
 		response.resolve(createAssistantMessage("<title>manual llm</title>"));
@@ -167,13 +175,15 @@ describe("AgentSession title generation disposal", () => {
 		const agent = new Agent({
 			getApiKey: () => "test-key",
 			initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
-			streamFn: createMockModel({ responses: [{ content: ["Done"] }] }).stream,
+			streamFn: createMockModel({ handler: { content: ["Done"] } }).stream,
 		});
 		session = new AgentSession({
 			agent,
 			sessionManager: SessionManager.inMemory(),
 			settings,
 			modelRegistry: new ModelRegistry(authStorage),
+			sideStreamFn: declineTitleFork,
+			autoTitle: true,
 		});
 		const firstStarted = Promise.withResolvers<void>();
 		const secondStarted = Promise.withResolvers<void>();
@@ -193,12 +203,12 @@ describe("AgentSession title generation disposal", () => {
 		const setSessionName = vi.spyOn(session.sessionManager, "setSessionName");
 		const firstSessionId = session.sessionManager.getSessionId();
 
-		session.maybeStartTitleGeneration("/skill:implement issues/07-manual-llm.md");
+		await session.prompt("implement issues/07-manual-llm.md");
 		await firstStarted.promise;
 		expect(await session.newSession()).toBe(true);
 		expect(session.sessionManager.getSessionId()).not.toBe(firstSessionId);
 
-		session.maybeStartTitleGeneration("name the replacement session");
+		await session.prompt("name the replacement session");
 		await secondStarted.promise;
 		expect(completeSimple).toHaveBeenCalledTimes(2);
 
@@ -236,6 +246,8 @@ describe("AgentSession title generation disposal", () => {
 			sessionManager: SessionManager.inMemory(),
 			settings,
 			modelRegistry: new ModelRegistry(authStorage),
+			sideStreamFn: declineTitleFork,
+			autoTitle: true,
 		});
 		const titleInputs: string[] = [];
 		vi.spyOn(ai, "completeSimple").mockImplementation(async (_model, context) => {
@@ -246,7 +258,6 @@ describe("AgentSession title generation disposal", () => {
 		const named = Promise.withResolvers<void>();
 		session.sessionManager.onSessionNameChanged(() => named.resolve());
 
-		session.maybeStartTitleGeneration("help");
 		await session.prompt("help");
 		await named.promise;
 
@@ -275,6 +286,8 @@ describe("AgentSession title generation disposal", () => {
 			sessionManager: SessionManager.inMemory(),
 			settings,
 			modelRegistry: new ModelRegistry(authStorage),
+			sideStreamFn: declineTitleFork,
+			autoTitle: true,
 		});
 		const titleInputs: string[] = [];
 		vi.spyOn(ai, "completeSimple").mockImplementation(async (_model, context) => {
@@ -285,7 +298,6 @@ describe("AgentSession title generation disposal", () => {
 		const named = Promise.withResolvers<void>();
 		session.sessionManager.onSessionNameChanged(() => named.resolve());
 
-		session.maybeStartTitleGeneration("fix [Image #1, 640x200]");
 		await session.prompt("fix [Image #1, 640x200]");
 		await named.promise;
 

@@ -400,6 +400,56 @@ describe("normalizeSchemaForGoogle", () => {
 		});
 	});
 
+	it("strips uniqueItems and unsupported array/content validation keywords for Google and CCA", () => {
+		const input = {
+			type: "object",
+			properties: {
+				tags: {
+					type: "array",
+					items: { type: "string" },
+					uniqueItems: true,
+					description: "List of tags",
+				},
+				data: {
+					type: "string",
+					contentEncoding: "base64",
+					contentMediaType: "image/png",
+				},
+			},
+		};
+
+		const googleExpected = {
+			type: "object",
+			properties: {
+				tags: {
+					type: "array",
+					items: { type: "string" },
+					description: "List of tags\n\n{uniqueItems: true}",
+				},
+				data: {
+					type: "string",
+				},
+			},
+			propertyOrdering: ["tags", "data"],
+		};
+		const ccaExpected = {
+			type: "object",
+			properties: {
+				tags: {
+					type: "array",
+					items: { type: "string" },
+					description: "List of tags\n\n{uniqueItems: true}",
+				},
+				data: {
+					type: "string",
+				},
+			},
+		};
+
+		expect(normalizeSchemaForGoogle(input)).toEqual(googleExpected);
+		expect(normalizeSchemaForCCA(input)).toEqual(ccaExpected);
+	});
+
 	it("falls back when a false subschema produces unsupported `not` on the CCA wire", () => {
 		const fallback = { type: "object", properties: {} };
 

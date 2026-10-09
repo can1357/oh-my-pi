@@ -157,7 +157,8 @@ export class BufferLine {
 	isWrapped = false;
 
 	constructor(columns: number, attrs: Readonly<CellAttributes> = DEFAULT_CELL_ATTRIBUTES) {
-		this.cells = new Array<CellData>(columns).fill(sharedBlankCell(attrs));
+		const blank = sharedBlankCell(attrs);
+		this.cells = Array.from({ length: columns }, () => blank);
 	}
 
 	/** Number of grid columns in the line. */

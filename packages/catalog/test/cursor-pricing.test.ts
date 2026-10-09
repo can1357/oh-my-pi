@@ -141,6 +141,20 @@ describe("cursor API-equivalent pricing", () => {
 		});
 	});
 
+	it("models the Claude Haiku 5.5 100K 5x long tier on both lanes", () => {
+		for (const id of ["claude-haiku-5-5", "claude-haiku-5-5-1m"]) {
+			const haiku = buildModel(spec(id));
+			expect(haiku.cost).toMatchObject({ input: 0.1, output: 0.5, cacheRead: 0.01, cacheWrite: 0.125 });
+			expect(haiku.cost.longContext).toEqual({
+				inputThreshold: 100_000,
+				input: 0.5,
+				output: 2.5,
+				cacheRead: 0.05,
+				cacheWrite: 0.625,
+			});
+		}
+	});
+
 	it("prices every served catalog id; only docs-absent ids stay zero", () => {
 		// Snapshot of the Cursor roster on 2026-09-22. A newly served id
 		// without a cost-patch rule fails here instead of silently billing

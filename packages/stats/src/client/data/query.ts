@@ -17,14 +17,7 @@
 
 import { startTransition, useCallback, useEffect, useReducer, useRef, useState } from "react";
 import { currentLiveVersion, useLiveVersion } from "./live";
-import {
-	cachedEntry,
-	type Inflight,
-	inflightRequest,
-	loadQuery,
-	type QueryFetcher,
-	releaseQuery,
-} from "./query-store";
+import { cachedEntry, type Inflight, inflightRequest, loadQuery, type QueryFetcher, releaseQuery } from "./query-store";
 
 /** Minimum spacing between live-driven refetches of one query. */
 const LIVE_REFETCH_THROTTLE_MS = 1500;
@@ -60,11 +53,7 @@ export function prefetchQuery<T>(key: readonly unknown[], fetcher: () => Promise
 	loadQuery(keyString, currentLiveVersion(), fetcher).promise.catch(() => {});
 }
 
-export function useQuery<T>(
-	key: readonly unknown[],
-	fetcher: QueryFetcher<T>,
-	options?: QueryOptions,
-): QueryResult<T> {
+export function useQuery<T>(key: readonly unknown[], fetcher: QueryFetcher<T>, options?: QueryOptions): QueryResult<T> {
 	const keyString = JSON.stringify(key);
 	const enabled = options?.enabled ?? true;
 	const pollMs = options?.pollMs;

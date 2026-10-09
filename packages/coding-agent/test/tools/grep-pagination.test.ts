@@ -28,7 +28,10 @@ describe("grep file pagination", () => {
 	it("pages files 20 at a time and caps an overflowing file's matches", async () => {
 		const names = Array.from({ length: 25 }, (_, index) => `f${String(index).padStart(2, "0")}.txt`);
 		for (const name of names) await Bun.write(path.join(cwd, name), "needle\n");
-		await Bun.write(path.join(cwd, "hot.txt"), Array.from({ length: 30 }, (_, index) => `needle ${index}`).join("\n"));
+		await Bun.write(
+			path.join(cwd, "hot.txt"),
+			Array.from({ length: 30 }, (_, index) => `needle ${index}`).join("\n"),
+		);
 		const session: ToolSession = {
 			cwd,
 			hasUI: false,

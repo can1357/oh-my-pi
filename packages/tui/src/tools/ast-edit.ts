@@ -246,7 +246,7 @@ export const astEditToolRenderer = {
 		// reconstruct across the blank-line groups the tree list collapses by.
 		const contexts = classifyGroupedLines(allLines, details?.cwd ?? details?.searchPath, details?.searchPath);
 		// Style lazily: collapsed bodies show only the first groups.
-		const styledLines: (string | undefined)[] = new Array(allLines.length);
+		const styledLines: (string | undefined)[] = Array.from({ length: allLines.length }, () => undefined);
 		const styleLine = (index: number): string => {
 			const cached = styledLines[index];
 			if (cached !== undefined) return cached;

@@ -103,9 +103,14 @@ describe("formatJavaScriptForDisplay", () => {
 			["class A {", "    m() {", "        return { a: 1 }", "    }", "}", "const o = { b: 2 }"].join("\n"),
 		);
 		expect(formatJavaScriptForDisplay("function g(){switch(x){case 1:{y()}}}const z={k:[1,2]}")).toBe(
-			["function g() {", "    switch (x) {", "        case 1: { y() }", "    }", "}", "const z = { k: [1, 2] }"].join(
-				"\n",
-			),
+			[
+				"function g() {",
+				"    switch (x) {",
+				"        case 1: { y() }",
+				"    }",
+				"}",
+				"const z = { k: [1, 2] }",
+			].join("\n"),
 		);
 	});
 
