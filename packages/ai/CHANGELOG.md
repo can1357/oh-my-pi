@@ -10,6 +10,8 @@
 
 ### Fixed
 
+- Fixed Cursor passthrough allowlists to use protocol tool cases and restrict advertised client MCP definitions instead of disabling live tools ([#10099](https://github.com/can1357/oh-my-pi/pull/10099) by [@jroth1111](https://github.com/jroth1111)).
+
 - Fixed Cursor routed-model updates being discarded despite advertising support, while preserving explicit requested model labels ([#11324](https://github.com/can1357/oh-my-pi/pull/11324) by [@jroth1111](https://github.com/jroth1111)).
 
 - Fixed Claude Haiku 5.5 requests silently enabling adaptive thinking when reasoning is off, on native Bedrock (main and helper calls) and the Anthropic API; conversations whose earlier effort controls rule out disabled thinking fall back to lowest-effort adaptive thinking instead of failing ([#14996](https://github.com/can1357/oh-my-pi/pull/14996) by [@bse-ai](https://github.com/bse-ai)).

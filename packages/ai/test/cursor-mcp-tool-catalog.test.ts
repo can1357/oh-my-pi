@@ -11,6 +11,13 @@ const tool = (name: string, parameters: TSchema = { type: "object", properties: 
 });
 
 describe("cursor buildMcpToolDefinitions", () => {
+	it("passthrough forwards native-named client tools as MCP without duplicate Write definitions", () => {
+		const tools = [tool("read"), tool("write"), tool("bash")];
+		const definitions = buildMcpToolDefinitions(tools, false, true);
+		expect(definitions.map(definition => definition.toolName)).toEqual(["read", "write", "bash"]);
+		expect(definitions.every(definition => definition.providerIdentifier === "pi-agent")).toBe(true);
+		expect(buildMcpToolDefinitions(tools)).toEqual([]);
+	});
 	it("forwards the write transport alongside preview-staging devices so xd:// resolution stays reachable", () => {
 		// A Cursor session with xdev on: ast_edit is a mounted device, write is the
 		// xd:// transport carried top-level. ast_edit always stages a preview whose

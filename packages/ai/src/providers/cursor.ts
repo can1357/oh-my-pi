@@ -1246,9 +1246,37 @@ function streamCursorWithWireMode(
 			const { requestBytes, conversationState } = builtRequest;
 			serializedFallbackWireModelId = builtRequest.fallbackWireModelId;
 			conversationEntry.state = conversationState;
+			let clientTools = context.tools;
+			if (options?.externalToolExecutor) {
+				if (options.toolChoice === "required" || options.toolChoice === "any") {
+					throw new AIError.ValidationError(
+						`Cursor passthrough does not support toolChoice "${options.toolChoice}"`,
+					);
+				}
+				const forcedName = getNamedToolChoiceName(options.toolChoice);
+				if (forcedName && CURSOR_PASSTHROUGH_SERVER_ONLY_TOOLS.has(forcedName)) {
+					throw new AIError.ValidationError(
+						`Cursor passthrough does not support forcing server-only tool "${forcedName}"`,
+					);
+				}
+				if (forcedName && !(context.tools ?? []).some(tool => tool.name === forcedName)) {
+					throw new AIError.ValidationError(
+						`Cursor passthrough tool "${forcedName}" is not declared by the client`,
+					);
+				}
+				clientTools =
+					options.toolChoice === "none"
+						? []
+						: (context.tools ?? []).filter(
+								tool =>
+									!CURSOR_PASSTHROUGH_SERVER_ONLY_TOOLS.has(tool.name) &&
+									(!forcedName || tool.name === forcedName),
+							);
+			}
 			const requestContextTools = buildMcpToolDefinitions(
-				context.tools,
+				clientTools,
 				model.requiresCursorToolSchemaProjection === true,
+				options?.externalToolExecutor === true,
 			);
 			const requestContextRules = buildCursorRequestContextRules(context.systemPrompt);
 			// Auto mode may request wire id "default" while output.model stays the
@@ -1300,37 +1328,13 @@ function streamCursorWithWireMode(
 			if (options?.cursorDevExperimentOverrides !== undefined) {
 				requestHeaders["x-dev-experiment-overrides"] = options.cursorDevExperimentOverrides;
 			}
-			// In passthrough mode, restrict the model's tool view to exactly the
-			// caller-declared tools (including native names like bash/read/write).
-			// Always send the header: omitting it leaves Cursor's unrestricted native
-			// set enabled (including when tools is empty / text-only passthrough).
-			// toolChoice "none" disables tools; a named forced choice advertises that
-			// name alone (even when absent from context.tools — Cursor decides).
-			// Cursor has no required-call signal, so `toolChoice: "required"` would
-			// silently weaken to auto — reject it instead of advertising the full list.
+			// The CLI filter uses ToolCall oneof field names, not OMP function names.
+			// All client-owned definitions (including bash/read/write) use MCP in
+			// passthrough, disabling native hosted tools. Empty means no tools.
 			if (options?.externalToolExecutor) {
-				if (options.toolChoice === "required" || options.toolChoice === "any") {
-					throw new AIError.ValidationError(
-						`Cursor passthrough does not support toolChoice "${options.toolChoice}"; use a named tool choice or omit toolChoice`,
-					);
-				}
-				const forcedName = getNamedToolChoiceName(options.toolChoice);
-				// Interaction-only tools (e.g. connect_scm / native todos) are resolved
-				// entirely server-side with no deferrable exec frame — advertising them
-				// lets Cursor finish the work while an OpenAI client would still try to
-				// re-run the surfaced call. Exclude them from the allowlist, and reject
-				// a forced choice that names one rather than weakening to the remaining
-				// declared tools / `__none__`.
-				if (forcedName && CURSOR_PASSTHROUGH_SERVER_ONLY_TOOLS.has(forcedName)) {
-					throw new AIError.ValidationError(
-						`Cursor passthrough does not support forcing server-only tool "${forcedName}"`,
-					);
-				}
-				const declared = (context.tools ?? [])
-					.map(tool => tool.name)
-					.filter(name => name.length > 0 && !CURSOR_PASSTHROUGH_SERVER_ONLY_TOOLS.has(name));
-				const allowedTools = options.toolChoice === "none" ? "" : forcedName ? forcedName : declared.join(",");
-				requestHeaders["x-cursor-agent-allowed-tools"] = allowedTools || "__none__";
+				requestHeaders["x-cursor-agent-allowed-tools"] = requestContextTools.length
+					? "get_mcp_tools_tool_call,mcp_tool_call"
+					: "";
 			}
 			const debugSession = isRequestDebugEnabled()
 				? await createRequestDebugSession({
@@ -5973,12 +5977,13 @@ function isJsonValue(value: unknown): value is JsonValue {
 export function buildMcpToolDefinitions(
 	tools: Tool[] | undefined,
 	requiresCursorToolSchemaProjection = false,
+	includeNativeNames = false,
 ): McpToolDefinition[] {
 	if (!tools || tools.length === 0) {
 		return [];
 	}
 
-	const advertisedTools = tools.filter(tool => !CURSOR_NATIVE_TOOL_NAMES.has(tool.name));
+	const advertisedTools = includeNativeNames ? tools : tools.filter(tool => !CURSOR_NATIVE_TOOL_NAMES.has(tool.name));
 	if (advertisedTools.length === 0) {
 		return [];
 	}
@@ -5990,7 +5995,7 @@ export function buildMcpToolDefinitions(
 	// devices are advertised — otherwise a staged preview can never be resolved
 	// and the SoftToolRequirement('write') escalation aborts the turn.
 	const writeTool = tools.find(tool => tool.name === "write");
-	const forwarded = writeTool ? [...advertisedTools, writeTool] : advertisedTools;
+	const forwarded = writeTool && !includeNativeNames ? [...advertisedTools, writeTool] : advertisedTools;
 
 	return forwarded.map(tool => {
 		const wireSchema = toolWireSchema(tool);

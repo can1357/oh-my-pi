@@ -212,7 +212,7 @@ describe("Cursor passthrough allowed-tools header", () => {
 				options: { externalToolExecutor: true },
 			},
 		);
-		expect(sent["x-cursor-agent-allowed-tools"]).toBe("bash,read");
+		expect(sent["x-cursor-agent-allowed-tools"]).toBe("get_mcp_tools_tool_call,mcp_tool_call");
 	});
 
 	it("sends __none__ when toolChoice is none even if tools are declared", async () => {
@@ -223,7 +223,7 @@ describe("Cursor passthrough allowed-tools header", () => {
 				options: { externalToolExecutor: true, toolChoice: "none" },
 			},
 		);
-		expect(sent["x-cursor-agent-allowed-tools"]).toBe("__none__");
+		expect(sent["x-cursor-agent-allowed-tools"]).toBe("");
 	});
 
 	it("restricts allowlist to a named forced toolChoice", async () => {
@@ -234,10 +234,10 @@ describe("Cursor passthrough allowed-tools header", () => {
 				options: { externalToolExecutor: true, toolChoice: { type: "tool", name: "read" } },
 			},
 		);
-		expect(sent["x-cursor-agent-allowed-tools"]).toBe("read");
+		expect(sent["x-cursor-agent-allowed-tools"]).toBe("get_mcp_tools_tool_call,mcp_tool_call");
 	});
 
-	it("advertises a forced tool name even when it is absent from context.tools", async () => {
+	it("does not advertise an undeclared forced tool", async () => {
 		const sent = await send(
 			{},
 			{
@@ -248,7 +248,7 @@ describe("Cursor passthrough allowed-tools header", () => {
 				},
 			},
 		);
-		expect(sent["x-cursor-agent-allowed-tools"]).toBe("report_delivery");
+		expect(sent["x-cursor-agent-allowed-tools"]).toBeUndefined();
 	});
 
 	it("rejects toolChoice required under passthrough instead of weakening to auto", async () => {
@@ -280,7 +280,7 @@ describe("Cursor passthrough allowed-tools header", () => {
 				options: { externalToolExecutor: true },
 			},
 		);
-		expect(sent["x-cursor-agent-allowed-tools"]).toBe("__none__");
+		expect(sent["x-cursor-agent-allowed-tools"]).toBe("");
 	});
 
 	it("excludes SCM and hosted web tools from the client-owned passthrough allowlist", async () => {
@@ -299,7 +299,7 @@ describe("Cursor passthrough allowed-tools header", () => {
 				options: { externalToolExecutor: true },
 			},
 		);
-		expect(sent["x-cursor-agent-allowed-tools"]).toBe("bash,read");
+		expect(sent["x-cursor-agent-allowed-tools"]).toBe("get_mcp_tools_tool_call,mcp_tool_call");
 	});
 
 	it("excludes native todo tools from the passthrough allowlist", async () => {
@@ -318,6 +318,6 @@ describe("Cursor passthrough allowed-tools header", () => {
 				options: { externalToolExecutor: true },
 			},
 		);
-		expect(sent["x-cursor-agent-allowed-tools"]).toBe("bash,read");
+		expect(sent["x-cursor-agent-allowed-tools"]).toBe("get_mcp_tools_tool_call,mcp_tool_call");
 	});
 });
