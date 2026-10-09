@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [18.8.7] - 2026-10-09
+
 ### Added
 
 - Added built-in CoralBricks support with `/login`, live model discovery, per-model reasoning levels and off controls, and bundled offline fallbacks. ([#14146](https://github.com/can1357/oh-my-pi/pull/14146) by [@ryan-brosas](https://github.com/ryan-brosas))
