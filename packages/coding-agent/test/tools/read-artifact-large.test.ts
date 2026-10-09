@@ -48,6 +48,26 @@ function byteLimitedRangeArtifact(): string {
 	return Array.from({ length: 100 }, (_, index) => `line-${index + 1} ${"x".repeat(1_016)}`).join("\n");
 }
 
+/**
+ * 100 lines of 699 bytes — just under the 768-column output cap, so the text the
+ * read returns is the bytes collected and the per-call budget is what bounds the
+ * page, not the column truncation.
+ */
+function multiRangeBudgetArtifact(): string {
+	return Array.from(
+		{ length: 100 },
+		(_, index) => `line-${String(index + 1).padStart(3, "0")} ${"x".repeat(690)}`,
+	).join("\n");
+}
+
+/** 6.000 lines of 701 bytes, stacked past the 4 MiB snapshot cap so ranges stream off disk. */
+function streamedMultiRangeArtifact(): string {
+	return Array.from(
+		{ length: 6_000 },
+		(_, index) => `line-${String(index + 1).padStart(5, "0")} ${"x".repeat(690)}`,
+	).join("\n");
+}
+
 describe("read tool large artifact handling", () => {
 	let testDir: string;
 	let artifactDir: string;
@@ -152,16 +172,75 @@ describe("read tool large artifact handling", () => {
 		expect(formatTruncationMetaNotice(truncation)).not.toContain("Use :2 to continue");
 	});
 
-	it("still returns the oversized selected line when a wider range raises the byte budget", async () => {
+	it("bounds a wide artifact range by the per-call budget instead of scaling past it", async () => {
 		await Bun.write(path.join(artifactDir, "0.mcp.log"), oversizedSelectedLineArtifact());
 
 		const result = await tool.execute("call-wide-oversized-selected", { path: "artifact://0:2-142" });
 		const output = getTextOutput(result);
 
-		expect(output).toContain("oversized-");
-		expect(output).toContain("trailing-two");
-		expect(output).not.toContain("could not fit after preceding context");
-		expect(result.details?.meta?.truncation).toBeUndefined();
+		// Before the per-call budget, widening the range to 2-142 raised the byte
+		// budget above the line's 68.4KB, so one page carried the whole oversized
+		// line plus its trailing context. The budget is fixed per call now, so the
+		// read falls back to the oversized-line notice and the raw hint, exactly
+		// what `2-2` already did.
+		expect(output).toContain("could not fit after preceding context");
+		expect(output).toContain("Line 2 is 68.4KB");
+		expect(output).toContain("50.0KB read budget");
+		expect(output).toContain("artifact://0:raw:2-2");
+		expect(output).not.toContain("trailing-two");
+	});
+
+	it("cuts a multi-range artifact read at the per-call byte budget and names the next line", async () => {
+		await Bun.write(path.join(artifactDir, "0.mcp.log"), multiRangeBudgetArtifact());
+
+		const result = await tool.execute("call-multi-range-budget", { path: "artifact://0:1-40,60-100" });
+		const output = getTextOutput(result);
+
+		// Each range fits its own per-range budget (40 lines × 699 bytes ≈ 28KB),
+		// so the old page returned all 81 selected lines for ~56KB. The per-call
+		// budget stops the second range at a line boundary and says where to pick
+		// the read back up in the same artifact.
+		expect(output).toContain("line-001");
+		expect(output).toContain("line-040");
+		expect(output).toContain("line-060");
+		expect(output).toContain("line-092");
+		expect(output).not.toContain("line-093");
+		expect(output).not.toContain("line-100");
+		expect(output).toContain("Read budget of 50.0KB");
+		expect(output).toContain("Use artifact://0:93- to continue");
+		expect(result.details?.meta?.source).toEqual({ type: "internal", value: "artifact://0" });
+	});
+
+	it("applies the same per-call budget when the artifact is too large to buffer", async () => {
+		await Bun.write(path.join(artifactDir, "0.mcp.log"), streamedMultiRangeArtifact());
+
+		const result = await tool.execute("call-streamed-multi-range-budget", { path: "artifact://0:1-40,60-100" });
+		const output = getTextOutput(result);
+
+		// 6.000 lines of 701 bytes sit just past the 4 MiB snapshot cap, so both
+		// ranges stream off disk instead of slicing a buffer. The budget lands one
+		// line earlier than the buffered case because every line is 701 bytes.
+		expect(output).toContain("line-00001");
+		expect(output).toContain("line-00040");
+		expect(output).toContain("line-00060");
+		expect(output).toContain("line-00091");
+		expect(output).not.toContain("line-00092");
+		expect(output).not.toContain("line-00100");
+		expect(output).toContain("Read budget of 50.0KB");
+		expect(output).toContain("Use artifact://0:92- to continue");
+	});
+
+	it("keeps raw multi-range artifact chunks out of the per-call budget", async () => {
+		await Bun.write(path.join(artifactDir, "0.mcp.log"), multiRangeBudgetArtifact());
+
+		const result = await tool.execute("call-raw-multi-range", { path: "artifact://0:raw:1-40,60-100" });
+		const output = getTextOutput(result);
+
+		// Raw chunks are for copy/paste back into a tool; a budget cut in the
+		// middle of one would corrupt the paste, so the whole selection returns.
+		expect(output).toContain("line-001");
+		expect(output).toContain("line-100");
+		expect(output).not.toContain("Read budget of");
 	});
 
 	it("keeps raw oversized-line reads context-free and byte-capped", async () => {

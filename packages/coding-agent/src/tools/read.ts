@@ -181,6 +181,14 @@ import { cfgImagesAutoResize } from "../modes/settings";
 const MAX_PROFILE_SUMMARY_BYTES = 32 * 1024 * 1024;
 /** Largest URL-located file a bare `:raw` read inlines; bigger ones must page with bounded ranges. */
 const MAX_URL_RAW_INLINE_BYTES = DEFAULT_MAX_BYTES;
+/**
+ * Total source bytes one artifact read call may deliver across every range it
+ * selects. Per-range budgets scale with the requested line count, so a
+ * multi-range page would otherwise stack several of them and return hundreds of
+ * KB from session storage that only spilled because it was too big. Raw chunks
+ * are exempt: they exist for copy/paste back into a tool.
+ */
+const ARTIFACT_TOTAL_READ_BUDGET_BYTES = DEFAULT_MAX_BYTES;
 /** Largest file buffered whole for the local read path and speculative snapshots. */
 export const SNAPSHOT_MAX_BYTES = 4 * 1024 * 1024;
 /** LF byte, scanned natively to find line boundaries in a buffered file. */
@@ -305,6 +313,25 @@ function formatOmittedRequestedLineNotice(
 	return `[Line ${line.index + 1} is ${formatBytes(
 		line.byteLength,
 	)} and could not fit after preceding context in the ${formatBytes(maxBytes)} read budget. Use ${rawTarget} to read that line without context (byte-capped if it exceeds the budget), or widen the requested range to increase the budget.]`;
+}
+
+/**
+ * How many leading `lines` fit in `budgetBytes` of joined text, and how many
+ * bytes they take. Cuts on a line boundary only: a first line that alone
+ * exceeds the budget keeps nothing, so the caller falls back to its
+ * oversized-line notice instead of handing back a mid-line page.
+ */
+function fitLinesToBudget(lines: readonly string[], budgetBytes: number): { kept: number; usedBytes: number } {
+	let usedBytes = 0;
+	let kept = 0;
+	for (const line of lines) {
+		const separator = kept > 0 ? 1 : 0;
+		const lineBytes = Buffer.byteLength(line, "utf8");
+		if (usedBytes + separator + lineBytes > budgetBytes) break;
+		usedBytes += separator + lineBytes;
+		kept++;
+	}
+	return { kept, usedBytes };
 }
 
 /**
@@ -1465,6 +1492,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		suffixResolution: { from: string; to: string } | undefined,
 		signal: AbortSignal | undefined,
 		allowBridge = true,
+		located?: LocatedRead,
 	): Promise<{
 		outputText: string;
 		columnTruncated: number;
@@ -1472,6 +1500,16 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		bridgeResult?: AgentToolResult<ReadToolDetails>;
 	}> {
 		const rawSelector = isRawSelector(parsed);
+
+		// Session artifact storage is the spill target, so a page read back out of
+		// it has to stay bounded by one per-call budget. Without it, per-range
+		// budgets stack: two 150 KB ranges return 300 KB from the very store that
+		// spilled because the result was too large. Raw chunks are exempt — they
+		// exist for copy/paste back into a tool.
+		const artifactBudget =
+			!rawSelector && located?.spec.artifactStore
+				? { remaining: ARTIFACT_TOTAL_READ_BUDGET_BYTES, url: located.url }
+				: undefined;
 
 		// ACP bridge first — the editor's in-memory buffer is source of truth.
 		const bridgePromise = allowBridge ? routeReadThroughBridge(this.session, absolutePath) : undefined;
@@ -1510,6 +1548,8 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		const fullLines = rawSelector ? undefined : buffered?.addressableLines;
 		let columnTruncated = 0;
 		let displayContent: { text: string; startLine: number; lineNumbers?: Array<number | null> } | undefined;
+		/** Set once the per-call budget ran out, so the ranges after it stay silent. */
+		let budgetSpent = false;
 
 		for (const range of ranges) {
 			const rangeStart = range.startLine - 1; // 0-indexed
@@ -1543,6 +1583,25 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 				continue;
 			}
 
+			// Cut at a line boundary once the per-call budget is spent, and name
+			// the first line left out so the reader continues in the same artifact
+			// instead of pulling a fresh page. Applied to both collection paths:
+			// the buffered slice and the streamed window feed the same blocks.
+			if (artifactBudget !== undefined && !budgetSpent && collectedLines.length > 0) {
+				const { kept, usedBytes } = fitLinesToBudget(collectedLines, artifactBudget.remaining);
+				if (kept < collectedLines.length) {
+					const cutLine = range.startLine + kept;
+					notices.push(
+						`[Read budget of ${formatBytes(ARTIFACT_TOTAL_READ_BUDGET_BYTES)} for this read reached at line ${cutLine}; the rest of the requested ranges was not shown. Use ${artifactBudget.url}:${cutLine}- to continue]`,
+					);
+					collectedLines = collectedLines.slice(0, kept);
+					// The ranges after this one could only add a notice each, so the
+					// loop stops once this range has been rendered.
+					budgetSpent = true;
+				}
+				artifactBudget.remaining -= usedBytes;
+			}
+
 			// Column truncation is display-only; clone before stamping ellipsis so
 			// the original on-disk lines stay intact for display reconstruction.
 			let displayLines: string[] = collectedLines;
@@ -1569,6 +1628,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 					blocks.push(formatTextWithMode(blockText, range.startLine, shouldAddHashLines, shouldAddLineNumbers));
 				}
 			}
+			if (budgetSpent) break;
 		}
 
 		let outputText: string;
@@ -2212,6 +2272,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 						suffixResolution,
 						undefined, // plain-file read: deterministic and fast, never abort mid-read
 						!located, // located URLs read their backing file directly, as their handlers do
+						located,
 					);
 					if (multiResult.bridgeResult) return multiResult.bridgeResult;
 					content = [{ type: "text", text: multiResult.outputText }];
@@ -2271,7 +2332,14 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 					const selectedLineLimit = effectiveLimit + leadingContext + trailingContext;
 					// Scale byte budget with line limit so the configured line count actually fits.
 					// Assume ~512 bytes/line average; never go below the shared default.
-					const maxBytesForRead = Math.max(DEFAULT_MAX_BYTES, maxLinesToCollect * 512);
+					const scaledByteBudget = Math.max(DEFAULT_MAX_BYTES, maxLinesToCollect * 512);
+					// A page of session artifact storage shares one budget per call with the
+					// multi-range path, so a wide selector cannot scale past it. `:raw` chunks
+					// stay verbatim for copy/paste and keep their own byte-capped preview.
+					const maxBytesForRead =
+						located?.spec.artifactStore && !rawSelector
+							? Math.min(scaledByteBudget, ARTIFACT_TOTAL_READ_BUDGET_BYTES)
+							: scaledByteBudget;
 
 					const lineWindow = buffered
 						? collectLineWindowFromBuffer(
