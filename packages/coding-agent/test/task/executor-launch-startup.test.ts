@@ -46,7 +46,6 @@ it("overlaps registry refresh with session-file opening and session setup", asyn
 		agent: { state: { systemPrompt: ["test"] } },
 		model: undefined,
 		extensionRunner: undefined,
-		sessionManager: { appendSessionInit: () => {} },
 		getActiveToolNames: () => ["yield"],
 		getEnabledToolNames: () => ["yield"],
 		subscribe: (listener: (event: AgentSessionEvent) => void) => {
