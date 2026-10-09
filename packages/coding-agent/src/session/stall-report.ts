@@ -53,7 +53,7 @@ type AgentSample = {
 };
 type Event =
 	| { type: "todo"; at: number; label: string; before?: string; after?: string }
-	| { type: "agent"; at: number; label: string; ref: AgentRef }
+	| { type: "agent"; at: number; label: string }
 	| { type: "job"; at: number; label: string }
 	| { type: "service"; at: number; label: string };
 type Baseline = {
@@ -222,6 +222,37 @@ function agentStatus(ref: AgentRef, removed = false): string {
 	return ref.session ? "idle" : ref.status;
 }
 
+/** Detached report metadata only: journals must never retain a live session graph. */
+function snapshotAgentRef(ref: AgentRef): AgentRef {
+	return {
+		id: ref.id,
+		displayName: ref.displayName,
+		kind: ref.kind,
+		parentId: ref.parentId,
+		rootSessionId: ref.rootSessionId,
+		status: ref.status,
+		session: null,
+		sessionFile: ref.sessionFile,
+		createdAt: ref.createdAt,
+		lastActivity: ref.lastActivity,
+		activity: ref.activity,
+		lifecycle: ref.lifecycle
+			? {
+					responseAt: ref.lifecycle.responseAt,
+					acceptedAt: ref.lifecycle.acceptedAt,
+					terminalAt: ref.lifecycle.terminalAt,
+				}
+			: undefined,
+		activeTime: ref.activeTime
+			? {
+					durationMs: ref.activeTime.durationMs,
+					historicalUnavailable: ref.activeTime.historicalUnavailable,
+					runningSince: ref.activeTime.runningSince,
+				}
+			: undefined,
+	};
+}
+
 /** Session-owned diagnostic sampling. No lifecycle action or result consumption occurs here. */
 export class StallReportCollector {
 	readonly #session: AgentSession;
@@ -273,14 +304,14 @@ export class StallReportCollector {
 				this.#agentOwners.add(event.ref.id);
 				this.#watchSession(event.ref.session);
 				if (!event.ref.session) {
-					const discovery = this.#watchRefServiceOwner({ ...event.ref });
+					const discovery = this.#watchRefServiceOwner(snapshotAgentRef(event.ref));
 					this.#serviceOwnerDiscoveries.add(discovery);
 					void discovery.finally(() => this.#serviceOwnerDiscoveries.delete(discovery));
 				}
 				if (event.type === "registered" || event.type === "removed" || event.type === "status_changed") {
 					this.#agentChanges.delete(agentKey(event.ref));
 					this.#agentChanges.set(agentKey(event.ref), {
-						ref: { ...event.ref },
+						ref: snapshotAgentRef(event.ref),
 						at: Date.now(),
 						sequence: ++this.#agentChangeSequence,
 						removed: event.type === "removed",
@@ -294,7 +325,6 @@ export class StallReportCollector {
 						type: "agent",
 						at: Date.now(),
 						label: `${event.type}: ${this.#quote(event.ref.id)} → ${event.ref.status}`,
-						ref: { ...event.ref },
 					});
 				}
 			}),
