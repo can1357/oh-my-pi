@@ -17,6 +17,9 @@ import { setTerminalTitleState, type TerminalTitleState } from "./title-generato
 /** What a blocked run waits on: an approval prompt or an `ask` question. */
 export type BlockedKind = "permission" | "question";
 
+/** A run waiting on the user; `msg` says for what. */
+export type BlockedStatus = { readonly state: "blocked"; readonly kind: BlockedKind; readonly msg?: string };
+
 /**
  * The agent's run status, in OSC 7501 terms:
  * - `idle`: at the prompt waiting for an instruction, including after the user interrupts a run;
@@ -27,7 +30,7 @@ export type BlockedKind = "permission" | "question";
  */
 export type RunStatus =
 	| { readonly state: "idle" | "working" | "done" }
-	| { readonly state: "blocked"; readonly kind: BlockedKind; readonly msg?: string }
+	| BlockedStatus
 	| { readonly state: "error"; readonly msg?: string };
 
 const OSC_7501 = "\x1b]7501;";
@@ -38,7 +41,10 @@ const CLEAR_REPORT = `${OSC_7501}state=clear${ST}`;
 const MSG_MAX_BYTES = 2048;
 
 const runtime: {
+	/** The event flow's status, set by {@link setRunStatus}. */
 	status: RunStatus;
+	/** Open dialogs' holds from {@link holdBlockedStatus}, newest last. */
+	dialogs: BlockedStatus[];
 	/** `terminal.programStatus`; off removes the record and stops reporting. */
 	enabled: boolean;
 	/** Set at teardown so a late transition cannot leave a record in the parent
@@ -48,10 +54,21 @@ const runtime: {
 	reported: string | undefined;
 } = {
 	status: { state: "idle" },
+	dialogs: [],
 	enabled: true,
 	disposed: false,
 	reported: undefined,
 };
+
+/**
+ * The status every surface shows: the event flow's own `blocked` prompt is the
+ * most specific (a tool approval renders through a dialog), else the newest
+ * open dialog, else the event flow's status.
+ */
+function shownStatus(): RunStatus {
+	if (runtime.status.state === "blocked") return runtime.status;
+	return runtime.dialogs.at(-1) ?? runtime.status;
+}
 
 function titleState(status: RunStatus): TerminalTitleState {
 	if (status.state === "working") return "working";
@@ -83,10 +100,15 @@ function formatReport(status: RunStatus): string {
 function report(): void {
 	if (runtime.disposed || !runtime.enabled) return;
 	if (!process.stdout.isTTY || isTerminalHeadless()) return;
-	const next = formatReport(runtime.status);
+	const next = formatReport(shownStatus());
 	if (next === runtime.reported) return;
 	writeTerminalSequence(next);
 	runtime.reported = next;
+}
+
+function publish(): void {
+	setTerminalTitleState(titleState(shownStatus()));
+	report();
 }
 
 function clear(): void {
@@ -102,8 +124,24 @@ function clear(): void {
  */
 export function setRunStatus(status: RunStatus): void {
 	runtime.status = status;
-	setTerminalTitleState(titleState(status));
-	report();
+	publish();
+}
+
+/**
+ * Show the run as `blocked` while an interactive dialog waits on the user,
+ * whatever the event flow reports meanwhile; called by the extension UI
+ * dialogs. The returned release drops the hold, and the surfaces fall back to
+ * the event flow's current status.
+ */
+export function holdBlockedStatus(status: BlockedStatus): () => void {
+	runtime.dialogs.push(status);
+	publish();
+	return () => {
+		const index = runtime.dialogs.indexOf(status);
+		if (index === -1) return;
+		runtime.dialogs.splice(index, 1);
+		publish();
+	};
 }
 
 /** Turn OSC 7501 reporting on or off (`terminal.programStatus`); off removes the record. */
@@ -119,7 +157,8 @@ export function setProgramStatusEnabled(enabled: boolean): void {
  * `error` survive a prompt, so they are left alone rather than reported twice.
  */
 export function resendProgramStatus(): void {
-	if (runtime.status.state === "done" || runtime.status.state === "error") return;
+	const { state } = shownStatus();
+	if (state === "done" || state === "error") return;
 	runtime.reported = undefined;
 	report();
 }
@@ -127,9 +166,11 @@ export function resendProgramStatus(): void {
 /**
  * Claim the terminal's status record when the UI takes over the terminal: the
  * counterpart to {@link disposeProgramStatus} and the only release of its latch.
+ * A UI starts with no dialog open, so holds left by a previous one are dropped.
  */
 export function initProgramStatus(): void {
 	runtime.disposed = false;
+	runtime.dialogs.length = 0;
 }
 
 /**
