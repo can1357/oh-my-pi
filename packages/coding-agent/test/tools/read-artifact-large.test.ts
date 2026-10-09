@@ -68,6 +68,24 @@ function streamedMultiRangeArtifact(): string {
 	).join("\n");
 }
 
+/** 73 small lines, a 60 KB line 74, then small lines to 300 (wide second range). */
+function oversizedTailArtifact(): string {
+	return [
+		...Array.from({ length: 73 }, (_, index) => `line-${String(index + 1).padStart(3, "0")} ${"x".repeat(690)}`),
+		`line-074 ${"x".repeat(60_000)}`,
+		...Array.from({ length: 226 }, (_, index) => `line-${String(index + 75).padStart(3, "0")} ${"x".repeat(690)}`),
+	].join("\n");
+}
+
+/** 49 KB first line (fits the cap) + 2 KB second line: context eats the budget. */
+function roomlessContextArtifact(): string {
+	return [
+		`ctx-line ${"y".repeat(49_996)}`,
+		`wanted-002 ${"z".repeat(2000)}`,
+		...Array.from({ length: 140 }, (_, index) => `tail-${String(index + 3).padStart(3, "0")}`),
+	].join("\n");
+}
+
 /** A 60 KB line followed by small ones: oversized leading context, not content. */
 function oversizedContextArtifact(): string {
 	return [
@@ -273,27 +291,51 @@ describe("read tool large artifact handling", () => {
 		expect(output).toContain("Use artifact://0:92-100 to continue");
 	});
 
-	it("names the line instead of hinting an identical selector when nothing fits", async () => {
+	it("resumes at the same line when it fits a fresh budget", async () => {
 		await Bun.write(path.join(artifactDir, "0.mcp.log"), multiRangeBudgetArtifact());
 
-		// 73 lines of 699 bytes leave 101 bytes of budget: not even the first
-		// line of the next range fits. Hinting `75-100` again would replay the
-		// same cut forever, so the page names line 75 and resumes after it.
+		// 73 lines of 699 bytes leave 101 bytes of budget: line 75 cannot be
+		// shown on this page, but at 699 bytes it fits a fresh 50 KB budget, so
+		// the hint resumes at the same line instead of skipping it. The
+		// follow-up shows it in full, which is what makes this not a loop.
 		// (The gap at line 74 is the selector's, not the budget's.)
 		const result = await tool.execute("call-multi-range-kept-zero", { path: "artifact://0:1-73,75-100" });
 		const output = getTextOutput(result);
 
 		expect(output).toContain("line-073");
-		expect(output).toContain("Line 75 is");
-		expect(output).toContain("was not shown");
-		expect(output).toContain("Use artifact://0:raw:75-75");
-		expect(output).toContain("artifact://0:76-100");
-		expect(output).not.toContain("Use artifact://0:75-100");
+		expect(output).toContain("Read budget of 50.0KB");
+		expect(output).toContain("Use artifact://0:75-100 to continue");
+		expect(output).not.toContain("line-075");
 
 		const followed = getTextOutput(
-			await tool.execute("call-multi-range-kept-zero-follow", { path: "artifact://0:76-100" }),
+			await tool.execute("call-multi-range-kept-zero-follow", { path: "artifact://0:75-100" }),
 		);
-		expect(followed).toContain("line-076");
+		expect(followed).toContain("line-075");
+		expect(followed).toContain("line-100");
+		expect(followed).not.toContain("Read budget");
+	});
+
+	it("names a line that exceeds the full budget instead of looping", async () => {
+		await Bun.write(path.join(artifactDir, "0.mcp.log"), oversizedTailArtifact());
+
+		// Line 74 is 60 KB: wider than any fresh budget, so resuming at it
+		// would replay the same cut forever. The page names it with a raw
+		// hint and resumes after it instead. (Line 73 is an unrequested gap:
+		// adjacent ranges would merge into one.)
+		const result = await tool.execute("call-multi-range-oversized-kept-zero", { path: "artifact://0:1-72,74-300" });
+		const output = getTextOutput(result);
+
+		expect(output).toContain("line-072");
+		expect(output).toContain("Line 74 is");
+		expect(output).toContain("was not shown");
+		expect(output).toContain("Use artifact://0:raw:74-74");
+		expect(output).toContain("artifact://0:75-300");
+		expect(output).not.toContain("Use artifact://0:74-300");
+
+		const followed = getTextOutput(
+			await tool.execute("call-multi-range-oversized-follow", { path: "artifact://0:75-300" }),
+		);
+		expect(followed).toContain("line-075");
 	});
 
 	it("bounds the issue's own single-range raw repro and keeps the continuation raw", async () => {
@@ -305,12 +347,34 @@ describe("read tool large artifact handling", () => {
 		expect(output).toContain("line-001");
 		expect(output).not.toContain("line-100");
 		expect(output).toContain("Use artifact://0:raw:74-300 to continue");
+		// No conflicting generic meta hint next to the bounded raw one.
+		expect(result.details?.meta?.truncation?.nextOffset).toBeUndefined();
 
 		const followed = getTextOutput(
 			await tool.execute("call-raw-single-repro-follow", { path: "artifact://0:raw:74-300" }),
 		);
 		expect(followed).toContain("line-074");
 		expect(followed).toContain("line-100");
+	});
+
+	it("keeps the end bound in streamed raw continuations", async () => {
+		await Bun.write(path.join(artifactDir, "0.mcp.log"), streamedMultiRangeArtifact());
+
+		// Past the 4 MiB snapshot cap the same raw:1-300 goes through the
+		// not-scanned-to-EOF branch, which used to emit an open offset that
+		// pages past the requested end.
+		const result = await tool.execute("call-raw-streamed-repro", { path: "artifact://0:raw:1-300" });
+		const output = getTextOutput(result);
+
+		expect(output).toContain("line-00001");
+		expect(output).not.toContain("line-00301");
+		expect(output).toContain("Use artifact://0:raw:73-300 to continue");
+
+		const followed = getTextOutput(
+			await tool.execute("call-raw-streamed-repro-follow", { path: "artifact://0:raw:73-300" }),
+		);
+		expect(followed).toContain("line-00073");
+		expect(followed).not.toContain("line-00301");
 	});
 
 	it("bounds raw multi-range artifact reads at the same per-call budget", async () => {
@@ -362,6 +426,22 @@ describe("read tool large artifact handling", () => {
 		);
 		expect(rest).toContain("line-00001");
 		expect(rest).toContain("line-00003");
+	});
+
+	it("retries without context when it leaves no room for the requested start", async () => {
+		await Bun.write(path.join(artifactDir, "0.mcp.log"), roomlessContextArtifact());
+
+		const result = await tool.execute("call-roomless-context", { path: "artifact://0:2-142" });
+		const output = getTextOutput(result);
+
+		// Line 1 fits the cap but leaves no room for line 2, so the first
+		// collection returns context only. Widening cannot raise a fixed
+		// budget; the read retries from the requested start instead of
+		// showing no requested content.
+		expect(output).toContain("wanted-002");
+		expect(output).toContain("Leading context line 1");
+		expect(output).toContain("was skipped");
+		expect(output).not.toContain("yyyyyyyyyy");
 	});
 
 	it("skips oversized leading context instead of rendering it", async () => {

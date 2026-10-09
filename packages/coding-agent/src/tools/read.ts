@@ -1623,15 +1623,18 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 				});
 				const kept = head.truncated ? (head.outputLines ?? 0) : collectedLines.length;
 				if (kept === 0) {
-					// The first line fits the per-range cap but not the remaining
-					// shared budget: hinting the identical selector would loop
-					// forever, so name the line and resume after it instead.
-					pushUnshowableLineNotice(
-						range.startLine,
-						Buffer.byteLength(collectedLines[0] ?? "", "utf8"),
-						range.startLine + 1,
-					);
-					continue;
+					const firstLineBytes = Buffer.byteLength(collectedLines[0] ?? "", "utf8");
+					if (firstLineBytes > ARTIFACT_TOTAL_READ_BUDGET_BYTES) {
+						// Genuinely oversized: no fresh budget could show it inline.
+						// Hinting the identical selector would loop forever, so name
+						// the line and resume after it instead.
+						pushUnshowableLineNotice(range.startLine, firstLineBytes, range.startLine + 1);
+						continue;
+					}
+					// Fits a full budget, just not what's left of this call: fall
+					// through to the normal cut below, which resumes at the same
+					// line. The follow-up starts with a fresh budget and shows it,
+					// so this cannot loop.
 				}
 				if (kept < collectedLines.length) {
 					const cutLine = range.startLine + kept;
@@ -2426,6 +2429,27 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 						startLineDisplay = requestedStart + 1;
 						lineWindow = await collectWindow(startLine);
 					}
+					if (
+						skippedContextNotice === undefined &&
+						located?.spec.artifactStore === true &&
+						leadingContext > 0 &&
+						lineWindow.byteLimitLine?.index === requestedStart &&
+						lineWindow.lines.length === leadingContext
+					) {
+						// The context fit but left no room for the first requested
+						// line, so nothing requested was collected. Widening cannot
+						// raise a fixed per-call budget; retry without the context,
+						// keeping the original page when the retry also collects
+						// nothing (an oversized requested line keeps its own notice).
+						const retried = await collectWindow(requestedStart);
+						if (retried.lines.length > 0) {
+							skippedContextNotice = `[Leading context line ${startLineDisplay} left no room in the ${formatBytes(maxBytesForRead)} per-read budget and was skipped to show the requested lines.]`;
+							leadingContext = 0;
+							startLine = requestedStart;
+							startLineDisplay = requestedStart + 1;
+							lineWindow = retried;
+						}
+					}
 
 					const {
 						lines: collectedLines,
@@ -2641,9 +2665,15 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 						}
 					} else if (!reachedEof) {
 						const nextOffset = startLine + userLimitedLines + 1;
-						const continueFrom = rawSelector
-							? `${selectorBase}:raw:${nextOffset}-`
-							: `${selectorBase}:${nextOffset}`;
+						// Artifact raw pages keep their bound so paging cannot
+						// read past the requested end; other reads keep the
+						// existing open offset.
+						const continueFrom =
+							rawSelector && located?.spec.artifactStore === true && limit !== undefined
+								? `${selectorBase}:raw:${nextOffset}-${startLine + effectiveLimit}`
+								: rawSelector
+									? `${selectorBase}:raw:${nextOffset}-`
+									: `${selectorBase}:${nextOffset}`;
 						outputText = formatBracketAwareText() ?? formatText(selectedContent, startLineDisplay);
 						if (omittedSelectedLine) {
 							const lineNumber = omittedSelectedLine.index + 1;
@@ -2691,7 +2721,17 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 								direction: "head",
 								startLine: startLineDisplay,
 								totalFileLines,
-								nextOffset: omittedSelectedLine ? null : undefined,
+								// A custom raw continuation above already names the
+								// next page: suppress the generic bare `Use :N`
+								// meta hint that would lose raw mode and the bound.
+								nextOffset:
+									omittedSelectedLine ||
+									(rawSelector &&
+										located?.spec.artifactStore === true &&
+										collectedLines.length > 0 &&
+										truncation.truncatedBy === "bytes")
+										? null
+										: undefined,
 								maxBytes: maxBytesForRead,
 							},
 						};
