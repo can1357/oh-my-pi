@@ -1042,8 +1042,12 @@ export function formatToolWorkingDirectory(workdir: string | undefined, projectD
 		return undefined;
 	}
 	const relativePath = path.relative(resolvedProjectDir, resolvedWorkdir);
+	// On Windows, `path.relative` across drives returns the absolute target, which is not inside the project.
 	const isWithinProject =
-		relativePath.length > 0 && !relativePath.startsWith("..") && !relativePath.startsWith(`..${path.sep}`);
+		relativePath.length > 0 &&
+		!path.isAbsolute(relativePath) &&
+		!relativePath.startsWith("..") &&
+		!relativePath.startsWith(`..${path.sep}`);
 	const displayWorkdir = isWithinProject ? relativePath : shortenPath(resolvedWorkdir);
 	return replaceTabs(displayWorkdir);
 }
@@ -1124,6 +1128,9 @@ export function createCachedComponent(
 		invalidate() {
 			cached = undefined;
 		},
+		releaseRenderCaches() {
+			cached = undefined;
+		},
 	};
 }
 
@@ -1154,6 +1161,14 @@ export function createRenderedStringCache(): RenderedStringCache {
 /** Drop the memo so the next lookup re-renders (e.g. the render function identity changed). */
 export function invalidateRenderedStringCache(cache: RenderedStringCache): void {
 	cache.theme = null;
+}
+
+export function releaseRenderedStringCache(cache: RenderedStringCache): void {
+	cache.theme = null;
+	cache.expanded = false;
+	cache.salt = "";
+	cache.content = "";
+	cache.value = "";
 }
 
 /** Reuse a rendered string while its theme, expansion, content, and salt match. */

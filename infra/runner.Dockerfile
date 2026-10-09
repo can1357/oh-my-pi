@@ -19,7 +19,7 @@
 # for interactive/agent use on the runner.
 FROM ghcr.io/actions/actions-runner:latest
 
-ARG RUST_NIGHTLY=nightly-2026-09-14
+ARG RUST_NIGHTLY=nightly-2026-10-06
 ARG BUN_VERSION=1.4.2
 ARG SCCACHE_VERSION=0.18.0
 ARG ZIG_VERSION=0.16.0

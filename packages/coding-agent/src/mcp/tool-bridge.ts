@@ -112,8 +112,9 @@ function omitUnusedOptionalArgs(args: MCPToolArgs, inputSchema: MCPToolDefinitio
 /**
  * Drop the harness-internal intent field (`INTENT_FIELD`) before forwarding
  * args to an MCP server. The harness injects `i` into every tool's wire
- * schema; the direct model tool-call path strips it via `extractIntent`, but
- * the `eval` `tool.*` bridge and any other in-process caller forwards args
+ * schema; the direct model tool-call path strips it via `extractIntent` and
+ * the `eval` `tool.*` bridge drops it in `callSessionTool`, but other
+ * in-process callers (Task proxies, `ctx.invokeTool`) may still forward args
  * verbatim. Strict-schema servers (Linear, anything with
  * `additionalProperties:false` / Zod `.strict()`) reject every call that
  * carries `i`. The MCP boundary is the authoritative guard so callers don't

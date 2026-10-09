@@ -6,12 +6,12 @@ import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 
 const PNG_DATA = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC";
 
-function model(id: string): Model<"bedrock-converse-stream"> {
+function model(id: string, provider = "amazon-bedrock"): Model<"bedrock-converse-stream"> {
 	return buildModel({
 		id,
 		name: id,
 		api: "bedrock-converse-stream",
-		provider: "amazon-bedrock",
+		provider,
 		baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com",
 		reasoning: false,
 		input: ["text", "image"],
@@ -115,6 +115,22 @@ describe("Bedrock tool-result image placement", () => {
 		).toBe(true);
 		expect(content.indexOf(siblingBlock)).toBeGreaterThan(0);
 		expect(Reflect.get(source, "bytes")).toBe(PNG_DATA);
+	});
+
+	it("hoists OpenAI tool-result images on a custom provider that uses Converse", async () => {
+		// A models.yml provider such as `bedrock-oregon` shares the Converse wire but
+		// not the `amazon-bedrock` id; nesting the image there returns HTTP 400
+		// "This model doesn't support the image field for user messages".
+		const target = model("global.openai.gpt-5.6-sol", "bedrock-oregon");
+		const content = finalUserContent(await capturePayload(target));
+		const toolResultBlock = objectValue(content[0], "tool result block");
+		const nestedContent = arrayField(
+			objectValue(Reflect.get(toolResultBlock, "toolResult"), "tool result"),
+			"content",
+		);
+
+		expect(nestedContent.some(block => Reflect.has(objectValue(block, "nested block"), "image"))).toBe(false);
+		expect(content.slice(1).some(block => Reflect.has(objectValue(block, "user block"), "image"))).toBe(true);
 	});
 
 	it("keeps Claude tool-result images nested", async () => {

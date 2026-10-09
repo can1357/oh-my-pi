@@ -17,6 +17,8 @@ import type {
 	AgentTelemetryConfig,
 	AgentTelemetryWarning,
 	ChatUsageEvent,
+	CostEstimate,
+	CostEstimatorContext,
 	ToolStatus,
 } from "@oh-my-pi/pi-agent-core";
 import { logger, postmortem } from "@oh-my-pi/pi-utils";
@@ -39,7 +41,7 @@ import { BatchLogRecordProcessor, LoggerProvider } from "@opentelemetry/sdk-logs
 import { MeterProvider, PeriodicExportingMetricReader } from "@opentelemetry/sdk-metrics";
 import { BatchSpanProcessor } from "@opentelemetry/sdk-trace-base";
 import { NodeTracerProvider } from "@opentelemetry/sdk-trace-node";
-import type { TelemetrySignalConfig } from "./telemetry-export";
+import type { TelemetryModelPricingResolver, TelemetrySignalConfig } from "./telemetry-export";
 
 /**
  * Periodic flush interval. A long-lived `omp` process (the ACP server is
@@ -84,18 +86,50 @@ export function isTelemetryExportEnabled(): boolean {
 }
 
 /**
+ * Report the request's provider-computed `Usage.cost` as the telemetry cost.
+ *
+ * The resolver only decides whether the model's price is known, by registry
+ * provider id and requested model id. The USD values are the ones the
+ * provider already computed and persisted, never a recomputation.
+ */
+export function estimateProviderCost(
+	context: CostEstimatorContext,
+	modelPricingResolver: TelemetryModelPricingResolver,
+): CostEstimate {
+	const providerId = context.providerId ?? context.provider;
+	const modelId = context.modelId ?? context.model;
+	if (!modelPricingResolver(providerId, modelId) && context.usageCost.total === 0) {
+		return { unavailable: "model_price_unavailable" };
+	}
+	return {
+		usd: context.usageCost.total,
+		inputUsd: context.usageCost.input,
+		outputUsd: context.usageCost.output,
+	};
+}
+
+/**
  * Merge OTLP metrics/log hooks into an existing agent telemetry config.
  *
- * The caller still owns content-capture policy, cost estimation, and custom
- * attributes. This only appends host-level metrics/log forwarding for the
- * providers registered by {@link registerProviders}.
+ * The caller still owns content-capture policy and custom attributes, and its
+ * own `costEstimator` wins. Without one, `modelPricingResolver` installs
+ * {@link estimateProviderCost}. Beyond that, this only appends host-level
+ * metrics/log forwarding for the providers registered by
+ * {@link registerProviders}.
  */
 export function createTelemetryExportConfig(
 	config: AgentTelemetryConfig | undefined,
+	modelPricingResolver?: TelemetryModelPricingResolver,
 ): AgentTelemetryConfig | undefined {
 	if (!isTelemetryExportEnabled()) return config;
+	const costEstimator =
+		config?.costEstimator ??
+		(modelPricingResolver
+			? (context: CostEstimatorContext) => estimateProviderCost(context, modelPricingResolver)
+			: undefined);
 	return {
 		...config,
+		...(costEstimator ? { costEstimator } : {}),
 		onChatUsage: async event => {
 			await config?.onChatUsage?.(event);
 			metricRecorder?.recordChatUsage(event);

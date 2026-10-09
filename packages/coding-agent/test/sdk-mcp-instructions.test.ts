@@ -3,6 +3,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { AuthStorage } from "@oh-my-pi/pi-ai";
+import { closeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -72,6 +73,9 @@ describe("createAgentSession MCP server instructions (deferred UI)", () => {
 
 	afterAll(() => {
 		authStorage.close();
+		// The model registry opened the shared `<isolatedAgentDir>/models.db` cache;
+		// release it so Windows can delete the isolated home.
+		closeModelCache();
 		setAgentDir(originalAgentDir);
 		for (const dir of [isolatedHome]) {
 			if (dir && fs.existsSync(dir)) {

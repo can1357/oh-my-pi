@@ -12,7 +12,7 @@ import {
 } from "@oh-my-pi/pi-agent-core";
 import { type BlockState, handleServerMessage, type ToolCallState } from "@oh-my-pi/pi-ai/providers/cursor";
 import { piTruncation } from "@oh-my-pi/pi-ai/providers/cursor/exec-modern";
-import type { AssistantMessage } from "@oh-my-pi/pi-ai/types";
+import type { AssistantMessage, ToolResultMessage } from "@oh-my-pi/pi-ai/types";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import {
 	AgentClientMessageSchema,
@@ -39,7 +39,9 @@ import type { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/ex
 import { ExtensionToolWrapper } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
 import { BUILTIN_TOOLS, GrepTool, ReadTool, type Tool, type ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { BashTool } from "@oh-my-pi/pi-coding-agent/tools/bash";
+import { TodoTool } from "@oh-my-pi/pi-coding-agent/tools/todo";
 import type { TruncationMeta } from "@oh-my-pi/pi-tui/tools/output-meta";
+import type { TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 import { AdviseTool } from "../src/advisor/advise-tool";
 
@@ -955,6 +957,115 @@ describe("CursorExecHandlers error results", () => {
 	});
 });
 
+describe("CursorExecHandlers argument validation", () => {
+	function recordingBridge(parameters: AgentTool["parameters"]) {
+		const calls: unknown[] = [];
+		const tool: AgentTool = {
+			name: "bash",
+			label: "Bash",
+			description: "Records validated command arguments",
+			parameters,
+			async execute(_id, args) {
+				calls.push(args);
+				return { content: [{ type: "text", text: "executed" }] };
+			},
+		};
+		return { handlers: new CursorExecHandlers({ cwd: ".", tools: new Map([[tool.name, tool]]) }), calls };
+	}
+
+	function mcp(
+		handlers: CursorExecHandlers,
+		toolName: string,
+		args: Record<string, unknown>,
+	): Promise<ToolResultMessage> {
+		return handlers.mcp({
+			name: toolName,
+			providerIdentifier: "pi-agent",
+			toolName,
+			toolCallId: "validation",
+			args,
+			rawArgs: {},
+		});
+	}
+
+	function todoBridge() {
+		let phases: TodoPhase[] = [];
+		const tool = new TodoTool(
+			createTestSession(".", {
+				getTodoPhases: () => phases,
+				setTodoPhases: value => {
+					phases = value;
+				},
+			}),
+		);
+		return {
+			handlers: new CursorExecHandlers({ cwd: ".", tools: new Map([["todo", tool as AgentTool]]) }),
+			phases: () => phases,
+		};
+	}
+
+	it("returns missing-command validation errors without executing a Cursor MCP tool", async () => {
+		const { handlers, calls } = recordingBridge(new BashTool(createTestSession(".")).parameters);
+		const result = await mcp(handlers, "bash", {});
+		expect(result.isError).toBe(true);
+		expect(result.content).toEqual([
+			expect.objectContaining({ text: expect.stringContaining('Validation failed for tool "bash"') }),
+		]);
+		expect(calls).toEqual([]);
+	});
+
+	it("refuses unsupported enum arguments before dispatching a Cursor MCP tool", async () => {
+		const { handlers, calls } = recordingBridge(type({ op: "'read' | 'write'" }));
+		const result = await mcp(handlers, "bash", { op: "erase" });
+		expect(result.isError).toBe(true);
+		expect(result.content).toEqual([
+			expect.objectContaining({ text: expect.stringContaining('Validation failed for tool "bash"') }),
+		]);
+		expect(calls).toEqual([]);
+	});
+
+	it("passes schema-normalized scalar and optional values to Cursor MCP tools", async () => {
+		const { handlers, calls } = recordingBridge(new BashTool(createTestSession(".")).parameters);
+		const result = await mcp(handlers, "bash", { command: 42, cwd: null, timeout: null });
+		expect(result.isError).toBe(false);
+		expect(calls).toEqual([{ command: "42" }]);
+	});
+
+	it("preserves a lenient todo tool's omitted-operation repair", async () => {
+		const { handlers, phases } = todoBridge();
+		const result = await mcp(handlers, "todo", {
+			list: [{ phase: "Recovered", items: ["From Cursor"] }],
+			__rawJson: "metadata",
+		});
+		expect(result.isError).toBe(false);
+		expect(phases()).toEqual([{ name: "Recovered", tasks: [{ content: "From Cursor", status: "in_progress" }] }]);
+	});
+
+	it("refuses parse-error metadata instead of executing even a lenient Cursor tool", async () => {
+		const { handlers, phases } = todoBridge();
+		const result = await mcp(handlers, "todo", {
+			list: [{ phase: "Rejected", items: ["Must not execute"] }],
+			__parseError: "Unexpected token",
+			__rawJson: "{broken",
+		});
+		expect(result.isError).toBe(true);
+		expect(result.content).toEqual([
+			expect.objectContaining({ text: expect.stringContaining("Tool call arguments are not valid JSON") }),
+		]);
+		expect(phases()).toEqual([]);
+	});
+
+	it("applies the same validation before native shell-stream execution", async () => {
+		const { handlers, calls } = recordingBridge(type({ command: "'safe-command'" }));
+		const result = await handlers.shellStream(
+			create(ShellArgsSchema, { toolCallId: "invalid-stream", command: "unsafe-command" }),
+			{ onStdout: () => {}, onStderr: () => {} },
+		);
+		expect(result.isError).toBe(true);
+		expect(calls).toEqual([]);
+	});
+});
+
 describe("CursorExecHandlers mounted tool bridge", () => {
 	it("executes MCP tools resolved from the xd:// registry", async () => {
 		const mountedTool: AgentTool = {
@@ -1453,38 +1564,43 @@ describe("CursorExecHandlers mounted tool bridge", () => {
 		}
 	});
 
-	it("refuses a download onto a FIFO instead of blocking on it", async () => {
-		// A write-only open of a FIFO blocks until a reader attaches, and
-		// `download_path` comes from the server — so a named pipe planted (or
-		// simply present) in the workspace hung the turn forever, with the
-		// non-regular-file guard sitting unreachable behind the open. The refusal
-		// has to come from the open itself, which is what `O_NONBLOCK` buys.
-		const workspace = await fs.mkdtemp(path.join(os.tmpdir(), "cursor-mcp-fifo-"));
-		try {
-			const fifo = path.join(workspace, "pipe");
-			const mkfifo = Bun.spawn(["mkfifo", fifo]);
-			if ((await mkfifo.exited) !== 0) throw new Error("mkfifo failed");
-			const handlers = new CursorExecHandlers({
-				cwd: workspace,
-				tools: new Map(),
-				getToolContext: () => yoloToolContext(),
-				mcpResources: {
-					serverNames: () => ["files"],
-					getServerResources: async () => undefined,
-					readServerResource: async (_name, uri) => ({ contents: [{ uri, text: "payload" }] }),
-				},
-			});
+	// Windows has no FIFOs (an MSYS `mkfifo` leaves a plain file the open accepts).
+	it.skipIf(process.platform === "win32")(
+		"refuses a download onto a FIFO instead of blocking on it",
+		async () => {
+			// A write-only open of a FIFO blocks until a reader attaches, and
+			// `download_path` comes from the server — so a named pipe planted (or
+			// simply present) in the workspace hung the turn forever, with the
+			// non-regular-file guard sitting unreachable behind the open. The refusal
+			// has to come from the open itself, which is what `O_NONBLOCK` buys.
+			const workspace = await fs.mkdtemp(path.join(os.tmpdir(), "cursor-mcp-fifo-"));
+			try {
+				const fifo = path.join(workspace, "pipe");
+				const mkfifo = Bun.spawn(["mkfifo", fifo]);
+				if ((await mkfifo.exited) !== 0) throw new Error("mkfifo failed");
+				const handlers = new CursorExecHandlers({
+					cwd: workspace,
+					tools: new Map(),
+					getToolContext: () => yoloToolContext(),
+					mcpResources: {
+						serverNames: () => ["files"],
+						getServerResources: async () => undefined,
+						readServerResource: async (_name, uri) => ({ contents: [{ uri, text: "payload" }] }),
+					},
+				});
 
-			await expect(
-				handlers.readMcpResource({ server: "files", uri: "files://x", downloadPath: "pipe" }),
-			).rejects.toThrow(/special file|non-regular file/);
-		} finally {
-			await removeWithRetries(workspace);
-		}
-		// A regression does not fail this assertion — it never reaches it, because
-		// the open never returns. The timeout IS the detector, raised off the 5s
-		// default only so a slow runner cannot claim the same verdict.
-	}, 20_000);
+				await expect(
+					handlers.readMcpResource({ server: "files", uri: "files://x", downloadPath: "pipe" }),
+				).rejects.toThrow(/special file|non-regular file/);
+			} finally {
+				await removeWithRetries(workspace);
+			}
+			// A regression does not fail this assertion — it never reaches it, because
+			// the open never returns. The timeout IS the detector, raised off the 5s
+			// default only so a slow runner cannot claim the same verdict.
+		},
+		20_000,
+	);
 
 	it("refuses a download when the session withheld file mutation or policy denies it", async () => {
 		// Download mode creates and overwrites workspace files without going
@@ -2020,7 +2136,8 @@ describe("CursorExecHandlers Pi frame translation", () => {
 		await handlers.piGrep({ toolCallId: "c3", args: { pattern: "x", path: ".", glob: "**/*.ts" } } as never);
 		await handlers.piGrep({ toolCallId: "c4", args: { pattern: "x", path: "src", glob: "/abs/**/*.ts" } } as never);
 
-		expect((calls[0] as { path: string }).path).toBe("src/**/*.ts");
+		// `piJoinPath` joins with `node:path`; the local tools normalize separators.
+		expect((calls[0] as { path: string }).path).toBe(path.join("src", "**/*.ts"));
 		// An absent or "." path leaves the glob standing alone: a "./"-prefixed
 		// spec is a needlessly different path expression for the same scope.
 		expect((calls[1] as { path: string }).path).toBe("**/*.ts");
@@ -2225,7 +2342,7 @@ describe("CursorExecHandlers Pi frame translation", () => {
 		await handlers.piFind({ toolCallId: "c3", args: { pattern: "*.ts" } } as never);
 
 		expect(calls).toEqual([
-			{ path: "src/*.ts", limit: 10 },
+			{ path: path.join("src", "*.ts"), limit: 10 },
 			// `optional int32`: a present 0 is clamped to 1 (as the reference
 			// does), not silently widened to the tool's default.
 			{ path: "*.ts", limit: 1 },

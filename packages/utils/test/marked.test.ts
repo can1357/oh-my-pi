@@ -631,6 +631,14 @@ describe("marked compatibility", () => {
 		});
 	}
 
+	test("keeps the text before a line or paragraph separator on its line", () => {
+		// U+2028 and U+2029 end no Markdown line, so they sit inside the
+		// paragraph. Splitting lines on them dropped the text in front of each.
+		const source = "Alpha beta\u2028gamma\u2029delta.\n\nNext.";
+		const [paragraph] = Lexer.lex(source);
+		expect(paragraph).toMatchObject({ type: "paragraph", text: "Alpha beta\u2028gamma\u2029delta." });
+		expect([...Lexer.lex(source)].map(token => token.raw).join("")).toBe(source);
+	});
 	test("keeps an inline extension's rewrite of the text token before it", () => {
 		const marked = new Marked().use({
 			extensions: [

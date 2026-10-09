@@ -39,6 +39,33 @@ describe("classifyModel", () => {
 		});
 	});
 
+	test("DeepSeek V4 revisions ignore suffixes and reviewed Flash aliases resolve to V4.1", () => {
+		expect(classifyModel("opencode-zen", "deepseek-v4-flash-free")).toMatchObject({
+			class: "deepseek",
+			family: "flash",
+			revision: "4.0.0",
+		});
+		expect(classifyModel("openrouter", "deepseek/deepseek-v4-flash-0731")).toMatchObject({
+			class: "deepseek",
+			family: "flash",
+			revision: "4.0.0",
+		});
+		expect(classifyModel("cline-pass", "deepseek-v4.1-flash")).toMatchObject({
+			class: "deepseek",
+			family: "flash",
+			revision: "4.1.0",
+		});
+		for (const provider of ["deepseek", "opencode-go"]) {
+			expect(classifyModel(provider, "deepseek-flash")).toEqual({
+				class: "deepseek",
+				family: "flash",
+				revision: "4.1.0",
+			});
+		}
+		expect(classifyModel("custom", "deepseek-flash")).toEqual({ class: "deepseek", family: "flash" });
+		expect(classifyModel("deepseek", "deepseek-r1")).toEqual({ class: "deepseek", family: "r1" });
+	});
+
 	test("bounded matchers do not fire on substrings", () => {
 		expect(classifyModel("test", "anthropicology").class).toBe("unknown");
 		expect(classifyModel("test", "deepseeker").class).toBe("unknown");
@@ -53,6 +80,39 @@ describe("classifyModel", () => {
 		// replay dialect on hosts like mistral (regression: pre-KDL parity sweep).
 		expect(classifyModel("mistral", "zai-glm-5-2")).toEqual({ class: "glm", revision: "5.2.0" });
 		expect(classifyModel("cerebras", "zai-glm-4.7")).toEqual({ class: "glm", revision: "4.7.0" });
+	});
+
+	test("bare K3 SKUs and provider-qualified selectors retain Kimi K3 identity", () => {
+		for (const [provider, model] of [
+			["", "k3"],
+			["", "kimi-code/k3"],
+			["", "kimi-coding/k3"],
+			["kimi-code", "k3"],
+			["kimi-coding", "K3"],
+			["", "k3-256k"],
+			["", "K3-256K"],
+			["", "kimi-code/k3-256k"],
+			["", "kimi-coding/K3-256K"],
+			["kimi-code", "k3-256k"],
+			["kimi-coding", "K3-256K"],
+		] as const) {
+			expect(classifyModel(provider, model)).toEqual({ class: "kimi", family: "k3" });
+		}
+	});
+
+	test("K3 identity does not absorb adjacent bare names", () => {
+		for (const model of [
+			"k30",
+			"k3-custom",
+			"k3anthropic",
+			"k3-256",
+			"k3-256kb",
+			"k3-256k-custom",
+			"kimi-code/k3-256kb",
+		]) {
+			expect(classifyModel("", model)).toEqual({ class: "unknown" });
+		}
+		expect(classifyModel("moonshot", "kimi-k3")).toEqual({ class: "kimi", family: "k3" });
 	});
 
 	test("-thinking suffix collapses to the logical id", () => {

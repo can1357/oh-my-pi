@@ -1,3 +1,4 @@
+import * as fs from "node:fs";
 import type { AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
 import { formatBytes, materializeString, sanitizeText } from "@oh-my-pi/pi-utils";
 import { sanitizeWithOptionalSixelPassthrough } from "../render/sixel";
@@ -231,6 +232,10 @@ function truncateBytesWindowed(
 			mode === "head"
 				? data.substring(0, Math.min(data.length, maxBytes))
 				: data.substring(Math.max(0, data.length - maxBytes));
+
+		// All-ASCII window: one byte per char, so it is exactly `maxBytes` bytes on a boundary.
+		const windowBytes = Buffer.byteLength(window, "utf-8");
+		if (windowBytes === window.length) return { text: window, bytes: windowBytes };
 
 		const buf = Buffer.from(window, "utf-8");
 
@@ -875,6 +880,8 @@ export class TailBuffer {
 export class OutputSink {
 	#buffer = "";
 	#bufferBytes = 0;
+	/** The overflowed tail window may exceed its budget until {@link #trimTail} runs. */
+	#tailUntrimmed = false;
 	#head = "";
 	#headBytes = 0;
 	#headLines = 0; // newline count inside #head
@@ -1001,7 +1008,8 @@ export class OutputSink {
 
 	/**
 	 * Push a chunk of output. The buffer management and onChunk callback run
-	 * synchronously. File sink writes are deferred and serialized internally.
+	 * synchronously; onChunk fires after the chunk is stored, so {@link preview}
+	 * already includes it. File sink writes are deferred and serialized internally.
 	 *
 	 * `inline` substitutes a bounded representation for the in-memory buffer and
 	 * live preview while the complete chunk is mirrored to the artifact.
@@ -1013,6 +1021,8 @@ export class OutputSink {
 		const inline = options?.inline;
 		const substituted = inline !== undefined;
 		const inlineChunk = inline === undefined ? chunk : sanitizeText(inline);
+
+		this.#store(chunk, inlineChunk, substituted);
 
 		// Throttled onChunk: coalesce chunks arriving inside the throttle window.
 		// A timer flushes quiet tails at the throttle boundary; dump() catches a
@@ -1028,7 +1038,10 @@ export class OutputSink {
 				this.#schedulePendingChunkFlush();
 			}
 		}
+	}
 
+	/** Count, cap, mirror, and retain one sanitized chunk. */
+	#store(chunk: string, inlineChunk: string, substituted: boolean): void {
 		const rawBytes = Buffer.byteLength(chunk, "utf-8");
 		this.#totalBytes += rawBytes;
 
@@ -1091,6 +1104,7 @@ export class OutputSink {
 	 */
 	#applyColumnCap(chunk: string): string {
 		if (chunk.length === 0) return chunk;
+		if (!this.#columnEllipsisAdded && this.#fitsColumnCap(chunk)) return chunk;
 		const max = this.#maxColumns;
 		const parts: string[] = [];
 		let cursor = 0;
@@ -1138,6 +1152,32 @@ export class OutputSink {
 		return parts.join("");
 	}
 
+	/**
+	 * Fast path for {@link #applyColumnCap}: when every line segment fits the
+	 * remaining cap even at the 3-bytes-per-code-unit UTF-8 worst case, the
+	 * chunk passes through unchanged and only the trailing line width is
+	 * measured. Returns false (state untouched) when any line might trip the cap.
+	 */
+	#fitsColumnCap(chunk: string): boolean {
+		const max = this.#maxColumns;
+		let room = max - this.#currentLineBytes;
+		let cursor = 0;
+		for (;;) {
+			const nlIdx = chunk.indexOf(NL, cursor);
+			const segEnd = nlIdx === -1 ? chunk.length : nlIdx;
+			if ((segEnd - cursor) * 3 > room) return false;
+			if (nlIdx === -1) break;
+			cursor = nlIdx + 1;
+			room = max;
+		}
+		if (cursor === 0) {
+			this.#currentLineBytes += Buffer.byteLength(chunk, "utf-8");
+		} else {
+			this.#currentLineBytes = cursor === chunk.length ? 0 : Buffer.byteLength(chunk.substring(cursor), "utf-8");
+		}
+		return true;
+	}
+
 	// The rolling tail budget is whatever the head window has not consumed of
 	// the inline budget: `spillThreshold - #headBytes`. While the head window
 	// fills it shrinks toward `spillThreshold - headLimit`; after `replace()`
@@ -1171,15 +1211,27 @@ export class OutputSink {
 			const { text, bytes } = truncateTailBytes(chunk, threshold);
 			this.#buffer = text;
 			this.#bufferBytes = bytes;
-		} else {
-			// Intermediate size is bounded (<= threshold + dataBytes), safe to concat.
-			this.#buffer += chunk;
-			this.#bufferBytes += dataBytes;
-
-			const { text, bytes } = truncateTailBytes(this.#buffer, threshold);
-			this.#buffer = text;
-			this.#bufferBytes = bytes;
+			this.#tailUntrimmed = false;
+			return;
 		}
+		// Amortize the trim: let the window grow to 2× the budget before cutting it
+		// back, so steady-state chunks cost an append instead of a window copy.
+		// `#trimTail()` restores the exact budget before the buffer is read.
+		this.#buffer += chunk;
+		this.#bufferBytes += dataBytes;
+		this.#tailUntrimmed = true;
+		if (this.#bufferBytes > threshold * 2) this.#trimTail();
+	}
+
+	/** Cut an overflowed tail window back to the current tail budget. */
+	#trimTail(): void {
+		if (!this.#tailUntrimmed) return;
+		this.#tailUntrimmed = false;
+		const threshold = Math.max(0, this.#spillThreshold - this.#headBytes);
+		if (this.#bufferBytes <= threshold) return;
+		const { text, bytes } = truncateTailBytes(this.#buffer, threshold);
+		this.#buffer = text;
+		this.#bufferBytes = bytes;
 	}
 
 	/**
@@ -1309,6 +1361,10 @@ export class OutputSink {
 	async #createFileSink(): Promise<void> {
 		if (!this.#artifactPath || this.#fileReady || this.#artifactError) return;
 		try {
+			// Bun's Windows FileSink defers the open: an unopenable target (e.g. a
+			// directory) only fails on the first write, misreported as a write
+			// failure. Probe the open eagerly so it stays classified — and terminal.
+			if (process.platform === "win32") fs.closeSync(fs.openSync(this.#artifactPath, "w"));
 			const sink = Bun.file(this.#artifactPath).writer();
 			this.#file = { path: this.#artifactPath, artifactId: this.#artifactId, sink };
 			this.#fileReady = true;
@@ -1367,6 +1423,7 @@ export class OutputSink {
 		this.#clearPendingChunkTimer();
 		this.#buffer = text;
 		this.#bufferBytes = Buffer.byteLength(text, "utf-8");
+		this.#tailUntrimmed = false;
 		this.#head = "";
 		this.#headBytes = 0;
 		this.#headLines = 0;
@@ -1453,6 +1510,69 @@ export class OutputSink {
 		}
 	}
 
+	/**
+	 * Current inline view without finalizing: the body {@link dump} would
+	 * return right now (head + elision marker + rolling tail), minus any notice
+	 * and minus the newline `dump()` appends after output that ends in a bare
+	 * carriage return. Each call trims the rolling tail to its budget (a copy
+	 * of the tail window once it overflowed), so call it from a throttled
+	 * onChunk (`chunkThrottleMs`), not once per raw chunk.
+	 */
+	preview(): string {
+		return this.#composeBody().body;
+	}
+
+	/**
+	 * Compose the visible output. With head retention, splice head + marker +
+	 * tail when content was elided. Otherwise return the rolling buffer.
+	 */
+	#composeBody(): {
+		body: string;
+		outputBytes: number;
+		outputLines: number;
+		elidedBytes?: number;
+		elidedLines?: number;
+	} {
+		this.#trimTail();
+		const totalLines = this.#sawData ? this.#totalLines + 1 : 0;
+		const headBytes = this.#headBytes;
+		const tailBuf = this.#buffer;
+		const tailBytes = this.#bufferBytes;
+		const headLines = this.#headLines + (headBytes > 0 && !this.#head.endsWith("\n") ? 1 : 0);
+		const tailLines = tailBuf.length > 0 ? countNewlines(tailBuf) + 1 : 0;
+
+		// Bytes that survived the column cap. Middle elision operates on these,
+		// so column-dropped bytes don't inflate the "elided from middle" count.
+		const effectiveTotalBytes = Math.max(0, this.#totalBytes - this.#columnDroppedBytes);
+
+		if (headBytes > 0 && effectiveTotalBytes > headBytes + tailBytes) {
+			// Middle was elided. Emit head + marker + tail.
+			const elidedBytes = Math.max(0, effectiveTotalBytes - headBytes - tailBytes);
+			const elidedLines = Math.max(0, totalLines - headLines - tailLines);
+			const marker = formatMiddleElisionMarker(elidedLines, elidedBytes);
+			const markerBytes = Buffer.byteLength(marker, "utf-8");
+			const headSep = this.#head.endsWith("\n") ? "" : "\n";
+			const tailSep = tailBuf.startsWith("\n") ? "" : "\n";
+			return {
+				body: `${this.#head}${headSep}${marker}${tailSep}${tailBuf}`,
+				outputBytes: headBytes + markerBytes + tailBytes + headSep.length + tailSep.length,
+				outputLines: headLines + 1 + tailLines,
+				elidedBytes,
+				elidedLines,
+			};
+		}
+		if (headBytes > 0) {
+			// Head + tail combine into the full buffered output (no overlap or elision).
+			const body = `${this.#head}${tailBuf}`;
+			return {
+				body,
+				outputBytes: headBytes + tailBytes,
+				outputLines: body.length > 0 ? countNewlines(body) + 1 : 0,
+			};
+		}
+		return { body: tailBuf, outputBytes: tailBytes, outputLines: tailLines };
+	}
+
 	async dump(notice?: string): Promise<OutputSummary> {
 		if (this.#pendingCarriageReturn) {
 			this.#pendingCarriageReturn = false;
@@ -1467,51 +1587,8 @@ export class OutputSink {
 
 		await this.#finalizeFile();
 
-		// Compose the visible output. With head retention, splice head + marker
-		// + tail when content was elided. Otherwise return the rolling buffer.
-		const headBytes = this.#headBytes;
-		const tailBuf = this.#buffer;
-		const tailBytes = this.#bufferBytes;
-		const headLines = this.#headLines + (headBytes > 0 && !this.#head.endsWith("\n") ? 1 : 0);
-		const tailLines = tailBuf.length > 0 ? countNewlines(tailBuf) + 1 : 0;
-
-		// Bytes that survived the column cap. Middle elision operates on these,
-		// so column-dropped bytes don't inflate the "elided from middle" count.
-		const effectiveTotalBytes = Math.max(0, this.#totalBytes - this.#columnDroppedBytes);
-
-		let body: string;
-		let outputBytes: number;
-		let outputLines: number;
-		let elidedBytes: number | undefined;
-		let elidedLines: number | undefined;
-
-		if (headBytes > 0 && effectiveTotalBytes > headBytes + tailBytes) {
-			// Middle was elided. Emit head + marker + tail.
-			elidedBytes = Math.max(0, effectiveTotalBytes - headBytes - tailBytes);
-			elidedLines = Math.max(0, totalLines - headLines - tailLines);
-			const marker = formatMiddleElisionMarker(elidedLines, elidedBytes);
-			const markerBytes = Buffer.byteLength(marker, "utf-8");
-			const headSep = this.#head.endsWith("\n") ? "" : "\n";
-			const tailSep = tailBuf.startsWith("\n") ? "" : "\n";
-			body = `${this.#head}${headSep}${marker}${tailSep}${tailBuf}`;
-			outputBytes =
-				headBytes +
-				markerBytes +
-				tailBytes +
-				Buffer.byteLength(headSep, "utf-8") +
-				Buffer.byteLength(tailSep, "utf-8");
-			outputLines = headLines + 1 + tailLines;
-			this.#truncated = true;
-		} else if (headBytes > 0) {
-			// Head + tail combine into the full buffered output (no overlap or elision).
-			body = `${this.#head}${tailBuf}`;
-			outputBytes = headBytes + tailBytes;
-			outputLines = body.length > 0 ? countNewlines(body) + 1 : 0;
-		} else {
-			body = tailBuf;
-			outputBytes = tailBytes;
-			outputLines = tailLines;
-		}
+		const { body, outputBytes, outputLines, elidedBytes, elidedLines } = this.#composeBody();
+		if (elidedBytes !== undefined) this.#truncated = true;
 
 		return {
 			output: `${noticeLine}${body}`,

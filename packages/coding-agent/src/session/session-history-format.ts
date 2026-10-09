@@ -8,7 +8,7 @@
  */
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, ImageContent, TextContent, ToolResultMessage } from "@oh-my-pi/pi-ai";
-import { escapeXmlText } from "@oh-my-pi/pi-utils";
+import { countNewlines, escapeXmlText } from "@oh-my-pi/pi-utils";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
 import type {
 	BashExecutionMessage,
@@ -129,7 +129,7 @@ function contentToText(content: string | readonly (TextContent | ImageContent)[]
 
 function lineCount(text: string): number {
 	if (!text) return 0;
-	return text.split("\n").length;
+	return countNewlines(text) + 1;
 }
 
 function primaryArgValue(value: unknown): string {
@@ -388,10 +388,21 @@ function executionLine(
  */
 export const PRIMARY_CONTEXT_CUSTOM_TYPES: ReadonlySet<string> = new Set(["plan-mode-context", "plan-mode-reference"]);
 
-/** Hidden non-primary custom messages whose content is needed to understand visible transcript entries. */
+/**
+ * Hidden non-primary custom messages whose content is needed to understand visible transcript entries:
+ * vision descriptions and the source file behind an `[image]` a user pasted or dropped.
+ */
 const CONTEXTUAL_NON_PRIMARY_HIDDEN_CUSTOM_TYPES: Record<string, true> = {
 	"image-attachment-description": true,
+	"image-attachment": true,
 };
+
+/**
+ * Notices persisted before they carried `{ index, path }` details hold only the text rendered
+ * from `prompts/system/image-attachment.md`; these recover both fields from it.
+ */
+const LEGACY_IMAGE_ATTACHMENT_INDEX = /`\[Image #(\d+)\]`/;
+const LEGACY_IMAGE_ATTACHMENT_PATH = /^Source path: `(.+)`$/m;
 
 /** One-liner for custom/hook messages: `[irc] A → B: body…`. */
 function customOneLiner(msg: CustomMessage | HookMessage): string {
@@ -413,6 +424,16 @@ function customOneLiner(msg: CustomMessage | HookMessage): string {
 				})
 				.join(", ");
 			return `[async-result] ${oneLine(labels)}`;
+		}
+		case "image-attachment": {
+			// The notice body is model-facing boilerplate; its path would be cut by `oneLine`.
+			// Emit the full path so a reader of the transcript can `read` the file.
+			const text = contentToText(msg.content);
+			const path = str("path") || LEGACY_IMAGE_ATTACHMENT_PATH.exec(text)?.[1];
+			if (!path) return `[${msg.customType}] ${oneLine(text)}`;
+			const index =
+				typeof details.index === "number" ? details.index : (LEGACY_IMAGE_ATTACHMENT_INDEX.exec(text)?.[1] ?? "?");
+			return `[image-attachment] Image #${index}: ${path}`;
 		}
 		default:
 			return `[${msg.customType}] ${oneLine(contentToText(msg.content))}`;

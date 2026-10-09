@@ -66,6 +66,7 @@ it("runs compiled bytecode containing dependency import.meta.resolve calls", asy
 		entrypoint,
 		outfile,
 		transformersVersion: "unused",
+		native: null,
 	});
 	const result = await $`${outfile}`.quiet().nothrow();
 	expect(result.exitCode).toBe(0);

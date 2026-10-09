@@ -3993,7 +3993,10 @@ impl Utility for Ls {
 			.matches
 			.get_many::<OsString>(options::PATHS)
 			.map_or_else(|| vec![Path::new(".")], |v| v.map(Path::new).collect());
-		match list(locs, &config, host.stdout_clone()) {
+		// A listing only prints once its directory is read and sorted, so
+		// per-line flushing would show nothing sooner: block-buffer and flush
+		// once per directory instead.
+		match list(locs, &config, StreamWriter::block(host.stdout_clone())) {
 			Ok(()) => runtime.status.get(),
 			Err(err) => {
 				host.error(&err, 1);
@@ -4794,16 +4797,16 @@ impl<'a> PathData<'a> {
 
 		let fs = config.runtime.fs();
 		let followed_path = config.runtime.paths.resolve(&p_buf);
+		// The DirArgs probe is the followed stat `metadata()` would repeat for a
+		// dereferenced operand, so keep it to seed the cache below.
+		let mut probed_dir_md = None;
 		let must_dereference = match &config.dereference {
 			Dereference::All => true,
 			Dereference::Args => command_line,
 			Dereference::DirArgs => {
-				if command_line {
-					if let Ok(md) = fs.metadata(&followed_path) {
-						md.is_dir()
-					} else {
-						false
-					}
+				if command_line && let Ok(md) = fs.metadata(&followed_path) && md.is_dir() {
+					probed_dir_md = Some(md);
+					true
 				} else {
 					false
 				}
@@ -4821,6 +4824,10 @@ impl<'a> PathData<'a> {
 		// nearly free compared to a metadata() call on a Path
 		let ft: OnceCell<Option<FileType>> = OnceCell::new();
 		let md: OnceCell<Option<Metadata>> = OnceCell::new();
+		if let Some(md_probe) = probed_dir_md {
+			ft.get_or_init(|| Some(md_probe.file_type()));
+			md.get_or_init(|| Some(md_probe));
+		}
 		let security_context: OnceCell<Box<str>> = OnceCell::new();
 
 		let de: RefCell<Option<DirEntry>> = if let Some(de) = dir_entry {
@@ -4963,7 +4970,7 @@ struct ListState<'a> {
 }
 
 #[allow(clippy::cognitive_complexity)]
-pub fn list(locs: Vec<&Path>, config: &Config, stdout: OpenFile) -> std::io::Result<()> {
+pub fn list(locs: Vec<&Path>, config: &Config, out: StreamWriter) -> std::io::Result<()> {
 	let fs = config.runtime.fs();
 	let mut files = Vec::<PathData>::new();
 	let mut dirs = Vec::<PathData>::new();
@@ -4972,7 +4979,7 @@ pub fn list(locs: Vec<&Path>, config: &Config, stdout: OpenFile) -> std::io::Res
 	let now = SystemTime::now();
 
 	let mut state = ListState {
-		out: StreamWriter::new(stdout),
+		out,
 		style_manager: config
 			.color
 			.as_ref()
@@ -5040,6 +5047,7 @@ pub fn list(locs: Vec<&Path>, config: &Config, stdout: OpenFile) -> std::io::Res
 	}
 
 	display_items(&files, config, &mut state, &mut dired)?;
+	state.out.flush()?;
 
 	for (pos, path_data) in dirs.iter().enumerate() {
 		let needs_blank_line = pos != 0 || !files.is_empty();
@@ -5060,9 +5068,12 @@ pub fn list(locs: Vec<&Path>, config: &Config, stdout: OpenFile) -> std::io::Res
 			Ok(rd) => rd,
 		};
 
-		state
-			.listed_ancestors
-			.insert(DirIdentity::of(fs, &path_data.fs_path, path_data.must_dereference)?);
+		// Ancestor identities are only consulted to break `-R` cycles.
+		if config.recursive {
+			state
+				.listed_ancestors
+				.insert(DirIdentity::of(fs, &path_data.fs_path, path_data.must_dereference)?);
+		}
 
 		// List each of the arguments to ls first.
 		depth_first_list(
@@ -5108,21 +5119,20 @@ pub fn list(locs: Vec<&Path>, config: &Config, stdout: OpenFile) -> std::io::Res
 	if config.dired && !config.hyperlink {
 		dired::print_dired_output(config, &dired, &mut state.out)?;
 	}
-	Ok(())
+	state.out.flush()
 }
 
 fn sort_entries(entries: &mut [PathData], config: &Config) {
 	match config.sort {
-		Sort::Time => entries.sort_unstable_by_key(|k| {
+		// GNU breaks time and size ties by name instead of leaving them unordered.
+		Sort::Time => sort_by_key_then_name(entries, |p| {
 			Reverse(
-				k.metadata()
+				p.metadata()
 					.and_then(|md| metadata_get_time(md, config.time))
 					.unwrap_or(UNIX_EPOCH),
 			)
 		}),
-		Sort::Size => {
-			entries.sort_unstable_by_key(|k| Reverse(k.metadata().map_or(0, |md| md.len())));
-		},
+		Sort::Size => sort_by_key_then_name(entries, |p| Reverse(p.metadata().map_or(0, |md| md.len()))),
 		// The default sort in GNU ls is case insensitive
 		Sort::Name => entries.sort_unstable_by(|a, b| a.display_name().cmp(b.display_name())),
 		Sort::Version => entries.sort_unstable_by(|a, b| {
@@ -5152,26 +5162,41 @@ fn sort_entries(entries: &mut [PathData], config: &Config) {
 	}
 
 	if config.group_directories_first && config.sort != Sort::None {
-		entries.sort_unstable_by_key(|p| {
-			let ft = {
-				// We will always try to deref symlinks to group directories, so PathData.md
-				// is not always useful.
-				if p.must_dereference {
-					p.file_type()
-				} else {
-					None
-				}
-			};
-
-			!match ft {
-				None => {
-					// If it metadata cannot be determined, treat as a file.
-					get_metadata_with_deref_opt(p.fs(), &p.fs_path, true)
-						.map_or_else(|_| false, |m| m.is_dir())
-				},
-				Some(ft) => ft.is_dir(),
+		// Stable, so each group keeps the order chosen above. The cached file type
+		// (from the dir entry or the dereferenced stat) answers for everything but
+		// symlinks, which are grouped by their target like GNU's `is_linked_directory`.
+		entries.sort_by_cached_key(|p| {
+			!match p.file_type() {
+				Some(ft) if !ft.is_symlink() => ft.is_dir(),
+				// If metadata cannot be determined, treat as a file.
+				_ => get_metadata_with_deref_opt(p.fs(), &p.fs_path, true).is_ok_and(|m| m.is_dir()),
 			}
 		});
+	}
+}
+
+/// Sorts `entries` by `key`, then by display name.
+///
+/// Each key is derived once, and the sort moves `(key, name, index)` tuples
+/// rather than whole `PathData`s, which are then placed by one in-place
+/// permutation (as `slice::sort_by_cached_key` does).
+fn sort_by_key_then_name<K: Ord>(entries: &mut [PathData], key: impl Fn(&PathData) -> K) {
+	let mut keyed: Vec<_> = entries
+		.iter()
+		.enumerate()
+		.map(|(index, entry)| (key(entry), entry.display_name(), index))
+		.collect();
+	keyed.sort_unstable();
+	let mut order: Vec<usize> = keyed.into_iter().map(|(.., index)| index).collect();
+	for i in 0..order.len() {
+		// Entries before `i` are placed; one an earlier swap moved away is found
+		// by following the indices it was swapped through.
+		let mut index = order[i];
+		while index < i {
+			index = order[index];
+		}
+		order[i] = index;
+		entries.swap(i, index);
 	}
 }
 
@@ -5284,6 +5309,7 @@ fn depth_first_list(
 	}
 
 	display_items(buf, config, state, dired)?;
+	state.out.flush()?;
 
 	if config.recursive {
 		for e in buf
@@ -5508,5 +5534,44 @@ mod integration_tests {
 		let ls = Ls::try_parse_from(["ls", "-l", "--full-time", "epoch"]).unwrap();
 		assert_eq!(ls.run(&mut host), 0);
 		assert!(capture.out().contains("1969-12-31 16:00:00.000000000 -0800"));
+	}
+
+	#[test]
+	fn size_sort_breaks_ties_by_name() {
+		let dir = tempfile::tempdir().unwrap();
+		// Created out of name order, and enough of them that a listing order
+		// following creation (tmpfs) or a hash (ext4) is not name order by luck.
+		for name in ["e", "h", "b", "j", "a", "g", "c", "i", "f", "d"] {
+			std::fs::write(dir.path().join(name), b"same").unwrap();
+		}
+
+		let (code, capture) = run_util::<Ls>(&["-S"], "", dir.path());
+		assert_eq!(code, 0, "{}", capture.err());
+		assert_eq!(capture.out(), "a\nb\nc\nd\ne\nf\ng\nh\ni\nj\n");
+
+		let (code, capture) = run_util::<Ls>(&["-Sr"], "", dir.path());
+		assert_eq!(code, 0, "{}", capture.err());
+		assert_eq!(capture.out(), "j\ni\nh\ng\nf\ne\nd\nc\nb\na\n");
+	}
+
+	#[test]
+	fn group_directories_first_keeps_the_sort_within_each_group() {
+		let dir = tempfile::tempdir().unwrap();
+		// More than 20 entries: below that an unstable sort runs as an
+		// insertion sort and happens to keep each group in order.
+		for i in 0..15 {
+			std::fs::create_dir(dir.path().join(format!("d{i:02}"))).unwrap();
+			std::fs::write(dir.path().join(format!("f{i:02}")), vec![b'x'; i + 1]).unwrap();
+		}
+
+		let (code, capture) = run_util::<Ls>(&["--group-directories-first", "-S"], "", dir.path());
+		assert_eq!(code, 0, "{}", capture.err());
+		// Empty directories tie on size and fall back to name order; files
+		// run largest first.
+		let expected: String = (0..15)
+			.map(|i| format!("d{i:02}\n"))
+			.chain((0..15).rev().map(|i| format!("f{i:02}\n")))
+			.collect();
+		assert_eq!(capture.out(), expected);
 	}
 }

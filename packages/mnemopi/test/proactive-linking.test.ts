@@ -1,9 +1,11 @@
 import { afterEach, describe, expect, it } from "bun:test";
+import { TempDir } from "@oh-my-pi/pi-utils";
 import "./setup";
 import { configureRecallFeatures } from "@oh-my-pi/pi-mnemopi/config";
 import { BeamMemory } from "@oh-my-pi/pi-mnemopi/core/beam";
 import type { EpisodicGraph, RelatedMemory } from "@oh-my-pi/pi-mnemopi/core/episodic-graph";
 import { Mnemopi } from "@oh-my-pi/pi-mnemopi/core/memory";
+import { transaction } from "../src/db";
 
 const previousProactive = process.env.MNEMOPI_PROACTIVE_LINKING;
 
@@ -206,6 +208,145 @@ describe("proactive memory linking", () => {
 		}
 	});
 
+	it("links new memories only to memories that are still valid", () => {
+		process.env.MNEMOPI_PROACTIVE_LINKING = "1";
+		const beam = new BeamMemory({ sessionId: "proactive-invalidated", dbPath: ":memory:" });
+		try {
+			const retiredWorking = beam.remember("Alice set up the CI/CD pipeline for backend deployment", {
+				importance: 0.8,
+			});
+			const liveWorking = beam.remember("Alice set up the CI/CD pipeline for frontend deployment", {
+				importance: 0.8,
+			});
+			const retiredEpisodic = beam.consolidateToEpisodic(
+				"Alice reviewed the CI/CD pipeline for backend deployment",
+				[],
+			);
+			expect(beam.invalidate(retiredWorking)).toBe(true);
+			expect(beam.invalidate(retiredEpisodic)).toBe(true);
+
+			const next = beam.remember("Alice configured the CI/CD pipeline for backend deployment", {
+				importance: 0.8,
+			});
+
+			const targets = new Set(
+				(
+					beam.db.query("SELECT DISTINCT target FROM graph_edges WHERE source = ?").all(next) as {
+						target: string;
+					}[]
+				).map(row => row.target),
+			);
+			expect(targets.has(liveWorking)).toBe(true);
+			expect(targets.has(retiredWorking)).toBe(false);
+			expect(targets.has(retiredEpisodic)).toBe(false);
+		} finally {
+			beam.close();
+		}
+	});
+
+	it("scores a memory id shared across tiers by the content of its live row", () => {
+		process.env.MNEMOPI_PROACTIVE_LINKING = "1";
+		const beam = new BeamMemory({ sessionId: "proactive-cross-tier", dbPath: ":memory:" });
+		try {
+			const expired = "2000-01-01T00:00:00.000Z";
+			const unrelated = "Grocery list includes bananas apples oranges and milk";
+			beam.importFromDict({
+				working_memory: [
+					{ id: "related-live-working", content: "Alice set up the CI/CD pipeline for backend deployment" },
+					{ id: "related-live-episodic", content: unrelated, valid_until: expired },
+					{
+						id: "related-retired-working",
+						content: "Alice tested the CI/CD pipeline for backend deployment",
+						valid_until: expired,
+					},
+					{ id: "related-retired-episodic", content: unrelated },
+					{
+						id: "retired-in-both-tiers",
+						content: "Alice checked the CI/CD pipeline for backend deployment",
+						valid_until: expired,
+					},
+				],
+				episodic_memory: [
+					{ id: "related-live-working", content: unrelated, valid_until: expired },
+					{ id: "related-live-episodic", content: "Alice reviewed the CI/CD pipeline for backend deployment" },
+					{ id: "related-retired-working", content: unrelated },
+					{
+						id: "related-retired-episodic",
+						content: "Alice verified the CI/CD pipeline for backend deployment",
+						superseded_by: "replacement-episodic",
+					},
+					{
+						id: "retired-in-both-tiers",
+						content: "Alice checked the CI/CD pipeline for backend deployment",
+						superseded_by: "replacement",
+					},
+				],
+			});
+
+			const next = beam.remember("Alice configured the CI/CD pipeline for backend deployment", {
+				importance: 0.8,
+			});
+
+			const targets = new Set(
+				(
+					beam.db.query("SELECT DISTINCT target FROM graph_edges WHERE source = ?").all(next) as {
+						target: string;
+					}[]
+				).map(row => row.target),
+			);
+			expect(targets.has("related-live-working")).toBe(true);
+			expect(targets.has("related-live-episodic")).toBe(true);
+			expect(targets.has("related-retired-working")).toBe(false);
+			expect(targets.has("related-retired-episodic")).toBe(false);
+			expect(targets.has("retired-in-both-tiers")).toBe(false);
+		} finally {
+			beam.close();
+		}
+	});
+
+	it("does not link memories that are superseded but not yet expired", () => {
+		process.env.MNEMOPI_PROACTIVE_LINKING = "1";
+		const beam = new BeamMemory({ sessionId: "proactive-superseded", dbPath: ":memory:" });
+		try {
+			const future = "2999-01-01T00:00:00.000Z";
+			beam.importFromDict({
+				working_memory: [
+					{
+						id: "superseded-working",
+						content: "Alice set up the CI/CD pipeline for backend deployment",
+						superseded_by: "replacement-working",
+					},
+					{ id: "valid-working", content: "Alice set up the CI/CD pipeline for frontend deployment" },
+				],
+				episodic_memory: [
+					{
+						id: "superseded-episodic",
+						content: "Alice reviewed the CI/CD pipeline for backend deployment",
+						superseded_by: "replacement-episodic",
+						valid_until: future,
+					},
+				],
+			});
+
+			const next = beam.remember("Alice configured the CI/CD pipeline for backend deployment", {
+				importance: 0.8,
+			});
+
+			const targets = new Set(
+				(
+					beam.db.query("SELECT DISTINCT target FROM graph_edges WHERE source = ?").all(next) as {
+						target: string;
+					}[]
+				).map(row => row.target),
+			);
+			expect(targets.has("valid-working")).toBe(true);
+			expect(targets.has("superseded-working")).toBe(false);
+			expect(targets.has("superseded-episodic")).toBe(false);
+		} finally {
+			beam.close();
+		}
+	});
+
 	it("does not create recall-similarity edges for unrelated content", () => {
 		process.env.MNEMOPI_PROACTIVE_LINKING = "1";
 		const beam = new BeamMemory({ sessionId: "proactive-unrelated", dbPath: ":memory:" });
@@ -301,6 +442,91 @@ describe("proactive memory linking", () => {
 					.get(second, first) as { count: number }
 			).count;
 			expect(after).toBe(before);
+		} finally {
+			beam.close();
+		}
+	});
+
+	// #14998: linking a retain against a large on-disk bank autocommitted every
+	// edge, so the synchronous remember paid one WAL commit (fsync) per linked
+	// memory and froze the TUI for seconds. Each commit appends at least one WAL
+	// frame, so the frame count separates one commit from one-per-edge.
+	it("links a new memory against an on-disk bank in a single commit", () => {
+		process.env.MNEMOPI_PROACTIVE_LINKING = "1";
+		const dir = TempDir.createSync("@mnemopi-proactive-commit-");
+		const beam = new BeamMemory({ sessionId: "proactive-commit", dbPath: dir.join("bank.db") });
+		try {
+			const seeded = 60;
+			const insert = beam.db.prepare(
+				"INSERT INTO episodic_memory (id, content, source, timestamp, session_id, importance) VALUES (?, ?, 'seed', ?, 'seed', 0.5)",
+			);
+			for (let i = 0; i < seeded; i++) {
+				insert.run(`seed-${i}`, `Deployment pipeline database indexing review ${i}`, new Date().toISOString());
+			}
+			insert.finalize();
+			beam.db.exec("PRAGMA wal_autocheckpoint=0");
+			beam.db.exec("PRAGMA wal_checkpoint(TRUNCATE)");
+
+			const id = beam.remember("Deployment pipeline database indexing review notes", { importance: 0.8 });
+
+			const linked = beam.db
+				.query("SELECT COUNT(*) AS count FROM graph_edges WHERE source = ? AND edge_type = 'related_to'")
+				.get(id) as { count: number };
+			expect(linked.count).toBe(seeded);
+			const wal = beam.db.query("PRAGMA wal_checkpoint(PASSIVE)").get() as { log: number };
+			expect(wal.log).toBeLessThan(seeded);
+		} finally {
+			beam.close();
+			dir.removeSync();
+		}
+	});
+
+	it("preserves proactive links in a caller transaction and later write rollback", () => {
+		process.env.MNEMOPI_PROACTIVE_LINKING = "1";
+		const beam = new BeamMemory({ sessionId: "proactive-caller-tx", dbPath: ":memory:" });
+		try {
+			const first = beam.remember("Alice set up the deployment pipeline");
+			const second = beam.db.transaction(() => beam.remember("Alice set up the deployment pipeline for testing"))();
+
+			const links = beam.db
+				.query<{ count: number }, [string, string]>(
+					"SELECT COUNT(*) AS count FROM graph_edges WHERE source = ? AND target = ?",
+				)
+				.get(second, first);
+			expect(links?.count).toBeGreaterThan(0);
+
+			expect(() =>
+				transaction(beam.db, () => {
+					beam.db.run("INSERT INTO gists (id, text) VALUES ('rolled-back', 'temporary')");
+					throw new Error("rollback");
+				}),
+			).toThrow("rollback");
+			expect(beam.db.query("SELECT id FROM gists WHERE id = 'rolled-back'").get()).toBeNull();
+		} finally {
+			beam.close();
+		}
+	});
+
+	it("leaves graph writes inside a manually begun transaction for the caller to roll back", () => {
+		process.env.MNEMOPI_PROACTIVE_LINKING = "1";
+		const beam = new BeamMemory({ sessionId: "proactive-manual-tx", dbPath: ":memory:" });
+		try {
+			const first = beam.remember("Alice set up the deployment pipeline");
+			beam.db.exec("BEGIN IMMEDIATE");
+			let second: string;
+			try {
+				second = beam.remember("Alice set up the deployment pipeline for testing");
+				const linked = beam.db
+					.query<{ count: number }, [string, string]>(
+						"SELECT COUNT(*) AS count FROM graph_edges WHERE source = ? AND target = ?",
+					)
+					.get(second, first);
+				expect(linked?.count).toBeGreaterThan(0);
+			} finally {
+				beam.db.exec("ROLLBACK");
+			}
+			expect(beam.db.query("SELECT id FROM working_memory WHERE id = ?").get(second)).toBeNull();
+			expect(beam.db.query("SELECT source FROM graph_edges WHERE source = ?").get(second)).toBeNull();
 		} finally {
 			beam.close();
 		}

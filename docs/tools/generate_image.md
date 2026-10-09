@@ -40,7 +40,7 @@ The custom tool is registered only when `generate_image.enabled=true` (default `
 1. The SDK injects `imageGenTool` as the `generate_image` custom tool only when the feature gate and tool filter allow it.
 2. A request with `model` resolves that selector against available catalog models of kind `image` and attempts only the selected model. Without it, candidates are ordered as explicitly configured image-role/fallback entries, the active model's configured `imageModel` target and then the active model itself when it supports hosted images, then non-explicit role-chain defaults. Duplicate provider/model entries are removed. `retry.fallbackChains.image: []` removes fallback selectors from the role chain, but does not suppress the active model's image candidates.
 3. The tool skips candidates with an unsupported API transport, unavailable credentials, or an unavailable hosted carrier. A provider HTTP failure advances to the next model in the resolved chain; validation, parsing, local I/O, cancellation, and timeout failures do not.
-4. Input images are resolved once, after the first usable model is found. A `path` is resolved relative to session cwd and content-sniffed. Inline `data` may be raw base64 (requiring `mime_type`) or a `data:<mime>;base64,...` URL.
+4. Input images are resolved once, after the first usable model is found. A `path` is resolved relative to session cwd, checked to be a regular file, size-checked, and content-sniffed. Inline `data` may be raw base64 (requiring `mime_type`) or a `data:<mime>;base64,...` URL.
 5. The selected catalog model's `api` determines the transport:
    - `openai-images`: OpenAI-compatible `/images/generations` and `/images/edits` requests, including xAI/xAI OAuth and DeepInfra. OpenAI edits use multipart image uploads; other providers use JSON references. A `404` from the edit endpoint retries the generation endpoint with the edit payload.
    - `openrouter-images`: OpenRouter's native `/images` endpoint, not chat completions. The catalog's request model id is sent directly, for example `google/gemini-3-pro-image` for selector `openrouter/google/gemini-3-pro-image`.
@@ -65,7 +65,7 @@ The custom tool is registered only when `generate_image.enabled=true` (default `
 
 ## Limits & Caps
 - Local path inputs are capped at `35 * 1024 * 1024` bytes (`MAX_IMAGE_SIZE`). Inline base64 inputs have no separate tool-level size cap.
-- A path input must exist and have a supported content-sniffed image type. Each input object must contain `path` or `data`; `path` wins when both are present.
+- A path input must exist, be a regular file, and have a supported content-sniffed image type. Each input object must contain `path` or `data`; `path` wins when both are present.
 - Raw base64 `data` requires `mime_type`; a data URL supplies its own MIME type.
 - Request timeout is `3 * 60 * 1000` ms.
 - OpenAI hosted output is requested as WebP. Other response files use MIME-derived extensions (`png`, `jpg`, `gif`, or `webp`; unknown MIME types fall back to `.png`).
@@ -77,7 +77,7 @@ The custom tool is registered only when `generate_image.enabled=true` (default `
 
 ## Errors
 - No usable model in the resolved chain: the aggregate error lists attempted models and candidates skipped for unsupported transports, unavailable credentials, invalid credentials, or unavailable hosted carriers.
-- Invalid input: file not found, file over 35 MiB, unsupported content-sniffed image type, missing `path`/`data`, empty image data, or raw base64 without `mime_type`.
+- Invalid input: file not found, a non-regular file, file over 35 MiB, unsupported content-sniffed image type, missing `path`/`data`, empty image data, or raw base64 without `mime_type`.
 - Hosted image models without an available same-provider `hostedImage` carrier are skipped as `hosted chat carrier unavailable`; a carrier without usable credentials is skipped as `carrier credentials unavailable`.
 - Antigravity credentials that do not contain both an access token and `projectId` cause that candidate to be skipped as `invalid credentials`.
 - More than three xAI/xAI OAuth edit references: `<provider> image edits accept up to 3 reference images; got <N>`.

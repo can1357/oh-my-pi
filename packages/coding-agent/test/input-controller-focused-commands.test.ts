@@ -8,9 +8,11 @@
  * agent) in a focused view, or `/export` writes the main session instead of the viewed one.
  */
 import { afterEach, describe, expect, it, vi } from "bun:test";
+import { AgentBusyError } from "@oh-my-pi/pi-agent-core";
 import { CommandController } from "@oh-my-pi/pi-coding-agent/modes/controllers/command-controller";
 import { InputController } from "@oh-my-pi/pi-coding-agent/modes/controllers/input-controller";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
+import manualContinuePrompt from "../src/prompts/system/manual-continue.md" with { type: "text" };
 
 function createFocusedContext() {
 	let editorText = "";
@@ -59,7 +61,7 @@ function createFocusedContext() {
 		handleExportCommand: vi.fn(async () => {}),
 		handleBtwCommand: vi.fn(async () => {}),
 		showResetUsageSelector: vi.fn(async () => {}),
-		withLocalSubmission: async <T>(_text: string, fn: () => Promise<T>) => fn(),
+		withLocalSubmission: vi.fn(async <T>(_text: string, fn: () => Promise<T>) => fn()),
 	};
 	return { ctx: ctx as unknown as InteractiveModeContext, raw: ctx, editor, prompt };
 }
@@ -76,6 +78,30 @@ async function submit(text: string) {
 describe("focused subagent view slash commands", () => {
 	afterEach(() => {
 		vi.restoreAllMocks();
+	});
+
+	it("continues the focused session with a synthetic directive for . and c", async () => {
+		for (const shortcut of [".", "c"]) {
+			const { prompt, editor, raw } = await submit(shortcut);
+			expect(prompt).toHaveBeenCalledWith(manualContinuePrompt, {
+				synthetic: true,
+				userInitiated: true,
+			});
+			expect(editor.clearDraft).toHaveBeenCalledWith(shortcut);
+			expect(raw.withLocalSubmission).not.toHaveBeenCalled();
+		}
+	});
+
+	it("restores a focused continue shortcut when the target is busy", async () => {
+		const { ctx, raw, editor, prompt } = createFocusedContext();
+		prompt.mockRejectedValueOnce(new AgentBusyError());
+		const controller = new InputController(ctx);
+		controller.setupEditorSubmitHandler();
+		await ctx.editor.onSubmit?.(".");
+
+		expect(editor.getText()).toBe(".");
+		expect(raw.showError).toHaveBeenCalledTimes(1);
+		expect(prompt).toHaveBeenCalledWith(manualContinuePrompt, { synthetic: true, userInitiated: true });
 	});
 
 	it("runs /usage from the focused view", async () => {

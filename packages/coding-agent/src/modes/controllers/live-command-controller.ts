@@ -117,8 +117,9 @@ export class LiveCommandController {
 				},
 				onLevels: input => {
 					if (this.#visualizer !== visualizer) return;
+					// Stored only: the ANIMATION_INTERVAL_MS ticker already renders the
+					// visualizer, so a render per mic chunk just hit the 30fps cap.
 					visualizer.setInputLevel(input);
-					this.#ctx.ui.requestComponentRender(visualizer);
 				},
 				onTranscript: transcript => {
 					if (this.#visualizer !== visualizer) return;

@@ -20,7 +20,6 @@ import {
 	hashPath,
 	normalizePathForComparison,
 	readLines,
-	tryAcquireFileLock,
 	type FileLockHandle,
 } from "@oh-my-pi/pi-utils";
 import { Settings } from "../config/settings";
@@ -29,7 +28,8 @@ import type { Setting } from "../config/registry";
 import { BLOB_HASH_RE, BLOB_STAGING_RE, blobStagingPath } from "../session/blob-store";
 import { listSessionsReadOnly, type SessionInfo, type SessionStatus } from "../session/session-listing";
 import { parseTerminalBreadcrumb } from "../session/session-paths";
-import { FileSessionStorage, sessionOwnerLeasePath } from "../session/session-storage";
+import { readSessionHeaderId } from "../session/session-loader";
+import { FileSessionStorage, tryAcquireSessionLease } from "../session/session-storage";
 import {
 	cfgGcArchive,
 	cfgGcBlobs,
@@ -734,7 +734,7 @@ async function runStaleGc(options: ResolvedGcOptions): Promise<StaleGcResult> {
 		errors: [],
 	};
 	for (const candidate of candidates) {
-		const lease = candidate.ownedSession ? tryAcquireSessionLease(candidate.ownedSession) : undefined;
+		const lease = candidate.ownedSession ? await tryAcquireSessionFileLease(candidate.ownedSession) : undefined;
 		if (lease === null) continue;
 		try {
 			result[candidate.kind] += 1;
@@ -756,12 +756,17 @@ async function runStaleGc(options: ResolvedGcOptions): Promise<StaleGcResult> {
 }
 
 /**
- * Take `sessionFile`'s ownership lease, or null while a running process holds
- * it (or the lease cannot be probed: an unknown owner is treated as live).
+ * Take the ownership lease of the session in `sessionFile`, or null while a
+ * running process holds it (or the lease cannot be probed: an unknown owner is
+ * treated as live). The lease is keyed by the header's session id. Undefined
+ * when the file has no session header: omp writes the header with the first
+ * bytes of a session, so no running writer owns such a file (and candidates
+ * are past the write grace, so none is mid-write).
  */
-function tryAcquireSessionLease(sessionFile: string): FileLockHandle | null {
+async function tryAcquireSessionFileLease(sessionFile: string): Promise<FileLockHandle | null | undefined> {
 	try {
-		return tryAcquireFileLock(sessionOwnerLeasePath(sessionFile));
+		const sessionId = await readSessionHeaderId(sessionFile);
+		return sessionId === undefined ? undefined : tryAcquireSessionLease(sessionId);
 	} catch {
 		return null;
 	}
@@ -1012,15 +1017,18 @@ function deleteHistoryRowsForSessions(dbPath: string, sessionIds: string[]): { d
 		db.run("PRAGMA busy_timeout = 5000");
 		const hasHistory = tableExists(db, "history") && tableHasColumn(db, "history", "session_id");
 		const hasRecaps = tableExists(db, "session_recaps");
-		if (!hasHistory && !hasRecaps) return { deleted: 0, ftsRebuilt: false };
+		const hasTitles = tableExists(db, "session_titles");
+		if (!hasHistory && !hasRecaps && !hasTitles) return { deleted: 0, ftsRebuilt: false };
 		const hasFts = hasHistory && tableExists(db, "history_fts");
 		using deleteStmt = hasHistory ? db.prepare("DELETE FROM history WHERE session_id = ?") : undefined;
-		// Recaps are session-scoped side output with no life beyond their session.
+		// Recaps and titles are session-scoped side output with no life beyond their session.
 		using deleteRecapsStmt = hasRecaps ? db.prepare("DELETE FROM session_recaps WHERE session_id = ?") : undefined;
+		using deleteTitlesStmt = hasTitles ? db.prepare("DELETE FROM session_titles WHERE session_id = ?") : undefined;
 		let deleted = 0;
 		const tx = db.transaction((ids: string[]) => {
 			for (const id of ids) {
 				deleteRecapsStmt?.run(id);
+				deleteTitlesStmt?.run(id);
 				if (!deleteStmt) continue;
 				const result = deleteStmt.run(id) as SqliteRunResult;
 				deleted += sqliteNumber(result.changes);

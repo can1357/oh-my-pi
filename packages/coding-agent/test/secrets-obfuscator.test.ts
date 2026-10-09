@@ -436,6 +436,7 @@ describe("SecretObfuscator regex behavior", () => {
 				provider: "anthropic",
 				content: "## Goal\nAudit the handlers.",
 				filesText: `<files>\n# /repo/\n${secret}.key (Read)\n</files>`,
+				retainedFiles: [{ text: `<files>\n# /repo/\n${secret}.old (Read)\n</files>`, after: 0 }],
 			},
 		};
 
@@ -446,6 +447,8 @@ describe("SecretObfuscator regex behavior", () => {
 		// The metadata takes the same boundary as the summary text...
 		expect(payload.filesText).not.toContain(secret);
 		expect(obfuscator.deobfuscate(payload.filesText ?? "")).toContain(secret);
+		expect(payload.retainedFiles?.[0]?.text).not.toContain(secret);
+		expect(payload.retainedFiles?.[0]?.after).toBe(0);
 		// ...while the replayed block stays byte-identical to the API summary.
 		expect(payload.content).toBe("## Goal\nAudit the handlers.");
 		expect(obfuscated).not.toBe(message);

@@ -5,15 +5,16 @@
  * The dashboard never waits for ingest. {@link StatsLive.start} kicks a full
  * sync in the background and watches the sessions directory; changed
  * transcripts are re-synced (only those files) shortly after they are written.
- * Every committed batch bumps {@link LiveStatus.version} (throttled), so open
- * pages refetch and fill in while parsing is still running.
+ * Every batch that changes stored rows bumps {@link LiveStatus.version}
+ * (throttled), so open pages refetch and fill in while parsing is still
+ * running; syncs that change nothing leave the version alone.
  */
 
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { getSessionsDir, logger } from "@oh-my-pi/pi-utils";
 import { syncAllSessions } from "./aggregator";
-import { initDb } from "./db";
+import { getDataVersion, initDb } from "./db";
 import { getRollupStatus, refreshRollups } from "./rollup";
 import type { LiveStatus, LiveSyncStatus } from "./shared-types";
 
@@ -28,7 +29,8 @@ const SYNC_RETRY_MS = 10_000;
 /** Minimum spacing of progress-only status events. */
 const PROGRESS_THROTTLE_MS = 150;
 
-type Listener = (status: LiveStatus) => void;
+/** Receives each distinct status and its JSON serialization (shared by every listener). */
+type Listener = (status: LiveStatus, frame: string) => void;
 
 /** One per process; owned by the dashboard server (see `startServer`). */
 export class StatsLive {
@@ -36,6 +38,10 @@ export class StatsLive {
 	#sync: LiveSyncStatus = { phase: "idle", current: 0, total: 0, processed: 0, lastSyncedAt: null, error: null };
 	#indexingHours = 0;
 	#listeners = new Set<Listener>();
+	/** Last frame sent to listeners; identical statuses are not re-sent. */
+	#lastFrame: string | null = null;
+	/** `PRAGMA data_version` at the last sync; null before the first. */
+	#dataVersion: number | null = null;
 
 	#started = false;
 	#watcher: fs.FSWatcher | null = null;
@@ -133,8 +139,9 @@ export class StatsLive {
 						};
 						this.#emitProgress();
 					}
-					if (event.processed > committed) {
-						committed = event.processed;
+					// Only committed row changes make pages refetch; unchanged transcripts cost nothing.
+					if (event.changes > committed) {
+						committed = event.changes;
 						this.#changed();
 					}
 				},
@@ -159,14 +166,28 @@ export class StatsLive {
 				}, SYNC_RETRY_MS);
 			}
 		}
-		// Another process may have ingested too; always let clients revalidate.
-		this.#changed();
+		// Another process may have ingested too; its commits move SQLite's data_version.
+		if (this.#externalWrites()) this.#changed();
 		this.#emit();
+	}
+
+	/** Whether another connection committed since the last check (always true on the first). */
+	#externalWrites(): boolean {
+		const current = getDataVersion();
+		if (current === null) return false;
+		const changed = current !== this.#dataVersion;
+		this.#dataVersion = current;
+		return changed;
 	}
 
 	/** Stored data changed: refresh rollups and (throttled) bump the version. */
 	#changed(): void {
 		void this.#refresh();
+		this.#bumpVersion();
+	}
+
+	/** Bump the data version (throttled), making open pages refetch. */
+	#bumpVersion(): void {
 		if (this.#versionTimer) return;
 		const wait = Math.max(0, this.#lastVersionAt + VERSION_THROTTLE_MS - Date.now());
 		this.#versionTimer = setTimeout(() => {
@@ -190,8 +211,9 @@ export class StatsLive {
 				await refreshRollups({
 					onProgress: remaining => {
 						this.#indexingHours = remaining;
-						// Each rolled batch fills in more history for open pages.
-						if (remaining > 0) this.#changed();
+						// Each rolled batch fills in more history for open pages; the rows
+						// themselves are already being rolled, so only the version moves.
+						if (remaining > 0) this.#bumpVersion();
 					},
 				});
 			} while (this.#refreshAgain);
@@ -240,9 +262,12 @@ export class StatsLive {
 
 	#emit(): void {
 		const status = this.status();
+		const frame = JSON.stringify(status);
+		if (frame === this.#lastFrame) return;
+		this.#lastFrame = frame;
 		for (const listener of this.#listeners) {
 			try {
-				listener(status);
+				listener(status, frame);
 			} catch (error) {
 				logger.warn("Stats live listener failed", { error: String(error) });
 			}

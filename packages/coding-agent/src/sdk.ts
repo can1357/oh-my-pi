@@ -59,6 +59,7 @@ import {
 } from "./capability/rule";
 import { bucketRules } from "./capability/rule-buckets";
 import type { EffectiveExtensionRoots } from "./capability/types";
+import { type OAuthAccountPools, SessionAccountPoolScope } from "./config/account-pools";
 import { shouldEnableAppendOnlyContext } from "./config/append-only-context-mode";
 import { shouldInlineToolDescriptors } from "./config/inline-tool-descriptors-mode";
 import { isAuthenticated, kNoAuth, ModelRegistry } from "./config/model-registry";
@@ -75,13 +76,15 @@ import {
 	type ResolveCliModelResult,
 	resolveConfiguredModelPatterns,
 	resolveModelRoleValue,
+	resolveSessionModelSelector,
+	sessionModelDiscoveryProviders,
 } from "./config/model-resolver";
 import { formatModelSelectorValue, parseModelString } from "@oh-my-pi/pi-tui/overlays/model-selector";
 import { loadPromptTemplates as loadPromptTemplatesInternal, type PromptTemplate } from "./config/prompt-templates";
 import { buildServiceTierByFamily } from "./config/service-tier";
 import { bindEffects, combine } from "./config/registry";
 import { Settings } from "./config/settings";
-import { CursorExecHandlers, type CursorMcpResourceAdapter, mcpServerResourcesAllowed } from "./cursor";
+import { CursorExecHandlers, type CursorMcpResourceAdapter } from "./cursor";
 import { createBridgeEditTool, createBridgeGrepFactory } from "./cursor-bridge-tools";
 import "./discovery";
 import { LiveImageUrlService } from "./blob-broker/service";
@@ -105,6 +108,7 @@ import {
 	discoverAndLoadExtensions,
 	discoverExtensionPaths,
 	EXTENSION_HANDLER_TIMEOUT_MS,
+	type ExtensionAgentIdentity,
 	type ExtensionContext,
 	type ExtensionFactory,
 	ExtensionRunner,
@@ -152,8 +156,7 @@ import { parseMCPToolName } from "@oh-my-pi/pi-tui/tools/mcp";
 import { MCP_CONNECTION_STATUS_EVENT_CHANNEL, type McpConnectionStatusEvent } from "./mcp/startup-events";
 import { resolveMCPToolAlias } from "./mcp/tool-bridge";
 import { createSessionMemoryRuntimeContext, resolveMemoryBackend } from "./memory-backend";
-import { cfgMemoryBackend } from "./memory-backend/settings";
-import { MEMORY_BACKEND_TOOL_NAMES, MEMORY_INSTRUCTION_TOOL_NAMES } from "./memory-backend/tool-names";
+import { MEMORY_BACKEND_TOOL_NAMES } from "./memory-backend/tool-names";
 import type { MnemopiSessionState } from "./mnemopi/state";
 import mcpXdevGuidanceTemplate from "./prompts/system/mcp-xdev-guidance.md" with { type: "text" };
 import lateDiagnosticTemplate from "./prompts/tools/lsp-late-diagnostic.md" with { type: "text" };
@@ -190,7 +193,11 @@ import {
 	USER_INTERRUPT_LABEL,
 	wrapSteeringForModel,
 } from "./session/messages";
-import { clampProviderContextImages, dropUnreadableContextImages } from "./session/provider-image-budget";
+import {
+	clampProviderContextImageBytes,
+	clampProviderContextImages,
+	dropUnreadableContextImages,
+} from "./session/provider-image-budget";
 import {
 	expandDefaultRetryFallbackChains,
 	findRetryFallbackCandidates,
@@ -286,6 +293,7 @@ import {
 } from "./tools/builtin-names";
 import { createComputerPrelude } from "./tools/computer";
 import { createRatchetPrelude } from "./ratchet/prelude-definition";
+import { createArchivePrelude } from "./archive/prelude-definition";
 import { ToolContextStore } from "./tools/context";
 import { isIrcEnabled } from "./irc/messaging";
 import { imageGenTool } from "./tools/image-gen";
@@ -303,9 +311,11 @@ import { normalizePromptPath } from "./utils/prompt-path";
 import { buildNamedToolChoice } from "./utils/tool-choice";
 import { VibeSessionRegistry } from "./vibe/runtime";
 import { registerLocalInferenceApi } from "./tiny/local-inference-api";
+import { shutdownTinyTitleClient } from "./tiny/title-client";
 import { buildWorkspaceTree, type WorkspaceTree } from "./workspace-tree";
 
 import {
+	cfgArchiveEnabled,
 	cfgAsyncMaxJobs,
 	cfgComputerEnabled,
 	cfgRatchetEnabled,
@@ -362,7 +372,14 @@ import { cfgTtsr } from "./export/ttsr-settings";
 import { cfgDisabledProviders, cfgEnabledModels, cfgEnabledProviders, cfgModelRoles } from "./config/model-settings";
 import { cfgEditRecoverInlineEdits } from "./edit/settings";
 import { cfgGoalEnabled } from "./goals/settings";
-import { cfgImagesBlockImages, cfgStartupQuiet, cfgTuiReactions, cfgTuiRenderMermaid } from "./modes/settings";
+import {
+	cfgImagesBlockImages,
+	cfgStartupQuiet,
+	cfgTuiReactions,
+	cfgTuiAutoGraph,
+	cfgTuiRenderMermaid,
+	cfgTuiRenderSvg,
+} from "./modes/settings";
 import { cfgLspEnabled, cfgLspLazy, cfgLspShared } from "./lsp/settings";
 import {
 	cfgMcpEnableProjectConfig,
@@ -543,10 +560,22 @@ export interface CreateAgentSessionOptions {
 	getApiKey?: AgentOptions["getApiKey"];
 	/**
 	 * Session whose stored credential affinities are copied into this session
-	 * before any child credential operation.
+	 * before any child credential operation: explicit pins always, automatic
+	 * affinity only for providers this session's own transcript has not pinned.
 	 * @internal
 	 */
 	credentialSourceSessionId?: string;
+	/**
+	 * OAuth account pools for this session: provider id → identity keys (see
+	 * `AuthStorage.sessions.restrict`). A listed provider authenticates only with
+	 * those accounts, never another account or an API key, and requests fail
+	 * when none of them can serve. Applied after {@link credentialSourceSessionId}
+	 * affinity is copied, and enforced on every key lookup through the session's
+	 * model registry, whatever provider session id it carries (title generation,
+	 * advisors, subagents this session spawns). A custom {@link getApiKey}
+	 * bypasses it.
+	 */
+	oauthAccountPools?: OAuthAccountPools;
 
 	/** Model to use. Default: from settings, else first available */
 	model?: Model;
@@ -725,6 +754,15 @@ export interface CreateAgentSessionOptions {
 	enableMCP?: boolean;
 	/** Existing MCP manager to reuse when MCP is enabled (skips discovery, propagates to toolSession). */
 	mcpManager?: MCPManager;
+	/**
+	 * MCP tools minted from a parent's shared manager (subagent proxies). They
+	 * register as manager-owned MCP tools — active from the start and replaced
+	 * wholesale by `refreshMCPTools` — so a parent `/mcp reload` can both add
+	 * and remove them. Passed as `customTools` they would instead be retained as
+	 * extension-owned tools across every refresh. A same-named `customTools`
+	 * entry keeps precedence and drops the proxy. Ignored for restricted sessions.
+	 */
+	mcpTools?: CustomTool[];
 
 	/** Enable LSP integration (tool, formatting, diagnostics, warmup). Default: true */
 	enableLsp?: boolean;
@@ -825,6 +863,17 @@ export interface CreateAgentSessionOptions {
 	/** Whether UI is available (enables interactive tools like ask). Default: false */
 	hasUI?: boolean;
 	/**
+	 * When a resumed session's saved models cannot be restored even after
+	 * discovery, allow continuing with a warning on another model: the settings
+	 * default at startup (`modelFallbackMessage`), or the current model when
+	 * `switchSession` later opens another session. Applies only when `hasUI` is
+	 * true and `retry.modelFallback` is on; otherwise `createAgentSession` and
+	 * `switchSession` throw `Could not restore model <provider/id>`. Hosts whose
+	 * `hasUI` only enables tool dialogs and cannot show the warning (rpc-ui) set
+	 * this to false. Default: true.
+	 */
+	allowSessionModelFallback?: boolean;
+	/**
 	 * A human can answer synchronous prompts even without a terminal UI (e.g. an
 	 * ACP client rendering elicitation forms). Enables `ask` without enabling
 	 * TUI-only session behavior such as eager LSP warmup. Default: `hasUI`.
@@ -836,6 +885,17 @@ export interface CreateAgentSessionOptions {
 	 * other session gets no `cfg://` in its prompt and has writes refused. Default: false.
 	 */
 	settingsApproval?: boolean;
+	/**
+	 * Replies render in omp's own TUI transcript, which draws Mermaid, ```svg
+	 * figures and table charts; only then does the system prompt mention them.
+	 * Print, RPC, ACP and subagent sessions read replies as text. Default: false.
+	 */
+	tuiTranscript?: boolean;
+	/**
+	 * Name the unnamed session from the operator's messages once each reply begins
+	 * (see `title.generator`). Only the interactive TUI sets this; ignored for subagents. Default: false.
+	 */
+	autoTitle?: boolean;
 	/**
 	 * Defer `confirm` reserve-policy fallback until AgentSession prompt-time UI is configured.
 	 * ACP uses this while capabilities are negotiated without enabling UI-only tools.
@@ -1268,9 +1328,9 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 	const toolMap = options.tools ? new Map(options.tools.map(tool => [tool.name, tool])) : undefined;
 	const promptTools = toolMap
 		? projectSystemPromptToolMetadata(
-				toolMap,
-				options.inlineToolDescriptors ? { mode: "full" } : { mode: "compact", toolNames: toolNames ?? [] },
-			)
+			toolMap,
+			options.inlineToolDescriptors ? { mode: "full" } : { mode: "compact", toolNames: toolNames ?? [] },
+		)
 		: undefined;
 	return await buildSystemPromptInternal({
 		cwd: options.cwd,
@@ -1369,14 +1429,14 @@ export function customToolToDefinition(tool: CustomTool, sourcePath?: string): T
 		renderCall: tool.renderCall,
 		renderResult: tool.renderResult
 			? (result, options, theme): Component => {
-					const component = tool.renderResult?.(
-						result,
-						{ expanded: options.expanded, isPartial: options.isPartial, spinnerFrame: options.spinnerFrame },
-						theme,
-					);
-					// Return empty component if undefined to match Component type requirement
-					return component ?? ({ render: () => [] } as unknown as Component);
-				}
+				const component = tool.renderResult?.(
+					result,
+					{ expanded: options.expanded, isPartial: options.isPartial, spinnerFrame: options.spinnerFrame },
+					theme,
+				);
+				// Return empty component if undefined to match Component type requirement
+				return component ?? ({ render: () => [] } as unknown as Component);
+			}
 			: undefined,
 		[TOOL_DEFINITION_MARKER]: true,
 	};
@@ -1688,7 +1748,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 	// Pin authStorage to modelRegistry.authStorage: ModelRegistry.getApiKey() routes refresh
 	// failures through that instance, so any divergent storage handed to the bridge / mcpManager
 	// / session would silently miss credential_disabled events.
-	const modelRegistry =
+	let modelRegistry =
 		options.modelRegistry ??
 		new ModelRegistry(
 			options.authStorage ?? (await logger.time("discoverModels", discoverAuthStorage, agentDir, { settings, cwd })),
@@ -1751,7 +1811,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		const scan = logger.time("buildWorkspaceTree", () =>
 			buildWorkspaceTree(cwd, { timeoutMs: STARTUP_SCAN_DEADLINE_MS }),
 		);
-		scan.catch(() => {});
+		scan.catch(() => { });
 		return scan;
 	};
 	// Undefined until needed: enabling `includeWorkspaceTree` mid-session scans
@@ -1770,7 +1830,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 	const contextFilesPromise = options.contextFiles
 		? Promise.resolve(options.contextFiles)
 		: logger.time("discoverContextFiles", discoverContextFiles, cwd, agentDir);
-	contextFilesPromise.catch(() => {});
+	contextFilesPromise.catch(() => { });
 	const resolveRepoContext = async (repoCwd: string) => {
 		try {
 			return await resolveActiveRepoContext(repoCwd);
@@ -1780,34 +1840,34 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		}
 	};
 	const activeRepoContextPromise = logger.time("resolveActiveRepoContext", resolveRepoContext, cwd);
-	activeRepoContextPromise.catch(() => {});
+	activeRepoContextPromise.catch(() => { });
 	const watchdogFilesPromise = logger.time("discoverWatchdogFiles", () => discoverWatchdogFiles(cwd, agentDir));
-	watchdogFilesPromise.catch(() => {});
+	watchdogFilesPromise.catch(() => { });
 	const advisorConfigsPromise = logger.time("discoverAdvisorConfigs", () => discoverAdvisorConfigs(cwd, agentDir));
-	advisorConfigsPromise.catch(() => {});
+	advisorConfigsPromise.catch(() => { });
 	const promptTemplatesPromise = options.promptTemplates
 		? Promise.resolve(options.promptTemplates)
 		: logger.time("discoverPromptTemplates", discoverPromptTemplates, cwd, agentDir);
-	promptTemplatesPromise.catch(() => {});
+	promptTemplatesPromise.catch(() => { });
 	const slashCommandsPromise = options.slashCommands
 		? Promise.resolve(options.slashCommands)
 		: logger.time("discoverSlashCommands", discoverSlashCommands, cwd);
-	slashCommandsPromise.catch(() => {});
+	slashCommandsPromise.catch(() => { });
 	const customCommandsPromise =
 		options.disableExtensionDiscovery || options.restrictToolNames === true
 			? Promise.resolve<CustomCommandsLoadResult>({ commands: [], errors: [] })
 			: logger.time("discoverCustomCommands", loadCustomCommandsInternal, { cwd, agentDir });
-	customCommandsPromise.catch(() => {});
+	customCommandsPromise.catch(() => { });
 	const skillsSettings = cfgSkills.get(settings);
 	const disabledExtensionIds = cfgDisabledExtensions.get(settings);
 	const discoveredSkillsPromise =
 		options.skills === undefined
 			? logger.time("discoverSkills", discoverSkills, cwd, agentDir, {
-					...skillsSettings,
-					disabledExtensions: disabledExtensionIds,
-				})
+				...skillsSettings,
+				disabledExtensions: disabledExtensionIds,
+			})
 			: undefined;
-	discoveredSkillsPromise?.catch(() => {});
+	discoveredSkillsPromise?.catch(() => { });
 
 	const sessionManager =
 		options.sessionManager ??
@@ -1825,7 +1885,26 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 	}
 	const providerSessionId = options.providerSessionId ?? sessionManager.getSessionId();
 	if (options.credentialSourceSessionId) {
-		modelRegistry.authStorage.sessions.inherit(options.credentialSourceSessionId, providerSessionId);
+		// A revived or resumed child already pins, in its own transcript, the accounts that
+		// hold its conversation cache. Inheriting the parent's automatic sticky for those
+		// providers would make seedCredentialPins defer to it (a live sticky for another
+		// account wins) and cold-miss the child's whole prefix. An explicit parent pin is
+		// the user's choice and still reaches the child.
+		const ownPins = sessionManager.getCredentialPins();
+		modelRegistry.authStorage.sessions.inherit(
+			options.credentialSourceSessionId,
+			providerSessionId,
+			(provider, explicit) => explicit || !ownPins.has(provider),
+		);
+	}
+	// From here on the session resolves every key through its pools; see
+	// SessionAccountPoolScope. A startup failure leaves no session to lift them.
+	const accountPoolScope = options.oauthAccountPools
+		? new SessionAccountPoolScope(modelRegistry.authStorage, options.oauthAccountPools, providerSessionId)
+		: undefined;
+	if (accountPoolScope) {
+		modelRegistry = accountPoolScope.registry(modelRegistry);
+		startupCleanup.defer(() => accountPoolScope.release());
 	}
 	const forkCacheShapeChanged =
 		options.model !== undefined ||
@@ -1836,7 +1915,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		options.customSystemPrompt !== undefined ||
 		options.appendSystemPrompt !== undefined ||
 		options.toolNames !== undefined ||
-		options.customTools !== undefined;
+		options.customTools !== undefined ||
+		options.mcpTools !== undefined;
 	const inheritedPromptCacheKey = forkCacheShapeChanged
 		? undefined
 		: sessionManager.getHeader()?.providerPromptCacheKey;
@@ -1941,21 +2021,11 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			let failedSessionModel: string | undefined;
 			for (let i = 0; i < sessionModelStrings.length; i++) {
 				const sessionModelStr = sessionModelStrings[i];
-				const parsedModel = parseModelString(sessionModelStr, {
-					allowMaxSuffix: true,
-					allowAutoAlias: true,
-					isLiteralModelId: (provider, id) => modelRegistry.find(provider, id) !== undefined,
-				});
-				if (!parsedModel) {
-					failedSessionModel ??= sessionModelStr;
-					continue;
-				}
-
-				const restoredModel = modelRegistry.find(parsedModel.provider, parsedModel.id);
-				if (restoredModel && hasModelAuth(restoredModel)) {
-					model = restoredModel;
+				const restored = resolveSessionModelSelector(modelRegistry, sessionModelStr);
+				if (restored) {
+					model = restored.model;
 					restoredSessionModelIndex = i;
-					restoredSessionThinkingLevel = parsedModel.thinkingLevel;
+					restoredSessionThinkingLevel = restored.thinkingLevel;
 					break;
 				}
 				failedSessionModel ??= sessionModelStr;
@@ -2057,6 +2127,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 	// which rules are bucketed into this session at all.
 	const isSubagentSession = (options.taskDepth ?? 0) > 0 || Boolean(options.parentTaskPrefix);
 	const agentKind: AgentKind = isSubagentSession ? SUB_AGENT_RULE_NAME : MAIN_AGENT_RULE_NAME;
+	// Visuals (Mermaid, SVG figures, table charts) are drawn only in the top-level TUI transcript.
+	const tuiTranscript = options.tuiTranscript === true && !isSubagentSession;
 	const resolvedAgentName = (options.agentName ?? agentKind).trim().toLowerCase();
 
 	// Discover rules and bucket them in one pass to avoid repeated scans over large rule sets.
@@ -2093,13 +2165,19 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 	// work continues so caches still warm.
 	const raceWithDeadline = async <T>(name: string, work: Promise<T>): Promise<T | undefined> => {
 		let timedOut = false;
-		const result = await Promise.race([
-			work,
-			Bun.sleep(STARTUP_SCAN_DEADLINE_MS).then(() => {
-				timedOut = true;
-				return undefined;
-			}),
-		]);
+		const deadline = Promise.withResolvers<undefined>();
+		// Cleared once the race settles: a pending timer would keep this whole startup
+		// scope (settings, session, registries) reachable for the full deadline.
+		const timer = setTimeout(() => {
+			timedOut = true;
+			deadline.resolve(undefined);
+		}, STARTUP_SCAN_DEADLINE_MS);
+		let result: T | undefined;
+		try {
+			result = await Promise.race([work, deadline.promise]);
+		} finally {
+			clearTimeout(timer);
+		}
 		if (timedOut) {
 			logger.warn("Startup scan exceeded deadline; deferring to system prompt fallback", {
 				name,
@@ -2148,9 +2226,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 	const asyncJobManager =
 		!options.parentTaskPrefix && !AsyncJobManager.instance()
 			? new AsyncJobManager({
-					// Re-read per capacity check so `async.maxJobs` resizes the cap live.
-					maxRunningJobs: () => Math.min(100, cfgAsyncMaxJobs.get(settings)),
-				})
+				// Re-read per capacity check so `async.maxJobs` resizes the cap live.
+				maxRunningJobs: () => Math.min(100, cfgAsyncMaxJobs.get(settings)),
+			})
 			: undefined;
 
 	const scopedAsyncJobManager = asyncJobManager ?? (options.parentTaskPrefix ? AsyncJobManager.instance() : undefined);
@@ -2191,12 +2269,6 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		const fileMutationVersions = new Map<string, number>();
 		const disposeCallbacks = new Set<() => void>();
 		const activeToolNames = new Set<string>();
-		// Construction-time grant probe: the registry and active set are still
-		// empty while `createTools` builds tools (ReadTool caches its description
-		// from `session.hasEditTool` then), and the startup active set is only
-		// seeded after that. Until then the getter answers from the requested
-		// scope; after `setSessionActiveToolNames` the live sets take over.
-		let activationApplied = false;
 		const toolRegistry = new Map<string, Tool & Pick<ToolDefinition, "defaultInactive">>();
 		const setActiveToolNames = (names: Iterable<string>): void => {
 			activeToolNames.clear();
@@ -2209,10 +2281,6 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				return sessionManager.getCwd();
 			},
 			isToolActive: name => activeToolNames.has(name),
-			// `read mcp://…` resolves through the process-global protocol router,
-			// which has no session, so the scope gate has to be reachable from the
-			// session the read tool is bound to.
-			isMCPServerResourceAllowed: serverName => serverResourcesAllowed(serverName),
 			setActiveToolNames,
 			toolRegistry,
 			hasUI: options.hasUI ?? false,
@@ -2242,22 +2310,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			},
 			restrictToolNames,
 			get hasEditTool() {
-				if (!activationApplied) {
-					// Construction time: the registry and active set are still empty and
-					// ReadTool caches its description here. Answer from the requested
-					// scope, like the pre-scope getter, plus the disallow filter.
-					// Name-only match: `edit` is a built-in with no MCP ownership metadata.
-					const requestedToolNames = options.toolNames ? normalizeToolNames(options.toolNames) : undefined;
-					return restrictToolNames
-						? requestedToolNames?.includes("edit") === true && !isToolDisallowed("edit", disallowedPatterns)
-						: (!requestedToolNames || requestedToolNames.includes("edit")) &&
-								!isToolDisallowed("edit", disallowedPatterns);
-				}
-				// Effective grant, not mere registration: the active set is filtered
-				// by `disallowedTools:` and an enforced `tools:` allowlist after
-				// `createTools` registers everything, so hashline anchors must
-				// follow the scoped-in set (resolveFileDisplayMode contract).
-				return toolRegistry.has("edit") && activeToolNames.has("edit");
+				const requestedToolNames = options.toolNames ? normalizeToolNames(options.toolNames) : undefined;
+				return restrictToolNames
+					? requestedToolNames?.includes("edit") === true
+					: !requestedToolNames || requestedToolNames.includes("edit");
 			},
 			skipPythonPreflight: options.skipPythonPreflight,
 			contextFiles,
@@ -2387,6 +2443,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		let browserPrelude: EvalPreludeDefinition | undefined;
 		let computerPrelude: EvalPreludeDefinition | undefined;
 		let ratchetPrelude: EvalPreludeDefinition | undefined;
+		let archivePrelude: EvalPreludeDefinition | undefined;
 		const getEvalPreludes = (): readonly EvalPreludeDefinition[] => {
 			if (restrictToolNames || !toolRegistry.has("eval") || !activeToolNames.has("eval")) return [];
 			const builtins: EvalPreludeDefinition[] = [];
@@ -2401,6 +2458,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			if (cfgRatchetEnabled.get(settings)) {
 				ratchetPrelude ??= createRatchetPrelude(toolSession);
 				builtins.push(ratchetPrelude);
+			}
+			if (cfgArchiveEnabled.get(settings)) {
+				archivePrelude ??= createArchivePrelude(toolSession);
+				builtins.push(archivePrelude);
 			}
 			return getEnabledEvalPreludes(builtins);
 		};
@@ -2739,19 +2800,13 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		if (!hasExplicitModel && sessionRetryLimit > 0) {
 			const restoreSessionModel = (): boolean => {
 				for (let i = 0; i < sessionRetryLimit; i++) {
-					const sessionModelStr = sessionModelStrings[i];
-					const parsedModel = parseModelString(sessionModelStr, {
-						allowMaxSuffix: true,
-						allowAutoAlias: true,
-						isLiteralModelId: (provider, id) => modelRegistry.find(provider, id) !== undefined,
-					});
-					if (!parsedModel) continue;
-					const restoredModel = modelRegistry.find(parsedModel.provider, parsedModel.id);
-					if (restoredModel && hasModelAuth(restoredModel)) {
+					const restored = resolveSessionModelSelector(modelRegistry, sessionModelStrings[i]);
+					if (restored) {
+						const restoredModel = restored.model;
 						model = restoredModel;
 						modelFallbackMessage = undefined;
 						restoredSessionModelIndex = i;
-						restoredSessionThinkingLevel = parsedModel.thinkingLevel;
+						restoredSessionThinkingLevel = restored.thinkingLevel;
 						// Recompute thinking-level from scratch against the reclaimed
 						// model: any value derived from the earlier fallback model's
 						// `thinking.defaultLevel` must not become sticky.
@@ -2765,25 +2820,16 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			if (!restoreSessionModel()) {
 				// The saved candidates weren't in the static+cached catalog. If any
 				// belongs to a discovery-backed provider that hasn't been fetched
-				// yet (models.yml `discovery:` — openai-models-list/litellm/proxy/…),
+				// yet (models.yml `discovery:` or extension `fetchDynamicModels`),
 				// trigger a cache-aware, provider-scoped discovery pass and retry
 				// before resume silently downgrades to the default role. The
 				// registry coalesces this with any matching request already running
 				// in the SDK's startup background refresh.
-				const discoverableProviders = new Set(modelRegistry.getDiscoverableProviders());
-				const candidateProviders = new Set<string>();
-				if (discoverableProviders.size > 0) {
-					for (const sessionModelStr of sessionModelStrings.slice(0, sessionRetryLimit)) {
-						const parsedModel = parseModelString(sessionModelStr, {
-							allowMaxSuffix: true,
-							allowAutoAlias: true,
-							isLiteralModelId: (provider, id) => modelRegistry.find(provider, id) !== undefined,
-						});
-						if (parsedModel && discoverableProviders.has(parsedModel.provider)) {
-							candidateProviders.add(parsedModel.provider);
-						}
-					}
-				}
+				const candidateProviders = sessionModelDiscoveryProviders(
+					modelRegistry,
+					sessionModelStrings.slice(0, sessionRetryLimit),
+					disabledProviderIds(settings),
+				);
 				if (candidateProviders.size > 0) {
 					// This skips the static reload and all-other-runtime restore
 					// performed by `refreshProvider`, so unrelated runtime providers
@@ -2794,6 +2840,15 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					restoreSessionModel();
 				}
 			}
+		}
+		// Exhaust persisted candidates (including configured and extension discovery)
+		// before permitting a settings-default or first-available substitution.
+		if (
+			sessionModelStrings.length > 0 &&
+			restoredSessionModelIndex < 0 &&
+			(!options.hasUI || options.allowSessionModelFallback === false || !cfgRetryModelFallback.get(settings))
+		) {
+			throw new Error(`Could not restore model ${sessionModelStrings[0]}`);
 		}
 		// Resolve deferred --model/subagent patterns now that extension models are
 		// registered. Use the same CLI resolver as the immediate path so bare role
@@ -3193,7 +3248,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				modelFallbackMessage =
 					patterns && patterns.length > 0
 						? `No model available matching enabledModels (${patterns.join(", ")}) with usable credentials. Configure auth for an allowed provider or adjust enabledModels.`
-						: "No models available. Use /login or set an API key environment variable. Then use /model to select a model.";
+						: "No default model selected. Use /login, set an API key environment variable, or select a local model with /model or --model.";
 			}
 		}
 
@@ -3319,16 +3374,21 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 
 		const registeredTools = restrictToolNames ? [] : extensionRunner.getAllRegisteredTools();
 		const initialRegisteredTools = new WeakSet(registeredTools);
-		const sdkCustomTools =
+		// Manager-owned proxies register like SDK custom tools but are classified
+		// as manager tools via their origins. An explicitly supplied custom tool
+		// keeps its name: the proxy is dropped rather than registered as a loser
+		// whose manager classification would let a refresh replace the winner.
+		const explicitCustomTools =
 			restrictToolNames && options.allowRestrictedCustomTools !== true
 				? []
 				: (options.customTools?.filter(tool => !isLegacyBuiltinToolDefinition(tool)) ?? []);
+		const explicitCustomToolNames = new Set(explicitCustomTools.map(tool => tool.name));
+		const sdkMcpTools = restrictToolNames
+			? []
+			: (options.mcpTools ?? []).filter(tool => !explicitCustomToolNames.has(tool.name));
+		initialMcpManagerTools.push(...sdkMcpTools);
+		const sdkCustomTools = [...sdkMcpTools, ...explicitCustomTools];
 		const sdkCustomToolNames = new Set(sdkCustomTools.map(tool => tool.name));
-		for (const tool of sdkCustomTools) {
-			if (HIDDEN_TOOL_NAMES.includes(tool.name as HiddenToolName)) {
-				throw new Error(`Cannot register custom tool '${tool.name}': '${tool.name}' is a reserved protocol tool.`);
-			}
-		}
 		const allCustomTools = [
 			...registeredTools,
 			...sdkCustomTools.map(tool => {
@@ -3372,9 +3432,6 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			}
 		}
 		for (const tool of wrappedExtensionTools) {
-			if (HIDDEN_TOOL_NAMES.includes(tool.name as HiddenToolName)) {
-				continue;
-			}
 			toolRegistry.set(tool.name, tool);
 			builtInRegistryToolNames.delete(tool.name);
 		}
@@ -3455,54 +3512,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// The grant is captured here, independently of the session's provider:
 		// a session that starts on another provider can switch to Cursor later,
 		// and the roster is built once, at session creation.
-		// Scope-aware Cursor grants: scoping keeps scoped-out tools in the
-		// canonical registry but removes them from the active set, and this
-		// bridge answers native frames from the registry regardless of the
-		// advertised catalog — so grants must consult the enforced scope, not
-		// registry membership alone. (The later `explicitlyRequestedToolNames`
-		// additions — yield, auto-learn, checkpoint/rewind — never name
-		// `edit`/`write`/`grep`, so the raw request matches the finalized set.)
-		const cursorRequestedToolNames = new Set(normalizeToolNames(options.toolNames ?? []));
-		const cursorScopeAllows = (name: string, sourceMcpServerName?: string): boolean => {
-			// The scope decides on the CANONICAL registered spelling, not the one
-			// the frame used: Cursor sends the supported Claude Code spelling
-			// (`mcp__srv-x__tool`) for a tool registered under the minted
-			// (`mcp__srv_x_tool`), and `getExecutableTool` resolves that alias
-			// after this check — so judging the raw spelling would let a frame
-			// bypass an `mcp__<server>_*` pattern and an enforced allowlist that
-			// both target the minted name. `resolveMCPToolAlias` returns the
-			// registered tool only when exactly one candidate matches, so an
-			// ambiguous or unknown spelling stays judged as itself.
-			const canonical = resolveMCPToolAlias(name, candidate => toolRegistry.get(candidate))?.name ?? name;
-			// Metadata-aware disallow: pass the tool's raw `mcpServerName`
-			// so `mcp__<server>_*` still matches length-capped minted names (a plain
-			// name-prefix match misses the truncated + hashed registry key).
-			// The per-server scope probe supplies the OWNED tool's server name: when
-			// two servers mint the same public name, the registry holds only the
-			// dedup winner, so judging the loser's shared name by the winner's
-			// metadata would let a server wildcard targeting the loser slip through
-			// — the override keeps each source owner judged by its own metadata.
-			const registeredMcpServerName = (toolRegistry.get(canonical) as { mcpServerName?: unknown } | undefined)
-				?.mcpServerName;
-			const mcpServerName =
-				typeof sourceMcpServerName === "string"
-					? sourceMcpServerName
-					: typeof registeredMcpServerName === "string"
-						? registeredMcpServerName
-						: undefined;
-			const isBuiltIn = builtInRegistryToolNames.has(canonical);
-			return isToolScopedIn(
-				canonical,
-				disallowedPatterns,
-				{
-					enforceToolAllowlist,
-					allowedToolNames: cursorRequestedToolNames,
-					isBuiltIn,
-				},
-				mcpServerName,
-			);
-		};
-		const editWasGranted = toolRegistry.has("edit") && cursorScopeAllows("edit");
+		const editWasGranted = toolRegistry.has("edit");
 		// Built on first use rather than eagerly: a session that never reaches
 		// Cursor never constructs it.
 		let cursorBridgeEditTool: AgentTool | undefined;
@@ -3611,9 +3621,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				// force-includes and the checkpoint/rewind pair; other auto-includes stay inactive.
 				const activate = explicitToolNames
 					? explicitToolNames.has(name) ||
-						SESSION_MANAGED_BUILTIN_TOOL_NAMES.includes(name) ||
-						name === "checkpoint" ||
-						name === "rewind"
+					SESSION_MANAGED_BUILTIN_TOOL_NAMES.includes(name) ||
+					name === "checkpoint" ||
+					name === "rewind"
 					: native.hidden !== true;
 				added.push({ name, builtIn: true, activate });
 			}
@@ -3680,83 +3690,24 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// Mounted devices are absent from the advertised tool set, so a miss on a
 		// device name has nothing to suggest unless the loop is told they exist.
 		const suggestDeviceToolNames = (): Iterable<string> => toolSession.xdev?.mountedNames ?? [];
-		// Cursor's resource frames ask what THIS client's servers advertise;
-		// only live connections have any. Built once: the advisor bridges
-		// answer from the same connections the primary does.
-		// A server that owns registry tools is gated purely by tool
-		// executability (at least one owned tool scoped in); the per-server
-		// predicate applies only to resource-only servers (no owned registry
-		// tool at all). One shared decision — `serverResourcesAllowed` below —
-		// covers every resource path: the adapter's three methods and the
-		// handler-side gate (`CursorExecHandlers` reaches the same verdict via
-		// `mcpServerResourcesAllowed`).
-		// A resource-only server (advertises resources, no tools) has no
-		// registry entry to gate on. Keep it unless the scope targets THIS
-		// server: an enforced allowlist (the subagent declared no MCP tools) or
-		// an `mcp__` disallow pattern naming it (`mcp__*` or
-		// `mcp__<server>_*`) strips it, while an unrelated
-		// `disallowedTools: [bash]` or a pattern for a different server must
-		// not silently remove its resources.
-		const resourceOnlyServerAllowed = (serverName: string): boolean =>
-			!enforceToolAllowlist && !mcpDisallowTargetsServer(disallowedPatterns, serverName);
-		// Ownership is read from the manager's loaded tools, NOT the registry:
-		// registered names are deduplicated, so when two servers mint the same
-		// public name only the winner survives in `toolRegistry` and the losing
-		// server would read as resource-only — its resources then escaping the
-		// disallow scope that targets its tools. The manager keeps every
-		// server's tools, each carrying its own `mcpServerName`.
-		//
-		// Resolved per call, not snapshotted: for an interactive session MCP
-		// discovery is deferred, so a set captured at construction would be
-		// empty (and equally stale after `tools/list_changed` adds or removes a
-		// server's tools).
-		const ownsAnyTool = (serverName: string): boolean =>
-			(mcpManager?.getTools() ?? []).some(
-				tool => (tool as { mcpServerName?: unknown }).mcpServerName === serverName,
-			);
-		const serverResourcesAllowed = (name: string): boolean =>
-			mcpServerResourcesAllowed(
-				// Both live sources, read per call. Extension-owned MCP tools live only
-				// in the registry; a server whose public name lost the registry's
-				// deduplication lives only in the manager's list. Reading just the
-				// registry makes that loser look resource-only, so an exact disallow of
-				// the shared name would strip the winner's resources while the loser's
-				// — whose only tool the same disallow matches — stayed listable and
-				// readable.
-				[toolRegistry.values(), mcpManager?.getTools() ?? []],
-				cursorScopeAllows,
-				resourceOnlyServerAllowed,
-				name,
-			);
+		// Cursor's resource frames ask what THIS client's servers advertise; only
+		// live connections have any. Built once: the advisor bridges answer from
+		// the same connections the primary does.
 		const cursorMcpResources: CursorMcpResourceAdapter | undefined = mcpManager && {
-			serverNames: () => mcpManager.getConnectedServers().filter(serverResourcesAllowed),
+			serverNames: () => mcpManager.getConnectedServers(),
 			getServerResources: async name => {
 				// The manager registers a server's tools before its background
 				// resource load finishes, so a frame arriving in that window
 				// would read an empty cache and report "advertises nothing".
 				await mcpManager.ensureServerResources(name);
-				// The advisor bridge shares this adapter and carries no
-				// handler-level `isToolExecutable` gate, so its explicit-server
-				// listings would otherwise reach this method ungated. The same
-				// scope decision as `serverNames()` above applies: a scoped-out
-				// server advertises nothing here either.
-				if (!serverResourcesAllowed(name)) return undefined;
 				return mcpManager.getServerResources(name);
 			},
-			readServerResource: async (name, uri) => {
-				// Same gate as the listing: a scoped-out server's resources are
-				// not readable, even by direct server address. The primary
-				// bridge's handler re-checks, but the advisor bridge shares this
-				// adapter and has no handler-level gate. Resource-only servers
-				// (no owned tool) stay readable when the scope does not target
-				// this server.
-				if (!serverResourcesAllowed(name)) return undefined;
-				return mcpManager.readServerResource(name, uri);
-			},
+			readServerResource: (name, uri) => mcpManager.readServerResource(name, uri),
 		};
 		const cursorExecHandlers = new CursorExecHandlers({
 			cwd,
 			// The session's cwd moves (`/cd`, resume, branch restore) while this
+			// bridge is built once at startup. Path-confining frames — the native
 			// `delete` and a `download_path` resource read — resolve against
 			// whichever of the two they are given, so without the live resolver the
 			// primary would write into the workspace the session has left while
@@ -3769,20 +3720,6 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			// registry may still hold the session's own `edit` (any mode) when
 			// this session did not start on Cursor.
 			getEditReplaceTool: getCursorBridgeEditTool,
-			// Frame-driven MCP/custom resolution must honor the subagent scope:
-			// scoped-out names resolve to nothing (unadvertised-tool error) even
-			// though their registry entries remain.
-			isToolExecutable:
-				enforceToolAllowlist || disallowedPatterns.length > 0
-					? (name: string): boolean => cursorScopeAllows(name)
-					: undefined,
-			// Live liveness, not just the scope: the executor strips `todo` from a
-			// non-prewalk subagent after construction, and these server-resolved frames
-			// bypass `resolveFrameTool`'s gate entirely.
-			isToolActive: name => toolSession.isToolActive?.(name) === true,
-			// Resource-only servers (no owned tool) stay readable when the scope does
-			// not target this server, so the handler gate agrees with the adapter.
-			allowToollessMcpServers: resourceOnlyServerAllowed,
 			getToolContext: () => toolContextStore.getContext(),
 			mcpResources: cursorMcpResources,
 			emitEvent: event => cursorEventEmitter?.(event),
@@ -3794,30 +3731,24 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			// the grant: the factory builds a fresh tool and `executeTool` prefers
 			// it over the registry, so installing it unconditionally would let a
 			// session without `grep` search anyway.
-			createGrepTool:
-				toolRegistry.has("grep") && cursorScopeAllows("grep")
-					? createBridgeGrepFactory(toolSession, extensionRunner)
-					: undefined,
+			createGrepTool: toolRegistry.has("grep") ? createBridgeGrepFactory(toolSession, extensionRunner) : undefined,
 			// Native delete and resource-download frames mutate files without a
 			// registry tool. Resolve both the transactional active predicate and
 			// live access mode: Agent.state.tools commits only after prompt rebuilding,
 			// while this predicate revokes before the await and rolls back on failure.
-			// Under an enforced scope these frames require the `write` grant.
 			allowDirectFileMutation: () =>
-				cursorScopeAllows("write") &&
-				((editWasGranted && toolSession.isToolActive?.("edit") === true) ||
-					(toolSession.isToolActive?.("write") === true &&
-						toolRegistry.has("write") &&
-						toolSession.deviceOnlyWrite !== true)),
+				(editWasGranted && toolSession.isToolActive?.("edit") === true) ||
+				(toolSession.isToolActive?.("write") === true &&
+					toolRegistry.has("write") &&
+					toolSession.deviceOnlyWrite !== true),
 		});
 
-		// Resolve the live inline-descriptors setting against the session-start model.
-		// `auto` enforces the per-model policy (inline for Gemini, off otherwise); a
-		// mid-session model switch keeps the start-time model's decision. Prompt and
-		// agent (description pruning) must agree on it.
-		const inlineToolDescriptorsModelId = model?.id;
+		// Resolve the live inline-descriptors setting against the active model.
+		// `auto` enforces the per-model policy (inline for Gemini, off otherwise), so
+		// a mid-session model switch re-decides it. Prompt and agent (description
+		// pruning) must agree: every prompt rebuild re-syncs the agent's pruning.
 		const resolveInlineToolDescriptors = (): boolean =>
-			shouldInlineToolDescriptors(cfgInlineToolDescriptors.get(settings), inlineToolDescriptorsModelId);
+			shouldInlineToolDescriptors(cfgInlineToolDescriptors.get(settings), (agent?.state.model ?? model)?.id);
 		// Latest memory backend instructions rendered for advisor system prompts.
 		// Populated by the initial rebuildSystemPrompt below (before the session is
 		// constructed) and refreshed on every later rebuild via
@@ -3894,31 +3825,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					setActiveRules(nextActiveRules);
 				}
 			}
-			// The backend's instructions are imperative prose ("Use `recall`
-			// proactively…"), so they are only truthful while every tool the block
-			// names is in the effective tool set — a scope that drops one would
-			// steer the model into a guaranteed unavailable-tool error. Same rule
-			// as the auto-learn guidance below — tool-specific guidance follows
-			// the effective set. Keyed on the tools each backend's OWN block
-			// references, not the memory tool roster: scoping out an unreferenced
-			// tool (`memory_edit`, `learn`) must not withhold guidance that never
-			// mentions it, and a partial allowlist (`tools: [recall]`) must not
-			// keep prose that also tells the model to call `retain`/`reflect`.
-			const memoryInstructionTools = MEMORY_INSTRUCTION_TOOL_NAMES[cfgMemoryBackend.get(settings)];
-			// Bare `*` is deny-all: no tool is callable, so no block that points
-			// at one survives — including backends whose prose names none.
-			const memoryToolsScopedOut =
-				restrictToolNames ||
-				disallowedPatterns.includes("*") ||
-				memoryInstructionTools.some(
-					name =>
-						!isToolScopedIn(name, disallowedPatterns, {
-							enforceToolAllowlist,
-							allowedToolNames: explicitlyRequestedToolNameSet,
-							isBuiltIn: true,
-						}),
-				);
-			const memoryBackend = memoryToolsScopedOut ? undefined : await resolveMemoryBackend(settings);
+			const memoryBackend = restrictToolNames ? undefined : await resolveMemoryBackend(settings);
 			const memoryInstructions = memoryBackend
 				? await memoryBackend.buildDeveloperInstructions(agentDir, settings, session)
 				: undefined;
@@ -3927,6 +3834,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			// tool-availability caveat lives in the wrapper template.
 			advisorMemoryPrompt = formatAdvisorMemoryPrompt(memoryInstructions);
 			if (hasSession) session.setAdvisorMemoryPrompt(advisorMemoryPrompt);
+			const inlineToolDescriptors = resolveInlineToolDescriptors();
+			// Unset only during the initial build; the agent is constructed with it.
+			if (agent) agent.pruneToolDescriptions = inlineToolDescriptors;
 			// A fixed string or array in systemPrompt replaces all generated blocks.
 			// Preserve the bookkeeping above, but skip discovering or rendering a
 			// template whose output would be discarded.
@@ -3947,21 +3857,15 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			// not just an active name): a custom/extension tool that merely shares the
 			// name is not built-in, and the settings reconcile adds/removes the built-ins
 			// as `autolearn.enabled` flips — so a subagent that filtered them out or a
-			// same-named custom tool while auto-learn is off get no guidance. The
-			// disallow filter applies on top: a `disallowedTools: [manage_skill]`
-			// agent must not be told to call a tool the scope invariant will always reject.
+			// same-named custom tool while auto-learn is off get no guidance.
 			const autoLearnInstructions = restrictToolNames
 				? undefined
 				: buildAutoLearnInstructions({
-						manageSkill:
-							(hasSession
-								? session.hasBuiltInTool("manage_skill")
-								: builtInRegistryToolNames.has("manage_skill")) &&
-							!isToolDisallowed("manage_skill", disallowedPatterns),
-						learn:
-							(hasSession ? session.hasBuiltInTool("learn") : builtInRegistryToolNames.has("learn")) &&
-							!isToolDisallowed("learn", disallowedPatterns),
-					});
+					manageSkill: hasSession
+						? session.hasBuiltInTool("manage_skill")
+						: builtInRegistryToolNames.has("manage_skill"),
+					learn: hasSession ? session.hasBuiltInTool("learn") : builtInRegistryToolNames.has("learn"),
+				});
 			const appendParts: string[] = [];
 			if (memoryInstructions) appendParts.push(memoryInstructions);
 			if (autoLearnInstructions) appendParts.push(autoLearnInstructions);
@@ -3970,10 +3874,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			// catalog line; a tool the route bound omits keeps its catalog line.
 			const xdevPromptDocs = toolSession.xdev
 				? planXdevPromptDocs(
-						toolSession.xdev,
-						cfgToolsXdevDocs.get(settings),
-						cfgToolsXdevInlineDevices.get(settings),
-					)
+					toolSession.xdev,
+					cfgToolsXdevDocs.get(settings),
+					cfgToolsXdevInlineDevices.get(settings),
+				)
 				: undefined;
 			const projection = projectMountedMCPXdevGuidance(
 				collectMountedMCPToolRoutes(toolSession.xdev ? listXdevTools(toolSession.xdev) : []),
@@ -3999,110 +3903,21 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				);
 			}
 			if (serverInstructions && serverInstructions.size > 0) {
-				// A server's instructions are appended only when the session actually
-				// granted it at least one tool: with `disallowedTools: [mcp__*]` (or an
-				// enforced allowlist naming none of a server's tools) the server is
-				// scoped out, so its server-controlled text must not land in a prompt
-				// whose tool surface cannot act on it. Ownership is matched via each
-				// registered tool's `mcpServerName`, never a `mcp__<server>_` name
-				// prefix — minted names are lossy-sanitized and length-capped, so a
-				// prefix can miss or over-match (see MCPManager.#replaceServerTools).
-				// Unrestricted sessions (no disallow list, no enforced allowlist) keep
-				// every connected server's instructions, byte-identical to before.
-				let scopedInServerNames: Set<string> | undefined;
-				// Ownership filtering runs only when the scope targets MCP access: an
-				// unrelated disallow (`disallowedTools: [bash]`) must not strip a
-				// resource-only server's instructions (no owned tool to match) — it
-				// keeps every server's instructions, byte-identical to unrestricted.
-				// Bare `*` is deny-all: it removes every MCP tool, so it targets MCP
-				// access just like `mcp__*` (matching the resource gate).
-				if (
-					enforceToolAllowlist ||
-					disallowedPatterns.some(pattern => pattern.startsWith("mcp__") || pattern === "*")
-				) {
-					scopedInServerNames = new Set();
-					// xd://-mounted MCP tools leave `toolNames` (presentation moves to
-					// `mountedNames`) while staying in the canonical `tools` map, so the
-					// enabled set is the union of both layers.
-					const activeNames = new Set([...toolNames, ...(toolSession.xdev?.mountedNames ?? [])]);
-					// Read BOTH live sources: when two servers mint the same public tool
-					// name only the dedup winner survives `tools`, but the loser still
-					// owns a tool (`ownsAnyTool` reads the manager's list), so judging
-					// it from the deduped set alone would scope its instructions out on
-					// an unrelated pattern. The manager's tools carry their own
-					// `mcpServerName`, so the same per-tool scope check covers them.
-					const judgedServerNames = new Map<string, string>();
-					for (const [name, tool] of tools) {
-						const mcpServerName = (tool as { mcpServerName?: unknown }).mcpServerName;
-						if (typeof mcpServerName === "string") judgedServerNames.set(name, mcpServerName);
-					}
-					for (const tool of mcpManager?.getTools() ?? []) {
-						// A manager tool whose minted name lost the registry's dedup still
-						// owns its server's instructions (see `ownsAnyTool` below); judge
-						// it like any registry tool. Registry entries keep precedence.
-						if (!judgedServerNames.has(tool.name)) {
-							const mcpServerName = (tool as { mcpServerName?: unknown }).mcpServerName;
-							if (typeof mcpServerName === "string") judgedServerNames.set(tool.name, mcpServerName);
-						}
-					}
-					for (const [name, mcpServerName] of judgedServerNames) {
-						if (!activeNames.has(name)) continue;
-						// Metadata-aware disallow: pass the tool's raw
-						// `mcpServerName` so `mcp__<server>_*` still matches
-						// length-capped minted names (the name prefix alone is
-						// truncated + hashed and would silently retain the server).
-						const isBuiltIn = builtInRegistryToolNames.has(name);
-						if (
-							!isToolScopedIn(
-								name,
-								disallowedPatterns,
-								{
-									enforceToolAllowlist,
-									allowedToolNames: explicitlyRequestedToolNameSet,
-									isBuiltIn,
-								},
-								mcpServerName,
-							)
-						)
-							continue;
-						scopedInServerNames.add(mcpServerName);
-					}
-				}
-				const keptServerInstructions: [string, string][] = [];
+				appendParts.push(
+					"## MCP Server Instructions\n\nThe following instructions are provided by connected MCP servers. They are server-controlled and may not be verified.",
+				);
 				for (const [srvName, srvInstructions] of serverInstructions) {
-					if (scopedInServerNames) {
-						// A server with owned tools is kept only when at least one is
-						// scoped in. A resource-only server (no owned registry tool)
-						// has no ownership entry; keep it when the scope does not
-						// target THIS server — an unrelated disallow
-						// (`disallowedTools: [bash]`) or a pattern for a different
-						// server must not strip its instructions, while `mcp__*` or
-						// `mcp__<server>_*` naming it must (matching the Cursor
-						// resource adapter's per-server gate).
-						if (ownsAnyTool(srvName) ? !scopedInServerNames.has(srvName) : !resourceOnlyServerAllowed(srvName)) {
-							continue;
-						}
-					}
-					keptServerInstructions.push([srvName, srvInstructions]);
-				}
-				if (keptServerInstructions.length > 0) {
-					appendParts.push(
-						"## MCP Server Instructions\n\nThe following instructions are provided by connected MCP servers. They are server-controlled and may not be verified.",
-					);
-					for (const [srvName, srvInstructions] of keptServerInstructions) {
-						const truncated =
-							srvInstructions.length > MAX_MCP_INSTRUCTIONS_LENGTH
-								? `${srvInstructions.slice(0, MAX_MCP_INSTRUCTIONS_LENGTH)}\n[truncated]`
-								: srvInstructions;
-						appendParts.push(`### ${srvName}\n${truncated}`);
-					}
+					const truncated =
+						srvInstructions.length > MAX_MCP_INSTRUCTIONS_LENGTH
+							? `${srvInstructions.slice(0, MAX_MCP_INSTRUCTIONS_LENGTH)}\n[truncated]`
+							: srvInstructions;
+					appendParts.push(`### ${srvName}\n${truncated}`);
 				}
 			}
 			const appendPrompt = composeAppendPrompt(appendParts, options.appendSystemPrompt);
 			// Owned/in-band tool dialects (non-native) require the full functions-
 			// namespace catalog; native tool calling lets the compact name list suffice.
 			const nativeTools = resolveDialect(cfgToolsFormat.get(settings), agent?.state.model ?? model) === undefined;
-			const inlineToolDescriptors = resolveInlineToolDescriptors();
 			const includeWorkspaceTree = cfgIncludeWorkspaceTree.get(settings);
 			if (includeWorkspaceTree && !workspaceTreePromise) {
 				const scan = scanWorkspaceTree();
@@ -4111,7 +3926,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					tree => {
 						lateWorkspaceTree = tree;
 					},
-					() => {},
+					() => { },
 				);
 			}
 			// Mounted xd:// readers stay out of the direct inventory, but their skill
@@ -4165,7 +3980,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				includeModelInPrompt: cfgIncludeModelInPrompt.get(settings),
 				personality: agentKind === "sub" ? "none" : cfgPersonality.get(settings),
 				subagent: agentKind === "sub",
-				renderMermaid: cfgTuiRenderMermaid.get(settings),
+				renderMermaid: tuiTranscript && cfgTuiRenderMermaid.get(settings),
+				renderSvg: tuiTranscript && cfgTuiRenderSvg.get(settings),
+				autoGraph: tuiTranscript && cfgTuiAutoGraph.get(settings) !== "off",
 				reactions: agentKind === "main" && options.hasUI === true && cfgTuiReactions.get(settings),
 				activeRepoContext,
 			});
@@ -4180,7 +3997,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		};
 
 		const toolNamesFromRegistry = Array.from(toolRegistry.keys());
-		let explicitlyRequestedToolNames = options.toolNames ? normalizeToolNames(options.toolNames) : undefined;
+		const explicitlyRequestedToolNames = options.toolNames ? normalizeToolNames(options.toolNames) : undefined;
 		// When `requireYieldTool` is set, the subagent's prompts and idle-reminders demand a
 		// `yield` call to terminate. The tool registry already includes `yield` (see
 		// `createTools`), but an explicit `toolNames` list would otherwise drop it from the
@@ -4206,51 +4023,15 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// Checkpoint and rewind are a pair: `createTools` auto-includes the sister
 		// tool in the registry, but an explicit `toolNames` list would otherwise
 		// drop it from the ACTIVE set — leaving the agent able to checkpoint but
-		// unable to rewind (or vice versa). Unlike the manage_skill/learn mirror
-		// above, this is a safety pairing — it applies to restricted sessions too.
+		// unable to rewind (or vice versa). Mirror the pairing here. Unlike the
+		// manage_skill/learn mirror above, this is a safety pairing — it applies
+		// to restricted sessions too.
 		if (explicitlyRequestedToolNames) {
-			explicitlyRequestedToolNames = withSiblingTools(explicitlyRequestedToolNames);
-		}
-		// A declaration may spell an MCP tool the Claude Code way
-		// (`mcp__srv-x__tool`), which is the supported wire spelling but not the
-		// registered key (`mcp__srv_x_tool`). Resolve such entries to the
-		// registered name so an enforced allowlist admits the tool the
-		// declaration names, and so an explicit `disable`/disallow of the same
-		// spelling is judged against the same key. Unambiguous matches only, and
-		// every non-MCP or unresolvable entry is left untouched.
-		//
-		// The disallow list is canonicalized against the same registry: an exact
-		// deny written in the Claude Code spelling must remove the tool it names,
-		// or the filter compares it with the minted key, fails to match, and
-		// leaves the denied tool executable.
-		if (toolRegistry.size > 0) {
-			const canonicalizeMcpSpelling = (name: string): string => {
-				// Wildcards are matched against minted names and raw server metadata,
-				// never resolved as a whole-name alias; `exec` (any case) expands downstream.
-				if (name.endsWith("*") || name.toLowerCase() === "exec") return name;
-				const canonical = resolveMCPToolAlias(name, candidate =>
-					toolRegistry.has(candidate) ? { name: candidate } : undefined,
-				);
-				return canonical?.name ?? name;
-			};
-			if (explicitlyRequestedToolNames) {
-				const resolved = new Set<string>();
-				let changed = false;
-				for (const name of explicitlyRequestedToolNames) {
-					const next = canonicalizeMcpSpelling(name);
-					if (next !== name) changed = true;
-					if (!resolved.has(next)) resolved.add(next);
-				}
-				if (changed) explicitlyRequestedToolNames = [...resolved];
+			if (builtInToolNames.includes("checkpoint") && !explicitlyRequestedToolNames.includes("rewind")) {
+				explicitlyRequestedToolNames.push("rewind");
+			} else if (builtInToolNames.includes("rewind") && !explicitlyRequestedToolNames.includes("checkpoint")) {
+				explicitlyRequestedToolNames.push("checkpoint");
 			}
-			const canonicalDisallowed = new Set<string>();
-			let disallowChanged = false;
-			for (const pattern of disallowedPatterns) {
-				const next = canonicalizeMcpSpelling(pattern);
-				if (next !== pattern) disallowChanged = true;
-				canonicalDisallowed.add(next);
-			}
-			if (disallowChanged) disallowedPatterns = [...canonicalDisallowed];
 		}
 		const requestedToolNames = explicitlyRequestedToolNames ?? toolNamesFromRegistry;
 		const normalizedRequested = requestedToolNames.filter(name => toolRegistry.has(name));
@@ -4264,26 +4045,14 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		const explicitlyRequestedToolNameSet = explicitlyRequestedToolNames
 			? new Set(explicitlyRequestedToolNames)
 			: undefined;
-		// The Cursor scope gate was seeded from the raw request above; refresh it
-		// in place now that the forced additions (yield, auto-learn, checkpoint/
-		// rewind pairing) are final, so the bridge admits exactly what the active
-		// set may contain. Handlers only run during streaming — never between
-		// here and the bridge construction.
-		if (explicitlyRequestedToolNameSet) {
-			cursorRequestedToolNames.clear();
-			for (const name of explicitlyRequestedToolNameSet) cursorRequestedToolNames.add(name);
-		}
 		const xdevReadAvailable =
 			builtInRegistryToolNames.has("read") &&
-			(explicitlyRequestedToolNameSet === undefined || explicitlyRequestedToolNameSet.has("read")) &&
-			// Name-only match: built-in `read`/`write` have no MCP ownership metadata.
-			!isToolDisallowed("read", disallowedPatterns);
+			(explicitlyRequestedToolNameSet === undefined || explicitlyRequestedToolNameSet.has("read"));
 		const xdevWriteAvailable =
 			builtInRegistryToolNames.has("write") &&
 			(explicitlyRequestedToolNameSet === undefined ||
 				explicitlyRequestedToolNameSet.has("write") ||
-				toolSession.deviceOnlyWrite === true) &&
-			!isToolDisallowed("write", disallowedPatterns);
+				toolSession.deviceOnlyWrite === true);
 		const initialRequestedActiveToolNames = options.toolNames
 			? requestedActiveToolNames
 			: requestedActiveToolNames.filter(name => !defaultInactiveToolNames.has(name));
@@ -4291,37 +4060,17 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 
 		// Custom tools and extension-registered tools are always included
 		// unless the effective registry winner is hidden / defaultInactive. Restricted callers own the list.
-		// When the caller enforces a tool allowlist (subagent `tools:` frontmatter),
-		// custom/extension/MCP tools not named in the list are excluded too.
 		const alwaysInclude: string[] = restrictToolNames
 			? []
 			: [
-					...sdkCustomTools.map(t => t.name),
-					...registeredTools.map(t => t.definition.name),
-					...settingsGatedCustomEntries.keys(),
-				].filter(
-					name =>
-						!defaultInactiveToolNames.has(name) &&
-						(!enforceToolAllowlist || explicitlyRequestedToolNameSet?.has(name) === true),
-				);
+				...sdkCustomTools.map(t => t.name),
+				...registeredTools.map(t => t.definition.name),
+				...settingsGatedCustomEntries.keys(),
+			].filter(name => !defaultInactiveToolNames.has(name));
 		for (const name of alwaysInclude) {
 			if (toolRegistry.has(name) && !initialToolNames.includes(name)) {
 				initialToolNames.push(name);
 			}
-		}
-		// Disallow patterns remove tools from the active set after the allowlist is
-		// applied (covers built-ins and any custom/extension/MCP tool not caught above).
-		// The registry's proxy objects carry `mcpServerName` (raw config server name),
-		// so `mcp__<server>_*` matches length-capped minted names by ownership too.
-		if (disallowedPatterns.length > 0) {
-			initialToolNames = withoutSiblingTools(initialToolNames, name => {
-				const mcpServerName = (toolRegistry.get(name) as { mcpServerName?: unknown } | undefined)?.mcpServerName;
-				return isToolDisallowed(
-					name,
-					disallowedPatterns,
-					typeof mcpServerName === "string" ? mcpServerName : undefined,
-				);
-			});
 		}
 
 		// Pre-register in the global agent registry BEFORE building the system prompt,
@@ -4385,21 +4134,12 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				mountedNames.length > 0 ||
 				initialToolNames.some(name => toolRegistry.get(name)?.deferrable === true) ||
 				toolSession.getPlanModeState?.()?.enabled === true;
-			if (
-				deviceTransportNeeded &&
-				xdevWriteAvailable &&
-				!initialToolNames.includes("write") &&
-				// Name-only match: write is a built-in with no MCP ownership metadata.
-				!isToolDisallowed("write", disallowedPatterns)
-			) {
+			if (deviceTransportNeeded && xdevWriteAvailable && !initialToolNames.includes("write")) {
 				initialToolNames.push("write");
 			}
 		}
 
 		setSessionActiveToolNames(initialToolNames);
-		// The active set is now final; the hasEditTool getter switches from the
-		// construction-time scope probe to the live sets from here on.
-		activationApplied = true;
 		const { systemPrompt } = await logger.time(
 			"buildSystemPrompt",
 			rebuildSystemPrompt,
@@ -4491,6 +4231,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			// else, and it runs before the blob broker uploads any of these bytes.
 			transformed = await dropUnreadableContextImages(transformed, transformModel);
 			transformed = await blobBroker.decorateContext(transformed, transformModel);
+			// Byte budget after decoration: URL/file-referenced images carry no inline bytes.
+			transformed = clampProviderContextImageBytes(transformed, transformModel);
 			// Keep per-request volatility out of the system prompt: the date/cwd
 			// reminder rides on the first user turn so open-weight providers keep
 			// their tool-schema prefix cache (#7404).
@@ -4523,10 +4265,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			(hasServiceTierEntry
 				? (existingSession.serviceTier ?? {})
 				: buildServiceTierByFamily(
-						cfgTierOpenai.get(settings),
-						cfgTierAnthropic.get(settings),
-						cfgTierGoogle.get(settings),
-					));
+					cfgTierOpenai.get(settings),
+					cfgTierAnthropic.get(settings),
+					cfgTierGoogle.get(settings),
+				));
 		const persistInitialServiceTier =
 			options.openAIServiceTier !== undefined || resolvedServiceTierByFamily !== undefined;
 		const initialServiceTierByFamily = { ...configuredServiceTierByFamily };
@@ -4585,11 +4327,11 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			options.cacheWarming === false
 				? undefined
 				: new CacheWarmer({
-						stream: (model, context, streamOptions) => primaryStreamFn(model, context, streamOptions),
-						getPromptTokens: () => session.lastPromptTokens(),
-						getMode: () => cfgProvidersCacheWarming.get(settings),
-						decide: event => extensionRunner.emitCacheWarmingDecision(event),
-					});
+					stream: (model, context, streamOptions) => primaryStreamFn(model, context, streamOptions),
+					getPromptTokens: () => session.lastPromptTokens(),
+					getMode: () => cfgProvidersCacheWarming.get(settings),
+					decide: event => extensionRunner.emitCacheWarmingDecision(event),
+				});
 		const codeModeState: { namespacesInfo?: unknown } = {};
 		const transformToolCallArguments = (args: Record<string, unknown>): Record<string, unknown> => {
 			let result = args;
@@ -4742,6 +4484,17 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			}
 		}
 
+		// Advisors share this session's extension runner (for the approval gate
+		// below), so their tool calls must name the advisor as `ctx.agent`; the
+		// runner's own identity would report them as this session's agent.
+		const advisorAgent: ExtensionAgentIdentity = Object.freeze({
+			kind: "sub",
+			id: "advisor",
+			name: "advisor",
+			depth: 0,
+			parentId: resolvedAgentId,
+		});
+
 		// Full toolset for the advisor, built unconditionally so it can be toggled at
 		// runtime. Bound to a DISTINCT ToolSession (its own `-advisor` session id +
 		// agent id) so the advisor's tool state — snapshot, seen-lines, conflict, and
@@ -4770,7 +4523,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			queueLaunchCompletion: notification =>
 				session?.queueLaunchCompletion(notification) ??
 				Promise.reject(new Error("Session unavailable for launch completion delivery")),
-			getAgentId: () => "advisor",
+			getAgentId: () => advisorAgent.id,
 			// The primary's availability signals are wrong for advisors: their tool
 			// slate is filtered separately at runtime (default read/grep/glob, no
 			// write transport), so xd:// devices are unreachable. Images are inlined,
@@ -4789,6 +4542,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// bridge both run these instances directly, so a raw one would execute a
 		// `bash`/`write` the user configured as `ask` or `deny`. Meta-notice
 		// first, matching the registry's wrap order.
+		const builtAdvisorTools = built.filter((tool): tool is Tool => tool != null);
 		// The advisor is a full agent, but it is still this agent's delegate: a
 		// session scoped read-only (`tools: []` or `disallowedTools: ["*"]`) must
 		// not reach `bash`/`write`/`edit` through its advisor. Apply the owning
@@ -4796,7 +4550,6 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// pair-aware filter as the primary's active set — so the advisor can only
 		// select what the primary itself may run. An unscoped session admits
 		// everything, leaving top-level behaviour unchanged.
-		const builtAdvisorTools = built.filter((tool): tool is Tool => tool != null);
 		const scopedAdvisorToolNames = new Set(
 			withoutSiblingTools(
 				builtAdvisorTools.map(tool => tool.name),
@@ -4809,7 +4562,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		);
 		const advisorTools: Tool[] = builtAdvisorTools
 			.filter(tool => scopedAdvisorToolNames.has(tool.name))
-			.map(tool => new ExtensionToolWrapper(wrapToolWithMetaNotice(tool), extensionRunner) as Tool);
+			.map(tool => new ExtensionToolWrapper(wrapToolWithMetaNotice(tool), extensionRunner, advisorAgent) as Tool);
 
 		const advisorWatchdogPrompts = [...watchdogFiles];
 		if (initialActiveRepoContext) {
@@ -4875,13 +4628,14 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			skillsReloadable: options.skills === undefined,
 			skillsSettings: cfgSkills.get(settings),
 			modelRegistry,
+			allowSessionModelFallback: options.hasUI === true && options.allowSessionModelFallback !== false,
 			rebindModelAfterDiscovery: options.model === undefined || options.rebindModelAfterDiscovery === true,
 			toolRegistry,
 			reconcileBrowserMcpFilter: mcpManager
 				? async enabled => {
-						await mcpManager.reconcileBrowserFilter(enabled);
-						return mcpManager.getTools();
-					}
+					await mcpManager.reconcileBrowserFilter(enabled);
+					return mcpManager.getTools();
+				}
 				: undefined,
 			memoryEnabled: !restrictToolNames,
 			memoryAgentDir: agentDir,
@@ -4889,11 +4643,11 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			createMemoryTools: restrictToolNames
 				? undefined
 				: async () => {
-						const tools = await Promise.all(
-							MEMORY_BACKEND_TOOL_NAMES.map(name => BUILTIN_TOOLS[name](toolSession)),
-						);
-						return tools.filter((tool): tool is AgentTool => tool !== null);
-					},
+					const tools = await Promise.all(
+						MEMORY_BACKEND_TOOL_NAMES.map(name => BUILTIN_TOOLS[name](toolSession)),
+					);
+					return tools.filter((tool): tool is AgentTool => tool !== null);
+				},
 			createThinkTool: async () => (await HIDDEN_TOOLS.think(toolSession)) ?? null,
 			createVibeTools:
 				(options.taskDepth ?? 0) === 0 && !options.parentTaskPrefix
@@ -4912,9 +4666,6 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			getXdevToolEntries: () => (toolSession.xdev ? xdevEntries(toolSession.xdev) : []),
 			xdev: toolSession.xdev,
 			presentationPinnedToolNames: explicitlyRequestedToolNameSet,
-			enforceToolAllowlist: enforceToolAllowlist || undefined,
-			allowedToolNames: explicitlyRequestedToolNameSet ?? undefined,
-			disallowedToolPatterns: disallowedPatterns.length > 0 ? disallowedPatterns : undefined,
 			setActiveToolNames: setSessionActiveToolNames,
 			ensureWriteRegistered,
 			isDeviceOnlyWrite: () => toolSession.deviceOnlyWrite === true,
@@ -4928,17 +4679,17 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			reconcileSettingsGatedTools,
 			getMcpServerInstructions: mcpManager
 				? () => {
-						const raw = mcpManager.getServerInstructions();
-						if (!raw || raw.size === 0) return raw;
-						const out = new Map<string, string>();
-						for (const [name, text] of raw) {
-							out.set(
-								name,
-								text.length > MAX_MCP_INSTRUCTIONS_LENGTH ? text.slice(0, MAX_MCP_INSTRUCTIONS_LENGTH) : text,
-							);
-						}
-						return out;
+					const raw = mcpManager.getServerInstructions();
+					if (!raw || raw.size === 0) return raw;
+					const out = new Map<string, string>();
+					for (const [name, text] of raw) {
+						out.set(
+							name,
+							text.length > MAX_MCP_INSTRUCTIONS_LENGTH ? text.slice(0, MAX_MCP_INSTRUCTIONS_LENGTH) : text,
+						);
 					}
+					return out;
+				}
 				: undefined,
 			disconnectOwnedMcpManager: ownedMcpManager ? () => ownedMcpManager.disconnectAll() : undefined,
 			ttsrManager,
@@ -4946,15 +4697,16 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			agentId: resolvedAgentId,
 			agentKind,
 			providerSessionId: options.providerSessionId,
+			accountPoolScope,
 			providerPromptCacheKeySource,
 			advisorTools,
 			// Same per-call `grep` seam the primary bridge gets, built against the
 			// advisor's own tool session so a `pi_grep` frame's context width and
 			// match cap are honored there too.
-			advisorCreateGrepTool: createBridgeGrepFactory(advisorToolSession, extensionRunner),
+			advisorCreateGrepTool: createBridgeGrepFactory(advisorToolSession, extensionRunner, advisorAgent),
 			// Same `replace`-mode requirement as the primary bridge; the advisor
 			// path gates it on the advisor's own `edit` grant.
-			advisorCreateEditTool: () => createBridgeEditTool(advisorToolSession, extensionRunner),
+			advisorCreateEditTool: () => createBridgeEditTool(advisorToolSession, extensionRunner, advisorAgent),
 			// The advisor's bridge tools are wrapped for approval, but the wrapper
 			// reads the mode and per-tool policies only from the execute-time
 			// context — the primary bridge passes the same store.
@@ -4963,9 +4715,16 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			// resource frame would otherwise report every server as empty.
 			advisorMcpResources: cursorMcpResources,
 			titleSystemPrompt: options.titleSystemPrompt,
+			autoTitle: options.autoTitle === true && !isSubagentSession,
 		});
 		hasSession = true;
 		credentialNoticeSession = session;
+		// Hashline snapshots are session-scoped: /new and switchSession fire the
+		// change callbacks, so clear the tool-side store there — stale tags would
+		// otherwise surface as "issued in this session" in mismatch diagnostics
+		// after a reset (#13370). The tools snapshot into THIS store, not the
+		// AgentSession's own lazy field.
+		session.registerSessionChangeCallback(() => toolSession.editStore?.clear());
 		if (ownedSkillDescriptionStore) {
 			// Let in-flight compressions land before releasing the file.
 			session.addDisposer(
@@ -5007,11 +4766,6 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		cfgToolCallSwitches.listen(session, ({ intentTracing, abortOnFabricatedResult }) => {
 			agent.intentTracing = intentTracing;
 			agent.abortOnFabricatedToolResult = abortOnFabricatedResult;
-		});
-		// Description pruning mirrors the prompt's inline catalog; the prompt listener
-		// above republishes the prompt for the same change.
-		cfgInlineToolDescriptors.listen(session, () => {
-			agent.pruneToolDescriptions = resolveInlineToolDescriptors();
 		});
 		// Tool-gating settings add or remove the tools they gate and refresh the
 		// prompt once per coalesced change. Restricted (structured) sessions keep the
@@ -5081,46 +4835,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				session.setToolBuiltIn(name, false);
 				session.setExtensionMCPTool(name, liveTool);
 				try {
-					// Subagent tool scoping: a tool outside the enforced allowlist or
-					// matching a disallow pattern stays registered but is never activated.
-					// The registration's `mcpServerName` is passed through so
-					// `mcp__<server>_*` matches length-capped minted names by ownership.
-					// A scope entry written in the Claude Code spelling
-					// (`mcp__srv-x__tool`) resolves against THIS registration: the
-					// startup canonicalization ran before the registry held the tool, so
-					// without this the minted key is compared with the raw pattern,
-					// fails to match, and a denied late tool activates (or a
-					// Claude-spelled allowlist entry denies it the inverse way).
-					const canonicalScopeEntry = (entry: string): string => {
-						if (entry.endsWith("*")) return entry;
-						return (
-							resolveMCPToolAlias(entry, candidate =>
-								toolRegistry.has(candidate) ? { name: candidate } : undefined,
-							)?.name ?? entry
-						);
-					};
-					// Canonicalize the declared entries against the live registry (not the tool
-					// name): a Claude-spelled `tools:` entry stays raw in the set when the tool
-					// was absent at startup, and only resolves now that this registration
-					// populated it — toolRegistry.set ran above, so the entry resolves against
-					// the registration being judged.
-					const allowlisted =
-						!enforceToolAllowlist ||
-						explicitlyRequestedToolNameSet?.has(name) === true ||
-						[...(explicitlyRequestedToolNameSet ?? [])].some(
-							entry => !entry.endsWith("*") && canonicalScopeEntry(entry) === name,
-						);
-					const scopedOut =
-						!allowlisted ||
-						isToolDisallowed(
-							name,
-							disallowedPatterns.map(canonicalScopeEntry),
-							registered.definition.mcpServerName,
-						);
-					if (
-						((registered.definition.defaultInactive || registered.definition.hidden) && !explicitlyRequested) ||
-						scopedOut
-					) {
+					if ((registered.definition.defaultInactive || registered.definition.hidden) && !explicitlyRequested) {
 						if (!alreadyEnabled) return;
 						await session.setActiveToolPresentation(
 							enabled.filter(enabledName => enabledName !== name),
@@ -5261,7 +4976,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			};
 			cfgExtensionSources.listen(session, () => {
 				const next = extensionReconcile
-					.catch(() => {})
+					.catch(() => { })
 					.then(reconcileExtensionSources)
 					.then(() => session.refreshSkillsAndCommands());
 				extensionReconcile = next;
@@ -5303,6 +5018,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 
 		{
 			const originalDispose = session.dispose.bind(session);
+			let tinyClientReleased = false;
 			session.dispose = async () => {
 				try {
 					// Reject new session work (eval starts) the moment disposal
@@ -5329,6 +5045,18 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					}
 					await originalDispose();
 				} finally {
+					// The tiny-model client is a process singleton shared by every session.
+					// Only the session that owns process state drops its connections, once:
+					// that fails every request still in flight, and a repeat dispose must not
+					// cancel requests other sessions made since.
+					if (bindsProcessState && !tinyClientReleased) {
+						tinyClientReleased = true;
+						try {
+							await shutdownTinyTitleClient();
+						} catch (error) {
+							logger.warn("Session dispose: tiny-model client shutdown failed", { error: String(error) });
+						}
+					}
 					unregisterUnlessParked();
 					unsubscribeCredentialDisabled();
 					unbindSessionEffects?.();
@@ -5353,8 +5081,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					try {
 						const codexPrewarmApiKey = options.getApiKey
 							? // `getApiKey` returns a value-or-promise union; unwrap the promise,
-								// then resolve the result if it is itself an ApiKeyResolver.
-								await resolveApiKeyOnce(await options.getApiKey(codexModel))
+							// then resolve the result if it is itself an ApiKeyResolver.
+							await resolveApiKeyOnce(await options.getApiKey(codexModel))
 							: await modelRegistry.getApiKey(codexModel, providerSessionId);
 						if (!codexPrewarmApiKey) return;
 						await logger.time("prewarmOpenAICodexResponses", prewarmOpenAICodexResponses, codexModel, {
@@ -5375,15 +5103,17 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			}
 		}
 
-		// Broker-shared language servers: one server per project, multiplexed
-		// across omp instances by the LSP mux daemon. Session-level because the
-		// flag lives in module state consulted on every client cold-start.
-		// Re-applied live on `lsp.shared` changes: servers cold-started after the
-		// change use the new mode; already-running clients keep their transport
-		// until they exit or idle out.
-		setSharedLspEnabled(enableLsp && cfgLspShared.get(settings));
-		if (enableLsp) {
-			cfgLspShared.listen(session, shared => setSharedLspEnabled(shared));
+		// Broker-shared language servers (see lsp/mux/protocol.ts). The flag is
+		// module state read on every client cold start, so only a session that binds
+		// process state may set it. A subagent or helper session (usually
+		// enableLsp=false) must not switch the parent's later cold starts to private
+		// servers. Re-applied live on `lsp.shared` changes; running clients keep
+		// their transport until they exit or idle out.
+		if (bindsProcessState) {
+			setSharedLspEnabled(enableLsp && cfgLspShared.get(settings));
+			if (enableLsp) {
+				cfgLspShared.listen(session, shared => setSharedLspEnabled(shared));
+			}
 		}
 
 		// Start LSP warmup in the background so startup does not block on language server initialization.
@@ -5395,8 +5125,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// CPU parsing big `initialize` responses concurrently with the LLM stream consumer, jittering
 		// perceived latency.
 		// Turning `lsp.lazy` off mid-session kicks off the same warmup once.
-		// `lsp.enabled: false` skips discovery and warmup entirely; `lspServers` stays undefined so the
-		// welcome screen hides its LSP section.
+		// `lsp.enabled: false` skips discovery and warmup entirely; `lspServers` stays undefined.
 		let lspServers: CreateAgentSessionResult["lspServers"];
 		if (enableLsp && cfgLspEnabled.get(settings) && options.hasUI) {
 			const startupLspServers = discoverStartupLspServers(
@@ -5487,6 +5216,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 						transformed = await normalizeProviderContextImagesForModel(transformed, transformModel);
 						transformed = await dropUnreadableContextImages(transformed, transformModel);
 						transformed = await blobBroker.decorateContext(transformed, transformModel);
+						transformed = clampProviderContextImageBytes(transformed, transformModel);
 						return captureDateCwdReminder.transform(
 							transformed,
 							formatLocalCalendarDate(),
