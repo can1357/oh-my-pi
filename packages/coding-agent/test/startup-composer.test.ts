@@ -58,13 +58,55 @@ describe("startup composer terminal session identity", () => {
 		const originalAgentDir = getAgentDir();
 		const originalTmuxPane = process.env.TMUX_PANE;
 		fs.mkdirSync(project);
-		fs.writeFileSync(sessionFile, "{}\n");
+		fs.writeFileSync(
+			sessionFile,
+			`${JSON.stringify({ type: "session", id: "cached", cwd: project })}\n${JSON.stringify({
+				type: "message",
+				message: { role: "user", content: "cached work" },
+			})}\n`,
+		);
 		process.env.TMUX_PANE = "%startup-fallback-session";
 		setAgentDir(agentDir);
 		try {
 			expect(resolveTerminalSessionPrepaint(project, sessionFile)).toEqual({
 				cacheCwd: project,
 				sessionFile,
+			});
+		} finally {
+			setAgentDir(originalAgentDir);
+			if (originalTmuxPane === undefined) delete process.env.TMUX_PANE;
+			else process.env.TMUX_PANE = originalTmuxPane;
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("skips a cached empty /new stub when a different terminal will resume an older transcript", () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "omp-startup-nonempty-session-"));
+		const agentDir = path.join(root, "agent");
+		const project = path.join(root, "project");
+		const sessions = path.join(root, "sessions");
+		const olderSessionFile = path.join(sessions, "2026-01-01T00-00-00_old.jsonl");
+		const emptySessionFile = path.join(sessions, "2026-01-02T00-00-00_empty.jsonl");
+		const originalAgentDir = getAgentDir();
+		const originalTmuxPane = process.env.TMUX_PANE;
+		fs.mkdirSync(project);
+		fs.mkdirSync(sessions);
+		fs.writeFileSync(
+			olderSessionFile,
+			`${JSON.stringify({ type: "session", id: "old", cwd: project })}\n${JSON.stringify({
+				type: "message",
+				message: { role: "user", content: "pre-new work" },
+			})}\n`,
+		);
+		fs.writeFileSync(emptySessionFile, `${JSON.stringify({ type: "session", id: "empty", cwd: project })}\n`);
+		fs.utimesSync(olderSessionFile, new Date("2026-01-01T00:00:00Z"), new Date("2026-01-01T00:00:00Z"));
+		fs.utimesSync(emptySessionFile, new Date("2026-01-02T00:00:00Z"), new Date("2026-01-02T00:00:00Z"));
+		process.env.TMUX_PANE = "%startup-nonempty-session";
+		setAgentDir(agentDir);
+		try {
+			expect(resolveTerminalSessionPrepaint(project, emptySessionFile)).toEqual({
+				cacheCwd: project,
+				sessionFile: olderSessionFile,
 			});
 		} finally {
 			setAgentDir(originalAgentDir);
@@ -112,7 +154,13 @@ describe("startup composer terminal session identity", () => {
 		const originalTmuxPane = process.env.TMUX_PANE;
 		fs.mkdirSync(originalProject);
 		fs.writeFileSync(oldSessionFile, "{}\n");
-		fs.writeFileSync(currentSessionFile, "{}\n");
+		fs.writeFileSync(
+			currentSessionFile,
+			`${JSON.stringify({ type: "session", id: "current", cwd: movedProject })}\n${JSON.stringify({
+				type: "message",
+				message: { role: "user", content: "current project work" },
+			})}\n`,
+		);
 		process.env.TMUX_PANE = "%startup-moved-project-current";
 		setAgentDir(agentDir);
 		try {

@@ -54,6 +54,94 @@ export interface TerminalSessionPrepaint {
 	readonly sessionFile: string;
 }
 
+function hasDisplayText(content: unknown): boolean {
+	if (typeof content === "string") return content.trim().length > 0;
+	if (!Array.isArray(content)) return false;
+	return content.some(part => {
+		if (!part || typeof part !== "object") return false;
+		const text = (part as { text?: unknown }).text;
+		return typeof text === "string" && text.trim().length > 0;
+	});
+}
+
+/**
+ * Prepaint-only mirror of the resumable-content boundary in `isEmptySession`.
+ * This stays synchronous and dependency-light because the first frame runs
+ * before the session graph loads.
+ */
+function hasResumableSessionContent(sessionFile: string): boolean {
+	let file: number | undefined;
+	try {
+		file = fs.openSync(sessionFile, "r");
+		const buffer = Buffer.allocUnsafe(64 * 1024);
+		const decoder = new TextDecoder();
+		let pending = "";
+		const inspect = (line: string): boolean => {
+			let entry: unknown;
+			try {
+				entry = JSON.parse(line);
+			} catch {
+				return false;
+			}
+			if (!entry || typeof entry !== "object") return false;
+			const record = entry as {
+				type?: unknown;
+				title?: unknown;
+				shortSummary?: unknown;
+				message?: { role?: unknown; content?: unknown };
+			};
+			if (typeof record.title === "string" && record.title.trim()) return true;
+			if (record.type === "compaction" && typeof record.shortSummary === "string" && record.shortSummary.trim()) {
+				return true;
+			}
+			if (record.type !== "message" || !record.message) return false;
+			if (record.message.role === "assistant") return true;
+			return (
+				(record.message.role === "user" || record.message.role === "developer") &&
+				hasDisplayText(record.message.content)
+			);
+		};
+
+		for (;;) {
+			const bytes = fs.readSync(file, buffer, 0, buffer.length, null);
+			if (bytes === 0) break;
+			pending += decoder.decode(buffer.subarray(0, bytes), { stream: true });
+			let newline = pending.indexOf("\n");
+			while (newline >= 0) {
+				if (inspect(pending.slice(0, newline).trim())) return true;
+				pending = pending.slice(newline + 1);
+				newline = pending.indexOf("\n");
+			}
+		}
+		pending += decoder.decode();
+		return pending.trim().length > 0 && inspect(pending.trim());
+	} catch {
+		return false;
+	} finally {
+		if (file !== undefined) fs.closeSync(file);
+	}
+}
+
+/** Resolve the project-local target `continueRecent()` will choose after skipping empty `/new` stubs. */
+function resolveCurrentProjectSession(currentSessionFile: string | undefined): string | undefined {
+	if (!currentSessionFile || !fs.existsSync(currentSessionFile)) return undefined;
+	if (hasResumableSessionContent(currentSessionFile)) return currentSessionFile;
+	try {
+		const sessionDir = path.dirname(currentSessionFile);
+		return fs
+			.readdirSync(sessionDir, { withFileTypes: true })
+			.filter(entry => entry.isFile() && entry.name.endsWith(".jsonl"))
+			.map(entry => {
+				const sessionFile = path.join(sessionDir, entry.name);
+				return { sessionFile, modified: fs.statSync(sessionFile).mtimeMs };
+			})
+			.sort((a, b) => b.modified - a.modified || b.sessionFile.localeCompare(a.sessionFile))
+			.find(entry => hasResumableSessionContent(entry.sessionFile))?.sessionFile;
+	} catch {
+		return undefined;
+	}
+}
+
 /** Resolve the session identity needed by prepaint, without loading the session graph. */
 export function resolveTerminalSessionPrepaint(
 	cwd: string,
@@ -61,10 +149,10 @@ export function resolveTerminalSessionPrepaint(
 ): TerminalSessionPrepaint | undefined {
 	const breadcrumb = readTerminalBreadcrumbEntrySync();
 	const resolvedCwd = path.resolve(cwd);
-	const currentSession =
-		currentSessionFile && fs.existsSync(currentSessionFile)
-			? { cacheCwd: resolvedCwd, sessionFile: currentSessionFile }
-			: undefined;
+	const resolvedCurrentSessionFile = resolveCurrentProjectSession(currentSessionFile);
+	const currentSession = resolvedCurrentSessionFile
+		? { cacheCwd: resolvedCwd, sessionFile: resolvedCurrentSessionFile }
+		: undefined;
 	// A terminal without a breadcrumb follows continueRecent()'s project-local
 	// fallback. The cache identity was written by that live session and lets the
 	// first frame reserve its usage widths before the session graph loads.

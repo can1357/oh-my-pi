@@ -3644,6 +3644,15 @@ export class InteractiveMode implements InteractiveModeContext {
 	#persistComposerStatus(): void {
 		const sessionFile = this.sessionManager.getSessionFile();
 		if (!sessionFile) return;
+		// A durable zero-turn `/new` boundary is skipped by continueRecent() in a
+		// different terminal. Keep the prior non-empty session's cache row so its
+		// usage remains available when that transcript is the actual resume target.
+		if (
+			!this.sessionManager.getSessionName()?.trim() &&
+			!this.sessionManager.getEntries().some(entry => entry.type === "message")
+		) {
+			return;
+		}
 		const model = this.session.model;
 		const usage = this.sessionManager.getUsageStatistics();
 		// Recover the border's ANSI wrapper by coloring a sentinel and splitting around it.
