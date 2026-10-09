@@ -60,7 +60,6 @@ async function createHarness(factory: ExtensionFactory) {
 		followUp: vi.fn(async (_text: string, _images?: ImageContent[]) => {}),
 		promptCustomMessage: vi.fn(async () => true),
 		abort: vi.fn(async () => {}),
-		maybeStartTitleGeneration: vi.fn(),
 	};
 	const ctx = {
 		editor,

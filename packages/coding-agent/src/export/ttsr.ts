@@ -14,6 +14,7 @@ import type { Judge, JudgeOptions, NoulQuestion } from "@oh-my-pi/pi-ai";
 import { AstMatchStrictness, astMatch, countTokens, Encoding } from "@oh-my-pi/pi-natives";
 import { logger } from "@oh-my-pi/pi-utils";
 import { compileRuleCondition, type Rule } from "../capability/rule";
+import { ensureGrammar } from "../utils/grammars";
 import type { TtsrSettings } from "./ttsr-settings";
 
 export type TtsrMatchSource = "text" | "thinking" | "tool";
@@ -904,6 +905,7 @@ export class TtsrManager {
 
 	async #astConditionsMatch(patterns: string[], source: string, lang: string): Promise<boolean> {
 		try {
+			await ensureGrammar({ lang });
 			const result = await astMatch({
 				patterns,
 				source,

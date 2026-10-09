@@ -1,26 +1,69 @@
 //! Vendored and extended language definitions for ast-grep integration.
 //!
 //! Originally derived from `ast-grep-language` v0.39.9, stripped of
-//! serde/ignore machinery, and extended with additional languages.
+//! serde/ignore machinery, and extended with additional languages. Grammars
+//! are either linked in or downloaded as WebAssembly; see [`grammar`].
 
+pub mod grammar;
 mod parsers;
+pub mod wasm_grammars;
 
 use std::{borrow::Cow, collections::HashMap, fmt, path::Path, sync::LazyLock};
 
 use ast_grep_core::{
-	Doc, Language, Node,
+	AstGrep, Doc, Language, Node,
 	matcher::{KindMatcher, Pattern, PatternBuilder, PatternError},
 	meta_var::MetaVariable,
 	tree_sitter::{LanguageExt, StrDoc, TSLanguage, TSRange},
 };
 use phf::phf_map;
 
+use self::grammar::{GrammarSource, LanguageGrammar, WasmGrammar};
+
+/// Grammar source of a language: `native <parsers fn>` or `wasm <wasm_grammars
+/// static>`.
+macro_rules! grammar {
+	(native $func:ident) => {
+		GrammarSource::Native(parsers::$func)
+	};
+	(wasm $grammar:ident) => {
+		GrammarSource::Wasm(&wasm_grammars::$grammar)
+	};
+}
+
+/// Parses `src` into a [`StrDoc`]. ast-grep's own `StrDoc::try_new` uses a
+/// bare parser, which cannot run wasm grammars.
+fn parse_doc<L: LanguageExt + LanguageGrammar>(src: &str, lang: L) -> Result<StrDoc<L>, String> {
+	let language = lang.grammar().load().map_err(|err| err.to_string())?;
+	let tree = grammar::parse(&language, src)
+		.map_err(|err| err.to_string())?
+		.ok_or("tree-sitter produced no tree")?;
+	Ok(StrDoc { src: src.to_owned(), lang, tree })
+}
+
+/// `LanguageExt::ast_grep` through [`parse_doc`]; panics when parsing fails,
+/// like ast-grep's default.
+fn ast_grep_doc<L: LanguageExt + LanguageGrammar>(src: &str, lang: L) -> AstGrep<StrDoc<L>> {
+	AstGrep::doc(parse_doc(src, lang).unwrap_or_else(|err| panic!("{err}")))
+}
+
+/// `LanguageExt::get_ts_language` for `lang`; panics when its wasm grammar is
+/// not installed (see [`grammar`]).
+fn loaded_language(lang: &impl LanguageGrammar) -> TSLanguage {
+	lang.grammar().load().unwrap_or_else(|err| panic!("{err}"))
+}
+
 /// Implements a stub language (no expando / `pre_process_pattern` needed).
 /// Use when the language grammar accepts `$VAR` as valid identifiers.
 macro_rules! impl_lang {
-	($lang:ident, $func:ident) => {
+	($lang:ident, $($grammar:tt)+) => {
 		#[derive(Clone, Copy, Debug)]
 		pub struct $lang;
+		impl LanguageGrammar for $lang {
+			fn grammar(&self) -> GrammarSource {
+				grammar!($($grammar)+)
+			}
+		}
 		impl Language for $lang {
 			fn kind_to_id(&self, kind: &str) -> u16 {
 				self.get_ts_language().id_for_node_kind(kind, true)
@@ -34,12 +77,16 @@ macro_rules! impl_lang {
 			}
 
 			fn build_pattern(&self, builder: &PatternBuilder) -> Result<Pattern, PatternError> {
-				builder.build(|src| StrDoc::try_new(src, *self))
+				builder.build(|src| parse_doc(src, *self))
 			}
 		}
 		impl LanguageExt for $lang {
+			fn ast_grep<S: AsRef<str>>(&self, source: S) -> AstGrep<StrDoc<Self>> {
+				ast_grep_doc(source.as_ref(), *self)
+			}
+
 			fn get_ts_language(&self) -> TSLanguage {
-				parsers::$func().into()
+				loaded_language(self)
 			}
 		}
 	};
@@ -67,9 +114,14 @@ fn pre_process_pattern(expando: char, query: &str) -> Cow<'_, str> {
 /// Implements a language with `expando_char` / `pre_process_pattern`.
 /// Use when the language does NOT accept `$` as a valid identifier character.
 macro_rules! impl_lang_expando {
-	($lang:ident, $func:ident, $char:expr) => {
+	($lang:ident, $char:expr, $($grammar:tt)+) => {
 		#[derive(Clone, Copy, Debug)]
 		pub struct $lang;
+		impl LanguageGrammar for $lang {
+			fn grammar(&self) -> GrammarSource {
+				grammar!($($grammar)+)
+			}
+		}
 		impl Language for $lang {
 			fn kind_to_id(&self, kind: &str) -> u16 {
 				self.get_ts_language().id_for_node_kind(kind, true)
@@ -91,12 +143,16 @@ macro_rules! impl_lang_expando {
 			}
 
 			fn build_pattern(&self, builder: &PatternBuilder) -> Result<Pattern, PatternError> {
-				builder.build(|src| StrDoc::try_new(src, *self))
+				builder.build(|src| parse_doc(src, *self))
 			}
 		}
 		impl LanguageExt for $lang {
+			fn ast_grep<S: AsRef<str>>(&self, source: S) -> AstGrep<StrDoc<Self>> {
+				ast_grep_doc(source.as_ref(), *self)
+			}
+
 			fn get_ts_language(&self) -> TSLanguage {
-				parsers::$func().into()
+				loaded_language(self)
 			}
 		}
 	};
@@ -104,74 +160,80 @@ macro_rules! impl_lang_expando {
 
 // ── Customized languages with expando_char ──────────────────────────────
 
-impl_lang_expando!(C, language_c, '𐀀');
-impl_lang_expando!(Cpp, language_cpp, '𐀀');
-impl_lang_expando!(CSharp, language_c_sharp, 'µ');
-impl_lang_expando!(Cmake, language_cmake, 'µ');
-impl_lang_expando!(Css, language_css, '_');
-impl_lang_expando!(Dockerfile, language_dockerfile, 'µ');
-impl_lang_expando!(Elixir, language_elixir, 'µ');
-impl_lang_expando!(Erlang, language_erlang, 'µ');
-impl_lang_expando!(Fortran, language_fortran, '𐀀');
-impl_lang_expando!(Go, language_go, 'µ');
-impl_lang!(Graphql, language_graphql);
-impl_lang_expando!(Haskell, language_haskell, 'µ');
-impl_lang_expando!(Hcl, language_hcl, 'µ');
-impl_lang_expando!(Ini, language_ini, 'µ');
-impl_lang_expando!(Just, language_just, 'µ');
-impl_lang_expando!(Kotlin, language_kotlin, 'µ');
-impl_lang_expando!(Nix, language_nix, '_');
-impl_lang_expando!(Ocaml, language_ocaml, 'µ');
-impl_lang_expando!(Php, language_php, 'µ');
-impl_lang_expando!(Powershell, language_powershell, 'µ');
-impl_lang_expando!(Proto, language_proto, 'µ');
-impl_lang_expando!(Python, language_python, 'µ');
-impl_lang_expando!(R, language_r, 'µ');
-impl_lang_expando!(Ruby, language_ruby, 'µ');
-impl_lang_expando!(Rust, language_rust, 'µ');
-impl_lang_expando!(Sql, language_sql, 'µ');
-impl_lang_expando!(Swift, language_swift, 'µ');
+impl_lang_expando!(C, '𐀀', native language_c);
+impl_lang_expando!(Cpp, '𐀀', native language_cpp);
+impl_lang_expando!(CSharp, 'µ', wasm CSHARP);
+impl_lang_expando!(Cmake, 'µ', wasm CMAKE);
+impl_lang_expando!(Css, '_', native language_css);
+impl_lang_expando!(Dockerfile, 'µ', wasm DOCKERFILE);
+impl_lang_expando!(Elixir, 'µ', wasm ELIXIR);
+impl_lang_expando!(Erlang, 'µ', wasm ERLANG);
+impl_lang_expando!(Fortran, '𐀀', wasm FORTRAN);
+impl_lang_expando!(Go, 'µ', native language_go);
+impl_lang!(Graphql, wasm GRAPHQL);
+impl_lang_expando!(Haskell, 'µ', wasm HASKELL);
+impl_lang_expando!(Hcl, 'µ', wasm HCL);
+impl_lang_expando!(Ini, 'µ', wasm INI);
+impl_lang_expando!(Just, 'µ', wasm JUST);
+impl_lang_expando!(Kotlin, 'µ', wasm KOTLIN);
+impl_lang_expando!(Nix, '_', wasm NIX);
+impl_lang_expando!(Ocaml, 'µ', wasm OCAML);
+impl_lang_expando!(Php, 'µ', wasm PHP);
+impl_lang_expando!(Powershell, 'µ', wasm POWERSHELL);
+impl_lang_expando!(Proto, 'µ', wasm PROTOBUF);
+impl_lang_expando!(Python, 'µ', native language_python);
+impl_lang_expando!(R, 'µ', wasm R);
+impl_lang_expando!(Ruby, 'µ', wasm RUBY);
+impl_lang_expando!(Rust, 'µ', native language_rust);
+impl_lang_expando!(Sql, 'µ', wasm SQL);
+impl_lang_expando!(Swift, 'µ', wasm SWIFT);
 
 // New expando languages
-impl_lang_expando!(Make, language_make, 'µ');
-impl_lang_expando!(ObjC, language_objc, '𐀀');
-impl_lang_expando!(Starlark, language_starlark, 'µ');
-impl_lang_expando!(Odin, language_odin, 'µ');
-impl_lang_expando!(Julia, language_julia, 'µ');
-impl_lang_expando!(Verilog, language_verilog, 'µ');
-impl_lang_expando!(Zig, language_zig, 'µ');
-impl_lang_expando!(Tlaplus, language_tlaplus, 'µ');
+impl_lang_expando!(Make, 'µ', wasm MAKE);
+impl_lang_expando!(ObjC, '𐀀', wasm OBJC);
+impl_lang_expando!(Starlark, 'µ', wasm STARLARK);
+impl_lang_expando!(Odin, 'µ', wasm ODIN);
+impl_lang_expando!(Julia, 'µ', wasm JULIA);
+impl_lang_expando!(Verilog, 'µ', wasm VERILOG);
+impl_lang_expando!(Zig, 'µ', wasm ZIG);
+impl_lang_expando!(Tlaplus, 'µ', wasm TLAPLUS);
 
 // ── Stub languages ($ accepted in grammar) ──────────────────────────────
 
-impl_lang!(Astro, language_astro);
-impl_lang!(Bash, language_bash);
-impl_lang!(Clojure, language_clojure);
-impl_lang!(Java, language_java);
-impl_lang!(JavaScript, language_javascript);
-impl_lang!(Json, language_json);
-impl_lang!(Lua, language_lua);
-impl_lang!(Scala, language_scala);
-impl_lang!(Solidity, language_solidity);
-impl_lang!(Svelte, language_svelte);
-impl_lang!(Tsx, language_tsx);
-impl_lang!(TypeScript, language_typescript);
-impl_lang!(Vue, language_vue);
-impl_lang!(Yaml, language_yaml);
+impl_lang!(Astro, wasm ASTRO);
+impl_lang!(Bash, native language_bash);
+impl_lang!(Clojure, wasm CLOJURE);
+impl_lang!(Java, native language_java);
+impl_lang!(JavaScript, native language_javascript);
+impl_lang!(Json, native language_json);
+impl_lang!(Lua, wasm LUA);
+impl_lang!(Scala, wasm SCALA);
+impl_lang!(Solidity, wasm SOLIDITY);
+impl_lang!(Svelte, wasm SVELTE);
+impl_lang!(Tsx, native language_tsx);
+impl_lang!(TypeScript, native language_typescript);
+impl_lang!(Vue, wasm VUE);
+impl_lang!(Yaml, native language_yaml);
 
 // New stub languages
-impl_lang!(Markdown, language_markdown);
-impl_lang!(Toml, language_toml);
-impl_lang!(Diff, language_diff);
-impl_lang!(Xml, language_xml);
-impl_lang!(Regex, language_regex);
-impl_lang!(Dart, language_dart);
-impl_lang!(EmacsLisp, language_elisp);
+impl_lang!(Markdown, native language_markdown);
+impl_lang!(Toml, native language_toml);
+impl_lang!(Diff, native language_diff);
+impl_lang!(Xml, wasm XML);
+impl_lang!(Regex, native language_regex);
+impl_lang!(Dart, wasm DART);
+impl_lang!(EmacsLisp, wasm EMACS_LISP);
 
 // ── Html (custom implementation with injection support) ──────────────────
 
 #[derive(Clone, Copy, Debug)]
 pub struct Html;
+
+impl LanguageGrammar for Html {
+	fn grammar(&self) -> GrammarSource {
+		grammar!(native language_html)
+	}
+}
 
 impl Language for Html {
 	fn expando_char(&self) -> char {
@@ -194,13 +256,17 @@ impl Language for Html {
 	}
 
 	fn build_pattern(&self, builder: &PatternBuilder) -> Result<Pattern, PatternError> {
-		builder.build(|src| StrDoc::try_new(src, *self))
+		builder.build(|src| parse_doc(src, *self))
 	}
 }
 
 impl LanguageExt for Html {
+	fn ast_grep<S: AsRef<str>>(&self, source: S) -> AstGrep<StrDoc<Self>> {
+		ast_grep_doc(source.as_ref(), *self)
+	}
+
 	fn get_ts_language(&self) -> TSLanguage {
-		parsers::language_html()
+		loaded_language(self)
 	}
 
 	fn injectable_languages(&self) -> Option<&'static [&'static str]> {
@@ -421,6 +487,15 @@ impl SupportLang {
 	pub fn sorted_aliases() -> &'static [&'static str] {
 		&SORTED_ALIASES
 	}
+
+	/// The WebAssembly grammar this language downloads on demand; `None` when
+	/// its grammar is linked into the addon.
+	pub fn wasm_grammar(self) -> Option<&'static WasmGrammar> {
+		match self.grammar() {
+			GrammarSource::Wasm(grammar) => Some(grammar),
+			GrammarSource::Native(_) => None,
+		}
+	}
 }
 
 impl fmt::Display for SupportLang {
@@ -527,10 +602,18 @@ impl Language for SupportLang {
 	}
 }
 
+impl LanguageGrammar for SupportLang {
+	impl_lang_method!(grammar, () => GrammarSource);
+}
+
 impl LanguageExt for SupportLang {
 	impl_lang_method!(get_ts_language, () => TSLanguage);
 
 	impl_lang_method!(injectable_languages, () => Option<&'static [&'static str]>);
+
+	fn ast_grep<S: AsRef<str>>(&self, source: S) -> AstGrep<StrDoc<Self>> {
+		ast_grep_doc(source.as_ref(), *self)
+	}
 
 	fn extract_injections<L: LanguageExt>(
 		&self,

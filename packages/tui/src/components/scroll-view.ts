@@ -408,6 +408,11 @@ export class ScrollView implements Component {
 		this.#child?.invalidate?.();
 	}
 
+	releaseRenderCaches(): void {
+		this.#cache = undefined;
+		this.#child?.releaseRenderCaches?.();
+	}
+
 	/** Permanently release a wrapped child's timers, subscriptions, and other resources. */
 	dispose(): void {
 		if (this.#disposed) return;

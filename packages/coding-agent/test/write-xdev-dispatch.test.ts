@@ -837,17 +837,16 @@ describe("device-only write transport for explicit lists omitting write", () => 
 		}
 	});
 
-	it("allows only the local sandbox while plan mode is active", async () => {
-		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "write-xdev-plan-guard-"));
+	it("allows the local sandbox outside plan mode while other targets stay rejected", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "write-xdev-local-sandbox-"));
 		try {
 			const getArtifactsDir = () => path.join(tempDir, "artifacts");
-			const getSessionId = () => "device-only-plan";
+			const getSessionId = () => "device-only-local";
 			const session = xdevSession(tempDir, {
 				enableLsp: false,
 				getArtifactsDir,
 				getSessionId,
 				localProtocolOptions: { getArtifactsDir, getSessionId },
-				getPlanModeState: () => ({ enabled: true, planFilePath: "local://review-plan.md" }),
 			});
 			const tools = await createTools(session, ["read"]);
 			const read = tools.find(entry => entry.name === "read");
@@ -855,20 +854,24 @@ describe("device-only write transport for explicit lists omitting write", () => 
 			expect(read).toBeDefined();
 			expect(write).toBeDefined();
 
-			const planWrite = await write!.execute("write-device-only-plan-local", {
-				path: "local://review-plan.md",
-				content: "plan draft\n",
+			const reportWrite = await write!.execute("write-device-only-local", {
+				path: "local://report.md",
+				content: "report draft\n",
 			});
-			expect(planWrite.isError).toBeUndefined();
-			const planRead = await read!.execute("read-device-only-plan-local", {
-				path: "local://review-plan.md",
+			expect(reportWrite.isError).toBeUndefined();
+			const reportRead = await read!.execute("read-device-only-local", {
+				path: "local://report.md",
 			});
-			expect(planRead.content.find(entry => entry.type === "text")?.text).toContain("plan draft");
+			expect(reportRead.content.find(entry => entry.type === "text")?.text).toContain("report draft");
+
+			await expect(
+				write!.execute("write-device-only-fs", { path: path.join(tempDir, "nope.txt"), content: "x" }),
+			).rejects.toThrow("Filesystem writes are not available");
 
 			// conflict:// resolves to a recorded working-tree file. Device-only
 			// access must reject it before the conflict resolver can mutate it.
 			await expect(
-				write!.execute("write-device-only-plan-conflict", {
+				write!.execute("write-device-only-conflict", {
 					path: "conflict://1",
 					content: "@ours",
 				}),

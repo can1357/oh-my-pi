@@ -220,6 +220,36 @@ impl GitRepo {
 			.map(|status| !status.is_empty())
 	}
 
+	/// Whether a merge, rebase, cherry-pick, revert, or `am` is underway in
+	/// this checkout: the index holds unmerged entries, or the operation's
+	/// state files remain because it is resolved but not yet committed or
+	/// aborted (a phase `git ls-files --unmerged` no longer reports).
+	pub fn operation_in_progress(&self) -> Result<bool> {
+		const STATE: [&str; 6] = [
+			"MERGE_HEAD",
+			"CHERRY_PICK_HEAD",
+			"REVERT_HEAD",
+			"REBASE_HEAD",
+			"rebase-merge",
+			"rebase-apply",
+		];
+		if STATE
+			.iter()
+			.any(|name| self.info.git_dir.join(name).exists())
+		{
+			return Ok(true);
+		}
+		if self.is_reftable() {
+			return Ok(!cli_text(self.root(), &["ls-files", "--unmerged"])?.is_empty());
+		}
+		let repo = self.gix()?;
+		let index = load_index_or_empty(&repo, "git ls-files")?;
+		Ok(index
+			.entries()
+			.iter()
+			.any(|entry| entry.stage() != gix::index::entry::Stage::Unconflicted))
+	}
+
 	/// Render git status in porcelain-v1 form.
 	///
 	/// Prefers the git CLI: whole-worktree status is the one read whose peak
