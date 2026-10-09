@@ -9,6 +9,7 @@ import {
 	getTerminalSessionsDir,
 	getWorktreesDir,
 	hashPath,
+	normalizePathForComparison,
 	pathIsWithin,
 	resolveEquivalentPath,
 } from "@oh-my-pi/pi-utils/dirs";
@@ -407,6 +408,29 @@ function writeIfChangedSync(file: string, content: string): void {
 	}
 	fs.mkdirSync(path.dirname(file), { recursive: true });
 	fs.writeFileSync(file, content);
+}
+
+/** Read exact custom-session paths from the existing persistent marker inventory. */
+export async function collectRegisteredSessionFiles(registryDir: string): Promise<string[]> {
+	let entries: string[];
+	try {
+		entries = await fs.promises.readdir(registryDir);
+	} catch (error) {
+		if (isEnoent(error)) return [];
+		throw error;
+	}
+	const files = new Map<string, string>();
+	for (const entry of entries) {
+		try {
+			const recorded = (await fs.promises.readFile(path.join(registryDir, entry), "utf8")).trim();
+			if (!recorded) continue;
+			const file = path.resolve(recorded);
+			if ((await fs.promises.stat(file)).isFile()) files.set(normalizePathForComparison(file), file);
+		} catch (error) {
+			if (!isEnoent(error) && (error as NodeJS.ErrnoException).code !== "ENOTDIR") throw error;
+		}
+	}
+	return [...files.values()];
 }
 
 /**

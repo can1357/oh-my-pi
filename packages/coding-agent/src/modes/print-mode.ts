@@ -6,13 +6,14 @@
  * - `omp --mode json "prompt"` - JSON event stream
  */
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
-import type { ImageContent } from "@oh-my-pi/pi-ai";
+import type { AssistantMessage, ImageContent } from "@oh-my-pi/pi-ai";
 import { $flag, logger, postmortem, sanitizeText } from "@oh-my-pi/pi-utils";
 import type { MCPManager } from "../mcp/manager";
 import { resolveMCPTimeoutMs } from "../mcp/timeout";
 import { type AgentSession, type AgentSessionEvent, SHUTDOWN_CONSOLIDATE_BUDGET_MS } from "../session/agent-session";
 import { CREDENTIAL_DISABLED_NOTICE_SOURCE } from "../session/credential-disabled-notice";
 import { isSilentAbort } from "../session/messages";
+import { bindSessionMessaging } from "../session/messaging-host";
 import { flushTelemetryExport } from "../telemetry-export";
 import {
 	formatPersistenceDurabilityFailure,
@@ -20,6 +21,8 @@ import {
 	formatPersistenceNotice,
 } from "./persistence-failure";
 import { initializeExtensions } from "./runtime-init";
+import { RpcExtensionUserMessageTracker, RpcPromptResults } from "./rpc/rpc-prompt-results";
+import type { RpcSettleSession } from "./rpc/rpc-session-settle";
 
 import { cfgPlanDefaultOnStartup, cfgPlanEnabled } from "../plan-mode/settings";
 
@@ -41,6 +44,8 @@ export interface PrintModeOptions {
 	planYolo?: boolean;
 	/** Manager returned by session creation; only print mode waits for its servers. */
 	mcpManager?: MCPManager;
+	/** Explicit address; unnamed direct-print runs remain addressable only by short id. */
+	name?: string;
 }
 
 /** Matches the longest built-in provider request deadline while bounding tool-loop stalls. */
@@ -103,6 +108,13 @@ export function printableEvent(event: AgentSessionEvent): unknown {
 	}
 }
 
+/** Print attribution waits for hidden follow-ups, but not passive next-turn reminders. */
+export function createPrintPromptResults(
+	session: RpcSettleSession & { agent: Pick<AgentSession["agent"], "hasQueuedMessages"> },
+): RpcPromptResults {
+	return new RpcPromptResults(session, undefined, undefined, () => !session.agent.hasQueuedMessages());
+}
+
 /**
  * Run in print (single-shot) mode.
  *
@@ -114,14 +126,34 @@ export async function runPrintMode(session: AgentSession, options: PrintModeOpti
 	// through postmortem (130/143/129). Record the reason so the aborted-response
 	// branch below never races that with its own ordinary failure status.
 	let signalReason: postmortem.Reason | undefined;
+	const messaging = await bindSessionMessaging(session, {
+		directPrint: options.name === undefined,
+		claimNames: false,
+	});
+	let disposedMessaging: Promise<void> | undefined;
+	const stopReceiving = () => messaging.stopReceiving();
+	const disposeMessaging = () => (disposedMessaging ??= messaging.dispose());
 	const cancelSignalTeardown = postmortem.register("print-mode-session", reason => {
 		signalReason = reason;
-		return session.dispose({ reason, mnemopiConsolidateTimeoutMs: SHUTDOWN_CONSOLIDATE_BUDGET_MS });
+		stopReceiving();
+		return disposeMessaging().then(() =>
+			session.dispose({ reason, mnemopiConsolidateTimeoutMs: SHUTDOWN_CONSOLIDATE_BUDGET_MS }),
+		);
 	});
 	try {
-		return await runPrintModeCore(session, options, () => signalReason !== undefined);
+		if (options.name !== undefined) await session.sessionManager.setSessionName(options.name, "user");
+		return await runPrintModeCore(
+			session,
+			options,
+			() => signalReason !== undefined,
+			messaging.ready,
+			stopReceiving,
+			disposeMessaging,
+		);
 	} finally {
 		cancelSignalTeardown();
+		stopReceiving();
+		await disposeMessaging();
 	}
 }
 
@@ -129,6 +161,9 @@ async function runPrintModeCore(
 	session: AgentSession,
 	options: PrintModeOptions,
 	signalTeardownActive: () => boolean,
+	messagingReady: () => void,
+	stopReceiving: () => void,
+	disposeMessaging: () => Promise<void>,
 ): Promise<number> {
 	const { mode, messages = [], initialMessage, initialImages, printThoughts, planYolo = false } = options;
 
@@ -158,8 +193,10 @@ async function runPrintModeCore(
 		}
 	}
 	// Set up extensions for print mode (no UI, no command context)
+	const extensionUserMessages = new RpcExtensionUserMessageTracker();
 	await initializeExtensions(session, {
 		mode: mode === "json" ? "json" : "print",
+		trackAgentInvokingMessage: task => extensionUserMessages.trackAgentMessageTask(task),
 		reportSendError: (action, err) => {
 			process.stderr.write(
 				`Extension ${action === "extension_send" ? "sendMessage" : "sendUserMessage"} failed: ${err.message}\n`,
@@ -228,6 +265,11 @@ async function runPrintModeCore(
 		writeStderrLine(`Warning: ${formatPersistenceNotice(notice)}`);
 	});
 
+	let assistantMsg: AssistantMessage | undefined;
+	let dispatched = false;
+	// Single-shot print fixes receive/attribution mode after SessionStart; mid-run toggles are unsupported.
+	const receivingEnabled = session.messaging !== undefined;
+	const promptResults = createPrintPromptResults(session);
 	// Always subscribe to enable session persistence via _handleAgentEvent
 	session.subscribe(event => {
 		// In JSON mode, output all events
@@ -238,6 +280,7 @@ async function runPrintModeCore(
 			// hidden behind a sibling account that quietly answers the prompt.
 			writeStderrLine(`Warning: ${event.message}`);
 		}
+		promptResults.observe(event);
 	});
 
 	const timeoutMs = resolveMCPTimeoutMs();
@@ -267,6 +310,7 @@ async function runPrintModeCore(
 			strictMCPFailure = true;
 		}
 	}
+	messagingReady();
 
 	let wroteTextWorkingIndicator = false;
 	const writeTextWorkingIndicator = (): void => {
@@ -275,31 +319,69 @@ async function runPrintModeCore(
 		wroteTextWorkingIndicator = true;
 	};
 
+	// Attribute the CLI answer before an autonomous message turn can replace it.
+	const dispatch = async (
+		label: string,
+		text: string,
+		images: ImageContent[] | undefined,
+		finalPrompt: boolean,
+	): Promise<void> => {
+		dispatched = true;
+		if (!receivingEnabled) {
+			await logger.time(label, () => session.prompt(text, { images }));
+			return;
+		}
+		const completed = Promise.withResolvers<void>();
+		const ticket = promptResults.begin(undefined, message => {
+			assistantMsg = message;
+			if (finalPrompt) stopReceiving();
+			completed.resolve();
+		});
+		try {
+			const tracked = extensionUserMessages.watchPrompt(() =>
+				logger.time(label, () =>
+					session.prompt(text, {
+						images,
+						streamingBehavior: "followUp",
+						onPromptAdmitted: () => promptResults.admit(ticket),
+					}),
+				),
+			);
+			const invoked = await tracked.prompt;
+			if (!invoked) await tracked.waitForAgentMessageTasks();
+			if (invoked || tracked.hasAgentMessageTask()) promptResults.settle(ticket);
+			else promptResults.completeLocal(ticket);
+		} catch (error) {
+			promptResults.discard(ticket);
+			throw error;
+		}
+		await completed.promise;
+	};
+
 	// Send initial message with attachments
 	if (!strictMCPFailure && initialMessage !== undefined) {
 		writeTextWorkingIndicator();
 		if (mode === "text") session.setTextOutputCommitted(false);
-		await logger.time("print:prompt:initial", () => session.prompt(initialMessage, { images: initialImages }));
+		await dispatch("print:prompt:initial", initialMessage, initialImages, messages.length === 0);
 	}
 
 	// Send remaining messages
 	if (!strictMCPFailure) {
-		for (const message of messages) {
+		for (const [index, message] of messages.entries()) {
 			writeTextWorkingIndicator();
 			if (mode === "text") session.setTextOutputCommitted(false);
-			await logger.time("print:prompt:next", () => session.prompt(message));
+			await dispatch("print:prompt:next", message, undefined, index === messages.length - 1);
 		}
 	}
+	stopReceiving();
+	if (receivingEnabled) await session.waitForIdle();
+	await disposeMessaging();
+	if (!receivingEnabled || !dispatched) assistantMsg = session.getLastAssistantMessage();
 
 	// From this point onward a late blocker must be recorded without starting a
 	// primary turn whose response print mode would never emit.
 	session.prepareForHeadlessAdvisorDrain();
 
-	// Read via the session accessor, not the raw state tail: a classifier
-	// refusal is pruned from active context at settle, and an aborted turn
-	// can trail synthetic tool results — both would hide the terminal
-	// assistant message (and its error) from a last-element read.
-	const assistantMsg = session.getLastAssistantMessage();
 	// The terminal stop reason decides the process exit code in every output
 	// mode: `--mode json` used to report success for the same turn-fatal error
 	// text mode exits 1 on (issue #11498). Silent aborts (plan-mode compaction

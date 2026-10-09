@@ -619,6 +619,7 @@ export class Settings {
 	#changeListeners: (Set<SettingChangeListener> | undefined)[] = [];
 	/** Forwarders of every change into live {@link overlay} children. */
 	#childForwarders = new Set<SettingChangeListener>();
+	readonly #layerListeners = new Set<() => void>();
 	/** Instance this overlay reads through to ({@link overlay}); overlays never persist or write back. */
 	#parent: Settings | undefined;
 	/** Parent {@link revision} `#merged` was last built from; any other parent revision re-merges. */
@@ -790,6 +791,12 @@ export class Settings {
 			target.#applyParentChange(setting);
 		};
 		this.#childForwarders.add(forward);
+		const forwardLayers = () => {
+			const target = ref.deref();
+			if (!target) this.#layerListeners.delete(forwardLayers);
+			else target.#syncParent();
+		};
+		this.#layerListeners.add(forwardLayers);
 		return child;
 	}
 
@@ -1081,6 +1088,14 @@ export class Settings {
 		for (const source of sources) (this.#changeListeners[source.slot] ??= new Set()).add(listener);
 		return () => {
 			for (const source of sources) this.#changeListeners[source.slot]?.delete(listener);
+		};
+	}
+
+	/** Observe completed raw-layer rebuilds, including masked policy changes. */
+	onLayersChange(listener: () => void): () => void {
+		this.#layerListeners.add(listener);
+		return () => {
+			this.#layerListeners.delete(listener);
 		};
 	}
 
@@ -1548,6 +1563,12 @@ export class Settings {
 	get revision(): number {
 		this.#syncParent();
 		return this.#revision;
+	}
+
+	/** Raw runtime or CLI-config layer, cloned; overlay children include their parent's layer. */
+	getLayerRaw(layer: "runtime" | "overlay"): RawSettings {
+		const own = structuredClone(layer === "runtime" ? this.#overrides : this.#configOverlay);
+		return this.#parent ? this.#deepMerge(this.#parent.getLayerRaw(layer), own) : own;
 	}
 
 	/**
@@ -3880,6 +3901,13 @@ export class Settings {
 		this.#revision++;
 		if (this.#parent) this.#syncedParentRevision = this.#parent.revision;
 		this.#merged = this.#mergeOverParent(this.#mergeOwnLayers(this.#ownLayers()));
+		for (const listener of Array.from(this.#layerListeners)) {
+			try {
+				listener();
+			} catch (error) {
+				logger.warn("Settings: layer-change listener failed", { error: String(error) });
+			}
+		}
 	}
 
 	#ownLayers(): OwnLayers {

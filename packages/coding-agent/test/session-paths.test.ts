@@ -1,7 +1,9 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, spyOn, test, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { listOfflineSessions } from "@oh-my-pi/pi-coding-agent/messaging/mailbox";
+import { listLocalSessionsWithRegisteredFiles } from "@oh-my-pi/pi-coding-agent/session/session-listing";
 import {
 	computeDefaultSessionDir,
 	hasPositiveMovedProjectEvidence,
@@ -37,6 +39,7 @@ function legacySessionDir(sessionsRoot: string, cwd: string): string {
 }
 
 afterEach(() => {
+	vi.restoreAllMocks();
 	for (const dir of cleanup.splice(0)) fs.rmSync(dir, { recursive: true, force: true });
 });
 
@@ -98,6 +101,47 @@ describe("hasPositiveMovedProjectEvidence", () => {
 });
 
 describe("custom session-file registry", () => {
+	test("a custom marker whose transcript parent became a file does not hide a valid managed offline session", async () => {
+		const agentDir = makeTempDir("omp-agent-");
+		const parent = path.join(agentDir, "custom");
+		const staleFile = path.join(parent, "stopped.jsonl");
+		await Bun.write(staleFile, "{}\n");
+		await Bun.write(path.join(getCustomSessionFilesDir(agentDir), hashPath(staleFile)), staleFile);
+		await fs.promises.rm(parent, { recursive: true });
+		await Bun.write(parent, "now a regular file");
+		if (process.platform === "win32") {
+			// Windows reports ENOENT here; expose POSIX ENOTDIR at the same
+			// filesystem boundary while keeping the managed inventory real.
+			const stat = fs.promises.stat;
+			const statSpy = spyOn(fs.promises, "stat") as unknown as {
+				mockImplementation(implementation: (file: fs.PathLike) => Promise<fs.Stats>): void;
+			};
+			statSpy.mockImplementation(async file => {
+				if (file === staleFile) throw Object.assign(new Error("not a directory"), { code: "ENOTDIR" });
+				return stat(file);
+			});
+		}
+		const managedFile = path.join(getSessionsDir(agentDir), "project", "valid.jsonl");
+		await Bun.write(
+			managedFile,
+			`${JSON.stringify({
+				type: "session",
+				version: 3,
+				id: "valid-managed-session",
+				cwd: agentDir,
+				timestamp: new Date().toISOString(),
+				title: "offline recipient",
+				titleSource: "user",
+			})}\n`,
+		);
+		const sessions = await listOfflineSessions({
+			sessions: () => listLocalSessionsWithRegisteredFiles({ agentDir }),
+		});
+		expect(sessions.map(session => ({ id: session.sessionId, path: session.path, name: session.name }))).toEqual([
+			{ id: "valid-managed-session", path: managedFile, name: "offline recipient" },
+		]);
+	});
+
 	test("records an exact relocated session file and skips managed JSONL files", () => {
 		const agentDir = makeTempDir("omp-agent-");
 		const cwd = makeTempDir("omp-cwd-");

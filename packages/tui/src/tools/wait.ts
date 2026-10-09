@@ -1,7 +1,9 @@
 import type { Component } from "../tui";
 import { Text } from "../components/text";
+import { Markdown } from "../components/markdown";
+import { getMarkdownTheme } from "../theme";
 import { visibleWidth } from "../utils";
-import { formatAge } from "@oh-my-pi/pi-utils";
+import { formatAge, sanitizeText } from "@oh-my-pi/pi-utils";
 import { shimmerEnabled, shimmerText } from "../theme/shimmer";
 import type { Theme } from "../theme/theme";
 import { Ellipsis, Hasher, type RenderCache, renderStatusLine, renderTreeList, truncateToWidth } from "../render/index";
@@ -20,6 +22,7 @@ import {
 	type ToolUIColor,
 	type ToolUIStatus,
 	cappedHeadLines,
+	sanitizeCarriageReturns,
 	createCachedComponent,
 	type ConfiguredThinkingLevel,
 } from "../render/render-utils";
@@ -536,6 +539,7 @@ export function createIrcMessageCard(
 		timestamp?: number;
 		pool?: string;
 		mode?: string;
+		remote?: boolean;
 	},
 	getExpanded: () => boolean,
 	uiTheme: Theme,
@@ -549,7 +553,11 @@ export function createIrcMessageCard(
 				: card.kind === "workpool"
 					? `Pool ${card.pool?.trim() || "?"} ${uiTheme.nav.selected} ${card.to?.trim() || "?"}`
 					: `IRC ${from} ${uiTheme.nav.selected} ${card.to?.trim() || "?"}`;
-	const body = card.body ?? "";
+	const body = card.remote === true ? sanitizeText(sanitizeCarriageReturns(card.body ?? "")) : (card.body ?? "");
+	const remoteTitle =
+		card.remote === true
+			? `IRC ← @${from}: ${replaceTabs((body.split(/\r?\n/).find(line => line.trim()) ?? "").trim())}`
+			: title;
 	const meta: string[] = [];
 	if (card.kind === "autoreply") meta.push("auto");
 	if (card.kind === "workpool" && card.mode) meta.push(card.mode);
@@ -559,6 +567,12 @@ export function createIrcMessageCard(
 	const component = createCachedComponent(
 		getExpanded,
 		(width, expanded) => {
+			if (card.remote === true) {
+				const header = uiTheme.fg("dim", truncateToWidth(plainText(remoteTitle), width, Ellipsis.Unicode));
+				return expanded && body.trim()
+					? [header, ...new Markdown(body, 0, 0, getMarkdownTheme()).render(width)]
+					: [header];
+			}
 			const lines = [renderStatusLine({ iconOverride: ircGlyph(uiTheme), title, meta }, uiTheme)];
 			if (body.trim()) {
 				lines.push(...bodyLines(body, expanded, uiTheme, { indent: "  ", collapsedLines: 3 }));
@@ -573,11 +587,11 @@ export function createIrcMessageCard(
 			role: `omp.irc.${card.kind}`,
 			tone: "info",
 			head: [
-				span(plainText(title), "toolTitle strong"),
+				span(plainText(card.remote === true ? remoteTitle : title), "toolTitle strong"),
 				...meta.filter(part => part !== age).map(part => span(` ${part}`, "muted")),
 			],
 			collapsible: body.trim().length > 0,
-			preview: { lines: 3 },
+			preview: { lines: card.remote === true ? 0 : 3 },
 		},
 		compact([
 			card.timestamp

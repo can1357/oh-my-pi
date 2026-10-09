@@ -1060,6 +1060,10 @@ export class SessionTools {
 		}) as T;
 	}
 
+	get explicitAutoApproveMode(): boolean {
+		return this.#isExplicitAutoApproveMode();
+	}
+
 	#isExplicitAutoApproveMode(): boolean {
 		return (
 			this.#autoApprove ||

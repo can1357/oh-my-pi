@@ -6,6 +6,7 @@ import { logger, setProjectDir } from "@oh-my-pi/pi-utils";
 import { clearClaudePluginRootsCache } from "../discovery/helpers";
 import { rebindMemoryBackendForCwd } from "../hindsight/backend";
 import { memoryStatsUnavailableMessage, resolveMemoryBackend } from "../memory-backend";
+import { claimSessionName, isReservedAddress, RESERVED_SESSION_NAME_ERROR } from "../messaging/names";
 import type { FreshSessionResult, HandoffResult } from "../session/agent-session";
 import { COMPACT_MODES, parseCompactArgs } from "../session/compact-modes";
 import { USER_INTERRUPT_LABEL } from "../session/messages";
@@ -646,7 +647,19 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 						await runtime.output("Could not generate a session title. Use /rename <title> to set one.");
 						return;
 					}
-					const persistence = sessionManager.setSessionName(title, "user");
+					if (isReservedAddress(title.trim())) {
+						await runtime.output(RESERVED_SESSION_NAME_ERROR);
+						return;
+					}
+					const taken = session.messaging
+						? new Set(
+								(await session.messaging.listSessions(runtime.signal)).flatMap(s => (s.name ? [s.name] : [])),
+							)
+						: new Set<string>();
+					if (!isCurrent()) return;
+					const requested = title;
+					const name = session.messaging ? claimSessionName(requested, taken) : requested;
+					const persistence = sessionManager.setSessionName(name, "user");
 					titleRevision = sessionManager.titleRevision;
 					const ok = await persistence;
 					if (!isCurrent()) return;
@@ -656,7 +669,9 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 					}
 					await runtime.notifyTitleChanged?.();
 					if (!isCurrent()) return;
-					await runtime.output(`Session renamed to ${title}.`);
+					const storedName = sessionManager.getSessionName()!;
+					const collision = storedName !== requested ? ` ("${requested}" is used by another session)` : "";
+					await runtime.output(`Session renamed to ${storedName}.${collision}`);
 				} catch (err) {
 					if (!isCurrent()) return;
 					if (command.args || !runtime.runCommandInBackground) throw err;

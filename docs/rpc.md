@@ -33,6 +33,12 @@ Behavior notes:
 - When stdin closes, pending extension UI, host-tool, and host-URI requests are rejected; accepted commands are drained, the session is disposed, pending stdout is delivered, and normal shutdown exits with code `0`. A session-persistence failure still latched at disposal exits with code `1` after delivering its `notice` frame.
 - Responses/events are written as one JSON object per line.
 
+### Cross-session messaging
+
+RPC sessions participate in same-machine cross-session messaging when `messaging.enabled` is true or the process is launched with `--cross-session`. `--name <name>` sets the session's user address. Messaging is off by default and is bound only for top-level sessions.
+
+The RPC runner binds the inbox before extension `session_start` hooks run. Incoming deliveries remain buffered until event and settlement consumers are installed. The startup `ready` frame does not advertise a messaging endpoint or token and is not a separate messaging-readiness acknowledgement. Session-bound shell and extension/hook exec calls receive this session's `OMP_MESSAGING_*` values; they are not exported to ambient `process.env`. See [Cross-session messaging](./agent-hub.md#cross-session-messaging) for discovery, addressing, inbound policy, and script authentication.
+
 ## Transport and Framing
 
 Protocol v1 stdout frames are a single JSON object followed by `\n`. The server caps each physical stdout frame at 1 MiB, including the newline. Inbound frames are always one unchunked JSONL object; clients SHOULD keep them within the advertised physical-frame limit. Input is not reassembled from `rpc_chunk` frames.
@@ -344,10 +350,10 @@ Local-only slash commands may emit `command_output` frames before completing. Th
 
 ### Yield vs settled
 
-For agent-invoking work, a prompt's `prompt_result` reports the **agent yield**: it finished its turn (`agent_end` with `yielded: true`), or the prompt was aborted before dispatch or by a session transition. Local-only results and pre-dispatch errors do not require an `agent_end`. The **session is done** only when nothing can wake it again — no run is live or admitted, no steer/follow-up is queued, and no background job (auto-backgrounded `bash`, async `task`, `eval`) or pending delivery will inject its result and start a follow-up turn.
+For agent-invoking work, a prompt's `prompt_result` reports the **agent yield**: it finished its turn (`agent_end` with `yielded: true`), or the prompt was aborted before dispatch or by a session transition. Local-only results and pre-dispatch errors do not require an `agent_end`. The **session is done with its currently accepted work** only when no run is live or admitted, no steer/follow-up is queued, and no background job (auto-backgrounded `bash`, async `task`, `eval`) or pending delivery will inject its result and start a follow-up turn. A future cross-session message can still wake a bound inbox.
 
 - `session_settled` is written once per stretch of agent activity, when the session becomes done. If background work was pending at the yield, OMP waits it out; any follow-up runs it triggers stream normally (`agent_start` … `agent_end`) before `session_settled`. It always follows the `prompt_result` frames of the final yield, and is not emitted for prompts that never reached the agent.
-- `prompt_result.sessionSettled` answers the same question at the yield, so a host can tear down immediately when it is `true`.
+- `prompt_result.sessionSettled` answers the same current-work question at the yield. A host can tear down when it is `true` if it does not need to remain available for future peer messages.
 - `get_state` reports `isSettled` (same predicate) and `hasPendingAsyncWork`, for hosts that attach mid-stream.
 
 Wait on `prompt_result` to present a turn's answer; wait on `session_settled` (or `isSettled`) before treating the conversation as finished, e.g. before pausing or recycling a sandbox.
@@ -838,6 +844,16 @@ Common event types:
 - `todo_reminder`, `todo_auto_clear`
 - `irc_message`, `notice`, `goal_updated`
 - `queue_update`
+
+### Cross-session events and unsolicited turns
+
+Accepted peer messages use the existing `irc_message` event: `{ type: "irc_message", message }`. The message is a displayed `irc:incoming` custom message with agent attribution and `details.remote: true`; it is not user instruction or consent. Messaging UI notices use the existing `notice` event with `source: "messaging"`. There is no new messaging command, frame category, or field on `ready`. Session-event filtering applies to these events as usual.
+
+An idle, receive-ready receiver can start a normal agent turn without a host `prompt` command, including in plan mode. Busy receivers queue peer content for a step boundary without interrupting a running tool. Suspended or transitioning receivers buffer accepted content for its original conversation. Clients must continue consuming agent events even without an outstanding prompt request.
+
+[`prompt_result`](#prompt-payload) completes an accepted host prompt, not every agent turn. A standalone peer wake opens no prompt ticket and emits no `prompt_result` of its own. If a host prompt shares a run with peer work, its existing ticket completes under the normal prompt-result rules. Correlate completion by request `id`, not by counting `agent_start` or `agent_end`. A synchronous local prompt response with `data.agentInvoked: false` has no later `prompt_result`; [`session_settled`](#yield-vs-settled) describes quiescence at that moment, not a promise that a future peer cannot wake the session.
+
+Default-policy holds have no messaging approval dialog in RPC, including RPC-UI, and remain held until their arrival-based expiry or a policy change. Explicit or invalid-policy holds emit a messaging notice and have no expiry.
 
 ### `queue_update` event
 

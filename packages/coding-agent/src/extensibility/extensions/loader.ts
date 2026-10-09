@@ -27,8 +27,9 @@ import type { ExecOptions } from "../../exec/exec";
 import { execCommand } from "../../exec/exec";
 // Runtime self-reference: dereference this namespace only inside loader functions to keep the index.ts cycle safe.
 import * as PiCodingAgent from "../../index";
-import type { SendUserMessageOptions } from "../../session/agent-session";
+import type { AgentSession, SendUserMessageOptions } from "../../session/agent-session";
 import type { CustomMessagePayload } from "../../session/messages";
+import { messagingEnvFor } from "../../session/messaging-host";
 import type { FileDeleteFallbackHandler, FileWriteFallbackHandler } from "../../tools/file-write-fallback";
 import { isFilesystemSourcePath } from "../../tools/path-utils";
 import { EventBus } from "../../utils/event-bus";
@@ -60,6 +61,13 @@ installLegacyPiSpecifierShim();
 
 type HandlerFn = (...args: unknown[]) => Promise<unknown>;
 type LoadedExtensionModule = ExtensionFactory | { default?: ExtensionFactory };
+
+const execSessions = new WeakMap<IExtensionRuntime, AgentSession>();
+
+/** Bind exec to this runtime's session, not the process's top-level conversation. */
+export function bindExtensionExecSession(runtime: IExtensionRuntime, session: AgentSession): void {
+	execSessions.set(runtime, session);
+}
 
 function getExtensionFactory(module: LoadedExtensionModule): ExtensionFactory | null {
 	const candidate = typeof module === "function" ? module : module.default;
@@ -309,7 +317,15 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 	}
 
 	exec(command: string, args: string[], options?: ExecOptions) {
-		return execCommand(command, args, options?.cwd ?? this.cwd, options);
+		const session = execSessions.get(this.runtime);
+		const messagingEnv = session
+			? messagingEnvFor(session)
+			: { set: {}, strip: ["OMP_MESSAGING_SOCKET", "OMP_MESSAGING_TOKEN"] as const };
+		return execCommand(command, args, options?.cwd ?? this.cwd, {
+			...options,
+			env: { ...options?.env, ...messagingEnv.set },
+			stripEnv: [...(options?.stripEnv ?? []), ...(session?.messaging ? [] : messagingEnv.strip)],
+		});
 	}
 
 	getActiveTools(): string[] {

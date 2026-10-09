@@ -1,13 +1,17 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { extractFileMentions, generateFileMentionMessages } from "@oh-my-pi/pi-coding-agent/utils/file-mentions";
+import * as pathUtils from "@oh-my-pi/pi-coding-agent/tools/path-utils";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
+import { KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
+import { createPromptActionAutocompleteProvider } from "@oh-my-pi/pi-tui/prompt/prompt-action-autocomplete";
 
 const tempDirs: string[] = [];
 
 afterEach(async () => {
+	vi.restoreAllMocks();
 	for (const dir of tempDirs.splice(0, tempDirs.length)) {
 		await removeWithRetries(dir);
 	}
@@ -19,7 +23,68 @@ async function createTempDir(): Promise<string> {
 	return dir;
 }
 
+describe("quoted session mention identity", () => {
+	test.each(['release "draft"', "release \\draft", 'release \\"draft"', "release notes"])(
+		"round-trips autocomplete through the shared extractor for %s",
+		async name => {
+			const provider = createPromptActionAutocompleteProvider({
+				commands: [],
+				basePath: "/project",
+				sessionMentions: async () => [{ name, cwd: "/other" }],
+				keybindings: KeybindingsManager.inMemory(),
+				copyCurrentLine: () => {},
+				copyPrompt: () => {},
+				undo: () => {},
+				moveCursorToMessageEnd: () => {},
+				moveCursorToMessageStart: () => {},
+				moveCursorToLineStart: () => {},
+				moveCursorToLineEnd: () => {},
+			});
+			const suggestions = await provider.getSuggestions(["@"], 0, 1);
+			const item = suggestions?.items.find(item => item.label === `@${name}`);
+			if (!suggestions || !item) throw new Error("expected session mention suggestion");
+			const completion = provider.applyCompletion(["@"], 0, 1, item, suggestions.prefix);
+			expect(extractFileMentions(completion.lines.join("\n"))).toEqual([name]);
+		},
+	);
+
+	test("allows a trailing backslash in a single-quoted name", () => {
+		expect(extractFileMentions(String.raw`@'release notes\'`)).toEqual([String.raw`release notes` + "\\"]);
+	});
+
+	test("preserves unknown escapes, single quotes, punctuation, boundaries and deduplication", () => {
+		expect(extractFileMentions(String.raw`@"C:\tmp\file.txt" @'C:\tmp\file.txt'`)).toEqual([
+			String.raw`C:\tmp\file.txt`,
+		]);
+		expect(
+			extractFileMentions(String.raw`@"release \"draft\"!" @"release \"draft\"!" user@example.com (@plain).`),
+		).toEqual(['release "draft"!', "plain"]);
+	});
+});
+
 describe("generateFileMentionMessages path resolution", () => {
+	test("passes a raw quoted UNC path intact to file resolution and reads its attachment", async () => {
+		const cwd = await createTempDir();
+		const fixture = path.join(cwd, "my file.txt");
+		await Bun.write(fixture, "network attachment contents");
+		const unc = String.raw`\\server\share\my file.txt`;
+		expect(extractFileMentions(String.raw`@"\\server\share\my file.txt"`)).toEqual([unc]);
+		const resolveReadPath = pathUtils.resolveReadPath;
+		// Use a real local file for the share so this test needs no external SMB server.
+		vi.spyOn(pathUtils, "resolveReadPath").mockImplementation((filePath, base) =>
+			filePath === unc ? fixture : resolveReadPath(filePath, base),
+		);
+		const mentions = extractFileMentions(String.raw`@"\\server\share\my file.txt"`);
+		const messages = await generateFileMentionMessages(mentions, cwd);
+		expect(messages).toHaveLength(1);
+		const message = messages[0];
+		if (message?.role !== "fileMention") throw new Error("expected UNC file mention attachment");
+		expect(message.files[0]).toMatchObject({
+			path: unc,
+			content: expect.stringContaining("network attachment contents"),
+		});
+	});
+
 	test("auto-reads an exact file path", async () => {
 		const cwd = await createTempDir();
 		await fs.mkdir(path.join(cwd, "src"), { recursive: true });

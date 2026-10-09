@@ -191,6 +191,26 @@ export function mapAgentSessionEventToAcpSessionUpdates(
 	options: AcpEventMapperOptions = {},
 ): SessionNotification[] {
 	switch (event.type) {
+		case "irc_message": {
+			const { customType, details } = event.message;
+			if (
+				customType !== "irc:incoming" ||
+				typeof details !== "object" ||
+				details === null ||
+				!("remote" in details) ||
+				details.remote !== true
+			)
+				return [];
+			const from = extractStringProperty<{ from?: unknown }>(details, "from");
+			const message = extractStringProperty<MessageContainer>(details, "message");
+			if (from === undefined || message === undefined) return [];
+			return [
+				toSessionNotification(sessionId, {
+					sessionUpdate: "agent_message_chunk",
+					content: { type: "text", text: `**Message from another session @${from}:** ${message}` },
+				}),
+			];
+		}
 		case "message_update":
 			return mapAssistantMessageUpdate(event, sessionId, options);
 		case "message_end":

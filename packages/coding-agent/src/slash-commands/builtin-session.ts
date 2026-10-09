@@ -3,6 +3,8 @@ import { getOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
 import { journalJudgmentUsage, resolveJudge, sharedJudgmentCache } from "../judgment";
 import type { AgentSession } from "../session/agent-session";
 import type { SessionOAuthAccountList } from "../session/agent-session-types";
+import { AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
+import { ownSessionLine, renderOtherSessionsSection } from "../session/messaging-host";
 import {
 	getChangelogPath,
 	parseChangelog,
@@ -250,6 +252,32 @@ function launchSessionStatsDashboard(
 }
 
 export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
+	{
+		name: "list-agents",
+		aliases: ["peers"],
+		description: "List agents and other sessions you can message",
+		handle: async (_command, runtime) => {
+			const own = ownSessionLine(runtime.session);
+			if (!own) {
+				await runtime.output(
+					'Cross-session messaging is off. Turn on "Cross-session messaging" in /settings or launch with --cross-session.',
+				);
+				return commandConsumed();
+			}
+			const agents = AgentRegistry.global().listVisibleTo(runtime.session.getAgentId() ?? MAIN_AGENT_ID);
+			const other = await renderOtherSessionsSection(runtime.session, runtime.signal);
+			await runtime.output(
+				[
+					own,
+					"",
+					"## Agents",
+					...agents.map(agent => `- ${agent.id} ${agent.status} ${agent.kind}`),
+					...(other ? ["", other] : []),
+				].join("\n"),
+			);
+			return commandConsumed();
+		},
+	},
 	{
 		name: "todo",
 		icon: "todo",

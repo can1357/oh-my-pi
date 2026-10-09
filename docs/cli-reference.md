@@ -76,7 +76,7 @@ Argument handling:
 | `--profile <name>` | Use an isolated profile for auth, sessions, settings, and caches. |
 | `--alias <name>` | Create a shell shortcut for a named profile and exit; requires `--profile` or `OMP_PROFILE`. |
 | `--config <file>` | Load an extra `config.yml`-style overlay for this run (repeatable). |
-| `--session-dir <dir>` | Directory for session storage and lookup. |
+| `--session-dir <dir>` | Directory for session storage and lookup. Registered session files here are also discoverable for offline cross-session messaging. |
 | `--no-session` | Don't save the session (ephemeral). |
 
 #### Session history
@@ -90,11 +90,17 @@ Argument handling:
 | `--from-codex` | Import a Codex session into OMP. |
 | `--export <session>` | Export a session file to HTML and exit. |
 | `--no-title` | Disable title auto-generation (equivalent to the `PI_NO_TITLE` [environment variable](./environment-variables.md)). |
+| `--name <name>` | Set this session's name. Interactive, RPC, and ACP collision checks are best-effort and use the visible live-session roster; print mode keeps the requested name unchecked. `all` and names starting with `@` are reserved even when messaging is off. |
+| `--cross-session` | Enable same-machine cross-session messaging for this run (equivalent to the ephemeral `messaging.enabled=true` setting). Only top-level conversations participate; subagents and helper sessions do not. |
 
 `--continue`, `--resume`, `--fork`, and foreign-session imports require
 persistence and cannot use `--no-session`. `--from-claude` and `--from-codex`
 are mutually exclusive and cannot be combined with `--continue`, `--resume`,
 or `--fork`.
+
+Reserved names produce `Session names cannot be "all" or start with "@" (reserved for broadcast and extension peer namespaces).` Use a session short id to disambiguate duplicate names. See [Cross-session messaging](./agent-hub.md#cross-session-messaging) for addressing and receipts.
+
+With messaging enabled, print/JSON runs stop receiving new peer work when the final CLI prompt's attributed work completes, drain already accepted turns with sending still available, then dispose the inbox. An extension command's nested assistant answer and terminal failure remain attributed to that CLI command; unrelated peer turns do not replace its answer.
 
 #### Model selection
 
@@ -255,7 +261,7 @@ Run `omp <command> --help` for each command's own flags and examples.
 | `config` | Manage configuration settings. | [config usage](./config-usage.md), [settings](./settings.md) |
 | `dry-balance` | Dry-run OAuth account balancing across random session ids. | |
 | `find` | Semantic search for implementing files and line ranges. | |
-| `gc` | Run storage garbage collection. | |
+| `gc` | Run storage garbage collection. `--stale` includes expired offline mail; dry-run by default, add `--apply` to remove candidates. Session deletion and GC archive moves retire that session's offline inbox. | [Offline inbox](./agent-hub.md#offline-inbox) |
 | `grep` | Test the grep tool from the CLI. (The [`grep` tool](./tools/grep.md) is a separate agent tool.) | |
 | `gallery` | Preview tool, composer, and status-line renderers in a deterministic gallery. | |
 | `git` | Interactive fullscreen git UI: split diff viewer, staging sidebar, and commit composer. | |

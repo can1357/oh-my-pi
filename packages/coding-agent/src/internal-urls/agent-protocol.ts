@@ -177,8 +177,8 @@ export class AgentProtocolHandler implements ProtocolHandler {
 		if (
 			!registry ||
 			!senderId ||
-			session.enableIrc === false ||
-			!isIrcEnabled(session.settings, session.taskDepth ?? 0)
+			(!session.messaging &&
+				(session.enableIrc === false || !isIrcEnabled(session.settings, session.taskDepth ?? 0)))
 		) {
 			throw new Error("Peer messaging is unavailable in this session.");
 		}
@@ -187,10 +187,19 @@ export class AgentProtocolHandler implements ProtocolHandler {
 		if (hasPathExtraction(url)) {
 			throw new Error("agent:// message target cannot have a JSON-path suffix.");
 		}
-		if (!content.trim()) throw new Error("agent:// messages require non-empty content.");
+		let notifyWhenIdle = false;
+		if (session.messaging) {
+			for (const key of url.searchParams.keys()) {
+				if (key !== "notify") throw new Error(`Unknown agent:// option "${key}".`);
+			}
+			const notify = url.searchParams.get("notify");
+			if (notify !== null && notify !== "idle") throw new Error(`Unknown agent:// option "notify".`);
+			notifyWhenIdle = notify === "idle";
+		}
+		if (!content.trim() && !notifyWhenIdle) throw new Error("agent:// messages require non-empty content.");
 		const result = await executeSend(
-			{ registry, senderId, sessionFileHint: session.getSessionFile?.() },
-			{ to, message: content },
+			{ registry, senderId, sessionFileHint: session.getSessionFile?.(), messaging: session.messaging },
+			{ to, message: content, notifyWhenIdle },
 		);
 		return {
 			content: [

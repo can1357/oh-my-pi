@@ -1,5 +1,5 @@
 import { Database } from "bun:sqlite";
-import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, setSystemTime, spyOn, test, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -11,6 +11,8 @@ import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import { BlobStore, blobStagingPath } from "@oh-my-pi/pi-coding-agent/session/blob-store";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { FileSessionStorage } from "@oh-my-pi/pi-coding-agent/session/session-storage";
+import * as mailbox from "@oh-my-pi/pi-coding-agent/messaging/mailbox";
+import * as transport from "@oh-my-pi/pi-coding-agent/messaging/transport";
 import {
 	getAgentDir,
 	getBlobsDir,
@@ -36,6 +38,8 @@ const originalExitCode = process.exitCode;
 beforeEach(async () => {
 	settingsState = beginSettingsTest();
 	root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-gc-"));
+	spyOn(transport, "messagingRegistryDir").mockReturnValue(path.join(root, "messaging"));
+	await fs.mkdir(path.join(root, "messaging"), { mode: 0o700 });
 	writes = [];
 	stderrWrites = [];
 	process.exitCode = 0;
@@ -54,6 +58,8 @@ afterEach(async () => {
 	stdoutSpy = undefined;
 	stderrSpy?.mockRestore();
 	stderrSpy = undefined;
+	vi.restoreAllMocks();
+	setSystemTime();
 	process.exitCode = originalExitCode;
 	restoreSettingsTestState(settingsState);
 	settingsState = undefined;
@@ -776,9 +782,27 @@ describe("runGcCommand history checkpoint", () => {
 	}, 10_000);
 });
 
+function queueMail(sessionId: string, id: string, body: string) {
+	return mailbox.enqueueOffline(sessionId, {
+		id,
+		from: {
+			sessionId: "sender",
+			name: "sender",
+			shortId: "12345678",
+			cwd: root,
+			entryId: "sender-entry",
+			class: "bypass",
+		},
+		body,
+		chain: [],
+		sentAt: Date.now(),
+	});
+}
+
 describe("runGcCommand cold-session archive", () => {
 	test("archives old completed sessions while honoring keep-count and active-status skips", async () => {
 		const archiveMe = await writeSession(root, "project", "archive-me", "complete", { ageDays: 90 });
+		await queueMail("archive-me", "archive-mail", "retire on archive");
 		// 60d keeps keep-recent cold-eligible (>30d cutoff) yet unambiguously newer than
 		// archive-me's 90d, so retainNewestGlobal:1 deterministically protects it regardless
 		// of readdir order when two sessions would otherwise share an mtime millisecond.
@@ -804,6 +828,7 @@ describe("runGcCommand cold-session archive", () => {
 		expect(result.archive?.archived).toBe(1);
 		expect(result.archive?.skippedActive).toBe(2);
 		expect(await Bun.file(archiveMe).exists()).toBe(false);
+		expect(await mailbox.drainOffline("archive-me")).toEqual([]);
 		expect(await Bun.file(archived).exists()).toBe(true);
 		expect(new Uint8Array(gunzipSync(await Bun.file(archived).bytes()))).toEqual(original);
 		expect(await Bun.file(path.join(archived.slice(0, -".jsonl.gz".length), "0.bash.log")).exists()).toBe(true);
@@ -876,6 +901,7 @@ describe("runGcCommand cold-session archive", () => {
 		await agePath(session, 90);
 		const artifacts = session.slice(0, -".jsonl".length);
 		await Bun.write(path.join(artifacts, "0.bash.log"), "retained artifact");
+		await queueMail("rollback", "rollback-mail", "keep on rollback");
 		const archiveDir = path.join(root, "archive", "sessions", "project");
 		const rename = fs.rename.bind(fs);
 		const renameSpy = spyOn(fs, "rename").mockImplementation(async (source, destination) => {
@@ -901,6 +927,7 @@ describe("runGcCommand cold-session archive", () => {
 		expect(result.archive?.archived).toBe(0);
 		expect(result.archive?.errors).toEqual([`${session}: artifact move failed`]);
 		expect(await Bun.file(session).bytes()).toEqual(original);
+		expect((await mailbox.drainOffline("rollback")).map(item => item.message.id)).toEqual(["rollback-mail"]);
 		expect(await Bun.file(path.join(artifacts, "0.bash.log")).text()).toBe("retained artifact");
 		expect(await fs.readdir(archiveDir)).toEqual([]);
 		expect((await fs.readdir(path.dirname(session))).sort()).toEqual(["rollback", "rollback.jsonl"]);
@@ -2476,4 +2503,113 @@ describe("runGcCommand stale state", () => {
 		const enabled = await runGcCommand({ flags: { agentDir: root } });
 		expect(enabled.stale?.wouldDelete).toBe(0);
 	});
+});
+
+describe("offline mail GC", () => {
+	test("dry-run reports only TTL-expired mail, then apply preserves unexpired mail", async () => {
+		const now = Date.now();
+		setSystemTime(now);
+		const from = {
+			sessionId: "sender",
+			name: "sender",
+			shortId: "12345678",
+			cwd: root,
+			entryId: "sender-entry",
+			class: "bypass",
+		} as const;
+		const records = [
+			{ sessionId: "expired", sentAt: now - mailbox.OFFLINE_INBOX_TTL_MS - 1 },
+			{ sessionId: "unexpired", sentAt: now },
+			{ sessionId: "boundary", sentAt: now - mailbox.OFFLINE_INBOX_TTL_MS },
+		];
+		const files: string[] = [];
+		for (const record of records) {
+			await mailbox.enqueueOffline(
+				record.sessionId,
+				{ id: record.sessionId, from, body: record.sessionId, chain: [], sentAt: record.sentAt },
+				{ now: record.sentAt },
+			);
+			const file = path.join(mailbox.mailboxDir(record.sessionId), `${record.sentAt}-${record.sessionId}.json`);
+			files.push(file);
+			if (record.sessionId !== "expired") await agePath(file, 90);
+		}
+		const flags = { agentDir: root, stale: true, staleRetainNewest: 100, staleRetainDays: 365 };
+		const dry = await runGcCommand({ flags });
+		expect(dry.stale).toMatchObject({ expiredMail: 1, wouldDelete: 1, deleted: 0, errors: [] });
+		const bytes = (await fs.stat(files[0])).size;
+		expect(dry.stale?.bytes).toBe(bytes);
+		for (const file of files) expect(await Bun.file(file).exists()).toBe(true);
+		const applied = await runGcCommand({ flags: { ...flags, apply: true } });
+		expect(applied.stale).toMatchObject({ expiredMail: 1, deleted: 1, bytes, errors: [] });
+		expect(await Bun.file(files[0]).exists()).toBe(false);
+		for (const file of files.slice(1)) expect(await Bun.file(file).exists()).toBe(true);
+	});
+
+	test("a stopped session moved to another cwd keeps unexpired mail through stale apply", async () => {
+		const originalAgentDir = getAgentDir();
+		setAgentDir(root);
+		try {
+			const before = path.join(root, "before");
+			const after = path.join(root, "after");
+			await fs.mkdir(before);
+			await fs.mkdir(after);
+			const original = SessionManager.create(before);
+			const sessionId = original.getSessionId();
+			const oldFile = original.getSessionFile()!;
+			try {
+				await original.ensureOnDisk();
+			} finally {
+				await original.close();
+			}
+			await queueMail(sessionId, "retained", "mail queued before relocation");
+			const inbox = mailbox.mailboxDir(sessionId);
+			const file = path.join(inbox, (await fs.readdir(inbox))[0]);
+			await agePath(file);
+			// No messaging service is running during resume/move.
+			const resumed = await SessionManager.open(oldFile, undefined, undefined, { suppressBreadcrumb: true });
+			try {
+				await resumed.moveTo(after);
+				expect(resumed.getSessionId()).toBe(sessionId);
+				expect(resumed.getSessionFile()).not.toBe(oldFile);
+				expect(await Bun.file(resumed.getSessionFile()!).exists()).toBe(true);
+				expect(await Bun.file(oldFile).exists()).toBe(false);
+			} finally {
+				await resumed.close();
+			}
+			const result = await runGcCommand({ flags: { agentDir: root, stale: true, apply: true } });
+			expect(result.stale).toMatchObject({ expiredMail: 0, wouldDelete: 0, deleted: 0, errors: [] });
+			expect((await mailbox.drainOffline(sessionId)).map(item => item.message.id)).toEqual(["retained"]);
+		} finally {
+			setAgentDir(originalAgentDir);
+		}
+	});
+});
+
+test("mail cleanup failure after archive still cleans history and stats for that archived session", async () => {
+	const session = await writeSession(root, "project", "cleanup-failure", "complete", { ageDays: 90 });
+	const historyPath = getHistoryDbPath(root);
+	await fs.mkdir(path.dirname(historyPath), { recursive: true });
+	const history = new Database(historyPath);
+	history.run("CREATE TABLE history (id INTEGER PRIMARY KEY, prompt TEXT, session_id TEXT)");
+	history.run("INSERT INTO history VALUES (1, 'old prompt', 'cleanup-failure')");
+	history.close();
+	const statsPath = path.join(root, "stats.db");
+	const stats = new Database(statsPath);
+	stats.run("CREATE TABLE messages (session_file TEXT)");
+	stats.run("INSERT INTO messages VALUES (?)", [session]);
+	stats.close();
+	spyOn(mailbox, "retireOfflineMailbox").mockRejectedValueOnce(new Error("mail cleanup denied"));
+	const result = await runGcCommand({
+		flags: {
+			agentDir: root,
+			archive: true,
+			apply: true,
+			coldArchiveAfterDays: 0,
+			retainNewestGlobal: 0,
+			retainNewestPerCwd: 0,
+		},
+	});
+	expect(result.archive).toMatchObject({ archived: 1, historyRowsDeleted: 1, statsRowsDeleted: 1 });
+	expect(result.archive?.errors).toContain(`${session}: mail cleanup denied`);
+	expect(await Bun.file(session).exists()).toBe(false);
 });

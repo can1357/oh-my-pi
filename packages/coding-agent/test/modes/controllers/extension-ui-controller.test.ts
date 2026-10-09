@@ -507,3 +507,29 @@ describe("ExtensionUiController custom overlay", () => {
 		expect(harness.editor.getText()).toBe("draft typed while factory is pending");
 	});
 });
+
+it("starts cross-session approval expiry only after its queued selector mounts", async () => {
+	const h = makeHarness();
+	const blocker = h.controller.showHookInput("Blocking input");
+	const view = { from: { name: "alpha", shortId: "aaaaaaaa", address: "alpha", cwd: "/project" }, body: "Approve me" };
+	const abort = new AbortController();
+	const presented = vi.fn();
+	const approval = h.controller.askCrossSessionApproval(view, abort.signal, presented);
+	expect(presented).not.toHaveBeenCalled();
+	h.handleInput("\r");
+	await blocker;
+	expect(presented).toHaveBeenCalledTimes(1);
+	expect(h.getFocused()).not.toBe(h.editor);
+	h.handleInput("\r");
+	expect(await approval).toBe("approve");
+
+	const secondBlocker = h.controller.showHookInput("Second blocker");
+	const queuedAbort = new AbortController();
+	const skipped = vi.fn();
+	const queued = h.controller.askCrossSessionApproval(view, queuedAbort.signal, skipped);
+	queuedAbort.abort();
+	expect(await queued).toBeUndefined();
+	h.handleInput("\r");
+	await secondBlocker;
+	expect(skipped).not.toHaveBeenCalled();
+});

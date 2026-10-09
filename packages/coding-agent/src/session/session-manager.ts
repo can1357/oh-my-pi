@@ -2129,7 +2129,7 @@ export class SessionManager {
 		}
 	}
 
-	static #cleanTitle(raw: string): string {
+	static cleanTitle(raw: string): string {
 		return raw
 			.replace(/[\u0000-\u001f\u007f-\u009f]/g, " ")
 			.replace(/ +/g, " ")
@@ -3271,7 +3271,7 @@ export class SessionManager {
 		if (this.#released) return false;
 		if (this.#titleSource === "user" && source === "auto") return false;
 
-		const title = SessionManager.#cleanTitle(name);
+		const title = SessionManager.cleanTitle(name);
 		if (!title) return false;
 
 		const previousTitle = this.#sessionName;

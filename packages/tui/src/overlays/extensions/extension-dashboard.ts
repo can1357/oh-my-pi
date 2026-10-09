@@ -77,6 +77,7 @@ export interface ExtensionDashboardRuntime {
 	subscribeMcpChanges(onChange: () => void): Array<() => void>;
 	mcpSource?: MCPRuntimeSource;
 	inspectorSource?: ExtensionInspectorSource;
+	peerAddress?: () => string;
 }
 
 export interface ExtensionDashboardOptions {
@@ -171,7 +172,7 @@ export class ExtensionDashboard implements Component {
 	readonly #frameBottom = new PanelRows();
 	readonly #frame = new Stack({
 		children: [
-			{ content: this.#frameTop, height: 1 },
+			{ content: this.#frameTop },
 			{ content: this.#frameTabs },
 			{ content: this.#frameUpperDivider, height: 1 },
 			{ content: this.#frameBody },
@@ -274,8 +275,9 @@ export class ExtensionDashboard implements Component {
 		const innerWidth = Math.max(1, width - 4);
 
 		const tabLines = this.#tabBar.render(innerWidth);
+		const peerAddress = this.#runtime.peerAddress?.();
 		// Fixed chrome: top border + tab rows + divider + divider + footer + bottom border.
-		const fixedRows = 1 + tabLines.length + 1 + 1 + 1 + 1;
+		const fixedRows = 1 + (peerAddress === undefined ? 0 : 1) + tabLines.length + 1 + 1 + 1 + 1;
 		const contentRows = Math.max(5, height - fixedRows);
 
 		this.#mainList.setMaxVisible(Math.max(3, contentRows - 2));
@@ -284,7 +286,10 @@ export class ExtensionDashboard implements Component {
 		this.#mainList.setToolSource(toolFrame);
 		this.#inspector.setToolSource(toolFrame);
 
-		this.#frameTop.setLines([topBorder(width, DASHBOARD_TITLE)]);
+		this.#frameTop.setLines([
+			topBorder(width, DASHBOARD_TITLE),
+			...(peerAddress === undefined ? [] : [row(theme.fg("dim", `Peer address  ${peerAddress}`), width)]),
+		]);
 		this.#frameTabs.setLines(tabLines.map(line => row(line, width)));
 		this.#frameUpperDivider.setLines([divider(width)]);
 		this.#frameBody.setLines(this.#body.render(innerWidth).map(line => row(line, width)));
@@ -636,11 +641,14 @@ export class ExtensionDashboard implements Component {
 		const toolFrame = snapshotToolRuntimeSource(this.#toolSource);
 		let tools = "";
 		for (const tool of toolFrame?.listLiveTools?.() ?? []) tools += `${tool.name}${tool.hidden ? "!" : ""}\0`;
-		return this.#native.get([this.#nativeVersion, sheet, tools, this.#inspectorScroll], () => {
-			this.#mainList.setToolSource(toolFrame);
-			this.#inspector.setToolSource(toolFrame);
-			return sheet ? this.#describePicker() : this.#describePage();
-		});
+		return this.#native.get(
+			[this.#nativeVersion, sheet, tools, this.#inspectorScroll, this.#runtime.peerAddress?.()],
+			() => {
+				this.#mainList.setToolSource(toolFrame);
+				this.#inspector.setToolSource(toolFrame);
+				return sheet ? this.#describePicker() : this.#describePage();
+			},
+		);
 	}
 
 	#describePicker(): NativeNode {
@@ -649,6 +657,7 @@ export class ExtensionDashboard implements Component {
 		return picker(
 			{
 				title: DASHBOARD_TITLE,
+				subtitle: this.#runtime.peerAddress ? `Peer address  ${this.#runtime.peerAddress()}` : undefined,
 				icon: "extension",
 				noun: "extensions",
 				size: "lg",
@@ -747,7 +756,13 @@ export class ExtensionDashboard implements Component {
 		];
 		if (query) buttons.push(actionButton("Clear search", "clear", { keys: "escape" }));
 		buttons.push(null, actionButton("Close", "close", { keys: "escape" }));
-		return col([head, this.#tabBar, keyed(search, "search"), body, actionBar(buttons)], { gap: "md", grow: 1 });
+		const address = this.#runtime.peerAddress
+			? [text(`Peer address  ${this.#runtime.peerAddress()}`, { truncate: "end" })]
+			: [];
+		return col([head, ...address, this.#tabBar, keyed(search, "search"), body, actionBar(buttons)], {
+			gap: "md",
+			grow: 1,
+		});
 	}
 
 	/**

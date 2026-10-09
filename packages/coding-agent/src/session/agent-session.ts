@@ -250,6 +250,18 @@ import { parseCommandArgs } from "../utils/command-args";
 import type { EditMode } from "@oh-my-pi/pi-tui/tools/edit";
 import { resolveFileDisplayMode } from "../utils/file-display-mode";
 import { extractFileMentions, generateFileMentionMessages } from "../utils/file-mentions";
+import {
+	formatAddressForUrl,
+	isReservedAddress,
+	RESERVED_SESSION_NAME_ERROR,
+	sessionAddress,
+} from "../messaging/names";
+import { permissionClassFromApproval, type PermissionClass } from "../messaging/policy";
+import type { SessionSnapshot } from "../messaging/protocol";
+import type { MessagingService, RemoteDelivery, SessionListing } from "../messaging/service";
+import { resolveApprovalFromContext } from "../tools/approval";
+import { resolveReadPath } from "../tools/path-utils";
+import sessionMentionTemplate from "../prompts/system/session-mention.md" with { type: "text" };
 import { normalizeModelContextImages } from "../utils/image-loading";
 import { TokenRateMeter } from "../utils/token-rate";
 import { resumeCommand } from "../utils/resume-command";
@@ -421,7 +433,7 @@ import {
 	copySessionArtifacts,
 	extractSessionInit,
 	type PersistedSessionInit,
-	type SessionManager,
+	SessionManager,
 } from "./session-manager";
 import { SessionMemory, type SessionMemoryHost } from "./session-memory";
 import { buildSessionMetadata } from "./session-metadata";
@@ -897,6 +909,13 @@ export class AgentSession implements SettingsScope {
 	#asyncDeliveryEpoch = 0;
 
 	readonly #irc: IrcBridge;
+	#messaging: MessagingService | undefined;
+	#messagingSuspensionDepth = 0;
+	#resumeMessagingReceiving: (() => void) | undefined;
+	#suspendedMessagingIdentity: Pick<SessionSnapshot, "sessionId" | "name" | "title" | "cwd"> | undefined;
+	#relayChain: readonly string[] = [];
+	#lastMessagingFinished: { finishedAt: number; status: string | null } | undefined;
+	#sessionMentionCache: { service: MessagingService; refreshedAt: number; sessions: SessionListing[] } | undefined;
 	#ircWakeTurnObserver:
 		| ((records: AgentMessage[]) => ((error?: unknown) => void | Promise<void>) | undefined)
 		| undefined;
@@ -1012,6 +1031,7 @@ export class AgentSession implements SettingsScope {
 	 *  incremented, so `isStreaming` alone cannot tell a host that a submission is admitted. */
 	#admittedSubmissionCount = 0;
 	#admittedSubmissionsSettled: PromiseWithResolvers<void> | undefined;
+	#ircResumeAfterAdmissionScheduled = false;
 	// Wire-level agent_end emission deferred until #promptInFlightCount drops to 0.
 	// Internal extension hooks and post-emit work (auto-retry, auto-compaction, todo
 	// checks in #handleAgentEvent) still fire on the original schedule — only the
@@ -1183,6 +1203,19 @@ export class AgentSession implements SettingsScope {
 		if (this.#modeExitDrainSuppressionDepth > 0 || this.#isDisposed || this.isStreaming || !this.#irc.hasPending()) {
 			return;
 		}
+		if (this.hasAdmittedSubmission) {
+			if (!this.#ircResumeAfterAdmissionScheduled) {
+				this.#ircResumeAfterAdmissionScheduled = true;
+				void this.waitForAdmittedSubmissions().then(() => {
+					// Let prompt()'s callers settle attribution before a peer starts a fresh turn.
+					setImmediate(() => {
+						this.#ircResumeAfterAdmissionScheduled = false;
+						this.#resumeStrandedIrcAsides();
+					});
+				});
+			}
+			return;
+		}
 		// A pooled yield contract means a pool turn owns this worker (installed,
 		// dispatching, or dispatch-imminent). Waking here would either emit keyed
 		// yields against its items or re-queue into the deferral path forever, so
@@ -1201,9 +1234,12 @@ export class AgentSession implements SettingsScope {
 		// already decided wake-intended at deferral time.
 		const records = [...this.#irc.drainDeferredWakes(), ...this.#irc.drainPending()];
 		if (this.#planModeState?.enabled) {
-			// Plan mode: fold stranded IRC asides into context without waking an
-			// autonomous turn. Convergence to ask/resolve stays user-driven.
-			this.#foldStrandedIrcAsidesIntoContext(records);
+			// Local plan-mode asides remain user-driven; other sessions always wake.
+			const remote = records.filter(
+				record => record.role === "custom" && record.details && Reflect.get(record.details, "remote") === true,
+			);
+			this.#foldStrandedIrcAsidesIntoContext(records.filter(record => !remote.includes(record)));
+			if (remote.length > 0) this.#wakeForIrc(remote);
 			return;
 		}
 		if (this.#advisors.autoResumeSuppressed) {
@@ -1261,44 +1297,38 @@ export class AgentSession implements SettingsScope {
 	 *  it, so park the follow-up queue across the wake and restore it after. It stays queued post-wake
 	 *  because #canAutoContinueForFollowUp suppresses follow-up auto-resume while a user interrupt is
 	 *  in effect, even though the wake left a provider-valid tail. */
-	#wakeForIrc(records: AgentMessage[]): void {
+	#wakeForIrc(records: AgentMessage[], onDisposition?: (accepted: boolean) => void): void {
 		if (this.#modeExitDrainSuppressionDepth > 0) {
 			this.#irc.queueAside(records);
+			onDisposition?.(true);
 			return;
 		}
-		// Park only a *blocked* follow-up (one a user interrupt is intentionally holding); an
-		// already-resumable follow-up can ride the wake turn normally without reordering.
-		const parkedFollowUps =
-			this.agent.peekSteeringQueue().length === 0 &&
-			this.agent.peekFollowUpQueue().length > 0 &&
-			!this.#canAutoContinueForFollowUp()
-				? [...this.agent.peekFollowUpQueue()]
-				: [];
-		const parkedQueueDrainBlocked = parkedFollowUps.length > 0 && this.#queuedMessageDrainBlocked;
-		if (parkedFollowUps.length > 0) {
-			this.agent.replaceQueues([...this.agent.peekSteeringQueue()], []);
-			if (parkedQueueDrainBlocked) this.#queuedMessageDrainBlocked = false;
-		}
-		// The wake observer is attached only once prompt ownership is won below: a
-		// deferred wake runs no turn, so observing it would capture the next
-		// turn's yield/output and relay it as this wake's reply.
+		const sessionGeneration = this.#sessionGeneration;
+		const sessionId = this.sessionId;
+		let parkedFollowUps: AgentMessage[] = [];
+		let parkedQueueDrainBlocked = false;
+		let acquired = false;
+		let generation = this.#promptGeneration;
 		let observation: TurnObservation | undefined;
-		this.#resetPromptMaintenanceState();
-		// Capture the generation before the wake so its post-prompt recovery wait
-		// bails the instant an abort (which bumps #promptGeneration) supersedes
-		// this wake — otherwise the wait would follow a successor turn (a queued
-		// follow-up or another stranded IRC wake started by abort cleanup),
-		// delaying the observation's finish and mis-attributing the successor's RPC
-		// progress to this now-dead wake monitor.
-		const generation = this.#promptGeneration;
-		this.#beginInFlight();
 		let turnError: unknown;
-		// A pooled-turn yield transition (item-set mutation + prompt rebuild) may be
-		// in flight when the wake lands. Starting the turn on the stale prompt would
-		// advertise one yield schema while the runtime enforces the other, so join
-		// the transition before building the turn from a consistent contract.
+		let accepted = false;
+		const accept = () => {
+			accepted = true;
+			onDisposition?.(true);
+		};
+		// Acquire in-flight ownership only after both barriers; transitions drain
+		// in-flight turns and must not wait for their own blocked wake.
 		void this.whenWorkPoolYieldSettled()
-			.then(() => {
+			.then(async () => {
+				do {
+					while (this.isSessionTransitioning) await this.waitForSessionTransition();
+					if (
+						this.#sessionGeneration !== sessionGeneration &&
+						(await this.#sessionGenerationChanged(sessionGeneration))
+					)
+						return;
+				} while (this.isSessionTransitioning);
+				if (this.#isDisposed || this.#unsubscribeAgent === undefined || this.sessionId !== sessionId) return;
 				// Synchronous ownership check, atomic with the dispatch below:
 				// agent.prompt() claims streaming with no await in between, and the
 				// yield contract above mutates synchronously, so no install can
@@ -1310,15 +1340,42 @@ export class AgentSession implements SettingsScope {
 					// Flushing them as ordinary asides would feed them to the batch
 					// with no observer to reply to the sender.
 					this.#irc.queueDeferredWake(records);
+					accept();
 					logger.debug("IRC wake turn parked while pooled");
 					return;
 				}
-				if (this.agent.state.isStreaming) {
+				if (this.isStreaming) {
 					this.#irc.queueAside(records);
+					accept();
 					logger.debug("IRC wake turn deferred behind the running turn");
 					return;
 				}
+				// Park only follow-ups deliberately blocked by a user interrupt.
+				parkedFollowUps =
+					this.agent.peekSteeringQueue().length === 0 &&
+					this.agent.peekFollowUpQueue().length > 0 &&
+					!this.#canAutoContinueForFollowUp()
+						? [...this.agent.peekFollowUpQueue()]
+						: [];
+				parkedQueueDrainBlocked = parkedFollowUps.length > 0 && this.#queuedMessageDrainBlocked;
+				if (parkedFollowUps.length > 0) {
+					this.agent.replaceQueues([...this.agent.peekSteeringQueue()], []);
+					if (parkedQueueDrainBlocked) this.#queuedMessageDrainBlocked = false;
+				}
+				this.#resetPromptMaintenanceState();
+				generation = this.#promptGeneration;
+				this.#beginInFlight();
+				acquired = true;
 				observation = this.#startTurnObservation(records);
+				if (
+					!records.some(
+						record =>
+							record.role === "custom" && record.details && Reflect.get(record.details, "remote") === true,
+					)
+				) {
+					this.#relayChain = [];
+				}
+				accept();
 				return this.agent.prompt(records);
 			})
 			.catch(error => {
@@ -1339,6 +1396,11 @@ export class AgentSession implements SettingsScope {
 				logger.warn("IRC wake turn failed", { error: String(error) });
 			})
 			.finally(async () => {
+				if (!accepted) {
+					for (const record of records) this.#irc.remoteEnteredContext(record);
+					onDisposition?.(false);
+				}
+				if (!acquired) return;
 				try {
 					await this.#waitForPostPromptRecovery(generation);
 				} catch (error) {
@@ -1477,7 +1539,7 @@ export class AgentSession implements SettingsScope {
 		const pending = this.#pendingAgentEndEmit;
 		if (!pending) return;
 		this.#pendingAgentEndEmit = undefined;
-		if (pending.type !== "agent_end" || pending.isTerminal === false) {
+		if (pending.type !== "agent_end") {
 			this.#emit(pending);
 			return;
 		}
@@ -1501,9 +1563,32 @@ export class AgentSession implements SettingsScope {
 			canDrain &&
 			!this.#abortInProgress &&
 			!this.#isDisposed &&
-			!this.#planModeState?.enabled &&
+			(!this.#planModeState?.enabled || this.#irc.pendingRemoteCount() > 0) &&
 			this.#irc.hasPending();
-		this.#emit(queuedContinuation || ircContinuation ? { ...pending, isTerminal: false } : pending);
+		const event = queuedContinuation || ircContinuation ? { ...pending, isTerminal: false } : pending;
+		const assistant = event.messages.findLast(message => message.role === "assistant");
+		const text =
+			assistant?.role === "assistant"
+				? assistant.content.flatMap(block => (block.type === "text" ? [block.text] : [])).join("\n")
+				: "";
+		this.#lastMessagingFinished = {
+			finishedAt: assistant?.completedAt ?? Date.now(),
+			status:
+				text
+					.split("\n")
+					.find(line => line.trim().length > 0)
+					?.trim() ?? null,
+		};
+		this.#emit(event);
+		if (
+			event.isTerminal !== false &&
+			!this.agent.hasQueuedMessages() &&
+			!this.#irc.hasPending() &&
+			this.#irc.pendingRemoteCount() === 0 &&
+			this.#pendingNextTurnMessages.length === 0
+		) {
+			this.#messaging?.turnSettledIdle();
+		}
 	}
 
 	/**
@@ -1591,6 +1676,7 @@ export class AgentSession implements SettingsScope {
 		this.#extensionPaths = config.extensionPaths;
 		this.#resetCoordinator = config.codexResetCoordinator ?? defaultCodexAutoRedeemCoordinator;
 		const bashHost: BashRunnerHost = {
+			session: this,
 			agent: this.agent,
 			sessionManager: this.sessionManager,
 			settings: this.settings,
@@ -1624,7 +1710,7 @@ export class AgentSession implements SettingsScope {
 			isStreaming: () => this.isStreaming,
 			planModeEnabled: () => this.#planModeState?.enabled === true,
 			emitSessionEvent: event => this.#emitSessionEvent(event),
-			wakeForIrc: records => this.#wakeForIrc(records),
+			wakeForIrc: (records, onDisposition) => this.#wakeForIrc(records, onDisposition),
 		};
 		this.#irc = new IrcBridge(ircHost);
 		const prewalkHost: PrewalkCoordinatorHost = {
@@ -2593,6 +2679,112 @@ export class AgentSession implements SettingsScope {
 		return this.#agentId;
 	}
 
+	get isSubagent(): boolean {
+		return (
+			this.#agentKind !== "main" ||
+			this.#evalToolSession?.agentRegistry?.get(this.#agentId ?? "")?.kind === "advisor"
+		);
+	}
+
+	get messaging(): MessagingService | undefined {
+		return this.#messaging;
+	}
+
+	setMessaging(service: MessagingService | undefined): void {
+		if (service && this.isSubagent)
+			throw new Error("Cross-session messaging is only available to the main conversation.");
+		this.#resumeMessagingReceiving?.();
+		this.#resumeMessagingReceiving = undefined;
+		this.#messaging = service;
+		if (service && this.#messagingSuspensionDepth > 0)
+			this.#resumeMessagingReceiving = service.suspendReceiving(this.#suspendedMessagingIdentity);
+		this.#sessionMentionCache = undefined;
+		void this.refreshBaseSystemPrompt().catch(error => {
+			logger.warn("Failed to refresh cross-session system prompt", { error: String(error) });
+		});
+	}
+
+	get isMessagingReceivingSuspended(): boolean {
+		return this.#messagingSuspensionDepth > 0;
+	}
+
+	get suspendedMessagingIdentity(): Pick<SessionSnapshot, "sessionId" | "name" | "title" | "cwd"> | undefined {
+		return this.#suspendedMessagingIdentity;
+	}
+
+	suspendMessagingReceiving(): () => void {
+		if (this.#messagingSuspensionDepth++ === 0) {
+			const sessionId = this.sessionId;
+			const cwd = this.sessionManager.getCwd();
+			const title = this.sessionManager.getSessionName() ?? null;
+			this.#suspendedMessagingIdentity = {
+				sessionId,
+				cwd,
+				title,
+				name:
+					this.#messaging?.ownAddress() ??
+					sessionAddress({
+						sessionId,
+						cwd,
+						sessionName: title ?? undefined,
+						titleSource: this.sessionManager.titleSource,
+						directPrint: false,
+					}),
+			};
+			this.#resumeMessagingReceiving = this.#messaging?.suspendReceiving(this.#suspendedMessagingIdentity);
+		}
+		let resumed = false;
+		return () => {
+			if (resumed) return;
+			resumed = true;
+			if (--this.#messagingSuspensionDepth > 0) return;
+			this.#suspendedMessagingIdentity = undefined;
+			const resume = this.#resumeMessagingReceiving;
+			this.#resumeMessagingReceiving = undefined;
+			resume?.();
+		};
+	}
+
+	permissionClass(): PermissionClass {
+		const explicit = this.#tools.explicitAutoApproveMode;
+		return permissionClassFromApproval(
+			resolveApprovalFromContext({ settings: this.settings, autoApprove: explicit }).approvalMode,
+			this.#clientBridge ? explicit : undefined,
+		);
+	}
+
+	async deliverRemoteMessages(deliveries: readonly RemoteDelivery[]): Promise<boolean> {
+		if (this.isSubagent) throw new Error("Cross-session messaging cannot deliver to a subagent.");
+		const sessionGeneration = this.#sessionGeneration;
+		do {
+			await this.waitForSessionTransition();
+			if (await this.#sessionGenerationChanged(sessionGeneration)) return false;
+		} while (this.isSessionTransitioning);
+		if (
+			this.#isDisposed ||
+			this.#unsubscribeAgent === undefined ||
+			deliveries.some(delivery => delivery.recipientSessionId !== this.sessionId)
+		)
+			return false;
+		if (deliveries.length === 0) return true;
+		if (!this.isStreaming) this.#relayChain = [];
+		for (const delivery of deliveries)
+			if (delivery.chain.length > this.#relayChain.length) this.#relayChain = delivery.chain;
+		return (await this.#irc.deliverRemote(deliveries)) !== "retired";
+	}
+
+	pendingRemoteCount(): number {
+		return this.#irc.pendingRemoteCount();
+	}
+
+	currentRelayChain(): readonly string[] {
+		return this.#relayChain;
+	}
+
+	lastFinished(): { finishedAt: number; status: string | null } | undefined {
+		return this.#lastMessagingFinished;
+	}
+
 	/** Dequeue the next HARD forced tool choice for the upcoming LLM call, dropping
 	 *  (and rejecting) one whose named tool is no longer active. */
 	#nextHardToolChoice(): ToolChoice | undefined {
@@ -3240,8 +3432,9 @@ export class AgentSession implements SettingsScope {
 		// unrelated events, mid-turn maintenance, or queued steering.
 		// RPC/ACP consumers may submit again on agent_end, so defer that frame
 		// until the owning prompt unwinds and the session actually becomes idle.
-		if (event.type === "agent_end" && this.#promptInFlightCount > 0) {
+		if (event.type === "agent_end") {
 			this.#pendingAgentEndEmit = event;
+			if (this.#promptInFlightCount === 0) this.#flushPendingAgentEnd();
 		} else {
 			this.#emit(event);
 		}
@@ -3855,6 +4048,7 @@ export class AgentSession implements SettingsScope {
 			event.message.completedAt = Date.now();
 			this.#tools.bindReplyToCapturedPrompt(event.message);
 		}
+		if (event.type === "message_end") this.#irc.remoteEnteredContext(event.message);
 		// Turn-boundary maintenance awaits this commit before draining steering;
 		// extension notifications must not own or delay the persistence work.
 		const messageEndPersistence =
@@ -5336,6 +5530,7 @@ export class AgentSession implements SettingsScope {
 	}
 
 	#notifySessionChangeCallbacks(): void {
+		this.#lastMessagingFinished = undefined;
 		for (const callback of Array.from(this.#sessionChangeCallbacks)) {
 			try {
 				callback();
@@ -5572,7 +5767,10 @@ export class AgentSession implements SettingsScope {
 	}
 
 	async #doDispose(options: AgentSessionDisposeOptions = {}): Promise<void> {
+		this.#isDisposed = true;
+		this.#recordSessionExit(options.reason ?? "dispose");
 		this.beginDispose();
+		await this.#messaging?.close();
 		// Stop cache warming before the drain windows below: an armed tick firing
 		// mid-dispose would issue a paid warm request and persist usage into the
 		// closing session writer.
@@ -5582,7 +5780,6 @@ export class AgentSession implements SettingsScope {
 			this.#cacheWarmer.onRefreshEnd = undefined;
 			this.#cacheWarmer.cancel();
 		}
-		this.#recordSessionExit(options.reason ?? "dispose");
 		this.#cancelExitRecorder?.();
 		this.#cancelExitRecorder = undefined;
 		this.#cancelFatalRecoveryHint?.();
@@ -7636,6 +7833,7 @@ export class AgentSession implements SettingsScope {
 		signal: AbortSignal | undefined,
 		origin: "direct" | "queued",
 	): Promise<QueuedMessagePreparation & { baseXdevCatalogDelivered: boolean }> {
+		this.#relayChain = [];
 		const sessionGeneration = this.#sessionGeneration;
 		const alreadyDisposing = this.#isDisposed && origin === "direct";
 		const isCurrent = () =>
@@ -7833,6 +8031,43 @@ export class AgentSession implements SettingsScope {
 				});
 				for (const fileMentionMessage of fileMentionMessages) {
 					messages.push(await this.#normalizeAgentMessageImages(fileMentionMessage));
+				}
+				const messaging = this.#messaging;
+				if (messaging) {
+					if (
+						this.#sessionMentionCache?.service !== messaging ||
+						Date.now() - this.#sessionMentionCache.refreshedAt >= 5_000
+					) {
+						this.#sessionMentionCache = {
+							service: messaging,
+							refreshedAt: Date.now(),
+							sessions: await messaging.listSessions(setupAbort.signal),
+						};
+					}
+					for (const mention of fileMentions) {
+						try {
+							await Bun.file(resolveReadPath(mention, this.sessionManager.getCwd())).stat();
+							continue;
+						} catch {
+							// Non-file mentions may identify another live session.
+						}
+						const target = this.#sessionMentionCache.sessions.find(session => session.name === mention);
+						if (!target) continue;
+						messages.push({
+							role: "custom",
+							customType: "session-mention",
+							content: prompt
+								.render(sessionMentionTemplate, {
+									name: mention,
+									shortId: target.shortId,
+									fromUrl: formatAddressForUrl(mention),
+								})
+								.trim(),
+							display: false,
+							attribution: "user",
+							timestamp: Date.now(),
+						});
+					}
 				}
 			}
 
@@ -9793,7 +10028,14 @@ export class AgentSession implements SettingsScope {
 	/**
 	 * Set a display name for the current session.
 	 */
-	setSessionName(name: string, source: "auto" | "user" = "auto", trigger?: SessionNameTrigger): Promise<boolean> {
+	async setSessionName(
+		name: string,
+		source: "auto" | "user" = "auto",
+		trigger?: SessionNameTrigger,
+	): Promise<boolean> {
+		if (source === "user" && isReservedAddress(SessionManager.cleanTitle(name))) {
+			throw new Error(RESERVED_SESSION_NAME_ERROR);
+		}
 		const setSessionName = this.sessionManager.setSessionName as SetSessionNameWithTrigger;
 		return setSessionName.call(this.sessionManager, name, source, trigger);
 	}

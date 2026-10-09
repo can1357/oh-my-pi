@@ -41,7 +41,9 @@ function encodeProjectDir(cwd: string): string {
 	return cwd.replace(/[^a-zA-Z0-9]/g, "-");
 }
 
-async function createClaudeFixture(): Promise<{ info: ForeignSessionInfo; store: ClaudeSessionStore }> {
+async function createClaudeFixture(
+	customTitle = "Imported Claude",
+): Promise<{ info: ForeignSessionInfo; store: ClaudeSessionStore }> {
 	const root = path.join(tempRoot, ".claude");
 	const cwd = path.join(tempRoot, "project-with-hyphen");
 	const id = "11111111-1111-4111-8111-111111111111";
@@ -90,7 +92,7 @@ async function createClaudeFixture(): Promise<{ info: ForeignSessionInfo; store:
 				],
 			},
 		},
-		{ type: "custom-title", customTitle: "Imported Claude", timestamp: "2026-01-01T00:00:03.000Z" },
+		{ type: "custom-title", customTitle, timestamp: "2026-01-01T00:00:03.000Z" },
 	]);
 	const store = new ClaudeSessionStore(root);
 	const info = (await store.list())[0];
@@ -99,6 +101,17 @@ async function createClaudeFixture(): Promise<{ info: ForeignSessionInfo; store:
 }
 
 describe("ClaudeSessionStore", () => {
+	it("imports a legacy reserved custom title without requiring messaging", async () => {
+		const { info, store } = await createClaudeFixture("all");
+		const manager = await store.load(info);
+		expect(manager.getSessionName()).toBe("all");
+		expect(manager.titleSource).toBe("user");
+		expect(buildSessionContext(manager.getEntries()).messages[0]).toMatchObject({
+			role: "user",
+			content: "First prompt",
+		});
+	});
+
 	it("lists an unindexed session at the cwd its transcript recorded", async () => {
 		const root = path.join(tempRoot, ".claude");
 		const cwd = path.join(tempRoot, "my-project.dir");

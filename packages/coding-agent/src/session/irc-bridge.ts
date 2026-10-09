@@ -1,11 +1,13 @@
 import type { Agent, AgentMessage } from "@oh-my-pi/pi-agent-core";
-import { prompt } from "@oh-my-pi/pi-utils";
+import { escapeXmlAttribute, prompt } from "@oh-my-pi/pi-utils";
 import { type IrcMessage } from "@oh-my-pi/pi-tui/tools/irc";
+import type { RemoteDelivery } from "../messaging/service";
+import { formatAddressForUrl } from "../messaging/names";
 import parentIrcSteerTemplate from "../prompts/steering/parent-irc.md" with { type: "text" };
 import ircIncomingTemplate from "../prompts/system/irc-incoming.md" with { type: "text" };
 import { AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
 import type { AgentSessionEvent } from "./agent-session-events";
-import { escapeHarnessTags } from "./harness-tags";
+import { escapeHarnessTags, escapePeerText } from "./harness-tags";
 import type { CustomMessage } from "./messages";
 import type { SessionManager } from "./session-manager";
 
@@ -17,7 +19,7 @@ export interface IrcBridgeHost {
 	isStreaming(): boolean;
 	planModeEnabled(): boolean;
 	emitSessionEvent(event: AgentSessionEvent): Promise<void>;
-	wakeForIrc(records: AgentMessage[]): void;
+	wakeForIrc(records: AgentMessage[], onDisposition?: (accepted: boolean) => void): void;
 }
 
 /** Owns incoming IRC queues and the session's non-interrupting aside queue. */
@@ -25,6 +27,7 @@ export class IrcBridge {
 	readonly #host: IrcBridgeHost;
 	#interrupts: AgentMessage[] = [];
 	#asides: AgentMessage[] = [];
+	readonly #pendingRemote = new Map<string, number>();
 	/** Wake-intended records parked while a pooled yield contract owns the worker.
 	 *  Pooled turns must not flush these (no observer would reply to the sender);
 	 *  they resume into a monitored wake once the contract clears. */
@@ -41,14 +44,37 @@ export class IrcBridge {
 		return this.#interrupts.length > 0;
 	}
 
-	/** Whether an aside is ready for step-boundary injection (not a parked wake). */
+	/** Whether an interrupting aside is ready for step-boundary injection (not a parked wake or remote peer). */
 	hasAsides(): boolean {
-		return this.#asides.length > 0;
+		return this.#asides.some(
+			record =>
+				record.role !== "custom" ||
+				!record.details ||
+				typeof record.details !== "object" ||
+				Reflect.get(record.details, "remote") !== true,
+		);
 	}
 
 	/** Whether any undelivered IRC record remains queued. */
 	hasPending(): boolean {
 		return this.#interrupts.length > 0 || this.#asides.length > 0 || this.#deferredWakes.length > 0;
+	}
+
+	pendingRemoteCount(): number {
+		let count = 0;
+		for (const pending of this.#pendingRemote.values()) count += pending;
+		return count;
+	}
+
+	/** Release admission capacity only once the record reaches the session context. */
+	remoteEnteredContext(record: AgentMessage): void {
+		if (record.role !== "custom" || !record.details || typeof record.details !== "object") return;
+		if (Reflect.get(record.details, "remote") !== true) return;
+		const id = Reflect.get(record.details, "id");
+		if (typeof id !== "string") return;
+		const count = this.#pendingRemote.get(id) ?? 0;
+		if (count <= 1) this.#pendingRemote.delete(id);
+		else this.#pendingRemote.set(id, count - 1);
 	}
 
 	/** Waits until every in-flight wake-turn relay has settled. */
@@ -84,6 +110,7 @@ export class IrcBridge {
 		this.#interrupts = [];
 		this.#asides = [];
 		this.#deferredWakes = [];
+		for (const record of [...snapshot.asides, ...snapshot.deferredWakes]) this.remoteEnteredContext(record);
 		return snapshot;
 	}
 
@@ -100,6 +127,12 @@ export class IrcBridge {
 		this.#interrupts = [...snapshot.interrupts, ...this.#interrupts];
 		this.#asides = [...snapshot.asides, ...this.#asides];
 		this.#deferredWakes = [...snapshot.deferredWakes, ...this.#deferredWakes];
+		for (const record of [...snapshot.asides, ...snapshot.deferredWakes]) {
+			if (record.role === "custom" && record.details && Reflect.get(record.details, "remote") === true) {
+				const id = Reflect.get(record.details, "id");
+				if (typeof id === "string") this.#pendingRemote.set(id, (this.#pendingRemote.get(id) ?? 0) + 1);
+			}
+		}
 	}
 
 	/** Queues records for the next step-boundary aside injection: IRC wakes deferred by a
@@ -142,7 +175,7 @@ export class IrcBridge {
 					continue;
 				}
 				const details = record.details;
-				if (!details || typeof details !== "object") {
+				if (!details || typeof details !== "object" || Reflect.get(details, "remote") === true) {
 					queue.remaining.push(record);
 					continue;
 				}
@@ -175,6 +208,47 @@ export class IrcBridge {
 		this.#interrupts = remainingInterrupts;
 		this.#asides = remainingAsides;
 		return messages;
+	}
+
+	/** Remote messages bypass local bus waiters, steering and interrupt queues. */
+	async deliverRemote(deliveries: readonly RemoteDelivery[]): Promise<"injected" | "woken" | "retired"> {
+		if (this.#host.isDisposed()) throw new Error("Recipient session is disposed.");
+		const records = deliveries.map(d => {
+			const record: CustomMessage = {
+				role: "custom",
+				customType: "irc:incoming",
+				content: prompt.render(ircIncomingTemplate, {
+					remote: true,
+					from: escapeXmlAttribute(d.from.address),
+					fromUrl: formatAddressForUrl(d.from.shortId),
+					shortId: d.from.shortId,
+					cwd: escapePeerText(d.from.cwd),
+					message: escapePeerText(d.body),
+				}),
+				display: true,
+				details: {
+					id: d.id,
+					from: d.from.address,
+					message: d.body,
+					remote: true,
+					shortId: d.from.shortId,
+					cwd: d.from.cwd,
+				},
+				attribution: "agent",
+				timestamp: d.receivedAt,
+			};
+			this.#pendingRemote.set(d.id, (this.#pendingRemote.get(d.id) ?? 0) + 1);
+			void this.#host.emitSessionEvent({ type: "irc_message", message: record });
+			return record;
+		});
+		if (records.length === 0) return "injected";
+		if (this.#host.isStreaming()) {
+			this.#asides.push(...records);
+			return "injected";
+		}
+		const disposition = Promise.withResolvers<boolean>();
+		this.#host.wakeForIrc(records, disposition.resolve);
+		return (await disposition.promise) ? "woken" : "retired";
 	}
 
 	/** Delivers an IRC message into the recipient session without awaiting any wake turn. */

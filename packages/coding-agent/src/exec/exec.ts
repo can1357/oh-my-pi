@@ -13,6 +13,10 @@ export interface ExecOptions {
 	timeout?: number;
 	/** Working directory */
 	cwd?: string;
+	/** Additional environment variables, merged over the inherited environment. */
+	env?: Record<string, string>;
+	/** Variables to remove from the final merged environment. */
+	stripEnv?: readonly string[];
 }
 
 /**
@@ -37,8 +41,14 @@ export async function execCommand(
 	cwd: string,
 	options?: ExecOptions,
 ): Promise<ExecResult> {
+	const env = { ...process.env };
+	delete env.OMP_MESSAGING_SOCKET;
+	delete env.OMP_MESSAGING_TOKEN;
+	Object.assign(env, options?.env);
+	for (const key of options?.stripEnv ?? []) delete env[key];
 	const result = await ptree.exec([command, ...args], {
 		cwd,
+		env,
 		signal: options?.signal,
 		timeout: options?.timeout,
 		allowNonZero: true,

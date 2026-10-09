@@ -1142,6 +1142,7 @@ export function createSubagentSettings(
 		// the parent task approval is the authorization boundary. Use yolo mode
 		// to preserve unattended subagent execution. User `tools.approval` policies still apply.
 		"tools.approvalMode": "yolo",
+		"messaging.enabled": false,
 		// Subagents run unadvised by default; runSubprocess opts a spawn back in
 		// per agent (frontmatter `advisor` / `task.agentAdvisor`) via overrides.
 		"advisor.enabled": false,
