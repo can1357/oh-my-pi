@@ -26,12 +26,12 @@ export interface StallReport {
 type TodoRow = { key: string; phase: string; content: string; status: string; blocker?: string };
 type ToolRow = { id: string; name: string; outcome: string; startedAt?: number; intent?: string };
 type Turn = { timestamp: number; text: string; tools: ToolRow[]; omittedTools: number };
-type History = {
+type ReportHistory = {
 	leaf: string | null;
 	turns: number;
 	tools: number;
 	recent: Turn[];
-	pending: Map<string, ToolRow>;
+	pending: ToolRow[];
 	lastActivity?: number;
 	diagnosticOnly?: boolean;
 	hasDiagnostics?: boolean;
@@ -43,9 +43,10 @@ type History = {
 	incompleteAncestry?: boolean;
 	parentSession?: string;
 };
+type History = Omit<ReportHistory, "pending"> & { pending: Map<string, ToolRow> };
 type AgentSample = {
 	ref: AgentRef;
-	history?: History;
+	history?: ReportHistory;
 	error?: string;
 	activeMs?: number;
 	partial: boolean;
@@ -253,6 +254,49 @@ function snapshotAgentRef(ref: AgentRef): AgentRef {
 	};
 }
 
+/** Tool telemetry snapshots contain only the report's scalar fields, never execution state. */
+function snapshotToolRow(tool: ToolRow): ToolRow {
+	return {
+		id: tool.id,
+		name: tool.name,
+		outcome: tool.outcome,
+		startedAt: tool.startedAt,
+		intent: tool.intent,
+	};
+}
+
+/** Bounded, detached history: no transcript entries or mutable live-summary fields escape. */
+function snapshotHistory(history: History): ReportHistory {
+	return {
+		leaf: history.leaf,
+		turns: history.turns,
+		tools: history.tools,
+		pending: Array.from(history.pending.values(), snapshotToolRow),
+		recent: history.recent.map(turn => ({
+			timestamp: turn.timestamp,
+			text: turn.text,
+			omittedTools: turn.omittedTools,
+			tools: turn.tools.map(snapshotToolRow),
+		})),
+		lastActivity: history.lastActivity,
+		diagnosticOnly: history.diagnosticOnly,
+		hasDiagnostics: history.hasDiagnostics,
+		diagnosticTurns: history.diagnosticTurns,
+		activeTime: history.activeTime
+			? {
+					durationMs: history.activeTime.durationMs,
+					historicalUnavailable: history.activeTime.historicalUnavailable,
+					runningSince: history.activeTime.runningSince,
+				}
+			: undefined,
+		hasActiveTelemetry: history.hasActiveTelemetry,
+		sessionId: history.sessionId,
+		cwd: history.cwd,
+		incompleteAncestry: history.incompleteAncestry,
+		parentSession: history.parentSession,
+	};
+}
+
 /** Session-owned diagnostic sampling. No lifecycle action or result consumption occurs here. */
 export class StallReportCollector {
 	readonly #session: AgentSession;
@@ -261,7 +305,7 @@ export class StallReportCollector {
 	readonly #events = new StallEventJournal<Event>();
 	readonly #disposers: (() => void)[] = [];
 	readonly #liveHistory = new WeakMap<AgentSession, History>();
-	readonly #parkedHistory = new WeakMap<AgentRef, { file: string; history: History }>();
+	readonly #parkedHistory = new WeakMap<AgentRef, { file: string | null; history: ReportHistory }>();
 	readonly #watchedSessions = new WeakSet<AgentSession>();
 	readonly #serviceSources = new Map<string, ServiceSource>();
 	readonly #owners = new Set<string>();
@@ -309,9 +353,16 @@ export class StallReportCollector {
 					void discovery.finally(() => this.#serviceOwnerDiscoveries.delete(discovery));
 				}
 				if (event.type === "registered" || event.type === "removed" || event.type === "status_changed") {
+					const snapshot = snapshotAgentRef(event.ref);
+					if (event.type === "removed" && event.ref.session) {
+						this.#parkedHistory.set(snapshot, {
+							file: snapshot.sessionFile,
+							history: snapshotHistory(this.#sessionHistory(event.ref.session)),
+						});
+					}
 					this.#agentChanges.delete(agentKey(event.ref));
 					this.#agentChanges.set(agentKey(event.ref), {
-						ref: snapshotAgentRef(event.ref),
+						ref: snapshot,
 						at: Date.now(),
 						sequence: ++this.#agentChangeSequence,
 						removed: event.type === "removed",
@@ -513,24 +564,28 @@ export class StallReportCollector {
 		this.#todos = next;
 	}
 
-	async #history(ref: AgentRef): Promise<History | undefined> {
+	#sessionHistory(session: AgentSession): History {
+		const summary = scanEntries(
+			session.sessionManager.getBranch(),
+			this.#liveHistory.get(session),
+			this.#quote,
+		);
+		this.#liveHistory.set(session, summary);
+		const header = session.sessionManager.getHeader();
+		summary.sessionId = header?.id;
+		summary.cwd = header?.cwd;
+		summary.parentSession = header?.parentSession;
+		return summary;
+	}
+
+	async #history(ref: AgentRef): Promise<ReportHistory | undefined> {
 		if (ref.session) {
 			this.#parkedHistory.delete(ref);
-			const summary = scanEntries(
-				ref.session.sessionManager.getBranch(),
-				this.#liveHistory.get(ref.session),
-				this.#quote,
-			);
-			this.#liveHistory.set(ref.session, summary);
-			const header = ref.session.sessionManager.getHeader();
-			summary.sessionId = header?.id;
-			summary.cwd = header?.cwd;
-			summary.parentSession = header?.parentSession;
-			return summary;
+			return snapshotHistory(this.#sessionHistory(ref.session));
 		}
-		if (!ref.sessionFile) return undefined;
 		const cached = this.#parkedHistory.get(ref);
 		if (cached?.file === ref.sessionFile) return cached.history;
+		if (!ref.sessionFile) return undefined;
 		const entries = await loadEntriesFromFile(ref.sessionFile, undefined, { throwIfMissing: true });
 		migrateToCurrentVersion(entries);
 		const logical = entries.filter((entry): entry is SessionEntry => entry.type !== "session");
@@ -550,8 +605,9 @@ export class StallReportCollector {
 		history.sessionId = header?.id;
 		history.cwd = header?.cwd;
 		history.parentSession = header?.parentSession;
-		this.#parkedHistory.set(ref, { file: ref.sessionFile, history });
-		return history;
+		const snapshot = snapshotHistory(history);
+		this.#parkedHistory.set(ref, { file: ref.sessionFile, history: snapshot });
+		return snapshot;
 	}
 
 	#jobLabel(job: AsyncJob, now: number): string {
@@ -774,7 +830,7 @@ export class StallReportCollector {
 				);
 			if (!history) lines.push("Last five assistant turns unavailable: no readable transcript.");
 			else {
-				for (const pending of history.pending.values())
+				for (const pending of history.pending)
 					lines.push(
 						`- Pending/unpaired tool ${pending.name}${pending.startedAt !== undefined ? `; execution marker age ${age(now - pending.startedAt)}` : "; execution start time unavailable"}${pending.intent ? `; intent ${pending.intent}` : ""} (unpaired history is not proof of current execution).`,
 					);
