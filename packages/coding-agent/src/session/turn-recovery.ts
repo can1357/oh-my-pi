@@ -37,9 +37,9 @@ import streamStallContinueTemplate from "../prompts/system/stream-stall-continue
 import thinkingLoopRedirectTemplate from "../prompts/system/thinking-loop-redirect.md" with { type: "text" };
 import unexpectedStopRetryTemplate from "../prompts/system/unexpected-stop-retry.md" with { type: "text" };
 import {
-	AUTO_THINKING,
 	type ConfiguredThinkingLevel,
 	clampThinkingLevelToCeiling,
+	isAutoThinking,
 	modelSupportsEffortCeiling,
 	resolveThinkingLevelForModel,
 } from "@oh-my-pi/pi-tui/thinking";
@@ -2000,7 +2000,7 @@ export class TurnRecovery {
 		if (!active || formatModelStringWithRouting(candidate) !== formatModelStringWithRouting(active)) return false;
 		const configured = this.#host.configuredThinkingLevel();
 		const requested = selector.thinkingLevel ?? configured;
-		if (requested === AUTO_THINKING || configured === AUTO_THINKING) return requested === configured;
+		if (isAutoThinking(requested) || isAutoThinking(configured)) return requested === configured;
 		const effective = resolveThinkingLevelForModel(
 			candidate,
 			clampThinkingLevelToCeiling(candidate, requested, this.#host.thinkingLevelCeiling()),
@@ -2034,10 +2034,9 @@ export class TurnRecovery {
 		// A fallback selector's explicit level (or the carried level after the
 		// replacement model's floor clamp) must never exceed the session's
 		// per-spawn effort ceiling.
-		const nextThinkingLevel =
-			requestedThinkingLevel === AUTO_THINKING
-				? requestedThinkingLevel
-				: clampThinkingLevelToCeiling(candidate, requestedThinkingLevel, this.#host.thinkingLevelCeiling());
+		const nextThinkingLevel = isAutoThinking(requestedThinkingLevel)
+			? requestedThinkingLevel
+			: clampThinkingLevelToCeiling(candidate, requestedThinkingLevel, this.#host.thinkingLevelCeiling());
 		const candidateSelector = formatModelStringWithRouting(candidate);
 		const previousModel = this.#host.model();
 		// Capture the edit mode under the outgoing model so the base system prompt

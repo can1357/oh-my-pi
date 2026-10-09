@@ -40,9 +40,9 @@ import { logger } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import MODEL_PRIO from "../priority.json" with { type: "json" };
 import {
-	AUTO_THINKING,
 	type ConfiguredThinkingLevel,
 	concreteThinkingLevel,
+	isAutoThinking,
 	parseConfiguredThinkingLevel,
 	resolveThinkingLevelForModel,
 } from "@oh-my-pi/pi-tui/thinking";
@@ -1450,8 +1450,8 @@ export function resolveModelRoleValue(
 				model: resolved.model,
 				matchedPatternIndex: patternIndex,
 				thinkingLevel: resolved.explicitThinkingLevel
-					? resolved.thinkingLevel === AUTO_THINKING
-						? AUTO_THINKING
+					? isAutoThinking(resolved.thinkingLevel)
+						? resolved.thinkingLevel
 						: (resolveThinkingLevelForModel(resolved.model, resolved.thinkingLevel) ?? resolved.thinkingLevel)
 					: resolved.thinkingLevel,
 				explicitThinkingLevel: resolved.explicitThinkingLevel,
@@ -1876,7 +1876,7 @@ export async function resolveModelScope(
 				logger.warn(`No models match pattern "${pattern}"`);
 				continue;
 			}
-			if (resolved.thinkingLevel === AUTO_THINKING) {
+			if (isAutoThinking(resolved.thinkingLevel)) {
 				addScopedModel(resolved.model, undefined, false);
 			} else {
 				addScopedModel(resolved.model, resolved.thinkingLevel, resolved.explicitThinkingLevel);
@@ -1901,7 +1901,7 @@ export async function resolveModelScope(
 
 		// Scoped models (Ctrl+P cycling) carry concrete per-model overrides;
 		// `auto` lives on the session, so drop the sentinel here.
-		if (thinkingLevel === AUTO_THINKING) {
+		if (isAutoThinking(thinkingLevel)) {
 			addScopedModel(model, undefined, false);
 		} else {
 			addScopedModel(model, thinkingLevel, explicitThinkingLevel);

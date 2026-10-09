@@ -2477,6 +2477,18 @@ impl ThinkingLevel {
 pub enum ConfiguredThinkingLevel {
 	#[serde(rename = "auto")]
 	Auto,
+	#[serde(rename = "auto:minimal")]
+	AutoMinimal,
+	#[serde(rename = "auto:low")]
+	AutoLow,
+	#[serde(rename = "auto:medium")]
+	AutoMedium,
+	#[serde(rename = "auto:high")]
+	AutoHigh,
+	#[serde(rename = "auto:xhigh")]
+	AutoXhigh,
+	#[serde(rename = "auto:max")]
+	AutoMax,
 	#[serde(rename = "inherit")]
 	Inherit,
 	#[serde(rename = "off")]
@@ -2500,6 +2512,12 @@ impl ConfiguredThinkingLevel {
 	pub fn as_str(self) -> &'static str {
 		match self {
 			Self::Auto => "auto",
+			Self::AutoMinimal => "auto:minimal",
+			Self::AutoLow => "auto:low",
+			Self::AutoMedium => "auto:medium",
+			Self::AutoHigh => "auto:high",
+			Self::AutoXhigh => "auto:xhigh",
+			Self::AutoMax => "auto:max",
 			Self::Inherit => "inherit",
 			Self::Off => "off",
 			Self::Minimal => "minimal",

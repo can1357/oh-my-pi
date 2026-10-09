@@ -319,7 +319,7 @@ export type Effort = "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 export type ThinkingLevel = "inherit" | "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 
 /** User-configured thinking selector, including automatic selection. */
-export type ConfiguredThinkingLevel = "auto" | "inherit" | "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
+export type ConfiguredThinkingLevel = "auto" | "auto:minimal" | "auto:low" | "auto:medium" | "auto:high" | "auto:xhigh" | "auto:max" | "inherit" | "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 
 /** Per-million-token USD rates. */
 export interface ModelCost {

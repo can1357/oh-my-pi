@@ -12,6 +12,7 @@ import {
 	normalizeProviderMaxInFlightRequests,
 	validateProviderMaxInFlightRequests,
 } from "../session/settings";
+import { isAutoThinking } from "@oh-my-pi/pi-tui/thinking";
 import { cfgAutolearnEnabled } from "../autolearn/settings";
 import { cfgMemoryBackend } from "../memory-backend/settings";
 import { cfgTuiVimMode } from "../modes/settings";
@@ -31,7 +32,7 @@ const CONDITIONS: Record<string, () => boolean> = {
 	hindsightActive: whenSettings(s => cfgMemoryBackend.get(s) === "hindsight"),
 	mnemopiActive: whenSettings(s => cfgMemoryBackend.get(s) === "mnemopi"),
 	autolearnActive: whenSettings(s => cfgAutolearnEnabled.get(s) === true),
-	autoThinkingActive: whenSettings(s => cfgDefaultThinkingLevel.get(s) === "auto"),
+	autoThinkingActive: whenSettings(s => isAutoThinking(cfgDefaultThinkingLevel.get(s))),
 	usageAwareFallbackEnabled: whenSettings(s => cfgRetryUsageAwareFallback.get(s) === true),
 	planModeEnabled: whenSettings(s => cfgPlanEnabled.get(s)),
 	planAutosaveEnabled: whenSettings(s => cfgPlanEnabled.get(s) && cfgPlanAutosave.get(s)),

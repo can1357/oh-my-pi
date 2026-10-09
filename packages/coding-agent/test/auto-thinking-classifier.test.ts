@@ -9,13 +9,17 @@ import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import {
 	AUTO_THINKING,
+	CLI_THINKING_LEVELS,
 	clampAutoThinkingEffort,
+	isAutoThinking,
+	parseAutoThinkingFloor,
 	parseConfiguredThinkingLevel,
 	parseEffort,
 	parseThinkingLevel,
 	resolveProvisionalAutoLevel,
 	resolveTaskEffortLevel,
 } from "@oh-my-pi/pi-tui/thinking";
+import { cfgProvidersAutoThinkingMinEffort } from "@oh-my-pi/pi-coding-agent/session/settings";
 import type { TinyMemoryLocalModelKey } from "@oh-my-pi/pi-coding-agent/tiny/models";
 import { tinyModelClient } from "@oh-my-pi/pi-coding-agent/tiny/title-client";
 import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
@@ -48,10 +52,36 @@ describe("auto thinking classifier helpers", () => {
 
 	it("parses configured thinking without widening provider-facing thinking selectors", () => {
 		expect(parseConfiguredThinkingLevel(AUTO_THINKING)).toBe(AUTO_THINKING);
+		expect(parseConfiguredThinkingLevel("auto:low")).toBe("auto:low");
+		expect(parseConfiguredThinkingLevel("auto:medium")).toBe("auto:medium");
+		expect(parseConfiguredThinkingLevel("auto:high")).toBe("auto:high");
+		expect(parseConfiguredThinkingLevel("auto:xhigh")).toBe("auto:xhigh");
+		expect(parseConfiguredThinkingLevel("auto:minimal")).toBe("auto:minimal");
+		expect(parseConfiguredThinkingLevel("auto:max")).toBeUndefined();
+		expect(parseConfiguredThinkingLevel("auto:bogus")).toBeUndefined();
 		expect(parseConfiguredThinkingLevel(Effort.High)).toBe(Effort.High);
 		expect(parseConfiguredThinkingLevel("bogus")).toBeUndefined();
 		expect(parseThinkingLevel(AUTO_THINKING)).toBeUndefined();
+		expect(parseThinkingLevel("auto:medium")).toBeUndefined();
+		expect(parseThinkingLevel("auto:max")).toBeUndefined();
 		expect(parseThinkingLevel(ThinkingLevel.Off)).toBe(ThinkingLevel.Off);
+
+		expect(isAutoThinking("auto")).toBe(true);
+		expect(isAutoThinking("auto:medium")).toBe(true);
+		expect(isAutoThinking("auto:max")).toBe(false);
+		expect(isAutoThinking("auto:bogus")).toBe(false);
+		expect(isAutoThinking("high")).toBe(false);
+		expect(isAutoThinking(undefined)).toBe(false);
+
+		expect(parseAutoThinkingFloor("auto:medium")).toBe(Effort.Medium);
+		expect(parseAutoThinkingFloor("auto:xhigh")).toBe(Effort.XHigh);
+		expect(parseAutoThinkingFloor("auto:max")).toBeUndefined();
+		expect(parseAutoThinkingFloor("auto")).toBeUndefined();
+		expect(parseAutoThinkingFloor("high")).toBeUndefined();
+
+		expect(CLI_THINKING_LEVELS).toContain("auto");
+		expect(CLI_THINKING_LEVELS).toContain("auto:xhigh");
+		expect(CLI_THINKING_LEVELS).not.toContain("auto:max");
 	});
 
 	it("expands the local reasoning classifier budget", async () => {
@@ -367,6 +397,85 @@ describe("auto thinking classifier helpers", () => {
 
 		expect(clampAutoThinkingEffort(model, Effort.XHigh)).toBe(Effort.High);
 		expect(clampAutoThinkingEffort(model, Effort.Minimal)).toBe(Effort.Low);
+	});
+
+	it("respects the minimum effort floor when clamping auto effort and resolving provisional level", () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-6");
+		if (!model) throw new Error("Expected bundled Claude Sonnet 4.6 model");
+
+		// Default floor is Low
+		expect(clampAutoThinkingEffort(model, Effort.Minimal)).toBe(Effort.Low);
+		// Configured floor: Medium
+		expect(clampAutoThinkingEffort(model, Effort.Low, Effort.XHigh, Effort.Medium)).toBe(Effort.Medium);
+		expect(clampAutoThinkingEffort(model, Effort.High, Effort.XHigh, Effort.Medium)).toBe(Effort.High);
+
+		// Configured floor: Minimal allows minimal when supported
+		const minimalCapableModel = buildModel({
+			id: "mock-minimal",
+			name: "Mock Minimal",
+			api: "openai-completions",
+			provider: "mock",
+			baseUrl: "https://example.com",
+			reasoning: true,
+			thinking: { mode: "effort", efforts: [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High] },
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 128_000,
+			maxTokens: 4096,
+		});
+		expect(clampAutoThinkingEffort(minimalCapableModel, Effort.Minimal, Effort.XHigh, Effort.Minimal)).toBe(
+			Effort.Minimal,
+		);
+		// Default floor Low raises Minimal to Low
+		expect(clampAutoThinkingEffort(minimalCapableModel, Effort.Minimal, Effort.XHigh)).toBe(Effort.Low);
+
+		// resolveProvisionalAutoLevel with floor
+		const lowDefaultModel = buildModel({
+			id: "mock-low-default",
+			name: "Mock Low Default",
+			api: "openai-completions",
+			provider: "mock",
+			baseUrl: "https://example.com",
+			reasoning: true,
+			thinking: { mode: "effort", efforts: [Effort.Low, Effort.Medium, Effort.High], defaultLevel: Effort.Low },
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 128_000,
+			maxTokens: 4096,
+		});
+		// Default floor (Low) keeps lowDefaultModel at Low
+		expect(resolveProvisionalAutoLevel(lowDefaultModel)).toBe(Effort.Low);
+		// Configured floor (Medium) raises provisional level to Medium
+		expect(resolveProvisionalAutoLevel(lowDefaultModel, Effort.Medium)).toBe(Effort.Medium);
+		// Configured floor (High) raises provisional level to High
+		expect(resolveProvisionalAutoLevel(lowDefaultModel, Effort.High)).toBe(Effort.High);
+	});
+
+	it("respects minEffort floor in classifyDifficulty via deps and settings", async () => {
+		const fixture = createLocalClassifierFixture("qwen3-1.7b");
+		vi.spyOn(tinyModelClient, "complete").mockResolvedValue("trivial");
+
+		// Without minEffort, trivial maps to Low
+		const defaultEffort = await classifyDifficulty({ request: "simple question" }, fixture);
+		expect(defaultEffort).toBe(Effort.Low);
+
+		// With minEffort in deps, trivial is raised to floor
+		const highFloorEffort = await classifyDifficulty(
+			{ request: "simple question" },
+			{ ...fixture, minEffort: Effort.High },
+		);
+		expect(highFloorEffort).toBe(Effort.High);
+
+		// With providers.autoThinkingMinEffort in settings
+		const settingsWithFloor = Settings.isolated({
+			modelRoles: { judge: "local/qwen3-1.7b" },
+		});
+		cfgProvidersAutoThinkingMinEffort.set(settingsWithFloor, Effort.Medium);
+		const mediumFloorEffort = await classifyDifficulty(
+			{ request: "simple question" },
+			{ ...fixture, settings: settingsWithFloor },
+		);
+		expect(mediumFloorEffort).toBe(Effort.Medium);
 	});
 
 	it("clamps max down to the ladder ceiling on models without a max tier", () => {
