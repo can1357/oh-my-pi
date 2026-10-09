@@ -655,4 +655,24 @@ describe("read tool large artifact handling", () => {
 		);
 		expect(followed).toContain("wanted-003");
 	});
+
+	it("emits no continuation past the known EOF after an omitted line", async () => {
+		await Bun.write(path.join(artifactDir, "0.mcp.log"), ["ctx-small", `big-${"x".repeat(60_000)}-end`].join("\n"));
+
+		// Two-line file read as `2-142`: line 2 is omitted with its raw hint, but
+		// lines 3-142 do not exist (`totalFileLines` is 2), so no `3-142`
+		// follow-up may be advertised.
+		const result = await tool.execute("call-omitted-eof", { path: "artifact://0:2-142" });
+		const output = getTextOutput(result);
+
+		expect(output).toContain("could not fit after preceding context");
+		expect(output).toContain("artifact://0:raw:2-2");
+		expect(output).not.toContain("3-142");
+
+		// Same file, open-ended selector: without the EOF gate the clamped end
+		// is absent (`resumeEnd === undefined`) and a bogus `3-` follow-up lands.
+		const openEnded = getTextOutput(await tool.execute("call-omitted-eof-open", { path: "artifact://0:2-" }));
+		expect(openEnded).toContain("artifact://0:raw:2-2");
+		expect(openEnded).not.toContain("Use artifact://0:3-");
+	});
 });

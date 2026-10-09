@@ -2792,10 +2792,18 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 							// the rest of the requested window explicitly.
 							if (located?.spec.artifactStore === true) {
 								const resumeFrom = lineNumber + 1;
-								const resumeEnd = limit !== undefined ? requestedStart + effectiveLimit : undefined;
-								if (resumeEnd === undefined || resumeEnd >= resumeFrom) {
-									const resumePart = resumeEnd !== undefined ? `${resumeFrom}-${resumeEnd}` : `${resumeFrom}-`;
-									outputText += `\n\n[More lines in file. Use ${selectorBase}:${resumePart} to continue]`;
+								// `totalFileLines` is exact here (reached EOF): never
+								// advertise lines past it. A two-line file read as
+								// `2-142` must not promise a `3-142` follow-up.
+								if (resumeFrom <= totalFileLines) {
+									const requestedEnd = limit !== undefined ? requestedStart + effectiveLimit : undefined;
+									const resumeEnd =
+										requestedEnd !== undefined ? Math.min(requestedEnd, totalFileLines) : undefined;
+									if (resumeEnd === undefined || resumeEnd >= resumeFrom) {
+										const resumePart =
+											resumeEnd !== undefined ? `${resumeFrom}-${resumeEnd}` : `${resumeFrom}-`;
+										outputText += `\n\n[More lines in file. Use ${selectorBase}:${resumePart} to continue]`;
+									}
 								}
 							}
 						} else if (
