@@ -5001,7 +5001,46 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				session.setToolBuiltIn(name, false);
 				session.setExtensionMCPTool(name, liveTool);
 				try {
-					if ((registered.definition.defaultInactive || registered.definition.hidden) && !explicitlyRequested) {
+					// Subagent tool scoping: a tool outside the enforced allowlist or
+					// matching a disallow pattern stays registered but is never activated.
+					// The registration's `mcpServerName` is passed through so
+					// `mcp__<server>_*` matches length-capped minted names by ownership.
+					// A scope entry written in the Claude Code spelling
+					// (`mcp__srv-x__tool`) resolves against THIS registration: the
+					// startup canonicalization ran before the registry held the tool, so
+					// without this the minted key is compared with the raw pattern,
+					// fails to match, and a denied late tool activates (or a
+					// Claude-spelled allowlist entry denies it the inverse way).
+					const canonicalScopeEntry = (entry: string): string => {
+						if (entry.endsWith("*")) return entry;
+						return (
+							resolveMCPToolAlias(entry, candidate =>
+								toolRegistry.has(candidate) ? { name: candidate } : undefined,
+							)?.name ?? entry
+						);
+					};
+					// Canonicalize the declared entries against the live registry (not the tool
+					// name): a Claude-spelled `tools:` entry stays raw in the set when the tool
+					// was absent at startup, and only resolves now that this registration
+					// populated it — toolRegistry.set ran above, so the entry resolves against
+					// the registration being judged.
+					const allowlisted =
+						!enforceToolAllowlist ||
+						explicitlyRequestedToolNameSet?.has(name) === true ||
+						[...(explicitlyRequestedToolNameSet ?? [])].some(
+							entry => !entry.endsWith("*") && canonicalScopeEntry(entry) === name,
+						);
+					const scopedOut =
+						!allowlisted ||
+						isToolDisallowed(
+							name,
+							disallowedPatterns.map(canonicalScopeEntry),
+							registered.definition.mcpServerName,
+						);
+					if (
+						((registered.definition.defaultInactive || registered.definition.hidden) && !explicitlyRequested) ||
+						scopedOut
+					) {
 						if (!alreadyEnabled) return;
 						await session.setActiveToolPresentation(
 							enabled.filter(enabledName => enabledName !== name),
