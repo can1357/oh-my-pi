@@ -37,6 +37,17 @@ single_version_override(
     ],
 )
 
+# rules_rust 0.71.3 writes `DEP_<links>_*` paths into a build script's out_dir
+# with an `${out_dir}` token that dependents' build scripts never resolve, so
+# e.g. tree-sitter's `DEP_WASMTIME_C_API_INCLUDE` pointed nowhere. The patch
+# keeps those paths exec-root relative (`${pwd}/bazel-out/.../_bs.out_dir/...`);
+# dependents already receive the out_dir as an input.
+single_version_override(
+    module_name = "rules_rust",
+    patch_strip = 1,
+    patches = ["//bazel/patches:rules_rust-dep-env-exec-root-paths.patch"],
+)
+
 # --- Rust toolchains ----------------------------------------------------------
 rust = use_extension("@rules_rust//rust:extensions.bzl", "rust")
 rust.toolchain(
@@ -191,6 +202,15 @@ crate.annotation(
     crate = "opusic-sys",
 )
 
+# wasmtime-c-api-impl (tree-sitter's `wasm` feature) runs `cmake -P` to install
+# the C API headers tree-sitter compiles against; same host PATH as opusic-sys.
+crate.annotation(
+    build_script_env = {
+        "PATH": "/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin:/run/current-system/sw/bin",
+    },
+    crate = "wasmtime-c-api-impl",
+)
+
 # cargo-bazel omits workspace-local build dependencies from generated registry
 # build scripts; restore nix 0.28's edge to the patched cfg_aliases crate.
 crate.annotation(
@@ -204,13 +224,6 @@ crate.annotation(
 crate.annotation(
     build_script_env = {"PCRE2_SYS_STATIC": "1"},
     crate = "pcre2-sys",
-)
-
-# tree-sitter-just's scanner.c hard-errors when NDEBUG is set (opt-mode cc
-# default). cc-rs appends env CFLAGS after its computed flags, so -UNDEBUG wins.
-crate.annotation(
-    build_script_env = {"CFLAGS": "-UNDEBUG"},
-    crate = "tree-sitter-just",
 )
 use_repo(crate, "crates")
 

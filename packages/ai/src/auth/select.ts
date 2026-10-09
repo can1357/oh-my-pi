@@ -505,9 +505,9 @@ export class CredentialSelector {
 	 * 1. strict: unblocked credentials only, usage limits respected, plan
 	 *    filter enforced (when any account is confirmed eligible);
 	 * 2. plan-fitting last resort: same plan filter, but blocked/exhausted
-	 *    accounts are allowed (blocked candidates rank earliest-unblocking
-	 *    first) so the caller gets real usage-limit semantics from the wire
-	 *    instead of a missing key;
+	 *    accounts are allowed (an explicit session pin first, then blocked
+	 *    candidates earliest-unblocking first) so the caller gets real
+	 *    usage-limit semantics from the wire instead of a missing key;
 	 * 3. unfiltered last resort: the plan filter matched nothing usable —
 	 *    skip it and try every account once; the server is the final arbiter
 	 *    of model access.
@@ -535,6 +535,9 @@ export class CredentialSelector {
 		const credentials = stored.filter(entry => this.#deps.affinity.allows(provider, sessionId, entry.credential));
 
 		if (credentials.length === 0) return undefined;
+		// Ranking and preflight both await provider work; preserve the row each
+		// selection started with even if a peer reorders the live pool.
+		const credentialIds = this.#deps.pool.entries(provider).map(entry => entry.id);
 		this.#deps.policies.validateUsageCapability(provider, this.#deps.usage.canFetchOAuthUsage(provider));
 
 		const providerKey = providerTypeKey(provider, "oauth");
@@ -659,6 +662,11 @@ export class CredentialSelector {
 							? { selection, usage: sessionPreferredUsage, usageChecked: true }
 							: { selection, usage: null, usageChecked: false },
 					);
+		// Keep the candidate object: preflight may rebind its positional index
+		// after a peer changes the credential pool.
+		const explicitPin = sessionPinIsExplicit
+			? candidates.find(candidate => candidate.selection.index === sessionPreferredIndex)
+			: undefined;
 		const preflightFailures = new Set<OAuthCandidate>();
 		// The last retryable refresh error (network, timeout, 5xx) that removed a candidate.
 		// When no candidate resolves, it is rethrown so callers retry instead of reporting
@@ -714,21 +722,24 @@ export class CredentialSelector {
 		const forceRefreshIndex = options?.forceRefresh
 			? (sessionPreferredIndex ?? candidates[0]?.selection.index)
 			: undefined;
-		// Each candidate's synchronous prefix below runs back to back inside `map`,
-		// before any await, so one provider re-list serves every initial rebind.
-		// Resyncs after an await (refresh, disable) re-read the store.
+		// Candidate IDs were captured before ranking. Their synchronous rebinds
+		// share one provider re-list; resyncs after refresh await re-read the store.
 		let preflightRows: StoredAuthCredential[] | undefined;
 		await Promise.all(
 			candidates.map(async candidate => {
 				const force = forceRefreshIndex !== undefined && candidate.selection.index === forceRefreshIndex;
-				const initialCredentialId = this.#deps.pool.entries(provider)[candidate.selection.index]?.id;
-				let syncedPeerCredential = false;
-				if (initialCredentialId !== undefined) {
-					const beforeSync = candidate.selection.credential;
-					preflightRows ??= this.#reloadProviderRows(provider);
-					if (!this.#rebindOAuthSelection(preflightRows, candidate.selection, initialCredentialId)) return;
-					syncedPeerCredential = !authCredentialEquals(beforeSync, candidate.selection.credential);
+				const initialCredentialId = credentialIds[candidate.selection.index];
+				if (initialCredentialId === undefined) {
+					preflightFailures.add(candidate);
+					return;
 				}
+				const beforeSync = candidate.selection.credential;
+				preflightRows ??= this.#reloadProviderRows(provider);
+				if (!this.#rebindOAuthSelection(preflightRows, candidate.selection, initialCredentialId)) {
+					preflightFailures.add(candidate);
+					return;
+				}
+				const syncedPeerCredential = !authCredentialEquals(beforeSync, candidate.selection.credential);
 				const hasFreshAccess = Date.now() + OAUTH_REFRESH_SKEW_MS < candidate.selection.credential.expires;
 				if ((!force || syncedPeerCredential) && hasFreshAccess) return;
 				const latestCredential = this.#deps.pool.credentials(provider)[candidate.selection.index];
@@ -884,9 +895,15 @@ export class CredentialSelector {
 		];
 		if (enforcePlanRequirement) passes.push({ allowBlocked: true, enforcePlanRequirement: false, enforceAccounts });
 		if (enforceAccounts) passes.push({ allowBlocked: true, enforcePlanRequirement: false, enforceAccounts: false });
+		// Blocked candidates rank earliest-unblock first, which would route a
+		// blocked explicit pin to an equally blocked sibling. Once the strict
+		// pass finds no unblocked account, the user's pin goes first.
+		const lastResortCandidates = explicitPin
+			? [explicitPin, ...candidates.filter(candidate => candidate !== explicitPin)]
+			: candidates;
 
 		for (const pass of passes) {
-			for (const candidate of candidates) {
+			for (const candidate of pass.allowBlocked ? lastResortCandidates : candidates) {
 				if (preflightFailures.has(candidate)) continue;
 				const candidateAccountKey = oauthAccountKey(candidate.selection.credential);
 				if (pass.enforceAccounts && (candidateAccountKey === undefined || !accountIds?.has(candidateAccountKey)))

@@ -18,7 +18,7 @@ export const cfgTitleIcons = register({
 		tab: "appearance",
 		group: "Display",
 		label: "Title Icons",
-		description: "Icon and short code that head new generated session titles",
+		description: "Icon and short code that head new generated or /rename session titles",
 		options: [
 			{
 				value: "nf+emoji",

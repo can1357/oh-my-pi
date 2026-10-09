@@ -155,6 +155,7 @@
 		"gen:models": "bun --cwd=packages/catalog run gen:models",
 		"gen:clippy": "bun scripts/gen-clippy-bazelrc.ts",
 		"gen:bazel-lock": "bun scripts/gen-bazel-lock.ts",
+		"gen:grammars": "bun scripts/gen-grammars.ts",
 		"gen:stats": "bun --cwd=packages/stats run gen:stats",
 		"gen:stats:reset": "bun --cwd=packages/stats run gen:stats:reset",
 		"gen:changelog": "bun scripts/rewrite-changelog.ts",
