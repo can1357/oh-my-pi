@@ -32,7 +32,8 @@ import { AUTO_THINKING, getConfiguredThinkingLevelMetadata, getThinkingLevelMeta
 const EMPTY_STRING_ARRAY: string[] = [];
 const EMPTY_NUMBER_RECORD: Record<string, number> = {};
 const EMPTY_STRING_ARRAYS_RECORD: Record<string, string[]> = {};
-const DEFAULT_TOOL_CALL_LOOP_EXEMPT_TOOLS: string[] = ["wait"];
+// Blocking waits legitimately re-issue identical calls while the awaited work is still running.
+const DEFAULT_TOOL_CALL_LOOP_EXEMPT_TOOLS: string[] = ["wait", "vibe_wait"];
 
 // Power assertions: macOS IOKit, Linux login1/ScreenSaver, Windows execution state.
 export const cfgPowerSleepPrevention = register({

@@ -39,31 +39,40 @@ describe("AgentSession tool-call loop guard", () => {
 		tempDir.removeSync();
 	});
 
-	it("injects a hidden redirect before the next model call", async () => {
+	/**
+	 * Drives `repeats` consecutive identical calls to `toolName`, then a text turn, under the
+	 * default `exemptTools` list with a threshold equal to `repeats`.
+	 */
+	async function runRepeatedCalls(
+		toolName: string,
+		args: Record<string, unknown>,
+		resultText: string,
+		repeats: number,
+	): Promise<{ contexts: Context[]; redirects: CustomMessage[] }> {
 		const model = createMockModel({ provider: "openai", id: "gpt-test" }).model;
 		const modelRegistry = new ModelRegistry(authStorage);
 		const contexts: Context[] = [];
-		const bashTool: AgentTool = {
-			name: "bash",
-			label: "Bash",
-			description: "Mock bash tool",
-			parameters: type({ "command?": "string" }),
-			execute: async () => ({ content: [{ type: "text" as const, text: "1263 passed, 4 skipped" }] }),
+		const tool: AgentTool = {
+			name: toolName,
+			label: toolName,
+			description: `Mock ${toolName} tool`,
+			parameters: type({ "[string]": "unknown" }),
+			execute: async () => ({ content: [{ type: "text" as const, text: resultText }] }),
 		};
 		let callCount = 0;
 		const agent = new Agent({
 			getApiKey: () => "test-key",
-			initialState: { model, systemPrompt: ["Test"], tools: [bashTool], messages: [] },
+			initialState: { model, systemPrompt: ["Test"], tools: [tool], messages: [] },
 			convertToLlm,
 			streamFn: (_model, context) => {
 				contexts.push(context);
-				const toolCallTurn = callCount < 2;
+				const toolCallTurn = callCount < repeats;
 				const toolCallId = `tc-${callCount}`;
 				callCount++;
 				const message: AssistantMessage = toolCallTurn
 					? {
 							role: "assistant",
-							content: [{ type: "toolCall", id: toolCallId, name: "bash", arguments: { command: "pytest -q" } }],
+							content: [{ type: "toolCall", id: toolCallId, name: toolName, arguments: args }],
 							api: model.api,
 							provider: model.provider,
 							model: model.id,
@@ -93,8 +102,7 @@ describe("AgentSession tool-call loop guard", () => {
 			"compaction.enabled": false,
 			"todo.enabled": false,
 			"model.toolCallLoopGuard.enabled": true,
-			"model.toolCallLoopGuard.threshold": 2,
-			"model.toolCallLoopGuard.exemptTools": ["wait"],
+			"model.toolCallLoopGuard.threshold": repeats,
 		});
 		settings.setModelRole("default", `${model.provider}/${model.id}`);
 		session = new AgentSession({
@@ -102,20 +110,44 @@ describe("AgentSession tool-call loop guard", () => {
 			sessionManager: SessionManager.inMemory(tempDir.path()),
 			settings,
 			modelRegistry,
-			toolRegistry: new Map([[bashTool.name, bashTool]]),
+			toolRegistry: new Map([[tool.name, tool]]),
 		});
 
 		await session.prompt("run checks");
 		await session.waitForIdle();
 
-		expect(contexts).toHaveLength(3);
-		expect(JSON.stringify(contexts[2]!.messages)).toContain("tool_call_loop_detected");
-		expect(JSON.stringify(contexts[2]!.messages)).toContain("1263 passed, 4 skipped");
 		const redirects = session.agent.state.messages.filter(
 			(message): message is CustomMessage =>
 				message.role === "custom" && message.customType === "tool-call-loop-redirect",
 		);
+		return { contexts, redirects };
+	}
+
+	it("injects a hidden redirect before the next model call", async () => {
+		const { contexts, redirects } = await runRepeatedCalls(
+			"bash",
+			{ command: "pytest -q" },
+			"1263 passed, 4 skipped",
+			2,
+		);
+
+		expect(contexts).toHaveLength(3);
+		expect(JSON.stringify(contexts[2]!.messages)).toContain("tool_call_loop_detected");
+		expect(JSON.stringify(contexts[2]!.messages)).toContain("1263 passed, 4 skipped");
 		expect(redirects).toHaveLength(1);
 		expect(redirects[0]!.display).toBe(false);
+	});
+
+	it("does not redirect repeated vibe_wait calls on a still-running worker by default", async () => {
+		const { contexts, redirects } = await runRepeatedCalls(
+			"vibe_wait",
+			{ sessions: ["worker"], timeout: 600 },
+			"Still running: `worker`.\nWait window elapsed before any turn settled — re-issue vibe_wait to keep waiting.",
+			5,
+		);
+
+		expect(contexts).toHaveLength(6);
+		expect(JSON.stringify(contexts[5]!.messages)).not.toContain("tool_call_loop_detected");
+		expect(redirects).toHaveLength(0);
 	});
 });

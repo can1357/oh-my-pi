@@ -13,6 +13,7 @@
 
 - Reduced memory growth after one-shot side requests without interrupting ongoing conversations ([#14334](https://github.com/can1357/oh-my-pi/pull/14334) by [@iliaal](https://github.com/iliaal)).
 - Fixed sessions staying untitled when you interrupted the first reply to send a queued steer message.
+- Fixed `/vibe` directors being told to stop calling `vibe_wait` after repeatedly waiting on a still-running worker; `vibe_wait` is now exempt from the tool-call loop guard by default like `wait` ([#15011](https://github.com/can1357/oh-my-pi/issues/15011)).
 
 ## [18.8.6] - 2026-10-08
 
