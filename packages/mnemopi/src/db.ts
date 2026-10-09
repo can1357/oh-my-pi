@@ -119,10 +119,12 @@ export function transaction<T>(db: Database, fn: () => T): T {
 			state.depth--;
 		}
 	}
-
+	// Caller-owned Bun/SQLite transactions already batch these writes; do not
+	// commit or roll them back from this helper.
+	if (db.inTransaction) return fn();
+	db.exec("BEGIN DEFERRED");
 	state = { depth: 1 };
 	txDb[TX_STATE] = state;
-	db.exec("BEGIN DEFERRED");
 	try {
 		const result = fn();
 		state.depth = 0;
@@ -154,10 +156,10 @@ export async function transactionAsync<T>(db: Database, fn: () => Promise<T>): P
 			state.depth--;
 		}
 	}
-
+	if (db.inTransaction) return await fn();
+	db.exec("BEGIN DEFERRED");
 	state = { depth: 1 };
 	txDb[TX_STATE] = state;
-	db.exec("BEGIN DEFERRED");
 	try {
 		const result = await fn();
 		state.depth = 0;

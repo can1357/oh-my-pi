@@ -34,7 +34,8 @@ import {
 	readQueueChipText,
 	resolveAbortLabel,
 } from "../../session/messages";
-import { resolveApproval } from "../../tools/approval";
+import { formatApprovalPrompt, resolveApproval } from "../../tools/approval";
+import { recoverAskQuestions } from "../../tools/ask";
 import { previewLine, PREVIEW_LIMITS, TRUNCATE_LENGTHS } from "@oh-my-pi/pi-tui/render/render-utils";
 import { PROPOSE_DEVICE_NAME } from "@oh-my-pi/pi-tui/tools/resolve";
 import { writeDeviceDispatch } from "../../tools/resolve";
@@ -42,6 +43,7 @@ import { nextActionableTask } from "../../tools/todo";
 import { SpeechEnhancer } from "../../tts/speech-enhancer";
 import { vocalizer } from "../../tts/vocalizer";
 import { canonicalizeMessage } from "@oh-my-pi/pi-tui/chat/thinking-display";
+import { type RunStatus, setRunStatus } from "../../utils/run-status";
 import { setTerminalTitleState } from "../../utils/title-generator";
 import {
 	assistantMessageLinkTargets,
@@ -173,9 +175,10 @@ export class EventController {
 	#renderedCustomMessages = new Set<string>();
 	#lastIntent: string | undefined = undefined;
 	#backgroundTaskCallIds = new Set<string>();
-	/** Tool calls whose approval prompt drove the title into `attention`; cleared
-	 *  at their tool_execution_end so the title returns to `working`. */
-	#approvalAttentionToolCallIds = new Set<string>();
+	/** Tool calls waiting on the user (an approval prompt or `ask`), with the
+	 *  `blocked` status each reports; cleared at their tool_execution_end so the
+	 *  run returns to `working` once none is left. */
+	#blockingPrompts = new Map<string, RunStatus>();
 	#approvalPreviewGates = new Map<string, ApprovalPreviewGate>();
 	#pendingStreamPreviews = new Map<string, unknown>();
 	#detachToolApprovalPreviewWaiter: (() => void) | undefined;
@@ -911,7 +914,7 @@ export class EventController {
 		this.#orphanedToolCompletions.clear();
 		this.#postToolAssistantComponents.clear();
 		this.#backgroundTaskCallIds.clear();
-		this.#approvalAttentionToolCallIds.clear();
+		this.#blockingPrompts.clear();
 		this.#readToolCallArgs.clear();
 		this.#readToolCallAssistantComponents.clear();
 		this.#lastAssistantComponent = undefined;
@@ -1085,7 +1088,7 @@ export class EventController {
 		this.#compactionOwnsProgress = false;
 		this.#setTerminalProgress(true);
 		this.ctx.ensureLoadingAnimation();
-		setTerminalTitleState("working");
+		setRunStatus({ state: "working" });
 		this.ctx.ui.requestRender();
 	}
 
@@ -1840,9 +1843,10 @@ export class EventController {
 		this.#updateWorkingMessageFromIntent(event.intent);
 		const tool = this.ctx.viewSession.getToolByName(event.toolName);
 		const renderToolName = toolRenderName(event.toolName, tool);
-		if (renderToolName === "ask" || this.#toolWillPromptForApproval(renderToolName, event.args)) {
-			this.#approvalAttentionToolCallIds.add(event.toolCallId);
-			setTerminalTitleState("attention");
+		const blocked = this.#blockingPrompt(renderToolName, event.args);
+		if (blocked) {
+			this.#blockingPrompts.set(event.toolCallId, blocked);
+			setRunStatus(blocked);
 		}
 		this.#resolveDisplaceablePoll(renderToolName);
 		if (!this.ctx.pendingTools.has(event.toolCallId)) {
@@ -1924,20 +1928,27 @@ export class EventController {
 	}
 
 	/**
-	 * Whether this tool call will block on an approval prompt before executing.
-	 * The extension wrapper waits on `uiContext.select(...)` after emitting
-	 * `tool_execution_start`, so an approval-mode / per-tool `prompt` policy is
-	 * user-blocking — the title should read `attention`, not `working`. Mirrors
-	 * the wrapper's `resolveApproval` inputs (approvalMode + tools.approval); uses
+	 * The `blocked` status of a tool call that waits on the user before it
+	 * completes: an `ask` question, or an approval prompt. The extension wrapper
+	 * waits on `uiContext.select(...)` after emitting `tool_execution_start`, so
+	 * an approval-mode / per-tool `prompt` policy is user-blocking — the run
+	 * reads `blocked`, not `working`. Mirrors the wrapper's `resolveApproval`
+	 * inputs (approvalMode + tools.approval) and prompt text; uses
 	 * `resolveApproval` rather than `requiresApproval` so a `deny` policy does not
 	 * throw in the render path.
 	 */
-	#toolWillPromptForApproval(toolName: string, args: unknown): boolean {
+	#blockingPrompt(toolName: string, args: unknown): RunStatus | undefined {
+		if (toolName === "ask") {
+			const questions = recoverAskQuestions(args)?.map(question => question.question);
+			return { state: "blocked", kind: "question", msg: questions?.join(" ") };
+		}
 		const tool = this.ctx.viewSession.getToolByName(toolName);
-		if (!tool) return false;
+		if (!tool) return undefined;
 		const mode = cfgToolsApprovalMode.get(settings);
 		const userPolicies: Record<string, unknown> = cfgToolsApproval.get(settings);
-		return resolveApproval(tool, args, mode, userPolicies).policy === "prompt";
+		const approval = resolveApproval(tool, args, mode, userPolicies);
+		if (approval.policy !== "prompt") return undefined;
+		return { state: "blocked", kind: "permission", msg: formatApprovalPrompt(tool, args, approval.reason) };
 	}
 
 	async #handleToolExecutionUpdate(
@@ -2057,14 +2068,12 @@ export class EventController {
 		this.#ensureWorkingLoaderWhileStreaming();
 		// Return to `working` only when the LAST outstanding user-blocking prompt
 		// resolves: with queued approval prompts (always-ask/write), the first tool
-		// to finish must not clear the attention signal while another prompt still
-		// waits. `ask` ids are in the set too (added at tool_execution_start), so
-		// the delete also covers them without leaking ids until turn end.
-		if (
-			this.#approvalAttentionToolCallIds.delete(event.toolCallId) &&
-			this.#approvalAttentionToolCallIds.size === 0
-		) {
-			setTerminalTitleState("working");
+		// to finish must not clear the blocked signal while another prompt still
+		// waits — the run reports that prompt instead. `ask` ids are in the map too
+		// (added at tool_execution_start), so the delete also covers them without
+		// leaking ids until turn end.
+		if (this.#blockingPrompts.delete(event.toolCallId)) {
+			setRunStatus(this.#blockingPrompts.values().next().value ?? { state: "working" });
 		}
 		if (event.toolName === "read") {
 			if (this.#inlineReadToolImages(event.toolCallId, event.result)) {
@@ -2228,7 +2237,8 @@ export class EventController {
 			// `awaitingAsyncWork`: the model handed control back and only a
 			// background-job result can resume it. The title tracks the model, so it
 			// goes idle now — before any await, so a wake landing mid-flush keeps the
-			// `working` its `agent_start` sets.
+			// `working` its `agent_start` sets. The OSC 7501 record stays `working`:
+			// the run is not over, it resumes or settles without the user.
 			if (event.awaitingAsyncWork === true) setTerminalTitleState("idle");
 			void this.#finishWhenRunSettles(event);
 			await this.ctx.flushPendingModelSwitch();
@@ -2240,7 +2250,7 @@ export class EventController {
 			this.ctx.flushPendingCommandOutput();
 			return;
 		}
-		setTerminalTitleState("idle");
+		setRunStatus(this.#settledRunStatus(event));
 
 		await this.#finishAgentEnd(event);
 		// This settle may belong to an extension-started turn while the main
@@ -2283,7 +2293,7 @@ export class EventController {
 				) {
 					return;
 				}
-				setTerminalTitleState("idle");
+				setRunStatus(this.#settledRunStatus(event));
 				await this.#finishAgentEnd(event);
 				if (this.ctx.shutdownRequested) this.ctx.requestShutdown();
 			});
@@ -2292,6 +2302,21 @@ export class EventController {
 		} finally {
 			if (this.#settleWatchEpoch === epoch) this.#settleWatchEpoch = undefined;
 		}
+	}
+
+	/**
+	 * The run status a settled turn leaves: `done` with a result to read,
+	 * `error` with the failure, or `idle` when there is nothing new — the user
+	 * interrupted, or a pending auto-retry will start the turn over (a cancelled
+	 * retry leaves the user at the prompt). Reads the turn's own `agent_end`
+	 * messages for the reason `sendErrorNotification` does.
+	 */
+	#settledRunStatus(event: Extract<AgentSessionEvent, { type: "agent_end" }>): RunStatus {
+		if (this.#retryPending) return { state: "idle" };
+		const last = event.messages.findLast((message): message is AssistantMessage => message.role === "assistant");
+		if (last?.stopReason === "error") return { state: "error", msg: last.errorMessage };
+		if (!last || last.stopReason === "aborted") return { state: "idle" };
+		return { state: "done" };
 	}
 
 	async #finishAgentEnd(event: Extract<AgentSessionEvent, { type: "agent_end" }>): Promise<void> {
@@ -2307,7 +2332,7 @@ export class EventController {
 		}
 		await this.ctx.flushPendingModelSwitch();
 		this.#sealAbandonedForegroundTools();
-		this.#approvalAttentionToolCallIds.clear();
+		this.#blockingPrompts.clear();
 		this.#readToolCallArgs.clear();
 		this.#readToolCallAssistantComponents.clear();
 		this.#priorTurnToolComponents = new Map(this.#toolTimelineComponents);

@@ -15,6 +15,7 @@ import { type AuthCredentialStore, AuthStorage, SqliteAuthCredentialStore } from
 import * as oauthUtils from "@oh-my-pi/pi-ai/registry/oauth";
 import type { OAuthCredentials } from "@oh-my-pi/pi-ai/registry/oauth/types";
 import type { UsageLimit, UsageProvider, UsageReport } from "@oh-my-pi/pi-ai/usage";
+import { OAuthRefresher } from "../src/auth/refresh";
 import { removeWithRetries } from "../../utils/src/temp";
 
 const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
@@ -1071,6 +1072,115 @@ describe("AuthStorage codex oauth ranking", () => {
 		);
 
 		expect(await authStorage.keys.get("openai-codex", "explicit-reserve-pin")).toBe("api-acct-protected");
+	});
+
+	test("routes to an explicit pin before an earlier-unblocking sibling once every account is blocked", async () => {
+		if (!authStorage) throw new Error("test setup failed");
+		await authStorage.credentials.set("openai-codex", [
+			{ type: "oauth", ...createCredential("acct-a", "a@example.com") },
+			{ type: "oauth", ...createCredential("acct-b", "b@example.com") },
+		]);
+		const accounts = authStorage.oauth.accounts("openai-codex");
+		const accountA = accounts.find(account => account.accountId === "acct-a");
+		const accountB = accounts.find(account => account.accountId === "acct-b");
+		if (!accountA || !accountB) throw new Error("expected both accounts");
+		const sessionId = "blocked-explicit-pin";
+
+		await authStorage.limits.markReached("openai-codex", sessionId, {
+			credentialId: accountB.credentialId,
+			retryAfterMs: 4 * HOUR_MS,
+		});
+		expect(authStorage.sessions.pin("openai-codex", sessionId, accountB.credentialId)).toBe(true);
+		// An unblocked sibling still wins over a blocked pin.
+		expect(await authStorage.keys.get("openai-codex", sessionId)).toBe("api-acct-a");
+
+		await authStorage.limits.markReached("openai-codex", sessionId, {
+			credentialId: accountA.credentialId,
+			retryAfterMs: HOUR_MS,
+		});
+		expect(authStorage.sessions.pin("openai-codex", sessionId, accountB.credentialId)).toBe(true);
+		expect(await authStorage.keys.get("openai-codex", sessionId)).toBe("api-acct-b");
+	});
+
+	test("retains the pinned row when the first preflight reload reorders later candidates", async () => {
+		if (!authStorage || !store) throw new Error("test setup failed");
+		const storage = authStorage;
+		await storage.credentials.set("openai-codex", [
+			{ type: "oauth", ...createCredential("acct-a", "a@example.com") },
+			{ type: "oauth", ...createCredential("acct-b", "b@example.com") },
+		]);
+		const accounts = storage.oauth.accounts("openai-codex");
+		const accountA = accounts.find(account => account.accountId === "acct-a");
+		const accountB = accounts.find(account => account.accountId === "acct-b");
+		if (!accountA || !accountB) throw new Error("expected both accounts");
+		const sessionId = "first-preflight-reorder";
+		await storage.limits.markReached("openai-codex", sessionId, {
+			credentialId: accountA.credentialId,
+			retryAfterMs: HOUR_MS,
+		});
+		await storage.limits.markReached("openai-codex", sessionId, {
+			credentialId: accountB.credentialId,
+			retryAfterMs: 4 * HOUR_MS,
+		});
+		expect(storage.sessions.pin("openai-codex", sessionId, accountB.credentialId)).toBe(true);
+
+		// The first preflight callback reloads B,A before the next callback
+		// reads its original index, but the pinned row remains B.
+		const list = store.listAuthCredentials.bind(store);
+		vi.spyOn(store, "listAuthCredentials").mockImplementation(provider => list(provider).reverse());
+		expect(await storage.keys.get("openai-codex", sessionId)).toBe("api-acct-b");
+	});
+
+	test("keeps an explicit blocked pin when concurrent preflight reorders the pool", async () => {
+		if (!authStorage || !store) throw new Error("test setup failed");
+		const storage = authStorage;
+		const credentialStore = store;
+		await storage.credentials.set("openai-codex", [
+			{ type: "oauth", ...createCredential("acct-a", "a@example.com") },
+			{ type: "oauth", ...createCredential("acct-b", "b@example.com") },
+		]);
+		const accounts = storage.oauth.accounts("openai-codex");
+		const accountA = accounts.find(account => account.accountId === "acct-a");
+		const accountB = accounts.find(account => account.accountId === "acct-b");
+		if (!accountA || !accountB) throw new Error("expected both accounts");
+		const sessionId = "reordered-explicit-pin";
+		await storage.limits.markReached("openai-codex", sessionId, {
+			credentialId: accountA.credentialId,
+			retryAfterMs: HOUR_MS,
+		});
+		await storage.limits.markReached("openai-codex", sessionId, {
+			credentialId: accountB.credentialId,
+			retryAfterMs: 4 * HOUR_MS,
+		});
+		expect(storage.sessions.pin("openai-codex", sessionId, accountB.credentialId)).toBe(true);
+		for (const row of credentialStore.listAuthCredentials("openai-codex")) {
+			if (row.credential.type === "oauth") {
+				credentialStore.updateAuthCredential(row.id, { ...row.credential, expires: Date.now() + 30_000 });
+			}
+		}
+		await storage.credentials.reload();
+
+		// Peer order changes while both preflight refreshes are awaiting; each
+		// candidate rebinds by stored row id rather than its old pool position.
+		const list = credentialStore.listAuthCredentials.bind(credentialStore);
+		let reordered = false;
+		vi.spyOn(credentialStore, "listAuthCredentials").mockImplementation(provider => {
+			const rows = list(provider);
+			return reordered ? rows.reverse() : rows;
+		});
+		const preflight = Promise.withResolvers<void>();
+		let refreshes = 0;
+		vi.spyOn(OAuthRefresher.prototype, "refresh").mockImplementation(async (_provider, credential) => {
+			if (++refreshes === 2) {
+				reordered = true;
+				await storage.credentials.reload();
+				preflight.resolve();
+			}
+			await preflight.promise;
+			return { ...credential, expires: Date.now() + WEEK_MS };
+		});
+
+		expect(await storage.keys.get("openai-codex", sessionId)).toBe("api-acct-b");
 	});
 
 	test("keeps a lone reserve account usable when usage is unknown", async () => {
