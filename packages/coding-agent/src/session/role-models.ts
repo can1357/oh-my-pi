@@ -78,11 +78,13 @@ export function resolveRoleModelFull(
 			? (settings.getModelRole("default") ??
 				(currentModel ? `${currentModel.provider}/${currentModel.id}` : undefined))
 			: settings.getModelRole(role);
+	const fastMode = settings.getModelRoleFast(role);
 	if (!roleModelStr) {
-		return { model: undefined, thinkingLevel: undefined, explicitThinkingLevel: false, warning: undefined };
+		return { model: undefined, thinkingLevel: undefined, explicitThinkingLevel: false, warning: undefined, fastMode };
 	}
-	return resolveModelRoleValue(roleModelStr, availableModels, {
+	const resolved = resolveModelRoleValue(roleModelStr, availableModels, {
 		settings,
 		matchPreferences: getModelMatchPreferences(settings),
 	});
+	return fastMode !== undefined ? { ...resolved, fastMode } : resolved;
 }

@@ -35,6 +35,7 @@ export interface ResolvedRoleModel {
 	model: Model;
 	thinkingLevel?: ConfiguredThinkingLevel;
 	explicitThinkingLevel: boolean;
+	fastMode?: boolean;
 }
 
 /** Catalog refresh capability used by the session picker. */

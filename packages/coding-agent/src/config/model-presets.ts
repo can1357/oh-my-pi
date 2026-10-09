@@ -41,13 +41,24 @@ function parseModelPreset(raw: unknown): ModelPreset | string {
 		if (typeof value !== "string" || value.trim() === "") return `role \`${role}\` is not a model selector`;
 		modelRoles[role] = value;
 	}
+	const rawFast = raw.modelRoleFast;
+	let modelRoleFast: Record<string, boolean> | undefined;
+	if (rawFast !== undefined) {
+		if (!isRecord(rawFast)) return "`modelRoleFast` is not a mapping";
+		modelRoleFast = {};
+		for (const role of Object.keys(rawFast)) {
+			const value = rawFast[role];
+			if (typeof value !== "boolean") return `role \`${role}\` fast mode is not a boolean`;
+			modelRoleFast[role] = value;
+		}
+	}
 	const level = raw.defaultThinkingLevel;
-	if (level === undefined) return { modelRoles };
+	if (level === undefined) return { modelRoles, ...(modelRoleFast ? { modelRoleFast } : {}) };
 	const thinking = typeof level === "string" ? parseConfiguredThinkingLevel(level) : undefined;
 	if (thinking === undefined || !isDefaultThinkingLevel(thinking)) {
 		return "`defaultThinkingLevel` is not a thinking level";
 	}
-	return { modelRoles, defaultThinkingLevel: thinking };
+	return { modelRoles, defaultThinkingLevel: thinking, ...(modelRoleFast ? { modelRoleFast } : {}) };
 }
 
 function isDefaultThinkingLevel(
@@ -84,8 +95,15 @@ export function findActiveModelPreset(settings: Settings): string | undefined {
 	return getModelPresetNames(settings).find(name => {
 		const lookup = getModelPreset(settings, name);
 		if (lookup.kind !== "found") return false;
-		const { modelRoles, defaultThinkingLevel } = lookup.preset;
+		const { modelRoles, defaultThinkingLevel, modelRoleFast } = lookup.preset;
 		if (defaultThinkingLevel !== undefined && defaultThinkingLevel !== thinking) return false;
+		if (modelRoleFast !== undefined) {
+			const currentFast = settings.getModelRolesFast();
+			const allFastKeys = new Set([...Object.keys(currentFast), ...Object.keys(modelRoleFast)]);
+			for (const role of allFastKeys) {
+				if (currentFast[role] !== modelRoleFast[role]) return false;
+			}
+		}
 		const presetIds = Object.keys(modelRoles);
 		return (
 			presetIds.length === roleIds.length &&
@@ -109,7 +127,16 @@ export function saveModelPreset(settings: Settings, name: string): ModelPreset {
 	for (const [role, selector] of Object.entries(settings.getModelRoles())) {
 		if (selector) modelRoles[role] = selector;
 	}
-	const preset: ModelPreset = { modelRoles, defaultThinkingLevel: cfgDefaultThinkingLevel.get(settings) };
+	const fastMap = settings.getModelRolesFast();
+	const modelRoleFast: Record<string, boolean> = {};
+	for (const [role, fast] of Object.entries(fastMap)) {
+		if (typeof fast === "boolean") modelRoleFast[role] = fast;
+	}
+	const preset: ModelPreset = {
+		modelRoles,
+		defaultThinkingLevel: cfgDefaultThinkingLevel.get(settings),
+		...(Object.keys(modelRoleFast).length > 0 ? { modelRoleFast } : {}),
+	};
 	cfgModelPresets.setEntry(settings, name, preset);
 	return preset;
 }
@@ -281,6 +308,24 @@ function writePresetRoles(settings: Settings, preset: ModelPreset): void {
 				continue;
 			}
 			settings.setModelRole(role, undefined);
+		}
+	}
+	const fastRoles = new Set([
+		...Object.keys(settings.getModelRolesFast()),
+		...(preset.modelRoleFast ? Object.keys(preset.modelRoleFast) : []),
+	]);
+	if (project) {
+		for (const role of fastRoles) {
+			const value =
+				preset.modelRoleFast && Object.hasOwn(preset.modelRoleFast, role) ? preset.modelRoleFast[role] : undefined;
+			if (value !== undefined) settings.setProjectModelRoleFast(role, value);
+			else settings.clearProjectModelRoleFast(role);
+		}
+	} else {
+		for (const role of fastRoles) {
+			const value =
+				preset.modelRoleFast && Object.hasOwn(preset.modelRoleFast, role) ? preset.modelRoleFast[role] : undefined;
+			settings.setModelRoleFast(role, value);
 		}
 	}
 	if (preset.defaultThinkingLevel !== undefined) {

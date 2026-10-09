@@ -47,7 +47,7 @@ import { EPHEMERAL_MODEL_CHANGE_ROLE } from "./session-entries";
 import type { SessionManager } from "./session-manager";
 
 import { cfgDefaultThinkingLevel, cfgProvidersFireworksTier } from "./settings";
-import { cfgDisabledProviders, cfgEnabledModels } from "../config/model-settings";
+import { cfgDisabledProviders, cfgEnabledModels, cfgModelRoleStorage } from "../config/model-settings";
 
 /** Capabilities borrowed from the owning AgentSession. */
 export interface ModelControlsHost {
@@ -74,6 +74,7 @@ export interface ModelControlsHost {
 export class ModelControls {
 	readonly #host: ModelControlsHost;
 	#scopedModels: Array<{ model: Model; thinkingLevel?: ThinkingLevel }>;
+	#activeRole: string | undefined = "default";
 	#thinkingLevel: ThinkingLevel | undefined;
 	/** Hard per-session effort ceiling (e.g. a task spawn's `task.maxEffort` cap); recovery paths re-clamp to it. */
 	readonly #thinkingLevelCeiling: Effort | undefined;
@@ -229,6 +230,7 @@ export class ModelControls {
 			selector?: string;
 			thinkingLevel?: ThinkingLevel;
 			persist?: boolean;
+			fastMode?: boolean;
 		},
 	): Promise<{ switched: boolean }> {
 		const previousEditMode = this.#host.resolveActiveEditMode();
@@ -242,6 +244,12 @@ export class ModelControls {
 		this.#host.clearActiveRetryFallback();
 		await this.#host.setModelWithProviderSessionReset(targetModel);
 		this.#host.sessionManager.appendModelChange(`${targetModel.provider}/${targetModel.id}`, role);
+		this.#activeRole = role;
+		const targetFastMode =
+			options && "fastMode" in options ? options.fastMode : this.#host.settings.getModelRoleFast(role);
+		if (targetFastMode !== undefined) {
+			this.setFastMode(targetFastMode);
+		}
 		if (options?.persist) {
 			this.#host.settings.setModelRole(
 				role,
@@ -254,6 +262,14 @@ export class ModelControls {
 					options.thinkingLevel,
 				),
 			);
+			if (options.fastMode !== undefined) {
+				const projectScope = cfgModelRoleStorage.get(this.#host.settings) === "project";
+				if (projectScope) {
+					this.#host.settings.setProjectModelRoleFast(role, options.fastMode);
+				} else {
+					this.#host.settings.setModelRoleFast(role, options.fastMode);
+				}
+			}
 		}
 		this.#host.settings.getStorage()?.recordModelUsage(`${targetModel.provider}/${targetModel.id}`);
 
@@ -291,6 +307,7 @@ export class ModelControls {
 			`${targetModel.provider}/${targetModel.id}`,
 			options?.ephemeral ? EPHEMERAL_MODEL_CHANGE_ROLE : "temporary",
 		);
+		this.#activeRole = undefined;
 		this.#host.settings.getStorage()?.recordModelUsage(`${targetModel.provider}/${targetModel.id}`);
 
 		// Apply explicit thinking level if given; otherwise prefer the model's
@@ -353,6 +370,7 @@ export class ModelControls {
 				model: resolved.model,
 				thinkingLevel: resolved.thinkingLevel,
 				explicitThinkingLevel: resolved.explicitThinkingLevel,
+				fastMode: this.#host.settings.getModelRoleFast(role),
 			});
 		}
 
@@ -381,7 +399,7 @@ export class ModelControls {
 	 * settings. Shared with role cycling and the plan-approval model slider.
 	 */
 	async applyRoleModel(entry: ResolvedRoleModel): Promise<void> {
-		await this.setModel(entry.model, entry.role);
+		await this.setModel(entry.model, entry.role, { fastMode: entry.fastMode });
 		if (entry.explicitThinkingLevel && entry.thinkingLevel !== undefined) {
 			this.setThinkingLevel(entry.thinkingLevel);
 		}
@@ -795,6 +813,7 @@ export class ModelControls {
 		if (!enabled) {
 			const tier = this.#serviceTierByFamily[family];
 			if (tier === "priority" || tier === "ultrafast") this.setServiceTierFamily(family, undefined);
+			this.#syncActiveRoleFast(enabled);
 			return true;
 		}
 		if (family === "openai" && !shouldSendServiceTier("priority", model)) {
@@ -809,6 +828,7 @@ export class ModelControls {
 			clearAnthropicFastModeFallback(this.#host.providerSessionState);
 		}
 		this.setServiceTierFamily(family, "priority");
+		this.#syncActiveRoleFast(enabled);
 		return true;
 	}
 
@@ -835,6 +855,17 @@ export class ModelControls {
 	toggleFastMode(): boolean {
 		if (!this.setFastMode(!this.isFastModeEnabled())) return false;
 		return this.isFastModeEnabled();
+	}
+
+	#syncActiveRoleFast(enabled: boolean): void {
+		if (this.#activeRole !== undefined && this.#host.settings.getModelRoleFast(this.#activeRole) !== undefined) {
+			const projectScope = cfgModelRoleStorage.get(this.#host.settings) === "project";
+			if (projectScope) {
+				this.#host.settings.setProjectModelRoleFast(this.#activeRole, enabled);
+			} else {
+				this.#host.settings.setModelRoleFast(this.#activeRole, enabled);
+			}
+		}
 	}
 
 	/**
