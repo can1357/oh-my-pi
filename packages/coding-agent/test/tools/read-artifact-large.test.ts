@@ -86,6 +86,15 @@ function roomlessContextArtifact(): string {
 	].join("\n");
 }
 
+/** A 60 KB `{`-opener followed by small lines and a closer: block-context bait. */
+function blockBaitArtifact(): string {
+	const lines = [`${"y".repeat(60_000)} {`];
+	for (let index = 2; index <= 142; index++) {
+		lines.push(index === 100 ? "}" : `wanted-${String(index).padStart(3, "0")}`);
+	}
+	return lines.join("\n");
+}
+
 /** A 60 KB line followed by small ones: oversized leading context, not content. */
 function oversizedContextArtifact(): string {
 	return [
@@ -476,6 +485,34 @@ describe("read tool large artifact handling", () => {
 		expect(output).toContain("Leading context line 1");
 		expect(output).toContain("was skipped");
 		expect(output).not.toContain("yyyyyyyyyy");
+	});
+
+	it("keeps a skipped opener out of block context", async () => {
+		await Bun.write(path.join(artifactDir, "0.mcp.log"), blockBaitArtifact());
+
+		const result = await tool.execute("call-block-bait", { path: "artifact://0:2-142" });
+		const output = getTextOutput(result);
+
+		// Line 1 opens a block its closer (line 100) belongs to, so the block
+		// pass would normally resurface it as context. It was deliberately
+		// skipped: the page must not display it and claim it was skipped.
+		expect(output).toContain("wanted-002");
+		expect(output).toContain("was skipped");
+		expect(output).not.toContain("yyyyyyyyyy");
+	});
+
+	it("collects the requested window after dropping context, not one line more", async () => {
+		await Bun.write(path.join(artifactDir, "0.mcp.log"), oversizedContextArtifact());
+
+		// Line 1 is dropped context; the window must be the requested line 2
+		// plus its three trailing lines — not five lines reaching an
+		// unrequested line 6 with a continuation pointing at it.
+		const result = await tool.execute("call-context-limits", { path: "artifact://0:2-2" });
+		const output = getTextOutput(result);
+
+		expect(output).toContain("wanted-001");
+		expect(output).toContain("wanted-004");
+		expect(output).not.toContain("wanted-005");
 	});
 
 	it("skips oversized leading context instead of rendering it", async () => {

@@ -2379,8 +2379,8 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 
 					const DEFAULT_LIMIT = this.#defaultLimit;
 					const effectiveLimit = limit ?? DEFAULT_LIMIT;
-					const maxLinesToCollect = Math.min(effectiveLimit + leadingContext + trailingContext, DEFAULT_MAX_LINES);
-					const selectedLineLimit = effectiveLimit + leadingContext + trailingContext;
+					let maxLinesToCollect = Math.min(effectiveLimit + leadingContext + trailingContext, DEFAULT_MAX_LINES);
+					let selectedLineLimit = effectiveLimit + leadingContext + trailingContext;
 					// Scale byte budget with line limit so the configured line count actually fits.
 					// Assume ~512 bytes/line average; never go below the shared default.
 					const scaledByteBudget = Math.max(DEFAULT_MAX_BYTES, maxLinesToCollect * 512);
@@ -2415,6 +2415,24 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 								);
 					let lineWindow = await collectWindow(startLine);
 					let skippedContextNotice: string | undefined;
+					/** 1-based numbers of leading context lines deliberately dropped below. */
+					const skippedContextLines: number[] = [];
+					/**
+					 * Restart collection at the requested start without the leading
+					 * context line(s). Collection limits were sized with the context
+					 * included; without recomputing, the window would over-collect
+					 * by one line and hint at unrequested lines.
+					 */
+					const dropLeadingContext = async (notice: string): Promise<void> => {
+						skippedContextNotice = notice;
+						for (let line = startLine + 1; line <= requestedStart; line++) skippedContextLines.push(line);
+						leadingContext = 0;
+						startLine = requestedStart;
+						startLineDisplay = requestedStart + 1;
+						maxLinesToCollect = Math.min(effectiveLimit + trailingContext, DEFAULT_MAX_LINES);
+						selectedLineLimit = effectiveLimit + trailingContext;
+						lineWindow = await collectWindow(startLine);
+					};
 					if (
 						startLine < requestedStart &&
 						lineWindow.firstLineByteLength !== undefined &&
@@ -2423,11 +2441,9 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 						// The over-budget line is leading context, not requested
 						// content: drop it and spend the budget on the requested
 						// start instead of rendering a context preview.
-						skippedContextNotice = `[Leading context line ${startLineDisplay} is ${formatBytes(lineWindow.firstLineByteLength)}, exceeds the ${formatBytes(maxBytesForRead)} read budget and was skipped.]`;
-						leadingContext = 0;
-						startLine = requestedStart;
-						startLineDisplay = requestedStart + 1;
-						lineWindow = await collectWindow(startLine);
+						await dropLeadingContext(
+							`[Leading context line ${startLineDisplay} is ${formatBytes(lineWindow.firstLineByteLength)}, exceeds the ${formatBytes(maxBytesForRead)} read budget and was skipped.]`,
+						);
 					}
 					if (
 						skippedContextNotice === undefined &&
@@ -2441,13 +2457,12 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 						// raise a fixed per-call budget; retry without the context,
 						// keeping the original page when the retry also collects
 						// nothing (an oversized requested line keeps its own notice).
-						const retried = await collectWindow(requestedStart);
-						if (retried.lines.length > 0) {
-							skippedContextNotice = `[Leading context line ${startLineDisplay} left no room in the ${formatBytes(maxBytesForRead)} per-read budget and was skipped to show the requested lines.]`;
-							leadingContext = 0;
-							startLine = requestedStart;
-							startLineDisplay = requestedStart + 1;
-							lineWindow = retried;
+						const startDisplay = startLineDisplay;
+						const retryLines = (await collectWindow(requestedStart)).lines;
+						if (retryLines.length > 0) {
+							await dropLeadingContext(
+								`[Leading context line ${startDisplay} left no room in the ${formatBytes(maxBytesForRead)} per-read budget and was skipped to show the requested lines.]`,
+							);
 						}
 					}
 
@@ -2611,6 +2626,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 									}
 									return truncated.text;
 								},
+								excludeFromContext: skippedContextLines.length > 0 ? new Set(skippedContextLines) : undefined,
 							},
 						);
 						const firstLine = entries.find(entry => entry.kind === "line");
