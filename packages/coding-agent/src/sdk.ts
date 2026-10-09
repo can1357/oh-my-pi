@@ -4201,6 +4201,18 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		const explicitlyRequestedToolNameSet = explicitlyRequestedToolNames
 			? new Set(explicitlyRequestedToolNames)
 			: undefined;
+		// Warn on allowlist entries that match nothing: a wildcard on the allow
+		// side (wildcards expand only in `disallowedTools`) or a typo silently
+		// grants nothing, which reads as deny-all. Warn once at startup; late
+		// registrations resolve Claude-spelled entries per judgment instead.
+		if (enforceToolAllowlist && explicitlyRequestedToolNames) {
+			const unresolvable = explicitlyRequestedToolNames.filter(
+				name => name.includes("*") || !toolRegistry.has(name),
+			);
+			if (unresolvable.length > 0) {
+				logger.warn("Subagent tools: allowlist entries match no registered tool (allowlist is exact-names-only; wildcards expand only in disallowedTools)", { entries: unresolvable });
+			}
+		}
 		const xdevReadAvailable =
 			builtInRegistryToolNames.has("read") &&
 			(explicitlyRequestedToolNameSet === undefined || explicitlyRequestedToolNameSet.has("read")) &&
@@ -4298,7 +4310,15 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			const mountedNames: string[] = [];
 			for (const name of initialToolNames) {
 				const tool = toolRegistry.get(name);
-				const explicitlyRequested = explicitlyRequestedToolNameSet?.has(name) === true;
+				// A Claude-spelled allowlist entry counts as explicitly requested for
+				// the mount split too (mirrors the late handler's canonicalRequested).
+				const explicitlyRequested =
+					explicitlyRequestedToolNameSet?.has(name) === true ||
+					[...(explicitlyRequestedToolNameSet ?? [])].some(
+						entry =>
+							!entry.endsWith("*") &&
+							(resolveMCPToolAlias(entry, candidate => (toolRegistry.has(candidate) ? { name: candidate } : undefined))?.name ?? entry) === name,
+					);
 				if (tool && xdevReadAvailable && xdevWriteAvailable && !explicitlyRequested && isMountableUnderXdev(tool))
 					mountedNames.push(name);
 				else topLevelToolNames.push(name);
@@ -5046,12 +5066,18 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					// was absent at startup, and only resolves now that this registration
 					// populated it — toolRegistry.set ran above, so the entry resolves against
 					// the registration being judged.
+					// Canonical grant for this registration: raw declared entries plus
+					// their live-registry resolutions, so a Claude-spelled entry counts as
+					// explicitly requested for the defaultInactive/hidden and mount-split
+					// gates below — not just for the scope decision.
+					const canonicalRequested = new Set(
+						[...(explicitlyRequestedToolNameSet ?? [])].flatMap(entry =>
+							entry.endsWith("*") ? [entry] : [entry, canonicalScopeEntry(entry)],
+						),
+					);
 					const allowlisted =
 						!enforceToolAllowlist ||
-						explicitlyRequestedToolNameSet?.has(name) === true ||
-						[...(explicitlyRequestedToolNameSet ?? [])].some(
-							entry => !entry.endsWith("*") && canonicalScopeEntry(entry) === name,
-						);
+						canonicalRequested.has(name);
 					const scopedOut =
 						!allowlisted ||
 						isToolDisallowed(
@@ -5060,7 +5086,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 							registered.definition.mcpServerName,
 						);
 					if (
-						((registered.definition.defaultInactive || registered.definition.hidden) && !explicitlyRequested) ||
+						((registered.definition.defaultInactive || registered.definition.hidden) && !canonicalRequested.has(name)) ||
 						scopedOut
 					) {
 						if (!alreadyEnabled) return;
@@ -5076,7 +5102,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					// explicit setActiveTools() decision that disabled the previous definition.
 					if (existingTool && !alreadyEnabled) return;
 					const shouldMount =
-						!explicitlyRequested &&
+						!canonicalRequested.has(name) &&
 						toolSession.xdev !== undefined &&
 						builtInRegistryToolNames.has("read") &&
 						builtInRegistryToolNames.has("write") &&
