@@ -5,6 +5,7 @@
 ### Added
 
 - Added per-role skill visibility control for subagents via agent frontmatter: `skills` (allowlist globs; `"none"`/`[]` lists none), `hideSkills` (denylist globs, highest precedence), and `unhideSkills` (re-exposes skills whose `SKILL.md` sets `hide: true`) — see [#4570](https://github.com/can1357/oh-my-pi/issues/4570). Controls the rendered `<skills>` block only; hidden skills remain loadable via `skill://<name>` and `/skill:<name>`.
+- Added `/jobs kill <id>|all` to cancel a running background job (or every one this session owns) from the command line, even while the agent is busy ([#14160](https://github.com/can1357/oh-my-pi/pull/14160) by [@KanwarGill](https://github.com/KanwarGill))
 
 ### Changed
 
@@ -13,6 +14,7 @@
 
 ### Fixed
 
+- Fixed the custom-tool examples' full-documentation link opening a missing page ([#15076](https://github.com/can1357/oh-my-pi/pull/15076) by [@qingshungLI](https://github.com/qingshungLI))
 - Fixed the `/models` compaction limit preview and **Compacts at** row rounding fractional percentages (`12.5%` showed as `13%`) ([#15074](https://github.com/can1357/oh-my-pi/pull/15074) by [@H4vC](https://github.com/H4vC))
 - Fixed `/omfg` save, overwrite, and validation prompts in Tern opening as a sheet over the candidate rule; they now sit in the composer slot like `ask`, so the rule stays readable while you choose ([#15058](https://github.com/can1357/oh-my-pi/pull/15058) by [@H4vC](https://github.com/H4vC))
 
