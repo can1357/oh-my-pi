@@ -108,6 +108,10 @@ async function main(): Promise<void> {
 			JSON.stringify(
 				received.map(row => ({
 					requestId: row.requestId,
+					userMessage:
+						row.run.action?.action.case === "userMessageAction"
+							? row.run.action.action.value.userMessage
+							: undefined,
 					run: {
 						runId: row.run.runId,
 						conversationId: row.run.conversationId,
