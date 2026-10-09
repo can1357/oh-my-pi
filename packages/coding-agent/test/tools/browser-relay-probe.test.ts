@@ -307,6 +307,23 @@ describe("relayExtensionNotice", () => {
 		expect(await relayExtensionNotice(`http://127.0.0.1:${port}`)).toContain("installed by omp 18.6.1");
 	});
 
+	it.each([
+		{ order: "the stale browser said hello first", stale: "first" },
+		{ order: "the stale browser said hello last", stale: "last" },
+	])("names a stale extension beside one whose stamp is not a version ($order)", async ({ stale }) => {
+		const port = await startRelay();
+		const old = { ...EXTENSION_HELLO, instanceId: "old-browser", ompVersion: "18.6.1" };
+		const custom = { ...EXTENSION_HELLO, instanceId: "custom-browser", ompVersion: "build rc2" };
+		for (const hello of stale === "first" ? [old, custom] : [custom, old]) await connectExtension(port, hello);
+		expect(await relayExtensionNotice(`http://127.0.0.1:${port}`)).toContain("installed by omp 18.6.1");
+	});
+
+	it("says nothing for an extension whose stamp is not a version, since its age is unknown", async () => {
+		const port = await startRelay();
+		await connectExtension(port, { ...EXTENSION_HELLO, ompVersion: "build rc2" });
+		expect(await relayExtensionNotice(`http://127.0.0.1:${port}`)).toBeNull();
+	});
+
 	it("stops naming a stale browser once it disconnects", async () => {
 		const port = await startRelay();
 		const old = await connectExtension(port, { ...EXTENSION_HELLO, instanceId: "old-browser", ompVersion: "18.6.1" });

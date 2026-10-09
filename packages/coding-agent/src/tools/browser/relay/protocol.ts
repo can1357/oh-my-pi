@@ -40,15 +40,26 @@ export type RelayToExtMessage = ({ t: "rpc"; id: number } & RelayRpcRequest) | {
 /** Required capability for safe relay target discovery and auto-attach. */
 export const DISCARDED_TABS_PROTOCOL_VERSION = 1;
 
-/** Whether an extension's hello `ompVersion` (empty: unstamped) is older than `than`; a stamp that is not semver is not. */
-export function isOlderOmpVersion(version: string, than: string): boolean {
-	if (version === "") return than !== "";
-	if (than === "") return false;
+/** Whether `version` is a semver string `Bun.semver.order` can rank. */
+function isSemver(version: string): boolean {
 	try {
-		return Bun.semver.order(version, than) < 0;
+		Bun.semver.order(version, version);
+		return true;
 	} catch {
 		return false;
 	}
+}
+
+/**
+ * Whether an extension's hello `ompVersion` is older than `than`. Unstamped
+ * ("") is the oldest; a stamp that is not semver has no known age, so it
+ * ranks after every semver stamp and is never older than one.
+ */
+export function isOlderOmpVersion(version: string, than: string): boolean {
+	if (version === "" || than === "") return version === "" && than !== "";
+	if (!isSemver(version)) return false;
+	if (!isSemver(than)) return true;
+	return Bun.semver.order(version, than) < 0;
 }
 
 /** Messages sent extension → relay. */
