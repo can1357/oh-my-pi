@@ -29,6 +29,7 @@ import { appendPersonaJournalEntry, clearPersonaJournalEntry } from "../session/
 import { discoverAgents, getAgent } from "../task";
 import type { PersonaExplicitOverrides } from "../session/tool-policy";
 import { clearSubmittedText, restoreDetachedDraft } from "./helpers/draft";
+import { formatKeyHint } from "@oh-my-pi/pi-tui/app-keybindings";
 import { CLI_THINKING_LEVELS, getConfiguredThinkingLevelMetadata } from "@oh-my-pi/pi-tui/thinking";
 import { noThinkingMessage, resolveThinkingArgument } from "./helpers/effort";
 import { commandConsumed, errorMessage, usage } from "./helpers/parse";

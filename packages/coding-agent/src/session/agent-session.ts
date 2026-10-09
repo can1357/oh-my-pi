@@ -12599,7 +12599,7 @@ export class AgentSession implements SettingsScope {
 		// through #reconcileModeAfterBranch. navigateTree() otherwise leaves the
 		// pre-navigation persona (and its restricted grant) attached to a
 		// transcript that no longer records it.
-		await this.#reconcileModeAfterBranch();
+		await this.#reconcileModeAfterTransition();
 
 		this.#branchSummaryAbortController = undefined;
 
