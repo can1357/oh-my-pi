@@ -3,7 +3,7 @@ import { stripVTControlCharacters } from "node:util";
 import type { AgentTool } from "@oh-my-pi/pi-agent-core";
 import { ToolExecutionComponent } from "@oh-my-pi/pi-tui/chat/tool-execution";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
-import { Text, type TUI } from "@oh-my-pi/pi-tui";
+import { ImageProtocol, setTerminalImageProtocol, TERMINAL, Text, type TUI } from "@oh-my-pi/pi-tui";
 import type { DescribeContext, NativeNode } from "@oh-my-pi/pi-tui/native/node";
 
 /**
@@ -158,6 +158,37 @@ describe("ToolExecutionComponent tool-result render memoization", () => {
 		expect(contextLines).toHaveLength(1);
 		expect(contextLines[0]).toContain("first instruction second instruction");
 		expect(contextLines[0]).not.toContain("\t");
+	});
+
+	it("keeps the passive context line below result images added after it", () => {
+		const originalProtocol = TERMINAL.imageProtocol;
+		setTerminalImageProtocol(ImageProtocol.Iterm2);
+		try {
+			const ui = { requestRender() {}, requestComponentRender() {} } as unknown as TUI;
+			const component = new ToolExecutionComponent("probe", {}, { showImages: true }, undefined, ui, process.cwd());
+			// Context first, result later: the result's image is mounted by the rebuild that follows.
+			component.setAdditionalContext("after the image");
+			component.updateResult(
+				{
+					content: [
+						{ type: "text", text: "out" },
+						{
+							type: "image",
+							data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==",
+							mimeType: "image/png",
+						},
+					],
+				},
+				false,
+			);
+
+			const frame = component.render(80).join("\n");
+			const image = frame.indexOf("\u001b]1337;File=");
+			expect(image).toBeGreaterThan(-1);
+			expect(frame.indexOf("Context: after the image")).toBeGreaterThan(image);
+		} finally {
+			setTerminalImageProtocol(originalProtocol);
+		}
 	});
 
 	it("truncates long passive context to one line until tools are expanded, then shows all of it", () => {
