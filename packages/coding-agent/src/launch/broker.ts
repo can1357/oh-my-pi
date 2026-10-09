@@ -29,7 +29,6 @@ import {
 	DAEMON_PTY_ROWS,
 	DAEMON_RUNTIME_DIR_ENV,
 	type DaemonCompletionNotification,
-	type DaemonObservationNotification,
 	type DaemonOperation,
 	type DaemonRpcResult,
 	type DaemonSignal,
@@ -41,6 +40,7 @@ import {
 } from "./protocol";
 import { resolveDaemonSpawnOptions } from "./spawn-options";
 import { renderTerminalOutput } from "./terminal-output";
+import type { DaemonObservationNotification } from "./protocol";
 import { quotePosixArgv } from "../utils/shell-quote";
 
 const DEFAULT_IDLE_GRACE_MS = 3_000;
@@ -428,6 +428,7 @@ class DaemonBroker {
 	readonly #token: string;
 	readonly #idleGraceMs: number;
 	readonly #restartBackoffBaseMs: number;
+	readonly #observerOwners = new Map<net.Socket, Set<string>>();
 	readonly #records = new Map<string, ManagedDaemon>();
 	/**
 	 * Names reserved by an in-flight `start` before its record lands in
@@ -442,7 +443,6 @@ class DaemonBroker {
 	readonly #ownerSockets = new Map<string, { socket: net.Socket; subscriptionId: string | undefined }>();
 	readonly #completionSubscriptions = new Map<string, string | undefined>();
 	readonly #pendingCompletions = new Map<string, Map<string, DaemonCompletionNotification>>();
-	readonly #observerOwners = new Map<net.Socket, Set<string>>();
 	readonly #finished = Promise.withResolvers<void>();
 	readonly #sockets = new Set<net.Socket>();
 	#server: net.Server | undefined;
@@ -497,7 +497,6 @@ class DaemonBroker {
 			await record.persistQueue;
 		}
 		this.#ownerSockets.clear();
-		this.#observerOwners.clear();
 		for (const socket of this.#sockets) socket.destroy();
 		this.#sockets.clear();
 		this.#clients.clear();
@@ -507,6 +506,7 @@ class DaemonBroker {
 			await promise;
 		}
 		if (process.platform !== "win32") await fs.rm(this.#endpoint, { force: true });
+		this.#observerOwners.clear();
 		this.#finished.resolve();
 	}
 
@@ -536,13 +536,13 @@ class DaemonBroker {
 				});
 			}
 		});
+		socket.once("close", () => this.#observerOwners.delete(socket));
 		socket.on("error", () => {
 			// Socket closure performs client accounting.
 		});
 		socket.on("close", () => {
 			this.#sockets.delete(socket);
 			if (!authenticated) return;
-			this.#observerOwners.delete(socket);
 			this.#clients.delete(socket);
 			this.#scheduleIdleShutdown();
 			for (const [owner, registration] of this.#ownerSockets) {
@@ -561,13 +561,13 @@ class DaemonBroker {
 			if (isRecord(decoded) && typeof decoded.id === "string") id = decoded.id;
 			const request = parseDaemonWireRequest(decoded);
 			if (request.token !== this.#token) throw new Error("Daemon broker authentication failed");
-			onAuthenticated();
 			// Apply the diagnostic scope before owned registration can yield to persistence.
 			// An awaited request is therefore a barrier for observing every later settlement.
 			if (request.observedOwners !== undefined) {
 				if (request.observedOwners.length === 0) this.#observerOwners.delete(socket);
 				else this.#observerOwners.set(socket, new Set(request.observedOwners));
 			}
+			onAuthenticated();
 			for (const owner of request.completionUnsubscribes ?? []) {
 				const subscriptionId = this.#completionSubscriptions.get(owner);
 				if (
@@ -1039,27 +1039,6 @@ class DaemonBroker {
 		}
 	}
 
-	#markReady(record: ManagedDaemon): void {
-		if (!record.spec.ready || record.snapshot.state !== "starting") return;
-		if (!record.logReady || !record.portReady) return;
-		record.snapshot.state = "ready";
-		record.snapshot.readyAt = Date.now();
-		this.#persist(record);
-	}
-
-	async #onPtyExit(record: ManagedDaemon, generation: number, result: PtyRunResult): Promise<void> {
-		return this.#settle(record, generation, result.exitCode, result.timedOut ? "timed out" : undefined);
-	}
-
-	#notifyCompletion(completion: DaemonCompletionNotification): void {
-		const pending = this.#pendingCompletions.get(completion.owner) ?? new Map<string, DaemonCompletionNotification>();
-		pending.set(completion.completionId, completion);
-		this.#pendingCompletions.set(completion.owner, pending);
-		const registration = this.#ownerSockets.get(completion.owner);
-		if (!registration || registration.socket.destroyed) return;
-		registration.socket.write(`${JSON.stringify(completion)}\n`);
-	}
-
 	#notifyObservers(snapshot: DaemonSnapshot, completion?: DaemonCompletionNotification): void {
 		const owner = snapshot.owner;
 		if (owner === undefined) return;
@@ -1080,6 +1059,27 @@ class DaemonBroker {
 			}
 			socket.write(line);
 		}
+	}
+
+	#markReady(record: ManagedDaemon): void {
+		if (!record.spec.ready || record.snapshot.state !== "starting") return;
+		if (!record.logReady || !record.portReady) return;
+		record.snapshot.state = "ready";
+		record.snapshot.readyAt = Date.now();
+		this.#persist(record);
+	}
+
+	async #onPtyExit(record: ManagedDaemon, generation: number, result: PtyRunResult): Promise<void> {
+		return this.#settle(record, generation, result.exitCode, result.timedOut ? "timed out" : undefined);
+	}
+
+	#notifyCompletion(completion: DaemonCompletionNotification): void {
+		const pending = this.#pendingCompletions.get(completion.owner) ?? new Map<string, DaemonCompletionNotification>();
+		pending.set(completion.completionId, completion);
+		this.#pendingCompletions.set(completion.owner, pending);
+		const registration = this.#ownerSockets.get(completion.owner);
+		if (!registration || registration.socket.destroyed) return;
+		registration.socket.write(`${JSON.stringify(completion)}\n`);
 	}
 
 	async #settle(record: ManagedDaemon, generation: number, exitCode?: number, error?: string): Promise<void> {
@@ -1140,8 +1140,8 @@ class DaemonBroker {
 						daemon: { ...record.snapshot },
 					} satisfies DaemonCompletionNotification)
 				: undefined;
-		if (completion) record.pendingCompletions.push(completion);
 		this.#notifyObservers(record.snapshot, completion);
+		if (completion) record.pendingCompletions.push(completion);
 		this.#persist(record);
 		await record.log?.close();
 		record.log = undefined;
