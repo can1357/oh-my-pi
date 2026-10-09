@@ -234,5 +234,8 @@ describe("ACP runtime schemas", () => {
 		expect(valid({ sessionUpdate: "session_message", messageId: "m", content: null })).toBe(true);
 		expect(valid({ sessionUpdate: "session_message", content: [{ type: "text", text: "hi" }] })).toBe(false);
 		expect(valid({ sessionUpdate: "session_message", messageId: "m", content: [{ type: "text" }] })).toBe(false);
+		expect(valid({ sessionUpdate: "session_message", messageId: "m", senderSessionId: false })).toBe(false);
+		expect(valid({ sessionUpdate: "session_message", messageId: "m", recipientSessionId: {} })).toBe(false);
+		expect(valid({ sessionUpdate: "session_message", messageId: "m", senderSessionId: null })).toBe(true);
 	});
 });

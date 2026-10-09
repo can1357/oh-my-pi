@@ -1,7 +1,10 @@
-import { logger } from "@oh-my-pi/pi-utils";
+import type { AssistantMessage } from "@oh-my-pi/pi-ai";
+import { getBlobsDir, logger } from "@oh-my-pi/pi-utils";
 import type { AgentSideConnection, SessionNotification, SubagentWorkState } from "@oh-my-pi/pi-utils/acp";
 import { AgentRegistry } from "../../registry/agent-registry";
 import type { AgentSession, AgentSessionEvent } from "../../session/agent-session";
+import { BlobStore, resolveImageDataSync } from "../../session/blob-store";
+import { isSilentAbort } from "../../session/messages";
 import {
 	type SubagentEventPayload,
 	type SubagentLifecyclePayload,
@@ -12,6 +15,7 @@ import type { EventBus } from "../../utils/event-bus";
 import {
 	type AcpLiveMessageState,
 	clearLiveAssistantMessageAfterEvent,
+	extractAssistantMessageText,
 	getLiveMessageId,
 	getLiveMessageProgress,
 	mapAgentSessionEventToAcpSessionUpdates,
@@ -29,6 +33,8 @@ interface ChildStream extends AcpLiveMessageState {
 	state: SubagentWorkState;
 	toolArgsById: Map<string, unknown>;
 	assignmentReported: boolean;
+	/** Whether the current turn streamed an assistant error to the client. */
+	turnErrorEmitted: boolean;
 	/** The child session's own cwd (its worktree for isolated runs), read from its registry ref. */
 	cwd: string | undefined;
 }
@@ -60,6 +66,7 @@ export class AcpSubagentStreams {
 	readonly #connection: AgentSideConnection;
 	readonly #session: AgentSession;
 	readonly #children = new Map<string, ChildStream>();
+	readonly #blobs = new BlobStore(getBlobsDir());
 	readonly #unsubscribers: Array<() => void>;
 
 	constructor(connection: AgentSideConnection, session: AgentSession, subagentEventBus: EventBus) {
@@ -129,6 +136,7 @@ export class AcpSubagentStreams {
 			state: { state: "running" },
 			toolArgsById: new Map(),
 			assignmentReported: false,
+			turnErrorEmitted: false,
 			cwd: undefined,
 			liveMessageId: undefined,
 			liveMessageProgress: undefined,
@@ -172,11 +180,14 @@ export class AcpSubagentStreams {
 		if (event.type === "tool_execution_start" || event.type === "tool_execution_update") {
 			child.toolArgsById.set(event.toolCallId, event.args);
 		}
+		if (event.type === "agent_start") child.turnErrorEmitted = false;
+		const fallback = event.type === "agent_end" ? this.#endOfTurnFallback(child, event) : [];
 		prepareLiveAssistantMessage(child, event);
 		const notifications = mapAgentSessionEventToAcpSessionUpdates(event, child.sessionId, {
 			getMessageId: message => getLiveMessageId(child, message),
 			getMessageProgress: message => getLiveMessageProgress(child, message),
 			getToolArgs: toolCallId => child.toolArgsById.get(toolCallId),
+			resolveImageData: data => resolveImageDataSync(this.#blobs, data),
 			// Never fall back to the root cwd: an isolated child's relative paths would
 			// then name files in the parent workspace instead of its worktree.
 			cwd: child.cwd,
@@ -184,7 +195,48 @@ export class AcpSubagentStreams {
 		});
 		if (event.type === "tool_execution_end") child.toolArgsById.delete(event.toolCallId);
 		clearLiveAssistantMessageAfterEvent(child, event);
-		return notifications;
+		if (event.type === "message_update" && event.assistantMessageEvent.type === "error" && notifications.length > 0) {
+			child.turnErrorEmitted = true;
+		}
+		return [...notifications, ...fallback];
+	}
+
+	/**
+	 * Text the client never received for a finished turn, mirroring the root
+	 * session's prompt-turn fallbacks: `agent_end` can overtake the final
+	 * assistant `message_end`, leaving its answer unsent, and a request that
+	 * fails before streaming emits only `agent_end` with the error.
+	 */
+	#endOfTurnFallback(
+		child: ChildStream,
+		event: Extract<AgentSessionEvent, { type: "agent_end" }>,
+	): SessionNotification[] {
+		const lastAssistant = event.messages.findLast(
+			(message): message is AssistantMessage => message.role === "assistant",
+		);
+		if (!lastAssistant) return [];
+		const texts: string[] = [];
+		// A live message whose `message_end` has not been mapped yet still holds its progress.
+		const progress = child.liveMessageProgress;
+		const answer = extractAssistantMessageText(lastAssistant);
+		if (progress && !progress.textEmitted && answer) {
+			progress.textEmitted = true;
+			texts.push(answer);
+		}
+		if (
+			lastAssistant.stopReason === "error" &&
+			lastAssistant.errorMessage &&
+			!isSilentAbort(lastAssistant) &&
+			!child.turnErrorEmitted
+		) {
+			child.turnErrorEmitted = true;
+			texts.push(lastAssistant.errorMessage);
+		}
+		const messageId = child.liveMessageId ?? crypto.randomUUID();
+		return texts.map(text => ({
+			sessionId: child.sessionId,
+			update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text }, messageId },
+		}));
 	}
 
 	#sendUpdate(child: ChildStream, patch: { title?: string; description?: string; state?: SubagentWorkState }): void {

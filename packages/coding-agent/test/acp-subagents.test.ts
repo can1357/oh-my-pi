@@ -208,6 +208,55 @@ describe("AcpSubagentStreams", () => {
 		// With no session to read a cwd from, nothing may resolve against the parent workspace.
 		expect(locations[1]?.some(path => path.startsWith("/work/"))).not.toBe(true);
 	});
+
+	it("sends a child's final answer or error when agent_end arrives without it, exactly once", async () => {
+		const assistant = (text: string, extra: Record<string, unknown> = {}) => ({
+			role: "assistant",
+			content: text ? [{ type: "text", text }] : [],
+			stopReason: "stop",
+			timestamp: 1,
+			...extra,
+		});
+		const emit = (id: string, event: Record<string, unknown>) =>
+			bus.emit(TASK_SUBAGENT_EVENT_CHANNEL, { id, event: event as AgentSessionEvent });
+		for (const id of ["Raced", "Failed", "Streamed"]) {
+			registerAgent(id, ROOT_AGENT_ID);
+			bus.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, lifecycle(id, "started"));
+			emit(id, { type: "agent_start" });
+		}
+		// `agent_end` overtakes the final `message_end`: only a thought reached the client.
+		const answer = assistant("the flaky test is X");
+		emit("Raced", {
+			type: "message_update",
+			message: answer,
+			assistantMessageEvent: { type: "thinking_delta", delta: "hmm", contentIndex: 0 },
+		});
+		emit("Raced", { type: "agent_end", messages: [answer] });
+		emit("Raced", { type: "message_end", message: answer });
+		// The request failed before streaming anything.
+		emit("Failed", {
+			type: "agent_end",
+			messages: [assistant("", { stopReason: "error", errorMessage: "model_not_supported" })],
+		});
+		// A normally streamed answer needs no fallback.
+		const streamed = assistant("done");
+		emit("Streamed", {
+			type: "message_update",
+			message: streamed,
+			assistantMessageEvent: { type: "text_delta", delta: "done", contentIndex: 0 },
+		});
+		emit("Streamed", { type: "message_end", message: streamed });
+		emit("Streamed", { type: "agent_end", messages: [streamed] });
+
+		const texts = (await delivered(7))
+			.filter(n => n.update.sessionUpdate === "agent_message_chunk")
+			.map(n => [n.sessionId.split("/")[1], n.update.sessionUpdate === "agent_message_chunk" && n.update.content]);
+		expect(texts).toEqual([
+			["Raced", { type: "text", text: "the flaky test is X" }],
+			["Failed", { type: "text", text: "model_not_supported" }],
+			["Streamed", { type: "text", text: "done" }],
+		]);
+	});
 });
 
 describe("ACP session messages for agent IRC traffic", () => {

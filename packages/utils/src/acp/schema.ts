@@ -130,6 +130,12 @@ function sessionNotification(value: unknown): boolean {
 		case "session_message":
 			return (
 				typeof update.messageId === "string" &&
+				(update.senderSessionId === undefined ||
+					update.senderSessionId === null ||
+					typeof update.senderSessionId === "string") &&
+				(update.recipientSessionId === undefined ||
+					update.recipientSessionId === null ||
+					typeof update.recipientSessionId === "string") &&
 				(update.content === undefined ||
 					update.content === null ||
 					(Array.isArray(update.content) && update.content.every(contentBlock)))
