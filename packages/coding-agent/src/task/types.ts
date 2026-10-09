@@ -229,6 +229,7 @@ export interface AgentDefinition {
 	description: string;
 	systemPrompt: string;
 	tools?: string[];
+	/** Exact names or `mcp__*` / `mcp__<server>_*` wildcards (bare `*` = deny-all), removed after the allowlist. Hidden protocol tools are immune. */
 	disallowedTools?: string[];
 	spawns?: string[] | "*";
 	model?: string[];

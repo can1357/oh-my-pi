@@ -121,7 +121,10 @@ interface SessionToolsOptions {
 	presentationPinnedToolNames?: ReadonlySet<string>;
 	/** Subagent tool scoping: every runtime active-set mutation preserves the startup scope. */
 	enforceToolAllowlist?: boolean;
-	/** Names the enforced `tools:` allowlist permits (hidden protocol tools are always permitted). */
+	/** Exact names the enforced `tools:` allowlist permits. Hidden protocol tools
+	 * (`yield`, `goal`, `think`) stay permitted only when built-in provenance
+	 * holds (an extension-defined same-named tool is still gated); wildcards
+	 * are not expanded here. */
 	allowedToolNames?: ReadonlySet<string>;
 	/** Disallow patterns removed from every runtime selection (trailing `*` = prefix wildcard). */
 	disallowedToolPatterns?: readonly string[];
@@ -478,8 +481,10 @@ export class SessionTools {
 		}
 		this.#presentationPinnedToolNames = options.presentationPinnedToolNames;
 		this.#enforceToolAllowlist = options.enforceToolAllowlist === true;
-		this.#allowedToolNames = options.allowedToolNames;
-		this.#disallowedToolPatterns = options.disallowedToolPatterns ?? [];
+		// Copy caller-owned collections: a post-construction mutation must not
+		// silently change enforcement.
+		this.#allowedToolNames = options.allowedToolNames === undefined ? undefined : new Set(options.allowedToolNames);
+		this.#disallowedToolPatterns = [...(options.disallowedToolPatterns ?? [])];
 		this.#ensureWriteRegistered = options.ensureWriteRegistered;
 		this.#isDeviceOnlyWrite = options.isDeviceOnlyWrite;
 		this.#deviceOnlyWriteTransportAvailable = this.#isDeviceOnlyWrite?.() === true;
@@ -1108,14 +1113,6 @@ export class SessionTools {
 	}
 
 	/**
-	 * Scope invariant for runtime mutations: a tool the startup scoping removed
-	 * (unlisted under an enforced `tools:` allowlist, or matched by
-	 * `disallowedTools:`) can never re-enter the active set through
-	 * {@link setActiveToolsByName}, extension hooks, or internal toggles. Hidden
-	 * protocol tools stay permitted, mirroring the shared
-	 * {@link isToolScopedIn} predicate from builtin-names.
-	 */
-	/**
 	 * Per-server resource gate for `read mcp://…`, which resolves through the
 	 * process-global protocol router and therefore cannot consult a session
 	 * itself. Uses the same shared decision as the Cursor adapter: a server that
@@ -1177,6 +1174,12 @@ export class SessionTools {
 		);
 	}
 
+	/**
+	 * Scope invariant for runtime mutations: a tool the startup scoping removed
+	 * (unlisted under an enforced `tools:` allowlist, or matched by
+	 * `disallowedTools:`) can never re-enter the active set through
+	 * {@link setActiveToolsByName}, extension hooks, or internal toggles.
+	 */
 	#scopeActiveToolSelection(toolNames: string[]): string[] {
 		if (!this.#enforceToolAllowlist && this.#disallowedToolPatterns.length === 0) return toolNames;
 		// Pair-aware, like the startup scope: a runtime mutation (extension

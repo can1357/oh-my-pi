@@ -312,7 +312,10 @@ export interface AgentSessionConfig {
 	presentationPinnedToolNames?: ReadonlySet<string>;
 	/** Subagent tool scoping: every runtime active-set mutation preserves the startup scope. */
 	enforceToolAllowlist?: boolean;
-	/** Names the enforced `tools:` allowlist permits (hidden protocol tools are always permitted). */
+	/** Exact names the enforced `tools:` allowlist permits. Hidden protocol tools
+	 * (`yield`, `goal`, `think`) stay permitted only when built-in provenance
+	 * holds (an extension-defined same-named tool is still gated); wildcards
+	 * are not expanded here. */
 	allowedToolNames?: ReadonlySet<string>;
 	/** Disallow patterns removed from every runtime selection (trailing `*` = prefix wildcard). */
 	disallowedToolPatterns?: readonly string[];

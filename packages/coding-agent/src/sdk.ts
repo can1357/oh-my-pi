@@ -787,10 +787,11 @@ export interface CreateAgentSessionOptions {
 	/**
 	 * Tool-name patterns removed from the active set: trailing `*` is a prefix
 	 * wildcard (`mcp__*` = all MCP tools, `mcp__<server>_*` = one server), any
-	 * other pattern matches the exact name. The `<server>` is the sanitized
-	 * tool-name prefix (`createMCPToolName` lowercases and collapses
-	 * non-`[a-z_]` characters). Hidden protocol tools (`yield`, `goal`, `think`)
-	 * are never disallowed.
+	 * other pattern matches the exact name (bare `*` denies all). The `<server>`
+	 * is the sanitized tool-name prefix (`createMCPToolName` lowercases, keeps
+	 * digits, and collapses other non-`[a-z0-9_]` characters). Hidden protocol
+	 * tools (`yield`, `goal`, `think`) are never disallowed; `disallowedTools:`
+	 * `['exec*']` blocks the alias without expanding it to `eval`/`bash`.
 	 */
 	disallowedTools?: string[];
 	/**

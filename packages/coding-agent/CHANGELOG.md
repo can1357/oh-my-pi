@@ -4,7 +4,7 @@
 
 ### Breaking Changes
 
-- Subagents that declare `tools:` now receive exactly that list: custom, extension, and MCP proxy tools not named in it are excluded from the active set and the `xd://` catalog instead of being force-included ([#8599](https://github.com/can1357/oh-my-pi/issues/8599)).
+- Subagents that declare `tools:` now receive exactly that list: custom, extension, and MCP proxy tools not named in it are excluded from the active set and the `xd://` catalog instead of being force-included. This includes the bundled `scout`/`reviewer`/`security-reviewer` agents (they declare `tools:`), which no longer inherit MCP/extension/custom tools, and session-managed builtins (`manage_skill`, `learn`, `context_notes`, `new_context`) plus the `checkpoint`/`rewind` sister are no longer force-added to declared lists. The scope also gates MCP server instructions, MCP resource listing/reads, and Cursor-provider frame execution for scoped subagents ([#8599](https://github.com/can1357/oh-my-pi/issues/8599)).
 
 ### Added
 
