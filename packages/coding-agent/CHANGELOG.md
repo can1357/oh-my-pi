@@ -75,6 +75,7 @@
 - Added `contextFiles.extra` to load extra instruction files, such as `AGENTS.local.md`, beside the usual context file ([#15147](https://github.com/can1357/oh-my-pi/pull/15147) by [@Shadorain](https://github.com/Shadorain)).
 - `/annotate` opens the note you are writing, a file or typed-prompt source, or (for local diff reviews) the current working-tree file in `$VISUAL` or `$EDITOR` with the external-editor key (Ctrl+G by default); a file source is saved back and its notes follow the edited text ([#15151](https://github.com/can1357/oh-my-pi/pull/15151) by [@Shadorain](https://github.com/Shadorain))
 - Added opt-in periodic stall assessments for the main agent, with todo changes, agent histories and active time, background job/service completions, and configurable idle waking (`stallReminders`, default interval: 60 minutes) ([#15078](https://github.com/can1357/oh-my-pi/pull/15078) by [@pedropaulovc](https://github.com/pedropaulovc)).
+- Added opt-in periodic stall assessments for the main agent, with todo changes, transcript-backed agent histories and active time that remain available after parked sessions are released, background job/service completions, and configurable idle waking (`stallReminders`, default interval: 60 minutes) ([#15078](https://github.com/can1357/oh-my-pi/pull/15078) by [@pedropaulovc](https://github.com/pedropaulovc)).
 
 ### Changed
 
