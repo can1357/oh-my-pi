@@ -9,6 +9,7 @@
 ### Fixed
 
 - Fixed Claude Haiku 5.5 requests silently enabling adaptive thinking when reasoning is off, on native Bedrock (main and helper calls) and the Anthropic API; conversations whose earlier effort controls rule out disabled thinking fall back to lowest-effort adaptive thinking instead of failing ([#14996](https://github.com/can1357/oh-my-pi/pull/14996) by [@bse-ai](https://github.com/bse-ai)).
+- Fixed Codex WebSocket reconnects across authentication or routing changes, including pooled sockets that fail the 30-second idle health gate, so effective hook-adjusted tool history is replayed in order without an obsolete `previous_response_id` before same-route chaining resumes; this overlaps the scope discussed in [#12131](https://github.com/can1357/oh-my-pi/issues/12131) without claiming coordination or supersession.
 
 ## [18.8.6] - 2026-10-08
 
