@@ -68,7 +68,7 @@ export type SchemeSelectors = "lines" | "none" | "opaque";
 /**
  * Mutation class of a writable scheme; drives plan-mode and device-only `write` gates.
  * - `workspace`: mutates user/external state; blocked in plan mode and device-only sessions.
- * - `sandbox`: session scratch space (local://); allowed in plan mode, and in device-only sessions while plan mode is active.
+ * - `sandbox`: session scratch space (local://); allowed in plan mode and device-only sessions.
  * - `coordination`: peer messaging (agent://); always allowed. {@link SchemeWritePolicy.cancels} grants the same per URL.
  * - `device`: tool-device dispatch (xd://); always allowed, the device enforces its own policy.
  */

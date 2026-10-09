@@ -126,8 +126,8 @@ export interface ResolvedModelRoleValue {
 export interface ModelCompactionPoint {
 	/** Context tokens that trigger auto-compaction; undefined when auto-compaction is off or the window is unknown. */
 	tokens: number | undefined;
-	/** The configured percentage of the window, when the trigger is percent-based. */
-	percent?: number;
+	/** Why it triggers there, in a few words: `fixed`, `85% of 400K base`, `80% of window`. */
+	basis?: string;
 	/** What sets it: the matching `compaction.modelThresholds` key, `global`, or `default`. */
 	source: string;
 	/** The model's own exact entry as editable text (`90k`, `80%`); absent when it has none. */
@@ -2174,7 +2174,7 @@ export class ModelBrowser implements Component {
 			const value =
 				compaction.tokens === undefined
 					? "off"
-					: `${compaction.tokens.toLocaleString("en-US")}${compaction.percent !== undefined ? ` · ${compaction.percent}%` : ""}`;
+					: `${compaction.tokens.toLocaleString("en-US")}${compaction.basis !== undefined ? ` · ${compaction.basis}` : ""}`;
 			facts.push({
 				k: [span("Compacts at", "muted")],
 				v: [span(value, "mono"), span(` · ${compaction.source}`, "dim")],

@@ -100,6 +100,14 @@ export class Disclosure implements Component {
 		this.#body?.invalidate?.();
 	}
 
+	releaseRenderCaches(): void {
+		this.#cache = undefined;
+		this.#boundedCache = undefined;
+		this.#summary?.releaseRenderCaches?.();
+		this.#collapsedBody?.releaseRenderCaches?.();
+		this.#body?.releaseRenderCaches?.();
+	}
+
 	dispose(): void {
 		if (this.#disposed) return;
 		this.#disposed = true;
