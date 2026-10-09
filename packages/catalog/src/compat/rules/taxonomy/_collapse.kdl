@@ -1,4 +1,10 @@
 collapse {
+	// Offline Opus tier selectors map to the canonical parameterized Sand row.
+	// Exact live packed rows win; discovery owns server route availability.
+	provider-alias "grokbot" "claude-opus-5-5-low" "claude-opus-5-5"
+	provider-alias "grokbot" "claude-opus-5-5-medium" "claude-opus-5-5"
+	provider-alias "grokbot" "claude-opus-5-5-high" "claude-opus-5-5"
+	provider-alias "grokbot" "claude-opus-5-5-xhigh" "claude-opus-5-5"
 	thinking-suffix "-thinking"
 	// Thinking-pair tokens: bounded (possibly infix) markers that name the
 	// thinking sibling of a live bare twin (`sonar-reasoning-pro` beside

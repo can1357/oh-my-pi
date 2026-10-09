@@ -20,6 +20,7 @@ import { buildModel } from "../src/build";
 import { isRetiredProvider } from "../src/compat/behavior";
 import { collapseVariants } from "../src/compat/collapse";
 import { providerEntries, providerEntry, seedModels } from "../src/compat/providers";
+import { isCredentialScopedCatalogProvider, resolveModelPolicy } from "../src/compat/resolve";
 import type { CompiledProvider } from "../src/compat/types";
 import { ANTIGRAVITY_PRIMARY_ENDPOINT, fetchAntigravityDiscoveryModels } from "../src/discovery/antigravity";
 import { createModelManager } from "../src/model-manager";
@@ -74,16 +75,16 @@ const packageRoot = path.join(import.meta.dir, "..");
 const DISCOVERY_ONLY_PROVIDERS = new Set(["ollama", "vllm", "lm-studio", "litellm"]);
 /**
  * Credential-scoped catalogs (Devin's Cascade roster is gated per account/team
- * via `allowed_model_uids`). Fetching them during generation would bake one
- * private account's entitlements into the shared bundle, and those rows then
- * survive forever as previous-snapshot zombies: a later regen without that
- * credential can never mark the provider authoritative to prune them. These
- * providers are never fetched at generation time and their previous-snapshot
- * rows are dropped — the curated static seed is the only bundled surface, and
- * runtime discovery is authoritative per credential (mirrors the GitLab Duo
- * fallback-only policy below).
+ * via `allowed_model_uids`; Grok Bot AvailableModels is renewer-account entitlements).
+ * Fetching them during generation would bake one private account's entitlements
+ * into the shared bundle, and those rows then survive forever as previous-snapshot
+ * zombies: a later regen without that credential can never mark the provider
+ * authoritative to prune them. These providers are never fetched at generation
+ * time and their previous-snapshot rows are dropped — the curated static seed is
+ * the only bundled surface, and runtime discovery is authoritative per credential
+ * (mirrors the GitLab Duo fallback-only policy below). Exclusion is derived from
+ * KDL `credential-scoped-catalog` via {@link isCredentialScopedCatalogProvider}.
  */
-const CREDENTIAL_SCOPED_PROVIDERS = new Set(["devin"]);
 
 /**
  * The rows one provider's authored seed (`rules/providers/<id>.kdl`) contributes
@@ -147,9 +148,9 @@ export function mergePreviousSnapshotModels(
 			if (
 				!fetchedKeys.has(`${model.provider}/${model.id}`) &&
 				!DISCOVERY_ONLY_PROVIDERS.has(model.provider) &&
-				!CREDENTIAL_SCOPED_PROVIDERS.has(model.provider) &&
-				// Yolo-Auto's documented static seed is the complete fallback
-				// catalog; never resurrect retired ids from the previous snapshot.
+				resolveModelPolicy(model).catalog.credentialScopedCatalog !== true &&
+				// Yolo-Auto documented static seeds are the complete offline fallback;
+				// never resurrect retired ids from the previous snapshot.
 				model.provider !== "yolo-auto" &&
 				!isRetiredProvider(model.provider) &&
 				!excludedProviders.has(model.provider)
@@ -297,7 +298,8 @@ function applyGlobalModelsDevFallback(
 			model.provider === "meta" ||
 			// Providers whose discovery is the deployment truth and whose
 			// corrections live in KDL opt out of same-id reference fills.
-			providerEntry(model.provider)?.skipCrossProviderReferenceFills === true
+			providerEntry(model.provider)?.skipCrossProviderReferenceFills === true ||
+			resolveModelPolicy(model).catalog.credentialScopedCatalog === true
 		) {
 			return model;
 		}
@@ -564,7 +566,7 @@ async function generateModels() {
 		(descriptor): descriptor is CatalogProviderDescriptor =>
 			isCatalogDescriptor(descriptor) &&
 			!DISCOVERY_ONLY_PROVIDERS.has(descriptor.providerId) &&
-			!CREDENTIAL_SCOPED_PROVIDERS.has(descriptor.providerId),
+			!isCredentialScopedCatalogProvider(descriptor.providerId),
 	);
 	const catalogProviderModelBatches = await Promise.all(
 		catalogProviderDescriptors.map(async descriptor => ({
@@ -790,6 +792,41 @@ export function buildGeneratedModel(model: ModelSpec<Api>): Model<Api> {
 	return buildModel(spec);
 }
 
+/** Rebuild selected authored seeds without credentials, network discovery, or changes to other snapshot rows. */
+export function generateOfflineSeedCatalog(
+	snapshot: Readonly<Record<string, Readonly<Record<string, Model<Api>>>>>,
+	providerIds: readonly string[],
+): Record<string, Readonly<Record<string, Model<Api>>>> {
+	const result = { ...snapshot };
+	for (const providerId of providerIds) {
+		const entry = providerEntry(providerId);
+		if (!entry?.seed || entry.seed.bundle === "never") throw new Error(`Provider ${providerId} has no bundled seed`);
+		const seeds = seedModels(providerId);
+		if (seeds.length === 0) throw new Error(`Provider ${providerId} has an empty seed`);
+		result[providerId] = Object.fromEntries(seeds.map(spec => [spec.id, buildGeneratedModel(spec)]));
+	}
+	return Object.fromEntries(Object.entries(result).sort(([a], [b]) => a.localeCompare(b)));
+}
+
 if (import.meta.main) {
-	generateModels().catch(console.error);
+	const offlineProviders = process.argv
+		.slice(2)
+		.filter(arg => arg.startsWith("--offline-provider="))
+		.map(arg => arg.slice("--offline-provider=".length));
+	const run =
+		offlineProviders.length > 0
+			? Bun.write(
+					path.join(packageRoot, "src/models.json"),
+					JSON.stringify(
+						generateOfflineSeedCatalog(
+							prevModelsJson as unknown as Record<string, Record<string, Model<Api>>>,
+							offlineProviders,
+						),
+					),
+				)
+			: generateModels();
+	run.catch(error => {
+		console.error(error);
+		process.exitCode = 1;
+	});
 }

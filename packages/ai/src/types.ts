@@ -50,6 +50,7 @@ import type { GitLabDuoWorkflowOptions } from "./providers/gitlab-duo-workflow";
 import type { GoogleOptions } from "./providers/google";
 import type { GoogleGeminiCliOptions } from "./providers/google-gemini-cli";
 import type { GoogleVertexOptions } from "./providers/google-vertex";
+import type { GrokbotOptions } from "./providers/grokbot";
 import type { OllamaChatOptions } from "./providers/ollama";
 import type { OpenAICodexResponsesOptions } from "./providers/openai-codex-responses";
 import type { OpenAICompletionsOptions } from "./providers/openai-completions";
@@ -88,6 +89,7 @@ export interface ApiOptionsMap {
 	"factory-droid-agent": FactoryDroidOptions;
 	"gitlab-duo-agent": GitLabDuoWorkflowOptions;
 	"devin-agent": DevinOptions;
+	"grokbot-sand": GrokbotOptions;
 	"apple-foundation-models": AppleFoundationModelsOptions;
 }
 // Compile-time exhaustiveness check - this will fail if ApiOptionsMap doesn't have all KnownApi keys
@@ -476,6 +478,16 @@ export type OpenAIResponseInclude =
 	| "reasoning.encrypted_content"
 	| "message.output_text.logprobs";
 
+/** Control-plane-provided identity and optional attestation for a Sand workload. */
+export interface GrokbotInferenceRequestContext {
+	workload: string;
+	jobId: string;
+	user: string;
+	inferenceProxyJwt?: string;
+	trafficType?: string;
+	provider429RetryPolicy?: string;
+}
+
 export interface StreamOptions {
 	temperature?: number;
 	topP?: number;
@@ -522,6 +534,14 @@ export interface StreamOptions {
 	 * These are merged on top of model-defined headers.
 	 */
 	headers?: Record<string, string>;
+	/** Authorized Sand workload context; a supplier can return a fresh, bound context per Stream attempt. */
+	grokbotInferenceRequestContext?:
+		| GrokbotInferenceRequestContext
+		| (() => GrokbotInferenceRequestContext | Promise<GrokbotInferenceRequestContext>);
+	/** Optional runtime-issued Sand workload authorization. Supplier is called per attempt; issuer determines token lifetime/reuse. Null disables environment sourcing. */
+	grokbotInferenceAuthenticationJwt?: string | (() => string | Promise<string>) | null;
+	/** Explicit one-shot attestation file; atomically claimed, read, and deleted when used. */
+	grokbotInferenceAuthenticationJwtFile?: string;
 	/**
 	 * Optional explicit request attribution override for providers that support it.
 	 */
@@ -1112,7 +1132,46 @@ export interface AnthropicCompactionFiles {
 	after: number;
 }
 
-export type ProviderPayload = OpenAIResponsesHistoryPayload | AnthropicMessagePayload | AnthropicCompactionPayload;
+/**
+ * One Anthropic/Claude native reasoning block carried verbatim across turns.
+ * Anthropic validates `signature` on replayed thinking, so blocks must round-trip
+ * byte-identical — hence a dedicated payload instead of relying on ThinkingContent
+ * in `content`, which display/compaction transforms may strip.
+ */
+export interface AnthropicNativeContentBlock {
+	/** `thinking` (signed) or `redacted_thinking` (encrypted/redacted). */
+	type: "thinking" | "redacted_thinking";
+	/** Thinking text for `thinking` blocks. */
+	thinking?: string;
+	/** Opaque Anthropic signature; replayed verbatim. */
+	signature?: string;
+	/** Redacted/encrypted payload for `redacted_thinking` blocks. */
+	data?: string;
+}
+
+/**
+ * Anthropic/Claude native thinking carried across turns so signed reasoning
+ * replays byte-identical. Written by the grokbot (sand) Anthropic-class provider
+ * onto the assistant message it produced; read back by that provider when it
+ * encodes the next request's `reasoningParts`. Other providers ignore it.
+ */
+export interface AnthropicNativeContentPayload {
+	type: "anthropicNativeContent";
+	/** Provider that produced the blocks; only that provider replays them natively. */
+	provider: string;
+	/** Concrete serving model when known (signatures name the model). */
+	model?: string;
+	/** Native reasoning blocks in wire order. */
+	blocks: AnthropicNativeContentBlock[];
+	/** Original server-provided native content string; replay verbatim in Sand message field 18. */
+	nativeContent?: string;
+}
+
+export type ProviderPayload =
+	| OpenAIResponsesHistoryPayload
+	| AnthropicMessagePayload
+	| AnthropicCompactionPayload
+	| AnthropicNativeContentPayload;
 
 /** Provider-reported rewrite applied to request content before inference. */
 export interface ProviderInputTransformation {

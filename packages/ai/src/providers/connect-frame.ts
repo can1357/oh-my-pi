@@ -52,6 +52,11 @@ export class ConnectFrameDecoder {
 		this.#limit = options.limit;
 	}
 
+	/** Remaining bytes at EOF expose truncated headers and payloads to the transport. */
+	get bufferedBytes(): number {
+		return this.#buffered;
+	}
+
 	/**
 	 * Buffer `chunk` (if any) and yield every frame now complete, in wire order.
 	 * An oversize length prefix throws after the frames that precede it.
