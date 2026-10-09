@@ -117,6 +117,19 @@ export const cfgBashAutoBackgroundEnabled = register({
 	},
 });
 
+export const cfgBashGitGuard = register({
+	id: "bash.gitGuard",
+	type: "boolean",
+	default: false,
+	ui: {
+		tab: "shell",
+		group: "Bash",
+		label: "Git Guard",
+		description:
+			"Refuse git commands that discard or move shared work in the bash tool: stash, reset --hard or to another commit, and checkout/switch/restore outside a merge or rebase conflict",
+	},
+});
+
 export const cfgBashPatterns = register({
 	id: "bash.patterns",
 	type: "array",
