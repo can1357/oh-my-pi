@@ -34,6 +34,22 @@ describe("classifyMCPServer", () => {
 		expect(classified.canClearAuthentication).toBe(true);
 	});
 
+	test("signing out stays available on disabled servers and for an orphaned persisted OAuth block", () => {
+		const authStorage = {
+			credentials: { get: () => ({ type: "oauth", access: "stored-access-token" }) },
+		} as unknown as AuthStorage;
+		expect(classifyMCPServer({ config: directHttp, authStorage, disabled: true }).canClearAuthentication).toBe(true);
+		expect(classifyMCPServer({ config: directHttp, authStorage, shadowed: true }).canClearAuthentication).toBe(false);
+
+		const orphaned = { ...directHttp, auth: { type: "oauth" as const, credentialId: "mcp_oauth_gone" } };
+		const writable = { provider: "native", path: "/tmp/mcp.json", level: "user" as const };
+		expect(classifyMCPServer({ config: orphaned, source: writable }).canClearAuthentication).toBe(true);
+		// A read-only source cannot have its auth block removed.
+		expect(
+			classifyMCPServer({ config: orphaned, source: { ...writable, provider: "claude" } }).canClearAuthentication,
+		).toBe(false);
+	});
+
 	test("disabled and shadowed rows cannot run contextual actions", () => {
 		const disabled = classifyMCPServer({ config: directHttp, disabled: true });
 		expect(disabled.canTest).toBe(false);

@@ -811,9 +811,22 @@ export class MCPManager {
 			this.#serverConfigs.set(name, config);
 			const connectionEpoch = this.#epoch;
 
+			// Whether this attempt still owns the server's pending slot. Only called
+			// after an await, by which point `connectionPromise` is registered.
+			const ownsPendingSlot = (): boolean =>
+				!signal?.aborted &&
+				this.#epoch === connectionEpoch &&
+				this.#pendingConnections.get(name) === connectionPromise;
+
 			// Resolve auth config before connecting, but do so per-server in parallel.
 			const connectionPromise = (async () => {
 				const resolvedConfig = await this.#resolveAuthConfig(config);
+				// Auth resolution can await a token refresh or a command-backed value;
+				// a cancel, reset, or per-server disconnect in that window must not
+				// create the transport (stdio would still spawn the server process).
+				if (!ownsPendingSlot()) {
+					throw new Error(`Server "${name}" was disconnected during initial connection`);
+				}
 				return connectToServer(name, resolvedConfig, {
 					signal,
 					onNotification: (method, params) => {
@@ -832,11 +845,7 @@ export class MCPManager {
 						connection._source = sources[name];
 					}
 
-					if (
-						signal?.aborted ||
-						this.#epoch !== connectionEpoch ||
-						this.#pendingConnections.get(name) !== connectionPromise
-					) {
+					if (!ownsPendingSlot()) {
 						this.#detachConnection(name, connection);
 						void disconnectServer(connection).catch(() => {});
 						throw new Error(`Server "${name}" was disconnected during initial connection`);
@@ -1686,6 +1695,11 @@ export class MCPManager {
 		signal: AbortSignal,
 	): Promise<MCPServerConnection> {
 		const resolvedConfig = await this.#resolveAuthConfig(config);
+		// Same window as the initial connect: never open a transport for a
+		// reconnect that was cancelled or superseded while auth resolved.
+		if (signal.aborted || this.#serverConfigs.get(name) !== config || this.#epoch !== reconnectEpoch) {
+			throw new Error(`Server "${name}" was disconnected during reconnection`);
+		}
 		const connection = await connectToServer(name, resolvedConfig, {
 			signal,
 			onNotification: (method, params) => {

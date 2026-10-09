@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import * as configValue from "@oh-my-pi/pi-coding-agent/config/resolve-config-value";
 import * as mcpClient from "@oh-my-pi/pi-coding-agent/mcp/client";
 import { MCPManager } from "@oh-my-pi/pi-coding-agent/mcp/manager";
 import { MCPServerActions } from "@oh-my-pi/pi-coding-agent/mcp/server-actions";
@@ -305,5 +306,81 @@ describe("MCPManager initial connection ownership", () => {
 		expect(manager.getConnection("server")).toBeUndefined();
 		expect(manager.getTools()).toEqual([]);
 		expect(refreshMCPTools).not.toHaveBeenCalled();
+	});
+
+	// A command-backed env value keeps auth resolution pending; a cancel in that
+	// window must stop before any transport exists (stdio would spawn the server).
+	const SLOW_ENV_CONFIG: MCPStdioServerConfig = { ...CONFIG, env: { TOKEN: "!print-token" } };
+
+	it("does not open a transport for an initial connect cancelled during auth resolution", async () => {
+		const manager = new MCPManager(process.cwd());
+		const resolving = Promise.withResolvers<void>();
+		const value = Promise.withResolvers<string>();
+		vi.spyOn(configValue, "resolveConfigValue").mockImplementation(() => {
+			resolving.resolve();
+			return value.promise;
+		});
+		const connect = vi.spyOn(mcpClient, "connectToServer");
+		const controller = new AbortController();
+
+		const loading = manager.connectServers({ server: SLOW_ENV_CONFIG }, {}, undefined, undefined, controller.signal);
+		await resolving.promise;
+		controller.abort();
+		value.resolve("token");
+		await loading.catch(() => undefined);
+		await manager.waitForPendingConnections();
+
+		expect(connect).not.toHaveBeenCalled();
+		expect(manager.getConnection("server")).toBeUndefined();
+	});
+
+	it("does not open a transport for an initial connect whose server is disconnected during auth resolution", async () => {
+		const manager = new MCPManager(process.cwd());
+		const resolving = Promise.withResolvers<void>();
+		const value = Promise.withResolvers<string>();
+		vi.spyOn(configValue, "resolveConfigValue").mockImplementation(() => {
+			resolving.resolve();
+			return value.promise;
+		});
+		const connect = vi.spyOn(mcpClient, "connectToServer");
+
+		const loading = manager.connectServers({ server: SLOW_ENV_CONFIG }, {});
+		await resolving.promise;
+		// Disabling one server neither aborts the load's signal nor bumps the epoch.
+		await manager.disconnectServer("server");
+		value.resolve("token");
+		await loading.catch(() => undefined);
+		await manager.waitForPendingConnections();
+
+		expect(connect).not.toHaveBeenCalled();
+		expect(manager.getConnection("server")).toBeUndefined();
+	});
+
+	it("does not open a transport for a reconnect cancelled during auth resolution", async () => {
+		const manager = new MCPManager(process.cwd());
+		const current = fakeConnection("server");
+		const connect = vi.spyOn(mcpClient, "connectToServer").mockResolvedValueOnce(current.connection);
+		vi.spyOn(mcpClient, "listTools").mockResolvedValue([]);
+		const resolve = vi.spyOn(configValue, "resolveConfigValue").mockResolvedValue("token");
+		await manager.connectServers({ server: SLOW_ENV_CONFIG }, {});
+		expect(connect).toHaveBeenCalledTimes(1);
+
+		const resolving = Promise.withResolvers<void>();
+		const value = Promise.withResolvers<string>();
+		resolve.mockImplementation(() => {
+			resolving.resolve();
+			return value.promise;
+		});
+		const actions = new MCPServerActions({ cwd: process.cwd(), manager, refreshMCPTools: async () => {} });
+		const controller = new AbortController();
+		const reconnect = actions.reconnect({ name: "server", config: SLOW_ENV_CONFIG }, controller.signal);
+		await resolving.promise;
+		controller.abort();
+		await expect(reconnect).rejects.toMatchObject({ name: "AbortError" });
+		value.resolve("token");
+		await manager.waitForPendingConnections();
+
+		expect(connect).toHaveBeenCalledTimes(1);
+		expect(manager.getConnection("server")).toBeUndefined();
 	});
 });

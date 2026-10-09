@@ -35,6 +35,19 @@ export interface LoadMCPConfigsResult {
 }
 
 /**
+ * On-disk entry with its transport made explicit, using the same inference as
+ * {@link mcpServerToConfig}: a standalone entry may omit `type` and give only a
+ * `url`, which discovery connects over HTTP. Persistence keeps the raw entry;
+ * capability checks and connections need the transport discovery used.
+ */
+export function withInferredTransport(config: MCPServerConfig): MCPServerConfig {
+	if (config.type !== undefined || config.command || !("url" in config)) return config;
+	// Raw JSON: a type-less entry is typed as stdio but may carry an HTTP url.
+	const { url } = config;
+	return typeof url === "string" && url ? { ...config, type: "http", url } : config;
+}
+
+/**
  * Convert canonical MCPServer to legacy MCPServerConfig.
  */
 export function mcpServerToConfig(server: MCPServer): MCPServerConfig {
@@ -329,16 +342,17 @@ export function filterExaMCPServers(
 }
 
 /**
- * Validate server config has required fields.
+ * Validate server config has required fields. A type-less `url` entry is judged
+ * as HTTP, as discovery reads it; callers still persist the entry unchanged.
  */
-export function validateServerConfig(name: string, config: MCPServerConfig): string[] {
+export function validateServerConfig(name: string, rawConfig: MCPServerConfig): string[] {
 	const errors: string[] = [];
-
+	const config = withInferredTransport(rawConfig);
 	const serverType = config.type ?? "stdio";
 
 	// Check for conflicting transport fields
 	const hasCommand = "command" in config && config.command;
-	const hasUrl = "url" in config && (config as { url?: string }).url;
+	const hasUrl = "url" in config && config.url;
 	if (hasCommand && hasUrl) {
 		errors.push(
 			`Server "${name}": both "command" and "url" are set - server should be either stdio (command) OR http/sse (url), not both`,
@@ -346,13 +360,11 @@ export function validateServerConfig(name: string, config: MCPServerConfig): str
 	}
 
 	if (serverType === "stdio") {
-		const stdioConfig = config as { command?: string };
-		if (!stdioConfig.command) {
+		if (!hasCommand) {
 			errors.push(`Server "${name}": stdio server requires "command" field`);
 		}
 	} else if (serverType === "http" || serverType === "sse") {
-		const httpConfig = config as { url?: string };
-		if (!httpConfig.url) {
+		if (!hasUrl) {
 			errors.push(`Server "${name}": ${serverType} server requires "url" field`);
 		}
 	} else {

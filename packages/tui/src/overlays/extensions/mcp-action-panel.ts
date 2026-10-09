@@ -83,6 +83,10 @@ export class MCPActionPanel implements Component {
 	#selectedIndex = 0;
 	#statusMessage?: StatusMessage;
 	#authorization?: { url: string; instructions?: string };
+	/** First visible wrapped row of an authorization URL taller than its window. */
+	#urlScroll = 0;
+	/** Largest {@link #urlScroll} for the last rendered layout; 0 when the URL fits. */
+	#urlMaxScroll = 0;
 	#confirmationAction?: MCPActionId;
 	#running?: { action: MCPActionId; controller: AbortController };
 	#pendingInput?: PendingInput;
@@ -124,24 +128,39 @@ export class MCPActionPanel implements Component {
 		}
 		for (const info of infoRows) push(info);
 
-		const transientRows: string[] = [];
+		// OAuth rows split into a pinned head, the authorization URL, and a tail
+		// (confirmation and status). The URL wraps instead of truncating, because it
+		// is only usable whole and manual input exists for sessions where no browser
+		// could open it; when it still exceeds the rows left, it scrolls with ↑/↓.
+		const headRows: string[] = [];
+		const urlRows: string[] = [];
+		const tailRows: string[] = [];
+		const contentWidth = Math.max(1, width - 4);
+		const wrapUrl = (url: string): void => {
+			const chars = Array.from(url);
+			for (let start = 0; start < chars.length; start += contentWidth) {
+				urlRows.push(theme.fg("dim", chars.slice(start, start + contentWidth).join("")));
+			}
+		};
 		if (this.#pendingInput) {
-			transientRows.push(
-				theme.fg("warning", "Paste the OAuth redirect URL or authorization code, then press Enter:"),
-			);
-			transientRows.push(theme.fg("accent", `> ${sanitizeDisplayLine(this.#pendingInput.buffer)}`));
+			headRows.push(theme.fg("warning", "Paste the OAuth redirect URL or authorization code, then press Enter:"));
+			headRows.push(theme.fg("accent", `> ${sanitizeDisplayLine(this.#pendingInput.buffer)}`));
+			if (this.#authorization) {
+				headRows.push(theme.fg("warning", "Authorization URL:"));
+				wrapUrl(this.#authorization.url);
+			}
 		} else if (this.#authorization) {
-			transientRows.push(theme.fg("warning", "Waiting for OAuth authorization"));
-			transientRows.push(
+			headRows.push(theme.fg("warning", "Waiting for OAuth authorization"));
+			headRows.push(
 				sanitizeDisplayLine(this.#authorization.instructions ?? "Complete authentication in the browser."),
 			);
-			transientRows.push(theme.fg("dim", sanitizeDisplayLine(this.#authorization.url)));
+			wrapUrl(this.#authorization.url);
 		}
 		if (this.#confirmationAction) {
-			transientRows.push(theme.fg("warning", "Press Enter again to confirm this action."));
+			tailRows.push(theme.fg("warning", "Press Enter again to confirm this action."));
 		}
 		if (this.#statusMessage) {
-			transientRows.push(
+			tailRows.push(
 				...sanitizeDisplayText(this.#statusMessage.text)
 					.split("\n")
 					.map(line => theme.fg(this.#statusMessage!.color, line)),
@@ -154,7 +173,26 @@ export class MCPActionPanel implements Component {
 		const variableRows = Math.max(1, height - 1 - infoRows.length - 1 - 2);
 		const actionCount = this.#state.actions.length;
 		const maxTransientRows = Math.max(0, variableRows - (actionCount > 0 ? 1 : 0));
-		const visibleTransientRows = transientRows.slice(0, maxTransientRows);
+		const visibleTransientRows = headRows.slice(0, maxTransientRows);
+		const urlBudget = maxTransientRows - visibleTransientRows.length;
+		this.#urlMaxScroll = 0;
+		if (urlRows.length > 0 && urlBudget > 0) {
+			if (urlRows.length <= urlBudget) {
+				visibleTransientRows.push(...urlRows);
+			} else {
+				// One row reports the window position; at least one URL row stays visible.
+				const windowRows = Math.max(1, urlBudget - 1);
+				this.#urlMaxScroll = urlRows.length - windowRows;
+				const start = Math.min(this.#urlScroll, this.#urlMaxScroll);
+				visibleTransientRows.push(...urlRows.slice(start, start + windowRows));
+				if (urlBudget > 1) {
+					visibleTransientRows.push(
+						theme.fg("muted", `URL lines ${start + 1}-${start + windowRows} of ${urlRows.length} · ↑/↓: scroll`),
+					);
+				}
+			}
+		}
+		visibleTransientRows.push(...tailRows.slice(0, Math.max(0, maxTransientRows - visibleTransientRows.length)));
 		const actionCapacity = Math.max(0, variableRows - visibleTransientRows.length);
 		const actionWindowSize = Math.min(actionCount, actionCapacity);
 		const maxWindowStart = Math.max(0, actionCount - actionWindowSize);
@@ -182,7 +220,7 @@ export class MCPActionPanel implements Component {
 		for (const transient of visibleTransientRows) push(transient);
 
 		const footer = this.#running
-			? " Esc: cancel action · Ctrl+C: close"
+			? `${this.#urlMaxScroll > 0 ? " ↑/↓: scroll URL ·" : ""} Esc: cancel action · Ctrl+C: close`
 			: " ↑/↓: select · Enter: run · Esc: back · Ctrl+C: close";
 		while (lines.length < height - 2) push();
 		lines.push(row(theme.fg("dim", footer), width));
@@ -210,7 +248,10 @@ export class MCPActionPanel implements Component {
 			this.onClose?.();
 			return;
 		}
-		if (this.#running) return;
+		if (this.#running) {
+			this.#scrollUrl(data);
+			return;
+		}
 		if (matchesSelectUp(data)) {
 			this.#moveSelection(-1);
 			return;
@@ -222,6 +263,17 @@ export class MCPActionPanel implements Component {
 		if (matchesKey(data, "enter") || matchesKey(data, "return") || data === "\n") {
 			void this.#activateSelected();
 		}
+	}
+
+	/** Scroll a clipped authorization URL; returns whether the key was consumed. */
+	#scrollUrl(data: string): boolean {
+		if (this.#urlMaxScroll === 0) return false;
+		const current = Math.min(this.#urlScroll, this.#urlMaxScroll);
+		if (matchesKey(data, "up")) this.#urlScroll = Math.max(0, current - 1);
+		else if (matchesKey(data, "down")) this.#urlScroll = Math.min(this.#urlMaxScroll, current + 1);
+		else return false;
+		this.onRequestRender?.();
+		return true;
 	}
 
 	invalidate(): void {}
@@ -303,6 +355,7 @@ export class MCPActionPanel implements Component {
 						url: sanitizeDisplayLine(info.url),
 						instructions: info.instructions ? sanitizeDisplayLine(info.instructions) : undefined,
 					};
+					this.#urlScroll = 0;
 					this.onRequestRender?.();
 				},
 				requestManualInput: signal => this.#requestManualInput(signal),
@@ -363,6 +416,7 @@ export class MCPActionPanel implements Component {
 			if (paste.remaining) this.#handleManualInput(paste.remaining);
 			return;
 		}
+		if (this.#scrollUrl(data)) return;
 		if (matchesKey(data, "escape")) {
 			this.#cancelRunning();
 			return;

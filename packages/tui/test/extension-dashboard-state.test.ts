@@ -191,6 +191,78 @@ describe("live MCP action panel", () => {
 		expect(rendered).not.toContain("Stale authentication");
 		dashboard.dispose();
 	});
+
+	function pendingPanelDashboard() {
+		const server = extension({
+			id: "mcp:github",
+			kind: "mcp",
+			name: "github",
+			displayName: "github",
+			source: { provider: "native", providerName: "Native", level: "user" },
+		});
+		const panelState: MCPActionPanelState = {
+			name: "github",
+			connectionStatus: "connected",
+			transport: "http",
+			source: "Native user",
+			authentication: "Loaded authentication",
+			tools: 1,
+			prompts: 0,
+			resources: 0,
+			actions: [],
+		};
+		const loads: Array<PromiseWithResolvers<MCPActionPanelState>> = [];
+		const runtime: ExtensionDashboardRuntime = {
+			getDisabledExtensions: () => [],
+			setDisabledExtensions: () => {},
+			getProviders: () => [],
+			loadExtensions: async () => [server],
+			toggleProvider: () => true,
+			toggleUserSource: () => true,
+			persistMcpToggle: async () => {},
+			applyMcpToggle: async () => {},
+			subscribeMcpChanges: () => [() => {}],
+			mcpActions: {
+				loadState: () => {
+					const load = Promise.withResolvers<MCPActionPanelState>();
+					loads.push(load);
+					return load.promise;
+				},
+				runAction: async () => "unused",
+			},
+		};
+		return { runtime, loads, panelState };
+	}
+
+	test("ignores repeated activation while the action panel is still loading", async () => {
+		const { runtime, loads, panelState } = pendingPanelDashboard();
+		const dashboard = await ExtensionDashboard.create({ runtime, terminalHeight: 24 });
+
+		dashboard.handleInput("\x1b[B");
+		dashboard.handleInput("\n");
+		dashboard.handleInput("\n");
+		await flushAsyncWork();
+		expect(loads).toHaveLength(1);
+
+		loads[0]!.resolve(panelState);
+		await flushAsyncWork();
+		expect(Bun.stripANSI(dashboard.render(100).join("\n"))).toContain("Loaded authentication");
+		dashboard.dispose();
+	});
+
+	test("does not install an action panel that finishes loading after the dashboard closes", async () => {
+		const { runtime, loads, panelState } = pendingPanelDashboard();
+		const dashboard = await ExtensionDashboard.create({ runtime, terminalHeight: 24 });
+
+		dashboard.handleInput("\x1b[B");
+		dashboard.handleInput("\n");
+		await flushAsyncWork();
+		dashboard.dispose();
+		loads[0]!.resolve(panelState);
+		await flushAsyncWork();
+
+		expect(Bun.stripANSI(dashboard.render(100).join("\n"))).not.toContain("Loaded authentication");
+	});
 });
 
 describe("applyDisabledExtensionsToState", () => {

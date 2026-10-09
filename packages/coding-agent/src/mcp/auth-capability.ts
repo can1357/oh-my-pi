@@ -1,5 +1,6 @@
 import type { SourceMeta } from "../capability/types";
 import type { AuthStorage } from "../session/auth-storage";
+import { withInferredTransport } from "./config";
 import { hasMcpAuthorizationHeader, lookupMcpOAuthCredential } from "./oauth-credentials";
 import type { MCPServerConfig } from "./types";
 
@@ -44,6 +45,17 @@ function isNetworkConfig(config: MCPServerConfig): config is MCPServerConfig & {
 	return config.type === "http" || config.type === "sse";
 }
 
+/**
+ * Config file an action may persist into. `native` is the discovery provider for
+ * OMP's own `mcp.json` files (the dashboard passes discovery sources), `omp` is the
+ * label `/mcp` assigns to the same files, and `mcp-json` covers standalone files.
+ */
+export function writableSourcePath(source: Pick<SourceMeta, "provider" | "path"> | undefined): string | undefined {
+	return source?.provider === "native" || source?.provider === "omp" || source?.provider === "mcp-json"
+		? source.path
+		: undefined;
+}
+
 function isMcpRemoteSpecifier(value: string): boolean {
 	const basename = value.split(/[\\/]/).at(-1) ?? value;
 	return basename === "mcp-remote" || basename === "mcp-remote.cmd" || basename.startsWith("mcp-remote@");
@@ -61,7 +73,8 @@ function isExternalAuthProxy(config: MCPServerConfig): boolean {
 }
 
 export function classifyMCPServer(options: ClassifyMCPServerOptions): MCPServerCapabilities {
-	const { config, authStorage, disabled = false, shadowed = false } = options;
+	const { source, authStorage, disabled = false, shadowed = false } = options;
+	const config = withInferredTransport(options.config);
 	const actionBlocked = disabled || shadowed;
 	const managedCredential = lookupMcpOAuthCredential(authStorage, config);
 	const externalProxy = isExternalAuthProxy(config);
@@ -107,7 +120,12 @@ export function classifyMCPServer(options: ClassifyMCPServerOptions): MCPServerC
 		canTest: !actionBlocked,
 		canReconnect: !actionBlocked,
 		canReauthenticate: reauthenticateUnavailableReason === undefined,
-		canClearAuthentication: !actionBlocked && managedCredential !== undefined,
+		// Signing out stays available on disabled servers (credentials outlive the
+		// enabled flag) and for a persisted OAuth block whose vault row is gone.
+		canClearAuthentication:
+			!shadowed &&
+			(managedCredential !== undefined ||
+				(config.auth?.type === "oauth" && writableSourcePath(source) !== undefined)),
 		canToggle: !shadowed,
 		reauthenticateUnavailableReason,
 	};

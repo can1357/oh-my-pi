@@ -49,7 +49,7 @@ import { InspectorPanel, type ToolRuntimeSource } from "./inspector-panel";
 import type { ExtensionInspectorSource } from "./inspector-model";
 import { snapshotToolRuntimeSource } from "./live-tool-session";
 import type { MCPRuntimeSource } from "./mcp-runtime";
-import { MCPActionPanel, type MCPActionPanelRuntime } from "./mcp-action-panel";
+import { MCPActionPanel, type MCPActionPanelRuntime, type MCPActionPanelState } from "./mcp-action-panel";
 import {
 	applyDisabledExtensionsToState,
 	applyFilter,
@@ -163,6 +163,9 @@ export class ExtensionDashboard implements Component {
 	#tabBar!: TabBar;
 	#body!: TwoColumnBody;
 	#mcpActionPanel?: MCPActionPanel;
+	/** Set while an action panel's initial state loads; repeated activations are ignored. */
+	#mcpActionPanelOpening = false;
+	#disposed = false;
 	#refreshToken = 0;
 	// Persistent fullscreen frame: top, tabs, divider, body, divider, footer,
 	// bottom. The fullscreen overlay paints from screen row 0, so mouse rows
@@ -563,20 +566,30 @@ export class ExtensionDashboard implements Component {
 	async #openMcpActions(extension: Extension): Promise<void> {
 		const runtime = this.#runtime.mcpActions;
 		if (!runtime || extension.kind !== "mcp") return;
+		if (this.#disposed || this.#mcpActionPanel || this.#mcpActionPanelOpening) return;
+		this.#mcpActionPanelOpening = true;
+		let state: MCPActionPanelState;
 		try {
-			const panel = new MCPActionPanel(extension, await runtime.loadState(extension), runtime, this.#terminalHeight);
-			panel.onRequestRender = () => this.onRequestRender?.();
-			panel.onChanged = () => void this.#refreshFromState();
-			panel.onClose = () => {
-				panel.dispose();
-				if (this.#mcpActionPanel === panel) this.#mcpActionPanel = undefined;
-				this.onRequestRender?.();
-			};
-			this.#mcpActionPanel = panel;
-			this.onRequestRender?.();
+			state = await runtime.loadState(extension);
 		} catch (error) {
 			logger.warn("Failed to open MCP action panel", { name: extension.name, error: String(error) });
+			return;
+		} finally {
+			this.#mcpActionPanelOpening = false;
 		}
+		// The dashboard can close while the state loads; a late panel would
+		// capture input for a dashboard that is no longer on screen.
+		if (this.#disposed || this.#mcpActionPanel) return;
+		const panel = new MCPActionPanel(extension, state, runtime, this.#terminalHeight);
+		panel.onRequestRender = () => this.onRequestRender?.();
+		panel.onChanged = () => void this.#refreshFromState();
+		panel.onClose = () => {
+			panel.dispose();
+			if (this.#mcpActionPanel === panel) this.#mcpActionPanel = undefined;
+			this.onRequestRender?.();
+		};
+		this.#mcpActionPanel = panel;
+		this.onRequestRender?.();
 	}
 
 	handleInput(data: string): void {
@@ -868,6 +881,7 @@ export class ExtensionDashboard implements Component {
 	}
 
 	dispose(): void {
+		this.#disposed = true;
 		this.#mcpActionPanel?.dispose();
 		this.#mcpActionPanel = undefined;
 		for (const unsub of this.#unsubscribers) unsub();

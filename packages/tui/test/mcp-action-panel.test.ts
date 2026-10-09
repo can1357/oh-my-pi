@@ -212,6 +212,78 @@ describe("MCPActionPanel", () => {
 		expect(panel.render(80).join("\n")).toContain("Action cancelled.");
 	});
 
+	test("keeps the whole authorization URL visible while manual OAuth input is pending", async () => {
+		const url = `https://auth.example/authorize?${"scope=read%20write&".repeat(12)}state=END`;
+		const runtime: MCPActionPanelRuntime = {
+			loadState: async () => state([action("reauthenticate")]),
+			runAction: async (_extension, _id, context) => {
+				context.onAuthorization({ url });
+				await context.requestManualInput(context.signal);
+				return "Authenticated.";
+			},
+		};
+		const panel = new MCPActionPanel(extension, state([action("reauthenticate")]), runtime, 24);
+
+		panel.handleInput("\r");
+		await flushAsyncWork();
+		const content = panel
+			.render(80)
+			.map(line => Bun.stripANSI(line).slice(2, -2).trimEnd())
+			.join("");
+
+		expect(content).toContain("Paste the OAuth redirect URL");
+		expect(content).toContain(url);
+	});
+
+	test("scrolls an authorization URL taller than a minimum-height panel without losing manual input", async () => {
+		const url = `https://auth.example/authorize?${"scope=read%20write&".repeat(30)}state=END`;
+		const actions = [
+			action("test"),
+			action("reconnect"),
+			action("reauthenticate"),
+			action("clear-authentication"),
+			action("disable"),
+		];
+		let manualInput = "";
+		const runtime: MCPActionPanelRuntime = {
+			loadState: async () => state(actions),
+			runAction: async (_extension, _id, context) => {
+				context.onAuthorization({ url });
+				manualInput = await context.requestManualInput(context.signal);
+				return "Authenticated.";
+			},
+		};
+		const panel = new MCPActionPanel(extension, state(actions), runtime, 14);
+		panel.handleInput("\r");
+		await flushAsyncWork();
+
+		const urlLines = new Map<number, string>();
+		let total = 0;
+		for (let frame = 0; frame < 40; frame++) {
+			const rendered = panel.render(80);
+			expect(rendered).toHaveLength(14);
+			const rows = rendered.map(line => Bun.stripANSI(line).slice(2, -2).trimEnd());
+			expect(rows.some(row => row.startsWith("Paste the OAuth redirect URL"))).toBe(true);
+			expect(rows.at(-2)).toContain("↑/↓: scroll URL");
+			const label = rows.indexOf("Authorization URL:");
+			const indicator = rows.findIndex(row => row.startsWith("URL lines"));
+			const position = /URL lines (\d+)-(\d+) of (\d+)/.exec(rows[indicator] ?? "");
+			expect(label).toBeGreaterThanOrEqual(0);
+			expect(position).not.toBeNull();
+			const [first, last] = [Number(position![1]), Number(position![2])];
+			total = Number(position![3]);
+			rows.slice(label + 1, indicator).forEach((line, offset) => urlLines.set(first - 1 + offset, line));
+			if (last === total) break;
+			panel.handleInput("\x1b[B");
+		}
+
+		expect(Array.from({ length: total }, (_, index) => urlLines.get(index)).join("")).toBe(url);
+		panel.handleInput("code=abc");
+		panel.handleInput("\r");
+		await flushAsyncWork();
+		expect(manualInput).toBe("code=abc");
+	});
+
 	test("sanitizes every server-controlled field before rendering", () => {
 		const maliciousState: MCPActionPanelState = {
 			...state([
@@ -284,6 +356,7 @@ describe("MCPActionPanel", () => {
 		panel.handleInput("\x1b[200~code=abc\x1b]0;owned\x07\x1b[201~");
 		const manualFrame = panel.render(120).join("\n");
 		expect(Bun.stripANSI(manualFrame)).toContain("code=abc");
+		expect(Bun.stripANSI(manualFrame)).toContain("https://auth.example/callback");
 		expect(Bun.stripANSI(manualFrame)).toContain("Esc: cancel action · Ctrl+C: close");
 		expect(manualFrame).not.toContain("\x1b]");
 		expect(manualFrame).not.toContain("\x07");

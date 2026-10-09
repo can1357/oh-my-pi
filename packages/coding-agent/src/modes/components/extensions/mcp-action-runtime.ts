@@ -13,7 +13,7 @@ import type { Settings } from "../../../config/settings";
 import type { CustomTool } from "../../../extensibility/custom-tools/types";
 import { cfgDisabledExtensions } from "../../../extensibility/settings";
 import { cfgMcpEnableProjectConfig } from "../../../mcp/settings";
-import { classifyMCPServer } from "../../../mcp/auth-capability";
+import { classifyMCPServer, writableSourcePath } from "../../../mcp/auth-capability";
 import { mcpServerToConfig } from "../../../mcp/config";
 import { getMCPServer } from "../../../mcp/config-writer";
 import type { MCPManager } from "../../../mcp/manager";
@@ -22,7 +22,6 @@ import {
 	MCPServerActions,
 	PROJECT_MCP_CONFIG_DISABLED_REASON,
 	type MCPServerActionTarget,
-	writableSourcePath,
 } from "../../../mcp/server-actions";
 import type { AuthStorage } from "../../../session/auth-storage";
 import { copyToClipboard } from "../../../utils/clipboard";
@@ -173,7 +172,7 @@ export function createMCPActionRuntime(options: CreateMCPActionRuntimeOptions): 
 				"Clear authentication",
 				"Remove OMP-managed OAuth credentials",
 				capabilities.canClearAuthentication,
-				"No OMP-managed OAuth credential found",
+				target.shadowed ? "Shadowed rows cannot be managed" : "No OMP-managed OAuth credential found",
 				true,
 			),
 			action(
@@ -243,9 +242,25 @@ export function createMCPActionRuntime(options: CreateMCPActionRuntimeOptions): 
 				case "clear-authentication":
 					context.onProgress(`Clearing authentication for ${target.name}...`);
 					return (await actions.clearAuthentication(target)).message;
-				case "enable":
+				case "enable": {
 					context.onProgress(`Enabling ${target.name}...`);
-					return (await actions.setEnabled(target, true)).message;
+					// A legacy `mcp:<name>` entry in `disabledExtensions` predates the
+					// mcp.json denylist and would keep the server disabled; the list
+					// toggle drops it once the enable persists, so the panel must too.
+					// It goes before the reload, which rediscovers servers through the
+					// same settings and would otherwise skip this one. A failed write
+					// leaves it in place; a failed reload leaves the committed enable.
+					const onPersisted = () => {
+						const disabledIds = cfgDisabledExtensions.get(settings);
+						if (disabledIds.includes(extension.id)) {
+							cfgDisabledExtensions.set(
+								settings,
+								disabledIds.filter(id => id !== extension.id),
+							);
+						}
+					};
+					return (await actions.setEnabled(target, true, { onPersisted })).message;
+				}
 				case "disable":
 					context.onProgress(`Disabling ${target.name}...`);
 					return (await actions.setEnabled(target, false)).message;

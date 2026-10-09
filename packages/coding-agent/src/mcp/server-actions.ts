@@ -5,8 +5,9 @@ import { expandEnvVarsDeep } from "../discovery/helpers";
 import type { CustomTool } from "../extensibility/custom-tools/types";
 import type { AuthStorage } from "../session/auth-storage";
 import { raceAbortSignal, withTimeout } from "./action-utils";
-import { classifyMCPServer } from "./auth-capability";
+import { classifyMCPServer, writableSourcePath } from "./auth-capability";
 import { connectToServer, disconnectServer, listTools, pingServer } from "./client";
+import { withInferredTransport } from "./config";
 import { setMcpServerEnabled, updateMCPServer } from "./config-writer";
 import {
 	MCPOAuthCancelledError,
@@ -79,17 +80,6 @@ function serverUrl(config: MCPServerConfig): string | undefined {
 	return config.type === "http" || config.type === "sse" ? config.url : undefined;
 }
 
-/**
- * Config file an action may persist into. `native` is the discovery provider for
- * OMP's own `mcp.json` files (the dashboard passes discovery sources), `omp` is the
- * label `/mcp` assigns to the same files, and `mcp-json` covers standalone files.
- */
-export function writableSourcePath(source: SourceMeta | undefined): string | undefined {
-	return source?.provider === "native" || source?.provider === "omp" || source?.provider === "mcp-json"
-		? source.path
-		: undefined;
-}
-
 export const PROJECT_MCP_CONFIG_DISABLED_REASON = "Project MCP servers are disabled (mcp.enableProjectConfig)";
 
 /**
@@ -114,10 +104,11 @@ function getServerTimeout(config: MCPServerConfig): number {
  * intact so persistence never writes resolved secrets); discovery deep-expands
  * those same files, so expand them identically here. Every other source already
  * holds the discovery result, whose literal env/header policies the manager
- * enforces, so expanding it again would rewrite values marked opaque.
+ * enforces, so expanding it again would rewrite values marked opaque. A raw entry
+ * may also omit `type`, so the transport is inferred the way discovery does.
  */
 function runtimeConfig(target: Pick<MCPServerActionTarget, "config" | "source">): MCPServerConfig {
-	return writableSourcePath(target.source) ? expandEnvVarsDeep(target.config) : target.config;
+	return withInferredTransport(writableSourcePath(target.source) ? expandEnvVarsDeep(target.config) : target.config);
 }
 
 function stripOAuthAuth(config: MCPServerConfig): MCPServerConfig {
@@ -148,8 +139,13 @@ async function testMCPConfig(options: {
 		);
 		return options.verifyTools === false ? [] : await listTools(connection, { signal: options.signal });
 	} finally {
-		if (connection) await disconnectServer(connection).catch(() => undefined);
-		await manager.disconnectAll().catch(() => undefined);
+		// Teardown is best effort and must not hold the result: a session DELETE
+		// that stalls would otherwise keep a cancelled test waiting on the
+		// transport timeout (or forever with OMP_MCP_TIMEOUT_MS=0).
+		void (async () => {
+			if (connection) await disconnectServer(connection).catch(() => undefined);
+			await manager.disconnectAll().catch(() => undefined);
+		})();
 	}
 }
 
@@ -423,9 +419,10 @@ export class MCPServerActions {
 
 	async clearAuthentication(target: MCPServerActionTarget): Promise<MCPServerActionResult> {
 		this.#assertActionAvailable(target, "clear-authentication");
-		const url = serverUrl(target.config);
+		const effectiveConfig = withInferredTransport(target.config);
+		const url = serverUrl(effectiveConfig);
 		const authStorage = this.#requireAuthStorage();
-		const credential = lookupMcpOAuthCredential(authStorage, target.config);
+		const credential = lookupMcpOAuthCredential(authStorage, effectiveConfig);
 		const removed = await removeManagedMcpOAuthCredentials(authStorage, [
 			credential?.credentialId,
 			target.config.auth?.credentialId,
@@ -444,7 +441,16 @@ export class MCPServerActions {
 		return { action: "clear-authentication", message: "Stored authentication cleared." };
 	}
 
-	async setEnabled(target: MCPServerToggleTarget, enabled: boolean): Promise<MCPServerActionResult> {
+	/**
+	 * Persist the enabled state, then reload a live runtime. `onPersisted` runs once
+	 * the state is committed and before the reload rediscovers servers, so callers
+	 * can retire overrides that rediscovery would otherwise still honour.
+	 */
+	async setEnabled(
+		target: MCPServerToggleTarget,
+		enabled: boolean,
+		options?: { onPersisted?: () => void },
+	): Promise<MCPServerActionResult> {
 		if (target.shadowed) throw new Error("Shadowed MCP rows cannot be changed");
 		const cwd = this.#options.cwd;
 		await setMcpServerEnabled({
@@ -454,6 +460,7 @@ export class MCPServerActions {
 			name: target.name,
 			enabled,
 		});
+		options?.onPersisted?.();
 		if (this.#options.manager) await this.reload();
 		return { action: enabled ? "enable" : "disable", message: `${target.name} ${enabled ? "enabled" : "disabled"}.` };
 	}
