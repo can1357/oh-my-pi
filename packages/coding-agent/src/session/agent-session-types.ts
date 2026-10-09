@@ -24,7 +24,9 @@ import type { AdvisorConfig } from "@oh-my-pi/pi-tui/overlays/advisor-config";
 import type { AsyncJob, AsyncJobDeliveryState, AsyncJobManager } from "../async";
 import type { EffectiveExtensionRoots } from "../capability/types";
 import type { AgentDefinition } from "../task/types";
+import type { SessionAccountPoolScope } from "../config/account-pools";
 import type { ModelRegistry } from "../config/model-registry";
+import type { RoleRoutePermit } from "../task/role-routing";
 import type { PromptTemplate } from "../config/prompt-templates";
 import type { Settings } from "../config/settings";
 import type { SkillsSettings } from "../extensibility/settings";
@@ -75,7 +77,26 @@ export type CommandMetadataChangedListener = () => void | Promise<void>;
 export type AsyncJobSnapshotItem = Pick<
 	AsyncJob,
 	"id" | "type" | "status" | "label" | "startTime" | "endTime" | "agentId"
->;
+> & {
+	/** Full command line of a job that runs a process; `label` is cut to 120 characters. */
+	command?: string;
+};
+
+/** One async job as a job inspector (the jobs sheet) shows it beyond its snapshot row. */
+export interface AsyncJobInspection {
+	/** Full command line of a job that runs a process. */
+	command?: string;
+	/** Directory that command started in. */
+	cwd?: string;
+	/** Live pids the job's command spawned. */
+	pids: readonly number[];
+	/** Exit status of a settled command. */
+	exitCode?: number;
+	/** Output tail while running; the final result or error text once settled. */
+	output?: string;
+	/** Artifact holding the full output when `output` is cut. */
+	artifactId?: string;
+}
 
 /** Snapshot of running, recent, and pending-delivery asynchronous jobs. */
 export interface AsyncJobSnapshot {
@@ -176,6 +197,8 @@ export interface AgentSessionConfig {
 	thinkingLevelCeiling?: Effort;
 	/** Retry chain ownership when startup selected one of its fallback entries. */
 	initialRetryFallback?: InitialRetryFallbackState;
+	/** Process-local host authority for this session's primary provider requests. */
+	roleRoute?: RoleRoutePermit;
 	/** Skip retry.fallbackChains validation at construction; the host calls `validateRetryFallbackChains()` later. */
 	deferRetryFallbackValidation?: boolean;
 	/** Prewalk from the starting model to a fast/cheap target after implementation begins. */
@@ -223,6 +246,14 @@ export interface AgentSessionConfig {
 	createThinkTool?: () => Promise<AgentTool | null>;
 	/** Model registry for API key resolution and model discovery. */
 	modelRegistry: ModelRegistry;
+	/**
+	 * Whether `switchSession` may open a session whose saved models cannot be
+	 * restored, keeping the current model and warning, instead of throwing
+	 * `Could not restore model <provider/id>`. `retry.modelFallback: false`
+	 * still forbids it. `createAgentSession` sets this from `hasUI` and its
+	 * `allowSessionModelFallback` option. Default: false.
+	 */
+	allowSessionModelFallback?: boolean;
 	/** Whether the startup model may be replaced by refreshed same-selector registry metadata. */
 	rebindModelAfterDiscovery?: boolean;
 	/** Tool registry for LSP and settings. */
@@ -298,6 +329,8 @@ export interface AgentSessionConfig {
 	agentKind?: "main" | "sub";
 	/** Provider-facing session ID override. */
 	providerSessionId?: string;
+	/** OAuth account pools enforced on the session's key lookups; the session lifts them on dispose. */
+	accountPoolScope?: SessionAccountPoolScope;
 	/** Whether the provider prompt-cache key was explicit or fork-inherited. */
 	providerPromptCacheKeySource?: "explicit" | "fork";
 	/** Full advisor toolset built against an advisor-scoped tool session. */
@@ -547,6 +580,8 @@ export interface EphemeralTurnOptions {
 	onTextDelta?: (delta: string) => void | Promise<void>;
 	signal?: AbortSignal;
 	dedupeReply?: boolean;
+	/** UTF-8 byte cap of the deduped reply (default 4 KiB); `Infinity` keeps a long answer whole. */
+	replyMaxBytes?: number;
 }
 
 /** A side-turn response that is not appended to session history. */

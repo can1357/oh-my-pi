@@ -4,7 +4,6 @@ import type { NativeChild, NativeNode } from "@oh-my-pi/pi-tui/native/node";
 import { SessionInfoOverlay } from "@oh-my-pi/pi-tui/overlays/session-info-overlay";
 import { UsageDashboardComponent } from "@oh-my-pi/pi-tui/overlays/usage-dashboard";
 import { createUsageRowBlock } from "@oh-my-pi/pi-tui/overlays/usage-row";
-import { JobsPanel } from "@oh-my-pi/pi-tui/overlays/jobs-panel";
 import { computeContextBreakdown, ContextUsageView } from "@oh-my-pi/pi-tui/status-line/context-usage";
 import { DEFAULT_COMPACTION_SETTINGS } from "@oh-my-pi/pi-agent-core/compaction";
 import { initTheme, theme } from "@oh-my-pi/pi-tui/theme";
@@ -79,14 +78,14 @@ describe("UsageDashboardComponent.describe", () => {
 		];
 		const meters = findAll(dashboard(reports).describe(cx), n => n.k === "meter").map(n => n.p);
 		expect(meters).toEqual([
-			expect.objectContaining({ value: 1, style: "bar", tone: "error" }),
 			expect.objectContaining({ value: 0.9, style: "bar", tone: "warning" }),
+			expect.objectContaining({ value: 1, style: "bar", tone: "error" }),
 		]);
 		const fallback = dashboard(reports).describe(plainCx);
 		expect(findAll(fallback, n => n.k === "meter" || n.k === "chart")).toEqual([]);
 		expect(findAll(fallback, n => n.k === "progress").map(n => n.p)).toEqual([
-			expect.objectContaining({ value: 1, tone: "error" }),
 			expect.objectContaining({ value: 0.9, tone: "warning" }),
+			expect.objectContaining({ value: 1, tone: "error" }),
 		]);
 	});
 
@@ -154,7 +153,7 @@ describe("UsageDashboardComponent.describe", () => {
 });
 
 describe("SessionInfoOverlay.describe", () => {
-	it("turns the themed session report into headed key/value sections", () => {
+	it("turns the themed session report into a copyable file row and headed key/value sections", () => {
 		const info =
 			`${theme.fg("dim", "File:")} /tmp/s.jsonl\n` +
 			`\n${theme.bold("MCP Servers")}\n` +
@@ -162,8 +161,10 @@ describe("SessionInfoOverlay.describe", () => {
 		const overlay = new SessionInfoOverlay({ terminal: { rows: 20 } }, info, () => {});
 		const root = overlay.describe(cx);
 		const kvs = findAll(root, n => n.k === "kv").map(n => n.p);
+		const copies = findAll(root, n => n.p?.role === "omp.info.copy");
+		expect(copies.map(n => n.p?.title)).toEqual(["Copy file path"]);
+		expect(JSON.stringify(copies[0])).toContain("/tmp/s.jsonl");
 		expect(kvs).toEqual([
-			expect.objectContaining({ items: [{ k: "File", v: [{ t: "/tmp/s.jsonl" }] }] }),
 			expect.objectContaining({
 				items: [
 					{
@@ -229,35 +230,6 @@ describe("ContextUsageView.describe", () => {
 	});
 });
 
-describe("JobsPanel.describe", () => {
-	const now = Date.now();
-	const snapshot = {
-		running: [
-			{
-				id: "j1",
-				type: "task",
-				status: "running" as const,
-				label: "Audit credits",
-				startTime: now - 5_000,
-				agentId: "Audit",
-			},
-			{ id: "j2", type: "bash", status: "running" as const, label: "cargo test", startTime: now - 9_000 },
-		],
-		recent: [],
-	};
-
-	it("draws task jobs as agents and other jobs as dot rows, and only rows without `agent`", () => {
-		const native = new JobsPanel(snapshot, now, []).describe(cx);
-		expect(findAll(native, n => n.k === "agent").map(n => n.p)).toEqual([
-			expect.objectContaining({ name: "Audit", status: "running", stats: { age: 5_000 } }),
-		]);
-		expect(findAll(native, n => n.p?.role === "omp.jobs.row").map(n => n.key)).toEqual(["j2"]);
-		const plain = new JobsPanel(snapshot, now, []).describe(plainCx);
-		expect(findAll(plain, n => n.k === "agent")).toEqual([]);
-		expect(findAll(plain, n => n.p?.role === "omp.jobs.row").map(n => n.key)).toEqual(["j1", "j2"]);
-	});
-});
-
 describe("createUsageRowBlock describe", () => {
 	it("declares throughput as a rate and omits it for sub-100ms requests", () => {
 		const usage = {
@@ -273,5 +245,33 @@ describe("createUsageRowBlock describe", () => {
 		if (!fast || !slow) throw new Error("usage row did not describe");
 		expect(findAll(fast, n => n.k === "rate")).toEqual([]);
 		expect(findAll(slow, n => n.k === "rate").map(n => n.p)).toEqual([{ value: 250, unit: "tok/s" }]);
+	});
+
+	it("shows the turn's time on the terminal's clock, re-describing when it changes", () => {
+		const usage = {
+			input: 100,
+			output: 500,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 600,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		};
+		const block = createUsageRowBlock(usage, 2000, undefined, new Date(2026, 0, 1, 18, 5, 9).getTime());
+		const shown = (hour12: boolean | undefined) => {
+			const described = block.describe?.({ ...cx, hour12 });
+			if (!described) throw new Error("usage row did not describe");
+			const [line] = findAll(described, n => n.k === "text");
+			return { line: JSON.stringify(line), title: String(described.p?.title) };
+		};
+		// No clock from the terminal keeps the log-style stamp.
+		expect(shown(undefined).line).toContain('"18:05 · ');
+		expect(shown(undefined).title).toBe("2026-01-01 18:05:09");
+		const twelve = shown(true);
+		expect(twelve.line).toMatch(/"0?6:05\s?pm · /i);
+		expect(twelve.title).toMatch(/^2026-01-01 0?6:05:09\s?pm$/i);
+		const twentyFour = shown(false);
+		expect(twentyFour.line).toContain('"18:05 · ');
+		expect(twentyFour.title).toBe("2026-01-01 18:05:09");
+		expect(shown(undefined).title).toBe("2026-01-01 18:05:09");
 	});
 });

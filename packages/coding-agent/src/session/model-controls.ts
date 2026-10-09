@@ -1,4 +1,5 @@
 import { type Agent, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
+import type { ResolvedThinkingLevel } from "@oh-my-pi/pi-agent-core/thinking";
 import type { Model, ProviderSessionState, ServiceTier, ServiceTierByFamily, ServiceTierFamily } from "@oh-my-pi/pi-ai";
 import {
 	Effort,
@@ -12,6 +13,7 @@ import {
 	isAnthropicFastModeFallbackDisabled,
 } from "@oh-my-pi/pi-ai/providers/anthropic-state";
 import { isFireworksFastModelId } from "@oh-my-pi/pi-catalog/fireworks-model-id";
+import { THINKING_EFFORTS } from "@oh-my-pi/pi-catalog/effort";
 import { getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
 import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
 import { logger } from "@oh-my-pi/pi-utils";
@@ -24,6 +26,7 @@ import {
 	type ResolvedModelRoleValue,
 	resolveModelRoleValue,
 } from "../config/model-resolver";
+import { formatModelSelectorValue } from "@oh-my-pi/pi-tui/overlays/model-selector";
 import { getKnownRoleIds } from "../config/model-roles";
 import type { Settings } from "../config/settings";
 import { containsMagicKeyword } from "@oh-my-pi/pi-tui/prompt/magic-keywords";
@@ -31,6 +34,7 @@ import type { MagicKeywordId } from "../modes/magic-keywords";
 import {
 	AUTO_THINKING,
 	type ConfiguredThinkingLevel,
+	concreteThinkingLevel,
 	clampAutoThinkingEffort,
 	clampThinkingLevelToCeiling,
 	resolveProvisionalAutoLevel,
@@ -39,6 +43,17 @@ import {
 	toReasoningEffort,
 } from "@oh-my-pi/pi-tui/thinking";
 import type { EditMode } from "@oh-my-pi/pi-tui/tools/edit";
+import {
+	adoptRoleRouteCandidate,
+	assertRoleDispatch,
+	assertRoleModel,
+	inspectRoleRouteCandidate,
+	resolveRoleRoute,
+	roleRouteFallbackCandidates,
+	roleRouteMetadata,
+	type RoleRouteModelSelection,
+	type RoleRoutePermit,
+} from "../task/role-routing";
 import type { AgentSessionEvent } from "./agent-session-events";
 import type { ModelCycleResult, ResolvedRoleModel, RoleModelCycle, RoleModelCycleResult } from "./agent-session-types";
 import { formatRoleModelValue, resolveRoleModelFull } from "./role-models";
@@ -53,6 +68,7 @@ export interface ModelControlsHost {
 	agent: Agent;
 	settings: Settings;
 	modelRegistry: ModelRegistry;
+	readonly roleRoute?: RoleRoutePermit;
 	sessionManager: SessionManager;
 	providerSessionState: Map<string, ProviderSessionState>;
 	model(): Model | undefined;
@@ -60,7 +76,11 @@ export interface ModelControlsHost {
 	promptGeneration(): number;
 	resolveActiveEditMode(): EditMode;
 	syncAfterModelChange(previousEditMode: EditMode): Promise<void>;
-	setModelWithProviderSessionReset(model: Model): Promise<void>;
+	setModelWithProviderSessionReset(
+		model: Model,
+		selection?: "explicit" | "automatic",
+		options?: { thinkingLevel: ConfiguredThinkingLevel | undefined },
+	): Promise<void>;
 	clearActiveRetryFallback(): void;
 	clearInheritedProviderPromptCacheKey(): void;
 	magicKeywordEnabled(keyword: MagicKeywordId): boolean;
@@ -93,7 +113,11 @@ export class ModelControls {
 		this.#scopedModels = options.scopedModels ?? [];
 		this.#serviceTierByFamily = options.serviceTierByFamily ?? {};
 		this.#thinkingLevelCeiling = options.thinkingLevelCeiling;
-		if (options.thinkingLevel === AUTO_THINKING) {
+		const governed = this.#governedThinking(this.#model, options.thinkingLevel);
+		if (governed) {
+			this.#autoThinking = governed.configured === AUTO_THINKING;
+			this.#thinkingLevel = governed.effective;
+		} else if (options.thinkingLevel === AUTO_THINKING) {
 			// Keep auto pending until the first turn while exposing a valid wire effort.
 			this.#autoThinking = true;
 			this.#thinkingLevel = clampThinkingLevelToCeiling(
@@ -113,6 +137,80 @@ export class ModelControls {
 
 	get #model(): Model | undefined {
 		return this.#host.model();
+	}
+
+	#selectRoleModel(
+		model: Model,
+		selector?: string,
+		commit: boolean = false,
+		thinkingLevel?: ConfiguredThinkingLevel,
+	): RoleRouteModelSelection | undefined {
+		const permit = this.#host.roleRoute;
+		if (!permit) return undefined;
+		const identity = formatModelStringWithRouting(model);
+		const metadata = roleRouteMetadata(permit);
+		const selected =
+			metadata?.selectedOccurrence === undefined ? undefined : metadata.occurrences[metadata.selectedOccurrence];
+		if (
+			selected?.identity === identity &&
+			(selector === undefined ||
+				selector === selected.pattern ||
+				selector === formatModelSelectorValue(identity, selected.thinkingLevel)) &&
+			(thinkingLevel === undefined ||
+				(!selected.fixedEffort && selected.thinkingLevel !== AUTO_THINKING) ||
+				selected.thinkingLevel === thinkingLevel)
+		) {
+			assertRoleModel(permit, model, undefined, this.#host.modelRegistry);
+			return resolveRoleRoute(permit, this.#host.modelRegistry);
+		}
+		const candidates = roleRouteFallbackCandidates(permit, this.#host.modelRegistry).filter(
+			candidate =>
+				(selector === undefined || candidate.selector === selector) &&
+				formatModelStringWithRouting(candidate.model) === identity &&
+				(thinkingLevel === undefined ||
+					(!candidate.fixedEffort && candidate.thinkingLevel !== AUTO_THINKING) ||
+					candidate.thinkingLevel === thinkingLevel),
+		);
+		if (candidates.length !== 1)
+			throw new Error("Host role model change requires one exact remaining approved occurrence.");
+		return commit
+			? adoptRoleRouteCandidate(permit, candidates[0].selector, model, this.#host.modelRegistry)
+			: inspectRoleRouteCandidate(permit, candidates[0].selector, model, this.#host.modelRegistry);
+	}
+
+	#governedThinking(
+		model: Model | undefined,
+		requested: ConfiguredThinkingLevel | undefined,
+		explicit: boolean = false,
+		preview?: RoleRouteModelSelection,
+	): { configured: ConfiguredThinkingLevel | undefined; effective: ResolvedThinkingLevel | undefined } | undefined {
+		const permit = this.#host.roleRoute;
+		if (!permit) return undefined;
+		if (!preview) assertRoleModel(permit, model, undefined, this.#host.modelRegistry);
+		const selected = preview ?? resolveRoleRoute(permit, this.#host.modelRegistry);
+		if (explicit && selected.fixedEffort && requested !== selected.thinkingLevel) {
+			throw new Error("Host role thinking change cannot override the fixed approved effort.");
+		}
+		if (explicit && selected.thinkingLevel === AUTO_THINKING && requested !== AUTO_THINKING) {
+			throw new Error("Host role thinking change cannot replace the approved automatic selector.");
+		}
+		const configured =
+			selected.fixedEffort || selected.thinkingLevel === AUTO_THINKING ? selected.thinkingLevel : requested;
+		const rawEffective = selected.fixedEffort
+			? concreteThinkingLevel(configured)
+			: configured === AUTO_THINKING
+				? clampThinkingLevelToCeiling(model, resolveProvisionalAutoLevel(model), this.#thinkingLevelCeiling)
+				: resolveThinkingLevelForModel(
+						model,
+						clampThinkingLevelToCeiling(model, configured, this.#thinkingLevelCeiling),
+					);
+		const effective = rawEffective === ThinkingLevel.Inherit ? undefined : rawEffective;
+		const reasoning = toReasoningEffort(effective);
+		if (preview && reasoning !== undefined && model && !getSupportedEfforts(model).includes(reasoning)) {
+			throw new Error("Host role model change cannot apply an unsupported serving effort.");
+		}
+		if (!preview) assertRoleDispatch(permit, model, reasoning, undefined, this.#host.modelRegistry);
+		return { configured, effective };
 	}
 
 	/** Effective metadata-clamped thinking level applied to the agent. */
@@ -164,6 +262,14 @@ export class ModelControls {
 
 	/** Restores thinking state from a transcript without persisting a new entry. */
 	restoreThinkingLevel(level: ConfiguredThinkingLevel | undefined): void {
+		const governed = this.#governedThinking(this.#model, level);
+		if (governed) {
+			this.#autoThinking = governed.configured === AUTO_THINKING;
+			this.#autoResolvedLevel = undefined;
+			this.#thinkingLevel = governed.effective;
+			this.#applyThinkingLevelToAgent(governed.effective);
+			return;
+		}
 		this.#autoThinking = level === AUTO_THINKING;
 		this.#autoResolvedLevel = undefined;
 		this.#thinkingLevel =
@@ -185,7 +291,9 @@ export class ModelControls {
 		this.#thinkingLevel = level;
 		this.#autoThinking = auto;
 		this.#autoResolvedLevel = resolved;
-		this.#applyThinkingLevelToAgent(level);
+		// Roll back state only; the unchanged permit is revalidated at the next dispatch.
+		this.#host.agent.setThinkingLevel(toReasoningEffort(level));
+		this.#host.agent.setDisableReasoning(shouldDisableReasoning(level));
 	}
 
 	/** Restores service tiers without persisting a duplicate transcript entry. */
@@ -202,6 +310,10 @@ export class ModelControls {
 	}
 
 	resolveTemporaryModelThinkingLevel(model: Model): ConfiguredThinkingLevel | undefined {
+		if (this.#host.roleRoute) {
+			const selection = this.#selectRoleModel(model);
+			return this.#governedThinking(model, this.configuredThinkingLevel(), false, selection)?.configured;
+		}
 		const availableModels = this.#host.modelRegistry.getAvailable();
 		if (availableModels.length === 0) return undefined;
 
@@ -234,14 +346,35 @@ export class ModelControls {
 		if (!this.#host.modelRegistry.hasConfiguredAuth(model)) {
 			throw new Error(`No API key for ${model.provider}/${model.id}`);
 		}
+		let roleSelection = this.#selectRoleModel(model, options?.selector, false, options?.thinkingLevel);
+		let governed = roleSelection
+			? this.#governedThinking(
+					model,
+					options?.thinkingLevel ?? model.thinking?.defaultLevel ?? this.configuredThinkingLevel(),
+					options?.thinkingLevel !== undefined,
+					roleSelection,
+				)
+			: undefined;
 
 		const targetModel = await this.#host.modelRegistry.refreshSelectedModelMetadata(model);
+		if (roleSelection) {
+			roleSelection = this.#selectRoleModel(targetModel, roleSelection.selector);
+			governed = this.#governedThinking(targetModel, governed?.configured, false, roleSelection);
+		}
+		if (roleSelection) roleSelection = this.#selectRoleModel(targetModel, roleSelection.selector, true);
 
 		this.#host.modelRegistry.clearSuppressedSelector(formatModelStringWithRouting(targetModel));
 		this.#host.clearActiveRetryFallback();
-		await this.#host.setModelWithProviderSessionReset(targetModel);
-		this.#host.sessionManager.appendModelChange(`${targetModel.provider}/${targetModel.id}`, role);
-		if (options?.persist) {
+		await this.#host.setModelWithProviderSessionReset(
+			targetModel,
+			"explicit",
+			governed ? { thinkingLevel: governed.configured } : undefined,
+		);
+		this.#host.sessionManager.appendModelChange(
+			roleSelection?.selector ?? `${targetModel.provider}/${targetModel.id}`,
+			roleSelection?.role ?? role,
+		);
+		if (options?.persist && !this.#host.roleRoute) {
 			this.#host.settings.setModelRole(
 				role,
 				formatRoleModelValue(
@@ -254,11 +387,13 @@ export class ModelControls {
 				),
 			);
 		}
-		this.#host.settings.getStorage()?.recordModelUsage(`${targetModel.provider}/${targetModel.id}`);
+		if (!this.#host.roleRoute)
+			this.#host.settings.getStorage()?.recordModelUsage(`${targetModel.provider}/${targetModel.id}`);
 
 		// Re-apply thinking for the newly selected model. Prefer the model's
 		// configured defaultLevel; otherwise preserve the current level (or auto).
-		this.#reapplyThinkingLevel(targetModel.thinking?.defaultLevel);
+		if (governed) this.setThinkingLevel(governed.configured);
+		else this.#reapplyThinkingLevel(targetModel.thinking?.defaultLevel);
 		await this.#host.syncAfterModelChange(previousEditMode);
 		return { switched: true };
 	}
@@ -274,26 +409,48 @@ export class ModelControls {
 		model: Model,
 		thinkingLevel?: ConfiguredThinkingLevel,
 		options?: { ephemeral?: boolean },
+		selection: "explicit" | "automatic" = "explicit",
 	): Promise<void> {
 		const previousEditMode = this.#host.resolveActiveEditMode();
 		if (!this.#host.modelRegistry.hasConfiguredAuth(model)) {
 			throw new Error(`No API key for ${model.provider}/${model.id}`);
 		}
+		let roleSelection = this.#selectRoleModel(model, undefined, false, thinkingLevel);
+		let governed = roleSelection
+			? this.#governedThinking(
+					model,
+					thinkingLevel ?? model.thinking?.defaultLevel ?? this.configuredThinkingLevel(),
+					thinkingLevel !== undefined,
+					roleSelection,
+				)
+			: undefined;
 
 		const targetModel = await this.#host.modelRegistry.refreshSelectedModelMetadata(model);
+		if (roleSelection) {
+			roleSelection = this.#selectRoleModel(targetModel, roleSelection.selector);
+			governed = this.#governedThinking(targetModel, governed?.configured, false, roleSelection);
+		}
+		if (roleSelection) roleSelection = this.#selectRoleModel(targetModel, roleSelection.selector, true);
 
 		this.#host.modelRegistry.clearSuppressedSelector(formatModelStringWithRouting(targetModel));
 		this.#host.clearActiveRetryFallback();
-		await this.#host.setModelWithProviderSessionReset(targetModel);
+		await this.#host.setModelWithProviderSessionReset(
+			targetModel,
+			selection,
+			governed ? { thinkingLevel: governed.configured } : undefined,
+		);
 		this.#host.sessionManager.appendModelChange(
-			`${targetModel.provider}/${targetModel.id}`,
+			roleSelection?.selector ?? `${targetModel.provider}/${targetModel.id}`,
 			options?.ephemeral ? EPHEMERAL_MODEL_CHANGE_ROLE : "temporary",
 		);
-		this.#host.settings.getStorage()?.recordModelUsage(`${targetModel.provider}/${targetModel.id}`);
+		if (!this.#host.roleRoute)
+			this.#host.settings.getStorage()?.recordModelUsage(`${targetModel.provider}/${targetModel.id}`);
 
 		// Apply explicit thinking level if given; otherwise prefer the model's
 		// configured defaultLevel; otherwise re-clamp the current level (or auto).
-		if (thinkingLevel !== undefined) {
+		if (governed) {
+			this.setThinkingLevel(governed.configured);
+		} else if (thinkingLevel !== undefined) {
 			this.setThinkingLevel(thinkingLevel);
 		} else {
 			this.#reapplyThinkingLevel(targetModel.thinking?.defaultLevel);
@@ -379,6 +536,17 @@ export class ModelControls {
 	 * settings. Shared with role cycling and the plan-approval model slider.
 	 */
 	async applyRoleModel(entry: ResolvedRoleModel): Promise<void> {
+		if (this.#host.roleRoute) {
+			const selection = this.#selectRoleModel(
+				entry.model,
+				undefined,
+				false,
+				entry.explicitThinkingLevel ? entry.thinkingLevel : undefined,
+			);
+			this.#governedThinking(entry.model, entry.thinkingLevel, entry.explicitThinkingLevel, selection);
+			await this.setModel(entry.model, entry.role, { selector: selection?.selector });
+			return;
+		}
 		await this.setModel(entry.model, entry.role);
 		if (entry.explicitThinkingLevel && entry.thinkingLevel !== undefined) {
 			this.setThinkingLevel(entry.thinkingLevel);
@@ -441,15 +609,31 @@ export class ModelControls {
 		const nextIndex = direction === "forward" ? (currentIndex + 1) % len : (currentIndex - 1 + len) % len;
 		const next = scopedModels[nextIndex];
 
+		const roleSelection = this.#selectRoleModel(next.model);
+		const governed = this.#governedThinking(
+			next.model,
+			this.#autoThinking ? AUTO_THINKING : next.thinkingLevel,
+			false,
+			roleSelection,
+		);
+		if (roleSelection) this.#selectRoleModel(next.model, roleSelection.selector, true);
 		// Apply model
 		this.#host.modelRegistry.clearSuppressedSelector(formatModelStringWithRouting(next.model));
 		this.#host.clearActiveRetryFallback();
-		await this.#host.setModelWithProviderSessionReset(next.model);
-		this.#host.sessionManager.appendModelChange(`${next.model.provider}/${next.model.id}`);
-		this.#host.settings.getStorage()?.recordModelUsage(`${next.model.provider}/${next.model.id}`);
+		await this.#host.setModelWithProviderSessionReset(
+			next.model,
+			"explicit",
+			governed ? { thinkingLevel: governed.configured } : undefined,
+		);
+		this.#host.sessionManager.appendModelChange(
+			roleSelection?.selector ?? `${next.model.provider}/${next.model.id}`,
+			roleSelection?.role,
+		);
+		if (!this.#host.roleRoute)
+			this.#host.settings.getStorage()?.recordModelUsage(`${next.model.provider}/${next.model.id}`);
 
 		// Apply the scoped model's configured thinking level, preserving auto.
-		this.setThinkingLevel(this.#autoThinking ? AUTO_THINKING : next.thinkingLevel);
+		this.setThinkingLevel(governed ? governed.configured : this.#autoThinking ? AUTO_THINKING : next.thinkingLevel);
 		await this.#host.syncAfterModelChange(previousEditMode);
 
 		return { model: next.model, thinkingLevel: this.thinkingLevel, isScoped: true };
@@ -467,19 +651,31 @@ export class ModelControls {
 		const len = availableModels.length;
 		const nextIndex = direction === "forward" ? (currentIndex + 1) % len : (currentIndex - 1 + len) % len;
 		const nextModel = availableModels[nextIndex];
+		const roleSelection = this.#selectRoleModel(nextModel);
+		const governed = this.#governedThinking(nextModel, this.configuredThinkingLevel(), false, roleSelection);
 
 		const apiKey = await this.#host.modelRegistry.getApiKey(nextModel, this.#host.sessionId());
 		if (!apiKey) {
 			throw new Error(`No API key for ${nextModel.provider}/${nextModel.id}`);
 		}
+		if (roleSelection) this.#selectRoleModel(nextModel, roleSelection.selector, true);
 
 		this.#host.modelRegistry.clearSuppressedSelector(formatModelStringWithRouting(nextModel));
 		this.#host.clearActiveRetryFallback();
-		await this.#host.setModelWithProviderSessionReset(nextModel);
-		this.#host.sessionManager.appendModelChange(`${nextModel.provider}/${nextModel.id}`);
-		this.#host.settings.getStorage()?.recordModelUsage(`${nextModel.provider}/${nextModel.id}`);
+		await this.#host.setModelWithProviderSessionReset(
+			nextModel,
+			"explicit",
+			governed ? { thinkingLevel: governed.configured } : undefined,
+		);
+		this.#host.sessionManager.appendModelChange(
+			roleSelection?.selector ?? `${nextModel.provider}/${nextModel.id}`,
+			roleSelection?.role,
+		);
+		if (!this.#host.roleRoute)
+			this.#host.settings.getStorage()?.recordModelUsage(`${nextModel.provider}/${nextModel.id}`);
 		// Re-apply the current thinking level (or auto) for the newly selected model
-		this.#reapplyThinkingLevel();
+		if (governed) this.setThinkingLevel(governed.configured);
+		else this.#reapplyThinkingLevel();
 		await this.#host.syncAfterModelChange(previousEditMode);
 
 		return { model: nextModel, thinkingLevel: this.thinkingLevel, isScoped: false };
@@ -501,6 +697,13 @@ export class ModelControls {
 	// =========================================================================
 
 	#applyThinkingLevelToAgent(level: ThinkingLevel | undefined): void {
+		assertRoleDispatch(
+			this.#host.roleRoute,
+			this.#model,
+			toReasoningEffort(level),
+			undefined,
+			this.#host.modelRegistry,
+		);
 		this.#host.agent.setThinkingLevel(toReasoningEffort(level));
 		this.#host.agent.setDisableReasoning(shouldDisableReasoning(level));
 	}
@@ -512,6 +715,8 @@ export class ModelControls {
 	 * user turn. Later classifications persist only changed concrete resolutions.
 	 */
 	setThinkingLevel(level: ConfiguredThinkingLevel | undefined, persist: boolean = false): void {
+		const governed = this.#governedThinking(this.#model, level, true);
+		if (governed) level = governed.configured;
 		if (level === AUTO_THINKING) {
 			const provisional = clampThinkingLevelToCeiling(
 				this.#model,
@@ -527,7 +732,7 @@ export class ModelControls {
 				this.#host.clearInheritedProviderPromptCacheKey();
 			}
 			this.#applyThinkingLevelToAgent(provisional);
-			if (persist) {
+			if (persist && !this.#host.roleRoute) {
 				cfgDefaultThinkingLevel.set(this.#host.settings, AUTO_THINKING);
 			}
 			const isChanging = !wasAuto || previousLevel !== provisional;
@@ -541,10 +746,12 @@ export class ModelControls {
 		const wasAuto = this.#autoThinking;
 		this.#autoThinking = false;
 		this.#autoResolvedLevel = undefined;
-		const effectiveLevel = resolveThinkingLevelForModel(
-			this.#model,
-			clampThinkingLevelToCeiling(this.#model, level, this.#thinkingLevelCeiling),
-		);
+		const effectiveLevel = governed
+			? governed.effective
+			: resolveThinkingLevelForModel(
+					this.#model,
+					clampThinkingLevelToCeiling(this.#model, level, this.#thinkingLevelCeiling),
+				);
 		// Leaving auto must persist even when the resolved effort is unchanged (e.g.
 		// auto resolved to medium, then the user pins medium): otherwise the latest
 		// session entry keeps `configured: "auto"` and resume re-enables auto.
@@ -556,7 +763,7 @@ export class ModelControls {
 		if (isChanging) {
 			this.#host.clearInheritedProviderPromptCacheKey();
 			this.#host.sessionManager.appendThinkingLevelChange(effectiveLevel, effectiveLevel);
-			if (persist && effectiveLevel !== undefined && effectiveLevel !== ThinkingLevel.Off) {
+			if (persist && !this.#host.roleRoute && effectiveLevel !== undefined && effectiveLevel !== ThinkingLevel.Off) {
 				cfgDefaultThinkingLevel.set(this.#host.settings, effectiveLevel);
 			}
 			this.#host.emit({ type: "thinking_level_changed", thinkingLevel: effectiveLevel });
@@ -569,7 +776,27 @@ export class ModelControls {
 	 * preferred default or the current effective level.
 	 */
 	#reapplyThinkingLevel(preferredDefault?: ThinkingLevel): void {
+		if (this.#host.roleRoute) {
+			const governed = this.#governedThinking(
+				this.#model,
+				this.#autoThinking ? AUTO_THINKING : (preferredDefault ?? this.#thinkingLevel),
+			);
+			this.setThinkingLevel(governed?.configured);
+			return;
+		}
 		this.setThinkingLevel(this.#autoThinking ? AUTO_THINKING : (preferredDefault ?? this.#thinkingLevel));
+	}
+
+	/** All selectable effort selectors for the active model, in cycle order. */
+	getAvailableEffortSelectors(): ConfiguredThinkingLevel[] {
+		if (!this.#model?.reasoning) return [];
+		const efforts = this.getAvailableThinkingLevels();
+		const ceiling = this.#thinkingLevelCeiling;
+		const selectable =
+			ceiling === undefined
+				? efforts
+				: efforts.filter(level => THINKING_EFFORTS.indexOf(level) <= THINKING_EFFORTS.indexOf(ceiling));
+		return [ThinkingLevel.Off, AUTO_THINKING, ...selectable];
 	}
 
 	/**
@@ -577,13 +804,8 @@ export class ModelControls {
 	 * @returns New selector, or undefined if model doesn't support thinking
 	 */
 	cycleThinkingLevel(): ConfiguredThinkingLevel | undefined {
-		if (!this.#model?.reasoning) return undefined;
-
-		const levels: ConfiguredThinkingLevel[] = [
-			ThinkingLevel.Off,
-			AUTO_THINKING,
-			...this.getAvailableThinkingLevels(),
-		];
+		const levels = this.getAvailableEffortSelectors();
+		if (levels.length === 0) return undefined;
 		const configured = this.configuredThinkingLevel();
 		const currentLevel = configured === ThinkingLevel.Inherit ? ThinkingLevel.Off : configured;
 		const currentIndex = currentLevel ? levels.indexOf(currentLevel) : -1;
@@ -662,6 +884,7 @@ export class ModelControls {
 			this.#thinkingLevelCeiling,
 		);
 		if (effort === undefined) return;
+		assertRoleDispatch(this.#host.roleRoute, model, toReasoningEffort(effort), undefined, this.#host.modelRegistry);
 		const shouldPersistResolution = this.#thinkingLevel !== effort;
 		this.#autoResolvedLevel = effort;
 		this.#thinkingLevel = effort;

@@ -6,7 +6,9 @@
  * negotiated `apc` limit is split across messages with the same verb, tagged
  * `c=<chunk-id>`, with `m=1` on every chunk but the last; the receiver joins
  * the bodies byte-wise. Chunks split on code-point boundaries, so every chunk
- * is valid UTF-8 on its own and the joined bytes equal the original body.
+ * is valid UTF-8 on its own and the joined bytes equal the original body, and
+ * never where the next chunk would lead with a `key=value;` segment the
+ * receiver would read as a parameter (Tern's `tsp_chunks`).
  */
 import { isRecord } from "@oh-my-pi/pi-utils/type-guards";
 import {
@@ -34,36 +36,58 @@ export type TspParams = Readonly<Record<string, string | number>>;
 
 let nextChunkId = 1;
 
-/** UTF-8 byte length of one UTF-16 code unit sequence starting at `i`, and its unit count. */
-function codePointBytes(text: string, i: number): { bytes: number; units: number } {
-	const c = text.charCodeAt(i);
-	if (c < 0x80) return { bytes: 1, units: 1 };
-	if (c < 0x800) return { bytes: 2, units: 1 };
-	if (c >= 0xd800 && c <= 0xdbff && i + 1 < text.length) {
-		const next = text.charCodeAt(i + 1);
-		if (next >= 0xdc00 && next <= 0xdfff) return { bytes: 4, units: 2 };
+/** Whether `bytes` from `at` leads with a `key=value;` segment, which a receiver reads as one more parameter. */
+function leadsWithParameter(bytes: Uint8Array, at: number): boolean {
+	let i = at;
+	// Key bytes: `[A-Za-z0-9_-]`.
+	for (; i < bytes.length; i++) {
+		const b = bytes[i]!;
+		if (
+			!((b >= 0x30 && b <= 0x39) || (b >= 0x41 && b <= 0x5a) || (b >= 0x61 && b <= 0x7a) || b === 0x5f || b === 0x2d)
+		)
+			break;
 	}
-	return { bytes: 3, units: 1 };
+	if (i === at || bytes[i] !== 0x3d) return false;
+	i++;
+	// Value bytes: printable ASCII other than `;`.
+	while (i < bytes.length && bytes[i]! >= 0x21 && bytes[i]! <= 0x7e && bytes[i] !== 0x3b) i++;
+	return bytes[i] === 0x3b;
 }
 
-/** Split `body` into pieces of at most `limit` UTF-8 bytes, never inside a code point. */
-export function splitUtf8(body: string, limit: number): string[] {
-	const max = Math.max(4, Math.trunc(limit));
+/**
+ * Where the chunk of `bytes` starting at `start` ends: the safe cut nearest
+ * below `start + limit` (above `start`), else the nearest above it, else the
+ * end. A cut is safe on a UTF-8 character boundary where the rest doesn't
+ * lead with a parameter-shaped segment.
+ */
+function chunkEnd(bytes: Uint8Array, start: number, limit: number): number {
+	const target = start + limit;
+	if (target >= bytes.length) return bytes.length;
+	const safe = (at: number): boolean => (bytes[at]! & 0xc0) !== 0x80 && !leadsWithParameter(bytes, at);
+	for (let at = target; at > start; at--) if (safe(at)) return at;
+	for (let at = target + 1; at < bytes.length; at++) if (safe(at)) return at;
+	return bytes.length;
+}
+
+/**
+ * Chunk bodies for `body` of `byteLength` UTF-8 bytes, cut as Tern's
+ * `tsp_chunks` cuts. Pure ASCII without `;` (every base64 blob) has no
+ * parameter-shaped segment and no multibyte character, so it is cut every
+ * `limit` characters.
+ */
+function chunkBodies(body: string, byteLength: number, limit: number): string[] {
+	const max = Math.max(1, Math.trunc(limit));
 	const pieces: string[] = [];
-	let start = 0;
-	let bytes = 0;
-	let i = 0;
-	while (i < body.length) {
-		const step = codePointBytes(body, i);
-		if (bytes + step.bytes > max) {
-			pieces.push(body.slice(start, i));
-			start = i;
-			bytes = 0;
-		}
-		bytes += step.bytes;
-		i += step.units;
+	if (byteLength === body.length && !body.includes(";")) {
+		for (let at = 0; at < body.length; at += max) pieces.push(body.slice(at, at + max));
+		return pieces;
 	}
-	pieces.push(body.slice(start));
+	const bytes = Buffer.from(body, "utf8");
+	for (let start = 0; start < bytes.length;) {
+		const end = chunkEnd(bytes, start, max);
+		pieces.push(bytes.toString("utf8", start, end));
+		start = end;
+	}
 	return pieces;
 }
 
@@ -79,8 +103,9 @@ function encodeParams(params: TspParams | undefined): string {
 }
 
 /**
- * Encode one logical message, chunked when `body` exceeds `limit` UTF-8 bytes.
- * Returns the complete byte string to write (all chunks, in order).
+ * Encode one logical message, chunked when `body` exceeds `limit` UTF-8 bytes:
+ * the first chunk carries `params`, every chunk `c=<id>` and all but the last
+ * `m=1`. Returns the complete byte string to write (all chunks, in order).
  */
 export function encodeTspMessage(
 	verb: TspVerb,
@@ -90,13 +115,15 @@ export function encodeTspMessage(
 ): string {
 	const base = encodeParams(params);
 	// Fast path: ASCII-length bound first, exact byte count only near the limit.
-	if (body.length * 3 <= limit || Buffer.byteLength(body, "utf8") <= limit) return frame(verb, base, body);
+	if (body.length * 3 <= limit) return frame(verb, base, body);
+	const byteLength = Buffer.byteLength(body, "utf8");
+	if (byteLength <= limit) return frame(verb, base, body);
 	const chunkId = (nextChunkId++).toString(36);
-	const pieces = splitUtf8(body, limit);
+	const pieces = chunkBodies(body, byteLength, limit);
 	let out = "";
 	for (let i = 0; i < pieces.length; i++) {
 		const more = i < pieces.length - 1 ? ";m=1" : "";
-		out += frame(verb, `${base};c=${chunkId}${more}`, pieces[i]!);
+		out += frame(verb, `${i === 0 ? base : ""};c=${chunkId}${more}`, pieces[i]!);
 	}
 	return out;
 }
@@ -106,9 +133,22 @@ export function encodeTspJson(verb: TspVerb, value: unknown, params?: TspParams,
 	return encodeTspMessage(verb, JSON.stringify(value), params, limit);
 }
 
-/** The `hello` query; callers follow it with a DA1 sentinel. */
+/**
+ * The `hello` query; callers follow it with a DA1 sentinel. `features: ["edit"]`
+ * tells the terminal that omp applies its `edit` events (Tern SDK,
+ * `protocol/input.md`), so it may keep a native selection in omp's editors;
+ * without it, every key stays omp's. `"undo"` says omp applies `undo` events,
+ * so the terminal may turn ⌃Z in a field into one.
+ * `"send"` accepts an explicit prompt for a live composer without simulating keys.
+ */
 export function encodeTspHelloQuery(version?: string): string {
-	return encodeTspJson("q", { q: "hello", v: [TSP_VERSION], app: "omp", ver: version });
+	return encodeTspJson("q", {
+		q: "hello",
+		v: [TSP_VERSION],
+		app: "omp",
+		features: ["edit", "undo", "send"],
+		ver: version,
+	});
 }
 
 /** One decoded APC message: verb, parameters and raw body. */
@@ -165,13 +205,22 @@ const EVENT_REQUIRED: Readonly<Record<string, Readonly<Record<string, "string" |
 	select: { id: "string", item: "string" },
 	activate: { id: "string", item: "string" },
 	action: { id: "string", act: "string" },
+	// `value` varies by control (boolean, number, string, string[], null): the handler checks it.
+	change: { id: "string", item: "string" },
 	edit: { id: "string", from: "number", to: "number", text: "string", cursor: "number", len: "number" },
+	undo: { id: "string" },
+	focus: { id: "string" },
 	error: { msg: "string" },
 	gone: { ids: "array" },
 };
 
 function decodeEvent(value: Record<string, unknown>): TspEvent | null {
 	if (typeof value.ev !== "string") return null;
+	if (value.ev === "send") {
+		const { sf, id, text } = value;
+		if (typeof sf !== "string" || !sf || typeof id !== "string" || !id || typeof text !== "string") return null;
+		return { ev: "send", sf, id, text };
+	}
 	const required = EVENT_REQUIRED[value.ev];
 	if (!required) return null;
 	for (const key in required) {

@@ -3,7 +3,7 @@ import { Effort } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { ModelRegistry } from "../src/config/model-registry";
-import { resolveAgentModelPatterns, resolveModelOverride } from "../src/config/model-resolver";
+import { createTaskModelRoute, resolveRoleRoute } from "../src/task/role-routing";
 import { Settings } from "../src/config/settings";
 import { createAgentSession } from "../src/sdk";
 import { SessionManager } from "../src/session/session-manager";
@@ -17,6 +17,7 @@ for (const provider of ["openrouter", "vercel-ai-gateway"] as const) {
 		const dir = TempDir.createSync("sdk-active-selector-");
 		const authStorage = createInMemoryAuthStorage();
 		const modelRegistry = new ModelRegistry(authStorage, dir.join("models.yml"));
+		authStorage.keys.setRuntime(provider, "fixture");
 		const routing =
 			provider === "openrouter"
 				? { openRouterRouting: { only: ["anthropic"] } }
@@ -36,6 +37,7 @@ for (const provider of ["openrouter", "vercel-ai-gateway"] as const) {
 		});
 		const routed = buildModel({ ...base, compat: routing });
 		vi.spyOn(modelRegistry, "getAvailable").mockReturnValue([base]);
+		vi.spyOn(modelRegistry, "getAll").mockReturnValue([base]);
 		vi.spyOn(modelRegistry, "getApiKey").mockResolvedValue("fixture");
 		const captured: { session?: ToolSession } = {};
 		const originalCreateTools = tools.createTools;
@@ -69,36 +71,40 @@ for (const provider of ["openrouter", "vercel-ai-gateway"] as const) {
 		try {
 			const selected = captured.session?.getActiveModelString?.();
 			expect(selected).toBe(`${provider}/anthropic/fixture-model@anthropic:high`);
-			const inherited = resolveAgentModelPatterns({
-				requestModel: "@default",
-				activeModelPattern: selected,
+			const authority = {
 				settings,
+				agentName: "worker",
+				getParentSelector: () => captured.session?.getActiveModelString?.(),
+				getParentModel: () => session.model,
+			};
+			const inherited = await createTaskModelRoute({
+				authority,
+				modelRegistry,
+				selectors: ["@default"],
+				explicit: true,
 			});
-			expect(inherited).toEqual([selected!]);
-			const resolved = resolveModelOverride(inherited, modelRegistry, settings);
+			const resolved = resolveRoleRoute(inherited.permit, modelRegistry);
 			expect(resolved.thinkingLevel).toBe(Effort.High);
-			expect(resolved.model?.compat).toMatchObject(routing);
+			expect(resolved.model.compat).toMatchObject(routing);
 			session.setThinkingLevel(Effort.Low);
 			expect(captured.session?.getActiveModelString?.()).toBe(`${provider}/anthropic/fixture-model@anthropic:low`);
-			const overridden = resolveModelOverride(
-				resolveAgentModelPatterns({
-					requestModel: "@default:high",
-					activeModelPattern: captured.session?.getActiveModelString?.(),
-					settings,
-				}),
+			const overridden = await createTaskModelRoute({
+				authority,
 				modelRegistry,
-				settings,
-			);
-			expect(overridden.thinkingLevel).toBe(Effort.High);
-			expect(overridden.model?.compat).toMatchObject(routing);
-			const explicit = `${provider}/anthropic/fixture-model:high`;
-			expect(
-				resolveAgentModelPatterns({
-					requestModel: explicit,
-					activeModelPattern: captured.session?.getActiveModelString?.(),
-					settings,
-				}),
-			).toEqual([explicit]);
+				selectors: ["@default:high"],
+				explicit: true,
+			});
+			const overriddenSelection = resolveRoleRoute(overridden.permit, modelRegistry);
+			expect(overriddenSelection.thinkingLevel).toBe(Effort.High);
+			expect(overriddenSelection.model.compat).toMatchObject(routing);
+			session.setThinkingLevel("off");
+			const disabled = await createTaskModelRoute({
+				authority,
+				modelRegistry,
+				selectors: ["@default"],
+				explicit: true,
+			});
+			expect(resolveRoleRoute(disabled.permit, modelRegistry).thinkingLevel).toBe("off");
 		} finally {
 			await session.dispose();
 			authStorage.close();

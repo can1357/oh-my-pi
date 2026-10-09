@@ -12,6 +12,8 @@ import * as executorModule from "@oh-my-pi/pi-coding-agent/task/executor";
 import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
 import type { SingleResult, TaskParams } from "@oh-my-pi/pi-tui/tools/task";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import { resolveRoleRoute } from "@oh-my-pi/pi-coding-agent/task/role-routing";
+import { createTaskModelFixture, type TaskModelFixture } from "../helpers/model-fixtures";
 
 const taskAgent: AgentDefinition = {
 	name: "task",
@@ -20,16 +22,24 @@ const taskAgent: AgentDefinition = {
 	source: "bundled",
 };
 
+const modelFixtures: TaskModelFixture[] = [];
+
 function createSession(options: {
 	manager: AsyncJobManager;
 	settings?: Record<string, unknown>;
 	spawns?: string | boolean;
 	cwd?: string;
 }): ToolSession {
+	const settings = Settings.isolated({ "async.enabled": true, ...options.settings });
+	const fixture = createTaskModelFixture(settings);
+	modelFixtures.push(fixture);
 	return {
 		cwd: options.cwd ?? "/tmp",
 		hasUI: false,
-		settings: Settings.isolated({ "async.enabled": true, ...options.settings }),
+		settings,
+		modelRegistry: fixture.modelRegistry,
+		getActiveModel: fixture.getActiveModel,
+		getActiveModelString: fixture.getActiveModelString,
 		getSessionFile: () => null,
 		getSessionSpawns: () => options.spawns ?? "*",
 		asyncJobManager: options.manager,
@@ -72,10 +82,11 @@ describe("task async preflight", () => {
 	});
 
 	afterEach(async () => {
-		vi.restoreAllMocks();
 		for (const manager of managers.splice(0)) await manager.dispose({ timeoutMs: 1_000 });
+		vi.restoreAllMocks();
 		AgentLifecycleManager.resetGlobalForTests();
 		AgentRegistry.resetGlobalForTests();
+		for (const fixture of modelFixtures.splice(0)) fixture.close();
 	});
 
 	function manager(): AsyncJobManager {
@@ -181,27 +192,58 @@ describe("task async preflight", () => {
 			} as TaskParams);
 
 			const text = textOf(result);
-			expect(text).toContain(`Searched: ${path.join("~", "project", ".omp", "agents")}`);
+			// shortenPath renders home paths as portable `~/…` on every platform.
+			expect(text).toContain("Searched: ~/project/.omp/agents");
 			expect(text).not.toContain(home);
 		} finally {
 			await fs.rm(home, { recursive: true, force: true });
 		}
 	});
 
-	it("routes a per-call model on a task item into the spawn", async () => {
+	it("admits a task item's configured model with fixed effort before executor dispatch", async () => {
 		mockDiscovery();
-		const runSubprocess = vi.spyOn(executorModule, "runSubprocess").mockResolvedValue(resultFor("Router"));
 		const jobs = manager();
-		const tool = await TaskTool.create(
-			createSession({ manager: jobs, settings: { "async.enabled": false, "task.batch": true } }),
-		);
-
-		await tool.execute("per-call-model", {
+		const session = createSession({
+			manager: jobs,
+			settings: {
+				"async.enabled": false,
+				"task.batch": true,
+				modelRoles: { "project-review": "routing-test/primary" },
+			},
+		});
+		const selected: string[] = [];
+		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+			const route = resolveRoleRoute(options.roleRoute!, session.modelRegistry);
+			selected.push(route.selector);
+			expect(route.fixedEffort).toBe(true);
+			return resultFor(options.id);
+		});
+		const tool = await TaskTool.create(session);
+		const result = await tool.execute("per-call-model", {
 			context: "Shared context.",
-			tasks: [{ name: "Router", agent: "task", task: "Do the work.", model: "p/requested:high" }],
+			tasks: [{ name: "Router", agent: "task", task: "Do the work.", model: "@project-review:high" }],
 		} as TaskParams);
+		expect(result.isError).not.toBe(true);
+		expect(selected).toEqual(["routing-test/primary:high"]);
+	});
 
-		expect(runSubprocess.mock.calls[0]?.[0]?.modelOverride).toEqual(["p/requested:high"]);
+	it("rejects an unauthorized batch item atomically without registering otherwise valid siblings", async () => {
+		mockDiscovery();
+		const dispatch = vi.spyOn(executorModule, "runSubprocess");
+		const jobs = manager();
+		const register = vi.spyOn(jobs, "register");
+		const tool = await TaskTool.create(createSession({ manager: jobs, settings: { "task.batch": true } }));
+		const result = await tool.execute("unauthorized-model", {
+			context: "Shared context.",
+			tasks: [
+				{ name: "Valid", task: "Allowed work.", model: "@default" },
+				{ name: "Denied", task: "Unauthorized work.", model: "routing-test/unassigned" },
+			],
+		} as TaskParams);
+		expect(textOf(result)).toContain("not authorized");
+		expect(result.isError).toBe(true);
+		expect(register).not.toHaveBeenCalled();
+		expect(dispatch).not.toHaveBeenCalled();
 	});
 
 	it("rejects an ambiguous per-call model before dispatching the item", async () => {

@@ -208,20 +208,20 @@ describe("dispatchRpcInputFrame", () => {
 describe("RpcInputDispatcher", () => {
 	test("control frames resolve extension UI requests while an ordinary command is active", async () => {
 		const { deps, outputs } = makeDeps(async command => {
-			if (command.type !== "steer") throw new Error(`unexpected command type: ${command.type}`);
+			if (command.type !== "get_state") throw new Error(`unexpected command type: ${command.type}`);
 			const response = await requestExtensionInput(depsRef, "ui-active", "Continue?");
 			return {
 				id: command.id,
 				type: "response",
-				command: "steer",
+				command: "get_state",
 				success: true,
 				data: { agentInvoked: "value" in response && response.value === "continue" },
-			};
+			} as unknown as RpcResponse;
 		});
 		const depsRef = deps;
 		const dispatcher = new RpcInputDispatcher({ deps });
 
-		dispatcher.dispatch({ id: "steer-1", type: "steer", message: "ask extension" });
+		dispatcher.dispatch({ id: "cmd-1", type: "get_state" });
 		await flushMicrotasks();
 
 		expect(outputs).toEqual([
@@ -244,9 +244,9 @@ describe("RpcInputDispatcher", () => {
 				message: "Continue?",
 			},
 			{
-				id: "steer-1",
+				id: "cmd-1",
 				type: "response",
-				command: "steer",
+				command: "get_state",
 				success: true,
 				data: { agentInvoked: true },
 			},
@@ -301,6 +301,8 @@ describe("RpcInputDispatcher", () => {
 						autoCompactionEnabled: false,
 						fastModeEnabled: false,
 						fastModeActive: false,
+						slowModeSupported: false,
+						slowModeEnabled: false,
 						tokensPerSecond: null,
 						messageCount: 0,
 						queuedMessageCount: 0,
@@ -308,6 +310,7 @@ describe("RpcInputDispatcher", () => {
 						isSettled: true,
 						queuedMessages: { steering: [], followUp: [] },
 						todoPhases: [],
+						goal: null,
 					},
 				};
 			}
@@ -485,23 +488,22 @@ describe("RpcInputDispatcher", () => {
 		]);
 		const started: string[] = [];
 		const { deps, outputs } = makeDeps(async command => {
-			if (command.type !== "steer") throw new Error(`unexpected command type: ${command.type}`);
+			if (command.type !== "get_state") throw new Error(`unexpected command type: ${command.type}`);
 			started.push(command.id ?? "");
 			await tool.execute(`toolu_${command.id}`, {});
 			return {
 				id: command.id,
 				type: "response",
-				command: "steer",
+				command: "get_state",
 				success: true,
 				data: { agentInvoked: true },
-			};
+			} as unknown as RpcResponse;
 		});
 		const dispatcher = new RpcInputDispatcher({ deps });
 
-		dispatcher.dispatch({ id: "active", type: "steer", message: "active host tool" });
-		dispatcher.dispatch({ id: "queued", type: "steer", message: "queued host tool" });
+		dispatcher.dispatch({ id: "active", type: "get_state" });
+		dispatcher.dispatch({ id: "queued", type: "get_state" });
 		await flushMicrotasks();
-
 		expect(started).toEqual(["active"]);
 		expect(hostToolFrames).toHaveLength(1);
 		expect(hostToolFrames[0]).toMatchObject({
@@ -520,14 +522,14 @@ describe("RpcInputDispatcher", () => {
 			{
 				id: "active",
 				type: "response",
-				command: "steer",
+				command: "get_state",
 				success: false,
 				error: disconnectMessage,
 			},
 			{
 				id: "queued",
 				type: "response",
-				command: "steer",
+				command: "get_state",
 				success: false,
 				error: disconnectMessage,
 			},
@@ -540,26 +542,25 @@ describe("RpcInputDispatcher", () => {
 		const started: string[] = [];
 		const { deps, outputs } = makeDeps(
 			async command => {
-				if (command.type !== "steer") throw new Error(`unexpected command type: ${command.type}`);
+				if (command.type !== "get_state") throw new Error(`unexpected command type: ${command.type}`);
 				started.push(command.id ?? "");
-				await requestExtensionInput(depsRef, `${command.id}-dialog`, command.message);
+				await requestExtensionInput(depsRef, `${command.id}-dialog`, `${command.id} dialog`);
 				return {
 					id: command.id,
 					type: "response",
-					command: "steer",
+					command: "get_state",
 					success: true,
 					data: { agentInvoked: true },
-				};
+				} as unknown as RpcResponse;
 			},
 			{ pendingExtensionRequests },
 		);
 		const depsRef = deps;
 		const dispatcher = new RpcInputDispatcher({ deps });
 
-		dispatcher.dispatch({ id: "active", type: "steer", message: "active dialog" });
-		dispatcher.dispatch({ id: "queued", type: "steer", message: "queued dialog" });
+		dispatcher.dispatch({ id: "active", type: "get_state" });
+		dispatcher.dispatch({ id: "queued", type: "get_state" });
 		await flushMicrotasks();
-
 		expect(started).toEqual(["active"]);
 		expect(outputs).toEqual([
 			{
@@ -584,7 +585,7 @@ describe("RpcInputDispatcher", () => {
 			{
 				id: "active",
 				type: "response",
-				command: "steer",
+				command: "get_state",
 				success: false,
 				error: disconnectMessage,
 			},
@@ -597,7 +598,7 @@ describe("RpcInputDispatcher", () => {
 			{
 				id: "queued",
 				type: "response",
-				command: "steer",
+				command: "get_state",
 				success: false,
 				error: disconnectMessage,
 			},

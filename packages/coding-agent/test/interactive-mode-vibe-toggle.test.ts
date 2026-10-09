@@ -736,10 +736,12 @@ describe("InteractiveMode vibe mode toggle", () => {
 		await session.sessionManager.ensureOnDisk();
 		const sessionFile = session.sessionFile;
 		if (!sessionFile) throw new Error("Expected persisted session file");
+		const entryId = session.sessionManager.appendMessage({ role: "user", content: "seed", timestamp: Date.now() });
 
 		await expect(session.newSession()).rejects.toThrow("Exit vibe mode first");
 		await expect(session.newSession({ drop: true })).rejects.toThrow("Exit vibe mode first");
 		await expect(session.fork()).rejects.toThrow("Exit vibe mode first");
+		await expect(session.fork(entryId)).rejects.toThrow("Exit vibe mode first");
 		await expect(session.moveSession(path.join(tempDir.path(), "other-project"))).rejects.toThrow(
 			"Exit vibe mode first",
 		);

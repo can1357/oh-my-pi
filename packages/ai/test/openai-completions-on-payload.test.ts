@@ -6,6 +6,8 @@
 import { describe, expect, it } from "bun:test";
 import { streamOpenAICompletions } from "@oh-my-pi/pi-ai/providers/openai-completions";
 import type { Context, FetchImpl, Model } from "@oh-my-pi/pi-ai/types";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 
 const completionsModel = {
@@ -86,4 +88,77 @@ describe("openai-completions onPayload replacement", () => {
 
 		expect(JSON.stringify(captured?.messages)).toContain("Say hello");
 	}, 10_000);
+});
+
+describe("openai-completions governed payload selection", () => {
+	const model = buildModel({
+		provider: "payload-selection-test",
+		id: "bound-model",
+		name: "Bound model",
+		api: "openai-completions",
+		baseUrl: "http://127.0.0.1:1/v1",
+		reasoning: true,
+		thinking: { mode: "effort", efforts: [Effort.Low, Effort.High] },
+		input: ["text"],
+		supportsTools: true,
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 128000,
+		maxTokens: 8192,
+		compat: { supportsReasoningEffort: true, thinkingFormat: "openai" },
+	});
+
+	for (const field of ["models", "fallbacks"] as const) {
+		it(`rejects baseline extraBody ${field} alternatives rather than dropping them`, async () => {
+			let requests = 0;
+			const configured = {
+				...model,
+				compat: { ...model.compat, extraBody: { [field]: [model.id, "catalog-outsider"] } },
+			};
+			const result = await streamOpenAICompletions(configured, baseContext(), {
+				apiKey: "test-key",
+				fetch: createSseFetch(() => requests++),
+				reasoning: Effort.High,
+				preserveModelSelection: true,
+			}).result();
+			expect(result.stopReason).toBe("error");
+			expect(requests).toBe(0);
+		});
+	}
+
+	for (const change of ["model", "reasoning_effort", "models", "fallbacks"] as const) {
+		it(`rejects a late in-place ${change} rewrite before sending a governed request`, async () => {
+			let requests = 0;
+			const result = await streamOpenAICompletions(model, baseContext(), {
+				apiKey: "test-key",
+				fetch: createSseFetch(() => requests++),
+				reasoning: Effort.High,
+				preserveModelSelection: true,
+				onPayload: payload => {
+					Object.assign(payload as Record<string, unknown>, {
+						[change]:
+							change === "models" || change === "fallbacks"
+								? [model.id, "catalog-outsider"]
+								: change === "model"
+									? "catalog-outsider"
+									: Effort.Low,
+					});
+				},
+			}).result();
+			expect(result.stopReason).toBe("error");
+			expect(requests).toBe(0);
+		});
+	}
+
+	it("rejects a replacement body that discards governed controls", async () => {
+		let requests = 0;
+		const result = await streamOpenAICompletions(model, baseContext(), {
+			apiKey: "test-key",
+			fetch: createSseFetch(() => requests++),
+			reasoning: Effort.High,
+			preserveModelSelection: true,
+			onPayload: () => [],
+		}).result();
+		expect(result.stopReason).toBe("error");
+		expect(requests).toBe(0);
+	});
 });

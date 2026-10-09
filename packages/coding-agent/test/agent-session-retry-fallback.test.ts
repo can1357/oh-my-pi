@@ -14,17 +14,20 @@ import {
 	type ModelUsageHealth,
 	type ProviderSessionState,
 	type ToolCall,
+	type SimpleStreamOptions,
 } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { buildParams } from "@oh-my-pi/pi-ai/providers/openai-responses";
+import { unregisterOAuthProvider } from "@oh-my-pi/pi-ai/registry/oauth";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { writeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
-import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
+import { ModelRegistry, type ProviderConfigInput } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { parseModelString } from "@oh-my-pi/pi-tui/overlays/model-selector";
 import { parseModelPattern } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
+import { cfgEnabledModels, cfgModelRoles } from "@oh-my-pi/pi-coding-agent/config/model-settings";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { editVariantForModel } from "@oh-my-pi/pi-coding-agent/utils/edit-mode";
 import { ExtensionRuntime, loadExtensionFromFactory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
@@ -37,10 +40,18 @@ import {
 	validateRetryFallbackChains,
 } from "@oh-my-pi/pi-coding-agent/session/retry-fallback-chains";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import {
+	createTaskModelRoute,
+	resolveRoleRoute,
+	roleRouteMetadata,
+	wrapRoleRouteStream,
+} from "@oh-my-pi/pi-coding-agent/task/role-routing";
+import { stream, streamSimple } from "@oh-my-pi/pi-ai/stream";
 import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { mockSchedulerWaitWithClock } from "./helpers/mock-scheduler-clock";
+import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
 
 import { cfgRetryUsageReservePolicy } from "@oh-my-pi/pi-coding-agent/session/settings";
 
@@ -840,6 +851,106 @@ describe("AgentSession retry fallback", () => {
 		expect(session.messages.some(message => message.role === "user")).toBe(true);
 	});
 
+	it("keeps a declined reserve fallback until the selected account recovers", async () => {
+		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+		const fallbackModel = getBundledModel("openai", "gpt-4o-mini");
+		if (!primaryModel || !fallbackModel) throw new Error("Expected bundled reserve fallback models");
+		const mock = createMockModel({ handler: { content: ["stayed on primary"] } });
+		const agent = new Agent({
+			getApiKey: model => `${model.provider}-test-key`,
+			initialState: { model: primaryModel, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: mock.stream,
+		});
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.usageAwareFallback": true,
+			"retry.usageReservePolicy": "confirm",
+			"retry.fallbackChains": { default: [`${fallbackModel.provider}/${fallbackModel.id}`] },
+		});
+		settings.setModelRole("default", `${primaryModel.provider}/${primaryModel.id}`);
+		let health: "reserve" | "unknown" | "healthy" = "reserve";
+		let selectedHealth: "reserve" | "healthy" | undefined = "reserve";
+		vi.spyOn(modelRegistry.authStorage.health, "model").mockImplementation(async provider => ({
+			state: provider === primaryModel.provider ? health : "healthy",
+			accounts:
+				provider === primaryModel.provider
+					? [
+							{
+								credentialId: 1,
+								credentialType: "oauth",
+								selected: selectedHealth === undefined ? undefined : true,
+								state: selectedHealth ?? "reserve",
+							},
+							{ credentialId: 2, credentialType: "oauth", state: health },
+						]
+					: [],
+		}));
+		const confirmFallback = vi.fn(async () => false);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			providerSessionId: "shared-provider-session",
+			settings,
+			modelRegistry,
+		});
+		session.setUsageFallbackConfirmer(confirmFallback);
+		session.setThinkingLevel(Effort.Medium);
+		await session.prompt("Stay on the primary");
+		await session.waitForIdle();
+		session.setThinkingLevel(Effort.High);
+		await session.prompt("Continue with more thinking");
+		await session.waitForIdle();
+		expect(confirmFallback).toHaveBeenCalledTimes(1);
+		health = "unknown";
+		await session.prompt("Continue without quota data");
+		await session.waitForIdle();
+		health = "reserve";
+		await session.prompt("Continue when quota data returns");
+		await session.waitForIdle();
+		expect(confirmFallback).toHaveBeenCalledTimes(1);
+		expect(session.model?.id).toBe(primaryModel.id);
+		health = "healthy";
+		await session.prompt("Continue while only another account is healthy");
+		await session.waitForIdle();
+		health = "reserve";
+		await session.prompt("Keep the refusal when the other account reaches reserve");
+		await session.waitForIdle();
+		expect(confirmFallback).toHaveBeenCalledTimes(1);
+		selectedHealth = undefined;
+		health = "healthy";
+		await session.prompt("Continue while account selection is temporarily unavailable");
+		await session.waitForIdle();
+		selectedHealth = "reserve";
+		health = "reserve";
+		await session.prompt("Keep the refusal when the same reserved account is selected again");
+		await session.waitForIdle();
+		expect(confirmFallback).toHaveBeenCalledTimes(1);
+		selectedHealth = "healthy";
+		health = "healthy";
+		await session.prompt("Continue after quota recovery");
+		await session.waitForIdle();
+		selectedHealth = "reserve";
+		health = "reserve";
+		await session.prompt("Ask again for a new reserve episode");
+		await session.waitForIdle();
+		expect(confirmFallback).toHaveBeenCalledTimes(2);
+		session.freshSession();
+		await session.prompt("Keep the decision after resetting the provider connection");
+		await session.waitForIdle();
+		expect(confirmFallback).toHaveBeenCalledTimes(2);
+		const otherModel = getBundledModel("anthropic", "claude-haiku-4-5");
+		if (!otherModel) throw new Error("Expected another bundled reserve model");
+		await session.setModel(otherModel);
+		await session.prompt("Ask before spending another model's reserve");
+		await session.waitForIdle();
+		expect(confirmFallback).toHaveBeenCalledTimes(3);
+		await session.newSession();
+		await session.setModel(otherModel);
+		await session.prompt("Ask in a different transcript with the same provider session override");
+		await session.waitForIdle();
+		expect(confirmFallback).toHaveBeenCalledTimes(4);
+	});
+
 	it("honors a live fail-closed policy after reserve spending was approved", async () => {
 		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
 		const fallbackModel = getBundledModel("openai", "gpt-4o-mini");
@@ -1331,7 +1442,7 @@ describe("AgentSession retry fallback", () => {
 	});
 
 	it("does not degrade Fireworks Fast or retry a chain after queued fail-closed preflight", async () => {
-		const primaryModel = getBundledModel("fireworks", "kimi-k2.6-fast");
+		const primaryModel = getBundledModel("fireworks", "kimi-k3-fast");
 		const fallbackModel = getBundledModel("openai", "gpt-4o-mini");
 		if (!primaryModel || !fallbackModel) throw new Error("Expected bundled queued fail-closed models");
 		const requestedModels: string[] = [];
@@ -4619,63 +4730,66 @@ describe("AgentSession retry fallback", () => {
 		expect(getLastAssistantMessage(session).stopReason).toBe("error");
 	});
 
-	it("auto-retries a bare Request was aborted error-stop turn (issue #5375)", async () => {
-		const model = getBundledModel("openai", "gpt-4o-mini");
-		if (!model) {
-			throw new Error("Expected bundled OpenAI test model to exist");
-		}
+	it.each(["Request was aborted.", "The operation was aborted", "The operation was aborted."])(
+		"auto-retries empty abort errors: %s",
+		async abortMessage => {
+			const model = getBundledModel("openai", "gpt-4o-mini");
+			if (!model) {
+				throw new Error("Expected bundled OpenAI test model to exist");
+			}
 
-		const requestedModels: string[] = [];
-		// A stalled/dropped stream that the provider surfaces as stopReason:"error"
-		// carrying the bare abort sentinel, then a clean recovery on the retry.
-		const mock = createMockModel({
-			responses: [{ throw: "Request was aborted." }, { content: ["recovered after bare abort error"] }],
-		});
-		const agent = new Agent({
-			getApiKey: model => `${model.provider}-test-key`,
-			initialState: {
-				model,
-				systemPrompt: ["Test"],
-				tools: [],
-				messages: [],
-			},
-			streamFn: (requestedModel, context, options) => {
-				requestedModels.push(`${requestedModel.provider}/${requestedModel.id}`);
-				return mock.stream(requestedModel, context, options);
-			},
-		});
+			const requestedModels: string[] = [];
+			// A stalled/dropped stream that the provider surfaces as stopReason:"error"
+			// carrying the bare abort sentinel, then a clean recovery on the retry.
+			const mock = createMockModel({
+				responses: [{ throw: abortMessage }, { content: ["recovered after bare abort error"] }],
+			});
+			const agent = new Agent({
+				getApiKey: model => `${model.provider}-test-key`,
+				initialState: {
+					model,
+					systemPrompt: ["Test"],
+					tools: [],
+					messages: [],
+				},
+				streamFn: (requestedModel, context, options) => {
+					requestedModels.push(`${requestedModel.provider}/${requestedModel.id}`);
+					return mock.stream(requestedModel, context, options);
+				},
+			});
 
-		const settings = Settings.isolated({
-			"compaction.enabled": false,
-			"retry.baseDelayMs": 5,
-			"retry.maxRetries": 1,
-		});
-		settings.setModelRole("default", `${model.provider}/${model.id}`);
+			const settings = Settings.isolated({
+				"compaction.enabled": false,
+				"retry.baseDelayMs": 5,
+				"retry.maxRetries": 1,
+			});
+			settings.setModelRole("default", `${model.provider}/${model.id}`);
 
-		session = new AgentSession({
-			agent,
-			sessionManager: SessionManager.inMemory(),
-			settings,
-			modelRegistry,
-		});
-		mockSchedulerWaitWithClock();
-		const { retryStartEvents, retryEndEvents } = trackRetryEvents(session);
+			session = new AgentSession({
+				agent,
+				sessionManager: SessionManager.inMemory(),
+				settings,
+				modelRegistry,
+			});
+			mockSchedulerWaitWithClock();
+			const { retryStartEvents, retryEndEvents } = trackRetryEvents(session);
 
-		await session.prompt("Retry the bare abort error");
-		await session.waitForIdle();
+			await session.prompt("Retry the bare abort error");
+			await session.waitForIdle();
 
-		// Same model, retried once (no model fallback for a reason-less abort).
-		expect(requestedModels).toEqual([`${model.provider}/${model.id}`, `${model.provider}/${model.id}`]);
-		expect(retryStartEvents).toHaveLength(1);
-		expect(retryEndEvents).toHaveLength(1);
-		expect(retryEndEvents[0]).toMatchObject({ success: true, attempt: 1 });
-		const lastAssistant = getLastAssistantMessage(session);
-		expect(lastAssistant.stopReason).toBe("stop");
-		expect(lastAssistant.content).toContainEqual({
-			type: "text",
-			text: "recovered after bare abort error",
-		});
-	});
+			// Same model, retried once (no model fallback for a reason-less abort).
+			expect(requestedModels).toEqual([`${model.provider}/${model.id}`, `${model.provider}/${model.id}`]);
+			expect(retryStartEvents).toHaveLength(1);
+			expect(retryEndEvents).toHaveLength(1);
+			expect(retryEndEvents[0]).toMatchObject({ success: true, attempt: 1 });
+			const lastAssistant = getLastAssistantMessage(session);
+			expect(lastAssistant.stopReason).toBe("stop");
+			expect(lastAssistant.content).toContainEqual({
+				type: "text",
+				text: "recovered after bare abort error",
+			});
+		},
+	);
 
 	it("matches plain fallback roles for compat-routed primary models", async () => {
 		const fallbackModel = getBundledModel("openai", "gpt-4o-mini");
@@ -4953,7 +5067,7 @@ describe("AgentSession retry fallback", () => {
 	});
 
 	it("reports a Fireworks Fast degrade as fallback-routed even though it arms no chain", async () => {
-		const fastModel = getBundledModel("fireworks", "kimi-k2.6-fast");
+		const fastModel = getBundledModel("fireworks", "kimi-k3-fast");
 		if (!fastModel) throw new Error("Expected the bundled Fireworks Fast model to exist");
 		const baseId = fastModel.id.replace(/-fast$/, "");
 		const baseModel = getBundledModel("fireworks", baseId);
@@ -5358,7 +5472,8 @@ describe("AgentSession retry fallback", () => {
 			streamFn: (model, context, options) => {
 				requestCount++;
 				requestedModels.push(`${model.provider}/${model.id}`);
-				if (requestCount === 1) return transportErrorAfterToolCallStream(model, toolCall);
+				// The first mid-stream drop gets one same-model retry before fallback selection.
+				if (requestCount <= 2) return transportErrorAfterToolCallStream(model, toolCall);
 				const mock = createMockModel({ id: model.id, provider: model.provider });
 				mock.push({ content: ["Recovered on a fitting fallback"] });
 				return mock.stream(mock, context, options);
@@ -5386,6 +5501,7 @@ describe("AgentSession retry fallback", () => {
 		await session.waitForIdle();
 
 		expect(requestedModels).toEqual([
+			`${primaryModel.provider}/${primaryModel.id}`,
 			`${primaryModel.provider}/${primaryModel.id}`,
 			`${largeFallback.provider}/${largeFallback.id}`,
 		]);
@@ -6846,5 +6962,324 @@ describe("AgentSession retry fallback", () => {
 
 		expect(requestedModels).toContain("openrouter/z-ai/glm-4.7@chutes");
 		expect(getLastAssistantMessage(session).stopReason).not.toBe("error");
+	});
+});
+
+type GovernedDispatchModel = NonNullable<ProviderConfigInput["models"]>[number];
+
+async function createGovernedDispatchHarness(
+	options: {
+		extraBody?: Record<string, unknown>;
+		primaryApi?: "openai-completions" | "openai-responses";
+		primaryThinking?: GovernedDispatchModel["thinking"];
+		onPayload?: SimpleStreamOptions["onPayload"];
+		requiresVision?: boolean;
+		firstStatus?: 404 | 503;
+		selectors?: string[];
+		enabledModels?: string[];
+	} = {},
+) {
+	const requests: Array<{ model: string; reasoning_effort?: string; models?: unknown }> = [];
+	const server = Bun.serve({
+		hostname: "127.0.0.1",
+		port: 0,
+		fetch: async request => {
+			const body = (await request.json()) as { model: string; reasoning_effort?: string; models?: unknown };
+			requests.push(body);
+			if (
+				options.firstStatus &&
+				body.model === "primary" &&
+				(options.firstStatus === 404 || requests.length === 1)
+			) {
+				return Response.json(
+					{
+						error: {
+							message:
+								options.firstStatus === 404 ? "Model unavailable at this endpoint" : "Service unavailable",
+						},
+					},
+					{ status: options.firstStatus },
+				);
+			}
+			return new Response(
+				'data: {"id":"dispatch-recovered","object":"chat.completion.chunk","created":0,"choices":[{"index":0,"delta":{"role":"assistant","content":"Recovered"}}]}\n\n' +
+					'data: {"id":"dispatch-recovered","object":"chat.completion.chunk","created":0,"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\n' +
+					"data: [DONE]\n\n",
+				{ status: 200, headers: { "content-type": "text/event-stream" } },
+			);
+		},
+	});
+	const directory = TempDir.createSync("@pi-governed-dispatch-");
+	const authStorage = createInMemoryAuthStorage();
+	authStorage.keys.setRuntime("dispatch-test", "local-test-key");
+	let session: AgentSession | undefined;
+	try {
+		const settings = Settings.isolated({
+			modelRoles: { task: "dispatch-test/primary:high" },
+			"retry.fallbackChains": { task: ["dispatch-test/fallback:low"] },
+			"retry.baseDelayMs": 1,
+			"retry.maxRetries": 1,
+			"compaction.enabled": false,
+			...(options.enabledModels ? { enabledModels: options.enabledModels } : {}),
+		});
+		const models = ["primary", "fallback", "catalog-outsider"].map<GovernedDispatchModel>(id => ({
+			id,
+			name: id,
+			api: id === "primary" ? (options.primaryApi ?? "openai-completions") : "openai-completions",
+			reasoning: true,
+			thinking:
+				id === "primary" && options.primaryThinking
+					? options.primaryThinking
+					: { mode: "effort", efforts: [Effort.Low, Effort.Medium, Effort.High] },
+			input: ["text", "image"],
+			supportsTools: true,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 128000,
+			maxTokens: 8192,
+			compat: {
+				supportsReasoningEffort: true,
+				thinkingFormat: "openai",
+				...(id === "primary" && options.extraBody ? { extraBody: options.extraBody } : {}),
+			},
+		}));
+		const providerConfig: ProviderConfigInput = {
+			api: "openai-completions",
+			baseUrl: `${server.url.toString().replace(/\/$/, "")}/v1`,
+			oauth: {
+				name: "Isolated dispatch credential",
+				login: async () => {
+					const key = await authStorage.keys.peek("dispatch-test");
+					if (key === undefined)
+						throw new AIError.ConfigurationError("No isolated runtime credential is available.");
+					return key;
+				},
+			},
+			models,
+		};
+		const registry = new ModelRegistry(authStorage, directory.join("models.yml"), { settings });
+		registry.registerProvider("dispatch-test", providerConfig);
+		const { permit } = await createTaskModelRoute({
+			authority: { settings, agentName: "worker" },
+			modelRegistry: registry,
+			selectors: options.selectors ?? ["@task"],
+			explicit: true,
+			requiresVision: options.requiresVision,
+		});
+		const selectedModel = resolveRoleRoute(permit, registry).model;
+		const agent = new Agent({
+			getApiKey: () => "local-test-key",
+			initialState: { model: selectedModel, systemPrompt: ["Test"], tools: [], messages: [] },
+			convertToLlm,
+			onPayload: options.onPayload,
+			streamFn: wrapRoleRouteStream(
+				() => permit,
+				(model, context, streamOptions) =>
+					model.api === "openai-responses"
+						? stream(model, context, { ...streamOptions, apiKey: "local-test-key", extraBody: options.extraBody })
+						: streamSimple(model, context, streamOptions),
+				registry,
+			),
+		});
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(directory.path()),
+			settings,
+			modelRegistry: registry,
+			roleRoute: permit,
+		});
+		const retryEvents = trackRetryEvents(session);
+		const fallbackEvents: AgentSessionEvent[] = [];
+		const assistantMessages: AssistantMessage[] = [];
+		session.subscribe(event => {
+			if (event.type === "retry_fallback_applied") fallbackEvents.push(event);
+			if (event.type === "message_end" && event.message.role === "assistant") assistantMessages.push(event.message);
+		});
+		return {
+			session,
+			settings,
+			requests,
+			permit,
+			retryEvents,
+			fallbackEvents,
+			assistantMessages,
+			beforeDispatch: (callback: () => void) => agent.addBeforeModelCall(() => callback()),
+			replacePrimary: (changes: Partial<GovernedDispatchModel>) => {
+				registry.registerProvider("dispatch-test", {
+					...providerConfig,
+					models: models.map(model => (model.id === "primary" ? { ...model, ...changes } : model)),
+				});
+			},
+			revokeAuth: () => authStorage.keys.removeRuntime("dispatch-test"),
+			cleanup: async () => {
+				await session?.dispose();
+				unregisterOAuthProvider("dispatch-test");
+				authStorage.close();
+				server.stop(true);
+				directory.removeSync();
+			},
+		};
+	} catch (error) {
+		await session?.dispose();
+		unregisterOAuthProvider("dispatch-test");
+		authStorage.close();
+		server.stop(true);
+		directory.removeSync();
+		throw error;
+	}
+}
+
+describe("AgentSession governed admission recovery", () => {
+	for (const extraBody of [
+		{ models: ["primary", "catalog-outsider"] },
+		{ model: "catalog-outsider" },
+		{ reasoning_effort: "low" },
+	]) {
+		it(`keeps local extraBody ${Object.keys(extraBody)[0]} rejection terminal with an approved retry chain`, async () => {
+			const harness = await createGovernedDispatchHarness({ extraBody });
+			try {
+				await harness.session.prompt("Exercise the governed dispatch");
+				await harness.session.waitForIdle();
+				expect(harness.assistantMessages.at(-1)?.stopReason).toBe("error");
+				expect(harness.requests).toEqual([]);
+				expect(harness.fallbackEvents).toEqual([]);
+				expect(harness.retryEvents.retryStartEvents).toEqual([]);
+				expect(roleRouteMetadata(harness.permit)?.selectedOccurrence).toBe(0);
+				expect(harness.session.model?.id).toBe("primary");
+			} finally {
+				await harness.cleanup();
+			}
+		});
+	}
+
+	for (const loss of ["tools", "image", "auth", "enabled", "grant"] as const) {
+		it(`does not switch occurrences after selected ${loss} admission is revoked`, async () => {
+			const harness = await createGovernedDispatchHarness({ requiresVision: loss === "image" });
+			try {
+				if (loss === "tools") harness.replacePrimary({ supportsTools: false });
+				if (loss === "image") harness.replacePrimary({ input: ["text"] });
+				if (loss === "auth") harness.beforeDispatch(harness.revokeAuth);
+				if (loss === "enabled") cfgEnabledModels.override(harness.settings, ["dispatch-test/fallback"]);
+				if (loss === "grant") cfgModelRoles.override(harness.settings, { alternate: "dispatch-test/primary:high" });
+				await harness.session.prompt("Exercise current admission");
+				await harness.session.waitForIdle();
+				expect(harness.assistantMessages.at(-1)?.stopReason).toBe("error");
+				expect(harness.requests).toEqual([]);
+				expect(harness.fallbackEvents).toEqual([]);
+				expect(harness.retryEvents.retryStartEvents).toEqual([]);
+				expect(roleRouteMetadata(harness.permit)?.selectedOccurrence).toBe(0);
+				expect(harness.session.model?.id).toBe("primary");
+			} finally {
+				await harness.cleanup();
+			}
+		});
+	}
+
+	it("keeps a late provider payload rewrite terminal without trying an approved fallback", async () => {
+		const harness = await createGovernedDispatchHarness({
+			onPayload: payload => {
+				Object.assign(payload as Record<string, unknown>, { models: ["primary", "catalog-outsider"] });
+			},
+		});
+		try {
+			await harness.session.prompt("Exercise late payload admission");
+			await harness.session.waitForIdle();
+			expect(harness.assistantMessages.at(-1)?.stopReason).toBe("error");
+			expect(harness.requests).toEqual([]);
+			expect(harness.fallbackEvents).toEqual([]);
+			expect(harness.retryEvents.retryStartEvents).toEqual([]);
+			expect(roleRouteMetadata(harness.permit)?.selectedOccurrence).toBe(0);
+		} finally {
+			await harness.cleanup();
+		}
+	});
+
+	it("keeps a real mandatory-reasoning configuration rejection terminal", async () => {
+		const harness = await createGovernedDispatchHarness({
+			selectors: ["@task:off"],
+			primaryThinking: { mode: "effort", efforts: [Effort.High], requiresEffort: true },
+		});
+		try {
+			await harness.session.prompt("Exercise explicit reasoning-off admission");
+			await harness.session.waitForIdle();
+			expect(harness.assistantMessages.at(-1)?.stopReason).toBe("error");
+			expect(harness.requests).toEqual([]);
+			expect(harness.fallbackEvents).toEqual([]);
+			expect(harness.retryEvents.retryStartEvents).toEqual([]);
+			expect(roleRouteMetadata(harness.permit)?.selectedOccurrence).toBe(0);
+		} finally {
+			await harness.cleanup();
+		}
+	});
+
+	it("keeps an asynchronous Responses configuration rejection terminal", async () => {
+		const harness = await createGovernedDispatchHarness({
+			primaryApi: "openai-responses",
+			extraBody: { model: "catalog-outsider" },
+		});
+		try {
+			await harness.session.prompt("Exercise asynchronous provider configuration admission");
+			await harness.session.waitForIdle();
+			expect(harness.assistantMessages.at(-1)?.api).toBe("openai-responses");
+			expect(harness.assistantMessages.at(-1)?.stopReason).toBe("error");
+			expect(harness.requests).toEqual([]);
+			expect(harness.fallbackEvents).toEqual([]);
+			expect(harness.retryEvents.retryStartEvents).toEqual([]);
+			expect(roleRouteMetadata(harness.permit)?.selectedOccurrence).toBe(0);
+			expect(harness.session.model?.id).toBe("primary");
+		} finally {
+			await harness.cleanup();
+		}
+	});
+
+	it("retains approved model and effort fallback after a real provider 404", async () => {
+		const harness = await createGovernedDispatchHarness({ firstStatus: 404 });
+		try {
+			await harness.session.prompt("Exercise genuine provider recovery");
+			await harness.session.waitForIdle();
+			expect(harness.requests.map(({ model, reasoning_effort }) => ({ model, reasoning_effort }))).toEqual([
+				{ model: "primary", reasoning_effort: "high" },
+				{ model: "fallback", reasoning_effort: "low" },
+			]);
+			expect(harness.assistantMessages.at(-1)?.stopReason).toBe("stop");
+			expect(harness.fallbackEvents).toHaveLength(1);
+			expect(roleRouteMetadata(harness.permit)?.selectedOccurrence).toBe(1);
+		} finally {
+			await harness.cleanup();
+		}
+	});
+
+	it("retains genuine provider transient retry on the admitted occurrence", async () => {
+		const harness = await createGovernedDispatchHarness({ firstStatus: 503 });
+		try {
+			await harness.session.prompt("Exercise genuine transient recovery");
+			await harness.session.waitForIdle();
+			expect(harness.requests.map(({ model, reasoning_effort }) => ({ model, reasoning_effort }))).toEqual([
+				{ model: "primary", reasoning_effort: "high" },
+				{ model: "primary", reasoning_effort: "high" },
+			]);
+			expect(harness.assistantMessages.at(-1)?.stopReason).toBe("stop");
+			expect(harness.fallbackEvents).toEqual([]);
+			expect(roleRouteMetadata(harness.permit)?.selectedOccurrence).toBe(0);
+		} finally {
+			await harness.cleanup();
+		}
+	}, 10_000);
+
+	it("retains host selector arrays when an earlier approved model is disabled", async () => {
+		const harness = await createGovernedDispatchHarness({
+			selectors: ["dispatch-test/primary:high", "dispatch-test/fallback:low"],
+			enabledModels: ["dispatch-test/fallback"],
+		});
+		try {
+			await harness.session.prompt("Exercise host selector admission");
+			await harness.session.waitForIdle();
+			expect(harness.requests.map(({ model, reasoning_effort }) => ({ model, reasoning_effort }))).toEqual([
+				{ model: "fallback", reasoning_effort: "low" },
+			]);
+			expect(roleRouteMetadata(harness.permit)?.selectedOccurrence).toBe(1);
+			expect(harness.retryEvents.retryStartEvents).toEqual([]);
+		} finally {
+			await harness.cleanup();
+		}
 	});
 });

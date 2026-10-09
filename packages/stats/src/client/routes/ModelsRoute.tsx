@@ -7,6 +7,7 @@ import { buildModelColorLookup, modelKey, OTHER_COLOR } from "../data/colors";
 import {
 	formatCompact,
 	formatDurationMs,
+	formatErrorRate,
 	formatEstimatedCost,
 	formatInteger,
 	formatPercent,
@@ -59,13 +60,20 @@ const SHARE_OPTIONS = [
 const SHARE_LIMIT = 6;
 
 export function ModelsRoute({ active, range }: ModelsRouteProps) {
-	const query = useQuery(["models", range], () => getModelDashboardStats(range), { enabled: active });
+	const query = useQuery(["models", range], ({ signal }) => getModelDashboardStats(range, signal), {
+		enabled: active,
+	});
 	const meta = rangeMeta(range);
 	const [mode, setMode] = useState<ShareMode>("share");
 	const [hidden, toggleSeries] = useHiddenSeries();
 	const [expandedKey, setExpandedKey] = useState<string | null>(null);
 	const view = useMemo(() => (query.data ? buildModelsView(query.data, range) : null), [query.data, range]);
 	const bucketWord = bucketName(meta.bucketMs);
+	// Stable columns: a fresh array would make Table re-sort on every render.
+	const columns = useMemo(
+		() => (view ? buildModelColumns(view, expandedKey, bucketWord) : []),
+		[view, expandedKey, bucketWord],
+	);
 	const isEmpty = (data: ModelDashboardStats) => data.byModel.length === 0;
 	const empty = <EmptyState title="No model usage in this range" hint="Pick a wider range in the top bar." />;
 
@@ -184,7 +192,7 @@ export function ModelsRoute({ active, range }: ModelsRouteProps) {
 							<Table
 								rows={view.models}
 								rowKey={row => modelKey(row.model, row.provider)}
-								columns={buildModelColumns(view, expandedKey, bucketWord)}
+								columns={columns}
 								initialSort={{ key: "requests", dir: "desc" }}
 								limit={25}
 								onRowClick={row => {
@@ -388,7 +396,7 @@ function buildModelColumns(view: ModelsView, expandedKey: string | null, bucketW
 				) : (
 					<span title={`${formatInteger(row.failedRequests)} failed`}>
 						<Badge tone={errorRateTone(row.errorRate)} mono>
-							{formatPercent(row.errorRate)}
+							{formatErrorRate(row.errorRate)}
 						</Badge>
 					</span>
 				),
@@ -477,7 +485,7 @@ function ModelDetail({
 								label: "Error rate",
 								value: (
 									<span className={`tone-${errorRateTone(model.errorRate)}`}>
-										{formatPercent(model.errorRate)}{" "}
+										{formatErrorRate(model.errorRate)}{" "}
 										<span className="dim">({formatInteger(model.failedRequests)} failed)</span>
 									</span>
 								),

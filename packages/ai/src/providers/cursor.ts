@@ -179,11 +179,13 @@ import {
 	isRecord,
 	logger,
 	parseJsonWithRepair,
-	parseStreamingJson,
 	parseStreamingJsonThrottled,
 	sanitizeText,
 } from "@oh-my-pi/pi-utils";
+import { classifyJsonPrefix } from "@oh-my-pi/pi-utils/json-parse";
+import { LRUCache } from "@oh-my-pi/pi-utils/lru";
 import * as AIError from "../error";
+import { parseToolCallArguments } from "../utils/tool-call-arguments";
 import type {
 	Api,
 	AssistantMessage,
@@ -225,7 +227,8 @@ import { AssistantMessageEventStream } from "../utils/event-stream";
 import { connectProxiedSocket, getProxyForUrl, wrapFetchForProxy } from "../utils/proxy";
 import { createRequestDebugSession, isRequestDebugEnabled, type RequestDebugResponseLog } from "../utils/request-debug";
 import { sanitizeSchemaForCursor, toolWireSchema } from "../utils/schema";
-import { formatConnectEndStreamError } from "./connect-error-detail";
+import { formatConnectEndStreamError, hasRetryableCursorErrorDetail } from "./connect-error-detail";
+import { CONNECT_END_STREAM_FLAG, ConnectFrameDecoder, frameConnectMessage } from "./connect-frame";
 import mcpExternalHandoffMessage from "./cursor-external-tool-handoff.md" with { type: "text" };
 import {
 	buildMcpStateResult,
@@ -259,7 +262,7 @@ import {
 	piTimeout,
 	shellTimeoutSeconds,
 } from "./cursor/exec-modern";
-import { frameConnectMessage, handleInteractionQuery, protoUnknownFields } from "./cursor/interaction-query";
+import { handleInteractionQuery, protoUnknownFields } from "./cursor/interaction-query";
 
 export const CURSOR_API_URL = CURSOR_DEFAULT_BASE_URL;
 export { CURSOR_CLIENT_VERSION };
@@ -348,8 +351,18 @@ const CURSOR_MAX_STREAM_RETRIES = 5;
 const CURSOR_RETRY_BASE_DELAY_MS = 500;
 const NOT_IMPLEMENTED = `Not implemented by this client`;
 
-const conversationStateCache = new Map<string, ConversationStateStructure>();
-const conversationBlobStores = new Map<string, Map<string, Uint8Array>>();
+/**
+ * Per-conversation checkpoint and the blob store its blob refs point into, kept
+ * in one entry so they are always evicted together. Bounded: each blob store
+ * holds the serialized history, and an evicted conversation rebuilds from
+ * `context` exactly like the first request after a restart.
+ */
+interface CursorConversationEntry {
+	state: ConversationStateStructure | undefined;
+	blobs: Map<string, Uint8Array>;
+}
+const CURSOR_CONVERSATION_CACHE_MAX = 128;
+const cursorConversations = new LRUCache<string, CursorConversationEntry>({ max: CURSOR_CONVERSATION_CACHE_MAX });
 const warnedCursorKimiK3ReplayMessages = new Set<string>();
 /**
  * Base conversation id → rotated wire id (#8345). Cursor's backend can pin a
@@ -418,8 +431,6 @@ interface CursorTransportRequest extends CursorGrpcRequest {
 	/** Exact discovery id eligible for a retry because the normalized effort payload was serialized unchanged. */
 	fallbackWireModelId?: string;
 }
-
-const CONNECT_END_STREAM_FLAG = 0b00000010;
 
 interface CursorLogEntry {
 	ts: number;
@@ -600,7 +611,7 @@ function classifyCursorStructuredError(structured: CursorStructuredError): Error
 	if (code === 21) return new AIError.AbortError(fullMessage);
 	const status = CURSOR_ERROR_STATUS[code];
 	if (status !== undefined) return new AIError.ProviderHttpError(fullMessage, status, { code: name });
-	if (retryable === true || CURSOR_RETRYABLE_ERROR_CODES.has(code)) {
+	if (retryable === true || (retryable === undefined && CURSOR_RETRYABLE_ERROR_CODES.has(code))) {
 		return new AIError.ProviderHttpError(fullMessage, 503, { code: name });
 	}
 	return new AIError.ProviderHttpError(fullMessage, 400, { code: name });
@@ -612,7 +623,17 @@ function classifyConnectError(error: Record<string, unknown>): Error {
 	if (structured) return classifyCursorStructuredError(structured);
 	const code = typeof error.code === "string" ? error.code : "unknown";
 	const message = typeof error.message === "string" ? error.message : "Unknown error";
-	return new ConnectEndStreamError(`Connect error ${code}: ${message}`, formatConnectEndStreamError(error));
+	const endStreamError = new ConnectEndStreamError(
+		`Connect error ${code}: ${message}`,
+		formatConnectEndStreamError(error),
+	);
+	// Without a decodable binary detail, Cursor's retry verdict survives only in
+	// the detail's debug JSON; the classification text drops it, so carry it as
+	// a structured flag.
+	if (hasRetryableCursorErrorDetail(error.details)) {
+		AIError.attach(endStreamError, AIError.create(AIError.Flag.Transient));
+	}
+	return endStreamError;
 }
 
 function parseConnectEndStream(data: Uint8Array): Error | null {
@@ -1040,20 +1061,24 @@ function streamCursorWithWireMode(
 		// Once aborted, the Agent finalizes from the abort error and discards
 		// late results regardless, so skipping the rest of the drain loses
 		// nothing that could still be delivered.
-		let abortSettled: Promise<void> | undefined;
 		const drainInFlightDispatches = async (): Promise<void> => {
 			const signal = options?.signal;
-			while (inFlightDispatches.size > 0) {
-				if (signal?.aborted) return;
-				const settled = Promise.all(inFlightDispatches);
-				if (!signal) {
-					await settled;
-					continue;
+			if (!signal) {
+				while (inFlightDispatches.size > 0) await Promise.all(inFlightDispatches);
+				return;
+			}
+			if (inFlightDispatches.size === 0 || signal.aborted) return;
+			const { promise: aborted, resolve } = Promise.withResolvers<void>();
+			const onAbort = (): void => resolve();
+			signal.addEventListener("abort", onAbort, { once: true });
+			try {
+				while (inFlightDispatches.size > 0 && !signal.aborted) {
+					await Promise.race([Promise.all(inFlightDispatches), aborted]);
 				}
-				abortSettled ??= new Promise<void>(resolve =>
-					signal.addEventListener("abort", () => resolve(), { once: true }),
-				);
-				await Promise.race([settled, abortSettled]);
+			} finally {
+				// The request signal outlives this stream (it spans the agent's tool
+				// loop); a lingering listener would pin this request's whole scope.
+				signal.removeEventListener("abort", onAbort);
 			}
 		};
 
@@ -1064,6 +1089,9 @@ function streamCursorWithWireMode(
 		const h2Completion = Promise.withResolvers<void>();
 		let h2Settled = false;
 		let sawTurnEnded = false;
+		// After the final step's `stepCompleted`, only a repeat checkpoint and the
+		// `turnEnded` usage frame follow.
+		let stepCompletedIsLatest = false;
 		let endStreamError: Error | null = null;
 		let progressVersion = 0;
 		let latestCheckpointProgressVersion = -1;
@@ -1090,6 +1118,20 @@ function streamCursorWithWireMode(
 				return;
 			}
 			if (!sawTurnEnded) {
+				// A stream cut after the final step lost only usage and a repeat
+				// checkpoint, so the turn is complete. The final step ends on answer
+				// text; a step that ended on tool calls, or left one open, may be
+				// followed by another step and is still treated as truncated.
+				if (
+					stepCompletedIsLatest &&
+					output.content.at(-1)?.type === "text" &&
+					openBlockState?.currentToolCall === null &&
+					openBlockState.openToolCalls.size === 0
+				) {
+					logger.debug("cursor stream ended after stepCompleted without turnEnded", { model: model.id });
+					h2Completion.resolve();
+					return;
+				}
 				h2Completion.reject(
 					new AIError.ProviderResponseError("Cursor stream ended before turnEnded", {
 						kind: "incomplete-stream",
@@ -1108,6 +1150,14 @@ function streamCursorWithWireMode(
 		let serializedFallbackWireModelId: string | undefined;
 		let activeBlobStore: Map<string, Uint8Array> | undefined;
 		let originalRequestId: string | undefined;
+		// Removed in `finally`: the request signal outlives this stream, and a
+		// listener left on it would retain this request's scope (request bytes,
+		// output, blob store) until the caller's whole prompt ends.
+		let onTransportAbort: (() => void) | undefined;
+		// A call without conversation/session id mints a one-off conversation that
+		// no later request can address; its cache entries are released at the end.
+		const ephemeralConversation =
+			!retryContext && options?.conversationId === undefined && options?.sessionId === undefined;
 		try {
 			const apiKey = options?.apiKey;
 			if (!apiKey) {
@@ -1124,12 +1174,12 @@ function streamCursorWithWireMode(
 			// and result, so the turn resumes where it stopped instead of replaying
 			// the last user message.
 			const rotatedFresh = retryContext ? false : freshRotatedConversationIds.has(conversationId);
-			activeBlobStore =
-				retryContext?.blobStore ?? conversationBlobStores.get(conversationId) ?? new Map<string, Uint8Array>();
+			const cachedConversation = cursorConversations.get(conversationId);
+			activeBlobStore = retryContext?.blobStore ?? cachedConversation?.blobs ?? new Map<string, Uint8Array>();
 			const blobStore = activeBlobStore;
-			conversationBlobStores.set(conversationId, blobStore);
-			const cachedState =
-				retryContext?.checkpoint ?? (rotatedFresh ? undefined : conversationStateCache.get(conversationId));
+			const conversationEntry: CursorConversationEntry = { state: cachedConversation?.state, blobs: blobStore };
+			cursorConversations.set(conversationId, conversationEntry);
+			const cachedState = retryContext?.checkpoint ?? (rotatedFresh ? undefined : cachedConversation?.state);
 			const builtRequest = await buildGrpcRequestForWireMode(
 				model,
 				context,
@@ -1144,7 +1194,7 @@ function streamCursorWithWireMode(
 			);
 			const { requestBytes, conversationState } = builtRequest;
 			serializedFallbackWireModelId = builtRequest.fallbackWireModelId;
-			conversationStateCache.set(conversationId, conversationState);
+			conversationEntry.state = conversationState;
 			const requestContextTools = buildMcpToolDefinitions(
 				context.tools,
 				model.requiresCursorToolSchemaProjection === true,
@@ -1216,7 +1266,7 @@ function streamCursorWithWireMode(
 
 			if (!retryContext) stream.push({ type: "start", partial: output });
 
-			let pendingBuffer: Buffer = Buffer.alloc(0);
+			const frameDecoder = new ConnectFrameDecoder();
 			const previousState = retryContext?.blockState;
 			let currentTextBlock = previousState?.currentTextBlock ?? null;
 			let currentThinkingBlock = previousState?.currentThinkingBlock ?? null;
@@ -1257,7 +1307,8 @@ function streamCursorWithWireMode(
 			openBlockState = state;
 
 			const onConversationCheckpoint = (checkpoint: ConversationStateStructure) => {
-				conversationStateCache.set(conversationId!, checkpoint);
+				conversationEntry.state = checkpoint;
+				cursorConversations.set(conversationId!, conversationEntry);
 			};
 
 			// Client replies that carry a local result (exec output, exec control,
@@ -1288,18 +1339,7 @@ function streamCursorWithWireMode(
 						log?.write(chunk);
 					});
 				}
-				// Steady state drains fully per chunk; alias a fresh transport chunk
-				// instead of copying it through Buffer.concat (see aws-eventstream.ts).
-				pendingBuffer = pendingBuffer.length === 0 ? chunk : Buffer.concat([pendingBuffer, chunk]);
-
-				while (pendingBuffer.length >= 5) {
-					const flags = pendingBuffer[0];
-					const msgLen = pendingBuffer.readUInt32BE(1);
-					if (pendingBuffer.length < 5 + msgLen) break;
-
-					const messageBytes = pendingBuffer.subarray(5, 5 + msgLen);
-					pendingBuffer = pendingBuffer.subarray(5 + msgLen);
-
+				for (const { flags, payload: messageBytes } of frameDecoder.decode(chunk)) {
 					if (flags & CONNECT_END_STREAM_FLAG) {
 						const endError = parseConnectEndStream(messageBytes);
 						if (endError) {
@@ -1326,11 +1366,21 @@ function streamCursorWithWireMode(
 							sawProgressOrSideEffect = true;
 							progressVersion++;
 						}
+						if (interactionCase === "stepCompleted") {
+							stepCompletedIsLatest = true;
+						} else if (
+							interactionCase !== "heartbeat" &&
+							serverMessage.message.case !== "conversationCheckpointUpdate" &&
+							serverMessage.message.case !== "kvServerMessage"
+						) {
+							stepCompletedIsLatest = false;
+						}
 						if (serverMessage.message.case === "conversationCheckpointUpdate") {
 							latestCheckpoint = serverMessage.message.value;
 							latestCheckpointProgressVersion = progressVersion;
 							latestCheckpointTerminal = sawTurnEnded;
-							conversationStateCache.set(conversationId!, latestCheckpoint);
+							conversationEntry.state = latestCheckpoint;
+							cursorConversations.set(conversationId!, conversationEntry);
 						}
 						const isTurnEnded = interactionCase === "turnEnded";
 						// Dispatch is fire-and-forget so the socket keeps draining while a
@@ -1412,12 +1462,13 @@ function streamCursorWithWireMode(
 			});
 
 			if (options?.signal) {
-				options.signal.addEventListener("abort", () => {
+				onTransportAbort = () => {
 					runTransport?.close();
 					void closeDebugLog().finally(() => {
 						settleH2(new AIError.AbortError());
 					});
-				});
+				};
+				options.signal.addEventListener("abort", onTransportAbort, { once: true });
 			}
 
 			runTransport.write(frameConnectMessage(requestBytes));
@@ -1505,6 +1556,7 @@ function streamCursorWithWireMode(
 			if (h2Unavailable) error = mapH2TransportError(error, model.baseUrl || CURSOR_API_URL);
 			const fallbackWireModelId =
 				wireMode === "normalized" &&
+				!options?.preserveModelSelection &&
 				!sawProgressOrSideEffect &&
 				!options?.signal?.aborted &&
 				isCursorModelNotFound(error)
@@ -1678,6 +1730,8 @@ function streamCursorWithWireMode(
 				if (currentRotated) successfulRotatedConversationIds.delete(currentRotated);
 				rotatedConversationIds.set(baseConversationId, rotated);
 				freshRotatedConversationIds.add(rotated);
+				// The poisoned id is never addressed again; release its side state.
+				cursorConversations.delete(conversationId);
 				logger.debug("cursor conversation rotated", {
 					base: baseConversationId,
 					from: conversationId,
@@ -1706,6 +1760,17 @@ function streamCursorWithWireMode(
 			}
 			runTransport?.close();
 			h2Client?.close();
+			if (onTransportAbort) options?.signal?.removeEventListener("abort", onTransportAbort);
+			if (ephemeralConversation && baseConversationId !== undefined) {
+				const rotated = rotatedConversationIds.get(baseConversationId);
+				for (const id of [baseConversationId, rotated]) {
+					if (id === undefined) continue;
+					cursorConversations.delete(id);
+					successfulRotatedConversationIds.delete(id);
+					freshRotatedConversationIds.delete(id);
+				}
+				rotatedConversationIds.delete(baseConversationId);
+			}
 		}
 	})();
 
@@ -1724,6 +1789,19 @@ export type ToolCallState = ToolCall & {
 	[kStreamingEnvelopeId]?: string;
 	[kCursorExecResolved]?: true;
 };
+
+/**
+ * Content index of a streamed block. Blocks are stamped with their index on
+ * push and Cursor never reorders `output.content`, so this is O(1) per delta;
+ * the identity check keeps a foreign block resolvable.
+ */
+function streamedBlockIndex(
+	output: AssistantMessage,
+	block: AssistantMessage["content"][number] & { [kStreamingBlockIndex]: number },
+): number {
+	const index = block[kStreamingBlockIndex];
+	return output.content[index] === block ? index : output.content.indexOf(block);
+}
 
 export interface BlockState {
 	currentTextBlock: (TextContent & { [kStreamingBlockIndex]: number }) | null;
@@ -4419,13 +4497,13 @@ function isExecOwnedToolCall(toolCall: { tool?: { case?: string } } | undefined)
  * so reparsing unconditionally would erase the arguments of every such block
  * caught open by a truncated stream.
  *
- * Server-owned blocks are also paired here. `connect-scm` and `todo` are
- * stamped {@link kCursorExecResolved} the moment they open, so `agent-loop.ts`
- * synthesizes no placeholder for them and only their `toolCallCompleted` frame
- * pairs a result. A transport that closes before that frame would leave the
- * call unpaired, and `buildSessionContext` strips a dangling call from every
- * rebuilt transcript — the interaction disappears. An interrupted result is
- * emitted instead.
+ * Server-owned blocks are also paired here. `connect-scm`, `todo` and
+ * `web-fetch` are stamped {@link kCursorExecResolved} the moment they open,
+ * so `agent-loop.ts` synthesizes no placeholder for them and only their
+ * `toolCallCompleted` frame pairs a result. A transport that closes before
+ * that frame would leave the call unpaired, and `buildSessionContext` strips
+ * a dangling call from every rebuilt transcript — the interaction disappears.
+ * An interrupted result is emitted instead.
  *
  * MCP blocks are excluded even when resolved: the exec dispatch that marked
  * them owns their result, and `drainInFlightDispatches` awaits it before this
@@ -4439,14 +4517,14 @@ export function flushOpenToolCalls(
 	const openBlocks = new Set<ToolCallState>(state.openToolCalls.values());
 	if (state.currentToolCall) openBlocks.add(state.currentToolCall);
 	for (const block of openBlocks) {
-		const idx = output.content.indexOf(block);
+		const idx = streamedBlockIndex(output, block);
 		const partialJson = block[kStreamingPartialJson];
 		if (partialJson !== undefined) {
-			block.arguments = parseStreamingJson(partialJson);
+			block.arguments = parseToolCallArguments(partialJson);
 			clearStreamingPartialJson(block);
 		}
 		const kind = block[kStreamingBlockKind];
-		if (kind === "connect-scm" || kind === "todo" || kind === "cursor-edit") {
+		if (kind === "connect-scm" || kind === "todo" || kind === "cursor-edit" || kind === "web-fetch") {
 			if (!(kind === "cursor-edit" && state.pairedEditToolCallIds?.has(block.id))) {
 				state.onToolResult?.({
 					role: "toolResult",
@@ -4846,7 +4924,7 @@ export function mergeCursorMcpToolCallArgs(
 function endCurrentTextBlock(output: AssistantMessage, stream: AssistantMessageEventStream, state: BlockState): void {
 	const block = state.currentTextBlock;
 	if (!block) return;
-	const idx = output.content.indexOf(block);
+	const idx = streamedBlockIndex(output, block);
 	stream.push({
 		type: "text_end",
 		contentIndex: idx,
@@ -4863,7 +4941,7 @@ function endCurrentThinkingBlock(
 ): void {
 	const block = state.currentThinkingBlock;
 	if (!block) return;
-	const idx = output.content.indexOf(block);
+	const idx = streamedBlockIndex(output, block);
 	stream.push({
 		type: "thinking_end",
 		contentIndex: idx,
@@ -4985,7 +5063,7 @@ export function processInteractionUpdate(
 			stream.push({ type: "text_start", contentIndex: output.content.length - 1, partial: output });
 		}
 		state.currentTextBlock!.text += delta;
-		const idx = output.content.indexOf(state.currentTextBlock!);
+		const idx = streamedBlockIndex(output, state.currentTextBlock!);
 		stream.push({ type: "text_delta", contentIndex: idx, delta, partial: output });
 	} else if (updateCase === "thinkingDelta") {
 		state.setFirstTokenTime();
@@ -5001,7 +5079,7 @@ export function processInteractionUpdate(
 			stream.push({ type: "thinking_start", contentIndex: output.content.length - 1, partial: output });
 		}
 		state.currentThinkingBlock!.thinking += delta;
-		const idx = output.content.indexOf(state.currentThinkingBlock!);
+		const idx = streamedBlockIndex(output, state.currentThinkingBlock!);
 		stream.push({ type: "thinking_delta", contentIndex: idx, delta, partial: output });
 	} else if (updateCase === "thinkingCompleted") {
 		endCurrentThinkingBlock(output, stream, state);
@@ -5139,7 +5217,7 @@ export function processInteractionUpdate(
 			if (target?.[kStreamingBlockKind] === "cursor-edit") {
 				const current = stringToolArg(target.arguments, "stream_content") ?? "";
 				target.arguments = { ...target.arguments, stream_content: current + editDelta };
-				const idx = output.content.indexOf(target);
+				const idx = streamedBlockIndex(output, target);
 				stream.push({ type: "toolcall_delta", contentIndex: idx, delta: editDelta, partial: output });
 				return;
 			}
@@ -5169,7 +5247,7 @@ export function processInteractionUpdate(
 				target.arguments = throttled.value;
 				target[kStreamingLastParseLen] = throttled.parsedLen;
 			}
-			const idx = output.content.indexOf(target);
+			const idx = streamedBlockIndex(output, target);
 			stream.push({ type: "toolcall_delta", contentIndex: idx, delta: chunk, partial: output });
 		}
 	} else if (updateCase === "toolCallCompleted") {
@@ -5188,13 +5266,22 @@ export function processInteractionUpdate(
 				// path throttles mid-stream parses, so `arguments` may lag the buffer.
 				const partial = settled[kStreamingPartialJson];
 				if (partial) {
-					settled.arguments = parseStreamingJson(partial);
+					settled.arguments = parseToolCallArguments(partial);
 				}
 				const decodedArgs = decodeMcpArgsMap(selectMcpCall(toolCall)?.args?.args);
-				settled.arguments = mergeCursorMcpToolCallArgs(
-					settled.arguments as Record<string, unknown> | undefined,
-					decodedArgs,
-				);
+				if (!isRecord(settled.arguments) || !("__parseError" in settled.arguments)) {
+					settled.arguments = mergeCursorMcpToolCallArgs(settled.arguments, decodedArgs);
+				} else if (
+					decodedArgs &&
+					Object.keys(decodedArgs).length > 0 &&
+					classifyJsonPrefix(partial ?? "") !== "prefix"
+				) {
+					// A buffer that is not a cut-off prefix (e.g. a rewritten snapshot appended
+					// as `{...}{...}`) still has an authoritative completion frame: use it alone,
+					// and let validation reject any oversized key it omitted (#2615). A cut-off
+					// buffer stays refused, since the frame may omit or share its truncation.
+					settled.arguments = decodedArgs;
+				}
 			} else if (settled[kStreamingBlockKind] === "connect-scm") {
 				// The authoritative outcome arrives only here, on the completion's
 				// `ConnectScmResult` oneof. The block was stamped resolved at start,
@@ -5299,7 +5386,7 @@ export function processInteractionUpdate(
 					});
 				}
 			}
-			const idx = output.content.indexOf(settled);
+			const idx = streamedBlockIndex(output, settled);
 			clearStreamingPartialJson(settled);
 			stream.push({ type: "toolcall_end", contentIndex: idx, toolCall: settled, partial: output });
 			releaseStreamedCall(state, settled);
@@ -5331,7 +5418,9 @@ export function processInteractionUpdate(
  * summed 22 against a final 36 — and never report input, cache, or reasoning
  * tokens, so every bucket the final frame reports replaces the streamed
  * estimate. Unreported counters decode as `undefined`; a frame that reports
- * nothing at all leaves the streamed totals untouched.
+ * nothing at all leaves the streamed totals untouched. `inputTokens` counts the
+ * whole prompt, cache hits and writes included, so fresh input is what remains
+ * after both are taken out.
  */
 function applyTurnEndedUsage(usage: Usage, update: TurnEndedUpdate): void {
 	const input = Number(update.inputTokens ?? 0n);
@@ -5340,7 +5429,7 @@ function applyTurnEndedUsage(usage: Usage, update: TurnEndedUpdate): void {
 	const cacheWrite = Number(update.cacheWriteTokens ?? 0n);
 	const reasoning = Number(update.reasoningTokens ?? 0n);
 	if (input <= 0 && output <= 0 && cacheRead <= 0 && cacheWrite <= 0) return;
-	if (input > 0) usage.input = input;
+	if (input > 0) usage.input = Math.max(input - cacheRead - cacheWrite, 0);
 	if (output > 0) usage.output = output;
 	if (cacheRead > 0) usage.cacheRead = cacheRead;
 	if (cacheWrite > 0) usage.cacheWrite = cacheWrite;
@@ -5554,18 +5643,33 @@ function canReplayCursorThinking(msg: AssistantMessage, targetModelId: string | 
 	);
 }
 
-function buildCursorAssistantContent(
-	msg: AssistantMessage,
-	targetModelId: string | undefined,
-): CursorRootPromptAssistantContentPart[] {
-	const content: CursorRootPromptAssistantContentPart[] = [];
+interface CursorAssistantStep {
+	content: CursorRootPromptAssistantContentPart[];
+	/** Raw (un-normalized) ids of the calls this round issued, in order. */
+	callIds: string[];
+}
+
+/**
+ * Split one assistant message into the model rounds it recorded. A Cursor
+ * server turn persists as a single message whose tool calls interleave with
+ * the text and reasoning that followed each result; a round ends at a call
+ * followed by anything other than another call. Consecutive calls stay in one
+ * round — they were issued together. Hidden reasoning still marks a boundary.
+ */
+function buildCursorAssistantSteps(msg: AssistantMessage, targetModelId: string | undefined): CursorAssistantStep[] {
+	const steps: CursorAssistantStep[] = [];
+	let step: CursorAssistantStep = { content: [], callIds: [] };
 	const replayThinking = canReplayCursorThinking(msg, targetModelId);
 	for (const item of msg.content) {
+		if (item.type !== "toolCall" && step.callIds.length > 0) {
+			steps.push(step);
+			step = { content: [], callIds: [] };
+		}
 		if (item.type === "text") {
-			if (item.text) content.push({ type: "text", text: item.text });
+			if (item.text) step.content.push({ type: "text", text: item.text });
 		} else if (item.type === "thinking") {
 			if (replayThinking && item.thinking) {
-				content.push({
+				step.content.push({
 					type: "reasoning",
 					text: item.thinking,
 					providerOptions: { cursor: { modelName: msg.model } },
@@ -5579,15 +5683,17 @@ function buildCursorAssistantContent(
 			// gets the whole Run rejected as opaque resource_exhausted. Sanitize the
 			// id everywhere it reaches the wire; the tool-result side normalizes the
 			// same id identically, so the call/result pairing stays intact.
-			content.push({
+			step.content.push({
 				type: "tool-call",
 				toolCallId: normalizeToolCallId(item.id),
 				toolName: item.name,
 				args: normalizeCursorMcpArguments(item.arguments),
 			});
+			step.callIds.push(item.id);
 		}
 	}
-	return content;
+	steps.push(step);
+	return steps.filter(({ content }) => content.length > 0);
 }
 
 function assertCursorKimiK3HistoryReplayable(
@@ -5700,25 +5806,61 @@ function buildRootPromptMessagesJson(
 ): Uint8Array[] {
 	assertCursorKimiK3HistoryReplayable(messages, activeUserMessageIndex, targetModelId);
 	const historyEnd = activeUserMessageIndex >= 0 ? activeUserMessageIndex : messages.length;
-	const { pairedToolCallIds } = collectCursorToolHistory(messages, historyEnd);
+	const { toolResults, pairedToolCallIds } = collectCursorToolHistory(messages, historyEnd);
 	const entries: Uint8Array[] = [...systemPromptIds];
 	const pushJson = (obj: unknown) => {
 		const bytes = new TextEncoder().encode(JSON.stringify(obj));
 		entries.push(storeCursorBlob(blobStore, bytes));
 	};
+	// Results already replayed under the step that issued their call; the
+	// message-order pass below skips them.
+	const emittedResults = new Set<string>();
+	// Emit even when the result text is empty: the assistant `tool-call` is
+	// already in history, so dropping the pair would replay an orphaned call.
+	const pushToolResult = (result: ToolResultMessage) => {
+		const toolCallId = normalizeToolCallId(result.toolCallId);
+		pushJson({
+			role: "tool",
+			id: toolCallId,
+			content: [
+				{
+					type: "tool-result",
+					toolName: result.toolName,
+					toolCallId,
+					result: toolResultToText(result),
+					...(result.isError ? { isError: true } : {}),
+				},
+			],
+		});
+		emittedResults.add(result.toolCallId);
+	};
 
-	for (let i = 0; i < messages.length; i++) {
-		if (i === activeUserMessageIndex) break;
+	for (let i = 0; i < historyEnd; i++) {
 		const msg = messages[i];
 		if (msg.role === "user" || msg.role === "developer") {
 			const content = buildCursorRootPromptContent(msg.content);
 			if (content.length === 0) continue;
 			pushJson({ role: "user", content });
 		} else if (msg.role === "assistant") {
-			const content = buildCursorAssistantContent(msg, targetModelId);
-			if (content.length === 0) continue;
-			pushJson({ role: "assistant", content });
+			const steps = buildCursorAssistantSteps(msg, targetModelId);
+			for (const [stepIndex, step] of steps.entries()) {
+				pushJson({ role: "assistant", content: step.content });
+				// The final step's results stay in message order below: they are
+				// what the following turn responds to, and may arrive out of order.
+				if (stepIndex === steps.length - 1) continue;
+				// Replay this round's results in the order they arrived: calls issued
+				// together can finish out of call order.
+				const roundCallIds = new Set(step.callIds);
+				for (let j = i + 1; j < historyEnd; j++) {
+					const later = messages[j];
+					if (later.role !== "toolResult" || !roundCallIds.has(later.toolCallId)) continue;
+					if (emittedResults.has(later.toolCallId)) continue;
+					const result = toolResults.get(later.toolCallId);
+					if (result) pushToolResult(result);
+				}
+			}
 		} else if (msg.role === "toolResult") {
+			if (emittedResults.has(msg.toolCallId)) continue;
 			if (!pairedToolCallIds.has(msg.toolCallId)) {
 				pushJson({
 					role: "assistant",
@@ -5726,22 +5868,7 @@ function buildRootPromptMessagesJson(
 				});
 				continue;
 			}
-			// Emit even when the result text is empty: the assistant `tool-call` is
-			// already in history, so dropping the pair would replay an orphaned call.
-			const toolCallId = normalizeToolCallId(msg.toolCallId);
-			pushJson({
-				role: "tool",
-				id: toolCallId,
-				content: [
-					{
-						type: "tool-result",
-						toolName: msg.toolName,
-						toolCallId,
-						result: toolResultToText(msg),
-						...(msg.isError ? { isError: true } : {}),
-					},
-				],
-			});
+			pushToolResult(msg);
 		}
 	}
 

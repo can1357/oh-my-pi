@@ -33,15 +33,26 @@ export interface FastembedRuntimeInstallPlan {
  * manifest is inlined into a bundle. The runtime install deliberately does not
  * override fastembed's `onnxruntime-node` dependency: the prebuilt native addon
  * links against that package's bundled ORT dylib/so/dll name.
+ *
+ * It does override `@anush008/tokenizers`: every fastembed release pins
+ * `^0.0.0`, which resolves to a build without linux-arm64 bindings (#14083).
+ * {@link TOKENIZERS_SPEC} keeps the identical JS API and adds them.
  */
 const FASTEMBED_SPEC = packageManifest.peerDependencies.fastembed;
+
+/** `@anush008/tokenizers` release with linux-arm64 gnu/musl bindings (added in 0.5.0). */
+const TOKENIZERS_SPEC = "0.6.0";
 
 /** Build the deterministic fastembed runtime install plan used by local embeddings. */
 export function fastembedRuntimeInstallPlan(): FastembedRuntimeInstallPlan {
 	return {
-		versionKey: `fastembed-${FASTEMBED_SPEC}_transitive-ort`.replace(/[^A-Za-z0-9._-]/g, "_"),
+		versionKey: `fastembed-${FASTEMBED_SPEC}_transitive-ort_tokenizers-${TOKENIZERS_SPEC}`.replace(
+			/[^A-Za-z0-9._-]/g,
+			"_",
+		),
 		install: {
 			dependencies: { fastembed: FASTEMBED_SPEC },
+			overrides: { "@anush008/tokenizers": TOKENIZERS_SPEC },
 			trustedDependencies: ["onnxruntime-node"],
 		},
 	};

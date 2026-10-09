@@ -113,8 +113,8 @@ Agent Hub is the human-facing live session view. Adjacent commands and internal 
 
 - `/jobs` prints a snapshot of running and recently settled asynchronous tool jobs. It does not replace the per-agent transcript or control view.
 - `history://<id>` gives the coding agent a concise transcript for a live/parked subagent or a retained on-disk transcript.
-- `agent://<id>` resolves a subagent's saved final output artifact; it is not the live transcript.
-- `write agent://<id>` steers or follows up with a normal subagent; `agent://all` broadcasts to visible live peers. Messaging a parked subagent revives it. `read history://` lists registered agents and retained on-disk transcripts.
+- `agent://<id>` resolves a subagent's saved final output artifact; it is not the live transcript. Before that artifact exists, a registered agent resolves to its status, the `yield` payloads it has submitted so far, and its latest assistant text.
+- `write agent://<id>` steers or follows up with a normal subagent; `agent://all` broadcasts to visible live peers. Messaging a parked subagent revives it. `read history://` lists registered agents and retained on-disk transcripts, refreshing the caller root's persisted roster first, the same as `history://<id>` lookups.
 - `read proc://` lists background jobs and project services; `read proc://<id>` inspects status/output without consuming delivery.
 
 Advisor rows are intentionally excluded from the agent-facing peer roster, `history://` index, and `agent://` messaging workflows.

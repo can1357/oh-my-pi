@@ -3,6 +3,7 @@ import type { AbortSourceTracker } from "../utils/abort";
 import type { CapturedHttpErrorResponse, RawHttpRequestDump } from "../utils/http-inspector";
 import { classify, classifyMessage, status } from "./flags";
 import { formatMessage } from "./format";
+import { ConfigurationError } from "./validation";
 
 /** Context a provider catch block hands to {@link finalize}. */
 export interface FinalizeOptions {
@@ -49,11 +50,16 @@ export async function finalize(error: unknown, opts: FinalizeOptions = {}): Prom
 	const currentStatus = errorStatus ?? opts.capturedErrorResponse?.status;
 
 	let message: string;
+	let localReason: Error | undefined;
 	try {
-		const localReason = opts.abortTracker?.getLocalAbortReason();
+		localReason = opts.abortTracker?.getLocalAbortReason();
 		message = localReason?.message ?? (await formatMessage(error, opts));
 	} catch {
 		message = error instanceof Error ? error.message : String(error);
+	}
+	if (!aborted && localReason === undefined && error instanceof ConfigurationError) {
+		const prefix = "ConfigurationError:";
+		if (!message.startsWith(prefix)) message = `${prefix} ${message}`;
 	}
 
 	// A captured status is transport context for the original error. Put it at

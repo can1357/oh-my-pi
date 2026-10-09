@@ -1,3 +1,4 @@
+import type { RoleRouteMetadata } from "../task/role-routing";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type {
 	ImageContent,
@@ -9,6 +10,7 @@ import type {
 } from "@oh-my-pi/pi-ai";
 import type { StructuredSubagentSchemaMode } from "@oh-my-pi/pi-tui/tools/task";
 import type { CompactionMethod } from "./compaction-methods";
+import type { WorkPoolYieldItem } from "../task/workpool-yield";
 import type { RetryFallbackRole } from "./retry-fallback-chains";
 
 export const CURRENT_SESSION_VERSION = 3;
@@ -234,8 +236,10 @@ export interface CredentialPinEntry extends SessionEntryBase {
 /** Session init entry - captures initial context for subagent sessions (debugging/replay). */
 export interface SessionInitEntry extends SessionEntryBase {
 	type: "session_init";
-	/** Full system prompt sent to the model */
-	systemPrompt: string;
+	/** Persisted closure/provenance for readmission; never an authorization capability. */
+	roleRouting?: RoleRouteMetadata;
+	/** System prompt blocks exactly as sent to the model; files written before blocks were kept store one joined string. */
+	systemPrompt: string[] | string;
 	/** Initial task/user message */
 	task: string;
 	/** Tools available to the agent */
@@ -246,7 +250,7 @@ export interface SessionInitEntry extends SessionEntryBase {
 	modelRole?: string;
 	/** Initially resolved provider/model selector for historical display. */
 	resolvedModel?: string;
-	/** Subagent's `subagent:<id>` retry fallback role as installed at spawn; cold revival reinstalls it. Absent when none was installed or on older files. */
+	/** Historical legacy retry diagnostics; never restored as model authority. */
 	retryFallback?: RetryFallbackRole;
 	/** Whether the agent definition is read-only, allowing an exact zero-LoC attribution. */
 	readOnly?: boolean;
@@ -266,6 +270,8 @@ export interface SessionInitEntry extends SessionEntryBase {
 	compactionThreshold?: { thresholdPercent: number; thresholdTokens: number };
 	/** True when the subagent ran inside an isolation worktree: never revivable, transcript-only after park. Absent on older files. */
 	isolated?: boolean;
+	/** Work-pool yield items of the last model call; revival restores them so the yield tool matches. Absent when none. */
+	workPoolYieldItems?: WorkPoolYieldItem[];
 }
 
 /** Mode change entry - tracks agent mode transitions (e.g. plan mode). */

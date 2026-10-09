@@ -103,7 +103,7 @@ describe("per-call model schema boundaries", () => {
 				const schema = getTaskSchema({ isolationEnabled, effortEnabled, batchEnabled: true });
 				const result = schema({
 					context: "Shared context",
-					model: "p/requested",
+					model: "routing-test/primary",
 					tasks: [{ task: "Do work", solutionSpace: "c" }],
 				});
 				expect(result instanceof type.errors).toBe(true);
@@ -111,16 +111,15 @@ describe("per-call model schema boundaries", () => {
 		}
 	}
 
-	it("accepts ordered model arrays on both flat calls and batch items", () => {
-		const models = ["p/preferred:high", "p/alternative"];
-		const flat = taskSchema({ task: "Do work", solutionSpace: "c", model: models });
-		expect(flat instanceof type.errors).toBe(false);
-		if (flat instanceof type.errors) throw new Error(flat.summary);
-		expect(flat.model).toEqual(models);
-		const batch = getTaskSchema({ isolationEnabled: false, batchEnabled: true })({
-			context: "Shared context",
-			tasks: [{ task: "Do work", solutionSpace: "c", model: models }],
+	for (const model of [42, true, {}, ["routing-test/primary", 42]]) {
+		it(`rejects a non-selector wire value ${JSON.stringify(model)} on flat and batch calls`, () => {
+			const flat = taskSchema({ task: "Do work", solutionSpace: "c", model });
+			expect(flat instanceof type.errors).toBe(true);
+			const batch = getTaskSchema({ isolationEnabled: false, batchEnabled: true })({
+				context: "Shared context",
+				tasks: [{ task: "Do work", solutionSpace: "c", model }],
+			});
+			expect(batch instanceof type.errors).toBe(true);
 		});
-		expect(batch instanceof type.errors).toBe(false);
-	});
+	}
 });

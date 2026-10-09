@@ -179,9 +179,13 @@ function sessionPreview(session: SessionSelectorEntry, forkedFrom: string | unde
 	]);
 }
 
+/** Absolute dates of week-old sessions; `toLocaleDateString` goes through Intl on every call. */
+const localeDateCache = new WeakMap<Date, { time: number; text: string }>();
+
 /** Relative age of a session's last modification (`"3 hours ago"`), falling back to the date after a week. */
 function formatSessionDate(date: Date): string {
-	const diffMs = Date.now() - date.getTime();
+	const time = date.getTime();
+	const diffMs = Date.now() - time;
 	const diffMins = Math.floor(diffMs / 60000);
 	const diffHours = Math.floor(diffMs / 3600000);
 	const diffDays = Math.floor(diffMs / 86400000);
@@ -192,7 +196,11 @@ function formatSessionDate(date: Date): string {
 	if (diffDays === 1) return "1 day ago";
 	if (diffDays < 7) return `${diffDays} days ago`;
 
-	return date.toLocaleDateString();
+	const cached = localeDateCache.get(date);
+	if (cached?.time === time) return cached.text;
+	const text = date.toLocaleDateString();
+	localeDateCache.set(date, { time, text });
+	return text;
 }
 
 /** A cached native session item and the inputs it was built from. */
@@ -545,6 +553,8 @@ class SessionList<T extends SessionSelectorEntry> implements Component {
 	#lastFilterQuery = "";
 	/** Bumped whenever the visible session set may have changed (native memo key). */
 	#itemsVersion = 0;
+	/** Per-row line heights of the visible list for the ANSI window, reused until the set changes. */
+	#rowHeights: { items: readonly T[]; length: number; version: number; heights: readonly number[] } | undefined;
 	#itemsNative:
 		| { version: number; showCwd: boolean; currentPath: string | undefined; items: NativeNode[] }
 		| undefined;
@@ -1130,14 +1140,13 @@ class SessionList<T extends SessionSelectorEntry> implements Component {
 		// worst-case count-based window would leave (then padded by
 		// fill-height).
 		const filtered = this.#menu.visibleItems;
-		const itemHeight = (session: T): number => (session.title ? 4 : 3);
 		const budget = this.#lineBudget();
 		const {
 			startIndex,
 			endIndex,
 			rowOffset: offsetRows,
 			totalRows: rawTotalRows,
-		} = getMenuWindow(filtered.map(itemHeight), this.#menu.selectedIndex, budget);
+		} = getMenuWindow(this.#visibleRowHeights(filtered), this.#menu.selectedIndex, budget);
 
 		// Each session block is built into sessionLines, then wrapped by ScrollView
 		// so the right-edge scrollbar is proportional at the physical-line level.
@@ -1232,6 +1241,17 @@ class SessionList<T extends SessionSelectorEntry> implements Component {
 		return lines;
 	}
 
+	/** Line height per visible session (3, or 4 when a title adds a preview line), memoized per visible set. */
+	#visibleRowHeights(items: readonly T[]): readonly number[] {
+		const cached = this.#rowHeights;
+		if (cached?.items === items && cached.length === items.length && cached.version === this.#itemsVersion) {
+			return cached.heights;
+		}
+		const heights = items.map(session => (session.title ? 4 : 3));
+		this.#rowHeights = { items, length: items.length, version: this.#itemsVersion, heights };
+		return heights;
+	}
+
 	handleInput(keyData: string): void {
 		// Delete key — or Backspace on an empty search query — request delete
 		// confirmation from the parent. macOS laptops have no dedicated Forward
@@ -1310,7 +1330,11 @@ export interface SessionSelectorOptions<T extends SessionSelectorEntry = Session
 	title?: string;
 	/** Fixed scope label, or false to omit the scope suffix. */
 	scopeLabel?: string | false;
-	/** Show each session's working directory in the list. */
+	/**
+	 * Show each session's working directory in the list. Defaults to on when
+	 * the session files live in more than one directory (e.g. the folder scope
+	 * merging a repository's worktrees).
+	 */
 	showCwd?: boolean;
 	/**
 	 * Reads the live terminal height so the visible window fits the viewport.
@@ -1354,6 +1378,7 @@ export class SessionSelectorComponent<T extends SessionSelectorEntry = SessionSe
 	#onRequestRender?: () => void;
 	readonly #loadAllSessions?: () => Promise<T[]>;
 	#folderSessions: T[];
+	readonly #folderShowCwd: boolean;
 	#globalSessions: T[] | null = null;
 	#scope: "folder" | "all" = "folder";
 	#toggling = false;
@@ -1420,6 +1445,9 @@ export class SessionSelectorComponent<T extends SessionSelectorEntry = SessionSe
 		this.#onDelete = options.onDelete;
 		this.#loadAllSessions = options.loadAllSessions;
 		this.#folderSessions = sessions;
+		// Storage directory, not recorded cwd: one folder's sessions may record
+		// symlink aliases of the same path, which must not turn the column on.
+		this.#folderShowCwd = options.showCwd ?? new Set(sessions.map(session => path.dirname(session.path))).size > 1;
 		this.#globalSessions = options.allSessions ?? null;
 		this.#getTerminalRows = options.getTerminalRows ?? (() => 24);
 		this.#fillHeight = options.fillHeight ?? false;
@@ -1437,7 +1465,7 @@ export class SessionSelectorComponent<T extends SessionSelectorEntry = SessionSe
 		// projects' history (issue #3099).
 		this.#sessionList = new SessionList(
 			sessions,
-			options.showCwd ?? false,
+			this.#folderShowCwd,
 			options.historyMatcher,
 			options.getTerminalRows,
 			options.pinnedIds,
@@ -1510,7 +1538,7 @@ export class SessionSelectorComponent<T extends SessionSelectorEntry = SessionSe
 			this.#sessionList.setSessions(global, true);
 		} else {
 			this.#scope = "folder";
-			this.#sessionList.setSessions(this.#folderSessions, false);
+			this.#sessionList.setSessions(this.#folderSessions, this.#folderShowCwd);
 		}
 		this.title = this.#headerLabel();
 		this.#onRequestRender?.();

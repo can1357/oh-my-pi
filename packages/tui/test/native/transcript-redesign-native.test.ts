@@ -116,6 +116,60 @@ describe("native transcript redesign", () => {
 		expect(harness.errors).toEqual([]);
 	});
 
+	it("opens settled thoughts when expandThinkingBlocks turns on, keeping a hand-folded one folded", async () => {
+		const message: AssistantMessage = {
+			...failed(""),
+			stopReason: "stop",
+			errorMessage: undefined,
+			content: [{ type: "thinking", thinking: "Weighing it carefully" }],
+		};
+		const component = new AssistantMessageComponent(message);
+		harness = await TspHarness.start();
+		harness.tui.addChild(component);
+		const thought = () => harness!.find(node => node.k === "section" && node.p?.role === "omp.thinking");
+		await harness.render();
+		expect(thought()?.p).toMatchObject({ collapsed: true });
+
+		component.setExpandThinkingBlocks(true);
+		await harness.render();
+		expect(thought()?.p).toMatchObject({ collapsed: false });
+
+		component.handleNativeEvent({ type: "toggle", key: "k0", collapsed: true });
+		component.setExpandThinkingBlocks(false);
+		component.setExpandThinkingBlocks(true);
+		component.updateContent(message);
+		await harness.render();
+		expect(thought()?.p).toMatchObject({ collapsed: true });
+		expect(harness.errors).toEqual([]);
+	});
+
+	it("shows hidden thinking only while it streams, and nothing once it settles", async () => {
+		const component = new AssistantMessageComponent(undefined, true);
+		harness = await TspHarness.start();
+		harness.tui.addChild(component);
+		const message = (...content: AssistantMessage["content"]): AssistantMessage => ({
+			...failed(""),
+			stopReason: "stop",
+			errorMessage: undefined,
+			content,
+		});
+		component.updateContent(message({ type: "thinking", thinking: "Weighing it" }), { transient: true });
+		await harness.render();
+		expect(harness.find(node => node.k === "section" && node.p?.role === "omp.thinking.live")?.p).toMatchObject({
+			collapsed: true,
+		});
+
+		component.updateContent(
+			message({ type: "thinking", thinking: "Weighing it carefully" }, { type: "text", text: "Done." }),
+		);
+		component.markTranscriptBlockFinalized();
+		await harness.render();
+		expect(
+			harness.find(node => node.k === "section" && String(node.p?.role).startsWith("omp.thinking")),
+		).toBeUndefined();
+		expect(harness.errors).toEqual([]);
+	});
+
 	it("gives a user message no head row, and routes its toolbar to omp's copy and rewind", async () => {
 		const actions: TranscriptAction[] = [];
 		setTranscriptActionHandler(action => actions.push(action));
@@ -132,6 +186,24 @@ describe("native transcript redesign", () => {
 		expect(actions).toEqual([{ act: "copy", text: "Fix the build" }, { act: "rewind" }]);
 	});
 
+	it("shows a user message's time on the terminal's clock", async () => {
+		setTranscriptActionHandler(() => {});
+		const at = new Date(2026, 0, 1, 18, 5).getTime();
+		for (const [hour12, shown] of [
+			[false, /^18:05$/],
+			[true, /^0?6:05\s?pm$/i],
+		] as const) {
+			harness = await TspHarness.start(undefined, { hour12 });
+			harness.tui.addChild(new UserMessageComponent("Fix the build", { timestamp: at }));
+			await harness.render();
+			const time = harness.find(node => node.p?.role === "omp.user.time");
+			expect(texts(time)).toMatch(shown);
+			expect(String(prop(time, "title"))).toMatch(hour12 ? /pm/i : /18:05/);
+			harness.stop();
+			harness = undefined;
+		}
+	});
+
 	it("shows a status notice as a toast that re-shows when its text changes", async () => {
 		const notice = new StatusNotice("Thinking blocks: hidden");
 		harness = await TspHarness.start();
@@ -144,5 +216,18 @@ describe("native transcript redesign", () => {
 		await harness.render();
 		expect(harness.find(node => node.k === "toast")?.p).toMatchObject({ text: "Thinking blocks: shown" });
 		expect(harness.find(node => node.k === "text" && node.p?.text === "Thinking blocks: hidden")).toBeUndefined();
+	});
+
+	it("keeps a toast: false notice off a native terminal until a later status reuses it", async () => {
+		const notice = new StatusNotice("MCP: 2 connected, 1 failed", { toast: false });
+		harness = await TspHarness.start();
+		harness.tui.addChild(notice);
+		await harness.render();
+		expect(harness.find(node => node.k === "toast")).toBeUndefined();
+		expect(harness.find(node => texts(node).includes("MCP"))).toBeUndefined();
+		notice.setMessage("Copied to clipboard");
+		harness.tui.requestRender();
+		await harness.render();
+		expect(harness.find(node => node.k === "toast")?.p).toMatchObject({ text: "Copied to clipboard" });
 	});
 });

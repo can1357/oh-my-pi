@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it } from "bun:test";
+import * as fsSync from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { TempDir } from "@oh-my-pi/pi-utils";
@@ -33,6 +34,32 @@ function makeSession(cwd: string, evalSessionId: string, options?: { autoProvisi
 
 function executorOptions(session: ToolSession, sessionId: string): JsExecutorOptions {
 	return { cwd: session.cwd, sessionId, session };
+}
+
+function canResolve(specifier: string, fromDir: string): boolean {
+	try {
+		Bun.resolveSync(specifier, fromDir);
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+/**
+ * Picks a package OMP itself resolves but the workspace cannot. Prefers `@babel/parser`; a stray
+ * `node_modules` above the temp dir (e.g. `npm i` run in the Windows profile dir) legitimately puts
+ * it in the workspace's ancestry, so fall back to any other package installed for OMP.
+ */
+function ompOnlyPackage(workspaceDir: string): string {
+	const ompDir = path.resolve(import.meta.dir, "../..");
+	const repoModules = path.resolve(ompDir, "../../node_modules");
+	const candidates = [
+		"@babel/parser",
+		...fsSync.readdirSync(repoModules).filter(name => !name.startsWith(".") && !name.startsWith("@")),
+	];
+	const picked = candidates.find(name => canResolve(name, ompDir) && !canResolve(name, workspaceDir));
+	if (!picked) throw new Error(`Every OMP dependency is also resolvable from ${workspaceDir}`);
+	return picked;
 }
 
 describe("persistent JavaScript package environments", () => {
@@ -106,7 +133,8 @@ describe("persistent JavaScript package environments", () => {
 		using workspace = TempDir.createSync("@omp-js-package-missing-");
 		const sessionId = `js-package-missing:${crypto.randomUUID()}`;
 		const session = makeSession(workspace.path(), sessionId);
-		const result = await executeJs('await import("@babel/parser")', executorOptions(session, sessionId));
+		const specifier = ompOnlyPackage(workspace.path());
+		const result = await executeJs(`await import(${JSON.stringify(specifier)})`, executorOptions(session, sessionId));
 		expect(result.exitCode).toBe(1);
 		expect(result.output).toContain("JS package environment fallback");
 	});

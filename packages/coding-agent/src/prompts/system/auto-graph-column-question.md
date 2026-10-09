@@ -1,0 +1,1 @@
+The state is a Markdown table from a coding assistant's answer, with each column's inferred type. A chart will be drawn under the table. Should the column "{{column}}" be plotted as one of the chart's data series? Yes for a measure the table compares; no for a total or average restating other columns, a setting that barely varies, or a number that only labels a row.

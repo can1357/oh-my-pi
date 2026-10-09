@@ -18,6 +18,8 @@ const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
 const DEFAULT_REFLECT_TIMEOUT_MS = 120_000;
 const DEFAULT_RECALL_TIMEOUT_MS = 30_000;
 const DEFAULT_RETAIN_TIMEOUT_MS = 60_000;
+/** Server-side maximum `limit` on the mental-model list endpoint; keeps typical banks to one request. */
+const MENTAL_MODEL_PAGE_SIZE = 1000;
 
 export type Budget = "low" | "mid" | "high" | string;
 export type TagsMatch = "any" | "all" | "any_strict" | "all_strict";
@@ -177,8 +179,14 @@ export interface MentalModelSummary {
 	[key: string]: unknown;
 }
 
+/** Complete mental-model listing; also the wire shape of one list page. */
 export interface MentalModelListResponse {
 	items: MentalModelSummary[];
+	/**
+	 * Match count across all pages. `listMentalModels` always sets it to the complete item count;
+	 * on a single wire page it is server-reported (Hindsight ≥ 0.9) and absent on older servers.
+	 */
+	total?: number;
 	[key: string]: unknown;
 }
 
@@ -435,18 +443,28 @@ export class HindsightApi {
 	}
 
 	/**
-	 * List mental models in a bank. Default `detail=content` includes the
-	 * generated `content` text but excludes the heavyweight `reflect_response`
-	 * provenance chain (which can exceed 200KB). Use `detail=metadata` for
-	 * inventory and `detail=full` only for debug surfaces.
+	 * List every mental model in a bank, following `limit`/`offset` pages until
+	 * the server runs out — the endpoint defaults to 100 per page, so a single
+	 * request would silently drop the rest of a shared bank. Default
+	 * `detail=content` includes the generated `content` text but excludes the
+	 * heavyweight `reflect_response` provenance chain (which can exceed 200KB).
+	 * Use `detail=metadata` for inventory and `detail=full` only for debug surfaces.
 	 */
 	async listMentalModels(bankId: string, options?: ListMentalModelsOptions): Promise<MentalModelListResponse> {
-		return this.#request<MentalModelListResponse>(
-			"GET",
-			`/v1/default/banks/${encodeURIComponent(bankId)}/mental-models`,
-			"listMentalModels",
-			{ query: { detail: options?.detail ?? "content" }, signal: options?.signal },
-		);
+		const path = `/v1/default/banks/${encodeURIComponent(bankId)}/mental-models`;
+		const detail = options?.detail ?? "content";
+		const items: MentalModelSummary[] = [];
+		while (true) {
+			const page = await this.#request<MentalModelListResponse>("GET", path, "listMentalModels", {
+				query: { detail, limit: MENTAL_MODEL_PAGE_SIZE, offset: items.length },
+				signal: options?.signal,
+			});
+			const pageItems = page.items ?? [];
+			items.push(...pageItems);
+			if (pageItems.length < MENTAL_MODEL_PAGE_SIZE) break;
+			if (typeof page.total === "number" && items.length >= page.total) break;
+		}
+		return { items, total: items.length };
 	}
 
 	/** Fetch a single mental model. Returns `null` on 404. */

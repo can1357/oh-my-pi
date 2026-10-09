@@ -326,7 +326,8 @@ impl Session {
 
 			let mut tag: Option<String> = None;
 			// Updated files register their response rows (plus still-valid prior
-			// provenance) against the minted tag: (store key, carried lines, drifted).
+			// provenance) against the minted tag: (store key, carried lines,
+			// drifted).
 			let mut provenance: Option<(PathBuf, Vec<u32>, bool)> = None;
 			match file.op {
 				FileOp::Delete => self.store.invalidate(&canonical),
@@ -379,8 +380,9 @@ impl Session {
 				.map_or_else(|| format!("[{header_path}]"), |tag| format!("[{header_path}#{tag}]"));
 			let text = format_file_text(&file, &header);
 			if let (Some((key, mut seen_lines, drifted)), Some(tag)) = (provenance, &response_tag) {
-				// A drifted write shows rows of the previewed text, not of the recorded
-				// version the tag names, so only carried lines stay anchorable.
+				// A drifted write shows rows of the previewed text, not of the
+				// recorded version the tag names, so only carried lines
+				// stay anchorable.
 				if !drifted {
 					seen_lines.extend(seen_lines_from_body(&text));
 				}
@@ -449,23 +451,40 @@ fn recorded_view(file: &StagedFile, written: &str) -> String {
 }
 
 /// Prior-snapshot lines that keep both their number and content in `after`:
-/// the unchanged leading run, filtered by what `prior` displayed. A missing or
-/// unrestricted prior snapshot let the edit anchor anywhere, so the whole run
-/// carries over. Lines after the first change shifted, so their old numbers
-/// never carry.
+/// every unchanged run the edit did not shift (the leading run, plus runs below
+/// line-neutral hunks), filtered by what `prior` displayed. A missing or
+/// unrestricted prior snapshot let the edit anchor anywhere, so every such run
+/// carries over. Shifted lines never carry: their old numbers name other
+/// content.
 fn carried_seen_lines(before: &str, after: &str, prior: Option<&Snapshot>) -> Vec<u32> {
-	let unchanged = before
-		.split('\n')
-		.zip(after.split('\n'))
-		.take_while(|(old, new)| old == new)
-		.count();
-	let unchanged = u32::try_from(unchanged).unwrap_or(u32::MAX);
-	match prior.and_then(|snapshot| snapshot.seen_lines.as_ref()) {
-		// `range(1..=0)` panics; a first-line change carries nothing.
-		_ if unchanged == 0 => Vec::new(),
-		Some(seen) if !seen.is_empty() => seen.range(1..=unchanged).copied().collect(),
-		_ => (1..=unchanged).collect(),
+	let seen = prior
+		.and_then(|snapshot| snapshot.seen_lines.as_ref())
+		.filter(|seen| !seen.is_empty());
+	let old_lines: Vec<&str> = before.split('\n').collect();
+	let new_lines: Vec<&str> = after.split('\n').collect();
+	let (old_ids, new_ids) = pi_diff::intern(&old_lines, &new_lines);
+	let mut carried = Vec::new();
+	let (mut old_line, mut new_line) = (1_u32, 1_u32);
+	for run in pi_diff::myers_diff(&old_ids, &new_ids) {
+		if run.added {
+			new_line += run.count;
+			continue;
+		}
+		if run.removed {
+			old_line += run.count;
+			continue;
+		}
+		if old_line == new_line {
+			let unshifted = old_line..old_line + run.count;
+			match seen {
+				Some(seen) => carried.extend(seen.range(unshifted)),
+				None => carried.extend(unshifted),
+			}
+		}
+		old_line += run.count;
+		new_line += run.count;
 	}
+	carried
 }
 
 /// Model-facing text for one file (`formatEditResultText`).

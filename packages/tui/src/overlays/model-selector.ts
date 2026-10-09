@@ -64,6 +64,8 @@ export function parseModelString(
 	if (slashIdx <= 0) return undefined;
 	const id = modelStr.slice(slashIdx + 1);
 	const provider = modelStr.slice(0, slashIdx);
+	// Every recognized suffix can also be part of an authoritative literal ID.
+	if (options?.isLiteralModelId?.(provider, id) === true) return { provider, id };
 	// Strip strict thinking level suffixes first (e.g. "claude-sonnet-4-6:high" -> id "claude-sonnet-4-6", thinkingLevel "high").
 	const strict = splitThinkingSuffix(id);
 	if (strict.level) return { provider, id: strict.base, thinkingLevel: strict.level };

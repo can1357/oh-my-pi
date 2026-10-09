@@ -722,4 +722,36 @@ describe("history:// protocol", () => {
 			expect(AgentRegistry.global().get("Worker")?.sessionFile).toBe(childA);
 		});
 	});
+
+	it("bare read history:// lists the caller root's persisted agents like history://<id> finds them", async () => {
+		await withTempDir(async dir => {
+			const rootA = path.join(dir, "a", "main.jsonl");
+			const rootB = path.join(dir, "b", "main.jsonl");
+			const header = JSON.stringify({
+				type: "session",
+				version: CURRENT_SESSION_VERSION,
+				id: "fixture",
+				timestamp: new Date().toISOString(),
+				cwd: "/tmp",
+			});
+			await Bun.write(rootA, `${header}\n`);
+			await Bun.write(rootB, `${header}\n`);
+			await Bun.write(path.join(dir, "a", "main", "Scanner.jsonl"), sessionFixtureJsonl());
+			// The process-global Main ref belongs to another root; the caller is root A.
+			AgentRegistry.global().register({
+				id: "Main",
+				displayName: "main",
+				kind: "main",
+				session: null,
+				sessionFile: rootB,
+				status: "running",
+			});
+
+			const tool = new ReadTool(makeToolSession(dir, rootA));
+			const result = await tool.execute("history-index-a", { path: "history://" });
+			const output = result.content.find(part => part.type === "text");
+			if (output?.type !== "text") throw new Error("Expected text output");
+			expect(output.text).toMatch(/\| Scanner \| parked \|/);
+		});
+	});
 });

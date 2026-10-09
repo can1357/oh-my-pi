@@ -432,7 +432,10 @@ describe("buildSessionContext", () => {
 			// A rewrite marker newer than the tail strips the tail's bound
 			// thinking on the next request; native replay must not do that. The
 			// commit timestamp still retires the tail's pre-compaction usage.
+			// An assistant entry is saved when its stream ends, after the
+			// message's own (stream start) time; the marker precedes the latter.
 			const mayDay = new Date("2025-05-01T00:00:00Z").getTime();
+			const streamStart = mayDay - 6_000;
 			const retainedAssistant: SessionMessageEntry = {
 				type: "message",
 				id: "2",
@@ -456,7 +459,7 @@ describe("buildSessionContext", () => {
 						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 					},
 					stopReason: "stop",
-					timestamp: mayDay + 1_000,
+					timestamp: streamStart,
 				},
 			};
 			const tailUser = msg("4", "3", "user", "after compact");
@@ -469,6 +472,7 @@ describe("buildSessionContext", () => {
 						content: "Native summary",
 						signature: "sig_state",
 						model: "claude-fable-5",
+						exactTail: true,
 					},
 				},
 			};
@@ -485,8 +489,27 @@ describe("buildSessionContext", () => {
 			expect(summary.timestamp).toBe(new Date("2025-06-01T00:00:00Z").getTime());
 			const [llmSummary] = defaultConvertToLlm([summary]);
 			if (llmSummary?.role !== "user") throw new Error("Expected user LLM message");
-			expect(llmSummary.historyRewriteAt).toBe(mayDay - 1);
+			expect(llmSummary.historyRewriteAt).toBe(streamStart - 1);
 			expect(llmSummary.timestamp).toBe(summary.timestamp);
+
+			// A summary persisted before `exactTail` keeps its entry-time marker:
+			// thinking created after it was signed against that request.
+			const persisted: CompactionEntry = {
+				...nativeCompaction,
+				preserveData: {
+					anthropicCompaction: {
+						provider: "anthropic",
+						content: "Native summary",
+						signature: "sig_state",
+						model: "claude-fable-5",
+					},
+				},
+			};
+			const [legacySummary] = defaultConvertToLlm([
+				buildSessionContext([entries[0], retainedAssistant, persisted, tailUser]).messages[0],
+			]);
+			if (legacySummary?.role !== "user") throw new Error("Expected user LLM message");
+			expect(legacySummary.historyRewriteAt).toBe(mayDay - 1);
 
 			// A local compaction keeps the entry commit timestamp.
 			const localCtx = buildSessionContext(
@@ -863,6 +886,78 @@ describe("buildSessionContext", () => {
 			// hiding this suffix would make the newest response disappear.
 			expect(transcript.messages.map(m => m.role)).toEqual(["assistant", "compactionSummary"]);
 			expect(JSON.stringify(transcript.messages)).toContain("kept assistant suffix");
+		});
+
+		it("keeps the final answer when advisor notes follow a kept mid-turn suffix", () => {
+			const entries: SessionEntry[] = [
+				msg("1", null, "user", "original request"),
+				msg("2", "1", "assistant", "tool-loop continuation"),
+				msg("3", "2", "assistant", "final answer"),
+				{
+					type: "custom_message",
+					id: "4",
+					parentId: "3",
+					timestamp: "2025-01-01T00:00:00Z",
+					customType: "advisor-note",
+					content: "review note",
+					display: true,
+					attribution: "agent",
+				},
+				compaction("5", "4", "Idle compaction", "2"),
+			];
+
+			const transcript = buildSessionContext(entries, undefined, undefined, {
+				transcript: true,
+				collapseCompactedHistory: true,
+			});
+
+			expect(transcript.messages.map(message => message.role)).toEqual([
+				"assistant",
+				"assistant",
+				"custom",
+				"compactionSummary",
+			]);
+			expect(transcript.messages[1]).toMatchObject({
+				role: "assistant",
+				content: [{ type: "text", text: "final answer" }],
+			});
+		});
+
+		it("trims past agent notes to a later user-invoked skill request", () => {
+			const entries: SessionEntry[] = [
+				msg("1", null, "user", "old request"),
+				msg("2", "1", "assistant", "orphaned continuation"),
+				{
+					type: "custom_message",
+					id: "3",
+					parentId: "2",
+					timestamp: "2025-01-01T00:00:00Z",
+					customType: "advisor-note",
+					content: "note on the old turn",
+					display: true,
+					attribution: "agent",
+				},
+				{
+					type: "custom_message",
+					id: "4",
+					parentId: "3",
+					timestamp: "2025-01-01T00:00:00Z",
+					customType: "skill-prompt",
+					content: "review this change",
+					display: true,
+					attribution: "user",
+				},
+				msg("5", "4", "assistant", "new response"),
+				compaction("6", "5", "Summary", "2"),
+			];
+
+			const transcript = buildSessionContext(entries, undefined, undefined, {
+				transcript: true,
+				collapseCompactedHistory: true,
+			});
+
+			expect(transcript.messages.map(message => message.role)).toEqual(["custom", "assistant", "compactionSummary"]);
+			expect(transcript.messages[0]).toMatchObject({ content: "review this change", attribution: "user" });
 		});
 
 		it("trimmed assistants consume reset state before the first visible turn", () => {

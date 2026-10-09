@@ -1,12 +1,19 @@
 import { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
+import { Agent } from "@oh-my-pi/pi-agent-core";
+import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
+import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
+import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { createSubagentSettings } from "@oh-my-pi/pi-coding-agent/task/executor";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
-const MODEL_PERF_FLUSH_DELAY_MS = 100;
+const MODEL_PERF_FLUSH_DELAY_MS = 60_000;
 const REPO_ROOT = path.resolve(import.meta.dir, "../../..");
 const AGENT_STORAGE_MODULE = path.resolve(import.meta.dir, "../src/session/agent-storage.ts");
 
@@ -70,6 +77,114 @@ describe("AgentStorage model perf aggregates", () => {
 		expect(stats?.samples).toBe(2);
 		expect(stats?.tps).toBeCloseTo(1500000 / 9000, 5);
 		expect(stats?.ttftMs).toBeCloseTo(750, 5);
+	});
+
+	it("keeps a non-default service tier's samples in their own row", async () => {
+		const storage = await openStorage();
+
+		const standard = storage.recordModelPerf("openai-codex/gpt-6-astra", {
+			outputTokens: 100,
+			durationMs: 4000,
+		});
+		const ultrafast = storage.recordModelPerf(
+			"openai-codex/gpt-6-astra",
+			{ outputTokens: 3000, durationMs: 10000 },
+			"ultrafast",
+		);
+		// `default`/`auto` are the standard serving path, so they share the bare row.
+		const explicitDefault = storage.recordModelPerf(
+			"openai-codex/gpt-6-astra",
+			{ outputTokens: 100, durationMs: 4000 },
+			"default",
+		);
+		await flushPerf(standard, ultrafast, explicitDefault);
+
+		const perf = storage.getModelPerf();
+		expect(perf.get("openai-codex/gpt-6-astra")?.samples).toBe(2);
+		expect(perf.get("openai-codex/gpt-6-astra")?.tps).toBeCloseTo(200000 / 8000, 5);
+		expect(perf.get("openai-codex/gpt-6-astra@ultrafast")?.samples).toBe(1);
+		expect(perf.get("openai-codex/gpt-6-astra@ultrafast")?.tps).toBeCloseTo(300, 5);
+	});
+
+	it("records a session turn under the tier the provider reported serving", async () => {
+		// The session's turn loop schedules real timers; only the deferred perf
+		// batch needs the fake clock, and closing the storage flushes it.
+		vi.useRealTimers();
+		tempDir = TempDir.createSync("@omp-served-tier-perf-");
+		const dbPath = path.join(tempDir.path(), "agent.db");
+		const storage = await AgentStorage.open(dbPath);
+		const settings = Settings.isolated({ "tier.openai": "ultrafast" }, { storage });
+		const auth = await AuthStorage.create(":memory:");
+		try {
+			const registry = new ModelRegistry(auth, path.join(tempDir.path(), "models.yml"));
+			registry.getApiKey = async () => "test-key";
+			const model = buildModel({
+				provider: "openai-codex",
+				id: "gpt-6-astra",
+				name: "GPT-6 Astra",
+				api: "openai-codex-responses",
+				baseUrl: "https://example.com",
+				reasoning: true,
+				input: ["text"],
+				cost: { input: 10, output: 50, cacheRead: 1, cacheWrite: 0 },
+				contextWindow: 200_000,
+				maxTokens: 32_000,
+			});
+			const mock = createMockModel({
+				id: "gpt-6-astra",
+				provider: "openai-codex",
+				responses: [
+					// The backend downgraded the requested ultrafast turn: the echo is what
+					// the row must follow, not the session's live setting.
+					{ content: ["downgraded"], usage: { input: 100, output: 1000 }, serviceTier: "default" },
+					{ content: ["served"], usage: { input: 100, output: 3000 }, serviceTier: "ultrafast" },
+				],
+			});
+			const agent = new Agent({
+				getApiKey: () => "test-key",
+				initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
+				streamFn: mock.stream,
+			});
+			const session = new AgentSession({
+				agent,
+				sessionManager: SessionManager.inMemory(),
+				modelRegistry: registry,
+				settings,
+				serviceTierByFamily: { openai: "ultrafast" },
+			});
+			try {
+				await session.prompt("first");
+				await session.prompt("second");
+			} finally {
+				await session.dispose();
+			}
+			AgentStorage.close(); // flushes the still-batched perf write
+
+			const reopened = await AgentStorage.open(dbPath);
+			const perf = reopened.getModelPerf();
+			expect(perf.get("openai-codex/gpt-6-astra")?.samples).toBe(1);
+			expect(perf.get("openai-codex/gpt-6-astra@ultrafast")?.samples).toBe(1);
+		} finally {
+			auth.close();
+		}
+	});
+
+	it("persists a still-batched sample when the storage closes before the window elapses", async () => {
+		const storage = await openStorage();
+		const dbPath = path.join(tempDir.path(), "agent.db");
+		void storage.recordModelPerf("openai/gpt-5", { outputTokens: 600, durationMs: 3000 });
+
+		AgentStorage.close();
+		const reopened = await AgentStorage.open(dbPath);
+
+		expect(reopened.getModelPerf().get("openai/gpt-5")?.tps).toBeCloseTo(200, 5);
+	});
+
+	it("includes a still-batched sample in an in-process read without waiting for the window", async () => {
+		const storage = await openStorage();
+		void storage.recordModelPerf("openai/gpt-5", { outputTokens: 600, durationMs: 3000 });
+
+		expect(storage.getModelPerf().get("openai/gpt-5")?.tps).toBeCloseTo(200, 5);
 	});
 
 	it("records task subagent samples in the shared model performance aggregate", async () => {
@@ -136,6 +251,22 @@ describe("AgentStorage model perf aggregates", () => {
 		expect(storage.getModelPerf().has("openai/gpt-5")).toBe(false);
 	});
 
+	it("skips rows with a NULL model key so perf keys stay selectors", async () => {
+		const storage = await openStorage();
+		const db = new Database(path.join(tempDir.path(), "agent.db"));
+		try {
+			// `TEXT PRIMARY KEY` admits NULL; the model browser iterates every key as a string.
+			db.run("INSERT INTO model_perf (model_key, samples, output_tokens, gen_ms) VALUES (NULL, 3, 300, 3000)");
+			db.run(
+				"INSERT INTO model_perf (model_key, samples, output_tokens, gen_ms) VALUES ('openai/gpt-5', 3, 300, 3000)",
+			);
+		} finally {
+			db.close();
+		}
+
+		expect([...storage.getModelPerf().keys()]).toEqual(["openai/gpt-5"]);
+	});
+
 	it("ignores out-of-range TTFT but keeps the throughput sample", async () => {
 		const storage = await openStorage();
 
@@ -188,6 +319,30 @@ describe("AgentStorage model perf aggregates", () => {
 		expect(glm?.tps).toBeCloseTo(100, 5);
 	});
 
+	it("imports a served tier's history into its own row", async () => {
+		const storage = await openStorage();
+
+		const statsDbPath = path.join(tempDir.path(), "stats.db");
+		const statsDb = new Database(statsDbPath);
+		statsDb.run(`CREATE TABLE messages (
+			provider TEXT, model TEXT, output_tokens INTEGER, duration INTEGER,
+			ttft INTEGER, stop_reason TEXT, timestamp INTEGER, service_tier TEXT
+		)`);
+		using insert = statsDb.prepare("INSERT INTO messages VALUES (?, ?, ?, ?, ?, ?, ?, ?)");
+		const now = Date.now();
+		insert.run("openai-codex", "gpt-6-astra", 100, 4000, null, "stop", now - 3000, null);
+		insert.run("openai-codex", "gpt-6-astra", 3000, 10000, null, "stop", now - 2000, "ultrafast");
+		statsDb.close();
+
+		await storage.backfillModelPerfFromStats(statsDbPath);
+
+		const perf = storage.getModelPerf();
+		// The standard turn stays the standard aggregate; the ultrafast turn does not
+		// drag it up.
+		expect(perf.get("openai-codex/gpt-6-astra")?.tps).toBeCloseTo(25, 5);
+		expect(perf.get("openai-codex/gpt-6-astra@ultrafast")?.tps).toBeCloseTo(300, 5);
+	});
+
 	it("caps the backfill at the newest samples per model", async () => {
 		const storage = await openStorage();
 
@@ -216,6 +371,68 @@ describe("AgentStorage model perf aggregates", () => {
 		const stats = storage.getModelPerf().get("openai/gpt-5");
 		expect(stats?.samples).toBe(256);
 		expect(stats?.tps).toBeCloseTo(100, 5);
+	});
+
+	it("keeps live aggregates and skips the re-import when the v1 import already ran", async () => {
+		tempDir = TempDir.createSync("@omp-agent-storage-perf-v1-");
+		const homeDir = tempDir.join("home");
+		const agentDir = tempDir.join("agent");
+		const env = {
+			...process.env,
+			HOME: homeDir,
+			USERPROFILE: homeDir,
+			OMP_PROFILE: "",
+			PI_CODING_AGENT_DIR: agentDir,
+			PI_CONFIG_DIR: ".omp",
+			PI_PROFILE: "",
+			XDG_CACHE_HOME: tempDir.join("xdg-cache"),
+			XDG_CONFIG_HOME: tempDir.join("xdg-config"),
+			XDG_DATA_HOME: tempDir.join("xdg-data"),
+			XDG_STATE_HOME: tempDir.join("xdg-state"),
+		};
+		const probe = await runProbe(
+			[
+				'import { Database } from "bun:sqlite";',
+				'import * as fs from "node:fs";',
+				'import * as path from "node:path";',
+				'import { getAgentDbPath, getStatsDbPath } from "@oh-my-pi/pi-utils";',
+				`import { AgentStorage } from ${JSON.stringify(AGENT_STORAGE_MODULE)};`,
+				// A stale stats.db that never saw the live Astra turns.
+				"const statsPath = getStatsDbPath();",
+				"fs.mkdirSync(path.dirname(statsPath), { recursive: true });",
+				"const statsDb = new Database(statsPath);",
+				'statsDb.run("CREATE TABLE messages (provider TEXT, model TEXT, output_tokens INTEGER, duration INTEGER, ttft INTEGER, stop_reason TEXT, timestamp INTEGER, service_tier TEXT)");',
+				'statsDb.run("INSERT INTO messages VALUES (?, ?, ?, ?, ?, ?, ?, ?)", ["openai", "synced-model", 20, 2000, null, "stop", Date.now(), null]);',
+				"statsDb.close();",
+				// A v1 install: the marker is set and the aggregates hold live samples.
+				"await AgentStorage.open();",
+				"AgentStorage.close();",
+				"const agentDb = new Database(getAgentDbPath());",
+				'agentDb.run("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)", ["model_perf_backfill", "complete"]);',
+				'agentDb.run("INSERT OR REPLACE INTO model_perf (model_key, samples, output_tokens, gen_ms, ttft_samples, ttft_ms) VALUES (?, ?, ?, ?, ?, ?)", ["openai-codex/gpt-6-astra", 40, 40000, 400000, 0, 0]);',
+				"agentDb.close();",
+				// Reopening and reading runs the v2 migration.
+				"const storage = await AgentStorage.open();",
+				"const perf = storage.getModelPerf();",
+				"const markerDb = new Database(getAgentDbPath(), { readonly: true });",
+				"const marker = markerDb.query(\"SELECT value FROM meta WHERE key = 'model_perf_backfill_v2'\").get();",
+				"markerDb.close();",
+				"console.error(JSON.stringify({ keys: [...perf.keys()], astra: perf.get('openai-codex/gpt-6-astra'), marker }));",
+				"AgentStorage.close();",
+			].join("\n"),
+			env,
+		);
+		expect(probe.exitCode, probe.stderr).toBe(0);
+		const result = JSON.parse(probe.stderr.trim().split("\n").pop() ?? "null") as {
+			keys: string[];
+			astra: { samples: number; tps: number };
+			marker: { value: string } | null;
+		};
+		// The live row survives untouched and nothing is re-imported on top of it.
+		expect(result.keys).toEqual(["openai-codex/gpt-6-astra"]);
+		expect(result.astra.samples).toBe(40);
+		expect(result.astra.tps).toBeCloseTo(100, 5);
+		expect(result.marker).toEqual({ value: "complete" });
 	});
 
 	it("does not start the stats backfill while flushing a live batch on exit", async () => {
@@ -278,10 +495,38 @@ describe("AgentStorage model perf aggregates", () => {
 					.get(),
 			).toEqual({ samples: 2, output_tokens: 30, gen_ms: 3000 });
 			expect(
-				db.query<{ value: string }, [string]>("SELECT value FROM meta WHERE key = ?").get("model_perf_backfill"),
+				db.query<{ value: string }, [string]>("SELECT value FROM meta WHERE key = ?").get("model_perf_backfill_v2"),
 			).toEqual({ value: "complete" });
 		} finally {
 			db.close();
 		}
 	});
+
+	it("lets a process exit naturally mid-window and still persists the pending batch", async () => {
+		tempDir = TempDir.createSync("@omp-agent-storage-natural-exit-");
+		const dbPath = tempDir.join("agent.db");
+		const startedAt = Date.now();
+		const exiting = await runProbe(
+			[
+				`import { AgentStorage } from ${JSON.stringify(AGENT_STORAGE_MODULE)};`,
+				`const storage = await AgentStorage.open(${JSON.stringify(dbPath)});`,
+				'void storage.recordModelPerf("openai/natural-exit", { outputTokens: 10, durationMs: 1000 });',
+			].join("\n"),
+			{ ...process.env, HOME: tempDir.path(), USERPROFILE: tempDir.path() },
+		);
+		expect(exiting.exitCode, exiting.stderr).toBe(0);
+		// A referenced batch timer would hold the process open for the whole window.
+		expect(Date.now() - startedAt).toBeLessThan(MODEL_PERF_FLUSH_DELAY_MS / 2);
+
+		const db = new Database(dbPath, { readonly: true });
+		try {
+			expect(
+				db
+					.query<{ samples: number }, []>("SELECT samples FROM model_perf WHERE model_key = 'openai/natural-exit'")
+					.get(),
+			).toEqual({ samples: 1 });
+		} finally {
+			db.close();
+		}
+	}, 30_000);
 });

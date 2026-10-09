@@ -9,12 +9,15 @@ import type { AgentEvent, AgentMessage, AgentToolResult, ThinkingLevel } from "@
 import type { CompactionResult } from "@oh-my-pi/pi-agent-core/compaction";
 import type { ImageContent, Model } from "@oh-my-pi/pi-ai";
 import { isRecord, ptree, readJsonl } from "@oh-my-pi/pi-utils";
+import type { LogoutAccount } from "@oh-my-pi/pi-tui/overlays/logout-account-selector";
 import type { FileSink } from "bun";
 import type { BashResult } from "../../exec/bash-executor";
 import type { AgentSessionEvent, SessionStats } from "../../session/agent-session";
+import type { BtwHistoryRecord } from "../../session/btw-history";
 import type { CacheWarmingMode } from "../../session/cache-warmer";
 import type { SessionEntry, SessionTreeNode } from "../../session/session-entries";
 import { MAX_RPC_FRAME_BYTES, MAX_RPC_REASSEMBLED_BYTES, RpcFrameDecoder, type RpcProtocolVersion } from "./rpc-frame";
+import type { RpcGoalOp, RpcGoalResult } from "./rpc-goal";
 import {
 	RPC_MESSAGES_PAGE_BUSY_ERROR,
 	RPC_MESSAGES_PAGE_STALE_ERROR,
@@ -22,7 +25,10 @@ import {
 	type RpcMessagesPageOptions,
 } from "./rpc-messages";
 import type {
+	RpcAbortAndRestoreQueueResult,
 	RpcAvailableCommandsUpdateFrame,
+	RpcBtwDeltaFrame,
+	RpcBtwRecordFrame,
 	RpcAvailableSlashCommand,
 	RpcCommand,
 	RpcExtensionUIRequest,
@@ -33,8 +39,10 @@ import type {
 	RpcHostToolDefinition,
 	RpcHostToolResult,
 	RpcHostToolUpdate,
+	RpcLiveFrame,
 	RpcOpenSessionResult,
 	RpcPromptResultFrame,
+	RpcRemoveQueuedMessageResult,
 	RpcResponse,
 	RpcSessionSettledFrame,
 	RpcSessionState,
@@ -106,6 +114,7 @@ export type RpcSubagentEventListener = (payload: RpcSubagentEventFrame["payload"
 export type RpcAvailableCommandsUpdateListener = (commands: RpcAvailableSlashCommand[]) => void;
 export type RpcPromptResultListener = (result: RpcPromptResultFrame) => void;
 export type RpcSessionSettledListener = () => void;
+export type RpcLiveListener = (frame: RpcLiveFrame) => void;
 
 export interface RpcClientToolContext<TDetails = unknown> {
 	toolCallId: string;
@@ -228,9 +237,33 @@ function isRpcSessionSettledFrame(value: unknown): value is RpcSessionSettledFra
 	return isRecord(value) && value.type === "session_settled";
 }
 
+const LIVE_FRAME_TYPES: Record<string, true> = {
+	live_phase: true,
+	live_levels: true,
+	live_transcript: true,
+	live_end: true,
+};
+
+function isRpcLiveFrame(value: unknown): value is RpcLiveFrame {
+	return isRecord(value) && typeof value.type === "string" && Object.hasOwn(LIVE_FRAME_TYPES, value.type);
+}
+
 function isRpcAvailableCommandsUpdateFrame(value: unknown): value is RpcAvailableCommandsUpdateFrame {
 	if (!isRecord(value)) return false;
 	return value.type === "available_commands_update" && Array.isArray(value.commands);
+}
+
+function isRpcBtwDeltaFrame(value: unknown): value is RpcBtwDeltaFrame {
+	return (
+		isRecord(value) &&
+		value.type === "btw_delta" &&
+		typeof value.recordId === "string" &&
+		typeof value.delta === "string"
+	);
+}
+
+function isRpcBtwRecordFrame(value: unknown): value is RpcBtwRecordFrame {
+	return isRecord(value) && value.type === "btw_record" && isRecord(value.record);
 }
 
 function isRpcHostToolCallRequest(value: unknown): value is RpcHostToolCallRequest {
@@ -296,10 +329,15 @@ export class RpcClient {
 	#subagentProgressListeners = new Set<RpcSubagentProgressListener>();
 	#subagentEventListeners = new Set<RpcSubagentEventListener>();
 	#availableCommandsUpdateListeners = new Set<RpcAvailableCommandsUpdateListener>();
+	#btwDeltaListeners = new Set<(frame: RpcBtwDeltaFrame) => void>();
+	#btwRecordListeners = new Set<(record: BtwHistoryRecord) => void>();
 	#promptResultListeners = new Set<RpcPromptResultListener>();
 	#sessionSettledListeners = new Set<RpcSessionSettledListener>();
+	#liveListeners = new Set<RpcLiveListener>();
 	/** `promptAndWait` completions keyed by request id; registered before the prompt is sent. */
 	#promptResultWaiters = new Map<string, (result: RpcPromptResultFrame) => void>();
+	/** Same-id failures that arrive after the success ack removed the pending request. */
+	#promptErrorWaiters = new Map<string, (error: Error) => void>();
 	#pendingRequests: Map<string, { resolve: (response: RpcResponse) => void; reject: (error: Error) => void }> =
 		new Map();
 	#customTools: RpcClientCustomTool[] = [];
@@ -502,7 +540,11 @@ export class RpcClient {
 
 		const error = new Error("Client stopped");
 		const child = this.#process;
-		child.kill(undefined, this.options.terminationGraceMs);
+		try {
+			child.kill(undefined, this.options.terminationGraceMs);
+		} catch {
+			// The process may already have exited; client state below must still be cleared.
+		}
 		this.#abortController.abort(error);
 		this.#process = null;
 		for (const request of this.#pendingRequests.values()) request.reject(error);
@@ -591,6 +633,18 @@ export class RpcClient {
 		return () => this.#availableCommandsUpdateListeners.delete(listener);
 	}
 
+	/** Subscribe to `btw_delta` frames: text appended to the running side question's answer. */
+	onBtwDelta(listener: (frame: RpcBtwDeltaFrame) => void): () => void {
+		this.#btwDeltaListeners.add(listener);
+		return () => this.#btwDeltaListeners.delete(listener);
+	}
+
+	/** Subscribe to `btw_record` frames: a side question's full record on every lifecycle change. */
+	onBtwRecord(listener: (record: BtwHistoryRecord) => void): () => void {
+		this.#btwRecordListeners.add(listener);
+		return () => this.#btwRecordListeners.delete(listener);
+	}
+
 	/** Subscribe to `prompt_result` frames: the terminal outcome of each prompt, correlated by request id. */
 	onPromptResult(listener: RpcPromptResultListener): () => void {
 		this.#promptResultListeners.add(listener);
@@ -607,6 +661,14 @@ export class RpcClient {
 		this.#sessionSettledListeners.add(listener);
 		return () => {
 			this.#sessionSettledListeners.delete(listener);
+		};
+	}
+
+	/** Subscribe to live voice frames: `live_phase`, `live_levels`, `live_transcript`, `live_end`. */
+	onLive(listener: RpcLiveListener): () => void {
+		this.#liveListeners.add(listener);
+		return () => {
+			this.#liveListeners.delete(listener);
 		};
 	}
 
@@ -656,8 +718,9 @@ export class RpcClient {
 
 	/**
 	 * Remove the first matching user message and its companions from one pending queue.
+	 * A removed message's images are returned for restoring it to an editor.
 	 */
-	async removeQueuedMessage(message: string, queue: "steering" | "followUp"): Promise<{ removed: boolean }> {
+	async removeQueuedMessage(message: string, queue: "steering" | "followUp"): Promise<RpcRemoveQueuedMessageResult> {
 		const response = await this.#send({ type: "remove_queued_message", message, queue });
 		return this.#getData(response);
 	}
@@ -686,11 +749,22 @@ export class RpcClient {
 	}
 
 	/**
-	 * Continue the newest session in `sessionDir`, or start a fresh one there.
-	 * Lets a pre-spawned process bind to a host-keyed conversation.
+	 * Withdraw queued user steering/follow-up messages, then abort (the TUI Esc path).
+	 * Returns the withdrawn messages so the caller can restore them to its editor.
 	 */
-	async openSession(sessionDir: string): Promise<RpcOpenSessionResult> {
-		const response = await this.#send({ type: "open_session", sessionDir });
+	async abortAndRestoreQueue(): Promise<RpcAbortAndRestoreQueueResult> {
+		const response = await this.#send({ type: "abort_and_restore_queue" });
+		return this.#getData(response);
+	}
+
+	/**
+	 * Continue the newest session in `sessionDir`, or start a fresh one there.
+	 * Lets a pre-spawned process bind to a host-keyed conversation. With `model`,
+	 * the session uses it instead of its saved model; otherwise a saved model that
+	 * cannot be restored rejects with `Could not restore model <provider/id>`.
+	 */
+	async openSession(sessionDir: string, model?: { provider: string; modelId: string }): Promise<RpcOpenSessionResult> {
+		const response = await this.#send({ type: "open_session", sessionDir, ...model });
 		return this.#getData(response);
 	}
 
@@ -723,6 +797,9 @@ export class RpcClient {
 			...state,
 			fastModeEnabled: state.fastModeEnabled === true,
 			fastModeActive: state.fastModeActive === true,
+			slowModeSupported: state.slowModeSupported === true,
+			slowModeEnabled: state.slowModeEnabled === true,
+			goal: state.goal ?? null,
 			tokensPerSecond:
 				typeof state.tokensPerSecond === "number" && Number.isFinite(state.tokensPerSecond)
 					? state.tokensPerSecond
@@ -735,6 +812,56 @@ export class RpcClient {
 	 */
 	async setFastMode(enabled: boolean): Promise<{ enabled: boolean; active: boolean }> {
 		const response = await this.#send({ type: "set_fast_mode", enabled });
+		return this.#getData(response);
+	}
+
+	/**
+	 * Enable or disable `/slow` for the active model: the flex tier for this
+	 * session on OpenAI/Google, or the persisted Claude low-priority setting
+	 * (`providers.anthropic.slowMode`) on Anthropic.
+	 */
+	async setSlowMode(enabled: boolean): Promise<boolean> {
+		const response = await this.#send({ type: "set_slow_mode", enabled });
+		return this.#getData<{ enabled: boolean }>(response).enabled;
+	}
+
+	/**
+	 * Read or change goal mode. `get` never mutates or starts a turn; `create`/`resume`
+	 * start a turn only when the server enables `goal.continuationModes: ["rpc"]`.
+	 */
+	async goal(op: RpcGoalOp, options?: { objective?: string; tokenBudget?: number }): Promise<RpcGoalResult> {
+		const response = await this.#send({
+			type: "goal",
+			op,
+			objective: options?.objective,
+			token_budget: options?.tokenBudget,
+		});
+		return this.#getData(response);
+	}
+
+	/**
+	 * Start a GPT live voice session bound to this session; resolves once it is connected
+	 * and recording. `instructions` replaces the bundled live prompt (Handlebars:
+	 * `{{username}}`, `{{firstName}}`). Frames arrive through {@link onLive}.
+	 */
+	async liveStart(options?: { voice?: string; instructions?: string }): Promise<{ voice: string }> {
+		const response = await this.#send({
+			type: "live_start",
+			voice: options?.voice,
+			instructions: options?.instructions,
+		});
+		return this.#getData(response);
+	}
+
+	/** Stop the live voice session, if any; resolves once it has stopped. */
+	async liveStop(): Promise<void> {
+		const response = await this.#send({ type: "live_stop" });
+		this.#getData(response);
+	}
+
+	/** Set microphone mute, or toggle it when `muted` is omitted. Fails without an active session. */
+	async liveMute(muted?: boolean): Promise<{ muted: boolean }> {
+		const response = await this.#send({ type: "live_mute", muted });
 		return this.#getData(response);
 	}
 
@@ -944,6 +1071,27 @@ export class RpcClient {
 	}
 
 	/**
+	 * Ask a side question (`/btw`), or a follow-up in topic `recordId`. Resolves with the
+	 * running record; the answer streams via {@link onBtwDelta} and {@link onBtwRecord}.
+	 */
+	async btw(question: string, recordId?: string): Promise<BtwHistoryRecord> {
+		const response = await this.#send({ type: "btw", question, ...(recordId === undefined ? {} : { recordId }) });
+		return this.#getData<{ record: BtwHistoryRecord }>(response).record;
+	}
+
+	/** Cancel the running side question (only if it is `recordId`, when given). */
+	async cancelBtw(recordId?: string): Promise<boolean> {
+		const response = await this.#send({ type: "btw_cancel", ...(recordId === undefined ? {} : { recordId }) });
+		return this.#getData<{ cancelled: boolean }>(response).cancelled;
+	}
+
+	/** This session's side questions, newest first. */
+	async getBtwHistory(): Promise<readonly BtwHistoryRecord[]> {
+		const response = await this.#send({ type: "get_btw_history" });
+		return this.#getData<{ records: readonly BtwHistoryRecord[] }>(response).records;
+	}
+
+	/**
 	 * Summarize the session into a handoff document and compact it in place.
 	 */
 	async handoff(customInstructions?: string): Promise<RpcHandoffResult | null> {
@@ -960,11 +1108,14 @@ export class RpcClient {
 	}
 
 	/**
-	 * Switch to a different session file.
+	 * Switch to a different session file, optionally with `model` instead of its saved one.
 	 * @returns Object with `cancelled: true` if an extension cancelled the switch
 	 */
-	async switchSession(sessionPath: string): Promise<{ cancelled: boolean }> {
-		const response = await this.#send({ type: "switch_session", sessionPath });
+	async switchSession(
+		sessionPath: string,
+		model?: { provider: string; modelId: string },
+	): Promise<{ cancelled: boolean }> {
+		const response = await this.#send({ type: "switch_session", sessionPath, ...model });
 		return this.#getData(response);
 	}
 
@@ -974,6 +1125,16 @@ export class RpcClient {
 	 */
 	async branch(entryId: string): Promise<{ text: string; cancelled: boolean }> {
 		const response = await this.#send({ type: "branch", entryId });
+		return this.#getData(response);
+	}
+
+	/**
+	 * Fork into a new session file and switch to it: history up to and including
+	 * `entryId`, or the whole session when omitted.
+	 * @returns Object with `cancelled: true` if an extension cancelled the fork
+	 */
+	async fork(entryId?: string): Promise<{ cancelled: boolean }> {
+		const response = await this.#send({ type: "fork", entryId });
 		return this.#getData(response);
 	}
 
@@ -1094,21 +1255,18 @@ export class RpcClient {
 							return;
 						}
 						if (req.method !== "input" || !onManualCodeInput) return;
-						void Promise.resolve(onManualCodeInput({ title: req.title, placeholder: req.placeholder }))
-							.then(value => {
-								this.#writeFrame({
-									type: "extension_ui_response",
-									id: req.id,
-									value,
-								});
-							})
-							.catch(() => {
-								this.#writeFrame({
-									type: "extension_ui_response",
-									id: req.id,
-									cancelled: true,
-								});
-							});
+						// The prompt can outlive the agent (e.g. a broken stdin pipe stops the client); drop the reply
+						// instead of throwing "Client not started" out of a detached promise chain.
+						void Promise.resolve(onManualCodeInput({ title: req.title, placeholder: req.placeholder })).then(
+							value => {
+								if (this.#process) this.#writeFrame({ type: "extension_ui_response", id: req.id, value });
+							},
+							() => {
+								if (this.#process) {
+									this.#writeFrame({ type: "extension_ui_response", id: req.id, cancelled: true });
+								}
+							},
+						);
 					}
 				: undefined;
 		if (listener) this.#extensionUiListeners.add(listener);
@@ -1118,6 +1276,21 @@ export class RpcClient {
 		} finally {
 			if (listener) this.#extensionUiListeners.delete(listener);
 		}
+	}
+
+	/** List the stored credentials `logout()` can remove for a provider, active first. */
+	async getLogoutAccounts(providerId: string): Promise<LogoutAccount[]> {
+		const response = await this.#send({ type: "get_logout_accounts", providerId });
+		return this.#getData<{ accounts: LogoutAccount[] }>(response).accounts;
+	}
+
+	/**
+	 * Remove one stored credential. Rejects when it is no longer stored.
+	 * `remainingSource` names what still authenticates the provider (another stored credential, env var, config).
+	 */
+	async logout(providerId: string, credentialId: number): Promise<{ remainingSource?: string }> {
+		const response = await this.#send({ type: "logout", providerId, credentialId });
+		return this.#getData<{ remainingSource?: string }>(response);
 	}
 
 	/**
@@ -1229,7 +1402,14 @@ export class RpcClient {
 		const events: AgentEvent[] = [];
 		const { promise, resolve, reject } = Promise.withResolvers<AgentEvent[]>();
 		const unsubscribe = this.onEvent(event => events.push(event));
-		this.#promptResultWaiters.set(id, () => resolve(events));
+		this.#promptResultWaiters.set(id, result => {
+			if (result.status === "error") {
+				reject(new Error(result.error?.message ?? "Prompt failed"));
+				return;
+			}
+			resolve(events);
+		});
+		this.#promptErrorWaiters.set(id, reject);
 		let timeoutId: NodeJS.Timeout | undefined;
 		try {
 			const response = await this.#send({ type: "prompt", message, images }, 30_000, id);
@@ -1243,6 +1423,7 @@ export class RpcClient {
 			unsubscribe();
 			clearTimeout(timeoutId);
 			this.#promptResultWaiters.delete(id);
+			this.#promptErrorWaiters.delete(id);
 		}
 	}
 
@@ -1259,6 +1440,14 @@ export class RpcClient {
 				this.#pendingRequests.delete(id);
 				pending.resolve(data);
 				return;
+			}
+			if (id && data.success === false) {
+				const rejectLate = this.#promptErrorWaiters.get(id);
+				if (rejectLate) {
+					this.#promptErrorWaiters.delete(id);
+					rejectLate(new RpcCommandError(data.error, data.command, data.code));
+					return;
+				}
 			}
 		}
 
@@ -1300,6 +1489,13 @@ export class RpcClient {
 			return;
 		}
 
+		if (isRpcLiveFrame(data)) {
+			for (const listener of this.#liveListeners) {
+				listener(data);
+			}
+			return;
+		}
+
 		if (isRpcSessionSettledFrame(data)) {
 			for (const listener of this.#sessionSettledListeners) {
 				listener();
@@ -1319,6 +1515,16 @@ export class RpcClient {
 			for (const listener of this.#availableCommandsUpdateListeners) {
 				listener(data.commands);
 			}
+			return;
+		}
+
+		if (isRpcBtwDeltaFrame(data)) {
+			for (const listener of this.#btwDeltaListeners) listener(data);
+			return;
+		}
+
+		if (isRpcBtwRecordFrame(data)) {
+			for (const listener of this.#btwRecordListeners) listener(data.record);
 			return;
 		}
 
@@ -1366,13 +1572,20 @@ export class RpcClient {
 			},
 		});
 
-		this.#writeFrame(fullCommand, err => {
+		const fail = (err: Error) => {
 			this.#pendingRequests.delete(id);
 			if (settled) return;
 			settled = true;
 			clearTimeout(timeoutId);
 			reject(err);
-		});
+		};
+		// Settle this promise on a synchronous throw too (e.g. a non-serializable command): the caller only
+		// receives `promise`, so a later rejection routed through `fail` would otherwise be unhandled.
+		try {
+			this.#writeFrame(fullCommand, fail);
+		} catch (err) {
+			fail(err instanceof Error ? err : new Error(String(err)));
+		}
 		return promise;
 	}
 
@@ -1438,14 +1651,23 @@ export class RpcClient {
 		if (!this.#process?.stdin) {
 			throw new Error("Client not started");
 		}
-		const stdin = this.#process.stdin;
-		stdin.write(`${JSON.stringify(frame)}\n`);
-		if (!("flush" in stdin)) return;
-		const flushResult = (stdin as FileSink).flush();
-		if (isPromise(flushResult)) {
-			flushResult.catch((err: Error) => {
-				onError?.(err);
-			});
+		const child = this.#process;
+		const stdin = child.stdin;
+		// Serialize first: a non-serializable frame is the caller's error, not a pipe failure.
+		const line = `${JSON.stringify(frame)}\n`;
+		// A broken stdin pipe is terminal: fail this frame's request, then stop so start() can relaunch.
+		const failed = (err: unknown) => {
+			onError?.(err instanceof Error ? err : new Error(String(err)));
+			if (this.#process === child) void this.stop();
+		};
+		try {
+			const write = stdin.write(line);
+			if (isPromise(write)) write.catch(failed);
+			if (!("flush" in stdin)) return;
+			const flushResult = (stdin as FileSink).flush();
+			if (isPromise(flushResult)) flushResult.catch(failed);
+		} catch (err) {
+			failed(err);
 		}
 	}
 

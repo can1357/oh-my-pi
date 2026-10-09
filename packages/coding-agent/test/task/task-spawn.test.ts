@@ -15,7 +15,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import { type AsyncJob, AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async/job-manager";
-import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { createAgentsHubDeps } from "@oh-my-pi/pi-coding-agent/modes/agents-hub-deps";
 import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
@@ -29,7 +28,8 @@ import type { AgentProgress, SingleResult, TaskParams } from "@oh-my-pi/pi-tui/t
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { snapshotJobs } from "@oh-my-pi/pi-coding-agent/async/job-control";
 import { cfgTaskAgentModelOverrides, cfgTaskMaxConcurrency } from "@oh-my-pi/pi-coding-agent/task/settings";
-import { createInMemoryAuthStorage } from "../helpers/agent-session-setup";
+import { createTaskModelFixture, type TaskModelFixture } from "../helpers/model-fixtures";
+import { resolveRoleRoute } from "@oh-my-pi/pi-coding-agent/task/role-routing";
 
 const taskAgent: AgentDefinition = {
 	name: "task",
@@ -38,11 +38,21 @@ const taskAgent: AgentDefinition = {
 	source: "bundled",
 };
 
+const modelFixtures: TaskModelFixture[] = [];
+const pendingGates = new Set<Deferred>();
+let cleaningUp = false;
+
 function createSession(options: { manager?: AsyncJobManager; settings?: Record<string, unknown> }): ToolSession {
+	const settings = Settings.isolated(options.settings ?? {});
+	const fixture = createTaskModelFixture(settings);
+	modelFixtures.push(fixture);
 	return {
 		cwd: "/tmp",
 		hasUI: false,
-		settings: Settings.isolated(options.settings ?? {}),
+		settings,
+		modelRegistry: fixture.modelRegistry,
+		getActiveModel: fixture.getActiveModel,
+		getActiveModelString: fixture.getActiveModelString,
 		getSessionFile: () => null,
 		getSessionSpawns: () => "*",
 		asyncJobManager: options.manager,
@@ -85,7 +95,16 @@ interface Deferred {
 
 function deferred(): Deferred {
 	const { promise, resolve } = Promise.withResolvers<void>();
-	return { promise, resolve };
+	const gate: Deferred = {
+		promise,
+		resolve: () => {
+			pendingGates.delete(gate);
+			resolve();
+		},
+	};
+	pendingGates.add(gate);
+	if (cleaningUp) gate.resolve();
+	return gate;
 }
 
 async function pollUntil(predicate: () => boolean, timeoutMs = 2000): Promise<void> {
@@ -106,22 +125,28 @@ describe("task spawn routing", () => {
 	}
 
 	beforeEach(() => {
+		cleaningUp = false;
 		AgentRegistry.resetGlobalForTests();
 		AgentLifecycleManager.resetGlobalForTests();
 	});
 
 	afterEach(async () => {
-		vi.restoreAllMocks();
+		cleaningUp = true;
+		for (const gate of pendingGates) gate.resolve();
+		await Promise.all(managers.flatMap(manager => manager.getAllJobs().map(job => job.promise)));
 		for (const manager of managers.splice(0)) {
 			await manager.dispose({ timeoutMs: 1000 });
 		}
+		await AgentLifecycleManager.global().dispose();
+		vi.restoreAllMocks();
 		AgentLifecycleManager.resetGlobalForTests();
 		AgentRegistry.resetGlobalForTests();
+		for (const fixture of modelFixtures.splice(0)) fixture.close();
 	});
 
 	it("returns immediately on spawn and delivers the follow-up hint when the job completes", async () => {
 		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({
-			agents: [{ ...taskAgent, model: ["anthropic/claude-sonnet-4"] }],
+			agents: [{ ...taskAgent, model: ["routing-test/primary"] }],
 			projectAgentsDir: null,
 		});
 		const gate = deferred();
@@ -132,7 +157,7 @@ describe("task spawn routing", () => {
 
 		const manager = createManager();
 		const tool = await TaskTool.create(
-			createSession({ manager, settings: { "task.agentModelOverrides": { task: "openai/gpt-4.1-mini" } } }),
+			createSession({ manager, settings: { "task.agentModelOverrides": { task: "routing-test/fallback" } } }),
 		);
 
 		const result = await tool.execute("tc-spawn", {
@@ -157,50 +182,38 @@ describe("task spawn routing", () => {
 		expect(job!.status).toBe("completed");
 		expect(job!.resultText).toContain("history://Spawnling");
 		expect(runSpy).toHaveBeenCalledTimes(1);
-		expect(runSpy.mock.calls[0]?.[0].modelOverride).toEqual(["openai/gpt-4.1-mini"]);
 	});
 
-	it("uses the persisted /agents model after replacing a session-only task selection", async () => {
-		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({
-			agents: [{ ...taskAgent, model: ["@task"] }],
-			projectAgentsDir: null,
-		});
-		const runSpy = vi
-			.spyOn(executorModule, "runSubprocess")
-			.mockImplementation(async options => makeResult(options.id ?? "?"));
+	it("uses the current /agents model for each newly admitted worker", async () => {
+		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({ agents: [taskAgent], projectAgentsDir: null });
 		const manager = createManager();
 		const session = createSession({ manager });
-		const auth = createInMemoryAuthStorage();
-		try {
-			const deps = createAgentsHubDeps(session.cwd, session.settings, new ModelRegistry(auth), () => ({
-				explicit: [],
-				configured: [],
-				configuredLevel: "user",
-				mode: "explicit-only",
-			}));
-			const tool = await TaskTool.create(session);
-
-			cfgTaskAgentModelOverrides.override(session.settings, { task: "anthropic/claude-opus-5" });
-			const first = await tool.execute("tc-old", { agent: "task", name: "Old", task: "First task" } as TaskParams);
-			const firstJob = manager.getJob(first.details?.async?.jobId ?? "");
-			if (!firstJob) throw new Error("First task did not spawn");
-			await firstJob.promise;
-			deps.setAgentOverride("model", "task", "anthropic/claude-opus-5-5");
-			await tool.execute("tc-new", { agent: "task", name: "New", task: "Second task" } as TaskParams);
-			await Promise.all(manager.getAllJobs().map(job => job.promise));
-
-			expect(runSpy.mock.calls.map(([options]) => options.modelOverride)).toEqual([
-				["anthropic/claude-opus-5"],
-				["anthropic/claude-opus-5-5"],
-			]);
-		} finally {
-			auth.close();
-		}
+		const selected: string[] = [];
+		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+			selected.push(resolveRoleRoute(options.roleRoute!, session.modelRegistry).selector);
+			return makeResult(options.id);
+		});
+		const deps = createAgentsHubDeps(session.cwd, session.settings, session.modelRegistry!, () => ({
+			explicit: [],
+			configured: [],
+			configuredLevel: "user",
+			mode: "explicit-only",
+		}));
+		const tool = await TaskTool.create(session);
+		cfgTaskAgentModelOverrides.override(session.settings, { task: "routing-test/primary:low" });
+		const first = await tool.execute("tc-old", { agent: "task", name: "Old", task: "First task" } as TaskParams);
+		const firstJob = manager.getJob(first.details?.async?.jobId ?? "");
+		if (!firstJob) throw new Error("First task did not spawn");
+		await firstJob.promise;
+		deps.setAgentOverride("model", "task", "routing-test/fallback:high");
+		await tool.execute("tc-new", { agent: "task", name: "New", task: "Second task" } as TaskParams);
+		await Promise.all(manager.getAllJobs().map(job => job.promise));
+		expect(selected).toEqual(["routing-test/primary:low", "routing-test/fallback:high"]);
 	});
 
 	it("fires before_subagent_spawn once per child even though the task preflight resolves policy first", async () => {
 		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({
-			agents: [{ ...taskAgent, model: ["anthropic/claude-sonnet-4"] }],
+			agents: [{ ...taskAgent, model: ["routing-test/primary", "routing-test/fallback"] }],
 			projectAgentsDir: null,
 		});
 		const runSpy = vi
@@ -211,7 +224,7 @@ describe("task spawn routing", () => {
 		const signals: Array<AbortSignal | undefined> = [];
 		session.emitBeforeSubagentSpawn = async (_event, signal) => {
 			signals.push(signal);
-			return { model: `openai/gpt-4.1-mini-${signals.length}`, note: `pool ${signals.length}` };
+			return { model: "routing-test/fallback:high", note: `pool ${signals.length}` };
 		};
 		const tool = await TaskTool.create(session);
 
@@ -220,8 +233,10 @@ describe("task spawn routing", () => {
 
 		expect(signals).toHaveLength(1);
 		expect(signals[0]).toBeInstanceOf(AbortSignal);
-		expect(runSpy.mock.calls[0]?.[0].modelOverride).toEqual(["openai/gpt-4.1-mini-1"]);
-		expect(runSpy.mock.calls[0]?.[0].modelRoute).toBe("pool 1");
+		expect(resolveRoleRoute(runSpy.mock.calls[0]![0].roleRoute!, session.modelRegistry)).toMatchObject({
+			selector: "routing-test/fallback:high",
+			fixedEffort: true,
+		});
 	});
 
 	for (const { label, runnerOverrides, expectRetained } of [
@@ -245,17 +260,11 @@ describe("task spawn routing", () => {
 	]) {
 		it(label, async () => {
 			vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({
-				agents: [{ ...taskAgent, model: ["anthropic/claude-sonnet-4"] }],
+				agents: [{ ...taskAgent, model: ["routing-test/primary"] }],
 				projectAgentsDir: null,
 			});
 			const repoRoot = "/repo-root";
-			vi.spyOn(isolationRunner, "prepareIsolationContext").mockResolvedValue({
-				repoRoot,
-				baseline: {
-					root: { repoRoot, headCommit: "HEAD", staged: "", unstaged: "", untracked: [], untrackedPatch: "" },
-					nested: [],
-				},
-			});
+			vi.spyOn(isolationRunner, "prepareIsolationContext").mockResolvedValue({ repoRoot });
 			vi.spyOn(isolationRunner, "runIsolatedSubprocess").mockImplementation(async opts => ({
 				...makeResult(opts.agentId),
 				isolated: true,
@@ -927,15 +936,9 @@ describe("task spawn routing", () => {
 		});
 
 		const manager = createManager();
-		const settings = Settings.isolated({ "task.maxConcurrency": 4 });
-		const tool = await TaskTool.create({
-			cwd: "/tmp",
-			hasUI: false,
-			settings,
-			getSessionFile: () => null,
-			getSessionSpawns: () => "*",
-			asyncJobManager: manager,
-		} as unknown as ToolSession);
+		const session = createSession({ manager, settings: { "task.maxConcurrency": 4 } });
+		const settings = session.settings;
+		const tool = await TaskTool.create(session);
 
 		// Prime the semaphore at the initial high cap.
 		const first = await tool.execute("tc-1", { agent: "task", name: "First", task: "Work A." } as TaskParams);
@@ -978,15 +981,9 @@ describe("task spawn routing", () => {
 		});
 
 		const manager = createManager();
-		const settings = Settings.isolated({ "task.maxConcurrency": 4 });
-		const tool = await TaskTool.create({
-			cwd: "/tmp",
-			hasUI: false,
-			settings,
-			getSessionFile: () => null,
-			getSessionSpawns: () => "*",
-			asyncJobManager: manager,
-		} as unknown as ToolSession);
+		const session = createSession({ manager, settings: { "task.maxConcurrency": 4 } });
+		const settings = session.settings;
+		const tool = await TaskTool.create(session);
 
 		const jobs: AsyncJob[] = [];
 		for (const id of ["First", "Second", "Third", "Fourth", "Fifth"]) {

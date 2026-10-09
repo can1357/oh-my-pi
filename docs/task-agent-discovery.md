@@ -40,18 +40,18 @@ Parsing comes from frontmatter via `parseAgentFields()` (`src/discovery/helpers.
 - backward-compat behavior: if `spawns` missing but `tools` includes `task`, `spawns` becomes `*`
 - `output` is passed through as opaque schema data
 - `read-summarize: false` (normalized to `readSummarize`) disables structural summaries for the subagent's `read` tool — `runSubprocess` applies a `read.summarize.enabled: false` override on the child's isolated settings (`src/task/executor.ts`). `scout` ships with it disabled. When absent, the child inherits the parent's read-summary setting.
-- `model` accepts one selector, CSV, or an array. Entries are tried in order after role aliases are expanded.
-- `thinking-level` / `thinking` selects the agent's configured effort. When `task.enableEffort` (default `false`) exposes it, a task item's coarse `effort` (`lo`, `med`, `hi`) takes precedence at launch. OMP maps that hint to the selected model's lowest, middle, or highest supported effort, then clamps it to `task.maxEffort` (default `max`). The ceiling is carried across retry-fallback model switches. If the selected model has no supported effort at or below the ceiling, the spawn fails; models without a controllable effort surface instead fall back to their normal selector.
+- `model` accepts one selector, CSV, or an array. Entries are tried in order after role aliases are expanded, within the current approved route. Per-call `model` outranks an exact `task.agentModelOverrides[agentName]` entry, which outranks frontmatter.
+- `thinking-level` / `thinking` selects the agent's configured effort, including `auto`. When `task.enableEffort` (default `false`) exposes it, a task item's coarse `effort` (`lo`, `med`, `hi`) overrides that default only for a route without fixed effort. OMP maps the hint to the model's supported ladder and applies `task.maxEffort` (default `max`) to runtime-selected effort across approved retry candidates. A fixed model suffix outranks both the agent default and coarse field, is not clamped or discarded, and fails when unsupported; unsuffixed `@default` instead inherits the actual parent's concrete effort.
 - `blocking: true` makes the parent wait for that agent even when async task execution is enabled
 - `autoloadSkills` names skills from the parent session to inject before the first child prompt; unknown names are ignored
-- `prewalk: true` starts the subagent on its resolved model and hands off to the default prewalk target (the `smol` role) at its first edit/write, exactly like the session-level `--prewalk`; a string value (e.g. `prewalk: "@smol"` or `prewalk: "openai/gpt-5-mini"`) picks a custom target. The `task.agentPrewalk` settings record (agent name → `"on"` / `"off"` / pattern, configured per agent from the `/agents` hub via its prewalk strip) overrides the frontmatter. Resolution happens in `runSubprocess` (`src/task/executor.ts`). An unavailable target is skipped instead of failing the spawn. A resolved target is skipped only when both its model identity and its effective thinking mode/level match the starting selection after model clamping; a same-model effort downgrade is a real hand-off and still arms and switches at the first edit/write.
+- `prewalk: true` starts the subagent on its resolved model and requests the default prewalk target (the `smol` role) at its first edit/write; a string value (e.g. `prewalk: "@smol"` or `prewalk: "openai/gpt-5-mini"`) picks a custom target. The `task.agentPrewalk` settings record (agent name → `"on"` / `"off"` / pattern, configured per agent from the `/agents` hub via its prewalk strip) overrides frontmatter. Task sessions can hand off only within their current approved route and with fixed effort preserved. An unavailable target or exact model+effort no-op is skipped; a same-model effort change is a real handoff only when the route permits it.
 - `advisor: true` pairs spawned sessions of the agent with an advisor running the model resolved for the `advisor` role; a string value (e.g. `advisor: "deepseek/deepseek-v4-flash"` or `advisor: "@smol:high"`) sets an explicit advisor model pattern (optional `:level` suffix), applied as the spawned session's `modelRoles.advisor`. The `task.agentAdvisor` settings record (agent name → `"on"` / `"off"` / pattern, configured per agent from the `/agents` hub via its advisor strip) overrides the frontmatter. Resolution happens in `runSubprocess` (`src/task/executor.ts`); subagents default to no advisor, and the effective opt-in is persisted in `session_init` so cold revival restores it.
 
 ## Role-backed custom agents
 
 OMP discovers user agents from `~/.omp/agent/agents/*.md` and project agents from `.omp/agents/*.md`.
 
-Give the agent a role alias in frontmatter, then dispatch it by name. For model routing, task dispatch sets only `agent`; it does not set a worker model:
+An agent chooses semantic instructions and allowed tools; its frontmatter can provide a default model role. You can dispatch by agent name alone or independently request an approved `model` without changing the agent's instructions/tools:
 
 `~/.omp/agent/agents/reviewer.md`:
 
@@ -72,7 +72,7 @@ modelRoles:
   review: openai/gpt-5.4:high
 ```
 
-`@review` resolves through `modelRoles.review`. Each `modelRoles.<role>` value stores a concrete model selector and may append a thinking suffix such as `:high` (`src/config/model-resolver.ts`). Changing that mapping affects subsequent task resolutions without editing agent definitions. Task/eval preflight reloads the current global, project, and explicit overlay settings before rediscovering agents, so agent files and their role aliases added during a live session resolve from one refreshed configuration state.
+`@review` resolves through the actual `modelRoles.review` assignment and its approved configured fallbacks; `@review:high` retains that role identity and requests `high` across its chain. Real custom configured roles are supported, not limited to an automatic-classifier roster. Changing a mapping affects subsequent task resolutions without editing agent definitions. Task/eval preflight reloads current global, project, and explicit overlay settings before rediscovering agents, so newly configured roles and agent files resolve from one refreshed state.
 
 With the default batched task schema, supply shared `context` and per-item `task` and `solutionSpace`. `solutionSpace` describes how open-ended the assignment is, rather than its size. Set `agent` only when choosing a non-default agent:
 
@@ -222,20 +222,18 @@ A missing name fails preflight with `Unknown agent "...". Available: ...`; no su
 
 For task dispatch, model precedence is:
 
-1. the call's own `model` selector (task item / flat call, eval `agent(model=…)`, or the first turn of a `workpool(model=…)` worker)
+1. the call's own `model` selector (task item / flat call, eval `agent(model=…)`, or creation of a `workpool(model=…)` worker)
 2. `task.agentModelOverrides[agentName]`
 3. the agent frontmatter's prioritized `model` list
-4. the parent's active model, then its configured/default model fallback
+4. the actual live parent model and its actual effort
 
-Role aliases in any of the first three sources are expanded through `modelRoles`, except `@default`
-(equivalently `*`), which names step 4 itself: it resolves to the parent's active model rather than
-to `modelRoles.default`, so a child asked for `@default` runs whatever its parent switched to. A
-per-call `model` is validated before dispatch: the ambiguous literals `default`/`inherit` (with or
-without a `:level` suffix) are rejected in favor of an explicit `@default`, and a selector that
-expands to nothing or matches no available model fails the spawn naming the selector rather than
-silently falling through to a lower-precedence source.
+Precedence chooses among approved routes, not arbitrary available models. Concrete selections must already be authorized by the current operator's configured roles/fallbacks, the selected agent's frontmatter or exact model override, or the actual live parent. Availability, authentication, enabled/catalog membership, and project recommendations are not permission.
 
-After policy resolution, the `before_subagent_spawn` extension hook runs once for the actual dispatch. It can block the spawn or replace the resolved model patterns; a routing note is carried into progress metadata.
+`@default` names the exact live parent's provider/model, not `modelRoles.default` or a parent-role fallback chain. Unsuffixed `@default` inherits the parent's actual effort; `@default:high` overrides only effort. A requested fixed suffix such as `@review:high` outranks agent thinking defaults and the supported coarse `effort` field. Unsupported fixed effort fails rather than clamping or discarding it. Unqualified routes permit runtime effort selection; configured `auto` remains `auto`.
+
+A per-call `model` accepts one selector or an ordered, non-empty array. Role aliases retain identity and may use their currently configured approved fallback chain; raw literals stay inside the requested candidate closure rather than acquiring another role/default/auth chain. `@inherit`, bare `default`/`inherit` (including suffixed forms), unknown roles, malformed selectors, and unauthorized or unavailable requests fail. Explicit failure stops without dropping `model`, substituting another model, or falling through to settings/frontmatter/parent selection.
+
+After policy resolution, `before_subagent_spawn` runs once for actual dispatch. It may block or narrow the current approved model candidates, never enlarge them or weaken fixed effort; a routing note is carried into progress metadata. Retries and revival remain inside the same candidate closure and revalidate current permission. Workpool follow-ups retain the worker's existing model/effort contract; they are not per-item rerouting.
 
 The `Alt+P` task model pick is session-only; saving a model in `/agents` replaces that runtime selection for the current session and persists the new value for future sessions.
 
@@ -248,14 +246,31 @@ Service-tier precedence is independent of model selection: an exact, case-sensit
 `task.agentServiceTierOverrides[agentName]` entry overrides `tier.subagent`; an absent entry preserves
 the global behavior. `inherit` snapshots the parent session's live per-family tiers (including
 `/fast` changes) for the next spawn. The child session resolves a concrete value against the model
-it finally settles on — after auth fallback and after patterns only the session can resolve, such as
-extension-registered models — and populates only that model's provider family when the family
+it finally settles on — after approved candidate resolution, including models only the child session
+can resolve, such as extension-registered models — and populates only that model's provider family when the family
 supports the value, so same-family retry fallbacks retain the tier and cross-family fallbacks never
 inherit it. The resolved map is persisted with the child's session, even when it is empty, so a
 parked agent revived after a restart keeps its per-agent tier instead of re-deriving
 `tier.subagent`. The entry is looked up by task/eval dispatch only; Vibe workers launched through
 the same executor keep `tier.subagent`. Service tiers are configuration-only; agent frontmatter and
 the task/eval wire formats do not expose a tier field or automatic Fast policy.
+
+Account selection is independent of model and service-tier selection: an exact, case-sensitive
+`task.agentAccountPools[agentName]` entry maps provider ids to OAuth identity keys (the `identityKey`
+values broker [client account pools](./auth-broker-gateway.md#client-account-pools-routing-not-authorization)
+use, such as `email:<address>|org:<id>` for Anthropic; [`omp usage accounts`](./cli-reference.md)
+lists them). For each listed provider the child authenticates
+only with those accounts: ranking, the parent's copied account affinity, restored pins, fallback
+passes, and credential rotation stay inside the pool, and runtime, environment, and stored API keys
+are not used; a `models.yml` `apiKey` for the provider fails the request instead of sending a pooled
+token to that endpoint. When no pooled account can serve, the request fails with `No API key for
+provider: … restricted to its OAuth account pool` instead of borrowing another account; an empty
+list allows no account. Pools do not pick models, so model and retry-fallback policy still decide
+which provider the child calls. The pool covers every key lookup the agent makes, whatever provider
+session id it carries: fresh or reset sessions, advisors, title generation, skill compression, and
+subagents it spawns without their own entry (an entry of their own replaces it). Vibe workers take
+the pool from their first turn, and a parked agent revived in the same process or after a restart
+takes the live entry for its agent name. A custom SDK `getApiKey` resolver bypasses pools.
 
 Runtime output schema precedence is:
 

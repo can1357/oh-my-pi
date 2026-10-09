@@ -30,8 +30,10 @@ pub struct Snapshot {
 	pub text:       Arc<str>,
 	/// Four-character content tag.
 	pub hash:       String,
-	/// Lines displayed from this version, when provenance was recorded.
-	pub seen_lines: Option<BTreeSet<u32>>,
+	/// Lines displayed from this version, when provenance was recorded. Shared
+	/// so lookups hand out snapshots without copying a set that holds one entry
+	/// per displayed line.
+	pub seen_lines: Option<Arc<BTreeSet<u32>>>,
 }
 
 /// Clipboard registers threaded through one patch application.
@@ -184,6 +186,8 @@ impl EditStore {
 	/// Record normalized text under a canonical path and return its tag.
 	pub fn record(&self, path: &Path, text: &str, seen_lines: Option<&[u32]>) -> String {
 		let hash = file_hash(text);
+		// Counted before locking: preview threads share this mutex.
+		let units = text.encode_utf16().count();
 		let mut state = self.inner.lock();
 		state.clock = state.clock.wrapping_add(1);
 		let touched = state.clock;
@@ -213,7 +217,7 @@ impl EditStore {
 			merge_seen(&mut snapshot, seen_lines);
 			history
 				.versions
-				.insert(0, StoredSnapshot { snapshot, units: text.encode_utf16().count() });
+				.insert(0, StoredSnapshot { snapshot, units });
 			history.versions.truncate(max_versions);
 		}
 		let current_units = history.retained_units();
@@ -262,6 +266,31 @@ impl EditStore {
 			.map(|v| v.snapshot.clone())
 	}
 
+	/// Return the current version's tag and refresh path recency.
+	pub fn head_hash(&self, path: &Path) -> Option<String> {
+		let mut state = self.inner.lock();
+		touch(&mut state, path);
+		state
+			.histories
+			.get(path)?
+			.versions
+			.first()
+			.map(|v| v.snapshot.hash.clone())
+	}
+
+	/// Every retained snapshot for a path, newest first.
+	pub fn versions(&self, path: &Path) -> Vec<Snapshot> {
+		let mut state = self.inner.lock();
+		touch(&mut state, path);
+		state.histories.get(path).map_or_else(Vec::new, |history| {
+			history
+				.versions
+				.iter()
+				.map(|version| version.snapshot.clone())
+				.collect()
+		})
+	}
+
 	/// Return the most recent version matching a tag and refresh path recency.
 	pub fn by_hash(&self, path: &Path, hash: &str) -> Option<Snapshot> {
 		let mut state = self.inner.lock();
@@ -273,6 +302,17 @@ impl EditStore {
 			.iter()
 			.find(|v| v.snapshot.hash == hash)
 			.map(|v| v.snapshot.clone())
+	}
+
+	/// Whether a version matching a tag is retained; refreshes path recency
+	/// like [`Self::by_hash`].
+	pub fn has_hash(&self, path: &Path, hash: &str) -> bool {
+		let mut state = self.inner.lock();
+		touch(&mut state, path);
+		state
+			.histories
+			.get(path)
+			.is_some_and(|history| history.versions.iter().any(|v| v.snapshot.hash == hash))
 	}
 
 	/// Return the version with exactly equal text and refresh path recency.
@@ -288,15 +328,15 @@ impl EditStore {
 			.map(|v| v.snapshot.clone())
 	}
 
-	/// Return every retained version matching a tag.
-	pub fn find_by_hash(&self, hash: &str) -> Vec<Snapshot> {
+	/// Path of every retained version matching a tag (one entry per version).
+	pub fn paths_with_hash(&self, hash: &str) -> Vec<PathBuf> {
 		let state = self.inner.lock();
 		state
 			.histories
 			.values()
 			.flat_map(|h| h.versions.iter())
 			.filter(|v| v.snapshot.hash == hash)
-			.map(|v| v.snapshot.clone())
+			.map(|v| v.snapshot.path.clone())
 			.collect()
 	}
 
@@ -371,9 +411,8 @@ impl EditStore {
 
 fn merge_seen(snapshot: &mut Snapshot, lines: Option<&[u32]>) {
 	let Some(lines) = lines else { return };
-	snapshot
-		.seen_lines
-		.get_or_insert_with(BTreeSet::new)
+	// Copies the set only while a lookup still holds the previous version.
+	Arc::make_mut(snapshot.seen_lines.get_or_insert_with(Arc::default))
 		.extend(lines.iter().copied());
 }
 
@@ -465,7 +504,21 @@ mod tests {
 		assert_eq!(store.record(path, "one", Some(&[3])), first);
 		let head = store.head(path).unwrap();
 		assert_eq!(&*head.text, "one");
-		assert_eq!(head.seen_lines.unwrap(), BTreeSet::from([1, 3]));
+		assert_eq!(*head.seen_lines.unwrap(), BTreeSet::from([1, 3]));
+	}
+
+	#[test]
+	fn versions_lists_newest_first() {
+		let store = EditStore::new();
+		let path = Path::new("a.ts");
+		store.record(path, "one", Some(&[1]));
+		store.record(path, "two", Some(&[2]));
+		let texts: Vec<String> = store
+			.versions(path)
+			.iter()
+			.map(|snapshot| snapshot.text.to_string())
+			.collect();
+		assert_eq!(texts, ["two", "one"]);
 	}
 
 	#[test]

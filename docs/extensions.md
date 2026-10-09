@@ -140,6 +140,25 @@ labeling action. `getAllTools()` returns tool schemas and source metadata, while
 
 ### Provider registration
 
+Provider `models` entries and rows returned by `fetchDynamicModels` accept the same `api`/`kind` pairs as `models.yml` (see [Models](./models.md)): a runner API such as `openai-images` implies its kind, so the model reaches the `image` role and `generate_image` instead of registering as chat. A static `models` entry whose `kind` its api cannot serve fails `registerProvider`; such a `fetchDynamicModels` row is dropped with a logged warning.
+
+```ts
+pi.registerProvider("my-gateway", {
+  baseUrl: "https://gateway.example.com/v1",
+  apiKey: "GATEWAY_API_KEY",
+  models: [{
+    id: "gpt-image-2",
+    name: "GPT Image 2",
+    api: "openai-images", // kind: "image" implied
+    reasoning: false,
+    input: ["text"],
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    contextWindow: 128000,
+    maxTokens: 16384,
+  }],
+});
+```
+
 `pi.registerProvider(name, config)` can include an optional `usage` field containing a
 `UsageProvider` imported from `@oh-my-pi/pi-ai`. Its `fetchUsage` implementation receives the
 normalized credential and returns a normalized `UsageReport`; the result is then handled
@@ -244,7 +263,7 @@ export default function (pi: ExtensionAPI) {
 - `deliverAs: "steer"` (default while streaming) — steers the current run
 - `deliverAs: "followUp"` — queued behind the current run while streaming
 - `deliverAs: "nextTurn"` — kept out of the editable pending-message UI; while streaming it waits for the next turn, and when idle without `triggerTurn` it is appended to context/history without starting a turn
-- `deliverAs: "aside"` — injected at the next agent step boundary without interrupting the current tool batch; when idle it normally starts a turn regardless of `triggerTurn`. Plan mode or user-interrupt auto-resume suppression folds it into context instead
+- `deliverAs: "aside"` — injected at the next agent step boundary without interrupting the current tool batch, except that it ends a running interruptible `wait` (the wait returns "Wait interrupted by message." and its job keeps running); when idle it normally starts a turn regardless of `triggerTurn`. Plan mode or user-interrupt auto-resume suppression folds it into context instead
 - `triggerTurn: true` — starts a turn when idle (also honored with `deliverAs: "nextTurn"`: idle prompts immediately; while streaming the queued message schedules an internal continuation)
 
 When idle without `triggerTurn`, ordinary `sendMessage` delivery appends the
@@ -287,7 +306,7 @@ Handlers and tool `execute` receive `ctx` with:
 - `shutdown()`
 - `getSystemPrompt()`
 - `isProjectTrusted()` — always `true`; OMP does not ask for per-directory trust before loading project inputs
-- `agent` — the agent this session runs: `{ kind: "main" | "sub", id, name, depth, parentId? }`. Factories are rebound to every subagent session (task tool, eval `agent()`, `/tan` clones), so a handler can check `ctx.agent.kind === "sub"` or the lowercased agent definition `name` (for example `"explore"`) to act only in subagents. Use `kind`, not `depth`: `depth` counts `task` nesting only, so `/tan` clones are subagents at depth 0 and report `name: "sub"`
+- `agent` — the agent this session runs: `{ kind: "main" | "sub", id, name, depth, parentId? }`. Factories are rebound to every subagent session (task tool, eval `agent()`, `/tan` clones), so a handler can check `ctx.agent.kind === "sub"` or the lowercased agent definition `name` (for example `"explore"`) to act only in subagents. Use `kind`, not `depth`: `depth` counts `task` nesting only, so `/tan` clones are subagents at depth 0 and report `name: "sub"`. An advisor's own tool calls reach the session's `tool_call`/`tool_result` handlers with `{ kind: "sub", id: "advisor", name: "advisor", depth: 0, parentId }`, so `kind === "main"` also excludes advisor activity
 - `runEphemeralTurn(...)` (optional; see below)
 - `memory` (optional structured memory runtime — status/search/save across the configured backend)
 - `setInterval(fn, ms, ...args)` / `setTimeout(fn, ms, ...args)` / `clearTimer(timer)` — managed timers (see below)
@@ -345,7 +364,7 @@ If you use raw `setInterval`/`setTimeout` or detached promises instead, you own 
 
 ### Model selection (`ctx.models`)
 
-`ctx.models` is a read-only facade for picking and comparing models the same way core does:
+`ctx.models` is a read-only facade for querying and resolving model availability, not permission to route a task/eval worker:
 
 - `list()` — authenticated models available this session.
 - `current()` — the live session model (read lazily, so it reflects `/model` switches).
@@ -359,6 +378,13 @@ const contrasting = ctx.models
   .list()
   .find((m) => current && ctx.models.family(m) !== ctx.models.family(current));
 ```
+
+For task/eval workers, `agent` chooses semantic instructions/tools and `model` chooses a routing role/model independently. A concrete selection must already be authorized by current operator roles/fallbacks, the selected agent's frontmatter or exact model override, or the actual live parent. Availability from `list()`/`resolve()`, credentials, enabled/catalog membership, and project recommendations are not permission.
+
+Per-call request → exact `task.agentModelOverrides[agentName]` → agent frontmatter → actual live parent is precedence within approved routes. Actual custom configured chat roles support selectors such as `@review:high`; no automatic-classifier roster restricts them. A role alias retains identity and may use its approved configured chain. Raw literal selectors and ordered arrays stay within the requested candidate closure instead of gaining unrelated role/default/auth chains.
+
+`@default` selects the exact live parent's provider/model plus actual effort, not `modelRoles.default` or a parent-role fallback chain; `@default:high` changes only effort. `@inherit` and bare `default`/`inherit` (also suffixed) are invalid. A requested fixed suffix outranks agent thinking defaults and the supported task coarse `effort` field; unsupported fixed effort fails rather than clamping or discarding it. Unqualified routes permit runtime effort selection; configured `auto` remains `auto`. Invalid, unauthorized, unavailable, or exhausted explicit selections stop without dropping `model` or substituting another source. Retries and revival revalidate current permission within the original candidate closure. Workpool follow-ups retain each worker's model/effort contract, not per-item rerouting. See [Task/eval worker routing](./models.md#taskeval-worker-routing).
+
 
 ## 3) Command context (`ExtensionCommandContext`)
 
@@ -398,6 +424,8 @@ Cancelable pre-events:
 - `session_before_branch` → `{ cancel?: boolean; skipConversationRestore?: boolean }`
 - `session_before_compact` → `{ cancel?: boolean; compaction?: CompactionResult }`
 - `session_before_tree` → `{ cancel?: boolean; summary?: { summary: string; details?: unknown } }`
+
+`session_before_branch` and `session_branch` carry `reason`, which decides what `session_before_branch.entryId` means. For `"branch"` (`branch(entryId)`, `/branch`) it is the user message being rewound: it and everything after it are dropped. For `"fork"` (`AgentSession.fork(entryId)`, RPC `fork` with an `entryId`) and `"btw"` (`/btw` promotion) it is the last entry kept in the new session.
 
 ### Prompt and turn lifecycle
 
@@ -442,6 +470,7 @@ prompt-template expansion, and queue insertion:
 | Submission | `source` |
 |---|---|
 | Main-session Enter or Ctrl+Enter | `"interactive"` |
+| `prompt`, `steer`, `follow_up`, or `abort_and_prompt` in RPC or RPC UI mode | `"rpc"` |
 
 Handlers run in extension/registration order. Returned `text` and `images`
 replacements feed subsequent handlers; omitted fields preserve the current value,
@@ -476,7 +505,7 @@ and `/new`. Commands retain their explicit prefill and session-transition action
 
 ### Subagent lifecycle
 
-- `before_subagent_spawn` → `{ model?: string | string[]; block?: boolean; reason?: string; note?: string }`. Fires in the parent session exactly once per spawned child (`task`, eval `agent()`, workpool workers), at dispatch before the child resolves its model — never during a frontend's validation preflight, so stateful routers (round-robin, quota) advance once per child. The event carries `agent`, `invocationKind`, `modelRole` (the pre-expansion role alias, when any), the expanded `patterns` core would use, and an optional stable `spawnKey`. A returned `model` replaces the spawn's attempt-ordered patterns while keeping the role identity, so the remaining entries become the child's retry fallback chain; handlers run in extension order and the last returned `model` wins, along with its `note`, which the task UI shows as the spawn's routing reason on live, async, and settled rows. `block: true` refuses the spawn with `reason`. Cancelling the spawn releases an awaiting handler (its result is discarded and pending `ctx.ui` dialogs close) instead of holding the spawn until the handler timeout.
+- `before_subagent_spawn` → `{ model?: string | string[]; block?: boolean; reason?: string; note?: string }`. Fires in the parent session exactly once per spawned child (`task`, eval `agent()`, workpool workers), at dispatch before the child resolves its model — never during a frontend's validation preflight. The event carries `agent`, `invocationKind`, `modelRole` (the pre-expansion role alias, when any), the expanded `patterns` core would use, and an optional stable `spawnKey`. A returned `model` may narrow to already-approved candidate occurrences, never add models, change route authority, or weaken fixed effort. Remaining permitted entries form the child's retry candidates; ordinary configured role fallback stays inside that same approved closure. Handlers run in extension order; the last returned selection and its `note` are checked against the prior approved route, not treated as fresh authority. The task UI shows the routing note on live, async, and settled rows. `block: true` refuses the spawn with `reason`. Cancelling the spawn releases an awaiting handler (its result is discarded and pending `ctx.ui` dialogs close) instead of holding the spawn until the handler timeout.
 
 ### Reliability/runtime signals
 

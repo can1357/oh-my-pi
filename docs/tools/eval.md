@@ -115,7 +115,7 @@ The renderer merges call and result inline, syntax-highlights from the declared 
 With `eval.autoBackground.enabled` (default `false`), a cell that outlives `eval.autoBackground.thresholdMs` (default 60000 ms) is converted into a managed async job instead of blocking the turn:
 
 - The tool foreground-waits for `resolveAutoBackgroundWaitMs(thresholdMs, clampedCellTimeoutMs)`: the threshold, clamped down to the cell's own clamped timeout minus a 1 s buffer so a deadline expiry resolves inline rather than backgrounding moments before it fires. Raising `timeout` therefore does not extend foreground execution beyond the threshold. A threshold of `0` backgrounds immediately.
-- On backgrounding, the tool returns the live output tail plus `Backgrounded as job <id>; result will be delivered automatically.`, with `details.async = { state: "running", jobId, type: "eval" }`. The job's completion is delivered later like a backgrounded bash command.
+- On backgrounding, the tool returns the live output tail plus `Backgrounded as job <id> (killed once it has run <n>s in total; …)` — or `(no deadline)` under `timeout: 0` — and the no-polling instruction (`formatBackgroundNotice`), stating the cell's clamped timeout, with `details.async = { state: "running", jobId, type: "eval" }`. The deadline is the cell's runtime budget, counted from cell start (including the foreground wait) and paused across `agent()`/tool bridge calls, so it is not a wall-clock time left. The job's completion is delivered later like a backgrounded bash command.
 - A queued user/peer message (steer) arriving mid-wait backgrounds the cell immediately ("Backgrounded early to handle an incoming message; the cell keeps running.").
 - At the async-job manager's running-job capacity the tool falls through to ordinary foreground execution instead of failing.
 - A failed, cancelled, or timed-out cell is reported as a failed background job (an errored execution is re-entered into the job manager's failure path), never as a silent success.
@@ -208,7 +208,7 @@ Registers one background subagent job and returns an `AgentHandle` immediately:
 
 - JS: `await agent(prompt, { agent?, label?, schema?, schemaMode?, isolated?, apply?, merge?, tools?, model? })`; Python uses keyword arguments (`schema_mode`).
 - Preflight (spawn policy, unknown agent, `task.maxRecursionDepth`, hard turn budget, plan-mode isolation controls, unknown `tools` names) fails handle allocation; Python raises directly, JS's pending handle rejects when awaited/used. Execution failures surface from `.wait()`.
-- `agent` defaults from the current spawn policy. `model` overrides the selected agent's model for this call only (`provider/model[:level]` or a role alias); it outranks `task.agentModelOverrides` and the agent frontmatter, rejects the ambiguous literals `default`/`inherit` with or without a `:level` suffix (use `@default`), and fails the call when it matches no available model. `schema` overrides agent/session schemas; `schemaMode`/`schema_mode` chooses `permissive` or `strict`.
+- `agent` defaults from the current spawn policy and selects semantic instructions/tools; `model` selects the routing role/model independently for this call. Model precedence within approved routes is request → exact `task.agentModelOverrides[agentName]` → agent frontmatter → actual live parent. `schema` overrides agent/session schemas; `schemaMode`/`schema_mode` chooses `permissive` or `strict`.
 - `isolated` requests isolation. `apply` controls whether captured changes are integrated; `merge=false` selects patch mode while the normal setting controls branch mode.
 - `tools`: names of kernel-defined tools (see below) the child may call; each call executes inside the caller's kernel.
 - Handle surface: `.id`, `.agent`, `.handle` (`agent://<id>`), `.status`, `.done()`, `.wait(timeout?)`, `.send(message)`, `.cancel()`, `.output()`. Python handles are awaitable; JavaScript uses `await handle.wait()`.
@@ -216,21 +216,27 @@ Registers one background subagent job and returns an `AgentHandle` immediately:
 
 #### Per-call model selection
 
-Both `agent()` and `workpool()` accept a model selector or an ordered, non-empty array. Examples:
+Both `agent()` and `workpool()` pass a raw selector or ordered, non-empty array to the shared task policy without stripping suffixes or expanding it in the kernel. Use concrete `provider/model[:level]` selectors, actual configured chat roles such as `@review:high`, or `@default[:level]`. Assuming `review` and `smol` are configured approved roles:
 
 ```js
-const review = await agent("Review the change", { model: ["@slow", "@default"] });
+const review = await agent("Review the change", { agent: "reviewer", model: ["@review:high", "@default"] });
 const pool = await workpool("scout", { name: "research", model: ["@smol", "@default"] });
 ```
 
 ```python
-review = agent("Review the change", model=["@slow", "@default"])
+review = agent("Review the change", agent="reviewer", model=["@review:high", "@default"])
 pool = workpool("scout", name="research", model=["@smol", "@default"])
 ```
 
-The shared resolver retains role identity and tries the requested candidates before parent-auth fallback. Empty arrays, blank elements, comma-only selectors and invalid thinking suffixes fail preflight. Literal model IDs with colon suffixes retain their identity. These selectors are ordered preferences, not a closed model allowlist: configured runtime fallbacks still apply.
+A concrete model must be authorized by the current operator's configured roles/fallbacks, the selected agent's frontmatter or exact model override, or the actual live parent. Availability, authentication, enabled/catalog membership, and project recommendations do not grant permission. Choosing a role changes neither the semantic agent nor its allowed tools. Actual custom configured roles are valid; there is no automatic-classifier roster allowlist.
 
-A workpool applies its raw selector to each worker's **first turn**. Follow-up turns reuse that worker's existing session and do not receive a new selector. With `eval.workpool.freshAgents=true`, every new worker receives the pool selector. Different pools keep independent selections.
+Requested arrays remain inside their candidate closure. Role aliases retain identity and may use their currently configured approved fallback chains; raw literal entries do not gain an unrelated role/default/auth chain. Hooks may narrow, not enlarge, this closure; retries and revival revalidate it against current configuration. An invalid, unauthorized, unavailable, or exhausted explicit selection stops without dropping `model` or substituting a lower-precedence source.
+
+`@default` is the exact live parent's provider/model plus its actual effort, not `modelRoles.default` or a parent-role fallback chain. `@default:high` changes only effort. `@review:high` fixes `high` across that role's approved chain; a requested suffix outranks the agent default and task's supported coarse `effort` field. Unsupported fixed effort fails rather than clamping or discarding it. Unqualified routes permit runtime effort selection; configured `auto` remains `auto`.
+
+Empty arrays, blank elements, comma-only selectors, unknown roles, `@inherit`, bare `default`/`inherit` (also with suffixes), and invalid thinking suffixes fail preflight. Registered literal model IDs ending in a recognized suffix retain their identity.
+
+A workpool applies its raw selector when **creating each worker**. Follow-up turns retain that worker's model/effort contract and existing session; pushed items do not reroute it. With `eval.workpool.freshAgents=true`, every new worker receives the pool selector. Different pools keep independent selections.
 
 ### `wait()`
 
@@ -270,7 +276,7 @@ With `eval.tools.enabled` (default on), a cell can turn a function into a tool o
 - Output sink default window: 50 KiB (`DEFAULT_MAX_BYTES`); live tail: 100 KiB; truncation helpers cap at 3000 lines.
 - Each model-visible JSON display preview is capped at 8000 UTF-8 bytes. Larger values spill in full to the output artifact and retain bounded preview metadata in `jsonOutputs`; if persistence is unavailable or fails, `jsonOutputs` retains the full value.
 - Transcript preview defaults to 10 lines.
-- Eval subagent spawning obeys `task.maxRecursionDepth` (default `2`; negative values allow unlimited depth). Subagent/workpool fan-out uses `task.maxConcurrency` (default 32, `0` unbounded); completion/judgment requests have their separate fixed 32-request cap.
+- Eval subagent spawning obeys `task.maxRecursionDepth` (default `2`; negative values allow unlimited depth). Each `workpool()` caps its own live workers at `task.maxConcurrency` (default 32, `0` unbounded). `agent()` takes no `task.maxConcurrency` slot: every handle is a running background job counted against the session-wide `async.maxJobs` cap (default and maximum 100), which it shares with every other background job in the session, including async `bash`, async `task` spawns, `workpool()` pools and nested subagents' jobs. `agent()` fails with `Background job limit reached` once that cap is full. Completion/judgment requests have their own fixed 32-request cap.
 - Malformed params are schema errors; unavailable/disabled backends and missing session are `ToolError`s.
 - Runtime exceptions become backend output with nonzero exit. Interactive stdin is an error. Output truncation does not fail the call.
 - A dead retained managed kernel may be replaced and the invocation retried once by its executor.

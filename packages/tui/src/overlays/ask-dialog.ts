@@ -212,11 +212,7 @@ function questionTabLabel(question: ExtensionAskDialogQuestion, index: number): 
 }
 
 function wrapQuestionTitle(question: ExtensionAskDialogQuestion, width: number): string[] {
-	const mdTheme = getMarkdownTheme();
-	const questionText = renderInlineMarkdown(replaceTabs(sanitizeCarriageReturns(question.question)), mdTheme, t =>
-		theme.fg("text", t),
-	);
-	return wrapTextWithAnsi(questionText, Math.max(1, width));
+	return renderPreviewContent(sanitizeCarriageReturns(question.question), Math.max(1, width), "text");
 }
 
 function renderQuestionTitle(question: ExtensionAskDialogQuestion, width: number, maxRows = MAX_HEADER_ROWS): string[] {
@@ -299,10 +295,10 @@ function splitPreviewSegments(preview: string): PreviewSegment[] {
 	return segments;
 }
 
-function renderPreviewContent(preview: string, width: number): string[] {
+function renderPreviewContent(preview: string, width: number, textColor: "muted" | "text" = "muted"): string[] {
 	const out: string[] = [];
 	const mdTheme = getMarkdownTheme();
-	const accentStyle = { color: (text: string) => theme.fg("muted", text) };
+	const accentStyle = { color: (text: string) => theme.fg(textColor, text) };
 	for (const segment of splitPreviewSegments(preview)) {
 		if (segment.kind === "code") {
 			const highlighted = highlightCode(segment.text, segment.language);
@@ -528,6 +524,7 @@ export function normalizeDialogQuestions(questions: ExtensionAskDialogQuestion[]
 }
 
 export class AskDialogComponent implements Component {
+	readonly retireDisplacedTranscript = true;
 	#states: QuestionState[];
 	#activeTabIndex = 0;
 	#submitScrollOffset = 0;
@@ -714,8 +711,11 @@ export class AskDialogComponent implements Component {
 	}
 
 	/**
-	 * A bottom-anchored glass sheet over the composer (the `overlay` hoists into
-	 * the terminal's layer; the dialog's own slot in the dock stays empty).
+	 * In the dock, in the composer's place and framed as the composer is: a
+	 * `col` with the prompt editor's root role (`omp.editor`), so the terminal
+	 * gives it the composer's insets and spacing. Not a modal `overlay` sheet:
+	 * one anchored at the bottom covered the transcript rows that explain the
+	 * question and blocked scrolling until the question was answered.
 	 */
 	describe(cx: DescribeContext): NativeNode {
 		const inputGuard = this.options.inputGuard;
@@ -731,13 +731,7 @@ export class AskDialogComponent implements Component {
 		if (this.#isSubmitTab()) this.#describeSubmitBody(children);
 		else this.#describeQuestionBody(children);
 		children.push(this.#describeActions(blocked));
-		const sheet = node(
-			"overlay",
-			{ role: "omp.overlay.ask", anchor: "bottom", size: "md", modal: true },
-			[col(children, { gap: "md" })],
-			"sheet",
-		);
-		this.#native = col([sheet]);
+		this.#native = col(children, { role: "omp.editor", gap: "md" });
 		this.#nativeBlocked = blocked;
 		return this.#native;
 	}
@@ -1135,7 +1129,7 @@ export class AskDialogComponent implements Component {
 		const action = question?.multi
 			? `${formatKeyHint("space")} toggle · ${enter} ${enterAction}`
 			: `${enter} select · ${formatKeyHint("n")} note`;
-		const tabs = this.#hasSubmitTab() ? ` · ${formatKeyHints(["tab", "left", "right"])}` : "";
+		const tabs = this.#hasSubmitTab() ? ` · ${formatKeyHints(["tab", "left", "right"])} question` : "";
 		const expand = this.#expandHint();
 		if (this.#questionCanPage && indicator) {
 			const pageKeys = editorKeys("tui.select.pageUp", "tui.select.pageDown");

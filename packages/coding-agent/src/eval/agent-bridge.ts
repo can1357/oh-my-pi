@@ -69,7 +69,8 @@ export interface EvalAgentResult {
 	details: {
 		agent: string;
 		id: string;
-		model?: string | string[];
+		/** Host-observed serving selector, not the requested candidate array. */
+		model?: string;
 		structured: boolean;
 		schemaSource?: "caller" | "agent" | "session";
 		schemaMode?: StructuredSubagentSchemaMode;
@@ -92,8 +93,6 @@ function parseAgentArgs(args: unknown): EvalAgentArgs {
 	if (result instanceof type.errors) {
 		throw new ToolError(`agent() received invalid arguments: ${result.summary}`);
 	}
-	// The wire layer owns blank and malformed-array rejection so
-	// the shared preflight's empty-selector carve-out stays internal-only.
 	const selectorProblem = invalidModelSelectorReason(result.model, "agent()");
 	if (selectorProblem) throw new ToolError(selectorProblem);
 	return result;
@@ -147,7 +146,7 @@ async function buildEvalAgentResult(execution: StructuredSubagentResult): Promis
 	const schemaSource = structuredOutput?.source === "none" ? undefined : structuredOutput?.source;
 	const schemaMode = structured ? structuredOutput?.mode : undefined;
 	const schemaStatus = structuredOutput?.status === "unavailable" ? undefined : structuredOutput?.status;
-	const model = result.resolvedModel ?? policy.modelOverride;
+	const model = result.resolvedModel;
 	const nestedPatches = result.nestedPatches?.length ? result.nestedPatches : undefined;
 	const isolationSummary = mergeSummary ? mergeSummary.trim() : undefined;
 	return {

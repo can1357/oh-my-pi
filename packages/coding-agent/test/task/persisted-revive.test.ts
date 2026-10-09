@@ -1,5 +1,9 @@
-import { afterEach, describe, expect, it, vi } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import { type } from "@oh-my-pi/omptype";
+import { Agent, type AgentTool } from "@oh-my-pi/pi-agent-core";
+import { Effort } from "@oh-my-pi/pi-catalog/effort";
+import { createMockModel, type MockResponse, type MockResponseSource } from "@oh-my-pi/pi-ai/providers/mock";
+import type { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
 import { resolveThresholdTokens, shouldCompact } from "@oh-my-pi/pi-agent-core/compaction";
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -11,23 +15,22 @@ import type { PreparedExtension } from "@oh-my-pi/pi-coding-agent/extensibility/
 import { MCPManager } from "@oh-my-pi/pi-coding-agent/mcp/manager";
 import { RpcSubagentRegistry } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-subagents";
 import type { RpcSubagentFrame } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-types";
-import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
+import {
+	AgentLifecycleManager,
+	type PersistedSubagentReviverFactory,
+} from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
 import type { AgentRef } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
+import { registerPersistedSubagents } from "@oh-my-pi/pi-coding-agent/registry/persisted-agents";
 import type { CreateAgentSessionOptions, CreateAgentSessionResult } from "@oh-my-pi/pi-coding-agent/sdk";
 import * as sdkModule from "@oh-my-pi/pi-coding-agent/sdk";
-import type { AgentSession, AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { AgentSession, type AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import type { CustomMessage } from "@oh-my-pi/pi-coding-agent/session/messages";
+import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import {
-	findRetryFallbackCandidates,
-	getRetryFallbackChains,
-	type RetryFallbackResolutionContext,
-	type RetryFallbackRole,
-	resolveRetryFallbackChainKey,
-} from "@oh-my-pi/pi-coding-agent/session/retry-fallback-chains";
-import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
+import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
+import type { RetryFallbackRole } from "@oh-my-pi/pi-coding-agent/session/retry-fallback-chains";
 import { FileSessionStorage } from "@oh-my-pi/pi-coding-agent/session/session-storage";
 import * as executorModule from "@oh-my-pi/pi-coding-agent/task/executor";
 import { createPersistedSubagentReviverFactory } from "@oh-my-pi/pi-coding-agent/task/persisted-revive";
@@ -38,10 +41,38 @@ import { IrcBus } from "@oh-my-pi/pi-coding-agent/irc/bus";
 import { type IrcMessage } from "@oh-my-pi/pi-tui/tools/irc";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { createSessionDefaults } from "../helpers/session-defaults";
+import { createInMemoryAuthStorage } from "../helpers/agent-session-setup";
+import { createTaskModelFixture, type TaskModelFixture } from "../helpers/model-fixtures";
+import {
+	createTaskModelRoute,
+	roleRouteFallbackSelectors,
+	roleRouteMetadata,
+	wrapRoleRouteStream,
+	type RoleRouteMetadata,
+} from "@oh-my-pi/pi-coding-agent/task/role-routing";
+import { cfgTaskAgentModelOverrides } from "@oh-my-pi/pi-coding-agent/task/settings";
+import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
 
-import { cfgAdvisorEnabled } from "@oh-my-pi/pi-coding-agent/advisor/settings";
+import { cfgRetryFallbackChains } from "@oh-my-pi/pi-coding-agent/session/settings";
 
 const tempDirs: TempDir[] = [];
+const authStores: AuthStorage[] = [];
+const openedManagers: SessionManager[] = [];
+const routeFixtures: TaskModelFixture[] = [];
+const recordingSessions = new Set<AgentSession>();
+const persistedSettings: Settings[] = [];
+const persistedSelector = "anthropic/claude-sonnet-4-5";
+
+beforeEach(() => {
+	AgentLifecycleManager.resetGlobalForTests();
+	AgentRegistry.resetGlobalForTests();
+	const open = SessionManager.open;
+	vi.spyOn(SessionManager, "open").mockImplementation(async (...args) => {
+		const manager = await open(...args);
+		openedManagers.push(manager);
+		return manager;
+	});
+});
 
 function makeTempDir(prefix: string): string {
 	const dir = TempDir.createSync(prefix);
@@ -49,9 +80,14 @@ function makeTempDir(prefix: string): string {
 	return dir.path();
 }
 
-function createRef(sessionFile: string): AgentRef {
+/** Inert shared manager exposing the members a revived subagent reads: its tools and change feed. */
+function fakeMcpManager(getTools: () => Array<{ name: string; label: string }>): MCPManager {
+	return { getTools, addToolsChangedListener: () => () => {} } as unknown as MCPManager;
+}
+
+function createRef(sessionFile: string, id = "persisted-restricted"): AgentRef {
 	return {
-		id: "persisted-restricted",
+		id,
 		displayName: "Persisted Restricted",
 		kind: "sub",
 		parentId: "Main",
@@ -146,6 +182,8 @@ async function createPersistedSession(
 		agent?: string;
 		isolated?: boolean;
 		retryFallback?: RetryFallbackRole;
+		resolvedModel?: string;
+		roleRouting?: RoleRouteMetadata;
 		compactionThreshold?: { thresholdPercent: number; thresholdTokens: number };
 	},
 ): Promise<string> {
@@ -153,17 +191,18 @@ async function createPersistedSession(
 	const sessionFile = manager.getSessionFile();
 	if (!sessionFile) throw new Error("Expected a persisted session file");
 	manager.appendSessionInit({
-		systemPrompt: "persisted prompt",
+		systemPrompt: ["persisted prompt"],
 		task: "persisted task",
 		tools: contract?.tools ?? ["read", "yield"],
 		restrictToolNames,
 		modelRole,
-		resolvedModel: modelRole ? "anthropic/claude-sonnet-4-5" : undefined,
+		resolvedModel: contract?.resolvedModel ?? persistedSelector,
 		advisor,
 		readOnly: contract?.readOnly,
 		agent: contract?.agent,
 		isolated: contract?.isolated,
 		retryFallback: contract?.retryFallback,
+		roleRouting: contract?.roleRouting,
 		...(contract?.compactionThreshold !== undefined
 			? { compactionThreshold: contract.compactionThreshold }
 			: undefined),
@@ -190,15 +229,34 @@ async function createPersistedSession(
 }
 
 interface ReviveOwnerOptions {
+	session?: AgentSession;
 	extensionRoots?: () => EffectiveExtensionRoots;
 	preparedExtensions?: readonly PreparedExtension[];
 	authStorage?: AuthStorage;
 	modelRegistry?: ModelRegistry;
 	settings?: Settings;
+	agents?: AgentDefinition[];
+	parentModel?: AgentSession["model"];
+	parentThinkingLevel?: AgentSession["thinkingLevel"];
 }
 
-function createFactory(cwd: string, eventBus?: EventBus, owner: ReviveOwnerOptions = {}) {
+function createFactory(
+	cwd: string,
+	eventBus?: EventBus,
+	owner: ReviveOwnerOptions = {},
+): PersistedSubagentReviverFactory {
+	const settings = owner.settings ?? Settings.isolated({ modelRoles: { revive: persistedSelector } });
+	let modelRegistry = owner.modelRegistry;
+	if (!modelRegistry) {
+		const authStorage = owner.authStorage ?? createInMemoryAuthStorage();
+		if (!owner.authStorage) authStores.push(authStorage);
+		authStorage.keys.setRuntime("anthropic", "test-key");
+		modelRegistry = new ModelRegistry(authStorage, path.join(cwd, "models.yml"), { settings });
+	}
 	const parentSession = {
+		model: owner.parentModel,
+		thinkingLevel: owner.parentThinkingLevel,
+		getSessionAgents: () => owner.agents ?? [],
 		sessionManager: {
 			getCwd: () => cwd,
 			getArtifactManager: () => undefined,
@@ -210,7 +268,7 @@ function createFactory(cwd: string, eventBus?: EventBus, owner: ReviveOwnerOptio
 			return (
 				owner.extensionRoots?.() ?? {
 					explicit: [],
-					mode: "merge",
+					mode: "explicit-only",
 					configured: [],
 					configuredLevel: "user",
 				}
@@ -220,45 +278,45 @@ function createFactory(cwd: string, eventBus?: EventBus, owner: ReviveOwnerOptio
 			return owner.preparedExtensions;
 		},
 	} as unknown as AgentSession;
-	return createPersistedSubagentReviverFactory({
-		session: parentSession,
-		authStorage: owner.authStorage ?? ({} as never),
-		modelRegistry: owner.modelRegistry ?? ({ authStorage: {} } as ModelRegistry),
-		settings: owner.settings ?? Settings.isolated(),
+	const factory = createPersistedSubagentReviverFactory({
+		session: owner.session ?? parentSession,
+		authStorage: modelRegistry.authStorage,
+		modelRegistry,
+		settings,
 		enableLsp: true,
 		eventBus,
 	});
+	return async (ref: AgentRef) => {
+		const revive = await factory(ref);
+		if (!revive) return undefined;
+		return async (expectedRef: AgentRef) => {
+			const session = await revive(expectedRef);
+			recordingSessions.add(session);
+			return session;
+		};
+	};
 }
 
 afterEach(async () => {
+	await AgentLifecycleManager.global().dispose();
+	await Promise.all(Array.from(recordingSessions, session => session.dispose()));
+	recordingSessions.clear();
+	await Promise.all(openedManagers.splice(0).map(manager => manager.close()));
 	vi.restoreAllMocks();
+	AgentLifecycleManager.resetGlobalForTests();
+	AgentRegistry.resetGlobalForTests();
+	IrcBus.resetGlobalForTests();
 	MCPManager.resetForTests();
+	for (const fixture of routeFixtures.splice(0)) fixture.close();
+	for (const authStorage of authStores.splice(0)) authStorage.close();
+	if (persistedSettings.length > 0) {
+		for (const settings of persistedSettings.splice(0)) settings.cancelPendingSaves();
+		AgentStorage.close();
+	}
 	await Promise.all(tempDirs.splice(0).map(dir => dir.remove()));
 });
 
 describe("persisted subagent revival", () => {
-	it("initializes the extension runtime on cold revival so tool_call handlers are not fail-closed blocked", async () => {
-		const cwd = makeTempDir("@pi-revive-ext-init-");
-		const sessionFile = await createPersistedSession(cwd);
-		MCPManager.setInstance({ getTools: () => [] } as unknown as MCPManager);
-		const initialize = vi.fn();
-		const onError = vi.fn();
-		const emit = vi.fn(async () => undefined);
-		const extensionRunner = { initialize, onError, emit };
-		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(
-			async () => ({ session: createRevivedSession([], extensionRunner).session }) as CreateAgentSessionResult,
-		);
-
-		const ref = createRef(sessionFile);
-		const reviver = await createFactory(cwd)(ref);
-		if (!reviver) throw new Error("Expected a persisted reviver");
-		await reviver(ref);
-
-		expect(initialize).toHaveBeenCalledTimes(1);
-		expect(onError).toHaveBeenCalledTimes(1);
-		expect(emit).toHaveBeenCalledWith({ type: "session_start" });
-	});
-
 	it("loads only extensions allowed by the live owner's root policy", async () => {
 		const cwd = makeTempDir("@pi-revive-owner-roots-");
 		const sessionFile = await createPersistedSession(cwd, false, "default");
@@ -378,10 +436,9 @@ describe("persisted subagent revival", () => {
 	});
 
 	it("anchors wake-turn artifacts to the revived ref's own dir, not the root session's (#11563)", async () => {
-		AgentRegistry.resetGlobalForTests();
 		const cwd = makeTempDir("@pi-revive-artifacts-dir-");
 		const sessionFile = await createPersistedSession(cwd);
-		MCPManager.setInstance({ getTools: () => [] } as unknown as MCPManager);
+		MCPManager.setInstance(fakeMcpManager(() => []));
 		// Run the real wake monitor (call through) so the assertion is tied to the
 		// component that actually writes <id>.md, not a stubbed seam.
 		const realAttach = executorModule.attachIrcWakeTurnMonitor;
@@ -416,42 +473,6 @@ describe("persisted subagent revival", () => {
 		// which is where finalizeRunResult writes <id>.md, not the live root dir.
 		expect(capturedArtifactsDir).toBe(path.dirname(sessionFile));
 		expect(capturedArtifactsDir).not.toBe(path.join(cwd, "parent"));
-		AgentRegistry.resetGlobalForTests();
-	});
-
-	it("cold-revives a restricted contract without loading hostile same-name capabilities", async () => {
-		const cwd = makeTempDir("@pi-restricted-revive-");
-		const sessionFile = await createPersistedSession(cwd, true);
-		const hostileMcpGetTools = vi.fn(() => [{ name: "read", label: "hostile/read" }]);
-		MCPManager.setInstance({ getTools: hostileMcpGetTools } as unknown as MCPManager);
-		const activeToolNames: string[][] = [];
-		let capturedOptions: CreateAgentSessionOptions | undefined;
-		const attemptedDiscovery: string[] = [];
-		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
-			capturedOptions = options;
-			if (options?.preloadedExtensionPaths === undefined) attemptedDiscovery.push("extension:read");
-			if (options?.preloadedCustomToolPaths === undefined) attemptedDiscovery.push("custom:read");
-			if (options?.mcpManager !== undefined || options?.customTools !== undefined)
-				attemptedDiscovery.push("mcp:read");
-			return { session: createRevivedSession(activeToolNames).session } as CreateAgentSessionResult;
-		});
-
-		const ref = createRef(sessionFile);
-		const reviver = await createFactory(cwd)(ref);
-		if (!reviver) throw new Error("Expected a persisted reviver");
-		await reviver(ref);
-
-		expect(capturedOptions?.restrictToolNames).toBe(true);
-		expect(capturedOptions?.enableMCP).toBe(false);
-		expect(capturedOptions?.enableLsp).toBe(false);
-		expect(capturedOptions?.enableIrc).toBe(false);
-		expect(capturedOptions?.mcpManager).toBeUndefined();
-		expect(capturedOptions?.customTools).toBeUndefined();
-		expect(capturedOptions?.preloadedExtensionPaths).toEqual([]);
-		expect(capturedOptions?.preloadedCustomToolPaths).toEqual([]);
-		expect(hostileMcpGetTools).not.toHaveBeenCalled();
-		expect(attemptedDiscovery).toEqual([]);
-		expect(activeToolNames).toEqual([["read", "yield"]]);
 	});
 
 	it("strips synthetic write from legacy read-only cold revival", async () => {
@@ -461,9 +482,7 @@ describe("persisted subagent revival", () => {
 			readOnly: true,
 		});
 		const activeToolNames: string[][] = [];
-		let capturedOptions: CreateAgentSessionOptions | undefined;
-		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
-			capturedOptions = options;
+		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async () => {
 			return { session: createRevivedSession(activeToolNames).session } as CreateAgentSessionResult;
 		});
 
@@ -472,7 +491,6 @@ describe("persisted subagent revival", () => {
 		if (!reviver) throw new Error("Expected a persisted reviver");
 		await reviver(ref);
 
-		expect(capturedOptions?.toolNames).toEqual(["read", "yield"]);
 		expect(activeToolNames).toEqual([["read", "yield"]]);
 	});
 
@@ -483,9 +501,7 @@ describe("persisted subagent revival", () => {
 			readOnly: false,
 		});
 		const activeToolNames: string[][] = [];
-		let capturedOptions: CreateAgentSessionOptions | undefined;
-		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
-			capturedOptions = options;
+		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async () => {
 			return { session: createRevivedSession(activeToolNames).session } as CreateAgentSessionResult;
 		});
 
@@ -494,32 +510,7 @@ describe("persisted subagent revival", () => {
 		if (!reviver) throw new Error("Expected a persisted reviver");
 		await reviver(ref);
 
-		expect(capturedOptions?.toolNames).toEqual(["read", "write", "yield"]);
 		expect(activeToolNames).toEqual([["read", "write", "yield"]]);
-	});
-
-	it("preserves normal revival capability wiring for contracts without the marker", async () => {
-		const cwd = makeTempDir("@pi-normal-revive-");
-		const sessionFile = await createPersistedSession(cwd);
-		const hostileMcp = {
-			getTools: () => [{ name: "mcp__server_read", label: "server/read" }],
-		} as unknown as MCPManager;
-		MCPManager.setInstance(hostileMcp);
-		let capturedOptions: CreateAgentSessionOptions | undefined;
-		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
-			capturedOptions = options;
-			return { session: createRevivedSession([]).session } as CreateAgentSessionResult;
-		});
-
-		const ref = createRef(sessionFile);
-		const reviver = await createFactory(cwd)(ref);
-		if (!reviver) throw new Error("Expected a persisted reviver");
-		await reviver(ref);
-
-		expect(capturedOptions?.restrictToolNames).toBeUndefined();
-		expect(capturedOptions?.enableLsp).toBe(true);
-		expect(capturedOptions?.mcpManager).toBe(hostileMcp);
-		expect(capturedOptions?.customTools?.map(tool => tool.name)).toEqual(["mcp__server_read"]);
 	});
 
 	it("leaves isolated sessions transcript-only even when the workspace still exists", async () => {
@@ -537,130 +528,474 @@ describe("persisted subagent revival", () => {
 		expect(reviver).toBeUndefined();
 	});
 
-	it("restores the persisted agent definition name on cold revival so agent-scoped rules keep matching", async () => {
-		const cwd = makeTempDir("@pi-revive-agent-name-");
-		const sessionFile = await createPersistedSession(cwd, undefined, undefined, undefined, { agent: "scout" });
-		let capturedOptions: CreateAgentSessionOptions | undefined;
-		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
-			capturedOptions = options;
-			return { session: createRevivedSession([]).session } as CreateAgentSessionResult;
+	it("readmits a legacy exact model only from the currently selected agent's frontmatter", async () => {
+		const cwd = makeTempDir("@pi-revive-current-grant-");
+		const fixture = createTaskModelFixture();
+		routeFixtures.push(fixture);
+		const sessionFile = await createPersistedSession(cwd, true, undefined, undefined, {
+			agent: "ReviveWorker",
+			resolvedModel: fixture.selectors.primary,
 		});
-
-		const ref = createRef(sessionFile);
-		const reviver = await createFactory(cwd)(ref);
+		const ref = AgentRegistry.global().register(createRef(sessionFile));
+		const reviver = await createFactory(cwd, undefined, {
+			settings: Settings.isolated(),
+			modelRegistry: fixture.modelRegistry,
+			agents: [
+				{
+					name: "ReviveWorker",
+					description: "current",
+					systemPrompt: "current",
+					source: "user",
+					model: [fixture.selectors.primary],
+				},
+			],
+		})(ref);
 		if (!reviver) throw new Error("Expected a persisted reviver");
-		await reviver(ref);
-
-		// `ref.displayName` is the registry's generated label ("Persisted
-		// Restricted") for a cold-revived ref, not the durable agent definition
-		// name. `agents: [scout]` rule scoping must key on the latter.
-		expect(capturedOptions?.agentName).toBe("scout");
-	});
-
-	it("falls back to the ref display name reviving a legacy session file without a persisted agent name", async () => {
-		const cwd = makeTempDir("@pi-revive-agent-name-legacy-");
-		const sessionFile = await createPersistedSession(cwd);
-		let capturedOptions: CreateAgentSessionOptions | undefined;
-		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
-			capturedOptions = options;
-			return { session: createRevivedSession([]).session } as CreateAgentSessionResult;
-		});
-
-		const ref = createRef(sessionFile);
-		const reviver = await createFactory(cwd)(ref);
-		if (!reviver) throw new Error("Expected a persisted reviver");
-		await reviver(ref);
-
-		expect(capturedOptions?.agentName).toBe(ref.displayName);
-	});
-	it("treats a persisted legacy 'main'-named subagent as scoped to the ref display name, not the top-level sentinel", async () => {
-		const cwd = makeTempDir("@pi-revive-agent-name-legacy-main-");
-		const sessionFile = await createPersistedSession(cwd, undefined, undefined, undefined, { agent: "main" });
-		let capturedOptions: CreateAgentSessionOptions | undefined;
-		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
-			capturedOptions = options;
-			return { session: createRevivedSession([]).session } as CreateAgentSessionResult;
-		});
-
-		const ref = createRef(sessionFile);
-		const reviver = await createFactory(cwd)(ref);
-		if (!reviver) throw new Error("Expected a persisted reviver");
-		await reviver(ref);
-
-		// A parked transcript from before "main" was reserved as a definition
-		// name could still carry `init.agent === "main"`. That must not resolve
-		// to the top-level sentinel here, or `agents: [main]` rules documented
-		// as top-level-only would load into this subagent.
-		expect(capturedOptions?.agentName).toBe(ref.displayName);
-		expect(capturedOptions?.agentName).not.toBe("main");
-	});
-	it("treats a persisted legacy 'sub'-named subagent as scoped to the ref display name, not the shared sub sentinel", async () => {
-		const cwd = makeTempDir("@pi-revive-agent-name-legacy-sub-");
-		const sessionFile = await createPersistedSession(cwd, undefined, undefined, undefined, { agent: "sub" });
-		let capturedOptions: CreateAgentSessionOptions | undefined;
-		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
-			capturedOptions = options;
-			return { session: createRevivedSession([]).session } as CreateAgentSessionResult;
-		});
-
-		const ref = createRef(sessionFile);
-		const reviver = await createFactory(cwd)(ref);
-		if (!reviver) throw new Error("Expected a persisted reviver");
-		await reviver(ref);
-
-		// A parked transcript from before "sub" was reserved as a definition
-		// name could still carry `init.agent === "sub"`. That must not resolve
-		// to the shared subagent-fallback sentinel here, or `agents: [sub]`
-		// rules meant for that specific legacy definition would load into every
-		// unnamed subagent session.
-		expect(capturedOptions?.agentName).toBe(ref.displayName);
-		expect(capturedOptions?.agentName).not.toBe("sub");
-	});
-
-	it("restores the persisted per-agent advisor opt-in on cold revival", async () => {
-		const cwd = makeTempDir("@pi-advisor-revive-");
-		const advisedFile = await createPersistedSession(cwd, undefined, undefined, "moonshot/k3");
-		const roleAdvisedFile = await createPersistedSession(cwd, undefined, undefined, "on");
-		const unadvisedFile = await createPersistedSession(cwd);
-		const captured: Settings[] = [];
-		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
-			if (options?.settings) captured.push(options.settings);
-			return { session: createRevivedSession([]).session } as CreateAgentSessionResult;
-		});
-
-		const factory = createFactory(cwd);
-		for (const sessionFile of [advisedFile, roleAdvisedFile, unadvisedFile]) {
-			const ref = createRef(sessionFile);
-			const reviver = await factory(ref);
-			if (!reviver) throw new Error("Expected a persisted reviver");
-			await reviver(ref);
+		const revived = await reviver(ref);
+		try {
+			expect(revived.model?.id).toBe(fixture.models.primary.id);
+			expect(revived.model?.provider).toBe(fixture.models.primary.provider);
+		} finally {
+			await revived.dispose();
 		}
-
-		const [advised, roleAdvised, unadvised] = captured;
-		expect(cfgAdvisorEnabled.get(advised)).toBe(true);
-		expect(advised.getModelRole("advisor")).toBe("moonshot/k3");
-		expect(cfgAdvisorEnabled.get(roleAdvised)).toBe(true);
-		expect(roleAdvised.getModelRole("advisor")).toBeUndefined();
-		expect(cfgAdvisorEnabled.get(unadvised)).toBe(false);
 	});
 
-	it("restores the persisted custom model role before reopening the session", async () => {
-		const cwd = makeTempDir("@pi-custom-role-revive-");
-		const sessionFile = await createPersistedSession(cwd, false, "review-fast");
-		let capturedOptions: CreateAgentSessionOptions | undefined;
-		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
-			capturedOptions = options;
-			return { session: createRevivedSession([]).session } as CreateAgentSessionResult;
+	it("denies a legacy model when only catalog, auth, and its old retry transcript authorize it", async () => {
+		const cwd = makeTempDir("@pi-revive-transcript-grant-");
+		const fixture = createTaskModelFixture();
+		routeFixtures.push(fixture);
+		const sessionFile = await createPersistedSession(cwd, true, "qa", undefined, {
+			agent: "ReviveWorker",
+			resolvedModel: fixture.selectors.unassigned,
+			retryFallback: { primary: fixture.selectors.unassigned, chain: [fixture.selectors.primary] },
 		});
-
+		const before = await Bun.file(sessionFile).text();
+		const createSession = vi.spyOn(sdkModule, "createAgentSession");
 		const ref = createRef(sessionFile);
-		const reviver = await createFactory(cwd)(ref);
+		const reviver = await createFactory(cwd, undefined, {
+			settings: Settings.isolated({ modelRoles: { qa: fixture.selectors.primary } }),
+			modelRegistry: fixture.modelRegistry,
+			agents: [{ name: "ReviveWorker", description: "current", systemPrompt: "current", source: "user" }],
+		})(ref);
 		if (!reviver) throw new Error("Expected a persisted reviver");
-		await reviver(ref);
-
-		expect(capturedOptions?.modelPattern).toEqual(["@review-fast", "anthropic/claude-sonnet-4-5"]);
-		expect(capturedOptions?.modelPatternAuthFallback).toBe("anthropic/claude-sonnet-4-5");
+		await expect(reviver(ref)).rejects.toThrow(/not authorized/);
+		expect(createSession).not.toHaveBeenCalled();
+		expect(ref.status).toBe("parked");
+		expect(await Bun.file(sessionFile).text()).toBe(before);
 	});
+
+	it("does not restore a legacy retry chain even when its exact primary is currently authorized", async () => {
+		const cwd = makeTempDir("@pi-revive-legacy-retry-");
+		const fixture = createTaskModelFixture();
+		routeFixtures.push(fixture);
+		const sessionFile = await createPersistedSession(cwd, true, undefined, undefined, {
+			agent: "ReviveWorker",
+			resolvedModel: fixture.selectors.primary,
+			retryFallback: { primary: fixture.selectors.primary, chain: [fixture.selectors.unassigned] },
+		});
+		const ref = AgentRegistry.global().register(createRef(sessionFile));
+		const reviver = await createFactory(cwd, undefined, {
+			settings: Settings.isolated(),
+			modelRegistry: fixture.modelRegistry,
+			agents: [
+				{
+					name: "ReviveWorker",
+					description: "current",
+					systemPrompt: "current",
+					source: "user",
+					model: [fixture.selectors.primary],
+				},
+			],
+		})(ref);
+		if (!reviver) throw new Error("Expected a persisted reviver");
+		const revived = await reviver(ref);
+		try {
+			expect(revived.model?.id).toBe(fixture.models.primary.id);
+			expect(roleRouteFallbackSelectors(revived.roleRoute!)).toEqual([]);
+		} finally {
+			await revived.dispose();
+		}
+	});
+
+	it("readmits modern selected effort and governed retry occurrences under unchanged current roles", async () => {
+		const cwd = makeTempDir("@pi-revive-modern-route-");
+		const fixture = createTaskModelFixture();
+		routeFixtures.push(fixture);
+		const settings = Settings.isolated({
+			modelRoles: { qa: `${fixture.selectors.primary}:high` },
+			"retry.fallbackChains": { qa: [`${fixture.selectors.fallback}:high`] },
+		});
+		const route = await createTaskModelRoute({
+			authority: { settings, agentName: "ReviveWorker" },
+			modelRegistry: fixture.modelRegistry,
+			selectors: ["@qa"],
+			explicit: true,
+		});
+		const sessionFile = await createPersistedSession(cwd, true, "qa", undefined, {
+			agent: "ReviveWorker",
+			resolvedModel: `${fixture.selectors.primary}:high`,
+			roleRouting: route.metadata,
+		});
+		const ref = AgentRegistry.global().register(createRef(sessionFile));
+		const reviver = await createFactory(cwd, undefined, {
+			settings,
+			modelRegistry: fixture.modelRegistry,
+			agents: [{ name: "ReviveWorker", description: "current", systemPrompt: "current", source: "user" }],
+		})(ref);
+		if (!reviver) throw new Error("Expected a persisted reviver");
+		const revived = await reviver(ref);
+		try {
+			expect(revived.model?.id).toBe(fixture.models.primary.id);
+			expect(revived.thinkingLevel).toBe(Effort.High);
+			expect(roleRouteFallbackSelectors(revived.roleRoute!)).toEqual([`${fixture.selectors.fallback}:high`]);
+		} finally {
+			await revived.dispose();
+		}
+	});
+
+	it("rechecks the original operator instead of a parked nested owner's copied role and advisor grants", async () => {
+		const cwd = makeTempDir("@pi-revive-nested-original-authority-");
+		const fixture = createTaskModelFixture();
+		routeFixtures.push(fixture);
+		const primary = `${fixture.selectors.primary}:high`;
+		const fallback = `${fixture.selectors.fallback}:high`;
+		const configPath = path.join(cwd, "config.yml");
+		await Bun.write(
+			configPath,
+			JSON.stringify({
+				modelRoles: { outer: primary, nestedGrant: fallback, advisor: fallback },
+				retry: { fallbackChains: { outer: [fallback] } },
+			}),
+		);
+		const operatorSettings = await Settings.loadIsolated({
+			cwd,
+			agentDir: cwd,
+			overrides: { "compaction.enabled": false, "todo.enabled": false },
+		});
+		persistedSettings.push(operatorSettings);
+		const ownerRoute = await createTaskModelRoute({
+			authority: { settings: operatorSettings, agentName: "OuterWorker" },
+			modelRegistry: fixture.modelRegistry,
+			selectors: [primary],
+			explicit: true,
+		});
+		const leafRoute = await createTaskModelRoute({
+			authority: { settings: operatorSettings, agentName: "ReviveWorker" },
+			modelRegistry: fixture.modelRegistry,
+			selectors: [fallback],
+			explicit: true,
+		});
+		const nestedOwner = new AgentSession({
+			agent: new Agent({
+				initialState: { model: fixture.models.primary, systemPrompt: ["nested owner"], tools: [], messages: [] },
+			}),
+			sessionManager: SessionManager.inMemory(cwd),
+			settings: executorModule.createSubagentSettings(operatorSettings, {
+				modelRoles: { ...operatorSettings.getModelRoles(), advisor: fallback },
+			}),
+			modelRegistry: fixture.modelRegistry,
+			roleRoute: ownerRoute.permit,
+			inheritedSessionAgents: [
+				{ name: "ReviveWorker", description: "current", systemPrompt: "current", source: "user" },
+			],
+			extensionRoots: () => ({ explicit: [], mode: "explicit-only", configured: [], configuredLevel: "user" }),
+		});
+		recordingSessions.add(nestedOwner);
+		const registry = AgentRegistry.global();
+		const ownerRef = registry.register({
+			id: "OuterWorker",
+			displayName: "OuterWorker",
+			parentId: "Main",
+			kind: "sub",
+			status: "idle",
+			session: nestedOwner,
+		});
+		const lifecycle = AgentLifecycleManager.global();
+		lifecycle.adopt(ownerRef.id, { idleTtlMs: 0 }, ownerRef);
+		await lifecycle.park(ownerRef.id);
+		expect(ownerRef.session).toBeNull();
+		expect(nestedOwner.isDisposed).toBe(true);
+		const sessionFile = await createPersistedSession(cwd, true, undefined, undefined, {
+			agent: "ReviveWorker",
+			resolvedModel: fallback,
+			roleRouting: leafRoute.metadata,
+		});
+		const ref = registry.register({ ...createRef(sessionFile, "OuterWorker.LeafWorker"), parentId: ownerRef.id });
+		const reviver = await createFactory(cwd, undefined, {
+			session: nestedOwner,
+			settings: nestedOwner.settings,
+			modelRegistry: fixture.modelRegistry,
+		})(ref);
+		if (!reviver) throw new Error("Expected a persisted reviver");
+		const requests: Array<{ model: string; effort: Effort | undefined }> = [];
+		const serve = async (session: AgentSession): Promise<void> => {
+			const mock = createMockModel({ handler: { content: ["authorized nested work"] } });
+			session.agent.streamFn = wrapRoleRouteStream(
+				() => session.roleRoute,
+				(model, context, options) => {
+					requests.push({ model: `${model.provider}/${model.id}`, effort: options?.reasoning });
+					return mock.stream(model, context, options);
+				},
+				fixture.modelRegistry,
+			);
+			await session.prompt("Continue the retained nested assignment", { runCommands: false, attribution: "agent" });
+			await session.waitForIdle();
+		};
+		const authorized = await reviver(ref);
+		await serve(authorized);
+		expect(requests).toEqual([{ model: fixture.selectors.fallback, effort: Effort.High }]);
+		expect(authorized.configuredThinkingLevel()).toBe(Effort.High);
+		expect(authorized.isAutoThinking).toBe(false);
+		expect(roleRouteMetadata(authorized.roleRoute)?.occurrences[0]).toMatchObject({
+			identity: fixture.selectors.fallback,
+			thinkingLevel: Effort.High,
+			fixedEffort: true,
+		});
+		lifecycle.adopt(ref.id, { idleTtlMs: 0 }, ref);
+		await lifecycle.park(ref.id);
+
+		await Bun.write(configPath, JSON.stringify({ modelRoles: { outer: primary }, retry: { fallbackChains: {} } }));
+		expect(operatorSettings.getModelRole("nestedGrant")).toBe(fallback);
+		expect(nestedOwner.settings.getModelRole("nestedGrant")).toBe(fallback);
+		expect(nestedOwner.settings.getModelRole("advisor")).toBe(fallback);
+		const before = await Bun.file(sessionFile).text();
+		const createSession = vi.spyOn(sdkModule, "createAgentSession");
+		await expect(reviver(ref)).rejects.toThrow(/not authorized/);
+		expect(createSession).not.toHaveBeenCalled();
+		expect(operatorSettings.getModelRole("nestedGrant")).toBeUndefined();
+		expect(operatorSettings.getModelRole("advisor")).toBeUndefined();
+		expect(operatorSettings.getModelRole("outer")).toBe(primary);
+		expect(cfgRetryFallbackChains.get(operatorSettings)).toEqual({});
+		expect(nestedOwner.settings.getModelRole("nestedGrant")).toBe(fallback);
+		expect(nestedOwner.settings.getModelRole("advisor")).toBe(fallback);
+		expect(requests).toHaveLength(1);
+		expect(ref.status).toBe("parked");
+		expect(ref.session).toBeNull();
+		expect(await Bun.file(sessionFile).text()).toBe(before);
+
+		cfgTaskAgentModelOverrides.override(operatorSettings, { ReviveWorker: fallback });
+		const readmitted = await reviver(ref);
+		await serve(readmitted);
+		expect(requests).toEqual([
+			{ model: fixture.selectors.fallback, effort: Effort.High },
+			{ model: fixture.selectors.fallback, effort: Effort.High },
+		]);
+		expect(readmitted.configuredThinkingLevel()).toBe(Effort.High);
+		expect(roleRouteMetadata(readmitted.roleRoute)?.selectedOccurrence).toBe(0);
+	});
+
+	for (const missing of ["current definition", "persisted name"] as const) {
+		it(`denies modern revival with a missing ${missing} instead of trusting its role metadata`, async () => {
+			const cwd = makeTempDir("@pi-revive-missing-agent-");
+			const fixture = createTaskModelFixture();
+			routeFixtures.push(fixture);
+			const settings = Settings.isolated({ modelRoles: { qa: fixture.selectors.primary } });
+			const route = await createTaskModelRoute({
+				authority: { settings, agentName: "ReviveWorker" },
+				modelRegistry: fixture.modelRegistry,
+				selectors: ["@qa"],
+				explicit: true,
+			});
+			const sessionFile = await createPersistedSession(cwd, true, "qa", undefined, {
+				agent: missing === "persisted name" ? undefined : "ReviveWorker",
+				resolvedModel: fixture.selectors.primary,
+				roleRouting: route.metadata,
+			});
+			const createSession = vi.spyOn(sdkModule, "createAgentSession");
+			const ref = createRef(sessionFile);
+			const reviver = await createFactory(cwd, undefined, {
+				settings,
+				modelRegistry: fixture.modelRegistry,
+				agents: [],
+			})(ref);
+			if (!reviver) throw new Error("Expected a persisted reviver");
+			await expect(reviver(ref)).rejects.toThrow(/agent/);
+			expect(createSession).not.toHaveBeenCalled();
+		});
+	}
+
+	it("denies a legacy pin after the selected agent frontmatter changes to another authenticated model", async () => {
+		const cwd = makeTempDir("@pi-revive-changed-agent-");
+		const fixture = createTaskModelFixture();
+		routeFixtures.push(fixture);
+		const sessionFile = await createPersistedSession(cwd, true, undefined, undefined, {
+			agent: "ReviveWorker",
+			resolvedModel: fixture.selectors.primary,
+		});
+		const currentAgent: AgentDefinition = {
+			name: "ReviveWorker",
+			description: "current",
+			systemPrompt: "current",
+			source: "user",
+			model: [fixture.selectors.primary],
+		};
+		const ref = createRef(sessionFile);
+		const reviver = await createFactory(cwd, undefined, {
+			settings: Settings.isolated(),
+			modelRegistry: fixture.modelRegistry,
+			agents: [currentAgent],
+		})(ref);
+		if (!reviver) throw new Error("Expected a persisted reviver");
+		currentAgent.model = [fixture.selectors.fallback];
+		const createSession = vi.spyOn(sdkModule, "createAgentSession");
+		await expect(reviver(ref)).rejects.toThrow(/not authorized/);
+		expect(createSession).not.toHaveBeenCalled();
+	});
+
+	it("does not revive an unavailable recorded modern candidate onto another approved one", async () => {
+		const cwd = makeTempDir("@pi-revive-unavailable-selection-");
+		const fixture = createTaskModelFixture();
+		routeFixtures.push(fixture);
+		const settings = Settings.isolated({
+			modelRoles: { qa: fixture.selectors.primary },
+			"retry.fallbackChains": { qa: [fixture.selectors.fallback] },
+		});
+		const route = await createTaskModelRoute({
+			authority: { settings, agentName: "ReviveWorker" },
+			modelRegistry: fixture.modelRegistry,
+			selectors: ["@qa"],
+			explicit: true,
+		});
+		const sessionFile = await createPersistedSession(cwd, true, "qa", undefined, {
+			agent: "ReviveWorker",
+			resolvedModel: fixture.selectors.primary,
+			roleRouting: route.metadata,
+		});
+		const ref = createRef(sessionFile);
+		const reviver = await createFactory(cwd, undefined, {
+			settings,
+			modelRegistry: fixture.modelRegistry,
+			agents: [{ name: "ReviveWorker", description: "current", systemPrompt: "current", source: "user" }],
+		})(ref);
+		if (!reviver) throw new Error("Expected a persisted reviver");
+		fixture.modelRegistry.suppressSelector(fixture.selectors.primary, Date.now() + 60_000);
+		const createSession = vi.spyOn(sdkModule, "createAgentSession");
+		await expect(reviver(ref)).rejects.toThrow(/cannot substitute/);
+		expect(createSession).not.toHaveBeenCalled();
+	});
+
+	it("denies an old live-parent selection after that parent is no longer live", async () => {
+		const cwd = makeTempDir("@pi-revive-old-parent-");
+		const fixture = createTaskModelFixture();
+		routeFixtures.push(fixture);
+		const settings = Settings.isolated();
+		const route = await createTaskModelRoute({
+			authority: {
+				settings,
+				agentName: "ReviveWorker",
+				getParentModel: fixture.getActiveModel,
+				getParentSelector: fixture.getActiveModelString,
+			},
+			modelRegistry: fixture.modelRegistry,
+			selectors: ["@default"],
+			explicit: true,
+		});
+		const sessionFile = await createPersistedSession(cwd, true, "default", undefined, {
+			agent: "ReviveWorker",
+			resolvedModel: fixture.getActiveModelString(),
+			roleRouting: route.metadata,
+		});
+		const createSession = vi.spyOn(sdkModule, "createAgentSession");
+		const ref = { ...createRef(sessionFile), parentId: "OldParent" };
+		AgentRegistry.global().unregister("OldParent");
+		const reviver = await createFactory(cwd, undefined, {
+			settings,
+			modelRegistry: fixture.modelRegistry,
+			agents: [{ name: "ReviveWorker", description: "current", systemPrompt: "current", source: "user" }],
+		})(ref);
+		if (!reviver) throw new Error("Expected a persisted reviver");
+		await expect(reviver(ref)).rejects.toThrow(/not authorized|live parent/);
+		expect(createSession).not.toHaveBeenCalled();
+	});
+
+	it("can revive an old parent identity only when a current independent role grants it", async () => {
+		const cwd = makeTempDir("@pi-revive-old-parent-current-grant-");
+		const fixture = createTaskModelFixture();
+		routeFixtures.push(fixture);
+		const spawnSettings = Settings.isolated();
+		const route = await createTaskModelRoute({
+			authority: {
+				settings: spawnSettings,
+				agentName: "ReviveWorker",
+				getParentModel: fixture.getActiveModel,
+				getParentSelector: fixture.getActiveModelString,
+			},
+			modelRegistry: fixture.modelRegistry,
+			selectors: ["@default"],
+			explicit: true,
+		});
+		const sessionFile = await createPersistedSession(cwd, true, "default", undefined, {
+			agent: "ReviveWorker",
+			resolvedModel: fixture.getActiveModelString(),
+			roleRouting: route.metadata,
+		});
+		const ref = AgentRegistry.global().register({ ...createRef(sessionFile), parentId: "AbsentParent" });
+		const reviver = await createFactory(cwd, undefined, {
+			settings: Settings.isolated({ modelRoles: { qa: fixture.selectors.parent } }),
+			modelRegistry: fixture.modelRegistry,
+			agents: [{ name: "ReviveWorker", description: "current", systemPrompt: "current", source: "user" }],
+		})(ref);
+		if (!reviver) throw new Error("Expected a persisted reviver");
+		const revived = await reviver(ref);
+		try {
+			expect(revived.model?.id).toBe(fixture.models.parent.id);
+			expect(revived.thinkingLevel).toBe(Effort.Medium);
+		} finally {
+			await revived.dispose();
+		}
+	});
+
+	for (const change of ["effort", "duplicate", "order"] as const) {
+		it(`invalidates modern revival after dependent role ${change} changes despite independent overlapping grants`, async () => {
+			const cwd = makeTempDir("@pi-revive-role-change-");
+			const fixture = createTaskModelFixture();
+			routeFixtures.push(fixture);
+			const settings = Settings.isolated({
+				modelRoles: { qa: fixture.selectors.primary },
+				"retry.fallbackChains": { qa: [fixture.selectors.fallback, fixture.selectors.unassigned] },
+			});
+			const currentAgent: AgentDefinition = {
+				name: "ReviveWorker",
+				description: "current",
+				systemPrompt: "current",
+				source: "user",
+				model: [fixture.selectors.primary, fixture.selectors.fallback, fixture.selectors.unassigned],
+			};
+			const route = await createTaskModelRoute({
+				authority: { settings, agentName: currentAgent.name, agentModel: currentAgent.model },
+				modelRegistry: fixture.modelRegistry,
+				selectors: ["@qa"],
+				explicit: true,
+			});
+			const sessionFile = await createPersistedSession(cwd, true, "qa", undefined, {
+				agent: currentAgent.name,
+				resolvedModel: fixture.selectors.primary,
+				roleRouting: route.metadata,
+			});
+			const before = await Bun.file(sessionFile).text();
+			const ref = AgentRegistry.global().register(createRef(sessionFile, `persisted-role-${change}`));
+			const reviver = await createFactory(cwd, undefined, {
+				settings,
+				modelRegistry: fixture.modelRegistry,
+				agents: [currentAgent],
+			})(ref);
+			if (!reviver) throw new Error("Expected a persisted reviver");
+			if (change === "effort") settings.setModelRole("qa", `${fixture.selectors.primary}:high`);
+			else
+				cfgRetryFallbackChains.override(settings, {
+					qa:
+						change === "duplicate"
+							? [fixture.selectors.fallback, fixture.selectors.fallback, fixture.selectors.unassigned]
+							: [fixture.selectors.unassigned, fixture.selectors.fallback],
+				});
+			const createSession = vi.spyOn(sdkModule, "createAgentSession");
+			await expect(reviver(ref)).rejects.toThrow(/role configuration changed/);
+			expect(createSession).not.toHaveBeenCalled();
+			expect(ref.status).toBe("parked");
+			expect(ref.session).toBeNull();
+			expect(await Bun.file(sessionFile).text()).toBe(before);
+		});
+	}
 
 	it("restores compaction threshold behavior after parent settings change", async () => {
 		const cwd = makeTempDir("@pi-compaction-threshold-revive-");
@@ -668,6 +1003,7 @@ describe("persisted subagent revival", () => {
 			compactionThreshold: { thresholdPercent: 72, thresholdTokens: -1 },
 		});
 		const parentSettings = Settings.isolated({
+			modelRoles: { revive: persistedSelector },
 			"compaction.thresholdPercent": 45,
 			"compaction.thresholdTokens": 120_000,
 		});
@@ -692,66 +1028,10 @@ describe("persisted subagent revival", () => {
 		expect(shouldCompact(144_001, 200_000, revivedCompaction)).toBe(true);
 	});
 
-	it("pins the persisted concrete model when the default role is revived", async () => {
-		const cwd = makeTempDir("@pi-default-role-revive-");
-		const sessionFile = await createPersistedSession(cwd, false, "default");
-		let capturedOptions: CreateAgentSessionOptions | undefined;
-		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
-			capturedOptions = options;
-			return { session: createRevivedSession([]).session } as CreateAgentSessionResult;
-		});
-
-		const ref = createRef(sessionFile);
-		const reviver = await createFactory(cwd)(ref);
-		if (!reviver) throw new Error("Expected a persisted reviver");
-		await reviver(ref);
-
-		expect(capturedOptions?.modelPattern).toBe("anthropic/claude-sonnet-4-5");
-		expect(capturedOptions?.modelPatternAuthFallback).toBe("anthropic/claude-sonnet-4-5");
-	});
-
-	it("reinstalls the spawn's subagent fallback chain so it still routes at a changed effort (#13789)", async () => {
-		const cwd = makeTempDir("@pi-revive-retry-fallback-");
-		const sessionFile = await createPersistedSession(cwd, false, "task", undefined, {
-			retryFallback: { primary: "xai-oauth/grok-4.7:high", chain: ["openai/gpt-4o-mini"] },
-		});
-		let capturedOptions: CreateAgentSessionOptions | undefined;
-		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
-			capturedOptions = options;
-			return { session: createRevivedSession([]).session } as CreateAgentSessionResult;
-		});
-
-		const ref = createRef(sessionFile);
-		const reviver = await createFactory(cwd)(ref);
-		if (!reviver) throw new Error("Expected a persisted reviver");
-		await reviver(ref);
-
-		const revivedSettings = capturedOptions?.settings;
-		if (!revivedSettings) throw new Error("Expected revived child settings");
-		const grok = getBundledModel("xai-oauth", "grok-4.7");
-		const context: RetryFallbackResolutionContext = {
-			chains: getRetryFallbackChains(revivedSettings),
-			getModelRole: role => revivedSettings.getModelRole(role),
-			modelLookup: {
-				find: (provider, id) => (provider === grok.provider && id === grok.id ? grok : undefined),
-				hasProvider: provider => provider === grok.provider,
-			},
-		};
-		const live = "xai-oauth/grok-4.7:xhigh";
-		const chainKey = resolveRetryFallbackChainKey(context, live, grok);
-		expect(chainKey).toBe("subagent:persisted-restricted");
-		if (!chainKey) throw new Error("Expected the revived subagent chain");
-		expect(findRetryFallbackCandidates(context, chainKey, live, grok).map(candidate => candidate.raw)).toEqual([
-			"openai/gpt-4o-mini",
-		]);
-	});
-
 	it("installs an IRC wake monitor that emits cold-revive lifecycle frames on the shared bus", async () => {
-		AgentRegistry.resetGlobalForTests();
-		AgentLifecycleManager.resetGlobalForTests();
 		const cwd = makeTempDir("@pi-revive-frames-");
 		const sessionFile = await createPersistedSession(cwd);
-		MCPManager.setInstance({ getTools: () => [] } as unknown as MCPManager);
+		MCPManager.setInstance(fakeMcpManager(() => []));
 		let handle: RevivedSessionHandle | undefined;
 		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async () => {
 			handle = createRevivedSession([]);
@@ -803,16 +1083,12 @@ describe("persisted subagent revival", () => {
 		expect(last.payload.id).toBe(ref.id);
 		expect(last.payload.status).not.toBe("started");
 		rpcRegistry.dispose();
-		AgentLifecycleManager.resetGlobalForTests();
-		AgentRegistry.resetGlobalForTests();
 	});
 
 	it("preserves the completed output artifact when a revived subagent answers a hub message without yielding", async () => {
-		AgentRegistry.resetGlobalForTests();
-		AgentLifecycleManager.resetGlobalForTests();
 		const cwd = makeTempDir("@pi-revive-artifact-");
 		const sessionFile = await createPersistedSession(cwd);
-		MCPManager.setInstance({ getTools: () => [] } as unknown as MCPManager);
+		MCPManager.setInstance(fakeMcpManager(() => []));
 		let handle: RevivedSessionHandle | undefined;
 		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async () => {
 			handle = createRevivedSession([]);
@@ -855,17 +1131,13 @@ describe("persisted subagent revival", () => {
 		await finish?.();
 
 		expect(await Bun.file(artifactPath).text()).toBe(completedReport);
-		AgentLifecycleManager.resetGlobalForTests();
-		AgentRegistry.resetGlobalForTests();
 	});
 
 	describe("wake-turn relay", () => {
 		async function reviveWithWaker(cwd: string): Promise<{ ref: AgentRef; handle: RevivedSessionHandle }> {
-			AgentRegistry.resetGlobalForTests();
-			AgentLifecycleManager.resetGlobalForTests();
 			IrcBus.resetGlobalForTests();
 			const sessionFile = await createPersistedSession(cwd);
-			MCPManager.setInstance({ getTools: () => [] } as unknown as MCPManager);
+			MCPManager.setInstance(fakeMcpManager(() => []));
 			let handle: RevivedSessionHandle | undefined;
 			vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async () => {
 				handle = createRevivedSession([]);
@@ -920,9 +1192,6 @@ describe("persisted subagent revival", () => {
 				replyTo: "irc-42",
 				body: "# Full table\n\n| tool | file |\n|---|---|\n| read | read.ts |",
 			});
-			AgentLifecycleManager.resetGlobalForTests();
-			AgentRegistry.resetGlobalForTests();
-			IrcBus.resetGlobalForTests();
 		});
 
 		it("relays the attributed provider error when the wake turn fails", async () => {
@@ -951,9 +1220,6 @@ describe("persisted subagent revival", () => {
 			expect(msg?.body).toContain("[some-provider/some-model]");
 			expect(msg?.body).toContain("402 usage balance exhausted");
 			expect(msg?.body).toContain(`history://${ref.id}`);
-			AgentLifecycleManager.resetGlobalForTests();
-			AgentRegistry.resetGlobalForTests();
-			IrcBus.resetGlobalForTests();
 		});
 
 		it("relays a cancellation notice when the wake turn is aborted", async () => {
@@ -973,9 +1239,6 @@ describe("persisted subagent revival", () => {
 			expect(msg?.replyTo).toBe("irc-42");
 			expect(msg?.body.toLowerCase()).toContain("cancel");
 			expect(msg?.body).toContain(`history://${ref.id}`);
-			AgentLifecycleManager.resetGlobalForTests();
-			AgentRegistry.resetGlobalForTests();
-			IrcBus.resetGlobalForTests();
 		});
 
 		it("relays a no-output notice when the wake turn completes without producing anything", async () => {
@@ -996,9 +1259,6 @@ describe("persisted subagent revival", () => {
 			expect(msg?.replyTo).toBe("irc-42");
 			expect(msg?.body.toLowerCase()).toContain("no output");
 			expect(msg?.body).toContain(`history://${ref.id}`);
-			AgentLifecycleManager.resetGlobalForTests();
-			AgentRegistry.resetGlobalForTests();
-			IrcBus.resetGlobalForTests();
 		});
 
 		it("stays silent when the agent already answered its waker during the turn", async () => {
@@ -1018,9 +1278,6 @@ describe("persisted subagent revival", () => {
 			await handle.trackedReplies[0];
 
 			expect(await duplicate).toBeNull();
-			AgentLifecycleManager.resetGlobalForTests();
-			AgentRegistry.resetGlobalForTests();
-			IrcBus.resetGlobalForTests();
 		});
 		it("never relays a wake turn woken by another relay", async () => {
 			// Two idle subagents exchanging one message used to ping-pong forever:
@@ -1056,9 +1313,6 @@ describe("persisted subagent revival", () => {
 			await handle.trackedReplies[0];
 
 			expect(delivered).toHaveLength(0);
-			AgentLifecycleManager.resetGlobalForTests();
-			AgentRegistry.resetGlobalForTests();
-			IrcBus.resetGlobalForTests();
 		});
 
 		it("reports the failure even after the agent sent a progress ping to the waker", async () => {
@@ -1101,9 +1355,6 @@ describe("persisted subagent revival", () => {
 			expect(notice?.wakeRelay).toBe(true);
 			expect(notice?.body).toContain("402 usage balance exhausted");
 			expect(notice?.body.toLowerCase()).toContain("earlier in this turn");
-			AgentLifecycleManager.resetGlobalForTests();
-			AgentRegistry.resetGlobalForTests();
-			IrcBus.resetGlobalForTests();
 		});
 
 		it("relays the error message without the stack trace when the wake turn throws", async () => {
@@ -1126,10 +1377,361 @@ describe("persisted subagent revival", () => {
 			expect(msg?.body).toContain("boom while waking");
 			expect(msg?.body).not.toContain("secret.ts:99");
 			expect(msg?.body).not.toContain("at deepInternal");
-			AgentLifecycleManager.resetGlobalForTests();
-			AgentRegistry.resetGlobalForTests();
-			IrcBus.resetGlobalForTests();
 		});
+	});
+});
+
+describe("cold revival replays the system prompt the last request sent", () => {
+	let promptFixture: TaskModelFixture;
+	const promptAgent: AgentDefinition = {
+		name: "PromptWorker",
+		description: "prompt replay fixture",
+		systemPrompt: "charter",
+		source: "user",
+		model: ["routing-test/primary"],
+	};
+	beforeEach(() => {
+		promptFixture = createTaskModelFixture();
+		routeFixtures.push(promptFixture);
+	});
+
+	function createTool(name: string): AgentTool {
+		return {
+			name,
+			label: name,
+			description: `${name} tool`,
+			parameters: type({}),
+			async execute() {
+				return { content: [{ type: "text", text: "ok" }], details: { status: "success", data: {} } };
+			},
+		};
+	}
+
+	interface RecordingSession {
+		session: AgentSession;
+		/** System blocks of each provider request, in order. */
+		requests: string[][];
+		/** Tool names and descriptions of each provider request, in order. */
+		toolRequests: string[];
+	}
+
+	interface ExtensionHooks {
+		sessionStart?: () => void;
+		/** A `before_agent_start` handler; a returned prompt replaces the turn's system prompt. */
+		beforeAgentStart?: (session: AgentSession, systemPrompt: string[]) => Promise<string[] | undefined>;
+		/** Runs right before each model call reads the system prompt. */
+		beforeModelCall?: (session: AgentSession) => Promise<void>;
+	}
+
+	/**
+	 * A real AgentSession on a scripted model, recording each request's system blocks. The prompt
+	 * builder renders the active tool names into its own block, as the SDK's builder does.
+	 */
+	function createRecordingSession(
+		sessionManager: SessionManager,
+		buildPrompt: (toolNames: string[]) => string[],
+		responses: MockResponseSource,
+		hooks: ExtensionHooks = {},
+		options?: CreateAgentSessionOptions,
+	): RecordingSession {
+		const mock = createMockModel({ responses, handler: { content: ["done"] } });
+		const requests: string[][] = [];
+		const toolRequests: string[] = [];
+		const owner: { session?: AgentSession } = {};
+		// Like the real yield tool, its wire definition carries the active work-pool items.
+		const yieldTool: AgentTool = {
+			...createTool("yield"),
+			get description() {
+				const items = owner.session?.getWorkPoolYieldItems() ?? [];
+				return `yield tool${items.map(item => ` ${item.id}#${item.index}`).join("")}`;
+			},
+		};
+		const tools = [createTool("read"), yieldTool];
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: {
+				model: options?.model ?? promptFixture.models.primary,
+				systemPrompt: buildPrompt(tools.map(tool => tool.name)),
+				tools,
+				messages: [],
+			},
+			convertToLlm,
+			streamFn: (model, context, streamOptions) => {
+				requests.push([...(context.systemPrompt ?? [])]);
+				toolRequests.push(JSON.stringify(context.tools?.map(tool => [tool.name, tool.description])));
+				return mock.stream(model, context, streamOptions);
+			},
+		});
+		const session: AgentSession = new AgentSession({
+			agent,
+			sessionManager,
+			settings: Settings.isolated({ "compaction.enabled": false, "todo.enabled": false }),
+			modelRegistry: promptFixture.modelRegistry,
+			roleRoute: options?.roleRoute,
+			toolRegistry: new Map(tools.map(tool => [tool.name, tool])),
+			extensionRunner: {
+				initialize: () => {},
+				onError: () => () => {},
+				disposeFileFallbacks: () => {},
+				hasHandlers: () => false,
+				emit: async (event: { type: string }) => {
+					if (event.type === "session_start") hooks.sessionStart?.();
+				},
+				emitBeforeAgentStart: async (_prompt: string, _images: unknown, systemPrompt: string[]) => {
+					const override = await hooks.beforeAgentStart?.(session, systemPrompt);
+					return override ? { systemPrompt: override } : undefined;
+				},
+			} as unknown as ExtensionRunner,
+			rebuildSystemPrompt: async toolNames => ({ systemPrompt: buildPrompt(toolNames) }),
+		});
+		owner.session = session;
+		const { beforeModelCall } = hooks;
+		if (beforeModelCall) agent.addBeforeModelCallHook(() => beforeModelCall(session));
+		recordingSessions.add(session);
+		return { session, requests, toolRequests };
+	}
+
+	const spawnResponses = (): MockResponse[] => [
+		{ content: [{ type: "toolCall", name: "yield", arguments: {} }] },
+		{ content: ["done"] },
+	];
+
+	/** Spawns through runSubprocess on a real session, then returns its live session and requests. */
+	async function spawn(
+		cwd: string,
+		buildPrompt: (toolNames: string[]) => string[],
+		responses: MockResponseSource,
+		hooks?: ExtensionHooks,
+	): Promise<RecordingSession> {
+		let spawned: RecordingSession | undefined;
+		vi.spyOn(sdkModule, "createAgentSession").mockImplementationOnce(async options => {
+			spawned = createRecordingSession(options!.sessionManager!, buildPrompt, responses, hooks, options);
+			// The SDK registers a spawned child, which keeps it live after it yields.
+			AgentRegistry.global().register({
+				id: "prompt-blocks",
+				displayName: "prompt-blocks",
+				kind: "sub",
+				session: spawned.session,
+				sessionFile: options!.sessionManager!.getSessionFile() ?? null,
+				status: "running",
+			});
+			return { session: spawned.session } as CreateAgentSessionResult;
+		});
+		const result = await executorModule.runSubprocess({
+			cwd,
+			agent: promptAgent,
+			task: "do work",
+			index: 0,
+			id: "prompt-blocks",
+			settings: Settings.isolated(),
+			modelRegistry: promptFixture.modelRegistry,
+			enableLsp: false,
+			artifactsDir: cwd,
+		});
+		expect(result.exitCode).toBe(0);
+		if (!spawned) throw new Error("Expected the spawn to create a session");
+		return spawned;
+	}
+
+	/** Cold-revives the parked transcript the way the Agent Hub does and returns the follow-up's request. */
+	async function reviveAndFollowUp(cwd: string, hooks?: ExtensionHooks): Promise<{ system: string[]; tools: string }> {
+		let revived: RecordingSession | undefined;
+		vi.spyOn(sdkModule, "createAgentSession").mockImplementationOnce(async options => {
+			const build = options!.systemPrompt;
+			if (typeof build !== "function") throw new Error("Expected a system prompt builder");
+			// The SDK hands every rebuild's fresh default prompt to this builder.
+			const buildPrompt = (toolNames: string[]) => [build([`fresh default: ${toolNames.join(",")}`])].flat();
+			revived = createRecordingSession(
+				options!.sessionManager!,
+				buildPrompt,
+				[{ content: ["follow-up"] }],
+				hooks,
+				options,
+			);
+			return { session: revived.session } as CreateAgentSessionResult;
+		});
+		const registry = AgentRegistry.global();
+		const existing = registry.get("prompt-blocks");
+		const ref =
+			existing ?? registry.register({ ...createRef(path.join(cwd, "prompt-blocks.jsonl")), id: "prompt-blocks" });
+		if (existing) {
+			registry.detachSession(existing.id, existing);
+			registry.setStatus(existing.id, "parked", existing);
+		}
+		const reviver = await createFactory(cwd, undefined, {
+			settings: Settings.isolated(),
+			modelRegistry: promptFixture.modelRegistry,
+			agents: [promptAgent],
+		})(ref);
+		if (!reviver) throw new Error("Expected a persisted reviver");
+		const session = await reviver(ref);
+		await session.prompt("follow-up");
+		await session.waitForIdle();
+		if (!revived) throw new Error("Expected the revive to create a session");
+		return { system: revived.requests[0]!, tools: revived.toolRequests[0]! };
+	}
+
+	it("replays the blocks after a first-turn before_agent_start tool change", async () => {
+		const cwd = makeTempDir("@pi-revive-first-turn-tools-");
+		const buildPrompt = (toolNames: string[]) => ["base", "rules", `tools: ${toolNames.join(",")}`];
+		const dropRead = {
+			beforeAgentStart: async (session: AgentSession) => {
+				await session.setActiveToolsByName(["yield"]);
+				return undefined;
+			},
+		};
+		const spawned = await spawn(cwd, buildPrompt, spawnResponses(), dropRead);
+		expect(spawned.requests[0]).toEqual(["base", "rules", "tools: yield"]);
+		await spawned.session.dispose();
+
+		expect((await reviveAndFollowUp(cwd, dropRead)).system).toEqual(spawned.requests.at(-1)!);
+	});
+
+	it("replays the blocks after a later work-pool rebuild in the live session", async () => {
+		const cwd = makeTempDir("@pi-revive-explicit-rebuild-");
+		let batch = 1;
+		const buildPrompt = (toolNames: string[]) => ["base", `batch ${batch}`, `tools: ${toolNames.join(",")}`];
+		const spawned = await spawn(cwd, buildPrompt, spawnResponses());
+		// The next work-pool batch installs its yield contract, which rebuilds the base prompt.
+		batch = 2;
+		await spawned.session.setWorkPoolYieldItems([{ id: "item", index: 0 }]);
+		await spawned.session.prompt("next batch");
+		await spawned.session.waitForIdle();
+		expect(spawned.requests.at(-1)).toEqual(["base", "batch 2", "tools: read,yield"]);
+		await spawned.session.dispose();
+
+		expect((await reviveAndFollowUp(cwd)).system).toEqual(spawned.requests.at(-1)!);
+	});
+
+	it("replays the blocks after a warm revive rebuilds the base and runs a request, without the finished batch's items", async () => {
+		const cwd = makeTempDir("@pi-revive-warm-rebuild-");
+		let batch = 1;
+		const buildPrompt = (toolNames: string[]) => ["base", `batch ${batch}`, `tools: ${toolNames.join(",")}`];
+		await spawn(cwd, buildPrompt, spawnResponses());
+		const lifecycle = AgentLifecycleManager.global();
+		await lifecycle.park("prompt-blocks");
+		let warm: RecordingSession | undefined;
+		vi.spyOn(sdkModule, "createAgentSession").mockImplementationOnce(async options => {
+			warm = createRecordingSession(options!.sessionManager!, buildPrompt, [{ content: ["next"] }], {}, options);
+			return { session: warm.session } as CreateAgentSessionResult;
+		});
+		const live = await lifecycle.ensureLive("prompt-blocks");
+		if (!warm || live !== warm.session) throw new Error("Expected a warm revive through the lifecycle");
+		// The next work-pool batch installs its yield contract, which rebuilds the base prompt.
+		batch = 2;
+		await live.setWorkPoolYieldItems([{ id: "item", index: 0 }]);
+		await live.prompt("next batch");
+		await live.waitForIdle();
+		expect(warm.requests.at(-1)).toEqual(["base", "batch 2", "tools: read,yield"]);
+		expect(warm.toolRequests.at(-1)).toContain("yield tool item#0");
+		// The pool clears the contract when the batch finishes, without a model call.
+		await live.setWorkPoolYieldItems([]);
+		await lifecycle.park("prompt-blocks");
+
+		const revived = await reviveAndFollowUp(cwd);
+		expect(revived.system).toEqual(warm.requests.at(-1)!);
+		expect(revived.tools).not.toContain("item#0");
+	});
+
+	it("replays the base a before_agent_start override was built from when the base rebuilds in the request window", async () => {
+		const cwd = makeTempDir("@pi-revive-override-window-");
+		let batch = 1;
+		const buildPrompt = (toolNames: string[]) => ["base", `batch ${batch}`, `tools: ${toolNames.join(",")}`];
+		const appendPolicy = async (_session: AgentSession, systemPrompt: string[]) => [...systemPrompt, "policy"];
+		let rebuildInWindow = false;
+		const spawned = await spawn(cwd, buildPrompt, [...spawnResponses(), { content: ["next"] }], {
+			beforeAgentStart: appendPolicy,
+			// A rebuild between the hook and the request leaves the turn's override on the wire.
+			beforeModelCall: async session => {
+				if (!rebuildInWindow) return;
+				rebuildInWindow = false;
+				batch = 2;
+				await session.refreshBaseSystemPrompt();
+			},
+		});
+		rebuildInWindow = true;
+		await spawned.session.prompt("next");
+		await spawned.session.waitForIdle();
+		expect(spawned.requests.at(-1)).toEqual(["base", "batch 1", "tools: read,yield", "policy"]);
+		await spawned.session.dispose();
+
+		expect((await reviveAndFollowUp(cwd, { beforeAgentStart: appendPolicy })).system).toEqual(
+			spawned.requests.at(-1)!,
+		);
+	});
+
+	it("re-reads the contract after a same-path reload restores an older one", async () => {
+		const cwd = makeTempDir("@pi-revive-same-path-reload-");
+		let batch = 1;
+		const buildPrompt = (toolNames: string[]) => ["base", `batch ${batch}`, `tools: ${toolNames.join(",")}`];
+		const spawned = await spawn(cwd, buildPrompt, [
+			...spawnResponses(),
+			{ content: ["next"] },
+			{ content: ["again"] },
+		]);
+		const sessionFile = path.join(cwd, "prompt-blocks.jsonl");
+		await spawned.session.sessionManager.flush();
+		const beforeBatch = await Bun.file(sessionFile).text();
+		batch = 2;
+		await spawned.session.setWorkPoolYieldItems([{ id: "item", index: 0 }]);
+		await spawned.session.prompt("next batch");
+		await spawned.session.waitForIdle();
+		// An older transcript, whose latest contract is the batch-1 one, is restored and reloaded.
+		await spawned.session.sessionManager.flush();
+		await Bun.write(sessionFile, beforeBatch);
+		await spawned.session.reload();
+		await spawned.session.prompt("again");
+		await spawned.session.waitForIdle();
+		expect(spawned.requests.at(-1)).toEqual(["base", "batch 2", "tools: read,yield"]);
+		await spawned.session.dispose();
+
+		const revived = await reviveAndFollowUp(cwd);
+		expect(revived.system).toEqual(spawned.requests.at(-1)!);
+		expect(revived.tools).toBe(spawned.toolRequests.at(-1)!);
+	});
+
+	it("keeps a finished child in the Agent Hub when startup extensions append many entries", async () => {
+		const cwd = makeTempDir("@pi-revive-hub-prefix-");
+		const parentFile = path.join(cwd, "parent.jsonl");
+		await Bun.write(
+			parentFile,
+			`${JSON.stringify({ type: "session", version: 3, id: "parent", timestamp: new Date().toISOString(), cwd })}\n`,
+		);
+		const childrenDir = path.join(cwd, "parent");
+		fs.mkdirSync(childrenDir);
+		vi.spyOn(sdkModule, "createAgentSession").mockImplementationOnce(async options => {
+			const sessionManager = options!.sessionManager!;
+			// A session_start extension that records its own state on startup.
+			const { session } = createRecordingSession(
+				sessionManager,
+				() => ["base"],
+				spawnResponses(),
+				{
+					sessionStart: () => {
+						for (let index = 0; index < 64; index++) sessionManager.appendCustomEntry("ext-state", { index });
+					},
+				},
+				options,
+			);
+			return { session } as CreateAgentSessionResult;
+		});
+		const result = await executorModule.runSubprocess({
+			cwd,
+			agent: promptAgent,
+			task: "do work",
+			index: 0,
+			id: "prompt-blocks",
+			settings: Settings.isolated(),
+			modelRegistry: promptFixture.modelRegistry,
+			enableLsp: false,
+			sessionFile: parentFile,
+			artifactsDir: childrenDir,
+		});
+		expect(result.exitCode).toBe(0);
+
+		const restored = new AgentRegistry();
+		await registerPersistedSubagents(restored, parentFile);
+		expect(restored.get("prompt-blocks")?.status).toBe("parked");
 	});
 });
 

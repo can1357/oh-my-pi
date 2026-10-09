@@ -5,7 +5,12 @@
  * that toggles the entire provider. All items below are dimmed when the
  * master switch is off.
  */
+import type { TspPickerGroup, TspPickerItem, TspProps, TspSpan, TspTone } from "@oh-my-pi/pi-wire";
 import type { Component } from "../../tui";
+import { formatKeyHint } from "../../app-keybindings";
+import { node, span, stableKey } from "../../native/describe";
+import type { NativeNode } from "../../native/node";
+import { pickerFuzzyHits, pickerQuery } from "../../native/picker";
 import { matchesKey } from "../../keys";
 import { padding, truncateToWidth, visibleWidth } from "../../utils";
 import { theme } from "../../theme";
@@ -27,6 +32,7 @@ import {
 	formatMcpListHint,
 	isDiscoveredMcpServer,
 	type MCPConnectionHealth,
+	type MCPRuntimeSnapshot,
 	type MCPRuntimeSource,
 	snapshotMcpRuntime,
 } from "./mcp-runtime";
@@ -67,6 +73,11 @@ function getListItemKey(item: ListItem): string {
 	}
 }
 
+/** Native item/scope id of a flattened row: its hashed {@link getListItemKey}, safe inside `/` keypaths. */
+function nativeItemId(item: ListItem): string {
+	return stableKey(getListItemKey(item));
+}
+
 /** Searchable text for a flattened row (the menu filter rebuilds via applyFilter; this covers headers/switches). */
 function getListItemSearchText(item: ListItem): string {
 	switch (item.type) {
@@ -81,12 +92,38 @@ function getListItemSearchText(item: ListItem): string {
 	}
 }
 
+/** The inventory as `picker` data: rows, display order with kind groups, the selection and search hits. */
+export interface ExtensionListPickerView {
+	readonly items: TspPickerItem[];
+	/** Item ids in display order; kind headers become group entries. */
+	readonly order: (string | TspPickerGroup)[];
+	/** Selected item id; null when nothing or a kind header is selected. */
+	readonly selected: string | null;
+	readonly hits: Record<string, [number, number][]>;
+	/** Whether kind headers group the rows (the unfiltered ALL view). */
+	readonly grouped: boolean;
+}
+
+/** The selected row's switch: its state, and why it cannot flip when it can't. */
+export interface ExtensionListSwitch {
+	readonly on: boolean;
+	readonly blocked?: string;
+}
+
 /** Flattened list item for rendering */
 type ListItem =
 	| { type: "master"; providerId: string; providerName: string; enabled: boolean }
 	| { type: "user-source"; providerId: string; providerName: string; enabled: boolean }
 	| { type: "kind-header"; kind: ExtensionKind; label: string; icon: string; count: number }
 	| { type: "extension"; item: Extension };
+
+/** Picker dot tone of each MCP connection health, matching the ANSI health glyph colours. */
+const MCP_HEALTH_TONE: Record<MCPConnectionHealth, TspTone> = {
+	connected: "success",
+	connecting: "pending",
+	disconnected: "muted",
+	inactive: "warning",
+};
 
 export class ExtensionList implements Component {
 	#menu: MenuSelection<ListItem>;
@@ -154,6 +191,11 @@ export class ExtensionList implements Component {
 
 	getSearchQuery(): string {
 		return this.#menu.query;
+	}
+
+	/** The search field's text and caret for a native `picker` head. */
+	nativeQuery(): Pick<TspProps<"picker">, "query" | "cursor"> {
+		return pickerQuery(this.#search);
 	}
 
 	resetSelection(): void {
@@ -256,6 +298,232 @@ export class ExtensionList implements Component {
 		return lines;
 	}
 
+	/** The visible rows as `picker` data, joined with live MCP health and tool runtime like {@link render}. */
+	pickerView(): ExtensionListPickerView {
+		this.#toolFrame = snapshotToolRuntimeSource(this.#toolSource);
+		const masterDisabled = this.#isMasterDisabled();
+		const query = this.#menu.query;
+		const items: TspPickerItem[] = [];
+		const order: (string | TspPickerGroup)[] = [];
+		const hits: Record<string, [number, number][]> = {};
+		let grouped = false;
+		for (const entry of this.#menu.visibleItems) {
+			if (entry.type === "kind-header") {
+				grouped = true;
+				order.push({ group: nativeItemId(entry), label: entry.label, count: entry.count });
+				continue;
+			}
+			const item = this.#pickerItem(entry, masterDisabled);
+			items.push(item);
+			order.push(item.id);
+			if (query && typeof item.label === "string") {
+				const marked = pickerFuzzyHits(item.label, query);
+				if (marked) hits[item.id] = marked;
+			}
+		}
+		const selected = this.#menu.selectedItem;
+		return {
+			items,
+			order,
+			selected: selected && selected.type !== "kind-header" ? nativeItemId(selected) : null,
+			hits,
+			grouped,
+		};
+	}
+
+	/**
+	 * The visible rows as a native `list` (kind headers included, so the
+	 * selection matches the keyboard's), for terminals without `picker`.
+	 */
+	describeList(key: string): NativeNode {
+		this.#toolFrame = snapshotToolRuntimeSource(this.#toolSource);
+		const masterDisabled = this.#isMasterDisabled();
+		const rows: NativeNode[] = [];
+		for (const entry of this.#menu.visibleItems) {
+			if (entry.type === "kind-header") {
+				rows.push(
+					node(
+						"item",
+						{
+							label: [span(entry.label, "muted strong")],
+							value: [span(String(entry.count), "dim")],
+						},
+						undefined,
+						nativeItemId(entry),
+					),
+				);
+				continue;
+			}
+			const item = this.#pickerItem(entry, masterDisabled);
+			const label: TspSpan[] = [
+				span(`${this.#nativeGlyph(item.dot)} `, item.dot ?? "dim"),
+				span(typeof item.label === "string" ? item.label : "", item.tone === "muted" ? "dim" : "strong"),
+			];
+			for (const badge of item.badges ?? []) label.push(span(`  ${badge.text}`, badge.tone ?? "muted"));
+			rows.push(
+				node(
+					"item",
+					{
+						label,
+						detail: typeof item.detail === "string" ? [span(item.detail, "dim")] : item.detail,
+						disabled: item.disabled !== undefined,
+					},
+					undefined,
+					item.id,
+				),
+			);
+		}
+		const selected = this.#menu.selectedItem;
+		return node(
+			"list",
+			{
+				selected: selected ? nativeItemId(selected) : null,
+				empty: "No extensions found for this provider.",
+				virtual: true,
+				grow: 1,
+				basis: 0,
+				actions: { click: "select", dblclick: "activate" },
+				aria: "Extensions",
+			},
+			rows,
+			key,
+		);
+	}
+
+	/**
+	 * A pointer pick of the row with native id `id`: select it, then toggle it
+	 * when `activate` (the click-on-selected / double-click path). Returns
+	 * whether the id named a visible row.
+	 */
+	pickNative(id: string, activate: boolean): boolean {
+		const index = this.#menu.visibleItems.findIndex(item => nativeItemId(item) === id);
+		if (index < 0) return false;
+		if (index !== this.#menu.selectedIndex) {
+			this.#menu.setSelectedIndex(index);
+			this.#syncScroll();
+			this.#notifySelectionChange();
+		}
+		if (activate) this.activateSelected();
+		return true;
+	}
+
+	/** The selected row's switch, or undefined on a kind header or an empty list. */
+	selectedSwitch(): ExtensionListSwitch | undefined {
+		const item = this.#menu.selectedItem;
+		if (!item || item.type === "kind-header") return undefined;
+		if (item.type === "master") return { on: item.enabled };
+		if (item.type === "user-source") {
+			const providerOff =
+				this.#callbacks.getProviders?.().find(provider => provider.id === item.providerId)?.enabled === false;
+			return providerOff ? { on: item.enabled, blocked: "Provider disabled" } : { on: item.enabled };
+		}
+		const on = item.item.state !== "disabled";
+		if (isShadowedExtension(item.item)) return { on, blocked: "Shadowed by another source" };
+		if (this.#isMasterDisabled()) return { on, blocked: "Provider disabled" };
+		return { on };
+	}
+
+	#isMasterDisabled(): boolean {
+		return (
+			this.#masterSwitchProvider !== null &&
+			this.#callbacks.getProviders?.().find(provider => provider.id === this.#masterSwitchProvider)?.enabled ===
+				false
+		);
+	}
+
+	/** A text status glyph for the `list` fallback, matching the ANSI row icons. */
+	#nativeGlyph(dot: TspTone | undefined): string {
+		switch (dot) {
+			case "success":
+				return theme.status.enabled;
+			case "warning":
+				return theme.status.shadowed;
+			case "pending":
+				return theme.status.running;
+			default:
+				return theme.status.disabled;
+		}
+	}
+
+	#pickerItem(entry: Exclude<ListItem, { type: "kind-header" }>, masterDisabled: boolean): TspPickerItem {
+		const id = nativeItemId(entry);
+		if (entry.type === "master") {
+			return {
+				id,
+				label: `Enable ${sanitizeDisplayLine(entry.providerName)}`,
+				icon: "power",
+				dot: entry.enabled ? "success" : "muted",
+				badges: [{ text: "Master Switch", tone: "warning" }],
+				tone: entry.enabled ? undefined : "muted",
+			};
+		}
+		if (entry.type === "user-source") {
+			const off = !entry.enabled || masterDisabled;
+			return {
+				id,
+				label: `Load ~/ ${sanitizeDisplayLine(entry.providerName)} config`,
+				icon: "folder",
+				detail: "opt-in; project config always loads",
+				dot: entry.enabled ? "success" : "muted",
+				tone: off ? "muted" : undefined,
+				disabled: masterDisabled ? "Provider disabled" : undefined,
+			};
+		}
+		const ext = entry.item;
+		const shadowed = isShadowedExtension(ext);
+		const effectivelyDisabled = masterDisabled || ext.state === "disabled";
+		const mcpSnap = this.#mcpSnapshot(ext, shadowed, effectivelyDisabled);
+		const hint = this.#extensionHint(ext, mcpSnap);
+		const dot: TspTone = masterDisabled
+			? "muted"
+			: shadowed
+				? "warning"
+				: mcpSnap
+					? MCP_HEALTH_TONE[mcpSnap.health]
+					: ext.state === "active"
+						? "success"
+						: "muted";
+		return {
+			id,
+			label: sanitizeDisplayLine(ext.displayName),
+			detail: hint ? sanitizeDisplayLine(hint) : undefined,
+			dot,
+			tone: effectivelyDisabled ? "muted" : shadowed ? "warning" : undefined,
+			badges: shadowed
+				? [
+						{
+							text: "shadowed",
+							tone: "warning",
+							title: ext.shadowedBy ? `Shadowed by ${sanitizeDisplayLine(ext.shadowedBy)}` : undefined,
+						},
+					]
+				: undefined,
+			facts: { kind: this.#getKindLabel(ext.kind) },
+			disabled: effectivelyDisabled
+				? masterDisabled
+					? "Provider disabled"
+					: `Disabled · ${formatKeyHint("space")} to enable`
+				: undefined,
+		};
+	}
+
+	/** Live MCP health for an unshadowed discovered server row. */
+	#mcpSnapshot(ext: Extension, shadowed: boolean, effectivelyDisabled: boolean): MCPRuntimeSnapshot | undefined {
+		return ext.kind === "mcp" && isDiscoveredMcpServer(ext.raw) && !shadowed
+			? snapshotMcpRuntime(ext.raw, this.#mcpSource, {
+					enabled: !effectivelyDisabled,
+					shadowed: false,
+				})
+			: undefined;
+	}
+
+	/** The trailing row hint: MCP health/project, or the kind's own list hint. */
+	#extensionHint(ext: Extension, mcpSnap: MCPRuntimeSnapshot | undefined): string | undefined {
+		return mcpSnap
+			? joinListHints(formatMcpListHint(mcpSnap), projectListHint(ext))
+			: formatExtensionListHint(ext, ext.kind === "tool" ? liveToolsForExtension(ext, this.#toolFrame) : []);
+	}
+
 	#renderUserSourceSwitch(
 		item: ListItem & { type: "user-source" },
 		isSelected: boolean,
@@ -317,13 +585,7 @@ export class ExtensionList implements Component {
 	#renderExtensionRow(ext: Extension, isSelected: boolean, width: number, masterDisabled: boolean): string {
 		const shadowed = isShadowedExtension(ext);
 		const effectivelyDisabled = masterDisabled || ext.state === "disabled";
-		const mcpSnap =
-			ext.kind === "mcp" && isDiscoveredMcpServer(ext.raw) && !shadowed
-				? snapshotMcpRuntime(ext.raw, this.#mcpSource, {
-						enabled: !effectivelyDisabled,
-						shadowed: false,
-					})
-				: undefined;
+		const mcpSnap = this.#mcpSnapshot(ext, shadowed, effectivelyDisabled);
 
 		const stateIcon = shadowed
 			? this.#getStateIcon("shadowed", masterDisabled)
@@ -348,9 +610,7 @@ export class ExtensionList implements Component {
 		const namePadded = this.#padText(name, nameWidth);
 		line += namePadded;
 
-		const hint = mcpSnap
-			? joinListHints(formatMcpListHint(mcpSnap), projectListHint(ext))
-			: formatExtensionListHint(ext, ext.kind === "tool" ? liveToolsForExtension(ext, this.#toolFrame) : []);
+		const hint = this.#extensionHint(ext, mcpSnap);
 		if (hint) {
 			const triggerStyle = effectivelyDisabled
 				? "dim"
@@ -562,8 +822,8 @@ export class ExtensionList implements Component {
 		);
 	}
 
-	/** Toggle the selected item, or flip the provider master switch when on it. */
-	#activateSelected(): void {
+	/** Toggle the selected item, or flip the provider master switch when on it (Space/Enter). */
+	activateSelected(): void {
 		const item = this.#menu.selectedItem;
 		if (item?.type === "master") {
 			this.#callbacks.onMasterToggle?.(item.providerId);
@@ -614,7 +874,7 @@ export class ExtensionList implements Component {
 		const index = this.hitTest(line);
 		if (index === null) return;
 		if (index === this.#menu.selectedIndex) {
-			this.#activateSelected();
+			this.activateSelected();
 			return;
 		}
 		this.#menu.setSelectedIndex(index);
@@ -637,7 +897,7 @@ export class ExtensionList implements Component {
 
 		// Space or Enter: activate the selected row (toggle item / master switch)
 		if (data === " " || matchesKey(data, "enter") || matchesKey(data, "return") || data === "\n") {
-			this.#activateSelected();
+			this.activateSelected();
 			return;
 		}
 

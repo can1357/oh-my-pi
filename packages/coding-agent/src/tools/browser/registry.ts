@@ -9,6 +9,7 @@ import type { CmuxKind } from "./cmux/rpc";
 import { CmuxSocketClient } from "./cmux/socket-client";
 import {
 	BROWSER_PROTOCOL_TIMEOUT_MS,
+	connectPuppeteer,
 	DEFAULT_VIEWPORT,
 	launchHeadlessBrowser,
 	loadPuppeteer,
@@ -220,7 +221,7 @@ async function openBrowserHandle(kind: BrowserKind, opts: AcquireBrowserOptions)
 		const cdpUrl = normalizeConnectedCdpUrl(kind.cdpUrl);
 		await waitForCdp(cdpUrl, 5_000, opts.signal);
 		const puppeteer = await loadPuppeteer();
-		const browser = await puppeteer.connect({
+		const browser = await connectPuppeteer(puppeteer, {
 			browserURL: cdpUrl,
 			defaultViewport: null,
 			protocolTimeout: BROWSER_PROTOCOL_TIMEOUT_MS,
@@ -257,8 +258,23 @@ async function openBrowserHandle(kind: BrowserKind, opts: AcquireBrowserOptions)
 				`omp browser relay is serving at ${cdpUrl} but its extension never connected. Install it with \`omp browser-relay install\` and check the toolbar badge shows "on".`,
 			);
 		}
+		if (outcome === "extension-gone") {
+			throw new ToolError(
+				`omp browser relay is serving at ${cdpUrl} but its extension disconnected and has not come back. Open Chrome with the OMP Browser Relay extension and check the toolbar badge shows "on".`,
+			);
+		}
+		if (outcome === "outdated-relay") {
+			throw new ToolError(
+				`The browser relay at ${cdpUrl} is out of date. Restart the relay under this OMP version, then retry.`,
+			);
+		}
+		if (outcome === "outdated-extension") {
+			throw new ToolError(
+				"The OMP Browser Relay extension is out of date. Run `omp browser-relay install` and reload the extension in Chrome.",
+			);
+		}
 		const puppeteer = await loadPuppeteer();
-		const browser = await puppeteer.connect({
+		const browser = await connectPuppeteer(puppeteer, {
 			browserURL: cdpUrl,
 			defaultViewport: null,
 			protocolTimeout: BROWSER_PROTOCOL_TIMEOUT_MS,
@@ -314,7 +330,7 @@ async function openBrowserHandle(kind: BrowserKind, opts: AcquireBrowserOptions)
 	const puppeteer = await loadPuppeteer();
 	let browser: Browser;
 	try {
-		browser = await puppeteer.connect({
+		browser = await connectPuppeteer(puppeteer, {
 			browserURL: cdpUrl,
 			defaultViewport: null,
 			protocolTimeout: BROWSER_PROTOCOL_TIMEOUT_MS,
@@ -365,7 +381,9 @@ async function disposeBrowserHandle(handle: BrowserHandle, opts: ReleaseBrowserO
 			// connection. `kill` is scoped to spawned-app browsers — stopping the
 			// shared daemon here would tear down every other session's tabs. The
 			// daemon dies with the last omp client in the project (broker idle
-			// teardown), or via an explicit stop (`write proc://<name>/kill`).
+			// teardown), when its CDP endpoint stops answering after a failed tab
+			// cleanup (`stopSharedBrowserIfUnreachable`), or via an explicit stop
+			// (`write proc://<name>/kill`).
 			if (handle.browser.connected) {
 				try {
 					handle.browser.disconnect();
@@ -448,7 +466,7 @@ async function openSharedHeadlessHandle(
 			);
 		}
 		const puppeteer = await loadPuppeteer();
-		const browser = await puppeteer.connect({
+		const browser = await connectPuppeteer(puppeteer, {
 			browserWSEndpoint: shared.wsEndpoint,
 			defaultViewport: kind.headless
 				? {

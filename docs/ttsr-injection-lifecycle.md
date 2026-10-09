@@ -109,6 +109,8 @@ When assistant updates arrive and rules exist:
 - for tools exposing `matcherEntries(args)`, the streamed payload is projected per touched file into `{ path, digest }` entries (added lines only, same-path sections/hunks merged); each entry is checked in isolation via `checkSnapshot(entry.digest, perFileContext)` under its own file path and stream key (`<toolcall>#<path>`), so a path-scoped rule like `tool:edit(*.ts)` never fires on text belonging to a sibling Markdown hunk in a multi-file payload
 - otherwise, for tools exposing a combined `matcherDigest` (edit/write), replace the scoped buffer with the reconstructed source snapshot and call `checkSnapshot(snapshot, matchContext)`; otherwise append the delta into the scoped manager buffer and call `checkDelta(delta, matchContext)` (synchronous regex matching either way)
 - `checkDelta` skips buffering entirely for text/thinking sources when no registered rule allows that source (`canMatchText`/`canMatchThinking`), so unmatched prose/thinking deltas pay no buffering cost
+- matching is incremental: a condition that cannot cross a newline (no `s` flag, nothing in it matches `\n`) is re-tested only from the start of the line holding the previous buffer end, so it gives the full-scan result on every delta; a condition that can span lines is re-scanned over the whole buffer only while it is ≤4 KB or once it has grown 25% since the last full scan
+- `text_end`, `thinking_end`, and `toolcall_end` run a final whole-buffer check (`TtsrCheckOptions.final`), so a cross-line match deferred by the growth throttle is still caught before the block closes; `checkDelta` defaults to `final: false`, `checkSnapshot` to `final: true` (one-shot callers such as the CLI stay exact)
 
 AST matching does not run in the streaming listener. The awaited `beforeToolCall` hook checks the finalized, validated execution arguments using the same per-file or combined source snapshot. An interrupt blocks the tool before its side effects, marks the assistant turn aborted, and follows the existing TTSR injection/retry path; `never` mode allows execution and attaches its reminder to the result. Streaming regex matching remains synchronous.
 
@@ -144,7 +146,7 @@ After the 50ms timeout, the scheduled task first verifies that its retry token, 
 3. if `contextMode === "discard"`, drops the targeted partial assistant output with `agent.replaceMessages(...slice(0, targetAssistantIndex))`
 4. builds injection content from pending rules using `ttsr-interrupt.md`
 5. appends a hidden runtime custom message and persists a matching `custom_message` entry with `customType: "ttsr-injection"` and `details.rules`
-6. marks/persists those rule names through a `ttsr_injection` entry and calls `agent.continue()` to retry generation
+6. marks/persists those rule names through a `ttsr_injection` entry and schedules a continuation with the session's agent-continue scheduler. If the interrupted run is still busy, the scheduler waits for it to settle and retries; skipped or failed continuations release the resume gate.
 
 Template payload is:
 
@@ -298,7 +300,7 @@ A rule with `question` is judged: its natural-language question goes to the `jud
 
 - A yes-probability ≥ 0.7 flags the rule. Flagged rules pass through `TtsrManager.claim()`, which drops rules another verdict already claimed or that the repeat policy blocks, and marks the rest injected in memory; one rule flagged by several outputs is therefore delivered once.
 - Verdicts arriving after a session replacement (`/new`, session switch) are dropped.
-- Survivors emit `ttsr_triggered` and are rendered with `ttsr-warning.md` into a hidden `ttsr-injection` custom message (`details.rules`), sent with `deliverAs: "aside"`: mid-run it joins the next step without interrupting; on an idle session it starts a turn. Its `message_end` persists the `ttsr_injection` entry.
+- Survivors emit `ttsr_triggered` and are rendered with `ttsr-warning.md` into a hidden `ttsr-injection` custom message (`details.rules`), sent with `deliverAs: "aside"`: mid-run it joins the next step without interrupting (a running interruptible `wait` ends); on an idle session it starts a turn. Its `message_end` persists the `ttsr_injection` entry.
 - The session's `onBeforeYield` hook awaits in-flight judgments (up to 5s) before the agent loop drains asides and stops, so a warning about the final reply or last tool call lands in the same run. Later verdicts still arrive as asides.
 - Judge failures (no credentials, timeouts, parse errors) are logged and deliver nothing.
 

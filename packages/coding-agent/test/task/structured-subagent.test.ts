@@ -2,20 +2,29 @@ import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import path from "node:path";
-import { buildModel } from "@oh-my-pi/pi-catalog/build";
-import { normalizeModelPatternList, resolveModelOverride } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
+import {
+	disableProvider,
+	enableProvider,
+	getDisabledProviders,
+	isProviderEnabled,
+	setDisabledProviders,
+} from "@oh-my-pi/pi-coding-agent/capability";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { AgentCompactionThresholdOverride } from "@oh-my-pi/pi-coding-agent/config/compaction-threshold";
 import type { BeforeSubagentSpawnEvent } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
+import { cfgDisabledProviders, cfgEnabledModels } from "@oh-my-pi/pi-coding-agent/config/model-settings";
 import {
 	artifactsDirsFromRegistry,
 	resetRegisteredArtifactDirsForTests,
 } from "@oh-my-pi/pi-coding-agent/internal-urls/registry-helpers";
 import * as planHandoff from "@oh-my-pi/pi-coding-agent/plan-mode/plan-handoff";
+import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import * as discoveryModule from "@oh-my-pi/pi-coding-agent/task/discovery";
 import { createEvalCustomTools } from "@oh-my-pi/pi-coding-agent/task/eval-tools";
 import * as executorModule from "@oh-my-pi/pi-coding-agent/task/executor";
 import * as isolationRunner from "@oh-my-pi/pi-coding-agent/task/isolation-runner";
+import { resolveRoleRoute } from "@oh-my-pi/pi-coding-agent/task/role-routing";
+import { createTaskModelFixture, type TaskModelFixture } from "../helpers/model-fixtures";
 import {
 	buildStructuredSubagentRecoveryHint,
 	invalidModelSelectorReason,
@@ -40,19 +49,7 @@ const AGENT: AgentDefinition = {
 	output: { type: "object", properties: { agent: { type: "boolean" } } },
 };
 
-/** One catalog entry so a populated registry can reject an unmatchable selector. */
-const MODEL = buildModel({
-	id: "claude-sonnet-4-5",
-	name: "Claude Sonnet 4.5",
-	api: "anthropic-messages",
-	provider: "anthropic",
-	reasoning: false,
-	baseUrl: "https://api.anthropic.com",
-	input: ["text"],
-	cost: { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 },
-	contextWindow: 200000,
-	maxTokens: 8192,
-});
+const modelFixtures: TaskModelFixture[] = [];
 
 function session(
 	options: {
@@ -69,26 +66,32 @@ function session(
 		sessionAgents?: readonly AgentDefinition[];
 	} = {},
 ): ToolSession {
+	const settings =
+		options.settings ??
+		Settings.isolated({
+			"task.maxRecursionDepth": options.maxDepth ?? 2,
+			"task.isolation.enabled": options.isolationEnabled ?? false,
+			"isolation.backend": "rcopy",
+			"task.enableLsp": true,
+			...(options.modelRoles ? { modelRoles: options.modelRoles } : {}),
+			...(options.isolationApply !== undefined ? { "task.isolation.apply": options.isolationApply } : {}),
+			...(options.agentServiceTierOverrides
+				? { "task.agentServiceTierOverrides": options.agentServiceTierOverrides }
+				: {}),
+			...(options.agentCompactionThresholdOverrides
+				? { "task.agentCompactionThresholdOverrides": options.agentCompactionThresholdOverrides }
+				: {}),
+		});
+	const fixture = createTaskModelFixture(settings);
+	modelFixtures.push(fixture);
 	return {
 		cwd: options.cwd ?? "/tmp",
 		hasUI: false,
 		outputSchema: options.outputSchema,
-		settings:
-			options.settings ??
-			Settings.isolated({
-				"task.maxRecursionDepth": options.maxDepth ?? 2,
-				"task.isolation.enabled": options.isolationEnabled ?? false,
-				"isolation.backend": "rcopy",
-				"task.enableLsp": true,
-				...(options.modelRoles ? { modelRoles: options.modelRoles } : {}),
-				...(options.isolationApply !== undefined ? { "task.isolation.apply": options.isolationApply } : {}),
-				...(options.agentServiceTierOverrides
-					? { "task.agentServiceTierOverrides": options.agentServiceTierOverrides }
-					: {}),
-				...(options.agentCompactionThresholdOverrides
-					? { "task.agentCompactionThresholdOverrides": options.agentCompactionThresholdOverrides }
-					: {}),
-			}),
+		settings,
+		modelRegistry: fixture.modelRegistry,
+		getActiveModel: fixture.getActiveModel,
+		getActiveModelString: fixture.getActiveModelString,
 		getSessionFile: () => null,
 		getSessionSpawns: () => "*",
 		getSessionAgents: () => options.sessionAgents ?? [],
@@ -98,7 +101,7 @@ function session(
 
 function request(overrides: Partial<StructuredSubagentRequest> = {}): StructuredSubagentRequest {
 	return {
-		session: session(),
+		session: overrides.session ?? session(),
 		invocationKind: "task",
 		assignment: "Inspect the target.",
 		agent: "worker",
@@ -130,19 +133,20 @@ function mockDiscovery(agent: AgentDefinition = AGENT): void {
 afterEach(() => {
 	vi.restoreAllMocks();
 	resetRegisteredArtifactDirsForTests();
+	for (const fixture of modelFixtures.splice(0)) fixture.close();
 });
 
 describe("structured subagent primitive", () => {
 	it("resolves user-tagged model agents for task and eval but rejects untagged names", async () => {
 		mockDiscovery();
 		const taggedSession = session();
-		taggedSession.getSessionAgents = () => [{ ...AGENT, name: "m1", model: ["a/x"] }];
+		taggedSession.getSessionAgents = () => [{ ...AGENT, name: "m1", model: ["routing-test/primary"] }];
 		for (const invocationKind of ["task", "eval"] satisfies StructuredSubagentRequest["invocationKind"][]) {
 			const policy = await resolveEffectiveSubagentPolicy(
 				request({ session: taggedSession, agent: "m1", invocationKind }),
 			);
 			expect(policy.agent.name).toBe("m1");
-			expect(policy.modelOverride).toEqual(["a/x"]);
+			expect(resolveRoleRoute(policy.roleRoute!, taggedSession.modelRegistry).model.id).toBe("primary");
 		}
 		await expect(resolveEffectiveSubagentPolicy(request({ session: taggedSession, agent: "m9" }))).rejects.toThrow(
 			'Unknown agent "m9". Available: worker, m1',
@@ -150,11 +154,40 @@ describe("structured subagent primitive", () => {
 	});
 
 	it("keeps discovered agents authoritative on pseudonym collisions", async () => {
-		mockDiscovery({ ...AGENT, name: "m1", model: ["b/y"] });
+		mockDiscovery({ ...AGENT, name: "m1", model: ["routing-test/fallback"] });
 		const taggedSession = session();
-		taggedSession.getSessionAgents = () => [{ ...AGENT, name: "m1", model: ["a/x"] }];
+		taggedSession.getSessionAgents = () => [{ ...AGENT, name: "m1", model: ["routing-test/primary"] }];
 		const policy = await resolveEffectiveSubagentPolicy(request({ session: taggedSession, agent: "m1" }));
-		expect(policy.modelOverride).toEqual(["b/y"]);
+		expect(resolveRoleRoute(policy.roleRoute!, taggedSession.modelRegistry).model.id).toBe("fallback");
+	});
+
+	it("rescans agents when a plugin provider is disabled while an earlier discovery is in flight", async () => {
+		const previouslyDisabled = getDisabledProviders();
+		enableProvider("omp-plugins");
+		const firstEntered = Promise.withResolvers<void>();
+		const releaseFirst = Promise.withResolvers<void>();
+		let scans = 0;
+		vi.spyOn(discoveryModule, "discoverAgents").mockImplementation(async () => {
+			const pluginsEnabled = isProviderEnabled("omp-plugins");
+			if (++scans === 1) {
+				firstEntered.resolve();
+				await releaseFirst.promise;
+			}
+			const agents = pluginsEnabled ? [AGENT, { ...AGENT, name: "plugin-worker" }] : [AGENT];
+			return { agents, projectAgentsDir: null };
+		});
+		try {
+			const first = resolveEffectiveSubagentPolicy(request({ agent: "plugin-worker" }));
+			await firstEntered.promise;
+			disableProvider("omp-plugins");
+			const second = resolveEffectiveSubagentPolicy(request({ agent: "plugin-worker" }));
+			releaseFirst.resolve();
+
+			expect((await first).agent.name).toBe("plugin-worker");
+			await expect(second).rejects.toThrow('Unknown agent "plugin-worker"');
+		} finally {
+			setDisabledProviders(previouslyDisabled);
+		}
 	});
 
 	it("uses caller, agent, then session schemas in precedence order", async () => {
@@ -253,29 +286,31 @@ describe("structured subagent primitive", () => {
 			"task:\n  enableEffort: true\nretry:\n  modelFallback: true\n",
 		);
 		const liveSettings = await Settings.loadIsolated({ cwd: projectDir, agentDir });
-		const liveSession = {
-			...session(),
-			cwd: projectDir,
-			settings: liveSettings,
-		} as ToolSession;
+		const liveSession = session({ cwd: projectDir, settings: liveSettings });
 
 		try {
 			await Bun.write(
 				path.join(projectDir, ".omp", "config.yml"),
-				"task:\n  agentModelOverrides:\n    hot-worker: xai-oauth/grok-4.6:medium\n  enableEffort: false\nretry:\n  modelFallback: false\n",
+				"task:\n  agentModelOverrides:\n    hot-worker: routing-test/fallback:medium\n  enableEffort: false\nretry:\n  modelFallback: false\n",
 			);
 			await Bun.write(
 				path.join(projectDir, ".omp", "agents", "hot-worker.md"),
-				"---\nname: hot-worker\ndescription: Newly added worker.\nmodel: openai/gpt-4o\n---\n\nInspect the assignment.\n",
+				"---\nname: hot-worker\ndescription: Newly added worker.\nmodel: routing-test/primary\n---\n\nInspect the assignment.\n",
 			);
 
 			const policy = await resolveEffectiveSubagentPolicy(request({ session: liveSession, agent: "hot-worker" }));
 
-			expect(policy.modelOverride).toEqual(["xai-oauth/grok-4.6:medium"]);
+			expect(resolveRoleRoute(policy.roleRoute!, liveSession.modelRegistry)).toMatchObject({
+				selector: "routing-test/fallback:medium",
+				thinkingLevel: "medium",
+				fixedEffort: true,
+			});
 			expect(cfgTaskEnableEffort.get(liveSettings)).toBe(false);
 			expect(cfgRetryModelFallback.get(liveSettings)).toBe(false);
 		} finally {
 			liveSettings.cancelPendingSaves();
+			// `Settings.loadIsolated` opened `<agentDir>/agent.db`; Windows cannot delete it while open.
+			AgentStorage.close();
 			await fs.rm(root, { recursive: true, force: true });
 		}
 	});
@@ -330,261 +365,335 @@ describe("structured subagent primitive", () => {
 			expect(second.serviceTierOverride).toBe("none");
 		} finally {
 			liveSettings.cancelPendingSaves();
+			AgentStorage.close();
 			await fs.rm(root, { recursive: true, force: true });
 		}
 	});
 
-	it("forwards parent-authorized model agents to nested subagent sessions", async () => {
-		mockDiscovery();
-		const inheritedAgent: AgentDefinition = { ...AGENT, name: "m1", model: ["b/y"] };
-		const parentSession = session({ sessionAgents: [inheritedAgent] });
-		const dispatched: executorModule.ExecutorOptions[] = [];
-		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
-			dispatched.push(options);
-			return result();
-		});
-
-		const settled = await runStructuredSubagent(request({ session: parentSession, retainArtifacts: true }));
-
-		expect(dispatched[0]?.inheritedSessionAgents).toEqual([inheritedAgent]);
-		await fs.rm(settled.artifactsDir, { recursive: true, force: true });
-	});
-	it("propagates a custom thinking-suffixed role alias through policy, dispatch, and settlement", async () => {
-		const customAgent = { ...AGENT, model: ["@reviewer:high"] };
-		mockDiscovery(customAgent);
-		const childSession = session({ modelRoles: { reviewer: "openai/gpt-4o" } });
-		const dispatched: executorModule.ExecutorOptions[] = [];
-		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
-			dispatched.push(options);
-			return { ...result(), modelRole: options.modelRole };
-		});
-
-		const settled = await runStructuredSubagent(
-			request({ session: childSession, agent: "worker", retainArtifacts: true }),
-		);
-
-		expect(settled.policy.modelRole).toBe("reviewer");
-		expect(dispatched[0]?.modelRole).toBe("reviewer");
-		expect(settled.result.modelRole).toBe("reviewer");
-		await fs.rm(settled.artifactsDir, { recursive: true, force: true });
-	});
-	it("does not treat a spawn handle as the HUD description", async () => {
-		mockDiscovery();
-		const dispatched: executorModule.ExecutorOptions[] = [];
-		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
-			dispatched.push(options);
-			return result();
-		});
-
-		const handleOnly = await runStructuredSubagent(
-			request({ identity: { id: "AuthLoader", label: "AuthLoader" }, retainArtifacts: true }),
-		);
-		expect(dispatched[0]?.description).toBeUndefined();
-		expect(dispatched[0]?.id).toBe("AuthLoader");
-		await fs.rm(handleOnly.artifactsDir, { recursive: true, force: true });
-
-		dispatched.length = 0;
-		const evalLabeled = await runStructuredSubagent(
-			request({
-				invocationKind: "eval",
-				identity: { label: "Refactor the auth flow" },
-				retainArtifacts: true,
-			}),
-		);
-		expect(dispatched[0]?.description).toBe("Refactor the auth flow");
-		await fs.rm(evalLabeled.artifactsDir, { recursive: true, force: true });
-	});
-
-	it("derives modelRole from the raw selector source in request, override, definition order", async () => {
-		const customAgent = { ...AGENT, model: ["@definition"] };
-		mockDiscovery(customAgent);
-		const roleSession = session({
+	it("selects request, exact override, frontmatter, then the actual live parent", async () => {
+		mockDiscovery({ ...AGENT, model: ["@definition"] });
+		const childSession = session({
 			modelRoles: {
-				request: "openai/gpt-4o",
-				override: "openai/gpt-4o",
-				definition: "openai/gpt-4o",
+				request: "routing-test/primary",
+				override: "routing-test/fallback:low",
+				definition: "routing-test/plain",
 			},
 		});
-		cfgTaskAgentModelOverrides.override(roleSession.settings, { worker: "@override" });
-
-		const requestPolicy = await resolveEffectiveSubagentPolicy(request({ session: roleSession, model: "@request" }));
-		expect(requestPolicy.modelRole).toBe("request");
-
-		const overridePolicy = await resolveEffectiveSubagentPolicy(request({ session: roleSession }));
-		expect(overridePolicy.modelRole).toBe("override");
-
-		const concreteOverrideSession = session({
-			modelRoles: {
-				override: "openai/gpt-4o",
-				definition: "openai/gpt-4o",
-			},
+		cfgTaskAgentModelOverrides.override(childSession.settings, { worker: "@override" });
+		const requested = await resolveEffectiveSubagentPolicy(
+			request({ session: childSession, model: "@request:high" }),
+		);
+		expect(resolveRoleRoute(requested.roleRoute!, childSession.modelRegistry)).toMatchObject({
+			selector: "routing-test/primary:high",
+			role: "request",
+			thinkingLevel: "high",
+			fixedEffort: true,
 		});
-		cfgTaskAgentModelOverrides.override(concreteOverrideSession.settings, { worker: "openai/gpt-4o" });
-		const concreteOverridePolicy = await resolveEffectiveSubagentPolicy(
-			request({ session: concreteOverrideSession }),
+		const overridden = await resolveEffectiveSubagentPolicy(request({ session: childSession }));
+		expect(resolveRoleRoute(overridden.roleRoute!, childSession.modelRegistry)).toMatchObject({
+			selector: "routing-test/fallback:low",
+			role: "override",
+		});
+		cfgTaskAgentModelOverrides.override(childSession.settings, {});
+		const defined = await resolveEffectiveSubagentPolicy(request({ session: childSession }));
+		expect(resolveRoleRoute(defined.roleRoute!, childSession.modelRegistry)).toMatchObject({
+			selector: "routing-test/plain",
+			role: "definition",
+		});
+		mockDiscovery();
+		const inherited = await resolveEffectiveSubagentPolicy(request({ session: childSession }));
+		expect(resolveRoleRoute(inherited.roleRoute!, childSession.modelRegistry)).toMatchObject({
+			selector: "routing-test/parent:medium",
+			thinkingLevel: "medium",
+			fixedEffort: true,
+		});
+	});
+
+	it("admits a configured custom role without an agent roster entry and fixes its requested effort", async () => {
+		mockDiscovery();
+		const childSession = session({ modelRoles: { "project-review": "routing-test/primary:low" } });
+		const policy = await resolveEffectiveSubagentPolicy(
+			request({ session: childSession, model: "@project-review:high" }),
 		);
-		expect(concreteOverridePolicy.modelRole).toBeUndefined();
+		expect(resolveRoleRoute(policy.roleRoute!, childSession.modelRegistry)).toMatchObject({
+			model: { provider: "routing-test", id: "primary" },
+			selector: "routing-test/primary:high",
+			role: "project-review",
+			thinkingLevel: "high",
+			fixedEffort: true,
+			occurrence: 0,
+		});
+		expect(policy.agent.name).toBe("worker");
+		expect(policy.effectiveAgent.tools).toEqual(AGENT.tools);
+	});
 
-		const definitionPolicy = await resolveEffectiveSubagentPolicy(
-			request({ session: session({ modelRoles: { definition: "openai/gpt-4o" } }) }),
+	it("inherits @default model identity and effort rather than the configured default role", async () => {
+		mockDiscovery({ ...AGENT, model: ["routing-test/plain"] });
+		const childSession = session({ modelRoles: { default: "routing-test/fallback:low" } });
+		for (const [model, thinkingLevel] of [
+			["@default", "medium"],
+			["@default:high", "high"],
+		] as const) {
+			const policy = await resolveEffectiveSubagentPolicy(request({ session: childSession, model }));
+			expect(resolveRoleRoute(policy.roleRoute!, childSession.modelRegistry)).toMatchObject({
+				model: { provider: "routing-test", id: "parent" },
+				selector: `routing-test/parent:${thinkingLevel}`,
+				thinkingLevel,
+				fixedEffort: true,
+			});
+		}
+	});
+
+	it("preserves implicit smol configured-default routing without changing explicit live-parent inheritance", async () => {
+		mockDiscovery({ ...AGENT, model: ["@smol"] });
+		const childSession = session({
+			modelRoles: { default: "routing-test/fallback:low", independent: "routing-test/fallback" },
+		});
+		const implicit = await resolveEffectiveSubagentPolicy(request({ session: childSession }));
+		expect(resolveRoleRoute(implicit.roleRoute!, childSession.modelRegistry)).toMatchObject({
+			model: { id: "fallback" },
+			thinkingLevel: "low",
+			role: "default",
+		});
+		const parent = await resolveEffectiveSubagentPolicy(request({ session: childSession, model: "@default" }));
+		expect(resolveRoleRoute(parent.roleRoute!, childSession.modelRegistry)).toMatchObject({
+			model: { id: "parent" },
+			thinkingLevel: "medium",
+		});
+		childSession.settings.setModelRole("default", "routing-test/primary:high");
+		expect(() => resolveRoleRoute(implicit.roleRoute!, childSession.modelRegistry)).toThrow(/configuration changed/);
+		expect(resolveRoleRoute(parent.roleRoute!, childSession.modelRegistry).model.id).toBe("parent");
+	});
+
+	it("requires model discovery and an actual parent rather than manufacturing inheritance", async () => {
+		mockDiscovery();
+		const noRegistry = session();
+		noRegistry.modelRegistry = undefined;
+		await expect(resolveEffectiveSubagentPolicy(request({ session: noRegistry, model: "@default" }))).rejects.toThrow(
+			/Model discovery is required/,
 		);
-		expect(definitionPolicy.modelRole).toBe("definition");
-	});
-	it("falls through an empty request selector to the agent definition role", async () => {
-		const customAgent = { ...AGENT, model: ["@definition"] };
-		mockDiscovery(customAgent);
-		const childSession = session({ modelRoles: { definition: "openai/gpt-4o" } });
-
-		const policy = await resolveEffectiveSubagentPolicy(request({ session: childSession, model: "" }));
-
-		expect(policy.modelRole).toBe("definition");
-		expect(policy.modelOverride).toEqual(["openai/gpt-4o"]);
+		const noParent = session({ modelRoles: { default: "routing-test/primary" } });
+		noParent.getActiveModel = undefined;
+		noParent.getActiveModelString = undefined;
+		await expect(resolveEffectiveSubagentPolicy(request({ session: noParent, model: "@default" }))).rejects.toThrow(
+			/actual live parent/,
+		);
+		await expect(resolveEffectiveSubagentPolicy(request({ session: noParent }))).rejects.toThrow(
+			/actual live parent/,
+		);
 	});
 
-	it("rejects an ambiguous per-call selector instead of resolving it as the default role", async () => {
-		mockDiscovery({ ...AGENT, model: ["@definition"] });
-		const childSession = session({ modelRoles: { definition: "openai/gpt-4o" } });
-
-		await expect(
-			resolveEffectiveSubagentPolicy(request({ session: childSession, model: "default" })),
-		).rejects.toThrow(/"@default"/);
-		// The rule applies per pattern, not to the joined chain.
-		await expect(
-			resolveEffectiveSubagentPolicy(request({ session: childSession, model: "openai/gpt-4o,default" })),
-		).rejects.toThrow(/"@default"/);
-	});
-
-	it("rejects an ambiguous per-call selector carrying a thinking suffix", async () => {
-		mockDiscovery({ ...AGENT, model: ["@definition"] });
-		const childSession = session({ modelRoles: { definition: "openai/gpt-4o" } });
-
-		for (const model of ["default:high", "DEFAULT:high", "inherit:low"]) {
+	it("rejects blank, malformed, ambiguous, and inherited aliases without silently dropping a supplied selector", async () => {
+		mockDiscovery();
+		const childSession = session({ modelRoles: { worker: "routing-test/primary" } });
+		for (const model of ["", " , ", [], ["routing-test/primary", ""], [42], null]) {
+			await expect(
+				resolveEffectiveSubagentPolicy(
+					request({ session: childSession, model: model as StructuredSubagentRequest["model"] }),
+				),
+			).rejects.toThrow(/invalid `model`/);
+		}
+		for (const model of [
+			"default",
+			"default:high",
+			"DEFAULT:high",
+			"inherit",
+			"inherit:low",
+			["routing-test/primary", "default"],
+		]) {
 			await expect(resolveEffectiveSubagentPolicy(request({ session: childSession, model }))).rejects.toThrow(
 				/"@default"/,
 			);
 		}
+		for (const model of ["@inherit", "@inherit:high", "pi/inherit", "pi/inherit:low"]) {
+			await expect(resolveEffectiveSubagentPolicy(request({ session: childSession, model }))).rejects.toThrow(
+				/cannot select @inherit/,
+			);
+		}
 	});
 
-	it("fails a per-call selector that expands to nothing rather than silently demoting it", async () => {
-		mockDiscovery({ ...AGENT, model: ["@definition"] });
-		const childSession = session({ modelRoles: { empty: "", definition: "openai/gpt-4o" } });
-
-		await expect(resolveEffectiveSubagentPolicy(request({ session: childSession, model: "@empty" }))).rejects.toThrow(
-			/No available model matches `model`/,
-		);
+	it("rejects unconfigured roles even alongside a usable authorized selection", async () => {
+		mockDiscovery();
+		const childSession = session();
+		for (const model of ["@missing", "@missing:high", ["@default", "@missing"]]) {
+			await expect(resolveEffectiveSubagentPolicy(request({ session: childSession, model }))).rejects.toThrow(
+				/not configured/,
+			);
+		}
 	});
 
-	it("fails a per-call selector that matches no available model", async () => {
-		mockDiscovery({ ...AGENT, model: ["@definition"] });
-		const childSession = session({ modelRoles: { definition: "openai/gpt-4o" } });
-		const registry = { getAvailable: () => [MODEL] } as unknown as ToolSession["modelRegistry"];
-		const withRegistry = { ...childSession, modelRegistry: registry } as ToolSession;
-
+	it("does not turn catalog, authentication, or enabled scope into model authority", async () => {
+		mockDiscovery();
+		const childSession = session({ settings: Settings.isolated({ enabledModels: ["routing-test/*"] }) });
+		const unassigned = childSession.modelRegistry!.find("routing-test", "unassigned")!;
+		expect(childSession.modelRegistry!.hasConfiguredAuth(unassigned)).toBe(true);
+		expect(childSession.modelRegistry!.getAvailable().some(model => model.id === "unassigned")).toBe(true);
 		await expect(
-			resolveEffectiveSubagentPolicy(request({ session: withRegistry, model: "openai/does-not-exist" })),
-		).rejects.toThrow(/No available model matches `model`/);
+			resolveEffectiveSubagentPolicy(request({ session: childSession, model: "routing-test/unassigned" })),
+		).rejects.toThrow(/not authorized/);
+		await expect(
+			resolveEffectiveSubagentPolicy(request({ session: childSession, model: "routing-test/not-in-catalog" })),
+		).rejects.toThrow(/no current operator grant/);
+	});
 
+	it("authorizes only the selected agent's exact case-sensitive settings override", async () => {
+		mockDiscovery({ ...AGENT, model: ["routing-test/primary"] });
+		const childSession = session();
+		cfgTaskAgentModelOverrides.override(childSession.settings, {
+			Worker: "routing-test/fallback",
+			other: "routing-test/unassigned",
+		});
+		const defined = await resolveEffectiveSubagentPolicy(request({ session: childSession }));
+		expect(resolveRoleRoute(defined.roleRoute!, childSession.modelRegistry).model.id).toBe("primary");
+		for (const model of ["routing-test/fallback", "routing-test/unassigned"]) {
+			await expect(resolveEffectiveSubagentPolicy(request({ session: childSession, model }))).rejects.toThrow(
+				/not authorized/,
+			);
+		}
+		cfgTaskAgentModelOverrides.override(childSession.settings, { worker: "routing-test/fallback:high" });
+		const overridden = await resolveEffectiveSubagentPolicy(request({ session: childSession }));
+		expect(resolveRoleRoute(overridden.roleRoute!, childSession.modelRegistry)).toMatchObject({
+			selector: "routing-test/fallback:high",
+			role: undefined,
+			fixedEffort: true,
+		});
+	});
+
+	it("fails an authorized explicit selection outside provider, auth, or enabled scope instead of inheriting", async () => {
+		mockDiscovery();
+		for (const scope of ["enabled", "disabled"] as const) {
+			const childSession = session({ modelRoles: { worker: "routing-test/primary" } });
+			childSession.modelRegistry!.getAll();
+			if (scope === "enabled") cfgEnabledModels.override(childSession.settings, ["routing-test/parent"]);
+			else cfgDisabledProviders.override(childSession.settings, ["routing-test"]);
+			await expect(
+				resolveEffectiveSubagentPolicy(request({ session: childSession, model: "routing-test/primary" })),
+			).rejects.toThrow(scope === "disabled" ? /disabled|No usable model remains/ : /No usable model remains/);
+		}
+		const childSession = session({ modelRoles: { worker: "routing-test/primary" } });
+		const unauthenticated = createTaskModelFixture(childSession.settings, { authenticated: false });
+		modelFixtures.push(unauthenticated);
+		Object.assign(childSession, {
+			modelRegistry: unauthenticated.modelRegistry,
+			getActiveModel: unauthenticated.getActiveModel,
+			getActiveModelString: unauthenticated.getActiveModelString,
+		});
+		await expect(
+			resolveEffectiveSubagentPolicy(request({ session: childSession, model: "routing-test/primary" })),
+		).rejects.toThrow(/No usable model remains/);
+	});
+
+	it("selects the first usable ordered role occurrence, retaining its own role and effort", async () => {
+		mockDiscovery();
+		const childSession = session({
+			modelRoles: { leading: "routing-test/primary:high", trailing: "routing-test/fallback:low" },
+		});
+		childSession.modelRegistry!.suppressSelector("routing-test/primary", Date.now() + 60_000);
 		const policy = await resolveEffectiveSubagentPolicy(
-			request({ session: withRegistry, model: "anthropic/claude-sonnet-4-5" }),
+			request({ session: childSession, model: ["@leading", "@trailing"] }),
 		);
-		expect(policy.modelOverride).toEqual(["anthropic/claude-sonnet-4-5"]);
+		expect(resolveRoleRoute(policy.roleRoute!, childSession.modelRegistry)).toMatchObject({
+			model: { id: "fallback" },
+			selector: "routing-test/fallback:low",
+			role: "trailing",
+			thinkingLevel: "low",
+			fixedEffort: true,
+			occurrence: 1,
+		});
 	});
 
-	it("inherits the parent's active model for `@default`, not the configured default role", async () => {
-		mockDiscovery({ ...AGENT, model: ["@definition"] });
-		const childSession = {
-			...session({ modelRoles: { default: "openai/gpt-4o", definition: "anthropic/claude-sonnet-4-5" } }),
-			getActiveModelString: () => "zai/glm-5.2:high",
-			getModelString: () => "openai/gpt-4o",
-		} as ToolSession;
-
-		const policy = await resolveEffectiveSubagentPolicy(request({ session: childSession, model: "@default" }));
-
-		expect(policy.modelOverride).toEqual(["zai/glm-5.2:high"]);
-		// The request still outranks the agent definition; it just resolves to inheritance.
-		expect(policy.modelRole).toBeUndefined();
-	});
-
-	it("admits mixed inherited requests when configured role candidates are unavailable", async () => {
-		mockDiscovery({ ...AGENT, model: ["@definition"] });
-		const childSession = {
-			...session({
-				modelRoles: { default: "openai/gpt-4o", smol: "openai/gpt-4o", definition: "openai/gpt-4o" },
+	it("counts duplicate role candidates as ordered occurrences rather than collapsing their efforts", async () => {
+		mockDiscovery();
+		const childSession = session({
+			settings: Settings.isolated({
+				modelRoles: { "project-review": "routing-test/primary:low" },
+				"retry.modelFallback": true,
+				"retry.fallbackChains": { "project-review": ["routing-test/primary:high", "routing-test/fallback:medium"] },
 			}),
-			getActiveModelString: () => "anthropic/claude-sonnet-4-5",
-			getModelString: () => "openai/gpt-4o",
-			modelRegistry: { getAvailable: () => [MODEL] },
-		} as ToolSession;
-		const policy = await resolveEffectiveSubagentPolicy(
-			request({ session: childSession, model: "@default:high,@smol" }),
-		);
-		const selected = resolveModelOverride(
-			normalizeModelPatternList(policy.modelOverride),
-			{ getAvailable: () => [MODEL] },
-			childSession.settings,
-		);
-
-		expect(selected.model).toBe(MODEL);
-		expect(policy.modelRole).toBeUndefined();
+		});
+		childSession.modelRegistry!.suppressSelector("routing-test/primary", Date.now() + 60_000);
+		const policy = await resolveEffectiveSubagentPolicy(request({ session: childSession, model: "@project-review" }));
+		expect(resolveRoleRoute(policy.roleRoute!, childSession.modelRegistry)).toMatchObject({
+			selector: "routing-test/fallback:medium",
+			role: "project-review",
+			thinkingLevel: "medium",
+			occurrence: 2,
+		});
+		await expect(
+			resolveEffectiveSubagentPolicy(request({ session: childSession, model: "routing-test/primary" })),
+		).rejects.toThrow(/No usable model remains/);
 	});
 
-	it("falls through an empty configured override to the agent definition role", async () => {
-		const customAgent = { ...AGENT, model: ["@definition"] };
-		mockDiscovery(customAgent);
-		const childSession = session({ modelRoles: { definition: "openai/gpt-4o" } });
-		cfgTaskAgentModelOverrides.override(childSession.settings, { worker: "" });
-
-		const policy = await resolveEffectiveSubagentPolicy(request({ session: childSession }));
-
-		expect(policy.modelRole).toBe("definition");
-		expect(policy.modelOverride).toEqual(["openai/gpt-4o"]);
-	});
-	it("falls through a configured alias that expands to no patterns", async () => {
-		const customAgent = { ...AGENT, model: ["@definition"] };
-		mockDiscovery(customAgent);
-		const childSession = session({ modelRoles: { empty: "", definition: "openai/gpt-4o" } });
-		cfgTaskAgentModelOverrides.override(childSession.settings, { worker: "@empty" });
-
-		const policy = await resolveEffectiveSubagentPolicy(request({ session: childSession }));
-
-		expect(policy.modelRole).toBe("definition");
-		expect(policy.modelOverride).toEqual(["openai/gpt-4o"]);
+	it("rejects unsupported requested efforts rather than clamping or falling through", async () => {
+		mockDiscovery();
+		const childSession = session({ modelRoles: { worker: "routing-test/primary,routing-test/plain" } });
+		for (const model of ["routing-test/primary:xhigh", ["routing-test/plain:high", "routing-test/primary:low"]]) {
+			await expect(resolveEffectiveSubagentPolicy(request({ session: childSession, model }))).rejects.toThrow(
+				/not supported/,
+			);
+		}
 	});
 
-	it("lets before_subagent_spawn replace model patterns at dispatch without dropping role identity", async () => {
-		mockDiscovery({ ...AGENT, model: ["@definition"] });
-		const childSession = session({ modelRoles: { definition: "anthropic/claude-opus-4-5" } });
+	it("preserves literal colon-containing IDs and recognizes only an appended effort suffix", async () => {
+		mockDiscovery();
+		const childSession = session({ modelRoles: { local: "routing-test/colon:model" } });
+		for (const model of ["routing-test/colon:model", "routing-test/colon:model:high"]) {
+			const policy = await resolveEffectiveSubagentPolicy(request({ session: childSession, model }));
+			expect(resolveRoleRoute(policy.roleRoute!, childSession.modelRegistry)).toMatchObject({
+				model: { id: "colon:model" },
+				selector: model,
+				fixedEffort: model.endsWith(":high"),
+			});
+		}
+	});
+
+	it("lets spawn hooks narrow approved candidates without running during frontend preflight", async () => {
+		mockDiscovery({ ...AGENT, model: ["@project-review"] });
+		const childSession = session({ modelRoles: { "project-review": "routing-test/primary,routing-test/fallback" } });
 		const events: BeforeSubagentSpawnEvent[] = [];
 		childSession.emitBeforeSubagentSpawn = async event => {
 			events.push(event);
-			return { model: "openai/gpt-4o", note: "pool test" };
+			return { model: "routing-test/fallback:high" };
 		};
-		const dispatched: executorModule.ExecutorOptions[] = [];
-		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
-			dispatched.push(options);
-			return result();
-		});
-
-		// Frontend preflight is side-effect free: stateful routers must not advance.
+		vi.spyOn(executorModule, "runSubprocess").mockResolvedValue(result());
 		await resolveEffectiveSubagentPolicy(request({ session: childSession }));
 		expect(events).toEqual([]);
-
 		const settled = await runStructuredSubagent(request({ session: childSession, retainArtifacts: true }));
-		expect(dispatched[0]).toMatchObject({
-			modelOverride: ["openai/gpt-4o"],
-			modelRole: "definition",
-			modelRoute: "pool test",
+		expect(events).toHaveLength(1);
+		expect(resolveRoleRoute(settled.policy.roleRoute!, childSession.modelRegistry)).toMatchObject({
+			selector: "routing-test/fallback:high",
+			role: "project-review",
+			fixedEffort: true,
 		});
-		expect(events).toEqual([
-			{
-				type: "before_subagent_spawn",
-				agent: "worker",
-				invocationKind: "task",
-				modelRole: "definition",
-				patterns: ["anthropic/claude-opus-4-5"],
-			},
-		]);
 		await fs.rm(settled.artifactsDir, { recursive: true, force: true });
+	});
+
+	it("rejects a hook that widens a selection even to an independently authorized model", async () => {
+		mockDiscovery();
+		const childSession = session({
+			modelRoles: { worker: "routing-test/primary", independent: "routing-test/fallback" },
+		});
+		childSession.emitBeforeSubagentSpawn = async () => ({ model: "routing-test/fallback" });
+		const dispatch = vi.spyOn(executorModule, "runSubprocess");
+		await expect(
+			runStructuredSubagent(request({ session: childSession, model: "routing-test/primary:high" })),
+		).rejects.toThrow(/escaped the approved model\/effort/);
+		expect(dispatch).not.toHaveBeenCalled();
+		expect(artifactsDirsFromRegistry()).toEqual([]);
+	});
+
+	it("rejects a spawn hook that removes or downgrades a fixed requested effort", async () => {
+		mockDiscovery();
+		const childSession = session({ modelRoles: { worker: "routing-test/primary" } });
+		const dispatch = vi.spyOn(executorModule, "runSubprocess");
+		for (const replacement of ["routing-test/primary", "routing-test/primary:low"]) {
+			childSession.emitBeforeSubagentSpawn = async () => ({ model: replacement });
+			await expect(
+				runStructuredSubagent(request({ session: childSession, model: "routing-test/primary:high" })),
+			).rejects.toThrow(/escaped the approved model\/effort/);
+		}
+		expect(dispatch).not.toHaveBeenCalled();
+		expect(artifactsDirsFromRegistry()).toEqual([]);
 	});
 
 	it("rejects dispatch before leasing artifacts when an extension blocks the spawn", async () => {
@@ -597,25 +706,6 @@ describe("structured subagent primitive", () => {
 		expect(error as StructuredSubagentError).toMatchObject({ kind: "preflight", message: "pool exhausted" });
 		expect(run).not.toHaveBeenCalled();
 		expect(artifactsDirsFromRegistry()).toEqual([]);
-	});
-
-	it("does not assign a role when a child uses an explicit model selector", async () => {
-		mockDiscovery();
-		const childSession = session({ modelRoles: { reviewer: "openai/gpt-4o" } });
-		const dispatched: executorModule.ExecutorOptions[] = [];
-		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
-			dispatched.push(options);
-			return result();
-		});
-
-		const settled = await runStructuredSubagent(
-			request({ session: childSession, model: "openai/gpt-4o", retainArtifacts: true }),
-		);
-
-		expect(settled.policy.modelRole).toBeUndefined();
-		expect(dispatched[0]?.modelRole).toBeUndefined();
-		expect(settled.result.modelRole).toBeUndefined();
-		await fs.rm(settled.artifactsDir, { recursive: true, force: true });
 	});
 
 	it("leases temporary artifacts for a retained invocation and registers them for agent URLs", async () => {
@@ -662,14 +752,6 @@ describe("structured subagent primitive", () => {
 		expect(settled.result.structuredOutput?.status).toBe("valid");
 		await expect(fs.stat(settled.artifactsDir)).resolves.toBeDefined();
 		await fs.rm(settled.artifactsDir, { recursive: true, force: true });
-	});
-	it("uses identical non-plan LSP and IRC policy for task and eval invocations", async () => {
-		mockDiscovery();
-		const taskPolicy = await resolveEffectiveSubagentPolicy(request());
-		const evalPolicy = await resolveEffectiveSubagentPolicy(request({ invocationKind: "eval" }));
-
-		expect(evalPolicy.enableLsp).toBe(taskPolicy.enableLsp);
-		expect(evalPolicy.enableIrc).toBe(taskPolicy.enableIrc);
 	});
 
 	it("rejects an invalid caller schema before executor dispatch in both modes", async () => {
@@ -784,96 +866,6 @@ describe("structured subagent primitive", () => {
 		expect(ids.sort()).toEqual(["Worker", "Worker-2"]);
 		expect(sharedSession.agentOutputManager).toBeDefined();
 		for (const run of settled) await fs.rm(run.artifactsDir, { recursive: true, force: true });
-	});
-
-	it("suppresses plan capability sources while preserving non-plan propagation", async () => {
-		mockDiscovery();
-		const mcpManager = {} as NonNullable<ToolSession["mcpManager"]>;
-		const extensionPaths = ["/plugins/example.ts"];
-		const preparedExtensions = [
-			{
-				path: extensionPaths[0]!,
-				resolvedPath: extensionPaths[0]!,
-				factory: () => {},
-				error: null,
-			},
-		] as NonNullable<ToolSession["preparedExtensions"]>;
-		const customToolPaths = [{ path: "/tools/example.ts", source: "project" }] as unknown as NonNullable<
-			ToolSession["customToolPaths"]
-		>;
-		const planSession = session({ planMode: true });
-		Object.assign(planSession, { mcpManager, extensionPaths, customToolPaths });
-		const nonPlanSession = session();
-		let explicitRoot = "/plugins/explicit";
-		const extensionRoots = () => ({
-			explicit: [explicitRoot],
-			mode: "explicit-only" as const,
-			configured: ["/plugins/configured"],
-			configuredLevel: "project" as const,
-		});
-		Object.assign(nonPlanSession, {
-			mcpManager,
-			extensionPaths,
-			customToolPaths,
-			preparedExtensions,
-			effectiveExtensionRoots: extensionRoots,
-		});
-		const mcpDisabledSession = session();
-		mcpDisabledSession.enableMCP = false;
-		const restrictedSession = session();
-		const getApiKey = async () => "exact-account-key";
-		Object.assign(restrictedSession, {
-			restrictToolNames: true,
-			getApiKey,
-			mcpManager,
-			extensionPaths,
-			customToolPaths,
-		});
-		const options = [] as executorModule.ExecutorOptions[];
-		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async executorOptions => {
-			options.push(executorOptions);
-			return result();
-		});
-
-		const planRun = await runStructuredSubagent(request({ session: planSession, retainArtifacts: true }));
-		const nonPlanRun = await runStructuredSubagent(request({ session: nonPlanSession, retainArtifacts: true }));
-		const mcpDisabledRun = await runStructuredSubagent(
-			request({ session: mcpDisabledSession, retainArtifacts: true }),
-		);
-		const restrictedRun = await runStructuredSubagent(request({ session: restrictedSession, retainArtifacts: true }));
-
-		expect(options[0]).toMatchObject({
-			enableMCP: false,
-			restrictToolNames: true,
-			preloadedExtensionPaths: [],
-			preloadedCustomToolPaths: [],
-		});
-		expect(options[0]?.mcpManager).toBeUndefined();
-		expect(options[1]).toMatchObject({
-			enableMCP: true,
-			mcpManager,
-			preloadedExtensionPaths: extensionPaths,
-			preloadedPreparedExtensions: preparedExtensions,
-			preloadedCustomToolPaths: customToolPaths,
-		});
-		expect(options[1]?.restrictToolNames).toBe(false);
-		expect(options[1]?.extensionRoots?.()).toEqual(extensionRoots());
-		explicitRoot = "/plugins/explicit-after-spawn";
-		expect(options[1]?.extensionRoots?.().explicit).toEqual([explicitRoot]);
-		expect(options[2]).toMatchObject({ enableMCP: false });
-		expect(options[2]?.mcpManager).toBeUndefined();
-		expect(options[3]).toMatchObject({
-			enableMCP: false,
-			restrictToolNames: true,
-			preloadedExtensionPaths: [],
-			preloadedCustomToolPaths: [],
-		});
-		expect(options[3]?.mcpManager).toBeUndefined();
-		expect(options[3]?.getApiKey).toBe(getApiKey);
-		await fs.rm(planRun.artifactsDir, { recursive: true, force: true });
-		await fs.rm(nonPlanRun.artifactsDir, { recursive: true, force: true });
-		await fs.rm(mcpDisabledRun.artifactsDir, { recursive: true, force: true });
-		await fs.rm(restrictedRun.artifactsDir, { recursive: true, force: true });
 	});
 
 	it("unregisters and removes a temporary lease when output ID allocation fails", async () => {
@@ -1010,31 +1002,6 @@ describe("structured subagent primitive", () => {
 		await fs.rm(settled.artifactsDir, { recursive: true, force: true });
 	});
 
-	it("defaults task isolation to auto-apply and lets config retain artifacts", async () => {
-		mockDiscovery();
-		const defaultPolicy = await resolveEffectiveSubagentPolicy(
-			request({ session: session({ isolationEnabled: true }), isolation: { requested: true } }),
-		);
-		expect(defaultPolicy.applyChanges).toBe(true);
-
-		const capturePolicy = await resolveEffectiveSubagentPolicy(
-			request({
-				session: session({ isolationEnabled: true, isolationApply: false }),
-				isolation: { requested: true },
-			}),
-		);
-		expect(capturePolicy.applyChanges).toBe(false);
-
-		const evalPolicy = await resolveEffectiveSubagentPolicy(
-			request({
-				invocationKind: "eval",
-				session: session({ isolationEnabled: true, isolationApply: false }),
-				isolation: { requested: true },
-			}),
-		);
-		expect(evalPolicy.applyChanges).toBe(true);
-	});
-
 	it("retains successful isolated task artifacts when auto-apply is disabled", async () => {
 		mockDiscovery();
 		let artifactsDir: string | undefined;
@@ -1067,17 +1034,13 @@ describe("per-call selector syntax", () => {
 	});
 
 	for (const model of [
-		"anthropic/claude-sonnet-4-5:heigh",
-		["anthropic/claude-sonnet-4-5:heigh", "anthropic/claude-sonnet-4-5"],
-		"@default,anthropic/claude-sonnet-4-5:heigh",
+		"routing-test/primary:heigh",
+		["routing-test/primary:heigh", "routing-test/primary"],
+		"@default,routing-test/primary:heigh",
 	]) {
 		it(`rejects an invalid thinking suffix instead of silently dropping it: ${JSON.stringify(model)}`, async () => {
 			mockDiscovery();
-			const childSession = {
-				...session(),
-				getActiveModelString: () => "anthropic/claude-sonnet-4-5",
-				modelRegistry: { getAvailable: () => [MODEL] },
-			} as ToolSession;
+			const childSession = session({ modelRoles: { worker: "routing-test/primary" } });
 			await expect(resolveEffectiveSubagentPolicy(request({ session: childSession, model }))).rejects.toThrow(
 				/Invalid thinking suffix/,
 			);

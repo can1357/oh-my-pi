@@ -159,11 +159,13 @@ At each call, the executor loads settings shell config (`shell`, `env`, optional
 
 Unless `bash.direnv` is `"off"`, preflight attempts to load the cwd's direnv/devenv changes within `bash.direnvLoadTimeoutMs`, additionally bounded by a positive command timeout. Direnv-provided variables are merged below explicit caller `env`; safe variables removed by direnv are prepended as `unset -v ...`. ACP-terminal and PTY routes run the same preflight before their backend; the non-PTY executor runs it internally.
 
+Successful exports retain their loaded environment and `DIRENV_*` state per `.envrc` directory. Each call still runs `direnv export json` to check direnv's watched inputs and authorization state, but an unchanged environment avoids re-running `.envrc` and devenv setup. OMP returns the complete diff relative to its process environment. A change to that process environment, or to the nanosecond timestamp, size, or existence of the `.envrc` or any direnv-watched path (including direnv's allow/deny files), restarts the load from a clean baseline; so does a warm export that reports any change. This cache does not modify OMP's process environment.
+
 If the selected shell includes `bash`, it attempts `getOrCreateSnapshot()`:
 
 - snapshot captures aliases/functions/options from user rc,
 - snapshot creation is best-effort,
-- failure falls back to no snapshot.
+- failure falls back to no snapshot; a failed snapshot is retried after 60 s, or sooner when the rc file's mtime or size or the shell environment changes.
 
 If `prefix` is configured, it wraps the command after any direnv unset prefix.
 
@@ -198,7 +200,7 @@ Behavior highlights:
 - `esc` while running kills the PTY session,
 - terminal resize propagates to PTY (`session.resize(cols, rows)`).
 
-Unlike the non-PTY engine, the interactive PTY path does **not** apply the non-interactive hardening. It inherits the user's environment and sets a real `TERM=xterm-256color` (applied as an override on the Rust side) so editors, pagers, and TUIs behave like a normal terminal.
+Unlike the non-PTY engine, the interactive PTY path does **not** apply the non-interactive hardening. The Rust side starts from the process's native environment and applies the env it is handed as overrides; Bun's `process.env` writes never reach that base, so the PTY is handed the shell spawn environment (`getShellConfig().env`) minus its non-interactive guards (`GIT_EDITOR`, `GPG_TTY`, `CI`) and `NO_COLOR`, then a real `TERM=xterm-256color` so editors, pagers, and TUIs behave like a normal terminal, then the direnv values, which win over both. A key left out keeps the inherited value.
 
 PTY output is normalized (`CRLF`/`CR` to `LF`, `sanitizeText`) and written into `OutputSink`, including artifact spill support.
 
@@ -216,7 +218,7 @@ The bash executor builds the sink with `headBytes` and `maxColumns` from setting
 - when `headBytes > 0` (`tools.artifactHeadBytes`, default 20 KiB) it reserves a **head** window within that same budget and uses the remainder for a rolling **tail**; head retention is capped at half the total budget, and `dump()` splices in a middle-elision marker when necessary,
 - per-line column cap: when `maxColumns > 0` (`tools.outputMaxColumns`, default 768 bytes) over-wide lines are ellipsis-truncated at write time and the rest of the line is dropped,
 - tracks total bytes/lines seen,
-- mirrors the sanitized, uncapped text stream to the artifact file when output overflows, a column cap dropped bytes, or the file is already active; artifact size is unbounded by default,
+- mirrors the sanitized, uncapped text stream to the artifact file when output overflows, a column cap dropped bytes, or the file is already active; the artifact file is capped at `tools.artifactMaxBytes` (default 16 MB: the first 3 MB plus a rolling tail, joined by an `[ARTIFACT TRUNCATED: …]` notice; `0` = unbounded),
 - marks `truncated` on tail overflow, middle elision, column-cap drops, or file spill.
 
 `dump()` returns:
@@ -243,7 +245,7 @@ Non-PTY execution also passes shell-minimizer settings into the native `Shell` s
 
 ## Live tool updates and async jobs
 
-For non-PTY foreground execution, `BashTool` uses a separate `TailBuffer` for partial updates and emits `onUpdate` snapshots while command is running.
+For non-PTY foreground execution, `BashTool` passes an `onPreview` callback to `executeBash()`, which streams the `OutputSink`'s own inline view (`OutputSink.preview()`) as `onUpdate` snapshots while the command is running; there is no separate partial-update buffer.
 
 For PTY execution, live rendering is handled by custom UI overlay, not by `onUpdate` text chunks.
 

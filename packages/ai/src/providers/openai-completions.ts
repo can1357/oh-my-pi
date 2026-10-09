@@ -6,6 +6,7 @@ import type { ResolvedOpenAICompat } from "@oh-my-pi/pi-catalog/types";
 import { clinePassClientHeaders } from "@oh-my-pi/pi-catalog/wire/cline-pass";
 import {
 	$env,
+	isRecord,
 	logger,
 	parseStreamingJson,
 	parseStreamingJsonThrottled,
@@ -13,8 +14,9 @@ import {
 } from "@oh-my-pi/pi-utils";
 import { renderDemotedThinking } from "../dialect/demotion";
 import * as AIError from "../error";
+import { parseToolCallArguments } from "../utils/tool-call-arguments";
 import { getKimiCommonHeaders } from "../registry/oauth/kimi";
-import { getEnvApiKey } from "../stream";
+import { getEnvApiKey } from "../env-api-key";
 import type {
 	AssistantMessage,
 	Context,
@@ -884,9 +886,10 @@ const streamOpenAICompletionsOnce = (
 				let params = builtParams.params;
 				// Tool-triggered suppression is a hard wire constraint; cached
 				// enabled-effort negotiation must not overwrite its `none`.
-				const reasoningEffortFallbackKey = builtParams.reasoningEffortFallbackAllowed
-					? createOpenAIReasoningEffortFallbackKey("chat-completions", trimmedBaseUrl, params.model)
-					: undefined;
+				const reasoningEffortFallbackKey =
+					builtParams.reasoningEffortFallbackAllowed && !options?.preserveModelSelection
+						? createOpenAIReasoningEffortFallbackKey("chat-completions", trimmedBaseUrl, params.model)
+						: undefined;
 				const requestReasoningEffortFallback =
 					reasoningEffortFallbackKey === undefined
 						? undefined
@@ -897,8 +900,14 @@ const streamOpenAICompletionsOnce = (
 					applyOpenAIReasoningEffortFallback(params, requestReasoningEffortFallback);
 				}
 				activeReasoningEffortFallbackKey = reasoningEffortFallbackKey;
+				const governedSelection = options?.preserveModelSelection
+					? governedCompletionsSelection(params)
+					: undefined;
 				const replacedParams = await options?.onPayload?.(params, model);
 				if (replacedParams !== undefined) params = replacedParams as typeof params;
+				if (governedSelection !== undefined && governedCompletionsSelection(params) !== governedSelection) {
+					throw new AIError.ConfigurationError("Provider payload changed the governed model/effort selection.");
+				}
 				activeRequestParams = params;
 				rawRequestDump = {
 					provider: model.provider,
@@ -1078,7 +1087,7 @@ const streamOpenAICompletionsOnce = (
 					}
 				}
 				block.arguments =
-					typeof block.partialArgs === "string" ? parseStreamingJson(block.partialArgs) : block.partialArgs;
+					typeof block.partialArgs === "string" ? parseToolCallArguments(block.partialArgs) : block.partialArgs;
 				delete block.partialArgs;
 				if (block.streamIndex !== undefined) {
 					toolCallBlockByIndex.delete(block.streamIndex);
@@ -1335,6 +1344,7 @@ const streamOpenAICompletionsOnce = (
 				// and release the socket immediately (a queued `.return()` alone
 				// would wait on the never-arriving next chunk).
 				onGraceEnd: () => requestAbortController.abort(),
+				awaitDrainOnReturn: options?.waitForTerminalDrain,
 			});
 			for await (const chunk of terminalAwareStream) {
 				if (!chunk || typeof chunk !== "object") continue;
@@ -1379,6 +1389,8 @@ const streamOpenAICompletionsOnce = (
 					// Trailing usage-only chunk (`stream_options.include_usage`) after
 					// `finish_reason`: the response is complete — stop pulling instead
 					// of waiting for `[DONE]`/close from hosts that never send either.
+					// `iterateWithTerminalGrace` drains the tail in the background so
+					// compliant hosts still get to relay `[DONE]` before the socket closes.
 					if (streamFinishedAt !== undefined && sawUsagePayload) break;
 					continue;
 				}
@@ -1950,6 +1962,31 @@ function applyOpenAIChatCompletionsPromptCachePolicy(
 		markLatestStableChatCompletionsCacheBreakpoint(params.messages);
 }
 
+/** Capture policy-encoded controls, not caller effort labels or raw model-id guesses. */
+function governedCompletionsSelection(params: OpenAICompletionsParams): string {
+	if (!isRecord(params)) {
+		throw new AIError.ConfigurationError("Provider payload discarded the governed model/effort selection.");
+	}
+	const alternatives = params as OpenAICompletionsParams & { models?: unknown; fallbacks?: unknown };
+	if (
+		(Array.isArray(alternatives.models) && alternatives.models.length > 0) ||
+		(Array.isArray(alternatives.fallbacks) && alternatives.fallbacks.length > 0)
+	) {
+		throw new AIError.ConfigurationError("Provider payload supplied model alternatives for a governed selection.");
+	}
+	return JSON.stringify({
+		model: params.model,
+		reasoning_effort: params.reasoning_effort,
+		reasoning: params.reasoning,
+		thinking: params.thinking,
+		enable_thinking: params.enable_thinking,
+		chat_template_kwargs: params.chat_template_kwargs,
+		venice_disable_thinking: params.venice_parameters?.disable_thinking,
+		provider: params.provider,
+		providerOptions: params.providerOptions,
+	});
+}
+
 function buildParams(
 	model: Model<"openai-completions">,
 	context: Context,
@@ -2117,6 +2154,16 @@ function buildParams(
 		toolChoice: params.tool_choice,
 		hasTools: Array.isArray(params.tools) && params.tools.length > 0,
 	});
+	if (
+		options?.preserveModelSelection &&
+		options.reasoning !== undefined &&
+		!options.disableReasoning &&
+		!finalPolicy.reasoning.enabled
+	) {
+		throw new AIError.ConfigurationError(
+			"The selected reasoning effort cannot be honored with this tool request; no effort suppression is permitted.",
+		);
+	}
 	const compat = finalPolicy.compat as ResolvedOpenAICompat;
 	const messages = convertMessages(model, context, compat);
 	maybeAddAnthropicCacheControl(compat, messages);
@@ -2148,10 +2195,21 @@ function buildParams(
 	dropOpenRouterKimiForcedToolReasoning(params, model, finalPolicy);
 
 	applyOpenAIGatewayRouting(params, compat, cacheRetention !== "none");
+	const governedSelection = options?.preserveModelSelection
+		? { model: params.model, reasoningEffort: params.reasoning_effort, reasoning: JSON.stringify(params.reasoning) }
+		: undefined;
 
 	applyOpenAIExtraBody(params, compat.extraBody, {
 		dropThinkingWhenReasoningEffort: compat.dropThinkingWhenReasoningEffort,
 	});
+	if (
+		governedSelection &&
+		(params.model !== governedSelection.model ||
+			params.reasoning_effort !== governedSelection.reasoningEffort ||
+			JSON.stringify(params.reasoning) !== governedSelection.reasoning)
+	) {
+		throw new AIError.ConfigurationError("Provider extraBody changed the governed model/effort selection.");
+	}
 	applyOpenAIChatCompletionsPromptCachePolicy(params, model, options);
 
 	return {

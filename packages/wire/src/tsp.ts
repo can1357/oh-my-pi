@@ -11,9 +11,11 @@
  * `q` query, `o` open, `f` frame, `b` blob, `t` palette, `x` close. Terminal →
  * program: `r` reply, `e` event (on the pty's input side).
  *
- * The normative spec is `crates/tern/SURFACE_PROTOCOL.md` in the Stencil
- * repository; these types mirror it. Unknown fields and verbs are ignored in
- * both directions, so every addition here is optional.
+ * The normative spec is the Tern SDK's Surface Protocol and Elements reference
+ * (`docs/sdk/src/protocol` and `docs/sdk/src/elements` in the Stencil
+ * repository, https://docs.stencil.so/tern/protocol/); these types mirror it.
+ * Unknown fields and verbs are ignored in both directions, so every addition
+ * here is optional.
  */
 
 /** Protocol version this build speaks. */
@@ -350,13 +352,17 @@ export interface TspEditorProps {
 	decor?: readonly TspEditorDecoration[];
 	/** Inline completion suffix drawn after the caret. */
 	ghost?: string;
-	placeholder?: string;
+	/** Dim text while `text` is empty; spans style it (`em` for italics). */
+	placeholder?: TspText;
 	prompt?: TspText;
 	/** Mode label (vim). */
 	mode?: string;
 	/** The text is code in this language (`python`, `bash`): highlighted, in the mono face. */
 	lang?: string;
 	readonly?: boolean;
+	/** Ready to accept an atomic `send` when advertised in `hello.features`.
+	 *  Independent of text editability or keyboard focus; absent or false is not ready. */
+	sendable?: boolean;
 	maxLines?: number;
 }
 export type TspInputProps = Omit<TspEditorProps, "maxLines">;
@@ -433,7 +439,7 @@ export interface TspPickerItem {
 export interface TspPickerColumn {
 	id: string;
 	head?: string;
-	/** `elapsed`: the value is an age in ms at send; Tern clocks it (spec §9). */
+	/** `elapsed`: the value is an age in ms at send; Tern clocks it. */
 	format?: "text" | "num" | "price" | "bar" | "time" | "elapsed" | "dim";
 	/** Lower priorities hide first when narrow. */
 	priority?: number;
@@ -701,6 +707,8 @@ export interface TspAgentProps {
 		tokens?: number;
 		context?: number;
 		contextLabel?: string;
+		/** The agent's own completion estimate, 0–1; drawn while running. */
+		done?: number;
 		cost?: number;
 		age?: number;
 		took?: number;
@@ -847,8 +855,16 @@ export type TspOp =
 	| readonly [op: "settle", id: string]
 	| readonly [op: "focus", id: string | null]
 	| readonly [op: "reveal", id: string, where: "start" | "end" | "nearest"]
+	| readonly [op: "scroll", id: string, by: TspScrollBy]
 	| readonly [op: "suspend"]
 	| readonly [op: "resume"];
+
+/**
+ * How far a `scroll` op moves the scroller holding a node: a line, a
+ * viewport less a line, or to an end (`end` makes a following `ansi` block
+ * follow again). Sent only when `hello.features` lists `scroll`.
+ */
+export type TspScrollBy = "line-up" | "line-down" | "page-up" | "page-down" | "start" | "end";
 
 /** Verb `f`: an atomic batch of ops for one surface. */
 export interface TspFrame {
@@ -892,7 +908,7 @@ export interface TspPalette {
 
 /** Verb `q`. */
 export type TspQuery =
-	| { q: "hello"; v: readonly number[]; app: string; ver?: string }
+	| { q: "hello"; v: readonly number[]; app: string; ver?: string; features?: readonly string[] }
 	| { q: "blobs"; ids: readonly string[] };
 
 /** Verb `r`. */
@@ -910,6 +926,8 @@ export type TspReply =
 			cell?: { w: number; h: number };
 			dark?: boolean;
 			reduceMotion?: boolean;
+			/** The user's system reads a 12-hour clock (`false`: 24-hour); absent from older terminals. */
+			hour12?: boolean;
 	  }
 	| { r: "blobs"; have: readonly string[] };
 
@@ -938,5 +956,27 @@ export type TspEvent =
 	 * text length the terminal saw, a mismatch makes the edit stale).
 	 */
 	| { ev: "edit"; sf: string; id: string; from: number; to: number; text: string; cursor: number; len: number }
+	/**
+	 * Undo the last change to the text of `editor`/`input` node `id` through the
+	 * program's own undo history (an applied `edit` is one unit, as typing is); a
+	 * no-op when there is nothing to undo. Sent only when `hello` lists `"undo"`.
+	 */
+	| { ev: "undo"; sf: string; id: string }
+	/**
+	 * Submit `text` as one prompt through the addressed composer's ordinary
+	 * submission path, without paste or keyboard simulation. Sent only when
+	 * the program's `hello.features` includes `"send"` and `sf`/`id` identify
+	 * a live editable composer whose `sendable` is exactly true. Writable text
+	 * or keyboard focus alone does not imply submission readiness. Blank text is
+	 * a no-op; an existing draft is retained for local recall, not appended to
+	 * the supplied prompt.
+	 */
+	| { ev: "send"; sf: string; id: string; text: string }
+	/**
+	 * The user clicked into node `id` (an `editor`/`input` without the focus, or
+	 * a `prefs` sheet while the focus is outside it): the program moves its
+	 * keyboard focus there, or ignores it (a modal overlay keeps the keys).
+	 */
+	| { ev: "focus"; sf: string; id: string }
 	| { ev: "error"; sf?: string; s?: number; op?: number; msg: string }
 	| { ev: "gone"; sf?: string; ids: readonly string[] };

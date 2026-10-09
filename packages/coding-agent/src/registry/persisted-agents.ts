@@ -14,9 +14,9 @@ import {
 	type AgentHistorySummary,
 	type AgentMetricsSummary,
 	type AgentRegistry,
-	getAgentTombstonePath,
 	MAIN_AGENT_ID,
 } from "./agent-registry";
+import { getAgentTombstonePath } from "./agent-tombstone";
 
 /** Maximum prefix entries inspected for task metadata. */
 const MAX_METADATA_LINES = 64;
@@ -341,7 +341,10 @@ async function readPersistedAgentMetadata(
 				hasSessionInit = true;
 				createdAt ??= timestampOf(record.timestamp);
 				if (typeof record.task === "string") activity = summarizePersistedTask(record.task);
-				const inferred = typeof record.systemPrompt === "string" ? inferBundledAgent(record.systemPrompt) : {};
+				const systemPrompt = Array.isArray(record.systemPrompt)
+					? record.systemPrompt.join("\n\n")
+					: record.systemPrompt;
+				const inferred = typeof systemPrompt === "string" ? inferBundledAgent(systemPrompt) : {};
 				history = {
 					...history,
 					...inferred,

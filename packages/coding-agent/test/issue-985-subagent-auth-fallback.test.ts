@@ -1,333 +1,179 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import type { Api, Model } from "@oh-my-pi/pi-ai";
-import { buildModel } from "@oh-my-pi/pi-catalog/build";
-import { kNoAuth } from "@oh-my-pi/pi-coding-agent/config/model-registry";
-import {
-	type ModelLookupRegistry,
-	resolveModelOverrideWithAuthFallback,
-} from "@oh-my-pi/pi-coding-agent/config/model-resolver";
-import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { Effort } from "@oh-my-pi/pi-catalog/effort";
+import { kNoAuth, ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
+import { createTaskModelRoute, resolveRoleRoute } from "@oh-my-pi/pi-coding-agent/task/role-routing";
+import { TempDir } from "@oh-my-pi/pi-utils";
+import * as path from "node:path";
 
-/**
- * Regression test for #985.
- *
- * Reporter screenshot showed parent session on DeepSeek V4 Pro dispatching a
- * task subagent that resolved to `qwen3.6-plus-free` — an opencode-zen model
- * the user has no working credentials for. The dispatch hit a provider that
- * could not serve the model and surfaced a confusing API rejection instead of
- * silently using the parent's already-authenticated model.
- *
- * The fix: at dispatch time, if the resolved subagent model has no working
- * credentials, fall back to the parent session's active model (which by
- * definition has working auth — the parent turn is using it).
- */
+const parentSelector = "issue985-parent/parent";
+const taskSelector = "issue985-task/task";
+const alternateSelector = "issue985-parent/alternate";
+const resources: Array<{ dir: TempDir; authStorage: AuthStorage }> = [];
 
-const parentModel: Model<Api> = buildModel({
-	id: "deepseek-v4-pro",
-	name: "DeepSeek V4 Pro",
-	api: "openai-completions",
-	provider: "deepseek",
-	baseUrl: "https://api.deepseek.com",
-	reasoning: false,
-	input: ["text"],
-	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-	contextWindow: 128000,
-	maxTokens: 8192,
-});
-
-const unauthedTaskModel: Model<Api> = buildModel({
-	id: "qwen3.6-plus-free",
-	name: "Qwen3.6 Plus Free",
-	api: "openai-completions",
-	provider: "opencode-zen",
-	baseUrl: "https://opencode.ai/zen/v1",
-	reasoning: false,
-	input: ["text"],
-	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-	contextWindow: 128000,
-	maxTokens: 8192,
-});
-
-const sharedModel: Model<Api> = buildModel({
-	id: "shared-id",
-	name: "Shared",
-	api: "openai-completions",
-	provider: "deepseek",
-	baseUrl: "https://api.deepseek.com",
-	reasoning: false,
-	input: ["text"],
-	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-	contextWindow: 128000,
-	maxTokens: 8192,
-});
-
-interface MockRegistryOptions {
-	models: Model<Api>[];
-	authedProviders: Set<string>;
-}
-
-function createMockRegistry(options: MockRegistryOptions): ModelLookupRegistry & {
-	getApiKey(model: Model<Api>): Promise<string | undefined>;
-} {
-	return {
-		getAvailable: () => options.models,
-		getApiKey: async (model: Model<Api>) =>
-			options.authedProviders.has(model.provider) ? "sk-test-token" : undefined,
-	} as unknown as ModelLookupRegistry & { getApiKey(model: Model<Api>): Promise<string | undefined> };
-}
-
-describe("issue #985: subagent dispatch auth fallback", () => {
-	test("falls back to parent active model when resolved subagent model has no auth", async () => {
-		const registry = createMockRegistry({
-			models: [parentModel, unauthedTaskModel],
-			authedProviders: new Set(["deepseek"]), // user has DeepSeek; opencode-zen unauthed
-		});
-
-		const result = await resolveModelOverrideWithAuthFallback(
-			["qwen3.6-plus-free"],
-			"deepseek/deepseek-v4-pro",
-			registry,
-		);
-
-		expect(result.authFallbackUsed).toBe(true);
-		expect(result.model?.provider).toBe("deepseek");
-		expect(result.model?.id).toBe("deepseek-v4-pro");
-	});
-
-	test("does not fall back when resolved subagent model has working auth", async () => {
-		const registry = createMockRegistry({
-			models: [parentModel, unauthedTaskModel],
-			authedProviders: new Set(["deepseek", "opencode-zen"]),
-		});
-
-		const result = await resolveModelOverrideWithAuthFallback(
-			["qwen3.6-plus-free"],
-			"deepseek/deepseek-v4-pro",
-			registry,
-		);
-
-		expect(result.authFallbackUsed).toBe(false);
-		expect(result.model?.provider).toBe("opencode-zen");
-		expect(result.model?.id).toBe("qwen3.6-plus-free");
-	});
-
-	test("returns primary unchanged when parent active model also has no auth", async () => {
-		const registry = createMockRegistry({
-			models: [parentModel, unauthedTaskModel],
-			authedProviders: new Set(), // nothing authed
-		});
-
-		const result = await resolveModelOverrideWithAuthFallback(
-			["qwen3.6-plus-free"],
-			"deepseek/deepseek-v4-pro",
-			registry,
-		);
-
-		expect(result.authFallbackUsed).toBe(false);
-		expect(result.model?.provider).toBe("opencode-zen");
-		expect(result.model?.id).toBe("qwen3.6-plus-free");
-	});
-
-	test("returns primary unchanged when no parent active model is provided", async () => {
-		const registry = createMockRegistry({
-			models: [parentModel, unauthedTaskModel],
-			authedProviders: new Set(["deepseek"]),
-		});
-
-		const result = await resolveModelOverrideWithAuthFallback(["qwen3.6-plus-free"], undefined, registry);
-
-		expect(result.authFallbackUsed).toBe(false);
-		expect(result.model?.provider).toBe("opencode-zen");
-	});
-
-	test("does not fall back when subagent and parent resolve to the same model", async () => {
-		const registry = createMockRegistry({
-			models: [sharedModel],
-			authedProviders: new Set(), // even with no auth, identical model means no benefit
-		});
-
-		const result = await resolveModelOverrideWithAuthFallback(["deepseek/shared-id"], "deepseek/shared-id", registry);
-
-		expect(result.authFallbackUsed).toBe(false);
-		expect(result.model?.id).toBe("shared-id");
-	});
-
-	test("treats keyless providers (kNoAuth marker) as authenticated", async () => {
-		// Keyless-by-design providers (Ollama, llama.cpp, lm-studio) advertise the
-		// kNoAuth sentinel from getApiKey to signal that they do not require
-		// credentials. The helper treats this as authenticated so an explicitly
-		// configured local model is never silently rerouted to the parent's
-		// remote provider (see #1008).
-		const registry: ModelLookupRegistry & { getApiKey(model: Model<Api>): Promise<string | undefined> } = {
-			getAvailable: () => [parentModel, unauthedTaskModel],
-			getApiKey: async (model: Model<Api>) => {
-				if (model.provider === "deepseek") return "sk-test";
-				if (model.provider === "opencode-zen") return kNoAuth;
-				return undefined;
+async function createRegistry(taskAuth: "apiKey" | "none" | "oauth" = "oauth") {
+	const dir = TempDir.createSync("omp-subagent-route-auth-");
+	const authStorage = await AuthStorage.create(":memory:");
+	resources.push({ dir, authStorage });
+	const modelsPath = path.join(dir.path(), "models.yml");
+	await Bun.write(
+		modelsPath,
+		JSON.stringify({
+			providers: {
+				"issue985-parent": {
+					api: "openai-completions",
+					baseUrl: "https://parent.example.test/v1",
+					apiKey: "parent-test-key",
+					models: [
+						{ id: "parent", reasoning: false },
+						{
+							id: "alternate",
+							reasoning: true,
+							thinking: { mode: "effort", efforts: [Effort.Low, Effort.High] },
+						},
+					],
+				},
+				"issue985-task": {
+					api: "openai-completions",
+					baseUrl: "https://task.example.test/v1",
+					auth: taskAuth,
+					...(taskAuth === "apiKey" ? { apiKey: "task-test-key" } : {}),
+					models: [{ id: "task", reasoning: false }],
+				},
 			},
-		} as never;
-
-		const result = await resolveModelOverrideWithAuthFallback(
-			["qwen3.6-plus-free"],
-			"deepseek/deepseek-v4-pro",
-			registry,
-		);
-
-		expect(result.authFallbackUsed).toBe(false);
-		expect(result.model?.provider).toBe("opencode-zen");
-		expect(result.model?.id).toBe("qwen3.6-plus-free");
-	});
-});
-
-describe("issue #5325: sessionId forwarded to getApiKey for session-sticky OAuth", () => {
-	// The pre-flight auth check in resolveModelOverrideWithAuthFallback calls
-	// getApiKey without a session id. For providers with session-sticky OAuth
-	// credentials, this can return undefined even though the credential is
-	// usable once the subagent session starts. The fix forwards a sessionId
-	// so session-sticky credentials resolve during the pre-flight check.
-	test("forwards sessionId to getApiKey for the primary model", async () => {
-		let receivedSessionId: string | undefined;
-		const registry: ModelLookupRegistry & { getApiKey(model: Model<Api>): Promise<string | undefined> } = {
-			getAvailable: () => [parentModel, unauthedTaskModel],
-			getApiKey: async (model: Model<Api>, sessionId?: string) => {
-				if (model.provider === "opencode-zen") {
-					receivedSessionId = sessionId;
-					// Without sessionId, OAuth can't resolve; with it, it can.
-					return sessionId ? "sk-resolved-token" : undefined;
-				}
-				if (model.provider === "deepseek") return "sk-test";
-				return undefined;
-			},
-		} as never;
-
-		const result = await resolveModelOverrideWithAuthFallback(
-			["qwen3.6-plus-free"],
-			"deepseek/deepseek-v4-pro",
-			registry,
-			undefined,
-			"subagent-session-123",
-		);
-
-		expect(receivedSessionId).toBe("subagent-session-123");
-		expect(result.authFallbackUsed).toBe(false);
-		expect(result.model?.provider).toBe("opencode-zen");
-		expect(result.model?.id).toBe("qwen3.6-plus-free");
-	});
-	test("forwards sessionId to getApiKey for the fallback model", async () => {
-		const receivedSessionIds: string[] = [];
-		const registry: ModelLookupRegistry & { getApiKey(model: Model<Api>): Promise<string | undefined> } = {
-			getAvailable: () => [parentModel, unauthedTaskModel],
-			getApiKey: async (model: Model<Api>, sessionId?: string) => {
-				if (sessionId) receivedSessionIds.push(`${model.provider}:${sessionId}`);
-				if (model.provider === "opencode-zen") return undefined;
-				return sessionId ? "sk-resolved-token" : undefined;
-			},
-		} as never;
-
-		const result = await resolveModelOverrideWithAuthFallback(
-			["qwen3.6-plus-free"],
-			"deepseek/deepseek-v4-pro",
-			registry,
-			undefined,
-			"subagent-session-456",
-		);
-
-		expect(receivedSessionIds).toEqual(["opencode-zen:subagent-session-456", "deepseek:subagent-session-456"]);
-		expect(result.authFallbackUsed).toBe(true);
-		expect(result.model?.provider).toBe("deepseek");
-	});
-	test("preserves the requested model warning when auth falls back", async () => {
-		const registry: ModelLookupRegistry & { getApiKey(model: Model<Api>): Promise<string | undefined> } = {
-			getAvailable: () => [parentModel, unauthedTaskModel],
-			getApiKey: async (model: Model<Api>) => (model.provider === "deepseek" ? "sk-test" : undefined),
-		} as never;
-
-		const result = await resolveModelOverrideWithAuthFallback(
-			["qwen3.6-plus-free:invalid"],
-			"deepseek/deepseek-v4-pro",
-			registry,
-		);
-
-		expect(result.authFallbackUsed).toBe(true);
-		expect(result.warning).toBe(
-			'Invalid thinking level "invalid" in pattern "qwen3.6-plus-free:invalid". Using default instead.',
-		);
-	});
-});
-
-describe("issue #11709: disabled provider subagent model resolution", () => {
-	afterEach(() => {
-		resetSettingsForTest();
-	});
-
-	test("skips an authenticated model from a disabled provider", async () => {
-		const settings = await Settings.init({
-			inMemory: true,
-			overrides: { disabledProviders: ["opencode-zen"] },
-		});
-		const registry = createMockRegistry({
-			models: [unauthedTaskModel, parentModel],
-			authedProviders: new Set(["opencode-zen", "deepseek"]),
-		});
-
-		const result = await resolveModelOverrideWithAuthFallback(
-			["opencode-zen/qwen3.6-plus-free", "deepseek/deepseek-v4-pro"],
-			undefined,
-			registry,
-			settings,
-		);
-
-		expect(result.model?.provider).toBe("deepseek");
-		expect(result.model?.id).toBe("deepseek-v4-pro");
-	});
-});
-
-describe("requested candidate authentication order", () => {
-	for (const parent of ["deepseek/deepseek-v4-pro", undefined]) {
-		test(`uses a later authenticated candidate with parent ${parent ?? "omitted"}`, async () => {
-			const registry = createMockRegistry({
-				models: [parentModel, unauthedTaskModel, sharedModel],
-				authedProviders: new Set(["deepseek"]),
-			});
-			const resolved = await resolveModelOverrideWithAuthFallback(
-				["opencode-zen/qwen3.6-plus-free", "deepseek/shared-id:high"],
-				parent,
-				registry,
-			);
-			expect(resolved.model?.id).toBe("shared-id");
-			expect(resolved.authFallbackUsed).toBe(false);
-			expect(resolved.explicitThinkingLevel).toBe(true);
-		});
-	}
-
-	test("exhausts candidates inside a configured role before using the parent", async () => {
-		const settings = Settings.isolated({ modelRoles: { qa: "opencode-zen/qwen3.6-plus-free,deepseek/shared-id" } });
-		const registry = createMockRegistry({
-			models: [parentModel, unauthedTaskModel, sharedModel],
-			authedProviders: new Set(["deepseek"]),
-		});
-		const resolved = await resolveModelOverrideWithAuthFallback(
-			["@qa"],
-			"deepseek/deepseek-v4-pro",
-			registry,
-			settings,
-		);
-		expect(resolved.model?.id).toBe("shared-id");
-		expect(resolved.authFallbackUsed).toBe(false);
-	});
-});
-
-test("accepts a keyless parent after requested credentials fail", async () => {
-	const local = { ...parentModel, provider: "ollama", id: "local-model" };
-	const registry = {
-		getAvailable: () => [unauthedTaskModel, local],
-		getApiKey: async (model: Model<Api>) => (model.provider === "ollama" ? kNoAuth : undefined),
-	};
-	const resolved = await resolveModelOverrideWithAuthFallback(
-		["opencode-zen/qwen3.6-plus-free"],
-		"ollama/local-model",
-		registry,
+		}),
 	);
-	expect(resolved.model?.id).toBe("local-model");
-	expect(resolved.authFallbackUsed).toBe(true);
+	return new ModelRegistry(authStorage, modelsPath);
+}
+
+function authority(
+	registry: ModelRegistry,
+	settings = Settings.isolated(),
+	agentModel: string | string[] = taskSelector,
+) {
+	return {
+		settings,
+		agentName: "task",
+		agentModel,
+		getParentModel: () => registry.find("issue985-parent", "parent"),
+		getParentSelector: () => parentSelector,
+	};
+}
+
+afterEach(async () => {
+	for (const { dir, authStorage } of resources.splice(0)) {
+		authStorage.close();
+		await dir.remove();
+	}
+});
+
+describe("issue #985: governed subagent authentication", () => {
+	test("denies an unauthenticated pin without substituting the authenticated live parent", async () => {
+		const registry = await createRegistry();
+		const settings = Settings.isolated({
+			modelRoles: { default: parentSelector },
+			"retry.fallbackChains": { default: [alternateSelector] },
+		});
+		expect(registry.hasConfiguredAuth(registry.find("issue985-parent", "parent")!)).toBe(true);
+		await expect(
+			createTaskModelRoute({
+				authority: authority(registry, settings),
+				modelRegistry: registry,
+				selectors: [taskSelector],
+				explicit: true,
+			}),
+		).rejects.toThrow(/Host role preflight unavailable/);
+	});
+
+	test("keeps an authenticated authorized pin on the requested provider", async () => {
+		const registry = await createRegistry("apiKey");
+		const route = await createTaskModelRoute({
+			authority: authority(registry),
+			modelRegistry: registry,
+			selectors: [taskSelector],
+			explicit: true,
+		});
+		expect(resolveRoleRoute(route.permit).selector).toBe(taskSelector);
+	});
+
+	test("admits a keyless authorized provider without sending it to the remote parent (#1008)", async () => {
+		const registry = await createRegistry("none");
+		const requested = registry.find("issue985-task", "task")!;
+		expect(await registry.getApiKey(requested)).toBe(kNoAuth);
+		const route = await createTaskModelRoute({
+			authority: authority(registry),
+			modelRegistry: registry,
+			selectors: [taskSelector],
+			explicit: true,
+		});
+		expect(resolveRoleRoute(route.permit).selector).toBe(taskSelector);
+	});
+
+	test("uses a later authorized candidate with its exact supported effort", async () => {
+		const registry = await createRegistry();
+		const route = await createTaskModelRoute({
+			authority: authority(registry, Settings.isolated(), [taskSelector, alternateSelector]),
+			modelRegistry: registry,
+			selectors: [taskSelector, `${alternateSelector}:high`],
+			explicit: true,
+		});
+		expect(resolveRoleRoute(route.permit)).toMatchObject({
+			selector: `${alternateSelector}:high`,
+			thinkingLevel: "high",
+			fixedEffort: true,
+			occurrence: 1,
+		});
+	});
+
+	test("walks only the actual configured role chain when the primary has no auth", async () => {
+		const registry = await createRegistry();
+		const settings = Settings.isolated({
+			modelRoles: { qa: taskSelector, default: parentSelector },
+			"retry.fallbackChains": { qa: [alternateSelector], default: [parentSelector] },
+		});
+		const route = await createTaskModelRoute({
+			authority: authority(registry, settings),
+			modelRegistry: registry,
+			selectors: ["@qa"],
+			explicit: true,
+		});
+		expect(resolveRoleRoute(route.permit).selector).toBe(alternateSelector);
+	});
+
+	test("walks a configured role past a disabled provider but rejects an explicit disabled pin (#11709)", async () => {
+		const registry = await createRegistry("apiKey");
+		const settings = Settings.isolated({
+			disabledProviders: ["issue985-task"],
+			modelRoles: { qa: taskSelector },
+			"retry.fallbackChains": { qa: [alternateSelector] },
+		});
+		const route = await createTaskModelRoute({
+			authority: authority(registry, settings, [taskSelector, alternateSelector]),
+			modelRegistry: registry,
+			selectors: ["@qa"],
+			explicit: true,
+		});
+		expect(resolveRoleRoute(route.permit).selector).toBe(alternateSelector);
+		await expect(
+			createTaskModelRoute({
+				authority: authority(registry, settings),
+				modelRegistry: registry,
+				selectors: [taskSelector],
+				explicit: true,
+			}),
+		).rejects.toThrow(/Requested provider issue985-task is disabled/);
+	});
+
+	test("rejects an invalid suffix instead of replacing the effort or using the parent", async () => {
+		const registry = await createRegistry("apiKey");
+		await expect(
+			createTaskModelRoute({
+				authority: authority(registry),
+				modelRegistry: registry,
+				selectors: [`${taskSelector}:invalid`],
+				explicit: true,
+			}),
+		).rejects.toThrow(/Invalid thinking suffix/);
+	});
 });

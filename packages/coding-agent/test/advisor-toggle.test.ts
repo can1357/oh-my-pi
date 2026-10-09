@@ -371,51 +371,44 @@ describe("AgentSession advisor toggle", () => {
 		session.agent.state.isStreaming = false;
 	});
 
-	it("activates an enabled advisor once background model discovery settles", async () => {
-		// Advisor role points at a valid model that is missing from the catalog at
-		// construction (discovery-backed provider still loading), so the advisor
-		// starts `no_model`. Regression for the startup ordering race in #9010.
+	it("activates the default advisor when discovery starts after session construction", async () => {
 		const advisorSelector = `${replacementModel.provider}/${replacementModel.id}`;
 		const settings = Settings.isolated({ "compaction.enabled": false, "advisor.enabled": true });
 		settings.setModelRole("advisor", advisorSelector);
-
-		const fullCatalog = modelRegistry.getAvailable();
+		const registry = new ModelRegistry(authStorage);
+		const fullCatalog = registry.getAvailable();
 		const withoutAdvisorModel = fullCatalog.filter(
 			m => !(m.provider === replacementModel.provider && m.id === replacementModel.id),
 		);
 		let discovered = false;
-		vi.spyOn(modelRegistry, "getAvailable").mockImplementation(() =>
-			discovered ? fullCatalog : withoutAdvisorModel,
-		);
+		vi.spyOn(registry, "getAvailable").mockImplementation(() => (discovered ? fullCatalog : withoutAdvisorModel));
 		const { promise: refreshSettled, resolve: settleRefresh } = Promise.withResolvers<void>();
-		vi.spyOn(modelRegistry, "awaitBackgroundRefresh").mockImplementation(() => refreshSettled);
+		vi.spyOn(registry, "refresh").mockImplementation(() => refreshSettled);
 
 		const raceSession = new AgentSession({
 			agent: new Agent({ initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] } }),
 			sessionManager,
 			settings,
-			modelRegistry,
+			modelRegistry: registry,
 			advisorTools: [],
-		});
-
-		// The retry emits `model_changed` once it rebuilds; await that signal
-		// rather than a wall-clock delay so the test tracks the real event.
-		const { promise: advisorRebuilt, resolve: signalRebuilt } = Promise.withResolvers<void>();
-		const unsubscribe = raceSession.subscribe(event => {
-			if (event.type === "model_changed") signalRebuilt();
 		});
 		try {
 			expect(raceSession.isAdvisorEnabled()).toBe(true);
 			expect(raceSession.isAdvisorActive()).toBe(false);
+			await registry.awaitBackgroundRefresh();
+			await Promise.resolve();
+			expect(raceSession.isAdvisorActive()).toBe(false);
 
-			// Discovery completes and the background refresh settles: the advisor
-			// rebuilds against the now-complete catalog and goes live.
+			registry.refreshInBackground();
+			await Promise.resolve();
+			expect(raceSession.isAdvisorActive()).toBe(false);
 			discovered = true;
 			settleRefresh();
-			await advisorRebuilt;
+			await registry.awaitBackgroundRefresh();
+			expect(raceSession.getAdvisorAgent()?.state.model.id).toBe(replacementModel.id);
 			expect(raceSession.isAdvisorActive()).toBe(true);
 		} finally {
-			unsubscribe();
+			settleRefresh();
 			vi.restoreAllMocks();
 			await raceSession.dispose();
 		}
@@ -595,6 +588,23 @@ describe("AgentSession advisor toggle", () => {
 		const advisor = session.getAdvisorAgent();
 		if (!advisor) throw new Error("Expected Architecture advisor");
 		const advisorPrompt = advisor.state.systemPrompt.join("\n");
+		expect(advisorPrompt).toContain("Keep advice concrete.");
+		expect(advisorPrompt).toContain("Review module boundaries.");
+	});
+	it("uses a roster saved while the advisor is disabled once it is enabled", () => {
+		session.settings.setModelRole("advisor", `${model.provider}/${model.id}`);
+		expect(session.isAdvisorEnabled()).toBe(false);
+
+		expect(
+			session.applyAdvisorConfigs(
+				[{ name: "Architecture", instructions: "Review module boundaries." }],
+				"Keep advice concrete.",
+			),
+		).toBe(0);
+		expect(session.setAdvisorEnabled(true)).toBe(true);
+
+		expect(session.getAdvisorStats().advisors.map(advisor => advisor.name)).toEqual(["Architecture"]);
+		const advisorPrompt = session.getAdvisorAgent()?.state.systemPrompt.join("\n");
 		expect(advisorPrompt).toContain("Keep advice concrete.");
 		expect(advisorPrompt).toContain("Review module boundaries.");
 	});

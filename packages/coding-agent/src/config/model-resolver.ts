@@ -27,11 +27,13 @@ import type { ModelRoleLookup } from "@oh-my-pi/pi-tui/overlays/model-browser";
 import type { Api, Effort, KnownProvider, Model, ModelSpec } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { resolveBareVariantSelector, resolveVariantSelector } from "@oh-my-pi/pi-catalog/compat/collapse";
+import { providerEntry } from "@oh-my-pi/pi-catalog/compat/providers";
 import { collapseVariantId, stripThinkingVariantSuffix } from "@oh-my-pi/pi-catalog/compat/taxonomy";
 import { modelMatchesHost } from "@oh-my-pi/pi-catalog/hosts";
 import { buildModelProviderPriorityRank } from "@oh-my-pi/pi-catalog/identity";
 import { clampThinkingLevelForModel } from "@oh-my-pi/pi-catalog/model-thinking";
 import { type GeneratedProvider, getBundledModels, modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
+import { modelKind } from "@oh-my-pi/pi-catalog/types";
 import { DEFAULT_MODEL_PER_PROVIDER } from "@oh-my-pi/pi-catalog/provider-models";
 import { fuzzyMatch } from "@oh-my-pi/pi-tui";
 import { logger } from "@oh-my-pi/pi-utils";
@@ -44,7 +46,7 @@ import {
 	parseConfiguredThinkingLevel,
 	resolveThinkingLevelForModel,
 } from "@oh-my-pi/pi-tui/thinking";
-import { isAuthenticated, kNoAuth, type ModelRegistry } from "./model-registry";
+import type { ModelRegistry } from "./model-registry";
 import {
 	DEFAULT_MODEL_ROLE_ALIAS,
 	formatModelRoleAlias,
@@ -64,7 +66,7 @@ function isKnownProvider(provider: string): provider is KnownProvider {
 }
 
 /**
- * Pick the first provider-default model in availability order.
+ * Pick the first auto-selectable provider-default model in availability order.
  *
  * When `hasConcreteCredential` is supplied and at least one available model
  * belongs to a provider with a concrete credential, the candidate pool is
@@ -78,24 +80,27 @@ function isKnownProvider(provider: string): provider is KnownProvider {
  * If multiple providers expose that same default id, rank only that shared-id
  * group by canonical provider priority so native/OAuth transports beat mirrors
  * without changing unrelated provider fallback precedence.
+ * Providers with `automatic-default #false` remain available to explicit model
+ * selectors but cannot become the startup fallback.
  */
 export function pickDefaultAvailableModel(
 	availableModels: Model<Api>[],
 	hasConcreteCredential?: (provider: string) => boolean,
 ): Model<Api> | undefined {
+	const autoSelectable = availableModels.filter(model => providerEntry(model.provider)?.automaticDefault !== false);
 	const models =
 		hasConcreteCredential === undefined
-			? availableModels
+			? autoSelectable
 			: (() => {
 					const concreteAuthByProvider = new Map<string, boolean>();
-					const concrete = availableModels.filter(model => {
+					const concrete = autoSelectable.filter(model => {
 						const cached = concreteAuthByProvider.get(model.provider);
 						if (cached !== undefined) return cached;
 						const hasConcreteAuth = hasConcreteCredential(model.provider);
 						concreteAuthByProvider.set(model.provider, hasConcreteAuth);
 						return hasConcreteAuth;
 					});
-					return concrete.length > 0 ? concrete : availableModels;
+					return concrete.length > 0 ? concrete : autoSelectable;
 				})();
 	const firstDefault = models.find(
 		model => isKnownProvider(model.provider) && DEFAULT_MODEL_PER_PROVIDER[model.provider] === model.id,
@@ -1140,11 +1145,6 @@ function matchSessionInheritedPattern(
 	return undefined;
 }
 
-/** {@link matchSessionInheritedPattern} for a whole selection, without the level. */
-export function modelSelectionInheritsSessionModel(value: string | string[] | undefined): boolean {
-	return normalizeModelPatternList(value).some(pattern => matchSessionInheritedPattern(pattern) !== undefined);
-}
-
 function shouldInheritDefaultBeforePriority(role: ModelRole): boolean {
 	return role === "smol" || role === "slow";
 }
@@ -1294,8 +1294,6 @@ export function resolveConfiguredModelPatterns(
 	});
 }
 export interface AgentModelPatternResolutionOptions {
-	/** Highest-priority request selector, when supplied by a caller. */
-	requestModel?: string | string[];
 	settingsOverride?: string | string[];
 	agentModel?: string | string[];
 	settings?: Settings;
@@ -1308,35 +1306,17 @@ interface EffectiveAgentModelSelection {
 	patterns: string[];
 }
 
-/** Point an inherited selector at an explicitly requested thinking level. */
-function applyRequestedThinkingLevel(pattern: string, level: ConfiguredThinkingLevel): string {
-	return `${pattern}:${level}`;
-}
-
 function resolveEffectiveAgentModelSelection(
 	options: AgentModelPatternResolutionOptions,
 ): EffectiveAgentModelSelection {
-	const { requestModel, settingsOverride, agentModel, settings, activeModelPattern, fallbackModelPattern } = options;
+	const { settingsOverride, agentModel, settings, activeModelPattern, fallbackModelPattern } = options;
 	const inheritSessionModel = (requested?: SessionModelInheritance): EffectiveAgentModelSelection => {
 		const fallback =
 			activeModelPattern?.trim() || fallbackModelPattern?.trim() || settings?.getModelRole("default")?.trim() || "";
 		const patterns = resolveConfiguredModelPatterns(fallback, settings);
 		const level = requested?.level;
-		return { patterns: level ? patterns.map(pattern => applyRequestedThinkingLevel(pattern, level)) : patterns };
+		return { patterns: level ? patterns.map(pattern => `${pattern}:${level}`) : patterns };
 	};
-
-	let requestSource = requestModel;
-	let requestedInheritance = false;
-	const requestPatterns = normalizeModelPatternList(requestModel).flatMap((pattern, index, patterns) => {
-		const inheritance = matchSessionInheritedPattern(pattern);
-		if (!inheritance) return resolveConfiguredModelPatterns(pattern, settings);
-		if (!requestedInheritance) requestSource = index === 0 ? undefined : patterns.slice(0, index);
-		requestedInheritance = true;
-		return inheritSessionModel(inheritance).patterns;
-	});
-	if (requestPatterns.length > 0 || requestedInheritance) {
-		return { source: requestSource, patterns: requestPatterns };
-	}
 
 	const overridePatterns = resolveConfiguredModelPatterns(settingsOverride, settings);
 	if (overridePatterns.length > 0) {
@@ -1431,8 +1411,9 @@ export interface AgentAdvisorSelection {
  * runs unadvised. The settings override decides enablement first ("off" wins,
  * "on" enables with the agent's own model pattern or the `advisor` role, any
  * other value is a custom model pattern); otherwise the agent definition's
- * `advisor` field applies. A returned pattern lands on the spawned session's
- * `modelRoles.advisor`, so role aliases and `:level` suffixes resolve there.
+ * `advisor` field applies. Callers expand a returned pattern against the
+ * owner's roles (`resolveAgentAdvisorRolePattern`) before it lands on the
+ * spawned session's `modelRoles.advisor`, so `@advisor` cannot point at itself.
  */
 export function resolveAgentAdvisorSelection(
 	options: AgentAdvisorResolutionOptions,
@@ -1448,6 +1429,17 @@ export function resolveAgentAdvisorSelection(
 	}
 	if (options.agentAdvisor === true) return {};
 	return agentPattern ? { model: agentPattern } : undefined;
+}
+
+/**
+ * Expand an agent advisor pattern against the owner's role lookup before it is
+ * stamped onto a spawned session's `modelRoles.advisor`. Without this, a
+ * self-referential `@advisor` lands as the child's own advisor role, trips the
+ * cycle guard, and silently degrades to the built-in `slow` priority list.
+ */
+export function resolveAgentAdvisorRolePattern(pattern: string, settings?: ModelRoleLookup): string {
+	const expanded = resolveConfiguredModelPatterns(pattern, settings);
+	return expanded.length > 0 ? expanded.join(",") : pattern;
 }
 
 /**
@@ -1516,12 +1508,15 @@ export function resolveModelRoleValue(
 }
 
 interface ExplicitThinkingSelectorOptions {
-	isLiteralModelId?: (provider: string, id: string) => boolean;
+	/** Exact ID lookup; an undefined provider checks unqualified IDs across the caller's model set. */
+	isLiteralModelId?: (provider: string | undefined, id: string) => boolean;
 }
 
 function isLiteralModelSelector(value: string, options?: ExplicitThinkingSelectorOptions): boolean {
-	const parsed = parseModelString(value);
-	return parsed !== undefined && options?.isLiteralModelId?.(parsed.provider, parsed.id) === true;
+	const slash = value.indexOf("/");
+	return slash > 0
+		? options?.isLiteralModelId?.(value.slice(0, slash), value.slice(slash + 1)) === true
+		: options?.isLiteralModelId?.(undefined, value) === true;
 }
 
 export function extractExplicitThinkingSelector(
@@ -1537,7 +1532,9 @@ export function extractExplicitThinkingSelector(
 	let current = normalized;
 	while (!visited.has(current)) {
 		visited.add(current);
-		const rolePrefixLength = modelRoleAliasPrefixLength(current) ?? LEGACY_MODEL_ROLE_ALIAS_PREFIX.length;
+		if (modelRoleAliasPrefixLength(current) === undefined && isLiteralModelSelector(current, options))
+			return undefined;
+		const rolePrefixLength = modelRoleAliasPrefixLength(current) ?? 0;
 		const strictSelector = splitThinkingSuffix(current, rolePrefixLength).level;
 		if (strictSelector) {
 			return strictSelector;
@@ -1686,87 +1683,50 @@ export function disabledProviderIds(settings?: Settings): ReadonlySet<string> {
 	return new Set(settings ? cfgDisabledProviders.get(settings) : undefined);
 }
 
+function parseSessionModelSelector(modelRegistry: ModelRegistry, selector: string) {
+	return parseModelString(selector, {
+		...MAX_THINKING_SUFFIX_OPTIONS,
+		isLiteralModelId: (provider, id) => modelRegistry.find(provider, id) !== undefined,
+	});
+}
+
 /**
- * Resolve a list of override patterns to the first matching model, with an
- * auth-aware fallback to the parent session's active model.
+ * Resolve a saved session model selector (`provider/id`, optionally with a
+ * thinking suffix) to a registered model whose provider is enabled and has
+ * credentials configured. Startup resume and runtime session switches share
+ * this lookup, so both restore the same models.
  *
- * Providers disabled through settings are removed before matching so ordered
- * overrides skip them and an all-disabled list resolves to no model.
- *
- * If the resolved subagent model has no working credentials (provider has no
- * usable auth), and the parent's active model resolves with working auth,
- * use the parent's model instead. This prevents subagent dispatch from
- * silently routing to a provider the user can't actually call (e.g.
- * `modelRoles.task` pointing at an unqualified id whose only available
- * provider variant has no configured credentials — see #985).
- *
- * `sessionId` is forwarded to `getApiKey` so that session-sticky OAuth
- * credentials resolve correctly during the pre-flight auth check. Without it,
- * providers with multiple OAuth accounts may return `undefined` even though
- * the credential is usable once the subagent session starts — see #5325.
- *
- * Keyless-by-design providers (llama.cpp, ollama, lm-studio) advertise the
- * `kNoAuth` sentinel from `getApiKey` to signal that they do not require
- * credentials. Those are treated as authenticated here so an explicitly
- * configured local model is never silently rerouted to the parent's remote
- * provider (see #1008).
- *
- * If neither the subagent nor the parent has working auth, returns the
- * primary resolution unchanged so the existing error path still surfaces
- * a meaningful failure downstream.
+ * Uses the side-effect-free `hasConfiguredAuth` probe: it refreshes no OAuth
+ * tokens and runs no `!command` keys, which would stall a restore on the network.
  */
-export async function resolveModelOverrideWithAuthFallback(
-	modelPatterns: string[],
-	parentActiveModelPattern: string | undefined,
-	modelRegistry: ModelLookupRegistry & Pick<ModelRegistry, "getApiKey">,
-	settings?: Settings,
-	sessionId?: string,
-): Promise<{
-	model?: Model<Api>;
-	thinkingLevel?: ConfiguredThinkingLevel;
-	explicitThinkingLevel: boolean;
-	authFallbackUsed: boolean;
-	warning?: string;
-}> {
-	const disabledProviders = disabledProviderIds(settings);
-	let lookupRegistry: ModelLookupRegistry = modelRegistry;
-	if (disabledProviders.size > 0) {
-		const enabledModels = modelRegistry.getAvailable().filter(model => !disabledProviders.has(model.provider));
-		lookupRegistry = { getAvailable: () => enabledModels };
-	}
-	// Expand first: a role (or comma-separated item) may contain several
-	// requested alternatives that must be tried before the parent model.
-	const patterns = resolveConfiguredModelPatterns(modelPatterns, settings);
-	const primary = resolveModelOverride(patterns, lookupRegistry, settings);
-	// Without an alternative there is no routing decision to make. Let the
-	// child session resolve credentials through its normal execution path.
-	if (!primary.model || (!parentActiveModelPattern && patterns.length === 1)) {
-		return { ...primary, authFallbackUsed: false };
-	}
+export function resolveSessionModelSelector(
+	modelRegistry: ModelRegistry,
+	selector: string,
+): { model: Model<Api>; thinkingLevel?: ConfiguredThinkingLevel } | undefined {
+	const parsed = parseSessionModelSelector(modelRegistry, selector);
+	if (!parsed) return undefined;
+	const model = modelRegistry.find(parsed.provider, parsed.id);
+	if (!model || !modelRegistry.hasConfiguredAuth(model)) return undefined;
+	return { model, thinkingLevel: parsed.thinkingLevel };
+}
 
-	for (const pattern of patterns) {
-		const candidate = resolveModelOverride([pattern], lookupRegistry, settings);
-		if (!candidate.model) continue;
-		const key = await modelRegistry.getApiKey(candidate.model, sessionId);
-		if (key === kNoAuth || isAuthenticated(key)) {
-			return { ...candidate, authFallbackUsed: false };
-		}
+/**
+ * Discovery-backed providers (models.yml `discovery:` or extension
+ * `fetchDynamicModels`) that could still supply one of the saved selectors
+ * after a provider-scoped refresh. Disabled providers are skipped.
+ */
+export function sessionModelDiscoveryProviders(
+	modelRegistry: ModelRegistry,
+	selectors: readonly string[],
+	disabledProviders: ReadonlySet<string>,
+): Set<string> {
+	const providers = new Set<string>();
+	for (const selector of selectors) {
+		const parsed = parseSessionModelSelector(modelRegistry, selector);
+		const provider = parsed && modelRegistry.getDiscoveryProviderId(parsed.provider);
+		if (provider && !disabledProviders.has(provider)) providers.add(provider);
 	}
-	if (!parentActiveModelPattern) return { ...primary, authFallbackUsed: false };
-
-	const fallback = resolveModelOverride([parentActiveModelPattern], lookupRegistry, settings);
-	if (!fallback.model) {
-		return { ...primary, authFallbackUsed: false };
-	}
-	if (modelsAreEqual(fallback.model, primary.model)) {
-		return { ...primary, authFallbackUsed: false };
-	}
-	const fallbackKey = await modelRegistry.getApiKey(fallback.model, sessionId);
-	if (fallbackKey !== kNoAuth && !isAuthenticated(fallbackKey)) {
-		return { ...primary, authFallbackUsed: false };
-	}
-
-	return { ...fallback, authFallbackUsed: true, warning: primary.warning ?? fallback.warning };
+	return providers;
 }
 
 /**
@@ -1839,6 +1799,22 @@ export async function resolveModelScope(
 			explicitThinkingLevel: explicit,
 		});
 	};
+	// The scope is chat-only (it feeds Ctrl+P cycling and the initial model). A
+	// pattern naming an available non-chat runner (judge, search, image, …) is
+	// not a typo: the model hub and role resolution use runners outside the scope.
+	let runnerModels: Model<Api>[] | undefined;
+	const reportUnmatched = (pattern: string, glob: boolean) => {
+		runnerModels ??= modelRegistry.getAvailable("all").filter(model => modelKind(model) !== "chat");
+		const namesRunner = glob
+			? resolveGlobScopePattern(pattern, runnerModels).models.length > 0
+			: parseModelPatternWithContext(pattern, runnerModels, buildPreferenceContext(runnerModels, preferences))
+					.model !== undefined;
+		if (namesRunner) {
+			logger.debug(`Scope pattern "${pattern}" names a non-chat model; it stays out of the chat scope`);
+			return;
+		}
+		logger.warn(`No models match pattern "${pattern}"`);
+	};
 
 	for (const pattern of patterns) {
 		// Check if pattern contains glob characters
@@ -1852,7 +1828,7 @@ export async function resolveModelScope(
 			} = resolveGlobScopePattern(pattern, availableModels);
 
 			if (matchingModels.length === 0) {
-				logger.warn(`No models match pattern "${pattern}"`);
+				reportUnmatched(pattern, true);
 				continue;
 			}
 
@@ -1892,7 +1868,7 @@ export async function resolveModelScope(
 		}
 
 		if (!model) {
-			logger.warn(`No models match pattern "${pattern}"`);
+			reportUnmatched(pattern, false);
 			continue;
 		}
 
@@ -1996,6 +1972,7 @@ function findExactCliModel(
 	selector: string,
 	allModels: Model<Api>[],
 	availableModels: Model<Api>[],
+	preferences: ModelMatchPreferences | undefined,
 	options?: { catalogFallback?: boolean },
 ): Model<Api> | undefined {
 	// Explicit provider/id references stay authoritative against the full catalog.
@@ -2003,6 +1980,7 @@ function findExactCliModel(
 	if (referenced) return referenced;
 
 	// Flat-id (or full-selector-string) matches prefer authenticated providers,
+	// ranked like any other ambiguous bare id (recent use, modelProviderOrder),
 	// then fall back to catalog order. This covers aggregator-style flat ids
 	// that merely look provider-qualified (e.g. "openai/gpt-oss-120b" hosted on
 	// OpenRouter), where the provider/id decomposition above found nothing. A
@@ -2012,8 +1990,8 @@ function findExactCliModel(
 	const lower = selector.toLowerCase();
 	const isFlatMatch = (model: Model<Api>) =>
 		model.id.toLowerCase() === lower || formatModelString(model).toLowerCase() === lower;
-	const preferred = availableModels.find(m => isFlatMatch(m) && !isProviderLockedCrossMatch(selector, m));
-	if (preferred) return preferred;
+	const preferred = availableModels.filter(m => isFlatMatch(m) && !isProviderLockedCrossMatch(selector, m));
+	if (preferred.length > 0) return pickPreferredModel(preferred, buildPreferenceContext(availableModels, preferences));
 	// The unauthenticated catalog fallback is a weak match: a bare id like
 	// `default` collides with the bundled `cursor/default` model, which must not
 	// shadow a configured `modelRoles.default` role the user can actually run.
@@ -2122,7 +2100,8 @@ function resolveCliModelInScope(
 	options: CliModelOptions & { cliModel: string },
 	scope: CliModelScope,
 ): ResolveCliModelResult {
-	const { cliProvider, cliModel, settings, preferences } = options;
+	const { cliProvider, cliModel, settings } = options;
+	const preferences = mergeModelMatchPreferences(settings, options.preferences);
 	const { all: allModels, available: availableModels } = scope;
 	if (allModels.length === 0) {
 		return {
@@ -2150,7 +2129,9 @@ function resolveCliModelInScope(
 
 	const trimmedModel = cliModel.trim();
 	if (!provider) {
-		const exact = findExactCliModel(trimmedModel, allModels, availableModels, { catalogFallback: false });
+		const exact = findExactCliModel(trimmedModel, allModels, availableModels, preferences, {
+			catalogFallback: false,
+		});
 		if (exact) {
 			return {
 				model: exact,
@@ -2166,7 +2147,9 @@ function resolveCliModelInScope(
 			MAX_THINKING_SUFFIX_OPTIONS,
 		);
 		if (exactThinkingLevel) {
-			const exactSuffixed = findExactCliModel(exactBase, allModels, availableModels, { catalogFallback: false });
+			const exactSuffixed = findExactCliModel(exactBase, allModels, availableModels, preferences, {
+				catalogFallback: false,
+			});
 			if (exactSuffixed) {
 				return {
 					model: exactSuffixed,

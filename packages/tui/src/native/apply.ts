@@ -1,8 +1,9 @@
 /**
  * Reference document applier: applies TSP frames to a node tree the way the
- * spec says the terminal does (§5.1). Ops are validated and applied one by
- * one; a rejected op is reported and skipped without affecting the rest of
- * the frame. `settle` is recorded as a hint and never restricts later ops.
+ * spec says the terminal does (Tern SDK, `protocol/documents.md`, frame ops).
+ * Ops are validated and applied one by one; a rejected op is reported and
+ * skipped without affecting the rest of the frame. `settle` is recorded as a
+ * hint and never restricts later ops.
  *
  * Used by tests, the debug server's `doc` op, and the TSP test harness.
  */
@@ -212,7 +213,8 @@ export class TspDocument {
 				this.#focus = id;
 				return;
 			}
-			case "reveal": {
+			case "reveal":
+			case "scroll": {
 				const [, id] = op;
 				this.#node(id);
 				return;
