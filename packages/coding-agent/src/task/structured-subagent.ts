@@ -294,6 +294,9 @@ function assertIsolationControlsAllowed(request: StructuredSubagentRequest, plan
 	if (!affirmative) return;
 	const reason = isolationUnavailableReason(request.session, planMode);
 	if (reason === undefined) return;
+	// Note: "plan-mode" never reaches this throw — assertPlanControlsAllowed
+	// runs first and rejects every affirmative shape in plan mode — so the
+	// fallback message covers "disabled" only.
 	throw new StructuredSubagentError(
 		"preflight",
 		reason === "nested"

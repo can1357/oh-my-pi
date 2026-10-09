@@ -302,6 +302,20 @@ describe("structured subagent primitive", () => {
 		await expect(
 			resolveEffectiveSubagentPolicy(request({ session: nested, isolation: { requested: false, apply: false } })),
 		).resolves.toBeDefined();
+		// The headline silent-downgrade fix: a malformed affirmative value must
+		// reject with its type and value, not downgrade to non-isolated.
+		await expect(
+			resolveEffectiveSubagentPolicy(
+				request({ session: nested, isolation: { requested: "true" as unknown as boolean } }),
+			),
+		).rejects.toThrow("Invalid value for `isolated`");
+		// Affirmative apply alone on an open-gate non-isolated session resolves:
+		// the gate only closes gated-off sessions.
+		const open = session({ isolationEnabled: true });
+		mockDiscovery();
+		await expect(
+			resolveEffectiveSubagentPolicy(request({ session: open, isolation: { apply: true } })),
+		).resolves.toBeDefined();
 	});
 	it("reloads project task and retry policy before resolving an agent added during the session", async () => {
 		const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-task-hot-reload-"));
