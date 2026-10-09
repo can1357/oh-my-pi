@@ -24,10 +24,9 @@ export interface StoredMessage {
 	body: string;
 	chain: string[];
 	sentAt: number;
-	sessionFile?: string;
 }
 
-export type StoredRefusalNotice = Extract<InboxRequest, { kind: "refused" }> & { sentAt: number; sessionFile?: string };
+export type StoredRefusalNotice = Extract<InboxRequest, { kind: "refused" }> & { sentAt: number };
 export type StoredMail = StoredMessage | StoredRefusalNotice;
 export interface DrainedMail {
 	message: StoredMail;
@@ -103,12 +102,7 @@ async function mailboxFiles(dir: string, create: boolean): Promise<string[]> {
 function parseStoredMessage(raw: unknown): StoredMail | undefined {
 	if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return undefined;
 	const value = raw as Record<string, unknown>;
-	if (
-		typeof value.sentAt !== "number" ||
-		!Number.isFinite(value.sentAt) ||
-		(value.sessionFile !== undefined && typeof value.sessionFile !== "string")
-	)
-		return undefined;
+	if (typeof value.sentAt !== "number" || !Number.isFinite(value.sentAt)) return undefined;
 	const request = parseInboxRequest(
 		value.type === "notice"
 			? {
@@ -126,20 +120,9 @@ function parseStoredMessage(raw: unknown): StoredMail | undefined {
 		return undefined;
 	if (request.type === "message") {
 		if (!request.from || !request.chain) return undefined;
-		return {
-			id: request.id,
-			from: request.from,
-			body: request.body,
-			chain: request.chain,
-			sentAt: value.sentAt,
-			...(value.sessionFile === undefined ? {} : { sessionFile: value.sessionFile }),
-		};
+		return { id: request.id, from: request.from, body: request.body, chain: request.chain, sentAt: value.sentAt };
 	}
-	return {
-		...request,
-		sentAt: value.sentAt,
-		...(value.sessionFile === undefined ? {} : { sessionFile: value.sessionFile }),
-	};
+	return { ...request, sentAt: value.sentAt };
 }
 
 async function readStoredMessage(file: string): Promise<StoredMail | undefined> {

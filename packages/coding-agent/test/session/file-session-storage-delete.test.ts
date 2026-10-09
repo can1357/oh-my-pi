@@ -49,7 +49,6 @@ function queueMail(sessionId: string, sessionFile: string, id: string, body: str
 		body,
 		chain: [],
 		sentAt: Date.now(),
-		sessionFile,
 	});
 }
 

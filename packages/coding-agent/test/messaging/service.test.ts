@@ -50,6 +50,8 @@ import {
 import * as transport from "../../src/messaging/transport";
 import type { SessionTitleSource } from "../../src/session/session-entries";
 import { renderOtherSessionsSection } from "../../src/session/messaging-host";
+import { executeSend } from "../../src/irc/messaging";
+import { AgentRegistry } from "../../src/registry/agent-registry";
 
 class FakeHost implements MessagingHost {
 	directPrint = false;
@@ -1285,7 +1287,7 @@ describe("offline handoff regressions", () => {
 		).toEqual(["COLLISION_MARKER"]);
 	});
 
-	it("rejects duplicate live full identities with the existing ambiguity receipt", async () => {
+	it("reports one session open in two processes by pid instead of as a naming ambiguity", async () => {
 		const { a, stopped, bh, bs } = await stoppedBeta();
 		for (const host of [bh, new FakeHost("b", "beta-copy")]) {
 			const live = await MessagingService.start(host, bs);
@@ -1294,10 +1296,83 @@ describe("offline handoff regressions", () => {
 		}
 		const result = await a.send(stopped, "DO_NOT_ROUTE", { notifyWhenIdle: false });
 		expect(result.ok).toBe(false);
-		expect(result.text).toContain('Not sent: "beta" matches more than one agent:');
-		expect(result.text).toEndWith("Address one by its session short id.");
+		expect(result.text).toStartWith("Not sent: beta is open in more than one omp process (pid ");
+		expect(result.text).not.toContain("short id");
 		expect(bh.deliveries).toEqual([]);
 		expect(await mailbox.drainOffline("b")).toEqual([]);
+	});
+
+	it("does not count a stale registry row for a running session as a second process", async () => {
+		const { a, stopped, bh, bs } = await stoppedBeta();
+		const live = await MessagingService.start(bh, bs);
+		services.push(live);
+		live.markReady();
+		const dir = temp!.path();
+		const [entry] = (await transport.readInboxEntries({ dir })).filter(item => item.sessionId === "b");
+		const meta = JSON.parse(await fs.readFile(path.join(dir, `${entry.entryId}.json`), "utf8"));
+		// Same session and live pid, but its socket is gone: a killed process whose pid was reused.
+		await fs.writeFile(
+			path.join(dir, `stale-${entry.entryId}.json`),
+			JSON.stringify({ ...meta, endpoint: `${meta.endpoint}-stale` }),
+		);
+		expect((await a.send(stopped, "STALE_ROW_MARKER", { notifyWhenIdle: false })).ok).toBe(true);
+		expect(bh.deliveries.map(item => item.body)).toEqual(["STALE_ROW_MARKER"]);
+	});
+
+	it("fails a send to a running session that is too slow to answer instead of queueing it offline", async () => {
+		const { a, stopped, bh, bs } = await stoppedBeta();
+		const live = await MessagingService.start(bh, bs);
+		services.push(live);
+		live.markReady();
+		vi.spyOn(transport, "requestInbox").mockImplementation(async (entry, request, options) =>
+			request.type === "snapshot" ? { ok: false, error: "timeout" } : realRequestInbox(entry, request, options),
+		);
+		const result = await a.send(stopped, "SLOW_PEER_MARKER", { notifyWhenIdle: false });
+		expect(result).toEqual({
+			ok: false,
+			text: "Failed to send to beta: the session is running but did not answer in time. Try again shortly.",
+		});
+		expect(bh.deliveries).toEqual([]);
+		expect(await mailbox.drainOffline("b")).toEqual([]);
+	});
+
+	it("delivers mail found in a running session's mailbox when its turn settles idle", async () => {
+		const { b, bh } = await pair();
+		await mailbox.enqueueOffline("b", {
+			id: "late-1",
+			from: sender,
+			body: "LATE_MAIL_MARKER",
+			chain: [],
+			sentAt: Date.now(),
+		});
+		const delivered = Promise.withResolvers<readonly RemoteDelivery[]>();
+		vi.spyOn(bh, "deliverRemote").mockImplementation(async deliveries => {
+			delivered.resolve(deliveries);
+			return true;
+		});
+		b.turnSettledIdle();
+		expect((await delivered.promise).map(item => item.body)).toEqual(["LATE_MAIL_MARKER"]);
+		expect(bh.display).toContain("1 message(s) from other sessions were waiting in this session's mailbox.");
+		expect(await mailbox.drainOffline("b")).toEqual([]);
+	});
+
+	it("does not scan saved sessions when the recipient is a local agent", async () => {
+		const { a } = await pair();
+		const scan = vi.spyOn(mailbox, "listOfflineSessions");
+		const registry = new AgentRegistry();
+		registry.register({ id: "Worker", displayName: "Worker", kind: "sub", session: null, status: "running" });
+		await executeSend({ registry, senderId: "Main", messaging: a }, { to: "Worker", message: "hi" });
+		expect(scan).not.toHaveBeenCalled();
+	});
+
+	it("lets an ACP conversation subscribe to idle notices", async () => {
+		const { a } = await pair();
+		const result = await executeSend(
+			{ registry: new AgentRegistry(), senderId: "acp:conversation-1", messaging: a },
+			{ to: "beta", message: "", notifyWhenIdle: true },
+		);
+		expect(result.isError).toBe(false);
+		expect(result.content).toEqual([{ type: "text", text: "Will notify you when beta is next idle." }]);
 	});
 
 	it("drains a successful send whose atomic mailbox write overlaps receiver startup", async () => {

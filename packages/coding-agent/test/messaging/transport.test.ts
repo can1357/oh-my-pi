@@ -339,7 +339,11 @@ describe.skipIf(process.platform !== "win32")("Windows proof client", () => {
 		expect(writes[0]).not.toContain(peerKey);
 	});
 
-	it.each(["close", "error", "timeout"])("keeps a pre-proof %s unreachable without disclosure", async kind => {
+	it.each([
+		["close", "unreachable"],
+		["error", "unreachable"],
+		["timeout", "timeout"],
+	])("reports a pre-proof %s as %s without disclosure", async (kind, error) => {
 		const { socket, writes, result } = await proofClient({ type: "snapshot" });
 		if (kind === "timeout") {
 			socket.emit("data", '{"type":"proof"');
@@ -347,7 +351,7 @@ describe.skipIf(process.platform !== "win32")("Windows proof client", () => {
 			socket.emit("data", ',"proof":"');
 			vi.advanceTimersByTime(1);
 		} else socket.emit(kind, new Error("peer unavailable"));
-		expect(await result).toEqual({ ok: false, error: "unreachable" });
+		expect(await result).toEqual({ ok: false, error });
 		expect(writes).toHaveLength(1);
 	});
 
@@ -614,7 +618,7 @@ describe("inbox transport", () => {
 	it.each([
 		{ request: { type: "snapshot" } as InboxRequest, timeout: SNAPSHOT_TIMEOUT_MS },
 		{ request: { type: "message", id: "one", body: "hello" } as InboxRequest, timeout: SEND_TIMEOUT_MS },
-	])("returns unreachable at the default $timeout ms request deadline", async ({ request, timeout }) => {
+	])("returns timeout, not unreachable, at the default $timeout ms request deadline", async ({ request, timeout }) => {
 		const dir = tempDir();
 		await publish(dir, async () => ({ ok: true, snapshot }));
 		const [entry] = await listInboxEntries({ dir });
@@ -635,7 +639,7 @@ describe("inbox transport", () => {
 		vi.advanceTimersByTime(timeout - 1);
 		expect(settled).toBe(false);
 		vi.advanceTimersByTime(1);
-		expect(await result).toEqual({ ok: false, error: "unreachable" });
+		expect(await result).toEqual({ ok: false, error: "timeout" });
 	});
 
 	it.skipIf(process.platform === "win32")(
