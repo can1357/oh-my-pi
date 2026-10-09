@@ -252,10 +252,13 @@ export function planInlineSwaps(input: InlinePlanInput): InlineSwapPlan {
  * stamps `prunedAt`. A retracted item may have gone out as frames in an
  * earlier request, and signed thinking after it is bound to those bytes; the
  * stamp makes `transformMessages` drop that thinking instead of the provider
- * rejecting it. The rewrite time is the message whose images first pushed the
- * request over the cap, so thinking minted after the switch to text is kept.
- * Items with no assistant turn between them and that message were never
- * followed by thinking in their framed form and stay unstamped.
+ * rejecting it. Each item's rewrite time is the message that retracted it:
+ * the backstop is replayed on every prefix of the history (the request that
+ * message arrived in), newest swaps first, so an item that survived an
+ * earlier crossing gets the later message that pushed it out, and thinking
+ * minted while it was still frames is dropped. Items with no assistant turn
+ * between them and that message were never followed by thinking in their
+ * framed form and stay unstamped.
  */
 function stampCapRetractions(
 	messages: Message[],
@@ -268,43 +271,50 @@ function stampCapRetractions(
 ): boolean {
 	if (plan.retracted.toolResults.length === 0 && !plan.retracted.systemPrompt) return false;
 	const toolResultIndex = new Map(scan.toolResults.map(built => [built.candidate.id, built.index]));
-	const { firstUserIndex } = scan;
-	const retractedAt = new Map<number, "toolResult" | "systemPrompt">();
-	const framesAt = new Map<number, number>();
-	const place = (index: number | undefined, frames: number) => {
-		if (index !== undefined && index >= 0) framesAt.set(index, (framesAt.get(index) ?? 0) + frames);
-	};
-	for (const swap of plan.toolResults) place(toolResultIndex.get(swap.id), swap.frames);
+	// Every tool-result swap before the backstop ran, in context order. The
+	// first pass decides each item from what precedes it, so a prefix holds
+	// exactly the swaps at or before its end.
+	const swaps: Array<{ index: number; frames: number; retracted: boolean }> = [];
+	for (const swap of plan.toolResults) {
+		const index = toolResultIndex.get(swap.id);
+		if (index !== undefined) swaps.push({ index, frames: swap.frames, retracted: false });
+	}
 	for (const swap of plan.retracted.toolResults) {
 		const index = toolResultIndex.get(swap.id);
-		place(index, swap.frames);
-		if (index !== undefined) retractedAt.set(index, "toolResult");
+		if (index !== undefined) swaps.push({ index, frames: swap.frames, retracted: true });
 	}
+	swaps.sort((a, b) => a.index - b.index);
 	const prompt = plan.systemPrompt ?? plan.retracted.systemPrompt;
-	if (prompt) place(firstUserIndex, prompt.frames);
-	if (plan.retracted.systemPrompt && firstUserIndex >= 0) retractedAt.set(firstUserIndex, "systemPrompt");
-	if (retractedAt.size === 0) return false;
+	const promptIndex = prompt ? scan.firstUserIndex : -1;
 
+	// Message index of each retracted item → index of the message that retracted it.
+	const retractedBy = new Map<number, number>();
 	let images = 0;
-	let crossing = -1;
-	for (let index = 0; index < original.length; index++) {
-		images += messageImageCount(original[index]) + (framesAt.get(index) ?? 0);
-		if (images > imageLimit) {
-			crossing = index;
-			break;
+	let next = 0;
+	for (let end = 0; end < original.length; end++) {
+		images += messageImageCount(original[end]);
+		if (prompt && end === promptIndex) images += prompt.frames;
+		while (next < swaps.length && swaps[next].index === end) images += swaps[next++].frames;
+		let excess = images - imageLimit;
+		for (let swap = next - 1; swap >= 0 && excess > 0; swap--) {
+			excess -= swaps[swap].frames;
+			if (swaps[swap].retracted && !retractedBy.has(swaps[swap].index)) retractedBy.set(swaps[swap].index, end);
+		}
+		const promptSent = promptIndex >= 0 && promptIndex <= end;
+		if (excess > 0 && plan.retracted.systemPrompt && promptSent && !retractedBy.has(promptIndex)) {
+			retractedBy.set(promptIndex, end);
 		}
 	}
-	if (crossing < 0) return false;
-	const rewriteAt = original[crossing].timestamp;
 
 	let stamped = false;
-	for (const [index, kind] of retractedAt) {
-		if (!original.slice(index + 1, crossing).some(message => message.role === "assistant")) continue;
+	for (const [index, by] of retractedBy) {
+		if (!original.slice(index + 1, by).some(message => message.role === "assistant")) continue;
+		const rewriteAt = original[by].timestamp;
 		const message = messages[index];
-		if (kind === "toolResult" && message.role === "toolResult") {
+		if (message.role === "toolResult") {
 			messages[index] = { ...message, prunedAt: Math.max(message.prunedAt ?? rewriteAt, rewriteAt) };
 			stamped = true;
-		} else if (kind === "systemPrompt" && message.role === "user") {
+		} else if (message.role === "user") {
 			messages[index] = {
 				...message,
 				historyRewriteAt: Math.max(message.historyRewriteAt ?? rewriteAt, rewriteAt),

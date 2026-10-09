@@ -597,6 +597,90 @@ describe("SnapcompactInlineTransformer", () => {
 		expect(thinkingByTurn).toEqual([true, false, true]);
 	});
 
+	describe("successive cap crossings", () => {
+		const model = makeModel({ provider: "groq" });
+		const anthropic = makeModel();
+		const bindingModel = {
+			...anthropic,
+			thinking: { ...anthropic.thinking, prefixBinding: true },
+		} as Model<"anthropic-messages">;
+		const screenshot: ImageContent = { type: "image", data: "c2NyZWVuc2hvdA==", mimeType: "image/png" };
+		const paste = (timestamp: number): Message => ({ role: "user", content: [screenshot, screenshot], timestamp });
+		const thinkingTurn = (timestamp: number): AssistantMessage => ({
+			...createAssistantMessage(`turn ${timestamp}`),
+			content: [
+				{ type: "thinking", thinking: "reasoning", thinkingSignature: "sig" },
+				{ type: "text", text: `turn ${timestamp}` },
+			],
+			model: "test-model",
+			timestamp,
+		});
+		const thinkingKept = (messages: Message[]) =>
+			Object.fromEntries(
+				transformMessages(messages, bindingModel)
+					.filter(message => message.role === "assistant")
+					.map(message => [message.timestamp, message.content.some(block => block.type === "thinking")]),
+			);
+
+		it("stamps a result at the later crossing that retracted it, not the first", async () => {
+			const transformer = new SnapcompactInlineTransformer(
+				withTestShape({ renderSystemPrompt: "none", renderToolResults: true }),
+			);
+			const history: Message[] = [
+				{ ...userMessage("go"), timestamp: 1 },
+				{ ...toolResult("call_a", LARGE), timestamp: 2 },
+				thinkingTurn(3),
+				{ ...toolResult("call_b", LARGE), timestamp: 4 },
+				thinkingTurn(5),
+			];
+			const sent = await transformer.transform({ messages: history }, model);
+			expect(imageCount(sent)).toBe(4);
+
+			// 2 frames + 2 frames + 2 screenshots > 5: only B reverts, A stays frames.
+			const firstCrossing = [...history, paste(6), thinkingTurn(7)];
+			const afterFirst = await transformer.transform({ messages: firstCrossing }, model);
+			expect(afterFirst.messages[1]).toEqual(sent.messages[1]);
+			expect((afterFirst.messages[3] as ToolResultMessage).prunedAt).toBe(6);
+
+			// Two more screenshots push A out too; thinking at 7 was minted against A's frames.
+			const secondCrossing = [...firstCrossing, paste(8), thinkingTurn(9)];
+			const afterSecond = await transformer.transform({ messages: secondCrossing }, model);
+			expect(imageCount(afterSecond)).toBe(4);
+			expect((afterSecond.messages[1] as ToolResultMessage).prunedAt).toBe(8);
+			expect((afterSecond.messages[3] as ToolResultMessage).prunedAt).toBe(6);
+			expect(thinkingKept(afterSecond.messages)).toEqual({ 3: false, 5: false, 7: false, 9: true });
+		});
+
+		it("stamps a system-prompt retraction at its own crossing after a tool result's", async () => {
+			const transformer = new SnapcompactInlineTransformer(
+				withTestShape({ renderSystemPrompt: "all", renderToolResults: true }),
+			);
+			const history: Message[] = [
+				{ ...userMessage("go"), timestamp: 1 },
+				{ ...toolResult("call_a", LARGE), timestamp: 2 },
+				thinkingTurn(3),
+			];
+			const sent = await transformer.transform({ systemPrompt: [LARGE], messages: history }, model);
+			expect(imageCount({ messages: [sent.messages[0]] })).toBe(2);
+			expect(imageCount({ messages: [sent.messages[1]] })).toBe(2);
+
+			// Prompt 2 + A 2 + 2 screenshots > 5: A reverts, the prompt keeps its frames.
+			const firstCrossing = [...history, paste(4), thinkingTurn(5)];
+			const afterFirst = await transformer.transform({ systemPrompt: [LARGE], messages: firstCrossing }, model);
+			expect(afterFirst.messages[0]).toEqual(sent.messages[0]);
+			expect((afterFirst.messages[1] as ToolResultMessage).prunedAt).toBe(4);
+
+			// Prompt 2 + 4 screenshots > 5: the prompt reverts at the second paste.
+			const secondCrossing = [...firstCrossing, paste(6), thinkingTurn(7)];
+			const afterSecond = await transformer.transform({ systemPrompt: [LARGE], messages: secondCrossing }, model);
+			expect(imageCount(afterSecond)).toBe(4);
+			const carrier = afterSecond.messages[0] as Extract<Message, { role: "user" }>;
+			expect(carrier.historyRewriteAt).toBe(6);
+			expect((afterSecond.messages[1] as ToolResultMessage).prunedAt).toBe(4);
+			expect(thinkingKept(afterSecond.messages)).toEqual({ 3: false, 5: false, 7: true });
+		});
+	});
+
 	it("never changes how an already-sent message goes out as the conversation grows", async () => {
 		// Every request must start with the previous request's exact bytes.
 		// Rewriting an earlier item voids the provider prompt cache from there
