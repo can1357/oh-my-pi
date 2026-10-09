@@ -1759,17 +1759,13 @@ export class TurnRecovery {
 	}
 
 	/**
-	 * Chain keys to consult for the active model, most specific walk first: the
-	 * chain that owns the current fallback walk, then the chain the CURRENT model
-	 * owns when that is a different key.
+	 * Chain keys for the current model, starting with the chain that owns this
+	 * runtime's fallback walk, then the chain the current model owns.
 	 *
-	 * The second key is what makes a chain reachable from the end of another one.
-	 * `#activeRetryFallback.role` is pinned at the first hop and never
-	 * re-resolved, so a session that lands on the last entry of one chain has no
-	 * candidate left and retries the same model until the budget is gone — even
-	 * when that entry is itself a chain key with its own fallbacks configured
-	 * (`anthropic/claude-opus-5 -> … -> runinfra/deepseek-v4-pro`, whose own
-	 * `runinfra/deepseek-v4-pro -> openrouter/deepseek/…` chain was unreachable).
+	 * Supplying `pinnedRole`, even as `undefined`, uses the caller's fallback
+	 * ownership instead of the main session's active fallback. This keeps an
+	 * advisor's first fallback independent while preserving the two-key walk
+	 * when its fallback model owns another chain.
 	 *
 	 * Two keys is the whole walk per attempt. Chains that point at each other
 	 * alternate models instead of looping in place, and every hop still spends a
@@ -1780,7 +1776,7 @@ export class TurnRecovery {
 		currentModel: Model | null | undefined = this.#host.model(),
 		options?: { pinnedRole?: string; roleHint?: string },
 	): string[] {
-		const pinned = options?.pinnedRole ?? this.#activeRetryFallback?.role;
+		const pinned = options && "pinnedRole" in options ? options.pinnedRole : this.#activeRetryFallback?.role;
 		const current = this.resolveRetryFallbackRole(currentSelector, currentModel, options?.roleHint);
 		if (!pinned) return current ? [current] : [];
 		return current && current !== pinned ? [pinned, current] : [pinned];

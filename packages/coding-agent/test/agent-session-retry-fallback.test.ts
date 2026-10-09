@@ -1907,6 +1907,87 @@ describe("AgentSession retry fallback", () => {
 		});
 	});
 
+	it("keeps an unpinned advisor off the main session's active fallback chain", async () => {
+		const mainPrimary = getBundledModel("openai", "gpt-4o-mini");
+		const advisorPrimary = getBundledModel("anthropic", "claude-sonnet-4-5");
+		const mainFallback = getBundledModel("google", "gemini-2.5-flash");
+		const advisorFallback = getBundledModel("openai", "gpt-4o");
+		if (!mainPrimary || !advisorPrimary || !mainFallback || !advisorFallback) {
+			throw new Error("Expected bundled fallback models to exist");
+		}
+
+		const mainPrimarySelector = `${mainPrimary.provider}/${mainPrimary.id}`;
+		const advisorPrimarySelector = `${advisorPrimary.provider}/${advisorPrimary.id}`;
+		const mainFallbackSelector = `${mainFallback.provider}/${mainFallback.id}`;
+		const advisorFallbackSelector = `${advisorFallback.provider}/${advisorFallback.id}`;
+		const requestedAdvisorModels: string[] = [];
+		const applied: Array<Extract<AgentSessionEvent, { type: "retry_fallback_applied" }>> = [];
+		const advisorRecovered = Promise.withResolvers<void>();
+		const advisorMock = createMockModel();
+		const agent = new Agent({
+			getApiKey: model => `${model.provider}-test-key`,
+			initialState: { model: mainFallback, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: createMockModel({ responses: [{ content: ["Primary complete"] }] }).stream,
+		});
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.baseDelayMs": 5,
+			"retry.fallbackRevertPolicy": "never",
+			"retry.fallbackChains": {
+				default: [advisorPrimarySelector, mainFallbackSelector],
+				advisor: [advisorFallbackSelector],
+			},
+			"advisor.syncBacklog": "1",
+		});
+		settings.setModelRole("default", mainPrimarySelector);
+		settings.setModelRole("advisor", `${advisorPrimarySelector}:high`);
+
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+			initialRetryFallback: {
+				role: "default",
+				originalSelector: mainPrimarySelector,
+				originalThinkingLevel: undefined,
+			},
+			advisorTools: [],
+			advisorConfigs: [{ name: "isolated-chain", model: `${advisorPrimarySelector}:high` }],
+			advisorStreamFn: (model, context, options) => {
+				const selector = `${model.provider}/${model.id}`;
+				requestedAdvisorModels.push(selector);
+				if (selector === advisorPrimarySelector) {
+					advisorMock.push({ throw: "overloaded_error: provider returned error 503" });
+				} else {
+					advisorMock.push({ content: [`Recovered on ${selector}`] });
+				}
+				return advisorMock.stream(model, context, options);
+			},
+		});
+		session.subscribe(event => {
+			if (event.type === "retry_fallback_applied") applied.push(event);
+			if (event.type === "retry_fallback_succeeded" && event.role === "advisor") advisorRecovered.resolve();
+		});
+
+		session.setAdvisorEnabled(true);
+		await session.prompt("Review the primary turn");
+		await session.waitForIdle();
+		await advisorRecovered.promise;
+
+		expect(requestedAdvisorModels).toEqual([advisorPrimarySelector, advisorFallbackSelector]);
+		expect(applied).toEqual([
+			{
+				type: "retry_fallback_applied",
+				from: `${advisorPrimarySelector}:high`,
+				to: advisorFallbackSelector,
+				role: "advisor",
+				reason: expect.stringContaining("overloaded_error: provider returned error 503"),
+			},
+		]);
+		expect(session.model).toMatchObject({ provider: mainFallback.provider, id: mainFallback.id });
+	});
+
 	it("keeps advisor fallback recovery on its role chain when another role shares its model", async () => {
 		const mainModel = getBundledModel("openai", "gpt-4o-mini");
 		const advisorPrimary = getBundledModel("anthropic", "claude-sonnet-4-5");
