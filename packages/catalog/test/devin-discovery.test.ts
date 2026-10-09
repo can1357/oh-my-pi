@@ -572,12 +572,20 @@ describe("devin native display filtering", () => {
 		expect(find("fusion-kimi-k3-sidekick-swe-2-high")).toBeUndefined();
 		expect(wireId("fusion-sidekick-swe-2-high")).toBeUndefined();
 		expect(wireId("fusion")).toBeUndefined();
-		// Only the lead runs, so limits and pricing are the lead's, not the composite card's.
+		// Only the lead runs, so limits and pricing are the lead's — including
+		// the lead's own cache-write rate and long-context tier — not the
+		// composite card's.
 		const routed = find("fusion-gpt-6-sol-high-sidekick-swe-2-high");
 		expect(routed?.contextWindow).toBe(400_000);
 		expect(routed?.maxTokens).toBe(128_000);
 		expect(routed?.input).toEqual(["text", "image"]);
-		expect(routed?.cost).toEqual({ input: 2, output: 8, cacheRead: 0, cacheWrite: 0 });
+		expect(routed?.cost).toEqual({
+			input: 2,
+			output: 8,
+			cacheRead: 0,
+			cacheWrite: 2.5,
+			longContext: { inputThreshold: 272_000, input: 4, output: 12, cacheRead: 0, cacheWrite: 5 },
+		});
 	});
 
 	it("stops composite pricing at the Sidekick marker even with a sparse headline card", () => {
@@ -769,7 +777,7 @@ describe("devin catalog seed", () => {
 	});
 });
 
-describe("devin cost-fallback", () => {
+describe("devin catalog pricing", () => {
 	const zero = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
 
 	function spec(id: string, cost = zero): ModelSpec<"devin-agent"> {
@@ -790,7 +798,7 @@ describe("devin cost-fallback", () => {
 
 	it("prices plan-included SWE-2 at the promo fallback without a recurring tariff", () => {
 		const model = buildModel(spec("swe-2"));
-		expect(model.cost).toMatchObject({ input: 0.75, output: 3.75, cacheRead: 0.075, cacheWrite: 0.75 });
+		expect(model.cost).toMatchObject({ input: 0.75, output: 3.75, cacheRead: 0.075, cacheWrite: 0 });
 		expect(model.cost.timeBased).toBeUndefined();
 	});
 
@@ -798,7 +806,7 @@ describe("devin cost-fallback", () => {
 		const clock = spyOn(Date, "now").mockReturnValue(Date.parse("2027-01-01T00:00:00Z"));
 		try {
 			const model = buildModel(spec("swe-2"));
-			expect(model.cost).toMatchObject({ input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3 });
+			expect(model.cost).toMatchObject({ input: 3, output: 15, cacheRead: 0.3, cacheWrite: 0 });
 			expect(model.cost.timeBased).toBeUndefined();
 		} finally {
 			clock.mockRestore();
@@ -809,5 +817,59 @@ describe("devin cost-fallback", () => {
 		const model = buildModel(spec("swe-2", { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3 }));
 		expect(model.cost).toMatchObject({ input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3 });
 		expect(model.cost.timeBased).toBeUndefined();
+	});
+
+	it("bills Claude and GPT-5.6+ cache writes at 1.25x input and earlier GPT writes at nothing", () => {
+		const haiku = buildModel(spec("claude-haiku-5-5", { input: 0.1, output: 0.5, cacheRead: 0.01, cacheWrite: 0 }));
+		expect(haiku.cost.cacheWrite).toBeCloseTo(0.125, 10);
+		const terra = buildModel(spec("gpt-5-6-terra", { input: 2, output: 12, cacheRead: 0.2, cacheWrite: 0 }));
+		expect(terra.cost.cacheWrite).toBe(2.5);
+		const gpt55 = buildModel(spec("gpt-5-5", { input: 5, output: 30, cacheRead: 0.5, cacheWrite: 0 }));
+		expect(gpt55.cost.cacheWrite).toBe(0);
+	});
+
+	it("derives a GPT-6 Fast lane's long-context tier from its own price", () => {
+		const fast = buildModel(spec("gpt-6-sol-fast", { input: 4, output: 20, cacheRead: 0.4, cacheWrite: 0 }));
+		expect(fast.cost.longContext).toEqual({
+			inputThreshold: 272_000,
+			input: 8,
+			output: 30,
+			cacheRead: 0.8,
+			cacheWrite: 10,
+		});
+	});
+
+	it("tiers the standard GPT-5.6 lanes but not their undocumented Fast lanes", () => {
+		const standard = buildModel(spec("gpt-5-6-sol-high", { input: 4, output: 20, cacheRead: 0.4, cacheWrite: 0 }));
+		expect(standard.cost.longContext).toEqual({
+			inputThreshold: 272_000,
+			input: 8,
+			output: 30,
+			cacheRead: 0.8,
+			cacheWrite: 10,
+		});
+		const fast = buildModel(
+			spec("gpt-5-6-sol-high-priority", { input: 8, output: 40, cacheRead: 0.8, cacheWrite: 0 }),
+		);
+		expect(fast.cost.longContext).toBeUndefined();
+	});
+
+	it("doubles every Grok leg but raises Gemini Pro output only 1.5x above 200K", () => {
+		const grok = buildModel(spec("grok-4-7", { input: 2, output: 6, cacheRead: 0.5, cacheWrite: 0 }));
+		expect(grok.cost.longContext).toEqual({
+			inputThreshold: 200_000,
+			input: 4,
+			output: 12,
+			cacheRead: 1,
+			cacheWrite: 0,
+		});
+		const gemini = buildModel(spec("gemini-3-1-pro", { input: 2, output: 12, cacheRead: 0.2, cacheWrite: 0 }));
+		expect(gemini.cost.longContext).toEqual({
+			inputThreshold: 200_000,
+			input: 4,
+			output: 18,
+			cacheRead: 0.4,
+			cacheWrite: 0,
+		});
 	});
 });

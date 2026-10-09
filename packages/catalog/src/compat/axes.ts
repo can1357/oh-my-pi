@@ -378,6 +378,12 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 		shape: "scalar",
 		values: [true, false],
 	},
+	/**
+	 * The host bills cache writes at this multiple of the row's live `input`
+	 * price (and the long-context tier's `input`), for hosts whose discovery
+	 * reports cache-write tokens but no cache-write rate.
+	 */
+	"cache-write-rate": { key: "cacheWriteRate", set: "catalog", shape: "scalar" },
 	"delegation-bias": { key: "delegationBias", set: "catalog", shape: "scalar", values: DELEGATION_BIASES },
 	"discovery-api": { key: "discoveryApi", set: "catalog", shape: "scalar" },
 	"edit-prompt-variant": { key: "editPromptVariant", set: "catalog", shape: "scalar", values: ["full", "compact"] },

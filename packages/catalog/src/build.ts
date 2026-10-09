@@ -166,8 +166,9 @@ function applyCatalogAssignments<TApi extends Api>(model: Model<TApi>, catalog: 
 
 /**
  * Applies reviewed catalog-data value corrections (`cost-patch`,
- * `cache-read-at-input-rate`, `limits-patch`, `long-context-cost`,
- * `context-window-floor`, `input-modalities`) onto an upstream-sourced spec. Applied by
+ * `cache-read-at-input-rate`, `cache-write-rate`, `limits-patch`,
+ * `long-context-cost`, `context-window-floor`, `input-modalities`) onto an
+ * upstream-sourced spec. Applied by
  * `buildModel` to every upstream-sourced spec; user-authored overrides are
  * recomposed after building by the override applicators, so explicit user
  * limits and pricing still win.
@@ -176,6 +177,41 @@ export function applyCatalogCorrections(
 	model: Pick<ModelSpec<Api>, "cost" | "contextWindow" | "maxTokens" | "input">,
 	catalog: Record<string, unknown>,
 ): void {
+	const longContext = objectPayload(catalog.longContext);
+	if (longContext !== undefined) {
+		const inputThreshold = numberField(longContext, "inputThreshold");
+		const inclusive = Reflect.get(longContext, "inputThresholdInclusive") === true;
+		const multiplier = numberField(longContext, "multiplier");
+		const outputMultiplier = numberField(longContext, "outputMultiplier") ?? multiplier;
+		const input = numberField(longContext, "input");
+		const output = numberField(longContext, "output");
+		const cacheRead = numberField(longContext, "cacheRead");
+		const cacheWrite = numberField(longContext, "cacheWrite");
+		const base = model.cost;
+		const hasTokenPrice = base.input !== 0 || base.output !== 0 || base.cacheRead !== 0 || base.cacheWrite !== 0;
+		if (inputThreshold !== undefined && multiplier !== undefined && outputMultiplier !== undefined && hasTokenPrice) {
+			// Multiplier form: tier rates derive from the row's live list price.
+			model.cost = {
+				...base,
+				longContext: {
+					inputThreshold,
+					...(inclusive && { inputThresholdInclusive: true }),
+					input: base.input * multiplier,
+					output: base.output * outputMultiplier,
+					cacheRead: base.cacheRead * multiplier,
+					cacheWrite: base.cacheWrite * multiplier,
+				},
+			};
+		} else if (
+			inputThreshold !== undefined &&
+			input !== undefined &&
+			output !== undefined &&
+			cacheRead !== undefined &&
+			cacheWrite !== undefined
+		) {
+			model.cost = { ...model.cost, longContext: { inputThreshold, input, output, cacheRead, cacheWrite } };
+		}
+	}
 	const patch = objectPayload(catalog.costPatch);
 	if (patch !== undefined) {
 		model.cost = { ...model.cost };
@@ -253,6 +289,15 @@ export function applyCatalogCorrections(
 			...model.cost,
 			cacheRead: model.cost.input,
 			...(longContext && { longContext: { ...longContext, cacheRead: longContext.input } }),
+		};
+	}
+	const cacheWriteRate = catalog.cacheWriteRate;
+	if (typeof cacheWriteRate === "number") {
+		const { longContext } = model.cost;
+		model.cost = {
+			...model.cost,
+			cacheWrite: model.cost.input * cacheWriteRate,
+			...(longContext && { longContext: { ...longContext, cacheWrite: longContext.input * cacheWriteRate } }),
 		};
 	}
 	if (catalog.timeBased !== undefined) {

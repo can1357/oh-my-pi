@@ -1,4 +1,5 @@
 import { logger } from "@oh-my-pi/pi-utils";
+import { buildModel } from "../build";
 import { collapseVariants, type EffortVariantFamily } from "../compat/collapse";
 import { Effort, THINKING_EFFORTS } from "../effort";
 import type { DevinCompat, FetchImpl, ModelCost, ModelSpec } from "../types";
@@ -105,8 +106,8 @@ function devinCostDenominatorTokens(denominator: string): number {
 /**
  * Per-million-token rates from the config's cost dimensions. `COST_FUZZY` marks
  * an estimated rate, not a different unit, so both kinds are read. `cacheWrite`
- * has no Cascade dimension — Devin bills cache writes at the input rate — and
- * stays 0.
+ * has no Cascade dimension and stays 0; the provider's `cache-write-rate` rules
+ * supply Devin's published rate.
  *
  * Composite configs (`fusion`) flatten their own rate card plus every
  * dispatched component's card into one `modelDimensions` list. A `Sidekick`
@@ -477,14 +478,16 @@ function devinFusionLeadUid(uid: string, liveUids: ReadonlyMap<string, unknown>)
 /**
  * Point a Fusion pairing at its lead. omp runs only the lead (the sidekick is
  * paired by the native client), so the limits and pricing a caller budgets
- * against are the lead's, not the composite card's.
+ * against are the lead's, not the composite card's. The composite uid carries
+ * no model identity, so the lead's own catalog rules (cache-write rate,
+ * long-context tier) are materialized here rather than at the composite's build.
  */
 function routeDevinFusionLead(spec: ModelSpec<"devin-agent">, lead: ModelSpec<"devin-agent">): void {
 	spec.requestModelId = lead.id;
 	spec.reasoning = lead.reasoning;
 	spec.input = lead.input;
 	spec.supportsTools = lead.supportsTools;
-	spec.cost = lead.cost;
+	spec.cost = buildModel(lead).cost;
 	spec.contextWindow = lead.contextWindow;
 	spec.maxTokens = lead.maxTokens;
 	if (lead.compat?.supportsParallelToolCalls) {
