@@ -45,8 +45,30 @@ describe("anthropic Sonnet 5.5 cache-read rule", () => {
 		expect(buildModel(spec("claude-sonnet-5")).cost?.cacheRead).toBe(0.2);
 	});
 
-	test("partner clouds keep their own Sonnet 5.5 pricing", () => {
-		expect(buildModel(spec("claude-sonnet-5-5@default", "google-vertex")).cost?.cacheRead).toBe(0.2);
+	test("Vertex prices Sonnet 5.5 cache hits at $0.10/MTok", () => {
+		expect(buildModel(spec("claude-sonnet-5-5@default", "google-vertex")).cost?.cacheRead).toBe(0.1);
+	});
+
+	test("Bedrock global rates use $0.10/MTok without changing other prices", () => {
+		expect(buildModel(spec("global.anthropic.claude-sonnet-5-5", "amazon-bedrock")).cost).toMatchObject({
+			input: 2,
+			output: 10,
+			cacheRead: 0.1,
+			cacheWrite: 2.5,
+		});
+	});
+
+	test("Bedrock regional US keeps its 10% premium on all prices", () => {
+		const regional = {
+			...spec("us.anthropic.claude-sonnet-5-5", "amazon-bedrock"),
+			cost: { input: 2.2, output: 11, cacheRead: 0.22, cacheWrite: 2.75 },
+		};
+		expect(buildModel(regional).cost).toMatchObject({
+			input: 2.2,
+			output: 11,
+			cacheRead: 0.11,
+			cacheWrite: 2.75,
+		});
 	});
 
 	test("commandcode, priced at Anthropic list, follows the cut", () => {

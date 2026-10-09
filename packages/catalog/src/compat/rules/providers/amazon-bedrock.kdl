@@ -22,6 +22,16 @@ provider "amazon-bedrock" {
 		revision ">=5.1" {
 			thinking-efforts "low" "medium" "high" "xhigh" "max"
 		}
+		family "sonnet" {
+			// Bedrock cut Sonnet 5.5 cache reads by 50%; regional US rates
+			// retain their 10% premium in the exact-id override below.
+			// https://aws.amazon.com/bedrock/pricing/
+			revision ">=5.5 <6" {
+				cost-patch {
+					cache-read 0.1
+				}
+			}
+		}
 	}
 	class "xai" {
 		family "grok" {
@@ -49,6 +59,12 @@ provider "amazon-bedrock" {
 	class "unknown" {
 		thinking-efforts "minimal" "low" "medium" "high"
 		thinking-mode "budget"
+	}
+	// Bedrock's regional US Sonnet 5.5 cache-hit SKU is $0.11/MTok.
+	models "us.anthropic.claude-sonnet-5-5" {
+		cost-patch {
+			cache-read 0.11
+		}
 	}
 	// residue: taxonomy ranks and exact globs do not isolate these models.
 	models "moonshot.kimi-k2-thinking" {

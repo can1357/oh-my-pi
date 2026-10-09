@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Fixed Claude Sonnet 5.5 cache reads on Anthropic (and Command Code) being priced at $0.20/MTok instead of the current $0.10/MTok ([#14902](https://github.com/can1357/oh-my-pi/issues/14902)).
+- Fixed Claude Sonnet 5.5 cache-read pricing on Anthropic, Vertex AI, Amazon Bedrock, and Command Code to reflect current rates ([#14902](https://github.com/can1357/oh-my-pi/issues/14902)).
 
 ## [18.8.3] - 2026-10-07
 
