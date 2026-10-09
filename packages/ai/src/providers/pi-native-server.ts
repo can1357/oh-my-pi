@@ -86,6 +86,11 @@ const ALLOWED_OPTION_KEYS: ReadonlySet<keyof SimpleStreamOptions> = new Set([
 	"openrouterVariant",
 	"loopGuard",
 	"acceptEmptyResponse",
+	"cursorClientSupportsInlineImages",
+	"cursorClientSupportsRoutedModelUpdate",
+	"cursorClientSupportsPromptContextUsageRpc",
+	"cursorRunId",
+	"cursorAgentSessionId",
 	// Anthropic on-demand compaction request: the gateway constructs the
 	// top-level `compaction` parameter, so the option must survive the hop.
 	"anthropicCompaction",

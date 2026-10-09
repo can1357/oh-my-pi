@@ -11,6 +11,7 @@ import {
 } from "@oh-my-pi/pi-catalog/discovery/cursor-proto";
 import { create, fromBinary, toBinary } from "@oh-my-pi/pi-catalog/discovery/protobuf";
 import { streamSimple } from "../../src/stream";
+import * as piNative from "../../src/providers/pi-native-server";
 import { ConnectFrameDecoder, frameConnectMessage } from "../../src/providers/connect-frame";
 import type { Context, SimpleStreamOptions } from "../../src/types";
 
@@ -78,6 +79,18 @@ async function main(): Promise<void> {
 		maxTokens: 100,
 	});
 	const context: Context = { messages: [{ role: "user", content: "fixture", timestamp: 0 }] };
+	const gateway = Bun.serve({
+		port: 0,
+		async fetch(request) {
+			const parsed = piNative.parseRequest(await request.json());
+			const events = streamSimple(model, parsed.context, {
+				...parsed.options,
+				apiKey: "fixture-token",
+				signal: request.signal,
+			});
+			return new Response(piNative.encodeStream(events), { headers: { "content-type": "text/event-stream" } });
+		},
+	});
 	const conversationId = crypto.randomUUID();
 	const invoke = async (options: SimpleStreamOptions = {}) => {
 		const result = await streamSimple(model, context, {
@@ -104,6 +117,21 @@ async function main(): Promise<void> {
 			cursorRunId: "caller-run",
 			onPayload: payload => create(AgentRunRequestSchema, { ...(payload as AgentRunRequest), runId: "hook-run" }),
 		});
+		const remote = await streamSimple(
+			{ ...model, baseUrl: gateway.url.toString(), transport: "pi-native" },
+			context,
+			{
+				apiKey: "gateway-fixture-token",
+				sessionId: conversationId,
+				cursorRunId: "remote-run",
+				cursorAgentSessionId: "remote-session",
+				cursorClientSupportsInlineImages: true,
+				cursorClientSupportsRoutedModelUpdate: true,
+				cursorClientSupportsPromptContextUsageRpc: true,
+				signal: AbortSignal.timeout(10000),
+			},
+		).result();
+		if (remote.stopReason !== "stop") throw new Error(`Remote Cursor dispatch failed: ${remote.errorMessage}`);
 		console.log(
 			JSON.stringify(
 				received.map(row => ({
@@ -125,6 +153,7 @@ async function main(): Promise<void> {
 			),
 		);
 	} finally {
+		gateway.stop(true);
 		for (const session of sessions) session.destroy();
 		server.close();
 	}

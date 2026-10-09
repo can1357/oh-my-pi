@@ -17,8 +17,8 @@ test("public Cursor dispatch serializes fresh run IDs, flags and hook replacemen
 	expect(exitCode).toBe(0);
 	expect(stderr).toBe("");
 	const received = JSON.parse(stdout) as { run: AgentRunRequest; requestId: string; userMessage?: UserMessage }[];
-	expect(received).toHaveLength(3);
-	const [first, second, replaced] = received;
+	expect(received).toHaveLength(4);
+	const [first, second, replaced, remote] = received;
 	expect(first.run.runId).toMatch(/^[0-9a-f-]{36}$/);
 	expect(second.run.runId).not.toBe(first.run.runId);
 	expect(first.run.clientSupportsInlineImages).toBe(true);
@@ -31,6 +31,11 @@ test("public Cursor dispatch serializes fresh run IDs, flags and hook replacemen
 	expect(first.run.conversationGroupId).toBe(conversationId);
 	expect(second.run.conversationGroupId).toBe(first.run.conversationGroupId);
 	expect(replaced.run.runId).toBe("hook-run");
+	expect(remote.run.runId).toBe("remote-run");
+	expect(remote.run.agentSessionId).toBe("remote-session");
+	expect(remote.run.clientSupportsInlineImages).toBe(true);
+	expect(remote.run.clientSupportsRoutedModelUpdate).toBe(true);
+	expect(remote.run.clientSupportsPromptContextUsageRpc).toBe(true);
 	for (const row of received) {
 		expect(row.requestId).toBe(row.run.runId);
 		expect(row.userMessage?.text).toBe("fixture");
