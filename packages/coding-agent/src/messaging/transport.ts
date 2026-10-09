@@ -467,8 +467,9 @@ export async function requestInbox(
 		socket.destroy();
 		resolve(response);
 	};
+	// A deadline means the peer is alive but slow; only a failed/closed socket is "unreachable".
 	const timer = setTimeout(
-		() => finish({ ok: false, error: "unreachable" }),
+		() => finish({ ok: false, error: "timeout" }),
 		options?.timeoutMs ?? (request.type === "snapshot" ? SNAPSHOT_TIMEOUT_MS : SEND_TIMEOUT_MS),
 	);
 	const abort = (): void => finish({ ok: false, error: "aborted" });

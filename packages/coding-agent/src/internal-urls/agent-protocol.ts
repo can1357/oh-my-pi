@@ -23,7 +23,7 @@ import * as path from "node:path";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import { fuzzyFilter } from "@oh-my-pi/pi-tui/fuzzy";
 import { formatDuration, isEnoent, prompt } from "@oh-my-pi/pi-utils";
-import { type AgentRef, AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
+import { type AgentRef, AgentRegistry } from "../registry/agent-registry";
 import { ensurePersistedRoster } from "../registry/persisted-agents";
 import { executeSend, isIrcEnabled } from "../irc/messaging";
 import agentPromptDoc from "../prompts/internal-urls/agent.md" with { type: "text" };
@@ -195,12 +195,6 @@ export class AgentProtocolHandler implements ProtocolHandler {
 			const notify = url.searchParams.get("notify");
 			if (notify !== null && notify !== "idle") throw new Error(`Unknown agent:// option "notify".`);
 			notifyWhenIdle = notify === "idle";
-			if (notifyWhenIdle && senderId !== MAIN_AGENT_ID) {
-				return {
-					content: [{ type: "text", text: "Not sent: only the main conversation can ask for an idle notice." }],
-					isError: true,
-				};
-			}
 		}
 		if (!content.trim() && !notifyWhenIdle) throw new Error("agent:// messages require non-empty content.");
 		const result = await executeSend(

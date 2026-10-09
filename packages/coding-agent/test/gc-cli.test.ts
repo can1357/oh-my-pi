@@ -1,7 +1,6 @@
 import { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, setSystemTime, spyOn, test, vi } from "bun:test";
 import * as fs from "node:fs/promises";
-import type { Stats } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { gunzipSync, gzipSync } from "node:zlib";
@@ -783,7 +782,7 @@ describe("runGcCommand history checkpoint", () => {
 	}, 10_000);
 });
 
-function queueMail(sessionId: string, sessionFile: string, id: string, body: string) {
+function queueMail(sessionId: string, id: string, body: string) {
 	return mailbox.enqueueOffline(sessionId, {
 		id,
 		from: {
@@ -797,14 +796,13 @@ function queueMail(sessionId: string, sessionFile: string, id: string, body: str
 		body,
 		chain: [],
 		sentAt: Date.now(),
-		sessionFile,
 	});
 }
 
 describe("runGcCommand cold-session archive", () => {
 	test("archives old completed sessions while honoring keep-count and active-status skips", async () => {
 		const archiveMe = await writeSession(root, "project", "archive-me", "complete", { ageDays: 90 });
-		await queueMail("archive-me", archiveMe, "archive-mail", "retire on archive");
+		await queueMail("archive-me", "archive-mail", "retire on archive");
 		// 60d keeps keep-recent cold-eligible (>30d cutoff) yet unambiguously newer than
 		// archive-me's 90d, so retainNewestGlobal:1 deterministically protects it regardless
 		// of readdir order when two sessions would otherwise share an mtime millisecond.
@@ -903,7 +901,7 @@ describe("runGcCommand cold-session archive", () => {
 		await agePath(session, 90);
 		const artifacts = session.slice(0, -".jsonl".length);
 		await Bun.write(path.join(artifacts, "0.bash.log"), "retained artifact");
-		await queueMail("rollback", session, "rollback-mail", "keep on rollback");
+		await queueMail("rollback", "rollback-mail", "keep on rollback");
 		const archiveDir = path.join(root, "archive", "sessions", "project");
 		const rename = fs.rename.bind(fs);
 		const renameSpy = spyOn(fs, "rename").mockImplementation(async (source, destination) => {
@@ -2508,14 +2506,9 @@ describe("runGcCommand stale state", () => {
 });
 
 describe("offline mail GC", () => {
-	test("dry-run reports only TTL-expired mail, then apply preserves unexpired mail with missing owners", async () => {
+	test("dry-run reports only TTL-expired mail, then apply preserves unexpired mail", async () => {
 		const now = Date.now();
 		setSystemTime(now);
-		const owned = await writeSession(root, "project", "owned", "complete");
-		const foreign = path.join(root, "other-profile", "custom", "session.jsonl");
-		await Bun.write(foreign, '{"type":"session","id":"foreign"}\n');
-		const unreadable = path.join(root, "unreadable.jsonl");
-		await Bun.write(unreadable, "{}\n");
 		const from = {
 			sessionId: "sender",
 			name: "sender",
@@ -2525,45 +2518,25 @@ describe("offline mail GC", () => {
 			class: "bypass",
 		} as const;
 		const records = [
-			{ sessionId: "expired", sessionFile: owned, sentAt: now - mailbox.OFFLINE_INBOX_TTL_MS - 1 },
-			{ sessionId: "orphan", sessionFile: path.join(root, "missing.jsonl"), sentAt: now },
-			{ sessionId: "owned", sessionFile: owned, sentAt: now },
-			{ sessionId: "foreign", sessionFile: foreign, sentAt: now },
-			{ sessionId: "unreadable", sessionFile: unreadable, sentAt: now },
-			{ sessionId: "boundary", sessionFile: owned, sentAt: now - mailbox.OFFLINE_INBOX_TTL_MS },
+			{ sessionId: "expired", sentAt: now - mailbox.OFFLINE_INBOX_TTL_MS - 1 },
+			{ sessionId: "unexpired", sentAt: now },
+			{ sessionId: "boundary", sentAt: now - mailbox.OFFLINE_INBOX_TTL_MS },
 		];
 		const files: string[] = [];
 		for (const record of records) {
 			await mailbox.enqueueOffline(
 				record.sessionId,
-				{
-					id: record.sessionId,
-					from,
-					body: record.sessionId,
-					chain: [],
-					sentAt: record.sentAt,
-					sessionFile: record.sessionFile,
-				},
+				{ id: record.sessionId, from, body: record.sessionId, chain: [], sentAt: record.sentAt },
 				{ now: record.sentAt },
 			);
 			const file = path.join(mailbox.mailboxDir(record.sessionId), `${record.sentAt}-${record.sessionId}.json`);
 			files.push(file);
 			if (record.sessionId !== "expired") await agePath(file, 90);
 		}
-		const stat = fs.stat;
-		// Windows has no portable chmod-based EACCES fixture; keep this spy on the
-		// numeric-stat signature used by GC rather than its unrelated bigint overload.
-		const statSpy = spyOn(fs, "stat") as unknown as {
-			mockImplementation(implementation: (file: string) => Promise<Stats>): void;
-		};
-		statSpy.mockImplementation(async file => {
-			if (file === unreadable) throw Object.assign(new Error("permission denied"), { code: "EACCES" });
-			return stat(file);
-		});
 		const flags = { agentDir: root, stale: true, staleRetainNewest: 100, staleRetainDays: 365 };
 		const dry = await runGcCommand({ flags });
 		expect(dry.stale).toMatchObject({ expiredMail: 1, wouldDelete: 1, deleted: 0, errors: [] });
-		const bytes = (await stat(files[0])).size;
+		const bytes = (await fs.stat(files[0])).size;
 		expect(dry.stale?.bytes).toBe(bytes);
 		for (const file of files) expect(await Bun.file(file).exists()).toBe(true);
 		const applied = await runGcCommand({ flags: { ...flags, apply: true } });
@@ -2588,7 +2561,7 @@ describe("offline mail GC", () => {
 			} finally {
 				await original.close();
 			}
-			await queueMail(sessionId, oldFile, "retained", "mail queued before relocation");
+			await queueMail(sessionId, "retained", "mail queued before relocation");
 			const inbox = mailbox.mailboxDir(sessionId);
 			const file = path.join(inbox, (await fs.readdir(inbox))[0]);
 			await agePath(file);

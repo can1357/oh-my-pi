@@ -11,6 +11,7 @@ import {
 	drainOfflineUnlocked,
 	enqueueOfflineUnlocked,
 	listOfflineSessions,
+	mailboxDir,
 	withOfflineMailboxLock,
 	type DrainedMail,
 	type OfflineSession,
@@ -388,17 +389,20 @@ export class MessagingService {
 		return cfgMessagingList.get(this.settings) === "deny" ? [] : (await this.#sessions(signal)).compatible;
 	}
 
-	async resolve(to: string, signal?: AbortSignal): Promise<SessionResolution> {
+	/** `includeOffline: false` skips the saved-session scan (a disk walk) when the caller already has a local match. */
+	async resolve(to: string, options?: { includeOffline?: boolean; signal?: AbortSignal }): Promise<SessionResolution> {
 		if (isReservedAddress(to)) return { kind: "none" };
 		if (to === this.ownAddress() || to === this.ownShortId()) return { kind: "self" };
-		const sessions = await this.#sessions(signal);
+		const sessions = await this.#sessions(options?.signal);
 		const addressed = sessions.compatible.filter(session => session.name === to || session.shortId === to);
 		const ids = new Set(addressed.map(session => session.sessionId));
 		const candidates = sessions.compatible.filter(session => ids.has(session.sessionId));
-		if (candidates.length > 1) return { kind: "ambiguous", candidates };
-		if (candidates.length === 1) return { kind: "found", target: candidates[0] };
+		// One session open in two processes is not a naming ambiguity; send() reports it with the pids.
+		if (ids.size > 1) return { kind: "ambiguous", candidates };
+		if (candidates.length > 0) return { kind: "found", target: candidates[0] };
 		if (sessions.incompatible.some(session => session.name === to || session.shortId === to))
 			return { kind: "incompatible", name: to };
+		if (options?.includeOffline === false) return { kind: "none" };
 		const offline = (await listOfflineSessions()).filter(
 			session =>
 				session.sessionId !== this.#ownSessionId() &&
@@ -428,14 +432,11 @@ export class MessagingService {
 			};
 		let address = target.name ?? target.shortId;
 		if ("entry" in target) {
+			// Probed listing: a stale row (killed process, reused pid) is pruned instead of counted.
 			const duplicates = (
-				await readInboxEntries({ dir: this.#publication.registryDir, signal: opts.signal })
+				await listInboxEntries({ dir: this.#publication.registryDir, signal: opts.signal })
 			).filter(entry => entry.sessionId === target.sessionId);
-			if (duplicates.length > 1)
-				return {
-					ok: false,
-					text: `Not sent: "${address}" matches more than one agent:\n${duplicates.map(() => `- ${target.name ?? "(unnamed)"} (session ${target.shortId}, ${target.cwd})`).join("\n")}\nAddress one by its session short id.`,
-				};
+			if (duplicates.length > 1) return { ok: false, text: duplicateProcessText(address, duplicates) };
 		}
 		if (!body.trim() && !opts.notifyWhenIdle) return { ok: false, text: "empty" };
 		const id = crypto.randomUUID();
@@ -469,6 +470,7 @@ export class MessagingService {
 		const dir = this.#publication.registryDir;
 		const offlineTarget = "entry" in target ? undefined : target;
 		const failedEntries = new Set<string>();
+		let pruned = false;
 		sent.push(now);
 		const fail = (text: string): SendOutcome => {
 			this.#outgoing.delete(id);
@@ -484,13 +486,12 @@ export class MessagingService {
 					saved.sessionId,
 					async () => {
 						const entries = (await readInboxEntries({ dir, signal: opts.signal })).filter(
-							entry => entry.sessionId === saved.sessionId,
+							entry => entry.sessionId === saved.sessionId && !failedEntries.has(entry.entryId),
 						);
+						// Metadata only under the lock; probe (and prune stale rows) outside it before refusing.
 						if (entries.length > 1)
-							return {
-								error: `Not sent: "${address}" matches more than one agent:\n${entries.map(() => `- ${saved.name ?? "(unnamed)"} (session ${saved.shortId}, ${saved.cwd})`).join("\n")}\nAddress one by its session short id.`,
-							};
-						if (entries.length === 1 && !failedEntries.has(entries[0].entryId)) {
+							return pruned ? { error: duplicateProcessText(address, entries) } : { prune: true };
+						if (entries.length === 1) {
 							if (entries[0].version !== MESSAGING_WIRE_VERSION)
 								return { error: `Not sent: ${address} runs an incompatible omp version.` };
 							return { entry: entries[0] };
@@ -508,14 +509,7 @@ export class MessagingService {
 						}
 						const outcome = await enqueueOfflineUnlocked(
 							saved.sessionId,
-							{
-								id,
-								from: request.from!,
-								body,
-								chain: request.chain ?? [],
-								sentAt: now,
-								sessionFile: saved.path,
-							},
+							{ id, from: request.from!, body, chain: request.chain ?? [], sentAt: now },
 							{ dir },
 						);
 						return outcome === "full"
@@ -528,6 +522,11 @@ export class MessagingService {
 					throw error;
 				});
 				if (handoff.error) return fail(handoff.error);
+				if (handoff.prune) {
+					await listInboxEntries({ dir, signal: opts.signal });
+					pruned = true;
+					continue;
+				}
 				if (handoff.queued) {
 					this.#outgoing.set(id, { sessionId: saved.sessionId });
 					return {
@@ -537,10 +536,15 @@ export class MessagingService {
 				}
 				const snapshot = await requestInbox(handoff.entry!, { type: "snapshot" }, { dir, signal: opts.signal });
 				if (!snapshot.ok || !("snapshot" in snapshot)) {
+					// Only a dead socket falls through to the offline mailbox; a slow live session never does.
 					if (!snapshot.ok && snapshot.error === "unreachable" && !opts.signal?.aborted) {
 						failedEntries.add(handoff.entry!.entryId);
 						continue;
 					}
+					if (!snapshot.ok && snapshot.error === "timeout")
+						return fail(
+							`Failed to send to ${address}: the session is running but did not answer in time. Try again shortly.`,
+						);
 					return fail(
 						`Failed to send to ${address}: ${!snapshot.ok ? snapshot.error : "Unexpected snapshot response"}`,
 					);
@@ -574,7 +578,13 @@ export class MessagingService {
 			}
 			const error = !result.ok ? result.error : "Unexpected snapshot response";
 			return fail(
-				`Failed to send to ${address}: ${error === "unreachable" ? "the session is no longer running." : error}`,
+				`Failed to send to ${address}: ${
+					error === "unreachable"
+						? "the session is no longer running."
+						: error === "timeout"
+							? "the session is running but did not answer in time; it may not have received this."
+							: error
+				}`,
 			);
 		}
 		if (result.outcome !== "held" && result.outcome !== "queued" && result.outcome !== "delivered")
@@ -757,9 +767,6 @@ export class MessagingService {
 		// ponytail: best-effort refusal receipt; a full sender inbox loses the notice, not user data
 		try {
 			const dir = this.#publication.registryDir;
-			const sessionFile = (await listOfflineSessions()).find(
-				session => session.sessionId === message.from.sessionId,
-			)?.path;
 			const request: Extract<InboxRequest, { kind: "refused" }> = {
 				type: "notice",
 				id: `refused-${message.id}`,
@@ -769,11 +776,7 @@ export class MessagingService {
 				aboutId: message.id,
 				toSessionId: message.from.sessionId,
 			};
-			const notice: StoredRefusalNotice = {
-				...request,
-				sentAt: Date.now(),
-				...(sessionFile ? { sessionFile } : {}),
-			};
+			const notice: StoredRefusalNotice = { ...request, sentAt: Date.now() };
 			const failed = new Set<string>();
 			for (;;) {
 				const entry = await withOfflineMailboxLock(
@@ -805,7 +808,10 @@ export class MessagingService {
 		}
 	}
 
-	async #deliverOfflineMail(mail: DrainedMail[]): Promise<void> {
+	async #deliverOfflineMail(
+		mail: DrainedMail[],
+		arrival = "arrived while this session was not running",
+	): Promise<void> {
 		if (this.#receivingStopped || this.#closed) return;
 		let admitted = 0;
 		this.#batching++;
@@ -850,12 +856,25 @@ export class MessagingService {
 			this.#batching--;
 			this.#flush();
 		}
-		if (admitted > 0)
-			this.host.showNotice(`${admitted} message(s) from other sessions arrived while this session was not running.`);
+		if (admitted > 0) this.host.showNotice(`${admitted} message(s) from other sessions ${arrival}.`);
 	}
 
 	turnSettledIdle(): void {
 		this.#idle.turnSettledIdle();
+		// Mail can still reach a live session's mailbox (e.g. a refusal notice sent while this session
+		// was too slow to answer); pick it up whenever a turn settles.
+		this.#retiring = this.#retiring
+			.then(() => this.#drainLiveMailbox())
+			.catch(error => logger.warn("Failed to drain cross-session mailbox", { error: String(error) }));
+	}
+
+	async #drainLiveMailbox(): Promise<void> {
+		if (this.#closed || this.#receivingStopped || this.#suspended > 0) return;
+		const dir = this.#publication.registryDir;
+		const sessionId = this.#ownSessionId();
+		// Skip the lock entirely in the common empty case: this runs after every turn.
+		if ((await fs.readdir(mailboxDir(sessionId, { dir })).catch(() => [])).length === 0) return;
+		await this.#deliverOfflineMail(await drainOffline(sessionId, { dir }), "were waiting in this session's mailbox");
 	}
 
 	close(): Promise<void> {
@@ -884,4 +903,8 @@ export function formatSessionListing(sessions: SessionListing[]): string {
 				`- ${field(session.name ?? "(unnamed)")} [${session.shortId}] ${session.busy ? "busy" : "idle"} — ${field(session.cwd)}${session.title === null ? "" : ` — "${field(session.title)}"`}`,
 		),
 	].join("\n");
+}
+
+function duplicateProcessText(address: string, entries: readonly InboxEntry[]): string {
+	return `Not sent: ${address} is open in more than one omp process (${entries.map(entry => `pid ${entry.pid}`).join(", ")}). Close the extra copy, then send again.`;
 }

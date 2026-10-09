@@ -62,15 +62,11 @@ export async function executeSend(
 		const recipient = registry.get(to);
 		if (!recipient || recipient.status === "parked") await ensurePersistedRoster(registry, sessionFileHint);
 	}
-	if (notifyWhenIdle && senderId !== MAIN_AGENT_ID) {
-		return coordinationErrorResult("Not sent: only the main conversation can ask for an idle notice.", {
-			op: "send",
-			from: senderId,
-			to,
-		});
-	}
 	if (!isBroadcast && messaging) {
-		const resolution = await messaging.resolve(to);
+		const local = registry.get(to);
+		const localCandidate = local && local.id !== senderId && local.kind !== "advisor" && local.status !== "aborted";
+		// A local agent match skips the saved-session disk scan; live sessions are still checked for a name clash.
+		const resolution = await messaging.resolve(to, { includeOffline: !localCandidate });
 		if (resolution.kind === "self") {
 			return coordinationErrorResult("That is this session's own name.", { op: "send", from: senderId, to });
 		}
@@ -81,8 +77,6 @@ export async function executeSend(
 				to,
 			});
 		}
-		const local = registry.get(to);
-		const localCandidate = local && local.id !== senderId && local.kind !== "advisor" && local.status !== "aborted";
 		const sessions: SessionCandidate[] =
 			resolution.kind === "found" || resolution.kind === "offline"
 				? [resolution.target]
