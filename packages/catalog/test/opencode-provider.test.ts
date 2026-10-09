@@ -996,3 +996,61 @@ describe("issue #10416 — retired bare opencode provider", () => {
 		expect(merged.map(model => `${model.provider}/${model.id}`)).toEqual(["fixture-provider/live-fallback-model"]);
 	});
 });
+
+describe("mergePreviousSnapshotModels — static-seed-complete providers", () => {
+	// CoralBricks' reviewed KDL seed is the complete documented fallback
+	// catalog (`bundle="always"`; `/v1/models` is key-protected), and
+	// Yolo-Auto's is the same. A host-retired id must not return as a
+	// previous-snapshot zombie while other providers' unfetched rows are
+	// still restored.
+	test("drops previous-snapshot rows for providers whose seed is the complete fallback catalog", () => {
+		const coralZombie = buildModel({
+			id: "retired-coral-model",
+			name: "Retired Coral Model",
+			api: "openai-completions",
+			provider: "coralbricks",
+			baseUrl: "https://inference.coralbricks.ai/v1",
+			reasoning: true,
+			input: ["text", "image"],
+			cost: { input: 0.15, output: 0.5, cacheRead: 0, cacheWrite: 0.23 },
+			contextWindow: 1_048_576,
+			maxTokens: 131_072,
+		});
+		const yoloZombie = buildModel({
+			id: "retired-yolo-model",
+			name: "Retired Yolo Model",
+			api: "openai-completions",
+			provider: "yolo-auto",
+			baseUrl: "https://yolo.invalid/v1",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 128_000,
+			maxTokens: 16_384,
+		});
+		const kept = buildModel({
+			id: "kept-fallback-model",
+			name: "Kept Fallback Model",
+			api: "openai-completions",
+			provider: "fixture-provider",
+			baseUrl: "https://fixture.invalid/v1",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 128_000,
+			maxTokens: 16_384,
+		});
+
+		const merged = mergePreviousSnapshotModels(
+			[],
+			{
+				coralbricks: { [coralZombie.id]: coralZombie },
+				"yolo-auto": { [yoloZombie.id]: yoloZombie },
+				"fixture-provider": { [kept.id]: kept },
+			},
+			new Set(),
+		);
+
+		expect(merged.map(model => `${model.provider}/${model.id}`)).toEqual(["fixture-provider/kept-fallback-model"]);
+	});
+});

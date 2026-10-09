@@ -503,6 +503,7 @@ function detectOpenAICompat(
 		supportsDeveloperRole: isOpenAIHost || isAzureHost,
 		supportsMultipleSystemMessages: supportsMultipleSystemMessagesDefault,
 		supportsReasoningEffort: !isGrok && !d.isXiaomiMimo && (!(d.isZai || d.isZhipu) || supportsZaiReasoningEffort),
+		trustExplicitThinkingOnly: undefined,
 		// API-conditional: this completions-only Copilot exclusion cannot be a
 		// provider rule without changing Copilot Responses rows.
 		supportsReasoningParams: provider !== "github-copilot",
@@ -732,6 +733,7 @@ function resolveOpenAIResponsesPolicy(
 			hostMatchesUrl(baseUrl, "openrouter") ||
 			hostMatchesUrl(baseUrl, "deepseekFamily"),
 		supportsReasoningEffort: !isXaiHost,
+		trustExplicitThinkingOnly: undefined,
 		supportsLongPromptCacheRetention: isOpenAIUrl,
 		supportsPromptCacheBreakpoints,
 		promptCacheBreakpointTtl: supportsPromptCacheBreakpoints ? "30m" : undefined,
