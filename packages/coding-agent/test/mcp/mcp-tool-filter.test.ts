@@ -569,13 +569,18 @@ test("an entry beyond the wildcard bound degrades to unmatched instead of stalli
 });
 
 test("a glob match is refused for names beyond the length bound", () => {
-	// The compiled regex runs only against names up to 64 characters — the same
-	// ceiling the mint applies to registry names. Longer names stay addressable
-	// through the exact literal path; the glob path skips them instead of
-	// backtracking against server-controlled input.
+	// Multi-token patterns run the compiled regex only against names up to 64
+	// characters — the same ceiling the mint applies to registry names. Longer
+	// names stay addressable through the exact literal path; the glob path
+	// skips them instead of backtracking against server-controlled input.
+	// Single-wildcard patterns (`*`, `prefix_*`) are linear-time, so the bound
+	// skips them: a `disabledTools: ["*"]` deny-all still excludes a >64-char
+	// advertised name.
 	const long = "web_search_tool_" + "x".repeat(100);
 	expect(run([long], [long]).allowed).toEqual([long]);
-	expect(run(["read", long], ["web_search_tool_*"]).allowed).toEqual([]);
+	expect(run(["read", long], ["web_search_tool_*"]).allowed).toEqual([long]);
+	expect(run([long, "a".repeat(65)], undefined, ["*"]).allowed).toEqual([]);
+	expect(run(["read", long], ["web_search_*_nope_*_x"]).allowed).toEqual([]);
 });
 
 test("a non-array filter value degrades to filter-off instead of throwing", () => {

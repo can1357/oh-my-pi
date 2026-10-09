@@ -195,11 +195,15 @@ function compilePattern(pattern: string): ToolMatcher {
 			// sanitized spelling is the second domain a name outside the
 			// identifier alphabet is reached through.
 			const regex = picomatch.makeRe(quoteBareDoubles(pattern), PARSE_OPTIONS);
+			// Single-wildcard patterns (`*`, `prefix_*`) are linear-time — no
+			// backtracking class — so the name-length bound skips them: a
+			// documented `disabledTools: ["*"]` deny-all must still exclude a
+			// >64-char advertised name (the 64 cap is a registry-key ceiling,
+			// not an advertised-name ceiling). Multi-token patterns keep the bound.
+			const skipLengthBound = wildcardTokenCount(pattern) <= 1;
 			matcher = (name: string) =>
-				(name.length <= MAX_GLOB_NAME_LENGTH && regex.test(name)) ||
-				// The sanitized spelling is never longer than the raw name, so the
-				// length bound covers the second domain without a second check.
-				(name.length <= MAX_GLOB_NAME_LENGTH && regex.test(sanitizeToolName(name)));
+				(skipLengthBound || name.length <= MAX_GLOB_NAME_LENGTH) &&
+				(regex.test(name) || regex.test(sanitizeToolName(name)));
 		} catch {
 			// A pattern the engine rejects — a descending class range such as
 			// `[z-a]`, for instance — never matches anything, and degrading to
