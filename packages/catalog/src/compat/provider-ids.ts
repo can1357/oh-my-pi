@@ -62,6 +62,7 @@ export type KnownProvider =
 	| "qianfan"
 	| "qwen-portal"
 	| "sakana"
+	| "sambanova"
 	| "siliconflow"
 	| "siliconflow-cn"
 	| "singularityapi-dev"

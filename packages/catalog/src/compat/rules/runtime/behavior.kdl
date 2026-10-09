@@ -181,6 +181,9 @@ behavior {
 	exclude-models provider="nanogpt" substring="embedding" substring="image" substring="vision" \
 		substring="audio" substring="speech" substring="transcribe" substring="moderation" \
 		substring="realtime" substring="whisper" substring="tts"
+	// SambaNova's /v1/models may include embedding and audio SKUs.
+	exclude-models provider="sambanova" substring="embedding" substring="whisper" substring="audio" \
+		substring="e5-mistral" substring="clip"
 	// AIML API's roster interleaves media/embedding SKUs; bounded tokens keep
 	// chat ids from false-matching on plain substrings.
 	exclude-models provider="aimlapi" token="audio" token="embed" token="embedding" token="embeddings" \

@@ -5,12 +5,16 @@
 ### Fixed
 
 - Fixed Claude Haiku 5.5 thinking Off to request explicitly disabled thinking on every host serving its adaptive thinking ([#14996](https://github.com/can1357/oh-my-pi/pull/14996) by [@bse-ai](https://github.com/bse-ai)).
+### Added
+
+- Added SambaNova Cloud as a new provider (`sambanova`), with dynamic model discovery from `/v1/models`, per-token pricing, and cascade-resolved reasoning and vision classification
 
 ## [18.8.6] - 2026-10-08
 
 ### Added
 
 - Added prompt-cache lookback support for Claude models across all hosts, including the public `prompt-cache-lookback` catalog axis and `resolvePromptCacheLookback` API.
+- Added the `prompt-cache-lookback` catalog axis and `resolvePromptCacheLookback`, giving Claude models on every host their 20-position prompt-cache lookback ([#14751](https://github.com/can1357/oh-my-pi/pull/14751) by [@will-bogusz](https://github.com/will-bogusz))
 
 ### Fixed
 
