@@ -8,7 +8,7 @@
 
 ### Fixed
 
-- Fixed DeepSeek thinking-mode continuations sending an empty `reasoning_content` after cross-API history demoted the saved chain into a `<think>` block in assistant content, which DeepSeek rejects as `reasoning_content must be passed back`.
+- Fixed DeepSeek thinking-mode continuations sending an empty `reasoning_content` after cross-API history demoted the saved chain into a `<think>` block in assistant content, which DeepSeek rejects as `reasoning_content must be passed back` ([#15028](https://github.com/can1357/oh-my-pi/pull/15028) by [@yugasun](https://github.com/yugasun)).
 
 - Fixed Claude Haiku 5.5 requests silently enabling adaptive thinking when reasoning is off, on native Bedrock (main and helper calls) and the Anthropic API; conversations whose earlier effort controls rule out disabled thinking fall back to lowest-effort adaptive thinking instead of failing ([#14996](https://github.com/can1357/oh-my-pi/pull/14996) by [@bse-ai](https://github.com/bse-ai)).
 
