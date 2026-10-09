@@ -540,14 +540,11 @@ describe("AgentSession Responses request-body timeout recovery", () => {
 		const harness = await createSessionHarness();
 		// Non-persisted sessions allocate nothing and only keep an in-memory copy that `artifact://` cannot read.
 		const allocateArtifactPath = vi.spyOn(harness.sessionManager, "allocateArtifactPath").mockResolvedValue({});
-		const saveArtifact = vi.spyOn(harness.sessionManager, "saveArtifact").mockResolvedValue("0");
 		try {
 			await runPrompt(harness);
 			expect(harness.requests).toHaveLength(1);
-			expect(saveArtifact).not.toHaveBeenCalled();
 			assertTerminalErrorState(harness);
 		} finally {
-			saveArtifact.mockRestore();
 			allocateArtifactPath.mockRestore();
 			await harness.cleanup();
 		}

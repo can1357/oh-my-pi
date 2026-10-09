@@ -940,15 +940,9 @@ export class SessionMaintenance {
 				artifactId = undefined;
 				({ replacements, replacementTokenCounts, savings } = calculateReplacementState(artifactId));
 			}
-		} else {
-			// No on-disk artifact (non-persisted session): `artifact://` cannot resolve an in-memory copy,
-			// so emit the link-free placeholder, like the async follow-up path, or fail when one is required.
-			if (opts.requireArtifact) throw new Error("shake could not save a recovery artifact");
-			artifactId = undefined;
-			({ replacements, replacementTokenCounts, savings } = calculateReplacementState(artifactId));
-			if (opts.toolResultsOnly && savings < config.minSavings) {
-				return { mode, toolResultsDropped: 0, blocksDropped: 0, tokensFreed: 0 };
-			}
+		} else if (opts.requireArtifact) {
+			// No on-disk artifact (non-persisted session): `artifact://` cannot resolve an in-memory copy.
+			throw new Error("shake could not save a recovery artifact");
 		}
 
 		assertCurrent();

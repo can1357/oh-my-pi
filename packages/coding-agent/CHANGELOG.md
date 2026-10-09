@@ -4,7 +4,8 @@
 
 ### Fixed
 
-- Shake in a `--no-session` run no longer leaves placeholders pointing at an `artifact://` link that cannot be read; they now carry only the token count ([#12466](https://github.com/can1357/oh-my-pi/issues/12466))
+- Shake in a `--no-session` run no longer leaves placeholders pointing at an `artifact://` link that cannot be read; they now carry only the token count; in `--no-session` runs the request-body timeout recovery no longer shrinks and retries, since the dropped content would be unrecoverable ([#14593](https://github.com/can1357/oh-my-pi/pull/14593) by [@tahakotil](https://github.com/tahakotil))
+
 ### Added
 
 - Added OSC 7501 program status reporting: terminals and agent inboxes that support it now show whether omp is working, waiting on your answer or approval (with the question), done, or failed (with the error), without parsing the window title. Turn it off with `terminal.programStatus`.
