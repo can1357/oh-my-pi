@@ -2525,7 +2525,10 @@ export function convertMessages(
 					// drop the field the template re-renders the assistant turn
 					// without thinking content, the rendered tokens diverge from the
 					// slot's existing KV cache, and llama.cpp falls back to full
-					// prompt re-processing (#3528). Honor the streamed signature when
+					// prompt re-processing (#3528). Remote DashScope Qwen 3.8
+					// (alibaba-token-plan, `preserve_thinking` on) requires the
+					// same replay: history without `reasoning_content` loses the
+					// prior turn's thinking server-side. Honor the streamed signature when
 					// it identifies a recognized wire field so a model that emitted
 					// `reasoning` (some llama.cpp builds) round-trips to the same
 					// field; otherwise fall back to the configured

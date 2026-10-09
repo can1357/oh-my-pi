@@ -111,10 +111,13 @@ provider "alibaba-token-plan" {
 		// turns (preserve_thinking defaults on). The exact `qwen3.8-max` /
 		// `qwen3.8-flash` rows keep their reviewed ladders; discovered siblings
 		// (e.g. `qwen3.8-plus`) inherit this wire contract instead of silently
-		// dropping effort selections on the Qwen dialect.
+		// dropping effort selections on the Qwen dialect. The sibling ladder is
+		// low/medium/high: DashScope documents no minimal or xhigh tier for
+		// unlisted 3.8 SKUs (unlike max's xhigh and flash's minimal rungs).
 		revision ">=3.8 <3.9" {
 			supports-reasoning-effort #true
 			replay-reasoning-content #true
+			thinking-efforts "low" "medium" "high"
 			when-thinking {
 				extra-body {
 					enable_thinking #true
@@ -147,9 +150,14 @@ provider "alibaba-token-plan" {
 		}
 	}
 	// Max exposes a distinct low/medium/xhigh ladder; Flash retains its
-	// provider-authored minimal/low/medium/high ladder.
+	// provider-authored minimal/low/medium/high ladder (the class revision
+	// rule below would otherwise narrow discovered-tier siblings and flash
+	// alike to low/medium/high).
 	models "qwen3.8-max" {
 		thinking-default-level "xhigh"
 		thinking-efforts "low" "medium" "xhigh"
+	}
+	models "qwen3.8-flash" {
+		thinking-efforts "minimal" "low" "medium" "high"
 	}
 }

@@ -957,7 +957,7 @@ describe("openai-completions compatibility", () => {
 			contextWindow: 1_000_000,
 			maxTokens: 131_072,
 		} satisfies ModelSpec<"openai-completions">);
-		expect(getSupportedEfforts(model).length).toBeGreaterThan(0);
+		expect(getSupportedEfforts(model)).toEqual([Effort.Low, Effort.Medium, Effort.High]);
 		const payload = toObject(
 			await captureOpenAICompletionsPayload(model, undefined, {
 				apiKey: alibabaTokenPlanApiKey,

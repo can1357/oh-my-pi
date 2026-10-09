@@ -188,7 +188,7 @@ describe("OpenAI compat policy", () => {
 			contextWindow: 1_000_000,
 			maxTokens: 131_072,
 		} satisfies ModelSpec<"openai-completions">);
-		for (const effort of [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High]) {
+		for (const effort of [Effort.Low, Effort.Medium, Effort.High]) {
 			const params = chatParams();
 			params.model = model.id;
 			const policy = resolveOpenAICompatPolicy(model, { endpoint: "chat-completions", reasoning: effort });
