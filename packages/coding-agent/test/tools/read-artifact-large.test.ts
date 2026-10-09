@@ -111,6 +111,11 @@ function wideMultiRangeArtifact(): string {
 	).join("\n");
 }
 
+/** One 60 KB line: multi-range EOF-clamp bait. */
+function singleLineOversizedArtifact(): string {
+	return `solo-${"x".repeat(60_000)}-end`;
+}
+
 /** Streamed scale with a 200 KB line 70: per-range cap stops mid-range. */
 function streamedStuckRangeArtifact(): string {
 	const lines = Array.from({ length: 69 }, (_, index) => `s-${String(index + 1).padStart(3, "0")} ${"x".repeat(693)}`);
@@ -674,5 +679,20 @@ describe("read tool large artifact handling", () => {
 		const openEnded = getTextOutput(await tool.execute("call-omitted-eof-open", { path: "artifact://0:2-" }));
 		expect(openEnded).toContain("artifact://0:raw:2-2");
 		expect(openEnded).not.toContain("Use artifact://0:3-");
+	});
+
+	it("drops multi-range recovery past the known EOF", async () => {
+		await Bun.write(path.join(artifactDir, "0.mcp.log"), singleLineOversizedArtifact());
+
+		// One-line file read as `1-2,4-5`: line 1 is oversized with its raw hint,
+		// and both the `2-2` suffix and the `4-5` later range are past EOF. The
+		// advertised rest must not name them; following it once returned only
+		// beyond-EOF notices and no requested content.
+		const result = await tool.execute("call-multi-eof", { path: "artifact://0:1-2,4-5" });
+		const output = getTextOutput(result);
+
+		expect(output).toContain("artifact://0:raw:1-1");
+		expect(output).toContain("Range 4-5 is beyond end of file");
+		expect(output).not.toContain("2-2,4-5");
 	});
 });

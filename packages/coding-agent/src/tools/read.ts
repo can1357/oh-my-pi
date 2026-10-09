@@ -1581,18 +1581,38 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 
 			const budget = artifactBudget;
 			/**
+			 * Drop suffixes past the known EOF and clamp bounded ends to it.
+			 * `fullLines` means the whole file is in memory, so the total is
+			 * exact; a streamed window may only know a lower bound, so its
+			 * hints stay as requested rather than risk dropping real lines.
+			 */
+			const clampRangePartsToKnownEof = (
+				parts: Array<{ startLine: number; endLine: number | undefined }>,
+			): string[] => {
+				if (fullLines === undefined) return parts.map(part => formatRangePart(part.startLine, part.endLine));
+				const total = fullLines.length;
+				const out: string[] = [];
+				for (const part of parts) {
+					if (part.startLine > total) continue;
+					const end = part.endLine !== undefined ? Math.min(part.endLine, total) : undefined;
+					if (end !== undefined && end < part.startLine) continue;
+					out.push(formatRangePart(part.startLine, end));
+				}
+				return out;
+			};
+			/**
 			 * Name a line the budget cannot show and point at its byte-capped raw
 			 * form plus the unattempted remainder, so no requested line goes
 			 * unmentioned and no hint repeats an identical selector.
 			 */
 			const pushUnshowableLineNotice = (lineNumber: number, lineBytes: number, resumeFrom: number): void => {
 				if (budget === undefined) return;
-				const remainder = [
+				const remainder = clampRangePartsToKnownEof([
 					...(range.endLine === undefined || resumeFrom <= range.endLine
-						? [formatRangePart(resumeFrom, range.endLine)]
+						? [{ startLine: resumeFrom, endLine: range.endLine }]
 						: []),
-					...ranges.slice(rangeIndex + 1).map(later => formatRangePart(later.startLine, later.endLine)),
-				];
+					...ranges.slice(rangeIndex + 1).map(later => ({ startLine: later.startLine, endLine: later.endLine })),
+				]);
 				notices.push(
 					`[Line ${lineNumber} is ${formatBytes(lineBytes)}, exceeds the ${formatBytes(
 						ARTIFACT_TOTAL_READ_BUDGET_BYTES,
@@ -1640,10 +1660,12 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 				}
 				if (kept < collectedLines.length) {
 					const cutLine = range.startLine + kept;
-					const rest = [
-						formatRangePart(cutLine, range.endLine),
-						...ranges.slice(rangeIndex + 1).map(later => formatRangePart(later.startLine, later.endLine)),
-					];
+					const rest = clampRangePartsToKnownEof([
+						{ startLine: cutLine, endLine: range.endLine },
+						...ranges
+							.slice(rangeIndex + 1)
+							.map(later => ({ startLine: later.startLine, endLine: later.endLine })),
+					]);
 					notices.push(
 						`[Read budget of ${formatBytes(ARTIFACT_TOTAL_READ_BUDGET_BYTES)} for this read reached at line ${cutLine}; the rest of the requested ranges was not shown. Use ${budget.url}:${rawSelector ? "raw:" : ""}${rest.join(",")} to continue]`,
 					);
@@ -1666,10 +1688,10 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 				// collected. Name the stuck line and carry the remainder instead
 				// of leaving a silent hole.
 				const stuckLine = byteLimitLine.index + 1;
-				const rest = [
-					formatRangePart(range.startLine + collectedLines.length, range.endLine),
-					...ranges.slice(rangeIndex + 1).map(later => formatRangePart(later.startLine, later.endLine)),
-				];
+				const rest = clampRangePartsToKnownEof([
+					{ startLine: range.startLine + collectedLines.length, endLine: range.endLine },
+					...ranges.slice(rangeIndex + 1).map(later => ({ startLine: later.startLine, endLine: later.endLine })),
+				]);
 				notices.push(
 					`[Range collection stopped at line ${stuckLine} (${formatBytes(byteLimitLine.byteLength)} exceeds the per-range window); lines were left unread. Use ${budget.url}:${rawSelector ? "raw:" : ""}${rest.join(",")} to continue]`,
 				);
