@@ -1701,7 +1701,7 @@ describe("persisted allowlist revival", () => {
 			timestamp: Date.now(),
 		});
 		await manager.close();
-		MCPManager.setInstance({ getTools: () => [] } as unknown as MCPManager);
+		MCPManager.setInstance(fakeMcpManager(() => []));
 
 		const activeToolNames: string[][] = [];
 		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async () => {
@@ -1751,7 +1751,7 @@ describe("persisted allowlist revival", () => {
 			timestamp: Date.now(),
 		});
 		await manager.close();
-		MCPManager.setInstance({ getTools: () => [] } as unknown as MCPManager);
+		MCPManager.setInstance(fakeMcpManager(() => []));
 
 		const activeToolNames: string[][] = [];
 		let capturedOptions: CreateAgentSessionOptions | undefined;
@@ -1808,7 +1808,7 @@ describe("persisted allowlist revival", () => {
 			timestamp: Date.now(),
 		});
 		await manager.close();
-		MCPManager.setInstance({ getTools: () => [] } as unknown as MCPManager);
+		MCPManager.setInstance(fakeMcpManager(() => []));
 
 		const activeToolNames: string[][] = [];
 		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async () => {
@@ -1860,7 +1860,7 @@ describe("persisted allowlist revival", () => {
 			timestamp: Date.now(),
 		});
 		await manager.close();
-		MCPManager.setInstance({ getTools: () => [] } as unknown as MCPManager);
+		MCPManager.setInstance(fakeMcpManager(() => []));
 
 		const activeToolNames: string[][] = [];
 		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async () => {

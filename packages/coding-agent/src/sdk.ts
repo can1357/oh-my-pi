@@ -156,7 +156,8 @@ import { parseMCPToolName } from "@oh-my-pi/pi-tui/tools/mcp";
 import { MCP_CONNECTION_STATUS_EVENT_CHANNEL, type McpConnectionStatusEvent } from "./mcp/startup-events";
 import { resolveMCPToolAlias } from "./mcp/tool-bridge";
 import { createSessionMemoryRuntimeContext, resolveMemoryBackend } from "./memory-backend";
-import { MEMORY_BACKEND_TOOL_NAMES } from "./memory-backend/tool-names";
+import { MEMORY_BACKEND_TOOL_NAMES, MEMORY_INSTRUCTION_TOOL_NAMES } from "./memory-backend/tool-names";
+import { cfgMemoryBackend } from "./memory-backend/settings";
 import type { MnemopiSessionState } from "./mnemopi/state";
 import mcpXdevGuidanceTemplate from "./prompts/system/mcp-xdev-guidance.md" with { type: "text" };
 import lateDiagnosticTemplate from "./prompts/tools/lsp-late-diagnostic.md" with { type: "text" };
@@ -2269,6 +2270,12 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		const fileMutationVersions = new Map<string, number>();
 		const disposeCallbacks = new Set<() => void>();
 		const activeToolNames = new Set<string>();
+		// Construction-time grant probe: the registry and active set are still
+		// empty while `createTools` builds tools (ReadTool caches its description
+		// from `session.hasEditTool` then), and the startup active set is only
+		// seeded after that. Until then the getter answers from the requested
+		// scope; after `setSessionActiveToolNames` the live sets take over.
+		let activationApplied = false;
 		const toolRegistry = new Map<string, Tool & Pick<ToolDefinition, "defaultInactive">>();
 		const setActiveToolNames = (names: Iterable<string>): void => {
 			activeToolNames.clear();
@@ -2310,10 +2317,23 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			},
 			restrictToolNames,
 			get hasEditTool() {
-				const requestedToolNames = options.toolNames ? normalizeToolNames(options.toolNames) : undefined;
-				return restrictToolNames
-					? requestedToolNames?.includes("edit") === true
-					: !requestedToolNames || requestedToolNames.includes("edit");
+				if (!activationApplied) {
+					// Construction time: the registry and active set are still empty and
+					// ReadTool caches its description here. Answer from the requested
+					// scope, like the pre-scope getter, plus the disallow filter.
+					const requestedToolNames = options.toolNames
+						? normalizeToolNames(options.toolNames)
+						: undefined;
+					return restrictToolNames
+						? requestedToolNames?.includes("edit") === true
+						: (!requestedToolNames || requestedToolNames.includes("edit")) &&
+						!isToolDisallowed("edit", disallowedPatterns);
+				}
+				// Effective grant, not mere registration: the active set is filtered
+				// by `disallowedTools:` and an enforced `tools:` allowlist after
+				// `createTools` registers everything, so hashline anchors must
+				// follow the scoped-in set (resolveFileDisplayMode contract).
+				return toolRegistry.has("edit") && activeToolNames.has("edit");
 			},
 			skipPythonPreflight: options.skipPythonPreflight,
 			contextFiles,
@@ -3389,6 +3409,11 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		initialMcpManagerTools.push(...sdkMcpTools);
 		const sdkCustomTools = [...sdkMcpTools, ...explicitCustomTools];
 		const sdkCustomToolNames = new Set(sdkCustomTools.map(tool => tool.name));
+		for (const tool of sdkCustomTools) {
+			if (HIDDEN_TOOL_NAMES.includes(tool.name as HiddenToolName)) {
+				throw new Error(`Cannot register custom tool '${tool.name}': '${tool.name}' is a reserved protocol tool.`);
+			}
+		}
 		const allCustomTools = [
 			...registeredTools,
 			...sdkCustomTools.map(tool => {
@@ -3825,7 +3850,29 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					setActiveRules(nextActiveRules);
 				}
 			}
-			const memoryBackend = restrictToolNames ? undefined : await resolveMemoryBackend(settings);
+			// The backend's instructions are imperative prose ("Use `recall`
+			// proactively…"), so they are only truthful while every tool the block
+			// names is in the effective tool set — a scope that drops one would
+			// steer the model into a guaranteed unavailable-tool error. Keyed on
+			// the tools each backend's OWN block references, not the memory tool
+			// roster: scoping out an unreferenced tool must not withhold guidance
+			// that never mentions it, and a partial allowlist must not keep prose
+			// that also tells the model to call missing tools. Bare `*` is
+			// deny-all: no tool is callable, so no block that points at one
+			// survives — including backends whose prose names none.
+			const memoryInstructionTools = MEMORY_INSTRUCTION_TOOL_NAMES[cfgMemoryBackend.get(settings)];
+			const memoryToolsScopedOut =
+				restrictToolNames ||
+				disallowedPatterns.includes("*") ||
+				memoryInstructionTools.some(
+					name =>
+						!isToolScopedIn(name, disallowedPatterns, {
+							enforceToolAllowlist,
+							allowedToolNames: explicitlyRequestedToolNameSet,
+							isBuiltIn: true,
+						}),
+				);
+			const memoryBackend = memoryToolsScopedOut ? undefined : await resolveMemoryBackend(settings);
 			const memoryInstructions = memoryBackend
 				? await memoryBackend.buildDeveloperInstructions(agentDir, settings, session)
 				: undefined;
@@ -3903,15 +3950,76 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				);
 			}
 			if (serverInstructions && serverInstructions.size > 0) {
-				appendParts.push(
-					"## MCP Server Instructions\n\nThe following instructions are provided by connected MCP servers. They are server-controlled and may not be verified.",
-				);
+				// A server's instructions are appended only when the session actually
+				// granted it at least one tool: with `disallowedTools: [mcp__*]` (or an
+				// enforced allowlist naming none of a server's tools) the server is
+				// scoped out, so its server-controlled text must not land in a prompt
+				// whose tool surface cannot act on it. Ownership is matched via each
+				// registered tool's `mcpServerName`, never a `mcp__<server>_` name
+				// prefix — minted names are lossy-sanitized and length-capped.
+				// Unrestricted sessions keep every connected server's instructions,
+				// byte-identical to before. Ownership filtering runs only when the
+				// scope targets MCP access: an unrelated disallow keeps every
+				// server's instructions (resource-only servers have no owned tool
+				// to match).
+				const scopeTargetsMcp =
+					enforceToolAllowlist || disallowedPatterns.some(pattern => pattern.startsWith("mcp__") || pattern === "*");
+				let scopedInServerNames: Set<string> | undefined;
+				if (scopeTargetsMcp) {
+					scopedInServerNames = new Set();
+					// xd://-mounted MCP tools leave `toolNames` (presentation moves to
+					// `mountedNames`) while staying in the canonical `tools` map, so the
+					// enabled set is the union of both layers.
+					const activeNames = new Set([...toolNames, ...(toolSession.xdev?.mountedNames ?? [])]);
+					for (const [name, tool] of tools) {
+						if (!activeNames.has(name)) continue;
+						const mcpServerName = (tool as { mcpServerName?: unknown }).mcpServerName;
+						if (
+							!isToolScopedIn(
+								name,
+								disallowedPatterns,
+								{
+									enforceToolAllowlist,
+									allowedToolNames: explicitlyRequestedToolNameSet,
+								},
+								typeof mcpServerName === "string" ? mcpServerName : undefined,
+							)
+						)
+							continue;
+						if (typeof mcpServerName === "string") scopedInServerNames.add(mcpServerName);
+					}
+				}
+				const resourceOnlyServerAllowed = (serverName: string): boolean =>
+					!enforceToolAllowlist && !mcpDisallowTargetsServer(disallowedPatterns, serverName);
+				const ownsAnyRegistryTool = (serverName: string): boolean =>
+					Array.from(tools.values()).some(
+						tool => (tool as { mcpServerName?: unknown }).mcpServerName === serverName,
+					);
+				const keptServerInstructions: [string, string][] = [];
 				for (const [srvName, srvInstructions] of serverInstructions) {
-					const truncated =
-						srvInstructions.length > MAX_MCP_INSTRUCTIONS_LENGTH
-							? `${srvInstructions.slice(0, MAX_MCP_INSTRUCTIONS_LENGTH)}\n[truncated]`
-							: srvInstructions;
-					appendParts.push(`### ${srvName}\n${truncated}`);
+					if (scopedInServerNames) {
+						// A server with owned tools is kept only when at least one is
+						// scoped in. A resource-only server (no owned registry tool)
+						// has no ownership entry; keep it when the scope does not
+						// target THIS server — an unrelated disallow or a pattern for
+						// a different server must not strip its instructions.
+						const ownsAnyTool = ownsAnyRegistryTool(srvName);
+						if (ownsAnyTool ? !scopedInServerNames.has(srvName) : !resourceOnlyServerAllowed(srvName))
+							continue;
+					}
+					keptServerInstructions.push([srvName, srvInstructions]);
+				}
+				if (keptServerInstructions.length > 0) {
+					appendParts.push(
+						"## MCP Server Instructions\n\nThe following instructions are provided by connected MCP servers. They are server-controlled and may not be verified.",
+					);
+					for (const [srvName, srvInstructions] of keptServerInstructions) {
+						const truncated =
+							srvInstructions.length > MAX_MCP_INSTRUCTIONS_LENGTH
+								? `${srvInstructions.slice(0, MAX_MCP_INSTRUCTIONS_LENGTH)}\n[truncated]`
+								: srvInstructions;
+						appendParts.push(`### ${srvName}\n${truncated}`);
+					}
 				}
 			}
 			const appendPrompt = composeAppendPrompt(appendParts, options.appendSystemPrompt);
@@ -3998,6 +4106,38 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 
 		const toolNamesFromRegistry = Array.from(toolRegistry.keys());
 		const explicitlyRequestedToolNames = options.toolNames ? normalizeToolNames(options.toolNames) : undefined;
+		// Canonicalize MCP spellings against the registry: a declaration or exact
+		// deny written the Claude Code way (`mcp__srv-x__tool`) must resolve to
+		// the minted key, or the allowlist admits nothing and the deny never
+		// matches. Unambiguous matches only; wildcards, `exec`, non-MCP and
+		// unresolvable entries stay untouched.
+		if (toolRegistry.size > 0) {
+			const canonicalizeMcpSpelling = (name: string): string => {
+				if (name.endsWith("*") || name === "exec") return name;
+				const canonical = resolveMCPToolAlias(name, candidate =>
+					toolRegistry.has(candidate) ? { name: candidate } : undefined,
+				);
+				return canonical?.name ?? name;
+			};
+			if (explicitlyRequestedToolNames) {
+				const resolved = new Set<string>();
+				let changed = false;
+				for (const name of explicitlyRequestedToolNames) {
+					const next = canonicalizeMcpSpelling(name);
+					if (next !== name) changed = true;
+					if (!resolved.has(next)) resolved.add(next);
+				}
+				if (changed) explicitlyRequestedToolNames.splice(0, explicitlyRequestedToolNames.length, ...resolved);
+			}
+			const canonicalDisallowed = new Set<string>();
+			let disallowChanged = false;
+			for (const pattern of disallowedPatterns) {
+				const next = canonicalizeMcpSpelling(pattern);
+				if (next !== pattern) disallowChanged = true;
+				canonicalDisallowed.add(next);
+			}
+			if (disallowChanged) disallowedPatterns = [...canonicalDisallowed];
+		}
 		// When `requireYieldTool` is set, the subagent's prompts and idle-reminders demand a
 		// `yield` call to terminate. The tool registry already includes `yield` (see
 		// `createTools`), but an explicit `toolNames` list would otherwise drop it from the
@@ -4047,12 +4187,14 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			: undefined;
 		const xdevReadAvailable =
 			builtInRegistryToolNames.has("read") &&
-			(explicitlyRequestedToolNameSet === undefined || explicitlyRequestedToolNameSet.has("read"));
+			(explicitlyRequestedToolNameSet === undefined || explicitlyRequestedToolNameSet.has("read")) &&
+			!isToolDisallowed("read", disallowedPatterns);
 		const xdevWriteAvailable =
 			builtInRegistryToolNames.has("write") &&
 			(explicitlyRequestedToolNameSet === undefined ||
 				explicitlyRequestedToolNameSet.has("write") ||
-				toolSession.deviceOnlyWrite === true);
+				toolSession.deviceOnlyWrite === true) &&
+			!isToolDisallowed("write", disallowedPatterns);
 		const initialRequestedActiveToolNames = options.toolNames
 			? requestedActiveToolNames
 			: requestedActiveToolNames.filter(name => !defaultInactiveToolNames.has(name));
@@ -4060,17 +4202,35 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 
 		// Custom tools and extension-registered tools are always included
 		// unless the effective registry winner is hidden / defaultInactive. Restricted callers own the list.
+		// When the caller enforces a tool allowlist (subagent `tools:` frontmatter),
+		// custom/extension/MCP tools not named in the list are excluded too.
 		const alwaysInclude: string[] = restrictToolNames
 			? []
 			: [
 				...sdkCustomTools.map(t => t.name),
 				...registeredTools.map(t => t.definition.name),
 				...settingsGatedCustomEntries.keys(),
-			].filter(name => !defaultInactiveToolNames.has(name));
+			].filter(
+				name =>
+					!defaultInactiveToolNames.has(name) &&
+					(!enforceToolAllowlist || explicitlyRequestedToolNameSet?.has(name) === true),
+			);
 		for (const name of alwaysInclude) {
 			if (toolRegistry.has(name) && !initialToolNames.includes(name)) {
 				initialToolNames.push(name);
 			}
+		}
+		// Disallow patterns remove tools from the active set after the allowlist is
+		// applied (covers built-ins and any custom/extension/MCP tool not caught above).
+		if (disallowedPatterns.length > 0) {
+			initialToolNames = withoutSiblingTools(initialToolNames, name => {
+				const mcpServerName = (toolRegistry.get(name) as { mcpServerName?: unknown } | undefined)?.mcpServerName;
+				return isToolDisallowed(
+					name,
+					disallowedPatterns,
+					typeof mcpServerName === "string" ? mcpServerName : undefined,
+				);
+			});
 		}
 
 		// Pre-register in the global agent registry BEFORE building the system prompt,
@@ -4140,6 +4300,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		}
 
 		setSessionActiveToolNames(initialToolNames);
+		// The active set is now final; the hasEditTool getter switches from the
+		// construction-time scope probe to the live sets from here on.
+		activationApplied = true;
 		const { systemPrompt } = await logger.time(
 			"buildSystemPrompt",
 			rebuildSystemPrompt,
@@ -4666,6 +4829,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			getXdevToolEntries: () => (toolSession.xdev ? xdevEntries(toolSession.xdev) : []),
 			xdev: toolSession.xdev,
 			presentationPinnedToolNames: explicitlyRequestedToolNameSet,
+			enforceToolAllowlist: enforceToolAllowlist || undefined,
+			allowedToolNames: explicitlyRequestedToolNameSet ?? undefined,
+			disallowedToolPatterns: disallowedPatterns.length > 0 ? disallowedPatterns : undefined,
 			setActiveToolNames: setSessionActiveToolNames,
 			ensureWriteRegistered,
 			isDeviceOnlyWrite: () => toolSession.deviceOnlyWrite === true,
