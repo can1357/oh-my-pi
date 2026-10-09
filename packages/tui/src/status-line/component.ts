@@ -3717,6 +3717,14 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		const pct = ctx.contextPercent;
 		const window = ctx.contextWindow;
 		const compactContext = ctx.options.context_pct?.compact === true && segments.includes("context_pct");
+		const compactContextLabel = `ctx:${formatCompactContextPercent(pct)}`;
+		const startupCompactContextLabel =
+			compactContext && pct === null && ctx.session.startupContextPercent != null
+				? `ctx:${formatCompactContextPercent(ctx.session.startupContextPercent)}`
+				: undefined;
+		const nativeCompactContextLabel = startupCompactContextLabel
+			? compactContextLabel.padEnd(startupCompactContextLabel.length)
+			: compactContextLabel;
 		const showContextWindow = !compactContext || segments.includes("context_total");
 		const boundaries = ctx.autoCompactEnabled ? this.#compactionBoundaries(window) : null;
 		const lines = [
@@ -3762,7 +3770,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 					: {}),
 				...(marks.length > 0 ? { marks } : {}),
 				...(compactContext
-					? { label: `ctx:${formatCompactContextPercent(pct)}` }
+					? { label: nativeCompactContextLabel }
 					: pct === null
 						? {}
 						: { label: `${Math.round(pct)}%` }),

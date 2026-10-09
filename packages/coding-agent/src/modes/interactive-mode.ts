@@ -3438,7 +3438,11 @@ export class InteractiveMode implements InteractiveModeContext {
 		let resetDisplay = false;
 
 		if (any("autoResume")) {
-			sharedComposerCache()?.writeAutoResume(this.sessionManager.getCwd(), cfgAutoResume.get(this.settings));
+			sharedComposerCache()?.writeAutoResume(
+				this.sessionManager.getCwd(),
+				cfgAutoResume.get(this.settings),
+				cfgAutoResume.provenance(this.settings) === "project",
+			);
 		}
 
 		if (

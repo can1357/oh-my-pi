@@ -1948,6 +1948,7 @@ export async function runRootCommand(
 
 		applyStartupComposerPreferences({
 			autoResume: cfgAutoResume.get(settingsInstance),
+			autoResumeProjectScoped: cfgAutoResume.provenance(settingsInstance) === "project",
 			quiet: cfgStartupQuiet.get(settingsInstance),
 			composerShape: cfgComposerShape.get(settingsInstance),
 			showHardwareCursor: cfgShowHardwareCursor.get(settingsInstance),

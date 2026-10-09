@@ -30,7 +30,7 @@ import type { SymbolPreset } from "../theme/theme";
 import { isWordCompletionMethod } from "./word-completion";
 
 /** Bump whenever any payload format changes; older stores are cleared on open. */
-const FORMAT_VERSION = 6;
+const FORMAT_VERSION = 7;
 /** Project key of rows that serve every project lacking its own. */
 const ANY_PROJECT = "";
 
@@ -47,6 +47,11 @@ CREATE TABLE IF NOT EXISTS entries (
 
 /** Speculative composer cache payload kinds. */
 type EntryKind = "auto-resume" | "ui" | "status";
+
+interface CachedAutoResume {
+	readonly value: boolean;
+	readonly projectScoped: boolean;
+}
 
 /** Theme inputs cached from the last resolved settings load for stable prepaint colors. */
 export interface ComposerThemePreferences {
@@ -98,6 +103,13 @@ function parseCachedStatus(
 	const status = parseStatus(value.status);
 	if (!status || (value.sessionFile !== undefined && typeof value.sessionFile !== "string")) return undefined;
 	return { status, sessionFile: value.sessionFile };
+}
+
+function parseCachedAutoResume(value: unknown): CachedAutoResume | undefined {
+	if (!isRecord(value) || typeof value.value !== "boolean" || typeof value.projectScoped !== "boolean") {
+		return undefined;
+	}
+	return { value: value.value, projectScoped: value.projectScoped };
 }
 
 function parseUiState(
@@ -190,6 +202,7 @@ export class ComposerCache {
 	readonly #db: Database;
 	readonly #select: Statement<{ project: string; kind: EntryKind; value: string }, [string, string]>;
 	readonly #upsert: Statement<unknown, [string, EntryKind, string]>;
+	readonly #delete: Statement<unknown, [string, EntryKind]>;
 	/**
 	 * Value this connection last read or wrote per `project\0kind`. Startup and
 	 * model/status events re-send identical payloads; matching ones skip the
@@ -211,6 +224,7 @@ export class ComposerCache {
 		this.#upsert = db.prepare(
 			"INSERT INTO entries (project, kind, value) VALUES (?, ?, ?) ON CONFLICT (project, kind) DO UPDATE SET value = excluded.value WHERE value IS NOT excluded.value",
 		);
+		this.#delete = db.prepare("DELETE FROM entries WHERE project = ? AND kind = ?");
 	}
 
 	/**
@@ -239,7 +253,9 @@ export class ComposerCache {
 			logger.debug("composer cache read failed", { error: String(error) });
 		}
 		const ui = parseUiState(parseJson(own.ui)) ?? parseUiState(parseJson(anyProject.ui));
-		const autoResume = parseJson(own["auto-resume"]) ?? parseJson(anyProject["auto-resume"]);
+		const ownAutoResume = parseCachedAutoResume(parseJson(own["auto-resume"]));
+		const globalAutoResume = parseCachedAutoResume(parseJson(anyProject["auto-resume"]));
+		const autoResume = ownAutoResume?.projectScoped ? ownAutoResume.value : globalAutoResume?.value;
 		const cachedStatus = parseCachedStatus(parseJson(own.status)) ?? parseCachedStatus(parseJson(anyProject.status));
 		const canReuseSessionUsage =
 			options.allowSessionUsage &&
@@ -264,15 +280,60 @@ export class ComposerCache {
 		};
 	}
 
+	/** Exact session identity most recently cached for this project; shared fallback rows never qualify. */
+	cachedSessionFile(cwd: string): string | undefined {
+		const project = path.resolve(cwd);
+		try {
+			const row = this.#select
+				.all(project, project)
+				.find(entry => entry.project === project && entry.kind === "status");
+			if (!row) return undefined;
+			this.#known.set(`${row.project}\0${row.kind}`, row.value);
+			return parseCachedStatus(parseJson(row.value))?.sessionFile;
+		} catch (error) {
+			logger.debug("composer cache session identity read failed", { error: String(error) });
+			return undefined;
+		}
+	}
+
 	/** Resolved theme and composer settings for the next prepaint. */
-	writeUi(cwd: string, preferences: ComposerPreferences, theme: ComposerThemePreferences, autoResume: boolean): void {
+	writeUi(
+		cwd: string,
+		preferences: ComposerPreferences,
+		theme: ComposerThemePreferences,
+		autoResume: boolean,
+		autoResumeProjectScoped = false,
+	): void {
 		this.#putShared(cwd, "ui", { preferences, theme });
-		this.#putShared(cwd, "auto-resume", autoResume);
+		this.writeAutoResume(cwd, autoResume, autoResumeProjectScoped);
 	}
 
 	/** Refresh the live auto-resume setting without replacing the cached UI snapshot. */
-	writeAutoResume(cwd: string, autoResume: boolean): void {
-		this.#putShared(cwd, "auto-resume", autoResume);
+	writeAutoResume(cwd: string, autoResume: boolean, projectScoped = false): void {
+		const project = path.resolve(cwd);
+		const value: CachedAutoResume = { value: autoResume, projectScoped };
+		const json = JSON.stringify(value);
+		const ownKey = `${project}\0auto-resume`;
+		const globalKey = `${ANY_PROJECT}\0auto-resume`;
+		try {
+			if (projectScoped) {
+				if (this.#known.get(ownKey) === json) return;
+				this.#upsert.run(project, "auto-resume", json);
+				this.#known.set(ownKey, json);
+				return;
+			}
+			// Global/default values belong only in the shared row. Removing this
+			// project's inherited snapshot prevents it from shadowing later global
+			// changes, while explicitly project-scoped rows remain distinguishable.
+			this.#db.transaction(() => {
+				this.#delete.run(project, "auto-resume");
+				this.#upsert.run(ANY_PROJECT, "auto-resume", json);
+			})();
+			this.#known.delete(ownKey);
+			this.#known.set(globalKey, json);
+		} catch (error) {
+			logger.debug("composer cache write failed", { kind: "auto-resume", error: String(error) });
+		}
 	}
 
 	/** Status-bar inputs for the next prepaint's startup status line. */
@@ -300,6 +361,7 @@ export class ComposerCache {
 		// Unfinalized statements keep the file handle open on Windows.
 		this.#select.finalize();
 		this.#upsert.finalize();
+		this.#delete.finalize();
 		this.#db.close();
 	}
 

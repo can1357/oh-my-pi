@@ -87,6 +87,8 @@ describe("composer startup cache", () => {
 
 		const cache = ComposerCache.open(dbPath);
 		cache.writeStatus(project, statusWithUsage, sessionFile);
+		expect(cache.cachedSessionFile(project)).toBe(sessionFile);
+		expect(cache.cachedSessionFile(path.join(root, "fresh"))).toBeUndefined();
 
 		const fresh = cache.read(project).status?.statusLine;
 		expect(fresh?.thinkingLevel).toBe(ThinkingLevel.High);
@@ -129,7 +131,7 @@ describe("composer startup cache", () => {
 		const cache = ComposerCache.open(dbPath);
 		cache.writeUi(project, preferences, theme, true);
 		cache.writeStatus(project, statusWithUsage, sessionFile);
-		cache.writeUi(otherProject, otherPreferences, theme, true);
+		cache.writeUi(otherProject, otherPreferences, theme, true, true);
 		cache.writeStatus(otherProject, statusWithUsage, otherSessionFile);
 
 		cache.writeAutoResume(project, false);
@@ -142,6 +144,10 @@ describe("composer startup cache", () => {
 			cache.read(otherProject, { allowSessionUsage: true, sessionFile: otherSessionFile }).status?.statusLine
 				.contextPercent,
 		).toBe(42);
+		expect(
+			cache.read(path.join(root, "fresh"), { allowSessionUsage: true, sessionFile: otherSessionFile }).status
+				?.statusLine.contextPercent,
+		).toBeUndefined();
 
 		cache.writeAutoResume(project, true);
 		expect(cache.read(project, { allowSessionUsage: true, sessionFile }).status?.statusLine.contextPercent).toBe(42);

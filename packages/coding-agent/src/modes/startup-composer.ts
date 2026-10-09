@@ -37,6 +37,7 @@ export interface PrepaintComposerOptions {
 export interface PrepaintComposerPreferences extends ComposerPreferences {
 	readonly theme: ComposerThemePreferences;
 	readonly autoResume: boolean;
+	readonly autoResumeProjectScoped?: boolean;
 }
 
 interface PendingComposer {
@@ -53,13 +54,26 @@ export interface TerminalSessionPrepaint {
 	readonly sessionFile: string;
 }
 
-/** Resolve the breadcrumb identity needed by prepaint, without loading the session graph. */
-export function resolveTerminalSessionPrepaint(cwd: string): TerminalSessionPrepaint | undefined {
+/** Resolve the session identity needed by prepaint, without loading the session graph. */
+export function resolveTerminalSessionPrepaint(
+	cwd: string,
+	currentSessionFile?: string,
+): TerminalSessionPrepaint | undefined {
 	const breadcrumb = readTerminalBreadcrumbEntrySync();
-	if (!breadcrumb) return undefined;
 	const resolvedCwd = path.resolve(cwd);
+	const currentSession =
+		currentSessionFile && fs.existsSync(currentSessionFile)
+			? { cacheCwd: resolvedCwd, sessionFile: currentSessionFile }
+			: undefined;
+	// A terminal without a breadcrumb follows continueRecent()'s project-local
+	// fallback. The cache identity was written by that live session and lets the
+	// first frame reserve its usage widths before the session graph loads.
+	if (!breadcrumb) return currentSession;
 	const breadcrumbCwd = path.resolve(breadcrumb.cwd);
 	if (breadcrumbCwd === resolvedCwd) return { cacheCwd: resolvedCwd, sessionFile: breadcrumb.sessionFile };
+	// continueRecent() gives an existing current-project session precedence over
+	// relocating a missing-cwd breadcrumb. Mirror that choice in prepaint.
+	if (currentSession) return currentSession;
 	if (fs.existsSync(breadcrumbCwd)) return undefined;
 	if (!hasPositiveMovedProjectEvidence(breadcrumb.cwdIdentity, resolvedCwd)) return undefined;
 	return { cacheCwd: breadcrumbCwd, sessionFile: breadcrumb.sessionFile };
@@ -97,7 +111,7 @@ export function beginStartupComposer(options: PrepaintComposerOptions = {}): voi
 	const cache = options.cache === false ? undefined : sharedComposerCache();
 	const terminalSession = options.sessionFile
 		? { cacheCwd: cwd, sessionFile: options.sessionFile }
-		: resolveTerminalSessionPrepaint(cwd);
+		: resolveTerminalSessionPrepaint(cwd, cache?.cachedSessionFile(cwd));
 	const cached = cache
 		? cache.read(terminalSession?.cacheCwd ?? cwd, {
 				allowSessionUsage: options.allowSessionUsage,
@@ -162,5 +176,5 @@ export function applyStartupComposerPreferences(update: PrepaintComposerPreferen
 	// responsive again: take raw-input ownership now. The kernel echoed (and
 	// buffered) everything typed during the load; the editor replays it here.
 	pending.composer.enableInput();
-	pending.cache?.writeUi(pending.cwd, preferences, update.theme, update.autoResume);
+	pending.cache?.writeUi(pending.cwd, preferences, update.theme, update.autoResume, update.autoResumeProjectScoped);
 }

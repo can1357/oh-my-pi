@@ -50,6 +50,30 @@ import {
 } from "@oh-my-pi/pi-coding-agent/modes/settings";
 
 describe("startup composer terminal session identity", () => {
+	it("uses the cached current-project session when a new terminal has no breadcrumb", () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "omp-startup-fallback-session-"));
+		const agentDir = path.join(root, "agent");
+		const project = path.join(root, "project");
+		const sessionFile = path.join(root, "session.jsonl");
+		const originalAgentDir = getAgentDir();
+		const originalTmuxPane = process.env.TMUX_PANE;
+		fs.mkdirSync(project);
+		fs.writeFileSync(sessionFile, "{}\n");
+		process.env.TMUX_PANE = "%startup-fallback-session";
+		setAgentDir(agentDir);
+		try {
+			expect(resolveTerminalSessionPrepaint(project, sessionFile)).toEqual({
+				cacheCwd: project,
+				sessionFile,
+			});
+		} finally {
+			setAgentDir(originalAgentDir);
+			if (originalTmuxPane === undefined) delete process.env.TMUX_PANE;
+			else process.env.TMUX_PANE = originalTmuxPane;
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
 	it("reuses the prior project cache row when the breadcrumb project moved", () => {
 		const root = fs.mkdtempSync(path.join(os.tmpdir(), "omp-startup-moved-project-"));
 		const agentDir = path.join(root, "agent");
@@ -68,6 +92,35 @@ describe("startup composer terminal session identity", () => {
 			expect(resolveTerminalSessionPrepaint(movedProject)).toEqual({
 				cacheCwd: originalProject,
 				sessionFile,
+			});
+		} finally {
+			setAgentDir(originalAgentDir);
+			if (originalTmuxPane === undefined) delete process.env.TMUX_PANE;
+			else process.env.TMUX_PANE = originalTmuxPane;
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("prefers a current-project session over a moved-project breadcrumb", () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "omp-startup-moved-project-current-"));
+		const agentDir = path.join(root, "agent");
+		const originalProject = path.join(root, "project");
+		const movedProject = path.join(root, "renamed-project");
+		const oldSessionFile = path.join(root, "old-session.jsonl");
+		const currentSessionFile = path.join(root, "current-session.jsonl");
+		const originalAgentDir = getAgentDir();
+		const originalTmuxPane = process.env.TMUX_PANE;
+		fs.mkdirSync(originalProject);
+		fs.writeFileSync(oldSessionFile, "{}\n");
+		fs.writeFileSync(currentSessionFile, "{}\n");
+		process.env.TMUX_PANE = "%startup-moved-project-current";
+		setAgentDir(agentDir);
+		try {
+			writeTerminalBreadcrumb(originalProject, oldSessionFile);
+			fs.renameSync(originalProject, movedProject);
+			expect(resolveTerminalSessionPrepaint(movedProject, currentSessionFile)).toEqual({
+				cacheCwd: movedProject,
+				sessionFile: currentSessionFile,
 			});
 		} finally {
 			setAgentDir(originalAgentDir);
