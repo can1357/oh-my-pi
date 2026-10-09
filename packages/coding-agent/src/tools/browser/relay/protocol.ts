@@ -40,25 +40,22 @@ export type RelayToExtMessage = ({ t: "rpc"; id: number } & RelayRpcRequest) | {
 /** Required capability for safe relay target discovery and auto-attach. */
 export const DISCARDED_TABS_PROTOCOL_VERSION = 1;
 
-/** Whether `version` is a semver string `Bun.semver.order` can rank. */
-function isSemver(version: string): boolean {
-	try {
-		Bun.semver.order(version, version);
-		return true;
-	} catch {
-		return false;
-	}
-}
+/**
+ * An omp release version as relays and extensions report it. Stricter than
+ * `Bun.semver.order`, which ranks strings with trailing text; peers supply
+ * these and results quote them.
+ */
+const OMP_VERSION_PATTERN = /^(?=.{5,64}$)\d+\.\d+\.\d+(?:-[0-9A-Za-z]+(?:\.[0-9A-Za-z]+)*)?$/;
 
 /**
- * Whether an extension's hello `ompVersion` is older than `than`. Unstamped
- * ("") is the oldest; a stamp that is not semver has no known age, so it
- * ranks after every semver stamp and is never older than one.
+ * Whether an omp version a relay or extension reports is older than `than`.
+ * Unreported ("") is the oldest; anything else that is not an omp version has
+ * no known age, so it ranks after every version and is never older than one.
  */
 export function isOlderOmpVersion(version: string, than: string): boolean {
 	if (version === "" || than === "") return version === "" && than !== "";
-	if (!isSemver(version)) return false;
-	if (!isSemver(than)) return true;
+	if (!OMP_VERSION_PATTERN.test(version)) return false;
+	if (!OMP_VERSION_PATTERN.test(than)) return true;
 	return Bun.semver.order(version, than) < 0;
 }
 
