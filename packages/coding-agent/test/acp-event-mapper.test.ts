@@ -106,6 +106,10 @@ class ReplayTestSession {
 		return () => {};
 	}
 
+	holdStallReminderDelivery(): Disposable {
+		return { [Symbol.dispose]() {} };
+	}
+
 	subscribe(_listener: (event: AgentSessionEvent) => void): () => void {
 		return () => {};
 	}
