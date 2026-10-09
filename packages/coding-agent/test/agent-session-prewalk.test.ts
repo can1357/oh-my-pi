@@ -223,6 +223,33 @@ describe("AgentSession prewalk", () => {
 		expect(created.efforts).toEqual([Effort.Medium, Effort.Medium, Effort.Low]);
 	});
 
+	it("restores the planning model on /new after aborting target classification", async () => {
+		const started = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		vi.spyOn(autoThinkingClassifier, "classifyDifficulty").mockImplementation(async () => {
+			started.resolve();
+			await release.promise;
+			return Effort.Low;
+		});
+		const created = createLifecycleSession(
+			[toolCall("todo", "todo"), toolCall("write", "write"), { content: ["done"] }],
+			{ targetThinkingLevel: AUTO_THINKING },
+		);
+
+		const prompt = created.session.prompt("Edit the scratch file");
+		await started.promise;
+		expect(created.session.model?.id).toBe(created.target.id);
+		const abort = created.session.abort();
+		release.resolve();
+		await abort;
+		await prompt;
+
+		expect(created.session.getPrewalkState()).toBeUndefined();
+		expect(await created.session.newSession()).toBe(true);
+		expect(created.session.model?.id).toBe(created.primary.id);
+		expect(created.session.configuredThinkingLevel()).toBe(Effort.High);
+	});
+
 	it("/new restores the previous prewalk source and effort, then requires a fresh todo before handoff", async () => {
 		const created = createLifecycleSession([
 			toolCall("old-todo", "todo"),

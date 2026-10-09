@@ -281,14 +281,8 @@ export class PrewalkCoordinator {
 		const sourceThinkingLevel = this.#host.configuredThinkingLevel();
 		await this.#host.setModelTemporary(target, prewalk.thinkingLevel, { ephemeral: true });
 		const generation = this.#userTurnGeneration;
-		if (
-			prewalk.thinkingLevel === AUTO_THINKING &&
-			this.#userTurnText !== undefined &&
-			generation === this.#host.promptGeneration()
-		) {
-			await this.#host.applyAutoThinkingLevel(this.#userTurnText, generation, this.#userTurnSolutionSpace);
-			if (generation !== this.#host.promptGeneration()) return;
-		}
+		const promptText = this.#userTurnText;
+		const solutionSpace = this.#userTurnSolutionSpace;
 		this.#clearPrewalkState();
 		if (source) {
 			this.#handoff = {
@@ -303,6 +297,14 @@ export class PrewalkCoordinator {
 			`Prewalk: switched to ${target.provider}/${target.id} after first ${action.toolName} call.`,
 			"prewalk",
 		);
+		if (
+			prewalk.thinkingLevel === AUTO_THINKING &&
+			promptText !== undefined &&
+			generation === this.#host.promptGeneration()
+		) {
+			await this.#host.applyAutoThinkingLevel(promptText, generation, solutionSpace);
+			if (generation !== this.#host.promptGeneration()) return;
+		}
 		this.#host.agent.steer({
 			role: "custom",
 			customType: PREWALK_CHECKLIST_MESSAGE_TYPE,
