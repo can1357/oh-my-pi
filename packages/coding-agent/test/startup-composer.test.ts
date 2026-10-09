@@ -730,6 +730,7 @@ describe("Composer prepaint", () => {
 		await terminal.waitForRender(() => terminal.getViewport().some(row => Bun.stripANSI(row).includes("v9.9.9")));
 
 		applyStartupComposerPreferences({
+			autoResume: false,
 			quiet: true,
 			composerShape: "box",
 			showHardwareCursor: config.showHardwareCursor,
@@ -777,7 +778,7 @@ describe("Composer prepaint", () => {
 		expect(terminal.startOptions?.deferInput).toBeTrue();
 		expect(terminal.inputEnables).toBe(0);
 
-		applyStartupComposerPreferences({ ...config, theme: {} });
+		applyStartupComposerPreferences({ ...config, theme: {}, autoResume: false });
 		expect(terminal.inputEnables).toBe(1);
 
 		// Adoption after preferences must not double-enable…

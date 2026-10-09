@@ -30,7 +30,7 @@ import type { SymbolPreset } from "../theme/theme";
 import { isWordCompletionMethod } from "./word-completion";
 
 /** Bump whenever any payload format changes; older stores are cleared on open. */
-const FORMAT_VERSION = 2;
+const FORMAT_VERSION = 3;
 /** Project key of rows that serve every project lacking its own. */
 const ANY_PROJECT = "";
 
@@ -64,8 +64,8 @@ export interface ComposerStartupCache {
 }
 
 export interface ComposerCacheReadOptions {
-	/** Reuse layout hints only when startup will resume the session that produced them. */
-	readonly reuseSessionUsage?: boolean;
+	/** Permit reuse of layout hints when cached settings will auto-resume the producing session. */
+	readonly allowSessionUsage?: boolean;
 }
 
 function parseJson(value: string | undefined): unknown {
@@ -91,7 +91,7 @@ function parseStatus(value: unknown): ComposerStatusCache | undefined {
 
 function parseUiState(
 	value: unknown,
-): { preferences: ComposerPreferences; theme: ComposerThemePreferences } | undefined {
+): { preferences: ComposerPreferences; theme: ComposerThemePreferences; autoResume: boolean } | undefined {
 	if (!isRecord(value) || !isRecord(value.preferences) || !isRecord(value.theme)) return undefined;
 	const {
 		quiet,
@@ -106,6 +106,7 @@ function parseUiState(
 		spellingAutocorrect,
 	} = value.preferences;
 	if (
+		typeof value.autoResume !== "boolean" ||
 		typeof quiet !== "boolean" ||
 		typeof composerShape !== "string" ||
 		typeof showHardwareCursor !== "boolean" ||
@@ -135,6 +136,7 @@ function parseUiState(
 		return undefined;
 	}
 	return {
+		autoResume: value.autoResume,
 		preferences: {
 			quiet,
 			composerShape,
@@ -230,7 +232,7 @@ export class ComposerCache {
 		const ui = parseUiState(parseJson(own.ui)) ?? parseUiState(parseJson(anyProject.ui));
 		const cachedStatus = parseStatus(parseJson(own.status)) ?? parseStatus(parseJson(anyProject.status));
 		const status =
-			cachedStatus && !options.reuseSessionUsage
+			cachedStatus && !(options.allowSessionUsage && ui?.autoResume)
 				? {
 						...cachedStatus,
 						statusLine: {
@@ -248,8 +250,8 @@ export class ComposerCache {
 	}
 
 	/** Resolved theme and composer settings for the next prepaint. */
-	writeUi(cwd: string, preferences: ComposerPreferences, theme: ComposerThemePreferences): void {
-		this.#putShared(cwd, "ui", { preferences, theme });
+	writeUi(cwd: string, preferences: ComposerPreferences, theme: ComposerThemePreferences, autoResume: boolean): void {
+		this.#putShared(cwd, "ui", { preferences, theme, autoResume });
 	}
 
 	/** Status-bar inputs for the next prepaint's startup status line. */

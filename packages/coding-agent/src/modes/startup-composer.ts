@@ -24,11 +24,14 @@ export interface PrepaintComposerOptions {
 	readonly preferences?: Partial<ComposerPreferences>;
 	readonly theme?: ComposerThemePreferences;
 	readonly cache?: boolean;
+	/** Whether this launch shape can auto-resume the cached session. */
+	readonly allowSessionUsage?: boolean;
 }
 
 /** Final settings pushed into the live composer after Settings and the theme resolve. */
 export interface PrepaintComposerPreferences extends ComposerPreferences {
 	readonly theme: ComposerThemePreferences;
+	readonly autoResume: boolean;
 }
 
 interface PendingComposer {
@@ -70,7 +73,9 @@ export function beginStartupComposer(options: PrepaintComposerOptions = {}): voi
 	if (pendingComposer) throw new Error("A prepaint composer is already active");
 	const cwd = options.cwd ?? process.cwd();
 	const cache = options.cache === false ? undefined : sharedComposerCache();
-	const cached = cache ? cache.read(cwd) : { preferences: undefined, theme: undefined, status: undefined };
+	const cached = cache
+		? cache.read(cwd, { allowSessionUsage: options.allowSessionUsage })
+		: { preferences: undefined, theme: undefined, status: undefined };
 	const theme = { ...cached.theme, ...options.theme };
 	initThemeSync(theme.symbolPreset, theme.colorBlindMode, theme.darkTheme, theme.lightTheme);
 	setMagicKeywords(MAGIC_KEYWORDS);
@@ -129,5 +134,5 @@ export function applyStartupComposerPreferences(update: PrepaintComposerPreferen
 	// responsive again: take raw-input ownership now. The kernel echoed (and
 	// buffered) everything typed during the load; the editor replays it here.
 	pending.composer.enableInput();
-	pending.cache?.writeUi(pending.cwd, preferences, update.theme);
+	pending.cache?.writeUi(pending.cwd, preferences, update.theme, update.autoResume);
 }

@@ -44,7 +44,7 @@ describe("composer startup cache", () => {
 		const status = statusFor(ThinkingLevel.High);
 
 		const writer = ComposerCache.open(dbPath);
-		writer.writeUi(project, preferences, theme);
+		writer.writeUi(project, preferences, theme, false);
 		writer.writeStatus(project, status);
 		writer.close();
 
@@ -91,9 +91,14 @@ describe("composer startup cache", () => {
 		expect(fresh?.thinkingLevel).toBe(ThinkingLevel.High);
 		expect(fresh?.contextPercent).toBeUndefined();
 		expect(fresh?.tokenBreakdown).toBeUndefined();
-		const resumed = cache.read(project, { reuseSessionUsage: true }).status?.statusLine;
+		cache.writeUi(project, COMPOSER_DEFAULTS, {}, true);
+		const resumed = cache.read(project, { allowSessionUsage: true }).status?.statusLine;
 		expect(resumed?.contextPercent).toBe(37.5);
 		expect(resumed?.tokenBreakdown).toEqual(statusWithUsage.statusLine.tokenBreakdown);
+		cache.writeUi(project, COMPOSER_DEFAULTS, {}, false);
+		const disabled = cache.read(project, { allowSessionUsage: true }).status?.statusLine;
+		expect(disabled?.contextPercent).toBeUndefined();
+		expect(disabled?.tokenBreakdown).toBeUndefined();
 		const fallback = cache.read(path.join(root, "fresh")).status?.statusLine;
 		expect(fallback?.thinkingLevel).toBe(ThinkingLevel.High);
 		expect(fallback?.contextPercent).toBeUndefined();
@@ -178,7 +183,7 @@ describe("composer startup cache", () => {
 			'import * as path from "node:path";',
 			`import { ComposerCache } from ${JSON.stringify(composerCacheModule)};`,
 			"const cache = ComposerCache.open();",
-			`cache.writeUi(${JSON.stringify(project)}, {}, {});`,
+			`cache.writeUi(${JSON.stringify(project)}, {}, {}, false);`,
 			"cache.close();",
 			`const expected = path.join(${JSON.stringify(xdgCache)}, "omp", "cache", "composer.db");`,
 			"process.stdout.write(String(await Bun.file(expected).exists()));",
