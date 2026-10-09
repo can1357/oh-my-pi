@@ -30,7 +30,7 @@ import type { SymbolPreset } from "../theme/theme";
 import { isWordCompletionMethod } from "./word-completion";
 
 /** Bump whenever any payload format changes; older stores are cleared on open. */
-const FORMAT_VERSION = 4;
+const FORMAT_VERSION = 5;
 /** Project key of rows that serve every project lacking its own. */
 const ANY_PROJECT = "";
 
@@ -45,8 +45,8 @@ CREATE TABLE IF NOT EXISTS entries (
 ) WITHOUT ROWID;
 `;
 
-/** Every kind is mirrored under {@link ANY_PROJECT} as the fallback for projects without their own row. */
-type EntryKind = "ui" | "status";
+/** UI and status are mirrored per project; auto-resume is a single global setting. */
+type EntryKind = "auto-resume" | "ui" | "status";
 
 /** Theme inputs cached from the last resolved settings load for stable prepaint colors. */
 export interface ComposerThemePreferences {
@@ -102,7 +102,7 @@ function parseCachedStatus(
 
 function parseUiState(
 	value: unknown,
-): { preferences: ComposerPreferences; theme: ComposerThemePreferences; autoResume: boolean } | undefined {
+): { preferences: ComposerPreferences; theme: ComposerThemePreferences } | undefined {
 	if (!isRecord(value) || !isRecord(value.preferences) || !isRecord(value.theme)) return undefined;
 	const {
 		quiet,
@@ -117,7 +117,6 @@ function parseUiState(
 		spellingAutocorrect,
 	} = value.preferences;
 	if (
-		typeof value.autoResume !== "boolean" ||
 		typeof quiet !== "boolean" ||
 		typeof composerShape !== "string" ||
 		typeof showHardwareCursor !== "boolean" ||
@@ -147,7 +146,6 @@ function parseUiState(
 		return undefined;
 	}
 	return {
-		autoResume: value.autoResume,
 		preferences: {
 			quiet,
 			composerShape,
@@ -241,10 +239,11 @@ export class ComposerCache {
 			logger.debug("composer cache read failed", { error: String(error) });
 		}
 		const ui = parseUiState(parseJson(own.ui)) ?? parseUiState(parseJson(anyProject.ui));
+		const autoResume = parseJson(anyProject["auto-resume"]);
 		const cachedStatus = parseCachedStatus(parseJson(own.status)) ?? parseCachedStatus(parseJson(anyProject.status));
 		const canReuseSessionUsage =
 			options.allowSessionUsage &&
-			ui?.autoResume &&
+			autoResume === true &&
 			options.sessionFile !== undefined &&
 			cachedStatus?.sessionFile === options.sessionFile;
 		const status =
@@ -267,27 +266,13 @@ export class ComposerCache {
 
 	/** Resolved theme and composer settings for the next prepaint. */
 	writeUi(cwd: string, preferences: ComposerPreferences, theme: ComposerThemePreferences, autoResume: boolean): void {
-		this.#putShared(cwd, "ui", { preferences, theme, autoResume });
+		this.#putShared(cwd, "ui", { preferences, theme });
+		this.#putGlobal("auto-resume", autoResume);
 	}
 
 	/** Refresh the live auto-resume setting without replacing the cached UI snapshot. */
-	writeAutoResume(cwd: string, autoResume: boolean): void {
-		const project = path.resolve(cwd);
-		let ownUi: string | undefined;
-		let fallbackUi: string | undefined;
-		try {
-			for (const row of this.#select.all(project, ANY_PROJECT)) {
-				if (row.kind !== "ui") continue;
-				if (row.project === project) ownUi = row.value;
-				else fallbackUi = row.value;
-			}
-		} catch (error) {
-			logger.debug("composer cache auto-resume read failed", { error: String(error) });
-			return;
-		}
-		const ui = parseUiState(parseJson(ownUi)) ?? parseUiState(parseJson(fallbackUi));
-		if (!ui) return;
-		this.writeUi(cwd, ui.preferences, ui.theme, autoResume);
+	writeAutoResume(_cwd: string, autoResume: boolean): void {
+		this.#putGlobal("auto-resume", autoResume);
 	}
 
 	/** Status-bar inputs for the next prepaint's startup status line. */
@@ -316,6 +301,19 @@ export class ComposerCache {
 		this.#select.finalize();
 		this.#upsert.finalize();
 		this.#db.close();
+	}
+
+	/** Best-effort upsert of one global setting shared by every project. */
+	#putGlobal(kind: EntryKind, value: unknown): void {
+		const json = JSON.stringify(value);
+		const key = `${ANY_PROJECT}\0${kind}`;
+		if (this.#known.get(key) === json) return;
+		try {
+			this.#upsert.run(ANY_PROJECT, kind, json);
+			this.#known.set(key, json);
+		} catch (error) {
+			logger.debug("composer cache write failed", { kind, error: String(error) });
+		}
 	}
 
 	/**

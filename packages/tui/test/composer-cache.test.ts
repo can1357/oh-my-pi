@@ -115,8 +115,11 @@ describe("composer startup cache", () => {
 
 	it("updates live auto-resume intent without replacing the cached UI snapshot", () => {
 		const project = path.join(root, "project");
+		const otherProject = path.join(root, "other-project");
 		const sessionFile = path.join(root, "sessions", "session.jsonl");
+		const otherSessionFile = path.join(root, "sessions", "other-session.jsonl");
 		const preferences = { ...COMPOSER_DEFAULTS, composerShape: "rail" };
+		const otherPreferences = { ...COMPOSER_DEFAULTS, composerShape: "box" };
 		const theme = { symbolPreset: "ascii" as const, colorBlindMode: true };
 		const status = statusFor(ThinkingLevel.High);
 		const statusWithUsage: ComposerStatusCache = {
@@ -126,15 +129,26 @@ describe("composer startup cache", () => {
 		const cache = ComposerCache.open(dbPath);
 		cache.writeUi(project, preferences, theme, true);
 		cache.writeStatus(project, statusWithUsage, sessionFile);
+		cache.writeUi(otherProject, otherPreferences, theme, true);
+		cache.writeStatus(otherProject, statusWithUsage, otherSessionFile);
 
 		cache.writeAutoResume(project, false);
 		expect(cache.read(project)).toMatchObject({ preferences, theme });
+		expect(cache.read(otherProject)).toMatchObject({ preferences: otherPreferences, theme });
 		expect(
 			cache.read(project, { allowSessionUsage: true, sessionFile }).status?.statusLine.contextPercent,
+		).toBeUndefined();
+		expect(
+			cache.read(otherProject, { allowSessionUsage: true, sessionFile: otherSessionFile }).status?.statusLine
+				.contextPercent,
 		).toBeUndefined();
 
 		cache.writeAutoResume(project, true);
 		expect(cache.read(project, { allowSessionUsage: true, sessionFile }).status?.statusLine.contextPercent).toBe(42);
+		expect(
+			cache.read(otherProject, { allowSessionUsage: true, sessionFile: otherSessionFile }).status?.statusLine
+				.contextPercent,
+		).toBe(42);
 		cache.close();
 	});
 
