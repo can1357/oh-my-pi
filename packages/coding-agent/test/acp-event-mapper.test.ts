@@ -100,6 +100,10 @@ class ReplayTestSession {
 
 	setClientBridge(_bridge: unknown): void {}
 
+	holdStallReminderDelivery(): Disposable {
+		return { [Symbol.dispose]() {} };
+	}
+
 	subscribe(_listener: (event: AgentSessionEvent) => void): () => void {
 		return () => {};
 	}

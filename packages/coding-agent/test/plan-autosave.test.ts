@@ -174,6 +174,7 @@ describe("plan-yolo approval autosave", () => {
 			setPlanModeState: state => {
 				planModeState = state;
 			},
+			holdStallReminderDelivery: () => ({ [Symbol.dispose]() {} }),
 			getPlanReferencePath: () => "",
 			setPlanProposalHandler: handler => {
 				capturedHandler = handler ?? undefined;
