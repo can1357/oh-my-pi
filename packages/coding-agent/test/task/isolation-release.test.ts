@@ -10,6 +10,7 @@ import { runIsolatedSubprocess } from "@oh-my-pi/pi-coding-agent/task/isolation-
 import * as worktreeModule from "@oh-my-pi/pi-coding-agent/task/worktree";
 import * as natives from "@oh-my-pi/pi-natives";
 import type { SingleResult } from "@oh-my-pi/pi-tui/tools/task";
+import { createSessionDefaults } from "../helpers/session-defaults";
 
 const tempRoots: string[] = [];
 
@@ -64,9 +65,9 @@ async function commitsAcrossRelease(id: string, runEndPatch: string, releasePatc
 		nestedPatches: [],
 	});
 	const session = {
+		...createSessionDefaults(),
 		prepareForHeadlessAdvisorDrain: () => {},
 		waitForAdvisorCatchup: async () => true,
-		dispose: async () => {},
 	} as unknown as AgentSession;
 	vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
 		AgentRegistry.global().register({
