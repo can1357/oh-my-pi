@@ -2997,6 +2997,11 @@ export class ModelRegistry {
 	 * Materialize provider-level config headers for one outbound request.
 	 * Catalog inspection never executes command-backed values.
 	 */
+	/** Effective endpoint used by discovery, including runtime and models.yml overrides. */
+	getEffectiveProviderBaseUrl(provider: string): string | undefined {
+		return this.#descriptorBaseUrl(provider);
+	}
+
 	async getProviderHeaders(provider: string): Promise<Record<string, string> | undefined> {
 		const resolver = createConfigHeaderResolver([
 			this.#providerOverrides.get(provider)?.headers,

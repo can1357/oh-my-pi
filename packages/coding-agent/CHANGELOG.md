@@ -4,6 +4,10 @@
 
 ### Added
 
+- Added `/grokbot` status with configured credential/backend precedence and secret-redacted terminal output ([#10175](https://github.com/can1357/oh-my-pi/pull/10175) by [@jroth1111](https://github.com/jroth1111)).
+
+### Added
+
 - Added Grok Bot login and model selection, including advertised aliases and literal bracketed selectors ([#10175](https://github.com/can1357/oh-my-pi/pull/10175) by [@jroth1111](https://github.com/jroth1111)).
 
 ### Changed

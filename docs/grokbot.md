@@ -3,6 +3,11 @@
 OMP provides two distinct connectors using your existing authorized Grok Bot
 account. Neither uses the public Anthropic API or guarantees Opus entitlement.
 
+`/grokbot` shows native connector configuration without printing credentials.
+It respects configured credentials and backend overrides and redacts host URL
+userinfo, query parameters, fragments and terminal control characters. It is
+not an inference or entitlement test.
+
 ## Host-managed text chat
 
 ```sh
