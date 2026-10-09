@@ -10,10 +10,12 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { unregisterCustomApis } from "@oh-my-pi/pi-ai/api-registry";
 import { createMockModel, registerMockApi } from "@oh-my-pi/pi-ai/providers/mock";
+import { closeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
+import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import { runSubprocess } from "@oh-my-pi/pi-coding-agent/task/executor";
 import { __resetDirsFromEnvForTests, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
 import { createInMemoryAuthStorage } from "../helpers/agent-session-setup";
@@ -57,11 +59,17 @@ afterEach(async () => {
 	vi.restoreAllMocks();
 	for (const key of ENV_KEYS) restoreEnvValue(key, savedEnv[key]);
 	__resetDirsFromEnvForTests();
+	// The subagent session opened agent.db and models.db under root; Windows cannot delete open files.
+	AgentStorage.close();
+	closeModelCache();
 	await removeWithRetries(root);
 });
 
 it("releases a parked subagent's persistent shell so a revive starts a fresh one", async () => {
-	const cwd = path.join(root, "work");
+	// Under the isolated HOME: project discovery walks up from cwd and stops at os.homedir(). On Windows
+	// os.tmpdir() lives under the real home, so a cwd outside the fake HOME would walk into the real
+	// ~/.omp and load the developer's installed plugins as project plugins.
+	const cwd = path.join(root, "home", "work");
 	const artifactsDir = path.join(root, "artifacts");
 	await fs.mkdir(cwd, { recursive: true });
 	await fs.mkdir(artifactsDir, { recursive: true });

@@ -15,6 +15,7 @@ import {
 	deleteModelPreset,
 	formatModelPresetSwitch,
 	getModelPresetNames,
+	isCleanModelPresetSwitch,
 	isValidModelPresetName,
 	modelPresetSavedMessage,
 	type ModelPresetSession,
@@ -25,6 +26,8 @@ import { describeLoopLimitRuntime } from "../modes/loop-limit";
 import type { InteractiveModeContext } from "../modes/types";
 import ratchetKickoffPrompt from "../prompts/ratchet-kickoff.md" with { type: "text" };
 import type { AgentSession } from "../session/agent-session";
+import { CLI_THINKING_LEVELS, getConfiguredThinkingLevelMetadata } from "@oh-my-pi/pi-tui/thinking";
+import { noThinkingMessage, resolveThinkingArgument } from "./helpers/effort";
 import { commandConsumed, errorMessage, usage } from "./helpers/parse";
 import { handleSecurityCommand } from "./helpers/security";
 import type { ParsedSlashCommand, SlashCommandSpec, TuiSlashCommandRuntime } from "./types";
@@ -763,14 +766,27 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 	{
 		name: "prewalk",
 		icon: "prewalk",
-		description: "Arm or restart a one-shot model handoff",
+		description: "Arm, restart, or cancel a one-shot model handoff",
 		allowArgs: true,
-		acpDescription: "Arm or restart prewalk",
-		acpInputHint: "[restart]",
-		subcommands: [{ name: "restart", description: "Return to @default and re-arm the handoff to @smol" }],
+		acpDescription: "Arm, restart, or cancel prewalk",
+		acpInputHint: "[restart|off]",
+		subcommands: [
+			{ name: "restart", description: "Return to @default and re-arm the handoff to @smol" },
+			{ name: "off", description: "Cancel this session's handoff without changing the active model" },
+		],
 		handle: async (command, runtime) => {
 			const arg = command.args.trim().toLowerCase();
-			if (arg && arg !== "restart") return usage("Usage: /prewalk [restart]", runtime);
+			if (arg && arg !== "restart" && arg !== "off") return usage("Usage: /prewalk [restart|off]", runtime);
+			if (arg === "off") {
+				const armed = runtime.session.getPrewalkState() !== undefined;
+				runtime.session.disarmPrewalk();
+				await runtime.output(
+					armed
+						? "Prewalk off: canceled this session's pending handoff; keeping the active model."
+						: "Prewalk already off for this session; keeping the active model.",
+				);
+				return commandConsumed();
+			}
 			const target = resolveSessionModelSelector("@smol", runtime.session, runtime.settings);
 			if (target.error || !target.model) {
 				return usage(target.error ?? 'Model "@smol" not found', runtime);
@@ -860,6 +876,59 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 			ctx.ui.requestRender();
 		},
 	},
+	{
+		name: "effort",
+		icon: "gauge",
+		get description() {
+			return `Set reasoning effort (thinking level, intelligence) for this session; ${formatKeyHint("shift+tab")} cycles levels`;
+		},
+		acpDescription: "Set or show reasoning effort (thinking level, intelligence)",
+		acpInputHint: "[level]",
+		inlineHint: "[level]",
+		allowArgs: true,
+		subcommands: CLI_THINKING_LEVELS.map(level => ({
+			name: level,
+			description: getConfiguredThinkingLevelMetadata(level).description,
+		})),
+		getTuiAutocompleteDescription: runtime =>
+			`Thinking: ${runtime.ctx.session.configuredThinkingLevel() ?? "model default"}`,
+		handle: async (command, runtime) => {
+			const session = runtime.session;
+			if (!command.args.trim()) {
+				await runtime.output(
+					session.model?.reasoning
+						? `Thinking: ${session.configuredThinkingLevel() ?? "model default"}\nAvailable: ${session.getAvailableEffortSelectors().join(", ")}`
+						: noThinkingMessage(session),
+				);
+				return commandConsumed();
+			}
+			const resolved = resolveThinkingArgument(session, command.args);
+			if ("error" in resolved) return usage(resolved.error, runtime);
+			session.setThinkingLevel(resolved.level);
+			await runtime.output(`Thinking set to ${resolved.level}.`);
+			// `setThinkingLevel` emits `thinking_level_changed`, which hosts with a
+			// session-lifetime subscription (ACP) already turn into a config push.
+			await runtime.notifyConfigChanged?.({ handledBySessionEvent: true });
+			return commandConsumed();
+		},
+		handleTui: (command, runtime) => {
+			clearSubmittedText(runtime);
+			const { ctx } = runtime;
+			if (!command.args.trim()) {
+				if (ctx.session.model?.reasoning) ctx.showThinkingSelector();
+				else ctx.showStatus(noThinkingMessage(ctx.session));
+				return;
+			}
+			const resolved = resolveThinkingArgument(ctx.session, command.args);
+			if ("error" in resolved) {
+				ctx.showError(resolved.error);
+				return;
+			}
+			// thinking_level_changed refreshes the status line and editor border.
+			ctx.session.setThinkingLevel(resolved.level);
+			ctx.showStatus(`Thinking set to ${resolved.level}.`);
+		},
+	},
 ];
 
 const PRESETS_USAGE = "Usage: /modelpreset [list | save <name> | switch <name> | delete <name>]";
@@ -904,7 +973,7 @@ async function runPresetsCommand(
 			const wroteRoles = result.kind === "switched" || result.kind === "failed";
 			return {
 				message,
-				failed: result.kind !== "switched" || result.shadowed.length > 0 || result.shadowedThinking !== undefined,
+				failed: !isCleanModelPresetSwitch(result),
 				switched: result.kind === "switched",
 				changedConfig: wroteRoles,
 			};

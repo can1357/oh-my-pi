@@ -15,14 +15,14 @@ import {
 	type TUIOptions,
 	type ViewportSize,
 } from "../tui";
-import { sliceWithWidth, visibleWidth } from "../utils";
+import { wrapLiteralLine } from "../utils";
 import type { NativeChild, NativeSurface, NativeSurfaceProvider } from "../native/node";
 import { sameItems } from "../native/memo";
 import { postmortem } from "@oh-my-pi/pi-utils";
 import { CustomEditor } from "./custom-editor";
 import type { WordCompletionMethod } from "./word-completion";
 import { type AnimationFrame, TranscriptContainer } from "../chrome/transcript-container";
-import { type LspServerInfo, type RecentSession, WelcomeComponent } from "./welcome";
+import { WelcomeComponent } from "./welcome";
 import { ensureThemeSync, getEditorTheme, theme } from "../theme/theme";
 
 const DOUBLE_INTERRUPT_MS = 500;
@@ -58,11 +58,6 @@ export const COMPOSER_DEFAULTS: ComposerPreferences = {
 /** Welcome data that can be supplied initially or patched as startup resolves it. */
 export interface ComposerWelcomeUpdate {
 	readonly version?: string;
-	readonly modelName?: string;
-	readonly providerName?: string;
-	readonly recentSessions?: readonly RecentSession[];
-	/** Detected project servers; `null` means LSP is disabled and hides the welcome section. */
-	readonly lspServers?: readonly LspServerInfo[] | null;
 }
 
 /**
@@ -215,10 +210,6 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 	#preferences: ComposerPreferences;
 	#welcome: WelcomeComponent | undefined;
 	#version = "";
-	#modelName = "";
-	#providerName = "";
-	#recentSessions: RecentSession[] = [];
-	#lspServers: LspServerInfo[] | null = [];
 	#headerBefore: readonly Component[] = [];
 	#headerAfter: readonly Component[] = [];
 	#runtimeChildren: readonly Component[] = [];
@@ -279,6 +270,8 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 	#transientChrome: ReadonlySet<Component> = new Set();
 	#transientChromeFloor: number | undefined;
 	#anchorAfterInlineRetirement = false;
+	/** Rows the chrome below each below-transcript root took in the last frame (see {@link rowsBelow}). */
+	#rowsBelow = new Map<Component, number>();
 	#lastInterruptAt = 0;
 	/** Last described surface; its arrays are reused while their children are unchanged. */
 	#nativeSurface: NativeSurface = { main: [], dock: [] };
@@ -347,6 +340,27 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 		this.ui.addChild(this.#statusHost);
 		this.ui.setFocus(this.editor);
 	}
+	/**
+	 * Rows the below-transcript chrome under `root` (editor, status line, …)
+	 * took in the last frame, so a root that grows upward can cap itself to
+	 * the screen rows left above them; `undefined` before `root` was laid out.
+	 */
+	rowsBelow(root: Component): number | undefined {
+		return this.#rowsBelow.get(root);
+	}
+
+	/**
+	 * Keep the input on the bottom row while the live rows cannot fill the
+	 * screen, as after an inline decision panel closes. A tall block that just
+	 * left the chrome above the editor (a command report) may have scrolled
+	 * rows into native history that cannot be pulled back; without the pin the
+	 * editor would jump up to where the shorter frame now ends. The pin lifts
+	 * once live rows fill the screen again.
+	 */
+	pinInputToBottom(): void {
+		this.#anchorAfterInlineRetirement = true;
+	}
+
 	/** Compose the bounded mutable viewport and the next ordered history append. */
 	renderFrame(viewport: ViewportSize): TerminalFramePlan {
 		if (!this.#started || this.#stopped) return { viewport: [] };
@@ -373,10 +387,12 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 		let transientRows = 0;
 		let displacingRows = 0;
 		let decisionPanelOpen = false;
+		const ends: { root: Component; end: number }[] = [];
 		for (const root of afterRoots) {
 			const chrome: Component = root;
 			const start = after.length;
 			this.#renderBelowRoot(root, width, after, afterSpans);
+			ends.push({ root, end: after.length });
 			if (this.#transientChrome.has(root)) transientRows += after.length - start;
 			if (
 				chrome.retireDisplacedTranscript ||
@@ -386,6 +402,7 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 				decisionPanelOpen = true;
 			}
 		}
+		this.#rowsBelow = new Map(ends.map(({ root, end }) => [root, after.length - end]));
 		// Offer history under capacity pressure only: blocks stay live (and keep
 		// reflowing to the current width) while the screen has room. A batch
 		// leaves the mutable viewport in the same frame it is appended, so its
@@ -786,20 +803,8 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 		if (!lines) return [];
 		if (isInsideTerminalMultiplexer()) return lines.slice(start);
 		const reflowed: string[] = [];
-		const columns = Math.max(1, width);
 		for (let index = start; index < lines.length; index++) {
-			const line = lines[index]!;
-			const lineWidth = visibleWidth(line);
-			if (lineWidth === 0) {
-				reflowed.push("");
-				continue;
-			}
-			for (let column = 0; column < lineWidth;) {
-				let slice = sliceWithWidth(line, column, columns, true);
-				if (slice.width === 0) slice = sliceWithWidth(line, column, columns);
-				reflowed.push(slice.text);
-				column += Math.max(1, slice.width);
-			}
+			reflowed.push(...wrapLiteralLine(lines[index]!, width));
 		}
 		return reflowed;
 	}
@@ -871,7 +876,7 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 		this.ui.requestRender();
 	}
 
-	/** Patch welcome data in place as model, session, and project discovery complete. */
+	/** Patch welcome data in place as version, session, and project discovery complete. */
 	updateWelcome(update: ComposerWelcomeUpdate): void {
 		if (this.#stopped) return;
 		this.#applyWelcomeUpdate(update);
@@ -880,11 +885,6 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 		const welcome = this.#welcome;
 		if (!welcome) return;
 		if (update.version !== undefined) welcome.setVersion(this.#version);
-		if (update.modelName !== undefined || update.providerName !== undefined) {
-			welcome.setModel(this.#modelName, this.#providerName);
-		}
-		if (update.recentSessions !== undefined) welcome.setRecentSessions(this.#recentSessions);
-		if (update.lspServers !== undefined) welcome.setLspServers(this.#lspServers);
 		this.ui.requestRender();
 	}
 
@@ -965,20 +965,10 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 
 	#applyWelcomeUpdate(update: ComposerWelcomeUpdate): void {
 		if (update.version !== undefined) this.#version = update.version;
-		if (update.modelName !== undefined) this.#modelName = update.modelName;
-		if (update.providerName !== undefined) this.#providerName = update.providerName;
-		if (update.recentSessions !== undefined) this.#recentSessions = [...update.recentSessions];
-		if (update.lspServers !== undefined) this.#lspServers = update.lspServers && [...update.lspServers];
 	}
 
 	#ensureWelcome(): void {
-		this.#welcome ??= new WelcomeComponent(
-			this.#version,
-			this.#modelName,
-			this.#providerName,
-			this.#recentSessions,
-			this.#lspServers,
-		);
+		this.#welcome ??= new WelcomeComponent(this.#version);
 	}
 
 	#rebuildHeader(): void {

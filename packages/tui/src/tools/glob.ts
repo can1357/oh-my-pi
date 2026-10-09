@@ -29,6 +29,10 @@ export interface GlobToolDetails {
 	fileCount?: number;
 	files?: string[];
 	truncated?: boolean;
+	/** The scan hit the tool deadline, so the listed files are an incomplete
+	 * set rather than a complete answer. Distinct from `truncated`, which also
+	 * covers result-limit and output truncation. */
+	timedOut?: boolean;
 	error?: string;
 	/** Working directory at search time. Used by the renderer to resolve relative
 	 * file paths to absolute paths for OSC 8 hyperlinks. */
@@ -184,6 +188,10 @@ export const globToolRenderer = {
 		const truncation = details?.truncation ?? details?.meta?.truncation;
 		const limits = details?.meta?.limits;
 		const truncated = Boolean(details?.truncated || truncation || details?.resultLimitReached || limits?.resultLimit);
+		// A non-empty timed-out result is the case `truncated` alone cannot
+		// explain: the listing is short because the scan died, not because it
+		// finished. Say which one it was.
+		const timedOut = Boolean(details?.timedOut);
 		const files = details?.files ?? [];
 
 		const missingPaths = details?.missingPaths ?? [];
@@ -192,15 +200,18 @@ export const globToolRenderer = {
 
 		if (fileCount === 0) {
 			// `truncated` on an empty result means the scan timed out mid-walk —
-			// render "incomplete", not a definitive "No files found".
-			const emptyLabel = truncated ? "No matches before timeout (scan incomplete)" : "No files found";
+			// render "incomplete", not a definitive "No files found". `timedOut`
+			// states it outright; the inference stays for old transcripts that
+			// predate the field.
+			const emptyTimedOut = timedOut || truncated;
+			const emptyLabel = emptyTimedOut ? "No matches before timeout (scan incomplete)" : "No files found";
 			const header = renderStatusLine(
 				{
 					icon: "warning",
 					title: "Glob",
 					titleColor: "toolTitle",
 					description: formatGlobRenderPaths(args),
-					meta: truncated ? ["0 files", uiTheme.fg("warning", "timed out")] : ["0 files"],
+					meta: emptyTimedOut ? ["0 files", uiTheme.fg("warning", "timed out")] : ["0 files"],
 				},
 				uiTheme,
 			);
@@ -210,7 +221,7 @@ export const globToolRenderer = {
 		}
 		const meta: string[] = [formatCount("file", fileCount)];
 		if (details?.scopePath) meta.push(`in ${details.scopePath}`);
-		if (truncated) meta.push(uiTheme.fg("warning", "truncated"));
+		if (truncated) meta.push(uiTheme.fg("warning", timedOut ? "timed out" : "truncated"));
 		const header = renderStatusLine(
 			{
 				...(truncated ? { icon: "warning" as const } : { iconOverride: globStatusIcon(uiTheme) }),
@@ -294,6 +305,7 @@ export const globToolRenderer = {
 		const truncation = details.truncation ?? details.meta?.truncation;
 		const limits = details.meta?.limits;
 		const truncated = Boolean(details.truncated || truncation || details.resultLimitReached || limits?.resultLimit);
+		const timedOut = Boolean(details.timedOut);
 		const missingPaths = details.missingPaths ?? [];
 		const missingNote = missingPaths.length > 0 ? `skipped missing: ${missingPaths.join(", ")}` : undefined;
 		const scope = details.scopePath ? `in ${details.scopePath}` : undefined;
@@ -301,7 +313,10 @@ export const globToolRenderer = {
 			const foot = footnoteText(compact([missingNote]));
 			return {
 				// `truncated` on an empty result means the scan timed out mid-walk.
-				tool: { ...globNativeHead(args, compact(["0 files", scope])), note: truncated ? "timed out" : undefined },
+				tool: {
+					...globNativeHead(args, compact(["0 files", scope])),
+					note: timedOut || truncated ? "timed out" : undefined,
+				},
 				tone: "warning",
 				inline: true,
 				body: foot ? [foot] : undefined,
@@ -315,7 +330,9 @@ export const globToolRenderer = {
 		if (artifactId) reasons.push(formatFullOutputReference(artifactId));
 		const head = globNativeHead(args, compact([formatCount("file", details.fileCount), scope]));
 		return {
-			tool: truncated ? { ...head, badges: [{ text: "truncated", tone: "warning" }] } : head,
+			tool: truncated
+				? { ...head, badges: [{ text: timedOut ? "timed out" : "truncated", tone: "warning" }] }
+				: head,
 			inline: true,
 			body: compact<NativeChild>([
 				describeGlobFiles(details.files ?? [], details.cwd),

@@ -21,6 +21,7 @@ import {
 	resolveOutputSinkArtifactMaxBytes,
 	resolveOutputSinkHeadBytes,
 } from "../tools/output-meta";
+import { quotePosixArgv } from "../utils/shell-quote";
 import { getOrCreateSnapshot } from "../utils/shell-snapshot";
 import { TerminalGraphicsDecoder } from "../utils/terminal-graphics";
 import { loadDirenvEnv } from "./direnv";
@@ -39,6 +40,12 @@ export interface BashExecutorOptions {
 	/** Milliseconds before aborting the command; 0 disables the executor deadline. */
 	timeout?: number;
 	onChunk?: (chunk: string) => void;
+	/**
+	 * Receives the sink's current inline view ({@link OutputSink.preview}: the
+	 * body the final result will carry so far) at the `onChunk` cadence. Use it
+	 * for live previews instead of re-buffering `onChunk` chunks.
+	 */
+	onPreview?: (text: string) => void;
 	chunkThrottleMs?: number;
 	signal?: AbortSignal;
 	/** Session key suffix to isolate shell sessions per agent */
@@ -49,6 +56,11 @@ export interface BashExecutorOptions {
 	useUserShell?: boolean;
 	/** Run supported user shells (zsh/fish) on a headless PTY; requires `useUserShell`. */
 	pty?: BashPtyOptions;
+	/**
+	 * Refuse git commands that discard or move shared work (`bash.gitGuard`),
+	 * enforced by the embedded shell's `git` builtin.
+	 */
+	gitGuard?: boolean;
 	/**
 	 * Filesystem for `scheme://` paths in this run of the embedded shell (a URL
 	 * `cwd` included). External shells and processes never see it.
@@ -402,12 +414,8 @@ function ensureInteractiveShellArgs(shell: string, args: string[]): string[] {
 	return [...effectiveArgs, "-i"];
 }
 
-function quoteShellArg(value: string): string {
-	return `'${value.replace(/'/g, "'\\''")}'`;
-}
-
 function buildUserShellCommand(shell: string, args: string[], command: string): string {
-	return [shell, ...ensureInteractiveShellArgs(shell, args), command].map(quoteShellArg).join(" ");
+	return quotePosixArgv([shell, ...ensureInteractiveShellArgs(shell, args), command]);
 }
 
 function resolveUserShellConfig(settings: Settings, baseConfig: ShellConfig): ShellConfig {
@@ -531,8 +539,6 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 		supportsAutoUserShell(shell) &&
 		$env.PI_NO_PTY !== "1" &&
 		!isPersistentShellCdCommand(command);
-	const snapshotPath = bashShell ? await getOrCreateSnapshot(shell, shellEnv) : null;
-
 	const minimizer = buildMinimizerOptions(cfgShellMinimizer.get(settings));
 
 	const commandCwd = resolveShellCwd(options?.cwd);
@@ -545,15 +551,19 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 	// signal + timeout so an aborted / short-timeout call can't hang on a cold
 	// `.envrc` load before the abort listener is installed. The helper applies
 	// the configured shell `prefix` after any `unset -v` it prepends. A URL cwd
-	// has no `.envrc` on the host.
-	const preflight = await applyDirenvPreflight(command, commandCwd ?? process.cwd(), {
-		callerEnv: options?.env,
-		signal: options?.signal,
-		timeoutMs: cfgBashDirenvLoadTimeoutMs.get(settings),
-		callerTimeoutMs: options?.timeout,
-		direnvSetting: virtualCwd ? "off" : cfgBashDirenv.get(settings),
-		commandPrefix: prefix,
-	});
+	// has no `.envrc` on the host. The rc snapshot is independent, so both load
+	// concurrently.
+	const [snapshotPath, preflight] = await Promise.all([
+		bashShell ? getOrCreateSnapshot(shell, shellEnv) : null,
+		applyDirenvPreflight(command, commandCwd ?? process.cwd(), {
+			callerEnv: options?.env,
+			signal: options?.signal,
+			timeoutMs: cfgBashDirenvLoadTimeoutMs.get(settings),
+			callerTimeoutMs: options?.timeout,
+			direnvSetting: virtualCwd ? "off" : cfgBashDirenv.get(settings),
+			commandPrefix: prefix,
+		}),
+	]);
 	const commandEnv = buildNonInteractiveEnv(preflight.env);
 	const runCdInPersistentShell = options?.useUserShell === true && !prefix && isPersistentShellCdCommand(command);
 	// Never wrap in cmd.exe: it is only the Windows no-bash fallback for spawn
@@ -565,14 +575,22 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 
 	// Create output sink for truncation and artifact handling
 	const graphics = new TerminalGraphicsDecoder();
-	const sink = new OutputSink({
-		onChunk: usePty ? undefined : options?.onChunk,
+	const onChunk = usePty ? undefined : options?.onChunk;
+	const onPreview = usePty ? undefined : options?.onPreview;
+	const sink: OutputSink = new OutputSink({
+		onChunk:
+			onChunk || onPreview
+				? chunk => {
+						onChunk?.(chunk);
+						onPreview?.(sink.preview());
+					}
+				: undefined,
 		artifactPath: options?.artifactPath,
 		artifactId: options?.artifactId,
 		headBytes: resolveOutputSinkHeadBytes(settings),
 		artifactMaxBytes: resolveOutputSinkArtifactMaxBytes(settings),
 		maxColumns: resolveOutputMaxColumns(settings),
-		chunkThrottleMs: !usePty && options?.onChunk ? (options.chunkThrottleMs ?? 50) : 0,
+		chunkThrottleMs: onChunk || onPreview ? (options?.chunkThrottleMs ?? 50) : 0,
 	});
 
 	// sink.push() is synchronous — buffer management, counters, and onChunk
@@ -628,12 +646,15 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 		}
 	}
 
+	// The embedded shell reads its builtin switches from the session env; a
+	// different env also keys a separate persistent session.
+	const sessionEnv = options?.gitGuard ? { ...shellEnv, PI_GIT_GUARD: "1" } : shellEnv;
 	const shellOptions = {
-		sessionEnv: shellEnv,
+		sessionEnv,
 		snapshotPath: snapshotPath ?? undefined,
 		minimizer,
 	};
-	const sessionKey = buildSessionKey(shell, prefix, snapshotPath, shellEnv, options?.sessionKey, minimizer);
+	const sessionKey = buildSessionKey(shell, prefix, snapshotPath, sessionEnv, options?.sessionKey, minimizer);
 	const persistentSessionBroken = brokenShellSessions.has(sessionKey);
 	if (persistentSessionBroken) {
 		shellSessions.delete(sessionKey);

@@ -74,7 +74,7 @@ interface RowLike {
 	provider: string;
 	api: Api;
 	compat?: unknown;
-	compatConfig?: { thinkingFormat?: string };
+	compatConfig?: { thinkingFormat?: string; trustExplicitThinkingOnly?: boolean };
 	thinking?: Model<Api>["thinking"];
 	[key: string]: unknown;
 }
@@ -94,6 +94,7 @@ function keepsExplicitThinking(row: RowLike): boolean {
 		return true;
 	}
 	if (row.provider === "cline-pass" && row.thinking) return true;
+	if (row.compatConfig?.trustExplicitThinkingOnly === true) return true;
 	if (row.provider === "openrouter" && row.thinking?.requiresEffort === true) return true;
 	return false;
 }

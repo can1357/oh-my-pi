@@ -22,7 +22,7 @@ export interface TtsProgressEvent {
 
 export type TtsWorkerInbound =
 	| { type: "ping"; id: string }
-	| { type: "synthesize"; id: string; modelKey: TtsLocalModelKey; text: string; voice?: string }
+	| { type: "synthesize"; id: string; modelKey: TtsLocalModelKey; text: string; voice?: string; speed?: number }
 	| { type: "download"; id: string; modelKey: TtsLocalModelKey }
 	// Streaming synthesis: a session is opened with `stream-start`, fed complete
 	// speakable segments with `stream-push` (the parent's SpeakableStream does all
@@ -30,7 +30,7 @@ export type TtsWorkerInbound =
 	// with `stream-end`. `stream-cancel` interrupts without a final drain. The
 	// worker emits an `audio-chunk` per segment and a final `stream-done` only for
 	// non-cancelled sessions.
-	| { type: "stream-start"; id: string; modelKey: TtsLocalModelKey; voice?: string }
+	| { type: "stream-start"; id: string; modelKey: TtsLocalModelKey; voice?: string; speed?: number }
 	| { type: "stream-push"; id: string; text: string }
 	| { type: "stream-end"; id: string }
 	| { type: "stream-cancel"; id: string };

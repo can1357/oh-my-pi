@@ -8,6 +8,7 @@ import type { CustomMessage } from "../session/messages";
 import type { ToolSession } from "../tools";
 import { isIrcEnabled } from "../irc/messaging";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { isCompletionProbeEnabled } from "./completion-probe";
 import { runSubagentFollowUpTurn } from "./executor";
 import {
 	type EffectiveSubagentPolicy,
@@ -18,7 +19,7 @@ import { type AgentProgress, oneLineLabel, type SingleResult, type TaskToolDetai
 import { buildWorkPoolOutputSchema, type WorkPoolYieldItem } from "./workpool-yield";
 
 import { cfgEvalWorkpoolFreshAgents } from "../eval/settings";
-import { cfgTaskCompletionProbeMs, cfgTaskMaxConcurrency, cfgTaskMaxRuntimeMs } from "./settings";
+import { cfgTaskMaxConcurrency, cfgTaskMaxRuntimeMs } from "./settings";
 
 /** One user-supplied unit tracked through a workpool batch. */
 export interface WorkPoolItem {
@@ -410,7 +411,7 @@ export class WorkPool {
 							subagentEventBus: this.session.subagentEventBus,
 							artifactsDir: this.session.getSessionFile()?.slice(0, -6),
 							maxRuntimeMs: cfgTaskMaxRuntimeMs.get(this.session.settings),
-							completionProbeMs: cfgTaskCompletionProbeMs.get(this.session.settings),
+							completionProbe: isCompletionProbeEnabled(this.session.settings, this.session.taskDepth ?? 0),
 						});
 					}
 				} catch (error) {

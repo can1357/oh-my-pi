@@ -20,21 +20,29 @@ async function settledRunRef(signal: AbortSignal): Promise<WeakRef<SpawnRun>> {
 	return new WeakRef(run);
 }
 
-/** Collects across a few event-loop turns: Bun's conservative stack scan can pin a just-dropped object once. */
-async function collected(ref: WeakRef<object>): Promise<boolean> {
+/**
+ * Collects across a few event-loop turns and returns how many runs are still reachable. Bun's
+ * conservative stack scan can pin the most recently dropped object in a stale native stack slot
+ * (deterministically so on Windows), so callers settle several runs and tolerate one survivor.
+ */
+async function liveAfterGc(refs: WeakRef<object>[]): Promise<number> {
+	let live = refs.length;
 	for (let turn = 0; turn < 20; turn++) {
 		Bun.gc(true);
-		if (ref.deref() === undefined) return true;
+		live = refs.filter(ref => ref.deref() !== undefined).length;
+		if (live === 0) break;
 		await Bun.sleep(0);
 	}
-	return false;
+	return live;
 }
 
 it("does not stay reachable from a long-lived owner signal once it settles", async () => {
 	const owner = new AbortController();
-	const ref = await settledRunRef(owner.signal);
-	expect(await collected(ref)).toBe(true);
-	// The owner signal is still live and unaborted; only the run was released.
+	const refs: WeakRef<SpawnRun>[] = [];
+	// A signal that retained settled runs would pin every one of them, not just a stale-slot survivor.
+	for (let i = 0; i < 8; i++) refs.push(await settledRunRef(owner.signal));
+	expect(await liveAfterGc(refs)).toBeLessThanOrEqual(1);
+	// The owner signal is still live and unaborted; only the runs were released.
 	expect(owner.signal.aborted).toBe(false);
 });
 

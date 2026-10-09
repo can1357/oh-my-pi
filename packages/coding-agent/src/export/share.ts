@@ -26,6 +26,7 @@ import { DEFAULT_SHARE_URL } from "@oh-my-pi/pi-wire";
 import { $ } from "bun";
 import { obfuscateToolArguments } from "../secrets/message-transform";
 import type { SecretObfuscator } from "../secrets/obfuscator";
+import { SecretValueSet } from "../secrets/placeholder";
 import { type SessionEntry, type SessionHeader, TITLE_CHANGE_ENTRY_TYPE } from "../session/session-entries";
 import type { SessionManager } from "../session/session-manager";
 import type { OutputMeta } from "@oh-my-pi/pi-tui/tools/output-meta";
@@ -105,8 +106,8 @@ export function buildShareSnapshot(sm: SessionManager, options?: ShareSessionOpt
  * extension `details`/`data`, `mode_change.data`, structured output schemas)
  * are dropped so they cannot leak.
  */
-function collectShareRegexSecretValues(o: SecretObfuscator, data: SessionData): Set<string> {
-	const values = new Set<string>();
+function collectShareRegexSecretValues(o: SecretObfuscator, data: SessionData): SecretValueSet {
+	const values = new SecretValueSet();
 	const add = (value: string | undefined): void => {
 		if (value === undefined) return;
 		for (const secretValue of o.collectRegexSecretValuesForObfuscation(value)) {
@@ -206,7 +207,7 @@ function collectShareRegexSecretValues(o: SecretObfuscator, data: SessionData): 
 				addContent(entry.content);
 				return;
 			case "session_init":
-				add(entry.systemPrompt);
+				for (const block of [entry.systemPrompt].flat()) add(block);
 				add(entry.task);
 				return;
 			case "label":
@@ -256,6 +257,10 @@ function redactShareHeader(
 }
 
 function redactSessionDataForShare(o: SecretObfuscator, data: SessionData): SessionData {
+	return o.batch(() => redactSessionDataBatch(o, data));
+}
+
+function redactSessionDataBatch(o: SecretObfuscator, data: SessionData): SessionData {
 	const sharedRegexSecretValues = collectShareRegexSecretValues(o, data);
 	return {
 		...data,
@@ -322,9 +327,14 @@ function redactShareEntry(
 		case "session_init":
 			return {
 				...entry,
-				systemPrompt: o.obfuscate(entry.systemPrompt, sharedRegexSecretValues),
+				systemPrompt:
+					typeof entry.systemPrompt === "string"
+						? o.obfuscate(entry.systemPrompt, sharedRegexSecretValues)
+						: entry.systemPrompt.map(block => o.obfuscate(block, sharedRegexSecretValues)),
 				task: o.obfuscate(entry.task, sharedRegexSecretValues),
 				outputSchema: undefined,
+				// Revival-only state; its item ids can carry user text.
+				workPoolYieldItems: undefined,
 			};
 		case "label":
 			return {

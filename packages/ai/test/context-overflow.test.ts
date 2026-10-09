@@ -202,6 +202,22 @@ async function discoverLmStudioModel(): Promise<LmStudioDiscoveredModel | undefi
 }
 
 const lmStudioModel = await discoverLmStudioModel();
+
+/**
+ * True when a llama.cpp server answers `/health` with 2xx. Any other listener on
+ * :8081 (e.g. a Jupyter server's 404) must not opt the suite into a live run.
+ */
+async function isLlamaCppHealthy(): Promise<boolean> {
+	if (!Bun.env.PI_LOCAL_LLM || Bun.env.PI_NO_LOCAL_LLM) return false;
+	try {
+		const response = await fetch("http://localhost:8081/health", { signal: AbortSignal.timeout(1000) });
+		return response.ok;
+	} catch {
+		return false;
+	}
+}
+
+const llamaCppHealthy = await isLlamaCppHealthy();
 // =============================================================================
 // Anthropic
 // Expected pattern: "prompt is too long: X tokens > Y maximum"
@@ -668,18 +684,10 @@ describe("Context overflow error handling", () => {
 	});
 
 	// =============================================================================
-	// llama.cpp server (local) - Skip if not running
+	// llama.cpp server (local) - requires PI_LOCAL_LLM=1 and a healthy server on :8081
 	// =============================================================================
 
-	let llamaCppRunning = false;
-	try {
-		execSync("curl -s --max-time 1 http://localhost:8081/health > /dev/null", { stdio: "ignore" });
-		llamaCppRunning = true;
-	} catch {
-		llamaCppRunning = false;
-	}
-
-	describe.skipIf(!llamaCppRunning)("llama.cpp (local)", () => {
+	describe.skipIf(!llamaCppHealthy)("llama.cpp (local)", () => {
 		it("should detect overflow via isContextOverflow", async () => {
 			// Using small context (4096) to match server --ctx-size setting
 			const model: Model<"openai-completions"> = buildModel({

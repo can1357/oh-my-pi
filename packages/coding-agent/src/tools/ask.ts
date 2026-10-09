@@ -335,7 +335,8 @@ async function askSingleQuestion(
 		while (true) {
 			const opts: ExtensionUISelectItem[] = questionOptions.map(opt => toSelectOption(opt));
 
-			if (!navigation?.allowForward && selected.size > 0) {
+			// Arrow-key forward navigation is TUI-only; RPC clients need the Done row to advance.
+			if (selected.size > 0) {
 				opts.push(doneLabel);
 			}
 			opts.push(OTHER_OPTION);
@@ -479,16 +480,15 @@ async function askSingleQuestion(
 
 function formatQuestionResult(result: QuestionResult): string {
 	const noteSuffix = result.note ? ` (note: ${result.note})` : "";
-	if (result.customInput !== undefined) {
-		return `${result.id}: "${result.customInput}"${noteSuffix}`;
+	const custom = result.customInput === undefined ? undefined : `"${result.customInput}"`;
+	if (result.selectedOptions.length === 0) {
+		if (custom !== undefined) return `${result.id}: ${custom}${noteSuffix}`;
+		return result.multi ? `${result.id}: []${noteSuffix}` : `${result.id}: (cancelled)${noteSuffix}`;
 	}
-	if (result.selectedOptions.length > 0) {
-		const suffix = `${result.timedOut ? " (auto-selected after timeout)" : ""}${noteSuffix}`;
-		return result.multi
-			? `${result.id}: [${result.selectedOptions.join(", ")}]${suffix}`
-			: `${result.id}: ${result.selectedOptions[0]}${suffix}`;
-	}
-	return result.multi ? `${result.id}: []${noteSuffix}` : `${result.id}: (cancelled)${noteSuffix}`;
+	const picked = result.multi ? `[${result.selectedOptions.join(", ")}]` : result.selectedOptions[0];
+	const answer = custom === undefined ? picked : `${picked} + ${custom}`;
+	const timeoutSuffix = result.timedOut ? " (auto-selected after timeout)" : "";
+	return `${result.id}: ${answer}${timeoutSuffix}${noteSuffix}`;
 }
 
 function formatSingleQuestionResponse(result: {

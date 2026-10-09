@@ -201,7 +201,7 @@ describe("isPayloadRejection - ambiguous no-body statuses", () => {
 
 describe("retriable - transient-wrapped payload rejections (#9235 review)", () => {
 	it("keeps transient-wrapped payload rejections non-retryable", () => {
-		const id = AIError.classifyMessage({ errorMessage: "Provider returned error: 413 Payload Too Large" });
+		const id = AIError.classifyMessage({ errorMessage: "Provider returned error: Payload Too Large" });
 		expect(AIError.is(id, AIError.Flag.PayloadRejected)).toBe(true);
 		expect(AIError.is(id, AIError.Flag.Transient)).toBe(true);
 		expect(AIError.retriable(id)).toBe(false);

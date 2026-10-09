@@ -103,7 +103,11 @@ Saves through a symlinked main config preserve the link and update its resolved 
 
 Interactive sessions and RPC/RPC-UI hosts watch the main global file, project settings sources, and config overlays. Changes are reloaded after a short debounce, preserving runtime overrides. A layer that fails to parse or validate keeps its last good values and logs a warning; other valid layers can still refresh. Live reload does not move the invalid file to a `.broken-*` backup.
 
+Symlinked configs follow edits to their target and replacement of any intermediate file or directory symlink, including profile links. After a link switches targets, subsequent edits to the new target are watched too.
+
 Reloading changes the settings values available to consumers; startup-only work is not rerun. Provider-source switches take effect on the next discovery pass. Task/eval dispatch also reloads persisted settings before resolving a subagent's policy.
+
+Routing changes to `modelRoles`, `retry.fallbackChains`, and `task.agentModelOverrides` apply to subsequent subagent launches and fallback decisions without restarting the host. `auth.accountPolicies` and `retry.usageReservePct` also update the long-lived account router for subsequent credential selection and quota checks. Reloading does not restart running subagents or switch a healthy active session's model; explicit runtime overrides still take precedence.
 
 ## Precedence
 
@@ -297,7 +301,7 @@ omp --config ./local/ci-settings.yml "check this failure"
 omp --config ./base.yml --config ./experiment.yml "try this model"
 ```
 
-`--config` is accepted by the default launch command, `acp`, and `models`.
+`--config` is accepted by the default launch command, `acp`, `models`, and `dry-balance`. For `models` and `dry-balance`, put it after the command name (`omp dry-balance --config ./policy.yml`); placed before the command name, it is dropped.
 
 Wrappers may instead set `PI_CONFIG_FILES` to a platform-delimited path list (`:` on Unix, `;` on Windows). Environment overlays load in listed order before explicit `--config` overlays.
 
@@ -617,7 +621,7 @@ tools:
 
 Mounting still follows the session's explicit tool allow-list. A session that permits `read` but omits `write` can receive a device-only write transport; this does not grant filesystem writes.
 
-Individual built-in tools and Eval preludes are toggled by their own keys, e.g. `bash.enabled`, `launch.enabled`, `eval.py`, `eval.js`, `glob.enabled`, `grep.enabled`, `fetch.enabled`, `browser.enabled`, `computer.enabled`, `ratchet.enabled` (default `false`; the `ratchet(flow)` eval/hillclimb prelude, which `/ratchet` turns on for the current session only), `astEdit.enabled`, `astGrep.enabled`, `find.enabled` (`auto`/`on`/`off`; `auto` enables `find` only when the `judge` role resolves to a native TypeSafe jev model), and `web_search.enabled`. Image questions use `read <image>?q=<question>` and honor `images.questionTimeoutMs`.
+Individual built-in tools and Eval preludes are toggled by their own keys, e.g. `bash.enabled`, `launch.enabled`, `eval.py`, `eval.js`, `glob.enabled`, `grep.enabled`, `fetch.enabled`, `browser.enabled`, `computer.enabled`, `ratchet.enabled` (default `false`; the `ratchet(flow)` eval/hillclimb prelude, which `/ratchet` turns on for the current session only), `archive.enabled` (default `true`; the read-only `archive` eval prelude over prompt history, recent projects, past sessions, and recaps), `astEdit.enabled`, `astGrep.enabled`, `find.enabled` (`auto`/`on`/`off`; `auto` enables `find` only when the `judge` role resolves to a native TypeSafe jev model), and `web_search.enabled`. Image questions use `read <image>?q=<question>` and honor `images.questionTimeoutMs`.
 
 ### Window-scoped computer use
 
@@ -670,6 +674,7 @@ lsp:
 | --------------------------------- | ------- | --------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `bash.enabled`                    | boolean | `true`    | Enable the bash tool.                                                                                                                                       |
 | `bash.allowCompoundCommands`      | boolean | `false`   | Evaluate flat, literal `&&` chains per segment; unmatched segments inherit normal bash approval policy and mode.                                            |
+| `bash.gitGuard`                   | boolean | `false`   | For checkouts shared by concurrent agents: refuse `git stash` (except `list`/`show`), `reset --hard`, `reset` to another commit, and `checkout`/`switch`/working-tree `restore` unless a merge or rebase conflict is being resolved. Unstaging stays allowed. Enforced by the embedded shell's `git` builtin, so it sees expanded commands and the real cwd; services, client terminals, `pty` calls, and git started by path or through another program are not guarded. |
 | `launch.enabled`                  | boolean | `true`    | Enable named `bash` services and `proc://` supervision for shared long-running project processes; there is no separate launch tool.                                                                                           |
 | `bash.autoBackground.enabled`     | boolean | `true`   | Auto-background long-running commands.                                                                                                                      |
 | `bash.autoBackground.thresholdMs` | number  | `60000`   | Threshold before auto-backgrounding.                                                                                                                        |
@@ -768,6 +773,8 @@ memory:
 | `compaction.methodOrder`      | array   | `remote, snapcompact, handoff, shake, soft` | Ordered fallbacks. `remote` uses provider-native server compaction (OpenAI Responses compact, Anthropic compaction beta); unavailable or failed methods advance. |
 | `compaction.thresholdPercent` | number  | `-1`                                     | Percent-of-context trigger; `-1` = reserve-based default.                                                                                                                                                                                 |
 | `compaction.thresholdTokens`  | number  | `-1`                                     | Fixed token trigger when `> 0`.                                                                                                                                                                                                           |
+| `compaction.modelThresholds`  | record  | `{}`                                     | Per-model compaction trigger keyed by `provider/model-id` or a `*`-terminated prefix (`deepseek/*`): a token count (`90000`) or a percentage (`"80%"`). See below. |
+| `compaction.modelThresholdsEnabled` | boolean | `true`                             | Whether `compaction.modelThresholds` applies. Subagents with a `task.agentCompactionThresholdOverrides` entry run with it off. |
 | `task.agentCompactionThresholdOverrides` | record | `{}` | Exact-name task/eval agent → compaction trigger: a positive token count (`90000`) or a percentage string (`"80%"`). See below. |
 | `compaction.reserveTokens`    | number  | _(unset)_                                | Absolute reserve floor. When unset, the effective reserve is the larger of `16384` and 15% of the context window; if that default would leave no practical small-window budget, it falls back to the 15% reserve.                         |
 | `compaction.keepRecentTokens` | number  | `20000`                                  | Recent-history token budget for summary compaction.                                                                                                                                                                                                           |
@@ -780,6 +787,23 @@ memory:
 A positive `compaction.thresholdTokens` wins over `thresholdPercent` and is clamped below the context window. Otherwise, a positive percentage is clamped to 1–99%; non-positive percentages use the reserve-based threshold.
 
 `compaction` has additional tuning keys (idle compaction, supersede/drop heuristics) visible in `omp config list`. See [Compaction](./compaction.md) for the full strategy reference.
+
+Per-model compaction triggers replace both `compaction.threshold*` settings for the models they match. The `/models` preview shows each model's trigger; to set one, select a role or fallback row in the **Roles** view and press `k` (or click **Compaction limit**), then type `90000`, `90k`, `1M`, or `80%` (empty input resets). That writes the exact `provider/model-id` key to the global config. By hand:
+
+```yaml
+compaction:
+  thresholdPercent: 80
+  modelThresholds:
+    "deepseek/*": 90000
+    "openrouter/anthropic/*": "60%"
+    anthropic/claude-opus-5.5: 150000
+```
+
+- An exact `provider/model-id` key wins; otherwise the longest matching `*`-terminated prefix applies. `*` is only allowed at the end, and every key needs a `provider/` part.
+- Entry values follow the same rules as `task.agentCompactionThresholdOverrides` below; `null` clears a lower-layer entry.
+- The trigger follows the active model: switching models, context promotion, and advisors each use their own model's entry.
+- A `task.agentCompactionThresholdOverrides` entry outranks model entries for that agent, including entries added while it runs.
+- The hub refuses an edit when the project config sets the same model key; change it in the project config instead.
 
 Per-agent compaction triggers for task/eval subagents. This keeps the main session at 40,000 tokens while `scout` compacts at 80% of its window and `task` at 90,000 tokens:
 
@@ -839,6 +863,7 @@ tui:
 | `images.autoResize`           | boolean | `true`           | Resize large images for model compatibility.                              |
 | `images.blockImages`          | boolean | `false`          | Never send images to providers.                                           |
 | `tui.hyperlinks`              | enum    | `auto`           | `off`, `auto`, `always`.                                                  |
+| `tui.autoGraph`               | enum    | `always`         | Chart numeric tables in the agent's answers, in the theme's colors, on terminals that show graphics: `always` uses the built-in best guess, `smart` lets the judge model pick the chart kind and columns for tables with several numeric columns, `off` leaves tables alone. Tern receives the chart as SVG. Applies to the main session in the TUI only: subagent transcripts, print, RPC, and ACP output stay plain, and their system prompts omit the diagram and chart guidance. |
 | `tui.mouse`                   | boolean | `false`          | Capture mouse clicks in the main session so live subagent cards and HUD rows focus on click, with a hover highlight on the target. Native text selection becomes Shift+drag and wheel scroll becomes Shift+wheel while on. |
 | `display.pinnedAgents`        | enum    | `collapsed`      | Pinned live-agent jump list above the editor: `off` hides it, `collapsed` shows a few rows with an expander, `full` lists all. |
 | `display.subagentLivePreview` | boolean | `false`          | Show each pinned subagent's current (or most recent) tool call beneath its jump-list row. |
@@ -894,10 +919,12 @@ provider:
 
 tts:
   localVoice: af_heart
+  localSpeed: 1
 
 speech:
   enabled: false
   voice: af_heart
+  speed: 1
 
 stt:
   enabled: false
@@ -921,7 +948,9 @@ searxng:
 | `providers.maxInFlightRequests`     | record  | `{}`      | Positive per-provider concurrency limits for LLM HTTP requests, shared across local `omp` processes using the same config root. Omitted providers are unlimited. `omp config set` rejects non-positive or non-numeric values.                                                                                                                                                                                                          |
 | `providers.tinyModelDtype`          | enum    | `default` | ONNX precision for local tiny models. Overridden by `PI_TINY_DTYPE`.                                                                                                                                                                                                                                                                                                                                                                   |
 | `tts.localVoice`                    | enum    | `af_heart` | Voice used by the local Kokoro TTS runner. Available local voices remain configurable independently of `modelRoles.speech`.                                                                                                                                                                                                                                                                                                           |
+| `tts.localSpeed`                    | number  | `1`       | Speaking rate of the local Kokoro TTS runner (`tts` tool, `omp say`). `1` is normal; values are clamped to `0.5`–`2.5`.                                                                                                                                                                                                                                                                                                              |
 | `speech.voice`                      | enum    | `af_heart` | Kokoro voice used when assistant-output vocalization is enabled.                                                                                                                                                                                                                                                                                                                                                                     |
+| `speech.speed`                      | number  | `1`       | Speaking rate for assistant-output vocalization. `1` is normal; values are clamped to `0.5`–`2.5`.                                                                                                                                                                                                                                                                                                                                   |
 | `stt.enabled`                       | boolean | `false`   | Enable microphone speech-to-text; choose the recognition model with `modelRoles.dictation`.                                                                                                                                                                                                                                                                                                                                           |
 | `stt.language`                      | string  | `en`      | Source language hint for speech-to-text.                                                                                                                                                                                                                                                                                                                                                                                               |
 | `stt.submitTrigger`                 | enum    | `never`   | When completed dictation auto-submits: `never`, `release`, `release-complete`, or `say-submit`.                                                                                                                                                                                                                                                                                                                                        |
@@ -941,9 +970,18 @@ searxng:
 | `searxng.token`                     | string  | _(unset)_ | SearXNG token; also `searxng.basicUsername`/`searxng.basicPassword`/`searxng.categories`/`searxng.language`/`searxng.engines` (comma-separated engine names or bang shortcuts, e.g. `ddg, br, startpage`, sent as the API's `engines=` parameter)/`searxng.safesearch`.                                                                                                                                                                                                                                                                                                 |
 | `auth.broker.url`                   | string  | _(unset)_ | Auth-broker URL. The actual credential connection uses env then the main global config, not project/config-overlay values.                                                                                                                                                                                                                                                                                                                                                                                  |
 | `auth.broker.token`                 | string  | _(unset)_ | Auth-broker token. `OMP_AUTH_BROKER_TOKEN` wins over the main global config; the broker token file is a fallback. Project/config-overlay values do not redirect credentials.                                                                                                                                                                                                                                                                                                                                                                              |
+| `task.agentAccountPools`            | record  | `{}`      | Exact-name task/eval agent → provider id → OAuth identity keys (the `identityKey` values of [client account pools](./auth-broker-gateway.md#client-account-pools-routing-not-authorization), e.g. `email:<address>\|org:<id>` for Anthropic; `omp usage accounts` lists them). The agent authenticates for each listed provider only with those accounts, never another account or an API key, and fails when none can serve; an empty list allows no account. A malformed entry fails settings load. See [Task agent discovery](./task-agent-discovery.md#model-and-structured-output-precedence). |
 | `secrets.enabled`                   | boolean | `false`   | Enable configured secret obfuscation and built-in credential-shaped token redaction before provider requests. See [Secret obfuscation](./secrets.md).                                                                                                                                                                                                                                                                                  |
 
 Provider credentials and custom model definitions are configured separately — see [Providers](./providers.md) and [Models](./models.md).
+
+#### Saved reset auto-consumption
+
+`codexResets.autoRedeem` and `claudeResets.autoRedeem` independently control saved-reset consumption: `yes` enables automatic spending, `no` disables it, and `unset` requires consent before the first spend. Headless sessions never spend while consent is unset.
+
+When a usage refresh detects an eligible banked reset expiring within the next **5 minutes**, auto-consumption attempts it even with little or no usage, a credit reserve, or `salvageHorizonHours: 0`. Provider eligibility, covered-limit requirements, cooldowns, and duplicate-spend protections still apply.
+
+`salvageHorizonHours` controls earlier, usage-based salvage; setting it to `0` leaves the five-minute last-chance rule active. Set the provider's `autoRedeem` to `no` to disable all automatic spending.
 
 ### Other groups
 

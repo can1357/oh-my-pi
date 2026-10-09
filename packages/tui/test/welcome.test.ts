@@ -1,6 +1,7 @@
 import { afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
 import { pickWeightedTip, WelcomeComponent } from "@oh-my-pi/pi-tui/prompt/welcome";
 import { initTheme, theme } from "@oh-my-pi/pi-tui/theme";
+import { visibleWidth } from "@oh-my-pi/pi-tui";
 
 describe("WelcomeComponent", () => {
 	beforeAll(async () => {
@@ -11,10 +12,29 @@ describe("WelcomeComponent", () => {
 		vi.restoreAllMocks();
 	});
 
+	it("natively sets the version under the wordmark beside the logo", () => {
+		const tree = new WelcomeComponent("18.4.12").describe({} as never);
+		expect(tree.c?.[0]).toMatchObject({
+			key: "lockup",
+			p: { role: "omp.welcome.lockup" },
+			c: [
+				{ k: "image", key: "logo" },
+				{
+					k: "col",
+					p: { role: "omp.welcome.mark" },
+					c: [
+						{ p: { role: "omp.welcome.wordmark" } },
+						{ p: { role: "omp.welcome.version", spans: [{ t: "v18.4.12" }] } },
+					],
+				},
+			],
+		});
+	});
+
 	it("selects standard tip when preset is not unicode", () => {
 		vi.spyOn(theme, "getSymbolPreset").mockReturnValue("nerd");
 
-		const welcome = new WelcomeComponent("1.0.0", "model", "provider");
+		const welcome = new WelcomeComponent("1.0.0");
 		expect(welcome.tip).not.toBe("Please use nerdfont 😭.");
 		expect(welcome.tip).toBeDefined();
 	});
@@ -24,12 +44,12 @@ describe("WelcomeComponent", () => {
 
 		// 9% chance => selects special tip
 		vi.spyOn(Math, "random").mockReturnValue(0.09);
-		const welcomeSpecial = new WelcomeComponent("1.0.0", "model", "provider");
+		const welcomeSpecial = new WelcomeComponent("1.0.0");
 		expect(welcomeSpecial.tip).toBe("Please use nerdfont 😭.");
 
 		// 10% chance => selects regular tip
 		vi.spyOn(Math, "random").mockReturnValue(0.1);
-		const welcomeRegular = new WelcomeComponent("1.0.0", "model", "provider");
+		const welcomeRegular = new WelcomeComponent("1.0.0");
 		expect(welcomeRegular.tip).not.toBe("Please use nerdfont 😭.");
 		expect(welcomeRegular.tip).toBeDefined();
 	});
@@ -60,31 +80,43 @@ describe("WelcomeComponent", () => {
 		expect(pickWeightedTip([], 0.5)).toBe("");
 	});
 
-	it("truncates a long model name inside the fixed left column and keeps the right column", () => {
-		// Dynamic model labels must not influence the responsive breakpoint: a
-		// long name is truncated with an ellipsis instead of collapsing the right
-		// column or changing the box height when authoritative session data
-		// replaces the prepaint labels.
-		const modelName = "DeepSeek V4 Flash (2x usage)";
-		const output = new WelcomeComponent("17.3.4", modelName, "opencode-go").render(55).join("\n");
-		const plain = output.replace(/\x1b\[[0-9;]*m/g, "");
+	it("centers the lockup and every tip line in the terminal width", () => {
+		const columns = 140;
+		const rows = new WelcomeComponent("1.0.0").render(columns).map(row => Bun.stripANSI(row).trimEnd());
+		const indent = (row: string) => visibleWidth(row) - visibleWidth(row.trimStart());
+		const expectCentered = (left: number, right: number) => expect(Math.abs(left - right)).toBeLessThanOrEqual(1);
 
-		expect(plain).not.toContain(modelName);
-		expect(plain).toMatch(/DeepSeek V4 [^│]*…/);
-		expect(plain).toContain("Recent sessions");
+		// The lockup is one block: the logo's bar starts it, the wordmark row ends it.
+		const bar = rows.find(row => row.includes("████████████")) ?? "";
+		const word = rows.find(row => row.includes("▄▀▀▄")) ?? "";
+		expectCentered(indent(bar), columns - visibleWidth(word));
+
+		// Each tip line centers on its own.
+		const below = rows.slice(rows.findIndex(row => row.includes("Tip: "))).filter(row => row.length > 0);
+		expect(below.length).toBeGreaterThanOrEqual(1);
+		for (const row of below) expectCentered(indent(row), columns - visibleWidth(row));
 	});
 
-	it("hides the LSP section only when LSP is disabled (null), not when no servers were detected", () => {
-		const [empty, disabled] = [[], null].map(servers =>
-			new WelcomeComponent("1.0.0", "model", "provider", [], servers)
-				.render(100)
-				.join("\n")
-				.replace(/\x1b\[[0-9;]*m/g, ""),
-		);
+	it("drops the tip below 50 columns", () => {
+		const text = (columns: number) => Bun.stripANSI(new WelcomeComponent("1.0.0").render(columns).join("\n"));
+		expect(text(50)).toContain("Tip: ");
+		expect(text(49)).not.toContain("Tip: ");
+		expect(text(49)).toContain("v1.0.0");
+	});
 
-		expect(empty).toContain("No LSP servers");
-		expect(disabled).not.toContain("LSP Servers");
-		expect(disabled).not.toContain("No LSP servers");
-		expect(disabled).toContain("Recent sessions");
+	it("sets the version under the wordmark while the lockup fits, else keeps the logo alone", () => {
+		const rows = (columns: number) => new WelcomeComponent("1.0.0").render(columns).map(row => Bun.stripANSI(row));
+
+		// The lockup needs 12 logo + 4 gap + 15 wordmark columns inside the 2-column margin.
+		const fits = rows(33);
+		const word = fits.find(row => row.includes("▄▀▀▄"));
+		const version = fits.find(row => row.includes("v1.0.0"));
+		expect(fits.some(row => row.includes("████████████"))).toBe(true);
+		expect(version?.indexOf("v1.0.0")).toBe(word?.indexOf("▄▀▀▄"));
+
+		const narrow = rows(32).join("\n");
+		expect(narrow).toContain("████████████");
+		expect(narrow).not.toContain("▄▀▀▄");
+		expect(narrow).not.toContain("v1.0.0");
 	});
 });
