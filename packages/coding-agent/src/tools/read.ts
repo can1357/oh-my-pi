@@ -1381,12 +1381,17 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 				.sourcePath(absolutePath)
 				.done();
 		}
-		const result = buildInMemorySelectorResult(this.session, formatTranscriptLines(transcript.segments), parsed, {
-			details,
-			sourcePath: absolutePath,
-			entityLabel: "transcript",
-			immutable: true,
-		});
+		const result = await buildInMemorySelectorResult(
+			this.session,
+			formatTranscriptLines(transcript.segments),
+			parsed,
+			{
+				details,
+				sourcePath: absolutePath,
+				entityLabel: "transcript",
+				immutable: true,
+			},
+		);
 		const first = result.content.find((entry): entry is TextContent => entry.type === "text");
 		if (first) first.text = applySuffix(`${header}\n${first.text}`);
 		return result;
