@@ -8457,19 +8457,19 @@ export const TruncatedToolCallSuccessSchema: MessageCodec<TruncatedToolCallSucce
 
 /** Cursor agent message agent.v1.TtftBreakdown. */
 export interface TtftBreakdown extends ProtoMessage {
-	serverFirstTokenMs: bigint;
-	preStreamSetupMs: bigint;
-	waitForFirstEventMs: bigint;
-	providerTtftMs?: bigint;
-	slowPoolWaitMs: bigint;
+	serverFirstTokenMs: number;
+	preStreamSetupMs: number;
+	waitForFirstEventMs: number;
+	providerTtftMs?: number;
+	slowPoolWaitMs: number;
 }
 
 export const TtftBreakdownSchema: MessageCodec<TtftBreakdown> = pb<TtftBreakdown>("agent.v1.TtftBreakdown", [
-	{ no: 1, name: "serverFirstTokenMs", kind: "int64" },
-	{ no: 2, name: "preStreamSetupMs", kind: "int64" },
-	{ no: 3, name: "waitForFirstEventMs", kind: "int64" },
-	{ no: 4, name: "providerTtftMs", kind: "int64", optional: true },
-	{ no: 5, name: "slowPoolWaitMs", kind: "int64" },
+	{ no: 1, name: "serverFirstTokenMs", kind: "double" },
+	{ no: 2, name: "preStreamSetupMs", kind: "double" },
+	{ no: 3, name: "waitForFirstEventMs", kind: "double" },
+	{ no: 4, name: "providerTtftMs", kind: "double", optional: true },
+	{ no: 5, name: "slowPoolWaitMs", kind: "double" },
 ]);
 
 /** Cursor agent message agent.v1.TurnEndedUpdate. */
