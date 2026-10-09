@@ -49,10 +49,11 @@ function ModelList({ models }: { models: string[] }) {
 
 export function TracesRoute({ active, session, onOpenSession }: TracesRouteProps) {
 	const [filter, setFilter] = useState("");
-	const sessions = useQuery(["sessions", SESSION_LIMIT], () => getSessions(SESSION_LIMIT), {
-		pollMs: 30000,
-		enabled: active && session === null,
-	});
+	const sessions = useQuery(
+		["sessions", SESSION_LIMIT],
+		({ signal }) => getSessions(SESSION_LIMIT, undefined, signal),
+		{ pollMs: 30000, enabled: active && session === null },
+	);
 
 	const filtered = useMemo(() => {
 		const rows = sessions.data ?? [];

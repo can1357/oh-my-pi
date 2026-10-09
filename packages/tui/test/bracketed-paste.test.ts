@@ -90,6 +90,26 @@ describe("BracketedPasteHandler", () => {
 			// @ts-expect-error - remaining carries post-marker input
 			expect(result.remaining).toBe("tail");
 		});
+
+		it("consumes doubled start delimiters without leaking framing into pasted text", () => {
+			const handler = new BracketedPasteHandler();
+			expect(handler.process(`${PASTE_START}${PASTE_START}https://example.com${PASTE_END}`)).toEqual({
+				handled: true,
+				pasteContent: "https://example.com",
+				remaining: "",
+			});
+		});
+
+		it("keeps the payload when a second start arrives in a later chunk", () => {
+			const handler = new BracketedPasteHandler();
+			handler.process(`${PASTE_START}first`);
+			handler.process(PASTE_START);
+			expect(handler.process(`second${PASTE_END}`)).toEqual({
+				handled: true,
+				pasteContent: "firstsecond",
+				remaining: "",
+			});
+		});
 	});
 
 	describe("Re-encoded paste controls", () => {

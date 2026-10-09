@@ -6,7 +6,10 @@ use std::{
 	collections::HashMap,
 	fs,
 	io::{self},
-	sync::Arc,
+	sync::{
+		Arc,
+		atomic::{AtomicBool, Ordering},
+	},
 	time::Duration,
 };
 
@@ -31,9 +34,9 @@ use tokio_util::sync::CancellationToken;
 use crate::windows::configure_windows_path;
 use crate::{
 	cancel::{AbortReason, AbortToken, CancelToken},
-	git::git_builtin,
+	git::{GitLayers, git_builtin},
 	minimizer,
-	output_decode::{OutputDecoder, decode_bytes},
+	output_decode::OutputDecoder,
 	process,
 };
 
@@ -42,12 +45,6 @@ struct ShellSessionCore {
 	/// Session filesystem; each run installs a cancellation-scoped view of it
 	/// (or of the run's own override) and restores it afterwards.
 	filesystem: Fs,
-}
-
-impl Drop for ShellSessionCore {
-	fn drop(&mut self) {
-		terminate_internal_background_jobs(&mut self.shell);
-	}
 }
 
 #[derive(Clone, Default)]
@@ -820,11 +817,13 @@ async fn create_session_for_run(
 		.await
 		.map_err(|err| Error::msg(format!("Failed to initialize shell: {err}")))?;
 
-	if let Some(exec_builtin) = shell.builtin_mut("exec") {
-		exec_builtin.disabled = true;
-	}
-	if let Some(suspend_builtin) = shell.builtin_mut("suspend") {
-		suspend_builtin.disabled = true;
+	// `exec` would replace the host process and `suspend` would stop it.
+	// Replace them with disabled refusals rather than only disabling them, so
+	// `enable exec` cannot hand the real builtins back.
+	for name in ["exec", "suspend"] {
+		if shell.builtin_mut(name).is_some() {
+			shell.register_builtin(name, pi_builtins::withheld_builtin());
+		}
 	}
 	// Process inspection and control (see `pi_builtins::process_builtins`).
 	// `nohup` is withheld when PI_DISABLE_NOHUP_BUILTIN asks for the system one;
@@ -862,11 +861,15 @@ async fn create_session_for_run(
 		}
 	}
 
-	// Opt-in via PI_SMART_GIT: `git worktree add` becomes a copy-on-write clone
-	// through pi-vcs; every other git invocation reaches the binary unchanged
-	// (see `crate::git`).
-	if env_flag(config, "PI_SMART_GIT") {
-		shell.register_builtin("git", git_builtin());
+	// Opt-in `git` layers (see `crate::git`): PI_SMART_GIT makes `git worktree
+	// add` a copy-on-write clone through pi-vcs; PI_GIT_GUARD refuses commands
+	// that discard or move work in a shared checkout. Anything a layer does not
+	// take reaches the binary unchanged.
+	if let Some(git) = git_builtin(GitLayers {
+		smart_worktree: env_flag(config, "PI_SMART_GIT"),
+		guard:          env_flag(config, "PI_GIT_GUARD"),
+	}) {
+		shell.register_builtin("git", git);
 	}
 
 	copy_env_into_shell(&mut shell, std::env::vars_os())?;
@@ -935,8 +938,10 @@ enum CommandCaptureMode {
 }
 
 struct CommandRunOutput {
-	result:   ExecutionResult,
-	buffered: Option<BufferedOutput>,
+	result:         ExecutionResult,
+	buffered:       Option<BufferedOutput>,
+	/// A command reported an error yet went on, so the exit status hides it.
+	reported_error: bool,
 }
 
 struct ChainCapture {
@@ -1126,7 +1131,10 @@ async fn run_shell_command_single(
 		// `too-large` result with empty `text`/`original_text` was emitted, which
 		// a consumer keying off `minimized` presence could mistake for a real
 		// rewrite that produced empty output.
-		if !buffered.exceeded {
+		// A command that reported an error yet exited 0 (jq after an input that
+		// fails) is left whole: a filter may cut the error, and its exit-code
+		// gate cannot see it.
+		if !buffered.exceeded && !command_run.reported_error {
 			let minimized = match minimizer_mode {
 				minimizer::engine::MinimizerMode::WholeCommand => minimizer::apply(
 					&options.command,
@@ -1257,7 +1265,11 @@ async fn run_shell_command_segmented_chain(
 				if next_input_bytes > max_capture_bytes {
 					aggregate = None;
 				} else {
-					let minimized = minimizer::apply(&segment.command, &buffered.text, exit, config);
+					let minimized = if command_run.reported_error {
+						minimizer::MinimizerOutput::passthrough(&buffered.text)
+					} else {
+						minimizer::apply(&segment.command, &buffered.text, exit, config)
+					};
 					capture.push(
 						&buffered.text,
 						buffered.input_bytes,
@@ -1336,6 +1348,12 @@ async fn run_shell_command_once(
 	params.process_group_policy = ProcessGroupPolicy::NewProcessGroup;
 	params.set_cancel_token(cancel_token.clone());
 	params.set_spawn_observer(spawn_registry.clone());
+	// Only a buffered capture can be minimized, so only it asks for the report.
+	let reported_error = matches!(capture_mode, CommandCaptureMode::Buffered { .. })
+		.then(|| Arc::new(AtomicBool::new(false)));
+	if let Some(flag) = &reported_error {
+		params.set_reported_error(Arc::clone(flag));
+	}
 	let reader_cancel = CancellationToken::new();
 	let (activity_tx, activity_rx) = flume::bounded::<()>(1);
 	let reader_callback = on_chunk;
@@ -1451,7 +1469,8 @@ async fn run_shell_command_once(
 		Some(OutputRead::Buffered(output)) => Some(output),
 		Some(OutputRead::Streaming) | None => None,
 	};
-	Ok(CommandRunOutput { result, buffered })
+	let reported_error = reported_error.is_some_and(|flag| flag.load(Ordering::Relaxed));
+	Ok(CommandRunOutput { result, buffered, reported_error })
 }
 
 async fn run_shell_command_streams(
@@ -1722,15 +1741,12 @@ async fn terminate_run(registry: &process::SpawnRegistry) {
 		}
 	}
 }
-fn terminate_internal_background_jobs(shell: &mut BrushShell) {
-	for job in &mut shell.jobs_mut().jobs {
-		job.abort_internal_tasks();
-	}
-}
 
 fn terminate_background_jobs(shell: &mut BrushShell) {
 	let mut targets = process::TerminationTargets::new();
-	terminate_internal_background_jobs(shell);
+	for job in &mut shell.jobs_mut().jobs {
+		job.abort_internal_tasks();
+	}
 	for job in &shell.jobs().jobs {
 		if let Some(pgid) = job.process_group_id() {
 			targets.add_pgid(pgid);
@@ -1981,14 +1997,14 @@ async fn read_output(
 			let _ = activity.try_send(());
 			let text = decoder.push(&buf[..n]);
 			if !text.is_empty() {
-				emit_chunk(&text, on_chunk.as_ref()).await;
+				emit_chunk(text, on_chunk.as_ref()).await;
 			}
 		}
 	}
 
 	let rest = decoder.finish();
 	if !rest.is_empty() {
-		emit_chunk(&rest, on_chunk.as_ref()).await;
+		emit_chunk(rest, on_chunk.as_ref()).await;
 	}
 }
 
@@ -2002,7 +2018,10 @@ async fn read_output_buffered(
 	const BUF: usize = 65536;
 	let mut buf = vec![0u8; BUF];
 	let mut input_bytes = 0usize;
-	let mut captured = Vec::new();
+	// The decoded capture, built from the same decoder output that streams,
+	// so the bytes are decoded once rather than again at the end.
+	let mut captured = String::new();
+	let mut captured_bytes = 0usize;
 	let mut exceeded = false;
 	let mut decoder = OutputDecoder::new();
 
@@ -2051,29 +2070,33 @@ async fn read_output_buffered(
 			input_bytes = input_bytes.saturating_add(n);
 		}
 		// Once `exceeded`, the post-process minimizer is bypassed (see the
-		// `!output.exceeded` gate at the call site), so further appends just
-		// grow `captured` without serving any purpose. Stop accumulating to
-		// bound peak memory on commands that produce very large output.
-		if !exceeded {
-			if captured.len().saturating_add(n) > max_capture_bytes {
-				exceeded = true;
-			} else {
-				captured.extend_from_slice(&buf[..n]);
-			}
+		// `!output.exceeded` gate at the call site), so the capture serves no
+		// purpose. Drop it to bound peak memory on commands that produce very
+		// large output.
+		if !exceeded && captured_bytes.saturating_add(n) > max_capture_bytes {
+			exceeded = true;
+			captured = String::new();
 		}
+		captured_bytes = captured_bytes.saturating_add(n);
 
 		let text = decoder.push(&buf[..n]);
 		if !text.is_empty() {
-			emit_chunk(&text, on_chunk.as_ref()).await;
+			if !exceeded {
+				captured.push_str(&text);
+			}
+			emit_chunk(text, on_chunk.as_ref()).await;
 		}
 	}
 
 	let rest = decoder.finish();
 	if !rest.is_empty() {
-		emit_chunk(&rest, on_chunk.as_ref()).await;
+		if !exceeded {
+			captured.push_str(&rest);
+		}
+		emit_chunk(rest, on_chunk.as_ref()).await;
 	}
 
-	BufferedOutput { text: decode_bytes(&captured), input_bytes, exceeded }
+	BufferedOutput { text: captured, input_bytes, exceeded }
 }
 
 #[cfg(unix)]
@@ -2123,9 +2146,9 @@ fn read_nonblocking<T: std::os::fd::AsRawFd>(file: &T, buf: &mut [u8]) -> io::Re
 /// can never buffer unbounded output in memory (#4078). A disconnected
 /// receiver (consumer gone) fails immediately, so the pipe keeps draining
 /// and the child never wedges on a full pipe.
-async fn emit_chunk(text: &str, callback: Option<&Sender<String>>) {
+async fn emit_chunk(text: String, callback: Option<&Sender<String>>) {
 	if let Some(callback) = callback {
-		let _ = callback.send_async(text.to_string()).await;
+		let _ = callback.send_async(text).await;
 	}
 }
 
@@ -2166,9 +2189,9 @@ fn nohup_builtin_disabled(config: &ShellConfig) -> bool {
 	env_flag(config, "PI_DISABLE_NOHUP_BUILTIN")
 }
 
-/// Reads a boolean builtin switch (`PI_DISABLE_*`, `PI_SMART_GIT`) from the
-/// session environment (preferred) then the process environment. Truthy =
-/// present and not "", "0", or "false".
+/// Reads a boolean builtin switch (`PI_DISABLE_*`, `PI_SMART_GIT`,
+/// `PI_GIT_GUARD`) from the session environment (preferred) then the process
+/// environment. Truthy = present and not "", "0", or "false".
 fn env_flag(config: &ShellConfig, key: &str) -> bool {
 	let raw = config
 		.session_env
@@ -3208,6 +3231,109 @@ mod tests {
 				.next()
 				.is_some_and(|value| value == pid.to_string())
 		}));
+	}
+
+	/// Contract: `read` from a file consumes exactly one line of the shared
+	/// offset — the next `read`, and any later reader of the same descriptor,
+	/// resumes right after it.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn read_from_a_file_leaves_the_rest_for_the_next_reader() {
+		let dir = tempfile::tempdir().expect("temporary directory");
+		let path = dir.path().join("lines.txt");
+		std::fs::write(&path, "one\ntwo\nthree\nfour\n").expect("write fixture");
+		let path = path.to_string_lossy().replace('\\', "/");
+		let (result, output) = execute_captured(format!(
+			"{{ read -r a; read -r b; echo \"[$a][$b]\"; cat; }} < '{path}'"
+		))
+		.await;
+		assert_eq!(result.exit_code, Some(0), "{output:?}");
+		assert_eq!(output, "[one][two]\nthree\nfour\n");
+	}
+
+	/// Contract: `read` assigns UTF-8 input as text, not one Latin-1
+	/// character per byte.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn read_decodes_utf8_input() {
+		let (result, output) = execute_captured(
+			"printf 'é ü\\n' | { read -r first rest; echo \"$first|$rest\"; }".to_owned(),
+		)
+		.await;
+		assert_eq!(result.exit_code, Some(0), "{output:?}");
+		assert_eq!(output, "é|ü\n");
+	}
+
+	/// Contract: `read -n` counts characters, not bytes, as bash does in a
+	/// UTF-8 locale; a multibyte character is never split.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn read_count_takes_whole_utf8_characters() {
+		let (result, output) = execute_captured(
+			"printf 'éa\\n' | { read -r -n 1 first; read -r rest; echo \"$first|$rest\"; }".to_owned(),
+		)
+		.await;
+		assert_eq!(result.exit_code, Some(0), "{output:?}");
+		assert_eq!(output, "é|a\n");
+	}
+
+	/// Contract: `mapfile -n` from a file consumes exactly the lines it
+	/// stores; a later reader of the descriptor gets the rest.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn mapfile_count_from_a_file_leaves_the_rest_for_the_next_reader() {
+		let dir = tempfile::tempdir().expect("temporary directory");
+		let path = dir.path().join("lines.txt");
+		std::fs::write(&path, "one\ntwo\nthree\nfour\n").expect("write fixture");
+		let path = path.to_string_lossy().replace('\\', "/");
+		let (result, output) = execute_captured(format!(
+			"{{ mapfile -t -n 2 lines; echo \"${{lines[*]}}\"; cat; }} < '{path}'"
+		))
+		.await;
+		assert_eq!(result.exit_code, Some(0), "{output:?}");
+		assert_eq!(output, "one two\nthree\nfour\n");
+	}
+
+	/// Contract: a `mapfile -C` callback that reads the same piped stdin gets
+	/// the lines after the one mapfile stored, as in bash; mapfile must not
+	/// have read them ahead.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn mapfile_callback_reads_the_next_line_of_a_pipe() {
+		let (result, output) = execute_captured(
+			"cb() { read -r x; echo \"cb:$1:$2:$x\"; }; seq 1 4 | { mapfile -t -C cb -c 1 arr; echo \
+			 \"arr=${arr[*]}\"; }"
+				.to_owned(),
+		)
+		.await;
+		assert_eq!(result.exit_code, Some(0), "{output:?}");
+		assert_eq!(output, "cb:0:1:2\ncb:1:3:4\narr=1 3\n");
+	}
+
+	/// Contract: the same holds for a regular file, whose read-ahead mapfile
+	/// gives back to the shared offset before each callback.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn mapfile_callback_reads_the_next_line_of_a_file() {
+		let dir = tempfile::tempdir().expect("temporary directory");
+		let path = dir.path().join("lines.txt");
+		std::fs::write(&path, "1\n2\n3\n4\n").expect("write fixture");
+		let path = path.to_string_lossy().replace('\\', "/");
+		let (result, output) = execute_captured(format!(
+			"cb() {{ read -r x; echo \"cb:$1:$2:$x\"; }}; {{ mapfile -t -C cb -c 1 arr; echo \
+			 \"arr=${{arr[*]}}\"; }} < '{path}'"
+		))
+		.await;
+		assert_eq!(result.exit_code, Some(0), "{output:?}");
+		assert_eq!(output, "cb:0:1:2\ncb:1:3:4\narr=1 3\n");
+	}
+
+	/// Contract: `mapfile` into a readonly array fails before reading, as in
+	/// bash: the array is unchanged and the piped input stays for the next
+	/// reader.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn mapfile_into_a_readonly_array_leaves_the_input_unread() {
+		let (_, output) = execute_captured(
+			"printf 'a\\nb\\n' | { arr=(x); readonly arr; mapfile -t -O 1 arr; echo \"rc=$? \
+			 ${arr[*]}\"; cat; }"
+				.to_owned(),
+		)
+		.await;
+		assert!(output.ends_with("rc=1 x\na\nb\n"), "{output:?}");
 	}
 
 	#[tokio::test(flavor = "multi_thread")]
@@ -5512,6 +5638,103 @@ mod tests {
 		let _ = std::fs::remove_dir_all(&tmp);
 	}
 
+	/// `declare -r` lists readonly variables; it must not also require the
+	/// trace attribute (`-t`).
+	#[tokio::test(flavor = "multi_thread")]
+	async fn declare_readonly_listing_does_not_require_trace() {
+		let (result, output) =
+			execute_captured("readonly OMP_DECLARE_RO=1; declare -r | grep -c OMP_DECLARE_RO".into())
+				.await;
+		assert_eq!(result.exit_code, Some(0), "{output}");
+		assert_eq!(output.trim(), "1");
+	}
+
+	/// `exec` would replace the host process. `enable exec` must not bring it
+	/// back: on regression the test process itself turns into `false` and fails.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn enable_cannot_restore_exec_or_suspend() {
+		let (result, output) = execute_captured(
+			"enable exec suspend; exec false; echo exec-refused; suspend -f; echo suspend-refused"
+				.into(),
+		)
+		.await;
+		assert_eq!(result.exit_code, Some(0), "{output}");
+		assert!(output.contains("exec: not available in this shell"), "{output}");
+		assert!(output.contains("exec-refused"), "{output}");
+		assert!(output.contains("suspend-refused"), "{output}");
+	}
+
+	/// `sort -m -o f - g < f` truncates `f` for its output while stdin is still
+	/// reading it, so stdin must be copied first or the rest of `f` is lost.
+	/// The input is far larger than what stdin reads ahead, and the small
+	/// buffer makes the merge read it in many chunks.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn sort_merge_into_the_file_on_stdin_keeps_all_input() {
+		let dir = tempfile::tempdir().expect("temp dir");
+		let odd: String = (0..20_000).map(|n| format!("{:06}\n", 2 * n + 1)).collect();
+		let even: String = (0..20_000).map(|n| format!("{:06}\n", 2 * n)).collect();
+		std::fs::write(dir.path().join("f"), odd).expect("write f");
+		std::fs::write(dir.path().join("g"), even).expect("write g");
+		let (result, output) =
+			execute_captured(format!("cd '{}' && sort -m -S 1K -o f - g < f", dir.path().display()))
+				.await;
+		assert_eq!(result.exit_code, Some(0), "{output}");
+		let merged = std::fs::read_to_string(dir.path().join("f")).expect("read f");
+		let expected: String = (0..40_000).map(|n| format!("{n:06}\n")).collect();
+		assert!(merged == expected, "merged {} of 40000 lines", merged.lines().count());
+	}
+
+	/// `umask` belongs to the shell: it masks files the shell, its builtins,
+	/// and its external commands create, subshells keep their own copy, and
+	/// the host process umask never changes.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn umask_is_scoped_to_the_shell() {
+		use std::os::unix::fs::PermissionsExt;
+
+		let host_umask = || {
+			// SAFETY: `umask` cannot fail; the mask is restored at once. Each
+			// nextest test runs in its own process.
+			let mask = unsafe { libc::umask(0) };
+			unsafe { libc::umask(mask) };
+			mask
+		};
+		let before = host_umask();
+		let dir = tempfile::tempdir().expect("temp dir");
+		let (result, output) = execute_captured(format!(
+			"cd '{}' && umask 077 && : > redirect && touch builtin && sh -c ': > external' && mkdir \
+			 made && (umask 000) && umask",
+			dir.path().display()
+		))
+		.await;
+		assert_eq!(result.exit_code, Some(0), "{output}");
+		assert_eq!(output.trim(), "0077", "a subshell's umask must not leak out");
+		let mode = |name: &str| {
+			std::fs::metadata(dir.path().join(name))
+				.expect("created file")
+				.permissions()
+				.mode()
+				& 0o777
+		};
+		assert_eq!(mode("redirect"), 0o600, "redirections use the shell umask");
+		assert_eq!(mode("builtin"), 0o600, "builtins use the shell umask");
+		assert_eq!(mode("external"), 0o600, "external commands inherit the shell umask");
+		assert_eq!(mode("made"), 0o700, "mkdir uses the shell umask");
+
+		// A mask looser than the host's keeps the bits the host umask clears.
+		let (result, output) = execute_captured(format!(
+			"cd '{}' && umask 000 && : > loose-redirect && touch loose-builtin && mkdir loose-dir",
+			dir.path().display()
+		))
+		.await;
+		assert_eq!(result.exit_code, Some(0), "{output}");
+		assert_eq!(mode("loose-redirect"), 0o666);
+		assert_eq!(mode("loose-builtin"), 0o666);
+		assert_eq!(mode("loose-dir"), 0o777);
+		assert_eq!(host_umask(), before, "the host process umask must not change");
+	}
+
 	/// The `xargs` builtin spawns real child processes, but their stdout must
 	/// flow back into the shell pipeline (ctx streams, not the host fds), items
 	/// must batch per `-n`, and a failing invocation must surface GNU's 123.
@@ -6002,6 +6225,56 @@ replace = [{ pattern = "hello", replacement = "HI" }]
 		);
 	}
 
+	/// Lets in-flight writes land, empties `path`, and reports whether anything
+	/// wrote to it again: a background `yes` still running refills it within
+	/// milliseconds.
+	async fn still_written(path: &std::path::Path) -> bool {
+		time::sleep(Duration::from_millis(300)).await;
+		std::fs::File::options()
+			.write(true)
+			.open(path)
+			.and_then(|file| file.set_len(0))
+			.expect("truncate output");
+		time::sleep(Duration::from_millis(300)).await;
+		std::fs::metadata(path).expect("stat output").len() > 0
+	}
+
+	/// A background builtin started in a subshell ends with the subshell, as an
+	/// external one does. Left running it was out of reach — no process for
+	/// `pkill`, no job for `kill %N` — and spun for the life of the host.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn subshell_exit_ends_its_background_builtins() {
+		let _guard = shell_test_lock().lock().await;
+		let output = tempfile::NamedTempFile::new().expect("output file");
+		let shell = Shell::new(None);
+		let command = format!("(yes > {} &)", quote_arg(&output.path().to_string_lossy()));
+
+		shell
+			.run(ShellRunOptions { command, ..Default::default() }, None, CancelToken::default())
+			.await
+			.expect("run subshell");
+
+		assert!(!still_written(output.path()).await, "background `yes` outlived its subshell");
+	}
+
+	/// `kill %N` ends a background job running inside the shell, which has no
+	/// process to deliver the signal to.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn kill_jobspec_ends_in_process_background_job() {
+		let _guard = shell_test_lock().lock().await;
+		let output = tempfile::NamedTempFile::new().expect("output file");
+		let shell = Shell::new(None);
+		let command = format!("yes > {} & kill %1", quote_arg(&output.path().to_string_lossy()));
+
+		let result = shell
+			.run(ShellRunOptions { command, ..Default::default() }, None, CancelToken::default())
+			.await
+			.expect("run kill");
+
+		assert_eq!(result.exit_code, Some(0), "kill %1 failed");
+		assert!(!still_written(output.path()).await, "`yes` kept running after kill %1");
+	}
+
 	/// `live_background_job_count` reports 0 when the session has no live
 	/// external background jobs and 1 while one is running. The host relies on
 	/// this to retain a per-call shell whose `&`/`nohup` child is still alive
@@ -6134,6 +6407,58 @@ replace = [{ pattern = "hello", replacement = "HI" }]
 		assert_eq!(minimized.filter, "chain");
 		assert_eq!(minimized.original_text, expected);
 		assert_eq!(minimized.text, "HI\n".repeat(200));
+	}
+
+	/// Like jq, the built-in jq reports an input that fails and exits 0 when it
+	/// is not the last. Such a run is never shortened, even when the error does
+	/// not start a line; long successful output that only looks like an error
+	/// still is.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn jq_run_that_reported_an_error_is_not_minimized() {
+		let root = unique_temp_dir("jq-error");
+		std::fs::write(root.join("in.jsonl"), "1\n2\n3\n").expect("write input");
+		let _guard = shell_test_lock().lock().await;
+		let run = async |command: &str| {
+			let (tx, rx) = flume::unbounded::<String>();
+			let options = ShellExecuteOptions {
+				command: command.to_string(),
+				cwd: Some(root.to_string_lossy().into_owned()),
+				// the built-in jq even when the environment turns builtins off
+				session_env: Some(HashMap::from([(
+					"PI_DISABLE_UUTILS_BUILTINS".to_string(),
+					"0".to_string(),
+				)])),
+				minimizer: Some(minimizer::MinimizerOptions {
+					enabled: Some(true),
+					..Default::default()
+				}),
+				..Default::default()
+			};
+			let result = execute_shell(options, Some(tx), CancelToken::default())
+				.await
+				.expect("execute_shell");
+			let output: String = rx.drain().collect();
+			(result, output)
+		};
+		let rows = r#"range(0; 100) | "row with many fields and a longer string value""#;
+		// `stderr` writes no newline, so the error lands mid-line
+		let failing = format!(
+			r#"jq -r 'if . == 2 then "prefix" | stderr | error("boom") else {rows} end' in.jsonl"#
+		);
+		for command in [failing.clone(), format!("cd . && {failing}")] {
+			let (result, output) = run(&command).await;
+			assert_eq!(result.exit_code, Some(0), "{command}");
+			assert!(output.contains("prefixError: \"boom\""), "{command}: {output:?}");
+			assert!(result.minimized.is_none(), "{command}: {:?}", result.minimized);
+		}
+		for value in ["Error: expected user data", "jq: error is data"] {
+			let command = format!(r#"jq -nr 'range(0; 200) | "{value}"'"#);
+			let (result, _) = run(&command).await;
+			assert_eq!(result.exit_code, Some(0), "{command}");
+			assert!(result.minimized.is_some(), "{command} is shortened");
+		}
+		let _ = std::fs::remove_dir_all(&root);
 	}
 
 	#[cfg(unix)]

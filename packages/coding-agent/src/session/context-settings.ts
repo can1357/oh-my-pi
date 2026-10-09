@@ -1,8 +1,13 @@
+import {
+	type AgentCompactionThresholdOverride,
+	validateModelCompactionThresholds,
+} from "../config/compaction-threshold";
 import { combine, register, type SettingValueOf } from "../config/registry";
 import { COMPACTION_METHOD_CHOICES, DEFAULT_COMPACTION_METHOD_ORDER } from "./compaction-methods";
 import { SHAPE_VARIANT_NAMES } from "@oh-my-pi/snapcompact";
 
 const EMPTY_STRING_ARRAY: string[] = [];
+const EMPTY_MODEL_COMPACTION_THRESHOLDS: Record<string, AgentCompactionThresholdOverride> = {};
 
 export const cfgWorkspaceAdditionalDirectories = register({
 	id: "workspace.additionalDirectories",
@@ -150,6 +155,29 @@ export const cfgCompactionThresholdTokens = register({
 			{ value: "500000", label: "500K tokens", description: "Very large context window" },
 		],
 	},
+});
+
+/**
+ * Per-model compaction points that replace `compaction.thresholdPercent`/`thresholdTokens`
+ * for the models they match: `provider/model-id` exactly, else the longest `…*` prefix.
+ * Edited from the /models hub; a per-agent `task.agentCompactionThresholdOverrides` entry still wins.
+ */
+export const cfgCompactionModelThresholds = register({
+	id: "compaction.modelThresholds",
+	type: "record",
+	default: EMPTY_MODEL_COMPACTION_THRESHOLDS,
+	validate: validateModelCompactionThresholds,
+});
+
+/**
+ * Whether `compaction.modelThresholds` applies. Subagent spawn turns it off for an
+ * agent whose `task.agentCompactionThresholdOverrides` entry applies, so that entry
+ * outranks every model entry, including ones added while the agent runs.
+ */
+export const cfgCompactionModelThresholdsEnabled = register({
+	id: "compaction.modelThresholdsEnabled",
+	type: "boolean",
+	default: true,
 });
 
 export const cfgCompactionHandoffSaveToDisk = register({

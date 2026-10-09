@@ -7,15 +7,35 @@ import { getConfigRootDir, getLogsDir, localDay, logger, removeWithRetries, setA
 
 const originalAgentDir = process.env.PI_CODING_AGENT_DIR;
 const originalXdgStateHome = process.env.XDG_STATE_HOME;
+const originalHome = process.env.HOME;
+const originalUserProfile = process.env.USERPROFILE;
 const fallbackAgentDir = path.join(getConfigRootDir(), "agent");
 let cleanupRoot: string | undefined;
 
-afterEach(async () => {
-	if (originalXdgStateHome === undefined) {
-		delete process.env.XDG_STATE_HOME;
+function restoreEnv(name: string, value: string | undefined): void {
+	if (value === undefined) delete process.env[name];
+	else process.env[name] = value;
+}
+
+// Points the logs dir at `root`. XDG_STATE_HOME is only honored on Linux/macOS;
+// elsewhere the config root follows the home dir, so redirect that instead —
+// otherwise the test reads and writes the user's real ~/.omp/logs.
+async function isolateLogsRoot(root: string): Promise<void> {
+	if (process.platform === "linux" || process.platform === "darwin") {
+		const xdgStateHome = path.join(root, "state");
+		await fs.mkdir(path.join(xdgStateHome, "omp"), { recursive: true });
+		process.env.XDG_STATE_HOME = xdgStateHome;
 	} else {
-		process.env.XDG_STATE_HOME = originalXdgStateHome;
+		process.env.HOME = root;
+		process.env.USERPROFILE = root;
 	}
+	setAgentDir(fallbackAgentDir);
+}
+
+afterEach(async () => {
+	restoreEnv("XDG_STATE_HOME", originalXdgStateHome);
+	restoreEnv("HOME", originalHome);
+	restoreEnv("USERPROFILE", originalUserProfile);
 	if (originalAgentDir) {
 		setAgentDir(originalAgentDir);
 	} else {
@@ -31,10 +51,7 @@ afterEach(async () => {
 describe("report bundle logs", () => {
 	it("collects every same-day PID log, not only the current process", async () => {
 		cleanupRoot = await fs.mkdtemp(path.join(os.tmpdir(), "omp-report-logs-"));
-		const xdgStateHome = path.join(cleanupRoot, "state");
-		await fs.mkdir(path.join(xdgStateHome, "omp"), { recursive: true });
-		process.env.XDG_STATE_HOME = xdgStateHome;
-		setAgentDir(fallbackAgentDir);
+		await isolateLogsRoot(cleanupRoot);
 
 		const logsDir = getLogsDir();
 		await fs.mkdir(logsDir, { recursive: true });
@@ -78,10 +95,7 @@ describe("report bundle logs", () => {
 
 	it("includes this process's records still buffered by the batching file transport", async () => {
 		cleanupRoot = await fs.mkdtemp(path.join(os.tmpdir(), "omp-report-buffered-"));
-		const xdgStateHome = path.join(cleanupRoot, "state");
-		await fs.mkdir(path.join(xdgStateHome, "omp"), { recursive: true });
-		process.env.XDG_STATE_HOME = xdgStateHome;
-		setAgentDir(fallbackAgentDir);
+		await isolateLogsRoot(cleanupRoot);
 		const logsDir = getLogsDir();
 		logger.setTransports({ console: false, file: logsDir });
 		const marker = `report-buffered-${crypto.randomUUID()}`;

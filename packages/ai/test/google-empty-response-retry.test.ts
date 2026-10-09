@@ -1,4 +1,4 @@
-import { describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { streamGoogle } from "@oh-my-pi/pi-ai/providers/google";
 import { streamGoogleGeminiCli } from "@oh-my-pi/pi-ai/providers/google-gemini-cli";
@@ -268,6 +268,17 @@ describe("Google empty-response retry (public + Vertex path)", () => {
 });
 
 describe("Google empty-response retry (Cloud Code Assist path)", () => {
+	// Endpoint-counting mocks model CCA only; pinning the client version keeps
+	// the Antigravity manifest lookup off the injected fetch.
+	const savedAntigravityVersion = process.env.PI_AI_ANTIGRAVITY_VERSION;
+	beforeEach(() => {
+		process.env.PI_AI_ANTIGRAVITY_VERSION = "2.19.1";
+	});
+	afterEach(() => {
+		if (savedAntigravityVersion === undefined) delete process.env.PI_AI_ANTIGRAVITY_VERSION;
+		else process.env.PI_AI_ANTIGRAVITY_VERSION = savedAntigravityVersion;
+	});
+
 	it("retries a STOP-with-empty-text response (the reported gemini-3-flash hang)", async () => {
 		let calls = 0;
 		const fetchMock: FetchImpl = async () => {

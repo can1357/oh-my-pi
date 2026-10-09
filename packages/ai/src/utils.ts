@@ -119,10 +119,10 @@ export function stripOpenAIResponsesOutputOnlyStatusesForReplay<TItem extends { 
  * top-level items and `message.content[]`. Avoids a deep tree walk/clone of
  * every history node on providers that reject native-resolution images.
  */
-function clampReplayItemImageDetail(
-	item: Record<string, unknown>,
+function clampReplayItemImageDetail<TItem extends { type?: unknown; detail?: unknown; content?: unknown }>(
+	item: TItem,
 	supportsImageDetailOriginal: boolean,
-): Record<string, unknown> {
+): TItem {
 	if (supportsImageDetailOriginal) return item;
 
 	if (item.type === "input_image" && item.detail === "original") {
@@ -140,6 +140,21 @@ function clampReplayItemImageDetail(
 		return { ...record, detail: "auto" };
 	});
 	return changed ? { ...item, content } : item;
+}
+
+/** Clamp replayed images without changing item identities or other native replay fields. */
+export function clampOpenAIResponsesImageDetailForReplay<
+	TItem extends { type?: unknown; detail?: unknown; content?: unknown },
+>(items: TItem[], supportsImageDetailOriginal: boolean): TItem[] {
+	if (supportsImageDetailOriginal) return items;
+	let clamped: TItem[] | undefined;
+	for (let index = 0; index < items.length; index++) {
+		const item = items[index]!;
+		const clampedItem = clampReplayItemImageDetail(item, supportsImageDetailOriginal);
+		if (clampedItem !== item && !clamped) clamped = items.slice(0, index);
+		clamped?.push(clampedItem);
+	}
+	return clamped ?? items;
 }
 
 function isOpenAIResponsesClientInputBoundary(item: Record<string, unknown>): boolean {
@@ -220,7 +235,7 @@ export function sanitizeOpenAIResponsesHistoryItemsForReplay(
 	options: OpenAIResponsesReplaySanitizeOptions = {},
 ): ResponseInput {
 	const replayItems = dropMalformedOpenAIResponsesToolCalls(items);
-	const supportsImageDetailOriginal = options.supportsImageDetailOriginal !== false;
+	const supportsImageDetailOriginal = options.supportsImageDetailOriginal === true;
 	const computerLinkedReasoningItems =
 		options.supportsComputerUse === false
 			? undefined
@@ -545,6 +560,27 @@ export function dropMalformedOpenAIResponsesToolCalls<
 	return kept;
 }
 
+/**
+ * Replay history is immutable and re-sanitized on every request, so remember
+ * which `arguments` string each item was already validated with instead of
+ * re-parsing every historical call (large write/edit payloads) per request.
+ */
+const validatedReplayArguments = new WeakMap<object, string>();
+
+function hasValidReplayArguments(item: Record<string, unknown>): boolean {
+	const args = item.arguments;
+	if (typeof args !== "string") return false;
+	if (validatedReplayArguments.get(item) === args) return true;
+	if (args.trim().length === 0) return false;
+	try {
+		JSON.parse(args);
+	} catch {
+		return false;
+	}
+	validatedReplayArguments.set(item, args);
+	return true;
+}
+
 function sanitizeOpenAIResponsesHistoryItemForReplay(
 	item: Record<string, unknown>,
 	supportsImageDetailOriginal: boolean,
@@ -557,12 +593,7 @@ function sanitizeOpenAIResponsesHistoryItemForReplay(
 		return undefined;
 	}
 	if (item.type === "function_call") {
-		if (typeof item.arguments !== "string" || item.arguments.trim().length === 0) return undefined;
-		try {
-			JSON.parse(item.arguments);
-		} catch {
-			return undefined;
-		}
+		if (!hasValidReplayArguments(item)) return undefined;
 	}
 	if (item.type === "item_reference") return undefined;
 	if (item.type === "image_generation_call") return sanitizeOpenAIResponsesImageGenerationCallForReplay(item);

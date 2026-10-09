@@ -275,6 +275,39 @@ function jobsRenderResult(
 	});
 
 	let cached: RenderCache | undefined;
+	// Per-job preview rows are invariant across spinner/shimmer frames (the job
+	// snapshots are frozen for this result), so the envelope strip, flatten and
+	// wrap run once per (job, expanded, width) instead of every animated frame.
+	const previewRows = new Map<JobSnapshot, { expanded: boolean; width: number; lines: readonly string[] }>();
+	const jobPreviewRows = (job: JobSnapshot, expanded: boolean, continuationWidth: number): readonly string[] => {
+		const hit = previewRows.get(job);
+		if (hit !== undefined && hit.expanded === expanded && hit.width === continuationWidth) return hit.lines;
+		const artifactError = job.meta?.artifactError ?? job.artifactError;
+		// Legacy rows did not retain full metadata. Strip the known warning
+		// footer so the dedicated row/root warning remains the only copy.
+		const previewError =
+			artifactError ?? (outputMeta?.source?.type !== "report" ? outputMeta?.artifactError : undefined);
+		const previewMeta = job.meta ?? (previewError ? { artifactError: previewError } : undefined);
+		const preview = flattenStructuredPreview(
+			stripTaskResultEnvelope(
+				stripOutputNotice(job.errorText?.trim() || job.resultText?.trim() || "", previewMeta).trim(),
+			),
+		);
+		const lines: string[] = [];
+		if (preview) {
+			const maxLines = expanded ? PREVIEW_LINES_EXPANDED : PREVIEW_LINES_COLLAPSED;
+			const previewLines = getPreviewLines(
+				preview,
+				maxLines,
+				Math.min(PREVIEW_LINE_WIDTH, continuationWidth),
+				Ellipsis.Unicode,
+			);
+			const tone = job.errorText ? "error" : "dim";
+			for (const pl of previewLines) lines.push(`  ${uiTheme.fg(tone, pl)}`);
+		}
+		previewRows.set(job, { expanded, width: continuationWidth, lines });
+		return lines;
+	};
 	return {
 		render(width: number): readonly string[] {
 			const expanded = options.expanded;
@@ -377,30 +410,7 @@ function jobsRenderResult(
 							);
 						}
 
-						// Legacy rows did not retain full metadata. Strip the known warning
-						// footer so the dedicated row/root warning remains the only copy.
-						const previewError =
-							artifactError ?? (outputMeta?.source?.type !== "report" ? outputMeta?.artifactError : undefined);
-						const previewMeta = job.meta ?? (previewError ? { artifactError: previewError } : undefined);
-
-						const preview = flattenStructuredPreview(
-							stripTaskResultEnvelope(
-								stripOutputNotice(job.errorText?.trim() || job.resultText?.trim() || "", previewMeta).trim(),
-							),
-						);
-						if (preview) {
-							const maxLines = expanded ? PREVIEW_LINES_EXPANDED : PREVIEW_LINES_COLLAPSED;
-							const previewLines = getPreviewLines(
-								preview,
-								maxLines,
-								Math.min(PREVIEW_LINE_WIDTH, continuationWidth),
-								Ellipsis.Unicode,
-							);
-							const tone = job.errorText ? "error" : "dim";
-							for (const pl of previewLines) {
-								lines.push(`  ${uiTheme.fg(tone, pl)}`);
-							}
-						}
+						for (const previewLine of jobPreviewRows(job, expanded, continuationWidth)) lines.push(previewLine);
 						return lines;
 					},
 				},

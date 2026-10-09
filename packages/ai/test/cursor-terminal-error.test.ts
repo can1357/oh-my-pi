@@ -6,13 +6,21 @@ import type { Context, CursorToolResultHandler, Model, ToolResultMessage } from 
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import {
 	AgentServerMessageSchema,
+	ConversationStateStructureSchema,
 	ExecServerMessageSchema,
 	CustomErrorDetailsSchema,
 	CursorError,
 	ErrorDetailsSchema,
+	GetBlobArgsSchema,
+	HeartbeatUpdateSchema,
 	InteractionUpdateSchema,
+	KvServerMessageSchema,
+	McpArgsSchema,
+	McpToolCallSchema,
 	ReadArgsSchema,
+	StepCompletedUpdateSchema,
 	TextDeltaUpdateSchema,
+	ToolCallCompletedUpdateSchema,
 	ToolCallSchema,
 	ToolCallStartedUpdateSchema,
 	TurnEndedUpdateSchema,
@@ -28,7 +36,14 @@ type Scenario =
 	| { kind: "connect-error-after-turn" }
 	| { kind: "connect-detailed-error-after-turn" }
 	| { kind: "connect-classification-detail-after-turn" }
+	| { kind: "connect-cursor-error-details-after-turn"; isRetryable: boolean }
 	| { kind: "connect-structured-error-after-turn" }
+	| { kind: "connect-provider-error-after-step"; isRetryable: boolean | undefined }
+	| { kind: "cut-after-step-completed" }
+	| { kind: "cut-after-step-trailing-frames" }
+	| { kind: "cut-after-content-following-step" }
+	| { kind: "cut-after-tool-call-step" }
+	| { kind: "cut-with-tool-call-open" }
 	| { kind: "grpc-trailer-after-turn" }
 	| { kind: "end-before-turn" }
 	| { kind: "hang-after-turn" }
@@ -74,6 +89,96 @@ function turnEndedFrame(): Buffer {
 					case: "turnEnded",
 					value: create(TurnEndedUpdateSchema, {}),
 				},
+			}),
+		},
+	});
+	return frameConnectMessage(toBinary(AgentServerMessageSchema, message));
+}
+
+function stepCompletedFrame(): Buffer {
+	const message = create(AgentServerMessageSchema, {
+		message: {
+			case: "interactionUpdate",
+			value: create(InteractionUpdateSchema, {
+				message: {
+					case: "stepCompleted",
+					value: create(StepCompletedUpdateSchema, { stepId: 0n, stepDurationMs: 1n }),
+				},
+			}),
+		},
+	});
+	return frameConnectMessage(toBinary(AgentServerMessageSchema, message));
+}
+
+/**
+ * The head of a frame whose length prefix promises more bytes than ever
+ * arrive: the shape of a stream closed partway through Cursor's trailing
+ * checkpoint.
+ */
+function truncatedFrame(): Buffer {
+	const frame = frameConnectMessage(Buffer.alloc(4096, 0x1a));
+	return frame.subarray(0, 512);
+}
+
+function checkpointFrame(): Buffer {
+	const message = create(AgentServerMessageSchema, {
+		message: {
+			case: "conversationCheckpointUpdate",
+			value: create(ConversationStateStructureSchema, {}),
+		},
+	});
+	return frameConnectMessage(toBinary(AgentServerMessageSchema, message));
+}
+
+function heartbeatFrame(): Buffer {
+	const message = create(AgentServerMessageSchema, {
+		message: {
+			case: "interactionUpdate",
+			value: create(InteractionUpdateSchema, {
+				message: { case: "heartbeat", value: create(HeartbeatUpdateSchema, {}) },
+			}),
+		},
+	});
+	return frameConnectMessage(toBinary(AgentServerMessageSchema, message));
+}
+
+function kvGetBlobFrame(): Buffer {
+	const message = create(AgentServerMessageSchema, {
+		message: {
+			case: "kvServerMessage",
+			value: create(KvServerMessageSchema, {
+				id: 1,
+				message: { case: "getBlobArgs", value: create(GetBlobArgsSchema, { blobId: new Uint8Array(32) }) },
+			}),
+		},
+	});
+	return frameConnectMessage(toBinary(AgentServerMessageSchema, message));
+}
+
+/** An MCP tool call's start or completion envelope, correlated by `callId`. */
+function mcpToolCallFrame(phase: "toolCallStarted" | "toolCallCompleted"): Buffer {
+	const toolCall = create(ToolCallSchema, {
+		tool: {
+			case: "mcpToolCall",
+			value: create(McpToolCallSchema, {
+				args: create(McpArgsSchema, { name: "read", toolName: "read", toolCallId: "call-step" }),
+			}),
+		},
+	});
+	const message = create(AgentServerMessageSchema, {
+		message: {
+			case: "interactionUpdate",
+			value: create(InteractionUpdateSchema, {
+				message:
+					phase === "toolCallStarted"
+						? {
+								case: "toolCallStarted",
+								value: create(ToolCallStartedUpdateSchema, { callId: "envelope-step", toolCall }),
+							}
+						: {
+								case: "toolCallCompleted",
+								value: create(ToolCallCompletedUpdateSchema, { callId: "envelope-step", toolCall }),
+							},
 			}),
 		},
 	});
@@ -230,6 +335,93 @@ async function startServer(): Promise<string> {
 			return;
 		}
 
+		if (scenario.kind === "cut-after-step-completed") {
+			// Captured from live Cursor turns: the answer and `stepCompleted`
+			// arrive, then the stream closes partway through the trailing repeat
+			// checkpoint, so `turnEnded` and the end frame never come.
+			stream.write(Buffer.concat([textDeltaFrame("complete answer"), stepCompletedFrame(), truncatedFrame()]));
+			stream.end();
+			return;
+		}
+
+		if (scenario.kind === "cut-after-step-trailing-frames") {
+			// The repeat checkpoint arrives whole, with keepalive and blob traffic,
+			// and the cut lands in the `turnEnded` frame that follows it.
+			stream.write(
+				Buffer.concat([
+					textDeltaFrame("complete answer"),
+					stepCompletedFrame(),
+					checkpointFrame(),
+					heartbeatFrame(),
+					kvGetBlobFrame(),
+					truncatedFrame(),
+				]),
+			);
+			stream.end();
+			return;
+		}
+
+		if (scenario.kind === "cut-after-content-following-step") {
+			stream.write(Buffer.concat([stepCompletedFrame(), textDeltaFrame("still streaming")]));
+			stream.end();
+			return;
+		}
+
+		if (scenario.kind === "cut-after-tool-call-step") {
+			// A step that ended on a settled tool call: another model step may
+			// follow, so a cut here is not a finished turn.
+			stream.write(
+				Buffer.concat([
+					textDeltaFrame("checking"),
+					mcpToolCallFrame("toolCallStarted"),
+					mcpToolCallFrame("toolCallCompleted"),
+					stepCompletedFrame(),
+					truncatedFrame(),
+				]),
+			);
+			stream.end();
+			return;
+		}
+
+		if (scenario.kind === "cut-with-tool-call-open") {
+			stream.write(
+				Buffer.concat([
+					mcpToolCallFrame("toolCallStarted"),
+					textDeltaFrame("while the call runs"),
+					stepCompletedFrame(),
+					truncatedFrame(),
+				]),
+			);
+			stream.end();
+			return;
+		}
+
+		if (scenario.kind === "connect-provider-error-after-step") {
+			// Shape captured from a live Cursor rejection: ERROR_PROVIDER_ERROR (57)
+			// whose binary detail carries Cursor's retry verdict.
+			const details = create(ErrorDetailsSchema, {
+				error: CursorError.ERROR_PROVIDER_ERROR,
+				details: create(CustomErrorDetailsSchema, {
+					title: "Provider Error",
+					detail:
+						"We're having trouble connecting to the model provider. This might be temporary - please try again in a moment.",
+					...(scenario.isRetryable === undefined ? {} : { isRetryable: scenario.isRetryable }),
+				}),
+				isExpected: true,
+			});
+			stream.write(stepCompletedFrame());
+			stream.write(
+				connectEndErrorFrame("resource_exhausted", "Error", [
+					{
+						type: "aiserver.v1.ErrorDetails",
+						value: Buffer.from(toBinary(ErrorDetailsSchema, details)).toString("base64"),
+					},
+				]),
+			);
+			stream.end();
+			return;
+		}
+
 		if (scenario.kind === "exec-then-hang") {
 			// Exec request, then the stream stays open: the only way this turn
 			// ends is the client aborting.
@@ -259,6 +451,29 @@ async function startServer(): Promise<string> {
 			stream.write(
 				connectEndErrorFrame("invalid_argument", "Error", [
 					{ type: "google.rpc.ErrorInfo", debug: "quota exceeded for this account" },
+				]),
+			);
+			stream.end();
+			return;
+		}
+
+		if (scenario.kind === "connect-cursor-error-details-after-turn") {
+			// Shape captured from a live Cursor outage: bare `unavailable: Error`
+			// with the retry verdict only inside the typed detail's debug JSON.
+			stream.write(
+				connectEndErrorFrame("unavailable", "Error", [
+					{
+						type: "aiserver.v1.ErrorDetails",
+						debug: {
+							error: "ERROR_OPENAI",
+							details: {
+								title: "Unable to reach the model provider",
+								detail: "We're having trouble connecting to the model provider.",
+								isRetryable: scenario.isRetryable,
+							},
+							isExpected: false,
+						},
+					},
 				]),
 			);
 			stream.end();
@@ -420,6 +635,15 @@ describe("Cursor terminal lifecycle after turnEnded", () => {
 		expect(AIError.is(result.errorId, AIError.Flag.UsageLimit)).toBe(false);
 	});
 
+	it.each([true, false])("follows Cursor's ErrorDetails.isRetryable=%p verdict for recovery", async isRetryable => {
+		scenario = { kind: "connect-cursor-error-details-after-turn", isRetryable };
+		const baseUrl = await startServer();
+		const { result } = await collectStream(makeModel(baseUrl));
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toContain("Unable to reach the model provider");
+		expect(AIError.is(result.errorId, AIError.Flag.Transient)).toBe(isRetryable);
+	});
+
 	it("maps Cursor ErrorDetails into retryable provider status and message", async () => {
 		scenario = { kind: "connect-structured-error-after-turn" };
 		const baseUrl = await startServer();
@@ -450,6 +674,50 @@ describe("Cursor terminal lifecycle after turnEnded", () => {
 		expect(result.stopReason).toBe("error");
 		expect(result.errorMessage).toContain("Cursor stream ended before turnEnded");
 	});
+
+	it.each(["cut-after-step-completed", "cut-after-step-trailing-frames"] as const)(
+		"completes a turn whose stream was cut after stepCompleted (%s)",
+		async kind => {
+			scenario = { kind };
+			const baseUrl = await startServer();
+			const { eventTypes, result } = await collectStream(makeModel(baseUrl));
+			expect(eventTypes.at(-1)).toBe("done");
+			expect(result.stopReason).toBe("stop");
+			expect(result.errorMessage).toBeUndefined();
+			expect(result.content.map(block => (block.type === "text" ? block.text : block.type))).toEqual([
+				"complete answer",
+			]);
+		},
+	);
+
+	it.each(["cut-after-content-following-step", "cut-after-tool-call-step", "cut-with-tool-call-open"] as const)(
+		"still rejects a stream cut after stepCompleted that did not end the turn (%s)",
+		async kind => {
+			scenario = { kind };
+			const baseUrl = await startServer();
+			const { eventTypes, result } = await collectStream(makeModel(baseUrl));
+			expect(eventTypes.at(-1)).toBe("error");
+			expect(result.stopReason).toBe("error");
+			expect(result.errorMessage).toContain("Cursor stream ended before turnEnded");
+		},
+	);
+
+	it.each([
+		{ isRetryable: false, retriable: false, status: 400 },
+		{ isRetryable: true, retriable: true, status: 503 },
+		{ isRetryable: undefined, retriable: true, status: 503 },
+	])(
+		"retries ERROR_PROVIDER_ERROR only when Cursor allows it (isRetryable=$isRetryable)",
+		async ({ isRetryable, retriable, status }) => {
+			scenario = { kind: "connect-provider-error-after-step", isRetryable };
+			const baseUrl = await startServer();
+			const { result } = await collectStream(makeModel(baseUrl));
+			expect(result.stopReason).toBe("error");
+			expect(result.errorMessage).toContain("Cursor PROVIDER_ERROR: Provider Error");
+			expect(result.errorStatus).toBe(status);
+			expect(AIError.retriable(AIError.classifyMessage(result))).toBe(retriable);
+		},
+	);
 
 	it("pairs and closes a server-owned call the dying stream left open", async () => {
 		// The failure this guards: a native todo block is stamped resolved at

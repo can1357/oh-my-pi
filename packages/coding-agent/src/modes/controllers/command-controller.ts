@@ -50,7 +50,6 @@ import { ContextUsageView, contextUsageHead } from "@oh-my-pi/pi-tui/status-line
 import type { OverlayHandle } from "@oh-my-pi/pi-tui";
 import { ReportPanel } from "@oh-my-pi/pi-tui/overlays/report-panel";
 import type { TspText } from "@oh-my-pi/pi-wire";
-import { JobsPanel } from "@oh-my-pi/pi-tui/overlays/jobs-panel";
 import { computeSessionContextBreakdown } from "../../session/context-usage-runtime";
 import { buildHotkeysMarkdown, HotkeysSheetComponent } from "@oh-my-pi/pi-tui/hotkeys-markdown";
 import { isNativeRendering } from "@oh-my-pi/pi-tui/native/state";
@@ -75,6 +74,8 @@ import {
 } from "../../slash-commands/helpers/active-oauth-account";
 import { formatProviderName } from "@oh-my-pi/pi-tui/chrome/format";
 import { formatCompactQuota } from "@oh-my-pi/pi-tui/overlays/advisor-config";
+import { resolveTernPane } from "../../tools/browser/tern/kind";
+import { TernError, type TernErrorKind, TernSocketClient } from "../../tools/browser/tern/wire";
 import { outputMeta } from "../../tools/output-meta";
 import { resolveToCwd, stripOuterDoubleQuotes } from "../../tools/path-utils";
 import { replaceTabs, truncateToWidth } from "@oh-my-pi/pi-tui/render/render-utils";
@@ -101,6 +102,12 @@ import type { UnavailableUsageAccount } from "@oh-my-pi/pi-tui/overlays/usage-da
 import { cfgTerminalShowImages } from "../settings";
 import { cfgProviderAppendOnlyContext } from "../../session/settings";
 import { cfgShareRedactSecrets, cfgShareServerUrl, cfgShareStore } from "../../commands/settings";
+
+/** How long `/fork` waits for Tern to open the fork's pane. */
+const TERN_FORK_TIMEOUT_MS = 10_000;
+
+/** Fork failures after which Tern may still open the pane, so `/fork` must not also fork in place. */
+const TERN_FORK_UNCONFIRMED: Partial<Record<TernErrorKind, true>> = { closed: true, timeout: true, protocol: true };
 
 function formatCreditValue(value: number): string {
 	return value.toLocaleString(undefined, { maximumFractionDigits: 4 });
@@ -166,7 +173,7 @@ export class CommandController {
 	 * `/usage`, its body scrolled by the terminal once it is long, closed by
 	 * Esc or Close.
 	 */
-	#showReport(options: { title: string; head?: TspText; body: Component }): void {
+	showCommandReport(options: { title: string; head?: TspText; body: Component }): void {
 		// A replacement keeps where the editor sat before the first report.
 		const openedAtBottom =
 			this.ctx.reportContainer.children.length > 0 ? this.#reportOpenedAtBottom : this.ctx.composerInputAtBottom();
@@ -203,9 +210,9 @@ export class CommandController {
 		this.ctx.ui.requestRender();
 	}
 
-	/** A titled markdown report; see {@link #showReport}. */
+	/** A titled markdown report; see {@link showCommandReport}. */
 	#showMarkdownPanel(title: string, markdown: string): void {
-		this.#showReport({ title, body: new Markdown(markdown.trim(), 0, 0, getMarkdownTheme()) });
+		this.showCommandReport({ title, body: new Markdown(markdown.trim(), 0, 0, getMarkdownTheme()) });
 	}
 
 	async #restoreAfterMoveFailure(
@@ -600,7 +607,7 @@ export class CommandController {
 	async handleAdvisorStatusCommand(): Promise<void> {
 		const stats = this.ctx.session.getAdvisorStats();
 		if (!stats.configured) {
-			this.#showReport({ title: "Advisor Status", body: new Text("Advisor is disabled.", 0, 0) });
+			this.showCommandReport({ title: "Advisor Status", body: new Text("Advisor is disabled.", 0, 0) });
 			return;
 		}
 		// Fetch live quota data (cached 5 min by the auth-gateway) so we can show
@@ -664,7 +671,7 @@ export class CommandController {
 				info += `${theme.fg("dim", "Tokens:")} ${stats.tokens.total.toLocaleString()}\n`;
 				if (stats.cost > 0) info += `${theme.fg("dim", "Cost:")} $${stats.cost.toFixed(4)}\n`;
 			}
-			this.#showReport({
+			this.showCommandReport({
 				title: `Advisor Status (${stats.advisors.length} advisors)`,
 				body: new Text(info.trim(), 0, 0),
 			});
@@ -714,9 +721,14 @@ export class CommandController {
 			info += `${theme.fg("dim", "Cache Read:")} ${stats.tokens.cacheRead.toLocaleString()}\n`;
 		}
 		if (stats.cost > 0) info += `${theme.fg("dim", "Cost:")} $${stats.cost.toFixed(4)}\n`;
-		this.#showReport({ title: "Advisor Status", body: new Text(info.trim(), 0, 0) });
+		this.showCommandReport({ title: "Advisor Status", body: new Text(info.trim(), 0, 0) });
 	}
 
+	/**
+	 * `/jobs`: natively the live jobs sheet the jobs pill opens (inspect and
+	 * cancel included); `/jobs full`, and text mode, a report of the running
+	 * and recent jobs (see {@link showCommandReport}).
+	 */
 	async handleJobsCommand(options?: { full?: boolean }): Promise<void> {
 		const full = options?.full === true;
 		const snapshot = this.ctx.session.getAsyncJobSnapshot({ recentLimit: 5 });
@@ -724,21 +736,25 @@ export class CommandController {
 			this.ctx.showWarning("Async background jobs are unavailable in this session.");
 			return;
 		}
+		if (isNativeRendering() && !full) {
+			this.ctx.showJobsSheet();
+			return;
+		}
 
 		const now = Date.now();
-		const lineWidth = Math.max(24, (this.ctx.ui.terminal.columns ?? 100) - 24);
-		let info = `${theme.bold("Background Jobs")}\n\n`;
-		info += `${theme.fg("dim", "Running:")} ${snapshot.running.length}\n`;
-
+		const columns = this.ctx.ui.terminal.columns ?? 100;
+		const lineWidth = Math.max(24, columns - 24);
+		let info = `${theme.fg("dim", "Running:")} ${snapshot.running.length}\n`;
 		if (snapshot.running.length === 0 && snapshot.recent.length === 0) {
-			info += `\n${theme.fg("dim", "No async jobs yet.")}\n`;
-			this.ctx.presentCommandOutput(new JobsPanel(snapshot, now, [new Spacer(1), new Text(info, 1, 0)]));
+			info += `\n${theme.fg("dim", "No async jobs yet.")}`;
+			this.showCommandReport({ title: "Background Jobs", body: new Text(info, 0, 0) });
 			return;
 		}
 
 		// Full mode wraps here so every line, including heredoc lines and wrap
-		// continuations, keeps the two-column indent under its job row.
-		const commandWidth = Math.max(1, (this.ctx.ui.terminal.columns ?? 100) - 4);
+		// continuations, keeps the two-column indent under its job row inside the
+		// report box.
+		const commandWidth = Math.max(1, columns - 6);
 		const describe = (job: AsyncJobSnapshotItem): string => {
 			if (!full) return `  ${theme.fg("dim", truncateJobLabel(job.label, lineWidth))}`;
 			const command = replaceTabs(sanitizeText(job.command ?? job.label));
@@ -763,9 +779,7 @@ export class CommandController {
 			}
 		}
 
-		// The native jobs panel truncates labels, so full mode renders plain text only
-		const body = [new Spacer(1), new Text(info.trimEnd(), 1, 0)];
-		this.ctx.presentCommandOutput(full ? body : new JobsPanel(snapshot, now, body));
+		this.showCommandReport({ title: "Background Jobs", body: new Text(info.trimEnd(), 0, 0) });
 	}
 
 	async handleUsageCommand(reports?: UsageReport[] | null): Promise<void> {
@@ -847,7 +861,7 @@ export class CommandController {
 			return;
 		}
 		// Natively the body is `/context`'s own card (meters, legend, compaction mark).
-		this.#showReport({
+		this.showCommandReport({
 			title: "Context Usage",
 			head: contextUsageHead(breakdown),
 			body: new ContextUsageView(breakdown, theme),
@@ -1278,6 +1292,8 @@ export class CommandController {
 		}
 		this.ctx.statusContainer.disposeChildren();
 
+		if (await this.#forkIntoTernPane()) return;
+
 		// After a `/fork`, the current session ID is changed to the forked one,
 		// so the session ID before the fork is the one we want to show in the hint.
 		const previousSessionId = this.ctx.sessionManager.isSessionOnDisk()
@@ -1306,6 +1322,52 @@ export class CommandController {
 				1,
 			),
 		]);
+	}
+
+	/**
+	 * `/fork` inside a Tern pane: ask Tern to run `omp --fork` of this session in a new pane beside
+	 * this one, which keeps the original session. False means fork in place instead: outside Tern,
+	 * an unsaved session, a Tern without `fork`, or Tern refusing it. Once the request is out, an
+	 * unconfirmed one is reported rather than retried in place, since Tern may still open the pane.
+	 */
+	async #forkIntoTernPane(): Promise<boolean> {
+		const tern = resolveTernPane();
+		if (!tern || !this.ctx.sessionManager.isSessionOnDisk()) return false;
+		const client = new TernSocketClient({ socketPath: tern.socketPath });
+		try {
+			try {
+				await client.connect();
+			} catch (error) {
+				logger.debug("Tern unreachable for /fork; forking in place", {
+					error: error instanceof Error ? error.message : String(error),
+				});
+				return false;
+			}
+			if (!client.supports("fork")) return false;
+			// The new pane's omp reads the session file as it starts.
+			await this.ctx.session.flushToDisk();
+			try {
+				await client.fork({ block: tern.pane }, { timeoutMs: TERN_FORK_TIMEOUT_MS });
+			} catch (error) {
+				if (error instanceof TernError && !TERN_FORK_UNCONFIRMED[error.kind]) {
+					const details = { kind: error.kind, error: error.message };
+					if (error.kind === "failed") logger.warn("Tern could not open the fork pane; forking in place", details);
+					else logger.debug("Tern refused the fork; forking in place", details);
+					return false;
+				}
+				this.ctx.showError(
+					`Tern did not confirm the fork: ${error instanceof Error ? error.message : String(error)}`,
+				);
+				return true;
+			}
+		} finally {
+			client.close();
+		}
+		this.ctx.present([
+			new Spacer(1),
+			new Text(theme.fg("accent", `${theme.status.success} Session forked into a new pane`), 1, 1),
+		]);
+		return true;
 	}
 
 	/**
@@ -1392,14 +1454,19 @@ export class CommandController {
 
 	/**
 	 * `/wt [<branch>]` — fork the checkout into a new linked git worktree on
-	 * `branch` (default `wt/<timestamp>`), carrying uncommitted changes along,
-	 * then relocate the session there like `/move`.
+	 * `branch` (default `wt/<timestamp>`), carrying uncommitted changes along
+	 * unless `keepChanges` is false, then relocate the session there like `/move`.
+	 * Returns the worktree only when the session now lives in it.
 	 */
-	async handleWorktreeCommand(branch?: string): Promise<void> {
+	async handleWorktreeCommand(
+		branch?: string,
+		options: { keepChanges?: boolean } = {},
+	): Promise<SessionWorktree | undefined> {
 		if (this.ctx.session.isStreaming) {
 			this.ctx.showWarning("Wait for the current response to finish or abort it before creating a worktree.");
-			return;
+			return undefined;
 		}
+		let created: SessionWorktree | undefined;
 		await this.#withSessionMove(async () => {
 			const branchName = branch?.trim() || defaultSessionWorktreeBranch();
 			const cwd = this.ctx.sessionManager.getCwd();
@@ -1415,7 +1482,7 @@ export class CommandController {
 			this.ctx.ui.requestRender();
 			let worktree: SessionWorktree;
 			try {
-				worktree = await createSessionWorktree(cwd, this.ctx.settings, branchName);
+				worktree = await createSessionWorktree(cwd, this.ctx.settings, branchName, options);
 			} catch (err) {
 				this.ctx.showError(`Worktree creation failed: ${err instanceof Error ? err.message : String(err)}`);
 				return false;
@@ -1430,7 +1497,10 @@ export class CommandController {
 				});
 			}
 			if (!(await this.#relocateSession(worktree.path))) return false;
-			const cleanup = await cleanSourceCheckoutIfConfigured(cwd, this.ctx.settings);
+			created = worktree;
+			const cleanup = worktree.keptChanges
+				? await cleanSourceCheckoutIfConfigured(cwd, this.ctx.settings)
+				: { cleaned: false, errorMessage: undefined };
 			if (cleanup.errorMessage !== undefined) {
 				this.ctx.showWarning(`Worktree created, but cleaning source checkout failed: ${cleanup.errorMessage}`);
 			}
@@ -1444,6 +1514,7 @@ export class CommandController {
 			]);
 			return true;
 		});
+		return created;
 	}
 
 	/** Save source settings before acquiring the gate for a complete relocation operation. */
@@ -1880,6 +1951,7 @@ export class CommandController {
 			}
 		} finally {
 			this.#finishHandoffUi(handoffLoader);
+			await this.ctx.flushCompactionQueue({ willRetry: false });
 		}
 		this.ctx.ui.requestRender(true, { clearScrollback: true });
 	}

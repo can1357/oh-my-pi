@@ -2,6 +2,168 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `wasmGrammarFor` for tree-sitter grammars loaded as WebAssembly on demand from `<natives dir>/grammars`, and `missingGrammars` on `astGrep`/`astEdit` results naming languages skipped because their grammar is not installed.
+
+### Changed
+
+- Reduced syntax-highlighting startup work by bundling the complete precompiled grammar set ([#14104](https://github.com/can1357/oh-my-pi/pull/14104) by [@iliaal](https://github.com/iliaal)).
+- Changed standalone binaries to embed each native addon as its own deterministic zstd frame instead of a timestamped gzip tarball, making binaries smaller.
+- Updated the shell's built-in `jq` to jaq 3.1.1, which `jq --version` now reports ([#14659](https://github.com/can1357/oh-my-pi/pull/14659) by [@will-bogusz](https://github.com/will-bogusz))
+
+### Fixed
+
+- Fixed the built-in `jq` erroring where jq returns `null` (`.a.b` over `{}`, `.[0]` over `null`) and lacking `IN`, `input_filename`, `input_line_number` and `--unbuffered` ([#14659](https://github.com/can1357/oh-my-pi/pull/14659) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed the built-in `jq` reading each file operand separately: `-s` now slurps them into one array and `input` reads on into the next file, as in jq ([#14659](https://github.com/can1357/oh-my-pi/pull/14659) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed the built-in `jq` stopping at the first input that fails and rejecting `"021"` and `"+1"` in `tonumber`, where jq does neither; a run that reported a failing input is never shortened by the output minimizer, even when it exits 0 ([#14659](https://github.com/can1357/oh-my-pi/pull/14659) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed the built-in `jq`'s `halt_error` printing its message to stdout; like jq, it now goes to stderr ([#14659](https://github.com/can1357/oh-my-pi/pull/14659) by [@will-bogusz](https://github.com/will-bogusz))
+- Shrank the native addon by about 77 MB: only 17 common tree-sitter grammars are linked in, and the other 39 languages load WebAssembly grammars from the grammar directory, treated as unsupported until installed.
+
+## [18.8.4] - 2026-10-08
+
+### Fixed
+
+- Fixed long output from a failing `jq` command hiding its error message: the output minimizer now shortens `jq` output only when the command succeeded ([#14657](https://github.com/can1357/oh-my-pi/pull/14657) by [@will-bogusz](https://github.com/will-bogusz))
+
+## [18.8.1] - 2026-10-07
+
+### Added
+
+- Added the `PI_NATIVES_DIR` configuration option to control where compiled native addons are extracted. The version-specific subdirectory remains appended, allowing separate `HOME` environments to share the same native addon copy without sharing other data.
+
+### Fixed
+
+- Fixed background shell builtins and other in-process commands so they terminate when their subshell exits and can be stopped with `kill %N`, matching the behavior of external commands.
+
+## [18.7.0] - 2026-10-06
+
+### Breaking Changes
+
+- Renamed the `linux-all` Bazel target (`//:natives-linux-all`) to `all` (`//:natives-all`); the renamed target now includes Darwin addons.
+- Removed the `gen:native` and `gen:native:reset` scripts. Standalone binary builds now embed the native addon archive and manifest instead of writing them to `native/`.
+
+### Added
+
+- Enhanced `rasterizeSvg` with optional scaling and terminal-cell padding, allowing SVGs to render larger while preserving 1:1 display in terminals.
+- Added `OMP_NATIVE_FEATURES` for passing extra Cargo features to local native addon builds; Bazel builds ignore this setting.
+- Added support for cross-compiling macOS native addons from Linux hosts.
+
+### Changed
+
+- macOS addon release stamping now works on any host by refreshing the addon's ad-hoc signature automatically.
+
+### Fixed
+
+- Fixed `tail` failing to print files, or omitting their first 64 KiB, when file sizes were exact multiples of 64 KiB.
+- Fixed `tail` printing nothing, or dropping lines from the file's first 64 KiB, when the file size is an exact multiple of 64 KiB ([#14264](https://github.com/can1357/oh-my-pi/pull/14264) by [@jchanghong023](https://github.com/jchanghong023))
+- Fixed native `sed` and `jq` killing the host process with SIGBUS when an input file is truncated while they read it ([#14613](https://github.com/can1357/oh-my-pi/issues/14613))
+- Fixed `tail -f` piped into a command that exits early (such as `head -n 1` or `grep -m1`) never stopping on macOS ([#14614](https://github.com/can1357/oh-my-pi/issues/14614))
+- Native `sort -u` keeps punctuation-distinct paths under UTF-8 locales instead of silently dropping records ([#14606](https://github.com/can1357/oh-my-pi/issues/14606)).
+
+## [18.6.3] - 2026-10-06
+
+### Breaking Changes
+
+- `isoResolve` now returns a Promise and runs off the JavaScript thread; a backend found available is not re-probed ([#14528](https://github.com/can1357/oh-my-pi/pull/14528) by [@H4vC](https://github.com/H4vC))
+
+### Added
+
+- Added `encodeSixelAsync` and `decodeSixelToPngAsync`, which encode and decode SIXEL off the JavaScript thread ([#14529](https://github.com/can1357/oh-my-pi/pull/14529) by [@H4vC](https://github.com/H4vC))
+- Added `warmBlockParse`, which parses a file for block context off the JavaScript thread so later block-context lookups answer from the cache; files over 4 MiB, which the cache does not keep, are skipped ([#14520](https://github.com/can1357/oh-my-pi/pull/14520) by [@H4vC](https://github.com/H4vC))
+- Added native screenshot region capture without replacing the full-frame coordinate reference, native cancellation generations, and cross-process input/focus ownership.
+- Added operation-scoped physical Escape cancellation on macOS.
+- Added native application discovery/launch, background menus, combined image/AX observations, display targets, bounded held input, task control ownership, and macOS Space movement.
+
+### Changed
+
+- Replaced per-screenshot macOS subprocesses and intermediate PNGs with a persistent ScreenCaptureKit main-loop worker on macOS 14+ and in-process CoreGraphics on macOS 12/13.
+- Read macOS window metadata from one coherent Quartz snapshot instead of re-enumerating the desktop for each window property.
+- Defaulted desktop capture to the focused window's monitor, retaining explicit all-display and display-ID selection.
+- Removed legacy desktop-addon emulation; computer use now requires the current native capture/cancellation API.
+- Sped up the embedded shell on command output that is not valid UTF-8: decoding is linear, so commands printing binary data no longer stall (1 MiB took 14 s), and captured output is decoded once ([#14454](https://github.com/can1357/oh-my-pi/pull/14454) by [@H4vC](https://github.com/H4vC))
+- Sped up edit previews while edit arguments stream: diffs, fuzzy matching and hashline parsing no longer redo or copy all their work for every streamed chunk ([#14520](https://github.com/can1357/oh-my-pi/pull/14520) by [@H4vC](https://github.com/H4vC))
+- Sped up `fuzzyFind`: a cached scan is scored in place instead of being copied on every call ([#14454](https://github.com/can1357/oh-my-pi/pull/14454) by [@H4vC](https://github.com/H4vC))
+- Sped up applying multi-hunk patches and `astEdit` calls with many edits ([#14521](https://github.com/can1357/oh-my-pi/pull/14521) by [@H4vC](https://github.com/H4vC))
+- Sped up `countTokens` on long runs of one kind of character, such as whitespace or letters ([#14454](https://github.com/can1357/oh-my-pi/pull/14454) by [@H4vC](https://github.com/H4vC))
+- Sped up builtins that print many lines (`ls`, `find`, `paste`, `diff`, `cmp`, `wc`, `echo`, `ts`), `while read` and `mapfile` loops over files, and `sed` scripts using `N` ([#14522](https://github.com/can1357/oh-my-pi/pull/14522) by [@H4vC](https://github.com/H4vC))
+- Sped up flowchart and state diagram rendering in `renderMermaidAscii`; a 40-node flowchart renders about 14× faster, with identical output ([#14454](https://github.com/can1357/oh-my-pi/pull/14454) by [@H4vC](https://github.com/H4vC))
+- Sped up `find -type`, `rm -r`, `mkdir -p`, `ls` and `stat`, especially on Windows ([#14523](https://github.com/can1357/oh-my-pi/pull/14523) by [@H4vC](https://github.com/H4vC))
+- Sped up `sed` scripts that use regular expressions, `printf` output, and `sort -`, which now reads standard input directly instead of copying it to a temporary file ([#14454](https://github.com/can1357/oh-my-pi/pull/14454) by [@H4vC](https://github.com/H4vC))
+- Sped up `cp` and `mv` of directory trees; `mv` within one filesystem no longer walks the moved tree first ([#14524](https://github.com/can1357/oh-my-pi/pull/14524) by [@H4vC](https://github.com/H4vC))
+- Staging files or hunks keeps the git index's file stat cache, so the next status check no longer re-reads every tracked file; staging many files rewrites the index once ([#14454](https://github.com/can1357/oh-my-pi/pull/14454) by [@H4vC](https://github.com/H4vC))
+- `pidwait` and PTY sessions wait for process exit and cancellation events instead of polling ([#14526](https://github.com/can1357/oh-my-pi/pull/14526) by [@H4vC](https://github.com/H4vC))
+- Applying a patch to the worktree reads only the files the patch touches ([#14454](https://github.com/can1357/oh-my-pi/pull/14454) by [@H4vC](https://github.com/H4vC))
+- Sped up `listWorkspace`, `fuzzyFind` with followed symlinks, and `fd`; the file-mention scan cache releases expired entries sooner ([#14527](https://github.com/can1357/oh-my-pi/pull/14527) by [@H4vC](https://github.com/H4vC))
+- Sped up parsing of large hashline edits ([#14454](https://github.com/can1357/oh-my-pi/pull/14454) by [@H4vC](https://github.com/H4vC))
+- Sped up copy-on-write task isolation setup on reflink (Linux) and ReFS (Windows) volumes ([#14528](https://github.com/can1357/oh-my-pi/pull/14528) by [@H4vC](https://github.com/H4vC))
+- `Process.waitForExit()` on a single process waits for the operating system's exit notification instead of polling every 50 ms ([#14454](https://github.com/can1357/oh-my-pi/pull/14454) by [@H4vC](https://github.com/H4vC))
+- Reduced memory and copying in `renderMermaidAscii`, snapcompact rendering and single-display desktop screenshots ([#14529](https://github.com/can1357/oh-my-pi/pull/14529) by [@H4vC](https://github.com/H4vC))
+- `DesktopSession.capabilities` no longer blocks behind a running capture or input operation: while one runs, it answers from the capabilities read by the latest capture or capabilities call; otherwise it reads them live ([#14529](https://github.com/can1357/oh-my-pi/pull/14529) by [@H4vC](https://github.com/H4vC))
+- Native OAuth logins are detected as soon as the browser redirects, without polling every 20 ms ([#14531](https://github.com/can1357/oh-my-pi/pull/14531) by [@H4vC](https://github.com/H4vC))
+- Reduced the memory used by the local completion model's tokenizer ([#14533](https://github.com/can1357/oh-my-pi/pull/14533) by [@H4vC](https://github.com/H4vC))
+- Long lines cut by the lint, gt and system output minimizers now end in `…[+N]`, showing how many characters were dropped ([#14532](https://github.com/can1357/oh-my-pi/pull/14532) by [@H4vC](https://github.com/H4vC))
+- Reduced the memory used by tokenizer tables and by counting Claude tokens on long inputs ([#14530](https://github.com/can1357/oh-my-pi/pull/14530) by [@H4vC](https://github.com/H4vC))
+
+### Fixed
+
+- Rejected stale display-layout coordinates before pointer input and zoom, and preserved the previous coordinate frame when a capture is canceled.
+- Released held input on cancellation and refused competing native mutations before dispatch.
+- Fixed `umask` in the embedded shell changing the host process's umask; the mask now belongs to the shell, applies to files created by redirections, builtins such as `touch`, `mkdir` and `cp`, and external commands, and a subshell's `umask` no longer leaks out ([#14454](https://github.com/can1357/oh-my-pi/pull/14454) by [@H4vC](https://github.com/H4vC))
+- Fixed diff hunk headers sometimes naming a different enclosing function than `git diff` does ([#14521](https://github.com/can1357/oh-my-pi/pull/14521) by [@H4vC](https://github.com/H4vC))
+- Fixed `enable exec` and `enable suspend` restoring builtins that replace or stop the host process ([#14454](https://github.com/can1357/oh-my-pi/pull/14454) by [@H4vC](https://github.com/H4vC))
+- Fixed `ls -t` and `ls -S` listing entries with equal times or sizes in arbitrary order, and `ls --group-directories-first` scrambling entries within each group; ties now sort by name as in GNU `ls` ([#14523](https://github.com/can1357/oh-my-pi/pull/14523) by [@H4vC](https://github.com/H4vC))
+- Fixed `rm -r` and `rm -d` on Windows failing on a directory that has the read-only attribute ([#14523](https://github.com/can1357/oh-my-pi/pull/14523) by [@H4vC](https://github.com/H4vC))
+- Fixed `declare -r` listing only readonly variables that were also traced, and `declare -t` listing every variable ([#14454](https://github.com/can1357/oh-my-pi/pull/14454) by [@H4vC](https://github.com/H4vC))
+- Fixed `sed` regular expressions treating `\b` as a backspace instead of a word boundary ([#14454](https://github.com/can1357/oh-my-pi/pull/14454) by [@H4vC](https://github.com/H4vC))
+- Fixed `mv` between filesystems losing modification times, modes, ownership, subdirectory extended attributes and hard links, failing on sockets, and removing source symlinks when copying an entry failed ([#14524](https://github.com/can1357/oh-my-pi/pull/14524) by [@H4vC](https://github.com/H4vC))
+- Fixed `sort` reading standard input again for each repeated `-` operand ([#14454](https://github.com/can1357/oh-my-pi/pull/14454) by [@H4vC](https://github.com/H4vC))
+- Fixed `sort` collating text only on its first run in a session and taking its collation order, decimal point and thousands separator from omp's own locale instead of the shell's `LC_ALL`, `LC_COLLATE`, `LC_NUMERIC` and `LANG`, and `sort --parallel` changing the host's thread pool: `--parallel=N` now limits that sort to N threads and rejects invalid counts as GNU sort does ([#14525](https://github.com/can1357/oh-my-pi/pull/14525) by [@H4vC](https://github.com/H4vC))
+- Fixed `tac` crashing omp when the file it read was truncated at the same time ([#14525](https://github.com/can1357/oh-my-pi/pull/14525) by [@H4vC](https://github.com/H4vC))
+- Fixed `tail -f` piped into a command that exits early (such as `grep -m1`) never stopping, including when following provider-backed paths ([#14525](https://github.com/can1357/oh-my-pi/pull/14525) by [@H4vC](https://github.com/H4vC))
+- Fixed run cancellation on Windows terminating an unrelated older process when the cancelled command reused the process ID of that process's exited parent ([#14454](https://github.com/can1357/oh-my-pi/pull/14454) by [@H4vC](https://github.com/H4vC))
+- Fixed staging hunks and stashing clearing the index's skip-worktree flags, so files outside a sparse checkout no longer show as deleted afterwards ([#14454](https://github.com/can1357/oh-my-pi/pull/14454) by [@H4vC](https://github.com/H4vC))
+- Fixed the `psql` output minimizer listing every table row whose first column began with a word like `ERROR` above the table, instead of applying the row limit ([#14454](https://github.com/can1357/oh-my-pi/pull/14454) by [@H4vC](https://github.com/H4vC))
+- Fixed a PTY command hanging forever when its output callback stopped consuming output; the bridge now disconnects after the stall timeout like the shell bridge ([#14526](https://github.com/can1357/oh-my-pi/pull/14526) by [@H4vC](https://github.com/H4vC))
+- Fixed `Process.args()` on Windows returning an empty list for elevated processes when the caller is not elevated ([#14526](https://github.com/can1357/oh-my-pi/pull/14526) by [@H4vC](https://github.com/H4vC))
+- Fixed strings passed to native functions sometimes losing their last characters when they ended in non-ASCII text (seen as `highlightCode` dropping the end of long lines) ([#14454](https://github.com/can1357/oh-my-pi/pull/14454) by [@H4vC](https://github.com/H4vC))
+- Fixed `renderMermaidAscii` hanging and running out of memory on an `xychart` axis whose range is finer than floating-point precision ([#14454](https://github.com/can1357/oh-my-pi/pull/14454) by [@H4vC](https://github.com/H4vC))
+- Fixed copied task isolation trees on Windows turning directory symlinks into file symlinks ([#14528](https://github.com/can1357/oh-my-pi/pull/14528) by [@H4vC](https://github.com/H4vC))
+- Fixed `getWorkProfile()` attributing async work to the wrong region or dropping it ([#14454](https://github.com/can1357/oh-my-pi/pull/14454) by [@H4vC](https://github.com/H4vC))
+- Fixed `read` and `mapfile` in the embedded shell treating Ctrl-C and Ctrl-D bytes in a file or pipe as an interrupt or end of input (`printf 'a\003b\n' | read -r x` failed, `printf '\004x\n' | mapfile` stored nothing); they are keys only when standard input is a terminal ([#14522](https://github.com/can1357/oh-my-pi/pull/14522) by [@H4vC](https://github.com/H4vC))
+- Fixed `read` storing each byte of UTF-8 input as a separate character (`é` became `Ã©`); `read -n` and `read -N` now count characters instead of bytes, as bash does ([#14522](https://github.com/can1357/oh-my-pi/pull/14522) by [@H4vC](https://github.com/H4vC))
+- Fixed `read -d` with a multibyte delimiter never matching; it stops at the delimiter's first byte, as bash does ([#14522](https://github.com/can1357/oh-my-pi/pull/14522) by [@H4vC](https://github.com/H4vC))
+- Fixed `echo -e -E` expanding escapes; the later option wins, as in bash ([#14522](https://github.com/can1357/oh-my-pi/pull/14522) by [@H4vC](https://github.com/H4vC))
+- Fixed `mapfile -O` writing into a readonly array; it now fails before reading any input, as bash does ([#14522](https://github.com/can1357/oh-my-pi/pull/14522) by [@H4vC](https://github.com/H4vC))
+- Fixed `computer` element refs expiring after two `ax()` reads of a window while the element was still there: an element now keeps its `[ref=eN]` across `ax()` and `find()` reads, even after missing a single snapshot. An element whose role or label changes gets a new ref, and its old ref keeps working until it expires; on Windows, an element that reuses a gone element's `RuntimeId` gets a new ref, and one whose `RuntimeId` cannot be read gets a new ref on every read ([#14485](https://github.com/can1357/oh-my-pi/pull/14485) by [@will-bogusz](https://github.com/will-bogusz))
+
+## [18.6.2] - 2026-10-04
+
+### Fixed
+
+- Fixed short snapcompact PNGs being emitted below the minimum dimensions accepted by some vision backends ([#14355](https://github.com/can1357/oh-my-pi/issues/14355)).
+
+## [18.6.1] - 2026-10-04
+
+### Fixed
+
+- Fixed concurrent searches through host-provided filesystem callbacks so they no longer starve other asynchronous filesystem operations, and ensured canceled searches release promptly.
+
+## [18.5.1] - 2026-10-03
+
+### Fixed
+
+- Fixed macOS computer-use scrolling so takeover and desktop scroll actions move iPhone Mirroring and other pixel-forwarding windows reliably, with smooth mouse-like wheel steps.
+- Fixed macOS computer-use value entry for date and time controls, including Calendar date pickers, with support for ISO 8601 dates and date-times and clear validation for unsupported formats.
+- Fixed macOS computer-use value entry for popup buttons, allowing options to be selected by title with confirmation and reporting available options when a title is not found.
+- Fixed macOS accessibility values for checkboxes, radio buttons, and radio groups so snapshots, attributes, and window information return usable numbers, titles, and referenced element values instead of debug representations.
+
+## [18.5.0] - 2026-10-03
+
+### Fixed
+
+- Fixed Ctrl+V on Windows sometimes pasting text with a few characters replaced by unrelated glyphs (for example `https://` turning into `՞ttp缀難//`); clipboard reads and writes no longer run at the same time ([#14144](https://github.com/can1357/oh-my-pi/pull/14144) by [@H4vC](https://github.com/H4vC))
+
 ## [18.4.10] - 2026-10-02
 
 ### Fixed
@@ -607,7 +769,7 @@
 
 ### Fixed
 
-- Fixed the pi-natives version sentinel emitting "reinstall to re-sync" when a long-lived process survives an in-place upgrade: the loader now detects that the resident addon exposes a *prior* release's sentinel and reports "omp was upgraded while this session was running — restart to pick up the new version (disk is already consistent)" instead of misdiagnosing it as a stale on-disk file ([#4812](https://github.com/can1357/oh-my-pi/issues/4812)).
+- Fixed the pi-natives version sentinel emitting "reinstall to re-sync" when a long-lived process survives an in-place upgrade: the loader now detects that the resident addon exposes a _prior_ release's sentinel and reports "omp was upgraded while this session was running — restart to pick up the new version (disk is already consistent)" instead of misdiagnosing it as a stale on-disk file ([#4812](https://github.com/can1357/oh-my-pi/issues/4812)).
 
 ## [17.0.0] - 2026-07-15
 
@@ -766,7 +928,7 @@
 
 ### Fixed
 
-- Fixed native shell execution reporting `pi-natives:command: syntax error at end of input` for a valid `&&`/`;` chain whose later pipeline stage is a compound command, e.g. `echo x && git log | while read h; do …; done | head`. The output minimizer's segmented-chain runner rebuilds each chain segment from the brush-parser AST via `pipeline.to_string()` and re-executes that string, but `simple_segment` only validated the *first* pipeline stage — so a compound later stage (`while`/`for`/`if`/subshell) was re-serialized without its terminator (`Display` drops it) and re-run as broken shell. `simple_segment` now requires every stage to be a `Display`-safe simple command, and — closing the recurring class of brush `Display` round-trip divergences (here-doc close-tag quoting, multi-byte char/byte offsets) at its root — each reconstructed segment is re-parsed and must match the original pipeline shape before the chain runner executes it; any divergence runs the command whole via the unsegmented path instead of corrupting it.
+- Fixed native shell execution reporting `pi-natives:command: syntax error at end of input` for a valid `&&`/`;` chain whose later pipeline stage is a compound command, e.g. `echo x && git log | while read h; do …; done | head`. The output minimizer's segmented-chain runner rebuilds each chain segment from the brush-parser AST via `pipeline.to_string()` and re-executes that string, but `simple_segment` only validated the _first_ pipeline stage — so a compound later stage (`while`/`for`/`if`/subshell) was re-serialized without its terminator (`Display` drops it) and re-run as broken shell. `simple_segment` now requires every stage to be a `Display`-safe simple command, and — closing the recurring class of brush `Display` round-trip divergences (here-doc close-tag quoting, multi-byte char/byte offsets) at its root — each reconstructed segment is re-parsed and must match the original pipeline shape before the chain runner executes it; any divergence runs the command whole via the unsegmented path instead of corrupting it.
 
 ## [16.0.7] - 2026-06-18
 
@@ -806,7 +968,7 @@
 
 - Fixed `pi-natives` deadlocking at addon load (`dlopen` hang) on some Linux hosts. The load-time Tokio runtime install added in 15.12.6 ran inside `#[module_init]`, which executes while the dynamic-loader lock is held; building the multi-thread runtime there eagerly spawns worker threads, and a fresh worker blocking to acquire the loader lock the init thread still owns deadlocks the whole load (every native consumer hangs at startup). The runtime is now built from an exported `__ompInstallTokioRuntime` that the JS loader calls once, immediately after `dlopen` returns and before any async native runs; `#[module_init]` only installs the crash handler. napi-rs materializes its runtime lazily on first async use (`RT` is a `LazyLock`) and `create_custom_tokio_runtime` only records the runtime, so the post-load install is still adopted — preserving the Windows commit-limit thread probing/back-off from 15.12.6 without spawning under the loader lock.
 - Fixed `blockRangeAt` (and thus the edit tool's `replace block` / `delete block` / `insert after block` ops) returning no block for a construct whose opening line follows a blank line — most visibly in Swift, where `replace block` on a SwiftUI `var body: some View {` (or any statement/declaration after a blank line) failed with "could not resolve a syntactic block… (unsupported language, blank/closer line, or parse error)". tree-sitter-swift inserts a zero-width separator node at the start of a statement that follows a blank line; the resolver queried the first content column with a zero-width point range, which `ts_node_named_descendant_for_point_range` absorbs into that invisible node and bubbles back up to the enclosing body (or the file root), so no block was found. The query now spans the first content character (a one-column-wide range) so it skips zero-width nodes and descends into the node that actually begins on the line.
-- Fixed native shell execution reporting `unterminated here document sequence` for a multi-command line that contains a here-doc with a quoted or escaped delimiter (`<<'TAG'`, `<<"TAG"`, `<<\TAG`) followed by another command (e.g. a `sqlite3 … <<'SQL' … SQL` query followed by an `echo`/second command). The output minimizer's segmented-chain runner rebuilds each `&&`/`;`/newline segment from the brush-parser AST via `pipeline.to_string()`, and that `Display` impl re-emits a quoted/escaped here-doc's *closing* delimiter with its quotes intact (`'SQL'` instead of the required bare `SQL`) — an invalid close tag that the re-run segment never matches. Here-doc-bearing pipelines are now ineligible for segmentation, so the command runs whole via the unsegmented path (where the executor parses it correctly); a lone here-doc was unaffected because it was never segmented.
+- Fixed native shell execution reporting `unterminated here document sequence` for a multi-command line that contains a here-doc with a quoted or escaped delimiter (`<<'TAG'`, `<<"TAG"`, `<<\TAG`) followed by another command (e.g. a `sqlite3 … <<'SQL' … SQL` query followed by an `echo`/second command). The output minimizer's segmented-chain runner rebuilds each `&&`/`;`/newline segment from the brush-parser AST via `pipeline.to_string()`, and that `Display` impl re-emits a quoted/escaped here-doc's _closing_ delimiter with its quotes intact (`'SQL'` instead of the required bare `SQL`) — an invalid close tag that the re-run segment never matches. Here-doc-bearing pipelines are now ineligible for segmentation, so the command runs whole via the unsegmented path (where the executor parses it correctly); a lone here-doc was unaffected because it was never segmented.
 - Fixed native addon loading leaving stale `~/.omp/natives/<version>` cache directories behind after updates; successful loads now remove older version directories best-effort.
 - Fixed Linux source-built native addons hanging during package import by keeping the Windows-only Tokio worker probe out of non-Windows module initialization ([#2553](https://github.com/can1357/oh-my-pi/issues/2553)).
 - Fixed `pi-iso` Windows clippy failures in symlink placeholder metadata, block-clone path resolution, and readonly cleanup handling ([#2379](https://github.com/can1357/oh-my-pi/pull/2379) by [@oldschoola](https://github.com/oldschoola)).
@@ -815,7 +977,7 @@
 
 ### Fixed
 
-- Fixed `pi-natives` aborting the whole process at addon load on memory-constrained Windows hosts (`OS can't spawn worker thread`, typically OS error 1455 — pagefile/commit limit). napi-rs builds its own Tokio runtime with one eagerly-spawned worker per CPU, and that spawn *panics* rather than erroring, so under `panic = "abort"` the failure was uncatchable. The addon now installs its own runtime at load: it probes how many threads the OS will actually grant (starting from the Tokio default, clamped to a small ceiling since CPU-heavy native work runs on libuv/Rayon and Tokio's separate blocking pool, not the scheduler workers), sizes the multi-thread runtime to the probed count, and falls back to a current-thread runtime if not even one worker can be spawned — no panic on any path.
+- Fixed `pi-natives` aborting the whole process at addon load on memory-constrained Windows hosts (`OS can't spawn worker thread`, typically OS error 1455 — pagefile/commit limit). napi-rs builds its own Tokio runtime with one eagerly-spawned worker per CPU, and that spawn _panics_ rather than erroring, so under `panic = "abort"` the failure was uncatchable. The addon now installs its own runtime at load: it probes how many threads the OS will actually grant (starting from the Tokio default, clamped to a small ceiling since CPU-heavy native work runs on libuv/Rayon and Tokio's separate blocking pool, not the scheduler workers), sizes the multi-thread runtime to the probed count, and falls back to a current-thread runtime if not even one worker can be spawned — no panic on any path.
 
 ## [15.12.4] - 2026-06-13
 

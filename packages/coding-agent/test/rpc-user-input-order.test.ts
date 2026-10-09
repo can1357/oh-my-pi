@@ -45,6 +45,17 @@ test("a prompt accepted after abort stays current", () => {
 	expect(gate.isCurrent(prompt)).toBe(true);
 });
 
+test("abort_and_restore_queue invalidates input accepted before it, like abort", () => {
+	const gate = new RpcUserInputGate();
+	const before = { type: "steer", message: "still admitting" } as const;
+	gate.accept(before);
+	gate.accept({ type: "abort_and_restore_queue" });
+	const after = { type: "prompt", message: "after" } as const;
+	gate.accept(after);
+	expect(gate.isCurrent(before)).toBe(false);
+	expect(gate.isCurrent(after)).toBe(true);
+});
+
 test("later input does not start until the earlier submission's work settles", async () => {
 	const gate = new RpcUserInputGate();
 	const release = Promise.withResolvers<void>();

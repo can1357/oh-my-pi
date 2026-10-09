@@ -169,6 +169,7 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	"requires-thinking-as-text": wire("requiresThinkingAsText", ["openai"]),
 	"requires-tool-result-name": wire("requiresToolResultName", ["openai"]),
 	"strict-responses-pairing": wire("strictResponsesPairing", ["openai-responses"]),
+	"stateful-responses": wire("statefulResponses", ["openai-responses"]),
 	"requires-reasoning-off-juice-instruction": wire("requiresReasoningOffJuiceInstruction", ["openai-responses"]),
 	"supports-all-turns-reasoning-context": wire("supportsAllTurnsReasoningContext", ["openai-responses"]),
 	"supports-configuration-update": wire("supportsConfigurationUpdate", ["openai-responses"]),
@@ -194,6 +195,7 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	"supports-reasoning-effort": wire("supportsReasoningEffort", OAI),
 	"supports-reasoning-params": wire("supportsReasoningParams", OAI),
 	"supports-reasoning-summary": wire("supportsReasoningSummary", ["openai-responses"]),
+	"store-responses": wire("storeResponses", ["openai-responses"]),
 	"supports-store": wire("supportsStore", ["openai"]),
 	"supports-strict-mode": wire("supportsStrictMode", OAI),
 	"supports-tool-choice": wire("supportsToolChoice", OAI),
@@ -227,7 +229,7 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	"allow-anthropic-header-overrides": wire("allowAnthropicHeaderOverrides", ["anthropic"]),
 	"disable-adaptive-thinking": wire("disableAdaptiveThinking", ["anthropic"]),
 	"disable-strict-tools": wire("disableStrictTools", ["anthropic"]),
-	"disabled-thinking": wire("disabledThinking", ["anthropic"], "scalar", ["omit", "disabled", "adaptive"]),
+	"disabled-thinking": wire("disabledThinking", ["anthropic", "bedrock"], "scalar", ["omit", "disabled", "adaptive"]),
 	"effort-beta": wire("effortBeta", ["anthropic"]),
 	"escape-builtin-tool-names": wire("escapeBuiltinToolNames", ["anthropic"]),
 	"fast-mode": wire("fastMode", ["anthropic"]),
@@ -259,7 +261,7 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	// ── wire: devin-agent ──
 	"model-router": wire("modelRouter", ["devin"]),
 	"supports-parallel-tool-calls": wire("supportsParallelToolCalls", ["devin"]),
-	"trust-explicit-thinking-only": wire("trustExplicitThinkingOnly", ["devin"]),
+	"trust-explicit-thinking-only": wire("trustExplicitThinkingOnly", [...OAI, "devin"]),
 
 	// ── wire: google APIs ──
 	"antigravity-claude-tool-mode": wire("antigravityClaudeToolMode", ["google"]),
@@ -293,7 +295,7 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	"stream-idle-timeout-ms": wire("streamIdleTimeoutMs", [...OAI, "anthropic", "bedrock", "google"]),
 	"strip-image-input": wire("stripImageInput", [...OAI, "anthropic", "google"]),
 	"supports-forced-tool-choice": wire("supportsForcedToolChoice", [...OAI, "anthropic", "bedrock"]),
-	"supports-sampling-params": wire("supportsSamplingParams", [...OAI, "anthropic"]),
+	"supports-sampling-params": wire("supportsSamplingParams", [...OAI, "anthropic", "bedrock", "devin", "google"]),
 	"thinking-loop-guard": wire("thinkingLoopGuard", [...OAI, "anthropic", "google"], "scalar", [
 		"gemini",
 		"deepseek",
@@ -304,7 +306,7 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	"thinking-default-level": { key: "defaultLevel", set: "thinking", shape: "scalar", values: EFFORTS },
 	"thinking-effort-budgets": { key: "effortBudgets", set: "thinking", shape: "object" },
 	"thinking-effort-map": { key: "effortMap", set: "thinking", shape: "object" },
-	"thinking-efforts": { key: "efforts", set: "thinking", shape: "array", values: EFFORTS },
+	"thinking-efforts": { key: "efforts", set: "thinking", shape: "array", values: EFFORTS, emptyArray: true },
 	"thinking-mode": {
 		key: "mode",
 		set: "thinking",
@@ -390,10 +392,19 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	},
 	"web-search-model": { key: "webSearchModel", set: "catalog", shape: "scalar" },
 	"hosted-image": { key: "hostedImage", set: "catalog", shape: "scalar", values: [true, false] },
+	/** How the model line bills an input image; shape and formulas in `./image-tokenization`. */
+	"image-tokenization": { key: "imageTokenization", set: "catalog", shape: "object" },
 	"image-model": { key: "imageModel", set: "catalog", shape: "scalar" },
+	"inline-image-byte-budget": { key: "inlineImageByteBudget", set: "catalog", shape: "scalar" },
 	"limits-patch": { key: "limitsPatch", set: "catalog", shape: "object" },
 	"long-context-cost": { key: "longContext", set: "catalog", shape: "object" },
 	"prompt-cache": { key: "promptCache", set: "catalog", shape: "object" },
+	/**
+	 * Prompt-cache lookback in block positions: how far back from a cache
+	 * breakpoint the provider looks for an earlier request's cache entry.
+	 * Unassigned: no known lookback bound.
+	 */
+	"prompt-cache-lookback": { key: "promptCacheLookback", set: "catalog", shape: "scalar" },
 	"long-usage-limit-fallback": { key: "longUsageLimitFallback", set: "catalog", shape: "scalar" },
 	"max-context-window": { key: "maxContextWindow", set: "catalog", shape: "scalar" },
 	"pricing-status": {
