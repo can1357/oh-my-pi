@@ -83,7 +83,7 @@ function createHub(): ModelHubComponent {
 
 function pickerProps(hub: ModelHubComponent): TspPickerProps {
 	const root = hub.describe(pickerCx);
-	if (root.k !== "picker" || !root.p) throw new Error(`expected a picker root, got ${root.k}`);
+	if (root?.k !== "picker" || !root.p) throw new Error(`expected a picker root, got ${root?.k}`);
 	return root.p;
 }
 
