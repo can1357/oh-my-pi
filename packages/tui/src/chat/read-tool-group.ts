@@ -771,12 +771,17 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 		return this.#native.get(key, () => {
 			const describeEntries = (entries: readonly ReadEntry[]): NativeNode =>
 				dataFirst ? this.#describeTool(entries) : this.#describeGroup(entries);
+			// Passive context sits below the card, outside its preview clamp, as on ordinary tool cards.
+			const context = describeToolAdditionalContext(this.#additionalContext, this.#expanded);
+			const withContext = (described: NativeNode): NativeNode =>
+				context.length > 0 ? col([described, ...context]) : described;
 			const entries = [...this.#entries.values()];
 			const drawn = new Map(entries.map(entry => [entry, entry.presentation.draw()]));
 			const full = entries.filter(entry => drawn.get(entry)!.mode === "full");
 			const visible = entries.filter(entry => drawn.get(entry)!.mode !== "hidden");
-			if (full.length === entries.length) return withHidden(describeEntries(full), !this.#toolActivityVisible);
-			if (visible.length === 0) return withHidden(describeEntries(entries), true);
+			if (full.length === entries.length)
+				return withHidden(withContext(describeEntries(full)), !this.#toolActivityVisible);
+			if (visible.length === 0) return withHidden(withContext(describeEntries(entries)), true);
 			const children: NativeNode[] = [];
 			let fullDrawn = false;
 			for (const entry of visible) {
@@ -794,7 +799,7 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 				}
 			}
 			// Always the column: each child keeps its key, so its toggle reaches only its own reads.
-			return withHidden(col(children, { role: "omp.tool.read" }), !this.#toolActivityVisible);
+			return withHidden(col([...children, ...context], { role: "omp.tool.read" }), !this.#toolActivityVisible);
 		});
 	}
 
@@ -853,7 +858,6 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 				if (usage) body.push(this.#nativeUsage(usage, `u${entry.toolCallId}`));
 			}
 		}
-		body.push(...describeToolAdditionalContext(this.#additionalContext, this.#expanded));
 		return node(
 			"tool",
 			{
@@ -1035,7 +1039,6 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 			const usage = this.#usageRows.get(entry.toolCallId);
 			if (usage) children.push(this.#nativeUsage(usage, `u${entry.toolCallId}`));
 		}
-		children.push(...describeToolAdditionalContext(this.#additionalContext, this.#expanded));
 		return card(
 			{
 				role: "omp.tool.read",
