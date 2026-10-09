@@ -1852,6 +1852,14 @@ function mapOptionsForApi<TApi extends Api>(
 		fetch: options?.fetch,
 		fallbacks: options?.fallbacks,
 		acceptEmptyResponse: options?.acceptEmptyResponse,
+		cursorExcludeTools: options?.cursorExcludeTools,
+		cursorLocalCliMode: options?.cursorLocalCliMode,
+		cursorDevExperimentOverrides: options?.cursorDevExperimentOverrides,
+		cursorClientSupportsInlineImages: options?.cursorClientSupportsInlineImages,
+		cursorClientSupportsRoutedModelUpdate: options?.cursorClientSupportsRoutedModelUpdate,
+		cursorClientSupportsPromptContextUsageRpc: options?.cursorClientSupportsPromptContextUsageRpc,
+		cursorRunId: options?.cursorRunId,
+		cursorAgentSessionId: options?.cursorAgentSessionId,
 		anthropicPrefixMismatchBehavior: options?.anthropicPrefixMismatchBehavior,
 		anthropicCompaction: options?.anthropicCompaction,
 		anthropicSlowMode: options?.anthropicSlowMode,
@@ -2294,13 +2302,19 @@ function mapOptionsForApi<TApi extends Api>(
 				...base,
 				execHandlers,
 				onToolResult,
-				externalToolExecutor: options?.cursorExternalToolExecutor,
+				toolChoice: options?.toolChoice,
+				// Upstream renamed the flag; accept the PR spelling as fallback
+				// for older callers until the option is removed.
+				externalToolExecutor: options?.cursorExternalToolExecutor ?? options?.cursorToolPassthrough,
+				cursorExcludeTools: options?.cursorExcludeTools,
+				cursorLocalCliMode: options?.cursorLocalCliMode,
+				cursorDevExperimentOverrides: options?.cursorDevExperimentOverrides,
 				cursorClientSupportsInlineImages: options?.cursorClientSupportsInlineImages,
 				cursorClientSupportsRoutedModelUpdate: options?.cursorClientSupportsRoutedModelUpdate,
 				cursorClientSupportsPromptContextUsageRpc: options?.cursorClientSupportsPromptContextUsageRpc,
 				cursorRunId: options?.cursorRunId,
 				cursorAgentSessionId: options?.cursorAgentSessionId,
-				wireModelId: resolveWireModelId(cursorModel, effort),
+				wireModelId: options?.cursorAutoMode ? "default" : resolveWireModelId(cursorModel, effort),
 			});
 		}
 

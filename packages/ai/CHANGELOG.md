@@ -4,6 +4,8 @@
 
 ### Added
 
+- Added Cursor Auto routing and client-owned tool passthrough with routing-aware gateway model labels ([#10099](https://github.com/can1357/oh-my-pi/pull/10099) by [@jroth1111](https://github.com/jroth1111)).
+
 - Added routing-session cleanup for OpenAI Responses and Codex while preserving shared provider fallbacks ([#14334](https://github.com/can1357/oh-my-pi/pull/14334) by [@iliaal](https://github.com/iliaal)).
 
 ### Fixed

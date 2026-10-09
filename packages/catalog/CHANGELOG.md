@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added Cursor Auto gateway selection and CLI-default discovery without replacing failed authoritative catalogs ([#10099](https://github.com/can1357/oh-my-pi/pull/10099) by [@jroth1111](https://github.com/jroth1111)).
+
 ### Fixed
 
 - Fixed Cursor roster wire identities and synthetic Auto routing without preventing dynamic effort-family collapsing ([#11324](https://github.com/can1357/oh-my-pi/pull/11324) by [@jroth1111](https://github.com/jroth1111)).

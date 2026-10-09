@@ -1887,6 +1887,26 @@
 			],
 			"x-open": true
 		},
+		"AssistantRoutedModelEvent": {
+			"type": "object",
+			"properties": {
+				"type": {
+					"const": "routed_model"
+				},
+				"model": {
+					"type": "string"
+				},
+				"partial": {
+					"$ref": "#/$defs/AssistantMessage"
+				}
+			},
+			"required": [
+				"type",
+				"model",
+				"partial"
+			],
+			"x-open": true
+		},
 		"AssistantMessageEvent": {
 			"anyOf": [
 				{
@@ -1921,6 +1941,9 @@
 				},
 				{
 					"$ref": "#/$defs/AssistantToolCallEndEvent"
+				},
+				{
+					"$ref": "#/$defs/AssistantRoutedModelEvent"
 				},
 				{
 					"$ref": "#/$defs/AssistantDoneEvent"

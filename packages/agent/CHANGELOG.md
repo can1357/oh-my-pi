@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added forwarding of Cursor routed-model events to agent clients ([#10099](https://github.com/can1357/oh-my-pi/pull/10099) by [@jroth1111](https://github.com/jroth1111)).
+
 ## [18.8.6] - 2026-10-08
 
 ### Added

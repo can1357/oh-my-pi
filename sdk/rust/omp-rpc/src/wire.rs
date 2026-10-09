@@ -2336,6 +2336,49 @@ impl<'de> Deserialize<'de> for AssistantErrorEvent {
 	}
 }
 
+///
+/// Open record: declared fields are decoded leniently (a value that does not fit stays
+/// in `extra`) and every other key is kept in `extra`.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct AssistantRoutedModelEvent {
+	pub model: Option<String>,
+	pub partial: Option<AssistantMessage>,
+	/// Every key not decoded into a declared field.
+	pub extra: Map<String, Value>,
+}
+
+impl Serialize for AssistantRoutedModelEvent {
+	fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+		let mut map = serializer.serialize_map(None)?;
+		if let Some(value) = &self.model {
+			map.serialize_entry("model", value)?;
+		}
+		if let Some(value) = &self.partial {
+			map.serialize_entry("partial", value)?;
+		}
+		for (key, value) in &self.extra {
+			match key.as_str() {
+				"model" if self.model.is_some() => continue,
+				"partial" if self.partial.is_some() => continue,
+				_ => {}
+			}
+			map.serialize_entry(key, value)?;
+		}
+		map.end()
+	}
+}
+
+impl<'de> Deserialize<'de> for AssistantRoutedModelEvent {
+	fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+		let mut extra = Map::<String, Value>::deserialize(deserializer)?;
+		Ok(Self {
+			model: take(&mut extra, "model"),
+			partial: take(&mut extra, "partial"),
+			extra,
+		})
+	}
+}
+
 /// Streaming update for one assistant message, discriminated by `type`.
 #[derive(Debug, Clone, PartialEq)]
 pub enum AssistantMessageEvent {
@@ -2350,6 +2393,7 @@ pub enum AssistantMessageEvent {
 	ToolcallStart(AssistantToolCallStartEvent),
 	ToolcallDelta(AssistantToolCallDeltaEvent),
 	ToolcallEnd(AssistantToolCallEndEvent),
+	RoutedModel(AssistantRoutedModelEvent),
 	Done(AssistantDoneEvent),
 	Error(AssistantErrorEvent),
 }
@@ -2369,6 +2413,7 @@ impl AssistantMessageEvent {
 			Some("toolcall_start") => |value| serde_json::from_value(value).map(Self::ToolcallStart),
 			Some("toolcall_delta") => |value| serde_json::from_value(value).map(Self::ToolcallDelta),
 			Some("toolcall_end") => |value| serde_json::from_value(value).map(Self::ToolcallEnd),
+			Some("routed_model") => |value| serde_json::from_value(value).map(Self::RoutedModel),
 			Some("done") => |value| serde_json::from_value(value).map(Self::Done),
 			Some("error") => |value| serde_json::from_value(value).map(Self::Error),
 			other => {
@@ -2393,6 +2438,7 @@ impl Serialize for AssistantMessageEvent {
 			Self::ToolcallStart(member) => serialize_tagged(member, &[("type", "toolcall_start")], serializer),
 			Self::ToolcallDelta(member) => serialize_tagged(member, &[("type", "toolcall_delta")], serializer),
 			Self::ToolcallEnd(member) => serialize_tagged(member, &[("type", "toolcall_end")], serializer),
+			Self::RoutedModel(member) => serialize_tagged(member, &[("type", "routed_model")], serializer),
 			Self::Done(member) => serialize_tagged(member, &[("type", "done")], serializer),
 			Self::Error(member) => serialize_tagged(member, &[("type", "error")], serializer),
 		}

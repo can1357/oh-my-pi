@@ -493,6 +493,12 @@ class AssistantErrorEvent(TypedDict):
     error: AssistantMessage
 
 
+class AssistantRoutedModelEvent(TypedDict):
+    type: Literal["routed_model"]
+    model: str
+    partial: AssistantMessage
+
+
 class SelectOptionDetail(TypedDict):
     """Presentation metadata aligned positionally with `options`."""
     description: NotRequired[str]
@@ -1588,7 +1594,7 @@ AgentMessage: TypeAlias = UserMessage | DeveloperMessage | AssistantMessage | To
 """A transcript message, discriminated by `role`."""
 
 
-AssistantMessageEvent: TypeAlias = AssistantStartEvent | AssistantTextStartEvent | AssistantTextDeltaEvent | AssistantTextEndEvent | AssistantThinkingStartEvent | AssistantThinkingDeltaEvent | AssistantThinkingEndEvent | AssistantImageEndEvent | AssistantToolCallStartEvent | AssistantToolCallDeltaEvent | AssistantToolCallEndEvent | AssistantDoneEvent | AssistantErrorEvent
+AssistantMessageEvent: TypeAlias = AssistantStartEvent | AssistantTextStartEvent | AssistantTextDeltaEvent | AssistantTextEndEvent | AssistantThinkingStartEvent | AssistantThinkingDeltaEvent | AssistantThinkingEndEvent | AssistantImageEndEvent | AssistantToolCallStartEvent | AssistantToolCallDeltaEvent | AssistantToolCallEndEvent | AssistantRoutedModelEvent | AssistantDoneEvent | AssistantErrorEvent
 """Streaming update for one assistant message, discriminated by `type`."""
 
 
@@ -1744,6 +1750,10 @@ parse_assistant_error_event = cast("Decoder[AssistantErrorEvent]", open_record("
 """Decodes a `AssistantErrorEvent` open record: checks the discriminator and keeps every key."""
 
 
+parse_assistant_routed_model_event = cast("Decoder[AssistantRoutedModelEvent]", open_record("type", frozenset({"routed_model"})))
+"""Decodes a `AssistantRoutedModelEvent` open record: checks the discriminator and keeps every key."""
+
+
 parse_select_option_detail = cast("Decoder[SelectOptionDetail]", open_record(None, None))
 """Decodes a `SelectOptionDetail` open record: checks the discriminator and keeps every key."""
 
@@ -1760,7 +1770,7 @@ parse_agent_message = cast("Decoder[AgentMessage]", open_record("role", frozense
 """Decodes a `AgentMessage` open record: checks the discriminator and keeps every key."""
 
 
-parse_assistant_message_event = cast("Decoder[AssistantMessageEvent]", open_record("type", frozenset({"start", "text_start", "text_delta", "text_end", "thinking_start", "thinking_delta", "thinking_end", "image_end", "toolcall_start", "toolcall_delta", "toolcall_end", "done", "error"})))
+parse_assistant_message_event = cast("Decoder[AssistantMessageEvent]", open_record("type", frozenset({"start", "text_start", "text_delta", "text_end", "thinking_start", "thinking_delta", "thinking_end", "image_end", "toolcall_start", "toolcall_delta", "toolcall_end", "routed_model", "done", "error"})))
 """Decodes a `AssistantMessageEvent` open record: checks the discriminator and keeps every key."""
 
 
@@ -3721,6 +3731,7 @@ __all__ = [
     "AssistantImageEndEvent",
     "AssistantMessage",
     "AssistantMessageEvent",
+    "AssistantRoutedModelEvent",
     "AssistantStartEvent",
     "AssistantTextDeltaEvent",
     "AssistantTextEndEvent",
@@ -3912,6 +3923,7 @@ __all__ = [
     "parse_assistant_image_end_event",
     "parse_assistant_message",
     "parse_assistant_message_event",
+    "parse_assistant_routed_model_event",
     "parse_assistant_start_event",
     "parse_assistant_text_delta_event",
     "parse_assistant_text_end_event",

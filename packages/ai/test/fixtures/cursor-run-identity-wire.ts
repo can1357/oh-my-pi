@@ -110,7 +110,7 @@ async function main(): Promise<void> {
 					requestId: row.requestId,
 					run: {
 						runId: row.run.runId,
-					conversationId: row.run.conversationId,
+						conversationId: row.run.conversationId,
 						conversationGroupId: row.run.conversationGroupId,
 						agentSessionId: row.run.agentSessionId,
 						clientSupportsInlineImages: row.run.clientSupportsInlineImages,

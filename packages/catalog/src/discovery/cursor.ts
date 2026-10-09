@@ -71,6 +71,27 @@ const CursorDecodedResponseSchema = type({
 
 type CursorModelDetailsValue = typeof CursorModelDetailsSchema.infer;
 
+export interface CursorDefaultModel {
+	modelId: string;
+	displayName?: string;
+}
+
+/** Read the CLI default using the current nested ModelDetails wire shape. */
+export async function fetchCursorDefaultModel(
+	options: CursorModelDiscoveryOptions,
+): Promise<CursorDefaultModel | null> {
+	const baseUrl = (options.baseUrl ?? CURSOR_DEFAULT_BASE_URL).replace(/\/+$/, "");
+	const payload = await fetchCursorUnary(
+		baseUrl,
+		CURSOR_GET_DEFAULT_MODEL_PATH,
+		toBinary(GetDefaultModelForCliRequestSchema, create(GetDefaultModelForCliRequestSchema, {})),
+		options,
+		options.timeoutMs ?? 5000,
+	);
+	const model = decodeUnary(GetDefaultModelForCliResponseSchema, payload)?.model;
+	return model?.modelId ? { modelId: model.modelId, displayName: model.displayName } : null;
+}
+
 /** Options for authenticated Cursor model discovery. */
 export interface CursorModelDiscoveryOptions {
 	/** Cursor access token used for bearer authentication. */
@@ -151,6 +172,15 @@ export async function fetchCursorUsableModels(
 			? []
 			: normalizeCursorModels(parsedUsable.models, options.baseUrl, references);
 	const usableModelIds = usable === null ? undefined : new Set(legacyModels.map(model => model.id));
+	if (
+		legacyModels.length > 0 &&
+		defaultModel?.modelId &&
+		!legacyModels.some(model => model.id === defaultModel.modelId)
+	) {
+		legacyModels.push(...normalizeCursorModels([defaultModel], options.baseUrl, references));
+		legacyModels.sort((a, b) => a.id.localeCompare(b.id));
+		usableModelIds?.add(defaultModel.modelId);
+	}
 	if (!available || available.models.length === 0) return legacyModels;
 	const richModels = normalizeRichCursorModels(
 		available.models,

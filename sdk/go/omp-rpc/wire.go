@@ -1575,6 +1575,37 @@ func (v *AssistantErrorEventReason) UnmarshalJSON(data []byte) error {
 	return unknownValue("AssistantErrorEventReason", s)
 }
 
+type AssistantRoutedModelEvent struct {
+	Model   string           `json:"model"`
+	Partial AssistantMessage `json:"partial"`
+	// Extra holds undeclared keys and declared keys whose value did not decode (that field stays zero).
+	// Encoding writes them back, over a declared field with the same key.
+	Extra map[string]json.RawMessage `json:"-"`
+}
+
+func (v *AssistantRoutedModelEvent) UnmarshalJSON(data []byte) error {
+	return decodeWith(data, "AssistantRoutedModelEvent", v.decodeFrom)
+}
+
+func (v *AssistantRoutedModelEvent) decodeFrom(raw map[string]json.RawMessage) error {
+	var out AssistantRoutedModelEvent
+	d := fieldDecoder{raw: raw, owner: "AssistantRoutedModelEvent", open: true}
+	d.constant("type", "routed_model")
+	d.required("model", &out.Model)
+	d.required("partial", &out.Partial)
+	out.Extra = d.rest()
+	if d.err != nil {
+		return d.err
+	}
+	*v = out
+	return nil
+}
+
+func (v AssistantRoutedModelEvent) MarshalJSON() ([]byte, error) {
+	type plain AssistantRoutedModelEvent
+	return encodeObject(plain(v), `"type":"routed_model"`, v.Extra)
+}
+
 // Streaming update for one assistant message, discriminated by `type`.
 type AssistantMessageEvent struct {
 	// Value holds one variant, chosen by "type" on decode.
@@ -1597,6 +1628,7 @@ func (AssistantImageEndEvent) isAssistantMessageEvent()      {}
 func (AssistantToolCallStartEvent) isAssistantMessageEvent() {}
 func (AssistantToolCallDeltaEvent) isAssistantMessageEvent() {}
 func (AssistantToolCallEndEvent) isAssistantMessageEvent()   {}
+func (AssistantRoutedModelEvent) isAssistantMessageEvent()   {}
 func (AssistantDoneEvent) isAssistantMessageEvent()          {}
 func (AssistantErrorEvent) isAssistantMessageEvent()         {}
 
@@ -1637,6 +1669,8 @@ func (v *AssistantMessageEvent) decodeFrom(raw map[string]json.RawMessage) error
 		value, err = decodeVariant[AssistantToolCallDeltaEvent](raw)
 	case "toolcall_end":
 		value, err = decodeVariant[AssistantToolCallEndEvent](raw)
+	case "routed_model":
+		value, err = decodeVariant[AssistantRoutedModelEvent](raw)
 	case "done":
 		value, err = decodeVariant[AssistantDoneEvent](raw)
 	case "error":

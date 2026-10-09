@@ -26,7 +26,9 @@ test("public Cursor dispatch serializes fresh run IDs, flags and hook replacemen
 	expect(first.run.clientSupportsPromptContextUsageRpc).toBe(true);
 	expect(first.run.agentSessionId).toBe("wire-session");
 	expect(second.run.clientSupportsInlineImages).toBe(false);
-		expect(first.run.conversationGroupId).toBe(first.run.conversationId);
+	const conversationId = first.run.conversationId;
+	if (typeof conversationId !== "string" || !conversationId) throw new Error("Wire conversation ID missing");
+	expect(first.run.conversationGroupId).toBe(conversationId);
 	expect(second.run.conversationGroupId).toBe(first.run.conversationGroupId);
 	expect(replaced.run.runId).toBe("hook-run");
 	for (const row of received) expect(row.requestId).toBe(row.run.runId);
