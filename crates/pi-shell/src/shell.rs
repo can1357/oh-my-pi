@@ -31,7 +31,7 @@ use tokio_util::sync::CancellationToken;
 use crate::windows::configure_windows_path;
 use crate::{
 	cancel::{AbortReason, AbortToken, CancelToken},
-	git::git_builtin,
+	git::{GitLayers, git_builtin},
 	minimizer,
 	output_decode::OutputDecoder,
 	process,
@@ -858,11 +858,15 @@ async fn create_session_for_run(
 		}
 	}
 
-	// Opt-in via PI_SMART_GIT: `git worktree add` becomes a copy-on-write clone
-	// through pi-vcs; every other git invocation reaches the binary unchanged
-	// (see `crate::git`).
-	if env_flag(config, "PI_SMART_GIT") {
-		shell.register_builtin("git", git_builtin());
+	// Opt-in `git` layers (see `crate::git`): PI_SMART_GIT makes `git worktree
+	// add` a copy-on-write clone through pi-vcs; PI_GIT_GUARD refuses commands
+	// that discard or move work in a shared checkout. Anything a layer does not
+	// take reaches the binary unchanged.
+	if let Some(git) = git_builtin(GitLayers {
+		smart_worktree: env_flag(config, "PI_SMART_GIT"),
+		guard:          env_flag(config, "PI_GIT_GUARD"),
+	}) {
+		shell.register_builtin("git", git);
 	}
 
 	copy_env_into_shell(&mut shell, std::env::vars_os())?;
@@ -2166,9 +2170,9 @@ fn nohup_builtin_disabled(config: &ShellConfig) -> bool {
 	env_flag(config, "PI_DISABLE_NOHUP_BUILTIN")
 }
 
-/// Reads a boolean builtin switch (`PI_DISABLE_*`, `PI_SMART_GIT`) from the
-/// session environment (preferred) then the process environment. Truthy =
-/// present and not "", "0", or "false".
+/// Reads a boolean builtin switch (`PI_DISABLE_*`, `PI_SMART_GIT`,
+/// `PI_GIT_GUARD`) from the session environment (preferred) then the process
+/// environment. Truthy = present and not "", "0", or "false".
 fn env_flag(config: &ShellConfig, key: &str) -> bool {
 	let raw = config
 		.session_env

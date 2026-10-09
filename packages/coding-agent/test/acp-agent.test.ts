@@ -2565,7 +2565,9 @@ describe("ACP agent", () => {
 			Object.assign(session, {
 				messages: session.sessionManager.buildSessionContext().messages,
 				titleGenerationSignal: new AbortController().signal,
-				generateTitle: (_context: string, _systemPrompt?: string, signal?: AbortSignal) => {
+				renameTitle: (_title?: string, signal?: AbortSignal) => {
+					// A generating rename reserves a title revision, as `AgentSession.renameTitle` does.
+					session.sessionManager.reserveTitleRevision();
 					const inference = inferences[inferenceIndex++];
 					titleSignals.push(signal);
 					inference.started.resolve();

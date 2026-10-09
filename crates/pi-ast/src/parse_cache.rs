@@ -21,10 +21,12 @@ use std::{
 };
 
 use anyhow::{Result, anyhow};
-use ast_grep_core::tree_sitter::LanguageExt;
-use tree_sitter::{Parser, Tree};
+use tree_sitter::Tree;
 
-use crate::language::SupportLang;
+use crate::language::{
+	SupportLang,
+	grammar::{self, GrammarError, LanguageGrammar},
+};
 
 /// Arbitrary fixed seed (golden-ratio constant). Fixed, not random, so a key is
 /// reproducible across calls within a process; it never leaves the process, so
@@ -198,7 +200,9 @@ fn lock() -> MutexGuard<'static, Cache> {
 ///
 /// Semantics match a bare `Parser::new()` / `set_language` / `parse` sequence
 /// exactly: `Err` when the grammar fails to load, `Ok(None)` when `parse`
-/// yields nothing, `Ok(Some(tree))` otherwise. Trees carrying syntax errors are
+/// yields nothing or `lang`'s wasm grammar is not installed (callers treat it
+/// like an unsupported language), `Ok(Some(tree))` otherwise. Trees carrying
+/// syntax errors are
 /// cached like any other — `has_error()` is a property of the tree, so callers
 /// that reject on it reach the identical verdict from a cached tree, and
 /// repeated "does this parse" probes over the same broken file get the speedup
@@ -211,11 +215,14 @@ pub fn parse_cached(code: &str, lang: SupportLang) -> Result<Option<Tree>> {
 	if let Some(tree) = cached {
 		return Ok(Some(tree));
 	}
-	let mut parser = Parser::new();
-	parser
-		.set_language(&lang.get_ts_language())
-		.map_err(|err| anyhow!("Failed to load tree-sitter language: {err}"))?;
-	let Some(tree) = parser.parse(code, None) else {
+	let language = match lang.grammar().load() {
+		Ok(language) => language,
+		Err(GrammarError::NotInstalled { .. }) => return Ok(None),
+		Err(err) => return Err(err.into()),
+	};
+	let Some(tree) = grammar::parse(&language, code)
+		.map_err(|err| anyhow!("Failed to load tree-sitter language: {err}"))?
+	else {
 		return Ok(None);
 	};
 	lock().insert(key, code, &tree);
@@ -262,11 +269,10 @@ mod tests {
 	}
 
 	fn tree_of(code: &str, lang: SupportLang) -> Tree {
-		let mut parser = Parser::new();
-		parser
-			.set_language(&lang.get_ts_language())
-			.expect("grammar loads");
-		parser.parse(code, None).expect("parse produces a tree")
+		let language = lang.grammar().load().expect("grammar loads");
+		grammar::parse(&language, code)
+			.expect("grammar loads")
+			.expect("parse produces a tree")
 	}
 
 	const TS: SupportLang = SupportLang::TypeScript;
