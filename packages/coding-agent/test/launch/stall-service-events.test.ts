@@ -249,6 +249,20 @@ describe("diagnostic observation coverage gaps", () => {
 		});
 	}, 10_000);
 
+	it("retries a rejected empty scope instead of caching an unacknowledged unsubscribe", async () => {
+		await withProtocolServer(async ({ client, requests, rejectNextRequest }) => {
+			const unsubscribe = client.observeOwners(["child-owner"], () => undefined);
+			await client.request({ op: "ping" });
+			rejectNextRequest("scope clear rejected");
+			unsubscribe();
+			await expect(client.request({ op: "ping" })).rejects.toThrow("scope clear rejected");
+			await client.request({ op: "ping" });
+			expect(
+				requests.filter(request => request.observedOwners !== undefined).map(request => request.observedOwners),
+			).toEqual([["child-owner"], [], []]);
+		});
+	}, 10_000);
+
 	it("reports lost coverage once per registration and exposes reconnect registration failures without acking observations", async () => {
 		await withProtocolServer(async ({ client, requests, currentSocket, rejectNextRequest }) => {
 			const gaps: string[] = [];
