@@ -762,6 +762,12 @@ export function resetOpenAICodexHistoryAfterCompaction(options: OpenAICodexCompa
 	metadataSession.reuseTurnForNextRequest = options.compaction.phase !== "standalone_turn";
 }
 
+interface CodexPendingWebSocketPayload {
+	readonly body: RequestBody;
+	readonly hookMayRefreshTurnState: boolean;
+	readonly steeringOwner?: CodexWebSocketConnection;
+}
+
 interface CodexRequestContext {
 	apiKey: string;
 	accountId?: string;
@@ -777,6 +783,7 @@ interface CodexRequestContext {
 	responsesLite: boolean;
 	requestMetadata?: CodexRequestMetadata;
 	transformedBody: RequestBody;
+	pendingWebSocketPayload?: CodexPendingWebSocketPayload;
 	rawRequestDump: RawHttpRequestDump;
 }
 
@@ -1694,7 +1701,11 @@ async function openInitialCodexEventStream(
 	try {
 		return await openCodexSseTransport(model, requestContext, requestSetup, options, websocketState, transformedBody);
 	} catch (error) {
+		const pendingPayload = requestContext.pendingWebSocketPayload;
 		if (!dropRejectedCodexAccessPrograms(transformedBody, model, requestContext.accountId, error)) throw error;
+		if (pendingPayload && requestContext.pendingWebSocketPayload === pendingPayload) {
+			requestContext.pendingWebSocketPayload = undefined;
+		}
 		return openCodexSseTransport(model, requestContext, requestSetup, options, websocketState, transformedBody);
 	}
 }
@@ -1776,6 +1787,7 @@ async function* streamCodexCompactionEvents(
 				completed = true;
 				return;
 			}
+			const pendingPayload = requestContext.pendingWebSocketPayload;
 			const failure = bufferedEvents.findLast(event => event.type === "error" || event.type === "response.failed");
 			if (
 				failure !== undefined &&
@@ -1786,6 +1798,9 @@ async function* streamCodexCompactionEvents(
 					createCodexProviderStreamError(failure),
 				)
 			) {
+				if (pendingPayload && requestContext.pendingWebSocketPayload === pendingPayload) {
+					requestContext.pendingWebSocketPayload = undefined;
+				}
 				const replay = await openCodexSseTransport(model, requestContext, requestSetup, options, websocketState);
 				if (websocketState) websocketState.lastTransport = replay.transport;
 				yield* drainCodexCompactionEvents(replay.eventStream, requestContext);
@@ -1851,8 +1866,13 @@ async function openCodexWebSocketTransport(
 }> {
 	const transformedBody = requestContext.transformedBody;
 	const fullInput = Array.isArray(transformedBody.input) ? transformedBody.input : undefined;
-	const steered = websocketState.acceptedSteering;
-	websocketState.acceptedSteering = undefined;
+	const pendingPayload = requestContext.pendingWebSocketPayload;
+	let pendingPayloadForRequest = pendingPayload;
+	if (pendingPayload?.steeringOwner && websocketState.connection === pendingPayload.steeringOwner) {
+		closeCodexSteeringOwner(websocketState, pendingPayload.steeringOwner);
+	}
+	const steered = pendingPayload ? undefined : websocketState.acceptedSteering;
+	if (!pendingPayload) websocketState.acceptedSteering = undefined;
 	const payloadHook = options?.onPayload;
 	const hasPayloadHook = payloadHook !== undefined;
 	const timeouts: CodexWebSocketRequestTimeouts = {
@@ -1869,11 +1889,11 @@ async function openCodexWebSocketTransport(
 		return attestationHeader;
 	};
 
-	let chainedBody = buildCodexChainedRequestBody(transformedBody, websocketState);
+	let chainedBody = pendingPayload?.body ?? buildCodexChainedRequestBody(transformedBody, websocketState);
 	let candidateGeneration = websocketState.appendStateVersion;
 	let candidateConnection = websocketState.connection;
 	let candidateResponseId = websocketState.lastResponseId;
-	let steeringSource = steered?.connection;
+	let steeringSource = pendingPayload ? undefined : steered?.connection;
 	let liveSteers: CodexAcceptedSteer[] = [];
 	let steeringPlan: { kind: "attach" } | { kind: "create"; input: InputItem[] } | { kind: "discard" } | undefined;
 
@@ -2011,42 +2031,87 @@ async function openCodexWebSocketTransport(
 	// request identity is already in `client_metadata`; connection-scoped
 	// compatibility values that can change after the upgrade ride alongside it
 	// on every `response.create`.
-	const websocketClientMetadata = { ...chainedBody.client_metadata };
-	if (requestContext.responsesLite) {
-		websocketClientMetadata[CODEX_WS_RESPONSES_LITE_CLIENT_METADATA_KEY] = "true";
+	let websocketRequestCandidate: Record<string, unknown>;
+	if (pendingPayload) {
+		websocketRequestCandidate = {
+			...pendingPayload.body,
+			type: "response.create",
+		};
+		const pendingClientMetadata = asRecord(websocketRequestCandidate.client_metadata);
+		if (pendingClientMetadata) {
+			websocketRequestCandidate.client_metadata = { ...pendingClientMetadata };
+		}
+	} else {
+		const websocketClientMetadata = { ...chainedBody.client_metadata };
+		if (requestContext.responsesLite) {
+			websocketClientMetadata[CODEX_WS_RESPONSES_LITE_CLIENT_METADATA_KEY] = "true";
+		}
+		if (requestContext.turnState.value) {
+			websocketClientMetadata[X_CODEX_TURN_STATE_HEADER] = requestContext.turnState.value;
+		}
+		websocketRequestCandidate = {
+			type: "response.create",
+			...chainedBody,
+			client_metadata: websocketClientMetadata,
+		};
 	}
-	if (requestContext.turnState.value) {
-		websocketClientMetadata[X_CODEX_TURN_STATE_HEADER] = requestContext.turnState.value;
-	}
-	const websocketRequestCandidate: Record<string, unknown> = {
-		type: "response.create",
-		...chainedBody,
-		client_metadata: websocketClientMetadata,
-	};
 	const approvedContinuationId =
 		typeof chainedBody.previous_response_id === "string" && chainedBody.previous_response_id.length > 0
 			? chainedBody.previous_response_id
 			: undefined;
-	let effectiveRequestBody: RequestBody | undefined;
+	let effectiveRequestBody: RequestBody | undefined = pendingPayload?.body;
 	let websocketRequest: Record<string, unknown>;
 	let prefixLength = 0;
 	let hookRequestsContinuation = false;
-	if (Array.isArray(fullInput) && Array.isArray(chainedBody.input) && chainedBody.previous_response_id) {
+	// Capture hook ownership once; later handoff refreshes must not mistake a
+	// provider-injected turn-state value for a hook edit.
+	let hookMayRefreshTurnState = pendingPayload?.hookMayRefreshTurnState ?? false;
+	if (
+		!pendingPayload &&
+		Array.isArray(fullInput) &&
+		Array.isArray(chainedBody.input) &&
+		chainedBody.previous_response_id
+	) {
 		prefixLength = Math.max(0, fullInput.length - chainedBody.input.length);
 	}
-	if (hasPayloadHook) {
+	if (pendingPayload) {
+		delete websocketRequestCandidate.previous_response_id;
+		websocketRequest = websocketRequestCandidate;
+	} else if (hasPayloadHook) {
+		const preHookClientMetadata = asRecord(websocketRequestCandidate.client_metadata);
+		const preHookHadClientMetadata =
+			Object.hasOwn(websocketRequestCandidate, "client_metadata") && preHookClientMetadata !== null;
+		const preHookHadTurnState =
+			preHookHadClientMetadata && Object.hasOwn(preHookClientMetadata, X_CODEX_TURN_STATE_HEADER);
+		const preHookTurnState = preHookClientMetadata?.[X_CODEX_TURN_STATE_HEADER];
 		const hookRequest = cloneJsonTree(websocketRequestCandidate);
 		const replacementWebsocketRequest = await payloadHook(hookRequest, model);
 		const finalHookRequest =
 			replacementWebsocketRequest === undefined
 				? hookRequest
 				: (replacementWebsocketRequest as Record<string, unknown>);
+		const finalClientMetadata = Object.hasOwn(finalHookRequest, "client_metadata")
+			? asRecord(finalHookRequest.client_metadata)
+			: undefined;
+		hookMayRefreshTurnState =
+			preHookHadClientMetadata &&
+			finalClientMetadata != null &&
+			Object.hasOwn(finalClientMetadata, X_CODEX_TURN_STATE_HEADER) === preHookHadTurnState &&
+			(!preHookHadTurnState || Object.is(finalClientMetadata[X_CODEX_TURN_STATE_HEADER], preHookTurnState));
 		hookRequestsContinuation =
 			approvedContinuationId !== undefined &&
 			typeof finalHookRequest.previous_response_id === "string" &&
 			finalHookRequest.previous_response_id.length > 0 &&
 			finalHookRequest.previous_response_id === approvedContinuationId;
-		effectiveRequestBody = buildCodexEffectiveRequestBody(fullInput, prefixLength, finalHookRequest);
+		const preparedBody = buildCodexEffectiveRequestBody(fullInput, prefixLength, finalHookRequest);
+		effectiveRequestBody = preparedBody;
+		const pendingPayloadRecord: CodexPendingWebSocketPayload = {
+			body: preparedBody,
+			hookMayRefreshTurnState,
+			steeringOwner: steeringSource,
+		};
+		requestContext.pendingWebSocketPayload = pendingPayloadRecord;
+		pendingPayloadForRequest = pendingPayloadRecord;
 		websocketRequest = {
 			...effectiveRequestBody,
 			type: "response.create",
@@ -2084,12 +2149,9 @@ async function openCodexWebSocketTransport(
 		model.provider,
 		requestSetup.requestSignal,
 	);
-	let appendCandidateValid = isCodexAppendCandidateValid(
-		websocketState,
-		candidateGeneration,
-		candidateConnection,
-		candidateResponseId,
-	);
+	let appendCandidateValid = pendingPayload
+		? false
+		: isCodexAppendCandidateValid(websocketState, candidateGeneration, candidateConnection, candidateResponseId);
 	const steeringOwner = steeringSource;
 	const steeringIdsLive =
 		steeringOwner !== undefined && liveSteers.length > 0
@@ -2195,7 +2257,19 @@ async function openCodexWebSocketTransport(
 				}
 			};
 			const refreshRequestMetadata = (): void => {
-				if (hasPayloadHook) return;
+				if (hasPayloadHook) {
+					if (!hookMayRefreshTurnState) return;
+					const clientMetadata = asRecord(request.client_metadata);
+					if (!clientMetadata) return;
+					request.client_metadata = { ...clientMetadata };
+					const refreshedClientMetadata = request.client_metadata as Record<string, unknown>;
+					if (requestContext.turnState.value) {
+						refreshedClientMetadata[X_CODEX_TURN_STATE_HEADER] = requestContext.turnState.value;
+					} else {
+						delete refreshedClientMetadata[X_CODEX_TURN_STATE_HEADER];
+					}
+					return;
+				}
 				const clientMetadata = request.client_metadata as Record<string, string> | undefined;
 				if (!clientMetadata) return;
 				if (requestContext.responsesLite) {
@@ -2214,6 +2288,9 @@ async function openCodexWebSocketTransport(
 				refreshRequestMetadata();
 			};
 			const afterSend = (): void => {
+				if (pendingPayloadForRequest && requestContext.pendingWebSocketPayload === pendingPayloadForRequest) {
+					requestContext.pendingWebSocketPayload = undefined;
+				}
 				recordCodexTurnRequestDiagnostics(websocketState, request, "websocket", usesContinuation);
 			};
 			try {
@@ -2340,11 +2417,14 @@ async function openCodexSseTransport(
 			),
 		);
 	};
+	const pendingPayload = requestContext.pendingWebSocketPayload;
 	const canAppendBeforeRequest = state?.canAppend === true;
-	let wireBody = body;
-	const replacementWireBody = await options?.onPayload?.(wireBody, model);
-	if (replacementWireBody !== undefined) {
-		wireBody = replacementWireBody as RequestBody;
+	let wireBody = pendingPayload?.body ?? body;
+	if (!pendingPayload) {
+		const replacementWireBody = await options?.onPayload?.(wireBody, model);
+		if (replacementWireBody !== undefined) {
+			wireBody = replacementWireBody as RequestBody;
+		}
 	}
 	recordCodexTurnRequestDiagnostics(state, wireBody, "sse", canAppendBeforeRequest);
 	// SSE turns never chain, so later reads need only the per-turn knobs (summary
@@ -2354,6 +2434,9 @@ async function openCodexSseTransport(
 		stream_options: wireBody.stream_options ? { ...wireBody.stream_options } : undefined,
 		service_tier: wireBody.service_tier,
 	};
+	if (pendingPayload && requestContext.pendingWebSocketPayload === pendingPayload) {
+		requestContext.pendingWebSocketPayload = undefined;
+	}
 	return { eventStream: await open(wireBody), requestBodyForState, transport: "sse" };
 }
 
@@ -3281,6 +3364,7 @@ class CodexStreamProcessor {
 	 * rejection arrives before any output, so the replay is always safe.
 	 */
 	async #tryDropRejectedAccessPrograms(error: unknown): Promise<boolean> {
+		const pendingPayload = this.requestContext.pendingWebSocketPayload;
 		if (
 			hasVisibleAssistantContent(this.output) ||
 			this.options?.signal?.aborted ||
@@ -3292,6 +3376,9 @@ class CodexStreamProcessor {
 			)
 		) {
 			return false;
+		}
+		if (pendingPayload && this.requestContext.pendingWebSocketPayload === pendingPayload) {
+			this.requestContext.pendingWebSocketPayload = undefined;
 		}
 		this.#closeOpenBlocksForReplay();
 		const websocketState = this.requestContext.websocketState;
