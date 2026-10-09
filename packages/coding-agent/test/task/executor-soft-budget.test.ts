@@ -77,8 +77,6 @@ function createMockSession(
 
 	const session: Partial<AgentSession> = {
 		...defaults,
-		// Kept-alive disposal captures this session's settings for a later revival.
-		settings: Settings.isolated({}),
 		state: { messages: [] } as never,
 		agent: { state: { systemPrompt: ["test"] } } as never,
 		model: { api: "anthropic-messages" } as never,
