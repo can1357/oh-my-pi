@@ -209,6 +209,39 @@ describe("AcpSubagentStreams", () => {
 		expect(locations[1]?.some(path => path.startsWith("/work/"))).not.toBe(true);
 	});
 
+	it("reports the delegated prompt that opens each run, but not later harness notices", async () => {
+		registerAgent("Worker", ROOT_AGENT_ID);
+		const userMessage = (content: string) => ({
+			type: "message_end",
+			message: { role: "user", content, attribution: "agent", timestamp: 1 },
+		});
+		const assistantStart = { type: "message_start", message: { role: "assistant", content: [], timestamp: 1 } };
+		for (const [run, prompt] of [
+			[1, "first item"],
+			[2, "follow-up item"],
+		] as const) {
+			bus.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, lifecycle("Worker", "started"));
+			for (const event of [userMessage(prompt), assistantStart, userMessage(`budget notice ${run}`)]) {
+				bus.emit(TASK_SUBAGENT_EVENT_CHANNEL, { id: "Worker", event: event as AgentSessionEvent });
+			}
+			bus.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, lifecycle("Worker", "completed"));
+		}
+		const childSessionId = `${ROOT_SESSION_ID}/Worker`;
+		const assignments = (await delivered(6))
+			.map(n => n.update)
+			.filter(update => update.sessionUpdate === "session_message");
+		expect(assignments).toEqual([
+			expect.objectContaining({
+				messageId: `assignment:${childSessionId}:1`,
+				content: [{ type: "text", text: "first item" }],
+			}),
+			expect.objectContaining({
+				messageId: `assignment:${childSessionId}:2`,
+				content: [{ type: "text", text: "follow-up item" }],
+			}),
+		]);
+	});
+
 	it("sends a child's final answer or error when agent_end arrives without it, exactly once", async () => {
 		const assistant = (text: string, extra: Record<string, unknown> = {}) => ({
 			role: "assistant",

@@ -223,6 +223,11 @@ describe("ACP runtime schemas", () => {
 		// Unknown state values are reserved for future and `_`-prefixed extension states.
 		expect(valid({ sessionUpdate: "subagent_update", sessionId: "child", state: { state: "_paused" } })).toBe(true);
 		expect(valid({ sessionUpdate: "subagent_update", sessionId: "child", state: null, title: null })).toBe(true);
+		const idle = (state: Record<string, unknown>) =>
+			valid({ sessionUpdate: "subagent_update", sessionId: "child", state: { state: "idle", ...state } });
+		expect(idle({ stopReason: "error", error: { code: -32000, message: "boom" } })).toBe(true);
+		expect(idle({ stopReason: 1 })).toBe(false);
+		expect(idle({ stopReason: "error", error: false })).toBe(false);
 		expect(
 			valid({
 				sessionUpdate: "session_message",

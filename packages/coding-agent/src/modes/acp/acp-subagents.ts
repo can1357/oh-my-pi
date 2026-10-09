@@ -32,7 +32,10 @@ interface ChildStream extends AcpLiveMessageState {
 	/** Latest work-state snapshot, re-sent when the parent session is loaded again. */
 	state: SubagentWorkState;
 	toolArgsById: Map<string, unknown>;
-	assignmentReported: boolean;
+	/** Runs started in this child; numbers each run's delegated prompt. */
+	runs: number;
+	/** Until the run's first assistant message, an agent-attributed user message is the parent's delegation. */
+	awaitingAssignment: boolean;
 	/** Whether the current turn streamed an assistant error to the client. */
 	turnErrorEmitted: boolean;
 	/** The child session's own cwd (its worktree for isolated runs), read from its registry ref. */
@@ -117,7 +120,11 @@ export class AcpSubagentStreams {
 	#handleLifecycle(payload: SubagentLifecyclePayload): void {
 		const existing = this.#children.get(payload.id);
 		if (existing) {
-			// IRC wake turns and revivals restart work in the same child conversation.
+			// IRC wake turns, follow-up assignments and revivals restart work in the same child conversation.
+			if (payload.status === "started") {
+				existing.runs++;
+				existing.awaitingAssignment = true;
+			}
 			existing.state = payload.status === "started" ? { state: "running" } : IDLE_STATE_BY_LIFECYCLE[payload.status];
 			this.#sendUpdate(existing, { state: existing.state });
 			return;
@@ -135,7 +142,8 @@ export class AcpSubagentStreams {
 			description: payload.description,
 			state: { state: "running" },
 			toolArgsById: new Map(),
-			assignmentReported: false,
+			runs: 1,
+			awaitingAssignment: true,
 			turnErrorEmitted: false,
 			cwd: undefined,
 			liveMessageId: undefined,
@@ -158,18 +166,20 @@ export class AcpSubagentStreams {
 	}
 
 	#mapChildEvent(child: ChildStream, event: AgentSessionEvent): SessionNotification[] {
+		if (event.type === "message_start" && event.message.role === "assistant") child.awaitingAssignment = false;
 		if (event.type === "message_end" && event.message.role === "user") {
-			// The child's first user message is the assignment its parent delegated;
-			// later parent messages arrive as IRC traffic (`irc_message`) instead.
-			if (child.assignmentReported || event.message.attribution !== "agent") return [];
-			child.assignmentReported = true;
+			// A run opens with the work its parent delegated (the initial task or a
+			// workpool/vibe follow-up); later agent-attributed user messages are
+			// harness notices, and parent messages arrive as IRC traffic instead.
+			if (!child.awaitingAssignment || event.message.attribution !== "agent") return [];
+			child.awaitingAssignment = false;
 			const content = event.message.content;
 			return [
 				{
 					sessionId: child.sessionId,
 					update: {
 						sessionUpdate: "session_message",
-						messageId: `assignment:${child.sessionId}`,
+						messageId: `assignment:${child.sessionId}:${child.runs}`,
 						senderSessionId: child.parentSessionId,
 						recipientSessionId: child.sessionId,
 						content: typeof content === "string" ? [{ type: "text", text: content }] : content,
