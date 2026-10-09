@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [18.8.7] - 2026-10-09
+
 ### Fixed
 
 - Fixed proactive linking freezing the host for seconds per stored memory on large banks; a memory's graph links are now written in one commit instead of one per link ([#14998](https://github.com/can1357/oh-my-pi/issues/14998)).
