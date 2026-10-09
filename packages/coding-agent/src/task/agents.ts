@@ -242,5 +242,23 @@ export function resolveAgentSkills(
 	});
 }
 
+/**
+ * Resolve the agent's `autoloadSkills` names against the full unfiltered skill
+ * list. A skill hidden from the `<skills>` listing can still be preloaded —
+ * except a `disableModelInvocation: true` opt-out, which is never injectable
+ * (mirroring the `unhideSkills` rule in {@link resolveAgentSkills}). Unknown
+ * names are ignored. Returns copies, never parent session identities.
+ */
+export function resolveAgentAutoloadSkills(
+	sessionSkills: readonly Skill[],
+	autoloadSkills: string[] | undefined,
+): Skill[] {
+	if (!autoloadSkills?.length) return [];
+	return autoloadSkills
+		.map(name => sessionSkills.find(skill => skill.name === name))
+		.filter(skill => skill !== undefined && skill.modelInvocationDisabled !== true)
+		.map(skill => ({ ...skill }));
+}
+
 // Re-export for backward compatibility
 export const BUNDLED_AGENTS = loadBundledAgents;

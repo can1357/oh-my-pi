@@ -33,7 +33,7 @@ import type { ToolSession } from "../tools";
 import { isIrcEnabled } from "../irc/messaging";
 import { buildOutputValidator } from "../tools/output-schema-validator";
 import { trackLateCleanup } from "../utils/late-cleanup";
-import { resolveAgentSkills } from "./agents";
+import { resolveAgentAutoloadSkills, resolveAgentSkills } from "./agents";
 import { type DiscoveryResult, discoverAgents, getAgent } from "./discovery";
 import { type ExecutorOptions, runSubprocess } from "./executor";
 import {
@@ -514,11 +514,7 @@ function resolveAgentSkillsForExecutor(session: ToolSession, agent: AgentDefinit
 	const skills = resolveAgentSkills(fullSkills, agent);
 	// Autoload resolves against the full unfiltered list: a skill hidden from
 	// the `<skills>` listing can still be preloaded into the child's context.
-	const autoloadSkills = agent.autoloadSkills?.length
-		? agent.autoloadSkills
-				.map(name => fullSkills.find(skill => skill.name === name))
-				.filter(skill => skill !== undefined)
-		: [];
+	const autoloadSkills = resolveAgentAutoloadSkills(fullSkills, agent.autoloadSkills);
 	return { skills, autoloadSkills };
 }
 

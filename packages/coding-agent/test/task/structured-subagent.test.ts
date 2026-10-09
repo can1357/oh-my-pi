@@ -633,6 +633,36 @@ describe("structured subagent primitive", () => {
 		expect(dispatched[0]?.autoloadSkills?.map(s => s.name)).toEqual(["secret"]);
 	});
 
+	it("refuses to autoload a model-invocation opt-out", async () => {
+		// Autoload injects skill content into the child context, so a
+		// `disableModelInvocation: true` opt-out must be a no-op here — mirroring
+		// the `unhideSkills` rule. Otherwise autoload would resurrect the same
+		// opt-out the listing filter refuses to resurrect.
+		const skills = [
+			{ name: "alpha", description: "a", filePath: "/skills/alpha/SKILL.md", baseDir: "/skills", source: "user" },
+			{
+				name: "revoked",
+				description: "r",
+				filePath: "/skills/revoked/SKILL.md",
+				baseDir: "/skills",
+				source: "user",
+				modelInvocationDisabled: true,
+			},
+		];
+		mockDiscovery({ ...AGENT, autoloadSkills: ["revoked", "alpha"] });
+		const childSession = session();
+		childSession.skills = skills;
+		const dispatched: executorModule.ExecutorOptions[] = [];
+		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+			dispatched.push(options);
+			return result();
+		});
+
+		await runStructuredSubagent(request({ session: childSession, retainArtifacts: true }));
+
+		expect(dispatched[0]?.autoloadSkills?.map(s => s.name)).toEqual(["alpha"]);
+	});
+
 	it("retains temporary artifacts when the run failed but yielded schema-valid structured output", async () => {
 		// Regression: a task can produce schema-valid data and then fail (or
 		// exceed its runtime limit). The async notice still advertises the

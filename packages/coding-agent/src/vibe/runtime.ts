@@ -35,7 +35,7 @@ import vibeTurnResultTemplate from "../prompts/tools/vibe-turn-result.md" with {
 import { AgentLifecycleManager } from "../registry/agent-lifecycle";
 import { type AgentRef, AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
 import { SessionManager, SessionPersistenceIndeterminateError } from "../session/session-manager";
-import { getBundledAgent, resolveAgentSkills } from "../task/agents";
+import { getBundledAgent, resolveAgentAutoloadSkills, resolveAgentSkills } from "../task/agents";
 import { type ExecutorOptions, runSubagentFollowUpTurn, runSubprocess } from "../task/executor";
 import { generateTaskName } from "../task/name-generator";
 import { AgentOutputManager } from "../task/output-manager";
@@ -1313,11 +1313,7 @@ export class VibeSessionRegistry {
 			mcpManager: session.mcpManager ?? MCPManager.instance(),
 			contextFiles: session.contextFiles?.filter(file => path.basename(file.path).toLowerCase() !== "agents.md"),
 			skills: resolveAgentSkills(session.skills ?? [], record.agent),
-			autoloadSkills: record.agent.autoloadSkills?.length
-				? record.agent.autoloadSkills
-						.map(name => (session.skills ?? []).find(skill => skill.name === name))
-						.filter(skill => skill !== undefined)
-				: [],
+			autoloadSkills: resolveAgentAutoloadSkills(session.skills ?? [], record.agent.autoloadSkills),
 			workspaceTree: session.workspaceTree,
 			promptTemplates: session.promptTemplates,
 			rules: session.rules,
