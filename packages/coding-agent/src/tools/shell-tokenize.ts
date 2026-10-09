@@ -1,6 +1,6 @@
 /**
  * Conservative shell command tokenizer shared by the bash approval-pattern
- * matcher and the gh-cache invalidator.
+ * matcher, the gh-cache invalidator, and the session anonymizer.
  *
  * Splits a bash command into independent command segments, each a list of word
  * tokens. Handles single/double-quoted strings, backslash escapes, and the
@@ -14,72 +14,98 @@
 export function tokenizeShellSegments(command: string): string[][] {
 	const segments: string[][] = [];
 	let current: string[] = [];
-	let buffer = "";
+	for (const token of lexShellCommand(command)) {
+		if (token.kind === "word") {
+			// Empty quoted words (`''`) carry no argument text.
+			if (token.value.length > 0) current.push(token.value);
+		} else if (/[\n;&|()]/.test(token.raw) && current.length > 0) {
+			segments.push(current);
+			current = [];
+		}
+	}
+	if (current.length > 0) segments.push(current);
+	return segments;
+}
+
+/** One lexical piece of a shell command: a word, or the whitespace/operator run between words. */
+export type ShellToken = { kind: "word"; raw: string; value: string } | { kind: "separator"; raw: string };
+
+/**
+ * Lex a command into words and separators with their source text, so callers can rewrite words
+ * and reassemble the command. Word boundaries match {@link tokenizeShellSegments}: `value` is the
+ * quote/escape-removed word, `raw` its verbatim spelling; separators are runs of spaces, tabs, and
+ * the operator characters `\n ; & | ( )`.
+ */
+export function lexShellCommand(command: string): ShellToken[] {
+	const tokens: ShellToken[] = [];
+	let value = "";
+	let wordStart = -1;
+	let separatorStart = -1;
 	let inSingle = false;
 	let inDouble = false;
-	const pushBuffer = () => {
-		if (buffer.length > 0) {
-			current.push(buffer);
-			buffer = "";
+	const startWord = (index: number) => {
+		if (wordStart >= 0) return;
+		if (separatorStart >= 0) {
+			tokens.push({ kind: "separator", raw: command.slice(separatorStart, index) });
+			separatorStart = -1;
 		}
+		wordStart = index;
 	};
-	const pushSegment = () => {
-		pushBuffer();
-		if (current.length > 0) segments.push(current);
-		current = [];
+	const endWord = (index: number) => {
+		if (wordStart < 0) return;
+		tokens.push({ kind: "word", raw: command.slice(wordStart, index), value });
+		value = "";
+		wordStart = -1;
 	};
 	for (let i = 0; i < command.length; i++) {
 		const ch = command[i];
 		if (inSingle) {
-			if (ch === "'") {
-				inSingle = false;
-				continue;
-			}
-			buffer += ch;
+			if (ch === "'") inSingle = false;
+			else value += ch;
 			continue;
 		}
 		if (inDouble) {
 			if (ch === "\\" && i + 1 < command.length) {
 				const next = command[i + 1];
 				if (next === '"' || next === "\\" || next === "$" || next === "`") {
-					buffer += next;
+					value += next;
 					i++;
 					continue;
 				}
 			}
-			if (ch === '"') {
-				inDouble = false;
-				continue;
-			}
-			buffer += ch;
+			if (ch === '"') inDouble = false;
+			else value += ch;
 			continue;
 		}
+		if (
+			ch === " " ||
+			ch === "\t" ||
+			ch === "\n" ||
+			ch === ";" ||
+			ch === "&" ||
+			ch === "|" ||
+			ch === "(" ||
+			ch === ")"
+		) {
+			endWord(i);
+			if (separatorStart < 0) separatorStart = i;
+			continue;
+		}
+		startWord(i);
 		if (ch === "'") {
 			inSingle = true;
-			continue;
-		}
-		if (ch === '"') {
+		} else if (ch === '"') {
 			inDouble = true;
-			continue;
-		}
-		if (ch === "\\" && i + 1 < command.length) {
-			buffer += command[i + 1];
+		} else if (ch === "\\" && i + 1 < command.length) {
+			value += command[i + 1];
 			i++;
-			continue;
+		} else {
+			value += ch;
 		}
-		if (ch === " " || ch === "\t") {
-			pushBuffer();
-			continue;
-		}
-		if (ch === "\n" || ch === ";" || ch === "&" || ch === "|" || ch === "(" || ch === ")") {
-			pushSegment();
-			// `&&`, `||` already collapsed by the segment break above.
-			continue;
-		}
-		buffer += ch;
 	}
-	pushSegment();
-	return segments;
+	endWord(command.length);
+	if (separatorStart >= 0) tokens.push({ kind: "separator", raw: command.slice(separatorStart) });
+	return tokens;
 }
 
 /** A command in a conservative, flat `&&` chain. */
