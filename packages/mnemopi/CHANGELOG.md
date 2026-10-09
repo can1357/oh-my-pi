@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+### Added
+
+- Incoming facts now strengthen a matching observation instead of storing a second copy. Evidence is the number of distinct sources, and a claim is aged with `superseded_by` only for an explicit negation or a known single-valued relation; otherwise both records stay active. Each reinforcement or weakening is written to `memory_validations` with the source id and a short quote. Recall hides aged facts and gives extra evidence a small score boost. Fact consolidation of knowledge-graph triples runs on every write, not only when polyphonic recall is on. ([#14314](https://github.com/can1357/oh-my-pi/pull/14314) by [@KamelotWalker](https://github.com/KamelotWalker))
+- Added `world`/`experience` semantic kinds to extracted facts, persisted independently of MEMORIA categories and exposed in recall. Existing databases migrate automatically with historical facts treated as world knowledge. ([#14314](https://github.com/can1357/oh-my-pi/pull/14314) by [@KamelotWalker](https://github.com/KamelotWalker))
+
+### Fixed
+
+- Stopped chatter and arbitrary prose from becoming facts through extraction fallback, including framed conversation input. Preserved Turkish declarative legacy output and completed items in truncated structured JSON without retaining unfinished items or schema text. ([#14314](https://github.com/can1357/oh-my-pi/pull/14314) by [@KamelotWalker](https://github.com/KamelotWalker))
+- Fixed extracted facts with identical text overwriting each other's `world`/`experience` provenance, and preserved legitimate legacy facts containing phrases such as "no memories" or "no facts". ([#14314](https://github.com/can1357/oh-my-pi/pull/14314) by [@KamelotWalker](https://github.com/KamelotWalker))
+- Fixed observation supersession chains losing their surviving winner after source deletion, legacy normalized fact IDs splitting evidence, and legacy KG IDs hiding both workplace claims on reconfirmation. Mixed-scope sleep summaries now retain the narrowest source visibility, and returning preferences correctly supersede their explicit negations. ([#14314](https://github.com/can1357/oh-my-pi/pull/14314) by [@KamelotWalker](https://github.com/KamelotWalker))
 ### Fixed
 
 - Fixed proactive linking freezing the host for seconds per stored memory on large banks; a memory's graph links are now written in one commit instead of one per link ([#14998](https://github.com/can1357/oh-my-pi/issues/14998)).

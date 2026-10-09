@@ -4,7 +4,7 @@ type PragmaTableInfoRow = {
 	name: string;
 };
 
-function addColumnIfMissing(db: Database, table: string, column: string, definition: string): boolean {
+export function addColumnIfMissing(db: Database, table: string, column: string, definition: string): boolean {
 	const rows = db.query(`PRAGMA table_info(${table})`).all() as PragmaTableInfoRow[];
 	for (const row of rows) {
 		if (row.name === column) {
@@ -172,6 +172,7 @@ export function initBeam(db: Database): void {
 			session_id TEXT DEFAULT 'default',
 			message_idx INTEGER,
 			fact_type TEXT,
+			memory_kind TEXT NOT NULL DEFAULT 'world' CHECK (memory_kind IN ('world', 'experience')),
 			key TEXT,
 			value TEXT,
 			context_snippet TEXT,
@@ -196,6 +197,12 @@ export function initBeam(db: Database): void {
 	addColumnIfMissing(db, "memoria_facts", "valid_from_msg_idx", "INTEGER");
 	addColumnIfMissing(db, "memoria_facts", "valid_to_msg_idx", "INTEGER");
 	addColumnIfMissing(db, "memoria_facts", "source_memory_id", "TEXT");
+	addColumnIfMissing(
+		db,
+		"memoria_facts",
+		"memory_kind",
+		"TEXT NOT NULL DEFAULT 'world' CHECK (memory_kind IN ('world', 'experience'))",
+	);
 
 	db.run(`
 		CREATE TABLE IF NOT EXISTS memoria_timelines (
@@ -261,6 +268,21 @@ export function initBeam(db: Database): void {
 	for (const table of ["memoria_timelines", "memoria_instructions", "memoria_preferences", "memoria_kg"] as const) {
 		addColumnIfMissing(db, table, "source_memory_id", "TEXT");
 	}
+	addColumnIfMissing(db, "memoria_preferences", "proof_count", "INTEGER DEFAULT 1");
+	addColumnIfMissing(db, "memoria_preferences", "sources_json", "TEXT");
+	addColumnIfMissing(db, "memoria_preferences", "superseded_by", "TEXT");
+	db.run(`
+		UPDATE memoria_preferences
+		SET sources_json = CASE
+				WHEN source_memory_id IS NOT NULL AND trim(source_memory_id) != '' THEN json_array(source_memory_id)
+				ELSE '[]'
+			END,
+			proof_count = CASE
+				WHEN source_memory_id IS NOT NULL AND trim(source_memory_id) != '' THEN 1
+				ELSE 0
+			END
+		WHERE sources_json IS NULL
+	`);
 
 	db.run(`
 		CREATE TABLE IF NOT EXISTS consolidation_log (
@@ -352,13 +374,39 @@ export function initBeam(db: Database): void {
 			timestamp TEXT,
 			source_msg_id TEXT,
 			confidence REAL DEFAULT 1.0,
+			memory_kind TEXT NOT NULL DEFAULT 'world' CHECK (memory_kind IN ('world', 'experience')),
 			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 		)
 	`);
+	addColumnIfMissing(
+		db,
+		"facts",
+		"memory_kind",
+		"TEXT NOT NULL DEFAULT 'world' CHECK (memory_kind IN ('world', 'experience'))",
+	);
+	addColumnIfMissing(db, "facts", "scope", "TEXT DEFAULT 'session'");
+	addColumnIfMissing(db, "facts", "superseded_by", "TEXT DEFAULT NULL");
+	addColumnIfMissing(db, "facts", "proof_count", "INTEGER DEFAULT 1");
+	addColumnIfMissing(db, "facts", "sources_json", "TEXT");
+	db.run(`
+		UPDATE facts
+		SET sources_json = CASE
+				WHEN source_msg_id IS NOT NULL AND trim(source_msg_id) != '' THEN json_array(source_msg_id)
+				ELSE '[]'
+			END,
+			proof_count = CASE
+				WHEN source_msg_id IS NOT NULL AND trim(source_msg_id) != '' THEN 1
+				ELSE 0
+			END
+		WHERE sources_json IS NULL
+	`);
+	db.run("DROP INDEX IF EXISTS idx_facts_active");
+	db.run("CREATE INDEX IF NOT EXISTS idx_facts_active ON facts(predicate, subject) WHERE superseded_by IS NULL");
 	runAll(db, [
 		"CREATE INDEX IF NOT EXISTS idx_facts_session ON facts(session_id)",
 		"CREATE INDEX IF NOT EXISTS idx_facts_subject ON facts(subject)",
 		"CREATE INDEX IF NOT EXISTS idx_facts_source ON facts(source_msg_id)",
+		"CREATE INDEX IF NOT EXISTS idx_facts_canonical_lookup ON facts(predicate, subject, object, session_id, scope)",
 	]);
 	db.run(`
 		CREATE VIRTUAL TABLE IF NOT EXISTS fts_facts USING fts5(

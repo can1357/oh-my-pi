@@ -5,7 +5,7 @@ import { closeQuietly, type DatabasePath, openDatabase } from "../db";
 import { backfillConsolidatedFacts, ensureVeracityConsolidator } from "./beam/consolidate";
 import type { BeamMemoryState, JsonValue, Metadata, RecallResult, RecallTierLabel } from "./beam/types";
 import { EpisodicGraph } from "./episodic-graph";
-import { VeracityConsolidator } from "./veracity-consolidation";
+import { proofCountBoost, VeracityConsolidator } from "./veracity-consolidation";
 
 export type PolyphonicVoice = "hybrid" | "vector" | "graph" | "fact" | "temporal";
 
@@ -478,7 +478,7 @@ export class PolyphonicRecallEngine {
 				if (existing !== undefined && existing.score >= fact.confidence) continue;
 				byId.set(memoryId, {
 					memoryId,
-					score: fact.confidence,
+					score: fact.confidence * proofCountBoost(fact.sources.length),
 					voice: "fact",
 					metadata: {
 						fact_id: fact.id ?? "",
@@ -720,9 +720,9 @@ const backfilledEngines = new WeakSet<PolyphonicRecallEngine>();
 
 /**
  * The beam's polyphonic engine, built on first use. Building it creates the fact voice
- * tables; until it succeeds once, each call also backfills `consolidated_facts` from KG
- * facts extracted while polyphonic recall was off, so enabling the flag on an existing
- * bank starts with a fact voice and a failed backfill (e.g. a busy database) is retried.
+ * tables; until backfill succeeds once, each call also consolidates any KG fact whose
+ * source is missing from `consolidated_facts` (a legacy bank, or a write whose
+ * consolidation failed). A failed backfill is retried on the next polyphonic recall.
  */
 export function getPolyphonicEngine(beam: BeamMemoryState): PolyphonicRecallEngine {
 	const cached = beam.caches.polyphonicEngine;

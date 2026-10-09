@@ -71,6 +71,7 @@ export interface RememberInput extends MemoryInput {
 	readonly extract_entities?: boolean;
 	readonly extractText?: string | null;
 	readonly extract_text?: string | null;
+	readonly experienceText?: string | null;
 	readonly embedText?: string | null;
 	readonly embed_text?: string | null;
 	readonly trustTier?: string | null;
@@ -95,6 +96,8 @@ export interface RememberFacadeOptions {
 	 */
 	readonly extractText?: string | null;
 	readonly extract_text?: string | null;
+	/** Assistant messages are extracted separately, never as user world/instruction facts. */
+	readonly experienceText?: string | null;
 	/**
 	 * Override the text passed to embeddings and FTS indexing. Stored content
 	 * remains unchanged; when unset, embeddings and FTS use stored content.
@@ -168,6 +171,7 @@ type FacadeRememberOptions = {
 	extractEntities: boolean;
 	extract: boolean;
 	extractText: string | undefined;
+	experienceText: string | undefined;
 	embedText: string | undefined;
 	trustTier: string | undefined;
 	veracity: string | undefined;
@@ -306,6 +310,7 @@ function toRememberOptions(input: string | RememberInput, options: RememberFacad
 			false,
 		extract: options.extract ?? memory?.extract ?? false,
 		extractText: extractText ?? undefined,
+		experienceText: options.experienceText ?? memory?.experienceText ?? undefined,
 		embedText: embedText ?? undefined,
 		trustTier: options.trustTier ?? options.trust_tier ?? memory?.trustTier ?? memory?.trust_tier ?? undefined,
 		veracity: options.veracity ?? memory?.veracity ?? undefined,

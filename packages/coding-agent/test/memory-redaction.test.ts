@@ -122,4 +122,76 @@ describe("memory secret redaction", () => {
 		expect(memory).toBe("leak [REDACTED]");
 		expect(options).toBeUndefined();
 	});
+
+	it("redacts nonuniform TCKNs using the tenth and eleventh digit checks independently", () => {
+		expect(redactMemorySecrets("id 10000000146")).toBe("id [REDACTED:tckn]");
+		// The odd/even expression is negative before modulo normalization.
+		expect(redactMemorySecrets("id 19090909018")).toBe("id [REDACTED:tckn]");
+		// The first checksum is wrong even though the final digit matches the sum.
+		expect(redactMemorySecrets("id 10000000157")).toBe("id 10000000157");
+		// The tenth digit is correct but the final checksum is wrong.
+		expect(redactMemorySecrets("id 10000000145")).toBe("id 10000000145");
+	});
+
+	it("redacts an exact national IBAN span without consuming following prose", () => {
+		expect(redactMemorySecrets("pay TR330006100519786457841326 and continue")).toBe("pay [REDACTED:iban] and continue");
+		expect(redactMemorySecrets("pay tr33 0006 1005 1978 6457 8413 26 and continue")).toBe("pay [REDACTED:iban] and continue");
+		expect(redactMemorySecrets("GB82-WEST-1234-5698-7654-32 tomorrow")).toBe("[REDACTED:iban] tomorrow");
+		expect(redactMemorySecrets("TR330006100519786457841326 and GB82WEST12345698765432 tomorrow")).toBe(
+			"[REDACTED:iban] and [REDACTED:iban] tomorrow",
+		);
+	});
+
+	it("does not mask IBAN prefixes with invalid length, checksum, country, or token boundaries", () => {
+		expect(redactMemorySecrets("TR3300061005197864578413260")).toBe("TR3300061005197864578413260");
+		expect(redactMemorySecrets("TR33000610051978645784132 and continue")).toBe("TR33000610051978645784132 and continue");
+		expect(redactMemorySecrets("TR340006100519786457841326 and continue")).toBe("TR340006100519786457841326 and continue");
+		expect(redactMemorySecrets("XX330006100519786457841326")).toBe("XX330006100519786457841326");
+		expect(redactMemorySecrets("account_TR330006100519786457841326")).toBe("account_TR330006100519786457841326");
+	});
+
+	it("redacts PII with typed masks and strict validators (no FP on bad checksums); covers TR phones, TCKN, IBAN, CC", () => {
+		// email
+		expect(redactMemorySecrets("reach user.name+tag@sub.example.co.uk or not")).toBe("reach [REDACTED:email] or not");
+
+		// TR phone +90/05xx variants
+		expect(redactMemorySecrets("call +905321234567")).toBe("call [REDACTED:phone]");
+		expect(redactMemorySecrets("0532 123 45 67 or +90-532-123-45-67")).toBe("[REDACTED:phone] or [REDACTED:phone]");
+		expect(redactMemorySecrets("phone 0532123456 short no")).toBe("phone 0532123456 short no");
+
+		// TCKN 11dig + checksum only
+		expect(redactMemorySecrets("tckn 11111111110 is valid")).toBe("tckn [REDACTED:tckn] is valid");
+		expect(redactMemorySecrets("tckn 11111111111 no, 12345678901 no")).toBe("tckn 11111111111 no, 12345678901 no");
+
+		// IBAN mod-97 incl TR
+		expect(redactMemorySecrets("pay to TR330006100519786457841326")).toBe("pay to [REDACTED:iban]");
+		expect(redactMemorySecrets("GB82WEST12345698765432")).toBe("[REDACTED:iban]");
+		expect(redactMemorySecrets("bad TR123456789012345678901234 and XX00")).toBe("bad TR123456789012345678901234 and XX00");
+
+		// credit card Luhn, groups
+		expect(redactMemorySecrets("card 4111111111111111 ok")).toBe("card [REDACTED:credit_card] ok");
+		expect(redactMemorySecrets("4111-1111-1111-1111")).toBe("[REDACTED:credit_card]");
+		expect(redactMemorySecrets("4242 4242 4242 4242")).toBe("[REDACTED:credit_card]");
+		expect(redactMemorySecrets("4111111111111112 bad luhn")).toBe("4111111111111112 bad luhn");
+		expect(redactMemorySecrets("1234 5678 1234 5678 no")).toBe("1234 5678 1234 5678 no");
+
+		// new secrets explicit
+		expect(redactMemorySecrets("use hf_abc123def456ghi789jkl012mno345")).toBe("use [REDACTED]");
+		// regression for 6 review findings
+		// 1. email linear (no quadratic)
+		const longish = "a@b." + "c".repeat(20) + ".com";
+		expect(redactMemorySecrets("mail " + longish)).toBe("mail [REDACTED:email]");
+		// 2. credential full before PII (no partial)
+		expect(redactMemorySecrets("password_4111111111111111")).toBe("[REDACTED]");
+		// 3. IBAN no following text swallow
+		expect(redactMemorySecrets("TR330006100519786457841326.")).toBe("[REDACTED:iban].");
+		// 4. TCKN dual control (use one that passes both)
+		expect(redactMemorySecrets("tckn 11111111110")).toBe("tckn [REDACTED:tckn]");
+		// 5. phone no code token/line match
+		expect(redactMemorySecrets("code05321234567")).toBe("code05321234567");
+		expect(redactMemorySecrets("v05321234567")).toBe("v05321234567");
+		// 6. cc 13-19 + groups (amex 15dig)
+		expect(redactMemorySecrets("amex 378282246310005")).toBe("amex [REDACTED:credit_card]");
+		expect(redactMemorySecrets("13dig 1234567890123 no")).toBe("13dig 1234567890123 no"); // not luhn or short
+	});
 });

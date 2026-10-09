@@ -4,6 +4,8 @@ import type { Api, ApiKey, Model } from "@oh-my-pi/pi-ai";
 export type MnemopiLlmCompletionTask = {
 	kind: "memory-extraction";
 	input: string;
+	/** Experience extraction uses a separate assistant-only instruction boundary. */
+	sourceKind?: "experience";
 };
 
 export interface MnemopiLlmCompleteOptions {

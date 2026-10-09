@@ -1,3 +1,5 @@
+import type { MemoryFactKind } from "./core/beam/types";
+
 export type JsonScalar = string | number | boolean | null;
 export type JsonValue = JsonScalar | JsonValue[] | { [key: string]: JsonValue };
 export type Metadata = Record<string, JsonValue>;
@@ -123,6 +125,7 @@ export interface FactRow {
 	timestamp: string | null;
 	source_msg_id: string | null;
 	confidence: number;
+	memory_kind: MemoryFactKind;
 	created_at: string;
 }
 

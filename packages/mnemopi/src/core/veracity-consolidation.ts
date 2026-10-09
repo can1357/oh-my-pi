@@ -34,6 +34,18 @@ export const MULTI_VALUED_PREDICATES: Readonly<Record<string, true>> = Object.fr
 	depends_on: true,
 	knows: true,
 });
+/**
+ * Relations that hold for one object at a time. A later object may age the earlier
+ * one. Anything outside this list stays active: a wrong supersede hides a true fact.
+ */
+export const SINGLE_VALUED_PREDICATES: Readonly<Record<string, true>> = Object.freeze({
+	lives_in: true,
+	works_at: true,
+	works_for: true,
+	is_a: true,
+	name: true,
+	called: true,
+});
 const TX_DEPTH = Symbol("mnemopi.veracity.txDepth");
 
 type TxDatabase = Database & {
@@ -511,4 +523,206 @@ export class VeracityConsolidator {
 	close(): void {
 		if (this.ownsConnection) this.conn.close();
 	}
+}
+
+/** Hindsight `proof_count_alpha`: extra distinct sources nudge recall, they do not dominate it. */
+export const PROOF_COUNT_ALPHA = 0.1;
+export const OBSERVATION_QUOTE_LIMIT = 160;
+const OBSERVATION_STOP: Record<string, true> = {
+	the: true,
+	a: true,
+	an: true,
+	of: true,
+	to: true,
+	and: true,
+	or: true,
+	user: true,
+};
+const POSITIVE_PREFERENCE: Record<string, true> = {
+	prefers: true,
+	prefer: true,
+	likes: true,
+	like: true,
+	wants: true,
+	want: true,
+};
+const NEGATIVE_PREFERENCE: Record<string, true> = {
+	dislikes: true,
+	dislike: true,
+	hates: true,
+	hate: true,
+	rejects: true,
+	reject: true,
+	avoids: true,
+	avoid: true,
+};
+
+export type ObservationRelation = "same" | "contradicts" | "distinct";
+export type ObservationAction = "reinforce" | "weaken";
+
+interface PreferenceFrame {
+	readonly polarity: "pos" | "neg";
+	readonly object: string;
+}
+
+export interface MemoryValidationWrite {
+	readonly memoryId: string;
+	readonly sourceId: string;
+	readonly action: ObservationAction;
+	readonly quote: string;
+	readonly newContent?: string;
+}
+
+/** Multiplicative boost. One source is identity so existing single-source scores stay put. */
+export function proofCountBoost(distinctSources: number): number {
+	const extra = Math.max(0, Math.floor(distinctSources) - 1);
+	if (extra === 0) return 1;
+	return 1 + PROOF_COUNT_ALPHA * Math.log1p(extra);
+}
+
+/** Identity keeps symbols that distinguish claims (`C++` vs `C#`); classification may still ignore them. */
+export function observationIdentityText(text: string): string {
+	return text
+		.normalize("NFC")
+		.toLocaleLowerCase("tr")
+		.replace(/[^\p{L}\p{N}+#]+/gu, " ")
+		.replace(/\s+/g, " ")
+		.trim();
+}
+
+export function normalizeObservationText(text: string): string {
+	return text
+		.normalize("NFC")
+		.toLocaleLowerCase("tr")
+		.replace(/[^\p{L}\p{N}\s]+/gu, " ")
+		.replace(/\s+/g, " ")
+		.trim();
+}
+
+const NEGATION_TOKENS: Record<string, true> = {
+	not: true,
+	no: true,
+	never: true,
+	dont: true,
+	doesnt: true,
+	cannot: true,
+	cant: true,
+	degil: true,
+	değil: true,
+	yok: true,
+};
+
+function observationTokens(text: string): string[] {
+	return normalizeObservationText(text)
+		.split(" ")
+		.filter(
+			token =>
+				token !== "" && (token.length > 1 || /^\p{N}+$/u.test(token)) && !Object.hasOwn(OBSERVATION_STOP, token),
+		);
+}
+
+function tokenJaccard(left: readonly string[], right: readonly string[]): number {
+	if (left.length === 0 || right.length === 0) return 0;
+	const rightSet = new Set(right);
+	const union = new Set<string>(right);
+	let intersection = 0;
+	for (const token of left) {
+		union.add(token);
+		if (rightSet.has(token)) intersection++;
+	}
+	return union.size === 0 ? 0 : intersection / union.size;
+}
+
+function preferenceFrame(text: string): PreferenceFrame | null {
+	const normalized = normalizeObservationText(text);
+	const negated = /^(?:the user |user |i )?(?:does not|doesnt|do not|no longer|not) (?:prefer|like|want)s? (.+)$/.exec(
+		normalized,
+	);
+	if (negated?.[1]) return { polarity: "neg", object: negated[1] };
+	const framed =
+		/^(?:the user |user |i )?(prefers|prefer|likes|like|wants|want|dislikes|dislike|hates|hate|rejects|reject|avoids|avoid) (.+)$/.exec(
+			normalized,
+		);
+	const verb = framed?.[1];
+	const object = framed?.[2];
+	if (verb === undefined || object === undefined) return null;
+	if (Object.hasOwn(NEGATIVE_PREFERENCE, verb)) return { polarity: "neg", object };
+	if (Object.hasOwn(POSITIVE_PREFERENCE, verb)) return { polarity: "pos", object };
+	return null;
+}
+
+function sequencesEqual(left: readonly string[], right: readonly string[]): boolean {
+	if (left.length === 0 || left.length !== right.length) return false;
+	for (let index = 0; index < left.length; index++) {
+		if (left[index] !== right[index]) return false;
+	}
+	return true;
+}
+
+function withoutNegation(tokens: readonly string[]): string[] {
+	return tokens.filter(token => !Object.hasOwn(NEGATION_TOKENS, token));
+}
+
+/**
+ * Same claim strengthens. Explicit negation contradicts. A different value in the
+ * same preference family stays distinct: aging it would hide a fact that may still
+ * be true ("dislikes slow tests" and "dislikes flaky tests").
+ */
+export function classifyObservation(incoming: string, existing: string): ObservationRelation {
+	const left = normalizeObservationText(incoming);
+	const right = normalizeObservationText(existing);
+	if (left === "" || right === "") return "distinct";
+	const incomingFrame = preferenceFrame(incoming);
+	const existingFrame = preferenceFrame(existing);
+	if (
+		incomingFrame !== null &&
+		existingFrame !== null &&
+		incomingFrame.polarity !== existingFrame.polarity &&
+		tokenJaccard(observationTokens(incomingFrame.object), observationTokens(existingFrame.object)) >= 0.5
+	) {
+		return "contradicts";
+	}
+	const leftTokens = observationTokens(left);
+	const rightTokens = observationTokens(right);
+	const leftNegated = leftTokens.some(token => Object.hasOwn(NEGATION_TOKENS, token));
+	const rightNegated = rightTokens.some(token => Object.hasOwn(NEGATION_TOKENS, token));
+	if (leftNegated !== rightNegated) {
+		return tokenJaccard(withoutNegation(leftTokens), withoutNegation(rightTokens)) >= 0.5
+			? "contradicts"
+			: "distinct";
+	}
+	if (left === right || sequencesEqual(leftTokens, rightTokens)) return "same";
+	return "distinct";
+}
+
+export function mergeEvidenceSources(raw: string | null, sourceId: string): { sources: string[]; added: boolean } {
+	const sources = parseSources(raw);
+	const clean = sourceId.trim();
+	if (clean === "" || sources.includes(clean)) return { sources, added: false };
+	sources.push(clean);
+	return { sources, added: true };
+}
+
+export function clipObservationQuote(text: string, limit = OBSERVATION_QUOTE_LIMIT): string {
+	const compact = text.replace(/\s+/g, " ").trim();
+	if (compact.length <= limit) return compact;
+	return `${compact.slice(0, limit - 1)}…`;
+}
+
+/** Evidence journal. `validator` is the source id; `note` is the short quote. */
+export function recordMemoryValidation(db: Database, entry: MemoryValidationWrite): void {
+	const memoryId = entry.memoryId.trim();
+	const sourceId = entry.sourceId.trim();
+	if (memoryId === "" || sourceId === "") return;
+	db.run(
+		`INSERT INTO memory_validations (memory_id, validator, action, new_content, note)
+		 VALUES (?, ?, ?, ?, ?)`,
+		[
+			memoryId,
+			sourceId,
+			entry.action,
+			clipObservationQuote(entry.newContent ?? entry.quote),
+			clipObservationQuote(entry.quote),
+		],
+	);
 }

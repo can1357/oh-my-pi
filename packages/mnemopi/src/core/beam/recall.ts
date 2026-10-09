@@ -9,6 +9,7 @@ import { adjustWeights, classifyIntent } from "../query-intent";
 import { getSynonyms, STOP_WORDS as QUERY_STOP_WORDS } from "../synonyms";
 import { extractTemporal } from "../temporal-parser";
 import { cosineSimilarity } from "../vector-math";
+import { proofCountBoost } from "../veracity-consolidation";
 import type { BeamMemoryState, RecallEnhancedOptions, RecallOptions, RecallResult } from "./types";
 
 type DbValue = string | number | null | Uint8Array;
@@ -400,16 +401,19 @@ function tableExists(beam: BeamMemoryState, table: string): boolean {
 	);
 }
 
-function factsHaveScopeColumn(beam: BeamMemoryState): boolean {
+function factsHaveColumn(beam: BeamMemoryState, column: string): boolean {
 	const rows = queryAll(beam, "PRAGMA table_info(facts)");
-	return rows.some(row => asString(row.name) === "scope");
+	return rows.some(row => asString(row.name) === column);
 }
 
 function factVisibilityWhere(beam: BeamMemoryState, tableAlias: string): { where: string; params: DbValue[] } {
 	const prefix = tableAlias.length === 0 ? "" : `${tableAlias}.`;
-	const scope = factsHaveScopeColumn(beam)
+	const scope = factsHaveColumn(beam, "scope")
 		? `(${prefix}session_id = ? OR ${prefix}scope = 'global')`
 		: `${prefix}session_id = ?`;
+	// Aged observations must not occupy an FTS slot. Hiding them here, not after LIMIT,
+	// is what keeps a superseded preference from evicting the current one.
+	const aged = factsHaveColumn(beam, "superseded_by") ? `${prefix}superseded_by IS NULL` : "";
 	// A fact is a derivative of the working_memory row it was extracted from: once that row is
 	// explicitly superseded (`memory_edit invalidate`) or has expired, the fact must stop
 	// surfacing — otherwise an explicit invalidation is silently defeated at the fact layer.
@@ -417,7 +421,8 @@ function factVisibilityWhere(beam: BeamMemoryState, tableAlias: string): { where
 	// fts_episodes visibility predicates). Facts whose source row no longer exists stay
 	// visible: nothing contradicts them.
 	const sourceSuperseded = `NOT EXISTS (SELECT 1 FROM working_memory w WHERE w.id = ${prefix}source_msg_id AND (w.superseded_by IS NOT NULL OR (w.valid_until IS NOT NULL AND w.valid_until <= ?)))`;
-	return { where: `${scope} AND ${sourceSuperseded}`, params: [beam.sessionId, nowIso()] };
+	const where = [scope, aged, sourceSuperseded].filter(clause => clause !== "").join(" AND ");
+	return { where, params: [beam.sessionId, nowIso()] };
 }
 
 function buildWhere(
@@ -1253,7 +1258,8 @@ function factLine(result: RecallResult): string {
 	const ts = typeof result.timestamp === "string" && result.timestamp.length > 0 ? result.timestamp.slice(0, 10) : "?";
 	const source = result.source ?? "unknown";
 	const score = result.score ?? result.importance ?? 0;
-	return `${content} (${ts}, ${source}, c:${score.toFixed(1)})`;
+	const kind = result.memory_kind ? ` [${result.memory_kind}]` : "";
+	return `${content}${kind} (${ts}, ${source}, c:${score.toFixed(1)})`;
 }
 
 export function formatContext(beam: BeamMemoryState, results: readonly RecallResult[], format = "bullet"): string {
@@ -1333,7 +1339,7 @@ export function factRecall(beam: BeamMemoryState, query: string, topK = 30): Fac
 	const ranks = normalizeRanks(matched, "rowid");
 	const rows = queryAll(
 		beam,
-		`SELECT rowid, fact_id, subject, predicate, object, timestamp, confidence
+		`SELECT rowid, fact_id, subject, predicate, object, timestamp, confidence, memory_kind, proof_count
 		 FROM facts
 		 WHERE rowid IN (${placeholders(rowids.length)}) AND ${visibility.where}
 		 ORDER BY confidence DESC
@@ -1346,6 +1352,7 @@ export function factRecall(beam: BeamMemoryState, query: string, topK = 30): Fac
 			const predicate = asString(row.predicate);
 			const object = asString(row.object);
 			const confidence = asNumber(row.confidence, 0.5);
+			const proof = asNumber(row.proof_count, 1);
 			const content = object.length > 0 ? object : `${subject} ${predicate}`.trim();
 			const searchable = factSearchableText(subject, predicate, object);
 			const queryGroups = factExpandedTokenGroups(query, searchable);
@@ -1354,7 +1361,8 @@ export function factRecall(beam: BeamMemoryState, query: string, topK = 30): Fac
 			const result: FactRecallResult = {
 				id: asString(row.fact_id),
 				content,
-				score: round4(lexical * (0.7 + confidence * 0.2 + rank * 0.1)),
+				memory_kind: row.memory_kind === "experience" ? "experience" : "world",
+				score: round4(lexical * (0.7 + confidence * 0.2 + rank * 0.1) * proofCountBoost(proof)),
 				fact_id: asString(row.fact_id),
 				subject,
 				predicate,

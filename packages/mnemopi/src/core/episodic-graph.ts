@@ -1,5 +1,7 @@
 import type { Database } from "bun:sqlite";
 import { closeQuietly, type DatabasePath, openDatabase, transaction } from "../db";
+import { addColumnIfMissing } from "./beam/schema";
+import type { MemoryFactKind } from "./beam/types";
 
 export interface Gist {
 	readonly id: string;
@@ -18,6 +20,7 @@ export interface Fact {
 	readonly object: string;
 	readonly timestamp: string;
 	readonly confidence: number;
+	readonly memoryKind?: MemoryFactKind;
 	readonly temporalQualifier?: string | null;
 	/** Memory the fact was extracted from (`facts.source_msg_id`), when stored. */
 	readonly memoryId?: string | null;
@@ -88,6 +91,7 @@ interface FactRow {
 	readonly timestamp: string | null;
 	readonly source_msg_id: string | null;
 	readonly confidence: number | null;
+	readonly memory_kind: MemoryFactKind;
 }
 
 interface EdgeRow {
@@ -171,6 +175,7 @@ function rowToFact(row: FactRow): Fact {
 		confidence: row.confidence ?? 0.5,
 		temporalQualifier: null,
 		memoryId: row.source_msg_id,
+		memoryKind: row.memory_kind,
 	};
 }
 
@@ -292,9 +297,16 @@ export class EpisodicGraph {
 				timestamp TEXT,
 				source_msg_id TEXT,
 				confidence REAL DEFAULT 0.5,
+				memory_kind TEXT NOT NULL DEFAULT 'world' CHECK (memory_kind IN ('world', 'experience')),
 				created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 			)
 		`);
+		addColumnIfMissing(
+			this.db,
+			"facts",
+			"memory_kind",
+			"TEXT NOT NULL DEFAULT 'world' CHECK (memory_kind IN ('world', 'experience'))",
+		);
 		this.db.run("CREATE INDEX IF NOT EXISTS idx_facts_subject ON facts(subject)");
 		this.db.run("CREATE INDEX IF NOT EXISTS idx_facts_predicate ON facts(predicate)");
 		this.db.run("CREATE INDEX IF NOT EXISTS idx_facts_object ON facts(object)");
@@ -388,9 +400,19 @@ export class EpisodicGraph {
 	storeFact(fact: Fact, memoryId: string, sessionId = "default"): void {
 		this.db.run(
 			`INSERT OR REPLACE INTO facts
-				(fact_id, session_id, subject, predicate, object, timestamp, source_msg_id, confidence)
-				VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-			[fact.id, sessionId, fact.subject, fact.predicate, fact.object, fact.timestamp, memoryId, fact.confidence],
+				(fact_id, session_id, subject, predicate, object, timestamp, source_msg_id, confidence, memory_kind)
+				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			[
+				fact.id,
+				sessionId,
+				fact.subject,
+				fact.predicate,
+				fact.object,
+				fact.timestamp,
+				memoryId,
+				fact.confidence,
+				fact.memoryKind ?? "world",
+			],
 		);
 	}
 	getFact(id: string): Fact | null {

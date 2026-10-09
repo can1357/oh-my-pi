@@ -4,6 +4,13 @@
 
 ### Added
 
+- Mnemopi now distinguishes user/world facts from completed agent experiences, with separate extraction sources and semantic kind labels in recall results. ([#14314](https://github.com/can1357/oh-my-pi/pull/14314) by [@KamelotWalker](https://github.com/KamelotWalker))
+
+### Fixed
+
+- Prevented Turkish and English greeting-, thanks-, and acknowledgement-only sessions from being retained as memory episodes, including during shutdown. ([#14314](https://github.com/can1357/oh-my-pi/pull/14314) by [@KamelotWalker](https://github.com/KamelotWalker))
+- Redacted email addresses, Turkish phone numbers and identity numbers, IBANs, and payment card numbers with typed masks before memory writes. Added credential-prefix coverage and applied the same protection to separate extraction and embedding text. ([#14314](https://github.com/can1357/oh-my-pi/pull/14314) by [@KamelotWalker](https://github.com/KamelotWalker))
+- Fixed memory redaction missing nonuniform valid Turkish identity numbers and IBANs followed by ordinary prose, while preserving surrounding text and rejecting invalid checksums or account-number prefixes. ([#14314](https://github.com/can1357/oh-my-pi/pull/14314) by [@KamelotWalker](https://github.com/KamelotWalker))
 - Added OSC 7501 program status reporting: terminals and agent inboxes that support it now show whether omp is working, waiting on your answer or approval (with the question), done, or failed (with the error), without parsing the window title. Turn it off with `terminal.programStatus`.
 - Added title cards (icon and short code) to `/rename`: the title model picks one for a title you type, or for a generated title when the session has no card yet; `title.icons: boring` keeps renamed titles plain.
 - Grammars for less common languages (Kotlin, Swift, Ruby, PHP, Haskell, Verilog, and others) are now downloaded on first use for code summaries, block context, `ast_grep`, `ast_edit`, and TTSR rules; offline, files in those languages are skipped with a note instead of failing. `PI_GRAMMARS_URL` overrides the download location.

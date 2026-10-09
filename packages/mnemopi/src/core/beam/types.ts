@@ -7,6 +7,8 @@ export type Metadata = Record<string, JsonValue>;
 
 export type MemoryScope = "global" | "session" | "channel" | string;
 export type TrustTier = "STATED" | "OBSERVED" | "INFERRED" | "SYSTEM" | string;
+/** Semantic provenance, independent of the MEMORIA entity/metric/date categories. */
+export type MemoryFactKind = "world" | "experience";
 export type Veracity =
 	| "unknown"
 	| "likely_true"
@@ -145,6 +147,8 @@ export interface RememberOptions {
 	 * as user `Instruction:` memories.
 	 */
 	extractText?: string;
+	/** Separate assistant-authored source; only explicitly typed experience facts are stored. */
+	experienceText?: string;
 	/**
 	 * Override the text passed to embeddings and FTS indexing. Stored `content`
 	 * remains unchanged; when unset, embeddings and FTS use `content`.
@@ -273,6 +277,7 @@ export type RecallResult = RecallRowFields & {
 	truncated?: boolean;
 	/** Original character count of `content` before {@link truncated} clipping. */
 	full_length?: number;
+	memory_kind?: MemoryFactKind;
 	score?: number;
 	distance?: number;
 	rank?: number;

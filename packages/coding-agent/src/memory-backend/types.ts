@@ -45,6 +45,8 @@ export interface MemoryBackendSearchItem {
 	source?: string;
 	timestamp?: string;
 	score?: number;
+	/** Semantic provenance of extracted facts, when supported by the backend. */
+	memoryKind?: "world" | "experience";
 }
 
 export interface MemoryBackendSearchResult {

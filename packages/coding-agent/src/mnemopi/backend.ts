@@ -22,6 +22,7 @@ import type {
 import { memoryToolRefs } from "../memory-backend/tool-names";
 import memoryConsolidationPrompt from "../prompts/system/memory-consolidation-system.md" with { type: "text" };
 import memoryExtractionPrompt from "../prompts/system/memory-extraction-system.md" with { type: "text" };
+import memoryExperienceExtractionPrompt from "../prompts/system/memory-experience-extraction-system.md" with { type: "text" };
 import mnemopiInstructions from "../prompts/system/mnemopi-instructions.md" with { type: "text" };
 import type { AgentSession } from "../session/agent-session";
 import { tinyModelClient } from "../tiny/title-client";
@@ -74,7 +75,10 @@ export function resolveMemoryCompletionInput(
 	options?: MnemopiLlmCompleteOptions,
 ): MemoryCompletionInput {
 	if (options?.task?.kind === "memory-extraction") {
-		return { prompt: options.task.input, systemPrompt: memoryExtractionPrompt };
+		return {
+			prompt: options.task.input,
+			systemPrompt: options.task.sourceKind === "experience" ? memoryExperienceExtractionPrompt : memoryExtractionPrompt,
+		};
 	}
 	return { prompt };
 }
@@ -293,6 +297,7 @@ export const mnemopiBackend: MemoryBackend = {
 			source: result.source ?? undefined,
 			timestamp: result.timestamp ?? undefined,
 			score: result.score,
+			memoryKind: result.memory_kind,
 		}));
 		return { backend: "mnemopi", query, count: items.length, items };
 	},

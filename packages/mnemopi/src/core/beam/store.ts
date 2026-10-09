@@ -14,6 +14,7 @@ import type {
 	BeamMemoryState,
 	BeamStats,
 	ImportStats,
+	MemoryFactKind,
 	Metadata,
 	RememberBatchItem,
 	RememberBatchOptions,
@@ -165,14 +166,209 @@ function tableExists(db: BeamMemoryState["db"], table: string): boolean {
 	return statement.get(table) !== null;
 }
 
-/** Tables whose rows point back to a `working_memory` id via `source_memory_id`. */
-const MEMORIA_SOURCE_TABLES = [
-	"memoria_facts",
-	"memoria_instructions",
-	"memoria_kg",
-	"memoria_preferences",
-	"memoria_timelines",
-] as const;
+/** Tables whose rows are one extraction of a `working_memory` id, not a shared observation. */
+const MEMORIA_SOURCE_TABLES = ["memoria_facts", "memoria_instructions", "memoria_kg", "memoria_timelines"] as const;
+
+function columnExists(db: BeamMemoryState["db"], table: string, column: string): boolean {
+	const rows = db.query(`PRAGMA table_info(${table})`).all() as { name: string }[];
+	return rows.some(row => row.name === column);
+}
+
+function parseSourceList(raw: unknown): string[] {
+	if (typeof raw !== "string" || raw === "") return [];
+	try {
+		const parsed: unknown = JSON.parse(raw);
+		if (!Array.isArray(parsed)) return [];
+		return parsed.filter((item): item is string => typeof item === "string" && item !== "");
+	} catch {
+		return [];
+	}
+}
+
+function deleteValidations(db: BeamMemoryState["db"], memoryIds: readonly string[]): void {
+	if (memoryIds.length === 0 || !tableExists(db, "memory_validations")) return;
+	const placeholders = memoryIds.map(() => "?").join(", ");
+	db.run(`DELETE FROM memory_validations WHERE memory_id IN (${placeholders})`, [...memoryIds]);
+}
+
+/** Bypass removed winners without reviving an older claim while a successor survives. */
+function releaseSupersession(
+	db: BeamMemoryState["db"],
+	table: "facts" | "consolidated_facts" | "memoria_preferences",
+	winnerIds: readonly string[],
+): void {
+	if (winnerIds.length === 0 || !columnExists(db, table, "superseded_by")) return;
+	const idColumn = table === "facts" ? "fact_id" : "id";
+	const placeholders = winnerIds.map(() => "?").join(", ");
+	const rows = db
+		.query(`SELECT ${idColumn} AS id, superseded_by FROM ${table} WHERE ${idColumn} IN (${placeholders})`)
+		.all(...winnerIds) as { id: string | number; superseded_by: string | null }[];
+	const successors = new Map(rows.map(row => [String(row.id), row.superseded_by]));
+	for (const [removedId, successor] of successors) {
+		let next = successor;
+		const seen = new Set([removedId]);
+		while (next !== null && successors.has(next)) {
+			if (seen.has(next)) {
+				next = null;
+				break;
+			}
+			seen.add(next);
+			next = successors.get(next) ?? null;
+		}
+		if (next !== null && db.query(`SELECT 1 FROM ${table} WHERE ${idColumn} = ?`).get(next) === null) next = null;
+		db.run(
+			`UPDATE ${table} SET superseded_by = ?
+			 WHERE superseded_by = ? AND ${idColumn} NOT IN (${placeholders})`,
+			[next, removedId, ...winnerIds],
+		);
+	}
+}
+
+function detachFactSources(db: BeamMemoryState["db"], ids: readonly string[], graphRefs: Set<string>): void {
+	if (!tableExists(db, "facts")) return;
+	const placeholders = ids.map(() => "?").join(", ");
+	if (!columnExists(db, "facts", "sources_json")) {
+		const factRows = db.query(`SELECT fact_id FROM facts WHERE source_msg_id IN (${placeholders})`).all(...ids) as {
+			fact_id: string;
+		}[];
+		const deletedIds = factRows.map(row => row.fact_id);
+		for (const factId of deletedIds) graphRefs.add(factId);
+		releaseSupersession(db, "facts", deletedIds);
+		db.run(`DELETE FROM facts WHERE source_msg_id IN (${placeholders})`, [...ids]);
+		return;
+	}
+	const byId = new Map<string, { source_msg_id: string | null; sources_json: string | null }>();
+	const direct = db
+		.query(`SELECT fact_id, source_msg_id, sources_json FROM facts WHERE source_msg_id IN (${placeholders})`)
+		.all(...ids) as { fact_id: string; source_msg_id: string | null; sources_json: string | null }[];
+	for (const row of direct) byId.set(row.fact_id, row);
+	try {
+		const linked = db
+			.query(
+				`SELECT f.fact_id AS fact_id, f.source_msg_id AS source_msg_id, f.sources_json AS sources_json
+				 FROM facts f, json_each(f.sources_json) s
+				 WHERE s.value IN (${placeholders})`,
+			)
+			.all(...ids) as { fact_id: string; source_msg_id: string | null; sources_json: string | null }[];
+		for (const row of linked) byId.set(row.fact_id, row);
+	} catch {
+		// A malformed sources_json cannot hide a source_msg_id match already collected above.
+	}
+	const dropped = new Set(ids);
+	const deleted: string[] = [];
+	for (const [factId, row] of byId) {
+		const listed = parseSourceList(row.sources_json);
+		const linkedSources = listed.length > 0 ? listed : row.source_msg_id ? [row.source_msg_id] : [];
+		const remaining = linkedSources.filter(source => !dropped.has(source));
+		if (remaining.length === 0) {
+			graphRefs.add(factId);
+			deleted.push(factId);
+			continue;
+		}
+		const nextSource = remaining.find(source => !source.startsWith("session:")) ?? null;
+		const sourceMsg = row.source_msg_id !== null && dropped.has(row.source_msg_id) ? nextSource : row.source_msg_id;
+		db.run("UPDATE facts SET sources_json = ?, proof_count = ?, source_msg_id = ? WHERE fact_id = ?", [
+			JSON.stringify(remaining),
+			remaining.length,
+			sourceMsg,
+			factId,
+		]);
+	}
+	releaseSupersession(db, "facts", deleted);
+	if (deleted.length > 0) {
+		db.run(`DELETE FROM facts WHERE fact_id IN (${deleted.map(() => "?").join(", ")})`, deleted);
+	}
+	deleteValidations(db, deleted);
+}
+
+function detachConsolidatedSources(db: BeamMemoryState["db"], ids: readonly string[]): void {
+	if (!tableExists(db, "consolidated_facts")) return;
+	const placeholders = ids.map(() => "?").join(", ");
+	let rows: { id: string; sources_json: string | null }[] = [];
+	try {
+		rows = db
+			.query(
+				`SELECT cf.id AS id, cf.sources_json AS sources_json
+				 FROM consolidated_facts cf, json_each(cf.sources_json) s
+				 WHERE s.value IN (${placeholders})`,
+			)
+			.all(...ids) as { id: string; sources_json: string | null }[];
+	} catch {
+		return;
+	}
+	const dropped = new Set(ids);
+	const deleted: string[] = [];
+	for (const row of rows) {
+		const remaining = parseSourceList(row.sources_json).filter(source => !dropped.has(source));
+		if (remaining.length === 0) {
+			deleted.push(row.id);
+			continue;
+		}
+		db.run("UPDATE consolidated_facts SET sources_json = ? WHERE id = ?", [JSON.stringify(remaining), row.id]);
+	}
+	releaseSupersession(db, "consolidated_facts", deleted);
+	if (deleted.length > 0) {
+		db.run(`DELETE FROM consolidated_facts WHERE id IN (${deleted.map(() => "?").join(", ")})`, deleted);
+	}
+	deleteValidations(db, deleted);
+}
+
+function detachPreferenceSources(db: BeamMemoryState["db"], ids: readonly string[]): void {
+	if (!tableExists(db, "memoria_preferences")) return;
+	const placeholders = ids.map(() => "?").join(", ");
+	if (!columnExists(db, "memoria_preferences", "sources_json")) {
+		const rows = db
+			.query(`SELECT id FROM memoria_preferences WHERE source_memory_id IN (${placeholders})`)
+			.all(...ids) as { id: number }[];
+		const deletedIds = rows.map(row => String(row.id));
+		releaseSupersession(db, "memoria_preferences", deletedIds);
+		db.run(`DELETE FROM memoria_preferences WHERE source_memory_id IN (${placeholders})`, [...ids]);
+		return;
+	}
+	const byId = new Map<number, { source_memory_id: string | null; sources_json: string | null }>();
+	const direct = db
+		.query(
+			`SELECT id, source_memory_id, sources_json FROM memoria_preferences WHERE source_memory_id IN (${placeholders})`,
+		)
+		.all(...ids) as { id: number; source_memory_id: string | null; sources_json: string | null }[];
+	for (const row of direct) byId.set(row.id, row);
+	try {
+		const linked = db
+			.query(
+				`SELECT p.id AS id, p.source_memory_id AS source_memory_id, p.sources_json AS sources_json
+				 FROM memoria_preferences p, json_each(p.sources_json) s
+				 WHERE s.value IN (${placeholders})`,
+			)
+			.all(...ids) as { id: number; source_memory_id: string | null; sources_json: string | null }[];
+		for (const row of linked) byId.set(row.id, row);
+	} catch {
+		// Direct source_memory_id matches are enough when sources_json is not valid JSON.
+	}
+	const dropped = new Set(ids);
+	const deletedIds: string[] = [];
+	for (const [id, row] of byId) {
+		const listed = parseSourceList(row.sources_json);
+		const linkedSources = listed.length > 0 ? listed : row.source_memory_id ? [row.source_memory_id] : [];
+		const remaining = linkedSources.filter(source => !dropped.has(source));
+		if (remaining.length === 0) {
+			deletedIds.push(String(id));
+			continue;
+		}
+		const nextSource = remaining.find(source => !source.startsWith("session:")) ?? row.source_memory_id;
+		const sourceMemory =
+			row.source_memory_id !== null && dropped.has(row.source_memory_id) ? nextSource : row.source_memory_id;
+		db.run("UPDATE memoria_preferences SET sources_json = ?, proof_count = ?, source_memory_id = ? WHERE id = ?", [
+			JSON.stringify(remaining),
+			remaining.length,
+			sourceMemory,
+			id,
+		]);
+	}
+	releaseSupersession(db, "memoria_preferences", deletedIds);
+	if (deletedIds.length > 0) {
+		db.run(`DELETE FROM memoria_preferences WHERE id IN (${deletedIds.map(() => "?").join(", ")})`, deletedIds);
+	}
+}
 
 /**
  * Remove every artifact linked to the given `working_memory` ids so no deletion
@@ -190,14 +386,9 @@ function purgeWorkingMemoryArtifacts(db: BeamMemoryState["db"], ids: readonly st
 
 	const graphRefs = new Set<string>(ids);
 	for (const id of ids) graphRefs.add(`gist_${id}`);
-	if (tableExists(db, "facts")) {
-		using factStatement = db.prepare(`SELECT fact_id FROM facts WHERE source_msg_id IN (${placeholders})`);
-		const factRows = factStatement.all(...ids) as {
-			fact_id: string;
-		}[];
-		for (const row of factRows) graphRefs.add(row.fact_id);
-		db.run(`DELETE FROM facts WHERE source_msg_id IN (${placeholders})`, [...ids]);
-	}
+	detachFactSources(db, ids, graphRefs);
+	detachConsolidatedSources(db, ids);
+	detachPreferenceSources(db, ids);
 
 	db.run(`DELETE FROM annotations WHERE memory_id IN (${placeholders})`, [...ids]);
 	db.run(`DELETE FROM memory_embeddings WHERE memory_id IN (${placeholders})`, [...ids]);
@@ -304,9 +495,16 @@ function proactiveLinkIfEnabled(
  * are swallowed so they can never disrupt the synchronous `remember` that
  * scheduled them.
  */
-async function runFactExtraction(beam: BeamMemoryState, memoryId: string, content: string): Promise<void> {
+async function runFactExtraction(
+	beam: BeamMemoryState,
+	memoryId: string,
+	content: string,
+	sourceKind?: MemoryFactKind,
+): Promise<void> {
 	try {
-		const extracted = await extractFactCategoriesSafe(content);
+		const extracted = await extractFactCategoriesSafe(content, {
+			sourceKind: sourceKind === "experience" ? "experience" : undefined,
+		});
 		if (countExtractedFactCategories(extracted) === 0) return;
 		storeExtractedFactCategories(beam, extracted, 0, memoryId);
 		invalidateCaches(beam);
@@ -324,10 +522,15 @@ async function runFactExtraction(beam: BeamMemoryState, memoryId: string, conten
  * re-entered inside the task because the AsyncLocalStorage scope set by
  * `Mnemopi.#withRuntimeOptions` has already exited by the time the task runs.
  */
-function scheduleFactExtraction(beam: BeamMemoryState, memoryId: string, content: string): void {
+function scheduleFactExtraction(
+	beam: BeamMemoryState,
+	memoryId: string,
+	content: string,
+	sourceKind?: MemoryFactKind,
+): void {
 	if (content.trim() === "") return;
 	const runtimeOptions = getMnemopiRuntimeOptions();
-	const task = withMnemopiRuntimeOptions(runtimeOptions, () => runFactExtraction(beam, memoryId, content));
+	const task = withMnemopiRuntimeOptions(runtimeOptions, () => runFactExtraction(beam, memoryId, content, sourceKind));
 	const pending = beam.pendingExtractions;
 	if (pending !== undefined) {
 		pending.add(task);
@@ -539,7 +742,10 @@ export function remember(beam: BeamMemoryState, content: string, options: StoreR
 		metadata: metadata ?? undefined,
 	});
 	scheduleEmbedding(beam, [{ memoryId, content: embedText }]);
-	if (options.extract === true) scheduleFactExtraction(beam, memoryId, extractionSource);
+	if (options.extract === true) {
+		scheduleFactExtraction(beam, memoryId, extractionSource);
+		if (options.experienceText) scheduleFactExtraction(beam, memoryId, options.experienceText, "experience");
+	}
 	invalidateCaches(beam);
 	return memoryId;
 }
@@ -614,7 +820,8 @@ export function rememberBatch(
 	items.forEach((item, index) => {
 		const id = ids[index];
 		if (id !== undefined && (item.extract === true || options.extract === true)) {
-			scheduleFactExtraction(beam, id, item.content);
+			scheduleFactExtraction(beam, id, item.extractText ?? item.content);
+			if (item.experienceText) scheduleFactExtraction(beam, id, item.experienceText, "experience");
 		}
 	});
 	return ids;

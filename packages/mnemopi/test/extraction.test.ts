@@ -6,6 +6,7 @@ import {
 	extractFactsSafe,
 	heuristicExtractFacts,
 	parseFacts,
+	parseExtractedFactCategories,
 } from "@oh-my-pi/pi-mnemopi/core/extraction";
 import { getExtractionStats, resetExtractionStats } from "@oh-my-pi/pi-mnemopi/core/extraction/diagnostics";
 import {
@@ -81,6 +82,67 @@ describe("structured extraction", () => {
 		).toEqual([]);
 	});
 
+
+	it("does not promote chatter, arbitrary lines, or broken JSON into facts", () => {
+		expect(parseFacts("Selam Echo\nThank you very much\nTamam, teşekkür ederim")).toEqual([]);
+		expect(parseFacts("This response contains no persistent information.\nNo durable memories to extract.")).toEqual([]);
+		expect(parseFacts('{"facts": ["Teşekkür ederim", "The user prefers tabs"')).toEqual(["The user prefers tabs"]);
+		expect(parseFacts("- Thank you very much\n- The user prefers tabs")).toEqual(["The user prefers tabs"]);
+		expect(parseFacts('{"facts":["Selam Echo","Thank you very much"],"preferences":[]}')).toEqual([]);
+		expect(parseFacts('{"facts":[{"text":"The user prefers tabs","kind":"world"}, {"text":"unfinished')).toEqual(["The user prefers tabs"]);
+		expect(parseFacts('{"facts":[{"text":"unfinished')).toEqual([]);
+		expect(parseFacts('{"facts":[broken "The user prefers tabs"]}')).toEqual([]);
+	});
+
+	it("retains assertions containing no-facts phrases while ignoring whole-line empty markers", () => {
+		expect(parseFacts("- The user has no memories of the incident\n- The database has no facts stored")).toEqual([
+			"The user has no memories of the incident",
+			"The database has no facts stored",
+		]);
+		expect(parseFacts("No memories.\n- NO_FACTS\nNothing to remember.\nThere are no durable facts to extract.")).toEqual([]);
+	});
+
+	it("keeps Turkish declarative facts and scheduled events in legacy line output", () => {
+		expect(parseFacts("Gabi İstanbul'da oturur.\nToplantı yarın saat 15:00'te.\nKullanıcı geliştiricidir.\nSelam Echo")).toEqual([
+			"Gabi İstanbul'da oturur",
+			"Toplantı yarın saat 15:00'te",
+			"Kullanıcı geliştiricidir",
+		]);
+	});
+
+	it("preserves semantic provenance while normalizing structured fact text", () => {
+		const extracted = parseExtractedFactCategories(JSON.stringify({
+			facts: [
+				{ text: "The user prefers tabs.", kind: "world" },
+				{ text: "The agent fixed the parser!", kind: "experience" },
+				{ text: "Thank you very much", kind: "world" },
+			],
+			preferences: [{ text: "Koyu tema tercih ediyor.", kind: "world" }],
+		}));
+		expect(extracted.facts).toEqual([
+			{ text: "The user prefers tabs", kind: "world" },
+			{ text: "The agent fixed the parser", kind: "experience" },
+		]);
+		expect(extracted.preferences).toEqual([{ text: "Koyu tema tercih ediyor", kind: "world" }]);
+		expect(parseFacts('{"facts":[{"text":"The agent fixed the parser","kind":"experience"}]}')).toEqual([
+			"The agent fixed the parser",
+		]);
+	});
+
+	it("keeps coincident normalized texts typed independently across items and categories", () => {
+		const extracted = parseExtractedFactCategories(JSON.stringify({
+			facts: [
+				{ text: "The parser uses tabs.", kind: "world" },
+				{ text: "The parser uses tabs!", kind: "experience" },
+			],
+			timelines: [{ text: "The parser uses tabs", kind: "world" }],
+		}));
+		expect(extracted.facts).toEqual([
+			{ text: "The parser uses tabs", kind: "world" },
+			{ text: "The parser uses tabs", kind: "experience" },
+		]);
+		expect(extracted.timelines).toEqual([{ text: "The parser uses tabs", kind: "world" }]);
+	});
 	it("uses deterministic heuristic extraction when no LLM is configured", async () => {
 		process.env.MNEMOPI_LLM_ENABLED = "false";
 		const facts = await extractFactsSafe("My name is Ada. I work at Example Corp and I prefer dark mode.");
@@ -91,6 +153,14 @@ describe("structured extraction", () => {
 		const stats = getExtractionStats();
 		expect(stats.totals.successes).toBe(1);
 		expect(stats.by_tier.local.successes).toBe(1);
+	});
+
+	it("skips the model and heuristic extraction for content-free greetings", async () => {
+		expect(await extractFacts("Selam Echo!")).toEqual([]);
+		expect(await extractFacts("[role: user]\nSelam Echo!\n[user:end]")).toEqual([]);
+		expect(await extractFacts("Okay, thank you very much.")).toEqual([]);
+		expect(heuristicExtractFacts("I am fine, thank you.")).toEqual([]);
+		expect(getExtractionStats().totals.calls).toBe(0);
 	});
 
 	it("returns empty without recording for empty input", async () => {

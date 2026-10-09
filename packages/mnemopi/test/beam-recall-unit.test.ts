@@ -528,7 +528,6 @@ describe("beam recall free functions", () => {
 
 	it("filters fact recall to same-session facts plus explicitly global facts", () => {
 		const beam = makeBeam();
-		beam.db.run("ALTER TABLE facts ADD COLUMN scope TEXT DEFAULT 'session'");
 		beam.db.run(
 			"INSERT INTO facts (fact_id, session_id, subject, predicate, object, timestamp, confidence, scope) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
 			[

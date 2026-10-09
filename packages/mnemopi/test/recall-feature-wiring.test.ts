@@ -97,17 +97,17 @@ describe("polyphonic recall wiring", () => {
 		}
 	});
 
-	it("backfills consolidated facts written while the flag was off, once", async () => {
+	it("consolidates KG facts at write time and does not recount them when polyphonic recall is enabled", async () => {
 		const dbPath = tempDbPath();
 		const writer = memory(dbPath);
 		const id = writer.remember("Our primary database keeps the billing ledger", { veracity: "stated" });
 		// The extraction text names the subject the stored content never mentions (cf. `extractText`).
 		writer.beam.extractAndStoreFacts("PostgreSQL runs the billing ledger", 0, id);
 		writer.sleep();
-		const tables = writer.beam.db
-			.query("SELECT name FROM sqlite_master WHERE name IN ('consolidated_facts', 'conflicts')")
-			.all();
-		expect(tables).toEqual([]);
+		// Consolidation no longer waits for the polyphonic flag.
+		expect(writer.beam.db.query("SELECT subject, mention_count, sources_json FROM consolidated_facts").all()).toEqual(
+			[{ subject: "PostgreSQL", mention_count: 1, sources_json: JSON.stringify([id]) }],
+		);
 
 		const linear = await memory(dbPath, { polyphonicRecall: false }).recallEnhanced("PostgreSQL", 10);
 		const polyphonic = await memory(dbPath, { polyphonicRecall: true }).recallEnhanced("PostgreSQL", 10);
@@ -117,7 +117,7 @@ describe("polyphonic recall wiring", () => {
 		const hit = polyphonic.find(result => result.id === id);
 		expect(hit?.voice_scores?.fact).toBeGreaterThan(0);
 		expect(hit?.content).toBe("Our primary database keeps the billing ledger");
-		// A second engine on the same bank does not count the backfilled mention again.
+		// Enabling the flag backfills nothing new, so the write-time mention is not counted again.
 		expect(writer.beam.db.query("SELECT subject, mention_count, sources_json FROM consolidated_facts").all()).toEqual(
 			[{ subject: "PostgreSQL", mention_count: 1, sources_json: JSON.stringify([id]) }],
 		);
@@ -142,6 +142,8 @@ describe("polyphonic recall wiring", () => {
 		const writer = memory(dbPath);
 		const id = writer.remember("Our primary database keeps the billing ledger", { veracity: "stated" });
 		writer.beam.extractAndStoreFacts("PostgreSQL runs the billing ledger", 0, id);
+		// Leave the KG row without its consolidated fact, as a legacy bank or a failed write would.
+		writer.beam.db.run("DELETE FROM consolidated_facts");
 		const reader = memory(dbPath, { polyphonicRecall: true });
 		const warn = spyOn(logger, "warn").mockImplementation(() => {});
 		const busy = spyOn(VeracityConsolidator.prototype, "serializedWrite").mockImplementationOnce(() => {
@@ -155,6 +157,9 @@ describe("polyphonic recall wiring", () => {
 			const retried = await reader.recallEnhanced("PostgreSQL", 10);
 			expect(retried.find(result => result.id === id)?.voice_scores?.fact).toBeGreaterThan(0);
 			expect(warn).toHaveBeenCalledTimes(1);
+			expect(writer.beam.db.query("SELECT subject, mention_count, sources_json FROM consolidated_facts").all()).toEqual(
+				[{ subject: "PostgreSQL", mention_count: 1, sources_json: JSON.stringify([id]) }],
+			);
 		} finally {
 			busy.mockRestore();
 			warn.mockRestore();

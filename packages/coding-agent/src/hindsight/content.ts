@@ -1,3 +1,6 @@
+import { hasRetainableContent, stripRetentionProtocolMarkers } from "@oh-my-pi/pi-mnemopi/core/content-noise";
+export { stripRetentionProtocolMarkers };
+
 /**
  * Pure content utilities for the Hindsight backend.
  *
@@ -27,7 +30,6 @@ const LEGACY_HINDSIGHT_MEMORIES_REGEX = /<hindsight_memories>[\s\S]*?<\/hindsigh
 const LEGACY_RELEVANT_MEMORIES_REGEX = /<relevant_memories>[\s\S]*?<\/relevant_memories>/g;
 const MENTAL_MODELS_REGEX = /<mental_models>[\s\S]*?<\/mental_models>/g;
 
-const RETENTION_PROTOCOL_MARKER_REGEX = /^\[(?:role:\s*[-_a-zA-Z0-9]+|[-_a-zA-Z0-9]+:end|timestamp:\s+.+)\]$/;
 /**
  * Strip `<memories>`, `<mental_models>`, and legacy memory blocks.
  *
@@ -60,6 +62,15 @@ const SUBSTANTIVE_CHAR_RE = /[\p{L}\p{N}]/u;
  */
 export function hasSubstantiveContent(content: string): boolean {
 	return SUBSTANTIVE_CHAR_RE.test(content);
+}
+
+/** Reject chatter-only windows before episode retention, including the shutdown path. */
+export function hasRetainableMessages(messages: readonly HindsightMessage[]): boolean {
+	return messages.some(
+		message =>
+			(message.role === "user" || message.role === "assistant") &&
+			hasRetainableContent(stripRetentionProtocolMarkers(stripMemoryTags(message.content))),
+	);
 }
 
 /** Format recall results into a bullet list for context injection. */
@@ -232,15 +243,6 @@ function formatEmbeddableRetentionMessages(messages: HindsightMessage[]): Retent
 	return { transcript, messageCount: parts.length };
 }
 
-/** Remove retention framing lines from a stored coding-agent episode transcript. */
-export function stripRetentionProtocolMarkers(content: string): string {
-	return content
-		.split(/\r?\n/)
-		.filter(line => !RETENTION_PROTOCOL_MARKER_REGEX.test(line.trim()))
-		.join("\n")
-		.replace(/\n{3,}/g, "\n\n")
-		.trim();
-}
 
 export function prepareRetentionTranscript(
 	messages: HindsightMessage[],
@@ -274,4 +276,9 @@ export function prepareEmbeddableRetentionTranscript(messages: HindsightMessage[
 /** Format only user-authored messages for memory fact/entity extraction. */
 export function prepareUserRetentionTranscript(messages: HindsightMessage[]): RetentionTranscript {
 	return formatRetentionMessages(messages.filter(message => message.role === "user"));
+}
+
+/** Keep assistant actions in a separately labelled source, never in user fact extraction. */
+export function prepareExperienceRetentionTranscript(messages: HindsightMessage[]): RetentionTranscript {
+	return formatRetentionMessages(messages.filter(message => message.role === "assistant"));
 }

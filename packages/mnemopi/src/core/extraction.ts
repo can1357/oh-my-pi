@@ -1,3 +1,7 @@
+import type { MemoryFactKind } from "./beam/types";
+import { hasRetainableContent } from "./content-noise";
+import memoryExtractionPrompt from "./memory-extraction.md" with { type: "text" };
+import experienceExtractionPrompt from "./memory-experience-extraction.md" with { type: "text" };
 import { getDiagnostics, safeForLog } from "./extraction/diagnostics";
 import { callHostLlm, getHostLlmBackend } from "./llm-backends";
 import {
@@ -39,37 +43,17 @@ function llmMaxTokens(): number {
 	return envInt("MNEMOPI_LLM_MAX_TOKENS", 2048);
 }
 
-export const EXTRACTION_PROMPT_TEMPLATE =
-	env("MNEMOPI_EXTRACTION_PROMPT") ||
-	`You are an expert structured memory extractor for Mnemopi v3.0+ MEMORIA tables.
-The user message below may be in English, German, Russian, or another language.
-First detect the language, then extract ONLY high-signal, long-term relevant items.
-Categories to extract (return valid JSON only, no extra text):
-- facts: persistent user metrics, states, knowledge, or personal data
-  (Examples: 'my name is X', 'I work at Y', 'server runs on port 8080')
-- instructions: rules or commands directed at me the agent
-  (Examples: 'always use tabs', 'never delete logs', 'call me boss')
-- preferences: likes, dislikes, and their evolution
-  (Examples: 'I like dark mode', 'I prefer Python over Go')
-- timelines: real events with dates/times
-  (Examples: 'release on 2024-12-01', 'meeting next Tuesday')
-- kg: knowledge-graph triples in subject-predicate-object form
+export const EXTRACTION_PROMPT_TEMPLATE = env("MNEMOPI_EXTRACTION_PROMPT") || memoryExtractionPrompt;
 
-Rules:
-- Only extract persistent, non-transient content. Ignore weather, one-off chat, system text.
-- Use semantic understanding — do NOT rely on English keywords.
-- Preserve original casing and language.
-- If nothing qualifies, return empty arrays.
+export interface FactExtractionOptions extends RemoteLlmOptions {
+	/** Assistant content is accepted only as explicitly typed experience facts. */
+	sourceKind?: "experience";
+}
 
-Return JSON in this exact format:
-{"facts": [], "instructions": [], "preferences": [], "timelines": [], "kg": []}
-
-User message: {text}
-
-Extraction:`;
-
-export function buildExtractionPrompt(text: string, detectedLang = "en"): string {
-	const template = getMnemopiRuntimeOptions()?.llm?.extractionPrompt ?? EXTRACTION_PROMPT_TEMPLATE;
+export function buildExtractionPrompt(text: string, detectedLang = "en", sourceKind?: "experience"): string {
+	const template = sourceKind === "experience"
+		? experienceExtractionPrompt
+		: (getMnemopiRuntimeOptions()?.llm?.extractionPrompt ?? EXTRACTION_PROMPT_TEMPLATE);
 	return template.split("{text}").join(text).split("{lang}").join(detectedLang);
 }
 function stripFence(raw: string): string {
@@ -97,12 +81,18 @@ export interface ExtractedKgTriple {
 	object: string;
 }
 
+/** Preserve each item's semantic provenance even when normalized texts coincide. */
+export interface ExtractedMemoryFact {
+	text: string;
+	kind: MemoryFactKind;
+}
+
 /** Category-preserving extraction result used by background memory routing. */
 export interface ExtractedFactCategories {
-	facts: string[];
-	instructions: string[];
-	preferences: string[];
-	timelines: string[];
+	facts: ExtractedMemoryFact[];
+	instructions: ExtractedMemoryFact[];
+	preferences: ExtractedMemoryFact[];
+	timelines: ExtractedMemoryFact[];
 	kg: ExtractedKgTriple[];
 }
 
@@ -121,11 +111,11 @@ interface FactArrayOptions {
 	joinFields?: boolean;
 }
 
-function normalizeFactArray(items: unknown, options: FactArrayOptions): string[] {
+function normalizeFactArray(items: unknown, options: FactArrayOptions): ExtractedMemoryFact[] {
 	if (!Array.isArray(items)) {
 		return [];
 	}
-	const out: string[] = [];
+	const out: ExtractedMemoryFact[] = [];
 	for (const item of items) {
 		let text: string | null = null;
 		if (typeof item === "string") {
@@ -146,8 +136,8 @@ function normalizeFactArray(items: unknown, options: FactArrayOptions): string[]
 		}
 		if (text !== null && text !== "") {
 			const normalized = normalizeFact(text);
-			if (normalized !== "") {
-				out.push(normalized);
+			if (normalized !== "" && hasRetainableContent(normalized)) {
+				out.push({ text: normalized, kind: isRecord(item) && item.kind === "experience" ? "experience" : "world" });
 				if (out.length >= STRUCTURED_CATEGORY_LIMIT) break;
 			}
 		}
@@ -194,18 +184,18 @@ function normalizeKgArray(items: unknown): ExtractedKgTriple[] {
 	return out;
 }
 
-/** Flatten extracted string categories for legacy fact callers. */
+/** Flatten typed categories for flat-text fact callers. */
 export function flattenExtractedFactCategories(extracted: ExtractedFactCategories): string[] {
 	const out: string[] = [];
 	for (const category of STRING_CATEGORY_KEYS) {
 		for (const item of extracted[category]) {
-			out.push(item);
+			out.push(item.text);
 		}
 	}
 	return out;
 }
 
-/** Count string facts plus KG triples in a category-preserving extraction result. */
+/** Count typed facts plus KG triples in a category-preserving extraction result. */
 export function countExtractedFactCategories(extracted: ExtractedFactCategories): number {
 	return (
 		extracted.facts.length +
@@ -214,6 +204,45 @@ export function countExtractedFactCategories(extracted: ExtractedFactCategories)
 		extracted.timelines.length +
 		extracted.kg.length
 	);
+}
+
+/** Recover only complete category values from a JSON response truncated mid-item. */
+function recoverCompleteJsonPrefix(raw: string): string | null {
+	const stack: string[] = [];
+	let inString = false;
+	let escaped = false;
+	let completeEnd = 0;
+	let closers = "";
+	for (let index = 0; index < raw.length; index++) {
+		const char = raw[index];
+		if (inString) {
+			if (escaped) {
+				escaped = false;
+			} else if (char === "\\") {
+				escaped = true;
+			} else if (char === '"') {
+				inString = false;
+				if (stack.length === 2 && stack[1] === "[") {
+					completeEnd = index + 1;
+					closers = "]}";
+				}
+			}
+			continue;
+		}
+		if (char === '"') {
+			inString = true;
+		} else if (char === "{" || char === "[") {
+			stack.push(char);
+		} else if (char === "}" || char === "]") {
+			if (stack.pop() !== (char === "}" ? "{" : "[")) return null;
+			if ((stack.length === 2 && stack[1] === "[") || stack.length === 1) {
+				completeEnd = index + 1;
+				closers = stack.length === 2 ? "]}" : "}";
+			}
+		}
+	}
+	if (completeEnd === 0) return null;
+	return raw.slice(0, completeEnd) + closers;
 }
 
 /** Parse extractor output without discarding MEMORIA categories or KG triples. */
@@ -234,31 +263,40 @@ export function parseExtractedFactCategories(rawOutput: string | null | undefine
 					facts: normalizeFactArray(parsed.facts, { fields: FACT_TEXT_FIELD_KEYS }),
 					instructions: normalizeFactArray(parsed.instructions, { fields: INSTRUCTION_TEXT_FIELD_KEYS }),
 					preferences: normalizeFactArray(parsed.preferences, { fields: PREFERENCE_TEXT_FIELD_KEYS }),
-					timelines: normalizeFactArray(parsed.timelines, { fields: TIMELINE_TEXT_FIELD_KEYS, joinFields: true }),
+					timelines: normalizeFactArray(parsed.timelines, {
+						fields: TIMELINE_TEXT_FIELD_KEYS,
+						joinFields: true,
+					}),
 					kg: normalizeKgArray(parsed.kg),
 				};
 			}
 		} catch {
-			const matches = [...raw.matchAll(/"([^"]{10,})"/g)].map(m => m[1]).filter((v): v is string => v !== undefined);
-			if (matches.length > 0) {
-				return {
-					...emptyFactCategories(),
-					facts: matches
-						.map(normalizeFact)
-						.filter(f => f !== "")
-						.slice(0, FLAT_FACT_LIMIT),
-				};
+			const completePrefix = recoverCompleteJsonPrefix(rawClean);
+			if (completePrefix !== null) {
+				try {
+					JSON.parse(completePrefix);
+					return parseExtractedFactCategories(completePrefix);
+				} catch {
+					// Invalid syntax is not truncated structured data; never quote-scrape it.
+				}
 			}
+			return emptyFactCategories();
 		}
 	}
-	const cleaned: string[] = [];
+	const cleaned: ExtractedMemoryFact[] = [];
 	for (const line of raw.split("\n")) {
-		const fact = line.replace(/^[\s\d.\-*]+/, "").trim();
-		if (fact.length > 10) {
+		const numbered = /^\s*(?:[-*]|\d+[.)])\s+(.+)$/.exec(line);
+		const fact = (numbered?.[1] ?? line).trim();
+		if (/^(?:(?:there (?:are|is) )?no (?:durable |persistent |meaningful )?(?:facts|memories)(?: (?:found|to (?:extract|remember)))?|nothing to (?:extract|remember)|no_facts)[.!?]*$/i.test(fact)) continue;
+		const declarativeText = fact.normalize("NFKD").toLowerCase().replace(/\p{M}/gu, "").replace(/ı/g, "i");
+		// Accept explicit list items or declarative legacy facts, never arbitrary long prose.
+		const declarative =
+			/\b(?:is|are|was|were|has|have|uses?|prefers?|dislikes?|loves?|hates?|works? at|lives? in|runs?|fixed|implemented)\b/i.test(fact) ||
+			/\b(?:tercih (?:ediyor|eder|etti)|kullaniyor|kullanir|calisiyor|calisir|yasiyor|yasar|oturur|oturuyor|seviyor|sever|duzeltti|tamamladi|vardir|sahiptir|oldu|olacak)\b/i.test(declarativeText) ||
+			/\b(?:toplanti|surum|yayin|son tarih|teslim|bulusma)\b.*(?:\b(?:yarin|bugun|saat)\b|\d{1,2}:\d{2}|\d{4}-\d{2}-\d{2})|\b[a-z]+(?:dir|dur|tir|tur)\b/i.test(declarativeText);
+		if ((numbered || declarative) && hasRetainableContent(fact) && !/^(?:user|assistant|system):/i.test(fact)) {
 			const normalized = normalizeFact(fact);
-			if (normalized !== "") {
-				cleaned.push(normalized);
-			}
+			if (normalized !== "") cleaned.push({ text: normalized, kind: "world" });
 		}
 		if (cleaned.length >= FLAT_FACT_LIMIT) break;
 	}
@@ -283,7 +321,7 @@ function addUnique(out: string[], value: string): void {
 
 export function heuristicExtractFacts(text: string): string[] {
 	const normalized = text.replace(/\s+/g, " ").trim();
-	if (normalized === "") {
+	if (normalized === "" || !hasRetainableContent(normalized)) {
 		return [];
 	}
 	const facts: string[] = [];
@@ -339,6 +377,7 @@ async function localFallback(
 	prompt: string,
 	sourceText: string,
 	diag = getDiagnostics(),
+	sourceKind?: "experience",
 ): Promise<ExtractedFactCategories> {
 	diag.recordAttempt("local");
 	try {
@@ -359,26 +398,26 @@ async function localFallback(
 		return emptyFactCategories();
 	}
 	diag.recordFailure("local", undefined, "model_not_loaded");
-	const heuristic = heuristicExtractFacts(sourceText);
+	const heuristic = sourceKind === "experience" ? [] : heuristicExtractFacts(sourceText);
 	if (heuristic.length > 0) {
 		diag.recordSuccess("local", heuristic.length);
 		diag.recordCall({ succeeded: true });
-		return { ...emptyFactCategories(), facts: heuristic };
+		return { ...emptyFactCategories(), facts: heuristic.map<ExtractedMemoryFact>(text => ({ text, kind: "world" })) };
 	}
 	diag.recordCall({ succeeded: false, allEmpty: true });
 	return emptyFactCategories();
 }
 
 /** Extract fact categories from text using configured, host, local, or remote LLMs. */
-export async function extractFactCategories(
+async function runFactExtraction(
 	text: string | null | undefined,
-	options: RemoteLlmOptions = {},
+	options: FactExtractionOptions = {},
 ): Promise<ExtractedFactCategories> {
 	const diag = getDiagnostics();
-	if (typeof text !== "string" || text.trim() === "") {
+	if (typeof text !== "string" || text.trim() === "" || !hasRetainableContent(text)) {
 		return emptyFactCategories();
 	}
-	const prompt = buildExtractionPrompt(text);
+	const prompt = buildExtractionPrompt(text, "en", options.sourceKind);
 
 	// Configured completion (host-injected runtime LLM, e.g. the coding-agent's smol
 	// or a local on-device model). Mirrors consolidation's precedence: when a
@@ -389,7 +428,11 @@ export async function extractFactCategories(
 		try {
 			const raw = await callConfiguredCompletion(prompt, 0, {
 				maxTokens: llmMaxTokens(),
-				task: { kind: "memory-extraction", input: text },
+				task: {
+					kind: "memory-extraction",
+					input: text,
+					...(options.sourceKind === "experience" ? { sourceKind: "experience" as const } : {}),
+				},
 			});
 			if (typeof raw === "string" && raw.trim() !== "") {
 				const extracted = parseExtractedFactCategories(raw);
@@ -407,7 +450,7 @@ export async function extractFactCategories(
 			console.warn(`extractFacts: configured completion raised: ${safeForLog(exc)}`);
 			return emptyFactCategories();
 		}
-		return localFallback(prompt, text, diag);
+		return localFallback(prompt, text, diag, options.sourceKind);
 	}
 
 	try {
@@ -424,7 +467,7 @@ export async function extractFactCategories(
 				}
 			}
 			diag.recordNoOutput("host");
-			return localFallback(prompt, text, diag);
+			return localFallback(prompt, text, diag, options.sourceKind);
 		}
 	} catch (exc) {
 		diag.recordAttempt("host");
@@ -436,11 +479,11 @@ export async function extractFactCategories(
 
 	if (!llmAvailable()) {
 		diag.recordAttempt("local");
-		const heuristic = heuristicExtractFacts(text);
+		const heuristic = options.sourceKind === "experience" ? [] : heuristicExtractFacts(text);
 		if (heuristic.length > 0) {
 			diag.recordSuccess("local", heuristic.length);
 			diag.recordCall({ succeeded: true });
-			return { ...emptyFactCategories(), facts: heuristic };
+			return { ...emptyFactCategories(), facts: heuristic.map<ExtractedMemoryFact>(text => ({ text, kind: "world" })) };
 		}
 		diag.recordFailure("local", undefined, "llm_unavailable_at_call_site");
 		diag.recordCall({ succeeded: false });
@@ -465,7 +508,23 @@ export async function extractFactCategories(
 		console.warn(`extractFacts: remote LLM raised: ${safeForLog(exc)}`);
 	}
 
-	return localFallback(prompt, text, diag);
+	return localFallback(prompt, text, diag, options.sourceKind);
+}
+
+/** Keep assistant-source extraction isolated from user facts and heuristics. */
+export async function extractFactCategories(
+	text: string | null | undefined,
+	options: FactExtractionOptions = {},
+): Promise<ExtractedFactCategories> {
+	const extracted = await runFactExtraction(text, options);
+	if (options.sourceKind !== "experience") return extracted;
+	return {
+		facts: extracted.facts.filter(fact => fact.kind === "experience"),
+		timelines: extracted.timelines.filter(fact => fact.kind === "experience"),
+		instructions: [],
+		preferences: [],
+		kg: [],
+	};
 }
 
 /** Extract legacy flat fact strings from text. */
@@ -475,9 +534,12 @@ export async function extractFacts(text: string | null | undefined, options: Rem
 }
 
 /** Safely extract category-preserving facts, swallowing best-effort failures. */
-export async function extractFactCategoriesSafe(text: string | null | undefined): Promise<ExtractedFactCategories> {
+export async function extractFactCategoriesSafe(
+	text: string | null | undefined,
+	options: FactExtractionOptions = {},
+): Promise<ExtractedFactCategories> {
 	try {
-		return await extractFactCategories(text);
+		return await extractFactCategories(text, options);
 	} catch (exc) {
 		const diag = getDiagnostics();
 		diag.recordFailure("wrapper", exc, "outer_wrapper_caught");
