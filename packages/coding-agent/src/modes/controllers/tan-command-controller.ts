@@ -40,7 +40,7 @@ async function removeCloneSession(cloneFile: string): Promise<void> {
 }
 
 export class TanCommandController {
-	constructor(private readonly ctx: InteractiveModeContext) { }
+	constructor(private readonly ctx: InteractiveModeContext) {}
 
 	async start(work: string): Promise<void> {
 		const trimmedWork = work.trim();

@@ -53,6 +53,7 @@ function session(
 		outputSchema?: unknown;
 		maxDepth?: number;
 		isolationEnabled?: boolean;
+		isIsolated?: boolean;
 		isolationApply?: boolean;
 		modelRoles?: Record<string, string>;
 		agentServiceTierOverrides?: Record<string, string>;
@@ -82,6 +83,7 @@ function session(
 			}),
 		getSessionFile: () => null,
 		getSessionSpawns: () => "*",
+		...(options.isIsolated === true ? { isIsolated: true as const } : {}),
 		getSessionAgents: () => options.sessionAgents ?? [],
 		getPlanModeState: () => (options.planMode ? { enabled: true } : undefined),
 	} as unknown as ToolSession;
@@ -274,6 +276,32 @@ describe("structured subagent primitive", () => {
 			"Eval-defined tools are unavailable in plan mode.",
 		);
 		expect(discover2).toHaveBeenCalledTimes(1);
+	});
+	it("fails fast on nested isolation before discovery and gates affirmative apply/merge", async () => {
+		// The nested gate runs before `discoverAgentsShared`: a nested
+		// `isolated: true` with an unknown agent must report the gate, not
+		// "Unknown agent", and skip the discovery cost.
+		const nested = session({ isolationEnabled: true, isIsolated: true });
+		const discover = vi.spyOn(discoveryModule, "discoverAgents");
+		await expect(
+			resolveEffectiveSubagentPolicy(request({ session: nested, agent: "nope", isolation: { requested: true } })),
+		).rejects.toThrow("task.isolation.allowNested");
+		expect(discover).not.toHaveBeenCalled();
+		vi.restoreAllMocks();
+
+		// Affirmative `apply`/`merge` alone are gated like `isolated: true`: the
+		// prompts hide all three when the gate is off. A literal `false`
+		// everywhere stays a schema-aware no-op.
+		mockDiscovery();
+		await expect(
+			resolveEffectiveSubagentPolicy(request({ session: nested, isolation: { apply: true } })),
+		).rejects.toThrow("task.isolation.allowNested");
+		await expect(
+			resolveEffectiveSubagentPolicy(request({ session: nested, isolation: { merge: "patch" } })),
+		).rejects.toThrow("task.isolation.allowNested");
+		await expect(
+			resolveEffectiveSubagentPolicy(request({ session: nested, isolation: { requested: false, apply: false } })),
+		).resolves.toBeDefined();
 	});
 	it("reloads project task and retry policy before resolving an agent added during the session", async () => {
 		const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-task-hot-reload-"));

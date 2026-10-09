@@ -59,9 +59,9 @@ export const taskItemSchema = type({
 	// `false` keeps the wire schema provider-safe (`const: false`) — `never`
 	// would leak `{"not": true}`, which OpenAI/Google-class schemas reject.
 	// Caveat: the Google `parametersJsonSchema` normalizer degrades
-	// `{const: false}` to a bare `{type: "boolean"}`, so Gemini/Vertex
-	// advertise an undescribed optional `isolated` (validation still rejects
-	// any explicit value via the preflight; see packages/ai normalization).
+	// `{const: false}` to a bare `{type: "boolean"}`, so on Gemini/Vertex the
+	// schema itself accepts `true` and enforcement falls through to the
+	// preflight (see packages/ai normalization).
 	"isolated?": "false",
 	"tools?": "string[]",
 	"+": "delete",

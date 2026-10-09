@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from "bun:test";
 import { Settings } from "../../src/config/settings";
 import * as taskDiscovery from "../../src/task/discovery";
 import { TaskTool } from "../../src/task/index";
-import { isScoutSpawnable } from "../../src/task/spawn-policy";
+import { isIsolationAvailable, type IsolationGateSession, isScoutSpawnable } from "../../src/task/spawn-policy";
 import type { AgentDefinition } from "../../src/task/types";
 import { getTaskSchema } from "../../src/task/types";
 import type { ToolSession } from "../../src/tools";
@@ -129,4 +129,39 @@ describe("task tool description scout gating", () => {
 		// hard-coded scout guidance is dropped.
 		expect(description).toContain("- `reviewer`: Reviewer.");
 	});
+});
+
+describe("isIsolationAvailable", () => {
+	function gateSession(
+		overrides: { enabled?: boolean; allowNested?: boolean; isIsolated?: boolean } = {},
+	): IsolationGateSession {
+		return {
+			settings: Settings.isolated({
+				"task.isolation.enabled": overrides.enabled ?? true,
+				...(overrides.allowNested === true ? { "task.isolation.allowNested": true } : {}),
+			}),
+			...(overrides.isIsolated === true ? { isIsolated: true as const } : {}),
+		};
+	}
+
+	it.each([
+		// [planMode, enabled, allowNested, isIsolated, expected]
+		[false, true, false, false, true],
+		[false, true, false, undefined, true],
+		[false, true, true, true, true],
+		[true, true, true, false, false],
+		[false, false, true, false, false],
+		[false, true, false, true, false],
+		[true, false, false, true, false],
+	])(
+		"planMode=%s enabled=%s allowNested=%s isIsolated=%s -> %s",
+		(planMode, enabled, allowNested, isIsolated, expected) => {
+			const session = gateSession({
+				enabled,
+				allowNested,
+				...(isIsolated === true ? { isIsolated: true as const } : {}),
+			});
+			expect(isIsolationAvailable(session, planMode as boolean)).toBe(expected as boolean);
+		},
+	);
 });

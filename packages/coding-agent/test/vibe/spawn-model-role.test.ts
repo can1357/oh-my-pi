@@ -20,122 +20,122 @@ import type { VibeCli } from "@oh-my-pi/pi-tui/tools/vibe";
 import { VibeSessionRegistry } from "@oh-my-pi/pi-coding-agent/vibe/runtime";
 
 function makeParentSession(settings: Settings, isIsolated = false): ToolSession {
- return {
-  cwd: "/tmp",
-  settings,
-  asyncJobManager: new AsyncJobManager({ onJobComplete: () => { } }),
-  getSessionId: () => "parent-session",
-  // No session file: spawn skips lifecycle persistence and stays in-memory.
-  getSessionFile: () => null,
-  getArtifactsDir: () => null,
-  taskDepth: 0,
-  isIsolated,
-  enableLsp: false,
- } as unknown as ToolSession;
+	return {
+		cwd: "/tmp",
+		settings,
+		asyncJobManager: new AsyncJobManager({ onJobComplete: () => {} }),
+		getSessionId: () => "parent-session",
+		// No session file: spawn skips lifecycle persistence and stays in-memory.
+		getSessionFile: () => null,
+		getArtifactsDir: () => null,
+		taskDepth: 0,
+		isIsolated,
+		enableLsp: false,
+	} as unknown as ToolSession;
 }
 
 /** Spawn one worker and capture the ExecutorOptions the vibe path hands the executor. */
 async function spawnAndCaptureOptions(cli: VibeCli, settings: Settings, isIsolated = false): Promise<ExecutorOptions> {
- const captured = Promise.withResolvers<ExecutorOptions>();
- vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
-  captured.resolve(options);
-  return {
-   index: 0,
-   id: options.id,
-   agent: options.agent.name,
-   agentSource: "bundled",
-   task: options.task,
-   exitCode: 0,
-   output: "done",
-   stderr: "",
-   truncated: false,
-   durationMs: 1,
-   tokens: 0,
-   requests: 0,
-  } as SingleResult;
- });
+	const captured = Promise.withResolvers<ExecutorOptions>();
+	vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+		captured.resolve(options);
+		return {
+			index: 0,
+			id: options.id,
+			agent: options.agent.name,
+			agentSource: "bundled",
+			task: options.task,
+			exitCode: 0,
+			output: "done",
+			stderr: "",
+			truncated: false,
+			durationMs: 1,
+			tokens: 0,
+			requests: 0,
+		} as SingleResult;
+	});
 
- const registry = VibeSessionRegistry.global();
- await registry.spawn(makeParentSession(settings, isIsolated), { cli, prompt: "work" });
- return captured.promise;
+	const registry = VibeSessionRegistry.global();
+	await registry.spawn(makeParentSession(settings, isIsolated), { cli, prompt: "work" });
+	return captured.promise;
 }
 
 describe("vibe worker spawn model role", () => {
- afterEach(() => {
-  vi.restoreAllMocks();
-  VibeSessionRegistry.resetGlobalForTests();
-  AgentRegistry.resetGlobalForTests();
- });
+	afterEach(() => {
+		vi.restoreAllMocks();
+		VibeSessionRegistry.resetGlobalForTests();
+		AgentRegistry.resetGlobalForTests();
+	});
 
- it("forwards the `task` role behind the `good` worker's expanded patterns", async () => {
-  const options = await spawnAndCaptureOptions(
-   "good",
-   Settings.isolated({
-    modelRoles: { default: "anthropic/opus", task: "anthropic/sonnet" },
-   }),
-  );
+	it("forwards the `task` role behind the `good` worker's expanded patterns", async () => {
+		const options = await spawnAndCaptureOptions(
+			"good",
+			Settings.isolated({
+				modelRoles: { default: "anthropic/opus", task: "anthropic/sonnet" },
+			}),
+		);
 
-  expect(options.modelOverride).toEqual(["anthropic/sonnet"]);
-  expect(options.modelRole).toBe("task");
- });
+		expect(options.modelOverride).toEqual(["anthropic/sonnet"]);
+		expect(options.modelRole).toBe("task");
+	});
 
- it("forwards the `smol` role behind the `fast` worker's expanded patterns", async () => {
-  const options = await spawnAndCaptureOptions(
-   "fast",
-   Settings.isolated({
-    modelRoles: { default: "anthropic/opus", smol: "fast/hy3" },
-   }),
-  );
+	it("forwards the `smol` role behind the `fast` worker's expanded patterns", async () => {
+		const options = await spawnAndCaptureOptions(
+			"fast",
+			Settings.isolated({
+				modelRoles: { default: "anthropic/opus", smol: "fast/hy3" },
+			}),
+		);
 
-  expect(options.modelOverride).toEqual(["fast/hy3"]);
-  expect(options.modelRole).toBe("smol");
- });
+		expect(options.modelOverride).toEqual(["fast/hy3"]);
+		expect(options.modelRole).toBe("smol");
+	});
 
- it("keeps the role identity when a per-agent model override replaces the alias", async () => {
-  // `task.agentModelOverrides` wins over the agent definition, and an explicit
-  // selector carries no role — the child must then inherit `default`, not
-  // capture the routing of whichever role happens to name the same model.
-  const options = await spawnAndCaptureOptions(
-   "good",
-   Settings.isolated({
-    modelRoles: { default: "anthropic/opus", task: "anthropic/sonnet" },
-    "task.agentModelOverrides": { task: "openai-codex/sol" },
-   }),
-  );
+	it("keeps the role identity when a per-agent model override replaces the alias", async () => {
+		// `task.agentModelOverrides` wins over the agent definition, and an explicit
+		// selector carries no role — the child must then inherit `default`, not
+		// capture the routing of whichever role happens to name the same model.
+		const options = await spawnAndCaptureOptions(
+			"good",
+			Settings.isolated({
+				modelRoles: { default: "anthropic/opus", task: "anthropic/sonnet" },
+				"task.agentModelOverrides": { task: "openai-codex/sol" },
+			}),
+		);
 
-  expect(options.modelOverride).toEqual(["openai-codex/sol"]);
-  expect(options.modelRole).toBeUndefined();
- });
+		expect(options.modelOverride).toEqual(["openai-codex/sol"]);
+		expect(options.modelRole).toBeUndefined();
+	});
 
- it("restricts the first spawn to the worker agent's account pool, as revival does", async () => {
-  // Without it a worker runs unrestricted until it is parked and revived.
-  const options = await spawnAndCaptureOptions(
-   "good",
-   Settings.isolated({
-    modelRoles: { default: "anthropic/opus", task: "anthropic/sonnet" },
-    "task.agentAccountPools": {
-     task: { anthropic: ["email:a@example.com|org:org-a"] },
-     sonic: { anthropic: [] },
-    },
-   }),
-  );
+	it("restricts the first spawn to the worker agent's account pool, as revival does", async () => {
+		// Without it a worker runs unrestricted until it is parked and revived.
+		const options = await spawnAndCaptureOptions(
+			"good",
+			Settings.isolated({
+				modelRoles: { default: "anthropic/opus", task: "anthropic/sonnet" },
+				"task.agentAccountPools": {
+					task: { anthropic: ["email:a@example.com|org:org-a"] },
+					sonic: { anthropic: [] },
+				},
+			}),
+		);
 
-  expect(options.oauthAccountPools).toEqual({ anthropic: ["email:a@example.com|org:org-a"] });
- });
+		expect(options.oauthAccountPools).toEqual({ anthropic: ["email:a@example.com|org:org-a"] });
+	});
 
- it("propagates the parent session's isolation marker to the worker spawn", async () => {
-  // A vibe worker of an isolated parent executes inside the parent's
-  // worktree (cwd), so the worker session must inherit `isIsolated` —
-  // otherwise its own `isolated: true` spawns would bypass the
-  // task.isolation.allowNested gate.
-  const options = await spawnAndCaptureOptions(
-   "good",
-   Settings.isolated({
-    modelRoles: { default: "anthropic/opus", task: "anthropic/sonnet" },
-   }),
-   true,
-  );
+	it("propagates the parent session's isolation marker to the worker spawn", async () => {
+		// A vibe worker of an isolated parent executes inside the parent's
+		// worktree (cwd), so the worker session must inherit `isIsolated` —
+		// otherwise its own `isolated: true` spawns would bypass the
+		// task.isolation.allowNested gate.
+		const options = await spawnAndCaptureOptions(
+			"good",
+			Settings.isolated({
+				modelRoles: { default: "anthropic/opus", task: "anthropic/sonnet" },
+			}),
+			true,
+		);
 
-  expect(options.isIsolated).toBe(true);
- });
+		expect(options.isIsolated).toBe(true);
+	});
 });

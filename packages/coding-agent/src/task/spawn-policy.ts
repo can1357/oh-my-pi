@@ -75,6 +75,23 @@ export interface IsolationGateSession {
  * Centralized so the task schema, task description, and eval description
  * cannot drift apart.
  */
+/** Why {@link isIsolationAvailable} is off — lets the preflight fail fast with the matching message. */
+export type IsolationUnavailableReason = "plan-mode" | "disabled" | "nested";
+
+/**
+ * Reason isolation controls are unavailable, or `undefined` when available.
+ * Same predicate as {@link isIsolationAvailable}; prefer this in error paths
+ * so the message cannot drift from the gate.
+ */
+export function isolationUnavailableReason(
+	session: IsolationGateSession,
+	planMode: boolean,
+): IsolationUnavailableReason | undefined {
+	if (planMode) return "plan-mode";
+	if (cfgTaskIsolationEnabled.get(session.settings) !== true) return "disabled";
+	if (session.isIsolated === true && cfgTaskIsolationAllowNested.get(session.settings) !== true) return "nested";
+	return undefined;
+}
 export function isIsolationAvailable(session: IsolationGateSession, planMode: boolean): boolean {
 	return (
 		!planMode &&
