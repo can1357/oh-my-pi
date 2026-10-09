@@ -10,7 +10,7 @@
 import * as path from "node:path";
 import { resolveContainedPathSync } from "../discovery/contained-path";
 import ompDoc from "../prompts/internal-urls/omp.md" with { type: "text" };
-import { getDocFilenames, getEmbeddedDoc } from "./docs-index";
+import { getDocFilenames, getDocsDiskRoot, getEmbeddedDoc } from "./docs-index";
 import { ompDocFilename, ompDocRel, ompDocsScopeEntries } from "./omp-scope";
 import type {
 	InternalResource,
@@ -23,22 +23,16 @@ import type {
 } from "./types";
 
 /**
- * Repo `docs/` tree the embedded corpus is generated from. This mirrors the
- * on-disk fallback in `docs-index`, and reaches a real directory only in a
- * source checkout: a compiled binary or the npm bundle carries the corpus as an
- * embed, so four levels up from here is `node_modules/`.
- */
-const DOCS_ROOT = path.resolve(import.meta.dir, "../../../../docs");
-
-/**
- * File the doc is read from in a source checkout, or `undefined` when no file
- * backs it. The filename must be part of the corpus (`getDocFilenames`) and
- * the file must still exist inside `docs/`, so a link always names a doc
- * `omp://<doc>.md` resolves. Symlinks escaping the tree resolve to `outside`.
+ * Repo `docs/` tree the embedded corpus is generated from. Only the
+ * docs-index-owned root ({@link getDocsDiskRoot}) is ever probed: resolving
+ * `docs/` relative to this module would land in the consumer's own tree
+ * (their project's `docs/`, `node_modules/docs`) on installs where the
+ * corpus is embedded.
  */
 function docFileOnDisk(docPath: string): string | undefined {
-	if (!getDocFilenames().includes(docPath)) return undefined;
-	const resolution = resolveContainedPathSync(DOCS_ROOT, path.resolve(DOCS_ROOT, docPath));
+	const root = getDocsDiskRoot();
+	if (root === null || !getDocFilenames().includes(docPath)) return undefined;
+	const resolution = resolveContainedPathSync(root, path.resolve(root, docPath));
 	return resolution.status === "ok" ? resolution.realPath : undefined;
 }
 
