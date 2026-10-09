@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Added
+
+- `astMatch` now accepts serialized structured ast-grep rule cores through `ruleConfigs`.
 ### Changed
 
 - Reduced syntax-highlighting startup work by bundling the complete precompiled grammar set ([#14104](https://github.com/can1357/oh-my-pi/pull/14104) by [@iliaal](https://github.com/iliaal)).

@@ -1,7 +1,7 @@
 import * as path from "node:path";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, Judge } from "@oh-my-pi/pi-ai";
-import { compileRuleCondition, type Rule } from "../../capability/rule";
+import { type AstCondition, compileRuleCondition, formatAstCondition, type Rule } from "../../capability/rule";
 import { buildRuleFromMarkdown, createSourceMeta } from "../../discovery/helpers";
 import { judgeRules, TtsrManager, type TtsrOutput } from "../../export/ttsr";
 import type { TtsrToolInspector } from "../../session/ttsr-outputs";
@@ -149,7 +149,7 @@ interface GeneratedRulePayload {
 	name: string;
 	description: string;
 	condition?: string[];
-	astCondition?: string[];
+	astCondition?: AstCondition[];
 	question?: string;
 	scope: string[];
 	body: string;
@@ -281,7 +281,7 @@ function assembleRuleMarkdown(payload: GeneratedRulePayload): string {
 	return lines.join("\n");
 }
 
-function formatFrontmatterStringArray(values: readonly string[]): string {
+function formatFrontmatterStringArray(values: readonly AstCondition[]): string {
 	if (values.length === 1) {
 		return JSON.stringify(values[0]);
 	}
@@ -447,7 +447,10 @@ function describeTriggers(rule: Rule): string {
 }
 
 function buildNoMatchFeedback(rule: Rule, outputs: readonly TtsrOutput[]): string {
-	const hints = extractConditionHints([...(rule.condition ?? []), ...(rule.astCondition ?? [])]);
+	const hints = extractConditionHints([
+		...(rule.condition ?? []),
+		...(rule.astCondition ?? []).map(formatAstCondition),
+	]);
 	const lines = [
 		rule.question
 			? `No assistant output within scope ${formatRuleList(rule.scope)} passed ${describeTriggers(rule)}; the question was never asked.`
@@ -539,7 +542,7 @@ function extensionGlob(filePaths: readonly string[] | undefined): string | undef
 	return undefined;
 }
 
-function formatRuleList(values: readonly string[] | undefined): string {
+function formatRuleList(values: readonly AstCondition[] | undefined): string {
 	if (!values || values.length === 0) {
 		return "<default>";
 	}
