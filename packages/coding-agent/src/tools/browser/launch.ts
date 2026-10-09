@@ -14,6 +14,7 @@ import type * as BrowsersNs from "@oh-my-pi/pi-utils/browsers";
 import type {
 	Browser,
 	CDPSession,
+	Connection,
 	ConnectOptions,
 	Device,
 	JSHandle,
@@ -204,6 +205,17 @@ export async function connectPuppeteer(puppeteer: typeof Puppeteer, options: Con
 		}
 		throw toError(error);
 	}
+}
+
+/**
+ * The connection's root session, which answers browser-level `Target.*` commands. The omp relay serves
+ * those but exposes no attachable browser target, so `browser.target().createCDPSession()` fails there.
+ */
+export function browserConnection(browser: Browser): Connection {
+	// Puppeteer's CDP browser keeps its connection behind an internal getter.
+	if (!("_connection" in browser)) throw new ToolError("Puppeteer browser exposes no CDP connection");
+	const connection = browser._connection as Connection;
+	return connection;
 }
 
 /** Return device descriptors from the already-loaded Puppeteer module. */
