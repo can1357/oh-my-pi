@@ -230,6 +230,28 @@ function normalizeStoredGeminiSignature(value: unknown): StoredGeminiSignature |
 // Merges a new per-call or message-level signature into whatever is already
 // stored, so a later message-level signature never clobbers an earlier per-call
 // one (and vice versa).
+const DEMOTED_THINK_OPEN = "<think>\n";
+const DEMOTED_THINK_CLOSE = "\n</think>";
+
+/**
+ * Pull leading dialect-demoted `<think>` blocks out of assistant `content`.
+ * `transformMessages` wraps foreign reasoning with `renderDemotedThinking`,
+ * and the flattener inserts one newline after each block that has a successor.
+ */
+function hoistDemotedThinking(content: string): { reasoning: string; content: string } | undefined {
+	let rest = content;
+	const parts: string[] = [];
+	while (rest.startsWith(DEMOTED_THINK_OPEN)) {
+		const end = rest.indexOf(DEMOTED_THINK_CLOSE, DEMOTED_THINK_OPEN.length);
+		if (end < 0) return undefined;
+		parts.push(rest.slice(DEMOTED_THINK_OPEN.length, end));
+		rest = rest.slice(end + DEMOTED_THINK_CLOSE.length);
+		if (rest.startsWith("\n")) rest = rest.slice(1);
+	}
+	if (parts.length === 0 || parts.every(part => part.trim() === "")) return undefined;
+	return { reasoning: parts.join("\n"), content: rest };
+}
+
 function mergeStoredGeminiSignature(existing: string | undefined, update: StoredGeminiSignature): string {
 	const merged = normalizeStoredGeminiSignature(parseStoredThoughtSignature(existing)) ?? {};
 	if (update.perCall !== undefined) merged.perCall = update.perCall;
@@ -2673,6 +2695,26 @@ export function convertMessages(
 				});
 				if (reasoningDetails.length > 0) {
 					assistantMsg.reasoning_details = reasoningDetails;
+				}
+			}
+			// Cross-API history demotes unsigned thinking into the target dialect's
+			// `<think>` wrapper before this encoder runs, then the exact-replay
+			// fallback below fills `reasoning_content` with "". DeepSeek thinking
+			// mode rejects that empty field (`reasoning_content must be passed
+			// back`) and the gateway surfaces it as a generic body 400. Lift the
+			// demoted chain back into the structured field and out of `content`.
+			if (
+				compat.requiresReasoningContentForToolCalls &&
+				!compat.allowsSyntheticReasoningContentForToolCalls &&
+				typeof assistantMsg.content === "string" &&
+				(assistantMsg.reasoning_content === undefined || assistantMsg.reasoning_content === "")
+			) {
+				const hoisted = hoistDemotedThinking(assistantMsg.content);
+				if (hoisted) {
+					const reasoningField = compat.reasoningContentField ?? "reasoning_content";
+					assistantMsg[reasoningField] = hoisted.reasoning;
+					assistantMsg.content = hoisted.content.length > 0 ? hoisted.content : null;
+					hasReasoningField = true;
 				}
 			}
 			// Some OpenAI-compatible backends concatenate assistant content as a

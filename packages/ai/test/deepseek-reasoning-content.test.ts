@@ -1,5 +1,4 @@
 import { describe, expect, it } from "bun:test";
-import { renderDemotedThinking } from "@oh-my-pi/pi-ai/dialect";
 import { convertMessages } from "@oh-my-pi/pi-ai/providers/openai-completions";
 import type { AssistantMessage, Model, ModelSpec, ThinkingContent, ToolCall } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
@@ -332,8 +331,8 @@ describe("DeepSeek reasoning_content tool-call replay", () => {
 			const messages = convertMessages(model, { messages: [msg] }, compat);
 			const assistant = findOpenAICompletionAssistantWireMessage(messages);
 			expect(assistant).toBeDefined();
-			expect(assistant?.reasoning_content).toBe("");
-			expect(assistant?.content).toBe(renderDemotedThinking(model.id, "Need to preserve cross-api reasoning."));
+			expect(assistant?.reasoning_content).toBe("Need to preserve cross-api reasoning.");
+			expect(assistant?.content).not.toContain("<think>");
 		});
 		it("falls through to empty-string when thinking block has opaque signature and empty text", () => {
 			const model = deepseekModel({
