@@ -44,7 +44,8 @@ export interface Skill {
 	 * Provenance for `hide`: the skill's frontmatter opted out of model
 	 * invocation via `disableModelInvocation: true` (vs a presentation-only
 	 * `hide: true`). `unhideSkills` overrides `hide` for listing but must not
-	 * resurrect model-invocation opt-outs.
+	 * resurrect model-invocation opt-outs. Presentation provenance, not access
+	 * control: `skill://` resolution does not enforce this flag.
 	 */
 	modelInvocationDisabled?: boolean;
 	/**

@@ -1313,6 +1313,11 @@ export class VibeSessionRegistry {
 			mcpManager: session.mcpManager ?? MCPManager.instance(),
 			contextFiles: session.contextFiles?.filter(file => path.basename(file.path).toLowerCase() !== "agents.md"),
 			skills: resolveAgentSkills(session.skills ?? [], record.agent),
+			autoloadSkills: record.agent.autoloadSkills?.length
+				? record.agent.autoloadSkills
+						.map(name => (session.skills ?? []).find(skill => skill.name === name))
+						.filter(skill => skill !== undefined)
+				: [],
 			workspaceTree: session.workspaceTree,
 			promptTemplates: session.promptTemplates,
 			rules: session.rules,

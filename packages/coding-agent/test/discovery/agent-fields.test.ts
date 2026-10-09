@@ -199,6 +199,13 @@ describe("parseAgentFields", () => {
 		expect(fields?.skills).toEqual([]);
 	});
 
+	test("treats padded and cased none as the empty-allowlist sentinel", () => {
+		// The sentinel trims and case-folds: " none ", "None", and "NONE" all
+		// list nothing, like the exact "none".
+		for (const sentinel of [" none ", "None", "NONE"]) {
+			expect(parseAgentFields({ name: "worker", description: "desc", skills: sentinel })?.skills).toEqual([]);
+		}
+	});
 	test("returns undefined skills when field absent", () => {
 		const fields = parseAgentFields({
 			name: "worker",

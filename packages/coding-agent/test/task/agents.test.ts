@@ -101,6 +101,25 @@ describe("resolveAgentSkills", () => {
 		expect(listed(resolveAgentSkills(skills, agent({ skills: ["**"] })))).toEqual(["alpha", "ns/secret"]);
 	});
 
+	test("never lists a model-invocation opt-out, even with hide falsy or unhide present", () => {
+		// `modelInvocationDisabled` is checked independently of `hide`: a
+		// malformed record (flag set, `hide` falsy) must not bypass protection,
+		// and `unhideSkills: ["*"]` must not resurrect the opt-out.
+		const revoked = { ...skill("revoked"), modelInvocationDisabled: true };
+		const hidden = { ...skill("hidden", true), modelInvocationDisabled: true };
+		const plain = skill("alpha");
+		expect(listed(resolveAgentSkills([revoked, plain], agent({ skills: ["*"] })))).toEqual(["alpha"]);
+		expect(listed(resolveAgentSkills([hidden, plain], agent({ unhideSkills: ["*"] })))).toEqual(["alpha"]);
+	});
+
+	test("returns copies for listed skills, never parent object identities", () => {
+		// Parent and child must not share Skill identities: a child-side in-place
+		// mutation would otherwise leak back into the parent session.
+		const skills = [skill("alpha"), skill("beta")];
+		const resolved = resolveAgentSkills(skills, agent({ skills: ["alpha", "beta"] }));
+		expect(resolved.map(s => s.name)).toEqual(["alpha", "beta"]);
+		for (const [i, s] of resolved.entries()) expect(s).not.toBe(skills[i]);
+	});
 	test("unparseable glob pattern is tolerated and matches nothing", () => {
 		// `Bun.Glob` parses leniently, so this asserts the tolerated outcome
 		// for this shape — not a guaranteed fail-safe for every malformed

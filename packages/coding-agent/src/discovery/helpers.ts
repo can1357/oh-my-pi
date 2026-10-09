@@ -390,15 +390,18 @@ export function parseAgentFields(frontmatter: Record<string, unknown>): ParsedAg
 	const autoloadSkills = parseArrayOrCSV(frontmatter.autoloadSkills)
 		?.map(s => s.trim())
 		.filter(Boolean);
-	// `skills: "none"` is sugar for the explicitly empty allowlist (`[]`): zero
-	// skills listed. An absent field stays `undefined` (unrestricted), and so
-	// does a malformed one that resolves to no usable name (a blank CSV, an
-	// array of blanks) — silently listing nothing is the one reading nobody
-	// asks for.
-	const rawSkills = frontmatter.skills === "none" ? [] : parseArrayOrCSV(frontmatter.skills, { keepEmpty: true });
-	const namedSkills = rawSkills?.map(s => s.trim()).filter(Boolean) ?? [];
+	// `skills: "none"` (case-insensitive, surrounding whitespace ignored) is
+	// sugar for the explicitly empty allowlist (`[]`): zero skills listed. An
+	// absent field stays `undefined` (unrestricted), and so does a malformed
+	// one that resolves to no usable name (a blank CSV, an array of blanks) —
+	// silently listing nothing is the one reading nobody asks for.
+	const rawSkillsValue =
+		typeof frontmatter.skills === "string" && frontmatter.skills.trim().toLowerCase() === "none"
+			? []
+			: parseArrayOrCSV(frontmatter.skills, { keepEmpty: true });
+	const namedSkills = rawSkillsValue?.map(s => s.trim()).filter(Boolean) ?? [];
 	const skills =
-		rawSkills !== undefined && (rawSkills.length === 0 || namedSkills.length > 0) ? namedSkills : undefined;
+		rawSkillsValue !== undefined && (rawSkillsValue.length === 0 || namedSkills.length > 0) ? namedSkills : undefined;
 	const hideSkills = parseArrayOrCSV(frontmatter.hideSkills)
 		?.map(s => s.trim())
 		.filter(Boolean);

@@ -171,9 +171,13 @@ export function clearBundledAgentsCache(): void {
  * `unhideSkills` source-hide override).
  *
  * Visibility controls the rendered `<skills>` block only — skills are never
- * dropped, so `skill://<name>` and `/skill:<name>` stay reachable. Since the
+ * dropped, so `skill://<name>` stays reachable (plus `/skill:<name>` where the
+ * session has a slash dispatcher, i.e. the main session). Since the
  * child prompt renderer re-filters `hide !== true`, listing-hidden skills are
  * marked `hide: true` on the copies and `unhideSkills` clears the flag.
+ * This is presentation filtering, not access control: a
+ * `disableModelInvocation: true` opt-out is never listable via `unhideSkills`,
+ * but `skill://` resolution itself does not enforce `hide`.
  *
  * Globs follow `Bun.Glob` semantics: `*` does not cross `/`, so a namespaced
  * collision alias (`ns/name`) needs an explicit `ns/*` or `**` pattern.
@@ -218,17 +222,23 @@ export function resolveAgentSkills(
 		globs?.some(({ glob }) => glob.match(name)) ?? false;
 	return sessionSkills.map(skill => {
 		// `unhideSkills` overrides presentation hides (`SKILL.md` `hide: true`)
-		// only. A `disableModelInvocation: true` opt-out is a capability
-		// revocation the agent author must not silently resurrect.
-		const unhideable = skill.hide === true && skill.modelInvocationDisabled !== true;
+		// only. A `disableModelInvocation: true` opt-out is never listable via
+		// `unhideSkills`, regardless of the skill's current `hide` value — the
+		// flag is checked independently so a malformed Skill record (flag set,
+		// `hide` falsy) cannot bypass the protection.
+		const invocationRevoked = skill.modelInvocationDisabled === true;
+		const unhideable = skill.hide === true && !invocationRevoked;
 		const listed =
 			!matches(denyGlobs, skill.name) &&
 			(!allowlistPresent || matches(allowGlobs, skill.name)) &&
-			(skill.hide !== true || (unhideable && matches(unhideGlobs, skill.name)));
+			(skill.hide !== true || (unhideable && matches(unhideGlobs, skill.name))) &&
+			!invocationRevoked;
+		// Always spread-copy: the parent session and the child must not share
+		// Skill identities (a child-side in-place mutation would leak back).
 		if (listed) {
-			return skill.hide === true ? { ...skill, hide: false } : skill;
+			return skill.hide === true ? { ...skill, hide: false } : { ...skill };
 		}
-		return skill.hide === true ? skill : { ...skill, hide: true };
+		return skill.hide === true ? { ...skill } : { ...skill, hide: true };
 	});
 }
 
