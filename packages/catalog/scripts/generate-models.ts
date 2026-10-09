@@ -10,6 +10,7 @@ const COPILOT_PREMIUM_MULTIPLIERS: Record<string, number> = {
 };
 
 import * as path from "node:path";
+import { parseArgs } from "node:util";
 import { discoverAuthStorage } from "@oh-my-pi/pi-ai/auth-broker/discover";
 import type { OAuthAccess } from "@oh-my-pi/pi-ai/auth-storage";
 import type { OAuthProvider } from "@oh-my-pi/pi-ai/oauth/types";
@@ -23,6 +24,10 @@ import { providerEntries, providerEntry, seedModels } from "../src/compat/provid
 import { isCredentialScopedCatalogProvider, resolveModelPolicy } from "../src/compat/resolve";
 import type { CompiledProvider } from "../src/compat/types";
 import { ANTIGRAVITY_PRIMARY_ENDPOINT, fetchAntigravityDiscoveryModels } from "../src/discovery/antigravity";
+import {
+	resolveGrokbotCacheCredentialAsync,
+	resolveGrokbotDiscoveryIdentityAsync,
+} from "../src/discovery/grokbot-auth";
 import { createModelManager } from "../src/model-manager";
 import { resolveModelTokenizer } from "../src/model-tokenizer";
 import prevModelsJson from "../src/models.json" with { type: "json" };
@@ -85,6 +90,13 @@ const DISCOVERY_ONLY_PROVIDERS = new Set(["ollama", "vllm", "lm-studio", "litell
  * (mirrors the GitLab Duo fallback-only policy below). Exclusion is derived from
  * KDL `credential-scoped-catalog` via {@link isCredentialScopedCatalogProvider}.
  */
+/**
+ * Providers whose authored seed is the complete documented fallback
+ * catalog: their previous-snapshot rows are never resurrected, so an id
+ * the host retired (e.g. CoralBricks' GLM 5.3 Flash, 2026-10-07) cannot
+ * return as a previous-snapshot zombie.
+ */
+const STATIC_SEED_COMPLETE_PROVIDERS = new Set(["yolo-auto", "coralbricks"]);
 
 /**
  * The rows one provider's authored seed (`rules/providers/<id>.kdl`) contributes
@@ -148,10 +160,8 @@ export function mergePreviousSnapshotModels(
 			if (
 				!fetchedKeys.has(`${model.provider}/${model.id}`) &&
 				!DISCOVERY_ONLY_PROVIDERS.has(model.provider) &&
-				resolveModelPolicy(model).catalog.credentialScopedCatalog !== true &&
-				// Yolo-Auto documented static seeds are the complete offline fallback;
-				// never resurrect retired ids from the previous snapshot.
-				model.provider !== "yolo-auto" &&
+				!isCredentialScopedCatalogProvider(model.provider) &&
+				!STATIC_SEED_COMPLETE_PROVIDERS.has(model.provider) &&
 				!isRetiredProvider(model.provider) &&
 				!excludedProviders.has(model.provider)
 			) {
@@ -216,7 +226,17 @@ async function fetchProviderModelsFromCatalog(
 		const discoveryConfig = { apiKey };
 		const preparedConfig =
 			getProviderDefinition(descriptor.providerId)?.prepareModelDiscovery?.(discoveryConfig) ?? discoveryConfig;
-		const managerOptions = descriptor.createModelManagerOptions(preparedConfig);
+		const managerConfig =
+			descriptor.providerId === "grokbot"
+				? {
+						...preparedConfig,
+						...(await resolveGrokbotDiscoveryIdentityAsync()),
+						cacheCredential: await resolveGrokbotCacheCredentialAsync(
+							typeof preparedConfig.apiKey === "string" ? preparedConfig.apiKey : undefined,
+						),
+					}
+				: preparedConfig;
+		const managerOptions = descriptor.createModelManagerOptions(managerConfig);
 		const manager = createModelManager(managerOptions);
 		const result = await manager.refresh("online");
 		// `stale: true` means the dynamic fetch failed and the manager fell back
@@ -559,14 +579,15 @@ async function fetchCodexDiscoveryModels(): Promise<ModelSpec<"openai-codex-resp
 	return [...models];
 }
 
-async function generateModels() {
+async function generateModels(selectedProvider?: string) {
 	// Fetch models from dynamic sources.
 	const modelsDevModels = await loadModelsDevData();
 	const catalogProviderDescriptors = PROVIDER_DESCRIPTORS.filter(
 		(descriptor): descriptor is CatalogProviderDescriptor =>
 			isCatalogDescriptor(descriptor) &&
 			!DISCOVERY_ONLY_PROVIDERS.has(descriptor.providerId) &&
-			!isCredentialScopedCatalogProvider(descriptor.providerId),
+			!isCredentialScopedCatalogProvider(descriptor.providerId) &&
+			(selectedProvider === undefined || descriptor.providerId === selectedProvider),
 	);
 	const catalogProviderModelBatches = await Promise.all(
 		catalogProviderDescriptors.map(async descriptor => ({
@@ -617,12 +638,14 @@ async function generateModels() {
 		{ label: "Codex", providerId: "openai-codex", authoritative: true, fetch: fetchCodexDiscoveryModels },
 	] as const;
 	const specialDiscoveries = await Promise.all(
-		specialDiscoverySources.map(async source => ({
-			label: source.label,
-			providerId: source.providerId,
-			authoritative: source.authoritative,
-			models: await source.fetch(),
-		})),
+		specialDiscoverySources
+			.filter(source => selectedProvider === undefined || source.providerId === selectedProvider)
+			.map(async source => ({
+				label: source.label,
+				providerId: source.providerId,
+				authoritative: source.authoritative,
+				models: await source.fetch(),
+			})),
 	);
 	const authoritativeSpecialDiscoveryProviders = new Set<string>();
 	for (const discovery of specialDiscoveries) {
@@ -733,20 +756,34 @@ async function generateModels() {
 	};
 
 	const modelSpecs: Record<string, Record<string, ModelSpec>> = sortObj(providers);
-	const MODELS: Record<string, Record<string, Model<Api>>> = {};
+	// Validated against the generated rows, not a descriptor list, so every
+	// source kind (descriptor, special discovery, models.dev, seed) is selectable
+	// and a typo fails before models.json is rewritten.
+	if (selectedProvider !== undefined && modelSpecs[selectedProvider] === undefined) {
+		throw new Error(`No catalog rows generated for provider: ${selectedProvider}`);
+	}
+	// A provider-only update must not re-bake unrelated snapshot metadata.
+	// Keep cross-provider inputs above for reference fills, but replace only
+	// the requested provider in the generated output.
+	const MODELS: Record<string, Record<string, Model<Api>>> = selectedProvider === undefined
+		? {}
+		: { ...(prevModelsJson as unknown as Record<string, Record<string, Model<Api>>>) };
+	if (selectedProvider !== undefined) delete MODELS[selectedProvider];
 	for (const [provider, models] of Object.entries(modelSpecs)) {
+		if (selectedProvider !== undefined && provider !== selectedProvider) continue;
 		MODELS[provider] = Object.fromEntries(
 			Object.entries(sortObj(models)).map(([id, model]) => [id, buildGeneratedModel(model)]),
 		);
 	}
 
 	// Generate JSON file
-	await Bun.write(path.join(packageRoot, "src/models.json"), JSON.stringify(MODELS));
+	await Bun.write(path.join(packageRoot, "src/models.json"), JSON.stringify(sortObj(MODELS)));
 	console.log("Generated src/models.json");
 
-	// Print statistics
-	const totalModels = allModels.length;
-	const reasoningModels = allModels.filter(m => m.reasoning).length;
+	// Print statistics for the rows this run regenerated.
+	const writtenModels = selectedProvider === undefined ? allModels : Object.values(MODELS[selectedProvider] ?? {});
+	const totalModels = writtenModels.length;
+	const reasoningModels = writtenModels.filter(m => m.reasoning).length;
 
 	console.log(`
 Model Statistics:`);
@@ -754,6 +791,7 @@ Model Statistics:`);
 	console.log(`  Reasoning-capable models: ${reasoningModels}`);
 
 	for (const [provider, models] of Object.entries(MODELS)) {
+		if (selectedProvider !== undefined && provider !== selectedProvider) continue;
 		console.log(`  ${provider}: ${Object.keys(models).length} models`);
 	}
 }
@@ -809,10 +847,12 @@ export function generateOfflineSeedCatalog(
 }
 
 if (import.meta.main) {
-	const offlineProviders = process.argv
-		.slice(2)
-		.filter(arg => arg.startsWith("--offline-provider="))
-		.map(arg => arg.slice("--offline-provider=".length));
+	const { values } = parseArgs({
+		args: Bun.argv.slice(2),
+		options: { provider: { type: "string" }, "offline-provider": { type: "string", multiple: true } },
+	});
+	const offlineProviders = values["offline-provider"] ?? [];
+	if (values.provider && offlineProviders.length) throw new Error("Choose --provider or --offline-provider, not both");
 	const run =
 		offlineProviders.length > 0
 			? Bun.write(
@@ -824,7 +864,7 @@ if (import.meta.main) {
 						),
 					),
 				)
-			: generateModels();
+			: generateModels(values.provider);
 	run.catch(error => {
 		console.error(error);
 		process.exitCode = 1;

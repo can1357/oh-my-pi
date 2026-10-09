@@ -310,6 +310,8 @@ export interface OpenAICompat {
 	supportsMultipleSystemMessages?: boolean;
 	/** Whether the provider supports `reasoning_effort`. Default: auto-detected from URL. */
 	supportsReasoningEffort?: boolean;
+	/** Do not infer a thinking dial when discovery supplies no explicit thinking configuration. */
+	trustExplicitThinkingOnly?: boolean;
 	/** Optional mapping from pi-ai reasoning levels to provider/model-specific `reasoning_effort` values. */
 	reasoningEffortMap?: Partial<Record<Effort, string>>;
 	/** Whether the provider supports `stream_options: { include_usage: true }` for token usage in streaming responses. Default: true. */
@@ -867,6 +869,7 @@ export interface ResolvedOpenAISharedCompat {
 	supportsDeveloperRole: boolean;
 	supportsStrictMode: boolean;
 	supportsReasoningEffort: boolean;
+	trustExplicitThinkingOnly?: boolean;
 	reasoningEffortMap: Partial<Record<Effort, string>>;
 	supportsReasoningParams: boolean;
 	supportsSamplingParams: boolean;
@@ -950,6 +953,7 @@ export type ResolvedOpenAICompat = ResolvedOpenAISharedCompat &
 			OpenAICompat,
 			| "supportsDeveloperRole"
 			| "supportsReasoningEffort"
+			| "trustExplicitThinkingOnly"
 			| "reasoningEffortMap"
 			| "supportsReasoningParams"
 			| "supportsReasoningSummary"

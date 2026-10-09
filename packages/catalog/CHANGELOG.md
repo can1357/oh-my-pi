@@ -6,6 +6,12 @@
 
 - Added account-scoped Grok Bot model discovery and explicit Opus 5.5 effort selectors without implying inference entitlement ([#10175](https://github.com/can1357/oh-my-pi/pull/10175) by [@jroth1111](https://github.com/jroth1111)).
 - Added the text-only `grokbot-chat/host-managed` route without claiming a specific backend model ([#10175](https://github.com/can1357/oh-my-pi/pull/10175) by [@jroth1111](https://github.com/jroth1111)).
+## [18.8.7] - 2026-10-09
+
+### Added
+
+- Added built-in CoralBricks support with `/login`, live model discovery, per-model reasoning levels and off controls, and bundled offline fallbacks. ([#14146](https://github.com/can1357/oh-my-pi/pull/14146) by [@ryan-brosas](https://github.com/ryan-brosas))
+- Added `gen:models --provider <id>` to update one provider without changing other providers' catalog snapshots. ([#14146](https://github.com/can1357/oh-my-pi/pull/14146) by [@ryan-brosas](https://github.com/ryan-brosas))
 
 ### Fixed
 

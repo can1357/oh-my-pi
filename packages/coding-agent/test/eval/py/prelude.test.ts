@@ -14,7 +14,7 @@ async function runPrelude(
 	const script = `${prelude}\n${code}`;
 	// The full prelude exceeds Windows' ~32k `python -c` command-line limit
 	// (ENAMETOOLONG); a script file behaves identically on every platform.
-	const dir = await TempDir.create("omp-py-prelude-");
+	const dir = await TempDir.create("@omp-py-prelude-");
 	try {
 		const scriptPath = dir.join("script.py");
 		await Bun.write(scriptPath, script);

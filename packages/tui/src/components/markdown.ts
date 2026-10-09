@@ -2016,6 +2016,14 @@ export class Markdown implements Component {
 		this.#cachedLines = undefined;
 	}
 
+	releaseRenderCaches(): void {
+		this.invalidate();
+		this.#dropStreamPrefix();
+		this.#streamingHighlightCache = undefined;
+		this.#fastTail = undefined;
+		this.#lastTailCapture = undefined;
+	}
+
 	/**
 	 * The unrendered source as an `md` node, `stream` while the streaming
 	 * (transient) cache is on. Append-only growth yields a fresh node of the
