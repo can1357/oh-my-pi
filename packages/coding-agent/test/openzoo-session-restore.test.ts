@@ -3,8 +3,13 @@
  * cache is empty, resume must refresh the built-in OpenZoo catalog before
  * failing with "Could not restore model openzoo/auto". Bundled providers
  * stay off that path: a missing anthropic id is not a live-only catalog.
+ *
+ * The proxy URL and bearer live in this session's models.yml. Discovery
+ * must use that scoped config; the test does not touch process env, so a
+ * concurrent suite still sees the caller's OPENZOO_BASE_URL and
+ * OPENZOO_API_KEY.
  */
-import { afterEach, expect, test } from "bun:test";
+import { expect, test } from "bun:test";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { sessionModelDiscoveryProviders } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -13,31 +18,29 @@ import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manage
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
 
-const ENV_KEYS = ["OPENZOO_BASE_URL", "OPENZOO_API_KEY"] as const;
-const ORIGINAL_ENV = new Map(ENV_KEYS.map(key => [key, Bun.env[key]]));
-
-afterEach(() => {
-	for (const key of ENV_KEYS) {
-		const value = ORIGINAL_ENV.get(key);
-		if (value === undefined) {
-			delete Bun.env[key];
-		} else {
-			Bun.env[key] = value;
-		}
-	}
-});
+/** Distinct from the localhost:8402 default so a hit on the env fallback fails. */
+const SCOPED_BASE_URL = "http://127.0.0.1:18402/v1";
+const SCOPED_API_KEY = "oz_scoped-restore";
 
 test("cold session resume refreshes openzoo/auto and keeps advertised capabilities", async () => {
-	delete Bun.env.OPENZOO_BASE_URL;
-	delete Bun.env.OPENZOO_API_KEY;
+	const envBefore = {
+		baseUrl: Bun.env.OPENZOO_BASE_URL,
+		apiKey: Bun.env.OPENZOO_API_KEY,
+	};
 	const tmp = await TempDir.create("@openzoo-resume-");
+	await Bun.write(
+		tmp.join("models.yml"),
+		["providers:", "  openzoo:", `    baseUrl: ${SCOPED_BASE_URL}`, `    apiKey: ${SCOPED_API_KEY}`, ""].join("\n"),
+	);
 	const authStorage = createInMemoryAuthStorage();
 	const settings = Settings.isolated({});
 	const urls: string[] = [];
+	const authorization: (string | null)[] = [];
 	const registry = new ModelRegistry(authStorage, tmp.join("models.yml"), {
 		settings,
-		fetch: async input => {
+		fetch: async (input, init) => {
 			urls.push(String(input));
+			authorization.push(new Headers(init?.headers).get("Authorization"));
 			return Response.json({
 				data: [
 					{
@@ -82,8 +85,10 @@ test("cold session resume refreshes openzoo/auto and keeps advertised capabiliti
 			expect(session.model?.id).toBe("auto");
 			expect(session.model?.reasoning).toBe(true);
 			expect(session.model?.input).toEqual(["text", "image"]);
-			expect(urls).toHaveLength(1);
-			expect(urls[0]).toEndWith("/v1/models");
+			expect(urls).toEqual([`${SCOPED_BASE_URL}/models`]);
+			expect(authorization).toEqual([`Bearer ${SCOPED_API_KEY}`]);
+			expect(Bun.env.OPENZOO_BASE_URL).toBe(envBefore.baseUrl);
+			expect(Bun.env.OPENZOO_API_KEY).toBe(envBefore.apiKey);
 		} finally {
 			await session.dispose();
 		}
