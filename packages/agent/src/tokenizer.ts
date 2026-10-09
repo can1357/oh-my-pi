@@ -5,7 +5,7 @@ import { materializeString, stringifyJson } from "@oh-my-pi/pi-utils";
 import { LRUCache } from "@oh-my-pi/pi-utils/lru";
 import * as snapcompact from "@oh-my-pi/snapcompact";
 import { isEstimateCacheable, messageEstimateVersion } from "./compaction/message-cache";
-import { estimateImageContentTokens } from "./image-tokens";
+import { base64ImageSize, estimateImageContentTokens } from "./image-tokens";
 import type { AgentMessage } from "./types";
 
 const testEnv = Bun.env.NODE_ENV === "test";
@@ -149,13 +149,15 @@ interface MessageEstimate {
  * Model-aware local token counter. Immutable: the catalog-resolved encoding
  * is fixed at construction, so a cached count can never straddle two
  * encodings. An `Agent` owns one for its active model (swapping the instance
- * when the model's encoding changes); one-shot flows construct their own for
- * the model that will be billed. Known tokenizer families use exact native
- * counts; unknown models keep the fast byte estimate (or o200k when
- * `PI_TOKENIZER_ACCURATE=1`).
+ * when the model's encoding or snapcompact frame pricing changes); one-shot
+ * flows construct their own for the model that will be billed. Known
+ * tokenizer families use exact native counts; unknown models keep the fast
+ * byte estimate (or o200k when `PI_TOKENIZER_ACCURATE=1`).
  */
 export class Tokenizer {
 	readonly #encoding: natives.Encoding | null;
+	readonly #frameBilling: snapcompact.FrameBilling;
+	readonly frameBillingKey: string;
 
 	/** Exact counts only; byte fallbacks remain mode-dependent and uncached. */
 	readonly #nativeCounts = new LRUCache<string, number>({
@@ -174,8 +176,10 @@ export class Tokenizer {
 	 */
 	#estimates = new WeakMap<AgentMessage, MessageEstimate>();
 
-	constructor(model?: Pick<Model, "tokenizer"> | null) {
+	constructor(model?: (Pick<Model, "tokenizer"> & snapcompact.ShapeTarget) | null) {
 		this.#encoding = tokenizerEncodingForModel(model);
+		this.#frameBilling = snapcompact.frameBilling(model ?? undefined);
+		this.frameBillingKey = snapcompact.frameBillingKey(this.#frameBilling);
 	}
 
 	get encoding(): natives.Encoding | null {
@@ -332,11 +336,12 @@ export class Tokenizer {
 					if (message.blocks) {
 						for (const block of message.blocks) {
 							if (block.type === "text") fragments.push(block.text);
-							else extra += snapcompact.FRAME_TOKEN_ESTIMATE;
+							else extra += this.#frameTokens(block.data);
 						}
 					} else if (message.images) {
-						// Snapcompact frames render at ≥1568px; providers bill the downscaled cap.
-						extra += message.images.length * snapcompact.FRAME_TOKEN_ESTIMATE;
+						for (const image of message.images) {
+							extra += this.#frameTokens(image.data);
+						}
 					}
 				}
 				break;
@@ -347,5 +352,11 @@ export class Tokenizer {
 
 		if (fragments.length === 0) return extra;
 		return extra + this.countTokens(fragments);
+	}
+
+	/** One snapcompact frame at the active model's price for its pixel size; unreadable frames cost the ceiling. */
+	#frameTokens(data: string): number {
+		const size = base64ImageSize(data);
+		return size ? snapcompact.frameTokens(this.#frameBilling, size) : snapcompact.FRAME_TOKEN_ESTIMATE;
 	}
 }

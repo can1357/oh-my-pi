@@ -9,6 +9,7 @@ import type { CmuxKind } from "./cmux/rpc";
 import { CmuxSocketClient } from "./cmux/socket-client";
 import {
 	BROWSER_PROTOCOL_TIMEOUT_MS,
+	connectPuppeteer,
 	DEFAULT_VIEWPORT,
 	launchHeadlessBrowser,
 	loadPuppeteer,
@@ -16,7 +17,7 @@ import {
 	type UserAgentOverride,
 } from "./launch";
 import { reapOrphanSharedTargets } from "./orphan-registry";
-import { ensureRelayDaemon, isLoopbackRelayUrl } from "./relay/daemon";
+import { ensureRelayDaemon, isLoopbackRelayUrl, restartRelayDaemon } from "./relay/daemon";
 import type { RelayKind } from "./relay/kind";
 import { waitForRelayExtension } from "./relay/probe";
 import { ensureSharedBrowser } from "./shared-daemon";
@@ -220,7 +221,7 @@ async function openBrowserHandle(kind: BrowserKind, opts: AcquireBrowserOptions)
 		const cdpUrl = normalizeConnectedCdpUrl(kind.cdpUrl);
 		await waitForCdp(cdpUrl, 5_000, opts.signal);
 		const puppeteer = await loadPuppeteer();
-		const browser = await puppeteer.connect({
+		const browser = await connectPuppeteer(puppeteer, {
 			browserURL: cdpUrl,
 			defaultViewport: null,
 			protocolTimeout: BROWSER_PROTOCOL_TIMEOUT_MS,
@@ -240,13 +241,19 @@ async function openBrowserHandle(kind: BrowserKind, opts: AcquireBrowserOptions)
 		// on demand (the extension dials in on its own). Hosts without a CLI
 		// worker entry (bun test, SDK embedding) never spawn brokers. Remote
 		// relay URLs must already be serving.
-		if (isLoopbackRelayUrl(cdpUrl) && (isCompiledBinary() || workerHostEntry() !== null)) {
+		const autoStart = isLoopbackRelayUrl(cdpUrl) && (isCompiledBinary() || workerHostEntry() !== null);
+		if (autoStart) {
 			await ensureRelayDaemon({ cdpUrl, signal: opts.signal });
 		}
 		// The relay answers /json/version with 503 until its extension dials in;
 		// the wait fails fast when nothing serves the port or the server has
 		// already outlived the window an installed extension needs to connect.
-		const outcome = await waitForRelayExtension(cdpUrl, opts.signal);
+		let outcome = await waitForRelayExtension(cdpUrl, opts.signal);
+		// A broker-owned relay outlives omp upgrades; replace an incompatible one
+		// with this version's once. A manually started relay is left to its owner.
+		if (outcome === "outdated-relay" && autoStart && (await restartRelayDaemon({ cdpUrl, signal: opts.signal }))) {
+			outcome = await waitForRelayExtension(cdpUrl, opts.signal);
+		}
 		if (outcome === "unreachable") {
 			throw new ToolError(
 				`omp browser relay is not reachable at ${cdpUrl}. Start it with \`omp browser-relay\` (or check the endpoint), and make sure the OMP Browser Relay extension is loaded in Chrome.`,
@@ -255,6 +262,11 @@ async function openBrowserHandle(kind: BrowserKind, opts: AcquireBrowserOptions)
 		if (outcome === "no-extension") {
 			throw new ToolError(
 				`omp browser relay is serving at ${cdpUrl} but its extension never connected. Install it with \`omp browser-relay install\` and check the toolbar badge shows "on".`,
+			);
+		}
+		if (outcome === "extension-gone") {
+			throw new ToolError(
+				`omp browser relay is serving at ${cdpUrl} but its extension disconnected and has not come back. Open Chrome with the OMP Browser Relay extension and check the toolbar badge shows "on".`,
 			);
 		}
 		if (outcome === "outdated-relay") {
@@ -268,7 +280,7 @@ async function openBrowserHandle(kind: BrowserKind, opts: AcquireBrowserOptions)
 			);
 		}
 		const puppeteer = await loadPuppeteer();
-		const browser = await puppeteer.connect({
+		const browser = await connectPuppeteer(puppeteer, {
 			browserURL: cdpUrl,
 			defaultViewport: null,
 			protocolTimeout: BROWSER_PROTOCOL_TIMEOUT_MS,
@@ -324,7 +336,7 @@ async function openBrowserHandle(kind: BrowserKind, opts: AcquireBrowserOptions)
 	const puppeteer = await loadPuppeteer();
 	let browser: Browser;
 	try {
-		browser = await puppeteer.connect({
+		browser = await connectPuppeteer(puppeteer, {
 			browserURL: cdpUrl,
 			defaultViewport: null,
 			protocolTimeout: BROWSER_PROTOCOL_TIMEOUT_MS,
@@ -460,7 +472,7 @@ async function openSharedHeadlessHandle(
 			);
 		}
 		const puppeteer = await loadPuppeteer();
-		const browser = await puppeteer.connect({
+		const browser = await connectPuppeteer(puppeteer, {
 			browserWSEndpoint: shared.wsEndpoint,
 			defaultViewport: kind.headless
 				? {

@@ -86,14 +86,8 @@ export function treeRefs(text: string): string[] {
 	return refs;
 }
 
-/** Whether the cell's output carries this tree: every ref it names, or the whole text when it names none. */
-function printedIn(printedRefs: ReadonlySet<string>, output: string, text: string): boolean {
-	const refs = treeRefs(text);
-	return refs.length > 0 ? refs.every(ref => printedRefs.has(ref)) : output.includes(text);
-}
-
 /**
- * A desktop-root pointer position (pixels of the latest desktop screenshot) in
+ * A desktop-root pointer position (pixels of the desktop's or display's latest screenshot) in
  * desktop coordinates, through the display regions that screenshot reported;
  * undefined when it falls outside them. Native pointer input maps it the same way.
  */
@@ -368,9 +362,10 @@ export class ObservationLedger {
 	 */
 	take(output: string): PendingSettle | undefined {
 		if (this.#reads.size > 0) {
-			const printedRefs = new Set(Array.from(output.matchAll(/\[ref=(e\d+)\]/g), match => match[1]!));
 			for (const read of this.#reads.values()) {
-				if (!printedIn(printedRefs, output, read.text)) continue;
+				// Printed verbatim, or JSON-escaped inside a `display(...)`. Refs alone do not tell:
+				// an element keeps its ref across reads, so an earlier printed tree names them too.
+				if (!output.includes(read.text) && !output.includes(JSON.stringify(read.text).slice(1, -1))) continue;
 				const touched = this.#touched.get(read.window.id);
 				this.recordShown(read.window, read.text, read.options);
 				if (touched && touched.sequence > read.sequence) this.#touched.set(read.window.id, touched);

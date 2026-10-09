@@ -27,12 +27,12 @@ User setup, permissions, safety guidance, examples, and platform limitations: [S
 
 ## Settings
 
-| Setting | Type | Default | Contract |
-|---|---|---:|---|
-| `computer.enabled` | boolean | `false` | Enable the Eval prelude. |
-| `computer.display` | string | `all` | Composite every display, or select one native display ID. |
-| `computer.maxWidth` | number | `3840` | Maximum screenshot width. |
-| `computer.maxHeight` | number | `2400` | Maximum screenshot height. |
+| Setting              | Type    |  Default | Contract                                                                                                                     |
+| -------------------- | ------- | -------: | ---------------------------------------------------------------------------------------------------------------------------- |
+| `computer.enabled`   | boolean |  `false` | Enable the Eval prelude.                                                                                                     |
+| `computer.display`   | string  | `active` | Capture the display with the largest focused-window overlap (primary fallback); use `all` or a native display ID explicitly. |
+| `computer.maxWidth`  | number  |   `3840` | Maximum screenshot width.                                                                                                    |
+| `computer.maxHeight` | number  |   `2400` | Maximum screenshot height.                                                                                                   |
 
 There is no `computer.backend` setting. The native addon selects the platform backend.
 
@@ -65,7 +65,7 @@ Handles are frozen snapshots plus proxy methods. `computer.window(...)` and `com
 
 `computer.run(fnOrCode, { args?, read_only?, timeout? })` runs a multi-step function or JavaScript string in the same session and returns the real structured value. JavaScript functions receive `{ desktop, wait, assert }` — `desktop` has the desktop helpers plus synchronous `capabilities()`, but not `run()` or `close()` — and cannot capture Eval-cell closures; `{ args: [...] }` passes plain data, functions, and regular expressions after the scope object. Python `computer.run(code, read_only=..., timeout=...)` accepts a JavaScript string only. Nonempty inner `display` text prints in the outer Eval cell; screenshots surface as Eval images. `read_only` defaults to `false`; `timeout` defaults to 120 seconds, is capped by a positive `tools.maxTimeout`, then clamped to 1–300 seconds. The host invocation schema rejects unknown fields; the JavaScript facade forwards only recognized run options. `computer.capabilities()` reports the native backend and permission state (`action: "capabilities"`); `computer.close()` ends the persistent desktop session.
 
-Approval: a direct call is `read` when its terminal method is inspection-only (`displays`, `windows`, `window`, `focusedWindow`, `screenshot`, `elementAt`, `focusedElement`, `ref`, `clipboard.read`, `ax`, `find`, `value`, `bounds`, `attributes`, `actions`, `parent`, `children`) and `exec` for input, `raise`, `setValue`, `perform`, `press`, `click`, `focus`, and `clipboard.write`; read calls also run with the worker's read-only guard. `computer.run` is `read` only when `read_only === true`; malformed input, an omitted flag, or `false` is `exec`.
+Approval: a direct call is `read` when its terminal method is inspection-only (`displays`, `windows`, `window`, `focusedWindow`, `screenshot`, `zoom`, `elementAt`, `focusedElement`, `ref`, `clipboard.read`, `ax`, `find`, `value`, `bounds`, `attributes`, `actions`, `parent`, `children`) and `exec` for input, `raise`, `setValue`, `perform`, `press`, `click`, `focus`, and `clipboard.write`; read calls also run with the worker's read-only guard. `computer.run` is `read` only when `read_only === true`; malformed input, an omitted flag, or `false` is `exec`.
 
 Runs have full host access and are not sandboxed. The persistent `JsRuntime` supplies `desktop`, `wait`, and `assert`, plus ordinary helpers such as `display`, `print`, `read`, `write`, `env`, and `tool`. Full Bun/Node files, processes, modules, and network APIs remain available. `wait(ms)` sleeps; `wait(predicate, { timeout?, interval? })` polls until truthy.
 
@@ -83,11 +83,20 @@ The same surface is reachable as `computer.*` directly and as `desktop.*` inside
 
 A window facade exposes immutable `id`, `app`, `title`, optional `pid`, `bounds`, and `focused` fields.
 
+### Applications and display handles
+
+- `desktop.apps.list({ query?, runningOnly? })` returns `{ id, name, path, running, pid? }[]`.
+- `desktop.apps.open(idOrNameOrNativeAppPath, { activate? })` launches a native application; exact identities/paths precede unique names, and deliberate activation defaults off.
+- `desktop.display(id | "active" | "all")` returns a display input target with an independent screenshot frame. A new `"active"` screenshot reselects its monitor; input and zoom use that last frame, and keyboard input cannot silently target another monitor.
+
+macOS uses bundle/Launch Services identity, Windows includes registered/Start-menu/packaged applications, and Linux uses XDG desktop entries with argv or D-Bus activation. Missing platform services fail explicitly. Windows/Linux activation hints are advisory; PID is omitted when process attribution cannot be established.
+
 ### Screenshots and input
 
 Both a selected window and `desktop` expose:
 
-- `screenshot({ silent? }) -> { path, width, height }`
+- `screenshot({ silent? }) -> { path, width, height, coordinateWidth, coordinateHeight }`
+- `zoom({ x, y, width, height }, { silent? }) -> { path, width, height, coordinateWidth, coordinateHeight, region }`
 - `click(x, y, { button?, count?, modifiers?, takeover? })`
 - `doubleClick(x, y, { button?, modifiers?, takeover? })`
 - `move(x, y)`
@@ -96,9 +105,21 @@ Both a selected window and `desktop` expose:
 - `type(text, { takeover? })`
 - `press(chord | string[], { takeover? })`
 
-A window also exposes `raise()`, `ax(...)`, `find(...)`, and `ref(...)`. Window input defaults to background delivery without deliberate activation or pointer movement. `takeover: true` briefly activates the target and posts real input; use it only after that call reports `BackgroundUnavailable` or a screenshot proves a no-op, and AX cannot perform the action. Never replay uncertain input blindly. Desktop-root pointer helpers drive the user's real pointer, so prefer window handles. Pixel coordinates belong to the most recent screenshot of the same target. Coordinate input before capture, after target/layout changes, or with another target's frame throws.
+A window also exposes `raise()`, `ax(...)`, `find(...)`, and `ref(...)`. Window input defaults to background delivery without deliberate activation or pointer movement. `takeover: true` briefly activates the target and posts real input; use it only after that call reports `BackgroundUnavailable` or a screenshot proves a no-op, and AX cannot perform the action. Never replay uncertain input blindly. Desktop-root pointer helpers drive the user's real pointer, so prefer window handles. Pixel coordinates belong to the most recent full screenshot of the same target. Coordinate input before capture, after target/layout changes, or with another target's frame throws.
 
-Screenshots are PNGs written under the OS temp directory. Native capture is resized to the effective capture caps before both saving and displaying; the saved PNG and model-visible image share the same pixel frame. Unless `silent: true`, each capture emits a status text block and an image block. Details record captured dimensions, original source dimensions, and target.
+Screenshots are PNGs written under the OS temp directory. Native capture is resized to the effective capture caps before both saving and displaying; both Eval runtimes preserve the original-detail image bytes and metadata, so Eval does not perform a second resize or encode. Unless `silent: true`, each capture emits a status text block and an image block. Details record captured dimensions, original source dimensions, and target.
+
+Zoom requires a previous full capture of the same target. Its rectangle is in that full frame's pixels; a fresh native image is cropped before applying output caps. Zoom does not replace the stored click frame. `width`/`height` describe the returned image; `coordinateWidth`/`coordinateHeight` describe the unchanged full frame used for later input. Desktop zoom pins the originally captured display even if focus moves to another monitor. Window resizes and display-layout changes reject stale input/zoom with `InvalidCoordinateFrame`.
+
+### Observation, menus, holds, and control
+
+- `win.observe({ silent?, all?, maxDepth? })` returns screenshot metadata plus `{ ax, nodeCount, truncated }`, normally emitting both image and AX text. Capture/AX failure restores the previous delivered coordinate frame.
+- `win.menu.items(path?)` lists `{ title, path, enabled, checked, hasSubmenu, shortcut? }[]`; `win.menu.select(path)` invokes one enabled unambiguous command in the target window's context.
+- `holdKeys(keys, { duration, takeover? })` and `holdMouse(x, y, { duration, button?, keys?, takeover? })` use seconds in `[0, 100]`. `drag` also accepts arbitrary `keys`. Held input is always released within the call.
+- `desktop.control.acquire({ reason })` needs live human confirmation, returns `{ active }`, and holds native task ownership between calls. `release()` revokes it; `state()` reads live state. Normal run retirement preserves an acquired grant, while interruption, task completion, and disposal revoke it. Omitted takeover follows that live grant; explicit false remains background.
+- `win.bringToCurrentSpace()` is macOS-only, verifies actual movement without switching Spaces/activating, and invalidates the old frame.
+
+Menu/app labels are untrusted data. A takeover grant does not authorize unrelated external effects. Inspect `applications`, `menus`, `heldInput`, `spaces`, and `globalEscape` capabilities.
 
 ### Accessibility
 
@@ -116,15 +137,15 @@ On macOS, `setValue` on a date or time control (one whose `AXValue` is a date) t
 
 On macOS, `setValue(value)` on a popup button (`popupbutton`) chooses the menu option titled exactly `value`: it opens a closed menu, presses the option, and confirms the choice by reading the popup's value back. No match, or several options with that title, throws with the available option titles, and a menu the call opened is closed again.
 
-AX actions need no screenshot. AX bounds and `desktop.elementAt()` use platform-native global desktop coordinates (logical points on macOS, physical pixels on Windows), not screenshot pixels. A window AX snapshot, and each post-input report of the window, advances its ref generation; current and immediately previous refs remain valid, while older refs throw `StaleRef`.
+AX actions need no screenshot. AX bounds and `desktop.elementAt()` use platform-native global desktop coordinates (logical points on macOS, physical pixels on Windows), not screenshot pixels. An element keeps its ref across AX snapshots; a ref throws `StaleRef` once its element is missing from the window's current and previous snapshots, a post-input report's read of the window counting as one. A role or label change gives the element a new ref, and its old ref keeps working until it expires the same way.
 
 ### What a cell's input left behind
 
-Mutating helpers return nothing; the Eval cell that called them reports their effect once, after its own output. The prelude's `settleCell` hook asks the worker to settle. Every window the cell sent input to (window input, and element actions on refs the session read from that window), and every window where a ref-addressed call failed, is re-read once, no sooner than 500 ms after the cell's last input, with the options of the model's last `ax()` of that window. Desktop-root input counts for the window it reaches when sent: pointer input for the topmost window under the pointer (its desktop-screenshot pixels mapped through that screenshot's display regions; a window covering a whole display, such as the macOS Dock's overlay, is passed over), keys for the focused window. Elements from `elementAt` and `focusedElement` belong to the window at their point and the focused window. Input whose window stays unknown is shown on the window focused at settle time.
+Input helpers report their effect once, after the Eval cell's own output. The prelude's `settleCell` hook asks the worker to settle. Every window the cell sent input to (window input including `menu.select`, `holdKeys`, `holdMouse`, `raise` and `bringToCurrentSpace`, and element actions on refs the session read from that window), and every window where a ref-addressed call failed, is re-read once, no sooner than 500 ms after the cell's last input, with the options of the model's last `ax()` or `observe()` of that window. Desktop and display input (`desktop.*`, `desktop.display(…)`) counts for the window it reaches when sent: pointer input for the topmost window under the pointer (pixels of that target's latest full screenshot mapped through the screenshot's display regions; a window covering a whole display, such as the macOS Dock's overlay, is passed over), keys for the focused window. Elements from `elementAt` and `focusedElement` belong to the window at their point and the focused window. Input whose window stays unknown, `apps.open` included, is shown on the window focused at settle time.
 
-Each window prints as `window "<id>" <app> "<title>" after <inputs> — <summary>:` (the id JSON-quoted, exactly as `desktop.window()` takes it) followed by its current tree, rows marked against the tree the model last received for the window (the last `ax()` tree a cell printed, or its last report): `~` changed (with `(was: …)`), `+` added, and a `removed:` line for rows that disappeared. Native object addresses in values (`<AXUIElement 0x…>`) are ignored when comparing. An identical tree is reported as `no accessibility change visible … s after the input (the app may still be working)`: one sample, not a verdict. A tree over 16 KB is elided structurally to fit — whole subtrees go, empty wrappers first, then the deepest subtrees without controls, then those with controls, marked rows last — each run of removed siblings leaves one `… N rows elided` line, and the header says how many rows went and how many changed rows were among them. The single read keeps refs from the tree the model held before the cell valid (the native registry keeps one previous generation) and the printed refs live.
+Each window prints as `window "<id>" <app> "<title>" after <inputs> — <summary>:` (the id JSON-quoted, exactly as `desktop.window()` takes it) followed by its current tree, rows marked against the tree the model last received for the window (the last `ax()` or `observe()` tree a cell printed, or its last report): `~` changed (with `(was: …)`), `+` added, and a `removed:` line for rows that disappeared. Native object addresses in values (`<AXUIElement 0x…>`) are ignored when comparing. An identical tree is reported as `no accessibility change visible … s after the input (the app may still be working)`: one sample, not a verdict. A tree over 16 KB is elided structurally to fit — whole subtrees go, empty wrappers first, then the deepest subtrees without controls, then those with controls, marked rows last — each run of removed siblings leaves one `… N rows elided` line, and the header says how many rows went and how many changed rows were among them. The single read keeps every ref of the tree the model held before the cell valid (a ref expires only once its element is missing from two snapshots in a row) and the printed refs live.
 
-A window whose `ax()` tree the cell printed or displayed after its last input is not re-read; a tree the cell's code read without printing it does not count as seen. Input whose window stays unknown when no window is focused at settle time is named on a `no window to read back` line. Windows the input opened (of the processes it addressed, or newly focused), closed, or focused follow as one line each. Cells whose code never reached the desktop, and cancelled cells, report nothing; a settle that fails says so in the cell (`No post-input report for this cell (…)`). Reads past a 10 s budget are skipped and each skipped window is named.
+A window whose `ax()` or `observe()` tree the cell printed or displayed after its last input is not re-read; a tree the cell's code read without printing it does not count as seen. Input whose window stays unknown when no window is focused at settle time is named on a `no window to read back` line. Windows the input opened (of the processes it addressed, or newly focused), closed, or focused follow as one line each. Cells whose code never reached the desktop, and cancelled cells, report nothing; a settle that fails says so in the cell (`No post-input report for this cell (…)`). Reads past a 10 s budget are skipped and each skipped window is named.
 
 ### Clipboard
 
@@ -135,7 +156,7 @@ A window whose `ax()` tree the cell printed or displayed after its last input is
 
 Direct helpers and `computer.run(...)` return the worker's structured value directly; window and element facades cross the boundary as their identity fields. The outer Eval cell prints nonempty text emitted by inner `display(...)` calls. Non-silent screenshots remain ordinary Eval image output. A run with no display text and no return value emits no placeholder text. Combined display text is subject to the shared inline byte cap; over-cap text is saved as a session artifact.
 
-Result details contain the resolved `code`, `readOnly`, `screenshots`, optional structured `value`, and capability metadata (`backend`, `capturePermission`, `inputPermission`, `axPermission`). Each screenshot detail contains `path`, `width`, `height`, optional `sourceWidth`/`sourceHeight`, and `target`. Provider delivery uses ordinary text/image content with image detail `original`; it does not use provider Files or native `computer_call_output` metadata.
+Result details contain the resolved `code`, `readOnly`, `screenshots`, optional structured `value`, and capability metadata (`backend`, `capturePermission`, `inputPermission`, `axPermission`). Each screenshot detail contains `path`, `width`, `height`, `coordinateWidth`, `coordinateHeight`, optional `sourceWidth`/`sourceHeight` and `region`, and `target`. Provider delivery uses ordinary text/image content with image detail `original`; it does not use provider Files or native `computer_call_output` metadata.
 
 ## Flow and lifecycle
 
@@ -144,8 +165,8 @@ Result details contain the resolved `code`, `readOnly`, `screenshots`, optional 
 3. The supervisor lazily starts one crash-isolated Bun worker (10-second startup deadline) and forwards aborts. The worker rejects overlapping runs instead of queueing them.
 4. The worker lazily creates one native `DesktopSession` and one persistent `JsRuntime`. Handles, screenshot coordinate frames, runtime variables, and recent AX refs survive successful calls.
 5. Each run installs a run-scoped `desktop` facade plus `wait`/`assert`. AsyncLocalStorage prevents leaked asynchronous work from borrowing a later run's signal or read-only policy.
-6. Native operations execute in the worker. Runtime `tool.*` calls cross back through the supervisor into the owning session tool bridge and inherit cancellation.
-7. At run end, pending work is aborted, clone-safe displays/return value and capabilities return to the host, and the worker remains alive.
+6. Native operations execute in the worker with cancellation tokens captured before NAPI scheduling. Mutations acquire an OS-backed cross-process input/focus lease; reads do not. Runtime `tool.*` calls cross back through the supervisor into the owning session tool bridge and inherit cancellation.
+7. Abort, timeout, and normal run teardown synchronously retire that run's native generation, including unawaited queued operations. Delivery checks cancellation between events and releases held input during cleanup; later runs use a fresh generation. Clone-safe displays/return value and capabilities return to the host, and the worker remains alive.
 8. When an Eval cell that made computer calls ends, the host sends one `settle` request (15-second budget, same abort and restart handling as a run); the worker re-reads what the cell's input touched and returns the report appended to the cell's output.
 9. A run timeout is followed by a 750 ms supervisor grace period. If the worker does not finish, it is terminated with `computer worker restarted; captures and ax refs were reset`; a later call starts a fresh worker.
 10. Session cleanup sends `close`, waits up to 1.5 seconds, then force-terminates as a bounded fallback. Owner-scoped cleanup closes every registered computer controller.
@@ -163,17 +184,22 @@ Result details contain the resolved `code`, `readOnly`, `screenshots`, optional 
 
 Native errors are surfaced as `ToolError` text prefixed by the stable code name:
 
-- `PermissionDenied`, `CaptureFailed`, `InputFailed`, `BackgroundUnavailable`
+- `PermissionDenied`, `CaptureFailed`, `InputFailed`, `BackgroundUnavailable`, `InputBusy`, `Cancelled`
 - `WindowNotFound`, `InvalidTarget`, `InvalidKey`, `InvalidCoordinateFrame`
 - `StaleRef`, `AxUnsupported`, `AxFailed`, `Timeout`, `Closed`, `Internal`
+- `Unsupported`, `SpaceUnsupported`, `SpaceMoveDenied`
 
 Prelude/worker errors include `Computer session is closed`, `Computer worker is busy`, `Timed out starting computer worker`, `Computer code execution timed out after <ms>ms`, read-only mutation errors, and the worker-restart message above.
+
+`InputBusy` means another native operation owns input/focus and no input was sent. On macOS a listen-only, operation-scoped Escape monitor cancels physical Escape but ignores synthetic events. An unavailable monitor refuses input with `PermissionDenied`. `Cancelled` may follow partial input or an atomic OS/AX operation: cancellation cannot undo effects already delivered.
 
 Recover by refreshing the exact target screenshot after coordinate-frame errors, using the tree the cell's report prints (or a new AX snapshot) after `StaleRef`, and inspecting `desktop.capabilities()` for platform/permission failures. After `BackgroundUnavailable`, prefer AX; use `takeover: true` only for the refused call when supported. After partial-delivery or restoration errors, inspect the target before retrying because input may already have landed.
 
 ## Platform constraints
 
 Current native backends support macOS, Linux X11, Linux Wayland portal capture/input where available, and Windows; other targets depend on native-addon support. Capabilities and permission state are runtime facts—inspect `desktop.capabilities()` rather than assuming them. Wayland compositors do not permit omp to activate arbitrary windows, so per-window native input and `raise()` are unavailable; use AX actions, or desktop input after focusing the target yourself. See [Scriptable computer use: Platforms](../computer-use.md#platforms) for prerequisites and permission details.
+
+macOS capture uses ScreenCaptureKit on 14+ in one persistent native main-loop worker per desktop session, with raw pixels over private pipes: no per-screenshot process launch or intermediate PNG. Native CoreGraphics handles macOS 12/13. The optional Wayland PipeWire path refreshes portal geometry before coordinate delivery; this costs an additional portal request and may require renewed consent if its restore permission has expired.
 
 ## Critical constraints
 

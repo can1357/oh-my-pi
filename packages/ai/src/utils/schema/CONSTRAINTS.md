@@ -64,19 +64,21 @@ Schemas sent on the Google JSON Schema path MUST follow:
 
 1. **Unsupported JSON Schema keywords are stripped (except property names under `properties`)**
    - Unsupported keys (`UNSUPPORTED_SCHEMA_FIELDS`):
-      - `$schema`, `$ref`, `$defs`, `$dynamicRef`, `$dynamicAnchor`
+      - `$schema`, `$id`, `$anchor`, `$ref`, `$defs`, `$dynamicRef`, `$dynamicAnchor`
       - `examples`, `prefixItems`, `unevaluatedProperties`, `unevaluatedItems`
-      - `patternProperties`, `additionalProperties`
-      - `minItems`, `maxItems`, `minLength`, `maxLength`
-      - `minimum`, `maximum`, `exclusiveMinimum`, `exclusiveMaximum`
-      - `pattern`, `format`
+      - `patternProperties`, `additionalProperties`, `propertyNames`
+      - `minItems`, `maxItems`, `uniqueItems`, `contains`, `minContains`, `maxContains`, `additionalItems`
+      - `minLength`, `maxLength`, `minimum`, `maximum`, `exclusiveMinimum`, `exclusiveMaximum`, `multipleOf`
+      - `pattern`, `format`, `contentEncoding`, `contentMediaType`, `contentSchema`
       - `dependencies`, `dependentSchemas`, `dependentRequired`
-      - `deprecated`, `readOnly`, `writeOnly`, `$comment`
+      - `x-mcp-header`, `deprecated`, `readOnly`, `writeOnly`, `$comment`
    - Important: keys inside a `properties` object are treated as property names and MUST NOT be stripped by keyword match.
    - Human-meaningful stripped keys (`pattern`, `format`, min/max constraints, `default`, `examples`, etc.) are appended to the sibling `description` as an Anthropic-style spill block: `{pattern: "^foo$", minimum: 0}`. Structural/meta keys such as `$ref`, `$defs`, and `additionalProperties` are not spilled.
 
 2. **`type` arrays are normalized to scalar type + nullable marker**
    - `type: ["T", "null"]` becomes `type: "T"` and `nullable: true`.
+   - `type: ["A", "B", …]` becomes `anyOf: [{ type: "A", …A keywords }, { type: "B", …B keywords }]`; type-specific keywords (`items`, `properties`, `minimum`, …) move into the branches whose type they constrain, and a `null` member becomes `nullable: true`.
+   - A node left with a scalar `type` MUST NOT keep another type's keywords: Gemini rejects `items` beside `type: "string"` with HTTP 400.
    - Google expects scalar type, not `type[]`.
 
 3. **`const` is converted to `enum`**
@@ -115,7 +117,7 @@ For Cloud Code Assist Claude tool declarations, schema MUST satisfy stricter con
 
 1. Start with Google unsupported-key stripping behavior.
 2. **`nullable` keyword MUST be stripped** in CCA Claude path.
-3. `type: ["T", "null"]` becomes `type: "T"` with no `nullable` marker.
+3. `type: ["T", "null"]` becomes `type: "T"` with no `nullable` marker; a multi-type array becomes `anyOf` branches that the combiner rules below collapse.
 4. Human-meaningful stripped keys are appended to `description` with the same spill format used by the Google dispatcher.
 
 ### 3.3 Combiner/union normalization contract

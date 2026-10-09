@@ -1,4 +1,5 @@
 import { afterAll, describe, expect, it } from "bun:test";
+import type { AgentToolContext } from "@oh-my-pi/pi-agent-core";
 import { createContext, runInContext } from "node:vm";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { EvalPreludeDefinition } from "@oh-my-pi/pi-coding-agent/eval/preludes";
@@ -22,7 +23,9 @@ import type {
 	AxNode,
 	AxQuery,
 	AxSnapshotOptions,
+	CaptureRegion,
 	DesktopCapabilities,
+	DesktopCapture,
 	DesktopDisplay,
 	DesktopPoint,
 	DesktopWindow,
@@ -47,10 +50,15 @@ const capabilities: DesktopCapabilities = {
 	ax: true,
 	backgroundWindowInput: true,
 	takeover: true,
+	globalEscape: true,
 	capturePermission: "granted",
 	inputPermission: "granted",
 	axPermission: "granted",
 	displayCount: 1,
+	applications: true,
+	menus: true,
+	heldInput: true,
+	spaces: true,
 };
 
 const display: DesktopDisplay = {
@@ -98,6 +106,12 @@ class FakeNativeSession implements NativeDesktopSession {
 	readonly capabilities = capabilities;
 	clickCount = 0;
 	closeCount = 0;
+	cancelCount = 0;
+	retireCount = 0;
+	controlActive = false;
+	acquireCount = 0;
+	readonly operations: string[] = [];
+	readonly inputModes: boolean[] = [];
 	sourceWidth = 64;
 	sourceHeight = 32;
 
@@ -107,26 +121,72 @@ class FakeNativeSession implements NativeDesktopSession {
 	async listWindows(): Promise<DesktopWindow[]> {
 		return [windowFixture];
 	}
-	async capture(target: string): Promise<{
-		data: Uint8Array;
-		width: number;
-		height: number;
-		sourceWidth: number;
-		sourceHeight: number;
-		target: string;
-		displays?: DesktopDisplay[];
-	}> {
+	async capture(target: string): Promise<DesktopCapture> {
 		return {
 			data: Uint8Array.of(137, 80, 78, 71),
 			width: 64,
 			height: 32,
+			coordinateWidth: 64,
+			coordinateHeight: 32,
 			sourceWidth: this.sourceWidth,
 			sourceHeight: this.sourceHeight,
 			target,
+			displays: [display],
+			backend: "fake",
 		};
+	}
+	async captureRegion(_target: string, _region: CaptureRegion): Promise<DesktopCapture> {
+		throw new Error("Unexpected region capture");
+	}
+	cancel(): void {
+		this.cancelCount += 1;
+		this.controlActive = false;
+	}
+	retire(): void {
+		this.retireCount += 1;
+	}
+	async listApplications() {
+		return [{ id: "test.editor", name: "Editor", path: "/Applications/Editor.app", running: true, pid: 123 }];
+	}
+	async openApplication(id: string) {
+		this.operations.push(`open:${id}`);
+		return (await this.listApplications())[0]!;
+	}
+	async menuItems(_target: string, path: string[] = []) {
+		return [{ title: "Save", path: [...path, "Save"], enabled: true, checked: false, hasSubmenu: false }];
+	}
+	async menuSelect(target: string, path: string[]) {
+		this.operations.push(`menu:${target}:${path.join("/")}`);
+	}
+	async observe(target: string) {
+		return {
+			capture: await this.capture(target),
+			accessibility: { text: "- button [ref=e1]", nodeCount: 1, truncated: false },
+		};
+	}
+	async holdKeys(target: string, keys: string[], options: { duration: number }) {
+		this.operations.push(`holdKeys:${target}:${keys.join("+")}:${options.duration}`);
+	}
+	async holdMouse(target: string, x: number, y: number, options: { duration: number }) {
+		this.operations.push(`holdMouse:${target}:${x},${y}:${options.duration}`);
+	}
+	async acquireControl() {
+		this.acquireCount += 1;
+		this.controlActive = true;
+		return { active: true };
+	}
+	releaseControl(): void {
+		this.controlActive = false;
+	}
+	controlState() {
+		return { active: this.controlActive };
+	}
+	async bringToCurrentSpace(target: string) {
+		this.operations.push(`space:${target}`);
 	}
 	async click(_target: string, _x: number, _y: number, _opts?: PointerOptions | null): Promise<void> {
 		this.clickCount += 1;
+		this.inputModes.push(_opts?.takeover ?? this.controlActive);
 	}
 	async moveMouse(_target: string, _x: number, _y: number, _opts?: PointerOptions | null): Promise<void> {}
 	async drag(_target: string, _points: DesktopPoint[], _opts?: PointerOptions | null): Promise<void> {}
@@ -171,12 +231,49 @@ class FakeNativeSession implements NativeDesktopSession {
 	async axClick(_ref: string, _opts?: PointerOptions | null): Promise<void> {}
 	async close(): Promise<void> {
 		this.closeCount += 1;
+		this.controlActive = false;
+	}
+}
+
+/** A backend with independent full frames and native-detail crops, not a facade response stub. */
+class ZoomNativeSession extends FakeNativeSession {
+	readonly fullFrames = new Map<string, DesktopCapture>();
+	readonly fullCaptureCounts = new Map<string, number>();
+	readonly clicks: Array<{ target: string; x: number; y: number }> = [];
+
+	override async capture(target: string): Promise<DesktopCapture> {
+		const frame = await super.capture(target);
+		this.fullFrames.set(target, frame);
+		this.fullCaptureCounts.set(target, (this.fullCaptureCounts.get(target) ?? 0) + 1);
+		return frame;
+	}
+
+	override async captureRegion(target: string, region: CaptureRegion): Promise<DesktopCapture> {
+		const frame = this.fullFrames.get(target);
+		if (!frame) throw new Error(`InvalidCoordinateFrame: screenshot ${target} first`);
+		return {
+			...frame,
+			width: 128,
+			height: 64,
+			sourceWidth: 128,
+			sourceHeight: 64,
+			region,
+		};
+	}
+
+	override async click(target: string, x: number, y: number): Promise<void> {
+		const frame = this.fullFrames.get(target);
+		if (!frame || x < 0 || y < 0 || x >= frame.width || y >= frame.height) {
+			throw new Error("InvalidCoordinateFrame: click outside the full screenshot");
+		}
+		this.clicks.push({ target, x, y });
 	}
 }
 
 class MemoryTransport implements ComputerWorkerTransport {
 	readonly outbound: ComputerWorkerOutbound[] = [];
 	#handler?: (message: ComputerWorkerInbound) => void;
+	readonly listeners = new Set<(message: ComputerWorkerOutbound) => void>();
 	#waiters = new Set<{
 		predicate: (message: ComputerWorkerOutbound) => boolean;
 		resolve: (message: ComputerWorkerOutbound) => void;
@@ -184,6 +281,7 @@ class MemoryTransport implements ComputerWorkerTransport {
 
 	send(message: ComputerWorkerOutbound): void {
 		this.outbound.push(message);
+		for (const listener of this.listeners) listener(message);
 		for (const waiter of this.#waiters) {
 			if (!waiter.predicate(message)) continue;
 			this.#waiters.delete(waiter);
@@ -214,7 +312,7 @@ const snapshot = (readOnly = false): ComputerSessionSnapshot => ({
 	sessionId: crypto.randomUUID(),
 	captureMaxWidth: 1280,
 	captureMaxHeight: 896,
-	display: "all",
+	display: "active",
 	readOnly,
 });
 
@@ -239,6 +337,29 @@ function toolSession(): ToolSession {
 		getSessionFile: () => null,
 		getSessionSpawns: () => null,
 	};
+}
+
+/** Exercise the shipped host approval/call rendering and worker, with only native OS work substituted. */
+function workerPrelude(session: ToolSession, native: NativeDesktopSession): EvalPreludeDefinition {
+	const transport = new MemoryTransport();
+	new ComputerWorkerCore(transport, () => native);
+	return createComputerPrelude(session, () => ({
+		async run(code, timeoutMs, runSnapshot) {
+			const id = crypto.randomUUID();
+			transport.inbound({ type: "run", id, code, timeoutMs, session: runSnapshot });
+			const result = await transport.waitFor(message => message.type === "result" && message.id === id);
+			if (result.type !== "result") throw new Error("Expected a computer result");
+			if (!result.ok) throw new Error(result.error.message);
+			return result.payload;
+		},
+		async capabilities() {
+			return native.capabilities;
+		},
+		async close() {
+			transport.inbound({ type: "close" });
+			await transport.waitFor(message => message.type === "closed");
+		},
+	}));
 }
 
 afterAll(async () => {
@@ -350,7 +471,7 @@ describe("computer prelude", () => {
 		expect(calls[0]).toMatchObject({
 			code: "await desktop.windows()",
 			timeoutMs: 7_000,
-			snapshot: { readOnly: true, display: "all" },
+			snapshot: { readOnly: true, display: "active" },
 			signal: abort.signal,
 		});
 		expect(result.content).toEqual([
@@ -701,6 +822,142 @@ describe("computer prelude", () => {
 		]);
 	});
 
+	it("keeps full target click frames across direct JavaScript and run zooms", async () => {
+		const session = toolSession();
+		const native = new ZoomNativeSession();
+		const prelude = workerPrelude(session, native);
+		const emitted: unknown[] = [];
+		const context = { session, toolCallId: "zoom-js" };
+		const realm = createContext({
+			__omp_display__: () => {},
+			__omp_prelude__: async (_name: string, parameters: unknown) => {
+				const result = await prelude.invoke(parameters, context);
+				emitted.push(...result.content);
+				return {
+					text: result.content
+						.filter(block => block.type === "text")
+						.map(block => block.text)
+						.join("\n"),
+					details: result.details,
+				};
+			},
+		});
+		runInContext(prelude.javascript, realm);
+		try {
+			const zooms = await runInContext(
+				`(async () => {
+					await computer.screenshot({ silent: true });
+					const win = await computer.window(42);
+					await win.screenshot({ silent: true });
+					const region = { x: 8, y: 4, width: 16, height: 8 };
+					const desktopZoom = await computer.zoom(region);
+					const windowZoom = await win.zoom(region, { silent: true });
+					await computer.click(60, 30);
+					await win.click(60, 30);
+					const runZoom = await computer.run(async ({ desktop }) => {
+						const win = await desktop.window(42);
+						const zoom = await win.zoom({ x: 8, y: 4, width: 16, height: 8 }, { silent: true });
+						await win.click(60, 30);
+						return zoom;
+					});
+					return [desktopZoom, windowZoom, runZoom];
+				})()`,
+				realm,
+			);
+			for (const zoom of zooms) {
+				expect(zoom.path).toMatch(/omp-computer-.*\.png$/);
+				expect(zoom).toMatchObject({
+					width: 128,
+					height: 64,
+					coordinateWidth: 64,
+					coordinateHeight: 32,
+					region: { x: 8, y: 4, width: 16, height: 8 },
+				});
+			}
+			expect(native.fullCaptureCounts).toEqual(
+				new Map([
+					["desktop", 1],
+					["42", 1],
+				]),
+			);
+			expect(native.clicks).toEqual([
+				{ target: "desktop", x: 60, y: 30 },
+				{ target: "42", x: 60, y: 30 },
+				{ target: "42", x: 60, y: 30 },
+			]);
+			expect(emitted).toContainEqual({
+				type: "image",
+				data: "iVBORw==",
+				mimeType: "image/png",
+				detail: "original",
+			});
+			expect(emitted).toContainEqual({
+				type: "text",
+				text: expect.stringContaining(
+					'region={"x":8,"y":4,"width":16,"height":8}; coordinateWidth=64 coordinateHeight=32; use the base full screenshot coordinates for input, not zoom pixels',
+				),
+			});
+		} finally {
+			await prelude.invoke({ action: "close" }, context);
+		}
+	});
+
+	it("keeps full target click frames across direct Python and run zooms", async () => {
+		let definitions: readonly EvalPreludeDefinition[] = [];
+		const session: ToolSession = { ...toolSession(), getEvalPreludes: () => definitions };
+		const native = new ZoomNativeSession();
+		const prelude = workerPrelude(session, native);
+		definitions = [prelude];
+		try {
+			const result = await executePython(
+				[
+					"import json",
+					"await computer.screenshot(silent=True)",
+					"win = await computer.window(42)",
+					"await win.screenshot(silent=True)",
+					'region = {"x": 8, "y": 4, "width": 16, "height": 8}',
+					"desktop_zoom = await computer.zoom(region, silent=True)",
+					"window_zoom = await win.zoom(region, silent=True)",
+					"await computer.click(60, 30)",
+					"await win.click(60, 30)",
+					`run_zoom = await computer.run('const zoom = await desktop.zoom({ x: 8, y: 4, width: 16, height: 8 }, { silent: true }); await desktop.click(60, 30); return zoom;')`,
+					"print(json.dumps([desktop_zoom, window_zoom, run_zoom]))",
+				].join("\n"),
+				{
+					cwd: process.cwd(),
+					sessionId: `computer-zoom-py-${crypto.randomUUID()}`,
+					toolSession: session,
+					kernelMode: "per-call",
+				},
+			);
+			expect(result.exitCode).toBe(0);
+			const zooms = JSON.parse(result.output.trim());
+			expect(zooms).toHaveLength(3);
+			for (const zoom of zooms) {
+				expect(zoom).toMatchObject({
+					width: 128,
+					height: 64,
+					coordinateWidth: 64,
+					coordinateHeight: 32,
+					region: { x: 8, y: 4, width: 16, height: 8 },
+				});
+			}
+			expect(native.fullCaptureCounts).toEqual(
+				new Map([
+					["desktop", 1],
+					["42", 1],
+				]),
+			);
+			expect(native.clicks).toEqual([
+				{ target: "desktop", x: 60, y: 30 },
+				{ target: "42", x: 60, y: 30 },
+				{ target: "desktop", x: 60, y: 30 },
+			]);
+		} finally {
+			await prelude.invoke({ action: "close" }, { session, toolCallId: "zoom-py-close" });
+		}
+	});
+
 	it("treats text-only Python host responses as unavailable capabilities", async () => {
 		const calls: unknown[] = [];
 		let definitions: readonly EvalPreludeDefinition[] = [];
@@ -762,7 +1019,7 @@ describe("computer worker round trips", () => {
 		const transport = new MemoryTransport();
 		const native = new FakeNativeSession();
 		new ComputerWorkerCore(transport, options => {
-			expect(options).toEqual({ display: "all" });
+			expect(options).toEqual({ display: "active" });
 			return native;
 		});
 
@@ -777,8 +1034,10 @@ describe("computer worker round trips", () => {
 		const texts = result.payload.displays.filter(block => block.type === "text");
 		const images = result.payload.displays.filter(block => block.type === "image");
 		expect(texts).toHaveLength(1);
-		expect(texts[0]?.text).toMatch(/^screenshot desktop 64×32 → .*omp-computer-.*\.png$/);
-		expect(images).toEqual([{ type: "image", data: "iVBORw==", mimeType: "image/png" }]);
+		expect(texts[0]?.text).toMatch(
+			/^screenshot desktop 64×32; coordinateWidth=64 coordinateHeight=32 → .*omp-computer-.*\.png$/,
+		);
+		expect(images).toEqual([{ type: "image", data: "iVBORw==", mimeType: "image/png", detail: "original" }]);
 		expect(result.payload.screenshots).toHaveLength(1);
 		expect(result.payload.screenshots[0]).toMatchObject({ width: 64, height: 32, target: "desktop" });
 		expect(result.payload.screenshots[0]?.path).toMatch(/omp-computer-.*\.png$/);
@@ -797,7 +1056,9 @@ describe("computer worker round trips", () => {
 		expect(result.payload.displays[0]).toEqual(
 			expect.objectContaining({
 				type: "text",
-				text: expect.stringMatching(/^screenshot desktop 64×32 \(scaled from 128×64\) → .*omp-computer-.*\.png$/),
+				text: expect.stringMatching(
+					/^screenshot desktop 64×32 \(scaled from 128×64\); coordinateWidth=64 coordinateHeight=32 → .*omp-computer-.*\.png$/,
+				),
 			}),
 		);
 		expect(result.payload.screenshots[0]).toMatchObject({
@@ -850,6 +1111,164 @@ describe("computer worker round trips", () => {
 			isToolError: true,
 			message: "Computer code execution timed out after 10ms",
 		});
+	});
+
+	it.each(["abort", "timeout"] as const)("cancels native work on %s and reuses the same session", async reason => {
+		const started = Promise.withResolvers<void>();
+		const pendingCapture = Promise.withResolvers<DesktopCapture>();
+		class CancellableSession extends FakeNativeSession {
+			#block = true;
+
+			override async capture(target: string): Promise<DesktopCapture> {
+				if (!this.#block) return super.capture(target);
+				this.#block = false;
+				started.resolve();
+				return pendingCapture.promise;
+			}
+
+			override cancel(): void {
+				super.cancel();
+				pendingCapture.reject(new Error("Cancelled: native capture stopped"));
+			}
+		}
+		const native = new CancellableSession();
+		const transport = new MemoryTransport();
+		let creations = 0;
+		new ComputerWorkerCore(transport, () => {
+			creations += 1;
+			return native;
+		});
+		const pending = runWorker(
+			transport,
+			"cancel-native",
+			"await desktop.screenshot({ silent: true }); await desktop.click(1, 2)",
+			false,
+			reason === "timeout" ? 100 : 2_000,
+		);
+		await started.promise;
+		if (reason === "abort") {
+			transport.inbound({ type: "abort", id: "cancel-native" });
+			// The native signal is synchronous, not deferred until Promise.race settles.
+			expect(native.cancelCount).toBe(1);
+		}
+		const cancelled = await pending;
+		expect(cancelled.ok).toBe(false);
+		if (!cancelled.ok) {
+			expect(cancelled.error.message).toContain(reason === "timeout" ? "timed out after 100ms" : "aborted");
+		}
+		expect(native.cancelCount).toBe(1);
+		expect(native.clickCount).toBe(0);
+		const recovered = await runWorker(
+			transport,
+			"after-native-cancel",
+			"await desktop.screenshot({ silent: true }); await desktop.click(1, 2)",
+		);
+		expect(recovered.ok).toBe(true);
+		expect(native.clickCount).toBe(1);
+		expect(native.cancelCount).toBe(1);
+		expect(native.retireCount).toBe(1);
+		expect(native.closeCount).toBe(0);
+		expect(creations).toBe(1);
+	});
+
+	it("does not let a finished run's watchdog or stale abort cancel the next native operation", async () => {
+		const transport = new MemoryTransport();
+		const native = new FakeNativeSession();
+		new ComputerWorkerCore(transport, () => native);
+		const first = await runWorker(transport, "finished", "42", false, 100);
+		expect(first.ok).toBe(true);
+		expect(native.retireCount).toBe(1);
+		expect(native.cancelCount).toBe(0);
+		const second = runWorker(
+			transport,
+			"next",
+			"await wait(150); await desktop.screenshot({ silent: true }); await desktop.click(1, 2)",
+		);
+		transport.inbound({ type: "abort", id: "finished" });
+		expect((await second).ok).toBe(true);
+		expect(native.retireCount).toBe(2);
+		expect(native.cancelCount).toBe(0);
+		expect(native.clickCount).toBe(1);
+	});
+
+	it("cancels unawaited native mutations before the next run without cancelling that run", async () => {
+		const releaseOld = Promise.withResolvers<void>();
+		const oldSettled = Promise.withResolvers<void>();
+		class QueuedInputSession extends FakeNativeSession {
+			#generation = 0;
+			readonly delivered: number[] = [];
+
+			override async click(_target: string, x: number): Promise<void> {
+				const generation = this.#generation;
+				if (x === 1) {
+					try {
+						await releaseOld.promise;
+						if (generation !== this.#generation) throw new Error("Cancelled: old input generation");
+						this.delivered.push(x);
+					} finally {
+						oldSettled.resolve();
+					}
+				} else {
+					this.delivered.push(x);
+				}
+			}
+
+			override cancel(): void {
+				super.cancel();
+				this.#generation += 1;
+			}
+			override retire(): void {
+				super.retire();
+				this.#generation += 1;
+			}
+		}
+		const native = new QueuedInputSession();
+		const transport = new MemoryTransport();
+		new ComputerWorkerCore(transport, () => native);
+		const first = await runWorker(transport, "floating-input", 'void desktop.click(1, 1); "returned"');
+		expect(first.ok).toBe(true);
+		if (first.ok) expect(first.payload.returnValue).toBe("returned");
+
+		const second = runWorker(
+			transport,
+			"next-input",
+			'await tool.inputBarrier(); await desktop.click(2, 2); "fresh"',
+		);
+		const barrier = await transport.waitFor(
+			message => message.type === "tool-call" && message.runId === "next-input",
+		);
+		if (barrier.type !== "tool-call") throw new Error("Expected next run's input barrier");
+		// Let the old queued input reach its event-delivery check while the next
+		// run is active. It must observe the retired generation and deliver nothing.
+		releaseOld.resolve();
+		await oldSettled.promise;
+		expect(native.delivered).toEqual([]);
+		expect(native.retireCount).toBe(1);
+		transport.inbound({ type: "tool-reply", id: barrier.id, reply: { ok: true, value: null } });
+		const recovered = await second;
+		expect(recovered.ok).toBe(true);
+		if (recovered.ok) expect(recovered.payload.returnValue).toBe("fresh");
+		expect(native.delivered).toEqual([2]);
+		expect(native.retireCount).toBe(2);
+	});
+
+	it("requires a full screenshot of the same target before zoom and never replaces it for invalid input", async () => {
+		const transport = new MemoryTransport();
+		const native = new ZoomNativeSession();
+		new ComputerWorkerCore(transport, () => native);
+		expect((await runWorker(transport, "desktop-only", "await desktop.screenshot({ silent: true })")).ok).toBe(true);
+		const missing = await runWorker(
+			transport,
+			"missing-window-frame",
+			"await (await desktop.window(42)).zoom({ x: 8, y: 4, width: 16, height: 8 })",
+			true,
+		);
+		expect(missing.ok).toBe(false);
+		if (!missing.ok) expect(missing.error.message).toContain("screenshot 42 first");
+		const invalid = await runWorker(transport, "missing-region", "await desktop.zoom(undefined)", true);
+		expect(invalid.ok).toBe(false);
+		expect(native.fullCaptureCounts).toEqual(new Map([["desktop", 1]]));
+		expect((await runWorker(transport, "original-frame", "await desktop.click(60, 30)")).ok).toBe(true);
 	});
 
 	it("round-trips tool calls and resolves the in-script promise", async () => {
@@ -1116,6 +1535,281 @@ describe("computer worker round trips", () => {
 	});
 });
 
+function liveWorker(native: NativeDesktopSession): ComputerWorkerHandle {
+	const transport = new MemoryTransport();
+	new ComputerWorkerCore(transport, () => native);
+	return {
+		send: message => transport.inbound(message),
+		onMessage: handler => {
+			transport.listeners.add(handler);
+			queueMicrotask(() => handler({ type: "ready" }));
+			return () => {
+				transport.listeners.delete(handler);
+			};
+		},
+		onError: () => () => {},
+		terminate: async () => {
+			transport.inbound({ type: "close" });
+		},
+	};
+}
+
+function confirmationContext(confirm: NonNullable<AgentToolContext["ui"]>["confirm"]): AgentToolContext {
+	return { hasUI: true, ui: { confirm } } as AgentToolContext;
+}
+
+describe("expanded computer APIs", () => {
+	it.each([true, false])(
+		"requires an actual live approval answer (%s), retaining only approved mode across helpers",
+		async approved => {
+			const native = new FakeNativeSession();
+			const session = toolSession();
+			const supervisor = new ComputerSupervisor(session, () => liveWorker(native));
+			const prelude = createComputerPrelude(session, () => supervisor);
+			const answer = Promise.withResolvers<boolean>();
+			const shown = Promise.withResolvers<void>();
+			const context = confirmationContext(async (_title, reason, options) => {
+				expect(reason).toContain("Edit the target");
+				expect(reason).toContain("Use the host interrupt");
+				expect(options?.signal).toBeInstanceOf(AbortSignal);
+				shown.resolve();
+				return await answer.promise;
+			});
+			try {
+				const acquiring = prelude.invoke(
+					{ action: "call", chain: [{ method: "control.acquire", args: [{ reason: "Edit the target" }] }] },
+					{ session, toolCallId: "live-human-approval", context },
+				);
+				await shown.promise;
+				expect(native.acquireCount).toBe(0);
+				answer.resolve(approved);
+				expect((await acquiring).details).toMatchObject({ value: { active: approved } });
+				expect(
+					(await supervisor.run("return await desktop.control.state()", 2000, snapshot(true))).returnValue,
+				).toEqual({ active: approved });
+				expect(native.acquireCount).toBe(approved ? 1 : 0);
+				await supervisor.run(
+					"const win = await desktop.window(42); await win.click(1, 2); await win.click(1, 2, { takeover: false });",
+					2000,
+					snapshot(),
+				);
+				expect(native.inputModes).toEqual([approved, false]);
+				await supervisor.revokeControl();
+				expect(native.controlActive).toBe(false);
+				expect(
+					(await supervisor.run("return await desktop.control.state()", 2000, snapshot(true))).returnValue,
+				).toEqual({ active: false });
+			} finally {
+				await supervisor.close();
+			}
+		},
+	);
+
+	it("denies headless control and ignores a late yes after cancellation", async () => {
+		const native = new FakeNativeSession();
+		const supervisor = new ComputerSupervisor(toolSession(), () => liveWorker(native));
+		try {
+			expect(
+				(await supervisor.run('return await desktop.control.acquire({ reason: "Headless" })', 2000, snapshot()))
+					.returnValue,
+			).toEqual({ active: false });
+			expect(native.acquireCount).toBe(0);
+			const answer = Promise.withResolvers<boolean>();
+			const shown = Promise.withResolvers<void>();
+			const abort = new AbortController();
+			const pending = supervisor.run(
+				'return await desktop.control.acquire({ reason: "Cancelled" })',
+				2000,
+				snapshot(),
+				abort.signal,
+				confirmationContext(async () => {
+					shown.resolve();
+					return await answer.promise;
+				}),
+			);
+			await shown.promise;
+			abort.abort();
+			answer.resolve(true);
+			await expect(pending).rejects.toThrow();
+			expect(native.acquireCount).toBe(0);
+			expect(native.controlActive).toBe(false);
+		} finally {
+			await supervisor.close();
+		}
+	});
+
+	it("revokes an acquired grant on worker error and disposal", async () => {
+		const native = new FakeNativeSession();
+		const supervisor = new ComputerSupervisor(toolSession(), () => liveWorker(native));
+		const context = confirmationContext(async () => true);
+		await supervisor.run(
+			'await desktop.control.acquire({ reason: "Test task" })',
+			2000,
+			snapshot(),
+			undefined,
+			context,
+		);
+		await expect(supervisor.run('throw new Error("stop")', 2000, snapshot())).rejects.toThrow("stop");
+		expect(native.controlActive).toBe(false);
+		await supervisor.run(
+			'await desktop.control.acquire({ reason: "New task" })',
+			2000,
+			snapshot(),
+			undefined,
+			context,
+		);
+		await supervisor.close();
+		expect(native.controlActive).toBe(false);
+		expect(native.closeCount).toBe(1);
+	});
+
+	it("routes nested menus, displays, observation, applications and bounded holds through the JS facade and worker", async () => {
+		const session = toolSession();
+		const native = new ZoomNativeSession();
+		const prelude = workerPrelude(session, native);
+		const context = { session, toolCallId: "expanded-js" };
+		const images: unknown[] = [];
+		const realm = createContext({
+			__omp_display__: () => {},
+			__omp_prelude__: async (_name: string, parameters: unknown) => {
+				const result = await prelude.invoke(parameters, context);
+				images.push(...result.content.filter(block => block.type === "image"));
+				return { details: result.details };
+			},
+		});
+		runInContext(prelude.javascript, realm);
+		try {
+			const value = await runInContext(
+				`(async () => {
+				const win = await computer.window(42);
+				const menu = await win.menu.items("File");
+				await win.menu.select(menu[0].path);
+				const observation = await win.observe();
+				await win.click(60, 30);
+				const display = await computer.display("display-1");
+				await display.screenshot({ silent: true });
+				await display.zoom({ x: 2, y: 2, width: 4, height: 4 }, { silent: true });
+				await display.click(60, 30);
+				await display.holdKeys(["space"], { duration: 0 });
+				await win.holdMouse(1, 2, { duration: 0, keys: ["space"] });
+				const apps = await computer.apps.list({ runningOnly: true });
+				await computer.apps.open(apps[0].id, { activate: false });
+				return { menu, observation, display: { ...display }, apps };
+			})()`,
+				realm,
+			);
+			expect(value.menu[0].path).toEqual(["File", "Save"]);
+			expect(value.observation).toMatchObject({
+				coordinateWidth: 64,
+				coordinateHeight: 32,
+				nodeCount: 1,
+				truncated: false,
+				ax: "- button [ref=e1]",
+			});
+			expect(value.display).toEqual({ id: "display-1" });
+			expect(native.clicks).toEqual([
+				{ target: "42", x: 60, y: 30 },
+				{ target: "display:display-1", x: 60, y: 30 },
+			]);
+			expect(native.operations).toEqual([
+				"menu:42:File/Save",
+				"holdKeys:display:display-1:space:0",
+				"holdMouse:42:1,2:0",
+				"open:test.editor",
+			]);
+			expect(images).toEqual([{ type: "image", data: "iVBORw==", mimeType: "image/png", detail: "original" }]);
+		} finally {
+			await prelude.invoke({ action: "close" }, context);
+		}
+	});
+
+	it("routes Python nested handles and new methods through the actual kernel and worker", async () => {
+		let definitions: readonly EvalPreludeDefinition[] = [];
+		const session: ToolSession = { ...toolSession(), getEvalPreludes: () => definitions };
+		const native = new ZoomNativeSession();
+		const prelude = workerPrelude(session, native);
+		definitions = [prelude];
+		try {
+			const result = await executePython(
+				[
+					"win = await computer.window(42)",
+					"items = await win.menu.items('File')",
+					"await win.menu.select(items[0]['path'])",
+					"obs = await win.observe(silent=True)",
+					"await win.click(60, 30)",
+					"monitor = await computer.display('display-1')",
+					"await monitor.screenshot(silent=True)",
+					"await monitor.holdKeys(['space'], duration=0)",
+					"await win.holdMouse(1, 2, duration=0)",
+					"apps = await computer.apps.list(runningOnly=True)",
+					"await computer.apps.open(apps[0]['id'], activate=False)",
+					"print(obs['nodeCount'], monitor.id, (await computer.control.state())['active'])",
+				].join("\n"),
+				{
+					cwd: process.cwd(),
+					sessionId: `computer-expanded-${crypto.randomUUID()}`,
+					toolSession: session,
+					kernelMode: "per-call",
+				},
+			);
+			expect(result.exitCode).toBe(0);
+			expect(result.output).toContain("1 display-1 False");
+			expect(native.controlActive).toBe(false);
+		} finally {
+			await prelude.invoke({ action: "close" }, { session, toolCallId: "expanded-py" });
+		}
+	});
+
+	it("does not emit a failed observation or replace the prior frame before the next click", async () => {
+		class FailingObservation extends ZoomNativeSession {
+			override async observe(_target: string): Promise<{
+				capture: DesktopCapture;
+				accessibility: { text: string; nodeCount: number; truncated: boolean };
+			}> {
+				throw new Error("AccessibilityUnavailable");
+			}
+		}
+		const native = new FailingObservation();
+		const transport = new MemoryTransport();
+		new ComputerWorkerCore(transport, () => native);
+		await runWorker(transport, "observe-base", "await (await desktop.window(42)).screenshot({ silent: true })");
+		const failed = await runWorker(transport, "observe-error", "await (await desktop.window(42)).observe()");
+		expect(failed.ok).toBe(false);
+		expect(native.fullCaptureCounts.get("42")).toBe(1);
+		expect(
+			(await runWorker(transport, "observe-prior-click", "await (await desktop.window(42)).click(60, 30)")).ok,
+		).toBe(true);
+		expect(native.clicks).toEqual([{ target: "42", x: 60, y: 30 }]);
+	});
+
+	it("classifies all new nested read and exec calls without permitting window methods on display handles", () => {
+		for (const method of ["apps.list", "control.state", "display"])
+			expect(isReadOnlyComputerCall([{ method, args: [] }])).toBe(true);
+		for (const method of ["apps.open", "control.acquire", "control.release", "holdKeys", "holdMouse"])
+			expect(isReadOnlyComputerCall([{ method, args: [] }])).toBe(false);
+		for (const method of ["observe", "menu.items"])
+			expect(
+				isReadOnlyComputerCall([
+					{ method: "window", args: [42] },
+					{ method, args: [] },
+				]),
+			).toBe(true);
+		for (const method of ["menu.select", "bringToCurrentSpace", "holdKeys", "holdMouse"])
+			expect(
+				isReadOnlyComputerCall([
+					{ method: "window", args: [42] },
+					{ method, args: [] },
+				]),
+			).toBe(false);
+		expect(() =>
+			renderComputerCall([
+				{ method: "display", args: ["all"] },
+				{ method: "menu.select", args: [["File"]] },
+			]),
+		).toThrow("Unknown display method");
+	});
+});
+
 class SupervisorWorker implements ComputerWorkerHandle {
 	readonly #respond: boolean;
 	#messageHandlers = new Set<(message: ComputerWorkerOutbound) => void>();
@@ -1191,9 +1885,9 @@ describe("computer supervisor recovery", () => {
 
 /**
  * A window whose tree answers inputs the way an app does: pressing "Edit"
- * turns it into "Done" and reveals a field. Every snapshot mints fresh refs;
- * like the native registry, the current and the previous snapshot's refs
- * resolve and older ones throw `StaleRef`.
+ * turns it into "Done" and reveals a field. Like the native registry, an
+ * element keeps its ref across snapshots until its label changes, and a ref
+ * resolves while its element is in the current or the previous snapshot.
  */
 class EditableWindowSession extends FakeNativeSession {
 	editing = false;
@@ -1204,6 +1898,8 @@ class EditableWindowSession extends FakeNativeSession {
 	status = "Ready";
 	windows: DesktopWindow[] = [windowFixture];
 	#nextRef = 1;
+	/** Element → its ref and the label that ref was minted for. */
+	readonly #elements = new Map<string, { ref: string; label: string }>();
 	#live = new Set<string>();
 	#previous = new Set<string>();
 
@@ -1217,23 +1913,28 @@ class EditableWindowSession extends FakeNativeSession {
 		this.snapshots += 1;
 		this.#previous = this.#live;
 		this.#live = new Set();
-		const ref = (): string => {
-			const minted = `e${this.#nextRef++}`;
-			this.#live.add(minted);
-			return minted;
+		const ref = (element: string, label = ""): string => {
+			let known = this.#elements.get(element);
+			if (!known || known.label !== label) {
+				known = { ref: `e${this.#nextRef++}`, label };
+				this.#elements.set(element, known);
+			}
+			this.#live.add(known.ref);
+			return known.ref;
 		};
+		const editLabel = this.editing ? "Done" : "Edit";
 		const rows = [
-			`- window "Editor" [ref=${ref()}] app=Code (focused)`,
-			`  - toolbar [ref=${ref()}]`,
-			`    - button "${this.editing ? "Done" : "Edit"}" [ref=${ref()}]`,
-			...(this.editing ? [`    - textfield "Phone" [ref=${ref()}]: "555"`] : []),
-			`    - button "Share" [ref=${ref()}]`,
-			`  - statictext [ref=${ref()}]: "${this.status}"`,
-			...(this.filler > 0 ? [`  - list [ref=${ref()}]`] : []),
-			...Array.from(
-				{ length: this.filler },
-				(_, index) => `    - statictext "Row ${index} of the ${this.status} transcript" [ref=${ref()}]`,
-			),
+			`- window "Editor" [ref=${ref("window")}] app=Code (focused)`,
+			`  - toolbar [ref=${ref("toolbar")}]`,
+			`    - button "${editLabel}" [ref=${ref("edit", editLabel)}]`,
+			...(this.editing ? [`    - textfield "Phone" [ref=${ref("phone")}]: "555"`] : []),
+			`    - button "Share" [ref=${ref("share")}]`,
+			`  - statictext [ref=${ref("status")}]: "${this.status}"`,
+			...(this.filler > 0 ? [`  - list [ref=${ref("list")}]`] : []),
+			...Array.from({ length: this.filler }, (_, index) => {
+				const label = `Row ${index} of the ${this.status} transcript`;
+				return `    - statictext "${label}" [ref=${ref(`row ${index}`, label)}]`;
+			}),
 		];
 		return { text: rows.join("\n") };
 	}
@@ -1278,19 +1979,19 @@ describe("computer cell settlement", () => {
 		expect(report).toBe(
 			[
 				'window "42" Code "Editor" after press e3 — 1 changed, 1 added, 0 removed (rows marked ~ changed, + added):',
-				'- window "Editor" [ref=e6] app=Code (focused)',
-				"  - toolbar [ref=e7]",
-				'    ~ button "Done" [ref=e8] (was: button "Edit")',
-				'    + textfield "Phone" [ref=e9]: "555"',
-				'    - button "Share" [ref=e10]',
-				'  - statictext [ref=e11]: "Ready"',
+				'- window "Editor" [ref=e1] app=Code (focused)',
+				"  - toolbar [ref=e2]",
+				'    ~ button "Done" [ref=e6] (was: button "Edit")',
+				'    + textfield "Phone" [ref=e7]: "555"',
+				'    - button "Share" [ref=e4]',
+				'  - statictext [ref=e5]: "Ready"',
 			].join("\n"),
 		);
 		// The printed refs are live: the next cell acts on them directly.
-		const next = await runWorker(transport, "press-done", 'await (await desktop.ref("e8")).press()');
+		const next = await runWorker(transport, "press-done", 'await (await desktop.ref("e6")).press()');
 		expect(next.ok).toBe(true);
 		expect(native.editing).toBe(false);
-		expect(await settleWorker(transport, "settle-done")).toContain("after press e8 — 1 changed, 0 added, 1 removed");
+		expect(await settleWorker(transport, "settle-done")).toContain("after press e6 — 1 changed, 0 added, 1 removed");
 		// Nothing new since that read: a further settle has nothing to say.
 		expect(await settleWorker(transport, "settle-idle")).toBeUndefined();
 	});
@@ -1359,26 +2060,49 @@ describe("computer cell settlement", () => {
 		);
 	});
 
+	it("reports a re-read the cell did not print although a tree it printed before the input names the same refs", async () => {
+		const transport = new MemoryTransport();
+		const native = new EditableWindowSession();
+		new ComputerWorkerCore(transport, () => native);
+		native.keyChord = async () => {
+			native.status = "Saved";
+		};
+
+		await readCell(transport, "read");
+		const cell = await runWorker(
+			transport,
+			"print-press-reread",
+			'const win = await desktop.window("42"); const before = await win.ax(); await win.press("cmd+s"); await win.ax(); return before',
+		);
+		expect(String(await settleWorker(transport, "settle", String(cell.ok && cell.payload.returnValue)))).toStartWith(
+			'window "42" Code "Editor" after press cmd+s — 1 changed, 0 added, 0 removed',
+		);
+	});
+
 	it("carries the current tree after a call fails on an expired ref, without a separate read", async () => {
 		const transport = new MemoryTransport();
 		const native = new EditableWindowSession();
 		new ComputerWorkerCore(transport, () => native);
 
-		for (const id of ["read-1", "read-2", "read-3"])
+		native.editing = true;
+		await runWorker(transport, "read-1", 'return await (await desktop.window("42")).ax()');
+		// The field is gone from the next two snapshots, so its ref expires.
+		native.editing = false;
+		for (const id of ["read-2", "read-3"])
 			await runWorker(transport, id, 'return await (await desktop.window("42")).ax()');
-		const stale = await runWorker(transport, "stale", 'await (await desktop.ref("e3")).press()');
+		const stale = await runWorker(transport, "stale", 'await (await desktop.ref("e4")).press()');
 		expect(stale.ok).toBe(false);
 		expect(native.editing).toBe(false);
 
 		const report = await settleWorker(transport, "settle-stale");
 		expect(report).toBe(
 			[
-				'window "42" Code "Editor" after ref e3 failed: StaleRef: e3 expired; re-run ax()/find() — current tree:',
-				'- window "Editor" [ref=e16] app=Code (focused)',
-				"  - toolbar [ref=e17]",
-				'    - button "Edit" [ref=e18]',
-				'    - button "Share" [ref=e19]',
-				'  - statictext [ref=e20]: "Ready"',
+				'window "42" Code "Editor" after ref e4 failed: StaleRef: e4 expired; re-run ax()/find() — current tree:',
+				'- window "Editor" [ref=e1] app=Code (focused)',
+				"  - toolbar [ref=e2]",
+				'    - button "Edit" [ref=e7]',
+				'    - button "Share" [ref=e5]',
+				'  - statictext [ref=e6]: "Ready"',
 			].join("\n"),
 		);
 	});
@@ -1419,42 +2143,86 @@ describe("computer cell settlement", () => {
 		);
 	});
 
-	it("reports desktop pointer input on the window under the pointer, not the focused one", async () => {
+	it.each([
+		{ target: "desktop", label: "desktop" },
+		{ target: '(await desktop.display("active"))', label: "display:active" },
+	])(
+		"reports $label pointer input on the window under the pointer, not the focused one",
+		async ({ target, label }) => {
+			const transport = new MemoryTransport();
+			const native = new EditableWindowSession();
+			new ComputerWorkerCore(transport, () => native);
+			// A 128×64 px screenshot of a 64×32 display: pointer pixels are halved.
+			native.capture = async captured => ({
+				data: Uint8Array.of(137, 80, 78, 71),
+				width: 128,
+				height: 64,
+				coordinateWidth: 128,
+				coordinateHeight: 64,
+				sourceWidth: 128,
+				sourceHeight: 64,
+				target: captured,
+				displays: [{ ...display, pixelWidth: 128, pixelHeight: 64 }],
+				backend: "fake",
+			});
+			const behind: DesktopWindow = {
+				...windowFixture,
+				id: "43",
+				title: "Behind",
+				x: 44,
+				y: 0,
+				width: 20,
+				height: 30,
+			};
+			// Listed above app windows and covering the display, like the macOS Dock's overlay: not where input went.
+			const overlay: DesktopWindow = {
+				...windowFixture,
+				id: "6",
+				app: "Dock",
+				title: "Dock",
+				pid: 9,
+				x: 0,
+				y: 0,
+				width: 64,
+				height: 32,
+				focused: false,
+			};
+			native.windows = [overlay, windowFixture, behind];
+
+			await runWorker(transport, "shot", `await ${target}.screenshot({ silent: true })`);
+			await runWorker(transport, "scroll", `await ${target}.scroll(110, 20, { dy: 100 })`);
+			const report = String(await settleWorker(transport, "settle-scroll"));
+			expect(report.split("\n")[0]).toBe(`window "43" Code "Behind" after ${label} scroll 110,20 — current tree:`);
+			expect(report).not.toContain('window "42"');
+			expect(report).not.toContain('window "6"');
+		},
+	);
+
+	it("reports a window's menu selection against the model's last read", async () => {
 		const transport = new MemoryTransport();
 		const native = new EditableWindowSession();
 		new ComputerWorkerCore(transport, () => native);
-		// A 128×64 px desktop screenshot of a 64×32 display: pointer pixels are halved.
-		native.capture = async target => ({
-			data: Uint8Array.of(137, 80, 78, 71),
-			width: 128,
-			height: 64,
-			sourceWidth: 128,
-			sourceHeight: 64,
-			target,
-			displays: [{ ...display, pixelWidth: 128, pixelHeight: 64 }],
-		});
-		const behind: DesktopWindow = { ...windowFixture, id: "43", title: "Behind", x: 44, y: 0, width: 20, height: 30 };
-		// Listed above app windows and covering the display, like the macOS Dock's overlay: not where input went.
-		const overlay: DesktopWindow = {
-			...windowFixture,
-			id: "6",
-			app: "Dock",
-			title: "Dock",
-			pid: 9,
-			x: 0,
-			y: 0,
-			width: 64,
-			height: 32,
-			focused: false,
+		native.menuSelect = async () => {
+			native.status = "Saved";
 		};
-		native.windows = [overlay, windowFixture, behind];
 
-		await runWorker(transport, "shot", "await desktop.screenshot({ silent: true })");
-		await runWorker(transport, "scroll", "await desktop.scroll(110, 20, { dy: 100 })");
-		const report = String(await settleWorker(transport, "settle-scroll"));
-		expect(report.split("\n")[0]).toBe('window "43" Code "Behind" after desktop scroll 110,20 — current tree:');
-		expect(report).not.toContain('window "42"');
-		expect(report).not.toContain('window "6"');
+		await readCell(transport, "read");
+		await runWorker(transport, "menu", 'await (await desktop.window("42")).menu.select(["File", "Save"])');
+		expect(String(await settleWorker(transport, "settle-menu")).split("\n")[0]).toBe(
+			'window "42" Code "Editor" after menu.select File > Save — 1 changed, 0 added, 0 removed (rows marked ~ changed, + added):',
+		);
+	});
+
+	it("reports an app launch on the window focused at settle time", async () => {
+		const transport = new MemoryTransport();
+		const native = new EditableWindowSession();
+		new ComputerWorkerCore(transport, () => native);
+
+		await readCell(transport, "read");
+		await runWorker(transport, "open", 'await desktop.apps.open("test.editor")');
+		expect(String(await settleWorker(transport, "settle-open"))).toStartWith(
+			'window "42" Code "Editor" after apps.open "test.editor" (its window is unknown; shown on the focused window) — no accessibility change visible',
+		);
 	});
 
 	it("elides a large report tree to its budget and keeps the rows the input changed", async () => {

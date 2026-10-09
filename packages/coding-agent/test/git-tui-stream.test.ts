@@ -1,7 +1,8 @@
-import { beforeAll, describe, expect, test } from "bun:test";
+import { beforeAll, describe, expect, spyOn, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import * as natives from "@oh-my-pi/pi-natives";
 import { DiffSide, DiffStream } from "@oh-my-pi/pi-natives";
 import { sanitizeText } from "@oh-my-pi/pi-utils";
 import { $ } from "bun";
@@ -12,6 +13,7 @@ import {
 	DiffPane,
 } from "@oh-my-pi/pi-tui/apps/git/diff-pane";
 import { GitModel } from "../src/cli/git-tui/state";
+import { ImageProtocol, TERMINAL } from "@oh-my-pi/pi-tui/terminal-capabilities";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
 
 const RED_PNG = Buffer.from(
@@ -207,6 +209,42 @@ describe("git TUI asset previews", () => {
 			pane.setAsset(file.path, contents.old, contents.new);
 			expect(sanitizeText(pane.render(80, 12).join("\n"))).toContain("After · SVG");
 		});
+	});
+
+	test("encodes a SIXEL image preview once across renders", async () => {
+		const terminal = TERMINAL as unknown as { imageProtocol: ImageProtocol | null };
+		const originalProtocol = terminal.imageProtocol;
+		terminal.imageProtocol = ImageProtocol.Sixel;
+		const encodeSixel = spyOn(natives, "encodeSixelAsync");
+		try {
+			const pane = new DiffPane();
+			pane.setAsset(
+				"image.png",
+				{ kind: "empty" },
+				{
+					kind: "image",
+					image: {
+						data: RED_PNG.toString("base64"),
+						mimeType: "image/png",
+						sourceMimeType: "image/png",
+						widthPx: 1,
+						heightPx: 1,
+						byteLength: RED_PNG.byteLength,
+						key: "red",
+					},
+				},
+			);
+			pane.render(80, 12);
+			await encodeSixel.mock.results[0]?.value;
+			pane.render(80, 12);
+			pane.render(80, 12);
+			// A fresh Image per render would start a new encode every frame and
+			// never show the one that landed.
+			expect(encodeSixel).toHaveBeenCalledTimes(1);
+		} finally {
+			encodeSixel.mockRestore();
+			terminal.imageProtocol = originalProtocol;
+		}
 	});
 
 	test("resolves staged Git LFS pointers from local object storage", async () => {
