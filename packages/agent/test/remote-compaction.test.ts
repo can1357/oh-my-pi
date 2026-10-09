@@ -2190,6 +2190,52 @@ describe("compact() remote compaction failure handling", () => {
 		};
 	}
 
+	test("V1 compact drops mixed-provider Anthropic state and keeps unrelated preserve data", async () => {
+		const compactionItem = { type: "compaction", encrypted_content: "enc-current-v1" };
+		const compactPaths: string[] = [];
+		const server = Bun.serve({
+			hostname: "127.0.0.1",
+			port: 0,
+			fetch(req) {
+				const url = new URL(req.url);
+				compactPaths.push(`${req.method} ${url.pathname}`);
+				if (req.method === "POST" && url.pathname.endsWith("/responses/compact")) {
+					return Response.json({ output: [compactionItem] });
+				}
+				return new Response("unexpected", { status: 404 });
+			},
+		});
+		try {
+			const preparation = makePreparation();
+			preparation.previousPreserveData = {
+				anthropicCompaction: { provider: "anthropic", content: "prior anthropic summary" },
+				openaiRemoteCompaction: {
+					provider: "openai",
+					replacementHistory: [{ type: "compaction", encrypted_content: "stale-enc" }],
+					compactionItem: { type: "compaction", encrypted_content: "stale-enc" },
+				},
+				sessionHint: "keep-me",
+			};
+			const model = makeOpenAiModel({
+				baseUrl: `http://127.0.0.1:${server.port}/v1`,
+				remoteCompaction: { enabled: true, v2StreamingEnabled: false },
+			});
+
+			const result = await compact(preparation, model, "test-key");
+
+			expect(compactPaths).toEqual(["POST /v1/responses/compact"]);
+			expect(result.preserveData?.anthropicCompaction).toBeUndefined();
+			expect(result.preserveData?.sessionHint).toBe("keep-me");
+			expect(result.preserveData?.openaiRemoteCompaction).toEqual({
+				provider: "openai",
+				replacementHistory: [compactionItem],
+				compactionItem,
+			});
+		} finally {
+			server.stop(true);
+		}
+	});
+
 	test.each(["v1", "v2", "codex-v2"])(
 		"preserves local summary history when entering native replay (%s)",
 		async protocol => {
