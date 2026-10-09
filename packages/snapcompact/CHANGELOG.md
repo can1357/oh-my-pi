@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- `maxFramesForDataBudget()` accepts an optional frame-payload byte budget (default `FRAME_DATA_BYTES_BUDGET`)
+
 ## [18.6.3] - 2026-10-06
 
 ### Breaking Changes

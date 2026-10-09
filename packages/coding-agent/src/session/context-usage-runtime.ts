@@ -15,7 +15,12 @@ import { resolveModelCompactionSettings } from "./model-compaction-threshold";
 import { resolveSpeculationLeadTokens } from "./speculation-lead";
 
 import { cfgSkillful } from "./settings";
-import { cfgSnapcompactShape, cfgSnapcompactSystemPrompt, cfgSnapcompactToolResults } from "./context-settings";
+import {
+	cfgSnapcompactMaxFrames,
+	cfgSnapcompactShape,
+	cfgSnapcompactSystemPrompt,
+	cfgSnapcompactToolResults,
+} from "./context-settings";
 
 /** Resolve session policy before handing pure boundary arithmetic to the UI. */
 export function getSessionCompactionBoundaries(
@@ -48,7 +53,12 @@ export function computeSessionContextBreakdown(
 		const renderToolResults = cfgSnapcompactToolResults.get(session.settings);
 		if (renderSystemPrompt !== "none" || renderToolResults) {
 			snapcompact = estimateInlineSavings({
-				options: { renderSystemPrompt, renderToolResults, shape: cfgSnapcompactShape.get(session.settings) },
+				options: {
+					renderSystemPrompt,
+					renderToolResults,
+					shape: cfgSnapcompactShape.get(session.settings),
+					maxFrames: cfgSnapcompactMaxFrames.get(session.settings),
+				},
 				model: session.model,
 				systemPrompt: session.systemPrompt ?? [],
 				messages: session.messages ?? [],

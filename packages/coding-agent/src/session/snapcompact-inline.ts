@@ -18,6 +18,7 @@ import { Tokenizer } from "@oh-my-pi/pi-agent-core";
 import type { Context, ImageContent, Model, TextContent, ToolResultMessage, UserMessage } from "@oh-my-pi/pi-ai";
 import * as snapcompact from "@oh-my-pi/snapcompact";
 import type { SnapcompactFrameSink } from "../blob-broker/service";
+import { providerImageBudget } from "./snapcompact-budget";
 import contextFramesNote from "../prompts/system/snapcompact-context-frames-note.md" with { type: "text" };
 import contextStub from "../prompts/system/snapcompact-context-stub.md" with { type: "text" };
 import systemFramesNote from "../prompts/system/snapcompact-system-frames-note.md" with { type: "text" };
@@ -31,6 +32,8 @@ export interface SnapcompactInlineOptions {
 	renderToolResults: boolean;
 	/** Frame variant override; `"auto"`/omitted picks the provider's eval winner. */
 	shape?: snapcompact.ShapeVariantName | "auto";
+	/** `snapcompact.maxFrames`: a positive value raises the provider's per-request image budget. */
+	maxFrames?: number;
 }
 
 /**
@@ -45,7 +48,8 @@ export type SnapcompactSavingsSink = (
 ) => void;
 
 // Per-provider image-count budgets live in @oh-my-pi/snapcompact
-// (`providerImageBudget`): snapcompact frames are 1568px (<2000px) so
+// (`providerImageBudget`), raised by `snapcompact.maxFrames` through
+// ./snapcompact-budget: snapcompact frames are 1568px (<2000px) so
 // dimension/size limits never bind; only COUNT does. Once the budget is
 // spent by already-attached archive/system-prompt images, tool results ship
 // verbatim as text.
@@ -318,7 +322,7 @@ export function estimateInlineSavings(input: {
 	const shape = snapcompact.resolveShape(model, options.shape);
 	const tokenizer = new Tokenizer(model);
 	const existingImages = countMessageImages(input.messages);
-	const budget = snapcompact.providerImageBudget(model.provider) - existingImages;
+	const budget = providerImageBudget(model.provider, options.maxFrames ?? 0) - existingImages;
 
 	const candidates: InlineToolResultCandidate[] = [];
 	if (options.renderToolResults) {
@@ -448,6 +452,7 @@ export class SnapcompactInlineTransformer {
 			renderSystemPrompt: this.options.renderSystemPrompt,
 			renderToolResults: this.options.renderToolResults,
 			shape: this.options.shape,
+			maxFrames: this.options.maxFrames,
 		};
 		if (!options.renderToolResults) this.#toolCache.clear();
 		if (options.renderSystemPrompt === "none") this.#systemCache = undefined;
@@ -459,7 +464,7 @@ export class SnapcompactInlineTransformer {
 		const shape = snapcompact.resolveShape(model, options.shape);
 		const shapeKey = JSON.stringify(shape);
 		const tokenizer = new Tokenizer(model);
-		const budget = snapcompact.providerImageBudget(model.provider) - countMessageImages(context.messages);
+		const budget = providerImageBudget(model.provider, options.maxFrames ?? 0) - countMessageImages(context.messages);
 		if (budget <= 0) return context;
 
 		const messages = [...context.messages];

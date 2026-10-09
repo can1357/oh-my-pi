@@ -99,7 +99,7 @@ function snapcompactHistoryBlockOptions(
 		return { maxFrameDataBytes: 0, ...(resolveFrameData ? { resolveFrameData } : {}) };
 	}
 	return {
-		maxFrameDataBytes: snapcompact.FRAME_DATA_BYTES_BUDGET,
+		maxFrameDataBytes: options?.snapcompactFrameBytesBudget ?? snapcompact.FRAME_DATA_BYTES_BUDGET,
 		...(resolveFrameData ? { resolveFrameData } : {}),
 	};
 }
@@ -182,6 +182,8 @@ export interface BuildSessionContextOptions {
 	inFlightToolCallIds?: ReadonlySet<string>;
 	/** Price and resolve persisted snapcompact frame payloads on demand. */
 	resolveFrameData?: (data: string) => snapcompact.LazyFrameData | undefined;
+	/** Base64 frame bytes attached to the LLM context; defaults to {@link snapcompact.FRAME_DATA_BYTES_BUDGET}. */
+	snapcompactFrameBytesBudget?: number;
 }
 
 /**

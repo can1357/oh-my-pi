@@ -214,7 +214,7 @@ Including `snapcompact` in `compaction.methodOrder` replaces the LLM summarizati
 - No model, API key, or network is involved, so snapcompact is also safe for overflow recovery. It requires a vision-capable current model (`model.input` includes `"image"`); otherwise automatic maintenance skips it and advances to the next configured method. Manual `/compact` honors the method order unless custom instructions are given (those imply a directed LLM summary).
 - Rationale: the shape table comes from the snapcompact 200k-token evals in `packages/snapcompact`, where bitmap frames preserved QA recall at lower billed-token cost than raw text for vision-capable models.
 
-The archive's 80-frame default is an upper bound, not a promised frame count. Session maintenance also caps frames by available context, the provider image budget, and `FRAME_DATA_BYTES_BUDGET` (3,000,000 bytes), sizing bytes from a per-shape frame estimate. When the rendered frames still exceed `FRAME_DATA_BYTES_BUDGET`, the archive is re-rendered once at the frame count its measured bytes fit (`frames × budget / payload`). A rendered archive that still exceeds standing-payload or context budgets is rejected/skipped rather than committed as an unusable prompt.
+The archive's 80-frame default is an upper bound, not a promised frame count. Session maintenance also caps frames by available context, the frame budget, and the frame-byte budget, sizing bytes from a per-shape frame estimate. The frame budget is the provider image budget unless `snapcompact.maxFrames` sets a positive cap (at most 80); a configured cap also raises the provider's per-request image limit to match, so the send path keeps those frames. The frame-byte budget is `snapcompact.frameBytesBudget` (default `FRAME_DATA_BYTES_BUDGET`, 3,000,000 bytes) and also bounds the frames attached when the context is rebuilt. When the rendered frames still exceed the frame-byte budget, the archive is re-rendered once at the frame count its measured bytes fit (`frames × budget / payload`). A rendered archive that still exceeds standing-payload or context budgets is rejected/skipped rather than committed as an unusable prompt.
 
 ### Maintenance progress guard
 
@@ -531,6 +531,8 @@ Defined in `packages/coding-agent/src/session/context-settings.ts`:
 - `snapcompact.systemPrompt` = `"none"` (`"agents-md"` and `"all"` opt into transient system-prompt imaging)
 - `snapcompact.toolResults` = `false` (transient imaging of large historical tool results)
 - `snapcompact.shape` = `"auto"`
+- `snapcompact.frameBytesBudget` = `3000000` (base64 bytes of archive frames per request)
+- `snapcompact.maxFrames` = `0` (provider image budget; a positive value sets the archive frame cap, at most 80)
 - `branchSummary.enabled` = `false`
 - `branchSummary.reserveTokens` = `16384`
 
