@@ -473,9 +473,7 @@ export class ModelRegistry {
 	 *
 	 * Sync constructor — eagerly loads config (including migrations), cache
 	 * metadata, and custom models. Bundled providers are enriched selectively
-	 * when synchronous callers query them. Production boot paths SHOULD prefer
-	 * {@link ModelRegistry.create} so the YAML/JSONC migration step lands off the
-	 * event loop's hot path before the first `tryLoad()` runs.
+	 * when synchronous callers query them.
 	 */
 	constructor(
 		readonly authStorage: AuthStorage,

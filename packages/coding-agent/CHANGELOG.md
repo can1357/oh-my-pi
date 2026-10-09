@@ -8,6 +8,7 @@
 ### Fixed
 
 - Fixed `/omfg` save, overwrite, and validation prompts in Tern opening as a sheet over the candidate rule; they now sit in the composer slot like `ask`, so the rule stays readable while you choose ([#15058](https://github.com/can1357/oh-my-pi/pull/15058) by [@H4vC](https://github.com/H4vC))
+- Fixed the SDK examples quick reference, `02-custom-model.ts`, and `09-api-keys-and-oauth.ts` importing `discoverModels`, `loadSettings`, `discoverHooks`, `discoverCustomTools`, and calling `ModelRegistry.create`, none of which exist; they now use `new ModelRegistry(authStorage)`, `modelRegistry.find(...)`, and `Settings.init`/`Settings.isolated` ([#15068](https://github.com/can1357/oh-my-pi/issues/15068))
 
 ## [18.8.7] - 2026-10-09
 

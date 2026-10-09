@@ -29,35 +29,33 @@ npx tsx examples/sdk/01-minimal.ts
 ## Quick Reference
 
 ```typescript
-import { getModel } from "@oh-my-pi/pi-ai";
 import {
 	AuthStorage,
 	createAgentSession,
 	discoverAuthStorage,
-	discoverModels,
 	discoverSkills,
-	discoverHooks,
-	discoverCustomTools,
 	discoverContextFiles,
 	discoverSlashCommands,
-	loadSettings,
 	buildSystemPrompt,
 	ModelRegistry,
 	SessionManager,
+	Settings,
 	BUILTIN_TOOLS,
 	HIDDEN_TOOLS,
 	createTools,
 } from "@oh-my-pi/pi-coding-agent";
 
-// Auth and models setup
-const authStorage = discoverAuthStorage();
-const modelRegistry = discoverModels(authStorage);
+// Auth, models, and settings setup
+const authStorage = await discoverAuthStorage();
+const modelRegistry = new ModelRegistry(authStorage);
+await modelRegistry.refresh();
+const settings = await Settings.init(); // or Settings.isolated({ "compaction.enabled": false })
 
 // Minimal
-const { session } = await createAgentSession({ authStorage, modelRegistry });
+const { session } = await createAgentSession({ authStorage, modelRegistry, settings });
 
 // Custom model
-const model = getModel("anthropic", "claude-opus-4-5");
+const model = modelRegistry.find("anthropic", "claude-opus-4-5");
 const { session } = await createAgentSession({ model, thinkingLevel: "high", authStorage, modelRegistry });
 
 // Modify prompt
@@ -88,8 +86,8 @@ const { session } = await createAgentSession({
 	modelRegistry: customRegistry,
 	systemPrompt: ["You are helpful."],
 	toolNames: ["read", "bash"],
-	customTools: [{ tool: myTool }],
-	hooks: [{ factory: myHook }],
+	customTools: [myTool],
+	extensions: [myExtension],
 	skills: [],
 	contextFiles: [],
 	slashCommands: [],
@@ -128,22 +126,21 @@ await writeTool.execute("call-1", {
 | Option                      | Default                       | Description                       |
 | --------------------------- | ----------------------------- | --------------------------------- |
 | `authStorage`               | `discoverAuthStorage()`       | Credential storage                |
-| `modelRegistry`             | `discoverModels(authStorage)` | Model registry                    |
+| `modelRegistry`             | `new ModelRegistry(authStorage)` | Model registry                 |
 | `cwd`                       | `process.cwd()`               | Working directory                 |
 | `agentDir`                  | `~/.omp/agent`                | Config directory                  |
 | `model`                     | From settings/first available | Model to use                      |
 | `thinkingLevel`             | From settings/"off"           | off, low, medium, high            |
 | `systemPrompt`              | Discovered                    | String or `(default) => modified` |
 | `toolNames`                 | All built-in tools            | Filter which tools to include     |
-| `customTools`               | Discovered                    | Replaces discovery                |
-| `additionalCustomToolPaths` | `[]`                          | Merge with discovery              |
-| `hooks`                     | Discovered                    | Replaces discovery                |
-| `additionalHookPaths`       | `[]`                          | Merge with discovery              |
+| `customTools`               | `[]`                          | Added to built-in tools           |
+| `extensions`                | `[]`                          | Inline extensions, merged with discovery |
+| `additionalExtensionPaths`  | `[]`                          | Merge with discovery              |
 | `skills`                    | Discovered                    | Skills for prompt                 |
 | `contextFiles`              | Discovered                    | AGENTS.md files                   |
 | `slashCommands`             | Discovered                    | File commands                     |
 | `sessionManager`            | `SessionManager.create(cwd)`  | Persistence                       |
-| `settingsManager`           | From agentDir                 | Settings overrides                |
+| `settings`                  | `Settings.init({ cwd, agentDir })` | Settings overrides           |
 
 ## Events
 

@@ -538,7 +538,7 @@ export interface CreateAgentSessionOptions {
 
 	/** Auth storage for credentials. Default: discoverAuthStorage(agentDir) */
 	authStorage?: AuthStorage;
-	/** Model registry. Default: discoverModels(authStorage, agentDir) */
+	/** Model registry. Default: new ModelRegistry(authStorage, `${agentDir}/models.yml`) */
 	modelRegistry?: ModelRegistry;
 	/**
 	 * Request credential resolver. Defaults to the model registry's normal
