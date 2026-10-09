@@ -40,6 +40,25 @@ export type RelayToExtMessage = ({ t: "rpc"; id: number } & RelayRpcRequest) | {
 /** Required capability for safe relay target discovery and auto-attach. */
 export const DISCARDED_TABS_PROTOCOL_VERSION = 1;
 
+/**
+ * Whether a relay or extension reported a well-formed omp release version.
+ * Stricter than `Bun.semver.order`, which ranks strings with trailing text;
+ * peers supply these and results quote them.
+ */
+export function isOmpVersion(version: string): boolean {
+	return /^(?=.{5,64}$)\d+\.\d+\.\d+(?:-[0-9A-Za-z]+(?:\.[0-9A-Za-z]+)*)?$/.test(version);
+}
+
+/**
+ * Whether a reported omp version is provably older than `than`: unreported ("")
+ * is older than anything reported; otherwise both must be omp versions, since
+ * anything else has no known age.
+ */
+export function isOlderOmpVersion(version: string, than: string): boolean {
+	if (version === "") return than !== "";
+	return isOmpVersion(version) && isOmpVersion(than) && Bun.semver.order(version, than) < 0;
+}
+
 /** Messages sent extension → relay. */
 export type ExtToRelayMessage =
 	| {
@@ -60,6 +79,8 @@ export type ExtToRelayMessage =
 			 * latest-wins socket replacement.
 			 */
 			instanceId?: string;
+			/** The omp version that installed this extension (manifest `version_name`). Absent on builds without the stamp. */
+			ompVersion?: string;
 	  }
 	| { t: "cdpEvent"; tabId: number; sessionId?: string; method: string; params?: Record<string, unknown> }
 	| { t: "detached"; tabId: number; reason: string; relayInitiated?: boolean }

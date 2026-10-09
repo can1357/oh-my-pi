@@ -17,7 +17,7 @@ import { VERSION } from "@oh-my-pi/pi-utils/dirs";
 import { throwIfAborted } from "../../tool-errors";
 import { probeCdpResponse } from "../attach";
 import type { RelayUnavailableInfo } from "./server";
-import { DISCARDED_TABS_PROTOCOL_VERSION } from "./protocol";
+import { DISCARDED_TABS_PROTOCOL_VERSION, isOlderOmpVersion } from "./protocol";
 
 /**
  * One extension keepalive alarm period (30s, `background.js`) plus the dial
@@ -130,4 +130,30 @@ export async function waitForRelayExtension(cdpUrl: string, signal?: AbortSignal
 		if (Date.now() >= deadline) return staleRelay ? "outdated-relay" : "no-extension";
 		await Bun.sleep(POLL_INTERVAL_MS);
 	}
+}
+
+/** The steps that replace an out-of-date relay extension. */
+export const UPDATE_RELAY_EXTENSION = "Run `omp browser-relay install` and reload the extension in Chrome.";
+
+/**
+ * Notice for an open through a ready relay where a connected extension was
+ * installed by an older omp, or null. The extension still speaks the relay
+ * protocol, so the open goes ahead; relay fixes shipped since that install
+ * stay inactive until the user reinstalls it. A relay too old to report the
+ * extension's version gets no notice: it cannot tell.
+ */
+export async function relayExtensionNotice(cdpUrl: string, signal?: AbortSignal): Promise<string | null> {
+	const response = await probeCdpResponse(`${cdpUrl}/json/version`, { timeoutMs: PROBE_TIMEOUT_MS, signal });
+	if (response === null || response.status < 200 || response.status >= 300) return null;
+	let installedBy: unknown;
+	try {
+		const parsed: unknown = JSON.parse(response.body);
+		if (typeof parsed !== "object" || parsed === null || !("ompExtensionVersion" in parsed)) return null;
+		installedBy = parsed.ompExtensionVersion;
+	} catch {
+		return null;
+	}
+	if (typeof installedBy !== "string" || !isOlderOmpVersion(installedBy, VERSION)) return null;
+	const origin = installedBy === "" ? "an older omp" : `omp ${installedBy}; this is omp ${VERSION}`;
+	return `The OMP Browser Relay extension is out of date (installed by ${origin}). ${UPDATE_RELAY_EXTENSION}`;
 }

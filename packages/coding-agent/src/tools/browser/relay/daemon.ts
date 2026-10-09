@@ -21,6 +21,7 @@ import { throwIfAborted } from "../../tool-errors";
 import { probeCdpResponse, probeCdpStatus } from "../attach";
 import { DEFAULT_RELAY_URL } from "./kind";
 import { relayVersionOf } from "./probe";
+import { isOlderOmpVersion } from "./protocol";
 
 const DEFAULT_RELAY_PORT = new URL(DEFAULT_RELAY_URL).port;
 
@@ -158,7 +159,7 @@ export async function restartRelayDaemon(opts: { cdpUrl: string; signal?: AbortS
 	if (version === VERSION) return true;
 	// A newer omp running alongside this one owns a newer relay; replacing it
 	// would only make the two versions take turns killing each other's relay.
-	if (version !== null && !isOlderRelayVersion(version)) return false;
+	if (version !== null && !isOlderOmpVersion(version, VERSION)) return false;
 	// Stops only the generation judged outdated, not one another omp started since.
 	const stopped = await stopQuietly(client, name, "Browser relay", opts.signal, existing.id);
 	if (stopped?.state === "exited" || stopped?.state === "failed") {
@@ -185,16 +186,5 @@ async function relayVersionAt(cdpUrl: string, signal: AbortSignal | undefined): 
 		return typeof parsed === "object" && parsed !== null ? relayVersionOf(parsed) : null;
 	} catch {
 		return null;
-	}
-}
-
-/** Whether a relay reporting `version` predates this OMP; one reporting none predates version markers. */
-function isOlderRelayVersion(version: string): boolean {
-	if (version === "") return true;
-	try {
-		return Bun.semver.order(version, VERSION) < 0;
-	} catch {
-		// Unparseable: not provably older, so leave it to its owner.
-		return false;
 	}
 }
