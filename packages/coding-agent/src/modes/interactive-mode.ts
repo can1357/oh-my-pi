@@ -336,6 +336,7 @@ import { materializeImageChipLinks, UiHelpers } from "./utils/ui-helpers";
 
 import {
 	cfgAutocompleteMaxVisible,
+	cfgAutoResume,
 	cfgComposerShape,
 	cfgComposerTokenRate,
 	cfgDisplayCacheMissMarker,
@@ -411,6 +412,7 @@ import {
  * them (`InteractiveMode.#applyUiSettingChanges`) so a bulk reload rebuilds the transcript once.
  */
 const cfgLiveUiSettings = combine({
+	autoResume: cfgAutoResume,
 	showHardwareCursor: cfgShowHardwareCursor,
 	"tui.maxInlineImages": cfgTuiMaxInlineImages,
 	"tui.resizeScrollback": cfgTuiResizeScrollback,
@@ -3434,6 +3436,10 @@ export class InteractiveMode implements InteractiveModeContext {
 		const any = (...ids: (keyof LiveUiSettings)[]) => ids.some(id => !Bun.deepEquals(next[id], previous[id]));
 		let rebuildChat = false;
 		let resetDisplay = false;
+
+		if (any("autoResume")) {
+			sharedComposerCache()?.writeAutoResume(this.sessionManager.getCwd(), cfgAutoResume.get(this.settings));
+		}
 
 		if (
 			any(

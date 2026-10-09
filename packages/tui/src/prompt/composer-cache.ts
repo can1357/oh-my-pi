@@ -270,6 +270,26 @@ export class ComposerCache {
 		this.#putShared(cwd, "ui", { preferences, theme, autoResume });
 	}
 
+	/** Refresh the live auto-resume setting without replacing the cached UI snapshot. */
+	writeAutoResume(cwd: string, autoResume: boolean): void {
+		const project = path.resolve(cwd);
+		let ownUi: string | undefined;
+		let fallbackUi: string | undefined;
+		try {
+			for (const row of this.#select.all(project, ANY_PROJECT)) {
+				if (row.kind !== "ui") continue;
+				if (row.project === project) ownUi = row.value;
+				else fallbackUi = row.value;
+			}
+		} catch (error) {
+			logger.debug("composer cache auto-resume read failed", { error: String(error) });
+			return;
+		}
+		const ui = parseUiState(parseJson(ownUi)) ?? parseUiState(parseJson(fallbackUi));
+		if (!ui) return;
+		this.writeUi(cwd, ui.preferences, ui.theme, autoResume);
+	}
+
 	/** Status-bar inputs for the next prepaint's startup status line. */
 	writeStatus(cwd: string, status: ComposerStatusCache, sessionFile?: string): void {
 		this.#putShared(

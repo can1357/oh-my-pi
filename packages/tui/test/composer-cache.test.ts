@@ -113,6 +113,31 @@ describe("composer startup cache", () => {
 		cache.close();
 	});
 
+	it("updates live auto-resume intent without replacing the cached UI snapshot", () => {
+		const project = path.join(root, "project");
+		const sessionFile = path.join(root, "sessions", "session.jsonl");
+		const preferences = { ...COMPOSER_DEFAULTS, composerShape: "rail" };
+		const theme = { symbolPreset: "ascii" as const, colorBlindMode: true };
+		const status = statusFor(ThinkingLevel.High);
+		const statusWithUsage: ComposerStatusCache = {
+			...status,
+			statusLine: { ...status.statusLine, contextPercent: 42 },
+		};
+		const cache = ComposerCache.open(dbPath);
+		cache.writeUi(project, preferences, theme, true);
+		cache.writeStatus(project, statusWithUsage, sessionFile);
+
+		cache.writeAutoResume(project, false);
+		expect(cache.read(project)).toMatchObject({ preferences, theme });
+		expect(
+			cache.read(project, { allowSessionUsage: true, sessionFile }).status?.statusLine.contextPercent,
+		).toBeUndefined();
+
+		cache.writeAutoResume(project, true);
+		expect(cache.read(project, { allowSessionUsage: true, sessionFile }).status?.statusLine.contextPercent).toBe(42);
+		cache.close();
+	});
+
 	it("skips write transactions for identical payloads", () => {
 		const project = path.join(root, "project");
 		const cache = ComposerCache.open(dbPath);

@@ -1,6 +1,4 @@
 import type { Terminal } from "@oh-my-pi/pi-tui";
-import { getTerminalId } from "@oh-my-pi/pi-tui/ttyid";
-import * as fs from "node:fs";
 import * as path from "node:path";
 import {
 	COMPOSER_DEFAULTS,
@@ -13,9 +11,9 @@ import {
 	type ComposerThemePreferences,
 	sharedComposerCache,
 } from "@oh-my-pi/pi-tui/prompt/composer-cache";
-import { getTerminalSessionsDir } from "@oh-my-pi/pi-utils/dirs";
 import { setMagicKeywords } from "@oh-my-pi/pi-tui/prompt/magic-keywords";
 import { initThemeSync } from "@oh-my-pi/pi-tui/theme";
+import { readTerminalBreadcrumbEntrySync } from "../session/session-paths";
 import { MAGIC_KEYWORDS } from "./magic-keywords";
 
 /** Inputs available at the CLI prepaint boundary before command modules load. */
@@ -51,18 +49,9 @@ let pendingComposer: PendingComposer | undefined;
 
 /** Read only the breadcrumb fields needed by prepaint, without loading the session graph. */
 function readTerminalSessionFile(cwd: string): string | undefined {
-	const terminalId = getTerminalId();
-	if (!terminalId) return undefined;
-	try {
-		const [breadcrumbCwd, sessionFile] = fs
-			.readFileSync(path.join(getTerminalSessionsDir(), terminalId), "utf8")
-			.trim()
-			.split("\n");
-		if (!breadcrumbCwd || !sessionFile || path.resolve(breadcrumbCwd) !== path.resolve(cwd)) return undefined;
-		return path.resolve(breadcrumbCwd, sessionFile);
-	} catch {
-		return undefined;
-	}
+	const breadcrumb = readTerminalBreadcrumbEntrySync();
+	if (!breadcrumb || path.resolve(breadcrumb.cwd) !== path.resolve(cwd)) return undefined;
+	return breadcrumb.sessionFile;
 }
 
 /** Ownership token that transfers one already-started Composer to InteractiveMode. */

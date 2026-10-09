@@ -495,6 +495,30 @@ export interface TerminalBreadcrumb {
 	cwdIdentity?: CwdIdentity;
 }
 
+/** Resolve and validate a parsed breadcrumb against the current filesystem. */
+function validateTerminalBreadcrumb(parsed: ParsedTerminalBreadcrumb | null): TerminalBreadcrumb | null {
+	if (!parsed) return null;
+	const { cwd, fresh, cwdIdentity } = parsed;
+	const sessionFile = path.resolve(cwd, parsed.sessionFile);
+	const stat = fs.statSync(sessionFile, { throwIfNoEntry: false });
+	const exists = stat?.isFile() === true;
+	return exists || fresh ? { cwd, sessionFile, exists, fresh, cwdIdentity } : null;
+}
+
+/** Synchronous breadcrumb read for first-frame paths that cannot await the session graph. */
+export function readTerminalBreadcrumbEntrySync(): TerminalBreadcrumb | null {
+	const terminalId = getTerminalId();
+	if (!terminalId) return null;
+
+	try {
+		const breadcrumbFile = path.join(getTerminalSessionsDir(), terminalId);
+		return validateTerminalBreadcrumb(parseTerminalBreadcrumb(fs.readFileSync(breadcrumbFile, "utf8")));
+	} catch (err) {
+		if (!isEnoent(err)) logger.debug("Terminal breadcrumb read failed", { err });
+		return null;
+	}
+}
+
 /**
  * Read the raw terminal breadcrumb for the current terminal.
  * Returns the recorded cwd + session file regardless of whether the recorded
@@ -512,18 +536,9 @@ export async function readTerminalBreadcrumbEntry(): Promise<TerminalBreadcrumb 
 
 	try {
 		const breadcrumbFile = path.join(getTerminalSessionsDir(), terminalId);
-		const parsed = parseTerminalBreadcrumb(await Bun.file(breadcrumbFile).text());
-		if (!parsed) return null;
-		const { cwd: breadcrumbCwd, sessionFile, fresh, cwdIdentity } = parsed;
-
-		const stat = fs.statSync(sessionFile, { throwIfNoEntry: false });
-		const exists = stat?.isFile() === true;
-		// A materialized target resumes normally; a missing target is honored only
-		// for a never-written lazy fresh-session boundary.
-		if (exists || fresh) return { cwd: breadcrumbCwd, sessionFile, exists, fresh, cwdIdentity };
+		return validateTerminalBreadcrumb(parseTerminalBreadcrumb(await Bun.file(breadcrumbFile).text()));
 	} catch (err) {
 		if (!isEnoent(err)) logger.debug("Terminal breadcrumb read failed", { err });
-		// Breadcrumb doesn't exist or is corrupt — fall through
+		return null;
 	}
-	return null;
 }
