@@ -54,6 +54,8 @@ import type {
 	AgentEvent,
 	AgentLoopConfig,
 	AgentMessage,
+	FinalAnswerReviewContext,
+	FinalAnswerReviewDecision,
 	AgentState,
 	AgentTool,
 	AgentToolContext,
@@ -444,6 +446,12 @@ export class Agent {
 	#withdrawnMessages = new WeakMap<AgentMessage, AbortController>();
 	#steeringWaiters = new Set<() => void>();
 	#queuedMessageGrouping?: (previous: AgentMessage, next: AgentMessage) => boolean;
+	#reviewFinalAnswer?: (
+		context: FinalAnswerReviewContext,
+		signal?: AbortSignal,
+	) => Promise<FinalAnswerReviewDecision | undefined> | FinalAnswerReviewDecision | undefined;
+	#finalAnswerReviewTimeoutMs?: number;
+	#shouldReviewFinalAnswer?: () => boolean;
 
 	#steeringMode: "all" | "one-at-a-time";
 	#followUpMode: "all" | "one-at-a-time";
@@ -1147,6 +1155,21 @@ export class Agent {
 			| undefined,
 	): void {
 		this.#onTurnEnd = fn;
+	}
+
+	setReviewFinalAnswer(
+		fn:
+			| ((
+					context: FinalAnswerReviewContext,
+					signal?: AbortSignal,
+			  ) => Promise<FinalAnswerReviewDecision | undefined> | FinalAnswerReviewDecision | undefined)
+			| undefined,
+		timeoutMs?: number,
+		shouldReview?: () => boolean,
+	): void {
+		this.#reviewFinalAnswer = fn;
+		this.#finalAnswerReviewTimeoutMs = timeoutMs;
+		this.#shouldReviewFinalAnswer = shouldReview;
 	}
 
 	/** Called with the exact system prompt each model call is built from, after before-model-call hooks. */
@@ -1923,6 +1946,9 @@ export class Agent {
 			getFollowUpMessages: signal => this.#dequeueFollowUpMessagesAfterHooks(signal ?? loopSignal),
 			getAsideMessages: async () => (await this.#asideMessageProvider?.()) ?? [],
 			onBeforeYield: () => this.#onBeforeYield?.(),
+			reviewFinalAnswer: this.#reviewFinalAnswer,
+			finalAnswerReviewTimeoutMs: this.#finalAnswerReviewTimeoutMs,
+			shouldReviewFinalAnswer: this.#shouldReviewFinalAnswer,
 			telemetry: this.#telemetry,
 		};
 

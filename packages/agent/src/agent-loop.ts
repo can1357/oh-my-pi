@@ -90,6 +90,7 @@ import type {
 	AgentToolResult,
 	AgentTurnEndContext,
 	AsideMessage,
+	FinalAnswerReviewDecision,
 	BeforeToolCallResult,
 	CommittableAsideMessage,
 	SoftToolRequirement,
@@ -104,6 +105,7 @@ import {
 	SPECULATIVE_STREAM_SESSION,
 } from "./types";
 import { yieldIfDue } from "./utils/yield";
+import { raceWithSignal } from "@oh-my-pi/pi-ai/utils/abort";
 /** Stop-details marker for a provider error after assistant content/tool args already streamed. */
 export const STREAM_INTERRUPTED_AFTER_CONTENT_STOP_DETAIL = "stream_interrupted_after_content";
 
@@ -718,6 +720,136 @@ function createAgentStream(): EventStream<AgentEvent, AgentMessage[]> {
 	);
 }
 
+function isToolEvent(event: AgentEvent): boolean {
+	return (
+		event.type === "tool_stream_update" ||
+		event.type === "tool_execution_start" ||
+		event.type === "tool_execution_update" ||
+		event.type === "tool_execution_end" ||
+		(event.type === "message_update" && event.assistantMessageEvent.type.startsWith("toolcall_"))
+	);
+}
+
+/**
+ * Buffering wrapper for candidate final answers.
+ * Holds events until the configured advisor approves the final answer
+ * or a tool call indicates an intermediate turn.
+ *
+ * It retains only the initial and latest immutable snapshots. Final approval
+ * publishes one complete message; a tool turn receives the accumulated prefix.
+ */
+class FinalAnswerBufferingStream extends EventStream<AgentEvent, AgentMessage[]> {
+	readonly #target: EventStream<AgentEvent, AgentMessage[]>;
+	#finalSnapshot: AssistantMessage | undefined;
+	#startMessage: AssistantMessage | undefined;
+	#hasStart = false;
+	#passthrough = false;
+
+	constructor(target: EventStream<AgentEvent, AgentMessage[]>) {
+		super(target.isComplete, target.extractResult);
+		this.#target = target;
+	}
+
+	override push(event: AgentEvent): void {
+		if (this.#passthrough) {
+			this.#target.push(event);
+			return;
+		}
+
+		if (isToolEvent(event)) {
+			this.#flushToolTurn(event);
+			return;
+		}
+
+		if (event.type === "message_start") {
+			this.#hasStart = true;
+			this.#startMessage = event.message as AssistantMessage;
+			this.#finalSnapshot = event.message as AssistantMessage;
+			return;
+		}
+
+		if (event.type === "message_end") {
+			this.#finalSnapshot = event.message as AssistantMessage;
+			return;
+		}
+
+		if (event.type === "message_update") {
+			this.#finalSnapshot = event.message as AssistantMessage;
+			return;
+		}
+
+		this.#target.push(event);
+	}
+
+	#flushToolTurn(toolEvent: AgentEvent): void {
+		this.#passthrough = true;
+		if (this.#hasStart && this.#startMessage) {
+			this.#target.push({ type: "message_start", message: this.#startMessage });
+		}
+		const snapshot = this.#finalSnapshot;
+		if (snapshot) {
+			for (let contentIndex = 0; contentIndex < snapshot.content.length; contentIndex++) {
+				const part = snapshot.content[contentIndex]!;
+				if (part.type !== "text" && part.type !== "thinking") continue;
+				const assistantMessageEvent: AssistantMessageEvent =
+					part.type === "text"
+						? { type: "text_delta", contentIndex, delta: part.text, partial: snapshot }
+						: { type: "thinking_delta", contentIndex, delta: part.thinking, partial: snapshot };
+				this.#target.push({ type: "message_update", assistantMessageEvent, message: snapshot });
+			}
+		}
+		this.#startMessage = undefined;
+		this.#finalSnapshot = undefined;
+		this.#target.push(toolEvent);
+	}
+
+	flush(): void {
+		this.#passthrough = true;
+		this.#startMessage = undefined;
+		if (this.#finalSnapshot) {
+			this.#target.push({ type: "message_start", message: this.#finalSnapshot });
+			this.#target.push({ type: "message_end", message: this.#finalSnapshot });
+			this.#finalSnapshot = undefined;
+		}
+	}
+
+	discard(): void {
+		this.#passthrough = true;
+		this.#startMessage = undefined;
+		this.#finalSnapshot = undefined;
+	}
+
+	override end(result: AgentMessage[]): void {
+		this.#target.end(result);
+	}
+
+	override fail(error: unknown): void {
+		this.#target.fail(error);
+	}
+}
+
+function isTerminalTextCandidate(message: AssistantMessage): boolean {
+	if (message.stopReason !== "stop" || message.stopDetails?.type === "pause_turn") return false;
+	let hasText = false;
+	for (const part of message.content) {
+		if (part.type === "toolCall") return false;
+		if (part.type === "text") {
+			if (part.text.trim().length > 0) hasText = true;
+			continue;
+		}
+		if (
+			part.type === "thinking" ||
+			part.type === "redactedThinking" ||
+			part.type === "fallback" ||
+			part.type === "anthropicServerTool"
+		) {
+			continue;
+		}
+		return false;
+	}
+	return hasText;
+}
+
 /**
  * Build the `agent_end` event payload. When telemetry is enabled, snapshots
  * the run collector so consumers receive {@link AgentRunSummary} +
@@ -1233,6 +1365,7 @@ async function runLoopBody(
 		let harmonyTruncateResumeCount = 0;
 		let pausedTurnContinuations = 0;
 		let dsmlLeakNudges = 0;
+		let finalAnswerReviewed = false;
 
 		// Soft tool requirement lifecycle (reminder then escalation; see SoftToolRequirement).
 		// The host-owned state survives only a gate stop between Agent.prompt calls.
@@ -1413,17 +1546,32 @@ async function runLoopBody(
 					stream.push({ type: "turn_start" });
 					emitInputMessages(stream, turnMessages);
 					turnOpen = true;
+				} else if (turnMessages.length > 0) {
+					emitInputMessages(stream, turnMessages);
 				}
 
 				// Stream assistant response
 				let recovered: HarmonyRecoveredToolCall | undefined;
 				let message: AssistantMessage;
+				let approvedAdvice: AgentMessage[] | undefined;
+				// A queued operator message starts a new request within the same run.
+				// Advisor corrections use attributed custom messages, so they keep the latch.
+				if (
+					config.reviewFinalAnswer &&
+					turnMessages.some(input => input.role === "user" && input.attribution !== "agent")
+				)
+					finalAnswerReviewed = false;
+				const shouldBufferCandidate =
+					Boolean(config.reviewFinalAnswer) &&
+					(config.shouldReviewFinalAnswer ? config.shouldReviewFinalAnswer() : true) &&
+					!finalAnswerReviewed;
+				const candidateStream = shouldBufferCandidate ? new FinalAnswerBufferingStream(stream) : stream;
 				try {
 					message = await streamAssistantResponse(
 						currentContext,
 						config,
 						signal,
-						stream,
+						candidateStream,
 						telemetry,
 						invokeAgentSpan,
 						stepCounter,
@@ -1504,10 +1652,82 @@ async function runLoopBody(
 					ensureUniqueToolCallIds(message, toolCallIdsDispatchedUnder(currentContext));
 					message = snapshotAssistantMessage(message);
 					currentContext.messages.push(message);
-					stream.push({ type: "message_start", message: snapshotAssistantMessage(message) });
-					stream.push({ type: "message_end", message: snapshotAssistantMessage(message) });
+					candidateStream.push({ type: "message_start", message: snapshotAssistantMessage(message) });
+					candidateStream.push({ type: "message_end", message: snapshotAssistantMessage(message) });
+				}
+
+				const isCandidateFinalAnswer =
+					shouldBufferCandidate && !signal?.aborted && isTerminalTextCandidate(message);
+
+				if (isCandidateFinalAnswer) {
+					const timeoutMs = config.finalAnswerReviewTimeoutMs ?? 5000;
+					const timeoutSignal = timeoutMs > 0 && timeoutMs < Infinity ? AbortSignal.timeout(timeoutMs) : undefined;
+					const reviewSignal =
+						signal && timeoutSignal ? AbortSignal.any([signal, timeoutSignal]) : (signal ?? timeoutSignal);
+
+					let decision: FinalAnswerReviewDecision | undefined;
+					try {
+						const reviewPromise = Promise.resolve().then(() =>
+							config.reviewFinalAnswer!({ message, messages: currentContext.messages }, reviewSignal),
+						);
+						decision = await raceWithSignal(reviewPromise, reviewSignal);
+					} catch (error) {
+						if (signal?.aborted) {
+							if (candidateStream instanceof FinalAnswerBufferingStream) {
+								candidateStream.discard();
+							}
+							if (currentContext.messages[currentContext.messages.length - 1] === message) {
+								currentContext.messages.pop();
+							}
+							throw signal.reason ?? error;
+						}
+						logger.warn("Final answer review failed or timed out; releasing answer", { error });
+						decision = { action: "approve" };
+					}
+
+					if (signal?.aborted) {
+						if (candidateStream instanceof FinalAnswerBufferingStream) {
+							candidateStream.discard();
+						}
+						if (currentContext.messages[currentContext.messages.length - 1] === message) {
+							currentContext.messages.pop();
+						}
+						throw signal.reason ?? new Error("Aborted");
+					}
+
+					const adviceList = decision?.advice
+						? Array.isArray(decision.advice)
+							? decision.advice
+							: [decision.advice]
+						: [];
+					if (decision?.action === "block" && adviceList.length > 0) {
+						if (candidateStream instanceof FinalAnswerBufferingStream) {
+							candidateStream.discard();
+						}
+						if (currentContext.messages[currentContext.messages.length - 1] === message) {
+							currentContext.messages.pop();
+						}
+						finalAnswerReviewed = true;
+						pendingMessages = [...adviceList];
+						hasMoreToolCalls = true;
+						continue;
+					}
+
+					finalAnswerReviewed = true;
+					if (decision?.action === "approve" && adviceList.length > 0) approvedAdvice = adviceList;
+					if (candidateStream instanceof FinalAnswerBufferingStream) {
+						candidateStream.flush();
+					}
+				} else if (candidateStream instanceof FinalAnswerBufferingStream) {
+					// An aborted provider result still carries usage and cancellation state.
+					candidateStream.flush();
 				}
 				newMessages.push(message);
+				if (approvedAdvice) {
+					currentContext.messages.push(...approvedAdvice);
+					newMessages.push(...approvedAdvice);
+					emitInputMessages(stream, approvedAdvice);
+				}
 
 				// The escalation choice (if any) applied to the call above; clear it so
 				// only the single escalation turn carries the forced choice.

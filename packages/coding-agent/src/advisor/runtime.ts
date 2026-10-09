@@ -713,6 +713,16 @@ export class AdvisorRuntime {
 		this.#clearSeenContext();
 		this.#wakeAllWaiters();
 	}
+	/**
+	 * Remove a reviewed final draft from the primary cursor without replaying
+	 * history. The advisor retains its review while the primary replaces the draft.
+	 */
+	forgetReviewedPrimaryTail(message: AssistantMessage): void {
+		if (this.#deliveredPrefix.at(-1)?.message !== message) return;
+		this.#deliveredPrefix.pop();
+		this.#lastCount = this.#deliveredPrefix.length;
+		this.#latestMessages = this.#latestMessages?.slice(0, this.#lastCount);
+	}
 
 	/**
 	 * Re-align the delivered prefix with the primary transcript after an

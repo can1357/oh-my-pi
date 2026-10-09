@@ -74,12 +74,35 @@ When no `WATCHDOG.yml` roster is present, the default advisor uses these setting
 - `advisor.reviewInterval` — review every Nth eligible update (default `1`). Skipped updates are captured as the primary saw them and sent with the next scheduled review.
 - `advisor.maxNotesPerUpdate` — maximum non-blocker advice notes accepted per advisor update (default `4`, range 1–32). Blockers are exempt.
 - `advisor.syncBacklog` — catch-up policy (default `off`); numeric thresholds are bounded, while `strict` waits without a wall-clock cap.
+- `advisor.reviewFinalAnswer`: hold candidate terminal text answers for advisor review before release (default `false`).
+- `advisor.finalReviewTimeoutMs`: review timeout in milliseconds (default `5000`, maximum `30000`).
 
 Edits to these settings apply to the running advisor at its next primary boundary without rebuilding it.
 
 Roster entries set their own cadence: an omitted `reviewMode` means `turn` and an omitted `reviewInterval` means `1`, regardless of the settings above. An omitted `syncBacklog` inherits `advisor.syncBacklog`, and an omitted `maxNotesPerUpdate` inherits the shared `WATCHDOG.yml` top-level value, then `advisor.maxNotesPerUpdate`. An explicit `syncBacklog: off` overrides a global `strict`.
 
 Rebuilding advisors (saving `/advisor configure`, model-role or context changes) keeps updates the cadence skipped: each rebuilt advisor receives them with its next scheduled review.
+
+### Final-answer review
+
+Enable `advisor.reviewFinalAnswer` to hold a completed draft until an active advisor reviews it. The default is `false`, so existing streaming stays unchanged.
+
+```yaml
+advisor:
+  enabled: true
+  reviewFinalAnswer: true
+  finalReviewTimeoutMs: 5000
+```
+
+OMP buffers text before it can determine whether the response includes a tool call. When a tool call starts, OMP releases that prefix and resumes tool streaming.
+
+When a reviewer reports a `concern` or `blocker` within the window, OMP hides the draft and requests one complete replacement. Deferred notes from earlier steps of the same request also enter this review. OMP delivers feedback as an attributed advisor card, not as a user message.
+
+Nits appear after the accepted answer and do not trigger another model call. OMP permits one correction per user request and does not run another gate on that correction. This limit prevents recursive correction loops but does not guarantee a correct answer.
+
+Review waits default to `5000` milliseconds. OMP clamps positive `advisor.finalReviewTimeoutMs` values to `1`–`30000` milliseconds and uses the default for invalid values. On timeout or failure, OMP releases the draft rather than hanging.
+
+After the window closes, OMP suppresses late notes from the covered request so they cannot change a later prompt. Plan mode and sessions without a live advisor bypass the gate.
 
 ### Headless runs
 

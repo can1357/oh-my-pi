@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added support for withholding candidate final text answers for external review before emitting assistant message events ([#15025](https://github.com/can1357/oh-my-pi/pull/15025) by [@aliefe04](https://github.com/aliefe04)).
+
 ## [18.8.6] - 2026-10-08
 
 ### Added

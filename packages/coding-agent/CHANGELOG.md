@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added opt-in final-answer review with `advisor.reviewFinalAnswer`. Concerns and blockers can trigger one same-request correction ([#15025](https://github.com/can1357/oh-my-pi/pull/15025) by [@aliefe04](https://github.com/aliefe04)).
+
 ### Changed
 
 - Web search now tells the agent about its X post operators (`site:x.com`, `from:<handle>`) when you are logged in to xAI, so questions about reactions on X reach X search.
