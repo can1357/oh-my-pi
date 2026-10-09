@@ -1342,6 +1342,9 @@ export class EventController {
 					target.setAdditionalContext(textContent(event.message.content));
 					this.ctx.ui.requestRender();
 				}
+				// The context closes its batch, as transcript replay does: the next turn's
+				// reads start a new group instead of overwriting this group's context.
+				this.#resetReadGroup();
 			} else if (event.message.synthetic) {
 				// A run-initiating synthetic developer prompt (auto-continue, or a
 				// queued follow-up drained inside the current run — plan approval, /goal)

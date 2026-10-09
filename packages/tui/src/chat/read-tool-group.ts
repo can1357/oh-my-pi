@@ -26,7 +26,7 @@ import { formatUsageRow } from "../overlays/usage-row";
 import { formatCount, isUrlLikePath, sanitizeText, sanitizeTextDeep } from "@oh-my-pi/pi-utils";
 import type { TspCardStatus, TspSpan, TspText } from "@oh-my-pi/pi-wire";
 import type { NativeToolHead } from "../tools/renderer";
-import { card, code, keyed, md, node, span, text, withHidden } from "../native/describe";
+import { card, code, col, keyed, md, node, span, text, withHidden } from "../native/describe";
 import {
 	type DescribeContext,
 	type NativeChild,
@@ -632,9 +632,12 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 	override describe(cx?: DescribeContext): NativeNode {
 		const dataFirst = cx?.supports("tool") === true;
 		const key = [dataFirst, this.#displayVersion, this.#toolActivityVisible, this.#sealed];
-		return this.#native.get(key, () =>
-			withHidden(dataFirst ? this.#describeTool() : this.#describeGroup(), !this.#toolActivityVisible),
-		);
+		return this.#native.get(key, () => {
+			const described = dataFirst ? this.#describeTool() : this.#describeGroup();
+			// Passive context sits below the card, outside its preview clamp, as on ordinary tool cards.
+			const context = describeToolAdditionalContext(this.#additionalContext, this.#expanded);
+			return withHidden(context.length > 0 ? col([described, ...context]) : described, !this.#toolActivityVisible);
+		});
 	}
 
 	/**
@@ -693,7 +696,6 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 				if (usage) body.push(this.#nativeUsage(usage, `u${entry.toolCallId}`));
 			}
 		}
-		body.push(...describeToolAdditionalContext(this.#additionalContext, this.#expanded));
 		return node(
 			"tool",
 			{
@@ -873,7 +875,6 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 			const usage = this.#usageRows.get(entry.toolCallId);
 			if (usage) children.push(this.#nativeUsage(usage, `u${entry.toolCallId}`));
 		}
-		children.push(...describeToolAdditionalContext(this.#additionalContext, this.#expanded));
 		return card(
 			{
 				role: "omp.tool.read",
