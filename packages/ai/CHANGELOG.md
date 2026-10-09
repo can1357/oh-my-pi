@@ -4,6 +4,7 @@
 
 ### Added
 
+- Added a native Grok Bot connector with credential renewal, streaming tool calls, and signed Claude history replay ([#10175](https://github.com/can1357/oh-my-pi/pull/10175) by [@jroth1111](https://github.com/jroth1111)).
 - Added routing-session cleanup for OpenAI Responses and Codex while preserving shared provider fallbacks ([#14334](https://github.com/can1357/oh-my-pi/pull/14334) by [@iliaal](https://github.com/iliaal)).
 
 ### Fixed

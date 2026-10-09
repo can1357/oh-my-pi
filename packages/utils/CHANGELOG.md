@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added asynchronous dotenv loading for provider credentials ([#10175](https://github.com/can1357/oh-my-pi/pull/10175) by [@jroth1111](https://github.com/jroth1111)).
+
 ## [18.8.1] - 2026-10-07
 
 ### Added
