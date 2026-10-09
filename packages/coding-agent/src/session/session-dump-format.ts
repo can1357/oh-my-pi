@@ -24,6 +24,7 @@ import {
 	type PythonExecutionMessage,
 	pythonExecutionToText,
 } from "./messages";
+import { ANONYMIZED_REVIEW_NOTE } from "./session-anonymizer";
 
 /** Minimal tool shape for dump output (matches AgentTool fields used by formatSessionDumpText). */
 export interface SessionDumpToolInfo {
@@ -275,7 +276,7 @@ export function formatSubagentDumpText(subagent: SessionDumpSubagent): string {
 	return lines.join("\n").trim();
 }
 
-/** Result of writing a `/dump all` zip (see `AgentSession.dumpSessionArchiveToTmpDir`). */
+/** Result of writing a `/dump all` or `/dump anon` zip (see `AgentSession.dumpSessionArchiveToTmpDir`). */
 export interface SessionDumpArchive {
 	path: string;
 	/** Archive member names in write order. */
@@ -283,6 +284,12 @@ export interface SessionDumpArchive {
 	subagentCount: number;
 	/** Why subagent discovery failed; the main dump is archived regardless. */
 	subagentError?: string;
+	/** Members are anonymized session JSONL (`/dump anon`), not raw transcripts. */
+	anonymized?: boolean;
+	/** `[member, count]` for transcripts whose malformed JSONL records were skipped. */
+	malformed?: ReadonlyArray<readonly [string, number]>;
+	/** Subagent transcripts skipped because no session header could be read. */
+	unreadable?: readonly string[];
 }
 
 /** Lines describing a `/dump all` archive: path, members, and any subagent discovery failure. */
@@ -295,6 +302,14 @@ export function formatDumpArchiveReport(archive: SessionDumpArchive): string[] {
 		...archive.files.map(file => `  ${file}`),
 	];
 	if (archive.subagentError) lines.push(`Subagent transcripts unavailable: ${archive.subagentError}`);
-	lines.push("This archive persists on disk and may contain raw context/secrets — treat accordingly.");
+	for (const [member, skipped] of archive.malformed ?? []) {
+		lines.push(`Skipped ${skipped} malformed record${skipped === 1 ? "" : "s"} in ${member}`);
+	}
+	for (const member of archive.unreadable ?? []) lines.push(`Not exported (no readable session header): ${member}`);
+	lines.push(
+		archive.anonymized
+			? ANONYMIZED_REVIEW_NOTE
+			: "This archive persists on disk and may contain raw context/secrets — treat accordingly.",
+	);
 	return lines;
 }
