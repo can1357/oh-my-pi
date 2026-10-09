@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added support for withholding candidate final text answers for external review before emitting assistant message events.
+
 ## [18.8.6] - 2026-10-08
 
 ### Added

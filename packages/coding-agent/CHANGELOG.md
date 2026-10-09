@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added opt-in advisor final-answer review (`advisor.reviewFinalAnswer`) to hold candidate terminal text and run one same-request correction on concerns or blockers.
+
 ### Changed
 
 - Web search now tells the agent about its X post operators (`site:x.com`, `from:<handle>`) when you are logged in to xAI, so questions about reactions on X reach X search.

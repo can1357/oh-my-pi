@@ -97,6 +97,20 @@ export type AgentBeforeModelCall = (
 	signal?: AbortSignal,
 ) => AgentPreModelCallResult | void | Promise<AgentPreModelCallResult | void>;
 
+export interface FinalAnswerReviewDecision {
+	action: "approve" | "block";
+	/**
+	 * On block, steer these messages into one same-request correction.
+	 * On approval, append them after the answer without starting another model call.
+	 */
+	advice?: AgentMessage | AgentMessage[];
+}
+
+export interface FinalAnswerReviewContext {
+	message: AssistantMessage;
+	messages: readonly AgentMessage[];
+}
+
 /**
  * A soft tool requirement: the host wants `toolName` called before the loop
  * runs other tools or yields, but WITHOUT paying the forced-`toolChoice` cost
@@ -591,6 +605,27 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 * post-turn steering.
 	 */
 	onTurnEnd?: (messages: AgentMessage[], signal?: AbortSignal, context?: AgentTurnEndContext) => Promise<void> | void;
+	/**
+	 * Optional gate invoked only at a terminal text-answer boundary (an assistant
+	 * message with no tool calls and stopReason "stop") before user-facing message
+	 * events are emitted.
+	 *
+	 * Returning `{ action: "block", advice }` suppresses the candidate final answer
+	 * from user emission, injects the advice as steering into the current loop, and
+	 * continues the turn for same-turn correction (bounded to a single correction loop).
+	 *
+	 * Returning `{ action: "approve" }` (or void / undefined) releases the buffered
+	 * answer events to the user.
+	 */
+	reviewFinalAnswer?: (
+		context: FinalAnswerReviewContext,
+		signal?: AbortSignal,
+	) => Promise<FinalAnswerReviewDecision | undefined> | FinalAnswerReviewDecision | undefined;
+	/** Optional live predicate so hosts can disable buffering when no reviewer is active. */
+	shouldReviewFinalAnswer?: () => boolean;
+
+	/** Bounded timeout for reviewFinalAnswer in milliseconds. Defaults to 5000. */
+	finalAnswerReviewTimeoutMs?: number;
 
 	/**
 	 * Called once an assistant message is finalized from the model stream, before

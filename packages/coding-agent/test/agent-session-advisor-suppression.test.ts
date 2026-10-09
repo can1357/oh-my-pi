@@ -26,7 +26,7 @@ import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { IrcMessage } from "@oh-my-pi/pi-tui/tools/irc";
-import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { AgentSession, type AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { USER_INTERRUPT_LABEL } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
@@ -59,6 +59,17 @@ interface CompletedAdvisorHarness {
 	sessionManager: SessionManager;
 	mock: MockModel;
 	advisorMock: MockModel;
+}
+
+interface CompletedAdvisorOptions {
+	reviewFinalAnswer?: boolean;
+	finalReviewTimeoutMs?: number;
+	primaryResponses?: MockResponse[];
+	advisorResponses?: (MockResponse | (() => Promise<MockResponse> | MockResponse))[];
+	advisorTools?: AgentTool[];
+	primaryTools?: AgentTool[];
+	syncBacklog?: "off" | "1";
+	advisorHandler?: () => MockResponse | Promise<MockResponse>;
 }
 
 interface AdvisorTestExtensionRunner {
@@ -170,16 +181,17 @@ describe("AgentSession advisor auto-resume suppression", () => {
 	async function createCompletedAdvisorSession(
 		severity: "concern" | "blocker" = "concern",
 		extensionRunner?: AdvisorTestExtensionRunner,
+		options: CompletedAdvisorOptions = {},
 	): Promise<CompletedAdvisorHarness> {
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
 		const mock = createMockModel({
-			responses: [
+			responses: options.primaryResponses ?? [
 				{ content: ["EXACT VERDICT"], stopReason: "stop" },
 				{ content: ["CHANGED VERDICT"], stopReason: "stop" },
 			],
 		});
 		const advisorMock = createMockModel({
-			responses: [
+			responses: options.advisorResponses ?? [
 				{
 					content: [
 						{
@@ -192,15 +204,23 @@ describe("AgentSession advisor auto-resume suppression", () => {
 			],
 			// Any further review stays silent; the advise-only turn above ends
 			// its own review without a follow-up request.
-			handler: () => ({ content: [], stopReason: "stop" }),
+			handler: options.advisorHandler ?? (() => ({ content: [], stopReason: "stop" })),
 		});
 		const agent = new Agent({
 			getApiKey: () => "test-key",
-			initialState: { model, systemPrompt: ["Test"], tools: [] },
+			initialState: { model, systemPrompt: ["Test"], tools: options.primaryTools ?? [] },
 			streamFn: mock.stream,
 		});
 		const sessionManager = SessionManager.inMemory();
-		const settings = Settings.isolated({ "compaction.enabled": false, "retry.enabled": false });
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.enabled": false,
+			...(options.syncBacklog !== undefined ? { "advisor.syncBacklog": options.syncBacklog } : {}),
+			...(options.reviewFinalAnswer !== undefined ? { "advisor.reviewFinalAnswer": options.reviewFinalAnswer } : {}),
+			...(options.finalReviewTimeoutMs !== undefined
+				? { "advisor.finalReviewTimeoutMs": options.finalReviewTimeoutMs }
+				: {}),
+		});
 		settings.setModelRole("advisor", "anthropic/claude-sonnet-4-5");
 		const authStorage = await AuthStorage.create(":memory:");
 		authStorages.push(authStorage);
@@ -211,7 +231,7 @@ describe("AgentSession advisor auto-resume suppression", () => {
 			sessionManager,
 			settings,
 			modelRegistry,
-			advisorTools: [],
+			advisorTools: options.advisorTools ?? [],
 			advisorStreamFn: advisorMock.stream,
 			extensionRunner: extensionRunner as never,
 		});
@@ -820,5 +840,279 @@ describe("AgentSession advisor auto-resume suppression", () => {
 		expect(userMessageText([...session.agent.peekFollowUpQueue()])).toContain("then add the test");
 		expect(userMessageText(session.agent.state.messages)).not.toContain("then add the test");
 		expect(mock.calls.length).toBe(2);
+	});
+
+	it("withholds rejected candidate text from session events and applies one same-request correction", async () => {
+		const { session, mock, advisorMock } = await createCompletedAdvisorSession("concern", undefined, {
+			reviewFinalAnswer: true,
+		});
+		const events: AgentSessionEvent[] = [];
+		session.subscribe(event => events.push(event));
+
+		expect(session.setAdvisorEnabled(true)).toBe(true);
+		await session.prompt("answer with exactly one line");
+		await session.waitForIdle();
+
+		// Candidate text was withheld and discarded from subscriber events; only corrected text visible.
+		const assistantEvents = events.filter(
+			(e): e is Extract<AgentSessionEvent, { type: "message_start" | "message_update" | "message_end" }> =>
+				(e.type === "message_start" || e.type === "message_update" || e.type === "message_end") &&
+				e.message?.role === "assistant",
+		);
+		expect(assistantEvents.length).toBeGreaterThan(0);
+		for (const event of assistantEvents) {
+			const serialized = JSON.stringify(event);
+			expect(serialized).not.toContain("EXACT VERDICT");
+		}
+		const finalAssistantEnd = assistantEvents.filter(e => e.type === "message_end").at(-1);
+		expect(finalAssistantEnd).toBeDefined();
+		expect(JSON.stringify(finalAssistantEnd)).toContain("CHANGED VERDICT");
+
+		// Exactly two primary calls in the same request, one Advisor review call.
+		expect(mock.calls).toHaveLength(2);
+		expect(advisorMock.calls).toHaveLength(1);
+
+		// Correctly attributed custom advisor card, and no fake user messages injected.
+		const advisorCards = session.agent.state.messages.filter(isAdvisorCard);
+		expect(advisorCards).toHaveLength(1);
+		expect(advisorCards[0].attribution).toBe("agent");
+		expect(advisorCards[0].role).toBe("custom");
+		expect(advisorCards[0].customType).toBe(ADVISOR_TYPE);
+		expect(advisorCards[0].content).toContain("Fixture verdict confirmed");
+
+		const userMessages = session.agent.state.messages.filter(m => m.role === "user");
+		expect(userMessages).toHaveLength(1);
+		expect(userMessageText(session.agent.state.messages)).toEqual(["answer with exactly one line"]);
+	});
+
+	it("reviews next unrelated prompt normally after candidate correction without leaking or cascading", async () => {
+		const { session, mock, advisorMock } = await createCompletedAdvisorSession("concern", undefined, {
+			reviewFinalAnswer: true,
+			primaryResponses: [
+				{ content: ["EXACT VERDICT"], stopReason: "stop" },
+				{ content: ["CHANGED VERDICT"], stopReason: "stop" },
+				{ content: ["UNRELATED ANSWER"], stopReason: "stop" },
+			],
+		});
+
+		expect(session.setAdvisorEnabled(true)).toBe(true);
+		await session.prompt("first task prompt");
+		await session.waitForIdle();
+
+		expect(mock.calls).toHaveLength(2);
+		expect(advisorMock.calls).toHaveLength(1);
+		expect(session.agent.state.messages.filter(isAdvisorCard)).toHaveLength(1);
+
+		// Next unrelated prompt: reviewed normally by advisor, silent second review.
+		await session.prompt("second unrelated prompt");
+		await session.waitForIdle();
+
+		// Exactly one extra primary call (not a correction leak or loop).
+		expect(mock.calls).toHaveLength(3);
+		// Second advisor review ran.
+		expect(advisorMock.calls).toHaveLength(2);
+		// No extra advisor card or cascaded correction.
+		expect(session.agent.state.messages.filter(isAdvisorCard)).toHaveLength(1);
+		const assistantMessages = session.agent.state.messages.filter(m => m.role === "assistant");
+		const lastAssistant = assistantMessages.at(-1);
+		expect(JSON.stringify(lastAssistant)).toContain("UNRELATED ANSWER");
+	});
+
+	it("retains all captured notes when advisor emits mixed nit and concern in same tool batch", async () => {
+		const { session, mock, advisorMock } = await createCompletedAdvisorSession("concern", undefined, {
+			reviewFinalAnswer: true,
+			primaryResponses: [
+				{ content: ["INITIAL DRAFT"], stopReason: "stop" },
+				{ content: ["CORRECTED DRAFT"], stopReason: "stop" },
+			],
+			advisorResponses: [
+				{
+					content: [
+						{
+							type: "toolCall",
+							name: "advise",
+							arguments: { note: "minor stylistic suggestion", severity: "nit" },
+						},
+						{
+							type: "toolCall",
+							name: "advise",
+							arguments: { note: "critical flaw in logic", severity: "concern" },
+						},
+					],
+				},
+			],
+		});
+
+		expect(session.setAdvisorEnabled(true)).toBe(true);
+		await session.prompt("draft code");
+		await session.waitForIdle();
+
+		expect(mock.calls).toHaveLength(2);
+		expect(advisorMock.calls).toHaveLength(1);
+
+		const advisorCards = session.agent.state.messages.filter(isAdvisorCard);
+		expect(advisorCards).toHaveLength(1);
+		const card = advisorCards[0];
+		expect(card.attribution).toBe("agent");
+
+		// All captured notes (both nit and concern) are retained in the details and content.
+		const details = card.details as { notes?: Array<{ note: string; severity?: string }> } | undefined;
+		expect(details?.notes).toBeDefined();
+		expect(details!.notes).toHaveLength(2);
+		expect(details!.notes!.some(n => n.note.includes("minor stylistic suggestion") && n.severity === "nit")).toBe(
+			true,
+		);
+		expect(details!.notes!.some(n => n.note.includes("critical flaw in logic") && n.severity === "concern")).toBe(
+			true,
+		);
+		expect(card.content).toContain("minor stylistic suggestion");
+		expect(card.content).toContain("critical flaw in logic");
+	});
+
+	it("discards late blocker emitted after final review timeout without altering next prompt", async () => {
+		const delayFinished = Promise.withResolvers<void>();
+		let reviewAttempts = 0;
+		const { session, mock } = await createCompletedAdvisorSession("blocker", undefined, {
+			reviewFinalAnswer: true,
+			finalReviewTimeoutMs: 25,
+			primaryResponses: [
+				{ content: ["FIRST TIMEOUT ANSWER"], stopReason: "stop" },
+				{ content: ["SECOND ANSWER"], stopReason: "stop" },
+			],
+			advisorResponses: [
+				async () => {
+					reviewAttempts++;
+					// Delay beyond the 25ms timeout window
+					await delayFinished.promise;
+					return {
+						content: [
+							{
+								type: "toolCall",
+								name: "advise",
+								arguments: { note: "late blocker after timeout", severity: "blocker" },
+							},
+						],
+					};
+				},
+			],
+		});
+
+		expect(session.setAdvisorEnabled(true)).toBe(true);
+		const firstPrompt = session.prompt("first prompt with slow advisor");
+
+		// Let review window time out; first answer is released without block
+		await session.waitForIdle();
+		await firstPrompt;
+
+		expect(mock.calls).toHaveLength(1);
+		// Released answer has first candidate text
+		const firstAssistant = session.agent.state.messages.filter(m => m.role === "assistant").at(-1);
+		expect(JSON.stringify(firstAssistant)).toContain("FIRST TIMEOUT ANSWER");
+
+		// Advisor finishes late and emits blocker to a closed window
+		delayFinished.resolve();
+		await session.waitForAdvisorCatchup(1000);
+		expect(reviewAttempts).toBe(1);
+
+		// Late blocker was discarded because the final review window was closed
+		expect(session.agent.state.messages.filter(isAdvisorCard)).toHaveLength(0);
+
+		// Next unrelated prompt runs cleanly without extra calls or alterations from late blocker
+		await session.prompt("second unrelated prompt");
+		await session.waitForIdle();
+
+		expect(mock.calls).toHaveLength(2);
+		expect(session.agent.state.messages.filter(isAdvisorCard)).toHaveLength(0);
+	});
+
+	it("approves empty or silent advisor review with single primary call and correct cadence", async () => {
+		const { session, mock, advisorMock } = await createCompletedAdvisorSession("concern", undefined, {
+			reviewFinalAnswer: true,
+			advisorResponses: [{ content: [], stopReason: "stop" }],
+		});
+		const events: AgentSessionEvent[] = [];
+		session.subscribe(event => events.push(event));
+
+		expect(session.setAdvisorEnabled(true)).toBe(true);
+		await session.prompt("straightforward prompt");
+		await session.waitForIdle();
+
+		// Single primary call, one silent review call
+		expect(mock.calls).toHaveLength(1);
+		expect(advisorMock.calls).toHaveLength(1);
+
+		// Approved candidate text is emitted in subscriber events
+		const assistantEvents = events.filter(
+			(e): e is Extract<AgentSessionEvent, { type: "message_start" | "message_end" }> =>
+				(e.type === "message_start" || e.type === "message_end") && e.message?.role === "assistant",
+		);
+		expect(assistantEvents.length).toBeGreaterThan(0);
+		expect(JSON.stringify(assistantEvents)).toContain("EXACT VERDICT");
+
+		// No advisor card in transcript
+		expect(session.agent.state.messages.filter(isAdvisorCard)).toEqual([]);
+		expect(await session.waitForAdvisorCatchup(1000)).toBe(true);
+		expect(advisorMock.calls).toHaveLength(1);
+	});
+	it("uses same-request deferred concerns before releasing the terminal answer", async () => {
+		const fixtureTool: AgentTool = {
+			name: "read_fixture",
+			label: "Read fixture",
+			description: "Read a test fixture",
+			parameters: type({}),
+			execute: async () => ({ content: [{ type: "text", text: "fixture result" }] }),
+		};
+		const { session, mock, advisorMock } = await createCompletedAdvisorSession("concern", undefined, {
+			reviewFinalAnswer: true,
+			syncBacklog: "1",
+			primaryTools: [fixtureTool],
+			primaryResponses: [
+				{ content: [{ type: "toolCall", name: "read_fixture", arguments: {} }] },
+				{ content: ["UNCORRECTED DRAFT"] },
+				{ content: ["COMPLETE CORRECTED ANSWER"] },
+			],
+		});
+		const visibleAnswers: string[] = [];
+		session.subscribe(event => {
+			if (event.type === "message_end" && event.message.role === "assistant") {
+				for (const part of event.message.content) if (part.type === "text") visibleAnswers.push(part.text);
+			}
+		});
+		expect(session.setAdvisorEnabled(true)).toBe(true);
+		await session.prompt("Read the fixture and report the result");
+		await session.waitForIdle();
+		expect(mock.calls).toHaveLength(3);
+		expect(advisorMock.calls).toHaveLength(2);
+		expect(visibleAnswers).toEqual(["COMPLETE CORRECTED ANSWER"]);
+		const cards = session.agent.state.messages.filter(isAdvisorCard);
+		expect(cards).toHaveLength(1);
+		expect(cards[0].content).toContain("Fixture verdict confirmed");
+	});
+
+	it("shows an approved answer before its nonblocking advisor card", async () => {
+		const { session } = await createCompletedAdvisorSession("concern", undefined, {
+			reviewFinalAnswer: true,
+			advisorResponses: [
+				{
+					content: [
+						{
+							type: "toolCall",
+							name: "advise",
+							arguments: { note: "A nonblocking observation", severity: "nit" },
+						},
+					],
+				},
+			],
+		});
+		const delivered: string[] = [];
+		session.subscribe(event => {
+			if (event.type !== "message_end") return;
+			if (event.message.role === "assistant") delivered.push("answer");
+			else if (isAdvisorCard(event.message)) delivered.push("advisor");
+		});
+		expect(session.setAdvisorEnabled(true)).toBe(true);
+		await session.prompt("Give one final answer");
+		await session.waitForIdle();
+		expect(delivered).toEqual(["answer", "advisor"]);
 	});
 });

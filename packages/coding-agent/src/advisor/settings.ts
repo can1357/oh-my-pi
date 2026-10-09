@@ -139,3 +139,33 @@ export const cfgAdvisorEvictStaleResults = register({
 		condition: "advisorEnabled",
 	},
 });
+
+export const cfgAdvisorReviewFinalAnswer = register({
+	id: "advisor.reviewFinalAnswer",
+	protocolDefault: ["rpc", "acp"],
+	type: "boolean",
+	default: false,
+	ui: {
+		tab: "model",
+		group: "Advisor",
+		label: "Advisor Review Final Answer",
+		description:
+			"Hold candidate final text answers until the advisor reviews them. Concerns and blockers trigger one same-response correction before the answer is shown.",
+		condition: "advisorEnabled",
+	},
+});
+
+export const cfgAdvisorFinalReviewTimeoutMs = register({
+	id: "advisor.finalReviewTimeoutMs",
+	protocolDefault: ["rpc", "acp"],
+	type: "number",
+	default: 5000,
+	ui: {
+		tab: "model",
+		group: "Advisor",
+		label: "Advisor Final Review Timeout (ms)",
+		description:
+			"Maximum duration in milliseconds to wait for advisor review on candidate final answers before releasing the answer.",
+		condition: "advisorEnabled",
+	},
+});

@@ -2198,6 +2198,11 @@ export class AgentSession implements SettingsScope {
 			streamFn: config.advisorStreamFn,
 			transformProviderContext: config.transformProviderContext,
 		});
+		this.agent.setReviewFinalAnswer(
+			(context, signal) => this.#advisors.reviewFinalAnswer(context, signal),
+			30_000,
+			() => this.#advisors.shouldReviewFinalAnswer(),
+		);
 
 		const maintenanceHost: SessionMaintenanceHost = {
 			agent: this.agent,
