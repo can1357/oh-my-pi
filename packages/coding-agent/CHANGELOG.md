@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Expanded edit approval previews now reveal the complete settled diff while live previews remain bounded ([#11638](https://github.com/can1357/oh-my-pi/issues/11638), [#13060](https://github.com/can1357/oh-my-pi/pull/13060) by [@kvnloo](https://github.com/kvnloo)).
+
 ### Changed
 
 - Web search now tells the agent about its X post operators (`site:x.com`, `from:<handle>`) when you are logged in to xAI, so questions about reactions on X reach X search.
