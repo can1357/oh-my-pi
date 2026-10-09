@@ -5,6 +5,7 @@
 ### Added
 
 - Added routing-session cleanup for OpenAI Responses and Codex while preserving shared provider fallbacks ([#14334](https://github.com/can1357/oh-my-pi/pull/14334) by [@iliaal](https://github.com/iliaal)).
+- Added the `TypeSafeJudge` `judgment` option (`route`, `typeField`, `typeMap`, `valueMap`, `usageMap`) so `typesafe`-family models can answer System One judgments on compatible third-party endpoints such as the Vercel AI Gateway's `/v1/evaluate` ([#13519](https://github.com/can1357/oh-my-pi/pull/13519) by [@szavadsky](https://github.com/szavadsky)).
 
 ### Fixed
 

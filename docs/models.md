@@ -162,6 +162,88 @@ A configured `kind`, explicit or implied by a runner API, outranks the bundled c
 
 Loading models.yml checks a `modelOverrides` `kind` only against an api the file names: the override's own `api`, or that of a `models` entry with the same id. A built-in or discovered model gets its api later, so its override `kind` is checked against that api when the override applies; a kind the api does not serve is ignored and logged. An `api` override without `kind` takes a runner API's kind, keeps a kind the new api still serves, and otherwise makes the model `chat`. A `models` entry that redefines a built-in id on a different api follows the same rule, so redefining an image row on `openai-completions` makes it `chat`.
 
+### Judgment endpoint overrides
+
+`judgment` (provider level, per model, or `modelOverrides`) retargets a
+`typesafe`-family model at a System One–compatible endpoint without a new
+`api` value. Provider-level settings are the baseline; per-model keys
+override them (`typeMap`, `valueMap`, and `usageMap` merge key-wise).
+Supported keys:
+
+- `route` — path appended to `baseUrl` (must start with `/`), e.g. `/v1/evaluate`.
+- `typeField` — answer discriminator field name (default `type`).
+- `typeMap` — canonical question type → wire type (canonical vocab:
+  `noul` | `choice` | `score`), e.g. `{noul: boolean}`. Requests send
+  the wire type; answers map the discriminator back before validation.
+- `valueMap` — canonical answer value key → wire value key, e.g.
+  `{noul: probability}`. Applied explicitly only: when the canonical key is
+  absent and the configured wire key is present, its value is copied over.
+- `usageMap` — renames usage fields: `input` (default `input_tokens`),
+  `output` (default `output_tokens`), `cost` (default `cost`). Missing
+  counts read as 0; a missing cost stays unset so ChainJudge reprices from the
+  catalog. Endpoints that report cost outside the usage object (e.g. Vercel's
+  `providerMetadata.gateway.*`) are out of scope — cost then reprices from
+  the catalog as usual.
+
+Vercel AI Gateway worked example (boolean judgments on `/v1/evaluate`).
+Discovery maps the gateway's `type: "evaluation"` rows (e.g.
+`vercel-ai-gateway/typesafe-ai/jev`) to `api: typesafe` judge models with
+the `/v1/evaluate` judgment defaults baked in, so the discovered id works
+with no config:
+
+```yaml
+providers:
+  vercel-ai-gateway:
+    apiKey: VERCEL_API_KEY
+```
+
+The model posts to `https://ai-gateway.vercel.sh/v1/evaluate` with `boolean` question types;
+`{type: boolean, probability: 0.9}` answers normalize to
+`{type: noul, noul: 0.9}`, and camelCase usage is read from `inputTokens` /
+`outputTokens`. To override the baked defaults (e.g. a custom judgment
+route), set `judgment` on a `modelOverrides` entry:
+
+```yaml
+providers:
+  vercel-ai-gateway:
+    apiKey: VERCEL_API_KEY
+    modelOverrides:
+      typesafe-ai/jev:
+        judgment:
+          route: /v1/evaluate
+          typeMap:
+            noul: boolean
+          valueMap:
+            noul: probability
+          usageMap:
+            input: inputTokens
+            output: outputTokens
+```
+
+A Bifrost-style endpoint that renames the discriminator
+
+Ollama System One example (local daemon — the default `typesafe` route
+posts to `{baseUrl}/v1/systemone`, so no `judgment` override is needed):
+
+```yaml
+providers:
+  ollama-systemone:
+    baseUrl: http://localhost:11434 # no /v1 — the client appends it
+    api: typesafe
+    auth: none
+    models:
+      - id: nimble/tev1
+        name: Tev via Ollama
+```
+
+The built-in `ollama` provider stays chat-only (its discovery maps every
+row to chat). Assign the custom id to the judge role in `config.yml`:
+
+```yaml
+modelRoles:
+  judge: ollama-systemone/nimble/tev1
+```
+
 ### Allowed auth/discovery values
 
 - `auth`: `apiKey` (default), `none`, or `oauth`. `none` and `oauth` waive the custom-provider `apiKey` requirement, but `oauth` does not create credentials or register a login flow. It forces OAuth-style request shaping; a usable credential must come from stored auth, environment, or a configured key. Custom `anthropic-messages` models also use OAuth-style shaping when `auth` is omitted; set `auth: apiKey` for plain API-key shaping.
@@ -196,6 +278,7 @@ Must define at least one of:
 - non-empty `modelOverrides`
 - `discovery`
 - `remoteCompaction`
+- `judgment`
 
 ### Discovery
 
@@ -205,7 +288,7 @@ Must define at least one of:
 
 ### Remote compaction
 
-`remoteCompaction` is independently sufficient for an override-only provider.
+`remoteCompaction` and `judgment` are each independently sufficient for an override-only provider.
 It supports `enabled`, `api`, `endpoint`, `model`, `v2StreamingEnabled`,
 `v2Endpoint`, and `streamingEndpoint`.
 
@@ -290,12 +373,12 @@ and transcripts record the concrete provider/model that executed the turn.
 
 Provider defaults vs per-model overrides:
 
-- Provider `headers`, `compat`, and `remoteCompaction` are baselines.
+- Provider `headers`, `compat`, `remoteCompaction`, and `judgment` are baselines.
 - Model `headers` override provider header keys.
 - `modelOverrides` can override model metadata (`name`, `api`, `kind`, `reasoning`, `thinking`, `input`,
   `imageInputDecoder`, `tokenizer`, `supportsTools`, `cost`, `promptCache`, `premiumMultiplier`, `contextWindow`,
   `maxContextWindow`, `maxTokens`, `omitMaxOutputTokens`, `preferWebsockets`, `headers`, `compat`,
-  `contextPromotionTarget`, `compactionModel`, and `remoteCompaction`).
+  `contextPromotionTarget`, `compactionModel`, `remoteCompaction`, and `judgment`).
 - `compat` is deep-merged for nested routing blocks (`openRouterRouting`, `vercelGatewayRouting`,
   `extraBody`, and `whenThinking`).
 

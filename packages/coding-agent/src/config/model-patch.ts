@@ -1,4 +1,11 @@
-import type { Api, Model, ModelSpec, RemoteCompactionConfig, ThinkingConfig } from "@oh-my-pi/pi-ai/types";
+import type {
+	Api,
+	JudgmentConfig,
+	Model,
+	ModelSpec,
+	RemoteCompactionConfig,
+	ThinkingConfig,
+} from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { isVertexExpressOpenAIUrl } from "@oh-my-pi/pi-catalog/hosts";
 import { providerEntry } from "@oh-my-pi/pi-catalog/compat/providers";
@@ -21,6 +28,7 @@ export interface ProviderOverride {
 	authHeader?: boolean;
 	compat?: ModelSpec<Api>["compat"];
 	remoteCompaction?: RemoteCompactionConfig<Api>;
+	judgment?: JudgmentConfig;
 	transport?: Model<Api>["transport"];
 	guardrailIdentifier?: Model<Api>["guardrailIdentifier"];
 	guardrailVersion?: Model<Api>["guardrailVersion"];
@@ -85,7 +93,15 @@ export function mergeDiscoveredModel<TApi extends Api>(
 	existing: Model<Api> | undefined,
 	providerOverride?: Pick<
 		ProviderOverride,
-		"baseUrl" | "baseUrlApis" | "compat" | "headers" | "remoteCompaction" | "transport" | "authHeader" | "apiKey"
+		| "baseUrl"
+		| "baseUrlApis"
+		| "compat"
+		| "headers"
+		| "remoteCompaction"
+		| "judgment"
+		| "transport"
+		| "authHeader"
+		| "apiKey"
 	>,
 ): Model<TApi> {
 	if (existing) {
@@ -110,6 +126,10 @@ export function mergeDiscoveredModel<TApi extends Api>(
 				mergeRemoteCompactionConfig(existing.remoteCompaction, model.remoteCompaction),
 				providerOverride?.remoteCompaction,
 			),
+			judgment: mergeProviderJudgmentConfig(
+				mergeJudgmentConfig(existing.judgment, model.judgment),
+				providerOverride?.judgment,
+			),
 			...(supportsTools !== undefined ? { supportsTools } : {}),
 			compat: mergeCompat(model.compatConfig, providerOverride?.compat),
 		} as ModelSpec<TApi>);
@@ -129,6 +149,7 @@ export function mergeDiscoveredModel<TApi extends Api>(
 				model.remoteCompaction,
 				providerOverride.remoteCompaction,
 			),
+			judgment: mergeProviderJudgmentConfig(model.judgment, providerOverride.judgment),
 			compat: mergeCompat(model.compatConfig, providerOverride.compat),
 		} as ModelSpec<TApi>);
 		return Bun.deepEquals(merged, model) ? model : merged;
@@ -232,6 +253,34 @@ export function mergeProviderRemoteCompactionConfig(
 }
 
 /**
+ * Merge per-model judgment overrides over a provider baseline (or base model
+ * value). `undefined` + `undefined` is `undefined`; otherwise a shallow
+ * spread with key-wise merges of `typeMap`, `valueMap`, and `usageMap` so a per-model
+ * `route` does not discard provider `typeMap` entries. Per-model wins.
+ */
+export function mergeJudgmentConfig(
+	base: JudgmentConfig | undefined,
+	override: JudgmentConfig | undefined,
+): JudgmentConfig | undefined {
+	if (!base) return override;
+	if (!override) return base;
+	return {
+		...base,
+		...override,
+		...(base.typeMap || override.typeMap ? { typeMap: { ...base.typeMap, ...override.typeMap } } : {}),
+		...(base.valueMap || override.valueMap ? { valueMap: { ...base.valueMap, ...override.valueMap } } : {}),
+		...(base.usageMap || override.usageMap ? { usageMap: { ...base.usageMap, ...override.usageMap } } : {}),
+	};
+}
+
+export function mergeProviderJudgmentConfig(
+	modelConfig: JudgmentConfig | undefined,
+	providerConfig: JudgmentConfig | undefined,
+): JudgmentConfig | undefined {
+	return mergeJudgmentConfig(providerConfig, modelConfig);
+}
+
+/**
  * The patchable subset of `Model` fields shared by `modelOverrides` entries,
  * custom model definitions, and parsed custom-model overlays. `undefined`
  * always means "leave the base value alone".
@@ -261,6 +310,7 @@ export interface ModelPatch {
 	contextPromotionTarget?: string;
 	compactionModel?: string;
 	remoteCompaction?: RemoteCompactionConfig<Api>;
+	judgment?: JudgmentConfig;
 	premiumMultiplier?: number;
 }
 
@@ -298,6 +348,9 @@ export function applyModelPatch(base: Model<Api>, patch: ModelPatch, transport: 
 	if (patch.compactionModel !== undefined) result.compactionModel = patch.compactionModel;
 	if (patch.remoteCompaction !== undefined) {
 		result.remoteCompaction = mergeRemoteCompactionConfig(base.remoteCompaction, patch.remoteCompaction);
+	}
+	if (patch.judgment !== undefined) {
+		result.judgment = mergeJudgmentConfig(base.judgment, patch.judgment);
 	}
 	if (patch.premiumMultiplier !== undefined) result.premiumMultiplier = patch.premiumMultiplier;
 	if (patch.cost) {

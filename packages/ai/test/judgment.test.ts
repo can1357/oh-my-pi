@@ -339,6 +339,66 @@ describe("TypeSafeJudge", () => {
 		expect(keys).toEqual(["Bearer stale", "Bearer fresh", "Bearer fresh"]);
 	});
 
+	it("posts to a custom route with mapped types and camelCase usage", async () => {
+		const calls: { url: string; init: RequestInit | undefined }[] = [];
+		const judge = new TypeSafeJudge({
+			apiKey: "v-key",
+			baseUrl: "https://gateway.example",
+			model: "eval-model",
+			judgment: {
+				route: "/v1/evaluate",
+				typeMap: { noul: "boolean" },
+				valueMap: { noul: "probability" },
+				usageMap: { input: "inputTokens", output: "outputTokens" },
+			},
+			fetch: async (url, init) => {
+				calls.push({ url: String(url), init });
+				return Response.json({
+					model: "eval-model",
+					answers: { urgent: { type: "boolean", probability: 0.9 } },
+					usage: { inputTokens: 12, outputTokens: 3 },
+				});
+			},
+		});
+
+		const result = await judge.judge(request);
+
+		expect(calls).toHaveLength(1);
+		expect(calls[0].url).toBe("https://gateway.example/v1/evaluate");
+		const sent = JSON.parse(String(calls[0].init?.body));
+		expect(sent.questions.urgent.type).toBe("boolean");
+		expect(result.answers.urgent).toMatchObject({ type: "noul", noul: 0.9 });
+		expect(result.usage.input).toBe(12);
+		expect(result.usage.output).toBe(3);
+		expect(result.usage.totalTokens).toBe(15);
+		expect(result.usage.cost.total).toBe(0);
+	});
+
+	it("reads the discriminator from a custom typeField", async () => {
+		const judge = new TypeSafeJudge({
+			apiKey: "b-key",
+			baseUrl: "https://bifrost.example",
+			model: "judge-model",
+			judgment: {
+				typeField: "kind",
+				valueMap: { noul: "value" },
+				usageMap: { input: "prompt_tokens", output: "completion_tokens" },
+			},
+			fetch: async () =>
+				Response.json({
+					model: "judge-model",
+					answers: { urgent: { kind: "noul", value: 0.7 } },
+					usage: { prompt_tokens: 8, completion_tokens: 2 },
+				}),
+		});
+
+		const result = await judge.judge(request);
+
+		expect(result.answers.urgent).toMatchObject({ type: "noul", noul: 0.7 });
+		expect(result.usage.input).toBe(8);
+		expect(result.usage.totalTokens).toBe(10);
+	});
+
 	it("surfaces validation errors without retrying and rejects answers of the wrong type", async () => {
 		let calls = 0;
 		const rejecting = new TypeSafeJudge({
