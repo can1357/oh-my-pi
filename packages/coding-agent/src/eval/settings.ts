@@ -72,7 +72,7 @@ export const cfgEvalAutoBackgroundEnabled = register({
 	id: "eval.autoBackground.enabled",
 	protocolDefault: ["rpc"],
 	type: "boolean",
-	default: false,
+	default: true,
 	ui: {
 		tab: "shell",
 		group: "Eval & Runtimes",

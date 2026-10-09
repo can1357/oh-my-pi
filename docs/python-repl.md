@@ -173,7 +173,7 @@ The pause/resume events are the sole mechanism that suspends the budget; `%pip` 
 
 ### Auto-backgrounding
 
-`eval.autoBackground.enabled` (default `false`) allows a cell to become a managed eval job after `eval.autoBackground.thresholdMs` (default 60,000 ms), or earlier when a steering message arrives. A cell that finishes within the foreground wait returns normally. At job-manager capacity, execution stays foreground. Backgrounding does not extend or disable the cell watchdog.
+`eval.autoBackground.enabled` (default `true`) allows a cell to become a managed eval job after `eval.autoBackground.thresholdMs` (default 60,000 ms), or earlier when a steering message arrives. Set it to `false` to keep cells in the foreground. A cell that finishes within the foreground wait returns normally. At job-manager capacity, execution stays foreground. Backgrounding does not extend or disable the cell watchdog.
 
 ### Kernel execution cancellation
 

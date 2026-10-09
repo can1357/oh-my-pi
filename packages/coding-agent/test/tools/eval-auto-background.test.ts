@@ -2,8 +2,10 @@ import { afterEach, describe, expect, it, vi } from "bun:test";
 import type { AgentToolContext } from "@oh-my-pi/pi-agent-core";
 import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import type { ExecutorBackendExecOptions, ExecutorBackendResult } from "@oh-my-pi/pi-coding-agent/eval";
 import * as evalIndex from "@oh-my-pi/pi-coding-agent/eval";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { buildAsyncResultBatchMessage } from "@oh-my-pi/pi-coding-agent/session/async-job-delivery";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { EvalTool } from "@oh-my-pi/pi-coding-agent/tools/eval";
 
@@ -18,7 +20,7 @@ function makeSession(settings: Settings, asyncJobManager: AsyncJobManager): Tool
 	};
 }
 
-function baseResult(overrides: Record<string, unknown> = {}) {
+function baseResult(overrides: Partial<ExecutorBackendResult> = {}): ExecutorBackendResult {
 	return {
 		output: "",
 		exitCode: 0,
@@ -29,7 +31,7 @@ function baseResult(overrides: Record<string, unknown> = {}) {
 		totalBytes: 0,
 		outputLines: 0,
 		outputBytes: 0,
-		displayOutputs: [] as unknown[],
+		displayOutputs: [],
 		...overrides,
 	};
 }
@@ -41,14 +43,13 @@ function baseResult(overrides: Record<string, unknown> = {}) {
  */
 function mockGatedCell(finalOutput: string): { release: () => void } {
 	const gate = Promise.withResolvers<void>();
-	vi.spyOn(evalIndex.jsBackend, "execute").mockImplementation((async (
-		_code: string,
-		options: { onChunk?: (chunk: string) => void },
-	) => {
-		options.onChunk?.("start\n");
-		await gate.promise;
-		return baseResult({ output: finalOutput });
-	}) as never);
+	vi.spyOn(evalIndex.jsBackend, "execute").mockImplementation(
+		async (_code: string, options: ExecutorBackendExecOptions): Promise<ExecutorBackendResult> => {
+			options.onChunk("start\n");
+			await gate.promise;
+			return baseResult({ output: finalOutput });
+		},
+	);
 	return { release: gate.resolve };
 }
 
@@ -94,8 +95,9 @@ describe("EvalTool auto-background", () => {
 				deliveries.push(text);
 			},
 		});
-		vi.spyOn(evalIndex.jsBackend, "execute").mockImplementation((async () =>
-			baseResult({ output: "quick\n" })) as never);
+		vi.spyOn(evalIndex.jsBackend, "execute").mockImplementation(async (): Promise<ExecutorBackendResult> =>
+			baseResult({ output: "quick\n" }),
+		);
 
 		const tool = new EvalTool(
 			makeSession(
@@ -175,6 +177,103 @@ describe("EvalTool auto-background", () => {
 		expect(deliveries[0]?.text).toContain("done");
 		// Tool-call updates stop once the cell is backgrounded.
 		expect(updates).toEqual(updatesAtBackground);
+		await asyncJobManager.dispose();
+	});
+
+	it("delivers displayed images after a cell backgrounds", async () => {
+		const asyncJobManager = new AsyncJobManager({});
+		const gate = Promise.withResolvers<void>();
+		const data = Buffer.from([0, 1, 2, 3]).toString("base64");
+		vi.spyOn(evalIndex.jsBackend, "execute").mockImplementation(async () => {
+			await gate.promise;
+			return baseResult({ displayOutputs: [{ type: "image", data, mimeType: "image/png" }] });
+		});
+		const tool = new EvalTool(
+			makeSession(
+				Settings.isolated({ "eval.autoBackground.enabled": true, "eval.autoBackground.thresholdMs": 10 }),
+				asyncJobManager,
+			),
+		);
+		const result = await tool.execute("call-image-background", { language: "js", code: "display(image)" });
+		const jobId = result.details?.async?.jobId;
+		if (!jobId) throw new Error("expected a backgrounded eval job");
+		gate.resolve();
+		await asyncJobManager.getJob(jobId)?.promise;
+		const delivery = buildAsyncResultBatchMessage([
+			{ jobId, result: "completed", job: asyncJobManager.getJob(jobId), durationMs: 1, epoch: 0 },
+		]);
+		expect(delivery?.content).toContainEqual({ type: "image", data, mimeType: "image/png" });
+		await asyncJobManager.dispose();
+	});
+
+	it("backgrounds long-running Python cells by default and delivers their result", async () => {
+		const deliveries: Array<{ jobId: string; text: string }> = [];
+		const asyncJobManager = new AsyncJobManager({
+			onJobComplete: async (jobId, text) => {
+				deliveries.push({ jobId, text });
+			},
+		});
+		const gate = Promise.withResolvers<void>();
+		let executionSignal: AbortSignal | undefined;
+		vi.spyOn(evalIndex.pythonBackend, "isAvailable").mockResolvedValue(true);
+		const pythonExecuteSpy = vi
+			.spyOn(evalIndex.pythonBackend, "execute")
+			.mockImplementation(
+				async (_code: string, options: ExecutorBackendExecOptions): Promise<ExecutorBackendResult> => {
+					executionSignal = options.signal;
+					options.onChunk("python start\n");
+					await gate.promise;
+					return baseResult({ output: "python start\npython done\n" });
+				},
+			);
+		const jsExecuteSpy = vi.spyOn(evalIndex.jsBackend, "execute");
+
+		const tool = new EvalTool(
+			makeSession(
+				Settings.isolated({
+					// Omit eval.autoBackground.enabled: this is the default-behavior contract.
+					"eval.autoBackground.thresholdMs": 10,
+				}),
+				asyncJobManager,
+			),
+		);
+		const result = await tool.execute("call-python-background", {
+			language: "py",
+			code: "print('python start'); work(); print('python done')",
+		});
+
+		expect(pythonExecuteSpy).toHaveBeenCalledTimes(1);
+		expect(jsExecuteSpy).not.toHaveBeenCalled();
+		expect(executionSignal).toBeInstanceOf(AbortSignal);
+		expect(result.details?.cells?.[0]?.language).toBe("python");
+		expect(result.details?.async?.state).toBe("running");
+		const jobId = result.details?.async?.jobId;
+		if (!jobId) {
+			throw new Error("expected an auto-backgrounded Python job id");
+		}
+		const runningJob = asyncJobManager.getJob(jobId);
+		expect(runningJob?.status).toBe("running");
+		gate.resolve();
+		await runningJob?.promise;
+		await asyncJobManager.drainDeliveries({ timeoutMs: 1 });
+		expect(deliveries).toEqual([{ jobId, text: expect.stringContaining("python done") }]);
+		await asyncJobManager.dispose();
+	});
+
+	it("keeps a short-timeout cell inline when it finishes before the threshold", async () => {
+		const asyncJobManager = new AsyncJobManager({});
+		const cell = mockGatedCell("done\n");
+		const tool = new EvalTool(
+			makeSession(Settings.isolated({ "eval.autoBackground.thresholdMs": 60_000 }), asyncJobManager),
+		);
+
+		const pending = tool.execute("call-short", { language: "js", code: "await work()", timeout: 1 });
+		cell.release();
+		const result = await pending;
+
+		expect(result.details?.async).toBeUndefined();
+		expect(result.details?.cells?.[0]?.status).toBe("complete");
+		expect(asyncJobManager.getAllJobs()).toEqual([]);
 		await asyncJobManager.dispose();
 	});
 
