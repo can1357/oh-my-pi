@@ -1851,6 +1851,10 @@ export class ToolExecutionComponent extends Container {
 			}
 		}
 		this.#renderedImageCount = this.#imageComponents.length;
+		// Multi-file boxes, images and figures above are appended on each rebuild; keep the
+		// passive context line after all of them so it never splits the tool's output.
+		this.removeChild(this.#additionalContextText);
+		this.addChild(this.#additionalContextText);
 	}
 
 	/**
