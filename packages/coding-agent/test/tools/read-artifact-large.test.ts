@@ -68,6 +68,14 @@ function streamedMultiRangeArtifact(): string {
 	).join("\n");
 }
 
+/** A 60 KB line followed by small ones: oversized leading context, not content. */
+function oversizedContextArtifact(): string {
+	return [
+		`context-60k ${"y".repeat(60_000)}`,
+		...Array.from({ length: 200 }, (_, index) => `wanted-${String(index + 1).padStart(3, "0")}`),
+	].join("\n");
+}
+
 /** 400 lines of 699 bytes: several budget pages, all addressable from memory. */
 function wideMultiRangeArtifact(): string {
 	return Array.from(
@@ -314,6 +322,21 @@ describe("read tool large artifact handling", () => {
 		);
 		expect(rest).toContain("line-00001");
 		expect(rest).toContain("line-00003");
+	});
+
+	it("skips oversized leading context instead of rendering it", async () => {
+		await Bun.write(path.join(artifactDir, "0.mcp.log"), oversizedContextArtifact());
+
+		const result = await tool.execute("call-oversized-context", { path: "artifact://0:2-142" });
+		const output = getTextOutput(result);
+
+		// Line 1 is context for the requested line 2, not content: with a
+		// fixed per-call budget it can no longer ride along, so the page says
+		// it was skipped and spends the budget on the requested lines.
+		expect(output).toContain("wanted-002");
+		expect(output).toContain("Leading context line 1");
+		expect(output).toContain("was skipped");
+		expect(output).not.toContain("context-60k");
 	});
 
 	it("keeps raw oversized-line reads context-free and byte-capped", async () => {

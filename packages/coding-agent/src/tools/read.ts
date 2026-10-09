@@ -2352,10 +2352,10 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 					const requestedStart = offset ? Math.max(0, offset - 1) : 0;
 					const expandStart = !rawSelector && offset !== undefined && offset > 1;
 					const expandEnd = !rawSelector && limit !== undefined;
-					const leadingContext = expandStart ? Math.min(requestedStart, RANGE_LEADING_CONTEXT_LINES) : 0;
+					let leadingContext = expandStart ? Math.min(requestedStart, RANGE_LEADING_CONTEXT_LINES) : 0;
 					const trailingContext = expandEnd ? RANGE_TRAILING_CONTEXT_LINES : 0;
-					const startLine = requestedStart - leadingContext;
-					const startLineDisplay = startLine + 1;
+					let startLine = requestedStart - leadingContext;
+					let startLineDisplay = startLine + 1;
 
 					const DEFAULT_LIMIT = this.#defaultLimit;
 					const effectiveLimit = limit ?? DEFAULT_LIMIT;
@@ -2370,28 +2370,45 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 						? Math.min(scaledByteBudget, ARTIFACT_TOTAL_READ_BUDGET_BYTES)
 						: scaledByteBudget;
 
-					const lineWindow = buffered
-						? collectLineWindowFromBuffer(
-								buffered,
-								startLine,
-								maxLinesToCollect,
-								maxBytesForRead,
-								selectedLineLimit,
-								rawSelector,
-							)
-						: await streamLinesFromFile(
-								absolutePath,
-								startLine,
-								maxLinesToCollect,
-								maxBytesForRead,
-								selectedLineLimit,
-								undefined, // plain-file read: deterministic and fast, never abort mid-read
-								{
-									includeTerminalNewline: rawSelector,
-									stopScanAfterCollect: fileSize > SNAPSHOT_MAX_BYTES,
-									seek: tailSeekTo?.(startLine),
-								},
-							);
+					const collectWindow = (fromLine: number) =>
+						buffered
+							? collectLineWindowFromBuffer(
+									buffered,
+									fromLine,
+									maxLinesToCollect,
+									maxBytesForRead,
+									selectedLineLimit,
+									rawSelector,
+								)
+							: streamLinesFromFile(
+									absolutePath,
+									fromLine,
+									maxLinesToCollect,
+									maxBytesForRead,
+									selectedLineLimit,
+									undefined, // plain-file read: deterministic and fast, never abort mid-read
+									{
+										includeTerminalNewline: rawSelector,
+										stopScanAfterCollect: fileSize > SNAPSHOT_MAX_BYTES,
+										seek: tailSeekTo?.(fromLine),
+									},
+								);
+					let lineWindow = await collectWindow(startLine);
+					let skippedContextNotice: string | undefined;
+					if (
+						startLine < requestedStart &&
+						lineWindow.firstLineByteLength !== undefined &&
+						lineWindow.firstLineByteLength > maxBytesForRead
+					) {
+						// The over-budget line is leading context, not requested
+						// content: drop it and spend the budget on the requested
+						// start instead of rendering a context preview.
+						skippedContextNotice = `[Leading context line ${startLineDisplay} is ${formatBytes(lineWindow.firstLineByteLength)}, exceeds the ${formatBytes(maxBytesForRead)} read budget and was skipped.]`;
+						leadingContext = 0;
+						startLine = requestedStart;
+						startLineDisplay = requestedStart + 1;
+						lineWindow = await collectWindow(startLine);
+					}
 
 					const {
 						lines: collectedLines,
@@ -2721,7 +2738,12 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 						}
 					}
 
-					content = [{ type: "text", text: outputText }];
+					content = [
+						{
+							type: "text",
+							text: skippedContextNotice ? `${outputText}\n\n${skippedContextNotice}` : outputText,
+						},
+					];
 				}
 			}
 			// A page of artifact storage is re-readable with selectors: spilling it would only
