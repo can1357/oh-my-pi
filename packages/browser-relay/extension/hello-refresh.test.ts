@@ -1,5 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import {
+	applyHelloTabActivation,
 	applyHelloTabChanges,
 	filterHelloTabIds,
 	invalidatesHelloReconciliation,
@@ -48,5 +49,23 @@ describe("hello refresh invalidation", () => {
 
 	it("drops attachment state for tabs removed after the snapshot", () => {
 		expect(filterHelloTabIds([1, 2], [{ tabId: 2 }, { tabId: 3 }])).toEqual([2]);
+	});
+
+	it("overlays tab activation on every tab in the affected window", () => {
+		expect(
+			applyHelloTabActivation(
+				[
+					{ tabId: 1, windowId: 10, active: true },
+					{ tabId: 2, windowId: 10, active: false },
+					{ tabId: 3, windowId: 20, active: true },
+				],
+				10,
+				2,
+			),
+		).toEqual([
+			{ tabId: 1, windowId: 10, active: false },
+			{ tabId: 2, windowId: 10, active: true },
+			{ tabId: 3, windowId: 20, active: true },
+		]);
 	});
 });

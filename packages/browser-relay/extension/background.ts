@@ -61,6 +61,7 @@ import {
 	snapshotAfterPendingOperationsSettle,
 } from "./pending-ops";
 import {
+	applyHelloTabActivation,
 	applyHelloTabChanges,
 	filterHelloTabIds,
 	invalidatesHelloReconciliation,
@@ -817,6 +818,8 @@ let helloRefresh: {
 	structuralDirty: boolean;
 	/** Tab lifecycle events received after this hello started building. */
 	tabChanges: Map<number, TabSnapshot | null>;
+	/** Latest activation per window received after this hello started building. */
+	tabActivations: Map<number, number>;
 	/**
 	 * Reconciliation metadata (URL or group membership) changed after this hello
 	 * snapshotted the tab. Suppress the first stale snapshot in a refresh chain to
@@ -883,6 +886,7 @@ function refreshHello(onSent?: () => void): void {
 			done: Promise<void>;
 			structuralDirty: boolean;
 			tabChanges: Map<number, TabSnapshot | null>;
+			tabActivations: Map<number, number>;
 			reconciliationDirty: boolean;
 			allowStaleReconciliation: boolean;
 			metaDirty: boolean;
@@ -891,6 +895,7 @@ function refreshHello(onSent?: () => void): void {
 			socket,
 			structuralDirty: false,
 			tabChanges: new Map(),
+			tabActivations: new Map(),
 			reconciliationDirty: false,
 			allowStaleReconciliation,
 			metaDirty: false,
@@ -901,6 +906,9 @@ function refreshHello(onSent?: () => void): void {
 			.then(async (hello) => {
 				const applyTabChanges = (): void => {
 					hello.tabs = applyHelloTabChanges(hello.tabs, entry.tabChanges);
+					for (const [windowId, activeTabId] of entry.tabActivations) {
+						hello.tabs = applyHelloTabActivation(hello.tabs, windowId, activeTabId);
+					}
 					hello.attachedTabIds = filterHelloTabIds(
 						hello.attachedTabIds,
 						hello.tabs,
@@ -1043,6 +1051,12 @@ function invalidateHelloRefresh(): void {
 function updateHelloTabSnapshot(tabId: number, tab: TabSnapshot | null): void {
 	if (!helloRefresh) return;
 	helloRefresh.tabChanges.set(tabId, tab);
+	helloRefresh.metaDirty = true;
+}
+
+function updateHelloTabActivation(tabId: number, windowId: number): void {
+	if (!helloRefresh) return;
+	helloRefresh.tabActivations.set(windowId, tabId);
 	helloRefresh.metaDirty = true;
 }
 
@@ -1660,12 +1674,20 @@ chrome.tabs.onUpdated.addListener((_tabId, changeInfo, tab) => {
 	}
 });
 
-chrome.tabs.onActivated.addListener(({ tabId }) => {
+chrome.tabs.onActivated.addListener(({ tabId, windowId }) => {
+	// onActivated is synchronous, while chrome.tabs.get() below is not. Overlay
+	// both the newly active tab and its now-inactive sibling onto any in-flight
+	// hello immediately, so an older chrome.tabs.query() result cannot arrive
+	// after tabUpdated and restore the previous active flags.
+	updateHelloTabActivation(tabId, windowId);
 	void chrome.tabs
 		.get(tabId)
 		.then(tab => {
 			const snap = snapshot(tab);
-			if (snap) post({ t: "tabUpdated", tab: snap });
+			if (snap) {
+				updateHelloTabSnapshot(snap.tabId, snap);
+				post({ t: "tabUpdated", tab: snap });
+			}
 		})
 		.catch(() => {
 			// The tab may have closed before Chrome answered.

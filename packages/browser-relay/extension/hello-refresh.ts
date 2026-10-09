@@ -15,6 +15,19 @@ export function applyHelloTabChanges<T extends { tabId: number }>(
 	return [...current.values()];
 }
 
+/** Overlay Chrome's synchronous activation event on a possibly older tab query. */
+export function applyHelloTabActivation<T extends { tabId: number; windowId: number; active: boolean }>(
+	tabs: readonly T[],
+	windowId: number,
+	activeTabId: number,
+): T[] {
+	return tabs.map(tab => {
+		if (tab.windowId !== windowId) return tab;
+		const active = tab.tabId === activeTabId;
+		return tab.active === active ? tab : { ...tab, active };
+	});
+}
+
 export function filterHelloTabIds(
 	tabIds: readonly number[],
 	tabs: readonly { tabId: number }[],
