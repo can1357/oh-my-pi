@@ -29,6 +29,8 @@ interface ChildStream extends AcpLiveMessageState {
 	state: SubagentWorkState;
 	toolArgsById: Map<string, unknown>;
 	assignmentReported: boolean;
+	/** The child session's own cwd (its worktree for isolated runs), read from its registry ref. */
+	cwd: string | undefined;
 }
 
 const IDLE_STATE_BY_LIFECYCLE: Record<Exclude<SubagentLifecyclePayload["status"], "started">, SubagentWorkState> = {
@@ -127,6 +129,7 @@ export class AcpSubagentStreams {
 			state: { state: "running" },
 			toolArgsById: new Map(),
 			assignmentReported: false,
+			cwd: undefined,
 			liveMessageId: undefined,
 			liveMessageProgress: undefined,
 		};
@@ -141,6 +144,8 @@ export class AcpSubagentStreams {
 	#handleEvent(payload: SubagentEventPayload): void {
 		const child = this.#children.get(payload.id);
 		if (!child) return;
+		// The session is attached to the ref once constructed, before it emits events.
+		child.cwd ??= AgentRegistry.global().get(payload.id)?.session?.sessionManager.getCwd();
 		for (const notification of this.#mapChildEvent(child, payload.event)) this.#deliver(notification);
 	}
 
@@ -172,7 +177,9 @@ export class AcpSubagentStreams {
 			getMessageId: message => getLiveMessageId(child, message),
 			getMessageProgress: message => getLiveMessageProgress(child, message),
 			getToolArgs: toolCallId => child.toolArgsById.get(toolCallId),
-			cwd: this.#session.sessionManager.getCwd(),
+			// Never fall back to the root cwd: an isolated child's relative paths would
+			// then name files in the parent workspace instead of its worktree.
+			cwd: child.cwd,
 			sessionMessages: this,
 		});
 		if (event.type === "tool_execution_end") child.toolArgsById.delete(event.toolCallId);

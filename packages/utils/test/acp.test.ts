@@ -217,6 +217,12 @@ describe("ACP runtime schemas", () => {
 		expect(valid({ sessionUpdate: "subagent_update", sessionId: "child", state: { state: "running" } })).toBe(true);
 		// A session cannot own itself.
 		expect(valid({ sessionUpdate: "subagent_update", sessionId: "parent" })).toBe(false);
+		expect(valid({ sessionUpdate: "subagent_update", sessionId: "child", state: 1 })).toBe(false);
+		expect(valid({ sessionUpdate: "subagent_update", sessionId: "child", title: false })).toBe(false);
+		expect(valid({ sessionUpdate: "subagent_update", sessionId: "child", description: 3 })).toBe(false);
+		// Unknown state values are reserved for future and `_`-prefixed extension states.
+		expect(valid({ sessionUpdate: "subagent_update", sessionId: "child", state: { state: "_paused" } })).toBe(true);
+		expect(valid({ sessionUpdate: "subagent_update", sessionId: "child", state: null, title: null })).toBe(true);
 		expect(
 			valid({
 				sessionUpdate: "session_message",

@@ -116,7 +116,17 @@ function sessionNotification(value: unknown): boolean {
 		case "usage_update":
 			return typeof update.size === "number" && typeof update.used === "number";
 		case "subagent_update":
-			return typeof update.sessionId === "string" && update.sessionId !== notification.sessionId;
+			return (
+				typeof update.sessionId === "string" &&
+				update.sessionId !== notification.sessionId &&
+				(update.title === undefined || update.title === null || typeof update.title === "string") &&
+				(update.description === undefined ||
+					update.description === null ||
+					typeof update.description === "string") &&
+				// Unrecognized state values are reserved for future or `_`-prefixed extension states, so
+				// only the discriminator's type is checked.
+				(update.state === undefined || update.state === null || objectWithString(update.state, "state"))
+			);
 		case "session_message":
 			return (
 				typeof update.messageId === "string" &&

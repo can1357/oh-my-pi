@@ -30,7 +30,11 @@ describe("AcpSubagentStreams", () => {
 
 	/** Resolves once `count` notifications reached the client, each valid on the wire. */
 	async function delivered(count: number): Promise<SessionNotification[]> {
-		while (sent.length < count) await new Promise<void>(resolve => (onSent = resolve));
+		while (sent.length < count) {
+			const next = Promise.withResolvers<void>();
+			onSent = next.resolve;
+			await next.promise;
+		}
 		for (const notification of sent) {
 			const result = zSessionNotification.safeParse(notification);
 			expect(result.success, JSON.stringify(notification)).toBe(true);
@@ -174,6 +178,35 @@ describe("AcpSubagentStreams", () => {
 				},
 			],
 		]);
+	});
+
+	it("resolves a child's file locations against the child's own cwd, never the parent's", async () => {
+		AgentRegistry.global().register({
+			id: "Isolated",
+			displayName: "Isolated",
+			kind: "sub",
+			parentId: ROOT_AGENT_ID,
+			session: { sessionManager: { getCwd: () => "/worktrees/isolated" } } as unknown as AgentSession,
+		});
+		registerAgent("Detached", ROOT_AGENT_ID);
+		for (const id of ["Isolated", "Detached"]) {
+			bus.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, lifecycle(id, "started"));
+			bus.emit(TASK_SUBAGENT_EVENT_CHANNEL, {
+				id,
+				event: {
+					type: "tool_execution_start",
+					toolCallId: `tc-${id}`,
+					toolName: "write",
+					args: { path: "src/a.ts", content: "x" },
+				},
+			});
+		}
+		const locations = (await delivered(4))
+			.map(n => n.update)
+			.flatMap(update => (update.sessionUpdate === "tool_call" ? [update.locations?.map(l => l.path)] : []));
+		expect(locations[0]).toEqual(["/worktrees/isolated/src/a.ts"]);
+		// With no session to read a cwd from, nothing may resolve against the parent workspace.
+		expect(locations[1]?.some(path => path.startsWith("/work/"))).not.toBe(true);
 	});
 });
 
