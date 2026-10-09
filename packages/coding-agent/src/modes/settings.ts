@@ -655,6 +655,18 @@ export const cfgDisplayHideToolActivity = register({
 	},
 });
 
+export const cfgDisplayHideAdvisorNotes = register({
+	id: "display.hideAdvisorNotes",
+	type: "boolean",
+	default: false,
+	ui: {
+		tab: "appearance",
+		group: "Display",
+		label: "Hide Advisor Notes",
+		description: "Hide advisor note cards from the transcript; the agent still receives the notes",
+	},
+});
+
 export const cfgDisplayShowTokenUsage = register({
 	id: "display.showTokenUsage",
 	type: "boolean",
@@ -693,6 +705,7 @@ export const cfgDisplayCacheMissMarker = register({
 effect(
 	combine({
 		hideToolActivity: cfgDisplayHideToolActivity,
+		hideAdvisorNotes: cfgDisplayHideAdvisorNotes,
 		readToolResultPreview: cfgReadToolResultPreview,
 		showImages: cfgTerminalShowImages,
 		cacheMissMarker: cfgDisplayCacheMissMarker,

@@ -340,6 +340,7 @@ import {
 	cfgComposerTokenRate,
 	cfgDisplayCacheMissMarker,
 	cfgDisplayCollapseCompacted,
+	cfgDisplayHideAdvisorNotes,
 	cfgDisplayHideToolActivity,
 	cfgDisplayPinnedAgents,
 	cfgDisplayShowTokenUsage,
@@ -432,6 +433,7 @@ const cfgLiveUiSettings = combine({
 	"compaction.enabled": cfgCompactionEnabled,
 	"compaction.methodOrder": cfgCompactionMethodOrder,
 	"display.hideToolActivity": cfgDisplayHideToolActivity,
+	"display.hideAdvisorNotes": cfgDisplayHideAdvisorNotes,
 	"terminal.showImages": cfgTerminalShowImages,
 	"terminal.programStatus": cfgTerminalProgramStatus,
 	hideThinkingBlock: cfgHideThinkingBlock,
@@ -3485,6 +3487,12 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.chatContainer.setToolActivityVisible(!hideToolActivity);
 			if (hideToolActivity) this.ui.clearInlineImages();
 			// Visibility changes must rebuild retired terminal history.
+			resetDisplay = true;
+		}
+		// Advisor cards read the shared display preference at render time;
+		// rebuild so cards already in the transcript appear or disappear too.
+		if (any("display.hideAdvisorNotes")) {
+			this.chatContainer.invalidate();
 			resetDisplay = true;
 		}
 		if (any("terminal.showImages")) {
