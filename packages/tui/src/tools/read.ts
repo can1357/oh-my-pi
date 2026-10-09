@@ -336,6 +336,18 @@ function readRawPath(args: ReadRenderArgs | undefined): string {
 }
 
 /**
+ * Whether a read result renders as a Markdown preview rather than numbered source:
+ * the read tool tagged it `text/markdown` (`read.renderMarkdown`, or a protocol
+ * resource) and the call did not ask for `:raw` source. Shared by the standalone
+ * read card and the read group's content previews so both honor the setting.
+ */
+export function readResultIsMarkdown(details: ReadToolDetails | undefined, args: ReadRenderArgs | undefined): boolean {
+	if (details?.contentType !== "text/markdown" || args?.raw === true) return false;
+	const sel = splitReadRenderPath(readRawPath(args)).sel;
+	return sel?.split(":").some(chunk => chunk.toLowerCase() === "raw") !== true;
+}
+
+/**
  * Native read head (§7.3 read): `Read path:13-36` with the path as the
  * target (shortened, plus the selector / legacy offset range), a `file://`
  * link when the fs path is known, and a suffix correction as meta.
@@ -594,9 +606,7 @@ export const readToolRenderer = {
 			const n = details.conflictCount;
 			title += ` ${uiTheme.fg("warning", `(⚠ ${n} conflict${n === 1 ? "" : "s"})`)}`;
 		}
-		const rawRequested =
-			args?.raw === true || renderPath.sel?.split(":").some(chunk => chunk.toLowerCase() === "raw") === true;
-		const isMarkdown = details?.contentType === "text/markdown" && !rawRequested;
+		const isMarkdown = readResultIsMarkdown(details, args);
 		let cachedWidth: number | undefined;
 		let cachedExpanded: boolean | undefined;
 		let cachedLines: string[] | undefined;
@@ -709,17 +719,14 @@ export const readToolRenderer = {
 		}
 
 		const renderPath = splitReadRenderPath(rawPath);
-		const rawRequested =
-			args?.raw === true || renderPath.sel?.split(":").some(chunk => chunk.toLowerCase() === "raw") === true;
-		const content: NativeChild[] =
-			details?.contentType === "text/markdown" && !rawRequested
-				? [md(contentText)]
-				: readContentCode(
-						contentText,
-						details?.displayContent?.startLine ?? readRangeStart(rawPath, args),
-						details?.displayContent?.lineNumbers,
-						getLanguageFromPath(renderPath.path),
-					);
+		const content: NativeChild[] = readResultIsMarkdown(details, args)
+			? [md(contentText)]
+			: readContentCode(
+					contentText,
+					details?.displayContent?.startLine ?? readRangeStart(rawPath, args),
+					details?.displayContent?.lineNumbers,
+					getLanguageFromPath(renderPath.path),
+				);
 		return { tool: head, inline: true, body: compact<NativeChild>([...content, foot]) };
 	},
 	mergeCallAndResult: true,

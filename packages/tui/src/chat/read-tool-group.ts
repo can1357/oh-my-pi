@@ -10,11 +10,12 @@ import {
 	type ReadRenderArgs,
 	type ReadToolDetails,
 	readContentCode,
+	readResultIsMarkdown,
 	readSourceFsPath,
 	splitPathAndSel,
 } from "../tools/read";
 import { PREVIEW_LIMITS, shortenPath } from "../render/render-utils";
-import { fileHyperlink, renderCodeCell } from "../render";
+import { fileHyperlink, renderCodeCell, renderMarkdownCell } from "../render";
 import { canonicalizeMessage } from "./thinking-display";
 import { internalUrlSchemeSpec, splitUrlScheme } from "../tools/url-scheme-host";
 import type { ToolExecutionHandle } from "./tool-execution";
@@ -22,7 +23,7 @@ import { formatUsageRow } from "../overlays/usage-row";
 import { formatCount } from "@oh-my-pi/pi-utils";
 import type { TspCardStatus, TspSpan, TspText } from "@oh-my-pi/pi-wire";
 import type { NativeToolHead } from "../tools/renderer";
-import { card, code, keyed, node, span, text, withHidden } from "../native/describe";
+import { card, code, keyed, md, node, span, text, withHidden } from "../native/describe";
 import {
 	type DescribeContext,
 	type NativeChild,
@@ -121,6 +122,10 @@ type ReadEntry = {
 	status: "pending" | "success" | "warning" | "error";
 	correctedFrom?: string;
 	contentText?: string;
+	/** Preview as rendered Markdown instead of numbered source; see {@link readResultIsMarkdown}. */
+	markdown?: boolean;
+	/** The call's `raw` arg, which keeps Markdown previews as source. */
+	raw?: boolean;
 	conflictCount?: number;
 	codeStartLine?: number;
 	codeLineNumbers?: Array<number | null>;
@@ -135,13 +140,12 @@ type ReadUsageRow = {
 	turnElapsedMs?: number;
 };
 
-/** Number of code lines to show in collapsed preview mode */
+/** Number of preview rows to show per read while collapsed. */
 const COLLAPSED_PREVIEW_LINES = PREVIEW_LIMITS.OUTPUT_COLLAPSED;
 
 /**
- * Collapsed clamp for a data-first group whose previews are already trimmed
- * to {@link COLLAPSED_PREVIEW_LINES}: large enough never to cut the trimmed
- * body, so collapsed shows every file and the head of each preview.
+ * The outer data-first group must not cut off later files: code is trimmed by
+ * source line and Markdown is clamped by each file's native card after rendering.
  */
 const TRIMMED_BODY_PREVIEW = { lines: 1000 } as const;
 
@@ -429,6 +433,7 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 			status: "pending",
 		};
 		entry.path = rawPath;
+		entry.raw = args.raw === true;
 		this.#entries.set(toolCallId, entry);
 		this.#updateDisplay();
 	}
@@ -485,6 +490,7 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 			typeof details?.conflictCount === "number" && details.conflictCount > 0 ? details.conflictCount : undefined;
 		entry.conflictCount = conflictCount;
 		entry.status = result.isError ? "error" : suffixResolution ? "warning" : "success";
+		entry.markdown = readResultIsMarkdown(details, { path: entry.path, raw: entry.raw });
 		// Store clean display content for preview/expanded display when the read
 		// tool provides it; fall back to model-facing text for legacy results.
 		const displayContent = details?.displayContent;
@@ -578,8 +584,8 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 	 * The read run as one inline `tool` on terminals that list the kind, else
 	 * the fallback: a bare `card` (role `omp.tool.read`) with `Read <path>` or
 	 * `Read (N)` in the head, a `list` of path items (status tone, link,
-	 * correction and conflict detail, nested usage) and, with content previews
-	 * on, a `code` block per read clamped by the card's preview while collapsed.
+	 * correction and conflict detail, nested usage) and a clamped preview per
+	 * read when content previews are on.
 	 */
 	override describe(cx?: DescribeContext): NativeNode {
 		const dataFirst = cx?.supports("tool") === true;
@@ -593,8 +599,8 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 	 * The data-first read (§7.3 read, read group, read error): one inline
 	 * `tool` (role `omp.tool.read`). One file: `Read path:13-36`, a failure's
 	 * message in the head. Several: `Read 3 files` over one 22px row per file
-	 * (glyph, dim dir, strong name, range). Content previews are numbered
-	 * `code` (a section per file in a group), trimmed while collapsed.
+	 * (glyph, dim dir, strong name, range). Each content preview is numbered
+	 * code or rendered Markdown, clamped per file while collapsed.
 	 */
 	#describeTool(): NativeNode {
 		const entries = [...this.#entries.values()];
@@ -715,8 +721,21 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 		);
 	}
 
-	/** One read's content as numbered `code`, trimmed to its first lines (plus a count) while collapsed. */
+	/** One read's content, clamped per file while the group is collapsed. */
 	#nativePreview(entry: ReadEntry): NativeChild[] {
+		if (entry.markdown) {
+			return [
+				card(
+					{
+						variant: "bare",
+						collapsible: true,
+						collapsed: !this.#expanded,
+						preview: { lines: COLLAPSED_PREVIEW_LINES },
+					},
+					[md(entry.contentText ?? "")],
+				),
+			];
+		}
 		const split = splitPathAndSel(entry.path);
 		const lines = (entry.contentText ?? "").split("\n");
 		const shown = this.#expanded ? lines.length : Math.min(lines.length, COLLAPSED_PREVIEW_LINES);
@@ -796,11 +815,13 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 						preview: { lines: COLLAPSED_PREVIEW_LINES },
 					},
 					[
-						code(entry.contentText ?? "", {
-							lang: getLanguageFromPath(split.path),
-							start: entry.codeStartLine,
-							numbers: true,
-						}),
+						entry.markdown
+							? md(entry.contentText ?? "")
+							: code(entry.contentText ?? "", {
+									lang: getLanguageFromPath(split.path),
+									start: entry.codeStartLine,
+									numbers: true,
+								}),
 					],
 					`p${entry.toolCallId}`,
 				),
@@ -1124,7 +1145,7 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 	}
 
 	/**
-	 * Add a code-cell content preview below the entry summary.
+	 * Add a code-cell (or Markdown-cell) content preview below the entry summary.
 	 * When collapsed: shows first COLLAPSED_PREVIEW_LINES lines with a "… N more lines ⟨<key>: Expand⟩" hint.
 	 * When expanded: shows full content.
 	 */
@@ -1147,20 +1168,33 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 		const component: Component = {
 			render: (width: number) => {
 				if (cachedLines && cachedWidth === width) return cachedLines;
-				cachedLines = renderCodeCell(
-					{
-						code: entry.contentText ?? "",
-						language: lang,
-						title,
-						status: entry.status === "success" ? "complete" : entry.status,
-						expanded,
-						codeMaxLines: expanded ? undefined : COLLAPSED_PREVIEW_LINES,
-						codeStartLine: entry.codeStartLine,
-						codeLineNumbers: entry.codeLineNumbers,
-						width,
-					},
-					theme,
-				);
+				const status = entry.status === "success" ? "complete" : entry.status;
+				cachedLines = entry.markdown
+					? renderMarkdownCell(
+							{
+								content: entry.contentText ?? "",
+								title,
+								status,
+								expanded,
+								contentMaxLines: COLLAPSED_PREVIEW_LINES,
+								width,
+							},
+							theme,
+						)
+					: renderCodeCell(
+							{
+								code: entry.contentText ?? "",
+								language: lang,
+								title,
+								status,
+								expanded,
+								codeMaxLines: expanded ? undefined : COLLAPSED_PREVIEW_LINES,
+								codeStartLine: entry.codeStartLine,
+								codeLineNumbers: entry.codeLineNumbers,
+								width,
+							},
+							theme,
+						);
 				cachedWidth = width;
 				return cachedLines;
 			},
