@@ -273,6 +273,46 @@ describe("read tool large artifact handling", () => {
 		expect(output).toContain("Use artifact://0:92-100 to continue");
 	});
 
+	it("names the line instead of hinting an identical selector when nothing fits", async () => {
+		await Bun.write(path.join(artifactDir, "0.mcp.log"), multiRangeBudgetArtifact());
+
+		// 73 lines of 699 bytes leave 101 bytes of budget: not even the first
+		// line of the next range fits. Hinting `75-100` again would replay the
+		// same cut forever, so the page names line 75 and resumes after it.
+		// (The gap at line 74 is the selector's, not the budget's.)
+		const result = await tool.execute("call-multi-range-kept-zero", { path: "artifact://0:1-73,75-100" });
+		const output = getTextOutput(result);
+
+		expect(output).toContain("line-073");
+		expect(output).toContain("Line 75 is");
+		expect(output).toContain("was not shown");
+		expect(output).toContain("Use artifact://0:raw:75-75");
+		expect(output).toContain("artifact://0:76-100");
+		expect(output).not.toContain("Use artifact://0:75-100");
+
+		const followed = getTextOutput(
+			await tool.execute("call-multi-range-kept-zero-follow", { path: "artifact://0:76-100" }),
+		);
+		expect(followed).toContain("line-076");
+	});
+
+	it("bounds the issue's own single-range raw repro and keeps the continuation raw", async () => {
+		await Bun.write(path.join(artifactDir, "0.mcp.log"), multiRangeBudgetArtifact());
+
+		const result = await tool.execute("call-raw-single-repro", { path: "artifact://0:raw:1-300" });
+		const output = getTextOutput(result);
+
+		expect(output).toContain("line-001");
+		expect(output).not.toContain("line-100");
+		expect(output).toContain("Use artifact://0:raw:74-300 to continue");
+
+		const followed = getTextOutput(
+			await tool.execute("call-raw-single-repro-follow", { path: "artifact://0:raw:74-300" }),
+		);
+		expect(followed).toContain("line-074");
+		expect(followed).toContain("line-100");
+	});
+
 	it("bounds raw multi-range artifact reads at the same per-call budget", async () => {
 		await Bun.write(path.join(artifactDir, "0.mcp.log"), multiRangeBudgetArtifact());
 
