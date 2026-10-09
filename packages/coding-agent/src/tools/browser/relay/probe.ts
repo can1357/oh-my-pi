@@ -56,17 +56,6 @@ export function relayCdpClientsOf(parsed: object): number | null {
 		: null;
 }
 
-/** Whether a relay reporting `version` predates this OMP; one reporting none predates version markers. */
-export function isOlderRelayVersion(version: string): boolean {
-	if (version === "") return true;
-	try {
-		return Bun.semver.order(version, VERSION) < 0;
-	} catch {
-		// Unparseable: not provably older, so leave it to its owner.
-		return false;
-	}
-}
-
 function parseUnavailableInfo(body: string): Omit<RelayUnavailableInfo, "ompRelayCdpClients"> | null {
 	try {
 		const parsed: unknown = JSON.parse(body);
@@ -113,7 +102,8 @@ function readyOutcome(body: string): RelayWaitOutcome {
 			if (relayVersionOf(parsed) !== VERSION) return "outdated-relay";
 			return "outdated-extension";
 		}
-		if (isOlderRelayVersion(relayVersionOf(parsed)) && relayCdpClientsOf(parsed) === 0) return "idle-older-relay";
+		if (isOlderOmpVersion(relayVersionOf(parsed), VERSION) && relayCdpClientsOf(parsed) === 0)
+			return "idle-older-relay";
 		return "ready";
 	} catch {
 		return "outdated-relay";
