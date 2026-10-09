@@ -12,12 +12,14 @@ import {
 	formatModelStringWithRouting,
 	parseModelPattern,
 	pickDefaultAvailableModel,
+	resolveAgentAdvisorRolePattern,
 	resolveAgentAdvisorSelection,
 	resolveAgentModelPatterns,
 	resolveAgentModelSelection,
 	resolveAgentPrewalkPattern,
 	resolveAllowedModels,
 	resolveCliModel,
+	resolveConfiguredModelPatterns,
 	resolveExplicitModelRole,
 	resolveModelFromSettings,
 	resolveModelFromString,
@@ -1150,6 +1152,19 @@ describe("resolveAgentAdvisorSelection", () => {
 		expect(resolveAgentAdvisorSelection({ settingsOverride: "", agentAdvisor: false })).toBeUndefined();
 	});
 });
+describe("resolveAgentAdvisorRolePattern", () => {
+	test("a self-referential @advisor resolves to the owner's advisor role inside the spawned session", () => {
+		const owner = Settings.isolated({ modelRoles: { advisor: "anthropic/claude-haiku-4-5" } });
+		const child = Settings.isolated({
+			modelRoles: {
+				...owner.getModelRoles(),
+				advisor: resolveAgentAdvisorRolePattern("@advisor:high", owner),
+			},
+		});
+
+		expect(resolveConfiguredModelPatterns("@advisor", child)).toEqual(["anthropic/claude-haiku-4-5:high"]);
+	});
+});
 describe("resolveAgentModelPatterns", () => {
 	test("pairs the first non-empty source's role with its patterns, skipping aliases with no patterns", () => {
 		const settings = Settings.isolated({
@@ -1442,6 +1457,28 @@ describe("resolveCliModel", () => {
 		expect(result.error).toBeUndefined();
 		expect(result.model?.provider).toBe("openai-codex");
 		expect(result.model?.id).toBe("gpt-5.5");
+	});
+
+	test("ranks an exact bare id carried by several authenticated providers like modelRoles", () => {
+		// Registry order and the built-in provider priority both favor Codex.
+		const models = [...openaiGpt55Models].reverse();
+		const registry = { getAll: () => models, getAvailable: () => models };
+		const preferences = { providerOrder: ["openai"] };
+
+		const bare = resolveCliModel({ cliModel: "gpt-5.5", modelRegistry: registry, preferences });
+		const suffixed = resolveCliModel({ cliModel: "gpt-5.5:high", modelRegistry: registry, preferences });
+
+		expect(bare.model?.provider).toBe("openai");
+		expect(suffixed.model?.provider).toBe("openai");
+		expect(suffixed.thinkingLevel).toBe(Effort.High);
+
+		// Recent use outranks modelProviderOrder, as for roles; this registry lists plain OpenAI first.
+		const recent = resolveCliModel({
+			cliModel: "gpt-5.5",
+			modelRegistry: { getAll: () => openaiGpt55Models, getAvailable: () => openaiGpt55Models },
+			preferences: { usageOrder: ["openai-codex/gpt-5.5"], providerOrder: ["openai"] },
+		});
+		expect(recent.model?.provider).toBe("openai-codex");
 	});
 
 	test("prefers an authenticated provider for flat slashful ids whose prefix is a provider slug", () => {
@@ -2305,6 +2342,76 @@ describe("extractExplicitThinkingSelector", () => {
 			isLiteralModelId: () => false,
 		});
 		expect(result).toBe("auto");
+	});
+
+	test("extracts max from a short qualified selector", () => {
+		expect(
+			extractExplicitThinkingSelector("p/a:max", undefined, {
+				isLiteralModelId: () => false,
+			}),
+		).toBe(Effort.Max);
+	});
+
+	test("extracts max from a short unqualified selector when no literal exists", () => {
+		expect(
+			extractExplicitThinkingSelector("a:max", undefined, {
+				isLiteralModelId: (provider, id) => provider !== undefined || id !== "a:max",
+			}),
+		).toBe(Effort.Max);
+	});
+
+	test("requires an exact provider match for qualified literal model ids", () => {
+		expect(
+			extractExplicitThinkingSelector("p/a:max", undefined, {
+				isLiteralModelId: (provider, id) => provider === "other" && id === "a:max",
+			}),
+		).toBe(Effort.Max);
+	});
+
+	test("extracts off from short qualified and unqualified selectors", () => {
+		expect(extractExplicitThinkingSelector("p/a:off")).toBe("off");
+		expect(extractExplicitThinkingSelector("a:off")).toBe("off");
+	});
+
+	test("keeps a strict outer suffix ahead of literal :max detection", () => {
+		expect(
+			extractExplicitThinkingSelector("a:max:off", undefined, {
+				isLiteralModelId: (provider, id) => provider === undefined && id === "a:max",
+			}),
+		).toBe("off");
+	});
+
+	test("extracts max from a role alias targeting a short selector", () => {
+		const settings = Settings.isolated({ modelRoles: { smol: "p/a" } });
+		expect(
+			extractExplicitThinkingSelector("@smol:max", settings, {
+				isLiteralModelId: () => false,
+			}),
+		).toBe(Effort.Max);
+	});
+
+	test("preserves literal qualified and unqualified :max and :auto model ids", () => {
+		const literalIds: Record<string, true> = {
+			"p/a:max": true,
+			"p/a:auto": true,
+			"a:max": true,
+			"a:auto": true,
+		};
+		const isLiteralModelId = (provider: string | undefined, id: string) =>
+			literalIds[provider === undefined ? id : `${provider}/${id}`] === true;
+
+		expect(extractExplicitThinkingSelector("p/a:max", undefined, { isLiteralModelId })).toBeUndefined();
+		expect(extractExplicitThinkingSelector("p/a:auto", undefined, { isLiteralModelId })).toBeUndefined();
+		expect(extractExplicitThinkingSelector("a:max", undefined, { isLiteralModelId })).toBeUndefined();
+		expect(extractExplicitThinkingSelector("a:auto", undefined, { isLiteralModelId })).toBeUndefined();
+	});
+
+	test("treats a missing unqualified literal :auto model id as the auto selector", () => {
+		const availableIds: Record<string, true> = { a: true };
+		const isLiteralModelId = (provider: string | undefined, id: string) =>
+			provider === undefined && availableIds[id] === true;
+
+		expect(extractExplicitThinkingSelector("a:auto", undefined, { isLiteralModelId })).toBe("auto");
 	});
 });
 

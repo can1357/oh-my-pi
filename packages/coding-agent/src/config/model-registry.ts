@@ -1,6 +1,6 @@
 import * as path from "node:path";
 import type { ApiKeyResolver, FetchImpl, ResolvedApiKey, UsageProvider } from "@oh-my-pi/pi-ai";
-import type { AuthApiKeyOptions } from "@oh-my-pi/pi-ai/auth-storage";
+import { type AuthApiKeyOptions, oauthAccountKey } from "@oh-my-pi/pi-ai/auth-storage";
 import { registerCustomApi, unregisterCustomApis } from "@oh-my-pi/pi-ai/api-registry";
 import { registerOAuthProvider, unregisterOAuthProvider, unregisterOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
 import type { OAuthCredentials, OAuthLoginCallbacks } from "@oh-my-pi/pi-ai/oauth/types";
@@ -114,7 +114,7 @@ import {
 	kNoAuth,
 	type ProviderDiscoveryState,
 	RUNTIME_DYNAMIC_MODEL_FETCH_TIMEOUT_MS,
-	resolveCodexDiscoveryAccounts,
+	resolveOAuthDiscoveryAccounts,
 	SPECIAL_MODEL_MANAGER_PROVIDER_IDS,
 	STARTUP_MODEL_CACHE_PROVIDER_IDS,
 	withModelDiscoveryTimeout,
@@ -1177,12 +1177,23 @@ export class ModelRegistry {
 	#mergeResolvedModels(baseModels: Model<Api>[], replacementModels: Model<Api>[]): Model<Api>[] {
 		return mergeByModelKey(baseModels, replacementModels, (existing, replacementModel) => {
 			if (!existing) return replacementModel;
+			const contextWindow = replacementModel.contextWindow ?? existing.contextWindow;
+			const maxTokens = replacementModel.maxTokens ?? existing.maxTokens;
+			const omitMaxOutputTokens = replacementModel.omitMaxOutputTokens ?? existing.omitMaxOutputTokens;
 			const supportsTools = replacementModel.supportsTools ?? existing.supportsTools;
+			if (
+				contextWindow === replacementModel.contextWindow &&
+				maxTokens === replacementModel.maxTokens &&
+				omitMaxOutputTokens === replacementModel.omitMaxOutputTokens &&
+				supportsTools === replacementModel.supportsTools
+			) {
+				return replacementModel;
+			}
 			return {
 				...replacementModel,
-				contextWindow: replacementModel.contextWindow ?? existing.contextWindow,
-				maxTokens: replacementModel.maxTokens ?? existing.maxTokens,
-				omitMaxOutputTokens: replacementModel.omitMaxOutputTokens ?? existing.omitMaxOutputTokens,
+				contextWindow,
+				maxTokens,
+				omitMaxOutputTokens,
 				...(supportsTools !== undefined ? { supportsTools } : {}),
 			};
 		});
@@ -2159,7 +2170,19 @@ export class ModelRegistry {
 				resolveKey: extractGoogleOAuthToken,
 				createOptions: oauthToken =>
 					googleAntigravityModelManagerOptions({
-						oauthToken,
+						resolveAccounts: async () => {
+							const accounts = await resolveOAuthDiscoveryAccounts(
+								this.authStorage,
+								"google-antigravity",
+								oauthToken,
+							);
+							return (
+								accounts?.map(account => ({
+									accessToken: account.accessToken,
+									accountKey: oauthAccountKey(account),
+								})) ?? null
+							);
+						},
 						endpoint: this.#descriptorBaseUrl("google-antigravity"),
 						fetch: this.#fetch,
 					}),
@@ -2194,7 +2217,8 @@ export class ModelRegistry {
 					if (officialCredential || isOfficialCodexApiUrl(configuredBaseUrl)) {
 						return openaiCodexModelManagerOptions({
 							baseUrl: officialCredential ? undefined : configuredBaseUrl,
-							resolveAccounts: () => resolveCodexDiscoveryAccounts(this.authStorage, accessToken),
+							resolveAccounts: () =>
+								resolveOAuthDiscoveryAccounts(this.authStorage, "openai-codex", accessToken),
 							fetch: this.#fetch,
 						});
 					}

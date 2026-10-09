@@ -28,6 +28,7 @@ import {
 	getSearchProvider,
 	type SearchProvider,
 } from "./provider";
+import { rankXAIProviders, targetsX, xaiModelChain } from "./providers/xai";
 import { applyQueryConstraints, parseSearchQuery } from "./query";
 import {
 	DEFAULT_WEB_SEARCH_TIMEOUT_SECONDS,
@@ -152,6 +153,17 @@ function expandHostedCandidate(
 	return models.map(model => ({ ...candidate, model }));
 }
 
+/**
+ * Move the chain's xAI-grounded candidates to the front, keeping their order,
+ * or prepend {@link xaiModelChain} when the chain has none. Unchanged without
+ * xAI credentials.
+ */
+function preferXAI(chain: RoleChainCandidate[], modelRegistry: ModelRegistry): RoleChainCandidate[] {
+	const xai = chain.filter(candidate => candidate.model.webSearch === "xai");
+	if (xai.length > 0) return [...xai, ...chain.filter(candidate => candidate.model.webSearch !== "xai")];
+	return [...xaiModelChain(modelRegistry, settings).map(model => ({ model, explicit: false })), ...chain];
+}
+
 /** Execute web search */
 async function executeSearch(
 	_toolCallId: string,
@@ -169,9 +181,14 @@ async function executeSearch(
 					: [];
 			})()
 		: resolveRoleChain("web", settings, pool);
-	const expanded = candidates.flatMap(candidate => expandHostedCandidate(candidate, options.sessionModel, pool));
-
 	const parsedQuery = parseSearchQuery(params.query);
+	let expanded = rankXAIProviders(
+		candidates.flatMap(candidate => expandHostedCandidate(candidate, options.sessionModel, pool)),
+		candidate => candidate.model,
+		settings,
+	);
+	// Only xAI reaches X posts; X-only queries try it first even when the role prefers another engine.
+	if (!params.model && targetsX(parsedQuery)) expanded = preferXAI(expanded, modelRegistry);
 
 	// Invariant across candidates; resolve once before walking the role chain.
 	let antigravityEndpointMode: "auto" | "production" | "sandbox" | undefined;

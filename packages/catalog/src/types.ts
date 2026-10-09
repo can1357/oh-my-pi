@@ -764,6 +764,8 @@ export interface AnthropicCompat {
  * deliberately not used to infer these request-shape capabilities.
  */
 export interface BedrockCompat {
+	/** Explicit disabled-thinking wire form; unset preserves the provider's existing behavior. */
+	disabledThinking?: AnthropicCompat["disabledThinking"];
 	/** Whether this endpoint accepts no checkpoints, automatic caching, or explicit cachePoint blocks. */
 	promptCacheMode?: "none" | "automatic" | "explicit";
 	/** Whether this wire may revise already-streamed text (`stream-revision` axis). Unassigned: append-only. */
@@ -803,6 +805,8 @@ export interface BedrockCompat {
 
 /** Fully-resolved Bedrock Converse prompt-cache capabilities, materialized once by `buildModel`. */
 export interface ResolvedBedrockCompat {
+	/** See {@link BedrockCompat.disabledThinking}. */
+	disabledThinking?: BedrockCompat["disabledThinking"];
 	promptCacheMode: NonNullable<BedrockCompat["promptCacheMode"]>;
 	/** See {@link BedrockCompat.streamRevision}. */
 	streamRevision?: BedrockCompat["streamRevision"];
@@ -1483,11 +1487,11 @@ export interface Model<TApi extends Api = Api> {
 	cursorMaxModeRoutes?: Readonly<Record<string, boolean>>;
 	/**
 	 * Per-account availability recorded by multi-account discovery: provider
-	 * account id (Codex: ChatGPT `chatgpt_account_id`) → that account's
-	 * entitlements on this model. An account appears only when its own catalog
-	 * lists the model, so credential selection can route account-gated models
-	 * (e.g. `gpt-daybreak-blue-latest`) straight to eligible accounts. Absent on
-	 * bundled/config rows and on single-account discovery.
+	 * account key (Codex: ChatGPT `chatgpt_account_id`; Antigravity: login
+	 * email) → that account's entitlements on this model. An account appears
+	 * only when its own catalog lists the model, so credential selection can
+	 * route account-gated models (e.g. `gpt-daybreak-blue-latest`, Antigravity
+	 * Claude 5.5) straight to eligible accounts. Absent on bundled/config rows.
 	 */
 	accountAccess?: Readonly<Record<string, ModelAccountAccess>>;
 	/** Cursor `RequestedModel.parameters` for this model's default variant. */

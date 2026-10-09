@@ -62,10 +62,11 @@ import {
 	persistForeignSession,
 } from "../../session/foreign-session-import";
 import type { ForeignSessionInfo, ForeignSessionSource } from "../../session/foreign-session-store";
+import { setModelCompactionPoint } from "../../session/model-compaction-threshold";
 import { isTranscriptEntry, type TranscriptEntry } from "../../session/session-context";
 import { isUserRequestEntry } from "@oh-my-pi/pi-tui/chat/transcript-entry";
 import type { SessionEntry, SessionTreeNode } from "../../session/session-entries";
-import type { SessionInfo } from "../../session/session-listing";
+import { readSessionInfo, type SessionInfo } from "../../session/session-listing";
 import { SessionManager } from "../../session/session-manager";
 import { loadPinnedSessionIds } from "../../session/session-pins";
 import { FileSessionStorage } from "../../session/session-storage";
@@ -1092,6 +1093,21 @@ export class SelectorController {
 						this.ctx.showError(error instanceof Error ? error.message : String(error));
 					}
 				},
+				onCompactionPointChange: (model, input) => {
+					try {
+						const entry = setModelCompactionPoint(this.ctx.settings, model, input);
+						const selector = `${model.provider}/${model.id}`;
+						this.ctx.showStatus(
+							entry === undefined
+								? `Compaction point for ${selector} reset`
+								: `Compaction point for ${selector}: ${typeof entry === "number" ? `${entry.toLocaleString("en-US")} tokens` : entry}`,
+						);
+						this.ctx.statusLine.invalidate();
+						return undefined;
+					} catch (error) {
+						return error instanceof Error ? error.message : String(error);
+					}
+				},
 				onSavePreset: name => {
 					try {
 						saveModelPreset(this.ctx.settings, name);
@@ -1861,13 +1877,15 @@ export class SelectorController {
 				return false;
 			}
 		}
+		const target = await this.#relocateFromRemovedWorktree(sessionPath);
+		if (!target) return false;
 		await this.ctx.prepareSessionSwitch();
 		this.ctx.resetObserverRegistry();
 		// AgentSession owns the transaction. It restores the complete source state
 		// if applying the target project's cwd fails, including in-memory sessions.
 		let modelFallbackWarning: string | undefined;
 		if (
-			(await this.ctx.session.switchSession(sessionPath, {
+			(await this.ctx.session.switchSession(target.sessionPath, {
 				onCwdChange: async (newCwd, sourceCwd) => {
 					if (normalizePathForComparison(newCwd) === normalizePathForComparison(sourceCwd)) return true;
 					return this.ctx.applyCwdChange(newCwd);
@@ -1888,9 +1906,43 @@ export class SelectorController {
 		// Clear and re-render the chat
 		await this.ctx.renderInitialMessages({ clearTerminalHistory: true });
 		await this.ctx.reloadTodos();
-		this.ctx.showStatus(movedProject ? `Resumed session in ${shortenPath(newCwd)}` : "Resumed session");
+		this.ctx.showStatus(
+			target.movedFrom
+				? `Resumed session, moved here from removed worktree ${shortenPath(target.movedFrom)}`
+				: movedProject
+					? `Resumed session in ${shortenPath(newCwd)}`
+					: "Resumed session",
+		);
 		if (modelFallbackWarning) this.ctx.showWarning(modelFallbackWarning);
 		return true;
+	}
+
+	/**
+	 * Move a session recorded in a removed worktree of this repository into the
+	 * current folder before resuming it: its own directory cannot be entered.
+	 * Returns the session file to switch to, or undefined after reporting a failed move.
+	 */
+	async #relocateFromRemovedWorktree(
+		sessionPath: string,
+	): Promise<{ sessionPath: string; movedFrom?: string } | undefined> {
+		const sessionManager = this.ctx.sessionManager;
+		// Never move the live session out from under its own writer.
+		if (sessionManager.getSessionFile() === sessionPath) return { sessionPath };
+		const cwd = sessionManager.getCwd();
+		const sessionDir = sessionManager.getSessionDir();
+		const info = await readSessionInfo(sessionPath);
+		if (!info || !(await SessionManager.isFromRemovedWorktree(info, cwd, sessionDir))) return { sessionPath };
+		try {
+			const relocated = await SessionManager.openRelocated(sessionPath, info.cwd, cwd, sessionDir);
+			const movedPath = relocated.getSessionFile() ?? sessionPath;
+			await relocated.close();
+			return { sessionPath: movedPath, movedFrom: info.cwd };
+		} catch (error) {
+			this.ctx.showError(
+				`Could not move the session out of removed worktree ${shortenPath(info.cwd)}: ${error instanceof Error ? error.message : String(error)}`,
+			);
+			return undefined;
+		}
 	}
 
 	async handleSessionDeleteCommand(): Promise<void> {
