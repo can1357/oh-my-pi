@@ -56,6 +56,9 @@ factory only if the provider supports model listing.
    run `bun run gen:compat`, then `bun run gen:models` with the discovery
    credentials needed by the provider. `gen:compat` writes `rules.json`,
    `auth-ids.ts`, and `provider-ids.ts` under `packages/catalog/src/compat/`.
+   For a provider-only catalog update, use `bun run gen:models --provider <id>`
+   to regenerate that provider while preserving every other provider's committed
+   snapshot. Cross-provider reference data remains available to the generator.
    Do not edit these generated files by hand.
 
 For example, a static OpenAI-compatible gateway can declare its catalog row as:

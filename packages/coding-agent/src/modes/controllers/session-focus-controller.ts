@@ -4,7 +4,7 @@ import { appKey } from "@oh-my-pi/pi-tui/chrome/keybinding-hints";
 import { AgentLifecycleManager } from "../../registry/agent-lifecycle";
 import { AgentRegistry, MAIN_AGENT_ID, type AgentRef, type RegistryEvent } from "../../registry/agent-registry";
 import type { AgentSession } from "../../session/agent-session";
-import { setTerminalTitleState } from "../../utils/title-generator";
+import { setRunStatus } from "../../utils/run-status";
 import type { InteractiveModeContext } from "../types";
 
 /**
@@ -217,7 +217,7 @@ export class SessionFocusController {
 			this.ctx.statusLine.setSession(target, this.#focusedAgentId);
 			// Reset run bookkeeping before replay populates pending tool handles.
 			if (target.isStreaming) await this.ctx.eventController.handleEvent({ type: "agent_start" });
-			else setTerminalTitleState("idle");
+			else setRunStatus({ state: "idle" });
 			if (generation !== this.#attachGeneration) return false;
 			await this.ctx.renderInitialMessages({ clearTerminalHistory: true });
 			if (generation !== this.#attachGeneration) return false;

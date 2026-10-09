@@ -539,7 +539,7 @@ Cursor's integration in `packages/ai` operates over an HTTP/2 Connect RPC transp
 - **PKCE OAuth & Polling**:
   - Deep-link PKCE login generates verifier/challenge and redirects to `https://cursor.com/loginDeepControl`.
   - Polls `https://api2.cursor.sh/auth/poll?uuid=...&verifier=...` with exponential backoff (1s to 10s delay, up to 150 attempts).
-  - Refresh trades refresh token via POST `https://api2.cursor.sh/auth/exchange_user_api_key`.
+  - Refresh renews the login session the way the Cursor IDE does: POST `https://api2.cursor.sh/oauth/token` with a `refresh_token` grant for the IDE's client id. The renewed session token is both access and refresh credential; `shouldLogout: true` means the session ended and the row is disabled.
   - Login, and any refresh of a credential still missing one, records the account email from `https://cursor.com/api/auth/me` (`fetchCursorAccountEmail`), so account policies and `/session pin` can name the account; a failed lookup leaves the credential usable without it.
 - **Usage & Quota Tracking (`packages/ai/src/usage/cursor.ts`)**:
   - Standard quota fetched from `https://api2.cursor.sh/auth/usage` (`parseCursorUsage`).
@@ -2180,6 +2180,24 @@ Provider-specific overrides in `packages/catalog/src/compat/rules/providers/zhip
 - **Discovery replacement**: Successful authoritative discovery replaces fallback provider rows rather than retaining retired seed models.
 - **Authored seeds**: `typesafe/jev`; bundle policy `always`. Limits, capabilities, and prices are authored alongside these rows.
 - Runtime manager: `commandCodeModelManagerOptions` in `packages/catalog/src/provider-models/openai-compat.ts`.
+
+## CoralBricks (`coralbricks`)
+
+### Special casings
+- Chat discovery uses `openai-completions` with CoralBricks' own `/v1/models` row fields (per-million `pricing`, `context_length`, `supports_image_input`, `supports_tools`). The endpoint publishes no output cap, so that still follows the bundled reference.
+- Live modality and prices are authoritative (`dynamicInputAuthoritative`, `dynamicCostAuthoritative`): a text-only row drops bundled image support, and an explicit `0` price replaces the bundled rate. A missing price field keeps the bundled rate.
+- Live `supports_reasoning` and `reasoning.supported_efforts` supply reasoning capability and the effort ladder, including for new model IDs and aliases. Explicit non-reasoning and empty effort vocabularies override stale bundled controls through refresh and cache reload; missing legacy metadata keeps the reviewed fallback.
+- `reasoning.mandatory` controls whether thinking can be switched off. `reasoning.disable: {"reasoning_effort":"none"}` maps off to `none`; mandatory models clamp an explicit off request to the lowest supported effort. Named `default_effort` values set the model default when supported. `none` is the server's off default, not an effort tier: an unrequested effort is omitted, while OMP's existing session/user thinking selection still applies. Coral models do not expose a thinking-token budget.
+
+### Auth & usage
+- Login kind `api-key` is declared in `packages/catalog/src/compat/rules/auth/coralbricks.kdl`. Environment keys: `CORAL_API_KEY`, then `CORALBRICKS_API_KEY`. Validation uses `models-endpoint` — Coral's `/v1/models` is key-protected, so the probe rejects bad keys and bills nothing.
+- Cached input reads are free on every model (`cache-read 0`); cache writes bill at the per-model cache-write rate via `prompt_tokens_details.cache_write_tokens`, which the shared OpenAI-completions usage parser already reads.
+
+### Catalog model handling
+- **Provider entry (`coralbricks`)**: `packages/catalog/src/compat/rules/providers/coralbricks.kdl` declares default model `glm-5.3-fast`. Environment keys: `CORAL_API_KEY`, then `CORALBRICKS_API_KEY`.
+- **Discovery replacement**: Successful authoritative discovery replaces bundled provider rows rather than retaining retired seed models.
+- **Authored seeds**: `glm-5.3-fast`, `deepseek-v4.1-flash-fast`; bundle policy `always`. Limits, capabilities, and prices are authored alongside these rows. GLM 5.3 Flash retired on 2026-10-07.
+- Runtime manager: `coralbricksModelManagerOptions` in `packages/catalog/src/provider-models/openai-compat.ts`.
 
 ## DeepInfra (`deepinfra`)
 

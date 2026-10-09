@@ -7,6 +7,25 @@ package(default_visibility = ["//visibility:public"])
 
 exports_files(["Cargo.toml"])
 
+rust_binary(
+    name = "generate_syntax_set",
+    srcs = [
+        "src/syntaxes/builder.rs",
+        "src/syntaxes/generate.rs",
+    ],
+    compile_data = glob(["src/syntaxes/*.sublime-syntax"]),
+    crate_root = "src/syntaxes/generate.rs",
+    edition = "2024",
+    deps = ["@crates//:syntect"],
+)
+
+genrule(
+    name = "syntax_set",
+    outs = ["syntaxes.packdump"],
+    cmd = "$(execpath :generate_syntax_set) $@",
+    tools = [":generate_syntax_set"],
+)
+
 darwin_helper(
     name = "oauth_callback_darwin_helper",
     src = "src/oauth_callback/darwin-helper.m",
@@ -61,15 +80,16 @@ rust_binary(
 )
 
 # The NAPI cdylib. build.rs is intentionally not wired in: napi_build::setup()
-# link args are hardcoded below and the OAuth relay is a separate target whose
-# executable is embedded as compile data. TypeScript typedef regeneration stays
-# a cargo-side dev flow (`bun --cwd packages/natives run build:bindings`);
-# index.js/index.d.ts are committed, so artifact builds never need the napi CLI.
+# link args are hardcoded below, and the OAuth relay executable and the
+# `:syntax_set` genrule output are separate targets embedded as compile data.
+# TypeScript typedef regeneration stays a cargo-side dev flow
+# (`bun --cwd packages/natives run build:bindings`); index.js/index.d.ts are
+# committed, so artifact builds never need the napi CLI.
 rust_shared_library(
     name = "pi_natives",
     srcs = glob(["src/**/*.rs"]),
     aliases = aliases(),
-    compile_data = glob([
+    compile_data = [":syntax_set"] + glob([
         "src/syntaxes/*.sublime-syntax",
         "src/fonts/*",
         "data/*.bin.zst",
@@ -91,10 +111,12 @@ rust_shared_library(
         "@platforms//os:macos": {
             "OMP_APPLEFM_BRIDGE": "$(execpath :applefm_bridge)",
             "OMP_OAUTH_DARWIN_HELPER": "$(execpath :oauth_callback_darwin_helper)",
+            "OMP_SYNTAX_SET": "$(execpath :syntax_set)",
             "OMP_CAPTURE_DARWIN_HELPER": "$(execpath :capture_darwin_helper)",
         },
         "//conditions:default": {
             "OMP_OAUTH_RELAY_BINARY": "$(execpath :oauth_callback_relay)",
+            "OMP_SYNTAX_SET": "$(execpath :syntax_set)",
         },
     }),
     rustc_flags = select({

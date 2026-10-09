@@ -135,7 +135,7 @@ interface BrowserOpenOptions {
 	allowed_domains?: string[];
 	/** Document-start JavaScript sources or cwd-relative source-file paths. */
 	init_scripts?: string[];
-	/** Absolute or cwd-relative directory for downloads. */
+	/** Absolute or cwd-relative directory for this tab's downloads; each tab keeps its own, except in a connected or relay browser, which shares one folder. */
 	downloads?: string;
 	/** Override the tab user agent before initial navigation. */
 	user_agent?: string;
