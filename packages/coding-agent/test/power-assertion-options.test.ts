@@ -1,10 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import { logger } from "@oh-my-pi/pi-utils";
-import {
-	powerAssertionOptions,
-	resetPowerBackendUnavailableLogForTests,
-	startPowerAssertion,
-} from "../src/session/agent-session";
+import { powerAssertionOptions } from "../src/session/agent-session";
+import { resetPowerBackendUnavailableForTests, startPowerAssertion } from "../src/session/power-assertion-backend";
 
 describe("powerAssertionOptions", () => {
 	it("asks for no assertion when sleep prevention is off", () => {
@@ -28,15 +25,17 @@ describe("startPowerAssertion", () => {
 
 	afterEach(() => {
 		vi.restoreAllMocks();
-		resetPowerBackendUnavailableLogForTests();
+		resetPowerBackendUnavailableForTests();
 	});
 
-	it("does not warn when the system bus is unavailable, and logs debug at most once", () => {
-		resetPowerBackendUnavailableLogForTests();
+	it("does not warn when the system bus is unavailable, logs debug once, and stops retrying the backend", () => {
+		resetPowerBackendUnavailableForTests();
 		const warn = vi.spyOn(logger, "warn").mockImplementation(() => {});
 		const debug = vi.spyOn(logger, "debug").mockImplementation(() => {});
-		expect(startPowerAssertion(options, unavailable)).toBeUndefined();
-		expect(startPowerAssertion(options, unavailable)).toBeUndefined();
+		const start = vi.fn(unavailable);
+		expect(startPowerAssertion(options, start)).toBeUndefined();
+		expect(startPowerAssertion(options, start)).toBeUndefined();
+		expect(start).toHaveBeenCalledTimes(1);
 		expect(warn).toHaveBeenCalledTimes(0);
 		expect(debug).toHaveBeenCalledTimes(1);
 	});

@@ -88,7 +88,7 @@ import { supportsOutputTokenLimit } from "@oh-my-pi/pi-catalog/compat/output-lim
 import { requiresNativeTools, requiresToolFreeHistoryForToolOptOut } from "@oh-my-pi/pi-catalog/compat/tools";
 import { preferredDialect } from "@oh-my-pi/pi-catalog/identity";
 import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
-import { type EditStore, PowerAssertion, type PowerAssertionOptions } from "@oh-my-pi/pi-natives";
+import { type EditStore, type PowerAssertion, type PowerAssertionOptions } from "@oh-my-pi/pi-natives";
 import {
 	$env,
 	escapeXmlText,
@@ -293,6 +293,7 @@ import type {
 	UsageFallbackConfirmer,
 } from "./agent-session-types";
 import { writeArtifact } from "./artifacts";
+import { startPowerAssertion } from "./power-assertion-backend";
 import { renderAttachmentSourceNotice } from "./attachment-source-notice";
 import { formatArtifactErrorNotice, type OutputMeta, stripOutputNotice } from "@oh-my-pi/pi-tui/tools/output-meta";
 import { truncateMiddle } from "@oh-my-pi/pi-tui/tools/streaming-output";
@@ -700,45 +701,6 @@ export function powerAssertionOptions(mode: "off" | "idle" | "display" | "system
 		system: mode === "system",
 		user: mode === "system",
 	};
-}
-
-/**
- * Code prefix `PowerAssertion.start` puts on its error message on Linux when the
- * system D-Bus socket does not exist (crates/pi-natives/src/power.rs,
- * `start_login1`), the "platform backend not present" case headless containers
- * hit by design. Refused or rejected connections do not carry it.
- */
-const POWER_BACKEND_UNAVAILABLE_CODE = "PowerBackendUnavailable:";
-
-let powerBackendUnavailableLogged = false;
-
-/**
- * Start a power assertion. A missing platform backend (headless container with
- * no D-Bus) is logged at debug once per process; any other failure still warns.
- */
-export function startPowerAssertion(
-	options: PowerAssertionOptions,
-	start: (options: PowerAssertionOptions) => PowerAssertion = PowerAssertion.start,
-): PowerAssertion | undefined {
-	try {
-		return start(options);
-	} catch (error) {
-		const message = error instanceof Error ? error.message : String(error);
-		if (message.startsWith(POWER_BACKEND_UNAVAILABLE_CODE)) {
-			if (!powerBackendUnavailableLogged) {
-				powerBackendUnavailableLogged = true;
-				logger.debug("Power assertion backend unavailable; sleep prevention disabled", { error: message });
-			}
-			return undefined;
-		}
-		logger.warn("Failed to acquire power assertion", { error: String(error) });
-		return undefined;
-	}
-}
-
-/** Test hook: forget that the unavailable-backend notice was already logged. */
-export function resetPowerBackendUnavailableLogForTests(): void {
-	powerBackendUnavailableLogged = false;
 }
 
 export class AgentSession implements SettingsScope {
