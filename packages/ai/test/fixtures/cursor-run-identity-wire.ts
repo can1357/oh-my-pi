@@ -33,9 +33,12 @@ interface VendorFirstPacket extends ProtoMessage {
 	timing: Uint8Array;
 	interaction: Uint8Array;
 }
-// The real server batches timing field 8 before interaction field 1 in one
-// protobuf envelope. The final oneof wins; a bad timing codec must not lose text.
+// Timing is independent of the message oneof: both wire orders must retain text.
 const vendorFirstPacket = pb<VendorFirstPacket>("fixture.vendor.FirstPacket", [
+	{ no: 1, name: "interaction", kind: "bytes" },
+	{ no: 8, name: "timing", kind: "bytes" },
+]);
+const vendorTimingFirstPacket = pb<VendorFirstPacket>("fixture.vendor.TimingFirstPacket", [
 	{ no: 8, name: "timing", kind: "bytes" },
 	{ no: 1, name: "interaction", kind: "bytes" },
 ]);
@@ -59,7 +62,8 @@ async function main(): Promise<void> {
 				handled = true;
 				received.push({ run: message.message.value, requestId: String(headers["x-request-id"]) });
 				stream.respond({ ":status": 200, "content-type": "application/connect+proto" });
-				const firstPacket = vendorFirstPacket.encode({
+				const packetCodec = received.length === 2 ? vendorTimingFirstPacket : vendorFirstPacket;
+				const firstPacket = packetCodec.encode({
 					timing: vendorTiming.encode({
 						serverFirstTokenMs: 0.5,
 						preStreamSetupMs: 1.25,

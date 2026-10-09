@@ -1051,8 +1051,8 @@ message AgentServerMessage {
       ConversationStateStructure conversation_checkpoint_update = 3;
       KvServerMessage kv_server_message = 4;
       InteractionQuery interaction_query = 7;
-      TtftBreakdown ttft_breakdown = 8;
    }
+   TtftBreakdown ttft_breakdown = 8;
 }
 
 message TtftBreakdown {
