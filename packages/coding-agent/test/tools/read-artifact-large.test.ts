@@ -119,6 +119,22 @@ function streamedStuckRangeArtifact(): string {
 	return lines.join("\n");
 }
 
+/** 60 KB `{`-opener at line 1, closer at 100, 250 small lines: block-context budget bait. */
+function blockBudgetArtifact(): string {
+	const lines = [`${"y".repeat(60_000)} {`];
+	for (let index = 2; index <= 250; index++) {
+		lines.push(index === 100 ? "}" : `s-${String(index).padStart(3, "0")}`);
+	}
+	return lines.join("\n");
+}
+
+/** Small line 1, 60 KB line 2, small lines 3-142: omitted-line remainder bait. */
+function omittedRemainderArtifact(): string {
+	const lines = ["ctx-small", `big-${"x".repeat(60_000)}-end`];
+	for (let index = 3; index <= 142; index++) lines.push(`wanted-${String(index).padStart(3, "0")}`);
+	return lines.join("\n");
+}
+
 /** Same scale, but the first line alone is 70 KB: wider than any per-range cap. */
 function streamedOversizedFirstLineArtifact(): string {
 	return [`oversized-first ${"x".repeat(70_000)}`, streamedMultiRangeArtifact()].join("\n");
@@ -599,5 +615,44 @@ describe("read tool large artifact handling", () => {
 		} finally {
 			homeSpy.mockRestore();
 		}
+	});
+
+	it("withholds block context that alone exceeds the artifact budget", async () => {
+		await Bun.write(path.join(artifactDir, "0.mcp.log"), blockBudgetArtifact());
+
+		// With column truncation off the 60 KB `{`-opener would ride along verbatim
+		// as off-window block context for lines 100 and 200, pushing the page past
+		// the fixed 50 KB per-call budget `pagedSource` cannot spill downstream.
+		const zeroColumnTool = new ReadTool({
+			...makeSession(testDir),
+			settings: Settings.isolated({ "tools.outputMaxColumns": 0 }),
+		});
+		const result = await zeroColumnTool.execute("call-block-budget", {
+			path: "artifact://0:100-100,200-200",
+		});
+		const output = getTextOutput(result);
+
+		expect(output).toContain("s-200");
+		expect(output).not.toContain("yyyyyyyyyy");
+		expect(Buffer.byteLength(output, "utf8")).toBeLessThanOrEqual(51_200);
+	});
+
+	it("carries the remainder after an omitted requested line", async () => {
+		await Bun.write(path.join(artifactDir, "0.mcp.log"), omittedRemainderArtifact());
+
+		// Line 2 is 60 KB behind a small retained context line: the page names the
+		// omitted line's raw preview, and must also carry lines 3-142 explicitly —
+		// the suppressed `nextOffset` leaves them no other continuation.
+		const result = await tool.execute("call-omitted-remainder", { path: "artifact://0:2-142" });
+		const output = getTextOutput(result);
+
+		expect(output).toContain("could not fit after preceding context");
+		expect(output).toContain("artifact://0:raw:2-2");
+		expect(output).toContain("Use artifact://0:3-142 to continue");
+
+		const followed = getTextOutput(
+			await tool.execute("call-omitted-remainder-follow", { path: "artifact://0:3-142" }),
+		);
+		expect(followed).toContain("wanted-003");
 	});
 });

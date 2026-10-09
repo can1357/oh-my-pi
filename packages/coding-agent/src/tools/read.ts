@@ -1726,13 +1726,19 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 					},
 				},
 			);
-			const firstLine = entries.find(entry => entry.kind === "line");
+			const budgetedEntries =
+				located?.spec.artifactStore === true &&
+				Buffer.byteLength(lineEntriesToPlainText(entries, BRACKET_CONTEXT_ELLIPSIS), "utf8") >
+					ARTIFACT_TOTAL_READ_BUDGET_BYTES
+					? entries.filter(entry => entry.kind !== "line" || entry.context === false)
+					: entries;
+			const firstLine = budgetedEntries.find(entry => entry.kind === "line");
 			displayContent = {
-				text: lineEntriesToPlainText(entries, BRACKET_CONTEXT_ELLIPSIS),
+				text: lineEntriesToPlainText(budgetedEntries, BRACKET_CONTEXT_ELLIPSIS),
 				startLine: firstLine?.kind === "line" ? firstLine.lineNumber : (visibleSpans[0]?.startLine ?? 1),
-				lineNumbers: entries.map(entry => (entry.kind === "line" ? entry.lineNumber : null)),
+				lineNumbers: budgetedEntries.map(entry => (entry.kind === "line" ? entry.lineNumber : null)),
 			};
-			outputText = formatLineEntriesWithMode(entries, shouldAddHashLines, shouldAddLineNumbers);
+			outputText = formatLineEntriesWithMode(budgetedEntries, shouldAddHashLines, shouldAddLineNumbers);
 		} else {
 			outputText = blocks.join("\n\n…\n\n");
 		}
@@ -2479,9 +2485,13 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 						// raise a fixed per-call budget; retry without the context,
 						// keeping the original page when the retry also collects
 						// nothing (an oversized requested line keeps its own notice).
-						const startDisplay = startLineDisplay;
-						const retryLines = (await collectWindow(requestedStart)).lines;
-						if (retryLines.length > 0) {
+						// Decided from the stuck line's size instead of a probe scan:
+						// when it alone exceeds the per-range cap the retry could
+						// only collect nothing, so the extra O(prefix) pass over a
+						// potentially multi-gigabyte artifact is pure waste.
+						const stuckBytes = lineWindow.byteLimitLine?.byteLength ?? 0;
+						if (stuckBytes <= maxBytesForRead) {
+							const startDisplay = startLineDisplay;
 							await dropLeadingContext(
 								`[Leading context line ${startDisplay} left no room in the ${formatBytes(maxBytesForRead)} per-read budget and was skipped to show the requested lines.]`,
 							);
@@ -2651,13 +2661,28 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 								excludeFromContext: skippedContextLines.length > 0 ? new Set(skippedContextLines) : undefined,
 							},
 						);
-						const firstLine = entries.find(entry => entry.kind === "line");
+						// Block context is best-effort readability aid: when an
+						// off-window opener alone exceeds the fixed artifact budget
+						// (e.g. a 60 KB `{`-opener with `outputMaxColumns=0`), drop
+						// the context lines rather than delivering an over-budget
+						// page `pagedSource` cannot spill downstream.
+						const budgetedEntries =
+							located?.spec.artifactStore === true &&
+							Buffer.byteLength(lineEntriesToPlainText(entries, BRACKET_CONTEXT_ELLIPSIS), "utf8") >
+								ARTIFACT_TOTAL_READ_BUDGET_BYTES
+								? entries.filter(entry => entry.kind !== "line" || entry.context === false)
+								: entries;
+						const firstLine = budgetedEntries.find(entry => entry.kind === "line");
 						capturedDisplayContent = {
-							text: lineEntriesToPlainText(entries, BRACKET_CONTEXT_ELLIPSIS),
+							text: lineEntriesToPlainText(budgetedEntries, BRACKET_CONTEXT_ELLIPSIS),
 							startLine: firstLine?.kind === "line" ? firstLine.lineNumber : startLineDisplay,
-							lineNumbers: entries.map(entry => (entry.kind === "line" ? entry.lineNumber : null)),
+							lineNumbers: budgetedEntries.map(entry => (entry.kind === "line" ? entry.lineNumber : null)),
 						};
-						const formatted = formatLineEntriesWithMode(entries, shouldAddHashLines, shouldAddLineNumbers);
+						const formatted = formatLineEntriesWithMode(
+							budgetedEntries,
+							shouldAddHashLines,
+							shouldAddLineNumbers,
+						);
 						if (!hashContext || emittedHashlineHeader) return formatted;
 						emittedHashlineHeader = true;
 						return prependHashlineHeader(formatted, hashContext);
@@ -2733,6 +2758,18 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 								`${selectorBase}:raw:${lineNumber}-${lineNumber}`,
 								located?.spec.artifactStore === true,
 							)}`;
+							// The omitted line is not the whole story: lines after it
+							// were requested too, and the suppressed `nextOffset`
+							// leaves them without any continuation. Name the bounded
+							// remainder so following it skips nothing requested.
+							if (located?.spec.artifactStore === true) {
+								const resumeFrom = lineNumber + 1;
+								const resumeEnd = limit !== undefined ? requestedStart + effectiveLimit : undefined;
+								if (resumeEnd === undefined || resumeEnd >= resumeFrom) {
+									const resumePart = resumeEnd !== undefined ? `${resumeFrom}-${resumeEnd}` : `${resumeFrom}-`;
+									outputText += `\n\n[More lines in file. Use ${selectorBase}:${resumePart} to continue]`;
+								}
+							}
 						} else {
 							outputText += `\n\n[More lines in file (${formatBytes(
 								fileSize,
@@ -2750,6 +2787,17 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 								`${selectorBase}:raw:${lineNumber}-${lineNumber}`,
 								located?.spec.artifactStore === true,
 							)}`;
+							// Same orphaned-remainder as the unscanned branch above:
+							// the omitted line's raw hint covers one line, so carry
+							// the rest of the requested window explicitly.
+							if (located?.spec.artifactStore === true) {
+								const resumeFrom = lineNumber + 1;
+								const resumeEnd = limit !== undefined ? requestedStart + effectiveLimit : undefined;
+								if (resumeEnd === undefined || resumeEnd >= resumeFrom) {
+									const resumePart = resumeEnd !== undefined ? `${resumeFrom}-${resumeEnd}` : `${resumeFrom}-`;
+									outputText += `\n\n[More lines in file. Use ${selectorBase}:${resumePart} to continue]`;
+								}
+							}
 						} else if (
 							rawSelector &&
 							located?.spec.artifactStore === true &&
