@@ -8,7 +8,7 @@
  * - omp://<file>.md - Reads a specific documentation file
  */
 import * as path from "node:path";
-import { resolveContainedPathSync } from "../discovery/contained-path";
+import { resolveContainedPath, resolveContainedPathSync } from "../discovery/contained-path";
 import ompDoc from "../prompts/internal-urls/omp.md" with { type: "text" };
 import { getDocFilenames, getDocsDiskRoot, getEmbeddedDoc } from "./docs-index";
 import { ompDocFilename, ompDocRel, ompDocsScopeEntries } from "./omp-scope";
@@ -103,7 +103,15 @@ export class OmpProtocolHandler implements ProtocolHandler {
 
 	/** Async counterpart of {@link locateSync}; null instead of undefined. */
 	async locate(url: InternalUrl, _context?: ResolveContext, _options?: LocateOptions): Promise<string | null> {
-		return docFileFor(url) ?? null;
+		// Async filesystem calls: the markdown linkifier awaits this off the
+		// render path, so blocking realpath/stat has no place here even though
+		// the first call still initializes the memoized corpus synchronously.
+		const docPath = ompDocRel(url);
+		if (docPath.length === 0) return null;
+		const root = getDocsDiskRoot();
+		if (root === null || !getDocFilenames().includes(docPath)) return null;
+		const resolution = await resolveContainedPath(root, path.resolve(root, docPath));
+		return resolution.status === "ok" ? resolution.realPath : null;
 	}
 
 	async #listDocs(url: InternalUrl): Promise<InternalResource> {
