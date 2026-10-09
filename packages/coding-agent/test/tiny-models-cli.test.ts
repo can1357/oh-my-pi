@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, spyOn, vi } from "bun:test";
 import { resolveModels, runTinyModelsCommand } from "@oh-my-pi/pi-coding-agent/cli/tiny-models-cli";
-import { TINY_LOCAL_MODELS } from "@oh-my-pi/pi-coding-agent/tiny/models";
+import { TINY_LOCAL_MODELS, isTinyJudgeLocalModelKey } from "@oh-my-pi/pi-coding-agent/tiny/models";
 import { tinyTitleClient } from "@oh-my-pi/pi-coding-agent/tiny/title-client";
 
 afterEach(() => {
@@ -18,14 +18,26 @@ describe("tiny-models download model resolution", () => {
 		const all = resolveModels("all", false);
 		for (const key of unsupported) expect(all).not.toContain(key);
 
+		// Usable = loadable AND not a judge model: judges are opt-in
+		// (role-scoped download on first judge use), not bulk prefetch —
+		// excluded from `all` by design, still explicitly resolvable.
 		const usable = TINY_LOCAL_MODELS.filter(
-			spec => !("onnxUnsupportedReason" in spec) || !spec.onnxUnsupportedReason,
+			spec =>
+				(!("onnxUnsupportedReason" in spec) || !spec.onnxUnsupportedReason) &&
+				!isTinyJudgeLocalModelKey(spec.key),
 		).map(spec => spec.key);
 		for (const key of usable) expect(all).toContain(key);
+		for (const spec of TINY_LOCAL_MODELS.filter(spec => isTinyJudgeLocalModelKey(spec.key))) {
+			expect(all).not.toContain(spec.key);
+			expect(resolveModels(spec.key, false)).toEqual([spec.key]);
+		}
 	});
 
 	it("includes ONNX-blocked models in `all` when the MLX backend is active", () => {
-		expect(resolveModels("all", true)).toEqual(TINY_LOCAL_MODELS.map(spec => spec.key));
+		// Judge models stay excluded even under MLX (no mlxRepo — judge forces ONNX).
+		expect(resolveModels("all", true)).toEqual(
+			TINY_LOCAL_MODELS.filter(spec => !isTinyJudgeLocalModelKey(spec.key)).map(spec => spec.key),
+		);
 	});
 
 	it("still resolves an explicitly requested unsupported model (only `all` is filtered)", () => {
