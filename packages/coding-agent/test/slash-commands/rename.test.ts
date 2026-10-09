@@ -10,7 +10,7 @@ import type { ExtensionActions, ExtensionUIContext } from "@oh-my-pi/pi-coding-a
 import { initializeExtensions } from "@oh-my-pi/pi-coding-agent/modes/runtime-init";
 import { runRootCommand } from "@oh-my-pi/pi-coding-agent/main";
 import type { MessagingService } from "@oh-my-pi/pi-coding-agent/messaging/service";
-import { RESERVED_SESSION_NAME_ERROR } from "@oh-my-pi/pi-coding-agent/messaging/names";
+import { RESERVED_SESSION_NAME_ERROR, sessionAddress } from "@oh-my-pi/pi-coding-agent/messaging/names";
 import { CommandController } from "@oh-my-pi/pi-coding-agent/modes/controllers/command-controller";
 import { ExtensionUiController } from "@oh-my-pi/pi-coding-agent/modes/controllers/extension-ui-controller";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
@@ -225,6 +225,33 @@ for (const mode of ["TUI", "headless"] as const) {
 			expect(stored).toMatch(/^release notes-[a-z]+-[a-z]+$/);
 			expect(output.mock.calls[0]?.[0]).toContain(stored);
 			expect(output.mock.calls[0]?.[0]).toContain(' ("release notes" is used by another session)');
+		});
+
+		it("addresses a carded title without its card and checks collisions and reserved names on it", async () => {
+			const { session, sessionManager, runtime, ctx, execute } = createRuntime(mode);
+			cfgTitleIcons.override(runtime.settings, "emoji");
+			const messaging = { listSessions: async () => [{ name: "beta" }] } as unknown as MessagingService;
+			Object.defineProperty(session, "messaging", { value: messaging, configurable: true });
+			vi.spyOn(tinyTitleClient, "generate").mockResolvedValue("🧪 BETA");
+			vi.spyOn(Math, "random").mockReturnValue(0);
+			const address = () =>
+				sessionAddress({
+					cwd: sessionManager.getCwd(),
+					sessionId: sessionManager.getSessionId(),
+					sessionName: sessionManager.getSessionName(),
+					titleSource: sessionManager.titleSource,
+					directPrint: false,
+				});
+
+			await execute("/rename beta");
+			const stored = sessionManager.getSessionName()!;
+			expect(stored).toMatch(/^🧪 BETA: beta-[a-z]+-[a-z]+$/);
+			expect(address()).toBe(stored.slice("🧪 BETA: ".length));
+
+			const error = mode === "TUI" ? vi.spyOn(ctx, "showError") : vi.spyOn(runtime, "output");
+			await execute("/rename @x");
+			expect(error.mock.calls).toEqual([[RESERVED_SESSION_NAME_ERROR]]);
+			expect(sessionManager.getSessionName()).toBe(stored);
 		});
 
 		it("replaces a manual title from conversation context and protects the result from automatic titles", async () => {
