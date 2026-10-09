@@ -15,7 +15,7 @@ export const cfgMessagingEnabled = register({
 		tab: "interaction",
 		group: "Messages",
 		label: "Cross-session messaging",
-		description: "Message other top-level omp sessions on this machine",
+		description: "Message other top-level omp sessions on this machine. A project config can only restrict this.",
 	},
 });
 
@@ -41,7 +41,8 @@ export const cfgMessagingDialogExpiry = register({
 		tab: "interaction",
 		group: "Messages",
 		label: "Dialog expiry",
-		description: "How long a default-policy message waits for approval; explicit hold does not expire",
+		description:
+			"How long a default-policy message waits for approval; explicit hold does not expire. Project configs cannot change this.",
 	},
 });
 
@@ -54,7 +55,7 @@ export const cfgMessagingSend = register({
 		tab: "interaction",
 		group: "Messages",
 		label: "Send to other sessions",
-		description: "Allow or deny outgoing cross-session messages",
+		description: "Allow or deny outgoing cross-session messages. A project config can only restrict this.",
 	},
 });
 
@@ -67,7 +68,8 @@ export const cfgMessagingList = register({
 		tab: "interaction",
 		group: "Messages",
 		label: "List other sessions",
-		description: "Show or hide the other-sessions roster; does not prevent sending by address",
+		description:
+			"Show or hide the other-sessions roster; does not prevent sending by address. A project config can only restrict this.",
 	},
 });
 
@@ -80,7 +82,8 @@ export const cfgMessagingRateLimit = register({
 		tab: "interaction",
 		group: "Messages",
 		label: "Messages per sender per window",
-		description: "Maximum messages from one sender in a rate window (positive integer)",
+		description:
+			"Maximum messages from one sender in a rate window (positive integer). A project config can only restrict this.",
 	},
 });
 
@@ -93,7 +96,7 @@ export const cfgMessagingRateWindowSeconds = register({
 		tab: "interaction",
 		group: "Messages",
 		label: "Rate window (s)",
-		description: "Per-sender rate window in seconds (positive integer)",
+		description: "Per-sender rate window in seconds (positive integer). A project config can only restrict this.",
 	},
 });
 
@@ -106,7 +109,8 @@ export const cfgMessagingRepeatWindowSeconds = register({
 		tab: "interaction",
 		group: "Messages",
 		label: "Identical-repeat window (s)",
-		description: "Drop a message identical to one the same sender sent within this many seconds (positive integer)",
+		description:
+			"Drop a message identical to one the same sender sent within this many seconds (positive integer). A project config can only restrict this.",
 	},
 });
 
@@ -119,7 +123,8 @@ export const cfgMessagingRelayMaxHops = register({
 		tab: "interaction",
 		group: "Messages",
 		label: "Relay chain max hops",
-		description: "Drop relay chains that have reached this many hops (positive integer)",
+		description:
+			"Drop relay chains that have reached this many hops (positive integer). A project config can only restrict this.",
 	},
 });
 
@@ -132,6 +137,7 @@ export const cfgMessagingRelayMaxRevisits = register({
 		tab: "interaction",
 		group: "Messages",
 		label: "Relay chain max revisits",
-		description: "Drop relay chains that have revisited this session this many times (at least 1)",
+		description:
+			"Drop relay chains that have revisited this session this many times (at least 1). A project config can only restrict this.",
 	},
 });

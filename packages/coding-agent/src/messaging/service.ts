@@ -19,7 +19,7 @@ import {
 	type StoredRefusalNotice,
 } from "./mailbox";
 import { isReservedAddress, sessionAddress, sessionShortId } from "./names";
-import { type PermissionClass, resolveInbound } from "./policy";
+import { type PermissionClass, resolveInbound, resolveMessagingPolicy } from "./policy";
 import {
 	type InboxRequest,
 	type InboxResponse,
@@ -29,7 +29,6 @@ import {
 	type SessionSnapshot,
 	SNAPSHOT_TIMEOUT_MS,
 } from "./protocol";
-import { cfgMessagingList, cfgMessagingRateLimit, cfgMessagingRateWindowSeconds, cfgMessagingSend } from "./settings";
 import {
 	type InboxAuth,
 	type InboxEntry,
@@ -386,7 +385,7 @@ export class MessagingService {
 	}
 
 	async listSessions(signal?: AbortSignal): Promise<SessionListing[]> {
-		return cfgMessagingList.get(this.settings) === "deny" ? [] : (await this.#sessions(signal)).compatible;
+		return resolveMessagingPolicy(this.settings).list === "deny" ? [] : (await this.#sessions(signal)).compatible;
 	}
 
 	/** `includeOffline: false` skips the saved-session scan (a disk walk) when the caller already has a local match. */
@@ -418,7 +417,7 @@ export class MessagingService {
 		body: string,
 		opts: { notifyWhenIdle: boolean; signal?: AbortSignal },
 	): Promise<SendOutcome> {
-		if (cfgMessagingSend.get(this.settings) === "deny")
+		if (resolveMessagingPolicy(this.settings).send === "deny")
 			return { ok: false, text: "Not sent: sending to other sessions is turned off (messaging.send)." };
 		const notifyWhenIdle = opts.notifyWhenIdle && resolveInbound(this.settings).value !== "refuse";
 		const idleNoticeSkipped =
@@ -458,11 +457,10 @@ export class MessagingService {
 			};
 		const now = Date.now();
 		const targetId = target.sessionId;
-		const sent = (this.#sent.get(targetId) ?? []).filter(
-			at => at > now - cfgMessagingRateWindowSeconds.get(this.settings) * 1000,
-		);
+		const policy = resolveMessagingPolicy(this.settings);
+		const sent = (this.#sent.get(targetId) ?? []).filter(at => at > now - policy.rateWindowSeconds * 1000);
 		this.#sent.set(targetId, sent);
-		if (sent.length >= cfgMessagingRateLimit.get(this.settings))
+		if (sent.length >= policy.rateLimit)
 			return {
 				ok: false,
 				text: `Failed to send to ${address}: Too many messages to this session just now: ${sent.length} were sent recently and more would be dropped by its rate limit, so this one was not sent. Batch what remains into one message, or wait a little before sending more.`,

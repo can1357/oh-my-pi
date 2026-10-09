@@ -2,7 +2,7 @@ import { logger } from "@oh-my-pi/pi-utils";
 import { LRUCache } from "@oh-my-pi/pi-utils/lru";
 import type { Settings } from "../config/settings";
 import { ManagedTimers } from "../extensibility/extensions/managed-timers";
-import { decideInbound, dialogExpiryMs, type InboundDecision, resolveInbound } from "./policy";
+import { decideInbound, dialogExpiryMs, type InboundDecision, resolveInbound, resolveMessagingPolicy } from "./policy";
 import type { StoredMessage } from "./mailbox";
 import {
 	ACCEPTED_QUEUE_CAP,
@@ -13,13 +13,6 @@ import {
 	type SenderInfo,
 } from "./protocol";
 import type { MessagingHost, RemoteDelivery } from "./service";
-import {
-	cfgMessagingRateLimit,
-	cfgMessagingRateWindowSeconds,
-	cfgMessagingRelayMaxHops,
-	cfgMessagingRelayMaxRevisits,
-	cfgMessagingRepeatWindowSeconds,
-} from "./settings";
 
 type MessageRequest = Extract<InboxRequest, { type: "message" }>;
 export type OutgoingNotice = Omit<
@@ -93,19 +86,18 @@ export class InboundGate {
 		remember = true,
 	): InboxResponse | undefined {
 		const now = Date.now();
+		const policy = resolveMessagingPolicy(this.settings);
 		const senderKey = ownChild ? "own-child" : sender.shortId;
 		const key = JSON.stringify([senderKey, category, repeatKey]);
 		const at = this.#repeats.get(key);
 		if (at !== undefined) {
-			if (at > now - cfgMessagingRepeatWindowSeconds.get(this.settings) * 1000)
-				return { ok: true, outcome: "dropped", reason: "repeat" };
+			if (at > now - policy.repeatWindowSeconds * 1000) return { ok: true, outcome: "dropped", reason: "repeat" };
 			this.#repeats.delete(key);
 		}
-		const windowStart = now - cfgMessagingRateWindowSeconds.get(this.settings) * 1000;
+		const windowStart = now - policy.rateWindowSeconds * 1000;
 		const rates = (this.#rates.get(senderKey) ?? []).filter(at => at > windowStart);
 		this.#rates.set(senderKey, rates);
-		if (rates.length >= cfgMessagingRateLimit.get(this.settings))
-			return { ok: true, outcome: "dropped", reason: "rate" };
+		if (rates.length >= policy.rateLimit) return { ok: true, outcome: "dropped", reason: "rate" };
 		rates.push(now);
 		if (remember) this.#repeats.set(key, now);
 		return undefined;
@@ -117,9 +109,10 @@ export class InboundGate {
 	}
 
 	#relayLoops(chain: readonly string[]): boolean {
+		const policy = resolveMessagingPolicy(this.settings);
 		return (
-			chain.length >= cfgMessagingRelayMaxHops.get(this.settings) ||
-			chain.filter(id => id === this.ownShortId()).length >= cfgMessagingRelayMaxRevisits.get(this.settings)
+			chain.length >= policy.relayMaxHops ||
+			chain.filter(id => id === this.ownShortId()).length >= policy.relayMaxRevisits
 		);
 	}
 

@@ -1,7 +1,18 @@
-import { logger } from "@oh-my-pi/pi-utils";
-import type { RawSettings, Settings } from "../config/settings";
+import { isRecord, logger } from "@oh-my-pi/pi-utils";
+import type { Setting } from "../config/registry";
+import type { Settings } from "../config/settings";
 import type { ApprovalMode } from "../tools/approval";
-import { cfgMessagingDialogExpiry } from "./settings";
+import {
+	cfgMessagingDialogExpiry,
+	cfgMessagingEnabled,
+	cfgMessagingList,
+	cfgMessagingRateLimit,
+	cfgMessagingRateWindowSeconds,
+	cfgMessagingRelayMaxHops,
+	cfgMessagingRelayMaxRevisits,
+	cfgMessagingRepeatWindowSeconds,
+	cfgMessagingSend,
+} from "./settings";
 
 export type PermissionClass = "bypass" | "prompting";
 export type InboundValue = "accept" | "hold" | "refuse";
@@ -14,20 +25,70 @@ export type InboundDecision = "accept" | "hold-default" | "hold-explicit" | "ref
 const STRICTNESS: Record<InboundValue, number> = { accept: 0, hold: 1, refuse: 2 };
 let warned = false;
 
-function rawInbound(layer: RawSettings): unknown {
-	const messaging = layer.messaging;
-	return messaging && typeof messaging === "object" && !Array.isArray(messaging)
-		? (messaging as Record<string, unknown>).crossSessionInbound
-		: undefined;
+function messagingLayers(settings: Settings): Record<string, unknown>[] {
+	return [
+		settings.getLayerRaw("runtime"),
+		settings.getLayerRaw("overlay"),
+		settings.getGlobalSettings(),
+		settings.getProjectSettings(),
+	].map(layer => {
+		const messaging = layer.messaging;
+		return isRecord(messaging) ? messaging : {};
+	});
 }
 
 function inboundLayers(settings: Settings): unknown[] {
-	return [
-		rawInbound(settings.getLayerRaw("runtime")),
-		rawInbound(settings.getLayerRaw("overlay")),
-		rawInbound(settings.getGlobalSettings()),
-		rawInbound(settings.getProjectSettings()),
-	];
+	return messagingLayers(settings).map(layer => layer.crossSessionInbound);
+}
+
+export interface MessagingPolicy {
+	enabled: boolean;
+	send: "allow" | "deny";
+	list: "allow" | "deny";
+	rateLimit: number;
+	rateWindowSeconds: number;
+	repeatWindowSeconds: number;
+	relayMaxHops: number;
+	relayMaxRevisits: number;
+	dialogExpiry: "60s" | "5m" | "10m" | "never";
+}
+
+/** Trusted layers (runtime incl. --cross-session, --config overlays, global) decide; project config can only restrict. */
+export function resolveMessagingPolicy(settings: Settings): MessagingPolicy {
+	const layers = messagingLayers(settings);
+	function resolve<T>(handle: Setting<T>, restrict?: (trusted: T, project: T) => T): T {
+		const key = handle.segments[1]!;
+		const valid = (raw: unknown): raw is T => {
+			if (!handle.accepts(raw)) return false;
+			try {
+				handle.definition.validate?.(raw);
+				return true;
+			} catch {
+				return false;
+			}
+		};
+		let trusted = handle.default;
+		for (let i = 0; i < 3; i++) {
+			const raw = layers[i]![key];
+			if (valid(raw)) {
+				trusted = raw;
+				break;
+			}
+		}
+		const project = layers[3]![key];
+		return restrict && valid(project) ? restrict(trusted, project) : trusted;
+	}
+	return {
+		enabled: resolve(cfgMessagingEnabled, (trusted, project) => trusted && project),
+		send: resolve(cfgMessagingSend, (trusted, project) => (project === "deny" ? project : trusted)),
+		list: resolve(cfgMessagingList, (trusted, project) => (project === "deny" ? project : trusted)),
+		rateLimit: resolve(cfgMessagingRateLimit, Math.min),
+		rateWindowSeconds: resolve(cfgMessagingRateWindowSeconds, Math.max),
+		repeatWindowSeconds: resolve(cfgMessagingRepeatWindowSeconds, Math.max),
+		relayMaxHops: resolve(cfgMessagingRelayMaxHops, Math.min),
+		relayMaxRevisits: resolve(cfgMessagingRelayMaxRevisits, Math.min),
+		dialogExpiry: resolve(cfgMessagingDialogExpiry),
+	};
 }
 
 function isInbound(value: unknown): value is InboundValue {
@@ -86,7 +147,7 @@ export function decideInbound(input: {
 }
 
 export function dialogExpiryMs(settings: Settings): number | null {
-	switch (cfgMessagingDialogExpiry.get(settings)) {
+	switch (resolveMessagingPolicy(settings).dialogExpiry) {
 		case "60s":
 			return 60_000;
 		case "5m":

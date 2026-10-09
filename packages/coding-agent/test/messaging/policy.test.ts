@@ -1,4 +1,13 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
+import { Agent } from "@oh-my-pi/pi-agent-core";
+import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
+import { ModelRegistry } from "../../src/config/model-registry";
+import { AgentSession } from "../../src/session/agent-session";
+import { bindSessionMessaging } from "../../src/session/messaging-host";
+import { SessionManager } from "../../src/session/session-manager";
+import { convertToLlm } from "../../src/session/messages";
+import * as transport from "../../src/messaging/transport";
+import { createInMemoryAuthStorage } from "../helpers/agent-session-setup";
 import { type RawSettings, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { InboundGate } from "../../src/messaging/inbound";
 import type { SenderInfo } from "../../src/messaging/protocol";
@@ -10,6 +19,7 @@ import {
 	inboundWarning,
 	permissionClassFromApproval,
 	resolveInbound,
+	resolveMessagingPolicy,
 	type InboundDecision,
 	type InboundValue,
 	type PermissionClass,
@@ -17,6 +27,7 @@ import {
 } from "@oh-my-pi/pi-coding-agent/messaging/policy";
 import {
 	cfgMessagingDialogExpiry,
+	cfgMessagingEnabled,
 	cfgMessagingInbound,
 	cfgMessagingRateLimit,
 	cfgMessagingRateWindowSeconds,
@@ -294,4 +305,279 @@ describe("cross-session inbound policy", () => {
 		cfgMessagingInbound.override(settings, "accept");
 		expect(events).toEqual(["first", "second", "first"]);
 	});
+});
+
+describe("tighten-only messaging policy", () => {
+	async function fixture(
+		global: Record<string, unknown>,
+		project: Record<string, unknown>,
+		overrides = {},
+		overlay?: Record<string, unknown>,
+	) {
+		const dir = TempDir.createSync("@messaging-trusted-policy-");
+		await Bun.write(dir.join("agent", "config.yml"), JSON.stringify({ messaging: global }));
+		await Bun.write(dir.join("project", ".omp", "config.yml"), JSON.stringify({ messaging: project }));
+		const configFiles: string[] = [];
+		if (overlay) {
+			configFiles.push(dir.join("overlay.yml"));
+			await Bun.write(configFiles[0]!, JSON.stringify({ messaging: overlay }));
+		}
+		const settings = await Settings.loadReadOnly({
+			cwd: dir.join("project"),
+			agentDir: dir.join("agent"),
+			overrides,
+			configFiles,
+		});
+		return { dir, settings };
+	}
+
+	it("ignores project enablement and all loosening, including dialog expiry", async () => {
+		const { dir, settings } = await fixture(
+			{
+				send: "deny",
+				list: "deny",
+				rateLimit: 5,
+				rateWindowSeconds: 120,
+				repeatWindowSeconds: 90,
+				relayMaxHops: 2,
+				relayMaxRevisits: 1,
+				dialogExpiry: "60s",
+				crossSessionInbound: "hold",
+			},
+			{
+				enabled: true,
+				send: "allow",
+				list: "allow",
+				rateLimit: 1000000,
+				rateWindowSeconds: 1,
+				repeatWindowSeconds: 1,
+				relayMaxHops: 100,
+				relayMaxRevisits: 100,
+				dialogExpiry: "never",
+				crossSessionInbound: "accept",
+			},
+		);
+		try {
+			expect(resolveMessagingPolicy(settings)).toEqual({
+				enabled: false,
+				send: "deny",
+				list: "deny",
+				rateLimit: 5,
+				rateWindowSeconds: 120,
+				repeatWindowSeconds: 90,
+				relayMaxHops: 2,
+				relayMaxRevisits: 1,
+				dialogExpiry: "60s",
+			});
+			expect(resolveInbound(settings)).toEqual({ value: "hold", invalid: false });
+			expect(dialogExpiryMs(settings)).toBe(60000);
+			expect(resolveMessagingPolicy(settings.overlay())).toEqual(resolveMessagingPolicy(settings));
+		} finally {
+			await dir.remove();
+		}
+	});
+
+	it("lets projects restrict runtime enablement, permissions, counts and windows", async () => {
+		const { dir, settings } = await fixture(
+			{
+				enabled: true,
+				send: "allow",
+				list: "allow",
+				rateLimit: 20,
+				rateWindowSeconds: 60,
+				repeatWindowSeconds: 30,
+				relayMaxHops: 8,
+				relayMaxRevisits: 3,
+				dialogExpiry: "5m",
+			},
+			{
+				enabled: false,
+				send: "deny",
+				list: "deny",
+				rateLimit: 2,
+				rateWindowSeconds: 120,
+				repeatWindowSeconds: 90,
+				relayMaxHops: 2,
+				relayMaxRevisits: 1,
+				dialogExpiry: "never",
+			},
+			{ "messaging.enabled": true },
+		);
+		try {
+			expect(cfgMessagingEnabled.get(settings)).toBe(true);
+			expect(resolveMessagingPolicy(settings)).toEqual({
+				enabled: false,
+				send: "deny",
+				list: "deny",
+				rateLimit: 2,
+				rateWindowSeconds: 120,
+				repeatWindowSeconds: 90,
+				relayMaxHops: 2,
+				relayMaxRevisits: 1,
+				dialogExpiry: "5m",
+			});
+			expect(resolveMessagingPolicy(settings.overlay({ "messaging.enabled": true }))).toEqual(
+				resolveMessagingPolicy(settings),
+			);
+		} finally {
+			await dir.remove();
+		}
+	});
+
+	it("uses the first valid trusted value and ignores invalid project values", async () => {
+		const { dir, settings } = await fixture(
+			{
+				enabled: true,
+				send: "deny",
+				list: "deny",
+				rateLimit: 5,
+				rateWindowSeconds: 120,
+				repeatWindowSeconds: 90,
+				relayMaxHops: 2,
+				relayMaxRevisits: 1,
+				dialogExpiry: "60s",
+			},
+			{
+				enabled: "false",
+				send: "DENY",
+				list: false,
+				rateLimit: 0,
+				rateWindowSeconds: -1,
+				repeatWindowSeconds: 1.5,
+				relayMaxHops: "1",
+				relayMaxRevisits: null,
+				dialogExpiry: "never",
+			},
+			{
+				"messaging.send": "allow",
+				"messaging.rateLimit": 7,
+				"messaging.rateWindowSeconds": 120,
+				"messaging.repeatWindowSeconds": 90,
+			},
+			{
+				enabled: false,
+				send: "deny",
+				list: "allow",
+				rateLimit: 6,
+				rateWindowSeconds: 0,
+				repeatWindowSeconds: "1",
+				relayMaxHops: 4,
+				relayMaxRevisits: 2,
+				dialogExpiry: "10m",
+			},
+		);
+		try {
+			expect(resolveMessagingPolicy(settings)).toEqual({
+				enabled: false,
+				send: "allow",
+				list: "allow",
+				rateLimit: 7,
+				rateWindowSeconds: 120,
+				repeatWindowSeconds: 90,
+				relayMaxHops: 4,
+				relayMaxRevisits: 2,
+				dialogExpiry: "10m",
+			});
+			expect(resolveMessagingPolicy(settings.overlay({ "messaging.enabled": true }))).toEqual({
+				...resolveMessagingPolicy(settings),
+				enabled: true,
+			});
+		} finally {
+			await dir.remove();
+		}
+	});
+
+	it("falls back to defaults when no layer supplies a valid value", async () => {
+		const { dir, settings } = await fixture(
+			{ enabled: null, send: "invalid", dialogExpiry: "invalid" },
+			{ enabled: true, send: "allow", rateLimit: 1000000, dialogExpiry: "never" },
+			{},
+			{ enabled: "true", send: "invalid", dialogExpiry: "invalid" },
+		);
+		try {
+			expect(resolveMessagingPolicy(settings)).toEqual({
+				enabled: false,
+				send: "allow",
+				list: "allow",
+				rateLimit: 30,
+				rateWindowSeconds: 60,
+				repeatWindowSeconds: 30,
+				relayMaxHops: 8,
+				relayMaxRevisits: 3,
+				dialogExpiry: "5m",
+			});
+		} finally {
+			await dir.remove();
+		}
+	});
+
+	it.each([false, true])(
+		"reconciles a masked project enablement edit on a real session (overlay=%s)",
+		async overlay => {
+			const dir = TempDir.createSync("@messaging-enable-reload-");
+			const file = dir.join("project", ".omp", "config.yml");
+			await Bun.write(file, JSON.stringify({ messaging: { enabled: true } }));
+			const parent = await Settings.loadIsolated({
+				cwd: dir.join("project"),
+				agentDir: dir.join("agent"),
+				overrides: { "messaging.enabled": true },
+			});
+			const settings = overlay ? parent.overlay() : parent;
+			const publish = transport.publishInbox;
+			vi.spyOn(transport, "publishInbox").mockImplementation((handler, options) =>
+				publish(handler, { ...options, dir: dir.join("inboxes") }),
+			);
+			const auth = createInMemoryAuthStorage();
+			const model = createMockModel({ provider: "openai", id: "messaging-policy" }).model;
+			const session = new AgentSession({
+				agent: new Agent({
+					initialState: { model, systemPrompt: ["Policy test"], tools: [], messages: [] },
+					convertToLlm,
+				}),
+				sessionManager: SessionManager.inMemory(dir.path()),
+				settings,
+				modelRegistry: new ModelRegistry(auth),
+				agentId: "Main",
+				agentKind: "main",
+				toolRegistry: new Map(),
+			});
+			const binding = await bindSessionMessaging(session, { directPrint: false, claimNames: false });
+			const effective = vi.fn();
+			const stopEffective = cfgMessagingEnabled.listen(settings, effective);
+			try {
+				expect(session.messaging).toBeDefined();
+				const stopped = Promise.withResolvers<void>();
+				const setMessaging = session.setMessaging.bind(session);
+				vi.spyOn(session, "setMessaging").mockImplementation(service => {
+					setMessaging(service);
+					if (!service) stopped.resolve();
+				});
+				await Bun.write(file, JSON.stringify({ messaging: { enabled: false } }));
+				await parent.reloadFromDisk();
+				await stopped.promise;
+				expect(cfgMessagingEnabled.get(settings)).toBe(true);
+				expect(effective).not.toHaveBeenCalled();
+				expect(session.messaging).toBeUndefined();
+				const started = Promise.withResolvers<void>();
+				vi.spyOn(session, "setMessaging").mockImplementation(service => {
+					setMessaging(service);
+					if (service) started.resolve();
+				});
+				await Bun.write(file, JSON.stringify({ messaging: { enabled: true } }));
+				await parent.reloadFromDisk();
+				await started.promise;
+				expect(session.messaging).toBeDefined();
+				expect(effective).not.toHaveBeenCalled();
+			} finally {
+				stopEffective();
+				await binding.dispose();
+				await session.dispose();
+				auth.close();
+				parent.cancelPendingSaves();
+				AgentStorage.close();
+				await dir.remove();
+			}
+		},
+		5000,
+	);
 });

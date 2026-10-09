@@ -1,7 +1,7 @@
 import { logger } from "@oh-my-pi/pi-utils";
 import { claimSessionName, isReservedAddress } from "../messaging/names";
 import { MessagingService, formatSessionListing, type MessagingHost } from "../messaging/service";
-import { cfgMessagingEnabled, cfgMessagingList } from "../messaging/settings";
+import { resolveMessagingPolicy } from "../messaging/policy";
 import type { AgentSession } from "./agent-session";
 
 const unavailableReasons = new WeakMap<AgentSession, string>();
@@ -54,7 +54,7 @@ export async function bindSessionMessaging(
 	};
 
 	const reconcile = async () => {
-		if (disposed || !cfgMessagingEnabled.get(session.settings)) {
+		if (disposed || !resolveMessagingPolicy(session.settings).enabled) {
 			await stop();
 			return;
 		}
@@ -90,7 +90,7 @@ export async function bindSessionMessaging(
 		};
 		try {
 			const started = await MessagingService.start(host, session.settings, session.suspendedMessagingIdentity);
-			if (disposed || !cfgMessagingEnabled.get(session.settings)) {
+			if (disposed || !resolveMessagingPolicy(session.settings).enabled) {
 				await started.close();
 				return;
 			}
@@ -128,7 +128,7 @@ export async function bindSessionMessaging(
 		transition = transition.then(reconcile);
 		return transition;
 	};
-	const unlisten = cfgMessagingEnabled.listen(session.settings, schedule);
+	const unlisten = session.settings.onLayersChange(schedule);
 	session.addDisposer?.(() => {
 		disposed = true;
 		unlisten();
@@ -157,7 +157,7 @@ export async function bindSessionMessaging(
 
 export function peerAddressDisplay(session: AgentSession): string {
 	if (session.messaging) return session.messaging.peerAddress;
-	if (!cfgMessagingEnabled.get(session.settings)) return "off";
+	if (!resolveMessagingPolicy(session.settings).enabled) return "off";
 	const reason = unavailableReasons.get(session);
 	return reason ? `unavailable — ${reason}` : "off";
 }
@@ -179,6 +179,6 @@ export async function renderOtherSessionsSection(
 	signal?: AbortSignal,
 ): Promise<string | undefined> {
 	const service = session.messaging;
-	if (!service || cfgMessagingList.get(session.settings) === "deny") return undefined;
+	if (!service || resolveMessagingPolicy(session.settings).list === "deny") return undefined;
 	return formatSessionListing(await service.listSessions(signal));
 }
