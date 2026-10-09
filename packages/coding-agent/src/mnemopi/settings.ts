@@ -125,6 +125,20 @@ export const cfgMnemopiAutoRetain = register({
 	},
 });
 
+/** Opt in to model-backed reflection; ordinary recall remains the default. */
+export const cfgMnemopiReflectSynthesis = register({
+	id: "mnemopi.reflectSynthesis",
+	type: "boolean",
+	default: false,
+	ui: {
+		tab: "memory",
+		group: "Mnemopi",
+		label: "Mnemopi Reflect Synthesis",
+		description: "Use the configured memory model to synthesize cited reflect answers (adds model calls and cost)",
+		condition: "mnemopiActive",
+	},
+});
+
 export const cfgMnemopiPolyphonicRecall = register({
 	id: "mnemopi.polyphonicRecall",
 	type: "boolean",

@@ -188,6 +188,8 @@ export interface RecallOptions {
 	useIntent?: boolean;
 	useMmr?: boolean;
 	mmrLambda?: number;
+	/** Set `false` to rank candidates without updating recall_count or last_recalled. */
+	updateRecallCounts?: boolean;
 	/**
 	 * Maximum characters of `content` returned per {@link RecallResult}. When the
 	 * stored content exceeds this, the preview is clipped and the trailing

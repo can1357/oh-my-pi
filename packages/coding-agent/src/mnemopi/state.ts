@@ -1,7 +1,7 @@
 import { dirname } from "node:path";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type * as MnemopiNs from "@oh-my-pi/pi-mnemopi";
-import type { Mnemopi, RecallResult } from "@oh-my-pi/pi-mnemopi";
+import type { Mnemopi, RecallEnhancedOptions, RecallResult, ReflectMemory, ReflectResult } from "@oh-my-pi/pi-mnemopi";
 import type * as MnemopiCoreNs from "@oh-my-pi/pi-mnemopi/core";
 import type { LocalModelInitializer } from "@oh-my-pi/pi-mnemopi/core";
 import { logger, toError } from "@oh-my-pi/pi-utils";
@@ -230,6 +230,11 @@ export interface MnemopiSessionStateOptions {
 	hasRecalledForFirstTurn?: boolean;
 }
 
+export interface MnemopiScopedReflection {
+	reflection: ReflectResult | null;
+	results: RecallResult[];
+}
+
 export class MnemopiSessionState {
 	sessionId: string;
 	readonly config: MnemopiBackendConfig;
@@ -399,7 +404,11 @@ export class MnemopiSessionState {
 		return lines.join("\n\n");
 	}
 
-	async collectScopedRecallResults(query: string): Promise<RecallResult[]> {
+	async collectScopedRecallResults(
+		query: string,
+		limit = this.config.recallLimit,
+		options: Pick<RecallEnhancedOptions, "contentPreviewChars" | "updateRecallCounts"> = {},
+	): Promise<RecallResult[]> {
 		const merged: RecallResult[] = [];
 		const byId = new Map<string, number>();
 		const byContent = new Map<string, number>();
@@ -416,7 +425,8 @@ export class MnemopiSessionState {
 			let targetSucceeded = false;
 			try {
 				for (const recallQuery of queries) {
-					const results = await target.memory.recallEnhanced(recallQuery, this.config.recallLimit, {
+					const results = await target.memory.recallEnhanced(recallQuery, limit, {
+						...options,
 						includeFacts: true,
 						channelId: target.bank,
 					});
@@ -444,12 +454,58 @@ export class MnemopiSessionState {
 			);
 		}
 		merged.sort(compareRecallResults);
-		if (merged.length > this.config.recallLimit) merged.length = this.config.recallLimit;
+		if (merged.length > limit) merged.length = limit;
 		return merged;
 	}
 
 	recallResultsScoped(query: string): Promise<RecallResult[]> {
 		return this.collectScopedRecallResults(query);
+	}
+
+	/**
+	 * Opt-in synthesis reads full candidates without counting them as recalled.
+	 * Only cited sources are counted on success; fallback reruns the original
+	 * recall limit so a wider synthesis ranking cannot change the displayed result.
+	 * Disabled or unavailable synthesis uses the unmodified legacy recall path.
+	 */
+	async reflectScoped(query: string, signal?: AbortSignal): Promise<MnemopiScopedReflection> {
+		signal?.throwIfAborted();
+		const complete = this.config.llmMode === "none" ? null : this.memory.runtimeOptions?.llm?.complete;
+		if (!this.config.reflectSynthesis || !complete) {
+			return { reflection: null, results: await this.recallResultsScoped(query) };
+		}
+		const results = await this.collectScopedRecallResults(query, Math.max(this.config.recallLimit, 12), {
+			contentPreviewChars: 0,
+			updateRecallCounts: false,
+		});
+		signal?.throwIfAborted();
+		if (results.length === 0) return { reflection: null, results };
+		const memories: ReflectMemory[] = results.map(result => ({
+			id: result.id,
+			content: result.content,
+			timestamp: result.timestamp,
+			kind: result.memory_type ?? result.tier_label ?? result.tier,
+		}));
+		const { synthesizeReflection } = await loadMnemopi();
+		const reflection = await synthesizeReflection(complete, query, memories, { signal });
+		signal?.throwIfAborted();
+		if (reflection) {
+			const citedIds = new Set(reflection.citedIds);
+			this.#recordReflectionRecallUsage(results.filter(result => citedIds.has(result.id)));
+			return { reflection, results };
+		}
+		const fallback = await this.collectScopedRecallResults(query, this.config.recallLimit, {
+			updateRecallCounts: false,
+		});
+		signal?.throwIfAborted();
+		this.#recordReflectionRecallUsage(fallback);
+		return { reflection: null, results: fallback };
+	}
+
+	#recordReflectionRecallUsage(results: readonly RecallResult[]): void {
+		for (const target of this.scoped.recall) {
+			target.memory.beam.recordRecallUsage(results, { channelId: target.bank });
+		}
 	}
 
 	formatScopedRecallContext(

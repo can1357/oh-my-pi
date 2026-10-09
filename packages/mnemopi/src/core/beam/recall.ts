@@ -32,7 +32,6 @@ type RecallOptionsInternal = RecallOptions & {
 	mmrLambda?: number;
 	ignoreSessionScope?: boolean;
 	currentSensitive?: boolean;
-	updateRecallCounts?: boolean;
 };
 
 type CandidateSignals = {
@@ -828,6 +827,20 @@ function rerankRecallResults(results: readonly RecallResult[], lambdaParam: numb
 	return mmrRerank(items, lambdaParam, topK).map(item => item.result);
 }
 
+/**
+ * Record usage only for memories actually shown or cited after a count-free recall.
+ * Uses the same visibility and validity filters as recall; projected facts have no
+ * recall counters and are ignored. Advances a valid enhanced-recall cache token
+ * past this usage-only write without hiding unrelated database changes.
+ */
+export function recordRecallUsage(
+	beam: BeamMemoryState,
+	results: readonly RecallResult[],
+	options: RecallOptions = {},
+): void {
+	countRecallsKeepingCache(beam, results, options, beam.caches.queryCacheToken ?? null);
+}
+
 function updateRecallCounts(
 	beam: BeamMemoryState,
 	results: readonly RecallResult[],
@@ -950,7 +963,7 @@ export async function recall(
 	} else {
 		finalResults = finalResults.slice(0, topK);
 	}
-	if (temporalOptions.updateRecallCounts !== false) updateRecallCounts(beam, finalResults, temporalOptions);
+	if (temporalOptions.updateRecallCounts !== false) recordRecallUsage(beam, finalResults, temporalOptions);
 	return finalResults;
 }
 
@@ -1090,7 +1103,7 @@ async function linearRecallEnhanced(
 	}
 	results.sort((left, right) => (right.score ?? 0) - (left.score ?? 0));
 	const finalResults = rerankRecallResults(results, options.mmrLambda ?? 0.7, topK);
-	if (enhancedOptions.updateRecallCounts !== false) updateRecallCounts(beam, finalResults, enhancedOptions);
+	if (enhancedOptions.updateRecallCounts !== false) recordRecallUsage(beam, finalResults, enhancedOptions);
 	return finalResults;
 }
 

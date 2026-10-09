@@ -137,6 +137,7 @@ function makeMnemopiConfig(
 		polyphonicRecall: false,
 		enhancedRecall: false,
 		proactiveLinking: false,
+		reflectSynthesis: false,
 		retainEveryNTurns: 3,
 		recallLimit: 10,
 		recallContextTurns: 1,

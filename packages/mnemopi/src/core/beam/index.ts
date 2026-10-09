@@ -20,7 +20,7 @@ import {
 	sleep,
 	sleepAllSessions,
 } from "./consolidate";
-import { factRecall, formatContext, recall, recallEnhanced } from "./recall";
+import { factRecall, formatContext, recall, recallEnhanced, recordRecallUsage } from "./recall";
 import { initBeam } from "./schema";
 import {
 	exportToDict,
@@ -283,6 +283,11 @@ export class BeamMemory implements BeamMemoryState {
 
 	recallEnhanced(query: string, topK = 40, options: RecallEnhancedOptions = {}): Promise<RecallResult[]> {
 		return recallEnhanced(this, query, topK, options);
+	}
+
+	/** Count only shown or cited results after recalling with updateRecallCounts: false. */
+	recordRecallUsage(results: readonly RecallResult[], options: RecallOptions = {}): void {
+		recordRecallUsage(this, results, options);
 	}
 
 	formatContext(results: readonly RecallResult[], format = "bullet"): string {

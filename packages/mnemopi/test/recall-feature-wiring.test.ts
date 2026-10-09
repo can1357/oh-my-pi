@@ -48,6 +48,51 @@ afterEach(() => {
 	for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
 
+describe("count-free recall facade", () => {
+	it.each([
+		{ name: "linear", polyphonicRecall: false, enhancedRecall: false },
+		{ name: "cached linear", polyphonicRecall: false, enhancedRecall: true },
+		{ name: "polyphonic", polyphonicRecall: true, enhancedRecall: false },
+		{ name: "cached polyphonic", polyphonicRecall: true, enhancedRecall: true },
+	])("preserves working and episodic usage during $name candidate recall", async features => {
+		const mem = memory(":memory:", features);
+		const workingId = mem.remember("Alice owns the durable launch checklist", {
+			extract: false,
+			extractEntities: false,
+		});
+		mem.beam.db.run(
+			"INSERT INTO episodic_memory (id, content, source, timestamp, session_id, importance, scope, channel_id, veracity, memory_type) VALUES (?, ?, 'test', ?, 'bank-a', 0.5, 'global', 'bank-a', 'unknown', 'general')",
+			["archive", "The durable launch checklist archive records the release process", new Date().toISOString()],
+		);
+		mem.beam.db.run(
+			"INSERT INTO facts (fact_id, session_id, subject, predicate, object, timestamp, confidence, source_msg_id) VALUES (?, 'bank-a', 'Alice', 'uses', ?, ?, 0.9, ?)",
+			["checklist-fact", "durable launch checklist", new Date().toISOString(), workingId],
+		);
+		const usage = () =>
+			mem.beam.db
+				.query(
+					"SELECT id, recall_count, last_recalled FROM working_memory UNION ALL SELECT id, recall_count, last_recalled FROM episodic_memory ORDER BY id",
+				)
+				.all();
+		const before = usage();
+		const options = { channelId: "bank-a", updateRecallCounts: false, includeFacts: true };
+		expect((await mem.recall("launch checklist", 10, options)).map(result => result.id)).toEqual(
+			expect.arrayContaining([workingId, "archive"]),
+		);
+		for (let call = 0; call < 2; call++) {
+			const results = await mem.recallEnhanced("launch checklist", 10, options);
+			expect(results.map(result => result.id)).toEqual(expect.arrayContaining([workingId, "archive"]));
+			expect(results.some(result => result.tier_label === "fact")).toBe(true);
+			expect(usage()).toEqual(before);
+		}
+		await mem.recallEnhanced("launch checklist", 10, { ...options, updateRecallCounts: true });
+		const counted = usage();
+		expect(counted).not.toEqual(before);
+		await mem.recallEnhanced("launch checklist", 10, options);
+		expect(usage()).toEqual(counted);
+	});
+});
+
 describe("polyphonic recall wiring", () => {
 	it("surfaces a graph-linked memory that linear recall cannot reach", async () => {
 		const dbPath = tempDbPath();
@@ -252,6 +297,24 @@ describe("enhanced recall cache wiring", () => {
 		mem.remember("The deploy runbook now also covers rollbacks");
 		const afterWrite = await mem.recallEnhanced("deploy runbook", 5, { includeFacts: true, channelId: "bank-a" });
 		expect(contents(afterWrite)).toContain("The deploy runbook now also covers rollbacks");
+		expect(mem.beam.caches.queryCache?.stats()).toMatchObject({ hits: 1, misses: 2 });
+	});
+
+	it("keeps count-free candidate rankings cached after recording usage without blessing unrelated writes", async () => {
+		const dbPath = tempDbPath();
+		const mem = memory(dbPath, { enhancedRecall: true });
+		mem.remember("The deploy runbook lives in the ops wiki");
+		const options = { includeFacts: true, channelId: "bank-a", updateRecallCounts: false };
+		const candidates = await mem.recallEnhanced("deploy runbook", 5, options);
+		mem.beam.recordRecallUsage(candidates, { channelId: "bank-a" });
+		expect(await mem.recallEnhanced("deploy runbook", 5, options)).toEqual(candidates);
+		expect(mem.beam.caches.queryCache?.stats()).toMatchObject({ hits: 1, misses: 1 });
+
+		memory(dbPath).remember("The deploy runbook now also covers rollbacks", { scope: "global" });
+		mem.beam.recordRecallUsage(candidates, { channelId: "bank-a" });
+		expect(contents(await mem.recallEnhanced("deploy runbook", 5, options))).toContain(
+			"The deploy runbook now also covers rollbacks",
+		);
 		expect(mem.beam.caches.queryCache?.stats()).toMatchObject({ hits: 1, misses: 2 });
 	});
 

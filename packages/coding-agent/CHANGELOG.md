@@ -4,6 +4,12 @@
 
 ### Added
 
+- Added opt-in Mnemopi `reflect` synthesis with cited memory sources via `mnemopi.reflectSynthesis` (default `false`); disabled or unavailable completions retain the original recalled-memory behavior ([#14378](https://github.com/can1357/oh-my-pi/pull/14378) by [@KamelotWalker](https://github.com/KamelotWalker)).
+
+### Fixed
+
+- Fixed memory completions timing out prematurely instead of honoring their configured timeout ([#14378](https://github.com/can1357/oh-my-pi/pull/14378) by [@KamelotWalker](https://github.com/KamelotWalker)).
+- Fixed opt-in reflection counting uncited or undisplayed memories as recalled, changing fallback rankings when collecting broader synthesis evidence, and invalidating enhanced-recall caches during usage accounting ([#14378](https://github.com/can1357/oh-my-pi/pull/14378) by [@KamelotWalker](https://github.com/KamelotWalker)).
 - Added OSC 7501 program status reporting: terminals and agent inboxes that support it now show whether omp is working, waiting on your answer or approval (with the question), done, or failed (with the error), without parsing the window title. Turn it off with `terminal.programStatus`.
 - Added title cards (icon and short code) to `/rename`: the title model picks one for a title you type, or for a generated title when the session has no card yet; `title.icons: boring` keeps renamed titles plain.
 - Grammars for less common languages (Kotlin, Swift, Ruby, PHP, Haskell, Verilog, and others) are now downloaded on first use for code summaries, block context, `ast_grep`, `ast_edit`, and TTSR rules; offline, files in those languages are skipped with a note instead of failing. `PI_GRAMMARS_URL` overrides the download location.

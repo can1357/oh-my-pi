@@ -22,6 +22,7 @@ import type {
 import { memoryToolRefs } from "../memory-backend/tool-names";
 import memoryConsolidationPrompt from "../prompts/system/memory-consolidation-system.md" with { type: "text" };
 import memoryExtractionPrompt from "../prompts/system/memory-extraction-system.md" with { type: "text" };
+import memoryReflectionPrompt from "../prompts/system/memory-reflect-system.md" with { type: "text" };
 import mnemopiInstructions from "../prompts/system/mnemopi-instructions.md" with { type: "text" };
 import type { AgentSession } from "../session/agent-session";
 import { tinyModelClient } from "../tiny/title-client";
@@ -66,9 +67,8 @@ export interface MemoryCompletionInput {
 
 /** Maps a Mnemopi completion into instruction and input turns.
  *
- *  Extraction is the only task with its own instructions, and it always supplies
- *  the raw text, so the instructions become the system turn and the text becomes
- *  the user turn. Every other task keeps the prompt Mnemopi rendered. */
+ *  Extraction and reflection supply separate instructions and raw input. Other
+ *  tasks keep the prompt Mnemopi rendered. */
 export function resolveMemoryCompletionInput(
 	prompt: string,
 	options?: MnemopiLlmCompleteOptions,
@@ -76,7 +76,20 @@ export function resolveMemoryCompletionInput(
 	if (options?.task?.kind === "memory-extraction") {
 		return { prompt: options.task.input, systemPrompt: memoryExtractionPrompt };
 	}
+	if (options?.task?.kind === "memory-reflect") {
+		return { prompt: options.task.input, systemPrompt: memoryReflectionPrompt };
+	}
 	return { prompt };
+}
+
+/** Combine a caller's cancellation with Mnemopi's seconds-based completion timeout. */
+export function resolveMemoryCompletionSignal(options?: MnemopiLlmCompleteOptions): AbortSignal | undefined {
+	const timeoutSignal =
+		typeof options?.timeout === "number" && Number.isFinite(options.timeout) && options.timeout > 0
+			? AbortSignal.timeout(options.timeout * 1000)
+			: undefined;
+	if (options?.signal && timeoutSignal) return AbortSignal.any([options.signal, timeoutSignal]);
+	return options?.signal ?? timeoutSignal;
 }
 
 async function installMnemopiState(session: AgentSession, config: MnemopiBackendConfig): Promise<MnemopiSessionState> {
@@ -581,10 +594,7 @@ async function resolveMnemopiProviderOptions(
 			// keeps the callback it already created and still journals to its start.
 			const onUsage = journalJudgmentUsage(usageLedger);
 			const request = resolveMemoryCompletionInput(prompt, opts);
-			const signal =
-				typeof opts?.timeout === "number" && Number.isFinite(opts.timeout) && opts.timeout > 0
-					? AbortSignal.timeout(opts.timeout)
-					: undefined;
+			const signal = resolveMemoryCompletionSignal(opts);
 
 			for (const { model } of candidates) {
 				if (signal?.aborted) return null;

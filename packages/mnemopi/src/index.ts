@@ -3,6 +3,7 @@ export * from "./core/beam/index";
 export * from "./core/embeddings";
 export * from "./core/llm-backends";
 export * from "./core/memory";
+export * from "./core/reflect";
 export {
 	addMemory,
 	flushExtractions,

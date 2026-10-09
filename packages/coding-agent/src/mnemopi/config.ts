@@ -27,6 +27,7 @@ import {
 	cfgMnemopiRecallContextTurns,
 	cfgMnemopiRecallLimit,
 	cfgMnemopiRecallMaxQueryChars,
+	cfgMnemopiReflectSynthesis,
 	cfgMnemopiRetainEveryNTurns,
 	cfgMnemopiScoping,
 } from "./settings";
@@ -53,6 +54,8 @@ export interface MnemopiBackendConfig {
 	polyphonicRecall: boolean;
 	enhancedRecall: boolean;
 	proactiveLinking: boolean;
+	/** Whether reflect may call the memory model instead of only returning recalled memories. */
+	reflectSynthesis: boolean;
 	retainEveryNTurns: number;
 	recallLimit: number;
 	recallContextTurns: number;
@@ -98,6 +101,7 @@ export function loadMnemopiConfig(settings: Settings, agentDir: string): Mnemopi
 		polyphonicRecall: cfgMnemopiPolyphonicRecall.get(settings),
 		enhancedRecall: cfgMnemopiEnhancedRecall.get(settings),
 		proactiveLinking: cfgMnemopiProactiveLinking.get(settings),
+		reflectSynthesis: cfgMnemopiReflectSynthesis.get(settings),
 		retainEveryNTurns: Math.max(1, Math.floor(cfgMnemopiRetainEveryNTurns.get(settings))),
 		recallLimit: Math.max(1, Math.floor(cfgMnemopiRecallLimit.get(settings))),
 		recallContextTurns: Math.max(1, Math.floor(cfgMnemopiRecallContextTurns.get(settings))),
