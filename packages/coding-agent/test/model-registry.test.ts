@@ -32,6 +32,8 @@ describe("ModelRegistry", () => {
 	let originalOllamaBaseUrl: string | undefined;
 	let originalOllamaHost: string | undefined;
 	let originalOllamaContextLength: string | undefined;
+	let originalLmStudioBaseUrl: string | undefined;
+	let originalLlamaCppBaseUrl: string | undefined;
 
 	// Shared, read-only fixtures: each registry's heavy bundled-catalog
 	// construction runs once in a `beforeAll` hook (hooks are excluded from a
@@ -44,6 +46,8 @@ describe("ModelRegistry", () => {
 	let bootOllamaBaseUrl: string | undefined;
 	let bootOllamaHost: string | undefined;
 	let bootOllamaContextLength: string | undefined;
+	let bootLmStudioBaseUrl: string | undefined;
+	let bootLlamaCppBaseUrl: string | undefined;
 	const spies: Array<{ mockRestore: () => void }> = [];
 
 	beforeEach(async () => {
@@ -51,9 +55,13 @@ describe("ModelRegistry", () => {
 		originalOllamaBaseUrl = Bun.env.OLLAMA_BASE_URL;
 		originalOllamaHost = Bun.env.OLLAMA_HOST;
 		originalOllamaContextLength = Bun.env.OLLAMA_CONTEXT_LENGTH;
+		originalLmStudioBaseUrl = Bun.env.LM_STUDIO_BASE_URL;
+		originalLlamaCppBaseUrl = Bun.env.LLAMA_CPP_BASE_URL;
 		delete Bun.env.OLLAMA_BASE_URL;
 		delete Bun.env.OLLAMA_HOST;
 		delete Bun.env.OLLAMA_CONTEXT_LENGTH;
+		delete Bun.env.LM_STUDIO_BASE_URL;
+		delete Bun.env.LLAMA_CPP_BASE_URL;
 		tempDir = path.join(os.tmpdir(), `pi-test-model-registry-${Snowflake.next()}`);
 		fs.mkdirSync(tempDir, { recursive: true });
 		modelsJsonPath = path.join(tempDir, "models.json");
@@ -81,6 +89,10 @@ describe("ModelRegistry", () => {
 		} else {
 			Bun.env.OLLAMA_CONTEXT_LENGTH = originalOllamaContextLength;
 		}
+		if (originalLmStudioBaseUrl === undefined) delete Bun.env.LM_STUDIO_BASE_URL;
+		else Bun.env.LM_STUDIO_BASE_URL = originalLmStudioBaseUrl;
+		if (originalLlamaCppBaseUrl === undefined) delete Bun.env.LLAMA_CPP_BASE_URL;
+		else Bun.env.LLAMA_CPP_BASE_URL = originalLlamaCppBaseUrl;
 		authStorage.close();
 		if (tempDir && fs.existsSync(tempDir)) {
 			removeSyncWithRetries(tempDir);
@@ -94,9 +106,13 @@ describe("ModelRegistry", () => {
 		bootOllamaBaseUrl = Bun.env.OLLAMA_BASE_URL;
 		bootOllamaHost = Bun.env.OLLAMA_HOST;
 		bootOllamaContextLength = Bun.env.OLLAMA_CONTEXT_LENGTH;
+		bootLmStudioBaseUrl = Bun.env.LM_STUDIO_BASE_URL;
+		bootLlamaCppBaseUrl = Bun.env.LLAMA_CPP_BASE_URL;
 		delete Bun.env.OLLAMA_BASE_URL;
 		delete Bun.env.OLLAMA_HOST;
 		delete Bun.env.OLLAMA_CONTEXT_LENGTH;
+		delete Bun.env.LM_STUDIO_BASE_URL;
+		delete Bun.env.LLAMA_CPP_BASE_URL;
 		sharedAuth = await AuthStorage.create(":memory:");
 		sharedDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-test-mr-shared-"));
 		// Unmodified bundled catalog (no custom config); reused by built-in-only
@@ -116,6 +132,10 @@ describe("ModelRegistry", () => {
 		else Bun.env.OLLAMA_HOST = bootOllamaHost;
 		if (bootOllamaContextLength === undefined) delete Bun.env.OLLAMA_CONTEXT_LENGTH;
 		else Bun.env.OLLAMA_CONTEXT_LENGTH = bootOllamaContextLength;
+		if (bootLmStudioBaseUrl === undefined) delete Bun.env.LM_STUDIO_BASE_URL;
+		else Bun.env.LM_STUDIO_BASE_URL = bootLmStudioBaseUrl;
+		if (bootLlamaCppBaseUrl === undefined) delete Bun.env.LLAMA_CPP_BASE_URL;
+		else Bun.env.LLAMA_CPP_BASE_URL = bootLlamaCppBaseUrl;
 		resetSettingsForTest();
 	});
 
