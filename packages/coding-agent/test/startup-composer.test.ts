@@ -418,7 +418,6 @@ describe("Composer prepaint", () => {
 			await releaseInit.promise;
 		});
 		vi.spyOn(mode.statusLine, "watchBranch").mockImplementation(() => {});
-		vi.spyOn(testSession.session, "maybeStartTitleGeneration").mockImplementation(() => {});
 		const prompt = vi.spyOn(testSession.session, "prompt").mockResolvedValue(true);
 
 		try {
@@ -468,7 +467,6 @@ describe("Composer prepaint", () => {
 		);
 		lease.adopt();
 		vi.spyOn(mode.statusLine, "watchBranch").mockImplementation(() => {});
-		vi.spyOn(testSession.session, "maybeStartTitleGeneration").mockImplementation(() => {});
 		const turn = Promise.withResolvers<boolean>();
 		const prompt = vi.spyOn(testSession.session, "prompt").mockResolvedValue(true);
 
