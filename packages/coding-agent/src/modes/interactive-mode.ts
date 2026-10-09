@@ -8255,7 +8255,12 @@ export class InteractiveMode implements InteractiveModeContext {
 		// intersect path runs (cliGrant null → leave explicit.tools undefined).
 		const cliGrant = this.session.getToolPolicy()?.cliGrant ?? null;
 		const explicitOverrides: PersonaExplicitOverrides = cliGrant ? { tools: [...cliGrant] } : {};
-		await this.#applyPersonaSwitch(agent, explicitOverrides);
+		try {
+			await this.#applyPersonaSwitch(agent, explicitOverrides);
+		} catch (error) {
+			this.showError(error instanceof Error ? error.message : String(error));
+			return;
+		}
 		// Caller-owned journal persistence (runtime stays pure; resume reconcile reads).
 		// j2g: the runtime's captured pre-persona baseline rides the entry so a
 		// resume can re-enter with it as the authoritative exit baseline.
@@ -8306,9 +8311,15 @@ export class InteractiveMode implements InteractiveModeContext {
 			// predictably invalidates the provider prompt cache (plan §9).
 			this.lastAssistantUsage = undefined;
 			await runtime.exit(hooks);
-		} finally {
+		} catch (error) {
+			// The runtime rolls back on failure (persona still active): keep the
+			// journal entry so resume restores it, and report instead of
+			// announcing a clear that did not happen.
 			this.#afterPersonaSwitch();
+			this.showError(error instanceof Error ? error.message : String(error));
+			return;
 		}
+		this.#afterPersonaSwitch();
 		clearPersonaJournalEntry(this.session);
 		this.showStatus("Agent persona cleared.");
 	}
@@ -8468,7 +8479,9 @@ export class InteractiveMode implements InteractiveModeContext {
 			// rendering because the rollback may have touched presentation.
 			this.#afterPersonaSwitch(agent.name);
 		} finally {
-			this.#afterPersonaSwitch();
+			this.statusLine.invalidate();
+			this.updateEditorBorderColor();
+			this.ui.requestRender();
 		}
 	}
 
