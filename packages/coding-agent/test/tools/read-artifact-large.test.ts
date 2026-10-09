@@ -107,6 +107,14 @@ function streamedOversizedFirstLineArtifact(): string {
 	return [`oversized-first ${"x".repeat(70_000)}`, streamedMultiRangeArtifact()].join("\n");
 }
 
+/** 70 KB first line over a small buffered artifact: single-range preview path. */
+function bufferedOversizedFirstLineArtifact(): string {
+	return [
+		`oversized-first ${"x".repeat(70_000)}`,
+		...Array.from({ length: 200 }, (_, index) => `tail-${String(index + 2).padStart(3, "0")}`),
+	].join("\n");
+}
+
 describe("read tool large artifact handling", () => {
 	let testDir: string;
 	let artifactDir: string;
@@ -397,6 +405,32 @@ describe("read tool large artifact handling", () => {
 		);
 		expect(followed).toContain("line-093");
 		expect(followed).toContain("line-100");
+	});
+
+	it("continues after an oversized first line instead of ending the page", async () => {
+		await Bun.write(path.join(artifactDir, "0.mcp.log"), bufferedOversizedFirstLineArtifact());
+
+		// The capped first line ends the page at line 1 with a byte-capped
+		// preview. Lines 2-300 would otherwise have no continuation: the
+		// partial-line metadata intentionally carries no nextOffset.
+		const raw = await tool.execute("call-oversized-first-single-raw", { path: "artifact://0:raw:1-300" });
+		const rawOutput = getTextOutput(raw);
+		expect(rawOutput).toContain("oversized-first");
+		expect(rawOutput).toContain("Use artifact://0:raw:2-300 to continue");
+
+		const rawFollowed = getTextOutput(
+			await tool.execute("call-oversized-first-single-raw-follow", { path: "artifact://0:raw:2-300" }),
+		);
+		expect(rawFollowed).toContain("tail-002");
+
+		const numbered = await tool.execute("call-oversized-first-single", { path: "artifact://0:1-300" });
+		const numberedOutput = getTextOutput(numbered);
+		expect(numberedOutput).toContain("Use artifact://0:2-300 to continue");
+
+		const numberedFollowed = getTextOutput(
+			await tool.execute("call-oversized-first-single-follow", { path: "artifact://0:2-300" }),
+		);
+		expect(numberedFollowed).toContain("tail-002");
 	});
 
 	it("names an oversized first line instead of leaving a silent hole", async () => {
