@@ -1,7 +1,7 @@
 import { beforeAll, describe, expect, it } from "bun:test";
 import type { Model } from "@oh-my-pi/pi-catalog/types";
 import { createStartupStatusLine } from "../src/status-line/startup";
-import { initTheme } from "../src/theme";
+import { initTheme, theme } from "../src/theme";
 
 beforeAll(async () => {
 	await initTheme();
@@ -114,6 +114,80 @@ describe("status line startup layout", () => {
 			const rendered = Bun.stripANSI(line.getTopBorder(24).content);
 			expect(rendered).toMatch(/ctx:\? {3,}.*Model/);
 			expect(rendered.endsWith("Model ")).toBeTrue();
+		} finally {
+			line.dispose();
+		}
+	});
+
+	it("keeps the auto-compact icon at its cached live column", () => {
+		const model = {
+			id: "startup-model",
+			name: "Model",
+			provider: "test",
+			api: "test",
+			contextWindow: 100_000,
+		} as Model;
+		const line = createStartupStatusLine({
+			settings: {
+				preset: "custom",
+				leftSegments: ["context_pct"],
+				rightSegments: [],
+				separator: "none",
+				contextLine: "off",
+				segmentOptions: { context_pct: { compact: true } },
+			},
+			gitEnabled: false,
+			model,
+			autoThinking: false,
+			fastMode: false,
+			usingSubscription: false,
+			contextPercent: 9.1,
+			autoCompactEnabled: true,
+			compactionBoundaries: null,
+		});
+
+		try {
+			const rendered = Bun.stripANSI(line.getTopBorder(30).content);
+			const placeholderStart = rendered.indexOf("ctx:?");
+			expect(placeholderStart).toBeGreaterThanOrEqual(0);
+			expect(rendered.indexOf(theme.icon.auto)).toBe(placeholderStart + "ctx:9.1% ".length);
+		} finally {
+			line.dispose();
+		}
+	});
+
+	it("uses cached overflow placement while masking the startup percentage", () => {
+		const model = {
+			id: "startup-model",
+			name: "Model",
+			provider: "test",
+			api: "test",
+			contextWindow: 100_000,
+		} as Model;
+		const line = createStartupStatusLine({
+			settings: {
+				preset: "custom",
+				leftSegments: ["model", "context_pct"],
+				rightSegments: ["context_total"],
+				separator: "none",
+				contextLine: "embedded",
+				segmentOptions: { context_pct: { compact: true } },
+			},
+			gitEnabled: false,
+			model,
+			autoThinking: false,
+			fastMode: false,
+			usingSubscription: false,
+			contextPercent: 120,
+			autoCompactEnabled: false,
+			compactionBoundaries: null,
+		});
+
+		try {
+			const rendered = Bun.stripANSI(line.getTopBorder(30).content);
+			expect(rendered).toContain("ctx:?");
+			expect(rendered).not.toContain("120%");
+			expect(rendered.indexOf("100K")).toBeLessThan(rendered.indexOf("ctx:?"));
 		} finally {
 			line.dispose();
 		}

@@ -932,12 +932,16 @@ const contextPctSegment: StatusLineSegment = {
 				? formatNumber(window)
 				: formatContextUsage(pct, window, ctx.contextTokens);
 		const text = theme.fg(color, display);
-		const content = compact ? `${text}${autoIcon}` : withIcon(theme.icon.context, `${text}${autoIcon}`);
 		const startupPercent = ctx.session.startupContextPercent;
-		const widthHint =
+		const startupDisplay =
 			compact && pct === null && startupPercent !== null && startupPercent !== undefined
-				? `${theme.fg(color, `ctx:${formatCompactContextPercent(startupPercent)}`)}${autoIcon}`
+				? `ctx:${formatCompactContextPercent(startupPercent)}`
 				: undefined;
+		const startupPadding = startupDisplay ? " ".repeat(Math.max(0, startupDisplay.length - display.length)) : "";
+		const content = compact
+			? `${text}${startupPadding}${autoIcon}`
+			: withIcon(theme.icon.context, `${text}${autoIcon}`);
+		const widthHint = startupDisplay ? `${theme.fg(color, startupDisplay)}${autoIcon}` : undefined;
 
 		return { content, visible: true, widthHint };
 	},

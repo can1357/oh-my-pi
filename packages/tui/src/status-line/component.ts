@@ -3272,10 +3272,9 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		// >100%: usage anchored past the active window (e.g. model switch to a
 		// smaller window). The bar clamps full, but the embedded label breaks
 		// past the window label — `──200K─120%` with the percent in error color.
-		const percentOverflow = pct !== null && pct > 100;
+		const placementPercent = embedCompactContext && pct === null ? (ctx.session.startupContextPercent ?? null) : pct;
+		const percentOverflow = placementPercent !== null && placementPercent > 100;
 		if (embedContext) {
-			const placementPercent =
-				embedCompactContext && pct === null ? (ctx.session.startupContextPercent ?? null) : pct;
 			const livePercent = embedCompactContext
 				? `ctx:${formatCompactContextPercent(percentOverflow ? pct : pct === null ? null : clampedPct)}`
 				: pct === null
