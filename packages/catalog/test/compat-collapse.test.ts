@@ -27,7 +27,10 @@ import {
 	resolveWireModelId,
 } from "@oh-my-pi/pi-catalog/model-thinking";
 import { getBundledModel, getBundledModels } from "@oh-my-pi/pi-catalog/models";
-import { googleGeminiCliModelManagerOptions } from "@oh-my-pi/pi-catalog/provider-models/google";
+import {
+	googleAntigravityModelManagerOptions,
+	googleGeminiCliModelManagerOptions,
+} from "@oh-my-pi/pi-catalog/provider-models/google";
 import type { ModelSpec } from "@oh-my-pi/pi-catalog/types";
 
 function requireReviewedTable(provider: string): VariantCollapseTable {
@@ -1577,7 +1580,8 @@ describe("antigravity discovery collapsing", () => {
 	);
 
 	it("returns collapsed logical entries and keeps the denylist", async () => {
-		const models = await fetchAntigravityDiscoveryModels({ token: "t", endpoint: "https://cca.test", fetcher });
+		const models = (await fetchAntigravityDiscoveryModels({ token: "t", endpoint: "https://cca.test", fetcher }))
+			?.models;
 
 		expect(models?.map(m => m.id).sort()).toEqual([
 			"claude-sonnet-4-6",
@@ -1652,15 +1656,114 @@ describe("antigravity discovery collapsing", () => {
 			{ preconnect: fetch.preconnect },
 		);
 
-		const models = await fetchAntigravityDiscoveryModels({
-			token: "t",
-			fetcher: defaultFetcher,
-		});
+		const models = (
+			await fetchAntigravityDiscoveryModels({
+				token: "t",
+				fetcher: defaultFetcher,
+			})
+		)?.models;
 
 		const discoveryUrl = requestedUrls.find(url => url.includes("/v1internal:fetchAvailableModels"));
 		expect(discoveryUrl).toBeDefined();
 		expect(discoveryUrl).toContain(ANTIGRAVITY_PRIMARY_ENDPOINT);
 		expect(models?.[0]?.baseUrl).toBe(ANTIGRAVITY_PRIMARY_ENDPOINT);
+	});
+
+	it("drops bundled rows the account roster does not serve, and keeps them when discovery fails", async () => {
+		const roster = {
+			models: {
+				"claude-sonnet-4-6": { displayName: "Claude Sonnet 4.6", supportsThinking: true, maxTokens: 250_000 },
+				"gemini-3.1-pro-low": { displayName: "Gemini 3.1 Pro (Low)", supportsThinking: true },
+			},
+		};
+		const resolve = async (discovery: () => Response) => {
+			const dir = await fs.mkdtemp(path.join(os.tmpdir(), "antigravity-roster-"));
+			const fetcher = Object.assign(
+				(input: string | URL | Request, _init?: RequestInit) =>
+					Promise.resolve(
+						String(input).includes(":fetchAvailableModels") ? discovery() : new Response("version: 2.19.1\n"),
+					),
+				{ preconnect: fetch.preconnect },
+			);
+			const options = googleAntigravityModelManagerOptions({
+				resolveAccounts: async () => [{ accessToken: "t" }],
+				fetch: fetcher,
+			});
+			const result = await resolveProviderModels({ ...options, cacheDbPath: path.join(dir, "models.db") }, "online");
+			return result.models.map(m => m.id);
+		};
+
+		// Bundled Claude 5.5 rows 404 on accounts whose roster omits them (#14328).
+		const served = await resolve(() => Response.json(roster));
+		expect(served).toContain("claude-sonnet-4-6");
+		expect(served).toContain("gemini-3.1-pro");
+		expect(served).not.toContain("claude-sonnet-5-5");
+		expect(served).not.toContain("claude-opus-5-5");
+		// Image SKUs are not chat rows and stay available to the image role.
+		expect(served).toContain("gemini-3-pro-image");
+
+		const unreachable = await resolve(() => new Response("Forbidden", { status: 403 }));
+		expect(unreachable).toContain("claude-sonnet-5-5");
+		expect(unreachable).toContain("claude-opus-5-5");
+	});
+
+	it("skips rejected Antigravity accounts while installing the healthy sibling's roster", async () => {
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "antigravity-rejected-roster-"));
+		const fetcher = Object.assign(
+			(input: string | URL | Request, init?: RequestInit) => {
+				if (!String(input).includes(":fetchAvailableModels"))
+					return Promise.resolve(new Response("version: 2.19.1\n"));
+				const token = new Headers(init?.headers).get("Authorization");
+				if (token === "Bearer revoked") return Promise.resolve(new Response("Unauthorized", { status: 401 }));
+				if (token === "Bearer forbidden") return Promise.resolve(new Response("Forbidden", { status: 403 }));
+				return Promise.resolve(
+					Response.json({
+						models: { "claude-opus-5-5-low": { displayName: "Claude Opus 5.5", supportsThinking: true } },
+					}),
+				);
+			},
+			{ preconnect: fetch.preconnect },
+		);
+		const options = googleAntigravityModelManagerOptions({
+			resolveAccounts: async () => [
+				{ accessToken: "revoked", accountKey: "revoked@example.com" },
+				{ accessToken: "forbidden", accountKey: "forbidden@example.com" },
+				{ accessToken: "healthy", accountKey: "healthy@example.com" },
+			],
+			endpoint: "https://cca.test",
+			fetch: fetcher,
+		});
+		const result = await resolveProviderModels({ ...options, cacheDbPath: path.join(dir, "models.db") }, "online");
+		expect(result.models.find(model => model.id === "claude-opus-5-5")?.accountAccess).toEqual({
+			"healthy@example.com": {},
+		});
+		expect(result.models.some(model => model.id === "claude-sonnet-5-5")).toBe(false);
+	});
+
+	it("keeps the previous Antigravity catalog when a sibling fetch fails transiently", async () => {
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "antigravity-transient-roster-"));
+		const fetcher = Object.assign(
+			(input: string | URL | Request, init?: RequestInit) => {
+				if (!String(input).includes(":fetchAvailableModels"))
+					return Promise.resolve(new Response("version: 2.19.1\n"));
+				if (new Headers(init?.headers).get("Authorization") === "Bearer unavailable") {
+					return Promise.resolve(
+						new Response("Unavailable", { status: String(input).includes(".sandbox.") ? 503 : 401 }),
+					);
+				}
+				return Promise.resolve(Response.json({ models: { "gemini-3.1-pro-low": { supportsThinking: true } } }));
+			},
+			{ preconnect: fetch.preconnect },
+		);
+		const options = googleAntigravityModelManagerOptions({
+			resolveAccounts: async () => [
+				{ accessToken: "unavailable", accountKey: "unavailable@example.com" },
+				{ accessToken: "healthy", accountKey: "healthy@example.com" },
+			],
+			fetch: fetcher,
+		});
+		const result = await resolveProviderModels({ ...options, cacheDbPath: path.join(dir, "models.db") }, "online");
+		expect(result.models.some(model => model.id === "claude-opus-5-5")).toBe(true);
 	});
 });
 

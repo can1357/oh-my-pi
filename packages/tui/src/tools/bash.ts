@@ -494,6 +494,15 @@ export function createShellRenderer<TArgs>(config: ShellRendererConfig<TArgs>) {
 			let cachedIsPartial: boolean | undefined;
 			let cachedPreviewWindow: number | undefined;
 			let cachedSnapshot: ToolCardSnapshot | undefined;
+			const dropSnapshot = () => {
+				cachedSnapshot = undefined;
+				cachedWidth = undefined;
+				cachedPreviewLines = undefined;
+				cachedExpanded = undefined;
+				cachedRawOutput = undefined;
+				cachedIsPartial = undefined;
+				cachedPreviewWindow = undefined;
+			};
 
 			return framedToolCard(
 				uiTheme,
@@ -596,17 +605,7 @@ export function createShellRenderer<TArgs>(config: ShellRendererConfig<TArgs>) {
 					cachedSnapshot = snapshot;
 					return snapshot;
 				},
-				{
-					onInvalidate: () => {
-						cachedSnapshot = undefined;
-						cachedWidth = undefined;
-						cachedPreviewLines = undefined;
-						cachedExpanded = undefined;
-						cachedRawOutput = undefined;
-						cachedIsPartial = undefined;
-						cachedPreviewWindow = undefined;
-					},
-				},
+				{ onInvalidate: dropSnapshot, onReleaseRenderCaches: dropSnapshot },
 			);
 		},
 		describeCall(args: TArgs, options: RenderResultOptions): NativeToolView {

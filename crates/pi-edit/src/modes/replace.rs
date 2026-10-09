@@ -12,8 +12,7 @@ use crate::{
 	error::EditError,
 	files::FileSource,
 	fuzzy::{
-		FindMatchOptions, ReplaceResult, find_match, format_match_error, format_occurrence_error,
-		replace_text,
+		ReplaceOutcome, ReplaceResult, format_match_error, format_occurrence_error, replace_text,
 	},
 	store::EditStore,
 	stream_json::ArgSnapshot,
@@ -36,25 +35,17 @@ impl ReplaceEngine {
 		replace_all: bool,
 		path: &str,
 	) -> Result<ReplaceResult, EditError> {
-		let result = replace_text(
+		let outcome = match replace_text(
 			content,
 			old_string,
 			new_string,
 			self.allow_fuzzy,
 			replace_all,
 			Some(self.fuzzy_threshold),
-		);
-		if let Ok(result) = result
-			&& result.count > 0
-		{
-			return Ok(result);
-		}
-
-		let outcome = find_match(content, old_string, &FindMatchOptions {
-			allow_fuzzy:     self.allow_fuzzy,
-			threshold:       Some(self.fuzzy_threshold),
-			excluded_ranges: &[],
-		});
+		)? {
+			ReplaceOutcome::Replaced(result) => return Ok(result),
+			ReplaceOutcome::Missed(outcome) => outcome,
+		};
 		if outcome.occurrences.is_some_and(|count| count > 1) {
 			return Err(EditError::apply(format_occurrence_error(path, &outcome)));
 		}
@@ -142,22 +133,24 @@ impl ModeEngine for ReplaceEngine {
 			Err(error) => return vec![Self::preview_error(path, error.to_string())],
 		};
 		let display = read.resolved.display.clone();
-		let before = read.text.clone();
-		let mut after = before.clone();
+		let before = read.text.as_str();
+		// Owned only once a replacement lands.
+		let mut after: Option<String> = None;
 		for entry in entries {
 			let old_string = entry.old_string.unwrap_or_default();
 			let new_string = entry.new_string.unwrap_or_default();
 			match self.replace(
-				&after,
+				after.as_deref().unwrap_or(before),
 				old_string,
 				new_string,
 				entry.replace_all.unwrap_or(false),
 				&display,
 			) {
-				Ok(result) => after = result.content,
+				Ok(result) => after = Some(result.content),
 				Err(error) => return vec![Self::preview_error(&display, error.to_string())],
 			}
 		}
+		let after = after.as_deref().unwrap_or(before);
 		if before == after {
 			return vec![Self::preview_error(
 				&display,
@@ -166,9 +159,10 @@ impl ModeEngine for ReplaceEngine {
 				),
 			)];
 		}
-		let output = generate_diff_string(&before, &after, None, &BlockContextSource {
+		let output = generate_diff_string(before, after, None, &BlockContextSource {
 			path: Some(&display),
 			lang: None,
+			streaming,
 		});
 		vec![PreviewFile {
 			display,
@@ -200,30 +194,39 @@ impl ModeEngine for ReplaceEngine {
 		}
 		let read = files.read(path)?;
 		let display = read.resolved.display.clone();
-		let before = read.text.clone();
-		let mut after = before.clone();
-
+		let mut after: Option<String> = None;
 		for entry in entries {
 			let old_string = entry.old_string.unwrap_or_default();
 			let new_string = entry.new_string.unwrap_or_default();
-			after = self
-				.replace(&after, old_string, new_string, entry.replace_all.unwrap_or(false), &display)?
-				.content;
+			let current = after.as_deref().unwrap_or(&read.text);
+			after = Some(
+				self
+					.replace(
+						current,
+						old_string,
+						new_string,
+						entry.replace_all.unwrap_or(false),
+						&display,
+					)?
+					.content,
+			);
 		}
-		if before == after {
+		let after = after.unwrap_or_else(|| read.text.clone());
+		if read.text == after {
 			return Err(EditError::apply(format!(
 				"Edits to {display} resulted in no changes being made."
 			)));
 		}
 
 		let persisted = read.persist(&after)?;
-		let output = generate_diff_string(&before, &after, None, &BlockContextSource {
-			path: Some(&display),
-			lang: None,
+		let output = generate_diff_string(&read.text, &after, None, &BlockContextSource {
+			path:      Some(&display),
+			lang:      None,
+			streaming: false,
 		});
 		let mut staged = StagedFile::new(display, read.resolved.absolute.clone(), FileOp::Update);
 		staged.before_raw = Some(read.raw.clone());
-		staged.before = before;
+		staged.before.clone_from(&read.text);
 		staged.after = after;
 		staged.persisted = Some(persisted);
 		staged.diff = output.diff;

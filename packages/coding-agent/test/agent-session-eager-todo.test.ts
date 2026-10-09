@@ -342,6 +342,29 @@ describe("AgentSession eager todo enforcement", () => {
 		expect(userId.session_id).not.toBe(session.sessionId);
 	});
 
+	it("keeps a card title's icon and code when a replan refreshes it", async () => {
+		// Tern indexes parked panes by the card; the title model names none, so the refresh must carry it over.
+		await recreateSession({ "title.refreshOnReplan": true });
+		await session.setSessionName("🧪 FLAKY: Fix flaky park tests", "auto");
+		vi.spyOn(ai, "completeSimple").mockResolvedValue({
+			stopReason: "stop",
+			content: [{ type: "text", text: "<title>Stabilize park test timing</title>" }],
+		} as never);
+		scriptedResponses = [
+			createToolCallAssistantMessage("todo", {
+				op: "init",
+				list: [{ phase: "Park", items: ["Stabilize park test timing"] }],
+			}),
+			createAssistantMessage("todo initialized"),
+		];
+
+		const titleApplied = waitForSessionName("🧪 FLAKY: Stabilize park test timing");
+		await session.prompt("replan the park tests");
+		await titleApplied;
+
+		expect(session.sessionManager.getSessionName()).toBe("🧪 FLAKY: Stabilize park test timing");
+	});
+
 	it("forwards the configured title system prompt to the replan refresh path", async () => {
 		// Issue #3734: TITLE_SYSTEM.md must apply on todo-init replan refresh,
 		// not just first-input titling. Without the threaded override, the

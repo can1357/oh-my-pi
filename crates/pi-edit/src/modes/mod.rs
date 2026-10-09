@@ -25,3 +25,28 @@ pub fn engine_for(
 		EditMode::Sloppy => Box::new(sloppy::SloppyEngine { allow_fuzzy, fuzzy_threshold }),
 	}
 }
+
+/// TTSR digest of a diff body: the `+` rows' text (excluding `+++ ` file
+/// headers) joined by `\n`, or `None` when there are no such rows (patch mode
+/// distinguishes that from a lone empty `+` row). Callers pick the row
+/// splitter because hashline payloads split with `lines()` while diff bodies
+/// keep `\r` via `split('\n')`.
+pub(crate) fn added_lines<'a>(rows: impl Iterator<Item = &'a str>) -> Option<String> {
+	let mut out = None::<String>;
+	for line in rows {
+		let Some(added) = line.strip_prefix('+') else {
+			continue;
+		};
+		if line.starts_with("+++ ") {
+			continue;
+		}
+		match &mut out {
+			Some(out) => {
+				out.push('\n');
+				out.push_str(added);
+			},
+			None => out = Some(added.to_owned()),
+		}
+	}
+	out
+}

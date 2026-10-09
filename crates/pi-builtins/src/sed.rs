@@ -73,8 +73,9 @@ pub struct ProcessingContext {
 	pub last_file:            bool,
 	/// Stop processing further input.
 	pub stop_processing:      bool,
-	/// Previously compiled RE, saved for reuse when specifying an empty RE
-	pub saved_regex:          Option<Regex>,
+	/// Previously compiled RE, saved for reuse when specifying an empty RE.
+	/// Shared, never cloned: a cloned `Regex` starts with an empty match cache.
+	pub saved_regex:          Option<Rc<Regex>>,
 	/// Modification of input processing action
 	// This is required to avoid doubly borrowing the reader in the 'N'
 	// command.
@@ -110,7 +111,7 @@ pub struct StringSpace {
 #[derive(Debug)]
 /// Types of address specifications that precede commands
 pub enum Address {
-	Re(Option<Regex>), // Line that matches (optional) regex
+	Re(Option<Rc<Regex>>), // Line that matches (optional) regex
 	Line(usize),       // Specific line
 	RelLine(usize),    // Relative line
 	Last,              // Last line
@@ -223,7 +224,7 @@ impl ReplacementTemplate {
 #[derive(Debug, Default)]
 /// Substitution command
 pub struct Substitution {
-	pub regex:       Option<Regex>,       // Regular expression
+	pub regex:       Option<Rc<Regex>>,   // Regular expression
 	pub replacement: ReplacementTemplate, // Specified broken-down replacement
 	pub occurrence:  usize,               // Which occurrence to substitute
 	pub print_flag:  bool,                // True if 'p' flag
@@ -1048,7 +1049,7 @@ fn compile_address(
 				line.advance();
 			}
 
-			Ok(Address::Re(compile_regex(lines, line, &re, context, icase, false)?))
+			Ok(Address::Re(compile_regex(lines, line, &re, context, icase, false)?.map(Rc::new)))
 		},
 		'$' => {
 			line.advance();
@@ -1322,7 +1323,8 @@ fn compile_subst_command(
 	}
 
 	// Compile regex with now known modifier flags.
-	subst.regex = compile_regex(lines, line, &pattern, context, subst.ignore_case, subst.multiline)?;
+	subst.regex = compile_regex(lines, line, &pattern, context, subst.ignore_case, subst.multiline)?
+		.map(Rc::new);
 
 	// Catch invalid group references at compile time, if possible.
 	if let Some(regex) = &subst.regex
@@ -3925,6 +3927,13 @@ pub fn parse_regex(
 					line.advance();
 					continue;
 				}
+				if line.current() == 'b' {
+					// In a regex `\b` is a word boundary, never a backspace; GNU sed
+					// omits the backspace escape for exactly this conflict.
+					result.push_str("\\b");
+					line.advance();
+					continue;
+				}
 				if let Some(decoded) = parse_char_escape(line) {
 					result.push(decoded);
 				} else {
@@ -5056,9 +5065,9 @@ pub mod fast_io {
 // Zero-copy line-based I/O
 //
 // Abstractions that allow file lines to be processed and output
-// in mmapped memory space.  By coalescing output requests an
-// efficient write(2) system call can be issued for them, bypassing
-// the copy required for output through BufWriter.
+// straight from an owned in-memory copy of the input file.  By
+// coalescing output requests a single write can be issued for adjacent
+// input lines, bypassing per-line copies into owned strings.
 // Search for "main" to see a usage example.
 //
 // SPDX-License-Identifier: MIT
@@ -5080,40 +5089,35 @@ use std::{
 
 #[cfg(unix)]
 use memchr::memchr;
-#[cfg(unix)]
-use memmap2::Mmap;
-#[cfg(unix)]
-use pi_vfs::File;
 use pi_vfs::BlockingFs;
 use crate::{host::Host, sed::error_handling::SedError};
 
 // Define two cursors for iterating over lines:
-// - MmapLineCursor based on mmap(2),
+// - SliceLineCursor over a file read whole into memory,
 // - ReadLineCursor based on BufReader.
 
-/// Cursor for zero-copy iteration over mmap’d file.
+/// Cursor for zero-copy iteration over an in-memory file snapshot.
 #[cfg(unix)]
-pub struct MmapLineCursor<'a> {
-	_file: File,     // Mmapped file; kept open while the map is referenced
-	data:  &'a [u8], // Mmapped data
-	pos:   usize,    // Position within the data
+pub struct SliceLineCursor<'a> {
+	data: &'a [u8], // Snapshot data
+	pos:  usize,    // Position within the data
 }
 
 #[cfg(unix)]
 /// Represents the get_line return: one line plus whether it was the last.
-pub struct NextMmapLine<'a> {
+pub struct NextSliceLine<'a> {
 	pub content:   &'a [u8],
 	pub full_span: &'a [u8],
 }
 
 #[cfg(unix)]
-impl<'a> MmapLineCursor<'a> {
-	fn new(file: File, data: &'a [u8]) -> Self {
-		Self { _file: file, data, pos: 0 }
+impl<'a> SliceLineCursor<'a> {
+	fn new(data: &'a [u8]) -> Self {
+		Self { data, pos: 0 }
 	}
 
 	/// Return the next line, if available, or None.
-	fn get_line(&mut self) -> io::Result<Option<NextMmapLine<'a>>> {
+	fn get_line(&mut self) -> io::Result<Option<NextSliceLine<'a>>> {
 		if self.pos >= self.data.len() {
 			return Ok(None);
 		}
@@ -5138,7 +5142,7 @@ impl<'a> MmapLineCursor<'a> {
 			full_span
 		};
 
-		Ok(Some(NextMmapLine { content, full_span }))
+		Ok(Some(NextSliceLine { content, full_span }))
 	}
 
 	/// Return true if the previously returned line was the last one.
@@ -5223,7 +5227,7 @@ impl<'a> IOChunk<'a> {
 		match &self.content {
 			IOChunkContent::Owned { has_newline, .. } => *has_newline,
 			#[cfg(unix)]
-			IOChunkContent::MmapInput { full_span, .. } => {
+			IOChunkContent::SliceInput { full_span, .. } => {
 				if let Some(&last) = full_span.last() {
 					last == b'\n'
 				} else {
@@ -5262,7 +5266,7 @@ impl<'a> IOChunk<'a> {
 	pub fn as_str(&self) -> Result<&str, SedError> {
 		match &self.content {
 			#[cfg(unix)]
-			IOChunkContent::MmapInput { content, .. } => {
+			IOChunkContent::SliceInput { content, .. } => {
 				if self.utf8_verified.get() {
 					// Use cached result
 					Ok(unsafe { self.content.as_str_unchecked() })
@@ -5280,7 +5284,7 @@ impl<'a> IOChunk<'a> {
 	pub fn as_bytes(&self) -> &[u8] {
 		match &self.content {
 			#[cfg(unix)]
-			IOChunkContent::MmapInput { content, .. } => content,
+			IOChunkContent::SliceInput { content, .. } => content,
 			IOChunkContent::Owned { content, .. } => content.as_bytes(),
 		}
 	}
@@ -5291,7 +5295,7 @@ impl<'a> IOChunk<'a> {
 		match &self.content {
 			IOChunkContent::Owned { .. } => Ok(()), // already owned
 			#[cfg(unix)]
-			IOChunkContent::MmapInput { content, full_span, .. } => match std::str::from_utf8(content) {
+			IOChunkContent::SliceInput { content, full_span, .. } => match std::str::from_utf8(content) {
 				Ok(valid_str) => {
 					let has_newline = full_span.last().copied() == Some(b'\n');
 					self.content = IOChunkContent::new_owned(valid_str.to_string(), has_newline);
@@ -5315,14 +5319,14 @@ impl<'a> IOChunk<'a> {
 	}
 }
 
-/// Data to be written to a file. It can come from the mmapped
-/// memory space, in which case it is tracked to allow coalescing
+/// Data to be written to a file. It can come from an in-memory input
+/// snapshot, in which case it is tracked to allow coalescing
 /// and bypassing BufWriter, or it can be other data from the process's
 /// memory space.
 #[derive(Debug, PartialEq, Eq)]
 enum IOChunkContent<'a> {
 	#[cfg(unix)]
-	MmapInput {
+	SliceInput {
 		content:   &'a [u8], // Line without newline
 		full_span: &'a [u8], // Line including original newline, if any
 	},
@@ -5352,7 +5356,7 @@ impl IOChunkContent<'_> {
 	#[cfg(unix)]
 	unsafe fn as_str_unchecked(&self) -> &str {
 		match self {
-			IOChunkContent::MmapInput { content, .. } => unsafe {
+			IOChunkContent::SliceInput { content, .. } => unsafe {
 				std::str::from_utf8_unchecked(content)
 			},
 			IOChunkContent::Owned { content, .. } => content,
@@ -5363,7 +5367,7 @@ impl IOChunkContent<'_> {
 	pub fn len(&self) -> usize {
 		match self {
 			#[cfg(unix)]
-			IOChunkContent::MmapInput { content, .. } => content.len(),
+			IOChunkContent::SliceInput { content, .. } => content.len(),
 
 			IOChunkContent::Owned { content, .. } => content.len(),
 		}
@@ -5374,12 +5378,13 @@ impl IOChunkContent<'_> {
 // driving write(2)/copy_file_range(2) output fast paths) is removed, because
 // the output writer is a plain `Write` handle without a file descriptor.
 
-/// Unified reader that uses mmap when possible, falls back to buffered reading.
+/// Unified reader: regular host files are read whole into memory and served
+/// zero-copy; everything else streams through a buffered reader.
 pub enum LineReader<'a> {
 	#[cfg(unix)]
-	MmapInput {
-		_mapped_file: Mmap, // A handle that can derive the mapped file slice
-		cursor:      MmapLineCursor<'a>,
+	SliceInput {
+		_data:  Vec<u8>, // Owns the bytes `cursor` borrows
+		cursor: SliceLineCursor<'a>,
 	},
 	ReadInput(ReadLineCursor),
 	#[cfg(not(unix))]
@@ -5391,6 +5396,17 @@ fn line_reader_read_input(file: impl Read + 'static) -> io::Result<LineReader<'s
 	let boxed: Box<dyn Read> = Box::new(file);
 	let reader = BufReader::new(boxed);
 	Ok(LineReader::ReadInput(ReadLineCursor::new(reader)))
+}
+
+/// Return a LineReader that serves all of `file`, read into memory up front.
+#[cfg(unix)]
+fn line_reader_slice_input(mut file: impl Read) -> io::Result<LineReader<'static>> {
+	let mut data = Vec::new();
+	file.read_to_end(&mut data)?;
+	// SAFETY: the heap buffer of `data` is never mutated or reallocated, and it
+	// lives in the same variant as the cursor borrowing it.
+	let slice: &'static [u8] = unsafe { std::slice::from_raw_parts(data.as_ptr(), data.len()) };
+	Ok(LineReader::SliceInput { _data: data, cursor: SliceLineCursor::new(slice) })
 }
 
 impl<'a> LineReader<'a> {
@@ -5408,15 +5424,13 @@ impl<'a> LineReader<'a> {
 		// against the shell working directory.
 		let file = host.fs().open(host.resolve(path))?;
 
-		// Only a handle the filesystem declares host-native can be mapped;
-		// provider files, and native ones mmap rejects (pipes), stream.
+		// Regular host files are read whole, never memory-mapped: sed runs in
+		// the host process, where truncating a mapped file under it raises
+		// SIGBUS and kills the host. Provider files and non-regular host files
+		// (pipes, process substitution) stream.
 		#[cfg(unix)]
-		if let Some(Ok(mapped_file)) = file.native().map(|native| unsafe { Mmap::map(native) }) {
-			// SAFETY: mmap owns the data and lives in the same variant
-			let slice: &'static [u8] =
-				unsafe { std::slice::from_raw_parts(mapped_file.as_ptr(), mapped_file.len()) };
-			let cursor = MmapLineCursor::new(file, slice);
-			return Ok(LineReader::MmapInput { _mapped_file: mapped_file, cursor });
+		if file.native().is_some() && file.metadata().is_ok_and(|meta| meta.is_file()) {
+			return line_reader_slice_input(file);
 		}
 
 		line_reader_read_input(file)
@@ -5440,9 +5454,9 @@ impl<'a> LineReader<'a> {
 	pub fn get_line(&mut self) -> io::Result<Option<IOChunk<'a>>> {
 		match self {
 			#[cfg(unix)]
-			LineReader::MmapInput { cursor, .. } => {
-				if let Some(NextMmapLine { content, full_span }) = cursor.get_line()? {
-					let chunk = IOChunk::from_content(IOChunkContent::MmapInput { content, full_span });
+			LineReader::SliceInput { cursor, .. } => {
+				if let Some(NextSliceLine { content, full_span }) = cursor.get_line()? {
+					let chunk = IOChunk::from_content(IOChunkContent::SliceInput { content, full_span });
 
 					Ok(Some(chunk))
 				} else {
@@ -5468,7 +5482,7 @@ impl<'a> LineReader<'a> {
 	pub fn last_line(&mut self) -> io::Result<bool> {
 		match self {
 			#[cfg(unix)]
-			LineReader::MmapInput { cursor, .. } => cursor.last_line(),
+			LineReader::SliceInput { cursor, .. } => cursor.last_line(),
 
 			LineReader::ReadInput(cursor) => cursor.last_line(),
 
@@ -5484,22 +5498,17 @@ impl<'a> LineReader<'a> {
 pub trait OutputWrite: Write {}
 impl<T: Write> OutputWrite for T {}
 
-/// An output data chunk from the mmapped file
-/// Data elements allow output to be performed through write(2)
-/// or through copy_file_range(2).
+/// A pending output span of contiguous lines from an input snapshot.
 #[cfg(unix)]
 #[derive(Clone)]
-struct MmapOutput {
+struct SliceOutput {
 	out_ptr: *const u8, // Start of the output data chunk
 	len:     usize,     // Output data chunk size
 }
 
-/// Abstraction for outputting data, potentially from the mmapped file
-/// Outputs from mmapped data are coalesced and written via the Linux
-/// copy_file_range(2) system call without any copying, if possible
-/// and worthwhile.  As a fallback write(2) is used, which requires
-/// the OS to copy data from the mmapped region to the output file
-/// page cache.
+/// Abstraction for outputting data, potentially from an input snapshot.
+/// Adjacent snapshot lines are coalesced and written with a single
+/// write of the original bytes.
 /// All other output is buffered and writen via BufWriter.
 pub struct OutputBuffer {
 	out:               BufWriter<Box<dyn OutputWrite + 'static>>, // Where to write
@@ -5508,7 +5517,7 @@ pub struct OutputBuffer {
 	max_pending_write: usize,                        /* Max bytes to keep before
 	                                                               * flushing */
 	#[cfg(unix)]
-	mmap_chunk:        Option<MmapOutput>, // Chunk to write
+	slice_chunk:       Option<SliceOutput>, // Chunk to write
 	// True when the last write didn't end with \n; the \n is deferred so
 	// that commands like `p` don't emit a spurious newline under -n.
 	pending_newline:   bool,
@@ -5516,7 +5525,7 @@ pub struct OutputBuffer {
 	low_level_flushes: usize, // Number of system call flushes
 }
 
-/// Threshold above which a coalesced mmap flush counts as a low-level flush
+/// Threshold above which a coalesced snapshot flush counts as a low-level flush
 /// in tests (formerly the direct-write threshold of the removed fd path).
 #[cfg(all(unix, test))]
 const MIN_DIRECT_WRITE: usize = 4 * 1024;
@@ -5550,7 +5559,7 @@ impl OutputBuffer {
 			} else {
 				usize::MAX
 			},
-			mmap_chunk: None,
+			slice_chunk: None,
 			pending_newline: false,
 			#[cfg(test)]
 			low_level_flushes: 0,
@@ -5569,10 +5578,10 @@ impl OutputBuffer {
 
 	/// Copy the specified file, opened through `fs`, to the output.
 	pub fn copy_file(&mut self, fs: &BlockingFs, path: &Path) -> io::Result<()> {
-		// Flush mmap writes, if any.
+		// Flush snapshot writes, if any.
 		#[cfg(unix)]
 		{
-			self.flush_mmap(WriteRange::Complete)?;
+			self.flush_slice(WriteRange::Complete)?;
 		}
 
 		let Ok(file) = fs.open(path) else {
@@ -5643,22 +5652,22 @@ impl OutputBuffer {
 		}
 
 		if self.pending_newline {
-			self.flush_mmap(WriteRange::Complete)?;
+			self.flush_slice(WriteRange::Complete)?;
 			self.out.write_all(b"\n")?;
 			self.pending_newline = false;
 			self.flush_completed_line()?;
 		}
 
 		match &new_chunk.content {
-			IOChunkContent::MmapInput { full_span, .. } => {
+			IOChunkContent::SliceInput { full_span, .. } => {
 				let new_ptr = full_span.as_ptr();
 				let new_len = full_span.len();
 
 				// Set whether a flush is needed and whether the
-				// mmap_chunk needs to be reset to the new input.
-				// This avoids calling mmap_chunk (which borrows self)
+				// slice_chunk needs to be reset to the new input.
+				// This avoids calling slice_chunk (which borrows self)
 				// when old_chunk is already borrowed.
-				let (flush_action, reset) = if let Some(old_chunk) = self.mmap_chunk.as_mut() {
+				let (flush_action, reset) = if let Some(old_chunk) = self.slice_chunk.as_mut() {
 					// Coalesce if adjacent.
 					if unsafe { old_chunk.out_ptr.add(old_chunk.len) } == new_ptr {
 						// Coalesce.
@@ -5679,16 +5688,16 @@ impl OutputBuffer {
 				};
 
 				if flush_action != WriteRange::None {
-					self.flush_mmap(flush_action)?;
+					self.flush_slice(flush_action)?;
 				}
 				if reset {
-					self.mmap_chunk = Some(MmapOutput { out_ptr: new_ptr, len: new_len });
+					self.slice_chunk = Some(SliceOutput { out_ptr: new_ptr, len: new_len });
 				}
 				self.pending_newline = !new_chunk.is_newline_terminated();
 			},
 
 			IOChunkContent::Owned { content, has_newline, .. } => {
-				self.flush_mmap(WriteRange::Complete)?;
+				self.flush_slice(WriteRange::Complete)?;
 				self.out.write_all(content.as_bytes())?;
 				if *has_newline {
 					self.out.write_all(b"\n")?;
@@ -5698,22 +5707,22 @@ impl OutputBuffer {
 		}
 
 		if self.line_buffered && new_chunk.is_newline_terminated() {
-			// Mmap output reaches the BufWriter only here; file-backed mmap
+			// Snapshot output reaches the BufWriter only here; file-backed
 			// output is block-buffered, so this cannot affect its fast path.
-			self.flush_mmap(WriteRange::Complete)?;
+			self.flush_slice(WriteRange::Complete)?;
 			self.flush_completed_line()?;
 		}
 		Ok(())
 	}
 
-	/// Flush any pending mmap data.
+	/// Flush any pending snapshot data.
 	// the raw-fd write(2) and
-	// copy_file_range(2) fast paths are removed; the coalesced mmap span is
+	// copy_file_range(2) fast paths are removed; the coalesced snapshot span is
 	// written through the buffered writer. `cover` block alignment is thus
 	// irrelevant and every flush writes the complete pending span.
 	#[cfg(unix)]
-	fn flush_mmap(&mut self, _cover: WriteRange) -> io::Result<()> {
-		if let Some(chunk) = self.mmap_chunk.as_mut() {
+	fn flush_slice(&mut self, _cover: WriteRange) -> io::Result<()> {
+		if let Some(chunk) = self.slice_chunk.as_mut() {
 			#[cfg(test)]
 			if chunk.len >= MIN_DIRECT_WRITE {
 				self.low_level_flushes += 1;
@@ -5730,7 +5739,7 @@ impl OutputBuffer {
 	/// Write a deferred newline if the last output didn't end with one.
 	pub fn flush_pending_newline(&mut self) -> io::Result<()> {
 		if self.pending_newline {
-			self.flush_mmap(WriteRange::Complete)?;
+			self.flush_slice(WriteRange::Complete)?;
 			self.out.write_all(b"\n")?;
 			self.pending_newline = false;
 			self.flush_completed_line()?;
@@ -5738,9 +5747,9 @@ impl OutputBuffer {
 		Ok(())
 	}
 
-	/// Flush everything: pending mmap and buffered data.
+	/// Flush everything: pending snapshot and buffered data.
 	pub fn flush(&mut self) -> io::Result<()> {
-		self.flush_mmap(WriteRange::Complete)?; // flush mmap if any
+		self.flush_slice(WriteRange::Complete)?; // flush snapshot if any
 		self.out.flush() // then flush buffered data
 	}
 }
@@ -5784,7 +5793,7 @@ impl OutputBuffer {
 		Ok(())
 	}
 
-	/// Flush everything: pending mmap and buffered data.
+	/// Flush everything: pending snapshot and buffered data.
 	pub fn flush(&mut self) -> io::Result<()> {
 		self.out.flush() // then flush buffered data
 	}
@@ -5814,8 +5823,8 @@ mod tests {
 	}
 
 	#[cfg(unix)]
-	pub fn new_content_mmap_input<'a>(content: &'a [u8], full_span: &'a [u8]) -> IOChunkContent<'a> {
-		IOChunkContent::MmapInput { content, full_span }
+	pub fn new_content_slice_input<'a>(content: &'a [u8], full_span: &'a [u8]) -> IOChunkContent<'a> {
+		IOChunkContent::SliceInput { content, full_span }
 	}
 
 	#[test]
@@ -5837,17 +5846,17 @@ mod tests {
 
 	#[test]
 	#[cfg(unix)]
-	fn test_mmap_line_output_single() -> io::Result<()> {
+	fn test_slice_line_output_single() -> io::Result<()> {
 		use std::{fs, io::Write};
 
 		use tempfile::NamedTempFile;
 
-		// Prepare the input buffer: two lines in one contiguous mmap region
-		let mmap_data = b"line one\nline two\n";
+		// Prepare the input buffer: two lines in one contiguous snapshot
+		let slice_data = b"line one\nline two\n";
 
 		// Write that into a temp file
 		let mut input = NamedTempFile::new()?;
-		input.write_all(mmap_data)?;
+		input.write_all(slice_data)?;
 		input.flush()?;
 		let input_path = input.path().to_path_buf();
 
@@ -5869,7 +5878,7 @@ mod tests {
 		assert_eq!(out.low_level_flushes, 0);
 
 		let written = fs::read(&output_path)?;
-		assert_eq!(written.as_slice(), mmap_data);
+		assert_eq!(written.as_slice(), slice_data);
 
 		Ok(())
 	}
@@ -5895,7 +5904,7 @@ mod tests {
 		let out_file = File::create(&output_path)?;
 		let mut out = OutputBuffer::new(Box::new(out_file), false);
 
-		// Read the first mmap line ("zero\n") and write it
+		// Read the first snapshot line ("zero\n") and write it
 		if let Some(chunk) = reader.get_line()? {
 			out.write_chunk(&chunk)?;
 		}
@@ -5903,7 +5912,7 @@ mod tests {
 		// Write an owned line ("middle\n")
 		out.write_str("middle\n")?;
 
-		// Read the second mmap line ("one\n") and write it
+		// Read the second snapshot line ("one\n") and write it
 		if let Some(chunk) = reader.get_line()? {
 			out.write_chunk(&chunk)?;
 		}
@@ -6124,7 +6133,7 @@ mod tests {
 
 	#[test]
 	#[cfg(unix)]
-	fn test_mmap_read() -> std::io::Result<()> {
+	fn test_slice_read() -> std::io::Result<()> {
 		// Create temporary file with known contents
 		let mut tmp = NamedTempFile::new()?;
 		write!(tmp, "first line\nsecond line\nlast line\n")?;
@@ -6135,7 +6144,7 @@ mod tests {
 
 		// Verify the reader's operation
 		if let Some(IOChunk {
-			content: IOChunkContent::MmapInput { content, full_span, .. },
+			content: IOChunkContent::SliceInput { content, full_span, .. },
 			utf8_verified,
 			..
 		}) = reader.get_line()?
@@ -6146,11 +6155,11 @@ mod tests {
 			assert!(!utf8_verified.get());
 			assert!(!reader.last_line().unwrap());
 		} else {
-			panic!("Expected IOChunkContent::MapInput");
+			panic!("Expected IOChunkContent::SliceInput");
 		}
 
 		if let Some(IOChunk {
-			content: IOChunkContent::MmapInput { content, full_span, .. },
+			content: IOChunkContent::SliceInput { content, full_span, .. },
 			utf8_verified,
 			..
 		}) = reader.get_line()?
@@ -6160,7 +6169,7 @@ mod tests {
 			assert!(!utf8_verified.get());
 			assert!(!reader.last_line().unwrap());
 		} else {
-			panic!("Expected IOChunkContent::MapInput");
+			panic!("Expected IOChunkContent::SliceInput");
 		}
 
 		if let Some(content) = reader.get_line()? {
@@ -6176,6 +6185,28 @@ mod tests {
 
 		assert_eq!(reader.get_line()?, None);
 
+		Ok(())
+	}
+
+	/// Truncating an input file after sed opened it must not fault the host
+	/// process; the reader keeps serving the bytes captured at open.
+	#[test]
+	fn test_file_truncated_after_open() -> io::Result<()> {
+		let mut tmp = NamedTempFile::new()?;
+		for _ in 0..4 {
+			tmp.write_all(&[b'.'; 4095])?;
+			tmp.write_all(b"\n")?;
+		}
+		tmp.flush()?;
+		let mut reader = LineReader::open(&tmp.path().to_path_buf())?;
+		tmp.as_file().set_len(0)?;
+
+		let mut lines = 0;
+		while let Some(chunk) = reader.get_line()? {
+			assert_eq!(chunk.as_bytes(), [b'.'; 4095]);
+			lines += 1;
+		}
+		assert_eq!(lines, 4);
 		Ok(())
 	}
 
@@ -6202,28 +6233,28 @@ mod tests {
 
 	#[cfg(unix)]
 	#[test]
-	fn test_mmap_newline_terminated() {
+	fn test_slice_newline_terminated() {
 		let content = b"line";
 		let full_span = b"line\n";
-		let chunk = IOChunk::from_content(new_content_mmap_input(content, full_span));
+		let chunk = IOChunk::from_content(new_content_slice_input(content, full_span));
 		assert!(chunk.is_newline_terminated());
 	}
 
 	#[cfg(unix)]
 	#[test]
-	fn test_mmap_not_newline_terminated() {
+	fn test_slice_not_newline_terminated() {
 		let content = b"line";
 		let full_span = b"line";
-		let chunk = IOChunk::from_content(new_content_mmap_input(content, full_span));
+		let chunk = IOChunk::from_content(new_content_slice_input(content, full_span));
 		assert!(!chunk.is_newline_terminated());
 	}
 
 	#[cfg(unix)]
 	#[test]
-	fn test_mmap_empty() {
+	fn test_slice_empty() {
 		let content = b"";
 		let full_span = b"";
-		let chunk = IOChunk::from_content(new_content_mmap_input(content, full_span));
+		let chunk = IOChunk::from_content(new_content_slice_input(content, full_span));
 		assert!(!chunk.is_newline_terminated());
 	}
 
@@ -6249,18 +6280,18 @@ mod tests {
 
 	#[cfg(unix)]
 	#[test]
-	fn test_ensure_owned_on_mmap_valid_utf8() {
-		let content = b"mmap string";
-		let full_span = b"mmap string\n";
+	fn test_ensure_owned_on_slice_valid_utf8() {
+		let content = b"slice string";
+		let full_span = b"slice string\n";
 
-		let mut chunk = IOChunk::from_content(new_content_mmap_input(content, full_span));
+		let mut chunk = IOChunk::from_content(new_content_slice_input(content, full_span));
 
 		let result = chunk.ensure_owned();
 		assert!(result.is_ok());
 
 		match &chunk.content {
 			IOChunkContent::Owned { content, has_newline, .. } => {
-				assert_eq!(content, "mmap string");
+				assert_eq!(content, "slice string");
 				assert!(*has_newline);
 			},
 			_ => panic!("Expected Owned variant after ensure_owned"),
@@ -6269,11 +6300,11 @@ mod tests {
 
 	#[cfg(unix)]
 	#[test]
-	fn test_ensure_owned_on_mmap_valid_utf8_no_newline() {
+	fn test_ensure_owned_on_slice_valid_utf8_no_newline() {
 		let content = b"no newline";
 		let full_span = b"no newline";
 
-		let mut chunk = IOChunk::from_content(new_content_mmap_input(content, full_span));
+		let mut chunk = IOChunk::from_content(new_content_slice_input(content, full_span));
 
 		let result = chunk.ensure_owned();
 		assert!(result.is_ok());
@@ -6289,11 +6320,11 @@ mod tests {
 
 	#[cfg(unix)]
 	#[test]
-	fn test_ensure_owned_on_mmap_invalid_utf8() {
+	fn test_ensure_owned_on_slice_invalid_utf8() {
 		let content = b"bad\xFFutf8";
 		let full_span = b"bad\xFFutf8\n";
 
-		let mut chunk = IOChunk::from_content(new_content_mmap_input(content, full_span));
+		let mut chunk = IOChunk::from_content(new_content_slice_input(content, full_span));
 
 		let result = chunk.ensure_owned();
 		assert!(result.is_err());
@@ -6314,10 +6345,10 @@ mod tests {
 
 	#[cfg(unix)]
 	#[test]
-	fn test_fields_mut_on_mmap_input_valid_utf8() {
+	fn test_fields_mut_on_slice_input_valid_utf8() {
 		let content = b"foo";
 		let full_span = b"foo\n";
-		let mut chunk = IOChunk::from_content(new_content_mmap_input(content, full_span));
+		let mut chunk = IOChunk::from_content(new_content_slice_input(content, full_span));
 
 		{
 			let (s, _) = chunk.fields_mut().unwrap();
@@ -6332,7 +6363,7 @@ mod tests {
 	fn test_fields_mut_on_utf8_multibyte() {
 		let content = "Ζωντανά!".as_bytes();
 		let full_span = "Ζωντανά!\n".as_bytes();
-		let mut chunk = IOChunk::from_content(new_content_mmap_input(content, full_span));
+		let mut chunk = IOChunk::from_content(new_content_slice_input(content, full_span));
 
 		let (s, _) = chunk.fields_mut().unwrap();
 		s.push_str(" Δεδομένα");
@@ -6345,7 +6376,7 @@ mod tests {
 	fn test_fields_mut_invalid_utf8() {
 		let content = b"abc\xFF"; // invalid UTF-8
 		let full_span = b"abc\xFF\n";
-		let mut chunk = IOChunk::from_content(new_content_mmap_input(content, full_span));
+		let mut chunk = IOChunk::from_content(new_content_slice_input(content, full_span));
 
 		let result = chunk.fields_mut();
 		assert!(result.is_err());
@@ -6364,7 +6395,7 @@ mod tests {
 			#[cfg(unix)]
 			max_pending_write: 8,
 			#[cfg(unix)]
-			mmap_chunk: None,
+			slice_chunk: None,
 			pending_newline: false,
 			low_level_flushes: 0,
 		};
@@ -6372,10 +6403,10 @@ mod tests {
 	}
 
 	#[cfg(unix)]
-	fn make_mmap_chunk(bytes: &'static [u8]) -> IOChunk<'static> {
+	fn make_slice_chunk(bytes: &'static [u8]) -> IOChunk<'static> {
 		IOChunk {
 			utf8_verified: Cell::new(true),
-			content:       IOChunkContent::MmapInput { content: bytes, full_span: bytes },
+			content:       IOChunkContent::SliceInput { content: bytes, full_span: bytes },
 		}
 	}
 
@@ -6393,61 +6424,61 @@ mod tests {
 
 	#[cfg(unix)]
 	#[test]
-	fn mmap_new_chunk_single() {
+	fn slice_new_chunk_single() {
 		let (mut outbuf, _file) = new_for_test(); // OutputBuffer
 
-		let c1 = make_mmap_chunk(b"abc");
+		let c1 = make_slice_chunk(b"abc");
 
 		outbuf.write_chunk(&c1).unwrap();
 
-		assert_eq!(outbuf.mmap_chunk.as_ref().unwrap().len, 3);
+		assert_eq!(outbuf.slice_chunk.as_ref().unwrap().len, 3);
 	}
 
 	#[cfg(unix)]
 	#[test]
-	fn mmap_new_chunk_and_coalesce() {
+	fn slice_new_chunk_and_coalesce() {
 		let (mut outbuf, _file) = new_for_test(); // OutputBuffer
 
 		let backing = b"abc\nefg\n"; // contiguous buffer, newline-terminated lines
-		let c1 = make_mmap_chunk(&backing[0..4]); // "abc\n"
-		let c2 = make_mmap_chunk(&backing[4..8]); // "efg\n"
+		let c1 = make_slice_chunk(&backing[0..4]); // "abc\n"
+		let c2 = make_slice_chunk(&backing[4..8]); // "efg\n"
 
 		outbuf.write_chunk(&c1).unwrap();
 		outbuf.write_chunk(&c2).unwrap();
 
-		assert_eq!(outbuf.mmap_chunk.as_ref().unwrap().len, 8);
+		assert_eq!(outbuf.slice_chunk.as_ref().unwrap().len, 8);
 	}
 
 	#[test]
 	#[cfg(unix)]
-	fn mmap_not_contiguous_triggers_flush() {
+	fn slice_not_contiguous_triggers_flush() {
 		let (mut buf, _file) = new_for_test();
 		let backing = b"abcdefghi";
-		let c1 = make_mmap_chunk(&backing[0..4]); // "abcd"
+		let c1 = make_slice_chunk(&backing[0..4]); // "abcd"
 		// Guaranteed non-coalescable.  Surprisingly, on macOS
 		// passing two strings resulted in coalescible data.
-		let c2 = make_mmap_chunk(&backing[5..9]); // "fghi"
+		let c2 = make_slice_chunk(&backing[5..9]); // "fghi"
 
 		buf.write_chunk(&c1).unwrap();
-		assert_eq!(buf.mmap_chunk.as_ref().unwrap().len, 4);
+		assert_eq!(buf.slice_chunk.as_ref().unwrap().len, 4);
 		buf.write_chunk(&c2).unwrap();
 		// No coalescing
-		assert_eq!(buf.mmap_chunk.as_ref().unwrap().len, 4);
+		assert_eq!(buf.slice_chunk.as_ref().unwrap().len, 4);
 	}
 
 	#[test]
 	#[cfg(unix)]
-	fn mmap_coalesce_and_flush_blocks() {
+	fn slice_coalesce_and_flush_blocks() {
 		let (mut buf, _file) = new_for_test();
 		buf.max_pending_write = 4;
 		let backing = b"abcde\nfgh\n"; // contiguous newline-terminated lines
-		let c1 = make_mmap_chunk(&backing[0..6]); // "abcde\n"
-		let c2 = make_mmap_chunk(&backing[6..10]); // "fgh\n"
+		let c1 = make_slice_chunk(&backing[0..6]); // "abcde\n"
+		let c2 = make_slice_chunk(&backing[6..10]); // "fgh\n"
 
 		buf.write_chunk(&c1).unwrap();
 		buf.write_chunk(&c2).unwrap();
 		// After a flush triggered by exceeding max_pending_write
-		assert_eq!(buf.mmap_chunk.as_ref().unwrap().len, 0);
+		assert_eq!(buf.slice_chunk.as_ref().unwrap().len, 0);
 	}
 
 	#[test]
@@ -7251,13 +7282,10 @@ use pi_vfs::{BlockingFs, File, TempOptions};
 use uucore::display::Quotable;
 
 use brush_core::openfiles::OpenFile;
-use crate::{
-	host::is_regular_file,
-	sed::{
-		command::ProcessingContext,
-		error_handling::{IoContext, SedError, SedResult},
-		fast_io::OutputBuffer,
-	},
+use crate::sed::{
+	command::ProcessingContext,
+	error_handling::{IoContext, SedError, SedResult},
+	fast_io::OutputBuffer,
 };
 
 /// Sibling file receiving in-place output, created through the injected
@@ -7310,6 +7338,9 @@ impl Drop for TempFile {
 // before an unpersisted temporary file is removed.
 pub struct InPlace {
 	stdout:              OpenFile,
+	/// Whether stdout is a regular file (block-buffered) rather than a pipe
+	/// or stream (line-buffered); classified once by the host.
+	stdout_is_file:      bool,
 	fs:                  BlockingFs,
 	pub output:          OutputBuffer,
 	pub in_place:        bool,
@@ -7323,16 +7354,17 @@ impl InPlace {
 	/// Create an in-place editing engine based on ProcessingContext.
 	/// Depending on its settings it may or may not perform in-place
 	/// editing, backup the original file, or follow symlinks.
-	pub fn new_with_stdout(context: ProcessingContext, stdout: OpenFile) -> Self {
+	pub fn new_with_stdout(context: ProcessingContext, stdout: OpenFile, stdout_is_file: bool) -> Self {
 		Self {
-			output:          stdout_output(&stdout),
+			output: stdout_output(&stdout, stdout_is_file),
 			stdout,
-			fs:              context.paths.fs().clone(),
-			in_place:        context.in_place,
+			stdout_is_file,
+			fs: context.paths.fs().clone(),
+			in_place: context.in_place,
 			in_place_suffix: context.in_place_suffix,
 			follow_symlinks: context.follow_symlinks,
-			temp_file:       None,
-			original_path:   None,
+			temp_file: None,
+			original_path: None,
 		}
 	}
 
@@ -7340,7 +7372,7 @@ impl InPlace {
 	#[cfg(test)]
 	pub fn new(context: ProcessingContext) -> Self {
 		let (host, _) = crate::host::Host::for_test("sed", "", ".");
-		Self::new_with_stdout(context, host.stdout_clone())
+		Self::new_with_stdout(context, host.stdout_clone(), host.stdout_is_regular_file())
 	}
 
 	/// Return an OutputBuffer for outputting the edits to the specified file.
@@ -7362,7 +7394,7 @@ impl InPlace {
 	/// to the context settings.
 	fn begin_resolved(&mut self, file_name: &Path) -> SedResult<&mut OutputBuffer> {
 		if !self.in_place {
-			self.output = stdout_output(&self.stdout);
+			self.output = stdout_output(&self.stdout, self.stdout_is_file);
 			return Ok(&mut self.output);
 		}
 
@@ -7413,7 +7445,7 @@ impl InPlace {
 
 		// Release the output's handle, then close the last one to surface
 		// deferred write errors before the file replaces the original.
-		self.output = stdout_output(&self.stdout);
+		self.output = stdout_output(&self.stdout, self.stdout_is_file);
 		temp.close()
 			.map_err_context(|| format!("error writing temporary file {}", temp.path.quote()))?;
 
@@ -7449,8 +7481,8 @@ impl InPlace {
 }
 
 /// Sed's standard output, line-buffered unless it is a regular file.
-fn stdout_output(stdout: &OpenFile) -> OutputBuffer {
-	OutputBuffer::new(Box::new(stdout.clone()), !is_regular_file(stdout))
+fn stdout_output(stdout: &OpenFile, stdout_is_file: bool) -> OutputBuffer {
+	OutputBuffer::new(Box::new(stdout.clone()), !stdout_is_file)
 }
 
 #[cfg(test)]
@@ -7938,16 +7970,19 @@ fn write_chunk(
 /// Return a reference to the current or the saved RE if the RE is None.
 /// Update the saved RE to RE.
 fn re_or_saved_re<'a>(
-	regex: Option<&Regex>,
+	regex: Option<&Rc<Regex>>,
 	context: &'a mut ProcessingContext,
 	location: &ScriptLocation,
 ) -> SedResult<&'a Regex> {
 	if let Some(re) = regex {
-		// First time we see this regex: clone it *once* into the context.
-		context.saved_regex = Some(re.clone());
+		// Share the compiled RE rather than cloning it: a cloned `Regex` gets a
+		// fresh, empty match cache, so every line would rebuild it from scratch.
+		if !context.saved_regex.as_ref().is_some_and(|saved| Rc::ptr_eq(saved, re)) {
+			context.saved_regex = Some(Rc::clone(re));
+		}
 		// Return a reference into context.saved_regex.
-		Ok(context.saved_regex.as_ref().unwrap())
-	} else if let Some(ref saved_re) = context.saved_regex {
+		Ok(context.saved_regex.as_deref().unwrap())
+	} else if let Some(saved_re) = context.saved_regex.as_deref() {
 		// We already have one: just borrow it.
 		Ok(saved_re)
 	} else {
@@ -8264,7 +8299,7 @@ fn process_file(
 
 	// Loop over the input lines as pattern space.
 	'lines: while let Some(mut pattern) = reader.get_line()? {
-		// mmap-backed input never
+		// snapshot-backed input never
 		// touches the (cancel-aware) stdin reader, so poll the host cancel
 		// flag here to keep long file runs abortable.
 		if host.is_cancelled() {
@@ -8365,8 +8400,11 @@ fn process_file(
 					*pat_has_newline = context.hold.has_newline;
 				},
 				'h' => {
-					// Replace hold with the contents of the pattern space.
-					context.hold.content = pattern.as_str()?.to_string();
+					// Replace hold with the contents of the pattern space, reusing
+					// the hold buffer.
+					let content = pattern.as_str()?;
+					context.hold.content.clear();
+					context.hold.content.push_str(content);
 					context.hold.has_newline = pattern.is_newline_terminated();
 				},
 				'H' => {
@@ -8392,10 +8430,12 @@ fn process_file(
 					// Append to pattern `\n` and the next line
 					// Rather than reading input here, which would result
 					// in a double borrow on reader, modify the action
-					// to perform when the next line is read.
+					// to perform when the next line is read. This cycle's
+					// `pattern` is discarded, so move its buffer instead of
+					// copying the accumulated pattern space each time.
 					context.input_action = Some(InputAction {
 						next_command: command.next.clone(),
-						prepend:      pattern.as_str()?.to_string(),
+						prepend:      std::mem::take(pattern.fields_mut()?.0),
 					});
 					continue 'lines;
 				},
@@ -8540,7 +8580,8 @@ pub fn process_all_files(
 	// terminal, so upstream's stdout-tty check for auto-unbuffered output is
 	// dropped; `-u` alone controls flushing.
 
-	let mut in_place = InPlace::new_with_stdout(context.clone(), host.stdout_clone());
+	let mut in_place =
+		InPlace::new_with_stdout(context.clone(), host.stdout_clone(), host.stdout_is_regular_file());
 	let last_file_index = files.len() - 1;
 
 	for (index, path) in files.iter().enumerate() {
@@ -9600,6 +9641,42 @@ mod tests {
 		let (code, capture) = crate::host::run_util::<Sed>(&["2q42"], "one\ntwo\nthree\n", "/");
 		assert_eq!(code, 42);
 		assert_eq!(capture.out(), "one\ntwo\n");
+	}
+
+	#[test]
+	fn builtin_carries_pattern_and_hold_space_across_cycles() {
+		// `:a;N;$!ba` grows the pattern space by one line per cycle; each `N`
+		// must carry everything accumulated so far, for stdin and for file
+		// input (an in-memory snapshot on unix).
+		let dir = tempfile::tempdir().unwrap();
+		std::fs::write(dir.path().join("in.txt"), "one\ntwo\nthree\n").unwrap();
+		let join = r":a;N;$!ba;s/\n/,/g";
+		for (args, stdin) in [(&[join][..], "one\ntwo\nthree\n"), (&[join, "in.txt"][..], "")] {
+			let (code, capture) = crate::host::run_util::<Sed>(args, stdin, dir.path());
+			assert_eq!(code, 0, "{}", capture.err());
+			assert_eq!(capture.out(), "one,two,three\n", "{args:?}");
+		}
+		// `N` with no next line prints the pending pattern space (GNU).
+		let (code, capture) = crate::host::run_util::<Sed>(&[r"N;s/\n/+/"], "a\nb\nc\n", "/");
+		assert_eq!(code, 0, "{}", capture.err());
+		assert_eq!(capture.out(), "a+b\nc\n");
+		// `1!G;h;$!d` reverses the input through the hold space.
+		let (code, capture) = crate::host::run_util::<Sed>(&["1!G;h;$!d"], "a\nb\nc\n", "/");
+		assert_eq!(code, 0, "{}", capture.err());
+		assert_eq!(capture.out(), "c\nb\na\n");
+	}
+
+	#[test]
+	fn builtin_matches_word_boundaries_in_regexes() {
+		// `\b` is a word boundary in substitutions and addresses, BRE and ERE alike.
+		let (code, capture) =
+			crate::host::run_util::<Sed>(&[r"s/\bfoo\b/bar/g"], "foo foobar barfoo foo\n", "/");
+		assert_eq!(code, 0, "{}", capture.err());
+		assert_eq!(capture.out(), "bar foobar barfoo bar\n");
+		let (code, capture) =
+			crate::host::run_util::<Sed>(&["-E", r"/\bfoo\b/d"], "foobar\nfoo\n", "/");
+		assert_eq!(code, 0, "{}", capture.err());
+		assert_eq!(capture.out(), "foobar\n");
 	}
 
 	#[test]

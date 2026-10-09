@@ -2,6 +2,158 @@
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- `ModelHubCallbacks.onCompactionPointChange` now receives a `confirmed` flag and returns a `CompactionPointChangeResult` (`{ kind: "error" }` or `{ kind: "confirm" }`) instead of an error string; a `confirm` result shows a warning that a second Enter on the same input accepts ([#15048](https://github.com/can1357/oh-my-pi/pull/15048) by [@H4vC](https://github.com/H4vC))
+- `ModelCompactionPoint.percent` is replaced by `basis`, a short explanation of why the model compacts there (`fixed`, `85% of 400K base`, `80% of window`) that the model hub preview shows next to the trigger ([#15065](https://github.com/can1357/oh-my-pi/pull/15065) by [@H4vC](https://github.com/H4vC))
+
+### Added
+
+- Added an `inline` option to `HookSelectorComponent` that keeps a selector in the composer slot in Tern instead of opening it as a sheet over the screen ([#15058](https://github.com/can1357/oh-my-pi/pull/15058) by [@H4vC](https://github.com/H4vC))
+- Added `ModelHubCallbacks.previewCompactionPoint`, whose line the compaction limit field shows while you type instead of the input syntax ([#15065](https://github.com/can1357/oh-my-pi/pull/15065) by [@H4vC](https://github.com/H4vC))
+
+## [18.8.7] - 2026-10-09
+
+### Added
+
+- Added cache-release hooks for TUI components and tool cards, allowing extensions to discard derived render data without rebuilding content ([#13632](https://github.com/can1357/oh-my-pi/pull/13632) by [@iliaal](https://github.com/iliaal)).
+
+### Changed
+
+- Subagent "Submit Result" cards now show the submitted result (its fields as a tree, or the report text), the section it fills, and why a submission was rejected, instead of only "Result submitted.".
+- Reduced memory held by retired transcript history in long sessions ([#13632](https://github.com/can1357/oh-my-pi/pull/13632) by [@iliaal](https://github.com/iliaal)).
+
+### Fixed
+
+- Reduced memory retained by discarded TSP images and previews ([#14336](https://github.com/can1357/oh-my-pi/pull/14336) by [@iliaal](https://github.com/iliaal)).
+- Fixed startup capability probes printing as text in the prompt (e.g. `25a1;stsp;q;{…}pppppp`) on terminals that cannot parse them, such as macOS Terminal.app.
+- Fixed the `/resume` picker flashing while a search runs over a large session history: background fuzzy matches now land in one update instead of reordering the list dozens of times per keystroke.
+
+## [18.8.6] - 2026-10-08
+
+### Changed
+
+- Improved rendering performance for streaming long Markdown lists while preserving nested items, numbering, and reference links.
+
+### Fixed
+
+- Added package exports for the native Tern/TSP modules, allowing extensions in compiled `omp` binaries to import them.
+- Fixed the Tern `/model` picker's Roles tab so typing and Backspace consistently edit the search field without triggering role commands.
+- Fixed the session picker so sessions retain and display their directory when switching between the current folder and all-project views.
+
+## [18.8.5] - 2026-10-08
+
+### Added
+
+- Added a **Compacts at** fact to the model hub preview and a Roles-view **Compaction limit** action (`k`) that edits the selected row's model limit through the new `ModelBrowserSource.compactionPointFor` and `ModelHubCallbacks.onCompactionPointChange` hooks ([#14952](https://github.com/can1357/oh-my-pi/pull/14952) by [@H4vC](https://github.com/H4vC))
+
+### Fixed
+
+- Fixed `/usage` dashboard cards reordering their limit rows by usage; rows now keep the provider's window order (e.g. 5 hour → weekly → monthly) ([#14953](https://github.com/can1357/oh-my-pi/pull/14953) by [@H4vC](https://github.com/H4vC))
+- Fixed Cmd+A, Cmd+C, Cmd+X and Shift+arrow selection doing nothing in the Tern prompt while Vim mode is in Insert mode ([#14954](https://github.com/can1357/oh-my-pi/pull/14954) by [@H4vC](https://github.com/H4vC))
+
+## [18.8.4] - 2026-10-08
+
+### Changed
+
+- Agent Hub keeps existing agents in place while open; new agents appear first in the flat roster or within their tree sibling group ([#13066](https://github.com/can1357/oh-my-pi/pull/13066) by [@kmccleary3301](https://github.com/kmccleary3301))
+
+### Fixed
+
+- Fixed relative file links in Tern assistant replies opening against the folder omp was started in; they now open the file in the session's working directory ([#14879](https://github.com/can1357/oh-my-pi/pull/14879) by [@H4vC](https://github.com/H4vC))
+- Fixed Tern modals with no clickable exit: BTW history, git shortcuts and autoresearch gain a Close button, plan review a Cancel button, the agent transcript viewer and `/annotate` review a top-right `esc` that runs Esc, and the `/move` dialog Accept, Cancel and Confirm buttons; new `escCloseButton()` builds the `esc` keycap button ([#14894](https://github.com/can1357/oh-my-pi/pull/14894) by [@H4vC](https://github.com/H4vC))
+
+## [18.8.2] - 2026-10-07
+
+### Removed
+
+- Removed per-call `model` fields from task parameter types.
+
+## [18.8.1] - 2026-10-07
+
+### Fixed
+
+- Fixed the native ask dialog on TSP surfaces so it replaces the composer instead of opening as a modal over the transcript, keeping the transcript readable and scrollable.
+
+## [18.8.0] - 2026-10-07
+
+### Added
+
+- SVG and Mermaid files now render as images or diagrams beneath their file cards, with SVG previews updating while the file streams and Mermaid previews appearing when the file is complete.
+- Native tool cards can open expanded regardless of the transcript’s expansion state; the todo checklist uses this behavior.
+
+### Changed
+
+- TSP composer placeholders now appear as the composer title in italicized curly quotes, with “What are we cooking?” used when no title is provided.
+- TSP image transfers are more efficient across reconnects and multiple surfaces: images are sent once per connection, existing terminal blobs are detected before upload, and images in the Tern blob cache can be reused without crossing the terminal pty.
+- Improved performance and responsiveness across the TUI, including large TSP messages and Markdown documents, streaming output, tool-result cards, debug logs, raw SSE and Git diff views, path and model searches, session and settings lists, plan review, agent transcripts, status updates, assistant links, Kitty images, and large prompt or evaluation content.
+- Large debug logs and plan-review histories now retain bounded history to keep the interface responsive, while preserving the newest log entries.
+
+### Fixed
+
+- Fixed slow Markdown processing for certain LaTeX environments and incomplete delimiters.
+- Fixed excessive slowdown when formatting long semicolon-free JavaScript evaluations.
+- Fixed prompt-editor lag in large drafts containing magic keywords.
+
+## [18.7.0] - 2026-10-06
+
+### Added
+
+- Assistant SVG code blocks now render as inline, theme-colored images on terminals with graphics support, updating as responses stream and adapting to terminal width; SVG that cannot be rendered remains available as code.
+- Numeric tables in assistant responses can now include automatically selected, themed charts based on the table’s structure and units.
+
+### Changed
+
+- The status line now recognizes projects located in the user’s `repos` directory.
+- Model mentions, `/switch` completions, and model-picker search now update immediately while typing, including with large model catalogs.
+
+### Fixed
+
+- Fixed terminal resizing issues that could cause flicker or briefly display an empty frame.
+- Improved `/annotate` handling for long source lines and filenames, preserving indentation and typed note text.
+- Fixed fullscreen inputs that could hide the cursor when hardware-cursor support was enabled.
+- Fixed model picker and mention-list ordering for same-provider `-latest` models so results remain alphabetically stable.
+- Model browser performance metrics now show the correct measurements for each service tier and identify the tier.
+- Fixed plan review keyboard navigation so horizontal options use Left/Right and model-slider adjustments use Shift+Left/Right.
+- Improved the Ask dialog footer so question-switching keyboard shortcuts are clearly labeled.
+- Fixed creating a new agent when its generated system prompt contains a Markdown code fence.
+- Timed-out `glob` scans are now labeled as timed out rather than truncated.
+- Ctrl+Delete now deletes the word after the cursor, matching Ctrl+Backspace behavior.
+
+## [18.6.3] - 2026-10-06
+
+### Breaking Changes
+
+- `WorkingRowSpec` no longer takes `rate`: the native working row reads spinner, elapsed time, divider, then the intent, and the tok/s readout moved to the composer bar
+
+### Added
+
+- `ComposerNativeState.rate` shows a tok/s readout in the native composer bar after the effort chip, and `ComposerNativeState.thinkingInModel` draws the thinking level as the model chip's icon instead of a separate chip
+- `formatTooltipKey` formats a key for a native tooltip: unicode keycap glyphs whatever the symbol preset, `esc` for Escape
+- `ImageOptions.requestRender` repaints an image without an image budget once its SIXEL encode lands ([#14529](https://github.com/can1357/oh-my-pi/pull/14529) by [@H4vC](https://github.com/H4vC))
+- `AssistantMessageComponent` can keep finished thinking sections expanded via `setExpandThinkingBlocks()`; sections folded by hand stay folded ([#14519](https://github.com/can1357/oh-my-pi/pull/14519) by [@H4vC](https://github.com/H4vC))
+
+### Changed
+
+- `/hotkeys` shows the effective `app.stt.pushToTalk` binding, including `Disabled` when unbound ([#6592](https://github.com/can1357/oh-my-pi/pull/6592) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy)).
+- SIXEL images are encoded off the main thread, so showing an image no longer stalls the terminal ([#14529](https://github.com/can1357/oh-my-pi/pull/14529) by [@H4vC](https://github.com/H4vC))
+
+### Fixed
+
+- Fixed native tooltips (composer, working row, queue, pause screen, git and extension dashboards) naming keys with Nerd Font icons Tern's UI font lacks, or as raw key ids (`ctrl+g`); they use keycap glyphs (`⇧⇥`, `⌃G`)
+- Fixed Tern's per-turn usage row showing a 24-hour time on a 12-hour terminal clock; the row and its tooltip now follow the terminal's clock, keeping the tooltip's ISO date ([#14565](https://github.com/can1357/oh-my-pi/pull/14565) by [@wolfiesch](https://github.com/wolfiesch))
+- Fixed hold-Space push-to-talk stopping the instant recording began (showing "No speech detected.") when opening the microphone briefly froze the UI ([#14463](https://github.com/can1357/oh-my-pi/pull/14463) by [@pgkt04](https://github.com/pgkt04))
+
+## [18.6.1] - 2026-10-04
+
+### Fixed
+
+- Fixed the Space key in the Git diff pane so it stages or unstages the focused hunk instead of scrolling or acting on the wrong change.
+- Fixed the BTW history sheet in Tern: the history list no longer collapses beside a long answer, the panes lose their foldable `##` headings, and the arrow/page keys scroll the answer ([#14331](https://github.com/can1357/oh-my-pi/pull/14331) by [@H4vC](https://github.com/H4vC))
+- Fixed a single saved side question in the BTW history panel opening on its one-row list: its answer now has focus, and Enter or `f` to follow up jumps to the bottom of the conversation ([#14331](https://github.com/can1357/oh-my-pi/pull/14331) by [@H4vC](https://github.com/H4vC))
+
+## [18.6.0] - 2026-10-03
+
 ### Fixed
 
 - Fixed Alt+Up (restore queued steering), arrows and other escape-sequence keys on Windows acting as Esc (interrupting the turn) and typing `[1;3A` into the editor when the console host relays them one byte at a time ([#14216](https://github.com/can1357/oh-my-pi/pull/14216) by [@H4vC](https://github.com/H4vC)).
@@ -2898,127 +3050,4 @@ Initial release under @oh-my-pi scope. See previous releases at [badlogic/pi-mon
 - Cursor now moves to end of content on exit, preventing status line from being overwritten ([#629](https://github.com/badlogic/pi-mono/pull/629) by [@tallshort](https://github.com/tallshort))
 - Reset ANSI styles after each rendered line to prevent style leakage
 
-## [0.42.5] - 2026-01-11
-
-### Fixed
-
-- Reduced flicker by only re-rendering changed lines ([#617](https://github.com/badlogic/pi-mono/pull/617) by [@ogulcancelik](https://github.com/ogulcancelik))
-- Cursor position tracking when content shrinks with unchanged remaining lines
-- TUI renders with wrong dimensions after suspend/resume if terminal was resized while suspended ([#599](https://github.com/badlogic/pi-mono/issues/599))
-- Pasted content containing Kitty key release patterns (e.g., `:3F` in MAC addresses) was incorrectly filtered out ([#623](https://github.com/badlogic/pi-mono/pull/623) by [@ogulcancelik](https://github.com/ogulcancelik))
-
-## [0.39.0] - 2026-01-08
-
-### Added
-
-- **Experimental:** Overlay compositing for `ctx.ui.custom()` with `{ overlay: true }` option ([#558](https://github.com/badlogic/pi-mono/pull/558) by [@nicobailon](https://github.com/nicobailon))
-
-## [0.38.0] - 2026-01-08
-
-### Added
-
-- `EditorComponent` interface for custom editor implementations
-- `StdinBuffer` class to split batched stdin into individual sequences (adapted from [OpenTUI](https://github.com/anomalyco/opentui), MIT license)
-
-### Fixed
-
-- Key presses no longer dropped when batched with other events over SSH ([#538](https://github.com/badlogic/pi-mono/pull/538))
-
-## [0.37.8] - 2026-01-07
-
-### Added
-
-- `Component.wantsKeyRelease` property to opt-in to key release events (default false)
-
-### Fixed
-
-- TUI now filters out key release events by default, preventing double-processing of keys in editors and other components
-
-## [0.37.7] - 2026-01-07
-
-### Fixed
-
-- `matchesKey()` now correctly matches Kitty protocol sequences for unmodified letter keys (needed for key release events)
-
-## [0.37.6] - 2026-01-06
-
-### Added
-
-- Kitty keyboard protocol flag 2 support for key release events. New exports: `isKeyRelease(data)`, `isKeyRepeat(data)`, `KeyEventType` type. Terminals supporting Kitty protocol (Kitty, Ghostty, WezTerm) now send proper key-up events.
-
-## [0.37.0] - 2026-01-05
-
-### Fixed
-
-- Crash when pasting text with trailing whitespace exceeding terminal width through Markdown rendering ([#457](https://github.com/badlogic/pi-mono/pull/457) by [@robinwander](https://github.com/robinwander))
-
-## [0.34.1] - 2026-01-04
-
-### Added
-
-- Symbol key support in keybinding system: `SymbolKey` type with 32 symbol keys, `Key` constants (e.g., `Key.backtick`, `Key.comma`), updated `matchesKey()` and `parseKey()` to handle symbol input ([#450](https://github.com/badlogic/pi-mono/pull/450) by [@kaofelix](https://github.com/kaofelix))
-
-## [0.34.0] - 2026-01-04
-
-### Added
-
-- `Editor.getExpandedText()` method that returns text with paste markers expanded to their actual content ([#444](https://github.com/badlogic/pi-mono/pull/444) by [@aliou](https://github.com/aliou))
-
-## [0.33.0] - 2026-01-04
-
-### Breaking Changes
-
-- **Key detection functions removed**: All `isXxx()` key detection functions (`isEnter()`, `isEscape()`, `isCtrlC()`, etc.) have been removed. Use `matchesKey(data, keyId)` instead (e.g., `matchesKey(data, "enter")`, `matchesKey(data, "ctrl+c")`). This affects hooks and custom tools that use `ctx.ui.custom()` with keyboard input handling. ([#405](https://github.com/badlogic/pi-mono/pull/405))
-
-### Added
-
-- `Editor.insertTextAtCursor(text)` method for programmatic text insertion ([#419](https://github.com/badlogic/pi-mono/issues/419))
-- `EditorKeybindingsManager` for configurable editor keybindings. Components now use `matchesKey()` and keybindings manager instead of individual `isXxx()` functions. ([#405](https://github.com/badlogic/pi-mono/pull/405) by [@hjanuschka](https://github.com/hjanuschka))
-
-### Changed
-
-- Key detection refactored: consolidated `is*()` functions into generic `matchesKey(data, keyId)` function that accepts key identifiers like `"ctrl+c"`, `"shift+enter"`, `"alt+left"`, etc.
-
-## [0.32.2] - 2026-01-03
-
-### Fixed
-
-- Slash command autocomplete now triggers for commands starting with `.`, `-`, or `_` (e.g., `/.land`, `/-foo`) ([#422](https://github.com/badlogic/pi-mono/issues/422))
-
-## [0.32.0] - 2026-01-03
-
-### Changed
-
-- Editor component now uses word wrapping instead of character-level wrapping for better readability ([#382](https://github.com/badlogic/pi-mono/pull/382) by [@nickseelert](https://github.com/nickseelert))
-
-### Fixed
-
-- Shift+Space, Shift+Backspace, and Shift+Delete now work correctly in Kitty-protocol terminals (Kitty, WezTerm, etc.) instead of being silently ignored ([#411](https://github.com/badlogic/pi-mono/pull/411) by [@nathyong](https://github.com/nathyong))
-
-## [0.31.1] - 2026-01-02
-
-### Fixed
-
-- `visibleWidth()` now strips OSC 8 hyperlink sequences, fixing text wrapping for clickable links ([#396](https://github.com/badlogic/pi-mono/pull/396) by [@Cursivez](https://github.com/Cursivez))
-
-## [0.31.0] - 2026-01-02
-
-### Added
-
-- `isShiftCtrlO()` key detection function for Shift+Ctrl+O (Kitty protocol)
-- `isShiftCtrlD()` key detection function for Shift+Ctrl+D (Kitty protocol)
-- `TUI.onDebug` callback for global debug key handling (Shift+Ctrl+D)
-- `wrapTextWithAnsi()` utility now exported (wraps text to width, preserving ANSI codes)
-
-### Changed
-
-- README.md completely rewritten with accurate component documentation, theme interfaces, and examples
-- `visibleWidth()` reimplemented with grapheme-based width calculation, 10x faster on Bun and ~15% faster on Node ([#369](https://github.com/badlogic/pi-mono/pull/369) by [@nathyong](https://github.com/nathyong))
-
-### Fixed
-
-- Markdown component now renders HTML tags as plain text instead of silently dropping them ([#359](https://github.com/badlogic/pi-mono/issues/359))
-- Crash in `visibleWidth()` and grapheme iteration when encountering undefined code points ([#372](https://github.com/badlogic/pi-mono/pull/372) by [@HACKE-RC](https://github.com/HACKE-RC))
-- ZWJ emoji sequences (rainbow flag, family, etc.) now render with correct width instead of being split into multiple characters ([#369](https://github.com/badlogic/pi-mono/pull/369) by [@nathyong](https://github.com/nathyong))
-
-Older entries are archived in [packages/tui/CHANGELOG.md@bac7e83b5b0e](https://github.com/can1357/oh-my-pi/blob/bac7e83b5b0eb86c909c17830a6666efc359578b/packages/tui/CHANGELOG.md).
+Older entries are archived in [packages/tui/CHANGELOG.md@4787659281ba](https://github.com/can1357/oh-my-pi/blob/4787659281ba47f5a3707bbf5ee61742e9373c42/packages/tui/CHANGELOG.md).

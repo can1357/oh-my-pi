@@ -404,6 +404,52 @@ describe("getOrCreateSnapshot", () => {
 		}
 	});
 
+	it("shares one in-flight creation across concurrent callers (no orphaned snapshot files)", async () => {
+		const realBash = REAL_BASH;
+		if (process.platform === "win32" || !existsSync(realBash)) return;
+		const testRoot = await fs.mkdtemp(path.join(os.tmpdir(), "omp-snap-inflight-"));
+		const originalTmpDir = process.env.TMPDIR;
+		process.env.TMPDIR = testRoot;
+		try {
+			const shellLink = path.join(testRoot, "bash-omp-inflight");
+			await fs.symlink(realBash, shellLink);
+			const env = { ...process.env, HOME: testRoot };
+			const [first, second] = await Promise.all([
+				getOrCreateSnapshot(shellLink, env),
+				getOrCreateSnapshot(shellLink, env),
+			]);
+			expect(first).not.toBeNull();
+			expect(second).toBe(first);
+			expect(await fs.readdir(snapshotDirIn(testRoot))).toEqual([path.basename(first!)]);
+		} finally {
+			if (originalTmpDir === undefined) delete process.env.TMPDIR;
+			else process.env.TMPDIR = originalTmpDir;
+			await fs.rm(testRoot, { recursive: true, force: true });
+		}
+	});
+
+	it("remembers a failed snapshot instead of respawning the shell on every call", async () => {
+		if (process.platform === "win32") return;
+		const testRoot = await fs.mkdtemp(path.join(os.tmpdir(), "omp-snap-negative-"));
+		const originalTmpDir = process.env.TMPDIR;
+		process.env.TMPDIR = testRoot;
+		try {
+			const runs = path.join(testRoot, "runs");
+			const fakeShell = path.join(testRoot, "counting-fail-shell.sh");
+			await fs.writeFile(fakeShell, `#!/bin/sh\nprintf x >> '${runs}'\nexit 1\n`);
+			await fs.chmod(fakeShell, 0o755);
+			const env = { ...process.env, HOME: testRoot };
+
+			expect(await getOrCreateSnapshot(fakeShell, env)).toBeNull();
+			expect(await getOrCreateSnapshot(fakeShell, env)).toBeNull();
+			expect(await fs.readFile(runs, "utf8")).toBe("x");
+		} finally {
+			if (originalTmpDir === undefined) delete process.env.TMPDIR;
+			else process.env.TMPDIR = originalTmpDir;
+			await fs.rm(testRoot, { recursive: true, force: true });
+		}
+	});
+
 	it("keeps snapshots in a uid-scoped dir so accounts sharing /tmp cannot collide", async () => {
 		// Regression: the dir used to be a single fixed `omp-shell-snapshots` name
 		// under the shared `os.tmpdir()`, created 0700. The first account to run omp

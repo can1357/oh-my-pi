@@ -87,3 +87,105 @@ class "openai" {
 		}
 	}
 }
+
+// GPT-5.2+ bills images in 32px patches × 1.2, sized per `detail` level:
+// https://developers.openai.com/api/docs/guides/images-vision#calculating-costs
+// Older lines carry no lineage rule and bill at their wire API's fallback
+// (providers/image-tokenization.kdl).
+class "openai" {
+	// gpt-5.6 sizing, shared by later lines. `<10` keeps separator-collapsed
+	// revisions (`openai-gpt-52-codex` parses as 52) off the 5.6+ sizing.
+	revision ">=5.6 <10" {
+		image-tokenization {
+			regime "openai-patch"
+			multiplier 1.2
+			auto "original"
+			low {
+				max-edge 512
+			}
+			high {
+				max-edge 2048
+				patch-budget 2500
+			}
+			original {
+				max-edge 65535
+			}
+		}
+	}
+	revision "=5.5" {
+		image-tokenization {
+			regime "openai-patch"
+			multiplier 1.2
+			auto "original"
+			low {
+				max-edge 512
+			}
+			high {
+				max-edge 2048
+				patch-budget 2500
+			}
+			original {
+				max-edge 6000
+				patch-budget 10000
+			}
+		}
+	}
+	// gpt-5.4: `auto` sizes like `high`, and `low` keeps a 6,144-patch budget.
+	revision "=5.4" {
+		image-tokenization {
+			regime "openai-patch"
+			multiplier 1.2
+			auto "high"
+			low {
+				max-edge 2048
+				patch-budget 6144
+			}
+			high {
+				max-edge 2048
+				patch-budget 2500
+			}
+			original {
+				max-edge 6000
+				patch-budget 10000
+			}
+		}
+	}
+	// gpt-5.2 (and the 5.3 Codex SKU) size every level the same way.
+	revision ">=5.2 <5.4" {
+		image-tokenization {
+			regime "openai-patch"
+			multiplier 1.2
+			auto "high"
+			low {
+				max-edge 2048
+				patch-budget 6144
+			}
+			high {
+				max-edge 2048
+				patch-budget 6144
+			}
+			original {
+				max-edge 2048
+				patch-budget 6144
+			}
+		}
+	}
+	// residue: astra's limits differ from the rest of its revision.
+	models "*gpt-6-astra*" {
+		image-tokenization {
+			regime "openai-patch"
+			multiplier 1.2
+			auto "original"
+			low {
+				max-edge 512
+			}
+			high {
+				max-edge 65535
+				patch-budget 2500
+			}
+			original {
+				max-edge 65535
+			}
+		}
+	}
+}

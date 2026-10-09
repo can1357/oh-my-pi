@@ -224,7 +224,7 @@ describe("worktree isolation helpers", () => {
 
 		it("retries isoResolve candidates when a backend is path-unavailable", async () => {
 			const unavailable = new Error("ISO_UNAVAILABLE: btrfs source is not a subvolume");
-			const isoResolve = vi.spyOn(natives, "isoResolve").mockReturnValue({
+			const isoResolve = vi.spyOn(natives, "isoResolve").mockResolvedValue({
 				kind: natives.IsoBackendKind.Btrfs,
 				candidates: [natives.IsoBackendKind.Btrfs, natives.IsoBackendKind.Rcopy],
 				fellBack: false,
@@ -256,7 +256,7 @@ describe("worktree isolation helpers", () => {
 			tempDirs.push(worktreeBase);
 			delete process.env.OMP_WORKTREE_DIR;
 			setWorktreesDir(worktreeBase);
-			vi.spyOn(natives, "isoResolve").mockReturnValue({
+			vi.spyOn(natives, "isoResolve").mockResolvedValue({
 				kind: natives.IsoBackendKind.Rcopy,
 				candidates: [natives.IsoBackendKind.Rcopy],
 				fellBack: false,
@@ -826,7 +826,7 @@ describe("detachGitDir", () => {
 
 	it("keeps ensureIsolation from mutating a linked-worktree parent (rcopy backend)", async () => {
 		const { wt, baseSha } = await makeLinkedWorktree();
-		vi.spyOn(natives, "isoResolve").mockReturnValue({
+		vi.spyOn(natives, "isoResolve").mockResolvedValue({
 			kind: natives.IsoBackendKind.Rcopy,
 			candidates: [natives.IsoBackendKind.Rcopy],
 			fellBack: false,

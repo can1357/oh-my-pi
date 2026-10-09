@@ -105,4 +105,20 @@ describe("vibe worker spawn model role", () => {
 		expect(options.modelOverride).toEqual(["openai-codex/sol"]);
 		expect(options.modelRole).toBeUndefined();
 	});
+
+	it("restricts the first spawn to the worker agent's account pool, as revival does", async () => {
+		// Without it a worker runs unrestricted until it is parked and revived.
+		const options = await spawnAndCaptureOptions(
+			"good",
+			Settings.isolated({
+				modelRoles: { default: "anthropic/opus", task: "anthropic/sonnet" },
+				"task.agentAccountPools": {
+					task: { anthropic: ["email:a@example.com|org:org-a"] },
+					sonic: { anthropic: [] },
+				},
+			}),
+		);
+
+		expect(options.oauthAccountPools).toEqual({ anthropic: ["email:a@example.com|org:org-a"] });
+	});
 });

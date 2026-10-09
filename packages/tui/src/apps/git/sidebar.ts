@@ -1699,7 +1699,12 @@ export class Sidebar {
 					png,
 					"image/png",
 					{ fallbackColor: text => theme.fg("dim", text) },
-					{ maxHeightCells: 3, budget: this.#imageBudget, imageKey: `git-avatar:${email}` },
+					{
+						maxHeightCells: 3,
+						budget: this.#imageBudget,
+						imageKey: `git-avatar:${email}`,
+						requestRender: this.#requestRender,
+					},
 				),
 			};
 		}

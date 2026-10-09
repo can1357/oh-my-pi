@@ -494,3 +494,48 @@ describe("GLM value-closer healing", () => {
 		expect(ends[0]?.arguments).toEqual({ path: "a.ts", content });
 	});
 });
+
+describe("long in-band tool calls fed in many deltas", () => {
+	const CLOSE_WAIT_DIALECTS: Dialect[] = ["deepseek", "gemini", "hermes", "kimi", "qwen3"];
+	const content = "line of generated file content\n".repeat(1_000);
+	const call: ToolCall = {
+		type: "toolCall",
+		id: "functions.write:0",
+		name: "write",
+		arguments: { path: "a.ts", content },
+	};
+
+	function feedChunks(dialect: Dialect, text: string, size: number): InbandScanEvent[] {
+		const scanner = createInbandScanner(dialect, { tools: TOOLS, parseThinking: true });
+		const events: InbandScanEvent[] = [];
+		for (let index = 0; index < text.length; index += size)
+			events.push(...scanner.feed(text.slice(index, index + size)));
+		events.push(...scanner.flush());
+		return events;
+	}
+
+	function visibleText(events: readonly InbandScanEvent[]): string {
+		return events.map(event => (event.type === "text" ? event.text : "")).join("");
+	}
+
+	it.each(CLOSE_WAIT_DIALECTS)(
+		"parses a %s call whose close splits across deltas and keeps the trailing text",
+		dialect => {
+			const rendered = getDialectDefinition(dialect).renderAssistantToolCalls([call], { tools: TOOLS });
+			// Odd chunk sizes split the multi-character close token at different offsets.
+			for (const size of [7, 13, 64]) {
+				const events = feedChunks(dialect, `${rendered} Done writing.`, size);
+				const ends = toolEnds(events);
+				expect(ends, `${dialect}/${size}`).toHaveLength(1);
+				expect(ends[0]!.arguments, `${dialect}/${size}`).toEqual({ path: "a.ts", content });
+				expect(visibleText(events).trim(), `${dialect}/${size}`).toBe("Done writing.");
+			}
+		},
+	);
+
+	it.each(CLOSE_WAIT_DIALECTS)("flush drops a %s call body that never closes", dialect => {
+		const rendered = getDialectDefinition(dialect).renderAssistantToolCalls([call], { tools: TOOLS });
+		const truncated = rendered.slice(0, rendered.length / 2);
+		expect(toolEnds(feedChunks(dialect, truncated, 7))).toEqual([]);
+	});
+});
