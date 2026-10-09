@@ -678,6 +678,7 @@ function normalizeOptionalNullsForSchema(
 	root: unknown = schema,
 	insideContent = false,
 	speculativeUnion = false,
+	stripSchemaValidNullStrings = false,
 ): { value: unknown; changed: boolean } {
 	if (value === null || value === undefined) return { value, changed: false };
 	if (schema === null || typeof schema !== "object") return { value, changed: false };
@@ -701,6 +702,7 @@ function normalizeOptionalNullsForSchema(
 				root,
 				insideContent,
 				speculativeUnion,
+				stripSchemaValidNullStrings,
 			);
 			if (
 				branchMatchesSchema(branch, normalized.value, root) &&
@@ -721,6 +723,7 @@ function normalizeOptionalNullsForSchema(
 				root,
 				insideContent,
 				speculativeUnion || selectedBranch !== branch,
+				stripSchemaValidNullStrings,
 			);
 			if (!normalized.changed) continue;
 
@@ -765,6 +768,7 @@ function normalizeOptionalNullsForSchema(
 				root,
 				insideContent,
 				speculativeUnion,
+				stripSchemaValidNullStrings,
 			);
 			if (!normalized.changed) continue;
 			nextValue = normalized.value;
@@ -789,6 +793,7 @@ function normalizeOptionalNullsForSchema(
 				root,
 				insideContent,
 				speculativeUnion,
+				stripSchemaValidNullStrings,
 			);
 			if (!normalized.changed) continue;
 			if (!changed) {
@@ -823,12 +828,16 @@ function normalizeOptionalNullsForSchema(
 	for (const [key, propertySchema] of Object.entries(properties)) {
 		if (!(key in nextValue)) continue;
 		const currentValue = nextValue[key];
-		const isNullish = currentValue === null || currentValue === "null";
+		// A valid string "null" may still violate a cross-field constraint.
+		// Only the failed-call fallback strips it, subject to full validation.
+		const isNullish =
+			currentValue === null ||
+			(currentValue === "null" &&
+				(stripSchemaValidNullStrings || !branchMatchesSchema(propertySchema, currentValue, root)));
 		const isInvalidEmptyString =
 			currentValue === "" && !required.has(key) && !branchMatchesSchema(propertySchema, currentValue, root);
 
-		// Strip null/string "null" from optional fields, and strip empty
-		// strings only when the property schema would reject the explicit value.
+		// Strip null and placeholder strings ("null", "") from optional fields.
 		// LLMs sometimes output these placeholders to mean "no value".
 		if ((isNullish || isInvalidEmptyString) && !required.has(key)) {
 			if (!changed) {
@@ -862,6 +871,7 @@ function normalizeOptionalNullsForSchema(
 			root,
 			insideContent || CONTENT_CARRYING_KEYS.has(key),
 			speculativeUnion,
+			stripSchemaValidNullStrings,
 		);
 		if (!normalized.changed) continue;
 
@@ -1802,6 +1812,85 @@ function validateContext(ctx: ValidationContext, value: unknown): ContextValidat
 	};
 }
 
+function withValueAtPath(node: unknown, path: (string | number)[], depth: number, value: string): unknown {
+	if (path.length === 0) return node;
+	const segment = path[depth];
+	const last = depth === path.length - 1;
+	if (Array.isArray(node)) {
+		if (typeof segment !== "number" || segment < 0 || segment >= node.length) return node;
+		const child = last ? value : withValueAtPath(node[segment], path, depth + 1, value);
+		if (child === node[segment]) return node;
+		const copy = node.slice();
+		copy[segment] = child;
+		return copy;
+	}
+	if (!isPlainRecord(node)) return node;
+	const child = last ? value : withValueAtPath(node[segment], path, depth + 1, value);
+	if (child === node[segment]) return node;
+	return { ...node, [segment]: child };
+}
+
+/**
+ * Find the valid repair that drops the fewest optional "null" strings.
+ * Try smaller removal sets first so dependent fields survive together; if
+ * the search grows too large, report the validation error rather than silently
+ * dropping valid filters.
+ */
+function restoreValidNullStrings(ctx: ValidationContext, original: unknown, stripped: unknown): unknown | undefined {
+	const paths: string[] = [];
+	const path: (string | number)[] = [];
+	let full = stripped;
+	const visit = (value: unknown): void => {
+		if (value === "null") {
+			const pointer = pathToPointer(path);
+			if (getValueAtPointer(stripped, pointer) !== undefined) return;
+			const candidate = withValueAtPath(full, path, 0, value);
+			if (candidate !== full) {
+				paths.push(pointer);
+				full = candidate;
+			}
+			return;
+		}
+		if (Array.isArray(value)) {
+			for (let index = 0; index < value.length; index++) {
+				path.push(index);
+				visit(value[index]);
+				path.pop();
+			}
+		} else if (isPlainRecord(value)) {
+			for (const key in value) {
+				if (!Object.hasOwn(value, key)) continue;
+				path.push(key);
+				visit(value[key]);
+				path.pop();
+			}
+		}
+	};
+	visit(original);
+
+	const maxCandidates = 256;
+	let checked = 0;
+	const findValid = (candidate: unknown, start: number, remaining: number): unknown | undefined => {
+		if (remaining === 0) {
+			if (checked++ >= maxCandidates) return undefined;
+			return validateContext(ctx, candidate).success ? candidate : undefined;
+		}
+		for (let index = start; index <= paths.length - remaining && checked < maxCandidates; index++) {
+			const next = deleteValueAtPointer(candidate, paths[index]!);
+			if (next === candidate) continue;
+			const valid = findValid(next, index + 1, remaining - 1);
+			if (valid !== undefined) return valid;
+		}
+		return undefined;
+	};
+
+	for (let removed = 0; removed <= paths.length && checked < maxCandidates; removed++) {
+		const valid = findValid(full, 0, removed);
+		if (valid !== undefined) return valid;
+	}
+	return undefined;
+}
+
 // In-band `arg_key`/`arg_value` tool-call syntax that leaks into native
 // tool-call arguments when a provider parses the model's owned format
 // server-side and the model botches an `</arg_value>` closer.
@@ -2009,10 +2098,9 @@ export function validateToolArguments(tool: Tool, toolCall: ToolCall): ToolCall[
 	const ctx = getValidationContext(tool);
 	const { json } = ctx;
 
-	// Always normalize first — strip null/string "null" from optional fields,
-	// strip optional empty strings only when their property schema rejects the
-	// explicit value, and substitute defaults. Handles LLM outputting
-	// placeholders for "no value" even when validation would otherwise pass.
+	// Normalize JSON nulls and invalid placeholder strings before validation.
+	// A valid string "null" is only removed later if the complete tool schema
+	// rejects it and accepts the call without it.
 	let normalizedArgs: unknown = originalArgs;
 	let changed = false;
 
@@ -2106,6 +2194,18 @@ export function validateToolArguments(tool: Tool, toolCall: ToolCall): ToolCall[
 			result = healedOutcome.result;
 		}
 		if (result.success) return result.value as ToolCall["arguments"];
+	}
+
+	// A string "null" may satisfy its property schema but fail a cross-field
+	// rule or ArkType predicate. Only retry without it if the complete tool
+	// schema accepts the result; otherwise preserve the original error.
+	const stripped = normalizeOptionalNullsForSchema(json, normalizedArgs, true, json, false, false, true);
+	if (stripped.changed && validateContext(ctx, stripped.value).success) {
+		const repaired = restoreValidNullStrings(ctx, normalizedArgs, stripped.value);
+		if (repaired !== undefined) {
+			const validated = validateContext(ctx, repaired);
+			if (validated.success) return validated.value as ToolCall["arguments"];
+		}
 	}
 
 	// Format validation errors nicely. The header phrase is asserted by

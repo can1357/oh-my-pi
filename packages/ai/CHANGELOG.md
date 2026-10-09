@@ -9,6 +9,7 @@
 ### Fixed
 
 - Fixed Claude Haiku 5.5 requests silently enabling adaptive thinking when reasoning is off, on native Bedrock (main and helper calls) and the Anthropic API; conversations whose earlier effort controls rule out disabled thinking fall back to lowest-effort adaptive thinking instead of failing ([#14996](https://github.com/can1357/oh-my-pi/pull/14996) by [@bse-ai](https://github.com/bse-ai)).
+- Fixed optional string tool arguments set to the literal `"null"` (e.g. an MCP `receiver="null"` filter) being silently dropped; `"null"` is now only stripped from optional fields whose schema rejects it ([#15016](https://github.com/can1357/oh-my-pi/issues/15016)).
 
 ## [18.8.6] - 2026-10-08
 
