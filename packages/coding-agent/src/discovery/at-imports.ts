@@ -228,7 +228,8 @@ function splitMarkdownSegments(content: string): MarkdownSegment[] {
 		const lineText = isLast ? line : `${line}\n`;
 		// A fence-looking line inside an HTML comment is comment text, not a fence.
 		const fence = bufferKind === "text" && inComment ? null : matchFence(line);
-		if (bufferKind === "text") inComment = scanHtmlComments(line, inComment).inComment;
+		// Skip fence-opener lines: expandTextSegment never sees them, so scanning would diverge.
+		if (bufferKind === "text" && !fence) inComment = scanHtmlComments(line, inComment).inComment;
 
 		if (fence && bufferKind === "text") {
 			flush();
@@ -271,7 +272,7 @@ function scanHtmlComments(
 			while (open !== -1 && isInsideInlineCode(line, open)) open = line.indexOf("<!--", open + 4);
 			if (open === -1) break;
 			pos = open;
-			searchFrom = open + 4;
+			searchFrom = open + 2; // `<!-->` and `<!--->` are complete comments
 			inComment = true;
 		}
 		const close = line.indexOf("-->", searchFrom);

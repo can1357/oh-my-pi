@@ -166,6 +166,29 @@ describe("expandAtImports", () => {
 		expect(expanded).toBe(["```", "<!--", "```", "see `<!--` then INLINED"].join("\n"));
 	});
 
+	test("a <!-- on a fence opener line does not start a comment", async () => {
+		await writeFile("a.md", "A");
+		await writeFile("b.md", "B");
+		await writeFile("c.md", "C");
+		const source = path.join(tmp, "AGENTS.md");
+		const input = ["~~~ <!--", "x", "~~~", "@./a.md", "~~~", "@./c.md", "~~~", "@./b.md"].join("\n");
+
+		const expanded = await expandAtImports(input, source);
+
+		expect(expanded).toBe(["~~~ <!--", "x", "~~~", "A", "~~~", "@./c.md", "~~~", "B"].join("\n"));
+	});
+
+	test("treats <!--> and <!---> as complete comments", async () => {
+		await writeFile("a.md", "A");
+		await writeFile("b.md", "B");
+		const source = path.join(tmp, "AGENTS.md");
+		const input = ["<!-->", "@./a.md", "<!--->", "@./b.md"].join("\n");
+
+		const expanded = await expandAtImports(input, source);
+
+		expect(expanded).toBe(["<!-->", "A", "<!--->", "B"].join("\n"));
+	});
+
 	test("does not expand inside inline code spans", async () => {
 		await writeFile("guide.md", "INLINED");
 		const source = path.join(tmp, "AGENTS.md");
