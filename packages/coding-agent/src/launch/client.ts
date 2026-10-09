@@ -166,7 +166,10 @@ class SocketDaemonClient implements DaemonBrokerClient {
 		const socket = this.#socket;
 		if (!socket || socket.closed) throw new Error("Daemon broker socket is unavailable");
 
-		await this.#markObservationSocket(socket);
+		if (this.#completionObservers.size > 0 || this.#observationSockets.has(socket)) {
+			await this.#markObservationSocket(socket);
+		}
+		if (signal?.aborted) throw new Error("Daemon broker request aborted");
 		const completionUnsubscribes = [...this.#completionUnsubscribes];
 		const completionReplays = [...this.#completionReplays];
 		const id = crypto.randomUUID();
@@ -411,6 +414,10 @@ class SocketDaemonClient implements DaemonBrokerClient {
 		this.#observationPublications.set(socket, publication);
 		try {
 			await ready;
+			if (this.#observationPublications.get(socket) === publication) {
+				if (this.#completionObservers.size > 0) this.#observationSockets.add(socket);
+				else this.#observationSockets.delete(socket);
+			}
 		} catch (error) {
 			if (this.#observationPublications.get(socket) === publication) this.#observationPublications.delete(socket);
 			throw error;
@@ -438,7 +445,6 @@ class SocketDaemonClient implements DaemonBrokerClient {
 				}),
 			);
 			if (this.#completionObservers.size > 0) this.#observationSockets.add(socket);
-			else this.#observationSockets.delete(socket);
 		} catch (error) {
 			this.#pending.delete(id);
 			clearTimeout(timer);
