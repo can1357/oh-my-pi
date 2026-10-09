@@ -168,6 +168,7 @@ async function buildHello(): Promise<ExtToRelayMessage> {
 		userAgent: navigator.userAgent,
 		browserVersion: versionMatch?.[0] ?? "Chrome/unknown",
 		discardedTabsProtocol: 1, // Keep in sync with the relay protocol version.
+		ompVersion: chrome.runtime.getManifest().version_name,
 		tabs: snapshots,
 		attachedTabIds,
 	};

@@ -12,11 +12,13 @@ import {
 	type BrowserKind,
 	type BrowserKindTag,
 	holdBrowser,
+	normalizeConnectedCdpUrl,
 	releaseBrowser,
 } from "./browser/registry";
 import { ensureChromiumExecutable } from "./browser/launch";
 import { resolveInitScriptSources } from "./browser/open-options";
 import { resolveRelayKind } from "./browser/relay/kind";
+import { relayExtensionNotice } from "./browser/relay/probe";
 import { describeTernTargets, listTernBlocks, type TernTarget, ternTargets } from "./browser/tern/blocks";
 import { resolveTernKind } from "./browser/tern/kind";
 import { isTernUnavailable } from "./browser/tern/wire";
@@ -523,6 +525,8 @@ async function openOnKind(
 		details.url = url;
 		details.viewport = tab.info.viewport;
 		const verb = result.created ? "Opened" : "Reused";
+		const relayNotice =
+			kind.kind === "relay" ? await relayExtensionNotice(normalizeConnectedCdpUrl(kind.cdpUrl), signal) : null;
 		const lines = [
 			`${verb} tab ${JSON.stringify(name)} on ${describeBrowser(tab)}`,
 			`URL: ${url}`,
@@ -530,6 +534,7 @@ async function openOnKind(
 			...(tab.backend === "tern" ? ternNotes(tab) : []),
 			...notes,
 			result.note,
+			relayNotice,
 		].filter((line): line is string => typeof line === "string");
 		return toolResult(details).text(lines.join("\n")).done();
 	} catch (error) {
