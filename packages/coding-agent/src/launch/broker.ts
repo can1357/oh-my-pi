@@ -660,7 +660,9 @@ class DaemonBroker {
 				return this.#send(operation);
 			case "stop": {
 				const record = this.#record(operation.name);
-				await this.#stopRecord(record, operation.timeoutMs);
+				if (operation.id === undefined || operation.id === record.snapshot.id) {
+					await this.#stopRecord(record, operation.timeoutMs);
+				}
 				return { op: "stop", daemon: record.snapshot };
 			}
 			case "restart":
