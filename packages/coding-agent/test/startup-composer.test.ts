@@ -1,4 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 import { parseArgs } from "@oh-my-pi/pi-coding-agent/cli/args";
 import { importRoomKey } from "@oh-my-pi/pi-coding-agent/collab/crypto";
@@ -16,13 +18,15 @@ import {
 	applyStartupComposerPreferences,
 	beginStartupComposer,
 	ComposerLease,
+	resolveTerminalSessionPrepaint,
 	stopPendingStartupComposer,
 	takeStartupComposerLease,
 } from "@oh-my-pi/pi-coding-agent/modes/startup-composer";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
-import { getProjectDir, setProjectDir } from "@oh-my-pi/pi-utils";
+import { writeTerminalBreadcrumb } from "@oh-my-pi/pi-coding-agent/session/session-paths";
+import { getAgentDir, getProjectDir, setAgentDir, setProjectDir } from "@oh-my-pi/pi-utils";
 import { VirtualTerminal } from "../../tui/test/virtual-terminal";
 import { installInMemoryRelay, uninstallInMemoryRelay } from "./collab/helpers/in-memory-relay";
 import { createTestSession } from "./utilities";
@@ -44,6 +48,35 @@ import {
 	cfgTuiMaxInlineImages,
 	cfgTuiResizeScrollback,
 } from "@oh-my-pi/pi-coding-agent/modes/settings";
+
+describe("startup composer terminal session identity", () => {
+	it("reuses the prior project cache row when the breadcrumb project moved", () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "omp-startup-moved-project-"));
+		const agentDir = path.join(root, "agent");
+		const originalProject = path.join(root, "project");
+		const movedProject = path.join(root, "renamed-project");
+		const sessionFile = path.join(root, "session.jsonl");
+		const originalAgentDir = getAgentDir();
+		const originalTmuxPane = process.env.TMUX_PANE;
+		fs.mkdirSync(originalProject);
+		fs.writeFileSync(sessionFile, "{}\n");
+		process.env.TMUX_PANE = "%startup-moved-project";
+		setAgentDir(agentDir);
+		try {
+			writeTerminalBreadcrumb(originalProject, sessionFile);
+			fs.renameSync(originalProject, movedProject);
+			expect(resolveTerminalSessionPrepaint(movedProject)).toEqual({
+				cacheCwd: originalProject,
+				sessionFile,
+			});
+		} finally {
+			setAgentDir(originalAgentDir);
+			if (originalTmuxPane === undefined) delete process.env.TMUX_PANE;
+			else process.env.TMUX_PANE = originalTmuxPane;
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+});
 
 class CountingTerminal extends VirtualTerminal {
 	starts = 0;

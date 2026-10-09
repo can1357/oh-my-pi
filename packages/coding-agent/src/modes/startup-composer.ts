@@ -1,4 +1,5 @@
 import type { Terminal } from "@oh-my-pi/pi-tui";
+import * as fs from "node:fs";
 import * as path from "node:path";
 import {
 	COMPOSER_DEFAULTS,
@@ -13,7 +14,7 @@ import {
 } from "@oh-my-pi/pi-tui/prompt/composer-cache";
 import { setMagicKeywords } from "@oh-my-pi/pi-tui/prompt/magic-keywords";
 import { initThemeSync } from "@oh-my-pi/pi-tui/theme";
-import { readTerminalBreadcrumbEntrySync } from "../session/session-paths";
+import { hasPositiveMovedProjectEvidence, readTerminalBreadcrumbEntrySync } from "../session/session-paths";
 import { MAGIC_KEYWORDS } from "./magic-keywords";
 
 /** Inputs available at the CLI prepaint boundary before command modules load. */
@@ -47,11 +48,21 @@ interface PendingComposer {
 
 let pendingComposer: PendingComposer | undefined;
 
-/** Read only the breadcrumb fields needed by prepaint, without loading the session graph. */
-function readTerminalSessionFile(cwd: string): string | undefined {
+export interface TerminalSessionPrepaint {
+	readonly cacheCwd: string;
+	readonly sessionFile: string;
+}
+
+/** Resolve the breadcrumb identity needed by prepaint, without loading the session graph. */
+export function resolveTerminalSessionPrepaint(cwd: string): TerminalSessionPrepaint | undefined {
 	const breadcrumb = readTerminalBreadcrumbEntrySync();
-	if (!breadcrumb || path.resolve(breadcrumb.cwd) !== path.resolve(cwd)) return undefined;
-	return breadcrumb.sessionFile;
+	if (!breadcrumb) return undefined;
+	const resolvedCwd = path.resolve(cwd);
+	const breadcrumbCwd = path.resolve(breadcrumb.cwd);
+	if (breadcrumbCwd === resolvedCwd) return { cacheCwd: resolvedCwd, sessionFile: breadcrumb.sessionFile };
+	if (fs.existsSync(breadcrumbCwd)) return undefined;
+	if (!hasPositiveMovedProjectEvidence(breadcrumb.cwdIdentity, resolvedCwd)) return undefined;
+	return { cacheCwd: breadcrumbCwd, sessionFile: breadcrumb.sessionFile };
 }
 
 /** Ownership token that transfers one already-started Composer to InteractiveMode. */
@@ -84,10 +95,13 @@ export function beginStartupComposer(options: PrepaintComposerOptions = {}): voi
 	if (pendingComposer) throw new Error("A prepaint composer is already active");
 	const cwd = options.cwd ?? process.cwd();
 	const cache = options.cache === false ? undefined : sharedComposerCache();
+	const terminalSession = options.sessionFile
+		? { cacheCwd: cwd, sessionFile: options.sessionFile }
+		: resolveTerminalSessionPrepaint(cwd);
 	const cached = cache
-		? cache.read(cwd, {
+		? cache.read(terminalSession?.cacheCwd ?? cwd, {
 				allowSessionUsage: options.allowSessionUsage,
-				sessionFile: options.sessionFile ?? readTerminalSessionFile(cwd),
+				sessionFile: terminalSession?.sessionFile,
 			})
 		: { preferences: undefined, theme: undefined, status: undefined };
 	const theme = { ...cached.theme, ...options.theme };

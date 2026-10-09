@@ -30,7 +30,7 @@ import type { SymbolPreset } from "../theme/theme";
 import { isWordCompletionMethod } from "./word-completion";
 
 /** Bump whenever any payload format changes; older stores are cleared on open. */
-const FORMAT_VERSION = 5;
+const FORMAT_VERSION = 6;
 /** Project key of rows that serve every project lacking its own. */
 const ANY_PROJECT = "";
 
@@ -45,7 +45,7 @@ CREATE TABLE IF NOT EXISTS entries (
 ) WITHOUT ROWID;
 `;
 
-/** UI and status are mirrored per project; auto-resume is a single global setting. */
+/** Speculative composer cache payload kinds. */
 type EntryKind = "auto-resume" | "ui" | "status";
 
 /** Theme inputs cached from the last resolved settings load for stable prepaint colors. */
@@ -239,7 +239,7 @@ export class ComposerCache {
 			logger.debug("composer cache read failed", { error: String(error) });
 		}
 		const ui = parseUiState(parseJson(own.ui)) ?? parseUiState(parseJson(anyProject.ui));
-		const autoResume = parseJson(anyProject["auto-resume"]);
+		const autoResume = parseJson(own["auto-resume"]) ?? parseJson(anyProject["auto-resume"]);
 		const cachedStatus = parseCachedStatus(parseJson(own.status)) ?? parseCachedStatus(parseJson(anyProject.status));
 		const canReuseSessionUsage =
 			options.allowSessionUsage &&
@@ -267,12 +267,12 @@ export class ComposerCache {
 	/** Resolved theme and composer settings for the next prepaint. */
 	writeUi(cwd: string, preferences: ComposerPreferences, theme: ComposerThemePreferences, autoResume: boolean): void {
 		this.#putShared(cwd, "ui", { preferences, theme });
-		this.#putGlobal("auto-resume", autoResume);
+		this.#putShared(cwd, "auto-resume", autoResume);
 	}
 
 	/** Refresh the live auto-resume setting without replacing the cached UI snapshot. */
-	writeAutoResume(_cwd: string, autoResume: boolean): void {
-		this.#putGlobal("auto-resume", autoResume);
+	writeAutoResume(cwd: string, autoResume: boolean): void {
+		this.#putShared(cwd, "auto-resume", autoResume);
 	}
 
 	/** Status-bar inputs for the next prepaint's startup status line. */
@@ -301,19 +301,6 @@ export class ComposerCache {
 		this.#select.finalize();
 		this.#upsert.finalize();
 		this.#db.close();
-	}
-
-	/** Best-effort upsert of one global setting shared by every project. */
-	#putGlobal(kind: EntryKind, value: unknown): void {
-		const json = JSON.stringify(value);
-		const key = `${ANY_PROJECT}\0${kind}`;
-		if (this.#known.get(key) === json) return;
-		try {
-			this.#upsert.run(ANY_PROJECT, kind, json);
-			this.#known.set(key, json);
-		} catch (error) {
-			logger.debug("composer cache write failed", { kind, error: String(error) });
-		}
 	}
 
 	/**

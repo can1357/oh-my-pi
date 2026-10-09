@@ -141,7 +141,7 @@ describe("composer startup cache", () => {
 		expect(
 			cache.read(otherProject, { allowSessionUsage: true, sessionFile: otherSessionFile }).status?.statusLine
 				.contextPercent,
-		).toBeUndefined();
+		).toBe(42);
 
 		cache.writeAutoResume(project, true);
 		expect(cache.read(project, { allowSessionUsage: true, sessionFile }).status?.statusLine.contextPercent).toBe(42);
