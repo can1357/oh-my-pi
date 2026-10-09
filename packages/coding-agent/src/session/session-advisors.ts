@@ -433,6 +433,12 @@ export interface SessionAdvisorsOptions {
 	 * advertises nothing.
 	 */
 	mcpResources?: CursorMcpResourceAdapter;
+	/** Owning session scope for advisor resource frames (absent = unrestricted). */
+	sessionScope?: {
+		isToolScopedIn(name: string): boolean;
+		isMCPServerResourceAllowed(serverName: string): boolean;
+		mcpManagerTools(): Iterable<{ readonly name?: string; readonly mcpServerName?: unknown }>;
+	};
 	watchdogPrompt?: string;
 	sharedInstructions?: string;
 	sharedMaxNotesPerUpdate?: number;
@@ -473,6 +479,9 @@ export interface SessionAdvisorsHost {
 	allowAgentInitiatedTurns(): boolean;
 	planModeState(): PlanModeState | undefined;
 	clientBridge(): ClientBridge | undefined;
+	/** Session tool scope for advisor Cursor bridges (absent = unrestricted). */
+	isToolScopedIn?(name: string): boolean;
+	isMCPServerResourceAllowed?(serverName: string): boolean;
 	emitSessionEvent(event: AgentSessionEvent): Promise<void>;
 	emitNotice(level: "info" | "warning" | "error", message: string, source?: string): void;
 	sendCustomMessage(message: CustomMessagePayload, options?: AdvisorMessageDeliveryOptions): Promise<boolean>;
@@ -535,6 +544,7 @@ export class SessionAdvisors {
 	#advisorCreateEditTool: SessionAdvisorsOptions["createEditTool"];
 	#advisorGetToolContext: SessionAdvisorsOptions["getToolContext"];
 	#advisorMcpResources: SessionAdvisorsOptions["mcpResources"];
+	#advisorSessionScope: SessionAdvisorsOptions["sessionScope"];
 	#advisorWatchdogPrompt: string | undefined;
 	#advisorSharedInstructions: string | undefined;
 	#advisorSharedMaxNotesPerUpdate: number | undefined;
@@ -608,6 +618,7 @@ export class SessionAdvisors {
 		this.#advisorCreateEditTool = options.createEditTool;
 		this.#advisorGetToolContext = options.getToolContext;
 		this.#advisorMcpResources = options.mcpResources;
+		this.#advisorSessionScope = options.sessionScope;
 		this.#advisorWatchdogPrompt = options.watchdogPrompt;
 		this.#advisorSharedInstructions = options.sharedInstructions;
 		this.#advisorSharedMaxNotesPerUpdate = options.sharedMaxNotesPerUpdate;
@@ -1376,6 +1387,11 @@ export class SessionAdvisors {
 				cwd: this.#host.sessionManager.getCwd(),
 				getCwd: () => this.#host.sessionManager.getCwd(),
 				tools: bridgeToolMap(advisorToolMap, this.#advisorCreateEditTool),
+				// Resource frames answer by server name and never run a roster tool, so
+				// gate them on the owning session scope (not the roster): without this a
+				// scoped subagent's advisor lists every connected server's resources.
+				allowToollessMcpServers: serverName => this.#advisorSessionScope?.isMCPServerResourceAllowed(serverName) ?? true,
+				mcpManagerTools: () => this.#advisorSessionScope?.mcpManagerTools() ?? [],
 				// The advisor roster is its grant: frames cannot execute tools outside
 				// it. `todo` is absent from advisor rosters, so the in-band todo-mirror
 				// suppression engages via the same predicate.

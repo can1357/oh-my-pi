@@ -372,6 +372,12 @@ export interface AgentSessionConfig {
 	 * empty catalog and every `read_mcp_resource` a `not_found`.
 	 */
 	advisorMcpResources?: CursorMcpResourceAdapter;
+	/** Owning session scope for advisor Cursor resource frames. */
+	advisorSessionScope?: {
+		isToolScopedIn(name: string): boolean;
+		isMCPServerResourceAllowed(serverName: string): boolean;
+		mcpManagerTools(): Iterable<{ readonly name?: string; readonly mcpServerName?: unknown }>;
+	};
 	/** Preloaded watchdog prompt content for the advisor. */
 	advisorWatchdogPrompt?: string;
 	/** Shared advisor instructions loaded from WATCHDOG.yml. */

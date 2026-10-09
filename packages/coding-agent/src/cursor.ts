@@ -393,6 +393,13 @@ async function executeTool(
 	args: Record<string, unknown>,
 	overrideTool?: CursorBridgeTool,
 ): Promise<ToolResultMessage> {
+	// Overrides (replace-mode edit, scoped grep factory) bypass the registry lookup,
+	// so gate them too: a session that scoped the tool out but keeps it registered
+	// (disallow-only scope) must refuse the frame, not run the override.
+	if (overrideTool && options.isToolExecutable && !options.isToolExecutable(toolName)) {
+		const refused = buildToolErrorResult(`Tool "${toolName}" not available`);
+		return createToolResultMessage(toolCallId, toolName, refused, true);
+	}
 	const tool = overrideTool ?? resolveFrameTool(options, toolName);
 	if (!tool) {
 		const result = buildToolErrorResult(`Tool "${toolName}" not available`);

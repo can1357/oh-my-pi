@@ -337,6 +337,52 @@ describe("pi_bash truncation reaches the wire from a real BashTool result", () =
 	});
 });
 
+describe("scope gates on override tools", () => {
+	let cwd: string;
+	beforeEach(async () => {
+		cwd = await fs.mkdtemp(path.join(os.tmpdir(), "cursor-scope-test-"));
+	});
+	afterEach(async () => {
+		await removeWithRetries(cwd);
+	});
+
+	it("refuses the scoped grep factory when grep is scoped out but registered", async () => {
+		const session = createTestSession(cwd);
+		const scopedHandlers = new CursorExecHandlers({
+			cwd,
+			tools: new Map<string, Tool>([["grep", new GrepTool(session)]]),
+			createGrepTool: createBridgeGrepFactory(session, passthroughRunner()),
+			isToolExecutable: name => name !== "grep",
+		});
+		const result = await scopedHandlers.grep({ toolCallId: "g1", pattern: "needle", path: cwd });
+		expect(result.isError).toBe(true);
+	});
+
+	it("refuses the replace-mode edit override when edit is scoped out but registered", async () => {
+		const target = path.join(cwd, "note.txt");
+		await Bun.write(target, "alpha\nbeta\n");
+		const session = createTestSession(cwd);
+		const scopedHandlers = new CursorExecHandlers({
+			cwd,
+			tools: new Map<string, Tool>([["edit", new EditTool(session)]]),
+			getEditReplaceTool: () => createBridgeEditTool(session, passthroughRunner()),
+			getToolContext: () => yoloToolContext(),
+			isToolExecutable: name => name !== "edit",
+		});
+		const result = await scopedHandlers.mcp({
+			name: "StrReplace",
+			providerIdentifier: "cursor",
+			toolName: "StrReplace",
+			toolCallId: "sr-scoped",
+			args: { path: target, old_string: "beta", new_string: "gamma" },
+			rawArgs: {},
+		});
+		expect(await Bun.file(target).text()).toBe("alpha\nbeta\n");
+		expect(
+			result.content.map(part => (part.type === "text" ? part.text : "")).join(""),
+		).toMatch(/not available/i);
+	});
+});
 describe("bridge tool resolution beyond the model-facing registry", () => {
 	let cwd: string;
 
@@ -1161,6 +1207,28 @@ describe("CursorExecHandlers mounted tool bridge", () => {
 		]);
 		// A server filter narrows to that server alone.
 		expect((await handlers.listMcpResources({ server: "issues" })).map(r => r.uri)).toEqual(["issues://open"]);
+	});
+	it("gates resource-only servers on the session scope, not the roster", async () => {
+		// A resource-only server owns no registry tool, so the roster-based
+		// `isToolExecutable` gate cannot see it: `allowToollessMcpServers`
+		// (the owning session scope) decides. This is the advisor case — the
+		// roster holds built-ins only, but allowed servers stay listable.
+		const handlers = new CursorExecHandlers({
+			cwd: ".",
+			tools: new Map(),
+			isToolExecutable: () => false,
+			allowToollessMcpServers: server => server === "docs",
+			mcpResources: {
+				serverNames: () => ["docs", "issues"],
+				getServerResources: async name =>
+					name === "docs"
+						? { resources: [{ uri: "docs://readme", name: "README" }] }
+						: { resources: [{ uri: "issues://open" }] },
+				readServerResource: async () => undefined,
+			},
+		});
+
+		expect((await handlers.listMcpResources({})).map(r => r.uri)).toEqual(["docs://readme"]);
 	});
 	it("filters resources of scoped-out servers from listing and reads", async () => {
 		// A scoped subagent (enforced allowlist / disallowedTools) must not reach

@@ -668,7 +668,7 @@ export class SessionTools {
 	 * keeps the registry entry but removes it from every active-set mutation,
 	 * so hashline anchors must be suppressed for the subagent (the
 	 * `resolveFileDisplayMode` contract). No-op for unrestricted sessions:
-	 * `#isToolScopedIn` admits everything then.
+	 * ``isToolScopedIn` admits everything then.
 	 */
 	get hasEditTool(): boolean {
 		return this.#toolRegistry.has("edit") && this.isToolScopedIn("edit");
