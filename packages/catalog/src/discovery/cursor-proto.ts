@@ -325,6 +325,7 @@ export const AgentRunRequestSchema: MessageCodec<AgentRunRequest> = pb<AgentRunR
 
 /** Cursor agent message agent.v1.AgentServerMessage. */
 export interface AgentServerMessage extends ProtoMessage {
+	ttftBreakdown?: TtftBreakdown;
 	message:
 		| { case: undefined; value?: undefined }
 		| { case: "interactionUpdate"; value: InteractionUpdate }
@@ -332,11 +333,11 @@ export interface AgentServerMessage extends ProtoMessage {
 		| { case: "execServerControlMessage"; value: ExecServerControlMessage }
 		| { case: "conversationCheckpointUpdate"; value: ConversationStateStructure }
 		| { case: "kvServerMessage"; value: KvServerMessage }
-		| { case: "interactionQuery"; value: InteractionQuery }
-		| { case: "ttftBreakdown"; value: TtftBreakdown };
+		| { case: "interactionQuery"; value: InteractionQuery };
 }
 
 export const AgentServerMessageSchema: MessageCodec<AgentServerMessage> = pb<AgentServerMessage>("agent.v1.AgentServerMessage", [
+	{ no: 8, name: "ttftBreakdown", kind: "message", T: () => TtftBreakdownSchema },
 	{
 		kind: "oneof",
 		name: "message",
@@ -347,7 +348,6 @@ export const AgentServerMessageSchema: MessageCodec<AgentServerMessage> = pb<Age
 			{ no: 3, name: "conversationCheckpointUpdate", kind: "message", T: () => ConversationStateStructureSchema },
 			{ no: 4, name: "kvServerMessage", kind: "message", T: () => KvServerMessageSchema },
 			{ no: 7, name: "interactionQuery", kind: "message", T: () => InteractionQuerySchema },
-			{ no: 8, name: "ttftBreakdown", kind: "message", T: () => TtftBreakdownSchema },
 		],
 	},
 ]);
