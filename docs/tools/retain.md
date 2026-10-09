@@ -61,7 +61,7 @@ Mnemopi:
    - it fetches `session.getHindsightSessionState()` and throws if the backend was not started;
    - if any item has `scope: "global"`, it calls `state.assertGlobalRetainAvailable()` first; under `per-project` scoping that throws `Hindsight global scope requires global or per-project-tagged scoping.` and nothing in the batch is queued;
    - each input item is handed to `HindsightSessionState.enqueueRetain(content, context, scope)`;
-   - `HindsightRetainQueue.enqueue(...)` appends the item and either flushes immediately when the queue reaches `RETAIN_FLUSH_BATCH_SIZE`, or starts a debounce timer for `RETAIN_FLUSH_INTERVAL_MS`;
+   - `HindsightRetainQueue.enqueue(...)` throws the same error for a `global` item under `per-project` scoping (the exported queue enforces it too, not only the tool); otherwise it appends the item and either flushes immediately when the queue reaches `RETAIN_FLUSH_BATCH_SIZE`, or starts a debounce timer for `RETAIN_FLUSH_INTERVAL_MS`;
    - on flush, `HindsightRetainQueue.#doFlush(...)` verifies ownership, best-effort ensures the bank exists via `ensureBankExists(...)`, maps items to `MemoryItemInput` with `context ?? config.retainContext` and `metadata.session_id`, then sends async `retainBatch(...)` requests: project items carry the bank-scope tags, global items carry no tags. When the scope has project tags, the two kinds go in separate, concurrent requests, because Hindsight tags a request's generated document with the union of its items' tags and document-level re-tags cascade to every memory in it. A failed request emits a warning notice for its own items only, naming them as global when they were.
 
 ## Modes / Variants

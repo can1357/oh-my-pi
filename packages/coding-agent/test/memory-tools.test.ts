@@ -387,6 +387,16 @@ describe("retain.execute", () => {
 		]);
 	});
 
+	it("rejects a global item enqueued directly on the queue under per-project scoping", () => {
+		const client = new HindsightApi({ baseUrl: "http://localhost:8888" });
+		registerState(client, undefined, { config: { scoping: "per-project" } });
+
+		expect(() => registeredState!.retainQueue.enqueue("cross-project fact", undefined, "global")).toThrow(
+			/requires global or per-project-tagged scoping/i,
+		);
+		expect(registeredState?.retainQueue.depth).toBe(0);
+	});
+
 	it("rejects a batch with a global item under per-project scoping before queueing anything", async () => {
 		const settings = Settings.isolated({ "memory.backend": "hindsight" });
 		const client = new HindsightApi({ baseUrl: "http://localhost:8888" });

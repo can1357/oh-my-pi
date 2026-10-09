@@ -88,6 +88,7 @@ export class HindsightRetainQueue {
 		if (this.#closed) {
 			throw new Error("Hindsight retain queue is closed.");
 		}
+		if (scope === "global") this.#state.assertGlobalRetainAvailable();
 		this.#items.push({ content, context, scope, timestamp: new Date() });
 
 		if (this.#items.length >= RETAIN_FLUSH_BATCH_SIZE) {
@@ -318,7 +319,6 @@ export class HindsightSessionState {
 
 	/** Queues a tool-initiated retain; `scope: "global"` retains it untagged (see {@link assertGlobalRetainAvailable}). */
 	enqueueRetain(content: string, context?: string, scope: MemoryWriteScope = "project"): void {
-		if (scope === "global") this.assertGlobalRetainAvailable();
 		this.retainQueue.enqueue(content, context, scope);
 	}
 
