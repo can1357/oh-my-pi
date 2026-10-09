@@ -6,6 +6,7 @@ import { formatDuration, replaceTabs } from "@oh-my-pi/pi-tui/render/render-util
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { getDaemonRuntimeDir, logger, sanitizeText } from "@oh-my-pi/pi-utils";
 import { type DaemonBrokerClient, daemonClientForProject } from "./client";
+import { awaitServiceObservationBarrier } from "./diagnostic-observers";
 import { canonicalProjectDir } from "./paths";
 import type { DaemonOperation, DaemonRpcResult } from "./protocol";
 import { renderTerminalOutputIsolated } from "./terminal-output-worker-client";
@@ -109,6 +110,7 @@ async function request(
 	operation: DaemonOperation,
 	signal?: AbortSignal,
 ): Promise<DaemonRpcResult> {
+	await awaitServiceObservationBarrier(serviceOwner(session));
 	const client = await daemonClientForProject(session.cwd);
 	subscribe(session, client);
 	const result = await client.request(operation, signal);

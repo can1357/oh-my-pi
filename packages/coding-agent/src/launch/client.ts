@@ -51,12 +51,28 @@ export interface DaemonCompletionUnregisterOptions {
 	preservePending?: boolean;
 }
 
+interface DaemonCompletionObserver {
+	listener: (notification: DaemonCompletionNotification) => void;
+	onGap?: (reason: string) => void;
+}
+
 /** Persistent per-process connection to one project or global daemon broker. */
 export interface DaemonBrokerClient {
 	onCompletion(
 		owner: string,
 		sink: (notification: DaemonCompletionNotification) => Promise<void> | void,
 	): (options?: DaemonCompletionUnregisterOptions) => void;
+	/**
+	 * Observe future settled generations without claiming or acknowledging owned delivery.
+	 * Scope is independent of child connections and remains active until unsubscribed.
+	 * Await a request on this client after subscribing to establish the broker registration.
+	 * onGap reports lost observational coverage; missed events are not replayed.
+	 */
+	observeOwners(
+		owners: readonly string[],
+		listener: (notification: DaemonCompletionNotification) => void,
+		onGap?: (reason: string) => void,
+	): () => void;
 	/** Canonical project directory or synthetic directory identifying a global scope. */
 	readonly projectDir: string;
 	request(operation: DaemonOperation, signal?: AbortSignal): Promise<DaemonRpcResult>;
@@ -146,6 +162,8 @@ class SocketDaemonClient implements DaemonBrokerClient {
 	readonly #idleGraceMs: number | undefined;
 	readonly #pending = new Map<string, PendingRequest>();
 	readonly #completionSinks = new Map<string, (notification: DaemonCompletionNotification) => Promise<void> | void>();
+	readonly #completionObservers = new Map<string, Set<DaemonCompletionObserver>>();
+	readonly #observationSockets = new WeakSet<net.Socket>();
 	readonly #completionUnsubscribes = new Set<string>();
 	readonly #preservedCompletionOwners = new Set<string>();
 	readonly #completionReplays = new Set<string>();
@@ -194,12 +212,14 @@ class SocketDaemonClient implements DaemonBrokerClient {
 			pending.removeAbort = () => signal.removeEventListener("abort", abort);
 		}
 		this.#pending.set(id, pending);
+		this.#markObservationSocket(socket);
 		socket.write(
 			`${JSON.stringify({
 				id,
 				token: this.#token,
 				owners: [...this.#completionSinks.keys()],
 				detachedOwners: [...this.#preservedCompletionOwners],
+				observedOwners: [...this.#completionObservers.keys()],
 				completionEvents: true,
 				completionUnsubscribes,
 				completionReplays,
@@ -224,6 +244,7 @@ class SocketDaemonClient implements DaemonBrokerClient {
 		this.#completionReconnectTimer = undefined;
 		this.#socket?.destroy();
 		this.#completionSinks.clear();
+		this.#completionObservers.clear();
 		this.#preservedCompletionOwners.clear();
 		this.#completionReplays.clear();
 		this.#socket = undefined;
@@ -247,7 +268,42 @@ class SocketDaemonClient implements DaemonBrokerClient {
 				this.#preservedCompletionOwners.delete(owner);
 				this.#completionUnsubscribes.add(owner);
 			}
-			if (this.#completionSinks.size === 0 && this.#completionReconnectTimer) {
+			if (
+				this.#completionSinks.size === 0 &&
+				this.#completionObservers.size === 0 &&
+				this.#completionReconnectTimer
+			) {
+				clearTimeout(this.#completionReconnectTimer);
+				this.#completionReconnectTimer = undefined;
+			}
+			this.#publishCompletionOwners();
+		};
+	}
+
+	observeOwners(
+		owners: readonly string[],
+		listener: (notification: DaemonCompletionNotification) => void,
+		onGap?: (reason: string) => void,
+	): () => void {
+		if (this.#closed) throw new Error("Daemon broker client is closed");
+		const scope = new Set(owners);
+		const observer: DaemonCompletionObserver = { listener, onGap };
+		for (const owner of scope) {
+			const observers = this.#completionObservers.get(owner) ?? new Set<DaemonCompletionObserver>();
+			observers.add(observer);
+			this.#completionObservers.set(owner, observers);
+		}
+		let subscribed = true;
+		this.#publishCompletionOwners();
+		return () => {
+			if (!subscribed) return;
+			subscribed = false;
+			for (const owner of scope) {
+				const observers = this.#completionObservers.get(owner);
+				if (!observers?.delete(observer)) continue;
+				if (observers.size === 0) this.#completionObservers.delete(owner);
+			}
+			if (this.#completionSinks.size === 0 && this.#completionObservers.size === 0) {
 				clearTimeout(this.#completionReconnectTimer);
 				this.#completionReconnectTimer = undefined;
 			}
@@ -257,13 +313,41 @@ class SocketDaemonClient implements DaemonBrokerClient {
 
 	#publishCompletionOwners(): void {
 		if (this.#closed) return;
-		void this.request({ op: "ping" }).catch(() => this.#scheduleCompletionReconnect());
+		void this.request({ op: "ping" }).catch(error => {
+			this.#notifyObservationGap(
+				`Daemon service observation registration failed: ${error instanceof Error ? error.message : String(error)}`,
+			);
+			this.#scheduleCompletionReconnect();
+		});
+	}
+
+	#markObservationSocket(socket: net.Socket): void {
+		if (this.#completionObservers.size > 0) this.#observationSockets.add(socket);
+		else this.#observationSockets.delete(socket);
+	}
+
+	#notifyObservationGap(reason: string): void {
+		if (this.#closed || this.#completionObservers.size === 0) return;
+		const notified = new Set<DaemonCompletionObserver>();
+		for (const observers of this.#completionObservers.values()) {
+			for (const observer of observers) {
+				if (!observer.onGap || notified.has(observer)) continue;
+				notified.add(observer);
+				try {
+					observer.onGap(reason);
+				} catch (error) {
+					logger.warn("Daemon observation gap listener failed", {
+						error: error instanceof Error ? error.message : String(error),
+					});
+				}
+			}
+		}
 	}
 
 	#scheduleCompletionReconnect(): void {
 		if (
 			this.#closed ||
-			this.#completionSinks.size === 0 ||
+			(this.#completionSinks.size === 0 && this.#completionObservers.size === 0) ||
 			this.#completionReconnectTimer !== undefined ||
 			(this.#socket !== undefined && !this.#socket.destroyed)
 		) {
@@ -342,6 +426,11 @@ class SocketDaemonClient implements DaemonBrokerClient {
 			// The close handler rejects pending requests with one stable error.
 		});
 		socket.on("close", () => {
+			if (this.#observationSockets.delete(socket)) {
+				this.#notifyObservationGap(
+					"Daemon service observation connection closed; completions during the coverage gap are unavailable",
+				);
+			}
 			if (this.#socket === socket) this.#socket = undefined;
 			this.#rejectPending(new Error("Daemon broker connection closed"));
 			this.#scheduleCompletionReconnect();
@@ -372,16 +461,17 @@ class SocketDaemonClient implements DaemonBrokerClient {
 					typeof decoded === "object" &&
 					decoded !== null &&
 					"event" in decoded &&
-					decoded.event === "daemon-completed"
+					(decoded.event === "daemon-completed" || decoded.event === "daemon-observed")
 				) {
-					logger.warn("Ignoring malformed daemon completion", { error: parseError.message });
+					logger.warn("Ignoring malformed daemon notification", { error: parseError.message });
 					continue;
 				}
 				this.#rejectPending(parseError);
 				continue;
 			}
 			if ("event" in message) {
-				void this.#deliverCompletion(message);
+				if (message.event === "daemon-observed") this.#deliverObservation(message.notification);
+				else void this.#deliverCompletion(message);
 				continue;
 			}
 			const response = message;
@@ -398,6 +488,20 @@ class SocketDaemonClient implements DaemonBrokerClient {
 				pending.resolve(parseDaemonRpcResult(pending.operation, response.result));
 			} catch (error) {
 				pending.reject(error instanceof Error ? error : new Error(String(error)));
+			}
+		}
+	}
+
+	#deliverObservation(notification: DaemonCompletionNotification): void {
+		for (const observer of this.#completionObservers.get(notification.owner) ?? []) {
+			try {
+				observer.listener(notification);
+			} catch (error) {
+				logger.warn("Daemon completion observer failed", {
+					owner: notification.owner,
+					completionId: notification.completionId,
+					error: error instanceof Error ? error.message : String(error),
+				});
 			}
 		}
 	}
@@ -434,12 +538,14 @@ class SocketDaemonClient implements DaemonBrokerClient {
 	#ackCompletion(completionId: string): void {
 		const socket = this.#socket;
 		if (!socket || socket.destroyed) return;
+		this.#markObservationSocket(socket);
 		socket.write(
 			`${JSON.stringify({
 				id: crypto.randomUUID(),
 				token: this.#token,
 				owners: [...this.#completionSinks.keys()],
 				detachedOwners: [...this.#preservedCompletionOwners],
+				observedOwners: [...this.#completionObservers.keys()],
 				completionEvents: true,
 				completionAcks: [completionId],
 				completionUnsubscribes: [...this.#completionUnsubscribes],
