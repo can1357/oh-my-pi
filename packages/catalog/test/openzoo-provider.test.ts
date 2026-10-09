@@ -279,11 +279,13 @@ describe("openzoo built-in provider", () => {
 	});
 
 	test("a parameter list that omits tools marks the model not tool-capable; a missing list stays tool-capable", async () => {
-		// `supportsTools: undefined` is permission to send native tools. A roster
-		// that published `supported_parameters` and left `tools` out must come
-		// back `false`, or a coding session offers tool definitions the model
-		// rejects. A row with no list, and a list that includes `tools`, stay
-		// unset. Other advertised capabilities still apply on the no-tools row.
+		// `supportsTools: undefined` is permission to send native tools, and a
+		// discovery merge keeps a cached `false` when the new row leaves the
+		// field unset. A roster that published `supported_parameters` and left
+		// `tools` out must come back `false`. A list that includes `tools`
+		// must come back `true`, so that refresh can clear the cached no. A
+		// row with no list stays unset. Other advertised capabilities still
+		// apply on the no-tools row.
 		const options = openzooModelManagerOptions({
 			fetch: async () =>
 				Response.json({
@@ -312,8 +314,8 @@ describe("openzoo built-in provider", () => {
 		expect(noTools?.reasoning).toBe(true);
 		expect(noTools && buildModel(noTools).supportsTools).toBe(false);
 		expect(withTools?.reasoning).toBe(true);
-		expect(withTools?.supportsTools).toBeUndefined();
-		expect(withTools && buildModel(withTools).supportsTools).toBeUndefined();
+		expect(withTools?.supportsTools).toBe(true);
+		expect(withTools && buildModel(withTools).supportsTools).toBe(true);
 		expect(silent?.supportsTools).toBeUndefined();
 		expect(silent && buildModel(silent).supportsTools).toBeUndefined();
 	});
@@ -371,6 +373,39 @@ describe("openzoo built-in provider", () => {
 		expect(models?.map(model => model.id)).toEqual(["auto"]);
 		expect(models?.[0]?.supportsTools).toBe(false);
 		expect(models?.[0] && buildModel(models[0]).supportsTools).toBe(false);
+	});
+
+	test("a later router alias that lists tools keeps the folded model tool-capable", async () => {
+		// Alias spellings fold into one `auto`. The tools advertisement can
+		// arrive after a row with no parameter list; dropping it would leave
+		// supportsTools unset, and a cached `false` would survive the refresh.
+		// An earlier alias that omitted tools still wins inside this roster.
+		const options = openzooModelManagerOptions({
+			fetch: async () =>
+				Response.json({
+					data: [
+						{ id: "auto", owned_by: "openzoo", pricing: { prompt: 1e-7, completion: 2e-7 } },
+						{ id: "openzoo/auto", owned_by: "openzoo", supported_parameters: ["tools"] },
+					],
+				}),
+		});
+		const models = await options.fetchDynamicModels?.();
+		expect(models?.map(model => model.id)).toEqual(["auto"]);
+		expect(models?.[0]?.supportsTools).toBe(true);
+		expect(models?.[0] && buildModel(models[0]).supportsTools).toBe(true);
+
+		const omittedFirst = openzooModelManagerOptions({
+			fetch: async () =>
+				Response.json({
+					data: [
+						{ id: "auto", owned_by: "openzoo", supported_parameters: ["temperature"] },
+						{ id: "openzoo/auto", owned_by: "openzoo", supported_parameters: ["tools"] },
+					],
+				}),
+		});
+		const omitted = await omittedFirst.fetchDynamicModels?.();
+		expect(omitted?.map(model => model.id)).toEqual(["auto"]);
+		expect(omitted?.[0]?.supportsTools).toBe(false);
 	});
 
 	test("leaves omitted limits unknown even when another provider publishes the same model", async () => {

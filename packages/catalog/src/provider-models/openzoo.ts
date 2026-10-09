@@ -119,15 +119,17 @@ function liveOpenzooReasoning(entry: OpenAICompatibleModelRecord): boolean {
  * `false` when `supported_parameters` is present and omits `tools`: callers
  * treat `undefined` as permission to send native tool definitions, so a
  * roster that listed its parameters and left tools out must say no.
- * `undefined` when the list is absent, or when it includes `tools` — a
- * missing list keeps the sparse default, and only the unsupported signal
- * is stored.
+ * `true` when that list includes `tools`. The positive has to be explicit:
+ * a refresh merges with `model.supportsTools ?? existing.supportsTools`, so
+ * an unset field would keep a cached `false` for the rest of the process.
+ * `undefined` when the list is absent — absence stays neutral and does not
+ * clear a cached no.
  */
-function liveOpenzooSupportsTools(entry: OpenAICompatibleModelRecord): false | undefined {
+function liveOpenzooSupportsTools(entry: OpenAICompatibleModelRecord): boolean | undefined {
 	if (!Array.isArray(entry.supported_parameters)) {
 		return undefined;
 	}
-	return listIncludes(entry.supported_parameters, "tools") ? undefined : false;
+	return listIncludes(entry.supported_parameters, "tools");
 }
 
 /**
@@ -161,9 +163,11 @@ function liveOpenzooInput(entry: OpenAICompatibleModelRecord): ("text" | "image"
  * Reasoning and image-input stay on the discovery defaults unless the row
  * reports them — a matching id from another provider is not a capability
  * signal. A present `supported_parameters` list that omits `tools` marks
- * the model not tool-capable; a missing list leaves that unset. Reviewed
- * corrections are rule-owned (`providers/openzoo.kdl`) and applied at
- * `buildModel` time. Pricing is always the proxy's: it is what the wallet pays.
+ * the model not tool-capable; a list that includes `tools` sets
+ * `supportsTools: true` so a cached no does not survive the refresh; a
+ * missing list leaves that unset. Reviewed corrections are rule-owned
+ * (`providers/openzoo.kdl`) and applied at `buildModel` time. Pricing is
+ * always the proxy's: it is what the wallet pays.
  *
  * `context_length` is deliberately ignored: the proxy reports the ceiling its
  * bind/retrieval layer accepts (128M tokens), not the transformer's window,
@@ -176,7 +180,7 @@ export function mapOpenzooModel(
 ): ModelSpec<"openai-completions"> | null {
 	const family = openzooVariantFamily(defaults.id);
 	const supportsTools = liveOpenzooSupportsTools(entry);
-	const toolSupport = supportsTools === false ? { supportsTools } : {};
+	const toolSupport = supportsTools !== undefined ? { supportsTools } : {};
 	if (family) {
 		// Same live capability fields as an ordinary row. The family return
 		// used to keep the generic reasoning:false / input:["text"] defaults,
@@ -220,6 +224,18 @@ export function mapOpenzooModel(
 	};
 }
 
+/**
+ * An omit sticks for the rest of this roster fold, including over a later
+ * alias that lists `tools`. An explicit `true` sticks while no alias omitted
+ * tools, so a tools advertisement on a later alias is not dropped. A missing
+ * list is neutral.
+ */
+function mergeOpenzooAdvertisedTools(previous: boolean | undefined, next: boolean | undefined): boolean | undefined {
+	if (previous === false || next === false) return false;
+	if (previous === true || next === true) return true;
+	return undefined;
+}
+
 /** Image input sticks once any router alias advertises it; a text-only alias does not clear it. */
 function mergeOpenzooAdvertisedInput(
 	previous: ModelSpec<"openai-completions">["input"],
@@ -235,7 +251,9 @@ function mergeOpenzooAdvertisedInput(
  * and each limit keeps the first nonzero/non-null value seen, so an alias row
  * that supplies only the number an earlier row omitted still contributes it.
  * An alias whose parameter list omits `tools` marks the folded model not
- * tool-capable; an alias with no list does not clear that mark.
+ * tool-capable, and a later alias that lists `tools` does not clear that
+ * mark. An alias with no list does not clear it either. A tools
+ * advertisement is kept when no alias omitted tools.
  * Advertised reasoning and image input are a union: a later alias that
  * reports either keeps it, and an alias that omits them does not clear it.
  */
@@ -252,6 +270,9 @@ export function createOpenzooModelMapper(
 			return row;
 		}
 		const previous = variants.get(row.id);
+		const supportsTools = previous
+			? mergeOpenzooAdvertisedTools(previous.supportsTools, row.supportsTools)
+			: row.supportsTools;
 		const merged = previous
 			? {
 					...previous,
@@ -265,7 +286,7 @@ export function createOpenzooModelMapper(
 					},
 					contextWindow: previous.contextWindow ?? row.contextWindow,
 					maxTokens: previous.maxTokens ?? row.maxTokens,
-					...(previous.supportsTools !== false && row.supportsTools === false ? { supportsTools: false } : {}),
+					...(supportsTools !== undefined ? { supportsTools } : {}),
 				}
 			: row;
 		variants.set(row.id, merged);
