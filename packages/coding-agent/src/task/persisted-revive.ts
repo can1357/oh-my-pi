@@ -18,7 +18,6 @@ import { installRetryFallbackRole } from "../session/retry-fallback-chains";
 import type { AuthStorage } from "../session/auth-storage";
 import { extractSessionInit, hasConversationalHistory, SessionManager } from "../session/session-manager";
 import type { EventBus } from "../utils/event-bus";
-import { withSiblingTools } from "../tools/builtin-names";
 import {
 	attachIrcWakeTurnMonitor,
 	compactionThresholdSettings,
@@ -259,12 +258,11 @@ export function createPersistedSubagentReviverFactory(
 			// snapshot predates tools that registered late originally and would
 			// drop one that is available again at revival time with no later
 			// registration event to re-activate it.
-			//
-			// The list is re-declared through the sibling pairing: the original
-			// run's active set carried the sister pair `declaredTools` alone
-			// cannot reproduce (`tools: [checkpoint]` was widened to include
-			// `rewind` during construction), so clamping to the raw declaration
-			// would strand the revived agent mid-investigation.
+			// Under an enforced `tools:` allowlist the declared list is exact:
+			// session creation no longer force-adds session-managed builtins or
+			// the checkpoint/rewind sister, so the clamp must not union them
+			// back — the cold path reproduces the declaration, matching what a
+			// fresh spawn carries. (`yield` rides `requireYieldTool` in both.)
 			//
 			// MCP entries are canonicalized against the live registry first. The
 			// declaration may name a tool the Claude Code way
@@ -280,16 +278,7 @@ export function createPersistedSubagentReviverFactory(
 					)?.name ?? name
 				);
 			});
-			const revivedScope = withSiblingTools(declaredScope);
-			// Session-managed builtins (manage_skill/learn/context_notes/new_context)
-			// and the requireYieldTool terminator ride every explicit list via
-			// createAgentSession (sdk.ts), so union them back when the revived
-			// registry holds them — `declaredTools` never persisted them, and
-			// without this the cold path drops tools the warm path keeps.
-			const revivedManaged = ["manage_skill", "learn", "context_notes", "new_context", "yield"].filter(
-				name => !revivedScope.includes(name) && session.getToolByName(name) !== undefined,
-			);
-			await session.setActiveToolsByName([...revivedScope, ...revivedManaged, ...session.getMountedXdevToolNames()]);
+			await session.setActiveToolsByName([...declaredScope, ...session.getMountedXdevToolNames()]);
 			// The yield tool's schema carries the last batch's items; the replayed prefix must match it.
 			if (init.workPoolYieldItems) await session.setWorkPoolYieldItems(init.workPoolYieldItems);
 			// Wire the extension runtime exactly as the live executor does. Without

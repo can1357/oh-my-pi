@@ -2561,6 +2561,27 @@ describe("createAgentSession defaultInactive tool activation", () => {
 		}
 	});
 
+	it("keeps yield callable under disallowedTools deny-all in a live session", async () => {
+		// Hidden-protocol exemption integration: nothing proves `yield`
+		// survives `disallowedTools: ["*"]` in a real session (unit tests pin
+		// the predicate; this pins the live active set + eval-bridge lookup).
+		const tempDir = makeTempDir();
+		const { session } = await createAgentSession({
+			...baseOptions(tempDir),
+			toolNames: ["read"],
+			requireYieldTool: true,
+			enforceToolAllowlist: true,
+			disallowedTools: ["*"],
+		});
+		try {
+			expect(session.getActiveToolNames()).toEqual(["yield"]);
+			expect(session.getToolForEvalBridge?.("yield")).toBeDefined();
+			expect(session.getToolForEvalBridge?.("read")).toBeUndefined();
+		} finally {
+			await session.dispose();
+		}
+	});
+
 	it("keeps a deny-all scope off the advisor roster", async () => {
 		const tempDir = makeTempDir();
 		const settings = Settings.isolated({ "advisor.enabled": true, "compaction.enabled": false });

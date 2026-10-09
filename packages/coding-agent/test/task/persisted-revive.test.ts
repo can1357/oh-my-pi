@@ -1773,12 +1773,11 @@ describe("persisted allowlist revival", () => {
 		expect(activeToolNames).toEqual([["read", "late_tool", "yield"]]);
 	});
 
-	it("re-admits session-managed builtins the SDK force-adds to every explicit list", async () => {
-		// `createAgentSession` force-adds manage_skill/learn/context_notes/new_context
-		// (plus the requireYieldTool terminator) to every non-restricted explicit
-		// list, but `declaredTools` persists only the executor's declaration. The
-		// clamp must union them back when the revived registry holds them, or the
-		// cold path drops tools the identical warm-revived agent keeps.
+	it("does not re-admit session-managed builtins under an enforced allowlist", async () => {
+		// Under an enforced `tools:` allowlist the declared list is exact:
+		// session creation no longer force-adds session-managed builtins, so
+		// the revival clamp reproduces the declaration instead of unioning
+		// them back — matching what a fresh spawn carries.
 		const cwd = makeTempDir("@pi-managed-revive-");
 		const manager = SessionManager.create(cwd, path.join(cwd, "sessions"));
 		const sessionFile = manager.getSessionFile();
@@ -1823,14 +1822,14 @@ describe("persisted allowlist revival", () => {
 		if (!reviver) throw new Error("Expected a persisted reviver");
 		await reviver(ref);
 
-		expect(activeToolNames).toEqual([["read", "yield", "manage_skill", "learn"]]);
+		expect(activeToolNames).toEqual([["read", "yield"]]);
 	});
 
-	it("keeps the checkpoint/rewind pair when reviving a declaration that named only one", async () => {
-		// `tools: [checkpoint]` is widened to include `rewind` during session
-		// construction (the pair is unusable apart), but `declaredTools` records
-		// the declaration. Clamping the revival to it would strand the agent able
-		// to checkpoint yet unable to rewind.
+	it("does not re-add the checkpoint/rewind sister under an enforced allowlist", async () => {
+		// `tools: [checkpoint]` stays exact under an enforced allowlist (no
+		// construction-time widening), so the revival clamp reproduces the
+		// declaration: clamping to it reproduces the exact grant, so the revived
+		// agent carries the same scope as a fresh spawn.
 		const cwd = makeTempDir("@pi-sibling-revive-");
 		const manager = SessionManager.create(cwd, path.join(cwd, "sessions"));
 		const sessionFile = manager.getSessionFile();
@@ -1872,6 +1871,57 @@ describe("persisted allowlist revival", () => {
 		if (!reviver) throw new Error("Expected a persisted reviver");
 		await reviver(ref);
 
-		expect(activeToolNames).toEqual([["checkpoint", "yield", "rewind"]]);
+		expect(activeToolNames).toEqual([["checkpoint", "yield"]]);
+	});
+
+	it("restores disallowedTools through cold revival and re-enforces them", async () => {
+		// A revive that drops the deny list silently widens the child: the
+		// persisted `disallowedTools` must reach session creation and the clamp.
+		const cwd = makeTempDir("@pi-disallow-revive-");
+		const manager = SessionManager.create(cwd, path.join(cwd, "sessions"));
+		const sessionFile = manager.getSessionFile();
+		if (!sessionFile) throw new Error("Expected a persisted session file");
+		manager.appendSessionInit({
+			systemPrompt: ["persisted prompt"],
+			task: "persisted task",
+			tools: ["read", "write", "yield"],
+			declaredTools: ["read", "write", "yield"],
+			enforceToolAllowlist: true,
+			disallowedTools: ["write"],
+		});
+		manager.appendMessage({
+			role: "assistant",
+			provider: "anthropic",
+			model: "claude-sonnet-4-5",
+			content: [{ type: "text", text: "persisted" }],
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			api: "anthropic-messages",
+			stopReason: "stop",
+			timestamp: Date.now(),
+		});
+		await manager.close();
+		MCPManager.setInstance(fakeMcpManager(() => []));
+
+		const activeToolNames: string[][] = [];
+		let capturedOptions: CreateAgentSessionOptions | undefined;
+		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
+			capturedOptions = options;
+			return { session: createRevivedSession(activeToolNames).session } as CreateAgentSessionResult;
+		});
+
+		const ref = createRef(sessionFile);
+		const reviver = await createFactory(cwd)(ref);
+		if (!reviver) throw new Error("Expected a persisted reviver");
+		await reviver(ref);
+
+		expect(capturedOptions?.disallowedTools).toEqual(["write"]);
+		expect(activeToolNames).toEqual([["read", "write", "yield"]]);
 	});
 });

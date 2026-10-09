@@ -1312,6 +1312,53 @@ describe("runSubprocess yield reminders", () => {
 		expect(callArgs.disallowedTools).toContain("bash");
 	});
 
+	it("auto-adds task to a spawns-scoped child and suppresses it under disallowedTools", async () => {
+		// The classifier promises `task` is auto-added for `spawns:` agents; pin
+		// the live spawn carries it — and that `disallowedTools: [task]`
+		// suppresses the auto-add instead of widening the grant.
+		const session = createMockSession(({ emit }) => {
+			emit({
+				type: "tool_execution_end",
+				toolCallId: "yield-task-auto-add",
+				toolName: "yield",
+				result: {
+					content: [{ type: "text", text: "Result submitted." }],
+					details: { status: "success", data: { ok: true } },
+				},
+				isError: false,
+			});
+		});
+		const spy = mockCreateAgentSession(session);
+		const agent = { ...baseAgent, tools: ["read"], spawns: "*" as const };
+		const result = await runSubprocess({ ...baseOptions, id: "subagent-task-auto-add", agent });
+		expect(result.exitCode).toBe(0);
+		const callArgs = spy.mock.calls[0][0] as { toolNames?: string[] };
+		expect(callArgs.toolNames).toContain("read");
+		expect(callArgs.toolNames).toContain("task");
+		vi.restoreAllMocks();
+		const session2 = createMockSession(({ emit }) => {
+			emit({
+				type: "tool_execution_end",
+				toolCallId: "yield-task-suppressed",
+				toolName: "yield",
+				result: {
+					content: [{ type: "text", text: "Result submitted." }],
+					details: { status: "success", data: { ok: true } },
+				},
+				isError: false,
+			});
+		});
+		const spy2 = mockCreateAgentSession(session2);
+		const suppressed = await runSubprocess({
+			...baseOptions,
+			id: "subagent-task-suppressed",
+			agent: { ...agent, disallowedTools: ["task"] },
+		});
+		expect(suppressed.exitCode).toBe(0);
+		const callArgs2 = spy2.mock.calls[0][0] as { toolNames?: string[] };
+		expect(callArgs2.toolNames).toContain("read");
+		expect(callArgs2.toolNames).not.toContain("task");
+	});
 	it("leaves scoping flags unset when the agent declares no tools", async () => {
 		const session = createMockSession(({ emit }) => {
 			emit({

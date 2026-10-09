@@ -288,6 +288,7 @@ import {
 	isToolDisallowed,
 	isToolScopedIn,
 	mcpDisallowTargetsServer,
+	normalizeToolName,
 	normalizeToolNames,
 	withSiblingTools,
 	withoutSiblingTools,
@@ -1377,7 +1378,7 @@ const TOOL_DEFINITION_MARKER = Symbol("__isToolDefinition");
 /** Matches the truncation applied to per-server instructions inside `rebuildSystemPrompt`. */
 const MAX_MCP_INSTRUCTIONS_LENGTH = 4000;
 /** Built-ins `createTools` force-includes into explicit tool lists; the active set mirrors them. */
-const SESSION_MANAGED_BUILTIN_TOOL_NAMES = ["manage_skill", "learn", "context_notes", "new_context"];
+export const SESSION_MANAGED_BUILTIN_TOOL_NAMES = ["manage_skill", "learn", "context_notes", "new_context"];
 
 let sshCleanupRegistered = false;
 
@@ -3415,7 +3416,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		const sdkCustomTools = [...sdkMcpTools, ...explicitCustomTools];
 		const sdkCustomToolNames = new Set(sdkCustomTools.map(tool => tool.name));
 		for (const tool of sdkCustomTools) {
-			if (HIDDEN_TOOL_NAMES.includes(tool.name as HiddenToolName)) {
+			if (HIDDEN_TOOL_NAMES.includes(normalizeToolName(tool.name) as HiddenToolName)) {
 				throw new Error(`Cannot register custom tool '${tool.name}': '${tool.name}' is a reserved protocol tool.`);
 			}
 		}
