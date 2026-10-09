@@ -5,6 +5,21 @@
 ### Fixed
 
 - Fixed incremental task results nesting array batches, mixing independently labelled section values, and mutating original yield payloads during repeated or mixed-section assembly ([#14925](https://github.com/can1357/oh-my-pi/pull/14925) by [@vavilonska](https://github.com/vavilonska))
+- Reduced memory retained by discarded TSP images and previews ([#14336](https://github.com/can1357/oh-my-pi/pull/14336) by [@iliaal](https://github.com/iliaal)).
+- Fixed startup capability probes printing as text in the prompt (e.g. `25a1;stsp;q;{…}pppppp`) on terminals that cannot parse them, such as macOS Terminal.app.
+
+## [18.8.6] - 2026-10-08
+
+### Changed
+
+- Improved rendering performance for streaming long Markdown lists while preserving nested items, numbering, and reference links.
+
+### Fixed
+
+- Added package exports for the native Tern/TSP modules, allowing extensions in compiled `omp` binaries to import them.
+- Fixed the Tern `/model` picker's Roles tab so typing and Backspace consistently edit the search field without triggering role commands.
+- Fixed the session picker so sessions retain and display their directory when switching between the current folder and all-project views.
+
 ## [18.8.5] - 2026-10-08
 
 ### Added

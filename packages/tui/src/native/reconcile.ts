@@ -30,6 +30,7 @@
 import * as logger from "@oh-my-pi/pi-utils/logger";
 import { TSP_TEXT_KINDS, type TspKind, type TspNode, type TspOp, type TspScrollBy } from "@oh-my-pi/pi-wire";
 import { type Component, Container, CURSOR_MARKER } from "../tui";
+import { getNativeBlob } from "./blobs";
 import { normalizeIconProps } from "./icons";
 import type { DescribeContext, NativeChild, NativeNode, NativeRevealAt } from "./node";
 import { isNativeSettled } from "./settle";
@@ -291,6 +292,7 @@ export class Reconciler {
 		this.#prevPortals = portals;
 		this.#regions = next;
 		for (const entry of this.#dels) this.#deleteEntry(entry);
+		this.#dels = [];
 		// Parked to survive a parent/child swap but absent from the new description.
 		for (const state of this.#parked) {
 			if (!state.parked) continue;
@@ -711,6 +713,8 @@ export class Reconciler {
 		owner: Owner,
 		entries: readonly Entry[],
 	): Readonly<Record<string, unknown>> | undefined {
+		// Dereferencing pins the blob through this synchronous reconcile/upload job, even after settling drops its node.
+		if (node.k === "image" && node.p?.blob) getNativeBlob(node.p.blob);
 		return normalizeIconProps(node.k, this.#resolveRefs(node, owner, entries));
 	}
 
