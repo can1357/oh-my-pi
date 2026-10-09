@@ -111,6 +111,14 @@ function wideMultiRangeArtifact(): string {
 	).join("\n");
 }
 
+/** Streamed scale with a 200 KB line 70: per-range cap stops mid-range. */
+function streamedStuckRangeArtifact(): string {
+	const lines = Array.from({ length: 69 }, (_, index) => `s-${String(index + 1).padStart(3, "0")} ${"x".repeat(693)}`);
+	lines.push(`stuck-070 ${"x".repeat(200_000)}`);
+	for (let index = 71; index <= 6000; index++) lines.push(`s-${String(index).padStart(5, "0")} ${"x".repeat(693)}`);
+	return lines.join("\n");
+}
+
 /** Same scale, but the first line alone is 70 KB: wider than any per-range cap. */
 function streamedOversizedFirstLineArtifact(): string {
 	return [`oversized-first ${"x".repeat(70_000)}`, streamedMultiRangeArtifact()].join("\n");
@@ -440,6 +448,25 @@ describe("read tool large artifact handling", () => {
 			await tool.execute("call-oversized-first-single-follow", { path: "artifact://0:2-300" }),
 		);
 		expect(numberedFollowed).toContain("tail-002");
+	});
+
+	it("names the stuck line when the per-range cap stops mid-range", async () => {
+		await Bun.write(path.join(artifactDir, "0.mcp.log"), streamedStuckRangeArtifact());
+
+		// The 200 KB line 70 stops the per-range window while the shared budget
+		// still has room, so lines 70-100 were never collected. Without a notice
+		// they would vanish silently; the budget cut never fires here.
+		const result = await tool.execute("call-stuck-range", { path: "artifact://0:1-50,52-100" });
+		const output = getTextOutput(result);
+
+		expect(output).toContain("s-001");
+		expect(output).toContain("stopped at line 70");
+		expect(output).toContain("Use artifact://0:70-100 to continue");
+		expect(output).not.toContain("stuck-070");
+
+		const followed = getTextOutput(await tool.execute("call-stuck-range-follow", { path: "artifact://0:70-100" }));
+		expect(followed).toContain("Line 70 is");
+		expect(followed).toContain("artifact://0:raw:70-70");
 	});
 
 	it("names an oversized first line instead of leaving a silent hole", async () => {

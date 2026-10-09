@@ -1555,6 +1555,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			let collectedLines: string[];
 			let totalFileLines: number;
 			let byteLimitLine: ReadLineWindow["byteLimitLine"];
+			let windowStoppedByByteLimit = false;
 			const maxBytesForRead = Math.max(DEFAULT_MAX_BYTES, maxLines * 512);
 			if (fullLines) {
 				totalFileLines = fullLines.length;
@@ -1569,6 +1570,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 				totalFileLines = window.totalFileLines;
 				collectedLines = window.lines;
 				byteLimitLine = window.byteLimitLine;
+				windowStoppedByByteLimit = window.stoppedByByteLimit;
 			}
 
 			if (rangeStart >= totalFileLines) {
@@ -1651,6 +1653,26 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 					budgetSpent = true;
 				}
 				budget.remaining -= head.truncated ? (head.outputBytes ?? 0) : Buffer.byteLength(joined, "utf8");
+			}
+			if (
+				budget !== undefined &&
+				!budgetSpent &&
+				windowStoppedByByteLimit &&
+				byteLimitLine !== undefined &&
+				collectedLines.length > 0
+			) {
+				// The per-range cap stopped the window while the shared budget
+				// still had room, so lines this range asked for were never
+				// collected. Name the stuck line and carry the remainder instead
+				// of leaving a silent hole.
+				const stuckLine = byteLimitLine.index + 1;
+				const rest = [
+					formatRangePart(range.startLine + collectedLines.length, range.endLine),
+					...ranges.slice(rangeIndex + 1).map(later => formatRangePart(later.startLine, later.endLine)),
+				];
+				notices.push(
+					`[Range collection stopped at line ${stuckLine} (${formatBytes(byteLimitLine.byteLength)} exceeds the per-range window); lines were left unread. Use ${budget.url}:${rawSelector ? "raw:" : ""}${rest.join(",")} to continue]`,
+				);
 			}
 
 			// Column truncation is display-only; clone before stamping ellipsis so
