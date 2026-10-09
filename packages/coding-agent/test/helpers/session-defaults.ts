@@ -1,3 +1,4 @@
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 
@@ -10,6 +11,8 @@ export function createSessionDefaults() {
 	let disposed = false;
 	return {
 		sessionManager,
+		// Persisted-run disposal captures overlay writes even when the session is not kept alive.
+		settings: Settings.isolated({}),
 		// These fixtures model ordinary assignment work, never a diagnostic reminder turn.
 		isStallDiagnosticTurn: () => false,
 		setActiveToolsByName: async (_toolNames: string[]) => {},
