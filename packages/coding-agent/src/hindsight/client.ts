@@ -555,10 +555,13 @@ export class HindsightApi {
 		}
 
 		const timeoutMs = opts?.timeoutMs ?? this.#requestTimeoutMs;
-		const init: RequestInit = {
+		const init: BunFetchRequestInit = {
 			method,
 			headers: this.#headers,
 			signal: withTimeoutSignal(timeoutMs, opts?.signal),
+			// Bun's native ~300s fetch idle timer would otherwise end a silent
+			// long reflect before the configured per-op deadline (the signal above).
+			timeout: false,
 		};
 		if (opts?.body !== undefined) {
 			init.body = JSON.stringify(pruneUndefined(opts.body));
