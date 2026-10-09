@@ -254,8 +254,9 @@ export const messageDefs = {
 	},
 	AssistantDoneEvent: { type: "'done'", reason: "'stop' | 'length' | 'toolUse'", message: "AssistantMessage" },
 	AssistantErrorEvent: { type: "'error'", reason: "'aborted' | 'error'", error: "AssistantMessage" },
+	AssistantRoutedModelEvent: { type: "'routed_model'", model: "string", partial: "AssistantMessage" },
 	AssistantMessageEvent: doc(
-		"AssistantStartEvent | AssistantTextStartEvent | AssistantTextDeltaEvent | AssistantTextEndEvent | AssistantThinkingStartEvent | AssistantThinkingDeltaEvent | AssistantThinkingEndEvent | AssistantImageEndEvent | AssistantToolCallStartEvent | AssistantToolCallDeltaEvent | AssistantToolCallEndEvent | AssistantDoneEvent | AssistantErrorEvent",
+		"AssistantStartEvent | AssistantTextStartEvent | AssistantTextDeltaEvent | AssistantTextEndEvent | AssistantThinkingStartEvent | AssistantThinkingDeltaEvent | AssistantThinkingEndEvent | AssistantImageEndEvent | AssistantToolCallStartEvent | AssistantToolCallDeltaEvent | AssistantToolCallEndEvent | AssistantRoutedModelEvent | AssistantDoneEvent | AssistantErrorEvent",
 		"Streaming update for one assistant message, discriminated by `type`.",
 	),
 } satisfies WireDefs;

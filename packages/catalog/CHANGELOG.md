@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added Cursor Auto gateway selection and CLI-default discovery without replacing failed authoritative catalogs ([#10099](https://github.com/can1357/oh-my-pi/pull/10099) by [@jroth1111](https://github.com/jroth1111)).
 ## [18.8.7] - 2026-10-09
 
 ### Added
@@ -10,6 +13,9 @@
 - Added `gen:models --provider <id>` to update one provider without changing other providers' catalog snapshots. ([#14146](https://github.com/can1357/oh-my-pi/pull/14146) by [@ryan-brosas](https://github.com/ryan-brosas))
 
 ### Fixed
+
+- Fixed Cursor roster wire identities and synthetic Auto routing without preventing dynamic effort-family collapsing ([#11324](https://github.com/can1357/oh-my-pi/pull/11324) by [@jroth1111](https://github.com/jroth1111)).
+- Fixed Cursor effort selection when a model roster includes both a logical base and its tier siblings ([#11324](https://github.com/can1357/oh-my-pi/pull/11324) by [@jroth1111](https://github.com/jroth1111)).
 
 - Fixed Claude Haiku 5.5 thinking Off to request explicitly disabled thinking on every host serving its adaptive thinking ([#14996](https://github.com/can1357/oh-my-pi/pull/14996) by [@bse-ai](https://github.com/bse-ai)).
 

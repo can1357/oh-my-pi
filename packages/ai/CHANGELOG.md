@@ -6,9 +6,28 @@
 
 ### Added
 
+- Added explicit host-managed Grok Bot chat with isolated temporary conversations, independently verified replies, and automatic cleanup.
+- Added read-only Sand allowance and reset reporting, separate from model and transport access.
+- Added opt-in Claude text-tool transport that preserves selected model routes and native thinking while omitting protobuf tool declarations.
+
+### Fixed
+
+- Fixed Cursor replies losing their first text chunk when it arrives alongside decimal timing metadata ([#11324](https://github.com/can1357/oh-my-pi/pull/11324) by [@jroth1111](https://github.com/jroth1111)).
+- Grok Bot permission diagnostics no longer assume missing attestation, and runtime JWT reuse follows the issuer's rules.
+- Grok Bot accepts caller-provided inference attestation and workload context, and preserves server-native Claude content across effort variants.
+- Grok Bot requests omit the retired variant-string wire flag and support advertised `reasoning_effort` parameters.
+- Updated Grok Bot's default Sand client stamp while preserving explicit client-version overrides.
+- Preserve nested connection-failure evidence when SDK errors are flattened into provider error messages ([#14380](https://github.com/can1357/oh-my-pi/pull/14380) by [@jroth1111](https://github.com/jroth1111)).
+- Added Cursor Auto routing and client-owned tool passthrough with routing-aware gateway model labels ([#10099](https://github.com/can1357/oh-my-pi/pull/10099) by [@jroth1111](https://github.com/jroth1111)).
+
 - Added routing-session cleanup for OpenAI Responses and Codex while preserving shared provider fallbacks ([#14334](https://github.com/can1357/oh-my-pi/pull/14334) by [@iliaal](https://github.com/iliaal)).
 
 ### Fixed
+
+- Fixed Cursor passthrough allowlists to use protocol tool cases and restrict advertised client MCP definitions instead of disabling live tools ([#10099](https://github.com/can1357/oh-my-pi/pull/10099) by [@jroth1111](https://github.com/jroth1111)).
+
+- Fixed Cursor routed-model updates being discarded despite advertising support, while preserving explicit requested model labels ([#11324](https://github.com/can1357/oh-my-pi/pull/11324) by [@jroth1111](https://github.com/jroth1111)).
+- Fixed Cursor capability/session controls and agent-mode user messages on the serialized request, with HTTP/1 streaming using the CLI's Bidi request contract ([#11324](https://github.com/can1357/oh-my-pi/pull/11324) by [@jroth1111](https://github.com/jroth1111)).
 
 - Fixed Claude Haiku 5.5 requests silently enabling adaptive thinking when reasoning is off, on native Bedrock (main and helper calls) and the Anthropic API; conversations whose earlier effort controls rule out disabled thinking fall back to lowest-effort adaptive thinking instead of failing ([#14996](https://github.com/can1357/oh-my-pi/pull/14996) by [@bse-ai](https://github.com/bse-ai)).
 - Fixed `/session pin` being ignored when every stored account is quota-blocked, which routed the next request to a different exhausted account instead of the pinned one ([#14997](https://github.com/can1357/oh-my-pi/issues/14997)).

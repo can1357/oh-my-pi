@@ -74,6 +74,10 @@ function isInputModalities(value: unknown): value is ("text" | "image")[] {
  * only when the spec left it unset.
  */
 function applyCatalogAssignments<TApi extends Api>(model: Model<TApi>, catalog: Record<string, unknown>): void {
+	const requestModelId = catalog.requestModelId;
+	if (typeof requestModelId === "string" && requestModelId.trim() && model.requestModelId === undefined) {
+		model.requestModelId = requestModelId.trim();
+	}
 	const kind = MODEL_KINDS.find(value => value === catalog.kind);
 	if (kind !== undefined) model.kind = kind;
 	if (catalog.contextWindowAuthoritative === true) {

@@ -359,6 +359,7 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	},
 	"clamp-context-override": { key: "clampContextOverride", set: "catalog", shape: "scalar" },
 	"context-promotion-target": { key: "contextPromotionTarget", set: "catalog", shape: "scalar" },
+	"request-model-id": { key: "requestModelId", set: "catalog", shape: "scalar" },
 	"context-window-floor": { key: "contextWindowFloor", set: "catalog", shape: "scalar" },
 	"context-window-authoritative": {
 		key: "contextWindowAuthoritative",

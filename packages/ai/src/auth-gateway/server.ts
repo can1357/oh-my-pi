@@ -76,6 +76,8 @@ import type {
 } from "./types";
 import { DEFAULT_AUTH_GATEWAY_BIND } from "./types";
 
+// ParsedFormatRequest / ParsedFormatOptions / FormatModule come from ./types.
+
 // `parseBind` lives in ../utils/parse-bind so the gateway and broker can't
 // drift on accepted inputs (e.g. empty hostname, IPv6 brackets).
 
@@ -187,6 +189,26 @@ function buildStreamOptions(parsed: ParsedFormatRequest, api: Api, signal: Abort
 	if (options.serviceTier !== undefined) opts.serviceTier = options.serviceTier;
 	if (options.cacheRetention !== undefined) opts.cacheRetention = options.cacheRetention;
 	if (options.include !== undefined) opts.include = options.include;
+	// Cursor-specific gateway options
+	if (options.cursorAutoMode !== undefined) opts.cursorAutoMode = options.cursorAutoMode;
+	if (options.cursorToolPassthrough !== undefined) opts.cursorToolPassthrough = options.cursorToolPassthrough;
+	// Upstream renamed the provider-side flag; bridge the gateway spelling so
+	// the passthrough header keeps working end to end.
+	if (options.cursorToolPassthrough !== undefined && opts.cursorExternalToolExecutor === undefined) {
+		opts.cursorExternalToolExecutor = options.cursorToolPassthrough;
+	}
+	// Cursor control headers without a first-class `SimpleStreamOptions` slot
+	// are threaded through `opts.headers` so Cursor's backend receives them
+	// (cursor.ts spreads caller headers into the upstream request).
+	if (options.cursorExcludeTools !== undefined) {
+		opts.headers = { ...opts.headers, "x-cursor-agent-exclude-tools": options.cursorExcludeTools };
+	}
+	if (options.cursorLocalCliMode) {
+		opts.headers = { ...opts.headers, "local-cli-mode": "true" };
+	}
+	if (options.cursorDevExperimentOverrides !== undefined) {
+		opts.headers = { ...opts.headers, "x-dev-experiment-overrides": options.cursorDevExperimentOverrides };
+	}
 	// Client-supplied `prompt_cache_key` wins; otherwise derive a stable
 	// key from the model + system + tools so prefix caching engages on
 	// Codex-class backends across turns of the same logical conversation.
@@ -320,6 +342,23 @@ async function handleFormatEndpoint(
 	{
 		const captured = captureRequestHeaders(req.headers);
 		parsed.options.headers = { ...captured, ...parsed.options.headers };
+		// Cursor-specific control headers: parse into typed options so they
+		// flow through `buildStreamOptions` into `SimpleStreamOptions`.
+		if (captured["x-cursor-auto-mode"] === "true") {
+			parsed.options.cursorAutoMode = true;
+		}
+		if (captured["x-cursor-tool-passthrough"] === "true") {
+			parsed.options.cursorToolPassthrough = true;
+		}
+		if (captured["x-cursor-agent-exclude-tools"]) {
+			parsed.options.cursorExcludeTools = captured["x-cursor-agent-exclude-tools"];
+		}
+		if (captured["local-cli-mode"] === "true") {
+			parsed.options.cursorLocalCliMode = true;
+		}
+		if (captured["x-dev-experiment-overrides"]) {
+			parsed.options.cursorDevExperimentOverrides = captured["x-dev-experiment-overrides"];
+		}
 	}
 	if (controller.signal.aborted) return clientClosedResponse(route);
 
@@ -423,7 +462,7 @@ async function handleFormatEndpoint(
 			}
 			return json(
 				200,
-				route.module.encodeResponse(message, parsed.modelId),
+				route.module.encodeResponse(message, parsed.modelId, parsed.options),
 				gatewayResponseHeaders(model, { requestId, costUsd: message.usage.cost.total, startedAt }),
 			);
 		} catch (error) {
