@@ -1,6 +1,7 @@
 import { logger, VERSION } from "@oh-my-pi/pi-utils";
 import { buildModel } from "./build";
 import { collapseBuiltVariants } from "./compat/collapse";
+import { resolveModelPolicy } from "./compat/resolve";
 import { applyCatalogMetrics, CatalogMetricsIndex } from "./identity/metrics";
 import { readModelCache, writeModelCache } from "./model-cache";
 import { type GeneratedProvider, getBundledModels } from "./models";
@@ -655,14 +656,18 @@ function mergeDynamicModel<TApi extends Api>(
 	// bundled reference's image support and the agent would go on sending
 	// images to a now text-only route.
 	const endpointChanged = existingModel.baseUrl !== dynamicModel.baseUrl;
-	const dynamicInputAuthoritative = endpointChanged || authority.input;
+	const credentialScopedCatalog =
+		resolveModelPolicy(dynamicModel as unknown as ModelSpec<TApi>).catalog.credentialScopedCatalog === true;
+	const dynamicInputAuthoritative = endpointChanged || authority.input || credentialScopedCatalog;
+	const dynamicLimitsAuthoritative = credentialScopedCatalog;
 	const supportsImage = dynamicInputAuthoritative
 		? dynamicModel.input.includes("image")
 		: existingModel.input.includes("image") || dynamicModel.input.includes("image");
-	// Providers with authoritative reasoning metadata must not regain a
-	// stale bundled dial after explicitly reporting no reasoning. Others
-	// retain the additive fallback for discovery that omits capabilities.
-	const reasoning = authority.reasoning ? dynamicModel.reasoning : existingModel.reasoning || dynamicModel.reasoning;
+	// Authoritative deployment metadata must not regain a stale bundled effort dial.
+	const dynamicReasoningAuthoritative = authority.reasoning || credentialScopedCatalog;
+	const reasoning = dynamicReasoningAuthoritative
+		? dynamicModel.reasoning
+		: existingModel.reasoning || dynamicModel.reasoning;
 	const longContextCost = dynamicModel.cost.longContext ?? existingModel.cost.longContext;
 	const timeBasedCost = dynamicModel.cost.timeBased ?? existingModel.cost.timeBased;
 	const existingHeaders = existingModel.resolveHeaders ?? existingModel.headers;
@@ -681,6 +686,10 @@ function mergeDynamicModel<TApi extends Api>(
 	// not follow an id whose discovered route moved: Copilot's chat-completions
 	// rows carry `supportsReasoningEffort: false`, which would silently strip
 	// the effort dial once the id is pinned to Responses (#12901).
+	// When discovery owns reasoning and reports false, do not keep the offline
+	// seed thinking ladder via object spread. Pass an explicit empty ladder so
+	// preserve-authored-thinking blocks KDL reasoning/effort re-attachment
+	// (`thinking: undefined` would unlock catalog `reasoning` fills again).
 	const compat =
 		dynamicModel.compatConfig ?? (dynamicModel.api === existingModel.api ? existingModel.compatConfig : undefined);
 	// A live row that trusts only its own thinking (e.g. CoralBricks' advertised
@@ -697,6 +706,9 @@ function mergeDynamicModel<TApi extends Api>(
 		name: preferDiscoveryName(dynamicModel.name, existingModel.name, dynamicModel.id),
 		reasoning,
 		...(trustsOwnThinking ? { thinking: dynamicModel.thinking } : {}),
+		...(dynamicReasoningAuthoritative && !dynamicModel.reasoning
+			? { thinking: { mode: "effort" as const, efforts: [] } }
+			: {}),
 		input: supportsImage ? ["text", "image"] : ["text"],
 		cost: {
 			input: preferDiscoveryCost(dynamicModel.cost.input, existingModel.cost.input, authority.cost),
@@ -706,8 +718,14 @@ function mergeDynamicModel<TApi extends Api>(
 			...(longContextCost ? { longContext: longContextCost } : {}),
 			...(timeBasedCost ? { timeBased: timeBasedCost } : {}),
 		},
-		contextWindow: preferDiscoveryLimit(dynamicModel.contextWindow, existingModel.contextWindow),
-		maxTokens: preferDiscoveryLimit(dynamicModel.maxTokens, existingModel.maxTokens),
+		contextWindow:
+			dynamicLimitsAuthoritative && dynamicModel.contextWindow === null
+				? null
+				: preferDiscoveryLimit(dynamicModel.contextWindow, existingModel.contextWindow),
+		maxTokens:
+			dynamicLimitsAuthoritative && dynamicModel.maxTokens === null
+				? null
+				: preferDiscoveryLimit(dynamicModel.maxTokens, existingModel.maxTokens),
 		headers: resolveHeaders
 			? undefined
 			: dynamicModel.headers

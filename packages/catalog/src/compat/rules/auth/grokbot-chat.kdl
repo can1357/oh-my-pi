@@ -1,0 +1,5 @@
+auth "grokbot-chat" {
+	name "Grok Bot chat (host-managed; not explicit Opus)"
+	env hook="grokbot"
+	login "custom" hook="grokbot"
+}

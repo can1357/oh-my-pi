@@ -1,3 +1,8 @@
+import {
+	GROKBOT_BACKEND,
+	resolveGrokbotCacheCredential,
+	resolveGrokbotDiscoveryIdentity,
+} from "../discovery/grokbot-auth";
 import { CHARM_HYPER_API_BASE_URL, normalizeCharmHyperBaseUrl } from "../wire/charm-hyper";
 import { CODEX_BASE_URL, CODEX_CLIENT_VERSION } from "../wire/codex";
 import { CURSOR_DEFAULT_BASE_URL } from "../wire/cursor";
@@ -12,12 +17,33 @@ import {
 export interface ModelCacheProviderIdOptions extends AccountScope {
 	apiKey?: string;
 	baseUrl?: string;
+	/** Grok Bot: `x-sand-box-namespace` sent on AvailableModels. */
+	namespace?: string;
+	/** Grok Bot: `x-cursor-client-version` sent on AvailableModels. */
+	clientVersion?: string;
+	/** Grok Bot: configured discovery/proxy headers that select the catalog. */
+	headers?: Record<string, string>;
+	/**
+	 * Grok Bot: pre-expanded renewer for cache scoping. When set (including after
+	 * async secrets load), skips the synchronous secrets-file read that would
+	 * otherwise expand `<authenticated>`.
+	 */
+	cacheCredential?: string;
+}
+
+/** Stable fingerprint of header bag for cache scoping (sorted key=value). */
+export function fingerprintModelCacheHeaders(headers?: Record<string, string>): string {
+	if (!headers) return "";
+	const keys = Object.keys(headers).sort();
+	if (keys.length === 0) return "";
+	return keys.map(key => `${key}=${headers[key] ?? ""}`).join("\u0001");
 }
 
 const CREDENTIAL_SCOPED_MODEL_CACHE_PROVIDERS: Readonly<Record<string, true>> = {
 	"opencode-go": true,
 	"opencode-zen": true,
 	"github-copilot": true,
+	grokbot: true,
 	"muse-code": true,
 	cursor: true,
 	"factory-droid": true,
@@ -204,6 +230,34 @@ export function resolveModelCacheProviderId(providerId: string, options: ModelCa
 		}
 		case "factory-droid":
 			return factoryDroidModelCacheProviderId(options);
+		case "grokbot": {
+			// AvailableModels is renewer-scoped and marked authoritative. Discovery
+			// also sends namespace + client-version headers (`grokbotClientHeaders`)
+			// from env *or* secrets/grokbot.env, so resolve identity through the
+			// shared helper that mirrors loadGrokbotConfig — unless the caller
+			// already passed a fully resolved identity (no second secrets read).
+			const baseUrl = options.baseUrl ?? GROKBOT_BACKEND;
+			const ns = options.namespace?.trim();
+			const ver = options.clientVersion?.trim();
+			const identity =
+				ns && ver
+					? { namespace: ns, clientVersion: ver }
+					: resolveGrokbotDiscoveryIdentity({
+							namespace: options.namespace,
+							clientVersion: options.clientVersion,
+						});
+			const headerScope = fingerprintModelCacheHeaders(options.headers);
+			// Expand `<authenticated>` to the real renewer so secrets-file accounts
+			// do not share one authoritative cache namespace. Prefer a precomputed
+			// cacheCredential from async catalog prep to avoid sync agent-dir I/O.
+			const credential =
+				options.cacheCredential !== undefined
+					? options.cacheCredential
+					: resolveGrokbotCacheCredential(options.apiKey);
+			const scope = `${credential}\u0000${baseUrl}\u0000${identity.namespace}\u0000${identity.clientVersion}\u0000${headerScope}`;
+			// v5 preserves account-advertised packed routes; v4 cached canonical rewrites.
+			return `grokbot:models-v5:${Bun.hash(scope).toString(36)}`;
+		}
 		case "openrouter":
 			return "openrouter:pseudo-api";
 		case "vllm": {

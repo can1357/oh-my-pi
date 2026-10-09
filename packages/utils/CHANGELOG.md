@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added asynchronous dotenv loading for provider credentials ([#10175](https://github.com/can1357/oh-my-pi/pull/10175) by [@jroth1111](https://github.com/jroth1111)).
+- Added shared incremental Connect envelope reading with bounded frame sizes, cancellation, and truncated-stream rejection ([#10175](https://github.com/can1357/oh-my-pi/pull/10175) by [@jroth1111](https://github.com/jroth1111)).
 ## [18.8.7] - 2026-10-09
 
 ### Added

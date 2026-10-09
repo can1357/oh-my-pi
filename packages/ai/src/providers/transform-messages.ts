@@ -1,4 +1,5 @@
 import { AsyncLocalStorage } from "node:async_hooks";
+import { classifyModel } from "@oh-my-pi/pi-catalog/identity";
 import { renderDemotedThinking } from "../dialect/demotion";
 import type {
 	Api,
@@ -627,6 +628,24 @@ function redactSensitiveCredentialsInMessages(messages: Message[]): Message[] {
 	});
 }
 
+/** Native adapter effort variants share reasoning provenance, not a different model lineage. */
+export function sharesNativeThinkingLineage(
+	source: Pick<AssistantMessage, "api" | "provider" | "model" | "upstreamModel">,
+	target: Model<Api>,
+): boolean {
+	if (source.api !== target.api || source.provider !== target.provider || target.api !== "grokbot-sand") return false;
+	const from = classifyModel(source.provider, source.upstreamModel ?? source.model, { lenient: true });
+	const to = target.identity ?? classifyModel(target.provider, target.id, { lenient: true });
+	return (
+		from.class === "anthropic" &&
+		to.class === "anthropic" &&
+		from.family !== undefined &&
+		from.family === to.family &&
+		from.revision !== undefined &&
+		from.revision === to.revision
+	);
+}
+
 export function transformMessages<TApi extends Api>(
 	messages: Message[],
 	model: Model<TApi>,
@@ -709,6 +728,7 @@ export function transformMessages<TApi extends Api>(
 				assistantMsg.model === model.id;
 
 			const isAnthropicTarget = isAnthropicMessagesModel(model);
+			const sameNativeThinkingLineage = sharesNativeThinkingLineage(assistantMsg, model);
 			// Anthropic's all-or-none contract on prior-turn thinking blocks
 			// applies to every `anthropic-messages → anthropic-messages` replay,
 			// not just the latest assistant turn. The legacy
@@ -882,7 +902,7 @@ export function transformMessages<TApi extends Api>(
 					// Cross-API target: same-model replay keeps signatures untouched
 					// (the encoder needs them for native replay; an OpenAI encrypted
 					// reasoning blob has empty text but a load-bearing signature).
-					if (isSameModel && sanitized.thinkingSignature) return sanitized;
+					if ((isSameModel || sameNativeThinkingLineage) && sanitized.thinkingSignature) return sanitized;
 					// Nothing left for the next turn to replay: drop empty/no-anchor
 					// thinking blocks before the cross-model paths.
 					if (!sanitized.thinking || sanitized.thinking.trim() === "") return [];
@@ -946,7 +966,7 @@ export function transformMessages<TApi extends Api>(
 						}
 						return [];
 					}
-					if (isSameModel) return block;
+					if (isSameModel || sameNativeThinkingLineage) return block;
 					return [];
 				}
 
@@ -1052,6 +1072,10 @@ export function transformMessages<TApi extends Api>(
 			return {
 				...assistantMsg,
 				content: transformedContent,
+				...(assistantMsg.providerPayload?.type === "anthropicNativeContent" &&
+				(invalidBoundThinkingAssistantIndexes.has(index) || foreignCredential)
+					? { providerPayload: undefined }
+					: {}),
 			};
 		}
 		return msg;

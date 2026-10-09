@@ -61,6 +61,8 @@ const KNOWN_APIS = [
 	"gitlab-duo-agent",
 	"devin-agent",
 	"factory-droid-agent",
+	"grokbot-sand",
+	"grokbot-chat",
 	"apple-foundation-models",
 ] as const satisfies readonly KnownApi[];
 type _MissingKnownApis = Exclude<KnownApi, (typeof KNOWN_APIS)[number]>;

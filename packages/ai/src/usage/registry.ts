@@ -10,6 +10,7 @@ import { devinUsageProvider } from "./devin";
 import { factoryDroidRankingStrategy, factoryDroidUsageProvider } from "./factory-droid";
 import { googleGeminiCliUsageProvider } from "./gemini";
 import { githubCopilotUsageProvider } from "./github-copilot";
+import { grokbotChatUsageProvider, grokbotUsageProvider } from "./grokbot";
 import { antigravityRankingStrategy, antigravityUsageProvider } from "./google-antigravity";
 import { kimiRankingStrategy, kimiUsageProvider } from "./kimi";
 import { museCodeUsageProvider } from "./muse-code";
@@ -44,6 +45,8 @@ export const DEFAULT_USAGE_PROVIDERS: readonly UsageProvider[] = [
 	opencodeGoUsageProvider,
 	githubCopilotUsageProvider,
 	cursorUsageProvider,
+	grokbotUsageProvider,
+	grokbotChatUsageProvider,
 	syntheticUsageProvider,
 	xaiOauthUsageProvider,
 	devinUsageProvider,

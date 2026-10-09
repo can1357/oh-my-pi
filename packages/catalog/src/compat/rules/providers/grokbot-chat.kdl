@@ -1,0 +1,20 @@
+// Official GrokBotService message-level chat. It does not accept a model id.
+provider "grokbot-chat" {
+	default-model "host-managed"
+	env "GROKBOT_RENEWAL_CREDENTIAL" "SAND_INFERENCE_RENEWAL_CREDENTIAL"
+	discovery label="Grok Bot chat (host-managed)" {
+		env "GROKBOT_RENEWAL_CREDENTIAL" "SAND_INFERENCE_RENEWAL_CREDENTIAL"
+	}
+	seed api="grokbot-chat" base-url="https://api2.cursor.sh" bundle="always" {
+		model "host-managed" name="Grok Bot chat (host-managed; backend unverified)" {
+			reasoning #false
+			input "text"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits
+			supports-tools #false
+		}
+	}
+	// Conservative OMP prompt budgeting only, not a claim about the hidden backend's limit.
+	context-window-floor 32768
+	pricing-status "variable"
+}

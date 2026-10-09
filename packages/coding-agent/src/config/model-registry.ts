@@ -26,6 +26,10 @@ import {
 	clampsContextOverride,
 	resolveMaxContextWindow,
 } from "@oh-my-pi/pi-catalog/compat/context-window";
+import {
+	resolveGrokbotCacheCredentialAsync,
+	resolveGrokbotDiscoveryIdentityAsync,
+} from "@oh-my-pi/pi-catalog/discovery/grokbot-auth";
 import { applyCatalogMetrics, CatalogMetricsIndex } from "@oh-my-pi/pi-catalog/identity/metrics";
 import { getModelCacheWriteStats, readModelCache } from "@oh-my-pi/pi-catalog/model-cache";
 import {
@@ -2349,7 +2353,23 @@ export class ModelRegistry {
 				const preparedConfig =
 					getProviderDefinition(descriptor.providerId)?.prepareModelDiscovery?.(discoveryConfig) ??
 					discoveryConfig;
-				const managerOptions = descriptor.createModelManagerOptions(preparedConfig);
+				// Grok Bot cache scope needs secrets-file identity + renewer; load
+				// both async once here so createModelManagerOptions never sync-reads
+				// the file. Forward configured provider headers for reverse-proxy discovery.
+				const grokbotHeaders =
+					descriptor.providerId === "grokbot" ? await this.getProviderHeaders("grokbot") : undefined;
+				const managerConfig =
+					descriptor.providerId === "grokbot"
+						? {
+								...preparedConfig,
+								...(await resolveGrokbotDiscoveryIdentityAsync()),
+								cacheCredential: await resolveGrokbotCacheCredentialAsync(
+									typeof preparedConfig.apiKey === "string" ? preparedConfig.apiKey : undefined,
+								),
+								...(grokbotHeaders ? { headers: grokbotHeaders } : {}),
+							}
+						: preparedConfig;
+				const managerOptions = descriptor.createModelManagerOptions(managerConfig);
 				const modelsDev = managerOptions.modelsDev
 					? { ...managerOptions.modelsDev, additiveOnly: true }
 					: modelsDevCatalogFallback(descriptor.providerId, this.#fetch);
@@ -3147,6 +3167,11 @@ export class ModelRegistry {
 	 * Materialize provider-level config headers for one outbound request.
 	 * Catalog inspection never executes command-backed values.
 	 */
+	/** Effective endpoint used by discovery, including runtime and models.yml overrides. */
+	getEffectiveProviderBaseUrl(provider: string): string | undefined {
+		return this.#descriptorBaseUrl(provider);
+	}
+
 	async getProviderHeaders(provider: string): Promise<Record<string, string> | undefined> {
 		const resolver = createConfigHeaderResolver([
 			this.#providerOverrides.get(provider)?.headers,

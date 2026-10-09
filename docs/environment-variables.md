@@ -339,6 +339,20 @@ therefore completes through the paste-code path.
 | `PI_OPENAI_STREAM_FIRST_EVENT_TIMEOUT_MS`   | OpenAI-specific first-event timeout override; `0` disables and takes precedence over the generic value. `omp config set providers.streamFirstEventTimeoutSeconds <seconds>` provides the persisted equivalent |
 | `PI_OPENAI_STREAM_IDLE_TIMEOUT_MS`          | OpenAI-specific idle timeout override; `0` disables and takes precedence over the generic value. `omp config set providers.streamIdleTimeoutSeconds <seconds>` provides the persisted equivalent              |
 
+### Grok Bot connector
+
+| Variable | Purpose |
+| --- | --- |
+| `GROKBOT_RENEWAL_CREDENTIAL`, `SAND_INFERENCE_RENEWAL_CREDENTIAL` | The user's authorized Grok Bot renewal credential |
+| `GROKBOT_MACHINE_ID` | Machine identity used for the Sand client checksum |
+| `GROKBOT_NAMESPACE`, `GROKBOT_CLIENT_VERSION` | Optional namespace and client-version overrides |
+| `GROKBOT_ANTHROPIC_TOOLS_WIRE` | Optional native/product tool-wire selection; explicit routes retain their model |
+| `INFERENCE_PROXY_JWT` | Optional authorization issued for the current inference workload |
+| `GROKBOT_INFERENCE_AUTHENTICATION_JWT_FILE` | Optional one-shot workload token file, consumed when used |
+
+These credentials do not grant access to denied models.
+See [Grok Bot](./grokbot.md) for setup and SDK options.
+
 ### Cursor provider debug
 
 | Variable           | Behavior                                                                 |
