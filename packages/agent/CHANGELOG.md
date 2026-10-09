@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Changed
+
+- `Agent.addBeforeModelCallHook` hooks now receive the live agent context as a second argument, so a host can rewrite the outgoing messages (e.g. a context reducer) before the provider request is built ([#13965](https://github.com/can1357/oh-my-pi/pull/13965) by [@ParadaCarleton](https://github.com/ParadaCarleton)).
 ## [18.8.6] - 2026-10-08
 
 ### Added

@@ -170,12 +170,26 @@ describe("Bedrock prompt-cache compat", () => {
 		expect(cached.promptCache).toEqual({ short: 300 });
 		expect(cached.promptCacheConfig).toBeUndefined();
 
-		const uncached = buildGeneratedModel({
+		// OpenAI declares the in-memory tier at provider level; the stale long
+		// tier from the snapshot row must still be dropped.
+		const recomputed = buildGeneratedModel({
 			...bedrockSpec(),
 			id: "gpt-5.2",
 			api: "openai-responses",
 			provider: "openai",
 			baseUrl: "https://api.openai.com/v1",
+			promptCache: stale,
+			promptCacheConfig: stale,
+		});
+		expect(recomputed.promptCache).toEqual({ short: 300 });
+		expect(recomputed.promptCacheConfig).toBeUndefined();
+
+		const uncached = buildGeneratedModel({
+			...bedrockSpec(),
+			id: "grok-4.6",
+			api: "openai-responses",
+			provider: "xai",
+			baseUrl: "https://api.x.ai/v1",
 			promptCache: stale,
 			promptCacheConfig: stale,
 		});

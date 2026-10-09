@@ -99,6 +99,9 @@ function refreshToolChoiceForActiveTools(
 	return tools.some(tool => tool.name === toolName) ? toolChoice : undefined;
 }
 
+/** Hook run before every provider request; see {@link Agent.addBeforeModelCallHook}. */
+export type AgentBeforeModelCallHook = (signal: AbortSignal | undefined, context: AgentContext) => Promise<void> | void;
+
 export class AgentBusyError extends Error {
 	constructor(
 		message: string = "Agent is already processing. Use steer() or followUp() to queue messages, or wait for completion.",
@@ -503,7 +506,7 @@ export class Agent {
 	#telemetry?: AgentLoopConfig["telemetry"];
 	#appendOnlyContext?: AppendOnlyContextManager;
 	#beforeQueuedMessageDequeueHooks = new Set<(signal?: AbortSignal) => Promise<void> | void>();
-	#beforeModelCallHooks = new Set<(signal?: AbortSignal) => Promise<void> | void>();
+	#beforeModelCallHooks = new Set<AgentBeforeModelCallHook>();
 
 	/** Buffered Cursor tool results with text length at time of call (for correct ordering) */
 	#cursorToolResultBuffer: CursorToolResultEntry[] = [];
@@ -954,15 +957,26 @@ export class Agent {
 		return () => this.#beforeQueuedMessageDequeueHooks.delete(registration);
 	}
 
-	/** Register an independently removable hook that runs immediately before each model call. */
-	addBeforeModelCallHook(hook: (signal?: AbortSignal) => Promise<void> | void): () => void {
-		const registration = (signal?: AbortSignal) => hook(signal);
+	/**
+	 * Register an independently removable hook that runs immediately before
+	 * each model call — every provider request, including the first request of
+	 * a prompt and each request of a continuing tool loop.
+	 *
+	 * `context` is the loop's live agent context. Hooks that rewrite history
+	 * (e.g. a context reducer) may replace `context.messages` in place; the
+	 * messages that reach the provider are whatever remains there when the hooks
+	 * return. Note that queued/prompt messages folded in for this request are
+	 * present in `context.messages` but not yet in `state.messages` — their
+	 * `message_end` only fires once provider preparation succeeds.
+	 */
+	addBeforeModelCallHook(hook: AgentBeforeModelCallHook): () => void {
+		const registration: AgentBeforeModelCallHook = (signal, context) => hook(signal, context);
 		this.#beforeModelCallHooks.add(registration);
 		return () => this.#beforeModelCallHooks.delete(registration);
 	}
 
-	async #runBeforeModelCallHooks(signal?: AbortSignal): Promise<void> {
-		for (const hook of this.#beforeModelCallHooks) await hook(signal);
+	async #runBeforeModelCallHooks(context: AgentContext, signal?: AbortSignal): Promise<void> {
+		for (const hook of this.#beforeModelCallHooks) await hook(signal, context);
 	}
 
 	async #runBeforeQueuedMessageDequeueHooks(signal?: AbortSignal): Promise<void> {
@@ -1849,7 +1863,7 @@ export class Agent {
 			getApiKey: this.getApiKey,
 			getToolContext: this.#getToolContext,
 			syncContextBeforeModelCall: async (context, signal) => {
-				await this.#runBeforeModelCallHooks(signal);
+				await this.#runBeforeModelCallHooks(context, signal);
 				if (this.#listeners.size > 0) {
 					await Bun.sleep(0);
 				}

@@ -127,7 +127,11 @@ export function getPromptCacheTtlMs(
 	options: SimpleStreamOptions | undefined,
 	isOAuthToken = false,
 ): number | undefined {
-	const tier = resolvePromptCacheTier(model, options, isOAuthToken);
+	return getPromptCacheTierTtlMs(model, resolvePromptCacheTier(model, options, isOAuthToken));
+}
+
+/** Lifetime the model's catalog entry declares for `tier`, or undefined when it declares none. */
+export function getPromptCacheTierTtlMs(model: Model<Api>, tier: PromptCacheTier | undefined): number | undefined {
 	const seconds = tier === undefined ? undefined : model.promptCache?.[tier];
 	return seconds === undefined ? undefined : seconds * 1000;
 }

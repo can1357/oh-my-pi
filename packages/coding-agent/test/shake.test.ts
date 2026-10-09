@@ -1,18 +1,21 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, setSystemTime, vi } from "bun:test";
 import * as path from "node:path";
 import { scheduler } from "node:timers/promises";
 import { type } from "@oh-my-pi/omptype";
-import { Agent, type AgentMessage, RESCUE_SHAKE_CONFIG, Tokenizer } from "@oh-my-pi/pi-agent-core";
+import { Agent, type AgentMessage, type AgentTool, RESCUE_SHAKE_CONFIG, Tokenizer } from "@oh-my-pi/pi-agent-core";
 import * as compactionModule from "@oh-my-pi/pi-agent-core/compaction";
-import type { AssistantMessage, ImageContent, ToolResultMessage, UserMessage } from "@oh-my-pi/pi-ai";
-import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
+import type { AssistantMessage, ImageContent, Model, ToolResultMessage, UserMessage } from "@oh-my-pi/pi-ai";
+import { createMockModel, type MockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { COLLAB_PROMPT_MESSAGE_TYPE } from "@oh-my-pi/pi-wire";
 import { AgentSession, type AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { formatShakeSummary } from "@oh-my-pi/pi-coding-agent/session/shake-types";
+import { CacheWarmer } from "@oh-my-pi/pi-coding-agent/session/cache-warmer";
+import { createSubagentSettings } from "@oh-my-pi/pi-coding-agent/task/executor";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
 import {
@@ -54,7 +57,10 @@ describe("AgentSession shake", () => {
 		if (!model) throw new Error("Expected built-in anthropic model to exist");
 		apiInfo = { api: model.api, provider: model.provider, model: model.id };
 
-		const agent = new Agent({ initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] } });
+		const agent = new Agent({
+			initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: createMockModel({ responses: [{ content: ["Done"] }] }).stream,
+		});
 		session = new AgentSession({
 			agent,
 			sessionManager,
@@ -65,6 +71,7 @@ describe("AgentSession shake", () => {
 	});
 
 	afterEach(async () => {
+		setSystemTime();
 		if (session) await session.dispose();
 		authStorage.close();
 		try {
@@ -571,6 +578,468 @@ describe("AgentSession shake", () => {
 			const texts = branchToolResults().map(m => (m.content[0] as { text: string }).text);
 			expect(texts.some(t => t.startsWith("B"))).toBe(false);
 			expect(texts.some(t => t.startsWith("R"))).toBe(true);
+		});
+	});
+
+	describe("cache-expired shake on user turns", () => {
+		async function seedConversation(
+			ageMs: number,
+			selectedModel?: Model,
+			apiKey = "test-key",
+		): Promise<ToolResultMessage> {
+			// Catalog declares `prompt-cache { short 300; long 3600 }` for first-party Anthropic.
+			const model = selectedModel ?? getBundledModel("anthropic", "claude-sonnet-5");
+			if (!model) throw new Error("Expected test model to exist");
+			authStorage.keys.setRuntime(model.provider, apiKey);
+			apiInfo = { api: model.api, provider: model.provider, model: model.id };
+
+			const completedAt = Date.now() - ageMs;
+			const toolCallId = "call_cold_cache";
+			sessionManager.appendMessage({
+				role: "user",
+				content: [{ type: "text", text: "inspect the large output" }],
+				timestamp: completedAt - 3,
+			});
+			sessionManager.appendMessage({
+				role: "assistant",
+				content: [{ type: "toolCall", id: toolCallId, name: "bash", arguments: { command: "build" } }],
+				...apiInfo,
+				stopReason: "toolUse",
+				usage,
+				timestamp: completedAt - 2,
+			});
+			const result: ToolResultMessage = {
+				role: "toolResult",
+				toolCallId,
+				toolName: "bash",
+				content: [{ type: "text", text: "cold output ".repeat(12_000) }],
+				isError: false,
+				timestamp: completedAt - 1,
+			};
+			sessionManager.appendMessage(result);
+			sessionManager.appendMessage({
+				role: "assistant",
+				content: [{ type: "text", text: `finished\n${"tail ".repeat(20_000)}` }],
+				...apiInfo,
+				stopReason: "stop",
+				usage,
+				timestamp: completedAt,
+			});
+			await sessionManager.rewriteEntries();
+			const sessionFile = sessionManager.getSessionFile();
+			if (!sessionFile) throw new Error("Expected a persisted session");
+			await session.dispose();
+			sessionManager = await SessionManager.open(sessionFile, tempDir.path());
+			const resumedAgent = new Agent({
+				initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
+				streamFn: createMockModel({ responses: [{ content: ["Done"] }, { content: ["Done again"] }] }).stream,
+			});
+			session = new AgentSession({
+				agent: resumedAgent,
+				sessionManager,
+				settings: Settings.isolated({
+					"compaction.enabled": false,
+					"compaction.shakeOnCacheExpiry": true,
+				}),
+				modelRegistry,
+			});
+			session.subscribe(event => events.push(event));
+			session.agent.replaceMessages(session.buildDisplaySessionContext().messages);
+			const resumedResult = session.messages.find(
+				message => message.role === "toolResult" && message.toolCallId === result.toolCallId,
+			);
+			if (resumedResult?.role !== "toolResult") throw new Error("Expected resumed tool result");
+			return resumedResult;
+		}
+
+		it("preserves a warm Claude prefix when the user returns inside the declared lifetime", async () => {
+			const result = await seedConversation(4 * 60_000);
+			const shakeSpy = vi.spyOn(session, "shake");
+
+			await session.prompt("continue");
+
+			expect(shakeSpy).not.toHaveBeenCalled();
+			expect(result.prunedAt).toBeUndefined();
+		});
+
+		it("shakes an expired Claude prefix before the first resumed user turn", async () => {
+			const result = await seedConversation(5 * 60_000 + 1);
+			const shakeSpy = vi.spyOn(session, "shake");
+
+			await session.prompt("continue after reopening");
+
+			expect(shakeSpy).toHaveBeenCalledWith("elide", expect.objectContaining({ config: expect.anything() }));
+			expect(result.prunedAt).toBeGreaterThan(0);
+			const text = result.content.map(block => (block.type === "text" ? block.text : "")).join("");
+			expect(text).toContain("shaken");
+		});
+
+		it("never shakes a model without a catalog-declared prompt-cache lifetime", async () => {
+			// Unknown lifetime is not an expired one: providers opt in through the
+			// KDL `prompt-cache` axis, never through a generic fallback.
+			const result = await seedConversation(24 * 60 * 60_000, createMockModel());
+			const shakeSpy = vi.spyOn(session, "shake");
+
+			await session.prompt("continue on a model with no declared lifetime");
+
+			expect(shakeSpy).not.toHaveBeenCalled();
+			expect(result.prunedAt).toBeUndefined();
+		});
+
+		it("uses the one-hour tier for an Anthropic OAuth seat when the turn reported no tier", async () => {
+			// OAuth subscriber seats write 1h entries by default (cache-warmer /
+			// request-builder semantics); 30 minutes later the prefix is still warm.
+			const result = await seedConversation(30 * 60_000, undefined, "sk-ant-oat01-test");
+			const shakeSpy = vi.spyOn(session, "shake");
+
+			await session.prompt("continue on a subscription seat");
+
+			expect(shakeSpy).not.toHaveBeenCalled();
+			expect(result.prunedAt).toBeUndefined();
+		});
+
+		it("uses the five-minute tier for an Anthropic API key when the turn reported no tier", async () => {
+			const result = await seedConversation(30 * 60_000, undefined, "sk-ant-api03-test");
+			const shakeSpy = vi.spyOn(session, "shake");
+
+			await session.prompt("continue on a pay-per-token key");
+
+			expect(shakeSpy).toHaveBeenCalledWith("elide", expect.objectContaining({ config: expect.anything() }));
+			expect(result.prunedAt).toBeGreaterThan(0);
+		});
+
+		it("shakes before an expired queued user follow-up resumes", async () => {
+			const result = await seedConversation(60 * 60_000 + 1);
+			const shakeSpy = vi.spyOn(session, "shake");
+
+			await session.followUp("queued after the cache expired");
+			await Bun.sleep(0);
+			await session.waitForIdle();
+
+			expect(shakeSpy).toHaveBeenCalledWith("elide", expect.objectContaining({ config: expect.anything() }));
+			expect(result.prunedAt).toBeGreaterThan(0);
+		});
+
+		it("shakes before an expired queued user steer resumes", async () => {
+			const result = await seedConversation(60 * 60_000 + 1);
+			const shakeSpy = vi.spyOn(session, "shake");
+
+			await session.steer("steered after the cache expired");
+			await session.waitForIdle();
+
+			expect(shakeSpy).toHaveBeenCalledWith("elide", expect.objectContaining({ config: expect.anything() }));
+			expect(result.prunedAt).toBeGreaterThan(0);
+		});
+
+		it("still shakes when a failed turn left a fresh timestamp on a cold cache", async () => {
+			const result = await seedConversation(60 * 60_000 + 1);
+			// An aborted turn never reached the provider, so it cannot have warmed
+			// the prefix — its fresh timestamp must not postpone the shake.
+			session.agent.replaceMessages([
+				...session.messages,
+				{
+					role: "assistant",
+					content: [{ type: "text", text: "interrupted" }],
+					...apiInfo,
+					stopReason: "aborted",
+					usage,
+					timestamp: Date.now(),
+				},
+			]);
+			const shakeSpy = vi.spyOn(session, "shake");
+
+			await session.prompt("continue after the failed turn");
+
+			expect(shakeSpy).toHaveBeenCalledWith("elide", expect.objectContaining({ config: expect.anything() }));
+			expect(result.prunedAt).toBeGreaterThan(0);
+		});
+
+		it("treats a writable collaboration prompt as a user turn", async () => {
+			const result = await seedConversation(60 * 60_000 + 1);
+			const shakeSpy = vi.spyOn(session, "shake");
+
+			await session.promptCustomMessage({
+				customType: COLLAB_PROMPT_MESSAGE_TYPE,
+				content: "continue from a collaborator",
+				display: true,
+				details: { from: "reviewer" },
+				attribution: "user",
+			});
+
+			expect(shakeSpy).toHaveBeenCalledWith("elide", expect.objectContaining({ config: expect.anything() }));
+			expect(result.prunedAt).toBeGreaterThan(0);
+		});
+	});
+
+	describe("cache-expired shake before every provider request", () => {
+		/**
+		 * Seed an older heavy bash result that sits outside the auto-shake protect
+		 * window, with a fresh timestamp so the cache reads warm at the first
+		 * request of the next prompt.
+		 */
+		function seedWarmHeavyHistory(model: Model): ToolResultMessage {
+			authStorage.keys.setRuntime(model.provider, "test-key");
+			apiInfo = { api: model.api, provider: model.provider, model: model.id };
+			const toolCallId = "call_warm_history";
+			const now = Date.now();
+			sessionManager.appendMessage({
+				role: "user",
+				content: [{ type: "text", text: "inspect the large output" }],
+				timestamp: now - 3,
+			});
+			sessionManager.appendMessage({
+				role: "assistant",
+				content: [{ type: "toolCall", id: toolCallId, name: "bash", arguments: { command: "build" } }],
+				...apiInfo,
+				stopReason: "toolUse",
+				usage,
+				timestamp: now - 2,
+			});
+			const result: ToolResultMessage = {
+				role: "toolResult",
+				toolCallId,
+				toolName: "bash",
+				content: [{ type: "text", text: "warm output ".repeat(12_000) }],
+				isError: false,
+				timestamp: now - 1,
+			};
+			sessionManager.appendMessage(result);
+			sessionManager.appendMessage({
+				role: "assistant",
+				content: [{ type: "text", text: `finished\n${"tail ".repeat(20_000)}` }],
+				...apiInfo,
+				stopReason: "stop",
+				usage,
+				timestamp: now,
+			});
+			return result;
+		}
+
+		/**
+		 * Replace the default session with one whose mock model answers the
+		 * prompt with a `bash` tool call, then a final text turn. `onToolRun`
+		 * executes inside the tool call, between the two provider requests.
+		 */
+		async function openToolLoopSession(options: {
+			onToolRun: () => void;
+			settings: Settings;
+			agentKind?: "main" | "sub";
+			/** Catalog-declared prompt-cache lifetimes (seconds per tier) for the mock model. */
+			promptCache?: Model["promptCache"];
+			cacheWarmer?: CacheWarmer;
+		}): Promise<{ model: MockModel; seeded: ToolResultMessage; requests: string[] }> {
+			const model = Object.assign(
+				createMockModel({
+					responses: [
+						{ content: [{ type: "toolCall", id: "call_loop", name: "bash", arguments: { command: "sleep" } }] },
+						{ content: ["Done"] },
+					],
+				}),
+				{ promptCache: options.promptCache ?? { short: 300 } },
+			);
+			// Generic mock models declare nothing; this path is opt-in via the
+			// catalog, so give the mock the common 5-minute tier unless a test
+			// supplies its own lifetimes.
+			const seeded = seedWarmHeavyHistory(model);
+			await sessionManager.rewriteEntries();
+			const sessionFile = sessionManager.getSessionFile();
+			if (!sessionFile) throw new Error("Expected a persisted session");
+			await session.dispose();
+			sessionManager = await SessionManager.open(sessionFile, tempDir.path());
+			const bashTool: AgentTool = {
+				name: "bash",
+				label: "Bash",
+				description: "Mock bash tool",
+				parameters: type({}),
+				execute: async () => {
+					options.onToolRun();
+					return { content: [{ type: "text" as const, text: "fresh tool output" }] };
+				},
+			};
+			// Snapshot each request's wire context at call time: shake mutates the
+			// journaled messages in place, so a live reference would show the
+			// post-shake text for the first request too.
+			const requests: string[] = [];
+			const agent = new Agent({
+				initialState: { model, systemPrompt: ["Test"], tools: [bashTool], messages: [] },
+				streamFn: (streamModel, context, options) => {
+					requests.push(JSON.stringify(context.messages));
+					return model.stream(streamModel, context, options);
+				},
+			});
+			session = new AgentSession({
+				agent,
+				sessionManager,
+				settings: options.settings,
+				modelRegistry,
+				agentKind: options.agentKind,
+				cacheWarmer: options.cacheWarmer,
+			});
+			session.subscribe(event => events.push(event));
+			session.agent.replaceMessages(session.buildDisplaySessionContext().messages);
+			return { model, seeded, requests };
+		}
+
+		function seededBranchResult(seeded: ToolResultMessage): ToolResultMessage {
+			const match = branchToolResults().find(message => message.toolCallId === seeded.toolCallId);
+			if (!match) throw new Error("Expected the seeded tool result on the branch");
+			return match;
+		}
+
+		it("shakes between tool-loop requests once a long tool call outlives the cache TTL", async () => {
+			const { model, seeded, requests } = await openToolLoopSession({
+				settings: Settings.isolated({ "compaction.enabled": false, "compaction.shakeOnCacheExpiry": true }),
+				// The declared lifetime is 5 minutes; a tool call that runs longer
+				// leaves the prefix cold for the request that carries its result.
+				onToolRun: () => setSystemTime(new Date(Date.now() + 6 * 60_000)),
+			});
+			const shakeSpy = vi.spyOn(session, "shake");
+
+			await session.prompt("run the slow build");
+			await session.waitForIdle();
+
+			expect(shakeSpy).toHaveBeenCalledTimes(1);
+			expect(shakeSpy).toHaveBeenCalledWith("elide", expect.objectContaining({ config: expect.anything() }));
+			expect(seededBranchResult(seeded).prunedAt).toBeGreaterThan(0);
+			expect(model.calls).toHaveLength(2);
+			expect(requests).toHaveLength(2);
+			// First request went out against the warm prefix untouched.
+			expect(requests[0]).toContain("warm output");
+			// Second request replays the shaken prefix AND still carries the tool
+			// result that was pending (not yet journaled) when the rewrite ran.
+			expect(requests[1]).not.toContain("warm output");
+			expect(requests[1]).toContain("shaken");
+			expect(requests[1]).toContain("fresh tool output");
+			expect(requests[1]).toContain("run the slow build");
+			// The loop finished on the rebuilt context without stranding anything.
+			const last = session.messages.at(-1);
+			expect(last?.role).toBe("assistant");
+			if (last?.role !== "assistant") throw new Error("Expected an assistant reply");
+			expect(JSON.stringify(last.content)).toContain("Done");
+		});
+
+		it("uses the catalog-declared prompt-cache lifetime of the model", async () => {
+			const { model, seeded } = await openToolLoopSession({
+				settings: Settings.isolated({ "compaction.enabled": false, "compaction.shakeOnCacheExpiry": true }),
+				// Declared 30-minute short tier: a 6-minute tool call still finds the
+				// prefix warm.
+				promptCache: { short: 30 * 60 },
+				onToolRun: () => setSystemTime(new Date(Date.now() + 6 * 60_000)),
+			});
+			const shakeSpy = vi.spyOn(session, "shake");
+
+			await session.prompt("run the slow build");
+			await session.waitForIdle();
+
+			expect(shakeSpy).not.toHaveBeenCalled();
+			expect(seededBranchResult(seeded).prunedAt).toBeUndefined();
+			expect(model.calls).toHaveLength(2);
+		});
+
+		it("shakes once a tool call outlives the catalog-declared lifetime", async () => {
+			const { seeded, requests } = await openToolLoopSession({
+				settings: Settings.isolated({ "compaction.enabled": false, "compaction.shakeOnCacheExpiry": true }),
+				promptCache: { short: 30 * 60 },
+				onToolRun: () => setSystemTime(new Date(Date.now() + 31 * 60_000)),
+			});
+			const shakeSpy = vi.spyOn(session, "shake");
+
+			await session.prompt("run the slow build");
+			await session.waitForIdle();
+
+			expect(shakeSpy).toHaveBeenCalledTimes(1);
+			expect(seededBranchResult(seeded).prunedAt).toBeGreaterThan(0);
+			expect(requests[1]).not.toContain("warm output");
+		});
+
+		it("treats a successful cache-warmer refresh as a cache touch", async () => {
+			const cacheWarmer = new CacheWarmer({
+				stream: () => {
+					throw new Error("not used");
+				},
+				getPromptTokens: () => 0,
+				getMode: () => "off",
+			});
+			const { model, seeded } = await openToolLoopSession({
+				settings: Settings.isolated({ "compaction.enabled": false, "compaction.shakeOnCacheExpiry": true }),
+				cacheWarmer,
+				onToolRun: () => {
+					// The warmer refreshed the prefix 4.5 minutes into a 6-minute tool
+					// call: the entry is only 1.5 minutes old when the next request goes out.
+					setSystemTime(new Date(Date.now() + 4.5 * 60_000));
+					cacheWarmer.onWarmed?.(
+						{
+							role: "assistant",
+							content: [],
+							...apiInfo,
+							stopReason: "stop",
+							usage,
+							timestamp: Date.now(),
+						} as AssistantMessage,
+						false,
+					);
+					setSystemTime(new Date(Date.now() + 1.5 * 60_000));
+				},
+			});
+			const shakeSpy = vi.spyOn(session, "shake");
+
+			await session.prompt("run the slow build");
+			await session.waitForIdle();
+
+			expect(shakeSpy).not.toHaveBeenCalled();
+			expect(seededBranchResult(seeded).prunedAt).toBeUndefined();
+			expect(model.calls).toHaveLength(2);
+		});
+
+		it("leaves a tool loop alone while the cache stays warm", async () => {
+			const { model, seeded } = await openToolLoopSession({
+				settings: Settings.isolated({ "compaction.enabled": false, "compaction.shakeOnCacheExpiry": true }),
+				onToolRun: () => {},
+			});
+			const shakeSpy = vi.spyOn(session, "shake");
+
+			await session.prompt("run the fast build");
+			await session.waitForIdle();
+
+			expect(shakeSpy).not.toHaveBeenCalled();
+			expect(seededBranchResult(seeded).prunedAt).toBeUndefined();
+			expect(model.calls).toHaveLength(2);
+		});
+
+		it("does nothing when compaction.shakeOnCacheExpiry is off", async () => {
+			const { seeded } = await openToolLoopSession({
+				settings: Settings.isolated({ "compaction.enabled": false, "compaction.shakeOnCacheExpiry": false }),
+				onToolRun: () => setSystemTime(new Date(Date.now() + 6 * 60_000)),
+			});
+			const shakeSpy = vi.spyOn(session, "shake");
+
+			await session.prompt("run the slow build");
+			await session.waitForIdle();
+
+			expect(shakeSpy).not.toHaveBeenCalled();
+			expect(seededBranchResult(seeded).prunedAt).toBeUndefined();
+		});
+
+		it("applies to subagent sessions through the inherited settings", async () => {
+			const parentSettings = Settings.isolated({
+				"compaction.enabled": false,
+				"compaction.shakeOnCacheExpiry": true,
+			});
+			const { model, seeded, requests } = await openToolLoopSession({
+				settings: createSubagentSettings(parentSettings),
+				agentKind: "sub",
+				onToolRun: () => setSystemTime(new Date(Date.now() + 6 * 60_000)),
+			});
+			const shakeSpy = vi.spyOn(session, "shake");
+
+			await session.prompt("subagent task");
+			await session.waitForIdle();
+
+			expect(shakeSpy).toHaveBeenCalledTimes(1);
+			expect(seededBranchResult(seeded).prunedAt).toBeGreaterThan(0);
+			expect(model.calls).toHaveLength(2);
+			expect(requests[1]).toContain("shaken");
+			expect(requests[1]).toContain("fresh tool output");
 		});
 	});
 

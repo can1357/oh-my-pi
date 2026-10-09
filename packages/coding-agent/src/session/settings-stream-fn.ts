@@ -16,7 +16,7 @@ import {
 	Tokenizer,
 	tokenizerEncodingForModel,
 } from "@oh-my-pi/pi-agent-core";
-import { type Model, type SimpleStreamOptions, streamSimple } from "@oh-my-pi/pi-ai";
+import { type CacheRetention, type Model, type SimpleStreamOptions, streamSimple } from "@oh-my-pi/pi-ai";
 import { serverSideFallbackModels } from "@oh-my-pi/pi-catalog/compat/server-side-fallback";
 import type { Encoding } from "@oh-my-pi/pi-natives";
 import type { Settings } from "../config/settings";
@@ -52,6 +52,12 @@ function timeoutSecondsToMs(value: number): number | undefined {
 	if (!Number.isFinite(value) || value < 0) return undefined;
 	if (value === 0) return 0;
 	return Math.max(1, Math.trunc(value * 1000));
+}
+
+/** Effective cache-retention option the settings wrapper sends to the provider. */
+export function resolveConfiguredCacheRetention(settings: Settings): CacheRetention | undefined {
+	const configured = cfgProvidersCacheRetention.get(settings);
+	return configured === "auto" ? undefined : configured;
 }
 
 /** Session wiring for Anthropic subscription wrap-up and slow mode (`providers.anthropic.slowMode`). */
@@ -100,8 +106,7 @@ export function createSettingsAwareStreamFn(
 		// PI_CACHE_RETENTION env override keep working; anything else is an
 		// explicit per-request retention (long restores 1h Anthropic TTLs and
 		// implicitly disables the short-entry keep-alive refresh loop).
-		const cacheRetentionSetting = cfgProvidersCacheRetention.get(settings);
-		const cacheRetention = cacheRetentionSetting === "auto" ? undefined : cacheRetentionSetting;
+		const cacheRetention = resolveConfiguredCacheRetention(settings);
 		const streamFirstEventTimeoutMs = timeoutSecondsToMs(cfgProvidersStreamFirstEventTimeoutSeconds.get(settings));
 		const streamIdleTimeoutMs = timeoutSecondsToMs(cfgProvidersStreamIdleTimeoutSeconds.get(settings));
 		// Server-side fallback (opt-in): when the user enables it, inject the
