@@ -1556,10 +1556,12 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			let totalFileLines: number;
 			let byteLimitLine: ReadLineWindow["byteLimitLine"];
 			let windowStoppedByByteLimit = false;
+			let windowReachedEof = false;
 			const maxBytesForRead = Math.max(DEFAULT_MAX_BYTES, maxLines * 512);
 			if (fullLines) {
 				totalFileLines = fullLines.length;
 				collectedLines = fullLines.slice(rangeStart, rangeStart + maxLines);
+				windowReachedEof = true;
 			} else {
 				const window = buffered
 					? collectLineWindowFromBuffer(buffered, rangeStart, maxLines, maxBytesForRead, maxLines, rawSelector)
@@ -1571,6 +1573,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 				collectedLines = window.lines;
 				byteLimitLine = window.byteLimitLine;
 				windowStoppedByByteLimit = window.stoppedByByteLimit;
+				windowReachedEof = window.reachedEof;
 			}
 
 			if (rangeStart >= totalFileLines) {
@@ -1581,20 +1584,19 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 
 			const budget = artifactBudget;
 			/**
+			 * Exact line count when the collector reached EOF: the whole file in
+			 * memory, a buffered window, or a streamed window that scanned to the
+			 * end. Anything else is a lower bound, so hints stay as requested
+			 * rather than risk dropping real lines.
+			 */
+			const knownTotal =
+				fullLines !== undefined || buffered !== undefined || windowReachedEof ? totalFileLines : undefined;
+			/**
 			 * Drop suffixes past the known EOF and clamp bounded ends to it.
-			 * `fullLines` means the whole file is in memory, so the total is
-			 * exact; a streamed window may only know a lower bound, so its
-			 * hints stay as requested rather than risk dropping real lines.
 			 */
 			const clampRangePartsToKnownEof = (
 				parts: Array<{ startLine: number; endLine: number | undefined }>,
 			): string[] => {
-				// Raw multi-range reads never set `fullLines`, but a buffered
-				// collector still knows the exact line count, so use it too. A
-				// streamed window may only know a lower bound, so its hints stay
-				// as requested rather than risk dropping real lines.
-				const knownTotal =
-					fullLines !== undefined ? fullLines.length : buffered !== undefined ? totalFileLines : undefined;
 				if (knownTotal === undefined) return parts.map(part => formatRangePart(part.startLine, part.endLine));
 				const out: string[] = [];
 				for (const part of parts) {
@@ -1608,10 +1610,11 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			/**
 			 * Name a line the budget cannot show and point at its byte-capped raw
 			 * form plus the unattempted remainder, so no requested line goes
-			 * unmentioned and no hint repeats an identical selector.
+			 * unmentioned and no hint repeats an identical selector. Returns the
+			 * remainder so callers can end the page on it.
 			 */
-			const pushUnshowableLineNotice = (lineNumber: number, lineBytes: number, resumeFrom: number): void => {
-				if (budget === undefined) return;
+			const pushUnshowableLineNotice = (lineNumber: number, lineBytes: number, resumeFrom: number): string[] => {
+				if (budget === undefined) return [];
 				const remainder = clampRangePartsToKnownEof([
 					...(range.endLine === undefined || resumeFrom <= range.endLine
 						? [{ startLine: resumeFrom, endLine: range.endLine }]
@@ -1627,13 +1630,41 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 							: ""
 					}.]`,
 				);
+				return remainder;
+			};
+			/**
+			 * End the page after an incomplete range whose hint already carries
+			 * every later range. Visiting them now would either duplicate them on
+			 * the follow-up or append a second hint whose continuation skips this
+			 * range's suffix. Later ranges past the known EOF still get their
+			 * out-of-bounds notice here, since the clamped hint no longer names
+			 * them.
+			 */
+			const endPageAfterIncompleteRange = (): void => {
+				if (knownTotal !== undefined) {
+					for (const later of ranges.slice(rangeIndex + 1)) {
+						if (later.startLine > knownTotal) {
+							const bound =
+								later.endLine !== undefined ? `${later.startLine}-${later.endLine}` : `${later.startLine}`;
+							notices.push(`[Range ${bound} is beyond end of file (${knownTotal} lines total); skipped]`);
+						}
+					}
+				}
 			};
 
 			if (budget !== undefined && collectedLines.length === 0 && byteLimitLine !== undefined) {
 				// The range's first line alone exceeds the per-range cap, so the
 				// window collected nothing and the lines after it were never
 				// attempted.
-				pushUnshowableLineNotice(byteLimitLine.index + 1, byteLimitLine.byteLength, byteLimitLine.index + 2);
+				const remainder = pushUnshowableLineNotice(
+					byteLimitLine.index + 1,
+					byteLimitLine.byteLength,
+					byteLimitLine.index + 2,
+				);
+				if (remainder.length > 0) {
+					endPageAfterIncompleteRange();
+					break;
+				}
 				continue;
 			}
 
@@ -1655,7 +1686,15 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 						// Genuinely oversized: no fresh budget could show it inline.
 						// Hinting the identical selector would loop forever, so name
 						// the line and resume after it instead.
-						pushUnshowableLineNotice(range.startLine, firstLineBytes, range.startLine + 1);
+						const unshowableRemainder = pushUnshowableLineNotice(
+							range.startLine,
+							firstLineBytes,
+							range.startLine + 1,
+						);
+						if (unshowableRemainder.length > 0) {
+							endPageAfterIncompleteRange();
+							break;
+						}
 						continue;
 					}
 					// Fits a full budget, just not what's left of this call: fall

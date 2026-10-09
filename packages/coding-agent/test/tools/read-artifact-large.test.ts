@@ -124,6 +124,18 @@ function hugeArtifact(): string {
 	).join("\n");
 }
 
+/** One 5 MB line: streamed, exact EOF without any buffer. */
+function streamedSingleLineArtifact(): string {
+	return `big-${"x".repeat(5_000_000)}-end`;
+}
+
+/** 70 KB line 1 with ~700-byte lines 2-300: unshowable-then-budget bait. */
+function unshowableThenBudgetArtifact(): string {
+	const lines = [`big-${"x".repeat(70_000)}-end`];
+	for (let index = 2; index <= 300; index++) lines.push(`w-${String(index).padStart(3, "0")} ${"x".repeat(690)}`);
+	return lines.join("\n");
+}
+
 /** Streamed scale with a 200 KB line 70: per-range cap stops mid-range. */
 function streamedStuckRangeArtifact(): string {
 	const lines = Array.from({ length: 69 }, (_, index) => `s-${String(index + 1).padStart(3, "0")} ${"x".repeat(693)}`);
@@ -512,8 +524,9 @@ describe("read tool large artifact handling", () => {
 		expect(output).toContain("exceeds the 50.0KB per-read budget");
 		expect(output).toContain("Use artifact://0:raw:1-1");
 		expect(output).toContain("artifact://0:2-2,4-5");
-		// The later range still renders in the same page.
-		expect(output).toContain("line-00003");
+		// The later range is deferred to the follow-up: rendering it now would
+		// let its own hint orphan the earlier suffix.
+		expect(output).not.toContain("line-00003");
 
 		const raw = getTextOutput(
 			await tool.execute("call-streamed-oversized-first-raw", { path: "artifact://0:raw:1-1" }),
@@ -740,5 +753,36 @@ describe("read tool large artifact handling", () => {
 		expect(output).toContain("47-100,200-200");
 		expect(output).not.toContain("Use artifact://0:200-200 to continue");
 		expect(output).not.toContain("line-00200");
+	});
+
+	it("clamps streamed recovery to an exact EOF without any buffer", async () => {
+		await Bun.write(path.join(artifactDir, "0.mcp.log"), streamedSingleLineArtifact());
+
+		// One 5 MB line streams past the snapshot cap, yet the window still
+		// reaches EOF with an exact total of 1: `2-2,4-5` must not be advertised.
+		const result = await tool.execute("call-streamed-single-eof", { path: "artifact://0:1-2,4-5" });
+		const output = getTextOutput(result);
+
+		expect(output).toContain("raw:1-1");
+		expect(output).not.toContain("2-2,4-5");
+	});
+
+	it("ends the page after an unshowable line instead of orphaning its suffix", async () => {
+		await Bun.write(path.join(artifactDir, "0.mcp.log"), unshowableThenBudgetArtifact());
+
+		// Range 1-100 names line 1 with `2-100,200-300` for the rest. Letting the
+		// second range spend the still-full budget appended a later `273-300`
+		// hint whose follow-up skips lines 2-100.
+		const result = await tool.execute("call-unshowable-stop", { path: "artifact://0:1-100,200-300" });
+		const output = getTextOutput(result);
+
+		expect(output).toContain("2-100,200-300");
+		expect(output).not.toContain("273-300");
+		expect(output).not.toContain("w-200");
+
+		const followed = getTextOutput(
+			await tool.execute("call-unshowable-stop-follow", { path: "artifact://0:2-100,200-300" }),
+		);
+		expect(followed).toContain("w-002");
 	});
 });
