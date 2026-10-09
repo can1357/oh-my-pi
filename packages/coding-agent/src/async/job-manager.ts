@@ -290,13 +290,13 @@ export class AsyncJobManager {
 		AsyncJobManager.#instance = value;
 	}
 
+	readonly #settledListeners = new Set<(job: AsyncJob) => void>();
 	/** Reset the process-global instance. Test-only. */
 	static resetForTests(): void {
 		AsyncJobManager.#instance = undefined;
 	}
 
 	readonly #jobs = new Map<string, AsyncJob>();
-	readonly #settledListeners = new Set<(job: AsyncJob) => void>();
 	readonly #deliveries: AsyncJobDelivery[] = [];
 	readonly #inFlightDeliveries: AsyncJobDelivery[] = [];
 	readonly #suppressedDeliveries = new Set<string>();
@@ -478,7 +478,6 @@ export class AsyncJobManager {
 		};
 		this.#jobs.set(id, job);
 		job.promise = (async () => {
-			let deliveryText: string | undefined;
 			try {
 				const outcome = await run({
 					jobId: id,
@@ -497,11 +496,13 @@ export class AsyncJobManager {
 				}
 				if (job.status === "cancelled") {
 					job.resultText = text;
+					this.#notifySettled(job);
 				} else {
 					job.status = "completed";
 					job.resultText = text;
 					this.#recordAgentReply(job);
-					deliveryText = text;
+					this.#notifySettled(job);
+					this.#enqueueDelivery(id, text);
 				}
 			} catch (error) {
 				job.endTime = Date.now();
@@ -511,11 +512,12 @@ export class AsyncJobManager {
 				if (job.status !== "cancelled") {
 					job.status = "failed";
 					this.#recordAgentReply(job);
-					deliveryText = errorText;
+					this.#notifySettled(job);
+					this.#enqueueDelivery(id, errorText);
+				} else {
+					this.#notifySettled(job);
 				}
 			}
-			this.#notifySettled(job);
-			if (deliveryText !== undefined) this.#enqueueDelivery(id, deliveryText);
 			if (this.#releasedForegroundJobs.has(id)) this.#discardForegroundJob(id);
 			else this.#scheduleEviction(id);
 			for (const listener of this.#settleListeners) {
