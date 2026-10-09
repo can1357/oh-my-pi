@@ -10,6 +10,7 @@ import {
 	getProjectPluginOverridesPath,
 	isEnoent,
 	logger,
+	normalizePathForComparison,
 } from "@oh-my-pi/pi-utils";
 import { JSONC } from "bun";
 import { resolveActiveProjectRegistryPath } from "../../discovery/helpers";
@@ -842,7 +843,7 @@ export class PluginManager {
 		const registryPath = await resolveActiveProjectRegistryPath(this.#cwd);
 		if (!registryPath) return undefined;
 		const projectRoot = path.dirname(registryPath);
-		if (path.resolve(projectRoot) === path.resolve(getPluginsDir())) return undefined;
+		if (normalizePathForComparison(projectRoot) === normalizePathForComparison(getPluginsDir())) return undefined;
 		const [projectDeps, projectConfig] = await Promise.all([
 			this.#readDeps(path.join(projectRoot, "package.json")),
 			this.#readRuntimeConfigAt(path.join(projectRoot, "omp-plugins.lock.json")),

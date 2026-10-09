@@ -115,5 +115,12 @@ class "kimi" {
 			native-kimi-k3-reasoning #true
 			clamp-output-to-model-max #true
 		}
+		// Native K3 accepts forced tools on the Anthropic surface too;
+		// omitting thinking leaves its mandatory provider default intact.
+		on-api "anthropic-messages" {
+			family "k3" {
+				supports-forced-tool-choice #true
+			}
+		}
 	}
 }

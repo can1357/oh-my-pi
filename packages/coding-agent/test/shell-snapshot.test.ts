@@ -3,6 +3,7 @@ import { existsSync } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { procmgr } from "@oh-my-pi/pi-utils";
 import { getOrCreateSnapshot, sanitizeSnapshotForBrush } from "@oh-my-pi/pi-coding-agent/utils/shell-snapshot";
 import fnEnvHelper from "../src/utils/shell-snapshot-fn-env.sh" with { type: "text" };
 
@@ -15,6 +16,10 @@ const REAL_BASH = Bun.env.SHELL?.includes("bash") ? Bun.env.SHELL : "/bin/bash";
 // function invokes): macOS has no `/usr/bin/echo`, so hard-coding it makes the
 // replay fail with `No such file or directory` even though the export landed.
 const REAL_ECHO = Bun.which("echo") ?? "/bin/echo";
+// A bare `bash` on Windows usually resolves to the WSL launcher
+// (`WindowsApps\bash.exe`), which runs inside Linux without the spawn env; use
+// the Git Bash the product itself resolves.
+const HELPER_BASH = process.platform === "win32" ? procmgr.resolveWindowsShell() : "bash";
 
 /** Mirrors the per-uid snapshot dir name computed in `getOrCreateSnapshot`. */
 function snapshotDirIn(tmpRoot: string): string {
@@ -122,7 +127,7 @@ describe("shell-snapshot fn-env helper", () => {
 			``,
 		].join("\n");
 
-		const child = Bun.spawn(["bash", "-c", `${fnEnvHelper}\n__omp_emit_referenced_exports`], {
+		const child = Bun.spawn([HELPER_BASH, "-c", `${fnEnvHelper}\n__omp_emit_referenced_exports`], {
 			env: {
 				PATH: process.env.PATH ?? "/usr/bin:/bin",
 				__MISE_EXE: "/opt/echo",
@@ -163,7 +168,7 @@ describe("shell-snapshot fn-env helper", () => {
 			``,
 		].join("\n");
 
-		const child = Bun.spawn(["bash", "-c", `${fnEnvHelper}\n__omp_emit_referenced_exports`], {
+		const child = Bun.spawn([HELPER_BASH, "-c", `${fnEnvHelper}\n__omp_emit_referenced_exports`], {
 			env: {
 				PATH: process.env.PATH ?? "/usr/bin:/bin",
 				GITHUB_TOKEN: "ghp_REDACTED",
@@ -209,7 +214,7 @@ describe("shell-snapshot fn-env helper", () => {
 
 	it("single-quote-escapes values containing apostrophes and preserves newlines", async () => {
 		const funcs = `shout () { echo "$TRICKY_VAL $NL_VAL"; }\n`;
-		const child = Bun.spawn(["bash", "-c", `${fnEnvHelper}\n__omp_emit_referenced_exports`], {
+		const child = Bun.spawn([HELPER_BASH, "-c", `${fnEnvHelper}\n__omp_emit_referenced_exports`], {
 			env: {
 				PATH: process.env.PATH ?? "/usr/bin:/bin",
 				TRICKY_VAL: "it's 'tricky'",
@@ -229,7 +234,7 @@ describe("shell-snapshot fn-env helper", () => {
 
 		// Eval the emitted lines and verify the round-trip values match.
 		const round = Bun.spawn(
-			["bash", "-c", `eval "$1"; printf '%s\\n' "$TRICKY_VAL"; printf '%s\\n' "$NL_VAL"`, "_", out],
+			[HELPER_BASH, "-c", `eval "$1"; printf '%s\\n' "$TRICKY_VAL"; printf '%s\\n' "$NL_VAL"`, "_", out],
 			{ stdout: "pipe", stderr: "ignore" },
 		);
 		const echoed = await readStream(round.stdout as ReadableStream<Uint8Array> | null);
@@ -392,6 +397,52 @@ describe("getOrCreateSnapshot", () => {
 				const files = await fs.readdir(snapshotDir);
 				expect(files).toEqual([]);
 			}
+		} finally {
+			if (originalTmpDir === undefined) delete process.env.TMPDIR;
+			else process.env.TMPDIR = originalTmpDir;
+			await fs.rm(testRoot, { recursive: true, force: true });
+		}
+	});
+
+	it("shares one in-flight creation across concurrent callers (no orphaned snapshot files)", async () => {
+		const realBash = REAL_BASH;
+		if (process.platform === "win32" || !existsSync(realBash)) return;
+		const testRoot = await fs.mkdtemp(path.join(os.tmpdir(), "omp-snap-inflight-"));
+		const originalTmpDir = process.env.TMPDIR;
+		process.env.TMPDIR = testRoot;
+		try {
+			const shellLink = path.join(testRoot, "bash-omp-inflight");
+			await fs.symlink(realBash, shellLink);
+			const env = { ...process.env, HOME: testRoot };
+			const [first, second] = await Promise.all([
+				getOrCreateSnapshot(shellLink, env),
+				getOrCreateSnapshot(shellLink, env),
+			]);
+			expect(first).not.toBeNull();
+			expect(second).toBe(first);
+			expect(await fs.readdir(snapshotDirIn(testRoot))).toEqual([path.basename(first!)]);
+		} finally {
+			if (originalTmpDir === undefined) delete process.env.TMPDIR;
+			else process.env.TMPDIR = originalTmpDir;
+			await fs.rm(testRoot, { recursive: true, force: true });
+		}
+	});
+
+	it("remembers a failed snapshot instead of respawning the shell on every call", async () => {
+		if (process.platform === "win32") return;
+		const testRoot = await fs.mkdtemp(path.join(os.tmpdir(), "omp-snap-negative-"));
+		const originalTmpDir = process.env.TMPDIR;
+		process.env.TMPDIR = testRoot;
+		try {
+			const runs = path.join(testRoot, "runs");
+			const fakeShell = path.join(testRoot, "counting-fail-shell.sh");
+			await fs.writeFile(fakeShell, `#!/bin/sh\nprintf x >> '${runs}'\nexit 1\n`);
+			await fs.chmod(fakeShell, 0o755);
+			const env = { ...process.env, HOME: testRoot };
+
+			expect(await getOrCreateSnapshot(fakeShell, env)).toBeNull();
+			expect(await getOrCreateSnapshot(fakeShell, env)).toBeNull();
+			expect(await fs.readFile(runs, "utf8")).toBe("x");
 		} finally {
 			if (originalTmpDir === undefined) delete process.env.TMPDIR;
 			else process.env.TMPDIR = originalTmpDir;

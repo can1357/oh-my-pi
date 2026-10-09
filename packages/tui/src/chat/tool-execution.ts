@@ -48,6 +48,7 @@ import {
 import type { XdevMountedState } from "../tools/xdev";
 import { isFramedBlockComponent, markFramedBlockComponent, renderStatusLine, WidthAwareText } from "../render/index";
 import { cachedPngConversion, convertImageToPngShared, imagePayloadKey } from "./image-loading";
+import { FenceFigure } from "./fence-figure";
 import { sanitizeWithOptionalSixelPassthrough } from "../render/sixel";
 import { renderDiff } from "../chrome/diff";
 import { type AnimationFrame, trimBlankEdges } from "../chrome/transcript-container";
@@ -167,6 +168,24 @@ class SafeToolRendererComponent implements Component {
 		const invalidate = this.#component.invalidate;
 		if (invalidate === undefined) return;
 		invalidate.call(this.#component);
+	}
+
+	releaseRenderCaches(): void {
+		const release = this.#component.releaseRenderCaches;
+		if (release === undefined) return;
+		try {
+			release.call(this.#component);
+		} catch (err) {
+			if (!this.#warned) {
+				this.#warned = true;
+				logger.warn("Tool renderer failed", {
+					tool: this.#toolName,
+					stage: this.#stage,
+					phase: "releaseRenderCaches",
+					error: String(err),
+				});
+			}
+		}
 	}
 
 	setIgnoreTight(ignore: boolean): void {
@@ -301,6 +320,8 @@ export class ToolExecutionComponent extends Container {
 	#multiFileBoxes: (Box | Spacer)[] = []; // Extra boxes for multi-file edit results
 	#imageComponents: Image[] = [];
 	#imageSpacers: Spacer[] = [];
+	/** The renderer's {@link ToolRenderer.figure} drawing; kept across rebuilds while its language is unchanged, so it redraws in place and its raster survives them. */
+	#figure: FenceFigure | undefined;
 	readonly #instanceId = ++toolExecutionInstanceSeq;
 	#toolName: string;
 	#toolLabel: string;
@@ -759,6 +780,11 @@ export class ToolExecutionComponent extends Container {
 		}
 	}
 
+	/** Whether the result's figure still waits for its raster; the transcript holds retirement meanwhile. */
+	isTranscriptBlockPending(): boolean {
+		return this.#toolActivityVisible && this.#figure?.pending === true;
+	}
+
 	/**
 	 * Whether this block is ready to retire as immutable history. Partial
 	 * results, including detached background tasks, remain active and mutable
@@ -941,11 +967,13 @@ export class ToolExecutionComponent extends Container {
 
 	/**
 	 * The native `collapsed` prop: the transcript's expand state, except that a
-	 * call streaming its body (edit, write) stays open until it settles, then
+	 * view that asks to be {@link NativeToolView.open} never starts folded, and
+	 * a call streaming its body (edit, write) stays open until it settles, then
 	 * folds like a finished thought. The user's own toggle still wins meanwhile:
 	 * the terminal keeps local collapse state until this prop changes.
 	 */
-	#nativeCollapsed(status: TspCardStatus): boolean {
+	#nativeCollapsed(status: TspCardStatus, view: NativeToolView): boolean {
+		if (view.open) return false;
 		const live = status === "pending" || status === "running";
 		return !this.#expanded && !(live && streamsBody(this.#toolName));
 	}
@@ -1008,7 +1036,7 @@ export class ToolExecutionComponent extends Container {
 				intent: typeof intent === "string" && intent ? plainText(intent) : undefined,
 				frame: inline ? "inline" : "card",
 				collapsible: hasBody,
-				collapsed: hasBody ? this.#nativeCollapsed(status) : undefined,
+				collapsed: hasBody ? this.#nativeCollapsed(status, view) : undefined,
 				preview: hasBody ? (preview === "auto" ? { lines: DEFAULT_TERMINAL_PREVIEW_LINES } : preview) : undefined,
 				tools: view.tools,
 				tone: view.tone,
@@ -1076,7 +1104,7 @@ export class ToolExecutionComponent extends Container {
 				tone: view.tone ?? NATIVE_STATUS_TONE[status],
 				status,
 				collapsible: hasBody,
-				collapsed: hasBody ? this.#nativeCollapsed(status) : undefined,
+				collapsed: hasBody ? this.#nativeCollapsed(status, view) : undefined,
 				preview: hasBody ? cardPreview(view.preview) : undefined,
 			},
 			children,
@@ -1132,6 +1160,7 @@ export class ToolExecutionComponent extends Container {
 				body: [...(callView.body ?? []), ...(resultView.body ?? [])],
 				tone: resultView.tone ?? callView.tone,
 				preview: resultView.preview ?? callView.preview,
+				open: resultView.open ?? callView.open,
 				inline: resultView.inline ?? callView.inline,
 				tools: resultView.tools ?? callView.tools,
 			};
@@ -1611,6 +1640,7 @@ export class ToolExecutionComponent extends Container {
 			this.removeChild(spacer);
 		}
 		this.#imageSpacers = [];
+		this.#syncFigure();
 
 		if (this.#result) {
 			const imageBlocks = this.#getAllImageBlocks();
@@ -1639,7 +1669,12 @@ export class ToolExecutionComponent extends Container {
 						imageData,
 						imageMimeType,
 						{ fallbackColor: (s: string) => theme.fg("toolOutput", s) },
-						{ ...resolveImageOptions(), budget: this.#ui.imageBudget, imageKey: `te${this.#instanceId}:${i}` },
+						{
+							...resolveImageOptions(),
+							budget: this.#ui.imageBudget,
+							imageKey: `te${this.#instanceId}:${i}`,
+							requestRender: () => this.#ui.requestRender(),
+						},
 					);
 					this.#imageComponents.push(imageComponent);
 					this.addChild(imageComponent);
@@ -1647,6 +1682,43 @@ export class ToolExecutionComponent extends Container {
 			}
 		}
 		this.#renderedImageCount = this.#imageComponents.length;
+	}
+
+	/**
+	 * Mount the built-in renderer's figure under the card and feed it the fence
+	 * as it stands: the mounted one stays while its language is unchanged, so it
+	 * redraws in place as the args stream.
+	 */
+	#syncFigure(): void {
+		const result = this.#result;
+		const renderer = this.#tool?.renderCall || this.#tool?.renderResult ? undefined : this.#renderer;
+		const fence =
+			this.#isBenignSkip() || isNativeRendering()
+				? undefined
+				: renderer?.figure?.(
+						this.#args,
+						result && { content: result.content, details: result.details, isError: result.isError },
+						this.#renderState,
+					);
+		const drawable = fence !== undefined && FenceFigure.draws(fence, { showImages: this.#showImages });
+		let figure = this.#figure;
+		if (figure && (!drawable || figure.lang !== fence.lang)) {
+			this.removeChild(figure);
+			figure.dispose();
+			figure = this.#figure = undefined;
+		}
+		if (!drawable) return;
+		if (!figure) {
+			figure = this.#figure = new FenceFigure(fence.lang, {
+				budget: this.#ui.imageBudget,
+				onChange: () => {
+					this.#blockVersion++;
+					this.#ui.requestRender();
+				},
+			});
+			this.addChild(figure);
+		}
+		figure.update(fence);
 	}
 
 	#getCallArgsForRender(): unknown {

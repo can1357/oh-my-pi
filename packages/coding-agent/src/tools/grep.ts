@@ -1,5 +1,5 @@
 import type { GrepToolDetails } from "@oh-my-pi/pi-tui/tools/grep";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
@@ -10,8 +10,9 @@ import type {
 	AgentToolUpdateCallback,
 	ToolTier,
 } from "@oh-my-pi/pi-agent-core";
-import { type GrepMatch, GrepOutputMode, type GrepResult, grep } from "@oh-my-pi/pi-natives";
+import { type EditStore, type GrepMatch, GrepOutputMode, type GrepResult, grep } from "@oh-my-pi/pi-natives";
 import { prompt, untilAborted } from "@oh-my-pi/pi-utils";
+import { LRUCache } from "@oh-my-pi/pi-utils/lru";
 import {
 	type ArchiveReader,
 	type ExtractedArchiveFile,
@@ -299,6 +300,73 @@ function isImmutableSourcePath(filePath: string, immutableSourcePaths: ReadonlyS
 	return false;
 }
 
+/** Grouped-output header naming an internal URL (`## local://notes/a.md (2 matches)`). */
+const URL_HEADER_RE = /^#+\s+([a-z][a-z0-9+.-]*:\/\/.*)$/i;
+const HEADER_SUFFIX_RE = /\s+\([^)]*\)\s*$/;
+
+/**
+ * Stat identity a recorded snapshot tag was minted under. `ctime` moves on
+ * every content write (it cannot be set by `utimes`), so an unchanged stamp
+ * plus an unchanged store head means re-recording would read identical bytes.
+ */
+interface SnapshotStamp {
+	readonly size: bigint;
+	readonly mtimeNs: bigint;
+	readonly ctimeNs: bigint;
+	readonly ino: bigint;
+	readonly tag: string;
+}
+
+const SNAPSHOT_STAMP_MAX = 256;
+/**
+ * Stats younger than this are never memoized (git's racy-clean rule): on
+ * coarse-timestamp filesystems a same-size rewrite inside one timestamp
+ * granule leaves the stamp unchanged.
+ */
+const RACY_STAMP_WINDOW_NS = 2_000_000_000n;
+const snapshotStampsByStore = new WeakMap<EditStore, LRUCache<string, SnapshotStamp>>();
+
+/**
+ * Whole-file snapshot tags for `snapshotPaths`, in order (null = unreadable or
+ * over the snapshot cap). Files whose stat identity is unchanged since this
+ * store last recorded them, and whose recorded head still carries that tag,
+ * skip the native re-read: recording identical text again would only refresh
+ * recency, which `headHash` does too. Stats run concurrently and BEFORE the
+ * read, so a write racing the read invalidates the stamp instead of pinning a
+ * stale tag.
+ */
+async function recordSnapshotTags(store: EditStore, snapshotPaths: readonly string[]): Promise<(string | null)[]> {
+	const stamps = snapshotStampsByStore.get(store) ?? new LRUCache<string, SnapshotStamp>({ max: SNAPSHOT_STAMP_MAX });
+	snapshotStampsByStore.set(store, stamps);
+	const stats = await Promise.all(snapshotPaths.map(filePath => stat(filePath, { bigint: true }).catch(() => null)));
+	return snapshotPaths.map((filePath, index) => {
+		const st = stats[index];
+		if (!st) {
+			stamps.delete(filePath);
+			return store.recordSnapshotFile(filePath);
+		}
+		const prior = stamps.get(filePath);
+		if (
+			prior &&
+			prior.size === st.size &&
+			prior.mtimeNs === st.mtimeNs &&
+			prior.ctimeNs === st.ctimeNs &&
+			prior.ino === st.ino &&
+			store.headHash(filePath) === prior.tag
+		) {
+			return prior.tag;
+		}
+		const tag = store.recordSnapshotFile(filePath);
+		const changedNs = st.mtimeNs > st.ctimeNs ? st.mtimeNs : st.ctimeNs;
+		if (tag && BigInt(Date.now()) * 1_000_000n - changedNs >= RACY_STAMP_WINDOW_NS) {
+			stamps.set(filePath, { size: st.size, mtimeNs: st.mtimeNs, ctimeNs: st.ctimeNs, ino: st.ino, tag });
+		} else {
+			stamps.delete(filePath);
+		}
+		return tag;
+	});
+}
+
 /**
  * Per-file native fetch budget that guarantees the JS range filter can still
  * surface `perFileKeep` in-range hits. Matches arrive one entry per matched
@@ -353,18 +421,34 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 	readonly summary = "Search file contents by regex";
 	get description(): string {
 		const displayMode = resolveFileDisplayMode(this.session);
-		return prompt.render(grepDescription, {
-			IS_HL_MODE: displayMode.hashLines,
-			IS_LINE_NUMBER_MODE: !displayMode.hashLines && displayMode.lineNumbers,
-			hasFind: this.session.isToolActive?.("find") ?? isFindEnabled(this.session),
-			eagerDelegation: sessionDelegationBias(this.session) === "eager",
-			scoutAvailable:
-				this.session.isScoutSpawnable?.() ??
-				isScoutSpawnable(
-					cfgTaskDisabledAgents.get(this.session.settings),
-					this.session.getSessionSpawns?.() ?? "*",
-				),
-		});
+		const isHlMode = displayMode.hashLines;
+		const isLineNumberMode = !displayMode.hashLines && displayMode.lineNumbers;
+		const hasFind = this.session.isToolActive?.("find") ?? isFindEnabled(this.session);
+		const eagerDelegation = sessionDelegationBias(this.session) === "eager";
+		const scoutAvailable =
+			this.session.isScoutSpawnable?.() ??
+			isScoutSpawnable(
+				cfgTaskDisabledAgents.get(this.session.settings),
+				this.session.getSessionSpawns?.() ?? "*",
+			);
+		// Every render input is a boolean; pack them so repeat reads skip the template render.
+		const key =
+			(isHlMode ? 1 : 0) |
+			(isLineNumberMode ? 2 : 0) |
+			(hasFind ? 4 : 0) |
+			(eagerDelegation ? 8 : 0) |
+			(scoutAvailable ? 16 : 0);
+		if (key !== this.#descriptionKey) {
+			this.#description = prompt.render(grepDescription, {
+				IS_HL_MODE: isHlMode,
+				IS_LINE_NUMBER_MODE: isLineNumberMode,
+				hasFind,
+				eagerDelegation,
+				scoutAvailable,
+			});
+			this.#descriptionKey = key;
+		}
+		return this.#description;
 	}
 	readonly parameters = searchSchema;
 	readonly strict = true;
@@ -372,6 +456,8 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 	readonly #contextBeforeOverride?: number;
 	readonly #contextAfterOverride?: number;
 	readonly #totalMatchLimit?: number;
+	#descriptionKey = -1;
+	#description = "";
 
 	constructor(
 		private readonly session: ToolSession,
@@ -685,33 +771,8 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 						? filePath
 						: formatResultPath(filePath, isDirectory, searchPath, this.session.cwd);
 
-				// Group matches by file in encounter order. Detect per-file overflow
-				// BEFORE truncation so the renderer can surface that a hot file was
-				// trimmed for diversity.
-				const fileOrder: string[] = [];
-				const matchesByPath = new Map<string, GrepMatch[]>();
-				for (const match of result.matches) {
-					if (!matchesByPath.has(match.path)) {
-						fileOrder.push(match.path);
-						matchesByPath.set(match.path, []);
-					}
-					matchesByPath.get(match.path)!.push(match);
-				}
-				let perFileLimitReached = false;
-				for (const file of fileOrder) {
-					const list = matchesByPath.get(file)!;
-					if (list.length > perFileMatchCap) {
-						perFileLimitReached = true;
-						list.length = perFileMatchCap;
-					}
-				}
-				const totalFiles = fileOrder.length;
-				// When native grep stopped at its internal cap, files past the cap were
-				// never surfaced — the file total is only a lower bound.
-				const totalFilesLabel = result.limitReached ? `${totalFiles}+` : `${totalFiles}`;
 				// Single-file scopes can't paginate — there is one file by definition.
 				const canPaginate = isMultiScope;
-				const skipFiles = canPaginate ? Math.min(normalizedSkip, totalFiles) : 0;
 				// A caller with a total match cap is not paginating: the cap bounds the
 				// output, and the only consumer that sets one (`pi_grep`) has no `skip`
 				// field to follow a "use skip=N" suggestion with. Windowing it to the
@@ -724,34 +785,60 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 				// The cap below then does the trimming and records that it bit, so
 				// `match_limit_reached` reaches the frame set.
 				const fileWindow = this.#totalMatchLimit !== undefined ? this.#totalMatchLimit + 1 : DEFAULT_FILE_LIMIT;
-				const windowFiles = canPaginate ? fileOrder.slice(skipFiles, skipFiles + fileWindow) : fileOrder;
+				const windowStart = canPaginate ? normalizedSkip : 0;
+				const windowEnd = canPaginate ? normalizedSkip + fileWindow : Number.POSITIVE_INFINITY;
+				// Group matches by file in encounter order. Every file is counted so
+				// per-file overflow is detected BEFORE truncation (the renderer surfaces
+				// that a hot file was trimmed for diversity), but match lists are only
+				// kept — already capped — for files inside the page window.
+				const fileGroups = new Map<string, { count: number; list?: GrepMatch[] }>();
+				const windowLists: GrepMatch[][] = [];
+				let perFileLimitReached = false;
+				for (const match of result.matches) {
+					const group = fileGroups.get(match.path);
+					if (!group) {
+						const order = fileGroups.size;
+						const list = order >= windowStart && order < windowEnd ? [match] : undefined;
+						if (list) windowLists.push(list);
+						fileGroups.set(match.path, { count: 1, list });
+						continue;
+					}
+					group.count++;
+					if (group.count > perFileMatchCap) {
+						perFileLimitReached = true;
+						continue;
+					}
+					group.list?.push(match);
+				}
+				const totalFiles = fileGroups.size;
+				// When native grep stopped at its internal cap, files past the cap were
+				// never surfaced — the file total is only a lower bound.
+				const totalFilesLabel = result.limitReached ? `${totalFiles}+` : `${totalFiles}`;
+				const skipFiles = canPaginate ? Math.min(normalizedSkip, totalFiles) : 0;
 				const fileLimitReached = canPaginate && totalFiles > skipFiles + fileWindow;
 				const selectedMatches: GrepMatch[] = [];
 				let totalMatchLimitReached = false;
-				if (windowFiles.length > 0) {
-					const lists = windowFiles.map(file => matchesByPath.get(file) ?? []);
-					// oxlint-disable-next-line unicorn/no-new-array -- length preallocation
-					const cursors = new Array<number>(lists.length).fill(0);
-					let anyAdded = true;
-					while (anyAdded) {
-						anyAdded = false;
-						for (let i = 0; i < lists.length; i++) {
-							if (cursors[i] < lists[i].length) {
-								selectedMatches.push(lists[i][cursors[i]++]);
-								anyAdded = true;
-							}
-						}
-					}
-					// Round-robin above interleaves files for diversity, so the cap is
-					// applied after selection rather than as a per-list bound: trimming
-					// mid-rotation would silently favour whichever files sort first.
-					const cap = this.#totalMatchLimit;
-					if (cap !== undefined && selectedMatches.length > cap) {
-						selectedMatches.length = cap;
-						totalMatchLimitReached = true;
+				// Round-robin interleaves files for diversity, so the cap is applied
+				// after selection rather than as a per-list bound: trimming
+				// mid-rotation would silently favour whichever files sort first.
+				// Selection stops one past the cap — enough to know the cap bit.
+				const cap = this.#totalMatchLimit;
+				const selectLimit = cap === undefined ? Number.POSITIVE_INFINITY : cap + 1;
+				let anyAdded = windowLists.length > 0;
+				for (let round = 0; anyAdded && selectedMatches.length < selectLimit; round++) {
+					anyAdded = false;
+					for (const list of windowLists) {
+						if (round >= list.length) continue;
+						selectedMatches.push(list[round]);
+						anyAdded = true;
+						if (selectedMatches.length >= selectLimit) break;
 					}
 				}
-				const nextSkip = skipFiles + windowFiles.length;
+				if (cap !== undefined && selectedMatches.length > cap) {
+					selectedMatches.length = cap;
+					totalMatchLimitReached = true;
+				}
+				const nextSkip = skipFiles + windowLists.length;
 				const limitMessage = fileLimitReached
 					? `Showing files ${skipFiles + 1}-${nextSkip} of ${totalFilesLabel}. Use skip=${nextSkip} for the next page, or narrow paths/pattern.`
 					: "";
@@ -840,16 +927,27 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 				const displayLines: string[] = [];
 				const hashContexts = new Map<string, { tag: string; path: string }>();
 				if (baseDisplayMode.hashLines) {
-					for (const relativePath of fileList) {
-						if (archiveDisplaySet.has(relativePath)) continue;
-						// Immutable schemes get no host file; mutable URLs (`local://`) bind to their backing file.
-						const snapshotPath = await resultSnapshotPath(relativePath, this.session.cwd, resolveContext);
+					const candidates = fileList.filter(relativePath => !archiveDisplaySet.has(relativePath));
+					// Immutable schemes get no host file; mutable URLs (`local://`) bind to their backing file.
+					const snapshotPaths = await Promise.all(
+						candidates.map(relativePath => resultSnapshotPath(relativePath, this.session.cwd, resolveContext)),
+					);
+					const editable: Array<{ relativePath: string; snapshotPath: string }> = [];
+					for (let index = 0; index < candidates.length; index++) {
+						const snapshotPath = snapshotPaths[index];
 						if (snapshotPath === undefined || isImmutableSourcePath(snapshotPath, immutableSourcePaths)) continue;
-						// Mint a whole-file content tag so any anchor validates while the
-						// file is unchanged; over-cap / unreadable files get no tag (and
-						// therefore plain, non-editable line output).
-						const tag = getEditStore(this.session).recordSnapshotFile(snapshotPath);
-						if (tag) hashContexts.set(relativePath, { tag, path: snapshotPath });
+						editable.push({ relativePath: candidates[index], snapshotPath });
+					}
+					// Mint a whole-file content tag so any anchor validates while the
+					// file is unchanged; over-cap / unreadable files get no tag (and
+					// therefore plain, non-editable line output).
+					const tags = await recordSnapshotTags(
+						getEditStore(this.session),
+						editable.map(entry => entry.snapshotPath),
+					);
+					for (let index = 0; index < editable.length; index++) {
+						const tag = tags[index];
+						if (tag) hashContexts.set(editable[index].relativePath, { tag, path: editable[index].snapshotPath });
 					}
 				}
 				const renderMatchesForFile = (relativePath: string): FileMatchSection => {
@@ -917,11 +1015,13 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 				const output = truncation.content;
 				const displayText = displayLines.join("\n");
 				let displayTargets: Record<string, string> | undefined;
+				// Only grouped headers start with `#`; code-frame rows start with their gutter.
 				for (const line of displayLines) {
-					const header = /^#+\s+([a-z][a-z0-9+.-]*:\/\/.*)$/i.exec(line);
+					if (line.charCodeAt(0) !== 35 /* # */) continue;
+					const header = URL_HEADER_RE.exec(line);
 					if (!header) continue;
-					const target = header[1]!.trimEnd().replace(/\s+\([^)]*\)\s*$/, "");
-					const resolved = InternalUrlRouter.instance().locateSync(target);
+					const target = header[1]!.trimEnd().replace(HEADER_SUFFIX_RE, "");
+					const resolved = router.locateSync(target);
 					if (resolved) (displayTargets ??= {})[target] = resolved;
 				}
 				const truncated = Boolean(

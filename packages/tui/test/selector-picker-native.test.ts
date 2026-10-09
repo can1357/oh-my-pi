@@ -83,6 +83,20 @@ describe("thinking selector picker", () => {
 		expect(p.items?.find(item => item.id === "high")?.chips?.[0]?.dot).toBe("thinkingHigh");
 		expect(p.current).toEqual(["high"]);
 	});
+
+	it("marks auto as current without a level chip", () => {
+		const withAuto = new ThinkingSelectorComponent(
+			"auto",
+			["off", "auto", "high"] as never,
+			() => {},
+			() => {},
+		);
+		const p = sheet(withAuto.describe(pickerCx)).props;
+		expect(p.current).toEqual(["auto"]);
+		expect(p.selected).toBe("auto");
+		expect(p.items?.find(item => item.id === "auto")?.chips).toBeUndefined();
+		expect(p.items?.find(item => item.id === "off")?.chips?.[0]?.dot).toBe("thinkingOff");
+	});
 });
 
 describe("hook selector picker", () => {
@@ -99,6 +113,21 @@ describe("hook selector picker", () => {
 		expect(picked).toEqual([]);
 		selector.handleNativeEvent(act("confirm"));
 		expect(picked).toEqual(["two"]);
+	});
+
+	it("inline stays in the dock as a card instead of a hoisted picker sheet", () => {
+		const picked: string[] = [];
+		const selector = new HookSelectorComponent(
+			"Save where?",
+			["project", "global"],
+			o => picked.push(o),
+			() => {},
+			{ inline: true },
+		);
+		const root = selector.describe(pickerCx);
+		expect(JSON.stringify(root)).not.toContain('"k":"picker"');
+		selector.handleNativeEvent({ type: "activate", key: "list", item: "1" });
+		expect(picked).toEqual(["global"]);
 	});
 });
 

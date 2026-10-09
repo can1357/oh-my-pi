@@ -24,7 +24,7 @@ describe("/slow", () => {
 		anthropicSlowModeLanes.lane(LANE).reset();
 	});
 
-	function createSession(provider: string, api: Api): AgentSession {
+	function createSession(provider: string, api: Api, settings = Settings.isolated()): AgentSession {
 		const tempDir = TempDir.createSync("@slow-command-");
 		const authStorage = createInMemoryAuthStorage();
 		cleanups.push(() => {
@@ -46,7 +46,7 @@ describe("/slow", () => {
 		return new AgentSession({
 			agent: new Agent({ initialState: { model, systemPrompt: ["test"], tools: [] } }),
 			sessionManager: SessionManager.inMemory(tempDir.path()),
-			settings: Settings.isolated(),
+			settings,
 			modelRegistry: new ModelRegistry(authStorage, path.join(tempDir.path(), "models.yml")),
 		});
 	}
@@ -120,5 +120,38 @@ describe("/slow", () => {
 		expect(session.serviceTierByFamily).toEqual({});
 		expect(cfgProvidersAnthropicSlowMode.get(session.settings)).toBe("off");
 		expect(await slow(session, "sideways")).toContain("Usage: /slow");
+	});
+
+	it("reports the active model's slow mode without touching a persisted setting it does not own", () => {
+		const anthropic = createSession(
+			"anthropic",
+			"anthropic-messages",
+			Settings.isolated({ "providers.anthropic.slowMode": "auto" }),
+		);
+		expect(anthropic.isSlowModeSupported()).toBe(true);
+		expect(anthropic.isSlowModeEnabled()).toBe(true);
+		expect(anthropic.getSlowModeScope()).toBe("global");
+
+		// Same persisted config, but the active model has no slow mode: reported off, setting kept.
+		const mistral = createSession(
+			"mistral",
+			"openai-completions",
+			Settings.isolated({ "providers.anthropic.slowMode": "auto" }),
+		);
+		expect(mistral.isSlowModeSupported()).toBe(false);
+		expect(mistral.isSlowModeEnabled()).toBe(false);
+		expect(mistral.getSlowModeScope()).toBeUndefined();
+		expect(mistral.setSlowMode(false)).toBe(false);
+		expect(cfgProvidersAnthropicSlowMode.get(mistral.settings)).toBe("auto");
+
+		// OpenAI's slow mode is this session's flex tier, independent of the Anthropic setting.
+		const openai = createSession(
+			"openai",
+			"openai-responses",
+			Settings.isolated({ "providers.anthropic.slowMode": "auto" }),
+		);
+		expect(openai.isSlowModeSupported()).toBe(true);
+		expect(openai.isSlowModeEnabled()).toBe(false);
+		expect(openai.getSlowModeScope()).toBe("session");
 	});
 });

@@ -189,6 +189,9 @@ fn check_apply(source: &str, case_name: &str, call: &Value) {
 
 #[test]
 fn legacy_parser_and_applier_cases_match_byte_for_byte() {
+	// The Lua boundary-repair cases need a grammar; Lua's is downloaded on
+	// demand in production, so link the native crate instead.
+	pi_ast::language::wasm_grammars::LUA.register(tree_sitter_lua::LANGUAGE.into());
 	let mut covered_names = 0_usize;
 	let mut calls = 0_usize;
 	for fixture_name in FIXTURES {
@@ -359,7 +362,8 @@ fn snapshot_store_matches_snapshot_contract_cases() {
 		snapshot
 			.seen_lines
 			.expect("seen")
-			.into_iter()
+			.iter()
+			.copied()
 			.collect::<Vec<_>>(),
 		vec![1]
 	);
@@ -368,11 +372,7 @@ fn snapshot_store_matches_snapshot_contract_cases() {
 	let shared_text = "shared\n";
 	let shared_tag = shared.record(&path, shared_text, None);
 	shared.record(&other, shared_text, None);
-	let mut matches = shared
-		.find_by_hash(&shared_tag)
-		.into_iter()
-		.map(|snapshot| snapshot.path)
-		.collect::<Vec<_>>();
+	let mut matches = shared.paths_with_hash(&shared_tag);
 	matches.sort();
 	assert_eq!(
 		matches,
@@ -408,7 +408,7 @@ fn snapshot_store_matches_snapshot_contract_cases() {
 		.seen_lines
 		.expect("seen lines");
 	assert_eq!(
-		seen.into_iter().collect::<Vec<_>>(),
+		seen.iter().copied().collect::<Vec<_>>(),
 		vec![1, 2],
 		"still fuses identical repeated reads of one colliding text onto one snapshot"
 	);

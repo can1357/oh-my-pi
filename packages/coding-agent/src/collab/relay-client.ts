@@ -12,7 +12,7 @@
 import { getProxyForUrl } from "@oh-my-pi/pi-ai/utils/proxy";
 import { logger } from "@oh-my-pi/pi-utils";
 import { open, sealSerialized } from "./crypto";
-import type { CollabFrame, RelayControlMessage } from "./protocol";
+import type { CollabFrame, EncodedFrame, RelayControlMessage } from "./protocol";
 import { packEnvelope, unpackEnvelope } from "./protocol";
 
 const RELAY_CLOSE_REASONS: Record<number, string> = {
@@ -178,10 +178,15 @@ export class CollabSocket {
 		this.#openSocket();
 	}
 
-	send(frame: CollabFrame, targetPeer = 0): void {
+	/**
+	 * Queue one frame. An {@link EncodedFrame} is sealed as-is, so a caller that
+	 * already serialized the payload (to measure or bound it) does not pay for a
+	 * second `JSON.stringify`.
+	 */
+	send(frame: CollabFrame | EncodedFrame, targetPeer = 0): void {
 		if (this.#closed) return;
 		try {
-			const serialized = JSON.stringify(frame);
+			const serialized = typeof frame === "string" ? frame : JSON.stringify(frame);
 			const prepared = Promise.withResolvers<void>();
 			this.#sendChain = Promise.all([this.#sendChain, prepared.promise]).then(() => {});
 			this.#enqueueSend([serialized].values(), targetPeer, Buffer.byteLength(serialized), prepared.resolve, true);
@@ -190,8 +195,11 @@ export class CollabSocket {
 		}
 	}
 
-	/** Keeps a snapshot contiguous with its welcome and ahead of subsequent live traffic. */
-	sendBatch(frames: Iterable<CollabFrame>, targetPeer = 0): void {
+	/**
+	 * Keeps a snapshot contiguous with its welcome and ahead of subsequent live
+	 * traffic. {@link EncodedFrame} items are sealed as-is, as in {@link send}.
+	 */
+	sendBatch(frames: Iterable<CollabFrame | EncodedFrame>, targetPeer = 0): void {
 		if (this.#closed) return;
 		this.#enqueueSend(frames[Symbol.iterator](), targetPeer, 0);
 	}

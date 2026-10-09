@@ -1,3 +1,5 @@
+import * as fs from "node:fs";
+import * as path from "node:path";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, ImageContent, Usage } from "@oh-my-pi/pi-ai";
 import { getStreamingPartialJson } from "@oh-my-pi/pi-ai/utils/block-symbols";
@@ -6,6 +8,7 @@ import { StatusNotice } from "@oh-my-pi/pi-tui/chrome/status-notice";
 import { QueuedMessagesBand } from "@oh-my-pi/pi-tui/prompt/queued-messages";
 import { logger } from "@oh-my-pi/pi-utils";
 import type { AdvisorMessageDetails } from "../../advisor";
+import { InternalUrlRouter } from "../../internal-urls";
 import { COLLAB_PROMPT_MESSAGE_TYPE, type CollabPromptDetails } from "../../collab/protocol";
 import { settings } from "../../config/settings";
 import { createAdvisorMessageCard } from "@oh-my-pi/pi-tui/chat/advisor-message";
@@ -42,10 +45,20 @@ import { TranscriptBlock, TranscriptContainer } from "@oh-my-pi/pi-tui/chrome/tr
 import { createUsageRowBlock, turnElapsedMs } from "@oh-my-pi/pi-tui/overlays/usage-row";
 import { UserMessageComponent } from "@oh-my-pi/pi-tui/chat/user-message";
 import { decodeStreamedToolArgs, streamingStringKeysForTool } from "../../modes/controllers/tool-args-reveal";
-import { materializeImageReferenceLinksSync } from "@oh-my-pi/pi-tui/prompt/image-references";
+import {
+	materializeImageReferenceLinks,
+	materializeImageReferenceLinksSync,
+} from "@oh-my-pi/pi-tui/prompt/image-references";
+import { normalizeBlobExtension } from "@oh-my-pi/pi-tui/prompt/image-format";
 import { imageAttachmentSource } from "@oh-my-pi/pi-tui/prompt/image-source";
 import { theme } from "@oh-my-pi/pi-tui/theme";
-import type { CompactionQueuedMessage, InteractiveModeContext, RenderSessionContextOptions } from "../../modes/types";
+import type {
+	CompactionQueuedMessage,
+	InteractiveModeContext,
+	RenderSessionContextOptions,
+	ShowStatusOptions,
+} from "../../modes/types";
+import { extractVisibleAssistantText } from "../rpc/rpc-live";
 import { LAUNCH_COMPLETION_MESSAGE_TYPE } from "../../session/launch-completion";
 import {
 	BACKGROUND_TAN_DISPATCH_MESSAGE_TYPE,
@@ -56,6 +69,8 @@ import {
 	type SkillPromptDetails,
 } from "../../session/messages";
 import type { SessionContext, StrippedToolCallsMarker } from "../../session/session-context";
+import { executeBuiltinSlashCommand, lookupBuiltinSlashCommand } from "../../slash-commands/builtin-registry";
+import { parseSlashCommand } from "../../slash-commands/helpers/parse";
 import { buildSkillCommandPrompt, invokeSkillCommandFromText, isKnownSkillCommand } from "../skill-command";
 import {
 	createAssistantMessageComponent,
@@ -118,13 +133,88 @@ type AddMessageOptions = {
 	reuseSettledComponent?: boolean;
 };
 
+type ImageChipSessionManager = Pick<
+	InteractiveModeContext["sessionManager"],
+	"putBlob" | "putBlobSync" | "getArtifactsDir" | "getSessionId"
+>;
+
+/** Where an image chip's bytes live: a file the chip opens directly, or the file behind an internal URL. */
+type ImageChipSource = { kind: "file"; path: string } | { kind: "internal"; path: string };
+
+/**
+ * Internal URLs (`local://`) stay on the image for the model but resolve against the
+ * session root, which `/move` relocates, so a chip cannot point at them. Their backing
+ * file holds the original pasted bytes (the payload may be auto-resized), so the chip
+ * opens a stable blob copy of that file. Undefined when no file backs the image.
+ */
+function imageChipSource(image: ImageContent, sessionManager: ImageChipSessionManager): ImageChipSource | undefined {
+	const sourcePath = imageAttachmentSource(image)?.path;
+	if (!sourcePath) return undefined;
+	const router = InternalUrlRouter.instance();
+	if (!router.canHandle(sourcePath)) return { kind: "file", path: sourcePath };
+	try {
+		const located = router.locateSync(sourcePath, {
+			localProtocolOptions: {
+				getArtifactsDir: () => sessionManager.getArtifactsDir(),
+				getSessionId: () => sessionManager.getSessionId(),
+			},
+		});
+		return located === undefined ? undefined : { kind: "internal", path: located };
+	} catch {
+		return undefined;
+	}
+}
+
+/** Chip targets for attached images: each file on disk, else a blob copy of the original bytes (or the payload). */
+export async function materializeImageChipLinks(
+	images: readonly ImageContent[],
+	sessionManager: ImageChipSessionManager,
+): Promise<(string | undefined)[]> {
+	const putBlob = sessionManager.putBlob.bind(sessionManager);
+	return Promise.all(
+		images.map(async image => {
+			const source = imageChipSource(image, sessionManager);
+			if (source?.kind === "file") return source.path;
+			if (source) {
+				try {
+					const bytes = await fs.promises.readFile(source.path);
+					return (await putBlob(bytes, { extension: normalizeBlobExtension(path.extname(source.path)) }))
+						.displayPath;
+				} catch (error) {
+					logger.warn("Failed to copy original image for its chip", {
+						path: source.path,
+						error: error instanceof Error ? error.message : String(error),
+					});
+				}
+			}
+			return (await materializeImageReferenceLinks([image], putBlob))?.[0];
+		}),
+	);
+}
+
+/** Synchronous {@link materializeImageChipLinks} for transcript rebuilds. */
 function imageLinksForMessage(
 	images: readonly ImageContent[],
-	putBlobSync: InteractiveModeContext["sessionManager"]["putBlobSync"],
+	sessionManager: ImageChipSessionManager,
 ): (string | undefined)[] | undefined {
 	if (images.length === 0) return undefined;
-	const materialized = materializeImageReferenceLinksSync(images, putBlobSync);
-	return images.map((image, index) => imageAttachmentSource(image)?.path ?? materialized?.[index]);
+	const putBlobSync = sessionManager.putBlobSync.bind(sessionManager);
+	return images.map(image => {
+		const source = imageChipSource(image, sessionManager);
+		if (source?.kind === "file") return source.path;
+		if (source) {
+			try {
+				const bytes = fs.readFileSync(source.path);
+				return putBlobSync(bytes, { extension: normalizeBlobExtension(path.extname(source.path)) }).displayPath;
+			} catch (error) {
+				logger.warn("Failed to copy original image for its chip", {
+					path: source.path,
+					error: error instanceof Error ? error.message : String(error),
+				});
+			}
+		}
+		return materializeImageReferenceLinksSync([image], putBlobSync)?.[0];
+	});
 }
 
 export class UiHelpers {
@@ -136,23 +226,24 @@ export class UiHelpers {
 	 * If multiple status messages are emitted back-to-back (without anything else being added to the chat),
 	 * we update the previous status line instead of appending new ones to avoid log spam.
 	 */
-	showStatus(message: string, options?: { dim?: boolean }): void {
+	showStatus(message: string, options?: ShowStatusOptions): void {
 		const children = this.ctx.chatContainer.children;
 		const last = children.length > 0 ? children[children.length - 1] : undefined;
 		const useDim = options?.dim ?? true;
 		// Resolve the dim color lazily so a later theme change re-shapes the line
 		// instead of leaving the palette that was active when it was presented.
 		const styleFn = useDim ? (t: string) => theme.fg("dim", t) : undefined;
+		const notice = { styleFn, toast: options?.toast };
 
 		if (last && last === this.ctx.lastStatus) {
-			this.ctx.lastStatus.setMessage(message, styleFn);
+			this.ctx.lastStatus.setMessage(message, notice);
 			this.ctx.ui.requestRender();
 			return;
 		}
 
-		const notice = new StatusNotice(message, styleFn);
-		this.ctx.present([notice]);
-		this.ctx.lastStatus = notice;
+		const status = new StatusNotice(message, notice);
+		this.ctx.present([status]);
+		this.ctx.lastStatus = status;
 	}
 
 	addMessageToChat(message: AgentMessage, options?: AddMessageOptions): Component[] {
@@ -289,11 +380,7 @@ export class UiHelpers {
 					} else {
 						const images = imageContent(message.content);
 						const imageLinks =
-							options?.imageLinks ??
-							imageLinksForMessage(
-								images,
-								this.ctx.viewSession.sessionManager.putBlobSync.bind(this.ctx.viewSession.sessionManager),
-							);
+							options?.imageLinks ?? imageLinksForMessage(images, this.ctx.viewSession.sessionManager);
 						userComponent = new UserMessageComponent(userText, {
 							synthetic: isSynthetic,
 							imageLinks,
@@ -1093,13 +1180,12 @@ export class UiHelpers {
 		const queuedMessages = this.ctx.viewSession.getQueuedMessages() as QueuedMessages;
 
 		const steeringMessages = [...queuedMessages.steering];
-		for (const entry of this.ctx.compactionQueuedMessages as CompactionQueuedMessage[]) {
-			if (entry.mode === "steer") steeringMessages.push(entry.text);
-		}
-
 		const followUpMessages = [...queuedMessages.followUp];
-		for (const entry of this.ctx.compactionQueuedMessages as CompactionQueuedMessage[]) {
-			if (entry.mode === "followUp") followUpMessages.push(entry.text);
+		if (!this.ctx.focusedAgentId) {
+			for (const entry of this.ctx.compactionQueuedMessages as CompactionQueuedMessage[]) {
+				if (entry.mode === "steer") steeringMessages.push(entry.text);
+				else followUpMessages.push(entry.text);
+			}
 		}
 
 		const groups = [
@@ -1141,6 +1227,22 @@ export class UiHelpers {
 	}
 
 	async #deliverQueuedMessage(message: CompactionQueuedMessage): Promise<void> {
+		const builtin = await executeBuiltinSlashCommand(message.text, {
+			ctx: this.ctx,
+			input: message.images ? { images: message.images } : undefined,
+		});
+		if (builtin === true) {
+			this.#parkLoopOnLocalConsume(message.text, false);
+			return;
+		}
+		if (typeof builtin === "string") {
+			const forwarded = await this.ctx.session.prompt(builtin, {
+				streamingBehavior: message.mode,
+				images: message.images,
+			});
+			this.#parkLoopOnLocalConsume(message.text, forwarded);
+			return;
+		}
 		if (
 			await invokeSkillCommandFromText(this.ctx, message.text, message.mode, {
 				propagateErrors: true,
@@ -1167,6 +1269,9 @@ export class UiHelpers {
 
 	isKnownSlashCommand(text: string): boolean {
 		if (!text.startsWith("/")) return false;
+		const parsed = parseSlashCommand(text);
+		const builtin = parsed && lookupBuiltinSlashCommand(parsed.name);
+		if (builtin && (builtin.allowArgs || !parsed.args)) return true;
 		const spaceIndex = text.indexOf(" ");
 		const commandName = spaceIndex === -1 ? text.slice(1) : text.slice(1, spaceIndex);
 		if (!commandName) return false;
@@ -1222,8 +1327,7 @@ export class UiHelpers {
 			}
 			if (firstPromptIndex === -1) {
 				for (const message of queuedMessages) {
-					const forwarded = await this.ctx.session.prompt(message.text);
-					this.#parkLoopOnLocalConsume(message.text, forwarded);
+					await this.#deliverQueuedMessage(message);
 				}
 				return;
 			}
@@ -1309,12 +1413,6 @@ export class UiHelpers {
 	}
 
 	extractAssistantText(message: AssistantMessage): string {
-		let text = "";
-		for (const content of message.content) {
-			if (content.type === "text") {
-				text += content.text;
-			}
-		}
-		return text.trim();
+		return extractVisibleAssistantText(message);
 	}
 }

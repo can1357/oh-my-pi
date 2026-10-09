@@ -1,9 +1,13 @@
 import { createModelBrowserSource } from "../src/modes/model-browser-source";
 import { beforeAll, describe, expect, test } from "bun:test";
-import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
+import { Agent, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { Model } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
+import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import {
 	buildBrowserItems,
 	buildSearchAffinity,
@@ -154,6 +158,25 @@ describe("ModelBrowser search ranking", () => {
 		expect(ranked.map(item => item.selector)).toEqual(["b/example-2", "a/example-2"]);
 		expect(browser.getSelected()?.selector).toBe(ranked[0].selector);
 		expect(ranked.length).toBe(browser.visibleCount);
+	});
+
+	test("orders same-provider -latest models alphabetically regardless of input order", () => {
+		// Regression: the comparator answered "first wins" for two `-latest` ids, so their
+		// order followed whatever order the catalog or fuzzy pass handed in.
+		const alpha = makeModel("demo", "alpha-latest");
+		const beta = makeModel("demo", "beta-latest");
+		const roles: RoleAssignments = {};
+		const options = { roles, mruOrder: [], affinity: buildSearchAffinity([], roles, []) };
+		for (const models of [
+			[alpha, beta],
+			[beta, alpha],
+		]) {
+			const sorted = buildBrowserItems(models);
+			sortModelItems(sorted);
+			expect(sorted.map(item => item.selector)).toEqual(["demo/alpha-latest", "demo/beta-latest"]);
+			const ranked = rankModelItems("latest", buildBrowserItems(models), options);
+			expect(ranked.map(item => item.selector)).toEqual(["demo/alpha-latest", "demo/beta-latest"]);
+		}
 	});
 
 	test("an exact query match outranks the MRU model", () => {
@@ -332,6 +355,29 @@ describe("ModelBrowser perf display", () => {
 		expect(renderPlain(browser, 80)[2]).toContain("118t/s");
 		const wideRow = renderPlain(browser, 120)[2];
 		expect(wideRow).toContain("0.9s 118t/s");
+	});
+
+	test("narrow rows drop cost, then context, before truncating the model name", () => {
+		const model = makeModel("openai", "gpt-5-codex-mini");
+		model.cost.input = 100;
+		model.contextWindow = 128_000;
+		model.cost.output = 0.001;
+		const browser = new ModelBrowser(createModelBrowserSource(Settings.isolated({})));
+		browser.setItems(buildBrowserItems([model]));
+
+		const wide = renderPlain(browser, 100)[2];
+		expect(wide).toContain("gpt-5-codex-mini");
+		expect(wide).toContain("128k");
+		expect(wide).toContain("$100/0.001");
+
+		const narrow = renderPlain(browser, 34)[2];
+		expect(narrow).toContain("gpt-5-codex-mini");
+		expect(narrow).toContain("128k");
+		expect(narrow).not.toContain("$100");
+
+		const tiny = renderPlain(browser, 16)[2];
+		expect(tiny).toContain("gpt-5");
+		expect(tiny).not.toContain("128k");
 	});
 
 	test("detail line shows measured perf regardless of width", () => {
@@ -518,5 +564,100 @@ describe("Factory Droid credits badge", () => {
 		expect(paidRow).not.toContain("free");
 		browser.setQuery("free");
 		expect(browser.visibleCount).toBe(0);
+	});
+});
+
+describe("serviceTierFor", () => {
+	beforeAll(async () => {
+		await initTheme(false);
+	});
+
+	test("labels the live session tier rather than the configured setting", async () => {
+		// The setting asks for ultrafast, but `/fast ultra` and `/slow` act on the
+		// session's per-family map; the browser must follow the session.
+		const settings = Settings.isolated({ "tier.openai": "ultrafast" });
+		const astra = makeModel("openai", "gpt-6-astra");
+		const auth = await AuthStorage.create(":memory:");
+		try {
+			const session = new AgentSession({
+				agent: new Agent({ initialState: { model: astra, systemPrompt: ["Test"], tools: [], messages: [] } }),
+				sessionManager: SessionManager.inMemory(),
+				modelRegistry: new ModelRegistry(auth),
+				settings,
+			});
+			try {
+				const browser = new ModelBrowser(
+					createModelBrowserSource(settings, model => session.effectiveServiceTier(model)),
+				);
+				browser.setItems(buildBrowserItems([astra]));
+				browser.setPerfStats(
+					new Map([
+						["openai/gpt-6-astra", { samples: 4, tps: 25, ttftMs: null }],
+						["openai/gpt-6-astra@ultrafast", { samples: 2, tps: 300, ttftMs: null }],
+					]),
+				);
+				const row = () => Bun.stripANSI(browser.render(120)[2] ?? "");
+
+				expect(row()).toContain("25t/s");
+				expect(row()).not.toContain("ultrafast");
+
+				expect(session.setUltrafastMode(true)).toBe(true);
+				expect(row()).toContain("300t/s ultrafast");
+
+				session.setUltrafastMode(false);
+				expect(row()).toContain("25t/s");
+				expect(row()).not.toContain("ultrafast");
+			} finally {
+				await session.dispose();
+			}
+		} finally {
+			auth.close();
+		}
+	});
+
+	test("without a session, returns the configured tier only when the request would carry it", () => {
+		const source = createModelBrowserSource(Settings.isolated({ "tier.openai": "ultrafast" }));
+		const firstParty = makeModel("openai", "gpt-6-astra");
+		const codexUnlisted = makeModel("openai-codex", "gpt-6-astra");
+		const codexAdvertised = buildModel({
+			id: "gpt-6-astra",
+			name: "gpt-6-astra",
+			api: "openai-codex-responses",
+			provider: "openai-codex",
+			baseUrl: "https://chatgpt.com/backend-api",
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 10, output: 50, cacheRead: 1, cacheWrite: 0 },
+			contextWindow: 400_000,
+			maxTokens: 128_000,
+			serviceTiers: ["ultrafast"],
+		});
+		const anthropic = buildModel({
+			id: "claude-opus-5-5",
+			name: "claude-opus-5-5",
+			api: "anthropic-messages",
+			provider: "anthropic",
+			baseUrl: "https://api.anthropic.com",
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 5, output: 25, cacheRead: 0.5, cacheWrite: 6.25 },
+			contextWindow: 200_000,
+			maxTokens: 64_000,
+		});
+
+		// First-party OpenAI takes ultrafast as-is.
+		expect(source.serviceTierFor?.(firstParty)).toBe("ultrafast");
+		// Codex realizes it only when discovery advertises it, so the browser must
+		// not label a tier the request would drop.
+		expect(source.serviceTierFor?.(codexUnlisted)).toBeUndefined();
+		expect(source.serviceTierFor?.(codexAdvertised)).toBe("ultrafast");
+		// No configured tier for the family.
+		expect(source.serviceTierFor?.(anthropic)).toBeUndefined();
+
+		// Anthropic realizes priority through fast mode, not a `service_tier` field,
+		// so no served tier is ever recorded for it and there is no row to label.
+		const anthropicPriority = createModelBrowserSource(Settings.isolated({ "tier.anthropic": "priority" }));
+		expect(anthropicPriority.serviceTierFor?.(anthropic)).toBeUndefined();
+		expect(anthropicPriority.serviceTierFor?.(firstParty)).toBeUndefined();
 	});
 });
