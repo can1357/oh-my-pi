@@ -1,19 +1,16 @@
 import { Database } from "bun:sqlite";
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test, vi } from "bun:test";
 import { AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai/auth-storage";
+import * as envApiKey from "@oh-my-pi/pi-ai/env-api-key";
 
-const ORIGINAL_OPENZOO_API_KEY = Bun.env.OPENZOO_API_KEY;
+const OPENZOO_LOCAL = "openzoo-local";
 
 let storage: AuthStorage | undefined;
 
 afterEach(() => {
+	vi.restoreAllMocks();
 	storage?.close();
 	storage = undefined;
-	if (ORIGINAL_OPENZOO_API_KEY === undefined) {
-		delete Bun.env.OPENZOO_API_KEY;
-	} else {
-		Bun.env.OPENZOO_API_KEY = ORIGINAL_OPENZOO_API_KEY;
-	}
 });
 
 function openStorage(): AuthStorage {
@@ -21,9 +18,21 @@ function openStorage(): AuthStorage {
 	return storage;
 }
 
+/**
+ * Stand in for the openzoo env hook. `openzoo-local` is what that hook returns
+ * when `OPENZOO_API_KEY` is unset; a different value is a real bearer. Other
+ * providers keep the real resolver so this file does not touch `Bun.env`.
+ */
+function stubOpenzooEnvKey(key: string): void {
+	const resolveEnvKey = envApiKey.getEnvApiKey;
+	vi.spyOn(envApiKey, "getEnvApiKey").mockImplementation(provider =>
+		provider === "openzoo" ? key : resolveEnvKey(provider),
+	);
+}
+
 describe("openzoo stored credentials", () => {
 	test("a source-less stored bearer wins over the keyless placeholder", async () => {
-		delete Bun.env.OPENZOO_API_KEY;
+		stubOpenzooEnvKey(OPENZOO_LOCAL);
 		const auth = openStorage();
 		await auth.credentials.set("openzoo", { type: "api_key", key: "oz_broker-bearer" });
 
@@ -33,7 +42,7 @@ describe("openzoo stored credentials", () => {
 	});
 
 	test("a login placeholder does not hide the source-less bearer", async () => {
-		delete Bun.env.OPENZOO_API_KEY;
+		stubOpenzooEnvKey(OPENZOO_LOCAL);
 		const auth = openStorage();
 		await auth.credentials.set("openzoo", [
 			{ type: "api_key", key: "openzoo-local", source: "login" },
@@ -45,7 +54,7 @@ describe("openzoo stored credentials", () => {
 	});
 
 	test("nothing stored still resolves the keyless placeholder", async () => {
-		delete Bun.env.OPENZOO_API_KEY;
+		stubOpenzooEnvKey(OPENZOO_LOCAL);
 		const auth = openStorage();
 
 		expect(await auth.keys.get("openzoo")).toBe("openzoo-local");
@@ -54,9 +63,9 @@ describe("openzoo stored credentials", () => {
 	});
 
 	test("OPENZOO_API_KEY still wins over a stored bearer", async () => {
+		stubOpenzooEnvKey("oz_env-bearer");
 		const auth = openStorage();
 		await auth.credentials.set("openzoo", { type: "api_key", key: "oz_broker-bearer" });
-		Bun.env.OPENZOO_API_KEY = "oz_env-bearer";
 
 		expect(await auth.keys.get("openzoo")).toBe("oz_env-bearer");
 		expect(await auth.keys.peek("openzoo")).toBe("oz_env-bearer");
