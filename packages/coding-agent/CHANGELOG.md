@@ -4,7 +4,7 @@
 
 ### Added
 
-- With the Hindsight memory backend, `retain` and `learn` can now store a memory with `scope: "global"` so every project recalls it (under `global` or `per-project-tagged` scoping).
+- With the Hindsight memory backend, `retain` and `learn` can now store a memory with `scope: "global"` so every project recalls it (under `global` or `per-project-tagged` scoping) ([#15030](https://github.com/can1357/oh-my-pi/pull/15030) by [@kithawk](https://github.com/kithawk)).
 
 ### Changed
 
