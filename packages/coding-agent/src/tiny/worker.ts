@@ -296,6 +296,13 @@ class JuliaJudgeModel {
 		const names = Object.keys(request.questions);
 		// Empty batch would build zero-dim ORT tensors that session.run rejects.
 		if (names.length === 0) return {};
+		// Validate server-side: the client caps choice/score at 2-20 options, but
+		// the worker is reachable over the socket — 0 options divides by zero in
+		// serializeJudgeRow, 100+ options blows up batch memory.
+		for (const name of names) {
+			const count = request.questions[name]?.options.length ?? 0;
+			if (count < 2 || count > 20) throw new Error(`judge question "${name}" needs 2-20 options, got ${count}`);
+		}
 		const { tokenizer, ort, session } = await this.load(reply, request.id);
 		// Matches the reference clean(): scrub the marker string so id 4 appears only at option markers.
 		const marker = tokenizer.mask_token;

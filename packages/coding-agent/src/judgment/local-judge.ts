@@ -129,10 +129,14 @@ export class LocalJudge implements Judge {
 		const questions: Record<string, JudgeQuestionPayload> = {};
 		for (const id of ids) questions[id] = toPayload(id, request.questions[id]);
 		const state = renderJudgeStateValue(request.state);
-		const logits = await tinyModelClient.judge(this.#modelId, state, questions, { signal: options.signal });
+		const { logits, error } = await tinyModelClient.judge(this.#modelId, state, questions, {
+			signal: options.signal,
+		});
 		// Aborted dispatches resolve null; rethrow the signal reason instead of masking it as no-output.
 		options.signal?.throwIfAborted();
-		if (!logits) throw new Error(`judgment: local model ${this.#modelId} returned no output`);
+		// A download failure, ORT shape error, or session crash arrives here with
+		// its message — never masked as empty output.
+		if (!logits) throw new Error(`judgment: local model ${this.#modelId} failed${error ? `: ${error}` : ""}`);
 		const answers: Record<string, Answer> = {};
 		for (const id of ids) answers[id] = toAnswer(id, request.questions[id], logits[id]);
 		return {

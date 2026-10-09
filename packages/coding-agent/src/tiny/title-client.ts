@@ -72,7 +72,11 @@ type WorkerHandle = RefCountedWorkerHandle<TinyWorkerRequest, TinyWorkerResponse
 type PendingRequest =
 	| { kind: "title"; modelKey: TinyLocalModelKey; source: string; resolve: (title: string | null) => void }
 	| { kind: "chat"; modelKey: TinyLocalModelKey; resolve: (text: string | null) => void }
-	| { kind: "judge"; modelKey: TinyLocalModelKey; resolve: (logits: Record<string, number[]> | null) => void }
+	| {
+			kind: "judge";
+			modelKey: TinyLocalModelKey;
+			resolve: (result: { logits: Record<string, number[]> | null; error?: string }) => void;
+	  }
 	| { kind: "load"; modelKey: TinyLocalModelKey; resolve: (result: TinyTitleDownloadResult) => void };
 
 export interface TinyTitleDownloadResult {
@@ -655,17 +659,19 @@ export class TinyTitleClient {
 		state: string,
 		questions: Record<string, JudgeQuestionPayload>,
 		options: TinyModelChatOptions = {},
-	): Promise<Record<string, number[]> | null> {
-		if (!isTinyJudgeLocalModelKey(modelKey)) return null;
-		if (options.signal?.aborted || this.#hasFailed(modelKey)) return null;
-		const { promise, resolve } = Promise.withResolvers<Record<string, number[]> | null>();
+	): Promise<{ logits: Record<string, number[]> | null; error?: string }> {
+		if (!isTinyJudgeLocalModelKey(modelKey)) return { logits: null };
+		if (options.signal?.aborted || this.#hasFailed(modelKey)) return { logits: null };
+		const { promise, resolve } = Promise.withResolvers<{ logits: Record<string, number[]> | null; error?: string }>();
 		const request: TinyWorkerRequest = {
 			type: "judge",
 			id: String(++this.#nextRequestId),
 			state,
 			questions,
 		};
-		return this.#run(request, { kind: "judge", modelKey, resolve }, promise, options.signal, () => resolve(null));
+		return this.#run(request, { kind: "judge", modelKey, resolve }, promise, options.signal, () =>
+			resolve({ logits: null }),
+		);
 	}
 
 	async complete(
@@ -816,7 +822,7 @@ export class TinyTitleClient {
 			return;
 		}
 		if (message.type === "judged") {
-			if (pending.kind === "judge") pending.resolve(message.logits);
+			if (pending.kind === "judge") pending.resolve({ logits: message.logits });
 			return;
 		}
 		if (pending.kind === "load") pending.resolve({ ok: true });
@@ -836,6 +842,7 @@ export class TinyTitleClient {
 	#fail(pending: PendingRequest, error: string | undefined): void {
 		this.#emitProgress({ modelKey: pending.modelKey, status: "error" }, error);
 		if (pending.kind === "load") pending.resolve(error === undefined ? { ok: false } : { ok: false, error });
+		else if (pending.kind === "judge") pending.resolve({ logits: null, error });
 		else pending.resolve(null);
 	}
 

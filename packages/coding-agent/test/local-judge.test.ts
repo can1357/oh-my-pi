@@ -11,7 +11,7 @@ afterEach(() => {
 
 describe("LocalJudge", () => {
 	it("maps argmax logits to the winning choice label (wrong winner surfaced to callers)", async () => {
-		spyOn(tinyModelClient, "judge").mockResolvedValue({ q: [0, 3, 1] });
+		spyOn(tinyModelClient, "judge").mockResolvedValue({ logits: { q: [0, 3, 1] } });
 		const judge = new LocalJudge("julia-1");
 
 		const result = await judge.judge({
@@ -33,7 +33,7 @@ describe("LocalJudge", () => {
 	});
 
 	it("reports noul as softmax(logits)[1] (inverted yes/no)", async () => {
-		spyOn(tinyModelClient, "judge").mockResolvedValue({ q: [0.5, 1.5] });
+		spyOn(tinyModelClient, "judge").mockResolvedValue({ logits: { q: [0.5, 1.5] } });
 		const judge = new LocalJudge("julia-1");
 
 		const result = await judge.judge({
@@ -47,7 +47,7 @@ describe("LocalJudge", () => {
 	});
 
 	it("scores the probability-weighted level index with string keys (wrong expected index)", async () => {
-		spyOn(tinyModelClient, "judge").mockResolvedValue({ q: [0, 0, 10, 0] });
+		spyOn(tinyModelClient, "judge").mockResolvedValue({ logits: { q: [0, 0, 10, 0] } });
 		const judge = new LocalJudge("julia-1");
 
 		const result = await judge.judge({
@@ -70,7 +70,7 @@ describe("LocalJudge", () => {
 		const seen: Array<Record<string, JudgeQuestionPayload>> = [];
 		spyOn(tinyModelClient, "judge").mockImplementation(async (_model, _state, questions) => {
 			seen.push(questions);
-			return { q: [5, 0] };
+			return { logits: { q: [5, 0] } };
 		});
 		const judge = new LocalJudge("julia-1");
 
@@ -108,7 +108,7 @@ describe("LocalJudge", () => {
 	});
 
 	it("throws JudgmentParseError on logit-count mismatch (silent mis-mapping)", async () => {
-		spyOn(tinyModelClient, "judge").mockResolvedValue({ q: [1, 2, 3] });
+		spyOn(tinyModelClient, "judge").mockResolvedValue({ logits: { q: [1, 2, 3] } });
 		const judge = new LocalJudge("julia-1");
 
 		let error: unknown;
@@ -130,7 +130,7 @@ describe("LocalJudge", () => {
 	});
 
 	it("propagates the abort reason instead of masking it as no-output", async () => {
-		spyOn(tinyModelClient, "judge").mockResolvedValue(null);
+		spyOn(tinyModelClient, "judge").mockResolvedValue({ logits: null });
 		const judge = new LocalJudge("julia-1");
 		const controller = new AbortController();
 		controller.abort();
@@ -159,7 +159,7 @@ describe("LocalJudge", () => {
 	});
 
 	it("rejects a 21-label choice pre-dispatch without calling the worker", async () => {
-		const mock = spyOn(tinyModelClient, "judge").mockResolvedValue({ q: [] });
+		const mock = spyOn(tinyModelClient, "judge").mockResolvedValue({ logits: { q: [] } });
 		const judge = new LocalJudge("julia-1");
 		const criteria: Record<string, null> = {};
 		for (let index = 0; index < 21; index++) criteria[`opt${index}`] = null;
@@ -184,7 +184,7 @@ describe("LocalJudge", () => {
 	});
 
 	it("rejects a 1-label choice pre-dispatch without calling the worker", async () => {
-		const mock = spyOn(tinyModelClient, "judge").mockResolvedValue({ q: [1] });
+		const mock = spyOn(tinyModelClient, "judge").mockResolvedValue({ logits: { q: [1] } });
 		const judge = new LocalJudge("julia-1");
 
 		let error: unknown;
