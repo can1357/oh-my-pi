@@ -105,6 +105,11 @@ export interface TinyModelChatOptions {
 	signal?: AbortSignal;
 }
 
+/** Scoring requests carry no generation budget: only cancellation. */
+export interface TinyJudgeOptions {
+	signal?: AbortSignal;
+}
+
 export interface TinyModelCompletionOptions extends TinyModelChatOptions {
 	systemPrompt?: string;
 }
@@ -658,7 +663,7 @@ export class TinyTitleClient {
 		modelKey: string,
 		state: string,
 		questions: Record<string, JudgeQuestionPayload>,
-		options: TinyModelChatOptions = {},
+		options: TinyJudgeOptions = {},
 	): Promise<{ logits: Record<string, number[]> | null; error?: string }> {
 		if (!isTinyJudgeLocalModelKey(modelKey)) return { logits: null };
 		if (options.signal?.aborted || this.#hasFailed(modelKey)) return { logits: null };
@@ -752,7 +757,10 @@ export class TinyTitleClient {
 	}
 
 	#ensureWorker(modelKey: TinyLocalModelKey): ModelWorker {
-		const envKey = tinyModelEnvKey();
+		// Judge keys force the ONNX CPU backend (the MLX layout lacks the judge
+		// head): device/dtype settings never apply, so they must not respawn the
+		// 577MB worker either.
+		const envKey = isTinyJudgeLocalModelKey(modelKey) ? "judge" : tinyModelEnvKey();
 		const existing = this.#workers.get(modelKey);
 		if (existing) {
 			// Device/dtype changed since connecting: reconnect once idle so in-flight

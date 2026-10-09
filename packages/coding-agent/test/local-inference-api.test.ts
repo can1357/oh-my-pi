@@ -305,7 +305,7 @@ describe("tiny model chat client", () => {
 				await client.judge("lfm2.5-230m", "s", {
 					q: { type: "noul", instructions: "i", options: ["no", "yes"] },
 				}),
-			).toBeNull();
+			).toEqual({ logits: null });
 			expect(connected).not.toContain("lfm2.5-230m");
 		} finally {
 			await client.terminate();
