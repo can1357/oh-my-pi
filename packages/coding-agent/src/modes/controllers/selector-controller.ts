@@ -63,7 +63,7 @@ import {
 	persistForeignSession,
 } from "../../session/foreign-session-import";
 import type { ForeignSessionInfo, ForeignSessionSource } from "../../session/foreign-session-store";
-import { setModelCompactionPoint } from "../../session/model-compaction-threshold";
+import { previewModelCompactionPoint, setModelCompactionPoint } from "../../session/model-compaction-threshold";
 import { isTranscriptEntry, type TranscriptEntry } from "../../session/session-context";
 import { isUserRequestEntry } from "@oh-my-pi/pi-tui/chat/transcript-entry";
 import type { SessionEntry, SessionTreeNode } from "../../session/session-entries";
@@ -1101,12 +1101,9 @@ export class SelectorController {
 							confirmed,
 						});
 						if (update.kind === "confirm") return update;
-						const { entry } = update;
-						const selector = `${model.provider}/${model.id}`;
+						const { described, summary } = update;
 						this.ctx.showStatus(
-							entry === undefined
-								? `Compaction point for ${selector} reset`
-								: `Compaction point for ${selector}: ${typeof entry === "number" ? `${entry.toLocaleString("en-US")} tokens` : entry}`,
+							`Compaction limit for ${model.provider}/${model.id}: ${described}${summary ? ` · ${summary}` : ""}`,
 						);
 						this.ctx.statusLine.invalidate();
 						// The entry can move the model between window tiers; the open hub's
@@ -1125,6 +1122,13 @@ export class SelectorController {
 						return { kind: "error", message: error instanceof Error ? error.message : String(error) };
 					}
 				},
+				previewCompactionPoint: (model, input) =>
+					previewModelCompactionPoint(
+						this.ctx.settings,
+						model,
+						input,
+						this.ctx.session.modelRegistry.contextWindowTiers(model),
+					),
 				onSavePreset: name => {
 					try {
 						saveModelPreset(this.ctx.settings, name);

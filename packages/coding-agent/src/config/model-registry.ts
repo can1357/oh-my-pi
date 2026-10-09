@@ -243,14 +243,16 @@ function getModelCompactionPointsFromSettings(settingsInstance?: Settings): unkn
 }
 
 /**
- * Whether `model`'s `compaction.modelThresholds` token entry sits at or past
- * `window`, where the fixed threshold would clamp: such an entry opts that
- * model into its extended window. Percentage entries scale with the window
- * and never opt in.
+ * Whether `model`'s `compaction.modelThresholds` token entry needs more than
+ * `window`. A base entry stands in for the window, so it needs a larger one
+ * once it exceeds `window`; a fixed trigger (`"f90000"`) needs room above it,
+ * so it does at `window` already. Such an entry opts that model into its
+ * extended window. Percentage entries scale with the window and never opt in.
  */
 function compactionPointReaches(points: unknown, model: Model<Api>, window: number): boolean {
-	const tokens = matchModelCompactionThreshold(points, model)?.threshold.thresholdTokens;
-	return tokens !== undefined && tokens > 0 && tokens >= window;
+	const threshold = matchModelCompactionThreshold(points, model)?.threshold;
+	if (!threshold || threshold.thresholdTokens <= 0) return false;
+	return threshold.fixed ? threshold.thresholdTokens >= window : threshold.thresholdTokens > window;
 }
 
 function contextWindowKey(model: { provider: string; id: string }): string {

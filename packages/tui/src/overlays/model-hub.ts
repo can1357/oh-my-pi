@@ -171,17 +171,24 @@ export interface ModelHubCallbacks {
 	/** Persist a new quick-switch cycle order (the ctrl+p role cycle). */
 	onCycleOrderChange?: (order: string[]) => void;
 	/**
-	 * Persist typed text as `model`'s own compaction point: a token count (`90000`,
-	 * `90k`, `1M`), a percentage (`80%`), or empty to reset. Rejected input
-	 * returns `{ kind: "error" }`; input that needs acknowledgement (a point past
-	 * the standard window) returns `{ kind: "confirm" }` until called again with
-	 * the same text and `confirmed`. Either keeps the field open.
+	 * Persist typed text as `model`'s own compaction limit: a token base the
+	 * policy scales (`400k`), a fixed trigger (`f400k`), a percentage (`80%`), or
+	 * empty to reset. Rejected input returns `{ kind: "error" }`; input that
+	 * needs acknowledgement (one that opens the extended window) returns
+	 * `{ kind: "confirm" }` until called again with the same text and
+	 * `confirmed`. Either keeps the field open.
 	 */
 	onCompactionPointChange?: (
 		model: Model,
 		input: string,
 		confirmed: boolean,
 	) => CompactionPointChangeResult | undefined;
+	/**
+	 * One short line on where `model` would compact with the typed limit
+	 * (`compacts at 340K · 85% of 400K base`), shown beside the field while
+	 * typing; undefined for input that does not parse or fit.
+	 */
+	previewCompactionPoint?: (model: Model, input: string) => string | undefined;
 	onCancel: () => void;
 }
 
@@ -242,8 +249,9 @@ type StripState =
 	  }
 	| {
 			/**
-			 * Footer text input setting `model`'s compaction point; `error` is the last
-			 * rejection, `confirm` the warning a second Enter on the same `value` accepts.
+			 * Footer text input setting `model`'s compaction limit; `error` is the last
+			 * rejection, `confirm` the warning a second Enter on the same `value`
+			 * accepts, `preview` the host's live line for the typed `value`.
 			 */
 			kind: "name";
 			purpose: "compaction";
@@ -251,6 +259,7 @@ type StripState =
 			input: Input;
 			error?: string;
 			confirm?: { value: string; message: string };
+			preview?: { value: string; text: string | undefined };
 	  };
 
 /** A Roles-view command; keys and the picker's action bar both run {@link ModelHubComponent}'s `#runRolesAction`. */
@@ -315,8 +324,8 @@ function providerInitials(providerId: string): string {
 
 const PROVIDER_REFRESH_DEBOUNCE_MS = 120;
 const RECENT_LIMIT = 15;
-/** Accepted compaction point input, shown beside the field. */
-const COMPACTION_INPUT_HINT = "90000 · 90k · 1m · 80% · empty resets";
+/** Accepted compaction limit input, shown beside the field: a scaled base, a fixed trigger, or a percentage. */
+const COMPACTION_INPUT_HINT = "400k base · f400k fixed · 80% · empty resets";
 
 type CompactionStrip = Extract<StripState, { purpose: "compaction" }>;
 
@@ -326,16 +335,26 @@ function compactionConfirmPending(strip: CompactionStrip): boolean {
 }
 
 /**
- * The note beside the compaction field: the last error, a pending warning, or
- * the input hint. Host messages embed model ids and config text, so both are
+ * The note beside the compaction field: the last error, a pending warning, the
+ * host's live preview of the typed limit, or (empty or unparsed input) the
+ * input syntax. Host text embeds model ids and config text, so it is
  * sanitized for every render path (terminal footer, Tern picker and strip).
  */
-function compactionNotice(strip: CompactionStrip): { text: string; style: "error" | "warning" | "dim" } {
+function compactionNotice(
+	strip: CompactionStrip,
+	preview: ((model: Model, input: string) => string | undefined) | undefined,
+): { text: string; style: "error" | "warning" | "dim" } {
 	if (strip.error) return { text: sanitizeDisplayWarning(strip.error), style: "error" };
 	// The footer hint and the primary action already say Enter accepts; the
 	// notice stays short so it fits beside the field.
 	if (strip.confirm && compactionConfirmPending(strip)) {
 		return { text: sanitizeDisplayWarning(strip.confirm.message), style: "warning" };
+	}
+	const value = strip.input.getValue();
+	if (preview && value.trim().length > 0) {
+		// Renders repeat per frame; ask the host once per typed value.
+		if (strip.preview?.value !== value) strip.preview = { value, text: preview(strip.model, value) };
+		if (strip.preview.text) return { text: sanitizeDisplayWarning(strip.preview.text), style: "dim" };
 	}
 	return { text: COMPACTION_INPUT_HINT, style: "dim" };
 }
@@ -2853,7 +2872,7 @@ export class ModelHubComponent implements Component {
 		if (strip.kind === "name") {
 			const labelText =
 				strip.purpose === "compaction"
-					? `Compact ${strip.model.id} at:`
+					? `${strip.model.id} limit:`
 					: strip.purpose === "preset"
 						? "Preset name:"
 						: "New role name:";
@@ -2865,7 +2884,7 @@ export class ModelHubComponent implements Component {
 			const inputLine = strip.input.render(inputWidth)[0] ?? "";
 			let hint: string;
 			if (strip.purpose === "compaction") {
-				const notice = compactionNotice(strip);
+				const notice = compactionNotice(strip, this.#callbacks.previewCompactionPoint);
 				hint = theme.fg(notice.style, notice.text);
 			} else {
 				hint = theme.fg("dim", "(letters, digits, - and _)");
@@ -3633,12 +3652,11 @@ export class ModelHubComponent implements Component {
 	#pickerStrip(strip: StripState): NonNullable<TspPickerProps["strip"]> {
 		if (strip.kind === "name") {
 			if (strip.purpose === "compaction") {
-				const notice = compactionNotice(strip);
+				const notice = compactionNotice(strip, this.#callbacks.previewCompactionPoint);
 				return {
 					label: [
-						span("Compact ", "muted"),
 						span(strip.model.id, "mono"),
-						span(" at ", "muted"),
+						span(" limit ", "muted"),
 						span(strip.input.getValue(), "mono"),
 						span("▏", "accent"),
 						span(`  ${notice.text}`, notice.style),
@@ -4020,12 +4038,12 @@ export class ModelHubComponent implements Component {
 		if (!strip) return undefined;
 		if (strip.kind === "name") {
 			if (strip.purpose === "compaction") {
-				const notice = compactionNotice(strip);
+				const notice = compactionNotice(strip, this.#callbacks.previewCompactionPoint);
 				return node(
 					"row",
 					{ gap: "sm", align: "center" },
 					[
-						text([span(`Compact ${strip.model.id} at:`, "accent")]),
+						text([span(`${strip.model.id} limit:`, "accent")]),
 						col([strip.input], { grow: 1 }),
 						text([span(notice.text, notice.style)], { wrap: "word" }),
 					],
