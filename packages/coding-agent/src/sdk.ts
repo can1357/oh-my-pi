@@ -84,7 +84,7 @@ import { loadPromptTemplates as loadPromptTemplatesInternal, type PromptTemplate
 import { buildServiceTierByFamily } from "./config/service-tier";
 import { bindEffects, combine } from "./config/registry";
 import { Settings } from "./config/settings";
-import { cfgMessagingList, cfgMessagingSend } from "./messaging/settings";
+import { resolveMessagingPolicy } from "./messaging/policy";
 import { CursorExecHandlers, type CursorMcpResourceAdapter } from "./cursor";
 import { createBridgeEditTool, createBridgeGrepFactory } from "./cursor-bridge-tools";
 import "./discovery";
@@ -3921,11 +3921,12 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					? { mode: "compact", toolNames: [...toolNames, ...mountedPromptToolNames] }
 					: { mode: "full" },
 			);
+			const messagingPolicy = resolveMessagingPolicy(settings);
 			const defaultPrompt = await buildSystemPromptInternal({
 				cwd: promptCwd,
 				messagingEnabled: session?.messaging !== undefined,
-				messagingSendAllowed: cfgMessagingSend.get(settings) !== "deny",
-				messagingListAllowed: cfgMessagingList.get(settings) !== "deny",
+				messagingSendAllowed: messagingPolicy.send !== "deny",
+				messagingListAllowed: messagingPolicy.list !== "deny",
 				additionalWorkspaceRoots: sessionManager.getAdditionalDirectories(),
 				xdevTools: toolSession.xdev ? xdevEntries(toolSession.xdev) : [],
 				xdevDocs: xdevPromptDocs ? renderXdevPromptDocs(xdevPromptDocs, routedCatalogNames) : "",
@@ -4734,6 +4735,23 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				session.emitNotice("error", `Failed to rebuild the system prompt after a settings change: ${error}`);
 			}
 		});
+		let messagingPromptPolicy = resolveMessagingPolicy(settings);
+		session.addDisposer(
+			settings.onLayersChange(() => {
+				const previous = messagingPromptPolicy;
+				messagingPromptPolicy = resolveMessagingPolicy(settings);
+				if (
+					session.isDisposed ||
+					(messagingPromptPolicy.enabled === previous.enabled &&
+						messagingPromptPolicy.send === previous.send &&
+						messagingPromptPolicy.list === previous.list)
+				)
+					return;
+				void session.refreshBaseSystemPrompt().catch(error => {
+					session.emitNotice("error", `Failed to rebuild the system prompt after a settings change: ${error}`);
+				});
+			}),
+		);
 		// Agent-level tool-call switches: the loop snapshots them per prompt run, so a
 		// change applies from the next run without splitting one response's schema/strip.
 		// The prompt listener above republishes the intent-field guidance.

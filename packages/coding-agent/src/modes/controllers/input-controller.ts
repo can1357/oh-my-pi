@@ -87,7 +87,7 @@ import {
 } from "../settings";
 import { cfgHideThinkingBlock } from "../../session/settings";
 import type { MessagingService } from "../../messaging/service";
-import { cfgMessagingList } from "../../messaging/settings";
+import { resolveMessagingPolicy } from "../../messaging/policy";
 
 /** Bare words that quit (as `/<word>`) when typed alone into a session with no messages. */
 const BARE_EXIT_WORDS: Record<string, true> = { exit: true, quit: true, q: true };
@@ -2603,7 +2603,7 @@ export class InputController {
 			sessionMentions: async signal => {
 				const session = this.ctx.viewSession;
 				const messaging = session.messaging;
-				if (!messaging || cfgMessagingList.get(session.settings) === "deny") return [];
+				if (!messaging || resolveMessagingPolicy(session.settings).list === "deny") return [];
 				const cached = sessionCandidates.get(messaging);
 				if (cached && Date.now() - cached.at < 5_000) return cached.candidates;
 				try {

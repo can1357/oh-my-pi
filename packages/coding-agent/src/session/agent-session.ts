@@ -1031,6 +1031,7 @@ export class AgentSession implements SettingsScope {
 	 *  incremented, so `isStreaming` alone cannot tell a host that a submission is admitted. */
 	#admittedSubmissionCount = 0;
 	#admittedSubmissionsSettled: PromiseWithResolvers<void> | undefined;
+	#ircResumeAfterAdmissionScheduled = false;
 	// Wire-level agent_end emission deferred until #promptInFlightCount drops to 0.
 	// Internal extension hooks and post-emit work (auto-retry, auto-compaction, todo
 	// checks in #handleAgentEvent) still fire on the original schedule — only the
@@ -1202,6 +1203,19 @@ export class AgentSession implements SettingsScope {
 		if (this.#modeExitDrainSuppressionDepth > 0 || this.#isDisposed || this.isStreaming || !this.#irc.hasPending()) {
 			return;
 		}
+		if (this.hasAdmittedSubmission) {
+			if (!this.#ircResumeAfterAdmissionScheduled) {
+				this.#ircResumeAfterAdmissionScheduled = true;
+				void this.waitForAdmittedSubmissions().then(() => {
+					// Let prompt()'s callers settle attribution before a peer starts a fresh turn.
+					setImmediate(() => {
+						this.#ircResumeAfterAdmissionScheduled = false;
+						this.#resumeStrandedIrcAsides();
+					});
+				});
+			}
+			return;
+		}
 		// A pooled yield contract means a pool turn owns this worker (installed,
 		// dispatching, or dispatch-imminent). Waking here would either emit keyed
 		// yields against its items or re-queue into the deferral path forever, so
@@ -1330,7 +1344,7 @@ export class AgentSession implements SettingsScope {
 					logger.debug("IRC wake turn parked while pooled");
 					return;
 				}
-				if (this.agent.state.isStreaming) {
+				if (this.isStreaming) {
 					this.#irc.queueAside(records);
 					accept();
 					logger.debug("IRC wake turn deferred behind the running turn");
