@@ -4,7 +4,7 @@
 
 ### Added
 
-- `maxFramesForDataBudget()` accepts an optional frame-payload byte budget (default `FRAME_DATA_BYTES_BUDGET`)
+- `maxFramesForDataBudget()` accepts an optional frame-payload byte budget (default `FRAME_DATA_BYTES_BUDGET`) ([#15091](https://github.com/can1357/oh-my-pi/pull/15091) by [@Ikaleio](https://github.com/Ikaleio))
 
 ## [18.6.3] - 2026-10-06
 

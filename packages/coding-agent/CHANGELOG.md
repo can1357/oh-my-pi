@@ -4,7 +4,7 @@
 
 ### Added
 
-- Added `snapcompact.frameBytesBudget` and `snapcompact.maxFrames` to set how many bytes and frames of snapcompact archive images one request may carry; a frame cap above the provider's image limit raises that limit so the frames are sent
+- Added `snapcompact.frameBytesBudget` and `snapcompact.maxFrames` to set how many bytes and frames of snapcompact archive images one request may carry; a frame cap above the provider's image limit raises that limit so the frames are sent ([#15091](https://github.com/can1357/oh-my-pi/pull/15091) by [@Ikaleio](https://github.com/Ikaleio))
 - Added `/jobs kill <id>|all` to cancel a running background job (or every one this session owns) from the command line, even while the agent is busy ([#14160](https://github.com/can1357/oh-my-pi/pull/14160) by [@KanwarGill](https://github.com/KanwarGill))
 
 ### Changed
