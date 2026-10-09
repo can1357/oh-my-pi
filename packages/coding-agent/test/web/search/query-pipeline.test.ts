@@ -79,6 +79,25 @@ describe("web search directive pipeline", () => {
 		);
 	});
 
+	it.each<[string, string, SearchProviderId]>([
+		["routes an X-only query to xAI ahead of the role's engine", "tern site:x.com", "xai"],
+		["keeps the role's engine for queries that are not X-only", "tern site:x.com site:github.com", "brave"],
+	])("%s", async (_caseName, query, expectedProvider) => {
+		const context = await stubRoleProvider("brave", async () => ({ provider: "brave", sources: SOURCES }));
+		context.authStorage.keys.setRuntime("xai", "test-xai-key");
+		vi.spyOn(provider, "getGroundedSearchProvider").mockImplementation(async grounding => ({
+			id: "xai",
+			label: grounding,
+			isAvailable: () => true,
+			isExplicitlyAvailable: () => true,
+			search: async () => ({ provider: "xai", sources: [{ title: "Post", url: "https://x.com/jack/status/20" }] }),
+		}));
+
+		const result = await runSearchQuery({ query }, context);
+
+		expect(result.details.response.provider).toBe(expectedProvider);
+	});
+
 	it("uses a request model override instead of modelRoles.web", async () => {
 		const context = await stubRoleProvider("jina", async params => ({
 			provider: "jina",

@@ -202,6 +202,19 @@ function setByPath(obj: RawSettings, segments: readonly string[], value: unknown
 }
 
 /**
+ * Assign `obj[key]` as an own property. Plain assignment of a parsed
+ * `__proto__` key (an agent name, say) would replace the prototype instead,
+ * silently dropping that entry.
+ */
+function setOwn(obj: RawSettings, key: string, value: unknown): void {
+	if (key === "__proto__") {
+		Object.defineProperty(obj, key, { value, enumerable: true, writable: true, configurable: true });
+	} else {
+		obj[key] = value;
+	}
+}
+
+/**
  * Removes the value at `segments`, pruning the parent objects the removal leaves empty. Every record on the
  * path below `obj` is replaced by a copy rather than edited: a merged view or a cached read may share it.
  */
@@ -1093,9 +1106,10 @@ export class Settings {
 	 * Apply on-disk edits live: watch the directories holding config.yml, the
 	 * project settings files, and `--config` overlays, and run a debounced
 	 * keep-last-good reload (a file that fails to parse or validate keeps its
-	 * layer's last good values). Only the persisting process-global instance watches; other
-	 * instances ignore the call. Stopped by {@link stopWatching} /
-	 * {@link cancelPendingSaves}.
+	 * layer's last good values). Arming a watch also schedules one reload, so
+	 * edits that landed before it went live are not lost. Only the persisting
+	 * process-global instance watches; other instances ignore the call. Stopped
+	 * by {@link stopWatching} / {@link cancelPendingSaves}.
 	 */
 	startWatching(): void {
 		if (this.#watchingFiles || !this.#persist || this.#savesCancelled || globalInstance !== this) return;
@@ -1173,6 +1187,7 @@ export class Settings {
 	#syncFileWatchers(): void {
 		if (!this.#watchingFiles) return;
 		const targets = this.#configWatchTargets();
+		let armed = false;
 		for (const [dir, entry] of this.#fileWatchers) {
 			if (targets.has(dir)) continue;
 			entry.watcher.close();
@@ -1203,7 +1218,13 @@ export class Settings {
 				if (this.#fileWatchers.get(dir)?.watcher === watcher) this.#fileWatchers.delete(dir);
 			});
 			this.#fileWatchers.set(dir, { watcher, names });
+			armed = true;
 		}
+		// The sources were last read before this watch existed, and Bun arms macOS
+		// FSEvents asynchronously, so a write in between raises no event (a write
+		// right after a symlink retarget, or any edit during startup). Re-read once
+		// the watch is live; that reload's own sync arms nothing new, so it settles.
+		if (armed) this.#scheduleWatchReload();
 	}
 
 	#scheduleWatchReload(): void {
@@ -3898,7 +3919,7 @@ export class Settings {
 		const result: RawSettings = {};
 		for (const key of Object.keys(overrides)) {
 			const override = overrides[key];
-			const baseVal = base[key];
+			const baseVal = Object.hasOwn(base, key) ? base[key] : undefined;
 
 			if (override === undefined) continue;
 
@@ -3910,12 +3931,12 @@ export class Settings {
 				baseVal !== null &&
 				!Array.isArray(baseVal)
 			) {
-				result[key] = this.#deepMerge(baseVal as RawSettings, override as RawSettings);
+				setOwn(result, key, this.#deepMerge(baseVal as RawSettings, override as RawSettings));
 			} else {
-				result[key] = override;
+				setOwn(result, key, override);
 			}
 		}
-		for (const key of Object.keys(base)) if (!Object.hasOwn(result, key)) result[key] = base[key];
+		for (const key of Object.keys(base)) if (!Object.hasOwn(result, key)) setOwn(result, key, base[key]);
 		return result;
 	}
 }

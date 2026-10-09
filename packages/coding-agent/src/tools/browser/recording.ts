@@ -491,7 +491,7 @@ export class RecordingController {
 		this.#starting = true;
 		let spool: TempDir | undefined;
 		try {
-			spool = await TempDir.create("omp-browser-recording-");
+			spool = await TempDir.create("@omp-browser-recording-");
 			if (validated.cursor) await source.installCursor(signal);
 			const viewport = await source.viewport(signal);
 			const active: ActiveRecording = {

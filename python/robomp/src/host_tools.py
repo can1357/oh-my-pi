@@ -2244,18 +2244,16 @@ def _build_submit_pr_review(bindings: ToolBindings) -> HostTool[Any, Any]:
                     error=f"anchor validation skipped: {exc.status} {exc.message}",
                 )
             else:
+                # Dropped anchors ride on the terminal audit row: an early
+                # error-free row would satisfy `has_successful_tool_call` and
+                # mark the PR reviewed even if the POST below fails.
                 filtered, dropped = _filter_anchorable_comments(staged, pr_files)
                 if dropped:
-                    _audit(
-                        bindings,
-                        "submit_pr_review",
-                        args,
-                        result={"dropped": [f"{c.path}:{c.line}" for c in dropped]},
-                    )
                     body += "\n\n## Not anchored to diff"
                     for c in dropped:
                         body += f"\n- **`{c.path}:{c.line}`** — {c.body}"
                     comments = [_review_comment_to_payload(c) for c in filtered]
+        dropped_anchors = [f"{c.path}:{c.line}" for c in dropped]
         try:
             review = _run_coro(
                 bindings.loop,
@@ -2270,7 +2268,57 @@ def _build_submit_pr_review(bindings: ToolBindings) -> HostTool[Any, Any]:
             )
         except GitHubError as exc:
             _audit(bindings, "submit_pr_review", args, error=str(exc))
-            _raise_command(f"GitHub rejected PR review: {exc.status} {exc.message}")
+            # 422 = validation rejection (e.g. Forgejo can't anchor inline
+            # comments). 500 = Forgejo internal error on the reviews endpoint
+            # (observed on certain PRs — the server crashes instead of returning
+            # a proper 422). Both mean the batched review can't land as-is.
+            # Degrade to visible issue comments (mirrors mira) so findings still
+            # surface and the model doesn't retry and degrade its own output.
+            # Without this fallback, a 500 propagates to the model as a raw
+            # error, triggering a retry-and-simplify loop where the model
+            # strips newlines from its review body on subsequent attempts.
+            if exc.status not in (422, 500):
+                _raise_command(f"GitHub rejected PR review: {exc.status} {exc.message}")
+
+            def _note(comment: Any) -> str:
+                return f"**`{comment.path}:{comment.line}`**\n\n{comment.body}"
+
+            posted_inline = 0
+            try:
+                _run_coro(
+                    bindings.loop,
+                    bindings.github.post_comment(bindings.repo.full_name, bindings.default_comment_number, body),
+                )
+                for comment in staged:
+                    _run_coro(
+                        bindings.loop,
+                        bindings.github.post_comment(
+                            bindings.repo.full_name, bindings.default_comment_number, _note(comment)
+                        ),
+                    )
+                    posted_inline += 1
+            except GitHubError as fexc:
+                _audit(bindings, "submit_pr_review", args, error=str(fexc))
+                _raise_command(
+                    f"Review rejected ({exc.status}) and fallback comment posting failed: {fexc.status} {fexc.message}"
+                )
+
+            cleared = bindings.db.clear_staged_review_comments(bindings.issue_key)
+            _audit(
+                bindings,
+                "submit_pr_review",
+                args,
+                result={
+                    "fallback": "issue_comments",
+                    "summary": True,
+                    "inline": posted_inline,
+                    "dropped": dropped_anchors,
+                    "cleared": cleared,
+                },
+            )
+            return (
+                f"review rejected ({exc.status}); posted summary + {posted_inline} inline comment(s) as issue comments"
+            )
         cleared = bindings.db.clear_staged_review_comments(bindings.issue_key)
         _audit(
             bindings,
@@ -2279,7 +2327,7 @@ def _build_submit_pr_review(bindings: ToolBindings) -> HostTool[Any, Any]:
             result={
                 "review_id": review.id,
                 "comments": len(comments),
-                "dropped": len(dropped),
+                "dropped": dropped_anchors,
                 "cleared": cleared,
                 "event": "COMMENT",
             },

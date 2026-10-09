@@ -135,6 +135,11 @@ export class Box implements Component {
 		}
 	}
 
+	releaseRenderCaches(): void {
+		this.#invalidateCache();
+		for (const child of this.children) child.releaseRenderCaches?.();
+	}
+
 	/**
 	 * A `card` when the box has a border or background: the background token
 	 * picks tone/role (user message, tool state, selection), a border colour

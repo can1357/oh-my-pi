@@ -1528,7 +1528,9 @@ export class WorkerCore {
 			this.#targetId = await targetIdForPage(this.#page);
 			this.#initScripts = new InitScriptManager(this.#page);
 			for (const source of payload.initScripts ?? []) await this.#initScripts.add(source);
-			this.#downloads = new DownloadManager(this.#browser, this.#page, this.#targetId);
+			this.#downloads = new DownloadManager(this.#browser, this.#page, this.#targetId, {
+				perTab: payload.mode === "headless" || payload.userDriven !== true,
+			});
 			if (payload.downloadsPath) await this.#downloads.enable(payload.downloadsPath);
 			const baseUserAgent = await this.#page.evaluate(() => navigator.userAgent);
 			this.#emulation = new BrowserEmulationController(

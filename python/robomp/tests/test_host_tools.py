@@ -1340,7 +1340,10 @@ def test_submit_pr_review_posts_summary_only_when_no_staged_comments(db: Databas
     assert captured["body"]["comments"] == []
 
 
-def test_submit_pr_review_failure_keeps_staged_comments(db: Database, tmp_path: Path) -> None:
+def test_submit_pr_review_failure_keeps_staged_comments_and_review_unrecorded(db: Database, tmp_path: Path) -> None:
+    """A rejected review must not satisfy the review-once ledger, even when an
+    unanchorable comment was dropped before the POST (#14859)."""
+
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/repos/octo/widget/pulls/99/files":
             return _pr_files_response(request)
@@ -1351,14 +1354,15 @@ def test_submit_pr_review_failure_keeps_staged_comments(db: Database, tmp_path: 
         stage_tool = next(x for x in build(bindings) if x.name == "pr_review_comment")
         submit_tool = next(x for x in build(bindings) if x.name == "submit_pr_review")
         stage_tool.execute({"path": "src/app.py", "line": 12, "body": "finding"}, _ctx())
+        stage_tool.execute({"path": "src/app.py", "line": 15, "body": "gap finding"}, _ctx())
         with pytest.raises(RpcCommandError):
             submit_tool.execute({"body": "summary"}, _ctx())
     finally:
         _stop_loop(loop, t)
 
     rows = db.list_staged_review_comments(bindings.issue_key)
-    assert len(rows) == 1
-    assert rows[0].path == "src/app.py"
+    assert [(r.path, r.line) for r in rows] == [("src/app.py", 12), ("src/app.py", 15)]
+    assert not db.has_successful_tool_call(bindings.issue_key, "submit_pr_review")
 
 
 def test_submit_pr_review_drops_unanchorable_comment_and_folds_into_summary(db: Database, tmp_path: Path) -> None:

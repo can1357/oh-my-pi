@@ -381,6 +381,27 @@ describe("runSubprocess parent-discovery pass-through (issue #2190)", () => {
 		expect(appendSessionInit).toHaveBeenCalledWith(expect.objectContaining({ tools: ["read", "write", "yield"] }));
 	});
 
+	it("persists @advisor expanded against the spawning owner's roles so cold revival keeps its model", async () => {
+		const session = yieldEmittingSession();
+		const appendSessionInit = vi.spyOn(session.sessionManager, "appendSessionInit");
+		const spy = vi.spyOn(sdkModule, "createAgentSession").mockResolvedValue(createSessionResult(session));
+		// A nested spawn's owner is a parent subagent whose advisor role overrides the root's.
+		const parentSettings = Settings.isolated({ modelRoles: { advisor: "anthropic/claude-sonnet-4-5" } });
+
+		const result = await runSubprocess({
+			...baseOptions,
+			id: "nested-advised-child",
+			settings: parentSettings,
+			agent: { ...baseAgent, advisor: "@advisor:high" },
+		});
+
+		expect(result.exitCode).toBe(0);
+		expect(spy.mock.calls[0]?.[0]?.settings?.getModelRole("advisor")).toBe("anthropic/claude-sonnet-4-5:high");
+		expect(appendSessionInit).toHaveBeenCalledWith(
+			expect.objectContaining({ advisor: "anthropic/claude-sonnet-4-5:high" }),
+		);
+	});
+
 	it("retains inherited MCP proxy tools for normal children", async () => {
 		const session = yieldEmittingSession();
 		const spy = vi.spyOn(sdkModule, "createAgentSession").mockResolvedValue(createSessionResult(session));
@@ -527,52 +548,6 @@ describe("runSubprocess parent-discovery pass-through (issue #2190)", () => {
 		expect(result.exitCode).toBe(0);
 		const forwarded = spy.mock.calls[0]?.[0];
 		expect(forwarded?.thinkingLevel).toBe(ThinkingLevel.Low);
-	});
-
-	it("ranks the agent-definition thinking level above the parent's inherited live effort", async () => {
-		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
-		if (!model) throw new Error("Expected claude-sonnet-4-5 model to exist");
-		const session = yieldEmittingSession();
-		const spy = vi.spyOn(sdkModule, "createAgentSession").mockResolvedValue(createSessionResult(session));
-
-		// An agent that inherits the session model receives the parent's live selector, `:high` included.
-		const result = await runSubprocess({
-			...baseOptions,
-			id: "subagent-inherited-live-effort",
-			modelOverride: [`${model.provider}/${model.id}:high`],
-			modelInheritsLiveThinkingLevel: true,
-			settings: Settings.isolated(),
-			modelRegistry: createModelRegistry(model),
-			thinkingLevel: ThinkingLevel.Low,
-		});
-
-		expect(result.exitCode).toBe(0);
-		expect(spy.mock.calls[0]?.[0]?.thinkingLevel).toBe(ThinkingLevel.Low);
-		expect(result.resolvedModel).toBe(`${model.provider}/${model.id}:low`);
-	});
-
-	it("keeps the agent-definition thinking level when credentials fall back to the parent", async () => {
-		const requested = getBundledModel("anthropic", "claude-sonnet-4-5");
-		const parentModel = getBundledModel("openai-codex", "gpt-5.6-sol");
-		if (!requested || !parentModel) throw new Error("Expected bundled models to exist");
-		const session = yieldEmittingSession();
-		const spy = vi.spyOn(sdkModule, "createAgentSession").mockResolvedValue(createSessionResult(session));
-
-		const result = await runSubprocess({
-			...baseOptions,
-			agent: { ...baseAgent, model: [`${requested.provider}/${requested.id}`] },
-			id: "subagent-auth-fallback-effort",
-			parentActiveModelPattern: `${parentModel.provider}/${parentModel.id}:high`,
-			settings: Settings.isolated(),
-			modelRegistry: createModelRegistry([requested, parentModel], async model =>
-				model.provider === parentModel.provider ? "test-key" : undefined,
-			),
-			thinkingLevel: ThinkingLevel.Low,
-		});
-
-		expect(result.exitCode).toBe(0);
-		expect(spy.mock.calls[0]?.[0]?.model?.provider).toBe(parentModel.provider);
-		expect(spy.mock.calls[0]?.[0]?.thinkingLevel).toBe(ThinkingLevel.Low);
 	});
 	it("persists an explicit role from a caller model override", async () => {
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5");

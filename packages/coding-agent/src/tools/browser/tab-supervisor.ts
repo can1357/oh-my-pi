@@ -1536,6 +1536,7 @@ async function buildInitPayload(browser: PuppeteerBrowserHandle, opts: AcquireTa
 		userAgent: opts.userAgent,
 		ignoreHttpsErrors: opts.ignoreHttpsErrors,
 		activateForScreenshot,
+		userDriven,
 	};
 }
 
@@ -1630,6 +1631,7 @@ async function recycleTimedOutWorkerTab(tab: WorkerTabSession, timeoutMs: number
 		recover: true,
 		emulateFocus: tab.kindTag === "headless",
 		activateForScreenshot: tab.activateForScreenshot,
+		userDriven: tab.kindTag === "connected" || tab.kindTag === "relay",
 	};
 	let worker = await spawnTabWorker();
 	try {

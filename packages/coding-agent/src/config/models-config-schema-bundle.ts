@@ -389,6 +389,7 @@ export const getModelsConfigSchemaBundle = once(() => {
 	});
 
 	return {
+		ApiCompatSchema,
 		OpenAICompatSchema,
 		ModelOverrideSchema,
 		ProviderDiscoverySchema,

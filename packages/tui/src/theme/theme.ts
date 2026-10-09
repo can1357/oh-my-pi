@@ -34,6 +34,7 @@ export {
 	createHighlightStream,
 	getEditorTheme,
 	getMarkdownTheme,
+	getMarkdownThemeWithLinkTargets,
 	getSelectListTheme,
 	getSettingsListTheme,
 	getSymbolTheme,

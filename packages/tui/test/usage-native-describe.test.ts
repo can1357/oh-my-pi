@@ -78,14 +78,14 @@ describe("UsageDashboardComponent.describe", () => {
 		];
 		const meters = findAll(dashboard(reports).describe(cx), n => n.k === "meter").map(n => n.p);
 		expect(meters).toEqual([
-			expect.objectContaining({ value: 1, style: "bar", tone: "error" }),
 			expect.objectContaining({ value: 0.9, style: "bar", tone: "warning" }),
+			expect.objectContaining({ value: 1, style: "bar", tone: "error" }),
 		]);
 		const fallback = dashboard(reports).describe(plainCx);
 		expect(findAll(fallback, n => n.k === "meter" || n.k === "chart")).toEqual([]);
 		expect(findAll(fallback, n => n.k === "progress").map(n => n.p)).toEqual([
-			expect.objectContaining({ value: 1, tone: "error" }),
 			expect.objectContaining({ value: 0.9, tone: "warning" }),
+			expect.objectContaining({ value: 1, tone: "error" }),
 		]);
 	});
 

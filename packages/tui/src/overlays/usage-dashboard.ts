@@ -84,7 +84,7 @@ export interface ProviderCard {
 	/** Number of represented accounts, including unavailable usage lookups. */
 	accounts: number;
 	unavailableAccounts: string[];
-	/** Window rows sorted most-pressing first. */
+	/** Window rows in provider-declared order (e.g. 5h → weekly → monthly); the fullest CARD_MAX_WINDOWS lead. */
 	windows: CardWindowRow[];
 	/** True when every account reports no limits (e.g. enterprise plans). */
 	unlimited: boolean;
@@ -146,8 +146,10 @@ function compactWindowTag(window: NonNullable<UsageLimit["window"]>): string {
  * Collapse usage reports into one compact card per provider: limits grouped by
  * quota bucket (label + window), each bucket showing the mean used fraction
  * across accounts (matching the classic report's aggregate "% free") with the
- * most-used account's reset countdown. Cards sort most-pressing first so
- * what's burning is on top-left; fully idle providers collapse into a tick.
+ * most-used account's reset countdown. Rows keep the provider's declared window
+ * order so 5h → week → month reads the same every time; cards sort by their
+ * fullest window so what's burning is on top-left; fully idle providers
+ * collapse into a tick.
  */
 export function buildProviderCards(
 	reports: UsageReport[],
@@ -181,7 +183,7 @@ export function buildProviderCards(
 			}
 		}
 
-		const windows: CardWindowRow[] = [...buckets.values()].map(bucket => {
+		const declared: CardWindowRow[] = [...buckets.values()].map(bucket => {
 			const fractions = bucket.limits
 				.map(limit => resolveUsedFraction(limit))
 				.filter((value): value is number => value !== undefined);
@@ -200,7 +202,13 @@ export function buildProviderCards(
 				usedText: fraction === undefined ? formatAbsoluteOnlyAmount(bucket.limits) : undefined,
 			};
 		});
-		windows.sort((a, b) => (b.fraction ?? -1) - (a.fraction ?? -1));
+		// Cards render at most CARD_MAX_WINDOWS rows; when a provider declares
+		// more, keep the fullest ones visible (still in declared order) so an
+		// exhausted bucket never hides behind "+N more".
+		const visible = new Set(
+			[...declared].sort((a, b) => (b.fraction ?? -1) - (a.fraction ?? -1)).slice(0, CARD_MAX_WINDOWS),
+		);
+		const windows = [...declared.filter(row => visible.has(row)), ...declared.filter(row => !visible.has(row))];
 		// The window tag earns its columns only when sibling rows would otherwise
 		// be indistinguishable (e.g. Antigravity's daily vs weekly "Usage (Google)").
 		for (const window of windows) {
@@ -264,9 +272,12 @@ export function buildProviderCards(
 		});
 	}
 
+	const worstFraction = new Map(
+		cards.map(card => [card, card.windows.reduce((max, window) => Math.max(max, window.fraction ?? -1), -1)]),
+	);
 	cards.sort((a, b) => {
-		const aWorst = a.windows[0]?.fraction ?? -1;
-		const bWorst = b.windows[0]?.fraction ?? -1;
+		const aWorst = worstFraction.get(a)!;
+		const bWorst = worstFraction.get(b)!;
 		if (aWorst !== bWorst) return bWorst - aWorst;
 		return a.name.localeCompare(b.name);
 	});
@@ -463,16 +474,14 @@ function detailWindowLabel(label: string, limit: UsageLimit): string | undefined
 	return sanitizeDisplayLine(windowLabel);
 }
 
+const WHOLE_DOLLARS = new Intl.NumberFormat("en-US", { maximumFractionDigits: 0 });
+const COMPACT_COUNT = new Intl.NumberFormat("en-US", { notation: "compact", maximumFractionDigits: 1 });
+
 /** `$1,234 · 5.6K requests` totals for the activity summary. */
 function formatActivityTotals(layout: HeatmapLayout): string {
 	const cost =
-		layout.totalCost >= 1
-			? `$${new Intl.NumberFormat("en-US", { maximumFractionDigits: 0 }).format(layout.totalCost)}`
-			: `$${layout.totalCost.toFixed(2)}`;
-	const requests = new Intl.NumberFormat("en-US", { notation: "compact", maximumFractionDigits: 1 }).format(
-		layout.totalRequests,
-	);
-	return `${cost} · ${requests} requests`;
+		layout.totalCost >= 1 ? `$${WHOLE_DOLLARS.format(layout.totalCost)}` : `$${layout.totalCost.toFixed(2)}`;
+	return `${cost} · ${COMPACT_COUNT.format(layout.totalRequests)} requests`;
 }
 
 // =============================================================================
@@ -547,6 +556,8 @@ export class UsageDashboardComponent implements Component {
 	#activityError: string | null = null;
 	#syncing = true;
 	#detailCache: { width: number; lines: string[] } | null = null;
+	/** ANSI overview rows; rebuilt when the revision or width changes. */
+	#overviewCache: { revision: number; width: number; lines: string[] } | null = null;
 	#lastViewportRows = 10;
 	#closed = false;
 	readonly #panel: OverlayPanel;
@@ -592,6 +603,7 @@ export class UsageDashboardComponent implements Component {
 
 	invalidate(): void {
 		this.#detailCache = null;
+		this.#overviewCache = null;
 		this.#panel.invalidate();
 	}
 
@@ -836,15 +848,8 @@ export class UsageDashboardComponent implements Component {
 		const ramp = this.#heatRamp();
 		const reset = "\x1b[39m";
 
-		const cost =
-			layout.totalCost >= 1
-				? `$${new Intl.NumberFormat("en-US", { maximumFractionDigits: 0 }).format(layout.totalCost)}`
-				: `$${layout.totalCost.toFixed(2)}`;
-		const requests = new Intl.NumberFormat("en-US", { notation: "compact", maximumFractionDigits: 1 }).format(
-			layout.totalRequests,
-		);
 		summary.push(
-			`${theme.bold(theme.fg("accent", "Activity"))} ${theme.fg("dim", `${cost} · ${requests} requests · last ${weeks} weeks`)}${this.#syncing ? theme.fg("dim", " · syncing…") : ""}`,
+			`${theme.bold(theme.fg("accent", "Activity"))} ${theme.fg("dim", `${formatActivityTotals(layout)} · last ${weeks} weeks`)}${this.#syncing ? theme.fg("dim", " · syncing…") : ""}`,
 		);
 		summary.push("");
 
@@ -876,10 +881,13 @@ export class UsageDashboardComponent implements Component {
 	// ---------------------------------------------------------------------------
 
 	#overviewLines(innerWidth: number): string[] {
+		const cached = this.#overviewCache;
+		if (cached?.revision === this.#revision && cached.width === innerWidth) return cached.lines;
 		const lines: string[] = [];
 		lines.push(...this.#renderCardsGrid(innerWidth));
 		lines.push("");
 		lines.push(...this.#renderHeatmap(innerWidth));
+		this.#overviewCache = { revision: this.#revision, width: innerWidth, lines };
 		return lines;
 	}
 

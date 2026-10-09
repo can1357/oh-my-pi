@@ -55,7 +55,7 @@
 5. Server routing uses `getServersForFile()` / `getServerForFile()` from `config.ts`: extension or basename match, then sort primary servers before linters. Helpers in `servers.ts` filter custom `createClient` adapters out of navigation/refactor paths with `getLspServersForFile()` / `getLspServerForFile()`.
 6. `getOrCreateClient()` caches by resolved spawn command, cwd, arguments, initialization options, settings, and language id. With `lsp.shared` (default `true` in SDK sessions), it first asks the broker-managed project mux for a shared transport; failure falls back to a private `ptree.spawn()`. An external `lspmux` wrapper takes precedence over broker sharing. Toggling `lsp.shared` mid-session applies to servers cold-started afterwards; already-running clients keep their transport. The client starts its message reader, sends `initialize`, stores capabilities, and sends `initialized`.
 7. The message reader in `client.ts` parses LSP frames, resolves pending requests, caches `publishDiagnostics`, tracks `$/progress` tokens for project-load completion, answers `workspace/configuration`, handles dynamic capability registration, and applies `workspace/applyEdit` through `applyWorkspaceEditWithLsp()`.
-8. Semantic single-file actions and concrete-file raw requests call `reconcileFileFromDisk()` before querying: unopened files are opened; externally changed files send `didChange` and discard stale diagnostics. An in-flight OMP write is not reconciled back to its older disk contents. Column resolution uses `resolveSymbolColumn()` from `utils.ts` on the target line and honors `#N` occurrence selectors.
+8. Semantic single-file actions and concrete-file raw requests call `reconcileFileFromDisk()` before querying: unopened files are opened; externally changed files send `didChange` and discard stale diagnostics. Opening, reconciling and refreshing documents, and resolving symbol columns, refuse non-regular files (FIFOs, devices, sockets) instead of reading them; a non-regular file among returned locations is listed without context lines, like a missing file. An in-flight OMP write is not reconciled back to its older disk contents. Column resolution uses `resolveSymbolColumn()` from `utils.ts` on the target line and honors `#N` occurrence selectors.
 9. Actions dispatch in `LspTool.execute()` through dedicated branches in `tool.ts`: workspace and multi-server branches (`status`, `diagnostics`, `rename_file`, workspace `symbols`, workspace `reload`, `capabilities`, `request`) run before the single-file switch; other actions share one client lookup.
 10. Requests go through `sendRequest()` in `client.ts`, which allocates an incrementing JSON-RPC id, installs abort and timeout handling, sends `$/cancelRequest` on abort, and rejects on timeout or process exit.
 11. Returned edits preview with `formatWorkspaceEdit()` or apply through `applyWorkspaceEditWithLsp()`, which updates affected live LSP documents. `rename_file` uses `applyEditsThenRename()` for reference edits and the filesystem move, then sends `workspace/didRenameFiles`.
@@ -252,7 +252,7 @@ Uses the same location normalization and output shape as `definition`, but sends
 
 ## Side Effects
 - Filesystem
-  - Reads config files, target files, and root markers.
+  - Reads config files, target files, and root markers. Non-regular files (FIFOs, devices, sockets) are never read: opening, reconciling, refreshing, symbol-column reads and text-edit application refuse them, and location context skips them.
   - `rename` and `code_actions` may edit/create/delete/rename files via `applyWorkspaceEdit()`.
   - `rename_file` always renames the source path on disk in apply mode.
   - Server-initiated `workspace/applyEdit` requests also mutate files through `applyWorkspaceEdit()`.
@@ -301,6 +301,7 @@ Uses the same location normalization and output shape as `definition`, but sends
 - `sendRequest()` rejects on timeout with `LSP request <method> timed out after <ms>ms`.
 - Client process exit rejects all pending requests with an exit-code/stderr error assembled in `getOrCreateClient()`.
 - Ordinary single-file action failures inside the main `try` become `LSP error: <message>`; `ToolError` is rethrown.
+- A non-regular target refused while opening, reconciling or refreshing a document, or resolving a symbol column, fails with `Cannot open '<path>': it is a <kind>, not a regular file or directory.` It surfaces like other read errors: single-file actions return `LSP error: Cannot open …` with `details.success: false`; `request` uses its own envelope, or throws when `line` is given (as other `resolveSymbolColumn()` errors do); `reload` reports `Failed to reload <server>: Cannot open …`; diagnostics records the server as failed; background watched-file refreshes log it and continue.
 - `request` has its own error envelope: `LSP error from <server> on <method>: <message>`.
 - Some server failures are intentionally softened:
   - diagnostics continue when one server fails

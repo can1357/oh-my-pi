@@ -41,15 +41,22 @@ import { sanitizeErrorLine } from "../chrome/error-block";
 import type { ScrollRangeAnchor } from "../components/scroll-view";
 import { formatContextUsage } from "../chrome/context-thresholds";
 import { node, span, text } from "../native/describe";
-import type { DescribeContext, NativeChild, NativeNode } from "../native/node";
-import { actionHint, hintsRow, overlayCard } from "../native/overlay";
+import type { DescribeContext, NativeChild, NativeNode, NativeUiEvent } from "../native/node";
+import { actionHint, escCloseButton, hintsRow, overlayCard } from "../native/overlay";
 
 /** Parsed message and model metadata relevant to a transcript viewer. */
 export type AgentTranscriptEntry = SessionMessageEntryLike | { type: "model_change"; model: string };
 
 /** Local filesystem and session parsing capabilities supplied by the host. */
 export interface AgentTranscriptSource {
-	fs: Pick<typeof fs, "openSync" | "closeSync" | "readSync" | "readFileSync" | "statSync">;
+	/**
+	 * Sync primitives drive the first paint and the incremental tail. When the
+	 * host also supplies `promises.readFile` (e.g. passes `node:fs` itself), full
+	 * reloads after rotation/rewrite read the file off the UI thread.
+	 */
+	fs: Pick<typeof fs, "openSync" | "closeSync" | "readSync" | "readFileSync" | "statSync"> & {
+		promises?: Pick<typeof fs.promises, "readFile">;
+	};
 	parseEntries(text: string): AgentTranscriptEntry[];
 }
 
@@ -86,6 +93,8 @@ export interface AgentTranscriptViewerDeps {
 
 /** How often to re-stat a file-backed transcript for growth (advisor/live tail). */
 const POLL_MS = 250;
+/** Every Nth idle poll re-verifies sentinels, catching same-size/mtime rewrites. */
+const IDLE_SENTINEL_CHECK_EVERY = 5;
 
 const SENTINEL_BYTES = 4096;
 
@@ -183,6 +192,10 @@ export class AgentTranscriptViewer implements Component {
 	#model: string | undefined;
 	#pollTimer: NodeJS.Timeout | undefined;
 	#disposed = false;
+	/** Async full reload in flight; polls are skipped until it lands. */
+	#localLoadInFlight = false;
+	/** Idle polls since the sentinels were last verified. */
+	#idlePolls = 0;
 	#initialEntryId: string | undefined;
 	/** Last described node and the visible inputs it was built from. */
 	#nativeCache: { signature: string; node: NativeNode } | undefined;
@@ -215,8 +228,10 @@ export class AgentTranscriptViewer implements Component {
 			this.#editor.setMaxHeight(4);
 			this.#editor.onSubmit = text => this.#submit(text);
 		}
-		this.#refresh();
-		this.#pollTimer = setInterval(() => this.#refresh(), POLL_MS);
+		// First paint loads synchronously so the initial entry can be revealed
+		// immediately; later full reloads from the poll may go async.
+		this.#refresh(false);
+		this.#pollTimer = setInterval(() => this.#refresh(true), POLL_MS);
 		this.#pollTimer.unref?.();
 	}
 
@@ -245,12 +260,13 @@ export class AgentTranscriptViewer implements Component {
 	// ========================================================================
 
 	/** Refresh the transcript from a local file or remote host. */
-	#refresh(): void {
+	#refresh(allowAsync: boolean): void {
 		if (this.#disposed) return;
 		if (this.#deps.remote) {
 			this.#fetchRemote();
 			return;
 		}
+		if (this.#localLoadInFlight) return;
 		const sessionFile = this.#deps.registry.get(this.#deps.agentId)?.sessionFile;
 		if (!sessionFile) {
 			this.#clearLocal("none");
@@ -264,14 +280,29 @@ export class AgentTranscriptViewer implements Component {
 			return;
 		}
 		const state = this.#localState;
-		if (state && this.#canAppendLocal(sessionFile, stat, state)) {
-			if (stat.size === state.size && stat.mtimeMs === state.mtimeMs) return;
-			if (stat.size > state.size) {
-				this.#appendLocal(sessionFile, stat, state);
+		if (state) {
+			// Idle fast path: an unchanged identity/size/mtime costs one stat;
+			// sentinels are re-read only every Nth idle poll so a rewrite that
+			// keeps size and mtime is still noticed.
+			if (
+				state.path === sessionFile &&
+				state.dev === stat.dev &&
+				state.ino === stat.ino &&
+				stat.size === state.size &&
+				stat.mtimeMs === state.mtimeMs
+			) {
+				if (++this.#idlePolls < IDLE_SENTINEL_CHECK_EVERY) return;
+				this.#idlePolls = 0;
+				if (this.#canAppendLocal(sessionFile, stat, state)) return;
+				this.#loadLocalFull(sessionFile, stat, allowAsync);
+				return;
+			}
+			if (stat.size > state.size && this.#canAppendLocal(sessionFile, stat, state)) {
+				this.#appendLocal(sessionFile, stat, state, allowAsync);
 				return;
 			}
 		}
-		this.#loadLocalFull(sessionFile, stat);
+		this.#loadLocalFull(sessionFile, stat, allowAsync);
 	}
 
 	#clearLocal(reason: string): void {
@@ -305,7 +336,23 @@ export class AgentTranscriptViewer implements Component {
 		return true;
 	}
 
-	#loadLocalFull(sessionFile: string, stat: fs.Stats): void {
+	#loadLocalFull(sessionFile: string, stat: fs.Stats, allowAsync: boolean): void {
+		const promises = allowAsync ? this.#deps.transcript.fs.promises : undefined;
+		if (promises) {
+			this.#localLoadInFlight = true;
+			void promises
+				.readFile(sessionFile)
+				.then(data => {
+					this.#localLoadInFlight = false;
+					if (!this.#disposed) this.#applyLocalFull(sessionFile, stat, data);
+				})
+				.catch((err: unknown) => {
+					// Leave #localState unchanged so a transient read error retries next poll.
+					this.#localLoadInFlight = false;
+					logger.debug("transcript viewer: read failed", { err: String(err) });
+				});
+			return;
+		}
 		let data: Buffer;
 		try {
 			data = this.#deps.transcript.fs.readFileSync(sessionFile);
@@ -314,6 +361,10 @@ export class AgentTranscriptViewer implements Component {
 			logger.debug("transcript viewer: read failed", { err: String(err) });
 			return;
 		}
+		this.#applyLocalFull(sessionFile, stat, data);
+	}
+
+	#applyLocalFull(sessionFile: string, stat: fs.Stats, data: Buffer): void {
 		// The file may have grown between the earlier `statSync` and this read.
 		// Anchor the tail cursor to what we actually consumed so the next poll's
 		// `#appendLocal` never re-renders bytes already in the rebuilt transcript;
@@ -347,7 +398,7 @@ export class AgentTranscriptViewer implements Component {
 		this.#rebuild(this.#extractMessages(this.#deps.transcript.parseEntries(complete)));
 	}
 
-	#appendLocal(sessionFile: string, stat: fs.Stats, state: LocalTranscriptState): void {
+	#appendLocal(sessionFile: string, stat: fs.Stats, state: LocalTranscriptState, allowAsync: boolean): void {
 		let chunk: string;
 		try {
 			chunk = readFileRangeSync(
@@ -358,7 +409,7 @@ export class AgentTranscriptViewer implements Component {
 			).toString("utf-8");
 		} catch (err) {
 			logger.debug("transcript viewer: tail read failed", { err: String(err) });
-			this.#loadLocalFull(sessionFile, stat);
+			this.#loadLocalFull(sessionFile, stat, allowAsync);
 			return;
 		}
 		const combined = state.pending + chunk;
@@ -373,7 +424,7 @@ export class AgentTranscriptViewer implements Component {
 			// File unlinked/rotated mid-poll: fall back to a guarded full reload
 			// instead of letting the open escape the poll timer.
 			logger.debug("transcript viewer: sentinel recompute failed", { err: String(err) });
-			this.#loadLocalFull(sessionFile, stat);
+			this.#loadLocalFull(sessionFile, stat, allowAsync);
 			return;
 		}
 		this.#localState = {
@@ -508,12 +559,7 @@ export class AgentTranscriptViewer implements Component {
 		}
 
 		if (matchesKey(data, "escape")) {
-			if (this.#editor && this.#editor.getText().trim() !== "") {
-				this.#editor.setText("");
-				this.#deps.requestRender();
-				return;
-			}
-			this.#deps.onClose();
+			this.#escape();
 			return;
 		}
 
@@ -596,6 +642,21 @@ export class AgentTranscriptViewer implements Component {
 		return lines;
 	}
 
+	/** The top-right `esc` runs Esc. */
+	handleNativeEvent(event: NativeUiEvent): void {
+		if (event.type === "action" && event.act === "close") this.#escape();
+	}
+
+	/** Esc: clear a non-empty draft first, else close the viewer. */
+	#escape(): void {
+		if (this.#editor && this.#editor.getText().trim() !== "") {
+			this.#editor.setText("");
+			this.#deps.requestRender();
+			return;
+		}
+		this.#deps.onClose();
+	}
+
 	/**
 	 * Header, transcript body (the builder's container, which describes its own
 	 * blocks), notice, message editor, stats and key hints. Scrolling is the
@@ -624,6 +685,8 @@ export class AgentTranscriptViewer implements Component {
 
 		const id = this.#deps.agentId;
 		const children: NativeChild[] = [];
+		// Top row: the agent's meta on the left, a clickable `esc` (close) on the right.
+		const top: NativeChild[] = [];
 		if (ref) {
 			const kindTag = ref.parentId ? `${ref.kind} ${theme.sep.dot} of ${ref.parentId}` : ref.kind;
 			const meta: NativeChild[] = [
@@ -632,8 +695,12 @@ export class AgentTranscriptViewer implements Component {
 				text([span(kindTag, "dim")], { truncate: "end" }),
 			];
 			if (this.#model) meta.push(text([span(this.#model, "muted")], { truncate: "end" }));
-			children.push(node("row", { gap: "sm", align: "center" }, meta, "meta"));
+			top.push(node("row", { gap: "sm", align: "center", grow: 1, min: { w: 0 } }, meta, "meta"));
+		} else {
+			top.push(node("spacer", { grow: 1 }));
 		}
+		top.push(escCloseButton());
+		children.push(node("row", { gap: "md", align: "center" }, top, "top"));
 		children.push(
 			placeholder === undefined
 				? node("col", { grow: 1 }, [this.#builder.container], "transcript")
@@ -696,7 +763,6 @@ export class AgentTranscriptViewer implements Component {
 		children.push(
 			hintsRow([
 				this.#editor ? actionHint("tui.input.submit", "send") : undefined,
-				{ keys: ["escape"], label: "close" },
 				{ keys: [this.#deps.expandKeys[0] ?? "ctrl+o"], label: "expand" },
 			]),
 		);
