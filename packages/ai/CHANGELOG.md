@@ -9,6 +9,7 @@
 
 ### Fixed
 
+- A stored OpenZoo API key, including one copied to the auth broker, is used when `OPENZOO_API_KEY` is unset. The keyless `openzoo-local` placeholder remains only when nothing is stored.
 - Fixed Claude Haiku 5.5 requests silently enabling adaptive thinking when reasoning is off, on native Bedrock (main and helper calls) and the Anthropic API; conversations whose earlier effort controls rule out disabled thinking fall back to lowest-effort adaptive thinking instead of failing ([#14996](https://github.com/can1357/oh-my-pi/pull/14996) by [@bse-ai](https://github.com/bse-ai)).
 - Fixed `/session pin` being ignored when every stored account is quota-blocked, which routed the next request to a different exhausted account instead of the pinned one ([#14997](https://github.com/can1357/oh-my-pi/issues/14997)).
 

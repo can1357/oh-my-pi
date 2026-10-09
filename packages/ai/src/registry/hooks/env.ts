@@ -33,6 +33,9 @@ export const ENV_HOOKS: Record<string, EnvHook> = {
 	// bearer, so a missing env var must still read as authenticated — the
 	// placeholder is what `empty-fallback` stores after `/login openzoo` too.
 	// OPENZOO_API_KEY still wins: a public tunnel URL checks the printed bearer.
+	// The placeholder is not a credential. KeyCascade yields it to a stored
+	// API key (a broker copy of the tunnel bearer has no `source`) so discovery
+	// and chat do not send `openzoo-local` instead of that key.
 	"openzoo-local": () => $env.OPENZOO_API_KEY?.trim() || "openzoo-local",
 	// Vertex AI supports either GOOGLE_CLOUD_API_KEY or Application Default Credentials.
 	"google-vertex-adc": () => {
