@@ -5,9 +5,10 @@ import type { ChatUsageEvent } from "@oh-my-pi/pi-agent-core";
 import type { Api, AssistantMessage, ChoiceQuestion, Model, NoulQuestion } from "@oh-my-pi/pi-ai";
 import * as ai from "@oh-my-pi/pi-ai";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
+import { cfgModelRoles } from "@oh-my-pi/pi-coding-agent/config/model-settings";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { ChainJudge, JudgmentCache, journalJudgmentUsage } from "@oh-my-pi/pi-coding-agent/judgment";
+import { ChainJudge, hasNativeJudge, JudgmentCache, journalJudgmentUsage } from "@oh-my-pi/pi-coding-agent/judgment";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { tinyModelClient } from "@oh-my-pi/pi-coding-agent/tiny/title-client";
 import { TempDir } from "@oh-my-pi/pi-utils";
@@ -324,6 +325,18 @@ describe("ChainJudge", () => {
 		// The primary's three entries are its initial completion plus two format
 		// corrections. A duplicated session fallback would add another three.
 		expect(attempted).toEqual([ONLINE.id, ONLINE.id, ONLINE.id, ONLINE_BACKUP.id]);
+	});
+
+	it("follows a judge role change inside the chain reuse window, agreeing with the native gate", () => {
+		const settings = Settings.isolated({ modelRoles: { judge: `${ONLINE.provider}/${ONLINE.id}` } });
+		const registry = makeRegistry([JEV_PREVIEW, ONLINE], { typesafe: "ts-key", [ONLINE.provider]: "online-key" });
+		expect(new ChainJudge({ settings, registry, purpose: "test" }).primaryModel()?.id).toBe(ONLINE.id);
+
+		cfgModelRoles.override(settings, { judge: "typesafe/jev-preview" });
+
+		// A gated feature (find, tab.goal) passes on a native judge, so its judge must route there too.
+		expect(hasNativeJudge(settings, registry)).toBe(true);
+		expect(new ChainJudge({ settings, registry, purpose: "test" }).primaryModel()?.id).toBe(JEV_PREVIEW.id);
 	});
 
 	it("resolves and forwards configured headers to native judgment models", async () => {

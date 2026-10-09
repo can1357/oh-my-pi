@@ -110,4 +110,23 @@ describe("text-mode command reports on a real terminal core", () => {
 		await term.waitForRender(() => !screen(term).some(row => row.includes("Available Tools")));
 		expect(screen(term).indexOf(last)).toBe(lastRow);
 	});
+
+	it.each([
+		["/mcp help", "MCP Server Management"],
+		["/mcp list", "MCP Servers"],
+		["/ssh help", "SSH Host Management"],
+		["/ssh list", "SSH Hosts"],
+	])("`%s` reports outside the transcript and Esc takes it away", async (command, title) => {
+		const last = await mountTranscript(40);
+		const lastRow = screen(term).indexOf(last);
+		const blocks = mode.chatContainer.children.length;
+		await runCommand(command, title);
+		expect(mode.chatContainer.children).toHaveLength(blocks);
+
+		term.sendInput("\x1b");
+		await term.waitForRender(() => !screen(term).some(row => row.includes(title)));
+		expect(screen(term).indexOf(last)).toBe(lastRow);
+		const buffer = term.getScrollBuffer().map(row => Bun.stripANSI(row));
+		expect(buffer.some(row => row.includes(title))).toBe(false);
+	});
 });

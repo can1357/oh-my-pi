@@ -157,6 +157,32 @@ describe("subagent warning injection", () => {
 		expect(result.rawOutput.includes("SYSTEM WARNING")).toBe(false);
 	});
 
+	it("delivers normalized strict-mode optionals from assembled yields, but keeps permissive nulls invalid", () => {
+		const args = {
+			rawOutput: "",
+			exitCode: 0,
+			stderr: "",
+			doneAborted: false,
+			signalAborted: false,
+			yieldItems: [{ status: "success" as const, data: { status: "done", detail: { blocker: null } } }],
+			outputSchema: {
+				properties: {
+					status: { type: "string" },
+					detail: { optionalProperties: { blocker: { type: "string" } } },
+				},
+			},
+			outputSchemaSource: "caller" as const,
+		};
+		const strict = finalizeSubprocessOutput({ ...args, outputSchemaMode: "strict" });
+		expect(strict.exitCode).toBe(0);
+		expect(strict.structuredOutput?.status).toBe("valid");
+		expect(strict.structuredOutput?.data).toEqual({ status: "done", detail: {} });
+
+		const permissive = finalizeSubprocessOutput({ ...args, outputSchemaMode: "permissive" });
+		expect(permissive.exitCode).toBe(1);
+		expect(permissive.structuredOutput?.status).toBe("invalid");
+	});
+
 	it("does not inject missing-submit warning when no schema and raw text exists", () => {
 		const result = finalizeSubprocessOutput({
 			rawOutput: "plain text notes",

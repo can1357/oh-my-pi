@@ -197,6 +197,19 @@ export function isLineInRanges(lineNumber: number, ranges: readonly LineRange[])
 	return false;
 }
 
+/**
+ * Kind of a non-regular, non-directory file, or undefined. Reading one in-process can block
+ * forever (a FIFO, `/dev/stdin` on the TUI's terminal) or never end (`/dev/zero`).
+ */
+export function specialFileKind(stat: fs.Stats): string | undefined {
+	if (stat.isFile() || stat.isDirectory()) return undefined;
+	if (stat.isCharacterDevice()) return "character device";
+	if (stat.isBlockDevice()) return "block device";
+	if (stat.isFIFO()) return "FIFO";
+	if (stat.isSocket()) return "socket";
+	return "special file";
+}
+
 /** Windows path naming an NTFS stream: a colon after the root (`C:\`, `\\?\C:\`, UNC). */
 function needsWindowsStreamExistenceCheck(resolved: string): boolean {
 	return process.platform === "win32" && resolved.slice(path.win32.parse(resolved).root.length).includes(":");

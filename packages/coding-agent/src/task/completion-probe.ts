@@ -1,9 +1,9 @@
 /**
  * Periodic completion self-estimates for running subagents.
  *
- * Every `task.completionProbeMs` the subagent is asked, through the same
- * ephemeral side turn `/btw` uses ({@link AgentSession.runEphemeralTurn}), to
- * estimate how complete its task is. The side turn reuses the live session's
+ * On the {@link PROBE_DELAYS_MS} backoff schedule the subagent is asked, through
+ * the same ephemeral side turn `/btw` uses ({@link AgentSession.runEphemeralTurn}),
+ * to estimate how complete its task is. The side turn reuses the live session's
  * system prompt, tools and history, so it reads the main conversation's prompt
  * cache and never touches the transcript. The parsed percentage feeds
  * `AgentProgress.completionPercent`, which wait/task views render.
@@ -13,14 +13,30 @@
  * finishes, so without it the estimate stalls near 0% for minutes.
  */
 import { getStreamingPartialJson } from "@oh-my-pi/pi-ai/utils/block-symbols";
-import { formatDuration, logger, prompt } from "@oh-my-pi/pi-utils";
+import { formatDuration, isInteractiveHost, logger, prompt } from "@oh-my-pi/pi-utils";
+import type { Settings } from "../config/settings";
 import completionProbePrompt from "../prompts/system/subagent-completion-probe.md" with { type: "text" };
 import type { AgentSession } from "../session/agent-session";
+import { cfgTaskCompletionProbe } from "./settings";
+
+/**
+ * Wait before each successive probe: early estimates come quickly, long runs back
+ * off to one side request an hour. The last entry repeats.
+ */
+const PROBE_DELAYS_MS = [2, 5, 10, 30, 60].map(minutes => minutes * 60_000);
+
+/**
+ * Whether a subagent spawned by a session at `parentDepth` gets completion probes.
+ * Only the interactive TUI shows the estimate, so print/RPC/ACP/SDK hosts never pay
+ * for it, and only the main agent's direct subagents (`parentDepth` 0) are probed.
+ * Callers: the task executor and eval workpool, when building a run monitor.
+ */
+export function isCompletionProbeEnabled(settings: Settings, parentDepth: number): boolean {
+	return parentDepth === 0 && isInteractiveHost() && cfgTaskCompletionProbe.get(settings);
+}
 
 /** Inputs for {@link startCompletionProbe}. */
 export interface CompletionProbeOptions {
-	/** Probe period; values ≤ 0 disable probing. */
-	intervalMs: number;
 	/** The run's current session; probing skips ticks while it is absent or idle. */
 	session: () => AgentSession | null;
 	/** Stops the timer and cancels an in-flight probe. */
@@ -66,19 +82,20 @@ function inflightToolCalls(session: AgentSession): InflightToolCall[] {
 }
 
 /**
- * Probe the run's session every {@link CompletionProbeOptions.intervalMs} until
- * `signal` aborts. Ticks are skipped while the session is idle or a previous
- * probe is still in flight; failures are logged and the next tick retries.
+ * Probe the run's session on the {@link PROBE_DELAYS_MS} schedule until `signal`
+ * aborts. Each delay counts from the end of the previous probe, so probes never
+ * overlap. A tick that finds the session idle is skipped; failures are logged.
+ * Both still advance the schedule.
  */
 export function startCompletionProbe(options: CompletionProbeOptions): void {
-	const { intervalMs, signal } = options;
-	if (intervalMs <= 0 || signal.aborted) return;
-	let inFlight = false;
+	const { signal } = options;
+	if (signal.aborted) return;
+	let step = 0;
+	let timer: NodeJS.Timeout | undefined;
 	let previous: { percent: number; at: number } | undefined;
 	const probe = async (): Promise<void> => {
 		const session = options.session();
-		if (inFlight || !session?.isStreaming || signal.aborted) return;
-		inFlight = true;
+		if (!session?.isStreaming || signal.aborted) return;
 		try {
 			const { replyText, assistantMessage } = await session.runEphemeralTurn({
 				promptText: prompt.render(completionProbePrompt, {
@@ -101,11 +118,16 @@ export function startCompletionProbe(options: CompletionProbeOptions): void {
 					error: error instanceof Error ? error.message : String(error),
 				});
 			}
-		} finally {
-			inFlight = false;
 		}
 	};
-	const timer = setInterval(() => void probe(), intervalMs);
-	timer.unref?.();
-	signal.addEventListener("abort", () => clearInterval(timer), { once: true });
+	const schedule = (): void => {
+		const delay = PROBE_DELAYS_MS[Math.min(step++, PROBE_DELAYS_MS.length - 1)];
+		timer = setTimeout(async () => {
+			await probe();
+			if (!signal.aborted) schedule();
+		}, delay);
+		timer.unref?.();
+	};
+	schedule();
+	signal.addEventListener("abort", () => clearTimeout(timer), { once: true });
 }

@@ -5,6 +5,7 @@ import {
 	buildReplanTitleContext,
 	type CustomMessage,
 	convertToLlm,
+	dedupeEphemeralReply,
 	INTERRUPTED_THINKING_MESSAGE_TYPE,
 	replaceLlmImagesWithText,
 	SKILL_PROMPT_MESSAGE_TYPE,
@@ -350,5 +351,34 @@ describe("buildReplanTitleContext", () => {
 
 		expect(context).toContain("08-app-settings.md");
 		expect(context).not.toContain("07-manual-llm.md");
+	});
+});
+
+describe("dedupeEphemeralReply", () => {
+	const long = Array.from({ length: 200 }, (_, i) => `Paragraph ${i}: the answer keeps going.`).join("\n\n");
+
+	it("cuts a side reply to 4 KiB by default", () => {
+		const reply = dedupeEphemeralReply(long);
+		expect(Buffer.byteLength(reply, "utf8")).toBeLessThanOrEqual(4096);
+		expect(reply.endsWith("[…truncated]")).toBe(true);
+	});
+
+	it("keeps a long answer whole under an unbounded cap while still collapsing a repeat loop", () => {
+		expect(dedupeEphemeralReply(long, Number.POSITIVE_INFINITY)).toBe(long);
+		const looping = `${long}\n${"again\n".repeat(50)}done`;
+		expect(dedupeEphemeralReply(looping, Number.POSITIVE_INFINITY)).toBe(`${long}\nagain\n[…50×]\ndone`);
+	});
+
+	it("drops a multi-byte character that straddles the byte budget instead of splitting it", () => {
+		const suffix = "\n[…truncated]";
+		const budget = Buffer.byteLength(suffix, "utf8") + 11;
+		for (const wide of ["€", "😀"]) {
+			const reply = dedupeEphemeralReply(`${"a".repeat(10)}${wide}${"b".repeat(40)}`, budget);
+			expect(reply).toBe(`${"a".repeat(10)}${suffix}`);
+			expect(Buffer.byteLength(reply, "utf8")).toBeLessThanOrEqual(budget);
+		}
+		expect(dedupeEphemeralReply(`${"a".repeat(8)}😀${"b".repeat(40)}`, budget + 1)).toBe(
+			`${"a".repeat(8)}😀${suffix}`,
+		);
 	});
 });

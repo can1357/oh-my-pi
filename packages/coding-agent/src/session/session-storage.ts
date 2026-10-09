@@ -138,6 +138,13 @@ export interface SessionStorage {
 	existsSync(path: string): boolean;
 	writeTextSync(path: string, content: string, options?: SessionStorageWriteOptions): void;
 	/**
+	 * Streaming {@link writeTextSync}: publishes the concatenation of `lines`
+	 * with the same staging, size check, and conflict semantics without
+	 * materializing it as one string. Optional; callers on backends without
+	 * it join the lines and call {@link writeTextSync}.
+	 */
+	writeLinesSync?(path: string, lines: readonly string[], options?: SessionStorageWriteOptions): void;
+	/**
 	 * Update the current session title through the storage backend.
 	 *
 	 * File-like backends rewrite the fixed-width JSONL title slot; indexed
@@ -168,6 +175,8 @@ export interface SessionStorage {
 	hasAssistantTurn?(path: string): Promise<boolean>;
 	writeText(path: string, content: string): Promise<void>;
 	writeTextAtomic(path: string, content: string, options?: WriteTextAtomicOptions): Promise<void>;
+	/** Streaming {@link writeTextAtomic}, optional on the same terms as {@link writeLinesSync}. */
+	writeLinesAtomic?(path: string, lines: readonly string[], options?: WriteTextAtomicOptions): Promise<void>;
 	rename(path: string, nextPath: string): Promise<void>;
 	unlink(path: string): Promise<void>;
 	deleteSessionWithArtifacts(sessionPath: string): Promise<void>;
@@ -217,6 +226,8 @@ const writerRegistry = new FinalizationRegistry<number>(fd => {
 
 class FileSessionStorageWriter implements SessionStorageWriter {
 	#fd: number;
+	/** Identity of the file `#fd` is open on: fixed for the descriptor's lifetime, so read once per descriptor. */
+	#heldIdentity: { ino: bigint; dev: bigint } | undefined;
 	#fpath: string;
 	#publishLock: ((append: () => void, landed: () => boolean) => void) | undefined;
 	#closed = false;
@@ -249,25 +260,34 @@ class FileSessionStorageWriter implements SessionStorageWriter {
 		writerRegistry.register(this, this.#fd, this);
 	}
 
+	#heldFile(): { ino: bigint; dev: bigint } {
+		if (!this.#heldIdentity) {
+			const held = fs.fstatSync(this.#fd, { bigint: true });
+			this.#heldIdentity = { ino: held.ino, dev: held.dev };
+		}
+		return this.#heldIdentity;
+	}
+
 	/**
 	 * A publish that renamed a fresh file over the session path leaves this
 	 * writer's descriptor on the orphaned previous inode, where the append would
 	 * be silently lost. Under the publish lock no cooperating replacement can
 	 * interleave, so re-open the live path when its identity changed.
 	 *
-	 * Returns the size of the descriptor the next write appends to: the one
-	 * `fstat` serves both the identity check and the append rollback point.
+	 * Returns the size of the descriptor the next write appends to: while the
+	 * path still names the held file, the one path `stat` serves both the
+	 * identity check and the append rollback point.
 	 */
 	#reopenIfReplaced(): number {
-		const current = fs.fstatSync(this.#fd);
-		let live: fs.Stats;
+		const held = this.#heldFile();
+		let live: fs.BigIntStats;
 		try {
-			live = fs.statSync(this.#fpath);
+			live = fs.statSync(this.#fpath, { bigint: true });
 		} catch (err) {
-			if (isEnoent(err)) return current.size;
+			if (isEnoent(err)) return fs.fstatSync(this.#fd).size;
 			throw err;
 		}
-		if (live.ino === current.ino) return current.size;
+		if (live.ino === held.ino && live.dev === held.dev) return Number(live.size);
 		const nextFd = openCloexecSync(this.#fpath, SESSION_WRITE_FLAGS | fs.constants.O_APPEND);
 		writerRegistry.unregister(this);
 		try {
@@ -276,8 +296,11 @@ class FileSessionStorageWriter implements SessionStorageWriter {
 			// Replacing the descriptor abandoned the old one; nothing else to do.
 		}
 		this.#fd = nextFd;
+		this.#heldIdentity = undefined;
 		writerRegistry.register(this, nextFd, this);
-		return fs.fstatSync(nextFd).size;
+		const next = fs.fstatSync(nextFd, { bigint: true });
+		this.#heldIdentity = { ino: next.ino, dev: next.dev };
+		return Number(next.size);
 	}
 
 	/**
@@ -286,7 +309,7 @@ class FileSessionStorageWriter implements SessionStorageWriter {
 	 * and `#reopenIfReplaced` would append to the same descriptor again.
 	 */
 	#holdsLivePath(): boolean {
-		const held = fs.fstatSync(this.#fd, { bigint: true });
+		const held = this.#heldFile();
 		let live: fs.BigIntStats;
 		try {
 			live = fs.statSync(this.#fpath, { bigint: true });
@@ -561,6 +584,46 @@ export function tryAcquireSessionLease(sessionId: string): FileLockHandle | null
 	return tryAcquireFileLock(lockPath);
 }
 
+/** Approximate size (UTF-16 units synchronously, bytes through a sink) buffered per staging-file write when streaming a body. */
+const LINE_STREAM_CHUNK = 1 << 20;
+
+/** Write `lines` to a new file at `target` in bounded chunks, never holding their full concatenation. */
+function writeLinesToFileSync(target: string, lines: readonly string[]): void {
+	const fd = fs.openSync(target, "w");
+	try {
+		let chunk = "";
+		for (const line of lines) {
+			chunk += line;
+			if (chunk.length < LINE_STREAM_CHUNK) continue;
+			fs.writeFileSync(fd, chunk);
+			chunk = "";
+		}
+		if (chunk.length > 0) fs.writeFileSync(fd, chunk);
+	} finally {
+		fs.closeSync(fd);
+	}
+}
+
+/**
+ * Async {@link writeLinesToFileSync} through a buffered Bun file sink.
+ * `target` must be a fresh path: a sink does not truncate an existing file.
+ */
+async function writeLinesToFile(target: string, lines: readonly string[]): Promise<void> {
+	const sink = Bun.file(target).writer({ highWaterMark: LINE_STREAM_CHUNK });
+	try {
+		for (const line of lines) sink.write(line);
+	} catch (err) {
+		try {
+			// Release the descriptor so the caller can discard the staging file.
+			await sink.end();
+		} catch {
+			// The write failure is the error worth reporting.
+		}
+		throw err;
+	}
+	await sink.end();
+}
+
 export class FileSessionStorage implements SessionStorage {
 	#assertExpectedSize(fpath: string, expectedSize: number | null | undefined): void {
 		if (expectedSize === undefined) return;
@@ -593,7 +656,7 @@ export class FileSessionStorage implements SessionStorage {
 		// the temp file, but the lock claim runs first). Match that behavior
 		// so a first publish to a new directory does not fail with ENOENT.
 		this.ensureDirSync(path.dirname(lockPath));
-		const osGate = this.#acquireOsPublishLock(fpath, lockPath);
+		const osGate = this.#acquireOsPublishLock(fpath, this.#osGatePath(lockPath));
 		try {
 			this.#acquirePublishLock(fpath, lockPath);
 			try {
@@ -629,11 +692,21 @@ export class FileSessionStorage implements SessionStorage {
 	 * That reproduces the serial order "their publish, then our append" the
 	 * lockfile used to enforce, and fails closed when the holder outlives the
 	 * bounded wait.
+	 *
+	 * `lockPath` and `gatePath` are the writer's precomputed
+	 * {@link #publishLockPath} and {@link #osGatePath}. The held descriptor
+	 * already lives in the session directory, so the directory is recreated
+	 * only when acquiring the gate fails (the `flock` sidecar needs it).
 	 */
-	#withAppendLock(fpath: string, append: () => void, landed: () => boolean): void {
-		const lockPath = this.#publishLockPath(fpath);
-		this.ensureDirSync(path.dirname(lockPath));
-		const osGate = this.#acquireOsPublishLock(fpath, lockPath);
+	#withAppendLock(fpath: string, lockPath: string, gatePath: string, append: () => void, landed: () => boolean): void {
+		let osGate: NativeFileLock;
+		try {
+			osGate = this.#acquireOsPublishLock(fpath, gatePath);
+		} catch (err) {
+			if (err instanceof SessionLockError) throw err;
+			this.ensureDirSync(path.dirname(lockPath));
+			osGate = this.#acquireOsPublishLock(fpath, gatePath);
+		}
 		try {
 			let appended = false;
 			if (!fs.existsSync(lockPath)) {
@@ -657,16 +730,15 @@ export class FileSessionStorage implements SessionStorage {
 	}
 
 	/**
-	 * Claim the process-owned gate for `fpath`, failing closed after the
-	 * same bounded wait the lockfile claim uses. The gate path is a sidecar
-	 * of the lockfile so one directory holds both; the native handle keeps
-	 * ownership, never the file content, so suspension and SIGKILL cannot
-	 * strand it as stealable.
+	 * Claim the process-owned gate at `gatePath` ({@link #osGatePath}) for
+	 * `fpath`, failing closed after the same bounded wait the lockfile claim
+	 * uses. The native handle keeps ownership, never the file content, so
+	 * suspension and SIGKILL cannot strand it as stealable.
 	 */
-	#acquireOsPublishLock(fpath: string, lockPath: string): NativeFileLock {
+	#acquireOsPublishLock(fpath: string, gatePath: string): NativeFileLock {
 		const deadline = Date.now() + SESSION_PUBLISH_LOCK_WAIT_MS;
 		for (;;) {
-			const gate = NativeFileLock.tryAcquire(this.#osGatePath(lockPath));
+			const gate = NativeFileLock.tryAcquire(gatePath);
 			if (gate.acquired) return gate;
 			gate.release();
 			if (Date.now() >= deadline) {
@@ -825,11 +897,33 @@ export class FileSessionStorage implements SessionStorage {
 	}
 
 	writeTextSync(fpath: string, content: string, options?: SessionStorageWriteOptions): void {
+		this.#publishSync(fpath, tempPath => fs.writeFileSync(tempPath, content), options);
+	}
+
+	/**
+	 * Streams `lines` into the staging file in bounded chunks. A subclass or
+	 * spy that intercepts {@link writeTextSync} still sees every full rewrite:
+	 * the lines are then joined and routed through it.
+	 */
+	writeLinesSync(fpath: string, lines: readonly string[], options?: SessionStorageWriteOptions): void {
+		if (this.writeTextSync !== FileSessionStorage.prototype.writeTextSync) {
+			this.writeTextSync(fpath, lines.join(""), options);
+			return;
+		}
+		this.#publishSync(fpath, tempPath => writeLinesToFileSync(tempPath, lines), options);
+	}
+
+	/** Stage a body via `stage` at a fresh temp path beside `fpath`, then check freshness and rename it in. */
+	#publishSync(
+		fpath: string,
+		stage: (tempPath: string) => void,
+		options: SessionStorageWriteOptions | undefined,
+	): void {
 		const dir = path.dirname(fpath);
 		this.ensureDirSync(dir);
 		const tempPath = path.join(dir, `.${path.basename(fpath)}.${Snowflake.next()}.tmp`);
 		try {
-			fs.writeFileSync(tempPath, content);
+			stage(tempPath);
 		} catch (err) {
 			this.#discardTemp(tempPath, fpath);
 			throw toError(err);
@@ -927,11 +1021,32 @@ export class FileSessionStorage implements SessionStorage {
 	}
 
 	async writeTextAtomic(fpath: string, content: string, options?: WriteTextAtomicOptions): Promise<void> {
+		await this.#publishAtomic(fpath, tempPath => fs.promises.writeFile(tempPath, content), options);
+	}
+
+	/**
+	 * Streams `lines` into the staging file through a buffered file sink. A
+	 * subclass or spy that intercepts {@link writeTextAtomic} still sees every
+	 * full rewrite: the lines are then joined and routed through it.
+	 */
+	async writeLinesAtomic(fpath: string, lines: readonly string[], options?: WriteTextAtomicOptions): Promise<void> {
+		if (this.writeTextAtomic !== FileSessionStorage.prototype.writeTextAtomic) {
+			return this.writeTextAtomic(fpath, lines.join(""), options);
+		}
+		await this.#publishAtomic(fpath, tempPath => writeLinesToFile(tempPath, lines), options);
+	}
+
+	/** Async {@link #publishSync}: stages via `stage`, then guard-checks and publishes without yielding. */
+	async #publishAtomic(
+		fpath: string,
+		stage: (tempPath: string) => Promise<void>,
+		options: WriteTextAtomicOptions | undefined,
+	): Promise<void> {
 		const dir = path.resolve(fpath, "..");
 		const tempPath = path.join(dir, `.${path.basename(fpath)}.${Snowflake.next()}.tmp`);
 		await fs.promises.mkdir(dir, { recursive: true });
 		try {
-			await fs.promises.writeFile(tempPath, content);
+			await stage(tempPath);
 		} catch (err) {
 			this.#discardTemp(tempPath, fpath);
 			throw toError(err);
@@ -1072,10 +1187,12 @@ export class FileSessionStorage implements SessionStorage {
 		return Promise.resolve();
 	}
 
-	openWriter(path: string, options?: { flags?: "a" | "w"; onError?: (err: Error) => void }): SessionStorageWriter {
-		return new FileSessionStorageWriter(path, {
+	openWriter(fpath: string, options?: { flags?: "a" | "w"; onError?: (err: Error) => void }): SessionStorageWriter {
+		const lockPath = this.#publishLockPath(fpath);
+		const gatePath = this.#osGatePath(lockPath);
+		return new FileSessionStorageWriter(fpath, {
 			...options,
-			publishLock: (append, landed) => this.#withAppendLock(path, append, landed),
+			publishLock: (append, landed) => this.#withAppendLock(fpath, lockPath, gatePath, append, landed),
 		});
 	}
 
@@ -1193,6 +1310,18 @@ function matchesPattern(name: string, pattern: string): boolean {
 		return name.endsWith(pattern.slice(1));
 	}
 	return name === pattern;
+}
+
+/**
+ * Name of `key` when it sits directly inside `resolvedDir` (a `path.resolve`d
+ * directory), else `undefined`. Key-indexed storages keep whatever spelling
+ * callers wrote, so both sides are resolved: on Windows `/sessions/x` and the
+ * `path.join`-built `\sessions\x\…` keys must list as the same directory.
+ */
+export function directChildKeyName(resolvedDir: string, key: string): string | undefined {
+	const name = path.basename(key);
+	if (!name || name.includes("/") || name.includes("\\")) return undefined;
+	return path.resolve(path.dirname(key)) === resolvedDir ? name : undefined;
 }
 
 class MemorySessionStorageWriter implements SessionStorageWriter {
@@ -1449,14 +1578,12 @@ export class MemorySessionStorage implements SessionStorage {
 	}
 
 	listFilesSync(dir: string, pattern: string): string[] {
-		const prefix = dir.endsWith("/") ? dir : `${dir}/`;
+		const resolvedDir = path.resolve(dir);
 		const files: string[] = [];
-		for (const path of this.#files.keys()) {
-			if (!path.startsWith(prefix)) continue;
-			const name = path.slice(prefix.length);
-			if (name.includes("/") || name.includes("\\")) continue;
-			if (!matchesPattern(name, pattern)) continue;
-			files.push(path);
+		for (const key of this.#files.keys()) {
+			const name = directChildKeyName(resolvedDir, key);
+			if (name === undefined || !matchesPattern(name, pattern)) continue;
+			files.push(key);
 		}
 		return files;
 	}

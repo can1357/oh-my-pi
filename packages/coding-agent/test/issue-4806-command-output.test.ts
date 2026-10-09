@@ -12,7 +12,7 @@ import { HistoryStorage } from "@oh-my-pi/pi-coding-agent/session/history-storag
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { InputController } from "@oh-my-pi/pi-coding-agent/modes/controllers/input-controller";
 import { Text } from "@oh-my-pi/pi-tui";
-import { setNativeRendering } from "@oh-my-pi/pi-tui/native/state";
+import { isNativeRendering, setNativeRendering } from "@oh-my-pi/pi-tui/native/state";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
 describe("issue #4806 command output during streaming", () => {
@@ -87,6 +87,7 @@ describe("issue #4806 command output during streaming", () => {
 	});
 
 	it("natively opens reports as focused sheets like /usage whose long bodies scroll; Esc closes them", async () => {
+		const wasNative = isNativeRendering();
 		setNativeRendering(true);
 		try {
 			streaming = false;
@@ -103,7 +104,8 @@ describe("issue #4806 command output during streaming", () => {
 			await mode.handleChangelogCommand("full");
 			expect(mode.ui.overlayStack).toHaveLength(1);
 			// The sheet body is the terminal's scroller; Page Down reaches it as a scroll request.
-			const bodyScroll = () => (sheet()?.describe?.({ supports: () => true } as never) as Described).c?.[0]?.scroll;
+			const bodyScroll = () =>
+				(sheet()?.describe?.({ supports: () => true } as never) as Described | undefined)?.c?.[0]?.scroll;
 			expect(bodyScroll()).toBeUndefined();
 			sheet()?.handleInput?.("\x1b[6~");
 			expect(bodyScroll()).toEqual({ by: "page-down", n: 1 });
@@ -114,11 +116,12 @@ describe("issue #4806 command output during streaming", () => {
 			expect(mode.ui.hasOverlay()).toBe(false);
 			expect(mode.ui.getFocused()).toBe(mode.editor);
 		} finally {
-			setNativeRendering(false);
+			setNativeRendering(wasNative);
 		}
 	});
 
 	it("closes an open native report sheet when the transcript is reset for another session", () => {
+		const wasNative = isNativeRendering();
 		setNativeRendering(true);
 		try {
 			streaming = false;
@@ -130,7 +133,7 @@ describe("issue #4806 command output during streaming", () => {
 			expect(mode.ui.hasOverlay()).toBe(false);
 			expect(mode.ui.getFocused()).toBe(mode.editor);
 		} finally {
-			setNativeRendering(false);
+			setNativeRendering(wasNative);
 		}
 	});
 

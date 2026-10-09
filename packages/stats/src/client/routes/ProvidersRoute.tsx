@@ -6,6 +6,7 @@ import { buildColorLookup, OTHER_COLOR, SERIES_COLORS } from "../data/colors";
 import {
 	formatCompact,
 	formatCost,
+	formatErrorRate,
 	formatEstimatedCost,
 	formatInteger,
 	formatPercent,
@@ -74,14 +75,16 @@ interface WindowRef {
 }
 
 export function ProvidersRoute({ active, range }: ProvidersRouteProps) {
-	const stats = useQuery(["providers", range], () => getProviderDashboardStats(range), { enabled: active });
+	const stats = useQuery(["providers", range], ({ signal }) => getProviderDashboardStats(range, signal), {
+		enabled: active,
+	});
 	const [metric, setMetric] = useState<BurnMetric>("tokens");
 	const [hidden, toggleHidden] = useHiddenSeries();
 	const meta = rangeMeta(range);
 
 	// Subscription windows load independently: insights for every provider
 	// first, then utilization series for the one provider being charted.
-	const windows = useQuery(["provider-windows", range], () => getProviderWindowStats(range, null), {
+	const windows = useQuery(["provider-windows", range], ({ signal }) => getProviderWindowStats(range, null, signal), {
 		enabled: active,
 	});
 	const [picked, setPicked] = useState<WindowRef | null>(null);
@@ -89,7 +92,7 @@ export function ProvidersRoute({ active, range }: ProvidersRouteProps) {
 	const selectedProvider = selected?.provider ?? null;
 	const accounts = useQuery(
 		["provider-windows", range, selectedProvider],
-		() => getProviderWindowStats(range, selectedProvider),
+		({ signal }) => getProviderWindowStats(range, selectedProvider, signal),
 		{ enabled: active && selectedProvider !== null },
 	);
 
@@ -178,7 +181,7 @@ export function ProvidersRoute({ active, range }: ProvidersRouteProps) {
 							/>
 							<Stat
 								label="Error rate"
-								value={formatPercent(t.requests > 0 ? t.failed / t.requests : 0)}
+								value={formatErrorRate(t.requests > 0 ? t.failed / t.requests : 0)}
 								hint={`${formatInteger(t.requests - t.failed)} succeeded`}
 							/>
 						</StatGrid>
@@ -338,7 +341,7 @@ function ProviderTotalsTable({
 						<span className="row" style={{ gap: 8, justifyContent: "flex-end" }}>
 							<span className="num dim">{formatInteger(p.failedRequests)}</span>
 							<Badge tone={p.failedRequests > 0 ? errorRateTone(rate) : "neutral"} mono>
-								{formatPercent(rate)}
+								{formatErrorRate(rate)}
 							</Badge>
 						</span>
 					);

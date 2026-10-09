@@ -356,6 +356,58 @@ describe("buildModel", () => {
 	});
 });
 
+describe("Responses native-resolution image compatibility", () => {
+	it.each([
+		["custom loopback", "custom", "openai-responses", "http://127.0.0.1:8080/v1", false],
+		["OpenAI routed through a custom host", "openai", "openai-responses", "https://proxy.example/v1", false],
+		["official OpenAI", "openai", "openai-responses", "https://api.openai.com/v1", true],
+		["OpenAI host with a custom provider name", "custom", "openai-responses", "https://api.openai.com/v1", true],
+		["Codex subscription", "openai-codex", "openai-codex-responses", "https://chatgpt.com/backend-api", true],
+		["Codex legacy backend", "openai-codex", "openai-codex-responses", "https://chat.openai.com/backend-api", true],
+		[
+			"Codex routed through a custom host",
+			"openai-codex",
+			"openai-codex-responses",
+			"http://127.0.0.1:8080/v1",
+			false,
+		],
+		["custom Codex proxy", "cc-switch", "openai-codex-responses", "http://127.0.0.1:8080/v1", false],
+		["Azure runtime endpoint", "azure", "azure-openai-responses", "", true],
+		["Azure host", "custom", "openai-responses", "https://resource.openai.azure.com/openai/v1", true],
+		[
+			"Azure provider routed through a custom host",
+			"azure",
+			"azure-openai-responses",
+			"http://127.0.0.1:8080/v1",
+			false,
+		],
+		["Copilot", "github-copilot", "openai-responses", "https://api.githubcopilot.com", false],
+		["xAI", "xai", "openai-responses", "https://api.x.ai/v1", false],
+	] as const)("uses only supported image detail on %s", (_label, provider, api, baseUrl, supported) => {
+		const model = buildModel({ ...responsesSpec({ input: ["text", "image"] }), provider, api, baseUrl });
+		expect(model.compat.supportsImageDetailOriginal).toBe(supported);
+	});
+
+	it.each([
+		["custom opt-in", "custom", "openai-responses", "http://127.0.0.1:8080/v1", true],
+		["OpenAI opt-out", "openai", "openai-responses", "https://api.openai.com/v1", false],
+		["Codex opt-out", "openai-codex", "openai-codex-responses", "https://chatgpt.com/backend-api", false],
+		["xAI wire-rule opt-in", "xai-oauth", "openai-responses", "https://api.x.ai/v1", true],
+	] as const)(
+		"lets explicit image-detail compat win over detection and wire rules: %s",
+		(_label, provider, api, baseUrl, supported) => {
+			const model = buildModel({
+				...responsesSpec({ id: "grok-4.3", input: ["text", "image"] }),
+				provider,
+				api,
+				baseUrl,
+				compat: { supportsImageDetailOriginal: supported },
+			});
+			expect(model.compat.supportsImageDetailOriginal).toBe(supported);
+		},
+	);
+});
+
 describe("xAI Responses reasoning-effort suppression", () => {
 	const grokResponsesSpec = (
 		id: string,
@@ -862,6 +914,20 @@ describe("openai-completions wire-quirk compat detection", () => {
 		).toBe("dsml");
 	});
 
+	it("selects the DSML healer for DeepSeek models on any host", () => {
+		// DSML is the model's own tool-call grammar: any server running its chat
+		// template without a working tool parser leaks it, whatever the provider.
+		const pattern = (provider: string, id: string, baseUrl: string) =>
+			resolveModelPolicy(completionsSpec({ provider, id, baseUrl })).compat.streamMarkupHealingPattern;
+		expect(pattern("llama.cpp", "deepseek-v4-flash", "http://192.168.1.20:8080/v1")).toBe("dsml");
+		expect(pattern("vllm", "deepseek-ai/DeepSeek-V4-Flash", "http://10.0.0.5:8000/v1")).toBe("dsml");
+		// User-configured providers, local or remote.
+		expect(pattern("my-box", "deepseek-v4-pro", "http://127.0.0.1:9000/v1")).toBe("dsml");
+		expect(pattern("my-box", "deepseek-v4-pro", "https://inference.example.com/v1")).toBe("dsml");
+		// Other model classes keep the generic healer.
+		expect(pattern("llama.cpp", "qwen3-coder", "http://127.0.0.1:8080/v1")).toBe("thinking");
+	});
+
 	it("derives Responses obfuscation opt-out and wire mode per surface", () => {
 		expect(
 			resolveModelPolicy(
@@ -1160,6 +1226,63 @@ describe("OpenRouter model discovery", () => {
 		});
 	});
 
+	it("bills discovered Haiku 5.5 rows at 5x their own rates above 100K input", async () => {
+		const haiku = {
+			name: "Anthropic: Claude Haiku 5.5",
+			supported_parameters: ["tools", "tool_choice", "reasoning"],
+			architecture: { input_modalities: ["text", "image"] },
+			top_provider: { max_completion_tokens: 128_000 },
+			context_length: 1_000_000,
+		};
+		const options = openrouterModelManagerOptions({
+			fetch: async url =>
+				String(url) !== "https://openrouter.ai/api/v1/models"
+					? Response.json({ data: [] })
+					: Response.json({
+							// Live OpenRouter wire prices (USD per token) for the standard and batch rows.
+							data: [
+								{
+									...haiku,
+									id: "anthropic/claude-haiku-5.5",
+									pricing: {
+										prompt: "0.0000001",
+										completion: "0.0000005",
+										input_cache_read: "0.00000001",
+										input_cache_write: "0.000000125",
+									},
+								},
+								{
+									...haiku,
+									id: "anthropic/claude-haiku-5.5:batch",
+									pricing: {
+										prompt: "0.00000005",
+										completion: "0.00000025",
+										input_cache_read: "0.000000005",
+										input_cache_write: "0.0000000625",
+									},
+								},
+							],
+						}),
+		});
+		const specs = (await options.fetchDynamicModels?.()) ?? [];
+		const tier = (id: string) => {
+			const spec = specs.find(model => model.id === id);
+			if (!spec) throw new Error(`Expected discovered ${id}`);
+			return buildModel(spec).cost.longContext;
+		};
+
+		const standard = tier("anthropic/claude-haiku-5.5");
+		expect(standard?.inputThreshold).toBe(100_000);
+		expect(standard?.input).toBeCloseTo(0.5, 10);
+		expect(standard?.output).toBeCloseTo(2.5, 10);
+		expect(standard?.cacheRead).toBeCloseTo(0.05, 10);
+		expect(standard?.cacheWrite).toBeCloseTo(0.625, 10);
+		// The batch row bills half price, so its tier must scale from its own card.
+		const batch = tier("anthropic/claude-haiku-5.5:batch");
+		expect(batch?.input).toBeCloseTo(0.25, 10);
+		expect(batch?.output).toBeCloseTo(1.25, 10);
+	});
+
 	it("ignores legacy OpenRouter chat-completions cache rows", async () => {
 		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-catalog-openrouter-legacy-cache-"));
 		const dbPath = path.join(tempDir, "models.db");
@@ -1187,6 +1310,30 @@ describe("OpenRouter model discovery", () => {
 		} finally {
 			await fs.rm(tempDir, { recursive: true, force: true });
 		}
+	});
+});
+
+describe("GitHub Copilot catalog corrections", () => {
+	it("prices Copilot Haiku 5.5 cache legs per tier without a second long-context tier", () => {
+		// `billing.token_prices` carries no cache prices for Haiku 5.5, so both
+		// discovered tiers arrive with $0 cache legs.
+		const base = buildModel(
+			completionsSpec({
+				id: "claude-haiku-5.5",
+				provider: "github-copilot",
+				cost: { input: 0.1, output: 0.5, cacheRead: 0, cacheWrite: 0 },
+			}),
+		);
+		expect(base.cost).toEqual({ input: 0.1, output: 0.5, cacheRead: 0.01, cacheWrite: 0.125 });
+		// The `-1m` sibling is the long tier itself; a nested tier would charge it 5x twice.
+		const long = buildModel(
+			completionsSpec({
+				id: "claude-haiku-5.5-1m",
+				provider: "github-copilot",
+				cost: { input: 0.5, output: 2.5, cacheRead: 0, cacheWrite: 0 },
+			}),
+		);
+		expect(long.cost).toEqual({ input: 0.5, output: 2.5, cacheRead: 0.05, cacheWrite: 0.625 });
 	});
 });
 
