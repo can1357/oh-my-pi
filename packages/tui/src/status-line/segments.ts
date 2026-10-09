@@ -815,11 +815,15 @@ const tokenTotalSegment: StatusLineSegment = {
 	describe(ctx) {
 		const { input, output, cacheWrite, orchestrationInput, orchestrationOutput } = ctx.usageStats;
 		const total = input + output + cacheWrite + orchestrationInput + orchestrationOutput;
-		if (!total) return null;
 		if (ctx.options.token_total?.breakdown === true) {
+			if (!total && ctx.session.startupTokenBreakdown) {
+				const masked = tokenTotalBreakdown(ctx.session.startupTokenBreakdown, maskedTokenValue);
+				return masked ? segView([span(masked, "statusLineSpend")], "tokens") : null;
+			}
 			const breakdown = tokenTotalBreakdown(ctx.usageStats);
 			return breakdown ? segView([span(breakdown, "statusLineSpend")], "tokens") : null;
 		}
+		if (!total) return null;
 		return segView([span(formatNumber(total), "statusLineSpend")], "tokens");
 	},
 };
