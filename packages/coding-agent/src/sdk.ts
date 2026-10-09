@@ -4424,6 +4424,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					: undefined
 				: undefined,
 		});
+		// Catalog rows carry the registry settings' extended-window opt-ins; this
+		// session adopts every model with the window its own settings select (a
+		// subagent with a compaction override must not inherit the parent's).
+		agent.setModelResolver(next => modelRegistry.fitContextWindow(next, settings));
 
 		cursorEventEmitter = event => agent.emitExternalEvent(event);
 

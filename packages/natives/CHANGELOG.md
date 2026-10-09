@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [18.8.7] - 2026-10-09
+
 ### Added
 
 - Added `wasmGrammarFor` for tree-sitter grammars loaded as WebAssembly on demand from `<natives dir>/grammars`, and `missingGrammars` on `astGrep`/`astEdit` results naming languages skipped because their grammar is not installed.
