@@ -63,6 +63,11 @@ export interface ComposerStartupCache {
 	readonly status?: ComposerStatusCache;
 }
 
+export interface ComposerCacheReadOptions {
+	/** Reuse layout hints only when startup will resume the session that produced them. */
+	readonly reuseSessionUsage?: boolean;
+}
+
 function parseJson(value: string | undefined): unknown {
 	if (value === undefined) return undefined;
 	try {
@@ -206,8 +211,11 @@ export class ComposerCache {
 		return openSqliteDatabaseSync(dbPath, db => new ComposerCache(db), { recoverCorruption: true });
 	}
 
-	/** Everything cached for `cwd`, with any-project rows as fallback for shared kinds. Never throws. */
-	read(cwd: string): ComposerStartupCache {
+	/**
+	 * Everything cached for `cwd`, with any-project rows as fallback for shared kinds. Never throws.
+	 * Fresh sessions omit the previous session's usage so their first frame does not reserve stale segments.
+	 */
+	read(cwd: string, options: ComposerCacheReadOptions = {}): ComposerStartupCache {
 		const project = path.resolve(cwd);
 		const own: Partial<Record<EntryKind, string>> = {};
 		const anyProject: Partial<Record<EntryKind, string>> = {};
@@ -220,10 +228,22 @@ export class ComposerCache {
 			logger.debug("composer cache read failed", { error: String(error) });
 		}
 		const ui = parseUiState(parseJson(own.ui)) ?? parseUiState(parseJson(anyProject.ui));
+		const cachedStatus = parseStatus(parseJson(own.status)) ?? parseStatus(parseJson(anyProject.status));
+		const status =
+			cachedStatus && !options.reuseSessionUsage
+				? {
+						...cachedStatus,
+						statusLine: {
+							...cachedStatus.statusLine,
+							contextPercent: undefined,
+							tokenBreakdown: undefined,
+						},
+					}
+				: cachedStatus;
 		return {
 			preferences: ui?.preferences,
 			theme: ui?.theme,
-			status: parseStatus(parseJson(own.status)) ?? parseStatus(parseJson(anyProject.status)),
+			status,
 		};
 	}
 

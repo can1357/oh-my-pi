@@ -66,7 +66,7 @@ describe("composer startup cache", () => {
 		cache.close();
 	});
 
-	it("keeps session usage out of the shared status fallback", () => {
+	it("reuses session usage only when requested for the originating project", () => {
 		const project = path.join(root, "project");
 		const status = statusFor(ThinkingLevel.High);
 		const statusWithUsage: ComposerStatusCache = {
@@ -87,8 +87,13 @@ describe("composer startup cache", () => {
 		const cache = ComposerCache.open(dbPath);
 		cache.writeStatus(project, statusWithUsage);
 
-		expect(cache.read(project).status?.statusLine.contextPercent).toBe(37.5);
-		expect(cache.read(project).status?.statusLine.tokenBreakdown).toEqual(statusWithUsage.statusLine.tokenBreakdown);
+		const fresh = cache.read(project).status?.statusLine;
+		expect(fresh?.thinkingLevel).toBe(ThinkingLevel.High);
+		expect(fresh?.contextPercent).toBeUndefined();
+		expect(fresh?.tokenBreakdown).toBeUndefined();
+		const resumed = cache.read(project, { reuseSessionUsage: true }).status?.statusLine;
+		expect(resumed?.contextPercent).toBe(37.5);
+		expect(resumed?.tokenBreakdown).toEqual(statusWithUsage.statusLine.tokenBreakdown);
 		const fallback = cache.read(path.join(root, "fresh")).status?.statusLine;
 		expect(fallback?.thinkingLevel).toBe(ThinkingLevel.High);
 		expect(fallback?.contextPercent).toBeUndefined();
