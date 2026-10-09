@@ -1,5 +1,6 @@
 import type { Api, Model, ModelSpec, RemoteCompactionConfig, ThinkingConfig } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { resolveModelPolicy } from "@oh-my-pi/pi-catalog/compat/resolve";
 import { isVertexExpressOpenAIUrl } from "@oh-my-pi/pi-catalog/hosts";
 import { PROVIDER_DESCRIPTORS } from "@oh-my-pi/pi-catalog/provider-models";
 import { toModelSpec } from "@oh-my-pi/pi-catalog/provider-models/bundled-references";
@@ -233,6 +234,12 @@ export function mergeProviderRemoteCompactionConfig(
  */
 export interface ModelPatch {
 	name?: string;
+	/**
+	 * Switch the model's API route (e.g. move a LiteLLM-discovered model from
+	 * openai-completions to anthropic-messages when the gateway serves it at
+	 * /v1/messages). Compat and thinking are re-resolved for the new API.
+	 */
+	api?: Api;
 	reasoning?: boolean;
 	thinking?: ThinkingConfig;
 	input?: ("text" | "image")[];
@@ -266,6 +273,10 @@ export interface ModelPatch {
 type ModelTransportPolicy = "merge" | "replace";
 export function applyModelPatch(base: Model<Api>, patch: ModelPatch, transport: ModelTransportPolicy): Model<Api> {
 	const result = { ...base };
+	const apiChanged = patch.api !== undefined && patch.api !== base.api;
+	if (apiChanged) {
+		result.api = patch.api as Api;
+	}
 	if (patch.name !== undefined) result.name = patch.name;
 	if (patch.reasoning !== undefined) result.reasoning = patch.reasoning;
 	if (patch.thinking !== undefined) result.thinking = patch.thinking;
@@ -307,6 +318,19 @@ export function applyModelPatch(base: Model<Api>, patch: ModelPatch, transport: 
 		result.headers = patch.headers;
 		result.resolveHeaders = patch.resolveHeaders;
 		compat = patch.compat;
+	}
+	if (apiChanged) {
+		// Compat is API-shaped: openai-completions fields are meaningless on an
+		// anthropic-messages route and vice versa. Re-derive the policy surface
+		// (identity/class rules) for the new API; explicit patch fields win.
+		const policy = resolveModelPolicy({
+			...toModelSpec(result),
+			compat: undefined,
+		} as unknown as ModelSpec<Api>);
+		compat = mergeCompat(policy.compat, patch.compat) as ModelSpec<Api>["compat"];
+		if (patch.thinking === undefined) {
+			result.thinking = policy.thinking ?? result.thinking;
+		}
 	}
 	const built = buildModel({ ...toModelSpec(result), compat } as ModelSpec<Api>);
 	if (patch.thinking !== undefined && built.thinking !== undefined) {

@@ -2143,6 +2143,48 @@ describe("ModelRegistry", () => {
 			expect(model?.omitMaxOutputTokens).toBe(true);
 			expect(model?.maxTokens).toBe(202752);
 		});
+
+		test("model override can switch the API route and re-resolves compat for it", () => {
+			const registry = readonlyRegistry({
+				providers: {
+					deepseek: { modelOverrides: { "deepseek-v4-flash": { api: "anthropic-messages" } } },
+				},
+			});
+			const model = registry.find("deepseek", "deepseek-v4-flash");
+			if (!model) throw new Error("Expected bundled deepseek-v4-flash");
+			expect(model.api).toBe("anthropic-messages");
+			// Compat is API-shaped: openai-completions fields must not survive the flip.
+			const compat = model.compat as Record<string, unknown> | undefined;
+			expect(compat?.supportsContextManagement).toBe(true);
+			expect(compat?.supportsStore).toBeUndefined();
+			// Identity rules still apply on the new route (deepseek flash effort ladder).
+			expect(model.thinking?.mode).toBe("effort");
+			expect(model.thinking?.efforts).toEqual([Effort.Low, Effort.High, Effort.Max]);
+			// Pricing and capacity are policy-independent and survive the flip.
+			const bundled = getBundledModels("deepseek" as Parameters<typeof getBundledModels>[0]).find(
+				m => m.id === "deepseek-v4-flash",
+			);
+			if (!bundled) throw new Error("Expected bundled base model");
+			expect(model.cost).toEqual(bundled.cost);
+			expect(model.contextWindow).toBe(bundled.contextWindow);
+			// Sibling models keep their original route.
+			expect(registry.find("deepseek", "deepseek-v4-pro")?.api).toBe("openai-completions");
+		});
+
+		test("API-route switch derives identity-appropriate thinking metadata", () => {
+			const registry = readonlyRegistry({
+				providers: {
+					minimax: { modelOverrides: { "MiniMax-M2.7": { api: "anthropic-messages" } } },
+				},
+			});
+			const model = registry.find("minimax", "MiniMax-M2.7");
+			if (!model) throw new Error("Expected bundled MiniMax-M2.7");
+			expect(model.api).toBe("anthropic-messages");
+			// minimax identity on the anthropic-messages route gets the adaptive
+			// thinking profile, matching the native minimax provider.
+			expect(model.thinking?.mode).toBe("anthropic-adaptive");
+			expect(model.thinking?.efforts).toEqual([Effort.Low, Effort.Medium, Effort.High]);
+		});
 	});
 
 	describe("github-copilot oauth endpoint alignment", () => {

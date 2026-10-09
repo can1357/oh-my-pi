@@ -245,6 +245,7 @@ export const getModelsConfigSchemaBundle = once(() => {
 
 	const ModelOverrideSchema = type({
 		"name?": "string",
+		"api?": ApiSchema,
 		"reasoning?": "boolean",
 		"thinking?": ModelThinkingSchema,
 		"input?": '("text" | "image")[]',
