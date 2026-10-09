@@ -6,7 +6,7 @@
  * reviver that pins the disposed session leaks one full session graph per
  * spawned subagent.
  */
-import { afterEach, beforeEach, expect, it, vi } from "bun:test";
+import { afterEach, beforeEach, expect, it as registerTest, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -39,7 +39,8 @@ const COLLECT_DEADLINE_MS = 15_000;
 const ENV_KEYS = ["HOME", "PI_CODING_AGENT_DIR", "OMP_PROFILE", "PI_PROFILE"] as const;
 let savedEnv: Record<string, string | undefined> = {};
 let root: string;
-const isChild = process.env.OMP_PARKED_RELEASE_CHILD === import.meta.path;
+const executionMode: "parent" | "child" =
+	process.env.OMP_PARKED_RELEASE_CHILD === import.meta.path ? "child" : "parent";
 const selectedCase = process.env.OMP_PARKED_RELEASE_CASE;
 let registeredChildCases = 0;
 
@@ -51,6 +52,7 @@ async function runIsolatedCase(name: string, timeoutMs: number): Promise<void> {
 		const storageEnv = {
 			HOME: home,
 			PI_CODING_AGENT_DIR: path.join(home, ".omp", "agent"),
+			CLAUDE_CONFIG_DIR: path.join(home, ".claude"),
 			XDG_CONFIG_HOME: path.join(sandbox, "xdg", "config"),
 			XDG_DATA_HOME: path.join(sandbox, "xdg", "data"),
 			XDG_STATE_HOME: path.join(sandbox, "xdg", "state"),
@@ -81,7 +83,8 @@ async function runIsolatedCase(name: string, timeoutMs: number): Promise<void> {
 			stdout: "pipe",
 			stderr: "pipe",
 		});
-		const watchdog = setTimeout(() => child.kill(), timeoutMs);
+		// Transport headroom does not change the original child's consumer timeout.
+		const watchdog = setTimeout(() => child.kill(), timeoutMs + 10_000);
 		try {
 			const [stdout, stderr, exitCode] = await Promise.all([
 				new Response(child.stdout).text(),
@@ -99,15 +102,16 @@ async function runIsolatedCase(name: string, timeoutMs: number): Promise<void> {
 	}
 }
 
-function isolatedCase(name: string, body: () => Promise<void>, timeoutMs: number): void {
-	if (isChild) {
+function it(name: string, body: () => Promise<void>, timeoutMs: number): void {
+	if (executionMode === "child") {
 		if (name === selectedCase) {
 			registeredChildCases += 1;
-			it(name, body, timeoutMs);
+			registerTest(name, body, timeoutMs);
 		}
 		return;
 	}
-	it(name, () => runIsolatedCase(name, timeoutMs), timeoutMs);
+	// Include pre-spawn setup and allow the transport watchdog to finish teardown.
+	registerTest(name, () => runIsolatedCase(name, timeoutMs), timeoutMs + 15_000);
 }
 
 function restoreEnvValue(key: string, value: string | undefined): void {
@@ -121,7 +125,7 @@ function restoreEnvValue(key: string, value: string | undefined): void {
 }
 
 beforeEach(async () => {
-	if (!isChild) return;
+	if (executionMode !== "child") return;
 	savedEnv = Object.fromEntries(ENV_KEYS.map(key => [key, process.env[key]]));
 	root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-parked-release-"));
 	const home = path.join(root, "home");
@@ -135,7 +139,7 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
-	if (!isChild) return;
+	if (executionMode !== "child") return;
 	await AgentLifecycleManager.global().dispose();
 	AgentLifecycleManager.resetGlobalForTests();
 	AgentRegistry.resetGlobalForTests();
@@ -239,7 +243,7 @@ async function runKeptAliveSubagent(parentAgentId?: string): Promise<{ release()
 	};
 }
 
-isolatedCase("releases a parked keep-alive subagent's session while the agent stays revivable", async () => {
+it("releases a parked keep-alive subagent's session while the agent stays revivable", async () => {
 	const run = await runKeptAliveSubagent();
 	try {
 		const sessionRef = weakRefToLiveSession(AGENT_ID);
@@ -256,7 +260,7 @@ isolatedCase("releases a parked keep-alive subagent's session while the agent st
 	}
 }, 30_000);
 
-isolatedCase("parks without retaining the run's settings overlay and revives with the settings it wrote", async () => {
+it("parks without retaining the run's settings overlay and revives with the settings it wrote", async () => {
 	const run = await runKeptAliveSubagent();
 	try {
 		// A write the subagent made to its own settings during the run.
@@ -275,7 +279,7 @@ isolatedCase("parks without retaining the run's settings overlay and revives wit
 	}
 }, 30_000);
 
-isolatedCase("retains report receipts and persisted metrics without retaining a parked subagent's live session", async () => {
+it("retains report receipts and persisted metrics without retaining a parked subagent's live session", async () => {
 	const ownerManager = SessionManager.inMemory(root);
 	const todoListeners = new Set<(phases: TodoPhase[]) => void>();
 	// Only the report owner is a fixture; the observed child uses the real executor and AgentSession.
@@ -351,6 +355,6 @@ isolatedCase("retains report receipts and persisted metrics without retaining a 
 	}
 }, 30_000);
 
-if (isChild && registeredChildCases !== 1) {
+if (executionMode === "child" && registeredChildCases !== 1) {
 	throw new Error(`Expected one parked-release child case, registered ${registeredChildCases}`);
 }
