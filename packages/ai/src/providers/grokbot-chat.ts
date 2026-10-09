@@ -16,6 +16,9 @@ import historyPrompt from "./grokbot/chat-history.md" with { type: "text" };
 const SERVICE = "/aiserver.v1.GrokBotService/";
 const CHAT_TIMEOUT_MS = 300_000;
 
+/** Only adapter-authored protocol diagnostics may reach the user without redacting transport exceptions. */
+class GrokbotChatProtocolError extends Error {}
+
 export interface GrokbotChatOptions extends StreamOptions {
 	toolChoice?: ToolChoice;
 	/** Bounds waiting for this one delivery; expiry never resubmits the prompt. */
@@ -126,13 +129,13 @@ async function collectReply(response: Response, agentId: string, nonce: string):
 		throw new GrokbotRpcError(response.status, isRecord(body) ? body.code : undefined);
 	}
 	if (!response.body || !response.headers.get("content-type")?.startsWith("application/connect+json"))
-		throw new Error("Grok Bot transcript watch returned an invalid stream");
+		throw new GrokbotChatProtocolError("Grok Bot transcript watch returned an invalid stream");
 	const entries = new Map<string, ChatEntry>();
 	for await (const frame of readConnectFrames(response.body)) {
 		if (frame.flags & 1 || frame.flags & ~3)
-			throw new Error("Grok Bot transcript watch returned unsupported envelope flags");
+			throw new GrokbotChatProtocolError("Grok Bot transcript watch returned unsupported envelope flags");
 		const raw: unknown = frame.payload.length ? JSON.parse(frame.payload.toString("utf8")) : {};
-		if (!isRecord(raw)) throw new Error("Grok Bot transcript watch returned an invalid frame");
+		if (!isRecord(raw)) throw new GrokbotChatProtocolError("Grok Bot transcript watch returned an invalid frame");
 		if (frame.flags & 2) {
 			if (isRecord(raw.error)) throw new GrokbotRpcError(200, raw.error.code);
 			break;
@@ -140,7 +143,8 @@ async function collectReply(response: Response, agentId: string, nonce: string):
 		if (isRecord(raw.turnFailed) && raw.turnFailed.agentId === agentId)
 			throw new GrokbotRpcError(200, raw.turnFailed.failureCode ?? "turn_failed");
 		if (!isRecord(raw.rows)) continue;
-		if (raw.rows.agentId !== agentId) throw new Error("Grok Bot transcript watch returned another agent");
+		if (raw.rows.agentId !== agentId)
+			throw new GrokbotChatProtocolError("Grok Bot transcript watch returned another agent");
 		for (const entry of records(raw.rows.entries)) {
 			const key = typeof entry.entryId === "string" ? entry.entryId : String(entry.seq);
 			entries.set(key, entry);
@@ -148,7 +152,7 @@ async function collectReply(response: Response, agentId: string, nonce: string):
 		const reply = grokbotChatReplyForNonce([...entries.values()], nonce);
 		if (reply) return reply;
 	}
-	throw new Error("Grok Bot transcript watch ended without a reply to this request");
+	throw new GrokbotChatProtocolError("Grok Bot transcript watch ended without a reply to this request");
 }
 
 async function listAgents(client: GrokbotRpcClient, cleanup = false): Promise<GrokbotRpcRecord[]> {
@@ -248,7 +252,8 @@ export const streamGrokbotChat: StreamFunction<"grokbot-chat"> = (
 				origin: "omp",
 			});
 			const matches = (await listAgents(client)).filter(agent => agentMatches(agent, agentId, name, originalIds));
-			if (matches.length !== 1) throw new Error("Grok Bot chat could not verify its newly created agent");
+			if (matches.length !== 1)
+				throw new GrokbotChatProtocolError("Grok Bot chat could not verify its newly created agent");
 			owned = { serverId: matches[0]!.id as string, agentId, name };
 			const baseline = await client.rpc(`${SERVICE}ListGrokBotTranscriptEntries`, {
 				agentId,
@@ -256,7 +261,7 @@ export const streamGrokbotChat: StreamFunction<"grokbot-chat"> = (
 				sessionId: "",
 			});
 			if (records(baseline.entries).length)
-				throw new Error("Grok Bot chat refused to attach to a nonempty transcript");
+				throw new GrokbotChatProtocolError("Grok Bot chat refused to attach to a nonempty transcript");
 			const nonce = crypto.randomUUID();
 			stream.push({ type: "start", partial: output });
 			const response = await client.request(
@@ -303,10 +308,10 @@ export const streamGrokbotChat: StreamFunction<"grokbot-chat"> = (
 				text: candidate.text,
 			});
 			if (!String(delivery.delivery ?? "").includes("ACCEPTED") && delivery.dispatched !== true)
-				throw new Error("Grok Bot chat refused this message delivery");
+				throw new GrokbotChatProtocolError("Grok Bot chat refused this message delivery");
 			const result = await watch;
 			if (result.error) throw result.error;
-			if (!result.reply?.text.trim()) throw new Error("Grok Bot chat returned no text reply");
+			if (!result.reply?.text.trim()) throw new GrokbotChatProtocolError("Grok Bot chat returned no text reply");
 			const readback = await client.rpc(`${SERVICE}ListGrokBotTranscriptEntries`, {
 				agentId,
 				limit: 40,
@@ -314,7 +319,7 @@ export const streamGrokbotChat: StreamFunction<"grokbot-chat"> = (
 			});
 			const verified = grokbotChatReplyForNonce(records(readback.entries), nonce);
 			if (!verified || verified.entryId !== result.reply.entryId || verified.text !== result.reply.text)
-				throw new Error("Grok Bot chat reply failed independent transcript readback");
+				throw new GrokbotChatProtocolError("Grok Bot chat reply failed independent transcript readback");
 			output.content.push({ type: "text", text: verified.text });
 			output.ttft = Math.round(performance.now() - began);
 			stream.push({ type: "text_start", contentIndex: 0, partial: output });
@@ -340,7 +345,9 @@ export const streamGrokbotChat: StreamFunction<"grokbot-chat"> = (
 		if (failure !== undefined) {
 			// Do not let a third-party transport's exception echo bearer headers.
 			const safe =
-				failure instanceof GrokbotRpcError || failure instanceof AIError.ConfigurationError
+				failure instanceof GrokbotRpcError ||
+				failure instanceof GrokbotChatProtocolError ||
+				failure instanceof AIError.ConfigurationError
 					? failure
 					: new Error(
 							options?.signal?.aborted

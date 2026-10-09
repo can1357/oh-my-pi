@@ -222,7 +222,18 @@ describe("host-managed GrokBotService adapter", () => {
 		const f = fixture({ mismatchReadback: true });
 		const result = await run(f);
 		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toContain("reply failed independent transcript readback");
 		expect(result.content).toEqual([]);
+		expect(f.newAgentExists).toBe(false);
+	});
+
+	test("does not expose unexpected hook or transport exception text", async () => {
+		const f = fixture();
+		const result = await run(f, context, undefined, () => {
+			throw new Error("DO_NOT_ECHO_SECRET");
+		});
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).not.toContain("DO_NOT_ECHO_SECRET");
 		expect(f.newAgentExists).toBe(false);
 	});
 
