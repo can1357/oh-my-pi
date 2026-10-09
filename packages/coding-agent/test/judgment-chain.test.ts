@@ -251,6 +251,50 @@ describe("ChainJudge", () => {
 		expect(online).not.toHaveBeenCalled();
 	});
 
+	it("keeps a logits local judge after a native failure but drops keyword and chat models", async () => {
+		// The post-native filter keeps native candidates plus logits-based local
+		// decision models (LocalJudge reproduces calibrated probabilities);
+		// keyword-classified tiny models and chat models never stand in.
+		const JULIA = getBundledModel("local", "julia-1");
+		if (!JULIA) throw new Error("Expected bundled julia-1 judge model");
+		const settings = Settings.isolated({
+			modelRoles: { judge: "typesafe/jev-preview" },
+			"retry.fallbackChains": {
+				judge: [`${LOCAL.provider}/${LOCAL.id}`, "local/julia-1", `${ONLINE.provider}/${ONLINE.id}`],
+			},
+		});
+		const registry = makeRegistry([JEV_PREVIEW, LOCAL, JULIA, ONLINE], {
+			typesafe: "ts-key",
+			openrouter: "or-key",
+			[ONLINE.provider]: "online-key",
+		});
+		vi.spyOn(globalThis, "fetch").mockImplementation(
+			asGlobalFetch(async url => {
+				if (String(url).endsWith("/v1/systemone")) return new Response("rejected", { status: 400 });
+				return Response.json({
+					model: "jev-1.13.0",
+					answers: { level: { type: "choice", choice: "high" } },
+					usage: { input_tokens: 8, output_tokens: 2 },
+				});
+			}),
+		);
+		const logits = vi
+			.spyOn(tinyModelClient, "judge")
+			.mockResolvedValue({ logits: { level: [0.2, 2.1] } });
+		const local = vi.spyOn(tinyModelClient, "complete");
+		const online = vi.spyOn(ai, "completeSimple");
+
+		const result = await new ChainJudge({ settings, registry, purpose: "test", sessionModel: ONLINE_BACKUP }).judge({
+			state: "redesign the scheduler",
+			questions: { level: TIER_QUESTION },
+		});
+
+		expect(result.answers.level.choice).toBe("high");
+		expect(logits).toHaveBeenCalled();
+		expect(local).not.toHaveBeenCalled();
+		expect(online).not.toHaveBeenCalled();
+	});
+
 	it("fails instead of degrading to a prompted model, and skips a rejected account on later calls", async () => {
 		const settings = Settings.isolated({
 			modelRoles: { judge: "typesafe/jev-preview" },

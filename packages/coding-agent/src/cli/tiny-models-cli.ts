@@ -105,7 +105,8 @@ async function listModels(json: boolean | undefined): Promise<void> {
 	writeLine(chalk.bold("Tiny local models"));
 	for (const spec of TINY_LOCAL_MODELS) {
 		const defaultMark = spec.key === DEFAULT_TINY_TITLE_LOCAL_MODEL_KEY ? chalk.cyan(" default") : "";
-		writeLine(`${chalk.cyan(spec.key)}${defaultMark}`);
+		const judgeMark = isTinyJudgeLocalModelKey(spec.key) ? chalk.yellow(" judge-only") : "";
+		writeLine(`${chalk.cyan(spec.key)}${defaultMark}${judgeMark}`);
 		writeLine(`  ${spec.label} — ${spec.description}`);
 	}
 	const status = wordCompletion.ready ? chalk.green("downloaded") : chalk.dim("not downloaded");
