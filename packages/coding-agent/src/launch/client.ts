@@ -162,6 +162,8 @@ class SocketDaemonClient implements DaemonBrokerClient {
 	readonly #idleGraceMs: number | undefined;
 	readonly #completionObservers = new Map<string, Set<DaemonCompletionObserver>>();
 	readonly #observationSockets = new WeakSet<net.Socket>();
+	readonly #observationPublications = new WeakMap<net.Socket, { revision: number; ready: Promise<void> }>();
+	#observationRevision = 0;
 	#observationReconnectTimer: NodeJS.Timeout | undefined;
 	readonly #pending = new Map<string, PendingRequest>();
 	readonly #completionSinks = new Map<string, (notification: DaemonCompletionNotification) => Promise<void> | void>();
@@ -191,7 +193,7 @@ class SocketDaemonClient implements DaemonBrokerClient {
 		const socket = this.#socket;
 		if (!socket || socket.destroyed) throw new Error("Daemon broker socket is unavailable");
 
-		this.#markObservationSocket(socket);
+		await this.#markObservationSocket(socket);
 		const completionUnsubscribes = [...this.#completionUnsubscribes];
 		const completionReplays = [...this.#completionReplays];
 		const id = crypto.randomUUID();
@@ -216,7 +218,6 @@ class SocketDaemonClient implements DaemonBrokerClient {
 		this.#pending.set(id, pending);
 		socket.write(
 			`${JSON.stringify({
-				observedOwners: [...this.#completionObservers.keys()],
 				id,
 				token: this.#token,
 				owners: [...this.#completionSinks.keys()],
@@ -267,11 +268,13 @@ class SocketDaemonClient implements DaemonBrokerClient {
 			observers.add(observer);
 			this.#completionObservers.set(owner, observers);
 		}
+		this.#observationRevision++;
 		let subscribed = true;
 		this.#publishObservedOwners();
 		return () => {
 			if (!subscribed) return;
 			subscribed = false;
+			this.#observationRevision++;
 			for (const owner of scope) {
 				const observers = this.#completionObservers.get(owner);
 				if (!observers?.delete(observer)) continue;
@@ -396,9 +399,64 @@ class SocketDaemonClient implements DaemonBrokerClient {
 		this.#observationReconnectTimer.unref();
 	}
 
-	#markObservationSocket(socket: net.Socket): void {
-		if (this.#completionObservers.size > 0) this.#observationSockets.add(socket);
-		else this.#observationSockets.delete(socket);
+	#deliverObservation(notification: DaemonCompletionNotification): void {
+		for (const observer of this.#completionObservers.get(notification.owner) ?? []) {
+			try {
+				observer.listener(notification);
+			} catch (error) {
+				logger.warn("Daemon completion observer failed", {
+					owner: notification.owner,
+					completionId: notification.completionId,
+					error: error instanceof Error ? error.message : String(error),
+				});
+			}
+		}
+	}
+
+	async #markObservationSocket(socket: net.Socket): Promise<void> {
+		const revision = this.#observationRevision;
+		const previous = this.#observationPublications.get(socket);
+		if (previous?.revision === revision) return previous.ready;
+		if (this.#completionObservers.size === 0 && !this.#observationSockets.has(socket)) return;
+		const ready = this.#writeObservationScope(socket);
+		const publication = { revision, ready };
+		this.#observationPublications.set(socket, publication);
+		try {
+			await ready;
+		} catch (error) {
+			if (this.#observationPublications.get(socket) === publication) this.#observationPublications.delete(socket);
+			throw error;
+		}
+	}
+
+	async #writeObservationScope(socket: net.Socket): Promise<void> {
+		const operation: DaemonOperation = { op: "ping" };
+		const id = crypto.randomUUID();
+		const { promise, resolve, reject } = Promise.withResolvers<DaemonRpcResult>();
+		const timer = setTimeout(() => {
+			if (!this.#pending.delete(id)) return;
+			reject(new Error("Daemon observation registration timed out"));
+		}, requestTimeoutMs(operation));
+		this.#pending.set(id, { operation, resolve, reject, timer });
+		try {
+			// This envelope only publishes the diagnostic scope: no owned delivery,
+			// completion acknowledgements, or output subscriptions are advertised.
+			socket.write(
+				`${JSON.stringify({
+					id,
+					token: this.#token,
+					observedOwners: [...this.#completionObservers.keys()],
+					operation,
+				})}\n`,
+			);
+			if (this.#completionObservers.size > 0) this.#observationSockets.add(socket);
+			else this.#observationSockets.delete(socket);
+		} catch (error) {
+			this.#pending.delete(id);
+			clearTimeout(timer);
+			reject(error instanceof Error ? error : new Error(String(error)));
+		}
+		await promise;
 	}
 
 	#notifyObservationGap(reason: string): void {
@@ -440,18 +498,20 @@ class SocketDaemonClient implements DaemonBrokerClient {
 	#bindSocket(socket: net.Socket): void {
 		this.#socket = socket;
 		this.#buffer = "";
+		socket.once("close", () => {
+			this.#observationPublications.delete(socket);
+			if (!this.#observationSockets.delete(socket)) return;
+			this.#notifyObservationGap(
+				"Daemon service observation connection closed; completions during the coverage gap are unavailable",
+			);
+			this.#scheduleObservationReconnect();
+		});
 		socket.setEncoding("utf8");
 		socket.on("data", chunk => this.#onData(chunk));
 		socket.on("error", () => {
 			// The close handler rejects pending requests with one stable error.
 		});
 		socket.on("close", () => {
-			if (this.#observationSockets.delete(socket)) {
-				this.#notifyObservationGap(
-					"Daemon service observation connection closed; completions during the coverage gap are unavailable",
-				);
-				this.#scheduleObservationReconnect();
-			}
 			if (this.#socket === socket) this.#socket = undefined;
 			this.#rejectPending(new Error("Daemon broker connection closed"));
 			this.#scheduleCompletionReconnect();
@@ -477,14 +537,25 @@ class SocketDaemonClient implements DaemonBrokerClient {
 			try {
 				message = parseDaemonWireMessage(decoded);
 			} catch (error) {
+				if (
+					typeof decoded === "object" &&
+					decoded !== null &&
+					"event" in decoded &&
+					decoded.event === "daemon-observed"
+				) {
+					logger.warn("Ignoring malformed daemon observation", {
+						error: error instanceof Error ? error.message : String(error),
+					});
+					continue;
+				}
 				const parseError = error instanceof Error ? error : new Error(String(error));
 				if (
 					typeof decoded === "object" &&
 					decoded !== null &&
 					"event" in decoded &&
-					(decoded.event === "daemon-completed" || decoded.event === "daemon-observed")
+					decoded.event === "daemon-completed"
 				) {
-					logger.warn("Ignoring malformed daemon notification", { error: parseError.message });
+					logger.warn("Ignoring malformed daemon completion", { error: parseError.message });
 					continue;
 				}
 				this.#rejectPending(parseError);
@@ -512,20 +583,6 @@ class SocketDaemonClient implements DaemonBrokerClient {
 				pending.resolve(parseDaemonRpcResult(pending.operation, response.result));
 			} catch (error) {
 				pending.reject(error instanceof Error ? error : new Error(String(error)));
-			}
-		}
-	}
-
-	#deliverObservation(notification: DaemonCompletionNotification): void {
-		for (const observer of this.#completionObservers.get(notification.owner) ?? []) {
-			try {
-				observer.listener(notification);
-			} catch (error) {
-				logger.warn("Daemon completion observer failed", {
-					owner: notification.owner,
-					completionId: notification.completionId,
-					error: error instanceof Error ? error.message : String(error),
-				});
 			}
 		}
 	}
@@ -562,14 +619,12 @@ class SocketDaemonClient implements DaemonBrokerClient {
 	#ackCompletion(completionId: string): void {
 		const socket = this.#socket;
 		if (!socket || socket.destroyed) return;
-		this.#markObservationSocket(socket);
 		socket.write(
 			`${JSON.stringify({
 				id: crypto.randomUUID(),
 				token: this.#token,
 				owners: [...this.#completionSinks.keys()],
 				detachedOwners: [...this.#preservedCompletionOwners],
-				observedOwners: [...this.#completionObservers.keys()],
 				completionEvents: true,
 				completionAcks: [completionId],
 				completionUnsubscribes: [...this.#completionUnsubscribes],

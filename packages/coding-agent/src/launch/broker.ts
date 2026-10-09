@@ -422,13 +422,13 @@ function connectPort(host: string, port: number): Promise<boolean> {
 }
 
 class DaemonBroker {
+	readonly #observerOwners = new Map<net.Socket, Set<string>>();
 	readonly #projectDir: string;
 	readonly #runtimeDir: string;
 	readonly #endpoint: string;
 	readonly #token: string;
 	readonly #idleGraceMs: number;
 	readonly #restartBackoffBaseMs: number;
-	readonly #observerOwners = new Map<net.Socket, Set<string>>();
 	readonly #records = new Map<string, ManagedDaemon>();
 	/**
 	 * Names reserved by an in-flight `start` before its record lands in
@@ -1302,9 +1302,9 @@ class DaemonBroker {
 			record.snapshot.state = "exited";
 			record.snapshot.exitedAt = Date.now();
 			this.#persist(record);
-			this.#notifyObservers(record.snapshot);
 			await record.log?.close();
 			record.log = undefined;
+			this.#notifyObservers(record.snapshot);
 			return;
 		}
 		record.snapshot.state = "stopping";
@@ -1496,7 +1496,7 @@ class DaemonBroker {
 							return decoded.pendingCompletions.map(value => {
 								const message = parseDaemonWireMessage(value);
 								if (!("event" in message) || message.event !== "daemon-completed") {
-									throw new Error("Pending daemon completion is not an owned completion");
+									throw new Error("Pending daemon completion is not a completion event");
 								}
 								return message;
 							});
