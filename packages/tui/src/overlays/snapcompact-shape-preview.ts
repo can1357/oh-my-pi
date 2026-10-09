@@ -31,7 +31,7 @@ import { theme } from "../theme/theme";
 import sampleDoc from "./snapcompact-shape-preview-doc.md" with { type: "text" };
 import type { DescribeContext, NativeNode } from "../native/node";
 import { col, node, span, text } from "../native/describe";
-import { registerNativeBlob } from "../native/blobs";
+import { nativeImageNode } from "../native/blobs";
 
 /** Mini-frame edge in px — a small page from the real rasterizer ≈ a zoomed crop. */
 const SRC_FRAME_PX = 128;
@@ -100,8 +100,7 @@ export class SnapcompactShapePreview implements Component {
 		else if (entry.state === "rendering") sample = node("spinner", { label: [span("rendering sample…", "dim")] });
 		else if (entry.state === "failed") sample = text([span("(sample render failed)", "dim")]);
 		else {
-			sample = node("image", {
-				blob: registerNativeBlob(entry.bytes, "image/png"),
+			sample = nativeImageNode(entry.bytes, "image/png", {
 				alt: `snapcompact ${label} sample`,
 				w: entry.edgePx,
 				h: entry.edgePx,

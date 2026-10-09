@@ -2246,6 +2246,9 @@ export class TUI extends Container {
 		this.terminal.enableInput?.();
 		this.#querySixelSupport();
 		this.#queryCellSize();
+		// The probes went out over the painted frame; a terminal that could not
+		// parse one left its bytes on the cursor row (see Terminal.enableInput).
+		this.requestRender(true);
 	}
 
 	addStartListener(listener: StartListener): () => void {

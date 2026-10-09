@@ -400,6 +400,19 @@ export const cfgTerminalShowProgress = register({
 	},
 });
 
+export const cfgTerminalProgramStatus = register({
+	id: "terminal.programStatus",
+	type: "boolean",
+	default: true,
+	ui: {
+		tab: "appearance",
+		group: "Display",
+		label: "Program Status (OSC 7501)",
+		description:
+			"Report whether the agent is working, waiting on you, done, or failed over OSC 7501, for terminal tab indicators and agent inboxes",
+	},
+});
+
 export const cfgTuiTextSizing = register({
 	id: "tui.textSizing",
 	type: "boolean",
