@@ -39,19 +39,8 @@ export interface DefaultToolRenderInput {
 	options: RenderResultOptions;
 }
 
-/** Header/body assembly shared by the string and Component APIs. */
-interface DefaultToolSnapshot {
-	status: StatusLineOptions;
-	phase: ToolCardPhase;
-	body: readonly string[];
-}
-
-/** Compute the single header/body assembly behind both default-tool entry points. */
-function buildDefaultToolSnapshot(
-	input: DefaultToolRenderInput,
-	uiTheme: Theme,
-	contentWidth: number,
-): DefaultToolSnapshot {
+/** Spinner-dependent header state; cheap, recomputed every frame. */
+function buildDefaultToolStatus(input: DefaultToolRenderInput): { status: StatusLineOptions; phase: ToolCardPhase } {
 	const { options, result } = input;
 	const status: StatusLineOptions = {
 		icon: options.isPartial
@@ -76,7 +65,12 @@ function buildDefaultToolSnapshot(
 			: result?.isError
 				? "error"
 				: "success";
+	return { status, phase };
+}
 
+/** Args preview plus JSON-tree/raw output body; depends only on args, output, expansion and width. */
+function buildDefaultToolBody(input: DefaultToolRenderInput, uiTheme: Theme, contentWidth: number): string[] {
+	const { options, result } = input;
 	const body: string[] = [];
 	const args = isRecord(input.args) ? input.args : undefined;
 	if (!options.expanded && args && Object.keys(args).length > 0) {
@@ -149,7 +143,7 @@ function buildDefaultToolSnapshot(
 		}
 	}
 
-	return { status, phase, body };
+	return body;
 }
 
 /** Format one generic tool call/result card at the available content width. */
@@ -158,8 +152,8 @@ export function formatDefaultToolExecution(
 	contentWidth: number,
 	uiTheme: Theme,
 ): string {
-	const snapshot = buildDefaultToolSnapshot(input, uiTheme, contentWidth);
-	return [renderStatusLine(snapshot.status, uiTheme), ...snapshot.body].join("\n");
+	const { status } = buildDefaultToolStatus(input);
+	return [renderStatusLine(status, uiTheme), ...buildDefaultToolBody(input, uiTheme, contentWidth)].join("\n");
 }
 
 /** Inline args summary budget in characters (a data cap, not a width). */
@@ -195,12 +189,34 @@ export function describeDefaultToolExecution(input: DefaultToolRenderInput): Nat
 
 /** Render the generic fallback as the state-tinted card used by direct custom tools. */
 export function renderDefaultToolExecution(input: DefaultToolRenderInput, uiTheme: Theme): Component {
+	// The body (JSON parse + tree walk or output styling) is spinner-invariant;
+	// rebuild it only when its inputs change instead of on every animated frame.
+	let memo:
+		| { args: unknown; output: string | undefined; expanded: boolean; contentWidth: number; body: readonly string[] }
+		| undefined;
 	return plainToolCard(
 		uiTheme,
 		({ contentWidth }) => {
-			const snapshot = buildDefaultToolSnapshot(input, uiTheme, contentWidth);
-			return { status: snapshot.status, phase: snapshot.phase, body: snapshot.body };
+			const { status, phase } = buildDefaultToolStatus(input);
+			const output = input.result?.output;
+			const expanded = input.options.expanded;
+			if (
+				memo === undefined ||
+				memo.args !== input.args ||
+				memo.output !== output ||
+				memo.expanded !== expanded ||
+				memo.contentWidth !== contentWidth
+			) {
+				memo = {
+					args: input.args,
+					output,
+					expanded,
+					contentWidth,
+					body: buildDefaultToolBody(input, uiTheme, contentWidth),
+				};
+			}
+			return { status, phase, body: memo.body };
 		},
-		{ paddingX: 1, paddingY: 1, ignoreTight: true },
+		{ paddingX: 1, paddingY: 1, ignoreTight: true, onInvalidate: () => (memo = undefined) },
 	);
 }

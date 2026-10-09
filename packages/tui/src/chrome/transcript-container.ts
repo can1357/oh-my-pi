@@ -1,6 +1,7 @@
 import { type Component, Container, type HistoryBatch } from "../tui";
 import * as logger from "@oh-my-pi/pi-utils/logger";
 import { popLoopPhase, pushLoopPhase } from "@oh-my-pi/pi-utils";
+import { renderForScrollback } from "../components/image";
 import { col } from "../native/describe";
 import type { NativeNode } from "../native/node";
 import { isNativeSettled, settleNative } from "../native/settle";
@@ -56,6 +57,12 @@ export interface AppendOnlyTranscriptBlock {
 
 interface FinalizableBlock {
 	isTranscriptBlockFinalized?(): boolean;
+	/**
+	 * A finalized block whose rows still wait on async work (an SVG figure's
+	 * raster). Retirement holds until it lands: committed rows can never be
+	 * repainted, so retiring early would freeze a placeholder into scrollback.
+	 */
+	isTranscriptBlockPending?(): boolean;
 	/** Render the row that must remain represented under emergency viewport pressure. */
 	renderTranscriptBlockEmergencyRow?(width: number): string | undefined;
 }
@@ -120,7 +127,7 @@ const EMPTY_STABLE_ROWS: readonly TranscriptStableRow[] = [];
 
 function isFinalized(component: Component): boolean {
 	const block = component as Component & FinalizableBlock;
-	return block.isTranscriptBlockFinalized?.() ?? true;
+	return (block.isTranscriptBlockFinalized?.() ?? true) && block.isTranscriptBlockPending?.() !== true;
 }
 
 function blockMode(component: Component): TranscriptBlockMode {
@@ -199,6 +206,7 @@ export class TranscriptContainer extends Container {
 	 */
 	#frameRows = new Map<TranscriptEntry, readonly string[]>();
 	#frameRowsWidth = 0;
+	#releaseFailures = new WeakSet<Component>();
 	/** The `children` array `#entries` last mirrored; see {@link #syncEntries}. */
 	#syncedChildren: Component[] | undefined;
 	/** Forces the next {@link #syncEntries} to compare every entry, not just the live tail. */
@@ -576,7 +584,10 @@ export class TranscriptContainer extends Container {
 			popLoopPhase();
 		}
 		this.#replayPending = false;
-		if (rows.length === 0) return undefined;
+		if (rows.length === 0) {
+			this.#releaseCommittedRenderCaches();
+			return undefined;
+		}
 		const batch: HistoryBatch = { id: this.#nextBatchId++, rows, kind: "replay" };
 		this.#offered = { batch, kind: "replay" };
 		return batch;
@@ -740,6 +751,8 @@ export class TranscriptContainer extends Container {
 				this.#retireEntry(this.#entries[index]!);
 			}
 			this.#frontier = offered.end;
+		} else {
+			this.#releaseCommittedRenderCaches();
 		}
 		this.#offered = undefined;
 		if (this.#replayRequested) this.#startReplay();
@@ -759,6 +772,7 @@ export class TranscriptContainer extends Container {
 			const entry = this.#entries[index]!;
 			this.#setAllocation(entry.component, Number.MAX_SAFE_INTEGER, this.#lastFrame);
 			const block = trimBlankEdges(entry.component.render(width));
+			if (entry.state === "committed") this.#releaseRenderCaches(entry);
 			if (block.length === 0) continue;
 			if (rows.length > 0) rows.unshift("");
 			rows.unshift(...block);
@@ -806,6 +820,7 @@ export class TranscriptContainer extends Container {
 		for (const entry of this.#entries) {
 			this.#setAllocation(entry.component, Number.MAX_SAFE_INTEGER, this.#lastFrame);
 			const block = this.#renderEntry(entry, width);
+			if (entry.state === "committed") this.#releaseRenderCaches(entry);
 			if (block.length === 0) continue;
 			if (rows.length > 0) rows.push("");
 			this.#childStartRows.set(entry.component, rows.length);
@@ -1000,9 +1015,11 @@ export class TranscriptContainer extends Container {
 			// Only the range head is sliced by its emitted stable prefix; every other
 			// entry renders whole, so the append-only verification pass (a second
 			// full render of the block's stable prefix) is skipped for them. This
-			// keeps a complete-ledger replay at one render per block.
-			const rendered =
-				index === start ? this.#renderEntry(entry, width) : trimBlankEdges(entry.component.render(width));
+			// keeps a complete-ledger replay at one render per block. These rows go
+			// to native scrollback, where nothing can repaint them.
+			const rendered = renderForScrollback(() =>
+				index === start ? this.#renderEntry(entry, width) : trimBlankEdges(entry.component.render(width)),
+			);
 			const emittedRows = index === start ? this.#renderStablePrefix(entry, entry.emitted, width).length : 0;
 			const block = rendered.slice(emittedRows);
 			reached = index + 1;
@@ -1045,6 +1062,29 @@ export class TranscriptContainer extends Container {
 		entry.stableRows = EMPTY_STABLE_ROWS;
 		entry.renderedStableByWidth = new Map();
 		entry.stableRowCountByWidth = new Map();
+		this.#frameRows.delete(entry);
+		this.#releaseRenderCaches(entry);
+	}
+
+	#releaseCommittedRenderCaches(): void {
+		for (let index = 0; index < this.#frontier; index++) {
+			this.#releaseRenderCaches(this.#entries[index]!);
+		}
+	}
+
+	#releaseRenderCaches(entry: TranscriptEntry): void {
+		const release = entry.component.releaseRenderCaches;
+		if (release === undefined) return;
+		try {
+			release.call(entry.component);
+		} catch (err) {
+			if (this.#releaseFailures.has(entry.component)) return;
+			this.#releaseFailures.add(entry.component);
+			logger.warn("Transcript block failed to release render caches", {
+				component: entry.component.constructor.name,
+				error: String(err),
+			});
+		}
 	}
 
 	#startReplay(): void {

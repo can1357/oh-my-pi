@@ -52,8 +52,8 @@ describe("RPC durable history (persisted SessionManager)", () => {
 	// across close/reopen breaks `get_entries(since)` consumers. No LLM is
 	// involved — the history is built with canonical SessionManager APIs.
 	test("linear history, branch siblings, and resume preserve IDs/parentage/tree/leaf", async () => {
-		await using cwdDir = await TempDir.create("rpc-durable-cwd-");
-		await using sessionsDir = await TempDir.create("rpc-durable-sessions-");
+		await using cwdDir = await TempDir.create("@rpc-durable-cwd-");
+		await using sessionsDir = await TempDir.create("@rpc-durable-sessions-");
 		const cwd = cwdDir.path();
 		const sessionDir = sessionsDir.path();
 
@@ -265,6 +265,22 @@ describe("RPC Pi-compatible primitives (live server)", () => {
 				command: "set_cache_warming",
 				success: true,
 				data: { mode: "off" },
+			});
+		});
+	}, 60000);
+
+	test("set_slow_mode rejects a non-boolean enabled before touching the persisted Claude setting", async () => {
+		await withRpcServer(async (send, next) => {
+			send({ type: "get_state", id: "slow-state" });
+			const state = (await next()).data as { slowModeSupported: unknown; slowModeScope: unknown };
+			expect([state.slowModeSupported, state.slowModeScope]).toEqual([true, "global"]);
+			send({ type: "set_slow_mode", id: "slow-bad", enabled: "false" });
+			expect(await next()).toEqual({
+				id: "slow-bad",
+				type: "response",
+				command: "set_slow_mode",
+				success: false,
+				error: "set_slow_mode requires boolean enabled",
 			});
 		});
 	}, 60000);

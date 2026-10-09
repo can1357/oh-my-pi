@@ -788,7 +788,7 @@ describe("SessionManager fence relaxes when flushSync supersedes the atomic rewr
 		await storage.rewriteStarted.promise;
 
 		// (1) Append X1 while the fence epoch is still current: fenced into memory
-		// and captured by flushSync's #fileBody() below.
+		// and captured by flushSync's #serializeBody() below.
 		sessionManager.appendCustomEntry("during_active_atomic", { data: "X1" });
 
 		// (2) flushSync supersedes the pending atomic (bumps #diskEpoch) and

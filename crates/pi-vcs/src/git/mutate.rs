@@ -12,7 +12,9 @@ use std::{
 use gix::bstr::{BString, ByteSlice};
 
 use super::{
-	GitRepo, normalize_path,
+	GitRepo,
+	filter::WorktreeFilter,
+	normalize_path,
 	open::{load_index_or_empty, load_index_or_head, status_with_fresh_index, status_with_index},
 	read::literal_pathspec,
 };
@@ -94,6 +96,11 @@ impl GitRepo {
 	pub fn stage_files(&self, files: &[String]) -> Result<()> {
 		let repo = self.gix()?;
 		let mut index = load_index_or_head(&repo, "git add")?;
+		// Whole seconds since the epoch before any file is stat'ed (see
+		// `stage_one`).
+		let staging_started = std::time::SystemTime::now()
+			.duration_since(std::time::UNIX_EPOCH)
+			.map_or(0, |elapsed| elapsed.as_secs());
 		let all = files.is_empty();
 		let mut requested: BTreeSet<String> = files
 			.iter()
@@ -125,8 +132,41 @@ impl GitRepo {
 		let (mut filter, filter_index) = repo
 			.filter_pipeline(None)
 			.map_err(|err| Error::backend("git add", err))?;
+		// Hash every selected path first, then rewrite the index in one pass:
+		// removing entries path by path rescans the whole index each time.
+		let mut replaced = std::collections::HashSet::<BString>::new();
+		let mut staged = Vec::new();
 		for path in selected {
-			stage_one(&mut filter, &filter_index, &mut index, &path)?;
+			match stage_one(self.root(), &mut filter, &filter_index, &path, staging_started)? {
+				Staged::Entry(entry) => {
+					replaced.insert(path.into());
+					staged.push(entry);
+				},
+				Staged::Removed => {
+					replaced.insert(path.into());
+				},
+				Staged::Kept => {},
+			}
+		}
+		index.remove_entries(|_, path, _| replaced.contains(path));
+		// A kept entry's stat as new as the old index is racy: only that
+		// index's timestamp makes git re-check the file's content, and the
+		// index written here is newer, so the stat is dropped to keep the
+		// check (git smudges such entries when it writes an index).
+		let racy_from = index.timestamp();
+		for entry in index.entries_mut() {
+			if entry.stat.is_racy(racy_from, Default::default()) {
+				entry.stat = gix::index::entry::Stat::default();
+			}
+		}
+		for entry in staged {
+			index.dangerously_push_entry(
+				entry.stat,
+				entry.id,
+				gix::index::entry::Flags::empty(),
+				entry.mode,
+				entry.path.as_bstr(),
+			);
 		}
 		index.sort_entries();
 		index
@@ -938,17 +978,14 @@ fn hook_is_executable(path: &Path) -> bool {
 	let Ok(metadata) = fs::metadata(path) else {
 		return false;
 	};
-	if !metadata.is_file() {
-		return false;
-	}
 	#[cfg(unix)]
 	{
 		use std::os::unix::fs::PermissionsExt;
-		metadata.permissions().mode() & 0o111 != 0
+		metadata.is_file() && metadata.permissions().mode() & 0o111 != 0
 	}
 	#[cfg(not(unix))]
 	{
-		true
+		metadata.is_file()
 	}
 }
 
@@ -1274,40 +1311,59 @@ fn same_worktree_file(_: &fs::Metadata, _: &fs::Metadata) -> bool {
 	false
 }
 
-/// Write the filtered worktree content at `path` into the object database and
-/// replace its index entry. A path that vanished or is untrackable (socket,
-/// plain directory) is left out of the index, as `git add` would.
+/// The new index entry for a staged path.
+struct StagedEntry {
+	path: BString,
+	stat: gix::index::entry::Stat,
+	id:   gix::ObjectId,
+	mode: gix::index::entry::Mode,
+}
+
+/// What staging a path does to its index entries.
+enum Staged {
+	/// Replace them with this entry.
+	Entry(StagedEntry),
+	/// Drop them: the path vanished or is untrackable (socket), as `git add`
+	/// would.
+	Removed,
+	/// Leave them: a plain directory.
+	Kept,
+}
+
+/// Write the filtered worktree content at `path` into the object database.
 fn stage_one(
+	root: &Path,
 	filter: &mut gix::filter::Pipeline<'_>,
 	filter_index: &gix::index::State,
-	index: &mut gix::index::File,
 	path: &str,
-) -> Result<()> {
+	staging_started: u64,
+) -> Result<Staged> {
 	use gix::objs::tree::EntryKind;
 	let rela_path = path.as_bytes().as_bstr();
+	// Stat before reading, as `git add` does, so the entry keeps a valid stat
+	// cache: a write landing after the stat changes the file's stat and later
+	// status calls re-hash it. A file last changed in the second staging
+	// began could change again within that second and keep its stat, so its
+	// stat is not recorded and the next status compares contents instead.
+	let stat = gix::index::fs::Metadata::from_path_no_follow(&root.join(path))
+		.ok()
+		.and_then(|metadata| gix::index::entry::Stat::from_fs(&metadata).ok())
+		.filter(|stat| u64::from(stat.mtime.secs) < staging_started)
+		.unwrap_or_default();
 	let Some((id, kind, _)) = filter
 		.worktree_file_to_object(rela_path, filter_index)
 		.map_err(|err| Error::backend("git add", err))?
 	else {
-		index.remove_entries(|_, p, _| p == rela_path);
-		return Ok(());
+		return Ok(Staged::Removed);
 	};
 	let mode = match kind {
 		EntryKind::Blob => gix::index::entry::Mode::FILE,
 		EntryKind::BlobExecutable => gix::index::entry::Mode::FILE_EXECUTABLE,
 		EntryKind::Link => gix::index::entry::Mode::SYMLINK,
 		EntryKind::Commit => gix::index::entry::Mode::COMMIT,
-		EntryKind::Tree => return Ok(()),
+		EntryKind::Tree => return Ok(Staged::Kept),
 	};
-	index.remove_entries(|_, p, _| p == rela_path);
-	index.dangerously_push_entry(
-		Default::default(),
-		id,
-		gix::index::entry::Flags::empty(),
-		mode,
-		rela_path,
-	);
-	Ok(())
+	Ok(Staged::Entry(StagedEntry { path: rela_path.to_owned(), stat, id, mode }))
 }
 
 fn copy_index_paths(dest: &mut gix::index::File, source: &gix::index::File, files: &[String]) {
@@ -1470,13 +1526,14 @@ fn checkout_conflicts(
 	target: &gix::index::File,
 ) -> Result<Vec<String>> {
 	let mut conflicts = Vec::new();
+	let mut filter = WorktreeFilter::staging(repo, "git checkout")?;
 	for entry in current.entries() {
 		let path = entry.path(current).to_str_lossy().into_owned();
 		let target_entry = target.entry_by_path(path.as_bytes().as_bstr());
 		if target_entry.is_some_and(|e| e.id == entry.id && e.mode == entry.mode) {
 			continue;
 		}
-		if worktree_id(repo, &root.join(&path), entry.mode)? != Some(entry.id) {
+		if worktree_id(repo, &mut filter, root, &path, entry.mode)? != Some(entry.id) {
 			conflicts.push(path);
 		}
 	}
@@ -1485,21 +1542,27 @@ fn checkout_conflicts(
 	Ok(conflicts)
 }
 
+/// Blob id the worktree entry at repo-relative `path` would be staged as —
+/// regular files pass through the clean filters, so a CRLF checkout under
+/// `core.autocrlf` matches its LF blob — or `None` when it is missing.
 fn worktree_id(
 	repo: &gix::Repository,
-	path: &Path,
+	filter: &mut WorktreeFilter<'_>,
+	root: &Path,
+	path: &str,
 	mode: gix::index::entry::Mode,
 ) -> Result<Option<gix::hash::ObjectId>> {
-	if !path.exists() && fs::symlink_metadata(path).is_err() {
+	let absolute = root.join(path);
+	if !absolute.exists() && fs::symlink_metadata(&absolute).is_err() {
 		return Ok(None);
 	}
 	let data = if mode == gix::index::entry::Mode::SYMLINK {
-		fs::read_link(path)?
+		fs::read_link(&absolute)?
 			.to_string_lossy()
 			.into_owned()
 			.into_bytes()
 	} else {
-		fs::read(path)?
+		filter.worktree_to_git(path, fs::read(&absolute)?)?
 	};
 	Ok(Some(
 		gix::objs::compute_hash(repo.object_hash(), gix::objs::Kind::Blob, &data)
@@ -1539,20 +1602,21 @@ fn restore_index_paths(
 	index: &gix::index::File,
 	files: &[String],
 ) -> Result<()> {
+	let mut filter = WorktreeFilter::staging(repo, "git restore")?;
 	for entry in index.entries() {
 		let path = entry.path(index).to_str_lossy();
 		if files.is_empty() || files.iter().any(|wanted| path_matches(&path, wanted)) {
 			let object = repo
 				.find_object(entry.id)
 				.map_err(|e| Error::backend("git restore", e))?;
-			let blob = object
+			let mut blob = object
 				.try_into_blob()
 				.map_err(|e| Error::backend("git restore", e))?;
 			let full = root.join(path.as_ref());
 			if let Some(parent) = full.parent() {
 				fs::create_dir_all(parent)?;
 			}
-			fs::write(full, &blob.data)?;
+			fs::write(full, filter.git_to_worktree(&path, blob.take_data())?)?;
 		}
 	}
 	Ok(())
@@ -1801,13 +1865,10 @@ fn branch_is_checked_out(common: &Path, full_ref: &str) -> bool {
 fn tracked_worktree_dirty(repo: &GitRepo) -> Result<bool> {
 	let gix = repo.gix()?;
 	let index = load_index_or_head(&gix, "git worktree remove")?;
+	let mut filter = WorktreeFilter::staging(&gix, "git worktree remove")?;
 	for entry in index.entries() {
-		if worktree_id(
-			&gix,
-			&repo.root().join(entry.path(&index).to_str_lossy().as_ref()),
-			entry.mode,
-		)? != Some(entry.id)
-		{
+		let path = entry.path(&index).to_str_lossy();
+		if worktree_id(&gix, &mut filter, repo.root(), &path, entry.mode)? != Some(entry.id) {
 			return Ok(true);
 		}
 	}
@@ -1904,6 +1965,10 @@ mod tests {
 		// gix reads the developer's `~/.gitconfig`, where a global
 		// `core.hooksPath` would redirect hook lookup away from this fixture.
 		git(temp.path(), &["config", "core.hooksPath", ".git/hooks"]);
+		// Assertions compare exact worktree bytes; Git for Windows' system
+		// `core.autocrlf=true` would check them out as CRLF. Tests covering
+		// line-ending conversion opt back in explicitly.
+		git(temp.path(), &["config", "core.autocrlf", "false"]);
 		fs::write(temp.path().join("a"), "one\n").unwrap();
 		fs::write(temp.path().join("b"), "two\n").unwrap();
 		git(temp.path(), &["add", "."]);
@@ -1950,6 +2015,34 @@ mod tests {
 		assert_eq!(git(temp.path(), &["status", "--porcelain"]), "A  new");
 		repo.unstage(&[]).unwrap();
 		assert_eq!(git(temp.path(), &["status", "--porcelain"]), "?? new");
+	}
+
+	/// Staged entries record the file's stat so later status calls can skip
+	/// re-hashing them; a zeroed stat would force a content check every time.
+	/// A file changed in the second staging began could change again within
+	/// that second without its stat changing, so it records none.
+	#[test]
+	fn stage_files_records_the_stat_cache_unless_racy() {
+		let (temp, repo) = fixture();
+		let set_mtime = |path: &str, when: std::time::SystemTime| {
+			fs::OpenOptions::new()
+				.write(true)
+				.open(temp.path().join(path))
+				.and_then(|file| file.set_modified(when))
+				.unwrap();
+		};
+		let now = std::time::SystemTime::now();
+		fs::write(temp.path().join("a"), "changed content\n").unwrap();
+		set_mtime("a", now - std::time::Duration::from_secs(30));
+		set_mtime("b", now + std::time::Duration::from_secs(60));
+		repo.stage_files(&[]).unwrap();
+		let index = gix::open(temp.path()).unwrap().open_index().unwrap();
+		let stat = |path: &str| index.entry_by_path(path.into()).unwrap().stat;
+		let size = fs::metadata(temp.path().join("a")).unwrap().len();
+		assert_eq!(u64::from(stat("a").size), size, "a records its size");
+		assert_ne!(stat("a").mtime, gix::index::entry::stat::Time::default(), "a records its mtime");
+		assert_eq!(stat("b"), gix::index::entry::Stat::default(), "a racy stat is not recorded");
+		assert_eq!(git(temp.path(), &["status", "--porcelain"]), "M  a");
 	}
 
 	#[test]
@@ -2270,6 +2363,47 @@ mod tests {
 	}
 
 	#[test]
+	fn checkout_restore_and_worktree_remove_honor_autocrlf() {
+		// Regression: conflict and dirty checks hashed raw worktree bytes, so a
+		// CRLF checkout under `core.autocrlf=true` (the Git for Windows default)
+		// read as modified and blocked the next checkout or a non-forced
+		// worktree removal, and restore wrote LF where git writes CRLF.
+		let (temp, repo) = fixture();
+		git(temp.path(), &["config", "core.autocrlf", "true"]);
+		repo.create_branch("other", "HEAD", false).unwrap();
+		fs::write(temp.path().join("a"), "main\n").unwrap();
+		repo.stage_files(&["a".into()]).unwrap();
+		repo
+			.commit_create("main", &CommitOptions::default())
+			.unwrap();
+		repo.checkout("other").unwrap();
+		assert_eq!(fs::read_to_string(temp.path().join("a")).unwrap(), "one\r\n");
+		repo.checkout("main").unwrap();
+		assert_eq!(fs::read_to_string(temp.path().join("a")).unwrap(), "main\r\n");
+		assert_eq!(git(temp.path(), &["status", "--porcelain"]), "");
+
+		fs::write(temp.path().join("a"), "dirty\r\n").unwrap();
+		assert!(matches!(repo.checkout("other"), Err(Error::Conflict { .. })));
+		repo
+			.restore(&RestoreOptions { files: vec!["a".into()], ..Default::default() })
+			.unwrap();
+		assert_eq!(fs::read_to_string(temp.path().join("a")).unwrap(), "main\r\n");
+		assert_eq!(git(temp.path(), &["status", "--porcelain"]), "");
+
+		let linked = temp.path().join("../linked-autocrlf");
+		let _ = fs::remove_dir_all(&linked);
+		repo
+			.worktree_add(&linked, "main", WorktreeAddOptions {
+				detach:       true,
+				clone:        WorktreeClone::Off,
+				keep_changes: false,
+			})
+			.unwrap();
+		assert_eq!(fs::read_to_string(linked.join("a")).unwrap(), "main\r\n");
+		assert!(repo.worktree_remove(&linked, false).unwrap(), "clean CRLF checkout is not dirty");
+	}
+
+	#[test]
 	fn mutate_clean_and_alternate_index() {
 		let (temp, repo) = fixture();
 		fs::write(temp.path().join(".gitignore"), "ignored\n").unwrap();
@@ -2345,8 +2479,8 @@ mod tests {
 		fs::write(temp.path().join("parent-untracked.txt"), "delete\n").unwrap();
 
 		// 4. Global excludesfile (core.excludesFile), configured *after* `repo`'s
-		//    cached gix handle was opened by the staging calls above. The clean below
-		//    must observe it or `global.env` is deleted.
+		//    cached gix handle was opened by the staging calls above. The clean
+		//    below must observe it or `global.env` is deleted.
 		let global_exclude = outside.path().join("global-excludes");
 		fs::write(&global_exclude, "global.env\n").unwrap();
 		git(temp.path(), &["config", "core.excludesFile", global_exclude.to_str().unwrap()]);
@@ -2411,8 +2545,8 @@ mod tests {
 			initially_empty.exists(),
 			"pathspec-scoped clean leaves directories outside the pathspec"
 		);
-		// 10. Pathspec scoping: cleaning with a pathspec prunes empty dirs inside the
-		//     pathspec but preserves the parent
+		// 10. Pathspec scoping: cleaning with a pathspec prunes empty dirs inside
+		//     the pathspec but preserves the parent
 		let pathspec_dir = temp.path().join("pathspec-parent/child/grandchild");
 		fs::create_dir_all(&pathspec_dir).unwrap();
 		fs::write(pathspec_dir.join("leaf.txt"), "leaf\n").unwrap();
@@ -2791,7 +2925,7 @@ mod tests {
 			.unwrap();
 		assert!(
 			git(temp.path(), &["worktree", "list", "--porcelain"])
-				.contains(linked.to_string_lossy().as_ref())
+				.contains(git_metadata_path(&linked).as_ref())
 		);
 		assert!(repo.worktree_remove(&linked, true).unwrap());
 
@@ -2813,7 +2947,7 @@ mod tests {
 		assert_eq!(git(temp.path(), &["rev-parse", "HEAD"]), source_head);
 		assert!(
 			!git(temp.path(), &["worktree", "list", "--porcelain"])
-				.contains(linked.to_string_lossy().as_ref())
+				.contains(git_metadata_path(&linked).as_ref())
 		);
 		assert!(repo.worktree_prune().is_ok());
 		let _ = fs::remove_dir_all(linked);

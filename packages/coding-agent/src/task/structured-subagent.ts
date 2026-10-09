@@ -10,11 +10,14 @@ import path from "node:path";
 import { $env, prompt, Snowflake } from "@oh-my-pi/pi-utils";
 import { shortenPath } from "@oh-my-pi/pi-tui/render/render-utils";
 import { resolveAgentModelSelection, resolveConfiguredModelPatterns } from "../config/model-resolver";
+import { type OAuthAccountPools, validateAgentAccountPools } from "../config/account-pools";
 import {
 	type CompactionThresholdPair,
 	validateAgentCompactionThresholdOverrides,
 } from "../config/compaction-threshold";
 import { type ServiceTierInheritSettingValue, validateAgentServiceTierOverrides } from "../config/service-tier";
+import { isProviderEnabled, isUserSourceEnabled } from "../capability";
+import type { EffectiveExtensionRoots } from "../capability/types";
 import type { CustomTool } from "../extensibility/custom-tools/types";
 import { sessionLocalProtocolOptions } from "../internal-urls/context";
 import { registerArtifactsDir } from "../internal-urls/registry-helpers";
@@ -58,6 +61,7 @@ import { parseIsolationBackend } from "./worktree";
 
 import {
 	cfgIsolationBackend,
+	cfgTaskAgentAccountPools,
 	cfgTaskAgentCompactionThresholdOverrides,
 	cfgTaskAgentModelOverrides,
 	cfgTaskAgentServiceTierOverrides,
@@ -163,6 +167,8 @@ export interface EffectiveSubagentPolicy {
 	serviceTierOverride?: ServiceTierInheritSettingValue;
 	/** Exact-name entry normalized to both child compaction threshold fields. */
 	compactionThresholdOverride?: CompactionThresholdPair;
+	/** Exact-name `task.agentAccountPools` entry: the only OAuth accounts the child may use, per listed provider. */
+	oauthAccountPools?: OAuthAccountPools;
 	parentActiveModelPattern?: string;
 	schema: StructuredSubagentSchemaResolution;
 	planMode: boolean;
@@ -286,6 +292,39 @@ function assertDepthAndSpawnAllowed(request: StructuredSubagentRequest, agentNam
 }
 
 /**
+ * In-flight agent discovery, keyed by resolved cwd, the effective extension
+ * roots and the provider/source toggles `discoverAgents` consults. Concurrent
+ * preflights (task batch items, eval `agent()` fan-out) share one disk scan;
+ * the entry is dropped when the scan settles, so any later call rescans and
+ * policy resolution stays as fresh as before. A toggle flipped mid-scan changes
+ * the key, so later callers rescan under the new policy. The live
+ * `discoverAgents` binding is part of the entry so spies swapped mid-flight
+ * never receive a stale result.
+ */
+const inflightDiscovery = new Map<string, { fn: typeof discoverAgents; promise: Promise<DiscoveryResult> }>();
+
+function discoverAgentsShared(cwd: string, extensionRoots?: EffectiveExtensionRoots): Promise<DiscoveryResult> {
+	const fn = discoverAgents;
+	const policy = [
+		isProviderEnabled("omp-plugins"),
+		isProviderEnabled("claude-plugins"),
+		isUserSourceEnabled("claude-plugins"),
+		isUserSourceEnabled("claude"),
+	].join(",");
+	const key = `${path.resolve(cwd)}\0${policy}\0${JSON.stringify(extensionRoots ?? null)}`;
+	const existing = inflightDiscovery.get(key);
+	if (existing && existing.fn === fn) return existing.promise;
+	const promise = fn(cwd, undefined, extensionRoots);
+	const entry = { fn, promise };
+	inflightDiscovery.set(key, entry);
+	const clear = () => {
+		if (inflightDiscovery.get(key) === entry) inflightDiscovery.delete(key);
+	};
+	promise.then(clear, clear);
+	return promise;
+}
+
+/**
  * Resolve every policy shared by task and eval before allocating artifacts or
  * dispatching work. Callers translate {@link StructuredSubagentError} into
  * their own wire-level error surface.
@@ -300,7 +339,7 @@ export async function resolveEffectiveSubagentPolicy(
 	assertPlanControlsAllowed(request, planMode);
 	assertDepthAndSpawnAllowed(request, agentName);
 
-	const discovery = await discoverAgents(request.session.cwd, undefined, request.session.effectiveExtensionRoots?.());
+	const discovery = await discoverAgentsShared(request.session.cwd, request.session.effectiveExtensionRoots?.());
 	const agents = [...discovery.agents, ...(request.session.getSessionAgents?.() ?? [])];
 	const agent = getAgent(agents, agentName);
 	if (!agent) {
@@ -345,6 +384,8 @@ export async function resolveEffectiveSubagentPolicy(
 	const compactionThresholdOverride = Object.hasOwn(compactionThresholdOverrides, agentName)
 		? compactionThresholdOverrides[agentName]
 		: undefined;
+	const agentAccountPools = validateAgentAccountPools(cfgTaskAgentAccountPools.get(request.session.settings));
+	const oauthAccountPools = Object.hasOwn(agentAccountPools, agentName) ? agentAccountPools[agentName] : undefined;
 	const parentActiveModelPattern = request.session.getActiveModelString?.();
 	const modelResolution = {
 		requestModel: request.model,
@@ -375,6 +416,7 @@ export async function resolveEffectiveSubagentPolicy(
 		modelRole,
 		serviceTierOverride,
 		compactionThresholdOverride,
+		oauthAccountPools,
 		parentActiveModelPattern,
 		schema,
 		planMode,
@@ -510,6 +552,7 @@ function buildExecutorOptions(
 		modelRoute: policy.modelRoute,
 		serviceTierOverride: policy.serviceTierOverride,
 		compactionThresholdOverride: policy.compactionThresholdOverride,
+		oauthAccountPools: policy.oauthAccountPools,
 		parentActiveModelPattern: policy.parentActiveModelPattern,
 		thinkingLevel: policy.effectiveAgent.thinkingLevel,
 		effort: request.effort,

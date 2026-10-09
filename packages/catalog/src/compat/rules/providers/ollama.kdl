@@ -13,6 +13,9 @@ provider "ollama" priority=-1 {
 	// Replaces both Ollama empty-length finish baselines.
 	empty-length-finish-is-context-error #true
 	thinking-efforts "low" "medium" "high" "max"
+	// Ollama's OpenAI-compatible endpoints accept effort "none" to turn thinking
+	// off; the lowest ladder effort ("low") still thinks on e.g. Gemma 4.
+	reasoning-disable-mode "none-effort"
 	// Ollama continues a trailing assistant turn verbatim on /api/chat and
 	// /v1/responses alike; callers use it to commit an output prefix.
 	supports-assistant-prefill #true

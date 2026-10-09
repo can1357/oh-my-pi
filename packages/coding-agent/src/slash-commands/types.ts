@@ -98,7 +98,17 @@ export interface SlashCommandRuntime {
 	 */
 	runCommandInBackground?: (task: () => Promise<void>) => void;
 	notifyTitleChanged?: () => Promise<void> | void;
-	notifyConfigChanged?: () => Promise<void> | void;
+	/**
+	 * Push the host's view of the session config (model, thinking level, mode).
+	 *
+	 * `handledBySessionEvent` marks changes the host may already learn from an
+	 * `AgentSession` lifetime event (`model_changed`/`thinking_level_changed`).
+	 * ACP installs a session-lifetime subscription that turns those into a
+	 * `config_option_update`, so it skips this explicit push once subscribed —
+	 * pre-bootstrap sessions still get it. Hosts without such a subscription
+	 * (RPC) ignore the flag and always push.
+	 */
+	notifyConfigChanged?: (options?: { handledBySessionEvent?: boolean }) => Promise<void> | void;
 }
 
 /**

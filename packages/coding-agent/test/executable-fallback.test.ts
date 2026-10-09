@@ -40,9 +40,12 @@ describe("executable fallback on unlinked binary", () => {
 
 	it("prefers original absolute launcher path over generic PATH match when executable", () => {
 		vi.spyOn(utils, "isCompiledBinary").mockReturnValue(true);
-		const missingPath = "/opt/homebrew/Cellar/omp/18.1.8/bin/omp";
-		const originalLauncher = "/opt/homebrew/bin/omp";
-		const otherOmpInPath = "/usr/local/bin/omp";
+		// The launcher must be fully qualified on the host platform: on Windows a rooted path
+		// without a drive letter is drive-relative and intentionally not trusted.
+		const root = process.platform === "win32" ? "C:" : "";
+		const missingPath = `${root}/opt/homebrew/Cellar/omp/18.1.8/bin/omp`;
+		const originalLauncher = `${root}/opt/homebrew/bin/omp`;
+		const otherOmpInPath = `${root}/usr/local/bin/omp`;
 
 		setProcessProp("execPath", missingPath);
 		setProcessProp("argv0", originalLauncher);

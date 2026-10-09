@@ -8,6 +8,7 @@ import { scheduler } from "node:timers/promises";
 import { type } from "@oh-my-pi/omptype";
 import { calculateCost } from "@oh-my-pi/pi-catalog/models";
 import {
+	ensureAntigravityVersion,
 	getAntigravityModelWireProfile,
 	getAntigravityUserAgent,
 	getGeminiCliHeaders,
@@ -577,6 +578,9 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 			if (replacementPayload !== undefined) {
 				requestBody = replacementPayload as typeof requestBody;
 			}
+			// The backend gates newer models on the client version; a process that
+			// skipped discovery (fresh model cache) must still send the current one.
+			if (isAntigravity) await ensureAntigravityVersion(options?.fetch ?? fetch, options?.signal);
 			const headers = isAntigravity ? { "User-Agent": getAntigravityUserAgent() } : getGeminiCliHeaders(model.id);
 
 			const requestHeaders = {

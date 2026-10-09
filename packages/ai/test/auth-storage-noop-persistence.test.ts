@@ -137,4 +137,21 @@ describe("AuthStorage skips no-op agent.db writes", () => {
 		await authStorage.keys.get(PROVIDER, sessionId);
 		expect(persistedLastUsed()).toBe(t0 + 61_000);
 	});
+
+	test("selection with recordAffinity false persists no sticky for OAuth or API-key credentials", async () => {
+		if (!authStorage || !store) throw new Error("test setup failed");
+		const apiKeyProvider = "unit-noop-persist-key";
+		await authStorage.credentials.set(PROVIDER, {
+			type: "oauth",
+			access: "cached-access",
+			refresh: "cached-refresh",
+			expires: farExpiry(),
+		});
+		await authStorage.credentials.set(apiKeyProvider, { type: "api_key", key: "stored-key" });
+
+		expect(await authStorage.keys.get(PROVIDER, "probe", { recordAffinity: false })).toBe("cached-access");
+		expect(await authStorage.keys.get(apiKeyProvider, "probe", { recordAffinity: false })).toBe("stored-key");
+		expect(store.getCache(`${STICKY_KEY_PREFIX}probe`)).toBeNull();
+		expect(store.getCache(`session:sticky:${apiKeyProvider}:probe`)).toBeNull();
+	});
 });

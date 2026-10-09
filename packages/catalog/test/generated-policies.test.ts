@@ -315,6 +315,31 @@ describe("generated model policies", () => {
 		});
 	});
 
+	it("bands Claude Haiku 5.5 at 100K input tokens on non-Anthropic hosts from their own list price", () => {
+		const bedrock = buildModel(
+			createSpec({
+				id: "anthropic.claude-haiku-5-5",
+				api: "bedrock-converse-stream",
+				provider: "amazon-bedrock",
+				contextWindow: 1_000_000,
+				cost: { input: 0.2, output: 1, cacheRead: 0.02, cacheWrite: 0.25 },
+			}),
+		);
+		expect(bedrock.cost.longContext).toEqual({
+			inputThreshold: 100_000,
+			input: 1,
+			output: 5,
+			cacheRead: 0.1,
+			cacheWrite: 1.25,
+		});
+
+		// Zero-priced subscription rows have no band, so no 100K window cap.
+		const copilot = buildModel(
+			createSpec({ id: "claude-haiku-5.5", api: "anthropic-messages", provider: "github-copilot" }),
+		);
+		expect(copilot.cost.longContext).toBeUndefined();
+	});
+
 	it("preserves QwenCloud's provider-authored qwen3.8 effort ladders", () => {
 		const models: ModelSpec<Api>[] = [
 			createSpec({
@@ -398,6 +423,22 @@ describe("generated model policies", () => {
 			// Thinking can no longer be disabled.
 			expect(model.thinking?.requiresEffort).toBe(true);
 			// Default effort is `max` per the GLM-5.3 API spec.
+			expect(model.thinking?.defaultLevel).toBe(Effort.Max);
+		}
+	});
+
+	it("keeps the GLM-5.3 low/high/max ladder on Fast serving-path ids on every host", () => {
+		const models = [
+			createSpec({ id: "glm-5.3-fast", api: "openai-completions", provider: "fireworks" }),
+			createSpec({ id: "zai-org/GLM-5.3-Fast", api: "openai-completions", provider: "baseten" }),
+			createSpec({ id: "zai/glm-5.3-fast", api: "anthropic-messages", provider: "vercel-ai-gateway" }),
+		].map(model => buildGenerated(model));
+
+		// Fast serves the same weights faster, so it keeps the base model's
+		// mandatory-thinking ladder rather than the host's generic one.
+		for (const model of models) {
+			expect(model.thinking?.efforts).toEqual([Effort.Low, Effort.High, Effort.Max]);
+			expect(model.thinking?.requiresEffort).toBe(true);
 			expect(model.thinking?.defaultLevel).toBe(Effort.Max);
 		}
 	});

@@ -96,7 +96,6 @@ export async function renderPdfPageScreenshot(
 	url.hash = `page=${page}&toolbar=0&navpanes=0&view=Fit`;
 
 	let browserLease = false;
-	let tabOpened = false;
 	let browser: BrowserHandle | undefined;
 	try {
 		const acquiredBrowser = await untilAborted(renderSignal, () =>
@@ -115,7 +114,6 @@ export async function renderPdfPageScreenshot(
 				ownerSessionId: session.getSessionId?.() ?? undefined,
 			}),
 		);
-		tabOpened = true;
 		await releaseBrowser(acquiredBrowser, { kill: false });
 		browserLease = false;
 
@@ -135,7 +133,11 @@ export async function renderPdfPageScreenshot(
 		}
 		throw error;
 	} finally {
-		if (tabOpened) await releaseTab(tabName, { kill: false });
-		if (browserLease && browser) await releaseBrowser(browser, { kill: false });
+		try {
+			// A timed-out navigation keeps the published tab, so release it by name.
+			await releaseTab(tabName, { kill: false });
+		} finally {
+			if (browserLease && browser) await releaseBrowser(browser, { kill: false });
+		}
 	}
 }

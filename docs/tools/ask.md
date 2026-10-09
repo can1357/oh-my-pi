@@ -50,7 +50,7 @@
 6. Otherwise it uses the selector/editor fallback for each question:
    - single-select list plus `Other (type your own)`
    - multi-select checkbox loop plus `Done selecting` when applicable and `Other (type your own)`
-7. In fallback multi-question mode, left/right arrow handlers move backward/forward and preserve prior answers. Single-select answers advance automatically; multi-select options toggle until the user moves forward or submits custom input.
+7. In fallback multi-question mode, left/right arrow handlers move backward/forward and preserve prior answers. Single-select answers advance automatically; multi-select options toggle until the user picks `Done selecting`, moves forward, or submits custom input.
 8. If a timeout fires before an answer, the fallback auto-selects the valid recommended option, or the first option otherwise; result text gets ` (auto-selected after timeout)` and `details.timedOut` is set. The rich dialog reports its own `timedOut` answers.
 9. If the user cancels without timeout, `execute()` aborts the tool context and throws `ToolAbortError("Ask tool was cancelled by the user")`.
 10. On success it formats human-readable text plus structured `details`; the TUI renderer uses `details` for rich result display.

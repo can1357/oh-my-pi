@@ -313,19 +313,23 @@ describe("createSessionManager — missing session (#2084)", () => {
 		}
 	});
 
-	it("propagates ENOTDIR on ordinary session loads when throwIfMissing is false (#11491)", async () => {
-		const cwd = await fsp.mkdtemp(path.join(os.tmpdir(), "omp-enotdir-ordinary-"));
-		const regularFile = path.join(cwd, "file.txt");
-		await Bun.write(regularFile, "not a directory");
-		const enotdirChild = path.join(regularFile, "child.jsonl");
-		try {
-			await expect(loadSessionFile(enotdirChild)).rejects.toMatchObject({
-				code: "ENOTDIR",
-			});
-		} finally {
-			await fsp.rm(cwd, { recursive: true, force: true });
-		}
-	});
+	// Windows reports a path through a regular file as ENOENT, never ENOTDIR.
+	it.skipIf(process.platform === "win32")(
+		"propagates ENOTDIR on ordinary session loads when throwIfMissing is false (#11491)",
+		async () => {
+			const cwd = await fsp.mkdtemp(path.join(os.tmpdir(), "omp-enotdir-ordinary-"));
+			const regularFile = path.join(cwd, "file.txt");
+			await Bun.write(regularFile, "not a directory");
+			const enotdirChild = path.join(regularFile, "child.jsonl");
+			try {
+				await expect(loadSessionFile(enotdirChild)).rejects.toMatchObject({
+					code: "ENOTDIR",
+				});
+			} finally {
+				await fsp.rm(cwd, { recursive: true, force: true });
+			}
+		},
+	);
 
 	it("rejects --resume combined with --no-session instead of silently discarding it (#12008)", async () => {
 		await expect(

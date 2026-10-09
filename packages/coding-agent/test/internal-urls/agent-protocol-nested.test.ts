@@ -9,7 +9,7 @@ import { AgentRegistry } from "../../src/registry/agent-registry";
 import type { AgentSession } from "../../src/session/agent-session";
 import { ArtifactManager } from "../../src/session/artifacts";
 
-const tempDir = TempDir.createSync("omp-nested-agent-repro-");
+const tempDir = TempDir.createSync("@omp-nested-agent-repro-");
 afterEach(() => {
 	AgentRegistry.resetGlobalForTests();
 	resetRegisteredArtifactDirsForTests();

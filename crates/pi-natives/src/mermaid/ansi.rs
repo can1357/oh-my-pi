@@ -97,12 +97,8 @@ pub fn detect_color_mode() -> ColorMode {
 	if !std::io::stdout().is_terminal() {
 		return ColorMode::None;
 	}
-	let color_term = std::env::var("COLORTERM")
-		.map(|v| v.to_lowercase())
-		.unwrap_or_default();
-	let term = std::env::var("TERM")
-		.map(|v| v.to_lowercase())
-		.unwrap_or_default();
+	let color_term = std::env::var("COLORTERM").map_or_default(|v| v.to_lowercase());
+	let term = std::env::var("TERM").map_or_default(|v| v.to_lowercase());
 	if color_term == "truecolor" || color_term == "24bit" {
 		ColorMode::Truecolor
 	} else if term.contains("256") {

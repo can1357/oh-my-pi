@@ -1,7 +1,7 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import { Agent, type AgentMessage } from "@oh-my-pi/pi-agent-core";
 import * as compactionModule from "@oh-my-pi/pi-agent-core/compaction";
-import type { AssistantMessage, Model, UserMessage } from "@oh-my-pi/pi-ai";
+import type { AssistantMessage, Context, Model, UserMessage } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
@@ -72,6 +72,7 @@ describe("async speculative compaction", () => {
 			obfuscateTextForProvider?: (text: string | undefined) => string | undefined;
 			obfuscatePreparationForProvider?: <T>(preparation: T) => T;
 			convertToLlmForSideRequest?: (messages: AgentMessage[]) => never;
+			buildLiveProviderContext?: (summarized: AgentMessage[], retained: AgentMessage[]) => Promise<Context>;
 			generateHandoffDocument?: (
 				focus: string,
 				options?: { autoTriggered?: boolean; signal?: AbortSignal },
@@ -121,7 +122,6 @@ describe("async speculative compaction", () => {
 				events.push(event.type);
 			},
 			emitNotice: () => {},
-			schedulePostPromptTask: () => {},
 			scheduleAgentContinue: () => {},
 			scheduleCompactionContinuation: () => false,
 			persistTurnMessagesForMidRunCompaction: async () => false,
@@ -132,6 +132,8 @@ describe("async speculative compaction", () => {
 			buildDisplaySessionContext: () => sessionManager.buildSessionContext(),
 			convertToLlmForSideRequest:
 				options.convertToLlmForSideRequest ?? ((messages: AgentMessage[]) => messages as never),
+			buildLiveProviderContext:
+				options.buildLiveProviderContext ?? (async (): Promise<Context> => ({ messages: [] })),
 			obfuscateTextForProvider: options.obfuscateTextForProvider ?? ((text: string | undefined) => text),
 			obfuscatePreparationForProvider:
 				options.obfuscatePreparationForProvider ?? (<T>(preparation: T) => preparation),
@@ -149,7 +151,7 @@ describe("async speculative compaction", () => {
 			generateHandoffDocument: options.generateHandoffDocument ?? (async () => undefined),
 			removeAssistantMessageFromActiveContext: () => {},
 			dropPersistedAssistantTurn: async () => undefined,
-			runRecoveryCompactionWithRollback: async () => ({ deferredHandoff: false, continuationScheduled: false }),
+			runRecoveryCompactionWithRollback: async () => ({ continuationScheduled: false }),
 			parseRetryAfterMsFromError: () => undefined,
 			setModelTemporary: async () => {},
 			abort: async () => {},
@@ -204,7 +206,7 @@ describe("async speculative compaction", () => {
 		expect(events.filter(event => event === "notes-reminder")).toHaveLength(1);
 		expect(maintenance.speculationState).toBe("idle");
 
-		await maintenance.runAutoCompaction("threshold", false, false, false, { triggerContextTokens: THRESHOLD });
+		await maintenance.runAutoCompaction("threshold", false, { triggerContextTokens: THRESHOLD });
 		expect(sessionManager.getEntries().findLast(entry => entry.type === "compaction")?.details).toEqual({
 			kind: "experimental-context-rollover",
 			version: 1,
@@ -259,7 +261,7 @@ describe("async speculative compaction", () => {
 		maintenance.maybeStartSpeculativeCompaction(SPECULATION_BAND_START, CONTEXT_WINDOW);
 		await waitForState("armed");
 
-		await maintenance.runAutoCompaction("threshold", false, false, false, { triggerContextTokens: THRESHOLD });
+		await maintenance.runAutoCompaction("threshold", false, { triggerContextTokens: THRESHOLD });
 
 		const entry = sessionManager.getEntries().findLast(item => item.type === "compaction");
 		expect(entry?.type === "compaction" ? entry.summary : undefined).toBe("armed summary");
@@ -303,7 +305,7 @@ describe("async speculative compaction", () => {
 		release.resolve();
 		await waitForState("armed");
 
-		await maintenance.runAutoCompaction("threshold", false, false, false, { triggerContextTokens: THRESHOLD });
+		await maintenance.runAutoCompaction("threshold", false, { triggerContextTokens: THRESHOLD });
 		const entry = sessionManager.getEntries().findLast(item => item.type === "compaction");
 		if (entry?.type !== "compaction") throw new Error("Expected native compaction entry");
 		expect(entry.providerReplayThroughEntryId).toBe(snapshotLeafId);
@@ -352,7 +354,7 @@ describe("async speculative compaction", () => {
 		sessionManager.appendMessage(assistantMessage("rewritten prefix", model));
 		sessionManager.appendMessage(userMessage("new suffix"));
 
-		await maintenance.runAutoCompaction("threshold", false, false, false, { triggerContextTokens: THRESHOLD });
+		await maintenance.runAutoCompaction("threshold", false, { triggerContextTokens: THRESHOLD });
 		expect(compactSpy).toHaveBeenCalledTimes(2);
 		const entry = sessionManager.getEntries().findLast(item => item.type === "compaction");
 		expect(entry?.type === "compaction" ? entry.summary : undefined).toBe("native summary 2");
@@ -405,7 +407,7 @@ describe("async speculative compaction", () => {
 		release.resolve();
 		await waitForState("armed");
 
-		await maintenance.runAutoCompaction("threshold", false, false, false, { triggerContextTokens: THRESHOLD });
+		await maintenance.runAutoCompaction("threshold", false, { triggerContextTokens: THRESHOLD });
 
 		expect(agent.state.messages.map(message => message.role)).toEqual([
 			"compactionSummary",
@@ -535,7 +537,7 @@ describe("async speculative compaction", () => {
 		await waitForState("armed");
 		sessionManager.appendMessage(userMessage("post-snapshot request"));
 
-		await maintenance.runAutoCompaction("threshold", false, false, false, {
+		await maintenance.runAutoCompaction("threshold", false, {
 			triggerContextTokens: THRESHOLD + 1_000,
 		});
 
@@ -557,7 +559,7 @@ describe("async speculative compaction", () => {
 		sessionManager.appendResetBoundary();
 		appendSummarizableConversation();
 
-		await maintenance.runAutoCompaction("threshold", false, false, false, { triggerContextTokens: THRESHOLD });
+		await maintenance.runAutoCompaction("threshold", false, { triggerContextTokens: THRESHOLD });
 
 		expect(compactSpy).toHaveBeenCalledTimes(2);
 		const entry = sessionManager.getEntries().findLast(item => item.type === "compaction");
@@ -604,7 +606,7 @@ describe("async speculative compaction", () => {
 		// local method, and the stale LLM summary must not override it.
 		cfgCompactionMethodOrder.override(maintenanceSettings, ["snapcompact"]);
 
-		await maintenance.runAutoCompaction("threshold", false, false, false, { triggerContextTokens: THRESHOLD });
+		await maintenance.runAutoCompaction("threshold", false, { triggerContextTokens: THRESHOLD });
 
 		expect(snapSpy).toHaveBeenCalledTimes(1);
 		const entry = sessionManager.getEntries().findLast(item => item.type === "compaction");
@@ -670,7 +672,7 @@ describe("async speculative compaction", () => {
 
 		// Armed: deferral ends so the real pass splices the result in immediately.
 		expect(maintenance.deferThresholdCompactionToSpeculation(THRESHOLD + 2_000, CONTEXT_WINDOW)).toBe(false);
-		await maintenance.runAutoCompaction("threshold", false, false, false, {
+		await maintenance.runAutoCompaction("threshold", false, {
 			triggerContextTokens: THRESHOLD + 2_000,
 		});
 
@@ -734,7 +736,7 @@ describe("async speculative compaction", () => {
 		expect(maintenance.speculationState).toBe("idle");
 		expect(maintenance.deferThresholdCompactionToSpeculation(THRESHOLD + 1_000, CONTEXT_WINDOW)).toBe(false);
 
-		await maintenance.runAutoCompaction("threshold", false, false, false, {
+		await maintenance.runAutoCompaction("threshold", false, {
 			triggerContextTokens: THRESHOLD + 1_000,
 		});
 		const entry = sessionManager.getEntries().findLast(item => item.type === "compaction");
@@ -778,7 +780,7 @@ describe("async speculative compaction", () => {
 		expect(maintenance.deferThresholdCompactionToSpeculation(THRESHOLD + 1_000, CONTEXT_WINDOW)).toBe(true);
 		await waitForState("armed");
 
-		await maintenance.runAutoCompaction("threshold", false, false, false, {
+		await maintenance.runAutoCompaction("threshold", false, {
 			triggerContextTokens: THRESHOLD + 1_000,
 		});
 		const entry = sessionManager.getEntries().findLast(item => item.type === "compaction");
@@ -841,7 +843,7 @@ describe("async speculative compaction", () => {
 		const largeText = "large-tail-token ".repeat(45_000);
 		sessionManager.appendMessage(assistantMessage(largeText, model));
 
-		await maintenance.runAutoCompaction("threshold", false, false, false, {
+		await maintenance.runAutoCompaction("threshold", false, {
 			triggerContextTokens: THRESHOLD + 40_000,
 		});
 
@@ -873,7 +875,7 @@ describe("async speculative compaction", () => {
 			"user",
 		);
 
-		await maintenance.runAutoCompaction("threshold", false, false, false, {
+		await maintenance.runAutoCompaction("threshold", false, {
 			triggerContextTokens: THRESHOLD + 40_000,
 		});
 
@@ -896,7 +898,7 @@ describe("async speculative compaction", () => {
 		await waitForState("armed");
 		sessionManager.appendMessage(userMessage("post-snapshot request"));
 
-		await maintenance.runAutoCompaction("threshold", false, false, false, {
+		await maintenance.runAutoCompaction("threshold", false, {
 			triggerContextTokens: THRESHOLD + 45_000,
 			pendingContextTokens: 45_000,
 		});
@@ -924,7 +926,7 @@ describe("async speculative compaction", () => {
 		const largeText = "large-tail-token ".repeat(45_000);
 		sessionManager.appendMessage(assistantMessage(largeText, model));
 
-		await maintenance.runAutoCompaction("threshold", false, false, false, {
+		await maintenance.runAutoCompaction("threshold", false, {
 			triggerContextTokens: THRESHOLD + 40_000,
 		});
 
@@ -951,7 +953,7 @@ describe("async speculative compaction", () => {
 		// A modest assistant turn is committed after the snapshot leaf
 		sessionManager.appendMessage(assistantMessage("brief acknowledgment", model));
 
-		await maintenance.runAutoCompaction("threshold", false, false, false, { triggerContextTokens: THRESHOLD });
+		await maintenance.runAutoCompaction("threshold", false, { triggerContextTokens: THRESHOLD });
 
 		// The armed handoff summary is claimed without paying for another LLM generation
 		expect(generateHandoffDocument).toHaveBeenCalledTimes(1);

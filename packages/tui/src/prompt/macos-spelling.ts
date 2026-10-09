@@ -56,6 +56,8 @@ export class MacOSSpellingProvider implements EditorTextAssistProvider {
 	#availabilityChecked = false;
 	#cacheGeneration = 0;
 	#typoCache = new Map<string, readonly native.SpellingRange[]>();
+	/** {@link #projectTypoRanges} answers for the current {@link #typoCache}; segments re-ask every frame. */
+	#projectionMemo = new Map<string, readonly native.SpellingRange[] | undefined>();
 	#typoInFlight = new Map<string, Promise<readonly native.SpellingRange[]>>();
 	#automaticTypoActive = false;
 	#automaticTypoQueue = new Map<string, string>();
@@ -237,6 +239,7 @@ export class MacOSSpellingProvider implements EditorTextAssistProvider {
 		return request;
 	}
 	#projectTypoRanges(text: string): readonly native.SpellingRange[] | undefined {
+		if (this.#projectionMemo.has(text)) return this.#projectionMemo.get(text);
 		let projected: native.SpellingRange[] | undefined;
 		let matchLength = -1;
 		for (const [previous, ranges] of this.#typoCache) {
@@ -265,6 +268,8 @@ export class MacOSSpellingProvider implements EditorTextAssistProvider {
 			});
 			matchLength = prefix + suffix;
 		}
+		if (this.#projectionMemo.size >= CACHE_LIMIT) this.#projectionMemo.clear();
+		this.#projectionMemo.set(text, projected);
 		return projected;
 	}
 
@@ -316,6 +321,7 @@ export class MacOSSpellingProvider implements EditorTextAssistProvider {
 		const hadProjectedRanges = (this.#projectTypoRanges(text)?.length ?? 0) > 0;
 		if (this.#typoCache.size >= CACHE_LIMIT) this.#typoCache.clear();
 		this.#typoCache.set(text, ranges);
+		this.#projectionMemo.clear();
 		if (ranges.length > 0 || hadProjectedRanges) this.onUpdate?.();
 		return ranges;
 	}
@@ -323,6 +329,7 @@ export class MacOSSpellingProvider implements EditorTextAssistProvider {
 	#clearCaches(): void {
 		this.#cacheGeneration++;
 		this.#typoCache.clear();
+		this.#projectionMemo.clear();
 		this.#typoInFlight.clear();
 		this.#automaticTypoQueue.clear();
 	}

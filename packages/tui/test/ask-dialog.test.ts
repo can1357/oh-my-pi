@@ -40,6 +40,22 @@ describe("AskDialogComponent", () => {
 		vi.restoreAllMocks();
 	});
 
+	it("multi-question footer labels the question-switch keys", () => {
+		const questions: ExtensionAskDialogQuestion[] = [
+			{ id: "q1", question: "First?", options: [{ label: "A1" }, { label: "A2" }] },
+			{ id: "q2", question: "Second?", options: [{ label: "B1" }, { label: "B2" }] },
+		];
+		const component = new AskDialogComponent(questions, {
+			onSubmit: vi.fn(),
+			onCancel: vi.fn(),
+			onPrompt: vi.fn(),
+		});
+		const lines = component.render(80).map(line => stripVTControlCharacters(line));
+		const footer = lines.find(line => line.includes("select"));
+		expect(footer).toContain("⇥/←/→ question · ");
+		expect(footer).toContain("cancel");
+	});
+
 	it("single-question, single-select: Enter on option submits immediately", () => {
 		const onSubmit = vi.fn();
 		const onCancel = vi.fn();
@@ -1301,6 +1317,29 @@ describe("AskDialogComponent", () => {
 		// …but the question line is just the question, not "[Alpha] First question?".
 		expect(output).toContain("First question?");
 		expect(output).not.toContain("[Alpha]");
+	});
+
+	it("renders fenced diff questions as blocks separate from prose", () => {
+		const component = new AskDialogComponent(
+			[
+				{
+					id: "diff",
+					question: "Review this patch:\n```diff\n-old()\n+new()\n```",
+					options: [{ label: "Apply" }, { label: "Reject" }],
+				},
+			],
+			{ onSubmit: vi.fn(), onCancel: vi.fn(), onPrompt: vi.fn() },
+		);
+
+		const rows = render(component).split("\n");
+		const questionRow = rows.findIndex(row => row.includes("Review this patch:"));
+		const deletionRow = rows.findIndex(row => row.includes("-old()"));
+		const additionRow = rows.findIndex(row => row.includes("+new()"));
+		expect(questionRow).toBeGreaterThanOrEqual(0);
+		expect(deletionRow).toBeGreaterThanOrEqual(0);
+		expect(deletionRow).toBeGreaterThan(questionRow);
+		expect(additionRow).toBeGreaterThan(deletionRow);
+		expect(rows[deletionRow]).not.toContain("+new()");
 	});
 
 	it("bounds in-body question header for long multi-line questions", () => {
