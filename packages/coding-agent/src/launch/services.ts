@@ -121,9 +121,7 @@ async function requestAfterObservation(
 	return result;
 }
 
-async function request(
-	...args: Parameters<typeof requestAfterObservation>
-): Promise<DaemonRpcResult> {
+async function request(...args: Parameters<typeof requestAfterObservation>): Promise<DaemonRpcResult> {
 	await awaitServiceObservationBarrier(serviceOwner(args[0]));
 	return requestAfterObservation(...args);
 }
