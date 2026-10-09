@@ -261,10 +261,21 @@ it("retains report receipts and persisted metrics without retaining a parked sub
 		const revived = await AgentLifecycleManager.global().ensureLive(AGENT_ID);
 		expect(cfgContextPromotionEnabled.get(revived)).toBe(true);
 	} finally {
-		collector.dispose();
-		expect(todoListeners.size).toBe(0);
-		registry.unregister(MAIN_AGENT_ID, ownerRef);
-		await ownerManager.close();
-		run?.close();
+		let remainingTodoListeners: number | undefined;
+		try {
+			collector.dispose();
+			remainingTodoListeners = todoListeners.size;
+		} finally {
+			try {
+				registry.unregister(MAIN_AGENT_ID, ownerRef);
+			} finally {
+				try {
+					await ownerManager.close();
+				} finally {
+					run?.close();
+				}
+			}
+		}
+		expect(remainingTodoListeners).toBe(0);
 	}
 }, 30_000);

@@ -14,6 +14,7 @@ import { AgentRegistry } from "../src/registry/agent-registry";
 import { SecretObfuscator } from "../src/secrets/obfuscator";
 import type { AgentSession } from "../src/session/agent-session";
 import { SessionManager } from "../src/session/session-manager";
+import { ACTIVE_TIME_CUSTOM_TYPE } from "../src/session/active-time";
 import * as sessionLoader from "../src/session/session-loader";
 import { StallReportCollector } from "../src/session/stall-report";
 import type { ToolSession } from "../src/tools";
@@ -147,6 +148,33 @@ describe("stall report collection", () => {
 		expect((await report.collect()).text).toContain("### “Child”");
 		retained.commit();
 		expect((await report.collect()).text).not.toContain("### “Child”");
+	});
+
+	it("retains removed in-memory agents' counters and last five responses without their live transcript", async () => {
+		const registry = new AgentRegistry();
+		const main = fixture(registry);
+		register(registry, main);
+		const child = fixture(registry, "RemovedMemory");
+		const childRef = register(registry, child, "Main", main.sessionManager.getSessionId());
+		cleanups.push(() => main.sessionManager.close(), () => child.sessionManager.close());
+		const report = collector(main);
+		for (let index = 1; index <= 6; index++) child.append(`removed-response-${index}`, { tool: "read" });
+		child.sessionManager.appendCustomEntry(ACTIVE_TIME_CUSTOM_TYPE, {
+			durationMs: 3_000,
+			historicalUnavailable: false,
+		});
+		registry.unregister(childRef.id, childRef);
+		// Terminal session disposal drops its entries; the pending report must keep only bounded plain data.
+		child.sessionManager.releaseRetainedEntries();
+
+		const receipt = await report.collect();
+		expect(receipt.text).toContain("### “RemovedMemory” (“RemovedMemory”) — removed");
+		expect(receipt.text).toContain("TOTAL turns 6; tool calls 6; active time 3s total observed running windows");
+		expect(receipt.text).not.toContain("removed-response-1");
+		for (let index = 2; index <= 6; index++) expect(receipt.text).toContain(`removed-response-${index}`);
+		expect((await report.collect()).text).toContain("### “RemovedMemory”");
+		receipt.commit();
+		expect((await report.collect()).text).not.toContain("### “RemovedMemory”");
 	});
 
 	it("excludes unchanged historical parked/aborted refs without reading their transcripts", async () => {
