@@ -19,6 +19,8 @@ export interface MCPToolFilterResult {
 	allowed: string[];
 	/** Config entries that matched no advertised tool name, in config order. */
 	unmatched: string[];
+	/** `disabledTools` entries that matched no advertised tool name, in config order. Never warned at reception (a defensive deny legitimately matches nothing); surfaced in `/mcp test` for typo diagnosis. */
+	unmatchedDisabled: string[];
 	/** True when a configured filter excluded every advertised tool. */
 	filterEmpty: boolean;
 }
@@ -245,7 +247,7 @@ export function filterMCPTools(input: MCPToolFilterInput): MCPToolFilterResult {
 
 	const filterConfigured = Boolean(enabledTools?.length || disabledTools?.length);
 	if (!filterConfigured) {
-		return { allowed: [...toolNames], unmatched: [], filterEmpty: false };
+		return { allowed: [...toolNames], unmatched: [], unmatchedDisabled: [], filterEmpty: false };
 	}
 
 	const enabled = enabledTools?.length ? enabledTools.map(compilePattern) : undefined;
@@ -274,6 +276,11 @@ export function filterMCPTools(input: MCPToolFilterInput): MCPToolFilterResult {
 	return {
 		allowed,
 		unmatched,
+		// Computed for `/mcp test` diagnosis only — reception never warns on
+		// these (see the comment above).
+		unmatchedDisabled: disabled
+			? disabledTools!.filter((_pattern, i) => !toolNames.some(name => disabled[i](name)))
+			: [],
 		filterEmpty: allowed.length === 0 && toolNames.length > 0,
 	};
 }
@@ -300,7 +307,7 @@ export function applyMCPToolFilter(
 	}
 
 	const toolNames = tools.map(t => t.name);
-	const { allowed, unmatched, filterEmpty } = filterMCPTools({
+	const { allowed, unmatched, unmatchedDisabled, filterEmpty } = filterMCPTools({
 		toolNames,
 		enabledTools: config.enabledTools,
 		disabledTools: config.disabledTools,
