@@ -2,11 +2,12 @@ import { afterEach, describe, expect, it, vi } from "bun:test";
 import type { DaemonSnapshot, DaemonSpec } from "@oh-my-pi/pi-tui/tools/daemon";
 import { Settings } from "../../src/config/settings";
 import * as daemonClient from "../../src/launch/client";
-import type { DaemonBrokerClient } from "../../src/launch/client";
+import type { DaemonBrokerClient, DaemonCompletionUnregisterOptions } from "../../src/launch/client";
 import {
 	DAEMON_OUTPUT_MONITOR_CAPABILITY,
 	type DaemonCompletionNotification,
 	type DaemonMonitorNotification,
+	type DaemonOperation,
 	type DaemonOutputSubscription,
 	type DaemonRpcResult,
 } from "../../src/launch/protocol";
@@ -65,16 +66,22 @@ function fixture() {
 	const preserved: boolean[] = [];
 	const queued: Array<{ id: string; epoch: number | undefined }> = [];
 	const progress: string[] = [];
-	const client: DaemonBrokerClient = {
+	const client = {
+		observeOwners(): never {
+			throw new Error("Unexpected diagnostics owner observation in service epoch fixture");
+		},
 		projectDir: process.cwd(),
-		onCompletion: (_owner, sink) => {
+		onCompletion: (_owner: string, sink: (notification: DaemonCompletionNotification) => void | Promise<void>) => {
 			completionSink = sink;
-			return options => {
+			return (options?: DaemonCompletionUnregisterOptions) => {
 				preserved.push(options?.preservePending === true);
 				if (completionSink === sink) completionSink = undefined;
 			};
 		},
-		onOutput: (registered, sink) => {
+		onOutput: (
+			registered: DaemonOutputSubscription,
+			sink: (notification: DaemonMonitorNotification) => void | Promise<void>,
+		) => {
 			subscription = registered;
 			outputSink = sink;
 			return Object.assign(
@@ -85,7 +92,7 @@ function fixture() {
 				{ ready: Promise.resolve(), republish() {} },
 			);
 		},
-		request: async operation => {
+		request: async (operation: DaemonOperation): Promise<DaemonRpcResult> => {
 			if (operation.op === "ping")
 				return { op: "ping", projectDir: process.cwd(), capabilities: [DAEMON_OUTPUT_MONITOR_CAPABILITY] };
 			if (operation.op === "start")
@@ -99,6 +106,7 @@ function fixture() {
 		},
 		close() {},
 	};
+	const brokerClient: DaemonBrokerClient = client;
 	const session: ToolSession = {
 		cwd: process.cwd(),
 		hasUI: false,
@@ -128,9 +136,9 @@ function fixture() {
 			};
 		},
 	};
-	vi.spyOn(daemonClient, "daemonClientForProject").mockResolvedValue(client);
+	vi.spyOn(daemonClient, "daemonClientForProject").mockResolvedValue(brokerClient);
 	return {
-		client,
+		client: brokerClient,
 		session,
 		queued,
 		progress,
