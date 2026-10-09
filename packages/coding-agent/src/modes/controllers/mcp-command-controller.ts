@@ -1761,7 +1761,7 @@ export class MCPCommandController {
 			// reception by design (defensive denies legitimately match nothing),
 			// so `/mcp test` is where a typo fails visibly instead of failing open.
 			const diagnostics = connection.lastFilterDiagnostics;
-			if (diagnostics && (diagnostics.unmatched.length > 0 || diagnostics.unmatchedDisabled.length > 0)) {
+			if (diagnostics && (diagnostics.excluded > 0 || diagnostics.unmatched.length > 0 || diagnostics.unmatchedDisabled.length > 0)) {
 				lines.push("");
 				lines.push(`  Filter: excluded ${diagnostics.excluded} tool${diagnostics.excluded === 1 ? "" : "s"}.`);
 				for (const entry of diagnostics.unmatched) lines.push(`    • "${entry}" matched no advertised tool (allowed list)`);

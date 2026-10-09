@@ -138,7 +138,8 @@ function backslashRun(pattern: string): boolean {
  * `tools/list_changed`, and the regex is synchronous and unabortable on the
  * main thread). Two cheap discrete bounds close the class without touching a
  * pattern any real config writes: at most 6 unescaped wildcard tokens, and no
- * name longer than 64 characters reaches the regex (the mint itself caps
+ * name longer than 64 characters reaches a multi-token regex (single-wildcard
+ * patterns are linear-time and skip the length bound — see `skipLengthBound`) (the mint itself caps
  * registry names at 64; longer names stay addressable through the exact
  * literal path). Measured worst case inside both bounds: ~65 ms per
  * (pattern, name).
