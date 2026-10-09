@@ -92,6 +92,9 @@ export type DaemonRpcResult =
 	| { op: "cancel"; cancelled: boolean }
 	| { op: "shutdown" };
 
+/** Every parsed broker frame, including diagnostics that never enter owned delivery or acknowledgement. */
+export type DaemonWireFrame = DaemonWireMessage | DaemonObservationNotification;
+
 /** Authenticated request envelope used by socket clients. */
 export interface DaemonWireRequest {
 	id: string;
@@ -111,6 +114,12 @@ export interface DaemonWireRequest {
 /** Response envelope kept raw until matched with its pending operation. */
 export type DaemonWireResponse = { id: string; ok: true; result: unknown } | { id: string; ok: false; error: string };
 
+/** Non-consuming observation of a settled generation, including stops and restart backoff. */
+export interface DaemonObservationNotification {
+	event: "daemon-observed";
+	notification: DaemonCompletionNotification;
+}
+
 /** Unsolicited terminal completion sent to the socket that owns a daemon. */
 export interface DaemonCompletionNotification {
 	event: "daemon-completed";
@@ -119,13 +128,7 @@ export interface DaemonCompletionNotification {
 	daemon: DaemonSnapshot;
 }
 
-/** Non-consuming observation of a settled generation, including stops and restart backoff. */
-export interface DaemonObservationNotification {
-	event: "daemon-observed";
-	notification: DaemonCompletionNotification;
-}
-
-export type DaemonWireMessage = DaemonWireResponse | DaemonCompletionNotification | DaemonObservationNotification;
+export type DaemonWireMessage = DaemonWireResponse | DaemonCompletionNotification;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -320,7 +323,7 @@ function parseDaemonCompletionNotification(value: unknown): DaemonCompletionNoti
 }
 
 /** Decode one broker response, owned completion, or non-consuming diagnostic observation. */
-export function parseDaemonWireMessage(value: unknown): DaemonWireMessage {
+export function parseDaemonWireMessage(value: unknown): DaemonWireFrame {
 	const source = record(value, "daemon message");
 	if (source.event === "daemon-completed") return parseDaemonCompletionNotification(source);
 	if (source.event === "daemon-observed") {
