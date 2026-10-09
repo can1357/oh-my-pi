@@ -222,6 +222,10 @@ turn. Failed, aborted, and empty responses do not restore the model; the existin
 retry budget still bounds failed attempts. A request-scoped content block does not
 create an availability cooldown for the model it restores.
 
+Restoration waits for that assistant response's transcript persistence and
+success bookkeeping, not unrelated message, tool, or turn-end extension handlers.
+Sessions without a request-scoped refusal fallback do not acquire this wait.
+
 The previous model must still be available and outside any existing cooldown.
 If the session was already on an availability fallback, that fallback and its
 original restoration policy resume rather than jumping to an unavailable primary.
@@ -230,23 +234,34 @@ while an automatic swap is pending. Response attribution stays with the model
 that produced it. The restored model receives the continued conversation, so a
 later invocation can trigger another refusal and fallback.
 
-`/new` saves the selected-model baseline for resume, including the previous model
-when a request-scoped refusal fallback is still unfinished. A fallback answer must
-not become the new transcript's selected model just because it answered last.
+An abort or session transition during fallback application rolls back an
+uncommitted candidate. Once primary restoration installs its model, its transcript
+and thinking selection commit before asynchronous model-dependent reconciliation.
+An ordinary abort finishes that restoration; an explicit model selection still wins.
+
+`/new` saves the selected-model baseline for resume beneath every unpinned fallback
+layer, including an availability fallback beneath an unfinished refusal detour.
+A fallback answer must not become the new transcript's selected model just because
+it answered last.
 
 The baseline includes the primary's configured thinking level (`auto` included)
-instead of the fallback's temporary effort. A manual thinking-level override made
-on the fallback remains authoritative. `/new` reanchors only unfinished fallback
+instead of the fallback's temporary effort. A fallback model's automatic effort-floor
+clamp is not a manual override. A manual thinking-level override made on the fallback
+remains authoritative. `/new` reanchors only unfinished fallback
 routing and records the active fallback as an ephemeral model change; it does not
 carry produced-work attribution from the previous conversation.
 
-Switching to a different session, or supplying an explicit model while switching,
-discards the outgoing session's fallback ownership only after the switch commits;
-a rejected switch preserves its pending restoration.
+Switching to a different session, supplying an explicit model while switching, or
+restoring a saved model during a same-file reload discards the outgoing fallback
+ownership only after the switch commits;
+a rejected switch preserves its pending restoration. A same-file reload that keeps
+the live model (`keepModel: true`, or unavailable saved models) retains the pending
+fallback instead.
 
-The refusal policy is recorded when the fallback is entered. Enabling
-`after-success` does not retroactively unpin a fallback entered under `default`;
-reselect the desired model with `/switch` to take ownership immediately.
+The refusal policy is recorded when the fallback is entered. Switching to `default`
+does not cancel a pending `after-success` restoration. Enabling `after-success` does
+not retroactively unpin a fallback entered under `default`; reselect the desired
+model with `/switch` to take ownership immediately.
 
 To distinguish routing from attribution, inspect the Provider section of
 `/session`. Agent Hub and task progress can still credit the fallback's successful

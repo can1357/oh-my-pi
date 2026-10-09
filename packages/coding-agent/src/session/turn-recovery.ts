@@ -235,7 +235,7 @@ export interface TurnRecoveryHost {
 	promptGeneration(): number;
 	promptSequence(): number;
 	sessionId(): string;
-	emitSessionEvent(event: AgentSessionEvent): Promise<void>;
+	emitSessionEvent(event: AgentSessionEvent, options?: { detachExtensions?: boolean }): Promise<void>;
 	scheduleAgentContinue(options: {
 		source: string;
 		delayMs?: number;
@@ -247,6 +247,7 @@ export interface TurnRecoveryHost {
 	appendSessionMessage(message: AssistantMessage): void;
 	persistedAssistantEntryId(message: AssistantMessage): string | undefined;
 	sessionMessageAlreadyPersisted(message: AssistantMessage): boolean;
+	/** Installs the model synchronously; the promise settles model-dependent reconciliation. */
 	setModelWithProviderSessionReset(model: Model): Promise<void>;
 	/** Edit mode resolved for the active model and settings, captured before a fallback swap. */
 	resolveActiveEditMode(): EditMode;
@@ -320,6 +321,7 @@ export class TurnRecovery {
 	#usageReserveApproval: { model: string; sessionId: string } | undefined;
 	#pendingRetryErrors: PendingRetryError[] = [];
 	#usageLimitOutcomes = new WeakMap<AssistantMessage, Promise<UsageLimitOutcome>>();
+	#settledAssistantResponses = new WeakSet<AssistantMessage>();
 	#emptyStopRetryCount = 0;
 	#unexpectedStopRetryCount = 0;
 	#malformedFunctionCallRetryCount = 0;
@@ -488,15 +490,21 @@ export class TurnRecovery {
 		return active.handle;
 	}
 
+	/** Whether the active fallback captured request-scoped after-success restoration. */
+	hasRequestScopedRetryFallback(): boolean {
+		return this.#activeRetryFallback?.restoreAfterSuccess === true;
+	}
+
 	/**
 	 * Records which model produced this turn, marks an active fallback as having
 	 * served, then closes a successful retry saga and annotates recovered
 	 * persisted errors.
 	 */
 	async onAssistantSettledSuccessfully(message: AssistantMessage): Promise<void> {
-		if (!assistantTurnProducedOutput(message)) {
+		if (!assistantTurnProducedOutput(message) || this.#settledAssistantResponses.has(message)) {
 			return;
 		}
+		this.#settledAssistantResponses.add(message);
 		const model = this.#host.model();
 		if (model) {
 			const level = this.#host.thinkingLevel();
@@ -517,12 +525,16 @@ export class TurnRecovery {
 		// permanently unproven, hiding it from observers for the whole session.
 		if (this.#activeRetryFallback && !this.#activeRetryFallback.served && model) {
 			this.#activeRetryFallback.served = true;
-			await this.#host.emitSessionEvent({
-				type: "retry_fallback_succeeded",
-				model:
-					this.#lastServed?.attribution.selector ?? formatRetryFallbackSelector(model, this.#host.thinkingLevel()),
-				role: this.#activeRetryFallback.role,
-			});
+			await this.#host.emitSessionEvent(
+				{
+					type: "retry_fallback_succeeded",
+					model:
+						this.#lastServed?.attribution.selector ??
+						formatRetryFallbackSelector(model, this.#host.thinkingLevel()),
+					role: this.#activeRetryFallback.role,
+				},
+				{ detachExtensions: true },
+			);
 		}
 		if (this.#retryAttempt === 0) {
 			return;
@@ -531,12 +543,15 @@ export class TurnRecovery {
 			status: "recovered",
 			supersedingMessage: message,
 		});
-		await this.#host.emitSessionEvent({
-			type: "auto_retry_end",
-			success: true,
-			attempt: this.#retryAttempt,
-			retryErrors,
-		});
+		await this.#host.emitSessionEvent(
+			{
+				type: "auto_retry_end",
+				success: true,
+				attempt: this.#retryAttempt,
+				retryErrors,
+			},
+			{ detachExtensions: true },
+		);
 		this.#clearPendingRetryErrors();
 		this.#retryAttempt = 0;
 		this.resolveRetry();
@@ -713,25 +728,50 @@ export class TurnRecovery {
 		return this.#runRecoveryCompactionWithRollback(reason, message, options);
 	}
 
-	/** Persist the selected model beneath a live fallback without promoting its effort or routing. */
+	/**
+	 * Persist the selected primary beneath an unfinished unpinned fallback while
+	 * retaining the live fallback route as an ephemeral selection.
+	 */
 	persistNewSessionModelState(previousSessionId: string): void {
 		const model = this.#host.model();
-		const fallback = this.#activeRetryFallback?.restoreAfterSuccess ? this.#activeRetryFallback : undefined;
 		const configuredThinkingLevel = this.#host.configuredThinkingLevel();
 		let selectedThinkingLevel = configuredThinkingLevel;
 		let selectedConcreteThinkingLevel = this.#host.thinkingLevel();
-		if (fallback) {
-			const restoreOriginalThinking = configuredThinkingLevel === fallback.lastAppliedFallbackThinkingLevel;
-			if (restoreOriginalThinking) selectedThinkingLevel = fallback.originalThinkingLevel;
-			const selector = parseRetryFallbackSelector(fallback.originalSelector, this.#host.modelRegistry);
+		let selectedModel = model ? formatModelStringWithRouting(model) : undefined;
+		let fallback = this.#activeRetryFallback;
+		let carriesFallbackRoute = false;
+		let restoredFallbackThinking = false;
+		let restoreFallbackThinking = true;
+
+		// A request-scoped refusal fallback is only a detour. Its predecessor
+		// may itself be an availability fallback, so walk through every
+		// unpinned layer to the persisted primary. A pinned availability fallback
+		// remains the legacy selected model, but an enclosing refusal detour must
+		// still not become that selection.
+		while (fallback && (fallback.restoreAfterSuccess || !fallback.pinned)) {
+			carriesFallbackRoute = true;
+			selectedModel = fallback.originalSelector;
+			if (restoreFallbackThinking && selectedThinkingLevel === fallback.lastAppliedFallbackThinkingLevel) {
+				selectedThinkingLevel = fallback.originalThinkingLevel;
+				restoredFallbackThinking = true;
+			} else {
+				// Once a manual override differs from an applied detour, do not
+				// reinterpret it as an automatic effort from an older layer.
+				restoreFallbackThinking = false;
+			}
+			fallback = fallback.previousFallback;
+		}
+
+		if (carriesFallbackRoute && selectedModel) {
+			const selector = parseRetryFallbackSelector(selectedModel, this.#host.modelRegistry);
 			const primaryModel =
-				resolveModelOverride([fallback.originalSelector], this.#host.modelRegistry, this.#host.settings).model ??
+				resolveModelOverride([selectedModel], this.#host.modelRegistry, this.#host.settings).model ??
 				(selector ? this.#host.modelRegistry.find(selector.provider, selector.id) : undefined);
 			const requestedThinkingLevel =
 				selectedThinkingLevel === AUTO_THINKING
 					? resolveProvisionalAutoLevel(primaryModel)
 					: (concreteThinkingLevel(selectedThinkingLevel) ??
-						(restoreOriginalThinking ? selector?.thinkingLevel : undefined));
+						(restoredFallbackThinking ? selector?.thinkingLevel : undefined));
 			selectedConcreteThinkingLevel = primaryModel
 				? clampThinkingLevelToCeiling(
 						primaryModel,
@@ -742,9 +782,8 @@ export class TurnRecovery {
 		}
 		// Carry only the unfinished route. Produced-work attribution belongs to
 		// the old conversation, unlike a fork which retains that conversation.
-		const carriedFallback = fallback !== undefined && this.#reanchorFallbackRouting(previousSessionId);
+		const carriedFallback = carriesFallbackRoute && this.#reanchorFallbackRouting(previousSessionId);
 		this.#host.sessionManager.appendThinkingLevelChange(selectedConcreteThinkingLevel, selectedThinkingLevel);
-		const selectedModel = fallback?.originalSelector ?? (model ? formatModelStringWithRouting(model) : undefined);
 		if (selectedModel) this.#host.sessionManager.appendModelChange(selectedModel);
 		if (carriedFallback && model) {
 			this.#host.sessionManager.appendModelChange(
@@ -2102,13 +2141,16 @@ export class TurnRecovery {
 		// `auto` instead of collapsing it to the level it resolved to this turn.
 		const currentThinkingLevel = this.#host.configuredThinkingLevel();
 		const requestedThinkingLevel = selector.thinkingLevel ?? currentThinkingLevel;
-		// A fallback selector's explicit level (or the carried level after the
-		// replacement model's floor clamp) must never exceed the session's
-		// per-spawn effort ceiling.
+		// Normalize the replacement model's effort floor as well as the session
+		// ceiling before recording the applied effort. An automatic floor clamp
+		// must not be mistaken for a manual override during restoration or /new.
 		const nextThinkingLevel =
 			requestedThinkingLevel === AUTO_THINKING
 				? requestedThinkingLevel
-				: clampThinkingLevelToCeiling(candidate, requestedThinkingLevel, this.#host.thinkingLevelCeiling());
+				: resolveThinkingLevelForModel(
+						candidate,
+						clampThinkingLevelToCeiling(candidate, requestedThinkingLevel, this.#host.thinkingLevelCeiling()),
+					);
 		const candidateSelector = formatModelStringWithRouting(candidate);
 		// Capture the edit mode under the outgoing model so the base system prompt
 		// can be re-synced once the swap commits — `edit.modelVariants` and other
@@ -2129,25 +2171,27 @@ export class TurnRecovery {
 		await this.#host.setModelWithProviderSessionReset(candidate);
 		// An explicit re-selection can keep the same candidate object while
 		// relinquishing automatic fallback ownership. Do not re-arm or roll it back.
-		if (
-			this.#retryFallbackGeneration !== fallbackGeneration ||
-			this.#activeRetryFallback !== previousFallback ||
-			this.#host.promptGeneration() !== generation ||
-			this.#host.isDisposed()
-		) {
-			return false;
-		}
-		if (options?.signal?.aborted) {
-			this.#fallbackRoutedFor = routedBeforeSwap;
-			if (this.#activeRetryFallback) this.#activeRetryFallback.served = servedBeforeSwap;
-			if (previousModel && this.#host.model() === candidate) {
-				await this.#host.setModelWithProviderSessionReset(previousModel);
-			}
+		if (this.#retryFallbackGeneration !== fallbackGeneration || this.#activeRetryFallback !== previousFallback) {
 			return false;
 		}
 		if (this.#host.model() !== candidate) {
 			this.#fallbackRoutedFor = routedBeforeSwap;
 			if (this.#activeRetryFallback) this.#activeRetryFallback.served = servedBeforeSwap;
+			return false;
+		}
+		if (
+			options?.signal?.aborted ||
+			this.#host.promptGeneration() !== generation ||
+			this.#host.isDisposed() ||
+			this.#host.abortInProgress()
+		) {
+			// Lifecycle cancellation does not transfer ownership. Undo the already
+			// installed candidate before abort/new-session callers capture their baseline.
+			this.#fallbackRoutedFor = routedBeforeSwap;
+			if (this.#activeRetryFallback) this.#activeRetryFallback.served = servedBeforeSwap;
+			if (previousModel) {
+				await this.#host.setModelWithProviderSessionReset(previousModel);
+			}
 			return false;
 		}
 		this.#host.sessionManager.appendModelChange(candidateSelector, EPHEMERAL_MODEL_CHANGE_ROLE, true);
@@ -2468,22 +2512,38 @@ export class TurnRecovery {
 		this.#activeRetryFallback = fallback.previousFallback;
 		if (fallback.originalWasFallback) this.#markFallbackRouted();
 		const fallbackGeneration = this.#retryFallbackGeneration;
-		await this.#host.setModelWithProviderSessionReset(primaryModel);
-		// Reconciliation can yield to an explicit model selection, including a
-		// re-selection of the same model after fallback ownership was cleared.
+		const sessionId = this.#host.sessionManager.getSessionId();
+		const reconciliation = this.#host.setModelWithProviderSessionReset(primaryModel);
+		// The host installs the model before yielding. Commit its transcript and
+		// effort in the same synchronous section: an abort or /new during the
+		// reconciliation must not capture the primary with the fallback's effort.
+		const committed =
+			this.#retryFallbackGeneration === fallbackGeneration &&
+			this.#activeRetryFallback === fallback.previousFallback &&
+			this.#host.model() === primaryModel &&
+			this.#host.sessionManager.getSessionId() === sessionId;
+		if (committed) {
+			this.#host.sessionManager.appendModelChange(primarySelector, EPHEMERAL_MODEL_CHANGE_ROLE);
+			this.#host.settings.getStorage()?.recordModelUsage(primarySelector);
+			const selectedThinkingLevel = this.#host.configuredThinkingLevel();
+			this.#host.setThinkingLevel(
+				selectedThinkingLevel === currentThinkingLevel ? thinkingToApply : selectedThinkingLevel,
+			);
+		}
+		await reconciliation;
+		// Explicit selections still win, including same-model reselection. An
+		// ordinary abort may change prompt generation without changing this owned
+		// restore; finish its prompt synchronization before teardown proceeds.
 		if (
+			!committed ||
 			this.#retryFallbackGeneration !== fallbackGeneration ||
 			this.#activeRetryFallback !== fallback.previousFallback ||
 			this.#host.model() !== primaryModel ||
-			this.#host.promptGeneration() !== generation ||
-			this.#host.isDisposed() ||
-			this.#host.abortInProgress()
+			this.#host.sessionManager.getSessionId() !== sessionId ||
+			this.#host.isDisposed()
 		) {
 			return false;
 		}
-		this.#host.sessionManager.appendModelChange(primarySelector, EPHEMERAL_MODEL_CHANGE_ROLE);
-		this.#host.settings.getStorage()?.recordModelUsage(primarySelector);
-		this.#host.setThinkingLevel(thinkingToApply);
 		await this.#host.syncAfterModelChange(previousEditMode);
 		return true;
 	}

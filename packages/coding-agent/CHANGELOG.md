@@ -16,6 +16,13 @@
 - Fixed the custom-tool examples' full-documentation link opening a missing page ([#15076](https://github.com/can1357/oh-my-pi/pull/15076) by [@qingshungLI](https://github.com/qingshungLI))
 - Fixed the `/models` compaction limit preview and **Compacts at** row rounding fractional percentages (`12.5%` showed as `13%`) ([#15074](https://github.com/can1357/oh-my-pi/pull/15074) by [@H4vC](https://github.com/H4vC))
 - Fixed `/omfg` save, overwrite, and validation prompts in Tern opening as a sheet over the candidate rule; they now sit in the composer slot like `ask`, so the rule stays readable while you choose ([#15058](https://github.com/can1357/oh-my-pi/pull/15058) by [@H4vC](https://github.com/H4vC))
+- Fixed resumed `/new` conversations staying on a refusal fallback, and unfinished refusal fallbacks overriding another session's selected model ([#12239](https://github.com/can1357/oh-my-pi/pull/12239) by [@endophysics](https://github.com/endophysics)).
+- Fixed refusal fallback being skipped after Codex account rotations and overriding explicit same-model selections during fallback application ([#12239](https://github.com/can1357/oh-my-pi/pull/12239) by [@endophysics](https://github.com/endophysics)).
+- Fixed `/new` losing refusal-fallback attribution or resuming the primary with the fallback's thinking effort instead of its saved level or `auto` configuration ([#12239](https://github.com/can1357/oh-my-pi/pull/12239) by [@endophysics](https://github.com/endophysics)).
+- Fixed `/new` losing the availability primary beneath nested refusal fallbacks, including its thinking level when a detour cannot support that effort ([#12239](https://github.com/can1357/oh-my-pi/pull/12239) by [@endophysics](https://github.com/endophysics)).
+- Fixed interrupted fallback swaps leaving the active model, saved model, and thinking level inconsistent ([#12239](https://github.com/can1357/oh-my-pi/pull/12239) by [@endophysics](https://github.com/endophysics)).
+- Fixed pending refusal restoration being cancelled by policy changes or delayed by unrelated extension handlers ([#12239](https://github.com/can1357/oh-my-pi/pull/12239) by [@endophysics](https://github.com/endophysics)).
+- Fixed reloading the active transcript reporting primary replies as refusal-fallback successes ([#12239](https://github.com/can1357/oh-my-pi/pull/12239) by [@endophysics](https://github.com/endophysics)).
 
 ## [18.8.7] - 2026-10-09
 
@@ -54,12 +61,6 @@
 - Fixed interrupting a reply to send a queued steer message briefly showing omp as idle (title, progress, working indicator) before the steer ran; RPC and SDK clients also no longer see a final `agent_end` for that interrupt.
 - Fixed browser tab recordings and video frame/contact-sheet extraction creating `omp-browser-recording-*` and `omp-video-*` scratch directories in your working directory instead of the system temp directory.
 - Fixed edit snapshots retaining excess history when metadata or displayed-line provenance grows; the 64 MiB snapshot budget now counts UTF-8 bytes, so CJK- and emoji-heavy files keep fewer versions ([#14975](https://github.com/can1357/oh-my-pi/pull/14975) by [@iliaal](https://github.com/iliaal)).
-
-### Fixed
-
-- Fixed resumed `/new` conversations staying on a refusal fallback, and unfinished refusal fallbacks overriding another session's selected model ([#12239](https://github.com/can1357/oh-my-pi/pull/12239) by [@endophysics](https://github.com/endophysics)).
-- Fixed refusal fallback being skipped after Codex account rotations and overriding explicit same-model selections during fallback application ([#12239](https://github.com/can1357/oh-my-pi/pull/12239) by [@endophysics](https://github.com/endophysics)).
-- Fixed `/new` losing refusal-fallback attribution or resuming the primary with the fallback's thinking effort instead of its saved level or `auto` configuration ([#12239](https://github.com/can1357/oh-my-pi/pull/12239) by [@endophysics](https://github.com/endophysics)).
 
 ## [18.8.6] - 2026-10-08
 
