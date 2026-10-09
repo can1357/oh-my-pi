@@ -194,4 +194,66 @@ describe("role model fast mode", () => {
 			defaultDir.removeSync();
 		}
 	});
+
+	it("restores original runtime modelRoleFast override when cloning into new cwd", async () => {
+		const baseDir = TempDir.createSync("@pi-fast-clone-a-");
+		const otherDir = TempDir.createSync("@pi-fast-clone-b-");
+		try {
+			const settings = Settings.isolated({
+				modelRoles: { default: "openai/gpt-5.2", smol: "openai/gpt-4o-mini" },
+				modelRoleFast: { smol: true },
+			});
+			settings.setProjectModelRoleFast("smol", false);
+			expect(settings.getModelRoleFast("smol")).toBe(false);
+
+			const cloned = await settings.cloneForCwd(otherDir.path());
+			expect(cloned.getModelRoleFast("smol")).toBe(true);
+		} finally {
+			baseDir.removeSync();
+			otherDir.removeSync();
+		}
+	});
+
+	it("clears active role on cycleModel so /fast does not rewrite previous role", async () => {
+		const currentSession = await createSession({
+			modelRoles: {
+				default: "openai/gpt-5.2",
+				smol: "openai/gpt-4o-mini",
+			},
+			modelRoleFast: {
+				smol: true,
+			},
+		});
+
+		const mini = getBundledModel("openai", "gpt-4o-mini")!;
+		await currentSession.setModel(mini, "smol");
+		expect(currentSession.isFastModeEnabled()).toBe(true);
+
+		await currentSession.cycleModel();
+
+		currentSession.setFastMode(false);
+		expect(currentSession.settings.getModelRoleFast("smol")).toBe(true);
+	});
+
+	it("resets family tier when switching from fast role to unset role within same family", async () => {
+		const currentSession = await createSession({
+			modelRoles: {
+				default: "openai/gpt-5.2",
+				smol: "openai/gpt-4o-mini",
+			},
+			modelRoleFast: {
+				smol: true,
+			},
+		});
+
+		const mini = getBundledModel("openai", "gpt-4o-mini")!;
+		await currentSession.setModel(mini, "smol");
+		expect(currentSession.isFastModeEnabled()).toBe(true);
+		expect(currentSession.serviceTierByFamily.openai).toBe("priority");
+
+		const gpt = getBundledModel("openai", "gpt-5.2")!;
+		await currentSession.setModel(gpt, "default");
+		expect(currentSession.isFastModeEnabled()).toBe(false);
+		expect(currentSession.serviceTierByFamily.openai).toBeUndefined();
+	});
 });
