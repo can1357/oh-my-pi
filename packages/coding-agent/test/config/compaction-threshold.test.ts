@@ -177,8 +177,44 @@ describe("compaction.modelThresholds", () => {
 
 			expect(() => setModelCompactionPoint(settings, deepseek, "90k")).toThrow("project config");
 			expect(resolveModelCompactionSettings(settings, deepseek)).toMatchObject({ thresholdTokens: 50000 });
-			expect(setModelCompactionPoint(settings, other, "90k")).toBe(90000);
+			expect(setModelCompactionPoint(settings, other, "90k")).toEqual({ kind: "saved", entry: 90000 });
 			expect(resolveModelCompactionSettings(settings, other)).toMatchObject({ thresholdTokens: 90000 });
 		});
+	});
+
+	it("writes a point past the standard window only once confirmed, and rejects one past the largest window", () => {
+		const settings = Settings.isolated({ extendedContext: false });
+		const model = {
+			provider: "openai",
+			id: "gpt-5.6-terra",
+			contextWindow: 272_000,
+			cost: { longContext: { inputThreshold: 272_000 } },
+		} as Model;
+		const tiers = { standard: 272_000, extended: 1_050_000 };
+
+		const pending = setModelCompactionPoint(settings, model, "400k", { tiers });
+		expect(pending).toEqual({ kind: "confirm", message: "Opens 1.05M window; >272K costs more" });
+		expect(resolveModelCompactionSettings(settings, model).thresholdTokens).toBe(-1);
+
+		expect(setModelCompactionPoint(settings, model, "400k", { tiers, confirmed: true })).toEqual({
+			kind: "saved",
+			entry: 400_000,
+		});
+		expect(resolveModelCompactionSettings(settings, model).thresholdTokens).toBe(400_000);
+		expect(setModelCompactionPoint(settings, model, "200k", { tiers })).toEqual({ kind: "saved", entry: 200_000 });
+
+		expect(() => setModelCompactionPoint(settings, model, "1050k", { tiers, confirmed: true })).toThrow(
+			"Must be below the 1.05M max window",
+		);
+		expect(() => setModelCompactionPoint(settings, model, "300k")).toThrow("Must be below the 272K window");
+		expect(resolveModelCompactionSettings(settings, model).thresholdTokens).toBe(200_000);
+	});
+
+	it("skips the warning when extended context is already on", () => {
+		const settings = Settings.isolated({ extendedContext: true });
+		const model = { provider: "openai", id: "gpt-5.6-terra", contextWindow: 1_050_000 } as Model;
+		expect(
+			setModelCompactionPoint(settings, model, "400k", { tiers: { standard: 272_000, extended: 1_050_000 } }),
+		).toEqual({ kind: "saved", entry: 400_000 });
 	});
 });

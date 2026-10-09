@@ -15,6 +15,7 @@ import {
 	getAgentDbPath,
 	getAgentDir,
 	getProjectDir,
+	logger,
 	normalizePathForComparison,
 	sanitizeText,
 } from "@oh-my-pi/pi-utils";
@@ -1093,9 +1094,14 @@ export class SelectorController {
 						this.ctx.showError(error instanceof Error ? error.message : String(error));
 					}
 				},
-				onCompactionPointChange: (model, input) => {
+				onCompactionPointChange: (model, input, confirmed) => {
 					try {
-						const entry = setModelCompactionPoint(this.ctx.settings, model, input);
+						const update = setModelCompactionPoint(this.ctx.settings, model, input, {
+							tiers: this.ctx.session.modelRegistry.contextWindowTiers(model),
+							confirmed,
+						});
+						if (update.kind === "confirm") return update;
+						const { entry } = update;
 						const selector = `${model.provider}/${model.id}`;
 						this.ctx.showStatus(
 							entry === undefined
@@ -1103,9 +1109,20 @@ export class SelectorController {
 								: `Compaction point for ${selector}: ${typeof entry === "number" ? `${entry.toLocaleString("en-US")} tokens` : entry}`,
 						);
 						this.ctx.statusLine.invalidate();
+						// The entry can move the model between window tiers; the open hub's
+						// rows are a pre-rebuild snapshot until the catalog rebuild settles.
+						// The settings listener's own reapply coalesces onto this one.
+						void this.ctx.session.modelRegistry
+							.reapplyModelPolicies()
+							.then(() => {
+								if (!closed) hub.refreshAfterExternalMutation();
+							})
+							.catch(error =>
+								logger.warn("model hub refresh after compaction point failed", { error: String(error) }),
+							);
 						return undefined;
 					} catch (error) {
-						return error instanceof Error ? error.message : String(error);
+						return { kind: "error", message: error instanceof Error ? error.message : String(error) };
 					}
 				},
 				onSavePreset: name => {

@@ -804,6 +804,7 @@ compaction:
 - The trigger follows the active model: switching models, context promotion, and advisors each use their own model's entry.
 - A `task.agentCompactionThresholdOverrides` entry outranks model entries for that agent, including entries added while it runs.
 - The hub refuses an edit when the project config sets the same model key; change it in the project config instead.
+- A token count at or past the model's standard window opts that model into its extended window (the window `extendedContext` would give it, including long-context pricing tiers) without turning `extendedContext` on. The hub warns first and saves on a second Enter; it rejects a count at or past the largest window the model can run with. A subagent whose `task.agentCompactionThresholdOverrides` entry applies ignores model entries, so it keeps the standard window.
 
 Per-agent compaction triggers for task/eval subagents. This keeps the main session at 40,000 tokens while `scout` compacts at 80% of its window and `task` at 90,000 tokens:
 
