@@ -6,7 +6,10 @@ import {
 	UPDATE_RELAY_EXTENSION,
 	waitForRelayExtension,
 } from "@oh-my-pi/pi-coding-agent/tools/browser/relay/probe";
-import { DISCARDED_TABS_PROTOCOL_VERSION } from "@oh-my-pi/pi-coding-agent/tools/browser/relay/protocol";
+import {
+	DISCARDED_TABS_PROTOCOL_VERSION,
+	isOlderOmpVersion,
+} from "@oh-my-pi/pi-coding-agent/tools/browser/relay/protocol";
 import {
 	type RelayServer,
 	type RelayUnavailableInfo,
@@ -370,5 +373,16 @@ describe("relayExtensionNotice", () => {
 		const started = performance.now();
 		expect(await relayExtensionNotice(`http://127.0.0.1:${fake.port}`, AbortSignal.timeout(50))).toBeNull();
 		expect(performance.now() - started).toBeLessThan(1_000);
+	});
+});
+
+describe("isOlderOmpVersion", () => {
+	it("never calls a reported version older than an omp version it cannot rank, so restarts leave that relay alone", () => {
+		expect(isOlderOmpVersion("999.0.0", "18.8.7+build")).toBeFalse();
+		expect(isOlderOmpVersion("999.0.0", "18.8.7-canary-foo")).toBeFalse();
+	});
+
+	it("still counts an unreported version as older than one it cannot rank", () => {
+		expect(isOlderOmpVersion("", "18.8.7+build")).toBeTrue();
 	});
 });

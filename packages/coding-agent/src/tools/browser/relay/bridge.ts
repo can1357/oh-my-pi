@@ -23,7 +23,7 @@
  */
 import { createHash } from "node:crypto";
 import { VERSION } from "@oh-my-pi/pi-utils/dirs";
-import { DISCARDED_TABS_PROTOCOL_VERSION, isOlderOmpVersion } from "./protocol";
+import { DISCARDED_TABS_PROTOCOL_VERSION, isOlderOmpVersion, isOmpVersion } from "./protocol";
 import type { ExtToRelayMessage, RelayRpcRequest, RelayToExtMessage, TabSnapshot } from "./protocol";
 
 /** Transport-agnostic websocket surface the bridge writes to. */
@@ -306,12 +306,17 @@ export class RelayBridge {
 		const info = this.#lastHello()?.info;
 		let hasCompatibleExtension = false;
 		// The oldest connected extension's installing omp, so a current browser cannot hide a stale one.
+		// A stamp of unknown age yields to any other, so it cannot hide one either.
 		let oldestExtensionOmp: string | undefined;
 		for (const instance of this.#instances.values()) {
 			if (!instance.socket || instance.info?.discardedTabsProtocol !== DISCARDED_TABS_PROTOCOL_VERSION) continue;
 			hasCompatibleExtension = true;
 			const ompVersion = instance.info.ompVersion ?? "";
-			if (oldestExtensionOmp === undefined || isOlderOmpVersion(ompVersion, oldestExtensionOmp)) {
+			if (
+				oldestExtensionOmp === undefined ||
+				isOlderOmpVersion(ompVersion, oldestExtensionOmp) ||
+				(oldestExtensionOmp !== "" && !isOmpVersion(oldestExtensionOmp))
+			) {
 				oldestExtensionOmp = ompVersion;
 			}
 		}
