@@ -553,6 +553,27 @@ describe("collab proto handshake (#4049)", () => {
 		}
 	});
 
+	it("welcomes a current-proto guest at v4 and round-trips a ui-request", async () => {
+		const host = new CollabHost(makeHostContext());
+		await host.start("ws://localhost:8787");
+		const guest = await joinRawGuest(host.link, COLLAB_PROTO);
+		try {
+			const welcome = await guest.nextFrame();
+			if (welcome.t !== "welcome") throw new Error(`expected welcome, got ${welcome.t}`);
+			expect(welcome.proto).toBe(4);
+
+			const pending = host.requestGuestUi({ kind: "select", title: "Continue?", options: ["Yes"] });
+			if (!pending) throw new Error("expected writable guest UI request");
+			const request = await guest.nextFrame();
+			if (request.t !== "ui-request") throw new Error(`expected ui-request, got ${request.t}`);
+			guest.socket.send({ t: "ui-response", reqId: request.request.reqId, value: "Yes" });
+			expect(await pending).toEqual({ kind: "answered", value: "Yes" });
+		} finally {
+			guest.socket.close();
+			await host.stop("test done");
+		}
+	});
+
 	it("CollabGuestLink.join fails fast with the host's rejection message instead of hanging for the welcome", async () => {
 		// Scripted host that rejects every hello the way CollabHost does for a
 		// proto mismatch. The real guest must surface that message from join().

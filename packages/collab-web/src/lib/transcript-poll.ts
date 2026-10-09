@@ -17,11 +17,18 @@ export type TranscriptPollDecision =
 	| { action: "retry" }
 	/** Terminal host error: stop polling and surface the message (prior rows stay). */
 	| { action: "stop"; message: string }
-	/** Rows read: advance the cursor and append the parsed entries. */
-	| { action: "advance"; newSize: number; carry: string; fresh: readonly SessionEntry[] };
+	/**
+	 * Rows read: advance the cursor and append the parsed entries. `caughtUp` marks a
+	 * read that returned nothing new, i.e. the transcript's end as of this poll.
+	 */
+	| { action: "advance"; newSize: number; carry: string; fresh: readonly SessionEntry[]; caughtUp: boolean };
 
-/** Maps one {@link TranscriptResult} reply to a polling decision. */
-export function decideTranscriptPoll(reply: TranscriptResult | null, carry: string): TranscriptPollDecision {
+/** Maps one {@link TranscriptResult} reply to a polling decision for a read from `fromByte`. */
+export function decideTranscriptPoll(
+	reply: TranscriptResult | null,
+	carry: string,
+	fromByte: number,
+): TranscriptPollDecision {
 	if (reply === null) return { action: "retry" };
 	if (reply.kind === "error") return { action: "stop", message: reply.message };
 	const parsed = parseJsonl(reply.text, carry);
@@ -31,5 +38,11 @@ export function decideTranscriptPoll(reply: TranscriptResult | null, carry: stri
 		if ("type" in item && item.type === "session") continue;
 		fresh.push(item as SessionEntry);
 	}
-	return { action: "advance", newSize: reply.newSize, carry: parsed.carry, fresh };
+	return {
+		action: "advance",
+		newSize: reply.newSize,
+		carry: parsed.carry,
+		fresh,
+		caughtUp: reply.newSize <= fromByte,
+	};
 }

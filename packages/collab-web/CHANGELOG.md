@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Archived conversation branches no longer remain visible in main or polled subagent browser collaboration transcripts ([#8301](https://github.com/can1357/oh-my-pi/pull/8301) by [@ParadaCarleton](https://github.com/ParadaCarleton))
+- Subagent transcripts larger than one 4 MiB read no longer briefly show archived branches before the archive record is read ([#8301](https://github.com/can1357/oh-my-pi/pull/8301) by [@ParadaCarleton](https://github.com/ParadaCarleton))
 ## [18.8.0] - 2026-10-07
 
 ### Changed

@@ -5,7 +5,8 @@ import { APP_NAME, isEnoent } from "@oh-my-pi/pi-utils";
 import { getResolvedThemeColors, getThemeExportColors } from "@oh-my-pi/pi-tui/theme";
 import type { SessionEntry, SessionHeader } from "../../session/session-entries";
 import { SessionManager } from "../../session/session-manager";
-import { collectSubSessions, type SubSession } from "../../session/sub-sessions";
+import { isTaskToolDetails } from "@oh-my-pi/pi-tui/tools/task-details";
+import { collectSubSessions as collectAllSubSessions, type SubSession } from "../../session/sub-sessions";
 import type { ExportThemeNames } from "./args";
 import templateCssPath from "./template.css" with { type: "file" };
 import templateHtmlPath from "./template.html" with { type: "file" };
@@ -61,6 +62,8 @@ export interface ExportOptions {
 	themeNames?: ExportThemeNames;
 	/** Embed subagent session transcripts found next to the session file (default true). */
 	includeSubSessions?: boolean;
+	/** Include archived branches, hidden by default so a shared page never leaks them. */
+	includeArchived?: boolean;
 }
 
 /** Parse a color string to RGB values. */
@@ -183,22 +186,104 @@ function sessionHeaderForExport(header: SessionHeader | null): SessionHeader | n
 	return exported;
 }
 
+/**
+ * Entries the exported page may render. Archived subtrees stay out unless asked
+ * for — an export is what gets shared, so a branch hidden in the TUI leaking
+ * into it defeats the point. The `archive` bookkeeping records go regardless:
+ * they carry no message content and would render as blank rows in the tree.
+ *
+ * The leaf comes back with them because dropping entries can strand it.
+ * `archiveEmptyBranches()` appends its records like any other entry, so the
+ * last one is the session leaf until the next turn; an export taken in between
+ * would otherwise name an entry the page does not have. Falls back to the
+ * nearest surviving ancestor, or null when nothing survives.
+ */
+function visibleForExport(sm: SessionManager, includeArchived: boolean): Pick<SessionData, "entries" | "leafId"> {
+	const all = sm.getEntries();
+	const hidden = includeArchived ? undefined : sm.getArchivedEntryIds();
+	const retained = all.filter(
+		entry =>
+			entry.type !== "archive" && !hidden?.has(entry.id) && !(entry.type === "label" && hidden?.has(entry.targetId)),
+	);
+	if (retained.length === all.length) return { entries: retained, leafId: sm.getLeafId() };
+	const visible = new Set(retained.map(entry => entry.id));
+	const parentOf = new Map(all.map(entry => [entry.id, entry.parentId]));
+	const nearestVisibleAncestor = (start: string | null): string | null => {
+		let cursor = start;
+		const seen = new Set<string>();
+		while (cursor !== null && !visible.has(cursor) && !seen.has(cursor)) {
+			seen.add(cursor);
+			cursor = parentOf.get(cursor) ?? null;
+		}
+		return cursor !== null && visible.has(cursor) ? cursor : null;
+	};
+	const entries = retained.map(entry => {
+		const parentId = nearestVisibleAncestor(entry.parentId);
+		return parentId === entry.parentId ? entry : { ...entry, parentId };
+	});
+
+	const leafId = nearestVisibleAncestor(sm.getLeafId());
+	return { entries, leafId };
+}
+
 /** Snapshot the session (plus optional agent state) into the JSON shape the viewer renders. */
-export function buildSessionData(sm: SessionManager, state?: AgentState): SessionData {
+export function buildSessionData(
+	sm: SessionManager,
+	state?: AgentState,
+	options?: { includeArchived?: boolean },
+): SessionData {
 	return {
 		header: sessionHeaderForExport(sm.getHeader()),
-		entries: sm.getEntries(),
-		leafId: sm.getLeafId(),
+		...visibleForExport(sm, options?.includeArchived === true),
 		systemPrompt: state?.systemPrompt.join("\n\n"),
 		tools: state?.tools?.map(t => ({ name: t.name, description: t.description })),
 	};
 }
 
-/** Subagent transcripts next to `sessionFile`, with export-only header fields stripped. */
-async function collectExportSubSessions(sessionFile: string): Promise<Record<string, SubSession>> {
-	const subSessions = await collectSubSessions(sessionFile);
-	for (const sub of Object.values(subSessions)) sub.header = sessionHeaderForExport(sub.header);
-	return subSessions;
+function referencedSubagentIds(entries: SessionEntry[]): Set<string> {
+	const ids = new Set<string>();
+	for (const entry of entries) {
+		if (entry.type !== "message" || entry.message.role !== "toolResult" || entry.message.toolName !== "task")
+			continue;
+		if (!isTaskToolDetails(entry.message.details)) continue;
+		for (const result of entry.message.details.results) ids.add(result.id);
+		for (const progress of entry.message.details.progress ?? []) ids.add(progress.id);
+	}
+	return ids;
+}
+
+/** Collect subagent transcripts, projecting archived branches for HTML export. */
+export async function collectSubSessions(
+	sessionFile: string,
+	options?: { includeArchived?: boolean; referencedAgentIds?: ReadonlySet<string> },
+): Promise<Record<string, SubSession>> {
+	const all = await collectAllSubSessions(sessionFile);
+	const selected: Record<string, SubSession> = {};
+	const rootDir = sessionFile.slice(0, -6);
+	const allChildIds = (parentKey: string | null): Set<string> =>
+		new Set(
+			Object.values(all)
+				.filter(sub => sub.parent === parentKey)
+				.map(sub => sub.agentId),
+		);
+	const visit = async (parentKey: string | null, agentIds: ReadonlySet<string>): Promise<void> => {
+		for (const agentId of agentIds) {
+			const key = parentKey ? `${parentKey}/${agentId}` : agentId;
+			const sub = all[key];
+			if (!sub) continue;
+			const subPath = path.join(rootDir, ...key.split("/")) + ".jsonl";
+			const manager = await SessionManager.open(subPath, undefined, undefined, { suppressBreadcrumb: true });
+			try {
+				const data = buildSessionData(manager, undefined, { includeArchived: options?.includeArchived });
+				selected[key] = { ...sub, header: data.header, entries: data.entries, leafId: data.leafId };
+				await visit(key, options?.referencedAgentIds ? referencedSubagentIds(data.entries) : allChildIds(key));
+			} finally {
+				await manager.close();
+			}
+		}
+	};
+	await visit(null, options?.referencedAgentIds ?? allChildIds(null));
+	return selected;
 }
 
 /** Generate HTML from bundled template with runtime substitutions. */
@@ -229,9 +314,12 @@ export async function exportSessionToHtml(
 	const sessionFile = sm.getSessionFile();
 	if (!sessionFile) throw new Error("Cannot export in-memory session to HTML");
 
-	const sessionData = buildSessionData(sm, state);
+	const sessionData = buildSessionData(sm, state, opts);
 	if (opts.includeSubSessions !== false) {
-		const subSessions = await collectExportSubSessions(sessionFile);
+		const subSessions = await collectSubSessions(sessionFile, {
+			includeArchived: opts.includeArchived,
+			referencedAgentIds: referencedSubagentIds(sessionData.entries),
+		});
 		if (Object.keys(subSessions).length > 0) sessionData.subSessions = subSessions;
 	}
 
@@ -258,13 +346,12 @@ export async function exportFromFile(inputPath: string, options?: ExportOptions 
 		throw err;
 	}
 
-	const sessionData: SessionData = {
-		header: sessionHeaderForExport(sm.getHeader()),
-		entries: sm.getEntries(),
-		leafId: sm.getLeafId(),
-	};
+	const sessionData = buildSessionData(sm, undefined, opts);
 	if (opts.includeSubSessions !== false) {
-		const subSessions = await collectExportSubSessions(inputPath);
+		const subSessions = await collectSubSessions(inputPath, {
+			includeArchived: opts.includeArchived,
+			referencedAgentIds: referencedSubagentIds(sessionData.entries),
+		});
 		if (Object.keys(subSessions).length > 0) sessionData.subSessions = subSessions;
 	}
 

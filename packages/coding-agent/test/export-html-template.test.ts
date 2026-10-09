@@ -32,6 +32,7 @@ const bundledDependencyStubs: Record<string, string> = {
 	"@oh-my-pi/pi-utils": 'export const APP_NAME = "omp"; export const isEnoent = () => false;',
 	"@oh-my-pi/pi-tui/theme":
 		"export const getResolvedThemeColors = async () => ({}); export const getThemeExportColors = async () => ({});",
+	"../../session/session-loader": "export const loadSessionFile = async () => ({ entries: [] });",
 	"../../session/sub-sessions": "export const collectSubSessions = async () => ({});",
 	"../../session/session-manager":
 		"export class SessionManager { static async open() { return new SessionManager(); } }",

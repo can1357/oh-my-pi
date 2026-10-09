@@ -118,6 +118,7 @@ describe("buildShareSnapshot", () => {
 			getHeader: () => sessionData([], "x").header,
 			getEntries: () => entries,
 			getLeafId: () => "e1",
+			getArchivedEntryIds: () => new Set<string>(),
 		} as unknown as SessionManager;
 		const obfuscator = new SecretObfuscator([{ type: "plain", content: "hunter2-XYZZY" }]);
 
@@ -195,6 +196,7 @@ describe("buildShareSnapshot", () => {
 			getHeader: () => header,
 			getEntries: () => entries,
 			getLeafId: () => "e1",
+			getArchivedEntryIds: () => new Set<string>(),
 		} as unknown as SessionManager;
 		const obfuscator = new SecretObfuscator([{ type: "plain", content: secret }]);
 
@@ -293,6 +295,7 @@ describe("buildShareSnapshot", () => {
 			getHeader: () => sessionData([], "x").header,
 			getEntries: () => entries,
 			getLeafId: () => "b1",
+			getArchivedEntryIds: () => new Set<string>(),
 		} as unknown as SessionManager;
 		const obfuscator = new SecretObfuscator([{ type: "plain", content: secret }]);
 
@@ -328,6 +331,7 @@ describe("buildShareSnapshot", () => {
 			getHeader: () => sessionData([], "x").header,
 			getEntries: () => entries,
 			getLeafId: () => "title-1",
+			getArchivedEntryIds: () => new Set<string>(),
 		} as unknown as SessionManager;
 		const snapshot = buildShareSnapshot(sm, {
 			obfuscator: new SecretObfuscator([{ type: "plain", content: secret }]),
@@ -363,6 +367,7 @@ describe("buildShareSnapshot", () => {
 			}),
 			getEntries: () => entries,
 			getLeafId: () => "title-1",
+			getArchivedEntryIds: () => new Set<string>(),
 		} as unknown as SessionManager;
 		const obfuscator = new SecretObfuscator([
 			{ type: "plain", content: plainTitle, friendlyName: friendlyTitle },
@@ -419,6 +424,7 @@ describe("buildShareSnapshot", () => {
 			getHeader: () => header,
 			getEntries: () => entries,
 			getLeafId: () => "b1",
+			getArchivedEntryIds: () => new Set<string>(),
 		} as unknown as SessionManager;
 		const obfuscator = new SecretObfuscator([
 			{ type: "plain", content: plainSecret, friendlyName },
@@ -479,6 +485,7 @@ describe("buildShareSnapshot", () => {
 			getHeader: () => sessionData([], "x").header,
 			getEntries: () => entries,
 			getLeafId: () => "a1",
+			getArchivedEntryIds: () => new Set<string>(),
 		} as unknown as SessionManager;
 		const obfuscator = new SecretObfuscator([
 			{ type: "plain", content: plainSecret, friendlyName },
@@ -520,6 +527,7 @@ describe("buildShareSnapshot", () => {
 			getHeader: () => sessionData([], "x").header,
 			getEntries: () => entries,
 			getLeafId: () => "a1",
+			getArchivedEntryIds: () => new Set<string>(),
 		} as unknown as SessionManager;
 		const obfuscator = new SecretObfuscator([
 			{ type: "plain", content: plainSecret, friendlyName },
@@ -557,6 +565,7 @@ describe("buildShareSnapshot", () => {
 			getHeader: () => ({ ...sessionData([], "x").header, title: `remember ${plainSecret}` }),
 			getEntries: () => entries,
 			getLeafId: () => "a1",
+			getArchivedEntryIds: () => new Set<string>(),
 		} as unknown as SessionManager;
 		const obfuscator = new SecretObfuscator([
 			{ type: "plain", content: plainSecret, friendlyName },
@@ -587,6 +596,7 @@ describe("shareSession", () => {
 			getHeader: () => sessionData([], "x").header,
 			getEntries: () => entries,
 			getLeafId: () => "e2",
+			getArchivedEntryIds: () => new Set<string>(),
 		} as unknown as SessionManager;
 
 		let uploaded: Uint8Array<ArrayBuffer> | null = null;

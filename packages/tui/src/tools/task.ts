@@ -44,6 +44,7 @@ import { renderStatusLine } from "../render/index";
 import { framedToolCard } from "../render/tool-card";
 import { formatOutputInline, renderJsonTreeLines } from "./json-tree";
 import { repairDoubleEncodedJsonString } from "./task-repair-args";
+import { isTaskToolDetails } from "./task-details";
 import { getSubprocessToolRenderer } from "./subprocess";
 import { assembleYieldResult, type YieldSectionShapes } from "./task-yield-assembly";
 import type { TspAgentProps, TspTone } from "@oh-my-pi/pi-wire";
@@ -1574,16 +1575,6 @@ export function renderResult(
 			borderColor,
 		};
 	});
-}
-
-/** Tests whether a persisted tool result carries a task snapshot. */
-export function isTaskToolDetails(value: unknown): value is TaskToolDetails {
-	return (
-		Boolean(value) &&
-		typeof value === "object" &&
-		"results" in (value as TaskToolDetails) &&
-		Array.isArray((value as TaskToolDetails).results)
-	);
 }
 
 /**

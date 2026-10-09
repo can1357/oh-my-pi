@@ -1,5 +1,5 @@
 import { subprocessToolRegistry } from "./subprocess-tool-registry";
-import { isTaskToolDetails } from "@oh-my-pi/pi-tui/tools/task";
+import { isTaskToolDetails } from "@oh-my-pi/pi-tui/tools/task-details";
 import { taskSubprocessRenderer } from "@oh-my-pi/pi-tui/tools/subprocess";
 /**
  * Task tool - Delegate tasks to specialized agents.

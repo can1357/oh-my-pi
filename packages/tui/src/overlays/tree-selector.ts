@@ -40,6 +40,7 @@ export type SessionTreeEntry = { id: string; parentId: string | null } & (
 	| { type: "mode_change"; mode: string }
 	| { type: "credential_pin"; provider: string }
 	| { type: "ttsr_injection"; injectedRules: string[] }
+	| { type: "archive"; targetId: string; archived: boolean }
 	| { type: "session_init" | "reset_boundary" }
 );
 
@@ -217,6 +218,13 @@ class TreeList implements Component {
 	onSelect?: (entryId: string, options: { summarize: boolean }) => void;
 	onCancel?: () => void;
 	onLabelEdit?: (entryId: string, currentLabel: string | undefined) => void;
+	/** Reveal or re-hide archived branches. The node set changes, so the caller rebuilds the list. */
+	onToggleArchived?: () => void;
+	/**
+	 * Hide the highlighted branch, or reveal it when it is already archived. The
+	 * node set changes either way, so the caller rebuilds the list.
+	 */
+	onArchiveToggle?: (entryId: string) => void;
 
 	/** Native item nodes by entry id, reused across filter/search changes. */
 	#itemCache = new Map<string, TreeItemMemo>();
@@ -403,6 +411,7 @@ class TreeList implements Component {
 			// no conversation content, so the tree only shows them in "all" mode.
 			const isSettingsEntry =
 				entry.type === "label" ||
+				entry.type === "archive" ||
 				entry.type === "custom" ||
 				entry.type === "model_change" ||
 				entry.type === "model_usage" ||
@@ -547,6 +556,9 @@ class TreeList implements Component {
 				break;
 			case "session_init":
 				parts.push("session init");
+				break;
+			case "archive":
+				parts.push("archive", entry.targetId);
 				break;
 		}
 
@@ -1042,6 +1054,10 @@ class TreeList implements Component {
 				return [{ t: `[mode: ${entry.mode}]`, s: "dim" }];
 			case "credential_pin":
 				return [{ t: `[credential pin: ${entry.provider}]`, s: "dim" }];
+			case "archive":
+				return [
+					{ t: entry.archived ? `[archived: ${entry.targetId}]` : `[restored: ${entry.targetId}]`, s: "dim" },
+				];
 			default:
 				// Bookkeeping entries with nothing worth spelling out still get their
 				// type. A row that renders to the empty string is worse than a
@@ -1246,6 +1262,12 @@ class TreeList implements Component {
 		} else if (matchesKey(keyData, "alt+a")) {
 			this.#filterMode = "all";
 			this.#applyFilter();
+		} else if (matchesKey(keyData, "alt+r")) {
+			// Archived branches were filtered out before this list was built.
+			this.onToggleArchived?.();
+		} else if (matchesKey(keyData, "shift+a") && !this.getSearchQuery()) {
+			const selected = this.#tree.selectedItem;
+			if (selected && this.onArchiveToggle) this.onArchiveToggle(selected.entry.id);
 		} else if (matchesKey(keyData, "shift+l") && !this.getSearchQuery()) {
 			this.editLabel();
 		} else {
@@ -1374,8 +1396,13 @@ export class TreeSelectorComponent extends OverlayPanel {
 		initialFilterMode: FilterMode = "default",
 		/** The picker's subtitle. */
 		private readonly sessionName?: string,
+		archive: { showing?: boolean; onToggle?: () => void; onArchiveToggle?: (entryId: string) => void } = {},
 	) {
-		super("Session Tree");
+		super(
+			archive.showing
+				? "Session Tree  [showing archived]  Alt+R: hide  Shift+A: archive/restore"
+				: "Session Tree  Alt+R: show archived  Shift+A: archive",
+		);
 		// The outer panel has eight fixed rows around the tree list: top/bottom
 		// borders, the two spacers, help, search, and section divider.
 		const PANEL_CHROME_ROWS = 8;
@@ -1388,6 +1415,8 @@ export class TreeSelectorComponent extends OverlayPanel {
 		this.#treeList.onSelect = onSelect;
 		this.#treeList.onCancel = onCancel;
 		this.#treeList.onLabelEdit = (entryId, currentLabel) => this.#showLabelInput(entryId, currentLabel);
+		if (archive.onToggle) this.#treeList.onToggleArchived = archive.onToggle;
+		if (archive.onArchiveToggle) this.#treeList.onArchiveToggle = archive.onArchiveToggle;
 
 		this.#treeContainer = new Container();
 		this.#treeContainer.addChild(this.#treeList);
