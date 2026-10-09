@@ -114,6 +114,23 @@ function liveOpenzooReasoning(entry: OpenAICompatibleModelRecord): boolean {
 }
 
 /**
+ * Native tool support the live row actually advertises.
+ *
+ * `false` when `supported_parameters` is present and omits `tools`: callers
+ * treat `undefined` as permission to send native tool definitions, so a
+ * roster that listed its parameters and left tools out must say no.
+ * `undefined` when the list is absent, or when it includes `tools` — a
+ * missing list keeps the sparse default, and only the unsupported signal
+ * is stored.
+ */
+function liveOpenzooSupportsTools(entry: OpenAICompatibleModelRecord): false | undefined {
+	if (!Array.isArray(entry.supported_parameters)) {
+		return undefined;
+	}
+	return listIncludes(entry.supported_parameters, "tools") ? undefined : false;
+}
+
+/**
  * Input modalities the live row actually advertises. `undefined` means the
  * roster omitted them — leave the discovery default and let KDL
  * `input-modalities` correct at `buildModel` time.
@@ -143,9 +160,10 @@ function liveOpenzooInput(entry: OpenAICompatibleModelRecord): ("text" | "image"
  * OpenRouter-style id) supplies only the display name.
  * Reasoning and image-input stay on the discovery defaults unless the row
  * reports them — a matching id from another provider is not a capability
- * signal. Reviewed corrections are rule-owned (`providers/openzoo.kdl`)
- * and applied at `buildModel` time. Pricing is always the proxy's: it is
- * what the wallet pays.
+ * signal. A present `supported_parameters` list that omits `tools` marks
+ * the model not tool-capable; a missing list leaves that unset. Reviewed
+ * corrections are rule-owned (`providers/openzoo.kdl`) and applied at
+ * `buildModel` time. Pricing is always the proxy's: it is what the wallet pays.
  *
  * `context_length` is deliberately ignored: the proxy reports the ceiling its
  * bind/retrieval layer accepts (128M tokens), not the transformer's window,
@@ -157,9 +175,12 @@ export function mapOpenzooModel(
 	references: ModelReferenceIndex,
 ): ModelSpec<"openai-completions"> | null {
 	const family = openzooVariantFamily(defaults.id);
+	const supportsTools = liveOpenzooSupportsTools(entry);
+	const toolSupport = supportsTools === false ? { supportsTools } : {};
 	if (family) {
 		return {
 			...defaults,
+			...toolSupport,
 			id: family.id,
 			name: family.name,
 			cost: mapOpenzooCost(entry.pricing),
@@ -184,6 +205,7 @@ export function mapOpenzooModel(
 	const identity = classifyModel("openzoo", defaults.id, { lenient: true });
 	return {
 		...defaults,
+		...toolSupport,
 		name: canonical?.name ?? toDisplayName(entry.display_name, defaults.name),
 		reasoning: liveOpenzooReasoning(entry) || identity.thinkingVariant === true,
 		input: liveOpenzooInput(entry) ?? defaults.input,
@@ -199,6 +221,8 @@ export function mapOpenzooModel(
  * fold into one `auto` entry. The fold is FIELD-BY-FIELD: each cost component
  * and each limit keeps the first nonzero/non-null value seen, so an alias row
  * that supplies only the number an earlier row omitted still contributes it.
+ * An alias whose parameter list omits `tools` marks the folded model not
+ * tool-capable; an alias with no list does not clear that mark.
  */
 export function createOpenzooModelMapper(
 	references: ModelReferenceIndex,
@@ -224,6 +248,7 @@ export function createOpenzooModelMapper(
 					},
 					contextWindow: previous.contextWindow ?? row.contextWindow,
 					maxTokens: previous.maxTokens ?? row.maxTokens,
+					...(previous.supportsTools !== false && row.supportsTools === false ? { supportsTools: false } : {}),
 				}
 			: row;
 		variants.set(row.id, merged);

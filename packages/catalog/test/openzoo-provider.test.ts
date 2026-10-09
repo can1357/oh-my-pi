@@ -274,6 +274,67 @@ describe("openzoo built-in provider", () => {
 		expect(models?.every(model => model.baseUrl === "https://tunnel.example/v1")).toBe(true);
 	});
 
+	test("a parameter list that omits tools marks the model not tool-capable; a missing list stays tool-capable", async () => {
+		// `supportsTools: undefined` is permission to send native tools. A roster
+		// that published `supported_parameters` and left `tools` out must come
+		// back `false`, or a coding session offers tool definitions the model
+		// rejects. A row with no list, and a list that includes `tools`, stay
+		// unset. Other advertised capabilities still apply on the no-tools row.
+		const options = openzooModelManagerOptions({
+			fetch: async () =>
+				Response.json({
+					data: [
+						{
+							id: "example-lab/no-tools",
+							owned_by: "openrouter",
+							supported_parameters: ["reasoning"],
+							max_model_len: 8_192,
+						},
+						{
+							id: "example-lab/with-tools",
+							owned_by: "openrouter",
+							supported_parameters: ["tools", "reasoning"],
+						},
+						{ id: "example-lab/silent", owned_by: "openrouter" },
+					],
+				}),
+		});
+		const models = await options.fetchDynamicModels?.();
+		const noTools = models?.find(model => model.id === "example-lab/no-tools");
+		const withTools = models?.find(model => model.id === "example-lab/with-tools");
+		const silent = models?.find(model => model.id === "example-lab/silent");
+
+		expect(noTools?.supportsTools).toBe(false);
+		expect(noTools?.reasoning).toBe(true);
+		expect(noTools && buildModel(noTools).supportsTools).toBe(false);
+		expect(withTools?.reasoning).toBe(true);
+		expect(withTools?.supportsTools).toBeUndefined();
+		expect(withTools && buildModel(withTools).supportsTools).toBeUndefined();
+		expect(silent?.supportsTools).toBeUndefined();
+		expect(silent && buildModel(silent).supportsTools).toBeUndefined();
+	});
+
+	test("a folded router alias whose parameter list omits tools is not tool-capable", async () => {
+		// Alias spellings fold into one `auto`. The no-tools advertisement can
+		// arrive on a later alias, and a following alias with no parameter list
+		// must not clear it — otherwise the default router still receives native
+		// tool definitions.
+		const options = openzooModelManagerOptions({
+			fetch: async () =>
+				Response.json({
+					data: [
+						{ id: "auto", owned_by: "openzoo", pricing: { prompt: 1e-7, completion: 2e-7 } },
+						{ id: "openzoo/auto", owned_by: "openzoo", supported_parameters: ["temperature"] },
+						{ id: "openzoo-auto", owned_by: "openzoo" },
+					],
+				}),
+		});
+		const models = await options.fetchDynamicModels?.();
+		expect(models?.map(model => model.id)).toEqual(["auto"]);
+		expect(models?.[0]?.supportsTools).toBe(false);
+		expect(models?.[0] && buildModel(models[0]).supportsTools).toBe(false);
+	});
+
 	test("leaves omitted limits unknown even when another provider publishes the same model", async () => {
 		const options = openzooModelManagerOptions({
 			fetch: async () => Response.json({ data: [{ id: "anthropic/claude-sonnet-4" }] }),
