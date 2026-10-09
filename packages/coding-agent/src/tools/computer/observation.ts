@@ -33,7 +33,7 @@ export interface TouchedWindow {
 	id: string;
 	/** Inputs sent to the window, in order: `press e5`, `type "abc"`. */
 	labels: string[];
-	/** The last failed call on the window, with its error; its refs need renewing. */
+	/** The last failed call on the window, with its error; the report prints the window's current refs. */
 	failure?: string;
 	/** Tree the model last received for this window, if any. */
 	baseline?: string;
@@ -136,7 +136,7 @@ export function windowAt(
 	);
 }
 
-/** A tree line without its ref: what stays equal when a re-read renews refs. */
+/** A tree line without its ref: what is compared across reads, since an element's ref can change with its label. */
 function withoutRef(line: string): string {
 	const row = parseTreeRow(line);
 	return row ? line.slice(0, row.refStart) + line.slice(row.refEnd) : line;
@@ -171,7 +171,7 @@ export interface TreeChange {
 }
 
 /**
- * Mark `after` against `before`. Refs are ignored: every read renews them. A
+ * Mark `after` against `before`. Refs are ignored: a relabelled element gets a new one. A
  * removed row and an added row of the same depth and role inside one change
  * are one row that changed.
  */
@@ -240,8 +240,8 @@ export class ObservationLedger {
 	readonly #refs = new Map<string, string>();
 	/** Windows input or a failure touched since the last settle; `sequence` orders them against reads. */
 	#touched = new Map<string, { labels: string[]; failure?: string; sequence: number }>();
-	/** `ax()` reads the cell made, latest per window; they count as shown once the cell's output carries them. */
-	#reads = new Map<string, { window: InputWindow; text: string; options: AxReadOptions; sequence: number }>();
+	/** `ax()`/`observe()` reads the cell made, per window in order; they count as shown once the cell's output carries them. */
+	#reads = new Map<string, Array<{ window: InputWindow; text: string; options: AxReadOptions; sequence: number }>>();
 	#sequence = 0;
 	#pids = new Set<number>();
 	#unattributed: string[] = [];
@@ -294,7 +294,10 @@ export class ObservationLedger {
 	 */
 	recordRead(window: InputWindow, text: string, options: AxReadOptions): void {
 		this.recordRefs(window.id, treeRefs(text));
-		this.#reads.set(window.id, { window, text, options: { ...options }, sequence: this.#sequence });
+		const read = { window, text, options: { ...options }, sequence: this.#sequence };
+		const reads = this.#reads.get(window.id);
+		if (reads) reads.push(read);
+		else this.#reads.set(window.id, [read]);
 	}
 
 	/** Whether no input since the last settle has claimed the roster-before read yet. */
@@ -340,7 +343,7 @@ export class ObservationLedger {
 		this.#lastInputAt = Date.now();
 	}
 
-	/** A call failed: the settle prints its window's current tree so refs renew. */
+	/** A call failed: the settle prints its window's current tree with current refs. */
 	noteFailure(window: InputWindow | undefined, label: string, message: string): void {
 		const failure = `${label} failed: ${message}`;
 		if (!window) {
@@ -356,22 +359,30 @@ export class ObservationLedger {
 
 	/**
 	 * Take what the cell left to settle, or undefined when it sent no input and
-	 * nothing failed. First, each `ax()` read whose tree the cell's `output`
-	 * carries becomes what the model saw, and settles its window unless input
-	 * reached the window after the read.
+	 * nothing failed. First, the latest `ax()` read of each window whose tree the
+	 * cell's `output` carries becomes what the model saw, and settles its window
+	 * only if it was read after the window's last input and its text was not
+	 * also seen before that input (the printed copy could be the earlier one).
 	 */
 	take(output: string): PendingSettle | undefined {
-		if (this.#reads.size > 0) {
-			for (const read of this.#reads.values()) {
-				// Printed verbatim, or JSON-escaped inside a `display(...)`. Refs alone do not tell:
-				// an element keeps its ref across reads, so an earlier printed tree names them too.
-				if (!output.includes(read.text) && !output.includes(JSON.stringify(read.text).slice(1, -1))) continue;
-				const touched = this.#touched.get(read.window.id);
-				this.recordShown(read.window, read.text, read.options);
-				if (touched && touched.sequence > read.sequence) this.#touched.set(read.window.id, touched);
-			}
-			this.#reads.clear();
+		for (const [id, reads] of this.#reads) {
+			// Printed verbatim, or JSON-escaped inside a `display(...)`. Refs alone do not tell:
+			// an element keeps its ref across reads, so an earlier printed tree names them too.
+			const printed = reads.findLast(
+				read =>
+					read.text.trim() !== "" &&
+					(output.includes(read.text) || output.includes(JSON.stringify(read.text).slice(1, -1))),
+			);
+			if (!printed) continue;
+			const touched = this.#touched.get(id);
+			const seenBefore =
+				touched !== undefined &&
+				(this.#windows.get(id)?.shown === printed.text ||
+					reads.some(read => read.sequence < touched.sequence && read.text === printed.text));
+			this.recordShown(printed.window, printed.text, printed.options);
+			if (touched && (touched.sequence > printed.sequence || seenBefore)) this.#touched.set(id, touched);
 		}
+		this.#reads.clear();
 		if (this.#inputs === 0 && this.#touched.size === 0 && this.#unattributed.length === 0) return undefined;
 		const touched: TouchedWindow[] = [...this.#touched].map(([id, { labels, failure }]) => {
 			const record = this.#windows.get(id);
@@ -428,7 +439,7 @@ function windowName(window: DesktopWindow | undefined, id: string): string {
 	return `window ${window ? windowLabel(window) : JSON.stringify(id)}`;
 }
 
-/** `press e5, type "abc"` — the inputs a read-back answers, then the failure that renewed it. */
+/** `press e5, type "abc"` — the inputs a read-back answers, then the failure that prompted it. */
 function describeCause(touched: TouchedWindow): string {
 	const inputs =
 		touched.labels.length > 4
@@ -464,7 +475,7 @@ export function renderReadBack(readBack: ReadBack): string {
 	// Without an input (a call failed on a stale ref) there is no input to have changed nothing.
 	if (change === undefined || (isUnchanged(change) && touched.labels.length === 0)) summary = "current tree";
 	else if (isUnchanged(change))
-		summary = `no accessibility change visible ${(readBack.sinceInputMs / 1000).toFixed(1)} s after the input (the app may still be working); refs renewed`;
+		summary = `no accessibility change visible ${(readBack.sinceInputMs / 1000).toFixed(1)} s after the input (the app may still be working)`;
 	else
 		summary = `${change.changed} changed, ${change.added} added, ${change.removed.length} removed (rows marked ~ changed, + added)`;
 	const tree = change?.text ?? readBack.text;

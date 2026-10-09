@@ -365,7 +365,7 @@ class El {
 		this.childCount = node.childCount;
 	}
 
-	/** A read of this element; a failure (an expired ref) has the settle renew the window's tree. */
+	/** A read of this element; a failure (an expired ref) has the settle print the window's current tree. */
 	#read<T>(method: string, call: () => Promise<T>): Promise<T> {
 		return this.#observer.read(this.#getContext().signal, this.ref, `${method} ${this.ref}`, call);
 	}
@@ -467,19 +467,24 @@ class Win {
 		return captureScreenshot(this.#session, this.#getContext, this.#observer, this.id, options, region);
 	}
 
+	/** The run context, once the read-only guard has passed: every input helper calls this before touching its arguments. */
+	#guard(method: string): ComputerRunContext {
+		const context = this.#getContext();
+		guardRun(context, method);
+		return context;
+	}
+
 	/**
 	 * An input on this window, recorded for the cell's read-back. Desktop-root
 	 * input is recorded on the window it reaches when sent: the one under
 	 * `point` for pointer input, the focused one for keys.
 	 */
 	async #input(
-		method: string,
+		context: ComputerRunContext,
 		label: string,
 		dispatch: () => Promise<void>,
 		point?: { x: number; y: number },
 	): Promise<void> {
-		const context = this.#getContext();
-		guardRun(context, method);
 		if (isRootTarget(this.id)) {
 			await this.#observer.input(context.signal, undefined, `${this.id} ${label}`, dispatch, {
 				target: this.id,
@@ -490,35 +495,39 @@ class Win {
 		await this.#observer.input(context.signal, { id: this.id, pid: this.pid }, label, dispatch);
 	}
 
-	click(x: number, y: number, options?: ClickOptions): Promise<void> {
+	async click(x: number, y: number, options?: ClickOptions): Promise<void> {
+		const context = this.#guard("click");
 		return this.#input(
-			"click",
+			context,
 			`click ${x},${y}`,
 			() => this.#session.click(this.id, x, y, pointerOptions(options)),
 			{ x, y },
 		);
 	}
 
-	doubleClick(x: number, y: number, options?: Omit<ClickOptions, "count">): Promise<void> {
+	async doubleClick(x: number, y: number, options?: Omit<ClickOptions, "count">): Promise<void> {
+		const context = this.#guard("doubleClick");
 		return this.#input(
-			"doubleClick",
+			context,
 			`doubleClick ${x},${y}`,
 			() => this.#session.click(this.id, x, y, pointerOptions({ ...options, count: 2 })),
 			{ x, y },
 		);
 	}
 
-	move(x: number, y: number): Promise<void> {
-		return this.#input("move", `move ${x},${y}`, () => this.#session.moveMouse(this.id, x, y, pointerOptions()), {
+	async move(x: number, y: number): Promise<void> {
+		const context = this.#guard("move");
+		return this.#input(context, `move ${x},${y}`, () => this.#session.moveMouse(this.id, x, y, pointerOptions()), {
 			x,
 			y,
 		});
 	}
 
-	drag(points: Array<[number, number]>, options?: DragOptions): Promise<void> {
-		const [start] = points;
+	async drag(points: Array<[number, number]>, options?: DragOptions): Promise<void> {
+		const context = this.#guard("drag");
+		const start = Array.isArray(points) ? points[0] : undefined;
 		return this.#input(
-			"drag",
+			context,
 			"drag",
 			() =>
 				this.#session.drag(
@@ -526,45 +535,48 @@ class Win {
 					points.map(([x, y]) => ({ x, y })),
 					pointerOptions(options),
 				),
-			start && { x: start[0], y: start[1] },
+			Array.isArray(start) ? { x: start[0], y: start[1] } : undefined,
 		);
 	}
 
-	scroll(x: number, y: number, options: ScrollOptions = {}): Promise<void> {
+	async scroll(x: number, y: number, options: ScrollOptions = {}): Promise<void> {
+		const context = this.#guard("scroll");
 		return this.#input(
-			"scroll",
+			context,
 			`scroll ${x},${y}`,
 			() => this.#session.scroll(this.id, x, y, options.dx ?? 0, options.dy ?? 0, pointerOptions(options)),
 			{ x, y },
 		);
 	}
 
-	type(text: string, options?: InputOptions): Promise<void> {
-		const shown = text.length > 24 ? `${text.slice(0, 23)}…` : text;
-		return this.#input("type", `type ${JSON.stringify(shown)}`, () =>
+	async type(text: string, options?: InputOptions): Promise<void> {
+		const context = this.#guard("type");
+		const shown = typeof text === "string" && text.length > 24 ? `${text.slice(0, 23)}…` : text;
+		return this.#input(context, `type ${JSON.stringify(shown)}`, () =>
 			this.#session.typeText(this.id, text, pointerOptions(options)),
 		);
 	}
 
-	press(chord: string | string[], options?: InputOptions): Promise<void> {
-		const keys = chordKeys(chord);
-		return this.#input("press", `press ${keys.join("+")}`, () =>
-			this.#session.keyChord(this.id, keys, pointerOptions(options)),
+	async press(chord: string | string[], options?: InputOptions): Promise<void> {
+		const context = this.#guard("press");
+		const shown = Array.isArray(chord) ? chord.join("+") : String(chord);
+		return this.#input(context, `press ${shown}`, () =>
+			this.#session.keyChord(this.id, chordKeys(chord), pointerOptions(options)),
 		);
 	}
 
 	async holdKeys(keys: string[], options: HoldOptions): Promise<void> {
+		const context = this.#guard("holdKeys");
 		validateHold(options);
 		validateKeys(keys, "keys");
-		return this.#input("holdKeys", `holdKeys ${keys.join("+")}`, () =>
-			this.#session.holdKeys(this.id, keys, options),
-		);
+		return this.#input(context, `holdKeys ${keys.join("+")}`, () => this.#session.holdKeys(this.id, keys, options));
 	}
 
 	async holdMouse(x: number, y: number, options: HoldMouseOptions): Promise<void> {
+		const context = this.#guard("holdMouse");
 		validateHold(options);
 		if (options.keys !== undefined) validateKeys(options.keys, "keys");
-		return this.#input("holdMouse", `holdMouse ${x},${y}`, () => this.#session.holdMouse(this.id, x, y, options), {
+		return this.#input(context, `holdMouse ${x},${y}`, () => this.#session.holdMouse(this.id, x, y, options), {
 			x,
 			y,
 		});
@@ -608,22 +620,22 @@ class Win {
 				return await nativeCall(context.signal, () => this.#session.menuItems(this.id, segments));
 			},
 			select: async (path: string[]): Promise<void> => {
+				const context = this.#guard("menu.select");
 				validateKeys(path, "menu path");
-				return this.#input("menu.select", `menu.select ${path.join(" > ")}`, () =>
+				return this.#input(context, `menu.select ${path.join(" > ")}`, () =>
 					this.#session.menuSelect(this.id, path),
 				);
 			},
 		};
 	}
 
-	bringToCurrentSpace(): Promise<void> {
-		return this.#input("bringToCurrentSpace", "bringToCurrentSpace", () =>
-			this.#session.bringToCurrentSpace(this.id),
-		);
+	async bringToCurrentSpace(): Promise<void> {
+		const context = this.#guard("bringToCurrentSpace");
+		return this.#input(context, "bringToCurrentSpace", () => this.#session.bringToCurrentSpace(this.id));
 	}
 
-	raise(): Promise<void> {
-		return this.#input("raise", "raise", () => this.#session.raiseWindow(this.id));
+	async raise(): Promise<void> {
+		return this.#input(this.#guard("raise"), "raise", () => this.#session.raiseWindow(this.id));
 	}
 
 	async ax(options?: AxOptions): Promise<string> {
