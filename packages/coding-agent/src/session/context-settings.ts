@@ -158,11 +158,14 @@ export const cfgCompactionThresholdTokens = register({
 });
 
 /**
- * Per-model compaction points that replace `compaction.thresholdPercent`/`thresholdTokens`
- * for the models they match: `provider/model-id` exactly, else the longest `…*` prefix.
- * Edited from the /models hub; a per-agent `task.agentCompactionThresholdOverrides` entry still wins.
- * A token entry at or past a model's standard window opts that model into its extended
- * window (`ModelRegistry.contextWindowTiers`).
+ * Per-model compaction limits for the models they match: `provider/model-id`
+ * exactly, else the longest `…*` prefix. A token entry is the base the
+ * threshold policy scales in place of the window (see
+ * `applyModelCompactionThreshold`); a percentage entry replaces both
+ * `compaction.threshold*` fields. Edited from the /models hub; a per-agent
+ * `task.agentCompactionThresholdOverrides` entry still wins. A token base past a
+ * model's standard window opts that model into its extended window
+ * (`ModelRegistry.contextWindowTiers`).
  */
 export const cfgCompactionModelThresholds = register({
 	id: "compaction.modelThresholds",
@@ -353,8 +356,12 @@ export const cfgCompaction = combine({
 	dropUseless: cfgCompactionDropUseless,
 });
 
-/** Configured compaction policy ({@link cfgCompaction}). */
-export type CompactionSettings = SettingValueOf<typeof cfgCompaction>;
+/**
+ * Configured compaction policy ({@link cfgCompaction}). `baseWindowTokens` is
+ * never configured directly: a `compaction.modelThresholds` token entry sets it
+ * for its model (see `applyModelCompactionThreshold`).
+ */
+export type CompactionSettings = SettingValueOf<typeof cfgCompaction> & { baseWindowTokens?: number };
 
 // Experimental: snapcompact inline imaging (transient, per-request; never persisted)
 export const cfgSnapcompactSystemPrompt = register({
