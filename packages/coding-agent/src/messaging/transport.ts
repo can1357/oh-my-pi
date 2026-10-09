@@ -19,6 +19,7 @@ import {
 	isMailboxSessionId,
 	type InboxResponse,
 	LINE_DEADLINE_MS,
+	MAX_PEER_TEXT_CHARS,
 	MAX_SERIALIZED_CHARS,
 	MESSAGING_WIRE_VERSION,
 	MessagingUnavailableError,
@@ -413,10 +414,10 @@ function parseResponse(raw: unknown): InboxResponse | undefined {
 		typeof s.v !== "number" ||
 		!Number.isFinite(s.v) ||
 		!isMailboxSessionId(s.sessionId) ||
-		(s.name !== null && typeof s.name !== "string") ||
+		(s.name !== null && (typeof s.name !== "string" || s.name.length > MAX_PEER_TEXT_CHARS)) ||
 		typeof s.shortId !== "string" ||
 		!/^[0-9a-f]{8}$/.test(s.shortId) ||
-		(s.title !== null && typeof s.title !== "string") ||
+		(s.title !== null && (typeof s.title !== "string" || s.title.length > MAX_PEER_TEXT_CHARS)) ||
 		typeof s.cwd !== "string" ||
 		s.cwd.length > 4096 ||
 		typeof s.busy !== "boolean" ||

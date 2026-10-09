@@ -18,7 +18,7 @@ import {
 	type StoredMessage,
 	type StoredRefusalNotice,
 } from "./mailbox";
-import { isReservedAddress, sessionAddress, sessionShortId } from "./names";
+import { isReservedAddress, peerDisplayText, sessionAddress, sessionShortId } from "./names";
 import { type PermissionClass, resolveInbound, resolveMessagingPolicy } from "./policy";
 import {
 	type InboxRequest,
@@ -429,7 +429,7 @@ export class MessagingService {
 				ok: false,
 				text: "Not sent: cannot subscribe to idle notices while this session refuses inbound messages.",
 			};
-		let address = target.name ?? target.shortId;
+		let address = peerDisplayText(target.name ?? target.shortId);
 		if ("entry" in target) {
 			// Probed listing: a stale row (killed process, reused pid) is pruned instead of counted.
 			const duplicates = (
@@ -544,7 +544,7 @@ export class MessagingService {
 							`Failed to send to ${address}: the session is running but did not answer in time. Try again shortly.`,
 						);
 					return fail(
-						`Failed to send to ${address}: ${!snapshot.ok ? snapshot.error : "Unexpected snapshot response"}`,
+						`Failed to send to ${address}: ${!snapshot.ok ? peerDisplayText(snapshot.error) : "Unexpected snapshot response"}`,
 					);
 				}
 				if (snapshot.snapshot.sessionId !== saved.sessionId) {
@@ -554,7 +554,7 @@ export class MessagingService {
 				if (snapshot.snapshot.v !== MESSAGING_WIRE_VERSION)
 					return fail(`Not sent: ${address} runs an incompatible omp version.`);
 				target = { ...snapshot.snapshot, entry: handoff.entry! };
-				address = target.name ?? target.shortId;
+				address = peerDisplayText(target.name ?? target.shortId);
 			}
 			if (!("entry" in target)) throw new Error("Missing live messaging target");
 			if (target.entry.version !== MESSAGING_WIRE_VERSION)
@@ -581,7 +581,7 @@ export class MessagingService {
 						? "the session is no longer running."
 						: error === "timeout"
 							? "the session is running but did not answer in time; it may not have received this."
-							: error
+							: peerDisplayText(error)
 				}`,
 			);
 		}
@@ -610,6 +610,7 @@ export class MessagingService {
 	}
 
 	async #receive(request: InboxRequest, auth: InboxAuth, receiver: SenderInfo): Promise<InboxResponse> {
+		if (request.type === "message" && !request.from && auth !== "own-child") return { ok: false, error: "anonymous" };
 		if (this.#closed) return { ok: false, error: "unreachable" };
 		if (JSON.stringify(request).length > MAX_SERIALIZED_CHARS) return { ok: false, error: "too_large" };
 		if (receiver.sessionId === this.#ownSessionId()) {
@@ -636,7 +637,7 @@ export class MessagingService {
 		if (request.type === "message") {
 			if (!request.body.trim()) {
 				if (!request.notifyWhenIdle) return { ok: false, error: "empty" };
-				return request.from ? this.#idle.subscribe(request.from, request.id) : { ok: true, outcome: "subscribed" };
+				return request.from ? this.#idle.subscribe(request.from, request.id) : { ok: false, error: "anonymous" };
 			}
 			const sender = request.from ?? { ...receiver, name: "own-child" };
 			const receivingSuspended =
@@ -660,14 +661,17 @@ export class MessagingService {
 		if (request.type === "subscribe") return this.#idle.subscribe(request.from, request.id);
 		if (receiver.sessionId !== this.#ownSessionId()) return { ok: true, outcome: "delivered" };
 		if (request.kind === "refused") {
-			if (request.toSessionId === this.#ownSessionId()) {
-				this.#outgoing.delete(request.aboutId);
-				this.#deliver({
-					type: "receipt",
-					recipientSessionId: this.#ownSessionId(),
-					text: `Your offline message to ${request.from.name ?? request.from.shortId} was refused.`,
-				});
-			}
+			if (
+				request.toSessionId !== this.#ownSessionId() ||
+				this.#outgoing.get(request.aboutId)?.sessionId !== request.from.sessionId
+			)
+				return { ok: false, error: "uncorrelated" };
+			this.#outgoing.delete(request.aboutId);
+			this.#deliver({
+				type: "receipt",
+				recipientSessionId: this.#ownSessionId(),
+				text: `Your offline message to ${peerDisplayText(request.from.name ?? request.from.shortId)} was refused.`,
+			});
 			return { ok: true, outcome: "delivered" };
 		}
 		if (
@@ -693,14 +697,14 @@ export class MessagingService {
 						type: "notice",
 						recipientSessionId: this.#ownSessionId(),
 						from,
-						text: `Your message to @${from.address} expired before its user approved it.`,
+						text: `Your message to @${peerDisplayText(from.address)} expired before its user approved it.`,
 					});
 				else if (request.kind === "retired")
 					this.#deliver({
 						type: "notice",
 						recipientSessionId: this.#ownSessionId(),
 						from,
-						text: `Your message to @${from.address} was dropped unread: that session switched to a different conversation.`,
+						text: `Your message to @${peerDisplayText(from.address)} was dropped unread: that session switched to a different conversation.`,
 					});
 				else if (request.reason)
 					this.#deliver({
@@ -821,7 +825,7 @@ export class MessagingService {
 						this.#deliver({
 							type: "receipt",
 							recipientSessionId: this.#ownSessionId(),
-							text: `Your offline message to ${message.from.name ?? message.from.shortId} was refused.`,
+							text: `Your offline message to ${peerDisplayText(message.from.name ?? message.from.shortId)} was refused.`,
 						});
 					await ack();
 					continue;
@@ -893,7 +897,7 @@ export class MessagingService {
 }
 
 export function formatSessionListing(sessions: SessionListing[]): string {
-	const field = (text: string) => escapePeerText(text).replace(/[\r\n]/g, " ");
+	const field = (text: string) => escapePeerText(peerDisplayText(text, 200));
 	return [
 		"## Other sessions",
 		...sessions.map(
@@ -904,5 +908,5 @@ export function formatSessionListing(sessions: SessionListing[]): string {
 }
 
 function duplicateProcessText(address: string, entries: readonly InboxEntry[]): string {
-	return `Not sent: ${address} is open in more than one omp process (${entries.map(entry => `pid ${entry.pid}`).join(", ")}). Close the extra copy, then send again.`;
+	return `Not sent: ${peerDisplayText(address)} is open in more than one omp process (${entries.map(entry => `pid ${entry.pid}`).join(", ")}). Close the extra copy, then send again.`;
 }

@@ -441,6 +441,19 @@ describe("inbox transport", () => {
 		expect(await Bun.file(file).exists()).toBe(true);
 	});
 
+	it.each(["name", "title"] as const)("caps snapshot %s at 4096 characters without truncating", async field => {
+		const dir = tempDir();
+		let current = { ...snapshot, [field]: "x".repeat(4096) };
+		await publish(dir, async () => ({ ok: true, snapshot: current }));
+		const [entry] = await readInboxEntries({ dir });
+		expect(await requestInbox(entry!, { type: "snapshot" }, { dir })).toEqual({ ok: true, snapshot: current });
+		current = { ...current, [field]: "x".repeat(4097) };
+		expect(await requestInbox(entry!, { type: "snapshot" }, { dir })).toEqual({
+			ok: false,
+			error: "invalid_response",
+		});
+	});
+
 	it.each(["delivered", "queued"] as const)(
 		"exchanges %s messages with a 201-character session name",
 		async outcome => {
@@ -724,6 +737,24 @@ describe("inbox request boundary", () => {
 		entryId: "87654321",
 		class: "bypass",
 	} as const;
+	it.each(["message", "subscribe", "notice"] as const)("caps the %s sender name at 4096 characters", type => {
+		const request = {
+			type,
+			id: "boundary",
+			from: { ...sender, name: "x".repeat(4096) },
+			...(type === "message" ? { body: "hello" } : type === "notice" ? { kind: "idle" } : {}),
+		};
+		expect<unknown>(parseInboxRequest(request)).toEqual(request);
+		expect(parseInboxRequest({ ...request, from: { ...request.from, name: "x".repeat(4097) } })).toBeUndefined();
+		expect(parseInboxRequest({ ...request, from: { ...sender, name: null } })).toBeDefined();
+	});
+
+	it("caps an idle status at 4096 characters without truncating", () => {
+		const request = { type: "notice", id: "boundary", from: sender, kind: "idle", status: "x".repeat(4096) };
+		expect<unknown>(parseInboxRequest(request)).toEqual(request);
+		expect(parseInboxRequest({ ...request, status: "x".repeat(4097) })).toBeUndefined();
+	});
+
 	it.each(["message", "subscription", undefined] as const)("accepts a retired notice with subject %s", subject => {
 		const notice: Extract<InboxRequest, { type: "notice" }> = {
 			type: "notice",

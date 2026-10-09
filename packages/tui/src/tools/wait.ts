@@ -3,7 +3,7 @@ import { Text } from "../components/text";
 import { Markdown } from "../components/markdown";
 import { getMarkdownTheme } from "../theme";
 import { visibleWidth } from "../utils";
-import { formatAge } from "@oh-my-pi/pi-utils";
+import { formatAge, sanitizeText } from "@oh-my-pi/pi-utils";
 import { shimmerEnabled, shimmerText } from "../theme/shimmer";
 import type { Theme } from "../theme/theme";
 import { Ellipsis, Hasher, type RenderCache, renderStatusLine, renderTreeList, truncateToWidth } from "../render/index";
@@ -22,6 +22,7 @@ import {
 	type ToolUIColor,
 	type ToolUIStatus,
 	cappedHeadLines,
+	sanitizeCarriageReturns,
 	createCachedComponent,
 	type ConfiguredThinkingLevel,
 } from "../render/render-utils";
@@ -552,7 +553,7 @@ export function createIrcMessageCard(
 				: card.kind === "workpool"
 					? `Pool ${card.pool?.trim() || "?"} ${uiTheme.nav.selected} ${card.to?.trim() || "?"}`
 					: `IRC ${from} ${uiTheme.nav.selected} ${card.to?.trim() || "?"}`;
-	const body = card.body ?? "";
+	const body = card.remote === true ? sanitizeText(sanitizeCarriageReturns(card.body ?? "")) : (card.body ?? "");
 	const remoteTitle =
 		card.remote === true
 			? `IRC ← @${from}: ${replaceTabs((body.split(/\r?\n/).find(line => line.trim()) ?? "").trim())}`

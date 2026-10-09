@@ -85,6 +85,27 @@ describe("cross-session UI", () => {
 		);
 		expect(transcript.render(100)).toHaveLength(1);
 	});
+	it("sanitizes expanded remote IRC in ANSI and native cards without altering the source body", () => {
+		const attack = "\x1b]0;PWNED\x07\x1b]52;c;SGVsbG8=\x07\x1b[31mpeer\x1b[0m\rreturn\n**second line**";
+		const input = { kind: "incoming" as const, from: attack, body: attack, remote: true };
+		const card = createIrcMessageCard(input, () => true, theme);
+		const rendered = card.render(200).join("\n");
+		expect(rendered).not.toContain("\x1b]");
+		expect(rendered).not.toContain("PWNED");
+		expect(rendered).not.toContain("SGVsbG8=");
+		expect(Bun.stripANSI(rendered)).toContain("peer return");
+		expect(Bun.stripANSI(rendered)).toContain("second line");
+		const node = card.describe!({
+			cols: 200,
+			reduceMotion: true,
+			dark: true,
+			supports: () => true,
+			feature: () => false,
+		});
+		expect(JSON.stringify(node)).not.toContain("\\u001b");
+		expect(JSON.stringify(node)).not.toContain("\\r");
+		expect(input.body).toBe(attack);
+	});
 
 	it("preserves the local IRC preview and its expansion behavior", () => {
 		let expanded = false;
@@ -135,5 +156,32 @@ describe("cross-session UI", () => {
 		expect(applied.cursorCol).toBe('tell @"release notes" '.length);
 		const quoted = suggestions.items.find(item => item.label === '@release "draft"')!;
 		expect(provider.applyCompletion(["@"], 0, 1, quoted, "@").lines).toEqual(['@"release \\"draft\\"" ']);
+	});
+	it("sanitizes and bounds session mention labels while preserving raw completion and filtering", async () => {
+		using dir = TempDir.createSync("@omp-peer-mentions-");
+		const attack = "\x1b]0;PWNED\x07\x1b]52;c;SGVsbG8=\x07\x1b[31mpeer\x1b[0m\nrow\rreturn";
+		const name = `${attack}${"x".repeat(500)}`;
+		const provider = new PromptActionAutocompleteProvider(
+			[],
+			dir.path(),
+			[],
+			undefined,
+			undefined,
+			undefined,
+			async () => [{ name, cwd: name }],
+		);
+		const suggestions = await provider.getSuggestions(["@"], 0, 1);
+		const item = suggestions?.items.find(item => item.value === `@"${name}"`);
+		expect(item).toBeDefined();
+		expect(item!.label).not.toContain("\x1b");
+		expect(item!.label).not.toContain("\n");
+		expect(item!.description).not.toContain("\x1b");
+		expect(item!.description).not.toContain("\r");
+		expect(item!.description).not.toContain("\n");
+		expect(item!.label.length).toBeLessThan(name.length);
+		expect(item!.description!.length).toBeLessThan(name.length);
+		expect(provider.applyCompletion(["@"], 0, 1, item!, "@").lines).toEqual([`@"${name}" `]);
+		const filtered = await provider.getSuggestions(["@PWNED"], 0, 6);
+		expect(filtered?.items.some(candidate => candidate.value === item!.value)).toBe(true);
 	});
 });

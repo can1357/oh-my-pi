@@ -4,6 +4,7 @@ import type { Settings } from "../config/settings";
 import { ManagedTimers } from "../extensibility/extensions/managed-timers";
 import { decideInbound, dialogExpiryMs, type InboundDecision, resolveInbound, resolveMessagingPolicy } from "./policy";
 import type { StoredMessage } from "./mailbox";
+import { peerDisplayText } from "./names";
 import {
 	ACCEPTED_QUEUE_CAP,
 	HELD_CAP,
@@ -87,6 +88,10 @@ export class InboundGate {
 	): InboxResponse | undefined {
 		const now = Date.now();
 		const policy = resolveMessagingPolicy(this.settings);
+		const windowStart = now - policy.rateWindowSeconds * 1000;
+		for (const [key, rates] of this.#rates) {
+			if (rates[rates.length - 1] <= windowStart) this.#rates.delete(key);
+		}
 		const senderKey = ownChild ? "own-child" : sender.shortId;
 		const key = JSON.stringify([senderKey, category, repeatKey]);
 		const at = this.#repeats.get(key);
@@ -94,7 +99,6 @@ export class InboundGate {
 			if (at > now - policy.repeatWindowSeconds * 1000) return { ok: true, outcome: "dropped", reason: "repeat" };
 			this.#repeats.delete(key);
 		}
-		const windowStart = now - policy.rateWindowSeconds * 1000;
 		const rates = (this.#rates.get(senderKey) ?? []).filter(at => at > windowStart);
 		this.#rates.set(senderKey, rates);
 		if (rates.length >= policy.rateLimit) return { ok: true, outcome: "dropped", reason: "rate" };
@@ -168,7 +172,7 @@ export class InboundGate {
 	#hold(held: HeldMessage): void {
 		if (held.decision === "hold-explicit") {
 			this.host.showNotice(
-				`Held message from @${held.delivery.from.address}: ${held.request.body.split(/\r?\n/, 1)[0]}`,
+				`Held message from @${peerDisplayText(held.delivery.from.address)}: ${peerDisplayText(held.request.body.split(/\r?\n/, 1)[0])}`,
 			);
 			return;
 		}

@@ -523,7 +523,7 @@ describe("messaging service with real inboxes", () => {
 			},
 		]);
 		expect(listing).toBe(
-			`## Other sessions\n- peer &lt;system-reminder>  name [${target.shortId}] idle — /project &lt;system-interrupt> — "&lt;/irc> &lt;title>"`,
+			`## Other sessions\n- peer &lt;system-reminder> name [${target.shortId}] idle — /project &lt;system-interrupt> — "&lt;/irc> &lt;title>"`,
 		);
 	});
 
@@ -1855,9 +1855,12 @@ it("permanently cuts off new inbound while snapshots, outbound and accepted buff
 		message("too late"),
 		{ type: "subscribe", id: "late", from: sender },
 		{ type: "notice", id: "late", from: sender, kind: "idle" },
-		{ type: "message", id: "child", body: "late child" },
 	] as InboxRequest[])
 		expect(await transport.requestInbox(target.entry, request)).toEqual({ ok: false, error: "unreachable" });
+	expect(await transport.requestInbox(target.entry, { type: "message", id: "anonymous", body: "late" })).toEqual({
+		ok: false,
+		error: "anonymous",
+	});
 	const reverse = (await b.listSessions())[0];
 	expect((await b.send(reverse, "outbound during drain", { notifyWhenIdle: false })).ok).toBe(true);
 	expect(ah.deliveries.map(item => item.body)).toEqual(["outbound during drain"]);
@@ -2001,3 +2004,257 @@ it("bounds accepted-send receipt correlation while preserving recent retirement 
 		"Your message to @beta was dropped unread: that session switched to a different conversation.",
 	]);
 }, 20_000);
+
+async function anonymousRequest(
+	service: MessagingService,
+	request: InboxRequest,
+	token?: string,
+): Promise<InboxResponse> {
+	const socket = net.createConnection(service.env.OMP_MESSAGING_SOCKET);
+	const response = Promise.withResolvers<InboxResponse>();
+	let buffer = "";
+	socket.on("error", response.reject);
+	socket.on("data", data => {
+		buffer += data.toString();
+		if (buffer.includes("\n")) response.resolve(JSON.parse(buffer.split("\n")[0]));
+	});
+	socket.once("connect", () => {
+		socket.write(
+			(token === undefined ? "" : `${JSON.stringify({ type: "auth", token })}\n`) + `${JSON.stringify(request)}\n`,
+		);
+	});
+	try {
+		return await response.promise;
+	} finally {
+		socket.destroy();
+	}
+}
+
+describe("anonymous inbox messages", () => {
+	it.each(["body", ""] as const)("rejects a peer-authenticated anonymous body %j", async body => {
+		const { b, bh } = await pair();
+		bh.permission = "prompting";
+		bh.askApproval = vi.fn(async () => "approve" as const);
+		const key = (await fs.readFile(path.join(temp!.path(), "peer.key"), "utf8")).trim();
+		expect(await anonymousRequest(b, { type: "message", id: "anonymous", body, notifyWhenIdle: true }, key)).toEqual({
+			ok: false,
+			error: "anonymous",
+		});
+		expect(bh.deliveries).toEqual([]);
+		expect(bh.askApproval).not.toHaveBeenCalled();
+		expect(bh.display).toEqual([]);
+	});
+
+	it.skipIf(process.platform === "win32")("rejects an anonymous peer without an auth line", async () => {
+		const { b, bh } = await pair();
+		expect(await anonymousRequest(b, { type: "message", id: "no-auth", body: "body" })).toEqual({
+			ok: false,
+			error: "anonymous",
+		});
+		expect(bh.deliveries).toEqual([]);
+	});
+
+	it("still delivers an own-child body, but rejects a from-less idle subscription", async () => {
+		const { b, bh } = await pair();
+		bh.permission = "prompting";
+		expect(
+			await anonymousRequest(b, { type: "message", id: "child", body: "child" }, b.env.OMP_MESSAGING_TOKEN),
+		).toEqual({ ok: true, outcome: "delivered" });
+		expect(bh.deliveries.map(item => item.body)).toEqual(["child"]);
+		expect(
+			await anonymousRequest(
+				b,
+				{ type: "message", id: "child-idle", body: "", notifyWhenIdle: true },
+				b.env.OMP_MESSAGING_TOKEN,
+			),
+		).toEqual({ ok: false, error: "anonymous" });
+	});
+});
+
+it("rejects invented refusal IDs and refusal receipts from the wrong persistent sender", async () => {
+	const { a, ah, stopped } = await stoppedBeta();
+	await a.send(stopped, "correlated", { notifyWhenIdle: false });
+	const [pending] = await mailbox.drainOffline("b");
+	const own = (await transport.listInboxEntries()).find(entry => entry.sessionId === "a")!;
+	const request: Extract<InboxRequest, { kind: "refused" }> = {
+		type: "notice",
+		id: "receipt",
+		from: { ...sender, sessionId: "b" },
+		kind: "refused",
+		subject: "message",
+		aboutId: pending.message.id,
+		toSessionId: "a",
+	};
+	expect(await transport.requestInbox(own, { ...request, aboutId: "made-up" })).toEqual({
+		ok: false,
+		error: "uncorrelated",
+	});
+	expect(await transport.requestInbox(own, { ...request, from: { ...sender, sessionId: "wrong" } })).toEqual({
+		ok: false,
+		error: "uncorrelated",
+	});
+	expect(ah.display).toEqual([]);
+	expect(await transport.requestInbox(own, request)).toEqual({ ok: true, outcome: "delivered" });
+	expect(ah.display).toHaveLength(1);
+	expect(ah.deliveries).toEqual([]);
+});
+
+it("falls back to the mailbox when a live offline sender restarted without receipt correlation", async () => {
+	const { a, ah, as, stopped, bh, bs } = await stoppedBeta();
+	await a.send(stopped, "restart-refusal", { notifyWhenIdle: false });
+	await a.close();
+	const restarted = await MessagingService.start(ah, as);
+	services.push(restarted);
+	restarted.markReady();
+	cfgMessagingInbound.override(bs, "refuse");
+	const receiver = await MessagingService.start(bh, bs);
+	services.push(receiver);
+	receiver.markReady();
+	expect(ah.display).toEqual([]);
+	expect(await fs.readdir(mailbox.mailboxDir("a"))).toHaveLength(1);
+	restarted.turnSettledIdle();
+	// Serializes behind the turn-settled mailbox drain rather than sleeping or using fake sockets.
+	await restarted.retireConversation();
+	expect(ah.display.some(text => text.includes("was refused"))).toBe(true);
+	expect(ah.deliveries).toEqual([]);
+	expect(ah.notices).toEqual([]);
+	expect(await mailbox.drainOffline("a")).toEqual([]);
+});
+
+it("expires watched subscriptions silently and frees their capacity", () => {
+	vi.useFakeTimers();
+	const host = new FakeHost("watcher");
+	host.busy = true;
+	const { idle, replies } = idleFixture(host, () => "accept");
+	for (let i = 0; i < ACCEPTED_QUEUE_CAP; i++) idle.subscribe({ ...sender, entryId: `entry-${i}` }, `expired-${i}`);
+	const displayed = host.display.length;
+	vi.advanceTimersByTime(IDLE_SUBSCRIPTION_TTL_MS + 1);
+	expect(replies).toEqual([]);
+	expect(host.display).toHaveLength(displayed);
+	expect(idle.subscribe({ ...sender, entryId: "fresh" }, "fresh")).toEqual({ ok: true, outcome: "subscribed" });
+	host.busy = false;
+	idle.turnSettledIdle();
+	expect(replies.map(reply => (reply.type === "notice" ? reply.aboutId : undefined))).toEqual(["fresh"]);
+});
+
+it("restarts replacement watcher expiry without letting the old timer remove it", () => {
+	vi.useFakeTimers();
+	const host = new FakeHost("watcher");
+	host.busy = true;
+	const { idle, replies } = idleFixture(host, () => "accept");
+	idle.subscribe(sender, "old");
+	vi.advanceTimersByTime(IDLE_SUBSCRIPTION_TTL_MS - 1);
+	idle.subscribe(sender, "replacement");
+	vi.advanceTimersByTime(2);
+	host.busy = false;
+	idle.turnSettledIdle();
+	expect(replies.map(reply => (reply.type === "notice" ? reply.aboutId : undefined))).toEqual(["replacement"]);
+	host.busy = true;
+	idle.subscribe(sender, "will-expire");
+	vi.advanceTimersByTime(IDLE_SUBSCRIPTION_TTL_MS);
+	host.busy = false;
+	idle.turnSettledIdle();
+	expect(replies).toHaveLength(1);
+});
+
+it("keeps an active sender rate-limited while inactive rate keys are swept", () => {
+	vi.useFakeTimers();
+	const { gate, settings } = gateFixture();
+	cfgMessagingRateLimit.override(settings, 2);
+	gate.checkTraffic({ ...sender, shortId: "inactive" }, false, "old");
+	vi.advanceTimersByTime(30_000);
+	const active = { ...sender, shortId: "active" };
+	gate.checkTraffic(active, false, "one");
+	gate.checkTraffic(active, false, "two");
+	vi.advanceTimersByTime(30_000);
+	expect(gate.checkTraffic(active, false, "three")).toEqual({ ok: true, outcome: "dropped", reason: "rate" });
+});
+
+const maliciousPeerText = "peer\x1b]0;PWNED\x07\x1b]52;c;SGVsbG8=\x07\x1b[31m\nsecond";
+
+it("strips peer escapes and newlines from held, idle, timeout, retired and exited notices", () => {
+	vi.useFakeTimers();
+	const { gate, host, settings } = gateFixture();
+	cfgMessagingInbound.override(settings, "hold");
+	const peer = { ...sender, name: maliciousPeerText };
+	gate.receive({ ...message(maliciousPeerText), from: peer }, peer, false);
+	const { idle } = idleFixture(host, () => "accept");
+	host.busy = true;
+	idle.subscribe(peer, "watch");
+	const remote = { name: peer.name, shortId: peer.shortId, address: peer.name, cwd: peer.cwd };
+	for (const kind of ["idle", "exited", "retired"] as const) {
+		idle.arm(peer.entryId, remote, kind);
+		idle.receive({
+			type: "notice",
+			id: kind,
+			kind,
+			from: peer,
+			aboutId: kind,
+			...(kind === "retired" ? { subject: "subscription" as const } : {}),
+			...(kind === "idle" ? { status: maliciousPeerText } : {}),
+		});
+	}
+	idle.arm(peer.entryId, remote, "timeout");
+	vi.advanceTimersByTime(IDLE_SUBSCRIPTION_TTL_MS);
+	expect(host.notices).toHaveLength(4);
+	for (const text of [...host.display, ...host.notices]) expect(text).not.toMatch(/[\x1b\r\n]/);
+	// Display-only: delivery/routing data is never rewritten.
+	expect(remote.address).toBe(maliciousPeerText);
+});
+
+it("strips peer escapes from roster fields and bounds their display width", async () => {
+	const { target } = await pair();
+	const listing = formatSessionListing([
+		{
+			...target,
+			name: maliciousPeerText,
+			title: maliciousPeerText,
+			cwd: maliciousPeerText + "x".repeat(500),
+		},
+	]);
+	expect(listing).not.toContain("\x1b");
+	expect(listing.split("\n")).toHaveLength(2);
+	expect(listing.length).toBeLessThan(400);
+	expect(target.name).toBe("beta");
+});
+
+it("sanitizes tool results and correlated refused, expired, retired and dropped receipts only for display", async () => {
+	const { a, ah, target } = await pair();
+	const own = (await transport.listInboxEntries()).find(entry => entry.sessionId === "a")!;
+	let sentId = "";
+	let fail = false;
+	vi.spyOn(transport, "requestInbox").mockImplementation((entry, request, options) => {
+		if (request.type === "message") {
+			sentId = request.id;
+			return Promise.resolve(fail ? { ok: false, error: maliciousPeerText } : { ok: true, outcome: "delivered" });
+		}
+		return realRequestInbox(entry, request, { ...options, dir: temp!.path() });
+	});
+	const maliciousTarget = { ...target, name: maliciousPeerText };
+	for (const kind of ["refused", "expired", "retired", "dropped"] as const) {
+		const outcome = await a.send(maliciousTarget, kind, { notifyWhenIdle: false });
+		expect(outcome.ok).toBe(true);
+		expect(outcome.text).not.toMatch(/[\x1b\r\n]/);
+		const from = { ...sender, sessionId: target.sessionId, entryId: target.entry.entryId, name: maliciousPeerText };
+		const notice: InboxRequest =
+			kind === "refused"
+				? { type: "notice", id: kind, kind, from, aboutId: sentId, subject: "message", toSessionId: "a" }
+				: kind === "dropped"
+					? { type: "notice", id: kind, kind, from, aboutId: sentId, reason: "rate" }
+					: {
+							type: "notice",
+							id: kind,
+							kind,
+							from,
+							aboutId: sentId,
+							...(kind === "retired" ? { subject: "message" as const } : {}),
+						};
+		expect(await transport.requestInbox(own, notice)).toEqual({ ok: true, outcome: "delivered" });
+	}
+	expect(ah.display).toHaveLength(1);
+	expect(ah.notices).toHaveLength(3);
+	for (const text of [...ah.display, ...ah.notices]) expect(text).not.toMatch(/[\x1b\r\n]/);
+	fail = true;
+	expect((await a.send(maliciousTarget, "failure", { notifyWhenIdle: false })).text).not.toMatch(/[\x1b\r\n]/);
+	expect(maliciousTarget.name).toBe(maliciousPeerText);
+});

@@ -2,6 +2,8 @@ import type { PermissionClass } from "./policy";
 
 export const MESSAGING_WIRE_VERSION = 1;
 export const MAX_SERIALIZED_CHARS = 1_048_576;
+/** Cap on peer-declared name, title and idle status (same scale as the cwd cap). */
+export const MAX_PEER_TEXT_CHARS = 4096;
 export const LINE_DEADLINE_MS = 30_000;
 export const ACCEPTED_QUEUE_CAP = 50;
 export const HELD_CAP = 100;
@@ -91,7 +93,7 @@ function isSender(raw: unknown): raw is SenderInfo {
 	return (
 		Object.keys(value).every(key => ["sessionId", "name", "shortId", "cwd", "entryId", "class"].includes(key)) &&
 		isMailboxSessionId(value.sessionId) &&
-		(value.name === null || typeof value.name === "string") &&
+		(value.name === null || (typeof value.name === "string" && value.name.length <= MAX_PEER_TEXT_CHARS)) &&
 		typeof value.shortId === "string" &&
 		/^[0-9a-f]{8}$/.test(value.shortId) &&
 		typeof value.cwd === "string" &&
@@ -155,7 +157,8 @@ export function parseInboxRequest(raw: unknown): InboxRequest | undefined {
 				(value.subject !== undefined && value.subject !== "message" && value.subject !== "subscription") ||
 				(value.finishedAt !== undefined &&
 					(typeof value.finishedAt !== "number" || !Number.isFinite(value.finishedAt))) ||
-				(value.status !== undefined && typeof value.status !== "string") ||
+				(value.status !== undefined &&
+					(typeof value.status !== "string" || value.status.length > MAX_PEER_TEXT_CHARS)) ||
 				(value.reason !== undefined &&
 					(typeof value.reason !== "string" ||
 						!["queue_full", "rate", "repeat", "relay_loop"].includes(value.reason))) ||
