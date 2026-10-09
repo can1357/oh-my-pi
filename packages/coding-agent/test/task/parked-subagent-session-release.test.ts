@@ -30,16 +30,85 @@ import { createInMemoryAuthStorage } from "../helpers/agent-session-setup";
 
 const AGENT_ID = "ParkedRelease";
 const MOCK_API_SOURCE = "test/parked-subagent-session-release";
-// After earlier files warm the session code, JSC's optimizing-JIT worklist can
-// keep an object referenced by an in-flight compile reachable for a few seconds
-// (observed ~4 s locally, >8 s on loaded CI runners); collection is polled past
-// that window. A healthy release returns on the first poll that sees it collected,
-// so the deadline only bounds how long a real leak takes to fail.
+// Collection runs in a fresh child VM with concurrent compilation disabled,
+// matching the existing retention probes. The whole-suite result is sensitive
+// to that compiler configuration; no particular native retainer is established.
+// Keep the same deadline and consumer assertions in the isolated process.
 const COLLECT_DEADLINE_MS = 15_000;
 
 const ENV_KEYS = ["HOME", "PI_CODING_AGENT_DIR", "OMP_PROFILE", "PI_PROFILE"] as const;
 let savedEnv: Record<string, string | undefined> = {};
 let root: string;
+const isChild = process.env.OMP_PARKED_RELEASE_CHILD === import.meta.path;
+const selectedCase = process.env.OMP_PARKED_RELEASE_CASE;
+let registeredChildCases = 0;
+
+async function runIsolatedCase(name: string, timeoutMs: number): Promise<void> {
+	const sandbox = await fs.mkdtemp(path.join(os.tmpdir(), "omp-parked-release-vm-"));
+	try {
+		const home = path.join(sandbox, "home");
+		const temp = path.join(sandbox, "tmp");
+		const storageEnv = {
+			HOME: home,
+			PI_CODING_AGENT_DIR: path.join(home, ".omp", "agent"),
+			XDG_CONFIG_HOME: path.join(sandbox, "xdg", "config"),
+			XDG_DATA_HOME: path.join(sandbox, "xdg", "data"),
+			XDG_STATE_HOME: path.join(sandbox, "xdg", "state"),
+			XDG_CACHE_HOME: path.join(sandbox, "xdg", "cache"),
+			USERPROFILE: home,
+			APPDATA: path.join(sandbox, "appdata", "roaming"),
+			LOCALAPPDATA: path.join(sandbox, "appdata", "local"),
+			TMPDIR: temp,
+			TMP: temp,
+			TEMP: temp,
+		};
+		await Promise.all(
+			[...new Set(Object.values(storageEnv))].map(directory => fs.mkdir(directory, { recursive: true })),
+		);
+		const child = Bun.spawn([process.execPath, "test", import.meta.path], {
+			cwd: path.resolve(import.meta.dir, "../../../.."),
+			env: {
+				...process.env,
+				...storageEnv,
+				OMP_PROFILE: "",
+				PI_PROFILE: "",
+				PI_CONFIG_DIR: ".omp",
+				OMP_PARKED_RELEASE_CHILD: import.meta.path,
+				OMP_PARKED_RELEASE_CASE: name,
+				BUN_JSC_useConcurrentJIT: "0",
+			},
+			stdin: "ignore",
+			stdout: "pipe",
+			stderr: "pipe",
+		});
+		const watchdog = setTimeout(() => child.kill(), timeoutMs);
+		try {
+			const [stdout, stderr, exitCode] = await Promise.all([
+				new Response(child.stdout).text(),
+				new Response(child.stderr).text(),
+				child.exited,
+			]);
+			expect(exitCode, `${stdout}${stderr}`).toBe(0);
+		} finally {
+			clearTimeout(watchdog);
+			child.kill();
+			await child.exited;
+		}
+	} finally {
+		await removeWithRetries(sandbox);
+	}
+}
+
+function isolatedCase(name: string, body: () => Promise<void>, timeoutMs: number): void {
+	if (isChild) {
+		if (name === selectedCase) {
+			registeredChildCases += 1;
+			it(name, body, timeoutMs);
+		}
+		return;
+	}
+	it(name, () => runIsolatedCase(name, timeoutMs), timeoutMs);
+}
 
 function restoreEnvValue(key: string, value: string | undefined): void {
 	if (value === undefined) {
@@ -52,6 +121,7 @@ function restoreEnvValue(key: string, value: string | undefined): void {
 }
 
 beforeEach(async () => {
+	if (!isChild) return;
 	savedEnv = Object.fromEntries(ENV_KEYS.map(key => [key, process.env[key]]));
 	root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-parked-release-"));
 	const home = path.join(root, "home");
@@ -65,6 +135,7 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+	if (!isChild) return;
 	await AgentLifecycleManager.global().dispose();
 	AgentLifecycleManager.resetGlobalForTests();
 	AgentRegistry.resetGlobalForTests();
@@ -168,7 +239,7 @@ async function runKeptAliveSubagent(parentAgentId?: string): Promise<{ release()
 	};
 }
 
-it("releases a parked keep-alive subagent's session while the agent stays revivable", async () => {
+isolatedCase("releases a parked keep-alive subagent's session while the agent stays revivable", async () => {
 	const run = await runKeptAliveSubagent();
 	try {
 		const sessionRef = weakRefToLiveSession(AGENT_ID);
@@ -185,7 +256,7 @@ it("releases a parked keep-alive subagent's session while the agent stays reviva
 	}
 }, 30_000);
 
-it("parks without retaining the run's settings overlay and revives with the settings it wrote", async () => {
+isolatedCase("parks without retaining the run's settings overlay and revives with the settings it wrote", async () => {
 	const run = await runKeptAliveSubagent();
 	try {
 		// A write the subagent made to its own settings during the run.
@@ -204,7 +275,7 @@ it("parks without retaining the run's settings overlay and revives with the sett
 	}
 }, 30_000);
 
-it("retains report receipts and persisted metrics without retaining a parked subagent's live session", async () => {
+isolatedCase("retains report receipts and persisted metrics without retaining a parked subagent's live session", async () => {
 	const ownerManager = SessionManager.inMemory(root);
 	const todoListeners = new Set<(phases: TodoPhase[]) => void>();
 	// Only the report owner is a fixture; the observed child uses the real executor and AgentSession.
@@ -279,3 +350,7 @@ it("retains report receipts and persisted metrics without retaining a parked sub
 		expect(remainingTodoListeners).toBe(0);
 	}
 }, 30_000);
+
+if (isChild && registeredChildCases !== 1) {
+	throw new Error(`Expected one parked-release child case, registered ${registeredChildCases}`);
+}
