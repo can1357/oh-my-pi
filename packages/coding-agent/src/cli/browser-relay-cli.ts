@@ -5,6 +5,7 @@
  */
 import * as path from "node:path";
 import { getBrowserRelayDir } from "@oh-my-pi/pi-utils";
+import { VERSION } from "@oh-my-pi/pi-utils/dirs";
 import { probeRelayServer } from "../tools/browser/relay/daemon";
 import backgroundJs from "../tools/browser/relay/extension-assets/background.js.txt" with { type: "text" };
 import licenseText from "../tools/browser/relay/extension-assets/LICENSE.txt" with { type: "text" };
@@ -32,7 +33,8 @@ export interface BrowserRelayCommandArgs {
 const EXTENSION_FILES: Record<string, string> = {
 	"background.js": backgroundJs,
 	LICENSE: licenseText,
-	"manifest.json": manifestJson,
+	// The extension reports `version_name` in its hello, so omp can tell when an older install keeps running.
+	"manifest.json": `${JSON.stringify({ ...JSON.parse(manifestJson), version_name: VERSION }, null, "\t")}\n`,
 	"options.html": optionsHtml,
 	"options.js": optionsJs,
 	"THIRD-PARTY-NOTICES.txt": thirdPartyNotices,

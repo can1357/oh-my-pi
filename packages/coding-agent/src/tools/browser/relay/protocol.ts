@@ -60,6 +60,8 @@ export type ExtToRelayMessage =
 			 * latest-wins socket replacement.
 			 */
 			instanceId?: string;
+			/** The omp version that installed this extension (manifest `version_name`). Absent on builds without the stamp. */
+			ompVersion?: string;
 	  }
 	| { t: "cdpEvent"; tabId: number; sessionId?: string; method: string; params?: Record<string, unknown> }
 	| { t: "detached"; tabId: number; reason: string; relayInitiated?: boolean }

@@ -1,7 +1,11 @@
 import { afterEach, describe, expect, it } from "bun:test";
 import { VERSION } from "@oh-my-pi/pi-utils/dirs";
 import { findFreeCdpPort } from "@oh-my-pi/pi-coding-agent/tools/browser/attach";
-import { waitForRelayExtension } from "@oh-my-pi/pi-coding-agent/tools/browser/relay/probe";
+import {
+	relayExtensionNotice,
+	UPDATE_RELAY_EXTENSION,
+	waitForRelayExtension,
+} from "@oh-my-pi/pi-coding-agent/tools/browser/relay/probe";
 import { DISCARDED_TABS_PROTOCOL_VERSION } from "@oh-my-pi/pi-coding-agent/tools/browser/relay/protocol";
 import {
 	type RelayServer,
@@ -221,5 +225,69 @@ describe("waitForRelayExtension", () => {
 		extension = new WebSocket(`ws://127.0.0.1:${port}/ext`);
 		extension.addEventListener("open", () => extension?.send(JSON.stringify(EXTENSION_HELLO)), { once: true });
 		expect(await wait).toBe("ready");
+	});
+});
+
+describe("relayExtensionNotice", () => {
+	let relay: RelayServer | undefined;
+	let fake: Bun.Server<undefined> | undefined;
+	let extension: WebSocket | undefined;
+
+	afterEach(() => {
+		extension?.close();
+		relay?.stop();
+		fake?.stop(true);
+		extension = undefined;
+		relay = undefined;
+		fake = undefined;
+	});
+
+	async function connectExtension(hello: object): Promise<string> {
+		const port = await findFreeCdpPort();
+		relay = startRelayServer({ port });
+		extension = new WebSocket(`ws://127.0.0.1:${port}/ext`);
+		extension.addEventListener("open", () => extension?.send(JSON.stringify(hello)), { once: true });
+		return `http://127.0.0.1:${port}`;
+	}
+
+	it("says nothing for an extension installed by this omp", async () => {
+		const cdpUrl = await connectExtension({ ...EXTENSION_HELLO, ompVersion: VERSION });
+		expect(await waitForRelayExtension(cdpUrl)).toBe("ready");
+		expect(await relayExtensionNotice(cdpUrl)).toBeNull();
+	});
+
+	it("names the older omp that installed a protocol-compatible extension and how to update it", async () => {
+		const cdpUrl = await connectExtension({ ...EXTENSION_HELLO, ompVersion: "18.6.1" });
+		expect(await waitForRelayExtension(cdpUrl)).toBe("ready");
+		const notice = await relayExtensionNotice(cdpUrl);
+		expect(notice).toContain("installed by omp 18.6.1");
+		expect(notice).toContain(UPDATE_RELAY_EXTENSION);
+	});
+
+	it("flags an extension installed before omp stamped its version", async () => {
+		const cdpUrl = await connectExtension(EXTENSION_HELLO);
+		expect(await waitForRelayExtension(cdpUrl)).toBe("ready");
+		const notice = await relayExtensionNotice(cdpUrl);
+		expect(notice).toContain("installed by an older omp");
+		expect(notice).toContain(UPDATE_RELAY_EXTENSION);
+	});
+
+	it("still fails a stamped extension that lacks the relay protocol instead of only noting it", async () => {
+		const cdpUrl = await connectExtension({ ...LEGACY_EXTENSION_HELLO, ompVersion: "18.6.1" });
+		expect(await waitForRelayExtension(cdpUrl)).toBe("outdated-extension");
+	});
+
+	it("says nothing when the relay is too old to report its extension's version", async () => {
+		fake = Bun.serve({
+			hostname: "127.0.0.1",
+			port: 0,
+			fetch: () =>
+				Response.json({
+					ompRelayVersion: "18.5.1",
+					ompRelayDiscardedTabsProtocol: String(DISCARDED_TABS_PROTOCOL_VERSION),
+					ompExtensionDiscardedTabsProtocol: String(DISCARDED_TABS_PROTOCOL_VERSION),
+				}),
+		});
+		expect(await relayExtensionNotice(`http://127.0.0.1:${fake.port}`)).toBeNull();
 	});
 });
