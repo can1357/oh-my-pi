@@ -568,17 +568,23 @@ function hasNonContextSegment(segments: readonly StatusLineSegmentId[]): boolean
 	return false;
 }
 
-function removeContextSegments(parts: string[], segments: StatusLineSegmentId[]): void {
+function removeContextSegments(
+	parts: string[],
+	segments: StatusLineSegmentId[],
+	widthHints: (string | undefined)[],
+): void {
 	let writeIndex = 0;
 	for (let readIndex = 0; readIndex < segments.length; readIndex++) {
 		const segment = segments[readIndex];
 		if (isContextSegment(segment)) continue;
 		parts[writeIndex] = parts[readIndex];
 		segments[writeIndex] = segment;
+		widthHints[writeIndex] = widthHints[readIndex];
 		writeIndex++;
 	}
 	parts.length = writeIndex;
 	segments.length = writeIndex;
+	widthHints.length = writeIndex;
 }
 
 function formatEmbeddedContextPercent(percent: number): string {
@@ -2937,6 +2943,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 
 		// Collect visible segment contents
 		const leftParts: string[] = [];
+		const leftWidthHints: (string | undefined)[] = [];
 		const leftSegIds: StatusLineSegmentId[] = [];
 		const leftSegmentIds = layout === "plain-right" ? [] : effectiveSettings.leftSegments;
 		for (const segId of leftSegmentIds) {
@@ -2946,11 +2953,13 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 			const rendered = renderSegment(segId, ctx);
 			if (rendered.visible && rendered.content) {
 				leftParts.push(rendered.content);
+				leftWidthHints.push(rendered.widthHint);
 				leftSegIds.push(segId);
 			}
 		}
 
 		const rightParts: string[] = [];
+		const rightWidthHints: (string | undefined)[] = [];
 		const rightSegIds: StatusLineSegmentId[] = [];
 		const rightSegmentIds = layout === "plain-left" ? [] : effectiveSettings.rightSegments;
 		for (const segId of rightSegmentIds) {
@@ -2959,6 +2968,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 			const rendered = renderSegment(segId, ctx);
 			if (rendered.visible && rendered.content) {
 				rightParts.push(rendered.content);
+				rightWidthHints.push(rendered.widthHint);
 				rightSegIds.push(segId);
 			}
 		}
@@ -2977,23 +2987,31 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 			embedContext &&
 			(!embedCompactContext || leftSegIds.includes("context_total") || rightSegIds.includes("context_total"));
 		if (embedContext) {
-			removeContextSegments(leftParts, leftSegIds);
-			removeContextSegments(rightParts, rightSegIds);
+			removeContextSegments(leftParts, leftSegIds, leftWidthHints);
+			removeContextSegments(rightParts, rightSegIds, rightWidthHints);
 		}
 
 		if (layout !== "plain-left") {
 			const runningBackgroundJobs = this.runningBackgroundJobCount();
 			if (runningBackgroundJobs > 0) {
 				rightParts.unshift(theme.fg("statusLineSubagents", `${theme.icon.job} ${runningBackgroundJobs}`));
+				rightWidthHints.unshift(undefined);
 			}
-			if (subagentBadge) rightParts.unshift(subagentBadge);
+			if (subagentBadge) {
+				rightParts.unshift(subagentBadge);
+				rightWidthHints.unshift(undefined);
+			}
 		}
 		const topFillWidth = Math.max(0, width);
 		// These arrays are local to this render; overflow handling can mutate them.
 		const left = leftParts;
 		const right = rightParts;
-		const leftWidths = left.map(part => visibleWidth(part));
-		const rightWidths = right.map(part => visibleWidth(part));
+		const leftWidths = left.map((part, index) =>
+			Math.max(visibleWidth(part), visibleWidth(leftWidthHints[index] ?? "")),
+		);
+		const rightWidths = right.map((part, index) =>
+			Math.max(visibleWidth(part), visibleWidth(rightWidthHints[index] ?? "")),
+		);
 
 		const leftSepWidth = separators.leftSepWidth;
 		const rightSepWidth = separators.rightSepWidth;
@@ -3247,23 +3265,28 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		// past the window label — `──200K─120%` with the percent in error color.
 		const percentOverflow = pct !== null && pct > 100;
 		if (embedContext) {
+			const placementPercent =
+				embedCompactContext && pct === null ? (ctx.session.startupContextPercent ?? null) : pct;
 			const livePercent = embedCompactContext
 				? `ctx:${formatCompactContextPercent(percentOverflow ? pct : pct === null ? null : clampedPct)}`
 				: pct === null
 					? ""
 					: formatEmbeddedContextPercent(percentOverflow ? pct : clampedPct);
 			const liveWindow = showEmbeddedContextWindow ? formatNumber(ctx.contextWindow) : "";
-			const candidatePercent = livePercent;
+			const placementPercentLabel = embedCompactContext
+				? `ctx:${formatCompactContextPercent(placementPercent)}`
+				: livePercent;
+			const candidatePercent = livePercent.padEnd(placementPercentLabel.length, horizontal);
 			const candidateWindow = liveWindow;
 			const minimumLabelWidth = embeddedContextGaugeMinWidth(
-				pct,
+				placementPercent,
 				ctx.contextWindow,
 				embedCompactContext,
 				showEmbeddedContextWindow,
 			);
 			if (gapWidth >= minimumLabelWidth) {
 				percentLabel = candidatePercent;
-				percentPlacementWidth = livePercent.length;
+				percentPlacementWidth = placementPercentLabel.length;
 				if (!showEmbeddedContextWindow) {
 					if (percentOverflow) percentStart = gapWidth - percentPlacementWidth;
 				} else {
@@ -3277,11 +3300,11 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 					}
 					scaleWidth = windowStart;
 				}
-			} else if (gapWidth >= livePercent.length) {
+			} else if (gapWidth >= placementPercentLabel.length) {
 				// The compact percentage is the primary readout. Keep it when an
 				// explicitly configured context total cannot share the narrow gauge.
 				percentLabel = candidatePercent;
-				percentPlacementWidth = livePercent.length;
+				percentPlacementWidth = placementPercentLabel.length;
 				if (percentOverflow) percentStart = gapWidth - percentPlacementWidth;
 			}
 		}
@@ -3685,6 +3708,8 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 
 		const pct = ctx.contextPercent;
 		const window = ctx.contextWindow;
+		const compactContext = ctx.options.context_pct?.compact === true && segments.includes("context_pct");
+		const showContextWindow = !compactContext || segments.includes("context_total");
 		const boundaries = ctx.autoCompactEnabled ? this.#compactionBoundaries(window) : null;
 		const lines = [
 			pct === null ? "Context usage unknown" : `Context ${Math.round(pct)}% used`,
@@ -3728,8 +3753,12 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 					? { parts: [{ value: speculationAt }, { value: used - speculationAt, token: "accent" }] }
 					: {}),
 				...(marks.length > 0 ? { marks } : {}),
-				...(pct === null ? {} : { label: `${Math.round(pct)}%` }),
-				...(window > 0 ? { total: formatNumber(window) } : {}),
+				...(compactContext
+					? { label: `ctx:${formatCompactContextPercent(pct)}` }
+					: pct === null
+						? {}
+						: { label: `${Math.round(pct)}%` }),
+				...(showContextWindow && window > 0 ? { total: formatNumber(window) } : {}),
 				title: lines.join("\n"),
 				actions: { click: "status.context" },
 			},

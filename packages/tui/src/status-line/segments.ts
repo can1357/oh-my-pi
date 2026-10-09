@@ -911,17 +911,27 @@ const contextPctSegment: StatusLineSegment = {
 				: formatContextUsage(pct, window, ctx.contextTokens);
 		const text = theme.fg(color, display);
 		const content = compact ? `${text}${autoIcon}` : withIcon(theme.icon.context, `${text}${autoIcon}`);
+		const startupPercent = ctx.session.startupContextPercent;
+		const widthHint =
+			compact && pct === null && startupPercent !== null && startupPercent !== undefined
+				? `${theme.fg(color, `ctx:${formatCompactContextPercent(startupPercent)}`)}${autoIcon}`
+				: undefined;
 
-		return { content, visible: true };
+		return { content, visible: true, widthHint };
 	},
 	describe(ctx) {
 		const pct = ctx.contextPercent;
 		const window = ctx.contextWindow;
 		const level = getContextUsageLevel(pct ?? 0, window);
 		const color = getContextUsageThemeColor(level);
+		const compact = ctx.options.context_pct?.compact === true;
 		const spans: TspSpan[] = [
 			span(
-				pct === null && window > 0 ? formatNumber(window) : formatContextUsage(pct, window, ctx.contextTokens),
+				compact
+					? `ctx:${formatCompactContextPercent(pct)}`
+					: pct === null && window > 0
+						? formatNumber(window)
+						: formatContextUsage(pct, window, ctx.contextTokens),
 				color,
 			),
 		];
@@ -935,7 +945,7 @@ const contextPctSegment: StatusLineSegment = {
 				spans.push(span(` ${theme.icon.auto}`, speculation === "armed" ? accentToken(ctx, "accent") : color));
 			}
 		}
-		return segView(spans, "context", getContextUsageTone(level));
+		return segView(spans, compact ? undefined : "context", getContextUsageTone(level));
 	},
 };
 
