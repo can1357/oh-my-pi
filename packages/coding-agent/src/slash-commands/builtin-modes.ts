@@ -714,56 +714,6 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 		},
 	},
 	{
-		name: "prewalk",
-		icon: "prewalk",
-		description: "Arm or restart a one-shot model handoff",
-		allowArgs: true,
-		acpDescription: "Arm or restart prewalk",
-		acpInputHint: "[restart]",
-		subcommands: [{ name: "restart", description: "Return to @default and re-arm the handoff to @smol" }],
-		handle: async (command, runtime) => {
-			const arg = command.args.trim().toLowerCase();
-			if (arg && arg !== "restart") return usage("Usage: /prewalk [restart]", runtime);
-			const target = resolveSessionModelSelector("@smol", runtime.session, runtime.settings);
-			if (target.error || !target.model) {
-				return usage(target.error ?? 'Model "@smol" not found', runtime);
-			}
-			if (!runtime.session.modelRegistry.hasConfiguredAuth(target.model)) {
-				return usage(`No API key for ${target.model.provider}/${target.model.id}`, runtime);
-			}
-			if (arg === "restart") {
-				const source = resolveSessionModelSelector("@default", runtime.session, runtime.settings);
-				if (source.error || !source.model) {
-					return usage(source.error ?? 'Model "@default" not found', runtime);
-				}
-				if (!runtime.session.modelRegistry.hasConfiguredAuth(source.model)) {
-					return usage(`No API key for ${source.model.provider}/${source.model.id}`, runtime);
-				}
-				const result = await runtime.session.restartPrewalk(
-					source.model,
-					source.thinkingLevel,
-					target.model,
-					target.thinkingLevel,
-				);
-				if (result === "rejected") return commandConsumed();
-				const restartSource = `${source.model.provider}/${source.model.id}`;
-				await runtime.output(
-					result === "armed"
-						? `Prewalk restarted: using @default (${restartSource}) for planning, then switching to @smol (${target.model.provider}/${target.model.id}) at the next edit/write (todo-gated).`
-						: `Prewalk reset: using @default (${restartSource}); @smol resolves to the same model and thinking level, so no handoff was armed.`,
-				);
-				return commandConsumed();
-			}
-			const armed = runtime.session.armPrewalk(target.model, target.thinkingLevel);
-			if (armed) {
-				await runtime.output(
-					`Prewalk on: switching to ${target.model.provider}/${target.model.id} at the next edit/write (todo-gated).`,
-				);
-			}
-			return commandConsumed();
-		},
-	},
-	{
 		name: "agent",
 		icon: "agents",
 		description: "Switch agent persona for this session (/agent <name>; bare /agent clears the active persona)",
@@ -789,56 +739,6 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 				return;
 			}
 			await runtime.ctx.showAgentPersonaPicker();
-		},
-	},
-	{
-		name: "modelpreset",
-		icon: "model",
-		description: "Save and switch model presets (role models + thinking level)",
-		acpDescription: "Manage model presets",
-		acpInputHint: "[list|save|switch|delete] [name]",
-		inlineHint: "[save|switch|delete|list] [name]",
-		subcommands: [
-			{ name: "list", description: "List saved presets" },
-			{ name: "save", description: "Save the current role models and thinking level", usage: "<name>" },
-			{ name: "switch", description: "Apply a saved preset", usage: "<name>" },
-			{ name: "delete", description: "Delete a saved preset", usage: "<name>" },
-		],
-		allowArgs: true,
-		getTuiAutocompleteDescription: runtime => {
-			const count = getModelPresetNames(runtime.ctx.settings).length;
-			return count > 0 ? `Presets: ${count} saved` : "Presets: none saved";
-		},
-		handle: async (command, runtime) => {
-			const outcome = await runPresetsCommand(command.args, runtime.settings, runtime.session);
-			if (outcome.usage) return usage(outcome.message, runtime);
-			await runtime.output(outcome.message);
-			if (outcome.switched) await runtime.notifyTitleChanged?.();
-			if (outcome.changedConfig) await runtime.notifyConfigChanged?.();
-			return commandConsumed();
-		},
-		handleTui: async (command, runtime) => {
-			clearSubmittedText(runtime);
-			const { ctx } = runtime;
-			let args = command.args;
-			if (!args.trim()) {
-				const names = getModelPresetNames(ctx.settings);
-				if (names.length === 0) {
-					ctx.showStatus(NO_PRESETS_MESSAGE);
-					return;
-				}
-				const picked = await ctx.showHookSelector("Switch to model preset", names);
-				if (picked === undefined) return;
-				args = `switch ${picked}`;
-			}
-			const outcome = await runPresetsCommand(args, ctx.settings, ctx.session);
-			if (outcome.switched) {
-				ctx.statusLine.invalidate();
-				ctx.updateEditorBorderColor();
-			}
-			if (outcome.failed || outcome.usage) ctx.showWarning(outcome.message);
-			else ctx.showStatus(outcome.message);
-			ctx.ui.requestRender();
 		},
 	},
 	{
