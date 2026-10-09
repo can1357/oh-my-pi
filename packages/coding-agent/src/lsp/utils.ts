@@ -4,7 +4,7 @@ import * as fs from "node:fs/promises";
 import path from "node:path";
 import { isEnoent } from "@oh-my-pi/pi-utils";
 import { type Theme, theme } from "@oh-my-pi/pi-tui/theme";
-import { formatPathRelativeToCwd, resolveToCwd } from "../tools/path-utils";
+import { formatPathRelativeToCwd, resolveToCwd, specialFileKind } from "../tools/path-utils";
 import type {
 	CodeAction,
 	Command,
@@ -19,6 +19,13 @@ import type {
 } from "./types";
 
 export { detectLanguageId } from "@oh-my-pi/pi-tui/lang-from-path";
+
+/** Read a file's text, refusing FIFOs, devices and sockets, whose reads can block forever or never end. */
+export async function readTextFromDisk(filePath: string): Promise<string> {
+	const kind = specialFileKind(await fs.stat(filePath));
+	if (kind) throw new Error(`Cannot open '${filePath}': it is a ${kind}, not a regular file or directory.`);
+	return Bun.file(filePath).text();
+}
 
 // =============================================================================
 // URI Handling (Cross-Platform)
@@ -643,7 +650,7 @@ function parseSymbolSpec(spec: string): { symbol: string; occurrence: number } {
 export async function resolveSymbolColumn(filePath: string, line: number, symbolSpec?: string): Promise<number> {
 	const lineNumber = Math.max(1, line);
 	try {
-		const fileText = await Bun.file(filePath).text();
+		const fileText = await readTextFromDisk(filePath);
 		const lines = fileText.split("\n");
 		const targetLine = lines[lineNumber - 1] ?? "";
 		if (!symbolSpec) {
@@ -674,6 +681,8 @@ export async function readLocationContext(filePath: string, line: number, contex
 	const targetLine = Math.max(1, line);
 	const surrounding = Math.max(0, contextLines);
 	try {
+		// Context is decoration: a special-file location keeps its header, like a missing file.
+		if (specialFileKind(await fs.stat(filePath))) return [];
 		const fileText = await Bun.file(filePath).text();
 		const lines = fileText.split("\n");
 		if (lines.length === 0) return [];

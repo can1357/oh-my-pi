@@ -127,6 +127,20 @@ describe("live routing config files", () => {
 		expect((await storage.health.model("live-routing-test", { reserveFraction: Number.NaN })).state).toBe("reserve");
 	});
 
+	it("applies an edit that landed before the watch was armed", async () => {
+		const file = tempDir.join("routing.yml");
+		await Bun.write(file, YAML.stringify(routing("first")));
+		settings = await Settings.init({ cwd: tempDir.path(), agentDir: tempDir.join("agent"), configFiles: [file] });
+		await Bun.write(file, YAML.stringify(routing("second")));
+		// Real-time wait, not fake timers: macOS FSEvents can still hand a just-journaled
+		// write to a stream created right after it. Once journaled, only a re-read on
+		// arming can apply the edit. A slow journal makes this pass vacuously, never flake.
+		await Bun.sleep(100);
+		settings.startWatching();
+		await waitFor(() => settings.getModelRole("smol") === "anthropic/second");
+		expect(getRetryFallbackChains(settings).smol).toEqual(["anthropic/second-fallback"]);
+	});
+
 	it("follows replacement of a profile ancestor symlink and watches the new target", async () => {
 		const first = tempDir.join("profile-a");
 		const second = tempDir.join("profile-b");

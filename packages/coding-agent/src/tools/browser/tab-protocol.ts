@@ -91,6 +91,11 @@ export type WorkerInitPayload =
 			 * behaves as `true`; the supervisor clears it for browsers we did not launch.
 			 */
 			activateForScreenshot?: boolean;
+			/**
+			 * The user drives this browser (connected, relay): downloads keep its one browser-wide folder and real file
+			 * names, since the user's own downloads land there too. Unset means an OMP-launched browser.
+			 */
+			userDriven?: boolean;
 	  };
 
 /** Result of one host tool requested by browser-run JavaScript. */

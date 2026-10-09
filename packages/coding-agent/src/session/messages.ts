@@ -174,6 +174,17 @@ export function buildReplanTitleContext(messages: AgentMessage[]): string {
 }
 
 /**
+ * Title text of a message the operator wrote: a typed prompt, or a `/skill:`
+ * invocation as its chip (never the expanded skill body). `undefined` for
+ * agent-attributed and non-user messages, which automatic titles never name.
+ */
+export function operatorTitleText(message: AgentMessage): string | undefined {
+	if (message.role === "custom") return titleTextFromSkillPrompt(message);
+	if (message.role !== "user" || message.attribution !== "user") return undefined;
+	return textFromContent(message.content) || undefined;
+}
+
+/**
  * Words of thinking plus reply text a settled assistant message contributes to
  * {@link buildReplanTitleContext}. Deferred auto-titling accumulates these and
  * retitles once the assistant has said enough to reveal the task; aborted and

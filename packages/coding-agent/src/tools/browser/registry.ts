@@ -17,7 +17,7 @@ import {
 	type UserAgentOverride,
 } from "./launch";
 import { reapOrphanSharedTargets } from "./orphan-registry";
-import { ensureRelayDaemon, isLoopbackRelayUrl } from "./relay/daemon";
+import { ensureRelayDaemon, isLoopbackRelayUrl, restartRelayDaemon } from "./relay/daemon";
 import type { RelayKind } from "./relay/kind";
 import { waitForRelayExtension } from "./relay/probe";
 import { ensureSharedBrowser } from "./shared-daemon";
@@ -241,13 +241,19 @@ async function openBrowserHandle(kind: BrowserKind, opts: AcquireBrowserOptions)
 		// on demand (the extension dials in on its own). Hosts without a CLI
 		// worker entry (bun test, SDK embedding) never spawn brokers. Remote
 		// relay URLs must already be serving.
-		if (isLoopbackRelayUrl(cdpUrl) && (isCompiledBinary() || workerHostEntry() !== null)) {
+		const autoStart = isLoopbackRelayUrl(cdpUrl) && (isCompiledBinary() || workerHostEntry() !== null);
+		if (autoStart) {
 			await ensureRelayDaemon({ cdpUrl, signal: opts.signal });
 		}
 		// The relay answers /json/version with 503 until its extension dials in;
 		// the wait fails fast when nothing serves the port or the server has
 		// already outlived the window an installed extension needs to connect.
-		const outcome = await waitForRelayExtension(cdpUrl, opts.signal);
+		let outcome = await waitForRelayExtension(cdpUrl, opts.signal);
+		// A broker-owned relay outlives omp upgrades; replace an incompatible one
+		// with this version's once. A manually started relay is left to its owner.
+		if (outcome === "outdated-relay" && autoStart && (await restartRelayDaemon({ cdpUrl, signal: opts.signal }))) {
+			outcome = await waitForRelayExtension(cdpUrl, opts.signal);
+		}
 		if (outcome === "unreachable") {
 			throw new ToolError(
 				`omp browser relay is not reachable at ${cdpUrl}. Start it with \`omp browser-relay\` (or check the endpoint), and make sure the OMP Browser Relay extension is loaded in Chrome.`,

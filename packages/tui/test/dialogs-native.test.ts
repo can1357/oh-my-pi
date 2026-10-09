@@ -1,12 +1,14 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import { KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
-import { setKeybindings, type TUI } from "@oh-my-pi/pi-tui";
-import type { DescribeContext, NativeChild, NativeNode } from "@oh-my-pi/pi-tui/native/node";
+import { setKeybindings, type Component, type TerminalFrameProvider, type TUI } from "@oh-my-pi/pi-tui";
+import { md } from "@oh-my-pi/pi-tui/native/describe";
+import type { DescribeContext, NativeChild, NativeNode, NativeSurfaceProvider } from "@oh-my-pi/pi-tui/native/node";
 import { AskDialogComponent, type ExtensionAskDialogQuestion } from "@oh-my-pi/pi-tui/overlays/ask-dialog";
 import { LoginDialogComponent } from "@oh-my-pi/pi-tui/overlays/login-dialog";
 import { PlanReviewOverlay } from "@oh-my-pi/pi-tui/overlays/plan-review-overlay";
 import { setNativeRendering } from "@oh-my-pi/pi-tui/native/state";
 import { getThemeByName, setThemeInstance } from "@oh-my-pi/pi-tui/theme";
+import { TspHarness } from "./native/tsp-harness";
 
 const ENTER = "\n";
 const UP = "\x1b[A";
@@ -97,17 +99,42 @@ describe("dialogs under a native surface", () => {
 		).toEqual([["Park them"], ["No"]]);
 	});
 
-	it("ask: tab and option events reach the dialog through the hoisted sheet's keypaths", () => {
+	it("ask: tab and option events reach the dialog through its described keypaths", () => {
 		const onSubmit = vi.fn();
 		const dialog = ask(onSubmit);
 		const tabs = find(dialog.describe(CX), node => node.k === "tabs");
-		expect(tabs?.path.startsWith("^")).toBe(true);
 		dialog.handleNativeEvent({ type: "select", key: tabs!.path, item: "1" });
 		const options = find(dialog.describe(CX), node => node.p?.role === "omp.ask.options");
 		expect(options?.node.key).toBe("q1");
 		dialog.handleNativeEvent({ type: "activate", key: options!.path, item: "option:0" });
 		dialog.handleNativeEvent({ type: "action", key: "x", act: "submit", mods: [] });
 		expect(onSubmit.mock.calls[0]?.[0].results[1].selectedOptions).toEqual(["Yes"]);
+	});
+
+	it("ask: docks in place of the composer instead of a modal sheet over the transcript", async () => {
+		// A modal bottom sheet hid the transcript rows explaining the question and blocked scrolling.
+		const transcript: Component = { render: () => [], invalidate: () => {}, describe: () => md("Why this decision") };
+		const dialog = ask();
+		const provider: TerminalFrameProvider & NativeSurfaceProvider = {
+			renderFrame: () => ({ viewport: [] }),
+			acknowledgeHistory: () => {},
+			describeSurface: () => ({ main: [transcript], dock: [dialog] }),
+		};
+		const harness = await TspHarness.start(tui => {
+			tui.setFrameProvider(provider);
+			tui.setFocus(dialog);
+		});
+		try {
+			expect(harness.errors).toEqual([]);
+			expect(harness.region("layer")?.c ?? []).toEqual([]);
+			const dock = harness.region("dock")!;
+			// Framed as the prompt composer (its root role), so Tern spaces it the same way.
+			const root = dock.c?.find(node => node.p?.role === "omp.editor");
+			expect(root?.c?.some(node => node.p?.role === "omp.ask.options")).toBe(true);
+			expect(harness.findAll(node => node.k === "overlay")).toEqual([]);
+		} finally {
+			harness.stop();
+		}
 	});
 
 	it("ask: Skip cancels like Esc; the recommended option loses its suffix for the badge", () => {
