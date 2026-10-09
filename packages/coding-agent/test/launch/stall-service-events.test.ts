@@ -428,6 +428,48 @@ describe("authoritative observational service events", () => {
 		);
 	}, 15_000);
 
+	it("observes a concurrent explicit backoff stop once without manufacturing owned delivery", async () => {
+		await withBroker(
+			async ({ projectDir, ownerClient, monitorClient }) => {
+				const observed: DaemonCompletionNotification[] = [];
+				const restarting = Promise.withResolvers<void>();
+				const stopped = Promise.withResolvers<DaemonCompletionNotification>();
+				const delivered: DaemonCompletionNotification[] = [];
+				ownerClient.onCompletion("child-owner", notification => {
+					delivered.push(notification);
+				});
+				monitorClient.observeOwners(["child-owner"], notification => {
+					observed.push(notification);
+					if (notification.daemon.state === "restarting") restarting.resolve();
+					else if (notification.daemon.state === "exited") stopped.resolve(notification);
+				});
+				await monitorClient.request({ op: "ping" });
+				const started = await ownerClient.request({
+					op: "start",
+					owner: "child-owner",
+					spec: { ...serviceSpec(projectDir, "backoff-stop-service", 4), restart: "always" },
+				});
+				if (started.op !== "start") throw new Error("Expected service start");
+				await ownerClient.request({ op: "send", name: "backoff-stop-service", data: "exit\n" });
+				await restarting.promise;
+				await Promise.all([
+					ownerClient.request({ op: "stop", name: "backoff-stop-service", timeoutMs: 2_000 }),
+					ownerClient.request({ op: "stop", name: "backoff-stop-service", timeoutMs: 2_000 }),
+				]);
+				expect((await stopped.promise).daemon).toMatchObject({
+					id: started.daemon.id,
+					state: "exited",
+					restartCount: 1,
+					pid: undefined,
+				});
+				await monitorClient.request({ op: "ping" });
+				expect(observed.map(({ daemon }) => daemon.state)).toEqual(["restarting", "exited"]);
+				expect(delivered).toEqual([]);
+			},
+			{ restartBackoffBaseMs: 10_000 },
+		);
+	}, 15_000);
+
 	it("continues observing a parked child after its connection closes and preserves owned replay", async () => {
 		await withBroker(async ({ projectDir, ownerClient, monitorClient, createClient }) => {
 			const observed = Promise.withResolvers<DaemonCompletionNotification>();
