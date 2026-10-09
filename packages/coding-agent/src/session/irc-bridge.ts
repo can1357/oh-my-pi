@@ -44,9 +44,15 @@ export class IrcBridge {
 		return this.#interrupts.length > 0;
 	}
 
-	/** Whether an aside is ready for step-boundary injection (not a parked wake). */
+	/** Whether an interrupting aside is ready for step-boundary injection (not a parked wake or remote peer). */
 	hasAsides(): boolean {
-		return this.#asides.length > 0;
+		return this.#asides.some(
+			record =>
+				record.role !== "custom" ||
+				!record.details ||
+				typeof record.details !== "object" ||
+				Reflect.get(record.details, "remote") !== true,
+		);
 	}
 
 	/** Whether any undelivered IRC record remains queued. */
