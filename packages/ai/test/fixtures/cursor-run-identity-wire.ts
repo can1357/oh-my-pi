@@ -9,11 +9,36 @@ import {
 	TextDeltaUpdateSchema,
 	TurnEndedUpdateSchema,
 } from "@oh-my-pi/pi-catalog/discovery/cursor-proto";
-import { create, fromBinary, toBinary } from "@oh-my-pi/pi-catalog/discovery/protobuf";
+import { create, fromBinary, pb, toBinary, type ProtoMessage } from "@oh-my-pi/pi-catalog/discovery/protobuf";
 import { streamSimple } from "../../src/stream";
 import * as piNative from "../../src/providers/pi-native-server";
 import { ConnectFrameDecoder, frameConnectMessage } from "../../src/providers/connect-frame";
 import type { Context, SimpleStreamOptions } from "../../src/types";
+
+interface VendorTiming extends ProtoMessage {
+	serverFirstTokenMs: number;
+	preStreamSetupMs: number;
+	waitForFirstEventMs: number;
+	providerTtftMs: number;
+	slowPoolWaitMs: number;
+}
+const vendorTiming = pb<VendorTiming>("fixture.vendor.Timing", [
+	{ no: 1, name: "serverFirstTokenMs", kind: "double" },
+	{ no: 2, name: "preStreamSetupMs", kind: "double" },
+	{ no: 3, name: "waitForFirstEventMs", kind: "double" },
+	{ no: 4, name: "providerTtftMs", kind: "double" },
+	{ no: 5, name: "slowPoolWaitMs", kind: "double" },
+]);
+interface VendorFirstPacket extends ProtoMessage {
+	timing: Uint8Array;
+	interaction: Uint8Array;
+}
+// The real server batches timing field 8 before interaction field 1 in one
+// protobuf envelope. The final oneof wins; a bad timing codec must not lose text.
+const vendorFirstPacket = pb<VendorFirstPacket>("fixture.vendor.FirstPacket", [
+	{ no: 8, name: "timing", kind: "bytes" },
+	{ no: 1, name: "interaction", kind: "bytes" },
+]);
 
 async function main(): Promise<void> {
 	const received: { run: AgentRunRequest; requestId: string }[] = [];
@@ -34,6 +59,21 @@ async function main(): Promise<void> {
 				handled = true;
 				received.push({ run: message.message.value, requestId: String(headers["x-request-id"]) });
 				stream.respond({ ":status": 200, "content-type": "application/connect+proto" });
+				const firstPacket = vendorFirstPacket.encode({
+					timing: vendorTiming.encode({
+						serverFirstTokenMs: 0.5,
+						preStreamSetupMs: 1.25,
+						waitForFirstEventMs: 2.5,
+						providerTtftMs: 3.75,
+						slowPoolWaitMs: 4.25,
+					}),
+					interaction: toBinary(
+						InteractionUpdateSchema,
+						create(InteractionUpdateSchema, {
+							message: { case: "textDelta", value: create(TextDeltaUpdateSchema, { text: "first-" }) },
+						}),
+					),
+				});
 				const text = create(AgentServerMessageSchema, {
 					message: {
 						case: "interactionUpdate",
@@ -52,6 +92,7 @@ async function main(): Promise<void> {
 				});
 				stream.end(
 					Buffer.concat([
+						frameConnectMessage(firstPacket),
 						frameConnectMessage(toBinary(AgentServerMessageSchema, text)),
 						frameConnectMessage(toBinary(AgentServerMessageSchema, end)),
 						frameConnectMessage(Buffer.from("{}"), 2),
@@ -104,6 +145,11 @@ async function main(): Promise<void> {
 				`Cursor wire fixture failed after ${received.length} requests: ${result.stopReason}; ${result.errorMessage}`,
 			);
 		}
+		const text = result.content
+			.filter(block => block.type === "text")
+			.map(block => block.text)
+			.join("");
+		if (text !== "first-wire verified") throw new Error("Cursor dropped text bundled with vendor timing fields");
 	};
 	try {
 		await invoke({
@@ -132,6 +178,11 @@ async function main(): Promise<void> {
 			},
 		).result();
 		if (remote.stopReason !== "stop") throw new Error(`Remote Cursor dispatch failed: ${remote.errorMessage}`);
+		const remoteText = remote.content
+			.filter(block => block.type === "text")
+			.map(block => block.text)
+			.join("");
+		if (remoteText !== "first-wire verified") throw new Error("Remote Cursor dispatch lost the first text packet");
 		console.log(
 			JSON.stringify(
 				received.map(row => ({

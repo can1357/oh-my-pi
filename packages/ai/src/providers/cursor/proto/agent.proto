@@ -1056,11 +1056,11 @@ message AgentServerMessage {
 }
 
 message TtftBreakdown {
-   int64 server_first_token_ms = 1;
-   int64 pre_stream_setup_ms = 2;
-   int64 wait_for_first_event_ms = 3;
-   optional int64 provider_ttft_ms = 4;
-   int64 slow_pool_wait_ms = 5;
+   double server_first_token_ms = 1;
+   double pre_stream_setup_ms = 2;
+   double wait_for_first_event_ms = 3;
+   optional double provider_ttft_ms = 4;
+   double slow_pool_wait_ms = 5;
 }
 
 // New unary API for naming an agent from a user message
