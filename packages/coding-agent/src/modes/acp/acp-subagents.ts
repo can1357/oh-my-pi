@@ -124,6 +124,10 @@ export class AcpSubagentStreams {
 			if (payload.status === "started") {
 				existing.runs++;
 				existing.awaitingAssignment = true;
+				// A late `message_end` from the previous run may never have arrived; a new
+				// run must not append its text to that run's message.
+				existing.liveMessageId = undefined;
+				existing.liveMessageProgress = undefined;
 			}
 			existing.state = payload.status === "started" ? { state: "running" } : IDLE_STATE_BY_LIFECYCLE[payload.status];
 			this.#sendUpdate(existing, { state: existing.state });

@@ -290,6 +290,38 @@ describe("AcpSubagentStreams", () => {
 			["Streamed", { type: "text", text: "done" }],
 		]);
 	});
+
+	it("does not append a new run's text to a previous run whose message_end never arrived", async () => {
+		registerAgent("Worker", ROOT_AGENT_ID);
+		const emit = (event: Record<string, unknown>) =>
+			bus.emit(TASK_SUBAGENT_EVENT_CHANNEL, { id: "Worker", event: event as AgentSessionEvent });
+		const answer = {
+			role: "assistant",
+			content: [{ type: "text", text: "run 1" }],
+			stopReason: "stop",
+			timestamp: 1,
+		};
+		bus.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, lifecycle("Worker", "started"));
+		emit({ type: "agent_start" });
+		emit({ type: "message_update", message: answer, assistantMessageEvent: { type: "thinking_delta", delta: "." } });
+		// Run 1 ends before its `message_end`, which never arrives.
+		emit({ type: "agent_end", messages: [answer] });
+		bus.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, lifecycle("Worker", "completed"));
+		bus.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, lifecycle("Worker", "started"));
+		emit({ type: "agent_start" });
+		emit({
+			type: "agent_end",
+			messages: [{ role: "assistant", content: [], stopReason: "error", errorMessage: "boom", timestamp: 2 }],
+		});
+
+		const chunks = (await delivered(6)).flatMap(n =>
+			n.update.sessionUpdate === "agent_message_chunk" && n.update.content.type === "text"
+				? [{ text: n.update.content.text, messageId: n.update.messageId }]
+				: [],
+		);
+		expect(chunks.map(chunk => chunk.text)).toEqual(["run 1", "boom"]);
+		expect(chunks[1]!.messageId).not.toBe(chunks[0]!.messageId);
+	});
 });
 
 describe("ACP session messages for agent IRC traffic", () => {
