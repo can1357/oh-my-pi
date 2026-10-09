@@ -4,7 +4,7 @@
 
 ### Added
 
-- Added `display.hideAdvisorNotes` (default off) to hide advisor note cards from the transcript; the agent still receives the notes
+- Added `display.hideAdvisorNotes` (default off) to hide advisor note cards from the transcript; the agent still receives the notes ([#15082](https://github.com/can1357/oh-my-pi/pull/15082) by [@jeffscottward](https://github.com/jeffscottward))
 - Added `/jobs kill <id>|all` to cancel a running background job (or every one this session owns) from the command line, even while the agent is busy ([#14160](https://github.com/can1357/oh-my-pi/pull/14160) by [@KanwarGill](https://github.com/KanwarGill))
 
 ### Changed
