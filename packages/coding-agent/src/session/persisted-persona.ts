@@ -9,6 +9,7 @@ import type { PersonaModelApplyHooks } from "./persona-model-hooks";
 import type { ModelOverrideState, PersonaRuntime } from "./persona-runtime";
 import { discoverAgents, getAgent } from "../task/discovery";
 
+import { sameExplicitOverrides } from "./tool-policy";
 import type { PersonaExplicitOverrides } from "./tool-policy";
 
 /**
@@ -375,7 +376,7 @@ export async function reconcileSessionPersona(
 		if (
 			active &&
 			active.agent.name === desired.name &&
-			JSON.stringify(active.explicit) === JSON.stringify(desired.explicit ?? {})
+			sameExplicitOverrides(active.explicit, desired.explicit ?? {})
 		) {
 			// fwdEX: identical name/overrides but a DIFFERENT persisted
 			// pre-persona baseline (branching between two activations of the

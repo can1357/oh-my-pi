@@ -1,4 +1,5 @@
 import type { Api, Model } from "@oh-my-pi/pi-ai";
+import { logger } from "@oh-my-pi/pi-utils";
 
 import type { AgentSession } from "./agent-session";
 import type { DiscoveredAgent, PersonaExplicitOverrides } from "./tool-policy";
@@ -136,12 +137,16 @@ export function createDefaultPersonaModelHooks(session: AgentSession): PersonaMo
 				if (resolved.model) {
 					await session.setModel(resolved.model);
 					resolvedThinking.push(resolved.thinkingLevel);
+				} else {
+					logger.warn(`Agent persona "${agent.name}": explicit model pattern did not resolve; keeping the session model`, { pattern: explicitModelPattern });
 				}
 			} else if (agent.model && agent.model.length > 0) {
 				const resolved = await resolveWithDiscoveryRetry(agent.model, session);
 				if (resolved.model) {
 					await session.setModel(resolved.model);
 					resolvedThinking.push(resolved.thinkingLevel);
+				} else {
+					logger.warn(`Agent persona "${agent.name}": model frontmatter did not resolve; keeping the session model`, { patterns: agent.model });
 				}
 			}
 			const explicitThinking =

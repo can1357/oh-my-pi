@@ -9,6 +9,7 @@ import type { Model } from "@oh-my-pi/pi-ai";
 import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
 import type { AgentSession } from "./agent-session";
 import type { PersonaExplicitOverrides, PersonaModelApplyHooks } from "./persona-model-hooks";
+import { sameExplicitOverrides } from "./tool-policy";
 import type { DiscoveredAgent, PolicySnapshot, SessionToolPolicy } from "./tool-policy";
 
 /** Defensive copy of a spawn policy: the live array is caller-owned after this. */
@@ -172,7 +173,7 @@ export class PersonaRuntime {
 				return;
 			}
 			const sameAgent = current && current.agent.name === desired.agent.name;
-			const sameExplicit = current && JSON.stringify(current.explicit) === JSON.stringify(desired.explicit ?? {});
+			const sameExplicit = current && sameExplicitOverrides(current.explicit, desired.explicit ?? {});
 			if (sameAgent && sameExplicit) {
 				return;
 			}

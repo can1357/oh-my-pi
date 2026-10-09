@@ -13,9 +13,21 @@ export type DiscoveredAgent = AgentDefinition;
  * take precedence over the agent definition's own frontmatter.
  */
 export interface PersonaExplicitOverrides {
+
 	model?: string;
 	thinking?: string;
 	tools?: readonly string[];
+}
+
+/** Order-insensitive equality for explicit overrides: key order and `tools` order are not semantic, so `['bash','read']` equals `['read','bash']` and never triggers a spurious exit+enter (with model flicker). */
+export function sameExplicitOverrides(a: PersonaExplicitOverrides, b: PersonaExplicitOverrides): boolean {
+	if ((a.model ?? undefined) !== (b.model ?? undefined)) return false;
+	if ((a.thinking ?? undefined) !== (b.thinking ?? undefined)) return false;
+	const at = a.tools ?? [];
+	const bt = b.tools ?? [];
+	if (at.length !== bt.length) return false;
+	const aset = new Set(at);
+	return aset.size === at.length && bt.every(t => aset.has(t));
 }
 
 /** Durable persona + toggle state captured by {@link SessionToolPolicy.snapshot}. */
