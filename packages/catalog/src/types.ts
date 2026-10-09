@@ -764,6 +764,8 @@ export interface AnthropicCompat {
  * deliberately not used to infer these request-shape capabilities.
  */
 export interface BedrockCompat {
+	/** Explicit disabled-thinking wire form; unset preserves the provider's existing behavior. */
+	disabledThinking?: AnthropicCompat["disabledThinking"];
 	/** Whether this endpoint accepts no checkpoints, automatic caching, or explicit cachePoint blocks. */
 	promptCacheMode?: "none" | "automatic" | "explicit";
 	/** Whether this wire may revise already-streamed text (`stream-revision` axis). Unassigned: append-only. */
@@ -803,6 +805,8 @@ export interface BedrockCompat {
 
 /** Fully-resolved Bedrock Converse prompt-cache capabilities, materialized once by `buildModel`. */
 export interface ResolvedBedrockCompat {
+	/** See {@link BedrockCompat.disabledThinking}. */
+	disabledThinking?: BedrockCompat["disabledThinking"];
 	promptCacheMode: NonNullable<BedrockCompat["promptCacheMode"]>;
 	/** See {@link BedrockCompat.streamRevision}. */
 	streamRevision?: BedrockCompat["streamRevision"];

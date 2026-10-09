@@ -308,8 +308,12 @@ class "anthropic" {
 		family "haiku" {
 			thinking-mode "budget"
 			// Haiku 5.5 is the first adaptive Haiku: `budget_tokens` is a 400.
+			// An omitted `thinking` is adaptive, but unlike Sonnet/Opus 5.5 it
+			// accepts `disabled` at effort `high` or below, so Off is explicit.
+			// https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/prompting-claude-haiku-5-5#use-effort-to-control-thinking
 			revision ">=5.5 <6" {
 				thinking-mode "anthropic-adaptive"
+				disabled-thinking "disabled"
 			}
 		}
 	}

@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import { Agent } from "@oh-my-pi/pi-agent-core";
+import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -25,14 +26,25 @@ function createRuntime(
 	sessionManager = SessionManager.inMemory(),
 ) {
 	authStorage = createInMemoryAuthStorage();
+	authStorage.keys.setRuntime("anthropic", "test-key");
 	const settings = Settings.isolated({
 		"compaction.enabled": false,
 		modelRoles: { tiny: `local/${DEFAULT_TINY_TITLE_LOCAL_MODEL_KEY}` },
 	});
 	const model = getBundledModel("anthropic", "claude-sonnet-4-5");
 	if (!model) throw new Error("Expected claude-sonnet-4-5 model to exist");
-	const agent = new Agent({ initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] } });
-	session = new AgentSession({ agent, sessionManager, settings, modelRegistry: new ModelRegistry(authStorage) });
+	const agent = new Agent({
+		getApiKey: () => "test-key",
+		initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
+		streamFn: createMockModel({ handler: { content: ["Looking at the cache."] } }).stream,
+	});
+	session = new AgentSession({
+		agent,
+		sessionManager,
+		settings,
+		modelRegistry: new ModelRegistry(authStorage),
+		autoTitle: true,
+	});
 	if (topic !== null) {
 		const message = { role: "user" as const, content: topic, timestamp: 1 };
 		agent.appendMessage(message);
@@ -441,7 +453,7 @@ it.each(["TUI", "headless"] as const)(
 			// A TITLE_SYSTEM.md override keeps the automatic title on the title model
 			// (no reply fork), so both titles race through `generate`.
 			session.setTitleSystemPrompt("Name the session in 3-6 words.");
-			session.maybeStartTitleGeneration("Repair cache invalidation after writes");
+			await session.prompt("Repair cache invalidation after writes");
 			pending = execute("/rename");
 			expect(generate).toHaveBeenCalledTimes(2);
 			automatic.resolve("Initial automatic title");

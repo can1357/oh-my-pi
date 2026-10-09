@@ -1582,9 +1582,10 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
  * pick the one whose identity (accountId / email / projectId) lines up with
  * the credential the caller is asking about.
  *
- * Falls back to the lone candidate when only one matches the provider; falls
- * through to `null` when nothing matches, which `AuthStorage` treats as "no
- * usage data" (ranking proceeds without a usage signal for this credential).
+ * Falls back to the provider's lone report when it shares no identity field
+ * with the credential; falls through to `null` when nothing matches, which
+ * `AuthStorage` treats as "no usage data" (ranking proceeds without a usage
+ * signal for this credential).
  */
 function matchUsageReport(reports: UsageReport[], provider: Provider, credential: OAuthCredential): UsageReport | null {
 	const all = reports.filter(report => report.provider === provider);
@@ -1635,7 +1636,17 @@ function matchUsageReport(reports: UsageReport[], provider: Provider, credential
 		report => !readMetadataString((report.metadata ?? {}) as Record<string, unknown>, "orgId"),
 	);
 	if (candidates.length === 0) return null;
-	if (all.length === 1 && candidates.length === 1) return candidates[0];
+	// The sole report stands in for a credential it shares no identity field
+	// with; otherwise identity decides, because a report naming another email,
+	// account or project is a sibling's pool whose fetch succeeded where this
+	// credential's failed.
+	if (
+		all.length === 1 &&
+		candidates.length === 1 &&
+		!reportHasComparableIdentity(candidates[0], accountId, email, projectId)
+	) {
+		return candidates[0];
+	}
 	for (const report of candidates) {
 		if (reportMatchesIdentity(report, accountId, email, projectId)) return report;
 	}
@@ -1699,7 +1710,13 @@ function findMatchingReportIndex(reports: UsageReport[], overlay: UsageReport): 
 		candidate => !readMetadataString((candidate.report.metadata ?? {}) as Record<string, unknown>, "orgId"),
 	);
 	if (candidates.length === 0) return -1;
-	if (all.length === 1 && candidates.length === 1) return candidates[0]!.index;
+	if (
+		all.length === 1 &&
+		candidates.length === 1 &&
+		!reportHasComparableIdentity(candidates[0]!.report, accountId, email, projectId)
+	) {
+		return candidates[0]!.index;
+	}
 	for (const candidate of candidates) {
 		if (reportMatchesIdentity(candidate.report, accountId, email, projectId)) return candidate.index;
 	}
@@ -1721,15 +1738,35 @@ function reportMatchesIdentity(
 		const metaAccount = readMetadataString(metadata, "accountId") ?? readMetadataString(metadata, "account_id");
 		if (metaAccount && metaAccount.toLowerCase() === accountId) return true;
 		for (const limit of report.limits) {
-			if (limit.scope.accountId?.toLowerCase() === accountId) return true;
+			if (limit.scope.accountId?.trim().toLowerCase() === accountId) return true;
 		}
 	}
 	if (projectId) {
 		const metaProject = readMetadataString(metadata, "projectId") ?? readMetadataString(metadata, "project_id");
 		if (metaProject && metaProject.toLowerCase() === projectId) return true;
 		for (const limit of report.limits) {
-			if (limit.scope.projectId?.toLowerCase() === projectId) return true;
+			if (limit.scope.projectId?.trim().toLowerCase() === projectId) return true;
 		}
+	}
+	return false;
+}
+
+/** Whether the report names an email, account or project the caller can compare against. */
+function reportHasComparableIdentity(
+	report: UsageReport,
+	accountId: string | undefined,
+	email: string | undefined,
+	projectId: string | undefined,
+): boolean {
+	const metadata = report.metadata ?? {};
+	if (email && readMetadataString(metadata, "email")) return true;
+	if (accountId) {
+		if (readMetadataString(metadata, "accountId") ?? readMetadataString(metadata, "account_id")) return true;
+		if (report.limits.some(limit => limit.scope.accountId?.trim())) return true;
+	}
+	if (projectId) {
+		if (readMetadataString(metadata, "projectId") ?? readMetadataString(metadata, "project_id")) return true;
+		if (report.limits.some(limit => limit.scope.projectId?.trim())) return true;
 	}
 	return false;
 }
