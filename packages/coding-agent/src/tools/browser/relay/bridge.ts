@@ -23,7 +23,7 @@
  */
 import { createHash } from "node:crypto";
 import { VERSION } from "@oh-my-pi/pi-utils/dirs";
-import { DISCARDED_TABS_PROTOCOL_VERSION } from "./protocol";
+import { DISCARDED_TABS_PROTOCOL_VERSION, isOlderOmpVersion } from "./protocol";
 import type { ExtToRelayMessage, RelayRpcRequest, RelayToExtMessage, TabSnapshot } from "./protocol";
 
 /** Transport-agnostic websocket surface the bridge writes to. */
@@ -305,10 +305,14 @@ export class RelayBridge {
 	versionInfo(wsUrl: string): Record<string, string> {
 		const info = this.#lastHello()?.info;
 		let hasCompatibleExtension = false;
+		// The oldest connected extension's installing omp, so a current browser cannot hide a stale one.
+		let oldestExtensionOmp: string | undefined;
 		for (const instance of this.#instances.values()) {
-			if (instance.socket && instance.info?.discardedTabsProtocol === DISCARDED_TABS_PROTOCOL_VERSION) {
-				hasCompatibleExtension = true;
-				break;
+			if (!instance.socket || instance.info?.discardedTabsProtocol !== DISCARDED_TABS_PROTOCOL_VERSION) continue;
+			hasCompatibleExtension = true;
+			const ompVersion = instance.info.ompVersion ?? "";
+			if (oldestExtensionOmp === undefined || isOlderOmpVersion(ompVersion, oldestExtensionOmp)) {
+				oldestExtensionOmp = ompVersion;
 			}
 		}
 		const ua = info?.userAgent ?? "";
@@ -322,8 +326,7 @@ export class RelayBridge {
 			ompRelayVersion: VERSION,
 			ompRelayDiscardedTabsProtocol: String(DISCARDED_TABS_PROTOCOL_VERSION),
 			ompExtensionDiscardedTabsProtocol: String(hasCompatibleExtension ? DISCARDED_TABS_PROTOCOL_VERSION : 0),
-			// The omp that installed the answering extension; empty when it predates the stamp.
-			ompExtensionVersion: info?.ompVersion ?? "",
+			ompExtensionVersion: oldestExtensionOmp ?? "",
 		};
 	}
 

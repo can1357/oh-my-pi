@@ -505,8 +505,10 @@ async function openOnKind(
 		details.url = url;
 		details.viewport = tab.info.viewport;
 		const verb = result.created ? "Opened" : "Reused";
+		// Advisory only: an open deadline that passes during the read drops the note, not the opened tab.
 		const relayNotice =
-			kind.kind === "relay" ? await relayExtensionNotice(normalizeConnectedCdpUrl(kind.cdpUrl), signal) : null;
+			kind.kind === "relay" ? await relayExtensionNotice(normalizeConnectedCdpUrl(kind.cdpUrl), openSignal) : null;
+		throwIfAborted(signal);
 		const lines = [
 			`${verb} tab ${JSON.stringify(name)} on ${describeBrowser(browser)}`,
 			`URL: ${url}`,
