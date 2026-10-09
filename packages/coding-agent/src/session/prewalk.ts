@@ -12,7 +12,7 @@ import planYoloHandoffPrompt from "../prompts/system/plan-yolo-handoff.md" with 
 import prewalkChecklistPrompt from "../prompts/system/prewalk-checklist.md" with { type: "text" };
 import prewalkContinuePrompt from "../prompts/system/prewalk-continue.md" with { type: "text" };
 import prewalkPlanPrompt from "../prompts/system/prewalk-plan.md" with { type: "text" };
-import { type ConfiguredThinkingLevel, prewalkWouldBeNoop } from "@oh-my-pi/pi-tui/thinking";
+import { AUTO_THINKING, type ConfiguredThinkingLevel, prewalkWouldBeNoop } from "@oh-my-pi/pi-tui/thinking";
 import { isMCPToolName } from "../tools/builtin-names";
 import {
 	replaceTabs,
@@ -68,6 +68,10 @@ export interface PrewalkCoordinatorHost {
 	settings: Settings;
 	model(): Model | undefined;
 	configuredThinkingLevel(): ConfiguredThinkingLevel | undefined;
+	/** Current prompt generation; stale handoffs must not apply classification to a replacement session. */
+	promptGeneration(): number;
+	/** Classifies a handoff's real user turn against the newly selected target model. */
+	applyAutoThinkingLevel(promptText: string, generation: number, solutionSpace?: string): Promise<void>;
 	restoreThinkingLevel(level: ConfiguredThinkingLevel | undefined): void;
 	resolveDefaultPrewalk(): Prewalk | undefined;
 	emitNotice(level: "info" | "warning" | "error", message: string, source?: string): void;
@@ -105,6 +109,9 @@ export class PrewalkCoordinator {
 	#planInjected = false;
 	#continuePending = false;
 	#todoSeen = false;
+	#userTurnText: string | undefined;
+	#userTurnGeneration = -1;
+	#userTurnSolutionSpace: string | undefined;
 	#planYolo: PlanYolo | undefined;
 	#planYoloPreviousNonMCPPresentation: { enabled: string[]; mounted: string[] } | undefined;
 	#planYoloArmed = false;
@@ -147,6 +154,8 @@ export class PrewalkCoordinator {
 		this.#prewalk = undefined;
 		this.#planInjected = false;
 		this.#continuePending = false;
+		this.#userTurnText = undefined;
+		this.#userTurnSolutionSpace = undefined;
 		this.#todoSeen = false;
 	}
 
@@ -202,6 +211,13 @@ export class PrewalkCoordinator {
 			`Prewalk: target ${prewalk.target.provider}/${prewalk.target.id} already matches the active model and thinking level; nothing to switch.`,
 			"prewalk",
 		);
+	}
+
+	/** Retains the real user turn for a possible auto-thinking target handoff. */
+	recordUserTurn(promptText: string, generation: number, solutionSpace?: string): void {
+		this.#userTurnText = promptText;
+		this.#userTurnGeneration = generation;
+		this.#userTurnSolutionSpace = solutionSpace;
 	}
 
 	/** Advances the one-way prewalk switch at a completed assistant-turn boundary. */
@@ -264,6 +280,15 @@ export class PrewalkCoordinator {
 		const source = this.#host.model();
 		const sourceThinkingLevel = this.#host.configuredThinkingLevel();
 		await this.#host.setModelTemporary(target, prewalk.thinkingLevel, { ephemeral: true });
+		const generation = this.#userTurnGeneration;
+		if (
+			prewalk.thinkingLevel === AUTO_THINKING &&
+			this.#userTurnText !== undefined &&
+			generation === this.#host.promptGeneration()
+		) {
+			await this.#host.applyAutoThinkingLevel(this.#userTurnText, generation, this.#userTurnSolutionSpace);
+			if (generation !== this.#host.promptGeneration()) return;
+		}
 		this.#clearPrewalkState();
 		if (source) {
 			this.#handoff = {
