@@ -1,4 +1,7 @@
 import type { Terminal } from "@oh-my-pi/pi-tui";
+import { getTerminalId } from "@oh-my-pi/pi-tui/ttyid";
+import * as fs from "node:fs";
+import * as path from "node:path";
 import {
 	COMPOSER_DEFAULTS,
 	Composer,
@@ -10,6 +13,7 @@ import {
 	type ComposerThemePreferences,
 	sharedComposerCache,
 } from "@oh-my-pi/pi-tui/prompt/composer-cache";
+import { getTerminalSessionsDir } from "@oh-my-pi/pi-utils/dirs";
 import { setMagicKeywords } from "@oh-my-pi/pi-tui/prompt/magic-keywords";
 import { initThemeSync } from "@oh-my-pi/pi-tui/theme";
 import { MAGIC_KEYWORDS } from "./magic-keywords";
@@ -26,6 +30,8 @@ export interface PrepaintComposerOptions {
 	readonly cache?: boolean;
 	/** Whether this launch shape can auto-resume the cached session. */
 	readonly allowSessionUsage?: boolean;
+	/** Exact session file this launch will resume; inferred from the terminal breadcrumb by default. */
+	readonly sessionFile?: string;
 }
 
 /** Final settings pushed into the live composer after Settings and the theme resolve. */
@@ -42,6 +48,22 @@ interface PendingComposer {
 }
 
 let pendingComposer: PendingComposer | undefined;
+
+/** Read only the breadcrumb fields needed by prepaint, without loading the session graph. */
+function readTerminalSessionFile(cwd: string): string | undefined {
+	const terminalId = getTerminalId();
+	if (!terminalId) return undefined;
+	try {
+		const [breadcrumbCwd, sessionFile] = fs
+			.readFileSync(path.join(getTerminalSessionsDir(), terminalId), "utf8")
+			.trim()
+			.split("\n");
+		if (!breadcrumbCwd || !sessionFile || path.resolve(breadcrumbCwd) !== path.resolve(cwd)) return undefined;
+		return path.resolve(breadcrumbCwd, sessionFile);
+	} catch {
+		return undefined;
+	}
+}
 
 /** Ownership token that transfers one already-started Composer to InteractiveMode. */
 export class ComposerLease {
@@ -74,7 +96,10 @@ export function beginStartupComposer(options: PrepaintComposerOptions = {}): voi
 	const cwd = options.cwd ?? process.cwd();
 	const cache = options.cache === false ? undefined : sharedComposerCache();
 	const cached = cache
-		? cache.read(cwd, { allowSessionUsage: options.allowSessionUsage })
+		? cache.read(cwd, {
+				allowSessionUsage: options.allowSessionUsage,
+				sessionFile: options.sessionFile ?? readTerminalSessionFile(cwd),
+			})
 		: { preferences: undefined, theme: undefined, status: undefined };
 	const theme = { ...cached.theme, ...options.theme };
 	initThemeSync(theme.symbolPreset, theme.colorBlindMode, theme.darkTheme, theme.lightTheme);

@@ -3632,7 +3632,8 @@ export class InteractiveMode implements InteractiveModeContext {
 	 * state) so the next launch renders it at first paint; see `createStartupStatusLine`.
 	 */
 	#persistComposerStatus(): void {
-		if (!this.sessionManager.getSessionFile()) return;
+		const sessionFile = this.sessionManager.getSessionFile();
+		if (!sessionFile) return;
 		const model = this.session.model;
 		const usage = this.sessionManager.getUsageStatistics();
 		// Recover the border's ANSI wrapper by coloring a sentinel and splitting around it.
@@ -3669,7 +3670,7 @@ export class InteractiveMode implements InteractiveModeContext {
 					: null,
 			},
 		};
-		sharedComposerCache()?.writeStatus(this.sessionManager.getCwd(), status);
+		sharedComposerCache()?.writeStatus(this.sessionManager.getCwd(), status, sessionFile);
 	}
 
 	#handleSessionAccentInputsChanged(): void {

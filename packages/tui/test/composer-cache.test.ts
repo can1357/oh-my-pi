@@ -66,8 +66,9 @@ describe("composer startup cache", () => {
 		cache.close();
 	});
 
-	it("reuses session usage only when requested for the originating project", () => {
+	it("reuses session usage only for the exact session being resumed", () => {
 		const project = path.join(root, "project");
+		const sessionFile = path.join(root, "sessions", "session-a.jsonl");
 		const status = statusFor(ThinkingLevel.High);
 		const statusWithUsage: ComposerStatusCache = {
 			...status,
@@ -85,18 +86,24 @@ describe("composer startup cache", () => {
 		};
 
 		const cache = ComposerCache.open(dbPath);
-		cache.writeStatus(project, statusWithUsage);
+		cache.writeStatus(project, statusWithUsage, sessionFile);
 
 		const fresh = cache.read(project).status?.statusLine;
 		expect(fresh?.thinkingLevel).toBe(ThinkingLevel.High);
 		expect(fresh?.contextPercent).toBeUndefined();
 		expect(fresh?.tokenBreakdown).toBeUndefined();
 		cache.writeUi(project, COMPOSER_DEFAULTS, {}, true);
-		const resumed = cache.read(project, { allowSessionUsage: true }).status?.statusLine;
+		const resumed = cache.read(project, { allowSessionUsage: true, sessionFile }).status?.statusLine;
 		expect(resumed?.contextPercent).toBe(37.5);
 		expect(resumed?.tokenBreakdown).toEqual(statusWithUsage.statusLine.tokenBreakdown);
+		const otherTerminal = cache.read(project, {
+			allowSessionUsage: true,
+			sessionFile: path.join(root, "sessions", "session-b.jsonl"),
+		}).status?.statusLine;
+		expect(otherTerminal?.contextPercent).toBeUndefined();
+		expect(otherTerminal?.tokenBreakdown).toBeUndefined();
 		cache.writeUi(project, COMPOSER_DEFAULTS, {}, false);
-		const disabled = cache.read(project, { allowSessionUsage: true }).status?.statusLine;
+		const disabled = cache.read(project, { allowSessionUsage: true, sessionFile }).status?.statusLine;
 		expect(disabled?.contextPercent).toBeUndefined();
 		expect(disabled?.tokenBreakdown).toBeUndefined();
 		const fallback = cache.read(path.join(root, "fresh")).status?.statusLine;

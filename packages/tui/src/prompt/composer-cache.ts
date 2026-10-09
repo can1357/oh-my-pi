@@ -30,7 +30,7 @@ import type { SymbolPreset } from "../theme/theme";
 import { isWordCompletionMethod } from "./word-completion";
 
 /** Bump whenever any payload format changes; older stores are cleared on open. */
-const FORMAT_VERSION = 3;
+const FORMAT_VERSION = 4;
 /** Project key of rows that serve every project lacking its own. */
 const ANY_PROJECT = "";
 
@@ -66,6 +66,8 @@ export interface ComposerStartupCache {
 export interface ComposerCacheReadOptions {
 	/** Permit reuse of layout hints when cached settings will auto-resume the producing session. */
 	readonly allowSessionUsage?: boolean;
+	/** Session file the current terminal breadcrumb will resume, when known. */
+	readonly sessionFile?: string;
 }
 
 function parseJson(value: string | undefined): unknown {
@@ -87,6 +89,15 @@ function parseStatus(value: unknown): ComposerStatusCache | undefined {
 	const { prefix, suffix } = rawBorderColor;
 	if (typeof prefix !== "string" || typeof suffix !== "string") return undefined;
 	return { borderColor: { prefix, suffix }, statusLine };
+}
+
+function parseCachedStatus(
+	value: unknown,
+): { status: ComposerStatusCache; sessionFile: string | undefined } | undefined {
+	if (!isRecord(value)) return undefined;
+	const status = parseStatus(value.status);
+	if (!status || (value.sessionFile !== undefined && typeof value.sessionFile !== "string")) return undefined;
+	return { status, sessionFile: value.sessionFile };
 }
 
 function parseUiState(
@@ -230,18 +241,23 @@ export class ComposerCache {
 			logger.debug("composer cache read failed", { error: String(error) });
 		}
 		const ui = parseUiState(parseJson(own.ui)) ?? parseUiState(parseJson(anyProject.ui));
-		const cachedStatus = parseStatus(parseJson(own.status)) ?? parseStatus(parseJson(anyProject.status));
+		const cachedStatus = parseCachedStatus(parseJson(own.status)) ?? parseCachedStatus(parseJson(anyProject.status));
+		const canReuseSessionUsage =
+			options.allowSessionUsage &&
+			ui?.autoResume &&
+			options.sessionFile !== undefined &&
+			cachedStatus?.sessionFile === options.sessionFile;
 		const status =
-			cachedStatus && !(options.allowSessionUsage && ui?.autoResume)
+			cachedStatus && !canReuseSessionUsage
 				? {
-						...cachedStatus,
+						...cachedStatus.status,
 						statusLine: {
-							...cachedStatus.statusLine,
+							...cachedStatus.status.statusLine,
 							contextPercent: undefined,
 							tokenBreakdown: undefined,
 						},
 					}
-				: cachedStatus;
+				: cachedStatus?.status;
 		return {
 			preferences: ui?.preferences,
 			theme: ui?.theme,
@@ -255,17 +271,24 @@ export class ComposerCache {
 	}
 
 	/** Status-bar inputs for the next prepaint's startup status line. */
-	writeStatus(cwd: string, status: ComposerStatusCache): void {
-		this.#putShared(cwd, "status", status, {
-			...status,
-			statusLine: {
-				...status.statusLine,
-				// Usage belongs to the current session. Reusing it in another project's
-				// first frame makes opt-in metrics appear briefly, then reflow to zero.
-				contextPercent: undefined,
-				tokenBreakdown: undefined,
+	writeStatus(cwd: string, status: ComposerStatusCache, sessionFile?: string): void {
+		this.#putShared(
+			cwd,
+			"status",
+			{ status, sessionFile: sessionFile === undefined ? undefined : path.resolve(cwd, sessionFile) },
+			{
+				status: {
+					...status,
+					statusLine: {
+						...status.statusLine,
+						// Usage belongs to one session. The shared fallback must never
+						// make another project reserve its usage-only segments.
+						contextPercent: undefined,
+						tokenBreakdown: undefined,
+					},
+				},
 			},
-		});
+		);
 	}
 
 	close(): void {
