@@ -179,8 +179,15 @@ describe("MiniMax Token Plan usage", () => {
 	});
 
 	test("honors a configured base URL for the quota request", async () => {
-		// One case per trim the provider applies: trailing slash, trailing `/v1`, and both together.
-		for (const configured of ["https://proxy.example", "https://proxy.example/", "https://proxy.example/v1/"]) {
+		// One case per trim the provider applies: trailing slash, trailing `/v1`, both together, and the
+		// Anthropic-route base URLs the bundled Token Plan rows use.
+		for (const configured of [
+			"https://proxy.example",
+			"https://proxy.example/",
+			"https://proxy.example/v1/",
+			"https://proxy.example/anthropic",
+			"https://proxy.example/anthropic/v1",
+		]) {
 			let requestedUrl = "";
 			const fetchMock: FetchImpl = input => {
 				requestedUrl = String(input);

@@ -36,7 +36,11 @@ export interface NormalizeSchemaOptions {
 	unsupportedFields: (key: string) => boolean;
 	normalizeFieldNames: boolean;
 	collapseNullFields: boolean;
-	normalizeTypeArrayToNullable: boolean;
+	/**
+	 * Target takes a scalar `type` only: `["T", "null"]` becomes `T` (+ `nullable`)
+	 * and a multi-type array becomes one `anyOf` branch per type.
+	 */
+	scalarizeTypeArrays: boolean;
 	stripNullableKeyword: boolean;
 	autoPropertyOrdering: boolean;
 	ensureObjectProperties: boolean;
@@ -290,6 +294,51 @@ function preHandleNullFields(obj: JsonObject): JsonObject {
 	return out;
 }
 
+/**
+ * Rewrites a multi-type `type` array (`["string", "array"]`) as one `anyOf`
+ * branch per non-null type, each carrying only the keywords that constrain its
+ * type. Collapsing to the first type instead narrows what the tool accepts and
+ * strands the other types' keywords: Gemini rejects `items` beside
+ * `type: "string"` with HTTP 400. A `null` member becomes `nullable: true`, as
+ * in the scalar collapse. Returns `obj` itself when it has fewer than two
+ * non-null types or already carries `anyOf`.
+ */
+function splitTypeArrayIntoAnyOf(obj: JsonObject): JsonObject {
+	if (!Array.isArray(obj.type) || Array.isArray(obj.anyOf)) return obj;
+	const types: string[] = [];
+	for (const type of obj.type) {
+		if (typeof type === "string" && type !== "null" && !types.includes(type)) types.push(type);
+	}
+	if (types.length < 2) return obj;
+	const branches = types.map(type => {
+		const schema: JsonObject = { type };
+		return { schema, keys: CLOUD_CODE_ASSIST_TYPE_SPECIFIC_KEYS[type] ?? {} };
+	});
+	const out: JsonObject = {};
+	for (const key in obj) {
+		if (!Object.hasOwn(obj, key) || key === "type") continue;
+		const value = obj[key];
+		if (!Object.hasOwn(ALL_CCA_TYPE_SPECIFIC_KEYS, key)) {
+			out[key] = value;
+			continue;
+		}
+		for (const branch of branches) {
+			if (Object.hasOwn(branch.keys, key)) branch.schema[key] = value;
+		}
+	}
+	if (obj.type.includes("null")) out.nullable = true;
+	out.anyOf = branches.map(branch => branch.schema);
+	return out;
+}
+
+/** Deletes keywords that constrain a JSON type other than `type`, e.g. `items` on a string node. */
+function dropForeignTypeKeywords(schema: JsonObject, type: string): void {
+	const allowed = CLOUD_CODE_ASSIST_TYPE_SPECIFIC_KEYS[type] ?? {};
+	for (const key in schema) {
+		if (Object.hasOwn(ALL_CCA_TYPE_SPECIFIC_KEYS, key) && !Object.hasOwn(allowed, key)) delete schema[key];
+	}
+}
+
 function outHasOwn(obj: JsonObject, key: string): boolean {
 	return Object.hasOwn(obj, key);
 }
@@ -375,6 +424,9 @@ function normalizeSchemaNode(value: unknown, options: NormalizeSchemaWalkOptions
 
 function normalizeSchemaObjectNode(value: JsonObject, options: NormalizeSchemaWalkOptions): unknown {
 	let obj = options.normalizeFieldNames && !options.insideSchemaMap ? applySnakeCaseRenames(value) : value;
+	if (options.scalarizeTypeArrays && !options.insideSchemaMap) {
+		obj = splitTypeArrayIntoAnyOf(obj);
+	}
 	if (options.collapseNullFields && !options.insideSchemaMap) {
 		obj = preHandleNullFields(obj);
 	}
@@ -479,13 +531,14 @@ function normalizeSchemaObjectNode(value: JsonObject, options: NormalizeSchemaWa
 			: entry;
 	}
 
-	if (options.normalizeTypeArrayToNullable && Array.isArray(result.type)) {
+	if (options.scalarizeTypeArrays && Array.isArray(result.type)) {
 		const types = (result.type as unknown[]).filter((t): t is string => typeof t === "string");
 		const nonNull = types.filter(t => t !== "null");
 		if (types.includes("null") && !options.stripNullableKeyword) {
 			result.nullable = true;
 		}
 		result.type = nonNull[0] ?? types[0];
+		if (typeof result.type === "string") dropForeignTypeKeywords(result, result.type);
 	}
 	if (constValue !== undefined) {
 		const existingEnum = Array.isArray(result.enum) ? result.enum : [];
@@ -738,20 +791,8 @@ function collapseMixedTypeCombinerVariants(schema: JsonObject, combiner: "anyOf"
 	const chosenType: string = nonNullTypes[0] ?? variantTypes[0];
 	nextSchema.type = chosenType;
 	const chosenTypeAllowedKeys = CLOUD_CODE_ASSIST_TYPE_SPECIFIC_KEYS[chosenType] ?? {};
-
-	// Strip sibling keys that were copied from the parent and belong to a
-	// different type (e.g. `items` sibling on a now-string-typed schema).
-	for (const key in nextSchema) {
-		if (!Object.hasOwn(nextSchema, key)) continue;
-		if (key === "type") continue;
-		if (
-			Object.hasOwn(ALL_CCA_TYPE_SPECIFIC_KEYS, key) &&
-			!Object.hasOwn(chosenTypeAllowedKeys, key) &&
-			!Object.hasOwn(CLOUD_CODE_ASSIST_SHARED_SCHEMA_KEYS, key)
-		) {
-			delete nextSchema[key];
-		}
-	}
+	// Sibling keys copied from the parent may belong to a different type.
+	dropForeignTypeKeywords(nextSchema, chosenType);
 
 	for (const key in mergedVariantFields) {
 		if (!Object.hasOwn(mergedVariantFields, key)) continue;
@@ -1256,7 +1297,7 @@ export function normalizeSchemaForGoogle(value: unknown): unknown {
 		unsupportedFields: isGoogleUnsupportedSchemaField,
 		normalizeFieldNames: true,
 		collapseNullFields: true,
-		normalizeTypeArrayToNullable: true,
+		scalarizeTypeArrays: true,
 		stripNullableKeyword: false,
 		autoPropertyOrdering: true,
 		ensureObjectProperties: true,
@@ -1279,7 +1320,7 @@ export function normalizeSchemaForCCA(value: unknown): unknown {
 		unsupportedFields: isGoogleUnsupportedSchemaField,
 		normalizeFieldNames: true,
 		collapseNullFields: false,
-		normalizeTypeArrayToNullable: true,
+		scalarizeTypeArrays: true,
 		stripNullableKeyword: true,
 		autoPropertyOrdering: false,
 		ensureObjectProperties: true,
@@ -1302,7 +1343,7 @@ export function normalizeSchemaForMCP(value: unknown): unknown {
 		unsupportedFields: isMcpUnsupportedSchemaField,
 		normalizeFieldNames: false,
 		collapseNullFields: false,
-		normalizeTypeArrayToNullable: false,
+		scalarizeTypeArrays: false,
 		foldOneOfIntoAnyOf: false,
 		stripNullableKeyword: true,
 		autoPropertyOrdering: false,
@@ -1330,8 +1371,9 @@ export function normalizeSchemaForMCP(value: unknown): unknown {
  *    rejected; collapse to `enum` with an inferred scalar `type`.
  *  - `oneOf` is not an MFJS combinator (only `anyOf` is); residual `oneOf` is
  *    folded into `anyOf`.
- *  - `type` must be a scalar string; `type: [...]` arrays are reduced to a
- *    single scalar (the `null` branch is dropped — `nullable` is unsupported).
+ *  - `type` must be a scalar string; `["T", "null"]` reduces to `T` (the
+ *    `null` member is dropped — `nullable` is unsupported) and a multi-type
+ *    array becomes one typed `anyOf` branch per type.
  *  - Enum-bearing nodes get an inferred `type` (the idiomatic MFJS form; a bare
  *    `enum` is valid too) so `anyOf` branches always carry a `type`.
  *  - Validation/decorative keywords (`minItems`, `maxItems`, `maxLength`,
@@ -1354,7 +1396,7 @@ export function normalizeSchemaForMoonshot(value: unknown): unknown {
 		unsupportedFields: isMoonshotUnsupportedSchemaField,
 		normalizeFieldNames: false,
 		collapseNullFields: false,
-		normalizeTypeArrayToNullable: true,
+		scalarizeTypeArrays: true,
 		stripNullableKeyword: true,
 		autoPropertyOrdering: false,
 		ensureObjectProperties: false,

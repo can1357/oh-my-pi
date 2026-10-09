@@ -39,10 +39,20 @@ async function runGit(repo: string, args: string[]): Promise<string> {
 	return stdout.trim();
 }
 
+/**
+ * `git init` pinned to verbatim line endings: assertions compare exact LF
+ * bytes, and Git for Windows' system `core.autocrlf=true` would check files
+ * out (and cherry-pick/restore them) as CRLF.
+ */
+async function initRepo(dir: string, branch = "main"): Promise<void> {
+	await runGit(dir, ["init", "-q", "-b", branch]);
+	await runGit(dir, ["config", "core.autocrlf", "false"]);
+}
+
 async function createGitRepo(): Promise<string> {
 	const repo = await fs.mkdtemp(path.join(os.tmpdir(), "omp-worktree-"));
 	tempDirs.push(repo);
-	await runGit(repo, ["init", "-q", "-b", "main"]);
+	await initRepo(repo);
 	return repo;
 }
 
@@ -184,7 +194,7 @@ describe("worktree isolation helpers", () => {
 
 		beforeAll(async () => {
 			repo = await fs.mkdtemp(path.join(os.tmpdir(), "omp-worktree-"));
-			await runGit(repo, ["init", "-q", "-b", BASE_BRANCH]);
+			await initRepo(repo, BASE_BRANCH);
 			await runGit(repo, ["config", "user.email", "test@example.com"]);
 			await runGit(repo, ["config", "user.name", "Test User"]);
 			await Promise.all([
@@ -214,7 +224,7 @@ describe("worktree isolation helpers", () => {
 
 		it("retries isoResolve candidates when a backend is path-unavailable", async () => {
 			const unavailable = new Error("ISO_UNAVAILABLE: btrfs source is not a subvolume");
-			const isoResolve = vi.spyOn(natives, "isoResolve").mockReturnValue({
+			const isoResolve = vi.spyOn(natives, "isoResolve").mockResolvedValue({
 				kind: natives.IsoBackendKind.Btrfs,
 				candidates: [natives.IsoBackendKind.Btrfs, natives.IsoBackendKind.Rcopy],
 				fellBack: false,
@@ -246,7 +256,7 @@ describe("worktree isolation helpers", () => {
 			tempDirs.push(worktreeBase);
 			delete process.env.OMP_WORKTREE_DIR;
 			setWorktreesDir(worktreeBase);
-			vi.spyOn(natives, "isoResolve").mockReturnValue({
+			vi.spyOn(natives, "isoResolve").mockResolvedValue({
 				kind: natives.IsoBackendKind.Rcopy,
 				candidates: [natives.IsoBackendKind.Rcopy],
 				fellBack: false,
@@ -556,7 +566,7 @@ describe("getRepoRoot", () => {
 		await fs.mkdir(path.join(outer, ".jj", "repo", "store"), { recursive: true });
 		const inner = path.join(outer, "vendor");
 		await fs.mkdir(inner, { recursive: true });
-		await runGit(inner, ["init", "-q", "-b", "main"]);
+		await initRepo(inner);
 
 		expect(await getRepoRoot(inner)).toBe(inner);
 	});
@@ -570,7 +580,7 @@ describe("detachGitDir", () => {
 	async function makeLinkedWorktree(): Promise<{ main: string; wt: string; commonDir: string; baseSha: string }> {
 		const main = await fs.mkdtemp(path.join(os.tmpdir(), "omp-detach-main-"));
 		tempDirs.push(main);
-		await runGit(main, ["init", "-q", "-b", "main"]);
+		await initRepo(main);
 		await runGit(main, ["config", "user.email", "src@example.com"]);
 		await runGit(main, ["config", "user.name", "Source User"]);
 		await fs.writeFile(path.join(main, "file.txt"), "base\n");
@@ -635,30 +645,35 @@ describe("detachGitDir", () => {
 		expect(await runGit(wt, ["rev-parse", "omp-fetched"])).toBe(taskCommit);
 	});
 
-	it.skipIf(process.getuid?.() === 0)("keeps shared git metadata intact when the index cannot be read", async () => {
-		const { wt, commonDir } = await makeLinkedWorktree();
-		const iso = await copyTree(wt);
-		const gitEntry = path.join(iso, ".git");
-		const pointerBefore = await fs.readFile(gitEntry, "utf8");
-		const indexPath = await runGit(iso, ["rev-parse", "--path-format=absolute", "--git-path", "index"]);
-		const indexMode = (await fs.stat(indexPath)).mode;
-		await fs.chmod(indexPath, 0);
-		try {
-			await expect(vcs.detachGitDir(iso, commonDir)).rejects.toMatchObject({
-				code: "Io",
-				stderr: expect.stringContaining("Permission denied"),
-			});
-		} finally {
-			await fs.chmod(indexPath, indexMode);
-		}
-		expect(await fs.readFile(gitEntry, "utf8")).toBe(pointerBefore);
-		expect(await runGit(iso, ["status", "--porcelain=v1"])).toBe("");
-	});
+	// chmod(0) cannot revoke read access on Windows (it only sets the
+	// read-only attribute), so an unreadable index is POSIX-only.
+	it.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
+		"keeps shared git metadata intact when the index cannot be read",
+		async () => {
+			const { wt, commonDir } = await makeLinkedWorktree();
+			const iso = await copyTree(wt);
+			const gitEntry = path.join(iso, ".git");
+			const pointerBefore = await fs.readFile(gitEntry, "utf8");
+			const indexPath = await runGit(iso, ["rev-parse", "--path-format=absolute", "--git-path", "index"]);
+			const indexMode = (await fs.stat(indexPath)).mode;
+			await fs.chmod(indexPath, 0);
+			try {
+				await expect(vcs.detachGitDir(iso, commonDir)).rejects.toMatchObject({
+					code: "Io",
+					stderr: expect.stringContaining("Permission denied"),
+				});
+			} finally {
+				await fs.chmod(indexPath, indexMode);
+			}
+			expect(await fs.readFile(gitEntry, "utf8")).toBe(pointerBefore);
+			expect(await runGit(iso, ["status", "--porcelain=v1"])).toBe("");
+		},
+	);
 
 	it("leaves an already-independent full-copy checkout untouched", async () => {
 		const src = await fs.mkdtemp(path.join(os.tmpdir(), "omp-detach-src-"));
 		tempDirs.push(src);
-		await runGit(src, ["init", "-q", "-b", "main"]);
+		await initRepo(src);
 		await runGit(src, ["config", "user.email", "src@example.com"]);
 		await runGit(src, ["config", "user.name", "Source User"]);
 		await fs.writeFile(path.join(src, "file.txt"), "base\n");
@@ -740,7 +755,7 @@ describe("detachGitDir", () => {
 		// Origin with two commits so a depth-1 clone has a real shallow boundary.
 		const origin = await fs.mkdtemp(path.join(os.tmpdir(), "omp-detach-origin-"));
 		tempDirs.push(origin);
-		await runGit(origin, ["init", "-q", "-b", "main"]);
+		await initRepo(origin);
 		await runGit(origin, ["config", "core.fsmonitor", "false"]);
 		await runGit(origin, ["config", "user.email", "src@example.com"]);
 		await runGit(origin, ["config", "user.name", "Source User"]);
@@ -811,7 +826,7 @@ describe("detachGitDir", () => {
 
 	it("keeps ensureIsolation from mutating a linked-worktree parent (rcopy backend)", async () => {
 		const { wt, baseSha } = await makeLinkedWorktree();
-		vi.spyOn(natives, "isoResolve").mockReturnValue({
+		vi.spyOn(natives, "isoResolve").mockResolvedValue({
 			kind: natives.IsoBackendKind.Rcopy,
 			candidates: [natives.IsoBackendKind.Rcopy],
 			fellBack: false,
@@ -853,7 +868,7 @@ describe("applyNestedPatches", () => {
 
 	beforeAll(async () => {
 		fixtureParent = await fs.mkdtemp(path.join(os.tmpdir(), "omp-nested-fixture-"));
-		await runGit(fixtureParent, ["init", "-q", "-b", "main"]);
+		await initRepo(fixtureParent);
 		await runGit(fixtureParent, ["config", "user.email", "test@example.com"]);
 		await runGit(fixtureParent, ["config", "user.name", "Test User"]);
 		// beforeEach copies both repos with fs.cp; auto maintenance would race
@@ -866,7 +881,7 @@ describe("applyNestedPatches", () => {
 
 		const fixtureNested = path.join(fixtureParent, nestedRel);
 		await fs.mkdir(fixtureNested, { recursive: true });
-		await runGit(fixtureNested, ["init", "-q", "-b", "main"]);
+		await initRepo(fixtureNested);
 		await runGit(fixtureNested, ["config", "user.email", "test@example.com"]);
 		await runGit(fixtureNested, ["config", "user.name", "Test User"]);
 		await runGit(fixtureNested, ["config", "maintenance.auto", "false"]);
@@ -982,7 +997,7 @@ describe("commitToBranch preserves agent commits", () => {
 
 	beforeAll(async () => {
 		fixtureRepo = await fs.mkdtemp(path.join(os.tmpdir(), "omp-commit-fixture-"));
-		await runGit(fixtureRepo, ["init", "-q", "-b", "main"]);
+		await initRepo(fixtureRepo);
 		await runGit(fixtureRepo, ["config", "user.email", "test@example.com"]);
 		await runGit(fixtureRepo, ["config", "user.name", "Test User"]);
 		// `git commit` kicks off `git maintenance run --auto`, which writes

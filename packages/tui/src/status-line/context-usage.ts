@@ -8,11 +8,9 @@ import { formatNumber } from "@oh-my-pi/pi-utils";
 import type { Theme, ThemeColor } from "../theme";
 import { Container } from "../tui";
 import { Text } from "../components/text";
-import { Spacer } from "../components/spacer";
-import { DynamicBorder } from "../chrome/dynamic-border";
 import type { TspSpan, TspText } from "@oh-my-pi/pi-wire";
 import type { DescribeContext, NativeNode } from "../native/node";
-import { card, col, node, row, span, text } from "../native/describe";
+import { col, node, row, span, text } from "../native/describe";
 
 interface ContextSkill {
 	readonly name: string;
@@ -742,10 +740,10 @@ function contextMeterParts(
 }
 
 /**
- * The `/context` frame for terminals that draw `meter`: a blocks meter
+ * The `/context` body for terminals that draw `meter`: a blocks meter
  * beside a legend `kv` (swatch · label → tokens · %), then a full-width bar
  * of the same parts marked where auto-compaction fires, then the snapcompact
- * estimate when one is on. The head names the model and window once.
+ * estimate when one is on. {@link contextUsageHead} names the model and window.
  */
 function describeContextFrame(breakdown: ContextBreakdown): NativeNode {
 	const { contextWindow: window, usedTokens, freeTokens, autoCompactBufferTokens, thresholdTokens } = breakdown;
@@ -810,18 +808,18 @@ function describeContextFrame(breakdown: ContextBreakdown): NativeNode {
 			),
 		);
 	}
+	return col(children, { gap: "md", role: "omp.context" });
+}
+
+/** The `/context` title: the model and its window once a model is selected. */
+export function contextUsageHead(breakdown: ContextBreakdown): TspText {
+	if (breakdown.contextWindow <= 0) return [span("Context usage", "strong")];
 	const modelName = breakdown.model?.name ?? breakdown.model?.id ?? "no model";
-	return card(
-		{
-			role: "omp.context",
-			head: [
-				span("Context", "strong"),
-				span(` · ${modelName}`, "muted"),
-				span(` · ${formatNumber(window).toLowerCase()}`, "dim"),
-			],
-		},
-		children,
-	);
+	return [
+		span("Context", "strong"),
+		span(` · ${modelName}`, "muted"),
+		span(` · ${formatNumber(breakdown.contextWindow).toLowerCase()}`, "dim"),
+	];
 }
 
 /**
@@ -854,38 +852,19 @@ export function describeContextUsage(breakdown: ContextBreakdown): NativeNode {
 }
 
 /**
- * The `/context` transcript block: ANSI renders the titled cell grid between
- * rules; natively it is one frame, drawn with `meter`s where the terminal
- * has them and as the glyph grid otherwise.
+ * The `/context` report body, without a frame or title of its own (the panel
+ * showing it is titled {@link contextUsageHead}): ANSI renders the cell grid
+ * beside the legend; natively it is drawn with `meter`s where the terminal has
+ * them and as the glyph grid otherwise.
  */
 export class ContextUsageView extends Container {
-	#breakdown: ContextBreakdown;
+	readonly #breakdown: ContextBreakdown;
 	#native: { meter: boolean; node: NativeNode } | undefined;
-	readonly #theme: Theme;
 
 	constructor(breakdown: ContextBreakdown, theme: Theme) {
 		super();
 		this.#breakdown = breakdown;
-		this.#theme = theme;
-		this.#build();
-	}
-
-	/** Replace the shown breakdown in place, refreshing both the ANSI and native views. */
-	setBreakdown(breakdown: ContextBreakdown): void {
-		this.#breakdown = breakdown;
-		this.#native = undefined;
-		this.clear();
-		this.#build();
-		this.invalidate();
-	}
-
-	#build(): void {
-		const theme = this.#theme;
-		this.addChild(new DynamicBorder());
-		this.addChild(new Text(theme.bold(theme.fg("accent", "Context Usage")), 1, 0));
-		this.addChild(new Spacer(1));
-		this.addChild(new Text(renderContextUsage(this.#breakdown, theme), 1, 0));
-		this.addChild(new DynamicBorder());
+		this.addChild(new Text(renderContextUsage(breakdown, theme), 0, 0));
 	}
 
 	override describe(cx: DescribeContext): NativeNode {
@@ -893,13 +872,7 @@ export class ContextUsageView extends Container {
 		if (this.#native?.meter === meter) return this.#native.node;
 		const breakdown = this.#breakdown;
 		const described =
-			breakdown.contextWindow <= 0
-				? describeContextUsage(breakdown)
-				: meter
-					? describeContextFrame(breakdown)
-					: card({ role: "omp.context", head: [span("Context usage", "strong")] }, [
-							describeContextUsage(breakdown),
-						]);
+			meter && breakdown.contextWindow > 0 ? describeContextFrame(breakdown) : describeContextUsage(breakdown);
 		this.#native = { meter, node: described };
 		return described;
 	}

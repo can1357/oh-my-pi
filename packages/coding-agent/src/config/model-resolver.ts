@@ -27,6 +27,7 @@ import type { ModelRoleLookup } from "@oh-my-pi/pi-tui/overlays/model-browser";
 import type { Api, Effort, KnownProvider, Model, ModelSpec } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { resolveBareVariantSelector, resolveVariantSelector } from "@oh-my-pi/pi-catalog/compat/collapse";
+import { providerEntry } from "@oh-my-pi/pi-catalog/compat/providers";
 import { collapseVariantId, stripThinkingVariantSuffix } from "@oh-my-pi/pi-catalog/compat/taxonomy";
 import { modelMatchesHost } from "@oh-my-pi/pi-catalog/hosts";
 import { buildModelProviderPriorityRank } from "@oh-my-pi/pi-catalog/identity";
@@ -65,7 +66,7 @@ function isKnownProvider(provider: string): provider is KnownProvider {
 }
 
 /**
- * Pick the first provider-default model in availability order.
+ * Pick the first auto-selectable provider-default model in availability order.
  *
  * When `hasConcreteCredential` is supplied and at least one available model
  * belongs to a provider with a concrete credential, the candidate pool is
@@ -79,24 +80,27 @@ function isKnownProvider(provider: string): provider is KnownProvider {
  * If multiple providers expose that same default id, rank only that shared-id
  * group by canonical provider priority so native/OAuth transports beat mirrors
  * without changing unrelated provider fallback precedence.
+ * Providers with `automatic-default #false` remain available to explicit model
+ * selectors but cannot become the startup fallback.
  */
 export function pickDefaultAvailableModel(
 	availableModels: Model<Api>[],
 	hasConcreteCredential?: (provider: string) => boolean,
 ): Model<Api> | undefined {
+	const autoSelectable = availableModels.filter(model => providerEntry(model.provider)?.automaticDefault !== false);
 	const models =
 		hasConcreteCredential === undefined
-			? availableModels
+			? autoSelectable
 			: (() => {
 					const concreteAuthByProvider = new Map<string, boolean>();
-					const concrete = availableModels.filter(model => {
+					const concrete = autoSelectable.filter(model => {
 						const cached = concreteAuthByProvider.get(model.provider);
 						if (cached !== undefined) return cached;
 						const hasConcreteAuth = hasConcreteCredential(model.provider);
 						concreteAuthByProvider.set(model.provider, hasConcreteAuth);
 						return hasConcreteAuth;
 					});
-					return concrete.length > 0 ? concrete : availableModels;
+					return concrete.length > 0 ? concrete : autoSelectable;
 				})();
 	const firstDefault = models.find(
 		model => isKnownProvider(model.provider) && DEFAULT_MODEL_PER_PROVIDER[model.provider] === model.id,
@@ -1371,8 +1375,9 @@ export interface AgentAdvisorSelection {
  * runs unadvised. The settings override decides enablement first ("off" wins,
  * "on" enables with the agent's own model pattern or the `advisor` role, any
  * other value is a custom model pattern); otherwise the agent definition's
- * `advisor` field applies. A returned pattern lands on the spawned session's
- * `modelRoles.advisor`, so role aliases and `:level` suffixes resolve there.
+ * `advisor` field applies. Callers expand a returned pattern against the
+ * owner's roles (`resolveAgentAdvisorRolePattern`) before it lands on the
+ * spawned session's `modelRoles.advisor`, so `@advisor` cannot point at itself.
  */
 export function resolveAgentAdvisorSelection(
 	options: AgentAdvisorResolutionOptions,
@@ -1388,6 +1393,17 @@ export function resolveAgentAdvisorSelection(
 	}
 	if (options.agentAdvisor === true) return {};
 	return agentPattern ? { model: agentPattern } : undefined;
+}
+
+/**
+ * Expand an agent advisor pattern against the owner's role lookup before it is
+ * stamped onto a spawned session's `modelRoles.advisor`. Without this, a
+ * self-referential `@advisor` lands as the child's own advisor role, trips the
+ * cycle guard, and silently degrades to the built-in `slow` priority list.
+ */
+export function resolveAgentAdvisorRolePattern(pattern: string, settings?: ModelRoleLookup): string {
+	const expanded = resolveConfiguredModelPatterns(pattern, settings);
+	return expanded.length > 0 ? expanded.join(",") : pattern;
 }
 
 /**
@@ -1451,12 +1467,14 @@ export function resolveModelRoleValue(
 }
 
 interface ExplicitThinkingSelectorOptions {
-	isLiteralModelId?: (provider: string, id: string) => boolean;
+	/** Exact ID lookup; an undefined provider checks unqualified IDs across the caller's model set. */
+	isLiteralModelId?: (provider: string | undefined, id: string) => boolean;
 }
 
 function isLiteralModelSelector(value: string, options?: ExplicitThinkingSelectorOptions): boolean {
 	const parsed = parseModelString(value);
-	return parsed !== undefined && options?.isLiteralModelId?.(parsed.provider, parsed.id) === true;
+	if (parsed) return options?.isLiteralModelId?.(parsed.provider, parsed.id) === true;
+	return options?.isLiteralModelId?.(undefined, value) === true;
 }
 
 export function extractExplicitThinkingSelector(
@@ -1472,7 +1490,7 @@ export function extractExplicitThinkingSelector(
 	let current = normalized;
 	while (!visited.has(current)) {
 		visited.add(current);
-		const rolePrefixLength = modelRoleAliasPrefixLength(current) ?? LEGACY_MODEL_ROLE_ALIAS_PREFIX.length;
+		const rolePrefixLength = modelRoleAliasPrefixLength(current) ?? 0;
 		const strictSelector = splitThinkingSuffix(current, rolePrefixLength).level;
 		if (strictSelector) {
 			return strictSelector;
@@ -1617,6 +1635,52 @@ export function resolveModelOverride(
  */
 export function disabledProviderIds(settings?: Settings): ReadonlySet<string> {
 	return new Set(settings ? cfgDisabledProviders.get(settings) : undefined);
+}
+
+function parseSessionModelSelector(modelRegistry: ModelRegistry, selector: string) {
+	return parseModelString(selector, {
+		...MAX_THINKING_SUFFIX_OPTIONS,
+		isLiteralModelId: (provider, id) => modelRegistry.find(provider, id) !== undefined,
+	});
+}
+
+/**
+ * Resolve a saved session model selector (`provider/id`, optionally with a
+ * thinking suffix) to a registered model whose provider is enabled and has
+ * credentials configured. Startup resume and runtime session switches share
+ * this lookup, so both restore the same models.
+ *
+ * Uses the side-effect-free `hasConfiguredAuth` probe: it refreshes no OAuth
+ * tokens and runs no `!command` keys, which would stall a restore on the network.
+ */
+export function resolveSessionModelSelector(
+	modelRegistry: ModelRegistry,
+	selector: string,
+): { model: Model<Api>; thinkingLevel?: ConfiguredThinkingLevel } | undefined {
+	const parsed = parseSessionModelSelector(modelRegistry, selector);
+	if (!parsed) return undefined;
+	const model = modelRegistry.find(parsed.provider, parsed.id);
+	if (!model || !modelRegistry.hasConfiguredAuth(model)) return undefined;
+	return { model, thinkingLevel: parsed.thinkingLevel };
+}
+
+/**
+ * Discovery-backed providers (models.yml `discovery:` or extension
+ * `fetchDynamicModels`) that could still supply one of the saved selectors
+ * after a provider-scoped refresh. Disabled providers are skipped.
+ */
+export function sessionModelDiscoveryProviders(
+	modelRegistry: ModelRegistry,
+	selectors: readonly string[],
+	disabledProviders: ReadonlySet<string>,
+): Set<string> {
+	const providers = new Set<string>();
+	for (const selector of selectors) {
+		const parsed = parseSessionModelSelector(modelRegistry, selector);
+		const provider = parsed && modelRegistry.getDiscoveryProviderId(parsed.provider);
+		if (provider && !disabledProviders.has(provider)) providers.add(provider);
+	}
+	return providers;
 }
 
 /**
@@ -1935,6 +1999,7 @@ function findExactCliModel(
 	selector: string,
 	allModels: Model<Api>[],
 	availableModels: Model<Api>[],
+	preferences: ModelMatchPreferences | undefined,
 	options?: { catalogFallback?: boolean },
 ): Model<Api> | undefined {
 	// Explicit provider/id references stay authoritative against the full catalog.
@@ -1942,6 +2007,7 @@ function findExactCliModel(
 	if (referenced) return referenced;
 
 	// Flat-id (or full-selector-string) matches prefer authenticated providers,
+	// ranked like any other ambiguous bare id (recent use, modelProviderOrder),
 	// then fall back to catalog order. This covers aggregator-style flat ids
 	// that merely look provider-qualified (e.g. "openai/gpt-oss-120b" hosted on
 	// OpenRouter), where the provider/id decomposition above found nothing. A
@@ -1951,8 +2017,8 @@ function findExactCliModel(
 	const lower = selector.toLowerCase();
 	const isFlatMatch = (model: Model<Api>) =>
 		model.id.toLowerCase() === lower || formatModelString(model).toLowerCase() === lower;
-	const preferred = availableModels.find(m => isFlatMatch(m) && !isProviderLockedCrossMatch(selector, m));
-	if (preferred) return preferred;
+	const preferred = availableModels.filter(m => isFlatMatch(m) && !isProviderLockedCrossMatch(selector, m));
+	if (preferred.length > 0) return pickPreferredModel(preferred, buildPreferenceContext(availableModels, preferences));
 	// The unauthenticated catalog fallback is a weak match: a bare id like
 	// `default` collides with the bundled `cursor/default` model, which must not
 	// shadow a configured `modelRoles.default` role the user can actually run.
@@ -2061,7 +2127,8 @@ function resolveCliModelInScope(
 	options: CliModelOptions & { cliModel: string },
 	scope: CliModelScope,
 ): ResolveCliModelResult {
-	const { cliProvider, cliModel, settings, preferences } = options;
+	const { cliProvider, cliModel, settings } = options;
+	const preferences = mergeModelMatchPreferences(settings, options.preferences);
 	const { all: allModels, available: availableModels } = scope;
 	if (allModels.length === 0) {
 		return {
@@ -2089,7 +2156,9 @@ function resolveCliModelInScope(
 
 	const trimmedModel = cliModel.trim();
 	if (!provider) {
-		const exact = findExactCliModel(trimmedModel, allModels, availableModels, { catalogFallback: false });
+		const exact = findExactCliModel(trimmedModel, allModels, availableModels, preferences, {
+			catalogFallback: false,
+		});
 		if (exact) {
 			return {
 				model: exact,
@@ -2105,7 +2174,9 @@ function resolveCliModelInScope(
 			MAX_THINKING_SUFFIX_OPTIONS,
 		);
 		if (exactThinkingLevel) {
-			const exactSuffixed = findExactCliModel(exactBase, allModels, availableModels, { catalogFallback: false });
+			const exactSuffixed = findExactCliModel(exactBase, allModels, availableModels, preferences, {
+				catalogFallback: false,
+			});
 			if (exactSuffixed) {
 				return {
 					model: exactSuffixed,

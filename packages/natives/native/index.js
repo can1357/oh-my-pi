@@ -46,6 +46,7 @@ export const VcsRepo = nativeBindings.VcsRepo;
 
 // functions
 export const __ompInstallTokioRuntime = nativeBindings.__ompInstallTokioRuntime ?? missingNativeExport("__ompInstallTokioRuntime");
+export const __ompSetGrammarDir = nativeBindings.__ompSetGrammarDir ?? missingNativeExport("__ompSetGrammarDir");
 export const __piNativesBuildVersion = nativeBindings.__piNativesBuildVersion;
 export const appleFmAvailability = nativeBindings.appleFmAvailability ?? missingNativeExport("appleFmAvailability");
 export const appleFmCancel = nativeBindings.appleFmCancel ?? missingNativeExport("appleFmCancel");
@@ -58,6 +59,7 @@ export const copyToClipboard = nativeBindings.copyToClipboard ?? missingNativeEx
 export const cosineSimilarityPairs = nativeBindings.cosineSimilarityPairs ?? missingNativeExport("cosineSimilarityPairs");
 export const countTokens = nativeBindings.countTokens ?? missingNativeExport("countTokens");
 export const decodeSixelToPng = nativeBindings.decodeSixelToPng ?? missingNativeExport("decodeSixelToPng");
+export const decodeSixelToPngAsync = nativeBindings.decodeSixelToPngAsync ?? missingNativeExport("decodeSixelToPngAsync");
 export const detectMacOSAppearance = nativeBindings.detectMacOSAppearance ?? missingNativeExport("detectMacOSAppearance");
 export const deviceCheckGenerateToken = nativeBindings.deviceCheckGenerateToken ?? missingNativeExport("deviceCheckGenerateToken");
 export const diffLineRuns = nativeBindings.diffLineRuns ?? missingNativeExport("diffLineRuns");
@@ -70,6 +72,7 @@ export const editGrammar = nativeBindings.editGrammar ?? missingNativeExport("ed
 export const editInspect = nativeBindings.editInspect ?? missingNativeExport("editInspect");
 export const enclosingBlockBoundaries = nativeBindings.enclosingBlockBoundaries ?? missingNativeExport("enclosingBlockBoundaries");
 export const encodeSixel = nativeBindings.encodeSixel ?? missingNativeExport("encodeSixel");
+export const encodeSixelAsync = nativeBindings.encodeSixelAsync ?? missingNativeExport("encodeSixelAsync");
 export const execReplace = nativeBindings.execReplace ?? missingNativeExport("execReplace");
 export const executeShell = nativeBindings.executeShell ?? missingNativeExport("executeShell");
 export const expandWindowsLongPath = nativeBindings.expandWindowsLongPath ?? missingNativeExport("expandWindowsLongPath");
@@ -138,7 +141,9 @@ export const vcsJoinPatches = nativeBindings.vcsJoinPatches ?? missingNativeExpo
 export const vcsValidateHunkSelections = nativeBindings.vcsValidateHunkSelections ?? missingNativeExport("vcsValidateHunkSelections");
 export const vectorIndexTopK = nativeBindings.vectorIndexTopK ?? missingNativeExport("vectorIndexTopK");
 export const visibleWidth = nativeBindings.visibleWidth ?? missingNativeExport("visibleWidth");
+export const warmBlockParse = nativeBindings.warmBlockParse ?? missingNativeExport("warmBlockParse");
 export const warmHighlighter = nativeBindings.warmHighlighter ?? missingNativeExport("warmHighlighter");
+export const wasmGrammarFor = nativeBindings.wasmGrammarFor ?? missingNativeExport("wasmGrammarFor");
 export const wrapTextWithAnsi = nativeBindings.wrapTextWithAnsi ?? missingNativeExport("wrapTextWithAnsi");
 
 // string/numeric enums (napi-rs string_enum produces TS-only const enum)

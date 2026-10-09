@@ -1080,6 +1080,36 @@ describe("runGcCommand cold-session archive", () => {
 		expect(rows.map(row => row.session_id)).toEqual(["keep-me"]);
 	});
 
+	test("removes archived session titles even when history.db has no prompt history", async () => {
+		await writeSession(root, "project", "archive-me", "complete", { ageDays: 90 });
+		const dbPath = getHistoryDbPath(root);
+		await fs.mkdir(path.dirname(dbPath), { recursive: true });
+		const db = new Database(dbPath);
+		db.run("CREATE TABLE session_titles (session_id TEXT PRIMARY KEY, title TEXT NOT NULL)");
+		db.run("INSERT INTO session_titles (session_id, title) VALUES ('archive-me', 'old title')");
+		db.run("INSERT INTO session_titles (session_id, title) VALUES ('keep-me', 'live title')");
+		db.close();
+
+		const result = await runGcCommand({
+			flags: {
+				agentDir: root,
+				archive: true,
+				coldArchiveAfterDays: 30,
+				retainNewestGlobal: 0,
+				retainNewestPerCwd: 0,
+				apply: true,
+			},
+		});
+
+		const check = new Database(dbPath);
+		const rows = check.query("SELECT session_id FROM session_titles").all() as Array<{ session_id: string }>;
+		check.close();
+
+		expect(result.archive?.archived).toBe(1);
+		expect(result.archive?.errors).toEqual([]);
+		expect(rows.map(row => row.session_id)).toEqual(["keep-me"]);
+	});
+
 	test("removes archived main and nested session rows from stats", async () => {
 		const session = await writeSession(root, "project", "archive-me", "complete", { ageDays: 90 });
 		const nestedSession = path.join(session.slice(0, -".jsonl".length), "nested.jsonl");
@@ -2403,12 +2433,20 @@ describe("runGcCommand stale state", () => {
 		const agentDir = path.join(root, "agent");
 		const collabDir = path.join(root, "collab");
 		const resumed = await writeAged(collabDir, "room-resumed.jsonl", "{}\n", 60);
-		const held = await writeAged(collabDir, "room-held.jsonl", "{}\n", 60);
+		// Unique per run: the lease is machine-wide, so a fixed id would contend
+		// with the same test running concurrently elsewhere.
+		const heldId = Bun.randomUUIDv7();
+		const held = await writeAged(
+			collabDir,
+			"room-held.jsonl",
+			`${JSON.stringify({ type: "session", id: heldId, timestamp: new Date().toISOString(), cwd: root })}\n`,
+			60,
+		);
 		const idle = await writeAged(collabDir, "room-idle.jsonl", "{}\n", 60);
 		// `--continue` in this terminal reopens the replica it last switched to.
 		await writeAged(getTerminalSessionsDir(agentDir), "tty-guest", `${root}\n${resumed}\n`);
-		// A live guest writing its replica holds the session ownership lease.
-		const release = new FileSessionStorage().claimSessionFile(held);
+		// A live guest writing its replica holds the session's ownership lease.
+		const release = new FileSessionStorage().claimSession(heldId, held);
 		if (!release) throw new Error("Expected to claim the replica lease");
 		let result: GcResult;
 		try {

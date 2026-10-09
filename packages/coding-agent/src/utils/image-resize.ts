@@ -26,6 +26,16 @@ export interface ResizedImage {
 	get data(): string;
 }
 
+/**
+ * Raw image bytes for {@link resizeImage}. `mimeType` is the caller's hint when decoding
+ * fails; `data` is the base64 of `bytes` when the caller already has it (reused verbatim).
+ */
+export interface ImageBytesInput {
+	bytes: Uint8Array;
+	mimeType?: string;
+	data?: string;
+}
+
 // 500KB target — aggressive compression; Anthropic's 5MB per-image cap is rarely the
 // binding constraint once images are downsized to 1568px (Anthropic's internal threshold).
 const DEFAULT_MAX_BYTES = 500 * 1024;
@@ -149,6 +159,35 @@ Buffer.prototype.toBase64 = function (this: Buffer) {
 	return new Uint8Array(this.buffer, this.byteOffset, this.byteLength).toBase64();
 };
 
+interface EncodedCandidate {
+	buffer: Uint8Array;
+	mimeType: string;
+}
+
+/** Build a result whose base64 `data` is computed on first access and memoized. */
+function encodedResult(
+	best: EncodedCandidate,
+	originalWidth: number,
+	originalHeight: number,
+	width: number,
+	height: number,
+): ResizedImage {
+	let data: string | undefined;
+	return {
+		buffer: best.buffer,
+		mimeType: best.mimeType,
+		originalWidth,
+		originalHeight,
+		width,
+		height,
+		wasResized: true,
+		get data() {
+			data ??= best.buffer.toBase64();
+			return data;
+		},
+	};
+}
+
 /**
  * Resize and recompress an image to fit within the specified max dimensions and file size.
  *
@@ -159,21 +198,47 @@ Buffer.prototype.toBase64 = function (this: Buffer) {
  *  4. If still too large, walk a dimension-scale ladder × quality ladder.
  *  5. If still too large, return the smallest variant produced.
  *
+ * The source is decoded and resized once per target size; the format/quality ladder
+ * re-encodes from a lossless intermediate at that size.
+ *
+ * Accepts an `ImageContent` (base64), raw bytes, or {@link ImageBytesInput}; passing
+ * bytes avoids a base64 round-trip when the caller already holds them.
+ *
  * Set OMP_NO_WEBP to exclude WebP from encoding (llama.cpp STB doesn't decode it).
  *
  * Backed by `Bun.Image`: a chainable native pipeline that runs decode/transform/encode
  * off the JS thread when the terminal (`.bytes()`) is awaited.
  */
-export async function resizeImage(img: ImageContent, options?: ImageResizeOptions): Promise<ResizedImage> {
+export async function resizeImage(
+	img: ImageContent | ImageBytesInput | Uint8Array,
+	options?: ImageResizeOptions,
+): Promise<ResizedImage> {
 	const excludeWebP = options?.excludeWebP ?? isWebPExcluded();
 	const opts = { ...DEFAULT_OPTIONS, ...options, excludeWebP };
-	const inputBuffer = Buffer.from(img.data, "base64");
+	let inputBuffer: Uint8Array;
+	let callerMime: string | undefined;
+	let originalData: string | undefined;
+	if (img instanceof Uint8Array) {
+		inputBuffer = img;
+	} else if ("bytes" in img) {
+		inputBuffer = img.bytes;
+		callerMime = img.mimeType;
+		originalData = img.data;
+	} else {
+		inputBuffer = Buffer.from(img.data, "base64");
+		callerMime = img.mimeType;
+		originalData = img.data;
+	}
+	const getOriginalData = (): string => {
+		originalData ??= inputBuffer.toBase64();
+		return originalData;
+	};
 
 	try {
 		const { width: originalWidth, height: originalHeight, format } = await new Bun.Image(inputBuffer).metadata();
 		// Trust decoded bytes over caller metadata. A mislabeled WebP must not take
 		// the fast path when the target decoder explicitly excludes WebP.
-		const sourceMime = format ? `image/${format}` : img.mimeType;
+		const sourceMime = format ? `image/${format}` : (callerMime ?? "application/octet-stream");
 
 		// Fast path: already within dimensions AND well under budget.
 		// Threshold is 1/4 of budget — if already that compact, don't re-encode.
@@ -201,7 +266,7 @@ export async function resizeImage(img: ImageContent, options?: ImageResizeOption
 				height: originalHeight,
 				wasResized: false,
 				get data() {
-					return img.data;
+					return getOriginalData();
 				},
 			};
 		}
@@ -232,31 +297,31 @@ export async function resizeImage(img: ImageContent, options?: ImageResizeOption
 			}
 		}
 
-		// First-attempt encoder: try PNG and JPEG (+ WebP if not excluded) — return smallest.
-		// PNG wins for line art / few-color UI; JPEG wins for photographic content;
-		// WebP usually beats JPEG by 25–35% but is disabled when OMP_NO_WEBP is set
-		// because many local inference backends (llama.cpp STB) don't decode it.
-		async function encodeSmallest(
-			width: number,
-			height: number,
+		// Lossy encoder for quality/dimension fallback ladders. PNG is excluded since
+		// it's lossless and doesn't respond to quality parameters. WebP is included
+		// unless OMP_NO_WEBP is set (llama.cpp STB incompatibility). Ladder steps pass a
+		// lossless PNG already at the target size, so each step only decodes that small
+		// intermediate instead of re-decoding and re-resizing the source; when
+		// `width`/`height` are given the source is resized first.
+		async function encodeLossy(
+			source: Uint8Array,
 			quality: number,
-		): Promise<{ buffer: Uint8Array; mimeType: string }> {
+			width?: number,
+			height?: number,
+		): Promise<EncodedCandidate> {
+			const pipeline = () => {
+				const image = new Bun.Image(source);
+				return width === undefined || height === undefined ? image : image.resize(width, height);
+			};
 			const candidates = await Promise.all([
-				new Bun.Image(inputBuffer)
-					.resize(width, height)
-					.png()
-					.bytes()
-					.then(b => ({ buffer: b, mimeType: "image/png" })),
-				new Bun.Image(inputBuffer)
-					.resize(width, height)
+				pipeline()
 					.jpeg({ quality })
 					.bytes()
 					.then(b => ({ buffer: b, mimeType: "image/jpeg" })),
 				...(opts.excludeWebP
 					? []
 					: [
-							new Bun.Image(inputBuffer)
-								.resize(width, height)
+							pipeline()
 								.webp({ quality })
 								.bytes()
 								.then(b => ({ buffer: b, mimeType: "image/webp" })),
@@ -265,75 +330,32 @@ export async function resizeImage(img: ImageContent, options?: ImageResizeOption
 			return pickSmallest(...candidates);
 		}
 
-		// Lossy encoder for quality/dimension fallback ladders. PNG is excluded since
-		// it's lossless and doesn't respond to quality parameters. WebP is included
-		// unless OMP_NO_WEBP is set (llama.cpp STB incompatibility).
-		async function encodeLossy(
-			width: number,
-			height: number,
-			quality: number,
-		): Promise<{ buffer: Uint8Array; mimeType: string }> {
-			const candidates = await Promise.all([
-				new Bun.Image(inputBuffer)
-					.resize(width, height)
-					.jpeg({ quality })
-					.bytes()
-					.then(b => ({ buffer: b, mimeType: "image/jpeg" })),
-				...(opts.excludeWebP
-					? []
-					: [
-							new Bun.Image(inputBuffer)
-								.resize(width, height)
-								.webp({ quality })
-								.bytes()
-								.then(b => ({ buffer: b, mimeType: "image/webp" })),
-						]),
-			]);
-			return pickSmallest(...candidates);
-		}
 		// Quality ladder — more aggressive steps for tighter budgets
 		const qualitySteps = [70, 60, 50, 40];
 		const scaleSteps = [1.0, 0.75, 0.5, 0.35, 0.25];
 
-		let best: { buffer: Uint8Array; mimeType: string };
 		let finalWidth = targetWidth;
 		let finalHeight = targetHeight;
 
-		// First attempt: resize to target, try PNG/JPEG (+ WebP), pick smallest
-		best = await encodeSmallest(targetWidth, targetHeight, opts.jpegQuality);
-
+		// First attempt: resize to target and try PNG/JPEG (+ WebP) in parallel, pick the
+		// smallest. PNG wins for line art / few-color UI; JPEG wins for photographic
+		// content; WebP usually beats JPEG by 25–35% but is disabled when OMP_NO_WEBP is
+		// set because many local inference backends (llama.cpp STB) don't decode it.
+		// The lossless PNG doubles as the intermediate for the quality ladder below.
+		const [targetPng, firstLossy] = await Promise.all([
+			new Bun.Image(inputBuffer).resize(targetWidth, targetHeight).png().bytes(),
+			encodeLossy(inputBuffer, opts.jpegQuality, targetWidth, targetHeight),
+		]);
+		let best = pickSmallest({ buffer: targetPng, mimeType: "image/png" }, firstLossy);
 		if (best.buffer.length <= opts.maxBytes) {
-			return {
-				buffer: best.buffer,
-				mimeType: best.mimeType,
-				originalWidth,
-				originalHeight,
-				width: finalWidth,
-				height: finalHeight,
-				wasResized: true,
-				get data() {
-					return Buffer.from(best.buffer).toBase64();
-				},
-			};
+			return encodedResult(best, originalWidth, originalHeight, finalWidth, finalHeight);
 		}
 
 		// Still too large — lossy JPEG (+ WebP) ladder with decreasing quality
 		for (const quality of qualitySteps) {
-			best = await encodeLossy(targetWidth, targetHeight, quality);
-
+			best = await encodeLossy(targetPng, quality);
 			if (best.buffer.length <= opts.maxBytes) {
-				return {
-					buffer: best.buffer,
-					mimeType: best.mimeType,
-					originalWidth,
-					originalHeight,
-					width: finalWidth,
-					height: finalHeight,
-					wasResized: true,
-					get data() {
-						return Buffer.from(best.buffer).toBase64();
-					},
-				};
+				return encodedResult(best, originalWidth, originalHeight, finalWidth, finalHeight);
 			}
 		}
 
@@ -346,47 +368,28 @@ export async function resizeImage(img: ImageContent, options?: ImageResizeOption
 				break;
 			}
 
+			const resized =
+				scale === 1
+					? targetPng
+					: await new Bun.Image(inputBuffer).resize(finalWidth, finalHeight).png({ compressionLevel: 0 }).bytes();
 			for (const quality of qualitySteps) {
-				best = await encodeLossy(finalWidth, finalHeight, quality);
-
+				best = await encodeLossy(resized, quality);
 				if (best.buffer.length <= opts.maxBytes) {
-					return {
-						buffer: best.buffer,
-						mimeType: best.mimeType,
-						originalWidth,
-						originalHeight,
-						width: finalWidth,
-						height: finalHeight,
-						wasResized: true,
-						get data() {
-							return Buffer.from(best.buffer).toBase64();
-						},
-					};
+					return encodedResult(best, originalWidth, originalHeight, finalWidth, finalHeight);
 				}
 			}
 		}
 
 		// Last resort: return smallest version we produced
-		return {
-			buffer: best.buffer,
-			mimeType: best.mimeType,
-			originalWidth,
-			originalHeight,
-			width: finalWidth,
-			height: finalHeight,
-			wasResized: true,
-			get data() {
-				return Buffer.from(best.buffer).toBase64();
-			},
-		};
+		return encodedResult(best, originalWidth, originalHeight, finalWidth, finalHeight);
 	} catch {
 		const headerDimensions = readImageHeaderDimensions(inputBuffer);
-		const fallbackMimeType = img.mimeType ?? headerDimensions?.mimeType ?? "application/octet-stream";
+		const fallbackMimeType = callerMime ?? headerDimensions?.mimeType ?? "application/octet-stream";
 		// Bun.Image rejected the input — we cannot decode/re-encode it.
 		// When the caller demanded WebP exclusion AND the source might be WebP,
 		// returning the original buffer would silently violate that contract,
 		// so surface an explicit error instead.
-		if (excludeWebP && (fallbackMimeType === "image/webp" || (!img.mimeType && !headerDimensions))) {
+		if (excludeWebP && (fallbackMimeType === "image/webp" || (!callerMime && !headerDimensions))) {
 			throw new Error("resizeImage: failed to decode image and cannot honor excludeWebP for a WebP source");
 		}
 		return {
@@ -399,7 +402,7 @@ export async function resizeImage(img: ImageContent, options?: ImageResizeOption
 			wasResized: false,
 			decodeFailed: true,
 			get data() {
-				return img.data;
+				return getOriginalData();
 			},
 		};
 	}

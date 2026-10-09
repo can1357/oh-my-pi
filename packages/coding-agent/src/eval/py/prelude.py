@@ -25,6 +25,9 @@ if "__omp_prelude_loaded__" not in globals():
 
     def display(value):
         """Render a value. Falls back to a JSON+text/plain bundle for plain dict/list/tuple."""
+        if isinstance(value, dict) and value.get("type") == "image":
+            _omp_display(value)
+            return
         if any(hasattr(value, attr) for attr in _PRESENTABLE_REPRS):
             _omp_display(value)
             return
@@ -471,7 +474,7 @@ if "__omp_prelude_loaded__" not in globals():
             mime_type = image.get("mimeType")
             if not isinstance(data, str) or not isinstance(mime_type, str):
                 continue
-            _omp_display({mime_type: data}, raw=True)
+            _omp_display({"application/x-omp-image": image}, raw=True)
             displayed += 1
         if displayed == 0:
             return value

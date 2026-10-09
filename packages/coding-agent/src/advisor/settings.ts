@@ -48,9 +48,9 @@ export const cfgAdvisorImmuneTurns = register({
 		group: "Advisor",
 		label: "Advisor Immune Turns",
 		description:
-			"After an advisor concern or blocker interrupts, route further concerns/blockers non-interruptingly for this many primary turns.",
+			"After an advisor concern or blocker interrupts, route further concerns as non-interrupting asides for this many primary turns. Blockers are exempt from the cooldown.",
 		options: [
-			{ value: "0", label: "0 steps", description: "Allow every concern/blocker to interrupt." },
+			{ value: "0", label: "0 steps", description: "No cooldown." },
 			{ value: "1", label: "1 step" },
 			{ value: "2", label: "2 steps" },
 			{ value: "3", label: "3 steps", description: "Default." },
