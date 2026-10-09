@@ -852,7 +852,8 @@ function collapseWithTable<TSpec extends VariantSpecLike>(
 		const existing = byId.get(family.id);
 		const existingCollapsed =
 			existing !== undefined &&
-			(existing.requestModelId !== undefined || existing.thinking?.effortRouting !== undefined);
+			((existing.requestModelId !== undefined && existing.requestModelId !== existing.id) ||
+				existing.thinking?.effortRouting !== undefined);
 		const reconciled =
 			existing !== undefined && existingCollapsed && retired !== undefined
 				? reconcileRetiredRouting(existing, family, retired)
