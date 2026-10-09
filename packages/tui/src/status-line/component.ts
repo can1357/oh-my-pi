@@ -3012,6 +3012,15 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		const rightWidths = right.map((part, index) =>
 			Math.max(visibleWidth(part), visibleWidth(rightWidthHints[index] ?? "")),
 		);
+		// Startup placeholders budget against their cached live width. Emit that
+		// reserved width too so the opposite group stays fixed on the first live
+		// frame: left parts grow toward the gap, while right parts grow away from it.
+		for (let index = 0; index < left.length; index++) {
+			left[index] += padding(leftWidths[index] - visibleWidth(left[index]));
+		}
+		for (let index = 0; index < right.length; index++) {
+			right[index] = padding(rightWidths[index] - visibleWidth(right[index])) + right[index];
+		}
 
 		const leftSepWidth = separators.leftSepWidth;
 		const rightSepWidth = separators.rightSepWidth;

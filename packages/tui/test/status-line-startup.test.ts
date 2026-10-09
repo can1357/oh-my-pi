@@ -82,4 +82,40 @@ describe("status line startup layout", () => {
 			line.dispose();
 		}
 	});
+
+	it("paints the cached compact width so the opposite startup group stays aligned", () => {
+		const model = {
+			id: "startup-model",
+			name: "Model",
+			provider: "test",
+			api: "test",
+			contextWindow: 100_000,
+		} as Model;
+		const line = createStartupStatusLine({
+			settings: {
+				preset: "custom",
+				leftSegments: ["context_pct"],
+				rightSegments: ["model"],
+				separator: "none",
+				contextLine: "off",
+				segmentOptions: { context_pct: { compact: true }, model: { showThinkingLevel: false } },
+			},
+			gitEnabled: false,
+			model,
+			autoThinking: false,
+			fastMode: false,
+			usingSubscription: false,
+			contextPercent: 9.1,
+			autoCompactEnabled: false,
+			compactionBoundaries: null,
+		});
+
+		try {
+			const rendered = Bun.stripANSI(line.getTopBorder(24).content);
+			expect(rendered).toMatch(/ctx:\? {3,}.*Model/);
+			expect(rendered.endsWith("Model ")).toBeTrue();
+		} finally {
+			line.dispose();
+		}
+	});
 });
