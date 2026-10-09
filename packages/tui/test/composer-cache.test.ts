@@ -66,6 +66,36 @@ describe("composer startup cache", () => {
 		cache.close();
 	});
 
+	it("keeps session usage out of the shared status fallback", () => {
+		const project = path.join(root, "project");
+		const status = statusFor(ThinkingLevel.High);
+		const statusWithUsage: ComposerStatusCache = {
+			...status,
+			statusLine: {
+				...status.statusLine,
+				contextPercent: 37.5,
+				tokenBreakdown: {
+					input: 25_000,
+					output: 500,
+					cacheWrite: 100,
+					orchestrationInput: 250,
+					orchestrationOutput: 50,
+				},
+			},
+		};
+
+		const cache = ComposerCache.open(dbPath);
+		cache.writeStatus(project, statusWithUsage);
+
+		expect(cache.read(project).status?.statusLine.contextPercent).toBe(37.5);
+		expect(cache.read(project).status?.statusLine.tokenBreakdown).toEqual(statusWithUsage.statusLine.tokenBreakdown);
+		const fallback = cache.read(path.join(root, "fresh")).status?.statusLine;
+		expect(fallback?.thinkingLevel).toBe(ThinkingLevel.High);
+		expect(fallback?.contextPercent).toBeUndefined();
+		expect(fallback?.tokenBreakdown).toBeUndefined();
+		cache.close();
+	});
+
 	it("skips write transactions for identical payloads", () => {
 		const project = path.join(root, "project");
 		const cache = ComposerCache.open(dbPath);

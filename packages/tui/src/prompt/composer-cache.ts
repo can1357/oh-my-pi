@@ -234,7 +234,16 @@ export class ComposerCache {
 
 	/** Status-bar inputs for the next prepaint's startup status line. */
 	writeStatus(cwd: string, status: ComposerStatusCache): void {
-		this.#putShared(cwd, "status", status);
+		this.#putShared(cwd, "status", status, {
+			...status,
+			statusLine: {
+				...status.statusLine,
+				// Usage belongs to the current session. Reusing it in another project's
+				// first frame makes opt-in metrics appear briefly, then reflow to zero.
+				contextPercent: undefined,
+				tokenBreakdown: undefined,
+			},
+		});
 	}
 
 	close(): void {
@@ -246,21 +255,23 @@ export class ComposerCache {
 
 	/**
 	 * Best-effort upsert of this project's row plus the any-project fallback row,
-	 * atomically: a failed write only costs the next launch its speculation.
+	 * atomically. Callers may omit project-local data from the fallback value. A
+	 * failed write only costs the next launch its speculation.
 	 */
-	#putShared(cwd: string, kind: EntryKind, value: unknown): void {
+	#putShared(cwd: string, kind: EntryKind, value: unknown, fallbackValue: unknown = value): void {
 		const project = path.resolve(cwd);
 		const json = JSON.stringify(value);
+		const fallbackJson = JSON.stringify(fallbackValue);
 		const ownKey = `${project}\0${kind}`;
 		const anyKey = `${ANY_PROJECT}\0${kind}`;
-		if (this.#known.get(ownKey) === json && this.#known.get(anyKey) === json) return;
+		if (this.#known.get(ownKey) === json && this.#known.get(anyKey) === fallbackJson) return;
 		try {
 			this.#db.transaction(() => {
 				this.#upsert.run(project, kind, json);
-				this.#upsert.run(ANY_PROJECT, kind, json);
+				this.#upsert.run(ANY_PROJECT, kind, fallbackJson);
 			})();
 			this.#known.set(ownKey, json);
-			this.#known.set(anyKey, json);
+			this.#known.set(anyKey, fallbackJson);
 		} catch (error) {
 			logger.debug("composer cache write failed", { kind, error: String(error) });
 		}
