@@ -1393,14 +1393,15 @@ class DaemonBroker {
 		// persisted restarting -> exited transition once, before log shutdown.
 		const leftBackoff = this.#observedBackoffs.delete(record.snapshot);
 		if (record.snapshot.state === "restarting") this.#observedBackoffs.add(record.snapshot);
-		else if (leftBackoff && record.stopRequested && record.snapshot.state === "exited") {
-			this.#notifyObservers(record.snapshot);
-		}
+		const stoppedBackoff = leftBackoff && record.stopRequested && record.snapshot.state === "exited";
 		const spec = JSON.stringify(record.spec);
 		const metadata = this.#serializeMetadata(record);
 		const writeSpec = spec !== record.persistedSpec;
 		const writeMeta = metadata !== record.persistedMeta;
-		if (!writeSpec && !writeMeta) return;
+		if (!writeSpec && !writeMeta) {
+			if (stoppedBackoff) this.#notifyObservers(record.snapshot);
+			return;
+		}
 		record.persistedSpec = spec;
 		record.persistedMeta = metadata;
 		record.persistQueue = record.persistQueue
@@ -1418,6 +1419,7 @@ class DaemonBroker {
 					error: error instanceof Error ? error.message : String(error),
 				});
 			});
+		if (stoppedBackoff) this.#notifyObservers(record.snapshot);
 	}
 
 	async #setRecordCompletionCapability(owner: string, capable: boolean): Promise<void> {
