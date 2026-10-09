@@ -10,6 +10,7 @@
 
 - Added `Agent.setModelResolver()` to fit every model an agent adopts (via `setModel`, starting with the current one) before it is used ([#15048](https://github.com/can1357/oh-my-pi/pull/15048) by [@H4vC](https://github.com/H4vC))
 - Added `CompactionSettings.baseWindowTokens`: when set, `resolveThresholdTokens()` scales its percentage or reserve-based threshold from that base instead of the full context window ([#15065](https://github.com/can1357/oh-my-pi/pull/15065) by [@H4vC](https://github.com/H4vC))
+- Added `getRemoteCompactionPreserve()`, which returns the provider-native replay payload a compaction stored, or `undefined` for a local summary ([#15084](https://github.com/can1357/oh-my-pi/pull/15084) by [@Hamoudii91](https://github.com/Hamoudii91))
 
 ### Fixed
 

@@ -1,5 +1,13 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
-import { ConcatSink, getBlobsDir, isEisdir, isEnoent, isEnotdir, parseJsonlLenient } from "@oh-my-pi/pi-utils";
+import {
+	ConcatSink,
+	getBlobsDir,
+	isEisdir,
+	isEnoent,
+	isEnotdir,
+	isRecord,
+	parseJsonlLenient,
+} from "@oh-my-pi/pi-utils";
 import * as snapcompact from "@oh-my-pi/snapcompact";
 import { Semaphore } from "../task/parallel";
 import {
@@ -11,6 +19,7 @@ import {
 	resolveImageDataUrl,
 	resolveImageDataUrlSync,
 } from "./blob-store";
+import { activePathOfLoadedEntries, archivedEntries } from "./compacted-history";
 import { buildSessionContext } from "./session-context";
 import type { FileEntry, RawFileEntry, SessionEntry, SessionHeader } from "./session-entries";
 import { migrateToCurrentVersion } from "./session-migrations";
@@ -649,6 +658,92 @@ export function resolveBlobRefsInEntriesSync(entries: FileEntry[], blobStore: Bl
 		}
 		site.holder[site.key] = data;
 	}
+}
+
+/** Resolves one blob ref to its bytes: base64 for image payloads, the whole data URL for `image_url`. */
+type BlobRefResolver = (ref: string, asDataUrl: boolean) => string;
+
+/** Copy-on-write counterpart of {@link collectBlobRefSites}: same positions, nothing mutated. */
+function inlineBlobRefs(value: unknown, resolve: BlobRefResolver, key?: string): unknown {
+	if (key !== "frames" && isExternalizableImagePosition(value, key) && isBlobRef(value.data)) {
+		return { ...value, data: resolve(value.data, false) };
+	}
+	if (Array.isArray(value)) {
+		let result: unknown[] | undefined;
+		for (let i = 0; i < value.length; i++) {
+			const next = inlineBlobRefs(value[i], resolve, key);
+			if (next === value[i]) continue;
+			result ??= value.slice();
+			result[i] = next;
+		}
+		return result ?? value;
+	}
+	if (!isRecord(value)) return value;
+	let result: Record<string, unknown> | undefined;
+	for (const childKey of Object.keys(value)) {
+		const child = value[childKey];
+		let next: unknown;
+		if (typeof child === "string" && isBlobRef(child) && childKey === "image_url") {
+			next = resolve(child, true);
+		} else if (
+			typeof child === "string" &&
+			isBlobRef(child) &&
+			childKey === "result" &&
+			value.type === "image_generation_call"
+		) {
+			next = resolve(child, false);
+		} else {
+			next = inlineBlobRefs(child, resolve, childKey);
+		}
+		if (next === child) continue;
+		result ??= { ...value };
+		result[childKey] = next;
+	}
+	return result ?? value;
+}
+
+/**
+ * `value` with the image bytes behind its blob refs restored, without touching
+ * `value`: only the objects on the way to a restored image are copied, the rest
+ * is shared. Returns `value` itself when it holds no blob ref. Each distinct
+ * blob is read once per call. Snapcompact frames stay references, as in
+ * {@link resolveBlobRefsInEntries}.
+ *
+ * A value too deeply nested to walk, or an image too large to hold as a
+ * string, comes back unchanged (a `RangeError`) rather than failing the caller.
+ */
+export function inlineBlobRefsSync<T>(value: T, blobStore: BlobStore): T {
+	try {
+		if (!containsBlobRef(value)) return value;
+		const resolved = new Map<string, string>();
+		const resolve: BlobRefResolver = (ref, asDataUrl) => {
+			const key = `${asDataUrl ? "url" : "base64"}:${ref}`;
+			let data = resolved.get(key);
+			if (data === undefined) {
+				data = asDataUrl ? resolveImageDataUrlSync(blobStore, ref) : resolveImageDataSync(blobStore, ref);
+				resolved.set(key, data);
+			}
+			return data;
+		};
+		return inlineBlobRefs(value, resolve) as T;
+	} catch (error) {
+		if (error instanceof RangeError) return value;
+		throw error;
+	}
+}
+
+/**
+ * {@link resolveBlobRefsInEntries} for a freshly loaded journal, except the
+ * entries a summarizing compaction archived on its active path: those keep
+ * their blob refs, since nothing reads their images until a leaf move brings
+ * them back into the kept range. Returns how many entries stayed unresolved.
+ */
+export async function resolveLoadedBlobRefs(entries: FileEntry[], blobStore: BlobStore): Promise<number> {
+	const sessionEntries = entries.filter((entry): entry is SessionEntry => entry.type !== "session");
+	const archived = new Set<FileEntry>(archivedEntries(activePathOfLoadedEntries(sessionEntries)));
+	const resolvable = archived.size === 0 ? entries : entries.filter(entry => !archived.has(entry));
+	await resolveBlobRefsInEntries(resolvable, blobStore);
+	return archived.size;
 }
 
 /**

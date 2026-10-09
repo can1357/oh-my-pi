@@ -22,6 +22,7 @@ Does not cover `/tree` UI rendering behavior beyond semantics that affect sessio
 - [`src/session/session-migrations.ts`](../packages/coding-agent/src/session/session-migrations.ts) — version migrations
 - [`src/session/session-loader.ts`](../packages/coding-agent/src/session/session-loader.ts) — file load + blob-ref resolution
 - [`src/session/session-context.ts`](../packages/coding-agent/src/session/session-context.ts) — `buildSessionContext`
+- [`src/session/compacted-history.ts`](../packages/coding-agent/src/session/compacted-history.ts) — which entries a summarizing compaction has archived
 - [`src/session/session-persistence.ts`](../packages/coding-agent/src/session/session-persistence.ts) — truncation + image blob externalization
 - [`src/session/session-paths.ts`](../packages/coding-agent/src/session/session-paths.ts) — on-disk layout, dir encoding, terminal breadcrumbs
 - [`src/session/session-listing.ts`](../packages/coding-agent/src/session/session-listing.ts) — discovery (list/recent/resolve)
@@ -472,7 +473,7 @@ Applied when header `version < 3`:
 
 - Missing or genuinely empty files initialize a new session at that exact path and materialize its header immediately. `SessionManager.open(..., { throwIfMissing: true })` instead rejects missing/empty input.
 - Non-empty data without a valid leading session header is rejected without modifying the file. An array-only `loadEntriesFromFile()` result of `[]` therefore does not distinguish empty from corrupt input; the manager uses `loadSessionFile()` diagnostics.
-- Valid files are loaded, migrated if needed, blob refs resolved, then indexed. Migrations, skipped malformed records, and loaded OpenAI replay sanitization mark the next persistence operation for a full rewrite.
+- Valid files are loaded, migrated if needed, blob refs resolved, then indexed. Images of entries a summarizing compaction archived on the active path (see [Archived images](#archived-images)) keep their blob refs. Migrations, skipped malformed records, and loaded OpenAI replay sanitization mark the next persistence operation for a full rewrite.
 - A recorded cwd is adopted only when it is enterable. Otherwise runtime cwd stays at the launch/current directory while the transcript remains in its original location; workspace-root edits stay runtime-only until relocation.
 
 ## Tree and Leaf Semantics
@@ -485,7 +486,7 @@ The underlying model is append-only tree + mutable leaf pointer:
 - `resetLeaf()` sets `leafId = null`; next append creates a new root entry (`parentId: null`).
 - `branchWithSummary()` sets leaf to branch target and appends a `branch_summary` entry.
 
-`getEntries()` returns all non-header entries in insertion order. There is no separate persisted leaf field: loading rebuilds the leaf from the last physical entry. Pointer-only `branch()`/`resetLeaf()` changes therefore need a subsequent append to survive reload. `discardEntryDurably()` appends a metadata branch marker and rewrites the journal to make a discarded path durable.
+`getEntries()` returns all non-header entries in insertion order. Entries a compaction archived hold their images as `blob:sha256:<hash>` refs there, as in `getBranch()` and `getTree()`; `withInlineImages(value)` returns a copy with the bytes restored for callers that need them. There is no separate persisted leaf field: loading rebuilds the leaf from the last physical entry. Pointer-only `branch()`/`resetLeaf()` changes therefore need a subsequent append to survive reload. `discardEntryDurably()` appends a metadata branch marker and rewrites the journal to make a discarded path durable.
 
 `createBranchedSession(leafId, { copyArtifacts? })` creates a new identity containing only the selected root-to-leaf path. It drops old label records and recreates the resolved labels for retained entries. Unlike a full fork, it does not inherit the provider prompt-cache key. With `copyArtifacts` (used by `AgentSession.fork(entryId)`), the artifacts directory is copied in the background and the new artifact manager waits for the copy before allocating ids or resolving `artifact://`, as for a move to a sibling file.
 
@@ -563,6 +564,16 @@ Before persisting entries:
 - Spilled MCP tool results omit duplicate `details.structuredContent` when the rendered structured output already lives in their truncation artifact.
 
 These projections leave the live entries unchanged. On load, ordinary persisted image references are resolved back to inline payloads. Snapcompact frames stay lazy until context reconstruction selects them. Archives with frames truncated by older persistence code fall back to their retained text or undamaged frames.
+
+### Archived images
+
+A compaction that summarizes its history archives the active-path entries before its kept range: the model context starts at the kept range, and compaction preparation reads from the newest reusable compaction's kept range onward. Those entries keep their images as blob refs in memory instead of base64, since nothing reads the bytes again.
+
+- Provider-native compactions (OpenAI Responses remote compaction) archive nothing: another provider re-summarizes the history behind them.
+- When a compaction lands, the archived entries' image payloads are swapped in place for the refs their journal lines hold. Every other field stays as it was, including text persistence truncates. This only happens while the session file already holds every entry, so `omp gc` cannot collect a blob that only memory points at. In-memory sessions never swap.
+- Loading a journal (`open`, `forkFrom`) resolves refs only for entries outside the archived range.
+- Moving the leaf (`branch`, `branchWithSummary`, `createBranchedSession`, `restoreState`) restores the images of the new path's kept range, so readers of `getBranch()` entries see bytes. Entries restored by a leaf move return to refs on the next move that leaves them.
+- `buildSessionContext()` restores images in the messages it returns. Exports, RPC `get_entries`/`get_tree`, collab snapshots, the rewind and copy selectors, editor draft restores, and the entries handed to `session_before_tree` go through `withInlineImages()`.
 
 ## Storage Abstractions
 

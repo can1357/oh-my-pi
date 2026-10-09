@@ -46,7 +46,11 @@ export function sessionResolveContext(
 		signal: options.signal,
 		sessionFile: session.getSessionFile() ?? undefined,
 		experimentalContextManagement: cfgCompactionExperimentalContextManagement.get(session.settings) === true,
-		getSessionBranch: () => getExperimentalContextSession(session).getBranch(),
+		getSessionBranch: () => {
+			const manager = getExperimentalContextSession(session);
+			const branch = manager.getBranch();
+			return manager.withInlineImages?.(branch) ?? branch;
+		},
 		sessionId: session.sessionManager?.getSessionId?.() ?? session.getSessionId?.() ?? undefined,
 		agentRegistry: session.agentRegistry,
 		localProtocolOptions: contextLocalProtocolOptions(session),

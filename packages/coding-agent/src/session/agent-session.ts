@@ -11656,7 +11656,9 @@ export class AgentSession implements SettingsScope {
 		}
 
 		const selectedText = this.#extractUserMessageText(selectedEntry.message.content);
-		const selectedImages = this.#extractUserMessageImages(selectedEntry.message.content);
+		const selectedImages = this.#extractUserMessageImages(
+			this.sessionManager.withInlineImages(selectedEntry.message.content),
+		);
 		const completed = await this.#branchIntoNewSession("branch", entryId, selectedEntry.parentId);
 		return { selectedText, selectedImages, cancelled: !completed };
 	}
@@ -12031,11 +12033,11 @@ export class AgentSession implements SettingsScope {
 			targetEntry.parentId !== null
 				? targetEntry.parentId
 				: targetId;
-		const { entries: entriesToSummarize, commonAncestorId } = collectEntriesForBranchSummary(
-			this.sessionManager,
-			oldLeafId,
-			summaryAnchorId,
-		);
+		const collected = collectEntriesForBranchSummary(this.sessionManager, oldLeafId, summaryAnchorId);
+		const { commonAncestorId } = collected;
+		// Hooks and the summarizer read these entries' images; entries a compaction
+		// archived hold them as blob refs.
+		const entriesToSummarize = this.sessionManager.withInlineImages(collected.entries);
 
 		// Prepare event data
 		const preparation: TreePreparation = {
@@ -12132,7 +12134,7 @@ export class AgentSession implements SettingsScope {
 			const request = transcriptEntryMessage(targetEntry);
 			const targetImages =
 				request && (request.role === "user" || request.role === "custom")
-					? this.#extractUserMessageImages(request.content)
+					? this.#extractUserMessageImages(this.sessionManager.withInlineImages(request.content))
 					: [];
 			if (targetImages.length > 0) editorImages = targetImages;
 		} else if (targetEntry.type === "custom_message" && targetEntry.customType !== SKILL_PROMPT_MESSAGE_TYPE) {

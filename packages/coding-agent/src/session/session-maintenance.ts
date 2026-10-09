@@ -3815,7 +3815,7 @@ export class SessionMaintenance {
 			providerReplayThroughEntryId: args.providerReplayThroughEntryId,
 		};
 		const rebuilt = buildSessionContext([...branch, pending]);
-		const rebuiltTokens = this.#countProjectedMessages(rebuilt.messages);
+		const rebuiltTokens = this.#countProjectedMessages(this.#host.sessionManager.withInlineImages(rebuilt.messages));
 		const providerPayload = getOpenAiRemoteCompactionPayload(pending);
 		if (!providerPayload) {
 			return nonMessageTokens + rebuiltTokens;

@@ -2102,15 +2102,15 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 
 			case "get_entries": {
 				try {
-					return success(
-						id,
-						"get_entries",
-						selectRpcEntries(
-							session.sessionManager.getEntries(),
-							session.sessionManager.getLeafId(),
-							command.since,
-						),
+					const selected = selectRpcEntries(
+						session.sessionManager.getEntries(),
+						session.sessionManager.getLeafId(),
+						command.since,
 					);
+					return success(id, "get_entries", {
+						...selected,
+						entries: session.sessionManager.withInlineImages(selected.entries),
+					});
 				} catch (err) {
 					return error(id, "get_entries", err instanceof Error ? err.message : String(err), "unknown_since");
 				}
@@ -2118,7 +2118,7 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 
 			case "get_tree": {
 				return success(id, "get_tree", {
-					tree: session.sessionManager.getTree(),
+					tree: session.sessionManager.getTree({ inlineImages: true }),
 					leafId: session.sessionManager.getLeafId(),
 				});
 			}

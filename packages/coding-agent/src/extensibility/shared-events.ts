@@ -78,7 +78,11 @@ export interface SessionBeforeCompactEvent {
 	type: "session_before_compact";
 	/** Compaction preparation with messages to summarize, file ops, previous summary, etc. */
 	preparation: CompactionPreparation;
-	/** Branch entries (root to current leaf). Use to inspect custom state or previous compactions. */
+	/**
+	 * Branch entries (root to current leaf). Use to inspect custom state or previous compactions.
+	 * Images of entries an earlier compaction archived are `blob:sha256:<hash>` refs; pass the
+	 * entries through `sessionManager.withInlineImages()` to read the bytes.
+	 */
 	branchEntries: SessionEntry[];
 	/** Optional user-provided instructions for the summary */
 	customInstructions?: string;

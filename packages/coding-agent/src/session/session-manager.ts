@@ -30,6 +30,7 @@ import type { StructuredSubagentSchemaMode } from "@oh-my-pi/pi-tui/tools/task";
 import { moveFileAcrossDevices } from "../utils/atomic-file";
 import { ArtifactManager } from "./artifacts";
 import { type BlobPutOptions, type BlobPutResult, BlobStore, lazyImageDataSync } from "./blob-store";
+import { archivedEntries, archivedPrefixLength } from "./compacted-history";
 import type { CompactionMethod } from "./compaction-methods";
 import {
 	type BashExecutionMessage,
@@ -80,6 +81,7 @@ import {
 	type SessionInfo,
 } from "./session-listing";
 import {
+	inlineBlobRefsSync,
 	loadEntriesFromFile,
 	loadSessionFile,
 	normalizeAssistantUsage,
@@ -87,6 +89,7 @@ import {
 	readSessionHeaderId,
 	resolveBlobRefsInEntries,
 	resolveBlobRefsInEntriesSync,
+	resolveLoadedBlobRefs,
 	type SessionLoadResult,
 	visitEntriesFromFile,
 } from "./session-loader";
@@ -99,7 +102,11 @@ import {
 	worktreeSessionDirs,
 	writeTerminalBreadcrumb,
 } from "./session-paths";
-import { forgetExternalizedImages, prepareEntryForPersistence } from "./session-persistence";
+import {
+	externalizePersistedImages,
+	forgetExternalizedImages,
+	prepareEntryForPersistence,
+} from "./session-persistence";
 import { loadPinnedSessionIds, sortPinnedFirst } from "./session-pins";
 import {
 	FileSessionStorage,
@@ -698,6 +705,7 @@ export type ReadonlySessionManager = Pick<
 	| "getHeader"
 	| "getEntries"
 	| "getTree"
+	| "withInlineImages"
 	| "getUsageStatistics"
 	| "putBlob"
 	| "putBlobSync"
@@ -939,6 +947,17 @@ export class SessionManager {
 	#sessionFileRelocating: { source: string; dest: string; copying?: boolean } | null = null;
 	/** Atomic entry batch currently staged for a full-file commit. */
 	#atomicEntryBatch: AtomicEntryBatch | undefined;
+
+	/**
+	 * Whether entries may hold images as blob refs: a summarizing compaction
+	 * archived them, or the entries came from a journal that did. Lets sessions
+	 * that never compacted skip the leaf-move bookkeeping.
+	 */
+	#mayHoldBlobRefs = false;
+	/** Entries a leaf move restored images in; they return to refs once the active path stops reading them. */
+	readonly #reinlinedImages = new Set<SessionEntry>();
+	/** A compaction archived images that could not be swapped yet (journal not current); retried on the next append. */
+	#archivedImagesPending = false;
 
 	#artifactManager: ArtifactManager | null = null;
 	#artifactManagerSessionFile: string | null = null;
@@ -1971,6 +1990,9 @@ export class SessionManager {
 
 		this.#entries = [];
 		this.#index.clear();
+		this.#reinlinedImages.clear();
+		this.#mayHoldBlobRefs = false;
+		this.#archivedImagesPending = false;
 		this.#fileIsCurrent = false;
 		this.#rewriteRequired = false;
 		this.#forceFileCreation = false;
@@ -2000,6 +2022,8 @@ export class SessionManager {
 	#applyEntries(header: SessionHeader, entries: SessionEntry[]): void {
 		this.#header = header;
 		this.#entries = entries;
+		this.#reinlinedImages.clear();
+		this.#archivedImagesPending = false;
 		this.#sessionId = header.id;
 		this.#sessionName = header.title;
 		this.#titleSource = header.titleSource;
@@ -2024,6 +2048,8 @@ export class SessionManager {
 			batch.externalLeafChanged = true;
 			batch.externalLeafId = id;
 		}
+		this.#inlineActiveImages();
+		this.#externalizeReinlinedImages();
 	}
 
 	#recordEntry(entry: SessionEntry): void {
@@ -2034,6 +2060,8 @@ export class SessionManager {
 		if (entry.type === "message" && entry.message.role === "assistant" && normalizeAssistantUsage(entry.message)) {
 			logger.warn("Assistant message recorded with incomplete usage", { id: entry.id });
 		}
+		// Only an entry extending the active path can change what that path archives.
+		const extendsActivePath = entry.parentId === this.#index.leafId();
 		this.#entries.push(entry);
 		this.#index.insert(entry);
 		const batch = this.#atomicEntryBatch;
@@ -2043,8 +2071,90 @@ export class SessionManager {
 			batch.externalLeafId = entry.id;
 		}
 		this.#appendToSessionFile(entry);
+		if (extendsActivePath && (entry.type === "compaction" || this.#archivedImagesPending)) {
+			this.#externalizeArchivedImages();
+		}
 		if (batch) batch.deferredNotifications.push(entry);
 		else this.#notifyEntryAppended(entry);
+	}
+
+	/**
+	 * Whether images may be swapped for blob refs now. The journal must already
+	 * hold every entry, so each ref in memory is also one a session file keeps
+	 * `omp gc` from collecting. In-memory sessions have no blob store to point at.
+	 */
+	#canExternalizeImages(): boolean {
+		return (
+			this.#persist &&
+			!this.#released &&
+			this.#fileIsCurrent &&
+			!this.#diskFailure &&
+			this.#atomicEntryBatch === undefined
+		);
+	}
+
+	/** Replace `entry`'s image payloads with their blob refs, in place, leaving every other field as it was. */
+	#externalizeEntryImages(entry: SessionEntry): void {
+		try {
+			const externalized = externalizePersistedImages(entry, this.#blobs);
+			if (externalized === entry) return;
+			Object.assign(entry, externalized);
+			this.#mayHoldBlobRefs = true;
+		} catch (error) {
+			// The images stay in memory; a later compaction or leaf move retries.
+			logger.warn("Could not externalize archived session images", { id: entry.id, error: toError(error).message });
+		}
+	}
+
+	/**
+	 * A compaction archives the entries before its kept range: nothing on the
+	 * active path reads their images again, so keep them as blob refs instead of
+	 * base64 in memory. Provider-native compactions archive nothing. A compaction
+	 * may also keep entries an earlier one archived (an extension chooses its own
+	 * `firstKeptEntryId`), so the kept range is restored first.
+	 */
+	#externalizeArchivedImages(): void {
+		this.#inlineActiveImages();
+		this.#archivedImagesPending = this.#persist && !this.#canExternalizeImages();
+		if (!this.#canExternalizeImages()) return;
+		for (const entry of archivedEntries(this.#index.branchView())) {
+			this.#reinlinedImages.delete(entry);
+			this.#externalizeEntryImages(entry);
+		}
+	}
+
+	/**
+	 * A leaf move can bring archived entries back into the kept range, or drop
+	 * the compaction that archived them. Restore their images so everything that
+	 * reads `getBranch()` entries (compaction, pruning, shake, exports) sees bytes.
+	 */
+	#inlineActiveImages(): void {
+		if (!this.#mayHoldBlobRefs) return;
+		const path = this.#index.branchView();
+		for (let i = archivedPrefixLength(path); i < path.length; i++) {
+			const entry = path[i];
+			try {
+				const inlined = inlineBlobRefsSync(entry, this.#blobs);
+				if (inlined === entry) continue;
+				Object.assign(entry, inlined);
+				this.#reinlinedImages.add(entry);
+			} catch (error) {
+				// A leaf move must not fail on an unreadable blob; the entry keeps its refs.
+				logger.warn("Could not restore archived session images", { id: entry.id, error: toError(error).message });
+			}
+		}
+	}
+
+	/** Return images a leaf move restored to blob refs once the active path no longer reads them. */
+	#externalizeReinlinedImages(): void {
+		if (this.#reinlinedImages.size === 0 || !this.#canExternalizeImages()) return;
+		const path = this.#index.branchView();
+		const read = new Set<SessionEntry>(path.slice(archivedPrefixLength(path)));
+		for (const entry of this.#reinlinedImages) {
+			if (read.has(entry)) continue;
+			this.#reinlinedImages.delete(entry);
+			this.#externalizeEntryImages(entry);
+		}
 	}
 
 	#rollbackAtomicEntryBatch(batch: AtomicEntryBatch): void {
@@ -2203,6 +2313,8 @@ export class SessionManager {
 		this.#draftOnlySessionCleanupArmed = snapshot.draftOnlySessionCleanupArmed;
 		this.#fallbackRuntimeOnly = snapshot.fallbackRuntimeOnly;
 		this.#applyEntries(snapshot.header, [...snapshot.entries]);
+		this.#mayHoldBlobRefs = true;
+		this.#inlineActiveImages();
 		this.#additionalDirectories = snapshot.header.additionalDirectories ?? [];
 		this.#sessionName = snapshot.sessionName;
 
@@ -2306,7 +2418,7 @@ export class SessionManager {
 		}
 
 		const migrated = migrateToCurrentVersion(fileEntries);
-		await resolveBlobRefsInEntries(fileEntries, this.#blobs);
+		this.#mayHoldBlobRefs = (await resolveLoadedBlobRefs(fileEntries, this.#blobs)) > 0;
 		// loadEntriesFromFile guarantees entries[0] is a valid session header.
 		const header = fileEntries[0] as SessionHeader;
 
@@ -2653,6 +2765,7 @@ export class SessionManager {
 		manager.#header.additionalDirectories =
 			manager.#additionalDirectories.length > 0 ? [...manager.#additionalDirectories] : undefined;
 		manager.#entries = structuredClone(this.#entries);
+		manager.#mayHoldBlobRefs = this.#mayHoldBlobRefs;
 		manager.#index.rebuild(manager.#entries);
 		manager.#forceFileCreation = true;
 		await manager.#rewriteAtomically();
@@ -2924,6 +3037,7 @@ export class SessionManager {
 		this.seal();
 		this.#entries = [];
 		this.#index.clear();
+		this.#reinlinedImages.clear();
 		this.#inMemoryArtifacts = null;
 		this.#closeWriterEventually();
 		this.#entriesReleased = true;
@@ -3316,13 +3430,14 @@ export class SessionManager {
 	}
 
 	/**
-	 * The live header and entries, for collab replication. Nothing is copied:
-	 * the host mutates entries in place on rewrite paths, so callers must not
-	 * mutate what this returns and must serialize it synchronously, before any
-	 * such rewrite can run.
+	 * The live header and entries, for collab replication. Entries are not
+	 * copied, except the ones holding archived images: those are copies with the
+	 * images restored, for the guests. The host mutates entries in place on
+	 * rewrite paths, so callers must not mutate what this returns and must
+	 * serialize it synchronously, before any such rewrite can run.
 	 */
 	snapshotForReplication(): { header: SessionHeader; entries: readonly SessionEntry[] } {
-		return { header: this.#header, entries: this.#entries };
+		return { header: this.#header, entries: this.withInlineImages(this.#entries) };
 	}
 
 	/**
@@ -3683,12 +3798,22 @@ export class SessionManager {
 	/**
 	 * Build the session context (LLM messages), or — with `{ transcript: true }` —
 	 * the full-history display transcript, from the current leaf path.
+	 *
+	 * Images of archived entries are restored in the returned messages. A caller
+	 * that only inspects roles and tool calls can pass `inlineImages: false` to
+	 * skip reading those blobs; the messages then carry `blob:sha256:` refs there.
 	 */
-	buildSessionContext(options?: BuildSessionContextOptions): SessionContext {
-		return buildSessionContext(this.#entries, this.#index.leafId(), this.#index.entriesById(), {
+	buildSessionContext(options?: BuildSessionContextOptions & { inlineImages?: boolean }): SessionContext {
+		const { inlineImages = true, ...contextOptions } = options ?? {};
+		const context = buildSessionContext(this.#entries, this.#index.leafId(), this.#index.entriesById(), {
 			resolveFrameData: data => lazyImageDataSync(this.#blobs, data),
-			...options,
+			...contextOptions,
 		});
+		// Archived images normally stay out of the context; a full-history
+		// transcript and a context-rollover request are the readers of them.
+		if (!inlineImages) return context;
+		const messages = this.withInlineImages(context.messages);
+		return messages === context.messages ? context : { ...context, messages };
 	}
 
 	/** Strip stale OpenAI Responses replay metadata from loaded assistant entries. */
@@ -3716,11 +3841,23 @@ export class SessionManager {
 	}
 
 	/**
+	 * `value` with the image bytes behind its blob refs restored, as a copy that
+	 * shares everything unchanged (`value` itself when nothing needed restoring).
+	 * Images of entries a compaction archived are blob refs in `getEntries()`,
+	 * `getTree()` and `getBranch()`; pass whatever leaves the session through this
+	 * first when it needs the bytes (export, display, replication).
+	 */
+	withInlineImages<T>(value: T): T {
+		return this.#mayHoldBlobRefs ? inlineBlobRefsSync(value, this.#blobs) : value;
+	}
+
+	/**
 	 * The session as a tree. A well-formed session has exactly one root; orphaned
 	 * entries (broken parent chain) are returned as roots too.
 	 */
-	getTree(): SessionTreeNode[] {
-		return this.#index.tree(this.#entries);
+	getTree(options?: { inlineImages?: boolean }): SessionTreeNode[] {
+		const entries = options?.inlineImages ? this.#entries.map(entry => this.withInlineImages(entry)) : this.#entries;
+		return this.#index.tree(entries);
 	}
 
 	/**
@@ -3759,6 +3896,7 @@ export class SessionManager {
 				leafId = child.id;
 			}
 			this.#entries = this.#entries.filter(candidate => candidate.id !== entryId);
+			this.#reinlinedImages.delete(entry);
 			this.#index.rebuild(this.#entries);
 		}
 		this.branchWithSummary(leafId, "", {
@@ -3846,6 +3984,8 @@ export class SessionManager {
 		this.#titleUpdatedAt = timestamp;
 		this.#hasTitleSlot = true;
 		this.#index.rebuild(this.#entries);
+		this.#reinlinedImages.clear();
+		this.#inlineActiveImages();
 		this.#artifactManager = null;
 		this.#artifactManagerSessionFile = null;
 		this.#forceFileCreation = this.#persist;
@@ -3949,7 +4089,7 @@ export class SessionManager {
 			throw err;
 		}
 		migrateToCurrentVersion(sourceEntries);
-		await resolveBlobRefsInEntries(sourceEntries, manager.#blobs);
+		const archivedImageEntries = await resolveLoadedBlobRefs(sourceEntries, manager.#blobs);
 
 		const sourceHeader = sourceEntries.find(entry => entry.type === "session") as SessionHeader | undefined;
 		const history = sourceEntries.filter(entry => entry.type !== "session") as SessionEntry[];
@@ -3973,6 +4113,7 @@ export class SessionManager {
 		manager.#hasTitleSlot = true;
 		manager.#entries = history;
 		manager.#index.rebuild(history);
+		manager.#mayHoldBlobRefs = archivedImageEntries > 0;
 		manager.sanitizeLoadedOpenAIResponsesReplayMetadata();
 		if (options?.repairInterruptedTail) {
 			SessionManager.#repairForkedInterruptedTail(history, manager.#index.pathTo());

@@ -187,7 +187,7 @@ function sessionHeaderForExport(header: SessionHeader | null): SessionHeader | n
 export function buildSessionData(sm: SessionManager, state?: AgentState): SessionData {
 	return {
 		header: sessionHeaderForExport(sm.getHeader()),
-		entries: sm.getEntries(),
+		entries: sm.withInlineImages(sm.getEntries()),
 		leafId: sm.getLeafId(),
 		systemPrompt: state?.systemPrompt.join("\n\n"),
 		tools: state?.tools?.map(t => ({ name: t.name, description: t.description })),
@@ -260,7 +260,7 @@ export async function exportFromFile(inputPath: string, options?: ExportOptions 
 
 	const sessionData: SessionData = {
 		header: sessionHeaderForExport(sm.getHeader()),
-		entries: sm.getEntries(),
+		entries: sm.withInlineImages(sm.getEntries()),
 		leafId: sm.getLeafId(),
 	};
 	if (opts.includeSubSessions !== false) {

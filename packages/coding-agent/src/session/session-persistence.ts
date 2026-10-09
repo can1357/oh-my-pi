@@ -524,3 +524,51 @@ export function prepareEntryForPersistence(entry: FileEntry, blobStore: BlobStor
 	const projected = stripSpilledMcpStructuredContent(stripReplayedReasoningSignatures(entry));
 	return truncateForPersistence(projected, blobStore) as FileEntry;
 }
+
+/**
+ * Copy of `live` that takes over only the blob refs `persisted` holds where
+ * `live` still carries the image bytes. `persisted` is a projection of `live`
+ * (see {@link prepareEntryForPersistence}), so everything else the projection
+ * changed (truncated text, dropped duplicates) is deliberately not adopted.
+ * Subtrees the projection shared with `live` are skipped by identity, and the
+ * result shares every subtree that adopted nothing.
+ */
+function adoptBlobRefs(live: unknown, persisted: unknown): unknown {
+	if (live === persisted) return live;
+	if (typeof live === "string") {
+		return typeof persisted === "string" && isBlobRef(persisted) && !isBlobRef(live) ? persisted : live;
+	}
+	if (Array.isArray(live)) {
+		if (!Array.isArray(persisted) || persisted.length !== live.length) return live;
+		let result: unknown[] | undefined;
+		for (let i = 0; i < live.length; i++) {
+			const next = adoptBlobRefs(live[i], persisted[i]);
+			if (next === live[i]) continue;
+			result ??= live.slice();
+			result[i] = next;
+		}
+		return result ?? live;
+	}
+	if (!isRecord(live) || !isRecord(persisted)) return live;
+	let result: Record<string, unknown> | undefined;
+	for (const key of Object.keys(live)) {
+		const next = adoptBlobRefs(live[key], persisted[key]);
+		if (next === live[key]) continue;
+		result ??= { ...live };
+		result[key] = next;
+	}
+	return result ?? live;
+}
+
+/**
+ * `entry` with its image payloads replaced by the blob refs persistence writes
+ * for them, and nothing else changed. Returns `entry` itself when it holds no
+ * externalizable image. Writes the image blobs, like persisting the entry does.
+ *
+ * Unlike {@link prepareEntryForPersistence}, the result stays a live entry:
+ * text persistence truncates, MCP structured content and replayed reasoning
+ * signatures are kept, so a session loses nothing it did not already hold.
+ */
+export function externalizePersistedImages(entry: FileEntry, blobStore: BlobStore): FileEntry {
+	return adoptBlobRefs(entry, prepareEntryForPersistence(entry, blobStore)) as FileEntry;
+}

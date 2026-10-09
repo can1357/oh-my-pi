@@ -117,6 +117,7 @@ describe("buildShareSnapshot", () => {
 		const sm = {
 			getHeader: () => sessionData([], "x").header,
 			getEntries: () => entries,
+			withInlineImages: <T>(value: T) => value,
 			getLeafId: () => "e1",
 		} as unknown as SessionManager;
 		const obfuscator = new SecretObfuscator([{ type: "plain", content: "hunter2-XYZZY" }]);
@@ -149,6 +150,7 @@ describe("buildShareSnapshot", () => {
 		const sm = {
 			getHeader: () => sessionData([], "x").header,
 			getEntries: () => entries,
+			withInlineImages: <T>(value: T) => value,
 			getLeafId: () => "si",
 		} as unknown as SessionManager;
 		const obfuscator = new SecretObfuscator([{ type: "plain", content: secret }]);
@@ -194,6 +196,7 @@ describe("buildShareSnapshot", () => {
 		const sm = {
 			getHeader: () => header,
 			getEntries: () => entries,
+			withInlineImages: <T>(value: T) => value,
 			getLeafId: () => "e1",
 		} as unknown as SessionManager;
 		const obfuscator = new SecretObfuscator([{ type: "plain", content: secret }]);
@@ -292,6 +295,7 @@ describe("buildShareSnapshot", () => {
 		const sm = {
 			getHeader: () => sessionData([], "x").header,
 			getEntries: () => entries,
+			withInlineImages: <T>(value: T) => value,
 			getLeafId: () => "b1",
 		} as unknown as SessionManager;
 		const obfuscator = new SecretObfuscator([{ type: "plain", content: secret }]);
@@ -327,6 +331,7 @@ describe("buildShareSnapshot", () => {
 		const sm = {
 			getHeader: () => sessionData([], "x").header,
 			getEntries: () => entries,
+			withInlineImages: <T>(value: T) => value,
 			getLeafId: () => "title-1",
 		} as unknown as SessionManager;
 		const snapshot = buildShareSnapshot(sm, {
@@ -362,6 +367,7 @@ describe("buildShareSnapshot", () => {
 				title: `${plainTitle} ${plainPreviousTitle} ${plainTrigger}`,
 			}),
 			getEntries: () => entries,
+			withInlineImages: <T>(value: T) => value,
 			getLeafId: () => "title-1",
 		} as unknown as SessionManager;
 		const obfuscator = new SecretObfuscator([
@@ -418,6 +424,7 @@ describe("buildShareSnapshot", () => {
 		const sm = {
 			getHeader: () => header,
 			getEntries: () => entries,
+			withInlineImages: <T>(value: T) => value,
 			getLeafId: () => "b1",
 		} as unknown as SessionManager;
 		const obfuscator = new SecretObfuscator([
@@ -478,6 +485,7 @@ describe("buildShareSnapshot", () => {
 		const sm = {
 			getHeader: () => sessionData([], "x").header,
 			getEntries: () => entries,
+			withInlineImages: <T>(value: T) => value,
 			getLeafId: () => "a1",
 		} as unknown as SessionManager;
 		const obfuscator = new SecretObfuscator([
@@ -519,6 +527,7 @@ describe("buildShareSnapshot", () => {
 		const sm = {
 			getHeader: () => sessionData([], "x").header,
 			getEntries: () => entries,
+			withInlineImages: <T>(value: T) => value,
 			getLeafId: () => "a1",
 		} as unknown as SessionManager;
 		const obfuscator = new SecretObfuscator([
@@ -556,6 +565,7 @@ describe("buildShareSnapshot", () => {
 		const sm = {
 			getHeader: () => ({ ...sessionData([], "x").header, title: `remember ${plainSecret}` }),
 			getEntries: () => entries,
+			withInlineImages: <T>(value: T) => value,
 			getLeafId: () => "a1",
 		} as unknown as SessionManager;
 		const obfuscator = new SecretObfuscator([
@@ -586,6 +596,7 @@ describe("shareSession", () => {
 		const sm = {
 			getHeader: () => sessionData([], "x").header,
 			getEntries: () => entries,
+			withInlineImages: <T>(value: T) => value,
 			getLeafId: () => "e2",
 		} as unknown as SessionManager;
 
