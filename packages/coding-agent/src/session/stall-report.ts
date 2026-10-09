@@ -678,7 +678,7 @@ export class StallReportCollector {
 		const listed = candidates.slice(0, MAX_ROWS);
 		const samples: AgentSample[] = await Promise.all(
 			listed.map(async ({ ref, status }) => {
-				let history: History | undefined;
+				let history: ReportHistory | undefined;
 				let error: string | undefined;
 				try {
 					history = await this.#history(ref);
