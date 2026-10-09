@@ -233,23 +233,14 @@ function normalizeStoredGeminiSignature(value: unknown): StoredGeminiSignature |
 const DEMOTED_THINK_OPEN = "<think>\n";
 const DEMOTED_THINK_CLOSE = "\n</think>";
 
-/**
- * Pull leading dialect-demoted `<think>` blocks out of assistant `content`.
- * `transformMessages` wraps foreign reasoning with `renderDemotedThinking`,
- * and the flattener inserts one newline after each block that has a successor.
- */
-function hoistDemotedThinking(content: string): { reasoning: string; content: string } | undefined {
-	let rest = content;
-	const parts: string[] = [];
-	while (rest.startsWith(DEMOTED_THINK_OPEN)) {
-		const end = rest.indexOf(DEMOTED_THINK_CLOSE, DEMOTED_THINK_OPEN.length);
-		if (end < 0) return undefined;
-		parts.push(rest.slice(DEMOTED_THINK_OPEN.length, end));
-		rest = rest.slice(end + DEMOTED_THINK_CLOSE.length);
-		if (rest.startsWith("\n")) rest = rest.slice(1);
-	}
-	if (parts.length === 0 || parts.every(part => part.trim() === "")) return undefined;
-	return { reasoning: parts.join("\n"), content: rest };
+/** Inner text of a block `transformMessages` marked with `kDemotedThinking`. */
+function unwrapDemotedThinking(text: string): string {
+	const wrapped =
+		text.startsWith(DEMOTED_THINK_OPEN) &&
+		text.endsWith(DEMOTED_THINK_CLOSE) &&
+		text.length > DEMOTED_THINK_OPEN.length + DEMOTED_THINK_CLOSE.length;
+	if (!wrapped) return text;
+	return text.slice(DEMOTED_THINK_OPEN.length, text.length - DEMOTED_THINK_CLOSE.length);
 }
 
 function mergeStoredGeminiSignature(existing: string | undefined, update: StoredGeminiSignature): string {
@@ -2462,6 +2453,10 @@ export function convertMessages(
 			const textBlocks = msg.content.filter(b => b.type === "text") as TextContent[];
 			// Filter out empty text blocks to avoid API validation errors
 			const nonEmptyTextBlocks = textBlocks.filter(b => b.text && b.text.trim().length > 0);
+			const replayExactReasoning =
+				compat.requiresReasoningContentForToolCalls && !compat.allowsSyntheticReasoningContentForToolCalls;
+			const demotedReasoningParts: string[] = [];
+			let contentWithoutDemoted: string | undefined;
 			if (nonEmptyTextBlocks.length > 0) {
 				// Always send assistant content as a plain string. Some OpenAI-compatible
 				// backends mirror array-of-text-block payloads back to the model literally,
@@ -2480,6 +2475,22 @@ export function convertMessages(
 						return isDemotedThinking(b) && i < nonEmptyTextBlocks.length - 1 ? `${text}\n` : text;
 					})
 					.join("");
+				if (replayExactReasoning) {
+					const visible: string[] = [];
+					let breakBeforeNext = false;
+					for (const block of nonEmptyTextBlocks) {
+						const text = block.text.toWellFormed();
+						if (isDemotedThinking(block)) {
+							const inner = unwrapDemotedThinking(text);
+							if (inner.trim().length > 0) demotedReasoningParts.push(inner);
+							breakBeforeNext = visible.length > 0;
+							continue;
+						}
+						visible.push(breakBeforeNext ? `\n${text}` : text);
+						breakBeforeNext = false;
+					}
+					contentWithoutDemoted = visible.join("");
+				}
 			}
 
 			// Handle thinking blocks
@@ -2697,25 +2708,21 @@ export function convertMessages(
 					assistantMsg.reasoning_details = reasoningDetails;
 				}
 			}
-			// Cross-API history demotes unsigned thinking into the target dialect's
-			// `<think>` wrapper before this encoder runs, then the exact-replay
-			// fallback below fills `reasoning_content` with "". DeepSeek thinking
-			// mode rejects that empty field (`reasoning_content must be passed
-			// back`) and the gateway surfaces it as a generic body 400. Lift the
-			// demoted chain back into the structured field and out of `content`.
+			// Cross-API history marks unsigned thinking with `kDemotedThinking` before
+			// this encoder flattens it into `content`, then the exact-replay fallback
+			// fills `reasoning_content` with "". DeepSeek thinking mode rejects that
+			// empty field. Move every marked block — not only a leading run, and not
+			// unmarked text that happens to look like `<think>` — into the structured
+			// field when that field is still empty.
 			if (
-				compat.requiresReasoningContentForToolCalls &&
-				!compat.allowsSyntheticReasoningContentForToolCalls &&
-				typeof assistantMsg.content === "string" &&
+				replayExactReasoning &&
+				demotedReasoningParts.length > 0 &&
 				(assistantMsg.reasoning_content === undefined || assistantMsg.reasoning_content === "")
 			) {
-				const hoisted = hoistDemotedThinking(assistantMsg.content);
-				if (hoisted) {
-					const reasoningField = compat.reasoningContentField ?? "reasoning_content";
-					assistantMsg[reasoningField] = hoisted.reasoning;
-					assistantMsg.content = hoisted.content.length > 0 ? hoisted.content : null;
-					hasReasoningField = true;
-				}
+				const reasoningField = compat.reasoningContentField ?? "reasoning_content";
+				assistantMsg[reasoningField] = demotedReasoningParts.join("\n");
+				assistantMsg.content = contentWithoutDemoted && contentWithoutDemoted.length > 0 ? contentWithoutDemoted : null;
+				hasReasoningField = true;
 			}
 			// Some OpenAI-compatible backends concatenate assistant content as a
 			// string even for tool-call replay. OpenAI accepts an empty string here;
