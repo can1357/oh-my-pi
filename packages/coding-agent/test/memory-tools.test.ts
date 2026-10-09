@@ -371,6 +371,22 @@ describe("retain.execute", () => {
 		]);
 	});
 
+	it("retains items queued through the two-argument enqueue as project-scoped", async () => {
+		const settings = Settings.isolated({ "memory.backend": "hindsight" });
+		const client = new HindsightApi({ baseUrl: "http://localhost:8888" });
+		const retainBatchSpy = vi.spyOn(HindsightApi.prototype, "retainBatch").mockResolvedValue({} as never);
+		vi.spyOn(HindsightApi.prototype, "createBank").mockResolvedValue({} as never);
+		registerState(client, settings, { retainTags: ["project:pi"], config: { scoping: "per-project-tagged" } });
+
+		registeredState!.retainQueue.enqueue("legacy caller fact", "legacy context");
+		await registeredState?.flushRetainQueue();
+
+		expect(retainBatchSpy).toHaveBeenCalledTimes(1);
+		expect(retainBatchSpy.mock.calls[0][1].map(item => ({ content: item.content, tags: item.tags }))).toEqual([
+			{ content: "legacy caller fact", tags: ["project:pi"] },
+		]);
+	});
+
 	it("rejects a batch with a global item under per-project scoping before queueing anything", async () => {
 		const settings = Settings.isolated({ "memory.backend": "hindsight" });
 		const client = new HindsightApi({ baseUrl: "http://localhost:8888" });
