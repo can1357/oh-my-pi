@@ -1633,6 +1633,9 @@ export class AgentSession implements SettingsScope {
 			settings: this.settings,
 			model: () => this.model,
 			configuredThinkingLevel: () => this.configuredThinkingLevel(),
+			promptGeneration: () => this.#promptGeneration,
+			applyAutoThinkingLevel: (promptText, generation, solutionSpace) =>
+				this.#models.applyAutoThinkingLevel(promptText, generation, solutionSpace),
 			restoreThinkingLevel: level => this.#models.restoreThinkingLevel(level),
 			resolveDefaultPrewalk: () => this.#resolveDefaultPrewalk(),
 			emitNotice: (level, message, source) => this.emitNotice(level, message, source),
@@ -7857,6 +7860,7 @@ export class AgentSession implements SettingsScope {
 			// non-auto sessions are skipped. Never blocks the turn — failures fall
 			// back to a concrete level inside the helper.
 			const isUserTurn = message.role === "user" || (message.role === "custom" && isUserInvokedSkillPrompt(message));
+			if (isUserTurn) this.#prewalk.recordUserTurn(expandedText, generation, options?.solutionSpace);
 			if (this.isAutoThinking && isUserTurn) {
 				await this.#models.applyAutoThinkingLevel(expandedText, generation, options?.solutionSpace);
 				if (this.#promptGeneration !== generation) {

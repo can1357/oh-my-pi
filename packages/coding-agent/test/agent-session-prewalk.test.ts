@@ -5,6 +5,7 @@ import { Agent, type AgentTool, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import { type Api, Effort, type Model } from "@oh-my-pi/pi-ai";
 import { createMockModel, type MockResponse } from "@oh-my-pi/pi-ai/providers/mock";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
+import * as autoThinkingClassifier from "@oh-my-pi/pi-coding-agent/auto-thinking/classifier";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
@@ -125,6 +126,7 @@ describe("AgentSession prewalk", () => {
 			sessionManager?: SessionManager;
 			target?: Model;
 			startupTarget?: Model;
+			targetThinkingLevel?: Effort | typeof AUTO_THINKING;
 		} = {},
 	) {
 		const primary = modelOrThrow("claude-sonnet-4-5");
@@ -137,6 +139,7 @@ describe("AgentSession prewalk", () => {
 		settings.setModelRole("smol", `anthropic/missing-model,${target.provider}/${target.id}:low`);
 		const mock = createMockModel({ responses });
 		const requested: string[] = [];
+		const efforts: Array<ThinkingLevel | undefined> = [];
 		const nudges: string[][] = [];
 		let requestNudges: string[] = [];
 		const agent = new Agent({
@@ -156,6 +159,7 @@ describe("AgentSession prewalk", () => {
 			},
 			streamFn: (model, context, streamOptions) => {
 				requested.push(model.id);
+				efforts.push(agent.state.thinkingLevel);
 				nudges.push(requestNudges);
 				return mock.stream(model, context, streamOptions);
 			},
@@ -167,15 +171,111 @@ describe("AgentSession prewalk", () => {
 			modelRegistry,
 			toolRegistry,
 			thinkingLevel: Effort.High,
+			agentKind: options.agentKind,
 			prewalk:
 				options.armed === false
 					? undefined
-					: { target: options.startupTarget ?? target, thinkingLevel: Effort.Low },
-			agentKind: options.agentKind,
+					: { target: options.startupTarget ?? target, thinkingLevel: options.targetThinkingLevel ?? Effort.Low },
 		});
 		session = created;
-		return { session: created, primary, target, settings, requested, nudges };
+		return { session: created, primary, target, settings, requested, nudges, efforts };
 	}
+
+	it("classifies an auto prewalk target against the subagent solution space before continuing", async () => {
+		const classifier = vi.spyOn(autoThinkingClassifier, "classifyDifficulty").mockResolvedValue(Effort.Low);
+		const created = createLifecycleSession(
+			[toolCall("todo", "todo"), toolCall("write", "write"), { content: ["done"] }],
+			{ agentKind: "sub", targetThinkingLevel: AUTO_THINKING },
+		);
+
+		await created.session.prompt("Edit the scratch file", { solutionSpace: "A single-line change" });
+
+		expect(classifier).toHaveBeenCalledTimes(1);
+		expect(classifier.mock.calls[0]?.[0]).toEqual({
+			request: "Edit the scratch file",
+			solutionSpace: "A single-line change",
+		});
+		expect(classifier.mock.calls[0]?.[1].model.id).toBe(created.target.id);
+		expect(created.requested).toEqual([created.primary.id, created.primary.id, created.target.id]);
+		expect(created.session.configuredThinkingLevel()).toBe(AUTO_THINKING);
+		expect(created.session.autoResolvedThinkingLevel()).toBe(Effort.Low);
+		expect(created.efforts).toEqual([Effort.High, Effort.High, Effort.Low]);
+	});
+
+	it("reclassifies the auto target for its own model after an auto planning model", async () => {
+		const classifier = vi
+			.spyOn(autoThinkingClassifier, "classifyDifficulty")
+			.mockImplementation(async (_input, options) =>
+				options.model.id === "claude-sonnet-4-5" ? Effort.Medium : Effort.Low,
+			);
+		const created = createLifecycleSession(
+			[toolCall("todo", "todo"), toolCall("write", "write"), { content: ["done"] }],
+			{ targetThinkingLevel: AUTO_THINKING },
+		);
+		created.session.setThinkingLevel(AUTO_THINKING);
+
+		await created.session.prompt("Fix the parser");
+
+		expect(classifier.mock.calls.map(([, options]) => options.model.id)).toEqual([
+			created.primary.id,
+			created.target.id,
+		]);
+		expect(created.efforts).toEqual([Effort.Medium, Effort.Medium, Effort.Low]);
+	});
+
+	it("restores the planning model on /new after aborting target classification", async () => {
+		const started = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		vi.spyOn(autoThinkingClassifier, "classifyDifficulty").mockImplementation(async () => {
+			started.resolve();
+			await release.promise;
+			return Effort.Low;
+		});
+		const created = createLifecycleSession(
+			[toolCall("todo", "todo"), toolCall("write", "write"), { content: ["done"] }],
+			{ targetThinkingLevel: AUTO_THINKING },
+		);
+
+		const prompt = created.session.prompt("Edit the scratch file");
+		await started.promise;
+		expect(created.session.model?.id).toBe(created.target.id);
+		const abort = created.session.abort();
+		release.resolve();
+		await abort;
+		await prompt;
+
+		expect(created.session.getPrewalkState()).toBeUndefined();
+		expect(await created.session.newSession()).toBe(true);
+		expect(created.session.model?.id).toBe(created.primary.id);
+		expect(created.session.configuredThinkingLevel()).toBe(Effort.High);
+	});
+
+	it("discards target classification when another model is selected while it runs", async () => {
+		const started = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		vi.spyOn(autoThinkingClassifier, "classifyDifficulty").mockImplementation(async () => {
+			started.resolve();
+			await release.promise;
+			return Effort.Low;
+		});
+		const created = createLifecycleSession(
+			[toolCall("todo", "todo"), toolCall("write", "write"), { content: ["done"] }],
+			{ targetThinkingLevel: AUTO_THINKING },
+		);
+		const selected = modelOrThrow("claude-opus-4-6");
+
+		const prompt = created.session.prompt("Edit the scratch file");
+		await started.promise;
+		await created.session.setModel(selected);
+		const selectedLevel = created.session.thinkingLevel;
+		release.resolve();
+		await prompt;
+
+		expect(selectedLevel).not.toBe(Effort.Low);
+		expect(created.session.model?.id).toBe(selected.id);
+		expect(created.session.autoResolvedThinkingLevel()).toBeUndefined();
+		expect(created.efforts.at(-1)).toBe(selectedLevel);
+	});
 
 	it("/new restores the previous prewalk source and effort, then requires a fresh todo before handoff", async () => {
 		const created = createLifecycleSession([

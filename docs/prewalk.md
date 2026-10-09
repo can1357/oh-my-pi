@@ -53,6 +53,8 @@ Calls to other tools do not trigger the handoff. A read-only `xd://` device requ
 
 The switch is one-shot: after the handoff, prewalk disarms itself, removes the planning nudge, and steers the target with an implementation checklist. It changes the session's active model and optional thinking level without rewriting model-role assignments. A same-model handoff can still change thinking; when the model and effective thinking configuration already match, prewalk disarms without switching.
 
+If the target uses `:auto` thinking, OMP classifies the original user turn for the target model before it continues; for task subagents, a nonblank `solutionSpace` takes precedence over the prompt. The planning model's effort does not carry over to the target.
+
 ## Arm from an active session
 
 In a top-level session, changing `prewalk.enabled` live also takes effect:
