@@ -124,3 +124,17 @@ export function splitCardTitle(title: string): CardTitleParts | undefined {
 	if (!line || !isCardIcon(line[1]!)) return undefined;
 	return { icon: line[1]!, code: line[2]!, title: line[3]! };
 }
+
+/**
+ * `title` headed by the card of the session's `current` title, if it has one.
+ * Regenerating a title for the same session (replan refresh, argument-less
+ * `/rename`) goes through the title model, which names no card; keeping the
+ * old one holds a card terminal's index for the session stable. A card the
+ * new title carries anyway (custom `TITLE_SYSTEM.md`, a model ignoring the
+ * prompt) yields to the current one rather than nesting under it.
+ */
+export function keepTitleCard(current: string | undefined, title: string): string {
+	const card = current ? splitCardTitle(current) : undefined;
+	if (!card) return title;
+	return `${card.icon} ${card.code}: ${splitCardTitle(title)?.title ?? title}`;
+}

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { parseCardTitleReply, splitCardTitle } from "@oh-my-pi/pi-coding-agent/utils/title-card";
+import { keepTitleCard, parseCardTitleReply, splitCardTitle } from "@oh-my-pi/pi-coding-agent/utils/title-card";
 
 describe("parseCardTitleReply", () => {
 	const reply = '<title nf="nf-md-flask" emoji="🧪" code="FLAKY">Fix flaky park tests</title>';
@@ -90,5 +90,16 @@ describe("splitCardTitle", () => {
 		["a code longer than 6", "🧪 FLAKIEST: Fix flaky park tests"],
 	])("leaves %s whole", (_case, title) => {
 		expect(splitCardTitle(title)).toBeUndefined();
+	});
+});
+
+describe("keepTitleCard", () => {
+	it("replaces a card the new title carries with the current one instead of nesting it", () => {
+		expect(keepTitleCard("🧪 CACHE: Fix cache writes", "🔥 NEW: Repair cache")).toBe("🧪 CACHE: Repair cache");
+	});
+
+	it("leaves the new title alone when the current title has no card", () => {
+		expect(keepTitleCard("Fix cache writes", "🔥 NEW: Repair cache")).toBe("🔥 NEW: Repair cache");
+		expect(keepTitleCard(undefined, "Repair cache")).toBe("Repair cache");
 	});
 });

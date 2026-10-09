@@ -21,6 +21,7 @@ import {
 import { formatShakeSummary, type ShakeMode } from "../session/shake-types";
 import { discoverTitleSystemPromptFile, resolvePromptInput } from "../system-prompt";
 import { isLowSignalTitleInput } from "../tiny/text";
+import { keepTitleCard } from "../utils/title-card";
 import { resolveToCwd } from "../tools/path-utils";
 import { commandConsumed, errorMessage, usage } from "./helpers/parse";
 import { handleSshAcp } from "./helpers/ssh";
@@ -37,7 +38,10 @@ function formatFreshSessionResult(result: FreshSessionResult): string {
 	return `Fresh provider session started (${result.closedProviderSessions} ${stateLabel} pruned).`;
 }
 
-/** Null reports no usable title; undefined silently discards an invalidated request. */
+/**
+ * A fresh title for the current conversation, keeping the current title's card.
+ * Null reports no usable title; undefined silently discards an invalidated request.
+ */
 async function generateRenameTitle(session: AgentSession, signal?: AbortSignal): Promise<string | null | undefined> {
 	const { sessionManager } = session;
 	const context = buildReplanTitleContext(session.messages);
@@ -46,11 +50,9 @@ async function generateRenameTitle(session: AgentSession, signal?: AbortSignal):
 	const sessionId = sessionManager.getSessionId();
 	const titleSignal = session.titleGenerationSignal;
 	const title = await session.generateTitle(context, undefined, signal);
-	return !titleSignal.aborted &&
-		sessionManager.getSessionId() === sessionId &&
-		sessionManager.titleRevision === revision
-		? title
-		: undefined;
+	if (titleSignal.aborted || sessionManager.getSessionId() !== sessionId || sessionManager.titleRevision !== revision)
+		return undefined;
+	return title && keepTitleCard(sessionManager.getSessionName(), title);
 }
 
 export const shutdownHandlerTui = (
