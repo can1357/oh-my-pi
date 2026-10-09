@@ -882,6 +882,23 @@ export class SessionManager {
 	 * nothing (rvEW).
 	 */
 	#deferredPublishGen = 0;
+	/**
+	 * Path of the latest deferred publish while the backend has neither
+	 * confirmed nor rejected it. A synchronous rewrite of that path queues
+	 * nothing meanwhile: it could only carry the last confirmed size, which
+	 * the store's queue-time check rejects against this manager's own
+	 * queued body. The publish's confirmation re-issues the transcript
+	 * instead, carrying the size the backend confirmed; an atomic rewrite
+	 * waits for that confirmation before taking its size.
+	 */
+	#unconfirmedPublishPath: string | undefined;
+	/**
+	 * A deferred publish's confirmation arrived after {@link seal} and found
+	 * the transcript had outgrown the body it confirmed. The seal refuses the
+	 * re-issue that confirmation owes, so {@link close} publishes the
+	 * transcript once its drain settles.
+	 */
+	#closeOwesPublish = false;
 	/** Lazy gate crossed (ensureOnDisk / loaded file): every entry must persist from now on. */
 	#forceFileCreation = false;
 	/**
@@ -1480,23 +1497,28 @@ export class SessionManager {
 	 * holds and latched, so the next append retries the transcript instead of
 	 * reusing an `expectedSize` the backend never reached.
 	 *
-	 * `onConfirm` runs only once the backend confirms the queued publish. A
-	 * deferred rewrite must neither record the replacement nor mark the manager
-	 * current before then (hV-oB): an append racing the unconfirmed publish
-	 * would otherwise take the hot path and land a bare append on a body the
-	 * backend may still reject, inflating the CAS token past anything durable.
-	 * A rewrite racing it instead carries the last confirmed token, which the
-	 * store's queue-time size check fail-fasts before a second provisional
-	 * publish can queue behind the unconfirmed one.
+	 * `onConfirm` runs only once the backend confirms the queued publish, and
+	 * only while it is the latest (`generation`): a newer deferred publish owns
+	 * the durability record then, and this body is no longer on the backend
+	 * (rvEW). A deferred rewrite must neither record the replacement nor mark
+	 * the manager current before then (hV-oB): an append racing the
+	 * unconfirmed publish would otherwise take the hot path and land a bare
+	 * append on a body the backend may still reject, inflating the CAS token
+	 * past anything durable. A rewrite racing it queues nothing (see
+	 * {@link #unconfirmedPublishPath}); `onConfirm` re-issues the transcript.
 	 */
-	#confirmDeferredPublish(sessionFile: string, onConfirm?: () => void): void {
+	#confirmDeferredPublish(sessionFile: string, generation: number, onConfirm: () => void): void {
 		const confirmed = this.#storage.confirmWrites?.(sessionFile);
+		this.#unconfirmedPublishPath = confirmed ? sessionFile : undefined;
 		if (!confirmed) return;
 		void confirmed
 			.then(() => {
-				onConfirm?.();
+				if (generation !== this.#deferredPublishGen) return;
+				this.#unconfirmedPublishPath = undefined;
+				onConfirm();
 			})
 			.catch(err => {
+				if (generation === this.#deferredPublishGen) this.#unconfirmedPublishPath = undefined;
 				this.#fileIsCurrent = false;
 				this.#rewriteRequired = true;
 				try {
@@ -1578,6 +1600,9 @@ export class SessionManager {
 		if (!this.#persist || !this.#shouldHaveSessionFile()) return;
 		let targetPath = this.#liveRelocationWritePath() ?? this.#sessionFile;
 		if (!targetPath) return;
+		// This manager's own publish of the path is still unconfirmed: its
+		// confirmation re-issues the transcript (see #unconfirmedPublishPath).
+		if (targetPath === this.#unconfirmedPublishPath) return;
 
 		try {
 			if (this.#sessionOwnedElsewhere()) targetPath = this.#moveOffSessionFile("open-elsewhere");
@@ -1601,20 +1626,18 @@ export class SessionManager {
 			this.#clearDiskError();
 			if (this.#storage.defersSyncPublish) {
 				// The publish is only queued: record nothing and stay non-current
-				// until the backend confirms (hV-oB). A racing rewrite still
-				// carries the last confirmed token, so the store's queue-time
-				// size check fail-fasts it instead of queueing a second
-				// provisional publish behind the unconfirmed one; a racing
-				// append retries the transcript on the cold path instead of
-				// landing a bare append on a body the backend may still reject.
-				// The success handler below is the single place the replacement
-				// becomes durable state.
+				// until the backend confirms (hV-oB). A racing rewrite of this
+				// path queues nothing until then, and a racing append retries the
+				// transcript on that cold path instead of landing a bare append
+				// on a body the backend may still reject. The success handler
+				// below is the single place the replacement becomes durable state.
+				// A manager current on the previous body (a branch from a flushed
+				// session) must stop being current too, or racing appends take
+				// the hot path onto the queued body.
+				this.#fileIsCurrent = false;
 				const generation = ++this.#deferredPublishGen;
 				const { bytes, stamp } = body;
-				this.#confirmDeferredPublish(targetPath, () => {
-					// A newer deferred publish owns the durability record now;
-					// this body is no longer on the backend, so record nothing.
-					if (generation !== this.#deferredPublishGen) return;
+				this.#confirmDeferredPublish(targetPath, generation, () => {
 					this.#recordFullRewrite(bytes);
 					const entries = this.#entries;
 					const bodyIsCurrent =
@@ -1629,10 +1652,11 @@ export class SessionManager {
 						// full transcript instead of declaring it durable
 						// (rvEW); the re-issued publish carries the
 						// just-confirmed size token, so its queue-time check
-						// passes.
+						// passes. A sealed manager leaves that write to close().
 						this.#fileIsCurrent = false;
 						this.#rewriteRequired = true;
-						this.#rewriteSynchronously();
+						if (this.#released) this.#closeOwesPublish = true;
+						else this.#rewriteSynchronously();
 						return;
 					}
 					if (!this.#sessionFileRelocating || targetPath === this.#sessionFile) {
@@ -1710,6 +1734,13 @@ export class SessionManager {
 			do {
 				this.#atomicRewriteDirty = false;
 				await this.#closeWriterHandle();
+				// This manager's own publish of the file is still unconfirmed:
+				// its confirmation settles #expectedDiskSize (or re-issues, which
+				// moves the epoch and supersedes this rewrite below).
+				const unconfirmed = this.#unconfirmedPublishPath;
+				if (unconfirmed !== undefined && unconfirmed === this.#sessionFile) {
+					await this.#storage.confirmWrites?.(unconfirmed).catch(() => undefined);
+				}
 				if (this.#sessionOwnedElsewhere()) this.#moveOffSessionFile("open-elsewhere");
 				const sessionFile = this.#sessionFile;
 				if (!sessionFile) return false;
@@ -2835,9 +2866,8 @@ export class SessionManager {
 		const claim = this.#sessionClaim;
 		claim?.release?.();
 		if (claim) claim.release = undefined;
-		// A prior `flushSync` can self-conflict with this manager's own
-		// unconfirmed deferred publish; drain despite the latch so that
-		// publish can still confirm before we give up on the transcript.
+		// Close and drain despite a latched failure, so a queued publish can
+		// still confirm before we give up on the transcript.
 		await this.#scheduleDiskWork(
 			async () => {
 				const hadWriter = this.#writer !== undefined;
@@ -2859,7 +2889,7 @@ export class SessionManager {
 			{ ignorePriorError: true },
 		);
 		if (
-			this.#diskFailure &&
+			(this.#diskFailure || this.#closeOwesPublish) &&
 			this.#sessionFile &&
 			this.#storage.defersSyncPublish &&
 			!this.#entriesReleased &&
@@ -2868,13 +2898,16 @@ export class SessionManager {
 			// Deferred-publish only: a synchronous backend's drain() is a
 			// no-op, so any failure there is a genuine external conflict or a
 			// permanent write failure, not a self-race this retry can catch
-			// up on. seal() disabled the ordinary mid-life repair path, so
-			// close() issues the terminal write directly instead.
-			const operationError = this.#diskFailure;
+			// up on. seal() disabled the ordinary mid-life repair path and the
+			// re-issue a late confirmation owes, so close() issues the
+			// terminal write directly instead.
+			const operationError =
+				this.#diskFailure ?? new Error("Session entries were still unpublished when the session closed.");
 			const sessionFile = this.#sessionFile;
 			await this.#scheduleDiskWork(
 				async () => {
 					await this.#publishAuthoritativeBody(sessionFile, operationError);
+					this.#closeOwesPublish = false;
 					this.#clearDiskError();
 				},
 				{ ignorePriorError: true },
@@ -3792,6 +3825,10 @@ export class SessionManager {
 	 * the new artifact manager waits for it before allocating ids or resolving
 	 * `artifact://`, so kept references stay valid and new ids cannot collide.
 	 * Returns the new file path, or undefined when not persisting.
+	 *
+	 * Callers `flush()` first. On a store that defers sync publishes, the
+	 * branch's publish supersedes a still-unconfirmed publish of the source,
+	 * so entries the source had not yet published reach only the branch.
 	 */
 	createBranchedSession(leafId: string, options?: { copyArtifacts?: boolean }): string | undefined {
 		const sourceSessionFile = this.#sessionFile;
