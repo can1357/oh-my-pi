@@ -427,6 +427,7 @@ function connectPort(host: string, port: number): Promise<boolean> {
 
 class DaemonBroker {
 	readonly #observerOwners = new Map<IpcConnection, Set<string>>();
+	readonly #observedBackoffs = new WeakSet<DaemonSnapshot>();
 	readonly #projectDir: string;
 	readonly #runtimeDir: string;
 	readonly #endpoint: string;
@@ -1157,7 +1158,10 @@ class DaemonBroker {
 						daemon: { ...record.snapshot },
 					} satisfies DaemonCompletionNotification)
 				: undefined;
-		this.#notifyObservers(record.snapshot, completion);
+		// A stopped restart backoff is observed by #persist at its persistence boundary.
+		if (completion || !record.stopRequested || !this.#observedBackoffs.has(record.snapshot)) {
+			this.#notifyObservers(record.snapshot, completion);
+		}
 		if (completion) record.pendingCompletions.push(completion);
 		this.#persist(record);
 		await record.log?.close();
@@ -1415,6 +1419,13 @@ class DaemonBroker {
 	}
 
 	#persist(record: ManagedDaemon): void {
+		// A stopped restart timer has no child exit callback. Observe its
+		// persisted restarting -> exited transition once, before log shutdown.
+		const leftBackoff = this.#observedBackoffs.delete(record.snapshot);
+		if (record.snapshot.state === "restarting") this.#observedBackoffs.add(record.snapshot);
+		else if (leftBackoff && record.stopRequested && record.snapshot.state === "exited") {
+			this.#notifyObservers(record.snapshot);
+		}
 		const spec = JSON.stringify(record.spec);
 		const metadata = this.#serializeMetadata(record);
 		const writeSpec = spec !== record.persistedSpec;
