@@ -12,12 +12,14 @@ import {
 	formatModelStringWithRouting,
 	parseModelPattern,
 	pickDefaultAvailableModel,
+	resolveAgentAdvisorRolePattern,
 	resolveAgentAdvisorSelection,
 	resolveAgentModelPatterns,
 	resolveAgentModelSelection,
 	resolveAgentPrewalkPattern,
 	resolveAllowedModels,
 	resolveCliModel,
+	resolveConfiguredModelPatterns,
 	resolveExplicitModelRole,
 	resolveModelFromSettings,
 	resolveModelFromString,
@@ -1148,6 +1150,19 @@ describe("resolveAgentAdvisorSelection", () => {
 	test("blank override falls through to the agent definition", () => {
 		expect(resolveAgentAdvisorSelection({ settingsOverride: "  ", agentAdvisor: true })).toEqual({});
 		expect(resolveAgentAdvisorSelection({ settingsOverride: "", agentAdvisor: false })).toBeUndefined();
+	});
+});
+describe("resolveAgentAdvisorRolePattern", () => {
+	test("a self-referential @advisor resolves to the owner's advisor role inside the spawned session", () => {
+		const owner = Settings.isolated({ modelRoles: { advisor: "anthropic/claude-haiku-4-5" } });
+		const child = Settings.isolated({
+			modelRoles: {
+				...owner.getModelRoles(),
+				advisor: resolveAgentAdvisorRolePattern("@advisor:high", owner),
+			},
+		});
+
+		expect(resolveConfiguredModelPatterns("@advisor", child)).toEqual(["anthropic/claude-haiku-4-5:high"]);
 	});
 });
 describe("resolveAgentModelPatterns", () => {

@@ -1330,7 +1330,11 @@ export interface SessionSelectorOptions<T extends SessionSelectorEntry = Session
 	title?: string;
 	/** Fixed scope label, or false to omit the scope suffix. */
 	scopeLabel?: string | false;
-	/** Show each session's working directory in the list. */
+	/**
+	 * Show each session's working directory in the list. Defaults to on when
+	 * the session files live in more than one directory (e.g. the folder scope
+	 * merging a repository's worktrees).
+	 */
 	showCwd?: boolean;
 	/**
 	 * Reads the live terminal height so the visible window fits the viewport.
@@ -1374,6 +1378,7 @@ export class SessionSelectorComponent<T extends SessionSelectorEntry = SessionSe
 	#onRequestRender?: () => void;
 	readonly #loadAllSessions?: () => Promise<T[]>;
 	#folderSessions: T[];
+	readonly #folderShowCwd: boolean;
 	#globalSessions: T[] | null = null;
 	#scope: "folder" | "all" = "folder";
 	#toggling = false;
@@ -1440,6 +1445,9 @@ export class SessionSelectorComponent<T extends SessionSelectorEntry = SessionSe
 		this.#onDelete = options.onDelete;
 		this.#loadAllSessions = options.loadAllSessions;
 		this.#folderSessions = sessions;
+		// Storage directory, not recorded cwd: one folder's sessions may record
+		// symlink aliases of the same path, which must not turn the column on.
+		this.#folderShowCwd = options.showCwd ?? new Set(sessions.map(session => path.dirname(session.path))).size > 1;
 		this.#globalSessions = options.allSessions ?? null;
 		this.#getTerminalRows = options.getTerminalRows ?? (() => 24);
 		this.#fillHeight = options.fillHeight ?? false;
@@ -1457,7 +1465,7 @@ export class SessionSelectorComponent<T extends SessionSelectorEntry = SessionSe
 		// projects' history (issue #3099).
 		this.#sessionList = new SessionList(
 			sessions,
-			options.showCwd ?? false,
+			this.#folderShowCwd,
 			options.historyMatcher,
 			options.getTerminalRows,
 			options.pinnedIds,
@@ -1530,7 +1538,7 @@ export class SessionSelectorComponent<T extends SessionSelectorEntry = SessionSe
 			this.#sessionList.setSessions(global, true);
 		} else {
 			this.#scope = "folder";
-			this.#sessionList.setSessions(this.#folderSessions, false);
+			this.#sessionList.setSessions(this.#folderSessions, this.#folderShowCwd);
 		}
 		this.title = this.#headerLabel();
 		this.#onRequestRender?.();

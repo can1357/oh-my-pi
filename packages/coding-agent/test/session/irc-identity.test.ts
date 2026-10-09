@@ -244,6 +244,29 @@ describe("IRC identity at session consumers", () => {
 		expect(target.bridge.drainInboxMessages(mail.to)).toEqual([mail]);
 	});
 
+	it("aside wait peeks ignore parked wakes and outgoing sessions without consuming current asides", async () => {
+		const manager = SessionManager.inMemory();
+		const target = recipient(manager);
+		const aside: AgentMessage = { role: "user", content: "synthetic aside", timestamp: 1 };
+		const wake: AgentMessage = { role: "user", content: "synthetic deferred wake", timestamp: 2 };
+		target.bridge.queueDeferredWake([wake]);
+		expect(target.bridge.hasAsides()).toBe(false);
+		target.bridge.queueAside([aside]);
+		expect(target.bridge.hasAsides()).toBe(true);
+		expect(target.bridge.drainPending()).toEqual([aside]);
+		expect(target.bridge.hasAsides()).toBe(false);
+		expect(target.bridge.drainDeferredWakes()).toEqual([wake]);
+		target.bridge.queueAside([aside]);
+		target.bridge.queueDeferredWake([wake]);
+		await manager.newSession();
+		expect(target.bridge.hasAsides()).toBe(false);
+		expect(target.bridge.drainPending()).toEqual([]);
+		expect(target.bridge.drainDeferredWakes()).toEqual([]);
+		target.bridge.queueAside([aside]);
+		expect(target.bridge.hasAsides()).toBe(true);
+		expect(target.bridge.drainPending()).toEqual([aside]);
+	});
+
 	for (const transition of ["branch", "resetLeaf", "clear", "rewind", "discard"] as const) {
 		it(`preserves accepted input and reservations across the same-session ${transition}`, async () => {
 			const manager = SessionManager.inMemory();
@@ -262,6 +285,7 @@ describe("IRC identity at session consumers", () => {
 			else if (transition === "rewind") manager.branchWithSummary(root, "synthetic rewind report");
 			else await manager.discardEntryDurably(discarded);
 			expect(manager.captureIrcConsumptionBoundary()).not.toBe(boundary);
+			expect(target.bridge.hasAsides()).toBe(true);
 			expect(target.bridge.hasInterrupts()).toBe(true);
 			expect(target.bridge.hasPending()).toBe(true);
 			await target.bridge.deliver(mail);
