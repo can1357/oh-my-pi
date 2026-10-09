@@ -130,4 +130,12 @@ describe("judge-serialize", () => {
 		expect(logits).toEqual({ a: [0.1, 0.2], b: [0.3, 0.4, 0.5] });
 		expect(Object.values(logits).map(row => row.length)).toEqual([2, 3]);
 	});
+
+	it("escapes non-ASCII like Python json.dumps (ensure_ascii)", () => {
+		// Training saw `\\uXXXX` escapes, not raw UTF-8: every token id after
+		// the first non-ASCII char diverges without this.
+		expect(renderJudgeStateValue({ a: "caf\u00e9" })).toBe('{"a": "caf\\u00e9"}');
+		expect(renderJudgeStateValue({ e: "\ud83d\ude00" })).toBe('{"e": "\\ud83d\\ude00"}');
+	});
+
 });

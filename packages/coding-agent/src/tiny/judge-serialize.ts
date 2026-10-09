@@ -122,7 +122,17 @@ export function renderJudgeStateValue(
 	state: string | { readonly [key: string]: unknown } | readonly unknown[],
 ): string {
 	if (typeof state === "string") return state;
-	const json = JSON.stringify(state);
+	// Mirror Python `json.dumps` WITH `ensure_ascii=True` (the default): every
+	// non-ASCII char becomes `\uXXXX`, so token ids after the first non-ASCII
+	// char match training. JS emits raw UTF-8 — without this the ids diverge.
+	const json = JSON.stringify(state).replace(
+		// Astral chars (surrogate pairs) first: Python emits the pair, not per-half escapes.
+		/[\uD800-\uDBFF][\uDC00-\uDFFF]|[\u0080-\uFFFF]/g,
+		char =>
+			char.length === 2
+				? `\\u${char.charCodeAt(0).toString(16).padStart(4, "0")}\\u${char.charCodeAt(1).toString(16).padStart(4, "0")}`
+				: `\\u${char.charCodeAt(0).toString(16).padStart(4, "0")}`,
+	);
 	let out = "";
 	let inString = false;
 	for (let index = 0; index < json.length; index++) {
