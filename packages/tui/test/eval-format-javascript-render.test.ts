@@ -97,4 +97,37 @@ describe("formatJavaScriptForDisplay", () => {
 			committed = nextCommitted;
 		}
 	});
+
+	it("tells blocks from object literals after class, function and switch bodies without semicolons", () => {
+		expect(formatJavaScriptForDisplay("class A{m(){return {a:1}}}const o={b:2}")).toBe(
+			["class A {", "    m() {", "        return { a: 1 }", "    }", "}", "const o = { b: 2 }"].join("\n"),
+		);
+		expect(formatJavaScriptForDisplay("function g(){switch(x){case 1:{y()}}}const z={k:[1,2]}")).toBe(
+			[
+				"function g() {",
+				"    switch (x) {",
+				"        case 1: { y() }",
+				"    }",
+				"}",
+				"const z = { k: [1, 2] }",
+			].join("\n"),
+		);
+	});
+
+	it("formats a large semicolon-free object-literal array in time proportional to its size", () => {
+		const literal = (entries: number) =>
+			`const xs = [ ${Array.from({ length: entries }, (_, i) => `{id:${i},name:"n${i}"}`).join(", ")} ]`;
+		const elapsed = (source: string): number => {
+			const start = Bun.nanoseconds();
+			formatJavaScriptForDisplay(source);
+			return Bun.nanoseconds() - start;
+		};
+		const small = literal(1_000);
+		const large = literal(16_000);
+		const smallNs = Math.min(elapsed(small), elapsed(small), elapsed(small));
+		// 16 times the entries: quadratic brace classification takes ~256 times as long.
+		let largeNs = Number.POSITIVE_INFINITY;
+		for (let run = 0; run < 3 && largeNs >= 80 * smallNs; run++) largeNs = Math.min(largeNs, elapsed(large));
+		expect(largeNs).toBeLessThan(80 * smallNs);
+	});
 });

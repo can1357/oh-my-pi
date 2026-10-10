@@ -1,7 +1,7 @@
 import { authPolicyFor } from "@oh-my-pi/pi-catalog/compat/auth";
 import { $pickenv, logger } from "@oh-my-pi/pi-utils";
+import { getEnvApiKey } from "../env-api-key";
 import * as AIError from "../error";
-import { getEnvApiKey } from "../stream";
 import type { OAuthCredentials } from "../registry/oauth/types";
 import type { Provider } from "../types";
 import { resolveUsedFraction } from "../usage";
@@ -871,7 +871,7 @@ export class UsageService implements UsageApi {
 		await this.#deps.cache.clearReports(provider, () => this.#collectUsageRequests());
 
 		if (this.#deps.store.invalidateUsageCache) {
-			await this.#deps.store.invalidateUsageCache(signal).catch(err => {
+			await this.#deps.store.invalidateUsageCache(provider, signal).catch(err => {
 				logger.debug("Failed to notify store of stale usage", { err });
 			});
 		}

@@ -58,6 +58,16 @@ describe("subagent session MCP tools follow the shared manager", () => {
 		removeSyncWithRetries(dir);
 	});
 
+	/**
+	 * Connects and awaits the initial tool loads. `connectServers` alone returns after
+	 * its startup window (250 ms by default), which a loaded runner outlasts while the
+	 * stdio fixture spawns, leaving the server's tools unregistered.
+	 */
+	async function connectReady(configs: Record<string, MCPStdioServerConfig>): Promise<void> {
+		await manager.connectServers(configs, {});
+		expect(await manager.waitForStartup(0)).toEqual({ connected: Object.keys(configs), pending: [], failed: [] });
+	}
+
 	function sessionOptions(): CreateAgentSessionOptions {
 		return {
 			cwd: dir,
@@ -77,7 +87,7 @@ describe("subagent session MCP tools follow the shared manager", () => {
 	}
 
 	it("adds and removes a live child's MCP tools across parent reloads", async () => {
-		await manager.connectServers({ alpha: fixtureConfig() }, {});
+		await connectReady({ alpha: fixtureConfig() });
 		const follower = followMCPTools(manager);
 		const { session: child } = await createAgentSession({
 			...sessionOptions(),
@@ -91,19 +101,19 @@ describe("subagent session MCP tools follow the shared manager", () => {
 
 		// Parent: `/mcp add bravo`, then `/mcp reload`.
 		await manager.disconnectAll();
-		await manager.connectServers({ alpha: fixtureConfig(), bravo: fixtureConfig() }, {});
+		await connectReady({ alpha: fixtureConfig(), bravo: fixtureConfig() });
 		await child.runToolRegistryMutation(async () => undefined);
 		expect(serversOf(child)).toEqual(["alpha", "bravo"]);
 
 		// Parent: remove alpha, then `/mcp reload`. Its proxies must leave the child too.
 		await manager.disconnectAll();
-		await manager.connectServers({ bravo: fixtureConfig() }, {});
+		await connectReady({ bravo: fixtureConfig() });
 		await child.runToolRegistryMutation(async () => undefined);
 		expect(serversOf(child)).toEqual(["bravo"]);
 	}, 20_000);
 
 	it("keeps a child's explicitly supplied same-name tool over the MCP proxy, before and after a reload", async () => {
-		await manager.connectServers({ alpha: fixtureConfig() }, {});
+		await connectReady({ alpha: fixtureConfig() });
 		const collidingName = `mcp__alpha_${manyToolName(0)}`;
 		const KERNEL_RESULT = "kernel-defined tool ran";
 		const kernelTool: CustomTool = {
@@ -133,7 +143,7 @@ describe("subagent session MCP tools follow the shared manager", () => {
 
 		// Parent `/mcp reload`: the rebind must not hand the name back to the MCP proxy.
 		await manager.disconnectAll();
-		await manager.connectServers({ alpha: fixtureConfig() }, {});
+		await connectReady({ alpha: fixtureConfig() });
 		await child.runToolRegistryMutation(async () => undefined);
 		expect(await runColliding()).toBe(KERNEL_RESULT);
 		// The rest of alpha's proxies still follow the reload.

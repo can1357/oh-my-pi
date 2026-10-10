@@ -101,21 +101,48 @@ pub fn draw_node(graph: &AsciiGraph, node: NodeId) -> Canvas {
 	canvas
 }
 
-/// Draw a box split into left-aligned text sections.
-pub fn draw_multi_box(sections: &[Vec<String>], use_ascii: bool, padding: i32) -> Canvas {
+/// Outer `(width, height)` of a multi-section box: one column of padding
+/// each side of the widest line, and one divider row between sections.
+pub fn multi_box_size(sections: &[Vec<String>]) -> (i32, i32) {
 	let max_text_width = sections
 		.iter()
-		.flat_map(|section| section.iter())
+		.flatten()
 		.map(|line| display_width(line) as i32)
 		.max()
 		.unwrap_or(0);
-	let box_width = max_text_width + 2 * padding + 2;
 	let total_lines: i32 = sections
 		.iter()
 		.map(|section| section.len().max(1) as i32)
 		.sum();
-	let box_height = total_lines + sections.len() as i32 - 1 + 2;
-	let mut canvas = Canvas::new(box_width, box_height);
+	(max_text_width + 4, total_lines + sections.len() as i32 - 1 + 2)
+}
+
+/// Write `cell` with `role` when `(x, y)` lies on the canvas.
+pub fn set_cell(
+	canvas: &mut Canvas,
+	roles: &mut RoleCanvas,
+	x: i32,
+	y: i32,
+	cell: Cell,
+	role: CharRole,
+) {
+	if canvas.in_bounds(x, y) {
+		canvas.set(x, y, cell);
+		roles.set_role(x, y, role);
+	}
+}
+
+/// Draw a box split into left-aligned text sections with its top-left corner
+/// at `(x, y)`. Spaces inside the box are left untouched.
+pub fn stamp_multi_box(
+	canvas: &mut Canvas,
+	roles: &mut RoleCanvas,
+	sections: &[Vec<String>],
+	x: i32,
+	y: i32,
+	use_ascii: bool,
+) {
+	let (box_width, box_height) = multi_box_size(sections);
 	let (
 		horizontal,
 		vertical,
@@ -130,42 +157,60 @@ pub fn draw_multi_box(sections: &[Vec<String>], use_ascii: bool, padding: i32) -
 	} else {
 		('─', '│', '┌', '┐', '└', '┘', '├', '┤')
 	};
-
-	canvas.set(0, 0, Cell::from(top_left));
-	canvas.set(box_width - 1, 0, Cell::from(top_right));
-	canvas.set(0, box_height - 1, Cell::from(bottom_left));
-	canvas.set(box_width - 1, box_height - 1, Cell::from(bottom_right));
-	for x in 1..box_width - 1 {
-		canvas.set(x, 0, Cell::from(horizontal));
-		canvas.set(x, box_height - 1, Cell::from(horizontal));
+	let (right, bottom) = (box_width - 1, box_height - 1);
+	let mut cell_at = |dx: i32, dy: i32, cell: Cell, role: CharRole| {
+		set_cell(canvas, roles, x + dx, y + dy, cell, role);
+	};
+	let mut border = |dx: i32, dy: i32, ch: char| cell_at(dx, dy, Cell::from(ch), CharRole::Border);
+	border(0, 0, top_left);
+	border(right, 0, top_right);
+	border(0, bottom, bottom_left);
+	border(right, bottom, bottom_right);
+	for dx in 1..right {
+		border(dx, 0, horizontal);
+		border(dx, bottom, horizontal);
 	}
-	for y in 1..box_height - 1 {
-		canvas.set(0, y, Cell::from(vertical));
-		canvas.set(box_width - 1, y, Cell::from(vertical));
+	for dy in 1..bottom {
+		border(0, dy, vertical);
+		border(right, dy, vertical);
+	}
+	let mut row = 1;
+	for (section_index, section) in sections.iter().enumerate() {
+		if section_index > 0 {
+			border(0, row, divider_left);
+			border(right, row, divider_right);
+			for dx in 1..right {
+				border(dx, row, horizontal);
+			}
+			row += 1;
+		}
+		row += section.len().max(1) as i32;
 	}
 
 	let mut row = 1;
-	for (section_index, section) in sections.iter().enumerate() {
-		if section.is_empty() {
-			row += 1;
-		} else {
-			for line in section {
-				for (i, cell) in to_cells(line).into_iter().enumerate() {
-					canvas.set(1 + padding + i as i32, row, cell);
+	for section in sections {
+		for line in section {
+			for (i, cell) in to_cells(line).into_iter().enumerate() {
+				if cell.is_space() {
+					continue;
 				}
-				row += 1;
-			}
-		}
-		if section_index + 1 < sections.len() {
-			canvas.set(0, row, Cell::from(divider_left));
-			canvas.set(box_width - 1, row, Cell::from(divider_right));
-			for x in 1..box_width - 1 {
-				canvas.set(x, row, Cell::from(horizontal));
+				// Border glyphs inside member text (`+id`, `-x`, `a|b`) take the
+				// border role: box cells have always been classified by glyph.
+				let role = match cell.as_char() {
+					Some(
+						'┌' | '┐' | '└' | '┘' | '├' | '┤' | '┬' | '┴' | '┼' | '│' | '─' | '╭' | '╮' | '╰'
+						| '╯' | '+' | '-' | '|',
+					) => CharRole::Border,
+					_ => CharRole::Text,
+				};
+				cell_at(2 + i as i32, row, cell, role);
 			}
 			row += 1;
 		}
+		// Empty sections still occupy a blank row; every section is followed
+		// by a divider (or the bottom border).
+		row += i32::from(section.is_empty()) + 1;
 	}
-	canvas
 }
 
 const fn drawing_direction(from: DrawingCoord, to: DrawingCoord) -> Dir {
@@ -283,11 +328,7 @@ pub fn draw_arrow(graph: &AsciiGraph, edge: &AsciiEdge) -> [Layer; 6] {
 	}
 	let label_canvas = draw_arrow_label(graph, edge);
 	let (path_canvas, lines_drawn, line_dirs) = draw_path(graph, &edge.path, edge.style);
-	let source_shape = graph
-		.nodes
-		.get(edge.from)
-		.map(|node| node.shape)
-		.unwrap_or_default();
+	let source_shape = graph.nodes.get(edge.from).map_or_default(|node| node.shape);
 	let box_start_canvas = draw_box_start(graph, &edge.path, source_shape);
 	let arrow_end_canvas = if edge.has_arrow_end {
 		match (lines_drawn.last(), line_dirs.last()) {
@@ -678,134 +719,30 @@ fn draw_bundle_shared_path(graph: &AsciiGraph, bundle: &EdgeBundle) -> (Layer, L
 	(path_canvas, corners_canvas)
 }
 
-fn draw_bundle_arrowhead(graph: &AsciiGraph, bundle: &EdgeBundle) -> Layer {
+/// Arrowhead just outside `node`'s entry side, pointing along the last step of
+/// `path` (a bundle's shared path or a fan-out edge's path to the junction).
+fn draw_bundle_arrowhead(graph: &AsciiGraph, path: &[GridCoord], node: NodeId) -> Layer {
 	let mut canvas = Layer::over(&graph.canvas);
-	let Some(pair) = bundle
-		.shared_path
-		.get(bundle.shared_path.len().saturating_sub(2)..)
+	let [.., before, last] = path else {
+		return canvas;
+	};
+	let td = graph.config.direction == super::LayoutDirection::TD;
+	let Some(mut dc) = node_attachment_point(graph, node, if td { Dir::Up } else { Dir::Left })
 	else {
 		return canvas;
 	};
-	if pair.len() < 2 {
-		return canvas;
-	}
-	let direction = determine_direction(pair[0], pair[1]);
-	let entry = if graph.config.direction == super::LayoutDirection::TD {
-		Dir::Up
-	} else {
-		Dir::Left
-	};
-	let Some(mut dc) = node_attachment_point(graph, bundle.shared_node, entry) else {
-		return canvas;
-	};
-	if graph.config.direction == super::LayoutDirection::TD {
+	if td {
 		dc.y -= 1;
 	} else {
 		dc.x -= 1;
 	}
-	let c = match direction {
-		Dir::Up => {
-			if graph.config.use_ascii {
-				'^'
-			} else {
-				'▲'
-			}
-		},
-		Dir::Down => {
-			if graph.config.use_ascii {
-				'v'
-			} else {
-				'▼'
-			}
-		},
-		Dir::Left => {
-			if graph.config.use_ascii {
-				'<'
-			} else {
-				'◄'
-			}
-		},
-		Dir::Right => {
-			if graph.config.use_ascii {
-				'>'
-			} else {
-				'►'
-			}
-		},
-		_ => {
-			if graph.config.use_ascii {
-				'v'
-			} else {
-				'▼'
-			}
-		},
+	// Bundle arrowheads only use the four cardinal glyphs; anything else
+	// (diagonal or degenerate step) points down.
+	let direction = match determine_direction(*before, *last) {
+		dir @ (Dir::Up | Dir::Down | Dir::Left | Dir::Right) => dir,
+		_ => Dir::Down,
 	};
-	canvas.set(dc.x, dc.y, Cell::from(c));
-	canvas
-}
-
-fn draw_bundled_edge_arrowhead(graph: &AsciiGraph, edge: &AsciiEdge) -> Layer {
-	let mut canvas = Layer::over(&graph.canvas);
-	let Some(pair) = edge
-		.path_to_junction
-		.get(edge.path_to_junction.len().saturating_sub(2)..)
-	else {
-		return canvas;
-	};
-	if pair.len() < 2 {
-		return canvas;
-	}
-	let direction = determine_direction(pair[0], pair[1]);
-	let entry = if graph.config.direction == super::LayoutDirection::TD {
-		Dir::Up
-	} else {
-		Dir::Left
-	};
-	let Some(mut dc) = node_attachment_point(graph, edge.to, entry) else {
-		return canvas;
-	};
-	if graph.config.direction == super::LayoutDirection::TD {
-		dc.y -= 1;
-	} else {
-		dc.x -= 1;
-	}
-	let c = match direction {
-		Dir::Up => {
-			if graph.config.use_ascii {
-				'^'
-			} else {
-				'▲'
-			}
-		},
-		Dir::Down => {
-			if graph.config.use_ascii {
-				'v'
-			} else {
-				'▼'
-			}
-		},
-		Dir::Left => {
-			if graph.config.use_ascii {
-				'<'
-			} else {
-				'◄'
-			}
-		},
-		Dir::Right => {
-			if graph.config.use_ascii {
-				'>'
-			} else {
-				'►'
-			}
-		},
-		_ => {
-			if graph.config.use_ascii {
-				'v'
-			} else {
-				'▼'
-			}
-		},
-	};
+	let c = arrowhead_char(direction, Dir::Down, graph.config.use_ascii);
 	canvas.set(dc.x, dc.y, Cell::from(c));
 	canvas
 }
@@ -990,15 +927,24 @@ const fn is_border_char(c: char) -> bool {
 	matches!(
 		c,
 		'┌' | '┐'
-			| '└' | '┘'
-			| '├' | '┤'
-			| '┬' | '┴'
-			| '┼' | '│'
-			| '─' | '╭'
-			| '╮' | '╰'
-			| '╯' | '+'
-			| '-' | '|'
-			| '.' | '\''
+			| '└'
+			| '┘'
+			| '├'
+			| '┤'
+			| '┬'
+			| '┴'
+			| '┼'
+			| '│'
+			| '─'
+			| '╭'
+			| '╮'
+			| '╰'
+			| '╯'
+			| '+'
+			| '-'
+			| '|'
+			| '.'
+			| '\''
 			| ':'
 	)
 }
@@ -1052,19 +998,17 @@ pub fn draw_graph(graph: &mut AsciiGraph) {
 			continue;
 		};
 		let offset = DrawingCoord::new(bounds.min_x, bounds.min_y);
-		graph.canvas = graph.canvas.merged(offset, use_ascii, &[&canvas]);
+		graph.canvas.merge(offset, use_ascii, &[&canvas]);
 		fill_roles_from_canvas(&mut graph.role_canvas, &canvas, offset, CharRole::Border);
 	}
 
-	for node_id in 0..graph.nodes.len() {
-		let drawing = graph.nodes[node_id].drawing.clone();
-		let coord = graph.nodes[node_id].drawing_coord;
-		if !graph.nodes[node_id].drawn
-			&& let (Some(drawing), Some(coord)) = (drawing, coord)
+	for node in &mut graph.nodes {
+		if !node.drawn
+			&& let (Some(drawing), Some(coord)) = (&node.drawing, node.drawing_coord)
 		{
-			graph.canvas = graph.canvas.merged(coord, use_ascii, &[&drawing]);
-			fill_roles_for_node_box(&mut graph.role_canvas, &drawing, coord);
-			graph.nodes[node_id].drawn = true;
+			graph.canvas.merge(coord, use_ascii, &[drawing]);
+			fill_roles_for_node_box(&mut graph.role_canvas, drawing, coord);
+			node.drawn = true;
 		}
 	}
 
@@ -1093,12 +1037,16 @@ pub fn draw_graph(graph: &mut AsciiGraph) {
 				lines.push(shared_path);
 				corners.push(shared_corners);
 				if bundle.kind == BundleKind::FanIn {
-					arrow_ends.push(draw_bundle_arrowhead(graph, bundle));
+					arrow_ends.push(draw_bundle_arrowhead(
+						graph,
+						&bundle.shared_path,
+						bundle.shared_node,
+					));
 				}
 				junctions.push(draw_junction_character(graph, bundle));
 			}
 			if bundle.kind == BundleKind::FanOut && edge.has_arrow_end {
-				arrow_ends.push(draw_bundled_edge_arrowhead(graph, edge));
+				arrow_ends.push(draw_bundle_arrowhead(graph, &edge.path_to_junction, edge.to));
 			}
 		} else {
 			let [path, box_start, arrow_end, arrow_start, edge_corners, label] =
@@ -1131,7 +1079,7 @@ pub fn draw_graph(graph: &mut AsciiGraph) {
 			continue;
 		}
 		let (label, offset) = draw_subgraph_label(graph, sg);
-		graph.canvas = graph.canvas.merged(offset, use_ascii, &[&label]);
+		graph.canvas.merge(offset, use_ascii, &[&label]);
 		fill_roles_from_canvas(&mut graph.role_canvas, &label, offset, CharRole::Text);
 	}
 }
@@ -1153,15 +1101,22 @@ mod tests {
 
 	#[test]
 	fn multi_box_matches_two_and_three_section_outputs() {
+		let draw_multi_box = |sections: &[Vec<String>], use_ascii: bool| {
+			let (width, height) = multi_box_size(sections);
+			let mut canvas = Canvas::new(width, height);
+			let mut roles = RoleCanvas::new(width, height);
+			stamp_multi_box(&mut canvas, &mut roles, sections, 0, 0, use_ascii);
+			canvas
+		};
 		let two = vec![vec!["CUSTOMER".into()], vec!["+id: int".into()]];
-		assert_eq!(rows(&draw_multi_box(&two, false, 1)), [
+		assert_eq!(rows(&draw_multi_box(&two, false)), [
 			"┌──────────┐",
 			"│ CUSTOMER │",
 			"├──────────┤",
 			"│ +id: int │",
 			"└──────────┘"
 		]);
-		assert_eq!(rows(&draw_multi_box(&two, true, 1)), [
+		assert_eq!(rows(&draw_multi_box(&two, true)), [
 			"+----------+",
 			"| CUSTOMER |",
 			"+----------+",
@@ -1171,7 +1126,7 @@ mod tests {
 
 		let three =
 			vec![vec!["Animal".into()], vec!["+name: String".into()], vec!["+eat: void".into()]];
-		assert_eq!(rows(&draw_multi_box(&three, false, 1)), [
+		assert_eq!(rows(&draw_multi_box(&three, false)), [
 			"┌───────────────┐",
 			"│ Animal        │",
 			"├───────────────┤",
@@ -1180,7 +1135,7 @@ mod tests {
 			"│ +eat: void    │",
 			"└───────────────┘",
 		]);
-		assert_eq!(rows(&draw_multi_box(&three, true, 1)), [
+		assert_eq!(rows(&draw_multi_box(&three, true)), [
 			"+---------------+",
 			"| Animal        |",
 			"+---------------+",

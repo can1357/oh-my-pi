@@ -22,7 +22,8 @@ import {
 } from "@oh-my-pi/pi-ai/providers/anthropic";
 import type { MessageCreateParams } from "@oh-my-pi/pi-ai/providers/anthropic-wire";
 import { getClaudeCodeVersion } from "@oh-my-pi/pi-ai/providers/claude-code-fingerprint";
-import { getEnvApiKey, streamSimple } from "@oh-my-pi/pi-ai/stream";
+import { getEnvApiKey } from "@oh-my-pi/pi-ai/env-api-key";
+import { streamSimple } from "@oh-my-pi/pi-ai/stream";
 import type {
 	AssistantMessage,
 	CacheRetention,
@@ -825,36 +826,41 @@ describe("Anthropic request fingerprint alignment", () => {
 		expect(capturedBeta ?? "").not.toContain("context-management-2025-06-27");
 	});
 
-	it("billing-header fingerprint uses first user message, not leading developer message", async () => {
-		const userText = "Hello from user with enough chars padding here";
+	it("keeps the OAuth billing header cached across developer-first main and side turns", async () => {
+		const first: Context["messages"][number] = {
+			role: "developer",
+			content: [{ type: "text", text: "Approve and execute the current plan" }],
+			timestamp: 1,
+		};
+		const base: Context = { systemPrompt: ["Be helpful."], messages: [first] };
+		const billing = async (context: Context): Promise<string> => {
+			const payload = await captureAnthropicPayload(ANTHROPIC_MODEL, context);
+			if (!payload || typeof payload !== "object" || !("system" in payload) || !Array.isArray(payload.system)) {
+				throw new Error("missing Anthropic system blocks");
+			}
+			const block = payload.system[0];
+			if (!block || typeof block !== "object" || !("text" in block) || typeof block.text !== "string") {
+				throw new Error("missing billing header");
+			}
+			return block.text;
+		};
 
-		// Conversation with only a user message.
-		const payloadUserOnly = (await captureAnthropicPayload(ANTHROPIC_MODEL, {
-			systemPrompt: ["Be helpful."],
-			messages: [{ role: "user", content: userText, timestamp: Date.now() }],
-		})) as { system?: Array<{ type: string; text?: string }> };
-
-		// Conversation prefixed with a developer message before the same user message.
-		const payloadWithDev = (await captureAnthropicPayload(ANTHROPIC_MODEL, {
-			systemPrompt: ["Be helpful."],
+		const main = await billing(base);
+		const side = await billing({
+			...base,
 			messages: [
-				{ role: "developer", content: "developer instruction text", timestamp: Date.now() },
-				{ role: "user", content: userText, timestamp: Date.now() },
+				first,
+				{ role: "developer", content: "No tools in this side turn", timestamp: 2 },
+				{ role: "user", content: "Summarize the progress so far", timestamp: 3 },
 			],
-		})) as { system?: Array<{ type: string; text?: string }> };
-
-		const billingUserOnly = payloadUserOnly.system?.[0].text ?? "";
-		const billingWithDev = payloadWithDev.system?.[0].text ?? "";
-
-		// Both payloads must carry the CLI billing signature.
-		expect(billingUserOnly).toStartWith("x-anthropic-billing-header:");
-		expect(billingWithDev).toStartWith("x-anthropic-billing-header:");
-		expect(billingUserOnly).toContain("cc_entrypoint=cli;");
-		expect(billingWithDev).toContain("cc_entrypoint=cli;");
-
-		// The cc_version suffix (fingerprint) must be identical — developer message must not affect it.
-		const extractSuffix = (header: string) => header.match(/cc_version=[^.]+\.([a-f0-9]{3})/)?.[1];
-		expect(extractSuffix(billingWithDev)).toBe(extractSuffix(billingUserOnly));
+		});
+		const later = await billing({
+			...base,
+			messages: [first, { role: "user", content: "Continue with the implementation", timestamp: 4 }],
+		});
+		expect(main).toStartWith("x-anthropic-billing-header:");
+		expect(side).toBe(main);
+		expect(later).toBe(main);
 	});
 
 	it("anchors the last system block on API-key requests", async () => {

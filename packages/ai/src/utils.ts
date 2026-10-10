@@ -560,6 +560,27 @@ export function dropMalformedOpenAIResponsesToolCalls<
 	return kept;
 }
 
+/**
+ * Replay history is immutable and re-sanitized on every request, so remember
+ * which `arguments` string each item was already validated with instead of
+ * re-parsing every historical call (large write/edit payloads) per request.
+ */
+const validatedReplayArguments = new WeakMap<object, string>();
+
+function hasValidReplayArguments(item: Record<string, unknown>): boolean {
+	const args = item.arguments;
+	if (typeof args !== "string") return false;
+	if (validatedReplayArguments.get(item) === args) return true;
+	if (args.trim().length === 0) return false;
+	try {
+		JSON.parse(args);
+	} catch {
+		return false;
+	}
+	validatedReplayArguments.set(item, args);
+	return true;
+}
+
 function sanitizeOpenAIResponsesHistoryItemForReplay(
 	item: Record<string, unknown>,
 	supportsImageDetailOriginal: boolean,
@@ -572,12 +593,7 @@ function sanitizeOpenAIResponsesHistoryItemForReplay(
 		return undefined;
 	}
 	if (item.type === "function_call") {
-		if (typeof item.arguments !== "string" || item.arguments.trim().length === 0) return undefined;
-		try {
-			JSON.parse(item.arguments);
-		} catch {
-			return undefined;
-		}
+		if (!hasValidReplayArguments(item)) return undefined;
 	}
 	if (item.type === "item_reference") return undefined;
 	if (item.type === "image_generation_call") return sanitizeOpenAIResponsesImageGenerationCallForReplay(item);

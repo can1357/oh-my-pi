@@ -98,6 +98,17 @@
 				"clientOmit": []
 			},
 			{
+				"name": "abort_and_restore_queue",
+				"doc": "Withdraw queued user input, then abort the current run; returns the withdrawn input.",
+				"params": null,
+				"result": "AbortAndRestoreQueueResult",
+				"nullable": false,
+				"unwrap": null,
+				"timeoutMs": null,
+				"completion": null,
+				"clientOmit": []
+			},
+			{
 				"name": "new_session",
 				"doc": "Start a new session.",
 				"params": "NewSessionParams",
@@ -137,6 +148,17 @@
 				"result": "FastModeResult",
 				"nullable": false,
 				"unwrap": null,
+				"timeoutMs": null,
+				"completion": null,
+				"clientOmit": []
+			},
+			{
+				"name": "set_slow_mode",
+				"doc": "Turn `/slow` on or off for the active model; returns whether it is now on.",
+				"params": "SetSlowModeParams",
+				"result": "SetSlowModeResult",
+				"nullable": false,
+				"unwrap": "enabled",
 				"timeoutMs": null,
 				"completion": null,
 				"clientOmit": []
@@ -650,6 +672,28 @@
 				"clientOmit": []
 			},
 			{
+				"name": "get_logout_accounts",
+				"doc": "List the stored credentials `logout` can remove for a provider, active first.",
+				"params": "GetLogoutAccountsParams",
+				"result": "GetLogoutAccountsResult",
+				"nullable": false,
+				"unwrap": "accounts",
+				"timeoutMs": null,
+				"completion": null,
+				"clientOmit": []
+			},
+			{
+				"name": "logout",
+				"doc": "Remove one stored credential; fails when it is no longer stored. `remainingSource` names auth that still applies.",
+				"params": "LogoutParams",
+				"result": "LogoutResult",
+				"nullable": false,
+				"unwrap": null,
+				"timeoutMs": null,
+				"completion": null,
+				"clientOmit": []
+			},
+			{
 				"name": "predict_word",
 				"doc": "Ghost-text suffix for the prose word ending at `cursor` (a UTF-16 offset); null when none applies.",
 				"params": "PredictWordParams",
@@ -667,6 +711,39 @@
 				"result": null,
 				"nullable": false,
 				"unwrap": null,
+				"timeoutMs": null,
+				"completion": null,
+				"clientOmit": []
+			},
+			{
+				"name": "btw",
+				"doc": "Ask a side question, or a follow-up in topic `recordId`; returns the record once it is running.",
+				"params": "BtwParams",
+				"result": "BtwResult",
+				"nullable": false,
+				"unwrap": "record",
+				"timeoutMs": null,
+				"completion": null,
+				"clientOmit": []
+			},
+			{
+				"name": "btw_cancel",
+				"doc": "Cancel the running side question (only topic `recordId` when given); false when none matches.",
+				"params": "BtwCancelParams",
+				"result": "BtwCancelResult",
+				"nullable": false,
+				"unwrap": "cancelled",
+				"timeoutMs": null,
+				"completion": null,
+				"clientOmit": []
+			},
+			{
+				"name": "get_btw_history",
+				"doc": "List the session's side-question records, newest first.",
+				"params": null,
+				"result": "GetBtwHistoryResult",
+				"nullable": false,
+				"unwrap": "records",
 				"timeoutMs": null,
 				"completion": null,
 				"clientOmit": []
@@ -2382,6 +2459,67 @@
 			],
 			"description": "Outcome of every `goal` op; both fields are null when the session has no goal."
 		},
+		"SlowModeScope": {
+			"enum": [
+				"session",
+				"global"
+			],
+			"type": "string",
+			"description": "Where `/slow` lives: persisted config shared by every session, or this session's flex tier."
+		},
+		"UsageLimitLowPriority": {
+			"type": "object",
+			"properties": {
+				"stage": {
+					"const": "low_priority"
+				},
+				"resetsAtSec": {
+					"type": "number",
+					"description": "Epoch seconds when the limit that was hit resets."
+				},
+				"allowanceLeftPercent": {
+					"type": "integer",
+					"description": "Percent of the low-priority allowance still available, when reported."
+				}
+			},
+			"required": [
+				"stage",
+				"resetsAtSec"
+			],
+			"description": "Requests are served on the provider's low-priority (slow) lane."
+		},
+		"UsageLimitWrapUp": {
+			"type": "object",
+			"properties": {
+				"stage": {
+					"const": "wrap_up"
+				},
+				"extraUsage": {
+					"type": "boolean",
+					"description": "Whether paid extra usage serves requests once the allowance is spent."
+				},
+				"resetsAtSec": {
+					"type": "number",
+					"description": "Epoch seconds when the limit that was hit resets, if reported."
+				}
+			},
+			"required": [
+				"stage",
+				"extraUsage"
+			],
+			"description": "Requests run on a short wrap-up allowance past the limit."
+		},
+		"UsageLimitState": {
+			"anyOf": [
+				{
+					"$ref": "#/$defs/UsageLimitLowPriority"
+				},
+				{
+					"$ref": "#/$defs/UsageLimitWrapUp"
+				}
+			],
+			"description": "Provider-neutral state of an account past its usage limit, discriminated by `stage`."
+		},
 		"SessionState": {
 			"type": "object",
 			"properties": {
@@ -2431,6 +2569,24 @@
 				"fastModeActive": {
 					"type": "boolean",
 					"default": false
+				},
+				"slowModeSupported": {
+					"type": "boolean",
+					"description": "`/slow` applies to the active model.",
+					"default": false
+				},
+				"slowModeEnabled": {
+					"type": "boolean",
+					"description": "`/slow` is on for the active model; always `false` when `slowModeSupported` is `false`.",
+					"default": false
+				},
+				"slowModeScope": {
+					"$ref": "#/$defs/SlowModeScope",
+					"description": "Where the active model's `/slow` lives; absent when unsupported."
+				},
+				"usageLimit": {
+					"$ref": "#/$defs/UsageLimitState",
+					"description": "Usage-limit stage of the active model's account; absent outside wrap-up and low priority."
 				},
 				"tokensPerSecond": {
 					"anyOf": [
@@ -2683,6 +2839,17 @@
 			"properties": {
 				"removed": {
 					"type": "boolean"
+				},
+				"images": {
+					"type": "array",
+					"items": {
+						"$ref": "#/$defs/ImageContent"
+					},
+					"description": "The removed message's images, so the client can restore them with its text."
+				},
+				"imagesDropped": {
+					"type": "boolean",
+					"description": "Only ever `true`: the images exceeded the transport limit and were omitted; the removal still happened."
 				}
 			},
 			"required": [
@@ -2699,6 +2866,54 @@
 			"required": [
 				"promoted"
 			]
+		},
+		"RestoredQueuedMessage": {
+			"type": "object",
+			"properties": {
+				"text": {
+					"type": "string"
+				},
+				"images": {
+					"type": "array",
+					"items": {
+						"$ref": "#/$defs/ImageContent"
+					}
+				}
+			},
+			"required": [
+				"text"
+			],
+			"description": "Queued user content withdrawn from the queue, as the editor would restore it."
+		},
+		"AbortAndRestoreQueueResult": {
+			"type": "object",
+			"properties": {
+				"steering": {
+					"type": "array",
+					"items": {
+						"$ref": "#/$defs/RestoredQueuedMessage"
+					}
+				},
+				"followUp": {
+					"type": "array",
+					"items": {
+						"$ref": "#/$defs/RestoredQueuedMessage"
+					}
+				},
+				"imagesDropped": {
+					"type": "boolean",
+					"description": "Only ever `true`: the full result exceeded the transport limit and every `images` was omitted."
+				},
+				"truncated": {
+					"type": "boolean",
+					"description": "Only ever `true`: even the text-only result exceeded the limit, so only an oldest-first prefix is listed."
+				}
+			},
+			"required": [
+				"steering",
+				"followUp"
+			],
+			"description": "User-authored queued input withdrawn before the abort, oldest first."
 		},
 		"BranchMessage": {
 			"type": "object",
@@ -3069,6 +3284,100 @@
 			],
 			"description": "Incremental subagent transcript read."
 		},
+		"BtwStatus": {
+			"enum": [
+				"running",
+				"complete",
+				"cancelled",
+				"error",
+				"interrupted"
+			],
+			"type": "string",
+			"description": "Side-question turn lifecycle; `interrupted` marks a turn whose process died while it ran."
+		},
+		"BtwHistoryTurn": {
+			"type": "object",
+			"properties": {
+				"question": {
+					"type": "string"
+				},
+				"answer": {
+					"type": "string"
+				},
+				"status": {
+					"$ref": "#/$defs/BtwStatus"
+				},
+				"createdAt": {
+					"type": "integer"
+				},
+				"updatedAt": {
+					"type": "integer"
+				},
+				"error": {
+					"type": "string"
+				}
+			},
+			"required": [
+				"question",
+				"answer",
+				"status",
+				"createdAt",
+				"updatedAt"
+			],
+			"description": "One question and its answer within a side-question topic."
+		},
+		"BtwHistoryRecord": {
+			"type": "object",
+			"properties": {
+				"question": {
+					"type": "string"
+				},
+				"answer": {
+					"type": "string"
+				},
+				"status": {
+					"$ref": "#/$defs/BtwStatus"
+				},
+				"createdAt": {
+					"type": "integer"
+				},
+				"updatedAt": {
+					"type": "integer"
+				},
+				"id": {
+					"type": "string"
+				},
+				"leafId": {
+					"anyOf": [
+						{
+							"type": "string"
+						},
+						{
+							"type": "null"
+						}
+					]
+				},
+				"error": {
+					"type": "string"
+				},
+				"followUps": {
+					"type": "array",
+					"items": {
+						"$ref": "#/$defs/BtwHistoryTurn"
+					}
+				}
+			},
+			"required": [
+				"question",
+				"answer",
+				"status",
+				"createdAt",
+				"updatedAt",
+				"id",
+				"leafId"
+			],
+			"description": "A side-question topic: its first turn's fields plus follow-ups; the latest turn is the last follow-up, else the record."
+		},
 		"LoginProvider": {
 			"type": "object",
 			"properties": {
@@ -3091,6 +3400,42 @@
 				"available",
 				"authenticated"
 			]
+		},
+		"LogoutAccount": {
+			"type": "object",
+			"properties": {
+				"credentialId": {
+					"type": "integer"
+				},
+				"provider": {
+					"type": "string"
+				},
+				"label": {
+					"type": "string"
+				},
+				"detail": {
+					"type": "string"
+				},
+				"type": {
+					"enum": [
+						"api_key",
+						"oauth"
+					],
+					"type": "string"
+				},
+				"active": {
+					"type": "boolean"
+				}
+			},
+			"required": [
+				"credentialId",
+				"provider",
+				"label",
+				"detail",
+				"type",
+				"active"
+			],
+			"description": "A stored credential `logout` can remove; `active` marks credentials the session may be using."
 		},
 		"HandoffResult": {
 			"type": "object",
@@ -4316,6 +4661,42 @@
 			],
 			"description": "Sent exactly once when a live session ends; `error` carries the failure cause."
 		},
+		"BtwDeltaEvent": {
+			"type": "object",
+			"properties": {
+				"type": {
+					"const": "btw_delta"
+				},
+				"recordId": {
+					"type": "string"
+				},
+				"delta": {
+					"type": "string"
+				}
+			},
+			"required": [
+				"type",
+				"recordId",
+				"delta"
+			],
+			"description": "Text appended to the running side question's latest answer."
+		},
+		"BtwRecordEvent": {
+			"type": "object",
+			"properties": {
+				"type": {
+					"const": "btw_record"
+				},
+				"record": {
+					"$ref": "#/$defs/BtwHistoryRecord"
+				}
+			},
+			"required": [
+				"type",
+				"record"
+			],
+			"description": "Full side-question record on every lifecycle change (started, complete, cancelled, error); the last one per id wins."
+		},
 		"CommandOutputEvent": {
 			"type": "object",
 			"properties": {
@@ -5348,6 +5729,12 @@
 					"$ref": "#/$defs/LiveEndEvent"
 				},
 				{
+					"$ref": "#/$defs/BtwDeltaEvent"
+				},
+				{
+					"$ref": "#/$defs/BtwRecordEvent"
+				},
+				{
 					"$ref": "#/$defs/CommandOutputEvent"
 				},
 				{
@@ -5528,6 +5915,28 @@
 			]
 		},
 		"SetFastModeParams": {
+			"type": "object",
+			"properties": {
+				"enabled": {
+					"type": "boolean"
+				}
+			},
+			"required": [
+				"enabled"
+			]
+		},
+		"SetSlowModeParams": {
+			"type": "object",
+			"properties": {
+				"enabled": {
+					"type": "boolean"
+				}
+			},
+			"required": [
+				"enabled"
+			]
+		},
+		"SetSlowModeResult": {
 			"type": "object",
 			"properties": {
 				"enabled": {
@@ -6176,6 +6585,54 @@
 				"providerId"
 			]
 		},
+		"GetLogoutAccountsParams": {
+			"type": "object",
+			"properties": {
+				"providerId": {
+					"type": "string"
+				}
+			},
+			"required": [
+				"providerId"
+			]
+		},
+		"GetLogoutAccountsResult": {
+			"type": "object",
+			"properties": {
+				"accounts": {
+					"type": "array",
+					"items": {
+						"$ref": "#/$defs/LogoutAccount"
+					}
+				}
+			},
+			"required": [
+				"accounts"
+			]
+		},
+		"LogoutParams": {
+			"type": "object",
+			"properties": {
+				"providerId": {
+					"type": "string"
+				},
+				"credentialId": {
+					"type": "integer"
+				}
+			},
+			"required": [
+				"providerId",
+				"credentialId"
+			]
+		},
+		"LogoutResult": {
+			"type": "object",
+			"properties": {
+				"remainingSource": {
+					"type": "string"
+				}
+			}
+		},
 		"PredictWordParams": {
 			"type": "object",
 			"properties": {
@@ -6230,6 +6687,64 @@
 				"cursor",
 				"suggestion",
 				"accepted"
+			]
+		},
+		"BtwParams": {
+			"type": "object",
+			"properties": {
+				"question": {
+					"type": "string"
+				},
+				"recordId": {
+					"type": "string"
+				}
+			},
+			"required": [
+				"question"
+			]
+		},
+		"BtwResult": {
+			"type": "object",
+			"properties": {
+				"record": {
+					"$ref": "#/$defs/BtwHistoryRecord"
+				}
+			},
+			"required": [
+				"record"
+			]
+		},
+		"BtwCancelParams": {
+			"type": "object",
+			"properties": {
+				"recordId": {
+					"type": "string"
+				}
+			}
+		},
+		"BtwCancelResult": {
+			"type": "object",
+			"properties": {
+				"cancelled": {
+					"type": "boolean"
+				}
+			},
+			"required": [
+				"cancelled"
+			]
+		},
+		"GetBtwHistoryResult": {
+			"type": "object",
+			"properties": {
+				"records": {
+					"type": "array",
+					"items": {
+						"$ref": "#/$defs/BtwHistoryRecord"
+					}
+				}
+			},
+			"required": [
+				"records"
 			]
 		}
 	}

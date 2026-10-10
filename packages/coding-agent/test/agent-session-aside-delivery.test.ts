@@ -20,6 +20,8 @@ import { SessionAdvisors } from "@oh-my-pi/pi-coding-agent/session/session-advis
 import type { IrcMessage } from "@oh-my-pi/pi-tui/tools/irc";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
+import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import { WaitTool } from "@oh-my-pi/pi-coding-agent/tools/wait";
 import * as imageLoading from "@oh-my-pi/pi-coding-agent/utils/image-loading";
 import { TempDir, untilAborted } from "@oh-my-pi/pi-utils";
 
@@ -148,6 +150,115 @@ describe("AgentSession aside delivery", () => {
 		);
 		expect(asides).toHaveLength(1);
 	});
+
+	it.each([false, true])(
+		"a user aside ends an owned-job wait without consuming the later job result (agent registry: %s)",
+		async withRegistry => {
+			const model = createMockModel({ provider: "openai", id: "gpt-test" }).model;
+			const contexts: Context[] = [];
+			const nextCall = Promise.withResolvers<void>();
+			const waitStarted = Promise.withResolvers<void>();
+			const job = Promise.withResolvers<string>();
+			const manager = new AsyncJobManager({});
+			const settings = Settings.isolated({
+				"compaction.enabled": false,
+				"todo.enabled": false,
+				"launch.enabled": false,
+			});
+			settings.setModelRole("default", `${model.provider}/${model.id}`);
+			const wait = new WaitTool({
+				cwd: tempDir.path(),
+				settings,
+				asyncJobManager: manager,
+				getAgentId: () => "Main",
+				...(withRegistry ? { agentRegistry: AgentRegistry.global() } : {}),
+			} as ToolSession);
+			const agent = new Agent({
+				getApiKey: () => "test-key",
+				initialState: { model, systemPrompt: ["Test"], tools: [wait], messages: [] },
+				convertToLlm,
+				streamFn: (_model, context) => {
+					contexts.push(context);
+					const first = contexts.length === 1;
+					if (contexts.length === 2) nextCall.resolve();
+					const message: AssistantMessage = {
+						role: "assistant",
+						content: first
+							? [{ type: "toolCall", id: "wait-1", name: "wait", arguments: {} }]
+							: [{ type: "text", text: "Acknowledged." }],
+						api: model.api,
+						provider: model.provider,
+						model: model.id,
+						usage: zeroUsage,
+						stopReason: first ? "toolUse" : "stop",
+						timestamp: Date.now(),
+					};
+					const stream = new AssistantMessageEventStream();
+					queueMicrotask(() => {
+						stream.push({ type: "start", partial: message });
+						stream.push({ type: "done", reason: first ? "toolUse" : "stop", message });
+					});
+					return stream;
+				},
+			});
+			session = new AgentSession({
+				agent,
+				sessionManager: SessionManager.inMemory(tempDir.path()),
+				settings,
+				modelRegistry: new ModelRegistry(authStorage),
+				toolRegistry: new Map([[wait.name, wait as unknown as AgentTool]]),
+				agentId: "Main",
+				asyncJobManager: manager,
+			});
+			await session.setWorkPoolYieldItems([{ id: "pool#1", index: 1 }]);
+			await session.deliverIrcMessage({
+				id: "parked-peer",
+				from: "Peer",
+				to: "Main",
+				body: "deferred wake",
+				ts: Date.now(),
+			});
+			await setImmediate();
+			session.subscribe(event => {
+				if (event.type === "tool_execution_start" && event.toolName === "wait") waitStarted.resolve();
+			});
+			manager.register("bash", "pending", () => job.promise, { ownerId: "Main" });
+			const run = session.prompt("go");
+			try {
+				await waitStarted.promise;
+				await Bun.sleep(450);
+				expect(contexts).toHaveLength(1);
+				expect(manager.getRunningJobs({ ownerId: "Main" })).toHaveLength(1);
+				await session.sendUserMessage("ASIDE_DURING_WAIT", { deliverAs: "aside" });
+				const timer = setTimeout(() => nextCall.reject(new Error("Aside remained behind the pending wait")), 1_500);
+				try {
+					await nextCall.promise;
+				} finally {
+					clearTimeout(timer);
+				}
+				expect(JSON.stringify(contexts[1]?.messages)).toContain("ASIDE_DURING_WAIT");
+				expect(JSON.stringify(contexts[1]?.messages)).toContain("Wait interrupted by message.");
+				expect(JSON.stringify(contexts[1]?.messages)).not.toContain("deferred wake");
+				expect(manager.getRunningJobs({ ownerId: "Main" })).toHaveLength(1);
+			} finally {
+				job.resolve("JOB_RESULT_AFTER_ASIDE");
+				await run;
+				await session.settleAsyncWork();
+			}
+			expect(
+				session.agent.state.messages.filter(
+					message => message.role === "user" && JSON.stringify(message.content).includes("ASIDE_DURING_WAIT"),
+				),
+			).toHaveLength(1);
+			expect(JSON.stringify(contexts.at(-1)?.messages)).toContain("JOB_RESULT_AFTER_ASIDE");
+			expect(
+				session.agent.state.messages.filter(message => JSON.stringify(message).includes("JOB_RESULT_AFTER_ASIDE")),
+			).toHaveLength(1);
+			await session.setWorkPoolYieldItems([]);
+			await session.waitForIdle();
+			expect(JSON.stringify(contexts.at(-1)?.messages)).toContain("deferred wake");
+		},
+	);
 
 	it("sendUserMessage delivered as an aside mid-run injects at the next step boundary without draining agent-core queues", async () => {
 		const model = createMockModel({ provider: "openai", id: "gpt-test" }).model;
@@ -1436,7 +1547,9 @@ describe("AgentSession aside delivery", () => {
 			};
 		});
 
-		const run = session.prompt("go");
+		// The subagent's own run is executor-driven (agent-attributed), so only the
+		// aside wake turn starts an observation; a user prompt would open its own.
+		const run = session.prompt("go", { attribution: "agent" });
 		await started.promise;
 		await session.sendUserMessage("WAKE_BG_ASIDE", { deliverAs: "aside" });
 		await session.abort({ reason: "internal" });

@@ -59,6 +59,7 @@ import {
 } from "./capability/rule";
 import { bucketRules } from "./capability/rule-buckets";
 import type { EffectiveExtensionRoots } from "./capability/types";
+import { type OAuthAccountPools, SessionAccountPoolScope } from "./config/account-pools";
 import { shouldEnableAppendOnlyContext } from "./config/append-only-context-mode";
 import { shouldInlineToolDescriptors } from "./config/inline-tool-descriptors-mode";
 import { isAuthenticated, kNoAuth, ModelRegistry } from "./config/model-registry";
@@ -192,7 +193,11 @@ import {
 	USER_INTERRUPT_LABEL,
 	wrapSteeringForModel,
 } from "./session/messages";
-import { clampProviderContextImages, dropUnreadableContextImages } from "./session/provider-image-budget";
+import {
+	clampProviderContextImageBytes,
+	clampProviderContextImages,
+	dropUnreadableContextImages,
+} from "./session/provider-image-budget";
 import {
 	expandDefaultRetryFallbackChains,
 	findRetryFallbackCandidates,
@@ -295,6 +300,7 @@ import { normalizePromptPath } from "./utils/prompt-path";
 import { buildNamedToolChoice } from "./utils/tool-choice";
 import { VibeSessionRegistry } from "./vibe/runtime";
 import { registerLocalInferenceApi } from "./tiny/local-inference-api";
+import { shutdownTinyTitleClient } from "./tiny/title-client";
 import { buildWorkspaceTree, type WorkspaceTree } from "./workspace-tree";
 
 import {
@@ -355,7 +361,14 @@ import { cfgTtsr } from "./export/ttsr-settings";
 import { cfgDisabledProviders, cfgEnabledModels, cfgEnabledProviders, cfgModelRoles } from "./config/model-settings";
 import { cfgEditRecoverInlineEdits } from "./edit/settings";
 import { cfgGoalEnabled } from "./goals/settings";
-import { cfgImagesBlockImages, cfgStartupQuiet, cfgTuiReactions, cfgTuiRenderMermaid } from "./modes/settings";
+import {
+	cfgImagesBlockImages,
+	cfgStartupQuiet,
+	cfgTuiReactions,
+	cfgTuiAutoGraph,
+	cfgTuiRenderMermaid,
+	cfgTuiRenderSvg,
+} from "./modes/settings";
 import { cfgLspEnabled, cfgLspLazy, cfgLspShared } from "./lsp/settings";
 import {
 	cfgMcpEnableProjectConfig,
@@ -536,10 +549,22 @@ export interface CreateAgentSessionOptions {
 	getApiKey?: AgentOptions["getApiKey"];
 	/**
 	 * Session whose stored credential affinities are copied into this session
-	 * before any child credential operation.
+	 * before any child credential operation: explicit pins always, automatic
+	 * affinity only for providers this session's own transcript has not pinned.
 	 * @internal
 	 */
 	credentialSourceSessionId?: string;
+	/**
+	 * OAuth account pools for this session: provider id → identity keys (see
+	 * `AuthStorage.sessions.restrict`). A listed provider authenticates only with
+	 * those accounts, never another account or an API key, and requests fail
+	 * when none of them can serve. Applied after {@link credentialSourceSessionId}
+	 * affinity is copied, and enforced on every key lookup through the session's
+	 * model registry, whatever provider session id it carries (title generation,
+	 * advisors, subagents this session spawns). A custom {@link getApiKey}
+	 * bypasses it.
+	 */
+	oauthAccountPools?: OAuthAccountPools;
 
 	/** Model to use. Default: from settings, else first available */
 	model?: Model;
@@ -834,6 +859,17 @@ export interface CreateAgentSessionOptions {
 	 * other session gets no `cfg://` in its prompt and has writes refused. Default: false.
 	 */
 	settingsApproval?: boolean;
+	/**
+	 * Replies render in omp's own TUI transcript, which draws Mermaid, ```svg
+	 * figures and table charts; only then does the system prompt mention them.
+	 * Print, RPC, ACP and subagent sessions read replies as text. Default: false.
+	 */
+	tuiTranscript?: boolean;
+	/**
+	 * Name the unnamed session from the operator's messages once each reply begins
+	 * (see `title.generator`). Only the interactive TUI sets this; ignored for subagents. Default: false.
+	 */
+	autoTitle?: boolean;
 	/**
 	 * Defer `confirm` reserve-policy fallback until AgentSession prompt-time UI is configured.
 	 * ACP uses this while capabilities are negotiated without enabling UI-only tools.
@@ -1686,7 +1722,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 	// Pin authStorage to modelRegistry.authStorage: ModelRegistry.getApiKey() routes refresh
 	// failures through that instance, so any divergent storage handed to the bridge / mcpManager
 	// / session would silently miss credential_disabled events.
-	const modelRegistry =
+	let modelRegistry =
 		options.modelRegistry ??
 		new ModelRegistry(
 			options.authStorage ?? (await logger.time("discoverModels", discoverAuthStorage, agentDir, { settings, cwd })),
@@ -1823,7 +1859,26 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 	}
 	const providerSessionId = options.providerSessionId ?? sessionManager.getSessionId();
 	if (options.credentialSourceSessionId) {
-		modelRegistry.authStorage.sessions.inherit(options.credentialSourceSessionId, providerSessionId);
+		// A revived or resumed child already pins, in its own transcript, the accounts that
+		// hold its conversation cache. Inheriting the parent's automatic sticky for those
+		// providers would make seedCredentialPins defer to it (a live sticky for another
+		// account wins) and cold-miss the child's whole prefix. An explicit parent pin is
+		// the user's choice and still reaches the child.
+		const ownPins = sessionManager.getCredentialPins();
+		modelRegistry.authStorage.sessions.inherit(
+			options.credentialSourceSessionId,
+			providerSessionId,
+			(provider, explicit) => explicit || !ownPins.has(provider),
+		);
+	}
+	// From here on the session resolves every key through its pools; see
+	// SessionAccountPoolScope. A startup failure leaves no session to lift them.
+	const accountPoolScope = options.oauthAccountPools
+		? new SessionAccountPoolScope(modelRegistry.authStorage, options.oauthAccountPools, providerSessionId)
+		: undefined;
+	if (accountPoolScope) {
+		modelRegistry = accountPoolScope.registry(modelRegistry);
+		startupCleanup.defer(() => accountPoolScope.release());
 	}
 	const forkCacheShapeChanged =
 		options.model !== undefined ||
@@ -2046,6 +2101,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 	// which rules are bucketed into this session at all.
 	const isSubagentSession = (options.taskDepth ?? 0) > 0 || Boolean(options.parentTaskPrefix);
 	const agentKind: AgentKind = isSubagentSession ? SUB_AGENT_RULE_NAME : MAIN_AGENT_RULE_NAME;
+	// Visuals (Mermaid, SVG figures, table charts) are drawn only in the top-level TUI transcript.
+	const tuiTranscript = options.tuiTranscript === true && !isSubagentSession;
 	const resolvedAgentName = (options.agentName ?? agentKind).trim().toLowerCase();
 
 	// Discover rules and bucket them in one pass to avoid repeated scans over large rule sets.
@@ -2169,12 +2226,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 
 	try {
 		const getActiveModelString = (): string | undefined => {
-			const activeModel = agent?.state.model ?? model;
-			if (!activeModel) return undefined;
-			// Inherit the live route and effective effort, not just the model identity.
-			// A later effort change must not reuse the startup selector or restart auto triage.
-			const effort = agent?.state.model ? agent.state.thinkingLevel : effectiveThinkingLevel;
-			return formatModelSelectorValue(formatModelStringWithRouting(activeModel), effort);
+			const activeModel = agent?.state.model;
+			if (activeModel) return formatModelString(activeModel);
+			if (model) return formatModelString(model);
+			return undefined;
 		};
 		// Per-path mutation counter shared across edit/write tools. Late-diagnostics
 		// entries capture it at fetch time and are dropped at injection if a newer
@@ -3161,7 +3216,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				modelFallbackMessage =
 					patterns && patterns.length > 0
 						? `No model available matching enabledModels (${patterns.join(", ")}) with usable credentials. Configure auth for an allowed provider or adjust enabledModels.`
-						: "No models available. Use /login or set an API key environment variable. Then use /model to select a model.";
+						: "No default model selected. Use /login, set an API key environment variable, or select a local model with /model or --model.";
 			}
 		}
 
@@ -3656,13 +3711,12 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					toolSession.deviceOnlyWrite !== true),
 		});
 
-		// Resolve the live inline-descriptors setting against the session-start model.
-		// `auto` enforces the per-model policy (inline for Gemini, off otherwise); a
-		// mid-session model switch keeps the start-time model's decision. Prompt and
-		// agent (description pruning) must agree on it.
-		const inlineToolDescriptorsModelId = model?.id;
+		// Resolve the live inline-descriptors setting against the active model.
+		// `auto` enforces the per-model policy (inline for Gemini, off otherwise), so
+		// a mid-session model switch re-decides it. Prompt and agent (description
+		// pruning) must agree: every prompt rebuild re-syncs the agent's pruning.
 		const resolveInlineToolDescriptors = (): boolean =>
-			shouldInlineToolDescriptors(cfgInlineToolDescriptors.get(settings), inlineToolDescriptorsModelId);
+			shouldInlineToolDescriptors(cfgInlineToolDescriptors.get(settings), (agent?.state.model ?? model)?.id);
 		// Latest memory backend instructions rendered for advisor system prompts.
 		// Populated by the initial rebuildSystemPrompt below (before the session is
 		// constructed) and refreshed on every later rebuild via
@@ -3748,6 +3802,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			// tool-availability caveat lives in the wrapper template.
 			advisorMemoryPrompt = formatAdvisorMemoryPrompt(memoryInstructions);
 			if (hasSession) session.setAdvisorMemoryPrompt(advisorMemoryPrompt);
+			const inlineToolDescriptors = resolveInlineToolDescriptors();
+			// Unset only during the initial build; the agent is constructed with it.
+			if (agent) agent.pruneToolDescriptions = inlineToolDescriptors;
 			// A fixed string or array in systemPrompt replaces all generated blocks.
 			// Preserve the bookkeeping above, but skip discovering or rendering a
 			// template whose output would be discarded.
@@ -3829,7 +3886,6 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			// Owned/in-band tool dialects (non-native) require the full functions-
 			// namespace catalog; native tool calling lets the compact name list suffice.
 			const nativeTools = resolveDialect(cfgToolsFormat.get(settings), agent?.state.model ?? model) === undefined;
-			const inlineToolDescriptors = resolveInlineToolDescriptors();
 			const includeWorkspaceTree = cfgIncludeWorkspaceTree.get(settings);
 			if (includeWorkspaceTree && !workspaceTreePromise) {
 				const scan = scanWorkspaceTree();
@@ -3892,7 +3948,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				includeModelInPrompt: cfgIncludeModelInPrompt.get(settings),
 				personality: agentKind === "sub" ? "none" : cfgPersonality.get(settings),
 				subagent: agentKind === "sub",
-				renderMermaid: cfgTuiRenderMermaid.get(settings),
+				renderMermaid: tuiTranscript && cfgTuiRenderMermaid.get(settings),
+				renderSvg: tuiTranscript && cfgTuiRenderSvg.get(settings),
+				autoGraph: tuiTranscript && cfgTuiAutoGraph.get(settings) !== "off",
 				reactions: agentKind === "main" && options.hasUI === true && cfgTuiReactions.get(settings),
 				activeRepoContext,
 			});
@@ -4141,6 +4199,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			// else, and it runs before the blob broker uploads any of these bytes.
 			transformed = await dropUnreadableContextImages(transformed, transformModel);
 			transformed = await blobBroker.decorateContext(transformed, transformModel);
+			// Byte budget after decoration: URL/file-referenced images carry no inline bytes.
+			transformed = clampProviderContextImageBytes(transformed, transformModel);
 			// Keep per-request volatility out of the system prompt: the date/cwd
 			// reminder rides on the first user turn so open-weight providers keep
 			// their tool-schema prefix cache (#7404).
@@ -4364,6 +4424,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					: undefined
 				: undefined,
 		});
+		// Catalog rows carry the registry settings' extended-window opt-ins; this
+		// session adopts every model with the window its own settings select (a
+		// subagent with a compaction override must not inherit the parent's).
+		agent.setModelResolver(next => modelRegistry.fitContextWindow(next, settings));
 
 		cursorEventEmitter = event => agent.emitExternalEvent(event);
 
@@ -4587,6 +4651,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			agentId: resolvedAgentId,
 			agentKind,
 			providerSessionId: options.providerSessionId,
+			accountPoolScope,
 			providerPromptCacheKeySource,
 			advisorTools,
 			// Same per-call `grep` seam the primary bridge gets, built against the
@@ -4604,6 +4669,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			// resource frame would otherwise report every server as empty.
 			advisorMcpResources: cursorMcpResources,
 			titleSystemPrompt: options.titleSystemPrompt,
+			autoTitle: options.autoTitle === true && !isSubagentSession,
 		});
 		hasSession = true;
 		credentialNoticeSession = session;
@@ -4654,11 +4720,6 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		cfgToolCallSwitches.listen(session, ({ intentTracing, abortOnFabricatedResult }) => {
 			agent.intentTracing = intentTracing;
 			agent.abortOnFabricatedToolResult = abortOnFabricatedResult;
-		});
-		// Description pruning mirrors the prompt's inline catalog; the prompt listener
-		// above republishes the prompt for the same change.
-		cfgInlineToolDescriptors.listen(session, () => {
-			agent.pruneToolDescriptions = resolveInlineToolDescriptors();
 		});
 		// Tool-gating settings add or remove the tools they gate and refresh the
 		// prompt once per coalesced change. Restricted (structured) sessions keep the
@@ -4911,6 +4972,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 
 		{
 			const originalDispose = session.dispose.bind(session);
+			let tinyClientReleased = false;
 			session.dispose = async () => {
 				try {
 					// Reject new session work (eval starts) the moment disposal
@@ -4937,6 +4999,18 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					}
 					await originalDispose();
 				} finally {
+					// The tiny-model client is a process singleton shared by every session.
+					// Only the session that owns process state drops its connections, once:
+					// that fails every request still in flight, and a repeat dispose must not
+					// cancel requests other sessions made since.
+					if (bindsProcessState && !tinyClientReleased) {
+						tinyClientReleased = true;
+						try {
+							await shutdownTinyTitleClient();
+						} catch (error) {
+							logger.warn("Session dispose: tiny-model client shutdown failed", { error: String(error) });
+						}
+					}
 					unregisterUnlessParked();
 					unsubscribeCredentialDisabled();
 					unbindSessionEffects?.();
@@ -4983,15 +5057,17 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			}
 		}
 
-		// Broker-shared language servers: one server per project, multiplexed
-		// across omp instances by the LSP mux daemon. Session-level because the
-		// flag lives in module state consulted on every client cold-start.
-		// Re-applied live on `lsp.shared` changes: servers cold-started after the
-		// change use the new mode; already-running clients keep their transport
-		// until they exit or idle out.
-		setSharedLspEnabled(enableLsp && cfgLspShared.get(settings));
-		if (enableLsp) {
-			cfgLspShared.listen(session, shared => setSharedLspEnabled(shared));
+		// Broker-shared language servers (see lsp/mux/protocol.ts). The flag is
+		// module state read on every client cold start, so only a session that binds
+		// process state may set it. A subagent or helper session (usually
+		// enableLsp=false) must not switch the parent's later cold starts to private
+		// servers. Re-applied live on `lsp.shared` changes; running clients keep
+		// their transport until they exit or idle out.
+		if (bindsProcessState) {
+			setSharedLspEnabled(enableLsp && cfgLspShared.get(settings));
+			if (enableLsp) {
+				cfgLspShared.listen(session, shared => setSharedLspEnabled(shared));
+			}
 		}
 
 		// Start LSP warmup in the background so startup does not block on language server initialization.
@@ -5094,6 +5170,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 						transformed = await normalizeProviderContextImagesForModel(transformed, transformModel);
 						transformed = await dropUnreadableContextImages(transformed, transformModel);
 						transformed = await blobBroker.decorateContext(transformed, transformModel);
+						transformed = clampProviderContextImageBytes(transformed, transformModel);
 						return captureDateCwdReminder.transform(
 							transformed,
 							formatLocalCalendarDate(),

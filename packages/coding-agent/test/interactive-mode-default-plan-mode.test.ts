@@ -415,6 +415,33 @@ describe("InteractiveMode plan.defaultOnStartup", () => {
 		expect(session?.peekPlanProposalHandler()).toBeUndefined();
 	});
 
+	it("leaves plan mode on /new so the new session matches its empty mode record (issue #14653)", async () => {
+		const writeTool = makeTool("write");
+		const created = createHarness(
+			Settings.isolated({
+				"plan.defaultOnStartup": true,
+				"compaction.enabled": false,
+				modelRoles: { plan: "anthropic/claude-sonnet-4-6" },
+			}),
+			{ extraRegistryTools: [writeTool], builtInToolNames: ["read", "write"] },
+		);
+		await created.init({ suppressWelcomeIntro: true });
+		expect(created.planModeEnabled).toBe(true);
+		expect(session?.model?.id).toBe("claude-sonnet-4-6");
+		const previousSessionFile = session?.sessionFile;
+
+		await created.handleClearCommand();
+
+		expect(session?.sessionFile).not.toBe(previousSessionFile);
+		expect(session?.sessionManager.buildSessionContext().mode).toBe("none");
+		expect(created.planModeEnabled).toBe(false);
+		expect(created.planModePaused).toBe(false);
+		expect(session?.getPlanModeState()).toBeUndefined();
+		expect(session?.peekPlanProposalHandler()).toBeUndefined();
+		expect(session?.getActiveToolNames()).toEqual(["read"]);
+		expect(session?.model?.id).toBe("claude-sonnet-4-5");
+	});
+
 	it("enters only when enabled and the session has no conversation or explicit mode", () => {
 		expect(startupDecisionHarness(Settings.isolated({ "compaction.enabled": false }))).toBe(false);
 		const enabled = Settings.isolated({ "plan.defaultOnStartup": true, "compaction.enabled": false });

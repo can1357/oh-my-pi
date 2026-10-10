@@ -495,6 +495,21 @@ describe("Anthropic compaction replay", () => {
 			expect(roles(wire)).toEqual(["assistant", "user", files, "assistant", "Continue."]);
 		});
 
+		it("keeps a developer message ending the retained tail a user turn ahead of trailing file metadata", () => {
+			const summary = summaryMessage({ signature: SIGNATURE, filesText: files }, "anthropic", 20);
+			const reminder: Context["messages"][number] = {
+				role: "developer",
+				content: "<system-reminder>budget</system-reminder>",
+				timestamp: 12,
+			};
+			const wire = convertAnthropicMessages([summary, call, result(11), reminder], preserved, false, {
+				replayCompaction: true,
+			});
+			// As a `system` message it would sit before a user turn, which the API rejects.
+			expect(wire.map(param => param.role)).toEqual(["assistant", "user", "user", "user"]);
+			expect(roles(wire).at(-1)).toBe(files);
+		});
+
 		it("replays earlier summaries' metadata at their own points inside the tail", () => {
 			const summary = summaryMessage(
 				{
@@ -718,6 +733,32 @@ describe("Anthropic compaction replay", () => {
 		expect(control?.index).toBeGreaterThan(nextIndex);
 		const keptIndex = wire.findIndex(message => JSON.stringify(message).includes("sig_kept"));
 		expect(wire.slice(0, keptIndex).some(message => message.role === "system")).toBe(false);
+	});
+
+	it("places a new tool addition after compaction file metadata, not before a user turn", async () => {
+		const first = await captureRequest(preserved, options, context.messages, [readTool]);
+		const opened = keptFrom(first);
+		const summary = summaryMessage(
+			{ signature: SIGNATURE, filesText: "<files>handlers.ts (Read)</files>" },
+			"anthropic",
+			3,
+		);
+		const request = await captureRequest(
+			preserved,
+			options,
+			[...context.messages, opened, summary],
+			[readTool, addedTool],
+		);
+		const wire = request.payload.messages;
+		if (!Array.isArray(wire)) throw new Error("Expected wire messages");
+		const controls = toolControls(wire);
+		expect(controls).toHaveLength(1);
+		const controlIndex = controls[0]?.index ?? -1;
+		expect(wire[controlIndex]?.role).toBe("system");
+		const filesIndex = wire.findIndex(message => JSON.stringify(message).includes("<files>handlers.ts"));
+		expect(filesIndex).toBeGreaterThan(-1);
+		expect(controlIndex).toBeGreaterThan(filesIndex);
+		expect(wire[controlIndex + 1]?.role === "assistant" || controlIndex === wire.length - 1).toBe(true);
 	});
 
 	it("makes no tool or effort change of its own on a compaction request", async () => {

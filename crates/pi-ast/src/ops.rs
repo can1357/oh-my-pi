@@ -294,8 +294,11 @@ pub fn rewrite_source(
 	Ok((ast.root().text().into_owned(), replacements))
 }
 
-pub fn apply_edits(content: &str, edits: &[Edit<String>]) -> Result<String> {
-	let mut sorted: Vec<&Edit<String>> = edits.iter().collect();
+pub fn apply_edits<'e>(
+	content: &str,
+	edits: impl IntoIterator<Item = &'e Edit<String>>,
+) -> Result<String> {
+	let mut sorted: Vec<&Edit<String>> = edits.into_iter().collect();
 	sorted.sort_by(|a, b| {
 		a.position
 			.cmp(&b.position)
@@ -311,6 +314,7 @@ pub fn apply_edits(content: &str, edits: &[Edit<String>]) -> Result<String> {
 			&& a.inserted_text == b.inserted_text
 	});
 	let mut prev_end = 0usize;
+	let mut capacity = content.len();
 	for edit in &sorted {
 		if edit.position < prev_end {
 			return Err(anyhow!(
@@ -318,19 +322,26 @@ pub fn apply_edits(content: &str, edits: &[Edit<String>]) -> Result<String> {
 			));
 		}
 		prev_end = edit.position.saturating_add(edit.deleted_length);
+		capacity = (capacity + edit.inserted_text.len()).saturating_sub(edit.deleted_length);
 	}
 
-	let mut output = content.to_string();
-	for edit in sorted.into_iter().rev() {
+	// Edits are sorted and disjoint: copy the gaps and replacements forward
+	// once instead of shifting the tail of the string for every edit.
+	let mut output = String::with_capacity(capacity);
+	let mut copied = 0;
+	for edit in sorted {
 		let start = edit.position;
 		let end = edit.position.saturating_add(edit.deleted_length);
-		if end > output.len() || start > end {
+		if end > content.len() || !content.is_char_boundary(start) || !content.is_char_boundary(end) {
 			return Err(anyhow!("Computed edit range is out of bounds"));
 		}
 		let replacement = std::str::from_utf8(&edit.inserted_text)
 			.map_err(|err| anyhow!("Replacement text is not valid UTF-8: {err}"))?;
-		output.replace_range(start..end, replacement);
+		output.push_str(&content[copied..start]);
+		output.push_str(replacement);
+		copied = end;
 	}
+	output.push_str(&content[copied..]);
 	Ok(output)
 }
 
@@ -401,15 +412,46 @@ fn compile_rust_contextual_pattern(pattern: &str) -> Option<Pattern> {
 
 #[cfg(test)]
 mod tests {
-	use ast_grep_core::source::Edit;
+	use std::collections::HashMap;
 
-	use super::{SupportLang, apply_edits, compile_search_patterns};
+	use ast_grep_core::{MatchStrictness, source::Edit, tree_sitter::LanguageExt};
+
+	use super::{
+		SupportLang, apply_edits, compile_pattern, compile_rewrite_rules, compile_search_patterns,
+		rewrite_source,
+	};
 
 	#[test]
 	fn compile_search_patterns_compiles_rust_patterns() {
 		let patterns = compile_search_patterns("foo($$$ARGS)", SupportLang::Rust)
 			.expect("rust pattern should compile");
 		assert!(!patterns.is_empty());
+	}
+
+	#[test]
+	fn emacs_lisp_pattern_binds_metavariables() {
+		let lang = SupportLang::EmacsLisp;
+		let pattern = compile_pattern("(defun $NAME $$$BODY)", None, &MatchStrictness::Smart, lang)
+			.expect("elisp pattern should compile");
+		let ast = lang.ast_grep("(defun greet (name)\n  (message \"Hello %s\" name)\n)");
+		let matched = ast.root().find(pattern).expect("defun should match");
+		let env = HashMap::<String, String>::from(matched.get_env().clone());
+		assert_eq!(env.get("NAME").map(String::as_str), Some("greet"));
+	}
+
+	#[test]
+	fn emacs_lisp_rewrite_substitutes_captures() {
+		let lang = SupportLang::EmacsLisp;
+		let rules = compile_rewrite_rules(
+			&[("(message $FORMAT $ARG)".to_owned(), "(format-message $FORMAT $ARG)".to_owned())],
+			lang,
+		)
+		.expect("elisp rewrite should compile");
+		let (output, replacements) =
+			rewrite_source("(defun greet (name)\n  (message \"Hello %s\" name))\n", lang, &rules)
+				.expect("rewrite succeeds");
+		assert_eq!(replacements, 1);
+		assert_eq!(output, "(defun greet (name)\n  (format-message \"Hello %s\" name))\n");
 	}
 
 	#[test]

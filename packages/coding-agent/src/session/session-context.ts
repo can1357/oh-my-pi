@@ -147,7 +147,7 @@ export function getRestorableSessionModels(
 	return [roleModel, defaultModel];
 }
 
-export function getLatestCompactionEntry(entries: SessionEntry[]): CompactionEntry | null {
+export function getLatestCompactionEntry(entries: readonly SessionEntry[]): CompactionEntry | null {
 	for (let i = entries.length - 1; i >= 0; i--) {
 		if (entries[i].type === "compaction") {
 			return entries[i] as CompactionEntry;
@@ -175,6 +175,11 @@ export interface BuildSessionContextOptions {
 	 * hides the call the agent is still waiting on.
 	 */
 	keepDanglingToolCalls?: boolean;
+	/**
+	 * Tool calls the live agent loop is still executing. They count as paired, so a
+	 * mid-turn rebuild keeps the in-flight assistant turn; the loop appends their results.
+	 */
+	inFlightToolCallIds?: ReadonlySet<string>;
 	/** Price and resolve persisted snapcompact frame payloads on demand. */
 	resolveFrameData?: (data: string) => snapcompact.LazyFrameData | undefined;
 }
@@ -688,7 +693,7 @@ export function buildSessionContext(
 	// a pending block instead of vanishing from the chat.)
 	const keepDangling = options?.transcript === true && options.keepDanglingToolCalls === true;
 	if (!keepDangling) {
-		const pairedToolResultIds = new Set<string>();
+		const pairedToolResultIds = new Set<string>(options?.inFlightToolCallIds);
 		for (const message of messages) {
 			if (message.role === "toolResult") pairedToolResultIds.add(message.toolCallId);
 		}
