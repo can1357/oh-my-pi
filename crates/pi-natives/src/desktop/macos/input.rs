@@ -1058,8 +1058,8 @@ fn stroke_path(
 /// the start, then [`stroke_path`], all routed to `wid` so the user's pointer
 /// stays where it is. `keys` are held around the gesture as key transitions
 /// to the target process, and their modifiers ride on every pointer event.
-/// A drag that starts a drag-and-drop session fails as
-/// [`drag_session_outcome`] describes.
+/// A drag that starts a drag-and-drop session throws with its outcome
+/// unconfirmed, as [`drag_session_outcome`] describes.
 fn background_drag(
 	source: &CGEventSource,
 	pid: libc::pid_t,
@@ -1117,8 +1117,10 @@ fn drag_pasteboard_count() -> isize {
 /// so where the item lands is not up to the drag. On macOS 26, Font Book
 /// dropped a font on the collection at the path's end in some drags and
 /// nowhere in others, depending on where the user's pointer and windows were,
-/// and `TextEdit` moved dragged text to the end of its document. Such a drag
-/// fails, and it is not rerun in takeover, which would repeat a drop that did
+/// and `TextEdit` moved dragged text to the end of its document. Such a drag's
+/// outcome is unknown rather than failed: it throws `InputFailed` saying the
+/// drop could not be confirmed, so the caller reads the target before
+/// retrying, and it is not rerun in takeover, which would repeat a drop that did
 /// land. Escape posted to the source did not cancel the drop, and releasing
 /// early would only drop the item short of the path's end. A drag inside a
 /// view (a slider, a text selection, a web page's mouse-driven drag) leaves
@@ -1140,10 +1142,11 @@ fn drag_session_outcome(
 		}
 	}
 	Err(DesktopError::input_failed(format!(
-		"the drag reached window {} ({}) but started a drag-and-drop session, which macOS completes \
-		 from the user's real pointer and button, so the item may have been dropped at the path's \
-		 end, elsewhere, or not at all; inspect the window before retrying; if nothing was dropped, \
-		 drag with takeover:true or use the app's menu command or ax actions",
+		"the drag reached window {} ({}), but its outcome could not be confirmed: it started a \
+		 drag-and-drop session, which macOS completes from the user's real pointer and button, so the \
+		 item may already have been dropped at the path's end, elsewhere, or not at all. Read the \
+		 target before retrying; prefer the app's menu command or ax actions, and drag with \
+		 takeover:true only if nothing was dropped",
 		window.id, window.app,
 	)))
 }
@@ -2951,7 +2954,7 @@ mod tests {
 	}
 
 	#[test]
-	fn a_drag_that_starts_a_drag_and_drop_session_fails_instead_of_reporting_success() {
+	fn a_drag_that_starts_a_drag_and_drop_session_reports_its_drop_as_unconfirmed() {
 		use std::cell::{Cell, RefCell};
 		let window = background_window("Font Book");
 		// `reads` are the drag pasteboard's change counts after the release, in
@@ -2970,22 +2973,24 @@ mod tests {
 				},
 				|| log.borrow_mut().push("caught up".to_owned()),
 			);
-			(outcome.map_err(|error| error.code.as_str()), log.into_inner())
+			(outcome.map_err(|error| (error.code.as_str(), error.message)), log.into_inner())
 		};
 		// Font Book wrote the drag pasteboard while it handled the routed
 		// drag: its session may drop the font at the path's end, elsewhere or
-		// nowhere, so the call fails instead of returning as if it had moved.
-		assert_eq!(run(&[8]), (Err("InputFailed"), vec!["read 8".to_owned()]));
+		// nowhere, so the call throws with the drop unconfirmed instead of
+		// returning as if it had moved, and says to read the target first.
+		let (outcome, log) = run(&[8]);
+		assert_eq!(log, vec!["read 8".to_owned()]);
+		let (code, message) = outcome.unwrap_err();
+		assert_eq!(code, "InputFailed");
+		assert!(message.contains("could not be confirmed"), "{message}");
+		assert!(message.contains("may already have been dropped"), "{message}");
+		assert!(message.contains("before retrying"), "{message}");
 		// A source that begins its session only once it catches up with the
 		// events is found by the read after the round trip.
-		assert_eq!(
-			run(&[7, 9]),
-			(Err("InputFailed"), vec![
-				"read 7".to_owned(),
-				"caught up".to_owned(),
-				"read 9".to_owned()
-			])
-		);
+		let (outcome, log) = run(&[7, 9]);
+		assert_eq!(log, vec!["read 7".to_owned(), "caught up".to_owned(), "read 9".to_owned()]);
+		assert_eq!(outcome.unwrap_err().0, "InputFailed");
 		// A drag inside a view (a slider, a selection) leaves the pasteboard
 		// alone.
 		assert_eq!(
