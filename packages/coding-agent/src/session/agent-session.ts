@@ -12747,13 +12747,14 @@ export class AgentSession implements SettingsScope {
 	 * Shared consume executor for Codex and Claude plans. Attempt keys enter the
 	 * process-wide set before mutation, while nonterminal outcomes release and
 	 * defer the episode so a still-banked grant is not buried permanently.
-	 * Returns the credentials whose reset was spent or adopted from a peer.
+	 * Returns the credentials whose reset was spent or adopted from a peer, and
+	 * whether the session's account pool dropped a planned restore.
 	 */
 	async #executeResetActions(
 		provider: "openai-codex" | "anthropic",
 		actions: (CodexResetAction | ClaudeResetAction)[],
 		coordinator: CodexAutoRedeemCoordinator,
-	): Promise<number[]> {
+	): Promise<{ restoredCredentialIds: number[]; poolLimited: boolean }> {
 		const authStorage = this.#modelRegistry.authStorage;
 		const providerLabel = provider === "anthropic" ? "Claude" : "Codex";
 		const source = provider === "anthropic" ? "claude-auto-reset" : "codex-auto-reset";
@@ -12764,6 +12765,7 @@ export class AgentSession implements SettingsScope {
 			action.reason === "blocked-account" &&
 			!authStorage.sessions.permits(provider, this.sessionId, action.target.credentialId);
 		const restored: number[] = [];
+		let poolLimited = false;
 		for (const action of actions) {
 			if (coordinator.attemptedKeys.has(action.attemptKey)) continue;
 			const previousAttemptAt = coordinator.lastAttemptAtByAccount.get(action.accountKey);
@@ -12851,6 +12853,7 @@ export class AgentSession implements SettingsScope {
 				if (sharedReset) restored.push(action.target.credentialId);
 				if (leftPool) {
 					// Never attempted: the episode and cooldown stay free if the pool allows it again.
+					poolLimited = true;
 					coordinator.attemptedKeys.delete(action.attemptKey);
 					if (previousAttemptAt === undefined) coordinator.lastAttemptAtByAccount.delete(action.accountKey);
 					else coordinator.lastAttemptAtByAccount.set(action.accountKey, previousAttemptAt);
@@ -12920,7 +12923,7 @@ export class AgentSession implements SettingsScope {
 			}
 		}
 		if (restored.length > 0) void this.fetchUsageReports();
-		return restored;
+		return { restoredCredentialIds: restored, poolLimited };
 	}
 
 	async #maybeAutoRedeemReset(activeBlockUnblockAtMs?: number): Promise<ResetRecoveryResult> {
@@ -12987,8 +12990,12 @@ export class AgentSession implements SettingsScope {
 			) {
 				return { restored: false, poolLimited };
 			}
-			const restoredCredentialIds = await this.#executeResetActions(provider, plan.actions, coordinator);
-			return { restored: restoredCredentialIds.length > 0, restoredCredentialIds, poolLimited };
+			const executed = await this.#executeResetActions(provider, plan.actions, coordinator);
+			return {
+				restored: executed.restoredCredentialIds.length > 0,
+				restoredCredentialIds: executed.restoredCredentialIds,
+				poolLimited: poolLimited || executed.poolLimited,
+			};
 		})()
 			.catch((error): ResetRecoveryResult => {
 				logger.warn("auto-reset: blocked pass failed", { provider, account: accountKey, error: String(error) });

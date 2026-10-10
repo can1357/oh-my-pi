@@ -695,7 +695,7 @@ export interface ResetRecoveryResult {
 	retryAfterMs?: number;
 	/** Credentials whose reset the pass spent or adopted from a peer. */
 	restoredCredentialIds?: number[];
-	/** The session's account pool excluded at least one restore candidate. */
+	/** The session's account pool excluded a restore candidate or dropped a planned restore. */
 	poolLimited?: boolean;
 }
 

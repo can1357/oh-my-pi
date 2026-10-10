@@ -345,6 +345,21 @@ describe("Claude saved-reset trigger integration", () => {
 		await Promise.all([runner.waitForIdle(), joiner.waitForIdle()]);
 	}
 
+	/** Empties the session's pool while the first pending attempt marker is written; returns that lease. */
+	function emptyPoolOnPendingMarker(session: AgentSession): () => SessionRestrictionLease | undefined {
+		const write = Bun.write.bind(Bun);
+		let replaced: SessionRestrictionLease | undefined;
+		vi.spyOn(Bun, "write").mockImplementation(async (destination, input) => {
+			// Only the reset lock files are written here, always as text.
+			const written = await write(destination as string, input as string);
+			if (!replaced && typeof input === "string" && input.startsWith("pending:")) {
+				replaced = authStorage.sessions.restrict("anthropic", session.sessionId, []);
+			}
+			return written;
+		});
+		return () => replaced;
+	}
+
 	it("redeems the exact live Cedar grant on a blocked retry and immediately recovers", async () => {
 		const { session, targets } = buildSession({
 			report: claudeReport(1),
@@ -512,22 +527,12 @@ describe("Claude saved-reset trigger integration", () => {
 		});
 		const pool = await poolToSessionAccount(session, 3 * 24 * HOUR);
 		mockSchedulerWaitWithClock();
-		const write = Bun.write.bind(Bun);
-		let replaced: SessionRestrictionLease | undefined;
-		vi.spyOn(Bun, "write").mockImplementation(async (destination, input) => {
-			// Only the reset lock files are written here, always as text.
-			const written = await write(destination as string, input as string);
-			// The pool is replaced while the pending attempt marker is written.
-			if (!replaced && typeof input === "string" && input.startsWith("pending:")) {
-				replaced = authStorage.sessions.restrict("anthropic", session.sessionId, []);
-			}
-			return written;
-		});
+		const replaced = emptyPoolOnPendingMarker(session);
 		let repooled: SessionRestrictionLease | undefined;
 		try {
 			await session.prompt("lose the pooled account while recording the attempt");
 			await session.waitForIdle();
-			expect(replaced).toBeDefined();
+			expect(replaced()).toBeDefined();
 			expect(targets).toEqual([]);
 			expect(coordinator.attemptedKeys.size).toBe(0);
 			expect(session.agent.state.messages.at(-1)).toMatchObject({ role: "assistant", stopReason: "error" });
@@ -537,7 +542,7 @@ describe("Claude saved-reset trigger integration", () => {
 			await session.prompt("recover once the account is pooled again");
 			await session.waitForIdle();
 		} finally {
-			const lease = repooled ?? replaced;
+			const lease = repooled ?? replaced();
 			if (lease) authStorage.sessions.unrestrict("anthropic", session.sessionId, lease);
 			await pool.release();
 		}
@@ -569,6 +574,41 @@ describe("Claude saved-reset trigger integration", () => {
 		}
 
 		expect(spent).toEqual([pool.outsideId]);
+		expect(open.session.agent.state.messages.at(-1)).toMatchObject({ role: "assistant", stopReason: "stop" });
+		expect(pooled.session.agent.state.messages.at(-1)).toMatchObject({ role: "assistant", stopReason: "error" });
+	});
+
+	it("restores the shared account for an unrestricted session that joined a pass whose pool dropped it mid-spend", async () => {
+		const openQuota = { restored: false };
+		const pooled = buildSession({ report: null, status: claudeStatus(true), streamErrorFirst: true });
+		const open = buildSession({
+			report: null,
+			status: claudeStatus(true),
+			streamErrorFirst: true,
+			quota: openQuota,
+			coordinator: pooled.coordinator,
+		});
+		const pool = await poolToSessionAccount(pooled.session, 3 * 24 * HOUR);
+		// Only the shared account is listed, so planning excludes nothing.
+		const listed = await authStorage.resets.list({ provider: "anthropic" });
+		vi.spyOn(authStorage.resets, "list").mockResolvedValue(
+			listed.filter(status => status.credentialId === pool.pooledId),
+		);
+		const replaced = emptyPoolOnPendingMarker(pooled.session);
+		const spent = recordSpends(credentialId => (credentialId === pool.pooledId ? openQuota : undefined));
+		mockSchedulerWaitWithClock();
+
+		try {
+			await promptJoined(pooled.session, open.session, pooled.coordinator);
+		} finally {
+			const lease = replaced();
+			if (lease) authStorage.sessions.unrestrict("anthropic", pooled.session.sessionId, lease);
+			await pool.release();
+		}
+
+		expect(replaced()).toBeDefined();
+		expect(spent).toEqual([pool.pooledId]);
+		expect(open.modelCalls()).toBe(2);
 		expect(open.session.agent.state.messages.at(-1)).toMatchObject({ role: "assistant", stopReason: "stop" });
 		expect(pooled.session.agent.state.messages.at(-1)).toMatchObject({ role: "assistant", stopReason: "error" });
 	});
