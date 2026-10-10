@@ -78,6 +78,17 @@ function defaultConvertToLlm(messages: AgentMessage[]): Message[] {
 	});
 }
 
+/** Whether some `toolResult` message of `previous` is no longer present (by identity) in `next`. */
+function droppedToolResult(previous: readonly AgentMessage[], next: readonly AgentMessage[]): boolean {
+	let kept: Set<AgentMessage> | undefined;
+	for (const message of previous) {
+		if (message.role !== "toolResult") continue;
+		kept ??= new Set(next);
+		if (!kept.has(message)) return true;
+	}
+	return false;
+}
+
 function refreshToolChoiceForActiveTools(
 	toolChoice: ToolChoice | undefined,
 	tools: AgentContext["tools"] = [],
@@ -448,6 +459,7 @@ export class Agent {
 	#steeringMode: "all" | "one-at-a-time";
 	#followUpMode: "all" | "one-at-a-time";
 	#interruptMode: "immediate" | "wait";
+	#historyRevision = 0;
 	#sessionId?: string;
 	#deadline?: number;
 	#promptCacheKey?: string;
@@ -1266,10 +1278,25 @@ export class Agent {
 		this.#state.tools = t;
 	}
 
-	replaceMessages(ms: AgentMessage[]) {
+	/**
+	 * Times a tool result the model saw may have left the conversation or changed: bumped by `replaceMessages`
+	 * when a previous `toolResult` message is absent (by identity) from the new list or the caller passes
+	 * `toolResultsRewritten`, and by `clearMessages`/`reset`. Appends and dropping other messages leave it unchanged.
+	 */
+	get historyRevision(): number {
+		return this.#historyRevision;
+	}
+
+	/**
+	 * Replace the conversation. Pass `toolResultsRewritten` when tool results were rewritten in place (same
+	 * objects, new content), which identity comparison cannot detect.
+	 */
+	replaceMessages(ms: AgentMessage[], options?: { toolResultsRewritten?: boolean }) {
+		const previous = this.#state.messages;
 		// New array assignment is intentional: caller-owned `ms` may be mutated
 		// after handoff; snapshot it so external mutations cannot leak in.
 		this.#state.messages = ms.slice();
+		if (options?.toolResultsRewritten || droppedToolResult(previous, this.#state.messages)) this.#historyRevision++;
 	}
 
 	/** Signal that the steering/follow-up queue contents may have changed. Every
@@ -1510,6 +1537,7 @@ export class Agent {
 
 	clearMessages() {
 		this.#state.messages.length = 0;
+		this.#historyRevision++;
 	}
 
 	abort(reason?: unknown) {
@@ -1552,6 +1580,7 @@ export class Agent {
 			this.#resolveRunningPrompt = undefined;
 		}
 		this.#state.messages.length = 0;
+		this.#historyRevision++;
 		this.#state.isStreaming = false;
 		this.#state.streamMessage = null;
 		this.#state.pendingToolCalls.clear();

@@ -28,10 +28,9 @@ const save = await win.ref("e12");
 await save.press();
 const [field] = await win.find({ role: "textfield", title: "Search" });
 await field.setValue("todo");
-await computer.run(async ({ desktop, wait }) => {
+await computer.run(async ({ desktop }) => {
 	const target = await desktop.window({ title: "Settings" });
 	await target.press("cmd+f");
-	await wait(300);
 	return await target.ax();
 }, { timeout: 30 });
 ```
@@ -49,10 +48,13 @@ await win.click(120, 48, button="right")
 - Choose the route by the surface: use AX for exposed semantic controls (`win.ax()` → `el.press()`/`el.setValue()`), and window screenshots/pixels for canvases, mirrored devices, and custom-drawn controls. Element actions need no screenshot. If the relevant controls are absent from AX, switch to pixels rather than repeatedly inspecting the same tree.
 - Pointer `x,y`: pixels in the MOST RECENT FULL screenshot of the SAME target. `zoom` uses a rectangle in that frame and returns a detailed view without changing it; subsequent clicks still use the full screenshot, never zoom pixels. AX coordinates are global desktop coordinates. NEVER mix them.
 - Prefer a window screenshot to a desktop overview. Desktop capture defaults to the monitor containing the focused window, with primary-monitor fallback; an explicit `all` setting captures the combined desktop.
-- An element keeps its `[ref=eN]` across `.ax()`/`find()` reads until its role or label changes; a ref whose element is missing from the window's last two `.ax()` snapshots throws `StaleRef`. Re-snapshot; NEVER guess.
+- A cell that sends input ends with a report, after its output, per window it touched (desktop or display input counts for the window under the pointer, or the focused window for keys): only what changed since your last tree of that window — `~` changed rows, `+` added rows (`(in eN)` names a new row's parent), `removed: e7-e9`, `order of eN's children: …` — or `no change since your last tree`; `win.ax()` prints the whole tree when you no longer have it. `past this read's node limit: eN-eM` = refs the truncated re-read did not reach; not removed. Refs of unchanged rows in your earlier tree stay live: act on them and the report's refs without another `ax()`. A window you have no tree of, and a new window the input focused, print whole. A call that failed on a ref reports its window too.
+- Reads after input in the same cell (`ax()`, `find()`, `observe()`, screenshots, window lookups, element reads) first wait until the app stops changing; NEVER add sleeps. AVOID `ax()` right after input: the report carries the change.
+- `no change` = the app went quiet with no accessibility change; not proof the input was ignored. Look before resending: a second send may land twice. A report ending `still changing` was read mid-update: read again before relying on it.
+- An element keeps its `[ref=eN]` across `.ax()`/`find()` reads and reports until its role or label changes; a ref whose element is missing from the window's last two snapshots (`.ax()` or report) throws `StaleRef`. Use refs from your latest tree of that window and the reports since; NEVER guess.
 - Outside explicitly acquired control, window input defaults to background routes without moving the user's pointer or deliberately activating the target. NEVER pass `takeover` by default. Only after THAT call throws `BackgroundUnavailable` or a screenshot proves a no-op, and AX cannot do it, retry that call with `{ takeover: true }`. A keyboard refusal does not make clicks need takeover. OS acceptance alone does not prove the application acted.
 - Partial-delivery or restoration error? Inspect the target before retrying; input may already have landed. NEVER blindly repeat it with takeover.
-- After changing the UI, verify the expected state with fresh AX evidence or a screenshot. In a run, use `wait(predicate, {timeout, interval})` for a specific state rather than assuming a fixed sleep means success.
+- After changing the UI, verify the expected state from the cell's report, or with fresh AX evidence or a screenshot when it has none. In a run, use `wait(predicate, {timeout, interval})` for a specific state rather than assuming a fixed sleep means success.
 - Desktop-root pointer helpers (`computer.click`, `computer.move`, …) drive the user's real pointer; act through window handles.
 - Wayland: per-window native input and `.raise()` are unavailable; use AX, or desktop input after focusing the target yourself.
 - Screenshots save full resolution to a temp path; use `{ silent: true }` in loops.

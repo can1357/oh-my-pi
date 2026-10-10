@@ -113,6 +113,41 @@ impl DesktopCapabilities {
 	}
 }
 
+/// Bounds for `DesktopSession.waitForUiQuiet`.
+#[napi(object)]
+#[derive(Debug, Clone, Default)]
+pub struct UiQuietOptions {
+	/// default 250
+	pub quiet_ms: Option<u32>,
+	/// default 5000
+	pub cap_ms:   Option<u32>,
+}
+
+/// Outcome of waiting for touched applications to stop emitting
+/// accessibility notifications.
+#[napi(object)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UiQuiet {
+	/// Milliseconds from the call until the quiet window closed, or until the
+	/// cap.
+	pub waited_ms: u32,
+	/// Counted AX notifications received while waiting.
+	pub events:    u32,
+	/// True when the cap ended the wait while notifications were still
+	/// arriving.
+	pub timed_out: bool,
+	/// Processes whose notifications were observed. 0 means nothing could be
+	/// observed and the call returned at once.
+	pub watched:   u32,
+}
+
+impl UiQuiet {
+	/// Nothing could be observed; callers fall back to a fixed delay.
+	pub(crate) const fn unwatched() -> Self {
+		Self { waited_ms: 0, events: 0, timed_out: false, watched: 0 }
+	}
+}
+
 #[napi(object)]
 #[derive(Debug, Clone, Default)]
 pub struct DesktopSessionOptions {
