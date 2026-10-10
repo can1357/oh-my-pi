@@ -227,8 +227,8 @@ export interface SegmentView {
 
 /**
  * The status line's facts for the native composer. A TSP terminal shows no
- * status strip: the tab title carries the session, the pane header the path
- * and branch, and the composer the rest.
+ * status strip: the tab title carries the session, the pane header the path,
+ * and the composer the rest (the git branch among its facts).
  */
 export interface ComposerFacts {
 	/**

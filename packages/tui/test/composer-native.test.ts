@@ -440,7 +440,7 @@ describe("native composer without a status strip", () => {
 			const model = byRole(bar, "omp.composer.model")!;
 			expect(model.p).toMatchObject({ actions: { click: "status.model" } });
 			expect(nodes(model).map(n => n.k)).toEqual(["row", "icon", "text", "icon"]);
-			// Path and branch belong to Tern's pane header; the rest stays as a fact.
+			// The path belongs to Tern's pane header; the rest stays as a fact (git shows nothing without a repo).
 			const extras = byRole(bar, "omp.composer.extras")!;
 			expect((extras.c ?? []).filter(isNode).map(n => n.key)).toEqual(["hostname"]);
 			expect(byRole(bar, "omp.composer.usage")?.p).toMatchObject({ actions: { click: "status.cost" } });
