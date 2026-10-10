@@ -194,10 +194,8 @@ impl KeyFocus {
 			FocusedWindow::Id(id) => id == wid,
 			FocusedWindow::Unmapped => false,
 		};
-		reported
-			&& self
-				.element_window
-				.is_some_and(|id| id != wid && parent_of(id) == Some(wid))
+		let overlay = self.element_window.filter(|&id| id != wid);
+		reported && overlay.is_some_and(|id| parent_of(id) == Some(wid))
 	}
 }
 
