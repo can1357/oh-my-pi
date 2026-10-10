@@ -420,6 +420,7 @@ async function runTestCommand(testCommand: TestCommand): Promise<void> {
 		let timedOut = false;
 		const killTimer = setTimeout(() => {
 			timedOut = true;
+			process.stdout.write(describeStuckProcessTree(proc.pid));
 			proc.kill("SIGKILL");
 		}, chunkTimeoutMs());
 		const exitCode = await proc.exited;
@@ -487,6 +488,46 @@ function chunkTimeoutMs(): number {
 	return 600_000;
 }
 
+// What a watchdog-killed chunk was still doing, captured just before the
+// SIGKILL: every process left in the chunk's tree (the `bun test` coordinator,
+// its `--test-worker`s, anything they spawned) with state, CPU, RSS and kernel
+// wait channel, plus the sockets those processes hold. A chunk can report every
+// test and still never exit; this is the only evidence of which process refused
+// to and what it was blocked on. Linux-only (ps/ss column names); elsewhere "".
+function describeStuckProcessTree(rootPid: number): string {
+	if (process.platform !== "linux") return "";
+	const ps = Bun.spawnSync(["ps", "-eo", "pid=,ppid=,stat=,etimes=,pcpu=,rss=,wchan:24=,args="]);
+	if (!ps.success) return "";
+	const rows = ps.stdout
+		.toString()
+		.split("\n")
+		.map(line => line.trim().split(/\s+/))
+		.filter(cols => cols.length >= 8);
+	const tree = new Set([String(rootPid)]);
+	for (let grew = true; grew;) {
+		grew = false;
+		for (const cols of rows) {
+			if (tree.has(cols[1]) && !tree.has(cols[0])) {
+				tree.add(cols[0]);
+				grew = true;
+			}
+		}
+	}
+	const lines = ["[watchdog] live process tree (pid ppid stat elapsed_s cpu% rss_kb wchan args):"];
+	for (const cols of rows) {
+		if (tree.has(cols[0])) lines.push(`  ${cols.slice(0, 7).join(" ")} ${cols.slice(7).join(" ").slice(0, 200)}`);
+	}
+	const ss = Bun.spawnSync(["ss", "-tuanpH"]);
+	if (ss.success) {
+		const owned = ss.stdout
+			.toString()
+			.split("\n")
+			.filter(line => [...tree].some(pid => line.includes(`pid=${pid},`)));
+		lines.push(`[watchdog] sockets held by that tree (${owned.length}):`, ...owned.map(line => `  ${line.trim()}`));
+	}
+	return `${lines.join("\n")}\n`;
+}
+
 // Exit codes that mean the bun process itself died to a runtime fault
 // (128 + fatal signal) rather than reporting failing tests (which exit 1).
 // Bun's panic handler exits via SIGTRAP (133) on macOS; raw SIGILL/SIGBUS/
@@ -535,19 +576,19 @@ function isCI(): boolean {
 	return normalized !== "" && normalized !== "0" && normalized !== "false";
 }
 
-// Fan-out width for the local parallel path, clamped to the command count.
-// Defaults to the machine's available parallelism; `OMP_TEST_CONCURRENCY`
-// overrides it — a positive integer to pick an exact width (dial down on a
-// memory-constrained laptop), or `all`/`max` to launch every chunk at once.
-function testConcurrency(total: number): number {
-	const raw = Bun.env.OMP_TEST_CONCURRENCY?.trim().toLowerCase();
-	if (!raw) return Math.min(Math.max(1, os.availableParallelism()), total);
-	if (raw === "all" || raw === "max") {
-		return total;
-	}
+// Fan-out width for the local parallel path, clamped to the command count and
+// to `cores`. Defaults to `cores`; `OMP_TEST_CONCURRENCY` (`spec`) dials it down
+// on a memory-constrained machine, and `all`/`max` name the cap explicitly.
+// Never wider than `cores`: every chunk is a full `bun test` process (~1 GB
+// resident on coding-agent), so launching all ~190 at once only trades a
+// CPU-bound run for an OOM kill.
+export function testConcurrency(total: number, spec: string | undefined, cores: number): number {
+	const cap = Math.min(Math.max(1, cores), total);
+	const raw = spec?.trim().toLowerCase();
+	if (!raw || raw === "all" || raw === "max") return cap;
 	const override = Number(raw);
 	if (Number.isFinite(override) && override >= 1) {
-		return Math.min(Math.floor(override), total);
+		return Math.min(Math.floor(override), cap);
 	}
 	throw new Error(`Invalid OMP_TEST_CONCURRENCY=${JSON.stringify(raw)}; expected a positive integer, all, or max`);
 }
@@ -773,7 +814,7 @@ export async function runTestCommandsInParallel(commands: TestCommand[], concurr
 	const fileWidths = [...new Set(commands.map(c => c.parallel).filter(p => p !== undefined))].sort((a, b) => a - b);
 	console.log(
 		`Running ${commands.length} test command(s), up to ${concurrency} in parallel ` +
-			`(OMP_TEST_CONCURRENCY=<n>|all to change); ${os.availableParallelism()} cores, ` +
+			`(OMP_TEST_CONCURRENCY=<n> to lower); ${os.availableParallelism()} cores, ` +
 			`--parallel=${fileWidths.join("/") || "n/a"} per chunk.`,
 	);
 
@@ -836,8 +877,10 @@ export async function runTestCommandsInParallel(commands: TestCommand[], concurr
 		// Watchdog: a wedged child (e.g. bun's panic handler deadlocking
 		// after a GC crash) would otherwise hang this worker forever.
 		let timedOut = false;
+		let stuckTree = "";
 		const killTimer = setTimeout(() => {
 			timedOut = true;
+			stuckTree = describeStuckProcessTree(proc.pid);
 			proc.kill("SIGKILL");
 		}, chunkTimeoutMs());
 		const exitCode = await proc.exited;
@@ -850,7 +893,7 @@ export async function runTestCommandsInParallel(commands: TestCommand[], concurr
 		return {
 			exitCode,
 			timedOut,
-			output: `${stdout.text}${stderr.text}${timedOut ? `\n[watchdog] chunk exceeded ${Math.round(chunkTimeoutMs() / 1000)}s; killed with SIGKILL (OMP_TEST_CHUNK_TIMEOUT to change)\n` : ""}`,
+			output: `${stdout.text}${stderr.text}${timedOut ? `\n${stuckTree}[watchdog] chunk exceeded ${Math.round(chunkTimeoutMs() / 1000)}s; killed with SIGKILL (OMP_TEST_CHUNK_TIMEOUT to change)\n` : ""}`,
 		};
 	}
 
@@ -954,7 +997,9 @@ if (import.meta.main) {
 	// `--dry-run` prints the argv the real run would use, budget included.
 	const pooled = requestedCommands.length > 1 && (!isCI() || explicitConcurrency);
 	// The sequential path is a pool of one, so a lone chunk keeps the whole budget.
-	const poolWidth = pooled ? testConcurrency(requestedCommands.length) : 1;
+	const poolWidth = pooled
+		? testConcurrency(requestedCommands.length, Bun.env.OMP_TEST_CONCURRENCY, os.availableParallelism())
+		: 1;
 	const testCommands = applyChunkBudget(requestedCommands, poolWidth);
 	if (pooled && !isDryRun) {
 		await runTestCommandsInParallel(testCommands, poolWidth);

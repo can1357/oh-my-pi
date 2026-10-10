@@ -1,6 +1,7 @@
 import { describe, expect, it, mock } from "bun:test";
 import { type } from "@oh-my-pi/omptype";
 import { type FactoryDroidGeminiOptions, streamFactoryDroidGemini } from "../src/providers/factory-droid/gemini";
+import * as AIError from "../src/error";
 import { SKIP_THOUGHT_SIGNATURE } from "../src/providers/google-shared";
 import { withCredentialRedaction } from "../src/providers/transform-messages";
 import type { AssistantMessage, Context, Model, StopReason, ToolResultMessage } from "../src/types";
@@ -363,6 +364,53 @@ describe("Factory Droid gemini wire — finishReason mapping", () => {
 		if (errorMessage) expect(result.errorMessage).toContain(errorMessage);
 		expect(result.stopDetails).toEqual(stopDetails);
 		if (stopReason === "toolUse") expect(result.content[0]).toMatchObject({ type: "toolCall", name: "Read" });
+	});
+
+	const textChunk = JSON.stringify({ candidates: [{ content: { role: "model", parts: [{ text: "Hel" }] } }] });
+	it.each<{ name: string; chunks: string[] }>([
+		{ name: "text", chunks: [textChunk] },
+		{ name: "functionCall", chunks: [toolCallChunk] },
+	])("a $name stream that ends without a finishReason is a retryable incomplete stream", async ({ chunks }) => {
+		const { result } = await run("hi", chunks);
+		expect(result.stopReason).toBe("error");
+		expect(AIError.is(result.errorId, AIError.Flag.Transient)).toBe(true);
+		const id = AIError.classifyMessage({ errorId: result.errorId, errorMessage: result.errorMessage });
+		expect(AIError.retriable(id)).toBe(true);
+	});
+
+	it("an empty body that reaches EOF is a retryable incomplete stream", async () => {
+		const emptyBody = mock(async () => new Response("", { status: 200 })) as unknown as typeof fetch;
+		const { result } = await run("hi", [], { fetch: emptyBody });
+		expect(result.stopReason).toBe("error");
+		const id = AIError.classifyMessage({ errorId: result.errorId, errorMessage: result.errorMessage });
+		expect(AIError.retriable(id)).toBe(true);
+	});
+
+	it.each([
+		{ code: 400, status: "INVALID_ARGUMENT", retriable: false },
+		{ code: 503, status: "UNAVAILABLE", retriable: true },
+	])("an in-band $code error frame keeps its status and classification", async ({ code, status, retriable }) => {
+		const errorFrame = JSON.stringify({ error: { code, message: "upstream said no", status } });
+		const { result } = await run("hi", [textChunk, errorFrame]);
+		expect(result.stopReason).toBe("error");
+		expect(result.errorStatus).toBe(code);
+		const id = AIError.classifyMessage({ errorId: result.errorId, errorMessage: result.errorMessage });
+		expect(AIError.retriable(id)).toBe(retriable);
+	});
+
+	it("keeps a promptFeedback block without a finishReason a non-retryable content filter", async () => {
+		const blocked = JSON.stringify({ promptFeedback: { blockReason: "PROHIBITED_CONTENT" } });
+		const { result } = await run("hi", [blocked]);
+		expect(result.stopReason).toBe("error");
+		expect(result.stopDetails).toEqual({ type: "content_filter", category: "PROHIBITED_CONTENT" });
+		const id = AIError.classifyMessage({ errorId: result.errorId, errorMessage: result.errorMessage });
+		expect(AIError.retriable(id)).toBe(false);
+	});
+
+	it("a STOP stream finishes cleanly", async () => {
+		const { result } = await run("hi", [textChunk, finishChunk("STOP")]);
+		expect(result.stopReason).toBe("stop");
+		expect(result.content).toMatchObject([{ type: "text", text: "Hel" }]);
 	});
 });
 

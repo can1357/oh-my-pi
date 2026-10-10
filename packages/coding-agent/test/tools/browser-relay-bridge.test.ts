@@ -286,6 +286,37 @@ describe("RelayBridge tab grouping", () => {
 		expect(groups[0]!.tabIds).toEqual([9]);
 	});
 
+	it("creates a Target.createTarget background tab without selecting it", () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, []);
+		const connId = bridge.cdpConnected(new FakeCdpSocket());
+		bridge.cdpMessage(
+			connId,
+			JSON.stringify({
+				id: ++msgSeq,
+				method: "Target.createTarget",
+				params: { url: "https://example.com/", background: true },
+			}),
+		);
+		const [create] = ext.rpcs("createTab");
+		expect(create).toMatchObject({ url: "https://example.com/", active: false });
+	});
+
+	it.each([
+		{ params: { url: "https://example.com/" } },
+		{ params: { url: "https://example.com/", background: false } },
+	])("leaves createTab selection to Chrome for Target.createTarget $params", ({ params }) => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, []);
+		const connId = bridge.cdpConnected(new FakeCdpSocket());
+		bridge.cdpMessage(connId, JSON.stringify({ id: ++msgSeq, method: "Target.createTarget", params }));
+		const [create] = ext.rpcs("createTab");
+		expect(create).toMatchObject({ url: "https://example.com/" });
+		expect(create).not.toHaveProperty("active");
+	});
+
 	it("never re-groups a tab the user pulled out of the omp group", async () => {
 		const bridge = new RelayBridge({ group: { title: "omp", color: "cyan" } });
 		const ext = new FakeExtSocket();

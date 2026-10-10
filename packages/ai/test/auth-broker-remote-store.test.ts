@@ -1,3 +1,4 @@
+import { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, test, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
@@ -53,7 +54,7 @@ describe("RemoteAuthCredentialStore SSE integration", () => {
 			delete process.env[key];
 		}
 		tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "auth-broker-remote-store-"));
-		store = await SqliteAuthCredentialStore.open(path.join(tempDir, "agent.db"));
+		store = new SqliteAuthCredentialStore(new Database(":memory:"));
 		await store.saveOAuth("anthropic", mintOAuthCredential("a", Date.now() + 60_000));
 		storage = new AuthStorage(store);
 		await storage.credentials.reload();
@@ -179,18 +180,15 @@ describe("RemoteAuthCredentialStore SSE integration", () => {
 			expect(await gatewayStorage.credentials.poll()).toBe(true);
 			expect(await gatewayStorage.credentials.poll()).toBe(false);
 
-			// Stop the broker, replace its persisted credential set, and boot a
-			// fresh AuthStorage whose in-memory generation starts below the
-			// client's previously acknowledged value.
+			// Stop the broker and boot a replacement over a different credential
+			// set whose AuthStorage generation starts below the client's
+			// previously acknowledged value.
 			const brokerUrl = new URL(handle!.url);
 			const bind = `${brokerUrl.hostname}:${brokerUrl.port}`;
 			await handle!.close();
 			storage!.close();
 
-			store = await SqliteAuthCredentialStore.open(path.join(tempDir, "agent.db"));
-			for (const provider of ["anthropic", "deepseek", "openai", "xai"]) {
-				await store.deleteProvider(provider);
-			}
+			store = new SqliteAuthCredentialStore(new Database(":memory:"));
 			await store.saveApiKey("google", "sk-restarted");
 			storage = new AuthStorage(store);
 			await storage.credentials.reload();
