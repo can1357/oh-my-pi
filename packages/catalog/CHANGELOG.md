@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added built-in Experiential Labs support with `/login`, live per-key model discovery, gateway pricing, and per-model reasoning levels. ([#PR_NUMBER](https://github.com/can1357/oh-my-pi/pull/PR_NUMBER) by [@YOUR_GITHUB_USERNAME](https://github.com/YOUR_GITHUB_USERNAME))
+
 ## [18.8.7] - 2026-10-09
 
 ### Added

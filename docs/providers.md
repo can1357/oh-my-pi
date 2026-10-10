@@ -138,6 +138,7 @@ The variables below supply credentials after runtime/config overrides and stored
 | `coralbricks`                    | `CORAL_API_KEY`, then `CORALBRICKS_API_KEY`                                   |
 | `deepinfra`                      | `DEEPINFRA_API_KEY`                                                           |
 | `deepseek`                       | `DEEPSEEK_API_KEY`                                                            |
+| `experiential`                   | `EXPLABS_API_KEY`                                                             |
 | `siliconflow`                    | `SILICONFLOW_API_KEY`                                                         |
 | `siliconflow-cn`                 | `SILICONFLOW_CN_API_KEY`                                                      |
 | `fireworks`                      | `FIREWORKS_API_KEY`                                                           |
