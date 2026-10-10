@@ -137,7 +137,14 @@ describe("Claude saved-reset trigger integration", () => {
 		keepCredits?: number;
 		/** Answers the auto-redeem consent prompt; without it the session has no prompt UI. */
 		consent?: () => Promise<string | undefined>;
-	}): { session: AgentSession; coordinator: CodexAutoRedeemCoordinator; targets: ResetCreditTarget[] } {
+		/** Shares another session's coordinator, as sessions of one process do. */
+		coordinator?: CodexAutoRedeemCoordinator;
+	}): {
+		session: AgentSession;
+		coordinator: CodexAutoRedeemCoordinator;
+		targets: ResetCreditTarget[];
+		modelCalls: () => number;
+	} {
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!model) throw new Error("Expected bundled anthropic/claude-sonnet-4-5 to exist");
 		authStorage.keys.setRuntime("anthropic", "test-key");
@@ -202,8 +209,11 @@ describe("Claude saved-reset trigger integration", () => {
 		settings.setModelRole("default", `${model.provider}/${model.id}`);
 		const sessionManager = SessionManager.inMemory();
 		managers.push(sessionManager);
-		const coordinator = createCodexAutoRedeemCoordinator();
-		coordinator.resetLockPath = `${tempDir.path()}/auth.db`;
+		let coordinator = options.coordinator;
+		if (!coordinator) {
+			coordinator = createCodexAutoRedeemCoordinator();
+			coordinator.resetLockPath = `${tempDir.path()}/auth.db`;
+		}
 		let extensionRunner: ExtensionRunner | undefined;
 		if (options.consent) {
 			extensionRunner = new ExtensionRunner(
@@ -225,7 +235,7 @@ describe("Claude saved-reset trigger integration", () => {
 			extensionRunner,
 		});
 		sessions.push(session);
-		return { session, coordinator, targets };
+		return { session, coordinator, targets, modelCalls: () => calls };
 	}
 
 	/**
@@ -237,7 +247,7 @@ describe("Claude saved-reset trigger integration", () => {
 	async function poolToSessionAccount(
 		session: AgentSession,
 		outsideWaitMs: number,
-	): Promise<{ pooledId: number; release: () => Promise<void> }> {
+	): Promise<{ pooledId: number; outsideId: number; release: () => Promise<void> }> {
 		await authStorage.credentials.set(
 			"anthropic",
 			[
@@ -279,11 +289,60 @@ describe("Claude saved-reset trigger integration", () => {
 		const lease = authStorage.sessions.restrict("anthropic", session.sessionId, [`email:${EMAIL}|org:${ORG_ID}`]);
 		return {
 			pooledId: pooled.id,
+			outsideId: outside.id,
 			release: async () => {
 				authStorage.sessions.unrestrict("anthropic", session.sessionId, lease);
 				await authStorage.credentials.remove("anthropic");
 			},
 		};
+	}
+
+	/** Records each redeemed credential and restores the quota it serves. */
+	function recordSpends(quotaFor: (credentialId: number) => { restored: boolean } | undefined): number[] {
+		const spent: number[] = [];
+		vi.spyOn(authStorage.resets, "redeem").mockImplementation(async request => {
+			spent.push(request.target.credentialId);
+			const quota = quotaFor(request.target.credentialId);
+			if (quota) quota.restored = true;
+			return {
+				ok: true,
+				code: "reset",
+				provider: "anthropic",
+				creditId: "cedar-grant-1",
+				cleared: ["anthropic:7d"],
+			};
+		});
+		return spent;
+	}
+
+	/**
+	 * Prompts `runner` and, once its blocked pass is listing resets, `joiner`,
+	 * which finds that pass in flight; the listing answers only after it has.
+	 */
+	async function promptJoined(
+		runner: AgentSession,
+		joiner: AgentSession,
+		coordinator: CodexAutoRedeemCoordinator,
+	): Promise<void> {
+		const statuses = await authStorage.resets.list({ provider: "anthropic" });
+		const listing = Promise.withResolvers<void>();
+		const joined = Promise.withResolvers<void>();
+		vi.spyOn(authStorage.resets, "list").mockImplementation(async () => {
+			listing.resolve();
+			await joined.promise;
+			return statuses;
+		});
+		const inFlight = coordinator.inFlightByAccount;
+		const get = inFlight.get.bind(inFlight);
+		vi.spyOn(inFlight, "get").mockImplementation(key => {
+			const pass = get(key);
+			if (pass) joined.resolve();
+			return pass;
+		});
+		const running = runner.prompt("run the blocked pass");
+		await listing.promise;
+		await Promise.all([running, joiner.prompt("join the blocked pass")]);
+		await Promise.all([runner.waitForIdle(), joiner.waitForIdle()]);
 	}
 
 	it("redeems the exact live Cedar grant on a blocked retry and immediately recovers", async () => {
@@ -441,6 +500,102 @@ describe("Claude saved-reset trigger integration", () => {
 		expect(targets).toEqual([]);
 		expect(coordinator.attemptedKeys.size).toBe(0);
 		expect(session.agent.state.messages.at(-1)).toMatchObject({ role: "assistant", stopReason: "error" });
+	});
+
+	it("drops a restore whose account leaves the session's pool while its attempt is recorded, then retries it", async () => {
+		const { session, coordinator, targets } = buildSession({
+			report: null,
+			status: claudeStatus(true),
+			streamErrorFirst: true,
+		});
+		const pool = await poolToSessionAccount(session, 3 * 24 * HOUR);
+		mockSchedulerWaitWithClock();
+		const write = Bun.write.bind(Bun);
+		let replaced: SessionRestrictionLease | undefined;
+		vi.spyOn(Bun, "write").mockImplementation(async (destination, input) => {
+			// Only the reset lock files are written here, always as text.
+			const written = await write(destination as string, input as string);
+			// The pool is replaced while the pending attempt marker is written.
+			if (!replaced && typeof input === "string" && input.startsWith("pending:")) {
+				replaced = authStorage.sessions.restrict("anthropic", session.sessionId, []);
+			}
+			return written;
+		});
+		let repooled: SessionRestrictionLease | undefined;
+		try {
+			await session.prompt("lose the pooled account while recording the attempt");
+			await session.waitForIdle();
+			expect(replaced).toBeDefined();
+			expect(targets).toEqual([]);
+			expect(coordinator.attemptedKeys.size).toBe(0);
+			expect(session.agent.state.messages.at(-1)).toMatchObject({ role: "assistant", stopReason: "error" });
+
+			// Neither the attempt nor its pending marker fences the account once it is pooled again.
+			repooled = authStorage.sessions.restrict("anthropic", session.sessionId, [`email:${EMAIL}|org:${ORG_ID}`]);
+			await session.prompt("recover once the account is pooled again");
+			await session.waitForIdle();
+		} finally {
+			const lease = repooled ?? replaced;
+			if (lease) authStorage.sessions.unrestrict("anthropic", session.sessionId, lease);
+			await pool.release();
+		}
+
+		expect(targets.map(target => target.credentialId)).toEqual([pool.pooledId]);
+		expect(session.agent.state.messages.at(-1)).toMatchObject({ role: "assistant", stopReason: "stop" });
+	});
+
+	it("restores an account outside a pooled peer's pool for an unrestricted session that joined its pass", async () => {
+		// The shared account holds only the kept reserve; the outside account has a spare reset.
+		const openQuota = { restored: false };
+		const pooled = buildSession({ report: null, status: claudeStatus(true), streamErrorFirst: true, keepCredits: 1 });
+		const open = buildSession({
+			report: null,
+			status: claudeStatus(true),
+			streamErrorFirst: true,
+			keepCredits: 1,
+			quota: openQuota,
+			coordinator: pooled.coordinator,
+		});
+		const pool = await poolToSessionAccount(pooled.session, 3 * 24 * HOUR);
+		const spent = recordSpends(credentialId => (credentialId === pool.outsideId ? openQuota : undefined));
+		mockSchedulerWaitWithClock();
+
+		try {
+			await promptJoined(pooled.session, open.session, pooled.coordinator);
+		} finally {
+			await pool.release();
+		}
+
+		expect(spent).toEqual([pool.outsideId]);
+		expect(open.session.agent.state.messages.at(-1)).toMatchObject({ role: "assistant", stopReason: "stop" });
+		expect(pooled.session.agent.state.messages.at(-1)).toMatchObject({ role: "assistant", stopReason: "error" });
+	});
+
+	it("recovers a pooled session and an unrestricted one with one restore of the account they share", async () => {
+		const quota = { restored: false };
+		const open = buildSession({ report: null, status: claudeStatus(true), streamErrorFirst: true, quota });
+		const pooled = buildSession({
+			report: null,
+			status: claudeStatus(true),
+			streamErrorFirst: true,
+			quota,
+			coordinator: open.coordinator,
+		});
+		const pool = await poolToSessionAccount(pooled.session, 24 * HOUR);
+		const spent = recordSpends(credentialId => (credentialId === pool.pooledId ? quota : undefined));
+		mockSchedulerWaitWithClock();
+
+		try {
+			await promptJoined(open.session, pooled.session, open.coordinator);
+		} finally {
+			await pool.release();
+		}
+
+		expect(spent).toEqual([pool.pooledId]);
+		for (const { session, modelCalls } of [open, pooled]) {
+			expect(modelCalls()).toBe(2);
+			expect(session.agent.state.messages.at(-1)).toMatchObject({ role: "assistant", stopReason: "stop" });
+		}
 	});
 
 	it("cancels reset discovery backoff without spending a credit or resuming the task", async () => {

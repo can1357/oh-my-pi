@@ -693,6 +693,10 @@ export function isTerminalRedeemOutcome(code: string): boolean {
 export interface ResetRecoveryResult {
 	restored: boolean;
 	retryAfterMs?: number;
+	/** Credentials whose reset the pass spent or adopted from a peer. */
+	restoredCredentialIds?: number[];
+	/** The session's account pool excluded at least one restore candidate. */
+	poolLimited?: boolean;
 }
 
 /**
@@ -710,7 +714,7 @@ export interface ResetRecoveryResult {
  *   catching attempt-key drift across a minute boundary.
  * - `inFlightByAccount`: serializes blocked passes per account — a second
  *   session for the same account adopts the in-flight promise instead of
- *   starting a second consume.
+ *   starting a second consume, unless that pass could not serve its account pool.
  * - `sweepInFlight` / `lastSweepAt` / `sweepPromise`: re-entrancy guard, floor,
  *   and settlement handle for the combined provider salvage sweep (a redeem refreshes usage,
  *   which would recurse into a sweep; the promise lets tests and diagnostics
