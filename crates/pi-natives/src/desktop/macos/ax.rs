@@ -498,7 +498,7 @@ impl AxBackend for MacAx {
 		}
 		skylight::with_background_guard(element_pid(element)?, || {
 			set_string_value(element, "AXValue", value)?;
-			verify_text_value(element, value)
+			verify_text_value(element, value, same_phone_number)
 		})
 	}
 
@@ -661,8 +661,12 @@ fn set_string_value(element: &AXUIElement, name: &str, text: &str) -> CoreResult
 	)
 }
 
-fn verify_text_value(element: &AXUIElement, expected: &str) -> CoreResult<()> {
-	if copy_string(element, "AXValue").as_deref() == Some(expected) {
+fn verify_text_value(
+	element: &AXUIElement,
+	expected: &str,
+	matches: fn(&str, &str) -> bool,
+) -> CoreResult<()> {
+	if copy_string(element, "AXValue").is_some_and(|actual| matches(&actual, expected)) {
 		Ok(())
 	} else {
 		Err(DesktopError::ax_failed(
@@ -670,6 +674,49 @@ fn verify_text_value(element: &AXUIElement, expected: &str) -> CoreResult<()> {
 			 be partial, inspect the target before retrying; no typing fallback was attempted",
 		))
 	}
+}
+
+/// Whether a field that stores `actual` after `expected` was written holds the
+/// written value. Apps format phone numbers as they store them: Contacts keeps
+/// `555-789-0123` as `(555) 789-0123` wrapped in directional marks. So a
+/// written phone number (at least seven digits, an optional `+`, and spaces,
+/// parentheses or hyphens) also matches a stored value with the same digits and
+/// `+` regrouped that way. Anything else must match exactly: other punctuation
+/// can change a number's scale, and a `-` before the first digit or a `-` or
+/// `)` after the last (`-1234567`, `(-1234567)`, `1234567-`, `(1234567)`) its
+/// sign.
+fn same_phone_number(actual: &str, expected: &str) -> bool {
+	if actual == expected {
+		return true;
+	}
+	if expected.chars().filter(char::is_ascii_digit).count() < 7 {
+		return false;
+	}
+	match (phone_symbols(actual), phone_symbols(expected)) {
+		(Some(actual), Some(expected)) => actual.eq(expected),
+		_ => false,
+	}
+}
+
+/// The digits and `+` signs of a phone number, or `None` when `text` holds
+/// anything but those and phone separators, or starts with a `-` sign.
+fn phone_symbols(text: &str) -> Option<impl Iterator<Item = char> + '_> {
+	let mark = |ch: char| {
+		ch.is_whitespace()
+			|| matches!(ch, '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
+	};
+	let separator = move |ch: char| mark(ch) || matches!(ch, '(' | ')' | '-');
+	let (Some(first), Some(last)) =
+		(text.find(|ch: char| ch.is_ascii_digit()), text.rfind(|ch: char| ch.is_ascii_digit()))
+	else {
+		return None;
+	};
+	let signed = text[..first].contains('-') || text[last..].contains(['-', ')']);
+	let phone = !signed
+		&& text
+			.chars()
+			.all(|ch| ch.is_ascii_digit() || ch == '+' || separator(ch));
+	phone.then(|| text.chars().filter(move |&ch| !separator(ch)))
 }
 
 /// Date and time controls publish `AXValue` as a `CFDate` and refuse the same
@@ -750,7 +797,7 @@ pub(super) fn insert_native_text(pid: libc::pid_t, wid: u32, text: &str) -> Core
 	};
 	skylight::with_background_guard(pid, || {
 		set_string_value(&element, "AXSelectedText", text)?;
-		verify_text_value(&element, &expected)
+		verify_text_value(&element, &expected, |actual, expected| actual == expected)
 	})?;
 	Ok(true)
 }
@@ -1174,7 +1221,7 @@ mod tests {
 
 	use super::{
 		AttachedCandidate, ax_result, element_action_result, replace_utf16_selection,
-		select_attached, stringify_value,
+		same_phone_number, select_attached, stringify_value,
 	};
 	use crate::desktop::error::ErrorCode;
 
@@ -1254,5 +1301,46 @@ mod tests {
 			frame_matches: true,
 		}];
 		assert!(select_attached(&candidates, 57).is_err());
+	}
+
+	#[test]
+	fn a_phone_number_the_app_reformatted_confirms_the_write() {
+		// Contacts stores a phone number in its own format between LRO and PDF
+		// marks.
+		let stored = "\u{202d}(555) 789-0123\u{202c}";
+		assert!(same_phone_number(stored, "555-789-0123"));
+		assert!(same_phone_number(stored, "5557890123"));
+		assert!(same_phone_number("+1 (555) 789-0123", "+1 555 789 0123"));
+		assert!(same_phone_number("Senior Developer", "Senior Developer"));
+		assert!(same_phone_number("café😀", "café😀"));
+		assert!(same_phone_number("", ""));
+	}
+
+	#[test]
+	fn a_value_the_app_changed_or_did_not_take_still_fails_the_write() {
+		let stored = "\u{202d}(555) 555-1212\u{202c}";
+		assert!(!same_phone_number(stored, "555-789-0123"), "old value kept");
+		assert!(!same_phone_number("\u{202d}(555) 789\u{202c}", "555-789-0123"), "truncated");
+		assert!(!same_phone_number("", "555-789-0123"), "cleared");
+		assert!(!same_phone_number("5557890123", "+1 555 789 0123"), "country code dropped");
+		for (actual, expected) in [
+			("1234567", "-1234567"),
+			("-1234567", "1234567"),
+			("1234567", "(-1234567)"),
+			("(-1234567)", "1234567"),
+			("1234567", "(1234567)"),
+			("(1234567)", "1234567"),
+			("1234567", "1234567-"),
+			("1234567-", "1234567"),
+			("1234567", "1234.567"),
+			("12345.67", "1234567"),
+			("1,234,567", "1234567"),
+			("1234567", "1.234.567"),
+			("555.789.0123", "555-789-0123"),
+			("5557890123x", "5557890123"),
+			("555\u{200b}7890123", "5557890123"),
+		] {
+			assert!(!same_phone_number(actual, expected), "{actual:?} confirmed {expected:?}");
+		}
 	}
 }
