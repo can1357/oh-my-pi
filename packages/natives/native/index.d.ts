@@ -75,6 +75,12 @@ export declare class DesktopSession {
   keyChord(target: string, keys: Array<string>, opts?: PointerOptions | undefined | null): Promise<undefined>
   raiseWindow(windowId: string): Promise<undefined>
   axSnapshot(target: string, opts?: AxSnapshotOptions | undefined | null): Promise<AxSnapshot>
+  /**
+   * Waits until the given processes stop emitting accessibility
+   * notifications for a quiet window, bounded by a cap. Resolves at once
+   * with `watched: 0` when nothing can be observed.
+   */
+  waitForUiQuiet(pids: Array<number>, options?: UiQuietOptions | undefined | null): Promise<UiQuiet>
   axQuery(target: string, query: AxQuery): Promise<Array<AxNode>>
   /**
    * Accessibility hit-test at global logical desktop coordinates; needs no
@@ -3443,6 +3449,38 @@ export interface TextPredictorOptions {
  * Pads with spaces when requested.
  */
 export declare function truncateToWidth(text: string, maxWidth: number, ellipsisKind: Ellipsis | undefined | null, pad: boolean | undefined | null, tabWidth: number): string
+
+/**
+ * Outcome of waiting for touched applications to stop emitting
+ * accessibility notifications.
+ */
+export interface UiQuiet {
+  /**
+   * Milliseconds from the call until the quiet window closed, or until the
+   * cap.
+   */
+  waitedMs: number
+  /** Counted AX notifications received while waiting. */
+  events: number
+  /**
+   * True when the cap ended the wait while notifications were still
+   * arriving.
+   */
+  timedOut: boolean
+  /**
+   * Processes whose notifications were observed. 0 means nothing could be
+   * observed and the call returned at once.
+   */
+  watched: number
+}
+
+/** Bounds for `DesktopSession.waitForUiQuiet`. */
+export interface UiQuietOptions {
+  /** default 250 */
+  quietMs?: number
+  /** default 5000 */
+  capMs?: number
+}
 
 /** Patch application options. */
 export interface VcsApplyOptions {

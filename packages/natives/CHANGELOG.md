@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `DesktopSession.waitForUiQuiet()` on macOS, which resolves once the given apps send no accessibility notification for a quiet window ([#15280](https://github.com/can1357/oh-my-pi/pull/15280) by [@will-bogusz](https://github.com/will-bogusz))
+
 ## [18.8.8] - 2026-10-10
 
 ### Changed

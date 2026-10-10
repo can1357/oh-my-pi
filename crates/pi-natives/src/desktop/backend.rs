@@ -11,6 +11,7 @@ use super::{
 	menus::DesktopMenuItem,
 	types::{
 		CaptureCaps, DesktopCapabilities, DesktopDisplay, DesktopWindow, DisplaySelector, Target,
+		UiQuiet,
 	},
 };
 
@@ -177,6 +178,19 @@ pub trait Backend: Send {
 		))
 	}
 	fn raise_window(&mut self, id: &str, token: &OperationToken) -> CoreResult<()>;
+	/// Blocks until none of `pids` has emitted a counted accessibility
+	/// notification for `quiet`, giving up after `cap`. Backends without
+	/// notification support report nothing watched so callers fall back to a
+	/// fixed delay.
+	fn wait_for_ui_quiet(
+		&mut self,
+		_pids: &[u32],
+		_quiet: Duration,
+		_cap: Duration,
+		_token: &OperationToken,
+	) -> CoreResult<UiQuiet> {
+		Ok(UiQuiet::unwatched())
+	}
 	fn ax(&mut self) -> Option<&mut dyn AxBackend>;
 }
 
