@@ -20,10 +20,15 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import * as natives from "@oh-my-pi/pi-natives";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
-import { getWorktreesDir, isEnoent } from "@oh-my-pi/pi-utils";
+import { getWorktreesDir, isEnoent, logger } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { Settings } from "../config/settings";
-import { hasLiveIsolationOwner, ISOLATION_OWNER_FILE, readRetainedMountBackend } from "../task/isolation-ownership";
+import {
+	hasLiveIsolationOwner,
+	inspectIsolationUniqueWork,
+	ISOLATION_OWNER_FILE,
+	readRetainedMountBackend,
+} from "../task/isolation-ownership";
 import { formatIsolationBackend, parseIsolationBackend } from "../task/worktree";
 
 import { cfgIsolationBackend, cfgWorktreeClone } from "../task/settings";
@@ -37,12 +42,16 @@ export interface WorktreeEntry {
 	path: string;
 	/** Classification of what we found on disk. */
 	kind: WorktreeKind;
-	/** Parent repo root, when this is a registered git worktree. */
+	/** Parent repo root, when this is a registered git worktree or task-isolation sandbox. */
 	parentRepo?: string;
 	/** Branch name extracted from the parent's tracking file, when available. */
 	branch?: string;
 	/** When set, the entry is unhealthy and `omp worktree clear` will remove it. */
 	orphanReason?: string;
+	/** For task-isolation sandboxes: true if the sandbox holds unmerged commits or modified files. */
+	hasUniqueWork?: boolean;
+	/** Description of the unique work held in the sandbox. */
+	uniqueWorkDetails?: string;
 }
 
 export interface AddWorktreeOptions {
@@ -65,6 +74,8 @@ export interface ClearWorktreesOptions {
 	/** Print what would be removed without touching the filesystem. */
 	dryRun: boolean;
 	json: boolean;
+	/** Force removal of task-isolation sandboxes even if they hold unmerged unique work. */
+	force?: boolean;
 }
 /**
  * Run native teardown on a retained workspace before recursive removal.
@@ -179,38 +190,82 @@ export async function listWorktrees(options: ListWorktreesOptions): Promise<void
 	}
 	let live = 0;
 	let orphaned = 0;
+	let unmerged = 0;
 	for (const entry of entries) {
-		const tag = entry.orphanReason ? chalk.yellow("orphaned") : chalk.green("live    ");
+		const tag = entry.hasUniqueWork
+			? chalk.yellow("unmerged")
+			: entry.orphanReason
+				? chalk.yellow("orphaned")
+				: chalk.green("live    ");
 		const detail = formatEntryDetail(entry);
 		console.log(`${tag}  ${entry.path}`);
 		if (detail) console.log(`          ${chalk.dim(detail)}`);
-		if (entry.orphanReason) orphaned += 1;
+		if (entry.hasUniqueWork) unmerged += 1;
+		else if (entry.orphanReason) orphaned += 1;
 		else live += 1;
 	}
-	console.log(chalk.dim(`\n${live} live · ${orphaned} orphaned · ${entries.length} total`));
+	console.log(
+		chalk.dim(
+			`\n${live} live · ${orphaned} orphaned${unmerged > 0 ? ` · ${chalk.yellow(`${unmerged} unmerged`)}` : ""} · ${entries.length} total`,
+		),
+	);
 }
 
 export async function clearWorktrees(options: ClearWorktreesOptions): Promise<{ removed: number; failed: number }> {
 	const entries = await scanWorktrees();
-	const targets = options.all ? entries : entries.filter(entry => entry.orphanReason !== undefined);
+	let preservedUnmerged = 0;
+	const targets = entries.filter(entry => {
+		if (entry.kind === "task-isolation" && entry.hasUniqueWork && !options.force) {
+			preservedUnmerged += 1;
+			return false;
+		}
+		if (options.all) return true;
+		return entry.orphanReason !== undefined;
+	});
 
 	if (targets.length === 0) {
 		if (options.json) {
-			console.log(JSON.stringify({ removed: 0, kept: entries.length }));
+			console.log(JSON.stringify({ removed: 0, kept: entries.length, preservedUnmerged }));
 		} else {
-			console.log(chalk.dim(options.all ? "No worktrees to remove." : "No orphaned worktrees to remove."));
+			if (preservedUnmerged > 0) {
+				console.log(
+					chalk.yellow(
+						`Preserved ${preservedUnmerged} dead sandbox${preservedUnmerged === 1 ? "" : "es"} with unmerged work (pass --force to clear).`,
+					),
+				);
+			} else {
+				console.log(chalk.dim(options.all ? "No worktrees to remove." : "No orphaned worktrees to remove."));
+			}
 		}
 		return { removed: 0, failed: 0 };
 	}
 
 	if (options.dryRun) {
 		if (options.json) {
-			console.log(JSON.stringify({ wouldRemove: targets.map(t => t.path) }, null, 2));
+			console.log(
+				JSON.stringify(
+					{
+						wouldRemove: targets.map(t => t.path),
+						preservedUnmerged: entries
+							.filter(e => e.kind === "task-isolation" && e.hasUniqueWork && !options.force)
+							.map(e => e.path),
+					},
+					null,
+					2,
+				),
+			);
 		} else {
 			for (const target of targets) {
 				console.log(`${chalk.yellow("would remove")}  ${target.path}`);
 			}
 			console.log(chalk.dim(`\n${targets.length} dir${targets.length === 1 ? "" : "s"} would be removed.`));
+			if (preservedUnmerged > 0) {
+				console.log(
+					chalk.yellow(
+						`Preserved ${preservedUnmerged} dead sandbox${preservedUnmerged === 1 ? "" : "es"} with unmerged work (pass --force to include).`,
+					),
+				);
+			}
 		}
 		return { removed: 0, failed: 0 };
 	}
@@ -252,7 +307,7 @@ export async function clearWorktrees(options: ClearWorktreesOptions): Promise<{ 
 	const failed = results.length - succeeded;
 
 	if (options.json) {
-		console.log(JSON.stringify({ removed: succeeded, failed, results }, null, 2));
+		console.log(JSON.stringify({ removed: succeeded, failed, preservedUnmerged, results }, null, 2));
 		return { removed: succeeded, failed };
 	}
 
@@ -264,6 +319,13 @@ export async function clearWorktrees(options: ClearWorktreesOptions): Promise<{ 
 			if (result.error) console.log(`          ${chalk.dim(result.error)}`);
 		}
 	}
+	if (preservedUnmerged > 0) {
+		console.log(
+			chalk.yellow(
+				`\nPreserved ${preservedUnmerged} dead sandbox${preservedUnmerged === 1 ? "" : "es"} with unmerged work (pass --force to clear).`,
+			),
+		);
+	}
 	console.log(chalk.dim(`\n${succeeded} removed${failed > 0 ? ` · ${chalk.red(`${failed} failed`)}` : ""}`));
 	return { removed: succeeded, failed };
 }
@@ -272,7 +334,7 @@ export async function clearWorktrees(options: ClearWorktreesOptions): Promise<{ 
 // Scanner
 // ───────────────────────────────────────────────────────────────────────────
 
-async function scanWorktrees(): Promise<WorktreeEntry[]> {
+export async function scanWorktrees(): Promise<WorktreeEntry[]> {
 	const root = getWorktreesDir();
 	let topLevel: string[];
 	try {
@@ -323,7 +385,7 @@ async function scanWorktrees(): Promise<WorktreeEntry[]> {
 	return entries;
 }
 
-async function classifyDir(dir: string): Promise<WorktreeEntry | null> {
+export async function classifyDir(dir: string): Promise<WorktreeEntry | null> {
 	const gitEntry = path.join(dir, ".git");
 	const gitStat = await fs.stat(gitEntry).catch(() => null);
 	if (gitStat?.isFile()) {
@@ -346,12 +408,22 @@ async function classifyDir(dir: string): Promise<WorktreeEntry | null> {
 	}
 	if (!isIsolation) return null;
 	const live = await hasLiveIsolationOwner(dir);
+	if (live) {
+		return {
+			path: dir,
+			kind: "task-isolation",
+		};
+	}
+	const check = await inspectIsolationUniqueWork(dir);
 	return {
 		path: dir,
 		kind: "task-isolation",
-		// Only after confirming no live owner is the "no live task" claim true.
-		// A running subagent's sandbox stays live so `clear` won't delete it.
-		orphanReason: live ? undefined : "task-isolation leftover (no live task owns it)",
+		parentRepo: check.parentRepo,
+		orphanReason: check.hasUniqueWork
+			? `task-isolation leftover (unmerged work: ${check.reason ?? "unique changes"})`
+			: "task-isolation leftover (no live task owns it)",
+		hasUniqueWork: check.hasUniqueWork,
+		uniqueWorkDetails: check.reason,
 	};
 }
 
@@ -415,12 +487,73 @@ function formatEntryDetail(entry: WorktreeEntry): string {
 		const branch = entry.branch ?? "unknown branch";
 		parts.push(`${repo} · ${branch}`);
 	} else if (entry.kind === "task-isolation") {
-		parts.push("task-isolation sandbox");
+		const repo = entry.parentRepo ? path.basename(entry.parentRepo) : undefined;
+		parts.push(repo ? `task-isolation sandbox (${repo})` : "task-isolation sandbox");
+		if (entry.hasUniqueWork) {
+			parts.push(chalk.yellow(`unmerged work: ${entry.uniqueWorkDetails ?? "unique changes"}`));
+		}
 	} else if (entry.kind === "empty") {
 		parts.push("legacy project shell");
 	} else {
 		parts.push("unrecognized contents");
 	}
-	if (entry.orphanReason) parts.push(entry.orphanReason);
+	if (entry.orphanReason && !entry.hasUniqueWork) parts.push(entry.orphanReason);
 	return parts.join(" — ");
+}
+
+let autoReapTriggered = false;
+
+/**
+ * Scan isolation sandboxes and reap clean dead-owner sandboxes.
+ * Safe to call at startup: asynchronous, non-blocking, never throws.
+ */
+export async function reapDeadIsolationSandboxes(): Promise<{ reaped: number; kept: number }> {
+	try {
+		const entries = await scanWorktrees();
+		let reaped = 0;
+		let kept = 0;
+		for (const entry of entries) {
+			if (entry.kind !== "task-isolation") continue;
+			if (!entry.orphanReason) continue;
+			if (entry.hasUniqueWork) {
+				kept += 1;
+				logger.debug("Preserving dead isolation sandbox with unique work", {
+					path: entry.path,
+					reason: entry.uniqueWorkDetails,
+				});
+				continue;
+			}
+			try {
+				await stopRetainedMount(entry.path);
+				await fs.rm(entry.path, { recursive: true, force: true });
+				reaped += 1;
+				logger.debug("Reaped clean dead isolation sandbox", { path: entry.path });
+			} catch (err) {
+				logger.debug("Failed to reap dead isolation sandbox", {
+					path: entry.path,
+					error: err instanceof Error ? err.message : String(err),
+				});
+			}
+		}
+		return { reaped, kept };
+	} catch (err) {
+		logger.debug("Automatic isolation sandbox reaping failed", {
+			error: err instanceof Error ? err.message : String(err),
+		});
+		return { reaped: 0, kept: 0 };
+	}
+}
+
+/**
+ * Trigger background isolation sandbox reaping on session startup once per process.
+ * Never delays startup, never throws.
+ */
+export function triggerIsolationReap(): void {
+	if (autoReapTriggered) return;
+	autoReapTriggered = true;
+	setTimeout(() => {
+		void reapDeadIsolationSandboxes().catch(err => {
+			logger.debug("Background isolation reaping failed", { error: String(err) });
+		});
+	}, 100);
 }

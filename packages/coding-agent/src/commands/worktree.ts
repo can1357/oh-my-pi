@@ -59,6 +59,11 @@ export default class Worktree extends Command {
 			description: "Clear every entry, including live PR-checkout worktrees (clear)",
 			default: false,
 		}),
+		force: Flags.boolean({
+			char: "f",
+			description: "Delete dead sandboxes even if they contain unmerged unique work (clear)",
+			default: false,
+		}),
 		"dry-run": Flags.boolean({
 			char: "n",
 			description: "Print what would be removed without touching the filesystem (clear)",
@@ -75,6 +80,7 @@ export default class Worktree extends Command {
 		"omp worktree add --detach ../review HEAD~2",
 		"omp worktree clear",
 		"omp worktree clear --dry-run",
+		"omp worktree clear --force",
 		"omp worktree clear --all",
 	];
 
@@ -112,6 +118,7 @@ export default class Worktree extends Command {
 				all: flags.all ?? false,
 				dryRun: flags["dry-run"] ?? false,
 				json: flags.json ?? false,
+				force: flags.force ?? false,
 			});
 			if (failed > 0) process.exitCode = 1;
 			return;

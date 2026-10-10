@@ -136,3 +136,125 @@ export function watch(repo, onChange, intervalMs = HEAD_WATCH_INTERVAL_MS) {
 	fs.watchFile(target, { interval: intervalMs }, listener).unref();
 	return () => fs.unwatchFile(target, listener);
 }
+
+/** List linked worktrees registered in a git repository. */
+export async function listWorktrees(repoDir) {
+	const repository = git(repoDir);
+	if (repository) {
+		try {
+			return await repository.worktrees();
+		} catch {}
+	}
+	const result = await $`git worktree list --porcelain`
+		.cwd(repoDir)
+		.quiet()
+		.nothrow();
+	if (result.exitCode !== 0) return [];
+	const lines = result.text().split("\n");
+	const entries = [];
+	let current = null;
+	for (const line of lines) {
+		if (line.startsWith("worktree ")) {
+			if (current) entries.push(current);
+			current = { path: line.slice("worktree ".length).trim(), detached: false };
+		} else if (line.startsWith("HEAD ") && current) {
+			current.head = line.slice("HEAD ".length).trim();
+		} else if (line.startsWith("branch ") && current) {
+			current.branch = line.slice("branch ".length).trim();
+		} else if (line === "detached" && current) {
+			current.detached = true;
+		}
+	}
+	if (current) entries.push(current);
+	return entries;
+}
+
+/** Resolve the current HEAD commit SHA of a git repository. */
+export async function getHeadSha(repoDir) {
+	const repository = git(repoDir);
+	if (repository) {
+		try {
+			const sha = await repository.headSha();
+			if (sha) return sha;
+		} catch {}
+	}
+	const result = await $`git rev-parse --verify HEAD`
+		.cwd(repoDir)
+		.quiet()
+		.nothrow();
+	if (result.exitCode !== 0) return null;
+	const sha = result.text().trim();
+	return sha.length > 0 ? sha : null;
+}
+
+/** List commit SHAs reachable from local refs matching prefix patterns. */
+export async function listRefShas(repoDir, patterns = ["refs/heads/", "refs/tags/"]) {
+	const result = await $`git for-each-ref "--format=%(objectname)" ${patterns}`
+		.cwd(repoDir)
+		.quiet()
+		.nothrow();
+	if (result.exitCode !== 0) return [];
+	return result
+		.text()
+		.split("\n")
+		.map(line => line.trim())
+		.filter(sha => sha.length === 40);
+}
+
+/** List commit SHAs recorded in refs/stash reflog. */
+export async function listStashShas(repoDir) {
+	const result = await $`git rev-list -g refs/stash "--format=%H"`
+		.cwd(repoDir)
+		.quiet()
+		.nothrow();
+	if (result.exitCode !== 0) return [];
+	return result
+		.text()
+		.split("\n")
+		.map(line => line.trim())
+		.filter(sha => sha.length === 40);
+}
+
+/** Check whether a commit object exists in the repository object database. */
+export async function hasCommit(repoDir, sha) {
+	const repository = git(repoDir);
+	if (repository) {
+		try {
+			await repository.commitDetails(sha);
+			return true;
+		} catch {}
+	}
+	const spec = `${sha}^{commit}`;
+	const result = await $`git cat-file -e ${spec}`
+		.cwd(repoDir)
+		.quiet()
+		.nothrow();
+	return result.exitCode === 0;
+}
+
+/** Run git status in porcelain v1 mode with untracked and ignored options. */
+export async function statusPorcelain(repoDir, options = {}) {
+	const repository = git(repoDir);
+	if (repository && !options.ignored) {
+		try {
+			return await repository.statusPorcelain({
+				untracked: options.untracked,
+			});
+		} catch {}
+	}
+	const args = ["status", "--porcelain=v1"];
+	if (options.untracked) {
+		args.push(`-u${options.untracked}`);
+	}
+	if (options.ignored) {
+		args.push(`--ignored=${options.ignored}`);
+	}
+	const result = await $`git ${args}`
+		.cwd(repoDir)
+		.quiet()
+		.nothrow();
+	if (result.exitCode !== 0) {
+		throw vcsError("Cli", `git status failed in ${repoDir}: ${result.stderr}`);
+	}
+	return result.text();
+}

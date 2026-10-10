@@ -46,6 +46,45 @@ pub fn prepare_destination(
 	})
 }
 
+/// Return relative paths of linked worktrees registered in `lower` that lie
+/// inside `lower`.
+pub fn nested_worktrees(lower: &Path) -> Vec<PathBuf> {
+	if !lower.join(".git").exists() {
+		return Vec::new();
+	}
+	let output = std::process::Command::new("git")
+		.arg("-C")
+		.arg(lower)
+		.args(["worktree", "list", "--porcelain"])
+		.stdin(std::process::Stdio::null())
+		.stdout(std::process::Stdio::piped())
+		.stderr(std::process::Stdio::null())
+		.output();
+	let Ok(output) = output else {
+		return Vec::new();
+	};
+	if !output.status.success() {
+		return Vec::new();
+	}
+	let text = String::from_utf8_lossy(&output.stdout);
+	let mut nested = Vec::new();
+	let lower_canon = fs::canonicalize(lower).unwrap_or_else(|_| lower.to_path_buf());
+	for line in text.lines() {
+		if let Some(rest) = line.strip_prefix("worktree ") {
+			let wt_path = Path::new(rest.trim());
+			let wt_canon = fs::canonicalize(wt_path).unwrap_or_else(|_| wt_path.to_path_buf());
+			if let Some(rel) = wt_canon
+				.strip_prefix(&lower_canon)
+				.ok()
+				.filter(|r| !r.as_os_str().is_empty())
+			{
+				nested.push(rel.to_path_buf());
+			}
+		}
+	}
+	nested
+}
+
 /// Removes the directory tree, file, or symlink at `path`; a missing path is
 /// not an error.
 pub fn remove_existing(path: &Path) -> io::Result<()> {
@@ -105,6 +144,18 @@ pub fn copy_dir_contents(
 	skip: &[&OsStr],
 	copy: &impl TreeCopy,
 ) -> IsoResult<()> {
+	let nested = nested_worktrees(src);
+	copy_dir_contents_internal(src, dst, src, &nested, skip, copy)
+}
+
+fn copy_dir_contents_internal(
+	src: &Path,
+	dst: &Path,
+	root: &Path,
+	nested: &[PathBuf],
+	skip: &[&OsStr],
+	copy: &impl TreeCopy,
+) -> IsoResult<()> {
 	let entries = fs::read_dir(src)
 		.map_err(|err| IsoError::other(format!("read_dir {}: {err}", src.display())))?;
 	for entry in entries {
@@ -115,6 +166,12 @@ pub fn copy_dir_contents(
 			continue;
 		}
 		let src_path = entry.path();
+		if src_path
+			.strip_prefix(root)
+			.is_ok_and(|rel| nested.iter().any(|wt| rel == wt))
+		{
+			continue;
+		}
 		let file_type = entry
 			.file_type()
 			.map_err(|err| IsoError::other(format!("file_type {}: {err}", src_path.display())))?;
@@ -124,7 +181,7 @@ pub fn copy_dir_contents(
 		} else if file_type.is_dir() {
 			fs::create_dir_all(&dst_path)
 				.map_err(|err| IsoError::other(format!("create {}: {err}", dst_path.display())))?;
-			copy_dir_contents(&src_path, &dst_path, &[], copy)?;
+			copy_dir_contents_internal(&src_path, &dst_path, root, nested, &[], copy)?;
 			copy.finish_dir(&src_path, &dst_path)?;
 		} else {
 			copy.file(&src_path, &dst_path, file_type)?;

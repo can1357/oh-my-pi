@@ -111,8 +111,57 @@ mod imp {
 			})?;
 		}
 
-		// A directory source clones the whole tree in one call.
-		cow::clonefile(&lower, merged, 0).map_err(|err| clone_error(&lower, merged, &err))
+		let nested = tree::nested_worktrees(&lower);
+		if nested.is_empty() {
+			// A directory source clones the whole tree in one call when no nested
+			// worktrees exist.
+			return cow::clonefile(&lower, merged, 0).map_err(|err| clone_error(&lower, merged, &err));
+		}
+
+		// When nested linked worktrees exist, clone entries while omitting them.
+		clone_excluding(&lower, merged, &lower, &nested)
+	}
+
+	fn clone_excluding(
+		src_dir: &Path,
+		dst_dir: &Path,
+		root: &Path,
+		nested: &[std::path::PathBuf],
+	) -> IsoResult<()> {
+		fs::create_dir_all(dst_dir).map_err(|err| {
+			IsoError::other(format!("unable to create {}: {err}", dst_dir.display()))
+		})?;
+
+		for entry in fs::read_dir(src_dir)
+			.map_err(|err| IsoError::other(format!("read_dir {}: {err}", src_dir.display())))?
+		{
+			let entry = entry
+				.map_err(|err| IsoError::other(format!("dir entry in {}: {err}", src_dir.display())))?;
+			let src = entry.path();
+			let Ok(rel) = src.strip_prefix(root) else {
+				continue;
+			};
+
+			if nested.iter().any(|wt| rel == wt) {
+				continue;
+			}
+
+			if nested.iter().any(|wt| wt.starts_with(rel)) {
+				let dst = dst_dir.join(entry.file_name());
+				clone_excluding(&src, &dst, root, nested)?;
+				continue;
+			}
+
+			let file_type = entry
+				.file_type()
+				.map_err(|err| IsoError::other(format!("file_type {}: {err}", src.display())))?;
+			if !(file_type.is_file() || file_type.is_dir() || file_type.is_symlink()) {
+				continue;
+			}
+			let dst = dst_dir.join(entry.file_name());
+			cow::clonefile(&src, &dst, CLONE_NOFOLLOW).map_err(|err| clone_error(&src, &dst, &err))?;
+		}
+		Ok(())
 	}
 
 	pub fn clone_tree(lower: &Path, merged: &Path, skip: &[&std::ffi::OsStr]) -> IsoResult<()> {
@@ -235,6 +284,55 @@ mod tests {
 				.file_type()
 				.is_symlink()
 		);
+		fs::remove_dir_all(root).unwrap();
+	}
+
+	#[test]
+	fn start_skips_nested_linked_worktrees() {
+		let nonce = format!(
+			"pi-iso-apfs-nested-{}-{}",
+			std::process::id(),
+			std::time::SystemTime::now()
+				.duration_since(std::time::UNIX_EPOCH)
+				.unwrap()
+				.as_nanos()
+		);
+		let root = std::env::temp_dir().join(nonce);
+		let lower = root.join("lower");
+		let merged = root.join("merged");
+		fs::create_dir_all(&lower).unwrap();
+
+		let run = |dir: &Path, args: &[&str]| {
+			let status = std::process::Command::new("git")
+				.arg("-C")
+				.arg(dir)
+				.args(args)
+				.status()
+				.expect("git command");
+			assert!(status.success());
+		};
+
+		run(&lower, &["init", "-q"]);
+		run(&lower, &["config", "user.email", "test@example.com"]);
+		run(&lower, &["config", "user.name", "Test"]);
+		run(&lower, &["config", "commit.gpgsign", "false"]);
+		fs::write(lower.join("root.txt"), b"root content\n").unwrap();
+		run(&lower, &["add", "root.txt"]);
+		run(&lower, &["commit", "-q", "-m", "init"]);
+
+		let nested = lower.join(".worktrees/nested-wt");
+		run(&lower, &["worktree", "add", "-q", nested.to_str().unwrap(), "HEAD"]);
+		fs::write(nested.join("untracked.txt"), b"nested worktree content\n").unwrap();
+
+		let result = backend().start(&lower, &merged);
+		if matches!(result, Err(crate::IsoError::Unavailable(_))) {
+			let _ = fs::remove_dir_all(root);
+			return;
+		}
+		result.unwrap();
+
+		assert!(merged.join("root.txt").exists());
+		assert!(!merged.join(".worktrees/nested-wt").exists());
 		fs::remove_dir_all(root).unwrap();
 	}
 }

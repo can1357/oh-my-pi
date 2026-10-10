@@ -242,6 +242,10 @@
 - Fixed documents served as `application/octet-stream` being downloaded twice.
 - Fixed collaboration guests rebuilding the transcript excessively during streaming.
 
+### Fixed
+
+- Fixed dead task-isolation sandboxes leaking under `~/.omp/wt`: session startup now asynchronously reaps clean sandboxes whose owning process died, postmortem cleanup removes interrupted sandboxes on signal termination when they contain no unique work, `omp worktree clear` preserves sandboxes holding unmerged work unless `--force` is given, and isolation materialization no longer duplicates nested linked worktrees into `m/` ([#14566](https://github.com/can1357/oh-my-pi/pull/14566) by [@jwaldrip](https://github.com/jwaldrip)).
+
 ## [18.7.0] - 2026-10-06
 
 ### Added
