@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import type { Usage } from "@oh-my-pi/pi-ai";
 import { isSyntheticToolResultMessage } from "@oh-my-pi/pi-agent-core";
 import { collectPendingToolCalls } from "@oh-my-pi/pi-coding-agent/session/exit-diagnostics";
 import {
@@ -13,6 +14,7 @@ import { loadEntriesFromFile } from "@oh-my-pi/pi-coding-agent/session/session-l
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { FileSessionStorage, MemorySessionStorage } from "@oh-my-pi/pi-coding-agent/session/session-storage";
 import { getTerminalId } from "@oh-my-pi/pi-tui";
+import { isTaskToolDetails, type TaskToolDetails } from "@oh-my-pi/pi-tui/tools/task";
 import { getAgentDir, getTerminalSessionsDir, removeWithRetries, setAgentDir, TempDir } from "@oh-my-pi/pi-utils";
 
 interface JsonlMessageEntry {
@@ -203,11 +205,11 @@ describe("SessionManager.forkFrom", () => {
 			timestamp,
 			message: {
 				role: "assistant",
-				content: [],
+				content: [{ type: "toolCall", id: "task-call-1", name: "task", arguments: { task: "inspect" } }],
 				api: "anthropic-messages",
 				provider: "anthropic",
 				model: "claude",
-				stopReason: "stop",
+				stopReason: "toolUse",
 				timestamp: Date.now(),
 				usage: {
 					input: 100,
@@ -221,7 +223,137 @@ describe("SessionManager.forkFrom", () => {
 				},
 			},
 		};
-		await Bun.write(sourceFile, `${JSON.stringify(sourceHeader)}\n${JSON.stringify(assistantEntry)}\n`);
+		const taskUsage = {
+			input: 40,
+			output: 10,
+			cacheRead: 2,
+			cacheWrite: 1,
+			totalTokens: 53,
+			premiumRequests: 3,
+			credits: { cost: 10, committedCost: 10, acuCost: 2 },
+			cost: { input: 1, output: 2, cacheRead: 3, cacheWrite: 4, total: 10 },
+		};
+		const nestedUsage = {
+			input: 5,
+			output: 3,
+			cacheRead: 1,
+			cacheWrite: 2,
+			totalTokens: 11,
+			premiumRequests: 1,
+			credits: { cost: 4, committedCost: 4, acuCost: 1 },
+			cost: { input: 1, output: 2, cacheRead: 3, cacheWrite: 4, total: 10 },
+		};
+		const nestedTaskSnapshot = (
+			id: string,
+			usage: typeof taskUsage,
+			progressCost: number,
+			nestedTask?: TaskToolDetails,
+		): TaskToolDetails => ({
+			projectAgentsDir: null,
+			usage,
+			totalDurationMs: 1,
+			results: [
+				{
+					index: 0,
+					id,
+					agent: "worker",
+					agentSource: "bundled",
+					task: "inspect nested",
+					exitCode: 0,
+					output: "done",
+					stderr: "",
+					truncated: false,
+					durationMs: 1,
+					tokens: usage.totalTokens,
+					requests: 1,
+					usage,
+					...(nestedTask ? { extractedToolData: { task: [nestedTask] } } : {}),
+				},
+			],
+			progress: [
+				{
+					index: 0,
+					id,
+					agent: "worker",
+					agentSource: "bundled",
+					status: "completed",
+					task: "inspect nested",
+					recentTools: [],
+					recentOutput: [],
+					toolCount: 1,
+					requests: 1,
+					tokens: usage.totalTokens,
+					cost: progressCost,
+					durationMs: 1,
+				},
+			],
+		});
+		const grandchildUsage = { ...nestedUsage, input: 8, totalTokens: 16 };
+		const inflightUsage = { ...nestedUsage, input: 6, totalTokens: 12 };
+		const inflightGrandchildUsage = { ...nestedUsage, input: 9, totalTokens: 18 };
+		const progressGrandchildUsage = { ...nestedUsage, input: 7, totalTokens: 14 };
+		const grandchildDetails = nestedTaskSnapshot("grandchild", grandchildUsage, 17);
+		const inflightGrandchildDetails = nestedTaskSnapshot("inflight-grandchild", inflightGrandchildUsage, 19);
+		const inflightTaskDetails = nestedTaskSnapshot("inflight", inflightUsage, 9, inflightGrandchildDetails);
+		const progressGrandchildDetails = nestedTaskSnapshot("progress-grandchild", progressGrandchildUsage, 21);
+		const taskResultEntry = {
+			type: "message",
+			id: "task-result-1",
+			parentId: "assistant-1",
+			timestamp,
+			message: {
+				role: "toolResult",
+				toolCallId: "task-call-1",
+				toolName: "task",
+				content: [{ type: "text", text: "completed worker" }],
+				isError: false,
+				timestamp: Date.now(),
+				details: {
+					usage: taskUsage,
+					results: [
+						{
+							index: 0,
+							id: "nested-agent",
+							agent: "worker",
+							agentSource: "bundled",
+							task: "inspect",
+							exitCode: 0,
+							output: "done",
+							stderr: "",
+							truncated: false,
+							durationMs: 1,
+							tokens: 11,
+							requests: 1,
+							usage: nestedUsage,
+							extractedToolData: { task: [grandchildDetails] },
+						},
+					],
+					progress: [
+						{
+							index: 0,
+							id: "nested-agent",
+							agent: "worker",
+							agentSource: "bundled",
+							status: "completed",
+							task: "inspect",
+							recentTools: [],
+							recentOutput: [],
+							toolCount: 1,
+							requests: 1,
+							tokens: 11,
+							cost: 10,
+							inflightTaskDetails,
+							extractedToolData: { task: [progressGrandchildDetails] },
+							durationMs: 1,
+						},
+					],
+				},
+			},
+		};
+		await Bun.write(
+			sourceFile,
+			`${JSON.stringify(sourceHeader)}\n${JSON.stringify(assistantEntry)}\n${JSON.stringify(taskResultEntry)}\n`,
+		);
 		const sourceText = await Bun.file(sourceFile).text();
 		const sourceManager = await SessionManager.open(sourceFile, sessionDir, undefined, { suppressBreadcrumb: true });
 
@@ -230,6 +362,42 @@ describe("SessionManager.forkFrom", () => {
 			const entry = entries.find((e): e is SessionMessageEntry => e.type === "message");
 			if (entry?.message.role !== "assistant") throw new Error("expected assistant message");
 			return entry.message;
+		};
+		const findTaskDetails = async (file: string): Promise<TaskToolDetails> => {
+			const entries = await loadEntriesFromFile(file);
+			const entry = entries.find(
+				(e): e is SessionMessageEntry =>
+					e.type === "message" && e.message.role === "toolResult" && e.message.toolName === "task",
+			);
+			if (!entry || entry.message.role !== "toolResult") throw new Error("expected task tool result");
+			if (!isTaskToolDetails(entry.message.details)) throw new Error("expected task tool details");
+			return entry.message.details;
+		};
+		const findNestedTaskDetails = (extractedToolData: Record<string, unknown[]> | undefined): TaskToolDetails => {
+			const nested = extractedToolData?.task?.[0];
+			if (!isTaskToolDetails(nested)) throw new Error("expected nested task details");
+			return nested;
+		};
+		const zeroCost = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 };
+		const expectUsagePreserved = (actual: Usage | undefined, expected: Usage) => {
+			expect(actual?.cost).toEqual(expected.cost);
+			expect(actual?.credits).toEqual(expected.credits);
+			expect(actual?.premiumRequests).toBe(expected.premiumRequests);
+			expect(actual?.input).toBe(expected.input);
+			expect(actual?.output).toBe(expected.output);
+			expect(actual?.cacheRead).toBe(expected.cacheRead);
+			expect(actual?.cacheWrite).toBe(expected.cacheWrite);
+			expect(actual?.totalTokens).toBe(expected.totalTokens);
+		};
+		const expectUsageReset = (actual: Usage | undefined, expected: Usage) => {
+			expect(actual?.cost).toEqual(zeroCost);
+			expect(actual?.credits).toBeUndefined();
+			expect(actual?.premiumRequests).toBeUndefined();
+			expect(actual?.input).toBe(expected.input);
+			expect(actual?.output).toBe(expected.output);
+			expect(actual?.cacheRead).toBe(expected.cacheRead);
+			expect(actual?.cacheWrite).toBe(expected.cacheWrite);
+			expect(actual?.totalTokens).toBe(expected.totalTokens);
 		};
 
 		const preserved = await SessionManager.forkFrom(sourceFile, cwd, path.join(tempDir.path(), "keep"), undefined, {
@@ -240,6 +408,36 @@ describe("SessionManager.forkFrom", () => {
 		const preservedMessage = await findAssistant(preservedFile);
 		expect(preservedMessage.usage.cost.total).toBe(6);
 		expect(preservedMessage.usage.premiumRequests).toBe(2);
+		const preservedTaskDetails = await findTaskDetails(preservedFile);
+		expect(preserved.getUsageStatistics().cost).toBe(16);
+		expect(preservedTaskDetails.usage?.cost).toEqual(taskUsage.cost);
+		expect(preservedTaskDetails.usage?.credits).toEqual(taskUsage.credits);
+		expect(preservedTaskDetails.usage?.premiumRequests).toBe(taskUsage.premiumRequests);
+		expect(preservedTaskDetails.results[0]?.usage?.cost).toEqual(nestedUsage.cost);
+		expect(preservedTaskDetails.results[0]?.usage?.credits).toEqual(nestedUsage.credits);
+		expect(preservedTaskDetails.results[0]?.usage?.premiumRequests).toBe(nestedUsage.premiumRequests);
+		expect(preservedTaskDetails.progress?.[0]?.cost).toBe(10);
+		const preservedTaskResult = preservedTaskDetails.results[0];
+		if (!preservedTaskResult) throw new Error("expected direct task result");
+		const preservedGrandchild = findNestedTaskDetails(preservedTaskResult.extractedToolData);
+		expectUsagePreserved(preservedGrandchild.usage, grandchildUsage);
+		expectUsagePreserved(preservedGrandchild.results[0]?.usage, grandchildUsage);
+		expect(preservedGrandchild.progress?.[0]?.cost).toBe(17);
+		const preservedProgress = preservedTaskDetails.progress?.[0];
+		if (!preservedProgress) throw new Error("expected task progress");
+		const preservedInflight = preservedProgress.inflightTaskDetails;
+		if (!preservedInflight) throw new Error("expected in-flight task details");
+		expectUsagePreserved(preservedInflight.usage, inflightUsage);
+		expectUsagePreserved(preservedInflight.results[0]?.usage, inflightUsage);
+		expect(preservedInflight.progress?.[0]?.cost).toBe(9);
+		const preservedInflightGrandchild = findNestedTaskDetails(preservedInflight.results[0]?.extractedToolData);
+		expectUsagePreserved(preservedInflightGrandchild.usage, inflightGrandchildUsage);
+		expectUsagePreserved(preservedInflightGrandchild.results[0]?.usage, inflightGrandchildUsage);
+		expect(preservedInflightGrandchild.progress?.[0]?.cost).toBe(19);
+		const preservedProgressGrandchild = findNestedTaskDetails(preservedProgress.extractedToolData);
+		expectUsagePreserved(preservedProgressGrandchild.usage, progressGrandchildUsage);
+		expectUsagePreserved(preservedProgressGrandchild.results[0]?.usage, progressGrandchildUsage);
+		expect(preservedProgressGrandchild.progress?.[0]?.cost).toBe(21);
 
 		const reset = await SessionManager.forkFrom(sourceFile, cwd, path.join(tempDir.path(), "reset"), undefined, {
 			suppressBreadcrumb: true,
@@ -255,6 +453,46 @@ describe("SessionManager.forkFrom", () => {
 		expect(resetMessage.usage.input).toBe(100);
 		expect(resetMessage.usage.output).toBe(50);
 		expect(resetMessage.usage.totalTokens).toBe(165);
+		const resetTaskDetails = await findTaskDetails(resetFile);
+		expectUsageReset(resetTaskDetails.usage, taskUsage);
+		expect(resetTaskDetails.results[0]?.usage?.cost).toEqual(zeroCost);
+		expect(resetTaskDetails.results[0]?.usage?.credits).toBeUndefined();
+		expect(resetTaskDetails.results[0]?.usage?.premiumRequests).toBeUndefined();
+		expect(resetTaskDetails.progress?.[0]?.cost).toBe(0);
+		expect(resetTaskDetails.progress?.[0]?.tokens).toBe(11);
+		const resetTaskResult = resetTaskDetails.results[0];
+		if (!resetTaskResult) throw new Error("expected direct task result");
+		expectUsageReset(resetTaskResult.usage, nestedUsage);
+		const resetGrandchild = findNestedTaskDetails(resetTaskResult.extractedToolData);
+		expectUsageReset(resetGrandchild.usage, grandchildUsage);
+		expectUsageReset(resetGrandchild.results[0]?.usage, grandchildUsage);
+		expect(resetGrandchild.progress?.[0]?.cost).toBe(0);
+		expect(resetGrandchild.progress?.[0]?.tokens).toBe(grandchildUsage.totalTokens);
+		const resetProgress = resetTaskDetails.progress?.[0];
+		if (!resetProgress) throw new Error("expected task progress");
+		const resetInflight = resetProgress.inflightTaskDetails;
+		if (!resetInflight) throw new Error("expected in-flight task details");
+		expectUsageReset(resetInflight.usage, inflightUsage);
+		expectUsageReset(resetInflight.results[0]?.usage, inflightUsage);
+		expect(resetInflight.progress?.[0]?.cost).toBe(0);
+		expect(resetInflight.progress?.[0]?.tokens).toBe(inflightUsage.totalTokens);
+		const resetInflightGrandchild = findNestedTaskDetails(resetInflight.results[0]?.extractedToolData);
+		expectUsageReset(resetInflightGrandchild.usage, inflightGrandchildUsage);
+		expectUsageReset(resetInflightGrandchild.results[0]?.usage, inflightGrandchildUsage);
+		expect(resetInflightGrandchild.progress?.[0]?.cost).toBe(0);
+		expect(resetInflightGrandchild.progress?.[0]?.tokens).toBe(inflightGrandchildUsage.totalTokens);
+		const resetProgressGrandchild = findNestedTaskDetails(resetProgress.extractedToolData);
+		expectUsageReset(resetProgressGrandchild.usage, progressGrandchildUsage);
+		expectUsageReset(resetProgressGrandchild.results[0]?.usage, progressGrandchildUsage);
+		expect(resetProgressGrandchild.progress?.[0]?.cost).toBe(0);
+		expect(resetProgressGrandchild.progress?.[0]?.tokens).toBe(progressGrandchildUsage.totalTokens);
+		// Token counts are context, not spend — compaction anchors depend on them.
+		expect(resetTaskDetails.usage?.input).toBe(40);
+		expect(resetTaskDetails.usage?.cacheRead).toBe(2);
+		expect(resetTaskDetails.usage?.totalTokens).toBe(53);
+		expect(resetTaskDetails.results[0]?.usage?.input).toBe(5);
+		expect(resetTaskDetails.results[0]?.usage?.cacheRead).toBe(1);
+		expect(resetTaskDetails.results[0]?.usage?.totalTokens).toBe(11);
 		const sourceMessage = sourceManager.getEntries().find(entry => entry.type === "message");
 		if (sourceMessage?.type !== "message" || sourceMessage.message.role !== "assistant") {
 			throw new Error("expected source assistant message");
