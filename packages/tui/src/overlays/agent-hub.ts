@@ -77,6 +77,7 @@ import {
 	statusTone,
 	taskSummary,
 	treeBranch,
+	treeAgentLabel,
 	treeContinuation,
 	treeMetadataIndent,
 } from "./agent-hub-renderer";
@@ -918,6 +919,11 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 		};
 	}
 
+	#agentDisplayLabel(ref: TRecord): string {
+		if (this.#viewMode !== "tree") return ref.id;
+		return treeAgentLabel(ref.id, this.#treeParentById.get(ref.id), this.#treeDepthById.get(ref.id) ?? 0);
+	}
+
 	#pickerAgentItem(ref: TRecord): TspPickerItem {
 		const observed = this.#observableFor(ref.id);
 		const metrics = this.#metricsFor(ref, observed);
@@ -937,7 +943,7 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 		const model = modelChip(ref, observed);
 		const item: TspPickerItem = {
 			id: ref.id,
-			label: sanitizeDisplaySingleLine(ref.id),
+			label: sanitizeDisplaySingleLine(this.#agentDisplayLabel(ref)),
 			mono: true,
 			dot: statusDot(ref.status),
 			detail: task ? taskSummary(task) : undefined,
@@ -1235,7 +1241,7 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 		const label = [
 			statusGlyphSpan(ref.status),
 			span(" "),
-			span(sanitizeDisplaySingleLine(ref.id), selected ? "accent strong" : "strong"),
+			span(sanitizeDisplaySingleLine(this.#agentDisplayLabel(ref)), selected ? "accent strong" : "strong"),
 		];
 		if (showParent && ref.parentId && ref.parentId !== MAIN_AGENT_ID) {
 			label.push(span(`  ↳ ${sanitizeDisplaySingleLine(ref.parentId)}`, "dim"));
@@ -2156,8 +2162,8 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 		const branch = treeMode
 			? treeBranch(ref, max, this.#treeDepthById, this.#treeParentById, this.#treeLastSiblingById)
 			: "";
-		const id = sanitizeDisplaySingleLine(ref.id);
-		const styledId = selected ? theme.bold(theme.fg("accent", id)) : theme.bold(id);
+		const label = sanitizeDisplaySingleLine(this.#agentDisplayLabel(ref));
+		const styledId = selected ? theme.bold(theme.fg("accent", label)) : theme.bold(label);
 		const fields: string[] = [`${cursor} ${branch}${statusGlyph(ref.status)} ${styledId}`];
 		if (this.#viewMode === "roster" && ref.parentId && ref.parentId !== MAIN_AGENT_ID) {
 			fields.push(theme.fg("dim", `↳ ${sanitizeDisplaySingleLine(ref.parentId)}`));

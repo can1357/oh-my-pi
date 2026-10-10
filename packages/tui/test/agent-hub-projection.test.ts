@@ -1,3 +1,4 @@
+import { treeAgentLabel } from "@oh-my-pi/pi-tui/overlays/agent-hub-renderer";
 import { describe, expect, it } from "bun:test";
 import {
 	type AgentMetrics,
@@ -38,5 +39,27 @@ describe("aggregateMetrics fallback reads", () => {
 		expect(run()).toBe(15);
 		tail.usage.output = 40;
 		expect(run()).toBe(50);
+	});
+});
+
+describe("treeAgentLabel", () => {
+	it("strips parent prefix when child is rendered under its parent", () => {
+		expect(treeAgentLabel("Parent.Child", "Parent", 1)).toBe("Child");
+		expect(treeAgentLabel("A.B.C", "A.B", 2)).toBe("C");
+	});
+
+	it("preserves full id when agent is rendered at root depth", () => {
+		expect(treeAgentLabel("Solo", undefined, 0)).toBe("Solo");
+		expect(treeAgentLabel("Parent.Child", undefined, 0)).toBe("Parent.Child");
+		expect(treeAgentLabel("Parent.Child", "Main", 0)).toBe("Parent.Child");
+	});
+
+	it("preserves full id when prefix does not match displayed parent", () => {
+		expect(treeAgentLabel("Other.Child", "Parent", 1)).toBe("Other.Child");
+		expect(treeAgentLabel("Child", "Parent", 1)).toBe("Child");
+	});
+
+	it("preserves dots within the child name segment", () => {
+		expect(treeAgentLabel("Parent.step1.5", "Parent", 1)).toBe("step1.5");
 	});
 });
