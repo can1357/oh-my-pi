@@ -81,8 +81,9 @@ fn with_window_menu<T>(
 ) -> CoreResult<T> {
 	let (app, pid, wid) = window_menu_context(window)?;
 	// Application menus dispatch through the key window, not their AX parent.
+	let entry_front = skylight::front_pid();
 	skylight::with_background_guard(pid, || {
-		let prepared = make_key_in_background(&source()?, pid, wid, window)?;
+		let prepared = make_key_in_background(&source()?, pid, wid, window, entry_front)?;
 		require_key_context(pid, wid)?;
 		// The user may have brought the app forward while its key window settled.
 		if prepared {

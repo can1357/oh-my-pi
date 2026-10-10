@@ -65,8 +65,9 @@ impl MacInput {
 				match mode {
 					DeliveryMode::Background => {
 						background_guard(&window, pid, &event)?;
+						let entry_front = skylight::front_pid();
 						skylight::with_background_guard(pid, || {
-							background_pointer(&self.source, pid, wid, &window, event)
+							background_pointer(&self.source, pid, wid, &window, event, entry_front)
 						})
 					},
 					DeliveryMode::Foreground => {
@@ -276,8 +277,9 @@ fn with_background_keyboard<T>(
 			 keystrokes cannot be proven to reach it; retry with takeover:true or use ax actions",
 		)));
 	}
+	let entry_front = skylight::front_pid();
 	skylight::with_background_guard(pid, || {
-		let prepared = make_key_in_background(source, pid, wid, window)?;
+		let prepared = make_key_in_background(source, pid, wid, window, entry_front)?;
 		if let Some(KeyboardConflict::Siblings(siblings)) = conflict
 			&& !await_key_window(pid, wid)?
 		{
@@ -416,8 +418,12 @@ const KEY_WINDOW_POLL: Duration = Duration::from_millis(10);
 enum FrontTarget {
 	/// Another application is frontmost.
 	Background,
-	/// The target already is the key window of the frontmost application.
+	/// The target already was the key window of the frontmost application
+	/// when the input began.
 	Key,
+	/// The target's application came to the front after the input began, so
+	/// the user may just have selected another of its windows.
+	CameForward,
 	/// The target is another window of the frontmost application, whose key
 	/// window takes the user's typing.
 	UserSibling,
@@ -427,6 +433,7 @@ enum FrontTarget {
 }
 
 fn front_target(
+	entry_front: Option<libc::pid_t>,
 	front: Option<libc::pid_t>,
 	pid: libc::pid_t,
 	wid: u32,
@@ -435,6 +442,7 @@ fn front_target(
 	match front {
 		None => FrontTarget::Unknown,
 		Some(front) if front != pid => FrontTarget::Background,
+		Some(_) if entry_front != Some(pid) => FrontTarget::CameForward,
 		Some(_) if focused() == Some(wid) => FrontTarget::Key,
 		Some(_) => FrontTarget::UserSibling,
 	}
@@ -452,6 +460,9 @@ fn front_target(
 /// user's keystrokes and key equivalents, stay with the user's app. In the
 /// frontmost application itself, nothing is posted: the target already is
 /// key, or making it key would move the user's typing, so the input refuses.
+/// `entry_front` is the front process sampled before the caller's focus guard
+/// began; a target that has come forward since then refuses, because the
+/// user may have just picked the window that would receive the input.
 ///
 /// Returns whether the activation step ran. The user can bring the target app
 /// forward at any moment, which would turn the step into a key-window switch
@@ -462,10 +473,17 @@ pub(super) fn make_key_in_background(
 	pid: libc::pid_t,
 	wid: u32,
 	window: &DesktopWindow,
+	entry_front: Option<libc::pid_t>,
 ) -> CoreResult<bool> {
-	match front_target(skylight::front_pid(), pid, wid, || ax::focused_window_id(pid)) {
+	match front_target(entry_front, skylight::front_pid(), pid, wid, || ax::focused_window_id(pid)) {
 		FrontTarget::Background => {},
 		FrontTarget::Key => return Ok(false),
+		FrontTarget::CameForward => {
+			return Err(DesktopError::background_unavailable(format!(
+				"window {wid}'s application came to the front while background input was prepared; \
+				 nothing was sent; inspect the window, then retry with takeover:true or use ax actions",
+			)));
+		},
 		FrontTarget::UserSibling => {
 			return Err(DesktopError::background_unavailable(format!(
 				"window {wid} belongs to the frontmost application but is not its key window; making \
@@ -688,10 +706,11 @@ fn background_pointer(
 	wid: u32,
 	window: &DesktopWindow,
 	event: PointerEvent,
+	entry_front: Option<libc::pid_t>,
 ) -> CoreResult<()> {
 	match event {
 		PointerEvent::Click { x, y, button: MouseButton::Left, count, .. } => {
-			if make_key_in_background(source, pid, wid, window)? {
+			if make_key_in_background(source, pid, wid, window, entry_front)? {
 				still_behind_user(pid, wid)?;
 			}
 			background_left_click(source, pid, wid, window, x, y, count)
@@ -2055,11 +2074,19 @@ mod tests {
 		// preparing it would send the user's next keystrokes and pastes there.
 		let unread =
 			|| -> Option<u32> { panic!("a background process's focused window is not read") };
-		assert_eq!(front_target(Some(9), 7, 42, unread), FrontTarget::Background);
-		assert_eq!(front_target(None, 7, 42, unread), FrontTarget::Unknown);
-		assert_eq!(front_target(Some(7), 7, 42, || Some(42)), FrontTarget::Key);
-		assert_eq!(front_target(Some(7), 7, 42, || Some(43)), FrontTarget::UserSibling);
-		assert_eq!(front_target(Some(7), 7, 42, || None), FrontTarget::UserSibling);
+		assert_eq!(front_target(Some(9), Some(9), 7, 42, unread), FrontTarget::Background);
+		assert_eq!(front_target(Some(9), None, 7, 42, unread), FrontTarget::Unknown);
+		assert_eq!(front_target(Some(7), Some(7), 7, 42, || Some(42)), FrontTarget::Key);
+		assert_eq!(front_target(Some(7), Some(7), 7, 42, || Some(43)), FrontTarget::UserSibling);
+		assert_eq!(front_target(Some(7), Some(7), 7, 42, || None), FrontTarget::UserSibling);
+	}
+
+	#[test]
+	fn a_target_brought_forward_before_its_key_window_step_refuses_even_as_key() {
+		// The user brought the background target forward and picked its window:
+		// delivering now would type into the window they just selected.
+		assert_eq!(front_target(Some(9), Some(7), 7, 42, || Some(42)), FrontTarget::CameForward);
+		assert_eq!(front_target(None, Some(7), 7, 42, || Some(42)), FrontTarget::CameForward);
 	}
 
 	#[test]
