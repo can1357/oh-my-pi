@@ -249,6 +249,47 @@ describe("PluginManager.install load validation", () => {
 		);
 	});
 
+	// #15167: validation runs the factory for real, so whatever it starts
+	// (bridge child processes, timers) must be shut down before install settles
+	// or a one-shot `omp plugin install`/`upgrade` never exits — including when
+	// the factory throws after registering its teardown.
+	test.each([
+		{ outcome: "succeeds", tail: "" },
+		{ outcome: "throws after starting work", tail: ' throw new Error("late factory failure");' },
+	])("shuts down validated extensions when the factory $outcome", async ({ tail }) => {
+		const marker = path.join(tmpRoot, "shutdown-marker");
+		vi.spyOn(Bun, "spawn").mockImplementation(((cmd: string[]) => {
+			expect(cmd).toEqual(["bun", "install", "--no-cache", "eager-plugin"]);
+
+			const prepare = (async () => {
+				await Bun.write(
+					pluginsPkgJson,
+					JSON.stringify({ name: "omp-plugins", private: true, dependencies: { "eager-plugin": "1.0.0" } }),
+				);
+				await writePluginPackage(pluginsNodeModules, "eager-plugin", {
+					version: "1.0.0",
+					source: `export default function(pi) { pi.on("session_shutdown", () => Bun.write(${JSON.stringify(marker)}, "down"));${tail} }\n`,
+				});
+			})();
+
+			return {
+				pid: 1,
+				stdout: emptyStream(),
+				stderr: emptyStream(),
+				exited: prepare.then(() => 0),
+			} as Subprocess;
+		}) as typeof Bun.spawn);
+
+		const install = new PluginManager(tmpRoot).install("eager-plugin");
+		if (tail) {
+			await expect(install).rejects.toThrow(/late factory failure/);
+		} else {
+			await install;
+		}
+
+		expect(await Bun.file(marker).text()).toBe("down");
+	});
+
 	test("rejects an install whose extension entry cannot resolve its dependencies", async () => {
 		vi.spyOn(Bun, "spawn").mockImplementation(((cmd: string[]) => {
 			expect(cmd).toEqual(["bun", "install", "--no-cache", "broken-plugin"]);

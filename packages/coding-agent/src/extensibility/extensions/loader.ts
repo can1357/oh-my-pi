@@ -45,6 +45,7 @@ import type {
 	ExtensionAPI,
 	ExtensionContext,
 	ExtensionFactory,
+	ExtensionLoadError,
 	ExtensionRuntime as IExtensionRuntime,
 	LoadExtensionsResult,
 	MessageRenderer,
@@ -446,15 +447,17 @@ async function bindExtension(
 	if (imported.error !== null || factory === null) {
 		return { extension: null, error: imported.error };
 	}
+	const extension = createExtension(extensionPath, imported.resolvedPath);
 	try {
-		const extension = createExtension(extensionPath, imported.resolvedPath);
 		const api = new ConcreteExtensionAPI(PiCodingAgent, extension, runtime, cwd, eventBus);
 		await withHostGuard(() => runExtensionFactory(factory, api, runtime));
 
 		return { extension, error: null };
 	} catch (err) {
 		const message = err instanceof Error ? err.message : String(err);
-		return { extension: null, error: `Failed to load extension: ${message}` };
+		// Keep the partial instance: handlers registered before the throw (e.g.
+		// `session_shutdown`) are the only way to tear down work it already started.
+		return { extension, error: `Failed to load extension: ${message}` };
 	}
 }
 
@@ -494,7 +497,7 @@ export async function bindPreparedExtensions(
 	eventBus?: EventBus,
 ): Promise<LoadExtensionsResult> {
 	const extensions: Extension[] = [];
-	const errors: Array<{ path: string; error: string }> = [];
+	const errors: ExtensionLoadError[] = [];
 	const resolvedEventBus = eventBus ?? new EventBus();
 	const runtime = new ExtensionRuntime();
 
@@ -502,7 +505,7 @@ export async function bindPreparedExtensions(
 		const { extension, error } = await bindExtension(prepared.path, prepared, cwd, resolvedEventBus, runtime);
 
 		if (error) {
-			errors.push({ path: prepared.path, error });
+			errors.push(extension ? { path: prepared.path, error, extension } : { path: prepared.path, error });
 			continue;
 		}
 
