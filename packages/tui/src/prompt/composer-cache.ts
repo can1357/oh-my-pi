@@ -296,6 +296,26 @@ export class ComposerCache {
 		}
 	}
 
+	/** Persisted auto-resume intent applicable to this project, before the settings graph loads. */
+	cachedAutoResume(cwd: string): boolean | undefined {
+		const project = path.resolve(cwd);
+		let own: CachedAutoResume | undefined;
+		let global: CachedAutoResume | undefined;
+		try {
+			for (const row of this.#select.all(project, ANY_PROJECT)) {
+				this.#known.set(`${row.project}\0${row.kind}`, row.value);
+				if (row.kind !== "auto-resume") continue;
+				const parsed = parseCachedAutoResume(parseJson(row.value));
+				if (row.project === project) own = parsed;
+				else global = parsed;
+			}
+		} catch (error) {
+			logger.debug("composer cache auto-resume read failed", { error: String(error) });
+			return undefined;
+		}
+		return own?.projectScoped ? own.value : global?.value;
+	}
+
 	/** Resolved theme and composer settings for the next prepaint. */
 	writeUi(
 		cwd: string,
@@ -357,8 +377,8 @@ export class ComposerCache {
 		);
 	}
 
-	/** Refresh session-independent status while retaining the last resumable session's usage identity. */
-	writeStatusPreservingSessionUsage(cwd: string, status: ComposerStatusCache): void {
+	/** Refresh global layout inputs while retaining all facts owned by the last resumable session. */
+	writeStatusPreservingSession(cwd: string, status: ComposerStatusCache): void {
 		const project = path.resolve(cwd);
 		let previous: { status: ComposerStatusCache; sessionFile: string | undefined } | undefined;
 		try {
@@ -372,18 +392,17 @@ export class ComposerCache {
 		} catch (error) {
 			logger.debug("composer cache session status read failed", { error: String(error) });
 		}
-		this.writeStatus(
-			cwd,
-			{
-				...status,
-				statusLine: {
-					...status.statusLine,
-					contextPercent: previous?.status.statusLine.contextPercent,
-					tokenBreakdown: previous?.status.statusLine.tokenBreakdown,
-				},
-			},
-			previous?.sessionFile,
-		);
+		const next = previous
+			? {
+					...previous.status,
+					statusLine: {
+						...previous.status.statusLine,
+						settings: status.statusLine.settings,
+						gitEnabled: status.statusLine.gitEnabled,
+					},
+				}
+			: status;
+		this.writeStatus(cwd, next, previous?.sessionFile);
 	}
 
 	close(): void {

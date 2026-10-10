@@ -135,6 +135,7 @@ describe("composer startup cache", () => {
 		cache.writeStatus(otherProject, statusWithUsage, otherSessionFile);
 
 		cache.writeAutoResume(project, false);
+		expect(cache.cachedAutoResume(project)).toBeFalse();
 		expect(cache.read(project)).toMatchObject({ preferences, theme });
 		expect(cache.read(otherProject)).toMatchObject({ preferences: otherPreferences, theme });
 		expect(
@@ -150,6 +151,7 @@ describe("composer startup cache", () => {
 		).toBeUndefined();
 
 		cache.writeAutoResume(project, true);
+		expect(cache.cachedAutoResume(project)).toBeTrue();
 		expect(cache.read(project, { allowSessionUsage: true, sessionFile }).status?.statusLine.contextPercent).toBe(42);
 		expect(
 			cache.read(otherProject, { allowSessionUsage: true, sessionFile: otherSessionFile }).status?.statusLine
@@ -158,7 +160,7 @@ describe("composer startup cache", () => {
 		cache.close();
 	});
 
-	it("refreshes zero-turn status while preserving resumable-session usage", () => {
+	it("refreshes zero-turn layout while preserving resumable-session facts", () => {
 		const project = path.join(root, "project");
 		const sessionFile = path.join(root, "sessions", "resumable.jsonl");
 		const cached = statusFor(ThinkingLevel.Low);
@@ -176,18 +178,37 @@ describe("composer startup cache", () => {
 				},
 			},
 		};
-		const refreshed = statusFor(ThinkingLevel.High);
+		const refreshedBase = statusFor(ThinkingLevel.High);
+		const refreshed: ComposerStatusCache = {
+			borderColor: { prefix: "new", suffix: "border" },
+			statusLine: {
+				...refreshedBase.statusLine,
+				settings: { leftSegments: ["path"], contextLine: "off" },
+				gitEnabled: false,
+				autoThinking: true,
+				fastMode: true,
+				autoCompactEnabled: false,
+				compactionBoundaries: null,
+			},
+		};
 		const cache = ComposerCache.open(dbPath);
 		cache.writeUi(project, COMPOSER_DEFAULTS, {}, true);
 		cache.writeStatus(project, cachedWithUsage, sessionFile);
 
-		cache.writeStatusPreservingSessionUsage(project, refreshed);
+		cache.writeStatusPreservingSession(project, refreshed);
 
 		expect(cache.cachedSessionFile(project)).toBe(sessionFile);
 		const resumed = cache.read(project, { allowSessionUsage: true, sessionFile }).status?.statusLine;
-		expect(resumed?.thinkingLevel).toBe(ThinkingLevel.High);
+		expect(resumed?.settings).toEqual(refreshed.statusLine.settings);
+		expect(resumed?.gitEnabled).toBeFalse();
+		expect(resumed?.thinkingLevel).toBe(ThinkingLevel.Low);
+		expect(resumed?.autoThinking).toBeFalse();
+		expect(resumed?.fastMode).toBeFalse();
+		expect(resumed?.autoCompactEnabled).toBeTrue();
+		expect(resumed?.compactionBoundaries).toEqual(cached.statusLine.compactionBoundaries);
 		expect(resumed?.contextPercent).toBe(37.5);
 		expect(resumed?.tokenBreakdown).toEqual(cachedWithUsage.statusLine.tokenBreakdown);
+		expect(cache.read(project).status?.borderColor).toEqual(cached.borderColor);
 		cache.close();
 	});
 

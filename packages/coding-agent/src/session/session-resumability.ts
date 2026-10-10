@@ -6,6 +6,11 @@ export interface SessionResumabilityFacts {
 	readonly firstMessage?: string;
 }
 
+/** Message roles whose text makes a transcript visible and resumable in the session picker. */
+export function isSessionDisplayMessageRole(role: unknown): role is "user" | "developer" | "assistant" {
+	return role === "user" || role === "developer" || role === "assistant";
+}
+
 export function sanitizeSessionName(value: string | undefined): string | undefined {
 	if (!value) return undefined;
 	const firstLine = value.split(/\r?\n/)[0] ?? "";

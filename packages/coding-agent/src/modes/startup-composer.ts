@@ -61,6 +61,11 @@ export interface TerminalSessionPrepaint {
 	readonly sessionFile: string;
 }
 
+export interface TerminalSessionPrepaintOptions {
+	/** Whether cached settings permit a potentially expensive current-project transcript scan. */
+	readonly canAutoResume?: (cacheCwd: string) => boolean;
+}
+
 /** Resolve the newest canonical project-local target `continueRecent()` will choose. */
 function resolveCurrentProjectSession(cwd: string): string | undefined {
 	return findMostRecentNonEmptySessionSync(sessionDirForCwd(cwd));
@@ -80,28 +85,35 @@ export function canReusePrepaintSessionUsage(
 /** Resolve the session identity needed by prepaint, without loading the session graph. */
 export function resolveTerminalSessionPrepaint(
 	cwd: string,
-	_currentSessionFile?: string,
+	options: TerminalSessionPrepaintOptions = {},
 ): TerminalSessionPrepaint | undefined {
 	const breadcrumb = readTerminalBreadcrumbEntrySync();
 	const resolvedCwd = path.resolve(cwd);
+	const canAutoResume = options.canAutoResume ?? (() => true);
 	// A terminal without a breadcrumb follows continueRecent()'s project-local
 	// fallback. Resolve it from the same canonical session directory as the live
 	// selector, rather than the last cache writer's possibly custom directory. The
 	// matching cache identity lets the
 	// first frame reserve its usage widths before the session graph loads.
 	if (!breadcrumb) {
+		if (!canAutoResume(resolvedCwd)) return undefined;
 		const currentSessionFile = resolveCurrentProjectSession(resolvedCwd);
 		return currentSessionFile ? { cacheCwd: resolvedCwd, sessionFile: currentSessionFile } : undefined;
 	}
 	const breadcrumbCwd = path.resolve(breadcrumb.cwd);
 	const breadcrumbSessionFile = resolveBreadcrumbToInteractiveRoot(breadcrumb.sessionFile);
 	if (breadcrumbCwd === resolvedCwd) return { cacheCwd: resolvedCwd, sessionFile: breadcrumbSessionFile };
-	if (fs.existsSync(breadcrumbCwd)) return undefined;
-	if (!hasPositiveMovedProjectEvidence(breadcrumb.cwdIdentity, resolvedCwd)) return undefined;
-	// Only the moved-project branch needs the fallback scan. Same-cwd breadcrumbs
-	// above are authoritative and must not pay a synchronous directory walk.
-	const currentSessionFile = resolveCurrentProjectSession(resolvedCwd);
+	const breadcrumbCwdExists = fs.existsSync(breadcrumbCwd);
+	const looksLikeMovedProject =
+		!breadcrumbCwdExists && hasPositiveMovedProjectEvidence(breadcrumb.cwdIdentity, resolvedCwd);
+	// continueRecent() always prefers a genuine target-project transcript for a
+	// cross-cwd breadcrumb, even while the old cwd still exists. A moved project's
+	// project-scoped cache remains keyed by its prior path, so either row may
+	// authorize this scan.
+	const mayScanCurrentProject = canAutoResume(resolvedCwd) || (looksLikeMovedProject && canAutoResume(breadcrumbCwd));
+	const currentSessionFile = mayScanCurrentProject ? resolveCurrentProjectSession(resolvedCwd) : undefined;
 	if (currentSessionFile) return { cacheCwd: resolvedCwd, sessionFile: currentSessionFile };
+	if (breadcrumbCwdExists || !looksLikeMovedProject || !canAutoResume(breadcrumbCwd)) return undefined;
 	return { cacheCwd: breadcrumbCwd, sessionFile: breadcrumbSessionFile };
 }
 
@@ -135,16 +147,19 @@ export function beginStartupComposer(options: PrepaintComposerOptions = {}): voi
 	if (pendingComposer) throw new Error("A prepaint composer is already active");
 	const cwd = options.cwd ?? process.cwd();
 	const cache = options.cache === false ? undefined : sharedComposerCache();
+	const allowSessionUsage = canReusePrepaintSessionUsage(
+		options.allowSessionUsage,
+		process.env.PI_CONFIG_FILES,
+		process.env.PI_CODING_AGENT_SESSION_DIR,
+	);
 	const terminalSession = options.sessionFile
 		? { cacheCwd: cwd, sessionFile: options.sessionFile }
-		: resolveTerminalSessionPrepaint(cwd, cache?.cachedSessionFile(cwd));
+		: resolveTerminalSessionPrepaint(cwd, {
+				canAutoResume: cacheCwd => allowSessionUsage && cache?.cachedAutoResume(cacheCwd) === true,
+			});
 	const cached = cache
 		? cache.read(terminalSession?.cacheCwd ?? cwd, {
-				allowSessionUsage: canReusePrepaintSessionUsage(
-					options.allowSessionUsage,
-					process.env.PI_CONFIG_FILES,
-					process.env.PI_CODING_AGENT_SESSION_DIR,
-				),
+				allowSessionUsage,
 				sessionFile: terminalSession?.sessionFile,
 			})
 		: { preferences: undefined, theme: undefined, status: undefined };

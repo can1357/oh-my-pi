@@ -10,7 +10,7 @@ import { parseJsonlLenient } from "@oh-my-pi/pi-utils/stream";
 import { toError } from "@oh-my-pi/pi-utils/type-guards";
 import { computeDefaultSessionDir } from "./session-paths";
 import { compareSessionRecency } from "./recent-session-sync";
-import { isSessionResumabilityEmpty, sanitizeSessionName } from "./session-resumability";
+import { isSessionDisplayMessageRole, isSessionResumabilityEmpty, sanitizeSessionName } from "./session-resumability";
 import { FileSessionStorage, type SessionStorage, type SessionStorageStat } from "./session-storage";
 import { lookupSessionTitle, recordSessionTitle } from "./session-index";
 
@@ -295,9 +295,9 @@ function extractFirstDisplayMessageFromPrefix(content: string): string | undefin
 	while (index !== -1) {
 		const role = extractStringProperty(content, "role", index);
 		const text = extractStringProperty(content, "content", index) ?? extractStringProperty(content, "text", index);
-		if (text) {
+		if (text && isSessionDisplayMessageRole(role)) {
 			if (role === "user") return text;
-			if (!fallback && (role === "developer" || role === "assistant")) fallback = text;
+			fallback ??= text;
 		}
 		index = content.indexOf('"role"', index + 6);
 	}
