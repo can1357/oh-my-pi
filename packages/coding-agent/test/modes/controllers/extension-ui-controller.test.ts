@@ -1,4 +1,4 @@
-import { afterEach, beforeAll, describe, expect, it, type Mock, vi } from "bun:test";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, type Mock, spyOn, vi } from "bun:test";
 import { type Component, Container, isFocusable, type OverlayOptions, setKeybindings } from "@oh-my-pi/pi-tui";
 import { KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
 import type { ExtensionAskDialogQuestion, ExtensionUIContext } from "../../../src/extensibility/extensions";
@@ -9,6 +9,14 @@ import { ExtensionUiController } from "../../../src/modes/controllers/extension-
 import { InputController } from "../../../src/modes/controllers/input-controller";
 import { getEditorTheme, getThemeByName, setThemeInstance } from "@oh-my-pi/pi-tui/theme";
 import type { InteractiveModeContext } from "../../../src/modes/types";
+import {
+	disposeProgramStatus,
+	initProgramStatus,
+	setProgramStatusEnabled,
+	setRunStatus,
+} from "../../../src/utils/run-status";
+import * as titleGenerator from "../../../src/utils/title-generator";
+import { setTerminalHeadless } from "@oh-my-pi/pi-utils";
 
 afterEach(() => {
 	setKeybindings(KeybindingsManager.inMemory());
@@ -505,5 +513,113 @@ describe("ExtensionUiController custom overlay", () => {
 		expect(component.dispose).toHaveBeenCalledTimes(1);
 		expect(harness.editorContainer.children).toEqual([harness.editor]);
 		expect(harness.editor.getText()).toBe("draft typed while factory is pending");
+	});
+});
+
+describe("ExtensionUiController OSC 7501 run status", () => {
+	const report = (body: string) => `\x1b]7501;${body}\x1b\\`;
+	let writes: string[] = [];
+	let prevHeadless = false;
+	let ttyDescriptor: PropertyDescriptor | undefined;
+
+	beforeEach(() => {
+		vi.spyOn(titleGenerator, "setTerminalTitleState").mockImplementation(() => {});
+		prevHeadless = setTerminalHeadless(false);
+		ttyDescriptor = Object.getOwnPropertyDescriptor(process.stdout, "isTTY");
+		Object.defineProperty(process.stdout, "isTTY", { value: true, configurable: true });
+		writes = [];
+		spyOn(process.stdout, "write").mockImplementation((chunk: unknown) => {
+			writes.push(typeof chunk === "string" ? chunk : new TextDecoder().decode(chunk as Uint8Array));
+			return true;
+		});
+		initProgramStatus();
+		setProgramStatusEnabled(true);
+		setRunStatus({ state: "working" });
+		writes.length = 0;
+	});
+
+	afterEach(() => {
+		disposeProgramStatus();
+		vi.restoreAllMocks();
+		if (ttyDescriptor) Object.defineProperty(process.stdout, "isTTY", ttyDescriptor);
+		else Reflect.deleteProperty(process.stdout, "isTTY");
+		setTerminalHeadless(prevHeadless);
+	});
+
+	it("keeps confirm details in the dialog but reports only its title until answered", async () => {
+		const harness = makeHarness();
+		const ui = await harness.init();
+
+		const answer = ui.confirm("Run terraform apply?", "This changes production.");
+		const dialog = harness.editorContainer.children[0];
+		expect(Bun.stripANSI(dialog?.render(120).join("\n") ?? "")).toContain("This changes production.");
+		expect(writes).toEqual([
+			report(`state=blocked:kind=permission:app=omp:msg=${Buffer.from("Run terraform apply?").toString("base64")}`),
+		]);
+
+		// The run settles while the dialog still waits: the dialog keeps the record.
+		setRunStatus({ state: "done" });
+		expect(writes).toHaveLength(1);
+
+		harness.handleInput("\r");
+		expect(await answer).toBe(true);
+		expect(writes.slice(1)).toEqual([report("state=done:app=omp")]);
+	});
+
+	it("hands a blocked record to the next queued dialog without reporting completion between prompts", async () => {
+		const harness = makeHarness();
+		const ui = await harness.init();
+		const first = ui.confirm("Approve deployment?", "terraform apply");
+		const second = ui.input("Deployment reason?");
+		setRunStatus({ state: "done" });
+
+		harness.handleInput("\r");
+		expect(await first).toBe(true);
+		expect(writes).toEqual([
+			report(`state=blocked:kind=permission:app=omp:msg=${Buffer.from("Approve deployment?").toString("base64")}`),
+			report(`state=blocked:kind=question:app=omp:msg=${Buffer.from("Deployment reason?").toString("base64")}`),
+		]);
+
+		harness.handleInput("\x1b");
+		expect(await second).toBeUndefined();
+		expect(writes.at(-1)).toBe(report("state=done:app=omp"));
+	});
+
+	it("reports an extension input as blocked on a question", async () => {
+		const harness = makeHarness();
+		const ui = await harness.init();
+
+		const answer = ui.input("Release name?");
+		expect(writes).toEqual([
+			report(`state=blocked:kind=question:app=omp:msg=${Buffer.from("Release name?").toString("base64")}`),
+		]);
+
+		harness.handleInput("\x1b");
+		expect(await answer).toBeUndefined();
+		expect(writes.slice(1)).toEqual([report("state=working:app=omp")]);
+	});
+
+	it("reports the presented approval dialog's prompt, not the newest queued tool call's", async () => {
+		const harness = makeHarness();
+		const ui = await harness.init();
+		const permission = (msg: string) =>
+			report(`state=blocked:kind=permission:app=omp:msg=${Buffer.from(msg).toString("base64")}`);
+
+		// Two concurrent approvals: the event flow reports each call as it starts,
+		// while the dialogs present one at a time.
+		setRunStatus({ state: "blocked", kind: "permission", msg: "Allow tool: read a" });
+		const first = ui.select("Allow tool: read a", ["Approve", "Deny"]);
+		setRunStatus({ state: "blocked", kind: "permission", msg: "Allow tool: read b" });
+		const second = ui.select("Allow tool: read b", ["Approve", "Deny"]);
+		expect(writes).toEqual([permission("Allow tool: read a")]);
+
+		harness.handleInput("\r");
+		expect(await first).toBe("Approve");
+		expect(writes.slice(1)).toEqual([permission("Allow tool: read b")]);
+
+		harness.handleInput("\r");
+		expect(await second).toBe("Approve");
+		setRunStatus({ state: "working" });
+		expect(writes.slice(2)).toEqual([report("state=working:app=omp")]);
 	});
 });
