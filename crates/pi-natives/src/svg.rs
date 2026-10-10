@@ -7,17 +7,88 @@ use std::sync::{Arc, LazyLock};
 
 use napi::{Result, bindgen_prelude::Uint8Array};
 use napi_derive::napi;
-use resvg::{tiny_skia, usvg};
+use resvg::{
+	tiny_skia,
+	usvg::{
+		self,
+		fontdb::{Database, Family, Style},
+	},
+};
 
 use crate::task;
 
 const MAX_RENDER_PIXELS: u64 = 16 * 1024 * 1024;
 
-static FONT_DB: LazyLock<Arc<usvg::fontdb::Database>> = LazyLock::new(|| {
-	let mut database = usvg::fontdb::Database::new();
+static FONT_DB: LazyLock<Arc<Database>> = LazyLock::new(|| {
+	let mut database = Database::new();
 	database.load_system_fonts();
+	resolve_generic_families(&mut database);
 	Arc::new(database)
 });
+
+/// Widely installed faces tried, in order, for a generic family whose
+/// configured name has no installed face.
+const SERIF_FALLBACKS: &[&str] =
+	&["DejaVu Serif", "Noto Serif", "Liberation Serif", "FreeSerif", "Times New Roman", "Times"];
+const SANS_SERIF_FALLBACKS: &[&str] =
+	&["DejaVu Sans", "Noto Sans", "Liberation Sans", "FreeSans", "Arial", "Helvetica"];
+const MONOSPACE_FALLBACKS: &[&str] =
+	&["DejaVu Sans Mono", "Noto Sans Mono", "Liberation Mono", "FreeMono", "Courier New", "Menlo"];
+
+/// Points every generic family (`serif`, `sans-serif`, …) at an installed face.
+///
+/// fontdb maps each generic family to one name: a Windows default
+/// (`Times New Roman`, `Arial`, …) or, with fontconfig, the first `<prefer>`
+/// entry of the last matching alias, installed or not. usvg falls back from
+/// unmatched `font-family` lists to `serif` only, so a dangling mapping drops
+/// every `<text>` element. Installed mappings are kept; dangling ones move to
+/// the first installed common face, then to any installed face.
+fn resolve_generic_families(database: &mut Database) {
+	let generics = [
+		(Family::Serif, SERIF_FALLBACKS),
+		(Family::SansSerif, SANS_SERIF_FALLBACKS),
+		(Family::Monospace, MONOSPACE_FALLBACKS),
+		(Family::Cursive, SANS_SERIF_FALLBACKS),
+		(Family::Fantasy, SANS_SERIF_FALLBACKS),
+	];
+	for (generic, fallbacks) in generics {
+		if is_installed(database, database.family_name(&generic)) {
+			continue;
+		}
+		let Some(name) = fallbacks
+			.iter()
+			.find(|name| is_installed(database, name))
+			.map(|name| (*name).to_owned())
+			.or_else(|| any_installed_family(database))
+		else {
+			return;
+		};
+		match generic {
+			Family::Serif => database.set_serif_family(name),
+			Family::SansSerif => database.set_sans_serif_family(name),
+			Family::Monospace => database.set_monospace_family(name),
+			Family::Cursive => database.set_cursive_family(name),
+			Family::Fantasy => database.set_fantasy_family(name),
+			Family::Name(_) => {},
+		}
+	}
+}
+
+fn is_installed(database: &Database, family: &str) -> bool {
+	database
+		.faces()
+		.any(|face| face.families.iter().any(|(name, _)| name == family))
+}
+
+/// First family name of an installed face, preferring upright faces.
+fn any_installed_family(database: &Database) -> Option<String> {
+	database
+		.faces()
+		.filter(|face| face.style == Style::Normal)
+		.chain(database.faces())
+		.find_map(|face| face.families.first())
+		.map(|(name, _)| name.clone())
+}
 
 /// Terminal cell size in device pixels, for [`rasterize_svg`] canvases a
 /// terminal shows over whole cells.
@@ -167,5 +238,36 @@ mod tests {
 		let error =
 			rasterize_svg_sync(svg, 8192, 8192, 1.0, None).expect_err("oversized canvas should fail");
 		assert!(error.reason.contains("safety cap"));
+	}
+
+	/// Inked pixels of `text` rendered against `database`.
+	fn text_ink(database: &Arc<Database>, text: &str) -> usize {
+		let svg =
+			format!(r#"<svg xmlns="http://www.w3.org/2000/svg" width="200" height="40">{text}</svg>"#);
+		let options = usvg::Options { fontdb: Arc::clone(database), ..usvg::Options::default() };
+		let tree = usvg::Tree::from_str(&svg, &options).expect("SVG should parse");
+		let mut pixmap = tiny_skia::Pixmap::new(200, 40).expect("pixmap should allocate");
+		resvg::render(&tree, tiny_skia::Transform::identity(), &mut pixmap.as_mut());
+		pixmap
+			.pixels()
+			.iter()
+			.filter(|pixel| pixel.alpha() > 0)
+			.count()
+	}
+
+	#[test]
+	fn renders_text_when_generic_family_is_not_installed() {
+		// Only Silver is installed; serif keeps fontdb's `Times New Roman`
+		// default, as on Linux hosts without Microsoft core fonts.
+		let mut database = Database::new();
+		database.load_font_data(include_bytes!("fonts/Silver.ttf").to_vec());
+		resolve_generic_families(&mut database);
+		let database = Arc::new(database);
+		let plain = r#"<text x="5" y="30" font-size="20" fill="black">Plain text</text>"#;
+		assert!(text_ink(&database, plain) > 0, "text without font-family was dropped");
+		// A missing named family falls back to serif.
+		let named =
+			r#"<text x="5" y="30" font-size="20" font-family="Inter" fill="black">Inter text</text>"#;
+		assert!(text_ink(&database, named) > 0, "text with a missing font-family was dropped");
 	}
 }
