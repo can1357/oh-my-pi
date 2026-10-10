@@ -2,9 +2,10 @@ use objc2_application_services::{AXError, AXUIElement};
 use objc2_core_foundation::{CFArray, CFNumber, CFRetained, CFType};
 
 use super::{
+	super::input::{await_key_window, make_key_in_background, source},
 	MacAx, copy_attribute, copy_attribute_result, copy_bool, copy_element, copy_required_string,
-	copy_string, copy_strings_from_action_names, create_application, element_pid, focused_window_id,
-	mac_handle, perform_action, set_timeout, skylight, window_id,
+	copy_string, copy_strings_from_action_names, create_application, element_pid, mac_handle,
+	perform_action, set_timeout, skylight, window_id,
 };
 use crate::desktop::{
 	backend::AxBackend,
@@ -80,19 +81,16 @@ fn with_window_menu<T>(
 ) -> CoreResult<T> {
 	let (app, pid, wid) = window_menu_context(window)?;
 	// Application menus dispatch through the key window, not their AX parent.
-	// Focus records change only this app's key context, never activate it or
-	// switch Spaces; the existing guards restore the user's keyboard context.
 	skylight::with_background_guard(pid, || {
-		skylight::with_focus_without_raise(pid, wid, || {
-			require_key_context(pid, wid)?;
-			action(&app, pid, wid)
-		})
+		make_key_in_background(&source()?, pid, wid, window)?;
+		require_key_context(pid, wid)?;
+		action(&app, pid, wid)
 	})
 }
 
 fn require_key_context(pid: libc::pid_t, wid: u32) -> CoreResult<()> {
 	control::check()?;
-	if focused_window_id(pid) != Some(wid) {
+	if !await_key_window(pid, wid)? {
 		return Err(DesktopError::background_unavailable(format!(
 			"menu dispatch requires window {wid} to be the exact key window of process {pid}; macOS \
 			 did not establish that context, so no command was dispatched"

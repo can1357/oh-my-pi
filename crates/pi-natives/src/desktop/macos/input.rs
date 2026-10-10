@@ -101,11 +101,8 @@ impl MacInput {
 						if !process::is_terminal(pid) && ax::insert_native_text(pid, wid, text)? {
 							return Ok(());
 						}
-						ensure_sole_keyboard_destination(pid, wid)?;
-						skylight::with_background_guard(pid, || {
-							skylight::with_focus_without_raise(pid, wid, || {
-								background_type(&self.source, pid, text)
-							})
+						with_background_keyboard(&self.source, pid, wid, &window, || {
+							background_type(&self.source, pid, text)
 						})
 					},
 					DeliveryMode::Foreground => {
@@ -161,11 +158,8 @@ impl MacInput {
 								"modifier flags on routed chords",
 							));
 						}
-						ensure_sole_keyboard_destination(pid, wid)?;
-						skylight::with_background_guard(pid, || {
-							skylight::with_focus_without_raise(pid, wid, || {
-								background_chord(&self.source, pid, keys)
-							})
+						with_background_keyboard(&self.source, pid, wid, &window, || {
+							background_chord(&self.source, pid, keys)
 						})
 					},
 					DeliveryMode::Foreground => skylight::with_foreground(pid, wid, |activated| {
@@ -202,16 +196,13 @@ impl MacInput {
 						if process::is_screen_sharing(pid) {
 							return Err(screen_sharing_refusal(&window, "held keys"));
 						}
-						ensure_sole_keyboard_destination(pid, wid)?;
-						skylight::with_background_guard(pid, || {
-							skylight::with_focus_without_raise(pid, wid, || {
-								with_held_keys(
-									&self.source,
-									keys,
-									|event| skylight::post_keyboard(pid, event),
-									|| control::wait(duration),
-								)
-							})
+						with_background_keyboard(&self.source, pid, wid, &window, || {
+							with_held_keys(
+								&self.source,
+								keys,
+								|event| skylight::post_keyboard(pid, event),
+								|| control::wait(duration),
+							)
 						})
 					},
 					DeliveryMode::Foreground => skylight::with_foreground(pid, wid, |activated| {
@@ -261,33 +252,43 @@ enum KeyboardConflict {
 	Siblings(usize),
 }
 
-/// Refuses background keystrokes unless `wid` is provably the only window of
-/// its process that can be key.
+/// Background keyboard delivery to window `wid`: inside the self-activation
+/// guard, makes `wid` its application's key window, then runs `deliver`.
 ///
 /// macOS posts key events to a *process*, which hands them to whichever window
-/// it treats as key; unlike pointer events they carry no window id, and no
-/// focus record or accessibility attribute reliably redirects that choice.
-/// Candidates come from the process's accessibility windows, not
-/// `WindowServer`'s list, which also holds the per-window compositor surfaces
-/// of Chromium, Electron, and `WebKit` apps. `DesktopWindow::focused` cannot
-/// disambiguate: it names only the active application's key window.
-fn ensure_sole_keyboard_destination(pid: libc::pid_t, wid: u32) -> CoreResult<()> {
+/// it treats as key; unlike pointer events they carry no window id. When the
+/// process has other windows that could be key, keys are sent only once the
+/// application reports `wid` as its focused window. Candidates come from the
+/// process's accessibility windows, not `WindowServer`'s list, which also holds
+/// the per-window compositor surfaces of Chromium, Electron, and `WebKit` apps.
+fn with_background_keyboard<T>(
+	source: &CGEventSource,
+	pid: libc::pid_t,
+	wid: u32,
+	window: &DesktopWindow,
+	deliver: impl FnOnce() -> CoreResult<T>,
+) -> CoreResult<T> {
 	let conflict = ax::window_records(pid)
 		.map_or(Some(KeyboardConflict::Unmapped), |records| keyboard_conflict(wid, &records));
-	match conflict {
-		None => Ok(()),
-		Some(KeyboardConflict::Unmapped) => Err(DesktopError::background_unavailable(format!(
+	if conflict == Some(KeyboardConflict::Unmapped) {
+		return Err(DesktopError::background_unavailable(format!(
 			"window {wid} is not among its application's accessibility windows, so background \
 			 keystrokes cannot be proven to reach it; retry with takeover:true or use ax actions",
-		))),
-		Some(KeyboardConflict::Siblings(siblings)) => {
-			Err(DesktopError::background_unavailable(format!(
-				"window {wid} shares its application with {siblings} other window(s); macOS delivers \
-				 background keystrokes to whichever window the application treats as key, so retry \
-				 with takeover:true or use ax actions",
-			)))
-		},
+		)));
 	}
+	skylight::with_background_guard(pid, || {
+		make_key_in_background(source, pid, wid, window)?;
+		if let Some(KeyboardConflict::Siblings(siblings)) = conflict
+			&& !await_key_window(pid, wid)?
+		{
+			return Err(DesktopError::background_unavailable(format!(
+				"window {wid} shares its application with {siblings} other window(s) and did not \
+				 become its key window, so background keystrokes could reach another window; retry \
+				 with takeover:true or use ax actions",
+			)));
+		}
+		deliver()
+	})
 }
 
 fn keyboard_conflict(wid: u32, records: &[ax::AxWindowRecord]) -> Option<KeyboardConflict> {
@@ -377,17 +378,107 @@ const REMOTE_MOUSE_DRAG: u32 = 1;
 /// Background pointer event fields, in `SkyLight`'s raw field numbering.
 const FIELD_MOUSE_EVENT_NUMBER: u32 = 0;
 const FIELD_CLICK_STATE: u32 = 1;
+/// Mouse pressure; a press `AppKit` builds carries it at full.
+const FIELD_PRESSURE: u32 = 2;
 const FIELD_BUTTON_NUMBER: u32 = 3;
 const FIELD_SUBTYPE: u32 = 7;
 /// Target pid, checked by Chromium's synthetic-event filter.
 const FIELD_TARGET_PID: u32 = 40;
 const FIELD_WINDOW_NUMBER: u32 = 51;
+/// The sender's `WindowServer` connection, as on an `AppKit`-built event.
+const FIELD_WINDOW_CONTEXT: u32 = 52;
+/// Subtype of an `AppKit`-defined event.
+const FIELD_APPKIT_SUBTYPE: u32 = 83;
 /// Shared id that makes `WindowServer` coalesce one gesture's events.
 const FIELD_CLICK_GROUP: u32 = 58;
 const FIELD_WINDOW_UNDER_POINTER: u32 = 91;
 const FIELD_WINDOW_UNDER_POINTER_THAT_CAN_HANDLE: u32 = 92;
 /// `NSEventSubtypeTouch`.
 const SUBTYPE_TOUCH: i64 = 3;
+/// `NSEventTypeAppKitDefined`, which the `CGEventType` enum cannot express.
+const APPKIT_DEFINED_EVENT: u32 = 13;
+/// `NSEventSubtypeApplicationActivated`.
+const APPLICATION_ACTIVATED: i64 = 1;
+/// Flags `AppKit` stamps on a window's application-activated event; they are
+/// not held modifiers.
+const ACTIVATION_FLAGS: u64 = 0xc0000;
+/// How long an application may take to report the key window that
+/// [`make_key_in_background`] asked for.
+const KEY_WINDOW_TIMEOUT: Duration = Duration::from_millis(250);
+const KEY_WINDOW_POLL: Duration = Duration::from_millis(10);
+
+/// Makes `wid` the key window of its background application, as that
+/// application sees it, without activating it.
+///
+/// A background application drops pid-routed keystrokes and key equivalents,
+/// and Chromium ignores its clicks, until it believes it is active. The
+/// application-activated event `AppKit` builds for a real activation gives it
+/// that belief; a press and release just outside the window's frame then make
+/// exactly `wid` key among its windows without reaching any of its controls.
+/// `WindowServer`'s front process and key-focus application, which route the
+/// user's keystrokes and key equivalents, stay with the user's app.
+pub(super) fn make_key_in_background(
+	source: &CGEventSource,
+	pid: libc::pid_t,
+	wid: u32,
+	window: &DesktopWindow,
+) -> CoreResult<()> {
+	let context = skylight::sender_connection()?;
+	let activated = CGEvent::new(source.clone())
+		.map_err(|()| DesktopError::input_failed("failed to create a Quartz activation event"))?;
+	// SAFETY: `activated` is a live CGEvent and the type is a valid CGEventType
+	// value the core-graphics enum lacks.
+	unsafe { set_event_type(activated.as_ptr(), APPKIT_DEFINED_EVENT) };
+	activated.set_flags(CGEventFlags::from_bits_retain(ACTIVATION_FLAGS));
+	skylight::set_fields(&activated, &[
+		(FIELD_WINDOW_NUMBER, i64::from(wid)),
+		(FIELD_WINDOW_CONTEXT, context),
+		(FIELD_APPKIT_SUBTYPE, APPLICATION_ACTIVATED),
+	])?;
+	skylight::post_routed(pid, &activated)?;
+	let (location, local) = activating_press(window);
+	let press = |event_type: CGEventType, number: i64| -> CoreResult<()> {
+		let event = mouse_event(source, event_type, location, CGMouseButton::Left)?;
+		skylight::set_fields(&event, &[
+			(FIELD_MOUSE_EVENT_NUMBER, number),
+			(FIELD_CLICK_STATE, 1),
+			(FIELD_PRESSURE, 255),
+			(FIELD_BUTTON_NUMBER, 0),
+			(FIELD_SUBTYPE, SUBTYPE_TOUCH),
+			(FIELD_WINDOW_NUMBER, i64::from(wid)),
+			(FIELD_WINDOW_CONTEXT, context),
+			(FIELD_WINDOW_UNDER_POINTER, i64::from(wid)),
+			(FIELD_WINDOW_UNDER_POINTER_THAT_CAN_HANDLE, i64::from(wid)),
+		])?;
+		skylight::set_window_location(&event, local)?;
+		skylight::post_routed(pid, &event)
+	};
+	press(CGEventType::LeftMouseDown, 1)?;
+	let release = control::cleanup(|| press(CGEventType::LeftMouseUp, 2));
+	skylight::after_cleanup(Ok(()), release)
+}
+
+/// Global and window-local points of the press that makes a window key: one
+/// point beyond its top-left corner, outside its frame.
+fn activating_press(window: &DesktopWindow) -> (CGPoint, CGPoint) {
+	let local = CGPoint::new(-1.0, -1.0);
+	(CGPoint::new(f64::from(window.x) + local.x, f64::from(window.y) + local.y), local)
+}
+
+/// Waits until `pid` reports `wid` as its focused window; the application
+/// handles [`make_key_in_background`]'s events asynchronously.
+pub(super) fn await_key_window(pid: libc::pid_t, wid: u32) -> CoreResult<bool> {
+	let deadline = Instant::now() + KEY_WINDOW_TIMEOUT;
+	loop {
+		if ax::focused_window_id(pid) == Some(wid) {
+			return Ok(true);
+		}
+		if Instant::now() >= deadline {
+			return Ok(false);
+		}
+		control::wait(KEY_WINDOW_POLL)?;
+	}
+}
 
 /// Lets `WindowServer` apply a pointer warp before HID input at the new
 /// location, and lets the target consume a click before focus or the pointer
@@ -431,6 +522,8 @@ unsafe extern "C" {
 	);
 	#[link_name = "CGEventCreateKeyboardEvent"]
 	fn create_keyboard_event(source: CGEventSourceRef, keycode: u16, down: bool) -> CGEventRef;
+	#[link_name = "CGEventSetType"]
+	fn set_event_type(event: CGEventRef, event_type: u32);
 	#[cfg(test)]
 	#[link_name = "CGEventSourceGetLocalEventsSuppressionInterval"]
 	fn get_local_events_suppression_interval(source: CGEventSourceRef) -> f64;
@@ -440,7 +533,7 @@ unsafe extern "C" {
 	-> u32;
 }
 
-fn source() -> CoreResult<CGEventSource> {
+pub(super) fn source() -> CoreResult<CGEventSource> {
 	event_source(CGEventSourceStateID::HIDSystemState)
 }
 
@@ -519,9 +612,8 @@ fn background_pointer(
 ) -> CoreResult<()> {
 	match event {
 		PointerEvent::Click { x, y, button: MouseButton::Left, count, .. } => {
-			skylight::with_focus_without_raise(pid, wid, || {
-				background_left_click(source, pid, wid, window, x, y, count)
-			})
+			make_key_in_background(source, pid, wid, window)?;
+			background_left_click(source, pid, wid, window, x, y, count)
 		},
 		PointerEvent::Click { x, y, button, count, .. } => {
 			background_button_click(source, pid, wid, window, x, y, button, count)
@@ -1874,6 +1966,27 @@ mod tests {
 			assert!((100.0..400.0).contains(&start), "primer for {x} starts outside at {start}");
 			assert_eq!((start - x).abs(), PRIMER_OFFSETS[0]);
 		}
+	}
+
+	#[test]
+	fn activating_press_lands_outside_the_target_window() {
+		// A press inside the frame would reach the window's own controls: a
+		// Chrome tab, Safari's address field, a Finder toolbar button.
+		let window = DesktopWindow {
+			id:      "42".to_string(),
+			title:   String::new(),
+			app:     String::new(),
+			pid:     Some(7),
+			x:       100,
+			y:       50,
+			width:   300,
+			height:  200,
+			focused: false,
+		};
+		let (location, local) = activating_press(&window);
+		assert!(local.x < 0.0 && local.y < 0.0, "window-local {local:?} is inside the frame");
+		assert!(location.x < 100.0 && location.y < 50.0, "press at {location:?} is inside the frame");
+		assert_eq!((location.x - local.x, location.y - local.y), (100.0, 50.0));
 	}
 
 	#[test]
