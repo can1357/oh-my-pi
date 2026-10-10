@@ -498,7 +498,7 @@ impl AxBackend for MacAx {
 		}
 		skylight::with_background_guard(element_pid(element)?, || {
 			set_string_value(element, "AXValue", value)?;
-			verify_text_value(element, value, same_up_to_formatting)
+			verify_text_value(element, value, same_phone_number)
 		})
 	}
 
@@ -677,43 +677,38 @@ fn verify_text_value(
 }
 
 /// Whether a field that stores `actual` after `expected` was written holds the
-/// written value in the app's own format. Apps reformat what they store:
-/// Contacts keeps `555-789-0123` as `(555) 789-0123` wrapped in directional
-/// marks. The letters and digits must match exactly, and the app may add or
-/// change separators but not remove one, so `1.5` stored as `15` still fails.
-fn same_up_to_formatting(actual: &str, expected: &str) -> bool {
+/// written value. Apps format phone numbers as they store them: Contacts keeps
+/// `555-789-0123` as `(555) 789-0123` wrapped in directional marks. So a
+/// written phone number (at least seven digits, an optional `+`, and spaces,
+/// parentheses or hyphens) also matches a stored value with the same digits and
+/// `+` regrouped that way. Anything else must match exactly: other punctuation,
+/// or a leading `-`, can change a number's sign or scale.
+fn same_phone_number(actual: &str, expected: &str) -> bool {
 	if actual == expected {
 		return true;
 	}
-	let (actual_text, actual_splits) = significant_text(actual);
-	let (expected_text, expected_splits) = significant_text(expected);
-	!expected_text.is_empty()
-		&& actual_text == expected_text
-		&& expected_splits
-			.iter()
-			.all(|split| actual_splits.binary_search(split).is_ok())
+	if expected.chars().filter(char::is_ascii_digit).count() < 7 {
+		return false;
+	}
+	match (phone_symbols(actual), phone_symbols(expected)) {
+		(Some(actual), Some(expected)) => actual.eq(expected),
+		_ => false,
+	}
 }
 
-/// The letters and digits of `text`, and the offsets among them where a
-/// separator (anything else) splits them.
-fn significant_text(text: &str) -> (String, Vec<usize>) {
-	let mut significant = String::with_capacity(text.len());
-	let mut splits = Vec::new();
-	let mut count = 0;
-	let mut separated = false;
-	for ch in text.chars() {
-		if ch.is_alphanumeric() {
-			if separated && count > 0 {
-				splits.push(count);
-			}
-			separated = false;
-			significant.push(ch);
-			count += 1;
-		} else {
-			separated = true;
-		}
-	}
-	(significant, splits)
+/// The digits and `+` signs of a phone number, or `None` when `text` holds
+/// anything but those and phone separators, or starts with a `-` sign.
+fn phone_symbols(text: &str) -> Option<impl Iterator<Item = char> + '_> {
+	let mark = |ch: char| {
+		ch.is_whitespace()
+			|| matches!(ch, '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
+	};
+	let separator = move |ch: char| mark(ch) || matches!(ch, '(' | ')' | '-');
+	let phone = text
+		.chars()
+		.all(|ch| ch.is_ascii_digit() || ch == '+' || separator(ch))
+		&& text.chars().find(|&ch| !mark(ch)) != Some('-');
+	phone.then(|| text.chars().filter(move |&ch| !separator(ch)))
 }
 
 /// Date and time controls publish `AXValue` as a `CFDate` and refuse the same
@@ -1218,7 +1213,7 @@ mod tests {
 
 	use super::{
 		AttachedCandidate, ax_result, element_action_result, replace_utf16_selection,
-		same_up_to_formatting, select_attached, stringify_value,
+		same_phone_number, select_attached, stringify_value,
 	};
 	use crate::desktop::error::ErrorCode;
 
@@ -1301,25 +1296,40 @@ mod tests {
 	}
 
 	#[test]
-	fn a_value_the_app_reformatted_confirms_the_write() {
+	fn a_phone_number_the_app_reformatted_confirms_the_write() {
 		// Contacts stores a phone number in its own format between LRO and PDF
 		// marks.
 		let stored = "\u{202d}(555) 789-0123\u{202c}";
-		assert!(same_up_to_formatting(stored, "555-789-0123"));
-		assert!(same_up_to_formatting(stored, "5557890123"));
-		assert!(same_up_to_formatting("1,000", "1000"));
-		assert!(same_up_to_formatting("Senior Developer", "Senior Developer"));
-		assert!(same_up_to_formatting("", ""));
+		assert!(same_phone_number(stored, "555-789-0123"));
+		assert!(same_phone_number(stored, "5557890123"));
+		assert!(same_phone_number("+1 (555) 789-0123", "+1 555 789 0123"));
+		assert!(same_phone_number("Senior Developer", "Senior Developer"));
+		assert!(same_phone_number("café😀", "café😀"));
+		assert!(same_phone_number("", ""));
 	}
 
 	#[test]
-	fn a_value_the_app_did_not_take_still_fails_the_write() {
+	fn a_value_the_app_changed_or_did_not_take_still_fails_the_write() {
 		let stored = "\u{202d}(555) 555-1212\u{202c}";
-		assert!(!same_up_to_formatting(stored, "555-789-0123"), "old value kept");
-		assert!(!same_up_to_formatting("\u{202d}(555) 789\u{202c}", "555-789-0123"), "truncated");
-		assert!(!same_up_to_formatting("", "555-789-0123"), "cleared");
-		assert!(!same_up_to_formatting("15", "1.5"), "a separator was removed");
-		assert!(!same_up_to_formatting("senior developer", "Senior Developer"), "case changed");
-		assert!(!same_up_to_formatting("", "--"), "nothing significant to compare");
+		assert!(!same_phone_number(stored, "555-789-0123"), "old value kept");
+		assert!(!same_phone_number("\u{202d}(555) 789\u{202c}", "555-789-0123"), "truncated");
+		assert!(!same_phone_number("", "555-789-0123"), "cleared");
+		assert!(!same_phone_number("5557890123", "+1 555 789 0123"), "country code dropped");
+		for (actual, expected) in [
+			("100", "-100"),
+			("-1234567", "1234567"),
+			("10.00", "1000"),
+			("1,234", "1.234"),
+			("1,000", "1000"),
+			("15", "1.5"),
+			("555.789.0123", "555-789-0123"),
+			("cafe", "cafe\u{301}"),
+			("hello", "hello😀"),
+			("alert", "alert!"),
+			("abc", "\u{200b}abc"),
+			("senior developer", "Senior Developer"),
+		] {
+			assert!(!same_phone_number(actual, expected), "{actual:?} confirmed {expected:?}");
+		}
 	}
 }
