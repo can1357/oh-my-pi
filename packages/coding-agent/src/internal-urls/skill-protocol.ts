@@ -64,7 +64,9 @@ async function skillTargetPath(
 	}
 	skill ??= skills.find(s => s.name === skillName);
 	if (!skill) {
-		const available = skills.map(s => s.name);
+		// The model reads this error: list only skills it may see, not the
+		// hidden ones (`hide` frontmatter or `skills.optInSkills`).
+		const available = skills.filter(s => s.hide !== true).map(s => s.name);
 		const availableStr = available.length > 0 ? available.join(", ") : "none";
 		throw new Error(`Unknown skill: ${skillName}\nAvailable: ${availableStr}`);
 	}

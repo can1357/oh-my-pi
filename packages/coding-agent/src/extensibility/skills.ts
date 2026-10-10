@@ -37,7 +37,8 @@ export interface Skill {
 	/**
 	 * When `true`, the skill is loaded and reachable via `skill://<name>` and
 	 * (when enabled) `/skill:<name>`, but is excluded from the rendered system
-	 * prompt's `<skills>` listing.
+	 * prompt's `<skills>` listing. Set from `hide`/`disableModelInvocation`
+	 * frontmatter or a `skills.optInSkills` match.
 	 */
 	hide?: boolean;
 	/**
@@ -300,6 +301,7 @@ export async function loadSkills(options: LoadSkillsOptions = {}): Promise<LoadS
 		customDirectories = [],
 		ignoredSkills = [],
 		includeSkills = [],
+		optInSkills = [],
 		disabledExtensions = [],
 		extensionRoots,
 	} = options;
@@ -355,6 +357,12 @@ export async function loadSkills(options: LoadSkillsOptions = {}): Promise<LoadS
 	function matchesIgnorePatterns(name: string): boolean {
 		if (ignoredSkills.length === 0) return false;
 		return ignoredSkills.some(pattern => new Bun.Glob(pattern).match(name));
+	}
+
+	// Check if skill name matches any of the opt-in patterns
+	function matchesOptInPatterns(name: string): boolean {
+		if (optInSkills.length === 0) return false;
+		return optInSkills.some(pattern => new Bun.Glob(pattern).match(name));
 	}
 
 	const disabledSkillNames = new Set(
@@ -593,6 +601,12 @@ export async function loadSkills(options: LoadSkillsOptions = {}): Promise<LoadS
 	}
 
 	const skills = Array.from(skillMap.values()).filter(skill => matchesIncludePatterns(skill.name));
+	// Like `ignoredSkills`, opt-in patterns see both the raw and the final name,
+	// so hiding `tdd` also hides the `<namespace>/tdd` alias a collision produced.
+	for (const skill of skills) {
+		const rawName = admitted.get(skill.name)?.rawName ?? skill.name;
+		if (matchesOptInPatterns(skill.name) || matchesOptInPatterns(rawName)) skill.hide = true;
+	}
 	// Deterministic ordering for prompt stability (case-insensitive, then exact name, then path).
 	skills.sort((a, b) => compareSkillOrder(a.name, a.filePath, b.name, b.filePath));
 	return {
