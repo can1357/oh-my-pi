@@ -74,8 +74,7 @@ export const BUILTIN_COLLABORATION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpe
 		],
 		allowArgs: true,
 		getTuiAutocompleteDescription: runtime => {
-			const session = runtime.ctx.focusedAgentId ? runtime.ctx.viewSession : runtime.ctx.session;
-			const stats = session.getAdvisorStats();
+			const stats = runtime.ctx.viewSession.getAdvisorStats();
 			if (stats.active && stats.advisors.length > 1) return `Advisor: on (${stats.advisors.length} advisors)`;
 			if (stats.active && stats.model) return `Advisor: on (${stats.model.provider}/${stats.model.id})`;
 			if (stats.configured) return "Advisor: configured, no model";
@@ -126,9 +125,9 @@ export const BUILTIN_COLLABORATION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpe
 			return usage("Usage: /advisor [on|off|status|dump [raw]|configure]", runtime);
 		},
 		handleTui: async (command, runtime) => {
-			// A focused subagent view toggles that agent's advisor; falling back to the main
-			// session would flip the wrong one (#15055).
-			const target = runtime.ctx.focusedAgentId ? runtime.ctx.viewSession : runtime.ctx.session;
+			// `viewSession` is the focused agent's session when one is focused, so /advisor
+			// flips the agent the user is looking at, not the main one (#15055).
+			const target = runtime.ctx.viewSession;
 			const { verb, rest } = parseSubcommand(command.args);
 			if (!verb || verb === "toggle") {
 				const active = target.toggleAdvisorEnabled();
