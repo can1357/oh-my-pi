@@ -122,7 +122,13 @@ export interface SchemeSpec {
 	readTier?: ToolTier;
 	/** Read output bypasses result truncation limits (skill:// instructions). */
 	unbounded?: boolean;
-	/** Renderers may call `locate` to hyperlink these URLs: locate is local, cheap, never spawns or fetches. */
+	/**
+	 * Renderers may call `locate` to hyperlink these URLs: locate is local and
+	 * cheap — never spawns or fetches. A virtual scheme may still materialize
+	 * its immutable content into a content-addressed read-only cache (omp://
+	 * docs), which `locate` names; `locateSync` stays absent so display targets
+	 * keep showing the `scheme://` URL.
+	 */
 	linkable?: boolean;
 	/** Transcript read cards collapse like plain files instead of expanding (xd://). */
 	compactTranscript?: boolean;
@@ -396,8 +402,10 @@ export interface ProtocolHandler {
 	 * (virtual/remote target, extraction URL, or a missing entry without
 	 * {@link LocateOptions.create}). Throws on malformed URLs and containment
 	 * violations with the same messages `resolve` uses. Never touches the
-	 * network; may run a local discovery CLI once (vault:// root lookup), so
-	 * renderers only locate {@link SchemeSpec.linkable} schemes.
+	 * network; may run a local discovery CLI once (vault:// root lookup) or
+	 * materialize a {@link SchemeSpec.linkable} scheme's immutable content into
+	 * its content-addressed read-only cache (omp:// docs), so renderers only
+	 * locate linkable schemes.
 	 */
 	locate?(url: InternalUrl, context?: ResolveContext, options?: LocateOptions): Promise<string | null>;
 	/**

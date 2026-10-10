@@ -6,6 +6,7 @@ import * as url from "node:url";
 import { stripVTControlCharacters } from "node:util";
 import { resetSettingsForTest, Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { LocalProtocolHandler } from "@oh-my-pi/pi-coding-agent/internal-urls/local-protocol";
+import { getEmbeddedDoc } from "@oh-my-pi/pi-coding-agent/internal-urls/docs-index";
 import { resolveMarkdownLinkHrefs } from "@oh-my-pi/pi-coding-agent/internal-urls/hyperlink-targets";
 import { InternalUrlRouter } from "@oh-my-pi/pi-coding-agent/internal-urls/router";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
@@ -129,10 +130,17 @@ describe("renderer settings propagation", () => {
 
 describe("resource links in chat markdown", () => {
 	let tempDir: string;
+	let docsCacheDir: string;
+	let originalDocsCacheDir: string | undefined;
 	let originalHyperlinks: boolean;
 
 	beforeEach(async () => {
 		tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-markdown-links-"));
+		// omp:// docs only exist embedded, so the materialization cache has to be
+		// pointed at a throwaway root — never the real ~/.omp/cache/docs.
+		docsCacheDir = path.join(tempDir, "docs-cache");
+		originalDocsCacheDir = process.env.OMP_DOCS_CACHE_DIR;
+		process.env.OMP_DOCS_CACHE_DIR = docsCacheDir;
 		originalHyperlinks = terminalCaps.TERMINAL.hyperlinks;
 		terminalCaps.setTerminalHyperlinks(true);
 		await initTheme();
@@ -140,6 +148,8 @@ describe("resource links in chat markdown", () => {
 
 	afterEach(async () => {
 		terminalCaps.setTerminalHyperlinks(originalHyperlinks);
+		if (originalDocsCacheDir === undefined) delete process.env.OMP_DOCS_CACHE_DIR;
+		else process.env.OMP_DOCS_CACHE_DIR = originalDocsCacheDir;
 		await fs.rm(tempDir, { recursive: true, force: true });
 	});
 
@@ -174,6 +184,46 @@ describe("resource links in chat markdown", () => {
 		expect(visible).toContain(`Reviewed findings (${href})`);
 		expect(visible).toContain("Artifact (artifact://42)");
 		expect(visible).not.toContain("file://");
+	});
+
+	it("links an embedded omp:// doc to its materialized cache copy", async () => {
+		const text = "[Harness docs](omp://tui.md)";
+		const targets = await resolveMarkdownLinkHrefs(terminalCaps.getMarkdownLinkUrls(text));
+		const fileUri = targets.get("omp://tui.md");
+		expect(fileUri).toBeString();
+		const cachedPath = url.fileURLToPath(fileUri!);
+		// ~/.omp/cache/docs/<sha16>/<doc>.md
+		expect(path.dirname(path.dirname(cachedPath))).toBe(docsCacheDir);
+		expect(path.basename(cachedPath)).toBe("tui.md");
+		const cached = await fs.stat(cachedPath);
+		expect(cached.isFile()).toBe(true);
+		expect(await Bun.file(cachedPath).text()).toBe((await getEmbeddedDoc("tui.md"))!);
+
+		const output = new terminalCaps.Markdown(text, 0, 0, {
+			...getMarkdownTheme(),
+			resolveLink: href => targets.get(href),
+		})
+			.render(300)
+			.join("\n");
+		expect(output).toContain(`\x1b]8;;${fileUri}\x07`);
+		const visible = stripVTControlCharacters(output);
+		expect(visible).toContain("Harness docs (omp://tui.md)");
+		expect(visible).not.toContain("file://");
+
+		// Display targets and the write surface are untouched: only the async
+		// locate path materializes, and omp:// stays read-only.
+		const router = InternalUrlRouter.instance();
+		expect(router.locateSync("omp://tui.md")).toBeUndefined();
+		expect(router.writeTier("omp://tui.md", undefined, undefined)).toEqual({
+			tier: "write",
+			policy: "deny",
+			reason: "omp:// URLs are read-only",
+		});
+
+		// Content-addressed key: a second render reuses the same file.
+		const again = await resolveMarkdownLinkHrefs(terminalCaps.getMarkdownLinkUrls(text));
+		expect(again.get("omp://tui.md")).toBe(fileUri);
+		expect((await fs.stat(cachedPath)).ino).toBe(cached.ino);
 	});
 
 	it("links ordinary paths against the session cwd while preserving displayed paths and source anchors", async () => {
