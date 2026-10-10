@@ -443,10 +443,10 @@ class Win {
 		);
 	}
 
-	async move(x: number, y: number): Promise<void> {
+	async move(x: number, y: number, options?: InputOptions): Promise<void> {
 		const context = this.#getContext();
 		guardRun(context, "move");
-		await nativeCall(context.signal, () => this.#session.moveMouse(this.id, x, y, pointerOptions()));
+		await nativeCall(context.signal, () => this.#session.moveMouse(this.id, x, y, pointerOptions(options)));
 	}
 
 	async drag(points: Array<[number, number]>, options?: DragOptions): Promise<void> {

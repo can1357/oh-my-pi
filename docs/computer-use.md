@@ -100,7 +100,7 @@ Window methods include:
 - `screenshot({ silent? })`
 - `zoom({ x, y, width, height }, { silent? })`
 - `click(x, y, { button?, count?, modifiers?, takeover? })` and `doubleClick(x, y)`
-- `move(x, y)`, `drag([[x, y], ...], options?)`, and `scroll(x, y, { dx?, dy?, takeover? })`
+- `move(x, y, { takeover? })`, `drag([[x, y], ...], options?)`, and `scroll(x, y, { dx?, dy?, takeover? })`
 - `type(text, { takeover? })` and `press(chord, { takeover? })`
 - `raise()`
 

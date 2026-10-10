@@ -99,7 +99,7 @@ Both a selected window and `desktop` expose:
 - `zoom({ x, y, width, height }, { silent? }) -> { path, width, height, coordinateWidth, coordinateHeight, region }`
 - `click(x, y, { button?, count?, modifiers?, takeover? })`
 - `doubleClick(x, y, { button?, modifiers?, takeover? })`
-- `move(x, y)`
+- `move(x, y, { takeover? })`
 - `drag([[x, y], ...], { modifiers?, takeover? })`
 - `scroll(x, y, { dx?, dy?, takeover? })`
 - `type(text, { takeover? })`
