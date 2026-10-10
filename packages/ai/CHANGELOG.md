@@ -16,6 +16,7 @@
 ### Added
 
 - Added routing-session cleanup for OpenAI Responses and Codex while preserving shared provider fallbacks ([#14334](https://github.com/can1357/oh-my-pi/pull/14334) by [@iliaal](https://github.com/iliaal)).
+- Added a reset-aware usage reserve: `AuthStorageOptions.defaultReserveTaperHours` and per-account `AuthAccountPolicy.taperHours` release the reserve as `reserve × min(1, timeToReset / taper)` per usage window (taper capped at the window length; unknown or rolling resets keep the static reserve), in both model usage health and credential ranking. Default `0` keeps reserves static ([#14074](https://github.com/can1357/oh-my-pi/pull/14074) by [@schickling-assistant](https://github.com/schickling-assistant)).
 
 ### Fixed
 

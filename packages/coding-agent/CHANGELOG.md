@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `retry.usageReserveTaperHours` (Reserve Taper, default `0` = unchanged static reserve) and per-account `auth.accountPolicies[].taperHours`: the usage reserve now releases linearly to 0 over that many hours before each quota window resets, so reserved quota is spent instead of expiring unused. `omp usage` policy lines reflect the tapered reserve ([#14074](https://github.com/can1357/oh-my-pi/pull/14074) by [@schickling-assistant](https://github.com/schickling-assistant)).
+
 ### Changed
 
 - In terminals that speak the Tern Surface Protocol (Tern), the composer's bottom bar shows the git branch and its status beside the model chip when the status line has the `git` segment; it outlasts the other facts as the bar narrows, and clicking it opens `/git` ([#15220](https://github.com/can1357/oh-my-pi/pull/15220) by [@H4vC](https://github.com/H4vC))

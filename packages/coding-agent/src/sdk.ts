@@ -989,9 +989,10 @@ export {
  * back into the broker through the {@link AuthStorageOptions.refreshOAuthCredential}
  * override to re-mint access tokens when needed.
  *
- * Account routing (`auth.accountPolicies`, `retry.usageReservePct`) comes from
- * effective settings: `options.settings` when given, else the matching global
- * instance, else a read-only load for `options.cwd`; explicit option values win.
+ * Account routing (`auth.accountPolicies`, `retry.usageReservePct`,
+ * `retry.usageReserveTaperHours`) comes from effective settings: `options.settings`
+ * when given, else the matching global instance, else a read-only load for
+ * `options.cwd`; explicit option values win.
  *
  * Delegates to {@link ./session/auth-broker-config} so the TUI and the catalog
  * generator share the same credential-discovery logic.
@@ -1009,6 +1010,8 @@ export async function discoverAuthStorage(
 		authStorageOptions: {
 			...discoveryOptions.authStorageOptions,
 			defaultReservePct: discoveryOptions.authStorageOptions?.defaultReservePct ?? policy.defaultReservePct,
+			defaultReserveTaperHours:
+				discoveryOptions.authStorageOptions?.defaultReserveTaperHours ?? policy.defaultReserveTaperHours,
 		},
 	});
 }

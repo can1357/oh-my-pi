@@ -4,7 +4,6 @@ import { getOAuthApiKey, getOAuthProvider } from "../registry/oauth";
 import type { OAuthCredentials, OAuthProvider } from "../registry/oauth/types";
 import type { Provider } from "../types";
 import type { CredentialRankingContext, CredentialRankingStrategy, PlanGate, UsageReport } from "../usage";
-import { isWithinUsageReserve } from "../usage";
 import type { RankingStrategyResolver } from "../usage/registry";
 import type { SessionAffinity } from "./affinity";
 import {
@@ -38,7 +37,9 @@ import {
 	type StoredAuthCredential,
 } from "./types";
 import type { UsageService } from "./usage";
+import { usageLimitsInReserve } from "./reserve";
 import {
+	currentReserveUsageLimits,
 	isUsageLimitReached,
 	normalizeUsageFraction,
 	remainingUsageFraction,
@@ -465,22 +466,28 @@ export class CredentialSelector {
 				strategy === undefined ? remainingFraction !== undefined : primary !== undefined || secondary !== undefined;
 			const primaryUncapped = primary === undefined && secondary !== undefined;
 			const policy = this.#deps.policies.forCredential(args.provider, selection.credential);
-			const reservePct = policy?.reservePct ?? args.defaultReservePct;
-			const reserveFraction =
-				reservePct === undefined || !Number.isFinite(reservePct)
-					? undefined
-					: Math.max(0, Math.min(1, reservePct / 100));
+			const reserve = this.#deps.policies.reserveFor(
+				args.provider,
+				selection.credential,
+				args.defaultReservePct === undefined ? undefined : args.defaultReservePct / 100,
+			);
+			const inReserve =
+				reserve !== undefined &&
+				usage !== null &&
+				remainingFraction !== undefined &&
+				usageLimitsInReserve(
+					currentReserveUsageLimits(strategy, usage, args.rankingContext, nowMs),
+					reserve,
+					nowMs,
+				) === true;
 			ranked.push({
 				selection,
 				usage,
 				usageChecked,
 				blocked,
 				blockedUntil,
-				inReserve:
-					reserveFraction !== undefined &&
-					remainingFraction !== undefined &&
-					isWithinUsageReserve(remainingFraction, reserveFraction),
-				reserveMeasured: reserveFraction !== undefined && remainingFraction !== undefined,
+				inReserve,
+				reserveMeasured: reserve !== undefined && remainingFraction !== undefined,
 				accountPriority: policy?.priority === undefined || !Number.isFinite(policy.priority) ? 0 : policy.priority,
 				allowanceSpent: remainingFraction === 0,
 				usageMeasured,

@@ -24,6 +24,12 @@ import type {
 /** Default remaining quota protected for accounts without an explicit policy override. */
 export const DEFAULT_USAGE_RESERVE_PCT = 10;
 
+/**
+ * Default lead time (hours) before a usage window resets over which the reserve
+ * releases linearly to 0. 0 keeps the reserve static until the reset.
+ */
+export const DEFAULT_USAGE_RESERVE_TAPER_HOURS = 0;
+
 /** Stored API key used by credential selection. */
 export type ApiKeyCredential = {
 	type: "api_key";
@@ -62,6 +68,8 @@ export interface AuthAccountPolicy {
 	readonly priority?: number;
 	/** Protected remaining quota percentage for this account. */
 	readonly reservePct?: number;
+	/** Hours before each window's reset over which this account's reserve releases to 0; overrides the global taper. */
+	readonly taperHours?: number;
 }
 
 /** Read-only set of per-account routing policies. */
@@ -337,6 +345,8 @@ export type AuthStorageOptions = {
 	accountPolicies?: AuthAccountPolicies;
 	/** Global reserve fallback for accounts without a matching reservePct policy. */
 	defaultReservePct?: number;
+	/** Global reserve taper (hours before reset) for accounts without a matching taperHours policy. */
+	defaultReserveTaperHours?: number;
 	usageFetch?: typeof fetch;
 	usageRequestTimeoutMs?: number;
 	usageLogger?: UsageLogger;

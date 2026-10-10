@@ -1,5 +1,5 @@
 import type { Provider } from "../types";
-import { isWithinUsageReserve, resolveUsedFraction } from "../usage";
+import { resolveUsedFraction } from "../usage";
 import type {
 	CredentialRankingContext,
 	UsageCredential,
@@ -14,7 +14,7 @@ import { credentialBlockScopesForRequest, providerTypeKey } from "./blocks";
 import type { CredentialBlocks } from "./blocks";
 import type { KeyCascade, KeyOverrides } from "./cascade";
 import type { AccountPolicies } from "./policy";
-import type { CredentialPool, StoredCredential } from "./pool";
+import type { CredentialPool } from "./pool";
 import type { OAuthRefresher } from "./refresh";
 import type { AuthCredentialStore } from "./store";
 import type {
@@ -31,7 +31,8 @@ import type { UsageService } from "./usage";
 import { REMOTE_REFRESH_SENTINEL } from "./types";
 import { oauthUsageRequest, usageCacheIdentity, usageRequest } from "./usage-cache";
 import type { UsageRequestDescriptor } from "./usage-cache";
-import { isUsageLimitExhausted, reserveUsageLimits, usageReportMetadataValue } from "./usage-report";
+import { usageLimitsInReserve } from "./reserve";
+import { currentReserveUsageLimits, isUsageLimitExhausted, usageReportMetadataValue } from "./usage-report";
 
 /** Dependencies for model pool health and stored credential probes. */
 export interface CredentialHealthDeps {
@@ -132,14 +133,6 @@ export class CredentialHealth implements HealthApi {
 		const reserveFraction = Number.isFinite(options.reserveFraction)
 			? Math.max(0, Math.min(1, options.reserveFraction))
 			: this.#deps.policies.defaultReservePct / 100;
-
-		const resolveReserveFraction = (entry: StoredCredential): number => {
-			const policy = this.#deps.policies.forCredential(provider, entry.credential);
-			const configured = policy?.reservePct;
-			return configured === undefined || !Number.isFinite(configured)
-				? reserveFraction
-				: Math.max(0, Math.min(1, configured / 100));
-		};
 		const nowMs = Date.now();
 		let accounts = await Promise.all(
 			pool.map(async ({ entry, index }): Promise<ModelUsageAccountHealth> => {
@@ -191,13 +184,7 @@ export class CredentialHealth implements HealthApi {
 				}
 				if (!report) return { credentialId: entry.id, credentialType, state: "unknown" };
 
-				const limits = reserveUsageLimits(strategy, report, rankingContext);
-				if (limits.length === 0) return { credentialId: entry.id, credentialType, state: "unknown" };
-
-				const currentLimits = limits.filter(limit => {
-					const resetsAt = limit.window?.resetsAt;
-					return resetsAt === undefined || resetsAt > nowMs || report.fetchedAt >= resetsAt;
-				});
+				const currentLimits = currentReserveUsageLimits(strategy, report, rankingContext, nowMs);
 				if (currentLimits.length === 0) {
 					return { credentialId: entry.id, credentialType, state: "unknown" };
 				}
@@ -221,10 +208,12 @@ export class CredentialHealth implements HealthApi {
 					return { credentialId: entry.id, credentialType, state: "unknown" };
 				}
 				const remainingFraction = Math.max(0, 1 - Math.max(...usedFractions));
+				const reserve = this.#deps.policies.reserveFor(provider, entry.credential, reserveFraction);
+				const inReserve = reserve !== undefined && usageLimitsInReserve(currentLimits, reserve, nowMs) === true;
 				return {
 					credentialId: entry.id,
 					credentialType,
-					state: isWithinUsageReserve(remainingFraction, resolveReserveFraction(entry)) ? "reserve" : "healthy",
+					state: inReserve ? "reserve" : "healthy",
 					remainingFraction,
 				};
 			}),
