@@ -1139,8 +1139,15 @@ impl DesktopSession {
 	/// behind it.
 	#[napi(getter)]
 	pub fn capabilities(&self) -> DesktopCapabilities {
+		// An in-flight takeover may have failed to start its stop after the
+		// snapshot was taken; the session's record is current.
+		let snapshot = || {
+			let mut snapshot = self.core.capabilities.lock().clone()?;
+			snapshot.global_escape &= !self.core.cancellation.escape_unavailable();
+			Some(snapshot)
+		};
 		if self.core.in_flight.load(Ordering::Acquire) > 0
-			&& let Some(snapshot) = self.core.capabilities.lock().clone()
+			&& let Some(snapshot) = snapshot()
 		{
 			return snapshot;
 		}
@@ -1149,12 +1156,7 @@ impl DesktopSession {
 			.call(self.core.cancellation.token(), |reply| Request::Capabilities { reply })
 		{
 			Ok(Response::Capabilities(c)) => c,
-			_ => self
-				.core
-				.capabilities
-				.lock()
-				.clone()
-				.unwrap_or_else(DesktopCapabilities::unavailable),
+			_ => snapshot().unwrap_or_else(DesktopCapabilities::unavailable),
 		}
 	}
 
@@ -2083,6 +2085,18 @@ mod capture_tests {
 			session.core.lifecycle.lock().tx.is_none(),
 			"a busy getter must return the snapshot without starting or querying a worker"
 		);
+	}
+
+	#[test]
+	fn busy_snapshot_reports_an_escape_stop_that_failed_after_it_was_taken() {
+		let core = SessionCore::new(DisplaySelector::Active);
+		let mut snapshot = DesktopCapabilities::unavailable();
+		snapshot.global_escape = true;
+		*core.capabilities.lock() = Some(snapshot);
+		core.cancellation.fail_escape_for_test();
+		core.in_flight.store(1, Ordering::Release);
+		let session = DesktopSession { core };
+		assert!(!session.capabilities().global_escape);
 	}
 
 	#[test]
