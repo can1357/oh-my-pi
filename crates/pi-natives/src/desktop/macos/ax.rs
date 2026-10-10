@@ -184,13 +184,20 @@ impl KeyFocus {
 	/// Whether keyboard focus sits in an overlay window attached to `wid`,
 	/// such as Finder's inline rename field or a popover, while the
 	/// application reports `wid`, or nothing, as its focused window.
-	pub(super) fn in_overlay_of(&self, wid: u32, parent_of: impl FnOnce(u32) -> Option<u32>) -> bool {
+	pub(super) fn in_overlay_of(
+		&self,
+		wid: u32,
+		parent_of: impl FnOnce(u32) -> Option<u32>,
+	) -> bool {
 		let reported = match self.window {
 			FocusedWindow::Unreported => true,
 			FocusedWindow::Id(id) => id == wid,
 			FocusedWindow::Unmapped => false,
 		};
-		reported && self.element_window.is_some_and(|id| id != wid && parent_of(id) == Some(wid))
+		reported
+			&& self
+				.element_window
+				.is_some_and(|id| id != wid && parent_of(id) == Some(wid))
 	}
 }
 

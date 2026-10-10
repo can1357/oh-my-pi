@@ -148,7 +148,7 @@ On macOS, native text fields support verified whole-value replacement and exact-
 
 ## Menus, held input, and task control
 
-Use `win.menu.items()` for top-level menus, `win.menu.items("File")` for a submenu, and `win.menu.select(["File", "Export…"])` to invoke a command. Matching prefers exact titles, otherwise compares case-insensitively while ignoring a trailing ellipsis. Selection rechecks enabled state and refuses ambiguous paths; it does not guess keyboard shortcuts.
+Use `win.menu.items()` for top-level menus, `win.menu.items("File")` for a submenu, and `win.menu.select(["File", "Export…"])` to invoke a command. Matching prefers exact titles, otherwise compares case-insensitively while ignoring a trailing ellipsis. Selection rechecks enabled state and refuses ambiguous paths; it does not guess keyboard shortcuts. On macOS both make the window key within its own application first, while the user's application stays frontmost, and give the application up to 1.5 s to revalidate its menus: a read right after the application took the activation waits for its items to change, and a command that reads disabled waits to become enabled, so a background application reports its commands as it would in front.
 
 `holdKeys(keys, { duration, takeover? })` and `holdMouse(x, y, { button?, duration, keys?, takeover? })` hold input for 0–100 seconds. `drag(points, { keys?, modifiers?, takeover? })` supports gestures such as Space-drag. Every call releases attempted keys/buttons on success, error, and cancellation; no pressed state survives into another call.
 

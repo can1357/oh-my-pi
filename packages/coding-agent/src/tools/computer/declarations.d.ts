@@ -236,7 +236,7 @@ interface ComputerWindow extends ComputerInputTarget {
 	/** Emit one full screenshot and AX snapshot without exposing a partial failed observation. */
 	observe(options?: ComputerScreenshotOptions & ComputerAxOptions): Promise<ComputerObservationResult>;
 	readonly menu: {
-		/** Inspect a menu path without activating the application. */
+		/** Inspect a menu path; on macOS the items validate in the window's menu context, as `select` sees them. */
 		items(path?: string | string[]): Promise<ComputerMenuItem[]>;
 		/** Select one unambiguous enabled command using the window's native menu context. */
 		select(path: string[]): Promise<void>;
