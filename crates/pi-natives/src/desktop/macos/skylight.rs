@@ -584,21 +584,17 @@ pub(super) fn with_foreground<T>(
 		)
 	})?;
 	let handed_back = Cell::new(false);
-	let restore = |preparation_failed: bool| {
+	let restore = || {
 		if !return_focus && user_acted() {
 			return Ok(());
 		}
 		let front = front_process(spi.get_front).ok_or_else(|| {
 			DesktopError::input_failed("cannot establish current focus for takeover restoration")
 		})?;
-		let now = if front.psn != target {
-			FocusAfterTakeover::Elsewhere
-		} else if ax::focused_window_id(pid)
-			.is_some_and(|key| key != wid && (!preparation_failed || Some(key) != focused))
-		{
-			FocusAfterTakeover::TargetSibling
-		} else {
+		let now = if front.psn == target {
 			FocusAfterTakeover::Target
+		} else {
+			FocusAfterTakeover::Elsewhere
 		};
 		if !hands_focus_back(return_focus, user_acted(), now) {
 			return Ok(());
@@ -623,10 +619,10 @@ pub(super) fn with_foreground<T>(
 		.and_then(|()| make_exact_window_key(spi, target, wid))
 		.and_then(|()| await_window_focused(spi, pid, wid, target));
 	let result = if let Err(error) = prepare {
-		after_cleanup(Err(error), control::cleanup(|| restore(true)))
+		after_cleanup(Err(error), control::cleanup(restore))
 	} else {
 		let result = action(true).and_then(|value| control::wait(FOREGROUND_SETTLE).map(|()| value));
-		after_cleanup(result, control::cleanup(|| restore(false)))
+		after_cleanup(result, control::cleanup(restore))
 	};
 	report_focus_return(handed_back.get(), previous.pid);
 	result
@@ -646,10 +642,8 @@ fn report_focus_return(handed_back: bool, previous: Option<pid_t>) {
 /// Where focus sits when a takeover ends.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FocusAfterTakeover {
-	/// The target process is front with the target (or its starting) key window.
+	/// The target process is front, whichever of its windows is key.
 	Target,
-	/// The target process is front, but another of its windows became key.
-	TargetSibling,
 	/// Another process is front: the user's own app again, or a third app.
 	Elsewhere,
 }
@@ -657,16 +651,17 @@ enum FocusAfterTakeover {
 /// Whether a takeover hands focus back to the app the user was in.
 ///
 /// An explicit takeover yields to any user input during the action, so a key
-/// the user typed or a window they picked keeps focus where it went. A
-/// returning takeover (the host's rerun of a refused background action) hands
-/// focus back even then: input the user typed while the target was front was
-/// meant for their own app. Neither overwrites a process the user switched
-/// to, which is either their own app already or a deliberately chosen third
-/// app.
+/// the user typed or a window they picked keeps focus where it went. Without
+/// such input it hands focus back whichever of the target's windows is key:
+/// a document the action opened or a sheet it closed is not the user's
+/// choice. A returning takeover (the host's rerun of a refused background
+/// action) hands focus back even after user input: input the user typed while
+/// the target was front was meant for their own app. Neither overwrites a
+/// process the user switched to, which is either their own app already or a
+/// deliberately chosen third app.
 const fn hands_focus_back(return_focus: bool, user_acted: bool, now: FocusAfterTakeover) -> bool {
 	match now {
 		FocusAfterTakeover::Elsewhere => false,
-		FocusAfterTakeover::TargetSibling => return_focus,
 		FocusAfterTakeover::Target => return_focus || !user_acted,
 	}
 }
@@ -992,18 +987,15 @@ mod tests {
 
 	#[test]
 	fn a_returning_takeover_hands_focus_back_after_typing_but_not_over_a_third_app() {
-		use FocusAfterTakeover::{Elsewhere, Target, TargetSibling};
-		// The user typed (or clicked) while the target was front.
+		use FocusAfterTakeover::{Elsewhere, Target};
+		// The user typed (or clicked) while the target was front: a returning
+		// takeover still hands focus back, an explicit one yields to that input.
 		assert!(hands_focus_back(true, true, Target));
-		assert!(hands_focus_back(true, true, TargetSibling));
-		// Negative control: an explicit takeover yields to that input.
 		assert!(!hands_focus_back(false, true, Target));
-		assert!(!hands_focus_back(false, true, TargetSibling));
-		// With no user input both restore, and an explicit takeover still keeps a
-		// sibling window the user chose.
+		// With no user input both hand focus back, whichever of the target's
+		// windows the action left key (a document it opened, a sheet it closed).
 		assert!(hands_focus_back(true, false, Target));
 		assert!(hands_focus_back(false, false, Target));
-		assert!(!hands_focus_back(false, false, TargetSibling));
 		// A process the user switched to keeps focus either way.
 		for (return_focus, user_acted) in [(true, true), (true, false), (false, false)] {
 			assert!(!hands_focus_back(return_focus, user_acted, Elsewhere));

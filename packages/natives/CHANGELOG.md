@@ -22,6 +22,7 @@
 - Fixed macOS background shortcuts with a modifier reporting success when the app stopped answering right after; they now throw `InputFailed` saying the outcome is unknown ([#15184](https://github.com/can1357/oh-my-pi/pull/15184) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed TextEdit and Script Editor freezing for good when a macOS background ⌘S followed a background edit of a just-opened document; background input now waits until the app reports the activation it was sent ([#15184](https://github.com/can1357/oh-my-pi/pull/15184) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed macOS takeover `InputFailed` naming only the target window when another held focus; it now names the app's focused window, such as an alert or sheet, or the app that stayed in front ([#15191](https://github.com/can1357/oh-my-pi/pull/15191) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed a macOS `takeover: true` click or key that opened a document or closed a sheet or panel leaving its app in front for good; focus now returns to your app unless you typed or clicked during the takeover ([#15191](https://github.com/can1357/oh-my-pi/pull/15191) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.8.7] - 2026-10-09
 
