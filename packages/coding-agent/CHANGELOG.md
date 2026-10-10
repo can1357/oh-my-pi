@@ -52,6 +52,7 @@
 
 ### Fixed
 
+- Unreachable default loopback model servers (Ollama, LM Studio, llama.cpp) you never configured no longer print a `model discovery failed` warning at startup ([#14592](https://github.com/can1357/oh-my-pi/pull/14592) by [@tahakotil](https://github.com/tahakotil), fixes [#12156](https://github.com/can1357/oh-my-pi/issues/12156)).
 - Reduced memory growth after one-shot side requests without interrupting ongoing conversations ([#14334](https://github.com/can1357/oh-my-pi/pull/14334) by [@iliaal](https://github.com/iliaal)).
 - Fixed sessions staying untitled when you interrupted the first reply to send a queued steer message.
 - Fixed browser downloads saving into another tab's `downloads` folder, and `tab.waitForDownload()` saving into the system Downloads folder once another tab closed; each tab in a Chromium omp launched or spawned now saves into its own, iframe downloads included. In those browsers a download no tab tracks (started by a page omp did not open, or finishing after its tab closed) now keeps Chromium's GUID file name instead of its suggested name; connected and relay browsers keep real file names ([#14544](https://github.com/can1357/oh-my-pi/pull/14544) by [@will-bogusz](https://github.com/will-bogusz))
