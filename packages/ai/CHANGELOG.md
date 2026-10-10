@@ -4,7 +4,7 @@
 
 ### Added
 
-- Added a usage-report freshness cutoff to model health queries, so callers can require quota evidence newer than a failure ([#15257](https://github.com/can1357/oh-my-pi/pull/15257)).
+- Added a usage-report freshness cutoff to model health queries, so callers can require quota evidence newer than a failure ([#15257](https://github.com/can1357/oh-my-pi/pull/15257) by [@joshuaswarren](https://github.com/joshuaswarren)).
 
 ## [18.8.9] - 2026-10-10
 
