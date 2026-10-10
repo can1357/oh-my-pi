@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed macOS `el.setValue()` reporting `AxFailed` when the app stored the written value in its own format, such as a Contacts phone number shown as `(555) 789-0123`
+
 ## [18.8.8] - 2026-10-10
 
 ### Changed

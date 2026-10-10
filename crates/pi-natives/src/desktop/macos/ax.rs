@@ -498,7 +498,7 @@ impl AxBackend for MacAx {
 		}
 		skylight::with_background_guard(element_pid(element)?, || {
 			set_string_value(element, "AXValue", value)?;
-			verify_text_value(element, value)
+			verify_text_value(element, value, same_up_to_formatting)
 		})
 	}
 
@@ -661,8 +661,12 @@ fn set_string_value(element: &AXUIElement, name: &str, text: &str) -> CoreResult
 	)
 }
 
-fn verify_text_value(element: &AXUIElement, expected: &str) -> CoreResult<()> {
-	if copy_string(element, "AXValue").as_deref() == Some(expected) {
+fn verify_text_value(
+	element: &AXUIElement,
+	expected: &str,
+	matches: fn(&str, &str) -> bool,
+) -> CoreResult<()> {
+	if copy_string(element, "AXValue").is_some_and(|actual| matches(&actual, expected)) {
 		Ok(())
 	} else {
 		Err(DesktopError::ax_failed(
@@ -670,6 +674,46 @@ fn verify_text_value(element: &AXUIElement, expected: &str) -> CoreResult<()> {
 			 be partial, inspect the target before retrying; no typing fallback was attempted",
 		))
 	}
+}
+
+/// Whether a field that stores `actual` after `expected` was written holds the
+/// written value in the app's own format. Apps reformat what they store:
+/// Contacts keeps `555-789-0123` as `(555) 789-0123` wrapped in directional
+/// marks. The letters and digits must match exactly, and the app may add or
+/// change separators but not remove one, so `1.5` stored as `15` still fails.
+fn same_up_to_formatting(actual: &str, expected: &str) -> bool {
+	if actual == expected {
+		return true;
+	}
+	let (actual_text, actual_splits) = significant_text(actual);
+	let (expected_text, expected_splits) = significant_text(expected);
+	!expected_text.is_empty()
+		&& actual_text == expected_text
+		&& expected_splits
+			.iter()
+			.all(|split| actual_splits.binary_search(split).is_ok())
+}
+
+/// The letters and digits of `text`, and the offsets among them where a
+/// separator (anything else) splits them.
+fn significant_text(text: &str) -> (String, Vec<usize>) {
+	let mut significant = String::with_capacity(text.len());
+	let mut splits = Vec::new();
+	let mut count = 0;
+	let mut separated = false;
+	for ch in text.chars() {
+		if ch.is_alphanumeric() {
+			if separated && count > 0 {
+				splits.push(count);
+			}
+			separated = false;
+			significant.push(ch);
+			count += 1;
+		} else {
+			separated = true;
+		}
+	}
+	(significant, splits)
 }
 
 /// Date and time controls publish `AXValue` as a `CFDate` and refuse the same
@@ -750,7 +794,7 @@ pub(super) fn insert_native_text(pid: libc::pid_t, wid: u32, text: &str) -> Core
 	};
 	skylight::with_background_guard(pid, || {
 		set_string_value(&element, "AXSelectedText", text)?;
-		verify_text_value(&element, &expected)
+		verify_text_value(&element, &expected, |actual, expected| actual == expected)
 	})?;
 	Ok(true)
 }
@@ -1174,7 +1218,7 @@ mod tests {
 
 	use super::{
 		AttachedCandidate, ax_result, element_action_result, replace_utf16_selection,
-		select_attached, stringify_value,
+		same_up_to_formatting, select_attached, stringify_value,
 	};
 	use crate::desktop::error::ErrorCode;
 
@@ -1254,5 +1298,28 @@ mod tests {
 			frame_matches: true,
 		}];
 		assert!(select_attached(&candidates, 57).is_err());
+	}
+
+	#[test]
+	fn a_value_the_app_reformatted_confirms_the_write() {
+		// Contacts stores a phone number in its own format between LRO and PDF
+		// marks.
+		let stored = "\u{202d}(555) 789-0123\u{202c}";
+		assert!(same_up_to_formatting(stored, "555-789-0123"));
+		assert!(same_up_to_formatting(stored, "5557890123"));
+		assert!(same_up_to_formatting("1,000", "1000"));
+		assert!(same_up_to_formatting("Senior Developer", "Senior Developer"));
+		assert!(same_up_to_formatting("", ""));
+	}
+
+	#[test]
+	fn a_value_the_app_did_not_take_still_fails_the_write() {
+		let stored = "\u{202d}(555) 555-1212\u{202c}";
+		assert!(!same_up_to_formatting(stored, "555-789-0123"), "old value kept");
+		assert!(!same_up_to_formatting("\u{202d}(555) 789\u{202c}", "555-789-0123"), "truncated");
+		assert!(!same_up_to_formatting("", "555-789-0123"), "cleared");
+		assert!(!same_up_to_formatting("15", "1.5"), "a separator was removed");
+		assert!(!same_up_to_formatting("senior developer", "Senior Developer"), "case changed");
+		assert!(!same_up_to_formatting("", "--"), "nothing significant to compare");
 	}
 }
