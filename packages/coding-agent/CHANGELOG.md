@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added a `display.showUsageModels` setting (default `true`) that opts out of the "Models with usage data" list in `/usage`, for users who only want the quota bars ([#7852](https://github.com/can1357/oh-my-pi/pull/7852) by [@mvid](https://github.com/mvid)).
+
 ### Changed
 
 - In terminals that speak the Tern Surface Protocol (Tern), the composer's bottom bar shows the git branch and its status beside the model chip when the status line has the `git` segment; it outlasts the other facts as the bar narrows, and clicking it opens `/git` ([#15220](https://github.com/can1357/oh-my-pi/pull/15220) by [@H4vC](https://github.com/H4vC))
