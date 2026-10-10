@@ -745,7 +745,7 @@ export async function pickElectronTarget(browser: Browser, options: PickTargetOp
 		}
 		targets = browser.targets();
 	}
-	const heldTargets: Array<{ name: string; url: string }> = [];
+	const heldTargets: Array<{ name: string; url: string; title: string }> = [];
 	let hasUnreadablePage = false;
 	const discoveredPages = await Promise.all(
 		targets.map(async target => {
@@ -756,7 +756,17 @@ export async function pickElectronTarget(browser: Browser, options: PickTargetOp
 				const id = await targetIdForTarget(target).catch(() => "");
 				const name = options.bound.get(id);
 				if (name !== undefined) {
-					heldTargets.push({ name, url: target.url() });
+					// Puppeteer keeps the CDP title on the target even when its page
+					// cannot be attached or its main frame is not ready.
+					const info =
+						"_getTargetInfo" in target && typeof target._getTargetInfo === "function"
+							? target._getTargetInfo()
+							: null;
+					const title =
+						info && typeof info === "object" && "title" in info && typeof info.title === "string"
+							? info.title
+							: "";
+					heldTargets.push({ name, url: target.url(), title });
 					return null;
 				}
 			}
@@ -832,7 +842,7 @@ async function firstVisiblePage(pages: Page[], signal?: AbortSignal): Promise<Pa
 async function pickPageFromList(
 	pages: Page[],
 	options: PickTargetOptions,
-	heldTargets: readonly { name: string; url: string }[] = [],
+	heldTargets: readonly { name: string; url: string; title: string }[] = [],
 ): Promise<Page> {
 	const enriched = await enrichPages(pages, options.signal);
 	const holders = await Promise.all(enriched.map(p => boundTabName(p.page, options.bound)));
@@ -848,10 +858,10 @@ async function pickPageFromList(
 			return holder && matches(p) ? [holder] : [];
 		});
 		if (held.length > 0) throw boundTabError(held, options.matcher);
-		const heldByUrl = heldTargets.filter(target => target.url.toLowerCase().includes(needle));
-		if (heldByUrl.length > 0)
+		const heldMatches = heldTargets.filter(matches);
+		if (heldMatches.length > 0)
 			throw boundTabError(
-				heldByUrl.map(target => target.name),
+				heldMatches.map(target => target.name),
 				options.matcher,
 			);
 		const summary = enriched.map(p => `- ${p.title || "(untitled)"}  ${p.url}`).join("\n");

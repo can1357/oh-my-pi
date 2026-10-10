@@ -336,6 +336,27 @@ describe("pickElectronTarget", () => {
 		expect(held.pageSpy).not.toHaveBeenCalled();
 	});
 
+	test("reports the holder when a connected matcher selects only a bound page's title", async () => {
+		const held = makeTarget("HELD");
+		Object.assign(held.target, {
+			url: () => "https://example.com/login",
+			_getTargetInfo: () => ({ title: "Two-Factor Code" }),
+		});
+		const free = fakePage({ url: "https://example.org/code", title: "Code" });
+		const available = makeTarget("FREE", free);
+		Object.assign(free, { target: () => available.target });
+
+		const error = await rejectionOf(
+			pickElectronTarget(makeBrowser([held.target, available.target]), {
+				matcher: "two-factor",
+				bound: new Map([["HELD", "login"]]),
+			}),
+		);
+		if (!(error instanceof Error)) throw new Error("Expected a tab conflict error");
+		expect(error.message).toContain('already driven by tab "login"');
+		expect(held.pageSpy).not.toHaveBeenCalled();
+	});
+
 	test("prefers the foreground tab when asked to, without disturbing default order", async () => {
 		const background = fakePage({ url: "https://example.com/", title: "Example" });
 		const foreground = fakePage({ url: "https://example.org/", title: "Example Org", visible: true });
