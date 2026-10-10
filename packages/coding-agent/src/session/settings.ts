@@ -837,7 +837,7 @@ export const cfgRetryFallbackRevertPolicy = register({
 				value: "when-healthy",
 				label: "When healthy",
 				description:
-					"After the cooldown, return only when the primary's usage report shows headroom above its reserve and the context fits; also returns from usage-driven fallbacks",
+					"At the next prompt after the cooldown, return only when the primary's usage report shows headroom above its reserve and the request fits; also returns from usage-driven fallbacks",
 			},
 			{ value: "never", label: "Never", description: "Stay on the fallback model until manually changed" },
 		],

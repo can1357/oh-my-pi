@@ -2,7 +2,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 import * as path from "node:path";
 import { scheduler } from "node:timers/promises";
 import { type } from "@oh-my-pi/omptype";
-import { Agent, type AgentTool } from "@oh-my-pi/pi-agent-core";
+import { Agent, type AgentTool, type StreamFn } from "@oh-my-pi/pi-agent-core";
 import { createCompactionSummaryMessage } from "@oh-my-pi/pi-agent-core/compaction";
 import {
 	type AnthropicFallbackCreditHandle,
@@ -7029,6 +7029,142 @@ describe("AgentSession retry fallback", () => {
 				expect(compactions).toEqual([]);
 			},
 		);
+
+		/**
+		 * Session resumed on a usage fallback `openai/gpt-4o` whose primary is
+		 * `openai/gpt-4o-mini`, both with the given windows. Records request model
+		 * ids and auto-compaction starts.
+		 */
+		async function startWindowedSession(options: {
+			primaryWindow: number;
+			fallbackWindow: number;
+			settings?: Record<string, unknown>;
+			health?: () => Promise<ModelUsageHealth>;
+		}) {
+			const modelsConfigPath = path.join(tempDir.path(), "when-healthy-policy-models.json");
+			await Bun.write(
+				modelsConfigPath,
+				JSON.stringify({
+					providers: {
+						openai: {
+							modelOverrides: {
+								"gpt-4o-mini": { contextWindow: options.primaryWindow },
+								"gpt-4o": { contextWindow: 1_000_000 },
+							},
+						},
+					},
+				}),
+			);
+			modelRegistry = new ModelRegistry(authStorage, modelsConfigPath);
+			const primary = modelRegistry.find("openai", "gpt-4o-mini");
+			const found = modelRegistry.find("openai", "gpt-4o");
+			if (!primary || !found) throw new Error("Expected override models to resolve");
+			const fallback = { ...found, contextWindow: options.fallbackWindow };
+			const requests: string[] = [];
+			const compactions: string[] = [];
+			const mock = createMockModel();
+			const stream: StreamFn = (model, context, streamOptions) => {
+				requests.push(model.id);
+				mock.push({ content: ["ok"] });
+				return mock.stream(model, context, streamOptions);
+			};
+			const agent = new Agent({
+				getApiKey: model => `${model.provider}-test-key`,
+				initialState: { model: fallback, systemPrompt: ["Test"], tools: [], messages: [] },
+				streamFn: stream,
+			});
+			const settings = Settings.isolated({
+				"compaction.enabled": true,
+				"compaction.asyncEnabled": false,
+				"compaction.methodOrder": ["soft"],
+				"compaction.thresholdPercent": 80,
+				"compaction.thresholdTokens": -1,
+				"compaction.keepRecentTokens": 100,
+				"retry.fallbackChains": { default: ["openai/gpt-4o"] },
+				"retry.fallbackRevertPolicy": "when-healthy",
+				...options.settings,
+			});
+			settings.setModelRole("default", "openai/gpt-4o-mini");
+			vi.spyOn(modelRegistry.authStorage.health, "model").mockImplementation(
+				options.health ?? (async () => healthOf("healthy")),
+			);
+			session = new AgentSession({
+				agent,
+				sessionManager: SessionManager.inMemory(),
+				settings,
+				modelRegistry,
+				sideStreamFn: stream,
+				initialRetryFallback: {
+					role: "default",
+					originalSelector: "openai/gpt-4o-mini",
+					originalThinkingLevel: undefined,
+					pinned: true,
+				},
+			});
+			session.subscribe(event => {
+				if (event.type === "auto_compaction_start") compactions.push(`after ${requests.length} requests`);
+			});
+			return { session, primary, requests, compactions };
+		}
+
+		it.each([
+			[
+				"the primary's stricter compaction threshold keeps the fallback",
+				{ "openai/gpt-4o-mini": "f4000" },
+				"gpt-4o",
+			],
+			[
+				"the fallback's stricter compaction threshold does not hold the return",
+				{ "openai/gpt-4o": "f4000" },
+				"gpt-4o-mini",
+			],
+		] as const)(
+			"judges the return with the primary's compaction policy: %s",
+			async (_case, modelThresholds, expected) => {
+				const { session, requests, compactions } = await startWindowedSession({
+					primaryWindow: 200_000,
+					fallbackWindow: 1_000_000,
+					settings: { "compaction.modelThresholds": modelThresholds },
+				});
+
+				// ~5k estimated tokens: past a 4000-token threshold, far inside both windows.
+				await session.prompt("lorem ipsum ".repeat(2000));
+				await session.waitForIdle();
+				expect(requests).toEqual([expected]);
+				expect(compactions).toEqual([]);
+			},
+		);
+
+		it("returns to a fitting primary when the fallback's window is unknown", async () => {
+			const { session, requests } = await startWindowedSession({ primaryWindow: 4000, fallbackWindow: 0 });
+
+			await session.prompt("Continue");
+			await session.waitForIdle();
+			expect(requests).toEqual(["gpt-4o-mini"]);
+		});
+
+		it("judges the request against a model switched in while the primary's usage was read", async () => {
+			const healthStarted = Promise.withResolvers<void>();
+			const releaseHealth = Promise.withResolvers<void>();
+			const { session, primary, compactions } = await startWindowedSession({
+				primaryWindow: 4000,
+				fallbackWindow: 1_000_000,
+				health: async () => {
+					healthStarted.resolve();
+					await releaseHealth.promise;
+					return healthOf("depleted");
+				},
+			});
+
+			const prompting = session.prompt("lorem ipsum ".repeat(5000));
+			await healthStarted.promise;
+			await session.setModelTemporary(primary, undefined, { ephemeral: true });
+			releaseHealth.resolve();
+			await prompting;
+			await session.waitForIdle();
+			// The oversized request is compacted before it goes to the 4000-token model.
+			expect(compactions[0]).toBe("after 0 requests");
+		});
 	});
 
 	// A thinking-loop abort is a same-model resample signal (the guard pairs it

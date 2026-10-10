@@ -2552,20 +2552,33 @@ export class SessionMaintenance {
 		const model = this.#model;
 		if (!model) return;
 		const contextWindow = model.contextWindow ?? 0;
-		if (contextWindow <= 0) return;
-		const compactionSettings = this.#compactionSettings;
-		const contextTokens = this.#estimatePrePromptContextTokens(messages, contextWindow);
-		const pendingMidTurnDeadEnd = this.#midTurnDeadEndPendingPrePrompt;
-		this.#midTurnDeadEndPendingPrePrompt = false;
-		// The estimate does not depend on the window, so it also judges the
-		// primary; a return that would need compaction is not taken.
+		// The estimate does not depend on the window, so one count serves both the
+		// primary below and this model; it runs only when something needs it.
+		let estimatedTokens: number | undefined;
+		const estimate = () => (estimatedTokens ??= this.#estimatePrePromptContextTokens(messages, contextWindow));
+		// A `when-healthy` return is judged on the assembled request against the
+		// primary's own window and compaction policy; one that would need
+		// compaction is not taken.
 		const returned = await this.#host.maybeReturnToHealthyPrimary(primary => {
 			const primaryWindow = primary.contextWindow ?? 0;
 			if (primaryWindow <= 0) return true;
-			const fitBudget = Math.max(0, primaryWindow - resolveBudgetReserveTokens(primaryWindow, compactionSettings));
-			return contextTokens <= fitBudget && !shouldCompact(contextTokens, primaryWindow, compactionSettings);
+			const primarySettings = resolveModelCompactionSettings(this.#host.settings, primary);
+			const tokens = estimate();
+			const fitBudget = Math.max(0, primaryWindow - resolveBudgetReserveTokens(primaryWindow, primarySettings));
+			return tokens <= fitBudget && !shouldCompact(tokens, primaryWindow, primarySettings);
 		}, signal);
-		if (returned) return;
+		if (signal?.aborted) return;
+		if (returned) {
+			this.#midTurnDeadEndPendingPrePrompt = false;
+			return;
+		}
+		// The model moved while usage was read: judge the request against it instead.
+		if (this.#model !== model) return this.runPrePromptCompactionIfNeeded(messages, signal);
+		if (contextWindow <= 0) return;
+		const compactionSettings = this.#compactionSettings;
+		const contextTokens = estimate();
+		const pendingMidTurnDeadEnd = this.#midTurnDeadEndPendingPrePrompt;
+		this.#midTurnDeadEndPendingPrePrompt = false;
 		if (!shouldCompact(contextTokens, contextWindow, compactionSettings)) {
 			this.maybeStartSpeculativeCompaction(contextTokens, contextWindow);
 			return;
