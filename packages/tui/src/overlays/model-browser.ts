@@ -395,8 +395,9 @@ interface SessionModelScopeInputs {
 function readSessionModelScopeInputs(
 	registry: ModelBrowserRegistry,
 	scopedModels: ReadonlyArray<Model>,
+	scopedModelsConfigured = scopedModels.length > 0,
 ): SessionModelScopeInputs {
-	if (scopedModels.length > 0) return { models: scopedModels, allModels: scopedModels, error: undefined };
+	if (scopedModelsConfigured) return { models: scopedModels, allModels: scopedModels, error: undefined };
 	const loadError = registry.getError();
 	let error = loadError ? String(loadError) : undefined;
 	let models: ReadonlyArray<Model>;
@@ -422,8 +423,9 @@ export function buildSessionModelScope(
 	settings: ModelBrowserSource,
 	registry: ModelBrowserRegistry,
 	scopedModels: ReadonlyArray<Model>,
+	scopedModelsConfigured = scopedModels.length > 0,
 ): SessionModelScope {
-	return scopeFromInputs(settings, readSessionModelScopeInputs(registry, scopedModels));
+	return scopeFromInputs(settings, readSessionModelScopeInputs(registry, scopedModels, scopedModelsConfigured));
 }
 
 /**
@@ -443,9 +445,9 @@ export class SessionModelScopeCache {
 		this.#registry = registry;
 	}
 
-	get(scopedModels: ReadonlyArray<Model>): SessionModelScope {
+	get(scopedModels: ReadonlyArray<Model>, scopedModelsConfigured = scopedModels.length > 0): SessionModelScope {
 		const revision = this.#settings.revision;
-		const inputs = readSessionModelScopeInputs(this.#registry, scopedModels);
+		const inputs = readSessionModelScopeInputs(this.#registry, scopedModels, scopedModelsConfigured);
 		const cachedInputs = this.#inputs;
 		const cached = this.#scope;
 		if (

@@ -278,6 +278,7 @@ export function buildModelSelectorCompletions(
 				),
 				registry: runtime.ctx.session.modelRegistry,
 				scopedModels: () => runtime.ctx.session.scopedModels.map(entry => entry.model),
+				scopedModelsConfigured: () => runtime.ctx.session.scopedModelsConfigured,
 			});
 			for (const { selector, model } of rankModels(query)) {
 				matches.push({ value: `${selector}${suffix} `, label: selector, description: model.name });

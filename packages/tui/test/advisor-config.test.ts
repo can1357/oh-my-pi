@@ -1,6 +1,7 @@
 import { beforeAll, describe, expect, it } from "bun:test";
 import * as os from "node:os";
 import * as path from "node:path";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import type { TUI } from "../src/index";
 import type { DescribeContext } from "../src/native/node";
 import {
@@ -35,6 +36,51 @@ describe("advisor review mode picker", () => {
 		if (!theme) throw new Error("theme unavailable");
 		setThemeInstance(theme);
 	});
+
+	it.each([false, true])(
+		"keeps the advisor model picker scoped when configured=%s and the scope is empty",
+		async configured => {
+			const available = buildModel({
+				id: "outside-scope",
+				name: "Outside scope",
+				provider: "fixture",
+				api: "openai-completions",
+				baseUrl: "https://example.invalid/v1",
+				reasoning: false,
+				input: ["text"],
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				contextWindow: 128000,
+				maxTokens: 8192,
+			});
+			let saved: WatchdogConfigDoc | undefined;
+			const overlay = new AdvisorConfigOverlayComponent(
+				{} as TUI,
+				{ ...deps, getAvailableModels: () => [available], scopedModelsConfigured: configured },
+				"project",
+				{ advisors: [{ name: "Reviewer" }] },
+				{
+					loadDoc: async () => ({ advisors: [] }),
+					save: async (_scope, doc) => {
+						saved = structuredClone(doc);
+					},
+					close: () => {},
+					requestRender: () => {},
+					notify: () => {},
+				},
+			);
+			overlay.handleInput("\r"); // Advisor detail.
+			for (let i = 0; i < 2; i++) overlay.handleInput("\x1b[B");
+			overlay.handleInput("\r"); // Model picker.
+			expect(overlay.render(100).join("\n").includes("Outside scope")).toBe(!configured);
+			overlay.handleInput("\r"); // Select only when the model is visible.
+			if (configured) overlay.handleInput("\x1b"); // Empty picker back to detail.
+			overlay.handleInput("\x1b"); // Back to roster.
+			for (let i = 0; i < 4; i++) overlay.handleInput("\x1b[B");
+			overlay.handleInput("\r"); // Save & apply.
+			await Promise.resolve();
+			expect(saved?.advisors[0].model).toBe(configured ? undefined : "fixture/outside-scope");
+		},
+	);
 
 	it("preserves configured mode when accepting current selection and saving", async () => {
 		let saved: WatchdogConfigDoc | undefined;

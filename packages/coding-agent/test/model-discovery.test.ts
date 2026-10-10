@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { resolveApiKeyOnce } from "@oh-my-pi/pi-ai/auth-retry";
 import type { FetchImpl, Model } from "@oh-my-pi/pi-ai";
 import type { OAuthCredentials } from "@oh-my-pi/pi-ai/oauth/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
@@ -20,7 +21,8 @@ import {
 import { RUNTIME_DYNAMIC_MODEL_FETCH_TIMEOUT_MS } from "@oh-my-pi/pi-coding-agent/config/model-provider-discovery";
 import { kNoAuth, ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { ProviderDiscoverySchema } from "@oh-my-pi/pi-coding-agent/config/models-config-schema";
-import { resetSettingsForTest } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { cfgExcludedModels } from "@oh-my-pi/pi-coding-agent/config/model-settings";
+import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 
@@ -717,7 +719,8 @@ describe("ModelRegistry runtime discovery", () => {
 			}
 			return new Response("version: 2.19.1\n");
 		};
-		const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
+		const settings = Settings.isolated();
+		const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock, settings });
 
 		await registry.refreshProvider("google-antigravity", "online");
 
@@ -736,6 +739,13 @@ describe("ModelRegistry runtime discovery", () => {
 		if (!accountA || !opus) throw new Error("expected account A and Claude Opus 5.5");
 		expect(authStorage.sessions.pin("google-antigravity", sessionId, accountA.credentialId)).toBe(true);
 		expect(await registry.getApiKey(opus, sessionId)).toContain('"token":"token-b"');
+
+		// Hiding the active model must retain its discovered account eligibility
+		// in the request resolver, even when the session is pinned elsewhere.
+		cfgExcludedModels.set(settings, ["google-antigravity/claude-opus-5-5"]);
+		expect(registry.find("google-antigravity", "claude-opus-5-5")).toBeUndefined();
+		expect(authStorage.sessions.pin("google-antigravity", sessionId, accountA.credentialId)).toBe(true);
+		expect(await resolveApiKeyOnce(registry.resolver(opus, sessionId))).toContain('"token":"token-b"');
 	});
 
 	test("Antigravity routing still works for an account whose login stored no email", async () => {

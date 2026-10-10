@@ -2598,6 +2598,7 @@ export class InputController {
 				source: createModelBrowserSource(this.ctx.settings, model => this.ctx.session.effectiveServiceTier(model)),
 				registry: this.ctx.session.modelRegistry,
 				scopedModels: () => this.ctx.session.scopedModels.map(s => s.model),
+				scopedModelsConfigured: () => this.ctx.session.scopedModelsConfigured,
 			}),
 			// This TUI host uses the default registry; the receiving session can change with focus.
 			internalUrlCaller: () => {

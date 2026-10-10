@@ -45,6 +45,8 @@ export interface ModelMentionHost {
 	sessionManager: SessionManager;
 	modelRegistry: ModelRegistry;
 	scopedModels(): ReadonlyArray<Model>;
+	/** A configured empty scope must not fall back to the global catalog. */
+	scopedModelsConfigured?(): boolean;
 	/** User-authorized model agents inherited from the parent session. */
 	inheritedAgents?: readonly AgentDefinition[];
 }
@@ -84,7 +86,8 @@ export class ModelMentionRegistry {
 	/** Resolve an exact selector within the same model scope as the session picker. */
 	findMentionable(selector: string): Model | undefined {
 		const scoped = this.#host.scopedModels();
-		const models = scoped.length > 0 ? scoped : this.#host.modelRegistry.getAvailable();
+		const configured = this.#host.scopedModelsConfigured?.() ?? scoped.length > 0;
+		const models = configured ? scoped : this.#host.modelRegistry.getAvailable();
 		return models.find(model => formatModelString(model) === selector);
 	}
 

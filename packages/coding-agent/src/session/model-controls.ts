@@ -47,7 +47,13 @@ import { EPHEMERAL_MODEL_CHANGE_ROLE } from "./session-entries";
 import type { SessionManager } from "./session-manager";
 
 import { cfgDefaultThinkingLevel, cfgProvidersFireworksTier } from "./settings";
-import { cfgDisabledProviders, cfgEnabledModels } from "../config/model-settings";
+import { cfgDisabledProviders, cfgEnabledModels, cfgModelExclusionFilter } from "../config/model-settings";
+
+/** Enter a visible cycle at its boundary when the active model is no longer eligible. */
+function nextModelCycleIndex(currentIndex: number, length: number, direction: "forward" | "backward"): number {
+	if (currentIndex === -1) return direction === "forward" ? 0 : length - 1;
+	return direction === "forward" ? (currentIndex + 1) % length : (currentIndex - 1 + length) % length;
+}
 
 /** Capabilities borrowed from the owning AgentSession. */
 export interface ModelControlsHost {
@@ -74,6 +80,7 @@ export interface ModelControlsHost {
 export class ModelControls {
 	readonly #host: ModelControlsHost;
 	#scopedModels: Array<{ model: Model; thinkingLevel?: ThinkingLevel }>;
+	#scopedModelsConfigured: boolean;
 	#thinkingLevel: ThinkingLevel | undefined;
 	/** Hard per-session effort ceiling (e.g. a task spawn's `task.maxEffort` cap); recovery paths re-clamp to it. */
 	readonly #thinkingLevelCeiling: Effort | undefined;
@@ -85,6 +92,7 @@ export class ModelControls {
 		host: ModelControlsHost,
 		options: {
 			scopedModels?: Array<{ model: Model; thinkingLevel?: ThinkingLevel }>;
+			scopedModelsConfigured?: boolean;
 			thinkingLevel?: ConfiguredThinkingLevel;
 			thinkingLevelCeiling?: Effort;
 			serviceTierByFamily?: ServiceTierByFamily;
@@ -92,6 +100,7 @@ export class ModelControls {
 	) {
 		this.#host = host;
 		this.#scopedModels = options.scopedModels ?? [];
+		this.#scopedModelsConfigured = options.scopedModelsConfigured ?? this.#scopedModels.length > 0;
 		this.#serviceTierByFamily = options.serviceTierByFamily ?? {};
 		this.#thinkingLevelCeiling = options.thinkingLevelCeiling;
 		if (options.thinkingLevel === AUTO_THINKING) {
@@ -141,11 +150,19 @@ export class ModelControls {
 		return this.#autoResolvedLevel;
 	}
 
-	/** Models explicitly scoped to the session's cycle command, minus currently disabled providers. */
+	/** Whether a scope is configured, including one with no eligible models. */
+	get scopedModelsConfigured(): boolean {
+		return this.#scopedModelsConfigured;
+	}
+
+	/** Models scoped to cycling, minus disabled providers and excluded models. */
 	get scopedModels(): ReadonlyArray<{ model: Model; thinkingLevel?: ThinkingLevel }> {
 		const disabledProviders = cfgDisabledProviders.get(this.#host.settings);
-		if (disabledProviders.length === 0) return this.#scopedModels;
-		return this.#scopedModels.filter(scoped => !disabledProviders.includes(scoped.model.provider));
+		const include = cfgModelExclusionFilter.get(this.#host.settings);
+		if (disabledProviders.length === 0 && !include) return this.#scopedModels;
+		return this.#scopedModels.filter(
+			scoped => !disabledProviders.includes(scoped.model.provider) && (!include || include(scoped.model)),
+		);
 	}
 
 	/**
@@ -154,8 +171,12 @@ export class ModelControls {
 	 * completes so a newly-discovered `enabledModels` model joins the cycle and the
 	 * scoped `/models` picker (issue #9220).
 	 */
-	setScopedModels(scopedModels: Array<{ model: Model; thinkingLevel?: ThinkingLevel }>): void {
+	setScopedModels(
+		scopedModels: Array<{ model: Model; thinkingLevel?: ThinkingLevel }>,
+		configured = scopedModels.length > 0,
+	): void {
 		this.#scopedModels = scopedModels;
+		this.#scopedModelsConfigured = configured;
 	}
 
 	/** Live per-provider-family service-tier selection. */
@@ -305,12 +326,13 @@ export class ModelControls {
 
 	/**
 	 * Cycle to next/previous model.
-	 * Uses scoped models (from --models flag) if available, otherwise all available models.
+	 * Uses the configured scope, even when empty; otherwise all available models.
 	 * @param direction - "forward" (default) or "backward"
-	 * @returns The new model info, or undefined if only one model available
+	 * @returns The new model info, or undefined if no eligible model change is available
 	 */
 	async cycleModel(direction: "forward" | "backward" = "forward"): Promise<ModelCycleResult | undefined> {
-		if (this.scopedModels.length > 0) {
+		// An empty filtered scope is still a scope, never permission to cycle globally.
+		if (this.#scopedModelsConfigured) {
 			return this.#cycleScopedModel(direction);
 		}
 		return this.#cycleAvailableModel(direction);
@@ -319,7 +341,7 @@ export class ModelControls {
 	/**
 	 * Resolve the configured role models in the given order plus the index of
 	 * the currently active one. Roles that have no configured model, or whose
-	 * configured model is not currently available, are skipped. The `default`
+	 * configured model is outside the available session scope, are skipped. The `default`
 	 * role falls back to the active model when no explicit assignment exists.
 	 *
 	 * Returns `undefined` only when there is no current model or no available
@@ -327,7 +349,9 @@ export class ModelControls {
 	 * still guard on `models.length`).
 	 */
 	getRoleModelCycle(roleOrder: readonly string[]): RoleModelCycle | undefined {
-		const availableModels = this.#host.modelRegistry.getAvailable();
+		const availableModels = this.#scopedModelsConfigured
+			? this.scopedModels.map(entry => entry.model)
+			: this.#host.modelRegistry.getAvailable();
 		if (availableModels.length === 0) return undefined;
 
 		const currentModel = this.#model;
@@ -398,10 +422,13 @@ export class ModelControls {
 		direction: "forward" | "backward" = "forward",
 	): Promise<RoleModelCycleResult | undefined> {
 		const cycle = this.getRoleModelCycle(roleOrder);
-		if (!cycle || cycle.models.length <= 1) return undefined;
+		if (!cycle) return undefined;
+		if (cycle.models.length === 1 && modelsAreEqual(cycle.models[0].model, this.#model)) return undefined;
 
-		const step = direction === "backward" ? -1 : 1;
-		const next = cycle.models[(cycle.currentIndex + step + cycle.models.length) % cycle.models.length];
+		const currentIndex = modelsAreEqual(cycle.models[cycle.currentIndex].model, this.#model)
+			? cycle.currentIndex
+			: -1;
+		const next = cycle.models[nextModelCycleIndex(currentIndex, cycle.models.length, direction)];
 
 		await this.applyRoleModel(next);
 
@@ -433,15 +460,12 @@ export class ModelControls {
 	async #cycleScopedModel(direction: "forward" | "backward"): Promise<ModelCycleResult | undefined> {
 		const previousEditMode = this.#host.resolveActiveEditMode();
 		const scopedModels = await this.#getScopedModelsWithApiKey();
-		if (scopedModels.length <= 1) return undefined;
+		if (scopedModels.length === 0) return undefined;
 
 		const currentModel = this.#model;
-		let currentIndex = scopedModels.findIndex(sm => modelsAreEqual(sm.model, currentModel));
-
-		if (currentIndex === -1) currentIndex = 0;
-		const len = scopedModels.length;
-		const nextIndex = direction === "forward" ? (currentIndex + 1) % len : (currentIndex - 1 + len) % len;
-		const next = scopedModels[nextIndex];
+		if (scopedModels.length === 1 && modelsAreEqual(scopedModels[0].model, currentModel)) return undefined;
+		const currentIndex = scopedModels.findIndex(sm => modelsAreEqual(sm.model, currentModel));
+		const next = scopedModels[nextModelCycleIndex(currentIndex, scopedModels.length, direction)];
 
 		// Apply model
 		this.#host.modelRegistry.clearSuppressedSelector(formatModelStringWithRouting(next.model));
@@ -460,15 +484,12 @@ export class ModelControls {
 	async #cycleAvailableModel(direction: "forward" | "backward"): Promise<ModelCycleResult | undefined> {
 		const previousEditMode = this.#host.resolveActiveEditMode();
 		const availableModels = this.#host.modelRegistry.getAvailable();
-		if (availableModels.length <= 1) return undefined;
+		if (availableModels.length === 0) return undefined;
 
 		const currentModel = this.#model;
-		let currentIndex = availableModels.findIndex(m => modelsAreEqual(m, currentModel));
-
-		if (currentIndex === -1) currentIndex = 0;
-		const len = availableModels.length;
-		const nextIndex = direction === "forward" ? (currentIndex + 1) % len : (currentIndex - 1 + len) % len;
-		const nextModel = availableModels[nextIndex];
+		if (availableModels.length === 1 && modelsAreEqual(availableModels[0], currentModel)) return undefined;
+		const currentIndex = availableModels.findIndex(m => modelsAreEqual(m, currentModel));
+		const nextModel = availableModels[nextModelCycleIndex(currentIndex, availableModels.length, direction)];
 
 		const apiKey = await this.#host.modelRegistry.getApiKey(nextModel, this.#host.sessionId());
 		if (!apiKey) {

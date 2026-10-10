@@ -523,6 +523,7 @@ export class SelectorController {
 					return command ? openInEditor(command, text) : Promise.resolve(null);
 				},
 				scopedModels: this.ctx.session.scopedModels,
+				scopedModelsConfigured: this.ctx.session.scopedModelsConfigured,
 				availableToolNames: this.ctx.session.getAdvisorAvailableToolNames(),
 				syncBacklog: cfgAdvisorSyncBacklog.get(this.ctx.settings),
 				defaultModelLabel: defaultAdvisorModel
@@ -852,6 +853,7 @@ export class SelectorController {
 			},
 			{
 				currentContextTokens,
+				scopedModelsConfigured: this.ctx.session.scopedModelsConfigured,
 				currentSelector,
 				taskModeKeys: this.ctx.keybindings.getKeys("app.model.selectTemporary"),
 				taskSelector,
@@ -1019,8 +1021,9 @@ export class SelectorController {
 								fallbackProvenance === "project" || fallbackProvenance === "global";
 							if (fallbackRoleValue && exposesPersistedFallback) {
 								const scopedModels = this.ctx.session.scopedModels.map(sm => sm.model);
-								const availableModels =
-									scopedModels.length > 0 ? scopedModels : this.ctx.session.getAvailableModels();
+								const availableModels = this.ctx.session.scopedModelsConfigured
+									? scopedModels
+									: this.ctx.session.getAvailableModels();
 								const resolved = resolveModelRoleValue(fallbackRoleValue, availableModels, {
 									settings: this.ctx.settings,
 								});
@@ -1162,6 +1165,7 @@ export class SelectorController {
 			},
 			{
 				initialProviderId: hubOptions.initialProviderId,
+				scopedModelsConfigured: this.ctx.session.scopedModelsConfigured,
 				currentSelector: this.ctx.session.model
 					? `${this.ctx.session.model.provider}/${this.ctx.session.model.id}`
 					: undefined,

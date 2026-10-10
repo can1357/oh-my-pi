@@ -341,6 +341,11 @@ Only string values are kept; malformed scoped entries are ignored. Path scoping 
 
 ## Provider and source disabling
 
+To hide selected models without disabling a provider, set `excludedModels` to
+provider-qualified IDs or glob patterns, for example `["devin/fusion-*"]`.
+This filters the catalog, model picker, `omp models`, and ACP model options.
+See [Excluding models](./models.md#excluding-models) for matching and reload behavior.
+
 `enabledProviders` opts foreign user-level configuration sources into discovery. Its default is empty, so user roots from Cursor, Codex, Claude, Claude marketplace plugins, Gemini, OpenCode, Windsurf, and GitHub are normally excluded until their provider id is listed (or `*`/`all` is listed). Enabling `claude` also enables `claude-plugins`; an explicit `CLAUDE_CONFIG_DIR` opts Claude's user root in without a list entry. Explicitly selected discovery roots can also opt in. `disabledProviders` still wins.
 
 Project roots remain enabled. Native OMP and `.agents` roots—including native marketplace plugins—are not foreign and do not require an entry.

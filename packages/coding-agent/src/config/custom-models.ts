@@ -175,9 +175,11 @@ export function normalizeSuppressedSelector(
 		isLiteralModelId: (provider, id) => hasLiveModel?.(provider, id) === true,
 	});
 	if (!parsed) return trimmed;
-	// Retired effort-tier variant ids normalize to their collapsed logical id
-	// so persisted suppressions keyed by raw member ids still bind.
-	const aliasId = resolveVariantSelector(parsed.provider, parsed.id);
+	// A real model ID shadows its alias even while excluded from selection.
+	// Retired variants still share their collapsed model's cooldown.
+	const aliasId = hasLiveModel?.(parsed.provider, parsed.id)
+		? undefined
+		: resolveVariantSelector(parsed.provider, parsed.id);
 	return `${parsed.provider}/${aliasId ?? parsed.id}`;
 }
 

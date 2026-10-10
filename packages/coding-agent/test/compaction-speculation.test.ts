@@ -5,6 +5,7 @@ import type { AssistantMessage, Context, Model, UserMessage } from "@oh-my-pi/pi
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
+import { cfgExcludedModels } from "@oh-my-pi/pi-coding-agent/config/model-settings";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import type { CompactionMethod } from "@oh-my-pi/pi-coding-agent/session/compaction-methods";
@@ -13,7 +14,10 @@ import { SessionMaintenance, type SessionMaintenanceHost } from "@oh-my-pi/pi-co
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import * as snapcompactModule from "@oh-my-pi/snapcompact";
 
-import { cfgCompactionMethodOrder } from "@oh-my-pi/pi-coding-agent/session/context-settings";
+import {
+	cfgContextPromotionEnabled,
+	cfgCompactionMethodOrder,
+} from "@oh-my-pi/pi-coding-agent/session/context-settings";
 
 const CONTEXT_WINDOW = 100_000;
 const THRESHOLD = 50_000;
@@ -66,6 +70,7 @@ describe("async speculative compaction", () => {
 	function createMaintenance(
 		options: {
 			asyncEnabled?: boolean;
+			recoveryEvents?: string[];
 			methodOrder?: CompactionMethod[];
 			experimental?: boolean;
 			recoveryTools?: boolean;
@@ -122,7 +127,7 @@ describe("async speculative compaction", () => {
 				events.push(event.type);
 			},
 			emitNotice: () => {},
-			scheduleAgentContinue: () => {},
+			scheduleAgentContinue: (continuation: { source: string }) => options.recoveryEvents?.push(continuation.source),
 			scheduleCompactionContinuation: () => false,
 			persistTurnMessagesForMidRunCompaction: async () => false,
 			findLastAssistantMessage: () => undefined,
@@ -149,8 +154,10 @@ describe("async speculative compaction", () => {
 			shake: async () => ({ modified: false, tokensRemoved: 0 }),
 			dropImages: async () => ({ removed: 0 }),
 			generateHandoffDocument: options.generateHandoffDocument ?? (async () => undefined),
-			removeAssistantMessageFromActiveContext: () => {},
-			dropPersistedAssistantTurn: async () => undefined,
+			removeAssistantMessageFromActiveContext: () => options.recoveryEvents?.push("remove-active-turn"),
+			dropPersistedAssistantTurn: async () => {
+				options.recoveryEvents?.push("drop-persisted-turn");
+			},
 			runRecoveryCompactionWithRollback: async () => ({ continuationScheduled: false }),
 			parseRetryAfterMsFromError: () => undefined,
 			setModelTemporary: async () => {},
@@ -194,6 +201,39 @@ describe("async speculative compaction", () => {
 	afterAll(() => {
 		authStorage.close();
 	});
+
+	it.each([false, true])(
+		"retries an in-flight pre-promotion overflow after its failed model is excluded: %s",
+		async excluded => {
+			const failed = modelRegistry.getModelMetadata({ provider: "anthropic", id: "claude-sonnet-4-5" });
+			const target = modelRegistry.find("anthropic", "claude-opus-4-5");
+			if (!failed || !target || !failed.contextWindow) throw new Error("Missing promotion fixtures");
+			const previousTarget = failed.contextPromotionTarget;
+			const recoveryEvents: string[] = [];
+			try {
+				failed.contextPromotionTarget = `${target.provider}/${target.id}`;
+				model = { ...target, contextWindow: failed.contextWindow * 2 };
+				maintenance = createMaintenance({ recoveryEvents });
+				cfgContextPromotionEnabled.set(maintenanceSettings, true);
+				modelRegistry.setSettings(maintenanceSettings);
+				if (excluded) cfgExcludedModels.set(maintenanceSettings, [`${failed.provider}/${failed.id}`]);
+				const overflow: AssistantMessage = {
+					...assistantMessage("", failed),
+					content: [],
+					stopReason: "error",
+					errorMessage: "maximum context length exceeded",
+				};
+				overflow.errorId = AIError.classifyMessage(overflow);
+				await maintenance.checkCompaction(overflow);
+				expect(recoveryEvents).toEqual(["remove-active-turn", "drop-persisted-turn", "promoted-model-overflow"]);
+				expect(model.id).toBe(target.id);
+				if (excluded) expect(modelRegistry.find(failed.provider, failed.id)).toBeUndefined();
+			} finally {
+				failed.contextPromotionTarget = previousTarget;
+				modelRegistry.setSettings(Settings.isolated());
+			}
+		},
+	);
 
 	it("reminds only near threshold once per experimental window, including the first and reset windows", async () => {
 		maintenance = createMaintenance({ experimental: true });

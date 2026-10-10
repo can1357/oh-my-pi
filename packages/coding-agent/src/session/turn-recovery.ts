@@ -2110,9 +2110,9 @@ export class TurnRecovery {
 			: this.#host.agent.state.messages.findLast(
 					(message): message is AssistantMessage => message.role === "assistant" && message !== failedMessage,
 				);
-		// Permitted redemption targets are catalog policy on the refused model.
+		// Redemption policy belongs to the refused model even when it is excluded from new selections.
 		const failedModel = failedMessage.fallbackCreditHandle
-			? this.#host.modelRegistry.find(failedMessage.provider, failedMessage.model)
+			? this.#host.modelRegistry.getModelMetadata({ provider: failedMessage.provider, id: failedMessage.model })
 			: undefined;
 		const creditTargets = failedModel ? fallbackCreditTargets(failedModel) : [];
 		for (const role of this.retryFallbackChainKeys(currentSelector)) {

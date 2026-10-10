@@ -207,12 +207,12 @@ export type ModelPresetSwitchResult =
 
 export type ModelPresetSession = Pick<
 	AgentSession,
-	"setModel" | "setThinkingLevel" | "getAvailableModels" | "scopedModels" | "modelRegistry"
+	"setModel" | "setThinkingLevel" | "getAvailableModels" | "scopedModels" | "scopedModelsConfigured" | "modelRegistry"
 >;
 
 function presetCandidates(session: ModelPresetSession): Model[] {
 	const scoped = session.scopedModels.map(entry => entry.model);
-	return scoped.length > 0 ? scoped : session.getAvailableModels();
+	return session.scopedModelsConfigured ? scoped : session.getAvailableModels();
 }
 
 function errorMessage(error: unknown): string {

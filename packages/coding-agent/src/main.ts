@@ -173,7 +173,7 @@ import {
 	cfgOmitThinking,
 	cfgPrewalkEnabled,
 } from "./session/settings";
-import { cfgDisabledProviders, cfgEnabledModels } from "./config/model-settings";
+import { cfgDisabledProviders, cfgEnabledModels, cfgExcludedModels } from "./config/model-settings";
 import { cfgTaskAgentIdleTtlMs } from "./task/settings";
 import { cfgSkillsIncludeSkills } from "./extensibility/settings";
 import { cfgWorkspaceAdditionalDirectories } from "./session/context-settings";
@@ -1042,7 +1042,7 @@ function sameScopedModelSet(a: ReadonlyArray<{ model: Model }>, b: ReadonlyArray
 export interface ScopedModelSink {
 	readonly isDisposed: boolean;
 	readonly scopedModels: ReadonlyArray<{ model: Model; thinkingLevel?: ThinkingLevel }>;
-	setScopedModels(scopedModels: Array<{ model: Model; thinkingLevel?: ThinkingLevel }>): void;
+	setScopedModels(scopedModels: Array<{ model: Model; thinkingLevel?: ThinkingLevel }>, configured?: boolean): void;
 }
 
 /**
@@ -1081,14 +1081,19 @@ export async function rebuildScopedModelsAfterDiscovery(
 }
 
 /** Settings the scoped model list follows (see {@link watchScopedModelSettings}). */
-const cfgScopedModelInputs = combine({ enabledModels: cfgEnabledModels, disabledProviders: cfgDisabledProviders });
+const cfgScopedModelInputs = combine({
+	enabledModels: cfgEnabledModels,
+	disabledProviders: cfgDisabledProviders,
+	excludedModels: cfgExcludedModels,
+});
 
 /**
  * Keep the Ctrl+P / scoped `/models` list in step with live settings: an
  * `enabledModels` edit re-resolves a settings-derived scope (an explicit
  * `--models` scope stays pinned), and a `disabledProviders` edit re-resolves
  * after the catalog rebuild so re-enabled providers rejoin (disabled ones are
- * already filtered from `session.scopedModels` at read time).
+ * already filtered from `session.scopedModels` at read time). Exclusion edits
+ * re-resolve both scope sources so models excluded at startup can rejoin.
  */
 export function watchScopedModelSettings(
 	session: ScopedModelSink & Pick<AgentSession, "addDisposer">,
@@ -1098,7 +1103,8 @@ export function watchScopedModelSettings(
 ): void {
 	const stop = cfgScopedModelInputs.listen(activeSettings, async (next, previous) => {
 		const providersChanged = !Bun.deepEquals(next.disabledProviders, previous.disabledProviders);
-		if (parsed.models && !providersChanged) return;
+		const exclusionsChanged = !Bun.deepEquals(next.excludedModels, previous.excludedModels);
+		if (parsed.models && !providersChanged && !exclusionsChanged) return;
 		if (providersChanged) await modelRegistry.reapplyModelPolicies();
 		if (session.isDisposed) return;
 		const patterns = parsed.models ?? cfgEnabledModels.get(activeSettings);
@@ -1112,8 +1118,7 @@ export function watchScopedModelSettings(
 						activeSettings,
 					);
 		const mapped = toSessionScopedModels(rebuilt, activeSettings);
-		if (sameScopedModelSet(session.scopedModels, mapped)) return;
-		session.setScopedModels(mapped);
+		session.setScopedModels(mapped, patterns.length > 0);
 	});
 	session.addDisposer(stop);
 }
@@ -1557,7 +1562,7 @@ export async function buildSessionOptions(
 			modelRegistry,
 			modelMatchPreferences,
 			disabledProviders,
-			{ deferUnregistered: true },
+			{ deferUnregistered: true, settings: activeSettings },
 		);
 		if (selection.deferred) {
 			// Preserve role fallback order until extensions have registered their providers.
@@ -1575,7 +1580,12 @@ export async function buildSessionOptions(
 	}
 	if (parsed.planYolo) {
 		const rolePattern = expandRoleAlias(parsed.planYoloInto ?? "@smol", activeSettings);
-		const resolved = resolveCliModel({ cliModel: rolePattern, modelRegistry, preferences: modelMatchPreferences });
+		const resolved = resolveCliModel({
+			cliModel: rolePattern,
+			modelRegistry,
+			preferences: modelMatchPreferences,
+			settings: activeSettings,
+		});
 		if (resolved.warning) {
 			process.stderr.write(`${chalk.yellow(`Warning: ${resolved.warning}`)}\n`);
 		}
@@ -1612,6 +1622,7 @@ export async function buildSessionOptions(
 	if (scopedModels.length > 0) {
 		options.scopedModels = toSessionScopedModels(scopedModels, activeSettings);
 	}
+	options.scopedModelsConfigured = (parsed.models ?? cfgEnabledModels.get(activeSettings)).length > 0;
 
 	// API key from CLI - set in authStorage
 	// (handled by caller before createAgentSession)
@@ -2226,7 +2237,7 @@ export async function runRootCommand(
 			// Chat telemetry reports each request's provider-computed cost. A model
 			// without a known rate card reports an unavailable reason instead of $0.
 			sessionOptions.telemetry = createTelemetryExportConfig(sessionOptions.telemetry, (providerId, modelId) => {
-				const model = modelRegistry.find(providerId, modelId);
+				const model = modelRegistry.getModelMetadata({ provider: providerId, id: modelId });
 				return model !== undefined && getModelPricingStatus(model) !== "unknown";
 			});
 		}

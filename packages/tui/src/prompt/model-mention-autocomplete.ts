@@ -84,6 +84,7 @@ export function createModelMentionSource(host: {
 	source: ModelBrowserSource;
 	registry: ModelBrowserRegistry;
 	scopedModels: () => ReadonlyArray<Model>;
+	scopedModelsConfigured?: () => boolean;
 }): ModelMentionCandidateSource {
 	let scopeCache: SessionModelScopeCacheClass | undefined;
 	let ranker: ModelItemRankerClass | undefined;
@@ -91,7 +92,7 @@ export function createModelMentionSource(host: {
 	return query => {
 		const { SessionModelScopeCache, buildSearchAffinity, ModelItemRanker } = loadModelBrowser();
 		scopeCache ??= new SessionModelScopeCache(host.source, host.registry);
-		const scope = scopeCache.get(host.scopedModels());
+		const scope = scopeCache.get(host.scopedModels(), host.scopedModelsConfigured?.());
 		if (!query.trim()) return scope.items;
 		const providerOrder = host.source.modelProviderOrder;
 		if (ranker?.items !== scope.items || rankerProviderOrder !== providerOrder) {

@@ -395,7 +395,7 @@ export async function runModelsCommand(command: ModelsCommandArgs): Promise<void
 	const settings = await Settings.init({ cwd, configFiles: command.flags.config });
 	const authStorage = await discoverAuthStorage(undefined, { settings });
 	try {
-		const modelRegistry = new ModelRegistry(authStorage);
+		const modelRegistry = new ModelRegistry(authStorage, undefined, { settings });
 
 		if (action === "refresh" && !json && process.stderr.isTTY) {
 			process.stderr.write("Refreshing models from all providers…\n");

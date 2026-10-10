@@ -8,12 +8,51 @@ Primary implementation files:
 
 - `packages/coding-agent/src/config/model-registry.ts` — loads built-in + custom models, provider overrides, runtime discovery, auth integration
 - `packages/coding-agent/src/config/model-resolver.ts` — parses model patterns and selects initial/smol/slow models
-- `packages/coding-agent/src/config/model-settings.ts` — model selection settings (`modelRoles`, `enabledModels`, `enabledProviders`/`disabledProviders`, `modelProviderOrder`, `cycleOrder`)
+- `packages/coding-agent/src/config/model-settings.ts` — model selection settings (`modelRoles`, `enabledModels`, `excludedModels`, `enabledProviders`/`disabledProviders`, `modelProviderOrder`, `cycleOrder`)
 - `packages/coding-agent/src/session/settings.ts` — provider transport preferences (`providers.*`)
 - `packages/coding-agent/src/config/models-config.ts` and `models-config-schema-bundle.ts` — custom provider/model validation
 - `packages/coding-agent/src/session/auth-storage.ts` — re-exports `AuthStorage` from `@oh-my-pi/pi-ai`; credential precedence is implemented in `packages/ai/src/auth/cascade.ts`
 - `packages/catalog/src/compat/resolve.ts` and `compat/rules/` — compatibility and model policy resolution
 - `packages/catalog/src/models.ts` and `packages/catalog/src/types.ts` — built-in providers/models and public model types
+
+## Excluding models
+
+Set `excludedModels` in the active profile's `config.yml` to hide selected models
+from the model picker, catalog, `omp models`, and ACP model `configOptions`:
+
+```yaml
+excludedModels:
+  - openai/gpt-5
+  - devin/fusion-*
+```
+
+Entries match the complete `provider/id`, case-insensitively, by literal equality
+or Bun glob syntax (`*`, `?`, and character classes). Literal comparison also
+handles copied IDs containing glob characters, such as
+`zhipu-coding-plan/glm-5.2-highspeed[1m]`. There is no fuzzy matching or thinking-level suffix parsing. The example
+hides Devin's `fusion-*` models while keeping its other models available.
+Quote YAML entries beginning with `*`. Incomplete escapes, unbalanced brackets or
+braces, empty character classes, and reversed character ranges are rejected.
+Escape unmatched literal brackets and braces with a backslash. An omitted or empty list
+excludes nothing.
+
+Exclusions also apply to direct model lookup and session model cycling, and take
+precedence over `enabledModels`. Provider configuration, authentication, and
+discovery caches are retained. Changing the list affects subsequent catalog
+reads and rebuilds settings-derived or explicit `--models` scopes, so clearing
+exclusions restores matching models to the picker and cycle. If exclusions empty
+a configured scope, cycling, model pickers, and model mentions stay in that scope
+and do not select an unrelated chat model. It does not switch an already active
+conversation model; metadata policy updates still apply to that model. SDK sessions apply their settings to a supplied
+model registry, so use a separate registry for sessions with different settings.
+Project settings and `--config` overlays
+use the normal settings precedence.
+
+The extension API has no general catalog-exclusion hook. Its
+`registerProvider({ oauth: { modifyModels } })` hook can project a catalog before
+ACP advertises it, but requires replacing the provider's OAuth registration and
+registering models, and runs only with stored OAuth credentials. Use
+`excludedModels` to filter an existing provider without replacing its auth flow.
 
 ## Config file location and legacy behavior
 

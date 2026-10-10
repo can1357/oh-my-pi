@@ -3056,7 +3056,10 @@ export class SessionMaintenance {
 			contextWindow > 0 &&
 			cfgContextPromotionEnabled.get(this.#host.settings)
 		) {
-			const foundModel = this.#host.modelRegistry.find(assistantMessage.provider, assistantMessage.model);
+			const foundModel = this.#host.modelRegistry.getModelMetadata({
+				provider: assistantMessage.provider,
+				id: assistantMessage.model,
+			});
 			const failedModel = foundModel && this.#host.modelRegistry.fitContextWindow(foundModel, this.#host.settings);
 			const failedWindow = failedModel?.contextWindow ?? 0;
 			const promotionTarget = failedModel

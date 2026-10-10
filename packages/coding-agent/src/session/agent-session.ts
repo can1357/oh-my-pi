@@ -1720,6 +1720,7 @@ export class AgentSession implements SettingsScope {
 			sessionManager: this.sessionManager,
 			modelRegistry: this.#modelRegistry,
 			scopedModels: () => this.scopedModels.map(s => s.model),
+			scopedModelsConfigured: () => this.scopedModelsConfigured,
 			inheritedAgents: config.inheritedSessionAgents,
 		});
 		this.#ownedAsyncJobManager = config.ownedAsyncJobManager;
@@ -1749,6 +1750,7 @@ export class AgentSession implements SettingsScope {
 		};
 		this.#models = new ModelControls(modelControlsHost, {
 			scopedModels: config.scopedModels,
+			scopedModelsConfigured: config.scopedModelsConfigured,
 			thinkingLevel: config.thinkingLevel,
 			thinkingLevelCeiling: config.thinkingLevelCeiling,
 			serviceTierByFamily: config.serviceTierByFamily,
@@ -6657,14 +6659,22 @@ export class AgentSession implements SettingsScope {
 		return this.sessionManager.getSessionName();
 	}
 
-	/** Scoped models for cycling (from --models flag) */
+	/** Whether a scope is configured, including one with no eligible models. */
+	get scopedModelsConfigured(): boolean {
+		return this.#models.scopedModelsConfigured;
+	}
+
+	/** Models scoped to cycling and selection. */
 	get scopedModels(): ReadonlyArray<{ model: Model; thinkingLevel?: ThinkingLevel }> {
 		return this.#models.scopedModels;
 	}
 
 	/** Replace the Ctrl+P/`/models` cycle scope (post-discovery rebuild; see {@link ModelControls.setScopedModels}). */
-	setScopedModels(scopedModels: Array<{ model: Model; thinkingLevel?: ThinkingLevel }>): void {
-		this.#models.setScopedModels(scopedModels);
+	setScopedModels(
+		scopedModels: Array<{ model: Model; thinkingLevel?: ThinkingLevel }>,
+		configured = scopedModels.length > 0,
+	): void {
+		this.#models.setScopedModels(scopedModels, configured);
 	}
 
 	/** Prompt templates */
@@ -10631,7 +10641,7 @@ export class AgentSession implements SettingsScope {
 			await this.#modelRegistry.reapplyModelPolicies();
 			const currentModel = this.model;
 			if (!currentModel || this.#isDisposed) return;
-			const found = this.#modelRegistry.find(currentModel.provider, currentModel.id);
+			const found = this.#modelRegistry.getModelMetadata(currentModel);
 			const updated = found && this.#modelRegistry.fitContextWindow(found, this.settings);
 			// Compare against the window bound before the refit so dependent state
 			// still reconciles once even though the refit already moved the row.
@@ -13352,7 +13362,7 @@ export class AgentSession implements SettingsScope {
 		// switched models while discovery was in flight.
 		const current = this.model;
 		if (!current || !modelsAreEqual(current, boundAtStartup)) return;
-		const found = this.#modelRegistry.find(current.provider, current.id);
+		const found = this.#modelRegistry.getModelMetadata(current);
 		const refreshed = found && this.#modelRegistry.fitContextWindow(found, this.settings);
 		if (!refreshed || refreshed.contextWindow === current.contextWindow) return;
 		this.agent.setModel(refreshed);

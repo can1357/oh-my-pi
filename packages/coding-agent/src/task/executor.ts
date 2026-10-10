@@ -4102,13 +4102,16 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			const registryFromParent = options.modelRegistry !== undefined;
 			const modelRegistry =
 				options.modelRegistry ??
-				new ModelRegistry(options.authStorage ?? (await awaitAbortable(discoverAuthStorage())));
+				new ModelRegistry(options.authStorage ?? (await awaitAbortable(discoverAuthStorage())), undefined, {
+					settings,
+				});
 			const authStorage = modelRegistry.authStorage;
 			if (options.authStorage && options.authStorage !== authStorage) {
 				throw new Error(
 					"options.authStorage and options.modelRegistry.authStorage must be the same instance when both are provided",
 				);
 			}
+			await awaitAbortable(modelRegistry.setSettings(settings));
 			checkAbort();
 			if (!registryFromParent) {
 				modelRegistry.refreshInBackground();

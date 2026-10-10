@@ -123,6 +123,8 @@ export interface AdvisorConfigDeps {
 	defaultToolNames: ReadonlySet<string>;
 	externalEditor?: (text: string) => Promise<string | null>;
 	scopedModels: ReadonlyArray<{ model: Model; thinkingLevel?: ThinkingLevel }>;
+	/** A configured scope stays active even if no models currently match it. */
+	scopedModelsConfigured?: boolean;
 	availableToolNames: string[];
 	syncBacklog?: AdvisorSyncBacklog;
 	/** Formatted advisor-role model shown on the seeded default row (e.g. "anthropic/claude-..."). */
@@ -1221,7 +1223,7 @@ export class AdvisorConfigOverlayComponent implements Component {
 	#showModelPicker(index: number): void {
 		const mruOrder = this.#deps.browserSource.mruOrder;
 		let models: ReadonlyArray<Model>;
-		if (this.#scopedModels.length > 0) {
+		if (this.#deps.scopedModelsConfigured ?? this.#scopedModels.length > 0) {
 			models = this.#scopedModels.map(scoped => scoped.model);
 		} else {
 			try {

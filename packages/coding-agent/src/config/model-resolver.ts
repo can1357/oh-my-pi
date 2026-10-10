@@ -58,7 +58,12 @@ import {
 } from "./model-roles";
 import type { Settings } from "./settings";
 
-import { cfgDisabledProviders, cfgEnabledModels, cfgModelProviderOrder } from "./model-settings";
+import {
+	cfgDisabledProviders,
+	cfgEnabledModels,
+	cfgModelExclusionFilter,
+	cfgModelProviderOrder,
+} from "./model-settings";
 import { cfgRetryFallbackChains } from "../session/settings";
 
 function isKnownProvider(provider: string): provider is KnownProvider {
@@ -1408,6 +1413,25 @@ export function resolveAgentAdvisorRolePattern(pattern: string, settings?: Model
 	return expanded.length > 0 ? expanded.join(",") : pattern;
 }
 
+/** Reject excluded provider-qualified selectors before alias or fuzzy resolution can rebind them. */
+function isExcludedModelSelector(selector: string, availableModels: Model<Api>[], settings?: Settings): boolean {
+	const include = settings && cfgModelExclusionFilter.get(settings);
+	if (!include) return false;
+	const trimmed = selector.trim();
+	const slash = trimmed.indexOf("/");
+	if (slash <= 0) return false;
+	const literal = { provider: trimmed.slice(0, slash), id: trimmed.slice(slash + 1) };
+	if (!include(literal)) return true;
+	const parsed = parseModelString(trimmed, MAX_THINKING_SUFFIX_OPTIONS);
+	if (!parsed || include(parsed)) return false;
+	// Real IDs with a suffix win over interpreting that suffix as a thinking level.
+	return !availableModels.some(
+		model =>
+			model.provider.toLowerCase() === literal.provider.toLowerCase() &&
+			model.id.toLowerCase() === literal.id.toLowerCase(),
+	);
+}
+
 /**
  * Resolve a model role value into a concrete model and thinking metadata.
  */
@@ -1446,6 +1470,7 @@ export function resolveModelRoleValue(
 	// rebuilding it per pattern inside parseModelPattern.
 	const preferenceContext = buildPreferenceContext(availableModels, matchPreferences);
 	for (const [patternIndex, effectivePattern] of effectivePatterns.entries()) {
+		if (isExcludedModelSelector(effectivePattern, availableModels, options?.settings)) continue;
 		const resolved = matchPatternWithContext(effectivePattern, availableModels, preferenceContext);
 		if (resolved.model) {
 			return {
@@ -1867,6 +1892,8 @@ export async function resolveModelScope(
 			continue;
 		}
 
+		if (isExcludedModelSelector(pattern, availableModels, settings)) continue;
+
 		// Role aliases (`@smol`, `pi/slow`) resolve to the role's single concrete
 		// model — not its whole fallback chain — so a role contributes one scope
 		// entry exactly like `--model` would pick. (Bare `*` stays a match-all
@@ -1981,6 +2008,8 @@ export function filterAvailableModelsByEnabledPatterns(
 			}
 			continue;
 		}
+
+		if (isExcludedModelSelector(pattern, available, settings)) continue;
 
 		// Mirror resolveModelScope: role aliases resolve to the role's model.
 		if (settings && modelRoleAliasPrefixLength(pattern) !== undefined) {
@@ -2099,6 +2128,18 @@ export function resolveCliModel(options: CliModelOptions): ResolveCliModelResult
 		all: modelRegistry.getAll(),
 		available: preferredModels ?? modelRegistry.getAvailable(),
 	};
+	const selector =
+		cliProvider && !cliModel.toLowerCase().startsWith(`${cliProvider.toLowerCase()}/`)
+			? `${cliProvider}/${cliModel}`
+			: cliModel;
+	if (isExcludedModelSelector(selector, scope.all, settings)) {
+		return {
+			model: undefined,
+			selector: undefined,
+			warning: undefined,
+			error: `Model "${selector.trim()}" is excluded by excludedModels.`,
+		};
+	}
 	const disabled = disabledProviderIds(settings);
 	if (disabled.size === 0) return resolveCliModelInScope(scoped, scope);
 

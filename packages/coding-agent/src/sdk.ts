@@ -615,6 +615,8 @@ export interface CreateAgentSessionOptions {
 	resolveServiceTierByFamily?: (model: Model | undefined) => ServiceTierByFamily;
 	/** Models available for cycling (Ctrl+P in interactive mode) */
 	scopedModels?: Array<{ model: Model; thinkingLevel?: ThinkingLevel }>;
+	/** Keep a configured scope active even when no models currently match it. */
+	scopedModelsConfigured?: boolean;
 	/** Prewalk from the starting model to a fast/cheap target at the first edit/write once the todo list exists. */
 	prewalk?: Prewalk;
 	/** CLI prewalk selector awaiting extension provider registration; patterns retain role fallback order. */
@@ -1122,10 +1124,12 @@ export async function resolvePrewalkTarget(
 	{
 		deferUnregistered = false,
 		beforeRefresh,
-	}: { deferUnregistered?: boolean; beforeRefresh?: () => Promise<void> } = {},
+		settings,
+	}: { deferUnregistered?: boolean; beforeRefresh?: () => Promise<void>; settings?: Settings } = {},
 ): Promise<{ prewalk?: Prewalk; warnings: string[]; deferred: boolean }> {
 	let refreshedProviders: Set<string> | undefined;
-	const resolveCandidate = (pattern: string) => resolveCliModel({ cliModel: pattern, modelRegistry, preferences });
+	const resolveCandidate = (pattern: string) =>
+		resolveCliModel({ cliModel: pattern, modelRegistry, preferences, settings });
 	let authenticated: ResolveCliModelResult | undefined;
 	let firstUnauthenticated: ResolveCliModelResult | undefined;
 	let lastResolution: ResolveCliModelResult | undefined;
@@ -1764,6 +1768,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		}
 	});
 	startupCleanup.defer(unsubscribeCredentialDisabled);
+	// Bind policy before catalog reads, with credential-disable reporting already installed.
+	await modelRegistry.setSettings(settings);
 	// Local-only and never rejects; awaited just before the first catalog read so
 	// its credential/cache I/O overlaps the cwd-scoped discoveries started below.
 	const credentialScopedCacheHydration = logger.time("hydrateCredentialScopedModelCaches", () =>
@@ -3229,7 +3235,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				modelRegistry,
 				modelMatchPreferences,
 				disabledProviderIds(settings),
-				{ beforeRefresh: discoveryInFlight ? () => discoveryInFlight : undefined },
+				{ beforeRefresh: discoveryInFlight ? () => discoveryInFlight : undefined, settings },
 			);
 			prewalk = selection.prewalk;
 			deferredPrewalk = undefined;
@@ -4569,6 +4575,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			ownedAsyncJobManager: asyncJobManager,
 			asyncJobManager: scopedAsyncJobManager,
 			scopedModels: options.scopedModels,
+			scopedModelsConfigured: options.scopedModelsConfigured,
 			inheritedSessionAgents: options.inheritedSessionAgents,
 			promptTemplates,
 			slashCommands,

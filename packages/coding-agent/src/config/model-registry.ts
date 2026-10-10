@@ -135,9 +135,9 @@ import {
 	validateProviderConfiguration,
 } from "./models-config";
 import type { ModelOverride, ModelsConfig, ProviderAuthMode } from "./models-config-schema";
-import { type Settings, settings } from "./settings";
+import { isSettingsInitialized, type Settings, settings } from "./settings";
 
-import { cfgDisabledProviders } from "./model-settings";
+import { cfgDisabledProviders, cfgModelExclusionFilter } from "./model-settings";
 import {
 	cfgCompactionModelThresholds,
 	cfgCompactionModelThresholdsEnabled,
@@ -512,6 +512,13 @@ export class ModelRegistry {
 		this.#loadModels();
 	}
 
+	/** Bind session policy settings, rebuilding metadata offline if the source changes. */
+	async setSettings(settingsInstance: Settings): Promise<void> {
+		if (this.#settings === settingsInstance) return;
+		this.#settings = settingsInstance;
+		await this.reapplyModelPolicies();
+	}
+
 	/**
 	 * Reload models from disk (built-in + custom config).
 	 */
@@ -769,10 +776,10 @@ export class ModelRegistry {
 						discoveryConfig.discovery.timeoutMs,
 					);
 		if (runtimeMetadata === undefined) {
-			return this.find(model.provider, model.id) ?? model;
+			return this.getModelMetadata(model) ?? model;
 		}
 		const { contextWindow, maxTokens, input } = runtimeMetadata;
-		const current = this.find(model.provider, model.id) ?? model;
+		const current = this.getModelMetadata(model) ?? model;
 		const override = this.#resolveLiveModelOverride(current);
 		const customModel = this.#resolveLiveCustomModelOverlay(current);
 		const patch: ModelPatch = {};
@@ -2905,17 +2912,24 @@ export class ModelRegistry {
 	 */
 	getAll(kind: ModelKind | "all" = "chat"): Model<Api>[] {
 		const models = this.#ensureFullSnapshot();
-		if (kind === "all") return models;
+		if (kind === "all") return this.#filterExcludedModels(models);
 		let snapshots = this.#fullKindSnapshots.get(models);
 		if (!snapshots) {
 			snapshots = {};
 			this.#fullKindSnapshots.set(models, snapshots);
 		}
 		const cached = snapshots[kind];
-		if (cached) return cached;
+		if (cached) return this.#filterExcludedModels(cached);
 		const filtered = models.filter(model => modelKind(model) === kind);
 		snapshots[kind] = filtered;
-		return filtered;
+		return this.#filterExcludedModels(filtered);
+	}
+
+	/** Filter only catalog reads; discovery inputs and provider metadata stay intact. */
+	#filterExcludedModels(models: Model<Api>[]): Model<Api>[] {
+		if (!this.#settings && !isSettingsInitialized()) return models;
+		const include = cfgModelExclusionFilter.get(this.#settings ?? settings);
+		return include ? models.filter(include) : models;
 	}
 
 	/**
@@ -2957,11 +2971,13 @@ export class ModelRegistry {
 		const requested = new Set([...providers].map(provider => provider.trim().toLowerCase()).filter(Boolean));
 		const isProviderAvailable = this.#createProviderAvailabilityCheck();
 		if (this.#hasFullSnapshot) {
-			return this.#models.filter(
-				model =>
-					requested.has(model.provider.toLowerCase()) &&
-					isProviderAvailable(model.provider) &&
-					(kind === "all" || modelKind(model) === kind),
+			return this.#filterExcludedModels(
+				this.#models.filter(
+					model =>
+						requested.has(model.provider.toLowerCase()) &&
+						isProviderAvailable(model.provider) &&
+						(kind === "all" || modelKind(model) === kind),
+				),
 			);
 		}
 		const availableProviders = new Set(
@@ -2970,7 +2986,7 @@ export class ModelRegistry {
 			),
 		);
 		const models = this.#composeStaticModels(availableProviders);
-		return kind === "all" ? models : models.filter(model => modelKind(model) === kind);
+		return this.#filterExcludedModels(kind === "all" ? models : models.filter(model => modelKind(model) === kind));
 	}
 
 	/**
@@ -3097,14 +3113,24 @@ export class ModelRegistry {
 	}
 
 	/**
-	 * Find a model by provider and ID. A provider disabled in settings has no
+	 * Find a model by provider and ID, respecting model exclusions.
+	 * A provider disabled in settings has no
 	 * models to find: every caller that falls back to a literal lookup when
 	 * availability-filtered resolution misses (retry fallback candidates,
 	 * advisors, restored and CLI models) would otherwise reach it anyway.
 	 */
 	find(provider: string, modelId: string): Model<Api> | undefined {
 		if (this.#isProviderDisabled(provider)) return undefined;
-		return resolveProviderModelReference(provider, modelId, this.#modelsForProviderLookup(provider));
+		// Resolve against the stable snapshot so reference indexes stay cached.
+		const model = this.getModelMetadata({ provider, id: modelId });
+		if (!model || (!this.#settings && !isSettingsInitialized())) return model;
+		const include = cfgModelExclusionFilter.get(this.#settings ?? settings);
+		return include && !include(model) ? undefined : model;
+	}
+
+	/** Look up metadata for a selected model, independent of catalog exclusions. */
+	getModelMetadata(model: Pick<Model<Api>, "provider" | "id">): Model<Api> | undefined {
+		return resolveProviderModelReference(model.provider, model.id, this.#modelsForProviderLookup(model.provider));
 	}
 
 	/** Whether settings disable `provider` (`disabledProviders`). */
@@ -3113,15 +3139,15 @@ export class ModelRegistry {
 	}
 
 	/**
-	 * One provider's full catalog (every kind, credentials ignored) without
+	 * One provider's catalog (every kind, credentials ignored, exclusions applied) without
 	 * materializing the whole bundled catalog. Startup validation of
 	 * provider-qualified selectors uses this: `getAll()` composes ~5k models
 	 * through the compat classifier, which costs ~80ms on the first paint path.
 	 */
 	getProviderModels(provider: string): Model<Api>[] {
 		const normalizedProvider = provider.trim().toLowerCase();
-		return this.#modelsForProviderLookup(provider).filter(
-			model => model.provider.toLowerCase() === normalizedProvider,
+		return this.#filterExcludedModels(
+			this.#modelsForProviderLookup(provider).filter(model => model.provider.toLowerCase() === normalizedProvider),
 		);
 	}
 
@@ -3242,7 +3268,10 @@ export class ModelRegistry {
 		if (this.#isKeylessProvider(provider)) {
 			return { apiKey: kNoAuth };
 		}
-		const accountAccess = options?.modelId ? this.find(provider, options.modelId)?.accountAccess : undefined;
+		// Selection exclusions do not remove an active model's account eligibility.
+		const accountAccess = options?.modelId
+			? this.getModelMetadata({ provider, id: options.modelId })?.accountAccess
+			: undefined;
 		return this.authStorage.keys.getWithCredential(provider, sessionId, {
 			baseUrl: options?.baseUrl,
 			modelId: options?.modelId,
@@ -3616,24 +3645,26 @@ export class ModelRegistry {
 		}
 	}
 
+	// Cooldown identity uses the full catalog, including models excluded during an active request.
+	#normalizeSuppressedSelector(selector: string): string {
+		return normalizeSuppressedSelector(
+			selector,
+			(provider, id) => this.getModelMetadata({ provider, id })?.id.toLowerCase() === id.toLowerCase(),
+		);
+	}
+
 	/**
 	 * Suppress a specific model selector (e.g., "provider/id") until a specific timestamp.
 	 */
 	suppressSelector(selector: string, untilMs: number): void {
-		this.#suppressedSelectors.set(
-			normalizeSuppressedSelector(selector, (provider, id) => this.find(provider, id) !== undefined),
-			untilMs,
-		);
+		this.#suppressedSelectors.set(this.#normalizeSuppressedSelector(selector), untilMs);
 	}
 
 	/**
 	 * Check if a model selector is currently suppressed due to rate limits.
 	 */
 	isSelectorSuppressed(selector: string): boolean {
-		const normalizedSelector = normalizeSuppressedSelector(
-			selector,
-			(provider, id) => this.find(provider, id) !== undefined,
-		);
+		const normalizedSelector = this.#normalizeSuppressedSelector(selector);
 		const suppressedUntil = this.#suppressedSelectors.get(normalizedSelector);
 		if (!suppressedUntil) return false;
 		if (suppressedUntil <= Date.now()) {
@@ -3647,9 +3678,7 @@ export class ModelRegistry {
 	 * Clear the cooldown suppression for one selector after an explicit user selection.
 	 */
 	clearSuppressedSelector(selector: string): void {
-		this.#suppressedSelectors.delete(
-			normalizeSuppressedSelector(selector, (provider, id) => this.find(provider, id) !== undefined),
-		);
+		this.#suppressedSelectors.delete(this.#normalizeSuppressedSelector(selector));
 	}
 
 	/**

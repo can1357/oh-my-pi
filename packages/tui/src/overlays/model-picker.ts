@@ -62,6 +62,8 @@ export interface ModelPickerCallbacks {
 }
 
 export interface ModelPickerOptions {
+	/** A configured scope stays active even if no models currently match it. */
+	scopedModelsConfigured?: boolean;
 	/** Session token count; models with smaller context windows are grayed and compact-first on pick. */
 	currentContextTokens?: number;
 	/** `provider/id` of the session's active model; highlighted and preselected. */
@@ -116,6 +118,7 @@ export class ModelPickerComponent implements Component {
 	#settings: ModelBrowserSource;
 	#registry: ModelPickerRegistry;
 	#scopedModels: ReadonlyArray<ScopedModelItem>;
+	readonly #scopedModelsConfigured: boolean;
 	#browser: ModelBrowser;
 	#configError: string | undefined;
 	#currentSelector: string | undefined;
@@ -151,6 +154,7 @@ export class ModelPickerComponent implements Component {
 		this.#settings = settings;
 		this.#registry = registry;
 		this.#scopedModels = scopedModels;
+		this.#scopedModelsConfigured = options.scopedModelsConfigured ?? scopedModels.length > 0;
 		this.#currentSelector = options.currentSelector;
 		this.#currentQuickRoleSelector = options.currentQuickRole ? `@${options.currentQuickRole}` : undefined;
 		this.#taskSelector = options.taskSelector;
@@ -197,7 +201,7 @@ export class ModelPickerComponent implements Component {
 		// Re-read only if the catalog moves (startup discovery landing, a
 		// models.yml edit): rebuilding a current catalog on every open blocks
 		// the first paint for seconds. A --models scope is registry-independent.
-		if (this.#scopedModels.length === 0) {
+		if (!this.#scopedModelsConfigured) {
 			this.#registry
 				.refreshIfStale()
 				.then(changed => {
@@ -218,6 +222,7 @@ export class ModelPickerComponent implements Component {
 			this.#settings,
 			this.#registry,
 			this.#scopedModels.map(s => s.model),
+			this.#scopedModelsConfigured,
 		);
 		this.#configError = scope.error;
 		this.#modelItems = scope.items;
