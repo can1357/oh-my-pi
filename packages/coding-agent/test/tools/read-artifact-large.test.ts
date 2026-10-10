@@ -143,7 +143,7 @@ describe("read tool large artifact handling", () => {
 
 		expect(output).toContain("leading-context");
 		expect(output).toContain("Line 2 is 68.4KB");
-		expect(output).toContain("50.0KB read budget");
+		expect(output).toContain("32.0KB read budget");
 		expect(output).toContain("artifact://0:raw:2-2");
 		const truncation = result.details?.meta?.truncation;
 		expect(truncation?.totalBytes).toBeGreaterThan(70_000);
@@ -152,16 +152,69 @@ describe("read tool large artifact handling", () => {
 		expect(formatTruncationMetaNotice(truncation)).not.toContain("Use :2 to continue");
 	});
 
-	it("still returns the oversized selected line when a wider range raises the byte budget", async () => {
+	it("cuts a wide artifact range at the per-call page budget instead of raising it past it", async () => {
 		await Bun.write(path.join(artifactDir, "0.mcp.log"), oversizedSelectedLineArtifact());
 
 		const result = await tool.execute("call-wide-oversized-selected", { path: "artifact://0:2-142" });
 		const output = getTextOutput(result);
 
-		expect(output).toContain("oversized-");
-		expect(output).toContain("trailing-two");
-		expect(output).not.toContain("could not fit after preceding context");
-		expect(result.details?.meta?.truncation).toBeUndefined();
+		// The page budget bounds the window even when the requested range would
+		// scale the byte budget above it, so the oversized line stays behind the
+		// raw-range hint rather than being widened back into the page.
+		expect(output).toContain("leading-context");
+		expect(output).toContain("32.0KB read budget");
+		expect(output).toContain("artifact://0:raw:2-2");
+		expect(output).not.toContain("trailing-two");
+		expect(result.details?.meta?.truncation).toBeDefined();
+	});
+
+	it("bounds one artifact range at the per-call page budget and names the next line", async () => {
+		// 300 lines of ~265 B ≈ 79 KB; the 32 KB page budget cuts at a line
+		// boundary instead of the line-scaled ~150 KB the range would otherwise get.
+		const result = await tool.execute("call-page-budget-range", { path: "artifact://0:1-300" });
+		const output = getTextOutput(result);
+		const truncation = result.details?.meta?.truncation;
+
+		expect(output).toContain("line-001");
+		expect(output).toContain("line-123");
+		expect(output).not.toContain("line-124");
+		expect(output).not.toContain("line-300");
+		expect(truncation).toBeDefined();
+		if (!truncation) throw new Error("expected truncation metadata");
+		expect(truncation.truncatedBy).toBe("bytes");
+		expect(truncation.shownRange).toEqual({ start: 1, end: 123 });
+		expect(truncation.nextOffset).toBe(124);
+		expect(truncation.outputBytes).toBeLessThanOrEqual(32 * 1024);
+		expect(formatTruncationMetaNotice(truncation)).toContain("Use :124 to continue");
+	});
+
+	it("bounds a multi-range artifact read at one per-call page budget", async () => {
+		const result = await tool.execute("call-page-budget-multi", { path: "artifact://0:1-100,200-300" });
+		const output = getTextOutput(result);
+
+		// The first range consumes most of the 32 KB budget; the second is cut at
+		// a line boundary and the notice names where to continue on the artifact.
+		expect(output).toContain("line-001");
+		expect(output).toContain("line-100");
+		expect(output).toContain("line-200");
+		expect(output).toContain("line-222");
+		expect(output).not.toContain("line-223");
+		expect(output).not.toContain("line-300");
+		expect(output).toContain("Read page budget (32.0KB) reached after lines 200-222");
+		expect(output).toContain("use artifact://0:223 to continue");
+	});
+
+	it("bounds a raw multi-range artifact read at the same per-call page budget", async () => {
+		const result = await tool.execute("call-page-budget-raw-multi", { path: "artifact://0:raw:1-100,200-300" });
+		const output = getTextOutput(result);
+
+		expect(output).toContain("line-001");
+		expect(output).toContain("line-100");
+		expect(output).toContain("line-200");
+		expect(output).toContain("line-222");
+		expect(output).not.toContain("line-223");
+		expect(output).toContain("Read page budget (32.0KB) reached after lines 200-222");
+		expect(output).toContain("use artifact://0:223 to continue");
 	});
 
 	it("keeps raw oversized-line reads context-free and byte-capped", async () => {

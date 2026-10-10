@@ -171,6 +171,7 @@ import { toolResult } from "./tool-result";
 import {
 	cfgFetchEnabled,
 	cfgReadDefaultLimit,
+	cfgReadPageMaxBytes,
 	cfgReadRenderMarkdown,
 	cfgReadSummarizeEnabled,
 	cfgReadSummarizeProse,
@@ -305,6 +306,54 @@ function formatOmittedRequestedLineNotice(
 	return `[Line ${line.index + 1} is ${formatBytes(
 		line.byteLength,
 	)} and could not fit after preceding context in the ${formatBytes(maxBytes)} read budget. Use ${rawTarget} to read that line without context (byte-capped if it exceeds the budget), or widen the requested range to increase the budget.]`;
+}
+
+/**
+ * Per-call inline byte budget for paged artifact reads (`read.pageMaxBytes`, in
+ * KiB). The spill wrapper exempts paged sources from artifact spilling, so this
+ * budget is the only clamp on how much of an artifact one `read` call can
+ * re-inline — a 300-line raw range otherwise returns ~150 KiB, and disjoint
+ * ranges accumulate with no total check at all. `undefined` disables the bound.
+ */
+function resolveReadPageByteBudget(settings: ToolSession["settings"]): number | undefined {
+	const kib = Math.max(0, cfgReadPageMaxBytes.get(settings));
+	return kib > 0 ? kib * 1024 : undefined;
+}
+
+/**
+ * Leading lines of `lines` whose "\n"-joined UTF-8 bytes fit `maxBytes`; the cut
+ * lands on a line boundary by construction. Returns `lines` itself when the
+ * whole selection fits, so the unbudgeted path keeps its single allocation.
+ */
+function fitLinesToByteBudget(lines: string[], maxBytes: number): string[] {
+	let bytes = 0;
+	for (let index = 0; index < lines.length; index++) {
+		const lineBytes = Buffer.byteLength(lines[index] ?? "", "utf-8") + (index > 0 ? 1 : 0);
+		if (bytes + lineBytes > maxBytes) return lines.slice(0, index);
+		bytes += lineBytes;
+	}
+	return lines;
+}
+
+/**
+ * Continuation notice for a multi-range read the per-call page budget cut short.
+ * `cut` separates a range truncated mid-content (continue at its next line)
+ * from one the exhausted budget never reached (continue at the next range).
+ */
+function formatReadPageBudgetNotice(
+	budgetBytes: number,
+	selectorBase: string,
+	visibleSpans: Array<{ startLine: number; endLine: number }>,
+	cut: boolean,
+	nextRange: LineRange | undefined,
+): string {
+	const budget = formatBytes(budgetBytes);
+	if (visibleSpans.length === 0) {
+		return `[Read page budget (${budget}) reached before any requested line fit; read a smaller range or raise read.pageMaxBytes]`;
+	}
+	const last = visibleSpans[visibleSpans.length - 1];
+	const nextStart = cut || nextRange === undefined ? last.endLine + 1 : nextRange.startLine;
+	return `[Read page budget (${budget}) reached after lines ${last.startLine}-${last.endLine}; use ${selectorBase}:${nextStart} to continue]`;
 }
 
 /**
@@ -1465,6 +1514,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		suffixResolution: { from: string; to: string } | undefined,
 		signal: AbortSignal | undefined,
 		allowBridge = true,
+		page?: { maxBytes: number; selectorBase: string },
 	): Promise<{
 		outputText: string;
 		columnTruncated: number;
@@ -1510,11 +1560,22 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		const fullLines = rawSelector ? undefined : buffered?.addressableLines;
 		let columnTruncated = 0;
 		let displayContent: { text: string; startLine: number; lineNumbers?: Array<number | null> } | undefined;
+		// What is left of the per-call page budget; `undefined` for reads whose
+		// output still spills downstream (every non-paged source).
+		let remainingPageBytes = page?.maxBytes;
 
-		for (const range of ranges) {
+		for (let rangeIndex = 0; rangeIndex < ranges.length; rangeIndex++) {
+			const range = ranges[rangeIndex];
 			const rangeStart = range.startLine - 1; // 0-indexed
 			const requestedLength = range.endLine !== undefined ? range.endLine - range.startLine + 1 : this.#defaultLimit;
 			const maxLines = Math.min(requestedLength, DEFAULT_MAX_LINES);
+
+			// Budget spent: no later range can be shown, so stop and name where to
+			// continue instead of silently dropping the remaining ranges.
+			if (page && remainingPageBytes !== undefined && remainingPageBytes <= 0) {
+				notices.push(formatReadPageBudgetNotice(page.maxBytes, page.selectorBase, visibleSpans, false, range));
+				break;
+			}
 
 			// The file is already in memory for everything within the snapshot byte
 			// cap, so slice ranges out of it instead of re-streaming per range. Raw
@@ -1522,10 +1583,21 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			// terminal newline sentinel) but still slices the same buffer.
 			let collectedLines: string[];
 			let totalFileLines: number;
-			const maxBytesForRead = Math.max(DEFAULT_MAX_BYTES, maxLines * 512);
+			let rangeCutByPage = false;
+			// A paged artifact read bounds the total inline text one call returns, so
+			// each range collects the smaller of its line-scaled budget and what is
+			// left of the page budget — the buffered slice path had no byte bound.
+			const lineScaledBytes = Math.max(DEFAULT_MAX_BYTES, maxLines * 512);
+			const maxBytesForRead =
+				remainingPageBytes === undefined ? lineScaledBytes : Math.min(lineScaledBytes, remainingPageBytes);
 			if (fullLines) {
 				totalFileLines = fullLines.length;
 				collectedLines = fullLines.slice(rangeStart, rangeStart + maxLines);
+				if (remainingPageBytes !== undefined) {
+					const fitted = fitLinesToByteBudget(collectedLines, maxBytesForRead);
+					rangeCutByPage = fitted.length < collectedLines.length;
+					collectedLines = fitted;
+				}
 			} else {
 				const window = buffered
 					? collectLineWindowFromBuffer(buffered, rangeStart, maxLines, maxBytesForRead, maxLines, rawSelector)
@@ -1535,6 +1607,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 						});
 				totalFileLines = window.totalFileLines;
 				collectedLines = window.lines;
+				rangeCutByPage = window.stoppedByByteLimit;
 			}
 
 			if (rangeStart >= totalFileLines) {
@@ -1567,7 +1640,37 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 				if (!fullLines || rawSelector) {
 					const blockText = displayLines.join("\n");
 					blocks.push(formatTextWithMode(blockText, range.startLine, shouldAddHashLines, shouldAddLineNumbers));
+					if (remainingPageBytes !== undefined) remainingPageBytes -= Buffer.byteLength(blockText, "utf-8");
+				} else if (remainingPageBytes !== undefined) {
+					// Buffered non-raw ranges render later from `visibleSpans`; charge
+					// the budget the same joined bytes so every path accounts alike.
+					let blockBytes = -1;
+					for (const line of displayLines) blockBytes += 1 + Buffer.byteLength(line, "utf-8");
+					remainingPageBytes -= blockBytes;
 				}
+			}
+
+			// The budget could not deliver this range whole: the page ends here and
+			// the notice names the cut point on the artifact URL.
+			if (page && remainingPageBytes !== undefined && rangeCutByPage) {
+				notices.push(
+					formatReadPageBudgetNotice(page.maxBytes, page.selectorBase, visibleSpans, true, ranges[rangeIndex + 1]),
+				);
+				break;
+			}
+			// The range fit exactly, leaving nothing for the next one: continue from
+			// that range's own start line.
+			if (page && remainingPageBytes !== undefined && remainingPageBytes <= 0 && rangeIndex + 1 < ranges.length) {
+				notices.push(
+					formatReadPageBudgetNotice(
+						page.maxBytes,
+						page.selectorBase,
+						visibleSpans,
+						false,
+						ranges[rangeIndex + 1],
+					),
+				);
+				break;
 			}
 		}
 
@@ -1771,6 +1874,11 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		const displayMode = resolveFileDisplayMode(this.session, { immutable });
 		// In-body continuation hints name the URL for located reads, so paging stays on the URL.
 		const selectorBase = located?.url ?? "";
+		// A paged artifact read has no downstream spill clamp, so the total inline
+		// text one call can return across its ranges is bounded here. The window
+		// collectors stop on a line boundary and their continuation notices name
+		// the next range, so the cut needs no new rendering path.
+		const pageMaxBytes = located?.spec.artifactStore ? resolveReadPageByteBudget(this.session.settings) : undefined;
 
 		// One suffix-glob memo per read call — archive, sqlite, and plain-path
 		// resolution share misses instead of re-globbing the workspace.
@@ -2212,6 +2320,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 						suffixResolution,
 						undefined, // plain-file read: deterministic and fast, never abort mid-read
 						!located, // located URLs read their backing file directly, as their handlers do
+						pageMaxBytes !== undefined ? { maxBytes: pageMaxBytes, selectorBase } : undefined,
 					);
 					if (multiResult.bridgeResult) return multiResult.bridgeResult;
 					content = [{ type: "text", text: multiResult.outputText }];
@@ -2270,8 +2379,13 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 					const maxLinesToCollect = Math.min(effectiveLimit + leadingContext + trailingContext, DEFAULT_MAX_LINES);
 					const selectedLineLimit = effectiveLimit + leadingContext + trailingContext;
 					// Scale byte budget with line limit so the configured line count actually fits.
-					// Assume ~512 bytes/line average; never go below the shared default.
-					const maxBytesForRead = Math.max(DEFAULT_MAX_BYTES, maxLinesToCollect * 512);
+					// Assume ~512 bytes/line average; never go below the shared default. A paged
+					// artifact read instead caps the window at the per-call page budget — its
+					// collector stops on a complete-line boundary, so the byte-limit truncation
+					// and continuation notices below already describe the cut.
+					const lineScaledBytes = Math.max(DEFAULT_MAX_BYTES, maxLinesToCollect * 512);
+					const maxBytesForRead =
+						pageMaxBytes === undefined ? lineScaledBytes : Math.min(lineScaledBytes, pageMaxBytes);
 
 					const lineWindow = buffered
 						? collectLineWindowFromBuffer(

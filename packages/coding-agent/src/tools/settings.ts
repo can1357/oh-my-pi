@@ -176,6 +176,27 @@ export const cfgReadDefaultLimit = register({
 	},
 });
 
+export const cfgReadPageMaxBytes = register({
+	id: "read.pageMaxBytes",
+	type: "number",
+	default: 32,
+	ui: {
+		tab: "files",
+		group: "Reading",
+		label: "Read Page Max Bytes (KB)",
+		description:
+			"Maximum inline bytes one read call may return across all of its ranges. An `artifact://` recovery page past it is cut on a line boundary and names the next range to read on the same artifact; plain files still spill to an artifact past the output threshold. 0 = unlimited.",
+		options: [
+			{ value: "8", label: "8 KB", description: "~30 lines of source" },
+			{ value: "16", label: "16 KB" },
+			{ value: "32", label: "32 KB", description: "Default" },
+			{ value: "64", label: "64 KB" },
+			{ value: "128", label: "128 KB" },
+			{ value: "256", label: "256 KB" },
+		],
+	},
+});
+
 export const cfgReadRenderMarkdown = register({
 	id: "read.renderMarkdown",
 	type: "boolean",
