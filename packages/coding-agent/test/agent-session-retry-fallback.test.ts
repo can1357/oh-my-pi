@@ -1911,150 +1911,155 @@ describe("AgentSession retry fallback", () => {
 		});
 	});
 
+	async function expectAdvisorFallbackRecovery(
+		revertPolicy: "cooldown-expiry" | "when-healthy" | "never",
+		restores: boolean,
+	): Promise<void> {
+		const mainModel = getBundledModel("openai", "gpt-4o-mini");
+		const advisorPrimary = getBundledModel("anthropic", "claude-sonnet-4-5");
+		const unrelatedFallback = getBundledModel("openai", "gpt-4o");
+		const advisorFallback = getBundledModel("google", "gemini-2.5-flash");
+		if (!mainModel || !advisorPrimary || !unrelatedFallback || !advisorFallback) {
+			throw new Error("Expected bundled advisor fallback models to exist");
+		}
+
+		const mainMock = createMockModel({
+			responses: [{ content: ["Primary complete"] }, { content: ["Primary complete again"] }],
+		});
+		const advisorMock = createMockModel();
+		let advisorPrimaryAttempts = 0;
+		const requestedAdvisorModels: string[] = [];
+		const fallbackAppliedEvents: Array<Extract<AgentSessionEvent, { type: "retry_fallback_applied" }>> = [];
+		const fallbackSucceededEvents: Array<Extract<AgentSessionEvent, { type: "retry_fallback_succeeded" }>> = [];
+		const fallbackSucceeded = Promise.withResolvers<void>();
+		const advisorFailures: string[] = [];
+		const advisorPrimarySelector = `${advisorPrimary.provider}/${advisorPrimary.id}`;
+		const advisorRoleSelector = `${advisorPrimarySelector}:high`;
+		const unrelatedFallbackSelector = `${unrelatedFallback.provider}/${unrelatedFallback.id}`;
+		const advisorFallbackSelector = `${advisorFallback.provider}/${advisorFallback.id}`;
+
+		const agent = new Agent({
+			getApiKey: model => `${model.provider}-test-key`,
+			initialState: {
+				model: mainModel,
+				systemPrompt: ["Test"],
+				tools: [],
+				messages: [],
+			},
+			streamFn: mainMock.stream,
+		});
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.baseDelayMs": 5,
+			"retry.fallbackChains": {
+				commit: [unrelatedFallbackSelector],
+				advisor: [advisorFallbackSelector],
+			},
+			"advisor.syncBacklog": "1",
+			"retry.fallbackRevertPolicy": revertPolicy,
+		});
+		settings.setModelRole("commit", `${advisorPrimarySelector}:medium`);
+		settings.setModelRole("advisor", advisorRoleSelector);
+		vi.spyOn(modelRegistry.authStorage.limits, "markReached").mockResolvedValue({ switched: false });
+
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+			advisorTools: [],
+			advisorConfigs: [{ name: "fallback-test", model: advisorRoleSelector }],
+			advisorStreamFn: (model, context, options) => {
+				const selector = `${model.provider}/${model.id}`;
+				requestedAdvisorModels.push(selector);
+				if (selector === advisorPrimarySelector && advisorPrimaryAttempts++ === 0) {
+					advisorMock.push({
+						throw: "Devin stream error failed_precondition: Your daily usage quota has been exhausted. Your quota will reset after 1s.",
+					});
+				} else if (selector === advisorPrimarySelector) {
+					advisorMock.push({ content: ["Advisor primary restored"] });
+				} else if (selector === unrelatedFallbackSelector) {
+					advisorMock.push({ content: ["Unrelated fallback answered"] });
+				} else if (selector === advisorFallbackSelector) {
+					advisorMock.push({ content: ["Advisor recovered"] });
+				} else {
+					throw new Error(`Unexpected advisor model requested: ${selector}`);
+				}
+				return advisorMock.stream(model, context, options);
+			},
+		});
+		session.subscribe(event => {
+			if (event.type === "retry_fallback_applied") fallbackAppliedEvents.push(event);
+			if (event.type === "retry_fallback_succeeded") {
+				fallbackSucceededEvents.push(event);
+				fallbackSucceeded.resolve();
+			}
+			if (event.type === "notice" && event.source === "advisor" && event.message.includes("unavailable")) {
+				advisorFailures.push(event.message);
+			}
+		});
+
+		session.setAdvisorEnabled(true);
+		await session.prompt("Complete one primary turn");
+		await session.waitForIdle();
+		// The catch-up gate releases immediately while the advisor is mid-failure
+		// (a failing advisor must never park the primary), so waitForIdle can
+		// return before the fallback retry lands — await the success event.
+		await fallbackSucceeded.promise;
+
+		expect(requestedAdvisorModels).toEqual([advisorPrimarySelector, advisorFallbackSelector]);
+		expect(session.getAdvisorAgent()?.state.model).toMatchObject({
+			provider: advisorFallback.provider,
+			id: advisorFallback.id,
+		});
+		expect(fallbackAppliedEvents).toEqual([
+			{
+				type: "retry_fallback_applied",
+				from: advisorRoleSelector,
+				to: advisorFallbackSelector,
+				role: "advisor",
+				reason: expect.stringContaining("daily usage quota has been exhausted"),
+			},
+		]);
+		expect(fallbackSucceededEvents).toEqual([
+			{
+				type: "retry_fallback_succeeded",
+				model: `${advisorFallbackSelector}:high`,
+				role: "advisor",
+			},
+		]);
+		expect(advisorFailures).toEqual([]);
+
+		const getApiKey = vi.spyOn(modelRegistry, "getApiKey");
+		const afterCooldown = Date.now() + 2_000;
+		vi.spyOn(Date, "now").mockReturnValue(afterCooldown);
+		await session.prompt("Complete another primary turn after the advisor cooldown");
+		await session.waitForIdle();
+		if (restores) {
+			expect(getApiKey).toHaveBeenCalledWith(
+				expect.objectContaining({ provider: advisorPrimary.provider, id: advisorPrimary.id }),
+				expect.any(String),
+				{ signal: expect.any(AbortSignal) },
+			);
+		}
+
+		// Advisor fallbacks are error detours, so both restoring policies return on cooldown alone.
+		const expected = restores ? advisorPrimary : advisorFallback;
+		expect(requestedAdvisorModels).toEqual([
+			advisorPrimarySelector,
+			advisorFallbackSelector,
+			`${expected.provider}/${expected.id}`,
+		]);
+		expect(session.getAdvisorAgent()?.state.model).toMatchObject({ provider: expected.provider, id: expected.id });
+	}
+
 	it.each([
 		["cooldown-expiry", true],
 		["when-healthy", true],
 		["never", false],
 	] as const)(
 		"keeps advisor fallback recovery on its role chain when another role shares its model (%s)",
-		async (revertPolicy, restores) => {
-			const mainModel = getBundledModel("openai", "gpt-4o-mini");
-			const advisorPrimary = getBundledModel("anthropic", "claude-sonnet-4-5");
-			const unrelatedFallback = getBundledModel("openai", "gpt-4o");
-			const advisorFallback = getBundledModel("google", "gemini-2.5-flash");
-			if (!mainModel || !advisorPrimary || !unrelatedFallback || !advisorFallback) {
-				throw new Error("Expected bundled advisor fallback models to exist");
-			}
-
-			const mainMock = createMockModel({
-				responses: [{ content: ["Primary complete"] }, { content: ["Primary complete again"] }],
-			});
-			const advisorMock = createMockModel();
-			let advisorPrimaryAttempts = 0;
-			const requestedAdvisorModels: string[] = [];
-			const fallbackAppliedEvents: Array<Extract<AgentSessionEvent, { type: "retry_fallback_applied" }>> = [];
-			const fallbackSucceededEvents: Array<Extract<AgentSessionEvent, { type: "retry_fallback_succeeded" }>> = [];
-			const fallbackSucceeded = Promise.withResolvers<void>();
-			const advisorFailures: string[] = [];
-			const advisorPrimarySelector = `${advisorPrimary.provider}/${advisorPrimary.id}`;
-			const advisorRoleSelector = `${advisorPrimarySelector}:high`;
-			const unrelatedFallbackSelector = `${unrelatedFallback.provider}/${unrelatedFallback.id}`;
-			const advisorFallbackSelector = `${advisorFallback.provider}/${advisorFallback.id}`;
-
-			const agent = new Agent({
-				getApiKey: model => `${model.provider}-test-key`,
-				initialState: {
-					model: mainModel,
-					systemPrompt: ["Test"],
-					tools: [],
-					messages: [],
-				},
-				streamFn: mainMock.stream,
-			});
-			const settings = Settings.isolated({
-				"compaction.enabled": false,
-				"retry.baseDelayMs": 5,
-				"retry.fallbackChains": {
-					commit: [unrelatedFallbackSelector],
-					advisor: [advisorFallbackSelector],
-				},
-				"advisor.syncBacklog": "1",
-				"retry.fallbackRevertPolicy": revertPolicy,
-			});
-			settings.setModelRole("commit", `${advisorPrimarySelector}:medium`);
-			settings.setModelRole("advisor", advisorRoleSelector);
-			vi.spyOn(modelRegistry.authStorage.limits, "markReached").mockResolvedValue({ switched: false });
-
-			session = new AgentSession({
-				agent,
-				sessionManager: SessionManager.inMemory(),
-				settings,
-				modelRegistry,
-				advisorTools: [],
-				advisorConfigs: [{ name: "fallback-test", model: advisorRoleSelector }],
-				advisorStreamFn: (model, context, options) => {
-					const selector = `${model.provider}/${model.id}`;
-					requestedAdvisorModels.push(selector);
-					if (selector === advisorPrimarySelector && advisorPrimaryAttempts++ === 0) {
-						advisorMock.push({
-							throw: "Devin stream error failed_precondition: Your daily usage quota has been exhausted. Your quota will reset after 1s.",
-						});
-					} else if (selector === advisorPrimarySelector) {
-						advisorMock.push({ content: ["Advisor primary restored"] });
-					} else if (selector === unrelatedFallbackSelector) {
-						advisorMock.push({ content: ["Unrelated fallback answered"] });
-					} else if (selector === advisorFallbackSelector) {
-						advisorMock.push({ content: ["Advisor recovered"] });
-					} else {
-						throw new Error(`Unexpected advisor model requested: ${selector}`);
-					}
-					return advisorMock.stream(model, context, options);
-				},
-			});
-			session.subscribe(event => {
-				if (event.type === "retry_fallback_applied") fallbackAppliedEvents.push(event);
-				if (event.type === "retry_fallback_succeeded") {
-					fallbackSucceededEvents.push(event);
-					fallbackSucceeded.resolve();
-				}
-				if (event.type === "notice" && event.source === "advisor" && event.message.includes("unavailable")) {
-					advisorFailures.push(event.message);
-				}
-			});
-
-			session.setAdvisorEnabled(true);
-			await session.prompt("Complete one primary turn");
-			await session.waitForIdle();
-			// The catch-up gate releases immediately while the advisor is mid-failure
-			// (a failing advisor must never park the primary), so waitForIdle can
-			// return before the fallback retry lands — await the success event.
-			await fallbackSucceeded.promise;
-
-			expect(requestedAdvisorModels).toEqual([advisorPrimarySelector, advisorFallbackSelector]);
-			expect(session.getAdvisorAgent()?.state.model).toMatchObject({
-				provider: advisorFallback.provider,
-				id: advisorFallback.id,
-			});
-			expect(fallbackAppliedEvents).toEqual([
-				{
-					type: "retry_fallback_applied",
-					from: advisorRoleSelector,
-					to: advisorFallbackSelector,
-					role: "advisor",
-					reason: expect.stringContaining("daily usage quota has been exhausted"),
-				},
-			]);
-			expect(fallbackSucceededEvents).toEqual([
-				{
-					type: "retry_fallback_succeeded",
-					model: `${advisorFallbackSelector}:high`,
-					role: "advisor",
-				},
-			]);
-			expect(advisorFailures).toEqual([]);
-
-			const getApiKey = vi.spyOn(modelRegistry, "getApiKey");
-			const afterCooldown = Date.now() + 2_000;
-			vi.spyOn(Date, "now").mockReturnValue(afterCooldown);
-			await session.prompt("Complete another primary turn after the advisor cooldown");
-			await session.waitForIdle();
-			if (restores) {
-				expect(getApiKey).toHaveBeenCalledWith(
-					expect.objectContaining({ provider: advisorPrimary.provider, id: advisorPrimary.id }),
-					expect.any(String),
-					{ signal: expect.any(AbortSignal) },
-				);
-			}
-
-			// Advisor fallbacks are error detours, so both restoring policies return on cooldown alone.
-			const expected = restores ? advisorPrimary : advisorFallback;
-			expect(requestedAdvisorModels).toEqual([
-				advisorPrimarySelector,
-				advisorFallbackSelector,
-				`${expected.provider}/${expected.id}`,
-			]);
-			expect(session.getAdvisorAgent()?.state.model).toMatchObject({ provider: expected.provider, id: expected.id });
-		},
+		expectAdvisorFallbackRecovery,
 	);
 
 	it.each(["enabled", "remote-disabled", "model-disabled"])(
