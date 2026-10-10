@@ -10,18 +10,24 @@ const repoRoot = path.resolve(packageDir, "..", "..");
 
 interface BundledPackage {
 	readonly dir: string;
+	readonly npmDir: string;
 	readonly identifier: string;
 	readonly rootShim: string | null;
 }
 
 const BUNDLED_PACKAGES: readonly BundledPackage[] = [
-	{ dir: "agent", identifier: "PiAgentCore", rootShim: null },
-	{ dir: "ai", identifier: "PiAi", rootShim: "legacy-pi-ai-shim.ts" },
-	{ dir: "catalog", identifier: "PiCatalog", rootShim: null },
-	{ dir: "coding-agent", identifier: "PiCodingAgent", rootShim: "legacy-pi-coding-agent-shim.ts" },
-	{ dir: "natives", identifier: "PiNatives", rootShim: null },
-	{ dir: "tui", identifier: "PiTui", rootShim: "legacy-pi-tui-shim.ts" },
-	{ dir: "utils", identifier: "PiUtils", rootShim: null },
+	{ dir: "agent", npmDir: "pi-agent-core", identifier: "PiAgentCore", rootShim: null },
+	{ dir: "ai", npmDir: "pi-ai", identifier: "PiAi", rootShim: "legacy-pi-ai-shim.ts" },
+	{ dir: "catalog", npmDir: "pi-catalog", identifier: "PiCatalog", rootShim: null },
+	{
+		dir: "coding-agent",
+		npmDir: "pi-coding-agent",
+		identifier: "PiCodingAgent",
+		rootShim: "legacy-pi-coding-agent-shim.ts",
+	},
+	{ dir: "natives", npmDir: "pi-natives", identifier: "PiNatives", rootShim: null },
+	{ dir: "tui", npmDir: "pi-tui", identifier: "PiTui", rootShim: "legacy-pi-tui-shim.ts" },
+	{ dir: "utils", npmDir: "pi-utils", identifier: "PiUtils", rootShim: null },
 ];
 
 const TYPEBOX_MODULE_KEY = "typebox";
@@ -116,8 +122,12 @@ export async function collectBundledPiEntries(): Promise<BundledPiEntry[]> {
 	}
 
 	for (const pkg of BUNDLED_PACKAGES) {
-		const packageRoot = path.join(repoRoot, "packages", pkg.dir);
-		const manifestPath = path.join(packageRoot, "package.json");
+		let packageRoot = path.join(repoRoot, "packages", pkg.dir);
+		let manifestPath = path.join(packageRoot, "package.json");
+		if (!(await Bun.file(manifestPath).exists())) {
+			packageRoot = path.join(packageDir, "..", pkg.npmDir);
+			manifestPath = path.join(packageRoot, "package.json");
+		}
 		const manifest: unknown = await Bun.file(manifestPath).json();
 		if (!isRecord(manifest) || typeof manifest.name !== "string") {
 			throw new Error(`Bundled Pi package manifest has no name: ${manifestPath}`);
