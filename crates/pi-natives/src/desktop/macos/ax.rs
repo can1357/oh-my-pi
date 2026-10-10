@@ -118,6 +118,14 @@ pub(super) fn key_window_id(pid: libc::pid_t) -> Option<u32> {
 		})
 }
 
+/// `AXFrontmost` as `pid`'s application reports it. `AppKit` answers from the
+/// application's own active state, which an `AppKit`-defined activation event
+/// sets while `WindowServer`'s front process stays the user's app.
+pub(super) fn reports_active(pid: libc::pid_t) -> Option<bool> {
+	let app = probe_application(pid)?;
+	copy_bool(&app, "AXFrontmost")
+}
+
 /// Whether `pid` stopped answering: an accessibility request got no reply
 /// within `timeout` seconds while the process still exists. Other AX errors,
 /// such as missing trust, prove nothing about the application and do not count.
