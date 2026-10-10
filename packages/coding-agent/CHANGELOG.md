@@ -15,6 +15,10 @@
 
 - Fixed table charts failing on a table cell such as `3 constructor` or `2 valueOf calls`
 
+### Fixed
+
+- Sessions past the provider image cap (or Anthropic's inline image byte budget) no longer rewrite the whole prompt cache on every new screenshot: the oldest images are now evicted a quarter of the budget at a time, so the cached prefix only changes once per step ([#15230](https://github.com/can1357/oh-my-pi/issues/15230))
+
 ## [18.8.8] - 2026-10-10
 
 ### Added
