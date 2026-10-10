@@ -5,7 +5,11 @@
 //! - comment, keyword, function, variable, string, number, type, operator,
 //!   punctuation, inserted, deleted
 
-use std::{cell::RefCell, collections::HashMap, sync::OnceLock};
+use std::{
+	cell::RefCell,
+	collections::{HashMap, HashSet},
+	sync::OnceLock,
+};
 
 use napi::{JsString, Result};
 use napi_derive::napi;
@@ -725,7 +729,12 @@ fn supports_language_impl(lang: &str) -> bool {
 #[napi]
 pub fn get_supported_languages() -> Vec<String> {
 	let ss = get_syntax_set();
-	ss.syntaxes().iter().map(|s| s.name.clone()).collect()
+	let mut seen = HashSet::new();
+	ss.syntaxes()
+		.iter()
+		.filter(|syntax| seen.insert(syntax.name.as_str()))
+		.map(|syntax| syntax.name.clone())
+		.collect()
 }
 
 #[cfg(test)]
@@ -742,14 +751,19 @@ mod tests {
 	static SOURCE_SYNTAX_SET: LazyLock<SyntaxSet> = LazyLock::new(builder::build_syntax_set);
 
 	#[test]
-	fn generated_syntax_set_preserves_supported_languages() {
+	fn generated_syntax_set_preserves_unique_supported_languages() {
 		let expected: BTreeSet<String> = SOURCE_SYNTAX_SET
 			.syntaxes()
 			.iter()
 			.map(|syntax| syntax.name.clone())
 			.collect();
-		let actual: BTreeSet<String> = get_supported_languages().into_iter().collect();
-		assert_eq!(actual, expected);
+		let actual = get_supported_languages();
+		let distinct: BTreeSet<String> = actual.iter().cloned().collect();
+		assert_eq!(actual.len(), distinct.len(), "supported language list contains duplicates");
+		assert_eq!(distinct, expected);
+		for language in actual {
+			assert!(supports_language_impl(&language), "listed language {language} is unsupported");
+		}
 	}
 
 	#[test]
@@ -864,6 +878,22 @@ mod tests {
 		assert!(out.contains("<k>-->"));
 		assert!(out.contains("<c> note"));
 	}
+	#[test]
+	fn markdown_recognises_table_headers_after_many_inline_spans() {
+		let colors = test_colors();
+		let spans = ["`a`"; 16].join(" ");
+		let escapes = "\\*".repeat(20);
+		for (case, first_row) in [("inline code spans", &spans), ("escaped asterisks", &escapes)] {
+			let out =
+				highlight_code_impl(&format!("{first_row} | x\n---|---\n"), Some("markdown"), &colors);
+			let first = out.lines().next().unwrap();
+			assert!(
+				first.contains("<p>|"),
+				"{case}: table separator lost punctuation highlighting: {first}"
+			);
+		}
+	}
+
 	/// Regression: with the JavaScript grammar, TS type annotations
 	/// (generic return types, arrow-type params) corrupted parser state, and a
 	/// later template literal left an unterminated string scope that painted

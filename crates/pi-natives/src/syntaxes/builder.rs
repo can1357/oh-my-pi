@@ -7,6 +7,8 @@ const EXTRA_SYNTAXES: &[(&str, &str)] = &[
 	("TypeScript", include_str!("TypeScript.sublime-syntax")),
 	("TypeScriptReact", include_str!("TypeScriptReact.sublime-syntax")),
 	("Astro", include_str!("Astro.sublime-syntax")),
+	// The later entry shadows syntect's backtracking Markdown grammar.
+	("Markdown", include_str!("Markdown.sublime-syntax")),
 ];
 
 /// Builds the serialized artifact's syntax set from newline-aware defaults and

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed stalls when highlighting Markdown tool previews with many inline spans or backslash escapes ([#13838](https://github.com/can1357/oh-my-pi/pull/13838) by [@sjawhar](https://github.com/sjawhar), [#15272](https://github.com/can1357/oh-my-pi/pull/15272) by [@iliaal](https://github.com/iliaal)).
+
 ## [18.8.8] - 2026-10-10
 
 ### Changed
