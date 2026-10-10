@@ -344,7 +344,7 @@ describe("imageGenTool catalog routing", () => {
 		expect(result.details?.provider).toBe("xai");
 	});
 
-	it("preserves an auto background and edit inputs across HTTP fallback and exhausted candidates", async () => {
+	it("omits unsupported auto backgrounds on the wire while preserving params and edit inputs across fallback", async () => {
 		const first = catalogModel("deepinfra", "first-image", "openai-images");
 		const second = catalogModel("image-proxy", "second-image", "openai-images");
 		const models = [first, second];
@@ -375,8 +375,8 @@ describe("imageGenTool catalog routing", () => {
 			"https://image-proxy.example/v1/images/edits",
 		]);
 		for (const body of bodies) {
+			expect(body).not.toHaveProperty("background");
 			expect(body).toMatchObject({
-				background: "auto",
 				input_references: [{ type: "image_url", url: `data:image/png;base64,${PNG_DATA}` }],
 			});
 		}

@@ -107,7 +107,6 @@ describe("auth gateway images", () => {
 					n: 2,
 					response_format: "b64_json",
 					size: "1536x1024",
-					background: "auto",
 				},
 			});
 			const body = (await response.json()) as {
@@ -163,7 +162,7 @@ describe("auth gateway images", () => {
 			expect(upstream?.authorization).toBe("Bearer key-openai");
 			expect(upstream?.contentType).toBeNull();
 			expect(upstream?.prompt).toBe("replace the sky");
-			expect(upstream?.background).toBe("auto");
+			expect(upstream?.background).toBeNull();
 			const upstreamImage = upstream?.image;
 			expect(upstreamImage).toBeInstanceOf(File);
 			if (!(upstreamImage instanceof File)) throw new Error("Expected an upstream image file");

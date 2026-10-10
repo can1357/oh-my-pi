@@ -69,6 +69,26 @@ describe("image background preference", () => {
 		expect(calls).toBe(0);
 	});
 
+	it("omits auto backgrounds for DeepInfra's strict endpoint without mutating the request", async () => {
+		const model = imageModel("deepinfra", "openai-images", "black-forest-labs/FLUX-2-pro");
+		const request = Object.freeze({ prompt: "a sticker", background: "auto" as const });
+		let calls = 0;
+		const fetchStub: FetchImpl = async (input, init) => {
+			calls++;
+			expect(input.toString()).toBe("https://deepinfra.example/v1/images/generations");
+			const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+			if (Object.hasOwn(body, "background")) {
+				return Response.json({ error: { message: "DeepInfra does not accept background" } }, { status: 400 });
+			}
+			expect(body).not.toHaveProperty("background");
+			return imageResponse();
+		};
+		const result = await generateImage(model, request, { apiKey: "test-key", fetch: fetchStub });
+		expect(calls).toBe(1);
+		expect(result.images).toEqual([{ data: IMAGE_DATA, mimeType: "image/webp" }]);
+		expect(request).toEqual({ prompt: "a sticker", background: "auto" });
+	});
+
 	it("Images transport serializes transparent generation backgrounds without changing output format", async () => {
 		const model = imageModel("openai", "openai-images");
 		const fetchStub: FetchImpl = async (input, init) => {
@@ -86,7 +106,7 @@ describe("image background preference", () => {
 		);
 		expect(result.images).toEqual([{ data: IMAGE_DATA, mimeType: "image/webp" }]);
 	});
-	for (const background of ["transparent", "opaque"] as const) {
+	for (const background of ["transparent", "opaque", "auto"] as const) {
 		for (const action of ["generate", "edit"] as const) {
 			it(`sends ${background} backgrounds through Codex ${action} while preserving WebP`, async () => {
 				const model = imageModel("openai-codex", "openai-codex-responses");
@@ -242,12 +262,13 @@ describe("image background preference", () => {
 				const omittedTools = omittedBody?.tools as Array<Record<string, unknown>>;
 				const autoTools = autoBody?.tools as Array<Record<string, unknown>>;
 				expect(omittedTools[0]).not.toHaveProperty("background");
-				expect(autoTools[0]).toMatchObject({ background: "auto", output_format: "webp" });
+				expect(autoTools[0]).not.toHaveProperty("background");
+				expect(autoTools[0]).toMatchObject({ output_format: "webp" });
 			} else {
 				expect(omittedBody).not.toHaveProperty("background");
-				if (provider === "xai") expect(autoBody).toEqual(omittedBody);
-				else expect(autoBody).toEqual({ ...omittedBody, background: "auto" });
+				expect(autoBody).not.toHaveProperty("background");
 			}
+			expect(autoBody).toEqual(omittedBody);
 		});
 	}
 });

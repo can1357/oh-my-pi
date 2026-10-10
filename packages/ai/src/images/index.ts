@@ -32,10 +32,13 @@ export async function generateImage(
 	request: ImageGenerationRequest,
 	options: ImageGenerationOptions,
 ): Promise<ImageGenerationResult> {
-	if (request.background && request.background !== "auto" && !supportsImageBackground(model)) {
-		throw new AIError.ValidationError(
-			`Image model ${model.provider}/${model.id} does not support ${request.background} backgrounds`,
-		);
+	if (request.background && !supportsImageBackground(model)) {
+		if (request.background !== "auto") {
+			throw new AIError.ValidationError(
+				`Image model ${model.provider}/${model.id} does not support ${request.background} backgrounds`,
+			);
+		}
+		request = { ...request, background: undefined };
 	}
 	switch (model.api) {
 		case "openai-images":
