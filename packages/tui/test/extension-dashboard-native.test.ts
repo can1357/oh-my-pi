@@ -1,6 +1,7 @@
 import { beforeAll, describe, expect, test } from "bun:test";
 import { TSP_KINDS, type TspNode, type TspPickerProps } from "@oh-my-pi/pi-wire";
 import { ExtensionDashboard, type ExtensionDashboardRuntime } from "../src/overlays/extensions/extension-dashboard";
+import { MCP_SERVERS_TAB_ID } from "../src/overlays/extensions/state-manager";
 import type { Extension, ExtensionProvider } from "../src/overlays/extensions/types";
 import { initTheme } from "../src/theme";
 import { TspHarness } from "./native/tsp-harness";
@@ -74,6 +75,50 @@ function pickerOf(harness: TspHarness): { node: TspNode; props: TspPickerProps }
 }
 
 describe("ExtensionDashboard native", () => {
+	test("MCP scope spans providers and opens disabled-server actions without toggling", async () => {
+		const fx = fixture();
+		const servers = [extension("mcp", "github", "native"), extension("mcp", "slack", "claude")];
+		servers[0]!.state = "disabled";
+		fx.runtime.loadExtensions = async () => servers;
+		let toggles = 0;
+		fx.runtime.persistMcpToggle = async () => {
+			toggles++;
+		};
+		fx.runtime.mcpActions = {
+			loadState: async ext => ({
+				name: ext.name,
+				connectionStatus: "disabled",
+				transport: "http",
+				source: ext.source.providerName,
+				authentication: "None",
+				tools: 0,
+				prompts: 0,
+				resources: 0,
+				actions: [],
+			}),
+			runAction: async () => "Completed.",
+		};
+		const harness = await open(fx);
+		try {
+			const sheet = pickerOf(harness);
+			const sf = harness.terminal.surface!;
+			harness.event({ ev: "action", sf, id: sheet.node.id, act: "scope", value: MCP_SERVERS_TAB_ID, mods: [] });
+			const scoped = pickerOf(harness);
+			expect(scoped.props.scopes?.find(scope => scope.id === MCP_SERVERS_TAB_ID)?.group).toBeUndefined();
+			expect(scoped.props.items?.map(item => item.label)).toEqual(["github", "slack"]);
+			const github = scoped.props.items!.find(item => item.label === "github")!;
+			expect(github.disabled).toBeUndefined();
+			harness.event({ ev: "activate", sf, id: scoped.node.id, item: github.id });
+			await Promise.resolve();
+			harness.flush(20);
+			expect(harness.find(node => node.k === "picker")).toBeUndefined();
+			expect(JSON.stringify(harness.region("main"))).toContain("MCP Server");
+			expect(toggles).toBe(0);
+		} finally {
+			harness.stop();
+		}
+	});
+
 	test("is a picker sheet whose row activation toggles like Space and whose scopes switch provider", async () => {
 		const fx = fixture();
 		const harness = await open(fx);

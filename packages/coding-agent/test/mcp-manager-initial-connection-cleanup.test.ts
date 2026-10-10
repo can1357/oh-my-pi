@@ -2,8 +2,10 @@ import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import * as configValue from "@oh-my-pi/pi-coding-agent/config/resolve-config-value";
 import * as mcpClient from "@oh-my-pi/pi-coding-agent/mcp/client";
 import { MCPManager } from "@oh-my-pi/pi-coding-agent/mcp/manager";
+import { MCPServerActions } from "@oh-my-pi/pi-coding-agent/mcp/server-actions";
 import type { MCPServerConnection, MCPStdioServerConfig, MCPTransport } from "@oh-my-pi/pi-coding-agent/mcp/types";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 import { TOOL_NAME as DELAYED_TOOL_NAME } from "./fixtures/delayed-tool-mcp";
@@ -16,6 +18,7 @@ const CONFIG: MCPStdioServerConfig = {
 class FakeTransport implements MCPTransport {
 	connected = true;
 	closeCalls = 0;
+	readonly closed = Promise.withResolvers<void>();
 	onClose?: () => void;
 	#closeGate?: Promise<void>;
 
@@ -33,6 +36,7 @@ class FakeTransport implements MCPTransport {
 	async close(): Promise<void> {
 		this.closeCalls += 1;
 		this.connected = false;
+		this.closed.resolve();
 		if (this.#closeGate) await this.#closeGate;
 	}
 }
@@ -211,5 +215,172 @@ describe("MCPManager initial connection ownership", () => {
 		expect(connectSpy).toHaveBeenCalledTimes(2);
 
 		stuckClose.resolve();
+	});
+
+	it("prevents a timed-out reconnect from installing a late connection", async () => {
+		const manager = new MCPManager(process.cwd());
+		const current = fakeConnection("server");
+		const late = fakeConnection("server");
+		const lateConnect = Promise.withResolvers<MCPServerConnection>();
+		const reconnectStarted = Promise.withResolvers<void>();
+		vi.spyOn(mcpClient, "connectToServer")
+			.mockResolvedValueOnce(current.connection)
+			.mockImplementationOnce((_name, _config, options) => {
+				expect(options?.signal?.aborted).toBe(false);
+				reconnectStarted.resolve();
+				return lateConnect.promise;
+			});
+		vi.spyOn(mcpClient, "listTools").mockResolvedValue([]);
+		await manager.connectServers({ server: CONFIG }, {});
+		const refreshMCPTools = vi.fn(async () => {});
+		const actions = new MCPServerActions({ cwd: process.cwd(), manager, refreshMCPTools });
+
+		const reconnect = actions.reconnect({ name: "server", config: { ...CONFIG, timeout: 5 } });
+		await reconnectStarted.promise;
+		await expect(reconnect).rejects.toThrow("Reconnect timed out after 5ms");
+		lateConnect.resolve(late.connection);
+		await manager.waitForPendingConnections();
+
+		expect(late.transport.closeCalls).toBe(1);
+		expect(manager.getConnection("server")).toBeUndefined();
+		expect(manager.getTools()).toEqual([]);
+		expect(refreshMCPTools).not.toHaveBeenCalled();
+	});
+
+	it("prevents an aborted reconnect from installing a late connection", async () => {
+		const manager = new MCPManager(process.cwd());
+		const current = fakeConnection("server");
+		const late = fakeConnection("server");
+		const lateConnect = Promise.withResolvers<MCPServerConnection>();
+		const reconnectStarted = Promise.withResolvers<void>();
+		vi.spyOn(mcpClient, "connectToServer")
+			.mockResolvedValueOnce(current.connection)
+			.mockImplementationOnce((_name, _config, _options) => {
+				reconnectStarted.resolve();
+				return lateConnect.promise;
+			});
+		vi.spyOn(mcpClient, "listTools").mockResolvedValue([]);
+		await manager.connectServers({ server: CONFIG }, {});
+		const refreshMCPTools = vi.fn(async () => {});
+		const actions = new MCPServerActions({ cwd: process.cwd(), manager, refreshMCPTools });
+		const controller = new AbortController();
+
+		const reconnect = actions.reconnect({ name: "server", config: CONFIG }, controller.signal);
+		await reconnectStarted.promise;
+		controller.abort();
+		await expect(reconnect).rejects.toMatchObject({ name: "AbortError" });
+		lateConnect.resolve(late.connection);
+		await manager.waitForPendingConnections();
+
+		expect(late.transport.closeCalls).toBe(1);
+		expect(manager.getConnection("server")).toBeUndefined();
+		expect(manager.getTools()).toEqual([]);
+		expect(refreshMCPTools).not.toHaveBeenCalled();
+	});
+
+	it("cancels post-test manager sync before a late connection can install", async () => {
+		const manager = new MCPManager(process.cwd());
+		const isolated = fakeConnection("isolated");
+		const late = fakeConnection("server");
+		const lateConnect = Promise.withResolvers<MCPServerConnection>();
+		const syncStarted = Promise.withResolvers<void>();
+		vi.spyOn(mcpClient, "connectToServer")
+			.mockResolvedValueOnce(isolated.connection)
+			.mockImplementationOnce(() => {
+				syncStarted.resolve();
+				return lateConnect.promise;
+			});
+		vi.spyOn(mcpClient, "listTools").mockResolvedValue([]);
+		const refreshMCPTools = vi.fn(async () => {});
+		const actions = new MCPServerActions({ cwd: process.cwd(), manager, refreshMCPTools });
+		const controller = new AbortController();
+
+		const testing = actions.test({ name: "server", config: CONFIG }, controller.signal);
+		await syncStarted.promise;
+		controller.abort();
+		await expect(testing).rejects.toMatchObject({ name: "AbortError" });
+		lateConnect.resolve(late.connection);
+		await late.transport.closed.promise;
+
+		expect(late.transport.closeCalls).toBe(1);
+		expect(manager.getConnection("server")).toBeUndefined();
+		expect(manager.getTools()).toEqual([]);
+		expect(refreshMCPTools).not.toHaveBeenCalled();
+	});
+
+	// A command-backed env value keeps auth resolution pending; a cancel in that
+	// window must stop before any transport exists (stdio would spawn the server).
+	const SLOW_ENV_CONFIG: MCPStdioServerConfig = { ...CONFIG, env: { TOKEN: "!print-token" } };
+
+	it("does not open a transport for an initial connect cancelled during auth resolution", async () => {
+		const manager = new MCPManager(process.cwd());
+		const resolving = Promise.withResolvers<void>();
+		const value = Promise.withResolvers<string>();
+		vi.spyOn(configValue, "resolveConfigValue").mockImplementation(() => {
+			resolving.resolve();
+			return value.promise;
+		});
+		const connect = vi.spyOn(mcpClient, "connectToServer");
+		const controller = new AbortController();
+
+		const loading = manager.connectServers({ server: SLOW_ENV_CONFIG }, {}, undefined, undefined, controller.signal);
+		await resolving.promise;
+		controller.abort();
+		value.resolve("token");
+		await loading.catch(() => undefined);
+		await manager.waitForPendingConnections();
+
+		expect(connect).not.toHaveBeenCalled();
+		expect(manager.getConnection("server")).toBeUndefined();
+	});
+
+	it("does not open a transport for an initial connect whose server is disconnected during auth resolution", async () => {
+		const manager = new MCPManager(process.cwd());
+		const resolving = Promise.withResolvers<void>();
+		const value = Promise.withResolvers<string>();
+		vi.spyOn(configValue, "resolveConfigValue").mockImplementation(() => {
+			resolving.resolve();
+			return value.promise;
+		});
+		const connect = vi.spyOn(mcpClient, "connectToServer");
+
+		const loading = manager.connectServers({ server: SLOW_ENV_CONFIG }, {});
+		await resolving.promise;
+		// Disabling one server neither aborts the load's signal nor bumps the epoch.
+		await manager.disconnectServer("server");
+		value.resolve("token");
+		await loading.catch(() => undefined);
+		await manager.waitForPendingConnections();
+
+		expect(connect).not.toHaveBeenCalled();
+		expect(manager.getConnection("server")).toBeUndefined();
+	});
+
+	it("does not open a transport for a reconnect cancelled during auth resolution", async () => {
+		const manager = new MCPManager(process.cwd());
+		const current = fakeConnection("server");
+		const connect = vi.spyOn(mcpClient, "connectToServer").mockResolvedValueOnce(current.connection);
+		vi.spyOn(mcpClient, "listTools").mockResolvedValue([]);
+		const resolve = vi.spyOn(configValue, "resolveConfigValue").mockResolvedValue("token");
+		await manager.connectServers({ server: SLOW_ENV_CONFIG }, {});
+		expect(connect).toHaveBeenCalledTimes(1);
+
+		const resolving = Promise.withResolvers<void>();
+		const value = Promise.withResolvers<string>();
+		resolve.mockImplementation(() => {
+			resolving.resolve();
+			return value.promise;
+		});
+		const actions = new MCPServerActions({ cwd: process.cwd(), manager, refreshMCPTools: async () => {} });
+		const controller = new AbortController();
+		const reconnect = actions.reconnect({ name: "server", config: SLOW_ENV_CONFIG }, controller.signal);
+		await resolving.promise;
+		controller.abort();
+		await expect(reconnect).rejects.toMatchObject({ name: "AbortError" });
+		value.resolve("token");
+		await manager.waitForPendingConnections();
+
+		expect(connect).toHaveBeenCalledTimes(1);
+		expect(manager.getConnection("server")).toBeUndefined();
 	});
 });

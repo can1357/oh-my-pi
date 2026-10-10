@@ -1,6 +1,18 @@
-import { describe, expect, test } from "bun:test";
-import { applyDisabledExtensionsToState } from "../src/overlays/extensions/state-manager";
+import { beforeAll, describe, expect, test } from "bun:test";
+import { ExtensionDashboard, type ExtensionDashboardRuntime } from "../src/overlays/extensions/extension-dashboard";
+import type { MCPActionPanelState } from "../src/overlays/extensions/mcp-action-panel";
+import {
+	applyDisabledExtensionsToState,
+	buildProviderTabs,
+	filterByProvider,
+	MCP_SERVERS_TAB_ID,
+} from "../src/overlays/extensions/state-manager";
 import type { DashboardState, Extension } from "../src/overlays/extensions/types";
+import { initTheme } from "../src/theme";
+
+beforeAll(async () => {
+	await initTheme(false);
+});
 
 function extension(overrides: Partial<Extension> & Pick<Extension, "id">): Extension {
 	return {
@@ -13,6 +25,11 @@ function extension(overrides: Partial<Extension> & Pick<Extension, "id">): Exten
 		raw: {},
 		...overrides,
 	};
+}
+
+async function flushAsyncWork(): Promise<void> {
+	await Promise.resolve();
+	await Promise.resolve();
 }
 
 function dashboardState(extensions: Extension[], selected: Extension | null = extensions[0] ?? null): DashboardState {
@@ -28,6 +45,225 @@ function dashboardState(extensions: Extension[], selected: Extension | null = ex
 		selected,
 	};
 }
+
+describe("cross-source MCP tab", () => {
+	test("aggregates MCP servers from every provider into a selectable second tab", () => {
+		const claudeServer = extension({
+			id: "mcp:claude-server",
+			kind: "mcp",
+			source: { provider: "claude", providerName: "Claude Code", level: "user" },
+		});
+		const nativeServer = extension({
+			id: "mcp:native-server",
+			kind: "mcp",
+			source: { provider: "mcp-json", providerName: "MCP Config", level: "user" },
+		});
+		const skill = extension({ id: "skill:alpha" });
+		const extensions = [skill, claudeServer, nativeServer];
+		const providers = [
+			{ id: "claude", displayName: "Claude Code", enabled: true, userSourceEnabled: true, foreignUserSource: true },
+			{
+				id: "mcp-json",
+				displayName: "MCP Config",
+				enabled: true,
+				userSourceEnabled: true,
+				foreignUserSource: false,
+			},
+		];
+
+		const tabs = buildProviderTabs(extensions, providers);
+
+		expect(tabs[0]?.id).toBe("all");
+		expect(tabs[1]).toMatchObject({ id: MCP_SERVERS_TAB_ID, label: "MCP Servers", enabled: true, count: 2 });
+		expect(filterByProvider(extensions, MCP_SERVERS_TAB_ID)).toEqual([claudeServer, nativeServer]);
+	});
+
+	test("omits the aggregate tab when no MCP servers are discovered", () => {
+		const tabs = buildProviderTabs([extension({ id: "skill:alpha" })], []);
+
+		expect(tabs.some(tab => tab.id === MCP_SERVERS_TAB_ID)).toBe(false);
+	});
+
+	test("navigates directly from ALL to the aggregate MCP inventory", async () => {
+		const skill = extension({ id: "skill:alpha" });
+		const server = extension({
+			id: "mcp:snowflake",
+			kind: "mcp",
+			name: "snowflake",
+			displayName: "snowflake",
+			source: { provider: "claude", providerName: "Claude Code", level: "user" },
+			raw: { name: "snowflake", _source: {} },
+		});
+		const providers = [
+			{ id: "claude", displayName: "Claude Code", enabled: true, userSourceEnabled: true, foreignUserSource: true },
+		];
+		const runtime: ExtensionDashboardRuntime = {
+			getDisabledExtensions: () => [],
+			setDisabledExtensions: () => {},
+			getProviders: () => providers,
+			loadExtensions: async () => [skill, server],
+			toggleProvider: () => true,
+			toggleUserSource: () => true,
+			persistMcpToggle: async () => {},
+			applyMcpToggle: async () => {},
+			subscribeMcpChanges: () => [],
+		};
+		const dashboard = await ExtensionDashboard.create({ runtime, terminalHeight: 30 });
+
+		dashboard.handleInput("\t");
+		const rendered = dashboard.render(100).join("\n");
+
+		expect(rendered).toContain("MCP Servers (1)");
+		expect(rendered).toContain("snowflake");
+		expect(rendered).not.toContain("alpha");
+		expect(rendered).not.toContain("Master Switch");
+		dashboard.dispose();
+	});
+});
+
+describe("live MCP action panel", () => {
+	test("reloads an open MCP action panel and ignores stale lifecycle results", async () => {
+		const server = extension({
+			id: "mcp:github",
+			kind: "mcp",
+			name: "github",
+			displayName: "github",
+			source: { provider: "native", providerName: "Native", level: "user" },
+		});
+		const initialState: MCPActionPanelState = {
+			name: "github",
+			connectionStatus: "connected",
+			transport: "http",
+			source: "Native user",
+			authentication: "Initial authentication",
+			tools: 1,
+			prompts: 0,
+			resources: 0,
+			actions: [],
+		};
+		const staleState = Promise.withResolvers<MCPActionPanelState>();
+		const freshState = Promise.withResolvers<MCPActionPanelState>();
+		let loadStateCalls = 0;
+		let notifyLifecycleChange: (() => void) | undefined;
+		const runtime: ExtensionDashboardRuntime = {
+			getDisabledExtensions: () => [],
+			setDisabledExtensions: () => {},
+			getProviders: () => [],
+			loadExtensions: async () => [server],
+			toggleProvider: () => true,
+			toggleUserSource: () => true,
+			persistMcpToggle: async () => {},
+			applyMcpToggle: async () => {},
+			subscribeMcpChanges: callback => {
+				notifyLifecycleChange = callback;
+				return [() => {}];
+			},
+			mcpActions: {
+				loadState: async () => {
+					loadStateCalls++;
+					if (loadStateCalls === 1) return initialState;
+					return loadStateCalls === 2 ? staleState.promise : freshState.promise;
+				},
+				runAction: async () => "unused",
+			},
+		};
+		const dashboard = await ExtensionDashboard.create({ runtime, terminalHeight: 24 });
+
+		dashboard.handleInput("\x1b[B");
+		dashboard.handleInput("\n");
+		await flushAsyncWork();
+		expect(Bun.stripANSI(dashboard.render(100).join("\n"))).toContain("Initial authentication");
+
+		notifyLifecycleChange?.();
+		notifyLifecycleChange?.();
+		freshState.resolve({
+			...initialState,
+			connectionStatus: "disconnected",
+			authentication: "Fresh authentication",
+		});
+		await flushAsyncWork();
+		staleState.resolve({ ...initialState, authentication: "Stale authentication" });
+		await flushAsyncWork();
+
+		const rendered = Bun.stripANSI(dashboard.render(100).join("\n"));
+		expect(rendered).toContain("disconnected");
+		expect(rendered).toContain("Fresh authentication");
+		expect(rendered).not.toContain("Stale authentication");
+		dashboard.dispose();
+	});
+
+	function pendingPanelDashboard() {
+		const server = extension({
+			id: "mcp:github",
+			kind: "mcp",
+			name: "github",
+			displayName: "github",
+			source: { provider: "native", providerName: "Native", level: "user" },
+		});
+		const panelState: MCPActionPanelState = {
+			name: "github",
+			connectionStatus: "connected",
+			transport: "http",
+			source: "Native user",
+			authentication: "Loaded authentication",
+			tools: 1,
+			prompts: 0,
+			resources: 0,
+			actions: [],
+		};
+		const loads: Array<PromiseWithResolvers<MCPActionPanelState>> = [];
+		const runtime: ExtensionDashboardRuntime = {
+			getDisabledExtensions: () => [],
+			setDisabledExtensions: () => {},
+			getProviders: () => [],
+			loadExtensions: async () => [server],
+			toggleProvider: () => true,
+			toggleUserSource: () => true,
+			persistMcpToggle: async () => {},
+			applyMcpToggle: async () => {},
+			subscribeMcpChanges: () => [() => {}],
+			mcpActions: {
+				loadState: () => {
+					const load = Promise.withResolvers<MCPActionPanelState>();
+					loads.push(load);
+					return load.promise;
+				},
+				runAction: async () => "unused",
+			},
+		};
+		return { runtime, loads, panelState };
+	}
+
+	test("ignores repeated activation while the action panel is still loading", async () => {
+		const { runtime, loads, panelState } = pendingPanelDashboard();
+		const dashboard = await ExtensionDashboard.create({ runtime, terminalHeight: 24 });
+
+		dashboard.handleInput("\x1b[B");
+		dashboard.handleInput("\n");
+		dashboard.handleInput("\n");
+		await flushAsyncWork();
+		expect(loads).toHaveLength(1);
+
+		loads[0]!.resolve(panelState);
+		await flushAsyncWork();
+		expect(Bun.stripANSI(dashboard.render(100).join("\n"))).toContain("Loaded authentication");
+		dashboard.dispose();
+	});
+
+	test("does not install an action panel that finishes loading after the dashboard closes", async () => {
+		const { runtime, loads, panelState } = pendingPanelDashboard();
+		const dashboard = await ExtensionDashboard.create({ runtime, terminalHeight: 24 });
+
+		dashboard.handleInput("\x1b[B");
+		dashboard.handleInput("\n");
+		await flushAsyncWork();
+		dashboard.dispose();
+		loads[0]!.resolve(panelState);
+		await flushAsyncWork();
+
+		expect(Bun.stripANSI(dashboard.render(100).join("\n"))).not.toContain("Loaded authentication");
+	});
+});
 
 describe("applyDisabledExtensionsToState", () => {
 	test("immediately applies item-disabled state to every visible dashboard slice", () => {

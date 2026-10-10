@@ -7,7 +7,7 @@ import { AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai";
 import * as mcpClient from "@oh-my-pi/pi-coding-agent/mcp/client";
 import * as oauthFlow from "@oh-my-pi/pi-coding-agent/mcp/oauth-flow";
 import type { SourceMeta } from "@oh-my-pi/pi-coding-agent/capability/types";
-import type { MCPServerConfig } from "@oh-my-pi/pi-coding-agent/mcp/types";
+import type { MCPServerConfig, MCPServerConnection } from "@oh-my-pi/pi-coding-agent/mcp/types";
 import { MCPCommandController } from "@oh-my-pi/pi-coding-agent/modes/controllers/mcp-command-controller";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import {
@@ -178,13 +178,11 @@ describe("/mcp auth commands", () => {
 		await controller.handle("/mcp reauth MaaS Slack");
 
 		expect(showError).not.toHaveBeenCalled();
-		expect(prepareConfig).toHaveBeenCalledWith(
-			expect.objectContaining({ url: EXPANDED_SERVER_URL }),
-			expect.objectContaining({ oauth: false }),
-		);
+		expect(prepareConfig).not.toHaveBeenCalled();
 		expect(connectToServer).toHaveBeenCalledWith(
 			expect.any(String),
 			expect.objectContaining({ url: EXPANDED_SERVER_URL }),
+			expect.objectContaining({ signal: expect.any(AbortSignal) }),
 		);
 		expect(authStorage.credentials.get(oauthFlow.mcpOAuthCredentialId(EXPANDED_SERVER_URL))).toMatchObject({
 			type: "oauth",
@@ -930,6 +928,122 @@ describe("/mcp auth commands", () => {
 		expect(authStorage.credentials.get(oauthFlow.mcpOAuthCredentialId(EXPANDED_SERVER_URL))).toMatchObject({
 			access: "replacement-access",
 		});
+	});
+
+	test.each([
+		["reauth", "/mcp reauth envserver"],
+		["URL quick-add", `/mcp add quickserver --url ${EXPANDED_SERVER_URL}`],
+	])("Esc still cancels a replacement reauth after a superseded %s flow ends", async (_kind, firstCommand) => {
+		const authStorage = freshAuthStorage();
+		await authStorage.credentials.reload();
+		vi.spyOn(mcpClient, "connectToServer").mockRejectedValue(AUTH_ERROR);
+		// Each login hangs until its flow is aborted; `loginEntered` marks that the
+		// flow has claimed the shared OAuth slot (claiming precedes login).
+		let loginEntered = Promise.withResolvers<void>();
+		vi.spyOn(oauthFlow.MCPOAuthFlow.prototype, "login").mockImplementation(function (this: oauthFlow.MCPOAuthFlow) {
+			const pending = Promise.withResolvers<never>();
+			this.ctrl.signal?.addEventListener("abort", () => pending.reject(new Error("OAuth callback cancelled")), {
+				once: true,
+			});
+			loginEntered.resolve();
+			return pending.promise;
+		});
+
+		const { controller, ctx, showError, editor } = createController(authStorage);
+		const preLogin = () => {};
+		editor.onEscape = preLogin;
+
+		const first = controller.handle(firstCommand);
+		await loginEntered.promise;
+		const firstEscape = editor.onEscape;
+		loginEntered = Promise.withResolvers<void>();
+		const replacement = new MCPCommandController(ctx).handle("/mcp reauth envserver");
+		await loginEntered.promise;
+		await first;
+		// The cancelled first flow must not take Escape away from the live replacement.
+		const replacementEscape = editor.onEscape;
+		expect(replacementEscape).not.toBe(preLogin);
+		expect(replacementEscape).not.toBe(firstEscape);
+
+		replacementEscape?.();
+		await replacement;
+		expect(showError).not.toHaveBeenCalled();
+		// Ownership returns to the pre-login handler, not the superseded flow's.
+		expect(editor.onEscape).toBe(preLogin);
+	});
+
+	test("cancelling a reauth during preflight hands Esc back to the login it did not supersede", async () => {
+		const authStorage = freshAuthStorage();
+		await authStorage.credentials.reload();
+		// First probe fails with an auth challenge so login A starts; the second
+		// probe (reauth B's preflight) never settles, so B never claims the slot.
+		const preflightEntered = Promise.withResolvers<void>();
+		vi.spyOn(mcpClient, "connectToServer")
+			.mockRejectedValueOnce(AUTH_ERROR)
+			.mockImplementationOnce(() => {
+				preflightEntered.resolve();
+				return new Promise<never>(() => {});
+			});
+		const loginEntered = Promise.withResolvers<void>();
+		vi.spyOn(oauthFlow.MCPOAuthFlow.prototype, "login").mockImplementation(function (this: oauthFlow.MCPOAuthFlow) {
+			const pending = Promise.withResolvers<never>();
+			this.ctrl.signal?.addEventListener("abort", () => pending.reject(new Error("OAuth callback cancelled")), {
+				once: true,
+			});
+			loginEntered.resolve();
+			return pending.promise;
+		});
+
+		const { controller, ctx, showError, editor } = createController(authStorage);
+		const preLogin = () => {};
+		editor.onEscape = preLogin;
+
+		const loginA = controller.handle("/mcp reauth envserver");
+		await loginEntered.promise;
+		const escapeA = editor.onEscape;
+		const reauthB = new MCPCommandController(ctx).handle("/mcp reauth envserver");
+		await preflightEntered.promise;
+		const escapeB = editor.onEscape;
+		expect(escapeB).not.toBe(escapeA);
+
+		escapeB?.();
+		await reauthB;
+		// A is still waiting for authorization and must keep its Escape.
+		expect(editor.onEscape).toBe(escapeA);
+
+		escapeA?.();
+		await loginA;
+		expect(showError).not.toHaveBeenCalled();
+		expect(editor.onEscape).toBe(preLogin);
+	});
+
+	test("/mcp reconnect treats a manager-loaded server as enabled despite its raw enabled:false", async () => {
+		const authStorage = freshAuthStorage();
+		const config: MCPServerConfig = { type: "http", url: EXPANDED_SERVER_URL, enabled: false };
+		const connection = {
+			name: "toolsrv",
+			config,
+			capabilities: { tools: {} },
+			tools: [],
+		} as unknown as MCPServerConnection;
+		const reconnectServer = vi.fn(async () => connection);
+		// A user `enabledServers` override admitted this tool-owned server; its source
+		// flag still says false and cannot be changed by `/mcp enable`.
+		const { controller, showError } = createController(authStorage, {
+			getServerConfig: vi.fn(() => config),
+			getSource: vi.fn(() => ({
+				provider: "claude",
+				providerName: "Claude",
+				path: "/tool/.mcp.json",
+				level: "user" as const,
+			})),
+			reconnectServer,
+			getTools: vi.fn(() => []),
+		});
+
+		await controller.handle("/mcp reconnect toolsrv");
+		expect(showError).not.toHaveBeenCalled();
+		expect(reconnectServer).toHaveBeenCalledWith("toolsrv", expect.objectContaining({ manual: true }));
 	});
 
 	test("Esc cancels even when OAuth login has not registered its signal listener yet", async () => {

@@ -2,15 +2,15 @@
  * ExtensionDashboard - Fullscreen alternate-screen control center for extensions.
  *
  * Chrome mirrors the `/settings` overlay: a titled rounded box, a shared
- * {@link TabBar} for provider selection, and a two-column body (inventory list |
+ * {@link TabBar} for provider and aggregate views, and a two-column body (inventory list |
  * inspector). Both panes are mouse-aware — wheel scrolls, hover highlights, and
  * clicks select/activate — routed from a single SGR-mouse handler.
  *
  * Navigation:
- * - Tab/Shift+Tab or ←/→: switch provider tab
+ * - Tab/Shift+Tab or ←/→: switch view tab
  * - Up/Down or wheel: move list selection
- * - Space/Enter or click: toggle selected item (or provider master switch)
- * - Wheel over the inspector, or PageUp/PageDown when the inspector overflows: scroll the detail pane
+ * - Enter or click: open MCP actions, otherwise toggle the selected item
+ * - Space: toggle the selected item or provider master switch
  * - Esc: clear search (if active) then close
  *
  * Natively (Tern) it is a `picker` sheet: provider scopes, the inventory as
@@ -49,11 +49,13 @@ import { InspectorPanel, type ToolRuntimeSource } from "./inspector-panel";
 import type { ExtensionInspectorSource } from "./inspector-model";
 import { snapshotToolRuntimeSource } from "./live-tool-session";
 import type { MCPRuntimeSource } from "./mcp-runtime";
+import { MCPActionPanel, type MCPActionPanelRuntime, type MCPActionPanelState } from "./mcp-action-panel";
 import {
 	applyDisabledExtensionsToState,
 	applyFilter,
 	createInitialState,
 	filterByProvider,
+	MCP_SERVERS_TAB_ID,
 	refreshState,
 } from "./state-manager";
 import {
@@ -77,6 +79,7 @@ export interface ExtensionDashboardRuntime {
 	subscribeMcpChanges(onChange: () => void): Array<() => void>;
 	mcpSource?: MCPRuntimeSource;
 	inspectorSource?: ExtensionInspectorSource;
+	mcpActions?: MCPActionPanelRuntime;
 }
 
 export interface ExtensionDashboardOptions {
@@ -89,7 +92,7 @@ function extFooter(): string {
 	const upDown = editorKeys("tui.select.up", "tui.select.down");
 	const pages = editorKeys("tui.select.pageUp", "tui.select.pageDown");
 	const close = interruptKey();
-	return ` ${upDown}: navigate · ${formatKeyHint("space")}: toggle · ${formatKeyHints(["left", "right"])}: provider · ${pages}: inspector · ${expandKeyHint()}: expand · ${close}: close`;
+	return ` ${upDown}: navigate · ${formatKeyHint("enter")}: MCP actions · ${formatKeyHint("space")}: toggle · ${formatKeyHints(["left", "right"])}: view · ${pages}: inspector · ${expandKeyHint()}: expand · ${close}: close`;
 }
 
 /**
@@ -134,6 +137,7 @@ function providerInitials(label: string): string {
 export function buildPickerScopes(tabs: ProviderTab[]): TspPickerScope[] {
 	return tabs.map(tab => {
 		if (tab.id === "all") return { id: tab.id, label: "All", icon: "extension", count: tab.count };
+		if (tab.id === MCP_SERVERS_TAB_ID) return { id: tab.id, label: tab.label, icon: "server", count: tab.count };
 		const emptyEnabled = tab.count === 0 && tab.enabled;
 		return {
 			id: tab.id,
@@ -158,6 +162,10 @@ export class ExtensionDashboard implements Component {
 	#inspector!: InspectorPanel;
 	#tabBar!: TabBar;
 	#body!: TwoColumnBody;
+	#mcpActionPanel?: MCPActionPanel;
+	/** Set while an action panel's initial state loads; repeated activations are ignored. */
+	#mcpActionPanelOpening = false;
+	#disposed = false;
 	#refreshToken = 0;
 	// Persistent fullscreen frame: top, tabs, divider, body, divider, footer,
 	// bottom. The fullscreen overlay paints from screen row 0, so mouse rows
@@ -227,6 +235,7 @@ export class ExtensionDashboard implements Component {
 					this.#body.resetInspectorScroll();
 				},
 				onToggle: (extensionId, enabled) => this.#handleExtensionToggle(extensionId, enabled),
+				onActivate: extension => void this.#openMcpActions(extension),
 				onMasterToggle: providerId => this.#handleProviderToggle(providerId),
 				onUserSourceToggle: providerId => this.#handleUserSourceToggle(providerId),
 				masterSwitchProvider: this.#getActiveProviderId(),
@@ -249,14 +258,14 @@ export class ExtensionDashboard implements Component {
 
 		this.#tabBar = new TabBar("", buildTabBarTabs(this.#state.tabs), getTabBarTheme());
 		this.#tabBar.showHint = false;
-		this.#tabBar.onTabChange = tab => this.#selectProviderById(tab.id);
+		this.#tabBar.onTabChange = tab => this.#selectTabById(tab.id);
 		const activeId = this.#state.tabs[this.#state.activeTabIndex]?.id;
 		if (activeId) this.#tabBar.setActiveById(activeId);
 	}
 
 	#getActiveProviderId(): string | null {
 		const tab = this.#state.tabs[this.#state.activeTabIndex];
-		return tab && tab.id !== "all" ? tab.id : null;
+		return tab && tab.id !== "all" && tab.id !== MCP_SERVERS_TAB_ID ? tab.id : null;
 	}
 
 	/** Live terminal height so the dashboard tracks resize while open. */
@@ -270,6 +279,10 @@ export class ExtensionDashboard implements Component {
 	 * the bottom border.
 	 */
 	render(width: number): readonly string[] {
+		if (this.#mcpActionPanel) {
+			this.#mcpActionPanel.terminalHeight = this.#terminalRows();
+			return this.#mcpActionPanel.render(width);
+		}
 		const height = Math.max(14, this.#terminalRows());
 		const innerWidth = Math.max(1, width - 4);
 
@@ -296,6 +309,10 @@ export class ExtensionDashboard implements Component {
 
 	invalidate(): void {
 		this.#nativeVersion++;
+		if (this.#mcpActionPanel) {
+			this.#mcpActionPanel.invalidate();
+			return;
+		}
 		this.#frame.invalidate();
 		this.#tabBar.invalidate();
 		this.#mainList.invalidate();
@@ -363,8 +380,8 @@ export class ExtensionDashboard implements Component {
 		}
 	}
 
-	/** Switch to the provider tab with `id`, re-filtering the list around it. */
-	#selectProviderById(id: string): void {
+	/** Switch to the tab with `id`, re-filtering the list around it. */
+	#selectTabById(id: string): void {
 		const index = this.#state.tabs.findIndex(t => t.id === id);
 		if (index < 0) return;
 		this.#state.activeTabIndex = index;
@@ -546,7 +563,40 @@ export class ExtensionDashboard implements Component {
 		this.#requestRender();
 	}
 
+	async #openMcpActions(extension: Extension): Promise<void> {
+		const runtime = this.#runtime.mcpActions;
+		if (!runtime || extension.kind !== "mcp") return;
+		if (this.#disposed || this.#mcpActionPanel || this.#mcpActionPanelOpening) return;
+		this.#mcpActionPanelOpening = true;
+		let state: MCPActionPanelState;
+		try {
+			state = await runtime.loadState(extension);
+		} catch (error) {
+			logger.warn("Failed to open MCP action panel", { name: extension.name, error: String(error) });
+			return;
+		} finally {
+			this.#mcpActionPanelOpening = false;
+		}
+		// The dashboard can close while the state loads; a late panel would
+		// capture input for a dashboard that is no longer on screen.
+		if (this.#disposed || this.#mcpActionPanel) return;
+		const panel = new MCPActionPanel(extension, state, runtime, this.#terminalHeight);
+		panel.onRequestRender = () => this.onRequestRender?.();
+		panel.onChanged = () => void this.#refreshFromState();
+		panel.onClose = () => {
+			panel.dispose();
+			if (this.#mcpActionPanel === panel) this.#mcpActionPanel = undefined;
+			this.onRequestRender?.();
+		};
+		this.#mcpActionPanel = panel;
+		this.onRequestRender?.();
+	}
+
 	handleInput(data: string): void {
+		if (this.#mcpActionPanel) {
+			this.#mcpActionPanel.handleInput(data);
+			return;
+		}
 		// SGR mouse reports (the fullscreen overlay enables tracking).
 		if (data.startsWith("\x1b[<")) {
 			this.#handleMouse(data);
@@ -622,7 +672,7 @@ export class ExtensionDashboard implements Component {
 
 	/** The dashboard is a `picker` sheet (scopes = providers, preview = inspector) wherever Tern draws pickers. */
 	nativeSheet(cx: DescribeContext): boolean {
-		return cx.supports("picker");
+		return !this.#mcpActionPanel && cx.supports("picker");
 	}
 
 	/**
@@ -632,6 +682,10 @@ export class ExtensionDashboard implements Component {
 	 * changes arrive as render requests, which bump the version).
 	 */
 	describe(cx: DescribeContext): NativeNode {
+		if (this.#mcpActionPanel) {
+			this.#mcpActionPanel.terminalHeight = this.#terminalRows();
+			return col([this.#mcpActionPanel]);
+		}
 		const sheet = this.nativeSheet(cx);
 		const toolFrame = snapshotToolRuntimeSource(this.#toolSource);
 		let tools = "";
@@ -758,6 +812,10 @@ export class ExtensionDashboard implements Component {
 	 * `close` closes. Provider tabs in the page route to the {@link TabBar}.
 	 */
 	handleNativeEvent(event: NativeUiEvent): void {
+		if (this.#mcpActionPanel) {
+			if (event.type === "action" && event.act === "close") this.#mcpActionPanel.handleInput("\x1b");
+			return;
+		}
 		const pick = pickerEvent(event);
 		if (pick) {
 			this.#handlePick(pick);
@@ -791,7 +849,7 @@ export class ExtensionDashboard implements Component {
 				if (pick.value) this.#tabBar.selectTab(pick.value);
 				return;
 			case "toggle":
-				this.#mainList.activateSelected();
+				this.#mainList.activateSelected("toggle");
 				this.#requestRender();
 				return;
 			case "expand":
@@ -807,10 +865,25 @@ export class ExtensionDashboard implements Component {
 	 * rewrite Extension.raw.
 	 */
 	#subscribeMcpRuntime(): void {
-		this.#unsubscribers.push(...this.#runtime.subscribeMcpChanges(() => this.#requestRender()));
+		this.#unsubscribers.push(
+			...this.#runtime.subscribeMcpChanges(() => {
+				this.#requestRender();
+				const panel = this.#mcpActionPanel;
+				if (!panel) return;
+				void panel.reloadState().catch(error => {
+					logger.warn("Failed to reload open MCP action panel", {
+						name: panel.extension.name,
+						error: String(error),
+					});
+				});
+			}),
+		);
 	}
 
 	dispose(): void {
+		this.#disposed = true;
+		this.#mcpActionPanel?.dispose();
+		this.#mcpActionPanel = undefined;
 		for (const unsub of this.#unsubscribers) unsub();
 		this.#unsubscribers = [];
 	}

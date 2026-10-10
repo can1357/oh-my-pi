@@ -40,6 +40,7 @@
 ### Added
 
 - Added cache-release hooks for TUI components and tool cards, allowing extensions to discard derived render data without rebuilding content ([#13632](https://github.com/can1357/oh-my-pi/pull/13632) by [@iliaal](https://github.com/iliaal)).
+- Added the MCP server action panel for the Extension Control Center, including live status, capability counts, disabled-action reasons, destructive-action confirmation, cancellable operations, and manual OAuth callback input ([#12764](https://github.com/can1357/oh-my-pi/pull/12764) by [@alexvitiello](https://github.com/alexvitiello)).
 
 ### Changed
 

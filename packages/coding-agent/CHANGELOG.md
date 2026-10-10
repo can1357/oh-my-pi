@@ -47,6 +47,7 @@
 - Added title cards (icon and short code) to `/rename`: the title model picks one for a title you type, or for a generated title when the session has no card yet; `title.icons: boring` keeps renamed titles plain.
 - Grammars for less common languages (Kotlin, Swift, Ruby, PHP, Haskell, Verilog, and others) are now downloaded on first use for code summaries, block context, `ast_grep`, `ast_edit`, and TTSR rules; offline, files in those languages are skipped with a note instead of failing. `PI_GRAMMARS_URL` overrides the download location.
 - Added `bash.gitGuard` (default off) for checkouts shared by concurrent agents: the bash tool refuses `git stash`, `git reset --hard` or to another commit, and `git checkout`/`switch`/`restore` that would overwrite working-tree files unless a merge or rebase conflict is being resolved; unstaging stays allowed, and commands are judged as they actually run, including inside substitutions, functions, and after `cd`.
+- Added a consolidated **MCP Servers** tab to `/extensions`, with live cross-source connection status, tool/resource/prompt inspection, and contextual test, reconnect, reauthenticate, credential-clear, enable, and disable actions ([#12764](https://github.com/can1357/oh-my-pi/pull/12764) by [@alexvitiello](https://github.com/alexvitiello)).
 
 ### Changed
 
@@ -75,6 +76,7 @@
 - Fixed interrupting a reply to send a queued steer message briefly showing omp as idle (title, progress, working indicator) before the steer ran; RPC and SDK clients also no longer see a final `agent_end` for that interrupt.
 - Fixed browser tab recordings and video frame/contact-sheet extraction creating `omp-browser-recording-*` and `omp-video-*` scratch directories in your working directory instead of the system temp directory.
 - Fixed edit snapshots retaining excess history when metadata or displayed-line provenance grows; the 64 MiB snapshot budget now counts UTF-8 bytes, so CJK- and emoji-heavy files keep fewer versions ([#14975](https://github.com/can1357/oh-my-pi/pull/14975) by [@iliaal](https://github.com/iliaal)).
+- Fixed `/mcp test` reporting a server as disabled when a user `enabledServers` override had enabled it despite its source's `enabled: false` ([#12764](https://github.com/can1357/oh-my-pi/pull/12764) by [@alexvitiello](https://github.com/alexvitiello)).
 
 ## [18.8.6] - 2026-10-08
 
