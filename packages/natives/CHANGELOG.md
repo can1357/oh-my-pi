@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### Changed
+
+- macOS background keystrokes into an app with several windows now reach the target window instead of throwing `BackgroundUnavailable`
+
+### Fixed
+
+- Fixed macOS background key presses, typing, held keys, left clicks and menu actions taking keyboard focus from the user's app, which then dropped pastes and shortcuts until clicked again
+- Fixed macOS background typing into Chrome pages and background shortcuts such as ⌘A in TextEdit doing nothing
+
 ## [18.8.7] - 2026-10-09
 
 ### Added
