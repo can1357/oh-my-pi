@@ -12,6 +12,8 @@ Shared edits need one integration owner{{#if ircEnabled}}; siblings coordinate v
 # Inputs
 `name`: CamelCase ≤32, auto-generated if omitted; address agent by name. `outputSchema` overrides agent/session schemas.
 `solutionSpace`: describe how open-ended the child's problem is: whether the fix or design is given, or which causes or designs remain open. Volume of work does not widen it; NEVER mention sibling agents or coordination. (`one fix: rename, names given`; `one fix: slice end in paginate`; `single-flight cache load; races easy to miss`; `several retry API shapes; error classes to choose`; `deadlock cause open, no repro`)
+{{#if seanceEnabled}}Historical consults: use `agent: "{{seanceAgentName}}"` with `sourceSession` (id/path); optional `model` overrides the saved source model. The source stays unchanged.
+If the saved model is absent/unavailable, set `model` explicitly.{{/if}}
 {{#if evalToolsEnabled}}`tools`: eval-defined, run in your kernel.
 {{/if}}{{#if effortEnabled}}`effort`: `"lo"`|`"med"`|`"hi"` by how open-ended the problem is.
 {{/if}}`schemaMode`: default permissive warns after retries; strict fails.

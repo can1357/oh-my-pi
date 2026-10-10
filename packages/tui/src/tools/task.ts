@@ -73,7 +73,7 @@ interface TaskRenderContext {
 	 */
 	nowMs?: number;
 }
-type TaskRenderOptions = RenderResultOptions & { renderContext?: TaskRenderContext };
+export type TaskRenderOptions = RenderResultOptions & { renderContext?: TaskRenderContext };
 
 const MAX_NESTED_TASK_RENDER_DEPTH = 8;
 
@@ -2204,6 +2204,10 @@ export interface TaskItem {
 	name?: string;
 	/** Agent type to run this item (e.g. "scout"). Defaults to the spawn policy's default agent. */
 	agent?: string;
+	/** Historical source session selected by the bundled consult agent. */
+	sourceSession?: string;
+	/** Optional model selector override for the historical source session. */
+	model?: string | string[];
 	/** The work; required by the schema. */
 	task?: string;
 	/** How open-ended the work is; required by the schema and the child's sole `auto` thinking classification input. */
@@ -2231,6 +2235,10 @@ export interface TaskParams {
 	name?: string;
 	/** Agent type to spawn (flat form); omitted values resolve from the session spawn policy. */
 	agent?: string;
+	/** Historical source session selected by the bundled consult agent. */
+	sourceSession?: string;
+	/** Optional model selector override for the historical source session. */
+	model?: string | string[];
 	/** The work (flat form). */
 	task?: string;
 	/** How open-ended the work is (flat form); see {@link TaskItem.solutionSpace}. */

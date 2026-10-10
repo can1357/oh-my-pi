@@ -9,6 +9,9 @@ import {
 	isProviderEnabled,
 	setDisabledProviders,
 } from "@oh-my-pi/pi-coding-agent/capability";
+import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
+import { getBundledAgent } from "@oh-my-pi/pi-coding-agent/task/agents";
+import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { AgentCompactionThresholdOverride } from "@oh-my-pi/pi-coding-agent/config/compaction-threshold";
 import type { BeforeSubagentSpawnEvent } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
@@ -202,6 +205,105 @@ describe("structured subagent primitive", () => {
 		inheritedSession.outputSchemaMode = "strict";
 		const inherited = await resolveEffectiveSubagentPolicy(request({ session: inheritedSession }));
 		expect(inherited.schema).toMatchObject({ source: "session", mode: "strict", outputSchemaOverridesAgent: false });
+	});
+
+	it("uses saved seance models in active-role/default order and honors an explicit available override", async () => {
+		const seanceAgent = getBundledAgent("seance");
+		if (!seanceAgent) throw new Error("Expected the bundled seance agent");
+		mockDiscovery(seanceAgent);
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-seance-policy-"));
+		const authStorage = await AuthStorage.create(":memory:");
+		authStorage.keys.setRuntime("anthropic", "test-key");
+		const modelRegistry = new ModelRegistry(authStorage);
+		const cwd = path.join(tempDir, "project");
+		const sourceFile = path.join(tempDir, "sessions", "source.jsonl");
+		await fs.mkdir(path.dirname(sourceFile), { recursive: true });
+		await Bun.write(
+			sourceFile,
+			`${[
+				{ type: "session", version: 3, id: "saved-source", timestamp: "2026-10-01T00:00:00.000Z", cwd },
+				{
+					type: "model_change",
+					id: "default-model",
+					parentId: null,
+					timestamp: "2026-10-01T00:00:01.000Z",
+					model: "anthropic/claude-sonnet-4-5",
+					role: "default",
+				},
+				{
+					type: "model_change",
+					id: "active-model",
+					parentId: "default-model",
+					timestamp: "2026-10-01T00:00:02.000Z",
+					model: "anthropic/claude-sonnet-4-6",
+					role: "fast",
+				},
+			]
+				.map(entry => JSON.stringify(entry))
+				.join("\n")}\n`,
+		);
+		const caller = Object.assign(session({ cwd }), { modelRegistry });
+		try {
+			const saved = await resolveEffectiveSubagentPolicy(
+				request({ session: caller, agent: "seance", sourceSession: sourceFile }),
+			);
+			expect(saved.sourceSession).toEqual({
+				file: sourceFile,
+				id: "saved-source",
+				modelSelectors: ["anthropic/claude-sonnet-4-6", "anthropic/claude-sonnet-4-5"],
+			});
+			expect(saved.modelOverride).toEqual(["anthropic/claude-sonnet-4-6", "anthropic/claude-sonnet-4-5"]);
+			expect(saved.enableLsp).toBe(false);
+			expect(saved.enableIrc).toBe(false);
+
+			const overridden = await resolveEffectiveSubagentPolicy(
+				request({
+					session: caller,
+					agent: "seance",
+					sourceSession: sourceFile,
+					model: "anthropic/claude-sonnet-4-5",
+				}),
+			);
+			expect(overridden.modelOverride).toEqual(["anthropic/claude-sonnet-4-5"]);
+		} finally {
+			authStorage.close();
+			await fs.rm(tempDir, { recursive: true, force: true });
+		}
+	});
+
+	it("fails closed when the source has no saved model or an explicit model is unavailable", async () => {
+		const seanceAgent = getBundledAgent("seance");
+		if (!seanceAgent) throw new Error("Expected the bundled seance agent");
+		mockDiscovery(seanceAgent);
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-seance-model-fail-"));
+		const authStorage = await AuthStorage.create(":memory:");
+		const modelRegistry = new ModelRegistry(authStorage);
+		const cwd = path.join(tempDir, "project");
+		const sourceFile = path.join(tempDir, "sessions", "no-model.jsonl");
+		await fs.mkdir(path.dirname(sourceFile), { recursive: true });
+		await Bun.write(
+			sourceFile,
+			`${JSON.stringify({ type: "session", version: 3, id: "no-model-source", timestamp: "2026-10-01T00:00:00.000Z", cwd })}\n`,
+		);
+		const caller = Object.assign(session({ cwd }), { modelRegistry });
+		try {
+			await expect(
+				resolveEffectiveSubagentPolicy(request({ session: caller, agent: "seance", sourceSession: sourceFile })),
+			).rejects.toThrow("The source session has no saved model.");
+			await expect(
+				resolveEffectiveSubagentPolicy(
+					request({
+						session: caller,
+						agent: "seance",
+						sourceSession: sourceFile,
+						model: "missing-provider/missing-model",
+					}),
+				),
+			).rejects.toThrow("No available saved model can serve this source.");
+		} finally {
+			authStorage.close();
+			await fs.rm(tempDir, { recursive: true, force: true });
+		}
 	});
 
 	it("gives task and eval invocations identical blocked-agent preflight errors", async () => {

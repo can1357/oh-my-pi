@@ -53,6 +53,8 @@ export interface SessionHeader {
 	previousSessionFiles?: string[];
 	/** Provider prompt-cache identity inherited by exact-route full forks. */
 	providerPromptCacheKey?: string;
+	/** Marks a restricted seance fork before its runtime session contract is appended. */
+	seanceFork?: true;
 }
 
 export interface NewSessionOptions {

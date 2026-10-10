@@ -9,6 +9,7 @@
 
 ### Added
 
+- Added selection-only session and model picker actions for `/seance`, so choosing a source or model leaves the active session and model unchanged ([#15036](https://github.com/can1357/oh-my-pi/pull/15036) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy)).
 - Added an `inline` option to `HookSelectorComponent` that keeps a selector in the composer slot in Tern instead of opening it as a sheet over the screen ([#15058](https://github.com/can1357/oh-my-pi/pull/15058) by [@H4vC](https://github.com/H4vC))
 - Added `ModelHubCallbacks.previewCompactionPoint`, whose line the compaction limit field shows while you type instead of the input syntax ([#15065](https://github.com/can1357/oh-my-pi/pull/15065) by [@H4vC](https://github.com/H4vC))
 - Added Vim find and till motions (`f`, `F`, `t`, `T`) in the prompt editor, with `;` and `,` to repeat them ([#15100](https://github.com/can1357/oh-my-pi/pull/15100) by [@Shadorain](https://github.com/Shadorain))
@@ -20,6 +21,7 @@
 ### Fixed
 
 - Fixed the Agents hub Time column rewinding and freezing for running subagents between progress updates ([#15140](https://github.com/can1357/oh-my-pi/pull/15140) by [@H4vC](https://github.com/H4vC))
+- Fixed Agent Hub and status-line spend dropping cumulative subagent cost after compaction, parking, or follow-up turns while keeping nested task-result charges on child rows ([#15038](https://github.com/can1357/oh-my-pi/pull/15038) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy)).
 
 ## [18.8.7] - 2026-10-09
 

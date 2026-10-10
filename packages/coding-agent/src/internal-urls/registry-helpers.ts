@@ -72,11 +72,16 @@ export function artifactsDirsFromRegistry(options?: { preferredDir?: string }): 
  * EPERM-rewrite backups (`.bak`) are skipped. When the same id appears in
  * multiple dirs, the first hit wins (registry dirs are scanned first; a
  * `preferredDir` from the caller root is scanned before them). Directory
- * listings are prefetched in parallel; the walk itself stays a sequential
- * depth-first pass so first-hit order is unaffected.
+ * listings are prefetched in parallel; ordinary walks remain sequential
+ * depth-first. In `onlyPreferred` mode direct files precede descendants, so a
+ * current child wins over copied historical same-id descendants.
  */
-export async function sessionFilesFromDisk(preferredDir?: string): Promise<Map<string, string>> {
-	const dirs = preferredDir ? [preferredDir, ...artifactsDirsFromRegistry()] : artifactsDirsFromRegistry();
+export async function sessionFilesFromDisk(
+	preferredDir?: string,
+	options?: { onlyPreferred?: boolean },
+): Promise<Map<string, string>> {
+	const dirs = options?.onlyPreferred ? [] : artifactsDirsFromRegistry();
+	if (preferredDir) dirs.unshift(preferredDir);
 	const listings = new Map<string, Promise<Dirent[] | null>>();
 	const list = (dir: string, depth: number): Promise<Dirent[] | null> => {
 		let listing = listings.get(dir);
@@ -100,22 +105,32 @@ export async function sessionFilesFromDisk(preferredDir?: string): Promise<Map<s
 
 	const found = new Map<string, string>();
 	const seenDirs = new Set<string>();
+	const recordFile = (dir: string, entry: Dirent): void => {
+		if (!entry.isFile() || !entry.name.endsWith(".jsonl")) return;
+		if (entry.name.startsWith("__advisor")) return;
+		const id = entry.name.slice(0, -".jsonl".length);
+		if (!found.has(id)) found.set(id, path.join(dir, entry.name));
+	};
 	const scan = async (dir: string, depth: number): Promise<void> => {
 		if (depth > MAX_SCAN_DEPTH || seenDirs.has(dir)) return;
 		seenDirs.add(dir);
 		const entries = await list(dir, depth);
 		if (!entries) return;
+		if (options?.onlyPreferred) {
+			// In a copied fork tree, a current direct child can share a basename with
+			// a historical descendant. Prefer the direct transcript, not readdir order.
+			for (const entry of entries) recordFile(dir, entry);
+			for (const entry of entries) {
+				if (entry.isDirectory()) await scan(path.join(dir, entry.name), depth + 1);
+			}
+			return;
+		}
 		for (const entry of entries) {
 			if (entry.isDirectory()) {
 				await scan(path.join(dir, entry.name), depth + 1);
 				continue;
 			}
-			if (!entry.isFile()) continue;
-			const name = entry.name;
-			if (!name.endsWith(".jsonl")) continue;
-			if (name.startsWith("__advisor")) continue;
-			const id = name.slice(0, -".jsonl".length);
-			if (!found.has(id)) found.set(id, path.join(dir, name));
+			recordFile(dir, entry);
 		}
 	};
 	for (const dir of dirs) await scan(dir, 0);

@@ -9,6 +9,7 @@ import { EPHEMERAL_MODEL_CHANGE_ROLE } from "../session/session-entries";
 import { visitEntriesFromFileStream } from "../session/session-loader";
 import { loadBundledAgents } from "../task/agents";
 import { isReadOnlyAgent } from "../task/read-only-policy";
+import { isSeanceSessionFile } from "../task/seance";
 import { persistedVibeChildIds } from "../vibe/lifecycle";
 import {
 	type AgentHistorySummary,
@@ -153,6 +154,8 @@ async function readPersistedAgentHistory(
 	const modelChangeById = new Map<string, { model: string; role?: string; resolvedModelIsFallback: boolean }>();
 	let leafId: string | undefined;
 	let leafTimestamp: number | undefined;
+	let directCost = 0;
+	// Direct cost mirrors lifetime SessionManager usage; legacy metrics below stay leaf-scoped.
 	try {
 		await visitEntriesFromFileStream(
 			transcript.sessionFile,
@@ -166,6 +169,12 @@ async function readPersistedAgentHistory(
 				leafId = id;
 				const parsedTimestamp = timestampOf(record.timestamp);
 				if (parsedTimestamp !== undefined) leafTimestamp = parsedTimestamp;
+				if (record.type === "model_usage") {
+					const usage = recordOf(record.usage);
+					const cost = recordOf(usage?.cost);
+					directCost += finiteNumber(cost?.total);
+					return;
+				}
 				if (record.type === "model_change" && typeof record.model === "string") {
 					modelChangeById.set(id, {
 						model: record.model,
@@ -176,7 +185,11 @@ async function readPersistedAgentHistory(
 				}
 				if (record.type !== "message") return;
 				const message = recordOf(record.message);
-				if (message?.role === "assistant") assistantById.set(id, assistantMetrics(message));
+				if (message?.role === "assistant") {
+					const assistant = assistantMetrics(message);
+					assistantById.set(id, assistant);
+					directCost += assistant.cost;
+				}
 			},
 			// Advisor transcripts are the one file that can grow pathologically large
 			// (issue #9553); cap their scan so one bad transcript can't stall the Hub
@@ -264,6 +277,7 @@ async function readPersistedAgentHistory(
 	}
 	if (contextTokens !== undefined) metrics.contextTokens = contextTokens;
 	return {
+		directCost,
 		...(metrics.requests > 0 ? { metrics } : {}),
 		...(resolvedModel ? { resolvedModel, resolvedModelIsFallback } : {}),
 		...(modelRole ? { modelRole } : {}),
@@ -566,6 +580,7 @@ export async function ensurePersistedRoster(
 			return root;
 		}
 	}
+	if (await isSeanceSessionFile(root)) return root;
 	// Forget settled latches oldest-first once the bound is reached, so a
 	// process that visits many roots doesn't accumulate one entry per root.
 	// In-flight scans are never evicted: their latch is the single-flight guard.
@@ -630,6 +645,7 @@ export async function registerPersistedSubagents(
 	} = {},
 ): Promise<void> {
 	if (!sessionFile?.endsWith(".jsonl")) return;
+	if (await isSeanceSessionFile(sessionFile)) return;
 	const shouldContinue = options.shouldContinue ?? (() => true);
 	const hydrateHistory = options.hydrateHistory ?? true;
 	if (!shouldContinue()) return;
@@ -822,7 +838,7 @@ async function registerPersistedSubagentsFromDir(
 		}
 		// A transcript stem is not proof of a child directory: "." and ".."
 		// revisit ancestors, and symlinks can point back into the same tree.
-		if (childDirectories.has(id)) {
+		if (childDirectories.has(id) && !(await isSeanceSessionFile(sessionFile))) {
 			await registerPersistedSubagentsFromDir(
 				registry,
 				path.join(dir, id),

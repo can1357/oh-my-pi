@@ -26,7 +26,7 @@ import {
 	stringifyJson,
 	toError,
 } from "@oh-my-pi/pi-utils";
-import type { StructuredSubagentSchemaMode } from "@oh-my-pi/pi-tui/tools/task";
+import { isTaskToolDetails, type StructuredSubagentSchemaMode } from "@oh-my-pi/pi-tui/tools/task";
 import { moveFileAcrossDevices } from "../utils/atomic-file";
 import { ArtifactManager } from "./artifacts";
 import { type BlobPutOptions, type BlobPutResult, BlobStore, lazyImageDataSync } from "./blob-store";
@@ -447,6 +447,33 @@ function resetUsageCost(usage: Usage | undefined): void {
 	usage.cost = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 };
 	usage.credits = undefined;
 	usage.premiumRequests = undefined;
+}
+
+/** Clear child billing kept in task results without discarding their token counts. */
+function resetTaskResultBilling(details: unknown): void {
+	if (!isTaskToolDetails(details)) return;
+	resetUsageCost(taskUsageFrom(details));
+	for (const result of details.results) {
+		if (result === null || typeof result !== "object") continue;
+		resetUsageCost(taskUsageFrom(result));
+		resetNestedTaskBilling(result.extractedToolData);
+	}
+	const progress = details.progress;
+	if (Array.isArray(progress)) {
+		for (const item of progress) {
+			if (item === null || typeof item !== "object") continue;
+			if (typeof item.cost === "number") item.cost = 0;
+			resetTaskResultBilling(item.inflightTaskDetails);
+			resetNestedTaskBilling(item.extractedToolData);
+		}
+	}
+}
+
+/** Recurse only through task snapshots extracted from the task subprocess tool. */
+function resetNestedTaskBilling(extractedToolData: Record<string, unknown[]> | undefined): void {
+	const tasks = extractedToolData?.task;
+	if (!Array.isArray(tasks)) return;
+	for (const task of tasks) resetTaskResultBilling(task);
 }
 
 function isAssistantEntry(entry: SessionEntry): boolean {
@@ -3942,9 +3969,13 @@ export class SessionManager {
 			sessionFile?: string;
 			resetInheritedCost?: boolean;
 			repairInterruptedTail?: boolean;
+			neutralizeInheritedSessionInit?: boolean;
 		},
 	): Promise<SessionManager> {
 		const dir = sessionDir ?? SessionManager.getDefaultSessionDir(cwd, undefined, storage);
+		if (options?.neutralizeInheritedSessionInit && options.sessionFile && storage.existsSync(options.sessionFile)) {
+			throw new Error(`Fork destination already exists: ${options.sessionFile}`);
+		}
 		const manager = new SessionManager(cwd, dir, true, storage);
 		manager.#suppressBreadcrumb = options?.suppressBreadcrumb === true;
 
@@ -3961,7 +3992,22 @@ export class SessionManager {
 		await resolveBlobRefsInEntries(sourceEntries, manager.#blobs);
 
 		const sourceHeader = sourceEntries.find(entry => entry.type === "session") as SessionHeader | undefined;
-		const history = sourceEntries.filter(entry => entry.type !== "session") as SessionEntry[];
+		const history: SessionEntry[] = [];
+		for (const entry of sourceEntries) {
+			if (entry.type === "session") continue;
+			if (options?.neutralizeInheritedSessionInit && entry.type === "session_init") {
+				history.push({
+					type: "custom",
+					customType: "source_session_init",
+					id: entry.id,
+					parentId: entry.parentId,
+					timestamp: entry.timestamp,
+					data: entry,
+				});
+				continue;
+			}
+			history.push(entry);
+		}
 		normalizeLoadedUsage(history);
 		if (options?.resetInheritedCost) SessionManager.#resetInheritedUsageCost(history);
 		manager.#resetToNewSession(
@@ -3971,6 +4017,7 @@ export class SessionManager {
 			},
 			options?.sessionFile,
 		);
+		if (options?.neutralizeInheritedSessionInit) manager.#header.seanceFork = true;
 		manager.#header.title = sourceHeader?.title;
 		manager.#header.titleSource = sourceHeader?.titleSource;
 		manager.#additionalDirectories = (sourceHeader?.additionalDirectories ?? []).filter(d => d !== path.resolve(cwd));
@@ -3987,12 +4034,49 @@ export class SessionManager {
 			SessionManager.#repairForkedInterruptedTail(history, manager.#index.pathTo());
 			manager.#index.rebuild(history);
 		}
-		manager.#forceFileCreation = true;
-		await manager.#rewriteAtomically();
-		if (options?.copyArtifacts !== false) {
-			await copySessionArtifacts(sourcePath, manager.#sessionFile!);
+		if (options?.neutralizeInheritedSessionInit && options.copyArtifacts !== false) {
+			const destinationArtifactsDir = artifactsDirectoryFor(manager.#sessionFile);
+			if (destinationArtifactsDir) {
+				try {
+					await fs.promises.lstat(destinationArtifactsDir);
+					throw new Error(`Fork artifact destination already exists: ${destinationArtifactsDir}`);
+				} catch (error) {
+					if (!isEnoent(error)) throw error;
+				}
+			}
 		}
-		return manager;
+		manager.#forceFileCreation = true;
+		if (!options?.neutralizeInheritedSessionInit) {
+			await manager.#rewriteAtomically();
+			if (options?.copyArtifacts !== false) {
+				await copySessionArtifacts(sourcePath, manager.#sessionFile!);
+			}
+			return manager;
+		}
+		let forkJournalWritten = false;
+		try {
+			await manager.#rewriteAtomically();
+			forkJournalWritten = true;
+			if (options.sessionFile && manager.#sessionFile !== options.sessionFile) {
+				throw new Error("Fork destination changed while the session was being created.");
+			}
+			if (options.copyArtifacts !== false) {
+				await copySessionArtifacts(sourcePath, manager.#sessionFile!);
+			}
+			return manager;
+		} catch (error) {
+			if (forkJournalWritten && manager.#sessionFile) {
+				try {
+					await manager.dropSession(manager.#sessionFile);
+				} catch (cleanupError) {
+					logger.warn("Failed to remove incomplete session fork", {
+						sessionFile: manager.#sessionFile,
+						error: cleanupError instanceof Error ? cleanupError.message : String(cleanupError),
+					});
+				}
+			}
+			throw error;
+		}
 	}
 
 	/**
@@ -4007,7 +4091,12 @@ export class SessionManager {
 	 * on them — since only billing attribution is inherited, not context size.
 	 */
 	static #resetInheritedUsageCost(history: SessionEntry[]): void {
-		for (const entry of history) resetUsageCost(entryUsage(entry));
+		for (const entry of history) {
+			resetUsageCost(entryUsage(entry));
+			if (entry.type === "message" && entry.message.role === "toolResult" && entry.message.toolName === "task") {
+				resetTaskResultBilling(entry.message.details);
+			}
+		}
 	}
 
 	/**
@@ -4172,6 +4261,7 @@ export class SessionManager {
 	): Promise<{
 		cwd: string;
 		init: PersistedSessionInit | null;
+		seanceFork: boolean;
 	} | null> {
 		let header: SessionHeader | undefined;
 		const initEntries: FileEntry[] = [];
@@ -4190,7 +4280,11 @@ export class SessionManager {
 		}
 		// A missing, empty, or invalid file has no usable session.
 		if (!header) return null;
-		return { cwd: header.cwd ?? getProjectDir(), init: extractSessionInit(initEntries) };
+		return {
+			cwd: header.cwd ?? getProjectDir(),
+			init: extractSessionInit(initEntries),
+			seanceFork: header.seanceFork === true,
+		};
 	}
 	/** Continue the most recent session, or create a new one if none exists. */
 	static async continueRecent(

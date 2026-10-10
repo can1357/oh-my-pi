@@ -1,1 +1,1 @@
-`history://<id>`: read-only transcript; bare lists registered agents, not persisted unregistered top-level sessions.
+`history://<agent-id>`: read-only agent transcript; NEVER use a saved-session UUID. Bare lists registered agents, not persisted unregistered top-level sessions. In seance, it discovers copied child/grandchild transcripts only; an empty listing means no nested histories—the fork already contains the source conversation.

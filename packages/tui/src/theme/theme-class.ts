@@ -704,6 +704,7 @@ export class Theme {
 			jobs: this.#symbols["icon.job"],
 			gauge: this.#symbols["icon.throughput"],
 			context: this.#symbols["icon.context"],
+			ghost: this.#symbols["icon.ghost"],
 			agents: this.#symbols["icon.agents"],
 			branch: this.#symbols["icon.branch"],
 			tree: this.#symbols["icon.worktree"],

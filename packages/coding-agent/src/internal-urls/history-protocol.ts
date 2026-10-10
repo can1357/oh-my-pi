@@ -72,6 +72,7 @@ interface RefLookup {
 	visible: AgentRef[];
 	/** Caller root's artifact dir, scanned first by on-disk fallbacks. */
 	preferredArtifactDir?: string;
+	forkOnly?: boolean;
 }
 
 /** True for `history://current/<path>`; throws unless the route is exactly `current/full`. */
@@ -322,10 +323,10 @@ export class HistoryProtocolHandler implements ProtocolHandler {
 		if (isCurrentFullRoute(url)) return null;
 		const agentId = url.rawHost || url.hostname;
 		if (!agentId) return null;
-		const { ref, preferredArtifactDir } = await this.#lookup(agentId, context);
+		const { ref, preferredArtifactDir, forkOnly } = await this.#lookup(agentId, context);
 		if (ref?.sessionFile) return ref.sessionFile;
 		if (ref?.session) return null;
-		return (await this.#findOnDisk(ref?.id ?? agentId, preferredArtifactDir))?.file ?? null;
+		return (await this.#findOnDisk(ref?.id ?? agentId, preferredArtifactDir, forkOnly))?.file ?? null;
 	}
 
 	/**
@@ -335,6 +336,13 @@ export class HistoryProtocolHandler implements ProtocolHandler {
 	 */
 	async #roster(context: ResolveContext | undefined): Promise<Omit<RefLookup, "ref">> {
 		const registry = AgentRegistry.global();
+		if (context?.session?.historyScope === "fork") {
+			return {
+				visible: [],
+				preferredArtifactDir: context.sessionFile?.slice(0, -".jsonl".length),
+				forkOnly: true,
+			};
+		}
 		// A caller resolving a possibly-parked id refreshes its own root's
 		// persisted roster first: a same-named parked ref restored by another
 		// root's scan must not be served (or listed as known) in its place.
@@ -357,7 +365,8 @@ export class HistoryProtocolHandler implements ProtocolHandler {
 	 * skipping advisor transcripts.
 	 */
 	async #lookup(agentId: string, context: ResolveContext | undefined): Promise<RefLookup> {
-		const { visible, preferredArtifactDir } = await this.#roster(context);
+		const { visible, preferredArtifactDir, forkOnly } = await this.#roster(context);
+		if (forkOnly) return { visible, preferredArtifactDir, forkOnly };
 		let ref = AgentRegistry.global().get(agentId);
 		if (ref?.kind === "advisor") ref = undefined;
 		if (!ref) {
@@ -365,7 +374,7 @@ export class HistoryProtocolHandler implements ProtocolHandler {
 			const lower = agentId.toLowerCase();
 			ref = visible.find(candidate => candidate.id.toLowerCase() === lower);
 		}
-		return { ref, visible, preferredArtifactDir };
+		return { ref, visible, preferredArtifactDir, forkOnly };
 	}
 
 	#resolveCurrentFull(url: InternalUrl, context: ResolveContext | undefined): InternalResource {
@@ -391,8 +400,8 @@ export class HistoryProtocolHandler implements ProtocolHandler {
 		if (isCurrentFullRoute(url)) return this.#resolveCurrentFull(url, context);
 		const agentId = url.rawHost || url.hostname;
 		if (!agentId) {
-			const { visible, preferredArtifactDir } = await this.#roster(context);
-			const content = await this.#renderIndex(visible, preferredArtifactDir);
+			const { visible, preferredArtifactDir, forkOnly } = await this.#roster(context);
+			const content = await this.#renderIndex(visible, preferredArtifactDir, forkOnly);
 			return {
 				url: url.href,
 				content,
@@ -401,13 +410,21 @@ export class HistoryProtocolHandler implements ProtocolHandler {
 			};
 		}
 
-		const { ref, visible, preferredArtifactDir } = await this.#lookup(agentId, context);
+		const { ref, visible, preferredArtifactDir, forkOnly } = await this.#lookup(agentId, context);
 		if (!ref) {
 			// Registry miss — the agent may have been unregistered or lost on resume.
 			// Serve its transcript straight from disk if the session file persists.
-			const disk = await this.#resolveFromDisk(agentId, preferredArtifactDir);
+			const disk = await this.#resolveFromDisk(agentId, preferredArtifactDir, forkOnly);
 			if (disk) return { ...disk, url: url.href };
 
+			if (forkOnly) {
+				throw new Error(
+					`Unknown copied child-agent transcript: ${agentId}\n` +
+						"This fork's `history://` lookup is limited to copied child-agent transcripts; " +
+						"the source conversation is already inherited.\n" +
+						"List copied transcripts with `history://`.",
+				);
+			}
 			const known = visible.map(candidate => candidate.id);
 			const knownStr = known.length > 0 ? known.join(", ") : "none";
 			throw new Error(`Unknown agent: ${agentId}\nKnown agents: ${knownStr}\nList all with history://`);
@@ -424,7 +441,7 @@ export class HistoryProtocolHandler implements ProtocolHandler {
 		} else {
 			// No live session and no retained sessionFile — try the disk scan before
 			// giving up, in case the transcript lingers under an artifacts dir.
-			const disk = await this.#resolveFromDisk(ref.id, preferredArtifactDir);
+			const disk = await this.#resolveFromDisk(ref.id, preferredArtifactDir, forkOnly);
 			if (disk) return { ...disk, url: url.href };
 			throw new Error(`Agent ${ref.id} has no transcript: session is gone and no session file was retained`);
 		}
@@ -447,8 +464,12 @@ export class HistoryProtocolHandler implements ProtocolHandler {
 	 * known — is scanned before every registry-derived dir, so a same-id
 	 * transcript from another root cannot shadow the caller's own.
 	 */
-	async #resolveFromDisk(agentId: string, preferredArtifactDir?: string): Promise<InternalResource | undefined> {
-		const match = await this.#findOnDisk(agentId, preferredArtifactDir);
+	async #resolveFromDisk(
+		agentId: string,
+		preferredArtifactDir?: string,
+		forkOnly = false,
+	): Promise<InternalResource | undefined> {
+		const match = await this.#findOnDisk(agentId, preferredArtifactDir, forkOnly);
 		if (!match) return undefined;
 		const messages = await loadSessionMessagesReadOnly(match.file);
 		const content = formatSessionHistoryMarkdown(messages, { title: `${match.id} (on disk)` });
@@ -466,8 +487,9 @@ export class HistoryProtocolHandler implements ProtocolHandler {
 	async #findOnDisk(
 		agentId: string,
 		preferredArtifactDir?: string,
+		forkOnly = false,
 	): Promise<{ id: string; file: string } | undefined> {
-		const files = await sessionFilesFromDisk(preferredArtifactDir);
+		const files = await sessionFilesFromDisk(preferredArtifactDir, forkOnly ? { onlyPreferred: true } : undefined);
 		const lower = agentId.toLowerCase();
 		let match: { id: string; file: string } | undefined;
 		for (const [id, file] of files) {
@@ -479,7 +501,7 @@ export class HistoryProtocolHandler implements ProtocolHandler {
 		return match;
 	}
 
-	async #renderIndex(refs: AgentRef[], preferredArtifactDir: string | undefined): Promise<string> {
+	async #renderIndex(refs: AgentRef[], preferredArtifactDir: string | undefined, forkOnly = false): Promise<string> {
 		const entries: IndexEntry[] = refs.map(ref => ({
 			id: ref.id,
 			status: ref.status,
@@ -489,7 +511,7 @@ export class HistoryProtocolHandler implements ProtocolHandler {
 		}));
 		// Merge on-disk transcripts for agents absent from the registry.
 		const registered = new Set(refs.map(ref => ref.id));
-		const disk = await sessionFilesFromDisk(preferredArtifactDir);
+		const disk = await sessionFilesFromDisk(preferredArtifactDir, forkOnly ? { onlyPreferred: true } : undefined);
 		for (const id of disk.keys()) {
 			if (registered.has(id)) continue;
 			entries.push({ id, status: "on disk", kind: "—", parent: "—", lastActivity: "—" });
@@ -497,7 +519,11 @@ export class HistoryProtocolHandler implements ProtocolHandler {
 
 		const lines: string[] = ["# Agents", ""];
 		if (entries.length === 0) {
-			lines.push("No agents registered.");
+			lines.push(
+				forkOnly
+					? "No copied child-agent transcripts.\nThe source conversation is already inherited; `history://` lists only copied child-agent transcripts."
+					: "No agents registered.",
+			);
 			return `${lines.join("\n")}\n`;
 		}
 		lines.push("| id | status | kind | parent | last activity |", "|---|---|---|---|---|");
@@ -508,18 +534,27 @@ export class HistoryProtocolHandler implements ProtocolHandler {
 		return `${lines.join("\n")}\n`;
 	}
 
-	async complete(): Promise<UrlCompletion[]> {
+	async complete(_query?: string, context?: ResolveContext): Promise<UrlCompletion[]> {
+		const forkOnly = context?.session?.historyScope === "fork";
+		const preferredArtifactDir = context?.sessionFile?.slice(0, -".jsonl".length);
 		const completions: UrlCompletion[] = [];
 		const seen = new Set<string>();
-		for (const ref of AgentRegistry.global().list()) {
-			if (ref.kind === "advisor") continue;
+		const refs = forkOnly
+			? []
+			: AgentRegistry.global()
+					.list()
+					.filter(ref => ref.kind !== "advisor");
+		for (const ref of refs) {
 			seen.add(ref.id);
 			completions.push({
 				value: ref.id,
 				description: `${ref.status} · ${ref.kind}${ref.parentId ? ` · parent ${ref.parentId}` : ""}`,
 			});
 		}
-		for (const id of await diskIdsForCompletion()) {
+		const diskIds = forkOnly
+			? [...(await sessionFilesFromDisk(preferredArtifactDir, { onlyPreferred: true })).keys()]
+			: await diskIdsForCompletion();
+		for (const id of diskIds) {
 			if (seen.has(id)) continue;
 			seen.add(id);
 			completions.push({ value: id, description: "on disk" });

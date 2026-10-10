@@ -42,6 +42,8 @@ export interface SubagentEventPayload {
 
 // Keep this explicit: ArkType serializes `unknown` as a boolean subschema, which llama.cpp grammars reject.
 const outputSchemaInputSchema = type("object | boolean | string | null");
+const modelSelectorInputSchema = type("string | string[]");
+const seanceTaskFields = { "sourceSession?": "string", "model?": modelSelectorInputSchema };
 // Coarse per-spawn thinking effort; must stay in sync with TASK_EFFORTS in ../thinking.
 const effortRule = '"lo" | "med" | "hi"' as const;
 
@@ -122,10 +124,12 @@ function createTaskSchema(options: {
 	defaultAgent: string;
 	effortEnabled: boolean;
 	evalToolsEnabled: boolean;
+	seanceEnabled: boolean;
 }): BaseType {
 	const agent = taskAgentSchemaRule(options.defaultAgent);
 	const effortField = options.effortEnabled ? { "effort?": effortRule } : {};
 	const toolsField = options.evalToolsEnabled ? { "tools?": "string[]" } : {};
+	const seanceFields = options.seanceEnabled ? seanceTaskFields : {};
 	if (options.batchEnabled) {
 		if (options.isolationEnabled) {
 			const item = type.raw({
@@ -137,6 +141,7 @@ function createTaskSchema(options: {
 				"outputSchema?": outputSchemaInputSchema,
 				"schemaMode?": '"permissive" | "strict"',
 				...toolsField,
+				...seanceFields,
 				"isolated?": "boolean",
 				"+": "delete",
 			});
@@ -155,6 +160,7 @@ function createTaskSchema(options: {
 			"outputSchema?": outputSchemaInputSchema,
 			"schemaMode?": '"permissive" | "strict"',
 			...toolsField,
+			...seanceFields,
 			"+": "delete",
 		});
 		return type.raw({
@@ -173,6 +179,7 @@ function createTaskSchema(options: {
 			"outputSchema?": outputSchemaInputSchema,
 			"schemaMode?": '"permissive" | "strict"',
 			...toolsField,
+			...seanceFields,
 			"isolated?": "boolean",
 			"+": "delete",
 		});
@@ -186,6 +193,7 @@ function createTaskSchema(options: {
 		"outputSchema?": outputSchemaInputSchema,
 		"schemaMode?": '"permissive" | "strict"',
 		...toolsField,
+		...seanceFields,
 		"+": "delete",
 	});
 }
@@ -198,18 +206,21 @@ export function getTaskSchema(options: {
 	/** Advertise the `tools` field for eval-defined tools (`eval.tools.enabled`, default on). */
 	evalToolsEnabled?: boolean;
 	defaultAgent?: string;
+	/** Advertise historical-consult fields only when the bundled agent is spawnable. */
+	seanceEnabled?: boolean;
 }): TaskToolSchemaInstance {
 	const defaultAgent = options.defaultAgent ?? "task";
 	const effortEnabled = options.effortEnabled ?? false;
 	const evalToolsEnabled = options.evalToolsEnabled ?? true;
-	if (defaultAgent === "task" && !effortEnabled && evalToolsEnabled) {
+	const seanceEnabled = options.seanceEnabled ?? false;
+	if (defaultAgent === "task" && !effortEnabled && evalToolsEnabled && !seanceEnabled) {
 		if (options.batchEnabled) return options.isolationEnabled ? taskSchemaBatch : taskSchemaBatchNoIsolation;
 		return options.isolationEnabled ? taskSchema : taskSchemaNoIsolation;
 	}
-	const key = `${options.isolationEnabled ? "iso" : "flat"}:${options.batchEnabled ? "batch" : "single"}:${effortEnabled ? "effort" : "default"}:${evalToolsEnabled ? "tools" : "notools"}:${defaultAgent}`;
+	const key = `${options.isolationEnabled ? "iso" : "flat"}:${options.batchEnabled ? "batch" : "single"}:${effortEnabled ? "effort" : "default"}:${evalToolsEnabled ? "tools" : "notools"}:${seanceEnabled ? "seance" : "no-seance"}:${defaultAgent}`;
 	const cached = taskSchemaCache.get(key);
 	if (cached) return cached;
-	const schema = createTaskSchema({ ...options, effortEnabled, evalToolsEnabled, defaultAgent });
+	const schema = createTaskSchema({ ...options, effortEnabled, evalToolsEnabled, defaultAgent, seanceEnabled });
 	taskSchemaCache.set(key, schema);
 	return schema;
 }

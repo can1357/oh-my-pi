@@ -320,6 +320,11 @@ export interface ToolSession {
 	 * required yield tool). Suppresses automatic tool-set expansion.
 	 */
 	restrictToolNames?: boolean;
+	/**
+	 * Capability stamped by a persisted fork header; history:// uses it to
+	 * scope lookups to that fork's copied artifact tree.
+	 */
+	historyScope?: "fork";
 	/** Task recursion depth (0 = top-level, 1 = first child, etc.) */
 	taskDepth?: number;
 	/** Get this agent's eval executor session ID; keys its retained JS/Python/Ruby/Julia state. */

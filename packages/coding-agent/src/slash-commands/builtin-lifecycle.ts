@@ -2,7 +2,9 @@ import { clearSubmittedText } from "./helpers/draft";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { CompactionCancelledError } from "@oh-my-pi/pi-agent-core/compaction";
-import { logger, setProjectDir } from "@oh-my-pi/pi-utils";
+import type { TextContent } from "@oh-my-pi/pi-ai";
+import { logger, setProjectDir, Snowflake } from "@oh-my-pi/pi-utils";
+import { sanitizeErrorLine } from "@oh-my-pi/pi-tui/chrome/error-block";
 import { clearClaudePluginRootsCache } from "../discovery/helpers";
 import { rebindMemoryBackendForCwd } from "../hindsight/backend";
 import { memoryStatsUnavailableMessage, resolveMemoryBackend } from "../memory-backend";
@@ -20,7 +22,11 @@ import {
 } from "../session/session-worktree";
 import { formatShakeSummary, type ShakeMode } from "../session/shake-types";
 import { discoverTitleSystemPromptFile, resolvePromptInput } from "../system-prompt";
+import seanceCommandPrompt from "../prompts/system/seance-command.md" with { type: "text" };
 import { resolveToCwd } from "../tools/path-utils";
+import type { TaskParams, TaskToolDetails } from "../task";
+import { resolveSeanceSource } from "../task/seance";
+import { parseCommandArgs } from "../utils/command-args";
 import { commandConsumed, errorMessage, usage } from "./helpers/parse";
 import { handleSshAcp } from "./helpers/ssh";
 import type {
@@ -30,6 +36,7 @@ import type {
 	SlashCommandSpec,
 	TuiSlashCommandRuntime,
 } from "./types";
+import type { InteractiveModeContext } from "../modes/types";
 
 function formatFreshSessionResult(result: FreshSessionResult): string {
 	const stateLabel = result.closedProviderSessions === 1 ? "provider state" : "provider states";
@@ -129,6 +136,116 @@ async function relocateHeadlessSession(
 	await runtime.notifyConfigChanged?.();
 	await runtime.notifyTitleChanged?.();
 	return undefined;
+}
+
+type ParsedSeanceArgs = { source: string | undefined; model: string | undefined } | { error: string };
+
+function parseSeanceArgs(args: string): ParsedSeanceArgs {
+	const tokens = parseCommandArgs(args, { strict: false });
+	let source: string | undefined;
+	let model: string | undefined;
+	for (let index = 0; index < tokens.length; index++) {
+		const token = tokens[index]!;
+		if (token === "--model" || token.startsWith("--model=")) {
+			if (model !== undefined) return { error: "Use --model only once." };
+			const selector = token === "--model" ? tokens[++index] : token.slice("--model=".length);
+			if (!selector || selector.startsWith("--")) {
+				return { error: "Usage: /seance [session id|path] [--model selector]" };
+			}
+			model = selector;
+			continue;
+		}
+		if (token.startsWith("-")) return { error: `Unknown /seance option: ${token}` };
+		if (source !== undefined) return { error: "Usage: /seance [session id|path] [--model selector]" };
+		source = token;
+	}
+	return { source, model };
+}
+
+async function launchSeance(ctx: InteractiveModeContext, sourceSession: string, model?: string): Promise<void> {
+	const taskTool = ctx.session.agent.state.tools.find(tool => tool.name === "task");
+	if (!taskTool) {
+		ctx.showError("The task tool is not available for /seance.");
+		return;
+	}
+	const params: TaskParams = {
+		agent: "seance",
+		sourceSession,
+		task: seanceCommandPrompt,
+		solutionSpace: "Historical summary; the selected transcript provides the evidence.",
+		...(model !== undefined ? { model } : {}),
+	};
+	const taskIds = new Set<string>();
+	let jobId: string | undefined;
+	let selectedModel: string | undefined;
+	const collect = (details: TaskToolDetails | undefined): void => {
+		if (!details) return;
+		for (const progress of details.progress ?? []) {
+			taskIds.add(progress.id);
+			selectedModel ??= progress.resolvedModel;
+		}
+		for (const item of details.results ?? []) {
+			taskIds.add(item.id);
+			selectedModel ??= item.resolvedModel;
+		}
+		jobId = details.async?.jobId ?? jobId;
+	};
+	try {
+		const result = await taskTool.execute(`seance-${Snowflake.next()}`, params, undefined, update => {
+			collect(update.details as TaskToolDetails | undefined);
+		});
+		const details = result.details as TaskToolDetails | undefined;
+		collect(details);
+		const content = result.content
+			.filter((part): part is TextContent => part.type === "text")
+			.map(part => part.text)
+			.join("\n")
+			.trim();
+		const failedResult = details?.results?.find(item => item.error || item.exitCode !== 0);
+		if (
+			result.isError ||
+			details?.async?.state === "failed" ||
+			failedResult ||
+			(!details?.async && (details?.results?.length ?? 0) === 0)
+		) {
+			ctx.showError(sanitizeErrorLine(content || failedResult?.error || "Seance preflight failed."));
+			return;
+		}
+		const state = details?.async?.state === "running" ? "running" : "completed";
+		const taskLabel = taskIds.size > 0 ? [...taskIds].join(", ") : jobId;
+		const modelLabel = selectedModel ? ` · ${selectedModel}` : "";
+		ctx.showStatus(sanitizeErrorLine(`Seance ${state}${taskLabel ? `: ${taskLabel}` : ""}${modelLabel}`));
+	} catch (error) {
+		ctx.showError(sanitizeErrorLine(error));
+	}
+}
+
+async function chooseSeanceModel(
+	ctx: InteractiveModeContext,
+	sourceSession: string,
+	model: string | undefined,
+): Promise<void> {
+	if (model !== undefined) {
+		void launchSeance(ctx, sourceSession, model);
+		return;
+	}
+	try {
+		const choice = await ctx.showHookSelector("Consult this session with", [
+			{ label: "Use saved model", description: "Use the active role or default model saved with this session" },
+			{ label: "Choose another model", description: "Select a one-off model for this consultation" },
+		]);
+		if (choice === "Use saved model") {
+			void launchSeance(ctx, sourceSession);
+		} else if (choice === "Choose another model") {
+			ctx.showModelSelector({
+				selectOnly: {
+					onSelect: selector => launchSeance(ctx, sourceSession, selector),
+				},
+			});
+		}
+	} catch (error) {
+		ctx.showError(sanitizeErrorLine(error));
+	}
 }
 
 export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
@@ -366,6 +483,39 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 			const customInstructions = command.args || undefined;
 			clearSubmittedText(runtime);
 			await runtime.ctx.handleHandoffCommand(customInstructions);
+		},
+	},
+	{
+		name: "seance",
+		icon: "ghost",
+		description: "Consult a saved session without resuming it",
+		inlineHint: "[session id|path] [--model selector]",
+		allowArgs: true,
+		handleTui: async (command, runtime) => {
+			clearSubmittedText(runtime);
+			const parsed = parseSeanceArgs(command.args);
+			if ("error" in parsed) {
+				runtime.ctx.showError(sanitizeErrorLine(parsed.error));
+				return;
+			}
+			if (!parsed.source) {
+				runtime.ctx.showSessionSelector(undefined, session =>
+					chooseSeanceModel(runtime.ctx, session.path, parsed.model),
+				);
+				return;
+			}
+			let sourceFile: string;
+			try {
+				const source = await resolveSeanceSource(parsed.source, {
+					cwd: runtime.ctx.sessionManager.getCwd(),
+					sessionDirHint: runtime.ctx.sessionManager.getSessionDir(),
+				});
+				sourceFile = source.file;
+			} catch (error) {
+				runtime.ctx.showError(sanitizeErrorLine(error));
+				return;
+			}
+			await chooseSeanceModel(runtime.ctx, sourceFile, parsed.model);
 		},
 	},
 	{

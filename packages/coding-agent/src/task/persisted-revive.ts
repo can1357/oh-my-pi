@@ -4,7 +4,7 @@ import { logger } from "@oh-my-pi/pi-utils";
 import { MAIN_AGENT_RULE_NAME, SUB_AGENT_RULE_NAME } from "../capability/rule";
 import { validateAgentAccountPools } from "../config/account-pools";
 import type { ModelRegistry } from "../config/model-registry";
-import { resolveAgentAdvisorRolePattern } from "../config/model-resolver";
+import { resolveAgentAdvisorRolePattern, resolveSessionModelSelector } from "../config/model-resolver";
 import { formatModelRoleAlias } from "../config/model-roles";
 import type { Settings } from "../config/settings";
 import { MCPManager } from "../mcp/manager";
@@ -25,7 +25,9 @@ import {
 	followMCPTools,
 	subagentRetryFallbackRole,
 } from "./executor";
+import { getBundledAgent } from "./agents";
 import { cfgTaskAgentAccountPools } from "./settings";
+import { SEANCE_AGENT_NAME, seanceIsolationOptions } from "./seance-policy";
 import type { AgentDefinition } from "./types";
 
 /**
@@ -79,6 +81,19 @@ export function createPersistedSubagentReviverFactory(
 		// is gone (isolated/merged worktree, moved dir): leave it transcript-only
 		// (history://) rather than resurrect a wrong or broken session.
 		if (!peek?.init) return undefined;
+		const isSeance = peek.seanceFork;
+		const seanceAgent = isSeance ? getBundledAgent(SEANCE_AGENT_NAME) : undefined;
+		if (isSeance) {
+			if (
+				peek.init.agent !== SEANCE_AGENT_NAME ||
+				peek.init.restrictToolNames !== true ||
+				!peek.init.resolvedModel
+			) {
+				return undefined;
+			}
+			await ctx.modelRegistry.awaitBackgroundRefresh().catch(() => {});
+			if (!resolveSessionModelSelector(ctx.modelRegistry, peek.init.resolvedModel) || !seanceAgent) return undefined;
+		}
 		// Isolated runs are never resumable: their worktree is merged + cleaned,
 		// and the parent was told messaging is impossible. A retained workspace
 		// (capture/persist failure) still exists on disk and would pass the cwd
@@ -158,19 +173,21 @@ export function createPersistedSubagentReviverFactory(
 			const agentAccountPools = validateAgentAccountPools(cfgTaskAgentAccountPools.get(ctx.settings));
 			const oauthAccountPools =
 				init.agent && Object.hasOwn(agentAccountPools, init.agent) ? agentAccountPools[init.agent] : undefined;
-			const persistedModelPattern =
-				init.modelRole && init.modelRole !== "default"
+			const persistedModelPattern = isSeance
+				? init.resolvedModel
+				: init.modelRole && init.modelRole !== "default"
 					? [formatModelRoleAlias(init.modelRole), ...(init.resolvedModel ? [init.resolvedModel] : [])]
 					: init.resolvedModel;
 			// Older session files persisted the synthetic xd:// write transport in the
 			// enabled set. A read-only agent definition could never grant full write,
 			// so remove that transport name before replaying tools as explicit grants.
-			const revivedToolNames =
-				init.readOnly === true && init.tools.includes("write")
+			const revivedToolNames = isSeance
+				? ["read", "grep", "glob", "yield"]
+				: init.readOnly === true && init.tools.includes("write")
 					? init.tools.filter(name => name !== "write")
 					: init.tools;
 			const artifactManager = ctx.session.sessionManager.getArtifactManager();
-			if (artifactManager) reopened.adoptArtifactManager(artifactManager);
+			if (artifactManager && !isSeance) reopened.adoptArtifactManager(artifactManager);
 			// A restricted persisted contract must not consult process-global MCP
 			// state: same-name MCP tools are untrusted capability sources.
 			const restrictToolNames = init.restrictToolNames === true;
@@ -188,7 +205,7 @@ export function createPersistedSubagentReviverFactory(
 					subagentEventBus: ctx.subagentEventBus,
 					modelRegistry: ctx.modelRegistry,
 					...(persistedModelPattern ? { modelPattern: persistedModelPattern } : {}),
-					modelPatternAuthFallback: init.resolvedModel,
+					modelPatternAuthFallback: isSeance ? undefined : init.resolvedModel,
 					settings: subagentSettings,
 					sessionManager: reopened,
 					agentId: ref.id,
@@ -222,12 +239,13 @@ export function createPersistedSubagentReviverFactory(
 					restrictToolNames: restrictToolNames || undefined,
 					requireYieldTool: true,
 					systemPrompt: () => [...init.systemPrompt],
-					// Inherit current owner policy, never extension authority from a transcript.
+					// Ordinary revived agents inherit the current owner's extension policy.
 					extensionRoots: () => ctx.session.effectiveExtensionRoots,
 					preloadedPreparedExtensions: ctx.session.preparedExtensions,
+					...(isSeance ? seanceIsolationOptions() : undefined),
 					// Old files predate persisted spawns: deny re-spawning rather than let
 					// createAgentSession default to wildcard ("*").
-					spawns: init.spawns ?? "",
+					spawns: isSeance ? "" : (init.spawns ?? ""),
 					hasUI: false,
 					enableLsp: restrictToolNames ? false : ctx.enableLsp,
 					...(restrictToolNames
@@ -251,7 +269,9 @@ export function createPersistedSubagentReviverFactory(
 			// Clamp the active set to the persisted list: createAgentSession's
 			// `alwaysInclude` can re-add non-defaultInactive extension/custom tools
 			// the original run didn't carry. Unknown/missing names are ignored.
-			await session.setActiveToolsByName([...revivedToolNames, ...session.getMountedXdevToolNames()]);
+			await session.setActiveToolsByName(
+				isSeance ? revivedToolNames : [...revivedToolNames, ...session.getMountedXdevToolNames()],
+			);
 			// The yield tool's schema carries the last batch's items; the replayed prefix must match it.
 			if (init.workPoolYieldItems) await session.setWorkPoolYieldItems(init.workPoolYieldItems);
 			// Wire the extension runtime exactly as the live executor does. Without
@@ -275,7 +295,7 @@ export function createPersistedSubagentReviverFactory(
 			const wakeAgent: AgentDefinition = {
 				name: ref.displayName,
 				description: "",
-				systemPrompt: init.systemPrompt.join("\n\n"),
+				systemPrompt: isSeance && seanceAgent ? seanceAgent.systemPrompt : init.systemPrompt.join("\n\n"),
 				source: "user",
 			};
 			attachIrcWakeTurnMonitor(session, {
@@ -288,7 +308,7 @@ export function createPersistedSubagentReviverFactory(
 				outputSchemaMode: init.outputSchemaMode,
 				// Anchor artifacts to the revived ref's own dir (its parent's children
 				// dir), not the live root session's, matching the spawn callers (#11563).
-				artifactsDir: path.dirname(sessionFile),
+				artifactsDir: isSeance ? sessionFile.slice(0, -".jsonl".length) : path.dirname(sessionFile),
 			});
 			return session;
 		};
