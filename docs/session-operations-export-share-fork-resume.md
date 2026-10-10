@@ -419,11 +419,11 @@ falls back to spawning the replacement with inherited terminal streams.
 
 ## In-session update
 
-`/update` is TUI-only. It runs `omp update --check` in a child process and asks `Update omp 18.8.7 → 18.9.0?` as a single-keypress prompt (`y` / `n`; Esc cancels). On `y` it runs the same in-place installer as `omp update`, again in a child so a failure cannot exit the session. It replaces the `omp` currently selected on `PATH` (binary, bun, npm, Homebrew, or mise). Nix, externally managed installs, and an already-current install are reported with the CLI's own message and never prompt.
+`/update` is TUI-only. It runs `omp update --check` in a child process and asks `Update omp 18.8.7 → 18.9.0?` as a single-keypress prompt (`y` / `n`; Esc cancels). On `y` it runs the same in-place installer as `omp update`, again in a child so a failure cannot exit the session. It replaces the `omp` currently selected on `PATH` (binary, bun, npm, Homebrew, or mise). An already-current or externally managed install is reported from the check and never prompts. Refusals the updater only detects while installing (Nix, canary on Homebrew or mise) are reported after the first `y` and do not offer a restart.
 
 Flags: `--check` (report only, no prompt), `--force`, and `--canary` / `--stable`. `--plugins` is not accepted; use `/plugins`.
 
-After a successful install a second `y` / `n` prompt offers `/restart`, which resumes a session that exists on disk. `n` keeps the old process running. When this process is not the install that was replaced (a source checkout, or a compiled binary other than the PATH entry), the prompt instead offers to restart into the installed omp, since `/restart` alone would relaunch the old entry point.
+After a successful install a second `y` / `n` prompt offers a restart that resumes a session that exists on disk; `n` keeps the old process running. The restart always relaunches the `omp` PATH entry the updater replaced, not this process's own entry point, so a source checkout, a different `omp` earlier on PATH, a Homebrew Cellar path, or a bun/npm launcher the standalone binary took over all land on the new install. The entry is not resolved through symlinks, so shims that pick the tool from `argv[0]` (mise) still launch omp. The prompt is skipped if a turn started while the install ran.
 
 ## How session switching actually mutates runtime state
 

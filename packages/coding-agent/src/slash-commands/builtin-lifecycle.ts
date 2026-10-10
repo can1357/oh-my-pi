@@ -860,7 +860,8 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 				ui: {
 					status: message => ctx.showStatus(message),
 					confirm: (title, message) => ctx.showHookConfirm(title, message, YES_NO_PROMPT),
-					restart: entry => ctx.restart(entry ? { entry } : undefined),
+					busy: () => ctx.session.isStreaming,
+					restart: entry => ctx.restart({ entry }),
 				},
 			});
 		},
