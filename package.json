@@ -47,6 +47,7 @@
 			"@types/react-dom": "^19.2.3",
 			"@typescript/native-preview": "7.0.0-dev.20260707.2",
 			"diff": "^9.0.0",
+			"fast-check": "4.10.2",
 			"fastembed": "3.0.0",
 			"katex": "^0.18.4",
 			"kitty-vt-wasm": "^0.2.0",
