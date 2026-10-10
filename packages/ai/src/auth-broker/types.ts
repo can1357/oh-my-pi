@@ -46,6 +46,11 @@ export interface SnapshotResponse extends Omit<AuthCredentialSnapshot, "credenti
 export interface UsageResponse {
 	generatedAt: number;
 	reports: UsageReport[];
+	/**
+	 * Providers whose saved resets the broker spends itself. Sent only to
+	 * clients advertising {@link AUTH_BROKER_CAPABILITY_RESET_SWEEP}.
+	 */
+	resetSweep?: string[];
 }
 
 /**
@@ -173,6 +178,9 @@ export const AUTH_BROKER_CAPABILITIES_HEADER = "OMP-Auth-Broker-Capabilities";
 
 /** Client understands independent Codex `chat` and `spark` credential-block scopes. */
 export const AUTH_BROKER_CAPABILITY_CODEX_METER_BLOCK_SCOPES = "codex-meter-block-scopes";
+
+/** Client defers its own saved-reset sweep to a broker that runs one; see {@link UsageResponse.resetSweep}. */
+export const AUTH_BROKER_CAPABILITY_RESET_SWEEP = "reset-sweep";
 
 /** Default port when none is configured. Loopback-only, no external exposure. */
 export const DEFAULT_AUTH_BROKER_BIND = "127.0.0.1:8765";

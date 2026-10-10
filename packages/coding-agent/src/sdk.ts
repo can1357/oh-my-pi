@@ -850,7 +850,8 @@ export interface CreateAgentSessionOptions {
 	/**
 	 * A human can answer synchronous prompts even without a terminal UI (e.g. an
 	 * ACP client rendering elicitation forms). Enables `ask` without enabling
-	 * TUI-only session behavior such as eager LSP warmup. Default: `hasUI`.
+	 * TUI-only session behavior such as eager LSP warmup. An explicit `false` also
+	 * keeps saved-reset consent off the extension UI context. Default: `hasUI`.
 	 */
 	interactivePrompts?: boolean;
 	/**
@@ -4583,6 +4584,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			skillsSettings: cfgSkills.get(settings),
 			modelRegistry,
 			allowSessionModelFallback: options.hasUI === true && options.allowSessionModelFallback !== false,
+			interactivePrompts: options.interactivePrompts,
 			rebindModelAfterDiscovery: options.model === undefined || options.rebindModelAfterDiscovery === true,
 			toolRegistry,
 			reconcileBrowserMcpFilter: mcpManager

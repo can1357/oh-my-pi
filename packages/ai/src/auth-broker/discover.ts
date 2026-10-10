@@ -122,7 +122,12 @@ function parseAuthAccountPolicies(value: unknown): AuthAccountPolicies {
 		}
 		const policy = entry as Record<string, unknown>;
 		const unknownPolicyFields = Object.keys(policy).filter(
-			key => key !== "provider" && key !== "account" && key !== "priority" && key !== "reservePct",
+			key =>
+				key !== "provider" &&
+				key !== "account" &&
+				key !== "autoRedeem" &&
+				key !== "priority" &&
+				key !== "reservePct",
 		);
 		if (unknownPolicyFields.length > 0) {
 			throw new AIError.ConfigurationError(`${path} has unknown fields: ${unknownPolicyFields.join(", ")}`);
@@ -159,6 +164,9 @@ function parseAuthAccountPolicies(value: unknown): AuthAccountPolicies {
 				`${accountPath} must include at least one of email, accountId, or projectId`,
 			);
 		}
+		if (policy.autoRedeem !== undefined && typeof policy.autoRedeem !== "boolean") {
+			throw new AIError.ConfigurationError(`${path}.autoRedeem must be true or false`);
+		}
 		if (policy.priority !== undefined && (typeof policy.priority !== "number" || !Number.isFinite(policy.priority))) {
 			throw new AIError.ConfigurationError(`${path}.priority must be a finite number`);
 		}
@@ -180,6 +188,7 @@ function parseAuthAccountPolicies(value: unknown): AuthAccountPolicies {
 				...(typeof rawAccount.projectId === "string" ? { projectId: rawAccount.projectId } : {}),
 				...(typeof rawAccount.orgId === "string" ? { orgId: rawAccount.orgId } : {}),
 			},
+			...(typeof policy.autoRedeem === "boolean" ? { autoRedeem: policy.autoRedeem } : {}),
 			...(typeof policy.priority === "number" ? { priority: policy.priority } : {}),
 			...(typeof policy.reservePct === "number" ? { reservePct: policy.reservePct } : {}),
 		};

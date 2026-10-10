@@ -277,6 +277,7 @@ export const usageResponseSchema: FluentType<UsageResponse> = type({
 	"+": "reject",
 	generatedAt: "number",
 	reports: arkUsageReportSchema.array(),
+	"resetSweep?": "string[]",
 });
 
 const usageHistoryEntrySchema = type({

@@ -222,6 +222,8 @@ export interface CredentialUpstream {
 	 * {@link AuthStorage.limits.invalidateMatching} fall back to `reload()`.
 	 */
 	markCredentialSuspect(credentialId: number, opts?: { signal?: AbortSignal }): Promise<void>;
+	/** Optional: whether the upstream broker spends `provider`'s saved resets itself, per its latest usage response. */
+	brokerSweepsResets(provider: string): boolean;
 }
 
 /**

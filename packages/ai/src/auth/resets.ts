@@ -156,6 +156,10 @@ export class ResetCredits implements ResetsApi {
 		return promise;
 	}
 
+	brokerSweeps(provider: string): boolean {
+		return this.#deps.store.brokerSweepsResets?.(provider) ?? false;
+	}
+
 	async #redeemAccountReset(
 		provider: string,
 		access: OAuthAccess,

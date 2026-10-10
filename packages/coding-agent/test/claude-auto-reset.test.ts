@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test";
-import type { ResetCreditAccountStatus, UsageReport, UsageResetCredit } from "@oh-my-pi/pi-ai";
+import type { OAuthAccountSummary, ResetCreditAccountStatus, UsageReport, UsageResetCredit } from "@oh-my-pi/pi-ai";
 import {
+	claudeResetStatusesFromReports,
 	planClaudeResetRedemptions,
 	type ClaudeResetPlanInput,
 	type ClaudeResetSkipReason,
@@ -101,7 +102,8 @@ function input(overrides: Partial<ClaudeResetPlanInput> = {}): ClaudeResetPlanIn
 		trigger: "blocked",
 		provider: "anthropic",
 		modelId: "claude-sonnet-4-6",
-		settings: { enabled: true, minBlockedMinutes: 60, keepCredits: 0, salvageHorizonMs: 12 * HOUR },
+		settings: { autoRedeem: "yes", minBlockedMinutes: 60, keepCredits: 0, salvageHorizonMs: 12 * HOUR },
+		accountPolicy: () => undefined,
 		reports: [report()],
 		statuses: [status()],
 		attemptedKeys: new Set(),
@@ -251,7 +253,7 @@ describe("planClaudeResetRedemptions: blocked recovery", () => {
 		expect(cooling.skipped[0]?.reason).toBe("provider-cooldown");
 
 		const reserved = planClaudeResetRedemptions(
-			input({ settings: { enabled: true, minBlockedMinutes: 60, keepCredits: 1, salvageHorizonMs: 12 * HOUR } }),
+			input({ settings: { autoRedeem: "yes", minBlockedMinutes: 60, keepCredits: 1, salvageHorizonMs: 12 * HOUR } }),
 		);
 		expect(reserved.actions).toEqual([]);
 		expect(reserved.skipped[0]?.reason).toBe("reserve");
@@ -274,7 +276,7 @@ describe("planClaudeResetRedemptions: expiry salvage", () => {
 	it("salvages at the inclusive five-minute boundary despite zero horizon, reserve, and zero usage", () => {
 		const urgentInput = input({
 			trigger: "sweep",
-			settings: { enabled: true, minBlockedMinutes: 60, keepCredits: 1, salvageHorizonMs: 0 },
+			settings: { autoRedeem: "yes", minBlockedMinutes: 60, keepCredits: 1, salvageHorizonMs: 0 },
 			reports: [report({ fiveHourUsed: 0, weeklyUsed: 0, sonnetUsed: 0 })],
 			statuses: [
 				status({
@@ -297,7 +299,8 @@ describe("planClaudeResetRedemptions: expiry salvage", () => {
 			},
 		]);
 		expect(
-			planClaudeResetRedemptions({ ...urgentInput, settings: { ...urgentInput.settings, enabled: false } }).actions,
+			planClaudeResetRedemptions({ ...urgentInput, settings: { ...urgentInput.settings, autoRedeem: "no" } })
+				.actions,
 		).toEqual([]);
 		for (const expiresInMs of [-1, 0, 5 * 60_000 + 1]) {
 			expect(
@@ -358,7 +361,7 @@ describe("planClaudeResetRedemptions: expiry salvage", () => {
 	it("uses urgent salvage rather than bypassing the blocked-recovery reserve", () => {
 		const plan = planClaudeResetRedemptions(
 			input({
-				settings: { enabled: true, minBlockedMinutes: 60, keepCredits: 1, salvageHorizonMs: 0 },
+				settings: { autoRedeem: "yes", minBlockedMinutes: 60, keepCredits: 1, salvageHorizonMs: 0 },
 				statuses: [status({ credit: { expiresAt: new Date(NOW + 60_000).toISOString() } })],
 			}),
 		);
@@ -569,5 +572,202 @@ describe("planClaudeResetRedemptions: expiry salvage", () => {
 		expect(plan.actions.map(action => action.accountKey)).toEqual(["anthropic|org-a|11", "anthropic|org-b|22"]);
 		expect(new Set(plan.actions.map(action => action.attemptKey)).size).toBe(2);
 		expect(plan.actions.map(action => action.target.credentialId)).toEqual([11, 22]);
+	});
+});
+
+describe("claudeResetStatusesFromReports", () => {
+	const legacy: OAuthAccountSummary = { position: 0, credentialId: 11, email: "user@example.com", active: true };
+	const early = status({
+		credit: { requiresLimit: false, blocking: [], clears: ["anthropic:7d"], usedFractions: { "anthropic:7d": 0.4 } },
+	});
+
+	function withInventory(usage: UsageReport): UsageReport {
+		const { availableCount, redeemableCount, eligible, nextCreditId, credits } = early;
+		return { ...usage, resetCredits: { availableCount, redeemableCount, eligible, nextCreditId, credits } };
+	}
+
+	it("finds a candidate for a credential stored without its organization under the one discovery stamped on its report", () => {
+		const reports = [withInventory(report({ orgId: "org-a", weeklyUsed: 0.4 }))];
+		const statuses = claudeResetStatusesFromReports([legacy], reports);
+		const plan = planClaudeResetRedemptions(input({ trigger: "sweep", reports, statuses }));
+		expect(plan.actions).toMatchObject([
+			{
+				reason: "expiring-credit",
+				accountKey: "anthropic|org-a|11",
+				target: { provider: "anthropic", credentialId: 11, creditId: "cedar-1", orgId: "org-a" },
+			},
+		]);
+	});
+
+	it("never hands a credential stored without its organization the report of a stored credential for the same account", () => {
+		const sibling: OAuthAccountSummary = { ...legacy, position: 1, credentialId: 22, orgId: "org-a", active: false };
+		const reports = [withInventory(report({ orgId: "org-a", weeklyUsed: 0.4 }))];
+		const statuses = claudeResetStatusesFromReports([legacy, sibling], reports);
+		const plan = planClaudeResetRedemptions(input({ trigger: "sweep", reports, statuses }));
+		expect(plan.actions.map(action => action.target.credentialId)).toEqual([22]);
+		expect(plan.skipped).toContainEqual({ accountKey: "anthropic|-|11", rule: "account", reason: "credits-unknown" });
+	});
+
+	it("keeps a credential stored without its organization apart from another member of that organization", () => {
+		const member: OAuthAccountSummary = {
+			position: 1,
+			credentialId: 22,
+			email: "member@example.com",
+			orgId: "org-a",
+			active: false,
+		};
+		const reports = [
+			withInventory(report({ orgId: "org-a", weeklyUsed: 0.4 })),
+			withInventory(report({ orgId: "org-a", email: "member@example.com", weeklyUsed: 0.4 })),
+		];
+		const statuses = claudeResetStatusesFromReports([legacy, member], reports);
+		const plan = planClaudeResetRedemptions(input({ trigger: "sweep", reports, statuses }));
+		expect(plan.actions.map(action => action.accountKey)).toEqual(["anthropic|org-a|11", "anthropic|org-a|22"]);
+	});
+});
+
+describe("planClaudeResetRedemptions: account autoRedeem override", () => {
+	/** Both organizations hold the same grant; only org-a has a policy, setting `autoRedeem`. */
+	const twoOrganizations = (
+		autoRedeem: boolean,
+		credit: Partial<UsageResetCredit> = {},
+	): Partial<ClaudeResetPlanInput> => ({
+		statuses: [
+			status({ credentialId: 11, orgId: "org-a", active: true, credit }),
+			status({ credentialId: 22, orgId: "org-b", active: false, credit: { ...credit, id: "cedar-2" } }),
+		],
+		accountPolicy: identity =>
+			identity.orgId === "org-a"
+				? { provider: "anthropic", account: { email: "user@example.com", orgId: "org-a" }, autoRedeem }
+				: undefined,
+	});
+	const lastChance = {
+		expiresAt: new Date(NOW + 5 * 60_000).toISOString(),
+		requiresLimit: false,
+		blocking: [],
+		usedFractions: {},
+	};
+	const idle = { fiveHourUsed: 0, weeklyUsed: 0, sonnetUsed: 0 };
+
+	it("restores only the account whose policy turns auto-redeem on while the provider says no", () => {
+		const plan = planClaudeResetRedemptions(
+			input({
+				settings: { autoRedeem: "no", minBlockedMinutes: 60, keepCredits: 0, salvageHorizonMs: 12 * HOUR },
+				reports: [report({ orgId: "org-a" }), report({ orgId: "org-b" })],
+				...twoOrganizations(true),
+			}),
+		);
+		expect(plan.actions).toMatchObject([
+			{ reason: "blocked-account", target: { credentialId: 11 }, autoRedeem: "yes" },
+		]);
+		expect(plan.skipped).toContainEqual({
+			accountKey: "anthropic|org-b|22",
+			rule: "account",
+			reason: "auto-redeem-off",
+		});
+	});
+
+	it("salvages only the account whose policy turns auto-redeem on while the provider says no", () => {
+		const plan = planClaudeResetRedemptions(
+			input({
+				trigger: "sweep",
+				settings: { autoRedeem: "no", minBlockedMinutes: 60, keepCredits: 0, salvageHorizonMs: 12 * HOUR },
+				reports: [report({ orgId: "org-a" }), report({ orgId: "org-b" })],
+				...twoOrganizations(true),
+			}),
+		);
+		expect(plan.actions).toMatchObject([
+			{ reason: "expiring-credit", target: { credentialId: 11 }, autoRedeem: "yes" },
+		]);
+		expect(plan.skipped).toContainEqual({
+			accountKey: "anthropic|org-b|22",
+			rule: "account",
+			reason: "auto-redeem-off",
+		});
+	});
+
+	it("spends a last-chance grant only on the account whose policy turns auto-redeem on while the provider says no", () => {
+		const plan = planClaudeResetRedemptions(
+			input({
+				trigger: "sweep",
+				settings: { autoRedeem: "no", minBlockedMinutes: 60, keepCredits: 1, salvageHorizonMs: 0 },
+				reports: [report({ orgId: "org-a", ...idle }), report({ orgId: "org-b", ...idle })],
+				...twoOrganizations(true, lastChance),
+			}),
+		);
+		expect(plan.actions).toMatchObject([
+			{ reason: "expiring-credit", target: { credentialId: 11 }, expiresInMs: 5 * 60_000, autoRedeem: "yes" },
+		]);
+		expect(plan.skipped).toContainEqual({
+			accountKey: "anthropic|org-b|22",
+			rule: "account",
+			reason: "auto-redeem-off",
+		});
+	});
+
+	it("restores the blocked sibling instead of the active account whose policy turns auto-redeem off", () => {
+		const plan = planClaudeResetRedemptions(
+			input({ reports: [report({ orgId: "org-a" }), report({ orgId: "org-b" })], ...twoOrganizations(false) }),
+		);
+		expect(plan.actions).toMatchObject([
+			{ reason: "blocked-account", target: { credentialId: 22 }, autoRedeem: "yes" },
+		]);
+		expect(plan.skipped).toContainEqual({
+			accountKey: "anthropic|org-a|11",
+			rule: "account",
+			reason: "auto-redeem-off",
+		});
+	});
+
+	it("salvages only the sibling of an account whose policy turns auto-redeem off", () => {
+		const plan = planClaudeResetRedemptions(
+			input({
+				trigger: "sweep",
+				reports: [report({ orgId: "org-a" }), report({ orgId: "org-b" })],
+				...twoOrganizations(false),
+			}),
+		);
+		expect(plan.actions).toMatchObject([
+			{ reason: "expiring-credit", target: { credentialId: 22 }, autoRedeem: "yes" },
+		]);
+		expect(plan.skipped).toContainEqual({
+			accountKey: "anthropic|org-a|11",
+			rule: "account",
+			reason: "auto-redeem-off",
+		});
+	});
+
+	it("lets the last-chance grant of an account whose policy turns auto-redeem off expire while the sibling's is spent", () => {
+		const plan = planClaudeResetRedemptions(
+			input({
+				trigger: "sweep",
+				settings: { autoRedeem: "yes", minBlockedMinutes: 60, keepCredits: 1, salvageHorizonMs: 0 },
+				reports: [report({ orgId: "org-a", ...idle }), report({ orgId: "org-b", ...idle })],
+				...twoOrganizations(false, lastChance),
+			}),
+		);
+		expect(plan.actions).toMatchObject([
+			{ reason: "expiring-credit", target: { credentialId: 22 }, expiresInMs: 5 * 60_000 },
+		]);
+		expect(plan.skipped).toContainEqual({
+			accountKey: "anthropic|org-a|11",
+			rule: "account",
+			reason: "auto-redeem-off",
+		});
+	});
+
+	it("leaves accounts without an override on the provider mode", () => {
+		const plan = planClaudeResetRedemptions(
+			input({
+				trigger: "sweep",
+				settings: { autoRedeem: "unset", minBlockedMinutes: 60, keepCredits: 0, salvageHorizonMs: 12 * HOUR },
+				reports: [report({ orgId: "org-a" }), report({ orgId: "org-b" })],
+				...twoOrganizations(true),
+			}),
+		);
+		expect(plan.actions).toMatchObject([
+			{ reason: "expiring-credit", target: { credentialId: 11 }, autoRedeem: "yes" },
+			{ reason: "expiring-credit", target: { credentialId: 22 }, autoRedeem: "unset" },
+		]);
 	});
 });

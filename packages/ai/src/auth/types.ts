@@ -60,6 +60,8 @@ export interface AuthAccountPolicy {
 	readonly account: AuthAccountSelector;
 	/** Higher values win after hard, plan, reserve, hot-window, and measured-usage safety checks. */
 	readonly priority?: number;
+	/** Overrides the provider's saved-reset auto-redeem mode for this account: `true` = yes, `false` = no. */
+	readonly autoRedeem?: boolean;
 	/** Protected remaining quota percentage for this account. */
 	readonly reservePct?: number;
 }
@@ -1113,6 +1115,8 @@ export interface OAuthApi {
 	 * selector match as routing and never refreshes, ranks, or mutates credentials.
 	 */
 	policy(provider: string, identity: OAuthAccountIdentity): AuthAccountPolicy | undefined;
+	/** Whether an account policy for `provider` sets `autoRedeem: true`, overriding a provider-wide `no`. */
+	enablesAutoRedeem(provider: string): boolean;
 	/**
 	 * Refresh the OAuth credential with the given id through a per-credential
 	 * single-flight. Concurrent callers for the same row await the same upstream
@@ -1361,6 +1365,8 @@ export interface ResetsApi {
 	 * Business refusals return a code; transport errors may throw without losing Claude's request ID.
 	 */
 	redeem(options: RedeemResetCreditOptions): Promise<ResetCreditRedeemOutcome>;
+	/** Whether the auth broker sweeps `provider`'s saved resets itself, per its latest usage response. */
+	brokerSweeps(provider: string): boolean;
 }
 
 /** Persisted credential rate-limit block operations. */

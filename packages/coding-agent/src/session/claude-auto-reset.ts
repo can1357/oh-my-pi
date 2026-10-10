@@ -1,20 +1,26 @@
 import {
+	type AuthAccountPolicy,
+	type OAuthAccountIdentity,
+	type OAuthAccountSummary,
 	type ResetCreditAccountStatus,
 	type ResetCreditTarget,
 	resolveUsedFraction,
 	type UsageLimit,
 	type UsageReport,
 	type UsageResetCredit,
+	type UsageResetCreditDetail,
 } from "@oh-my-pi/pi-ai";
 import { claudeRankingStrategy } from "@oh-my-pi/pi-ai/usage/claude";
 import {
 	ATTEMPT_COOLDOWN_MS,
 	DEBOUNCE_BUCKET_MS,
+	effectiveAutoRedeemMode,
 	IMMINENT_RESET_EXPIRY_MS,
 	REPORT_FRESHNESS_MS,
 	SALVAGE_MIN_USED_FRACTION,
 	type CodexResetTrigger,
 } from "./codex-auto-reset";
+import type { ResetAutoRedeemMode } from "./settings";
 
 const CLAUDE_PROVIDER = "anthropic";
 const JUNIPER_PROGRAM = "juniper_tide";
@@ -25,7 +31,7 @@ const MAX_PLAUSIBLE_WEEKLY_MS = 8 * 24 * 3_600_000;
 
 /** Why an account or grant is unsafe or unhelpful for automatic redemption. */
 export type ClaudeResetSkipReason =
-	| "disabled"
+	| "auto-redeem-off"
 	| "wrong-provider"
 	| "no-identity"
 	| "no-report"
@@ -58,14 +64,20 @@ export interface ClaudeResetPlanInput {
 	provider: string;
 	modelId: string;
 	settings: {
-		enabled: boolean;
+		/** Provider-wide consent; an account policy's `autoRedeem` overrides it for that account. */
+		autoRedeem: ResetAutoRedeemMode;
 		minBlockedMinutes: number;
 		keepCredits: number;
 		salvageHorizonMs: number;
 	};
+	/** Account policy lookup; a policy's `autoRedeem` overrides `settings.autoRedeem` for that account. */
+	accountPolicy: (identity: OAuthAccountIdentity) => AuthAccountPolicy | undefined;
 	/** Fresh usage for every stored Claude account. */
 	reports: UsageReport[] | null;
-	/** Authoritative live Cedar/Juniper eligibility for every stored account. */
+	/**
+	 * Cedar/Juniper eligibility for every stored account: a live listing before
+	 * any spend, or the usage reports' inventory to find salvage candidates.
+	 */
 	statuses: readonly ResetCreditAccountStatus[];
 	attemptedKeys: ReadonlySet<string>;
 	deferredUntilByKey: ReadonlyMap<string, number>;
@@ -81,6 +93,8 @@ export interface ClaudeResetAction {
 	accountKey: string;
 	attemptKey: string;
 	label: string;
+	/** The account's effective consent: `yes` spends without asking, `unset` asks first. */
+	autoRedeem: Exclude<ResetAutoRedeemMode, "no">;
 	availableCount: number;
 	remainingMs?: number;
 	blockedWindows?: string[];
@@ -111,6 +125,7 @@ interface ClaudeAccountSnapshot {
 	target: ResetCreditTarget;
 	label: string;
 	active: boolean;
+	autoRedeem: Exclude<ResetAutoRedeemMode, "no">;
 	availableCount: number;
 	credit: UsageResetCredit;
 	limits: UsageLimit[];
@@ -120,8 +135,12 @@ function normalized(value: unknown): string | undefined {
 	return typeof value === "string" && value.trim() ? value.trim().toLowerCase() : undefined;
 }
 
-function reportMatchesStatus(report: UsageReport, status: ResetCreditAccountStatus): boolean {
-	if (report.provider !== CLAUDE_PROVIDER) return false;
+/** Whether a usage report belongs to a stored account: the organization gates, then account id, else email. */
+export function reportMatchesStatus(
+	report: UsageReport,
+	status: Pick<ResetCreditAccountStatus, "provider" | "orgId" | "accountId" | "email">,
+): boolean {
+	if (report.provider !== status.provider) return false;
 	const reportOrgId = normalized(report.metadata?.orgId);
 	const statusOrgId = normalized(status.orgId);
 	if (reportOrgId !== statusOrgId) return false;
@@ -131,6 +150,49 @@ function reportMatchesStatus(report: UsageReport, status: ResetCreditAccountStat
 	const email = normalized(status.email);
 	if (accountId && reportAccountId) return accountId === reportAccountId;
 	return !!email && email === reportEmail;
+}
+
+/**
+ * Each stored account's Cedar/Juniper status from the inventory on its usage
+ * report, which the report fetch discovered, so a background sweep finds
+ * salvage candidates without listing. The inventory can be carried over a
+ * failed probe, so a spend re-plans from a live listing. An account whose
+ * report carries no inventory is unknown, never empty.
+ */
+export function claudeResetStatusesFromReports(
+	accounts: readonly OAuthAccountSummary[],
+	reports: readonly UsageReport[],
+): ResetCreditAccountStatus[] {
+	const stored = accounts.map((account): ResetCreditAccountStatus => ({
+		...account,
+		provider: CLAUDE_PROVIDER,
+		availableCount: 0,
+		credits: [],
+	}));
+	return stored.map(base => {
+		let status = base;
+		let report = reports.find(candidate => reportMatchesStatus(candidate, base));
+		if (!report && !base.orgId) {
+			// Discovery stamps the organization it resolves for a credential stored
+			// without one, as a live listing does on its status. A report another
+			// stored credential's identity matches is that credential's.
+			const adoptable: ResetCreditAccountStatus[] = [];
+			for (const candidate of reports) {
+				const orgId = candidate.metadata?.orgId;
+				if (typeof orgId !== "string" || stored.some(other => reportMatchesStatus(candidate, other))) continue;
+				const adopted = { ...base, orgId, report: candidate };
+				if (reportMatchesStatus(candidate, adopted)) adoptable.push(adopted);
+			}
+			if (adoptable.length === 1) {
+				status = adoptable[0]!;
+				report = status.report;
+			}
+		}
+		const inventory = report?.resetCredits;
+		if (!report || !inventory) return { ...status, error: "Usage report has no saved-reset inventory" };
+		const credits = inventory.credits?.filter((credit): credit is UsageResetCredit => typeof credit.id === "string");
+		return { ...status, ...inventory, credits: credits ?? [], report };
+	});
 }
 
 function creditExpiryMs(credit: UsageResetCredit): number | undefined {
@@ -149,6 +211,30 @@ function maxPlausibleRemainingMs(limitId: string, limit: UsageLimit | undefined)
 	const duration = limit?.window?.durationMs;
 	if (duration !== undefined && Number.isFinite(duration) && duration > 0) return duration + 3_600_000;
 	return limitId === FIVE_HOUR_LIMIT_ID ? MAX_PLAUSIBLE_FIVE_HOUR_MS : MAX_PLAUSIBLE_WEEKLY_MS;
+}
+
+/** Limits a grant restores: the ones it clears, and only the 5h window for a Juniper grant. */
+export function claudeCoveredLimits(limits: readonly UsageLimit[], credit: UsageResetCreditDetail): UsageLimit[] {
+	const clears = new Set(credit.clears ?? []);
+	return limits.filter(
+		limit => clears.has(limit.id) && (credit.program !== JUNIPER_PROGRAM || limit.id === FIVE_HOUR_LIMIT_ID),
+	);
+}
+
+/** The fullest covered limit by the report's or the grant's own used fraction: what a salvage spend restores. */
+export function fullestClaudeLimit(
+	covered: readonly UsageLimit[],
+	credit: UsageResetCreditDetail,
+): { limit: UsageLimit; used: number } | undefined {
+	let fullest: { limit: UsageLimit; used: number } | undefined;
+	for (const limit of covered) {
+		const resolved = resolveUsedFraction(limit);
+		const observed = resolved === undefined || !Number.isFinite(resolved) ? 0 : Math.max(0, resolved);
+		const server = credit.usedFractions?.[limit.id];
+		const used = Math.max(observed, typeof server === "number" && Number.isFinite(server) ? server : 0);
+		if (!fullest || used > fullest.used) fullest = { limit, used };
+	}
+	return fullest;
 }
 
 function claudeBlockedAttemptKey(
@@ -196,9 +282,6 @@ function skipForEpisode(
  */
 export function planClaudeResetRedemptions(input: ClaudeResetPlanInput): ClaudeResetPlan {
 	const skipped: ClaudeResetSkip[] = [];
-	if (!input.settings.enabled) {
-		return { actions: [], skipped: [{ accountKey: "*", rule: "account", reason: "disabled" }] };
-	}
 	if (input.trigger === "blocked" && input.provider !== CLAUDE_PROVIDER) {
 		return { actions: [], skipped: [{ accountKey: "*", rule: "blocked-account", reason: "wrong-provider" }] };
 	}
@@ -214,6 +297,11 @@ export function planClaudeResetRedemptions(input: ClaudeResetPlanInput): ClaudeR
 			continue;
 		}
 		const skip = (reason: ClaudeResetSkipReason) => skipped.push({ accountKey, rule: "account", reason });
+		const autoRedeem = effectiveAutoRedeemMode(input.settings.autoRedeem, input.accountPolicy(status));
+		if (autoRedeem === "no") {
+			skip("auto-redeem-off");
+			continue;
+		}
 		if (status.error) {
 			skip("credits-unknown");
 			continue;
@@ -297,6 +385,7 @@ export function planClaudeResetRedemptions(input: ClaudeResetPlanInput): ClaudeR
 			},
 			label,
 			active: status.active,
+			autoRedeem,
 			availableCount: status.availableCount,
 			credit,
 			limits,
@@ -412,6 +501,7 @@ export function planClaudeResetRedemptions(input: ClaudeResetPlanInput): ClaudeR
 					best.unblockAtMs,
 				),
 				label: best.snapshot.label,
+				autoRedeem: best.snapshot.autoRedeem,
 				availableCount: best.snapshot.availableCount,
 				remainingMs: best.remainingMs,
 				blockedWindows: best.blockers,
@@ -466,22 +556,12 @@ export function planClaudeResetRedemptions(input: ClaudeResetPlanInput): ClaudeR
 			skip("incomplete-coverage");
 			continue;
 		}
-		const covered = snapshot.limits.filter(
-			limit =>
-				clears.has(limit.id) && (snapshot.credit.program !== JUNIPER_PROGRAM || limit.id === FIVE_HOUR_LIMIT_ID),
-		);
+		const covered = claudeCoveredLimits(snapshot.limits, snapshot.credit);
 		if (covered.length === 0) {
 			skip("unsupported-window");
 			continue;
 		}
-		let fullest: { id: string; used: number } | undefined;
-		for (const limit of covered) {
-			const resolved = resolveUsedFraction(limit);
-			const observed = resolved === undefined || !Number.isFinite(resolved) ? 0 : Math.max(0, resolved);
-			const server = snapshot.credit.usedFractions?.[limit.id];
-			const used = Math.max(observed, typeof server === "number" && Number.isFinite(server) ? server : 0);
-			if (!fullest || used > fullest.used) fullest = { id: limit.id, used };
-		}
+		const fullest = fullestClaudeLimit(covered, snapshot.credit);
 		if (!fullest || (!imminent && fullest.used < SALVAGE_MIN_USED_FRACTION)) {
 			skip("window-mostly-free");
 			continue;
@@ -507,9 +587,10 @@ export function planClaudeResetRedemptions(input: ClaudeResetPlanInput): ClaudeR
 			accountKey: snapshot.accountKey,
 			attemptKey,
 			label: snapshot.label,
+			autoRedeem: snapshot.autoRedeem,
 			availableCount: snapshot.availableCount,
 			expiresInMs: expiresAtMs - input.nowMs,
-			salvageWindow: fullest.id,
+			salvageWindow: fullest.limit.id,
 			salvageUsedFraction: fullest.used,
 			active: snapshot.active,
 			program: snapshot.credit.program ?? "",
