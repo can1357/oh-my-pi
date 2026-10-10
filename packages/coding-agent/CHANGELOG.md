@@ -326,6 +326,7 @@
 - Made browser `tab.observe()` much faster on element-heavy pages, especially over the relay: listed elements are resolved to handles only when `tab.id(n)` uses them ([#14431](https://github.com/can1357/oh-my-pi/pull/14431) by [@will-bogusz](https://github.com/will-bogusz))
 
 ### Fixed
+- A plugin entry or directory the process may not read no longer vanishes silently; the skip now warns with the entry path, while a missing entry stays quiet ([#13484](https://github.com/can1357/oh-my-pi/issues/13484)).
 
 - Fixed Tern tooltips naming keys with Nerd Font icons Tern's UI font lacks (a box after "Thinking effort"); they show keycaps (`⇧⇥`) whatever the symbol preset
 - Fixed `/new`, session switches, and Esc aborts hanging for up to 30 seconds while an extension's `message_end` hook was still running; they now wait only for end-of-turn maintenance.
