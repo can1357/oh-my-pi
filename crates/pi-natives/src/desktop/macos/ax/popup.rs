@@ -227,7 +227,7 @@ fn close_menu(popup: &AXUIElement) -> bool {
 
 /// Runs `probe` every `POLL_INTERVAL` until it yields a value or `wait` has
 /// elapsed; the last probe runs at or after the deadline.
-fn poll<T>(wait: Duration, mut probe: impl FnMut() -> Option<T>) -> Option<T> {
+pub(super) fn poll<T>(wait: Duration, mut probe: impl FnMut() -> Option<T>) -> Option<T> {
 	let deadline = Instant::now() + wait;
 	loop {
 		if let Some(value) = probe() {

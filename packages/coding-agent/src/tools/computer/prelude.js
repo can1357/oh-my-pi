@@ -67,6 +67,7 @@
 	const elementValueMethods = [
 		"value",
 		"setValue",
+		"selectText",
 		"bounds",
 		"attributes",
 		"actions",

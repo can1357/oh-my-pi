@@ -171,6 +171,25 @@ interface ComputerCapabilities {
 	spaces: boolean;
 }
 
+interface ComputerSelectTextOptions {
+	/** Text that must directly precede the match. */
+	prefix?: string;
+	/** Text that must directly follow the match. */
+	suffix?: string;
+	/** `"text"` (default) selects the match; `"start"`/`"end"` place a caret before/after it. */
+	select?: "text" | "start" | "end";
+}
+
+/** Selection read back from the element, in UTF-16 code units. */
+interface ComputerTextSelection {
+	start: number;
+	length: number;
+	/** The selected text; empty for a caret. */
+	text: string;
+	/** Whether the element is focused in its app; typing and AX insertion act on the focused element. */
+	focused: boolean;
+}
+
 /** Live accessibility element resolved from a snapshot ref; expired refs throw `StaleRef`. */
 interface ComputerElement {
 	/** Snapshot ref tag, e.g. `e5`. */
@@ -184,6 +203,15 @@ interface ComputerElement {
 	readonly childCount: number;
 	value(): Promise<string | undefined>;
 	setValue(value: string): Promise<void>;
+	/**
+	 * Select `text` in this element's value by accessibility, without focus change, pointer
+	 * movement or keystrokes; the value is unchanged. `prefix`/`suffix` must directly surround the
+	 * match and pick one of several; `select: "start" | "end"` places a caret there instead.
+	 * Throws when the selection is not settable, the text is missing, or it is ambiguous.
+	 * Returns the selection read back. In an editable field, a following `type` replaces it when
+	 * `focused` is true; a terminal's selection is displayed output, not its input line.
+	 */
+	selectText(text: string, options?: ComputerSelectTextOptions): Promise<ComputerTextSelection>;
 	/** Bounds in global desktop coordinates, or null when the element has none. */
 	bounds(): Promise<ComputerBounds | null>;
 	attributes(): Promise<Record<string, string>>;
