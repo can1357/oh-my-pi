@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed OpenCode Zen Jev judgments to use System One, show the paid input rate, and list the free variant as known-free ([#15249](https://github.com/can1357/oh-my-pi/issues/15249)).
+
 ## [18.8.8] - 2026-10-10
 
 ### Added

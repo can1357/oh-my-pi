@@ -116,4 +116,27 @@ provider "opencode-zen" {
 		thinking-efforts "minimal" "low" "medium" "high"
 		thinking-mode "effort"
 	}
+	// Zen exposes both Jev variants through System One, even when /v1/models omits one.
+	seed api="typesafe" base-url="https://opencode.ai/zen" bundle="always" precedence="seed" {
+		model "jev-1.13" name="Jev 1.13" {
+			reasoning #false
+			input "text"
+			cost input=0.042 output=0 cache-read=0 cache-write=0
+			limits
+			supports-tools #false
+		}
+		model "jev-1.13-free" name="Jev 1.13 Free" {
+			reasoning #false
+			input "text"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits
+			supports-tools #false
+		}
+	}
+	models "jev-1.13" "jev-1.13-free" {
+		kind "judge"
+	}
+	models "jev-1.13-free" {
+		pricing-status "free"
+	}
 }

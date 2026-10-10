@@ -8,7 +8,7 @@ import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { readModelCache, writeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
 import { resolveProviderModels } from "@oh-my-pi/pi-catalog/model-manager";
 import { getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
-import { getBundledModels } from "@oh-my-pi/pi-catalog/models";
+import { getBundledModels, getModelPricingStatus } from "@oh-my-pi/pi-catalog/models";
 import {
 	fetchWellKnownModels,
 	MODELS_DEV_PROVIDER_DESCRIPTORS,
@@ -490,6 +490,48 @@ describe("Shared models.dev catalog fallback", () => {
 });
 
 describe("OpenCode provider discovery", () => {
+	test("discovers both Zen Jev judgments with distinct published prices", async () => {
+		const options = opencodeZenModelManagerOptions({
+			apiKey: "zen-account-key",
+			fetch: async () => modelListResponse(["jev-1.13", "gpt-5.5"]),
+		});
+		const discovered = await options.fetchDynamicModels?.();
+		if (!discovered) throw new Error("Zen model discovery failed");
+		const jev = discovered.filter(spec => spec.id.startsWith("jev-")).map(buildModel);
+		expect(jev.map(model => model.id).sort()).toEqual(["jev-1.13", "jev-1.13-free"]);
+		for (const model of jev) {
+			expect(model.api).toBe("typesafe");
+			expect(model.baseUrl).toBe("https://opencode.ai/zen");
+			expect(model.kind).toBe("judge");
+		}
+		const paid = jev.find(model => model.id === "jev-1.13");
+		const free = jev.find(model => model.id === "jev-1.13-free");
+		expect(paid?.cost).toEqual({ input: 0.042, output: 0, cacheRead: 0, cacheWrite: 0 });
+		expect(paid && getModelPricingStatus(paid)).toBe("fixed");
+		expect(free?.cost).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
+		expect(free && getModelPricingStatus(free)).toBe("free");
+	});
+
+	test("keeps the published Jev rates when Zen lists both ids without pricing metadata", async () => {
+		const options = opencodeZenModelManagerOptions({
+			apiKey: "zen-account-key",
+			fetch: async () => modelListResponse(["jev-1.13", "jev-1.13-free"]),
+		});
+		const discovered = await options.fetchDynamicModels?.();
+		if (!discovered) throw new Error("Zen model discovery failed");
+		expect(discovered.filter(spec => spec.id.startsWith("jev-"))).toHaveLength(2);
+		const free = discovered.find(spec => spec.id === "jev-1.13-free");
+		expect(free && getModelPricingStatus(buildModel(free))).toBe("free");
+	});
+
+	test("does not replace failed Zen discovery with only the Jev seeds", async () => {
+		const options = opencodeZenModelManagerOptions({
+			apiKey: "zen-account-key",
+			fetch: async () => new Response("unavailable", { status: 503 }),
+		});
+		expect(await options.fetchDynamicModels?.()).toBeNull();
+	});
+
 	test("invalidates cached GLM-5.3 Flash effort metadata on upgrade (issue #9960)", async () => {
 		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-catalog-opencode-glm53-flash-cache-"));
 		const cacheDbPath = path.join(tempDir, "models.db");
@@ -910,9 +952,13 @@ describe("OpenCode provider discovery", () => {
 
 			expect(freeOptions.cacheProviderId).not.toBe(paidOptions.cacheProviderId);
 			expect(freeResult.stale).toBe(false);
-			expect(freeResult.models.map(model => model.id).sort()).toEqual([...LIVE_FREE_MODEL_IDS].sort());
+			expect(freeResult.models.map(model => model.id).sort()).toEqual(
+				[...LIVE_FREE_MODEL_IDS, "jev-1.13", "jev-1.13-free"].sort(),
+			);
 			expect(paidResult.stale).toBe(false);
-			expect(paidResult.models.map(model => model.id).sort()).toEqual([...LIVE_PAID_MODEL_IDS].sort());
+			expect(paidResult.models.map(model => model.id).sort()).toEqual(
+				[...LIVE_PAID_MODEL_IDS, "jev-1.13", "jev-1.13-free"].sort(),
+			);
 			expect([freeFetches, paidFetches]).toEqual([1, 1]);
 		} finally {
 			await fs.rm(tempDir, { recursive: true, force: true });
