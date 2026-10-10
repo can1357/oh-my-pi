@@ -21,12 +21,6 @@ export type RetryFallbackChains = Record<string, string[]>;
 /** Policy controlling restoration of a fallback chain's primary model. */
 export type RetryFallbackRevertPolicy = "never" | "cooldown-expiry" | "when-healthy";
 
-/**
- * Why a fallback holds against cooldown-expiry restoration: the primary's usage
- * health moved the session, or the primary refused this conversation.
- */
-export type RetryFallbackPin = "usage" | "classifier-refusal";
-
 /** Parsed model selector used by retry fallback resolution. */
 export interface RetryFallbackSelector {
 	raw: string;
@@ -59,7 +53,10 @@ export interface ActiveRetryFallbackState {
 	originalSelector: string;
 	originalThinkingLevel: ConfiguredThinkingLevel | undefined;
 	lastAppliedFallbackThinkingLevel: ConfiguredThinkingLevel | undefined;
-	pin: RetryFallbackPin | undefined;
+	/** The primary's usage health moved the session here. */
+	pinned: boolean;
+	/** The primary refused this conversation; no policy returns to it. */
+	refusalPinned?: boolean;
 	/**
 	 * Set once a turn on the fallback target settles successfully. Until then the
 	 * switch is only a routing decision — nothing has been produced by the new

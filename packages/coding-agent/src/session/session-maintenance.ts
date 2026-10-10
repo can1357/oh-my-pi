@@ -3945,6 +3945,20 @@ export class SessionMaintenance {
 	}
 
 	/**
+	 * Whether `model` takes the live context plus `pendingMessages` (the request
+	 * about to go out) inside its window and below the pre-prompt compaction
+	 * threshold, i.e. without compacting first.
+	 */
+	requestFitsModelWithoutCompaction(model: Model, pendingMessages: AgentMessage[]): boolean {
+		const contextWindow = model.contextWindow ?? 0;
+		if (contextWindow <= 0) return true;
+		const compactionSettings = this.#compactionSettings;
+		const contextTokens = this.#estimatePrePromptContextTokens(pendingMessages, contextWindow);
+		const fitBudget = Math.max(0, contextWindow - resolveBudgetReserveTokens(contextWindow, compactionSettings));
+		return contextTokens <= fitBudget && !shouldCompact(contextTokens, contextWindow, compactionSettings);
+	}
+
+	/**
 	 * Retry-side check: whether an overflow/incomplete recovery rebuilt a prompt
 	 * that fits the active model's window again. Callers MUST invoke this AFTER
 	 * dropping the failed assistant from `this.#host.messages()` so the just-failed

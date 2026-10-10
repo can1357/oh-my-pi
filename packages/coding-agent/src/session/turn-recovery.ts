@@ -62,7 +62,6 @@ import {
 	getRetryFallbackRevertPolicy,
 	parseRetryFallbackSelector,
 	type RetryFallbackChains,
-	type RetryFallbackPin,
 	type RetryFallbackResolutionContext,
 	type RetryFallbackRevertPolicy,
 	type RetryFallbackSelector,
@@ -226,6 +225,11 @@ export interface TurnRecoveryHost {
 	 * `SessionMaintenance.contextFitsModel`.
 	 */
 	contextFitsModel(model: Model, excludedMessage?: AssistantMessage): boolean;
+	/**
+	 * Whether `model` takes the live context plus `pendingMessages` without
+	 * pre-prompt compaction. See `SessionMaintenance.requestFitsModelWithoutCompaction`.
+	 */
+	requestFitsModelWithoutCompaction(model: Model, pendingMessages: AgentMessage[]): boolean;
 	/** Whether streamed text has already been committed to the active output sink. */
 	textOutputCommitted(): boolean;
 	thinkingLevel(): ThinkingLevel | undefined;
@@ -374,7 +378,7 @@ export class TurnRecovery {
 			this.#activeRetryFallback = {
 				...options.initialRetryFallback,
 				lastAppliedFallbackThinkingLevel: host.configuredThinkingLevel(),
-				pin: options.initialRetryFallback.pin,
+				pinned: options.initialRetryFallback.pinned ?? false,
 			};
 			this.#markFallbackRouted();
 		}
@@ -715,13 +719,24 @@ export class TurnRecovery {
 	}
 
 	/**
-	 * Restores the configured primary once `retry.fallbackRevertPolicy` allows it.
+	 * Restores the configured primary under `retry.fallbackRevertPolicy:
+	 * cooldown-expiry`. `when-healthy` returns through
+	 * {@link maybeReturnToHealthyPrimary} once the request is assembled.
 	 * @returns true when the active model was actually switched back to the
 	 * primary, so callers can re-run the pre-send context-fit check against the
 	 * reverted (possibly smaller) window before issuing the next request.
 	 */
 	maybeRestoreRetryFallbackPrimary(signal?: AbortSignal): Promise<boolean> {
-		return this.#maybeRestoreRetryFallbackPrimary(signal);
+		return this.#maybeRestoreRetryFallbackPrimary(signal, undefined);
+	}
+
+	/**
+	 * Returns to the primary under `retry.fallbackRevertPolicy: when-healthy`.
+	 * `pendingMessages` is the request about to go out on top of the live
+	 * context; the primary must take it without compacting.
+	 */
+	maybeReturnToHealthyPrimary(pendingMessages: AgentMessage[], signal?: AbortSignal): Promise<boolean> {
+		return this.#maybeRestoreRetryFallbackPrimary(signal, pendingMessages);
 	}
 
 	/** Applies model fallback policy from live usage health before a turn starts. */
@@ -1972,7 +1987,7 @@ export class TurnRecovery {
 		}
 		this.#usageReserveApproval = undefined;
 		return this.applyRetryFallbackCandidate(fallback.role, fallback.selector, currentSelector, {
-			pin: "usage",
+			pinFallback: true,
 			apiKey: fallback.apiKey,
 			signal,
 			reason: describeUsageFallback(health, cfgRetryUsageReservePct.get(this.#host.settings)),
@@ -2021,7 +2036,13 @@ export class TurnRecovery {
 		role: string,
 		selector: RetryFallbackSelector,
 		currentSelector: string,
-		options?: { pin?: RetryFallbackPin; apiKey?: string; signal?: AbortSignal; reason?: string },
+		options?: {
+			pinFallback?: boolean;
+			pinFallbackForRefusal?: boolean;
+			apiKey?: string;
+			signal?: AbortSignal;
+			reason?: string;
+		},
 	): Promise<boolean> {
 		const resolved = resolveModelOverride([selector.raw], this.#host.modelRegistry, this.#host.settings);
 		const candidate = resolved.model ?? this.#host.modelRegistry.find(selector.provider, selector.id);
@@ -2086,14 +2107,14 @@ export class TurnRecovery {
 				originalSelector: currentSelector,
 				originalThinkingLevel: currentThinkingLevel,
 				lastAppliedFallbackThinkingLevel: nextThinkingLevel,
-				pin: options?.pin,
+				pinned: options?.pinFallback === true,
+				refusalPinned: options?.pinFallbackForRefusal === true,
 			};
 		} else {
 			this.#activeRetryFallback.lastAppliedFallbackThinkingLevel = nextThinkingLevel;
-			// A refusal pin outranks a usage pin: health recovery never answers a refusal.
-			if (options?.pin && this.#activeRetryFallback.pin !== "classifier-refusal") {
-				this.#activeRetryFallback.pin = options.pin;
-			}
+			this.#activeRetryFallback.pinned = this.#activeRetryFallback.pinned || options?.pinFallback === true;
+			this.#activeRetryFallback.refusalPinned =
+				this.#activeRetryFallback.refusalPinned || options?.pinFallbackForRefusal === true;
 		}
 		await this.#host.syncAfterModelChange(previousEditMode);
 		await this.#host.emitSessionEvent({
@@ -2111,7 +2132,7 @@ export class TurnRecovery {
 		failedMessage: AssistantMessage,
 		options?: {
 			excludeProvider?: string;
-			pin?: RetryFallbackPin;
+			pinFallbackForRefusal?: boolean;
 			preserveFailedTurn?: boolean;
 			wrapAround?: boolean;
 		},
@@ -2187,7 +2208,7 @@ export class TurnRecovery {
 					reason: `Request failed: ${failedMessage.errorMessage ?? "provider returned an error without details"}`,
 				});
 				const editModeChanged = this.#host.resolveActiveEditMode() !== previousEditMode;
-				if (applied && options?.pin === "classifier-refusal" && canRedeemFallbackCredit && !editModeChanged) {
+				if (applied && options?.pinFallbackForRefusal === true && canRedeemFallbackCredit && !editModeChanged) {
 					this.#activeFallbackCreditRedemption = {
 						targetSelector: `${candidate.provider}/${candidate.id}`,
 						handle: failedMessage.fallbackCreditHandle!,
@@ -2309,15 +2330,20 @@ export class TurnRecovery {
 		return true;
 	}
 
-	async #maybeRestoreRetryFallbackPrimary(signal?: AbortSignal): Promise<boolean> {
+	async #maybeRestoreRetryFallbackPrimary(
+		signal: AbortSignal | undefined,
+		pendingMessages: AgentMessage[] | undefined,
+	): Promise<boolean> {
 		const fallback = this.#activeRetryFallback;
 		if (!fallback) return false;
 		const policy = this.#getRetryFallbackRevertPolicy();
 		if (policy === "never") return false;
+		// `when-healthy` decides on the assembled request; `cooldown-expiry` keeps its earlier slot.
+		if ((policy === "when-healthy") !== (pendingMessages !== undefined)) return false;
 		// A refusal is the primary's verdict on this conversation, which usage
 		// recovery does not change (#10206).
-		if (fallback.pin === "classifier-refusal") return false;
-		if (fallback.pin === "usage" && policy !== "when-healthy") return false;
+		if (fallback.refusalPinned) return false;
+		if (fallback.pinned && policy !== "when-healthy") return false;
 
 		const {
 			originalSelector: originalSelectorRaw,
@@ -2356,8 +2382,13 @@ export class TurnRecovery {
 		if (!primaryModel) return false;
 		const apiKey = await this.#host.modelRegistry.getApiKey(primaryModel, this.#host.sessionId());
 		if (!apiKey) return false;
-		if (policy === "when-healthy") {
-			const canReturn = await this.#primaryCanTakeSessionBack(primaryModel, fallback.pin, signal);
+		if (pendingMessages) {
+			const canReturn = await this.#primaryCanTakeSessionBack(
+				primaryModel,
+				fallback.pinned,
+				pendingMessages,
+				signal,
+			);
 			if (
 				!canReturn ||
 				signal?.aborted ||
@@ -2387,17 +2418,19 @@ export class TurnRecovery {
 	}
 
 	/**
-	 * `when-healthy` return gate. The primary must hold the live context without
-	 * compacting and show usage headroom above its reserve. Unknown usage keeps
-	 * cooldown-expiry behavior for an error detour and holds a usage detour, so a
-	 * detour only ends on the same kind of evidence that started it.
+	 * `when-healthy` return gate. The primary must show usage headroom above its
+	 * reserve and take the pending request without compacting. Unknown usage
+	 * keeps cooldown-expiry behavior for an error detour and holds a usage
+	 * detour, so a detour only ends on the same kind of evidence that started it.
+	 * Usage is read first: it is cached, while the fit check measures the whole
+	 * context.
 	 */
 	async #primaryCanTakeSessionBack(
 		primaryModel: Model,
-		pin: RetryFallbackPin | undefined,
+		usagePinned: boolean,
+		pendingMessages: AgentMessage[],
 		signal: AbortSignal | undefined,
 	): Promise<boolean> {
-		if (!this.#host.contextFitsModel(primaryModel)) return false;
 		let state: ModelUsageHealthState;
 		try {
 			const health = await this.#host.modelRegistry.authStorage.health.model(primaryModel.provider, {
@@ -2418,7 +2451,8 @@ export class TurnRecovery {
 			});
 			state = "unknown";
 		}
-		return state === "healthy" || (state === "unknown" && pin === undefined);
+		if (state !== "healthy" && (state !== "unknown" || usagePinned)) return false;
+		return this.#host.requestFitsModelWithoutCompaction(primaryModel, pendingMessages);
 	}
 
 	#parseRetryAfterMsFromError(errorMessage: string): number | undefined {
@@ -2714,7 +2748,7 @@ export class TurnRecovery {
 				}
 				switchedModel = await this.#tryRetryModelFallback(currentSelector, message, {
 					excludeProvider: longUsageLimitFallback ? currentModel.provider : undefined,
-					pin: classifierRefusal ? "classifier-refusal" : undefined,
+					pinFallbackForRefusal: classifierRefusal,
 					preserveFailedTurn,
 					wrapAround: longUsageLimitFallback,
 				});

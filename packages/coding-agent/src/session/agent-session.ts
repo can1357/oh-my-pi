@@ -1737,6 +1737,8 @@ export class AgentSession implements SettingsScope {
 			configWarnings: this.configWarnings,
 			model: () => this.model,
 			contextFitsModel: (model, excludedMessage) => this.#maintenance.contextFitsModel(model, excludedMessage),
+			requestFitsModelWithoutCompaction: (model, pendingMessages) =>
+				this.#maintenance.requestFitsModelWithoutCompaction(model, pendingMessages),
 			textOutputCommitted: () => this.#textOutputCommitted,
 			thinkingLevel: () => this.thinkingLevel,
 			configuredThinkingLevel: () => this.configuredThinkingLevel(),
@@ -4542,7 +4544,9 @@ export class AgentSession implements SettingsScope {
 		coalescedSources: Set<string>,
 	): Promise<AgentContinueOutcome> {
 		try {
-			const reverted = await this.#recovery.maybeRestoreRetryFallbackPrimary(signal);
+			const reverted =
+				(await this.#recovery.maybeRestoreRetryFallbackPrimary(signal)) ||
+				(await this.#recovery.maybeReturnToHealthyPrimary([], signal));
 			if (signal.aborted || this.#isDisposed || this.#abortInProgress) {
 				return { status: "skipped", reason: "post-restore-unavailable" };
 			}
@@ -7834,6 +7838,13 @@ export class AgentSession implements SettingsScope {
 				for (const fileMentionMessage of fileMentionMessages) {
 					messages.push(await this.#normalizeAgentMessageImages(fileMentionMessage));
 				}
+			}
+
+			// `when-healthy` returns only when the primary takes this request
+			// without compacting, so it waits for the prompt and its attachments.
+			await this.#recovery.maybeReturnToHealthyPrimary(messages, setupAbort.signal);
+			if (this.#promptGeneration !== generation) {
+				return false;
 			}
 
 			const preparation = await this.#prepareAgentStart(

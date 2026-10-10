@@ -147,8 +147,8 @@ export interface InitialRetryFallbackState {
 	originalSelector: string;
 	/** Thinking selector configured for the unavailable primary. */
 	originalThinkingLevel: ConfiguredThinkingLevel | undefined;
-	/** Set when startup selected this fallback from live usage health. */
-	pin?: "usage";
+	/** Prevent cooldown restoration when startup selected this fallback from live usage health. */
+	pinned?: boolean;
 }
 
 /** Dependencies and initial state used to construct an AgentSession. */

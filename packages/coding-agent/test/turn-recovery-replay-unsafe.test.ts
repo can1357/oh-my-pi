@@ -76,6 +76,7 @@ function createHost(
 		configWarnings: [],
 		model: () => model,
 		contextFitsModel: () => true,
+		requestFitsModelWithoutCompaction: () => true,
 		textOutputCommitted: () => options.textOutputCommitted !== false,
 		thinkingLevel: () => undefined,
 		configuredThinkingLevel: () => undefined,
@@ -163,7 +164,7 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 				thinkingLevel: undefined,
 			},
 			`${model.provider}/${model.id}`,
-			{ pin: "usage", apiKey: "test-key", signal: controller.signal },
+			{ pinFallback: true, apiKey: "test-key", signal: controller.signal },
 		);
 
 		await fallbackApplied.promise;
@@ -214,7 +215,7 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 				thinkingLevel: undefined,
 			},
 			`${model.provider}/${model.id}`,
-			{ pin: "usage", apiKey: "test-key" },
+			{ pinFallback: true, apiKey: "test-key" },
 		);
 
 		await fallbackApplied.promise;
@@ -260,7 +261,7 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 				thinkingLevel: undefined,
 			},
 			`${model.provider}/${model.id}`,
-			{ pin: "usage", apiKey: "test-key", signal: controller.signal },
+			{ pinFallback: true, apiKey: "test-key", signal: controller.signal },
 		);
 
 		await eventStarted.promise;
