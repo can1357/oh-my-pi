@@ -899,6 +899,7 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 
 	/** Update the canonical editor reference after InteractiveMode remounts a custom editor. */
 	setEditor(editor: CustomEditor): void {
+		this.ui.replaceHeldFocus(this.#editor, editor);
 		this.#editor = editor;
 	}
 
