@@ -392,6 +392,9 @@
 - Fixed Mnemopi embedding workers (and other local-model workers) staying alive and holding gigabytes of RAM after the omp process that started them exited mid-embedding ([#14340](https://github.com/can1357/oh-my-pi/issues/14340))
 - Fixed a supervised PTY service on Windows hanging when it asks the terminal for the cursor position; the launch broker now answers the query as it does on Linux and macOS
 
+- Fixed two more Code Mode `display()` previews dropping the read continuation notice above the 8 KB model-visible cap: the streaming path on a file past `SNAPSHOT_MAX_BYTES`, which appends `[More lines in file (… total; not scanned to EOF). Use :N to continue]` and sets no `truncation` metadata, and a directory read sliced by a line selector, which appends `[N more lines in listing. Use :N to continue]`. Both now survive the cap like the byte-capped window notice did ([#12700](https://github.com/can1357/oh-my-pi/issues/12700) by [@F0Rextasy](https://github.com/F0Rextasy)).
+- Fixed a Code Mode `display()` preview dropping the read continuation notice when the value exceeded the 8 KB model-visible cap, leaving the model truncated content and no way to reach the rest. Notices are now re-attached after the elision marker inside that same cap, with any that did not fit counted in the marker, and only when they really end the field they came from, so a file that quotes the notice no longer invents a paging hint ([#12700](https://github.com/can1357/oh-my-pi/issues/12700) by [@F0Rextasy](https://github.com/F0Rextasy)).
+
 ## [18.6.2] - 2026-10-04
 
 ### Fixed

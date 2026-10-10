@@ -158,6 +158,101 @@ interface FormattedDisplayJson {
 }
 
 /**
+ * Matches the serialised form because the separator is the escape `\n`, not a newline, so the line-based helper cannot see it.
+ *
+ * Each alternative is the literal opening of one notice `read` can emit at
+ * `tools/read.ts`: `Showing lines …` (a byte-capped window), `More lines in
+ * file (` (the streaming path on a file past `SNAPSHOT_MAX_BYTES`, which never
+ * reaches EOF and therefore carries no `truncation` object to describe it),
+ * `\d+ more lines in listing` (a directory read sliced by a line selector),
+ * `Some lines truncated to ` (bracket context), and the two grep match/result
+ * limits. A notice the model can act on has to survive the cap even when it
+ * is the last line of a field.
+ *
+ * The closing quote anchors each match to a field tail: `formatOutputNotice`
+ * appends the notice last, so a notice with content behind it is a file
+ * quoting the format, and re-attaching that would hand the model a paging hint
+ * for text it is not reading.
+ */
+const SERIALIZED_OUTPUT_NOTICE =
+	/\[(?:Showing |More lines in file \(|\d+ more lines in listing|Some lines truncated to |\d+ matches limit reached\. Use limit=\d+ for more|\d+ results limit reached)[^\]\\]*\](?=")/g;
+
+/** Share of the preview budget the re-attached notices may claim. */
+const NOTICE_TAIL_BUDGET_BYTES = Math.floor(MAX_DISPLAY_TEXT_BYTES / 4);
+
+interface SerializedNotice {
+	text: string;
+	/** UTF-16 offset into the serialised value, to compare against the head cut. */
+	index: number;
+}
+
+function collectSerializedNotices(fullText: string): SerializedNotice[] {
+	return [...fullText.matchAll(SERIALIZED_OUTPUT_NOTICE)].map(match => ({
+		text: match[0],
+		index: match.index ?? 0,
+	}));
+}
+
+function byteLength(text: string): number {
+	return Buffer.byteLength(text, "utf-8");
+}
+
+/**
+ * Join the re-attached notices into at most `budgetBytes`. The tail used to be
+ * appended after the truncation, so a value carrying hundreds of notices came
+ * out at 18,740 bytes against the 8,000 byte cap. Notices that do not fit are
+ * dropped and counted: a silently short tail reads as "that was all of them".
+ */
+function capNoticeTail(notices: readonly string[], budgetBytes: number): string {
+	if (notices.length === 0 || budgetBytes <= 0) return "";
+	// Measure the prefix in one pass rather than dropping the last notice and
+	// re-joining: the notice text is model-controlled, so a value can carry
+	// thousands of them and the join-per-drop loop was quadratic in that count.
+	// One notice is kept whatever it weighs, so the tail never reads as empty.
+	let kept = 1;
+	let joinedBytes = byteLength(notices[0]!);
+	while (kept < notices.length) {
+		const nextBytes = joinedBytes + 1 + byteLength(notices[kept]!);
+		if (nextBytes > budgetBytes) break;
+		joinedBytes = nextBytes;
+		kept++;
+	}
+	const dropped = notices.length - kept;
+	const marker = dropped > 0 ? `\n[…${dropped} more notices elided…]` : "";
+	const room = budgetBytes - byteLength(marker);
+	if (room <= 0) return marker;
+	return `${truncateHeadBytes(notices.slice(0, kept).join("\n"), room).text}${marker}`;
+}
+
+/**
+ * Build the capped model-visible preview: a head-truncated prefix, the elision
+ * marker, then the notices the cut dropped. A notice is a tail line of one
+ * field, so the head cut takes it with everything else, and without the tail
+ * the model has truncated content and no way to reach the rest.
+ */
+function formatCappedPreview(fullText: string): string {
+	const headBudget = MAX_DISPLAY_TEXT_BYTES - DISPLAY_ELISION_RESERVE_BYTES;
+	// Scanned once for the whole settle: `fullText` is unbounded and the loop
+	// below re-decides the cut several times.
+	const notices = collectSerializedNotices(fullText);
+	const droppedAfter = (cut: number) =>
+		notices.filter(notice => notice.index >= cut).map(notice => notice.text);
+	let head = truncateHeadBytes(fullText, headBudget);
+	let noticeTail = capNoticeTail(droppedAfter(head.text.length), NOTICE_TAIL_BUDGET_BYTES);
+	// The tail shares the budget with the head, so reserving its bytes shortens
+	// the head, which can drop a further notice into the tail. Settle first.
+	for (let pass = 0; pass < 4; pass++) {
+		const nextHead = truncateHeadBytes(fullText, headBudget - byteLength(noticeTail));
+		const nextTail = capNoticeTail(droppedAfter(nextHead.text.length), NOTICE_TAIL_BUDGET_BYTES);
+		if (nextHead.text === head.text && nextTail === noticeTail) break;
+		head = nextHead;
+		noticeTail = nextTail;
+	}
+	const elided = `\n[…${fullText.length - head.text.length}ch elided…]`;
+	return noticeTail ? `${head.text}${elided}\n${noticeTail}` : `${head.text}${elided}`;
+}
+
+/**
  * Format one structured `display()` value for the model text and the tool
  * `details`. The model-visible preview is always capped at
  * {@link MAX_DISPLAY_TEXT_BYTES}. When the value exceeds that cap, the full
@@ -176,9 +271,7 @@ function formatDisplayJson(value: unknown, canSpill: boolean): FormattedDisplayJ
 	if (totalBytes <= MAX_DISPLAY_TEXT_BYTES) {
 		return { fullText, previewText: fullText, detailsValue: value, spillFullValue: false };
 	}
-
-	const head = truncateHeadBytes(fullText, MAX_DISPLAY_TEXT_BYTES - DISPLAY_ELISION_RESERVE_BYTES);
-	const previewText = `${head.text}\n[…${fullText.length - head.text.length}ch elided…]`;
+	const previewText = formatCappedPreview(fullText);
 	// Without an artifact to mirror into, keep the full value in details: there
 	// is no session JSONL to bloat, and discarding it would strand large
 	// displays from SDK consumers that read `details.jsonOutputs`.
