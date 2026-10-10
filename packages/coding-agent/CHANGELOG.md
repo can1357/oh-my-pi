@@ -5,6 +5,7 @@
 ### Added
 
 - Added optional rule frontmatter `reminder` for explicitly authored operational TTSR instructions (nonempty, at most 1024 UTF-8 bytes). All TTSR delivery channels use it while retaining complete rule bodies for normal readers; absent or invalid reminders keep the full instructions instead of truncating or disabling rules.
+- Added **Extra Context Files** to `/settings` → **Context** so custom instruction filenames can be configured without editing YAML ([#15252](https://github.com/can1357/oh-my-pi/pull/15252) by [@Shadorain](https://github.com/Shadorain)).
 
 ## [18.8.9] - 2026-10-10
 
