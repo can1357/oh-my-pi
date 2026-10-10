@@ -36,7 +36,7 @@ export const MAX_TOOL_CALL_ID_LENGTH = 64;
  * ids verbatim as provider correlation tokens), so ONLY these origins may be
  * canonicalized to their `call_` component for pairing.
  */
-function isResponsesFamilyApi(api: Api | undefined): boolean {
+export function isResponsesFamilyApi(api: Api | undefined): boolean {
 	return api === "openai-responses" || api === "openai-codex-responses" || api === "azure-openai-responses";
 }
 

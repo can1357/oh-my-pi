@@ -142,6 +142,40 @@ describe("streamDevin history handoff", () => {
 		expect(result?.toolCallId).toBe(callId);
 	});
 
+	it("keeps distinct opaque pipe-bearing ids from non-Responses sources paired with their own results", async () => {
+		const request = await captureRequest({
+			messages: [
+				{ role: "user", content: "start", timestamp: 1 },
+				assistant({
+					api: "openai-completions",
+					provider: "openrouter",
+					model: "some-model",
+					stopReason: "toolUse",
+					content: [
+						{ type: "toolCall", id: "call_A|first", name: "read", arguments: { path: "a.ts" } },
+						{ type: "toolCall", id: "call_A|second", name: "read", arguments: { path: "b.ts" } },
+					],
+				}),
+				{
+					role: "toolResult",
+					toolCallId: "call_A|second",
+					toolName: "read",
+					content: [{ type: "text", text: "second contents" }],
+					isError: false,
+					timestamp: 2,
+				},
+				{ role: "user", content: "continue", timestamp: 3 },
+			],
+		});
+
+		const call = request.chatMessagePrompts[1];
+		const results = request.chatMessagePrompts.filter(prompt => prompt.toolCallId);
+		const [firstId, secondId] = call?.toolCalls.map(toolCall => toolCall.id) ?? [];
+		expect(firstId).not.toBe(secondId);
+		expect(results.find(result => result.toolCallId === secondId)?.prompt).toBe("second contents");
+		expect(results.find(result => result.toolCallId === firstId)?.prompt).not.toBe("second contents");
+	});
+
 	it("accepts a bare-string system prompt", async () => {
 		const request = await captureRequest({
 			systemPrompt: "You are a test." as unknown as string[],

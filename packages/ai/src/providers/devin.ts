@@ -61,7 +61,7 @@ import {
 	ConnectFrameDecoder,
 	frameConnectMessage,
 } from "./connect-frame";
-import { responsesCallComponent, transformMessages } from "./transform-messages";
+import { isResponsesFamilyApi, responsesCallComponent, transformMessages } from "./transform-messages";
 
 /** Base host for Codeium/Windsurf's Cascade chat API (Connect protocol over HTTP/1.1). */
 export const DEVIN_API_URL = DEVIN_DEFAULT_BASE_URL;
@@ -239,13 +239,13 @@ export const streamDevin: StreamFunction<"devin-agent"> = (
 				userJwt: auth.userJwt,
 				cascadeId: options?.conversationId ?? options?.sessionId ?? crypto.randomUUID(),
 				// Foreign ids (cross-model calls and their results alike): Responses
-				// composites (`call_id|item_id`) keep their wire `call_id`, then the
-				// id is sanitized and capped.
+				// composites (`call_id|item_id`) keep their wire `call_id`; opaque ids
+				// from other APIs keep every segment. Both are then sanitized and capped.
 				messages: transformMessages(
 					context.messages,
 					model,
-					id =>
-						responsesCallComponent(id)
+					(id, _target, source) =>
+						(isResponsesFamilyApi(source.api) ? responsesCallComponent(id) : id)
 							.replace(/[^a-zA-Z0-9_-]/g, "_")
 							.slice(0, DEVIN_TOOL_CALL_ID_MAX_LENGTH),
 					DEVIN_TOOL_CALL_ID_MAX_LENGTH,
