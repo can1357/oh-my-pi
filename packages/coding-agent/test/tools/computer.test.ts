@@ -22,7 +22,9 @@ import { ComputerWorkerCore, type NativeDesktopSession } from "@oh-my-pi/pi-codi
 import type {
 	AxNode,
 	AxQuery,
+	AxSelectTextOptions,
 	AxSnapshotOptions,
+	AxTextSelection,
 	CaptureRegion,
 	DesktopCapabilities,
 	DesktopCapture,
@@ -227,6 +229,11 @@ class FakeNativeSession implements NativeDesktopSession {
 	}
 	async axPerform(_ref: string, _action: string): Promise<void> {}
 	async axSetValue(_ref: string, _value: string): Promise<void> {}
+	readonly selections: Array<{ ref: string; text: string; opts?: AxSelectTextOptions | null }> = [];
+	async axSelectText(ref: string, text: string, opts?: AxSelectTextOptions | null): Promise<AxTextSelection> {
+		this.selections.push({ ref, text, opts });
+		return { start: 4, length: text.length, text, focused: true };
+	}
 	async axFocus(_ref: string): Promise<void> {}
 	async axClick(_ref: string, _opts?: PointerOptions | null): Promise<void> {}
 	async close(): Promise<void> {
@@ -735,6 +742,7 @@ describe("computer prelude", () => {
 			ax: "- button [ref=e1]",
 			ref: { ref: "e1", role: "button", nativeRole: "AXButton", enabled: true, focused: false, childCount: 0 },
 			press: undefined,
+			selectText: { start: 7, length: 0, text: "", focused: true },
 			raise: undefined,
 			click: undefined,
 		};
@@ -767,6 +775,7 @@ describe("computer prelude", () => {
 				'el = await win.ref("e1")',
 				"print(repr(el))",
 				"await el.press()",
+				'print((await el.selectText("cat", prefix="red ", select="end"))["start"])',
 				"await win.raise_()",
 				"await win.click(10, 20, button='right', takeover=None)",
 			].join("\n"),
@@ -786,6 +795,7 @@ describe("computer prelude", () => {
 			"<computer.Window id='42' app='Code'> {'x': 1, 'y': 2, 'width': 3, 'height': 4}",
 			"- button [ref=e1]",
 			"<computer.Element ref='e1' role='button'>",
+			"7",
 		]);
 		expect(calls).toEqual([
 			{ action: "run", code: "return 6 * 7;", read_only: true, timeout: 3 },
@@ -803,6 +813,13 @@ describe("computer prelude", () => {
 				chain: [
 					{ method: "ref", args: ["e1"] },
 					{ method: "press", args: [] },
+				],
+			},
+			{
+				action: "call",
+				chain: [
+					{ method: "ref", args: ["e1"] },
+					{ method: "selectText", args: ["cat", { prefix: "red ", select: "end" }] },
 				],
 			},
 			{
@@ -1321,6 +1338,35 @@ describe("computer worker round trips", () => {
 		);
 		expect(result.ok).toBe(true);
 		if (result.ok) expect(result.payload.returnValue).toEqual({ role: "button", count: 1 });
+	});
+
+	it("selects element text through the native session and returns the read-back selection", async () => {
+		const transport = new MemoryTransport();
+		const native = new FakeNativeSession();
+		new ComputerWorkerCore(transport, () => native);
+		const result = await runWorker(
+			transport,
+			"select-text",
+			'const el = await (await desktop.window("42")).ref("e1"); await el.selectText("cat", { prefix: "red ", select: "end" })',
+		);
+		expect(result.ok).toBe(true);
+		if (result.ok) expect(result.payload.returnValue).toEqual({ start: 4, length: 3, text: "cat", focused: true });
+		expect(native.selections).toEqual([{ ref: "e1", text: "cat", opts: { prefix: "red ", select: "end" } }]);
+	});
+
+	it("blocks read-only selectText before invoking the native session", async () => {
+		const transport = new MemoryTransport();
+		const native = new FakeNativeSession();
+		new ComputerWorkerCore(transport, () => native);
+		const result = await runWorker(
+			transport,
+			"select-text-read-only",
+			'const el = await (await desktop.window("42")).ref("e1"); await el.selectText("cat")',
+			true,
+		);
+		expect(result.ok).toBe(false);
+		if (!result.ok) expect(result.error.message).toBe("read-only run: 'selectText' requires read_only: false");
+		expect(native.selections).toEqual([]);
 	});
 
 	describe("numeric window ids", () => {

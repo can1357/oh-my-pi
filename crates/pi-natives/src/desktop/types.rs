@@ -223,6 +223,31 @@ pub struct AxQuery {
 	pub limit: Option<u32>,
 }
 
+/// Where `axSelectText` looks for its text and what it selects there.
+#[napi(object)]
+#[derive(Debug, Clone, Default)]
+pub struct AxSelectTextOptions {
+	/// Text that must directly precede the match.
+	pub prefix: Option<String>,
+	/// Text that must directly follow the match.
+	pub suffix: Option<String>,
+	/// `text` (default) selects the match; `start` and `end` place a caret.
+	pub select: Option<String>,
+}
+
+/// The selection read back after `axSelectText`, in UTF-16 code units.
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct AxTextSelection {
+	pub start:   u32,
+	pub length:  u32,
+	/// The selected text, empty for a caret.
+	pub text:    String,
+	/// Whether the element is focused in its app: typing and AX insertion
+	/// act on the focused element.
+	pub focused: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Target {
 	Desktop,

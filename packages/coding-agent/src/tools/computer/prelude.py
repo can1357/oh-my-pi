@@ -77,6 +77,9 @@ def _make_computer():
         async def setValue(self, *args, **kwargs):
             return await self._method("setValue", args, kwargs)
 
+        async def selectText(self, *args, **kwargs):
+            return await self._method("selectText", args, kwargs)
+
         async def bounds(self, *args, **kwargs):
             return await self._method("bounds", args, kwargs)
 

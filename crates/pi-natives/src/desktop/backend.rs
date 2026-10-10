@@ -9,8 +9,10 @@ use super::{
 	frame::FrameGeometry,
 	keys::KeyName,
 	menus::DesktopMenuItem,
+	text_range::TextSelectRequest,
 	types::{
-		CaptureCaps, DesktopCapabilities, DesktopDisplay, DesktopWindow, DisplaySelector, Target,
+		AxTextSelection, CaptureCaps, DesktopCapabilities, DesktopDisplay, DesktopWindow,
+		DisplaySelector, Target,
 	},
 };
 
@@ -192,6 +194,18 @@ pub trait AxBackend {
 	fn perform(&mut self, h: &AxHandle, action: &str) -> CoreResult<()>;
 	fn set_value(&mut self, h: &AxHandle, value: &str) -> CoreResult<()>;
 	fn focus(&mut self, h: &AxHandle) -> CoreResult<()>;
+	/// Selects the text `request` names in the element's value, leaving the
+	/// value unchanged, and returns the selection read back.
+	fn select_text(
+		&mut self,
+		_h: &AxHandle,
+		_request: &TextSelectRequest,
+	) -> CoreResult<AxTextSelection> {
+		Err(DesktopError::new(
+			super::error::ErrorCode::Unsupported,
+			"selecting text by accessibility is available only on macOS",
+		))
+	}
 	fn element_at(&mut self, x: f64, y: f64) -> CoreResult<Option<AxHandle>>;
 	fn focused_element(&mut self) -> CoreResult<Option<AxHandle>>;
 	fn attributes(&mut self, h: &AxHandle) -> CoreResult<Vec<(String, String)>>;

@@ -85,6 +85,7 @@ export const WINDOW_METHODS: MethodPolicies = {
 export const ELEMENT_METHODS: MethodPolicies = {
 	value: "read",
 	setValue: "exec",
+	selectText: "exec",
 	bounds: "read",
 	attributes: "read",
 	actions: "read",

@@ -12,6 +12,7 @@ mod macos;
 mod menus;
 #[cfg(target_os = "macos")]
 mod native_helper;
+mod text_range;
 mod types;
 #[cfg(any(target_os = "windows", test))]
 mod win32;
@@ -59,6 +60,7 @@ enum Response {
 	Nodes(Vec<AxNode>),
 	Node(Option<AxNode>),
 	Attributes(Vec<(String, String)>),
+	TextSelection(AxTextSelection),
 }
 
 type Reply = flume::Sender<CoreResult<Response>>;
@@ -225,6 +227,11 @@ enum Request {
 		value:     String,
 		reply:     Reply,
 	},
+	AxSelectText {
+		reference: String,
+		request:   text_range::TextSelectRequest,
+		reply:     Reply,
+	},
 	AxFocus {
 		reference: String,
 		reply:     Reply,
@@ -272,6 +279,7 @@ impl Request {
 			| Self::AxParent { reply, .. }
 			| Self::AxPerform { reply, .. }
 			| Self::AxSetValue { reply, .. }
+			| Self::AxSelectText { reply, .. }
 			| Self::AxFocus { reply, .. }
 			| Self::AxClick { reply, .. }
 			| Self::Close { reply } => reply,
@@ -291,6 +299,7 @@ impl Request {
 				| Self::RaiseWindow { .. }
 				| Self::AxPerform { .. }
 				| Self::AxSetValue { .. }
+				| Self::AxSelectText { .. }
 				| Self::AxFocus { .. }
 				| Self::AxClick { .. }
 				| Self::OpenApplication { .. }
@@ -911,6 +920,10 @@ impl Worker {
 				let h = self.registry.resolve(reference)?;
 				self.ax()?.set_value(&h, value)?;
 				Ok(Response::Unit)
+			},
+			Request::AxSelectText { reference, request, .. } => {
+				let h = self.registry.resolve(reference)?;
+				Ok(Response::TextSelection(self.ax()?.select_text(&h, request)?))
 			},
 			Request::AxFocus { reference, .. } => {
 				let h = self.registry.resolve(reference)?;
@@ -1634,6 +1647,33 @@ impl DesktopSession {
 			reference,
 			value,
 			reply,
+		}))
+	}
+
+	/// Selects `text` in the element's value by accessibility, or places a
+	/// caret at its start or end, without focus change or keystrokes.
+	#[napi]
+	pub fn ax_select_text(
+		&self,
+		reference: String,
+		text: String,
+		opts: Option<AxSelectTextOptions>,
+	) -> Result<task::Promise<AxTextSelection>> {
+		let opts = opts.unwrap_or_default();
+		let request = text_range::TextSelectRequest {
+			text,
+			prefix: opts.prefix.unwrap_or_default(),
+			suffix: opts.suffix.unwrap_or_default(),
+			part: text_range::SelectPart::parse(opts.select.as_deref()).map_err(napi::Error::from)?,
+		};
+		let c = Arc::clone(&self.core);
+		let token = c.cancellation.token();
+		Ok(task::blocking("desktop.axSelectText", (), move |_| {
+			match c.call(token, |reply| Request::AxSelectText { reference, request, reply })? {
+				Response::TextSelection(v) => Ok(v),
+				_ => Err(DesktopError::internal("unexpected response")),
+			}
+			.map_err(Into::into)
 		}))
 	}
 
