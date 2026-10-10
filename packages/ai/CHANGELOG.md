@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [18.8.9] - 2026-10-10
+
 ### Changed
 
 - Updated state field rendering to trim trailing whitespace and normalize empty collection formatting for consistent prompt output
