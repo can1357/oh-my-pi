@@ -9,8 +9,10 @@ import * as os from "node:os";
 import type { ThinkingLevel } from "@oh-my-pi/pi-agent-core/thinking";
 import { EventLoopKeepalive } from "@oh-my-pi/pi-agent-core/utils/yield";
 import type { ImageContent, Model } from "@oh-my-pi/pi-ai";
-import { getModelPricingStatus } from "@oh-my-pi/pi-catalog/models";
-import { isEnoent, isEnotdir } from "@oh-my-pi/pi-utils";
+// Subpath, not the barrel: `@oh-my-pi/pi-utils` re-exports 55 modules (incl.
+// the native file-lock bridge) that this entry never touches. Every other
+// pi-utils import here already uses a subpath.
+import { isEnoent, isEnotdir } from "@oh-my-pi/pi-utils/fs-error";
 import {
 	APP_NAME,
 	directoryIsMissing,
@@ -23,7 +25,6 @@ import {
 import { $env, isBunTestRuntime, isCompiledBinary, setInteractiveHost } from "@oh-my-pi/pi-utils/env";
 import * as logger from "@oh-my-pi/pi-utils/logger";
 import * as postmortem from "@oh-my-pi/pi-utils/postmortem";
-import { fuzzyFilter } from "@oh-my-pi/pi-tui/fuzzy";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { reset as resetCapabilities } from "./capability";
 import {
@@ -35,13 +36,11 @@ import {
 	validateToolNames,
 } from "./cli/args";
 import { applyExtensionFlags, type ExtensionFlagSink } from "./cli/extension-flags";
-import { processFileArguments } from "./cli/file-processor";
 import { buildInitialMessage } from "./cli/initial-message";
 import { formatKeyHint } from "@oh-my-pi/pi-tui/app-keybindings";
 import type { SessionPickerOptions } from "@oh-my-pi/pi-tui/apps/session-picker";
 import { fetchBuild } from "./cli/build-service";
 import { applyStartupCwd } from "./cli/startup-cwd";
-import { getLatestRelease, isSourceCheckout, managedInstallName } from "./cli/update-cli";
 import { findConfigFile } from "./config";
 import { ModelRegistry } from "./config/model-registry";
 import { formatModelSelectorValue } from "@oh-my-pi/pi-tui/overlays/model-selector";
@@ -56,7 +55,6 @@ import {
 	resolveModelScope,
 	type ScopedModel,
 } from "./config/model-resolver";
-import { ModelsConfigFile } from "./config/models-config";
 import { serviceTierSettingToTier } from "./config/service-tier";
 import { all, combine, type ProtocolHost, type SettingValueOf } from "./config/registry";
 import { Settings, settings } from "./config/settings";
@@ -69,16 +67,12 @@ import {
 } from "./discovery/helpers";
 import { injectOmpExtensionCliRoots } from "./discovery/omp-extension-roots";
 import { formatExtensionLoadNotifications } from "./extensibility/extensions/load-errors";
-import { loadExtensions } from "./extensibility/extensions/loader";
 import { ExtensionRunner } from "./extensibility/extensions/runner";
 import type { ExtensionUIContext } from "./extensibility/extensions/types";
-import { scheduleMarketplaceAutoUpdate } from "./extensibility/plugins/marketplace-auto-update";
-import { registerDaemonProjectPresence } from "./launch/presence";
 import type { MCPManager } from "./mcp";
 import type { InteractiveMode } from "./modes/interactive-mode";
 import type { PrintModeOptions } from "./modes/print-mode";
 import type { RpcModeOptions } from "./modes/rpc/rpc-mode";
-import { claimRpcInput } from "./modes/rpc/rpc-input";
 import { CURRENT_SETUP_VERSION } from "@oh-my-pi/pi-tui/setup/setup-version";
 import type * as SetupWizardModule from "./modes/setup";
 import type { SetupScene } from "@oh-my-pi/pi-tui/setup/scenes/types";
@@ -91,7 +85,6 @@ import {
 } from "./modes/startup-composer";
 import { ensureTheme, initTheme, stopThemeWatcher } from "@oh-my-pi/pi-tui/theme";
 import type { SubmittedUserInput } from "./modes/types";
-import { createWarpEventBridgeExtension } from "./modes/warp-events";
 import { AgentLifecycleManager } from "./registry/agent-lifecycle";
 import {
 	type CreateAgentSessionOptions,
@@ -105,12 +98,6 @@ import type { AgentSession } from "./session/agent-session";
 import { createAuthStorageSettingsSync, describeAuthBrokerStartupError } from "./session/auth-broker-config";
 import type { AuthStorage } from "./session/auth-storage";
 import { describePendingToolCalls } from "./session/exit-diagnostics";
-import {
-	createForeignSessionStore,
-	foreignSessionInfoToSessionInfo,
-	foreignSessionSourceName,
-	persistForeignSession,
-} from "./session/foreign-session-import";
 import type { ForeignSessionInfo, ForeignSessionSource, ForeignSessionStore } from "./session/foreign-session-store";
 import { resolveResumableSession, type SessionInfo } from "./session/session-listing";
 import { ForkSourceNotFoundError, SessionManager, SessionMoveRefusedError } from "./session/session-manager";
@@ -121,8 +108,6 @@ import {
 	loadSystemPromptTemplateFile,
 	resolvePromptInput,
 } from "./system-prompt";
-import { createPersistedSubagentReviverFactory } from "./task/persisted-revive";
-import { createTelemetryExportConfig, initTelemetryExport, isTelemetryExportEnabled } from "./telemetry-export";
 import { cfgTelemetryOtlpExportEnabled } from "./telemetry-settings";
 import { registerLocalInferenceApi } from "./tiny/local-inference-api";
 import { concreteThinkingLevel, parseConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
@@ -135,7 +120,6 @@ import {
 	type StartupChangelogSelection,
 } from "./utils/changelog";
 import { EventBus } from "./utils/event-bus";
-import { resolveFirstLaunchPythonEvalWarning } from "./eval/startup-warning";
 import { CliUsageError } from "./cli/usage-error";
 import { cfgGoalEnabled } from "./goals/settings";
 import { cfgPlanDefaultOnStartup, cfgPlanEnabled } from "./plan-mode/settings";
@@ -237,6 +221,9 @@ async function checkForNewVersion(currentVersion: string): Promise<string | unde
 		return;
 	}
 	try {
+		// First-use boundary: the release-check graph (GitHub API client) is only
+		// reached when startup version checking is enabled.
+		const { isSourceCheckout, managedInstallName, getLatestRelease } = await import("./cli/update-cli");
 		// Checkouts update through git and a manager (Tern) updates its omp itself:
 		// "run omp update" would be wrong advice for both.
 		if (isSourceCheckout() || (await managedInstallName(process.execPath))) return;
@@ -520,6 +507,9 @@ async function loadTrustedSessionExtensions(
 			throw new Error(`Trusted extension must be a module file, not a directory: ${trustedPath}`);
 		}
 	}
+	// First-use boundary: only `--extension <file>`/`--hook <file>` trusted paths
+	// reach this; ordinary launches load extensions through `loadSessionExtensions`.
+	const { loadExtensions } = await import("./extensibility/extensions/loader");
 	return loadExtensions(paths, cwd, eventBus);
 }
 
@@ -1775,7 +1765,10 @@ export async function runRootCommand(
 		}
 		const mode = parsedArgs.mode || "text";
 		// RPC owns stdin. Claim its singleton stream before plugin/extension discovery can load an in-process consumer.
-		const rpcInput = mode === "rpc" || mode === "rpc-ui" ? claimRpcInput() : undefined;
+		// First-use boundary: resolved through Bun's sync CJS bridge so no `await` can
+		// slip between the mode check and the claim itself.
+		const rpcInput =
+			mode === "rpc" || mode === "rpc-ui" ? require("./modes/rpc/rpc-input").claimRpcInput() : undefined;
 
 		// Kick off plugin-root preload in parallel with the remaining startup work.
 		// Awaited later (before extension/skill discovery in createAgentSession needs it).
@@ -1998,6 +1991,14 @@ export async function runRootCommand(
 				if (isProtocolMode) {
 					throw new SessionResolutionError(`--from-${foreignSource} is not supported in ${mode} mode`);
 				}
+				// First-use boundary: only `--from-claude`/`--from-opencode` resume
+				// flags load the foreign-session import graph.
+				const {
+					foreignSessionSourceName,
+					createForeignSessionStore,
+					foreignSessionInfoToSessionInfo,
+					persistForeignSession,
+				} = await import("./session/foreign-session-import");
 				const sourceName = foreignSessionSourceName(foreignSource);
 				const store = (deps.createForeignSessionStore ?? createForeignSessionStore)(foreignSource);
 				let foreignSessions: ForeignSessionInfo[];
@@ -2187,12 +2188,18 @@ export async function runRootCommand(
 		await pluginPreloadPromise;
 		// Pure file I/O: overlap it with session-option building, but land it before
 		// extensions load or the session can start project daemons.
+		// First-use boundary: presence is a launch-only side service, and injected
+		// `deps` never load it at all.
 		const daemonPresencePromise =
 			deps === DEFAULT_RUN_ROOT_DEPENDENCIES
-				? logger.time("registerDaemonProjectPresence", registerDaemonProjectPresence, cwd)
+				? logger.time("registerDaemonProjectPresence", async () => {
+						const { registerDaemonProjectPresence } = await import("./launch/presence");
+						return registerDaemonProjectPresence(cwd);
+					})
 				: undefined;
 		daemonPresencePromise?.catch(() => {});
 
+		const { scheduleMarketplaceAutoUpdate } = await import("./extensibility/plugins/marketplace-auto-update");
 		scheduleMarketplaceAutoUpdate({
 			autoUpdate: cfgMarketplaceAutoUpdate.get(settingsInstance),
 			resolveActiveProjectRegistryPath,
@@ -2226,6 +2233,12 @@ export async function runRootCommand(
 		// loop's telemetry hooks so traces, run-level metrics, and structured logs
 		// have source events to export. Content capture remains governed by
 		// OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT.
+		// First-use boundary: the exporter graph (opentelemetry) and the 11.9 MB
+		// models.json rate-card table are off by default, so neither belongs in
+		// module evaluation.
+		const { initTelemetryExport, isTelemetryExportEnabled, createTelemetryExportConfig } = await import(
+			"./telemetry-export"
+		);
 		await logger.time(
 			"initTelemetryExport",
 			initTelemetryExport,
@@ -2234,6 +2247,7 @@ export async function runRootCommand(
 		if (isTelemetryExportEnabled()) {
 			// Chat telemetry reports each request's provider-computed cost. A model
 			// without a known rate card reports an unavailable reason instead of $0.
+			const { getModelPricingStatus } = await import("@oh-my-pi/pi-catalog/models");
 			sessionOptions.telemetry = createTelemetryExportConfig(sessionOptions.telemetry, (providerId, modelId) => {
 				const model = modelRegistry.find(providerId, modelId);
 				return model !== undefined && getModelPricingStatus(model) !== "unknown";
@@ -2305,7 +2319,10 @@ export async function runRootCommand(
 			// file — and the same result is handed to createAgentSession via
 			// `preloadedExtensions` so the discovery work is not repeated.
 			if (isInteractive && !parsedArgs.trustedExtensions?.length) {
-				sessionOptions.extensions = [...(sessionOptions.extensions ?? []), createWarpEventBridgeExtension()];
+				// First-use boundary: the warp-event bridge is an extension factory that
+				// only interactive launches install.
+				const { createWarpEventBridgeExtension: createWarpBridge } = await import("./modes/warp-events");
+				sessionOptions.extensions = [...(sessionOptions.extensions ?? []), createWarpBridge()];
 			}
 
 			const eventBus = new EventBus();
@@ -2368,11 +2385,14 @@ export async function runRootCommand(
 			}
 			const processedFiles =
 				initialArgs.fileArgs.length > 0
-					? await logger.time("processFileArguments", () =>
-							processFileArguments(initialArgs.fileArgs, {
+					? await logger.time("processFileArguments", async () => {
+							// First-use boundary: only launches with `@file` arguments read and
+							// decode attachments, so the processor graph is off the default path.
+							const { processFileArguments } = await import("./cli/file-processor");
+							return processFileArguments(initialArgs.fileArgs, {
 								autoResizeImages: cfgImagesAutoResize.get(settingsInstance),
-							}),
-						)
+							});
+						})
 					: undefined;
 			const { initialMessage, initialImages } = buildInitialMessage({
 				parsed: initialArgs,
@@ -2402,7 +2422,12 @@ export async function runRootCommand(
 					() => pythonEvalProbeAbort.abort(),
 					{ exitOnly: true },
 				);
-				pythonEvalWarningPromise = resolveFirstLaunchPythonEvalWarning({
+				// First-use boundary: the probe (changelog parse + interpreter spawn) only
+				// runs for interactive launches without a recorded first-launch marker.
+				const { resolveFirstLaunchPythonEvalWarning: resolvePythonEvalWarning } = await import(
+					"./eval/startup-warning"
+				);
+				pythonEvalWarningPromise = resolvePythonEvalWarning({
 					args: parsedArgs,
 					lastChangelogVersion: await readLastChangelogVersion(),
 					cwd: sessionOptions.cwd ?? getProjectDir(),
@@ -2460,6 +2485,9 @@ export async function runRootCommand(
 			// its persisted JSONL (see persisted-revive.ts). Scoped to the non-ACP
 			// bootstrap: ACP keeps several concurrent top-level sessions and a single
 			// process-global factory must not be clobbered by the most recent one.
+			// First-use boundary: the factory runs only when a parked ref is revived,
+			// so the subagent-rebuild graph stays out of module evaluation.
+			const { createPersistedSubagentReviverFactory } = await import("./task/persisted-revive");
 			AgentLifecycleManager.global().setPersistedSubagentReviverFactory(
 				createPersistedSubagentReviverFactory({
 					session,
@@ -2526,6 +2554,8 @@ export async function runRootCommand(
 				if (parsedArgs.model && availableModels.length > 0) {
 					// Credentials work; the requested selector is what failed. Point at
 					// the nearest usable models instead of an API-key checklist.
+					// First-use boundary: suggestion ranking only runs on this cold error path.
+					const { fuzzyFilter } = await import("@oh-my-pi/pi-tui/fuzzy");
 					const suggestions = fuzzyFilter(
 						availableModels.map(model => `${model.provider}/${model.id}`),
 						parsedArgs.model,
@@ -2542,6 +2572,8 @@ export async function runRootCommand(
 				}
 				process.stderr.write(`${chalk.yellow("\nSet an API key environment variable:")}\n`);
 				process.stderr.write("  ANTHROPIC_API_KEY, OPENAI_API_KEY, GEMINI_API_KEY, etc.\n");
+				// First-use boundary: the models-config path only prints on this exit path.
+				const { ModelsConfigFile } = await import("./config/models-config");
 				process.stderr.write(`${chalk.yellow(`\nOr create ${ModelsConfigFile.path()}`)}\n`);
 				process.exit(1);
 			}
