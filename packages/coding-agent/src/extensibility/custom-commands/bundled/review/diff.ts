@@ -140,7 +140,7 @@ function splitFileDiffs(rawDiff: string): string[] {
 	return starts.map((start, index) => {
 		const end = starts[index + 1] ?? rawDiff.length;
 		const fileDiff = rawDiff.slice(start, end);
-		return fileDiff.endsWith("\n") ? fileDiff.slice(0, -1) : fileDiff;
+		return fileDiff.replace(/\r?\n$/, "");
 	});
 }
 
@@ -195,7 +195,7 @@ export function parseReviewDiffSnapshot(rawDiff: string): ReviewDiffSnapshot {
 	let totalRemoved = 0;
 
 	for (const rawFileDiff of splitFileDiffs(rawDiff)) {
-		const lines = rawFileDiff.split("\n");
+		const lines = rawFileDiff.split(/\r?\n/);
 		let { oldPath, newPath } = parseHeaderPaths(lines[0] ?? "");
 		for (const line of lines) {
 			if (HUNK_HEADER_PATTERN.test(line)) break;

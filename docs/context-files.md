@@ -95,6 +95,8 @@ contextFiles:
     - AGENTS.local.md
 ```
 
+You can also edit the **global** list in `/settings` → **Context** → **Extra Context Files**. Enter a JSON array such as `["AGENTS.local.md", "TEAM.md"]`; `[]` disables global extra files, while clearing the field removes the global override. The row is hidden when the project configuration (`.omp/config.yml`) sets `contextFiles.extra`, so a repository's list is never copied into your global config; edit or remove the project setting to change it. Start a new session to load the updated files.
+
 The list is empty by default. Entries are file names, not paths — `../AGENTS.local.md` is rejected when settings load, as are the built-in names `AGENTS.md`, `CLAUDE.md`, `GEMINI.md`, and `copilot-instructions.md` (those already have providers, and listing them would duplicate a file or bypass shadowing). This is the configurable alternative to hard-coded `.local.md` sibling discovery ([#12496](https://github.com/can1357/oh-my-pi/pull/12496)): you choose the names, and an unset list discovers nothing.
 
 Each name is found the same way as a standalone `AGENTS.md` (the `agents-md` walk: cwd up to the repository root, with the same home-directory boundary). A file whose parent directory name starts with `.` is skipped. Empty files contribute nothing.

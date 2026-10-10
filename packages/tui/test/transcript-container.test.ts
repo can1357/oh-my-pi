@@ -631,6 +631,68 @@ describe("TranscriptContainer", () => {
 		expect(transcript.blockStates()).toEqual(["committed", "active"]);
 	});
 
+	it("removes live blocks behind a settled one without disturbing committed or settled bookkeeping", () => {
+		const transcript = new TranscriptContainer();
+		const committedA = new Block(["committed a"], true);
+		const committedB = new Block(["committed b"], true);
+		transcript.addChild(committedA);
+		transcript.addChild(committedB);
+		const commit = transcript.peekFinalizedBatch(80, 0);
+		expect(commit?.rows).toEqual(["committed a", "", "committed b", ""]);
+		transcript.acknowledgeFinalizedBatch(commit!.id);
+
+		const settled = new Block(["settled"], true);
+		const live = [1, 2, 3, 4, 5].map(n => new Block([`live ${n}`], false));
+		transcript.addChild(settled);
+		for (const block of live) transcript.addChild(block);
+		// Room for every live row: the finalized block settles and nothing is offered.
+		expect(transcript.peekFinalizedBatch(80, 20)).toBeUndefined();
+		expect(transcript.blockStates()).toEqual([
+			"committed",
+			"committed",
+			"settled",
+			"active",
+			"active",
+			"active",
+			"active",
+			"active",
+		]);
+
+		transcript.removeChild(live[0]!);
+		transcript.removeChild(live[4]!);
+
+		expect(transcript.blockStates()).toEqual(["committed", "committed", "settled", "active", "active", "active"]);
+		const expected = [committedA, committedB, settled, live[1]!, live[2]!, live[3]!];
+		expect(transcript.children).toHaveLength(expected.length);
+		expected.forEach((component, index) => expect(transcript.children[index]).toBe(component));
+
+		// Pressure retires the settled block next; committed rows are never offered again.
+		const retire = transcript.peekFinalizedBatch(80, 5);
+		expect(retire?.rows).toEqual(["settled", ""]);
+	});
+
+	it("refuses to remove an append-only block once its stable rows are offered or emitted", () => {
+		const transcript = new TranscriptContainer();
+		const block = new AppendBlock(["one", "two"], ["one"]);
+		transcript.addChild(block);
+
+		// Offered: the stable row is mid-write to native scrollback.
+		const append = transcript.peekFinalizedBatch(80, 0)!;
+		expect(append.rows).toEqual(["one"]);
+		transcript.removeChild(block);
+		expect(transcript.children).toHaveLength(1);
+		expect(transcript.children[0]).toBe(block);
+		expect(transcript.blockStates()).toEqual(["active"]);
+
+		// Emitted: the row is in scrollback, so the block can no longer be retracted.
+		transcript.acknowledgeFinalizedBatch(append.id);
+		expect(transcript.emittedStableRows()).toEqual([1]);
+		transcript.removeChild(block);
+		expect(transcript.children).toHaveLength(1);
+		expect(transcript.children[0]).toBe(block);
+		expect(transcript.blockStates()).toEqual(["active"]);
+	});
+
 	it("replays committed history without rewinding lifecycle state", () => {
 		const transcript = new TranscriptContainer();
 		transcript.addChild(new Block(["final"], true));

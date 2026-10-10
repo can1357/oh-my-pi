@@ -12,6 +12,9 @@ import type {
 import type { ResolvedReviewTarget } from "../review/target";
 import { getEditorCommand, openEditorOnPath, openInEditor } from "../../../../utils/external-editor";
 
+/** What the overlay host reads: the UI surface plus the live session cwd for editor paths. */
+export type AnnotationOverlayContext = Pick<CustomCommandContext, "ui" | "cwd" | "sessionManager">;
+
 const ANNOTATION_OVERLAY_OPTIONS = {
 	width: "100%",
 	maxHeight: "100%",
@@ -48,7 +51,7 @@ type EditableProvenance = Extract<TextReviewSourceProvenance, { kind: "file" } |
 
 async function editTextSource(
 	tui: TUI,
-	ctx: CustomCommandContext,
+	ctx: AnnotationOverlayContext,
 	overlay: AnnotationOverlay,
 	provenance: EditableProvenance,
 ): Promise<void> {
@@ -81,7 +84,7 @@ async function editTextSource(
 	}
 }
 
-async function editReviewedFile(tui: TUI, ctx: CustomCommandContext, overlay: AnnotationOverlay): Promise<void> {
+async function editReviewedFile(tui: TUI, ctx: AnnotationOverlayContext, overlay: AnnotationOverlay): Promise<void> {
 	const relative = overlay.reviewFilePath();
 	if (!relative) throw new Error("No file to open.");
 	const editor = requireEditor();
@@ -105,7 +108,7 @@ async function editReviewedFile(tui: TUI, ctx: CustomCommandContext, overlay: An
 
 /** Mount the frozen diff in the TUI overlay surface owned by the command host. */
 export function showCodeReviewOverlay(
-	ctx: CustomCommandContext,
+	ctx: AnnotationOverlayContext,
 	target: ResolvedReviewTarget,
 ): Promise<CodeReviewOverlayResult | undefined> {
 	return ctx.ui.custom<CodeReviewOverlayResult | undefined>(
@@ -120,8 +123,11 @@ export function showCodeReviewOverlay(
 					onComplete: done,
 					onWarning: message => ctx.ui.notify(message, "warning"),
 					onAnnotationExternalEditor: (draft, commit) => editAnnotationDraft(tui, draft, commit),
-					// A PR diff need not match the local checkout, so only local reviews open the working-tree file.
-					onExternalEditor: target.kind === "pr" ? undefined : () => editReviewedFile(tui, ctx, overlay),
+					// PR and caller-supplied diffs need not match the local checkout, so only local reviews open the working-tree file.
+					onExternalEditor:
+						target.kind === "pr" || target.kind === "patch"
+							? undefined
+							: () => editReviewedFile(tui, ctx, overlay),
 				},
 			);
 			return overlay;
@@ -132,7 +138,7 @@ export function showCodeReviewOverlay(
 
 /** Mount a frozen text source in the same annotation overlay UX. */
 export function showTextReviewOverlay(
-	ctx: CustomCommandContext,
+	ctx: AnnotationOverlayContext,
 	source: TextReviewSource,
 ): Promise<TextReviewOverlayResult | undefined> {
 	return ctx.ui.custom<TextReviewOverlayResult | undefined>(

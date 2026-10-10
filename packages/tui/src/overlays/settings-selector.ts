@@ -1664,7 +1664,7 @@ export class SettingsSelectorComponent implements Component {
 	}
 
 	/**
-	 * Create a text input submenu for a plain string setting.
+	 * Create a text input submenu for a string or structured setting.
 	 */
 	#createTextInput(
 		def: SettingDef & { type: "text" },
@@ -1767,6 +1767,15 @@ export class SettingsSelectorComponent implements Component {
 			this.#context.settings.set(path, -1);
 		} else if (path === "compaction.thresholdTokens" && value === "default") {
 			this.#context.settings.set(path, -1);
+		} else if (schemaType === "array") {
+			let parsed: unknown;
+			try {
+				parsed = JSON.parse(value);
+			} catch {
+				throw new Error(`Invalid array JSON for ${path}`);
+			}
+			if (!Array.isArray(parsed)) throw new Error(`Invalid array JSON for ${path}`);
+			this.#context.settings.set(path, parsed);
 		} else if (schemaType === "record") {
 			let parsed: unknown;
 			try {
