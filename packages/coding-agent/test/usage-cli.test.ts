@@ -15,6 +15,7 @@ import {
 } from "@oh-my-pi/pi-coding-agent/cli/usage-cli";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import * as sdkModule from "@oh-my-pi/pi-coding-agent/sdk";
+import { formatResetExpiryNotice } from "@oh-my-pi/pi-coding-agent/session/reset-expiry";
 import {
 	collectUnreportedAccounts,
 	type UsageAccountIdentity,
@@ -1346,6 +1347,66 @@ describe("formatUsageBreakdown", () => {
 		);
 		expect(text).toContain("soonest expires in 6h");
 		expect(text).not.toContain("▲");
+	});
+
+	it("warns about a later Claude grant when the soonest one clears only a quiet window", () => {
+		const now = Date.parse("2026-01-01T00:00:00.000Z");
+		const report = claudeResetReport(now, { "anthropic:5h": 0.1, "anthropic:7d": 0.8 }, [
+			cedarGrant(now, "juniper", 1 * HOUR, { program: "juniper_tide", clears: ["anthropic:5h"] }),
+			cedarGrant(now, "cedar", 6 * HOUR, { clears: ["anthropic:7d"] }),
+		]);
+		const text = stripVTControlCharacters(
+			formatUsageBreakdown([report], [], now, undefined, [], undefined, resetExpiryOptions()),
+		);
+		expect(text).toContain("▲ 1 saved reset expires within 24h");
+		expect(text).toContain("1 expires in 6h");
+		expect(text).toContain("anthropic:7d 80% used");
+	});
+
+	it.each([
+		{ name: "the account is not eligible", inventory: { eligible: false } },
+		{ name: "nothing is redeemable", inventory: { redeemableCount: 0 } },
+		{ name: "the server selected another grant", inventory: { nextCreditId: "other" } },
+	])("offers no spend command when $name", ({ inventory }) => {
+		const now = Date.parse("2026-01-01T00:00:00.000Z");
+		const base = claudeResetReport(now, { "anthropic:5h": 0.6 }, [cedarGrant(now, "cedar", 6 * HOUR)]);
+		const report = { ...base, resetCredits: { ...base.resetCredits!, ...inventory } };
+		const text = stripVTControlCharacters(
+			formatUsageBreakdown([report], [], now, undefined, [], undefined, resetExpiryOptions()),
+		);
+		expect(text).toContain("▲ 1 saved reset expires within 24h");
+		expect(text).not.toContain("/usage reset");
+	});
+
+	it("strips terminal controls and line breaks from the account in the TUI notice", () => {
+		const now = Date.parse("2026-01-01T00:00:00.000Z");
+		const base = claudeResetReport(now, { "anthropic:5h": 0.6 }, [cedarGrant(now, "cedar", 6 * HOUR)]);
+		const report = { ...base, metadata: { email: "evil\u001b[2J\n\tname@example.test" } };
+		const notice = formatResetExpiryNotice([report], now);
+		expect(notice).toBe("Saved Claude reset on evil name@example.test expires in 6h · /usage");
+	});
+
+	it("does not count a later Claude grant that clears only a quiet window", () => {
+		const now = Date.parse("2026-01-01T00:00:00.000Z");
+		const report = claudeResetReport(now, { "anthropic:5h": 0.1, "anthropic:7d": 0.8 }, [
+			cedarGrant(now, "cedar", 1 * HOUR, { clears: ["anthropic:7d"] }),
+			cedarGrant(now, "juniper", 6 * HOUR, { program: "juniper_tide", clears: ["anthropic:5h"] }),
+		]);
+		const text = stripVTControlCharacters(
+			formatUsageBreakdown([report], [], now, undefined, [], undefined, resetExpiryOptions()),
+		);
+		expect(text).toContain("▲ 1 saved reset expires within 24h");
+		expect(text).toContain("1 expires in 1h");
+	});
+
+	it("cuts a long account in the TUI notice without splitting a character", () => {
+		const now = Date.parse("2026-01-01T00:00:00.000Z");
+		const base = claudeResetReport(now, { "anthropic:5h": 0.6 }, [cedarGrant(now, "cedar", 6 * HOUR)]);
+		const report = { ...base, metadata: { email: `${"a".repeat(78)}😀😀@example.test` } };
+		const notice = formatResetExpiryNotice([report], now)!;
+		expect(notice.isWellFormed()).toBe(true);
+		expect(notice).toContain("…");
+		expect(notice).toEndWith(" expires in 6h · /usage");
 	});
 
 	it.each([

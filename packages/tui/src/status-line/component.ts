@@ -2298,7 +2298,16 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 					? resetReports.find(report => reportMatchesExactIdentity(report, context.identity))
 					: undefined;
 		const resetSummary = summarizeUsageResetCredits(resetReport?.resetCredits, now);
-		const resetExpiryMs = resetSummary?.soonestExpiry ? Date.parse(resetSummary.soonestExpiry) - now : undefined;
+		const expiring =
+			resetSummary && resetSummary.bankedCount > 0 && resetReport
+				? this.host.classifyResetExpiry?.(resetReport, now)
+				: undefined;
+		// The highlighted countdown is the warned reset's, not an earlier one that is not worth warning about.
+		const resetExpiryMs = expiring
+			? expiring.expiresAtMs - now
+			: resetSummary?.soonestExpiry
+				? Date.parse(resetSummary.soonestExpiry) - now
+				: undefined;
 		const resetCredits =
 			resetSummary && resetSummary.bankedCount > 0
 				? {
@@ -2310,7 +2319,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 								: undefined,
 						expired: resetExpiryMs !== undefined && resetExpiryMs <= 0,
 						unavailableReason: resetSummary.unavailableReason,
-						expiring: resetReport ? this.host.classifyResetExpiry?.(resetReport, now) : undefined,
+						expiring,
 					}
 				: undefined;
 		if (!selectedGroup) return resetCredits ? { resetCredits } : null;
