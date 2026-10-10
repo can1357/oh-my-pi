@@ -1,8 +1,8 @@
 import { expect, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import * as url from "node:url";
 import { TempDir } from "@oh-my-pi/pi-utils";
+import { $ } from "bun";
 import { collectBundledPiEntries } from "../../scripts/legacy-pi-virtual-module";
 import type { BundledPiEntry } from "../../scripts/legacy-pi-virtual-module";
 
@@ -30,10 +30,16 @@ test("published build plugin collects legacy Pi entries from installed sibling p
 		await fs.symlink(path.join(packagesDir, dir), path.join(scopeDir, npmDir), "dir");
 	}
 
-	const installedScript = path.join(codingAgentDir, "scripts/legacy-pi-virtual-module.ts");
-	// The installed script path is created at runtime, so a static import cannot exercise its own packageDir.
-	const { collectBundledPiEntries: collectInstalledEntries } = await import(url.pathToFileURL(installedScript).href);
-	const installed: BundledPiEntry[] = await collectInstalledEntries();
+	// A consumer module in the install root statically imports the installed copy, so its
+	// `import.meta.dir` resolves inside node_modules exactly as a downstream host build sees it.
+	const consumer = install.join("collect.ts");
+	await Bun.write(
+		consumer,
+		'import { collectBundledPiEntries } from "./node_modules/@oh-my-pi/pi-coding-agent/scripts/legacy-pi-virtual-module.ts";\nconsole.log(JSON.stringify(await collectBundledPiEntries()));\n',
+	);
+	const result = await $`${process.execPath} ${consumer}`.cwd(install.path()).quiet().nothrow();
+	expect(result.exitCode, result.stderr.toString()).toBe(0);
+	const installed: BundledPiEntry[] = result.json();
 	const monorepo = await collectBundledPiEntries();
 	expect(installed.map(entry => entry.key)).toEqual(monorepo.map(entry => entry.key));
 	expect(installed.find(entry => entry.key === "@oh-my-pi/pi-agent-core")?.importSpecifier).toBe(
