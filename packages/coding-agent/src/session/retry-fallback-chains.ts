@@ -19,7 +19,7 @@ import { cfgRetryFallbackChains, cfgRetryFallbackRevertPolicy } from "./settings
 export type RetryFallbackChains = Record<string, string[]>;
 
 /** Policy controlling restoration of a fallback chain's primary model. */
-export type RetryFallbackRevertPolicy = "never" | "cooldown-expiry";
+export type RetryFallbackRevertPolicy = "never" | "cooldown-expiry" | "when-healthy";
 
 /** Parsed model selector used by retry fallback resolution. */
 export interface RetryFallbackSelector {
@@ -53,7 +53,10 @@ export interface ActiveRetryFallbackState {
 	originalSelector: string;
 	originalThinkingLevel: ConfiguredThinkingLevel | undefined;
 	lastAppliedFallbackThinkingLevel: ConfiguredThinkingLevel | undefined;
+	/** The primary's usage health moved the session here. */
 	pinned: boolean;
+	/** The primary refused this conversation; no policy returns to it. */
+	refusalPinned?: boolean;
 	/**
 	 * Set once a turn on the fallback target settles successfully. Until then the
 	 * switch is only a routing decision — nothing has been produced by the new
@@ -344,7 +347,7 @@ export function validateRetryFallbackChains(
 
 /** Returns the configured fallback-primary restoration policy. */
 export function getRetryFallbackRevertPolicy(settings: Settings): RetryFallbackRevertPolicy {
-	return cfgRetryFallbackRevertPolicy.get(settings) === "never" ? "never" : "cooldown-expiry";
+	return cfgRetryFallbackRevertPolicy.get(settings);
 }
 
 /** Resolves the primary selector represented by a fallback-chain key. */

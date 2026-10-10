@@ -2376,6 +2376,8 @@ export class AgentSession implements SettingsScope {
 			runRecoveryCompactionWithRollback: (reason, message, options) =>
 				this.#recovery.runRecoveryCompactionWithRollback(reason, message, options),
 			parseRetryAfterMsFromError: errorMessage => this.#recovery.parseRetryAfterMsFromError(errorMessage),
+			maybeReturnToHealthyPrimary: (fitsWithoutCompaction, signal) =>
+				this.#recovery.maybeReturnToHealthyPrimary(fitsWithoutCompaction, signal),
 			setModelTemporary: (model, thinkingLevel, options) =>
 				this.#models.setModelTemporary(model, thinkingLevel, options, "automatic"),
 			abort: options => this.abort(options),
@@ -7919,9 +7921,20 @@ export class AgentSession implements SettingsScope {
 			if (maintenanceMessages !== messages && previewXdevMountNotice?.notice) {
 				maintenanceMessages.splice(xdevMountNoticeIndex, 0, previewXdevMountNotice.notice);
 			}
-			await this.#maintenance.runPrePromptCompactionIfNeeded(maintenanceMessages);
+			const returnedToPrimary = await this.#maintenance.runPrePromptCompactionIfNeeded(
+				maintenanceMessages,
+				setupAbort.signal,
+			);
 			if (this.#promptGeneration !== generation) {
 				return false;
+			}
+			// The return reset auto thinking to the primary's provisional level and
+			// the classification above was clamped for the fallback: classify again.
+			if (returnedToPrimary && this.isAutoThinking && isUserTurn) {
+				await this.#models.applyAutoThinkingLevel(expandedText, generation, options?.solutionSpace);
+				if (this.#promptGeneration !== generation) {
+					return false;
+				}
 			}
 			// Consume the xd:// notice only when its previewed revision still holds.
 			// A mount delta or catalog rebuild during the await invalidates it: any

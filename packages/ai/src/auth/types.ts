@@ -471,6 +471,8 @@ export interface ModelUsageHealthOptions {
 	sessionId?: string;
 	baseUrl?: string;
 	reserveFraction: number;
+	/** Headroom added to every account's reserve, global or per-account, before it reads healthy. */
+	reserveMarginFraction?: number;
 	signal?: AbortSignal;
 }
 

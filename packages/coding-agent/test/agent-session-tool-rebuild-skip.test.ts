@@ -1077,6 +1077,7 @@ describe("AgentSession refreshMCPTools rebuild skipping", () => {
 			.spyOn(SessionMaintenance.prototype, "runPrePromptCompactionIfNeeded")
 			.mockImplementation(async messages => {
 				maintenanceMessages.push([...messages]);
+				return false;
 			});
 
 		await session.refreshMCPTools([search]);
@@ -1117,6 +1118,7 @@ describe("AgentSession refreshMCPTools rebuild skipping", () => {
 			.spyOn(SessionMaintenance.prototype, "runPrePromptCompactionIfNeeded")
 			.mockImplementationOnce(async () => {
 				await session.refreshMCPTools([search, fetch]);
+				return false;
 			});
 		await session.prompt("first");
 
@@ -1158,6 +1160,7 @@ describe("AgentSession refreshMCPTools rebuild skipping", () => {
 			.spyOn(SessionMaintenance.prototype, "runPrePromptCompactionIfNeeded")
 			.mockImplementationOnce(async () => {
 				await session.refreshMCPTools([searchReconnected]);
+				return false;
 			});
 		await session.prompt("first");
 		expect(mountNoticesIn(contexts[0])).toHaveLength(0);
@@ -1307,6 +1310,7 @@ These tools became available:
 			.spyOn(SessionMaintenance.prototype, "runPrePromptCompactionIfNeeded")
 			.mockImplementationOnce(async () => {
 				await session.refreshBaseSystemPrompt();
+				return false;
 			});
 		await session.prompt("first");
 		expect(rebuildDuringMaintenance).toHaveBeenCalledTimes(1);
@@ -1346,6 +1350,7 @@ These tools became available:
 			.spyOn(SessionMaintenance.prototype, "runPrePromptCompactionIfNeeded")
 			.mockImplementationOnce(async () => {
 				await session.refreshBaseSystemPrompt();
+				return false;
 			});
 		await session.prompt("hi");
 

@@ -194,7 +194,7 @@ Defined in `packages/coding-agent/src/session/settings.ts`:
 - `retry.waitForUsageReset` (default `false`)
 - `retry.modelFallback` (default `true`; gates configured retry model-fallback switching)
 - `retry.fallbackChains`
-- `retry.fallbackRevertPolicy` (`"cooldown-expiry"` by default; `"never"` disables automatic restoration)
+- `retry.fallbackRevertPolicy` (`"cooldown-expiry"` by default; `"when-healthy"` also returns from usage-driven fallbacks when a new prompt is prepared, once the primary's usage shows headroom and the request fits; `"never"` disables automatic restoration)
 - `retry.usageAwareFallback` (default `false`; runs a preflight for supported coding-plan usage reports)
 - `retry.usageReservePct` (default `10`; remaining-quota reserve threshold)
 - `retry.usageReservePolicy` (default `"confirm"`; `"auto"` and `"fail-closed"` are also supported)

@@ -2,26 +2,29 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 import * as path from "node:path";
 import { scheduler } from "node:timers/promises";
 import { type } from "@oh-my-pi/omptype";
-import { Agent, type AgentTool } from "@oh-my-pi/pi-agent-core";
+import { Agent, type AgentTool, type StreamFn } from "@oh-my-pi/pi-agent-core";
 import { createCompactionSummaryMessage } from "@oh-my-pi/pi-agent-core/compaction";
 import {
 	type AnthropicFallbackCreditHandle,
 	type Api,
 	type AssistantMessage,
+	type CredentialRankingStrategy,
 	Effort,
 	type Message,
 	type Model,
 	type ModelUsageHealth,
 	type ProviderSessionState,
 	type ToolCall,
+	type UsageProvider,
 } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
-import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
+import { createMockModel, type MockResponse } from "@oh-my-pi/pi-ai/providers/mock";
 import { buildParams } from "@oh-my-pi/pi-ai/providers/openai-responses";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { writeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
+import * as autoThinkingClassifier from "@oh-my-pi/pi-coding-agent/auto-thinking/classifier";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { parseModelString } from "@oh-my-pi/pi-tui/overlays/model-selector";
 import { parseModelPattern } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
@@ -30,7 +33,12 @@ import { editVariantForModel } from "@oh-my-pi/pi-coding-agent/utils/edit-mode";
 import { ExtensionRuntime, loadExtensionFromFactory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
 import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
-import { AgentSession, type AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { AUTO_THINKING } from "@oh-my-pi/pi-tui/thinking";
+import {
+	AgentSession,
+	type AgentSessionEvent,
+	type InitialRetryFallbackState,
+} from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import {
 	type ServingModel,
@@ -1907,7 +1915,10 @@ describe("AgentSession retry fallback", () => {
 		});
 	});
 
-	it("keeps advisor fallback recovery on its role chain when another role shares its model", async () => {
+	async function expectAdvisorFallbackRecovery(
+		revertPolicy: "cooldown-expiry" | "when-healthy" | "never",
+		restores: boolean,
+	): Promise<void> {
 		const mainModel = getBundledModel("openai", "gpt-4o-mini");
 		const advisorPrimary = getBundledModel("anthropic", "claude-sonnet-4-5");
 		const unrelatedFallback = getBundledModel("openai", "gpt-4o");
@@ -1949,6 +1960,7 @@ describe("AgentSession retry fallback", () => {
 				advisor: [advisorFallbackSelector],
 			},
 			"advisor.syncBacklog": "1",
+			"retry.fallbackRevertPolicy": revertPolicy,
 		});
 		settings.setModelRole("commit", `${advisorPrimarySelector}:medium`);
 		settings.setModelRole("advisor", advisorRoleSelector);
@@ -2027,18 +2039,32 @@ describe("AgentSession retry fallback", () => {
 		vi.spyOn(Date, "now").mockReturnValue(afterCooldown);
 		await session.prompt("Complete another primary turn after the advisor cooldown");
 		await session.waitForIdle();
-		expect(getApiKey).toHaveBeenCalledWith(
-			expect.objectContaining({ provider: advisorPrimary.provider, id: advisorPrimary.id }),
-			expect.any(String),
-			{ signal: expect.any(AbortSignal) },
-		);
+		if (restores) {
+			expect(getApiKey).toHaveBeenCalledWith(
+				expect.objectContaining({ provider: advisorPrimary.provider, id: advisorPrimary.id }),
+				expect.any(String),
+				{ signal: expect.any(AbortSignal) },
+			);
+		}
 
-		expect(requestedAdvisorModels).toEqual([advisorPrimarySelector, advisorFallbackSelector, advisorPrimarySelector]);
-		expect(session.getAdvisorAgent()?.state.model).toMatchObject({
-			provider: advisorPrimary.provider,
-			id: advisorPrimary.id,
-		});
-	});
+		// Advisor fallbacks are error detours, so both restoring policies return on cooldown alone.
+		const expected = restores ? advisorPrimary : advisorFallback;
+		expect(requestedAdvisorModels).toEqual([
+			advisorPrimarySelector,
+			advisorFallbackSelector,
+			`${expected.provider}/${expected.id}`,
+		]);
+		expect(session.getAdvisorAgent()?.state.model).toMatchObject({ provider: expected.provider, id: expected.id });
+	}
+
+	it.each([
+		["cooldown-expiry", true],
+		["when-healthy", true],
+		["never", false],
+	] as const)(
+		"keeps advisor fallback recovery on its role chain when another role shares its model (%s)",
+		expectAdvisorFallbackRecovery,
+	);
 
 	it.each(["enabled", "remote-disabled", "model-disabled"])(
 		"skips incompatible advisor retries and replays compatible history with %s compaction",
@@ -6737,6 +6763,528 @@ describe("AgentSession retry fallback", () => {
 			thinkingLevel: undefined,
 			isFallback: true,
 			contextWindow: fallbackModel.contextWindow,
+		});
+	});
+
+	describe("fallbackRevertPolicy when-healthy", () => {
+		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+		const fallbackModel = getBundledModel("openai", "gpt-4o-mini");
+		if (!primaryModel || !fallbackModel) {
+			throw new Error("Expected bundled test models to exist");
+		}
+		const primarySelector = `${primaryModel.provider}/${primaryModel.id}`;
+		const fallbackSelector = `${fallbackModel.provider}/${fallbackModel.id}`;
+
+		function healthOf(state: ModelUsageHealth["state"]): ModelUsageHealth {
+			return { state, accounts: [] };
+		}
+
+		/**
+		 * Session on `primaryModel` whose chain falls back to `fallbackModel`. The
+		 * primary answers its first request with `primaryFailure`; its usage health
+		 * comes from `primaryHealth`, called with the reserve margin the caller
+		 * asked for. The fallback always reads healthy.
+		 */
+		function startSession(
+			settingsOverrides: Record<string, unknown>,
+			primaryHealth: (reserveMarginFraction: number) => ModelUsageHealth["state"] | Error,
+			primaryFailure?: MockResponse,
+			initialRetryFallback?: InitialRetryFallbackState,
+		): string[] {
+			const requestedModels: string[] = [];
+			const mock = createMockModel();
+			let primaryAttempts = 0;
+			const agent = new Agent({
+				getApiKey: model => `${model.provider}-test-key`,
+				initialState: {
+					model: initialRetryFallback ? fallbackModel! : primaryModel!,
+					systemPrompt: ["Test"],
+					tools: [],
+					messages: [],
+				},
+				streamFn: (model, context, options) => {
+					const selector = `${model.provider}/${model.id}`;
+					requestedModels.push(selector);
+					if (selector === primarySelector && primaryFailure && primaryAttempts++ === 0) {
+						mock.push(primaryFailure);
+					} else {
+						mock.push({ content: [`ok:${selector}`] });
+					}
+					return mock.stream(model, context, options);
+				},
+			});
+			const settings = Settings.isolated({
+				"compaction.enabled": false,
+				"retry.baseDelayMs": 5,
+				"retry.fallbackChains": { default: [fallbackSelector] },
+				"retry.fallbackRevertPolicy": "when-healthy",
+				...settingsOverrides,
+			});
+			settings.setModelRole("default", primarySelector);
+			vi.spyOn(modelRegistry.authStorage.health, "model").mockImplementation(async (provider, options) => {
+				if (provider !== primaryModel!.provider) return healthOf("healthy");
+				const state = primaryHealth(options.reserveMarginFraction ?? 0);
+				if (state instanceof Error) throw state;
+				return healthOf(state);
+			});
+			session = new AgentSession({
+				agent,
+				sessionManager: SessionManager.inMemory(),
+				settings,
+				modelRegistry,
+				initialRetryFallback,
+			});
+			return requestedModels;
+		}
+
+		it.each([
+			["when-healthy", "has headroom above its reserve margin", "healthy", "healthy", primarySelector],
+			["when-healthy", "is out of reserve but inside the margin", "healthy", "reserve", fallbackSelector],
+			["when-healthy", "has unknown usage", "unknown", "unknown", fallbackSelector],
+			["cooldown-expiry", "has headroom above its reserve margin", "healthy", "healthy", fallbackSelector],
+		] as const)(
+			"under %s, a usage-driven fallback returns only when the primary %s",
+			async (policy, _case, withoutMargin, withMargin, expected) => {
+				let recovered = false;
+				const requestedModels = startSession(
+					{ "retry.usageAwareFallback": true, "retry.fallbackRevertPolicy": policy },
+					margin => (!recovered ? "depleted" : margin > 0 ? withMargin : withoutMargin),
+				);
+
+				await session!.prompt("Primary is depleted before the request");
+				await session!.waitForIdle();
+				expect(requestedModels).toEqual([fallbackSelector]);
+
+				recovered = true;
+				await session!.prompt("Primary usage moved");
+				await session!.waitForIdle();
+				expect(requestedModels).toEqual([fallbackSelector, expected]);
+				expect(`${session!.model?.provider}/${session!.model?.id}`).toBe(expected);
+			},
+		);
+
+		it.each([
+			["healthy", primarySelector],
+			["unknown", primarySelector],
+			["failed usage check", primarySelector],
+			["depleted", fallbackSelector],
+			["reserve", fallbackSelector],
+		] as const)("after an error-driven fallback, a primary reading %s gives %s", async (state, expected) => {
+			let now = Date.now();
+			vi.spyOn(Date, "now").mockImplementation(() => now);
+			const requestedModels = startSession(
+				{},
+				() => (state === "failed usage check" ? new Error("usage endpoint unavailable") : state),
+				{ throw: "rate limit exceeded retry-after-ms=200" },
+			);
+
+			await session!.prompt("Primary rate-limits");
+			await session!.waitForIdle();
+			expect(requestedModels).toEqual([primarySelector, fallbackSelector]);
+
+			// Still cooling down: no return, whatever the usage report says.
+			await session!.prompt("Cooldown has not expired");
+			await session!.waitForIdle();
+			expect(requestedModels).toEqual([primarySelector, fallbackSelector, fallbackSelector]);
+
+			now += 240;
+			await session!.prompt("Cooldown expired");
+			await session!.waitForIdle();
+			expect(requestedModels).toEqual([primarySelector, fallbackSelector, fallbackSelector, expected]);
+		});
+
+		it("keeps a classifier-refusal fallback pinned while the primary is healthy", async () => {
+			const requestedModels = startSession({ "retry.maxRetries": 1 }, () => "healthy", {
+				content: [{ type: "thinking", thinking: "Classifier evaluation before refusal." }],
+				stopReason: "error",
+				stopDetails: { type: "refusal", category: "cyber", explanation: "Classifier declined this turn." },
+				errorMessage: "Refusal (cyber): Classifier declined this turn.",
+			});
+			let now = Date.now();
+			vi.spyOn(Date, "now").mockImplementation(() => now);
+
+			await session!.prompt("Primary refuses");
+			await session!.waitForIdle();
+			expect(requestedModels).toEqual([primarySelector, fallbackSelector]);
+
+			now += 10 * 60 * 1000;
+			await session!.prompt("Primary is healthy, but refused this conversation");
+			await session!.waitForIdle();
+			expect(requestedModels).toEqual([primarySelector, fallbackSelector, fallbackSelector]);
+		});
+
+		it.each([
+			["cooldown-expiry", fallbackSelector],
+			["never", fallbackSelector],
+			["when-healthy", primarySelector],
+		] as const)("a startup usage fallback (`pinned: true`) under %s gives %s", async (policy, expected) => {
+			const requestedModels = startSession({ "retry.fallbackRevertPolicy": policy }, () => "healthy", undefined, {
+				role: "default",
+				originalSelector: primarySelector,
+				originalThinkingLevel: undefined,
+				pinned: true,
+			});
+
+			await session!.prompt("Primary is healthy again");
+			await session!.waitForIdle();
+			expect(requestedModels).toEqual([expected]);
+		});
+
+		it("classifies an auto-thinking prompt again for the primary it returns to", async () => {
+			const requestedModels = startSession({}, () => "healthy", undefined, {
+				role: "default",
+				originalSelector: primarySelector,
+				originalThinkingLevel: undefined,
+				pinned: true,
+			});
+			const classifier = vi.spyOn(autoThinkingClassifier, "classifyDifficulty").mockResolvedValue(Effort.Low);
+			session!.setThinkingLevel(AUTO_THINKING);
+
+			await session!.prompt("Primary is healthy again");
+			await session!.waitForIdle();
+			expect(requestedModels).toEqual([primarySelector]);
+			// The fallback has no reasoning to classify for; the primary does.
+			expect(classifier).toHaveBeenCalledTimes(1);
+			expect(session!.autoResolvedThinkingLevel()).toBe(Effort.Low);
+		});
+
+		it("lets the usage preflight move a returned session off a sticky account inside its reserve", async () => {
+			// The return gate reads the pool; the account that serves is picked by
+			// the ordinary pre-model-call preflight, as on every other turn.
+			const tmp = TempDir.createSync("@retry-fallback-return-account-");
+			let usedFraction: Record<string, number> = { "account-1": 0.4, "account-2": 1 };
+			const strategy: CredentialRankingStrategy = {
+				findWindowLimits: report => ({ primary: report.limits[0] }),
+				scopeLimits: report => report.limits,
+				blockScope: context => `model:${context?.modelId}`,
+				blockScopes: () => ["shared"],
+				windowDefaults: { primaryMs: 60_000, secondaryMs: 60_000 },
+			};
+			const usageProvider: UsageProvider = {
+				id: "anthropic",
+				fetchUsage: async params => {
+					const accountId = params.credential.accountId ?? "";
+					return {
+						provider: "anthropic",
+						fetchedAt: Date.now(),
+						metadata: { accountId },
+						limits: [
+							{
+								id: "short",
+								label: "short",
+								scope: { provider: "anthropic" },
+								window: { id: "short", label: "short", resetsAt: Date.now() + 60_000 },
+								amount: { usedFraction: usedFraction[accountId], unit: "percent" },
+								status: "ok",
+							},
+						],
+					};
+				},
+			};
+			const auth = await AuthStorage.create(tmp.join("auth.db"), {
+				usageProviderResolver: provider => (provider === "anthropic" ? usageProvider : undefined),
+				rankingStrategyResolver: provider => (provider === "anthropic" ? strategy : undefined),
+				configValueResolver: async value => value,
+			});
+			try {
+				await auth.credentials.set(
+					"anthropic",
+					[1, 2].map(id => ({
+						type: "oauth" as const,
+						access: `access-${id}`,
+						refresh: `refresh-${id}`,
+						accountId: `account-${id}`,
+						expires: Date.now() + 3_600_000,
+					})),
+				);
+				auth.keys.setRuntime("openai", "test-key");
+				const settings = Settings.isolated({
+					"compaction.enabled": false,
+					"retry.usageAwareFallback": true,
+					"retry.fallbackRevertPolicy": "when-healthy",
+					"retry.fallbackChains": { default: [fallbackSelector] },
+				});
+				settings.setModelRole("default", primarySelector);
+				const registry = new ModelRegistry(auth, tmp.join("models.json"), { settings });
+				const served: string[] = [];
+				const mock = createMockModel();
+				const agent = new Agent({
+					getApiKey: model => auth.keys.get(model.provider, session!.sessionId, { modelId: model.id }),
+					initialState: { model: fallbackModel!, systemPrompt: ["Test"], tools: [], messages: [] },
+					streamFn: (model, context, options) => {
+						const account = auth.oauth.accounts(model.provider, session!.sessionId).find(entry => entry.active);
+						served.push(`${model.provider}/${model.id}@${account?.accountId ?? "key"}`);
+						mock.push({ content: ["ok"] });
+						return mock.stream(model, context, options);
+					},
+				});
+				session = new AgentSession({
+					agent,
+					settings,
+					modelRegistry: registry,
+					sessionManager: SessionManager.inMemory(),
+					initialRetryFallback: {
+						role: "default",
+						originalSelector: primarySelector,
+						originalThinkingLevel: undefined,
+						pinned: true,
+					},
+				});
+				// account-1 becomes the session's sticky pick, then drains into its
+				// ordinary reserve while account-2 recovers.
+				await auth.keys.get("anthropic", session.sessionId, { modelId: primaryModel!.id });
+				usedFraction = { "account-1": 0.95, "account-2": 0.2 };
+				await auth.usage.invalidate("anthropic");
+
+				await session.prompt("Primary quota recovered on a sibling account");
+				await session.waitForIdle();
+				expect(served).toEqual([`${primarySelector}@account-2`]);
+			} finally {
+				await session?.dispose();
+				session = undefined;
+				auth.close();
+				tmp.removeSync();
+			}
+		});
+
+		it.each([
+			["a reply grew the stored context", "reply"],
+			["the incoming prompt", "prompt"],
+			["an agent-start hook addition", "hook"],
+		] as const)(
+			"stays on the fallback instead of compacting when %s outgrows a smaller primary",
+			async (_case, grows) => {
+				const modelsConfigPath = path.join(tempDir.path(), "when-healthy-window-models.json");
+				await Bun.write(
+					modelsConfigPath,
+					JSON.stringify({
+						providers: {
+							openai: {
+								modelOverrides: {
+									"gpt-4o-mini": { contextWindow: 4000 },
+									"gpt-4o": { contextWindow: 1_000_000 },
+								},
+							},
+						},
+					}),
+				);
+				modelRegistry = new ModelRegistry(authStorage, modelsConfigPath);
+				const smallPrimary = modelRegistry.find("openai", "gpt-4o-mini");
+				const largeFallback = modelRegistry.find("openai", "gpt-4o");
+				if (!smallPrimary || !largeFallback) throw new Error("Expected override models to resolve");
+				const smallSelector = `${smallPrimary.provider}/${smallPrimary.id}`;
+				const largeSelector = `${largeFallback.provider}/${largeFallback.id}`;
+
+				// ~15k estimated tokens: over the primary's 4000 window, far under the fallback's.
+				const bigText = "lorem ipsum ".repeat(5000);
+				const requestedModels: string[] = [];
+				const mock = createMockModel();
+				let primaryAttempts = 0;
+				const agent = new Agent({
+					getApiKey: model => `${model.provider}-test-key`,
+					initialState: { model: smallPrimary, systemPrompt: ["Test"], tools: [], messages: [] },
+					streamFn: (model, context, options) => {
+						const selector = `${model.provider}/${model.id}`;
+						requestedModels.push(selector);
+						if (selector === smallSelector && primaryAttempts++ === 0) {
+							mock.push({ throw: "rate limit exceeded retry-after-ms=200" });
+						} else {
+							mock.push({ content: [selector === largeSelector && grows === "reply" ? bigText : "ok"] });
+						}
+						return mock.stream(model, context, options);
+					},
+				});
+				const settings = Settings.isolated({
+					"compaction.enabled": true,
+					"compaction.methodOrder": ["soft"],
+					"compaction.thresholdPercent": 80,
+					"compaction.thresholdTokens": -1,
+					"retry.baseDelayMs": 5,
+					"retry.fallbackChains": { default: [largeSelector] },
+					"retry.fallbackRevertPolicy": "when-healthy",
+				});
+				settings.setModelRole("default", smallSelector);
+				vi.spyOn(modelRegistry.authStorage.health, "model").mockResolvedValue(healthOf("healthy"));
+				const sessionManager = SessionManager.inMemory();
+				let extensionRunner: ExtensionRunner | undefined;
+				if (grows === "hook") {
+					const runtime = new ExtensionRuntime();
+					let started = 0;
+					const extension = await loadExtensionFromFactory(
+						pi => {
+							pi.on("before_agent_start", async () =>
+								started++ === 0
+									? undefined
+									: { message: { customType: "review", content: bigText, display: false } },
+							);
+						},
+						tempDir.path(),
+						new EventBus(),
+						runtime,
+						"when-healthy-agent-start",
+					);
+					extensionRunner = new ExtensionRunner(
+						[extension],
+						runtime,
+						tempDir.path(),
+						sessionManager,
+						modelRegistry,
+					);
+				}
+				session = new AgentSession({ agent, sessionManager, settings, modelRegistry, extensionRunner });
+				const compactions: string[] = [];
+				session.subscribe(event => {
+					if (event.type === "auto_compaction_start") compactions.push(event.type);
+				});
+				let now = Date.now();
+				vi.spyOn(Date, "now").mockImplementation(() => now);
+
+				await session.prompt("Fall back on a rate limit");
+				await session.waitForIdle();
+				expect(requestedModels).toEqual([smallSelector, largeSelector]);
+
+				now += 60_000;
+				await session.prompt(grows === "prompt" ? bigText : "Cooldown expired and the primary is healthy");
+				await session.waitForIdle();
+				expect(requestedModels).toEqual([smallSelector, largeSelector, largeSelector]);
+				expect(compactions).toEqual([]);
+			},
+		);
+
+		/**
+		 * Session resumed on a usage fallback `openai/gpt-4o` whose primary is
+		 * `openai/gpt-4o-mini`, both with the given windows. Records request model
+		 * ids and auto-compaction starts.
+		 */
+		async function startWindowedSession(options: {
+			primaryWindow: number;
+			fallbackWindow: number;
+			settings?: Record<string, unknown>;
+			health?: () => Promise<ModelUsageHealth>;
+		}) {
+			const modelsConfigPath = path.join(tempDir.path(), "when-healthy-policy-models.json");
+			await Bun.write(
+				modelsConfigPath,
+				JSON.stringify({
+					providers: {
+						openai: {
+							modelOverrides: {
+								"gpt-4o-mini": { contextWindow: options.primaryWindow },
+								"gpt-4o": { contextWindow: 1_000_000 },
+							},
+						},
+					},
+				}),
+			);
+			modelRegistry = new ModelRegistry(authStorage, modelsConfigPath);
+			const primary = modelRegistry.find("openai", "gpt-4o-mini");
+			const found = modelRegistry.find("openai", "gpt-4o");
+			if (!primary || !found) throw new Error("Expected override models to resolve");
+			const fallback = { ...found, contextWindow: options.fallbackWindow };
+			const requests: string[] = [];
+			const compactions: string[] = [];
+			const mock = createMockModel();
+			const stream: StreamFn = (model, context, streamOptions) => {
+				requests.push(model.id);
+				mock.push({ content: ["ok"] });
+				return mock.stream(model, context, streamOptions);
+			};
+			const agent = new Agent({
+				getApiKey: model => `${model.provider}-test-key`,
+				initialState: { model: fallback, systemPrompt: ["Test"], tools: [], messages: [] },
+				streamFn: stream,
+			});
+			const settings = Settings.isolated({
+				"compaction.enabled": true,
+				"compaction.asyncEnabled": false,
+				"compaction.methodOrder": ["soft"],
+				"compaction.thresholdPercent": 80,
+				"compaction.thresholdTokens": -1,
+				"compaction.keepRecentTokens": 100,
+				"retry.fallbackChains": { default: ["openai/gpt-4o"] },
+				"retry.fallbackRevertPolicy": "when-healthy",
+				...options.settings,
+			});
+			settings.setModelRole("default", "openai/gpt-4o-mini");
+			vi.spyOn(modelRegistry.authStorage.health, "model").mockImplementation(
+				options.health ?? (async () => healthOf("healthy")),
+			);
+			session = new AgentSession({
+				agent,
+				sessionManager: SessionManager.inMemory(),
+				settings,
+				modelRegistry,
+				sideStreamFn: stream,
+				initialRetryFallback: {
+					role: "default",
+					originalSelector: "openai/gpt-4o-mini",
+					originalThinkingLevel: undefined,
+					pinned: true,
+				},
+			});
+			session.subscribe(event => {
+				if (event.type === "auto_compaction_start") compactions.push(`after ${requests.length} requests`);
+			});
+			return { session, primary, requests, compactions };
+		}
+
+		it.each([
+			[
+				"the primary's stricter compaction threshold keeps the fallback",
+				{ "openai/gpt-4o-mini": "f4000" },
+				"gpt-4o",
+			],
+			[
+				"the fallback's stricter compaction threshold does not hold the return",
+				{ "openai/gpt-4o": "f4000" },
+				"gpt-4o-mini",
+			],
+		] as const)(
+			"judges the return with the primary's compaction policy: %s",
+			async (_case, modelThresholds, expected) => {
+				const { session, requests, compactions } = await startWindowedSession({
+					primaryWindow: 200_000,
+					fallbackWindow: 1_000_000,
+					settings: { "compaction.modelThresholds": modelThresholds },
+				});
+
+				// ~5k estimated tokens: past a 4000-token threshold, far inside both windows.
+				await session.prompt("lorem ipsum ".repeat(2000));
+				await session.waitForIdle();
+				expect(requests).toEqual([expected]);
+				expect(compactions).toEqual([]);
+			},
+		);
+
+		it("returns to a fitting primary when the fallback's window is unknown", async () => {
+			const { session, requests } = await startWindowedSession({ primaryWindow: 4000, fallbackWindow: 0 });
+
+			await session.prompt("Continue");
+			await session.waitForIdle();
+			expect(requests).toEqual(["gpt-4o-mini"]);
+		});
+
+		it("judges the request against a model switched in while the primary's usage was read", async () => {
+			const healthStarted = Promise.withResolvers<void>();
+			const releaseHealth = Promise.withResolvers<void>();
+			const { session, primary, compactions } = await startWindowedSession({
+				primaryWindow: 4000,
+				fallbackWindow: 1_000_000,
+				health: async () => {
+					healthStarted.resolve();
+					await releaseHealth.promise;
+					return healthOf("depleted");
+				},
+			});
+
+			const prompting = session.prompt("lorem ipsum ".repeat(5000));
+			await healthStarted.promise;
+			await session.setModelTemporary(primary, undefined, { ephemeral: true });
+			releaseHealth.resolve();
+			await prompting;
+			await session.waitForIdle();
+			// The oversized request is compacted before it goes to the 4000-token model.
+			expect(compactions[0]).toBe("after 0 requests");
 		});
 	});
 

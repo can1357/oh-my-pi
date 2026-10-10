@@ -9,6 +9,8 @@ import {
 	resolveTelemetry,
 	type StreamFn,
 	type ThinkingLevel,
+	Tokenizer,
+	tokenizerEncodingForModel,
 } from "@oh-my-pi/pi-agent-core";
 import {
 	AGGRESSIVE_SHAKE_CONFIG,
@@ -492,6 +494,14 @@ export interface SessionMaintenanceHost {
 		options: { autoContinue: boolean; triggerContextTokens?: number; excludeMediaMethods?: boolean },
 	): Promise<CompactionCheckResult>;
 	parseRetryAfterMsFromError(errorMessage: string): number | undefined;
+	/**
+	 * `retry.fallbackRevertPolicy: when-healthy` return to the primary, taken
+	 * only when `fitsWithoutCompaction` accepts it. True when the model switched.
+	 */
+	maybeReturnToHealthyPrimary(
+		fitsWithoutCompaction: (primary: Model) => boolean,
+		signal: AbortSignal | undefined,
+	): Promise<boolean>;
 	setModelTemporary(
 		model: Model,
 		thinkingLevel?: ConfiguredThinkingLevel,
@@ -551,6 +561,8 @@ export class SessionMaintenance {
 	/** Latest rollover boundary that already received its pre-threshold notebook reminder. */
 	#experimentalNotesReminderBoundaryId: string | undefined;
 	readonly #host: SessionMaintenanceHost;
+	/** Primary-domain tokenizer for `when-healthy` return checks across tokenizers. */
+	#returnTokenizer: Tokenizer | undefined;
 
 	get #model(): Model | undefined {
 		return this.#host.model();
@@ -2482,7 +2494,7 @@ export class SessionMaintenance {
 	 * floor the compaction decision respects so on-wire compression can never
 	 * suppress it.
 	 */
-	#estimateStoredContextTokens(pendingMessages: AgentMessage[] = []): number {
+	#estimateStoredContextTokens(pendingMessages: AgentMessage[] = [], tokenizer: Tokenizer = this.#tokenizer): number {
 		// Local counting is the whole point of this arm: provider usage is
 		// exactly what it must not trust. Exclude encrypted reasoning
 		// (thinkingSignature / redactedThinking) too — its local byte size
@@ -2491,9 +2503,9 @@ export class SessionMaintenance {
 		// other arm of compactionContextTokens) already accounts for it.
 		const opts = { excludeEncryptedReasoning: true } as const;
 		return (
-			computeNonMessageTokens(this.#host.nonMessageTokenSource(), this.#tokenizer, this.#host.settings.revision) +
-			this.#tokenizer.countMessages(this.#host.messages(), opts) +
-			this.#tokenizer.countMessages(pendingMessages, opts)
+			computeNonMessageTokens(this.#host.nonMessageTokenSource(), tokenizer, this.#host.settings.revision) +
+			tokenizer.countMessages(this.#host.messages(), opts) +
+			tokenizer.countMessages(pendingMessages, opts)
 		);
 	}
 
@@ -2540,18 +2552,57 @@ export class SessionMaintenance {
 		return tokens;
 	}
 
-	async runPrePromptCompactionIfNeeded(messages: AgentMessage[]): Promise<void> {
+	/** @returns true when a `retry.fallbackRevertPolicy: when-healthy` return switched to the primary. */
+	async runPrePromptCompactionIfNeeded(messages: AgentMessage[], signal?: AbortSignal): Promise<boolean> {
 		const model = this.#model;
-		if (!model) return;
+		if (!model) return false;
 		const contextWindow = model.contextWindow ?? 0;
-		if (contextWindow <= 0) return;
+		// The estimate does not depend on the window, so one count serves both the
+		// primary below and this model; it runs only when something needs it.
+		let estimatedTokens: number | undefined;
+		const estimate = () => (estimatedTokens ??= this.#estimatePrePromptContextTokens(messages, contextWindow));
+		// A `when-healthy` return is judged on the assembled request against the
+		// primary's own window and compaction policy; one that would need
+		// compaction is not taken.
+		const returned = await this.#host.maybeReturnToHealthyPrimary(primary => {
+			const primaryWindow = primary.contextWindow ?? 0;
+			if (primaryWindow <= 0) return true;
+			const primarySettings = resolveModelCompactionSettings(this.#host.settings, primary);
+			// The shared estimate counts in the fallback's tokenizer; a primary
+			// that tokenizes differently is also counted in its own domain, with
+			// one tokenizer reused across declined attempts.
+			const encoding = tokenizerEncodingForModel(primary);
+			const frameBillingKey = snapcompact.frameBillingKey(snapcompact.frameBilling(primary));
+			let tokens: number;
+			if (encoding === this.#tokenizer.encoding && frameBillingKey === this.#tokenizer.frameBillingKey) {
+				tokens = estimate();
+			} else {
+				if (
+					this.#returnTokenizer?.encoding !== encoding ||
+					this.#returnTokenizer.frameBillingKey !== frameBillingKey
+				) {
+					this.#returnTokenizer = new Tokenizer(primary);
+				}
+				tokens = Math.max(estimate(), this.#estimateStoredContextTokens(messages, this.#returnTokenizer));
+			}
+			const fitBudget = Math.max(0, primaryWindow - resolveBudgetReserveTokens(primaryWindow, primarySettings));
+			return tokens <= fitBudget && !shouldCompact(tokens, primaryWindow, primarySettings);
+		}, signal);
+		if (signal?.aborted) return false;
+		if (returned) {
+			this.#midTurnDeadEndPendingPrePrompt = false;
+			return true;
+		}
+		// The model moved while usage was read: judge the request against it instead.
+		if (this.#model !== model) return this.runPrePromptCompactionIfNeeded(messages, signal);
+		if (contextWindow <= 0) return false;
 		const compactionSettings = this.#compactionSettings;
-		const contextTokens = this.#estimatePrePromptContextTokens(messages, contextWindow);
+		const contextTokens = estimate();
 		const pendingMidTurnDeadEnd = this.#midTurnDeadEndPendingPrePrompt;
 		this.#midTurnDeadEndPendingPrePrompt = false;
 		if (!shouldCompact(contextTokens, contextWindow, compactionSettings)) {
 			this.maybeStartSpeculativeCompaction(contextTokens, contextWindow);
-			return;
+			return false;
 		}
 		if (
 			pendingMidTurnDeadEnd &&
@@ -2561,7 +2612,7 @@ export class SessionMaintenance {
 			// The prior tool loop already attempted the rescue and warned for this
 			// persisted oversized turn. Only a later persisted cut point makes a
 			// pre-prompt retry useful; the new agent loop may warn for its own turn.
-			return;
+			return false;
 		}
 		// Grace band: a live (or just-started) background speculation absorbs the
 		// blocking summarization; the user's prompt goes out immediately and the
@@ -2571,7 +2622,7 @@ export class SessionMaintenance {
 				contextTokens,
 				contextWindow,
 			});
-			return;
+			return false;
 		}
 
 		// Auto-promote first: switching to a larger-context model avoids compacting
@@ -2584,7 +2635,7 @@ export class SessionMaintenance {
 				contextWindow,
 				model: `${model.provider}/${model.id}`,
 			});
-			return;
+			return false;
 		}
 
 		logger.debug("Pre-prompt context maintenance triggered by pending prompt size", {
@@ -2599,6 +2650,7 @@ export class SessionMaintenance {
 			preparedContextTokens: this.#estimateStoredContextTokens(),
 			phase: "pre_turn",
 		});
+		return false;
 	}
 
 	/**
