@@ -23,6 +23,18 @@ describe("JsonLexer string scan", () => {
 		});
 	});
 
+	it("avoids bulk searches for short ordinary runs between escapes", () => {
+		const value = `${"a".repeat(31)}\n`.repeat(128);
+		const src = JSON.stringify(value);
+		const indexOf = vi.spyOn(String.prototype, "indexOf");
+		const progress = new JsonLexer(src, "strict").string(QUOTE);
+		const searches = indexOf.mock.calls.length;
+		indexOf.mockRestore();
+
+		expect(searches).toBeLessThan(16);
+		expect(progress.value).toBe(value);
+	});
+
 	it("does not re-search a distant closing quote after every mixed escape", () => {
 		const src = `"${`${"a".repeat(64)}\\n`.repeat(4096)}${"x".repeat(64)}"`;
 		const indexOf = vi.spyOn(String.prototype, "indexOf");
