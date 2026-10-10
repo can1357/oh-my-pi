@@ -333,6 +333,26 @@ fn window_snapshot(target: Option<u32>, owner: Option<u32>) -> CoreResult<Vec<De
 	Ok(result)
 }
 
+/// Whether `pid` owns an on-screen window in the normal window layer, from
+/// Quartz's window list; owner and layer need no Screen Recording permission.
+/// `None` when the list cannot be read.
+pub(super) fn has_onscreen_window(pid: libc::pid_t) -> Option<bool> {
+	let snapshot = CGWindowListCopyWindowInfo(
+		CGWindowListOption::OptionOnScreenOnly | CGWindowListOption::ExcludeDesktopElements,
+		0,
+	)?;
+	// SAFETY: CoreGraphics returns an immutable array of dictionaries whose
+	// documented window keys are CFStrings and whose values are CFTypes.
+	let snapshot = unsafe { CFRetained::cast_unchecked::<CFArray<WindowDictionary>>(snapshot) };
+	let pid = i64::from(pid);
+	// SAFETY: This copy-rule snapshot remains alive and is never mutated; the
+	// CoreGraphics key constants are process-lived.
+	Some(unsafe { snapshot.iter_unchecked() }.any(|dictionary| unsafe {
+		window_number(dictionary, kCGWindowOwnerPID) == Some(pid)
+			&& window_number(dictionary, kCGWindowLayer) == Some(0)
+	}))
+}
+
 fn window_value<'a>(dictionary: &'a WindowDictionary, key: &CFString) -> Option<&'a CFType> {
 	// SAFETY: All callers borrow an immutable copy-rule Quartz snapshot.
 	unsafe { dictionary.get_unchecked(key) }

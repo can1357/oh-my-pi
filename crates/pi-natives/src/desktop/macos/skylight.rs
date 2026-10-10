@@ -21,7 +21,7 @@ use super::{
 		control,
 		error::{CoreResult, DesktopError},
 	},
-	ax,
+	ax, capture,
 };
 
 const EVENT_RECORD_LENGTH: usize = 248;
@@ -374,7 +374,8 @@ enum FocusDecision {
 struct BackgroundFocusLease {
 	previous: ProcessSerialNumber,
 	target:   ProcessSerialNumber,
-	key:      u32,
+	/// The user's key window; `None` when the front app showed no window.
+	key:      Option<u32>,
 	activity: [u32; 5],
 	disarmed: bool,
 }
@@ -388,7 +389,7 @@ impl BackgroundFocusLease {
 	) -> FocusDecision {
 		if self.disarmed
 			|| (front != self.previous && front != self.target)
-			|| (front == self.previous && key.is_some_and(|key| key != self.key))
+			|| (front == self.previous && key.is_some_and(|key| Some(key) != self.key))
 			|| (front == self.target && activity != self.activity)
 		{
 			self.disarmed = true;
@@ -436,12 +437,16 @@ pub(super) fn with_background_guard<T>(
 			"cannot resolve the background target process; retry with takeover:true or use ax actions",
 		)
 	})?;
-	let previous_key = previous.pid.and_then(ax::key_window_id).ok_or_else(|| {
-		DesktopError::background_unavailable(
-			"cannot establish the user's key window for background focus restoration; retry with \
-			 takeover:true or use ax actions",
-		)
-	})?;
+	let previous_key = previous
+		.pid
+		.and_then(restoration_key)
+		.ok_or_else(|| {
+			DesktopError::background_unavailable(
+				"cannot establish the user's key window for background focus restoration; retry with \
+				 takeover:true or use ax actions",
+			)
+		})?
+		.window();
 	let mut lease = BackgroundFocusLease {
 		previous: previous.psn,
 		target,
@@ -476,9 +481,10 @@ pub(super) fn with_background_guard<T>(
 							if front_process(spi.get_front).is_some_and(|front| front.psn == target)
 								&& activation_activity() == lease.activity
 							{
-								set_front(spi, previous.psn, previous_key)?;
+								set_front(spi, previous.psn, previous_key.unwrap_or(0))?;
 								restored = true;
-								if !post_record(spi.post_record, previous.psn, &focus_record(previous_key))
+								if let Some(key) = previous_key
+									&& !post_record(spi.post_record, previous.psn, &focus_record(key))
 								{
 									return Err(DesktopError::input_failed(
 										"background key-window restoration was rejected",
@@ -540,6 +546,51 @@ fn set_front(spi: &ForegroundSpi, psn: ProcessSerialNumber, wid: u32) -> CoreRes
 	Ok(())
 }
 
+/// What the user's front application gets back after input elsewhere.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum UserKey {
+	Window(u32),
+	/// It provably shows no window, as Finder after a click on the desktop or
+	/// an app that just closed its last window: only the front process is
+	/// restored.
+	Windowless,
+}
+
+impl UserKey {
+	const fn window(self) -> Option<u32> {
+		match self {
+			Self::Window(id) => Some(id),
+			Self::Windowless => None,
+		}
+	}
+}
+
+/// The front application `pid`'s [`UserKey`]; `None` when neither its key
+/// window nor its windowlessness can be established.
+fn restoration_key(pid: pid_t) -> Option<UserKey> {
+	restorable_key(
+		ax::key_window_id(pid),
+		|| ax::window_records(pid).map(|records| records.iter().any(|record| record.id.is_some())),
+		|| capture::has_onscreen_window(pid),
+	)
+}
+
+/// [`restoration_key`]'s decision: an app with no key window counts as
+/// windowless only when both its accessibility windows (Finder's unmappable
+/// desktop entry aside) and `WindowServer`'s on-screen list show none of its
+/// windows. An unreadable answer from either refuses.
+fn restorable_key(
+	key: Option<u32>,
+	ax_lists_window: impl FnOnce() -> Option<bool>,
+	shows_window: impl FnOnce() -> Option<bool>,
+) -> Option<UserKey> {
+	if let Some(key) = key {
+		return Some(UserKey::Window(key));
+	}
+	(ax_lists_window() == Some(false) && shows_window() == Some(false))
+		.then_some(UserKey::Windowless)
+}
+
 /// Makes `wid` the frontmost key window, runs `action`, then restores the
 /// previous front process (or, within one process, its previous key window).
 ///
@@ -575,11 +626,13 @@ pub(super) fn with_foreground<T>(
 			"cannot identify the previous application for takeover restoration; no input was sent",
 		)
 	})?;
-	let previous_key = ax::key_window_id(previous_pid).ok_or_else(|| {
-		DesktopError::input_failed(
-			"cannot identify the previous key window for takeover restoration; no input was sent",
-		)
-	})?;
+	let previous_key = restoration_key(previous_pid)
+		.ok_or_else(|| {
+			DesktopError::input_failed(
+				"cannot identify the previous key window for takeover restoration; no input was sent",
+			)
+		})?
+		.window();
 	let restore = |preparation_failed: bool| {
 		if control::user_activity() != activity {
 			return Ok(());
@@ -601,7 +654,11 @@ pub(super) fn with_foreground<T>(
 		{
 			return Ok(());
 		}
-		set_front(spi, previous.psn, previous_key)?;
+		set_front(spi, previous.psn, previous_key.unwrap_or(0))?;
+		// A previous app that showed no window gets only its front status back.
+		let Some(previous_key) = previous_key else {
+			return Ok(());
+		};
 		// Returning to an app often reinstates its original key window by
 		// itself. Re-making an already-key Chromium window can clear the user's
 		// renderer focus, just as reactivating an already-key input target can.
@@ -906,8 +963,13 @@ mod tests {
 		let previous = ProcessSerialNumber { high: 0, low: 7 };
 		let target = ProcessSerialNumber { high: 0, low: 8 };
 		let third = ProcessSerialNumber { high: 0, low: 9 };
-		let lease =
-			|| BackgroundFocusLease { previous, target, key: 42, activity: [0; 5], disarmed: false };
+		let lease = || BackgroundFocusLease {
+			previous,
+			target,
+			key: Some(42),
+			activity: [0; 5],
+			disarmed: false,
+		};
 		let mut guard = lease();
 		assert_eq!(guard.observe(target, None, [0; 5]), FocusDecision::Restore);
 		assert_eq!(guard.observe(third, None, [0; 5]), FocusDecision::Disarm);
@@ -925,10 +987,47 @@ mod tests {
 	fn typing_in_the_original_window_does_not_claim_a_user_focus_switch() {
 		let previous = ProcessSerialNumber { high: 0, low: 7 };
 		let target = ProcessSerialNumber { high: 0, low: 8 };
-		let mut guard =
-			BackgroundFocusLease { previous, target, key: 42, activity: [0; 5], disarmed: false };
+		let mut guard = BackgroundFocusLease {
+			previous,
+			target,
+			key: Some(42),
+			activity: [0; 5],
+			disarmed: false,
+		};
 		assert_eq!(guard.observe(previous, Some(42), [1; 5]), FocusDecision::Observe);
 		assert_eq!(guard.observe(target, None, [1; 5]), FocusDecision::Restore);
+	}
+
+	#[test]
+	fn a_window_appearing_in_a_windowless_front_app_is_a_user_focus_change() {
+		// Finder in front after a click on the desktop: no key window to restore.
+		let previous = ProcessSerialNumber { high: 0, low: 7 };
+		let target = ProcessSerialNumber { high: 0, low: 8 };
+		let lease =
+			|| BackgroundFocusLease { previous, target, key: None, activity: [0; 5], disarmed: false };
+		let mut guard = lease();
+		assert_eq!(guard.observe(previous, None, [0; 5]), FocusDecision::Observe);
+		assert_eq!(guard.observe(target, None, [0; 5]), FocusDecision::Restore);
+
+		// The user opened a Finder window meanwhile: hands off.
+		let mut guard = lease();
+		assert_eq!(guard.observe(previous, Some(43), [0; 5]), FocusDecision::Disarm);
+		assert_eq!(guard.observe(target, None, [0; 5]), FocusDecision::Disarm);
+	}
+
+	#[test]
+	fn only_a_provably_windowless_front_app_is_restored_without_a_key_window() {
+		let unread = || -> Option<bool> { panic!("a known key window needs no window scan") };
+		assert_eq!(restorable_key(Some(42), unread, unread), Some(UserKey::Window(42)));
+		// TextEdit after closing its last document; Finder after a desktop click
+		// lists only its unmappable desktop, which counts as no window.
+		assert_eq!(restorable_key(None, || Some(false), || Some(false)), Some(UserKey::Windowless));
+		// Windows that AX or WindowServer reports, or an unreadable answer,
+		// refuse.
+		assert_eq!(restorable_key(None, || Some(true), || Some(false)), None);
+		assert_eq!(restorable_key(None, || Some(false), || Some(true)), None);
+		assert_eq!(restorable_key(None, || None, || Some(false)), None);
+		assert_eq!(restorable_key(None, || Some(false), || None), None);
 	}
 
 	#[test]
