@@ -1,0 +1,33 @@
+// Experiential Labs hosted AI gateway (api.experientiallabs.ai): one
+// OpenAI-compatible endpoint in front of hosted providers at list price,
+// `xpl_...` bearer keys issued from platform.experientiallabs.ai
+// (https://github.com/experientiallabs/experiential/blob/main/SETUP.md).
+//
+// The key-protected `GET /v1/models` is scoped to the calling key (keys can
+// carry model allowlists) and publishes each row's context window, output
+// cap, reasoning flag and effort vocabulary, `chat_max_tokens_field`, and a
+// `pricing` block in nano-USD per million tokens, so
+// `experientialModelManagerOptions` reads limits, ladders and tariffs live.
+//
+// Deliberately no `discovery` node: live discovery needs a user credential,
+// and enrolling would freeze one key's roster into models.json on every
+// credential-less regen. The provider stays runtime-only and
+// `dynamic-models-authoritative` prunes models the gateway stops serving.
+provider "experiential" {
+	default-model "claude-sonnet-4.6"
+	// The env name the gateway's own setup contract stores the key under.
+	env "EXPLABS_API_KEY"
+	dynamic-models-authoritative #true
+
+	// Gateway dialect: system prompts ride the `system` role and no `store`
+	// field is sent, matching the sibling OpenAI-compatible gateways. The
+	// per-row `chat_max_tokens_field` is mapped at discovery time.
+	supports-developer-role #false
+	supports-store #false
+	thinking-mode "effort"
+	// The gateway speaks one OpenAI dialect for every upstream: reasoning
+	// rides `reasoning_effort` with the row's advertised vocabulary. Without
+	// this, Qwen-family ids pick the Qwen template dialect from taxonomy and
+	// send `enable_thinking` instead of the selected effort.
+	thinking-format "openai"
+}

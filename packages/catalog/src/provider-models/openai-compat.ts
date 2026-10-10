@@ -46,6 +46,7 @@ import { normalizeCharmHyperBaseUrl } from "../wire/charm-hyper";
 import { CLINEPASS_API_BASE_URL, clinePassClientHeaders } from "../wire/cline-pass";
 import { CLOUDFLARE_AI_GATEWAY_COMPAT_BASE_URL } from "../wire/cloudflare-ai-gateway";
 import { coreWeaveProjectHeaders } from "../wire/coreweave";
+import { EXPERIENTIAL_API_BASE_URL } from "../wire/experiential";
 import {
 	COPILOT_API_HEADERS,
 	COPILOT_DISCOVERY_HEADERS,
@@ -60,6 +61,7 @@ import {
 	SINGULARITYAPI_TECH_API_BASE_URL,
 	normalizeSingularityApiBaseUrl,
 } from "../wire/singularityapi";
+import { normalizeV1BaseUrl } from "../wire/v1-base-url";
 import { createBundledReferenceMap, createReferenceResolver, toModelSpec } from "./bundled-references";
 import { getDefaultModelDiscoveryBaseUrl, resolveModelCacheProviderId } from "./cache-provider-id";
 import { getClinePassModelMetadata } from "./cline-pass";
@@ -7932,4 +7934,162 @@ export function singularityApiTechModelManagerOptions(
 	config?: SingularityApiModelManagerConfig,
 ): ModelManagerOptions<Api> {
 	return singularityApiModelManagerOptions("singularityapi-tech", SINGULARITYAPI_TECH_API_BASE_URL, config);
+}
+
+// ---------------------------------------------------------------------------
+// Experiential Labs
+// ---------------------------------------------------------------------------
+
+export interface ExperientialModelManagerConfig {
+	apiKey?: string;
+	baseUrl?: string;
+	fetch?: FetchImpl;
+}
+
+/**
+ * Experiential's `/v1/models` row shape, verified against the hosted gateway
+ * (2026-10-10): OpenAI list fields plus capability flags, limits, the
+ * advertised `reasoning_effort` vocabulary, and a `pricing` block in nano-USD
+ * per million tokens. The wire publishes no image-input flag.
+ */
+interface ExperientialModelRecord extends OpenAICompatibleModelRecord {
+	supports_completions?: unknown;
+	supports_embeddings?: unknown;
+	emits_images?: unknown;
+	supports_tools?: unknown;
+	supports_reasoning?: unknown;
+	reasoning_effort?: unknown;
+	supported_reasoning_efforts?: unknown;
+	chat_max_tokens_field?: unknown;
+	context_window_tokens?: unknown;
+	maximum_output_tokens?: unknown;
+	pricing?: unknown;
+}
+
+/** Experiential's thinking-off wire tier: a disable state, not a ladder rung. */
+const EXPERIENTIAL_WIRE_EFFORT_NONE = "none";
+
+/** One nano-USD-per-million rate as USD per million; missing or negative is 0. */
+function toExperientialRate(value: unknown): number {
+	const parsed = toNumber(value);
+	return parsed !== undefined && parsed >= 0 ? parsed / 1_000_000_000 : 0;
+}
+
+/**
+ * The gateway's base tariff. Pricing is never borrowed from another host:
+ * a row without a `pricing` block is priced as unknown (zero).
+ */
+function resolveExperientialCost(pricing: unknown): ModelSpec<"openai-completions">["cost"] {
+	if (!isRecord(pricing)) return { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+	return {
+		input: toExperientialRate(pricing.input_nano_usd_per_million_tokens),
+		output: toExperientialRate(pricing.output_nano_usd_per_million_tokens),
+		cacheRead: toExperientialRate(pricing.cached_input_nano_usd_per_million_tokens),
+		cacheWrite: toExperientialRate(
+			pricing.cache_write_nano_usd_per_million_tokens ?? pricing.cache_creation_input_nano_usd_per_million_tokens,
+		),
+	};
+}
+
+/**
+ * Map one Experiential row to a chat model spec. Rows the gateway marks as
+ * non-chat (`supports_completions: false`, embeddings, image output) are
+ * dropped. Live limits, reasoning, ladder and tariff win; a canonical bundled
+ * reference fills only the display name, input modality, and limits on rows
+ * that publish none. Reasoning is never borrowed: an effort the route does not
+ * advertise is rejected by the gateway.
+ */
+function mapExperientialModel(
+	entry: ExperientialModelRecord,
+	defaults: ModelSpec<"openai-completions">,
+	canonical: ModelSpec<"openai-completions"> | undefined,
+): ModelSpec<"openai-completions"> | null {
+	if (entry.supports_completions === false || entry.supports_embeddings === true || entry.emits_images === true) {
+		return null;
+	}
+	// A row without reasoning metadata has no known effort vocabulary, and the
+	// gateway rejects efforts a route does not accept (400
+	// `unsupported_parameter`), so it stays non-reasoning and no reasoning
+	// field is ever sent for it.
+	const reasoning = entry.supports_reasoning === true;
+	const wireEfforts = Array.isArray(entry.supported_reasoning_efforts) ? entry.supported_reasoning_efforts : undefined;
+	let thinking: ThinkingConfig | undefined;
+	if (reasoning && wireEfforts) {
+		// `none` is the off switch, not an Effort; it routes through
+		// `reasoningDisableMode` below.
+		const efforts = THINKING_EFFORTS.filter(effort => wireEfforts.includes(effort));
+		const defaultLevel = efforts.find(effort => effort === entry.reasoning_effort);
+		thinking =
+			efforts.length > 0
+				? { mode: "effort", efforts, ...(defaultLevel !== undefined && { defaultLevel }) }
+				: undefined;
+	}
+	// Never regrow a guessed dial from identity or KDL: the live vocabulary
+	// (or its absence) is the whole truth for this gateway.
+	const compat: NonNullable<ModelSpec<"openai-completions">["compat"]> = { trustExplicitThinkingOnly: true };
+	if (thinking && wireEfforts?.includes(EXPERIENTIAL_WIRE_EFFORT_NONE)) {
+		compat.reasoningDisableMode = "none-effort";
+	}
+	if (entry.chat_max_tokens_field === "max_tokens" || entry.chat_max_tokens_field === "max_completion_tokens") {
+		compat.maxTokensField = entry.chat_max_tokens_field;
+	}
+	const contextWindow = toPositiveNumber(entry.context_window_tokens, canonical?.contextWindow ?? null);
+	const canonicalMaxTokens =
+		canonical?.maxTokens != null && contextWindow != null
+			? Math.min(canonical.maxTokens, contextWindow)
+			: (canonical?.maxTokens ?? null);
+	return {
+		...defaults,
+		name: toModelName(entry.name, canonical?.name ?? defaults.name),
+		reasoning,
+		...(thinking && { thinking }),
+		input: canonical?.input ?? defaults.input,
+		...(typeof entry.supports_tools === "boolean" && { supportsTools: entry.supports_tools }),
+		...(Object.keys(compat).length > 0 && { compat }),
+		cost: resolveExperientialCost(entry.pricing),
+		contextWindow,
+		maxTokens: toPositiveNumber(entry.maximum_output_tokens, canonicalMaxTokens),
+	};
+}
+
+/**
+ * `experiential` — Experiential Labs' hosted gateway. `/v1/models` is
+ * key-protected and returns only the models the calling key may use, so
+ * discovery needs a key, the cache is namespaced per key and endpoint, and
+ * the live snapshot is authoritative for roster, reasoning and tariff.
+ */
+export function experientialModelManagerOptions(
+	config?: ExperientialModelManagerConfig,
+): ModelManagerOptions<"openai-completions"> {
+	const apiKey = config?.apiKey;
+	const baseUrl = normalizeV1BaseUrl(config?.baseUrl, EXPERIENTIAL_API_BASE_URL);
+	return {
+		providerId: "experiential",
+		cacheProviderId: resolveModelCacheProviderId("experiential", { apiKey, baseUrl }),
+		dynamicModelsAuthoritative: true,
+		dynamicReasoningAuthoritative: true,
+		// An explicit live `0` (a free model) must not revert to a bundled rate.
+		dynamicCostAuthoritative: true,
+		...(apiKey && {
+			fetchDynamicModels: () => {
+				// Resolved here so the cache fast path never walks the index.
+				const canonicalReferences = getBundledModelReferenceIndex();
+				return fetchOpenAICompatibleModels({
+					api: "openai-completions",
+					provider: "experiential",
+					baseUrl,
+					apiKey,
+					mapModel: (entry, defaults) =>
+						mapExperientialModel(
+							entry as ExperientialModelRecord,
+							defaults,
+							resolveModelReference(defaults.id, canonicalReferences) as
+								| ModelSpec<"openai-completions">
+								| undefined,
+						),
+					fetch: config?.fetch,
+				});
+			},
+		}),
+	};
 }

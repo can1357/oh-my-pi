@@ -2213,6 +2213,24 @@ Provider-specific overrides in `packages/catalog/src/compat/rules/providers/zhip
 - **Authored seeds**: `black-forest-labs/FLUX-2-pro`, `hexgrad/Kokoro-82M`; bundle policy `always`. Limits, capabilities, and prices are authored alongside these rows.
 - Runtime manager: `deepinfraModelManagerOptions` in `packages/catalog/src/provider-models/openai-compat.ts`.
 
+## Experiential Labs (`experiential`)
+
+### Special casings
+- Chat discovery uses `openai-completions` against the key-protected `/v1/models`, which lists only the models the calling key may use. Rows map `context_window_tokens`, `maximum_output_tokens`, `supports_tools`, `supports_reasoning`, `supported_reasoning_efforts` (default from `reasoning_effort`) and `chat_max_tokens_field` straight off the wire.
+- Prices arrive as nano-USD per million tokens in the `pricing` block and are divided by 10^9; `cache_write_nano_usd_per_million_tokens` falls back to `cache_creation_input_nano_usd_per_million_tokens`. Live prices are authoritative (`dynamicCostAuthoritative`), so free models stay at `0`; a row without `pricing` is priced as unknown (`0`) and never borrows another host's rate.
+- `none` in the effort vocabulary is the off switch, not a rung: it sets `reasoningDisableMode: "none-effort"` and is excluded from the ladder. Live reasoning is authoritative, so explicit non-reasoning rows and empty vocabularies do not regrow a dial.
+- Rows marked `supports_completions: false`, `supports_embeddings: true`, or `emits_images: true` are dropped. The wire publishes no image-input flag, so input modality and the display name come from the canonical bundled reference when one exists.
+- Gateway dialect: no `developer` role, no `store` field.
+
+### Auth & usage
+- Login kind `api-key` is declared in `packages/catalog/src/compat/rules/auth/experiential.kdl`. Environment keys: `EXPLABS_API_KEY`. Validation uses `models-endpoint`, which rejects a revoked or unknown key without billing.
+- The model cache is namespaced per key and normalized endpoint (credential-scoped), because keys can carry model allowlists.
+
+### Catalog model handling
+- **Provider entry (`experiential`)**: `packages/catalog/src/compat/rules/providers/experiential.kdl` declares default model `claude-sonnet-4.6`. Environment keys: `EXPLABS_API_KEY`.
+- **Runtime-only**: no `discovery` node and no bundled `models.json` rows; successful authoritative discovery is the whole roster.
+- Runtime manager: `experientialModelManagerOptions` in `packages/catalog/src/provider-models/openai-compat.ts`.
+
 ## Helmcode (`helmcode`)
 
 ### Special casings

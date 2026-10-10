@@ -2,6 +2,8 @@
  * Charm Hyper gateway endpoint, shared so a host migration — or a self-hosted
  * proxy override — touches a single module.
  */
+import { normalizeV1BaseUrl } from "./v1-base-url";
+
 export const CHARM_HYPER_API_BASE_URL = "https://hyper.charm.land/v1";
 
 /**
@@ -20,7 +22,5 @@ export const CHARM_HYPER_API_BASE_URL = "https://hyper.charm.land/v1";
  * `/v1` segment if it omits one.
  */
 export function normalizeCharmHyperBaseUrl(baseUrl?: string): string {
-	const trimmed = baseUrl?.trim().replace(/\/+$/, "");
-	if (!trimmed) return CHARM_HYPER_API_BASE_URL;
-	return trimmed.endsWith("/v1") ? trimmed : `${trimmed}/v1`;
+	return normalizeV1BaseUrl(baseUrl, CHARM_HYPER_API_BASE_URL);
 }

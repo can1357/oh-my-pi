@@ -31,6 +31,9 @@ const RUNTIME_ONLY_PROVIDERS = new Set([
 	// lanes), so no rows are frozen into models.json.
 	"singularityapi-dev",
 	"singularityapi-tech",
+	// Experiential Labs' roster is live and key-scoped (keys can carry model
+	// allowlists); experientialModelManagerOptions maps it at runtime.
+	"experiential",
 	// User-configured LiteLLM proxy (models.yml provider or litellm auth flow;
 	// PROXY_OPENAI_COMPAT_PROVIDERS) that forwards upstream chat templates.
 	"litellm",

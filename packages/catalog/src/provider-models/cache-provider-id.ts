@@ -1,6 +1,7 @@
 import { CHARM_HYPER_API_BASE_URL, normalizeCharmHyperBaseUrl } from "../wire/charm-hyper";
 import { CODEX_BASE_URL, CODEX_CLIENT_VERSION } from "../wire/codex";
 import { CURSOR_DEFAULT_BASE_URL } from "../wire/cursor";
+import { EXPERIENTIAL_API_BASE_URL } from "../wire/experiential";
 import { type AccountScope, factoryDroidModelCacheProviderId } from "../wire/factory-droid";
 import { PERSONAL_GITHUB_COPILOT_BASE_URL } from "../wire/github-copilot";
 import {
@@ -8,6 +9,7 @@ import {
 	SINGULARITYAPI_TECH_API_BASE_URL,
 	normalizeSingularityApiBaseUrl,
 } from "../wire/singularityapi";
+import { normalizeV1BaseUrl } from "../wire/v1-base-url";
 
 export interface ModelCacheProviderIdOptions extends AccountScope {
 	apiKey?: string;
@@ -26,6 +28,8 @@ const CREDENTIAL_SCOPED_MODEL_CACHE_PROVIDERS: Readonly<Record<string, true>> = 
 	// than from the synchronous, credential-less startup read.
 	"singularityapi-dev": true,
 	"singularityapi-tech": true,
+	// Experiential keys can carry model allowlists, so `/v1/models` is per key.
+	experiential: true,
 };
 
 /** Whether a provider's model-cache namespace requires its resolved credential. */
@@ -157,6 +161,15 @@ export function resolveModelCacheProviderId(providerId: string, options: ModelCa
 			const baseUrl = normalizeSingularityApiBaseUrl(options.baseUrl, canonical);
 			const scope = `${options.apiKey ?? ""}\u0000${baseUrl}`;
 			return `${providerId}:models-v1:${Bun.hash(scope).toString(36)}`;
+		}
+		case "experiential": {
+			// The roster is issued per key (keys can carry model allowlists) and
+			// discovery is authoritative, so a shared namespace would serve the
+			// previous key's roster for the full TTL. Both the registry and
+			// `experientialModelManagerOptions` normalize through `normalizeV1BaseUrl` so
+			// they land on one namespace.
+			const scope = `${options.apiKey ?? ""}\u0000${normalizeV1BaseUrl(options.baseUrl, EXPERIENTIAL_API_BASE_URL)}`;
+			return `experiential:models-v1:${Bun.hash(scope).toString(36)}`;
 		}
 		case "litellm": {
 			const baseUrl = options.baseUrl ?? getDefaultModelDiscoveryBaseUrl(providerId)!;

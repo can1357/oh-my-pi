@@ -1,0 +1,15 @@
+// Experiential Labs hosted gateway. Key validation probes the non-billable
+// `GET /v1/models`: a revoked or unknown key answers
+// `{"error":{"type":"authentication_error","code":"invalid_key"}}`
+// (observed 2026-10-10), so a bad key is rejected without spending.
+auth "experiential" {
+	name "Experiential Labs"
+	env "EXPLABS_API_KEY"
+	login "api-key" {
+		auth-url "https://platform.experientiallabs.ai"
+		instructions "Create or copy an API key from the Experiential Labs dashboard"
+		prompt "Paste your Experiential Labs API key" placeholder="xpl_..."
+		normalize "strip-bearer"
+		validate "models-endpoint" label="Experiential Labs" url="https://api.experientiallabs.ai/v1/models"
+	}
+}

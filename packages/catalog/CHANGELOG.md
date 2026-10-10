@@ -4,6 +4,7 @@
 
 ### Added
 
+- Added built-in Experiential Labs support with `/login`, live per-key model discovery, gateway pricing, and per-model reasoning levels. ([#15179](https://github.com/can1357/oh-my-pi/pull/15179) by [@dbk216](https://github.com/dbk216))
 - Added the `connection-bound-native-history` rule axis for Responses hosts that reject native history items from an earlier connection, set for GitHub Copilot ([#15148](https://github.com/can1357/oh-my-pi/pull/15148) by [@will-bogusz](https://github.com/will-bogusz))
 ### Fixed
 
