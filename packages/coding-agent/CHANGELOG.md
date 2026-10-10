@@ -352,6 +352,7 @@
 - Fixed resumed xAI, Factory Droid and OpenAI sessions forgetting earlier reasoning on their first request, while a retry after a stale Responses item error still rebuilds history ([#15148](https://github.com/can1357/oh-my-pi/pull/15148) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed the startup default ignoring the model a provider's discovery names as the account's default: with no model chosen, Devin Pro now starts on SWE-2 at High instead of SWE-1.6 ([#15115](https://github.com/can1357/oh-my-pi/pull/15115) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed `/advisor on|off` typed while a subagent is focused in Agent Hub being rejected as a main-session command (and, if it had gone through, toggling the main session's advisor); it now toggles that focused subagent's own advisor ([#15055](https://github.com/can1357/oh-my-pi/issues/15055) by [@triclops200](https://github.com/triclops200))
+- Fixed `/advisor on|off` typed while a subagent is focused in Agent Hub being rejected as a main-session command; it now toggles that focused subagent's own advisor ([#15171](https://github.com/can1357/oh-my-pi/pull/15171) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ## [18.8.7] - 2026-10-09
 
