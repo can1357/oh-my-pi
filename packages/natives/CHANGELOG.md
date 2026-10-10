@@ -15,6 +15,8 @@
 - Fixed macOS background typing into Chrome pages and background shortcuts such as ⌘A in TextEdit doing nothing ([#15184](https://github.com/can1357/oh-my-pi/pull/15184) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed a macOS background right-click or Control-click that opened a context menu leaving the menu open, which kept the keyboard from the user's app; the menu now closes and the click throws `InputFailed`, since it was delivered ([#15185](https://github.com/can1357/oh-my-pi/pull/15185) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed macOS keys and mouse buttons staying down when omp is killed or its native input code panics mid-gesture; a key or button the user is physically holding is left for the user to release ([#15192](https://github.com/can1357/oh-my-pi/pull/15192) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed macOS background keystrokes into Finder throwing `BackgroundUnavailable`, because its desktop is listed among its windows without a window id ([#15184](https://github.com/can1357/oh-my-pi/pull/15184) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed macOS background shortcuts with a modifier reporting success when the app stopped answering right after, as TextEdit can on a document's first ⌘S; they now throw `InputFailed` saying the outcome is unknown ([#15184](https://github.com/can1357/oh-my-pi/pull/15184) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.8.7] - 2026-10-09
 
