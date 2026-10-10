@@ -47,7 +47,7 @@ const MAX_ATTACHED_SEARCH_DEPTH: usize = 24;
 /// that skips bounds drops the last two, and `props` drops `AXChildren`,
 /// whose count `AXUIElementGetAttributeValueCount` reads without copying the
 /// array.
-const NODE_ATTRIBUTES: [&str; 9] = [
+const NODE_ATTRIBUTES: [&str; 11] = [
 	"AXChildren",
 	"AXRole",
 	"AXTitle",
@@ -55,6 +55,8 @@ const NODE_ATTRIBUTES: [&str; 9] = [
 	"AXDescription",
 	"AXEnabled",
 	"AXFocused",
+	"AXSelected",
+	"AXSubrole",
 	"AXPosition",
 	"AXSize",
 ];
@@ -65,8 +67,10 @@ const VALUE: usize = 3;
 const DESCRIPTION: usize = 4;
 const ENABLED: usize = 5;
 const FOCUSED: usize = 6;
-const POSITION: usize = 7;
-const SIZE: usize = 8;
+const SELECTED: usize = 7;
+const SUBROLE: usize = 8;
+const POSITION: usize = 9;
+const SIZE: usize = 10;
 
 /// Which slice of [`NODE_ATTRIBUTES`] one element read requests.
 #[derive(Clone, Copy)]
@@ -639,14 +643,14 @@ impl AxBackend for MacAx {
 
 	fn perform(&mut self, h: &AxHandle, action: &str) -> CoreResult<()> {
 		let element = mac_handle(h)?;
-		let native = action_name(action);
 		let actions = copy_strings_from_action_names(element)?;
-		if !actions.contains(&native) {
+		let Some(native) = supported_action(&actions, action).cloned() else {
 			return Err(DesktopError::ax_failed(format!(
-				"AX action '{native}' is not supported by this element; available actions: {}",
+				"AX action '{}' is not supported by this element; available actions: {}",
+				action_name(action),
 				actions.join(", "),
 			)));
-		}
+		};
 		let perform = || element_action_result(&native, send_action(element, &native));
 		// AXRaise is an explicit request to change stacking, including the
 		// takeover preparation path. Other semantic actions must stay background.
@@ -750,6 +754,18 @@ impl AxBackend for MacAx {
 		}
 		Ok(result)
 	}
+
+	fn focused_within(&mut self, root: &AxHandle) -> Option<AxHandle> {
+		app_focused(mac_handle(root).ok()?).map(AxHandle::Mac)
+	}
+
+	fn value_settable(&mut self, h: &AxHandle) -> bool {
+		let Ok(element) = mac_handle(h) else {
+			return false;
+		};
+		attribute_settable(element, "AXValue")
+			&& element_pid(element).is_ok_and(|pid| !process::is_terminal(pid))
+	}
 }
 
 fn element_props(
@@ -771,12 +787,33 @@ fn element_props(
 			.and_then(|value| value.downcast::<CFBoolean>().ok())
 			.map(|value| value.as_bool())
 	};
+	let title = nonempty(string(TITLE));
+	let description = nonempty(string(DESCRIPTION));
+	let unlabeled = [&title, &description]
+		.into_iter()
+		.flatten()
+		.all(|label| label.trim().is_empty());
+	// A window's own buttons are named only by their subrole.
+	let role_name = if unlabeled && native_role == "AXButton" {
+		string(SUBROLE).and_then(|subrole| {
+			Some(match subrole.as_str() {
+				"AXCloseButton" => "close",
+				"AXMinimizeButton" => "minimize",
+				"AXZoomButton" => "zoom",
+				"AXFullScreenButton" => "full screen",
+				_ => return None,
+			})
+		})
+	} else {
+		None
+	};
+	let selected = reports_selected(&native_role) && boolean(SELECTED).unwrap_or(false);
 	Ok(AxProps {
 		role: normalize_role_macos(&native_role),
 		native_role,
-		title: nonempty(string(TITLE)),
+		title,
 		value: nonempty(read(VALUE).map(|value| stringify_value(&value))),
-		description: nonempty(string(DESCRIPTION)),
+		description,
 		enabled: boolean(ENABLED).unwrap_or(true),
 		focused: boolean(FOCUSED).unwrap_or(false),
 		bounds: match read_bounds {
@@ -787,7 +824,16 @@ fn element_props(
 		},
 		actions,
 		child_count: u32::try_from(child_count).unwrap_or(u32::MAX),
+		selected,
+		role_name: role_name.map(str::to_owned),
 	})
+}
+
+/// Roles that report their own selection: list and table rows and cells,
+/// buttons, and the file icons of Finder's icon view, whose list reports a
+/// section rather than the icons as its selected children.
+fn reports_selected(native_role: &str) -> bool {
+	matches!(native_role, "AXRow" | "AXCell" | "AXButton" | "AXImage")
 }
 
 fn element_pid(element: &AXUIElement) -> CoreResult<libc::pid_t> {
@@ -798,6 +844,13 @@ fn element_pid(element: &AXUIElement) -> CoreResult<libc::pid_t> {
 		return Err(DesktopError::ax_failed("AX element has no application owner"));
 	}
 	Ok(pid)
+}
+
+/// The element holding keyboard focus inside `element`'s application.
+fn app_focused(element: &AXUIElement) -> Option<CFRetained<AXUIElement>> {
+	let app = create_application(element_pid(element).ok()?).ok()?;
+	set_timeout(&app).ok()?;
+	copy_element(&app, "AXFocusedUIElement")
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1004,13 +1057,16 @@ fn send_action(element: &AXUIElement, action: &str) -> AXError {
 /// `CannotComplete` from `AXPerformAction` means messaging failed or the app
 /// did not reply in time, e.g. while the action runs a modal dialog. The
 /// request was made, so its outcome is unknown rather than failed.
+/// `AttributeUnsupported` names no attribute an action reads; Preview answers
+/// it after following a PDF link's `AXPressAction`, so it is no proof of
+/// failure either.
 fn element_action_result(action: &str, error: AXError) -> CoreResult<()> {
-	if error == AXError::CannotComplete {
+	if matches!(error, AXError::CannotComplete | AXError::AttributeUnsupported) {
 		return Err(DesktopError::ax_unconfirmed(format!(
 			"AX action '{action}' was requested, but its outcome could not be confirmed: the app did \
-			 not reply in time or messaging failed ({error:?}), for example because the action \
-			 opened a modal dialog. It may already have taken effect: observe the window before \
-			 retrying"
+			 not reply in time, messaging failed or the app answered with an unrelated error \
+			 ({error:?}), for example because the action opened a modal dialog. It may already have \
+			 taken effect: observe the window before retrying"
 		)));
 	}
 	ax_result(error, format!("AX action '{action}' failed"))
@@ -1290,20 +1346,31 @@ fn bounds_matches_window(bounds: AxBounds, window: &DesktopWindow) -> bool {
 }
 
 fn action_name(action: &str) -> String {
-	match action.trim().to_ascii_lowercase().as_str() {
+	let action = action.trim();
+	match action.to_ascii_lowercase().as_str() {
 		"press" => "AXPress".to_string(),
 		"raise" => "AXRaise".to_string(),
 		"showmenu" | "show_menu" => "AXShowMenu".to_string(),
-		_ if action.starts_with("AX") => action.to_string(),
+		lower if lower.starts_with("ax") => format!("AX{}", &action[2..]),
 		_ => format!("AX{action}"),
 	}
+}
+
+/// The element's own name for `action`, matched regardless of case: `ax()`
+/// lists actions in lowercase.
+fn supported_action<'a>(available: &'a [String], action: &str) -> Option<&'a String> {
+	let requested = action_name(action);
+	available
+		.iter()
+		.find(|name| name.eq_ignore_ascii_case(&requested))
 }
 
 /// Renders an AX attribute value as stable, agent-readable text for
 /// [`AxProps::value`] and `attributes()`.
 ///
-/// Numbers print as numbers (checkbox/radio state, slider position) and an
-/// element reference (a radio group's selected button) prints as that
+/// Numbers print as numbers (checkbox/radio state, slider position), a date
+/// as the local ISO-8601 time the control shows and `setValue` takes back, and
+/// an element reference (a radio group's selected button) prints as that
 /// element's title or description, so snapshots never carry CF debug text
 /// whose pointer addresses change between otherwise identical reads.
 fn stringify_value(value: &CFType) -> String {
@@ -1315,6 +1382,17 @@ fn stringify_value(value: &CFType) -> String {
 	}
 	if let Some(number) = value.downcast_ref::<CFNumber>() {
 		return stringify_number(number);
+	}
+	if let Some(date) = value.downcast_ref::<CFDate>() {
+		// CF caches the system zone per process; the target app follows changes
+		// to it.
+		CFTimeZone::reset_system();
+		let zone = CFTimeZone::system();
+		return date::format_local(date.absolute_time(), |at| {
+			zone
+				.as_ref()
+				.map_or(0, |zone| zone.seconds_from_gmt(at) as i64)
+		});
 	}
 	if let Some(element) = value.downcast_ref::<AXUIElement>() {
 		return nonempty(copy_string(element, "AXTitle"))
@@ -1470,11 +1548,48 @@ mod tests {
 	}
 
 	#[test]
+	fn an_unrelated_attribute_error_from_an_action_is_unconfirmed() {
+		let error =
+			element_action_result("AXPressAction", AXError::AttributeUnsupported).unwrap_err();
+		assert_eq!(error.code, ErrorCode::AxUnconfirmed);
+		assert!(error.message.contains("observe the window"), "{}", error.message);
+	}
+
+	#[test]
+	fn finder_icons_report_their_own_selection() {
+		assert!(super::reports_selected("AXImage"));
+		assert!(super::reports_selected("AXRow"));
+		assert!(!super::reports_selected("AXStaticText"));
+	}
+
+	#[test]
 	fn numeric_values_render_as_numbers_at_stored_precision() {
 		assert_eq!(stringify_value(&CFNumber::new_i32(1)), "1");
 		assert_eq!(stringify_value(&CFNumber::new_i64(-3)), "-3");
 		assert_eq!(stringify_value(&CFNumber::new_f64(0.185)), "0.185");
 		assert_eq!(stringify_value(&CFNumber::new_f32(0.185)), "0.185");
+	}
+
+	#[test]
+	fn dates_render_as_the_local_time_set_value_takes_back() {
+		let at = 813_499_200.0;
+		let text = stringify_value(&objc2_core_foundation::CFDate::new(None, at).unwrap());
+		assert_eq!(&text[10..11], "T", "{text}");
+		assert_eq!(super::date::parse(&text), Some(super::date::DateRequest::Instant(at)), "{text}");
+	}
+
+	#[test]
+	fn listed_actions_perform_whatever_their_case() {
+		let available = ["AXOpen", "AXShowMenu", "AXPressAction"].map(String::from);
+		let native = |action| super::supported_action(&available, action).map(String::as_str);
+		assert_eq!(native("open"), Some("AXOpen"));
+		assert_eq!(native("pressaction"), Some("AXPressAction"));
+		assert_eq!(native("showmenu"), Some("AXShowMenu"));
+		assert_eq!(native("AXOpen"), Some("AXOpen"));
+		assert_eq!(native("press"), None);
+		assert_eq!(native("axopen"), Some("AXOpen"));
+		assert_eq!(native("axOpen"), Some("AXOpen"));
+		assert_eq!(native(" open "), Some("AXOpen"));
 	}
 
 	#[test]

@@ -847,7 +847,7 @@ impl Worker {
 			},
 			Request::AxNode { reference, .. } => {
 				let h = self.registry.resolve(reference)?;
-				let props = self.ax()?.props(&h)?;
+				let props = ax::node_props(self.ax()?, &h)?;
 				Ok(Response::Node(Some(ax::node_to_napi(reference.clone(), props))))
 			},
 			Request::AxAttributes { reference, .. } => {
@@ -1821,6 +1821,8 @@ mod capture_tests {
 				bounds:      Some(AxBounds { x: 10.0, y: 10.0, width: 20.0, height: 20.0 }),
 				actions:     Vec::new(),
 				child_count: 0,
+				selected:    false,
+				role_name:   None,
 			})
 		}
 

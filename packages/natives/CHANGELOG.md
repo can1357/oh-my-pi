@@ -6,6 +6,19 @@
 
 - Sped up macOS accessibility reads (`ax()`, `find()` and single-element reads) by fetching each element's attributes in one round trip to the app ([#15275](https://github.com/can1357/oh-my-pi/pull/15275) by [@will-bogusz](https://github.com/will-bogusz))
 
+### Added
+
+- Added to macOS `ax()` lines what an element can do: `(selected)`, `(settable)` where `setValue` can write, `actions=` for actions beyond its role's press, names for a window's close, minimize, zoom and full-screen buttons, and dates in local time
+
+### Changed
+
+- `ax()` lines show 200 characters of a long label or value instead of 80, keep newlines as `\n`, and end a cut value with how much was cut and the `value()` call that reads it whole
+
+### Fixed
+
+- Fixed macOS `ax()` marking every cell of a focused table or sidebar `(focused)`; it now marks only the element holding the app's keyboard focus
+- Fixed macOS `perform()` reporting a followed Preview PDF link as failed: an attribute error the app answers to an action now reports the outcome as unconfirmed
+
 ## [18.8.8] - 2026-10-10
 
 ### Changed

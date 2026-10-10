@@ -101,6 +101,11 @@ pub struct AxProps {
 	pub bounds:      Option<AxBounds>,
 	pub actions:     Vec<String>,
 	pub child_count: u32,
+	/// Whether a row, cell, button or file icon reports itself selected.
+	pub selected:    bool,
+	/// A name the platform derives when the element has neither title nor
+	/// description, such as a window's close button.
+	pub role_name:   Option<String>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -290,22 +295,27 @@ impl AxRegistry {
 struct WalkNode {
 	handle:   AxHandle,
 	props:    AxProps,
+	settable: bool,
 	children: Vec<Self>,
 }
 
 struct WalkState {
-	visited:   u32,
-	skipped:   u32,
-	max_nodes: u32,
-	max_depth: u32,
-	truncated: bool,
-	bounds:    WalkBounds,
+	visited:     u32,
+	skipped:     u32,
+	max_nodes:   u32,
+	max_depth:   u32,
+	truncated:   bool,
+	bounds:      WalkBounds,
+	/// Whether the walk reads which values `setValue` can write, a state only
+	/// `ax()` lines print.
+	line_states: bool,
 }
 
 fn walk_raw(
 	backend: &mut dyn AxBackend,
 	handle: AxHandle,
 	depth: u32,
+	in_web: bool,
 	state: &mut WalkState,
 ) -> CoreResult<Option<WalkNode>> {
 	if depth > state.max_depth || state.visited >= state.max_nodes {
@@ -321,16 +331,41 @@ fn walk_raw(
 		},
 		Err(error) => return Err(error),
 	};
+	// `setValue` refuses web content, whose echo it cannot verify.
+	let in_web = in_web || props.role == "webarea";
+	let settable = state.line_states
+		&& !in_web
+		&& takes_value(&props.role)
+		&& !opens(&props)
+		&& backend.value_settable(&handle);
 	let mut children = Vec::new();
 	for child in child_handles {
-		if let Some(child) = walk_raw(backend, child, depth + 1, state)? {
+		if let Some(child) = walk_raw(backend, child, depth + 1, in_web, state)? {
 			children.push(child);
 		}
 		if state.truncated && state.visited >= state.max_nodes {
 			break;
 		}
 	}
-	Ok(Some(WalkNode { handle, props, children }))
+	Ok(Some(WalkNode { handle, props, settable, children }))
+}
+
+/// Roles whose value `setValue` writes: text, which it sets as a string, and
+/// dates. Sliders, steppers and color wells hold numbers or colors it cannot
+/// write.
+fn takes_value(role: &str) -> bool {
+	matches!(
+		role,
+		"textfield" | "textarea" | "combobox" | "datetimearea" | "datefield" | "timefield"
+	)
+}
+
+/// Whether the element is an item the app opens, such as a file in a Finder
+/// list, whose name shows as a text field. Writing that field's value changes
+/// what the field reads, not the item: Finder renames nothing, even after a
+/// confirm.
+fn opens(props: &AxProps) -> bool {
+	props.actions.iter().any(|action| action == "AXOpen")
 }
 
 fn named(props: &AxProps) -> bool {
@@ -343,11 +378,20 @@ fn named(props: &AxProps) -> bool {
 /// Back/Forward/Reload among them — carry no `AXTitle` and name themselves
 /// through `AXDescription` alone.
 fn label(props: &AxProps) -> Option<&str> {
-	[props.title.as_deref(), props.description.as_deref()]
-		.into_iter()
-		.flatten()
-		.map(str::trim)
-		.find(|label| !label.is_empty())
+	labelled(props).map(|(label, _)| label)
+}
+/// The label and the element field that holds it in full. A name derived
+/// from a window control's subrole is a word or two and never cut, so its
+/// field never shows in a note.
+fn labelled(props: &AxProps) -> Option<(&str, &'static str)> {
+	[
+		(props.title.as_deref(), "title"),
+		(props.description.as_deref(), "description"),
+		(props.role_name.as_deref(), "role"),
+	]
+	.into_iter()
+	.filter_map(|(label, field)| Some((label?.trim(), field)))
+	.find(|(label, _)| !label.is_empty())
 }
 fn interactable(props: &AxProps) -> bool {
 	!props.actions.is_empty()
@@ -411,14 +455,103 @@ fn filter_node(mut node: WalkNode, all: bool) -> Option<WalkNode> {
 	}
 }
 
-fn escaped_truncated(value: &str, max: usize) -> String {
-	let mut out: String = value.chars().take(max).collect();
-	if value.chars().count() > max {
-		out.push('…');
+/// Characters of a label or value a line shows before cutting it.
+const SHOWN_CHARS: usize = 200;
+
+/// Writes `text` quoted, with escapes that keep its newlines and quotes
+/// readable. Past [`SHOWN_CHARS`] the line shows the start, how much it cut and
+/// the call that reads the whole text, unless that note would be longer than
+/// what it replaces.
+fn push_quoted(line: &mut String, text: &str, reference: &str, accessor: &str) {
+	let total = text.chars().count();
+	let cut = total.checked_sub(SHOWN_CHARS).and_then(|hidden| {
+		let note = format!(
+			"… (+{} chars; (await computer.ref(\"{reference}\")).{accessor})",
+			grouped(hidden)
+		);
+		(note.chars().count() < hidden).then_some(note)
+	});
+	line.push('"');
+	let shown = if cut.is_some() { SHOWN_CHARS } else { total };
+	for ch in text.chars().take(shown) {
+		match ch {
+			'"' => line.push_str("\\\""),
+			'\\' => line.push_str("\\\\"),
+			'\n' => line.push_str("\\n"),
+			'\r' => line.push_str("\\r"),
+			'\t' => line.push_str("\\t"),
+			ch if ch.is_control() => {
+				let _ = write!(line, "\\u{:04x}", u32::from(ch));
+			},
+			ch => line.push(ch),
+		}
 	}
-	out.replace('\\', "\\\\")
-		.replace('"', "\\\"")
-		.replace('\n', " ")
+	line.push('"');
+	if let Some(note) = cut {
+		line.push_str(&note);
+	}
+}
+
+/// `14230` as `14,230`.
+fn grouped(count: usize) -> String {
+	let digits = count.to_string();
+	let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+	for (index, digit) in digits.chars().enumerate() {
+		if index > 0 && (digits.len() - index).is_multiple_of(3) {
+			out.push(',');
+		}
+		out.push(digit);
+	}
+	out
+}
+
+/// Controls whose own action is a press, so a line never lists it.
+fn pressable(role: &str) -> bool {
+	matches!(
+		role,
+		"button"
+			| "checkbox"
+			| "radio"
+			| "link"
+			| "menuitem"
+			| "menubaritem"
+			| "menubutton"
+			| "popupbutton"
+			| "tab"
+			| "disclosuretriangle"
+	)
+}
+
+/// What a line lists after `actions=`: the macOS actions an element offers
+/// beyond what its role implies. A control's press, a text field's confirm
+/// and cancel, and the actions nearly every element has (scroll into view,
+/// context menu, raise, page scrolls, hover variants) go unlisted, except on a
+/// control without press, which lists all it has. App-defined custom actions
+/// cannot be performed by name and stay unlisted, as does any other
+/// platform's vocabulary.
+fn shown_actions(props: &AxProps) -> Option<String> {
+	let role = props.role.as_str();
+	let mut names = Vec::with_capacity(props.actions.len());
+	for action in &props.actions {
+		if action.starts_with("Name:") {
+			continue;
+		}
+		names.push(action.strip_prefix("AX")?);
+	}
+	if !pressable(role) || names.contains(&"Press") {
+		names.retain(|name| {
+			let implied = match *name {
+				"Press" => pressable(role),
+				"Confirm" | "Cancel" => matches!(role, "textfield" | "textarea" | "combobox"),
+				"ScrollToVisible" | "ShowMenu" | "Raise" | "ShowAlternateUI" | "ShowDefaultUI"
+				| "ZoomWindow" | "ScrollUpByPage" | "ScrollDownByPage" | "ScrollLeftByPage"
+				| "ScrollRightByPage" => true,
+				_ => false,
+			};
+			!implied
+		});
+	}
+	(!names.is_empty()).then(|| names.join(",").to_ascii_lowercase())
 }
 
 pub fn node_to_napi(reference: String, props: AxProps) -> AxNode {
@@ -447,6 +580,7 @@ fn format_tree(
 	node: WalkNode,
 	depth: usize,
 	window: &DesktopWindow,
+	focus: Option<&AxHandle>,
 	backend: &mut dyn AxBackend,
 	registry: &mut AxRegistry,
 	target: &str,
@@ -454,6 +588,13 @@ fn format_tree(
 	text: &mut String,
 	nodes: &mut u32,
 ) {
+	// The root's own focus only reflects app-local focus; report the global
+	// roster flag instead.
+	let focused = if depth == 0 {
+		window.focused
+	} else {
+		focused_in(focus, &node.handle, node.props.focused)
+	};
 	let reference = registry.register(backend, target, generation, node.handle, &node.props);
 	if !text.is_empty() {
 		text.push('\n');
@@ -461,8 +602,9 @@ fn format_tree(
 	text.push_str(&"  ".repeat(depth));
 	text.push_str("- ");
 	text.push_str(&node.props.role);
-	if let Some(label) = label(&node.props) {
-		let _ = write!(text, " \"{}\"", escaped_truncated(label, 80));
+	if let Some((label, field)) = labelled(&node.props) {
+		text.push(' ');
+		push_quoted(text, label, &reference, field);
 	}
 	let _ = write!(text, " [ref={reference}]");
 	if depth == 0 {
@@ -474,24 +616,38 @@ fn format_tree(
 		.as_deref()
 		.filter(|value| !value.is_empty())
 	{
-		let _ = write!(text, ": \"{}\"", escaped_truncated(value, 80));
+		text.push_str(": ");
+		push_quoted(text, value, &reference, "value()");
 	}
 	if !node.props.enabled {
 		text.push_str(" (disabled)");
 	}
-	// The root's own AXFocused only reflects app-local focus; report the global
-	// roster flag instead.
-	let focused = if depth == 0 {
-		window.focused
-	} else {
-		node.props.focused
-	};
+	if node.props.selected {
+		text.push_str(" (selected)");
+	}
+	if node.settable {
+		text.push_str(" (settable)");
+	}
 	if focused {
 		text.push_str(" (focused)");
 	}
+	if let Some(actions) = shown_actions(&node.props) {
+		let _ = write!(text, " actions={actions}");
+	}
 	*nodes += 1;
 	for child in node.children {
-		format_tree(child, depth + 1, window, backend, registry, target, generation, text, nodes);
+		format_tree(
+			child,
+			depth + 1,
+			window,
+			focus,
+			backend,
+			registry,
+			target,
+			generation,
+			text,
+			nodes,
+		);
 	}
 }
 
@@ -504,15 +660,20 @@ pub fn snapshot(
 	let target = &window.id;
 	let generation = registry.begin_snapshot(target);
 	let root = backend.window_root(window)?;
+	// Per-element focus flags also hold on every cell of a focused table, so
+	// `(focused)` marks only the application's own focused element where the
+	// backend reports one.
+	let focus = backend.focused_within(&root);
 	let mut state = WalkState {
-		visited:   0,
-		skipped:   0,
-		max_nodes: options.max_nodes.unwrap_or(800).max(1),
-		max_depth: options.max_depth.unwrap_or(24),
-		truncated: false,
-		bounds:    WalkBounds::Skip,
+		visited:     0,
+		skipped:     0,
+		max_nodes:   options.max_nodes.unwrap_or(800).max(1),
+		max_depth:   options.max_depth.unwrap_or(24),
+		truncated:   false,
+		bounds:      WalkBounds::Skip,
+		line_states: true,
 	};
-	let root = walk_raw(backend, root, 0, &mut state)?
+	let root = walk_raw(backend, root, 0, false, &mut state)?
 		.and_then(|node| filter_node(node, options.all.unwrap_or(false)));
 	let mut text = String::new();
 	let mut node_count = 0;
@@ -521,6 +682,7 @@ pub fn snapshot(
 			root,
 			0,
 			window,
+			focus.as_ref(),
 			backend,
 			registry,
 			target,
@@ -554,15 +716,17 @@ pub fn query(
 	let target = &window.id;
 	let generation = registry.current_generation(target);
 	let root = backend.window_root(window)?;
+	let focus = backend.focused_within(&root);
 	let mut state = WalkState {
-		visited:   0,
-		skipped:   0,
-		max_nodes: 5_000,
-		max_depth: 24,
-		truncated: false,
-		bounds:    WalkBounds::Read,
+		visited:     0,
+		skipped:     0,
+		max_nodes:   5_000,
+		max_depth:   24,
+		truncated:   false,
+		bounds:      WalkBounds::Read,
+		line_states: false,
 	};
-	let Some(root) = walk_raw(backend, root, 0, &mut state)? else {
+	let Some(root) = walk_raw(backend, root, 0, false, &mut state)? else {
 		return Ok(Vec::new());
 	};
 	let role = query.role.as_deref().map(str::to_lowercase);
@@ -581,8 +745,10 @@ pub fn query(
 			&& contains(label(&node.props), title.as_ref())
 			&& contains(node.props.value.as_deref(), value.as_ref())
 		{
-			let reference = registry.register(backend, target, generation, node.handle, &node.props);
-			result.push(node_to_napi(reference, node.props));
+			let mut props = node.props;
+			props.focused = focused_in(focus.as_ref(), &node.handle, props.focused);
+			let reference = registry.register(backend, target, generation, node.handle, &props);
+			result.push(node_to_napi(reference, props));
 			if result.len() >= limit {
 				break;
 			}
@@ -597,10 +763,24 @@ pub fn register_node(
 	target: &str,
 	handle: AxHandle,
 ) -> CoreResult<AxNode> {
-	let props = backend.props(&handle)?;
+	let props = node_props(backend, &handle)?;
 	let generation = registry.current_generation(target);
 	let reference = registry.register(backend, target, generation, handle, &props);
 	Ok(node_to_napi(reference, props))
+}
+
+/// Whether `handle` holds focus: it is its application's focused element when
+/// the backend reports one, else its own flag says so.
+fn focused_in(focus: Option<&AxHandle>, handle: &AxHandle, own: bool) -> bool {
+	focus.map_or(own, |focus| focus == handle)
+}
+
+/// An element's props, its `focused` decided by [`focused_in`].
+pub fn node_props(backend: &mut dyn AxBackend, handle: &AxHandle) -> CoreResult<AxProps> {
+	let mut props = backend.props(handle)?;
+	let focus = backend.focused_within(handle);
+	props.focused = focused_in(focus.as_ref(), handle, props.focused);
+	Ok(props)
 }
 pub fn element_at_node(
 	backend: &mut dyn AxBackend,
@@ -682,14 +862,20 @@ mod tests {
 
 	#[derive(Default)]
 	struct Mock {
-		props:        HashMap<u64, AxProps>,
-		children:     HashMap<u64, Vec<u64>>,
+		props:          HashMap<u64, AxProps>,
+		children:       HashMap<u64, Vec<u64>>,
 		/// Nodes read without an identity.
-		unidentified: HashSet<u64>,
+		unidentified:   HashSet<u64>,
 		/// Nodes whose earlier reads are gone, their identity taken over.
-		gone:         HashSet<u64>,
+		gone:           HashSet<u64>,
 		/// Bounds read by tree walks.
-		bounds_reads: u32,
+		bounds_reads:   u32,
+		/// The application's focused element.
+		focus:          Option<u64>,
+		/// Nodes whose value `setValue` can write.
+		settable:       HashSet<u64>,
+		/// Settability checks made.
+		settable_reads: u32,
 	}
 	impl Mock {
 		fn handle(&self, id: u64) -> AxHandle {
@@ -788,6 +974,15 @@ mod tests {
 		fn alive(&mut self, h: &AxHandle) -> bool {
 			!self.gone.contains(&node(h))
 		}
+
+		fn focused_within(&mut self, _: &AxHandle) -> Option<AxHandle> {
+			self.focus.map(|id| self.handle(id))
+		}
+
+		fn value_settable(&mut self, h: &AxHandle) -> bool {
+			self.settable_reads += 1;
+			self.settable.contains(&node(h))
+		}
 	}
 	fn p(role: &str, title: Option<&str>) -> AxProps {
 		AxProps {
@@ -801,6 +996,8 @@ mod tests {
 			bounds:      None,
 			actions:     Vec::new(),
 			child_count: 0,
+			selected:    false,
+			role_name:   None,
 		}
 	}
 	fn window() -> DesktopWindow {
@@ -1105,6 +1302,226 @@ mod tests {
 		assert_eq!(nodes.len(), 1);
 		assert_eq!(nodes[0].title, None);
 		assert_eq!(nodes[0].description.as_deref(), Some("Reload"));
+	}
+	fn tree(m: &mut Mock) -> String {
+		snapshot(m, &mut AxRegistry::default(), &window(), &AxSnapshotOptions::default())
+			.unwrap()
+			.text
+	}
+	#[test]
+	fn a_long_value_shows_its_start_and_names_the_call_that_reads_it_whole() {
+		let whole = format!("line one\n\"two\"\t{}", "x".repeat(14_415));
+		let mut note = p("textarea", None);
+		note.value = Some(whole.clone());
+		note.focused = true;
+		let mut field = p("textfield", None);
+		field.value = Some("y".repeat(SHOWN_CHARS + 30));
+		let mut m = Mock {
+			props: [(1, p("window", Some("Title"))), (2, note), (3, field)].into(),
+			children: [(1, vec![2, 3])].into(),
+			..Default::default()
+		};
+		let text = tree(&mut m);
+		assert_eq!(
+			text,
+			format!(
+				"- window \"Title\" [ref=e1] app=Safari (focused)\n  - textarea [ref=e2]: \"line \
+				 one\\n\\\"two\\\"\\t{}\"… (+14,230 chars; (await computer.ref(\"e2\")).value()) \
+				 (focused)\n  - textfield [ref=e3]: \"{}\"",
+				"x".repeat(SHOWN_CHARS - 15),
+				"y".repeat(SHOWN_CHARS + 30),
+			)
+		);
+		let found = query(&mut m, &mut AxRegistry::default(), &window(), &AxQuery {
+			role:  Some("textarea".into()),
+			title: None,
+			value: None,
+			limit: None,
+		})
+		.unwrap();
+		assert_eq!(found[0].value.as_deref(), Some(whole.as_str()));
+	}
+	/// The tree line of `reference`, without its indent.
+	fn line<'a>(text: &'a str, reference: &str) -> &'a str {
+		let tag = format!("[ref={reference}]");
+		text
+			.lines()
+			.find(|line| line.contains(&tag))
+			.unwrap_or_else(|| panic!("no {tag} in\n{text}"))
+			.trim_start()
+	}
+	#[test]
+	fn only_the_applications_focused_element_is_marked_focused() {
+		// A focused table reports every cell focused.
+		let cell = |title| {
+			let mut cell = p("cell", Some(title));
+			cell.focused = true;
+			cell
+		};
+		let mut m = Mock {
+			props: [
+				(1, p("window", Some("Title"))),
+				(2, p("outline", Some("Files"))),
+				(3, cell("a.txt")),
+				(4, cell("b.txt")),
+			]
+			.into(),
+			children: [(1, vec![2]), (2, vec![3, 4])].into(),
+			focus: Some(4),
+			..Default::default()
+		};
+		let text = tree(&mut m);
+		assert_eq!(line(&text, "e3"), "- cell \"a.txt\" [ref=e3]");
+		assert_eq!(line(&text, "e4"), "- cell \"b.txt\" [ref=e4] (focused)");
+		let found = query(&mut m, &mut AxRegistry::default(), &window(), &AxQuery {
+			role:  Some("cell".into()),
+			title: None,
+			value: None,
+			limit: None,
+		})
+		.unwrap();
+		assert_eq!(found.iter().map(|node| node.focused).collect::<Vec<_>>(), [false, true]);
+		let mut registry = AxRegistry::default();
+		let (a, b) = (m.handle(3), m.handle(4));
+		let a = register_node(&mut m, &mut registry, "w", a).unwrap();
+		let b = register_node(&mut m, &mut registry, "w", b).unwrap();
+		assert_eq!((a.focused, b.focused), (false, true));
+		// Without an application focus, an element's own flag stands.
+		m.focus = None;
+		let text = tree(&mut m);
+		assert!(line(&text, "e3").ends_with("(focused)"), "{text}");
+	}
+	#[test]
+	fn values_set_value_can_write_are_marked_settable_outside_web_content() {
+		let mut due = p("datetimearea", Some("Due"));
+		due.value = Some("2026-10-16T09:00:00-04:00".into());
+		let mut volume = p("slider", Some("Volume"));
+		volume.value = Some("0.5".into());
+		let mut m = Mock {
+			props: [
+				(1, p("window", Some("Title"))),
+				(2, due),
+				(3, p("webarea", Some("Page"))),
+				(4, p("textfield", Some("Search"))),
+				(5, p("button", Some("Go"))),
+				(6, volume),
+			]
+			.into(),
+			children: [(1, vec![2, 3, 5, 6]), (3, vec![4])].into(),
+			settable: [2, 4, 5, 6].into(),
+			..Default::default()
+		};
+		let text = tree(&mut m);
+		assert!(line(&text, "e2").ends_with("(settable)"), "{text}");
+		for unsettable in ["e4", "e5", "e6"] {
+			assert!(!line(&text, unsettable).contains("(settable)"), "{text}");
+		}
+		assert_eq!(m.settable_reads, 1);
+	}
+	#[test]
+	fn a_file_name_field_the_app_opens_is_not_marked_settable() {
+		let mut name = p("textfield", None);
+		name.value = Some("invoice.pdf".into());
+		name.actions = vec!["AXOpen".into(), "AXShowMenu".into(), "AXConfirm".into()];
+		let mut m = Mock {
+			props: [(1, p("window", Some("Title"))), (2, name)].into(),
+			children: [(1, vec![2])].into(),
+			settable: [2].into(),
+			..Default::default()
+		};
+		let text = tree(&mut m);
+		assert_eq!(line(&text, "e2"), "- textfield [ref=e2]: \"invoice.pdf\" actions=open");
+		assert_eq!(m.settable_reads, 0);
+	}
+	#[test]
+	fn selected_rows_and_items_are_marked() {
+		let mut inbox = p("row", Some("Inbox"));
+		inbox.selected = true;
+		let mut b_pdf = p("image", Some("b.pdf"));
+		b_pdf.selected = true;
+		let mut m = Mock {
+			props: [
+				(1, p("window", Some("Title"))),
+				(2, p("outline", Some("Sidebar"))),
+				(3, inbox),
+				(4, p("row", Some("Sent"))),
+				(5, p("list", Some("Files"))),
+				(6, p("image", Some("a.pdf"))),
+				(7, b_pdf),
+			]
+			.into(),
+			children: [(1, vec![2, 5]), (2, vec![3, 4]), (5, vec![6, 7])].into(),
+			..Default::default()
+		};
+		let text = tree(&mut m);
+		let marked: Vec<_> = text
+			.lines()
+			.filter(|line| line.ends_with(" (selected)"))
+			.map(str::trim_start)
+			.collect();
+		assert_eq!(marked, [
+			"- row \"Inbox\" [ref=e3] (selected)",
+			"- image \"b.pdf\" [ref=e7] (selected)"
+		]);
+	}
+	#[test]
+	fn lines_list_the_actions_a_role_does_not_imply() {
+		let with = |role: &str, title: &str, actions: &[&str]| {
+			let mut props = p(role, Some(title));
+			props.actions = actions.iter().map(|action| (*action).to_owned()).collect();
+			props
+		};
+		let mut m = Mock {
+			props: [
+				(1, p("window", Some("Title"))),
+				(2, with("button", "Save", &["AXPress", "AXShowMenu"])),
+				(3, with("button", "Search", &["AXShowMenu", "AXScrollToVisible"])),
+				(4, with("image", "a.pdf", &["AXOpen", "AXShowMenu"])),
+				(5, with("statictext", "Yoga", &["AXPress", "AXShowMenu", "AXScrollToVisible"])),
+				(6, with("textfield", "Name", &["AXConfirm", "AXCancel", "Name:Delete\nTarget:0x0"])),
+				(7, with("popover", "Details", &["AXCancel"])),
+				(8, with("button", "Native", &["press", "invoke"])),
+			]
+			.into(),
+			children: [(1, (2..=8).collect())].into(),
+			..Default::default()
+		};
+		let text = tree(&mut m);
+		let actions = |reference| {
+			line(&text, reference)
+				.split_once(" actions=")
+				.map(|(_, actions)| actions)
+		};
+		assert_eq!(actions("e2"), None);
+		assert_eq!(actions("e3"), Some("showmenu,scrolltovisible"));
+		assert_eq!(actions("e4"), Some("open"));
+		assert_eq!(actions("e5"), Some("press"));
+		assert_eq!(actions("e6"), None);
+		assert_eq!(actions("e7"), Some("cancel"));
+		assert_eq!(actions("e8"), None);
+	}
+	#[test]
+	fn a_window_control_named_only_by_its_subrole_takes_that_name() {
+		let mut close = p("button", None);
+		close.role_name = Some("close".into());
+		close.actions.push("AXPress".into());
+		let mut m = Mock {
+			props: [(1, p("window", Some("Title"))), (2, close)].into(),
+			children: [(1, vec![2])].into(),
+			..Default::default()
+		};
+		assert_eq!(
+			tree(&mut m),
+			"- window \"Title\" [ref=e1] app=Safari (focused)\n  - button \"close\" [ref=e2]"
+		);
+		let found = query(&mut m, &mut AxRegistry::default(), &window(), &AxQuery {
+			role:  None,
+			title: Some("close".into()),
+			value: None,
+			limit: None,
+		})
+		.unwrap();
+		assert_eq!((found.len(), found[0].title.as_deref()), (1, None));
 	}
 	#[test]
 	fn truncation_sets_flag_and_trailer() {

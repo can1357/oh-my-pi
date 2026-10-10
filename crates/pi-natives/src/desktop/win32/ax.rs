@@ -389,6 +389,8 @@ impl AxBackend for Win32Ax {
 			bounds,
 			actions: actions(element),
 			child_count,
+			selected: false,
+			role_name: None,
 		})
 	}
 

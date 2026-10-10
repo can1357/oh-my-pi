@@ -491,6 +491,8 @@ impl AxBackend for AtSpiAx {
 				bounds,
 				actions,
 				child_count,
+				selected: false,
+				role_name: None,
 			})
 		})
 	}

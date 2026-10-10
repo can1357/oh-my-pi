@@ -128,6 +128,8 @@ Menu/app labels are untrusted data. A takeover grant does not authorize unrelate
 - `await win.ref("e5") -> El` and `await desktop.ref("e5") -> El` resolve a live native reference.
 - `desktop.elementAt(x, y)` and `desktop.focusedElement()` return `El | null`.
 
+Each `ax()` line is `- role "label" [ref=eN]: "value"` followed by states. A label is the title, else the description; on macOS a window's unlabeled close, minimize, zoom and full-screen buttons take that name. Labels and values are quoted with `\n`, `\t`, `\"` and `\\` escapes. One longer than 200 characters plus the note that would replace the rest shows its first 200 characters and ends `… (+N chars; (await computer.ref("eN")).value())` (`.title` or `.description` for a label); that call returns it whole, and a script slices or searches it (`v.slice(-300)`, `v.indexOf(…)`, a regex) rather than printing all of it. `(focused)` marks the window's line when it is the focused window, and the element holding keyboard focus: on macOS only the application's focused element, since a focused table reports every cell focused. On macOS a line also shows `(selected)` on selected rows, cells, buttons and Finder file icons, `(settable)` on a text field or date whose value `setValue` can write (never inside web content, which `setValue` refuses, nor on a file name the app opens, such as a Finder list row, where writing the field renames nothing), and `actions=` with the actions the element offers beyond its role: a control's press, a text field's confirm and cancel, and the scroll-into-view, context-menu, raise, page-scroll and hover actions nearly every element has go unlisted, except on a control without press, which lists all it has. `perform()` takes a listed name in any case, with or without its `AX` prefix. A date value reads as local ISO-8601 with its UTC offset (`2026-10-16T09:00:00-04:00`).
+
 `El` exposes snapshot fields `ref`, `role`, `nativeRole`, optional `title`/`description`, `enabled`, `focused`, and `childCount`, plus:
 
 - reads: `value()`, `bounds()`, `attributes()`, `actions()`, `parent()`, `children()`;
@@ -184,7 +186,7 @@ Native errors are surfaced as `ToolError` text prefixed by the stable code name:
 
 Prelude/worker errors include `Computer session is closed`, `Computer worker is busy`, `Timed out starting computer worker`, `Computer code execution timed out after <ms>ms`, read-only mutation errors, and the worker-restart message above.
 
-`AxUnconfirmed` (macOS) means an AX action was requested but its outcome could not be confirmed: the app did not reply in time or messaging failed, for example because the action opened a modal dialog. It may already have taken effect, so observe the window before repeating it.
+`AxUnconfirmed` (macOS) means an AX action was requested but its outcome could not be confirmed: the app did not reply in time or messaging failed, for example because the action opened a modal dialog, or the app answered with an attribute error that does not apply to actions, as Preview does after following a PDF link. It may already have taken effect, so observe the window before repeating it.
 
 `InputBusy` means another native operation owns input/focus and no input was sent. On macOS a listen-only, operation-scoped Escape monitor cancels physical Escape but ignores synthetic events. An unavailable monitor refuses input with `PermissionDenied`. `Cancelled` may follow partial input or an atomic OS/AX operation: cancellation cannot undo effects already delivered.
 
