@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Subagents now derive their provider prompt-cache key from the spawning session plus agent name, so parallel siblings of one agent share a cache route instead of each missing the cache on its first turn ([#15266](https://github.com/can1357/oh-my-pi/issues/15266))
+
 ## [18.8.9] - 2026-10-10
 
 ### Added

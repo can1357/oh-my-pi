@@ -564,6 +564,12 @@ export interface ExecutorOptions {
 	 */
 	parentAgentId?: string;
 	/**
+	 * Prompt-cache identity of the spawning session. The child's key is derived from it plus the agent
+	 * name, so concurrent siblings of one agent share a cache route instead of each keying on its own
+	 * session id.
+	 */
+	parentPromptCacheKey?: string;
+	/**
 	 * Keep the finished subagent addressable in the registry for IRC/revival.
 	 * Defaults to true. Eval bridge agents are programmatic one-shot helpers and
 	 * set this false so disposal unregisters them instead of leaving idle peers.
@@ -4302,6 +4308,10 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			// prompt, artifacts dir) — only the SessionManager and settings differ.
 			const sessionSpec: SubagentSessionSpec = {
 				options: {
+					providerPromptCacheKey:
+						options.parentPromptCacheKey === undefined
+							? undefined
+							: `${options.parentPromptCacheKey}:${agent.name}`,
 					cwd: worktree ?? cwd,
 					additionalDirectories: worktree !== undefined ? undefined : options.additionalDirectories,
 					authStorage,
