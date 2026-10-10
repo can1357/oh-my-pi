@@ -451,6 +451,8 @@ export interface LspClient {
 	activeProgressTokens: Set<string | number>;
 	/** Resolves when the server's initial project loading completes (or after timeout) */
 	projectLoaded: Promise<void>;
+	/** Initial project load has not completed; absent on synthetic clients means ready. */
+	projectLoadPending?: boolean;
 	/** Call to signal that project loading has completed */
 	resolveProjectLoaded: () => void;
 }
