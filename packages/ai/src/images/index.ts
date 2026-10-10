@@ -21,7 +21,7 @@ export function isImageGenerationApi(api: Api): api is ImageGenerationApi {
 	return (IMAGE_GENERATION_APIS as readonly Api[]).includes(api);
 }
 
-/** Whether catalog policy verified explicit image backgrounds for this deployment. */
+/** Whether catalog policy verified explicit image backgrounds for this official-endpoint deployment. */
 export function supportsImageBackground(model: Model<Api>): boolean {
 	return model.imageBackground === true;
 }
@@ -32,7 +32,16 @@ export async function generateImage(
 	request: ImageGenerationRequest,
 	options: ImageGenerationOptions,
 ): Promise<ImageGenerationResult> {
-	if (request.background && !supportsImageBackground(model)) {
+	const carrier = options.carrier;
+	const supportsBackground =
+		!request.background ||
+		(supportsImageBackground(model) &&
+			(!carrier ||
+				(carrier.api === model.api &&
+					carrier.compat &&
+					"officialEndpoint" in carrier.compat &&
+					carrier.compat.officialEndpoint)));
+	if (request.background && !supportsBackground) {
 		if (request.background !== "auto") {
 			throw new AIError.ValidationError(
 				`Image model ${model.provider}/${model.id} does not support ${request.background} backgrounds`,

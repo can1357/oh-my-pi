@@ -704,6 +704,10 @@ function resolveOpenAIResponsesPolicy(
 ): ResolvedOpenAIResponsesCompat {
 	const baseUrl = spec.baseUrl ?? "";
 	const provider = spec.provider;
+	const isCodex = api === "openai-codex-responses";
+	const officialEndpoint = isCodex
+		? hostMatchesUrl(baseUrl, "openaiCodex")
+		: isOfficialOpenAIEndpoint(provider, baseUrl);
 	const backendProvider = spec.providerType ?? provider;
 	const hostModel = { provider, baseUrl };
 	const isAzure = modelMatchesHost(hostModel, "azureOpenAI");
@@ -796,7 +800,7 @@ function resolveOpenAIResponsesPolicy(
 		supportsObfuscationOptOut: isOpenAIUrl || provider === "openai",
 		storeResponses: false,
 		connectionBoundNativeHistory: false,
-		officialEndpoint: isOfficialOpenAIEndpoint(provider, baseUrl),
+		officialEndpoint,
 		harmonyLeakMitigation: false,
 		rejectRootObjectUnion: false,
 		retryWithoutStrictOnGrammarError: false,
@@ -814,6 +818,9 @@ function resolveOpenAIResponsesPolicy(
 	};
 	applyWireAxes(compat, axes.wire, api);
 	applyCompatOverrides(compat, spec.compat);
+	// Codex capabilities are endpoint facts, even when a rebuild spreads a
+	// previously materialized compat record into the spec.
+	if (isCodex) compat.officialEndpoint = officialEndpoint;
 	overlayEffortMapAxis(compat, axes, spec.compat);
 	if (isXaiHost && "reasoningEffortMap" in axes.wire) {
 		// The rules carry the canonical first-party xAI effort map; re-assert it

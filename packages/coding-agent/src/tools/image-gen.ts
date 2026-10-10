@@ -260,7 +260,21 @@ export const imageGenTool: CustomTool<typeof imageGenSchema, ImageGenToolDetails
 			let hasBackgroundCandidate = false;
 			let inputImages: ImageGenerationRequest["inputImages"];
 			for (const model of candidates) {
-				if (requiresBackground && !supportsImageBackground(model)) {
+				const carrier =
+					model.api === "openai-responses" || model.api === "openai-codex-responses"
+						? model.hostedImage
+							? model
+							: resolveHostedImageCarrier(ctx.modelRegistry, model, ctx.model)
+						: undefined;
+				const supportsBackground =
+					!requiresBackground ||
+					(supportsImageBackground(model) &&
+						(!carrier ||
+							(carrier.api === model.api &&
+								carrier.compat &&
+								"officialEndpoint" in carrier.compat &&
+								carrier.compat.officialEndpoint)));
+				if (requiresBackground && !supportsBackground) {
 					skipped.push(`${model.provider}/${model.id} (unsupported background ${params.background})`);
 					continue;
 				}
@@ -285,10 +299,8 @@ export const imageGenTool: CustomTool<typeof imageGenSchema, ImageGenToolDetails
 					continue;
 				}
 
-				let carrier: Model | undefined;
 				let apiKey = ctx.modelRegistry.resolver(model, sessionId);
 				if (model.api === "openai-responses" || model.api === "openai-codex-responses") {
-					carrier = model.hostedImage ? model : resolveHostedImageCarrier(ctx.modelRegistry, model, ctx.model);
 					if (!carrier) {
 						skipped.push(`${model.provider}/${model.id} (hosted chat carrier unavailable)`);
 						continue;

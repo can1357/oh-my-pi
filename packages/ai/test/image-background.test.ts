@@ -6,14 +6,19 @@ import type { Api, FetchImpl, Model } from "@oh-my-pi/pi-catalog/types";
 
 const IMAGE_DATA = Buffer.from("background-image").toString("base64");
 
-function imageModel(provider: string, api: Api, id = "gpt-image-2"): Model<Api> {
+function imageModel(
+	provider: string,
+	api: Api,
+	id = "gpt-image-2",
+	baseUrl = provider === "openai-codex" ? "https://chatgpt.com/backend-api" : `https://${provider}.example/v1`,
+): Model<Api> {
 	return buildModel({
 		id,
 		name: id,
 		provider,
 		api,
 		kind: "image",
-		baseUrl: `https://${provider}.example/v1`,
+		baseUrl,
 		reasoning: false,
 		input: ["text", "image"],
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
@@ -33,6 +38,7 @@ describe("image background preference", () => {
 		expect(supportsImageBackground({ ...model, imageBackground: undefined })).toBe(false);
 		expect(supportsImageBackground({ ...model, imageBackground: false })).toBe(false);
 		for (const overrides of [
+			{ baseUrl: "https://codex-proxy.example/v1" },
 			{ provider: "openai", api: "openai-responses" as const },
 			{ provider: "openai", api: "openai-images" as const },
 			{ provider: "custom-images", api: "openai-images" as const },
@@ -42,6 +48,60 @@ describe("image background preference", () => {
 		]) {
 			expect(supportsImageBackground(buildModel({ ...model, ...overrides }))).toBe(false);
 		}
+	});
+
+	it("rejects explicit backgrounds on a custom Codex URL before contacting it", async () => {
+		const official = imageModel("openai-codex", "openai-codex-responses");
+		const model = buildModel({ ...official, baseUrl: "https://codex-proxy.example/v1" });
+		const carrier = buildModel({ ...model, id: "gpt-5.4", name: "GPT 5.4", kind: "chat" });
+		let calls = 0;
+		const fetchStub: FetchImpl = async () => {
+			calls++;
+			throw new Error("Unexpected custom Codex request");
+		};
+		for (const selected of [model, official]) {
+			for (const background of ["transparent", "opaque"] as const) {
+				const error = await generateImage(
+					selected,
+					{ prompt: "a sticker", background },
+					{ apiKey: "test-key", carrier, fetch: fetchStub },
+				).catch((error: unknown) => error);
+				expect(error).toBeInstanceOf(AIError.ValidationError);
+				expect(error).toHaveProperty(
+					"message",
+					`Image model openai-codex/gpt-image-2 does not support ${background} backgrounds`,
+				);
+			}
+		}
+		expect(calls).toBe(0);
+	});
+
+	it("omits automatic backgrounds on a custom Codex URL without changing the request", async () => {
+		const official = imageModel("openai-codex", "openai-codex-responses");
+		const model = buildModel({ ...official, baseUrl: "https://codex-proxy.example/v1" });
+		const carrier = buildModel({ ...model, id: "gpt-5.4", name: "GPT 5.4", kind: "chat" });
+		const bodies: Array<Record<string, unknown>> = [];
+		const fetchStub: FetchImpl = async (input, init) => {
+			expect(input.toString()).toBe("https://codex-proxy.example/v1/codex/responses");
+			const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+			bodies.push(body);
+			const tools = body.tools as Array<Record<string, unknown>>;
+			expect(tools[0]).not.toHaveProperty("background");
+			const response = { output: [{ type: "image_generation_call", result: IMAGE_DATA }] };
+			return new Response(`data: ${JSON.stringify({ type: "response.completed", response })}\n\n`, {
+				headers: { "content-type": "text/event-stream" },
+			});
+		};
+		const request = Object.freeze({ prompt: "a sticker", background: "auto" as const });
+		const options = { apiKey: "test-key", carrier, fetch: fetchStub };
+		await generateImage(model, { prompt: "a sticker" }, options);
+		const result = await generateImage(model, request, options);
+		await generateImage(official, request, options);
+		expect(bodies).toHaveLength(3);
+		expect(bodies[1]).toEqual(bodies[0]);
+		expect(bodies[2]).toEqual(bodies[0]);
+		expect(result.images).toEqual([{ data: IMAGE_DATA, mimeType: "image/webp" }]);
+		expect(request).toEqual({ prompt: "a sticker", background: "auto" });
 	});
 
 	it("rejects DeepInfra explicit backgrounds with a capability error before its strict endpoint is called", async () => {

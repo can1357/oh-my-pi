@@ -30,7 +30,7 @@ function catalogModel(provider: string, id: string, api: Api, kind: "chat" | "im
 		name: `${provider}/${id}`,
 		api,
 		provider,
-		baseUrl: `https://${provider}.example/v1`,
+		baseUrl: provider === "openai-codex" ? "https://chatgpt.com/backend-api" : `https://${provider}.example/v1`,
 		kind,
 		reasoning: false,
 		input: kind === "image" ? ["text", "image"] : ["text"],
@@ -244,7 +244,7 @@ describe("imageGenTool catalog routing", () => {
 		);
 		collectPaths(result);
 
-		expect(urls).toEqual(["https://openai-codex.example/v1/codex/responses"]);
+		expect(urls).toEqual(["https://chatgpt.com/backend-api/codex/responses"]);
 		expect(requestBody).toMatchObject({
 			model: "gpt-5.4",
 			tools: [{ type: "image_generation", background: "transparent" }],
@@ -315,6 +315,77 @@ describe("imageGenTool catalog routing", () => {
 		).rejects.toThrow('supports background "opaque"');
 		expect(calls).toBe(0);
 	});
+
+	for (const rerouteImage of [true, false]) {
+		it(`skips custom Codex ${rerouteImage ? "image" : "carrier"} endpoints before authentication or input resolution`, async () => {
+			const official = catalogModel("openai-codex", "gpt-image-2", "openai-codex-responses");
+			const custom = buildModel({ ...official, baseUrl: "https://codex-proxy.example/v1" });
+			const carrier = buildModel({
+				...catalogModel("openai-codex", "gpt-5.4", "openai-codex-responses", "chat"),
+				baseUrl: "https://codex-proxy.example/v1",
+			});
+			let calls = 0;
+			const ctx = createContext({
+				models: [rerouteImage ? custom : official, carrier],
+				settings: Settings.isolated({ modelRoles: { image: "openai-codex/gpt-image-2" } }),
+				credentials: { "openai-codex": undefined },
+				fetch: async () => {
+					calls++;
+					throw new Error("Unexpected custom Codex request");
+				},
+			});
+			for (const model of [undefined, "openai-codex/gpt-image-2"]) {
+				const error = await imageGenTool
+					.execute(
+						"custom-codex-background",
+						{ subject: "cutout", background: "transparent", model, input: [{ data: PNG_DATA }] },
+						undefined,
+						ctx,
+					)
+					.catch((error: unknown) => error);
+				expect(error).toBeInstanceOf(Error);
+				expect(error).not.toBeInstanceOf(AggregateError);
+				expect(error).toHaveProperty("message", expect.stringContaining('supports background "transparent"'));
+				expect(error).toHaveProperty("message", expect.stringContaining("openai-codex/gpt-image-2"));
+			}
+			expect(calls).toBe(0);
+		});
+
+		it(`omits auto backgrounds on custom Codex ${rerouteImage ? "image" : "carrier"} endpoints`, async () => {
+			const baseUrl = "https://codex-proxy.example/v1";
+			const image = buildModel({
+				...catalogModel("openai-codex", "gpt-image-2", "openai-codex-responses"),
+				...(rerouteImage && { baseUrl }),
+			});
+			const carrier = buildModel({
+				...catalogModel("openai-codex", "gpt-5.4", "openai-codex-responses", "chat"),
+				baseUrl,
+			});
+			const urls: string[] = [];
+			const ctx = createContext({
+				models: [image, carrier],
+				settings: Settings.isolated({ modelRoles: { image: "openai-codex/gpt-image-2" } }),
+				fetch: async (input, init) => {
+					urls.push(input.toString());
+					const body = JSON.parse(String(init?.body)) as { tools: Array<Record<string, unknown>> };
+					expect(body.tools[0]).not.toHaveProperty("background");
+					return codexResponse();
+				},
+			});
+			for (const background of [undefined, "auto"] as const) {
+				const params = Object.freeze({ subject: "provider default", background });
+				const result = await imageGenTool.execute("custom-codex-auto", params, undefined, ctx);
+				collectPaths(result);
+				expect(result.details?.provider).toBe("openai-codex");
+				expect(result.details?.model).toBe("gpt-image-2");
+				expect(params.background).toBe(background);
+			}
+			expect(urls).toEqual([
+				"https://codex-proxy.example/v1/codex/responses",
+				"https://codex-proxy.example/v1/codex/responses",
+			]);
+		});
+	}
 
 	it("keeps an auto background candidate even when that provider cannot honor explicit preferences", async () => {
 		const xai = catalogModel("xai", "grok-imagine-image", "openai-images");

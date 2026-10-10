@@ -5,7 +5,7 @@ import { resolveCascadeRules } from "@oh-my-pi/pi-catalog/compat/cascade";
 import { supportsOutputTokenLimit } from "@oh-my-pi/pi-catalog/compat/output-limits";
 import { requiresNativeTools, requiresToolFreeHistoryForToolOptOut } from "@oh-my-pi/pi-catalog/compat/tools";
 import { getBundledModel, getBundledModels, type GeneratedProvider } from "@oh-my-pi/pi-catalog/models";
-import type { Model } from "@oh-my-pi/pi-catalog/types";
+import type { Model, ModelSpec } from "@oh-my-pi/pi-catalog/types";
 import { compileCompatRules } from "../scripts/compat-compiler";
 
 function fixture(provider: GeneratedProvider, predicate?: (candidate: Model) => boolean): Model {
@@ -74,20 +74,36 @@ test("KDL opts only the verified Codex image deployment into explicit background
 	}
 });
 
-test("built and bundled image background metadata is conservative across deployment changes", () => {
-	const bundled = getBundledModel("openai-codex", "gpt-image-2");
-	expect(bundled.imageBackground).toBe(true);
-	const model = buildModel(bundled);
+test("authored image background metadata opts in only the official Codex deployment and clears stale copies", () => {
+	const spec: ModelSpec = {
+		id: "gpt-image-2",
+		name: "GPT Image 2",
+		api: "openai-codex-responses",
+		provider: "openai-codex",
+		baseUrl: "https://chatgpt.com/backend-api",
+		reasoning: false,
+		input: ["text", "image"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: null,
+		maxTokens: null,
+	};
+	const model = buildModel(spec);
 	expect(model.imageBackground).toBe(true);
-	for (const overrides of [
-		{ provider: "openai", api: "openai-images" as const },
-		{ provider: "deepinfra", api: "openai-images" as const, id: "black-forest-labs/FLUX-2-pro" },
-		{ provider: "custom-images", api: "openai-images" as const },
-		{ api: "openai-images" as const },
+	const unsupportedDeployments: Partial<ModelSpec>[] = [
+		{ provider: "openai", api: "openai-images", baseUrl: "https://api.openai.com/v1" },
+		{
+			provider: "deepinfra",
+			api: "openai-images",
+			id: "black-forest-labs/FLUX-2-pro",
+			baseUrl: "https://api.deepinfra.com/v1/openai",
+		},
+		{ provider: "custom-images", api: "openai-images" },
+		{ api: "openai-images" },
 		{ id: "gpt-image-1" },
-	]) {
+		{ baseUrl: "https://gateway.example/backend-api/codex" },
+	];
+	for (const overrides of unsupportedDeployments) {
+		expect(buildModel({ ...spec, ...overrides }).imageBackground).toBeUndefined();
 		expect(buildModel({ ...model, ...overrides }).imageBackground).toBeUndefined();
 	}
-	expect(getBundledModel("openai", "gpt-image-2").imageBackground).toBeUndefined();
-	expect(getBundledModel("deepinfra", "black-forest-labs/FLUX-2-pro").imageBackground).toBeUndefined();
 });
