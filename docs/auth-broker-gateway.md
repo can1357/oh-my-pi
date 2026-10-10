@@ -145,6 +145,12 @@ Capability-dependent responses include `Vary: OMP-Auth-Broker-Capabilities` so i
 
 The CLI broker refresh hook also handles managed `mcp_oauth:*` credentials using their stored MCP token endpoint/client metadata; it does not need to load the MCP manager.
 
+### Saved-reset sweep
+
+`serve` also spends saved Codex and Claude rate-limit resets so they are not lost while no session is open. It follows the broker host's own `codexResets.*` and `claudeResets.*` settings and `auth.accountPolicies` (loaded at start; restart the broker after changing them), with the same planner and executor a session uses. With no one to ask, `unset` spends only a credit expiring within 5 minutes; `yes` also salvages earlier; `no` turns that provider's sweep off. An account policy's `autoRedeem: true|false` overrides the provider setting for that account, so `true` keeps the sweep running for it under `no`. If the account policies fail to load, the sweep stays off and the broker logs `auth-broker reset sweep disabled`.
+
+The sweep runs at start, then hourly, and wakes early when a known credit enters its last 5 minutes (then once a minute until it is gone, including while that provider's usage or listing is failing). Each run reads the broker's cached usage (the same reports `/v1/usage` serves) and lists Codex reset credits live. Claude accounts are listed live only when the reset inventory in their usage reports shows a credit to spend, and redeem re-checks the offer before spending.
+
 ## auth-gateway
 
 ### CLI
@@ -302,7 +308,7 @@ The gateway uses the same broker URL/token resolution and account-pool environme
 | ------------------- | ------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `auth.broker.url`   | unset   | Same as `OMP_AUTH_BROKER_URL`; env wins. Hidden from the settings UI. Values are resolved as a literal, an environment variable name, or `!<shell command>` to use trimmed stdout. |
 | `auth.broker.token` | unset   | Same as `OMP_AUTH_BROKER_TOKEN`; env wins. Values are resolved the same way.                                                                                                       |
-| `auth.accountPolicies` | `[]` | Per-account OAuth routing rules: `provider`, identity selector `account` (`email`, `accountId`, `projectId`, optional `orgId`), optional `priority` and `reservePct` (0–100). |
+| `auth.accountPolicies` | `[]` | Per-account OAuth routing rules: `provider`, identity selector `account` (`email`, `accountId`, `projectId`, optional `orgId`), optional `priority` and `reservePct` (0–100), and optional `autoRedeem` (`true`/`false`) overriding the provider's [saved-reset auto-redeem](./settings.md#saved-reset-auto-consumption) for that account. It is read from the effective settings of the process that spends the reset, so on a broker client the client's settings decide, not the broker's. |
 | `retry.usageReservePct` | `10` | Default protected remaining-quota percentage when an account has no `reservePct` override. |
 
 Broker connection values come from the agent's main config file, not project settings. Account policies/reserve use effective settings (including project/explicit config layers). Long-lived SDK sessions follow policy changes and can replace the credential store in place when effective broker settings change; failed changes leave the current store active.
