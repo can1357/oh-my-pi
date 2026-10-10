@@ -694,6 +694,114 @@ describe("Claude saved-reset trigger integration", () => {
 		await coordinator.sweepPromise;
 		expect(targets).toMatchObject([{ credentialId: CREDENTIAL_ID }, { credentialId: SIBLING_CREDENTIAL_ID }]);
 	});
+
+	it("does not spend headlessly when an account's true policy is removed after planning while claudeResets.autoRedeem is unset", async () => {
+		const status = claudeStatus(false);
+		const { session, coordinator, targets } = buildSession({
+			report: withInventory(claudeReport(0.5), status),
+			status,
+			autoRedeem: "unset",
+		});
+		authStorage.setAccountPolicies(accountPolicies(true));
+		const planned = Promise.withResolvers<void>();
+		const policy = authStorage.oauth.policy.bind(authStorage.oauth);
+		vi.spyOn(authStorage.oauth, "policy").mockImplementation((provider, identity) => {
+			const result = policy(provider, identity);
+			planned.resolve();
+			return result;
+		});
+		try {
+			await session.fetchUsageReports();
+			await planned.promise;
+			authStorage.setAccountPolicies({ accountPolicies: [], defaultReservePct: DEFAULT_USAGE_RESERVE_PCT });
+			await coordinator.sweepPromise;
+		} finally {
+			authStorage.setAccountPolicies({ accountPolicies: [], defaultReservePct: DEFAULT_USAGE_RESERVE_PCT });
+		}
+
+		expect(targets).toEqual([]);
+		expect(coordinator.attemptedKeys.size).toBe(0);
+		expect(coordinator.lastAttemptAtByAccount.size).toBe(0);
+	});
+
+	it("does not spend when the account's policy turns auto-redeem off while its pending spend marker is written", async () => {
+		const status = claudeStatus(false);
+		const { session, coordinator, targets } = buildSession({
+			report: withInventory(claudeReport(0.5), status),
+			status,
+		});
+		const writing = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		const write = Bun.write.bind(Bun);
+		vi.spyOn(Bun, "write").mockImplementation((async (destination: string, data: string) => {
+			if (data.startsWith("pending:")) {
+				writing.resolve();
+				await release.promise;
+			}
+			return write(destination, data);
+		}) as typeof Bun.write);
+		try {
+			await session.fetchUsageReports();
+			await writing.promise;
+			authStorage.setAccountPolicies(accountPolicies(false));
+			release.resolve();
+			await coordinator.sweepPromise;
+			expect(targets).toEqual([]);
+		} finally {
+			release.resolve();
+			authStorage.setAccountPolicies({ accountPolicies: [], defaultReservePct: DEFAULT_USAGE_RESERVE_PCT });
+		}
+
+		coordinator.lastSweepAt = 0;
+		await session.fetchUsageReports();
+		await coordinator.sweepPromise;
+		expect(targets).toMatchObject([{ credentialId: CREDENTIAL_ID }]);
+	});
+
+	it("spends what a Yes to the prompt approved even while a higher settings layer keeps auto-redeem unset", async () => {
+		const { session, coordinator, targets } = buildSession({
+			report: claudeReport(0.5),
+			status: claudeStatus(false),
+			siblings: [siblingStatus()],
+			autoRedeem: "unset",
+			select: async () => "Yes",
+		});
+
+		await session.fetchUsageReports();
+		await coordinator.sweepPromise;
+
+		expect(cfgClaudeResetsAutoRedeem.get(session.settings)).toBe("unset");
+		expect(targets).toMatchObject([{ credentialId: CREDENTIAL_ID }, { credentialId: SIBLING_CREDENTIAL_ID }]);
+	});
+
+	it("does not carry a Yes for the prompted account to one whose true policy is removed while the prompt is open", async () => {
+		const questions: string[] = [];
+		const { session, coordinator, targets } = buildSession({
+			report: claudeReport(0.5),
+			status: claudeStatus(false),
+			siblings: [siblingStatus()],
+			autoRedeem: "unset",
+			select: async question => {
+				questions.push(question);
+				authStorage.setAccountPolicies({ accountPolicies: [], defaultReservePct: DEFAULT_USAGE_RESERVE_PCT });
+				return "Yes";
+			},
+		});
+		authStorage.setAccountPolicies(accountPolicies(true));
+		try {
+			await session.fetchUsageReports();
+			await coordinator.sweepPromise;
+		} finally {
+			authStorage.setAccountPolicies({ accountPolicies: [], defaultReservePct: DEFAULT_USAGE_RESERVE_PCT });
+		}
+
+		expect(questions).toHaveLength(1);
+		expect(questions[0]).not.toContain(ORG_ID);
+		expect(cfgClaudeResetsAutoRedeem.get(session.settings)).toBe("unset");
+		expect(targets).toMatchObject([{ credentialId: SIBLING_CREDENTIAL_ID }]);
+		expect(targets).toHaveLength(1);
+	});
+
 	it.each(["yes", "no", "unset"] as const)(
 		"consumes an imminent reset without a prompt UI unless auto-redeem is no (%s)",
 		async autoRedeem => {

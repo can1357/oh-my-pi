@@ -287,6 +287,24 @@ describe("auth broker saved-reset sweep", () => {
 		expect(broker.redeemed).toEqual([{ provider: "openai-codex", ...SECOND_CODEX }]);
 	});
 
+	it("never spends a last-chance credit on an account whose policy turns auto-redeem off under unset", async () => {
+		const now = { ms: Date.parse("2026-10-09T12:00:00Z") };
+		const expiresAtMs = now.ms + 4 * 60_000;
+		const broker = startBroker({
+			now,
+			reports: () => [codexReport(now.ms), codexReport(now.ms, SECOND_CODEX)],
+			live: provider =>
+				provider === "openai-codex" ? [codexStatus(expiresAtMs), codexStatus(expiresAtMs, SECOND_CODEX)] : [],
+			settings: { "codexResets.autoRedeem": "unset", "claudeResets.autoRedeem": "no" },
+			policies: [autoRedeemPolicy("openai-codex", CODEX.email, false)],
+		});
+
+		await broker.start();
+		expect(broker.redeemed).toEqual([
+			{ provider: "openai-codex", ...SECOND_CODEX, creditId: "second-codex-account-credit" },
+		]);
+	});
+
 	it("salvages for an account whose policy turns auto-redeem on while the provider says no", async () => {
 		const now = { ms: Date.parse("2026-10-09T12:00:00Z") };
 		const expiresAtMs = now.ms + 2 * HOUR;

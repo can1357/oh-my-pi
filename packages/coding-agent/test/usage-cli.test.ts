@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
 import { stripVTControlCharacters } from "node:util";
-import type { UsageReport } from "@oh-my-pi/pi-ai";
+import type { UsageReport, UsageResetCredit } from "@oh-my-pi/pi-ai";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import {
 	buildRedactionMap,
@@ -108,7 +108,31 @@ function codexResetReport(opts: {
 	};
 }
 
-function claudeResetReport(nowMs: number, usage: Record<string, number>, expiresInMs: number): UsageReport {
+/** A Cedar grant clearing the 5h and weekly windows, spendable now unless overridden. */
+function cedarGrant(
+	nowMs: number,
+	id: string,
+	expiresInMs: number,
+	overrides: Partial<UsageResetCredit> = {},
+): UsageResetCredit {
+	return {
+		id,
+		program: "cedar_ember",
+		remainingCount: 1,
+		usable: true,
+		requiresLimit: false,
+		clears: ["anthropic:5h", "anthropic:7d"],
+		blocking: [],
+		usedFractions: {},
+		expiresAt: new Date(nowMs + expiresInMs).toISOString(),
+		status: "available",
+		...overrides,
+	};
+}
+
+/** Claude usage whose first grant is the server-selected one; every grant's remaining resets count as banked. */
+function claudeResetReport(nowMs: number, usage: Record<string, number>, grants: UsageResetCredit[]): UsageReport {
+	const selected = grants[0];
 	return {
 		provider: "anthropic",
 		fetchedAt: nowMs,
@@ -117,23 +141,11 @@ function claudeResetReport(nowMs: number, usage: Record<string, number>, expires
 		),
 		metadata: { email: "claude@example.test", accountId: "claude-account", orgId: "claude-org" },
 		resetCredits: {
-			availableCount: 1,
-			redeemableCount: 1,
-			nextCreditId: "cedar",
-			credits: [
-				{
-					id: "cedar",
-					program: "cedar_ember",
-					remainingCount: 1,
-					usable: true,
-					requiresLimit: false,
-					clears: ["anthropic:5h", "anthropic:7d"],
-					blocking: [],
-					usedFractions: {},
-					expiresAt: new Date(nowMs + expiresInMs).toISOString(),
-					status: "available",
-				},
-			],
+			availableCount: grants.reduce((sum, grant) => sum + (grant.remainingCount ?? 0), 0),
+			redeemableCount: selected?.usable ? (selected.remainingCount ?? 0) : 0,
+			nextCreditId: selected?.id,
+			eligible: true,
+			credits: grants,
 		},
 	};
 }
@@ -705,7 +717,7 @@ describe("formatUsageBreakdown", () => {
 			const plainAt = text.indexOf("plain@example.test");
 			expect(text).toContain("▲ 2 saved resets expire within 24h\n");
 			expect(text.slice(0, plainAt)).toContain(
-				"→ spent automatically before it expires while an interactive omp session is open  (auth.accountPolicies autoRedeem: true)",
+				"→ an open interactive omp session spends it by its last 5 min if eligible then  (auth.accountPolicies autoRedeem: true)",
 			);
 			expect(text.slice(0, plainAt)).toContain("or now:  /usage reset");
 			expect(text.slice(plainAt)).toContain("→ not spent automatically  (codexResets.autoRedeem: no)");
@@ -717,11 +729,11 @@ describe("formatUsageBreakdown", () => {
 			const plainAt = text.indexOf("plain@example.test");
 			expect(text).toContain("▲ 2 saved resets expire within 24h\n");
 			expect(text.slice(0, plainAt)).toContain(
-				"→ not spent automatically  (auth.accountPolicies autoRedeem: false)",
+				"→ not spent automatically  (auth.accountPolicies autoRedeem: false)\n",
 			);
 			expect(text.slice(0, plainAt)).toContain("spend it:  /usage reset");
 			expect(text.slice(plainAt)).toContain(
-				"→ spent automatically before it expires while an interactive omp session is open  (codexResets.autoRedeem: yes)",
+				"→ an open interactive omp session spends it by its last 5 min if eligible then  (codexResets.autoRedeem: yes)",
 			);
 		});
 
@@ -1326,11 +1338,9 @@ describe("formatUsageBreakdown", () => {
 	it("measures a Claude grant only against the windows it clears", () => {
 		const now = Date.parse("2026-01-01T00:00:00.000Z");
 		// The Opus weekly cap is nearly spent, but this grant does not clear it.
-		const report = claudeResetReport(
-			now,
-			{ "anthropic:5h": 0.1, "anthropic:7d": 0.2, "anthropic:7d:opus": 0.9 },
-			6 * HOUR,
-		);
+		const report = claudeResetReport(now, { "anthropic:5h": 0.1, "anthropic:7d": 0.2, "anthropic:7d:opus": 0.9 }, [
+			cedarGrant(now, "cedar", 6 * HOUR),
+		]);
 		const text = stripVTControlCharacters(
 			formatUsageBreakdown([report], [], now, undefined, [], undefined, resetExpiryOptions()),
 		);
@@ -1341,10 +1351,10 @@ describe("formatUsageBreakdown", () => {
 	it.each([
 		{
 			mode: "yes",
-			verdict: "→ spent automatically before it expires while an interactive omp session is open",
+			verdict: "→ an open interactive omp session spends it by its last 5 min if eligible then",
 			lost: false,
 		},
-		{ mode: "unset", verdict: "→ an interactive omp session asks before spending it", lost: false },
+		{ mode: "unset", verdict: "→ an open interactive omp session asks before spending it", lost: false },
 		{ mode: "no", verdict: "→ not spent automatically", lost: true },
 	])("says what codexResets.autoRedeem=$mode does with an expiring reset", ({ mode, verdict, lost }) => {
 		const now = Date.parse("2026-01-01T00:00:00.000Z");
@@ -1360,7 +1370,7 @@ describe("formatUsageBreakdown", () => {
 				resetExpiryOptions({ "codexResets.autoRedeem": mode }),
 			),
 		);
-		expect(text).toContain(`${verdict}  (codexResets.autoRedeem: ${mode})`);
+		expect(text).toContain(`${verdict}  (codexResets.autoRedeem: ${mode})\n`);
 		expect(text.includes("within 24h and will be lost")).toBe(lost);
 		expect(text).toContain(lost ? "spend it:  /usage reset" : "or now:  /usage reset");
 	});
@@ -1369,7 +1379,7 @@ describe("formatUsageBreakdown", () => {
 		const now = Date.parse("2026-01-01T00:00:00.000Z");
 		const reports = [
 			codexResetReport({ nowMs: now, accountId: "ws-team", weeklyUsed: 1, expiresInMs: [6 * HOUR] }),
-			claudeResetReport(now, { "anthropic:5h": 0.1, "anthropic:7d": 0.6 }, 3 * HOUR),
+			claudeResetReport(now, { "anthropic:5h": 0.1, "anthropic:7d": 0.6 }, [cedarGrant(now, "cedar", 3 * HOUR)]),
 		];
 		const options = resetExpiryOptions({ "codexResets.autoRedeem": "yes", "claudeResets.autoRedeem": "no" });
 		const text = stripVTControlCharacters(formatUsageBreakdown(reports, [], now, undefined, [], undefined, options));
@@ -1382,7 +1392,7 @@ describe("formatUsageBreakdown", () => {
 		const now = Date.parse("2026-01-01T00:00:00.000Z");
 		const reports = [
 			codexResetReport({ nowMs: now, accountId: "ws-team", weeklyUsed: 1, expiresInMs: [6 * HOUR] }),
-			claudeResetReport(now, { "anthropic:5h": 0.1, "anthropic:7d": 0.6 }, 3 * HOUR),
+			claudeResetReport(now, { "anthropic:5h": 0.1, "anthropic:7d": 0.6 }, [cedarGrant(now, "cedar", 3 * HOUR)]),
 		];
 		const options = resetExpiryOptions(
 			{ "codexResets.autoRedeem": "no", "claudeResets.autoRedeem": "no" },
@@ -1394,6 +1404,95 @@ describe("formatUsageBreakdown", () => {
 			"→ the auth broker spends it before it expires, per its host's codexResets.autoRedeem and account policies",
 		);
 		expect(text).toContain("→ not spent automatically  (claudeResets.autoRedeem: no)");
+	});
+
+	it.each([
+		{
+			name: "an unavailable grant behind the selected one",
+			grants: (now: number) => [
+				cedarGrant(now, "selected", 20 * 24 * HOUR),
+				cedarGrant(now, "behind", 6 * HOUR, { remainingCount: 2, usable: false, status: "unavailable" }),
+			],
+			header: "✦ 3 saved resets · 1 usable now · ▲ 2 expire, soonest in 6h",
+			title: "▲ 2 saved resets expire within 24h\n",
+			eligibleNow: false,
+		},
+		{
+			name: "a paused grant",
+			grants: (now: number) => [cedarGrant(now, "paused", 6 * HOUR, { usable: false, status: "paused" })],
+			header: "✦ 1 saved reset · 0 usable now · ▲ 1 expires in 6h",
+			title: "▲ 1 saved reset expires within 24h\n",
+			eligibleNow: false,
+		},
+		{
+			name: "the selected grant among several",
+			grants: (now: number) => [
+				cedarGrant(now, "selected", 6 * HOUR),
+				cedarGrant(now, "next", 10 * HOUR, { usable: false, status: "unavailable" }),
+				cedarGrant(now, "later", 30 * 24 * HOUR, { usable: false, status: "unavailable" }),
+			],
+			header: "✦ 3 saved resets · 1 usable now · ▲ 2 expire, soonest in 6h",
+			title: "▲ 2 saved resets expire within 24h\n",
+			eligibleNow: true,
+		},
+	])("counts $name among the expiring Claude resets", ({ grants, header, title, eligibleNow }) => {
+		const now = Date.parse("2026-01-01T00:00:00.000Z");
+		const report = claudeResetReport(now, { "anthropic:5h": 0.1, "anthropic:7d": 0.5 }, grants(now));
+		const options = resetExpiryOptions({ "claudeResets.autoRedeem": "yes" });
+		const text = stripVTControlCharacters(formatUsageBreakdown([report], [], now, undefined, [], undefined, options));
+		expect(text).toContain(header);
+		expect(text).toContain(title);
+		expect(text).toContain(
+			`→ an open interactive omp session spends it by its last 5 min if eligible then  (claudeResets.autoRedeem: yes)${eligibleNow ? "" : " · not eligible now"}\n`,
+		);
+		// Only a reset the provider lets omp spend now gets a command that spends it.
+		expect(text.includes("/usage reset")).toBe(eligibleNow);
+	});
+
+	it.each<{
+		name: string;
+		usage: Record<string, number>;
+		grant: Partial<UsageResetCredit>;
+		fetchedAgoMs: number;
+		eligibleNow: boolean;
+	}>([
+		{
+			name: "keeps the spend conditional when the exhausted window that makes a grant usable may reset first",
+			usage: { "anthropic:5h": 1, "anthropic:7d": 0.5 },
+			grant: { requiresLimit: true },
+			fetchedAgoMs: 0,
+			eligibleNow: true,
+		},
+		{
+			name: "marks a grant not eligible now, not lost, while a window it does not clear is exhausted",
+			usage: { "anthropic:5h": 0.5, "anthropic:7d": 0.5, "anthropic:7d:sonnet": 1 },
+			grant: {},
+			fetchedAgoMs: 0,
+			eligibleNow: false,
+		},
+		{
+			name: "leaves eligibility unmarked on a report too old for the planner",
+			usage: { "anthropic:5h": 0.5, "anthropic:7d": 0.5, "anthropic:7d:sonnet": 1 },
+			grant: {},
+			fetchedAgoMs: 20 * 60_000,
+			eligibleNow: true,
+		},
+	])("$name", ({ usage, grant, fetchedAgoMs, eligibleNow }) => {
+		const now = Date.parse("2026-01-01T00:00:00.000Z");
+		const report = {
+			...claudeResetReport(now, usage, [cedarGrant(now, "cedar", 6 * HOUR, grant)]),
+			fetchedAt: now - fetchedAgoMs,
+		};
+		const options = resetExpiryOptions({
+			"claudeResets.autoRedeem": "yes",
+			"claudeResets.salvageHorizonHours": 0,
+		});
+		const text = stripVTControlCharacters(formatUsageBreakdown([report], [], now, undefined, [], undefined, options));
+		const verdict =
+			"→ an open interactive omp session spends it by its last 5 min if eligible then  (claudeResets.autoRedeem: yes)";
+		expect(text).toContain(eligibleNow ? `${verdict}\n` : `${verdict} · not eligible now\n`);
+		expect(text).not.toContain("will be lost");
+		expect(text).toContain("or now:  /usage reset");
 	});
 
 	it("deduplicates identical per-limit notes across accounts sharing a window", () => {

@@ -989,6 +989,7 @@ An `auth.accountPolicies` entry's `autoRedeem` overrides the provider's setting 
 
 `omp auth-broker serve` runs the same sweep on the broker host's settings, so credits are salvaged while no session is open (see [Auth Broker](auth-broker-gateway.md#saved-reset-sweep)).
 
+`omp usage` and the active account's status-line usage segment flag banked resets expiring within **7 days** when the account's fullest window they restore is at least 25% used. Within **24 hours**, `omp usage` opens with a banner per account: whether the sweep above spends the reset or asks first (only while an interactive omp session is open), or that it will not, and the `/usage reset` target that spends it now when the provider allows. The interactive TUI shows that warning once per conversation.
 ### Other groups
 
 Every schema path not individually tabulated in this catalog is explicitly deferred to `omp config list`. Additional groups include:

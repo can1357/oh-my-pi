@@ -14,7 +14,10 @@ async function flushMicrotasks(): Promise<void> {
 	await Promise.resolve();
 }
 
-function makeSession(fetchUsageReports: (signal?: AbortSignal) => Promise<unknown>): AgentSession {
+function makeSession(
+	fetchUsageReports: (signal?: AbortSignal) => Promise<unknown>,
+	getSessionId: () => string = () => "conversation-1",
+): AgentSession {
 	const messages: unknown[] = [];
 	return {
 		fetchUsageReports,
@@ -36,6 +39,7 @@ function makeSession(fetchUsageReports: (signal?: AbortSignal) => Promise<unknow
 				cost: 0,
 			}),
 			getSessionName: () => "test",
+			getSessionId,
 		},
 		getAsyncJobSnapshot: () => ({ running: [] }),
 		getContextUsage: () => undefined,
@@ -127,8 +131,9 @@ function makeCodexSession(
 		accountId: "account-1",
 		email: "codex@example.com",
 	}),
+	getSessionId?: () => string,
 ): AgentSession {
-	const session = makeSession(fetchUsageReports) as unknown as Record<string, unknown>;
+	const session = makeSession(fetchUsageReports, getSessionId) as unknown as Record<string, unknown>;
 	session.sessionId = "session-1";
 	session.state = {
 		messages: [],
@@ -322,7 +327,7 @@ describe("StatusLineComponent usage refresh", () => {
 		component.dispose();
 	});
 
-	it("warns once per session about another account's reset expiring within 24 hours", async () => {
+	it("warns once per conversation about another account's reset expiring within 24 hours", async () => {
 		const sevenDayResetAt = Date.now() + 80 * 3_600_000;
 		let fetches = 0;
 		const reports = () => {
@@ -351,6 +356,113 @@ describe("StatusLineComponent usage refresh", () => {
 		expect(notices).toHaveLength(1);
 		expect(notices[0]).toContain("Saved Codex reset on codex@example.com (ws-team) expires in 6h");
 		expect(notices[0]).toContain("/usage");
+		component.dispose();
+	});
+
+	it("warns about a banked Claude reset the provider will not spend yet", async () => {
+		const claude = () => ({
+			provider: "anthropic",
+			fetchedAt: Date.now(),
+			metadata: { email: "claude@example.com" },
+			limits: [
+				{
+					id: "anthropic:7d",
+					label: "Claude 7 Day",
+					scope: { provider: "anthropic", windowId: "7d" },
+					window: { id: "7d", label: "7d", resetsAt: Date.now() + 80 * 3_600_000 },
+					amount: { unit: "percent", usedFraction: 0.5 },
+				},
+			],
+			resetCredits: {
+				availableCount: 2,
+				redeemableCount: 0,
+				nextCreditId: "paused",
+				credits: [
+					{
+						id: "paused",
+						program: "cedar_ember",
+						remainingCount: 2,
+						usable: false,
+						requiresLimit: false,
+						clears: ["anthropic:5h", "anthropic:7d"],
+						blocking: [],
+						usedFractions: {},
+						expiresAt: new Date(Date.now() + 6 * 3_600_000).toISOString(),
+						status: "paused",
+					},
+				],
+			},
+		});
+		const codex = codexUsageReport({ sevenDayPercent: 10, sevenDayResetAt: Date.now() + 80 * 3_600_000 });
+		const component = new StatusLineComponent(
+			makeCodexSession(async () => [...codex, claude()]),
+			statusLineHost,
+		);
+		const notices: string[] = [];
+		component.setResetExpiryNoticeHandler(notice => notices.push(notice));
+
+		await refreshUsage(component);
+
+		expect(notices).toHaveLength(1);
+		expect(notices[0]).toContain("2 saved Claude resets on claude@example.com expire, soonest in 6h");
+		component.dispose();
+	});
+
+	it("warns each conversation that /new or /resume opens in place, once", async () => {
+		const sevenDayResetAt = Date.now() + 80 * 3_600_000;
+		let conversation = "conversation-1";
+		const session = makeCodexSession(
+			async () =>
+				codexUsageReport({
+					sevenDayPercent: 60,
+					sevenDayResetAt,
+					savedResets: 1,
+					creditExpiresAt: [Date.now() + 6 * 3_600_000],
+				}),
+			undefined,
+			() => conversation,
+		);
+		const component = new StatusLineComponent(session, statusLineHost);
+		const notices: string[] = [];
+		component.setResetExpiryNoticeHandler(notice => notices.push(notice));
+
+		await refreshUsage(component);
+		conversation = "conversation-2"; // /new
+		await refreshUsage(component, 5 * 60_000);
+		conversation = "conversation-3"; // /resume of a conversation not warned yet
+		await refreshUsage(component, 5 * 60_000);
+		conversation = "conversation-1"; // /resume of the first one
+		await refreshUsage(component, 5 * 60_000);
+
+		expect(notices).toHaveLength(3);
+		component.dispose();
+	});
+
+	it("does not warn again when focus moves to a subagent and back", async () => {
+		let fetches = 0;
+		const reports = async () => {
+			fetches++;
+			return codexUsageReport({
+				sevenDayPercent: 60,
+				sevenDayResetAt: Date.now() + 80 * 3_600_000,
+				savedResets: 1,
+				creditExpiresAt: [Date.now() + 6 * 3_600_000],
+			});
+		};
+		const main = makeCodexSession(reports);
+		const subagent = makeCodexSession(reports, undefined, () => "subagent-1");
+		const component = new StatusLineComponent(main, statusLineHost);
+		const notices: string[] = [];
+		component.setResetExpiryNoticeHandler(notice => notices.push(notice));
+
+		await refreshUsage(component);
+		component.setSession(subagent, "agent-1");
+		await refreshUsage(component);
+		component.setSession(main);
+		await refreshUsage(component);
+
+		expect(fetches).toBe(3);
+		expect(notices).toHaveLength(1);
 		component.dispose();
 	});
 

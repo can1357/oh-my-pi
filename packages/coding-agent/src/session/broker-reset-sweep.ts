@@ -3,12 +3,12 @@
  * credential and outlives any session. It plans and spends through the same
  * executor as a session sweep, under the broker host's `codexResets.*` and
  * `claudeResets.*` settings and account policies; with no one to ask, each
- * action spends only what {@link headlessConsentedActions} allows.
+ * action spends only what {@link headlessApprovals} allows.
  */
 import type { AuthStorage, ResetCreditAccountStatus } from "@oh-my-pi/pi-ai";
 import { logger } from "@oh-my-pi/pi-utils";
 import type { Settings } from "../config/settings";
-import { type AutoResetHost, headlessConsentedActions, sweepResets, sweepsResets } from "./auto-reset";
+import { type AutoResetHost, headlessApprovals, sweepResets, sweepsResets } from "./auto-reset";
 import {
 	type CodexAutoRedeemCoordinator,
 	createCodexAutoRedeemCoordinator,
@@ -59,7 +59,7 @@ export class BrokerResetSweeper {
 			notice: (level, message, source) =>
 				level === "info" ? logger.info(message, { source }) : logger.warn(message, { source }),
 			adoptedResetMarkers: new Map(),
-			confirm: async (_provider, actions) => headlessConsentedActions(actions),
+			confirm: async (_provider, actions) => headlessApprovals(actions),
 		};
 	}
 

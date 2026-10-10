@@ -58,10 +58,10 @@ export interface AuthAccountSelector {
 export interface AuthAccountPolicy {
 	readonly provider: string;
 	readonly account: AuthAccountSelector;
-	/** Overrides the provider's saved-reset auto-redeem mode for this account: `true` = yes, `false` = no. */
-	readonly autoRedeem?: boolean;
 	/** Higher values win after hard, plan, reserve, hot-window, and measured-usage safety checks. */
 	readonly priority?: number;
+	/** Overrides the provider's saved-reset auto-redeem mode for this account: `true` = yes, `false` = no. */
+	readonly autoRedeem?: boolean;
 	/** Protected remaining quota percentage for this account. */
 	readonly reservePct?: number;
 }

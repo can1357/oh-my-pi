@@ -10,7 +10,6 @@ import type {
 	OAuthAccountIdentity,
 	ResetCreditAccountStatus,
 	ResetCreditRedeemOutcome,
-	ResetCreditTarget,
 	UsageReport,
 } from "@oh-my-pi/pi-ai";
 import type { Model } from "@oh-my-pi/pi-catalog/types";
@@ -36,6 +35,7 @@ import {
 	planCodexResetRedemptions,
 	REDEEM_RETRY_DEFER_MS,
 	resetAccountLockKey,
+	resetPlanSettings,
 	shouldEvaluateCodexAutoRedeem,
 } from "./codex-auto-reset";
 import { cfgClaudeResets, cfgClaudeResetsAutoRedeem, cfgCodexResets, cfgCodexResetsAutoRedeem } from "./settings";
@@ -63,9 +63,20 @@ export interface AutoResetHost {
 		provider: ResetProvider,
 		actions: ResetAction[],
 		coordinator: CodexAutoRedeemCoordinator,
-	) => Promise<readonly ResetAction[]>;
+	) => Promise<readonly ApprovedResetAction[]>;
 	/** Runs after at least one reset was spent. */
 	onRedeemed?: () => void;
+}
+
+/** A planned spend cleared to run, and what cleared it; the executor rechecks it against the current mode. */
+export interface ApprovedResetAction {
+	action: ResetAction;
+	/**
+	 * `auto-redeem-yes`: the account resolved to `yes`; `prompt-yes`: a Yes to a
+	 * prompt listing it; `headless-last-chance`: a host that cannot prompt
+	 * spending an `unset` credit in its last minutes.
+	 */
+	approval: "auto-redeem-yes" | "prompt-yes" | "headless-last-chance";
 }
 
 export function planCodexResets(
@@ -83,12 +94,7 @@ export function planCodexResets(
 		trigger,
 		provider: model?.provider ?? "",
 		modelId: model?.id ?? "",
-		settings: {
-			autoRedeem: cfg.autoRedeem,
-			minBlockedMinutes: Math.max(0, cfg.minBlockedMinutes),
-			keepCredits: Math.max(0, Math.trunc(cfg.keepCredits)),
-			salvageHorizonMs: Math.max(0, cfg.salvageHorizonHours) * 3_600_000,
-		},
+		settings: resetPlanSettings(cfg),
 		identity,
 		accountPolicy: account => host.authStorage.oauth.policy("openai-codex", account),
 		reports,
@@ -118,12 +124,7 @@ export function planClaudeResets(
 		trigger,
 		provider: model?.provider ?? "",
 		modelId: model?.provider === "anthropic" ? model.id : "",
-		settings: {
-			autoRedeem: cfg.autoRedeem,
-			minBlockedMinutes: Math.max(0, cfg.minBlockedMinutes),
-			keepCredits: Math.max(0, Math.trunc(cfg.keepCredits)),
-			salvageHorizonMs: Math.max(0, cfg.salvageHorizonHours) * 3_600_000,
-		},
+		settings: resetPlanSettings(cfg),
 		accountPolicy: account => host.authStorage.oauth.policy("anthropic", account),
 		reports,
 		statuses,
@@ -200,28 +201,31 @@ export async function adoptRecentReset(
 export async function executeResetActions(
 	host: AutoResetHost,
 	provider: ResetProvider,
-	actions: readonly ResetAction[],
+	approved: readonly ApprovedResetAction[],
 	coordinator: CodexAutoRedeemCoordinator,
 ): Promise<number> {
 	const authStorage = host.authStorage;
 	const providerLabel = provider === "anthropic" ? "Claude" : "Codex";
 	const source = provider === "anthropic" ? "claude-auto-reset" : "codex-auto-reset";
 	const autoRedeemSetting = provider === "anthropic" ? cfgClaudeResetsAutoRedeem : cfgCodexResetsAutoRedeem;
-	// Consent, earlier actions, the fence and the live listing all wait after
-	// planning: a policy or setting that has since turned the account off wins.
-	const autoRedeemOff = (target: ResetCreditTarget): boolean => {
-		const policy = authStorage.oauth.policy(provider, target);
-		return effectiveAutoRedeemMode(autoRedeemSetting.get(host.settings), policy) === "no";
+	// Consent, earlier actions, the fence, the live listing and the pending marker
+	// all wait after planning: spend only while the account's current mode still
+	// allows it. `no` always wins; under `unset` only an approval given for `unset` itself holds.
+	const consentWithdrawn = ({ action, approval }: ApprovedResetAction): boolean => {
+		const policy = authStorage.oauth.policy(provider, action.target);
+		const mode = effectiveAutoRedeemMode(autoRedeemSetting.get(host.settings), policy);
+		return mode === "no" || (mode === "unset" && approval === "auto-redeem-yes");
 	};
 	let redeemed = 0;
-	for (const action of actions) {
+	for (const approvedAction of approved) {
+		const { action } = approvedAction;
 		if (coordinator.attemptedKeys.has(action.attemptKey)) continue;
 		const previousAttemptAt = coordinator.lastAttemptAtByAccount.get(action.accountKey);
 		coordinator.attemptedKeys.add(action.attemptKey);
 		coordinator.lastAttemptAtByAccount.set(action.accountKey, Date.now());
 		let outcome: ResetCreditRedeemOutcome | undefined;
 		let sharedReset = false;
-		let turnedOff = false;
+		let withdrawn = false;
 		try {
 			const redeemOptions = {
 				target: action.target,
@@ -232,8 +236,8 @@ export async function executeResetActions(
 			const lockKey = resetAccountLockKey(action.target);
 			if (!lockKey) {
 				// An account without an upstream identity cannot share a cross-process fence.
-				turnedOff = autoRedeemOff(action.target);
-				if (!turnedOff) outcome = await authStorage.resets.redeem(redeemOptions);
+				withdrawn = consentWithdrawn(approvedAction);
+				if (!withdrawn) outcome = await authStorage.resets.redeem(redeemOptions);
 			} else {
 				// The coordinator is process-local. Fence concurrent processes and
 				// remember a recent attempt so a late 429 cannot spend again.
@@ -274,10 +278,13 @@ export async function executeResetActions(
 								return { ok: false, code: "no_credit", provider } satisfies ResetCreditRedeemOutcome;
 							}
 						}
-						turnedOff = autoRedeemOff(action.target);
-						if (turnedOff) return undefined;
 						const attemptedAt = Date.now();
 						await Bun.write(lockPath, `pending:${attemptedAt}`);
+						withdrawn = consentWithdrawn(approvedAction);
+						if (withdrawn) {
+							await Bun.write(lockPath, "");
+							return undefined;
+						}
 						const result = await authStorage.resets.redeem(redeemOptions);
 						if (result.code === "reset") {
 							await Bun.write(lockPath, `reset:${attemptedAt}`);
@@ -301,12 +308,12 @@ export async function executeResetActions(
 		}
 		if (!outcome) {
 			if (sharedReset) redeemed++;
-			if (turnedOff) {
-				// Never attempted: the episode and cooldown stay free for when it is turned back on.
+			if (withdrawn) {
+				// Never attempted: the episode and cooldown stay free for when consent returns.
 				coordinator.attemptedKeys.delete(action.attemptKey);
 				if (previousAttemptAt === undefined) coordinator.lastAttemptAtByAccount.delete(action.accountKey);
 				else coordinator.lastAttemptAtByAccount.set(action.accountKey, previousAttemptAt);
-				logger.debug(`${source}: auto-redeem turned off before spending`, { account: action.accountKey });
+				logger.debug(`${source}: auto-redeem consent withdrawn before spending`, { account: action.accountKey });
 			}
 			continue;
 		}
@@ -384,11 +391,20 @@ export async function redeemConsentedResets(
 }
 
 /**
- * What a host with no prompt UI may spend: each action under its account's
- * effective mode, so `yes` spends and `unset` spends only a credit about to expire.
+ * What a host with no prompt UI may spend, per each action's effective mode:
+ * `yes` spends; `unset` goes to the headless last-chance rule, which keeps only
+ * a credit about to expire, pinned to that credit; `no` never spends. The
+ * executor's `no` veto still backs this up.
  */
-export function headlessConsentedActions(actions: readonly ResetAction[]): ResetAction[] {
-	return actions.flatMap(action => headlessApprovedResetActions(action.autoRedeem, [action]));
+export function headlessApprovals(actions: readonly ResetAction[]): ApprovedResetAction[] {
+	const approved: ApprovedResetAction[] = actions
+		.filter(action => action.autoRedeem === "yes")
+		.map(action => ({ action, approval: "auto-redeem-yes" }));
+	const unset = actions.filter(action => action.autoRedeem === "unset");
+	for (const action of headlessApprovedResetActions("unset", unset)) {
+		approved.push({ action, approval: "headless-last-chance" });
+	}
+	return approved;
 }
 
 /**

@@ -690,23 +690,23 @@ function formatExpiringResets(warning: ResetExpiryWarning, nowMs: number): strin
 }
 
 function formatResetSpendVerdict(verdict: ResetSpendVerdict): string {
+	const outcome =
+		verdict.kind === "auto"
+			? "an open interactive omp session spends it by its last 5 min if eligible then"
+			: verdict.kind === "ask"
+				? "an open interactive omp session asks before spending it"
+				: "not spent automatically";
 	const setting =
 		verdict.accountAutoRedeem === undefined
-			? `(${verdict.setting}: ${verdict.mode})`
-			: `(auth.accountPolicies autoRedeem: ${verdict.accountAutoRedeem})`;
-	switch (verdict.kind) {
-		case "auto":
-			return `→ spent automatically before it expires while an interactive omp session is open  ${setting}`;
-		case "ask":
-			return `→ an interactive omp session asks before spending it  ${setting}`;
-		case "off":
-			return `→ not spent automatically  ${setting}`;
-	}
+			? `${verdict.setting}: ${verdict.mode}`
+			: `auth.accountPolicies autoRedeem: ${verdict.accountAutoRedeem}`;
+	return `→ ${outcome}  (${setting})${verdict.eligibleNow ? "" : " · not eligible now"}`;
 }
 
 /**
- * Saved resets expiring within 24 hours on accounts worth restoring: who
- * spends each one, and the `/usage reset` target that spends it now.
+ * Saved resets expiring within 24 hours on accounts worth restoring: what the
+ * provider's `autoRedeem` setting (or the account policy's) does with each one, whether it is eligible
+ * now, and the `/usage reset` target that spends it now when the provider allows.
  */
 function formatResetExpiryBanner(
 	expiring: readonly { report: UsageReport; warning: ResetExpiryWarning }[],
@@ -718,8 +718,10 @@ function formatResetExpiryBanner(
 ): string[] {
 	const verdicts = expiring.map(({ report, warning }) =>
 		resetSpendVerdict(
-			warning.provider,
+			report,
+			warning,
 			options.settings,
+			nowMs,
 			policyOptions?.getAccountPolicy(report.provider, usageReportIdentity(report)),
 		),
 	);
@@ -745,6 +747,7 @@ function formatResetExpiryBanner(
 			? `→ the auth broker spends it before it expires, per its host's ${verdict.setting} and account policies`
 			: formatResetSpendVerdict(verdict);
 		lines.push(`    ${chalk.dim(spender)}`);
+		if (!warning.usableNow) return;
 		// Codex usage reports carry no credential id; the stored account with the same identity has it.
 		const stored = options
 			.accounts(warning.provider)
