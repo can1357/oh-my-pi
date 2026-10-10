@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed Devin-routed OpenAI models rejecting every turn with `invalid_argument` after switching an existing session from `openai-codex` ([#15234](https://github.com/can1357/oh-my-pi/issues/15234))
+
 ## [18.8.8] - 2026-10-10
 
 ### Fixed

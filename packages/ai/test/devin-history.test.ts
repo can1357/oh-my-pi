@@ -112,6 +112,36 @@ describe("streamDevin history handoff", () => {
 		expect(native?.signature).toBe("native-signature");
 	});
 
+	it("replays foreign Responses composite tool-call ids as call ids paired with their results", async () => {
+		const callId = `call_${"a".repeat(32)}`;
+		const compositeId = `${callId}|fc_${"b".repeat(50)}`;
+		const request = await captureRequest({
+			messages: [
+				{ role: "user", content: "start", timestamp: 1 },
+				assistant({
+					api: "openai-codex-responses",
+					provider: "openai-codex",
+					model: "gpt-5.6-sol",
+					stopReason: "toolUse",
+					content: [{ type: "toolCall", id: compositeId, name: "read", arguments: { path: "a.ts" } }],
+				}),
+				{
+					role: "toolResult",
+					toolCallId: compositeId,
+					toolName: "read",
+					content: [{ type: "text", text: "contents" }],
+					isError: false,
+					timestamp: 2,
+				},
+				{ role: "user", content: "continue", timestamp: 3 },
+			],
+		});
+
+		const [, call, result] = request.chatMessagePrompts;
+		expect(call?.toolCalls.map(toolCall => toolCall.id)).toEqual([callId]);
+		expect(result?.toolCallId).toBe(callId);
+	});
+
 	it("accepts a bare-string system prompt", async () => {
 		const request = await captureRequest({
 			systemPrompt: "You are a test." as unknown as string[],

@@ -46,7 +46,7 @@ function isResponsesFamilyApi(api: Api | undefined): boolean {
  * index 0) keeps its full id so unrelated empty-half ids never collapse onto
  * one empty-string bucket.
  */
-function responsesCallComponent(id: string): string {
+export function responsesCallComponent(id: string): string {
 	const pipe = id.indexOf("|");
 	return pipe <= 0 ? id : id.slice(0, pipe);
 }

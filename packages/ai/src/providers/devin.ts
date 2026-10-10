@@ -61,7 +61,7 @@ import {
 	ConnectFrameDecoder,
 	frameConnectMessage,
 } from "./connect-frame";
-import { transformMessages } from "./transform-messages";
+import { responsesCallComponent, transformMessages } from "./transform-messages";
 
 /** Base host for Codeium/Windsurf's Cascade chat API (Connect protocol over HTTP/1.1). */
 export const DEVIN_API_URL = DEVIN_DEFAULT_BASE_URL;
@@ -79,6 +79,13 @@ const CHAT_MESSAGE_PATH = "/exa.api_server_pb.ApiServerService/GetChatMessage";
 const DEVIN_ASSIGN_MODEL_PATH = "/exa.api_server_pb.ApiServerService/AssignModel";
 const DEVIN_AUTH_PATH = "/exa.auth_pb.AuthService/GetUserJwt";
 const DEVIN_DEFAULT_STOP_PATTERNS = ["<|user|>", "<|bot|>", "<|context_request|>", "<|endoftext|>", "<|end_of_turn|>"];
+
+/**
+ * Cascade forwards replayed tool-call ids to the backend serving the chat model;
+ * OpenAI-routed models reject ids past OpenAI's 40-char cap or outside
+ * `[a-zA-Z0-9_-]` with an opaque `invalid_argument` (#15234).
+ */
+const DEVIN_TOOL_CALL_ID_MAX_LENGTH = 40;
 
 /**
  * Hard upper bound on a single Connect frame payload. The 4-byte length prefix
@@ -231,7 +238,18 @@ export const streamDevin: StreamFunction<"devin-agent"> = (
 				apiKey: auth.apiKey,
 				userJwt: auth.userJwt,
 				cascadeId: options?.conversationId ?? options?.sessionId ?? crypto.randomUUID(),
-				messages: transformMessages(context.messages, model),
+				// Foreign ids (cross-model calls and their results alike): Responses
+				// composites (`call_id|item_id`) keep their wire `call_id`, then the
+				// id is sanitized and capped.
+				messages: transformMessages(
+					context.messages,
+					model,
+					id =>
+						responsesCallComponent(id)
+							.replace(/[^a-zA-Z0-9_-]/g, "_")
+							.slice(0, DEVIN_TOOL_CALL_ID_MAX_LENGTH),
+					DEVIN_TOOL_CALL_ID_MAX_LENGTH,
+				),
 			};
 			// Router models (`adaptive`) are not valid chat model uids: the server
 			// resolves them through AssignModel and expects the returned uid plus
