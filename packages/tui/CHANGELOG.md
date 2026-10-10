@@ -19,7 +19,7 @@
 
 ### Changed
 
-- Expanded tool output (Ctrl+O) now soft-wraps the full body of IRC cards - outgoing `agent://` messages and incoming IRC bubbles - instead of cutting every line at 100/110 columns, and a collapsed IRC card with hidden text now shows the `Ctrl+O: Expand` hint ([#15049](https://github.com/can1357/oh-my-pi/issues/15049) by [@farnoy](https://github.com/farnoy))
+- Expanded tool output (Ctrl+O) now soft-wraps the full body of IRC cards - outgoing `agent://` messages and incoming IRC bubbles - instead of cutting every line at 100/110 columns, and a collapsed IRC card with hidden text now shows the `Ctrl+O: Expand` hint ([#15164](https://github.com/can1357/oh-my-pi/pull/15164) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ### Fixed
 
