@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- The `computer` guide explains the new `ax()` line states, `actions=`, local dates and how to read a value cut at 200 characters
+
 ## [18.8.9] - 2026-10-10
 
 ### Added
