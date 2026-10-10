@@ -41,7 +41,7 @@ export declare class DesktopSession {
   listDisplays(): Promise<Array<DesktopDisplay>>
   listWindows(): Promise<Array<DesktopWindow>>
   listApplications(options?: ApplicationQuery | undefined | null): Promise<Array<Application>>
-  openApplication(id: string, options?: ApplicationOpenOptions | undefined | null): Promise<Application>
+  openApplication(id: string, options?: ApplicationOpenOptions | undefined | null): Promise<OpenedApplication>
   /**
    * Capture and accessibility share one serialized request. Neither a failed
    * snapshot nor an abandoned reply replaces the last delivered input frame.
@@ -2546,6 +2546,15 @@ export interface NodeSpan {
 
 /** Decode notebook JSON into the editable cell-marker text. */
 export declare function notebookToEditableText(json: string, displayPath: string): string
+
+/**
+ * An opened application and the window it shows. On macOS `window` is its
+ * frontmost window once one is on screen; other platforms report none.
+ */
+export interface OpenedApplication {
+  application: Application
+  window?: DesktopWindow
+}
 
 /** Parsed Kitty keyboard protocol sequence result for a Kitty input sequence. */
 export interface ParsedKittyResult {

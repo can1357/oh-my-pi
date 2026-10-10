@@ -151,12 +151,18 @@
 	defineValueMethods(computer, desktopValueMethods, next => [next]);
 	computer.display = async selector => makeDisplay(await callValue([step("display", [selector])]));
 	for (const [namespace, methods] of [
-		["apps", ["list", "open"]],
+		["apps", ["list"]],
 		["control", ["acquire", "release", "state"]],
 	]) {
 		const nested = {};
 		for (const method of methods)
 			defineMethod(nested, method, (...args) => callValue([step(`${namespace}.${method}`, args)]));
+		if (namespace === "apps") {
+			defineMethod(nested, "open", async (...args) => {
+				const app = await callValue([step("apps.open", args)]);
+				return app?.window ? { ...app, window: makeWindow(app.window) } : app;
+			});
+		}
 		computer[namespace] = Object.freeze(nested);
 	}
 	computer.window = selector => resolveWindow([step("window", [selector])]);
