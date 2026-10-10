@@ -993,7 +993,14 @@ export async function discoverOpenAIModelsList(
 			providerConfig.discovery.type === "litellm"
 				? resolveLiteLLMApi(undefined, id, providerConfig.api)
 				: providerConfig.api;
-		const contextWindow = reportedContextWindow ?? DISCOVERY_DEFAULT_CONTEXT_WINDOW;
+		// Explicit null means the provider truthfully advertises unknown
+		// context (e.g. a dynamic route): preserve it instead of fabricating
+		// a number from the bundled reference catalog (issue #12616). Only
+		// omitted/invalid metadata falls through the heuristic chain.
+		const contextWindow =
+			item.max_model_len === null || item.context_length === null
+				? null
+				: (reportedContextWindow ?? DISCOVERY_DEFAULT_CONTEXT_WINDOW);
 		discovered.push(
 			buildModel({
 				id,
@@ -1012,10 +1019,11 @@ export async function discoverOpenAIModelsList(
 				contextWindow,
 				// Cap a provider-advertised output limit or the reference's output limit at
 				// the discovered context window so a larger limit can never request more
-				// tokens than the local runtime advertises.
+				// tokens than the local runtime advertises. Unknown (null) context leaves
+				// that limit uncapped rather than collapsing it to zero.
 				maxTokens: Math.min(
 					reportedMaxTokens ?? reference?.maxTokens ?? discoveryDefaultMaxTokens(api),
-					contextWindow,
+					contextWindow ?? Number.POSITIVE_INFINITY,
 				),
 				headers,
 				compat: {
