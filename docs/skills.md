@@ -56,7 +56,7 @@ Supported frontmatter fields on the skill type:
 - `globs?: string[]`
 - `alwaysApply?: boolean`
 - `hide?: boolean`
-- `disableModelInvocation?: boolean` (Agent Skills equivalent of `hide`; normalized from kebab-case `disable-model-invocation`)
+- `disableModelInvocation?: boolean` (Agent Skills opt-out of model invocation; normalized from kebab-case `disable-model-invocation`). Like `hide` it excludes the skill from the system-prompt `<skills>` listing, but unlike a presentation-only `hide: true` it is sticky: per-role `unhideSkills` re-exposes `hide: true` skills yet never resurrects a `disableModelInvocation` opt-out (see `docs/task-agent-discovery.md`). Loader provenance is tracked on `Skill.modelInvocationDisabled`.
 - additional keys are preserved as unknown metadata by conventional scanners
 - `enabled: false` skips a skill in conventional scanners and Skillshare discovery
 
@@ -148,9 +148,9 @@ System prompt construction (`src/system-prompt.ts`) uses discovered skills as fo
 
 When no tool metadata is supplied, the prompt builder uses the presence of `read` as a compatibility fallback.
 
-`hide: true` does not disable the skill. Hidden skills are still loaded and remain reachable through `skill://<name>` and `/skill:<name>` when skill commands are enabled.
+`hide: true` does not disable the skill. Hidden skills are still loaded and remain reachable through `skill://<name>` and (where the session has a slash dispatcher, i.e. the main session) `/skill:<name>` when skill commands are enabled.
 
-Task tool subagents receive the session's discovered/provided skills list via normal session creation; there is no per-task skill pinning override.
+Task tool subagents receive the session's discovered/provided skills list via normal session creation; agent frontmatter (`skills`/`hideSkills`/`unhideSkills`, see `docs/task-agent-discovery.md`) filters the child's rendered `<skills>` listing only, never which skills load. There is no per-task skill pinning override beyond that listing filter.
 
 ### Interactive `/skill:<name>` commands
 

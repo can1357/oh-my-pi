@@ -142,6 +142,121 @@ describe("parseAgentFields", () => {
 		expect(fields?.autoloadSkills).toBeUndefined();
 	});
 
+	test("parses skills allowlist from array frontmatter", () => {
+		const fields = parseAgentFields({
+			name: "worker",
+			description: "desc",
+			skills: ["alpha", "beta-*"],
+		});
+
+		expect(fields).toBeDefined();
+		expect(fields?.skills).toEqual(["alpha", "beta-*"]);
+	});
+
+	test("parses skills allowlist from CSV string", () => {
+		const fields = parseAgentFields({
+			name: "worker",
+			description: "desc",
+			skills: "alpha, beta-*",
+		});
+
+		expect(fields).toBeDefined();
+		expect(fields?.skills).toEqual(["alpha", "beta-*"]);
+	});
+
+	test("keeps empty skills allowlist as an empty array", () => {
+		const fields = parseAgentFields({
+			name: "worker",
+			description: "desc",
+			skills: [],
+		});
+
+		expect(fields).toBeDefined();
+		expect(fields?.skills).toEqual([]);
+	});
+
+	test("treats skills none as an empty allowlist", () => {
+		const fields = parseAgentFields({
+			name: "worker",
+			description: "desc",
+			skills: "none",
+		});
+
+		expect(fields).toBeDefined();
+		expect(fields?.skills).toEqual([]);
+	});
+
+	test("treats padded and cased none as the empty-allowlist sentinel", () => {
+		// The sentinel trims and case-folds: " none ", "None", and "NONE" all
+		// list nothing, like the exact "none".
+		for (const sentinel of [" none ", "None", "NONE"]) {
+			expect(parseAgentFields({ name: "worker", description: "desc", skills: sentinel })?.skills).toEqual([]);
+		}
+	});
+	test("returns undefined skills when field absent", () => {
+		const fields = parseAgentFields({
+			name: "worker",
+			description: "desc",
+		});
+
+		expect(fields).toBeDefined();
+		expect(fields?.skills).toBeUndefined();
+	});
+
+	test("treats a blank skills value as absent rather than an empty allowlist", () => {
+		// Only `[]` and the `"none"` sentinel mean "list nothing". A blank value
+		// is malformed and must fall back to the absent default (unrestricted);
+		// reading it as an empty allowlist would hide every skill because the
+		// user left a field blank.
+		for (const blank of ["", "   ", ["", "  "]]) {
+			expect(parseAgentFields({ name: "worker", description: "desc", skills: blank })?.skills).toBeUndefined();
+		}
+		// A CSV that pairs the sentinel with a real name is a name list, not the
+		// sentinel: only an exact `"none"` lists nothing.
+		expect(parseAgentFields({ name: "worker", description: "desc", skills: "none, git-*" })?.skills).toEqual([
+			"none",
+			"git-*",
+		]);
+	});
+
+	test("keeps brace expansions whole in the visibility fields' CSV form", () => {
+		// Commas inside `{...}` do not split: `"{alpha,beta}"` is one glob,
+		// matching both names.
+		expect(parseAgentFields({ name: "worker", description: "desc", skills: "{alpha,beta}" })?.skills).toEqual([
+			"{alpha,beta}",
+		]);
+		expect(
+			parseAgentFields({ name: "worker", description: "desc", hideSkills: "{alpha,beta}, gamma" })?.hideSkills,
+		).toEqual(["{alpha,beta}", "gamma"]);
+		expect(
+			parseAgentFields({ name: "worker", description: "desc", unhideSkills: "delta, {eps,zeta}" })?.unhideSkills,
+		).toEqual(["delta", "{eps,zeta}"]);
+	});
+
+	test("treats blank hideSkills/unhideSkills values as absent", () => {
+		for (const blank of ["", "   ", ["", "  "]]) {
+			expect(
+				parseAgentFields({ name: "worker", description: "desc", hideSkills: blank })?.hideSkills,
+			).toBeUndefined();
+			expect(
+				parseAgentFields({ name: "worker", description: "desc", unhideSkills: blank })?.unhideSkills,
+			).toBeUndefined();
+		}
+	});
+
+	test("parses hideSkills and unhideSkills from frontmatter", () => {
+		const fields = parseAgentFields({
+			name: "worker",
+			description: "desc",
+			hideSkills: ["internal-*"],
+			unhideSkills: ["internal-tools"],
+		});
+
+		expect(fields).toBeDefined();
+		expect(fields?.hideSkills).toEqual(["internal-*"]);
+		expect(fields?.unhideSkills).toEqual(["internal-tools"]);
+	});
+
 	test("parses readSummarize from boolean frontmatter", () => {
 		expect(parseAgentFields({ name: "scout", description: "desc", readSummarize: false })?.readSummarize).toBe(false);
 		expect(parseAgentFields({ name: "scout", description: "desc", readSummarize: true })?.readSummarize).toBe(true);
