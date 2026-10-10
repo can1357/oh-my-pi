@@ -29,6 +29,7 @@ import {
 	noteAttachmentStateChange,
 	noteDebuggerDetach,
 	noteRelayDetachOutcome,
+	recoverableHelloTabIds,
 	recoveryLoaderState,
 	requireRecoveryStateLoaded,
 	restoreRecoverableState,
@@ -1124,7 +1125,7 @@ async function buildHello(): Promise<
 		discardedTabsProtocol: 1, // Keep in sync with the relay protocol version.
 		tabs: snapshots,
 		attachedTabIds,
-		recoverableTabIds: [...recoverableTabIds],
+		recoverableTabIds: recoverableHelloTabIds(recoverableTabIds, attachedTabIds),
 		relayDetachedTabIds: [...relayDetachedTabIds],
 		recoveryLoaderIds: Object.fromEntries(
 			[...recoveryLoaderIds].map(([tabId, loaderId]) => [

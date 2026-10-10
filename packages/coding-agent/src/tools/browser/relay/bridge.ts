@@ -847,6 +847,15 @@ export class RelayBridge {
 				// otherwise root-local mutation in Chrome. Its promise rejection runs
 				// on a later microtask, after this hello is reconciled, so arm the fresh
 				// root synchronously while the old restoring socket is still known.
+				const pendingPreloadRootMutation = [...this.#pendingRpc.entries()].some(
+					([key, pending]) =>
+						key.startsWith(`${instanceId}:`) &&
+						pending.req.op === "send" &&
+						pending.req.tabId === tab.tabId &&
+						["Page.addScriptToEvaluateOnNewDocument", "Page.removeScriptToEvaluateOnNewDocument"].includes(
+							pending.req.method,
+						),
+				);
 				const interruptedPreloadRecovery = [...this.#pendingRpc.entries()].some(
 					([key, pending]) =>
 						key.startsWith(`${instanceId}:`) &&
@@ -860,7 +869,10 @@ export class RelayBridge {
 							"Runtime.evaluate",
 						].includes(pending.req.method),
 				);
-				if (tab.restoring !== null && tab.restoringExt === replacedSocket && interruptedPreloadRecovery) {
+				if (
+					pendingPreloadRootMutation ||
+					(tab.restoring !== null && tab.restoringExt === replacedSocket && interruptedPreloadRecovery)
+				) {
 					tab.forceFreshRootBeforeReplay = true;
 					tab.restorePending = true;
 				}
@@ -1304,6 +1316,7 @@ export class RelayBridge {
 				? await this.#frameDocumentState(ref.tabKey).catch(err => {
 						if (isExtensionTransportInterrupted(err)) {
 							tab.forceFreshRootBeforeReplay = true;
+							if (err instanceof ExtensionRpcTimeoutError) this.#recoverAfterAmbiguousPreloadMutation(tab);
 							throw err;
 						}
 						// A failed post-registration probe cannot prove which document
@@ -2527,6 +2540,18 @@ export class RelayBridge {
 			tab.preloadScripts.delete(ownerSessionId);
 		}
 		this.#enqueuePreloadScriptCleanup(tab, removed);
+	}
+
+	#recoverAfterAmbiguousPreloadMutation(tab: TabState): void {
+		const preserve = this.#sessionHolders(tab.tabKey).filter(
+			conn => !conn.autoAttach && conn.sessionsForTab(tab.tabKey).length > 0,
+		);
+		tab.forceFreshRootBeforeReplay = true;
+		tab.restorePending = preserve.length > 0;
+		if (preserve.length === 0 || tab.restoring !== null) return;
+		this.#pruneSubscriptions(tab, preserve);
+		this.#prunePreloadScripts(tab, preserve);
+		this.#startTabRecovery(tab, false, preserve);
 	}
 
 	#sessionOwnsTab(conn: CdpConnection, tabKey: string, sessionId: string): boolean {

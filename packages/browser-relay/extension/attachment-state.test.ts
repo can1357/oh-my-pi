@@ -13,6 +13,7 @@ import {
 	noteAttachmentStateChange,
 	noteDebuggerDetach,
 	noteRelayDetachOutcome,
+	recoverableHelloTabIds,
 	requireRecoveryStateLoaded,
 	restoreRecoverableState,
 	retryFailedStateUpdate,
@@ -587,6 +588,10 @@ describe("attachment-state", () => {
 				new Set([1, 3]),
 			),
 		).toEqual([1]);
+	});
+
+	it("includes newly probed extension-owned attachments in hello recovery metadata", () => {
+		expect(recoverableHelloTabIds(new Set([1, 2]), [2, 3])).toEqual([1, 2, 3]);
 	});
 
 	it("rejects an unknown startup recovery state instead of treating it as empty", () => {

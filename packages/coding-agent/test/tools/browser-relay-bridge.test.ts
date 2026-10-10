@@ -6674,6 +6674,40 @@ describe("RelayBridge tab grouping", () => {
 		expect(ext2.rpcs("send").filter(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument")).toHaveLength(0);
 	});
 
+	it("forces a fresh root when a same-instance replacement interrupts an initial preload registration", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })]);
+		const cdp = new FakeCdpSocket();
+		const connId = bridge.cdpConnected(cdp);
+		const pageSession = await attachPage(bridge, ext, cdp, connId, 1);
+
+		bridge.cdpMessage(
+			connId,
+			JSON.stringify({
+				id: ++msgSeq,
+				sessionId: pageSession,
+				method: "Page.addScriptToEvaluateOnNewDocument",
+				params: { source: "window.__relayInjected = true;" },
+			}),
+		);
+		await waitFor(
+			() => ext.pending("send").some(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument"),
+			"pending initial preload registration",
+		);
+
+		const replacement = new FakeExtSocket();
+		connect(bridge, replacement, [tab({ tabId: 1, groupId: -1 })], {
+			attachedTabIds: [1],
+			recoverableTabIds: [1],
+		});
+		expect(ext.closed).toBe(true);
+		await waitFor(
+			() => replacement.pending("detach").length === 1,
+			"fresh-root detach after same-instance replacement",
+		);
+	});
+
 	it("forces a fresh root after an initial preload registration times out", async () => {
 		vi.useFakeTimers();
 		try {
@@ -6722,6 +6756,49 @@ describe("RelayBridge tab grouping", () => {
 			expect(ext2.rpcs("send").filter(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument")).toHaveLength(
 				0,
 			);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("starts fresh-root recovery when the post-registration loader probe times out", async () => {
+		vi.useFakeTimers();
+		try {
+			const bridge = new RelayBridge({});
+			const ext = new FakeExtSocket();
+			connect(bridge, ext, [tab({ tabId: 1 })]);
+			const cdp = new FakeCdpSocket();
+			const connId = bridge.cdpConnected(cdp);
+			const pageSession = await attachPage(bridge, ext, cdp, connId, 1);
+
+			const addId = ++msgSeq;
+			bridge.cdpMessage(
+				connId,
+				JSON.stringify({
+					id: addId,
+					sessionId: pageSession,
+					method: "Page.addScriptToEvaluateOnNewDocument",
+					params: { source: "window.__relayInjected = true;", runImmediately: true },
+				}),
+			);
+			await waitFor(() => ext.pending("send").some(rpc => rpc.method === "Page.getFrameTree"));
+			ack(bridge, ext, "send", { frameTree: { frame: { loaderId: "loader-before" } } });
+			await waitFor(() => ext.pending("send").some(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument"));
+			ack(bridge, ext, "send", { identifier: "ambiguous-root-script" });
+			await waitFor(
+				() => ext.pending("send").some(rpc => rpc.method === "Page.getFrameTree"),
+				"post-registration loader probe",
+			);
+
+			vi.advanceTimersByTime(20_000);
+			await waitFor(() => ext.pending("detach").length === 1, "immediate fresh-root recovery detach");
+			expect(ext.closeCount).toBe(0);
+			expect(cdp.messages.some(message => message.id === addId && "error" in message)).toBe(true);
+			ack(bridge, ext, "detach");
+			await waitFor(() => ext.pending("attach").length === 1, "fresh-root recovery attach");
+			ack(bridge, ext, "attach");
+			await flush();
+			expect(ext.rpcs("send").filter(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument")).toHaveLength(1);
 		} finally {
 			vi.useRealTimers();
 		}

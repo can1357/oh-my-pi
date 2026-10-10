@@ -245,6 +245,13 @@ export function extensionOwnedAttachedTabIds(
 		.map((target) => target.tabId as number);
 }
 
+export function recoverableHelloTabIds(
+	recoverableTabIds: ReadonlySet<number>,
+	attachedTabIds: readonly number[],
+): number[] {
+	return [...new Set([...recoverableTabIds, ...attachedTabIds])];
+}
+
 export function requireRecoveryStateLoaded(loaded: boolean): void {
 	if (!loaded) throw new Error("browser relay recovery state failed to load");
 }
