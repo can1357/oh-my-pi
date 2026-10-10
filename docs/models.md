@@ -678,6 +678,8 @@ Switching writes roles the way the model picker does: into the scope chosen by `
 
 When several config layers define a preset of the same name, the highest layer (command line, then `--config` file, then project config, then global config) wins whole: entries are never merged across layers, so a project `deep` that only sets `default` applies without the global `deep`'s other roles. A `null` entry in a `--config` file (or a command-line override) hides the preset from lists and switches; a `null` entry in a project config is ignored, so the global preset of that name still applies. Saving always writes the named entry to the global config and reports when a higher layer still takes precedence for that name.
 
+Preset lists — the `/modelpreset` picker, `/modelpreset list`, and preset cycling in `/models` — follow config order: presets from higher layers come first, each layer in file order. Reorder entries under `modelPresets` in `config.yml` to put frequently used presets at the top. A newly saved preset is appended to the global config; re-saving an existing one keeps its position.
+
 Saving captures the effective assignments — including any `--model` session override — and the configured `defaultThinkingLevel`, not the session's live thinking level.
 
 Related settings:

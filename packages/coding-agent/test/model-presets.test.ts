@@ -235,7 +235,8 @@ describe("model presets", () => {
 		saveModelPreset(settings, "mine");
 
 		expect(Object.keys(settings.getGlobalSettings().modelPresets ?? {})).toEqual(["mine"]);
-		expect(getModelPresetNames(settings)).toEqual(["mine", "team"]);
+		// Higher layers list first: the project preset precedes the global one.
+		expect(getModelPresetNames(settings)).toEqual(["team", "mine"]);
 		expect(deleteModelPreset(settings, "team")).toBe("project");
 		expect(deleteModelPreset(settings, "mine")).toBe("deleted");
 		expect(getModelPresetNames(settings)).toEqual(["team"]);
@@ -399,6 +400,18 @@ describe("model presets", () => {
 		const fallsThrough = await projectSettings({ project: "modelPresets:\n  deep: null\n" });
 		cfgModelPresets.setEntry(fallsThrough, "deep", { modelRoles: { default: OPUS } });
 		expect(getModelPresetNames(fallsThrough)).toEqual(["deep"]);
+	});
+
+	it("lists presets in config order, keeping a re-saved preset in place", () => {
+		const settings = Settings.isolated();
+		cfgModelPresets.setEntry(settings, "zeta", { modelRoles: { default: OPUS } });
+		cfgModelPresets.setEntry(settings, "alpha", { modelRoles: { default: SONNET } });
+		cfgModelPresets.setEntry(settings, "mid", { modelRoles: { default: SONNET_46 } });
+		expect(getModelPresetNames(settings)).toEqual(["zeta", "alpha", "mid"]);
+
+		settings.setModelRole("default", SONNET_46);
+		saveModelPreset(settings, "zeta");
+		expect(getModelPresetNames(settings)).toEqual(["zeta", "alpha", "mid"]);
 	});
 
 	it("holds the model-role mutation lock for the whole apply", async () => {

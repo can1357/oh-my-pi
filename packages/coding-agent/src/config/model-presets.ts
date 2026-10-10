@@ -64,15 +64,17 @@ export function getModelPreset(settings: Settings, name: string): PresetLookup {
 	return typeof parsed === "string" ? { kind: "invalid", reason: parsed } : { kind: "found", preset: parsed };
 }
 
-/** Saved preset names, sorted; names a `--config`/runtime `null` tombstone hides are left out. */
+/**
+ * Saved preset names in config order: higher layers (runtime, `--config`, project) first, each in
+ * file order, then the global config's own entries; names a `--config`/runtime `null` tombstone
+ * hides are left out. Users rank presets by reordering them in `config.yml`.
+ */
 export function getModelPresetNames(settings: Settings): string[] {
-	return Object.keys(cfgModelPresets.get(settings))
-		.filter(name => settings.getOwnedModelPreset(name) !== undefined)
-		.sort((a, b) => a.localeCompare(b));
+	return Object.keys(cfgModelPresets.get(settings)).filter(name => settings.getOwnedModelPreset(name) !== undefined);
 }
 
 /**
- * First saved preset (by name) the current setup matches: identical effective
+ * First saved preset (in config order) the current setup matches: identical effective
  * role assignments and, when the preset records one, the same default thinking
  * level. Undefined when the roles were edited past every preset.
  */

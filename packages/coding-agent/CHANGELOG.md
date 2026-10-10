@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- `/modelpreset` (picker and `list`) and the `/models` preset cycling now follow the order presets appear in `config.yml` instead of alphabetical order, so frequently used presets can be moved to the top; project and `--config` presets list before global ones
+
 ## [18.8.9] - 2026-10-10
 
 ### Added
