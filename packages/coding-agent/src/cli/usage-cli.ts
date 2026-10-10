@@ -357,7 +357,7 @@ function formatAccountHeader(
 		}
 		const expiring = classifyResetExpiry(report, nowMs);
 		if (expiring) {
-			const text = ` · ▲ ${expiring.count} expire${expiring.count === 1 ? "s" : ""} in ${formatDuration(expiring.expiresAtMs - nowMs)}`;
+			const text = ` · ▲ ${formatExpiringResets(expiring, nowMs)}`;
 			header +=
 				expiring.tier === "imminent"
 					? chalk.red(text)
@@ -681,6 +681,12 @@ function formatPolicyLine(
 	return `policy: priority ${priority} · reserve ${reserveLabel}${autoRedeemLabel} · ${state} · ${(remainingFraction * 100).toFixed(1)}% left`;
 }
 
+/** `1 expires in 6h`, or `2 expire, soonest in 6h`. */
+function formatExpiringResets(warning: ResetExpiryWarning, nowMs: number): string {
+	const due = formatDuration(warning.expiresAtMs - nowMs);
+	return warning.count === 1 ? `1 expires in ${due}` : `${warning.count} expire, soonest in ${due}`;
+}
+
 function formatResetSpendVerdict(verdict: ResetSpendVerdict): string {
 	const setting = `(${verdict.setting}: ${verdict.mode})`;
 	switch (verdict.kind) {
@@ -725,16 +731,11 @@ function formatResetExpiryBanner(
 	expiring.forEach(({ report, warning }, index) => {
 		const peers = reportsByProvider.get(report.provider) ?? [report];
 		const identity = formatReportIdentity(report, peers, peers.indexOf(report), redaction);
-		const expiresAt = new Date(warning.expiresAtMs).toLocaleString(undefined, {
-			month: "short",
-			day: "numeric",
-			hour: "2-digit",
-			minute: "2-digit",
-			hourCycle: "h23",
-		});
+		const expiry = new Date(warning.expiresAtMs);
+		const expiresAt = `${expiry.toLocaleDateString(undefined, { month: "short", day: "numeric" })} ${expiry.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit", hourCycle: "h23" })}`;
 		const used = `${limitTitle(warning.limit)} ${Math.round(warning.usedFraction * 100)}% used`;
 		lines.push(
-			`  ${formatResetProviderName(warning.provider)} · ${identity} · expires in ${formatDuration(warning.expiresAtMs - nowMs)} (${expiresAt}) · ${used}`,
+			`  ${formatResetProviderName(warning.provider)} · ${identity} · ${formatExpiringResets(warning, nowMs)} (${expiresAt}) · ${used}`,
 		);
 		const verdict = verdicts[index]!;
 		lines.push(`    ${chalk.dim(formatResetSpendVerdict(verdict))}`);

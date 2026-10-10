@@ -93,9 +93,9 @@ export interface StatusLineHost<TSession extends StatusLineSession = StatusLineS
 	lookupPullRequest(cwd: string): Promise<{ stdout: string; exitCode: number }>;
 	calculateTokensPerSecond(messages: readonly AgentMessage[], isStreaming: boolean): number | null;
 	limitMatchesActiveAccount(report: UsageReport, limit: UsageLimit, identity: StatusAccountIdentity): boolean;
-	classifyResetExpiry(report: UsageReport, nowMs: number): StatusResetExpiry | undefined;
+	classifyResetExpiry?(report: UsageReport, nowMs: number): StatusResetExpiry | undefined;
 	/** One-line warning for saved resets anywhere in the pool that expire within 24 hours. */
-	resetExpiryNotice(reports: readonly UsageReport[], nowMs: number): string | undefined;
+	resetExpiryNotice?(reports: readonly UsageReport[], nowMs: number): string | undefined;
 	computeCompactionBoundaries(session: TSession, contextWindow: number, model?: Model): CompactionBoundaries | null;
 }
 

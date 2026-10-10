@@ -93,8 +93,6 @@ export function createStartupStatusLine(data: StatusLineStartupData): StatusLine
 		lookupPullRequest: async () => ({ stdout: "", exitCode: 1 }),
 		calculateTokensPerSecond: () => null,
 		limitMatchesActiveAccount: () => false,
-		classifyResetExpiry: () => undefined,
-		resetExpiryNotice: () => undefined,
 		computeCompactionBoundaries: () => data.compactionBoundaries,
 	};
 	const statusLine = new StatusLineComponent(session, host);

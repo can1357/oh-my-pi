@@ -113,8 +113,14 @@ export function formatResetExpiryNotice(reports: readonly UsageReport[], nowMs: 
 	}
 	if (!soonest) return undefined;
 	const { report, warning } = soonest;
+	const provider = formatResetProviderName(warning.provider);
 	const label = formatActiveAccountLabel(usageReportIdentity(report));
-	const resets = warning.count === 1 ? "reset expires" : `${warning.count} resets expire`;
+	const account = label ? ` on ${label}` : "";
+	const due = formatDuration(warning.expiresAtMs - nowMs);
+	const resets =
+		warning.count === 1
+			? `Saved ${provider} reset${account} expires in ${due}`
+			: `${warning.count} saved ${provider} resets${account} expire, soonest in ${due}`;
 	const others = accounts > 1 ? ` (and ${accounts - 1} more account${accounts === 2 ? "" : "s"})` : "";
-	return `Saved ${formatResetProviderName(warning.provider)} ${resets}${label ? ` on ${label}` : ""} in ${formatDuration(warning.expiresAtMs - nowMs)}${others} · /usage`;
+	return `${resets}${others} · /usage`;
 }

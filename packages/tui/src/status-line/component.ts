@@ -2048,7 +2048,14 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 	}
 
 	#noticeResetExpiry(reports: unknown): void {
-		if (this.#resetExpiryNoticed || !this.#onResetExpiryNotice || !Array.isArray(reports)) return;
+		if (
+			this.#resetExpiryNoticed ||
+			!this.#onResetExpiryNotice ||
+			!this.host.resetExpiryNotice ||
+			!Array.isArray(reports)
+		) {
+			return;
+		}
 		// fetchUsageReports supplies normalized rows; keep only entries shaped like reports.
 		const usageReports = reports.filter(
 			(report): report is UsageReport =>
@@ -2300,7 +2307,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 								: undefined,
 						expired: resetExpiryMs !== undefined && resetExpiryMs <= 0,
 						unavailableReason: resetSummary.unavailableReason,
-						expiring: resetReport ? this.host.classifyResetExpiry(resetReport, now) : undefined,
+						expiring: resetReport ? this.host.classifyResetExpiry?.(resetReport, now) : undefined,
 					}
 				: undefined;
 		if (!selectedGroup) return resetCredits ? { resetCredits } : null;
