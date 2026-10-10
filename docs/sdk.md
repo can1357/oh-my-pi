@@ -269,7 +269,7 @@ Behavior:
 
 Related APIs:
 
-- `sendUserMessage(content, { deliverAs?, attribution? })`
+- `sendUserMessage(content, { deliverAs?, attribution?, expandPromptTemplates? })`
 - `steer(text, images?, { attribution? })`
 - `followUp(text, images?, { synthetic?, attribution? })`
 - `sendCustomMessage({ customType, content, ... }, { deliverAs?, triggerTurn? })`

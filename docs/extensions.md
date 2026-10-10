@@ -273,7 +273,10 @@ ACP clients can defer agent-initiated turns, in which case requests that would
 start one are retained as hidden next-turn messages.
 
 `pi.sendUserMessage(content, { deliverAs })` submits text/images without slash-command
-or prompt-template expansion. Omit `deliverAs` to start a prompt when idle;
+or prompt-template expansion unless you pass `expandPromptTemplates: true`. With it,
+a registered `/skill:<name>` command and prompt templates expand on every delivery
+path; extension, custom, and file slash commands run only when `deliverAs` is
+omitted (or is `"aside"` while idle). Omit `deliverAs` to start a prompt when idle;
 while streaming, omission queues a steer. Explicit `"steer"` or `"followUp"`
 queues the prompt even when idle instead of starting a turn directly. `"aside"`
 injects at the next step boundary while a run is live and starts a turn when

@@ -465,6 +465,8 @@ export interface SendUserMessageOptions {
 	deliverAs?: "steer" | "followUp" | "aside";
 	/** Explicit billing/initiator attribution. */
 	attribution?: MessageAttribution;
+	/** Expand a registered `/skill:<name>` command and prompt templates (default: false). */
+	expandPromptTemplates?: boolean;
 }
 
 /** Result from a handoff operation. */

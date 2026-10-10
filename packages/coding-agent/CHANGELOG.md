@@ -332,6 +332,7 @@
 
 ### Added
 
+- Extensions can pass `expandPromptTemplates: true` to `pi.sendUserMessage()` so a `/skill:<name>` command or prompt template they send expands like typed input, matching Pi; Pi extensions with skill-alias commands now load the skill instead of sending the literal command text ([#14608](https://github.com/can1357/oh-my-pi/pull/14608) by [@andrebrait](https://github.com/andrebrait))
 - Added an agents HUD pill counting running subagents, opening the agent hub on click
 - In Tern the thinking level shows as the composer model chip's icon instead of a separate chip, still cycling on click, while `statusLine.compactThinkingLevel` (Compact Thinking Level, on by default) is on
 - Added `computer.zoom()` and window-local `zoom()` in JavaScript and Python Eval, with native-detail region captures that preserve full-screenshot click coordinates.
