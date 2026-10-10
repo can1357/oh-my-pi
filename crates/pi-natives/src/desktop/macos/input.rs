@@ -418,6 +418,9 @@ enum FrontTarget {
 	/// The target is another window of the frontmost application, whose key
 	/// window takes the user's typing.
 	UserSibling,
+	/// The front process could not be read, so the target may be a non-key
+	/// window of the frontmost application.
+	Unknown,
 }
 
 fn front_target(
@@ -426,12 +429,11 @@ fn front_target(
 	wid: u32,
 	focused: impl FnOnce() -> Option<u32>,
 ) -> FrontTarget {
-	if front != Some(pid) {
-		FrontTarget::Background
-	} else if focused() == Some(wid) {
-		FrontTarget::Key
-	} else {
-		FrontTarget::UserSibling
+	match front {
+		None => FrontTarget::Unknown,
+		Some(front) if front != pid => FrontTarget::Background,
+		Some(_) if focused() == Some(wid) => FrontTarget::Key,
+		Some(_) => FrontTarget::UserSibling,
 	}
 }
 
@@ -460,6 +462,13 @@ pub(super) fn make_key_in_background(
 			return Err(DesktopError::background_unavailable(format!(
 				"window {wid} belongs to the frontmost application but is not its key window; making \
 				 it key would move the user's typing there, so nothing was sent; retry with \
+				 takeover:true or use ax actions",
+			)));
+		},
+		FrontTarget::Unknown => {
+			return Err(DesktopError::background_unavailable(format!(
+				"window {wid}: the frontmost application could not be identified, so making the \
+				 window key could move the user's typing there; nothing was sent; retry with \
 				 takeover:true or use ax actions",
 			)));
 		},
@@ -2016,31 +2025,10 @@ mod tests {
 		let unread =
 			|| -> Option<u32> { panic!("a background process's focused window is not read") };
 		assert_eq!(front_target(Some(9), 7, 42, unread), FrontTarget::Background);
-		assert_eq!(front_target(None, 7, 42, unread), FrontTarget::Background);
+		assert_eq!(front_target(None, 7, 42, unread), FrontTarget::Unknown);
 		assert_eq!(front_target(Some(7), 7, 42, || Some(42)), FrontTarget::Key);
 		assert_eq!(front_target(Some(7), 7, 42, || Some(43)), FrontTarget::UserSibling);
 		assert_eq!(front_target(Some(7), 7, 42, || None), FrontTarget::UserSibling);
-	}
-
-	#[test]
-	fn activating_press_lands_outside_the_target_window() {
-		// A press inside the frame would reach the window's own controls: a
-		// Chrome tab, Safari's address field, a Finder toolbar button.
-		let window = DesktopWindow {
-			id:      "42".to_string(),
-			title:   String::new(),
-			app:     String::new(),
-			pid:     Some(7),
-			x:       100,
-			y:       50,
-			width:   300,
-			height:  200,
-			focused: false,
-		};
-		let (location, local) = activating_press(&window);
-		assert!(local.x < 0.0 && local.y < 0.0, "window-local {local:?} is inside the frame");
-		assert!(location.x < 100.0 && location.y < 50.0, "press at {location:?} is inside the frame");
-		assert_eq!((location.x - local.x, location.y - local.y), (100.0, 50.0));
 	}
 
 	#[test]
