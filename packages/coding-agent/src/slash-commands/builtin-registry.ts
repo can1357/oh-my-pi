@@ -39,6 +39,27 @@ export interface TuiBuiltinSlashCommand extends BuiltinSlashCommand {
 	getAutocompleteDescription?: () => string | undefined;
 }
 
+/**
+ * `/help` lists the registered builtins, optionally filtered by a query. It
+ * reads `BUILTIN_SLASH_COMMAND_DEFS` at call time so the listing stays in step
+ * with the registry without a second source of truth.
+ */
+const HELP_SLASH_COMMAND: SlashCommandSpec = {
+	name: "help",
+	icon: "question",
+	description: "List available commands",
+	inlineHint: "[query]",
+	allowArgs: true,
+	handleTui: (command, runtime) => {
+		const query = command.args.trim().toLowerCase();
+		const lines = BUILTIN_SLASH_COMMAND_DEFS.filter(
+			def => !query || def.name.includes(query) || def.description.toLowerCase().includes(query),
+		).map(def => `/${def.name} — ${def.description}`);
+		runtime.ctx.editor.setText("");
+		runtime.ctx.showSessionInfo(lines.length > 0 ? lines.join("\n") : `No commands match "${command.args.trim()}".`);
+	},
+};
+
 const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 	...BUILTIN_MODE_SLASH_COMMANDS,
 	...BUILTIN_COLLABORATION_SLASH_COMMANDS,
@@ -47,6 +68,7 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 	...BUILTIN_MARKETPLACE_SLASH_COMMANDS,
 	...BUILTIN_SKILLS_SLASH_COMMANDS,
 	...BUILTIN_CONTROL_SLASH_COMMANDS,
+	HELP_SLASH_COMMAND,
 ];
 
 const BUILTIN_SLASH_COMMAND_LOOKUP = new Map<string, SlashCommandSpec>();

@@ -1238,6 +1238,9 @@
 - Improved responsiveness in long sessions by significantly reducing the time required to scan provider context for credential patterns.
 - Fixed native judges failing to honor configured request headers, enabling authenticated and header-routed judge providers to work as configured.
 - Fixed LSP requests hanging when aborted while waiting for an earlier write to complete.
+### Added
+
+- Added a top-level `/help` slash command that lists the built-in commands, filtered by an optional query ([#12675](https://github.com/can1357/oh-my-pi/pull/12675) by [@F0Rextasy](https://github.com/F0Rextasy)).
 
 ## [18.2.7] - 2026-09-21
 
