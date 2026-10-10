@@ -338,24 +338,27 @@ fn with_background_keyboard<T>(
 	})
 }
 
-/// Before a background press: with other windows that could be key, `wid`
-/// must still be the key window `focused` reports, or the press would land in
-/// whichever sibling the user picked.
+/// Before every background press: no other window of the application may
+/// have become key, including one opened or unminimized since delivery
+/// began, or the press would land there. When siblings existed from the
+/// start, `wid` was proven key, so an unreadable focus also stops.
 fn key_window_guard(
 	conflict: Option<&KeyboardConflict>,
 	wid: u32,
 	focused: impl FnOnce() -> Option<u32>,
 ) -> CoreResult<()> {
-	match conflict {
-		Some(KeyboardConflict::Siblings(_)) if focused() != Some(wid) => {
-			Err(DesktopError::input_failed(format!(
-				"window {wid} stopped being its application's key window during background input; \
-				 keys sent before that may already have landed, and nothing more was sent; inspect \
-				 the window before retrying",
-			)))
-		},
-		_ => Ok(()),
+	let still_key = match focused() {
+		Some(focused) => focused == wid,
+		None => !matches!(conflict, Some(KeyboardConflict::Siblings(_))),
+	};
+	if still_key {
+		return Ok(());
 	}
+	Err(DesktopError::input_failed(format!(
+		"window {wid} stopped being its application's key window during background input; keys sent \
+		 before that may already have landed, and nothing more was sent; inspect the window before \
+		 retrying",
+	)))
 }
 
 fn keyboard_conflict(wid: u32, records: &[ax::AxWindowRecord]) -> Option<KeyboardConflict> {
@@ -2630,8 +2633,18 @@ mod tests {
 			(CGEventType::KeyDown as u32, "a".to_string()),
 			(CGEventType::KeyUp as u32, "a".to_string()),
 		]);
-		// A window with no sibling to lose focus to is not rechecked.
-		assert!(key_window_guard(None, 7, || Some(9)).is_ok());
+	}
+
+	#[test]
+	fn a_window_opened_during_background_input_stops_it_once_it_becomes_key() {
+		// The target had no siblings when delivery began.
+		assert_eq!(key_window_guard(None, 7, || Some(9)).unwrap_err().code, ErrorCode::InputFailed);
+		assert!(key_window_guard(None, 7, || Some(7)).is_ok());
+		// An application that reports no focused window, with nothing else to
+		// take the keys, keeps receiving them as before.
+		assert!(key_window_guard(None, 7, || None).is_ok());
+		let siblings = KeyboardConflict::Siblings(1);
+		assert!(key_window_guard(Some(&siblings), 7, || None).is_err());
 	}
 
 	#[test]
