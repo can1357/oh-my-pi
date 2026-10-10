@@ -82,7 +82,7 @@ impl CancellationSource {
 			return Err(busy());
 		}
 		if state.is_none() {
-			*state = Some(Arc::new(ControlLease::acquire_takeover(self)?));
+			*state = Some(Arc::new(ControlLease::acquire(self, true)?));
 		}
 		Ok(())
 	}
@@ -356,12 +356,20 @@ impl ControlLease {
 		takeover: bool,
 		start: impl FnOnce(EmergencyStop) -> CoreResult<macos::EscapeMonitor>,
 	) -> CoreResult<Self> {
-		if takeover { Self::acquire_with(source, start) } else { Self::background() }
+		if takeover {
+			Self::acquire_with(source, start)
+		} else {
+			Self::background()
+		}
 	}
 
 	#[cfg(not(target_os = "macos"))]
 	fn acquire(source: &CancellationSource, takeover: bool) -> CoreResult<Self> {
-		if takeover { Self::acquire_takeover(source) } else { Self::background() }
+		if takeover {
+			Self::acquire_takeover(source)
+		} else {
+			Self::background()
+		}
 	}
 
 	fn background() -> CoreResult<Self> {
