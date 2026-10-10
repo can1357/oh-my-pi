@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed OpenCode Go credentials that hit their subscription usage limits being skipped for free (`*-free`) models, and free-model rate limits benching credentials for paid models ([#15183](https://github.com/can1357/oh-my-pi/issues/15183)).
+
 ## [18.8.7] - 2026-10-09
 
 ### Added

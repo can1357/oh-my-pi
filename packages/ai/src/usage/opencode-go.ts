@@ -1,3 +1,4 @@
+import { quotaTierFor } from "@oh-my-pi/pi-catalog/compat/behavior";
 import { USER_AGENT, getInstallId } from "@oh-my-pi/pi-utils";
 import { ProviderHttpError } from "../error";
 import type {
@@ -197,13 +198,22 @@ export const opencodeGoUsageProvider: UsageProvider = {
  * would bench a working key until the subscription anniversary. Hard monthly
  * failures still rotate credentials via the `401 Insufficient balance`
  * usage-limit classification ([#3169](https://github.com/can1357/oh-my-pi/issues/3169)).
+ *
+ * Free SKUs (`quota-tiers provider="opencode-go"`) are unlimited and draw on no
+ * subscription window, so exhausted windows never gate them and their backoffs
+ * live in a separate pool from metered models ([#15183](https://github.com/can1357/oh-my-pi/issues/15183)).
  */
 export const opencodeGoRankingStrategy: CredentialRankingStrategy = {
 	findWindowLimits: report => ({
 		primary: report.limits.find(limit => limit.id === "rolling-5h"),
 		secondary: report.limits.find(limit => limit.id === "weekly"),
 	}),
-	scopeLimits: report => report.limits.filter(limit => limit.id !== "monthly"),
+	scopeLimits: (report, context) =>
+		context?.modelId && quotaTierFor(OPENCODE_GO_PROVIDER, context.modelId) === "free"
+			? []
+			: report.limits.filter(limit => limit.id !== "monthly"),
+	blockScope: context =>
+		context?.modelId ? `pool:${quotaTierFor(OPENCODE_GO_PROVIDER, context.modelId)}` : undefined,
 	windowDefaults: {
 		primaryMs: 5 * HOUR_MS,
 		secondaryMs: 7 * DAY_MS,
