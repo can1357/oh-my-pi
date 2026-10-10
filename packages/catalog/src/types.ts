@@ -1087,9 +1087,10 @@ export interface ResolvedOpenAIResponsesCompat extends ResolvedOpenAISharedCompa
 	isVercelGatewayHost: boolean;
 	/**
 	 * The configured endpoint is first-party OpenAI (`provider === "openai"` on
-	 * an `api.openai.com` or unset baseUrl). Gates official-only Responses
-	 * behavior: default-on stateful `previous_response_id` chaining and the
-	 * `text.verbosity` field.
+	 * an `api.openai.com` or unset baseUrl), or the Codex transport on its
+	 * official subscription backend. Gates endpoint-specific capabilities;
+	 * the OpenAI Responses transport also uses it for default-on stateful
+	 * chaining and `text.verbosity`.
 	 */
 	officialEndpoint: boolean;
 	/** Run Harmony-protocol leak detection/mitigation on streamed output. */
@@ -1407,6 +1408,8 @@ export interface Model<TApi extends Api = Api> {
 	webSearchModel?: string;
 	/** Whether this chat model can carry the Responses `image_generation` tool itself. */
 	hostedImage?: boolean;
+	/** Reviewed official-endpoint support for explicit transparent/opaque backgrounds. Only true opts in; rebuilt from catalog policy. */
+	imageBackground?: boolean;
 	/** Same-provider image model to generate images in this model's place (model id or provider/id). */
 	imageModel?: string;
 	/**

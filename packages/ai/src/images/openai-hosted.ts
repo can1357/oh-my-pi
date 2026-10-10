@@ -162,6 +162,7 @@ export async function generateHostedImage(
 		action: content.length > 1 ? "edit" : "generate",
 		output_format: "webp",
 		...(size ? { size } : {}),
+		...(request.background ? { background: request.background } : {}),
 		// A chat model generating on its own lets the host pick the image model.
 		...(model.api === "openai-responses" && modelKind(model) === "image"
 			? { model: model.requestModelId ?? model.id }

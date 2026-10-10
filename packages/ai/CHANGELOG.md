@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added transparent, opaque, and automatic image background preferences for catalog-supported official image deployments; automatic backgrounds use the provider default without sending an unsupported field on custom URLs and other deployments ([#15288](https://github.com/can1357/oh-my-pi/pull/15288) by [@FNDEVVE](https://github.com/FNDEVVE)).
+
 ## [18.8.9] - 2026-10-10
 
 ### Changed

@@ -1,7 +1,8 @@
 import { calculateCost } from "@oh-my-pi/pi-catalog/models";
 import { logger } from "@oh-my-pi/pi-utils";
+import * as AIError from "../../error";
 import { classifyGatewayError } from "../../error/gateway";
-import { generateImage } from "../../images";
+import { generateImage, supportsImageBackground } from "../../images";
 import * as imagesServer from "../../providers/images-server";
 import { deterministicUuid } from "../../utils/deterministic-id";
 import {
@@ -73,6 +74,14 @@ async function handleImages(
 		);
 	}
 
+	if (parsed.request.background && parsed.request.background !== "auto" && !supportsImageBackground(model)) {
+		return imagesServer.formatError(
+			400,
+			"invalid_request_error",
+			`Image model ${model.provider}/${model.id} does not support ${parsed.request.background} backgrounds`,
+		);
+	}
+
 	const client = resolveClientIdentity(req.headers);
 	const sessionId = deterministicUuid(`images\u0000${model.provider}/${model.id}`);
 	const apiKey = await resolveGatewayApiKey(bootOpts.storage, model, sessionId, controller.signal, peer);
@@ -112,6 +121,9 @@ async function handleImages(
 		);
 	} catch (error) {
 		if (controller.signal.aborted) return aborted();
+		if (error instanceof AIError.ValidationError) {
+			return imagesServer.formatError(400, "invalid_request_error", error.message);
+		}
 		const classified = classifyGatewayError(error);
 		logger.warn("auth-gateway image generation failed", { format: "images", error: classified.message, peer });
 		return imagesServer.formatError(classified.status, classified.type, classified.message);

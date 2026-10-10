@@ -206,6 +206,10 @@ A `models` string without `*` is an exact, case-sensitive match against the prov
 
 The directive vocabulary is closed and lives in **`src/compat/axes.ts`** — one table mapping each kebab-case directive to its resolved camelCase field, namespace (`wire` / `thinking` / `catalog`), value shape, applicable compat records, and (for enums) accepted values. The compiler rejects unknown directives and out-of-vocabulary values against that table; consult it rather than a duplicated table here.
 
+`image-background #true` is a conservative deployment capability, materialized as `Model.imageBackground` only while `compat.officialEndpoint` holds. Only reviewed provider/model/API combinations on their official endpoint opt into explicit transparent/opaque image backgrounds; an unassigned or false value means unsupported. `buildModel` clears copied capability metadata when rebuilding a model on an unreviewed deployment or custom `baseUrl`. The verified opt-in is `openai-codex/gpt-image-2` on `openai-codex-responses` at the official Codex backend; neither a shared image transport nor the same model id on the OpenAI platform or DeepInfra establishes support.
+
+Hosted image dispatch also requires the selected carrier to use the same API on its official endpoint. An official image catalog row cannot authorize background fields on a custom carrier URL. Explicit backgrounds are rejected or skipped before dispatch when that endpoint is unsupported; `auto` instead omits the background field without changing the caller's request.
+
 The three value shapes are:
 
 - **Scalar**: exactly one KDL boolean, integer, float, or string argument and no children. `#null` is rejected.

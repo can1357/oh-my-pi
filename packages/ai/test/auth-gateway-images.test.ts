@@ -95,6 +95,7 @@ describe("auth gateway images", () => {
 				n: 2,
 				size: "1536x1024",
 				response_format: "b64_json",
+				background: "auto",
 			});
 			expect(response.status).toBe(200);
 			expect(upstream).toEqual({
@@ -126,6 +127,7 @@ describe("auth gateway images", () => {
 					contentType: string | null;
 					prompt?: string | File | null;
 					image?: string | File | null;
+					background?: string | File | null;
 			  }
 			| undefined;
 		const fetchStub: FetchImpl = async (input, init) => {
@@ -135,6 +137,7 @@ describe("auth gateway images", () => {
 				authorization: new Headers(init.headers).get("authorization"),
 				contentType: new Headers(init.headers).get("content-type"),
 				prompt: init.body.get("prompt"),
+				background: init.body.get("background"),
 				image: init.body.get("image"),
 			};
 			return new Response(JSON.stringify({ data: [{ b64_json: IMAGE_DATA }] }), {
@@ -146,6 +149,7 @@ describe("auth gateway images", () => {
 			form.set("model", "gpt-image-edit");
 			form.set("prompt", "replace the sky");
 			form.set("size", "1024x1024");
+			form.set("background", "auto");
 			form.set("n", "1");
 			form.set("image", new File([new TextEncoder().encode("source-image")], "source.png", { type: "image/png" }));
 			const response = await fetch(`${url}/v1/images/edits`, {
@@ -158,6 +162,7 @@ describe("auth gateway images", () => {
 			expect(upstream?.authorization).toBe("Bearer key-openai");
 			expect(upstream?.contentType).toBeNull();
 			expect(upstream?.prompt).toBe("replace the sky");
+			expect(upstream?.background).toBeNull();
 			const upstreamImage = upstream?.image;
 			expect(upstreamImage).toBeInstanceOf(File);
 			if (!(upstreamImage instanceof File)) throw new Error("Expected an upstream image file");
@@ -276,5 +281,62 @@ describe("auth gateway images", () => {
 		};
 		const result = await generateImage(model, { prompt: "paint" }, { apiKey: "test-key", fetch: fetchStub });
 		expect(result.images).toEqual([{ data: bytes.toBase64(), mimeType: "image/webp" }]);
+	});
+	it("rejects unsupported or invalid backgrounds before credential lookup, even without stored credentials", async () => {
+		const openai = imageModel("openai", "background-openai", "openai-images");
+		const router = imageModel("openrouter", "background-router", "openrouter-images");
+		let calls = 0;
+		const fetchStub: FetchImpl = async () => {
+			calls++;
+			return Response.json({ data: [{ b64_json: IMAGE_DATA }] });
+		};
+		await withGateway([openai, router], fetchStub, async (url, storage) => {
+			storage.keys.removeRuntime(openai.provider);
+			storage.keys.removeRuntime(router.provider);
+			const keyLookup = vi.spyOn(storage.keys, "getWithCredential");
+			const unsupported = await gatewayRequest(url, "/v1/images/generations", {
+				model: router.id,
+				prompt: "paint",
+				background: "transparent",
+			});
+			expect(unsupported.status).toBe(400);
+			const error = (await unsupported.json()) as { error: { type: string; message: string } };
+			expect(error.error.type).toBe("invalid_request_error");
+			expect(error.error.message).toMatch(/does not support.*background/i);
+			const unsupportedForm = new FormData();
+			unsupportedForm.set("model", router.id);
+			unsupportedForm.set("prompt", "paint");
+			unsupportedForm.set("background", "opaque");
+			unsupportedForm.set("image", new File(["source"], "source.png", { type: "image/png" }));
+			const unsupportedEdit = await fetch(`${url}/v1/images/edits`, {
+				method: "POST",
+				headers: { Authorization: "Bearer gateway-token" },
+				body: unsupportedForm,
+			});
+			expect(unsupportedEdit.status).toBe(400);
+			expect(await unsupportedEdit.json()).toMatchObject({
+				error: { type: "invalid_request_error", message: expect.stringMatching(/does not support.*background/i) },
+			});
+			const invalidJson = await gatewayRequest(url, "/v1/images/generations", {
+				model: openai.id,
+				prompt: "paint",
+				background: "checkerboard",
+			});
+			expect(invalidJson.status).toBe(400);
+			const form = new FormData();
+			form.set("model", openai.id);
+			form.set("prompt", "paint");
+			form.set("background", "checkerboard");
+			form.set("image", new File(["source"], "source.png", { type: "image/png" }));
+			const invalidMultipart = await fetch(`${url}/v1/images/edits`, {
+				method: "POST",
+				headers: { Authorization: "Bearer gateway-token" },
+				body: form,
+			});
+			expect(invalidMultipart.status).toBe(400);
+			expect(keyLookup).not.toHaveBeenCalled();
+			keyLookup.mockRestore();
+			expect(calls).toBe(0);
+		});
 	});
 });

@@ -23,6 +23,14 @@ provider "openai-codex" {
 	models "gpt-image-2" {
 		kind "image"
 	}
+	// residue: only this hosted deployment has verified transparent/opaque
+	// output; the same model id on the OpenAI platform and Images-compatible
+	// hosts does not establish support for background selection.
+	on-api "openai-codex-responses" {
+		models "gpt-image-2" {
+			image-background #true
+		}
+	}
 
 	// Replaces the Codex provider's handwritten flex/priority pricing fallback.
 	// Fast (priority) draws included subscription usage at 2.5x Standard on
