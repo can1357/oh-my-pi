@@ -72,7 +72,8 @@ await tab.close()
 
 <critical>
 - MUST open a tab before direct use; `browser.tab(name)` does not open one.
-- Default to `tab.observe()`; use screenshots for visual confirmation.
+- Default to `tab.observe()`; screenshots answer visual questions (layout, canvas), not state questions.
+- Exact selector/ref → act directly; exact reads (`tab.text`, `tab.value`, `waitForText`, `isVisible`) for post-action checks — an exact read that answered the question is the verification, no trailing proof screenshot. Fuzzy questions those cannot express — which of several indistinguishable candidates matches the intent, does this state read like an error — go to `judge()` (`choice`/`bool` over the observed labels or AX text; `judge_batch()` in Python, `judgeBatch()` in JS; signature in `xd://eval/judge`). Screenshots stay for visual questions.
 - `tab.run` has full Bun/Node and tool-bridge access; it is not sandboxed.
 - Relay and CDP actions operate on real user sessions.
 </critical>
