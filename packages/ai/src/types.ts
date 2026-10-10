@@ -1269,6 +1269,12 @@ export interface AssistantMessage {
 	 * requests over the same transcript replay a byte-identical prefix.
 	 */
 	requestControls?: AnthropicRequestControls;
+	/**
+	 * Reasoning effort the request carried on the wire after the model's effort
+	 * ladder clamped the selector; absent when no effort was sent. Provider-neutral
+	 * counterpart to `requestControls.effort`, which only Anthropic routes replay.
+	 */
+	effort?: Effort | "none";
 	/** Provider-specific opaque payload used to reconstruct transport-native history. */
 	providerPayload?: ProviderPayload;
 	/** In-memory fallback credit handle attached when a refusal response carries a fallback credit token. */

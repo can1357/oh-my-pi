@@ -1,5 +1,6 @@
 import { scheduler } from "node:timers/promises";
 import { type } from "@oh-my-pi/omptype";
+import type { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { calculateCost } from "@oh-my-pi/pi-catalog/models";
 import {
 	applyCodexResidencyHeader,
@@ -3241,6 +3242,9 @@ class CodexStreamProcessor {
 			this.model.provider,
 			this.runtime.finalizeNativeOutputItems(),
 		);
+		// Read the encoded body, not `runtime.requestBodyForState` — the SSE state copy drops `reasoning`.
+		const sentEffort = this.requestContext.transformedBody.reasoning?.effort;
+		if (sentEffort != null) output.effort = sentEffort as Effort | "none";
 		output.duration = performance.now() - this.startTime;
 		if (completion.firstTokenTime) {
 			output.ttft = completion.firstTokenTime - this.startTime;

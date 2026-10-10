@@ -7,6 +7,7 @@ import {
 	type ServerSentEvent,
 	structuredCloneJSON,
 } from "@oh-my-pi/pi-utils";
+import type { Effort } from "@oh-my-pi/pi-catalog/effort";
 import * as AIError from "../error";
 import { getEnvApiKey } from "../env-api-key";
 import type {
@@ -1300,6 +1301,11 @@ const streamOpenAIResponsesOnce = (
 
 			output.duration = performance.now() - startTime;
 			if (firstTokenTime) output.ttft = firstTokenTime - startTime;
+			// activeParams tracks the attempt that succeeded: the compat policy, the
+			// stable-effort plan, and any reasoning-effort fallback retry already mutated it.
+			const sentEffort =
+				activeParams.reasoning && "effort" in activeParams.reasoning ? activeParams.reasoning.effort : undefined;
+			if (sentEffort != null) output.effort = sentEffort as Effort | "none";
 			stream.push({ type: "done", reason: output.stopReason, message: output });
 			stream.end();
 		} catch (error) {
