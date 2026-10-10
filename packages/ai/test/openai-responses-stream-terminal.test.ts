@@ -11,6 +11,7 @@ import { describe, expect, test } from "bun:test";
 import type { ResponseStreamEvent } from "@oh-my-pi/pi-ai/providers/openai-responses-wire";
 import { processResponsesStream } from "@oh-my-pi/pi-ai/providers/openai-shared";
 import type { AssistantMessage, Model } from "@oh-my-pi/pi-ai/types";
+import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { validateToolArguments } from "@oh-my-pi/pi-ai/utils/validation";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 
@@ -1245,6 +1246,84 @@ describe("processResponsesStream: payloadless proxy frames", () => {
 			expect.objectContaining({ type: "toolCall", name: "patch", arguments: { input: "complete patch" } }),
 		]);
 		expect(output.stopReason).toBe("toolUse");
+	});
+
+	test.each([
+		{
+			name: "a blank done after deltas, full item",
+			deltas: ['{"path": ', '"README.md"}'],
+			done: "",
+			item: '{"path": "README.md"}',
+			expected: { path: "README.md" },
+		},
+		{
+			name: "a blank done after deltas, empty item",
+			deltas: ['{"path": ', '"README.md"}'],
+			done: "",
+			item: "",
+			expected: { path: "README.md" },
+		},
+		{
+			name: "a blank done without deltas, full item",
+			deltas: [],
+			done: "",
+			item: '{"path": "README.md"}',
+			expected: { path: "README.md" },
+		},
+		{
+			name: "a blank done after truncated deltas, full item",
+			deltas: ['{"path": "READ'],
+			done: "",
+			item: '{"path": "README.md"}',
+			expected: { path: "README.md" },
+		},
+		{
+			name: "a zero-argument done, conflicting item",
+			deltas: ["{}"],
+			done: "{}",
+			item: '{"path": "other"}',
+			expected: {},
+		},
+		{ name: "a null done, null item", deltas: ["null"], done: "null", item: "null", expected: null },
+	])("finalizes function arguments from $name", async ({ deltas, done, item: itemArguments, expected }) => {
+		const output = makeOutput();
+		const item = { type: "function_call", id: "fc_done", call_id: "call_done", name: "read" };
+		await processResponsesStream(
+			makeStream([
+				{ type: "response.output_item.added", output_index: 0, item: { ...item, arguments: "" } },
+				...deltas.map(delta => ({ type: "response.function_call_arguments.delta", output_index: 0, delta })),
+				{ type: "response.function_call_arguments.done", output_index: 0, arguments: done },
+				{ type: "response.output_item.done", output_index: 0, item: { ...item, arguments: itemArguments } },
+				{ type: "response.completed", response: { status: "completed" } },
+			]),
+			output,
+			new AssistantMessageEventStream(),
+			makeModel(),
+		);
+		expect(output.content).toEqual([
+			expect.objectContaining({ type: "toolCall", name: "read", arguments: expected }),
+		]);
+	});
+
+	test("keeps a full done payload when a late delta and an empty item follow", async () => {
+		const output = makeOutput();
+		const item = { type: "function_call", id: "fc_late", call_id: "call_late", name: "read" };
+		await processResponsesStream(
+			makeStream([
+				{ type: "response.output_item.added", output_index: 0, item: { ...item, arguments: "" } },
+				{ type: "response.function_call_arguments.delta", item_id: "fc_late", delta: '{"path": "README.md"}' },
+				{ type: "response.function_call_arguments.done", item_id: "fc_late", arguments: '{"path": "README.md"}' },
+				{ type: "response.function_call_arguments.delta", item_id: "fc_late", delta: " " },
+				{ type: "response.output_item.done", output_index: 0, item: { ...item, arguments: "" } },
+				{ type: "response.completed", response: { status: "completed" } },
+			]),
+			output,
+			new AssistantMessageEventStream(),
+			makeModel(),
+		);
+		expect(output.content).toEqual([
+			expect.objectContaining({ type: "toolCall", name: "read", arguments: { path: "README.md" } }),
+		]);
 	});
 
 	test("ignores missing raw reasoning deltas while retaining the final reasoning snapshot", async () => {

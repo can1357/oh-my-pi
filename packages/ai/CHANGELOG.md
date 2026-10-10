@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+## [18.8.8] - 2026-10-10
+
+### Fixed
+
+- Fixed OpenAI Responses and Codex tool calls running with empty `{}` arguments when a compatible host or proxy ends the call with an empty arguments payload after streaming the real ones ([#15099](https://github.com/can1357/oh-my-pi/pull/15099) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed truncated Factory Droid Gemini responses ending as a hard error or a half-received tool call instead of being retried ([#15103](https://github.com/can1357/oh-my-pi/pull/15103) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed Factory Droid Gemini ignoring an error the server reports mid-response, which hid its status and retried errors that cannot succeed ([#15103](https://github.com/can1357/oh-my-pi/pull/15103) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed resumed OpenAI Responses sessions (xAI, Factory Droid, OpenAI and other hosts) dropping all earlier encrypted reasoning on their first request; GitHub Copilot still rebuilds history until its first response ([#15148](https://github.com/can1357/oh-my-pi/pull/15148) by [@will-bogusz](https://github.com/will-bogusz))
+
 ## [18.8.7] - 2026-10-09
 
 ### Added

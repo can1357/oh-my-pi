@@ -449,6 +449,9 @@ const FRAME_READY_TIMEOUT_MS = 8_000;
 const FRAME_READY_POLL_MS = 120;
 const RELAY_JSON_TIMEOUT_MS = 3_000;
 const RELAY_VISIBILITY_TIMEOUT_MS = 1_000;
+// A tab opened outside omp reaches the relay's /json, and gets its URL, a few ms after Chrome reports it created.
+const RELAY_MATCH_SETTLE_MS = 2_000;
+const RELAY_MATCH_POLL_MS = 100;
 
 async function abortable<T>(signal: AbortSignal | undefined, operation: () => Promise<T>): Promise<T> {
 	try {
@@ -522,10 +525,14 @@ export async function waitForMainFrame(
 		}
 	}
 }
-async function fetchRelayEntries(relayJson: string, signal?: AbortSignal): Promise<RelayJsonEntry[] | null> {
+async function fetchRelayEntries(
+	relayJson: string,
+	signal?: AbortSignal,
+	timeoutMs = RELAY_JSON_TIMEOUT_MS,
+): Promise<RelayJsonEntry[] | null> {
 	try {
 		const res = await probeCdpResponse(`${relayJson.replace(/\/$/, "")}/json`, {
-			timeoutMs: RELAY_JSON_TIMEOUT_MS,
+			timeoutMs,
 			signal,
 		});
 		if (!res || res.status < 200 || res.status >= 300) return null;
@@ -537,10 +544,14 @@ async function fetchRelayEntries(relayJson: string, signal?: AbortSignal): Promi
 	}
 }
 
+function relayEntryMatches(entry: RelayJsonEntry, needle: string): boolean {
+	return entry.url.toLowerCase().includes(needle) || entry.title.toLowerCase().includes(needle);
+}
+
 function selectRelayEntry(entries: RelayJsonEntry[], options: PickTargetOptions): RelayJsonEntry | null {
 	const needle = options.matcher?.toLowerCase();
 	if (needle) {
-		const hits = entries.filter(e => e.url.toLowerCase().includes(needle) || e.title.toLowerCase().includes(needle));
+		const hits = entries.filter(e => relayEntryMatches(e, needle));
 		const live = hits.filter(e => e.discarded !== "true");
 		if (live.length > 0) return live[0]!;
 		if (hits.length > 0) {
@@ -549,7 +560,9 @@ function selectRelayEntry(entries: RelayJsonEntry[], options: PickTargetOptions)
 			);
 		}
 		const summary = entries.map(e => `- ${e.title || "(untitled)"}  ${e.url}`).join("\n");
-		throw new ToolError(`No page target matched ${JSON.stringify(options.matcher)}. Available pages:\n${summary}`);
+		throw new ToolError(
+			`No page target matched ${JSON.stringify(options.matcher)} after waiting ${RELAY_MATCH_SETTLE_MS / 1000}s for a newly opened tab. Pass a target from these URLs or titles, or omit it to use the active tab. Available pages:\n${summary}`,
+		);
 	}
 	const usable = entries.filter(
 		e =>
@@ -562,7 +575,25 @@ function selectRelayEntry(entries: RelayJsonEntry[], options: PickTargetOptions)
 export async function pickElectronTarget(browser: Browser, options: PickTargetOptions = {}): Promise<Page> {
 	throwIfAborted(options.signal);
 	if (options.relayJson) {
-		const entries = await fetchRelayEntries(options.relayJson, options.signal);
+		let entries = await fetchRelayEntries(options.relayJson, options.signal);
+		const needle = options.matcher?.toLowerCase();
+		const settleDeadline = Date.now() + RELAY_MATCH_SETTLE_MS;
+		// Without page metadata, target enumeration below decides at once, as before.
+		while (
+			needle &&
+			entries?.some(e => e.type === "page") &&
+			!entries.some(e => e.type === "page" && relayEntryMatches(e, needle)) &&
+			Date.now() < settleDeadline
+		) {
+			await abortable(options.signal, () => Bun.sleep(Math.min(RELAY_MATCH_POLL_MS, settleDeadline - Date.now())));
+			const polled = await fetchRelayEntries(
+				options.relayJson,
+				options.signal,
+				Math.max(1, settleDeadline - Date.now()),
+			);
+			throwIfAborted(options.signal);
+			entries = polled ?? entries;
+		}
 		if (entries) {
 			const pageEntries = entries.filter(e => e.type === "page");
 			const selected = pageEntries.length > 0 ? selectRelayEntry(pageEntries, options) : null;
@@ -603,9 +634,26 @@ export async function pickElectronTarget(browser: Browser, options: PickTargetOp
 				}
 			}
 			if (selected) {
-				const target = targets.find(t => (t as Target & { _targetId?: string })._targetId === selected.id);
-				if (!target) throw new ToolError("Selected tab is no longer available");
-				const page = await attachPageWithTimeout(target, PAGE_ATTACH_TIMEOUT_MS, options.signal);
+				const isSelected = (t: Target) => (t as Target & { _targetId?: string })._targetId === selected.id;
+				const attachDeadline = Date.now() + PAGE_ATTACH_TIMEOUT_MS;
+				let target = targets.find(isSelected);
+				if (!target) {
+					// Puppeteer learns of a tab from the relay's targetCreated event, which can trail /json.
+					try {
+						target = await abortable(options.signal, () =>
+							browser.waitForTarget(isSelected, { timeout: PAGE_ATTACH_TIMEOUT_MS, signal: options.signal }),
+						);
+					} catch (error) {
+						throwIfAborted(options.signal);
+						if (error instanceof Error && error.name === "TimeoutError") {
+							throw new ToolError(
+								"Selected tab did not become available before omp could attach; retry, or reopen it if it closed",
+							);
+						}
+						throw error;
+					}
+				}
+				const page = await attachPageWithTimeout(target, attachDeadline - Date.now(), options.signal);
 				if (!page || !(await waitForMainFrame(page, FRAME_READY_TIMEOUT_MS, options.signal)))
 					throw new ToolError("Selected tab is not ready; retry after it loads");
 				return page;

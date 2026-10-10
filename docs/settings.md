@@ -784,7 +784,7 @@ memory:
 | `autolearn.autoContinue`      | boolean | `false`       | After an eligible primary stop, run a private capture turn (uses extra tokens). Off keeps only standing guidance; no hidden reminder is inserted into the next turn. Aborted, plan-mode, and goal-loop turns are skipped.                                                                                                           |
 | `autolearn.minToolCalls`      | number  | `5`           | Minimum completed tool calls in a primary turn before automatic capture is eligible.                                                                                                                                                                               |
 
-A positive `compaction.thresholdTokens` wins over `thresholdPercent` and is clamped below the context window. Otherwise, a positive percentage is clamped to 1–99%; non-positive percentages use the reserve-based threshold.
+A positive `compaction.thresholdTokens` wins over `thresholdPercent`. A fixed trigger (this or an `f` model entry) at or past the model's context window, for example where a provider caps the window lower, compacts at the window less the reserve, like the reserve-based default; the `/models` preview marks it `capped by window`. Otherwise, a positive percentage is clamped to 1–99%; non-positive percentages use the reserve-based threshold.
 
 `compaction` has additional tuning keys (idle compaction, supersede/drop heuristics) visible in `omp config list`. See [Compaction](./compaction.md) for the full strategy reference.
 
