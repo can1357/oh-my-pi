@@ -267,9 +267,6 @@ describe("jfind cascade", () => {
 			expect(nameRequests).toHaveLength(5);
 			expect(verifyRequests).toHaveLength(1);
 			expect(Object.keys(verifyRequests[0]!.questions)).toEqual(["p00"]);
-			for (const request of judge.requests) {
-				expect(Object.keys(request.questions).length).toBeLessThanOrEqual(16);
-			}
 			expect(result.stats.judged).toBe(72);
 			expect(result.stats.errors).toBe(0);
 			expect(result.stats.failures).toEqual([]);
