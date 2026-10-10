@@ -102,6 +102,8 @@ interface GrepPathSpec {
 	original: string;
 	clean: string;
 	literalFilesystemMatch?: boolean;
+	/** Entry is an external URL whose selector is still attached in `clean`. */
+	externalUrlWithSelector?: boolean;
 	ranges?: [LineRange, ...LineRange[]];
 }
 
@@ -130,6 +132,20 @@ function isReadSelectorGrammar(sel: string): boolean {
 	}
 	const lower = sel.toLowerCase();
 	return lower === "raw" || lower === "conflicts" || parseLineRanges(sel) !== null;
+}
+
+/**
+ * True when the trailing `:chunk` of a URL path is `conflicts`.
+ *
+ * `parseReadUrlTarget` never produces a `conflicts` selector — its tokenizer
+ * accepts only raw, tail, and line-range tokens — so `:conflicts` is never
+ * peeled off a URL. It survives glued to the path in both the bare
+ * (`…/data.json:conflicts`) and compound (`…/data.json:conflicts:raw`) forms,
+ * where the fetch would request it as a literal URL segment.
+ */
+function hasConflictsChunk(value: string): boolean {
+	const colon = value.lastIndexOf(":");
+	return colon > 0 && value.slice(colon + 1).toLowerCase() === "conflicts";
 }
 
 async function parsePathSpecs(rawEntries: readonly string[], cwd: string): Promise<GrepPathSpec[]> {
@@ -165,24 +181,91 @@ async function parsePathSpecs(rawEntries: readonly string[], cwd: string): Promi
 		const split = await splitPathAndSelPreferringLiteral(entry, cwd);
 		const literalFilesystemMatch = strictSplit.sel !== undefined && split.sel === undefined;
 		let clean = literalFilesystemMatch ? resolveReadPath(entry, cwd) : entry;
+		// Set when a URL selector survives into `clean`, so archive resolution can
+		// skip the entry: the retained chunk would otherwise read as an
+		// `archive:member` tail.
+		let externalUrlWithSelector = false;
 		let ranges: [LineRange, ...LineRange[]] | undefined;
 		if (!literalFilesystemMatch && split.sel) {
-			const parsed = parseLineRanges(split.sel);
-			if (!parsed) {
-				throw new ToolError(
-					`path entry "${entry}" — only line-range selectors like ":50-100" are supported (no ":raw"/":conflicts")`,
-				);
+			// An external URL is fetched whole and materialized before the search
+			// runs, so its display selectors mean what they mean for `read`: `:raw`
+			// keeps the response out of the markdown conversion, `:N-M` filters
+			// matches. A local path has neither affordance — the bytes are already
+			// on disk and a verbatim read of them is the same read — so it stays
+			// line-ranges-only.
+			//
+			// `externalTarget.sel` is the authority rather than reconciling two
+			// parsers: it comes from `parseReadUrlTarget`, the same function
+			// `materializeExternalUrlForSearch` re-parses `clean` with below, so the
+			// selector grep validates is by construction the selector the fetch
+			// honours. `clean` therefore stays the untouched entry — selector still
+			// attached — instead of being rebuilt from the split halves, which is
+			// what previously needed a reparse guard to prove the two agreed.
+			const externalTarget = parseReadUrlTarget(entry);
+			if (externalTarget !== null) {
+				// `:conflicts` is a git index display mode: it renders the merge stages
+				// of one path. An HTTP response has no index stages, so there is
+				// nothing for it to select. `read` resolves the compound form by
+				// requesting `…/data.json:conflicts` verbatim; grep deliberately
+				// diverges and refuses, because a selector the caller meant as a
+				// display mode would otherwise silently search a resource other than
+				// the one named. `%3A` stays the escape hatch for a literal colon.
+				if (hasConflictsChunk(externalTarget.path)) {
+					throw new ToolError(
+						`path entry "${entry}" — ":conflicts" has no meaning for a URL: it is a git index display mode, and a fetched response has no index stages. Drop ":conflicts", percent-encode a literal ":" as %3A, or read the URL and inspect the output.`,
+					);
+				}
+				// `split.sel` says a selector was written, but `parseReadUrlTarget`
+				// extracts none: the chunk is not a selector at all, it is a literal
+				// tail of the URL (`:abc`, `:1-1:1-2`). Since `clean` keeps the entry
+				// verbatim, that tail would be requested as part of the URL, so it
+				// has to be refused rather than searched. This is the property the
+				// old reparse guard checked, stated directly on the parse result.
+				if (externalTarget.sel.kind === "none") {
+					throw new ToolError(
+						`path entry "${entry}" — selector ":${split.sel}" is not a URL selector and would be requested as part of the URL. Use ":N-M" line ranges, ":raw", or a range plus ":raw"; percent-encode a literal ":" as %3A`,
+					);
+				}
+				// A tail selector (`:-10`) is resolved against the fetched line count,
+				// which does not exist yet, and search filters matches by absolute
+				// line number. Accepting it would silently widen to the whole
+				// response instead of the last N lines.
+				if (externalTarget.sel.kind === "tail") {
+					throw new ToolError(
+						`path entry "${entry}" — a tail selector (":-${externalTarget.sel.count}") needs the fetched line count, which search cannot resolve before the request. Use an absolute range like ":50-100".`,
+					);
+				}
+				ranges = externalTarget.sel.kind === "lines" ? externalTarget.sel.ranges : undefined;
+				clean = entry;
+				externalUrlWithSelector = true;
+			} else {
+				const parsed = parseLineRanges(split.sel);
+				if (!parsed) {
+					throw new ToolError(
+						`path entry "${entry}" — only line-range selectors like ":50-100" are supported (no ":raw"/":conflicts")`,
+					);
+				}
+				clean = split.path;
+				ranges = parsed;
 			}
-			if (hasGlobPathChars(split.path) && (await probeLiteralPathExists(split.path, cwd)) === "missing") {
+			// Local paths only: `?` and `*` are glob chars, so a URL carrying a
+			// query string (`…/data.json?v=2:1-5`) would otherwise be reported as
+			// a glob. A remote URL is never a local glob — the same reason archive
+			// resolution skips these entries.
+			if (
+				ranges &&
+				!externalUrlWithSelector &&
+				hasGlobPathChars(split.path) &&
+				(await probeLiteralPathExists(split.path, cwd)) === "missing"
+			) {
 				throw new ToolError(`Line-range selector requires a single file, not a glob: ${entry}`);
 			}
-			clean = split.path;
-			ranges = parsed;
 		}
 		specs.push({
 			original: entry,
 			clean,
 			literalFilesystemMatch,
+			externalUrlWithSelector,
 			ranges,
 		});
 	}
@@ -233,6 +316,10 @@ async function resolveArchiveSearchPaths(
 	for (let idx = 0; idx < pathSpecs.length; idx++) {
 		const spec = pathSpecs[idx];
 		if (!spec || spec.literalFilesystemMatch) continue;
+		// An external URL keeps its selector in `clean`, and a URL ending in an
+		// archive extension (`…/bundle.zip:raw`) would otherwise read as an
+		// `archive:member` reference. A remote URL is never a local archive.
+		if (spec.externalUrlWithSelector) continue;
 		const entry = spec.clean;
 		const candidates = parseArchivePathCandidates(entry);
 		const member = candidates.find(c => c.subPath !== "" && c.archivePath !== entry);
@@ -493,7 +580,16 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 			}
 			const scopedPaths = toPathList(rawPath);
 			const effectivePaths = scopedPaths.length > 0 ? scopedPaths : ["."];
-			const rawEntries = await expandDelimitedPathEntries(effectivePaths, this.session.cwd);
+			// Internal URLs resolve through the router, and a delimited list of them
+			// (`artifact://1;artifact://2`) reaches `splitDelimitedPathEntry` as one
+			// entry that it declines to split — the isInternalUrlPath guard below
+			// the predicate short-circuits first. `read` passes the same predicate
+			// for the same reason; without it a semicolon-joined artifact scope
+			// searched as one URI and silently missed the rest.
+			const internalRouter = InternalUrlRouter.instance();
+			const rawEntries = await expandDelimitedPathEntries(effectivePaths, this.session.cwd, {
+				routedUrlPredicate: entry => internalRouter.canResolve(entry),
+			});
 			const pathSpecs = await parsePathSpecs(rawEntries, this.session.cwd);
 			const resolveContext = sessionResolveContext(this.session, { signal });
 			// Internal URLs resolve inside the native search, bounded by the tier this call was approved at.
