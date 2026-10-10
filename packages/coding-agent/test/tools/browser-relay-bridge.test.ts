@@ -3784,6 +3784,82 @@ describe("RelayBridge tab grouping", () => {
 		expect(cdp.messages.filter(message => message.id === removeId && "result" in message)).toHaveLength(1);
 	});
 
+	it("reuses preserved preload registrations when a reconnect keeps the debugger root", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })], { attachedTabIds: [1] });
+		const cdp = new FakeCdpSocket();
+		const connId = bridge.cdpConnected(cdp);
+		const pageSession = await attachPage(bridge, ext, cdp, connId, 1);
+
+		bridge.cdpMessage(connId, JSON.stringify({ id: ++msgSeq, sessionId: pageSession, method: "Runtime.enable" }));
+		await waitFor(() => ext.pending("send").some(rpc => rpc.method === "Runtime.disable"));
+		ack(bridge, ext, "send");
+		await waitFor(() => ext.pending("send").some(rpc => rpc.method === "Runtime.enable"));
+		ack(bridge, ext, "send");
+		await flush();
+
+		const addId = ++msgSeq;
+		bridge.cdpMessage(
+			connId,
+			JSON.stringify({
+				id: addId,
+				sessionId: pageSession,
+				method: "Page.addScriptToEvaluateOnNewDocument",
+				params: { source: "window.__relayInjected = true;" },
+			}),
+		);
+		await waitFor(() => ext.pending("send").some(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument"));
+		ack(bridge, ext, "send", { identifier: "surviving-root-script" });
+		await flush();
+		const addReply = cdp.messages.find(message => message.id === addId);
+		const clientIdentifier =
+			addReply &&
+			"result" in addReply &&
+			addReply.result &&
+			typeof addReply.result === "object" &&
+			"identifier" in addReply.result &&
+			typeof addReply.result.identifier === "string"
+				? addReply.result.identifier
+				: undefined;
+		expect(clientIdentifier).toBeDefined();
+
+		bridge.extClosed(ext);
+		const reconnected = new FakeExtSocket();
+		connect(bridge, reconnected, [tab({ tabId: 1, groupId: -1 })], {
+			attachedTabIds: [1],
+			recoverableTabIds: [1],
+		});
+		await waitFor(() => reconnected.pending("send").some(rpc => rpc.method === "Runtime.disable"));
+		ack(bridge, reconnected, "send");
+		await waitFor(() => reconnected.pending("send").some(rpc => rpc.method === "Runtime.enable"));
+		ack(bridge, reconnected, "send");
+		await flush();
+
+		expect(
+			reconnected.rpcs("send").filter(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument"),
+		).toHaveLength(0);
+
+		const removeId = ++msgSeq;
+		bridge.cdpMessage(
+			connId,
+			JSON.stringify({
+				id: removeId,
+				sessionId: pageSession,
+				method: "Page.removeScriptToEvaluateOnNewDocument",
+				params: { identifier: clientIdentifier },
+			}),
+		);
+		await waitFor(() =>
+			reconnected.pending("send").some(rpc => rpc.method === "Page.removeScriptToEvaluateOnNewDocument"),
+		);
+		const remove = reconnected.pending("send").find(rpc => rpc.method === "Page.removeScriptToEvaluateOnNewDocument");
+		expect(remove?.params).toEqual({ identifier: "surviving-root-script" });
+		ack(bridge, reconnected, "send");
+		await flush();
+		expect(cdp.messages.filter(message => message.id === removeId && "result" in message)).toHaveLength(1);
+	});
+
 	it.each([
 		{
 			name: "after a hashbang",

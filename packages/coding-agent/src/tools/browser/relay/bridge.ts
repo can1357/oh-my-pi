@@ -3646,6 +3646,7 @@ export class RelayBridge {
 						tab,
 						keepPageSessions,
 						ext,
+						refreshedRoot,
 						refreshedRoot &&
 							(tab.contextGeneration !== contextGenerationBeforeRecovery ||
 								tab.mainFrameNavigationGeneration !== navigationGenerationBeforeRecovery ||
@@ -3796,6 +3797,7 @@ export class RelayBridge {
 		tab: TabState,
 		conns: CdpConnection[],
 		expectedExt: RelaySocket | null,
+		replayPreloads: boolean,
 		runImmediatePreloads: boolean,
 		recoveryLoaderId?: string,
 		recoveryFrameLoaderIds?: Record<string, string>,
@@ -3871,6 +3873,17 @@ export class RelayBridge {
 			this.#assertExtensionCurrent(expectedExt);
 		}
 		await this.#cleanupReplayedPreservedSubscriptions(tab, conns, expectedExt, replayed);
+		// A reconnect can report that Chrome's debugger root survived the extension
+		// transport. Runtime bookkeeping and other root-domain state still need to be
+		// restored, but the preload registrations remain installed on that same root.
+		// Re-adding them would execute every preserved script twice on later documents
+		// and replace the only identifiers that can remove the original registrations.
+		if (!replayPreloads) {
+			for (const scripts of tab.preloadScripts.values()) {
+				for (const script of scripts.values()) script.rootGeneration = tab.runtimeGeneration;
+			}
+			return;
+		}
 		const preloadScripts = [...tab.preloadScripts.values()]
 			.flatMap(scripts => [...scripts.values()])
 			.filter(script => conns.some(conn => this.#sessionOwnsTab(conn, tab.tabKey, script.ownerSessionId)))
