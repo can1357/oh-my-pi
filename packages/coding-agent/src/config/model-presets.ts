@@ -64,15 +64,29 @@ export function getModelPreset(settings: Settings, name: string): PresetLookup {
 	return typeof parsed === "string" ? { kind: "invalid", reason: parsed } : { kind: "found", preset: parsed };
 }
 
-/** Saved preset names, sorted; names a `--config`/runtime `null` tombstone hides are left out. */
+/**
+ * Saved preset names in config order: higher layers' presets first, then the global config's, each
+ * in file order. Names a `--config`/runtime `null` tombstone hides are left out.
+ */
 export function getModelPresetNames(settings: Settings): string[] {
-	return Object.keys(cfgModelPresets.get(settings))
-		.filter(name => settings.getOwnedModelPreset(name) !== undefined)
-		.sort((a, b) => a.localeCompare(b));
+	const names: string[] = [];
+	for (const name of Object.keys(cfgModelPresets.get(settings))) {
+		const source = settings.getOwnedModelPreset(name)?.source;
+		if (source !== undefined && source !== "global") names.push(name);
+	}
+	// Read global presets from the global layer: a project `null` falls through to the global preset
+	// but would otherwise take the project entry's position in the merged record.
+	const global = settings.getGlobalSettings().modelPresets;
+	if (isRecord(global)) {
+		for (const name of Object.keys(global)) {
+			if (settings.getOwnedModelPreset(name)?.source === "global") names.push(name);
+		}
+	}
+	return names;
 }
 
 /**
- * First saved preset (by name) the current setup matches: identical effective
+ * First saved preset (in config order) the current setup matches: identical effective
  * role assignments and, when the preset records one, the same default thinking
  * level. Undefined when the roles were edited past every preset.
  */
