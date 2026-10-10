@@ -370,6 +370,16 @@ fn activation_activity() -> [u32; 5] {
 	})
 }
 
+/// Hardware mouse presses (left, right, other): a click is how a user picks a
+/// window, while typing in their own window is not. Events posted to a pid do
+/// not advance these counters.
+fn pointer_presses() -> [u32; 3] {
+	[1, 3, 25].map(|event_type| {
+		// SAFETY: as in `activation_activity`; a read-only counter query.
+		unsafe { CGEventSourceCounterForEventType(1, event_type) }
+	})
+}
+
 #[derive(Debug, PartialEq, Eq)]
 enum FocusDecision {
 	Observe,
@@ -566,6 +576,7 @@ pub(super) fn with_focus_without_raise<T>(
 	action: impl FnOnce() -> CoreResult<T>,
 ) -> CoreResult<T> {
 	control::check()?;
+	let presses = pointer_presses();
 	let spi = required()?;
 	let previous = front_process(spi.get_front).ok_or_else(|| {
 		DesktopError::background_unavailable(format!(
@@ -601,7 +612,7 @@ pub(super) fn with_focus_without_raise<T>(
 				 takeover:true or use ax actions",
 			))),
 			control::cleanup(|| {
-				restore_focus_after_without_raise(spi, previous, previous_key, target, wid)
+				restore_focus_after_without_raise(spi, previous, previous_key, target, wid, presses)
 			}),
 		);
 	}
@@ -611,7 +622,7 @@ pub(super) fn with_focus_without_raise<T>(
 	after_cleanup(
 		result,
 		control::cleanup(|| {
-			restore_focus_after_without_raise(spi, previous, previous_key, target, wid)
+			restore_focus_after_without_raise(spi, previous, previous_key, target, wid, presses)
 		}),
 	)
 }
@@ -621,15 +632,15 @@ pub(super) fn with_focus_without_raise<T>(
 /// activated itself in response to the input (a link opening in a browser) is
 /// first sent back behind the previous front process, without raising either;
 /// a third application that took focus meanwhile is left alone, and so is a
-/// key window the user picked in the previous front process. Typing in that
-/// window is not a focus choice and does not stop the hand-back: background
-/// input watches no keys, so the user's own keys stay theirs.
+/// key window the user picked in the previous front process (see
+/// [`hands_back`]).
 fn restore_focus_after_without_raise(
 	spi: &RequiredSpi,
 	previous: FrontProcess,
 	previous_key: u32,
 	target: ProcessSerialNumber,
 	wid: u32,
+	presses: [u32; 3],
 ) -> CoreResult<()> {
 	let front = front_process(spi.get_front).ok_or_else(|| {
 		DesktopError::input_failed("cannot establish current focus for background restoration")
@@ -639,11 +650,8 @@ fn restore_focus_after_without_raise(
 	if front.psn != previous.psn {
 		return Ok(());
 	}
-	if previous
-		.pid
-		.and_then(ax::key_window_id)
-		.is_some_and(|key| key != previous_key && !(previous.psn == target && key == wid))
-	{
+	let key = previous.pid.and_then(ax::key_window_id);
+	if !hands_back(previous.psn == target, key, previous_key, wid, pointer_presses() != presses) {
 		return Ok(());
 	}
 	if !front_process(spi.get_front).is_some_and(|front| front.psn == previous.psn) {
@@ -656,6 +664,26 @@ fn restore_focus_after_without_raise(
 		return Err(DesktopError::input_failed("background focus restoration records were rejected"));
 	}
 	Ok(())
+}
+
+/// Whether focus goes back to `previous_key`, given the previous front
+/// process's key window now. Another window there was the user's choice. The
+/// target itself is still key after the focus record within one process, so
+/// there only a hardware click marks it as the user's choice. Typing in their
+/// own window never stops the hand-back: background input watches no keys.
+const fn hands_back(
+	same_process: bool,
+	key: Option<u32>,
+	previous_key: u32,
+	wid: u32,
+	clicked: bool,
+) -> bool {
+	match key {
+		Some(key) if key == previous_key => true,
+		Some(key) if same_process && key == wid => !clicked,
+		Some(_) => false,
+		None => true,
+	}
 }
 
 /// Makes `wid` the frontmost key window, runs `action`, then restores the
@@ -961,5 +989,20 @@ mod tests {
 		assert!(!preserves_exact_existing_focus(Some(target), target, Some(41), 42));
 		assert!(!preserves_exact_existing_focus(Some(target), target, None, 42));
 		assert!(!preserves_exact_existing_focus(None, target, Some(42), 42));
+	}
+
+	#[test]
+	fn focus_hand_back_yields_only_to_a_window_the_user_picked() {
+		let (user, target) = (7, 42);
+		// Typing in their own app moves no window: focus goes back to it.
+		assert!(hands_back(false, Some(user), user, target, false));
+		assert!(hands_back(true, Some(user), user, target, true), "a click in their own window");
+		assert!(hands_back(true, None, user, target, false));
+		// A sibling target still key after the focus record is ours to hand back,
+		// unless the user clicked it.
+		assert!(hands_back(true, Some(target), user, target, false));
+		assert!(!hands_back(true, Some(target), user, target, true));
+		assert!(!hands_back(true, Some(9), user, target, false), "another window the user picked");
+		assert!(!hands_back(false, Some(9), user, target, false));
 	}
 }

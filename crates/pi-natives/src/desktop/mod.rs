@@ -301,23 +301,33 @@ impl Request {
 		)
 	}
 
-	/// Whether this mutation is delivered as takeover (foreground) input, which
-	/// arms the physical-Escape stop. Requests without a `takeover` option
-	/// follow held control like the input requests do.
+	/// Whether this mutation takes over the user's own input or foreground,
+	/// which arms the physical-Escape stop: takeover delivery (explicit or
+	/// through held control), input to a desktop or display target (it drives
+	/// the user's real pointer and keyboard), an explicit raise, and an
+	/// activating launch.
 	fn takes_over(&self, token: &OperationToken) -> bool {
-		let takeover = match self {
-			Self::HoldKeys { takeover, .. }
-			| Self::HoldMouse { takeover, .. }
-			| Self::MoveMouse { takeover, .. }
-			| Self::Scroll { takeover, .. }
-			| Self::TypeText { takeover, .. }
-			| Self::KeyChord { takeover, .. } => *takeover,
-			Self::Click { options, .. }
-			| Self::Drag { options, .. }
-			| Self::AxClick { options, .. } => options.takeover,
-			_ => None,
+		let (target, takeover) = match self {
+			Self::HoldKeys { target, takeover, .. }
+			| Self::HoldMouse { target, takeover, .. }
+			| Self::MoveMouse { target, takeover, .. }
+			| Self::Scroll { target, takeover, .. }
+			| Self::TypeText { target, takeover, .. }
+			| Self::KeyChord { target, takeover, .. } => (Some(target), *takeover),
+			Self::Click { target, options, .. } | Self::Drag { target, options, .. } => {
+				(Some(target), options.takeover)
+			},
+			Self::AxClick { options, .. } => (None, options.takeover),
+			Self::RaiseWindow { .. } => return true,
+			Self::OpenApplication { options, .. } => return options.activate.unwrap_or(false),
+			Self::AxPerform { action, .. } => {
+				let action = action.trim();
+				return action.eq_ignore_ascii_case("raise") || action.eq_ignore_ascii_case("AXRaise");
+			},
+			_ => return false,
 		};
-		delivery_mode(takeover, token) == DeliveryMode::Foreground
+		target.is_some_and(|target| !matches!(target, Target::Window(_)))
+			|| delivery_mode(takeover, token) == DeliveryMode::Foreground
 	}
 
 	const fn frame_target(&self) -> Option<&Target> {
@@ -2457,22 +2467,23 @@ mod capture_tests {
 	#[test]
 	fn only_takeover_requests_arm_the_physical_escape_stop() {
 		let token = CancellationSource::default().token();
+		let window = Target::Window("42".to_string());
 		let reply = || flume::unbounded().0;
-		let typing = |takeover| Request::TypeText {
-			target: Target::Desktop,
+		let typing = |target: &Target, takeover| Request::TypeText {
+			target: target.clone(),
 			text: "abc".to_string(),
 			takeover,
 			reply: reply(),
 		};
-		let holding = |takeover| Request::HoldKeys {
-			target: Target::Desktop,
+		let holding = |target: &Target, takeover| Request::HoldKeys {
+			target: target.clone(),
 			keys: parse_keys(&["shift".to_string()]).unwrap(),
 			duration: Duration::ZERO,
 			takeover,
 			reply: reply(),
 		};
-		let clicking = |takeover| Request::Click {
-			target:  Target::Desktop,
+		let clicking = |target: &Target, takeover| Request::Click {
+			target:  target.clone(),
 			x:       0.0,
 			y:       0.0,
 			options: ParsedPointerOptions::parse(Some(PointerOptions {
@@ -2482,18 +2493,45 @@ mod capture_tests {
 			.unwrap(),
 			reply:   reply(),
 		};
-		for request in [typing(None), typing(Some(false)), holding(None), clicking(Some(false))] {
-			assert!(!request.takes_over(&token), "background input leaves Escape to the user");
-		}
-		for request in [typing(Some(true)), holding(Some(true)), clicking(Some(true))] {
-			assert!(request.takes_over(&token), "takeover input keeps the Escape stop");
-		}
-		let semantic = Request::AxPerform {
+		let perform = |action: &str| Request::AxPerform {
 			reference: "e1".to_string(),
-			action:    "AXPress".to_string(),
+			action:    action.to_string(),
 			reply:     reply(),
 		};
-		assert!(!semantic.takes_over(&token));
+		let open = |activate| Request::OpenApplication {
+			id:      "com.apple.TextEdit".to_string(),
+			options: ApplicationOpenOptions { activate },
+			reply:   reply(),
+		};
+		let background = [
+			typing(&window, None),
+			typing(&window, Some(false)),
+			holding(&window, None),
+			clicking(&window, Some(false)),
+			perform("AXPress"),
+			perform("showMenu"),
+			open(None),
+			open(Some(false)),
+		];
+		for request in background {
+			assert!(!request.takes_over(&token), "background input leaves Escape to the user");
+		}
+		let display = Target::parse("display:screen-1");
+		let takeover = [
+			typing(&window, Some(true)),
+			holding(&window, Some(true)),
+			clicking(&window, Some(true)),
+			typing(&Target::Desktop, None),
+			holding(&Target::Desktop, Some(false)),
+			clicking(&display, None),
+			Request::RaiseWindow { id: "42".to_string(), reply: reply() },
+			perform("raise"),
+			perform("AXRaise"),
+			open(Some(true)),
+		];
+		for request in takeover {
+			assert!(request.takes_over(&token), "takeover input keeps the Escape stop");
+		}
 	}
 
 	#[test]

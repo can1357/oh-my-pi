@@ -4,7 +4,7 @@
 
 ### Changed
 
-- Computer use's physical Escape stop now watches the keyboard only during takeover input (`takeover: true` or held control); an Escape the user presses in their own app no longer cancels background input, which the host interrupt still stops (by [@will-bogusz](https://github.com/will-bogusz))
+- Computer use's physical Escape stop now watches the keyboard only during takeover input (`takeover: true`, held control, desktop-level input, raises); an Escape the user presses in their own app no longer cancels background window input, which the host interrupt still stops (by [@will-bogusz](https://github.com/will-bogusz))
 
 ### Fixed
 
