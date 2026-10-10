@@ -1,8 +1,5 @@
 use std::{
-	ffi::{CStr, c_void},
-	mem,
-	os::raw::{c_char, c_int, c_uint},
-	ptr,
+	ffi::c_void,
 	sync::{
 		LazyLock,
 		atomic::{AtomicBool, Ordering},
@@ -21,6 +18,9 @@ use super::{
 		error::{CoreResult, DesktopError},
 	},
 	ax,
+	release::Route,
+	release_guard,
+	route::{self, Routes, symbol},
 };
 
 const EVENT_RECORD_LENGTH: usize = 248;
@@ -53,8 +53,6 @@ struct ProcessSerialNumber {
 	low:  u32,
 }
 
-type SLEventPostToPidFn = unsafe extern "C" fn(pid_t, *mut c_void);
-type SLEventSetIntegerValueFieldFn = unsafe extern "C" fn(*mut c_void, u32, i64);
 type SLPSPostEventRecordToFn = unsafe extern "C" fn(*const ProcessSerialNumber, *const u8) -> i32;
 type SLPSGetFrontProcessFn = unsafe extern "C" fn(*mut ProcessSerialNumber) -> i32;
 type CGSMainConnectionIDFn = unsafe extern "C" fn() -> u32;
@@ -65,12 +63,6 @@ type GetProcessPIDFn = unsafe extern "C" fn(*const ProcessSerialNumber, *mut pid
 type CGEventSetWindowLocationFn = unsafe extern "C" fn(*mut c_void, CGPoint);
 type SLPSSetFrontProcessWithOptionsFn =
 	unsafe extern "C" fn(*const ProcessSerialNumber, u32, u32) -> i32;
-type SLEventSetAuthenticationMessageFn = unsafe extern "C" fn(*mut c_void, *mut c_void);
-type ObjcGetClassFn = unsafe extern "C" fn(*const c_char) -> *mut c_void;
-type SelRegisterNameFn = unsafe extern "C" fn(*const c_char) -> *mut c_void;
-type ClassRespondsToSelectorFn = unsafe extern "C" fn(*mut c_void, *mut c_void) -> bool;
-type AuthenticationFactoryFn =
-	unsafe extern "C" fn(*mut c_void, *mut c_void, *mut c_void, c_int, c_uint) -> *mut c_void;
 
 #[derive(Clone, Copy)]
 struct PsnLookup {
@@ -91,12 +83,7 @@ impl PsnLookup {
 
 #[derive(Clone, Copy)]
 struct RequiredSpi {
-	post_to_pid:         SLEventPostToPidFn,
-	/// `CGEventPostToPid` when it is a separate implementation; `None` where
-	/// it re-exports `SLEventPostToPid` (as on macOS 26), since posting
-	/// through both would then deliver every event twice.
-	public_post_to_pid:  Option<SLEventPostToPidFn>,
-	set_integer:         SLEventSetIntegerValueFieldFn,
+	routes:              &'static Routes,
 	set_window_location: CGEventSetWindowLocationFn,
 	main_connection:     CGSMainConnectionIDFn,
 }
@@ -109,15 +96,6 @@ struct ForegroundSpi {
 	psn:         PsnLookup,
 }
 
-#[derive(Clone, Copy)]
-struct AuthenticationSpi {
-	set_message:       SLEventSetAuthenticationMessageFn,
-	objc_get_class:    ObjcGetClassFn,
-	sel_register_name: SelRegisterNameFn,
-	class_responds:    ClassRespondsToSelectorFn,
-	factory:           AuthenticationFactoryFn,
-}
-
 /// The front process as `WindowServer` reports it. Unlike
 /// `NSWorkspace.frontmostApplication`, this does not depend on an `AppKit`
 /// run loop in this process observing activation changes.
@@ -128,7 +106,6 @@ struct FrontProcess {
 }
 
 static REQUIRED: LazyLock<Option<RequiredSpi>> = LazyLock::new(resolve_required);
-static AUTHENTICATION: LazyLock<Option<AuthenticationSpi>> = LazyLock::new(resolve_authentication);
 static FOREGROUND: LazyLock<Option<ForegroundSpi>> = LazyLock::new(resolve_foreground);
 static PROCESS_PID: LazyLock<Option<GetProcessPIDFn>> = LazyLock::new(|| symbol(c"GetProcessPID"));
 
@@ -150,20 +127,15 @@ fn required() -> CoreResult<&'static RequiredSpi> {
 }
 
 fn resolve_required() -> Option<RequiredSpi> {
-	ensure_skylight_loaded()?;
-	let post_to_pid: SLEventPostToPidFn = symbol(c"SLEventPostToPid")?;
 	Some(RequiredSpi {
-		post_to_pid,
-		public_post_to_pid: symbol::<SLEventPostToPidFn>(c"CGEventPostToPid")
-			.filter(|public| *public as usize != post_to_pid as usize),
-		set_integer: symbol(c"SLEventSetIntegerValueField")?,
+		routes:              route::routes()?,
 		set_window_location: symbol(c"CGEventSetWindowLocation")?,
-		main_connection: symbol(c"CGSMainConnectionID")?,
+		main_connection:     symbol(c"CGSMainConnectionID")?,
 	})
 }
 
 fn resolve_foreground() -> Option<ForegroundSpi> {
-	ensure_skylight_loaded()?;
+	route::load_skylight()?;
 	let psn = PsnLookup {
 		main_connection:     symbol(c"CGSMainConnectionID"),
 		get_window_owner:    symbol(c"SLSGetWindowOwner"),
@@ -181,40 +153,17 @@ fn resolve_foreground() -> Option<ForegroundSpi> {
 	})
 }
 
-pub(super) fn ensure_skylight_loaded() -> Option<()> {
-	static LOADED: LazyLock<bool> = LazyLock::new(|| {
-		let path = c"/System/Library/PrivateFrameworks/SkyLight.framework/SkyLight";
-		// SAFETY: `path` is a static NUL-terminated framework path; the handle is
-		// intentionally process-lived.
-		!unsafe { libc::dlopen(path.as_ptr(), libc::RTLD_NOW | libc::RTLD_GLOBAL) }.is_null()
-	});
-	if *LOADED { Some(()) } else { None }
-}
-
-pub(super) fn symbol<T: Copy>(name: &CStr) -> Option<T> {
-	// SAFETY: `name` is NUL-terminated and RTLD_DEFAULT is valid for
-	// process-wide lookup.
-	let raw = unsafe { libc::dlsym(libc::RTLD_DEFAULT, name.as_ptr()) };
-	if raw.is_null() {
-		return None;
-	}
-	// SAFETY: Every callsite requests the exact C signature documented in its
-	// function-pointer alias.
-	Some(unsafe { mem::transmute_copy::<*mut c_void, T>(&raw) })
-}
-
 fn event_ptr(event: &CGEvent) -> *mut c_void {
 	event.as_ptr().cast()
 }
 
 /// Stamps raw `SkyLight` integer event fields onto `event`.
 pub(super) fn set_fields(event: &CGEvent, fields: &[(u32, i64)]) -> CoreResult<()> {
-	let spi = required()?;
+	let routes = required()?.routes;
 	let ptr = event_ptr(event);
 	for &(field, value) in fields {
-		// SAFETY: The event is alive for the call and `set_integer` passed the
-		// atomic exact-signature probe.
-		unsafe { (spi.set_integer)(ptr, field, value) };
+		// SAFETY: The event is alive for the call.
+		unsafe { routes.set_field(ptr, field, value) };
 	}
 	Ok(())
 }
@@ -229,52 +178,53 @@ pub(super) fn set_window_location(event: &CGEvent, location: CGPoint) -> CoreRes
 	Ok(())
 }
 
-/// Posts a pointer event through `SkyLight` alone, without the keyboard
-/// authentication envelope, which would route it past the session event tap
-/// Chromium's window handler listens on.
+/// Posts a pointer event through `SkyLight` alone (see [`Routes::routed`]).
 pub(super) fn post_routed(pid: pid_t, event: &CGEvent) -> CoreResult<()> {
-	control::check()?;
-	event.set_integer_value_field(
-		core_graphics::event::EventField::EVENT_SOURCE_USER_DATA,
-		control::SYNTHETIC_EVENT_TAG,
-	);
-	let spi = required()?;
-	// SAFETY: `event` remains retained for the synchronous post and
-	// `post_to_pid` was atomically resolved with its exact ABI.
-	unsafe { (spi.post_to_pid)(pid, event_ptr(event)) };
-	Ok(())
+	post_to_pid(Route::Routed(pid), event, |routes, event| {
+		// SAFETY: `post_to_pid` passes the live event it retains for the call.
+		unsafe { routes.routed(pid, event) };
+		Ok(())
+	})
 }
 
-/// Posts a background pointer event through `SkyLight`, then through the
-/// public per-pid queue only where `CGEventPostToPid` is a separate function.
-/// Where it is not, a second post would deliver the event twice. The separate
-/// public post is kept as it was; its benefit there is unmeasured.
+/// Posts a background pointer event through `SkyLight` and, where it is a
+/// separate function, the public per-pid queue (see [`Routes::public`]).
 pub(super) fn post_dual(pid: pid_t, event: &CGEvent) -> CoreResult<()> {
-	let spi = required()?;
-	post_routed(pid, event)?;
-	if let Some(public_post_to_pid) = spi.public_post_to_pid {
+	post_to_pid(Route::Dual(pid), event, |routes, event| {
+		// SAFETY: `post_to_pid` passes the live event it retains for the call.
+		unsafe { routes.routed(pid, event) };
 		control::check()?;
-		// SAFETY: `event` remains retained for the synchronous post and the
-		// symbol was resolved with the `SLEventPostToPid` ABI it shares.
-		unsafe { public_post_to_pid(pid, event_ptr(event)) };
-	}
-	Ok(())
+		// SAFETY: as above.
+		unsafe { routes.public(pid, event) };
+		Ok(())
+	})
 }
 
+/// Posts a keyboard event on the authenticated `SkyLight` route (see
+/// [`Routes::keyboard`]).
 pub(super) fn post_keyboard(pid: pid_t, event: &CGEvent) -> CoreResult<()> {
+	post_to_pid(Route::Keyboard(pid), event, |routes, event| {
+		// SAFETY: `post_to_pid` passes the live event it retains for the call.
+		unsafe { routes.keyboard(pid, event) };
+		Ok(())
+	})
+}
+
+/// Posts `event`, tagged as synthetic, through `post` on `route`, telling the
+/// input request's release helper what it holds. `post` receives a live
+/// event, retained for the synchronous call.
+fn post_to_pid(
+	route: Route,
+	event: &CGEvent,
+	post: impl FnOnce(&Routes, *mut c_void) -> CoreResult<()>,
+) -> CoreResult<()> {
 	control::check()?;
 	event.set_integer_value_field(
 		core_graphics::event::EventField::EVENT_SOURCE_USER_DATA,
 		control::SYNTHETIC_EVENT_TAG,
 	);
-	let spi = required()?;
-	attach_keyboard_authentication(pid, event);
-	// The authenticated SkyLight route reaches Chromium and AppKit. Posting the
-	// same event through the public per-pid queue as well would deliver every
-	// key twice. SAFETY: `event` remains retained and the exact symbol is part
-	// of the required atomic probe.
-	unsafe { (spi.post_to_pid)(pid, event_ptr(event)) };
-	Ok(())
+	let routes = required()?.routes;
+	release_guard::post(route, event, || post(routes, event_ptr(event)))
 }
 
 /// This process's `WindowServer` connection, which `AppKit` stamps on the
@@ -746,62 +696,6 @@ fn process_psn(lookup: PsnLookup, pid: pid_t, wid: u32) -> Option<ProcessSerialN
 	} else {
 		None
 	}
-}
-
-fn resolve_authentication() -> Option<AuthenticationSpi> {
-	Some(AuthenticationSpi {
-		set_message:       symbol(c"SLEventSetAuthenticationMessage")?,
-		objc_get_class:    symbol(c"objc_getClass")?,
-		sel_register_name: symbol(c"sel_registerName")?,
-		class_responds:    symbol(c"class_respondsToSelector")?,
-		factory:           symbol(c"objc_msgSend")?,
-	})
-}
-
-fn attach_keyboard_authentication(pid: pid_t, event: &CGEvent) {
-	let Some(spi) = AUTHENTICATION.as_ref() else {
-		return;
-	};
-	// SAFETY: Both C strings are static; runtime lookup functions have their
-	// exact Objective-C ABI.
-	let class = unsafe { (spi.objc_get_class)(c"SLSEventAuthenticationMessage".as_ptr()) };
-	// SAFETY: The selector C string is static and NUL-terminated.
-	let selector =
-		unsafe { (spi.sel_register_name)(c"messageWithEventRecord:pid:version:".as_ptr()) };
-	if class.is_null() || selector.is_null() {
-		return;
-	}
-	// SAFETY: This guard is required because macOS 14 has the class but lacks
-	// the macOS 15+ factory selector.
-	if !unsafe { (spi.class_responds)(class, selector) } {
-		return;
-	}
-	// __CGEvent stores its SLSEventRecord pointer after CFRuntimeBase and a
-	// padded u32.
-	let event_raw = event_ptr(event);
-	let mut record = ptr::null_mut();
-	for offset in [24usize, 32, 16] {
-		// SAFETY: These are the known pointer-aligned candidate slots in
-		// __CGEvent; read_unaligned avoids alignment assumptions.
-		let candidate =
-			unsafe { ptr::read_unaligned(event_raw.cast::<u8>().add(offset).cast::<*mut c_void>()) };
-		if !candidate.is_null() {
-			record = candidate;
-			break;
-		}
-	}
-	if record.is_null() {
-		return;
-	}
-	// SAFETY: Class response was checked before invoking this exact factory
-	// signature.
-	let message = unsafe { (spi.factory)(class, selector, record, pid, 0) };
-	if message.is_null() {
-		return;
-	}
-	// SAFETY: The event and autoreleased authentication object are alive for the
-	// synchronous attachment.
-	unsafe { (spi.set_message)(event_raw, message) };
 }
 
 #[cfg(test)]

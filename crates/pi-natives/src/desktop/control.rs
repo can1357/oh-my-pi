@@ -357,9 +357,15 @@ impl KernelOwner {
 				let leases = ProcessLease::acquire()
 					.and_then(|process| KernelLease::acquire().map(|kernel| (kernel, process)));
 				match leases {
-					Ok(_leases) => {
+					Ok(leases) => {
+						#[cfg(target_os = "macos")]
+						let shared = SharedOwnership::publish(&leases.0);
 						let _ = ready.send(Ok(()));
 						let _ = stopped.recv();
+						// Withdrawn before the lock is released.
+						#[cfg(target_os = "macos")]
+						drop(shared);
+						drop(leases);
 					},
 					Err(error) => {
 						let _ = ready.send(Err(error));
@@ -384,6 +390,43 @@ impl Drop for KernelOwner {
 			let _ = thread.join();
 		}
 	}
+}
+
+/// A duplicate of the kernel ownership lock while this process holds it. A
+/// macOS input-release helper keeps one open (`macos/release_guard.rs`), so a
+/// host that dies mid-input keeps other hosts out until the helper has
+/// released what the host held.
+#[cfg(target_os = "macos")]
+static SHARED_OWNERSHIP: Mutex<Option<std::fs::File>> = Mutex::new(None);
+
+#[cfg(target_os = "macos")]
+struct SharedOwnership;
+
+#[cfg(target_os = "macos")]
+impl SharedOwnership {
+	fn publish(lease: &KernelLease) -> Self {
+		*SHARED_OWNERSHIP.lock() = lease.0.try_clone().ok();
+		Self
+	}
+}
+
+#[cfg(target_os = "macos")]
+impl Drop for SharedOwnership {
+	fn drop(&mut self) {
+		SHARED_OWNERSHIP.lock().take();
+	}
+}
+
+/// A new close-on-exec descriptor for the kernel ownership lock, while this
+/// process holds it.
+#[cfg(target_os = "macos")]
+pub(crate) fn shared_ownership() -> Option<std::os::fd::OwnedFd> {
+	SHARED_OWNERSHIP
+		.lock()
+		.as_ref()?
+		.try_clone()
+		.ok()
+		.map(Into::into)
 }
 
 pub(crate) struct InputLease {
@@ -789,5 +832,24 @@ mod tests {
 		let second = KernelLease::at(&path).expect("lease after release");
 		drop(second);
 		std::fs::remove_file(path).expect("remove test lock");
+	}
+
+	#[cfg(target_os = "macos")]
+	#[test]
+	fn the_held_kernel_lock_is_shared_until_it_is_released() {
+		use std::os::fd::AsRawFd;
+		let _serial = OWNERSHIP_TEST.lock();
+		assert!(shared_ownership().is_none());
+		let owner = KernelOwner::acquire().expect("test kernel owner");
+		let shared = shared_ownership().expect("held lock is shared");
+		// The same locked file description: relocking it succeeds where an
+		// independent handle is refused.
+		// SAFETY: `shared` owns a live descriptor; flock is nonblocking.
+		assert_eq!(unsafe { libc::flock(shared.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) }, 0);
+		assert!(KernelLease::acquire().is_err());
+		drop(owner);
+		assert!(shared_ownership().is_none());
+		drop(shared);
+		remove_test_lock();
 	}
 }

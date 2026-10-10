@@ -26,7 +26,9 @@ use super::{
 	},
 	ax,
 	capture::{self, MacCapture},
-	process, skylight,
+	process,
+	release::Route,
+	release_guard, route, skylight,
 };
 
 pub(super) struct MacInput {
@@ -419,8 +421,7 @@ const FIELD_CLICK_STATE: u32 = 1;
 const FIELD_PRESSURE: u32 = 2;
 const FIELD_BUTTON_NUMBER: u32 = 3;
 const FIELD_SUBTYPE: u32 = 7;
-/// Target pid, checked by Chromium's synthetic-event filter.
-const FIELD_TARGET_PID: u32 = 40;
+const FIELD_TARGET_PID: u32 = route::TARGET_PID_FIELD;
 const FIELD_WINDOW_NUMBER: u32 = 51;
 /// The sender's `WindowServer` connection, as on an `AppKit`-built event.
 const FIELD_WINDOW_CONTEXT: u32 = 52;
@@ -2197,8 +2198,10 @@ fn post_global_mouse(
 fn post_global(event: &CGEvent) -> CoreResult<()> {
 	control::check()?;
 	event.set_integer_value_field(EventField::EVENT_SOURCE_USER_DATA, control::SYNTHETIC_EVENT_TAG);
-	event.post(CGEventTapLocation::HID);
-	Ok(())
+	release_guard::post(Route::Hid, event, || {
+		event.post(CGEventTapLocation::HID);
+		Ok(())
+	})
 }
 
 fn point(x: f64, y: f64) -> CoreResult<CGPoint> {

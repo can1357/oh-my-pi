@@ -79,6 +79,28 @@ rust_binary(
     }),
 )
 
+# Posts the releases of keys and buttons an input request still holds when
+# the host dies (src/desktop/macos/release_guard.rs). Shares release.rs and
+# route.rs with the addon.
+rust_binary(
+    name = "input_release_helper",
+    srcs = [
+        "src/desktop/macos/release.rs",
+        "src/desktop/macos/release_helper.rs",
+        "src/desktop/macos/route.rs",
+    ],
+    crate_root = "src/desktop/macos/release_helper.rs",
+    edition = "2024",
+    rustc_flags = [
+        "-Ccodegen-units=1",
+        "-Copt-level=z",
+        "-Cpanic=abort",
+        "-Cstrip=symbols",
+        "-Clink-arg=-Wl,-adhoc_codesign",
+    ],
+    target_compatible_with = ["@platforms//os:macos"],
+)
+
 # The NAPI cdylib. build.rs is intentionally not wired in: napi_build::setup()
 # link args are hardcoded below, and the OAuth relay executable and the
 # `:syntax_set` genrule output are separate targets embedded as compile data.
@@ -101,6 +123,7 @@ rust_shared_library(
             ":applefm_bridge",
             ":oauth_callback_darwin_helper",
             ":capture_darwin_helper",
+            ":input_release_helper",
         ],
         "//conditions:default": [":oauth_callback_relay"],
     }),
@@ -113,6 +136,7 @@ rust_shared_library(
             "OMP_OAUTH_DARWIN_HELPER": "$(execpath :oauth_callback_darwin_helper)",
             "OMP_SYNTAX_SET": "$(execpath :syntax_set)",
             "OMP_CAPTURE_DARWIN_HELPER": "$(execpath :capture_darwin_helper)",
+            "OMP_INPUT_RELEASE_HELPER": "$(execpath :input_release_helper)",
         },
         "//conditions:default": {
             "OMP_OAUTH_RELAY_BINARY": "$(execpath :oauth_callback_relay)",
