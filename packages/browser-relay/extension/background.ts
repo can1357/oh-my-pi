@@ -22,7 +22,6 @@ import {
 	createRetryableLoader,
 	detachThenBestEffortCleanup,
 	detachWithRecoveryLoaderObservation,
-	extensionOwnedAttachedTabIds,
 	filterFreshAttachmentState,
 	hasUsableRelaySocket,
 	isAttachmentStateCurrent,
@@ -68,7 +67,7 @@ import {
 	invalidatesHelloReconciliation,
 	shouldSuppressHelloSnapshot,
 } from "./hello-refresh";
-import { ownedDebuggerTabs } from "./debugger-ownership";
+import { extensionOwnedDebuggerTabs } from "./debugger-ownership";
 
 const DEFAULT_PORT = 9224;
 const PING_INTERVAL_MS = 20_000;
@@ -1102,12 +1101,10 @@ async function buildHello(): Promise<
 	// takeover that onDetach deliberately removed from recovery state.
 	// Probe ownership as well so a service-worker restart can recover an attachment
 	// whose in-memory live marker was lost without claiming DevTools-owned tabs.
-	const probedOwnedTabIds = await ownedDebuggerTabs(targets, tabId =>
-		chrome.debugger.sendCommand({ tabId }, "Target.getTargetInfo"),
-	);
-	const attachedTabIds = extensionOwnedAttachedTabIds(
+	const attachedTabIds = await extensionOwnedDebuggerTabs(
 		targets,
-		new Set([...liveOwnedTabIds, ...probedOwnedTabIds]),
+		liveOwnedTabIds,
+		tabId => chrome.debugger.sendCommand({ tabId }, "Target.getTargetInfo"),
 	);
 	await flushRecoverableUpdates();
 	const versionMatch = /Chrome\/[\d.]+/.exec(navigator.userAgent);
@@ -1421,10 +1418,15 @@ async function reconcileOrphans(): Promise<void> {
 	// could then strand the debugging infobar until a later successful pass.
 	// Leave any existing deadline intact and let the next alarm/startup retry.
 	const targets = await chrome.debugger.getTargets();
-	// getTargets includes DevTools and other debugger owners. Reconciliation may
-	// only re-seed attachments already known to this extension; otherwise a
-	// takeover becomes relay-authorized again before buildHello can filter it.
-	const attachedTabIds = extensionOwnedAttachedTabIds(targets, liveOwnedTabIds);
+	// getTargets includes DevTools and other debugger owners. Persisted ids cover
+	// normal restarts, while a live probe recovers the crash window after attach
+	// succeeded but before the ownership write committed. Commands still fail for
+	// DevTools/other-extension attachments, so those tabs remain excluded.
+	const attachedTabIds = await extensionOwnedDebuggerTabs(
+		targets,
+		liveOwnedTabIds,
+		tabId => chrome.debugger.sendCommand({ tabId }, "Target.getTargetInfo"),
+	);
 	await trackAttachments(attachedTabIds, () => true, attachmentState, true);
 	orphanAttachmentReconciliationPending = false;
 	// Only a socket that has actually delivered a hello owns reconciliation. A

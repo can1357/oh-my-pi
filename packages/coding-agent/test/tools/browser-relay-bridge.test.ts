@@ -6708,6 +6708,44 @@ describe("RelayBridge tab grouping", () => {
 		);
 	});
 
+	it("forces a fresh root when a replacement interrupts an initial preload post-add probe", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })]);
+		const cdp = new FakeCdpSocket();
+		const connId = bridge.cdpConnected(cdp);
+		const pageSession = await attachPage(bridge, ext, cdp, connId, 1);
+
+		bridge.cdpMessage(
+			connId,
+			JSON.stringify({
+				id: ++msgSeq,
+				sessionId: pageSession,
+				method: "Page.addScriptToEvaluateOnNewDocument",
+				params: { source: "window.__relayInjected = true;", runImmediately: true },
+			}),
+		);
+		await waitFor(() => ext.pending("send").some(rpc => rpc.method === "Page.getFrameTree"));
+		ack(bridge, ext, "send", { frameTree: { frame: { loaderId: "loader-before" } } });
+		await waitFor(() => ext.pending("send").some(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument"));
+		ack(bridge, ext, "send", { identifier: "accepted-but-not-journaled" });
+		await waitFor(
+			() => ext.pending("send").some(rpc => rpc.method === "Page.getFrameTree"),
+			"initial post-add loader probe",
+		);
+
+		const replacement = new FakeExtSocket();
+		connect(bridge, replacement, [tab({ tabId: 1, groupId: -1 })], {
+			attachedTabIds: [1],
+			recoverableTabIds: [1],
+		});
+		expect(ext.closed).toBe(true);
+		await waitFor(
+			() => replacement.pending("detach").length === 1,
+			"fresh-root detach after the post-add probe was interrupted",
+		);
+	});
+
 	it("forces a fresh root after an initial preload registration times out", async () => {
 		vi.useFakeTimers();
 		try {
@@ -6756,6 +6794,75 @@ describe("RelayBridge tab grouping", () => {
 			expect(ext2.rpcs("send").filter(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument")).toHaveLength(
 				0,
 			);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("replaces auto-attach sessions when an immediate preload post-add probe times out", async () => {
+		vi.useFakeTimers();
+		try {
+			const bridge = new RelayBridge({});
+			const ext = new FakeExtSocket();
+			connect(bridge, ext, [tab({ tabId: 1 })]);
+			const cdp = new FakeCdpSocket();
+			const connId = bridge.cdpConnected(cdp);
+			bridge.cdpMessage(
+				connId,
+				JSON.stringify({
+					id: ++msgSeq,
+					method: "Target.setAutoAttach",
+					params: { autoAttach: true, flatten: true, waitForDebuggerOnStart: false },
+				}),
+			);
+			await waitFor(() => ext.pending("attach").length === 1, "initial auto-attach");
+			ack(bridge, ext, "attach");
+			await flush();
+			const oldAutoAttachSessions = cdp.attachedSessions();
+			expect(oldAutoAttachSessions).toHaveLength(1);
+			const pageSession = await attachPage(bridge, ext, cdp, connId, 1);
+
+			const addId = ++msgSeq;
+			bridge.cdpMessage(
+				connId,
+				JSON.stringify({
+					id: addId,
+					sessionId: pageSession,
+					method: "Page.addScriptToEvaluateOnNewDocument",
+					params: { source: "window.__relayTimedOut = true;", runImmediately: true },
+				}),
+			);
+			await waitFor(() => ext.pending("send").some(rpc => rpc.method === "Page.getFrameTree"));
+			ack(bridge, ext, "send", { frameTree: { frame: { loaderId: "loader-before" } } });
+			await waitFor(() => ext.pending("send").some(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument"));
+			ack(bridge, ext, "send", { identifier: "accepted-before-probe-timeout" });
+			await waitFor(
+				() => ext.pending("send").some(rpc => rpc.method === "Page.getFrameTree"),
+				"post-add probe before timeout",
+			);
+
+			vi.advanceTimersByTime(20_000);
+			await flush();
+			expect(cdp.messages.some(message => message.id === addId && "error" in message)).toBe(true);
+			await waitFor(() => ext.pending("detach").length === 1, "fresh-root detach for auto-attach holder");
+			ack(bridge, ext, "detach");
+			await waitFor(() => ext.pending("attach").length === 1, "fresh-root attach for auto-attach holder");
+			ack(bridge, ext, "attach");
+			await flush();
+
+			const replacementSessions = cdp.attachedSessions().filter(id => !oldAutoAttachSessions.includes(id));
+			expect(replacementSessions.length).toBeGreaterThan(0);
+			for (const oldSession of [...oldAutoAttachSessions, pageSession]) {
+				expect(
+					cdp.messages.some(message => {
+						if (message.method !== "Target.detachedFromTarget") return false;
+						const params = message.params;
+						return (
+							params && typeof params === "object" && "sessionId" in params && params.sessionId === oldSession
+						);
+					}),
+				).toBe(true);
+			}
 		} finally {
 			vi.useRealTimers();
 		}
@@ -7353,6 +7460,37 @@ describe("RelayBridge tab grouping", () => {
 		await flush();
 		// The enable was never journaled, so nothing replays it onto the fresh root.
 		expect(ext2.rpcs("send").filter(rpc => rpc.method === "Fetch.enable")).toHaveLength(0);
+	});
+
+	it("forces a fresh root when a replacement interrupts a tracked shared-root setter", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })]);
+		const cdp = new FakeCdpSocket();
+		const connId = bridge.cdpConnected(cdp);
+		const pageSession = await attachPage(bridge, ext, cdp, connId, 1);
+
+		bridge.cdpMessage(
+			connId,
+			JSON.stringify({
+				id: ++msgSeq,
+				sessionId: pageSession,
+				method: "Fetch.enable",
+				params: { patterns: [{ urlPattern: "*" }] },
+			}),
+		);
+		await waitFor(() => ext.pending("send").some(rpc => rpc.method === "Fetch.enable"));
+
+		const replacement = new FakeExtSocket();
+		connect(bridge, replacement, [tab({ tabId: 1, groupId: -1 })], {
+			attachedTabIds: [1],
+			recoverableTabIds: [1],
+		});
+		expect(ext.closed).toBe(true);
+		await waitFor(
+			() => replacement.pending("detach").length === 1,
+			"fresh-root detach after a tracked setter was interrupted",
+		);
 	});
 
 	it("forces a fresh root when the extension reports guard-only Page state", async () => {

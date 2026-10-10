@@ -530,6 +530,8 @@ class TabState {
 	readonly subscriptionClears = new Map<string, Record<string, number>>();
 	/** In-flight root-state commands by subscription key. */
 	readonly pendingSubscriptions = new Map<string, Set<Promise<void>>>();
+	/** Immediate preload registrations awaiting their post-add document probe. */
+	pendingPreloadProbes = 0;
 	/** Latest successful tab-wide clear recorded for each shared-root key. */
 	readonly subscriptionClearSequences = new Map<string, number>();
 	/** Preserved per-session preload scripts from Page.addScriptToEvaluateOnNewDocument. */
@@ -856,6 +858,7 @@ export class RelayBridge {
 							pending.req.method,
 						),
 				);
+				const pendingTrackedRootMutation = [...tab.pendingSubscriptions.values()].some(pending => pending.size > 0);
 				const interruptedPreloadRecovery = [...this.#pendingRpc.entries()].some(
 					([key, pending]) =>
 						key.startsWith(`${instanceId}:`) &&
@@ -871,6 +874,8 @@ export class RelayBridge {
 				);
 				if (
 					pendingPreloadRootMutation ||
+					tab.pendingPreloadProbes > 0 ||
+					pendingTrackedRootMutation ||
 					(tab.restoring !== null && tab.restoringExt === replacedSocket && interruptedPreloadRecovery)
 				) {
 					tab.forceFreshRootBeforeReplay = true;
@@ -1311,21 +1316,29 @@ export class RelayBridge {
 			this.#replyError(conn, msg, "Page.addScriptToEvaluateOnNewDocument completed after the debugger detached");
 			return;
 		}
-		const documentState =
-			msg.params?.runImmediately === true
-				? await this.#frameDocumentState(ref.tabKey).catch(err => {
-						if (isExtensionTransportInterrupted(err)) {
-							tab.forceFreshRootBeforeReplay = true;
-							if (err instanceof ExtensionRpcTimeoutError) this.#recoverAfterAmbiguousPreloadMutation(tab);
-							throw err;
-						}
-						// A failed post-registration probe cannot prove which document
-						// received the immediate registration. Reusing the pre-add loader
-						// would make a navigation during the add look already covered on
-						// recovery, so keep the baseline unknown and replay conservatively.
-						return undefined;
-					})
-				: undefined;
+		let documentState: { mainLoaderId?: string; frameLoaderIds: Record<string, string> } | undefined;
+		if (msg.params?.runImmediately === true) {
+			// The additive registration is already live while this probe is pending.
+			// Track that window outside #pendingRpc so a same-instance replacement can
+			// synchronously fence the surviving root before rejecting the probe promise.
+			tab.pendingPreloadProbes++;
+			try {
+				documentState = await this.#frameDocumentState(ref.tabKey).catch(err => {
+					if (isExtensionTransportInterrupted(err)) {
+						tab.forceFreshRootBeforeReplay = true;
+						if (err instanceof ExtensionRpcTimeoutError) this.#recoverAfterAmbiguousPreloadMutation(tab);
+						throw err;
+					}
+					// A failed post-registration probe cannot prove which document
+					// received the immediate registration. Reusing the pre-add loader
+					// would make a navigation during the add look already covered on
+					// recovery, so keep the baseline unknown and replay conservatively.
+					return undefined;
+				});
+			} finally {
+				tab.pendingPreloadProbes--;
+			}
+		}
 		// The post-registration document probe is another await on the same
 		// debugger root. A final-owner detach can complete while it is pending,
 		// so fence the returned identifier again before journaling it or queuing
@@ -2543,15 +2556,18 @@ export class RelayBridge {
 	}
 
 	#recoverAfterAmbiguousPreloadMutation(tab: TabState): void {
-		const preserve = this.#sessionHolders(tab.tabKey).filter(
-			conn => !conn.autoAttach && conn.sessionsForTab(tab.tabKey).length > 0,
-		);
+		const holders = this.#sessionHolders(tab.tabKey);
+		const preserve = holders.filter(conn => !conn.autoAttach && conn.sessionsForTab(tab.tabKey).length > 0);
 		tab.forceFreshRootBeforeReplay = true;
 		tab.restorePending = preserve.length > 0;
-		if (preserve.length === 0 || tab.restoring !== null) return;
+		if (holders.length === 0 || tab.restoring !== null) return;
 		this.#pruneSubscriptions(tab, preserve);
 		this.#prunePreloadScripts(tab, preserve);
-		this.#startTabRecovery(tab, false, preserve);
+		// Auto-attach sessions are bound to the old root and cannot be preserved.
+		// Retract them before the forced refresh so #announceTab remints usable
+		// sessions after the new root is attached; explicit page holders remain live.
+		this.#retractTab(tab, preserve);
+		this.#announceTab(tab, true, preserve);
 	}
 
 	#sessionOwnsTab(conn: CdpConnection, tabKey: string, sessionId: string): boolean {
