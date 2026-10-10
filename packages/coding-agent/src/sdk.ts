@@ -1753,6 +1753,8 @@ export interface AutoLearnCaptureRunnerOptions {
 	sourceAgent: Agent;
 	/** Resolves the capture tools per run, so live `autolearn.enabled` / backend changes apply. */
 	captureTools: () => AgentTool[];
+	/** Credentials for the capture; defaults to the source agent's resolver. */
+	getApiKey?: AgentOptions["getApiKey"];
 	createAgent: (options: AgentOptions) => Agent;
 	/** The cache key the primary loop sends for `model`; falls back to the source agent's key, then its session id. */
 	primaryPromptCacheKey?: (model: Model) => string | undefined;
@@ -1843,7 +1845,7 @@ export function createAutoLearnCaptureRunner(
 			// Withdrawn tools the replayed history declares keep their sent definitions; host-run ones are dropped.
 			sentToolDefinitions: sourceSentToolDefinitions.copy(name => !hostRuns(name)),
 			providerSessionState: captureProviderSessionState,
-			getApiKey: requestModel => options.sourceAgent.getApiKey?.(requestModel),
+			getApiKey: options.getApiKey ?? (requestModel => options.sourceAgent.getApiKey?.(requestModel)),
 			onPayload: options.onPayload,
 			onResponse: options.onResponse,
 		});
@@ -2459,11 +2461,12 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		((requestModel: Model): ApiKeyResolver => {
 			const resolve = modelRegistry.resolver(requestModel, agent.sessionId);
 			// A usage limit only a sibling inside its reserve could take over skips
-			// the in-stream rotation, so turn recovery can spend a saved reset first.
+			// the in-stream rotation when turn recovery can still take it over, so
+			// a saved reset can be spent first.
 			return async context =>
 				context.lastChance &&
 				AIError.isUsageLimit(context.error, requestModel.api) &&
-				(await session.shouldRedeemBeforeTakeover(requestModel, context.signal))
+				(await session.shouldDeferUsageLimitTakeover(requestModel, context.signal))
 					? undefined
 					: resolve(context);
 		});
@@ -5668,6 +5671,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		const runAutoLearnCapture = createAutoLearnCaptureRunner({
 			sourceAgent: agent,
 			primaryPromptCacheKey: model => session.getPromptCacheKeyForModel(model),
+			// The capture has no turn recovery to spend a saved reset, so it keeps
+			// the stream's own sibling rotation.
+			getApiKey: options.getApiKey ?? (requestModel => modelRegistry.resolver(requestModel, agent.sessionId)),
 			captureTools: () =>
 				(["manage_skill", "learn"] as const)
 					.map(name => session.getToolByName(name))
