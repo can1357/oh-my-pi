@@ -316,6 +316,7 @@ fn walk_raw(
 	handle: AxHandle,
 	depth: u32,
 	in_web: bool,
+	in_row: bool,
 	state: &mut WalkState,
 ) -> CoreResult<Option<WalkNode>> {
 	if depth > state.max_depth || state.visited >= state.max_nodes {
@@ -333,14 +334,18 @@ fn walk_raw(
 	};
 	// `setValue` refuses web content, whose echo it cannot verify.
 	let in_web = in_web || props.role == "webarea";
+	// A text field in a table or outline row is the row's label: writing it
+	// changes what the field reads, not the item. Finder renames no file,
+	// Reminders keeps the list's name, Automator refuses the write.
 	let settable = state.line_states
 		&& !in_web
+		&& !in_row
 		&& takes_value(&props.role)
-		&& !opens(&props)
 		&& backend.value_settable(&handle);
+	let in_row = in_row || props.role == "row";
 	let mut children = Vec::new();
 	for child in child_handles {
-		if let Some(child) = walk_raw(backend, child, depth + 1, in_web, state)? {
+		if let Some(child) = walk_raw(backend, child, depth + 1, in_web, in_row, state)? {
 			children.push(child);
 		}
 		if state.truncated && state.visited >= state.max_nodes {
@@ -358,14 +363,6 @@ fn takes_value(role: &str) -> bool {
 		role,
 		"textfield" | "textarea" | "combobox" | "datetimearea" | "datefield" | "timefield"
 	)
-}
-
-/// Whether the element is an item the app opens, such as a file in a Finder
-/// list, whose name shows as a text field. Writing that field's value changes
-/// what the field reads, not the item: Finder renames nothing, even after a
-/// confirm.
-fn opens(props: &AxProps) -> bool {
-	props.actions.iter().any(|action| action == "AXOpen")
 }
 
 fn named(props: &AxProps) -> bool {
@@ -673,7 +670,7 @@ pub fn snapshot(
 		bounds:      WalkBounds::Skip,
 		line_states: true,
 	};
-	let root = walk_raw(backend, root, 0, false, &mut state)?
+	let root = walk_raw(backend, root, 0, false, false, &mut state)?
 		.and_then(|node| filter_node(node, options.all.unwrap_or(false)));
 	let mut text = String::new();
 	let mut node_count = 0;
@@ -726,7 +723,7 @@ pub fn query(
 		bounds:      WalkBounds::Read,
 		line_states: false,
 	};
-	let Some(root) = walk_raw(backend, root, 0, false, &mut state)? else {
+	let Some(root) = walk_raw(backend, root, 0, false, false, &mut state)? else {
 		return Ok(Vec::new());
 	};
 	let role = query.role.as_deref().map(str::to_lowercase);
@@ -1419,19 +1416,36 @@ mod tests {
 		assert_eq!(m.settable_reads, 1);
 	}
 	#[test]
-	fn a_file_name_field_the_app_opens_is_not_marked_settable() {
-		let mut name = p("textfield", None);
-		name.value = Some("invoice.pdf".into());
-		name.actions = vec!["AXOpen".into(), "AXShowMenu".into(), "AXConfirm".into()];
+	fn text_fields_in_table_and_outline_rows_are_not_marked_settable() {
+		let mut file = p("textfield", None);
+		file.value = Some("invoice.pdf".into());
+		file.actions = vec!["AXOpen".into(), "AXShowMenu".into(), "AXConfirm".into()];
+		let mut category = p("textfield", None);
+		category.value = Some("Mail".into());
+		let mut name = p("textfield", Some("Name"));
+		name.value = Some("Bench".into());
 		let mut m = Mock {
-			props: [(1, p("window", Some("Title"))), (2, name)].into(),
-			children: [(1, vec![2])].into(),
-			settable: [2].into(),
+			props: [
+				(1, p("window", Some("Title"))),
+				(2, p("outline", Some("Files"))),
+				(3, p("row", None)),
+				(4, p("cell", None)),
+				(5, file),
+				(6, p("row", None)),
+				(7, category),
+				(8, name),
+			]
+			.into(),
+			children: [(1, vec![2, 8]), (2, vec![3, 6]), (3, vec![4]), (4, vec![5]), (6, vec![7])]
+				.into(),
+			settable: [5, 7, 8].into(),
 			..Default::default()
 		};
 		let text = tree(&mut m);
-		assert_eq!(line(&text, "e2"), "- textfield [ref=e2]: \"invoice.pdf\" actions=open");
-		assert_eq!(m.settable_reads, 0);
+		assert_eq!(line(&text, "e5"), "- textfield [ref=e5]: \"invoice.pdf\" actions=open");
+		assert_eq!(line(&text, "e7"), "- textfield [ref=e7]: \"Mail\"");
+		assert!(line(&text, "e8").ends_with("(settable)"), "{text}");
+		assert_eq!(m.settable_reads, 1);
 	}
 	#[test]
 	fn selected_rows_and_items_are_marked() {
