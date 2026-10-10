@@ -925,23 +925,6 @@ describe("AuthStorage codex oauth ranking", () => {
 		await expect(authStorage.keys.get(provider, "after-runtime-usage")).resolves.toBe("api-acct-runtime");
 	});
 
-	test("requires a base selector identity", () => {
-		if (!store) throw new Error("test setup failed");
-		const activeStore = store;
-		expect(
-			() =>
-				new AuthStorage(activeStore, {
-					accountPolicies: [{ provider: "openai-codex", account: { orgId: "org-only" }, priority: 1 }],
-				}),
-		).toThrow("must include at least one of email, accountId, or projectId");
-		expect(
-			() =>
-				new AuthStorage(activeStore, {
-					accountPolicies: [{ provider: " openai-codex", account: { email: "account@example.com" }, priority: 1 }],
-				}),
-		).toThrow("without surrounding whitespace");
-	});
-
 	test.each([
 		[{}, "auth.accountPolicies[0].windows must name at least one usage window"],
 		[{ "7d": {} }, "auth.accountPolicies[0].windows.7d must set reservePct or taperHours"],
@@ -959,6 +942,23 @@ describe("AuthStorage codex oauth ranking", () => {
 					accountPolicies: [{ provider: "openai-codex", account: { accountId: "acct-shared" }, windows }],
 				}),
 		).toThrow(error);
+	});
+
+	test("requires a base selector identity", () => {
+		if (!store) throw new Error("test setup failed");
+		const activeStore = store;
+		expect(
+			() =>
+				new AuthStorage(activeStore, {
+					accountPolicies: [{ provider: "openai-codex", account: { orgId: "org-only" }, priority: 1 }],
+				}),
+		).toThrow("must include at least one of email, accountId, or projectId");
+		expect(
+			() =>
+				new AuthStorage(activeStore, {
+					accountPolicies: [{ provider: " openai-codex", account: { email: "account@example.com" }, priority: 1 }],
+				}),
+		).toThrow("without surrounding whitespace");
 	});
 
 	test("keeps hot-window and measured-usage safety ahead of configured priority", async () => {
