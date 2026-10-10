@@ -1,8 +1,8 @@
 /**
  * Effective snapcompact budgets after applying `snapcompact.frameBytesBudget`
  * and `snapcompact.maxFrames`. Compaction, context rebuilds, inline imaging, and
- * the send-time image clamp all resolve through here so a configured budget the
- * archive is sized for is never cut again by a lower budget on another path.
+ * the send-time image clamp all resolve through here so every path applies the
+ * same configured limits.
  */
 import * as snapcompact from "@oh-my-pi/snapcompact";
 
@@ -22,8 +22,9 @@ export function snapcompactFrameBudget(provider: string | undefined, configuredM
 }
 
 /**
- * Per-request image cap for `provider`, raised to the configured archive frame cap so
- * frames sized by `snapcompact.maxFrames` are not dropped again before send.
+ * Per-request image cap for `provider`, raised to at least the configured archive frame cap.
+ * The cap counts every image in the request (archive frames, user and tool images); a request
+ * over it loses its oldest images to the send-time clamp, archive frames included.
  */
 export function providerImageBudget(provider: string | undefined, configuredMaxFrames: number): number {
 	return Math.max(snapcompact.providerImageBudget(provider), snapcompactFrameBudget(provider, configuredMaxFrames));

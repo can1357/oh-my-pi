@@ -588,7 +588,7 @@ export const cfgSnapcompactMaxFrames = register({
 		group: "Experimental",
 		label: "Snapcompact Max Frames",
 		description:
-			"Archive frame cap. 0 uses the provider's image budget (5 for unrecognized providers). A positive value replaces that cap (at most 80) and raises the provider's per-request image limit to match.",
+			"Archive frame cap. 0 uses the provider's image budget (5 for unrecognized providers). A positive value replaces that cap (at most 80) and raises the provider's per-request image limit to at least that value. User and tool images share that limit; a request over it drops its oldest images first, archive frames included.",
 		options: [
 			{ value: "0", label: "Auto", description: "Provider image budget" },
 			{ value: "10", label: "10 frames" },
