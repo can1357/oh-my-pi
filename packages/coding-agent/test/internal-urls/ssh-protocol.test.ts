@@ -189,6 +189,32 @@ describe("SshProtocolHandler", () => {
 		expect(readSpy).not.toHaveBeenCalled();
 	});
 
+	it("propagates a canceled stat without starting a remote read", async () => {
+		mockHosts();
+		const controller = new AbortController();
+		const cancellation = new Error("Operation cancelled: Idle for 30s");
+		vi.spyOn(fileTransfer, "statRemotePath").mockImplementation(async () => {
+			controller.abort(cancellation);
+			throw cancellation;
+		});
+		const readSpy = vi.spyOn(fileTransfer, "readRemoteFile").mockRejectedValue(cancellation);
+
+		await expect(
+			handler.resolve(parseInternalUrl("ssh://icaro/etc/hosts"), { signal: controller.signal }),
+		).rejects.toBe(cancellation);
+		expect(readSpy).not.toHaveBeenCalled();
+	});
+
+	it("uses the remote read error when stat fails without cancellation", async () => {
+		mockHosts();
+		vi.spyOn(fileTransfer, "statRemotePath").mockRejectedValue(new Error("stat failed"));
+		vi.spyOn(fileTransfer, "readRemoteFile").mockRejectedValue(new Error("read failed: host unreachable"));
+
+		await expect(handler.resolve(parseInternalUrl("ssh://icaro/etc/hosts"))).rejects.toThrow(
+			"read failed: host unreachable",
+		);
+	});
+
 	it("autocompletes configured hosts and threads cwd to the capability load", async () => {
 		const spy = vi.spyOn(capability, "loadCapability").mockResolvedValue({
 			items: [
