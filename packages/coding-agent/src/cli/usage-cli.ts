@@ -694,12 +694,16 @@ function formatResetSpendVerdict(verdict: ResetSpendVerdict): string {
 			: verdict.kind === "ask"
 				? "an open interactive omp session asks before spending it"
 				: "not spent automatically";
-	return `→ ${outcome}  (${verdict.setting}: ${verdict.mode})${verdict.eligibleNow ? "" : " · not eligible now"}`;
+	const setting =
+		verdict.accountAutoRedeem === undefined
+			? `${verdict.setting}: ${verdict.mode}`
+			: `auth.accountPolicies autoRedeem: ${verdict.accountAutoRedeem}`;
+	return `→ ${outcome}  (${setting})${verdict.eligibleNow ? "" : " · not eligible now"}`;
 }
 
 /**
  * Saved resets expiring within 24 hours on accounts worth restoring: what the
- * provider's `autoRedeem` setting does with each one, whether it is eligible
+ * provider's `autoRedeem` setting (or the account policy's) does with each one, whether it is eligible
  * now, and the `/usage reset` target that spends it now when the provider allows.
  */
 function formatResetExpiryBanner(
@@ -710,7 +714,15 @@ function formatResetExpiryBanner(
 	options: UsageResetExpiryOptions,
 	policyOptions: UsagePolicyDiagnosticsOptions | undefined,
 ): string[] {
-	const verdicts = expiring.map(({ report, warning }) => resetSpendVerdict(report, warning, options.settings, nowMs));
+	const verdicts = expiring.map(({ report, warning }) =>
+		resetSpendVerdict(
+			report,
+			warning,
+			options.settings,
+			nowMs,
+			policyOptions?.getAccountPolicy(report.provider, usageReportIdentity(report)),
+		),
+	);
 	const count = expiring.reduce((sum, { warning }) => sum + warning.count, 0);
 	const lost = verdicts.every(verdict => verdict.kind === "off");
 	const lines = [

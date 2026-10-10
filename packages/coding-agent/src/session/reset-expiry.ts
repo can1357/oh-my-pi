@@ -3,7 +3,13 @@
  * will spend them first. Shared by `omp usage` and the TUI status line so both
  * warn about the accounts the salvage planners would act on.
  */
-import type { UsageLimit, UsageReport, UsageResetCredit, UsageResetCreditDetail } from "@oh-my-pi/pi-ai";
+import type {
+	AuthAccountPolicy,
+	UsageLimit,
+	UsageReport,
+	UsageResetCredit,
+	UsageResetCreditDetail,
+} from "@oh-my-pi/pi-ai";
 import { bankedResetCreditExpiryMs } from "@oh-my-pi/pi-tui/overlays/usage-display";
 import { formatDuration } from "@oh-my-pi/pi-utils";
 import type { Settings } from "../config/settings";
@@ -19,6 +25,7 @@ import {
 import {
 	type CodexResetAction,
 	type CodexResetSkip,
+	effectiveAutoRedeemMode,
 	fullestCodexChatWindow,
 	IMMINENT_RESET_EXPIRY_MS,
 	planCodexResetRedemptions,
@@ -95,7 +102,8 @@ export function classifyResetExpiry(report: UsageReport, nowMs: number): ResetEx
 
 /**
  * What an open interactive omp session does with an account's soonest expiring saved
- * reset. `kind` comes from the provider's `autoRedeem` setting alone: `auto`
+ * reset. `kind` comes from the durable settings alone, the account policy's
+ * `autoRedeem` over the provider's: `auto`
  * spends it by its last five minutes if the provider still allows it then,
  * `ask` prompts first, `off` leaves it. `eligibleNow` is the salvage planner's
  * answer for this report today; usage can change it before the reset expires.
@@ -104,6 +112,8 @@ export interface ResetSpendVerdict {
 	kind: "auto" | "ask" | "off";
 	setting: "codexResets.autoRedeem" | "claudeResets.autoRedeem";
 	mode: ResetAutoRedeemMode;
+	/** The account policy's `autoRedeem`, which overrides `mode` when set. */
+	accountAutoRedeem: boolean | undefined;
 	eligibleNow: boolean;
 }
 
@@ -112,15 +122,21 @@ export function resetSpendVerdict(
 	warning: ResetExpiryWarning,
 	settings: Settings,
 	nowMs: number,
+	policy: AuthAccountPolicy | undefined,
 ): ResetSpendVerdict {
 	const autoRedeem = warning.provider === "anthropic" ? cfgClaudeResetsAutoRedeem : cfgCodexResetsAutoRedeem;
 	const mode = autoRedeem.get(settings);
-	const kind = !shouldEvaluateCodexAutoRedeem(mode) ? "off" : shouldPromptCodexAutoRedeem(mode) ? "ask" : "auto";
+	const effective = effectiveAutoRedeemMode(mode, policy);
+	const kind = !shouldEvaluateCodexAutoRedeem(effective)
+		? "off"
+		: shouldPromptCodexAutoRedeem(effective)
+			? "ask"
+			: "auto";
 	const plan = planAsLastChance(report, warning, settings, nowMs);
 	// A stale report says nothing about eligibility: the sweep plans only after a fresh fetch.
 	const eligibleNow =
 		plan.actions[0]?.expiresInMs === IMMINENT_RESET_EXPIRY_MS || plan.skipped[0]?.reason === "stale-report";
-	return { kind, setting: autoRedeem.id, mode, eligibleNow };
+	return { kind, setting: autoRedeem.id, mode, accountAutoRedeem: policy?.autoRedeem, eligibleNow };
 }
 
 /**

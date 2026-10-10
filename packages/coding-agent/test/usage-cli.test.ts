@@ -713,7 +713,7 @@ describe("formatUsageBreakdown", () => {
 			const plainAt = text.indexOf("plain@example.test");
 			expect(text).toContain("▲ 2 saved resets expire within 24h\n");
 			expect(text.slice(0, plainAt)).toContain(
-				"→ spent automatically before it expires while an interactive omp session is open  (auth.accountPolicies autoRedeem: true)",
+				"→ an open interactive omp session spends it by its last 5 min if eligible then  (auth.accountPolicies autoRedeem: true)",
 			);
 			expect(text.slice(0, plainAt)).toContain("or now:  /usage reset");
 			expect(text.slice(plainAt)).toContain("→ not spent automatically  (codexResets.autoRedeem: no)");
@@ -725,11 +725,11 @@ describe("formatUsageBreakdown", () => {
 			const plainAt = text.indexOf("plain@example.test");
 			expect(text).toContain("▲ 2 saved resets expire within 24h\n");
 			expect(text.slice(0, plainAt)).toContain(
-				"→ not spent automatically  (auth.accountPolicies autoRedeem: false)",
+				"→ not spent automatically  (auth.accountPolicies autoRedeem: false)\n",
 			);
 			expect(text.slice(0, plainAt)).toContain("spend it:  /usage reset");
 			expect(text.slice(plainAt)).toContain(
-				"→ spent automatically before it expires while an interactive omp session is open  (codexResets.autoRedeem: yes)",
+				"→ an open interactive omp session spends it by its last 5 min if eligible then  (codexResets.autoRedeem: yes)",
 			);
 		});
 
