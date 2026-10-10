@@ -35,6 +35,12 @@ interface ChildStream extends AcpLiveMessageState {
 	toolArgsById: Map<string, unknown>;
 	/** Runs started in this child; numbers each run's delegated prompt. */
 	runs: number;
+	/**
+	 * Runs started but not yet terminal. A wake turn can start before the
+	 * previous run emits its terminal frame, so idle is reported only when
+	 * the last active run ends.
+	 */
+	activeRuns: number;
 	/** Until the run's first assistant message, an agent-attributed user message is the parent's delegation. */
 	awaitingAssignment: boolean;
 	/** Whether the current turn streamed an assistant error to the client. */
@@ -172,13 +178,19 @@ export class AcpSubagentStreams {
 			// IRC wake turns, follow-up assignments and revivals restart work in the same child conversation.
 			if (payload.status === "started") {
 				existing.runs++;
+				existing.activeRuns++;
 				existing.awaitingAssignment = true;
 				// A late `message_end` from the previous run may never have arrived; a new
 				// run must not append its text to that run's message.
 				existing.liveMessageId = undefined;
 				existing.liveMessageProgress = undefined;
+				existing.state = { state: "running" };
+			} else {
+				existing.activeRuns = Math.max(0, existing.activeRuns - 1);
+				// An older run ending while a newer one is active leaves the child running.
+				if (existing.activeRuns > 0) return;
+				existing.state = IDLE_STATE_BY_LIFECYCLE[payload.status];
 			}
-			existing.state = payload.status === "started" ? { state: "running" } : IDLE_STATE_BY_LIFECYCLE[payload.status];
 			this.#sendUpdate(existing, { state: existing.state });
 			return;
 		}
@@ -201,6 +213,7 @@ export class AcpSubagentStreams {
 			state: { state: "running" },
 			toolArgsById: new Map(),
 			runs: 1,
+			activeRuns: 1,
 			awaitingAssignment: true,
 			turnErrorEmitted: false,
 			settledMessageTimestamps: new Set(),

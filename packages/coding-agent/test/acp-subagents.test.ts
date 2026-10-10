@@ -153,6 +153,21 @@ describe("AcpSubagentStreams", () => {
 		expect(updates[2]).toMatchObject({ state: { state: "running" } });
 	});
 
+	it("stays running when a wake turn starts before the previous run's terminal frame", async () => {
+		registerAgent("Scout", ROOT_AGENT_ID);
+		// Run 1 starts; a wake turn starts; only then does run 1 report completion.
+		for (const status of ["started", "started", "completed", "completed"] as const) {
+			bus.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, lifecycle("Scout", status));
+		}
+		const states = (await delivered(3)).map(n =>
+			n.update.sessionUpdate === "subagent_update" ? n.update.state : null,
+		);
+		await Promise.resolve();
+		// No idle while the wake turn is active; idle once the last run ends.
+		expect(states).toEqual([{ state: "running" }, { state: "running" }, { state: "idle", stopReason: "end_turn" }]);
+		expect(sent).toHaveLength(3);
+	});
+
 	it("re-establishes known children for a reloaded parent, routing first and current state after", async () => {
 		registerAgent("Lead", ROOT_AGENT_ID);
 		registerAgent("Helper", "Lead");
