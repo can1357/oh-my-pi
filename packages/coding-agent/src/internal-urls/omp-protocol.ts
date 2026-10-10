@@ -7,6 +7,10 @@
  * - omp:// - Lists all available documentation files
  * - omp://<file>.md - Reads a specific documentation file
  */
+import { createHash } from "node:crypto";
+import * as fs from "node:fs/promises";
+import * as path from "node:path";
+import { getDocsCacheDir, logger } from "@oh-my-pi/pi-utils";
 import ompDoc from "../prompts/internal-urls/omp.md" with { type: "text" };
 import { getDocFilenames, getEmbeddedDoc } from "./docs-index";
 import { ompDocFilename, ompDocRel, ompDocsScopeEntries } from "./omp-scope";
@@ -26,7 +30,7 @@ import type {
  */
 export class OmpProtocolHandler implements ProtocolHandler {
 	readonly scheme = "omp";
-	readonly spec: SchemeSpec = { backing: "virtual", selectors: "lines", immutable: true };
+	readonly spec: SchemeSpec = { backing: "virtual", selectors: "lines", immutable: true, linkable: true };
 
 	/** Always advertised: harness docs are embedded in every build. */
 	promptDoc(): string {
@@ -62,6 +66,21 @@ export class OmpProtocolHandler implements ProtocolHandler {
 
 	async complete(): Promise<UrlCompletion[]> {
 		return getDocFilenames().map(value => ({ value }));
+	}
+
+	/**
+	 * Cached copy of the doc behind `url`, so transcript hyperlinks have a real
+	 * file to point at. `locateSync` is deliberately absent: the docs root names
+	 * no file, an unknown doc yields no link at all, and the embedded corpus is
+	 * a gzip blob that only `getEmbeddedDoc` can inflate — async, off the
+	 * render path. Every display target still shows the `omp://` URL.
+	 */
+	async locate(url: InternalUrl): Promise<string | null> {
+		const docPath = ompDocRel(url);
+		if (!docPath) return null;
+		const content = await getEmbeddedDoc(docPath);
+		if (content === undefined) return null;
+		return materializeOmpDoc(docPath, content);
 	}
 
 	async #listDocs(url: InternalUrl): Promise<InternalResource> {
@@ -102,4 +121,37 @@ export class OmpProtocolHandler implements ProtocolHandler {
 			size: Buffer.byteLength(content, "utf-8"),
 		};
 	}
+}
+
+/**
+ * Materialize one embedded doc into the content-addressed read-only cache and
+ * return its absolute path, or `null` when the cache is unwritable (the link
+ * then falls back to plain text).
+ *
+ * The digest keys the doc body, not the install, so a rebuilt bundle or a dev
+ * tree can never serve a stale file and concurrent renders write identical
+ * bytes into distinct temp paths, racing harmlessly on the rename.
+ */
+async function materializeOmpDoc(docPath: string, content: string): Promise<string | null> {
+	const digest = createHash("sha256").update(content).digest("hex").slice(0, 16);
+	const target = path.join(getDocsCacheDir(), digest, docPath);
+	try {
+		await fs.access(target);
+		return target;
+	} catch {
+		// Cache miss (or an unreadable entry): write it below.
+	}
+	// The random suffix keeps concurrent writers of the same doc from colliding
+	// on one temp path before the atomic rename.
+	const tempPath = `${target}.${process.pid}.${crypto.randomUUID()}.tmp`;
+	try {
+		await fs.mkdir(path.dirname(target), { recursive: true });
+		await Bun.write(tempPath, content, { mode: 0o444 });
+		await fs.rename(tempPath, target);
+	} catch (error) {
+		await fs.rm(tempPath, { force: true }).catch(() => undefined);
+		logger.debug("omp:// doc materialization failed", { docPath, error: String(error) });
+		return null;
+	}
+	return target;
 }
