@@ -95,6 +95,7 @@ const FIELD_RULES: Record<string, Rule> = {
 		"restrictToolNames",
 		"readSummarize",
 		"isolated",
+		"isIsolated",
 		"streamIndex",
 		"errorStatus",
 		"errorId",

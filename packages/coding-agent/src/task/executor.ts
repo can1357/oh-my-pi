@@ -447,6 +447,14 @@ export interface ExecutorOptions {
 	/** Parent task recursion depth (0 = top-level, 1 = first child, etc.) */
 	taskDepth?: number;
 	/**
+	 * Whether the spawning session itself runs inside an isolation worktree.
+	 * A non-isolated child of an isolated parent still executes inside the
+	 * parent's worktree (`cwd`), so the child session must inherit the marker —
+	 * otherwise it would expose `isolated` to its own children and let a nested
+	 * `isolated: true` bypass the `task.isolation.allowNested` gate.
+	 */
+	isIsolated?: boolean;
+	/**
 	 * Override the `task.maxRuntimeMs` wall-clock cap for this run. When provided
 	 * it wins over the settings value; `0` disables the per-subagent wall-clock
 	 * limit entirely. Used by the eval `agent()` bridge, whose parent cell
@@ -4340,6 +4348,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					prewalk,
 					spawns: spawnsEnv,
 					taskDepth: childDepth,
+					isIsolated: worktree !== undefined || options.isIsolated === true,
 					// The whole spawn tree shares the root session's observability bus,
 					// so nested lifecycle/progress/event frames reach its surfaces
 					// without leaking into another root session's traffic.
@@ -4520,6 +4529,9 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				// stamp the contract so cold revival leaves them transcript-only
 				// even when the workspace was retained for recovery.
 				isolated: worktree !== undefined || undefined,
+				// Preserve the nested-isolation gate marker across cold revives so a
+				// revived child of an isolated parent still rejects nested isolation.
+				isIsolated: worktree !== undefined || options.isIsolated === true || undefined,
 			});
 
 			abortSignal.addEventListener(

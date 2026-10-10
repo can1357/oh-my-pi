@@ -307,6 +307,42 @@ describe("subagent runtime model resolution", () => {
 		expect(persisted).toEqual({ primary: "primary/bad-runtime-model", chain: ["fallback/working-model"] });
 	});
 
+	for (const isIsolated of [true, false]) {
+		it(`persists the nested-isolation gate marker for cold revival (isIsolated=${isIsolated})`, async () => {
+			// The executor records `isIsolated` in the persisted subagent contract;
+			// dropping it would silently re-expose `isolated` to revived children
+			// of isolated parents.
+			const primary = model("primary", "bad-runtime-model");
+			const fallback = model("fallback", "working-model");
+			let persistedIsIsolated: boolean | undefined;
+			vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async () => {
+				const session = createYieldingSession("none");
+				vi.spyOn(session.sessionManager, "appendSessionInit").mockImplementation(init => {
+					persistedIsIsolated = init.isIsolated;
+					return "session-init";
+				});
+				return { session, extensionsResult: {}, setToolUIContext: () => {} } as never;
+			});
+			await runSubprocess({
+				cwd: "/tmp",
+				agent: { name: "task", description: "test", systemPrompt: "test", source: "bundled" },
+				task: "work",
+				index: 0,
+				id: `issue-2750-isolated-${isIsolated}`,
+				modelOverride: ["primary/bad-runtime-model", "fallback/working-model"],
+				settings: Settings.isolated({}),
+				modelRegistry: {
+					refresh: async () => {},
+					getAvailable: () => [primary, fallback],
+					getApiKey: async () => "test-key",
+				} as never,
+				enableLsp: false,
+				...(isIsolated ? { isIsolated: true as const } : {}),
+			});
+			expect(persistedIsIsolated).toBe(isIsolated || undefined);
+		});
+	}
+
 	it("does not attribute the run to a fallback that never served a turn", async () => {
 		// The incident shape: the primary does all the work, a transient error
 		// routes the child onto a chain candidate, and that candidate errors on its

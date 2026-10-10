@@ -41,7 +41,7 @@ import { hasWaitTool } from "../tools/wait";
 import { isIrcEnabled } from "../irc/messaging";
 import { isReadOnlyAgent } from "./read-only-policy";
 import { formatTaskResultSummary } from "./result-summary";
-import { isScoutSpawnable, resolveSpawnPolicy } from "./spawn-policy";
+import { isIsolationAvailable, isScoutSpawnable, resolveSpawnPolicy } from "./spawn-policy";
 import { type AgentDefinition, canSpawnAtDepth, getTaskSchema, type TaskToolSchemaInstance } from "./types";
 import {
 	type AgentProgress,
@@ -71,7 +71,6 @@ import {
 	cfgTaskEnableEffort,
 	cfgTaskEnableLsp,
 	cfgTaskIsolationApply,
-	cfgTaskIsolationEnabled,
 	cfgTaskMaxConcurrency,
 	cfgTaskMaxRecursionDepth,
 	cfgTaskMaxRuntimeMs,
@@ -241,6 +240,16 @@ function validateSpawnParams(params: TaskParams, batchEnabled: boolean): string 
 		}
 		if (hasTask) {
 			return "Top-level `task` is not part of the batch shape. Put the work in `tasks[]` items.";
+		}
+		if (params.isolated !== undefined && params.isolated !== false) {
+			// The batch shape carries isolation per item. Any top-level value
+			// other than the literal `false` (the schema-aware no-op) is a
+			// shape violation — including malformed affirmative values like
+			// `isolated: "true"` that slip through the lenient raw-args
+			// fallthrough. Rejecting here keeps `spawnParamsFor` from letting
+			// an item's `false` silently downgrade the malformed request
+			// before the nested-isolation preflight ever sees it.
+			return "Top-level `isolated` is not part of the batch shape. Set `isolated` per item in `tasks[]`.";
 		}
 		for (let i = 0; i < tasks.length; i++) {
 			const item = tasks[i];
@@ -667,7 +676,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 
 	get parameters(): TaskToolSchemaInstance {
 		const planMode = this.session.getPlanModeState?.()?.enabled === true;
-		const isolationEnabled = !planMode && cfgTaskIsolationEnabled.get(this.session.settings);
+		const isolationEnabled = isIsolationAvailable(this.session, planMode);
 		return getTaskSchema({
 			isolationEnabled,
 			batchEnabled: this.#isBatchEnabled(),
@@ -685,13 +694,13 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 	get description(): string {
 		const disabledAgents = cfgTaskDisabledAgents.get(this.session.settings);
 		const planMode = this.session.getPlanModeState?.()?.enabled === true;
-		const isolationEnabled = cfgTaskIsolationEnabled.get(this.session.settings);
+
 		return renderDescription({
 			agents:
 				discoverySnapshots.get(discoveryCacheKey(this.session.cwd, this.session.effectiveExtensionRoots?.())) ??
 				this.#discoveredAgents,
 			sessionAgents: this.session.advertisedSessionAgents?.() ?? this.session.getSessionAgents?.() ?? [],
-			isolationEnabled: !planMode && isolationEnabled,
+			isolationEnabled: isIsolationAvailable(this.session, planMode),
 			applyIsolatedChanges: cfgTaskIsolationApply.get(this.session.settings),
 			disabledAgents,
 			batchEnabled: this.#isBatchEnabled(),

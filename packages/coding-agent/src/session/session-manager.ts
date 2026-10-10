@@ -3465,6 +3465,7 @@ export class SessionManager {
 		readSummarize?: boolean;
 		advisor?: string;
 		compactionThreshold?: { thresholdPercent: number; thresholdTokens: number };
+		isIsolated?: boolean;
 		isolated?: boolean;
 		workPoolYieldItems?: WorkPoolYieldItem[];
 	}): string {
@@ -4359,6 +4360,8 @@ export interface PersistedSessionInit {
 	readSummarize?: boolean;
 	advisor?: string;
 	compactionThreshold?: { thresholdPercent: number; thresholdTokens: number };
+	/** Whether the session ran inside an isolation worktree (nested-isolation gate marker, revivable). */
+	isIsolated?: boolean;
 	isolated?: boolean;
 	workPoolYieldItems?: WorkPoolYieldItem[];
 }
@@ -4386,6 +4389,7 @@ export function extractSessionInit(entries: readonly FileEntry[]): PersistedSess
 			readSummarize: entry.readSummarize,
 			spawns: entry.spawns,
 			advisor: entry.advisor,
+			isIsolated: entry.isIsolated,
 			isolated: entry.isolated,
 			...(entry.compactionThreshold !== undefined ? { compactionThreshold: entry.compactionThreshold } : undefined),
 			...(entry.workPoolYieldItems !== undefined ? { workPoolYieldItems: entry.workPoolYieldItems } : undefined),
