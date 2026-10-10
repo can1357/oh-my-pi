@@ -142,6 +142,72 @@
 				"clientOmit": []
 			},
 			{
+				"name": "get_skill_diagnostics",
+				"doc": "Snapshot skill resolution; available even when startup notices are disabled.",
+				"params": null,
+				"result": "SkillDiagnosticsSnapshot",
+				"nullable": false,
+				"unwrap": null,
+				"timeoutMs": null,
+				"completion": null,
+				"clientOmit": []
+			},
+			{
+				"name": "set_skill_startup_diagnostics",
+				"doc": "Persist the skill startup-notice preference; returns the snapshot with the effective setting.",
+				"params": "SetSkillStartupDiagnosticsParams",
+				"result": "SkillDiagnosticsSnapshot",
+				"nullable": false,
+				"unwrap": null,
+				"timeoutMs": null,
+				"completion": null,
+				"clientOmit": []
+			},
+			{
+				"name": "prepare_skill_diagnostic_analysis",
+				"doc": "Snapshot the comparable variants of one skill name and return the server-held record with its consent disclosure; sends nothing to a model. `model` must name one authenticated model exactly; omitted uses the default analysis model.",
+				"params": "PrepareSkillDiagnosticAnalysisParams",
+				"result": "SkillDiagnosticAnalysisRecord",
+				"nullable": false,
+				"unwrap": null,
+				"timeoutMs": null,
+				"completion": null,
+				"clientOmit": []
+			},
+			{
+				"name": "analyze_skill_diagnostics",
+				"doc": "Start a prepared analysis once the user consented (`consent` must be true); returns the running record immediately. Progress and the result arrive as `skill_diagnostics_update` frames. Repeating the call for a running, complete or applied id replays its state without another model call; a cancelled, failed or stale analysis must be prepared again.",
+				"params": "AnalyzeSkillDiagnosticsParams",
+				"result": "SkillDiagnosticAnalysisRecord",
+				"nullable": false,
+				"unwrap": null,
+				"timeoutMs": null,
+				"completion": null,
+				"clientOmit": []
+			},
+			{
+				"name": "cancel_skill_diagnostic_analysis",
+				"doc": "Abort one analysis by id; returns its record.",
+				"params": "CancelSkillDiagnosticAnalysisParams",
+				"result": "SkillDiagnosticAnalysisRecord",
+				"nullable": false,
+				"unwrap": null,
+				"timeoutMs": null,
+				"completion": null,
+				"clientOmit": []
+			},
+			{
+				"name": "apply_skill_diagnostic_analysis",
+				"doc": "Apply a complete `prefer` recommendation after a separate confirmation (`confirmed` must be true): saves a content-bound exclusion in the user's global settings and reloads skills; installed files are unchanged. A successfully applied id replays without another change. If its record has `applied: true` and `error`, saving succeeded but the session reload failed; another separately confirmed call retries the application.",
+				"params": "ApplySkillDiagnosticAnalysisParams",
+				"result": "SkillDiagnosticAnalysisRecord",
+				"nullable": false,
+				"unwrap": null,
+				"timeoutMs": null,
+				"completion": null,
+				"clientOmit": []
+			},
+			{
 				"name": "set_fast_mode",
 				"doc": "Enable or disable fast mode for the session.",
 				"params": "SetFastModeParams",
@@ -2520,6 +2586,414 @@
 			],
 			"description": "Provider-neutral state of an account past its usage limit, discriminated by `stage`."
 		},
+		"SkillSelectionReason": {
+			"enum": [
+				"source-order",
+				"custom-directory",
+				"authored-over-installed"
+			],
+			"type": "string",
+			"description": "Rule that ordered the active variants of one skill name."
+		},
+		"SkillDiagnosticEntry": {
+			"type": "object",
+			"properties": {
+				"name": {
+					"type": "string"
+				},
+				"filePath": {
+					"type": "string"
+				},
+				"source": {
+					"type": "string"
+				},
+				"pluginName": {
+					"type": "string"
+				},
+				"repository": {
+					"type": "string"
+				},
+				"version": {
+					"type": "string"
+				}
+			},
+			"required": [
+				"name",
+				"filePath",
+				"source"
+			],
+			"description": "Allowlisted identity of one discovered skill file; `repository`/`version` are what its plugin declares."
+		},
+		"SkillDuplicateMatch": {
+			"enum": [
+				"content",
+				"origin"
+			],
+			"type": "string",
+			"description": "Why a duplicate is not loaded: identical SKILL.md content, or a same-origin variant (`skills.dedupeSameOrigin`)."
+		},
+		"SkillDiagnosticDuplicate": {
+			"type": "object",
+			"properties": {
+				"skill": {
+					"$ref": "#/$defs/SkillDiagnosticEntry"
+				},
+				"retained": {
+					"$ref": "#/$defs/SkillDiagnosticEntry"
+				},
+				"match": {
+					"$ref": "#/$defs/SkillDuplicateMatch",
+					"default": "content"
+				}
+			},
+			"required": [
+				"skill",
+				"retained"
+			],
+			"description": "A file not loaded because `retained` stands for it; older snapshots imply `match: content`."
+		},
+		"SkillResolutionDiagnostic": {
+			"type": "object",
+			"properties": {
+				"name": {
+					"type": "string"
+				},
+				"reason": {
+					"$ref": "#/$defs/SkillSelectionReason"
+				},
+				"skills": {
+					"type": "array",
+					"items": {
+						"$ref": "#/$defs/SkillDiagnosticEntry"
+					}
+				},
+				"duplicates": {
+					"type": "array",
+					"items": {
+						"$ref": "#/$defs/SkillDiagnosticDuplicate"
+					}
+				}
+			},
+			"required": [
+				"name",
+				"reason",
+				"skills",
+				"duplicates"
+			],
+			"description": "A skill name that resolved into several active variants and/or left redundant copies unloaded."
+		},
+		"ResourceRelationship": {
+			"enum": [
+				"copies",
+				"adaptation",
+				"overlap",
+				"complementary",
+				"unrelated",
+				"uncertain"
+			],
+			"type": "string",
+			"description": "How the model judged the compared resources to relate."
+		},
+		"ResourceAnalysisEvidence": {
+			"type": "object",
+			"properties": {
+				"candidateId": {
+					"type": "string"
+				},
+				"file": {
+					"type": "string"
+				},
+				"quote": {
+					"type": "string"
+				},
+				"explanation": {
+					"type": "string"
+				}
+			},
+			"required": [
+				"candidateId",
+				"file",
+				"quote",
+				"explanation"
+			],
+			"description": "A quote from one candidate's file that supports a finding; the server validated it against the snapshot the model read."
+		},
+		"ResourceRecommendationAction": {
+			"enum": [
+				"keep-all",
+				"prefer"
+			],
+			"type": "string"
+		},
+		"ResourceRecommendation": {
+			"type": "object",
+			"properties": {
+				"action": {
+					"$ref": "#/$defs/ResourceRecommendationAction"
+				},
+				"reason": {
+					"type": "string"
+				},
+				"preferredId": {
+					"type": "string",
+					"description": "Candidate id to keep; present only when `action` is `prefer`."
+				}
+			},
+			"required": [
+				"action",
+				"reason"
+			],
+			"description": "What to do with the compared resources; `prefer` only follows a preferable relationship over complete coverage."
+		},
+		"ResourceAnalysis": {
+			"type": "object",
+			"properties": {
+				"relationship": {
+					"$ref": "#/$defs/ResourceRelationship"
+				},
+				"evidence": {
+					"type": "array",
+					"items": {
+						"$ref": "#/$defs/ResourceAnalysisEvidence"
+					}
+				},
+				"differences": {
+					"type": "array",
+					"items": {
+						"type": "string"
+					}
+				},
+				"recommendation": {
+					"$ref": "#/$defs/ResourceRecommendation"
+				},
+				"limitations": {
+					"type": "array",
+					"items": {
+						"type": "string"
+					}
+				}
+			},
+			"required": [
+				"relationship",
+				"evidence",
+				"differences",
+				"recommendation",
+				"limitations"
+			],
+			"description": "The model's comparison of the prepared snapshots, validated against them before it is reported."
+		},
+		"SkillAnalysisStatus": {
+			"enum": [
+				"prepared",
+				"running",
+				"complete",
+				"failed",
+				"cancelled",
+				"applied",
+				"stale"
+			],
+			"type": "string",
+			"description": "Lifecycle of one analysis: `prepared` has sent nothing; `stale` means the reviewed files changed after preparation or analysis, or an applied preference was restored. A completed `result` may remain for inspection but cannot be applied."
+		},
+		"SkillAnalysisCandidate": {
+			"type": "object",
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"name": {
+					"type": "string"
+				},
+				"filePath": {
+					"type": "string"
+				},
+				"root": {
+					"type": "string"
+				},
+				"fingerprint": {
+					"type": "string"
+				},
+				"complete": {
+					"type": "boolean",
+					"description": "False when part of the skill directory was left out of the snapshot."
+				},
+				"files": {
+					"type": "integer",
+					"description": "Files included in the snapshot."
+				},
+				"omissions": {
+					"type": "array",
+					"items": {
+						"type": "string"
+					},
+					"description": "What was left out and why."
+				}
+			},
+			"required": [
+				"id",
+				"name",
+				"filePath",
+				"root",
+				"fingerprint",
+				"complete",
+				"files",
+				"omissions"
+			],
+			"description": "One skill variant an analysis would send: where it lives and how completely it is covered."
+		},
+		"SkillDiagnosticAnalysisRecord": {
+			"type": "object",
+			"properties": {
+				"id": {
+					"type": "string",
+					"description": "Opaque server-issued id; the only handle `analyze`, `cancel` and `apply` accept."
+				},
+				"name": {
+					"type": "string"
+				},
+				"status": {
+					"$ref": "#/$defs/SkillAnalysisStatus"
+				},
+				"model": {
+					"type": "string",
+					"description": "Exact model selector the analysis uses."
+				},
+				"bytes": {
+					"type": "integer",
+					"description": "Resource bytes the request carries."
+				},
+				"candidates": {
+					"type": "array",
+					"items": {
+						"$ref": "#/$defs/SkillAnalysisCandidate"
+					}
+				},
+				"disclosure": {
+					"type": "string",
+					"description": "What leaving the machine means (files are data, known secrets are filtered best-effort, the conversation is excluded, charges may apply); show it with `model`, `candidates` and `bytes` before asking for consent."
+				},
+				"createdAt": {
+					"type": "integer",
+					"description": "Epoch milliseconds when the record was prepared."
+				},
+				"applied": {
+					"type": "boolean",
+					"description": "The preference was saved. With `error`, the session reload failed and copies may still be active; a separately confirmed application can retry it. Restoring the copies invalidates this status."
+				},
+				"result": {
+					"$ref": "#/$defs/ResourceAnalysis",
+					"description": "Present once the analysis has completed, including `applied` and `stale` records."
+				},
+				"error": {
+					"type": "string",
+					"description": "Why the last run or application did not finish."
+				}
+			},
+			"required": [
+				"id",
+				"name",
+				"status",
+				"model",
+				"bytes",
+				"candidates",
+				"disclosure",
+				"createdAt",
+				"applied"
+			],
+			"description": "Server-held analysis of one skill name: what would be sent, then its status and result. Holds no full resource snapshots, credentials, or conversation; `result.evidence[].quote` carries bounded verbatim excerpts of skill files."
+		},
+		"SkillDiagnosticIssue": {
+			"enum": [
+				"conflict",
+				"redundancy",
+				"missing-provenance"
+			],
+			"type": "string",
+			"description": "What is wrong with a skill name: several active variants, redundant unloaded copies, or a copy that declares no repository."
+		},
+		"SkillDiagnosticItem": {
+			"type": "object",
+			"properties": {
+				"name": {
+					"type": "string"
+				},
+				"issues": {
+					"type": "array",
+					"items": {
+						"$ref": "#/$defs/SkillDiagnosticIssue"
+					}
+				},
+				"skills": {
+					"type": "array",
+					"items": {
+						"$ref": "#/$defs/SkillDiagnosticEntry"
+					}
+				},
+				"duplicates": {
+					"type": "array",
+					"items": {
+						"$ref": "#/$defs/SkillDiagnosticDuplicate"
+					}
+				},
+				"canAnalyze": {
+					"type": "boolean",
+					"description": "A comparable group exists, so `prepare_skill_diagnostic_analysis` can run for this name."
+				},
+				"reason": {
+					"$ref": "#/$defs/SkillSelectionReason"
+				},
+				"unavailableReason": {
+					"type": "string",
+					"description": "Why `canAnalyze` is false, e.g. a single copy with nothing to compare."
+				},
+				"analysis": {
+					"$ref": "#/$defs/SkillDiagnosticAnalysisRecord",
+					"description": "Current plan record for this name, in any status."
+				},
+				"lastAnalysis": {
+					"$ref": "#/$defs/SkillDiagnosticAnalysisRecord",
+					"description": "Most recent finished analysis, kept while another is prepared."
+				}
+			},
+			"required": [
+				"name",
+				"issues",
+				"skills",
+				"duplicates",
+				"canAnalyze"
+			],
+			"description": "One loaded skill name with its issues and analysis state; clean single-copy names are listed with `canAnalyze: false`."
+		},
+		"SkillDiagnosticsSnapshot": {
+			"type": "object",
+			"properties": {
+				"cwd": {
+					"type": "string"
+				},
+				"showStartupDiagnostics": {
+					"type": "boolean"
+				},
+				"diagnostics": {
+					"type": "array",
+					"items": {
+						"$ref": "#/$defs/SkillResolutionDiagnostic"
+					}
+				},
+				"items": {
+					"type": "array",
+					"items": {
+						"$ref": "#/$defs/SkillDiagnosticItem"
+					},
+					"description": "Every loaded skill name with its analysis state; absent when connected to an older server."
+				}
+			},
+			"required": [
+				"cwd",
+				"showStartupDiagnostics",
+				"diagnostics"
+			],
+			"description": "Current skill resolution; an empty `diagnostics` means no conflicts or redundant installations."
+		},
 		"SessionState": {
 			"type": "object",
 			"properties": {
@@ -2661,6 +3135,10 @@
 					],
 					"description": "Current goal mode; null when the session has no goal.",
 					"default": null
+				},
+				"skillDiagnostics": {
+					"$ref": "#/$defs/SkillDiagnosticsSnapshot",
+					"description": "Current skill-resolution details; absent when connected to an older server."
 				}
 			},
 			"required": [
@@ -4410,6 +4888,22 @@
 			],
 			"description": "Slash-command catalog, pushed at startup and whenever command metadata changes."
 		},
+		"SkillDiagnosticsUpdateEvent": {
+			"type": "object",
+			"properties": {
+				"type": {
+					"const": "skill_diagnostics_update"
+				},
+				"data": {
+					"$ref": "#/$defs/SkillDiagnosticsSnapshot"
+				}
+			},
+			"required": [
+				"type",
+				"data"
+			],
+			"description": "Skill-resolution snapshot, pushed at startup and whenever it, the effective notice setting, or any skill analysis state or result changes."
+		},
 		"SubagentLifecycleStatus": {
 			"enum": [
 				"started",
@@ -5708,6 +6202,9 @@
 					"$ref": "#/$defs/AvailableCommandsUpdateEvent"
 				},
 				{
+					"$ref": "#/$defs/SkillDiagnosticsUpdateEvent"
+				},
+				{
 					"$ref": "#/$defs/SubagentLifecycleEvent"
 				},
 				{
@@ -5912,6 +6409,72 @@
 			},
 			"required": [
 				"sessionDir"
+			]
+		},
+		"SetSkillStartupDiagnosticsParams": {
+			"type": "object",
+			"properties": {
+				"enabled": {
+					"type": "boolean"
+				}
+			},
+			"required": [
+				"enabled"
+			]
+		},
+		"PrepareSkillDiagnosticAnalysisParams": {
+			"type": "object",
+			"properties": {
+				"name": {
+					"type": "string"
+				},
+				"model": {
+					"type": "string"
+				}
+			},
+			"required": [
+				"name"
+			]
+		},
+		"AnalyzeSkillDiagnosticsParams": {
+			"type": "object",
+			"properties": {
+				"analysisId": {
+					"type": "string"
+				},
+				"consent": {
+					"type": "boolean"
+				}
+			},
+			"required": [
+				"analysisId",
+				"consent"
+			]
+		},
+		"CancelSkillDiagnosticAnalysisParams": {
+			"type": "object",
+			"properties": {
+				"analysisId": {
+					"type": "string"
+				}
+			},
+			"required": [
+				"analysisId"
+			]
+		},
+		"ApplySkillDiagnosticAnalysisParams": {
+			"type": "object",
+			"properties": {
+				"analysisId": {
+					"type": "string"
+				},
+				"confirmed": {
+					"type": "boolean"
+				}
+			},
+			"required": [
+				"analysisId",
+				"confirmed"
 			]
 		},
 		"SetFastModeParams": {

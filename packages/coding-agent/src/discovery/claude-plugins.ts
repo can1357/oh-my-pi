@@ -24,8 +24,10 @@ import {
 	expandEnvVarsDeep,
 	listClaudePluginRoots,
 	loadFilesFromDir,
+	readPluginProvenance,
 	scanSkillsFromDir,
 } from "./helpers";
+import { activeResourceExclusions } from "./omp-extension-roots";
 
 import { resolvePluginStdioPaths, substitutePluginRoot } from "./substitute-plugin-root";
 
@@ -43,7 +45,11 @@ async function allowedRoots(
 	ctx: LoadContext,
 	surface: "skills" | "mcp" | "other",
 ): Promise<{ roots: ClaudePluginRoot[]; warnings: string[] }> {
-	const { roots, warnings } = await listClaudePluginRoots(ctx.home, ctx.cwd);
+	const { roots, warnings } = await listClaudePluginRoots(
+		ctx.home,
+		ctx.cwd,
+		activeResourceExclusions(ctx.extensionRoots),
+	);
 	const userEnabled = isUserSourceEnabled("claude-plugins", ctx) || isUserSourceEnabled("claude", ctx);
 	const scopedRoots = userEnabled ? roots : roots.filter(root => root.scope === "project" || root.origin !== "claude");
 	const flags = await Promise.all(scopedRoots.map(root => legacyProviderAllowed(root.path, surface)));
@@ -219,7 +225,10 @@ async function loadSkills(ctx: LoadContext): Promise<LoadResult<Skill>> {
 	warnings.push(...rootWarnings);
 	const results = await Promise.all(
 		roots.map(async root => {
-			const marketplaceRootManifest = await readMarketplaceRootManifest(root);
+			const [marketplaceRootManifest, provenance] = await Promise.all([
+				readMarketplaceRootManifest(root),
+				readPluginProvenance(root.path),
+			]);
 			const { dirs: skillsDirs, warnings: resolveWarnings } = await resolvePluginDir(root, {
 				manifestKeys: ["skills"],
 				fallback: "skills",
@@ -235,6 +244,7 @@ async function loadSkills(ctx: LoadContext): Promise<LoadResult<Skill>> {
 						includeSelf: true,
 						origin: root.origin,
 						pluginName: root.plugin,
+						provenance,
 					}),
 				),
 			);

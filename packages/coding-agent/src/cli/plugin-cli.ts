@@ -19,6 +19,7 @@ import {
 } from "../extensibility/plugins/marketplace/index.js";
 import type { InstalledPlugin } from "../extensibility/plugins/types";
 import { theme } from "@oh-my-pi/pi-tui/theme";
+import { defaultPluginDoctorIo, type PluginDoctorIo, runPluginDoctorAnalysis } from "./plugin-doctor-analysis";
 
 // =============================================================================
 // Types
@@ -44,6 +45,10 @@ export interface PluginCommandArgs {
 	flags: {
 		json?: boolean;
 		fix?: boolean;
+		analyze?: boolean;
+		model?: string;
+		yes?: boolean;
+		apply?: boolean;
 		force?: boolean;
 		dryRun?: boolean;
 		local?: boolean;
@@ -106,6 +111,17 @@ export function parsePluginArgs(args: string[]): PluginCommandArgs | undefined {
 			result.flags.json = true;
 		} else if (arg === "--fix") {
 			result.flags.fix = true;
+		} else if (arg === "--analyze") {
+			result.flags.analyze = true;
+		} else if (arg === "--yes") {
+			result.flags.yes = true;
+		} else if (arg === "--apply") {
+			result.flags.apply = true;
+		} else if (arg === "--model" && i + 1 < args.length && !args[i + 1].startsWith("-")) {
+			result.flags.model = args[++i];
+		} else if (arg === "--model") {
+			console.error(chalk.red("--model requires a selector, e.g. --model provider/model"));
+			process.exit(1);
 		} else if (arg === "--force") {
 			result.flags.force = true;
 		} else if (arg === "--dry-run") {
@@ -142,6 +158,20 @@ import { classifyInstallTarget, handleMarketplaceInstall } from "./classify-inst
 
 export { classifyInstallTarget } from "./classify-install-target";
 
+/** Flag combinations that must be refused before any repair, model call, or write. */
+function analysisFlagError(action: PluginAction, flags: PluginCommandArgs["flags"]): string | undefined {
+	if (!flags.analyze) {
+		return flags.model !== undefined || flags.yes || flags.apply
+			? "--model, --yes and --apply only apply to `plugin doctor --analyze`"
+			: undefined;
+	}
+	if (action !== "doctor") return "--analyze is only available with `plugin doctor`";
+	if (flags.fix) {
+		return "--analyze cannot be combined with --fix: --fix repairs deterministic plugin problems and never authorizes AI-assisted decisions";
+	}
+	return undefined;
+}
+
 // =============================================================================
 // Command Handlers
 // =============================================================================
@@ -149,7 +179,12 @@ export { classifyInstallTarget } from "./classify-install-target";
 /**
  * Run a plugin command.
  */
-export async function runPluginCommand(cmd: PluginCommandArgs): Promise<void> {
+export async function runPluginCommand(cmd: PluginCommandArgs, io?: PluginDoctorIo): Promise<void> {
+	const flagError = analysisFlagError(cmd.action, cmd.flags);
+	if (flagError) {
+		console.error(chalk.red(flagError));
+		process.exit(1);
+	}
 	const manager = new PluginManager();
 
 	switch (cmd.action) {
@@ -166,7 +201,7 @@ export async function runPluginCommand(cmd: PluginCommandArgs): Promise<void> {
 			await handleLink(manager, cmd.args, cmd.flags);
 			break;
 		case "doctor":
-			await handleDoctor(manager, cmd.flags);
+			await handleDoctor(manager, cmd.args, cmd.flags, io);
 			break;
 		case "features":
 			await handleFeatures(manager, cmd.args, cmd.flags);
@@ -730,7 +765,24 @@ async function handleLink(
 	}
 }
 
-async function handleDoctor(manager: PluginManager, flags: { json?: boolean; fix?: boolean }): Promise<void> {
+async function handleDoctor(
+	manager: PluginManager,
+	args: string[],
+	flags: PluginCommandArgs["flags"],
+	io: PluginDoctorIo | undefined,
+): Promise<void> {
+	if (flags.analyze) {
+		const code = await runPluginDoctorAnalysis({
+			manager,
+			marketplace: await makeMarketplaceManager(),
+			selectors: args,
+			flags,
+			io: io ?? defaultPluginDoctorIo,
+		});
+		if (code !== 0) process.exit(code);
+		return;
+	}
+
 	const checks = await manager.doctor({ fix: flags.fix });
 
 	if (flags.json) {
@@ -760,6 +812,11 @@ async function handleDoctor(manager: PluginManager, flags: { json?: boolean; fix
 
 	console.log("");
 	console.log(`Summary: ${ok} ok, ${warnings} warnings, ${errors} errors${fixed > 0 ? `, ${fixed} fixed` : ""}`);
+	console.log(
+		chalk.dim(
+			`\nTwo extensions overlap? Opt in to an AI comparison (sends their files to a model, never runs them, changes nothing): ${APP_NAME} plugin doctor --analyze <plugin-a> <plugin-b>  (installed names, or paths to an extension file or directory)`,
+		),
+	);
 
 	if (errors > 0) {
 		if (!flags.fix) {
@@ -1122,7 +1179,7 @@ ${chalk.bold("Commands:")}
   uninstall <pkg>                Remove plugins
   list                           Show installed plugins
   link <path>                    Link local plugin for development
-  doctor                         Check plugin health
+  doctor                         Check plugin health (--analyze compares two extensions with AI)
   features <pkg>                 View/modify enabled features
   config <cmd> <pkg> [key] [val] Manage plugin settings
   enable <pkg>                   Enable a disabled plugin
@@ -1153,6 +1210,13 @@ ${chalk.bold("Config Subcommands:")}
 ${chalk.bold("Options:")}
   --json           Output as JSON
   --fix            Attempt automatic fixes (doctor)
+  --analyze        Compare exactly two extensions you name (installed name, or path to an extension file or
+                   directory) with an AI model (doctor). Read-only; sends their files to the model after consent
+                   and never runs them. Not combinable with --fix
+  --model <sel>    Model for --analyze (default: the smol role; an explicit selector must resolve exactly)
+  --yes            Consent to sending files to the model for --analyze. Never applies changes
+  --apply          After --analyze, hide the non-preferred copy in omp only, after a separate interactive
+                   confirmation (a terminal is required; nothing is uninstalled)
   --force          Overwrite without prompting (install)
   --scope <scope>  Install scope: user (default) or project (install name@marketplace)
   --dry-run        Preview changes without applying (install)
@@ -1164,6 +1228,7 @@ ${chalk.bold("Examples:")}
   ${APP_NAME} plugin features my-plugin --enable search,web
   ${APP_NAME} plugin config set my-plugin apiKey sk-xxx
   ${APP_NAME} plugin doctor --fix
+  ${APP_NAME} plugin doctor --analyze plugin-a ./extensions/helper.ts
   ${APP_NAME} plugin install --scope project name@marketplace
   ${APP_NAME} plugin install github:user/repo#v1.0
 `);

@@ -2493,6 +2493,453 @@ func (v *UsageLimitState) decodeFrom(raw map[string]json.RawMessage) error {
 	return nil
 }
 
+// Rule that ordered the active variants of one skill name.
+type SkillSelectionReason string
+
+const (
+	SkillSelectionReasonSourceOrder           SkillSelectionReason = "source-order"
+	SkillSelectionReasonCustomDirectory       SkillSelectionReason = "custom-directory"
+	SkillSelectionReasonAuthoredOverInstalled SkillSelectionReason = "authored-over-installed"
+)
+
+func (v *SkillSelectionReason) UnmarshalJSON(data []byte) error {
+	s, err := decodeString(data, "SkillSelectionReason")
+	if err != nil {
+		return err
+	}
+	switch value := SkillSelectionReason(s); value {
+	case SkillSelectionReasonSourceOrder, SkillSelectionReasonCustomDirectory, SkillSelectionReasonAuthoredOverInstalled:
+		*v = value
+		return nil
+	}
+	return unknownValue("SkillSelectionReason", s)
+}
+
+// Allowlisted identity of one discovered skill file; `repository`/`version` are what its plugin declares.
+type SkillDiagnosticEntry struct {
+	Name       string  `json:"name"`
+	FilePath   string  `json:"filePath"`
+	Source     string  `json:"source"`
+	PluginName *string `json:"pluginName,omitempty"`
+	Repository *string `json:"repository,omitempty"`
+	Version    *string `json:"version,omitempty"`
+}
+
+func (v *SkillDiagnosticEntry) UnmarshalJSON(data []byte) error {
+	return decodeWith(data, "SkillDiagnosticEntry", v.decodeFrom)
+}
+
+func (v *SkillDiagnosticEntry) decodeFrom(raw map[string]json.RawMessage) error {
+	var out SkillDiagnosticEntry
+	d := fieldDecoder{raw: raw, owner: "SkillDiagnosticEntry"}
+	d.required("name", &out.Name)
+	d.required("filePath", &out.FilePath)
+	d.required("source", &out.Source)
+	d.optional("pluginName", &out.PluginName)
+	d.optional("repository", &out.Repository)
+	d.optional("version", &out.Version)
+	if d.err != nil {
+		return d.err
+	}
+	*v = out
+	return nil
+}
+
+// Why a duplicate is not loaded: identical SKILL.md content, or a same-origin variant (`skills.dedupeSameOrigin`).
+type SkillDuplicateMatch string
+
+const (
+	SkillDuplicateMatchContent SkillDuplicateMatch = "content"
+	SkillDuplicateMatchOrigin  SkillDuplicateMatch = "origin"
+)
+
+func (v *SkillDuplicateMatch) UnmarshalJSON(data []byte) error {
+	s, err := decodeString(data, "SkillDuplicateMatch")
+	if err != nil {
+		return err
+	}
+	switch value := SkillDuplicateMatch(s); value {
+	case SkillDuplicateMatchContent, SkillDuplicateMatchOrigin:
+		*v = value
+		return nil
+	}
+	return unknownValue("SkillDuplicateMatch", s)
+}
+
+// A file not loaded because `retained` stands for it; older snapshots imply `match: content`.
+type SkillDiagnosticDuplicate struct {
+	Skill    SkillDiagnosticEntry `json:"skill"`
+	Retained SkillDiagnosticEntry `json:"retained"`
+	Match    SkillDuplicateMatch  `json:"match"`
+}
+
+func (v *SkillDiagnosticDuplicate) UnmarshalJSON(data []byte) error {
+	return decodeWith(data, "SkillDiagnosticDuplicate", v.decodeFrom)
+}
+
+func (v *SkillDiagnosticDuplicate) decodeFrom(raw map[string]json.RawMessage) error {
+	var out SkillDiagnosticDuplicate
+	d := fieldDecoder{raw: raw, owner: "SkillDiagnosticDuplicate"}
+	d.required("skill", &out.Skill)
+	d.required("retained", &out.Retained)
+	d.defaulted("match", &out.Match, `"content"`)
+	if d.err != nil {
+		return d.err
+	}
+	*v = out
+	return nil
+}
+
+// A skill name that resolved into several active variants and/or left redundant copies unloaded.
+type SkillResolutionDiagnostic struct {
+	Name       string                     `json:"name"`
+	Reason     SkillSelectionReason       `json:"reason"`
+	Skills     []SkillDiagnosticEntry     `json:"skills"`
+	Duplicates []SkillDiagnosticDuplicate `json:"duplicates"`
+}
+
+func (v *SkillResolutionDiagnostic) UnmarshalJSON(data []byte) error {
+	return decodeWith(data, "SkillResolutionDiagnostic", v.decodeFrom)
+}
+
+func (v *SkillResolutionDiagnostic) decodeFrom(raw map[string]json.RawMessage) error {
+	var out SkillResolutionDiagnostic
+	d := fieldDecoder{raw: raw, owner: "SkillResolutionDiagnostic"}
+	d.required("name", &out.Name)
+	d.required("reason", &out.Reason)
+	d.required("skills", &out.Skills)
+	d.required("duplicates", &out.Duplicates)
+	if d.err != nil {
+		return d.err
+	}
+	*v = out
+	return nil
+}
+
+// How the model judged the compared resources to relate.
+type ResourceRelationship string
+
+const (
+	ResourceRelationshipCopies        ResourceRelationship = "copies"
+	ResourceRelationshipAdaptation    ResourceRelationship = "adaptation"
+	ResourceRelationshipOverlap       ResourceRelationship = "overlap"
+	ResourceRelationshipComplementary ResourceRelationship = "complementary"
+	ResourceRelationshipUnrelated     ResourceRelationship = "unrelated"
+	ResourceRelationshipUncertain     ResourceRelationship = "uncertain"
+)
+
+func (v *ResourceRelationship) UnmarshalJSON(data []byte) error {
+	s, err := decodeString(data, "ResourceRelationship")
+	if err != nil {
+		return err
+	}
+	switch value := ResourceRelationship(s); value {
+	case ResourceRelationshipCopies, ResourceRelationshipAdaptation, ResourceRelationshipOverlap, ResourceRelationshipComplementary, ResourceRelationshipUnrelated, ResourceRelationshipUncertain:
+		*v = value
+		return nil
+	}
+	return unknownValue("ResourceRelationship", s)
+}
+
+// A quote from one candidate's file that supports a finding; the server validated it against the snapshot the model read.
+type ResourceAnalysisEvidence struct {
+	CandidateID string `json:"candidateId"`
+	File        string `json:"file"`
+	Quote       string `json:"quote"`
+	Explanation string `json:"explanation"`
+}
+
+func (v *ResourceAnalysisEvidence) UnmarshalJSON(data []byte) error {
+	return decodeWith(data, "ResourceAnalysisEvidence", v.decodeFrom)
+}
+
+func (v *ResourceAnalysisEvidence) decodeFrom(raw map[string]json.RawMessage) error {
+	var out ResourceAnalysisEvidence
+	d := fieldDecoder{raw: raw, owner: "ResourceAnalysisEvidence"}
+	d.required("candidateId", &out.CandidateID)
+	d.required("file", &out.File)
+	d.required("quote", &out.Quote)
+	d.required("explanation", &out.Explanation)
+	if d.err != nil {
+		return d.err
+	}
+	*v = out
+	return nil
+}
+
+type ResourceRecommendationAction string
+
+const (
+	ResourceRecommendationActionKeepAll ResourceRecommendationAction = "keep-all"
+	ResourceRecommendationActionPrefer  ResourceRecommendationAction = "prefer"
+)
+
+func (v *ResourceRecommendationAction) UnmarshalJSON(data []byte) error {
+	s, err := decodeString(data, "ResourceRecommendationAction")
+	if err != nil {
+		return err
+	}
+	switch value := ResourceRecommendationAction(s); value {
+	case ResourceRecommendationActionKeepAll, ResourceRecommendationActionPrefer:
+		*v = value
+		return nil
+	}
+	return unknownValue("ResourceRecommendationAction", s)
+}
+
+// What to do with the compared resources; `prefer` only follows a preferable relationship over complete coverage.
+type ResourceRecommendation struct {
+	Action ResourceRecommendationAction `json:"action"`
+	Reason string                       `json:"reason"`
+	// Candidate id to keep; present only when `action` is `prefer`.
+	PreferredID *string `json:"preferredId,omitempty"`
+}
+
+func (v *ResourceRecommendation) UnmarshalJSON(data []byte) error {
+	return decodeWith(data, "ResourceRecommendation", v.decodeFrom)
+}
+
+func (v *ResourceRecommendation) decodeFrom(raw map[string]json.RawMessage) error {
+	var out ResourceRecommendation
+	d := fieldDecoder{raw: raw, owner: "ResourceRecommendation"}
+	d.required("action", &out.Action)
+	d.required("reason", &out.Reason)
+	d.optional("preferredId", &out.PreferredID)
+	if d.err != nil {
+		return d.err
+	}
+	*v = out
+	return nil
+}
+
+// The model's comparison of the prepared snapshots, validated against them before it is reported.
+type ResourceAnalysis struct {
+	Relationship   ResourceRelationship       `json:"relationship"`
+	Evidence       []ResourceAnalysisEvidence `json:"evidence"`
+	Differences    []string                   `json:"differences"`
+	Recommendation ResourceRecommendation     `json:"recommendation"`
+	Limitations    []string                   `json:"limitations"`
+}
+
+func (v *ResourceAnalysis) UnmarshalJSON(data []byte) error {
+	return decodeWith(data, "ResourceAnalysis", v.decodeFrom)
+}
+
+func (v *ResourceAnalysis) decodeFrom(raw map[string]json.RawMessage) error {
+	var out ResourceAnalysis
+	d := fieldDecoder{raw: raw, owner: "ResourceAnalysis"}
+	d.required("relationship", &out.Relationship)
+	d.required("evidence", &out.Evidence)
+	d.required("differences", &out.Differences)
+	d.required("recommendation", &out.Recommendation)
+	d.required("limitations", &out.Limitations)
+	if d.err != nil {
+		return d.err
+	}
+	*v = out
+	return nil
+}
+
+// Lifecycle of one analysis: `prepared` has sent nothing; `stale` means the reviewed files changed after preparation or analysis, or an applied preference was restored. A completed `result` may remain for inspection but cannot be applied.
+type SkillAnalysisStatus string
+
+const (
+	SkillAnalysisStatusPrepared  SkillAnalysisStatus = "prepared"
+	SkillAnalysisStatusRunning   SkillAnalysisStatus = "running"
+	SkillAnalysisStatusComplete  SkillAnalysisStatus = "complete"
+	SkillAnalysisStatusFailed    SkillAnalysisStatus = "failed"
+	SkillAnalysisStatusCancelled SkillAnalysisStatus = "cancelled"
+	SkillAnalysisStatusApplied   SkillAnalysisStatus = "applied"
+	SkillAnalysisStatusStale     SkillAnalysisStatus = "stale"
+)
+
+func (v *SkillAnalysisStatus) UnmarshalJSON(data []byte) error {
+	s, err := decodeString(data, "SkillAnalysisStatus")
+	if err != nil {
+		return err
+	}
+	switch value := SkillAnalysisStatus(s); value {
+	case SkillAnalysisStatusPrepared, SkillAnalysisStatusRunning, SkillAnalysisStatusComplete, SkillAnalysisStatusFailed, SkillAnalysisStatusCancelled, SkillAnalysisStatusApplied, SkillAnalysisStatusStale:
+		*v = value
+		return nil
+	}
+	return unknownValue("SkillAnalysisStatus", s)
+}
+
+// One skill variant an analysis would send: where it lives and how completely it is covered.
+type SkillAnalysisCandidate struct {
+	ID          string `json:"id"`
+	Name        string `json:"name"`
+	FilePath    string `json:"filePath"`
+	Root        string `json:"root"`
+	Fingerprint string `json:"fingerprint"`
+	// False when part of the skill directory was left out of the snapshot.
+	Complete bool `json:"complete"`
+	// Files included in the snapshot.
+	Files int64 `json:"files"`
+	// What was left out and why.
+	Omissions []string `json:"omissions"`
+}
+
+func (v *SkillAnalysisCandidate) UnmarshalJSON(data []byte) error {
+	return decodeWith(data, "SkillAnalysisCandidate", v.decodeFrom)
+}
+
+func (v *SkillAnalysisCandidate) decodeFrom(raw map[string]json.RawMessage) error {
+	var out SkillAnalysisCandidate
+	d := fieldDecoder{raw: raw, owner: "SkillAnalysisCandidate"}
+	d.required("id", &out.ID)
+	d.required("name", &out.Name)
+	d.required("filePath", &out.FilePath)
+	d.required("root", &out.Root)
+	d.required("fingerprint", &out.Fingerprint)
+	d.required("complete", &out.Complete)
+	d.required("files", &out.Files)
+	d.required("omissions", &out.Omissions)
+	if d.err != nil {
+		return d.err
+	}
+	*v = out
+	return nil
+}
+
+// Server-held analysis of one skill name: what would be sent, then its status and result. Holds no full resource snapshots, credentials, or conversation; `result.evidence[].quote` carries bounded verbatim excerpts of skill files.
+type SkillDiagnosticAnalysisRecord struct {
+	// Opaque server-issued id; the only handle `analyze`, `cancel` and `apply` accept.
+	ID     string              `json:"id"`
+	Name   string              `json:"name"`
+	Status SkillAnalysisStatus `json:"status"`
+	// Exact model selector the analysis uses.
+	Model string `json:"model"`
+	// Resource bytes the request carries.
+	Bytes      int64                    `json:"bytes"`
+	Candidates []SkillAnalysisCandidate `json:"candidates"`
+	// What leaving the machine means (files are data, known secrets are filtered best-effort, the conversation is excluded, charges may apply); show it with `model`, `candidates` and `bytes` before asking for consent.
+	Disclosure string `json:"disclosure"`
+	// Epoch milliseconds when the record was prepared.
+	CreatedAt int64 `json:"createdAt"`
+	// The preference was saved. With `error`, the session reload failed and copies may still be active; a separately confirmed application can retry it. Restoring the copies invalidates this status.
+	Applied bool `json:"applied"`
+	// Present once the analysis has completed, including `applied` and `stale` records.
+	Result *ResourceAnalysis `json:"result,omitempty"`
+	// Why the last run or application did not finish.
+	Error *string `json:"error,omitempty"`
+}
+
+func (v *SkillDiagnosticAnalysisRecord) UnmarshalJSON(data []byte) error {
+	return decodeWith(data, "SkillDiagnosticAnalysisRecord", v.decodeFrom)
+}
+
+func (v *SkillDiagnosticAnalysisRecord) decodeFrom(raw map[string]json.RawMessage) error {
+	var out SkillDiagnosticAnalysisRecord
+	d := fieldDecoder{raw: raw, owner: "SkillDiagnosticAnalysisRecord"}
+	d.required("id", &out.ID)
+	d.required("name", &out.Name)
+	d.required("status", &out.Status)
+	d.required("model", &out.Model)
+	d.required("bytes", &out.Bytes)
+	d.required("candidates", &out.Candidates)
+	d.required("disclosure", &out.Disclosure)
+	d.required("createdAt", &out.CreatedAt)
+	d.required("applied", &out.Applied)
+	d.optional("result", &out.Result)
+	d.optional("error", &out.Error)
+	if d.err != nil {
+		return d.err
+	}
+	*v = out
+	return nil
+}
+
+// What is wrong with a skill name: several active variants, redundant unloaded copies, or a copy that declares no repository.
+type SkillDiagnosticIssue string
+
+const (
+	SkillDiagnosticIssueConflict          SkillDiagnosticIssue = "conflict"
+	SkillDiagnosticIssueRedundancy        SkillDiagnosticIssue = "redundancy"
+	SkillDiagnosticIssueMissingProvenance SkillDiagnosticIssue = "missing-provenance"
+)
+
+func (v *SkillDiagnosticIssue) UnmarshalJSON(data []byte) error {
+	s, err := decodeString(data, "SkillDiagnosticIssue")
+	if err != nil {
+		return err
+	}
+	switch value := SkillDiagnosticIssue(s); value {
+	case SkillDiagnosticIssueConflict, SkillDiagnosticIssueRedundancy, SkillDiagnosticIssueMissingProvenance:
+		*v = value
+		return nil
+	}
+	return unknownValue("SkillDiagnosticIssue", s)
+}
+
+// One loaded skill name with its issues and analysis state; clean single-copy names are listed with `canAnalyze: false`.
+type SkillDiagnosticItem struct {
+	Name       string                     `json:"name"`
+	Issues     []SkillDiagnosticIssue     `json:"issues"`
+	Skills     []SkillDiagnosticEntry     `json:"skills"`
+	Duplicates []SkillDiagnosticDuplicate `json:"duplicates"`
+	// A comparable group exists, so `prepare_skill_diagnostic_analysis` can run for this name.
+	CanAnalyze bool                  `json:"canAnalyze"`
+	Reason     *SkillSelectionReason `json:"reason,omitempty"`
+	// Why `canAnalyze` is false, e.g. a single copy with nothing to compare.
+	UnavailableReason *string `json:"unavailableReason,omitempty"`
+	// Current plan record for this name, in any status.
+	Analysis *SkillDiagnosticAnalysisRecord `json:"analysis,omitempty"`
+	// Most recent finished analysis, kept while another is prepared.
+	LastAnalysis *SkillDiagnosticAnalysisRecord `json:"lastAnalysis,omitempty"`
+}
+
+func (v *SkillDiagnosticItem) UnmarshalJSON(data []byte) error {
+	return decodeWith(data, "SkillDiagnosticItem", v.decodeFrom)
+}
+
+func (v *SkillDiagnosticItem) decodeFrom(raw map[string]json.RawMessage) error {
+	var out SkillDiagnosticItem
+	d := fieldDecoder{raw: raw, owner: "SkillDiagnosticItem"}
+	d.required("name", &out.Name)
+	d.required("issues", &out.Issues)
+	d.required("skills", &out.Skills)
+	d.required("duplicates", &out.Duplicates)
+	d.required("canAnalyze", &out.CanAnalyze)
+	d.optional("reason", &out.Reason)
+	d.optional("unavailableReason", &out.UnavailableReason)
+	d.optional("analysis", &out.Analysis)
+	d.optional("lastAnalysis", &out.LastAnalysis)
+	if d.err != nil {
+		return d.err
+	}
+	*v = out
+	return nil
+}
+
+// Current skill resolution; an empty `diagnostics` means no conflicts or redundant installations.
+type SkillDiagnosticsSnapshot struct {
+	Cwd                    string                      `json:"cwd"`
+	ShowStartupDiagnostics bool                        `json:"showStartupDiagnostics"`
+	Diagnostics            []SkillResolutionDiagnostic `json:"diagnostics"`
+	// Every loaded skill name with its analysis state; absent when connected to an older server.
+	Items []SkillDiagnosticItem `json:"items,omitempty"`
+}
+
+func (v *SkillDiagnosticsSnapshot) UnmarshalJSON(data []byte) error {
+	return decodeWith(data, "SkillDiagnosticsSnapshot", v.decodeFrom)
+}
+
+func (v *SkillDiagnosticsSnapshot) decodeFrom(raw map[string]json.RawMessage) error {
+	var out SkillDiagnosticsSnapshot
+	d := fieldDecoder{raw: raw, owner: "SkillDiagnosticsSnapshot"}
+	d.required("cwd", &out.Cwd)
+	d.required("showStartupDiagnostics", &out.ShowStartupDiagnostics)
+	d.required("diagnostics", &out.Diagnostics)
+	d.optional("items", &out.Items)
+	if d.err != nil {
+		return d.err
+	}
+	*v = out
+	return nil
+}
+
 type SessionState struct {
 	SessionID             string         `json:"sessionId"`
 	Model                 *ModelInfo     `json:"model,omitempty"`
@@ -2530,6 +2977,8 @@ type SessionState struct {
 	ContextUsage *ContextUsage    `json:"contextUsage,omitempty"`
 	// Current goal mode; null when the session has no goal.
 	Goal *GoalModeState `json:"goal"`
+	// Current skill-resolution details; absent when connected to an older server.
+	SkillDiagnostics *SkillDiagnosticsSnapshot `json:"skillDiagnostics,omitempty"`
 }
 
 func (v *SessionState) UnmarshalJSON(data []byte) error {
@@ -2568,6 +3017,7 @@ func (v *SessionState) decodeFrom(raw map[string]json.RawMessage) error {
 	d.defaulted("dumpTools", &out.DumpTools, `[]`)
 	d.optional("contextUsage", &out.ContextUsage)
 	d.defaulted("goal", &out.Goal, `null`)
+	d.optional("skillDiagnostics", &out.SkillDiagnostics)
 	if d.err != nil {
 		return d.err
 	}
@@ -4725,6 +5175,32 @@ func (v AvailableCommandsUpdateEvent) MarshalJSON() ([]byte, error) {
 	return encodeObject(plain(v), `"type":"available_commands_update"`, nil)
 }
 
+// Skill-resolution snapshot, pushed at startup and whenever it, the effective notice setting, or any skill analysis state or result changes.
+type SkillDiagnosticsUpdateEvent struct {
+	Data SkillDiagnosticsSnapshot `json:"data"`
+}
+
+func (v *SkillDiagnosticsUpdateEvent) UnmarshalJSON(data []byte) error {
+	return decodeWith(data, "SkillDiagnosticsUpdateEvent", v.decodeFrom)
+}
+
+func (v *SkillDiagnosticsUpdateEvent) decodeFrom(raw map[string]json.RawMessage) error {
+	var out SkillDiagnosticsUpdateEvent
+	d := fieldDecoder{raw: raw, owner: "SkillDiagnosticsUpdateEvent"}
+	d.constant("type", "skill_diagnostics_update")
+	d.required("data", &out.Data)
+	if d.err != nil {
+		return d.err
+	}
+	*v = out
+	return nil
+}
+
+func (v SkillDiagnosticsUpdateEvent) MarshalJSON() ([]byte, error) {
+	type plain SkillDiagnosticsUpdateEvent
+	return encodeObject(plain(v), `"type":"skill_diagnostics_update"`, nil)
+}
+
 type SubagentLifecycleStatus string
 
 const (
@@ -6429,6 +6905,7 @@ func (SessionSettledEvent) isRpcNotification()          {}
 func (ExtensionError) isRpcNotification()               {}
 func (ExtensionUiRequest) isRpcNotification()           {}
 func (AvailableCommandsUpdateEvent) isRpcNotification() {}
+func (SkillDiagnosticsUpdateEvent) isRpcNotification()  {}
 func (SubagentLifecycleEvent) isRpcNotification()       {}
 func (SubagentProgressEvent) isRpcNotification()        {}
 func (SubagentEvent) isRpcNotification()                {}
@@ -6499,6 +6976,8 @@ func (v *RpcNotification) UnmarshalJSON(data []byte) error {
 		value, err = decodeVariant[ExtensionUiRequest](raw)
 	case "available_commands_update":
 		value, err = decodeVariant[AvailableCommandsUpdateEvent](raw)
+	case "skill_diagnostics_update":
+		value, err = decodeVariant[SkillDiagnosticsUpdateEvent](raw)
 	case "subagent_lifecycle":
 		value, err = decodeVariant[SubagentLifecycleEvent](raw)
 	case "subagent_progress":
@@ -6619,6 +7098,7 @@ func (SessionSettledEvent) isRpcServerFrame()          {}
 func (ExtensionError) isRpcServerFrame()               {}
 func (ExtensionUiRequest) isRpcServerFrame()           {}
 func (AvailableCommandsUpdateEvent) isRpcServerFrame() {}
+func (SkillDiagnosticsUpdateEvent) isRpcServerFrame()  {}
 func (SubagentLifecycleEvent) isRpcServerFrame()       {}
 func (SubagentProgressEvent) isRpcServerFrame()        {}
 func (SubagentEvent) isRpcServerFrame()                {}
@@ -6699,6 +7179,8 @@ func (v *RpcServerFrame) UnmarshalJSON(data []byte) error {
 		value, err = decodeVariant[ExtensionUiRequest](raw)
 	case "available_commands_update":
 		value, err = decodeVariant[AvailableCommandsUpdateEvent](raw)
+	case "skill_diagnostics_update":
+		value, err = decodeVariant[SkillDiagnosticsUpdateEvent](raw)
 	case "subagent_lifecycle":
 		value, err = decodeVariant[SubagentLifecycleEvent](raw)
 	case "subagent_progress":
@@ -7463,6 +7945,76 @@ func (c Commands) OpenSession(ctx context.Context, p OpenSessionCommand) (OpenSe
 func (c Commands) GetState(ctx context.Context) (SessionState, error) {
 	var out SessionState
 	err := c.call(ctx, "get_state", nil, 0, &out)
+	return out, err
+}
+
+// GetSkillDiagnostics sends "get_skill_diagnostics": Snapshot skill resolution; available even when startup notices are disabled.
+func (c Commands) GetSkillDiagnostics(ctx context.Context) (SkillDiagnosticsSnapshot, error) {
+	var out SkillDiagnosticsSnapshot
+	err := c.call(ctx, "get_skill_diagnostics", nil, 0, &out)
+	return out, err
+}
+
+// SetSkillStartupDiagnosticsCommand holds the parameters of "set_skill_startup_diagnostics".
+type SetSkillStartupDiagnosticsCommand struct {
+	Enabled bool `json:"enabled"`
+}
+
+// SetSkillStartupDiagnostics sends "set_skill_startup_diagnostics": Persist the skill startup-notice preference; returns the snapshot with the effective setting.
+func (c Commands) SetSkillStartupDiagnostics(ctx context.Context, p SetSkillStartupDiagnosticsCommand) (SkillDiagnosticsSnapshot, error) {
+	var out SkillDiagnosticsSnapshot
+	err := c.call(ctx, "set_skill_startup_diagnostics", p, 0, &out)
+	return out, err
+}
+
+// PrepareSkillDiagnosticAnalysisCommand holds the parameters of "prepare_skill_diagnostic_analysis".
+type PrepareSkillDiagnosticAnalysisCommand struct {
+	Name  string  `json:"name"`
+	Model *string `json:"model,omitempty"`
+}
+
+// PrepareSkillDiagnosticAnalysis sends "prepare_skill_diagnostic_analysis": Snapshot the comparable variants of one skill name and return the server-held record with its consent disclosure; sends nothing to a model. `model` must name one authenticated model exactly; omitted uses the default analysis model.
+func (c Commands) PrepareSkillDiagnosticAnalysis(ctx context.Context, p PrepareSkillDiagnosticAnalysisCommand) (SkillDiagnosticAnalysisRecord, error) {
+	var out SkillDiagnosticAnalysisRecord
+	err := c.call(ctx, "prepare_skill_diagnostic_analysis", p, 0, &out)
+	return out, err
+}
+
+// AnalyzeSkillDiagnosticsCommand holds the parameters of "analyze_skill_diagnostics".
+type AnalyzeSkillDiagnosticsCommand struct {
+	AnalysisID string `json:"analysisId"`
+	Consent    bool   `json:"consent"`
+}
+
+// AnalyzeSkillDiagnostics sends "analyze_skill_diagnostics": Start a prepared analysis once the user consented (`consent` must be true); returns the running record immediately. Progress and the result arrive as `skill_diagnostics_update` frames. Repeating the call for a running, complete or applied id replays its state without another model call; a cancelled, failed or stale analysis must be prepared again.
+func (c Commands) AnalyzeSkillDiagnostics(ctx context.Context, p AnalyzeSkillDiagnosticsCommand) (SkillDiagnosticAnalysisRecord, error) {
+	var out SkillDiagnosticAnalysisRecord
+	err := c.call(ctx, "analyze_skill_diagnostics", p, 0, &out)
+	return out, err
+}
+
+// CancelSkillDiagnosticAnalysisCommand holds the parameters of "cancel_skill_diagnostic_analysis".
+type CancelSkillDiagnosticAnalysisCommand struct {
+	AnalysisID string `json:"analysisId"`
+}
+
+// CancelSkillDiagnosticAnalysis sends "cancel_skill_diagnostic_analysis": Abort one analysis by id; returns its record.
+func (c Commands) CancelSkillDiagnosticAnalysis(ctx context.Context, p CancelSkillDiagnosticAnalysisCommand) (SkillDiagnosticAnalysisRecord, error) {
+	var out SkillDiagnosticAnalysisRecord
+	err := c.call(ctx, "cancel_skill_diagnostic_analysis", p, 0, &out)
+	return out, err
+}
+
+// ApplySkillDiagnosticAnalysisCommand holds the parameters of "apply_skill_diagnostic_analysis".
+type ApplySkillDiagnosticAnalysisCommand struct {
+	AnalysisID string `json:"analysisId"`
+	Confirmed  bool   `json:"confirmed"`
+}
+
+// ApplySkillDiagnosticAnalysis sends "apply_skill_diagnostic_analysis": Apply a complete `prefer` recommendation after a separate confirmation (`confirmed` must be true): saves a content-bound exclusion in the user's global settings and reloads skills; installed files are unchanged. A successfully applied id replays without another change. If its record has `applied: true` and `error`, saving succeeded but the session reload failed; another separately confirmed call retries the application.
+func (c Commands) ApplySkillDiagnosticAnalysis(ctx context.Context, p ApplySkillDiagnosticAnalysisCommand) (SkillDiagnosticAnalysisRecord, error) {
+	var out SkillDiagnosticAnalysisRecord
+	err := c.call(ctx, "apply_skill_diagnostic_analysis", p, 0, &out)
 	return out, err
 }
 

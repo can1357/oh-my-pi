@@ -20,6 +20,7 @@ from omp_rpc import (
     NoticeEvent,
     SessionSettledEvent,
     SessionState,
+    SkillDiagnosticsUpdateEvent,
     SubagentEvent,
     ThinkingLevelChangedEvent,
     TodoReminderEvent,
@@ -29,6 +30,7 @@ from omp_rpc import (
     assistant_text_with_thinking,
     parse_notification,
     parse_session_state,
+    parse_skill_diagnostic_analysis_record,
 )
 
 
@@ -42,6 +44,294 @@ GOAL = {
     "createdAt": 1,
     "updatedAt": 2,
 }
+
+
+def valid_skill_snapshot() -> dict[str, object]:
+    entry = {"name": "review", "filePath": "/a/SKILL.md", "source": "native:user"}
+    return {
+        "cwd": "/workspace",
+        "showStartupDiagnostics": True,
+        "diagnostics": [
+            {
+                "name": "review",
+                "reason": "source-order",
+                "skills": [entry],
+                "duplicates": [
+                    {
+                        "skill": {**entry, "pluginName": "p", "repository": "github.com/a/b"},
+                        "retained": entry,
+                        "match": "origin",
+                    }
+                ],
+            }
+        ],
+    }
+
+
+def _diagnostic(snapshot: dict[str, object]) -> dict[str, object]:
+    return snapshot["diagnostics"][0]  # type: ignore[index]
+
+
+def _duplicate(snapshot: dict[str, object]) -> dict[str, object]:
+    return _diagnostic(snapshot)["duplicates"][0]  # type: ignore[index]
+
+
+def _duplicate_skill(snapshot: dict[str, object]) -> dict[str, object]:
+    return _duplicate(snapshot)["skill"]  # type: ignore[return-value]
+
+
+def _set(target: dict[str, object], key: str, value: object) -> None:
+    target[key] = value
+
+
+def _drop(target: dict[str, object], key: str) -> None:
+    del target[key]
+
+
+class SkillDiagnosticsProtocolTests(unittest.TestCase):
+    def test_valid_snapshot_parses_through_state_and_update(self) -> None:
+        snapshot = valid_skill_snapshot()
+
+        state = parse_session_state({"sessionId": "s", "skillDiagnostics": snapshot})
+        update = parse_notification(
+            {"type": "skill_diagnostics_update", "data": snapshot}
+        )
+
+        assert state.skill_diagnostics is not None
+        assert isinstance(update, SkillDiagnosticsUpdateEvent)
+        self.assertEqual(state.skill_diagnostics, update.data)
+        duplicate = state.skill_diagnostics.diagnostics[0].duplicates[0]
+        self.assertEqual(duplicate.skill.plugin_name, "p")
+        self.assertIsNone(duplicate.retained.plugin_name)
+        self.assertEqual(duplicate.skill.repository, "github.com/a/b")
+        self.assertEqual(duplicate.match, "origin")
+
+    def test_older_duplicate_without_match_defaults_to_content(self) -> None:
+        snapshot = valid_skill_snapshot()
+        _drop(_duplicate(snapshot), "match")
+
+        state = parse_session_state({"sessionId": "s", "skillDiagnostics": snapshot})
+
+        assert state.skill_diagnostics is not None
+        duplicate = state.skill_diagnostics.diagnostics[0].duplicates[0]
+        self.assertEqual(duplicate.match, "content")
+
+    def test_rejects_malformed_skill_diagnostics_with_value_error(self) -> None:
+        # One row per distinct boundary: bool leaf, required arrays (missing and
+        # null must not become empty), object items, literal, str leaf, and the
+        # optional leaf. Every failure must be the module's ValueError.
+        mutations = {
+            "bool leaf": lambda s: _set(s, "showStartupDiagnostics", "false"),
+            "diagnostics missing": lambda s: _drop(s, "diagnostics"),
+            "diagnostics null": lambda s: _set(s, "diagnostics", None),
+            "diagnostics not list": lambda s: _set(s, "diagnostics", {}),
+            "diagnostic not object": lambda s: _set(s, "diagnostics", ["x"]),
+            "reason unknown": lambda s: _set(_diagnostic(s), "reason", "newest"),
+            "skills missing": lambda s: _drop(_diagnostic(s), "skills"),
+            "skills null": lambda s: _set(_diagnostic(s), "skills", None),
+            "skill not object": lambda s: _set(_diagnostic(s), "skills", [1]),
+            "duplicates missing": lambda s: _drop(_diagnostic(s), "duplicates"),
+            "duplicates null": lambda s: _set(_diagnostic(s), "duplicates", None),
+            "duplicate not object": lambda s: _set(_diagnostic(s), "duplicates", [1]),
+            "duplicate retained missing": lambda s: _drop(_duplicate(s), "retained"),
+            "duplicate match unknown": lambda s: _set(_duplicate(s), "match", "newest"),
+            "entry leaf not string": lambda s: _set(_duplicate_skill(s), "filePath", 7),
+            "pluginName not string": lambda s: _set(
+                _duplicate_skill(s), "pluginName", 7
+            ),
+        }
+
+        for label, mutate in mutations.items():
+            snapshot = valid_skill_snapshot()
+            mutate(snapshot)
+            with self.subTest(label=label, path="state"), self.assertRaises(ValueError):
+                parse_session_state({"sessionId": "s", "skillDiagnostics": snapshot})
+            with (
+                self.subTest(label=label, path="update"),
+                self.assertRaises(ValueError),
+            ):
+                parse_notification(
+                    {"type": "skill_diagnostics_update", "data": snapshot}
+                )
+
+
+def analysis_candidate(candidate_id: str) -> dict[str, object]:
+    return {
+        "id": candidate_id,
+        "name": "review",
+        "filePath": f"/{candidate_id}/review/SKILL.md",
+        "root": f"/{candidate_id}/review",
+        "fingerprint": "f" * 64,
+        "complete": True,
+        "files": 1,
+        "omissions": [],
+    }
+
+
+def analysis_result() -> dict[str, object]:
+    evidence = {
+        "file": "SKILL.md",
+        "quote": "Review changes carefully.",
+        "explanation": "Both carry it.",
+    }
+    return {
+        "relationship": "adaptation",
+        "evidence": [
+            {**evidence, "candidateId": "skill-1"},
+            {**evidence, "candidateId": "skill-2"},
+        ],
+        "differences": ["One skips the linter."],
+        "recommendation": {
+            "action": "prefer",
+            "preferredId": "skill-1",
+            "reason": "The first loses nothing.",
+        },
+        "limitations": [],
+    }
+
+
+def analysis_record(**overrides: object) -> dict[str, object]:
+    return {
+        "id": "analysis-1",
+        "name": "review",
+        "status": "complete",
+        "model": "fake/fake-model",
+        "bytes": 120,
+        "candidates": [analysis_candidate("skill-1"), analysis_candidate("skill-2")],
+        "disclosure": "Files are treated as data.",
+        "createdAt": 1_700_000_000_000,
+        "applied": False,
+        "result": analysis_result(),
+        **overrides,
+    }
+
+
+def skill_snapshot_with_items() -> dict[str, object]:
+    snapshot = valid_skill_snapshot()
+    entry = {"name": "review", "filePath": "/a/SKILL.md", "source": "native:user"}
+    snapshot["items"] = [
+        {
+            "name": "review",
+            "issues": ["conflict", "redundancy"],
+            "skills": [entry],
+            "duplicates": [{"skill": entry, "retained": entry, "match": "content"}],
+            "reason": "source-order",
+            "canAnalyze": True,
+            "analysis": analysis_record(),
+            "lastAnalysis": analysis_record(
+                id="analysis-0", status="failed", error="The model failed.", result=None
+            ),
+        },
+        {
+            "name": "solo",
+            "issues": [],
+            "skills": [entry],
+            "duplicates": [],
+            "canAnalyze": False,
+            "unavailableReason": "Only one copy is loaded.",
+        },
+    ]
+    return snapshot
+
+
+def _item(snapshot: dict[str, object]) -> dict[str, object]:
+    return snapshot["items"][0]  # type: ignore[index]
+
+
+def _record(snapshot: dict[str, object]) -> dict[str, object]:
+    return _item(snapshot)["analysis"]  # type: ignore[return-value]
+
+
+def _result(snapshot: dict[str, object]) -> dict[str, object]:
+    return _record(snapshot)["result"]  # type: ignore[return-value]
+
+
+class SkillAnalysisProtocolTests(unittest.TestCase):
+    def test_items_records_and_structured_results_reach_consumers(self) -> None:
+        snapshot = skill_snapshot_with_items()
+
+        state = parse_session_state({"sessionId": "s", "skillDiagnostics": snapshot})
+        update = parse_notification(
+            {"type": "skill_diagnostics_update", "data": snapshot}
+        )
+
+        assert state.skill_diagnostics is not None
+        assert isinstance(update, SkillDiagnosticsUpdateEvent)
+        self.assertEqual(state.skill_diagnostics, update.data)
+        assert state.skill_diagnostics.items is not None
+        review, solo = state.skill_diagnostics.items
+        self.assertEqual(review.issues, ("conflict", "redundancy"))
+        self.assertTrue(review.can_analyze)
+        assert review.analysis is not None and review.last_analysis is not None
+        self.assertEqual(
+            (review.analysis.id, review.analysis.status, review.analysis.applied),
+            ("analysis-1", "complete", False),
+        )
+        self.assertEqual(review.analysis.created_at, 1_700_000_000_000)
+        self.assertEqual(review.analysis.candidates[1].root, "/skill-2/review")
+        assert review.analysis.result is not None
+        self.assertEqual(review.analysis.result.relationship, "adaptation")
+        self.assertEqual(review.analysis.result.evidence[1].candidate_id, "skill-2")
+        self.assertEqual(review.analysis.result.recommendation.preferred_id, "skill-1")
+        self.assertEqual(review.last_analysis.error, "The model failed.")
+        self.assertIsNone(review.last_analysis.result)
+        self.assertFalse(solo.can_analyze)
+        self.assertEqual(solo.unavailable_reason, "Only one copy is loaded.")
+        self.assertIsNone(solo.analysis)
+
+        record = parse_skill_diagnostic_analysis_record(analysis_record())
+        self.assertEqual(record, review.analysis)
+
+    def test_older_snapshot_without_items_still_decodes(self) -> None:
+        state = parse_session_state(
+            {"sessionId": "s", "skillDiagnostics": valid_skill_snapshot()}
+        )
+
+        assert state.skill_diagnostics is not None
+        self.assertIsNone(state.skill_diagnostics.items)
+        self.assertEqual(len(state.skill_diagnostics.diagnostics), 1)
+
+    def test_rejects_malformed_analysis_state_with_value_error(self) -> None:
+        mutations = {
+            "items not list": lambda s: _set(s, "items", {}),
+            "item issue unknown": lambda s: _set(_item(s), "issues", ["bogus"]),
+            "item canAnalyze not bool": lambda s: _set(_item(s), "canAnalyze", 1),
+            "item canAnalyze missing": lambda s: _drop(_item(s), "canAnalyze"),
+            "record status unknown": lambda s: _set(_record(s), "status", "paused"),
+            "record applied not bool": lambda s: _set(_record(s), "applied", "no"),
+            "record id missing": lambda s: _drop(_record(s), "id"),
+            "record bytes not int": lambda s: _set(_record(s), "bytes", 1.5),
+            "record candidates null": lambda s: _set(_record(s), "candidates", None),
+            "candidate complete not bool": lambda s: _set(
+                _record(s)["candidates"][0], "complete", "yes"  # type: ignore[index]
+            ),
+            "result relationship unknown": lambda s: _set(
+                _result(s), "relationship", "twins"
+            ),
+            "result recommendation missing": lambda s: _drop(
+                _result(s), "recommendation"
+            ),
+            "recommendation action unknown": lambda s: _set(
+                _result(s)["recommendation"], "action", "hide"  # type: ignore[index]
+            ),
+            "evidence candidateId missing": lambda s: _drop(
+                _result(s)["evidence"][0], "candidateId"  # type: ignore[index]
+            ),
+            "differences not list": lambda s: _set(_result(s), "differences", "none"),
+        }
+
+        for label, mutate in mutations.items():
+            snapshot = skill_snapshot_with_items()
+            mutate(snapshot)
+            with self.subTest(label=label, path="state"), self.assertRaises(ValueError):
+                parse_session_state({"sessionId": "s", "skillDiagnostics": snapshot})
+            with (
+                self.subTest(label=label, path="update"),
+                self.assertRaises(ValueError),
+            ):
+                parse_notification(
+                    {"type": "skill_diagnostics_update", "data": snapshot}
+                )
 
 
 class ProtocolParsingTests(unittest.TestCase):

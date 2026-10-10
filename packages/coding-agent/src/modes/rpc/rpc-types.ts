@@ -9,6 +9,8 @@ import type { CompactionResult } from "@oh-my-pi/pi-agent-core/compaction";
 import type { AssistantMessageEvent, Effort, ImageContent, Model, ToolExample } from "@oh-my-pi/pi-ai";
 import type { BashResult } from "../../exec/bash-executor";
 import type { ContextUsage } from "../../extensibility/extensions/types";
+import type { SkillDiagnosticAnalysisRecord } from "../../extensibility/skill-diagnostic-controller";
+import type { SkillDiagnosticsSnapshot } from "../../extensibility/skill-diagnostics";
 import type { AgentSessionEvent, SessionStats } from "../../session/agent-session";
 import type { RestoredQueuedMessage } from "../../session/agent-session-types";
 import type { CacheWarmingMode } from "../../session/cache-warmer";
@@ -24,6 +26,21 @@ import type { RpcMessagesPage } from "./rpc-messages";
 import type { GoalModeState } from "../../goals/state";
 import type { RpcGoalOp, RpcGoalResult } from "./rpc-goal";
 import type { BtwHistoryRecord } from "../../session/btw-history";
+
+export type {
+	SkillAnalysisCandidate,
+	SkillAnalysisStatus,
+	SkillDiagnosticAnalysisRecord,
+	SkillDiagnosticIssue,
+	SkillDiagnosticItem,
+} from "../../extensibility/skill-diagnostic-controller";
+export type { ResourceAnalysis } from "../../extensibility/resource-analysis";
+export type {
+	SkillDiagnosticDuplicate,
+	SkillDiagnosticEntry,
+	SkillDiagnosticsSnapshot,
+	SkillResolutionDiagnostic,
+} from "../../extensibility/skill-diagnostics";
 
 // ============================================================================
 // RPC Commands (stdin)
@@ -50,6 +67,12 @@ export type RpcCommand =
 
 	// State
 	| { id?: string; type: "get_state" }
+	| { id?: string; type: "get_skill_diagnostics" }
+	| { id?: string; type: "set_skill_startup_diagnostics"; enabled: boolean }
+	| { id?: string; type: "prepare_skill_diagnostic_analysis"; name: string; model?: string }
+	| { id?: string; type: "analyze_skill_diagnostics"; analysisId: string; consent: boolean }
+	| { id?: string; type: "cancel_skill_diagnostic_analysis"; analysisId: string }
+	| { id?: string; type: "apply_skill_diagnostic_analysis"; analysisId: string; confirmed: boolean }
 	| { id?: string; type: "set_fast_mode"; enabled: boolean }
 	| { id?: string; type: "set_slow_mode"; enabled: boolean }
 	| {
@@ -192,6 +215,8 @@ export interface RpcSessionState {
 	contextUsage?: ContextUsage;
 	/** Current goal-mode state; `null` when the session has no goal. */
 	goal: GoalModeState | null;
+	/** Current skill-resolution details; absent when connected to an older server. */
+	skillDiagnostics?: SkillDiagnosticsSnapshot;
 }
 
 export interface RpcAvailableSlashCommand {
@@ -206,6 +231,11 @@ export interface RpcAvailableSlashCommand {
 export interface RpcAvailableCommandsUpdateFrame {
 	type: "available_commands_update";
 	commands: RpcAvailableSlashCommand[];
+}
+
+export interface RpcSkillDiagnosticsUpdateFrame {
+	type: "skill_diagnostics_update";
+	data: SkillDiagnosticsSnapshot;
 }
 
 /** How a prompt's work ended, as reported by its {@link RpcPromptResultFrame}. */
@@ -402,6 +432,42 @@ export type RpcResponse =
 
 	// State
 	| { id?: string; type: "response"; command: "get_state"; success: true; data: RpcSessionState }
+	| { id?: string; type: "response"; command: "get_skill_diagnostics"; success: true; data: SkillDiagnosticsSnapshot }
+	| {
+			id?: string;
+			type: "response";
+			command: "set_skill_startup_diagnostics";
+			success: true;
+			data: SkillDiagnosticsSnapshot;
+	  }
+	| {
+			id?: string;
+			type: "response";
+			command: "prepare_skill_diagnostic_analysis";
+			success: true;
+			data: SkillDiagnosticAnalysisRecord;
+	  }
+	| {
+			id?: string;
+			type: "response";
+			command: "analyze_skill_diagnostics";
+			success: true;
+			data: SkillDiagnosticAnalysisRecord;
+	  }
+	| {
+			id?: string;
+			type: "response";
+			command: "cancel_skill_diagnostic_analysis";
+			success: true;
+			data: SkillDiagnosticAnalysisRecord;
+	  }
+	| {
+			id?: string;
+			type: "response";
+			command: "apply_skill_diagnostic_analysis";
+			success: true;
+			data: SkillDiagnosticAnalysisRecord;
+	  }
 	| {
 			id?: string;
 			type: "response";

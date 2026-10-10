@@ -52,6 +52,10 @@ export const frameDefs = {
 		{ type: "'available_commands_update'", commands: "AvailableSlashCommand[]" },
 		"Slash-command catalog, pushed at startup and whenever command metadata changes.",
 	),
+	SkillDiagnosticsUpdateEvent: doc(
+		{ type: "'skill_diagnostics_update'", data: "SkillDiagnosticsSnapshot" },
+		"Skill-resolution snapshot, pushed at startup and whenever it, the effective notice setting, or any skill analysis state or result changes.",
+	),
 	SubagentLifecycleStatus: "'started' | 'completed' | 'failed' | 'aborted'",
 	SubagentLifecyclePayload: {
 		id: "string",

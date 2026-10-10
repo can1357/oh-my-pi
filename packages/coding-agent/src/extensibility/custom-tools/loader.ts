@@ -11,6 +11,8 @@ import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import { logger } from "@oh-my-pi/pi-utils";
 import { toolCapability } from "../../capability/tool";
 import { type CustomTool, loadCapability } from "../../discovery";
+import { activeResourceExclusions } from "../../discovery/omp-extension-roots";
+import { dropExcludedPaths } from "../../discovery/resource-exclusions";
 import type { ExecOptions } from "../../exec/exec";
 import { execCommand } from "../../exec/exec";
 import type { HookUIContext } from "../../extensibility/hooks/types";
@@ -278,7 +280,8 @@ export async function discoverCustomToolPaths(
 		addPath(resolvePath(configPath, cwd), { provider: "config", providerName: "Config", level: "project" });
 	}
 
-	return allPathsWithSources;
+	// Reviewed duplicate packages stay installed but their tools do not load.
+	return dropExcludedPaths(allPathsWithSources, entry => resolvePath(entry.path, cwd), activeResourceExclusions());
 }
 
 /**

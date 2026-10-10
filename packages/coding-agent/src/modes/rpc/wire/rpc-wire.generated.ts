@@ -477,6 +477,137 @@ export interface UsageLimitWrapUp {
 /** Provider-neutral state of an account past its usage limit, discriminated by `stage`. */
 export type UsageLimitState = UsageLimitLowPriority | UsageLimitWrapUp;
 
+/** Rule that ordered the active variants of one skill name. */
+export type SkillSelectionReason = "source-order" | "custom-directory" | "authored-over-installed";
+
+/** Allowlisted identity of one discovered skill file; `repository`/`version` are what its plugin declares. */
+export interface SkillDiagnosticEntry {
+	name: string;
+	filePath: string;
+	source: string;
+	pluginName?: string;
+	repository?: string;
+	version?: string;
+}
+
+/** Why a duplicate is not loaded: identical SKILL.md content, or a same-origin variant (`skills.dedupeSameOrigin`). */
+export type SkillDuplicateMatch = "content" | "origin";
+
+/** A file not loaded because `retained` stands for it; older snapshots imply `match: content`. */
+export interface SkillDiagnosticDuplicate {
+	skill: SkillDiagnosticEntry;
+	retained: SkillDiagnosticEntry;
+	match?: SkillDuplicateMatch;
+}
+
+/** A skill name that resolved into several active variants and/or left redundant copies unloaded. */
+export interface SkillResolutionDiagnostic {
+	name: string;
+	reason: SkillSelectionReason;
+	skills: SkillDiagnosticEntry[];
+	duplicates: SkillDiagnosticDuplicate[];
+}
+
+/** How the model judged the compared resources to relate. */
+export type ResourceRelationship = "copies" | "adaptation" | "overlap" | "complementary" | "unrelated" | "uncertain";
+
+/** A quote from one candidate's file that supports a finding; the server validated it against the snapshot the model read. */
+export interface ResourceAnalysisEvidence {
+	candidateId: string;
+	file: string;
+	quote: string;
+	explanation: string;
+}
+
+export type ResourceRecommendationAction = "keep-all" | "prefer";
+
+/** What to do with the compared resources; `prefer` only follows a preferable relationship over complete coverage. */
+export interface ResourceRecommendation {
+	action: ResourceRecommendationAction;
+	reason: string;
+	/** Candidate id to keep; present only when `action` is `prefer`. */
+	preferredId?: string;
+}
+
+/** The model's comparison of the prepared snapshots, validated against them before it is reported. */
+export interface ResourceAnalysis {
+	relationship: ResourceRelationship;
+	evidence: ResourceAnalysisEvidence[];
+	differences: string[];
+	recommendation: ResourceRecommendation;
+	limitations: string[];
+}
+
+/** Lifecycle of one analysis: `prepared` has sent nothing; `stale` means the reviewed files changed after preparation or analysis, or an applied preference was restored. A completed `result` may remain for inspection but cannot be applied. */
+export type SkillAnalysisStatus = "prepared" | "running" | "complete" | "failed" | "cancelled" | "applied" | "stale";
+
+/** One skill variant an analysis would send: where it lives and how completely it is covered. */
+export interface SkillAnalysisCandidate {
+	id: string;
+	name: string;
+	filePath: string;
+	root: string;
+	fingerprint: string;
+	/** False when part of the skill directory was left out of the snapshot. */
+	complete: boolean;
+	/** Files included in the snapshot. */
+	files: number;
+	/** What was left out and why. */
+	omissions: string[];
+}
+
+/** Server-held analysis of one skill name: what would be sent, then its status and result. Holds no full resource snapshots, credentials, or conversation; `result.evidence[].quote` carries bounded verbatim excerpts of skill files. */
+export interface SkillDiagnosticAnalysisRecord {
+	/** Opaque server-issued id; the only handle `analyze`, `cancel` and `apply` accept. */
+	id: string;
+	name: string;
+	status: SkillAnalysisStatus;
+	/** Exact model selector the analysis uses. */
+	model: string;
+	/** Resource bytes the request carries. */
+	bytes: number;
+	candidates: SkillAnalysisCandidate[];
+	/** What leaving the machine means (files are data, known secrets are filtered best-effort, the conversation is excluded, charges may apply); show it with `model`, `candidates` and `bytes` before asking for consent. */
+	disclosure: string;
+	/** Epoch milliseconds when the record was prepared. */
+	createdAt: number;
+	/** The preference was saved. With `error`, the session reload failed and copies may still be active; a separately confirmed application can retry it. Restoring the copies invalidates this status. */
+	applied: boolean;
+	/** Present once the analysis has completed, including `applied` and `stale` records. */
+	result?: ResourceAnalysis;
+	/** Why the last run or application did not finish. */
+	error?: string;
+}
+
+/** What is wrong with a skill name: several active variants, redundant unloaded copies, or a copy that declares no repository. */
+export type SkillDiagnosticIssue = "conflict" | "redundancy" | "missing-provenance";
+
+/** One loaded skill name with its issues and analysis state; clean single-copy names are listed with `canAnalyze: false`. */
+export interface SkillDiagnosticItem {
+	name: string;
+	issues: SkillDiagnosticIssue[];
+	skills: SkillDiagnosticEntry[];
+	duplicates: SkillDiagnosticDuplicate[];
+	/** A comparable group exists, so `prepare_skill_diagnostic_analysis` can run for this name. */
+	canAnalyze: boolean;
+	reason?: SkillSelectionReason;
+	/** Why `canAnalyze` is false, e.g. a single copy with nothing to compare. */
+	unavailableReason?: string;
+	/** Current plan record for this name, in any status. */
+	analysis?: SkillDiagnosticAnalysisRecord;
+	/** Most recent finished analysis, kept while another is prepared. */
+	lastAnalysis?: SkillDiagnosticAnalysisRecord;
+}
+
+/** Current skill resolution; an empty `diagnostics` means no conflicts or redundant installations. */
+export interface SkillDiagnosticsSnapshot {
+	cwd: string;
+	showStartupDiagnostics: boolean;
+	diagnostics: SkillResolutionDiagnostic[];
+	/** Every loaded skill name with its analysis state; absent when connected to an older server. */
+	items?: SkillDiagnosticItem[];
+}
+
 export interface SessionState {
 	sessionId: string;
 	model?: ModelInfo;
@@ -514,6 +645,8 @@ export interface SessionState {
 	contextUsage?: ContextUsage;
 	/** Current goal mode; null when the session has no goal. */
 	goal?: GoalModeState | null;
+	/** Current skill-resolution details; absent when connected to an older server. */
+	skillDiagnostics?: SkillDiagnosticsSnapshot;
 }
 
 export interface BashResult {
@@ -1040,6 +1173,12 @@ export interface AvailableCommandsUpdateEvent {
 	commands: AvailableSlashCommand[];
 }
 
+/** Skill-resolution snapshot, pushed at startup and whenever it, the effective notice setting, or any skill analysis state or result changes. */
+export interface SkillDiagnosticsUpdateEvent {
+	type: "skill_diagnostics_update";
+	data: SkillDiagnosticsSnapshot;
+}
+
 export type SubagentLifecycleStatus = "started" | "completed" | "failed" | "aborted";
 
 export interface SubagentLifecyclePayload {
@@ -1440,7 +1579,7 @@ export interface HostUriSchemeDefinition {
 }
 
 /** Unsolicited outbound frame (everything except responses and host tool/URI requests), discriminated by `type`. */
-export type RpcNotification = ReadyEvent | PromptResultEvent | SessionSettledEvent | ExtensionError | ExtensionUiRequest | AvailableCommandsUpdateEvent | SubagentLifecycleEvent | SubagentProgressEvent | SubagentEvent | LivePhaseEvent | LiveLevelsEvent | LiveTranscriptEvent | LiveEndEvent | BtwDeltaEvent | BtwRecordEvent | CommandOutputEvent | SessionInfoUpdateEvent | ConfigUpdateEvent | RpcFrameErrorEvent | RpcAgentEvent;
+export type RpcNotification = ReadyEvent | PromptResultEvent | SessionSettledEvent | ExtensionError | ExtensionUiRequest | AvailableCommandsUpdateEvent | SkillDiagnosticsUpdateEvent | SubagentLifecycleEvent | SubagentProgressEvent | SubagentEvent | LivePhaseEvent | LiveLevelsEvent | LiveTranscriptEvent | LiveEndEvent | BtwDeltaEvent | BtwRecordEvent | CommandOutputEvent | SessionInfoUpdateEvent | ConfigUpdateEvent | RpcFrameErrorEvent | RpcAgentEvent;
 
 /** Any frame the server writes to stdout (after reassembling `rpc_chunk` sequences), discriminated by `type`. */
 export type RpcServerFrame = RpcResponse | RpcHostRequest | RpcNotification;
@@ -1495,6 +1634,29 @@ export interface OpenSessionParams {
 	sessionDir: string;
 	provider?: string;
 	modelId?: string;
+}
+
+export interface SetSkillStartupDiagnosticsParams {
+	enabled: boolean;
+}
+
+export interface PrepareSkillDiagnosticAnalysisParams {
+	name: string;
+	model?: string;
+}
+
+export interface AnalyzeSkillDiagnosticsParams {
+	analysisId: string;
+	consent: boolean;
+}
+
+export interface CancelSkillDiagnosticAnalysisParams {
+	analysisId: string;
+}
+
+export interface ApplySkillDiagnosticAnalysisParams {
+	analysisId: string;
+	confirmed: boolean;
 }
 
 export interface SetFastModeParams {
@@ -1793,6 +1955,12 @@ export interface RpcWireCommands {
 	new_session: { params: NewSessionParams; result: CancellationResult };
 	open_session: { params: OpenSessionParams; result: OpenSessionResult };
 	get_state: { params: undefined; result: SessionState };
+	get_skill_diagnostics: { params: undefined; result: SkillDiagnosticsSnapshot };
+	set_skill_startup_diagnostics: { params: SetSkillStartupDiagnosticsParams; result: SkillDiagnosticsSnapshot };
+	prepare_skill_diagnostic_analysis: { params: PrepareSkillDiagnosticAnalysisParams; result: SkillDiagnosticAnalysisRecord };
+	analyze_skill_diagnostics: { params: AnalyzeSkillDiagnosticsParams; result: SkillDiagnosticAnalysisRecord };
+	cancel_skill_diagnostic_analysis: { params: CancelSkillDiagnosticAnalysisParams; result: SkillDiagnosticAnalysisRecord };
+	apply_skill_diagnostic_analysis: { params: ApplySkillDiagnosticAnalysisParams; result: SkillDiagnosticAnalysisRecord };
 	set_fast_mode: { params: SetFastModeParams; result: FastModeResult };
 	set_slow_mode: { params: SetSlowModeParams; result: SetSlowModeResult };
 	goal: { params: GoalParams; result: GoalResult };

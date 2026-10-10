@@ -86,6 +86,41 @@ export const rpcCommands: readonly RpcCommandSpec[] = [
 
 	{ name: "get_state", doc: "Snapshot the session state.", result: "SessionState" },
 	{
+		name: "get_skill_diagnostics",
+		doc: "Snapshot skill resolution; available even when startup notices are disabled.",
+		result: "SkillDiagnosticsSnapshot",
+	},
+	{
+		name: "set_skill_startup_diagnostics",
+		doc: "Persist the skill startup-notice preference; returns the snapshot with the effective setting.",
+		params: { enabled: "boolean" },
+		result: "SkillDiagnosticsSnapshot",
+	},
+	{
+		name: "prepare_skill_diagnostic_analysis",
+		doc: "Snapshot the comparable variants of one skill name and return the server-held record with its consent disclosure; sends nothing to a model. `model` must name one authenticated model exactly; omitted uses the default analysis model.",
+		params: { name: "string", "model?": "string" },
+		result: "SkillDiagnosticAnalysisRecord",
+	},
+	{
+		name: "analyze_skill_diagnostics",
+		doc: "Start a prepared analysis once the user consented (`consent` must be true); returns the running record immediately. Progress and the result arrive as `skill_diagnostics_update` frames. Repeating the call for a running, complete or applied id replays its state without another model call; a cancelled, failed or stale analysis must be prepared again.",
+		params: { analysisId: "string", consent: "boolean" },
+		result: "SkillDiagnosticAnalysisRecord",
+	},
+	{
+		name: "cancel_skill_diagnostic_analysis",
+		doc: "Abort one analysis by id; returns its record.",
+		params: { analysisId: "string" },
+		result: "SkillDiagnosticAnalysisRecord",
+	},
+	{
+		name: "apply_skill_diagnostic_analysis",
+		doc: "Apply a complete `prefer` recommendation after a separate confirmation (`confirmed` must be true): saves a content-bound exclusion in the user's global settings and reloads skills; installed files are unchanged. A successfully applied id replays without another change. If its record has `applied: true` and `error`, saving succeeded but the session reload failed; another separately confirmed call retries the application.",
+		params: { analysisId: "string", confirmed: "boolean" },
+		result: "SkillDiagnosticAnalysisRecord",
+	},
+	{
 		name: "set_fast_mode",
 		doc: "Enable or disable fast mode for the session.",
 		params: { enabled: "boolean" },

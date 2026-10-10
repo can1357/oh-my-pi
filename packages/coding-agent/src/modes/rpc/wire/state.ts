@@ -92,6 +92,147 @@ export const stateDefs = {
 		"UsageLimitLowPriority | UsageLimitWrapUp",
 		"Provider-neutral state of an account past its usage limit, discriminated by `stage`.",
 	),
+	SkillSelectionReason: doc(
+		"'source-order' | 'custom-directory' | 'authored-over-installed'",
+		"Rule that ordered the active variants of one skill name.",
+	),
+	SkillDiagnosticEntry: doc(
+		{
+			name: "string",
+			filePath: "string",
+			source: "string",
+			"pluginName?": "string",
+			"repository?": "string",
+			"version?": "string",
+		},
+		"Allowlisted identity of one discovered skill file; `repository`/`version` are what its plugin declares.",
+	),
+	SkillDuplicateMatch: doc(
+		"'content' | 'origin'",
+		"Why a duplicate is not loaded: identical SKILL.md content, or a same-origin variant (`skills.dedupeSameOrigin`).",
+	),
+	SkillDiagnosticDuplicate: doc(
+		{
+			skill: "SkillDiagnosticEntry",
+			retained: "SkillDiagnosticEntry",
+			match: absentAs("SkillDuplicateMatch", "content"),
+		},
+		"A file not loaded because `retained` stands for it; older snapshots imply `match: content`.",
+	),
+	SkillResolutionDiagnostic: doc(
+		{
+			name: "string",
+			reason: "SkillSelectionReason",
+			skills: "SkillDiagnosticEntry[]",
+			duplicates: "SkillDiagnosticDuplicate[]",
+		},
+		"A skill name that resolved into several active variants and/or left redundant copies unloaded.",
+	),
+	ResourceRelationship: doc(
+		"'copies' | 'adaptation' | 'overlap' | 'complementary' | 'unrelated' | 'uncertain'",
+		"How the model judged the compared resources to relate.",
+	),
+	ResourceAnalysisEvidence: doc(
+		{ candidateId: "string", file: "string", quote: "string", explanation: "string" },
+		"A quote from one candidate's file that supports a finding; the server validated it against the snapshot the model read.",
+	),
+	ResourceRecommendationAction: "'keep-all' | 'prefer'",
+	ResourceRecommendation: doc(
+		{
+			action: "ResourceRecommendationAction",
+			"preferredId?": doc("string", "Candidate id to keep; present only when `action` is `prefer`."),
+			reason: "string",
+		},
+		"What to do with the compared resources; `prefer` only follows a preferable relationship over complete coverage.",
+	),
+	ResourceAnalysis: doc(
+		{
+			relationship: "ResourceRelationship",
+			evidence: "ResourceAnalysisEvidence[]",
+			differences: "string[]",
+			recommendation: "ResourceRecommendation",
+			limitations: "string[]",
+		},
+		"The model's comparison of the prepared snapshots, validated against them before it is reported.",
+	),
+	SkillAnalysisStatus: doc(
+		"'prepared' | 'running' | 'complete' | 'failed' | 'cancelled' | 'applied' | 'stale'",
+		"Lifecycle of one analysis: `prepared` has sent nothing; `stale` means the reviewed files changed after preparation or analysis, or an applied preference was restored. A completed `result` may remain for inspection but cannot be applied.",
+	),
+	SkillAnalysisCandidate: doc(
+		{
+			id: "string",
+			name: "string",
+			filePath: "string",
+			root: "string",
+			fingerprint: "string",
+			complete: doc("boolean", "False when part of the skill directory was left out of the snapshot."),
+			files: doc("number.integer", "Files included in the snapshot."),
+			omissions: doc("string[]", "What was left out and why."),
+		},
+		"One skill variant an analysis would send: where it lives and how completely it is covered.",
+	),
+	SkillDiagnosticAnalysisRecord: doc(
+		{
+			id: doc("string", "Opaque server-issued id; the only handle `analyze`, `cancel` and `apply` accept."),
+			name: "string",
+			status: "SkillAnalysisStatus",
+			model: doc("string", "Exact model selector the analysis uses."),
+			bytes: doc("number.integer", "Resource bytes the request carries."),
+			candidates: "SkillAnalysisCandidate[]",
+			disclosure: doc(
+				"string",
+				"What leaving the machine means (files are data, known secrets are filtered best-effort, the conversation is excluded, charges may apply); show it with `model`, `candidates` and `bytes` before asking for consent.",
+			),
+			createdAt: doc("number.integer", "Epoch milliseconds when the record was prepared."),
+			"result?": doc(
+				"ResourceAnalysis",
+				"Present once the analysis has completed, including `applied` and `stale` records.",
+			),
+			"error?": doc("string", "Why the last run or application did not finish."),
+			applied: doc(
+				"boolean",
+				"The preference was saved. With `error`, the session reload failed and copies may still be active; a separately confirmed application can retry it. Restoring the copies invalidates this status.",
+			),
+		},
+		"Server-held analysis of one skill name: what would be sent, then its status and result. Holds no full resource snapshots, credentials, or conversation; `result.evidence[].quote` carries bounded verbatim excerpts of skill files.",
+	),
+	SkillDiagnosticIssue: doc(
+		"'conflict' | 'redundancy' | 'missing-provenance'",
+		"What is wrong with a skill name: several active variants, redundant unloaded copies, or a copy that declares no repository.",
+	),
+	SkillDiagnosticItem: doc(
+		{
+			name: "string",
+			issues: "SkillDiagnosticIssue[]",
+			skills: "SkillDiagnosticEntry[]",
+			duplicates: "SkillDiagnosticDuplicate[]",
+			"reason?": "SkillSelectionReason",
+			canAnalyze: doc(
+				"boolean",
+				"A comparable group exists, so `prepare_skill_diagnostic_analysis` can run for this name.",
+			),
+			"unavailableReason?": doc("string", "Why `canAnalyze` is false, e.g. a single copy with nothing to compare."),
+			"analysis?": doc("SkillDiagnosticAnalysisRecord", "Current plan record for this name, in any status."),
+			"lastAnalysis?": doc(
+				"SkillDiagnosticAnalysisRecord",
+				"Most recent finished analysis, kept while another is prepared.",
+			),
+		},
+		"One loaded skill name with its issues and analysis state; clean single-copy names are listed with `canAnalyze: false`.",
+	),
+	SkillDiagnosticsSnapshot: doc(
+		{
+			cwd: "string",
+			showStartupDiagnostics: "boolean",
+			diagnostics: "SkillResolutionDiagnostic[]",
+			"items?": doc(
+				"SkillDiagnosticItem[]",
+				"Every loaded skill name with its analysis state; absent when connected to an older server.",
+			),
+		},
+		"Current skill resolution; an empty `diagnostics` means no conflicts or redundant installations.",
+	),
 	SessionState: {
 		"model?": "ModelInfo",
 		"thinkingLevel?": "ThinkingLevel",
@@ -133,6 +274,10 @@ export const stateDefs = {
 		dumpTools: absentAs("ToolDescriptor[]", []),
 		"contextUsage?": "ContextUsage",
 		goal: absentAs(doc("GoalModeState | null", "Current goal mode; null when the session has no goal."), null),
+		"skillDiagnostics?": doc(
+			"SkillDiagnosticsSnapshot",
+			"Current skill-resolution details; absent when connected to an older server.",
+		),
 	},
 
 	BashResult: {

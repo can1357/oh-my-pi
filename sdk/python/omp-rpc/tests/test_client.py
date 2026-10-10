@@ -112,6 +112,70 @@ FAKE_SERVER = textwrap.dedent(
     event_filter = None
     message_counter = 0
     pending_async_work = False
+    show_skill_startup_diagnostics = True
+    skill_diagnostics = [
+        {
+            "name": "review",
+            "reason": "source-order",
+            "skills": [
+                {
+                    "name": "review",
+                    "filePath": "/skills/first/review/SKILL.md",
+                    "source": "custom:user",
+                },
+                {
+                    "name": "second/review",
+                    "filePath": "/skills/second/review/SKILL.md",
+                    "source": "custom:user",
+                    "pluginName": "second",
+                },
+            ],
+            "duplicates": [
+                {
+                    "skill": {
+                        "name": "review",
+                        "filePath": "/skills/mirror/review/SKILL.md",
+                        "source": "custom:user",
+                    },
+                    "retained": {
+                        "name": "second/review",
+                        "filePath": "/skills/second/review/SKILL.md",
+                        "source": "custom:user",
+                        "pluginName": "second",
+                    },
+                    "match": "content",
+                }
+            ],
+        }
+    ]
+
+    def skill_items():
+        group = skill_diagnostics[0]
+        review = {
+            "name": "review",
+            "issues": ["conflict", "redundancy"],
+            "skills": group["skills"],
+            "duplicates": group["duplicates"],
+            "reason": group["reason"],
+            "canAnalyze": True,
+        }
+        solo = {
+            "name": "solo",
+            "issues": [],
+            "skills": [group["skills"][0]],
+            "duplicates": [],
+            "canAnalyze": False,
+            "unavailableReason": "Only one copy is loaded.",
+        }
+        return [review, solo]
+
+    def skill_snapshot():
+        return {
+            "cwd": "/workspace",
+            "showStartupDiagnostics": show_skill_startup_diagnostics,
+            "diagnostics": skill_diagnostics,
+            "items": skill_items(),
+        }
 
     def emit_event(payload):
         if event_filter is None or payload["type"] in event_filter:
@@ -175,6 +239,7 @@ FAKE_SERVER = textwrap.dedent(
             "todoPhases": todo_phases,
             "goal": goal_state,
             "dumpTools": [{"name": "read", "description": "Read files", "parameters": {"type": "object"}}] + registered_host_tools,
+            "skillDiagnostics": skill_snapshot(),
         }
 
     def emit_prompt_turn(
@@ -356,6 +421,22 @@ FAKE_SERVER = textwrap.dedent(
 
         if command_type == "get_state":
             respond(request_id, "get_state", current_state())
+        elif command_type == "get_skill_diagnostics":
+            respond(request_id, "get_skill_diagnostics", skill_snapshot())
+        elif command_type == "set_skill_startup_diagnostics":
+            enabled = command.get("enabled")
+            if not isinstance(enabled, bool):
+                respond(
+                    request_id,
+                    "set_skill_startup_diagnostics",
+                    success=False,
+                    error="enabled must be a boolean",
+                )
+            else:
+                show_skill_startup_diagnostics = enabled
+                snapshot = skill_snapshot()
+                respond(request_id, "set_skill_startup_diagnostics", snapshot)
+                emit_event({"type": "skill_diagnostics_update", "data": snapshot})
         elif command_type == "set_host_tools":
             registered_host_tools = command.get("tools", [])
             respond(
@@ -1436,6 +1517,32 @@ class RpcClientTests(unittest.TestCase):
             self.assertFalse(result.enabled)
             self.assertTrue(result.active)
 
+    def test_skill_diagnostics_helpers_parse_state_query_control_and_update(
+        self,
+    ) -> None:
+        updates = []
+        with self.make_client() as client:
+            client.on_skill_diagnostics_update(updates.append)
+            state_snapshot = client.get_state().skill_diagnostics
+            self.assertIsNotNone(state_snapshot)
+            assert state_snapshot is not None
+            queried = client.get_skill_diagnostics()
+            disabled = client.set_skill_startup_diagnostics(False)
+            disabled_state = client.get_state().skill_diagnostics
+            self.assertIsNotNone(disabled_state)
+            assert disabled_state is not None
+            self.assertFalse(disabled_state.show_startup_diagnostics)
+
+        self.assertEqual(queried, state_snapshot)
+        self.assertEqual(queried.cwd, "/workspace")
+        self.assertEqual(queried.diagnostics[0].skills[1].plugin_name, "second")
+        self.assertEqual(
+            queried.diagnostics[0].duplicates[0].retained.file_path,
+            "/skills/second/review/SKILL.md",
+        )
+        self.assertFalse(disabled.show_startup_diagnostics)
+        self.assertEqual([event.data for event in updates], [disabled])
+
     def test_prompt_and_wait_returns_assistant_text(self) -> None:
         with self.make_client() as client:
             turn = client.prompt_and_wait("say hello", timeout=2.0)
@@ -2252,8 +2359,11 @@ class TerminatesProcessGroupTests(unittest.TestCase):
                 textwrap.dedent(
                     f"""
                     import os, time
-                    with open({pid_file!r}, "w") as f:
+                    with open({beat_file!r}, "w") as f:
+                        f.write(str(time.time()))
+                    with open({(pid_file + ".tmp")!r}, "w") as f:
                         f.write(str(os.getpid()))
+                    os.replace({(pid_file + ".tmp")!r}, {pid_file!r})
                     while True:
                         with open({beat_file!r}, "w") as f:
                             f.write(str(time.time()))
