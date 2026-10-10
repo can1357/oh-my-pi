@@ -160,6 +160,31 @@ describe("task spawn routing", () => {
 		expect(runSpy.mock.calls[0]?.[0].modelOverride).toEqual(["openai/gpt-4.1-mini"]);
 	});
 
+	it("sends the async contract once while an earlier spawn result stays in the live context", async () => {
+		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({ agents: [taskAgent], projectAgentsDir: null });
+		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => makeResult(options.id ?? "?"));
+		const live: unknown[] = [];
+		const session = {
+			...createSession({ manager: createManager() }),
+			sessionManager: { buildSessionContext: () => ({ messages: live }) },
+		} as unknown as ToolSession;
+		const tool = await TaskTool.create(session);
+		const spawn = (name: string) =>
+			tool.execute(`tc-${name}`, { agent: "task", name, task: "Do the thing." } as TaskParams);
+
+		const first = await spawn("First");
+		expect(getFirstText(first)).toContain("Results auto-deliver");
+		live.push({ role: "toolResult", toolName: "task", details: first.details });
+
+		const second = await spawn("Second");
+		expect(getFirstText(second)).toContain("Spawned agent `Second`");
+		expect(getFirstText(second)).not.toContain("Results auto-deliver");
+
+		// Compaction or pruning removed the carrier result, so the contract returns.
+		live.length = 0;
+		expect(getFirstText(await spawn("Third"))).toContain("Results auto-deliver");
+	});
+
 	it("uses the persisted /agents model after replacing a session-only task selection", async () => {
 		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({
 			agents: [{ ...taskAgent, model: ["@task"] }],

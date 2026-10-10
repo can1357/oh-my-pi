@@ -208,6 +208,9 @@ function formatWallTimeSeconds(wallTimeMs: number): string {
 	return (wallTimeMs / 1000).toFixed(2);
 }
 
+/** Runs faster than this carry no actionable timing, so the model-facing notice is omitted (the UI still reads `details.wallTimeMs`). */
+export const WALL_TIME_NOTICE_MIN_MS = 1000;
+
 /** Formats the model-facing command duration notice. */
 export function formatWallTimeNotice(wallTimeMs: number): string {
 	return `Wall time: ${formatWallTimeSeconds(wallTimeMs)} seconds`;

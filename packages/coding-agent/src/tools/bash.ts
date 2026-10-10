@@ -2,6 +2,7 @@ import {
 	type BashToolDetails,
 	formatBackgroundNotice,
 	formatWallTimeNotice,
+	WALL_TIME_NOTICE_MIN_MS,
 	formatExitCodeNotice,
 } from "@oh-my-pi/pi-tui/tools/bash";
 import * as fs from "node:fs";
@@ -696,7 +697,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 
 		const outputLines = [this.#formatResultOutput(result)];
 		const notices: string[] = [];
-		if (options.wallTimeMs !== undefined) {
+		if (options.wallTimeMs !== undefined && options.wallTimeMs >= WALL_TIME_NOTICE_MIN_MS) {
 			notices.push(formatWallTimeNotice(options.wallTimeMs));
 		}
 		if (options.notices) {

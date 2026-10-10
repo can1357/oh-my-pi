@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Slimmed tool results: the async-task contract is sent once per context instead of on every spawn, bash `Wall time` shows only for runs of 1s or more, directory listings drop column padding, and the `<meta>` row appears only for truncated subagent output ([#15265](https://github.com/can1357/oh-my-pi/issues/15265))
+
 ## [18.8.9] - 2026-10-10
 
 ### Added
