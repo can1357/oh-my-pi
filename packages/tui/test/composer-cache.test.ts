@@ -160,6 +160,20 @@ describe("composer startup cache", () => {
 		cache.close();
 	});
 
+	it("refreshes inherited auto-resume intent without masking a project override", () => {
+		const project = path.join(root, "project");
+		const otherProject = path.join(root, "other-project");
+		const cache = ComposerCache.open(dbPath);
+		cache.writeAutoResume(project, true, true);
+		cache.writeGlobalAutoResume(true);
+
+		cache.writeGlobalAutoResume(false);
+
+		expect(cache.cachedAutoResume(project)).toBeTrue();
+		expect(cache.cachedAutoResume(otherProject)).toBeFalse();
+		cache.close();
+	});
+
 	it("refreshes zero-turn layout while preserving resumable-session facts", () => {
 		const project = path.join(root, "project");
 		const sessionFile = path.join(root, "sessions", "resumable.jsonl");

@@ -92,6 +92,32 @@ describe("startup composer terminal session identity", () => {
 		}
 	});
 
+	it("maps a recoverable backup to the primary session live resume will restore", () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "omp-startup-session-backup-"));
+		const agentDir = path.join(root, "agent");
+		const project = path.join(root, "project");
+		const originalAgentDir = getAgentDir();
+		setAgentDir(agentDir);
+		const sessions = sessionDirForCwd(project);
+		const primary = path.join(sessions, "2026-01-02T00-00-00_new.jsonl");
+		const backup = `${primary}.123.bak`;
+		fs.mkdirSync(project);
+		fs.mkdirSync(sessions, { recursive: true });
+		fs.writeFileSync(
+			backup,
+			`${JSON.stringify({ type: "session", id: "new", cwd: project })}\n${JSON.stringify({
+				type: "message",
+				message: { role: "user", content: "recoverable work" },
+			})}\n`,
+		);
+		try {
+			expect(resolveTerminalSessionPrepaint(project)?.sessionFile).toBe(primary);
+		} finally {
+			setAgentDir(originalAgentDir);
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
 	it("breaks equal session mtimes with the header creation time used by live resume", () => {
 		const root = fs.mkdtempSync(path.join(os.tmpdir(), "omp-startup-session-created-"));
 		const agentDir = path.join(root, "agent");

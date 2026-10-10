@@ -356,6 +356,20 @@ export class ComposerCache {
 		}
 	}
 
+	/** Refresh inherited intent without deleting a project's explicit override row. */
+	writeGlobalAutoResume(autoResume: boolean): void {
+		const value: CachedAutoResume = { value: autoResume, projectScoped: false };
+		const json = JSON.stringify(value);
+		const globalKey = `${ANY_PROJECT}\0auto-resume`;
+		if (this.#known.get(globalKey) === json) return;
+		try {
+			this.#upsert.run(ANY_PROJECT, "auto-resume", json);
+			this.#known.set(globalKey, json);
+		} catch (error) {
+			logger.debug("composer cache write failed", { kind: "auto-resume", error: String(error) });
+		}
+	}
+
 	/** Status-bar inputs for the next prepaint's startup status line. */
 	writeStatus(cwd: string, status: ComposerStatusCache, sessionFile?: string): void {
 		this.#putShared(

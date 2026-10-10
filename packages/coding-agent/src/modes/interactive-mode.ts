@@ -2405,6 +2405,11 @@ export class InteractiveMode implements InteractiveModeContext {
 				void this.#handleGoalSessionEvent(event);
 			}),
 			cfgLiveUiSettings.listen(this.settings, (next, previous) => this.#applyUiSettingChanges(next, previous)),
+			this.settings.onGlobalChange([cfgAutoResume], () => {
+				sharedComposerCache()?.writeGlobalAutoResume(
+					this.settings.globalValue(cfgAutoResume) ?? cfgAutoResume.default,
+				);
+			}),
 		);
 		// Cache the live model for the next status-bar prepaint: init-time
 		// reconciliations (#reconcileModeFromSession, #enterPlanMode for

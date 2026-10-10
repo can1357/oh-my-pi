@@ -47,6 +47,7 @@ import {
 	inheritWarnings,
 	lookup as lookupSetting,
 	resetRegistryForTest,
+	type Setting,
 	settingValuesEqual,
 	type ValueCacheEntry,
 	type WarnState,
@@ -624,6 +625,8 @@ export class Settings {
 	readonly warnState: WarnState = { invalid: new Map(), items: new Map() };
 	/** Change listeners bucketed by the `slot` of the setting they observe ({@link onEffectiveChange}). */
 	#changeListeners: (Set<SettingChangeListener> | undefined)[] = [];
+	/** Global-layer listeners fire even when a project value masks the changed setting. */
+	#globalChangeListeners: (Set<SettingChangeListener> | undefined)[] = [];
 	/** Forwarders of every change into live {@link overlay} children. */
 	#childForwarders = new Set<SettingChangeListener>();
 	/** Instance this overlay reads through to ({@link overlay}); overlays never persist or write back. */
@@ -922,6 +925,7 @@ export class Settings {
 		}
 		this.#rebuildMerged();
 		if (persistGlobal) this.#queueSave();
+		if (persistGlobal) this.#notifyGlobalChange(setting);
 		this.#fireIfChanged(setting, prev);
 	}
 
@@ -938,6 +942,7 @@ export class Settings {
 		if (current !== undefined) this.#stageGlobal(setting.segments, undefined);
 		this.#rebuildMerged();
 		if (current !== undefined) this.#queueSave();
+		if (current !== undefined) this.#notifyGlobalChange(setting);
 		this.#fireIfChanged(setting, prev);
 	}
 
@@ -968,6 +973,7 @@ export class Settings {
 		}
 		this.#rebuildMerged();
 		if (staged) this.#queueSave();
+		if (staged) this.#notifyGlobalChange(setting);
 		this.#fireIfChanged(setting, prev);
 	}
 
@@ -1056,6 +1062,11 @@ export class Settings {
 		return allSettings().map(setting => setting.get(this));
 	}
 
+	/** Configured value of every setting in the global layer, before project masking. */
+	#globalSnapshot(): unknown[] {
+		return allSettings().map(setting => this.globalValue(setting));
+	}
+
 	/**
 	 * Notifies change listeners for every setting whose effective value differs from
 	 * `previous` (disk reload, save-time merge, project re-scope).
@@ -1065,6 +1076,14 @@ export class Settings {
 		for (let i = 0; i < previous.length; i++) {
 			const setting = settings[i];
 			if (!settingValuesEqual(setting.get(this), previous[i])) this.#notifyChange(setting);
+		}
+	}
+
+	#fireGlobalChangesSince(previous: readonly unknown[]): void {
+		const settings = allSettings();
+		for (let i = 0; i < previous.length; i++) {
+			const setting = settings[i];
+			if (!settingValuesEqual(this.globalValue(setting), previous[i])) this.#notifyGlobalChange(setting);
 		}
 	}
 
@@ -1079,6 +1098,11 @@ export class Settings {
 		if (this.#childForwarders.size > 0) runChangeListeners(this.#childForwarders, setting);
 	}
 
+	#notifyGlobalChange(setting: AnySetting): void {
+		const listeners = this.#globalChangeListeners[setting.slot];
+		if (listeners) runChangeListeners(listeners, setting);
+	}
+
 	/**
 	 * Registry plumbing behind `Derived.listen` and `effect`: calls `listener` synchronously
 	 * whenever the effective value of one of `sources` changes in this instance. Returns the
@@ -1088,6 +1112,14 @@ export class Settings {
 		for (const source of sources) (this.#changeListeners[source.slot] ??= new Set()).add(listener);
 		return () => {
 			for (const source of sources) this.#changeListeners[source.slot]?.delete(listener);
+		};
+	}
+
+	/** Observe writes to the global layer even when a higher-precedence project value masks them. */
+	onGlobalChange(sources: readonly AnySetting[], listener: SettingChangeListener): () => void {
+		for (const source of sources) (this.#globalChangeListeners[source.slot] ??= new Set()).add(listener);
+		return () => {
+			for (const source of sources) this.#globalChangeListeners[source.slot]?.delete(listener);
 		};
 	}
 
@@ -1438,6 +1470,7 @@ export class Settings {
 			if (!keepLastGood) this.#validateAll(this.#mergeOverParent(this.#mergeOwnLayers(layers)), this.#cwd);
 
 			const previous = this.#snapshot();
+			const previousGlobal = this.#globalSnapshot();
 			for (const refresh of adopted) refresh.commit();
 			this.#global = layers.global;
 			this.#project = layers.project;
@@ -1446,6 +1479,7 @@ export class Settings {
 			for (const setting of settled) this.#softPins.delete(setting);
 			this.#rebuildMerged();
 			this.#fireChangesSince(previous);
+			this.#fireGlobalChangesSince(previousGlobal);
 			return;
 		}
 	}
@@ -1569,6 +1603,13 @@ export class Settings {
 	getGlobalSettings(): RawSettings {
 		const own = structuredClone(this.#global);
 		return this.#parent ? this.#deepMerge(this.#parent.getGlobalSettings(), own) : own;
+	}
+
+	/** Value supplied by the global layer alone, before project and launch-local overrides. */
+	globalValue<T>(setting: Setting<T>): T | undefined {
+		const own = getByPath(this.#global, setting.segments);
+		if (own !== undefined && own !== null) return own as T;
+		return this.#parent?.globalValue(setting);
 	}
 
 	/**
@@ -3791,9 +3832,11 @@ export class Settings {
 		this.#applyPendingGlobalWrites(saved);
 		if (!this.#acceptsLayers({ ...this.#ownLayers(), global: saved }, source)) return;
 		const previous = this.#snapshot();
+		const previousGlobal = this.#globalSnapshot();
 		this.#global = saved;
 		this.#rebuildMerged();
 		this.#fireChangesSince(previous);
+		this.#fireGlobalChangesSince(previousGlobal);
 	}
 
 	/** Re-applies every global write still pending a save onto `target`, a global layer read from disk. */

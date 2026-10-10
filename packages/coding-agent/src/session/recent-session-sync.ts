@@ -99,17 +99,45 @@ function inspectSessionFileSync(sessionFile: string): { created: Date; resumable
 /** Synchronous, dependency-light form of the canonical recent nonempty-session selector. */
 export function findMostRecentNonEmptySessionSync(sessionDir: string): string | undefined {
 	try {
-		return fs
-			.readdirSync(sessionDir, { withFileTypes: true })
-			.filter(entry => entry.isFile() && entry.name.endsWith(".jsonl"))
-			.flatMap(entry => {
-				const sessionFile = path.join(sessionDir, entry.name);
-				const inspected = inspectSessionFileSync(sessionFile);
+		const entries = fs.readdirSync(sessionDir, { withFileTypes: true }).filter(entry => entry.isFile());
+		const primaries = new Set(entries.filter(entry => entry.name.endsWith(".jsonl")).map(entry => entry.name));
+		const recoverableBackups = new Map<string, { file: string; modified: Date }>();
+		for (const entry of entries) {
+			if (!entry.name.endsWith(".bak")) continue;
+			const trimmed = entry.name.slice(0, -".bak".length);
+			const suffix = trimmed.lastIndexOf(".");
+			if (suffix <= 0) continue;
+			const primaryName = trimmed.slice(0, suffix);
+			if (!primaryName.endsWith(".jsonl") || primaries.has(primaryName)) continue;
+			const file = path.join(sessionDir, entry.name);
+			const modified = fs.statSync(file).mtime;
+			const existing = recoverableBackups.get(primaryName);
+			if (!existing || modified.getTime() > existing.modified.getTime()) {
+				recoverableBackups.set(primaryName, { file, modified });
+			}
+		}
+		const candidates = [
+			...entries
+				.filter(entry => entry.name.endsWith(".jsonl"))
+				.map(entry => ({
+					file: path.join(sessionDir, entry.name),
+					path: path.join(sessionDir, entry.name),
+					modified: undefined as Date | undefined,
+				})),
+			...[...recoverableBackups].map(([primaryName, backup]) => ({
+				file: backup.file,
+				path: path.join(sessionDir, primaryName),
+				modified: backup.modified,
+			})),
+		];
+		return candidates
+			.flatMap(candidate => {
+				const inspected = inspectSessionFileSync(candidate.file);
 				if (!inspected.resumable) return [];
 				return [
 					{
-						path: sessionFile,
-						modified: fs.statSync(sessionFile).mtime,
+						path: candidate.path,
+						modified: candidate.modified ?? fs.statSync(candidate.file).mtime,
 						created: inspected.created,
 					},
 				];
