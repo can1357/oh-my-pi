@@ -549,6 +549,16 @@ fn tokenize(command: &str) -> Vec<String> {
 					current.push(next);
 				}
 			},
+			// A `#` at a token boundary starts a comment: skip to end of line
+			// (chain segments are verbatim source and keep their comments).
+			// A mid-word `#` is literal word text (`build#1`).
+			(None, '#') if current.is_empty() => {
+				for c in chars.by_ref() {
+					if c == '\n' {
+						break;
+					}
+				}
+			},
 			(None, c) if c.is_whitespace() => {
 				if !current.is_empty() {
 					tokens.push(std::mem::take(&mut current));
@@ -567,6 +577,20 @@ fn tokenize(command: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	#[test]
+	fn comments_do_not_blind_program_detection() {
+		// Chain segments are verbatim source and keep their comments; a `#`
+		// line must not become the detected program (that silently disables
+		// output minimization for every comment-bearing segment).
+		let command = detect("# setup\n npm install").expect("commented command is detected");
+		assert_eq!(command.program, "npm");
+		assert_eq!(command.subcommand.as_deref(), Some("install"));
+		// A mid-word `#` is literal word text, not a comment.
+		let command = detect("npm run build#1").expect("hash-in-word command is detected");
+		assert_eq!(command.program, "npm");
+		assert_eq!(command.subcommand.as_deref(), Some("run"));
+	}
 
 	#[test]
 	fn detects_basic_program_and_subcommand() {
