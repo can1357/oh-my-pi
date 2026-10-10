@@ -685,6 +685,12 @@ interface TitleInput {
 	tried: boolean;
 }
 
+/** Planned saved-reset spends cleared to run; `prompted` records a Yes to this batch's consent prompt. */
+interface ApprovedResetActions {
+	actions: (CodexResetAction | ClaudeResetAction)[];
+	prompted: boolean;
+}
+
 const kPersistedSessionEntryId = Symbol("persistedSessionEntryId");
 type PersistedAssistantMessage = AssistantMessage & { [kPersistedSessionEntryId]?: string };
 
@@ -12516,11 +12522,14 @@ export class AgentSession implements SettingsScope {
 		provider: "openai-codex" | "anthropic",
 		actions: (CodexResetAction | ClaudeResetAction)[],
 		coordinator: CodexAutoRedeemCoordinator,
-	): Promise<(CodexResetAction | ClaudeResetAction)[]> {
+	): Promise<ApprovedResetActions> {
 		const asked = actions.filter(action => shouldPromptCodexAutoRedeem(action.autoRedeem));
 		const first = asked[0];
-		if (!first) return actions;
-		const preapproved = actions.filter(action => !shouldPromptCodexAutoRedeem(action.autoRedeem));
+		if (!first) return { actions, prompted: false };
+		const preapproved = {
+			actions: actions.filter(action => !shouldPromptCodexAutoRedeem(action.autoRedeem)),
+			prompted: false,
+		};
 		const providerLabel = provider === "anthropic" ? "Claude" : "Codex";
 		const settingsKey = provider === "anthropic" ? "claudeResets.autoRedeem" : "codexResets.autoRedeem";
 		const source = provider === "anthropic" ? "claude-auto-reset" : "codex-auto-reset";
@@ -12571,7 +12580,7 @@ export class AgentSession implements SettingsScope {
 			if (choice === "Yes") {
 				if (provider === "anthropic") cfgClaudeResetsAutoRedeem.set(this.settings, "yes");
 				else cfgCodexResetsAutoRedeem.set(this.settings, "yes");
-				return actions;
+				return { actions, prompted: true };
 			}
 			if (choice === "No") {
 				if (provider === "anthropic") cfgClaudeResetsAutoRedeem.set(this.settings, "no");
@@ -12710,28 +12719,30 @@ export class AgentSession implements SettingsScope {
 	 */
 	async #executeResetActions(
 		provider: "openai-codex" | "anthropic",
-		actions: (CodexResetAction | ClaudeResetAction)[],
+		approved: ApprovedResetActions,
 		coordinator: CodexAutoRedeemCoordinator,
 	): Promise<number> {
 		const authStorage = this.#modelRegistry.authStorage;
 		const providerLabel = provider === "anthropic" ? "Claude" : "Codex";
 		const source = provider === "anthropic" ? "claude-auto-reset" : "codex-auto-reset";
 		const autoRedeemSetting = provider === "anthropic" ? cfgClaudeResetsAutoRedeem : cfgCodexResetsAutoRedeem;
-		// Consent, earlier actions, the fence and the live listing all wait after
-		// planning: a policy or setting that has since turned the account off wins.
-		const autoRedeemOff = (target: ResetCreditTarget): boolean => {
+		// Consent, earlier actions, the fence, the live listing and the pending marker
+		// all wait after planning: spend only while the account's current mode still
+		// allows it, and an `unset` one only after a Yes to this batch's prompt.
+		const consentWithdrawn = (target: ResetCreditTarget): boolean => {
 			const policy = authStorage.oauth.policy(provider, target);
-			return effectiveAutoRedeemMode(autoRedeemSetting.get(this.settings), policy) === "no";
+			const mode = effectiveAutoRedeemMode(autoRedeemSetting.get(this.settings), policy);
+			return mode === "no" || (mode === "unset" && !approved.prompted);
 		};
 		let redeemed = 0;
-		for (const action of actions) {
+		for (const action of approved.actions) {
 			if (coordinator.attemptedKeys.has(action.attemptKey)) continue;
 			const previousAttemptAt = coordinator.lastAttemptAtByAccount.get(action.accountKey);
 			coordinator.attemptedKeys.add(action.attemptKey);
 			coordinator.lastAttemptAtByAccount.set(action.accountKey, Date.now());
 			let outcome: ResetCreditRedeemOutcome | undefined;
 			let sharedReset = false;
-			let turnedOff = false;
+			let withdrawn = false;
 			try {
 				const redeemOptions = {
 					target: action.target,
@@ -12742,8 +12753,8 @@ export class AgentSession implements SettingsScope {
 				const lockKey = resetAccountLockKey(action.target);
 				if (!lockKey) {
 					// An account without an upstream identity cannot share a cross-process fence.
-					turnedOff = autoRedeemOff(action.target);
-					if (!turnedOff) outcome = await authStorage.resets.redeem(redeemOptions);
+					withdrawn = consentWithdrawn(action.target);
+					if (!withdrawn) outcome = await authStorage.resets.redeem(redeemOptions);
 				} else {
 					// The coordinator is process-local. Fence concurrent processes and
 					// remember a recent attempt so a late 429 cannot spend again.
@@ -12779,10 +12790,13 @@ export class AgentSession implements SettingsScope {
 									return { ok: false, code: "no_credit", provider } satisfies ResetCreditRedeemOutcome;
 								}
 							}
-							turnedOff = autoRedeemOff(action.target);
-							if (turnedOff) return undefined;
 							const attemptedAt = Date.now();
 							await Bun.write(lockPath, `pending:${attemptedAt}`);
+							withdrawn = consentWithdrawn(action.target);
+							if (withdrawn) {
+								await Bun.write(lockPath, "");
+								return undefined;
+							}
 							const result = await authStorage.resets.redeem(redeemOptions);
 							if (result.code === "reset") {
 								await Bun.write(lockPath, `reset:${attemptedAt}`);
@@ -12806,12 +12820,12 @@ export class AgentSession implements SettingsScope {
 			}
 			if (!outcome) {
 				if (sharedReset) redeemed++;
-				if (turnedOff) {
-					// Never attempted: the episode and cooldown stay free for when it is turned back on.
+				if (withdrawn) {
+					// Never attempted: the episode and cooldown stay free for when consent returns.
 					coordinator.attemptedKeys.delete(action.attemptKey);
 					if (previousAttemptAt === undefined) coordinator.lastAttemptAtByAccount.delete(action.accountKey);
 					else coordinator.lastAttemptAtByAccount.set(action.accountKey, previousAttemptAt);
-					logger.debug(`${source}: auto-redeem turned off before spending`, { account: action.accountKey });
+					logger.debug(`${source}: auto-redeem consent withdrawn before spending`, { account: action.accountKey });
 				}
 				continue;
 			}
@@ -12930,8 +12944,8 @@ export class AgentSession implements SettingsScope {
 				}
 				return { restored: false, retryAfterMs };
 			}
-			const actions = await this.#confirmAutoRedeem(provider, plan.actions, coordinator);
-			return { restored: (await this.#executeResetActions(provider, actions, coordinator)) > 0 };
+			const approved = await this.#confirmAutoRedeem(provider, plan.actions, coordinator);
+			return { restored: (await this.#executeResetActions(provider, approved, coordinator)) > 0 };
 		})()
 			.catch((error): ResetRecoveryResult => {
 				logger.warn("auto-reset: blocked pass failed", { provider, account: accountKey, error: String(error) });
@@ -12973,8 +12987,8 @@ export class AgentSession implements SettingsScope {
 					const effectiveReports = overlayLiveResetCredits(reports, statuses);
 					const identity = authStorage.oauth.identity("openai-codex", this.sessionId);
 					const plan = this.#planCodexResets("sweep", effectiveReports, identity, coordinator);
-					const actions = await this.#confirmAutoRedeem("openai-codex", plan.actions, coordinator);
-					await this.#executeResetActions("openai-codex", actions, coordinator);
+					const approved = await this.#confirmAutoRedeem("openai-codex", plan.actions, coordinator);
+					await this.#executeResetActions("openai-codex", approved, coordinator);
 				} catch (error) {
 					logger.warn("codex-auto-reset: salvage listing failed", { error: String(error) });
 				}
@@ -12983,8 +12997,8 @@ export class AgentSession implements SettingsScope {
 				try {
 					const statuses = await this.listResetCredits(AbortSignal.timeout(10_000), "anthropic");
 					const plan = this.#planClaudeResets("sweep", reports, statuses, coordinator);
-					const actions = await this.#confirmAutoRedeem("anthropic", plan.actions, coordinator);
-					await this.#executeResetActions("anthropic", actions, coordinator);
+					const approved = await this.#confirmAutoRedeem("anthropic", plan.actions, coordinator);
+					await this.#executeResetActions("anthropic", approved, coordinator);
 				} catch (error) {
 					logger.warn("claude-auto-reset: salvage listing failed", { error: String(error) });
 				}
