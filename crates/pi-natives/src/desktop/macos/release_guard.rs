@@ -434,7 +434,10 @@ mod tests {
 		STAND_IN.with_borrow_mut(|stand_in| {
 			let (_, path) = stand_in.get_or_insert_with(|| {
 				let directory = HelperDirectory::create("omp-release-test").expect("directory");
-				let script = b"#!/bin/sh\ncat >/dev/null\nsleep 0.3\n";
+				// Well inside RELEASE_TIMEOUT (500 ms) so a loaded runner still
+				// sees the request wait for it; long enough that a request that
+				// does not wait finds it running.
+				let script = b"#!/bin/sh\ncat >/dev/null\nsleep 0.15\n";
 				let path = directory
 					.write("helper", script, 0o700)
 					.expect("stand-in helper");
