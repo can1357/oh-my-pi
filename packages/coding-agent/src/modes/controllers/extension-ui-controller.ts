@@ -37,6 +37,7 @@ import { HookInputComponent } from "@oh-my-pi/pi-tui/overlays/hook-input";
 import { HookSelectorComponent, type HookSelectorSlider } from "@oh-my-pi/pi-tui/overlays/hook-selector";
 import { getAvailableThemesWithPaths, getThemeByName, setTheme, type Theme, theme } from "@oh-my-pi/pi-tui/theme";
 import type { InteractiveModeContext, InteractiveSelectorDialogOptions } from "../../modes/types";
+import { CustomEntryComponent } from "../utils/ui-helpers";
 import { normalizeCustomMessagePayload, USER_INTERRUPT_LABEL } from "../../session/messages";
 import { disambiguateDisplayLabels, sanitizeCarriageReturns } from "@oh-my-pi/pi-tui/render/render-utils";
 import { setExtensionTerminalTitle, setSessionTerminalTitle } from "../../utils/title-generator";
@@ -189,9 +190,7 @@ export class ExtensionUiController {
 		const actions: ExtensionActions = {
 			sendMessage: this.#sendExtensionMessage,
 			sendUserMessage: this.#sendExtensionUserMessage,
-			appendEntry: (customType, data) => {
-				this.ctx.sessionManager.appendCustomEntry(customType, data);
-			},
+			appendEntry: (customType, data) => this.#appendExtensionEntry(customType, data),
 			setLabel: (targetId, label) => {
 				this.ctx.sessionManager.appendLabelChange(targetId, label);
 			},
@@ -417,9 +416,7 @@ export class ExtensionUiController {
 		const actions: ExtensionActions = {
 			sendMessage: this.#sendExtensionMessage,
 			sendUserMessage: this.#sendExtensionUserMessage,
-			appendEntry: (customType, data) => {
-				this.ctx.sessionManager.appendCustomEntry(customType, data);
-			},
+			appendEntry: (customType, data) => this.#appendExtensionEntry(customType, data),
 			setLabel: (targetId, label) => {
 				this.ctx.sessionManager.appendLabelChange(targetId, label);
 			},
@@ -1272,6 +1269,19 @@ export class ExtensionUiController {
 
 	async #updateSessionName(name: string): Promise<void> {
 		await this.ctx.sessionManager.setSessionName(name, "user");
+	}
+
+	#appendExtensionEntry(customType: string, data?: unknown): void {
+		const id = this.ctx.sessionManager.appendCustomEntry(customType, data);
+		if (!this.ctx.initialChatRendered || this.ctx.viewSession !== this.ctx.session) return;
+		const renderer = this.ctx.viewSession.extensionRunner?.getEntryRenderer(customType);
+		if (!renderer) return;
+		const entry = this.ctx.sessionManager.getEntry(id);
+		if (entry?.type !== "custom") return;
+		const component = new CustomEntryComponent(entry, renderer, this.ctx.toolOutputExpanded);
+		if (!component.hasContent()) return;
+		this.ctx.chatContainer.addChild(component);
+		this.ctx.ui.requestRender();
 	}
 
 	/**

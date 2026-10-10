@@ -41,6 +41,7 @@ import { resolvePath, withHostGuard } from "../utils";
 import type { ComposerShapeDefinition } from "@oh-my-pi/pi-tui/overlays/composer-shape-registry";
 import type {
 	AssistantThinkingRenderer,
+	EntryRenderer,
 	Extension,
 	ExtensionAPI,
 	ExtensionContext,
@@ -270,6 +271,10 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 		this.extension.messageRenderers.set(customType, renderer as MessageRenderer);
 	}
 
+	registerEntryRenderer<T>(customType: string, renderer: EntryRenderer<T>): void {
+		this.extension.entryRenderers.set(customType, renderer as EntryRenderer);
+	}
+
 	registerAssistantThinkingRenderer(renderer: AssistantThinkingRenderer): void {
 		this.extension.assistantThinkingRenderers.push(renderer);
 	}
@@ -382,6 +387,7 @@ function createExtension(extensionPath: string, resolvedPath: string): Extension
 		fileWriteFallbackHandlers: [],
 		fileDeleteFallbackHandlers: [],
 		messageRenderers: new Map(),
+		entryRenderers: new Map(),
 		composerShapes: new Map(),
 		commands: new Map(),
 		flags: new Map(),

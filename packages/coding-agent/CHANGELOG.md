@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed `pi-claude-bridge`, `pi-antigravity-bridge`, and `opensec-pi-subagents` failing to install; persisted Pi extension entries now display their registered renderer ([#15217](https://github.com/can1357/oh-my-pi/issues/15217)).
+
 ## [18.8.8] - 2026-10-10
 
 ### Added

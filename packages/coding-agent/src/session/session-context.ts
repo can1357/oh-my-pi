@@ -20,6 +20,7 @@ import {
 import { CONTEXT_NOTES_ENTRY_TYPE, getContextNotes, renderContextNotes } from "./context-notes";
 import {
 	type CompactionEntry,
+	type CustomEntry,
 	type CustomMessageEntry,
 	EPHEMERAL_MODEL_CHANGE_ROLE,
 	type SessionEntry,
@@ -106,6 +107,8 @@ function snapcompactHistoryBlockOptions(
 
 export interface SessionContext {
 	messages: AgentMessage[];
+	/** Custom session entries positioned before the indexed transcript message (or at its end). */
+	customEntries?: { messageIndex: number; entry: CustomEntry }[];
 	thinkingLevel?: string;
 	/** Configured thinking selector (`"auto"` or a concrete level) from the latest change. */
 	configuredThinkingLevel?: string;
@@ -357,6 +360,7 @@ export function buildSessionContext(
 	// 2. Emit kept messages (from firstKeptEntryId up to compaction)
 	// 3. Emit messages after compaction
 	const messages: AgentMessage[] = [];
+	const customEntries: SessionContext["customEntries"] = options?.transcript ? [] : undefined;
 	const cacheMissExplainedAt: boolean[] = [];
 	let pendingReset = false;
 	let currentMode = "none";
@@ -403,6 +407,8 @@ export function buildSessionContext(
 				return;
 			}
 			pushMessage(entry.message);
+		} else if (entry.type === "custom") {
+			customEntries?.push({ messageIndex: messages.length, entry });
 		} else if (entry.type === "custom_message") {
 			if (
 				!options?.transcript &&
@@ -768,6 +774,7 @@ export function buildSessionContext(
 
 	return {
 		messages,
+		...(customEntries ? { customEntries } : {}),
 		cacheMissExplainedAt: options?.transcript ? cacheMissExplainedAt : undefined,
 		thinkingLevel,
 		configuredThinkingLevel,
