@@ -792,11 +792,11 @@ fn replace_native_text(element: &AXUIElement, text: &str) -> CoreResult<bool> {
 	if !matches!(
 		copy_string(element, "AXRole").as_deref(),
 		Some("AXTextField" | "AXTextArea" | "AXComboBox")
-	) || !attribute_settable(element, "AXSelectedText")
-		|| !attribute_settable(element, "AXSelectedTextRange")
-	{
+	) {
 		return Ok(false);
 	}
+	// An unfocused Cocoa field has no field editor, so it publishes no
+	// settable selection until it is focused.
 	if copy_bool(element, "AXFocused") != Some(true) {
 		let attribute = CFString::from_str("AXFocused");
 		// SAFETY: The singleton CFBoolean and retained element remain valid
@@ -805,6 +805,11 @@ fn replace_native_text(element: &AXUIElement, text: &str) -> CoreResult<bool> {
 		if error != AXError::Success {
 			return Ok(false);
 		}
+	}
+	if !attribute_settable(element, "AXSelectedText")
+		|| !attribute_settable(element, "AXSelectedTextRange")
+	{
+		return Ok(false);
 	}
 	// Focusing can swap in the field editor, so the length is read afterward.
 	let Some(before) = copy_string(element, "AXValue") else {
