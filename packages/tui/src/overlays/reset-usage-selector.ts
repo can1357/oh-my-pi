@@ -1,4 +1,4 @@
-import type { UsageResetCreditDetail } from "@oh-my-pi/pi-ai";
+import type { UsageResetCredit, UsageResetCreditDetail } from "@oh-my-pi/pi-ai";
 import { Container, matchesKey, ScrollView, Spacer, Text, TruncatedText } from "../index";
 import { formatDuration, sanitizeText } from "@oh-my-pi/pi-utils";
 import { theme } from "../theme/theme";
@@ -17,6 +17,16 @@ const RESET_SELECTOR_MAX_VISIBLE = 10;
 
 const oneLine = (value: string): string => sanitizeText(value.replace(/[\r\n\t]+/g, " "));
 
+function formatCreditExpiry(expiresAt: string | undefined, absolute = false): string | undefined {
+	const expiryMs = expiresAt ? Date.parse(expiresAt) : Number.NaN;
+	if (!Number.isFinite(expiryMs)) return undefined;
+	const remainingMs = expiryMs - Date.now();
+	const relative = remainingMs > 0 ? `expires in ${formatDuration(remainingMs)}` : "expired";
+	if (!absolute) return relative;
+	const date = new Date(expiryMs);
+	return `${relative} (${date.toLocaleDateString()} ${date.toLocaleTimeString()})`;
+}
+
 /** Reset count, usability, expiry and unavailability of an account row, or its error. */
 function accountCountLabel(account: ResetUsageAccount): string {
 	if (account.error) return oneLine(account.error);
@@ -24,12 +34,12 @@ function accountCountLabel(account: ResetUsageAccount): string {
 	if (account.redeemableCount !== account.availableCount) {
 		countLabel += ` · ${account.redeemableCount} usable now`;
 	}
-	if (account.expiresAt) {
-		const expiryMs = Date.parse(account.expiresAt);
-		if (!Number.isNaN(expiryMs)) {
-			countLabel += expiryMs > Date.now() ? ` · expires in ${formatDuration(expiryMs - Date.now())}` : " · expired";
-		}
+	if (account.provider === "openai-codex" && account.credit && account.credits?.length) {
+		const index = account.credits.findIndex(credit => credit.id === account.target.creditId);
+		if (index >= 0) countLabel += ` · selected ${index + 1}/${account.credits.length}`;
 	}
+	const expiry = formatCreditExpiry(account.expiresAt);
+	if (expiry) countLabel += ` · ${expiry}`;
 	if (account.redeemableCount <= 0 && account.unavailableReason) {
 		countLabel += ` · ${oneLine(account.unavailableReason)}`;
 	}
@@ -58,6 +68,14 @@ export interface ResetUsageAccount {
 	unavailableReason?: string;
 	expiresAt?: string;
 	credit?: UsageResetCreditDetail;
+	/** Codex's usable credits in expiry order; target, credit and expiresAt already match the selected credit. */
+	credits?: readonly UsageResetCredit[];
+}
+
+function canCycleCredits(
+	account: ResetUsageAccount | undefined,
+): account is ResetUsageAccount & { credits: readonly UsageResetCredit[] } {
+	return account?.provider === "openai-codex" && account.redeemableCount > 0 && (account.credits?.length ?? 0) > 1;
 }
 
 /**
@@ -79,9 +97,14 @@ export class ResetUsageSelectorComponent extends OverlayPanel {
 		super("Spend a saved rate-limit reset", "omp.overlay.reset-usage");
 		this.#onSelectCallback = onSelect;
 		this.#onCancelCallback = onCancel;
+		// Own the selection state: never mutate the caller's account rows or targets.
+		accounts = accounts.map(account => ({
+			...account,
+			target: { ...account.target },
+			...(account.credits ? { credits: [...account.credits] } : {}),
+		}));
 		const firstRedeemable = accounts.find(account => account.redeemableCount > 0);
-		const accountKey = (account: ResetUsageAccount) =>
-			`${account.provider}:${account.target.credentialId}:${account.target.creditId ?? ""}`;
+		const accountKey = (account: ResetUsageAccount) => `${account.provider}:${account.target.credentialId}`;
 		this.#menu = new MenuSelection<ResetUsageAccount>(
 			accounts,
 			{
@@ -99,6 +122,8 @@ export class ResetUsageSelectorComponent extends OverlayPanel {
 
 	#updateList(): void {
 		this.#nativeRoot = undefined;
+		this.#nativeItems = undefined;
+		this.#nativeHints = undefined;
 		this.#listContainer.clear();
 
 		const items = this.#menu.visibleItems;
@@ -150,12 +175,18 @@ export class ResetUsageSelectorComponent extends OverlayPanel {
 			);
 		}
 
+		const creditDetails = this.#selectedCreditDetails(this.#menu.selectedItem);
+		if (creditDetails) this.#listContainer.addChild(new Text(theme.fg("muted", creditDetails), 0, 0));
+
 		const pending = items.find(item => this.#menu.isPending(item));
+		const cycleHint = canCycleCredits(this.#menu.selectedItem)
+			? `${formatKeyHint("tab")}/${formatKeyHint("shift+tab")} Codex reset · `
+			: "";
 		const hint = pending
 			? theme.fg("warning", oneLine(this.#confirmationMessage(pending)))
 			: theme.fg(
 					"muted",
-					`${editorKeys("tui.select.up", "tui.select.down")} select · ${formatKeyHint("enter")} spend a reset · ${editorKey("tui.select.cancel")} cancel`,
+					`${editorKeys("tui.select.up", "tui.select.down")} select · ${cycleHint}${formatKeyHint("enter")} spend a reset · ${editorKey("tui.select.cancel")} cancel`,
 				);
 		this.#listContainer.addChild(new Text(hint, 0, 0));
 
@@ -165,8 +196,33 @@ export class ResetUsageSelectorComponent extends OverlayPanel {
 		}
 	}
 
+	#selectedCreditDetails(account: ResetUsageAccount | undefined): string | undefined {
+		if (account?.provider !== "openai-codex" || !account.credit || !account.credits?.length) return undefined;
+		const index = account.credits.findIndex(credit => credit.id === account.target.creditId);
+		const details = [`Reset ${index + 1}/${account.credits.length}`];
+		if (account.credit.title) details.push(`“${oneLine(account.credit.title)}”`);
+		details.push(formatCreditExpiry(account.credit.expiresAt, true) ?? "expiry unknown");
+		return details.join(" · ");
+	}
+
+	#cycleCredit(direction: -1 | 1): void {
+		const account = this.#menu.selectedItem;
+		if (!canCycleCredits(account)) return;
+		const credits = account.credits;
+		const index = credits.findIndex(credit => credit.id === account.target.creditId);
+		const credit = credits[(index + direction + credits.length) % credits.length]!;
+		this.#menu.cancelConfirmation();
+		account.credit = credit;
+		account.expiresAt = credit.expiresAt;
+		account.target.creditId = credit.id;
+		this.#statusMessage = undefined;
+		this.#updateList();
+	}
+
 	#confirmationMessage(account: ResetUsageAccount): string {
-		const subject = account.credit?.title ? `“${account.credit.title}”` : "1 saved reset";
+		const subject =
+			this.#selectedCreditDetails(account) ??
+			(account.credit?.title ? `“${account.credit.title}”` : "1 saved reset");
 		const messages = [
 			`Press ${formatKeyHint("enter")} again to spend ${subject} for ${account.label} (${account.providerLabel}).`,
 		];
@@ -213,6 +269,10 @@ export class ResetUsageSelectorComponent extends OverlayPanel {
 			this.#menu.move(RESET_SELECTOR_MAX_VISIBLE, false);
 			this.#statusMessage = undefined;
 			this.#updateList();
+		} else if (matchesKey(keyData, "tab")) {
+			this.#cycleCredit(1);
+		} else if (matchesKey(keyData, "shift+tab")) {
+			this.#cycleCredit(-1);
 		} else if (matchesKey(keyData, "enter") || matchesKey(keyData, "return") || keyData === "\n") {
 			this.#activateSelection();
 		}
@@ -272,10 +332,15 @@ export class ResetUsageSelectorComponent extends OverlayPanel {
 				? text([span(oneLine(this.#confirmationMessage(pending)), "warning")])
 				: (this.#nativeHints ??= hintsRow([
 						actionHint(["tui.select.up", "tui.select.down"], "select"),
+						canCycleCredits(this.#menu.selectedItem)
+							? { keys: ["tab", "shift+tab"], label: "Codex reset" }
+							: undefined,
 						{ keys: ["enter"], label: "spend a reset" },
 						actionHint("tui.select.cancel", "cancel"),
 					])),
 		];
+		const creditDetails = this.#selectedCreditDetails(this.#menu.selectedItem);
+		if (creditDetails) children.splice(1, 0, text([span(creditDetails, "muted")]));
 		if (this.#statusMessage) children.push(text([span(oneLine(this.#statusMessage), "warning")]));
 		this.#nativeRoot = overlayCard(this.nativeRole, this.title, children);
 		return this.#nativeRoot;

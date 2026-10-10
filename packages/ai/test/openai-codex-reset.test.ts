@@ -11,8 +11,8 @@ import { describe, expect, it } from "bun:test";
 import type { FetchImpl } from "@oh-my-pi/pi-ai/types";
 import {
 	consumeCodexResetCredit,
+	getUsableCodexResetCredits,
 	listCodexResetCredits,
-	pickSoonestExpiringCredit,
 } from "@oh-my-pi/pi-ai/usage/openai-codex-reset";
 
 interface Captured {
@@ -128,36 +128,40 @@ describe("consumeCodexResetCredit", () => {
 	});
 });
 
-describe("pickSoonestExpiringCredit", () => {
-	it("spends in expiry order: soonest available credit first", () => {
+describe("getUsableCodexResetCredits", () => {
+	const nowMs = Date.parse("2026-07-31T12:00:00Z");
+
+	it("orders usable dated credits by expiry before undated and malformed credits", () => {
 		const credits = [
+			{ id: "undated" },
 			{ id: "late", status: "available", expiresAt: "2026-08-12T00:00:00Z" },
-			{ id: "soon", status: "available", expiresAt: "2026-07-31T18:00:00Z" },
+			{ id: "malformed", status: "available", expiresAt: "not-a-date" },
+			{ id: "soon", expiresAt: "2026-07-31T18:00:00Z" },
 			{ id: "mid", status: "available", expiresAt: "2026-08-11T00:00:00Z" },
 		];
-		expect(pickSoonestExpiringCredit(credits)?.id).toBe("soon");
+
+		expect(getUsableCodexResetCredits(credits, nowMs).map(credit => credit.id)).toEqual([
+			"soon",
+			"mid",
+			"late",
+			"undated",
+			"malformed",
+		]);
 	});
 
-	it("never picks a non-available credit over an available one", () => {
+	it("excludes expired, unavailable, and in-progress or completed redemptions", () => {
 		const credits = [
-			{ id: "spent", status: "redeemed", expiresAt: "2026-07-31T18:00:00Z" },
+			{ id: "expired", expiresAt: "2026-07-31T11:59:59Z" },
+			{ id: "boundary", expiresAt: "2026-07-31T12:00:00Z" },
+			{ id: "redeemed", status: "redeemed" },
+			{ id: "unavailable", status: "unavailable" },
+			{ id: "started", redeemStartedAt: "2026-07-31T11:00:00Z" },
+			{ id: "completed", redeemedAt: "2026-07-31T11:00:00Z" },
 			{ id: "live", status: "available", expiresAt: "2026-08-12T00:00:00Z" },
 		];
-		expect(pickSoonestExpiringCredit(credits)?.id).toBe("live");
-	});
 
-	it("ranks dated credits before undated ones and treats missing status as available", () => {
-		const credits = [{ id: "undated" }, { id: "dated", expiresAt: "2026-08-12T00:00:00Z" }];
-		expect(pickSoonestExpiringCredit(credits)?.id).toBe("dated");
-		expect(pickSoonestExpiringCredit([{ id: "undated" }])?.id).toBe("undated");
-	});
-
-	it("falls back to the first credit when none are available (backend surfaces the outcome)", () => {
-		const credits = [
-			{ id: "first", status: "redeemed" },
-			{ id: "second", status: "redeemed" },
-		];
-		expect(pickSoonestExpiringCredit(credits)?.id).toBe("first");
-		expect(pickSoonestExpiringCredit([])).toBeUndefined();
+		expect(getUsableCodexResetCredits(credits, nowMs).map(credit => credit.id)).toEqual(["live"]);
+		expect(getUsableCodexResetCredits(credits.slice(0, -1), nowMs)).toEqual([]);
+		expect(getUsableCodexResetCredits([], nowMs)).toEqual([]);
 	});
 });
