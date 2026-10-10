@@ -14,7 +14,13 @@ import { CustomToolAdapter } from "../extensibility/custom-tools/wrapper";
 import type { ExtensionRunner, SourceInfo, ToolInfo } from "../extensibility/extensions";
 import { type EvalPreludeDefinition, evalPreludeSummary } from "../eval/preludes";
 import { ExtensionToolWrapper } from "../extensibility/extensions/wrapper";
-import { loadSkills, type Skill, type SkillWarning, setActiveSkills } from "../extensibility/skills";
+import {
+	loadSkills,
+	type Skill,
+	type SkillWarning,
+	setActiveSkills,
+	setActiveSkillsRefresher,
+} from "../extensibility/skills";
 import { type LocalProtocolOptions } from "../internal-urls";
 import { stripXdUrlPrefix, XD_URL_PREFIX } from "@oh-my-pi/pi-tui/tools/xd-url";
 import { deduplicateMCPToolsByName, resolveMCPToolAlias } from "../mcp/tool-bridge";
@@ -482,6 +488,10 @@ export class SessionTools {
 		this.#skillWarnings = options.skillWarnings ?? [];
 		this.#skillsSettings = options.skillsSettings;
 		this.#skillsReloadable = options.skillsReloadable ?? true;
+		// skill:// lookups re-read skills from disk on a miss; only the main
+		// session owns the process-global snapshot they refresh (see
+		// refreshActiveSkills).
+		if (this.#host.agentKind() === "main") setActiveSkillsRefresher(() => this.reloadSkills());
 		this.#promptSurface = this.#derivePromptSurface();
 		// Seed from the construction slate (top-level tools plus xd:// mounts).
 		// Left empty, getEnabledToolNames() falls back to live agent.state.tools,
@@ -1886,25 +1896,39 @@ export class SessionTools {
 
 	/** Rediscovers reloadable skills and refreshes prompt metadata. */
 	async refreshSkills(): Promise<void> {
-		resetCapabilities();
 		if (this.#skillsReloadable) {
-			const skillsSettings = cfgSkills.get(this.#host.settings);
-			const discovered = await loadSkills({
-				...skillsSettings,
-				cwd: this.#host.sessionManager.getCwd(),
-				disabledExtensions: cfgDisabledExtensions.get(this.#host.settings),
-				extensionRoots: this.#host.effectiveExtensionRoots(),
-			});
-			this.#skills = discovered.skills;
-			this.#skillWarnings = discovered.warnings;
-			this.#skillsSettings = skillsSettings;
-
-			if (this.#host.agentKind() === "main") {
-				setActiveSkills(this.#skills);
-			}
+			await this.reloadSkills();
+		} else {
+			resetCapabilities();
 		}
 		await this.refreshBaseSystemPrompt();
 		this.#host.notifyCommandMetadataChanged();
+	}
+
+	/**
+	 * Re-discovers skills from disk for a just-in-time `skill://` lookup. Unlike
+	 * {@link refreshSkills} it skips the system-prompt rebuild, so a miss costs
+	 * one discovery pass and no prompt churn. Returns the refreshed snapshot —
+	 * the same array when skills are not reloadable.
+	 */
+	async reloadSkills(): Promise<readonly Skill[]> {
+		if (!this.#skillsReloadable) return this.#skills;
+		resetCapabilities();
+		const skillsSettings = cfgSkills.get(this.#host.settings);
+		const discovered = await loadSkills({
+			...skillsSettings,
+			cwd: this.#host.sessionManager.getCwd(),
+			disabledExtensions: cfgDisabledExtensions.get(this.#host.settings),
+			extensionRoots: this.#host.effectiveExtensionRoots(),
+		});
+		this.#skills = discovered.skills;
+		this.#skillWarnings = discovered.warnings;
+		this.#skillsSettings = skillsSettings;
+
+		if (this.#host.agentKind() === "main") {
+			setActiveSkills(this.#skills);
+		}
+		return this.#skills;
 	}
 
 	/** Selects enabled tools, ignoring names absent from the registry. */

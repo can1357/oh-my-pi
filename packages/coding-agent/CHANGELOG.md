@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- `skill://` resolution served the skill list captured at startup, so a skill added, renamed, moved, or deleted mid-session stayed invisible until omp restarted; a lookup that misses now re-discovers skills from disk once before failing ([#15253](https://github.com/can1357/oh-my-pi/pull/15253) by [@iacore](https://github.com/iacore))
+
 ## [18.8.9] - 2026-10-10
 
 ### Added
