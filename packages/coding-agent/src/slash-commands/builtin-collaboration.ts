@@ -74,7 +74,8 @@ export const BUILTIN_COLLABORATION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpe
 		],
 		allowArgs: true,
 		getTuiAutocompleteDescription: runtime => {
-			const stats = runtime.ctx.session.getAdvisorStats();
+			const session = runtime.ctx.focusedAgentId ? runtime.ctx.viewSession : runtime.ctx.session;
+			const stats = session.getAdvisorStats();
 			if (stats.active && stats.advisors.length > 1) return `Advisor: on (${stats.advisors.length} advisors)`;
 			if (stats.active && stats.model) return `Advisor: on (${stats.model.provider}/${stats.model.id})`;
 			if (stats.configured) return "Advisor: configured, no model";
@@ -125,10 +126,13 @@ export const BUILTIN_COLLABORATION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpe
 			return usage("Usage: /advisor [on|off|status|dump [raw]|configure]", runtime);
 		},
 		handleTui: async (command, runtime) => {
+			// A focused subagent view toggles that agent's advisor; falling back to the main
+			// session would flip the wrong one (#15055).
+			const target = runtime.ctx.focusedAgentId ? runtime.ctx.viewSession : runtime.ctx.session;
 			const { verb, rest } = parseSubcommand(command.args);
 			if (!verb || verb === "toggle") {
-				const active = runtime.ctx.session.toggleAdvisorEnabled();
-				const configured = runtime.ctx.session.isAdvisorEnabled();
+				const active = target.toggleAdvisorEnabled();
+				const configured = target.isAdvisorEnabled();
 				if (active) {
 					runtime.ctx.showStatus("Advisor enabled.");
 				} else if (configured) {
@@ -141,7 +145,7 @@ export const BUILTIN_COLLABORATION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpe
 				return;
 			}
 			if (verb === "on") {
-				const active = runtime.ctx.session.setAdvisorEnabled(true);
+				const active = target.setAdvisorEnabled(true);
 				runtime.ctx.showStatus(
 					active ? "Advisor enabled." : "Advisor setting enabled, but no model is assigned to the 'advisor' role.",
 				);
@@ -150,7 +154,7 @@ export const BUILTIN_COLLABORATION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpe
 				return;
 			}
 			if (verb === "off") {
-				runtime.ctx.session.setAdvisorEnabled(false);
+				target.setAdvisorEnabled(false);
 				runtime.ctx.showStatus("Advisor disabled.");
 				refreshStatusLine(runtime.ctx);
 				clearSubmittedText(runtime);
