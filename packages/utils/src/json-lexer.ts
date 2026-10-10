@@ -220,10 +220,10 @@ export class JsonLexer {
 		// malformed structure fails loudly instead of silently swallowing
 		// commas/colons or sibling members.
 		const lenient = quote === SQUOTE || this.mode === "streaming";
-		const quoteChar = quote === QUOTE ? '"' : "'";
+		const quoteChar = String.fromCharCode(quote);
 		// Cache each next delimiter so escape-dense strings do not repeatedly
 		// search for a distant closing quote and turn the scan quadratic.
-		let nextQuote = -1;
+		let nextQuote = quoteChar.charCodeAt(0) === quote ? -1 : n;
 		let nextBackslash = -1;
 		while (i < n) {
 			let cc = s.charCodeAt(i);

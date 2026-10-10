@@ -7,6 +7,24 @@ afterEach(() => {
 });
 
 describe("JsonLexer string scan", () => {
+	it.each([
+		["`", 0x60],
+		["「", 0x300c],
+	] as const)("honors a nonstandard %s delimiter after a long run", (delimiter, quote) => {
+		const prefix = "prefix: ";
+		const value = "abc".repeat(32);
+		const lexer = new JsonLexer(`${prefix}${delimiter}${value}${delimiter},next`, "strict", prefix.length);
+
+		expect(lexer.string(quote)).toEqual({ value, complete: true, stableLen: value.length });
+		expect(lexer.src.slice(lexer.pos)).toBe(",next");
+	});
+
+	it("does not reinterpret a wrapped delimiter as an escape while streaming", () => {
+		const value = `${"abc".repeat(32)}\`,next`;
+		const lexer = new JsonLexer(`\`${value}`, "incoming");
+		expect(lexer.string(0x10060)).toEqual({ value, complete: false, stableLen: value.length });
+	});
+
 	it("does not re-search the remaining input once per adjacent escape", () => {
 		const escapes = 4096;
 		const src = `"${"\\\\".repeat(escapes)}${"x".repeat(64)}"`;
