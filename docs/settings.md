@@ -564,6 +564,8 @@ retry:
 providers:
   anthropic:
     serverSideFallback: false
+    # Unset follows the model's catalog chain; set it to override the chain.
+    # serverSideFallbackModels: [claude-opus-5, claude-opus-4-8]
 ```
 
 | Key                                      | Type    | Default           | Notes                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
@@ -579,7 +581,8 @@ providers:
 | `retry.usageAwareFallback` | boolean | `false` | Before a turn, use reliable coding-plan quota reports to prefer healthy same-provider accounts and then configured fallback models. Unknown usage keeps the current model; ordinary API keys are excluded. |
 | `retry.usageReservePct` | number | `10` | Remaining quota percentage protected by usage-aware fallback. |
 | `retry.usageReservePolicy` | enum | `confirm` | `confirm`, `auto`, `fail-closed`. At reserve, `confirm` asks when an interactive confirmer is available and otherwise auto-falls back; exhausted quota can fall back without confirmation. `fail-closed` blocks known reserve/depleted quota rather than spending it. |
-| `providers.anthropic.serverSideFallback` | boolean | `false`           | Opt in to Anthropic's `server-side-fallback-2026-06-01` beta for eligible direct Claude Fable/Mythos requests. The catalog-owned server-side chain currently targets `claude-opus-5`, not `claude-opus-5-5`; unsupported models and hosts have no chain.                                                                                                                                          |
+| `providers.anthropic.serverSideFallback` | boolean | `false`           | Opt in to Anthropic's `server-side-fallback-2026-06-01` beta for eligible direct Claude Fable/Mythos requests. The catalog-owned server-side chain currently targets `claude-opus-5`, not `claude-opus-5-5`; `providers.anthropic.serverSideFallbackModels` replaces it when set, and unsupported models and hosts have no chain.                                                                                                                                          |
+| `providers.anthropic.serverSideFallbackModels` | array | catalog chain | Ordered bare Anthropic model ids (not `provider/model` selectors) sent as the server-side fallback chain when `serverSideFallback` is on, replacing the catalog chain for eligible models. Each id must be in the requested model's `allowed_fallback_models`. `[]` sends no fallbacks; the API accepts at most three entries, so longer chains send the first three and log one warning. |
 | `providers.openai-codex.codeMode`           | enum    | `off`             | Codex Code Mode for `code_mode_only` models, mirroring codex-rs: the direct tool surface collapses to `eval`/`ask`/`todo` and every other session tool is invoked from `eval` cells via its `tool.<name>()` bridge, collapsing multi-step tool work into one model round trip. `auto` follows the model catalog's `tool_mode` flag; `on` forces it for any Codex model; `off` (default) leaves the full direct surface. The turn metadata carries codex-rs's `tool_namespaces_info` exposure snapshot while active. |
 | `providers.openai-codex.codeModeDirectTools` | array   | `[]`              | Extra tool names to keep directly callable alongside `eval`/`ask`/`todo` when Codex Code Mode is active; entries that are not enabled in the session are ignored. |
 

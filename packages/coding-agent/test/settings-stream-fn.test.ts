@@ -7,7 +7,7 @@
  * OpenRouter sticky-routing / response caching behaves the same on advisor turns
  * (can1357/oh-my-pi#3639).
  */
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, vi } from "bun:test";
 import type { StreamFn } from "@oh-my-pi/pi-agent-core";
 import { type Context, type Model, type SimpleStreamOptions, streamSimple } from "@oh-my-pi/pi-ai";
 import { configureProviderStoreResponses } from "@oh-my-pi/pi-ai/providers/openai-responses";
@@ -16,8 +16,12 @@ import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { bindEffects } from "@oh-my-pi/pi-coding-agent/config/registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { cfgProvidersMuseCodeStoreResponses } from "@oh-my-pi/pi-coding-agent/session/settings";
+import {
+	cfgProvidersAnthropicServerSideFallbackModels,
+	cfgProvidersMuseCodeStoreResponses,
+} from "@oh-my-pi/pi-coding-agent/session/settings";
 import { createSettingsAwareStreamFn } from "@oh-my-pi/pi-coding-agent/session/settings-stream-fn";
+import { logger } from "@oh-my-pi/pi-utils";
 
 function captureBase(): { fn: StreamFn; calls: Array<{ options?: SimpleStreamOptions }> } {
 	const calls: Array<{ options?: SimpleStreamOptions }> = [];
@@ -287,6 +291,114 @@ describe("createSettingsAwareStreamFn", () => {
 			});
 
 			expect(calls[0]?.options?.fallbacks).toEqual([{ model: "claude-sonnet-5" }]);
+		});
+
+		it("forwards a configured multi-model chain in order", () => {
+			const settings = Settings.isolated({
+				"providers.anthropic.serverSideFallback": true,
+				"providers.anthropic.serverSideFallbackModels": ["claude-opus-5", "claude-opus-4-8"],
+			});
+			const { fn: base, calls } = captureBase();
+			const wrapped = createSettingsAwareStreamFn(settings, base);
+
+			wrapped(stubFableModel, stubContext, { apiKey: "k" });
+
+			expect(calls[0]?.options?.fallbacks).toEqual([{ model: "claude-opus-5" }, { model: "claude-opus-4-8" }]);
+		});
+
+		it("does not send a configured chain to models without a catalog chain", () => {
+			const settings = Settings.isolated({
+				"providers.anthropic.serverSideFallback": true,
+				"providers.anthropic.serverSideFallbackModels": ["claude-opus-5"],
+			});
+			const { fn: base, calls } = captureBase();
+			const wrapped = createSettingsAwareStreamFn(settings, base);
+
+			wrapped(stubBedrockFableModel, stubContext, { apiKey: "k" });
+			wrapped(stubOpusModel, stubContext, { apiKey: "k" });
+
+			expect(calls.map(call => call.options?.fallbacks)).toEqual([undefined, undefined]);
+		});
+
+		it("drops non-string chain entries instead of throwing (YAML/CLI can inject them)", () => {
+			const settings = Settings.isolated({
+				"providers.anthropic.serverSideFallback": true,
+				"providers.anthropic.serverSideFallbackModels": [1, "claude-opus-5", null, "  "] as unknown as string[],
+			});
+			const { fn: base, calls } = captureBase();
+			const wrapped = createSettingsAwareStreamFn(settings, base);
+
+			wrapped(stubFableModel, stubContext, { apiKey: "k" });
+
+			expect(calls[0]?.options?.fallbacks).toEqual([{ model: "claude-opus-5" }]);
+		});
+
+		it("trims whitespace from configured chain entries before forwarding", () => {
+			const settings = Settings.isolated({
+				"providers.anthropic.serverSideFallback": true,
+				"providers.anthropic.serverSideFallbackModels": [" claude-opus-5 ", "\tclaude-opus-4-8\n"],
+			});
+			const { fn: base, calls } = captureBase();
+			const wrapped = createSettingsAwareStreamFn(settings, base);
+
+			wrapped(stubFableModel, stubContext, { apiKey: "k" });
+
+			expect(calls[0]?.options?.fallbacks).toEqual([{ model: "claude-opus-5" }, { model: "claude-opus-4-8" }]);
+		});
+
+		it("caps the forwarded chain at the wire limit of three entries", () => {
+			const settings = Settings.isolated({
+				"providers.anthropic.serverSideFallback": true,
+				"providers.anthropic.serverSideFallbackModels": ["m1", "m2", "m3", "m4", "m5"],
+			});
+			const { fn: base, calls } = captureBase();
+			const wrapped = createSettingsAwareStreamFn(settings, base);
+
+			wrapped(stubFableModel, stubContext, { apiKey: "k" });
+
+			expect(calls[0]?.options?.fallbacks).toEqual([{ model: "m1" }, { model: "m2" }, { model: "m3" }]);
+		});
+
+		it("warns about an overlong chain once per chain, not per request, and not when caller fallbacks win", () => {
+			const overlongWarnings: unknown[] = [];
+			vi.spyOn(logger, "warn").mockImplementation((message: unknown) => {
+				if (String(message).includes("serverSideFallbackModels")) overlongWarnings.push(message);
+			});
+			try {
+				const settings = Settings.isolated({
+					"providers.anthropic.serverSideFallback": true,
+					"providers.anthropic.serverSideFallbackModels": ["m1", "m2", "m3", "m4"],
+				});
+				const { fn: base, calls } = captureBase();
+				const wrapped = createSettingsAwareStreamFn(settings, base);
+
+				wrapped(stubFableModel, stubContext, { apiKey: "k", fallbacks: [{ model: "caller" }] });
+				expect(overlongWarnings).toHaveLength(0);
+
+				wrapped(stubFableModel, stubContext, { apiKey: "k" });
+				wrapped(stubFableModel, stubContext, { apiKey: "k" });
+				expect(overlongWarnings).toHaveLength(1);
+				expect(calls[2]?.options?.fallbacks).toEqual([{ model: "m1" }, { model: "m2" }, { model: "m3" }]);
+
+				cfgProvidersAnthropicServerSideFallbackModels.override(settings, ["n1", "n2", "n3", "n4"]);
+				wrapped(stubFableModel, stubContext, { apiKey: "k" });
+				expect(overlongWarnings).toHaveLength(2);
+			} finally {
+				vi.restoreAllMocks();
+			}
+		});
+
+		it("sends no fallbacks when the configured chain is empty, even with the toggle on", () => {
+			const settings = Settings.isolated({
+				"providers.anthropic.serverSideFallback": true,
+				"providers.anthropic.serverSideFallbackModels": [],
+			});
+			const { fn: base, calls } = captureBase();
+			const wrapped = createSettingsAwareStreamFn(settings, base);
+
+			wrapped(stubFableModel, stubContext, { apiKey: "k" });
+
+			expect(calls[0]?.options?.fallbacks).toBeUndefined();
 		});
 	});
 
