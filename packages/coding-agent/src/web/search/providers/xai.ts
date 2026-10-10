@@ -165,6 +165,17 @@ export function targetsX(parsed: StructuredQuery): boolean {
 	return xHandleFilter(parsed).allowed.length > 0 || (parsed.sites.length > 0 && parsed.sites.every(isXSite));
 }
 
+/** Providers serving xAI models; a Set because `getAvailableForProviders` takes one. */
+const XAI_PROVIDERS: ReadonlySet<string> = new Set(["xai", "xai-oauth"]);
+
+/**
+ * Whether X search can run: an xAI-grounded model with credentials exists.
+ * Gates the X operators in the `web_search` tool description.
+ */
+export function xSearchAvailable(modelRegistry: ModelRegistry): boolean {
+	return modelRegistry.getAvailableForProviders(XAI_PROVIDERS).some(model => model.webSearch === "xai");
+}
+
 /** UTC start date (`YYYY-MM-DD`) of a `recency` window ending now. */
 function recencyStart(recency: NonNullable<SearchParams["recency"]>): string {
 	const start = new Date();

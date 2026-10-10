@@ -229,7 +229,7 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	"allow-anthropic-header-overrides": wire("allowAnthropicHeaderOverrides", ["anthropic"]),
 	"disable-adaptive-thinking": wire("disableAdaptiveThinking", ["anthropic"]),
 	"disable-strict-tools": wire("disableStrictTools", ["anthropic"]),
-	"disabled-thinking": wire("disabledThinking", ["anthropic"], "scalar", ["omit", "disabled", "adaptive"]),
+	"disabled-thinking": wire("disabledThinking", ["anthropic", "bedrock"], "scalar", ["omit", "disabled", "adaptive"]),
 	"effort-beta": wire("effortBeta", ["anthropic"]),
 	"escape-builtin-tool-names": wire("escapeBuiltinToolNames", ["anthropic"]),
 	"fast-mode": wire("fastMode", ["anthropic"]),
@@ -261,7 +261,7 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	// ── wire: devin-agent ──
 	"model-router": wire("modelRouter", ["devin"]),
 	"supports-parallel-tool-calls": wire("supportsParallelToolCalls", ["devin"]),
-	"trust-explicit-thinking-only": wire("trustExplicitThinkingOnly", ["devin"]),
+	"trust-explicit-thinking-only": wire("trustExplicitThinkingOnly", [...OAI, "devin"]),
 
 	// ── wire: google APIs ──
 	"antigravity-claude-tool-mode": wire("antigravityClaudeToolMode", ["google"]),

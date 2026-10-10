@@ -825,6 +825,11 @@ export class Image implements Component {
 		this.#cachedWidth = undefined;
 	}
 
+	releaseRenderCaches(): void {
+		this.#cachedLines = undefined;
+		this.#cachedWidth = undefined;
+	}
+
 	/**
 	 * SIXEL sequence for a target size. A new size starts the encode off the JS
 	 * thread and answers `undefined` until it settles; the settled encode

@@ -37,7 +37,7 @@ The SDK registers this write-approved custom tool when `speechgen.enabled=true` 
 2. Build the available `tts`-kind model pool and resolve `modelRoles.speech` plus `retry.fallbackChains.speech`. When no explicit configuration is present, the priority list is `local/kokoro`, `xai/grok-tts`, `xai-oauth/grok-tts`.
 3. For MP3, reorder only non-explicit candidates so cloud models precede local models. Explicit primary/fallback slots retain their positions. WAV preserves the resolved chain order.
 4. Try candidates sequentially:
-   - `local-inference` calls the local worker with the selected model id and `tts.localVoice`, encodes PCM16 WAV, and writes it. Per-call voice, language, sample rate, and bit rate are ignored.
+   - `local-inference` calls the local worker with the selected model id, `tts.localVoice`, and `tts.localSpeed`, encodes PCM16 WAV, and writes it. Per-call voice, language, sample rate, and bit rate are ignored.
    - `xai-tts` calls the selected model's `<baseUrl>/tts` through the model-registry credential resolver. It sends text and voice, and an explicit `output_format` only when WAV or non-default sample/MP3 bit rates require it.
    - `openai-speech` calls the selected model's `<baseUrl>/audio/speech` with `{ model, input, response_format, voice? }`; voice is sent only when explicitly supplied. This includes compatible providers such as DeepInfra, not just OpenAI.
 5. Missing API keys and provider HTTP errors advance to the next candidate. A local `null` response returns its error immediately; other failures do not trigger fallback.
@@ -51,7 +51,7 @@ The SDK registers this write-approved custom tool when `speechgen.enabled=true` 
 ## Side Effects
 - Filesystem: writes the destination, or a sibling `.wav` when the chain reaches local for a non-WAV destination.
 - Network: cloud synthesis calls the selected endpoint; local model loading may download/cache weights.
-- Session state: reads cwd, model registry, session id, speech-role settings, and `tts.localVoice`.
+- Session state: reads cwd, model registry, session id, speech-role settings, `tts.localVoice`, and `tts.localSpeed`.
 - Cancellation: cloud requests combine the caller signal with a 60-second timeout; local synthesis receives the caller signal.
 - Streaming: single-shot; no `onUpdate` progress.
 

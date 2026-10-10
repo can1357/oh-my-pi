@@ -196,6 +196,10 @@ export interface TUIStartOptions {
 	 * Paint without owning stdin: the terminal stays in cooked mode (kernel
 	 * echo + line editing at the hardware cursor) until {@link TUI.enableInput}
 	 * switches to raw input and replays the kernel-buffered keystrokes.
+	 *
+	 * A terminal expected to speak TSP needs raw input from the start, so it
+	 * gets it; its keystrokes are held instead (TSP events and the cell-size
+	 * reply still apply) until {@link TUI.releaseHeldInput} replays them.
 	 */
 	deferInput?: boolean;
 }
@@ -314,6 +318,16 @@ export interface Component {
 	 * Called when theme changes or when component needs to re-render from scratch.
 	 */
 	invalidate?(): void;
+	/**
+	 * Optional hook to drop memoized render output (rows, parse and wrap state)
+	 * that the next `render()` can rebuild from state the component keeps.
+	 * Unlike {@link invalidate}, it must not rebuild anything eagerly: no
+	 * renderer or extension callbacks, no image conversions, and no child
+	 * replacement or disposal. The next render must return the same rows it
+	 * would have returned without the release. Components without it are
+	 * simply not released.
+	 */
+	releaseRenderCaches?(): void;
 	/**
 	 * Optional hook to set whether this component ignores tight layout mode.
 	 */
@@ -544,6 +558,7 @@ export class Container implements Component {
 	clear(): void {
 		this.children = [];
 		this.#memoLines = undefined;
+		this.#memoChildLines = [];
 	}
 
 	/** Dispose every child, then detach it from this container. */
@@ -553,9 +568,20 @@ export class Container implements Component {
 	}
 
 	invalidate(): void {
+		// The per-child refs pin every row the children last rendered; dropping
+		// only the concatenation would keep all of them reachable.
 		this.#memoLines = undefined;
+		this.#memoChildLines = [];
 		for (const child of this.children) {
 			child.invalidate?.();
+		}
+	}
+
+	releaseRenderCaches(): void {
+		this.#memoLines = undefined;
+		this.#memoChildLines = [];
+		for (const child of this.children) {
+			child.releaseRenderCaches?.();
 		}
 	}
 
@@ -969,6 +995,11 @@ export class TUI extends Container {
 	#cancelPostmortemRestore?: () => void;
 	/** True between a `deferInput` start() and enableInput(). */
 	#inputDeferred = false;
+	/**
+	 * Keystrokes held since a TSP `deferInput` start, replayed by
+	 * releaseHeldInput(); undefined when not holding.
+	 */
+	#heldInput: string[] | undefined;
 	// Always-on event-loop lag probe. The high default threshold keeps it quiet;
 	// it only logs `ui.loop-blocked` (with the current loop phase) when a frame
 	// budget is genuinely starved. Armed in start(), disarmed in stop().
@@ -1413,6 +1444,7 @@ export class TUI extends Container {
 		// `hello` query must go out now to confirm the surface.
 		const nativeExpected = this.terminal.tspExpected === true;
 		this.#inputDeferred = options?.deferInput === true && !nativeExpected;
+		this.#heldInput = options?.deferInput === true && nativeExpected ? [] : undefined;
 		this.#watchdog.start();
 		this.#ghosttyInitialImageDelayDone = false;
 		this.#ghosttyImageReadyAtMs = this.#renderScheduler.now() + TUI.#GHOSTTY_INITIAL_IMAGE_DELAY_MS;
@@ -2246,6 +2278,23 @@ export class TUI extends Container {
 		this.terminal.enableInput?.();
 		this.#querySixelSupport();
 		this.#queryCellSize();
+		// The probes went out over the painted frame; a terminal that could not
+		// parse one left its bytes on the cursor row (see Terminal.enableInput).
+		this.requestRender(true);
+	}
+
+	/**
+	 * Replay the keystrokes held since a TSP `deferInput` start through the
+	 * normal input path, then deliver input live. Call once the app's key
+	 * handlers are installed so a hotkey pressed during startup still fires.
+	 * Idempotent; no-op when nothing is held.
+	 */
+	releaseHeldInput(): void {
+		const held = this.#heldInput;
+		if (held === undefined) return;
+		this.#heldInput = undefined;
+		if (this.#stopped) return;
+		for (const data of held) this.#handleInput(data);
 	}
 
 	addStartListener(listener: StartListener): () => void {
@@ -2271,6 +2320,10 @@ export class TUI extends Container {
 		// PI_FORCE_IMAGE_PROTOCOL choice — including its `off` kill switch — wins
 		// over the probe.
 		if (TERMINAL.imageProtocol) return;
+		// A Tern surface (live, or about to open optimistically at start) sends
+		// images through TSP; this also keeps held startup input free of probe
+		// listeners.
+		if (this.#nativeLive || this.terminal.tspExpected) return;
 		if (isImageProtocolForced()) return;
 		if (!process.stdin.isTTY || !process.stdout.isTTY) return;
 
@@ -2439,6 +2492,7 @@ export class TUI extends Container {
 		this.#nativeHoldTimer?.cancel();
 		this.#nativeHoldTimer = undefined;
 		this.#clearNativeConfirm();
+		this.#heldInput = undefined;
 		const nativeWasLive = this.#nativeLive;
 		if (nativeWasLive) {
 			this.#native!.stop();
@@ -2756,6 +2810,11 @@ export class TUI extends Container {
 		}
 		if (data.length === 0) return;
 
+		if (this.#heldInput !== undefined) {
+			this.#holdInput(data);
+			return;
+		}
+
 		// If focused component is an overlay, verify it's still visible (visibility can change due to
 		// terminal resize or visible() callback). Runs before the capture preflight below, which must
 		// target the effective focus owner, not a hidden overlay.
@@ -2833,6 +2892,18 @@ export class TUI extends Container {
 			focused.handleInput(data);
 			this.requestRender();
 		}
+	}
+
+	/**
+	 * Queue a keystroke typed before the app installed its key handlers; input
+	 * listeners see it once, on replay. The cell-size reply is a terminal report,
+	 * consumed now. Ctrl+C/Ctrl+D release the queue so a stalled startup stays
+	 * interruptible.
+	 */
+	#holdInput(data: string): void {
+		if (this.#consumeCellSizeResponse(data)) return;
+		this.#heldInput!.push(data);
+		if (matchesKey(data, "ctrl+c") || matchesKey(data, "ctrl+d")) this.releaseHeldInput();
 	}
 
 	#consumeCellSizeResponse(data: string): boolean {

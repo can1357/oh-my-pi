@@ -87,7 +87,7 @@ import {
 	selectChangelogEntries,
 } from "../../utils/changelog";
 import { copyToClipboard } from "../../utils/clipboard";
-import { formatDumpArchiveReport } from "../../session/session-dump-format";
+import { formatDumpArchiveReport, type SessionDumpArchive } from "../../session/session-dump-format";
 import { openPath } from "../../utils/open";
 import { resumeCommand } from "../../utils/resume-command";
 import { setSessionTerminalTitle } from "../../utils/title-generator";
@@ -334,9 +334,17 @@ export class CommandController {
 		}
 	}
 
-	async handleDumpAllCommand(): Promise<void> {
+	handleDumpAllCommand(): Promise<void> {
+		return this.#writeDumpArchive(() => this.ctx.session.dumpSessionArchiveToTmpDir());
+	}
+
+	handleDumpAnonCommand(): Promise<void> {
+		return this.#writeDumpArchive(() => this.ctx.session.dumpAnonymizedArchiveToTmpDir());
+	}
+
+	async #writeDumpArchive(write: () => Promise<SessionDumpArchive | undefined>): Promise<void> {
 		try {
-			const archive = await this.ctx.session.dumpSessionArchiveToTmpDir();
+			const archive = await write();
 			if (!archive) {
 				this.ctx.showError("No messages to dump yet.");
 				return;
