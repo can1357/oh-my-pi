@@ -338,6 +338,7 @@ export async function loadCapability<T>(
 	if (options.agentDir !== undefined) ctx.agentDir = options.agentDir;
 	if (options.providers) ctx.explicitProviders = new Set(options.providers);
 	if (options.includeDisabled) ctx.includeOptOutUserSources = true;
+	if (options.optedInUserSources?.length) ctx.optedInUserSources = new Set(options.optedInUserSources);
 	if (options.extensionRoots !== undefined) ctx.extensionRoots = options.extensionRoots;
 	const providers = filterProviders(capability, options);
 
@@ -364,7 +365,8 @@ export function isUserSourceEnabled(source: string, ctx?: LoadContext): boolean 
 	const id = source.replace(/^\./, "");
 	if (disabledProviders().has(id)) return false;
 	if (FOREIGN_USER_PROVIDERS[id] !== true) return true;
-	if (ctx?.explicitProviders?.has(id) || ctx?.includeOptOutUserSources) return true;
+	if (ctx?.explicitProviders?.has(id) || ctx?.optedInUserSources?.has(id) || ctx?.includeOptOutUserSources)
+		return true;
 	const enabled = enabledProviders();
 	if (enabled.has(id) || enabled.has("*") || enabled.has("all")) return true;
 	if (id === "claude-plugins" && enabled.has("claude")) return true;

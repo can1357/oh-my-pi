@@ -44,6 +44,12 @@ export const cfgSkillsEnableCodexUser = register({ id: "skills.enableCodexUser",
 
 export const cfgSkillsEnableClaudeUser = register({ id: "skills.enableClaudeUser", type: "boolean", default: false });
 
+export const cfgSkillsEnableOpencodeUser = register({
+	id: "skills.enableOpencodeUser",
+	type: "boolean",
+	default: false,
+});
+
 export const cfgSkillsEnableClaudeProject = register({
 	id: "skills.enableClaudeProject",
 	type: "boolean",
@@ -86,6 +92,7 @@ export const cfgSkills = combine({
 	enableSkillCommands: cfgSkillsEnableSkillCommands,
 	enableCodexUser: cfgSkillsEnableCodexUser,
 	enableClaudeUser: cfgSkillsEnableClaudeUser,
+	enableOpencodeUser: cfgSkillsEnableOpencodeUser,
 	enableClaudeProject: cfgSkillsEnableClaudeProject,
 	enablePiUser: cfgSkillsEnablePiUser,
 	enablePiProject: cfgSkillsEnablePiProject,

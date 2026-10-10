@@ -58,6 +58,12 @@ export interface LoadContext {
 	 * and can be switched on.
 	 */
 	includeOptOutUserSources?: boolean;
+	/**
+	 * Foreign `~/` sources this load is opted into, regardless of `enabledProviders`.
+	 * Carries a per-call opt-in (for skills, `skills.enable*User` of the session
+	 * doing the load) so providers never read process-global settings for it.
+	 */
+	optedInUserSources?: ReadonlySet<string>;
 }
 
 /**
@@ -114,6 +120,8 @@ export interface LoadOptions<T = unknown> {
 	includeInvalid?: boolean;
 	/** Include disabled items without letting them shadow enabled items. Default: false */
 	includeDisabled?: boolean;
+	/** Foreign `~/` sources to treat as opted in for this load only; forwarded to {@link LoadContext.optedInUserSources}. */
+	optedInUserSources?: readonly string[];
 	/** Explicit disabled extension IDs to apply instead of settings. */
 	disabledExtensions?: string[];
 	/**

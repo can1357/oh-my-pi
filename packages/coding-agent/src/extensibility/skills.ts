@@ -292,6 +292,7 @@ export async function loadSkills(options: LoadSkillsOptions = {}): Promise<LoadS
 		enabled = true,
 		enableCodexUser = false,
 		enableClaudeUser = false,
+		enableOpencodeUser = false,
 		enableClaudeProject = true,
 		enablePiUser = true,
 		enablePiProject = true,
@@ -316,6 +317,7 @@ export async function loadSkills(options: LoadSkillsOptions = {}): Promise<LoadS
 		if (provider === MANAGED_SKILLS_PROVIDER_ID) return true;
 		if (provider === "codex" && level === "user") return enableCodexUser || isUserSourceEnabled("codex");
 		if (provider === "claude" && level === "user") return enableClaudeUser || isUserSourceEnabled("claude");
+		if (provider === "opencode" && level === "user") return enableOpencodeUser || isUserSourceEnabled("opencode");
 		if (provider === "claude" && level === "project") return enableClaudeProject;
 		if (provider === "native" && level === "user") return enablePiUser;
 		if (provider === "native" && level === "project") return enablePiProject;
@@ -332,11 +334,18 @@ export async function loadSkills(options: LoadSkillsOptions = {}): Promise<LoadS
 		return true;
 	}
 
-	// Use capability API to load all skills
+	// Use capability API to load all skills. The per-tool user toggles travel in the load
+	// context, so a session's own settings decide which `~/` skill folders are scanned.
+	const optedInUserSources = [
+		...(enableCodexUser ? ["codex"] : []),
+		...(enableClaudeUser ? ["claude"] : []),
+		...(enableOpencodeUser ? ["opencode"] : []),
+	];
 	const result = await loadCapability<CapabilitySkill>(skillCapability.id, {
 		cwd,
 		disabledExtensions,
 		extensionRoots,
+		optedInUserSources,
 	});
 
 	const skillMap = new Map<string, Skill>();

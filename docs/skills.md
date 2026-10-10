@@ -107,7 +107,7 @@ Capability dedup key is skill name; the first item with a given name wins in the
 
 `loadSkills()` applies these controls:
 
-- source toggles: `enableCodexUser`, `enableClaudeUser`, `enableClaudeProject`, `enablePiUser`, `enablePiProject`, `enableAgentsUser`, `enableAgentsProject`
+- source toggles: `enableCodexUser`, `enableClaudeUser`, `enableOpencodeUser`, `enableClaudeProject`, `enablePiUser`, `enablePiProject`, `enableAgentsUser`, `enableAgentsProject`. The three user toggles (`skills.enableCodexUser`, `skills.enableClaudeUser`, `skills.enableOpencodeUser`, all default `false`) admit only that tool's user skills (`~/.codex`, `~/.claude/skills`, `~/.config/opencode/skills`) without opting the whole provider in through `enabledProviders`.
 - `disabledExtensions` entries with `skill:<name>`
 - `ignoredSkills` (exclude; glob patterns)
 - `includeSkills` (include allowlist; glob patterns; empty means include all)
