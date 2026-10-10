@@ -155,6 +155,8 @@ class TabState {
 	pinned: boolean;
 	/** Chrome tab group id from the last snapshot; -1 when ungrouped. */
 	groupId: number;
+	/** Only tabs created by a downstream createTarget may be closed by the relay. */
+	createdByRelay = false;
 	/** Whether `chrome.debugger` is currently attached to this tab. */
 	attached = false;
 	/** Set when attach failed or the user cancelled the debugger; cleared on navigation. */
@@ -744,6 +746,14 @@ export class RelayBridge {
 			this.#replyError(conn, msg, `No tab with key ${tabKey}`);
 			return false;
 		}
+		if (msg.method === "Target.closeTarget") {
+			await this.#handleBrowserCommand(conn, msg);
+			return true;
+		}
+		if (msg.method === "Page.close" && !tab.createdByRelay) {
+			this.#replyError(conn, msg, "Refusing to close a borrowed user tab");
+			return false;
+		}
 		const inst = this.#instances.get(tab.instanceId);
 		if (!inst || !inst.socket) {
 			this.#replyError(conn, msg, "relay extension is not connected");
@@ -929,6 +939,8 @@ export class RelayBridge {
 				this.#onTabUpsert(result.tab, inst.instanceId);
 				// Creating a tab is an explicit act of driving it.
 				const createdKey = tabKeyOf(inst.code, result.tab.tabId);
+				const createdTab = this.#tabs.get(createdKey);
+				if (createdTab) createdTab.createdByRelay = true;
 				this.#claimTab(conn, createdKey);
 				this.#reply(conn, msg, { targetId: pageTargetIdFromKey(createdKey) });
 				return;
@@ -942,6 +954,10 @@ export class RelayBridge {
 				const removedTab = this.#tabs.get(parsed.key);
 				if (!removedTab) {
 					this.#replyError(conn, msg, `No target with id ${String(msg.params?.targetId)}`);
+					return;
+				}
+				if (!removedTab.createdByRelay) {
+					this.#replyError(conn, msg, "Refusing to close a borrowed user tab");
 					return;
 				}
 				await this.#rpc({ op: "removeTab", tabId: removedTab.tabId }, this.#instanceFor(removedTab));

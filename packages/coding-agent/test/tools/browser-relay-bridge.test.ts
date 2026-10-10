@@ -208,6 +208,61 @@ describe("RelayBridge target discovery", () => {
 	});
 });
 
+describe("RelayBridge borrowed-tab protection", () => {
+	it("rejects root, page, and session-scoped target closes even after a user tab is claimed", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 }), tab({ tabId: 2, windowId: 2 })]);
+		const cdp = new FakeCdpSocket();
+		const connId = bridge.cdpConnected(cdp);
+		const sessionId = await attachPage(bridge, ext, cdp, connId, 1);
+		await claimTab(bridge, ext, cdp, connId, 1);
+		const commands = [
+			{ method: "Target.closeTarget", params: { targetId: `PAGE${ANON}.1` } },
+			{ method: "Target.closeTarget", params: { targetId: `PAGE${ANON}.2` } },
+			{ method: "Page.close", sessionId },
+			{ method: "Target.closeTarget", sessionId, params: { targetId: `PAGE${ANON}.2` } },
+		];
+		for (const command of commands) {
+			const id = ++msgSeq;
+			bridge.cdpMessage(connId, JSON.stringify({ id, ...command }));
+			await flush();
+			expect(cdp.messages.find(message => message.id === id)?.error).toEqual({
+				code: -32000,
+				message: "Refusing to close a borrowed user tab",
+			});
+		}
+		expect(ext.rpcs("removeTab")).toEqual([]);
+		expect(
+			ext
+				.rpcs("send")
+				.filter(command => command.method.endsWith(".close") || command.method === "Target.closeTarget"),
+		).toEqual([]);
+	});
+
+	it("allows a different cleanup connection to close only a relay-created target", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })]);
+		const creator = new FakeCdpSocket();
+		const creatorId = bridge.cdpConnected(creator);
+		bridge.cdpMessage(creatorId, JSON.stringify({ id: ++msgSeq, method: "Target.createTarget" }));
+		ack(bridge, ext, "createTab", { tab: tab({ tabId: 9 }) });
+		await flush();
+		const cleanup = new FakeCdpSocket();
+		const cleanupId = bridge.cdpConnected(cleanup);
+		const id = ++msgSeq;
+		bridge.cdpMessage(
+			cleanupId,
+			JSON.stringify({ id, method: "Target.closeTarget", params: { targetId: `PAGE${ANON}.9` } }),
+		);
+		ack(bridge, ext, "removeTab");
+		await flush();
+		expect(cleanup.messages.find(message => message.id === id)?.result).toEqual({ success: true });
+		expect(ext.rpcs("removeTab").map(command => command.tabId)).toEqual([9]);
+	});
+});
+
 describe("RelayBridge tab grouping", () => {
 	it("groups nothing on hello or tab lifecycle events — only claimed tabs join the omp group", () => {
 		const bridge = new RelayBridge({ group: { title: "omp", color: "cyan" } });
