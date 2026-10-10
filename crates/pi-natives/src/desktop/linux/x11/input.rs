@@ -41,7 +41,7 @@ use super::{
 use crate::desktop::{
 	backend::{DeliveryMode, Modifiers, MouseButton, PointerEvent},
 	control,
-	error::{CoreResult, DesktopError},
+	error::{CoreResult, DesktopError, ErrorCode},
 	keys::KeyName,
 	types::Target,
 };
@@ -299,7 +299,7 @@ impl X11Input {
 				if control::check().is_err() {
 					self.mpx = None;
 				}
-				return result.and(isolation);
+				return isolated(result, isolation);
 			},
 			Err(reason) => {
 				control::check()?;
@@ -930,7 +930,8 @@ impl X11Input {
 				let (x, y) = self.core_pointer().ok_or_else(|| {
 					DesktopError::input_failed("cannot verify the takeover pointer position")
 				})?;
-				self.wm().check_pointer_target(window, x, y)?;
+				// The takeover already moved the core pointer, and maybe clicked.
+				self.wm().check_pointer_target(window, x, y, true)?;
 			}
 		}
 		self
@@ -1049,7 +1050,7 @@ fn pointer_mpx(wm: Wm<'_>, mpx: &mut Mpx, window: Window, event: &PointerEvent) 
 	let &(x, y) = path
 		.first()
 		.ok_or_else(|| DesktopError::input_failed("drag path is empty"))?;
-	wm.check_pointer_target(window, x, y)?;
+	wm.check_pointer_target(window, x, y, false)?;
 	let snapshot = FocusSnapshot::capture(wm);
 	let result = match event {
 		PointerEvent::Click { button, count, modifiers, .. } => {
@@ -1068,7 +1069,17 @@ fn pointer_mpx(wm: Wm<'_>, mpx: &mut Mpx, window: Window, event: &PointerEvent) 
 	if isolation.is_err() {
 		mpx.inhibit();
 	}
-	result.and(isolation)
+	isolated(result, isolation)
+}
+
+/// Joins an MPX call's result with its focus-isolation check. A clean refusal
+/// yields to an isolation failure: the call then already disturbed focus, so
+/// it is not a refusal the host may rerun in takeover.
+fn isolated(result: CoreResult<()>, isolation: CoreResult<()>) -> CoreResult<()> {
+	match result {
+		Err(error) if error.code == ErrorCode::BackgroundUnavailable => isolation.and(Err(error)),
+		result => result.and(isolation),
+	}
 }
 
 /// Cheap up-front check (no device creation) for hosts where the MPX route
@@ -1207,5 +1218,25 @@ const fn event_kind(event: &PointerEvent) -> &'static str {
 		PointerEvent::Drag { .. } => "drag",
 		PointerEvent::Hold { .. } => "mouse hold",
 		PointerEvent::Scroll { .. } => "scroll",
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn a_refusal_that_disturbed_focus_is_not_rerunnable() {
+		let refused = || Err(DesktopError::background_unavailable("covered; no input was sent"));
+		let disturbed = || Err(DesktopError::input_failed("focus moved"));
+
+		let error = isolated(refused(), disturbed()).unwrap_err();
+		assert_eq!(error.code, ErrorCode::InputFailed);
+		assert_eq!(error.message, "focus moved");
+
+		assert_eq!(isolated(refused(), Ok(())).unwrap_err().code, ErrorCode::BackgroundUnavailable);
+		let failed = isolated(Err(DesktopError::input_failed("lost")), disturbed()).unwrap_err();
+		assert_eq!(failed.message, "lost");
+		assert_eq!(isolated(Ok(()), disturbed()).unwrap_err().message, "focus moved");
 	}
 }

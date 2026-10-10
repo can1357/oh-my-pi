@@ -82,6 +82,25 @@ fn wm_failed(error: impl std::fmt::Display) -> DesktopError {
 	DesktopError::input_failed(format!("X11 window query failed: {error}"))
 }
 
+/// A refusal of one input call. Before any of its events was sent it is
+/// `unsent`'s clean refusal, which the host may rerun in takeover. Once one
+/// was, part of the call may already have landed, so it is an `InputFailed`
+/// that must not be replayed.
+pub(super) fn refusal(
+	sent: bool,
+	reason: std::fmt::Arguments<'_>,
+	unsent: impl FnOnce(String) -> DesktopError,
+) -> DesktopError {
+	if sent {
+		DesktopError::input_failed(format!(
+			"{reason}; earlier input of this call may already have landed, so inspect the target \
+			 before retrying"
+		))
+	} else {
+		unsent(format!("{reason}; no input was sent"))
+	}
+}
+
 /// Window-manager view of the X session: one connection, its root, atoms.
 #[derive(Clone, Copy)]
 pub(super) struct Wm<'a> {
@@ -379,7 +398,14 @@ impl Wm<'_> {
 	/// Refuses a real (position-routed) pointer event at screen point `(x, y)`
 	/// unless it would land on `window`. Another window of the same process
 	/// and an unowned override-redirect popup are not the requested target.
-	pub(super) fn check_pointer_target(&self, window: Window, x: i16, y: i16) -> CoreResult<()> {
+	/// `sent` says whether this call already sent an event; see [`refusal`].
+	pub(super) fn check_pointer_target(
+		&self,
+		window: Window,
+		x: i16,
+		y: i16,
+		sent: bool,
+	) -> CoreResult<()> {
 		let attributes = self
 			.conn
 			.get_window_attributes(window)
@@ -387,9 +413,11 @@ impl Wm<'_> {
 			.reply()
 			.map_err(wm_failed)?;
 		if attributes.map_state != MapState::VIEWABLE {
-			return Err(DesktopError::background_unavailable(format!(
-				"window {window} is not viewable; no input was sent"
-			)));
+			return Err(refusal(
+				sent,
+				format_args!("window {window} is not viewable"),
+				DesktopError::background_unavailable,
+			));
 		}
 		let geometry = self
 			.conn
@@ -410,21 +438,28 @@ impl Wm<'_> {
 			|| px >= left + i32::from(geometry.width)
 			|| py >= top + i32::from(geometry.height)
 		{
-			return Err(DesktopError::invalid_coordinate_frame(format!(
-				"screen point ({x}, {y}) lies outside window {window} (x={left}, y={top}, {}x{}); no \
-				 input was sent",
-				geometry.width, geometry.height
-			)));
+			return Err(refusal(
+				sent,
+				format_args!(
+					"screen point ({x}, {y}) lies outside window {window} (x={left}, y={top}, {}x{})",
+					geometry.width, geometry.height
+				),
+				DesktopError::invalid_coordinate_frame,
+			));
 		}
 		let under = self.root_child_at(x, y).ok_or_else(|| {
-			DesktopError::background_unavailable(format!(
-				"no input window covers ({x}, {y}); no input was sent"
-			))
+			refusal(
+				sent,
+				format_args!("no input window covers ({x}, {y})"),
+				DesktopError::background_unavailable,
+			)
 		})?;
 		let frame = self.root_child_of(window).ok_or_else(|| {
-			DesktopError::background_unavailable(format!(
-				"window {window} is not mapped on this screen; no input was sent"
-			))
+			refusal(
+				sent,
+				format_args!("window {window} is not mapped on this screen"),
+				DesktopError::background_unavailable,
+			)
 		})?;
 		if under == frame {
 			return Ok(());
@@ -432,16 +467,20 @@ impl Wm<'_> {
 		let covering_pid = self.root_child_pid(under);
 		let client = self.client_of(under).unwrap_or(under);
 		let title = self.title(client);
-		Err(DesktopError::background_unavailable(format!(
-			"window {window}: screen point ({x}, {y}) is covered by window {client}{}{}, so a real \
-			 pointer event would land there; no input was sent",
-			if title.is_empty() {
-				String::new()
-			} else {
-				format!(" \"{title}\"")
-			},
-			covering_pid.map_or_else(String::new, |pid| format!(" (pid {pid})")),
-		)))
+		Err(refusal(
+			sent,
+			format_args!(
+				"window {window}: screen point ({x}, {y}) is covered by window {client}{}{}, so a \
+				 real pointer event would land there",
+				if title.is_empty() {
+					String::new()
+				} else {
+					format!(" \"{title}\"")
+				},
+				covering_pid.map_or_else(String::new, |pid| format!(" (pid {pid})")),
+			),
+			DesktopError::background_unavailable,
+		))
 	}
 
 	/// A mapped popup is evidence that input may be grabbed, not proof of
@@ -522,5 +561,24 @@ impl FocusSnapshot {
 			}
 			control::wait(FOCUS_POLL)?;
 		}
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use crate::desktop::error::ErrorCode;
+
+	#[test]
+	fn a_refusal_after_sent_input_is_an_input_failure_that_admits_partial_delivery() {
+		let before = refusal(false, format_args!("covered"), DesktopError::background_unavailable);
+		assert_eq!(before.code, ErrorCode::BackgroundUnavailable);
+		assert!(before.message.contains("no input was sent"), "{}", before.message);
+
+		let after = refusal(true, format_args!("covered"), DesktopError::background_unavailable);
+		assert_eq!(after.code, ErrorCode::InputFailed);
+		assert!(after.message.starts_with("covered"), "{}", after.message);
+		assert!(after.message.contains("may already have landed"), "{}", after.message);
+		assert!(!after.message.contains("no input was sent"), "{}", after.message);
 	}
 }
