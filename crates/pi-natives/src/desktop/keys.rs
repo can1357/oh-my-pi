@@ -55,7 +55,7 @@ pub enum KeyName {
 }
 
 impl KeyName {
-	#[cfg(target_os = "windows")]
+	#[cfg(any(target_os = "windows", target_os = "macos"))]
 	pub(crate) const fn is_modifier(self) -> bool {
 		matches!(self, Self::Ctrl | Self::Alt | Self::Shift | Self::Meta)
 	}

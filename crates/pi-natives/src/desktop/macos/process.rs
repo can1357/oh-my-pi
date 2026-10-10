@@ -197,10 +197,12 @@ fn is_chromium_bundle(bundle: &str) -> bool {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum RemoteScreen {
 	/// Sends each key event's key code to the remote computer (Screen
-	/// Sharing).
+	/// Sharing), with the modifiers the physical keyboard holds rather than
+	/// any the event carries.
 	KeyEvents,
-	/// Streams HID report state to a paired device (iPhone Mirroring), which
-	/// misses a key or button transition shorter than its report interval.
+	/// Streams HID report state, modifier keys included, to a paired device
+	/// (iPhone Mirroring), which misses a key or button transition shorter
+	/// than its report interval.
 	HidReports,
 }
 

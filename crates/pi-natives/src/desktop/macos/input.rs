@@ -1,4 +1,7 @@
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::{
+	ptr,
+	time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+};
 
 use core_graphics::{
 	display::CGDisplay,
@@ -108,6 +111,13 @@ impl MacInput {
 				let gap = key_gap(remote);
 				match mode {
 					DeliveryMode::Background => {
+						let modified = modified_text(&keys);
+						if remote == Some(RemoteScreen::KeyEvents) && !modified.is_empty() {
+							return Err(keyboard_modifiers_refusal(
+								&window,
+								&format!("type {}", modified.join(" ")),
+							));
+						}
 						if remote.is_none()
 							&& !process::is_terminal(pid)
 							&& ax::insert_native_text(pid, wid, text)?
@@ -122,7 +132,15 @@ impl MacInput {
 					},
 					DeliveryMode::Foreground => skylight::with_foreground(pid, wid, |activated| {
 						control::wait(first_key_settle(activated))?;
-						type_keys(&self.source, &keys, gap, |event| post_takeover_key(pid, wid, event))
+						if remote.is_some() {
+							// A remote screen may read modifiers from the keyboard
+							// state, which only bare key
+							// transitions at the HID tap move.
+							skylight::require_front_window(pid, wid)?;
+							post_bare_keys(&bare_transitions(&keys), gap)
+						} else {
+							type_keys(&self.source, &keys, gap, |event| post_takeover_key(pid, wid, event))
+						}
 					}),
 				}
 			},
@@ -145,9 +163,15 @@ impl MacInput {
 			Target::Window(id) => {
 				let window = capture.window(id)?;
 				let (pid, wid) = window_identity(&window)?;
-				let gap = key_gap(process::remote_screen(pid));
+				let remote = process::remote_screen(pid);
+				let gap = key_gap(remote);
 				match mode {
 					DeliveryMode::Background => {
+						if remote == Some(RemoteScreen::KeyEvents)
+							&& keys.iter().copied().any(KeyName::is_modifier)
+						{
+							return Err(keyboard_modifiers_refusal(&window, "press this shortcut"));
+						}
 						with_background_keyboard(&self.source, pid, wid, &window, || {
 							key_chord(&self.source, keys, gap, |event| skylight::post_keyboard(pid, event))
 						})
@@ -181,9 +205,15 @@ impl MacInput {
 			Target::Window(id) => {
 				let window = capture.window(id)?;
 				let (pid, wid) = window_identity(&window)?;
-				let gap = key_gap(process::remote_screen(pid));
+				let remote = process::remote_screen(pid);
+				let gap = key_gap(remote);
 				match mode {
 					DeliveryMode::Background => {
+						if remote == Some(RemoteScreen::KeyEvents)
+							&& keys.iter().copied().any(KeyName::is_modifier)
+						{
+							return Err(keyboard_modifiers_refusal(&window, "hold these keys"));
+						}
 						with_background_keyboard(&self.source, pid, wid, &window, || {
 							with_held_keys(
 								&self.source,
@@ -221,6 +251,17 @@ fn window_identity(window: &DesktopWindow) -> CoreResult<(libc::pid_t, u32)> {
 		DesktopError::invalid_target(format!("invalid macOS window id '{}'", window.id))
 	})?;
 	Ok((pid, wid))
+}
+
+/// Screen Sharing sends the remote computer the modifiers the physical
+/// keyboard holds, which background input cannot set without shifting the
+/// user's own typing.
+fn keyboard_modifiers_refusal(window: &DesktopWindow, action: &str) -> DesktopError {
+	DesktopError::background_unavailable(format!(
+		"window {} ({}) takes Shift, Option, Control and Command from the physical keyboard, so \
+		 background input cannot hold them to {action}; nothing was sent; retry with takeover:true",
+		window.id, window.app,
+	))
 }
 
 /// Why process-scoped background keystrokes could reach a window other than
@@ -549,6 +590,8 @@ unsafe extern "C" {
 		filter: u32,
 		state: u32,
 	);
+	#[link_name = "CGEventCreateKeyboardEvent"]
+	fn create_keyboard_event(source: CGEventSourceRef, keycode: u16, down: bool) -> CGEventRef;
 	#[link_name = "CGEventSetType"]
 	fn set_event_type(event: CGEventRef, event_type: u32);
 	#[cfg(test)]
@@ -1083,6 +1126,90 @@ fn type_keys(
 		result
 	});
 	skylight::after_cleanup(result, release)
+}
+
+/// The typed characters that need Shift or Option, each once.
+fn modified_text<'a>(keys: &[TypedKey<'a>]) -> Vec<&'a str> {
+	let mut modified = Vec::new();
+	for key in keys {
+		if let TypedKey::Layout(stroke, text) = *key
+			&& (stroke.shift || stroke.option)
+			&& !modified.contains(&text)
+		{
+			modified.push(text);
+		}
+	}
+	modified
+}
+
+/// Key transitions `(keycode, down)` that press `keys` like a hardware
+/// keyboard, holding Shift and Option only while a key needs them.
+/// `typed_keys` gives a remote screen only layout keys.
+fn bare_transitions(keys: &[TypedKey<'_>]) -> Vec<(u16, bool)> {
+	const SHIFT: u16 = 56;
+	const OPTION: u16 = 58;
+	let mut transitions = Vec::with_capacity(keys.len() * 2 + 2);
+	let (mut shift, mut option) = (false, false);
+	for key in keys {
+		let TypedKey::Layout(stroke, _) = *key else {
+			continue;
+		};
+		for (held, wanted, code) in
+			[(&mut shift, stroke.shift, SHIFT), (&mut option, stroke.option, OPTION)]
+		{
+			if *held != wanted {
+				*held = wanted;
+				transitions.push((code, wanted));
+			}
+		}
+		transitions.push((stroke.code, true));
+		transitions.push((stroke.code, false));
+	}
+	if option {
+		transitions.push((OPTION, false));
+	}
+	if shift {
+		transitions.push((SHIFT, false));
+	}
+	transitions
+}
+
+/// Posts bare key transitions at the HID tap: a null source and no flag or
+/// Unicode overrides, so `CoreGraphics` derives modifier state from the
+/// transitions exactly as for a hardware keyboard.
+fn post_bare_keys(transitions: &[(u16, bool)], gap: Duration) -> CoreResult<()> {
+	let post = |code, down| {
+		control::check()?;
+		// SAFETY: A null source is documented as valid for keyboard events.
+		let raw = unsafe { create_keyboard_event(ptr::null_mut(), code, down) };
+		if raw.is_null() {
+			return Err(DesktopError::input_failed("failed to create a Quartz keyboard event"));
+		}
+		// SAFETY: `raw` is a non-null create-rule event whose ownership moves
+		// here.
+		let event = unsafe { CGEvent::from_ptr(raw) };
+		post_global(&event)
+	};
+	let mut held = [false; 128];
+	let result = (|| {
+		for &(code, down) in transitions {
+			control::check()?;
+			post(code, down)?;
+			held[usize::from(code)] = down;
+			control::wait(gap)?;
+		}
+		Ok(())
+	})();
+	let cleanup = control::cleanup(|| {
+		let mut result = Ok(());
+		for (code, down) in held.into_iter().enumerate().rev() {
+			if down {
+				result = skylight::after_cleanup(result, post(code as u16, false));
+			}
+		}
+		result
+	});
+	skylight::after_cleanup(result, cleanup)
 }
 
 /// Wait before the first foreground keystroke: a surface that was just
@@ -2037,6 +2164,32 @@ mod tests {
 		assert_eq!(lengths(&format!("e{}", "\u{301}".repeat(24))), [20, 5]);
 		assert_eq!(lengths(&format!("a{}", "😀".repeat(10))), [19, 2]);
 		assert_eq!(lengths(""), Vec::<usize>::new());
+	}
+
+	#[test]
+	fn remote_takeover_presses_modifier_keys_and_background_names_what_needs_them() {
+		let keys = typed_keys("BC€a", us_stroke, Some(RemoteScreen::KeyEvents)).unwrap();
+		// Shift is held across B and C, Option joins it for €, and both are
+		// released before the plain a.
+		assert_eq!(bare_transitions(&keys), [
+			(56, true),
+			(11, true),
+			(11, false),
+			(8, true),
+			(8, false),
+			(58, true),
+			(19, true),
+			(19, false),
+			(56, false),
+			(58, false),
+			(0, true),
+			(0, false),
+		]);
+		assert_eq!(modified_text(&keys), ["B", "C", "€"]);
+		assert!(
+			modified_text(&typed_keys("ab", us_stroke, Some(RemoteScreen::KeyEvents)).unwrap())
+				.is_empty()
+		);
 	}
 
 	#[test]
