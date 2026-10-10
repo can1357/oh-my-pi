@@ -230,7 +230,10 @@ function registerCacheableMarkdownTheme(markdownTheme: MarkdownTheme): void {
 	});
 }
 
-export function getMarkdownThemeWithLinkTargets(targets: ReadonlyMap<string, string>): MarkdownTheme {
+export function getMarkdownThemeWithLinkTargets(
+	targets: ReadonlyMap<string, string>,
+	githubRepo?: string,
+): MarkdownTheme {
 	const base = getMarkdownTheme();
 	let snapshot = linkTargetSnapshots.get(targets);
 	let matches = snapshot?.size === targets.size;
@@ -247,7 +250,7 @@ export function getMarkdownThemeWithLinkTargets(targets: ReadonlyMap<string, str
 		linkTargetSnapshots.set(targets, snapshot);
 	}
 	const stableSnapshot = snapshot;
-	const linked: MarkdownTheme = { ...base, resolveLink: href => stableSnapshot.get(href) };
+	const linked: MarkdownTheme = { ...base, githubRepo, resolveLink: href => stableSnapshot.get(href) };
 	if (canCacheMarkdownListItems(base)) registerCacheableMarkdownTheme(linked);
 	return linked;
 }

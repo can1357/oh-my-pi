@@ -162,6 +162,7 @@ import { isMCPToolName } from "../tools/builtin-names";
 import type { LspStartupServerInfo } from "../tools";
 import { resolvePlanFilePath } from "../plan-mode/plan-files";
 import { resolveToCwd } from "../tools/path-utils";
+import { defaultGhHost, GITHUB_HOST, parseRepoRef, tryResolveCurrentRepo } from "../tools/gh-common";
 import { StreamPublisher } from "../stream/publisher";
 import { newRecordingPath, SessionRecorder } from "../stream/recording";
 import { StreamRedactor } from "../stream/redactor";
@@ -1161,6 +1162,13 @@ const CTRL_L_APPEARANCE_RESPONSE_DEADLINE_MS = 2000;
 /** Repaint cadence of the open jobs sheet: output tails, pids and list ages are polled, not pushed. */
 const JOBS_SHEET_REFRESH_MS = 250;
 
+/** One cwd a session held, from `since` (epoch ms) on, with the github.com repo resolved for it. */
+interface ProseGithubRepoEntry {
+	readonly cwd: string;
+	readonly since: number;
+	repo?: string;
+}
+
 export class InteractiveMode implements InteractiveModeContext {
 	#ownsStartedUi: boolean;
 	session: AgentSession;
@@ -1595,6 +1603,55 @@ export class InteractiveMode implements InteractiveModeContext {
 			rules: session.ttsrManager?.getRules(),
 		};
 	}
+	/**
+	 * Each session's cwds in the order it held them, by session id; the first covers
+	 * all earlier history. Keyed by id, not `AgentSession`: `/resume` loads another
+	 * session into the same object, while `/move` keeps the id across cwds.
+	 */
+	readonly #proseGithubRepos = new Map<string, ProseGithubRepoEntry[]>();
+	/**
+	 * Record `session`'s cwd when it differs from the last one seen, and resolve its
+	 * github.com repo (gh's default-repo pick, memoized per cwd) off the render path.
+	 * A session seen for the first time is seeded from the cwds its replies were
+	 * persisted with, so a resumed session keeps cwd changes from earlier runs.
+	 */
+	#trackProseGithubRepo(session: AgentSession): ProseGithubRepoEntry[] {
+		const sessionId = session.sessionManager.getSessionId();
+		let history = this.#proseGithubRepos.get(sessionId);
+		if (!history) {
+			history = [];
+			this.#proseGithubRepos.set(sessionId, history);
+			for (const entry of session.sessionManager.getEntries()) {
+				if (entry.type !== "message" || !entry.cwd || history.at(-1)?.cwd === entry.cwd) continue;
+				this.#pushProseGithubRepo(history, entry.cwd, entry.message.timestamp);
+			}
+		}
+		const cwd = session.sessionManager.getCwd();
+		if (history.at(-1)?.cwd !== cwd) this.#pushProseGithubRepo(history, cwd, Date.now());
+		return history;
+	}
+	#pushProseGithubRepo(history: ProseGithubRepoEntry[], cwd: string, since: number): void {
+		const entry: ProseGithubRepoEntry = { cwd, since: history.length === 0 ? Number.NEGATIVE_INFINITY : since };
+		history.push(entry);
+		void tryResolveCurrentRepo(cwd, undefined).then(repo => {
+			const ref = repo === undefined ? undefined : parseRepoRef(repo);
+			if (!ref || (ref.host?.toLowerCase() ?? defaultGhHost()) !== GITHUB_HOST) return;
+			entry.repo = ref.slug;
+			this.ui.invalidate();
+			this.ui.requestRender();
+		});
+	}
+	/**
+	 * Reader for the github.com repo of the view session's cwd at `at` (a message
+	 * timestamp; omitted means now). A rebuilt reply written before a cwd change
+	 * keeps the repo it was written in, and invalidation never retargets a reader.
+	 */
+	proseGithubRepo(at?: number): () => string | undefined {
+		const history = this.#trackProseGithubRepo(this.viewSession);
+		const entry = (at === undefined ? undefined : history.findLast(item => item.since <= at)) ?? history.at(-1)!;
+		return () => entry.repo;
+	}
+
 	get focusedAgentId(): string | undefined {
 		return this.#focusController.focusedAgentId;
 	}
@@ -2253,6 +2310,8 @@ export class InteractiveMode implements InteractiveModeContext {
 			cwd: () => this.sessionManager.getCwd(),
 		});
 		setSessionTerminalTitle(this.sessionManager.getSessionName(), this.sessionManager.getCwd());
+		// Before any cwd change, so replies written here stay bound to this repo.
+		this.#trackProseGithubRepo(this.session);
 		// Seeds the border, the status-line `vim` segment, and the cursor shape in one call.
 		// Deliberately here rather than beside #applyVimMode in the constructor: that runs before
 		// #focusController exists, which updateEditorBorderColor dereferences.
@@ -2779,6 +2838,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 		setSessionTerminalTitle(this.sessionManager.getSessionName(), this.sessionManager.getCwd());
 		this.statusLine.applyCwdChange();
+		this.#trackProseGithubRepo(this.session);
 		return true;
 	}
 

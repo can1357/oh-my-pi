@@ -276,6 +276,7 @@ export interface CopySelectorDeps {
 	proseOnlyThinking?: () => boolean;
 	expandThinkingBlocks?: () => boolean;
 	linkTargets?: ReadonlyMap<string, string>;
+	proseGithubRepo?: (at?: number) => () => string | undefined;
 	requestRender: () => void;
 	/** Replaces the "Copy" header when the picker is reused for another purpose. */
 	title?: string;
@@ -390,6 +391,7 @@ export class CopySelectorComponent implements Component {
 			proseOnlyThinking: this.deps.proseOnlyThinking,
 			expandThinkingBlocks: this.deps.expandThinkingBlocks,
 			linkTargets: this.deps.linkTargets,
+			proseGithubRepo: this.deps.proseGithubRepo,
 			requestRender: this.deps.requestRender,
 		});
 		builder.setExpanded(this.#expanded);

@@ -77,6 +77,8 @@ export interface SessionEntryBase {
 export interface SessionMessageEntry extends SessionEntryBase {
 	type: "message";
 	message: AgentMessage;
+	/** Cwd an assistant reply was written in; binds its bare `#N` refs to that repo after a resume. */
+	cwd?: string;
 }
 
 /** Usage from a model call that does not belong in the conversation transcript. */

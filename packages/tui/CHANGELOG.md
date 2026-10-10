@@ -148,6 +148,17 @@
 - Fixed slow Markdown processing for certain LaTeX environments and incomplete delimiters.
 - Fixed excessive slowdown when formatting long semicolon-free JavaScript evaluations.
 - Fixed prompt-editor lag in large drafts containing magic keywords.
+- Fixed quadratic Markdown lexing of documents with bare `\begin{…}` environments or unclosed `\[` openers ([#14667](https://github.com/can1357/oh-my-pi/pull/14667) by [@H4vC](https://github.com/H4vC))
+- Fixed quadratic eval display formatting on long semicolon-free JavaScript ([#14685](https://github.com/can1357/oh-my-pi/pull/14685) by [@H4vC](https://github.com/H4vC))
+- Fixed debug log viewer re-formatting every row each frame (select-all over 20k rows: ~3 s → ~2 ms per frame) ([#14686](https://github.com/can1357/oh-my-pi/pull/14686) by [@H4vC](https://github.com/H4vC))
+- Fixed plan review slowing down on long annotated plans ([#14686](https://github.com/can1357/oh-my-pi/pull/14686) by [@H4vC](https://github.com/H4vC))
+- Fixed prompt editor lag on large drafts containing a magic keyword ([#14690](https://github.com/can1357/oh-my-pi/pull/14690) by [@H4vC](https://github.com/H4vC))
+### Added
+
+- Writes of `.svg` and Mermaid (`.mmd`, `.mermaid`) files draw the image or diagram under the card, as the same code blocks draw in assistant replies: an SVG redraws as it streams, a diagram appears once the file is complete; tool renderers opt in through `figure`.
+### Added
+
+- Markdown now renders GitHub issue/PR references (`owner/repo#123`, and bare `#123` when `MarkdownTheme.githubRepo` is set) as OSC 8 hyperlinks without changing their visible text ([#13078](https://github.com/can1357/oh-my-pi/pull/13078) by [@andrebrait](https://github.com/andrebrait))
 
 ## [18.7.0] - 2026-10-06
 

@@ -249,6 +249,7 @@ Inviolable.
 
 <evidence-and-output>
 - MUST match requested format; brief, complete evidence/blockers. Report only exercised verification.
+- Issue/PR refs: bare `#N` means cwd repo ONLY; other repos (incl. forks, upstreams) MUST be `owner/repo#N` on GitHub, else a full URL. Links MUST target the repo owning the ref, never the cwd repo by default.
 </evidence-and-output>
 
 <yielding>

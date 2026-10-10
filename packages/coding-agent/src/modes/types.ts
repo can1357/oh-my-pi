@@ -219,6 +219,11 @@ export interface InteractiveModeContext {
 	/** Whether the viewed session's tables get charts: the main session's do, a focused subagent's do not. */
 	readonly tableChartsVisible: boolean;
 	resolveAssistantMessageLinkHrefs(hrefs: readonly string[]): Promise<ReadonlyMap<string, string>>;
+	/**
+	 * Reads the view session's GitHub repo (`owner/repo`) for bare `#N` prose refs as of
+	 * `at` (a message timestamp; omitted means now); undefined until resolved.
+	 */
+	proseGithubRepo(at?: number): () => string | undefined;
 	/** Whether this visible session has produced thinking content the user can reveal. */
 	readonly hasDisplayableThinkingContent: boolean;
 	/** Record a message whose thinking content makes Ctrl+T meaningful even at thinking level "off"; returns true on first observation. */
