@@ -171,6 +171,20 @@ export interface SourceMeta {
 	 * put the version, not the plugin name, in the path segment owning `skills/`.
 	 */
 	pluginName?: string;
+	/**
+	 * Source repository a plugin or package root declares (`repository` in
+	 * `.claude-plugin/plugin.json`, `plugin.json`, or `package.json`),
+	 * normalized to `host/owner/repo[/directory]`, plus the manifest version.
+	 * Set by the plugin-backed skill providers. Self-declared: it identifies
+	 * lineage across registries and forks, not authenticity.
+	 */
+	provenance?: SourceProvenance;
+}
+
+/** See {@link SourceMeta.provenance}. */
+export interface SourceProvenance {
+	repository: string;
+	version?: string;
 }
 
 /**

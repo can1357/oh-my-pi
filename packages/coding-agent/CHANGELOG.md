@@ -293,6 +293,11 @@
 
 - Improved JSON and JSONL query streaming and pagination to reduce resource usage, support partial results, and provide clearer continuation between result pages.
 - Clarified the `read` tool documentation with complete examples for requesting line ranges.
+- Cancel a pending model handoff with `/prewalk off` without changing the active model, saved prewalk setting, or delivered continuation history ([#14587](https://github.com/can1357/oh-my-pi/pull/14587) by [@NaC-L](https://github.com/NaC-L)).
+- RPC clients can log out like `/logout`: `get_logout_accounts` lists a provider's stored credentials and `logout` removes one; the TypeScript client and the generated Python, Go, and Rust SDKs gain matching methods ([#14588](https://github.com/can1357/oh-my-pi/pull/14588) by [@andrebrait](https://github.com/andrebrait))
+- Added startup notices for conflicting skill variants and redundant installations, with `/skills diagnostics` for resolution details and `skills.showStartupDiagnostics` to disable the notices ([#14148](https://github.com/can1357/oh-my-pi/pull/14148) by [@andrebrait](https://github.com/andrebrait)).
+- RPC hosts can inspect skill conflicts and redundant installations through typed diagnostics snapshots, receive startup and live updates, and persist the startup-notice preference ([#14148](https://github.com/can1357/oh-my-pi/pull/14148) by [@andrebrait](https://github.com/andrebrait)).
+- Added declared repository and version provenance to skill diagnostics, with opt-in `skills.dedupeSameOrigin` resolution for differing same-name plugin variants from the same source repository ([#14148](https://github.com/can1357/oh-my-pi/pull/14148) by [@andrebrait](https://github.com/andrebrait)).
 
 ### Fixed
 

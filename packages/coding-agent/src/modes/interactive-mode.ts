@@ -87,6 +87,7 @@ import type {
 	ExtensionWidgetOptions,
 } from "../extensibility/extensions";
 import type { CompactOptions } from "../extensibility/extensions/types";
+import { cfgSkillsShowStartupDiagnostics } from "../extensibility/settings";
 import type { Skill } from "../extensibility/skills";
 import type { FileSlashCommand } from "../extensibility/slash-commands";
 import { loadSlashCommands } from "../extensibility/slash-commands";
@@ -293,6 +294,7 @@ import type { LoopConditionConfig, LoopLimitRuntime } from "@oh-my-pi/pi-tui/sta
 import { OAuthManualInputManager } from "./oauth-manual-input";
 import { formatPersistenceNotice } from "./persistence-failure";
 import { resolveComposerHint } from "@oh-my-pi/pi-tui/prompt/composer-hints";
+import { summarizeSkillDiagnostics } from "./utils/skill-diagnostics";
 import { hintUsage } from "../utils/usage-counter";
 import {
 	getRunningSubagentBadgeAgentIds,
@@ -2403,6 +2405,9 @@ export class InteractiveMode implements InteractiveModeContext {
 				void this.#handleGoalSessionEvent(event);
 			}),
 			cfgLiveUiSettings.listen(this.settings, (next, previous) => this.#applyUiSettingChanges(next, previous)),
+			cfgSkillsShowStartupDiagnostics.listen(this.settings, () => {
+				this.#syncConfigWarningHeader();
+			}),
 		);
 		// Cache the live model for the next status-bar prepaint: init-time
 		// reconciliations (#reconcileModeFromSession, #enterPlanMode for
@@ -2421,6 +2426,7 @@ export class InteractiveMode implements InteractiveModeContext {
 				// `/move`, manage_skill, MCP prompts) lands here; rebuild the picker from session state.
 				this.#pendingSlashCommands = this.#buildPendingSlashCommands();
 				this.#rebuildSlashCommandAutocomplete(this.sessionManager.getCwd());
+				this.#syncConfigWarningHeader();
 				this.ui.requestRender();
 			}),
 		);
@@ -7343,12 +7349,23 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.composer.setHeaderExtras(this.#buildConfigWarningComponents(), this.#headerAfter);
 	}
 
-	/** Header rows for the current config warnings, rebuilt when they change (#10048). */
+	/** Human-only startup diagnostics, rebuilt when settings or discoveries change. */
 	#buildConfigWarningComponents(): Component[] {
 		const components: Component[] = [];
 		for (const warning of this.session.configWarnings) {
 			components.push(
 				new Text(`Warning: ${warning}`, 1, 0).setStyleFn(t => theme.fg("warning", t)),
+				new Spacer(1),
+			);
+		}
+		if (cfgSkillsShowStartupDiagnostics.get(this.settings) && this.session.skillDiagnostics.length > 0) {
+			const summary = summarizeSkillDiagnostics(this.session.skillDiagnostics);
+			components.push(
+				new Text(
+					`${summary.message}\n/skills diagnostics for details · disable Skill Startup Notices in /settings (Tasks)`,
+					1,
+					0,
+				).setStyleFn(t => theme.fg(summary.conflicts > 0 ? "warning" : "muted", t)),
 				new Spacer(1),
 			);
 		}

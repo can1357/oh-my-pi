@@ -161,7 +161,7 @@ import { createExtensionModelQuery } from "../extensibility/extensions/model-api
 import type { CompactOptions, ContextUsage } from "../extensibility/extensions/types";
 import type { CustomCommandContext } from "../extensibility/custom-commands/types";
 import { SkillDescriptionCatalog } from "../extensibility/skill-descriptions";
-import type { Skill, SkillWarning } from "../extensibility/skills";
+import type { Skill, SkillDiagnostic, SkillWarning } from "../extensibility/skills";
 import { expandSlashCommand, type FileSlashCommand, loadSlashCommands } from "../extensibility/slash-commands";
 import { normalizeToolEventInput, resolveToolEventInput } from "../extensibility/tool-event-input";
 import { GoalRuntime } from "../goals/runtime";
@@ -2057,6 +2057,7 @@ export class AgentSession implements SettingsScope {
 			baseSystemPrompt: this.agent.state.systemPrompt,
 			skills: config.skills,
 			skillWarnings: config.skillWarnings,
+			skillDiagnostics: config.skillDiagnostics,
 			skillsSettings: config.skillsSettings,
 			skillsReloadable: config.skillsReloadable,
 		});
@@ -9137,6 +9138,11 @@ export class AgentSession implements SettingsScope {
 	/** Skill loading warnings captured by SDK */
 	get skillWarnings(): readonly SkillWarning[] {
 		return this.#tools.skillWarnings;
+	}
+
+	/** Skill resolution diagnostics captured by SDK */
+	get skillDiagnostics(): readonly SkillDiagnostic[] {
+		return this.#tools.skillDiagnostics;
 	}
 
 	/** Session-local general-purpose agents pinned to user-tagged models. */

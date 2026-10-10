@@ -2493,6 +2493,153 @@ func (v *UsageLimitState) decodeFrom(raw map[string]json.RawMessage) error {
 	return nil
 }
 
+// Rule that ordered the active variants of one skill name.
+type SkillSelectionReason string
+
+const (
+	SkillSelectionReasonSourceOrder           SkillSelectionReason = "source-order"
+	SkillSelectionReasonCustomDirectory       SkillSelectionReason = "custom-directory"
+	SkillSelectionReasonAuthoredOverInstalled SkillSelectionReason = "authored-over-installed"
+)
+
+func (v *SkillSelectionReason) UnmarshalJSON(data []byte) error {
+	s, err := decodeString(data, "SkillSelectionReason")
+	if err != nil {
+		return err
+	}
+	switch value := SkillSelectionReason(s); value {
+	case SkillSelectionReasonSourceOrder, SkillSelectionReasonCustomDirectory, SkillSelectionReasonAuthoredOverInstalled:
+		*v = value
+		return nil
+	}
+	return unknownValue("SkillSelectionReason", s)
+}
+
+// Allowlisted identity of one discovered skill file; `repository`/`version` are what its plugin declares.
+type SkillDiagnosticEntry struct {
+	Name       string  `json:"name"`
+	FilePath   string  `json:"filePath"`
+	Source     string  `json:"source"`
+	PluginName *string `json:"pluginName,omitempty"`
+	Repository *string `json:"repository,omitempty"`
+	Version    *string `json:"version,omitempty"`
+}
+
+func (v *SkillDiagnosticEntry) UnmarshalJSON(data []byte) error {
+	return decodeWith(data, "SkillDiagnosticEntry", v.decodeFrom)
+}
+
+func (v *SkillDiagnosticEntry) decodeFrom(raw map[string]json.RawMessage) error {
+	var out SkillDiagnosticEntry
+	d := fieldDecoder{raw: raw, owner: "SkillDiagnosticEntry"}
+	d.required("name", &out.Name)
+	d.required("filePath", &out.FilePath)
+	d.required("source", &out.Source)
+	d.optional("pluginName", &out.PluginName)
+	d.optional("repository", &out.Repository)
+	d.optional("version", &out.Version)
+	if d.err != nil {
+		return d.err
+	}
+	*v = out
+	return nil
+}
+
+// Why a duplicate is not loaded: identical SKILL.md content, or a same-origin variant (`skills.dedupeSameOrigin`).
+type SkillDuplicateMatch string
+
+const (
+	SkillDuplicateMatchContent SkillDuplicateMatch = "content"
+	SkillDuplicateMatchOrigin  SkillDuplicateMatch = "origin"
+)
+
+func (v *SkillDuplicateMatch) UnmarshalJSON(data []byte) error {
+	s, err := decodeString(data, "SkillDuplicateMatch")
+	if err != nil {
+		return err
+	}
+	switch value := SkillDuplicateMatch(s); value {
+	case SkillDuplicateMatchContent, SkillDuplicateMatchOrigin:
+		*v = value
+		return nil
+	}
+	return unknownValue("SkillDuplicateMatch", s)
+}
+
+// A file not loaded because `retained` stands for it; older snapshots imply `match: content`.
+type SkillDiagnosticDuplicate struct {
+	Skill    SkillDiagnosticEntry `json:"skill"`
+	Retained SkillDiagnosticEntry `json:"retained"`
+	Match    SkillDuplicateMatch  `json:"match"`
+}
+
+func (v *SkillDiagnosticDuplicate) UnmarshalJSON(data []byte) error {
+	return decodeWith(data, "SkillDiagnosticDuplicate", v.decodeFrom)
+}
+
+func (v *SkillDiagnosticDuplicate) decodeFrom(raw map[string]json.RawMessage) error {
+	var out SkillDiagnosticDuplicate
+	d := fieldDecoder{raw: raw, owner: "SkillDiagnosticDuplicate"}
+	d.required("skill", &out.Skill)
+	d.required("retained", &out.Retained)
+	d.defaulted("match", &out.Match, `"content"`)
+	if d.err != nil {
+		return d.err
+	}
+	*v = out
+	return nil
+}
+
+// A skill name that resolved into several active variants and/or left redundant copies unloaded.
+type SkillResolutionDiagnostic struct {
+	Name       string                     `json:"name"`
+	Reason     SkillSelectionReason       `json:"reason"`
+	Skills     []SkillDiagnosticEntry     `json:"skills"`
+	Duplicates []SkillDiagnosticDuplicate `json:"duplicates"`
+}
+
+func (v *SkillResolutionDiagnostic) UnmarshalJSON(data []byte) error {
+	return decodeWith(data, "SkillResolutionDiagnostic", v.decodeFrom)
+}
+
+func (v *SkillResolutionDiagnostic) decodeFrom(raw map[string]json.RawMessage) error {
+	var out SkillResolutionDiagnostic
+	d := fieldDecoder{raw: raw, owner: "SkillResolutionDiagnostic"}
+	d.required("name", &out.Name)
+	d.required("reason", &out.Reason)
+	d.required("skills", &out.Skills)
+	d.required("duplicates", &out.Duplicates)
+	if d.err != nil {
+		return d.err
+	}
+	*v = out
+	return nil
+}
+
+// Current skill resolution; an empty `diagnostics` means no conflicts or redundant installations.
+type SkillDiagnosticsSnapshot struct {
+	Cwd                    string                      `json:"cwd"`
+	ShowStartupDiagnostics bool                        `json:"showStartupDiagnostics"`
+	Diagnostics            []SkillResolutionDiagnostic `json:"diagnostics"`
+}
+
+func (v *SkillDiagnosticsSnapshot) UnmarshalJSON(data []byte) error {
+	return decodeWith(data, "SkillDiagnosticsSnapshot", v.decodeFrom)
+}
+
+func (v *SkillDiagnosticsSnapshot) decodeFrom(raw map[string]json.RawMessage) error {
+	var out SkillDiagnosticsSnapshot
+	d := fieldDecoder{raw: raw, owner: "SkillDiagnosticsSnapshot"}
+	d.required("cwd", &out.Cwd)
+	d.required("showStartupDiagnostics", &out.ShowStartupDiagnostics)
+	d.required("diagnostics", &out.Diagnostics)
+	if d.err != nil {
+		return d.err
+	}
+	*v = out
+	return nil
+}
+
 type SessionState struct {
 	SessionID             string         `json:"sessionId"`
 	Model                 *ModelInfo     `json:"model,omitempty"`
@@ -2530,6 +2677,8 @@ type SessionState struct {
 	ContextUsage *ContextUsage    `json:"contextUsage,omitempty"`
 	// Current goal mode; null when the session has no goal.
 	Goal *GoalModeState `json:"goal"`
+	// Current skill-resolution details; absent when connected to an older server.
+	SkillDiagnostics *SkillDiagnosticsSnapshot `json:"skillDiagnostics,omitempty"`
 }
 
 func (v *SessionState) UnmarshalJSON(data []byte) error {
@@ -2568,6 +2717,7 @@ func (v *SessionState) decodeFrom(raw map[string]json.RawMessage) error {
 	d.defaulted("dumpTools", &out.DumpTools, `[]`)
 	d.optional("contextUsage", &out.ContextUsage)
 	d.defaulted("goal", &out.Goal, `null`)
+	d.optional("skillDiagnostics", &out.SkillDiagnostics)
 	if d.err != nil {
 		return d.err
 	}
@@ -4725,6 +4875,32 @@ func (v AvailableCommandsUpdateEvent) MarshalJSON() ([]byte, error) {
 	return encodeObject(plain(v), `"type":"available_commands_update"`, nil)
 }
 
+// Skill-resolution snapshot, pushed at startup and whenever it or the effective notice setting changes.
+type SkillDiagnosticsUpdateEvent struct {
+	Data SkillDiagnosticsSnapshot `json:"data"`
+}
+
+func (v *SkillDiagnosticsUpdateEvent) UnmarshalJSON(data []byte) error {
+	return decodeWith(data, "SkillDiagnosticsUpdateEvent", v.decodeFrom)
+}
+
+func (v *SkillDiagnosticsUpdateEvent) decodeFrom(raw map[string]json.RawMessage) error {
+	var out SkillDiagnosticsUpdateEvent
+	d := fieldDecoder{raw: raw, owner: "SkillDiagnosticsUpdateEvent"}
+	d.constant("type", "skill_diagnostics_update")
+	d.required("data", &out.Data)
+	if d.err != nil {
+		return d.err
+	}
+	*v = out
+	return nil
+}
+
+func (v SkillDiagnosticsUpdateEvent) MarshalJSON() ([]byte, error) {
+	type plain SkillDiagnosticsUpdateEvent
+	return encodeObject(plain(v), `"type":"skill_diagnostics_update"`, nil)
+}
+
 type SubagentLifecycleStatus string
 
 const (
@@ -6429,6 +6605,7 @@ func (SessionSettledEvent) isRpcNotification()          {}
 func (ExtensionError) isRpcNotification()               {}
 func (ExtensionUiRequest) isRpcNotification()           {}
 func (AvailableCommandsUpdateEvent) isRpcNotification() {}
+func (SkillDiagnosticsUpdateEvent) isRpcNotification()  {}
 func (SubagentLifecycleEvent) isRpcNotification()       {}
 func (SubagentProgressEvent) isRpcNotification()        {}
 func (SubagentEvent) isRpcNotification()                {}
@@ -6499,6 +6676,8 @@ func (v *RpcNotification) UnmarshalJSON(data []byte) error {
 		value, err = decodeVariant[ExtensionUiRequest](raw)
 	case "available_commands_update":
 		value, err = decodeVariant[AvailableCommandsUpdateEvent](raw)
+	case "skill_diagnostics_update":
+		value, err = decodeVariant[SkillDiagnosticsUpdateEvent](raw)
 	case "subagent_lifecycle":
 		value, err = decodeVariant[SubagentLifecycleEvent](raw)
 	case "subagent_progress":
@@ -6619,6 +6798,7 @@ func (SessionSettledEvent) isRpcServerFrame()          {}
 func (ExtensionError) isRpcServerFrame()               {}
 func (ExtensionUiRequest) isRpcServerFrame()           {}
 func (AvailableCommandsUpdateEvent) isRpcServerFrame() {}
+func (SkillDiagnosticsUpdateEvent) isRpcServerFrame()  {}
 func (SubagentLifecycleEvent) isRpcServerFrame()       {}
 func (SubagentProgressEvent) isRpcServerFrame()        {}
 func (SubagentEvent) isRpcServerFrame()                {}
@@ -6699,6 +6879,8 @@ func (v *RpcServerFrame) UnmarshalJSON(data []byte) error {
 		value, err = decodeVariant[ExtensionUiRequest](raw)
 	case "available_commands_update":
 		value, err = decodeVariant[AvailableCommandsUpdateEvent](raw)
+	case "skill_diagnostics_update":
+		value, err = decodeVariant[SkillDiagnosticsUpdateEvent](raw)
 	case "subagent_lifecycle":
 		value, err = decodeVariant[SubagentLifecycleEvent](raw)
 	case "subagent_progress":
@@ -7463,6 +7645,25 @@ func (c Commands) OpenSession(ctx context.Context, p OpenSessionCommand) (OpenSe
 func (c Commands) GetState(ctx context.Context) (SessionState, error) {
 	var out SessionState
 	err := c.call(ctx, "get_state", nil, 0, &out)
+	return out, err
+}
+
+// GetSkillDiagnostics sends "get_skill_diagnostics": Snapshot skill resolution; available even when startup notices are disabled.
+func (c Commands) GetSkillDiagnostics(ctx context.Context) (SkillDiagnosticsSnapshot, error) {
+	var out SkillDiagnosticsSnapshot
+	err := c.call(ctx, "get_skill_diagnostics", nil, 0, &out)
+	return out, err
+}
+
+// SetSkillStartupDiagnosticsCommand holds the parameters of "set_skill_startup_diagnostics".
+type SetSkillStartupDiagnosticsCommand struct {
+	Enabled bool `json:"enabled"`
+}
+
+// SetSkillStartupDiagnostics sends "set_skill_startup_diagnostics": Persist the skill startup-notice preference; returns the snapshot with the effective setting.
+func (c Commands) SetSkillStartupDiagnostics(ctx context.Context, p SetSkillStartupDiagnosticsCommand) (SkillDiagnosticsSnapshot, error) {
+	var out SkillDiagnosticsSnapshot
+	err := c.call(ctx, "set_skill_startup_diagnostics", p, 0, &out)
 	return out, err
 }
 

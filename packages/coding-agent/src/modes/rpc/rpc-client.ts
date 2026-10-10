@@ -26,6 +26,9 @@ import {
 } from "./rpc-messages";
 import type {
 	RpcAbortAndRestoreQueueResult,
+	SkillDiagnosticEntry,
+	SkillDiagnosticsSnapshot,
+	SkillResolutionDiagnostic,
 	RpcAvailableCommandsUpdateFrame,
 	RpcBtwDeltaFrame,
 	RpcBtwRecordFrame,
@@ -46,6 +49,7 @@ import type {
 	RpcResponse,
 	RpcSessionSettledFrame,
 	RpcSessionState,
+	RpcSkillDiagnosticsUpdateFrame,
 	RpcSubagentEventFrame,
 	RpcSubagentLifecycleFrame,
 	RpcSubagentMessagesResult,
@@ -112,6 +116,7 @@ export type RpcSubagentLifecycleListener = (payload: RpcSubagentLifecycleFrame["
 export type RpcSubagentProgressListener = (payload: RpcSubagentProgressFrame["payload"]) => void;
 export type RpcSubagentEventListener = (payload: RpcSubagentEventFrame["payload"]) => void;
 export type RpcAvailableCommandsUpdateListener = (commands: RpcAvailableSlashCommand[]) => void;
+export type RpcSkillDiagnosticsUpdateListener = (snapshot: SkillDiagnosticsSnapshot) => void;
 export type RpcPromptResultListener = (result: RpcPromptResultFrame) => void;
 export type RpcSessionSettledListener = () => void;
 export type RpcLiveListener = (frame: RpcLiveFrame) => void;
@@ -176,6 +181,79 @@ const sessionEventTypes = new Set<AgentSessionEvent["type"]>([
 	"goal_updated",
 	"queue_update",
 ]);
+
+function requireSkillDiagnosticsString(value: Record<string, unknown>, key: string, field: string): string {
+	const candidate = value[key];
+	if (typeof candidate !== "string") throw new Error(`${field}.${key} must be a string`);
+	return candidate;
+}
+
+function optionalSkillDiagnosticsString(
+	value: Record<string, unknown>,
+	key: string,
+	field: string,
+): string | undefined {
+	const candidate = value[key];
+	if (candidate !== undefined && typeof candidate !== "string") throw new Error(`${field}.${key} must be a string`);
+	return candidate;
+}
+
+function parseSkillDiagnosticEntry(value: unknown, field: string): SkillDiagnosticEntry {
+	if (!isRecord(value)) throw new Error(`${field} must be an object`);
+	const pluginName = optionalSkillDiagnosticsString(value, "pluginName", field);
+	const repository = optionalSkillDiagnosticsString(value, "repository", field);
+	const version = optionalSkillDiagnosticsString(value, "version", field);
+	return {
+		name: requireSkillDiagnosticsString(value, "name", field),
+		filePath: requireSkillDiagnosticsString(value, "filePath", field),
+		source: requireSkillDiagnosticsString(value, "source", field),
+		...(pluginName !== undefined && { pluginName }),
+		...(repository !== undefined && { repository }),
+		...(version !== undefined && { version }),
+	};
+}
+
+function parseSkillResolutionDiagnostic(value: unknown, field: string): SkillResolutionDiagnostic {
+	if (!isRecord(value)) throw new Error(`${field} must be an object`);
+	const reason = value.reason;
+	if (reason !== "source-order" && reason !== "custom-directory" && reason !== "authored-over-installed") {
+		throw new Error(`${field}.reason is invalid`);
+	}
+	if (!Array.isArray(value.skills)) throw new Error(`${field}.skills must be an array`);
+	if (!Array.isArray(value.duplicates)) throw new Error(`${field}.duplicates must be an array`);
+	return {
+		name: requireSkillDiagnosticsString(value, "name", field),
+		reason,
+		skills: value.skills.map((entry, index) => parseSkillDiagnosticEntry(entry, `${field}.skills[${index}]`)),
+		duplicates: value.duplicates.map((duplicate, index) => {
+			const duplicateField = `${field}.duplicates[${index}]`;
+			if (!isRecord(duplicate)) throw new Error(`${duplicateField} must be an object`);
+			const match = duplicate.match ?? "content";
+			if (match !== "content" && match !== "origin") throw new Error(`${duplicateField}.match is invalid`);
+			return {
+				skill: parseSkillDiagnosticEntry(duplicate.skill, `${duplicateField}.skill`),
+				retained: parseSkillDiagnosticEntry(duplicate.retained, `${duplicateField}.retained`),
+				match,
+			};
+		}),
+	};
+}
+
+function parseSkillDiagnosticsSnapshot(value: unknown): SkillDiagnosticsSnapshot {
+	if (!isRecord(value)) throw new Error("skill diagnostics snapshot must be an object");
+	if (typeof value.cwd !== "string") throw new Error("skill diagnostics snapshot.cwd must be a string");
+	if (typeof value.showStartupDiagnostics !== "boolean") {
+		throw new Error("skill diagnostics snapshot.showStartupDiagnostics must be a boolean");
+	}
+	if (!Array.isArray(value.diagnostics)) throw new Error("skill diagnostics snapshot.diagnostics must be an array");
+	return {
+		cwd: value.cwd,
+		showStartupDiagnostics: value.showStartupDiagnostics,
+		diagnostics: value.diagnostics.map((diagnostic, index) =>
+			parseSkillResolutionDiagnostic(diagnostic, `skill diagnostics snapshot.diagnostics[${index}]`),
+		),
+	};
+}
 
 function isRpcResponse(value: unknown): value is RpcResponse {
 	if (!isRecord(value)) return false;
@@ -266,6 +344,11 @@ function isRpcBtwRecordFrame(value: unknown): value is RpcBtwRecordFrame {
 	return isRecord(value) && value.type === "btw_record" && isRecord(value.record);
 }
 
+function parseRpcSkillDiagnosticsUpdateFrame(value: unknown): RpcSkillDiagnosticsUpdateFrame | undefined {
+	if (!isRecord(value) || value.type !== "skill_diagnostics_update") return undefined;
+	return { type: "skill_diagnostics_update", data: parseSkillDiagnosticsSnapshot(value.data) };
+}
+
 function isRpcHostToolCallRequest(value: unknown): value is RpcHostToolCallRequest {
 	if (!isRecord(value)) return false;
 	return (
@@ -331,6 +414,7 @@ export class RpcClient {
 	#availableCommandsUpdateListeners = new Set<RpcAvailableCommandsUpdateListener>();
 	#btwDeltaListeners = new Set<(frame: RpcBtwDeltaFrame) => void>();
 	#btwRecordListeners = new Set<(record: BtwHistoryRecord) => void>();
+	#skillDiagnosticsUpdateListeners = new Set<RpcSkillDiagnosticsUpdateListener>();
 	#promptResultListeners = new Set<RpcPromptResultListener>();
 	#sessionSettledListeners = new Set<RpcSessionSettledListener>();
 	#liveListeners = new Set<RpcLiveListener>();
@@ -645,6 +729,12 @@ export class RpcClient {
 		return () => this.#btwRecordListeners.delete(listener);
 	}
 
+	/** Subscribe to allowlisted skill-resolution snapshots from the RPC server. */
+	onSkillDiagnosticsUpdate(listener: RpcSkillDiagnosticsUpdateListener): () => void {
+		this.#skillDiagnosticsUpdateListeners.add(listener);
+		return () => this.#skillDiagnosticsUpdateListeners.delete(listener);
+	}
+
 	/** Subscribe to `prompt_result` frames: the terminal outcome of each prompt, correlated by request id. */
 	onPromptResult(listener: RpcPromptResultListener): () => void {
 		this.#promptResultListeners.add(listener);
@@ -804,7 +894,21 @@ export class RpcClient {
 				typeof state.tokensPerSecond === "number" && Number.isFinite(state.tokensPerSecond)
 					? state.tokensPerSecond
 					: null,
+			skillDiagnostics:
+				state.skillDiagnostics === undefined ? undefined : parseSkillDiagnosticsSnapshot(state.skillDiagnostics),
 		};
+	}
+
+	/** Query skill-resolution details even when startup notices are disabled. */
+	async getSkillDiagnostics(): Promise<SkillDiagnosticsSnapshot> {
+		const response = await this.#send({ type: "get_skill_diagnostics" });
+		return parseSkillDiagnosticsSnapshot(this.#getData(response));
+	}
+
+	/** Persist the startup-notice preference and return its effective session value. */
+	async setSkillStartupDiagnostics(enabled: boolean): Promise<SkillDiagnosticsSnapshot> {
+		const response = await this.#send({ type: "set_skill_startup_diagnostics", enabled });
+		return parseSkillDiagnosticsSnapshot(this.#getData(response));
 	}
 
 	/**
@@ -1525,6 +1629,17 @@ export class RpcClient {
 
 		if (isRpcBtwRecordFrame(data)) {
 			for (const listener of this.#btwRecordListeners) listener(data.record);
+			return;
+		}
+
+		if (isRecord(data) && data.type === "skill_diagnostics_update") {
+			let frame: RpcSkillDiagnosticsUpdateFrame;
+			try {
+				frame = parseRpcSkillDiagnosticsUpdateFrame(data)!;
+			} catch {
+				return;
+			}
+			for (const listener of this.#skillDiagnosticsUpdateListeners) listener(frame.data);
 			return;
 		}
 

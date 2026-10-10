@@ -25,7 +25,7 @@ import {
 	SUB_AGENT_RULE_NAME,
 } from "../capability/rule";
 import type { Skill, SkillFrontmatter } from "../capability/skill";
-import type { LoadContext, LoadResult, SourceMeta } from "../capability/types";
+import type { LoadContext, LoadResult, SourceMeta, SourceProvenance } from "../capability/types";
 import { resolveClaudePaths } from "../config/claude-paths";
 import type { MCPRequestIdFormat } from "../mcp/types";
 import { type ConfiguredThinkingLevel, parseConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
@@ -151,6 +151,7 @@ export function createSourceMeta(
 	level: "user" | "project",
 	origin?: string,
 	pluginName?: string,
+	provenance?: SourceProvenance,
 ): SourceMeta {
 	return {
 		provider,
@@ -159,7 +160,120 @@ export function createSourceMeta(
 		level,
 		...(origin !== undefined && { origin }),
 		...(pluginName !== undefined && { pluginName }),
+		...(provenance !== undefined && { provenance }),
 	};
+}
+
+const REPOSITORY_SHORTHAND_HOSTS: Record<string, string> = {
+	github: "github.com",
+	gitlab: "gitlab.com",
+	bitbucket: "bitbucket.org",
+};
+
+const CASE_INSENSITIVE_REPOSITORY_HOSTS: Record<string, true> = {
+	"github.com": true,
+	"gitlab.com": true,
+	"bitbucket.org": true,
+};
+
+const DEFAULT_REPOSITORY_PORTS: Record<string, string> = {
+	"http:": "80",
+	"https:": "443",
+	"ssh:": "22",
+	"git:": "9418",
+};
+
+/**
+ * Normalize a manifest `repository` (npm string/shorthand or `{ url, directory }`)
+ * to `host/owner/repo[/directory]`. Known forge paths are case-insensitive;
+ * private-host paths and `repository.directory` retain case.
+ */
+export function normalizeRepository(value: unknown): string | undefined {
+	const record = typeof value === "object" && value !== null ? (value as Record<string, unknown>) : undefined;
+	const spec = record ? record.url : value;
+	if (typeof spec !== "string") return undefined;
+	const raw = spec
+		.trim()
+		.replace(/^git\+/i, "")
+		.replace(/[?#].*$/, "");
+	let host: string;
+	let repoPath: string;
+	const shorthand = /^(?:(github|gitlab|bitbucket):)?([\w.-]+\/[\w.-]+)$/.exec(raw);
+	if (shorthand) {
+		host = REPOSITORY_SHORTHAND_HOSTS[shorthand[1] ?? "github"];
+		repoPath = shorthand[2];
+	} else if (/^[a-z][\w+.-]*:\/\//i.test(raw)) {
+		let url: URL;
+		try {
+			url = new URL(raw);
+		} catch {
+			return undefined;
+		}
+		if (!url.hostname) return undefined;
+		const port = url.port && url.port !== DEFAULT_REPOSITORY_PORTS[url.protocol] ? `:${url.port}` : "";
+		host = `${url.hostname.toLowerCase()}${port}`;
+		repoPath = url.pathname.replace(/^\/+|\/+$/g, "");
+	} else {
+		const scp = /^(?:[^@/]+@)?([^/:]+):(.+)$/.exec(raw);
+		const slash = raw.indexOf("/");
+		if (scp) {
+			host = scp[1].toLowerCase();
+			repoPath = scp[2];
+		} else if (slash > 0 && slash < raw.length - 1) {
+			host = raw
+				.slice(0, slash)
+				.replace(/^[^@]+@/, "")
+				.toLowerCase();
+			repoPath = raw.slice(slash + 1);
+		} else {
+			return undefined;
+		}
+	}
+	repoPath = repoPath.replace(/\/+$/, "").replace(/\.git$/i, "");
+	if (
+		!repoPath ||
+		repoPath.includes("\\") ||
+		repoPath.split("/").some(segment => !segment || segment === "." || segment === "..")
+	) {
+		return undefined;
+	}
+	if (CASE_INSENSITIVE_REPOSITORY_HOSTS[host] === true) repoPath = repoPath.toLowerCase();
+	let directory = "";
+	if (record?.directory !== undefined) {
+		if (typeof record.directory !== "string") return undefined;
+		directory = record.directory.trim().replace(/\/+$/, "");
+		if (
+			directory &&
+			(directory.startsWith("/") ||
+				/^[A-Za-z]:\//.test(directory) ||
+				directory.includes("\\") ||
+				directory.split("/").some(segment => !segment || segment === "." || segment === ".."))
+		) {
+			return undefined;
+		}
+	}
+	const repo = `${host}/${repoPath}`;
+	return directory ? `${repo}/${directory}` : repo;
+}
+
+/**
+ * Provenance a plugin or package root declares: the first `repository` found in
+ * `.claude-plugin/plugin.json`, `plugin.json`, then `package.json`, and the
+ * first `version` in the same order. Undefined without a usable repository.
+ */
+export async function readPluginProvenance(root: string): Promise<SourceProvenance | undefined> {
+	let repository: string | undefined;
+	let version: string | undefined;
+	for (const file of [path.join(".claude-plugin", "plugin.json"), "plugin.json", "package.json"]) {
+		const content = await readFile(path.join(root, file));
+		const data = content ? tryParseJson<{ repository?: unknown; version?: unknown }>(content) : null;
+		if (!data || typeof data !== "object") continue;
+		repository ??= normalizeRepository(data.repository);
+		if (typeof data.version === "string" && data.version.trim()) version ??= data.version.trim();
+		if (repository !== undefined && version !== undefined) break;
+	}
+	if (repository === undefined) return undefined;
+	return version === undefined ? { repository } : { repository, version };
 }
 
 export function parseBoolean(value: unknown): boolean | undefined {
@@ -440,6 +554,8 @@ export interface ScanSkillsFromDirOptions {
 	 * (Claude Code's own plugin cache layout).
 	 */
 	pluginName?: string;
+	/** Declared provenance of the plugin root, forwarded to {@link SourceMeta.provenance}. */
+	provenance?: SourceProvenance;
 }
 
 // Stable ordering used for skill lists in prompts: name (case-insensitive), then name, then path.
@@ -495,7 +611,14 @@ export async function scanSkillsFromDir(
 				content: body,
 				frontmatter: frontmatter as SkillFrontmatter,
 				level,
-				_source: createSourceMeta(providerId, skillPath, level, options.origin, options.pluginName),
+				_source: createSourceMeta(
+					providerId,
+					skillPath,
+					level,
+					options.origin,
+					options.pluginName,
+					options.provenance,
+				),
 			});
 		} catch {
 			warnings.push(`Failed to read skill file: ${skillPath}`);
