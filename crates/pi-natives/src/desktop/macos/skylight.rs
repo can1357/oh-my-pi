@@ -653,10 +653,16 @@ fn restore_focus_after_without_raise(
 		return Ok(());
 	}
 	let key = previous.pid.and_then(ax::key_window_id);
-	if !hands_back(previous.psn == target, key, previous_key, wid, pointer_presses() != presses) {
+	let hands_back_now =
+		|| hands_back(previous.psn == target, key, previous_key, wid, pointer_presses() != presses);
+	if !hands_back_now() {
 		return Ok(());
 	}
-	if !front_process(spi.get_front).is_some_and(|front| front.psn == previous.psn) {
+	// Re-read the press counter with the final front-process check, so a click
+	// on the target between the two still vetoes the hand-back.
+	if !front_process(spi.get_front).is_some_and(|front| front.psn == previous.psn)
+		|| !hands_back_now()
+	{
 		return Ok(());
 	}
 	let defocused = post_record(spi.post_record, target, &focus_record(wid, DEFOCUS_MARKER));
