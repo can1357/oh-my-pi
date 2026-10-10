@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added opt-in `tier.autoFastMode` and `tier.autoFastModeDurationMinutes` settings for temporary priority processing after primary-session user prompts ([#7207](https://github.com/can1357/oh-my-pi/pull/7207) by [@mvid](https://github.com/mvid)).
+- Added a blocked fast-mode status for provider refusals and ineligible accounts, with `/fast status` reporting the same state ([#7751](https://github.com/can1357/oh-my-pi/pull/7751) by [@mvid](https://github.com/mvid)).
+- Added Anthropic priority entitlement to usage reports so automatic fast mode skips known-ineligible accounts ([#7751](https://github.com/can1357/oh-my-pi/pull/7751) by [@mvid](https://github.com/mvid)).
+- Added OpenAI priority downgrade detection without treating Codex service-tier echoes as served-tier evidence ([#7751](https://github.com/can1357/oh-my-pi/pull/7751) by [@mvid](https://github.com/mvid)).
+
 ### Changed
 
 - In terminals that speak the Tern Surface Protocol (Tern), the composer's bottom bar shows the git branch and its status beside the model chip when the status line has the `git` segment; it outlasts the other facts as the bar narrows, and clicking it opens `/git` ([#15220](https://github.com/can1357/oh-my-pi/pull/15220) by [@H4vC](https://github.com/H4vC))
@@ -143,6 +150,7 @@
 ### Changed
 
 - Agent Hub keeps existing agents in place while open; new agents appear first in the flat roster or within their tree sibling group ([#13066](https://github.com/can1357/oh-my-pi/pull/13066) by [@kmccleary3301](https://github.com/kmccleary3301))
+- Bumped the Anthropic usage-report cache key so older processes cannot keep refilling entitlement-free cached reports ([#7751](https://github.com/can1357/oh-my-pi/pull/7751) by [@mvid](https://github.com/mvid)).
 
 ### Fixed
 
