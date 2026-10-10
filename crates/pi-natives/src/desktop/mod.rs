@@ -149,6 +149,9 @@ impl DisplayAwake {
 	}
 }
 
+/// Longest accepted `waitForUiQuiet` cap; the worker is held for the wait.
+const UI_QUIET_MAX_CAP_MS: u32 = 60_000;
+
 enum Response {
 	Capabilities(DesktopCapabilities),
 	Displays(Vec<DesktopDisplay>),
@@ -167,6 +170,7 @@ enum Response {
 	Node(Option<AxNode>),
 	Attributes(Vec<(String, String)>),
 	TextSelection(AxTextSelection),
+	UiQuiet(UiQuiet),
 }
 
 type Reply = flume::Sender<CoreResult<Response>>;
@@ -355,6 +359,12 @@ enum Request {
 		takeover:  Takeover,
 		reply:     Reply,
 	},
+	WaitForUiQuiet {
+		pids:  Vec<u32>,
+		quiet: Duration,
+		cap:   Duration,
+		reply: Reply,
+	},
 	Close {
 		reply: Reply,
 	},
@@ -397,6 +407,7 @@ impl Request {
 			| Self::AxFocus { reply, .. }
 			| Self::AxClick { reply, .. }
 			| Self::AxInput { reply, .. }
+			| Self::WaitForUiQuiet { reply, .. }
 			| Self::Close { reply } => reply,
 		};
 		reply.send(result).is_ok()
@@ -474,6 +485,7 @@ impl Request {
 			| Self::AxAttributes { .. }
 			| Self::AxChildren { .. }
 			| Self::AxParent { .. }
+			| Self::WaitForUiQuiet { .. }
 			| Self::Close { .. } => return false,
 		};
 		target.is_some_and(|target| !matches!(target, Target::Window(_)))
@@ -589,6 +601,7 @@ impl Request {
 			| Self::AxAttributes { .. }
 			| Self::AxChildren { .. }
 			| Self::AxParent { .. }
+			| Self::WaitForUiQuiet { .. }
 			| Self::Close { .. } => None,
 		}
 	}
@@ -1456,6 +1469,12 @@ impl Worker {
 			},
 			Request::AxSnapshot { target, options, .. } => {
 				Ok(Response::Snapshot(self.snapshot(target, options)?))
+			},
+			Request::WaitForUiQuiet { pids, quiet, cap, .. } => match self.backend.as_mut() {
+				Ok(backend) => {
+					Ok(Response::UiQuiet(backend.wait_for_ui_quiet(pids, *quiet, *cap, token)?))
+				},
+				Err(_) => Ok(Response::UiQuiet(UiQuiet::unwatched())),
 			},
 			Request::AxQuery { target, query, .. } => {
 				let window = self.window(target)?;
@@ -2370,6 +2389,30 @@ impl DesktopSession {
 				reply,
 			})? {
 				Response::Snapshot(v) => Ok(v),
+				_ => Err(DesktopError::internal("unexpected response")),
+			}
+			.map_err(Into::into)
+		}))
+	}
+
+	/// Waits until the given processes stop emitting accessibility
+	/// notifications for a quiet window, bounded by a cap. Resolves at once
+	/// with `watched: 0` when nothing can be observed.
+	#[napi]
+	pub fn wait_for_ui_quiet(
+		&self,
+		pids: Vec<u32>,
+		options: Option<UiQuietOptions>,
+	) -> Result<task::Promise<UiQuiet>> {
+		let options = options.unwrap_or_default();
+		let cap =
+			Duration::from_millis(u64::from(options.cap_ms.unwrap_or(5000).min(UI_QUIET_MAX_CAP_MS)));
+		let quiet = Duration::from_millis(u64::from(options.quiet_ms.unwrap_or(250))).min(cap);
+		let c = Arc::clone(&self.core);
+		let token = c.cancellation.token();
+		Ok(task::blocking("desktop.waitForUiQuiet", (), move |_| {
+			match c.call(token, |reply| Request::WaitForUiQuiet { pids, quiet, cap, reply })? {
+				Response::UiQuiet(v) => Ok(v),
 				_ => Err(DesktopError::internal("unexpected response")),
 			}
 			.map_err(Into::into)
