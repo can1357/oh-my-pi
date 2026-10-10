@@ -311,6 +311,7 @@
 - RPC `remove_queued_message` now returns the removed message's images, so clients can put an edited queued message back in the editor with its attachments ([#14179](https://github.com/can1357/oh-my-pi/pull/14179) by [@andrebrait](https://github.com/andrebrait))
 - Added `/btw` side questions for RPC hosts: `btw` asks one (or a follow-up in an earlier topic) while the main turn keeps running, the answer streams as `btw_delta` / `btw_record` frames, `btw_cancel` stops it, and `get_btw_history` lists the session's BTW history shared with the TUI ([#14110](https://github.com/can1357/oh-my-pi/pull/14110) by [@andrebrait](https://github.com/andrebrait))
 - Added the `providers.muse-code.storeResponses` setting (off by default; `PI_MUSE_STORE_RESPONSES` overrides it) to store Muse Code results on Meta's servers, so a turn whose connection drops is recovered instead of re-run ([#14534](https://github.com/can1357/oh-my-pi/pull/14534) by [@abilliontokens](https://github.com/abilliontokens)).
+- Added an optional `then_run` field on `write`/`edit`, behind the new `tools.thenRun` setting (off by default; the field is hidden from the tool schema while off), that runs one verification command after a successful local mutation, through the bash tool with its own approval; verification failure, cancel, or timeout keeps the applied mutation ([#12592](https://github.com/can1357/oh-my-pi/pull/12592) by [@yshihao636](https://github.com/yshihao636))
 
 ### Changed
 

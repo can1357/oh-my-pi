@@ -6,6 +6,7 @@
 import { ExponentialYield } from "@oh-my-pi/pi-agent-core/utils/yield";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
 import {
+	executeShell,
 	type MinimizerOptions,
 	PtySession,
 	Shell,
@@ -665,13 +666,22 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 	// parallel bash calls overlap on the same key, the first one owns the
 	// persistent session; the rest degrade to isolated one-shot shells — the
 	// same path quarantined sessions take.
+	// Follow-up verification uses natives `executeShell` (fresh session per
+	// call). That oneshot drops the native session core when the promise
+	// settles — the same bounded tree teardown Windows config-value resolution
+	// already relies on — instead of a JS-held `Shell` whose Drop waits on GC.
+	const followUpShell = options?.sessionKey?.includes(":follow-up:") === true;
 	const sessionBusy = shellSessionsInUse.has(sessionKey);
-	let shellSession = persistentSessionBroken || sessionBusy ? undefined : shellSessions.get(sessionKey);
-	if (!shellSession && !persistentSessionBroken && !sessionBusy) {
-		shellSession = new Shell(shellOptions);
-		shellSessions.set(sessionKey, shellSession);
+	let shellSession: Shell | undefined;
+	let executionShell: Shell | undefined;
+	if (!followUpShell) {
+		shellSession = persistentSessionBroken || sessionBusy ? undefined : shellSessions.get(sessionKey);
+		if (!shellSession && !persistentSessionBroken && !sessionBusy) {
+			shellSession = new Shell(shellOptions);
+			shellSessions.set(sessionKey, shellSession);
+		}
+		executionShell = shellSession ?? new Shell(shellOptions);
 	}
-	const executionShell = shellSession ?? new Shell(shellOptions);
 	const ownsPersistentSession = shellSession !== undefined;
 	if (ownsPersistentSession) {
 		shellSessionsInUse.add(sessionKey);
@@ -680,6 +690,7 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 	const runAbortController = new AbortController();
 	let abortCleanupPromise: Promise<void> | undefined;
 	const abortShell = (): Promise<void> => {
+		if (!executionShell) return Promise.resolve();
 		abortCleanupPromise ??= executionShell.abort().catch(() => undefined);
 		return abortCleanupPromise;
 	};
@@ -722,22 +733,38 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 	let resetSession = false;
 
 	try {
-		const runPromise = executionShell.run(
-			{
-				command: finalCommand,
-				cwd: commandCwd,
-				env: commandEnv,
-				timeoutMs: nativeTimeoutMs,
-				signal: runAbortController.signal,
-				filesystem: options?.filesystem,
-			},
-			(err, chunk) => {
-				if (!err) {
-					enqueueChunk(chunk);
-				}
-			},
-		);
-		options?.onStart?.(() => executionShell.pids());
+		const onNativeChunk = (err: Error | null, chunk: string) => {
+			if (!err) {
+				enqueueChunk(chunk);
+			}
+		};
+		const runPromise = followUpShell
+			? executeShell(
+					{
+						command: finalCommand,
+						cwd: commandCwd,
+						env: commandEnv,
+						sessionEnv: shellEnv,
+						timeoutMs: nativeTimeoutMs,
+						snapshotPath: snapshotPath ?? undefined,
+						minimizer,
+						signal: runAbortController.signal,
+						filesystem: options?.filesystem,
+					},
+					onNativeChunk,
+				)
+			: executionShell!.run(
+					{
+						command: finalCommand,
+						cwd: commandCwd,
+						env: commandEnv,
+						timeoutMs: nativeTimeoutMs,
+						signal: runAbortController.signal,
+						filesystem: options?.filesystem,
+					},
+					onNativeChunk,
+				);
+		if (executionShell) options?.onStart?.(() => executionShell.pids());
 
 		const ey = new ExponentialYield();
 		const winner = await ey.race<
@@ -750,12 +777,25 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 
 		if (winner.kind === "timeout" || winner.kind === "abort") {
 			acceptingChunks = false;
-			const cleanupPromise = abortShell();
-			if (shellSession) {
-				resetSession = true;
-				quarantineShellSession(sessionKey, runPromise, cleanupPromise);
+			if (followUpShell) {
+				// executeShell owns process-tree teardown via its cancel token.
+				// Wait until it settles so leftover children are reaped before
+				// this result returns, bounded by the existing quarantine deadline.
+				await Promise.race([
+					runPromise.then(
+						() => undefined,
+						() => undefined,
+					),
+					quarantineCleanupDeadline(),
+				]);
 			} else {
-				void Promise.allSettled([runPromise, cleanupPromise]);
+				const cleanupPromise = abortShell();
+				if (shellSession) {
+					resetSession = true;
+					quarantineShellSession(sessionKey, runPromise, cleanupPromise);
+				} else {
+					void Promise.allSettled([runPromise, cleanupPromise]);
+				}
 			}
 			let notice = "Command cancelled";
 			if (winner.kind === "timeout" && deadlineTimeoutMs !== undefined) {

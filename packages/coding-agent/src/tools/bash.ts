@@ -38,6 +38,7 @@ import { type BashInteractiveResult, runInteractiveBashPty } from "./bash-intera
 import { checkBashInterception } from "./bash-interceptor";
 import { rewriteGitWorktreeAdd } from "./bash-worktree-rewrite";
 import { canUseInteractiveBashPty } from "./bash-pty-selection";
+import { getFollowUpVerification } from "./follow-up-context";
 import { resolveEvalBackends } from "./eval-backends";
 import { invalidateGithubCacheForBashCommand } from "./gh-cache-invalidation";
 import { startService, type ServiceReady } from "../launch/services";
@@ -324,6 +325,8 @@ async function saveBashOriginalArtifact(session: ToolSession, originalText: stri
 }
 
 const BASH_TIMEOUT_DESCRIPTION = `timeout in seconds; 0 disables the command deadline; nonzero values are clamped to ${TOOL_TIMEOUTS.bash.min}-${TOOL_TIMEOUTS.bash.max}`;
+/** Follow-up verification never runs unbounded; global tools.maxTimeout may lower this. */
+const FOLLOW_UP_VERIFICATION_MAX_TIMEOUT_SEC = 60;
 
 const bashSchemaBase = type({
 	command: type("string"),
@@ -950,6 +953,16 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		onUpdate?: AgentToolUpdateCallback<BashToolDetails>,
 		ctx?: AgentToolContext,
 	): Promise<AgentToolResult<BashToolDetails>> {
+		const followUp = getFollowUpVerification();
+		if (followUp) {
+			// Extension-revised async/pty must not escape verification into a
+			// background job, PTY overlay, or client terminal.
+			pty = false;
+			const bridge = this.session.getClientBridge?.();
+			if (bridge?.capabilities.terminal && bridge.createTerminal) {
+				throw new ToolError("Follow-up verification cannot run on a remote ACP session.");
+			}
+		}
 		let command = rawCommand;
 
 		// Extract a leading `cd <path> && ...` into cwd when the model ignores the
@@ -971,7 +984,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		// them are not a service request.
 		const name = blankToUndefined(rawName);
 		const ready = normalizeReady(rawReady);
-		const asyncRequested = rawAsync === true;
+		const asyncRequested = rawAsync === true && !followUp;
 		const pendingNotices: string[] = [];
 		if (name !== undefined) {
 			if (!this.#launchEnabled) throw new ToolError("Service launch is disabled in this session.");
@@ -1093,13 +1106,22 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 
 		// A timeout of 0 is an explicit long-running-command contract: the user
 		// must still cancel the call or job, but OMP does not impose a deadline.
+		// Follow-up verification always stays bounded: cap at 60s, or a lower
+		// tools.maxTimeout if the user configured one.
 		const requestedTimeoutSec = rawTimeout ?? 300;
-		const timeoutDisabled = requestedTimeoutSec === 0;
+		const timeoutDisabled = requestedTimeoutSec === 0 && !followUp;
 		const maxTimeout = cfgToolsMaxTimeout.get(this.session.settings);
-		const timeoutSec = timeoutDisabled ? undefined : clampTimeout("bash", requestedTimeoutSec, maxTimeout);
+		const timeoutCeiling = followUp
+			? maxTimeout !== undefined && maxTimeout > 0
+				? Math.min(maxTimeout, FOLLOW_UP_VERIFICATION_MAX_TIMEOUT_SEC)
+				: FOLLOW_UP_VERIFICATION_MAX_TIMEOUT_SEC
+			: maxTimeout;
+		const timeoutSec = timeoutDisabled
+			? undefined
+			: clampTimeout("bash", followUp && requestedTimeoutSec === 0 ? 300 : requestedTimeoutSec, timeoutCeiling);
 		const timeoutMs = timeoutSec === undefined ? undefined : timeoutSec * 1000;
 		if (timeoutSec !== undefined) {
-			const timeoutClampNotice = formatTimeoutClampNotice(requestedTimeoutSec, timeoutSec, maxTimeout);
+			const timeoutClampNotice = formatTimeoutClampNotice(requestedTimeoutSec, timeoutSec, timeoutCeiling ?? 0);
 			if (timeoutClampNotice) pendingNotices.push(timeoutClampNotice);
 		}
 
@@ -1129,13 +1151,18 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		// auto-background would otherwise silently disable the terminal route).
 		const clientBridge = this.session.getClientBridge?.();
 		const bridgeTerminalAvailable = Boolean(
-			clientBridge?.capabilities.terminal && clientBridge.createTerminal && !pty && virtualCwd === undefined,
+			!followUp &&
+			clientBridge?.capabilities.terminal &&
+			clientBridge.createTerminal &&
+			!pty &&
+			virtualCwd === undefined,
 		);
 
 		const autoBgManager = this.session.asyncJobManager;
 		// At the running-job cap, fall through to direct foreground execution
 		// instead of failing every bash call until a slot frees up.
 		if (
+			!followUp &&
 			cfgBashAutoBackgroundEnabled.get(this.session.settings) &&
 			!pty &&
 			!bridgeTerminalAvailable &&
@@ -1221,9 +1248,10 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 				: undefined;
 
 		// Route through the client terminal when the client advertises the terminal capability.
-		// Skip when pty=true (PTY needs the local terminal UI) or the cwd is a URL
-		// (only the embedded shell's filesystem can enter it).
-		if (clientBridge?.capabilities.terminal && clientBridge.createTerminal && !pty && virtualCwd === undefined) {
+		// Skip when pty=true (PTY needs the local terminal UI), the cwd is a URL
+		// (only the embedded shell's filesystem can enter it), or during follow-up
+		// verification, which must stay on the local noninteractive executor.
+		if (bridgeTerminalAvailable && clientBridge?.createTerminal) {
 			// Invariant (ACP terminal bridge): createTerminal has no signal in its
 			// contract; allocation cannot be cancelled retroactively. Guard before
 			// allocation. Shared timeout helper / pure AbortSignal fusion rejected:
@@ -1520,7 +1548,9 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 				// command here so the unset prefix is not applied twice.
 				await executeBash(command, {
 					cwd: commandCwd,
-					sessionKey: this.session.getSessionId?.() ?? undefined,
+					sessionKey: followUp
+						? `${this.session.getSessionId?.() ?? ""}:follow-up:${followUp.callId}`
+						: (this.session.getSessionId?.() ?? undefined),
 					timeout: timeoutMs ?? 0,
 					signal,
 					gitGuard: cfgBashGitGuard.get(this.session.settings),

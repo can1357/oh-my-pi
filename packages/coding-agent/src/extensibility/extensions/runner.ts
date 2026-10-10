@@ -667,6 +667,11 @@ export class ExtensionRunner {
 		return this.#nativeToolResolver?.(name) !== undefined;
 	}
 
+	/** Native bash used for write/edit `then_run`. Fusion wraps it in the approval gate. */
+	getFollowUpBashTool(): AgentTool | undefined {
+		return this.#nativeToolResolver?.("bash")?.tool;
+	}
+
 	/**
 	 * Run the native built-in of `name` with `params` and return its result — the delegation target
 	 * of a same-tool `ctx.invokeTool`. Calls the unwrapped native `execute` directly with the loop's
@@ -674,6 +679,10 @@ export class ExtensionRunner {
 	 * same tool) rather than re-running the gate. `depth` guards a wrapper that recurses into itself;
 	 * it is per call chain (threaded from the caller), not session-global, so concurrent independent
 	 * delegations do not interfere.
+	 *
+	 * Write/edit `then_run` is preflighted and stripped by the outer wrapper before the extension
+	 * runs, so it never reaches this delegation. If an extension adds it, the native tool fails
+	 * closed instead of silently dropping the follow-up verification.
 	 */
 	async invokeNativeTool<TDetails = unknown>(
 		name: string,

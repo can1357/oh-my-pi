@@ -1,0 +1,1 @@
+Optional `then_run`: a shell command run once after this edit succeeds, through the bash tool with its own approval. Send it as a JSON field next to `input`; the raw patch grammar cannot carry it. Only the last write/edit of a tool-call batch may set it. Verification fail/cancel/timeout keeps the applied edit.

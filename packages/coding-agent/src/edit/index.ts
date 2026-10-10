@@ -54,18 +54,26 @@ import { type AppliedEditSnapshot, createEditBlackboxRecorder } from "./blackbox
 import hashlineCompactPrompt from "./hashline-compact.md" with { type: "text" };
 import { getLspBatchRequest } from "../lsp/batch";
 import { type EditToolDetails, type EditToolPerFileResult, type Operation } from "@oh-my-pi/pi-tui/tools/edit";
+import { assertNativeThenRunForbidden, thenRunSchemaVariant } from "../tools/action-fusion";
+import { cfgToolsThenRun } from "../tools/settings";
+import thenRunPrompt from "./then-run.md" with { type: "text" };
 import {
 	type ApplyPatchParams,
 	applyPatchSchema,
+	applyPatchSchemaWithoutThenRun,
 	type HashlineParams,
 	hashlineEditParamsSchema,
+	hashlineEditParamsSchemaWithoutThenRun,
 	type PatchParams,
 	patchEditSchema,
+	patchEditSchemaWithoutThenRun,
 	type ReplaceBatchParams,
 	type ReplaceParams,
 	replaceEditSchema,
+	replaceEditSchemaWithoutThenRun,
 	type SloppyParams,
 	sloppyEditSchema,
+	sloppyEditSchemaWithoutThenRun,
 } from "./schemas";
 import { getEditStore } from "./store";
 
@@ -158,12 +166,17 @@ export function editDescriptionCompact(mode: EditMode): string | undefined {
 export function resolveEditToolDescription(
 	mode: EditMode,
 	model: Pick<Model, "editPromptVariant"> | undefined,
+	thenRun = false,
 ): string {
 	const source =
 		model?.editPromptVariant === "compact"
 			? (editDescriptionCompact(mode) ?? editDescription(mode))
 			: editDescription(mode);
-	return prompt.render(source);
+	const rendered = prompt.render(source);
+	if (thenRun && (mode === "hashline" || mode === "sloppy" || mode === "apply_patch")) {
+		return `${rendered}\n\n${thenRunPrompt.trim()}`;
+	}
+	return rendered;
 }
 
 /** Builds the LSP writethrough from the current `lsp.*` settings; called per write so changes apply immediately. */
@@ -343,21 +356,26 @@ export class EditTool implements AgentTool<TInput> {
 	}
 
 	get description(): string {
-		return resolveEditToolDescription(this.mode, this.session.getActiveModel?.());
+		return resolveEditToolDescription(
+			this.mode,
+			this.session.getActiveModel?.(),
+			cfgToolsThenRun.get(this.session.settings),
+		);
 	}
 
 	get parameters(): TInput {
+		const { settings } = this.session;
 		switch (this.mode) {
 			case "replace":
-				return replaceEditSchema;
+				return thenRunSchemaVariant(settings, replaceEditSchema, replaceEditSchemaWithoutThenRun);
 			case "patch":
-				return patchEditSchema;
+				return thenRunSchemaVariant(settings, patchEditSchema, patchEditSchemaWithoutThenRun);
 			case "apply_patch":
-				return applyPatchSchema;
+				return thenRunSchemaVariant(settings, applyPatchSchema, applyPatchSchemaWithoutThenRun);
 			case "hashline":
-				return hashlineEditParamsSchema;
+				return thenRunSchemaVariant(settings, hashlineEditParamsSchema, hashlineEditParamsSchemaWithoutThenRun);
 			case "sloppy":
-				return sloppyEditSchema;
+				return thenRunSchemaVariant(settings, sloppyEditSchema, sloppyEditSchemaWithoutThenRun);
 		}
 	}
 
@@ -414,6 +432,22 @@ export class EditTool implements AgentTool<TInput> {
 		return paths.length > 0 ? paths : undefined;
 	}
 
+	/**
+	 * Every path the payload can mutate, for `then_run` preflight: section targets, digest
+	 * entries, delete targets, and move/rename sources and destinations. `matcherPaths` is
+	 * not enough — it returns only digest entries, which delete and rename targets lack.
+	 */
+	thenRunTargets(args: unknown): readonly string[] | undefined {
+		const { paths, entries, fileOps } = this.#inspect(args);
+		const targets = new Set<string>(paths);
+		for (const entry of entries) targets.add(entry.path);
+		for (const op of fileOps) {
+			targets.add(op.path);
+			if (op.to !== undefined) targets.add(op.to);
+		}
+		return targets.size > 0 ? [...targets] : undefined;
+	}
+
 	matcherEntries(args: unknown): readonly { path: string; digest: string }[] | undefined {
 		const entries = this.#inspect(args).entries;
 		return entries.length > 0 ? entries : undefined;
@@ -463,6 +497,7 @@ export class EditTool implements AgentTool<TInput> {
 		_onUpdate?: AgentToolUpdateCallback<EditToolDetails, TInput>,
 		context?: AgentToolContext,
 	): Promise<AgentToolResult<EditToolDetails, TInput>> {
+		assertNativeThenRunForbidden(params);
 		let open = this.#sessions.get(toolCallId);
 		const argsJson = JSON.stringify(params);
 		if (open && this.#streamedArgs.get(toolCallId) !== argsJson) {
