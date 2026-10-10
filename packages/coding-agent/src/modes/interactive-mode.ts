@@ -2509,6 +2509,9 @@ export class InteractiveMode implements InteractiveModeContext {
 		// `streamingBehavior: "steer"`, so whichever lands second queues into the
 		// other's turn instead of dying.
 		this.editor.disableSubmit = false;
+		// Keys pressed while a Tern startup loaded were held until this point,
+		// so they reach the same fully wired session a live keystroke would.
+		this.ui.releaseHeldInput();
 		// Publish native send readiness even when no user input triggers another frame.
 		this.ui.requestRender();
 	}
@@ -3679,7 +3682,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.editor.borderColor = theme.getPythonModeBorderColor();
 		} else if (vimMode === "visual" || vimMode === "visual-line") {
 			this.editor.borderColor = (str: string) => theme.fg("warning", str);
-		} else if (vimMode === "normal") {
+		} else if (vimMode === "normal" || vimMode === "replace") {
 			this.editor.borderColor = (str: string) => theme.fg("accent", str);
 		} else if (vimMode === "insert") {
 			// Insert gets its own colour rather than falling through to the session accent: with Normal
