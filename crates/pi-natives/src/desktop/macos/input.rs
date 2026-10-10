@@ -274,11 +274,14 @@ fn with_background_keyboard<T>(
 		return Err(unmapped_keyboard_refusal(wid));
 	}
 	skylight::with_background_guard(pid, || {
-		make_key_in_background(source, pid, wid, window)?;
+		let prepared = make_key_in_background(source, pid, wid, window)?;
 		if let Some(KeyboardConflict::Siblings(siblings)) = conflict
 			&& !await_key_window(pid, wid)?
 		{
 			return Err(sibling_keyboard_refusal(wid, siblings));
+		}
+		if prepared {
+			still_behind_user(pid, wid)?;
 		}
 		deliver()
 	})
@@ -450,15 +453,20 @@ fn front_target(
 /// user's keystrokes and key equivalents, stay with the user's app. In the
 /// frontmost application itself, nothing is posted: the target already is
 /// key, or making it key would move the user's typing, so the input refuses.
+///
+/// Returns whether the activation step ran. The user can bring the target app
+/// forward at any moment, which would turn the step into a key-window switch
+/// in the app they type into, so the front process is re-read before the
+/// press and, through [`still_behind_user`], by callers before they deliver.
 pub(super) fn make_key_in_background(
 	source: &CGEventSource,
 	pid: libc::pid_t,
 	wid: u32,
 	window: &DesktopWindow,
-) -> CoreResult<()> {
+) -> CoreResult<bool> {
 	match front_target(skylight::front_pid(), pid, wid, || ax::focused_window_id(pid)) {
 		FrontTarget::Background => {},
-		FrontTarget::Key => return Ok(()),
+		FrontTarget::Key => return Ok(false),
 		FrontTarget::UserSibling => {
 			return Err(DesktopError::background_unavailable(format!(
 				"window {wid} belongs to the frontmost application but is not its key window; making \
@@ -487,6 +495,7 @@ pub(super) fn make_key_in_background(
 		(FIELD_APPKIT_SUBTYPE, APPLICATION_ACTIVATED),
 	])?;
 	skylight::post_routed(pid, &activated)?;
+	still_behind_user(pid, wid)?;
 	let (location, local) = activating_press(window);
 	let press = |event_type: CGEventType, number: i64| -> CoreResult<()> {
 		let event = mouse_event(source, event_type, location, CGMouseButton::Left)?;
@@ -506,7 +515,27 @@ pub(super) fn make_key_in_background(
 	};
 	press(CGEventType::LeftMouseDown, 1)?;
 	let release = control::cleanup(|| press(CGEventType::LeftMouseUp, 2));
-	skylight::after_cleanup(Ok(()), release)
+	skylight::after_cleanup(Ok(true), release)
+}
+
+/// Refuses once the target's application is frontmost (or the front process
+/// is unknown) after [`make_key_in_background`] judged it a background app.
+pub(super) fn still_behind_user(pid: libc::pid_t, wid: u32) -> CoreResult<()> {
+	if left_background(skylight::front_pid(), pid) {
+		return Err(DesktopError::background_unavailable(format!(
+			"window {wid}'s application came to the front, or the front application could not be \
+			 identified, while background input was prepared; no further input was sent; inspect the \
+			 window, then retry with takeover:true or use ax actions",
+		)));
+	}
+	Ok(())
+}
+
+const fn left_background(front: Option<libc::pid_t>, pid: libc::pid_t) -> bool {
+	match front {
+		Some(front) => front == pid,
+		None => true,
+	}
 }
 
 /// Global and window-local points of the press that makes a window key: one
@@ -708,7 +737,9 @@ fn background_gesture(
 ) -> CoreResult<()> {
 	match event {
 		PointerEvent::Click { x, y, button: MouseButton::Left, count, modifiers } => {
-			make_key_in_background(source, pid, wid, window)?;
+			if make_key_in_background(source, pid, wid, window)? {
+				still_behind_user(pid, wid)?;
+			}
 			background_left_click(source, pid, wid, window, x, y, count, modifier_flags(modifiers))
 		},
 		PointerEvent::Click { x, y, button, count, modifiers } => background_button_click(
@@ -871,17 +902,21 @@ fn prepare_press(
 		},
 		|| make_key_in_background(source, pid, wid, window),
 		|| await_key_window(pid, wid),
+		|| still_behind_user(pid, wid),
 	)
 }
 
 /// [`prepare_press`] with its probes and the key-window step as closures.
+/// When `make_key` ran the activation step, `still_behind` re-checks after the
+/// wait for the key window that the user has not brought the target forward.
 fn ready_press(
 	wid: u32,
 	button: MouseButton,
 	holds_keys: bool,
 	conflict: impl FnOnce() -> Option<KeyboardConflict>,
-	make_key: impl FnOnce() -> CoreResult<()>,
+	make_key: impl FnOnce() -> CoreResult<bool>,
 	is_key: impl FnOnce() -> CoreResult<bool>,
+	still_behind: impl FnOnce() -> CoreResult<()>,
 ) -> CoreResult<()> {
 	let siblings = if holds_keys {
 		match conflict() {
@@ -895,9 +930,12 @@ fn ready_press(
 	if !holds_keys && !matches!(button, MouseButton::Left) {
 		return Ok(());
 	}
-	make_key()?;
+	let prepared = make_key()?;
 	if !is_key()? && siblings > 0 {
 		return Err(sibling_keyboard_refusal(wid, siblings));
+	}
+	if prepared {
+		still_behind()?;
 	}
 	Ok(())
 }
@@ -2629,12 +2667,13 @@ mod tests {
 				|| conflict,
 				|| {
 					steps.borrow_mut().push("make key");
-					Ok(())
+					Ok(true)
 				},
 				|| {
 					steps.borrow_mut().push("await key");
 					Ok(keyed)
 				},
+				|| Ok(()),
 			);
 			(result.map_err(|error| error.code.as_str()), steps.into_inner())
 		};
@@ -2660,6 +2699,34 @@ mod tests {
 			);
 			assert_eq!(ready(button, true, None, false), (Ok(()), both.clone()));
 		}
+	}
+
+	#[test]
+	fn a_held_press_stops_when_its_app_comes_to_the_front_during_preparation() {
+		let ready = |prepared: bool| {
+			let steps = std::cell::RefCell::new(Vec::new());
+			let result = ready_press(
+				42,
+				MouseButton::Left,
+				false,
+				|| None,
+				|| Ok(prepared),
+				|| {
+					steps.borrow_mut().push("await key");
+					Ok(true)
+				},
+				|| {
+					steps.borrow_mut().push("still behind");
+					Err(DesktopError::background_unavailable("came to the front"))
+				},
+			);
+			(result.map_err(|error| error.code.as_str()), steps.into_inner())
+		};
+		// The user can bring the target forward while it becomes key; the press
+		// would then switch the key window of the app they type into.
+		assert_eq!(ready(true), (Err("BackgroundUnavailable"), vec!["await key", "still behind"]));
+		// The target already was the frontmost key window: nothing to re-check.
+		assert_eq!(ready(false), (Ok(()), vec!["await key"]));
 	}
 
 	#[test]
@@ -2696,6 +2763,15 @@ mod tests {
 		assert_eq!(front_target(Some(7), 7, 42, || Some(42)), FrontTarget::Key);
 		assert_eq!(front_target(Some(7), 7, 42, || Some(43)), FrontTarget::UserSibling);
 		assert_eq!(front_target(Some(7), 7, 42, || None), FrontTarget::UserSibling);
+	}
+
+	#[test]
+	fn a_target_that_comes_to_the_front_during_preparation_stops_the_input() {
+		// Once the user brings the target forward, the activation step would
+		// move the key window of the app they now type into.
+		assert!(!left_background(Some(9), 7));
+		assert!(left_background(Some(7), 7));
+		assert!(left_background(None, 7));
 	}
 
 	#[test]
