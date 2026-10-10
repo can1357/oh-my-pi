@@ -14,7 +14,7 @@ import { isGlobalMemoryScopeAvailable } from "../mnemopi/settings";
 
 const learnSkillSchema = type({
 	action: "'create' | 'update'",
-	name: type("string").describe("kebab-case skill name"),
+	name: type("string").describe("skill name: letters, digits, and hyphens (any script)"),
 	description: type("string").describe("one-line description of when to use the skill"),
 	body: type("string").describe("the SKILL.md body in markdown (no frontmatter)"),
 }).describe("also create or enhance a managed skill in the same call");

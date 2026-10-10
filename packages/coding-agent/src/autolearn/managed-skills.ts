@@ -19,7 +19,15 @@ export const MANAGED_SKILLS_PROVIDER_ID = "omp-managed";
 /** Hard cap on a managed SKILL.md body to keep generated skills bounded. */
 export const MAX_MANAGED_SKILL_BYTES = 64_000;
 
-const SKILL_NAME_PATTERN = /^[a-z0-9][a-z0-9-]{0,63}$/;
+/**
+ * A managed-skill name becomes one path segment under the managed root, so the
+ * pattern bans everything that could climb out of it (`/`, `\`, `..`) or break
+ * the system prompt's `<skills>` listing (whitespace, angle brackets, backticks).
+ * Within those limits any script is allowed — `般若理趣分` is as valid as
+ * `banruo-liqu-fen` — and `\p{M}` keeps combining marks (Thai vowels, decomposed
+ * accents, Devanagari matras) usable. ASCII is lowercased before the check.
+ */
+const SKILL_NAME_PATTERN = /^[\p{L}\p{N}][\p{L}\p{N}\p{M}-]{0,63}$/u;
 
 /** Resolve the isolated managed-skills directory (`~/.omp/agent/managed-skills`). */
 export function getManagedSkillsDir(agentDir: string = getAgentDir()): string {
@@ -28,14 +36,15 @@ export function getManagedSkillsDir(agentDir: string = getAgentDir()): string {
 
 /**
  * Validate + normalize a managed-skill name. Throws on anything outside the
- * strict allowlist so a bad name can never escape `getManagedSkillsDir()`
- * (blocks `..`, slashes, empty, and uppercase).
+ * allowlist so a bad name can never escape `getManagedSkillsDir()` (blocks
+ * `..`, slashes, whitespace, and empty names). Letters and digits of any script
+ * are accepted; ASCII is lowercased so case never splits one name in two.
  */
 export function sanitizeSkillName(raw: string): string {
 	const name = raw.trim().toLowerCase();
 	if (!SKILL_NAME_PATTERN.test(name)) {
 		throw new Error(
-			`Invalid skill name "${raw}". Use lowercase letters, digits, and hyphens (1-64 chars, starting with a letter or digit).`,
+			`Invalid skill name "${raw}". Use letters, digits, and hyphens in any script (1-64 chars, starting with a letter or digit).`,
 		);
 	}
 	return name;

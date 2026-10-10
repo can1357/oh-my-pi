@@ -43,6 +43,17 @@ describe("managed-skills primitives", () => {
 		it("normalizes and accepts a valid kebab name", () => {
 			expect(sanitizeSkillName("  Demo-Skill ")).toBe("demo-skill");
 		});
+
+		it("accepts a name in a non-ASCII script", () => {
+			expect(sanitizeSkillName("般若理趣分")).toBe("般若理趣分");
+		});
+
+		it("still rejects names that could escape the root or break the prompt", () => {
+			expect(() => sanitizeSkillName("..")).toThrow();
+			expect(() => sanitizeSkillName("a\\b")).toThrow();
+			expect(() => sanitizeSkillName("<evil>")).toThrow();
+			expect(() => sanitizeSkillName("a`b")).toThrow();
+		});
 	});
 
 	describe("toSkillFrontmatter", () => {
@@ -66,6 +77,17 @@ describe("managed-skills primitives", () => {
 			await expect(
 				writeManagedSkill({ action: "create", name: "foo", description: "x", body: "y" }),
 			).rejects.toThrow(/already exists/);
+		});
+
+		it("writes and re-parses a non-ASCII-named skill", async () => {
+			await writeManagedSkill({
+				action: "create",
+				name: "般若理趣分",
+				description: "講法時用。",
+				body: "# 般若理趣分",
+			});
+			const { frontmatter } = parseFrontmatter(await Bun.file(skillFile("般若理趣分")).text(), { source: "test" });
+			expect(frontmatter.name).toBe("般若理趣分");
 		});
 
 		it("update overwrites the body; update of a missing skill throws", async () => {
