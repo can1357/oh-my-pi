@@ -292,6 +292,31 @@ describe("planClaudeResetRedemptions: blocked recovery", () => {
 		expect(restoredFor(3 * 24 * HOUR, 3 * 24 * HOUR + RESTORE_WAIT_TOLERANCE_MS)).toBe("anthropic|org-a|11");
 		expect(restoredFor(3 * 24 * HOUR, 3 * 24 * HOUR + RESTORE_WAIT_TOLERANCE_MS + 60_000)).toBe("anthropic|org-b|22");
 	});
+
+	it("never restores an account outside the session's account pool, however long its wait", () => {
+		const excluded = status({
+			credentialId: 22,
+			orgId: "org-b",
+			active: false,
+			credit: { id: "cedar-2", expiresAt: new Date(NOW + 20 * 24 * HOUR).toISOString() },
+		});
+		const plan = planClaudeResetRedemptions(
+			input({
+				reports: [
+					report({ orgId: "org-a", weeklyResetInMs: 4 * HOUR }),
+					report({ orgId: "org-b", weeklyResetInMs: 6 * 24 * HOUR }),
+				],
+				statuses: [status(), excluded],
+				permitsCredential: credentialId => credentialId === 11,
+			}),
+		);
+		expect(plan.actions).toMatchObject([{ reason: "blocked-account", accountKey: "anthropic|org-a|11", active: true }]);
+		expect(plan.skipped).toContainEqual({
+			accountKey: "anthropic|org-b|22",
+			rule: "blocked-account",
+			reason: "outside-account-pool",
+		});
+	});
 });
 
 describe("planClaudeResetRedemptions: expiry salvage", () => {

@@ -291,6 +291,45 @@ describe("Claude saved-reset trigger integration", () => {
 		expect(session.agent.state.messages.at(-1)).toMatchObject({ role: "assistant", stopReason: "stop" });
 	});
 
+	it("restores the session's own account, not a longer-blocked one outside its account pool", async () => {
+		const { session, targets } = buildSession({
+			report: null,
+			status: claudeStatus(true),
+			streamErrorFirst: true,
+		});
+		const excludedReport = claudeReport(1);
+		excludedReport.metadata = { accountId: "claude-excluded", email: "excluded@example.com", orgId: "org-excluded" };
+		for (const limit of excludedReport.limits) {
+			if (limit.window) limit.window.resetsAt = Date.now() + 6 * 24 * HOUR;
+		}
+		const excluded: ResetCreditAccountStatus = {
+			...claudeStatus(true),
+			credentialId: CREDENTIAL_ID + 1,
+			accountId: "claude-excluded",
+			email: "excluded@example.com",
+			orgId: "org-excluded",
+			active: false,
+			report: excludedReport,
+		};
+		// Far from expiry, so only the restore could spend it.
+		excluded.credits = excluded.credits.map(credit => ({
+			...credit,
+			expiresAt: new Date(Date.now() + 20 * 24 * HOUR).toISOString(),
+		}));
+		vi.spyOn(authStorage.resets, "list").mockImplementation(async () => [claudeStatus(true), excluded]);
+		const permits = vi
+			.spyOn(authStorage.sessions, "permits")
+			.mockImplementation((_provider, _sessionId, credentialId) => credentialId === CREDENTIAL_ID);
+		mockSchedulerWaitWithClock();
+
+		await session.prompt("recover inside the account pool");
+		await session.waitForIdle();
+
+		expect(permits).toHaveBeenCalledWith("anthropic", session.sessionId, CREDENTIAL_ID + 1);
+		expect(targets.map(target => target.credentialId)).toEqual([CREDENTIAL_ID]);
+		expect(session.agent.state.messages.at(-1)).toMatchObject({ role: "assistant", stopReason: "stop" });
+	});
+
 	it("cancels reset discovery backoff without spending a credit or resuming the task", async () => {
 		const { session, targets } = buildSession({
 			report: null,

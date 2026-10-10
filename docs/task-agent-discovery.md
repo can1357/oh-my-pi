@@ -256,7 +256,8 @@ values broker [client account pools](./auth-broker-gateway.md#client-account-poo
 use, such as `email:<address>|org:<id>` for Anthropic; [`omp usage accounts`](./cli-reference.md)
 lists them). For each listed provider the child authenticates
 only with those accounts: ranking, the parent's copied account affinity, restored pins, fallback
-passes, and credential rotation stay inside the pool, and runtime, environment, and stored API keys
+passes, credential rotation, and saved-reset restores stay inside the pool, and runtime,
+environment, and stored API keys
 are not used; a `models.yml` `apiKey` for the provider fails the request instead of sending a pooled
 token to that endpoint. When no pooled account can serve, the request fails with `No API key for
 provider: … restricted to its OAuth account pool` instead of borrowing another account; an empty

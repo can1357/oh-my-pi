@@ -32,9 +32,10 @@
  *   ~80% headroom (openai/codex#28525). The natural unblock is the LATEST
  *   reset among the exhausted windows (the account stays blocked until every
  *   one rolls over) and must be far enough away to justify the spend, with
- *   credits above the reserve. One candidate is redeemed: the one whose
- *   natural unblock is furthest away, because the account refills on its own
- *   then, so a reset is worth the wait it skips. Among candidates within
+ *   credits above the reserve, on an account the session may use (its account
+ *   pool). One candidate is redeemed: the one whose natural unblock is
+ *   furthest away, because the account refills on its own then, so a reset is
+ *   worth the wait it skips. Among candidates within
  *   {@link RESTORE_WAIT_TOLERANCE_MS} of that wait the active account wins,
  *   then the account whose credit dies soonest. The redeem clears its
  *   credential blocks so the retry's re-rank picks it up.
@@ -113,6 +114,7 @@ export type CodexResetSkipReason =
 	| "spark-model"
 	| "no-identity"
 	| "stale-report"
+	| "outside-account-pool"
 	| "not-limit-reached"
 	| "no-exhausted-window"
 	| "deferred"
@@ -145,6 +147,8 @@ export interface CodexResetPlanInput {
 	};
 	/** Active account (marks the preferred restore candidate); may be undefined. */
 	identity: OAuthAccountIdentity | undefined;
+	/** `blocked-account`: whether a stored credential may serve the blocked session; absent allows every account. */
+	permitsCredential?: (credentialId: number) => boolean;
 	/** Usage reports for ALL stored accounts (one per account for Codex). */
 	reports: UsageReport[] | null;
 	attemptedKeys: ReadonlySet<string>;
@@ -368,6 +372,11 @@ export function planCodexResetRedemptions(input: CodexResetPlanInput): CodexRese
 		for (const snapshot of snapshots) {
 			const rule = "blocked-account" as const;
 			const skip = (reason: CodexResetSkipReason) => skipped.push({ accountKey: snapshot.accountKey, rule, reason });
+			// Restoring an account the session may not use cannot unblock it.
+			if (input.permitsCredential && !input.permitsCredential(snapshot.target.credentialId)) {
+				skip("outside-account-pool");
+				continue;
+			}
 			// Live evidence: the 429 that triggered this pass names the active
 			// account directly, outranking a possibly pre-block report snapshot.
 			const liveUnblockAtMs = snapshot.active ? input.activeBlockUnblockAtMs : undefined;
