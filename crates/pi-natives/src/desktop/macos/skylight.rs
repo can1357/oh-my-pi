@@ -358,26 +358,28 @@ pub(super) fn after_cleanup<T>(result: CoreResult<T>, cleanup: CoreResult<()>) -
 	}
 }
 
+/// Hardware mouse presses (left, right, other `CGEventType`s): a click is how a
+/// user picks a window, while typing in their own window is not. Events posted
+/// to a pid do not advance these counters.
+const POINTER_PRESS_TYPES: [u32; 3] = [1, 3, 25];
+
+fn hid_counter(event_type: u32) -> u32 {
+	// SAFETY: HIDSystemState (1) and these public CGEventType values are
+	// defined by CGEventSource.h / CGEventTypes.h; this is a read-only query.
+	unsafe { CGEventSourceCounterForEventType(1, event_type) }
+}
+
 /// Physical activity is a conservative veto, not proof of which app the user
 /// chose. A source that updates HID counters for synthetic events can also veto
 /// restoration; yielding control is safer than fighting a deliberate switch.
 fn activation_activity() -> [u32; 5] {
-	// Left/right/other press, key press, and modifiers can change activation.
-	[1, 3, 25, 10, 12].map(|event_type| {
-		// SAFETY: HIDSystemState (1) and these public CGEventType values are
-		// defined by CGEventSource.h / CGEventTypes.h; this is a read-only query.
-		unsafe { CGEventSourceCounterForEventType(1, event_type) }
-	})
+	// Pointer presses, key press, and modifiers can change activation.
+	let [left, right, other] = POINTER_PRESS_TYPES;
+	[left, right, other, 10, 12].map(hid_counter)
 }
 
-/// Hardware mouse presses (left, right, other): a click is how a user picks a
-/// window, while typing in their own window is not. Events posted to a pid do
-/// not advance these counters.
 fn pointer_presses() -> [u32; 3] {
-	[1, 3, 25].map(|event_type| {
-		// SAFETY: as in `activation_activity`; a read-only counter query.
-		unsafe { CGEventSourceCounterForEventType(1, event_type) }
-	})
+	POINTER_PRESS_TYPES.map(hid_counter)
 }
 
 #[derive(Debug, PartialEq, Eq)]

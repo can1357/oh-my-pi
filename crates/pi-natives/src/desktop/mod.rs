@@ -29,7 +29,7 @@ use std::{
 
 pub use applications::{Application, ApplicationOpenOptions, ApplicationQuery};
 use ax::{AxRegistry, register_node};
-use backend::{Backend, DeliveryMode, MouseButton, PointerEvent};
+use backend::{Backend, DeliveryMode, MouseButton, PointerEvent, is_raise_action};
 use control::{CancellationSource, InputLease, OperationToken};
 use error::{CoreResult, DesktopError};
 use frame::{FrameGeometry, apply_capture_caps, encode_png};
@@ -320,10 +320,7 @@ impl Request {
 			Self::AxClick { options, .. } => (None, options.takeover),
 			Self::RaiseWindow { .. } => return true,
 			Self::OpenApplication { options, .. } => return options.activate.unwrap_or(false),
-			Self::AxPerform { action, .. } => {
-				let action = action.trim();
-				return action.eq_ignore_ascii_case("raise") || action.eq_ignore_ascii_case("AXRaise");
-			},
+			Self::AxPerform { action, .. } => return is_raise_action(action),
 			_ => return false,
 		};
 		target.is_some_and(|target| !matches!(target, Target::Window(_)))
