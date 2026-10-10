@@ -59,7 +59,9 @@ function codexStatus(expiresAtMs: number, account: CodexAccount = CODEX): ResetC
 		...account,
 		active: false,
 		availableCount: 1,
-		credits: [{ id: `${account.accountId}-credit`, expiresAt: new Date(expiresAtMs).toISOString(), status: "available" }],
+		credits: [
+			{ id: `${account.accountId}-credit`, expiresAt: new Date(expiresAtMs).toISOString(), status: "available" },
+		],
 	};
 }
 
@@ -230,7 +232,14 @@ describe("auth broker saved-reset sweep", () => {
 				provider !== "openai-codex"
 					? []
 					: listingFails
-						? [{ ...codexStatus(expiresAtMs), availableCount: 0, credits: [], error: "Failed to load saved resets" }]
+						? [
+								{
+									...codexStatus(expiresAtMs),
+									availableCount: 0,
+									credits: [],
+									error: "Failed to load saved resets",
+								},
+							]
 						: [codexStatus(expiresAtMs)],
 			settings: { "codexResets.autoRedeem": "unset", "claudeResets.autoRedeem": "no" },
 		});

@@ -305,7 +305,6 @@ import {
 import {
 	adoptRecentReset,
 	type AutoResetHost,
-	executeResetActions,
 	headlessConsentedActions,
 	planClaudeResets,
 	planCodexResets,
