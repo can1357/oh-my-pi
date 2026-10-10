@@ -4,7 +4,7 @@
 
 ### Added
 
-- Added `autoRedeem: false` to `auth.accountPolicies` entries to mark an account whose saved resets must not be spent automatically; any other value is rejected as invalid config
+- Added `autoRedeem: false` to `auth.accountPolicies` entries to mark an account whose saved resets must not be spent automatically; any other value is rejected as invalid config ([#15133](https://github.com/can1357/oh-my-pi/pull/15133) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.8.7] - 2026-10-09
 
