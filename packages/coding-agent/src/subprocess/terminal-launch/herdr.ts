@@ -1,7 +1,16 @@
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
 import { hasTerminalMultiplexerSession } from "@oh-my-pi/pi-tui/terminal-multiplexer";
-import { quotePosixArgv } from "../../utils/shell-quote";
+import { quotePosixArgument, quotePosixArgv } from "../../utils/shell-quote";
 import { launchError, nestedString, parseJson, runStep } from "./shared";
-import type { SupportedMultiplexerCapabilities, TerminalLaunchBackend, TerminalLaunchProvider } from "./types";
+import type {
+	SupportedMultiplexerCapabilities,
+	TerminalLaunchBackend,
+	TerminalLaunchCliRunner,
+	TerminalLaunchProvider,
+	TerminalLaunchRequest,
+} from "./types";
 
 const capabilities = {
 	displayName: "Herdr",
@@ -12,7 +21,6 @@ const capabilities = {
 		target: "pane",
 		direction: ["right", "down"],
 		focus: true,
-		shellGrammar: "posix",
 	},
 	window: {
 		displayName: "tab",
@@ -20,18 +28,52 @@ const capabilities = {
 		target: "workspace",
 		focus: true,
 		label: true,
-		shellGrammar: "posix",
 	},
 } as const satisfies SupportedMultiplexerCapabilities;
 
+const shellNeutralWord = /^[A-Za-z0-9_./-]+$/;
+
+/**
+ * `herdr pane run` types text into the pane's interactive shell, whose grammar is unknown.
+ * Typing only the absolute path of a self-deleting `/bin/sh` script keeps argv exact in any shell.
+ */
+async function runInPane(
+	request: TerminalLaunchRequest,
+	paneId: string,
+	runCli: TerminalLaunchCliRunner,
+): Promise<void> {
+	const directory = await fs.mkdtemp(path.join(os.tmpdir(), "omp-herdr-"));
+	try {
+		const script = path.join(directory, "launch");
+		if (!shellNeutralWord.test(script)) {
+			throw launchError(
+				request,
+				"launch script",
+				"Herdr launch needs a temporary directory path made of letters, digits, and ./_- only.",
+			);
+		}
+		await fs.writeFile(
+			script,
+			`#!/bin/sh\nrm -rf -- ${quotePosixArgument(directory)}\nexec ${quotePosixArgv(request.command)}\n`,
+			{ mode: 0o700 },
+		);
+		await runStep(request, "pane run", ["herdr", "pane", "run", paneId, script], request.cwd, runCli);
+	} catch (error) {
+		await fs.rm(directory, { recursive: true, force: true });
+		throw error;
+	}
+}
+
 const launchHerdr: TerminalLaunchBackend<"herdr", typeof capabilities> = async (
 	request,
-	{ environment: env, runCli },
+	{ environment: env, platform, runCli },
 ) => {
+	if (platform === "win32") {
+		throw launchError(request, "capability", "Herdr launches are not supported on Windows.");
+	}
 	if (!hasTerminalMultiplexerSession("herdr", env)) {
 		throw launchError(request, "capability", "Herdr launch requires an active Herdr pane or workspace.");
 	}
-	const shellCommand = quotePosixArgv(request.command);
 	const focusArgs = request.focus === undefined ? [] : [request.focus ? "--focus" : "--no-focus"];
 	if (request.placement === "pane") {
 		const target = request.target ?? env.HERDR_PANE_ID;
@@ -54,7 +96,7 @@ const launchHerdr: TerminalLaunchBackend<"herdr", typeof capabilities> = async (
 		);
 		const paneId = nestedString(created, "result", "pane", "pane_id");
 		if (!paneId) throw launchError(request, "pane split", "Herdr pane split returned no pane ID.");
-		await runStep(request, "pane run", ["herdr", "pane", "run", paneId, shellCommand], request.cwd, runCli);
+		await runInPane(request, paneId, runCli);
 		return { multiplexer: "herdr", placement: "pane", id: paneId };
 	}
 
@@ -71,7 +113,7 @@ const launchHerdr: TerminalLaunchBackend<"herdr", typeof capabilities> = async (
 	const tabId = nestedString(created, "result", "tab", "tab_id");
 	const paneId = nestedString(created, "result", "root_pane", "pane_id");
 	if (!tabId || !paneId) throw launchError(request, "tab create", "Herdr tab create returned incomplete IDs.");
-	await runStep(request, "pane run", ["herdr", "pane", "run", paneId, shellCommand], request.cwd, runCli);
+	await runInPane(request, paneId, runCli);
 	return { multiplexer: "herdr", placement: "window", id: tabId };
 };
 

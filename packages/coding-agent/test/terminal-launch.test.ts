@@ -83,13 +83,13 @@ type WmuxLaunchIsExcluded = AssertFalse<
 		TerminalLaunchRequest
 	>
 >;
-type HerdrShellGrammarIsRequired = AssertFalse<
+type HerdrPaneNeedsNoShellGrammar = AssertTrue<
 	IsAssignable<
 		{ multiplexer: "herdr"; placement: "pane"; command: readonly string[]; cwd: string },
 		TerminalLaunchRequest
 	>
 >;
-type HerdrWindowShellGrammarIsRequired = AssertFalse<
+type HerdrWindowNeedsNoShellGrammar = AssertTrue<
 	IsAssignable<
 		{ multiplexer: "herdr"; placement: "window"; command: readonly string[]; cwd: string },
 		TerminalLaunchRequest
@@ -161,15 +161,15 @@ const terminalLaunchTypeChecks: [
 	CmuxFocusIsSupported,
 	ScreenLaunchIsExcluded,
 	WmuxLaunchIsExcluded,
-	HerdrShellGrammarIsRequired,
-	HerdrWindowShellGrammarIsRequired,
+	HerdrPaneNeedsNoShellGrammar,
+	HerdrWindowNeedsNoShellGrammar,
 	CmuxWindowShellGrammarIsRequired,
 	CmuxPaneShellGrammarIsRequired,
 	OrcaWindowWorktreeOptionsAreSupported,
 	OrcaPaneFocusIsExcluded,
 	OrcaPaneShellGrammarIsRequired,
 	OrcaPaneDirectionIsRestricted,
-] = [false, false, true, false, false, false, false, false, false, true, false, false, false];
+] = [false, false, true, false, false, true, true, false, false, true, false, false, false];
 void terminalLaunchTypeChecks;
 
 describe("generic terminal launch construction", () => {
@@ -190,11 +190,11 @@ describe("generic terminal launch construction", () => {
 	});
 
 	it("rejects unconfirmed shell grammar and leaves optional provider defaults unset", () => {
-		const unconfirmed = createDefaultTerminalLaunchRequest("herdr", "pane", ["omp", "--resume"], "/repo");
+		const unconfirmed = createDefaultTerminalLaunchRequest("cmux", "pane", ["omp", "--resume"], "/repo");
 		if (!("error" in unconfirmed)) throw new Error("shell-input request unexpectedly omitted its grammar error");
 		expect(unconfirmed.error).toContain('requires shellGrammar: "posix"');
 
-		const confirmed = createDefaultTerminalLaunchRequest("herdr", "pane", ["omp", "--resume"], "/repo", "posix");
+		const confirmed = createDefaultTerminalLaunchRequest("cmux", "pane", ["omp", "--resume"], "/repo", "posix");
 		if ("error" in confirmed) throw new Error(confirmed.error);
 		for (const option of ["target", "focus", "direction", "execution"]) {
 			expect(Object.hasOwn(confirmed.request, option)).toBe(false);
@@ -635,58 +635,86 @@ describe("terminal launch dispatcher", () => {
 		expect(result).toEqual({ multiplexer: "zellij", placement: "window", id: "7" });
 	});
 
-	it("creates a Herdr pane, parses its JSON ID, then runs a POSIX-shell command", async () => {
-		const { calls, launch } = createHarness({ HERDR_ENV: "1", HERDR_PANE_ID: "w1:p1" }, [
-			{ stdout: '{"result":{"pane":{"pane_id":"w1:p2"}}}', exitCode: 0 },
-			{ stdout: "", exitCode: 0 },
-		]);
-		const result = await launch({
-			multiplexer: "herdr",
-			placement: "pane",
-			command: ["bun", "run", "my script.ts", "x'y"],
-			cwd: "/repo with space",
-			direction: "down",
-			focus: false,
-			shellGrammar: "posix",
-		});
+	it("types only a shell-neutral script path into a new Herdr pane and preserves exact argv", async () => {
+		const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "herdr-argv-"));
+		try {
+			const recorder = path.join(tempRoot, "recorder.js");
+			await Bun.write(recorder, 'process.stdout.write(JSON.stringify(process.argv.slice(2)) + "\\n");\n');
+			const args = ["Ω 雪", "", "it's 'quoted'", "; printf injected", "$(printf injected) * $HOME", "line\nbreak"];
+			const { calls, launch } = createHarness({ HERDR_ENV: "1", HERDR_PANE_ID: "w1:p1" }, [
+				{ stdout: '{"result":{"pane":{"pane_id":"w1:p2"}}}', exitCode: 0 },
+				{ stdout: "", exitCode: 0 },
+			]);
+			const result = await launch({
+				multiplexer: "herdr",
+				placement: "pane",
+				command: [process.execPath, recorder, ...args],
+				cwd: "/repo with space",
+				direction: "down",
+				focus: false,
+			});
 
-		expect(calls).toEqual([
-			{
+			expect(result).toEqual({ multiplexer: "herdr", placement: "pane", id: "w1:p2" });
+			expect(calls[0]).toEqual({
 				argv: ["herdr", "pane", "split", "w1:p1", "--direction", "down", "--cwd", "/repo with space", "--no-focus"],
 				cwd: "/repo with space",
-			},
-			{
-				argv: ["herdr", "pane", "run", "w1:p2", "'bun' 'run' 'my script.ts' 'x'\\''y'"],
-				cwd: "/repo with space",
-			},
-		]);
-		expect(result).toEqual({ multiplexer: "herdr", placement: "pane", id: "w1:p2" });
+			});
+			const typed = calls[1]!.argv[4]!;
+			expect(calls[1]!.argv).toEqual(["herdr", "pane", "run", "w1:p2", typed]);
+			expect(typed).toMatch(/^\/[A-Za-z0-9_./-]+$/);
+			if (process.platform !== "win32") {
+				const executed = await processCli(["/bin/sh", "-c", typed], tempRoot);
+				expect(executed.exitCode).toBe(0);
+				expect(JSON.parse(executed.stdout)).toEqual(args);
+				expect(await Bun.file(typed).exists()).toBe(false);
+			}
+		} finally {
+			await fs.rm(tempRoot, { recursive: true, force: true });
+		}
 	});
 
-	it("creates a Herdr tab in the explicit workspace and runs in its root pane", async () => {
+	it("creates a Herdr tab in the explicit workspace and removes its launch script when pane run fails", async () => {
 		const { calls, launch } = createHarness({ HERDR_ENV: "1", HERDR_WORKSPACE_ID: "w1" }, [
 			{
 				stdout: '{"result":{"tab":{"tab_id":"w1:t2"},"root_pane":{"pane_id":"w1:p3"}}}',
 				exitCode: 0,
 			},
-			{ stdout: "", exitCode: 0 },
+			{ stdout: "", exitCode: 1 },
 		]);
-		const result = await launch({
-			multiplexer: "herdr",
-			placement: "window",
-			command: ["omp", "--resume"],
-			cwd: "/repo",
-			target: "w1",
-			label: "agent",
-			focus: true,
-			shellGrammar: "posix",
-		});
+		await expect(
+			launch({
+				multiplexer: "herdr",
+				placement: "window",
+				command: ["omp", "--resume"],
+				cwd: "/repo",
+				target: "w1",
+				label: "agent",
+				focus: true,
+			}),
+		).rejects.toThrow("pane run failed");
 
-		expect(calls.map(call => call.argv)).toEqual([
-			["herdr", "tab", "create", "--workspace", "w1", "--cwd", "/repo", "--label", "agent", "--focus"],
-			["herdr", "pane", "run", "w1:p3", "'omp' '--resume'"],
+		expect(calls[0]!.argv).toEqual([
+			"herdr",
+			"tab",
+			"create",
+			"--workspace",
+			"w1",
+			"--cwd",
+			"/repo",
+			"--label",
+			"agent",
+			"--focus",
 		]);
-		expect(result).toEqual({ multiplexer: "herdr", placement: "window", id: "w1:t2" });
+		expect(calls[1]!.argv.slice(0, 4)).toEqual(["herdr", "pane", "run", "w1:p3"]);
+		await expect(fs.stat(path.dirname(calls[1]!.argv[4]!))).rejects.toThrow("ENOENT");
+	});
+
+	it("rejects Herdr launches on Windows before creating a surface", async () => {
+		const { calls, launch } = createHarness({ HERDR_ENV: "1", HERDR_PANE_ID: "w1:p1" }, [], "win32");
+		await expect(launch({ multiplexer: "herdr", placement: "pane", command: ["omp"], cwd: "/repo" })).rejects.toThrow(
+			"not supported on Windows",
+		);
+		expect(calls).toEqual([]);
 	});
 
 	it("preserves Unicode argv and pane cwd through ASCII-only CMUX shell input", async () => {
@@ -831,7 +859,6 @@ describe("terminal launch dispatcher", () => {
 				placement: "pane",
 				command: ["omp"],
 				cwd: "/repo",
-				shellGrammar: "posix",
 			}),
 		).rejects.toThrow("invalid JSON");
 
@@ -857,20 +884,7 @@ describe("terminal launch dispatcher", () => {
 	});
 
 	it("requires a POSIX destination-shell assertion for shell-input providers", async () => {
-		const herdr = createHarness({ HERDR_ENV: "1", HERDR_PANE_ID: "w1:p1", HERDR_WORKSPACE_ID: "w1" }, []);
 		const cmux = createHarness({ CMUX_WORKSPACE_ID: "workspace:1", CMUX_SURFACE_ID: "surface:1" }, []);
-		const herdrPaneRequest = {
-			multiplexer: "herdr",
-			placement: "pane",
-			command: ["omp"],
-			cwd: "/repo",
-		} as unknown as TerminalLaunchRequest;
-		const herdrWindowRequest = {
-			multiplexer: "herdr",
-			placement: "window",
-			command: ["omp"],
-			cwd: "/repo",
-		} as unknown as TerminalLaunchRequest;
 		const cmuxPaneRequest = {
 			multiplexer: "cmux",
 			placement: "pane",
@@ -884,28 +898,15 @@ describe("terminal launch dispatcher", () => {
 			cwd: "/repo",
 		} as unknown as TerminalLaunchRequest;
 
-		await expect(herdr.launch(herdrPaneRequest)).rejects.toThrow('requires shellGrammar: "posix"');
-		await expect(herdr.launch(herdrWindowRequest)).rejects.toThrow('requires shellGrammar: "posix"');
 		await expect(cmux.launch(cmuxPaneRequest)).rejects.toThrow('requires shellGrammar: "posix"');
 		await expect(cmux.launch(cmuxWindowRequest)).rejects.toThrow('requires shellGrammar: "posix"');
-		expect(herdr.calls).toEqual([]);
 		expect(cmux.calls).toEqual([]);
 	});
 
 	it("rejects terminal controls in shell-input requests before creating a surface", async () => {
-		const herdr = createHarness({ HERDR_ENV: "1", HERDR_PANE_ID: "w1:p1" }, []);
 		const cmux = createHarness({ CMUX_WORKSPACE_ID: "workspace:1", CMUX_SURFACE_ID: "surface:1" }, []);
 		for (const control of ["\u0003", "\u007f", "\u0085"]) {
 			const payload = `before${control} touch marker`;
-			await expect(
-				herdr.launch({
-					multiplexer: "herdr",
-					placement: "pane",
-					command: ["printf", "%s", payload],
-					cwd: "/repo",
-					shellGrammar: "posix",
-				}),
-			).rejects.toThrow("terminal control bytes");
 			await expect(
 				cmux.launch({
 					multiplexer: "cmux",
@@ -926,7 +927,6 @@ describe("terminal launch dispatcher", () => {
 				shellGrammar: "posix",
 			}),
 		).rejects.toThrow("terminal control bytes");
-		expect(herdr.calls).toEqual([]);
 		expect(cmux.calls).toEqual([]);
 	});
 
