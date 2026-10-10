@@ -371,7 +371,6 @@ describe("restricted sessions sharing extension providers", () => {
 				settings,
 				modelRegistry,
 				authStorage,
-				sessionManager: SessionManager.inMemory(),
 				changelogTargets: [],
 				requireChangelog: false,
 			});
