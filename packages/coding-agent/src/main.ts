@@ -1946,9 +1946,13 @@ export async function runRootCommand(
 			cfgThemeLight.get(settingsInstance),
 		);
 
+		const autoResumeCacheScope = settingCacheScope(cfgAutoResume.provenance(settingsInstance));
 		applyStartupComposerPreferences({
 			autoResume: cfgAutoResume.get(settingsInstance),
-			autoResumeCacheScope: settingCacheScope(cfgAutoResume.provenance(settingsInstance)),
+			autoResumeCacheScope,
+			autoResumeSourcePaths: autoResumeCacheScope
+				? settingsInstance.settingCacheSourcePaths(autoResumeCacheScope)
+				: undefined,
 			quiet: cfgStartupQuiet.get(settingsInstance),
 			composerShape: cfgComposerShape.get(settingsInstance),
 			showHardwareCursor: cfgShowHardwareCursor.get(settingsInstance),

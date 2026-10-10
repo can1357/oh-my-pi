@@ -174,6 +174,38 @@ describe("composer startup cache", () => {
 		cache.close();
 	});
 
+	it("rejects cached auto-resume intent after its config source changes on disk", async () => {
+		const project = path.join(root, "project");
+		const sessionFile = path.join(root, "sessions", "session.jsonl");
+		const configFile = path.join(root, "config.yml");
+		await Bun.write(configFile, "autoResume: true\n");
+		const cache = ComposerCache.open(dbPath);
+		cache.writeStatus(
+			project,
+			{
+				...statusFor(ThinkingLevel.Low),
+				statusLine: { ...statusFor(ThinkingLevel.Low).statusLine, contextPercent: 42 },
+			},
+			sessionFile,
+		);
+		cache.writeAutoResume(project, true, false, [configFile]);
+
+		expect(cache.cachedAutoResume(project)).toBeTrue();
+		expect(cache.read(project, { allowSessionUsage: true, sessionFile }).status?.statusLine.contextPercent).toBe(42);
+
+		await Bun.write(configFile, "autoResume: false\n");
+		expect(cache.cachedAutoResume(project)).toBeUndefined();
+		expect(
+			cache.read(project, { allowSessionUsage: true, sessionFile }).status?.statusLine.contextPercent,
+		).toBeUndefined();
+		cache.writeGlobalAutoResume(true);
+		await Bun.write(configFile, "autoResume: true\n");
+		cache.writeAutoResume(project, true, true, [configFile]);
+		await Bun.write(configFile, "autoResume: false\n");
+		expect(cache.cachedAutoResume(project)).toBeUndefined();
+		cache.close();
+	});
+
 	it("refreshes zero-turn layout while preserving resumable-session facts", () => {
 		const project = path.join(root, "project");
 		const sessionFile = path.join(root, "sessions", "resumable.jsonl");

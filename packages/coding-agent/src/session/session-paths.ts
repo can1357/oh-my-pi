@@ -538,6 +538,13 @@ export function readTerminalBreadcrumbEntrySync(): TerminalBreadcrumb | null {
 	}
 }
 
+/** Whether the current terminal breadcrumb authoritatively names this cwd/session pair. */
+export function terminalBreadcrumbMatchesSessionSync(cwd: string, sessionFile: string): boolean {
+	const breadcrumb = readTerminalBreadcrumbEntrySync();
+	if (!breadcrumb || path.resolve(breadcrumb.cwd) !== path.resolve(cwd)) return false;
+	return resolveBreadcrumbToInteractiveRoot(breadcrumb.sessionFile) === path.resolve(cwd, sessionFile);
+}
+
 /**
  * Read the raw terminal breadcrumb for the current terminal.
  * Returns the recorded cwd + session file regardless of whether the recorded

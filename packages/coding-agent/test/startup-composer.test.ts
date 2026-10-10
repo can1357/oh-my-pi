@@ -351,6 +351,55 @@ describe("startup composer terminal session identity", () => {
 		}
 	});
 
+	it("skips display intent that begins beyond the live recent-session prefix", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "omp-startup-bounded-prefix-"));
+		const agentDir = path.join(root, "agent");
+		const project = path.join(root, "project");
+		const originalAgentDir = getAgentDir();
+		const originalTmuxPane = process.env.TMUX_PANE;
+		fs.mkdirSync(project);
+		process.env.TMUX_PANE = "%startup-bounded-prefix";
+		setAgentDir(agentDir);
+		const sessions = sessionDirForCwd(project);
+		const resumable = path.join(sessions, "resumable.jsonl");
+		const pending = path.join(sessions, "pending.jsonl");
+		fs.mkdirSync(sessions, { recursive: true });
+		fs.writeFileSync(
+			resumable,
+			`${JSON.stringify({ type: "session", id: "resumable", cwd: project })}\n${JSON.stringify({
+				type: "message",
+				message: { role: "user", content: "real work" },
+			})}\n`,
+		);
+		fs.writeFileSync(
+			pending,
+			`${JSON.stringify({ type: "session", id: "pending", cwd: project })}\n${JSON.stringify({
+				type: "custom",
+				customType: "todo_state",
+				data: "x".repeat(5_000),
+			})}\n${JSON.stringify({
+				type: "message",
+				message: { role: "developer", content: "persisted reminder" },
+			})}\n`,
+		);
+		fs.utimesSync(resumable, new Date("2026-01-01T00:00:00Z"), new Date("2026-01-01T00:00:00Z"));
+		fs.utimesSync(pending, new Date("2026-01-02T00:00:00Z"), new Date("2026-01-02T00:00:00Z"));
+		try {
+			expect(resolveTerminalSessionPrepaint(project)?.sessionFile).toBe(resumable);
+			const live = await SessionManager.continueRecent(project);
+			try {
+				expect(live.getSessionFile()).toBe(resumable);
+			} finally {
+				await live.close();
+			}
+		} finally {
+			setAgentDir(originalAgentDir);
+			if (originalTmuxPane === undefined) delete process.env.TMUX_PANE;
+			else process.env.TMUX_PANE = originalTmuxPane;
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
 	it("normalizes an artifact breadcrumb to the interactive parent session", () => {
 		const root = fs.mkdtempSync(path.join(os.tmpdir(), "omp-startup-artifact-breadcrumb-"));
 		const agentDir = path.join(root, "agent");

@@ -45,6 +45,7 @@ export interface PrepaintComposerPreferences extends ComposerPreferences {
 	readonly autoResume: boolean;
 	/** Persisted settings layer that may safely seed the next launch. */
 	readonly autoResumeCacheScope?: "global" | "project";
+	readonly autoResumeSourcePaths?: readonly string[];
 }
 
 interface PendingComposer {
@@ -223,6 +224,11 @@ export function applyStartupComposerPreferences(update: PrepaintComposerPreferen
 	pending.composer.enableInput();
 	pending.cache?.writeUi(pending.cwd, preferences, update.theme);
 	if (update.autoResumeCacheScope) {
-		pending.cache?.writeAutoResume(pending.cwd, update.autoResume, update.autoResumeCacheScope === "project");
+		pending.cache?.writeAutoResume(
+			pending.cwd,
+			update.autoResume,
+			update.autoResumeCacheScope === "project",
+			update.autoResumeSourcePaths,
+		);
 	}
 }

@@ -30,7 +30,7 @@ import type { SymbolPreset } from "../theme/theme";
 import { isWordCompletionMethod } from "./word-completion";
 
 /** Bump whenever any payload format changes; older stores are cleared on open. */
-const FORMAT_VERSION = 7;
+const FORMAT_VERSION = 8;
 /** Project key of rows that serve every project lacking its own. */
 const ANY_PROJECT = "";
 
@@ -51,6 +51,16 @@ type EntryKind = "auto-resume" | "ui" | "status";
 interface CachedAutoResume {
 	readonly value: boolean;
 	readonly projectScoped: boolean;
+	readonly sources?: readonly CachedSourceSnapshot[];
+}
+
+interface CachedSourceSnapshot {
+	readonly path: string;
+	readonly kind: "file" | "missing" | "unreadable";
+	readonly mtimeNs?: string;
+	readonly ctimeNs?: string;
+	readonly inode?: string;
+	readonly size?: string;
 }
 
 /** Theme inputs cached from the last resolved settings load for stable prepaint colors. */
@@ -109,7 +119,51 @@ function parseCachedAutoResume(value: unknown): CachedAutoResume | undefined {
 	if (!isRecord(value) || typeof value.value !== "boolean" || typeof value.projectScoped !== "boolean") {
 		return undefined;
 	}
+	if (value.sources !== undefined) {
+		if (!Array.isArray(value.sources) || !value.sources.every(isCachedSourceSnapshot)) return undefined;
+		return { value: value.value, projectScoped: value.projectScoped, sources: value.sources };
+	}
 	return { value: value.value, projectScoped: value.projectScoped };
+}
+
+function isCachedSourceSnapshot(value: unknown): value is CachedSourceSnapshot {
+	if (!isRecord(value) || typeof value.path !== "string") return false;
+	if (value.kind === "missing" || value.kind === "unreadable") return true;
+	return (
+		value.kind === "file" &&
+		typeof value.mtimeNs === "string" &&
+		typeof value.ctimeNs === "string" &&
+		typeof value.inode === "string" &&
+		typeof value.size === "string"
+	);
+}
+
+function snapshotSource(sourcePath: string): CachedSourceSnapshot {
+	const resolved = path.resolve(sourcePath);
+	try {
+		const stat = fs.statSync(resolved, { bigint: true, throwIfNoEntry: false });
+		if (!stat?.isFile()) return { path: resolved, kind: "missing" };
+		return {
+			path: resolved,
+			kind: "file",
+			mtimeNs: stat.mtimeNs.toString(),
+			ctimeNs: stat.ctimeNs.toString(),
+			inode: stat.ino.toString(),
+			size: stat.size.toString(),
+		};
+	} catch {
+		return { path: resolved, kind: "unreadable" };
+	}
+}
+
+function snapshotSources(sourcePaths: readonly string[]): CachedSourceSnapshot[] {
+	return [...new Set(sourcePaths.map(sourcePath => path.resolve(sourcePath)))].sort().map(snapshotSource);
+}
+
+function cachedAutoResumeIsFresh(value: CachedAutoResume | undefined): value is CachedAutoResume {
+	if (!value) return false;
+	if (!value.sources) return true;
+	return value.sources.every(source => JSON.stringify(snapshotSource(source.path)) === JSON.stringify(source));
 }
 
 function parseUiState(
@@ -255,7 +309,13 @@ export class ComposerCache {
 		const ui = parseUiState(parseJson(own.ui)) ?? parseUiState(parseJson(anyProject.ui));
 		const ownAutoResume = parseCachedAutoResume(parseJson(own["auto-resume"]));
 		const globalAutoResume = parseCachedAutoResume(parseJson(anyProject["auto-resume"]));
-		const autoResume = ownAutoResume?.projectScoped ? ownAutoResume.value : globalAutoResume?.value;
+		const autoResume = ownAutoResume?.projectScoped
+			? cachedAutoResumeIsFresh(ownAutoResume)
+				? ownAutoResume.value
+				: undefined
+			: cachedAutoResumeIsFresh(globalAutoResume)
+				? globalAutoResume.value
+				: undefined;
 		const cachedStatus = parseCachedStatus(parseJson(own.status)) ?? parseCachedStatus(parseJson(anyProject.status));
 		const canReuseSessionUsage =
 			options.allowSessionUsage &&
@@ -313,7 +373,8 @@ export class ComposerCache {
 			logger.debug("composer cache auto-resume read failed", { error: String(error) });
 			return undefined;
 		}
-		return own?.projectScoped ? own.value : global?.value;
+		if (own?.projectScoped) return cachedAutoResumeIsFresh(own) ? own.value : undefined;
+		return cachedAutoResumeIsFresh(global) ? global.value : undefined;
 	}
 
 	/** Resolved theme and composer settings for the next prepaint. */
@@ -329,9 +390,13 @@ export class ComposerCache {
 	}
 
 	/** Refresh the live auto-resume setting without replacing the cached UI snapshot. */
-	writeAutoResume(cwd: string, autoResume: boolean, projectScoped = false): void {
+	writeAutoResume(cwd: string, autoResume: boolean, projectScoped = false, sourcePaths: readonly string[] = []): void {
 		const project = path.resolve(cwd);
-		const value: CachedAutoResume = { value: autoResume, projectScoped };
+		const value: CachedAutoResume = {
+			value: autoResume,
+			projectScoped,
+			sources: sourcePaths.length > 0 ? snapshotSources(sourcePaths) : undefined,
+		};
 		const json = JSON.stringify(value);
 		const ownKey = `${project}\0auto-resume`;
 		const globalKey = `${ANY_PROJECT}\0auto-resume`;
@@ -357,8 +422,12 @@ export class ComposerCache {
 	}
 
 	/** Refresh inherited intent without deleting a project's explicit override row. */
-	writeGlobalAutoResume(autoResume: boolean): void {
-		const value: CachedAutoResume = { value: autoResume, projectScoped: false };
+	writeGlobalAutoResume(autoResume: boolean, sourcePaths: readonly string[] = []): void {
+		const value: CachedAutoResume = {
+			value: autoResume,
+			projectScoped: false,
+			sources: sourcePaths.length > 0 ? snapshotSources(sourcePaths) : undefined,
+		};
 		const json = JSON.stringify(value);
 		const globalKey = `${ANY_PROJECT}\0auto-resume`;
 		if (this.#known.get(globalKey) === json) return;

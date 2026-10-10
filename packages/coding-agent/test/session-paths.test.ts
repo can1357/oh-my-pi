@@ -7,6 +7,7 @@ import {
 	hasPositiveMovedProjectEvidence,
 	readCwdIdentity,
 	readTerminalBreadcrumbEntrySync,
+	terminalBreadcrumbMatchesSessionSync,
 	writeTerminalBreadcrumb,
 } from "@oh-my-pi/pi-coding-agent/session/session-paths";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
@@ -99,6 +100,28 @@ describe("hasPositiveMovedProjectEvidence", () => {
 });
 
 describe("custom session-file registry", () => {
+	test("recognizes only the current terminal's same-cwd interactive session", () => {
+		const agentDir = makeTempDir("omp-agent-");
+		const cwd = makeTempDir("omp-cwd-");
+		const originalAgentDir = getAgentDir();
+		const originalTmuxPane = process.env.TMUX_PANE;
+		process.env.TMUX_PANE = "%breadcrumb-owner-test";
+		setAgentDir(agentDir);
+		try {
+			const sessionFile = path.join(cwd, "session.jsonl");
+			fs.writeFileSync(sessionFile, "{}\n");
+			writeTerminalBreadcrumb(cwd, sessionFile);
+
+			expect(terminalBreadcrumbMatchesSessionSync(cwd, sessionFile)).toBeTrue();
+			expect(terminalBreadcrumbMatchesSessionSync(cwd, path.join(cwd, "other.jsonl"))).toBeFalse();
+			expect(terminalBreadcrumbMatchesSessionSync(makeTempDir("omp-other-cwd-"), sessionFile)).toBeFalse();
+		} finally {
+			setAgentDir(originalAgentDir);
+			if (originalTmuxPane === undefined) delete process.env.TMUX_PANE;
+			else process.env.TMUX_PANE = originalTmuxPane;
+		}
+	});
+
 	test("rejects stale breadcrumb targets while preserving fresh lazy boundaries", () => {
 		const agentDir = makeTempDir("omp-agent-");
 		const cwd = makeTempDir("omp-cwd-");

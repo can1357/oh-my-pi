@@ -1,6 +1,10 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { isSessionDisplayMessageRole, isSessionResumabilityEmpty } from "./session-resumability";
+import {
+	isSessionDisplayMessageRole,
+	isSessionResumabilityEmpty,
+	SESSION_RESUMABILITY_PREFIX_BYTES,
+} from "./session-resumability";
 
 interface SessionRecency {
 	readonly path: string;
@@ -37,7 +41,8 @@ function inspectSessionFileSync(sessionFile: string): { created: Date; resumable
 		const buffer = Buffer.allocUnsafe(64 * 1024);
 		const decoder = new TextDecoder();
 		let pending = "";
-		const inspect = (line: string): boolean => {
+		let lineStartByte = 0;
+		const inspect = (line: string, withinPrefix: boolean): boolean => {
 			let entry: unknown;
 			try {
 				entry = JSON.parse(line);
@@ -52,12 +57,13 @@ function inspectSessionFileSync(sessionFile: string): { created: Date; resumable
 				shortSummary?: unknown;
 				message?: { role?: unknown; content?: unknown };
 			};
-			if (record.type === "session" && typeof record.timestamp === "string") {
+			if (withinPrefix && record.type === "session" && typeof record.timestamp === "string") {
 				const timestamp = new Date(record.timestamp);
 				if (Number.isFinite(timestamp.getTime())) created = timestamp;
 			}
-			if (record.type === "session") hasHeader = true;
+			if (withinPrefix && record.type === "session") hasHeader = true;
 			if (
+				withinPrefix &&
 				!isSessionResumabilityEmpty({
 					assistantTurns: 0,
 					title:
@@ -73,7 +79,7 @@ function inspectSessionFileSync(sessionFile: string): { created: Date; resumable
 			}
 			if (record.type !== "message" || !record.message) return hasHeader && hasResumableContent;
 			const hasDisplayMessage =
-				isSessionDisplayMessageRole(record.message.role) && hasDisplayText(record.message.content);
+				withinPrefix && isSessionDisplayMessageRole(record.message.role) && hasDisplayText(record.message.content);
 			hasResumableContent ||= !isSessionResumabilityEmpty({
 				assistantTurns: record.message.role === "assistant" ? 1 : 0,
 				firstMessage: hasDisplayMessage ? "display message" : undefined,
@@ -87,13 +93,19 @@ function inspectSessionFileSync(sessionFile: string): { created: Date; resumable
 			pending += decoder.decode(buffer.subarray(0, bytes), { stream: true });
 			let newline = pending.indexOf("\n");
 			while (newline >= 0) {
-				if (inspect(pending.slice(0, newline).trim())) return { created, resumable: true };
+				const rawLine = pending.slice(0, newline);
+				if (inspect(rawLine.trim(), lineStartByte < SESSION_RESUMABILITY_PREFIX_BYTES)) {
+					return { created, resumable: true };
+				}
+				lineStartByte += Buffer.byteLength(`${rawLine}\n`);
 				pending = pending.slice(newline + 1);
 				newline = pending.indexOf("\n");
 			}
 		}
 		pending += decoder.decode();
-		if (pending.trim().length > 0) inspect(pending.trim());
+		if (pending.trim().length > 0) {
+			inspect(pending.trim(), lineStartByte < SESSION_RESUMABILITY_PREFIX_BYTES);
+		}
 		return { created, resumable: hasHeader && hasResumableContent };
 	} catch {
 		return { created, resumable: false };

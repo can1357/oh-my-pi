@@ -327,7 +327,10 @@ function globalValue(setting: AnySetting): unknown {
 /** Keep one-shot config writes coherent with the next launch's speculative status-line cache. */
 function syncAutoResumeCache(setting: AnySetting): void {
 	if (setting !== cfgAutoResume) return;
-	sharedComposerCache()?.writeGlobalAutoResume(settings.globalValue(cfgAutoResume) ?? cfgAutoResume.default);
+	sharedComposerCache()?.writeGlobalAutoResume(
+		settings.globalValue(cfgAutoResume) ?? cfgAutoResume.default,
+		settings.settingCacheSourcePaths("global"),
+	);
 }
 
 /** Where the effective value comes from when it is not the global config (or the default), if anywhere. */

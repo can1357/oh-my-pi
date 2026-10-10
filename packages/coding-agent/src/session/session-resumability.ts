@@ -6,6 +6,9 @@ export interface SessionResumabilityFacts {
 	readonly firstMessage?: string;
 }
 
+/** Prefix window the live recent-session scan uses for displayable resume intent. */
+export const SESSION_RESUMABILITY_PREFIX_BYTES = 4096;
+
 /** Message roles whose text makes a transcript visible and resumable in the session picker. */
 export function isSessionDisplayMessageRole(role: unknown): role is "user" | "developer" | "assistant" {
 	return role === "user" || role === "developer" || role === "assistant";

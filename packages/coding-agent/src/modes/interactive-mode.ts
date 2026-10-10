@@ -140,6 +140,7 @@ import { modelMentionDisplayName } from "@oh-my-pi/pi-tui/prompt/model-mention-s
 import { modelMentionChipLabel, shiftImageMarkers } from "@oh-my-pi/pi-tui/prompt/composer-attachments";
 import type { SessionContext } from "../session/session-context";
 import type { SessionManager } from "../session/session-manager";
+import { terminalBreadcrumbMatchesSessionSync } from "../session/session-paths";
 import {
 	canAutoCreateWorktree,
 	planWorktreeExit,
@@ -2408,6 +2409,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.settings.onGlobalChange([cfgAutoResume], () => {
 				sharedComposerCache()?.writeGlobalAutoResume(
 					this.settings.globalValue(cfgAutoResume) ?? cfgAutoResume.default,
+					this.settings.settingCacheSourcePaths("global"),
 				);
 			}),
 			this.settings.onProjectChange([cfgAutoResume], () => this.#syncAutoResumeCache()),
@@ -3459,6 +3461,7 @@ export class InteractiveMode implements InteractiveModeContext {
 					this.sessionManager.getCwd(),
 					cfgAutoResume.get(this.settings),
 					cacheScope === "project",
+					this.settings.settingCacheSourcePaths(cacheScope),
 				);
 			}
 		}
@@ -3628,6 +3631,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.sessionManager.getCwd(),
 			cfgAutoResume.get(this.settings),
 			cacheScope === "project",
+			this.settings.settingCacheSourcePaths(cacheScope),
 		);
 	}
 
@@ -3677,7 +3681,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		// compaction, accent, and usage facts aligned with the retained identity.
 		const preserveSessionStatus =
 			!this.sessionManager.getSessionName()?.trim() &&
-			!this.sessionManager.getEntries().some(entry => entry.type === "message");
+			!this.sessionManager.getEntries().some(entry => entry.type === "message") &&
+			!terminalBreadcrumbMatchesSessionSync(this.sessionManager.getCwd(), sessionFile);
 		const model = this.session.model;
 		const usage = this.sessionManager.getUsageStatistics();
 		// Recover the border's ANSI wrapper by coloring a sentinel and splitting around it.

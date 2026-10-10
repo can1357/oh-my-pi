@@ -10,7 +10,12 @@ import { parseJsonlLenient } from "@oh-my-pi/pi-utils/stream";
 import { toError } from "@oh-my-pi/pi-utils/type-guards";
 import { computeDefaultSessionDir } from "./session-paths";
 import { compareSessionRecency } from "./recent-session-sync";
-import { isSessionDisplayMessageRole, isSessionResumabilityEmpty, sanitizeSessionName } from "./session-resumability";
+import {
+	isSessionDisplayMessageRole,
+	isSessionResumabilityEmpty,
+	sanitizeSessionName,
+	SESSION_RESUMABILITY_PREFIX_BYTES,
+} from "./session-resumability";
 import { FileSessionStorage, type SessionStorage, type SessionStorageStat } from "./session-storage";
 import { lookupSessionTitle, recordSessionTitle } from "./session-index";
 
@@ -66,7 +71,7 @@ export interface RecentSessionInfo {
 	timeAgo: string;
 }
 
-const SESSION_LIST_PREFIX_BYTES = 4096;
+const SESSION_LIST_PREFIX_BYTES = SESSION_RESUMABILITY_PREFIX_BYTES;
 /**
  * Tail window read to derive {@link SessionStatus}. Large enough to capture a
  * typical final assistant turn (thinking + text); when the final message exceeds

@@ -1620,6 +1620,17 @@ export class Settings {
 		return this.#agentDir;
 	}
 
+	/** Files whose on-disk identity validates a speculative cached setting value. */
+	settingCacheSourcePaths(scope: "global" | "project"): readonly string[] {
+		if (scope === "global") {
+			const own = MAIN_CONFIG_FILENAMES.map(filename => path.join(this.#agentDir, filename));
+			return this.#parent ? [...new Set([...this.#parent.settingCacheSourcePaths(scope), ...own])] : own;
+		}
+		const nativeProjectConfig = path.join(getProjectAgentDir(this.#cwd), "config.yml");
+		const own = [nativeProjectConfig, ...this.#projectSourcePaths];
+		return this.#parent ? [...new Set([...this.#parent.settingCacheSourcePaths(scope), ...own])] : [...new Set(own)];
+	}
+
 	/**
 	 * Monotonic revision for consumers caching derived effective settings.
 	 * Changes after every merged-layer or cwd-scope rebuild, including overlays
