@@ -138,9 +138,9 @@ test("the model hub describes a data-first picker when the terminal has the kind
 	const hub = openHub({ assign: [], cancel: 0 });
 	expect(hub.nativeSheet(withPicker)).toBe(true);
 	expect(hub.nativeSheet(withoutPicker)).toBe(false);
-	expect(hub.describe(withoutPicker).k).not.toBe("picker");
+	expect(hub.describe(withoutPicker)!.k).not.toBe("picker");
 
-	const root = hub.describe(withPicker);
+	const root = hub.describe(withPicker)!;
 	const p = props(root);
 	expect(p).toMatchObject({ size: "lg", layout: "rows", preview: "side", icon: "cpu", title: "Models", scope: "all" });
 	expect(p.scopes?.map(scope => [scope.id, scope.count, scope.group])).toEqual([
@@ -174,7 +174,7 @@ test("Factory Droid rows carry the base credit rate and a credit-only model is n
 		factoryDroidCredits: 0.5,
 	};
 	const hub = openHub({ assign: [], cancel: 0 }, [...MODELS, priced, creditOnly]);
-	const items = props(hub.describe(withPicker)).items ?? [];
+	const items = props(hub.describe(withPicker)!).items ?? [];
 	const row = (id: string) => items.find(entry => entry.id === `factory-droid/${id}`);
 	expect(row("claude-opus-5")?.facts?.price).toBe("$3·15 2×");
 	expect(row("preview-credit-model")?.facts?.price).toBe("0.5×");
@@ -183,9 +183,9 @@ test("Factory Droid rows carry the base credit rate and a credit-only model is n
 
 test("typing changes the order, hits, counts and head total but never the catalogue", () => {
 	const hub = openHub({ assign: [], cancel: 0 });
-	const before = props(hub.describe(withPicker));
+	const before = props(hub.describe(withPicker)!);
 	for (const ch of "sonnet") hub.handleInput(ch);
-	const after = props(hub.describe(withPicker));
+	const after = props(hub.describe(withPicker)!);
 	expect(after.items).toBe(before.items);
 	expect(after.query).toBe("sonnet");
 	expect(after.order).toEqual(["anthropic/claude-sonnet-5-5"]);
@@ -211,12 +211,12 @@ test("a re-sync that moves a role patches the catalogue instead of resending it"
 		},
 	);
 	hubs.push(hub);
-	const first = props(hub.describe(withPicker));
+	const first = props(hub.describe(withPicker)!);
 	expect(first.itemsAdd).toBeUndefined();
 
 	roles.default = "openai/gpt-5.6";
 	hub.refreshAfterExternalMutation();
-	const moved = props(hub.describe(withPicker));
+	const moved = props(hub.describe(withPicker)!);
 	expect(moved.items).toBe(first.items);
 	expect(moved.itemsAdd?.map(row => [row.id, row.chips?.map(chip => chip.text)]).sort()).toEqual([
 		["demo/demo", undefined],
@@ -226,7 +226,7 @@ test("a re-sync that moves a role patches the catalogue instead of resending it"
 	// Back to the original: the terminal kept the patch, so the reverted rows are still sent.
 	roles.default = "demo/demo";
 	hub.refreshAfterExternalMutation();
-	const reverted = props(hub.describe(withPicker));
+	const reverted = props(hub.describe(withPicker)!);
 	expect(reverted.items).toBe(first.items);
 	expect(reverted.itemsAdd?.map(row => [row.id, row.chips?.map(chip => chip.text)]).sort()).toEqual([
 		["demo/demo", ["default"]],
@@ -241,14 +241,14 @@ test("pointer events drive the hub through the same paths as its keys", () => {
 		hub.handleNativeEvent({ type: "action", key: "", act, value, mods: [] });
 
 	hub.handleNativeEvent({ type: "select", key: "", item: "openai/gpt-5.6" });
-	let p = props(hub.describe(withPicker));
+	let p = props(hub.describe(withPicker)!);
 	expect(p.selected).toBe("openai/gpt-5.6");
 	expect(p.focus).toBe("list");
-	expect(titleOf(hub.describe(withPicker).c)).toBe("gpt-5.6");
+	expect(titleOf(hub.describe(withPicker)!.c)).toBe("gpt-5.6");
 
 	// Activate = Enter: the role-assignment strip opens and takes the focus.
 	hub.handleNativeEvent({ type: "activate", key: "", item: "openai/gpt-5.6" });
-	p = props(hub.describe(withPicker));
+	p = props(hub.describe(withPicker)!);
 	expect(p.focus).toBe("strip");
 	expect(p.strip?.items.map(chip => chip.label).slice(0, 2)).toEqual(["default", "smol"]);
 	act("strip", "1");
@@ -257,17 +257,17 @@ test("pointer events drive the hub through the same paths as its keys", () => {
 	// The kind tab and scope clicks land where alt+→ and the sidebar do.
 	act("close");
 	act("tab", "image");
-	expect(props(hub.describe(withPicker)).tab).toBe("image");
+	expect(props(hub.describe(withPicker)!).tab).toBe("image");
 	act("tab", "all");
 	act("scope", "provider:openai");
-	p = props(hub.describe(withPicker));
+	p = props(hub.describe(withPicker)!);
 	expect(p.scope).toBe("provider:openai");
 	expect(p.order?.filter(entry => typeof entry === "string")).toEqual(["openai/gpt-5.6", "openai/gpt-5.6-mini"]);
 	expect(p.actions?.map(action => action.id)).toContain("refresh");
 
 	// Roles scope: roles with their fallback chain one level deep.
 	act("scope", "roles");
-	p = props(hub.describe(withPicker));
+	p = props(hub.describe(withPicker)!);
 	expect(p.items?.find(entry => entry.id === "fallback:default:0")).toMatchObject({
 		label: "openai/gpt-5.6",
 		depth: 1,
@@ -281,7 +281,7 @@ test("pointer events drive the hub through the same paths as its keys", () => {
 	act("scope", "all");
 	hub.handleInput("x");
 	act("close");
-	expect(props(hub.describe(withPicker)).query).toBe("");
+	expect(props(hub.describe(withPicker)!).query).toBe("");
 	expect(calls.cancel).toBe(0);
 	act("close");
 	expect(calls.cancel).toBe(1);
@@ -310,7 +310,7 @@ test("the Roles view picker names the active preset and ctrl+←/→ switches it
 	);
 	hubs.push(hub);
 	const subtitleText = () => {
-		const subtitle = props(hub.describe(withPicker)).subtitle;
+		const subtitle = props(hub.describe(withPicker)!).subtitle;
 		return Array.isArray(subtitle) ? subtitle.map(part => part.t).join("") : subtitle;
 	};
 
@@ -374,7 +374,7 @@ test("shows a non-default service tier's own speed aggregate", () => {
 		{ currentSelector: "demo/demo" },
 	);
 	hubs.push(hub);
-	const items = props(hub.describe(withPicker)).items ?? [];
+	const items = props(hub.describe(withPicker)!).items ?? [];
 	const speed = (id: string) => items.find(entry => entry.id === id)?.facts?.speed;
 	// The tier the host would send wins over the standard aggregate.
 	expect(speed("openai/gpt-5.6")).toBe("300 ultrafast");

@@ -33,6 +33,7 @@ export interface SetupHost extends SetupUiHost {
 	refreshModels(): Promise<void>;
 	selectModel(model: Model, selector: string): Promise<void>;
 	refreshProvider(provider: string): Promise<void>;
+	addCustomProvider?(provider: { id: string; baseUrl: string; apiKey: string }): Promise<void>;
 	saveComposerShape(shape: ComposerShape): Promise<void>;
 	saveSymbolPreset(preset: SymbolPreset): void;
 	saveColorBlindMode(enabled: boolean): void;

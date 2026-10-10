@@ -959,6 +959,11 @@ export class ModelRegistry {
 		return warnings;
 	}
 
+	/** The `models.yml` this registry loads; writers must edit this instance so they target the file it reads. */
+	get modelsConfigFile(): ConfigFile<ModelsConfig> {
+		return this.#modelsConfigFile;
+	}
+
 	#loadModels() {
 		this.#resetStaticComposition();
 		// Load custom config first (to know which providers to override).

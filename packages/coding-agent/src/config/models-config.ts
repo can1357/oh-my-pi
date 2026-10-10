@@ -194,10 +194,8 @@ export function getUnknownCompatKeys(config: ModelsConfig): string[] {
 	return unknownKeys;
 }
 
-export const ModelsConfigFile = new ConfigFile<ModelsConfig>("models", {
-	kind: "deferred",
-	resolve: getModelsConfigSchema,
-}).withValidation("models", config => {
+/** Provider-level checks a loadable `models.yml` must pass beyond its schema. */
+export function validateModelsConfigProviders(config: ModelsConfig): void {
 	const providers = config.providers ?? {};
 	for (const providerName in providers) {
 		const providerConfig = providers[providerName];
@@ -221,4 +219,9 @@ export const ModelsConfigFile = new ConfigFile<ModelsConfig>("models", {
 			"models-config",
 		);
 	}
-});
+}
+
+export const ModelsConfigFile = new ConfigFile<ModelsConfig>("models", {
+	kind: "deferred",
+	resolve: getModelsConfigSchema,
+}).withValidation("models", validateModelsConfigProviders);

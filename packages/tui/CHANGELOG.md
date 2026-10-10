@@ -271,6 +271,10 @@
 ### Removed
 
 - Removed `JobsPanel`, the `/jobs` transcript block; `/jobs` now opens `JobsSheet` natively ([#14138](https://github.com/can1357/oh-my-pi/pull/14138) by [@H4vC](https://github.com/H4vC)).
+### Added
+
+- Added a custom OpenAI-compatible endpoint option to the setup provider list ([#12997](https://github.com/can1357/oh-my-pi/pull/12997) by [@DrB0rk](https://github.com/DrB0rk)).
+- Added a provider editor to the `/models` hub for adding, editing, and deleting custom OpenAI-compatible providers (`+ Add provider…`, `Ctrl+N` / `Ctrl+E` / `Ctrl+D`); saves keep `models.yml` comments ([#13874](https://github.com/can1357/oh-my-pi/pull/13874) by [@andrebrait](https://github.com/andrebrait)).
 
 ## [18.4.12] - 2026-10-02
 
