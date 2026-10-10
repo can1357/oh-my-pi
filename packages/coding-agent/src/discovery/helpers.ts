@@ -12,6 +12,7 @@ import {
 	parseFrontmatter,
 	tryParseJson,
 } from "@oh-my-pi/pi-utils";
+import * as logger from "@oh-my-pi/pi-utils/logger";
 import { isUserSourceEnabled } from "../capability";
 import type { ContextFile } from "../capability/context-file";
 import type { ExtensionModule } from "../capability/extension-module";
@@ -235,10 +236,23 @@ function buildRule(
 		rawMode === "never" || rawMode === "prose-only" || rawMode === "tool-only" || rawMode === "always"
 			? rawMode
 			: undefined;
+	let reminder: string | undefined;
+	if (frontmatter.reminder !== undefined) {
+		if (
+			typeof frontmatter.reminder === "string" &&
+			frontmatter.reminder.trim().length > 0 &&
+			Buffer.byteLength(frontmatter.reminder) <= 1024
+		) {
+			reminder = frontmatter.reminder;
+		} else {
+			logger.warn("Invalid rule reminder: retaining full instructions", { path: filePath });
+		}
+	}
 	return {
 		name: resolvedName,
 		path: filePath,
 		content: body,
+		reminder,
 		globs,
 		alwaysApply: frontmatter.alwaysApply === true,
 		description: typeof frontmatter.description === "string" ? frontmatter.description : undefined,

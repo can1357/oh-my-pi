@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added optional rule frontmatter `reminder` for explicitly authored operational TTSR instructions (nonempty, at most 1024 UTF-8 bytes). All TTSR delivery channels use it while retaining complete rule bodies for normal readers; absent or invalid reminders keep the full instructions instead of truncating or disabling rules.
+
 ## [18.8.9] - 2026-10-10
 
 ### Added

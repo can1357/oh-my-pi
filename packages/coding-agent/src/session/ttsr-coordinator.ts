@@ -15,7 +15,7 @@ import {
 } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, Judge, ToolCall } from "@oh-my-pi/pi-ai";
 import { logger, prompt, relativePathWithinRoot, withTimeout } from "@oh-my-pi/pi-utils";
-import type { Rule } from "../capability/rule";
+import { ruleReminderContent, type Rule } from "../capability/rule";
 import type { Settings } from "../config/settings";
 import {
 	judgeRules,
@@ -228,7 +228,7 @@ export class TtsrCoordinator {
 				prompt.render(ttsrInterruptTemplate, {
 					name: rule.name,
 					path: this.#displayRulePath(rule.path),
-					content: rule.content,
+					content: ruleReminderContent(rule),
 				}),
 			)
 			.join("\n\n");
@@ -318,7 +318,7 @@ export class TtsrCoordinator {
 				prompt.render(ttsrToolReminderTemplate, {
 					name: rule.name,
 					path: this.#displayRulePath(rule.path),
-					content: rule.content,
+					content: ruleReminderContent(rule),
 				}),
 			)
 			.join("\n\n");
@@ -355,7 +355,7 @@ export class TtsrCoordinator {
 				prompt.render(ttsrInterruptTemplate, {
 					name: rule.name,
 					path: this.#displayRulePath(rule.path),
-					content: rule.content,
+					content: ruleReminderContent(rule),
 				}),
 			)
 			.join("\n\n");
@@ -579,7 +579,7 @@ export class TtsrCoordinator {
 					name: rule.name,
 					path: this.#displayRulePath(rule.path),
 					subject: output.subject,
-					content: rule.content,
+					content: ruleReminderContent(rule),
 				}),
 			)
 			.join("\n\n");

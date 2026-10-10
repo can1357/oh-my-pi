@@ -24,6 +24,8 @@ export interface RuleFrontmatter {
 	/** Whether discovery should omit this rule. */
 	enabled?: boolean;
 	description?: string;
+	/** Explicit operational TTSR payload; the full Markdown body remains available. */
+	reminder?: string;
 	globs?: string[];
 	alwaysApply?: boolean;
 	/** New key for TTSR match conditions. */
@@ -51,6 +53,8 @@ export interface Rule {
 	path: string;
 	/** Rule content (after frontmatter stripped) */
 	content: string;
+	/** Explicit operational TTSR payload, at most 1024 UTF-8 bytes. */
+	reminder?: string;
 	/** Globs this rule applies to (if any) */
 	globs?: string[];
 	/** Whether to always include this rule */
@@ -75,6 +79,15 @@ export interface Rule {
 	interruptMode?: "never" | "prose-only" | "tool-only" | "always";
 	/** Source metadata */
 	_source: SourceMeta;
+}
+
+/** Invalid summaries never disable a rule or silently truncate its instructions. */
+export function ruleReminderContent(rule: Rule): string {
+	return typeof rule.reminder === "string" &&
+		rule.reminder.trim().length > 0 &&
+		Buffer.byteLength(rule.reminder) <= 1024
+		? rule.reminder
+		: rule.content;
 }
 
 function normalizeRuleField(value: unknown): string[] | undefined {

@@ -39,6 +39,7 @@ interface Rule {
   name: string;
   path: string;
   content: string;
+  reminder?: string;
   globs?: string[];
   alwaysApply?: boolean;
   description?: string;
@@ -56,6 +57,14 @@ Capability identity is `rule.name` (`ruleCapability.key = rule => rule.name`).
 
 Consequence: precedence and deduplication are **name-based only**. Two different files with the same `name` are considered the same logical rule.
 
+
+### Operational TTSR reminders
+
+Markdown frontmatter may provide an explicit `reminder` string containing the active corrective instructions, authorization/privacy boundaries, and legitimate exceptions. It must contain non-whitespace text and fit within **1024 UTF-8 bytes**. All shared Markdown discovery providers preserve this field.
+
+TTSR's bridged interrupts, per-tool passive context, deferred stream injections, and judged warnings render the operational reminder. The full Markdown `content` remains unchanged for `rule://` and normal rulebook/always-apply consumers: history and POS/NEG evidence are not deleted. Existing rules without `reminder` retain their full-body injection behavior. Invalid summaries log a path-only warning and fall back to the full instructions rather than disabling the rule or truncating safety constraints. Programmatic rules receive the same safe fallback at rendering.
+
+The byte limit applies to each operational body, not template framing or a combined multi-rule message. This is explicit authoring, not automatic heading extraction or byte slicing. Rule authors must preserve safety exceptions outside their corrective-action section; absence of a trigger does not create permission.
 ## 2. Discovery sources and normalization
 
 `src/discovery/index.ts` auto-registers providers. For `rules`, current providers are:

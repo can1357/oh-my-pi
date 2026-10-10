@@ -158,6 +158,23 @@ describe("TTSR judged rules", () => {
 		expect(warnings).toHaveLength(0);
 	});
 
+	it("delivers explicit operational guidance after judgment while retaining the full rule", async () => {
+		const rule = judgedRule("no-todo", {
+			question: HAS_TODO,
+			scope: ["text"],
+			content: "Approval remains human-only. HISTORICAL_CASE",
+			reminder: "Approval remains human-only. Do not publish private data.",
+		});
+		const { judge } = fakeJudge({ [HAS_TODO]: 0.9 });
+		const { coordinator, warnings } = setup([rule], judge);
+		coordinator.onAssistantMessageEnd(assistant([{ type: "text", text: "TODO: later" }]));
+		await coordinator.settleJudgments();
+		expect(warnings[0].content).toContain("Approval remains human-only");
+		expect(warnings[0].content).toContain("Do not publish private data");
+		expect(warnings[0].content).not.toContain("HISTORICAL_CASE");
+		expect(rule.content).toContain("HISTORICAL_CASE");
+	});
+
 	it("sends as much output as fits Jev's state budget, measured in Jev tokens", async () => {
 		const { judge, requests } = fakeJudge({});
 		const { coordinator } = setup([judgedRule("no-todo", { question: HAS_TODO, scope: ["text"] })], judge);

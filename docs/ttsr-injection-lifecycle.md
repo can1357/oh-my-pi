@@ -2,6 +2,8 @@
 
 This document covers the current Time Traveling Stream Rules (TTSR) runtime path from rule discovery to stream interruption, retry injection, extension notifications, and session-state handling.
 
+
+TTSR renders an explicit nonempty `Rule.reminder` of at most 1024 UTF-8 bytes when available, otherwise the complete `Rule.content`. This applies to immediate bridged-tool blocks, per-tool passive context, deferred stream injections, and judged warnings. Full rule bodies remain available to rulebook and `rule://` readers. Invalid Markdown reminders emit a path-only diagnostic and retain full instructions; they never disable the rule or silently truncate authorization/privacy boundaries. The limit excludes the trusted template and aggregation of multiple rules. Scope, matching, repeat policy, and interruption mode are unchanged.
 ## Implementation files
 
 - [`packages/coding-agent/src/sdk.ts`](../packages/coding-agent/src/sdk.ts)
