@@ -2047,6 +2047,7 @@ mod tests {
 			' ' => key(49, false, false),
 			'\r' => key(36, false, false),
 			'€' => key(19, true, true),
+			'å' => key(0, false, true),
 			_ => None,
 		}
 	}
@@ -2189,6 +2190,11 @@ mod tests {
 		assert!(
 			modified_text(&typed_keys("ab", us_stroke, Some(RemoteScreen::KeyEvents)).unwrap())
 				.is_empty()
+		);
+		// Option alone also needs a modifier the remote reads from the keyboard.
+		assert_eq!(
+			modified_text(&typed_keys("aå", us_stroke, Some(RemoteScreen::KeyEvents)).unwrap()),
+			["å"]
 		);
 	}
 
