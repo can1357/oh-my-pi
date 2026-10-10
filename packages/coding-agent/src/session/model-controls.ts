@@ -75,6 +75,7 @@ export class ModelControls {
 	readonly #host: ModelControlsHost;
 	#scopedModels: Array<{ model: Model; thinkingLevel?: ThinkingLevel }>;
 	#thinkingLevel: ThinkingLevel | undefined;
+	#configuredThinkingSelector: ConfiguredThinkingLevel | undefined;
 	/** Hard per-session effort ceiling (e.g. a task spawn's `task.maxEffort` cap); recovery paths re-clamp to it. */
 	readonly #thinkingLevelCeiling: Effort | undefined;
 	#autoThinking = false;
@@ -86,6 +87,7 @@ export class ModelControls {
 		options: {
 			scopedModels?: Array<{ model: Model; thinkingLevel?: ThinkingLevel }>;
 			thinkingLevel?: ConfiguredThinkingLevel;
+			configuredThinkingSelector?: ConfiguredThinkingLevel;
 			thinkingLevelCeiling?: Effort;
 			serviceTierByFamily?: ServiceTierByFamily;
 		},
@@ -94,6 +96,7 @@ export class ModelControls {
 		this.#scopedModels = options.scopedModels ?? [];
 		this.#serviceTierByFamily = options.serviceTierByFamily ?? {};
 		this.#thinkingLevelCeiling = options.thinkingLevelCeiling;
+		this.#configuredThinkingSelector = options.configuredThinkingSelector ?? options.thinkingLevel;
 		if (options.thinkingLevel === AUTO_THINKING) {
 			// Keep auto pending until the first turn while exposing a valid wire effort.
 			this.#autoThinking = true;
@@ -131,6 +134,11 @@ export class ModelControls {
 		return this.#autoThinking ? AUTO_THINKING : this.#thinkingLevel;
 	}
 
+	/** User-selected effort before model metadata or session ceilings clamp it. */
+	getConfiguredThinkingLevel(): ConfiguredThinkingLevel | undefined {
+		return this.#configuredThinkingSelector;
+	}
+
 	/** Whether per-turn automatic thinking classification is enabled. */
 	get isAutoThinking(): boolean {
 		return this.#autoThinking;
@@ -165,6 +173,7 @@ export class ModelControls {
 
 	/** Restores thinking state from a transcript without persisting a new entry. */
 	restoreThinkingLevel(level: ConfiguredThinkingLevel | undefined): void {
+		this.#configuredThinkingSelector = level;
 		this.#autoThinking = level === AUTO_THINKING;
 		this.#autoResolvedLevel = undefined;
 		this.#thinkingLevel =
@@ -182,7 +191,13 @@ export class ModelControls {
 	}
 
 	/** Restores an exact thinking snapshot after a failed session switch. */
-	restoreThinkingSnapshot(level: ThinkingLevel | undefined, auto: boolean, resolved: Effort | undefined): void {
+	restoreThinkingSnapshot(
+		level: ThinkingLevel | undefined,
+		auto: boolean,
+		resolved: Effort | undefined,
+		configured: ConfiguredThinkingLevel | undefined,
+	): void {
+		this.#configuredThinkingSelector = configured;
 		this.#thinkingLevel = level;
 		this.#autoThinking = auto;
 		this.#autoResolvedLevel = resolved;
@@ -514,6 +529,8 @@ export class ModelControls {
 	 * user turn. Later classifications persist only changed concrete resolutions.
 	 */
 	setThinkingLevel(level: ConfiguredThinkingLevel | undefined, persist: boolean = false): void {
+		const previousSelector = this.#configuredThinkingSelector;
+		this.#configuredThinkingSelector = level;
 		if (level === AUTO_THINKING) {
 			const provisional = clampThinkingLevelToCeiling(
 				this.#model,
@@ -550,18 +567,18 @@ export class ModelControls {
 		// Leaving auto must persist even when the resolved effort is unchanged (e.g.
 		// auto resolved to medium, then the user pins medium): otherwise the latest
 		// session entry keeps `configured: "auto"` and resume re-enables auto.
-		const isChanging = wasAuto || effectiveLevel !== this.#thinkingLevel;
+		const isChanging = wasAuto || effectiveLevel !== this.#thinkingLevel || previousSelector !== level;
 
 		this.#thinkingLevel = effectiveLevel;
 		this.#applyThinkingLevelToAgent(effectiveLevel);
 
 		if (isChanging) {
 			this.#host.clearInheritedProviderPromptCacheKey();
-			this.#host.sessionManager.appendThinkingLevelChange(effectiveLevel, effectiveLevel);
+			this.#host.sessionManager.appendThinkingLevelChange(effectiveLevel, level);
 			if (persist && effectiveLevel !== undefined && effectiveLevel !== ThinkingLevel.Off) {
 				cfgDefaultThinkingLevel.set(this.#host.settings, effectiveLevel);
 			}
-			this.#host.emit({ type: "thinking_level_changed", thinkingLevel: effectiveLevel });
+			this.#host.emit({ type: "thinking_level_changed", thinkingLevel: effectiveLevel, configured: level });
 		}
 	}
 
@@ -571,7 +588,9 @@ export class ModelControls {
 	 * preferred default or the current effective level.
 	 */
 	#reapplyThinkingLevel(preferredDefault?: ThinkingLevel): void {
-		this.setThinkingLevel(this.#autoThinking ? AUTO_THINKING : (preferredDefault ?? this.#thinkingLevel));
+		this.setThinkingLevel(
+			this.#autoThinking ? AUTO_THINKING : (preferredDefault ?? this.#configuredThinkingSelector),
+		);
 	}
 
 	/** All selectable effort selectors for the active model, in cycle order. */

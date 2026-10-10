@@ -298,6 +298,8 @@
 
 ### Added
 
+- Expose the configured thinking selector to extensions with `getConfiguredThinkingLevel()` ([#14562](https://github.com/can1357/oh-my-pi/issues/14562), [#14580](https://github.com/can1357/oh-my-pi/pull/14580) by [@Dante-dan](https://github.com/Dante-dan)).
+
 - Added an agents HUD pill counting running subagents, opening the agent hub on click
 - In Tern the thinking level shows as the composer model chip's icon instead of a separate chip, still cycling on click, while `statusLine.compactThinkingLevel` (Compact Thinking Level, on by default) is on
 - Added `computer.zoom()` and window-local `zoom()` in JavaScript and Python Eval, with native-detail region captures that preserve full-screenshot click coordinates.

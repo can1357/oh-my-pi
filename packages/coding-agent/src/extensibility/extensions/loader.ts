@@ -6,6 +6,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
 import * as zod from "@oh-my-pi/omptype/zod";
+import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
 import type { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type {
 	ImageContent,
@@ -147,6 +148,10 @@ export class ExtensionRuntime implements IExtensionRuntime {
 	}
 
 	getThinkingLevel(): ThinkingLevel {
+		throw new ExtensionRuntimeNotInitializedError();
+	}
+
+	getConfiguredThinkingLevel(): ConfiguredThinkingLevel | undefined {
 		throw new ExtensionRuntimeNotInitializedError();
 	}
 
@@ -334,6 +339,10 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 
 	getThinkingLevel(): ThinkingLevel | undefined {
 		return this.runtime.getThinkingLevel();
+	}
+
+	getConfiguredThinkingLevel(): ConfiguredThinkingLevel | undefined {
+		return this.runtime.getConfiguredThinkingLevel?.();
 	}
 
 	setThinkingLevel(level: ThinkingLevel, persist?: boolean): void {

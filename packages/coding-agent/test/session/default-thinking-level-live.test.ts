@@ -43,7 +43,10 @@ describe("defaultThinkingLevel on running sessions", () => {
 
 	const start = async (
 		settings: Settings,
-		extra: Pick<CreateAgentSessionOptions, "thinkingLevel" | "taskDepth" | "parentTaskPrefix" | "agentId">,
+		extra: Pick<
+			CreateAgentSessionOptions,
+			"thinkingLevel" | "thinkingLevelCeiling" | "taskDepth" | "parentTaskPrefix" | "agentId"
+		>,
 	): Promise<AgentSession> => {
 		const cwd = path.join(os.tmpdir(), `pi-thinking-default-${Snowflake.next()}`);
 		tempDirs.push(cwd);
@@ -90,6 +93,20 @@ describe("defaultThinkingLevel on running sessions", () => {
 		// re-steered by the parent's edit either.
 		expect(cfgDefaultThinkingLevel.get(subagent.settings)).toBe(Effort.High);
 		expect(cfgDefaultThinkingLevel.get(createSubagentSettings(subagent.settings))).toBe(Effort.High);
+	});
+
+	it("distinguishes a selected max from explicit high when the session ceiling clamps both", async () => {
+		const session = await start(Settings.isolated(), {
+			thinkingLevel: Effort.Max,
+			thinkingLevelCeiling: Effort.High,
+		});
+		expect(session.thinkingLevel).toBe(Effort.High);
+		expect(session.getConfiguredThinkingLevel()).toBe(Effort.Max);
+		session.setThinkingLevel(Effort.High);
+		expect(session.thinkingLevel).toBe(Effort.High);
+		expect(session.getConfiguredThinkingLevel()).toBe(Effort.High);
+		session.setThinkingLevel("auto");
+		expect(session.getConfiguredThinkingLevel()).toBe("auto");
 	});
 
 	it("switches the main session only for a settings-panel change, not a plain settings write", async () => {

@@ -6,10 +6,11 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { Type } from "@oh-my-pi/omptype/typebox";
-import type { AgentMessage, AgentTool, AgentToolContext } from "@oh-my-pi/pi-agent-core";
+import type { AgentMessage, AgentTool, AgentToolContext, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import { streamAnthropic } from "@oh-my-pi/pi-ai/providers/anthropic";
 import type { MessageCreateParams } from "@oh-my-pi/pi-ai/providers/anthropic-wire";
-import type { ImageContent, TextContent } from "@oh-my-pi/pi-ai";
+import { Effort, type ImageContent, type TextContent } from "@oh-my-pi/pi-ai";
+import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
 import { kCursorExecResolved } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { convertToLlm, wrapSteeringForModel } from "@oh-my-pi/pi-coding-agent/session/messages";
@@ -160,6 +161,73 @@ describe("ExtensionRunner", () => {
 
 		runner.initialize(actions, contextActions, undefined, undefined, "tui");
 		expect(runner.createContext().mode).toBe("tui");
+	});
+
+	it("preserves the configured auto selector when resolved effort changes", async () => {
+		fs.writeFileSync(
+			path.join(extensionsDir, "configured-thinking.ts"),
+			`
+			export default function(pi) {
+				pi.on("session_start", () => {
+					pi.appendEntry("thinking-observation", {
+						resolved: pi.getThinkingLevel(), configured: pi.getConfiguredThinkingLevel()
+					});
+				});
+			}
+		`,
+		);
+		const result = await loadTestExtensions();
+		expect(result.errors).toEqual([]);
+		const observations: unknown[] = [];
+		let resolved: ThinkingLevel = Effort.Low;
+		let configured: ConfiguredThinkingLevel = "auto";
+		const runner = new ExtensionRunner(
+			result.extensions,
+			result.runtime,
+			tempDir.path(),
+			sessionManager,
+			modelRegistry,
+		);
+		runner.initialize(
+			{
+				sendMessage: () => {},
+				sendUserMessage: () => {},
+				appendEntry: (_type, data) => {
+					observations.push(data);
+				},
+				setLabel: () => {},
+				getActiveTools: () => [],
+				getAllTools: () => [],
+				setActiveTools: async () => {},
+				getCommands: () => [],
+				setModel: async () => false,
+				getThinkingLevel: () => resolved,
+				getConfiguredThinkingLevel: () => configured,
+				setThinkingLevel: () => {},
+				getSessionName: () => undefined,
+				setSessionName: async () => {},
+			},
+			{
+				getModel: () => undefined,
+				isIdle: () => true,
+				abort: () => {},
+				hasPendingMessages: () => false,
+				shutdown: () => {},
+				getContextUsage: () => undefined,
+				compact: async () => {},
+				getSystemPrompt: () => [],
+			},
+		);
+		await runner.emit({ type: "session_start" });
+		resolved = Effort.High;
+		await runner.emit({ type: "session_start" });
+		configured = Effort.High;
+		await runner.emit({ type: "session_start" });
+		expect(observations).toEqual([
+			{ resolved: "low", configured: "auto" },
+			{ resolved: "high", configured: "auto" },
+			{ resolved: "high", configured: "high" },
+		]);
 	});
 
 	it("uses required context actions when command actions are unavailable", async () => {

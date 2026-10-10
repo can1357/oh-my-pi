@@ -124,7 +124,8 @@ Core methods:
 - `getActiveTools`, `getAllTools`, `setActiveTools`
 - `getCommands`
 - `getSessionName`, `setSessionName`
-- `setModel`, `getThinkingLevel`, `setThinkingLevel`
+- `setModel`, `getThinkingLevel`, `getConfiguredThinkingLevel`, `setThinkingLevel`
+  - `getThinkingLevel()` returns the resolved effort; `getConfiguredThinkingLevel()` preserves `auto` across automatic prompt-time resolution. Concrete selectors retain the selected effort even when model metadata or a session ceiling clamps the resolved level.
 - `getServiceTiers`, `setServiceTier`
 - `registerProvider`, `unregisterProvider`
 - `registerFileWriteFallback`, `registerFileDeleteFallback`

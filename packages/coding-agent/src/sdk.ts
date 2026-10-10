@@ -4447,7 +4447,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			if (!autoThinking) {
 				// Do not write the `auto` selector before the first turn resolves; auto
 				// classification persists its concrete effort once a real user turn runs.
-				sessionManager.appendThinkingLevelChange(effectiveThinkingLevel);
+				sessionManager.appendThinkingLevelChange(effectiveThinkingLevel, thinkingLevel);
 			}
 			if (persistInitialServiceTier || Object.keys(initialServiceTierByFamily).length > 0) {
 				sessionManager.appendServiceTierChange(
@@ -4546,6 +4546,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			advisorConfigWarnings: discoveredAdvisors.warnings,
 			agent,
 			thinkingLevel: autoThinking ? AUTO_THINKING : effectiveThinkingLevel,
+			configuredThinkingSelector: thinkingLevel,
 			thinkingLevelCeiling: options.thinkingLevelCeiling,
 			initialRetryFallback,
 			deferRetryFallbackValidation: options.deferRetryFallbackValidation,
