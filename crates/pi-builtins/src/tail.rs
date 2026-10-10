@@ -686,9 +686,12 @@ mod chunks {
 	
 			// The chunk size is `BLOCK_SIZE` for all but the last chunk
 			// (that is, the chunk closest to the beginning of the file),
-			// which contains the remainder of the bytes.
-			let block_size = if self.block_idx == self.max_blocks_to_read - 1 {
-				self.size % BLOCK_SIZE
+			// which contains the remainder of the bytes. A file whose size is
+			// an exact multiple of `BLOCK_SIZE` has remainder zero, so the last
+			// chunk is a full block rather than an empty one.
+			let remainder = self.size % BLOCK_SIZE;
+			let block_size = if self.block_idx == self.max_blocks_to_read - 1 && remainder != 0 {
+				remainder
 			} else {
 				BLOCK_SIZE
 			};
@@ -2291,10 +2294,22 @@ mod follow {
 				return false;
 			}
 			// POLLRDBAND like GNU tail/tee: never ready on a pipe's write end, so
-			// only POLLERR (no reader left) wakes it.
+			// only a missing reader wakes it.
 			let mut fds = [PollFd::new(fd, PollFlags::POLLRDBAND)];
-			matches!(poll(&mut fds, PollTimeout::ZERO), Ok(n) if n > 0)
-				&& fds[0].revents().is_none_or(|revents| revents.contains(PollFlags::POLLERR))
+			matches!(poll(&mut fds, PollTimeout::ZERO), Ok(n) if n > 0) && reader_gone(fds[0].revents())
+		}
+		
+		/// Whether `poll` revents on a pipe's write end report that no reader is
+		/// left. Linux sets POLLERR; Darwin and most other Unices set POLLHUP
+		/// instead, so accept any of POLLERR | POLLHUP | POLLNVAL like GNU
+		/// `iopoll()`. Unrecognized bits (`None`) also count as broken.
+		#[cfg(unix)]
+		fn reader_gone(revents: Option<nix::poll::PollFlags>) -> bool {
+			use nix::poll::PollFlags;
+		
+			revents.is_none_or(|revents| {
+				revents.intersects(PollFlags::POLLERR | PollFlags::POLLHUP | PollFlags::POLLNVAL)
+			})
 		}
 		
 		#[allow(clippy::cognitive_complexity, reason = "preserves upstream follow loop")]
@@ -2478,6 +2493,23 @@ mod follow {
 			}
 		
 			Ok(())
+		}
+		
+		#[cfg(all(test, unix))]
+		mod tests {
+			use nix::poll::PollFlags;
+		
+			use super::reader_gone;
+		
+			// Failure mode: Darwin reports a widowed pipe write end as
+			// POLLHUP|POLLRDBAND without POLLERR, so `tail -f log | head -n1`
+			// kept following on macOS after head exited.
+			#[test]
+			fn reader_gone_accepts_darwin_and_linux_revents() {
+				assert!(reader_gone(Some(PollFlags::POLLHUP | PollFlags::POLLRDBAND)));
+				assert!(reader_gone(Some(PollFlags::POLLERR)));
+				assert!(!reader_gone(Some(PollFlags::POLLRDBAND)));
+			}
 		}
 	}
 	
@@ -3894,6 +3926,37 @@ mod tests {
 		let (code, capture) = run_util::<Tail>(&["-n", "1", "log"], "", dir.path());
 		assert_eq!(code, 0);
 		assert_eq!(capture.out(), "last\n");
+		assert_eq!(capture.err(), "");
+	}
+
+	// Failure mode: a file whose size is an exact multiple of the reverse-read
+	// block size (64 KiB) made the last `ReverseChunks` chunk come out empty,
+	// so that block was never searched — a single-block file printed nothing,
+	// and a larger file lost every line living in its first block.
+	#[test]
+	fn prints_last_lines_when_size_is_an_exact_block_multiple() {
+		let dir = tempfile::tempdir().unwrap();
+		// `L000000\n` … `L008191\n`: 8-byte lines, 8192 lines = 65536 bytes.
+		let content: String = (0..8192).map(|i| format!("L{i:06}\n")).collect();
+		assert_eq!(content.len(), 65536);
+		fs::write(dir.path().join("log"), content).unwrap();
+		let (code, capture) = run_util::<Tail>(&["-n", "2", "log"], "", dir.path());
+		assert_eq!(code, 0);
+		assert_eq!(capture.out(), "L008190\nL008191\n");
+		assert_eq!(capture.err(), "");
+	}
+
+	#[test]
+	fn searches_the_first_block_when_size_is_an_exact_block_multiple() {
+		let dir = tempfile::tempdir().unwrap();
+		// 16384 lines = 131072 bytes = two full blocks with no remainder.
+		let content: String = (0..16384).map(|i| format!("L{i:06}\n")).collect();
+		assert_eq!(content.len(), 131072);
+		fs::write(dir.path().join("log"), content).unwrap();
+		let (code, capture) = run_util::<Tail>(&["-n", "16384", "log"], "", dir.path());
+		assert_eq!(code, 0);
+		assert_eq!(capture.out().lines().count(), 16384);
+		assert!(capture.out().starts_with("L000000\n"), "first block was dropped");
 		assert_eq!(capture.err(), "");
 	}
 

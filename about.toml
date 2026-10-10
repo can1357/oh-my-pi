@@ -22,10 +22,3 @@ accepted = ["CDDL-1.0"]
 
 [terminfo]
 accepted = ["WTFPL"]
-
-[tree-sitter-graphql.clarify]
-license = "MIT"
-
-[[tree-sitter-graphql.clarify.files]]
-path = "LICENSE"
-checksum = "5ea7d9ec06cb21ca0a800b69cd954e346bafba94620eb115c4b1fead3f3b30f8"

@@ -1,13 +1,15 @@
 /**
  * Timeline overview strip: per-category density over the full virtual domain
  * plus a draggable/resizable viewport brush, mirroring DevTools' overview.
+ * The density layer is painted once per trace/scale/size/theme into an
+ * offscreen canvas; pan and zoom only blit it and redraw the brush.
  */
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { TraceSpanKind, TraceTrack } from "../types";
 import type { TimelineViewport } from "./TimelineCanvas";
 import type { TraceScale } from "./time-scale";
-import { useTraceTheme } from "./trace-colors";
+import { type TraceTheme, useTraceTheme } from "./trace-colors";
 
 export interface MinimapProps {
 	tracks: TraceTrack[];
@@ -22,6 +24,59 @@ const EDGE_PX = 6;
 const MIN_WINDOW_U = 10;
 
 type DragMode = "move" | "left" | "right" | "create";
+
+/** Paint the density strips (bucketed span coverage per pixel per category) at device resolution. */
+function paintDensity(
+	tracks: TraceTrack[],
+	scale: TraceScale,
+	width: number,
+	colors: TraceTheme,
+): OffscreenCanvas | HTMLCanvasElement {
+	const dpr = devicePixelRatio;
+	const pixelWidth = Math.floor(width * dpr);
+	const pixelHeight = Math.floor(HEIGHT * dpr);
+	let layer: OffscreenCanvas | HTMLCanvasElement;
+	let ctx: OffscreenCanvasRenderingContext2D | CanvasRenderingContext2D | null;
+	if (typeof OffscreenCanvas === "undefined") {
+		const canvas = document.createElement("canvas");
+		canvas.width = pixelWidth;
+		canvas.height = pixelHeight;
+		layer = canvas;
+		ctx = canvas.getContext("2d");
+	} else {
+		const canvas = new OffscreenCanvas(pixelWidth, pixelHeight);
+		layer = canvas;
+		ctx = canvas.getContext("2d");
+	}
+	if (!ctx) return layer;
+	ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+	const [d0, d1] = scale.domain;
+	const dSpan = Math.max(d1 - d0, 1e-9);
+	const buckets = STRIP_KINDS.map(() => new Float32Array(width));
+	for (const track of tracks) {
+		for (const span of track.spans) {
+			const k = STRIP_KINDS.indexOf(span.kind);
+			if (k === -1) continue;
+			const strip = buckets[k];
+			const x0 = Math.max(0, Math.floor(((scale.toU(span.start) - d0) / dSpan) * width));
+			const x1 = Math.min(width - 1, Math.ceil(((scale.toU(span.end) - d0) / dSpan) * width));
+			for (let x = x0; x <= x1; x++) strip[x] = Math.min(1, strip[x] + 0.34);
+		}
+	}
+	const stripH = HEIGHT / STRIP_KINDS.length;
+	for (let k = 0; k < STRIP_KINDS.length; k++) {
+		const strip = buckets[k];
+		ctx.fillStyle = colors.category[STRIP_KINDS[k]];
+		for (let x = 0; x < width; x++) {
+			if (strip[x] <= 0) continue;
+			ctx.globalAlpha = 0.25 + strip[x] * 0.75;
+			ctx.fillRect(x, k * stripH + 1, 1, stripH - 2);
+		}
+		ctx.globalAlpha = 1;
+	}
+	return layer;
+}
 
 export function Minimap({ tracks, scale, viewport, onViewportChange }: MinimapProps) {
 	const colors = useTraceTheme();
@@ -44,36 +99,18 @@ export function Minimap({ tracks, scale, viewport, onViewportChange }: MinimapPr
 	const toX = useCallback((u: number) => ((u - d0) / dSpan) * width, [d0, dSpan, width]);
 	const toU = useCallback((x: number) => d0 + (x / Math.max(width, 1)) * dSpan, [d0, dSpan, width]);
 
+	const density = useMemo(() => paintDensity(tracks, scale, width, colors), [tracks, scale, width, colors]);
+
 	useEffect(() => {
 		const canvas = canvasRef.current;
 		if (!canvas) return;
 		const ctx = canvas.getContext("2d");
 		if (!ctx) return;
 		const dpr = devicePixelRatio;
+		ctx.setTransform(1, 0, 0, 1, 0, 0);
+		ctx.clearRect(0, 0, canvas.width, canvas.height);
+		ctx.drawImage(density, 0, 0);
 		ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-		ctx.clearRect(0, 0, width, HEIGHT);
-
-		// Density strips: bucket span coverage per pixel per category.
-		const stripH = HEIGHT / STRIP_KINDS.length;
-		for (let k = 0; k < STRIP_KINDS.length; k++) {
-			const kind = STRIP_KINDS[k];
-			const buckets = new Float32Array(width);
-			for (const track of tracks) {
-				for (const span of track.spans) {
-					if (span.kind !== kind) continue;
-					const x0 = Math.max(0, Math.floor(toX(scale.toU(span.start))));
-					const x1 = Math.min(width - 1, Math.ceil(toX(scale.toU(span.end))));
-					for (let x = x0; x <= x1; x++) buckets[x] = Math.min(1, buckets[x] + 0.34);
-				}
-			}
-			ctx.fillStyle = colors.category[kind];
-			for (let x = 0; x < width; x++) {
-				if (buckets[x] <= 0) continue;
-				ctx.globalAlpha = 0.25 + buckets[x] * 0.75;
-				ctx.fillRect(x, k * stripH + 1, 1, stripH - 2);
-			}
-			ctx.globalAlpha = 1;
-		}
 
 		// Viewport brush.
 		const vx0 = toX(viewport.u0);
@@ -85,7 +122,7 @@ export function Minimap({ tracks, scale, viewport, onViewportChange }: MinimapPr
 		ctx.fillStyle = colors.selection;
 		ctx.fillRect(vx0, 0, 2, HEIGHT);
 		ctx.fillRect(vx1 - 2, 0, 2, HEIGHT);
-	}, [tracks, scale, viewport, colors, width, toX]);
+	}, [density, viewport, colors, toX]);
 
 	const handlePointerDown = (event: React.PointerEvent<HTMLCanvasElement>) => {
 		const rect = event.currentTarget.getBoundingClientRect();

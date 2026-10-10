@@ -127,16 +127,15 @@ export function dedupeEphemeralReply(text: string, maxBytes = EPHEMERAL_REPLY_MA
 		}
 		i = j;
 	}
-	let result = out.join("\n");
-	if (Buffer.byteLength(result, "utf8") > maxBytes) {
-		const suffix = "\n[…truncated]";
-		const budget = maxBytes - Buffer.byteLength(suffix, "utf8");
-		while (Buffer.byteLength(result, "utf8") > budget) {
-			result = result.slice(0, -1);
-		}
-		result += suffix;
-	}
-	return result;
+	const result = out.join("\n");
+	if (Buffer.byteLength(result, "utf8") <= maxBytes) return result;
+	const bytes = Buffer.from(result, "utf8");
+	const suffix = "\n[…truncated]";
+	// Cut on a UTF-8 character boundary: back off continuation bytes (10xxxxxx)
+	// so a multi-byte character straddling the budget is dropped whole.
+	let cut = Math.max(0, maxBytes - Buffer.byteLength(suffix, "utf8"));
+	while (cut > 0 && (bytes[cut] & 0xc0) === 0x80) cut--;
+	return bytes.toString("utf8", 0, cut) + suffix;
 }
 
 /**
@@ -172,6 +171,17 @@ export function buildReplanTitleContext(messages: AgentMessage[]): string {
 	// of the shared truncation budget.
 	const bounded = anchors.map(turn => ({ ...turn, text: turn.text?.slice(0, REPLAN_TITLE_ANCHOR_CHARS) }));
 	return formatTitleConversationContext([...bounded, ...recent]);
+}
+
+/**
+ * Title text of a message the operator wrote: a typed prompt, or a `/skill:`
+ * invocation as its chip (never the expanded skill body). `undefined` for
+ * agent-attributed and non-user messages, which automatic titles never name.
+ */
+export function operatorTitleText(message: AgentMessage): string | undefined {
+	if (message.role === "custom") return titleTextFromSkillPrompt(message);
+	if (message.role !== "user" || message.attribution !== "user") return undefined;
+	return textFromContent(message.content) || undefined;
 }
 
 /**

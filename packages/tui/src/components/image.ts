@@ -10,8 +10,7 @@ import {
 	renderImage,
 	TERMINAL,
 } from "../terminal-capabilities";
-import { registerNativeBlob } from "../native/blobs";
-import { node } from "../native/describe";
+import { nativeImageNode } from "../native/blobs";
 import type { DescribeContext, NativeNode } from "../native/node";
 import type { Component } from "../tui";
 
@@ -64,6 +63,11 @@ const RESTORE_CURSOR = "\x1b8";
 // Direct placements reserve height with leading zero-width rows. Keep them
 // non-plain so transcript blank-edge trimming does not collapse image-only blocks.
 const RESERVED_IMAGE_ROW = "\x1b[0m";
+
+/** Widest an {@link Image} rendered at `width` columns draws; callers sizing a raster for it (`SvgFigure`) match it. */
+export function imageMaxColumns(width: number): number {
+	return Math.max(1, width - 2);
+}
 
 /** Default count of inline images kept as live graphics before older ones fall back to text. */
 export const DEFAULT_MAX_INLINE_IMAGES = 8;
@@ -234,6 +238,8 @@ export class ImageBudget {
 	 * placements) instead of every image ever registered.
 	 */
 	#watchedPlacements = new Set<PlacementEmitState>();
+	/** Ids whose owner replaced them for good ({@link release}); retired once no frame shows them. */
+	#released = new Set<number>();
 
 	constructor(cap: number = DEFAULT_MAX_INLINE_IMAGES, requestRender: () => void = () => {}) {
 		this.#cap = normalizeCap(cap);
@@ -282,6 +288,17 @@ export class ImageBudget {
 		const id = this.#nextId;
 		this.#nextId = (this.#nextId + 1) & 0xffffff || 1;
 		return id;
+	}
+
+	/**
+	 * Retire the graphic held under `key` as soon as no frame shows it, instead
+	 * of when the residency sweep reaches it. For an owner that replaced the
+	 * image for good — a streaming SVG figure's earlier raster — so superseded
+	 * revisions never push older images (scrollback included) out of the store.
+	 */
+	release(key: string): void {
+		const id = this.#keyToId.get(key);
+		if (id !== undefined) this.#released.add(id);
 	}
 
 	/**
@@ -405,6 +422,13 @@ export class ImageBudget {
 			if (this.#passShowsLive(id)) liveIds.add(id);
 		}
 		const transmitted = this.#transmitted[this.#surface];
+		for (const id of this.#released) {
+			// #retire refuses while this pass or the other surface still shows it.
+			if (transmitted.has(id)) this.#retire(id);
+			if (this.#isTransmitted(id)) continue;
+			this.#forgetKeyForId(id);
+			this.#released.delete(id);
+		}
 		if (this.#cap <= 0 || transmitted.size <= this.#cap) return;
 		for (const id of transmitted) {
 			if (transmitted.size <= this.#cap) break;
@@ -501,6 +525,7 @@ export class ImageBudget {
 		this.#idToKey.clear();
 		this.#placementState.clear();
 		this.#watchedPlacements.clear();
+		this.#released.clear();
 		for (const surface of SURFACES) this.#liveIds[surface].clear();
 		return [...ids];
 	}
@@ -800,6 +825,11 @@ export class Image implements Component {
 		this.#cachedWidth = undefined;
 	}
 
+	releaseRenderCaches(): void {
+		this.#cachedLines = undefined;
+		this.#cachedWidth = undefined;
+	}
+
 	/**
 	 * SIXEL sequence for a target size. A new size starts the encode off the JS
 	 * thread and answers `undefined` until it settles; the settled encode
@@ -839,11 +869,9 @@ export class Image implements Component {
 	 */
 	describe(_cx: DescribeContext): NativeNode {
 		if (this.#native) return this.#native;
-		const blob = registerNativeBlob(Buffer.from(this.#base64Data, "base64"), this.#mimeType);
 		const maxW = this.#options.maxWidthCells;
 		const maxH = this.#options.maxHeightCells;
-		this.#native = node("image", {
-			blob,
+		this.#native = nativeImageNode(Buffer.from(this.#base64Data, "base64"), this.#mimeType, {
 			alt: imageFallback(this.#mimeType, this.#dimensions, this.#options.filename),
 			w: this.#dimensions.widthPx,
 			h: this.#dimensions.heightPx,
@@ -892,7 +920,7 @@ export class Image implements Component {
 		}
 
 		const cap = this.#options.maxWidthCells;
-		const maxWidth = cap != null && cap > 0 ? Math.min(width - 2, cap) : width - 2;
+		const maxWidth = cap != null && cap > 0 ? Math.min(imageMaxColumns(width), cap) : imageMaxColumns(width);
 
 		let lines: string[];
 

@@ -29,6 +29,7 @@ This document describes operator-visible behavior for session export, sharing, c
 | `/clear`                                | Interactive slash command    | Yes (clears live/model conversation context)  | Retains identity/file/history; a lazy session still follows the normal persistence gate    | Appends `reset_boundary`                                                            |
 | `/delete`                               | Interactive slash command    | Yes (starts an empty conversation)            | Attempts to delete the current persisted session and artifacts, then switches to a new one | None                                                                                |
 | `/fork`                                 | Interactive slash command    | Yes (active session identity changes)         | Creates new session file and switches current session to it (persistent mode only)         | Copies artifact directory to new session namespace when present                     |
+| `/fork pane`, `/fork window`, `/fork tab` | Interactive slash command  | No (parent session retained)                   | Opens a child OMP process from the flushed current transcript in a multiplexer pane/group (tmux window, Zellij/Herdr/Orca tab, or CMUX workspace) | Child receives a separate forked session                                            |
 | `--fork <id\|path>`                     | CLI startup                  | Yes after session creation                    | Creates a new session fork from the selected source into current cwd/session dir           | Copies source artifacts recursively by default                                      |
 | `/resume [id\|@claude\|@codex]`         | Interactive slash command    | Yes (active in-memory state replaced)         | Switches to a selected/matched session, or imports a selected foreign session              | None                                                                                |
 | `--resume`                              | CLI startup picker           | Yes after session creation                    | Opens selected existing session file (picker opens in current-folder scope; the global list is preloaded only for the empty-everything early exit and instant Tab switching) | None                |
@@ -279,17 +280,68 @@ for keyboard controls, follow-ups, persistence, and migration safety.
 
 ## Fork
 
-Interactive `/fork` creates a new session from the current one and switches the active session identity.
+Bare `/fork` creates a new session from the current one and switches the active
+session identity. `/fork pane` opens a separate OMP process in a new pane;
+`/fork window` and `/fork tab` open it in a new multiplexer group (a tmux
+window, Zellij/Herdr/Orca tab, or CMUX workspace). The child starts from the current
+persisted transcript, while the parent session stays active and continues
+running.
+
+Typing `/fork ` shows `[pane|window|tab]` as dim inline text, and Enter still
+runs the bare in-place fork. Typing a prefix (`/fork w`) opens the suggestions
+with the rest of the selected argument as dim inline text; Tab accepts it.
+
+Placement commands autodetect tmux, Zellij, Herdr, CMUX, or Orca from the terminal;
+`/fork auto` is not a subcommand (valid arguments are `pane`, `window`, and
+`tab`). `window` maps to a tmux window, a Zellij/Herdr/Orca tab, or a CMUX workspace.
+Plain terminals, `screen`, and `wmux` cannot host this fork placement and receive
+an explicit error; use bare `/fork` there instead.
 
 ### Preconditions and immediate guards
 
-- If agent is streaming, `/fork` is rejected with warning.
+- Bare `/fork` is rejected with a warning while the agent is streaming.
+- A placement fork during streaming asks before launching. The child can omit
+  the partial response, and confirming does not stop the parent response.
 - Forking is rejected while vibe mode is active.
-- UI status/loading indicators are cleared before operation.
+- Placement forks require an already persisted session transcript; pending
+  writes are flushed before the child launches. The parent never switches
+  sessions.
+- A CLI `--api-key` override cannot be safely passed through a multiplexer command;
+  placement forks refuse it rather than exposing the key.
+- UI status/loading indicators are cleared only for the original bare `/fork`
+  flow.
+
+### Terminal placement flow
+
+For a placement command, the controller rebuilds the child CLI command from the
+current CLI entry point and restart-safe launch flags (one-shot selectors such
+as `--goal` and positional prompts are dropped). It replaces stale startup
+model, thinking, profile, prompt-cache-key, and working-directory flags with the
+active session values; the child is pinned to the parent's prompt-cache key so
+it reads the cache the parent populated. The child also receives the effective
+agent/config directories, the resolved config overlays (which retain their
+original paths after `/move`), and the parent's session-dir and XDG base
+directories; scope variables the parent does not set are unset rather than
+exported empty. It starts with `--fork` and the absolute path of the current transcript. The
+generic terminal launcher handles provider-specific execution and reports
+capability or launch failures in the TUI. Herdr, CMUX, and Orca launches require
+explicit confirmation that the destination's configured interactive shell
+accepts POSIX syntax; this is never inferred from the local OS or `SHELL`.
+Declining confirmation stops before the session is flushed or a terminal is
+launched. `window` and `tab` both map to the multiplexer group placement. The Orca
+CLI is resolved in Orca's documented order (`ORCA_CLI_COMMAND`, then `orca-dev` in an
+Orca development checkout, then `orca-ide` on Linux outside an Orca terminal, then
+`orca`).
+
+Orca's CLI `--command` accepts shell text, not argv, and has no `--cwd`; after
+confirmation, OMP supplies `cd <quoted-cwd> && <quoted-command>` using shared
+POSIX shell quoting. When Orca cannot show the new tab and starts the child in a
+background terminal instead, `/fork` reports that as a warning rather than a
+visible tab.
 
 ### Session-level flow
 
-`AgentSession.fork()`:
+The original bare `/fork` uses `AgentSession.fork()`:
 
 1. Emits `session_before_switch` with `reason: "fork"` (cancellable).
 2. Flushes pending bash/session writes and drains/detaches advisor recorders.
@@ -334,9 +386,16 @@ Interactive `/fork` creates a new session from the current one and switches the 
 Startup `--fork` is resolved before normal session creation:
 
 1. `--fork` is rejected with `--no-session`.
-2. Path-like values (`/`, `\`, or `.jsonl`) call `SessionManager.forkFrom(path, cwd, sessionDir)`.
+2. Path-like values (`/`, `\`, or `.jsonl`) fork directly from the given path.
 3. Other values resolve via `resolveResumableSession(...)`: local sessions first, then global search when `sessionDir` is not forced. Matching accepts lowercased session id prefixes, full JSONL filename prefixes, and timestamp-stripped filename id suffixes.
 4. The forked file is created in the current cwd/session-dir scope and becomes the active session manager for startup. Source artifacts are copied recursively by default. Missing source files fail instead of producing an empty fork.
+   An unresolved tool call on the copied active branch is paired with an
+   outcome-unknown result in the child, rather than being marked never executed.
+   For a length stop, the never-executed guard is retained only when no
+   execution-start marker exists. A source whose process exit was recorded
+   after its last message is not repaired here: the child warns about the
+   pending calls and pairs them through the normal process-exit recovery.
+   The parent transcript is unchanged.
 5. Full-context forks automatically seed `providerPromptCacheKey` from the source header's inherited key, falling back to the source session id. Startup drops that automatic inheritance for explicit `--model`, `--thinking`, `--system-prompt`, `--system-prompt-template`, `--append-system-prompt`, `--tools`, or `--no-tools` overrides, or an applicable scoped-model override.
 
 Use `--prompt-cache-key <key>` to pin the provider prompt-cache identity explicitly and independently from both the OMP session id and `--provider-session-id`. `--provider-session-id` continues to control provider session/routing headers and sticky credential selection; `--prompt-cache-key` controls the OpenAI Responses `prompt_cache_key` payload where supported.
@@ -368,7 +427,7 @@ With an argument:
 
 `createSessionManager()` resolution order:
 
-1. If value looks like path (`/`, `\`, or `.jsonl`), open directly.
+1. If value looks like path (`/`, `\`, or `.jsonl`), open directly. A path that does not exist fails with `Session "<path>" not found.` rather than creating a session there.
 2. Else `resolveResumableSession(...)` searches:
    - current scope (`SessionManager.list(cwd, sessionDir)`)
    - global sessions (`SessionManager.listAll()`) only when no explicit `sessionDir` was provided
@@ -386,7 +445,8 @@ prompt. If its recorded cwd is missing or permission-blocked, startup retains
 the launch cwd without relocating the transcript; a failed cwd switch/rescope
 also prints a fallback warning.
 The same enterability policy applies to picker selections. A missing direct path
-initializes a new session at that path; malformed non-empty headers fail closed.
+fails with `Session "<path>" not found.`; an existing empty file or malformed
+non-empty headers fail closed without modifying the file.
 
 ## CLI `--continue`
 

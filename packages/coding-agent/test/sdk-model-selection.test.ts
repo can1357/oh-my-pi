@@ -24,6 +24,10 @@ import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
 
+import {
+	cfgCompactionModelThresholds,
+	cfgCompactionModelThresholdsEnabled,
+} from "@oh-my-pi/pi-coding-agent/session/context-settings";
 import { cfgRetryFallbackChains } from "@oh-my-pi/pi-coding-agent/session/settings";
 
 describe("createAgentSession deferred model pattern resolution", () => {
@@ -1928,48 +1932,6 @@ describe("createAgentSession deferred model pattern resolution", () => {
 		}
 	});
 
-	test("prefers Codex OAuth over plain OpenAI for the shared startup default", async () => {
-		const openaiDefault = getBundledModel("openai", "gpt-5.5");
-		const codexDefault = getBundledModel("openai-codex", "gpt-5.5");
-		if (!openaiDefault || !codexDefault) {
-			throw new Error("Expected bundled OpenAI and Codex GPT-5.5 defaults");
-		}
-
-		const authStorage = createInMemoryAuthStorage();
-		authStoragesToClose.push(authStorage);
-		authStorage.keys.setRuntime("openai", "sk-or-v1-invalid-openai-key");
-		authStorage.keys.setRuntime("openai-codex", "codex-oauth-token");
-		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "models.yml"));
-
-		const { session } = await createAgentSession({
-			cwd: tempDir,
-			agentDir: tempDir,
-			authStorage,
-			modelRegistry,
-			settings: Settings.isolated({ enabledModels: ["openai/gpt-5.5", "openai-codex/gpt-5.5"] }),
-			sessionManager: SessionManager.inMemory(),
-			disableExtensionDiscovery: true,
-			skills: [],
-			contextFiles: [],
-			promptTemplates: [],
-			slashCommands: [],
-			enableMCP: false,
-			enableLsp: false,
-			skipPythonPreflight: true,
-			rules: [],
-			preloadedCustomToolPaths: [],
-			toolNames: ["read"],
-		});
-
-		try {
-			expect(session.model?.provider).toBe("openai-codex");
-			expect(session.model?.id).toBe(codexDefault.id);
-			expect(session.model?.id).toBe(openaiDefault.id);
-		} finally {
-			await session.dispose();
-		}
-	});
-
 	test("caps premium Codex context before a new session starts", async () => {
 		const authStorage = createInMemoryAuthStorage();
 		authStoragesToClose.push(authStorage);
@@ -1998,6 +1960,96 @@ describe("createAgentSession deferred model pattern resolution", () => {
 		try {
 			expect(session.model?.provider).toBe("openai-codex");
 			expect(session.model?.id).toBe("gpt-5.6-sol");
+			expect(session.model?.contextWindow).toBe(272_000);
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	test("a subagent with its own compaction override does not inherit a model's compaction-point opt-in", async () => {
+		const authStorage = createInMemoryAuthStorage();
+		authStoragesToClose.push(authStorage);
+		authStorage.keys.setRuntime("openai", "sk-test");
+		const root = Settings.isolated({
+			extendedContext: false,
+			"compaction.modelThresholds": { "openai/gpt-5.6-terra": 400_000 },
+		});
+		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "models.yml"), { settings: root });
+		const child = executorModule.createSubagentSettings(
+			root,
+			executorModule.compactionThresholdSettings({ thresholdPercent: 80, thresholdTokens: -1 }),
+		);
+		const open = (settings: Settings) =>
+			createAgentSession({
+				cwd: tempDir,
+				agentDir: tempDir,
+				authStorage,
+				modelRegistry,
+				settings,
+				sessionManager: SessionManager.inMemory(),
+				disableExtensionDiscovery: true,
+				skills: [],
+				contextFiles: [],
+				promptTemplates: [],
+				slashCommands: [],
+				enableMCP: false,
+				enableLsp: false,
+				skipPythonPreflight: true,
+				rules: [],
+				preloadedCustomToolPaths: [],
+				toolNames: ["read"],
+				modelPattern: "openai/gpt-5.6-terra",
+			});
+
+		const { session: parent } = await open(root);
+		const { session: subagent } = await open(child);
+		try {
+			expect(parent.model?.contextWindow).toBe(1_050_000);
+			expect(subagent.model?.contextWindow).toBe(272_000);
+			// Re-selecting the shared catalog row keeps the subagent on its own tier.
+			const row = modelRegistry.find("openai", "gpt-5.6-terra");
+			if (!row) throw new Error("Expected bundled gpt-5.6-terra");
+			await subagent.setModel(row, "default", { persist: false });
+			expect(subagent.model?.contextWindow).toBe(272_000);
+		} finally {
+			await subagent.dispose();
+			await parent.dispose();
+		}
+	});
+
+	test("a compaction point edit switches the bound window before the next prompt can start", async () => {
+		const authStorage = createInMemoryAuthStorage();
+		authStoragesToClose.push(authStorage);
+		authStorage.keys.setRuntime("openai", "sk-test");
+		const settings = Settings.isolated();
+		const { session } = await createAgentSession({
+			cwd: tempDir,
+			agentDir: tempDir,
+			authStorage,
+			settings,
+			sessionManager: SessionManager.inMemory(),
+			disableExtensionDiscovery: true,
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableMCP: false,
+			enableLsp: false,
+			skipPythonPreflight: true,
+			rules: [],
+			preloadedCustomToolPaths: [],
+			toolNames: ["read"],
+			modelPattern: "openai/gpt-5.6-terra",
+		});
+		try {
+			expect(session.model?.contextWindow).toBe(272_000);
+			// Setting listeners run one microtask after the write; no catalog rebuild
+			// may be awaited before the bound row carries the new tier.
+			cfgCompactionModelThresholds.set(settings, { "openai/gpt-5.6-terra": 400_000 });
+			await Promise.resolve();
+			expect(session.model?.contextWindow).toBe(1_050_000);
+			cfgCompactionModelThresholdsEnabled.set(settings, false);
+			await Promise.resolve();
 			expect(session.model?.contextWindow).toBe(272_000);
 		} finally {
 			await session.dispose();

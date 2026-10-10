@@ -2568,7 +2568,7 @@ use ext_sort::ext_sort;
 use foldhash::{HashMap, SharedSeed, fast::FoldHasher};
 use icu_collator::{
 	CollatorBorrowed,
-	options::{AlternateHandling, CollatorOptions},
+	options::{AlternateHandling, CollatorOptions, Strength},
 };
 use icu_decimal::provider::{Baked, DecimalSymbolsV1};
 use icu_locale_core::Locale;
@@ -3980,10 +3980,11 @@ fn shell_collator(host: &Host) -> Option<Arc<CollatorBorrowed<'static>>> {
 		.lock()
 		.entry(locale)
 		.or_insert_with_key(|locale| {
-			// Shifted alternate handling makes spaces and punctuation matter only
-			// on ties, like glibc's collation (uucore's setting).
+			// Shift punctuation behind letters, but retain its quaternary
+			// distinctions for `-u` and `-c` instead of treating paths as equal.
 			let mut options = CollatorOptions::default();
 			options.alternate_handling = Some(AlternateHandling::Shifted);
+			options.strength = Some(Strength::Quaternary);
 			CollatorBorrowed::try_new(locale.into(), options)
 				.ok()
 				.map(Arc::new)
@@ -6182,6 +6183,37 @@ mod tests {
 			let rules = format!("text ordering performed using ‘{locale}’ sorting rules");
 			assert!(err.contains(&rules), "{err}");
 		}
+	}
+
+	// Failure mode: shifted collation at tertiary strength treated distinct
+	// punctuation-bearing paths as equal, so `sort -u` discarded records.
+	#[test]
+	fn locale_unique_preserves_punctuation_unless_the_key_ignores_it() {
+		if !locale_installed("en_US.UTF-8") {
+			eprintln!("skipping: en_US.UTF-8 not installed");
+			return;
+		}
+		let input = "src/a-b.ts\nsrc/ab.ts\nsrc/a_b.ts\nsrc/a.b.ts\n";
+		for args in [&["-u"][..], &["-u", "-k1,1"]] {
+			for _ in 0..2 {
+				let (code, out, err) = sort_in_locale("LANG", "en_US.UTF-8", args, input);
+				assert_eq!(code, 0, "{err}");
+				let mut lines: Vec<_> = out.lines().collect();
+				lines.sort_unstable();
+				assert_eq!(lines, ["src/a-b.ts", "src/a.b.ts", "src/a_b.ts", "src/ab.ts"], "{args:?}");
+			}
+		}
+		let (code, out, err) = sort_in_locale(
+			"LANG",
+			"en_US.UTF-8",
+			&["-u", "-k1,1"],
+			"group src/a-b.ts\ngroup src/ab.ts\n",
+		);
+		assert_eq!(code, 0, "{err}");
+		assert_eq!(out, "group src/a-b.ts\n");
+		let (code, out, err) = sort_in_locale("LANG", "en_US.UTF-8", &["-d", "-u"], input);
+		assert_eq!(code, 0, "{err}");
+		assert_eq!(out, "src/a-b.ts\n");
 	}
 
 	// Failure mode: the decimal point and grouping came from the process

@@ -940,10 +940,11 @@ fn expand_echoed_line_selection(pattern_text: &str, rewrite_text: &str) -> Optio
 	if line[open + SELECT_OPEN.len()..]
 		.matches(SELECT_OPEN)
 		.count()
-		> 0 || lines
-		.iter()
-		.enumerate()
-		.any(|(at, entry)| at != index && entry.contains(SELECT_OPEN))
+		> 0
+		|| lines
+			.iter()
+			.enumerate()
+			.any(|(at, entry)| at != index && entry.contains(SELECT_OPEN))
 	{
 		return None;
 	}
@@ -1246,7 +1247,8 @@ fn recover_mixed_rewrite_forms(
 		let close = inline_pattern[open + SELECT_OPEN.len()..]
 			.find(SELECT_CLOSE)
 			.expect("inline pattern was validated")
-			+ open + SELECT_OPEN.len();
+			+ open
+			+ SELECT_OPEN.len();
 		let between = &inline_pattern[index..open];
 		let selected = &inline_pattern[open + SELECT_OPEN.len()..close];
 		current.push_str(between);

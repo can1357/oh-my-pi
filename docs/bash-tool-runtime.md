@@ -143,15 +143,11 @@ Concurrent calls never share one `Shell`: the native session runs one command at
 
 ## Bundled `jq` compatibility
 
-Unless `PI_DISABLE_UUTILS_BUILTINS` is truthy, the non-PTY native shell registers a bundled `jq` command backed by vendored [jaq](https://github.com/01mf02/jaq), not the system `jq`. Setting that flag disables the in-process uutils command set and falls back to system binaries. The bundled jaq errors when chained access indexes through a null or missing intermediate: `.a.b` over `{}` exits 5, whereas jq returns `null`.
+Unless `PI_DISABLE_UUTILS_BUILTINS` is truthy, the non-PTY native shell registers a bundled `jq` command backed by [jaq](https://github.com/01mf02/jaq) 3.1.1, not the system `jq`; `jq --version` prints `jaq 3.1.1`. Setting that flag disables the in-process uutils command set and falls back to system binaries. `env jq …` runs the system `jq` for one command.
 
-Guard the access with `[.a.b?][0]` when the parent may be null or absent. The `?` suppresses jaq's traversal error (jq never raises it), and `[…][0]` maps the suppressed empty output to `null` while preserving a legitimate `false` or `null` value:
+The bundled jaq follows jq where scripts commonly rely on it: indexing `null` or a missing key yields `null` (`.a.b` over `{}`), `IN`, `input_filename`, `input_line_number` and `--unbuffered` are defined, `tonumber` reads one number literal (`"021"`, `"+1"`), file operands form one input stream (`-s` slurps all of them into one array, and `input` reads on into the next file), an error in one input does not stop the next, and output is always JSON (`nan` prints `null`).
 
-```jq
-{"c": [.a.b?][0]}
-```
-
-Avoid the naive `.a.b? // null`: `//` treats a legitimate `false` (and `null`) as absent, so it silently rewrites boolean data to the fallback. It also diverges on parse — `{"c": .a.b? // null}` is accepted by jaq but is a syntax error in jq (the value needs parentheses: `{"c": (.a.b? // null)}`).
+Known differences from jq 1.8: slicing `null` errors (`.a[1:]` over `{}`), indexing an object with a number yields `null` instead of an error (`.[0]` over `{"a":1}`), assignment does not create missing parents (`{} | .a.b = 1`), `del` moves the last key into the deleted key's place, `scan` yields only its first match and no capture arrays, `join` renders `null` as `"null"`, array indices must be integers (`.[1.5]` errors), floats print in jaq's notation (`3/1` prints `3.0`), `todate` keeps fractional seconds, `from_entries` reads only `key`/`value`, and `tostream`, `$__loc__`, `trimstr`, `INDEX`, `JOIN`, `--seq` and `--stream` are missing.
 
 ## Shell config, direnv, and snapshot behavior
 
@@ -165,7 +161,7 @@ If the selected shell includes `bash`, it attempts `getOrCreateSnapshot()`:
 
 - snapshot captures aliases/functions/options from user rc,
 - snapshot creation is best-effort,
-- failure falls back to no snapshot.
+- failure falls back to no snapshot; a failed snapshot is retried after 60 s, or sooner when the rc file's mtime or size or the shell environment changes.
 
 If `prefix` is configured, it wraps the command after any direnv unset prefix.
 
@@ -245,7 +241,7 @@ Non-PTY execution also passes shell-minimizer settings into the native `Shell` s
 
 ## Live tool updates and async jobs
 
-For non-PTY foreground execution, `BashTool` uses a separate `TailBuffer` for partial updates and emits `onUpdate` snapshots while command is running.
+For non-PTY foreground execution, `BashTool` passes an `onPreview` callback to `executeBash()`, which streams the `OutputSink`'s own inline view (`OutputSink.preview()`) as `onUpdate` snapshots while the command is running; there is no separate partial-update buffer.
 
 For PTY execution, live rendering is handled by custom UI overlay, not by `onUpdate` text chunks.
 

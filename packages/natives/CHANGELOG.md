@@ -2,6 +2,78 @@
 
 ## [Unreleased]
 
+## [18.8.8] - 2026-10-10
+
+### Changed
+
+- Reduced macOS accessibility-tree latency for `ax()` without changing its text output: each element's children are read once, and its bounds, which the tree never shows, are no longer read ([#15159](https://github.com/can1357/oh-my-pi/pull/15159) by [@will-bogusz](https://github.com/will-bogusz))
+
+### Fixed
+
+- Fixed macOS computer use reporting `AxFailed` instead of `StaleRef` for a ref whose element the app had removed ([#15156](https://github.com/can1357/oh-my-pi/pull/15156) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed macOS `el.press()` and `el.perform()` reporting `AxFailed` when the app did not answer in time, such as a press that opens a modal dialog; they now report `AxUnconfirmed` ([#15156](https://github.com/can1357/oh-my-pi/pull/15156) by [@will-bogusz](https://github.com/will-bogusz))
+
+## [18.8.7] - 2026-10-09
+
+### Added
+
+- Added `wasmGrammarFor` for tree-sitter grammars loaded as WebAssembly on demand from `<natives dir>/grammars`, and `missingGrammars` on `astGrep`/`astEdit` results naming languages skipped because their grammar is not installed.
+
+### Changed
+
+- Reduced syntax-highlighting startup work by bundling the complete precompiled grammar set ([#14104](https://github.com/can1357/oh-my-pi/pull/14104) by [@iliaal](https://github.com/iliaal)).
+- Changed standalone binaries to embed each native addon as its own deterministic zstd frame instead of a timestamped gzip tarball, making binaries smaller.
+- Updated the shell's built-in `jq` to jaq 3.1.1, which `jq --version` now reports ([#14659](https://github.com/can1357/oh-my-pi/pull/14659) by [@will-bogusz](https://github.com/will-bogusz))
+
+### Fixed
+
+- Fixed the built-in `jq` erroring where jq returns `null` (`.a.b` over `{}`, `.[0]` over `null`) and lacking `IN`, `input_filename`, `input_line_number` and `--unbuffered` ([#14659](https://github.com/can1357/oh-my-pi/pull/14659) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed the built-in `jq` reading each file operand separately: `-s` now slurps them into one array and `input` reads on into the next file, as in jq ([#14659](https://github.com/can1357/oh-my-pi/pull/14659) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed the built-in `jq` stopping at the first input that fails and rejecting `"021"` and `"+1"` in `tonumber`, where jq does neither; a run that reported a failing input is never shortened by the output minimizer, even when it exits 0 ([#14659](https://github.com/can1357/oh-my-pi/pull/14659) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed the built-in `jq`'s `halt_error` printing its message to stdout; like jq, it now goes to stderr ([#14659](https://github.com/can1357/oh-my-pi/pull/14659) by [@will-bogusz](https://github.com/will-bogusz))
+- Shrank the native addon by about 77 MB: only 17 common tree-sitter grammars are linked in, and the other 39 languages load WebAssembly grammars from the grammar directory, treated as unsupported until installed.
+
+## [18.8.4] - 2026-10-08
+
+### Fixed
+
+- Fixed long output from a failing `jq` command hiding its error message: the output minimizer now shortens `jq` output only when the command succeeded ([#14657](https://github.com/can1357/oh-my-pi/pull/14657) by [@will-bogusz](https://github.com/will-bogusz))
+
+## [18.8.1] - 2026-10-07
+
+### Added
+
+- Added the `PI_NATIVES_DIR` configuration option to control where compiled native addons are extracted. The version-specific subdirectory remains appended, allowing separate `HOME` environments to share the same native addon copy without sharing other data.
+
+### Fixed
+
+- Fixed background shell builtins and other in-process commands so they terminate when their subshell exits and can be stopped with `kill %N`, matching the behavior of external commands.
+
+## [18.7.0] - 2026-10-06
+
+### Breaking Changes
+
+- Renamed the `linux-all` Bazel target (`//:natives-linux-all`) to `all` (`//:natives-all`); the renamed target now includes Darwin addons.
+- Removed the `gen:native` and `gen:native:reset` scripts. Standalone binary builds now embed the native addon archive and manifest instead of writing them to `native/`.
+
+### Added
+
+- Enhanced `rasterizeSvg` with optional scaling and terminal-cell padding, allowing SVGs to render larger while preserving 1:1 display in terminals.
+- Added `OMP_NATIVE_FEATURES` for passing extra Cargo features to local native addon builds; Bazel builds ignore this setting.
+- Added support for cross-compiling macOS native addons from Linux hosts.
+
+### Changed
+
+- macOS addon release stamping now works on any host by refreshing the addon's ad-hoc signature automatically.
+
+### Fixed
+
+- Fixed `tail` failing to print files, or omitting their first 64 KiB, when file sizes were exact multiples of 64 KiB.
+- Fixed `tail` printing nothing, or dropping lines from the file's first 64 KiB, when the file size is an exact multiple of 64 KiB ([#14264](https://github.com/can1357/oh-my-pi/pull/14264) by [@jchanghong023](https://github.com/jchanghong023))
+- Fixed native `sed` and `jq` killing the host process with SIGBUS when an input file is truncated while they read it ([#14613](https://github.com/can1357/oh-my-pi/issues/14613))
+- Fixed `tail -f` piped into a command that exits early (such as `head -n 1` or `grep -m1`) never stopping on macOS ([#14614](https://github.com/can1357/oh-my-pi/issues/14614))
+- Native `sort -u` keeps punctuation-distinct paths under UTF-8 locales instead of silently dropping records ([#14606](https://github.com/can1357/oh-my-pi/issues/14606)).
+
 ## [18.6.3] - 2026-10-06
 
 ### Breaking Changes

@@ -335,7 +335,8 @@ async function askSingleQuestion(
 		while (true) {
 			const opts: ExtensionUISelectItem[] = questionOptions.map(opt => toSelectOption(opt));
 
-			if (!navigation?.allowForward && selected.size > 0) {
+			// Arrow-key forward navigation is TUI-only; RPC clients need the Done row to advance.
+			if (selected.size > 0) {
 				opts.push(doneLabel);
 			}
 			opts.push(OTHER_OPTION);

@@ -11,7 +11,7 @@ import { editDiffString } from "@oh-my-pi/pi-natives";
 import { TUI, visibleWidth } from "@oh-my-pi/pi-tui";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 import { VirtualTerminal } from "../../tui/test/virtual-terminal";
-import { withoutTerminalMultiplexer } from "../../tui/test/terminal-multiplexer-environment";
+import { withoutTerminalMultiplexer } from "../../tui/test/helpers/terminal-multiplexer";
 
 // The streaming edit preview is a fixed-height tail window ("cursor"): the last
 // EDIT_STREAMING_PREVIEW_LINES rows of the recomputed diff are pinned to the

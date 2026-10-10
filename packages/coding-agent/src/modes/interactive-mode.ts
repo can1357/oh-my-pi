@@ -1,4 +1,3 @@
-import { formatModelSelectorValue } from "@oh-my-pi/pi-tui/overlays/model-selector";
 /**
  * Interactive mode for the coding agent.
  * Handles TUI rendering and user interaction, delegating business logic to AgentSession.
@@ -67,13 +66,14 @@ import {
 	setProjectDir,
 } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
+import { pickTableChart } from "../auto-graph/planner";
 import { restartArgv } from "../cli/flag-tables";
 import type { CollabGuestLink } from "../collab/guest";
 import { CollabController } from "../collab/controller";
 import type { CollabHost } from "../collab/host";
 import { KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
 import { appKey, editorKey, rawKeyHint } from "@oh-my-pi/pi-tui/chrome/keybinding-hints";
-import { formatModelStringWithRouting, type ResolvedModelRoleValue } from "../config/model-resolver";
+import { formatModelString, type ResolvedModelRoleValue } from "../config/model-resolver";
 import { isSettingsInitialized, Settings, settings } from "../config/settings";
 import { clearClaudePluginRootsCache } from "../discovery/helpers";
 import type {
@@ -134,11 +134,19 @@ import { HistoryStorage } from "../session/history-storage";
 import { syncTextPrediction, textPredictionBackend } from "../predict/client";
 import { setWordPredictionHost } from "@oh-my-pi/pi-tui/prompt/word-completion";
 import { USER_INTERRUPT_LABEL } from "../session/messages";
-import { resolveMarkdownLinkTargets } from "../internal-urls/hyperlink-targets";
+import { resolveMarkdownLinkHrefs } from "../internal-urls/hyperlink-targets";
+import type { ResolveContext } from "../internal-urls/index";
 import { modelMentionDisplayName } from "@oh-my-pi/pi-tui/prompt/model-mention-syntax";
 import { modelMentionChipLabel, shiftImageMarkers } from "@oh-my-pi/pi-tui/prompt/composer-attachments";
 import type { SessionContext } from "../session/session-context";
 import type { SessionManager } from "../session/session-manager";
+import {
+	canAutoCreateWorktree,
+	planWorktreeExit,
+	removeExitWorktrees,
+	type SessionWorktree,
+	type WorktreeExitPlan,
+} from "../session/session-worktree";
 import type { ShakeMode } from "../session/shake-types";
 import { BUILTIN_SLASH_COMMAND_RESERVED_NAMES, buildTuiBuiltinSlashCommands } from "../slash-commands/builtin-registry";
 import { buildStaticInlineHint } from "../slash-commands/builtin-completions";
@@ -199,14 +207,15 @@ import { resumeCommand } from "../utils/resume-command";
 import { getSessionAccentAnsi, getSessionAccentHex } from "@oh-my-pi/pi-tui/theme/session-color";
 import { messageHasDisplayableThinking } from "@oh-my-pi/pi-tui/chat/thinking-display";
 import type { TokenRateMeter } from "../utils/token-rate";
+import { disposeProgramStatus, initProgramStatus, setProgramStatusEnabled } from "../utils/run-status";
 import {
 	disposeTerminalTitleState,
 	initTerminalTitleState,
 	popTerminalTitle,
 	pushTerminalTitle,
-	reportTernSessionFile,
+	reportTernSession,
 	setSessionTerminalTitle,
-	setTerminalSessionFileSource,
+	setTerminalSessionSource,
 	setTerminalTitlePullRequest,
 	setTerminalTitleSpinnerStyle,
 	setTerminalTitleStateEnabled,
@@ -218,6 +227,8 @@ import {
 	VibeSessionRegistry,
 } from "../vibe/runtime";
 import { AssistantMessageComponent } from "@oh-my-pi/pi-tui/chat/assistant-message";
+import { setSvgFigureRendering } from "@oh-my-pi/pi-tui/chat/svg-figure";
+import { setTableCharts } from "@oh-my-pi/pi-tui/chat/table-chart";
 import { setTranscriptActionHandler } from "@oh-my-pi/pi-tui/chat/transcript-actions";
 import { StatusNotice } from "@oh-my-pi/pi-tui/chrome/status-notice";
 import { ReadToolGroupComponent } from "@oh-my-pi/pi-tui/chat/read-tool-group";
@@ -267,7 +278,7 @@ import { SessionFocusController } from "./controllers/session-focus-controller";
 import { SSHCommandController } from "./controllers/ssh-command-controller";
 import { TanCommandController } from "./controllers/tan-command-controller";
 import { TodoCommandController } from "./controllers/todo-command-controller";
-import { imageReferenceHyperlink, materializeImageReferenceLinks } from "@oh-my-pi/pi-tui/prompt/image-references";
+import { imageReferenceHyperlink } from "@oh-my-pi/pi-tui/prompt/image-references";
 import { describeLoopCondition, evaluateLoopCondition, type LoopConditionVerdict } from "./loop-condition";
 import {
 	consumeLoopLimitIteration,
@@ -321,7 +332,7 @@ import type {
 	SubmittedUserInput,
 } from "./types";
 import type { TodoItem, TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
-import { UiHelpers } from "./utils/ui-helpers";
+import { materializeImageChipLinks, UiHelpers } from "./utils/ui-helpers";
 
 import {
 	cfgAutocompleteMaxVisible,
@@ -357,12 +368,15 @@ import {
 	cfgStatusLineShowHookStatus,
 	cfgStatusLineTransparent,
 	cfgSymbolPreset,
+	cfgTerminalProgramStatus,
 	cfgTerminalShowImages,
 	cfgTuiHyperlinks,
 	cfgTuiImeSafeCursor,
 	cfgTuiMaxInlineImages,
+	cfgTuiAutoGraph,
 	cfgTuiMouse,
 	cfgTuiRenderMermaid,
+	cfgTuiRenderSvg,
 	cfgTuiResizeScrollback,
 	cfgTuiTextSizing,
 	cfgTuiTight,
@@ -372,6 +386,7 @@ import {
 	cfgTuiVimModeDisplay,
 } from "./settings";
 import { cfgTasksTodoClearDelay } from "../tools/settings";
+import { cfgWorktreeOnExit, cfgWorktreeOnStart } from "../task/settings";
 import { cfgExpandThinkingBlocks, cfgProseOnlyThinking } from "../session/settings";
 import { cfgHideThinkingBlock } from "../session/settings";
 import { cfgCycleOrder, cfgModelRoles } from "../config/model-settings";
@@ -418,6 +433,7 @@ const cfgLiveUiSettings = combine({
 	"compaction.methodOrder": cfgCompactionMethodOrder,
 	"display.hideToolActivity": cfgDisplayHideToolActivity,
 	"terminal.showImages": cfgTerminalShowImages,
+	"terminal.programStatus": cfgTerminalProgramStatus,
 	hideThinkingBlock: cfgHideThinkingBlock,
 	proseOnlyThinking: cfgProseOnlyThinking,
 	expandThinkingBlocks: cfgExpandThinkingBlocks,
@@ -426,6 +442,8 @@ const cfgLiveUiSettings = combine({
 	"display.showTokenUsage": cfgDisplayShowTokenUsage,
 	"display.showTurnTime": cfgDisplayShowTurnTime,
 	"tui.renderMermaid": cfgTuiRenderMermaid,
+	"tui.renderSvg": cfgTuiRenderSvg,
+	"tui.autoGraph": cfgTuiAutoGraph,
 	"tui.textSizing": cfgTuiTextSizing,
 	"tui.tight": cfgTuiTight,
 	"tui.hyperlinks": cfgTuiHyperlinks,
@@ -1442,6 +1460,8 @@ export class InteractiveMode implements InteractiveModeContext {
 	get teardownFailed(): boolean {
 		return this.#teardownFailed;
 	}
+	/** Worktrees this launch created (auto-start or `/wt`), considered on exit per `worktree.onExit`. */
+	#ownedWorktrees: SessionWorktree[] = [];
 	/** True once `shutdown()` has begun teardown. Surfaced to the input
 	 *  controller so a Ctrl+C arriving while teardown is in flight can hard-
 	 *  abort the remaining work instead of stacking another no-op call. */
@@ -1555,9 +1575,15 @@ export class InteractiveMode implements InteractiveModeContext {
 	get assistantImagesVisible(): boolean {
 		return cfgTerminalShowImages.get(this.settings);
 	}
-	resolveAssistantMessageLinks(texts: readonly string[]): Promise<ReadonlyMap<string, string>> {
+	get tableChartsVisible(): boolean {
+		return this.#focusController.target === undefined;
+	}
+	resolveAssistantMessageLinkHrefs(hrefs: readonly string[]): Promise<ReadonlyMap<string, string>> {
+		return resolveMarkdownLinkHrefs(hrefs, this.#linkResolveContext());
+	}
+	#linkResolveContext(): ResolveContext {
 		const session = this.viewSession;
-		return resolveMarkdownLinkTargets(texts, {
+		return {
 			cwd: session.sessionManager.getCwd(),
 			sessionFile: session.sessionFile,
 			settings: session.settings,
@@ -1567,7 +1593,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			},
 			skills: session.skills,
 			rules: session.ttsrManager?.getRules(),
-		});
+		};
 	}
 	get focusedAgentId(): string | undefined {
 		return this.#focusController.focusedAgentId;
@@ -1660,6 +1686,8 @@ export class InteractiveMode implements InteractiveModeContext {
 	/** Repaints the subagent HUD so live-preview elapsed markers advance between progress events. */
 	#subagentPreviewTickTimer?: NodeJS.Timeout;
 	#observerUiSyncNeedsTodoReconcile = false;
+	/** Active subagent descriptions the todo HUD last rendered with (joined); see #flushObserverUiSync. */
+	#todoHudSubagentKey: string | undefined;
 	#runningSubagentCount = 0;
 	#agentRegistryUnsubscribe?: () => void;
 	#agentRegistrySubscriptionTarget?: AgentHubRegistry;
@@ -1754,6 +1782,8 @@ export class InteractiveMode implements InteractiveModeContext {
 
 		setTuiTight(cfgTuiTight.get(settings));
 		setMarkdownMermaidRendering(cfgTuiRenderMermaid.get(settings));
+		setSvgFigureRendering(cfgTuiRenderSvg.get(settings));
+		this.#applyAutoGraphSetting();
 		this.#applyTextSizingSetting();
 		// Keep generic pi-tui renderers aligned with the coding-agent setting.
 		applyHyperlinkSetting();
@@ -1839,10 +1869,9 @@ export class InteractiveMode implements InteractiveModeContext {
 		const attachmentChips = new AttachmentChipsBand(this.editor, this.ui.imageBudget, () => this.ui.requestRender());
 		this.attachmentChipsContainer.addChild(attachmentChips);
 		this.editor.attachmentChips = attachmentChips;
-		// Restored drafts (esc-esc, /tree, branch) re-materialize blob-store links off the render
+		// Restored drafts (esc-esc, /tree, branch) re-materialize chip links off the render
 		// path so their chip tokens become clickable again instead of degrading to dead text.
-		this.editor.draftImageLinkMaterializer = images =>
-			materializeImageReferenceLinks(images, this.sessionManager.putBlob.bind(this.sessionManager));
+		this.editor.draftImageLinkMaterializer = images => materializeImageChipLinks(images, this.sessionManager);
 		this.editorContainer = new Container();
 		this.editorContainer.addChild(this.editor);
 		this.statusLine = new StatusLineComponent(session, statusLineHost);
@@ -2217,7 +2246,12 @@ export class InteractiveMode implements InteractiveModeContext {
 		initTerminalTitleState();
 		setTerminalTitleStateEnabled(cfgTuiTitleState.get(this.settings));
 		setTerminalTitleSpinnerStyle(cfgTuiTitleSpinner.get(this.settings));
-		setTerminalSessionFileSource(() => this.sessionManager.getSessionFile());
+		initProgramStatus();
+		setProgramStatusEnabled(cfgTerminalProgramStatus.get(this.settings));
+		setTerminalSessionSource({
+			file: () => this.sessionManager.getSessionFile(),
+			cwd: () => this.sessionManager.getCwd(),
+		});
 		setSessionTerminalTitle(this.sessionManager.getSessionName(), this.sessionManager.getCwd());
 		// Seeds the border, the status-line `vim` segment, and the cursor shape in one call.
 		// Deliberately here rather than beside #applyVimMode in the constructor: that runs before
@@ -2244,7 +2278,7 @@ export class InteractiveMode implements InteractiveModeContext {
 				this.#handleSessionAccentInputsChanged();
 			}),
 			// Fork and branch adopt a new session file without retitling.
-			this.session.registerSessionChangeCallback(reportTernSessionFile),
+			this.session.registerSessionChangeCallback(reportTernSession),
 		);
 		this.#syncEditorMaxHeight();
 		this.isInitialized = true;
@@ -2464,6 +2498,14 @@ export class InteractiveMode implements InteractiveModeContext {
 			// replay with the newly detected palette.
 			onTerminalAppearanceChange(mode, appearanceRefreshWasRequested ? {} : undefined);
 		});
+
+		// Keys pressed while a Tern startup loaded were held until hooks ran, the
+		// session mode settled, the draft was restored and every subscription
+		// above was installed. They replay into the restored draft, never over
+		// it, a startup shortcut (Alt+P, Ctrl+G, extension shortcuts) acts on the
+		// final mode, editor contents and observed session, and a held Enter
+		// still meets the bootstrap submit gate lifted just below.
+		this.ui.releaseHeldInput();
 
 		// Everything is wired: subscriptions observe agent events, the session
 		// mode is reconciled, and the submit handler is installed. Lift the
@@ -2758,7 +2800,7 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	#scheduleLoopAutoSubmit(): void {
 		this.#cancelLoopAutoSubmit();
-		if (!this.loopModeEnabled || !this.loopPrompt) return;
+		if (!this.loopModeEnabled || !this.loopPrompt || this.#isShuttingDown) return;
 		const prompt = this.loopPrompt;
 		const loopAction = cfgLoopMode.get(settings);
 		this.#deferLoopAutoSubmit(() => {
@@ -3382,6 +3424,15 @@ export class InteractiveMode implements InteractiveModeContext {
 		setTerminalTextSizing(cfgTuiTextSizing.get(this.settings) && TERMINAL.supportsTextSizing);
 	}
 
+	/** Charts under assistant tables per `tui.autoGraph`; `smart` picks multi-series charts through the session's judge. */
+	#applyAutoGraphSetting(): void {
+		const mode = cfgTuiAutoGraph.get(this.settings);
+		setTableCharts(
+			mode,
+			mode === "smart" ? request => pickTableChart(request, this.session.tableChartJudge()) : undefined,
+		);
+	}
+
 	/**
 	 * Apply live UI side effects for settings changed through any path (`/settings`,
 	 * `cfg://`, `settings.set()`, on-disk reload). One coalesced {@link cfgLiveUiSettings}
@@ -3493,6 +3544,14 @@ export class InteractiveMode implements InteractiveModeContext {
 			setMarkdownMermaidRendering(cfgTuiRenderMermaid.get(this.settings));
 			rebuildChat = true;
 		}
+		if (any("tui.renderSvg")) {
+			setSvgFigureRendering(cfgTuiRenderSvg.get(this.settings));
+			rebuildChat = true;
+		}
+		if (any("tui.autoGraph")) {
+			this.#applyAutoGraphSetting();
+			rebuildChat = true;
+		}
 		if (any("tui.textSizing")) {
 			this.#applyTextSizingSetting();
 			this.ui.invalidate();
@@ -3511,6 +3570,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 		if (any("tui.titleState")) setTerminalTitleStateEnabled(cfgTuiTitleState.get(this.settings));
 		if (any("tui.titleSpinner")) setTerminalTitleSpinnerStyle(cfgTuiTitleSpinner.get(this.settings));
+		if (any("terminal.programStatus")) setProgramStatusEnabled(cfgTerminalProgramStatus.get(this.settings));
 
 		if (
 			any(
@@ -3627,7 +3687,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.editor.borderColor = theme.getPythonModeBorderColor();
 		} else if (vimMode === "visual" || vimMode === "visual-line") {
 			this.editor.borderColor = (str: string) => theme.fg("warning", str);
-		} else if (vimMode === "normal") {
+		} else if (vimMode === "normal" || vimMode === "replace") {
 			this.editor.borderColor = (str: string) => theme.fg("accent", str);
 		} else if (vimMode === "insert") {
 			// Insert gets its own colour rather than falling through to the session accent: with Normal
@@ -3708,7 +3768,8 @@ export class InteractiveMode implements InteractiveModeContext {
 	/**
 	 * What the TSP composer shows: the draft's shell mode, the effort chip
 	 * (the viewed agent's, like the model chip beside it) or the model chip's
-	 * effort icon, the tok/s readout after it, and send vs Stop.
+	 * effort icon, the tok/s readout after it, send vs Stop, and the session
+	 * title the empty composer's placeholder quotes.
 	 */
 	#composerNativeState(): ComposerNativeState {
 		const draft = this.editor.getText().trimStart();
@@ -3723,6 +3784,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			rate: this.#nativeTokenRate(),
 			running: this.loadingAnimation !== undefined || this.session.isStreaming,
 			viewing: this.#viewingLineage(),
+			title: this.sessionManager.getSessionName(),
 		};
 	}
 
@@ -4093,9 +4155,16 @@ export class InteractiveMode implements InteractiveModeContext {
 		if (this.#observerUiSyncNeedsTodoReconcile) {
 			this.#observerUiSyncNeedsTodoReconcile = false;
 			this.#reconcileTodosWithSubagents();
+			this.#syncTodoHudState(this.#todoPhasesOwner ?? this.session);
+			this.#renderTodoList();
+		} else if (this.#getActiveSubagentDescriptions().join("\n") !== this.#todoHudSubagentKey) {
+			// Progress-only ticks (10 Hz while subagents run) cannot change the
+			// todo phases or their persisted visibility — re-syncing would also
+			// re-arm the auto-clear timer so it could never fire. Only the HUD's
+			// subagent highlight depends on them, so repaint just when the active
+			// descriptions change.
+			this.#renderTodoList();
 		}
-		this.#syncTodoHudState(this.#todoPhasesOwner ?? this.session);
-		this.#renderTodoList();
 		this.#renderSubagentList();
 		this.ui.requestRender();
 	}
@@ -4112,6 +4181,8 @@ export class InteractiveMode implements InteractiveModeContext {
 	#renderTodoList(): void {
 		this.todoContainer.clear();
 		this.#todoHudNative = undefined;
+		const activeDescs = this.#getActiveSubagentDescriptions();
+		this.#todoHudSubagentKey = activeDescs.join("\n");
 		if (this.#todoHudHidden) return;
 		const phases = this.todoPhases.filter(phase => phase.tasks.length > 0);
 		if (phases.length === 0) return;
@@ -4122,7 +4193,6 @@ export class InteractiveMode implements InteractiveModeContext {
 		const subsequentStageCap = 4; // stages shown after the active one (a trailing summary row covers the rest)
 		const activeTaskCap = 5; // open tasks previewed for the active stage
 
-		const activeDescs = this.#getActiveSubagentDescriptions();
 		// A pending todo "lights up" (accent) when an in-flight subagent is doing
 		// its work, matched by normalized content overlap.
 		const isMatched = (todo: TodoItem): boolean =>
@@ -4496,10 +4566,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			// (same as the spawn-path ToolSession), not the settings default. This is
 			// the primary fallback in resolveAgentModelPatterns, so the `good` worker's
 			// pi/task inheritance tracks the reopened session's model.
-			getActiveModelString: () =>
-				this.session.model
-					? formatModelSelectorValue(formatModelStringWithRouting(this.session.model), this.session.thinkingLevel)
-					: undefined,
+			getActiveModelString: () => (this.session.model ? formatModelString(this.session.model) : undefined),
 		};
 	}
 
@@ -4677,8 +4744,10 @@ export class InteractiveMode implements InteractiveModeContext {
 	async #clearTransientModeState(options?: {
 		preserveVibe?: boolean;
 		vibeScopeAlreadySuspended?: boolean;
+		restorePlanModel?: boolean;
 	}): Promise<void> {
 		if (this.planModeEnabled || this.planModePaused) {
+			const previousModel = this.#planModePreviousModelState;
 			this.session.setPlanModeState(undefined);
 			try {
 				const previousPresentation = this.#planModePreviousToolPresentation;
@@ -4699,6 +4768,9 @@ export class InteractiveMode implements InteractiveModeContext {
 				this.#pendingPlanModelSwitch = false;
 				this.#planModeHasEntered = false;
 				this.#updatePlanModeStatus();
+			}
+			if (options?.restorePlanModel && previousModel) {
+				await this.#restorePlanPreviousModel(previousModel);
 			}
 		}
 
@@ -4758,9 +4830,13 @@ export class InteractiveMode implements InteractiveModeContext {
 		// flags and settings, and that set — not a historical one — is what exiting
 		// vibe must restore.
 		const vibeToolsetLostToTeardown = this.vibeModeEnabled && !preserveVibe;
+		// A session that records no model (a `/new` boundary) keeps the live model,
+		// which during plan mode is the transient plan-role model; hand it the
+		// pre-plan model instead. A recorded model was already restored by switchSession.
 		await this.#clearTransientModeState({
 			preserveVibe,
 			vibeScopeAlreadySuspended,
+			restorePlanModel: Object.keys(sessionContext.models).length === 0,
 		});
 		await VibeSessionRegistry.global().rehydrate(vibeSession);
 		const goalEnabled = cfgGoalEnabled.get(this.session.settings);
@@ -6751,12 +6827,16 @@ export class InteractiveMode implements InteractiveModeContext {
 			}
 			return;
 		}
-		this.#isShuttingDown = true;
+		this.#beginClose();
+		const worktreePlan = await this.#planOwnedWorktreeExit();
 		try {
 			await this.#teardown();
 		} catch (error) {
 			this.#handleTeardownError("close", error);
 			return;
+		}
+		for (const message of await removeExitWorktrees(worktreePlan)) {
+			process.stderr.write(`${chalk.yellow(message)}\n`);
 		}
 
 		// Print resumption hint only if the session was actually materialized to
@@ -6787,6 +6867,30 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	/**
+	 * Apply `worktree.onExit` to worktrees this launch created and return the ones
+	 * to remove after teardown. Stops the agent turn and live commands first so the
+	 * prompts describe a worktree nothing is still writing to. Never throws.
+	 */
+	async #planOwnedWorktreeExit(): Promise<WorktreeExitPlan[]> {
+		const policy = cfgWorktreeOnExit.get(this.settings);
+		if (policy === "keep" || this.#ownedWorktrees.length === 0) return [];
+		this.#abortLoopCondition();
+		this.#cancelLoopAutoSubmit();
+		try {
+			await this.session.abort();
+			await this.#liveCommandController.stop();
+		} catch (err) {
+			this.showWarning(err instanceof Error ? err.message : String(err));
+		}
+		return planWorktreeExit(
+			this.#ownedWorktrees,
+			policy,
+			(title, message) => this.showHookConfirm(title, message),
+			message => this.showWarning(message),
+		);
+	}
+
+	/**
 	 * Tear down like {@link shutdown}, then relaunch the CLI with the original
 	 * launch argv (session-source flags and positional prompts stripped, see
 	 * {@link restartArgv}), resuming this session when it exists on disk.
@@ -6799,7 +6903,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	 */
 	async restart(): Promise<void> {
 		if (this.#isShuttingDown) return;
-		this.#isShuttingDown = true;
+		this.#beginClose();
 		try {
 			await this.#teardown();
 		} catch (error) {
@@ -6843,6 +6947,16 @@ export class InteractiveMode implements InteractiveModeContext {
 		return sessionId && sessionFile && this.sessionManager.isSessionOnDisk() ? sessionId : undefined;
 	}
 
+	/**
+	 * Claim the one-shot `shutdown()`/`restart()` close and acknowledge it before
+	 * any await: worktree exit planning, live commands, and BTW history writes can
+	 * all stall, and the user must see a reason for the pause.
+	 */
+	#beginClose(): void {
+		this.#isShuttingDown = true;
+		this.showStatus("Closing session…");
+	}
+
 	/** Shared `shutdown()`/`restart()` teardown: dispose the session and hand the terminal back. */
 	async #teardown(): Promise<void> {
 		// An in-flight loop condition (or a deferred auto-submit timer) must not
@@ -6852,10 +6966,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#abortLoopCondition();
 		this.#cancelLoopAutoSubmit();
 
-		// Surface progress before any asynchronous cleanup, including live commands
-		// and BTW history writes, so the user sees a reason for the pause.
-		this.showStatus("Closing session…");
-
+		// `#beginClose()` already acknowledged the close; escalate only once the
+		// teardown itself lingers, so time spent in exit prompts never counts.
 		const stillClosingTimer = setTimeout(() => {
 			this.showStatus("Still closing… (flushing memory backend / network)");
 		}, STILL_CLOSING_DELAY_MS);
@@ -6904,6 +7016,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		// pending tick cannot re-emit an OSC title after `popTerminalTitle` hands the
 		// terminal back (which would leave the parent shell with a `π ⠋ …` tab).
 		disposeTerminalTitleState();
+		disposeProgramStatus();
 		popTerminalTitle();
 		this.stop();
 	}
@@ -6991,6 +7104,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		nextEditor.onAutocompleteUpdate = () => {
 			this.ui.requestRender();
 		};
+		// A swap during startup keeps the bootstrap submit gate until init lifts it.
+		nextEditor.disableSubmit = previousEditor.disableSubmit;
 		nextEditor.setShimmerRepaintHandler(() => this.ui.requestComponentRender(nextEditor));
 		this.editor = nextEditor;
 		this.composer.setEditor(nextEditor);
@@ -7507,6 +7622,10 @@ export class InteractiveMode implements InteractiveModeContext {
 		return this.#commandController.handleDumpAllCommand();
 	}
 
+	async handleDumpAnonCommand(): Promise<void> {
+		return this.#commandController.handleDumpAnonCommand();
+	}
+
 	handleAdvisorDumpCommand(isRaw?: boolean) {
 		return this.#commandController.handleAdvisorDumpCommand(isRaw);
 	}
@@ -7591,12 +7710,14 @@ export class InteractiveMode implements InteractiveModeContext {
 		await this.#commandController.handleDeleteCommand();
 	}
 
-	async handleForkCommand(): Promise<void> {
+	async handleForkCommand(placement?: "pane" | "window"): Promise<void> {
 		if (this.#vibeSessionTransitionBlocked()) return;
-		await this.#btwController.dispose();
-		this.#omfgController.dispose();
-		this.#cleanseController.dispose();
-		await this.#commandController.handleForkCommand();
+		if (!placement) {
+			await this.#btwController.dispose();
+			this.#omfgController.dispose();
+			this.#cleanseController.dispose();
+		}
+		await this.#commandController.handleForkCommand(placement);
 	}
 
 	async handleMoveCommand(targetPath?: string): Promise<void> {
@@ -7604,9 +7725,34 @@ export class InteractiveMode implements InteractiveModeContext {
 		await this.#commandController.handleMoveCommand(targetPath);
 	}
 
-	async handleWorktreeCommand(branch?: string): Promise<void> {
+	async handleWorktreeCommand(branch?: string, options?: { keepChanges?: boolean }): Promise<void> {
 		if (this.#vibeSessionTransitionBlocked()) return;
-		await this.#commandController.handleWorktreeCommand(branch);
+		const worktree = await this.#commandController.handleWorktreeCommand(branch, options);
+		if (worktree) this.#ownedWorktrees.push(worktree);
+	}
+
+	/**
+	 * Apply `worktree.onStart` to a fresh launch: optionally move the session into
+	 * a new worktree forked from clean `HEAD`. Silent no-op outside git checkouts;
+	 * failures become a warning so startup continues.
+	 */
+	async maybeAutoCreateWorktree(): Promise<void> {
+		try {
+			const policy = cfgWorktreeOnStart.get(this.settings);
+			if (policy === "off" || !(await canAutoCreateWorktree(this.sessionManager.getCwd()))) return;
+			if (
+				policy === "ask" &&
+				!(await this.showHookConfirm(
+					"Create a worktree for this session?",
+					"Work happens on a new wt/* branch; this checkout stays untouched.",
+				))
+			) {
+				return;
+			}
+			await this.handleWorktreeCommand(undefined, { keepChanges: false });
+		} catch (err) {
+			this.showWarning(`Worktree not created: ${err instanceof Error ? err.message : String(err)}`);
+		}
 	}
 
 	withBtwSessionMove(operation: () => Promise<boolean>): Promise<boolean> {
@@ -7862,8 +8008,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		await runProviderSetupWizard(this);
 	}
 
-	showHookConfirm(title: string, message: string): Promise<boolean> {
-		return this.#extensionUiController.showHookConfirm(title, message);
+	showHookConfirm(title: string, message: string, dialogOptions?: InteractiveSelectorDialogOptions): Promise<boolean> {
+		return this.#extensionUiController.showHookConfirm(title, message, dialogOptions);
 	}
 
 	// Input handling

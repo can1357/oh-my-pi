@@ -169,6 +169,28 @@ impl builtins::Command for KillCommand {
 					had_failure = true;
 					continue;
 				};
+				// A job running inside the shell has no process to deliver the signal
+				// to; a signal that would end a process ends the job instead.
+				if job.has_internal_tasks() {
+					let delivered = match signal {
+						KillSignal::Probe => true,
+						KillSignal::Signal(signal) if ends_process(signal) => {
+							job.abort_internal_tasks();
+							true
+						},
+						KillSignal::Signal(_) => false,
+					};
+					if !delivered {
+						writeln!(
+							context.stderr(),
+							"{}: {}: failed to send signal",
+							context.command_name,
+							operand
+						)?;
+						had_failure = true;
+					}
+					continue;
+				}
 				#[cfg(unix)]
 				{
 					let mut targets: Vec<i32> = job
@@ -627,6 +649,35 @@ impl KillSignal {
 	}
 }
 
+/// Whether `signal`'s default action ends the process it is sent to — the only
+/// effect `kill` can give a job that runs inside the shell. Stop, continue, and
+/// default-ignored signals leave such a job alone.
+fn ends_process(signal: TrapSignal) -> bool {
+	#[cfg(unix)]
+	{
+		match i32::try_from(signal) {
+			Ok(
+				libc::SIGCHLD
+				| libc::SIGCONT
+				| libc::SIGSTOP
+				| libc::SIGTSTP
+				| libc::SIGTTIN
+				| libc::SIGTTOU
+				| libc::SIGURG
+				| libc::SIGWINCH,
+			) => false,
+			#[cfg(target_os = "macos")]
+			Ok(libc::SIGINFO | libc::SIGIO) => false,
+			Ok(number) => number > 0,
+			Err(_) => false,
+		}
+	}
+	// Every signal `kill` sends on Windows terminates the process.
+	#[cfg(not(unix))]
+	{
+		matches!(signal, TrapSignal::Signal(_))
+	}
+}
 
 /// Resolves a signal name or number to its number.
 ///

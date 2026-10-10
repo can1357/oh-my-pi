@@ -14,6 +14,7 @@
 
 use std::{
 	collections::HashMap,
+	fs::FileType,
 	path::{Path, PathBuf},
 	sync::Arc,
 	time::SystemTime,
@@ -96,13 +97,44 @@ pub trait FileSource {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct Stamp {
-	mtime: Option<SystemTime>,
-	len:   u64,
+	mtime:        Option<SystemTime>,
+	len:          u64,
+	special_kind: Option<&'static str>,
+}
+
+/// Kind of a non-regular, non-directory file, or `None`. Reading one can block
+/// forever (a FIFO, a terminal) or never end (`/dev/zero`). `metadata` follows
+/// symlinks, so a link reports its target's kind.
+fn special_file_kind(file_type: FileType) -> Option<&'static str> {
+	if file_type.is_file() || file_type.is_dir() {
+		return None;
+	}
+	#[cfg(unix)]
+	{
+		use std::os::unix::fs::FileTypeExt;
+		if file_type.is_char_device() {
+			return Some("character device");
+		}
+		if file_type.is_block_device() {
+			return Some("block device");
+		}
+		if file_type.is_fifo() {
+			return Some("FIFO");
+		}
+		if file_type.is_socket() {
+			return Some("socket");
+		}
+	}
+	Some("special file")
 }
 
 fn stamp(absolute: &Path) -> Option<Stamp> {
 	let meta = std::fs::metadata(absolute).ok()?;
-	Some(Stamp { mtime: meta.modified().ok(), len: meta.len() })
+	Some(Stamp {
+		mtime:        meta.modified().ok(),
+		len:          meta.len(),
+		special_kind: special_file_kind(meta.file_type()),
+	})
 }
 
 /// Default [`FileSource`] backed by `std::fs`.
@@ -171,6 +203,12 @@ impl FileCache {
 		let Some(current) = stamp(&resolved.absolute) else {
 			return Ok(None);
 		};
+		if let Some(kind) = current.special_kind {
+			return Err(EditError::apply(format!(
+				"Cannot edit '{}': it is a {kind}, not a regular file or directory.",
+				resolved.display
+			)));
+		}
 		if let Some((cached_stamp, read)) = self.reads.get(&resolved.absolute)
 			&& *cached_stamp == current
 			&& read.resolved.display == resolved.display

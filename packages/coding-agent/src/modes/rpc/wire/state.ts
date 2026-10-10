@@ -296,6 +296,17 @@ export const stateDefs = {
 		"A side-question topic: its first turn's fields plus follow-ups; the latest turn is the last follow-up, else the record.",
 	),
 	LoginProvider: { id: "string", name: "string", available: "boolean", authenticated: "boolean" },
+	LogoutAccount: doc(
+		{
+			credentialId: "number.integer",
+			provider: "string",
+			label: "string",
+			detail: "string",
+			type: "'api_key' | 'oauth'",
+			active: "boolean",
+		},
+		"A stored credential `logout` can remove; `active` marks credentials the session may be using.",
+	),
 	HandoffResult: { "savedPath?": "string" },
 	PromptAck: doc(
 		{ "agentInvoked?": "boolean" },

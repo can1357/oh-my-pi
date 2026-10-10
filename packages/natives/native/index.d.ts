@@ -731,6 +731,13 @@ export declare class VcsRepo {
 export declare function __ompInstallTokioRuntime(): void
 
 /**
+ * Points the addon at the directory holding downloaded wasm grammars
+ * (`<dir>/<file>`). The loader (`native/loader-state.js`) calls this once
+ * with `<natives dir>/grammars`; grammars then load lazily from it.
+ */
+export declare function __ompSetGrammarDir(dir: string): void
+
+/**
  * Release version stamped into this `.node` after linking.
  *
  * `None` for an unstamped build. The JS loader compares it against
@@ -863,6 +870,11 @@ export interface AstFindResult {
   limitReached: boolean
   /** Non-fatal parse or pattern errors collected during the run. */
   parseErrors?: Array<string>
+  /**
+   * Languages whose on-demand grammar is not installed; their files were
+   * skipped (see `wasmGrammarFor`).
+   */
+  missingGrammars?: Array<string>
 }
 
 /**
@@ -1035,6 +1047,11 @@ export interface AstReplaceResult {
   limitReached: boolean
   /** Parse or pattern errors when not failing the whole operation. */
   parseErrors?: Array<string>
+  /**
+   * Languages whose on-demand grammar is not installed; their files were
+   * skipped (see `wasmGrammarFor`).
+   */
+  missingGrammars?: Array<string>
 }
 
 export interface AxNode {
@@ -2729,14 +2746,23 @@ export interface PtyStartOptions {
 /**
  * Rasterize SVG/SVGZ bytes into a bounded PNG without resolving local files.
  *
- * Conversion runs on the native blocking pool so parsing and rendering do not
- * stall the JavaScript event loop.
+ * The image is drawn at `scale` times the SVG's intrinsic size (default 1;
+ * above 1 renders vector content crisply at display resolution), then shrunk
+ * as needed to fit `max_width_px` x `max_height_px` with its aspect ratio
+ * kept. Conversion runs on the native blocking pool so parsing and rendering
+ * do not stall the JavaScript event loop.
+ *
+ * With `cell`, the limits round down to whole cells and the canvas pads with
+ * transparency, right and bottom, to whole cells: a terminal placing the PNG
+ * over `width / cell.width_px` columns and `height / cell.height_px` rows
+ * shows it 1:1 instead of resampling it.
  *
  * # Errors
- * Returns an error for invalid SVG data, zero/oversized limits, allocation
- * failure, or PNG encoding failure.
+ * Returns an error for invalid SVG data, zero/oversized limits, a zero cell
+ * size, a scale that is not finite and positive, allocation failure, or PNG
+ * encoding failure.
  */
-export declare function rasterizeSvg(input: Uint8Array, maxWidthPx: number, maxHeightPx: number): Promise<Uint8Array>
+export declare function rasterizeSvg(input: Uint8Array, maxWidthPx: number, maxHeightPx: number, scale?: number | undefined | null, cell?: SvgCell | undefined | null): Promise<Uint8Array>
 
 /**
  * Read an image from the system clipboard.
@@ -3390,6 +3416,15 @@ export interface SummarySegment {
  */
 export declare function supportsLanguage(lang: string): boolean
 
+/**
+ * Terminal cell size in device pixels, for [`rasterize_svg`] canvases a
+ * terminal shows over whole cells.
+ */
+export interface SvgCell {
+  widthPx: number
+  heightPx: number
+}
+
 /** Options for [`TextPredictor::new`]. */
 export interface TextPredictorOptions {
   /** Engine: `ngram`, `smollm`, or `apple`. */
@@ -3660,6 +3695,39 @@ export declare function warmBlockParse(options: BlockParseOptions): Promise<unde
  * highlighted languages on the native worker pool.
  */
 export declare function warmHighlighter(): Promise<undefined>
+
+/**
+ * Wasm grammar backing `lang` (alias) or the language of `path`; `null` for
+ * built-in or unknown languages.
+ */
+export declare function wasmGrammarFor(query: WasmGrammarQuery): WasmGrammarInfo | null
+
+/** A grammar the host downloads on first use. */
+export interface WasmGrammarInfo {
+  /** Canonical language name, e.g. `verilog`, `csharp`. */
+  language: string
+  /** stencil-hq/wasm-grammars release tag hosting the grammar, e.g. `v1`. */
+  release: string
+  /**
+   * File name inside the grammar directory; the release asset is
+   * `<file>.zst`.
+   */
+  file: string
+  /** Lowercase hex SHA-256 of the decompressed `.wasm`. */
+  sha256: string
+  /** Byte size of the decompressed `.wasm`. */
+  size: number
+  /** Whether the grammar is downloaded (or already loaded). */
+  installed: boolean
+}
+
+/** Language to look up: an alias, or a path to infer it from. */
+export interface WasmGrammarQuery {
+  /** Language alias (e.g. `kotlin`, `sv`); wins over `path`. */
+  lang?: string
+  /** File whose extension selects the language. */
+  path?: string
+}
 
 /** Profiling results returned to JavaScript. */
 export interface WorkProfile {

@@ -2800,7 +2800,8 @@ mod tests {
 				batches
 					.iter()
 					.filter(|batch| batch[0].path.ends_with("dense.txt"))
-					.count() >= 3,
+					.count()
+					>= 3,
 				"a dense file streams while it is searched, not as one batch",
 			);
 			assert_eq!(dense.len(), dense_matches);

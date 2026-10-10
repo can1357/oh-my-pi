@@ -1,31 +1,30 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import * as url from "node:url";
-import { getMarkdownLinkUrls, TERMINAL } from "@oh-my-pi/pi-tui";
+import { TERMINAL } from "@oh-my-pi/pi-tui";
 import { fileUriForTerminal } from "@oh-my-pi/pi-tui/render/hyperlink";
 import { extractUriScheme, InternalUrlRouter, parseInternalUrl, type ResolveContext } from "./index";
 import { expandPath } from "../tools/path-utils";
 
 /**
- * Resolve Markdown hyperlinks to existing local resources or absolute file URLs.
- * Relative paths use the calling session's cwd; missing, virtual, and remote targets stay unchanged.
+ * Resolve Markdown link destinations (as extracted by `getMarkdownLinkUrls`)
+ * to existing local resources or absolute file URLs. Relative paths use the
+ * calling session's cwd; missing, virtual, and remote targets stay unchanged.
  */
-export async function resolveMarkdownLinkTargets(
-	texts: readonly string[],
+export async function resolveMarkdownLinkHrefs(
+	hrefs: Iterable<string>,
 	context?: ResolveContext,
 ): Promise<ReadonlyMap<string, string>> {
 	const targets = new Map<string, string>();
 	const urls = new Set<string>();
 	const router = InternalUrlRouter.instance();
-	for (const text of texts) {
-		for (const href of getMarkdownLinkUrls(text)) {
-			if (!href || /[\x00-\x1f\x7f]/.test(href) || /^(?:#|\?|\/\/)/.test(href)) continue;
-			const scheme = extractUriScheme(href);
-			// Rendering must not fetch remote resources or materialize secrets:
-			// only linkable schemes locate locally and cheaply.
-			if (!scheme || scheme === "file" || (router.spec(scheme)?.linkable && router.canHandle(href))) {
-				urls.add(href);
-			}
+	for (const href of hrefs) {
+		if (!href || /[\x00-\x1f\x7f]/.test(href) || /^(?:#|\?|\/\/)/.test(href)) continue;
+		const scheme = extractUriScheme(href);
+		// Rendering must not fetch remote resources or materialize secrets:
+		// only linkable schemes locate locally and cheaply.
+		if (!scheme || scheme === "file" || (router.spec(scheme)?.linkable && router.canHandle(href))) {
+			urls.add(href);
 		}
 	}
 	await Promise.all(

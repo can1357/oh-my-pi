@@ -202,6 +202,94 @@ describe("pickElectronTarget", () => {
 		await expect(pickElectronTarget(browser)).resolves.toBe(page);
 	});
 
+	test.skipIf(!CHROMIUM_AVAILABLE)(
+		"waits for a real attached Chromium's first page before opening the managed tab",
+		async () => {
+			const exe = await ensureChromiumExecutable();
+			if (!exe) throw new Error("Expected a Chromium executable");
+			const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-attach-page-readiness-"));
+			const port = await findFreeCdpPort();
+			const child = Bun.spawn(
+				[
+					exe,
+					"--headless=new",
+					"--no-sandbox",
+					"--no-startup-window",
+					"--no-first-run",
+					"--no-default-browser-check",
+					"--use-mock-keychain",
+					"--password-store=basic",
+					`--user-data-dir=${root}`,
+					`--remote-debugging-port=${port}`,
+				],
+				{ stdin: "ignore", stdout: "ignore", stderr: "ignore" },
+			);
+			const session = makeSession();
+			const prelude = createBrowserPrelude(session);
+			const context = { session, toolCallId: "attach-page-readiness" };
+			const name = `page-readiness-${crypto.randomUUID()}`;
+			const controller = new AbortController();
+			let attached: BrowserHandle | undefined;
+			let restoreWait: (() => void) | undefined;
+			try {
+				const cdpUrl = `http://127.0.0.1:${port}`;
+				await waitForCdp(cdpUrl, 15_000);
+				attached = await acquireBrowser({ kind: "connected", cdpUrl }, { cwd: process.cwd() });
+				if (!("browser" in attached)) throw new Error("Expected a Puppeteer browser");
+				const browser = attached.browser;
+				expect(await browser.pages()).toHaveLength(0);
+				const waiting = Promise.withResolvers<void>();
+				const waitForTarget = browser.waitForTarget.bind(browser);
+				// Observe the real waiter starting, without replacing its CDP behavior.
+				// The first page is then created externally, not by browser.open.
+				const waitSpy = vi.spyOn(browser, "waitForTarget").mockImplementation((predicate, options) => {
+					waiting.resolve();
+					return waitForTarget(predicate, options);
+				});
+				restoreWait = () => waitSpy.mockRestore();
+				const opening = prelude
+					.invoke(
+						{
+							action: "open",
+							name,
+							url: "data:text/html,<title>First attached page</title>",
+							timeout: 15,
+							app: { cdp_url: cdpUrl },
+						},
+						{ ...context, signal: controller.signal },
+					)
+					.then(
+						result => ({ result }),
+						(error: unknown) => ({ error }),
+					);
+				await Promise.race([
+					waiting.promise,
+					opening.then(outcome => {
+						if ("error" in outcome) throw outcome.error;
+						throw new Error("Attached open finished before an external page was created");
+					}),
+				]);
+				expect(await browser.pages()).toHaveLength(0);
+				await browser.newPage();
+				const outcome = await opening;
+				if ("error" in outcome) throw outcome.error;
+				const title = await prelude.invoke({ action: "run", name, code: "return await tab.title();" }, context);
+				expect(title.details).toMatchObject({ value: "First attached page" });
+				await prelude.invoke({ action: "close", name, kill: true }, context);
+				expect(await probeCdpStatus(`${cdpUrl}/json/version`, { timeoutMs: 1500 })).toBe(200);
+			} finally {
+				controller.abort();
+				restoreWait?.();
+				await prelude.invoke({ action: "close", name }, context).catch(() => {});
+				if (attached) await releaseBrowser(attached, { kill: false });
+				child.kill();
+				await child.exited;
+				await fs.rm(root, { recursive: true, force: true });
+			}
+		},
+		30_000,
+	);
+
 	test("reports available pages when the matcher misses", async () => {
 		const page = fakePage({ url: "https://example.com/", title: "Example" });
 		const browser = {
@@ -426,6 +514,16 @@ describe("pickElectronTarget", () => {
 					url: "data:text/html,<title>Owned</title>",
 					app: { path: exe, args: [...flags, "--user-data-dir", path.join(root, "owned")] },
 				});
+				const borrowedTab = getTab(borrowedName);
+				const ownedTab = getTab(ownedName);
+				if (borrowedTab?.backend !== "worker" || ownedTab?.backend !== "worker")
+					throw new Error("Expected Chromium worker tabs");
+				expect(borrowedTab.browser).not.toBe(ownedTab.browser);
+				expect(borrowedTab.targetId).not.toBe(ownedTab.targetId);
+				expect(borrowedTab.browser.subprocess).toBeUndefined();
+				expect(ownedTab.browser.subprocess).toBeDefined();
+				const ownedTitle = await invoke({ action: "run", name: ownedName, code: "return await tab.title();" });
+				expect(ownedTitle.details).toMatchObject({ value: "Owned" });
 				const title = await invoke({ action: "run", name: borrowedName, code: "return await tab.title();" });
 				expect(title.details).toMatchObject({ value: "Borrowed" });
 				await invoke({ action: "close", name: borrowedName, kill: true });
@@ -756,6 +854,78 @@ describe("pickElectronTarget relay path", () => {
 		});
 		expect(picked).toBe(firstPage);
 		expect(second.pageSpy).not.toHaveBeenCalled();
+	});
+
+	it("waits for a just-opened tab to reach /json before failing the matcher", async () => {
+		const opened = {
+			id: "PAGE_NEW",
+			type: "page",
+			title: "",
+			url: "https://example.com/?omp-probe=new",
+			active: "false",
+			discarded: "false",
+		};
+		let served = 0;
+		relay.reload({ fetch: () => Response.json(++served === 1 ? RELAY_ENTRIES : [...RELAY_ENTRIES, opened]) });
+		const openedPage = makePage([() => {}], opened.url).page;
+		const target = makeTarget("PAGE_NEW", openedPage);
+
+		const picked = await pickElectronTarget(makeBrowser([target.target]), { relayJson, matcher: "omp-probe=new" });
+
+		expect(picked).toBe(openedPage);
+		expect(served).toBe(2);
+	});
+
+	it("names the missing tab and what to pass when no tab ever matches", async () => {
+		const error = await rejectionOf(pickElectronTarget(makeBrowser([]), { relayJson, matcher: "omp-probe=none" }));
+
+		expect(error).toBeInstanceOf(Error);
+		const message = (error as Error).message;
+		expect(message).toContain('No page target matched "omp-probe=none" after waiting 2s for a newly opened tab');
+		expect(message).toContain("omit it to use the active tab");
+		expect(message).toContain("- Docs  https://docs.example.com");
+	});
+
+	it("waits for Puppeteer to see a tab that /json already lists", async () => {
+		const cartPage = makePage([() => {}], RELAY_ENTRIES[1]!.url).page;
+		const late = makeTarget("PAGE11", cartPage);
+		const targets: Array<Target & { _targetId: string }> = [];
+		const browser = Object.assign(makeBrowser(targets), {
+			waitForTarget: async (predicate: (target: Target) => boolean) => {
+				targets.push(late.target);
+				return targets.find(predicate);
+			},
+		});
+
+		expect(await pickElectronTarget(browser, { relayJson, matcher: "whole foods" })).toBe(cartPage);
+	});
+
+	it("tells the model to retry when Puppeteer never sees the selected tab", async () => {
+		const browser = Object.assign(makeBrowser([]), {
+			waitForTarget: async () => {
+				throw Object.assign(new Error("Waiting for target failed"), { name: "TimeoutError" });
+			},
+		});
+
+		const error = await rejectionOf(pickElectronTarget(browser, { relayJson, matcher: "whole foods" }));
+
+		expect(error).toBeInstanceOf(Error);
+		expect((error as Error).message).toMatch(/^Selected tab did not become available.*retry, or reopen it/);
+	});
+
+	it("falls back to target enumeration at once when /json lists no pages", async () => {
+		let served = 0;
+		relay.reload({
+			fetch: () => {
+				served++;
+				return Response.json([]);
+			},
+		});
+		const cartPage = fakePage({ url: "https://example.com/cart", title: "Cart" });
+		const cart = makeTarget("PAGE_CART", cartPage);
+
+		expect(await pickElectronTarget(makeBrowser([cart.target]), { relayJson, matcher: "cart" })).toBe(cartPage);
+		expect(served).toBe(1);
 	});
 
 	it("does not adopt another live tab when the selected tab is unreadable", async () => {

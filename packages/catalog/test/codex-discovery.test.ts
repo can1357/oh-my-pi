@@ -280,7 +280,7 @@ describe("Codex model discovery", () => {
 			// retains the standard window; the registry expands it only when
 			// extended context is enabled.
 			expect(builtModel.cost).toEqual({ input: 10, output: 50, cacheRead: 1, cacheWrite: 0 });
-			expect(builtModel.serviceTierCost).toEqual({ flex: 0.5, priority: 2.5 });
+			expect(builtModel.serviceTierCost).toEqual({ flex: 0.5, priority: 2.5, ultrafast: 8 });
 			expect(builtModel).toMatchObject({
 				contextWindow: 272_000,
 				maxTokens: 128_000,

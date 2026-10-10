@@ -1,3 +1,4 @@
+import { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, test, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
@@ -16,6 +17,7 @@ import { removeWithRetries } from "../../utils/src/temp";
 import { withEnv } from "./helpers";
 
 const ANTHROPIC_ENV = ["ANTHROPIC_API_KEY", "ANTHROPIC_OAUTH_TOKEN"] as const;
+const AUTH_BROKER_MODULE = path.resolve(import.meta.dir, "../src/auth-broker/index.ts");
 const savedEnv: Partial<Record<(typeof ANTHROPIC_ENV)[number], string | undefined>> = {};
 
 function mintOAuthCredential(suffix: string, expires: number) {
@@ -52,7 +54,7 @@ describe("RemoteAuthCredentialStore SSE integration", () => {
 			delete process.env[key];
 		}
 		tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "auth-broker-remote-store-"));
-		store = await SqliteAuthCredentialStore.open(path.join(tempDir, "agent.db"));
+		store = new SqliteAuthCredentialStore(new Database(":memory:"));
 		await store.saveOAuth("anthropic", mintOAuthCredential("a", Date.now() + 60_000));
 		storage = new AuthStorage(store);
 		await storage.credentials.reload();
@@ -178,18 +180,15 @@ describe("RemoteAuthCredentialStore SSE integration", () => {
 			expect(await gatewayStorage.credentials.poll()).toBe(true);
 			expect(await gatewayStorage.credentials.poll()).toBe(false);
 
-			// Stop the broker, replace its persisted credential set, and boot a
-			// fresh AuthStorage whose in-memory generation starts below the
-			// client's previously acknowledged value.
+			// Stop the broker and boot a replacement over a different credential
+			// set whose AuthStorage generation starts below the client's
+			// previously acknowledged value.
 			const brokerUrl = new URL(handle!.url);
 			const bind = `${brokerUrl.hostname}:${brokerUrl.port}`;
 			await handle!.close();
 			storage!.close();
 
-			store = await SqliteAuthCredentialStore.open(path.join(tempDir, "agent.db"));
-			for (const provider of ["anthropic", "deepseek", "openai", "xai"]) {
-				await store.deleteProvider(provider);
-			}
+			store = new SqliteAuthCredentialStore(new Database(":memory:"));
 			await store.saveApiKey("google", "sk-restarted");
 			storage = new AuthStorage(store);
 			await storage.credentials.reload();
@@ -343,6 +342,43 @@ describe("RemoteAuthCredentialStore SSE integration", () => {
 				cacheReadTokens: 0,
 				cacheWriteTokens: 0,
 				costUsd: 0.05,
+			},
+		]);
+	});
+
+	test("a process that quits before the flush interval still reports its observed usage", async () => {
+		// Mirrors `omp -p`: one turn, then postmortem.quit() well inside the default 10s flush interval.
+		const script = [
+			'import { postmortem } from "@oh-my-pi/pi-utils";',
+			`import { AuthBrokerClient, RemoteAuthCredentialStore } from ${JSON.stringify(AUTH_BROKER_MODULE)};`,
+			`const client = new AuthBrokerClient({ url: ${JSON.stringify(handle!.url)}, token: ${JSON.stringify(token)} });`,
+			"const remote = new RemoteAuthCredentialStore({ client, streamSnapshots: false });",
+			"remote.recordObservedUsage(",
+			'	[{ at: Date.now(), provider: "anthropic", model: "claude-x", requests: 1, inputTokens: 12, outputTokens: 4, cacheReadTokens: 0, cacheWriteTokens: 0, costUsd: 0.01 }],',
+			'	{ installId: "print-mode-install", hostname: "print-mode-host", app: "omp" },',
+			");",
+			"await postmortem.quit(0);",
+		].join("\n");
+		const child = Bun.spawn([process.execPath, "--eval", script], {
+			cwd: import.meta.dir,
+			stdin: "ignore",
+			stdout: "ignore",
+			stderr: "pipe",
+		});
+		const [exitCode, stderr] = await Promise.all([child.exited, new Response(child.stderr).text()]);
+		expect(exitCode, stderr).toBe(0);
+
+		const reported = storage!.usage.clientSummary(0).clients.find(c => c.installId === "print-mode-install");
+		expect(reported?.providers).toEqual([
+			{
+				app: "omp",
+				provider: "anthropic",
+				requests: 1,
+				inputTokens: 12,
+				outputTokens: 4,
+				cacheReadTokens: 0,
+				cacheWriteTokens: 0,
+				costUsd: 0.01,
 			},
 		]);
 	});

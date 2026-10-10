@@ -1,7 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import { streamOpenAICompletions } from "@oh-my-pi/pi-ai/providers/openai-completions";
 import type { Context, FetchImpl, Model } from "@oh-my-pi/pi-ai/types";
-import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
+import { minimaxTokenPlanOpenAIModel } from "./helpers";
 
 function createSseResponse(events: unknown[]): Response {
 	const payload = `${events
@@ -54,7 +54,7 @@ function stopChunk(model: Model<"openai-completions">): unknown {
 
 describe("issue #1203 - MiniMax Coding Plan CN think tags", () => {
 	it("parses minimax-code-cn <think> content into a thinking block", async () => {
-		const model = getBundledModel("minimax-code-cn", "MiniMax-M2.5") as Model<"openai-completions">;
+		const model = minimaxTokenPlanOpenAIModel("minimax-code-cn", "MiniMax-M2.5");
 		const fetchMock = createMockFetch([
 			minimaxChunk(model, "<think>"),
 			minimaxChunk(model, "hidden reasoning"),
@@ -76,7 +76,7 @@ describe("issue #1203 - MiniMax Coding Plan CN think tags", () => {
 	});
 
 	it("dedupes MiniMax-M3 cumulative reasoning snapshots after answer text has started", async () => {
-		const model = getBundledModel("minimax-code-cn", "MiniMax-M3") as Model<"openai-completions">;
+		const model = minimaxTokenPlanOpenAIModel("minimax-code-cn", "MiniMax-M3");
 		const fetchMock = createMockFetch([
 			{
 				id: "chatcmpl-minimax-cn",

@@ -9,11 +9,20 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
-import { $env, $which, APP_NAME, compareVersions, isEnoent, VERSION } from "@oh-my-pi/pi-utils";
+import {
+	$env,
+	$which,
+	APP_NAME,
+	compareVersions,
+	getProjectDir,
+	isCompiledBinary,
+	isEnoent,
+	VERSION,
+} from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { withFileLock } from "@oh-my-pi/pi-utils/file-lock";
 import { $ } from "bun";
-import { settings } from "../config/settings";
+import { Settings, settings } from "../config/settings";
 import { theme } from "@oh-my-pi/pi-tui/theme";
 import {
 	isTimeoutError,
@@ -293,7 +302,7 @@ export function resolveReleaseBinaryAsset(
  *
  * The npm dist-tag and the GitHub release channel disagree in both directions.
  * The pipeline publishes the GitHub release first (`release_npm` needs
- * `release_github_verify` in `.github/workflows/ci.yml`), so GitHub leads
+ * `release_github` in `.github/workflows/ci.yml`), so GitHub leads
  * during a release; and a publish that only half-completes leaves the gap
  * permanent — 18.2.9 reached npm `latest` with no `v18.2.9` GitHub release at
  * all (issue #12913). Binary installs therefore install what GitHub actually
@@ -589,6 +598,38 @@ function tryRealpath(p: string): string | undefined {
 	} catch {
 		return undefined;
 	}
+}
+
+/**
+ * Whether this omp runs from a source checkout (the dev launcher or a `bun link` of
+ * `src/cli.ts`) rather than a compiled binary or a package-manager install, which
+ * always lives under `node_modules`. Checkouts update through git, so update
+ * prompts are noise there.
+ */
+export function isSourceCheckout(): boolean {
+	return !isCompiledBinary() && !import.meta.dir.split(path.sep).includes("node_modules");
+}
+
+/**
+ * Name of the app that manages the omp at `binaryPath`, or undefined when none does.
+ *
+ * A manager (Tern) keeps `manager.json` (`{"manager": "tern", "name": "Tern"}`) two
+ * directories above every binary it installs (`<root>/versions/<version>`,
+ * `<root>/bin/omp.exe`) and updates them itself, so `omp update` must leave them alone.
+ * A missing or unreadable manifest means unmanaged.
+ */
+export async function managedInstallName(binaryPath: string): Promise<string | undefined> {
+	const resolved = tryRealpath(binaryPath);
+	if (!resolved) return undefined;
+	let manifest: unknown;
+	try {
+		manifest = await Bun.file(path.join(path.dirname(path.dirname(resolved)), "manager.json")).json();
+	} catch {
+		return undefined;
+	}
+	if (!isRecord(manifest)) return undefined;
+	const name = typeof manifest.name === "string" && manifest.name ? manifest.name : manifest.manager;
+	return typeof name === "string" && name ? name : undefined;
 }
 
 function isSymlinkPath(p: string): boolean {
@@ -2226,6 +2267,16 @@ export async function runUpdateCommand(opts: {
 	check: boolean;
 	channel?: UpdateChannel;
 }): Promise<void> {
+	const ompPath = resolveOmpPath();
+	const manager = ompPath ? await managedInstallName(ompPath) : undefined;
+	if (manager) {
+		console.log(
+			chalk.yellow(`${ompPath} is installed and kept up to date by ${manager}; update it from ${manager}.`),
+		);
+		return;
+	}
+	// `update.channel` picks the channel; --canary/--stable switch and persist it.
+	await Settings.init({ cwd: getProjectDir() });
 	console.log(chalk.dim(`Current version: ${VERSION}`));
 	const persistedChannel = readPersistedChannel() ?? "stable";
 	const channel = opts.channel ?? persistedChannel;
@@ -2252,7 +2303,7 @@ export async function runUpdateCommand(opts: {
 	if (isChannelSwitch) {
 		console.log(
 			chalk.yellow(
-				`Switching to ${channel} ${release.version}${comparison <= 0 ? ` (downgrade from ${VERSION})` : ""}`,
+				`Switching to ${channel} ${release.version}${comparison < 0 ? ` (downgrade from ${VERSION})` : ""}`,
 			),
 		);
 	} else if (comparison > 0) {

@@ -135,6 +135,8 @@ Menu/app labels are untrusted data. A takeover grant does not authorize unrelate
 
 On macOS, `setValue` on a date or time control (one whose `AXValue` is a date) takes ISO-8601: `YYYY-MM-DD` changes the day and keeps the control's time of day, `YYYY-MM-DDTHH:MM[:SS]` is local time, and a date-time followed by `Z` or `±HH:MM` is that exact instant. Anything else is refused before a write, naming these forms and the control's current date, as is a local time that daylight saving skips or repeats (add an offset to pick a repeated one).
 
+On macOS, a ref whose element the app has since removed throws `StaleRef` from every element operation, without waiting for the snapshots to expire it.
+
 On macOS, `setValue(value)` on a popup button (`popupbutton`) chooses the menu option titled exactly `value`: it opens a closed menu, presses the option, and confirms the choice by reading the popup's value back. No match, or several options with that title, throws with the available option titles, and a menu the call opened is closed again.
 
 AX actions need no screenshot. AX bounds and `desktop.elementAt()` use platform-native global desktop coordinates (logical points on macOS, physical pixels on Windows), not screenshot pixels. An element keeps its ref across AX snapshots; a ref throws `StaleRef` once its element is missing from the window's current and previous snapshots. A role or label change gives the element a new ref, and its old ref keeps working until it expires the same way.
@@ -177,10 +179,12 @@ Native errors are surfaced as `ToolError` text prefixed by the stable code name:
 
 - `PermissionDenied`, `CaptureFailed`, `InputFailed`, `BackgroundUnavailable`, `InputBusy`, `Cancelled`
 - `WindowNotFound`, `InvalidTarget`, `InvalidKey`, `InvalidCoordinateFrame`
-- `StaleRef`, `AxUnsupported`, `AxFailed`, `Timeout`, `Closed`, `Internal`
+- `StaleRef`, `AxUnsupported`, `AxFailed`, `AxUnconfirmed`, `Timeout`, `Closed`, `Internal`
 - `Unsupported`, `SpaceUnsupported`, `SpaceMoveDenied`
 
 Prelude/worker errors include `Computer session is closed`, `Computer worker is busy`, `Timed out starting computer worker`, `Computer code execution timed out after <ms>ms`, read-only mutation errors, and the worker-restart message above.
+
+`AxUnconfirmed` (macOS) means an AX action was requested but its outcome could not be confirmed: the app did not reply in time or messaging failed, for example because the action opened a modal dialog. It may already have taken effect, so observe the window before repeating it.
 
 `InputBusy` means another native operation owns input/focus and no input was sent. On macOS a listen-only, operation-scoped Escape monitor cancels physical Escape but ignores synthetic events. An unavailable monitor refuses input with `PermissionDenied`. `Cancelled` may follow partial input or an atomic OS/AX operation: cancellation cannot undo effects already delivered.
 

@@ -135,7 +135,7 @@ interface BrowserOpenOptions {
 	allowed_domains?: string[];
 	/** Document-start JavaScript sources or cwd-relative source-file paths. */
 	init_scripts?: string[];
-	/** Absolute or cwd-relative directory for downloads. */
+	/** Absolute or cwd-relative directory for this tab's downloads; each tab keeps its own, except in a connected or relay browser, which shares one folder. */
 	downloads?: string;
 	/** Override the tab user agent before initial navigation. */
 	user_agent?: string;
@@ -143,7 +143,7 @@ interface BrowserOpenOptions {
 	ignore_https_errors?: boolean;
 	/** Permit local file pages to read other local files in an owned browser process. */
 	allow_file_access?: boolean;
-	/** Override the configured display mode for this open. */
+	/** Override the configured Chromium display mode for this open; inside Tern the open stays a picture-in-picture (use `app.tern: false` for Chromium). */
 	headed?: boolean;
 	/** Keep the tab live across turn settle and idle close (default false). */
 	persist?: boolean;

@@ -23,6 +23,12 @@ export interface BuiltinSlashCommand {
 	allowArgs?: boolean;
 	/** Subcommands for dropdown completion (e.g. /mcp add, /mcp list). */
 	subcommands?: SubcommandDef[];
+	/**
+	 * The bare command is a complete invocation (`/fork`). Subcommand completion
+	 * then waits for a typed prefix, so Enter on `/name ` submits the bare command
+	 * instead of accepting the first subcommand from the dropdown.
+	 */
+	subcommandOptional?: boolean;
 	/** Static inline hint when command takes a simple argument (no subcommands). */
 	inlineHint?: string;
 	/** TUI-only dynamic status text for command-name autocomplete. Static `description` remains canonical for ACP/help. */
