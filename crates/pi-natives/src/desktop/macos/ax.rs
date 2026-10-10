@@ -106,6 +106,29 @@ pub(super) fn focused_window_id(pid: libc::pid_t) -> Option<u32> {
 	window_id(&window)
 }
 
+/// How an error names a window: its id, title and, for anything but a
+/// standard window, its AX subrole or role (`AXDialog`, `AXSheet`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct WindowLabel {
+	pub(super) id:    Option<u32>,
+	pub(super) title: Option<String>,
+	pub(super) kind:  Option<String>,
+}
+
+/// `pid`'s `AXFocusedWindow`, labelled for an error message.
+pub(super) fn focused_window_label(pid: libc::pid_t) -> Option<WindowLabel> {
+	let app = probe_application(pid)?;
+	let window = copy_element(&app, "AXFocusedWindow")?;
+	let kind = copy_string(&window, "AXSubrole")
+		.filter(|subrole| subrole != "AXStandardWindow")
+		.or_else(|| copy_string(&window, "AXRole").filter(|role| role != "AXWindow"));
+	Some(WindowLabel {
+		id: window_id(&window),
+		title: nonempty(copy_string(&window, "AXTitle")),
+		kind,
+	})
+}
+
 /// The window that should regain key status when `pid` is handed keyboard
 /// focus back: its focused window, else its main window.
 pub(super) fn key_window_id(pid: libc::pid_t) -> Option<u32> {

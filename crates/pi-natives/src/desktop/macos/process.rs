@@ -336,6 +336,13 @@ pub(super) fn is_terminal(pid: libc::pid_t) -> bool {
 		})
 }
 
+/// `pid`'s application name as the Dock shows it.
+pub(super) fn application_name(pid: libc::pid_t) -> Option<String> {
+	NSRunningApplication::runningApplicationWithProcessIdentifier(pid)?
+		.localizedName()
+		.map(|name| name.to_string())
+}
+
 #[cfg(test)]
 mod tests {
 	use std::{

@@ -22,7 +22,7 @@ use super::{
 		error::{CoreResult, DesktopError},
 		types::DesktopFocusReturn,
 	},
-	ax,
+	ax, process,
 };
 
 const EVENT_RECORD_LENGTH: usize = 248;
@@ -746,7 +746,8 @@ fn make_exact_window_key(
 ///
 /// Global HID input goes to whichever window is key, so a target that still
 /// reports another focused window at the deadline refuses before any input is
-/// sent. A front process alone is not proof of the exact key window.
+/// sent. A front process alone is not proof of the exact key window. The
+/// refusal names what held focus instead, so the caller can address it.
 fn await_window_focused(
 	spi: &ForegroundSpi,
 	pid: pid_t,
@@ -756,17 +757,57 @@ fn await_window_focused(
 	let deadline = Instant::now() + ACTIVATION_TIMEOUT;
 	loop {
 		let focused = ax::focused_window_id(pid);
-		let target_front = front_process(spi.get_front).is_some_and(|front| front.psn == target);
+		let front = front_process(spi.get_front);
+		let target_front = front.is_some_and(|front| front.psn == target);
 		if focused == Some(wid) && target_front {
 			return Ok(());
 		}
 		if Instant::now() >= deadline {
-			return Err(DesktopError::input_failed(format!(
-				"window {wid} could not be confirmed as the exact frontmost key window",
-			)));
+			let seen = if target_front {
+				KeyWindowSeen::Focused(ax::focused_window_label(pid))
+			} else {
+				let pid = front.and_then(|front| front.pid);
+				KeyWindowSeen::Front { pid, name: pid.and_then(process::application_name) }
+			};
+			return Err(DesktopError::input_failed(unconfirmed_key_window(wid, &seen)));
 		}
 		control::wait(ACTIVATION_POLL)?;
 	}
+}
+
+/// What held focus when a window could not be confirmed as the frontmost key
+/// window.
+#[derive(Debug, PartialEq, Eq)]
+enum KeyWindowSeen {
+	/// Another process stayed in front.
+	Front { pid: Option<pid_t>, name: Option<String> },
+	/// The target's process came to the front with this focused window, if any.
+	Focused(Option<ax::WindowLabel>),
+}
+
+fn unconfirmed_key_window(wid: u32, seen: &KeyWindowSeen) -> String {
+	let held = match seen {
+		KeyWindowSeen::Front { pid: Some(pid), name: Some(name) } => {
+			format!("{name} (pid {pid}) stayed the front application")
+		},
+		KeyWindowSeen::Front { pid: Some(pid), name: None } => {
+			format!("pid {pid} stayed the front application")
+		},
+		KeyWindowSeen::Front { pid: None, .. } => {
+			"the front application could not be identified".to_owned()
+		},
+		KeyWindowSeen::Focused(None) => "its application reports no focused window".to_owned(),
+		KeyWindowSeen::Focused(Some(window)) => {
+			let title = window.title.as_ref().map(|title| format!(" \"{title}\""));
+			let kind = window.kind.as_ref().map(|kind| format!(" ({kind})"));
+			let (title, kind) = (title.unwrap_or_default(), kind.unwrap_or_default());
+			match window.id {
+				Some(id) => format!("its application's focused window is window {id}{title}{kind}"),
+				None => format!("its application's focused window{title}{kind} has no window id"),
+			}
+		},
+	};
+	format!("window {wid} could not be confirmed as the exact frontmost key window: {held}")
 }
 
 fn process_psn(lookup: PsnLookup, pid: pid_t, wid: u32) -> Option<ProcessSerialNumber> {
@@ -899,6 +940,54 @@ mod tests {
 		assert!(!preserves_exact_existing_focus(Some(target), target, Some(41), 42));
 		assert!(!preserves_exact_existing_focus(Some(target), target, None, 42));
 		assert!(!preserves_exact_existing_focus(None, target, Some(42), 42));
+	}
+
+	#[test]
+	fn an_unconfirmed_key_window_names_what_held_focus_instead() {
+		let focused = |id, title: Option<&str>, kind: &str| {
+			KeyWindowSeen::Focused(Some(ax::WindowLabel {
+				id,
+				title: title.map(str::to_owned),
+				kind: Some(kind.to_owned()),
+			}))
+		};
+		let refusal = |wid, seen| unconfirmed_key_window(wid, &seen);
+		let prefix = "could not be confirmed as the exact frontmost key window: ";
+		// Calendar's untitled recurring-event alert held key over its window 66.
+		assert_eq!(
+			refusal(66, focused(Some(93), None, "AXDialog")),
+			format!("window 66 {prefix}its application's focused window is window 93 (AXDialog)")
+		);
+		assert_eq!(
+			refusal(186, focused(Some(191), Some("Go to Folder"), "AXSheet")),
+			format!(
+				"window 186 {prefix}its application's focused window is window 191 \"Go to Folder\" \
+				 (AXSheet)"
+			)
+		);
+		assert_eq!(
+			refusal(186, focused(None, Some("Open"), "AXSheet")),
+			format!(
+				"window 186 {prefix}its application's focused window \"Open\" (AXSheet) has no window \
+				 id"
+			)
+		);
+		assert_eq!(
+			refusal(66, KeyWindowSeen::Focused(None)),
+			format!("window 66 {prefix}its application reports no focused window")
+		);
+		assert_eq!(
+			refusal(66, KeyWindowSeen::Front { pid: Some(367), name: Some("iTerm2".to_owned()) }),
+			format!("window 66 {prefix}iTerm2 (pid 367) stayed the front application")
+		);
+		assert_eq!(
+			refusal(66, KeyWindowSeen::Front { pid: Some(367), name: None }),
+			format!("window 66 {prefix}pid 367 stayed the front application")
+		);
+		assert_eq!(
+			refusal(66, KeyWindowSeen::Front { pid: None, name: None }),
+			format!("window 66 {prefix}the front application could not be identified")
+		);
 	}
 
 	#[test]
