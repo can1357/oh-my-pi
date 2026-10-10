@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed live tool cards in Tern dropping the model's intent once the tool starts, so bash cards' heads read only "Bash" and the head tooltip had no intent until the session was resumed ([#15281](https://github.com/can1357/oh-my-pi/issues/15281))
+
 ## [18.8.9] - 2026-10-10
 
 ### Added
