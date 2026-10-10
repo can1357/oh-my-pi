@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Trimmed always-on prompt text: the native tool-name list, the duplicated subagent yield protocol, and `proc://`/`agent://` rows when no tool can produce them are no longer sent ([#15264](https://github.com/can1357/oh-my-pi/issues/15264))
+
 ## [18.8.9] - 2026-10-10
 
 ### Added

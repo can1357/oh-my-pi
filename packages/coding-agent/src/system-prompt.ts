@@ -911,11 +911,6 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		xdevToolNames.size === 0
 			? directInventoryNames
 			: directInventoryNames.filter(name => tools?.has(name) || !xdevToolNames.has(name));
-	const toolInfo = inventoryToolNames.map(name => ({
-		name: toolPromptNames.get(name) ?? name,
-		internalName: name,
-		label: tools?.get(name)?.label ?? "",
-	}));
 	const toolInventory = toolListMode
 		? ""
 		: renderToolInventory(
@@ -947,6 +942,8 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		memoryBackend,
 		securityEnabled,
 		settingsApproval,
+		jobTools: ["bash", "eval", "task"].some(name => toolPromptNames.has(name)),
+		agentTools: ["eval", "task"].some(name => toolPromptNames.has(name)),
 	};
 	const filteredSkills = (options.skillDescriptions ?? new SkillDescriptionCatalog()).render(
 		hasSkillReader ? skills.filter(skill => skill.hide !== true) : [],
@@ -971,10 +968,8 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		customPrompt: resolvedCustomPrompt,
 		appendPrompt: resolvedAppendPrompt ?? "",
 		tools: [...new Set([...toolNames, ...xdevTools.map(mounted => mounted.name)])],
-		toolInfo,
 		toolInventory,
 		inlineToolDescriptors,
-		toolListMode,
 		toolRefs,
 		environment,
 		contextFiles,

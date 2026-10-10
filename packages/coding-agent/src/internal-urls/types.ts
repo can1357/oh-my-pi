@@ -156,6 +156,10 @@ export interface SchemeHost {
 	securityEnabled: boolean;
 	/** The user approves `cfg://` writes for this session (top-level TUI session). */
 	settingsApproval: boolean;
+	/** An active tool can create background jobs (`bash`, `eval`, `task`), the only producers of `proc://` entries. */
+	jobTools: boolean;
+	/** An active tool can spawn subagents (`task`, `eval`), the only producers of `agent://` entries. */
+	agentTools: boolean;
 }
 
 /**
