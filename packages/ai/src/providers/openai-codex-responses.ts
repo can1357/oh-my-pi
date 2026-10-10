@@ -426,6 +426,7 @@ export interface OpenAICodexWebSocketDebugStats {
 	lastInputItems: number;
 	lastDeltaInputItems?: number;
 	lastPreviousResponseId?: string;
+	/** Absent when native steering attach consumes a successor without sending a request. */
 	lastTurn?: OpenAICodexTurnDiagnostics;
 }
 
@@ -1986,6 +1987,9 @@ async function openCodexWebSocketTransport(
 					}
 					throw new CodexSteerCommitError("accepted steering was not committed to a current successor");
 				}
+				// No request was sent for this attach, so do not pair the successor's
+				// usage with the preceding request diagnostics.
+				websocketState.stats.lastTurn = undefined;
 			};
 			const attachRequest = chainedBody;
 			requestContext.rawRequestDump.body = attachRequest;

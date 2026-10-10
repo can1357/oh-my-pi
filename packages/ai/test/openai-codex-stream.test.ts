@@ -9157,6 +9157,30 @@ describe("openai-codex streaming", () => {
 		let steerSendCount = 0;
 		const sockets: AttachHookWebSocket[] = [];
 		const steering = createOneShotCodexSteering("continue automatically");
+		const priorUsage: CodexTestUsage = {
+			input_tokens: 17,
+			output_tokens: 4,
+			total_tokens: 21,
+			input_tokens_details: { cached_tokens: 3 },
+		};
+		const successorUsage: CodexTestUsage = {
+			input_tokens: 23,
+			output_tokens: 7,
+			total_tokens: 30,
+			input_tokens_details: { cached_tokens: 5 },
+		};
+		const createUsage: CodexTestUsage = {
+			input_tokens: 31,
+			output_tokens: 8,
+			total_tokens: 39,
+			input_tokens_details: { cached_tokens: 6 },
+		};
+		const chainedUsage: CodexTestUsage = {
+			input_tokens: 37,
+			output_tokens: 9,
+			total_tokens: 46,
+			input_tokens_details: { cached_tokens: 7 },
+		};
 		let hookCalls = 0;
 
 		class AttachHookWebSocket extends MockWebSocket {
@@ -9184,7 +9208,7 @@ describe("openai-codex streaming", () => {
 							id: "resp_attach_1",
 							status: "incomplete",
 							incomplete_details: { reason: "steered" },
-							usage: DEFAULT_USAGE,
+							usage: priorUsage,
 						},
 					});
 					this.sendJson({ type: "response.created", response: { id: "resp_attach_2" } });
@@ -9206,12 +9230,23 @@ describe("openai-codex streaming", () => {
 					});
 					this.sendJson({
 						type: "response.completed",
-						response: { id: "resp_attach_2", status: "completed", usage: DEFAULT_USAGE },
+						response: { id: "resp_attach_2", status: "completed", usage: successorUsage },
 					});
 					return;
 				}
 				createSendCount += 1;
 				createFrames.push(frame);
+				if (createFrames.length > 1) {
+					const createNumber = createFrames.length;
+					this.emitCodexResponse({
+						messageId: `msg_attach_${createNumber + 1}`,
+						responseId: `resp_attach_${createNumber + 1}`,
+						text: createNumber === 2 ? "Follow-up create" : "Chained create",
+						includeCreated: true,
+						usage: createNumber === 2 ? createUsage : chainedUsage,
+					});
+					return;
+				}
 				this.sendJson({ type: "response.created", response: { id: "resp_attach_1" } });
 				this.sendJson({
 					type: "response.output_item.added",
@@ -9249,12 +9284,32 @@ describe("openai-codex streaming", () => {
 			},
 		).result();
 		expect(steering.settled()).toBe("accepted");
+		expect(first.responseId).toBe("resp_attach_1");
+		expect(first.usage).toMatchObject({
+			input: 14,
+			output: 4,
+			cacheRead: 3,
+			totalTokens: 21,
+		});
+		const statsBeforeAttach = getOpenAICodexWebSocketDebugStats(model, {
+			sessionId: "ws-steering-attach-hook-session",
+			providerSessionState,
+		});
+		if (!statsBeforeAttach) throw new Error("expected diagnostics before steering attach");
+		const statsBeforeAttachSnapshot = structuredClone(statsBeforeAttach);
+		expect(statsBeforeAttach.lastTurn?.usage).toMatchObject({
+			rawInputTokens: priorUsage.input_tokens,
+			rawCachedTokens: priorUsage.input_tokens_details.cached_tokens,
+			rawOutputTokens: priorUsage.output_tokens,
+			rawTotalTokens: priorUsage.total_tokens,
+		});
+		const steeringUser = { role: "user" as const, content: "continue automatically", timestamp: Date.now() };
 
 		const second = await streamOpenAICodexResponses(
 			model,
 			{
 				systemPrompt: ["You are a helpful assistant."],
-				messages: [user, first, { role: "user", content: "continue automatically", timestamp: Date.now() }],
+				messages: [user, first, steeringUser],
 			},
 			{
 				fetch: fetchMock as FetchImpl,
@@ -9269,20 +9324,114 @@ describe("openai-codex streaming", () => {
 		).result();
 
 		expect(second.responseId).toBe("resp_attach_2");
+		expect(second.usage).toMatchObject({
+			input: 18,
+			output: 7,
+			cacheRead: 5,
+			totalTokens: 30,
+		});
 		expect(hookCalls).toBe(0);
 		expect(steerSendCount).toBe(1);
 		expect(createFrames).toHaveLength(1);
 		expect(createSendCount).toBe(1);
 		expect(steerFrames).toHaveLength(1);
 		expect(sockets).toHaveLength(1);
-		const stats = getOpenAICodexWebSocketDebugStats(model, {
+		const statsAfterAttach = getOpenAICodexWebSocketDebugStats(model, {
 			sessionId: "ws-steering-attach-hook-session",
 			providerSessionState,
 		});
-		expect(stats).toMatchObject({
-			fullContextRequests: 1,
-			deltaRequests: 0,
-			lastPreviousResponseId: undefined,
+		if (!statsAfterAttach) throw new Error("expected diagnostics after steering attach");
+		expect({
+			fullContextRequests: statsAfterAttach.fullContextRequests,
+			deltaRequests: statsAfterAttach.deltaRequests,
+			lastInputItems: statsAfterAttach.lastInputItems,
+			lastDeltaInputItems: statsAfterAttach.lastDeltaInputItems,
+			lastPreviousResponseId: statsAfterAttach.lastPreviousResponseId,
+		}).toEqual({
+			fullContextRequests: statsBeforeAttachSnapshot.fullContextRequests,
+			deltaRequests: statsBeforeAttachSnapshot.deltaRequests,
+			lastInputItems: statsBeforeAttachSnapshot.lastInputItems,
+			lastDeltaInputItems: statsBeforeAttachSnapshot.lastDeltaInputItems,
+			lastPreviousResponseId: statsBeforeAttachSnapshot.lastPreviousResponseId,
+		});
+		expect(statsAfterAttach.lastTurn).toBeUndefined();
+		expect(statsBeforeAttachSnapshot.lastTurn).toEqual(statsBeforeAttach.lastTurn);
+
+		const thirdUser = { role: "user" as const, content: "real follow-up", timestamp: Date.now() };
+		const third = await streamOpenAICodexResponses(
+			model,
+			{
+				systemPrompt: ["You are a helpful assistant."],
+				messages: [user, first, steeringUser, second, thirdUser],
+			},
+			{
+				fetch: fetchMock as FetchImpl,
+				apiKey: token,
+				sessionId: "ws-steering-attach-hook-session",
+				providerSessionState,
+			},
+		).result();
+		expect(third.responseId).toBe("resp_attach_3");
+		expect(third.usage).toMatchObject({
+			input: 25,
+			output: 8,
+			cacheRead: 6,
+			totalTokens: 39,
+		});
+		expect(createFrames[1]?.previous_response_id).toBe("resp_attach_2");
+		const statsAfterCreate = getOpenAICodexWebSocketDebugStats(model, {
+			sessionId: "ws-steering-attach-hook-session",
+			providerSessionState,
+		});
+		expect(statsAfterCreate?.lastTurn?.request).toMatchObject({
+			transport: "websocket",
+			previousResponseIdPresent: true,
+			inputItemCount: 1,
+			inputItemTypes: ["user"],
+			firstInputItemType: "user",
+			canAppendBeforeRequest: true,
+		});
+		expect(statsAfterCreate?.lastTurn?.usage).toMatchObject({
+			rawInputTokens: createUsage.input_tokens,
+			rawCachedTokens: createUsage.input_tokens_details.cached_tokens,
+			rawOutputTokens: createUsage.output_tokens,
+			rawTotalTokens: createUsage.total_tokens,
+		});
+
+		const fourthUser = { role: "user" as const, content: "real chained follow-up", timestamp: Date.now() };
+		const fourth = await streamOpenAICodexResponses(
+			model,
+			{
+				systemPrompt: ["You are a helpful assistant."],
+				messages: [user, first, steeringUser, second, thirdUser, third, fourthUser],
+			},
+			{
+				fetch: fetchMock as FetchImpl,
+				apiKey: token,
+				sessionId: "ws-steering-attach-hook-session",
+				providerSessionState,
+			},
+		).result();
+		expect(fourth.responseId).toBe("resp_attach_4");
+		expect(fourth.usage).toMatchObject({
+			input: 30,
+			output: 9,
+			cacheRead: 7,
+			totalTokens: 46,
+		});
+		expect(createFrames).toHaveLength(3);
+		expect(createSendCount).toBe(3);
+		expect(createFrames[2]?.previous_response_id).toBe("resp_attach_3");
+		const statsAfterChainedCreate = getOpenAICodexWebSocketDebugStats(model, {
+			sessionId: "ws-steering-attach-hook-session",
+			providerSessionState,
+		});
+		expect(statsAfterChainedCreate?.lastPreviousResponseId).toBe("resp_attach_3");
+		expect(statsAfterChainedCreate?.lastTurn?.usage).toMatchObject({
+			rawInputTokens: chainedUsage.input_tokens,
+			rawCachedTokens: chainedUsage.input_tokens_details.cached_tokens,
+			rawOutputTokens: chainedUsage.output_tokens,
+			rawTotalTokens: chainedUsage.total_tokens,
 		});
 		expect(fetchMock).not.toHaveBeenCalled();
 	});
@@ -9297,10 +9446,28 @@ describe("openai-codex streaming", () => {
 		const steerFrames: Array<Record<string, unknown>> = [];
 		let createSendCount = 0;
 		let steerSendCount = 0;
+		let lateOldSuccessorFrames = 0;
 		const sockets: LazyAttachResetWebSocket[] = [];
 		const steering = createOneShotCodexSteering("continue automatically");
+		const priorUsage: CodexTestUsage = {
+			input_tokens: 19,
+			output_tokens: 5,
+			total_tokens: 24,
+			input_tokens_details: { cached_tokens: 4 },
+		};
+		const oldSuccessorUsage: CodexTestUsage = {
+			input_tokens: 29,
+			output_tokens: 6,
+			total_tokens: 35,
+			input_tokens_details: { cached_tokens: 8 },
+		};
+		const recoveryUsage: CodexTestUsage = {
+			input_tokens: 41,
+			output_tokens: 10,
+			total_tokens: 51,
+			input_tokens_details: { cached_tokens: 9 },
+		};
 		let hookCalls = 0;
-		let lateOldSuccessorFrames = 0;
 
 		class LazyAttachResetWebSocket extends MockWebSocket {
 			constructor(url: string, options?: { headers?: WsHeaders }) {
@@ -9326,7 +9493,7 @@ describe("openai-codex streaming", () => {
 				});
 				this.sendJson({
 					type: "response.completed",
-					response: { id: "resp_lazy_reset_successor", status: "completed", usage: DEFAULT_USAGE },
+					response: { id: "resp_lazy_reset_successor", status: "completed", usage: oldSuccessorUsage },
 				});
 			}
 
@@ -9345,7 +9512,7 @@ describe("openai-codex streaming", () => {
 							id: "resp_lazy_reset_1",
 							status: "incomplete",
 							incomplete_details: { reason: "steered" },
-							usage: DEFAULT_USAGE,
+							usage: priorUsage,
 						},
 					});
 					this.sendJson({ type: "response.created", response: { id: "resp_lazy_reset_successor" } });
@@ -9399,6 +9566,7 @@ describe("openai-codex streaming", () => {
 					responseId: "resp_lazy_reset_replay",
 					text: "Replayed",
 					includeCreated: true,
+					usage: recoveryUsage,
 				});
 			}
 		}
@@ -9422,6 +9590,25 @@ describe("openai-codex streaming", () => {
 		).result();
 		expect(first.responseId).toBe("resp_lazy_reset_1");
 		expect(steering.settled()).toBe("accepted");
+		expect(first.usage).toMatchObject({
+			input: 15,
+			output: 5,
+			cacheRead: 4,
+			totalTokens: 24,
+		});
+		const statsBeforeRecovery = getOpenAICodexWebSocketDebugStats(model, {
+			sessionId,
+			providerSessionState,
+		});
+		if (!statsBeforeRecovery) throw new Error("expected diagnostics before lazy attach recovery");
+		const statsBeforeRecoverySnapshot = structuredClone(statsBeforeRecovery);
+		expect(statsBeforeRecovery.lastTurn?.usage).toMatchObject({
+			rawInputTokens: priorUsage.input_tokens,
+			rawCachedTokens: priorUsage.input_tokens_details.cached_tokens,
+			rawOutputTokens: priorUsage.output_tokens,
+			rawTotalTokens: priorUsage.total_tokens,
+		});
+		const steeringUser = { role: "user" as const, content: "continue automatically", timestamp: Date.now() };
 
 		const socket = sockets[0];
 		if (!socket) throw new Error("expected the initial websocket");
@@ -9459,7 +9646,7 @@ describe("openai-codex streaming", () => {
 			model,
 			{
 				systemPrompt: ["You are a helpful assistant."],
-				messages: [user, first, { role: "user", content: "continue automatically", timestamp: Date.now() }],
+				messages: [user, first, steeringUser],
 			},
 			{
 				fetch: fetchMock as FetchImpl,
@@ -9469,12 +9656,22 @@ describe("openai-codex streaming", () => {
 				onPayload: async payload => {
 					hookCalls += 1;
 					expect((payload as Record<string, unknown>).previous_response_id).toBeUndefined();
+					// Re-read live state before the recovery send can replace the pair.
+					expect(getOpenAICodexWebSocketDebugStats(model, { sessionId, providerSessionState })).toEqual(
+						statsBeforeRecoverySnapshot,
+					);
 					return payload;
 				},
 			},
 		).result();
 
 		expect(second.responseId).toBe("resp_lazy_reset_replay");
+		expect(second.usage).toMatchObject({
+			input: 32,
+			output: 10,
+			cacheRead: 9,
+			totalTokens: 51,
+		});
 		expect(resetDone).toBe(true);
 		expect(hookCalls).toBe(1);
 		expect(steerFrames).toHaveLength(1);
@@ -9487,14 +9684,38 @@ describe("openai-codex streaming", () => {
 		expect(sockets[1]?.readyState).toBe(MockWebSocket.OPEN);
 		expect(JSON.stringify(second.content)).toContain("Replayed");
 		expect(JSON.stringify(second.content)).not.toContain("Late old successor");
+		const recoveredInput = createFrames[1]?.input;
+		if (!Array.isArray(recoveredInput)) throw new Error("expected full recovery input");
 		const stats = getOpenAICodexWebSocketDebugStats(model, {
 			sessionId,
 			providerSessionState,
 		});
-		expect(stats).toMatchObject({
-			fullContextRequests: 2,
-			deltaRequests: 0,
+		if (!stats) throw new Error("expected diagnostics after lazy attach recovery");
+		expect({
+			fullContextRequests: stats.fullContextRequests,
+			deltaRequests: stats.deltaRequests,
+			lastInputItems: stats.lastInputItems,
+			lastDeltaInputItems: stats.lastDeltaInputItems,
+			lastPreviousResponseId: stats.lastPreviousResponseId,
+		}).toEqual({
+			fullContextRequests: statsBeforeRecoverySnapshot.fullContextRequests + 1,
+			deltaRequests: statsBeforeRecoverySnapshot.deltaRequests,
+			lastInputItems: recoveredInput.length,
+			lastDeltaInputItems: undefined,
 			lastPreviousResponseId: undefined,
+		});
+		expect(statsBeforeRecoverySnapshot.lastTurn).toEqual(statsBeforeRecovery.lastTurn);
+		expect(stats.lastTurn?.request).toMatchObject({
+			transport: "websocket",
+			previousResponseIdPresent: false,
+			inputItemCount: recoveredInput.length,
+			canAppendBeforeRequest: false,
+		});
+		expect(stats.lastTurn?.usage).toMatchObject({
+			rawInputTokens: recoveryUsage.input_tokens,
+			rawCachedTokens: recoveryUsage.input_tokens_details.cached_tokens,
+			rawOutputTokens: recoveryUsage.output_tokens,
+			rawTotalTokens: recoveryUsage.total_tokens,
 		});
 		expect(createFrames[1]?.previous_response_id).toBeUndefined();
 		expect(JSON.stringify(createFrames[1]?.input)).toContain("continue automatically");
