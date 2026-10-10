@@ -389,6 +389,11 @@ class FakeAgentSession {
 		return false;
 	}
 
+	// The fake has no service-tier machinery; the flag tracks the realized tier.
+	isFastModeActive(): boolean {
+		return this.fastMode;
+	}
+
 	setForcedToolChoice(toolName: string): void {
 		this.forcedToolChoice = toolName;
 	}
