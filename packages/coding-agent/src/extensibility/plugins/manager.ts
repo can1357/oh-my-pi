@@ -1,3 +1,4 @@
+import { Database } from "bun:sqlite";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -14,7 +15,12 @@ import {
 } from "@oh-my-pi/pi-utils";
 import { JSONC } from "bun";
 import { resolveActiveProjectRegistryPath } from "../../discovery/helpers";
+import { ModelRegistry } from "../../config/model-registry";
+import { AuthStorage, SqliteAuthCredentialStore } from "../../session/auth-storage";
+import { SessionManager } from "../../session/session-manager";
 import { loadExtensions } from "../extensions/loader";
+import { ExtensionRunner, emitSessionShutdownEvent } from "../extensions/runner";
+import type { LoadExtensionsResult } from "../extensions/types";
 import { refreshBunGitCache } from "./bun-git-cache";
 import { type GitSource, parseGitUrl } from "./git-url";
 import { resolvePluginManifestEntries } from "./loader";
@@ -113,6 +119,28 @@ async function readBunLockResolution(name: string): Promise<string | undefined> 
 	const lock = JSONC.parse(text) as { packages?: Record<string, unknown> } | null;
 	const entry = lock?.packages?.[name];
 	return Array.isArray(entry) && typeof entry[0] === "string" ? entry[0] : undefined;
+}
+
+/**
+ * Shut down extensions that install-time validation activated.
+ *
+ * Validation runs each factory for real, so anything a plugin starts eagerly
+ * (bridge child processes, timers, watchers) would otherwise outlive the check
+ * and keep one-shot `omp plugin install`/`upgrade` from exiting (#15167). Binds
+ * an inert runner — in-memory auth and session, no local model config — purely
+ * to deliver `session_shutdown` and clear managed timers, mirroring `omp models`.
+ */
+async function shutdownValidatedExtensions(result: LoadExtensionsResult, cwd: string): Promise<void> {
+	if (result.extensions.length === 0) return;
+	const authStorage = new AuthStorage(new SqliteAuthCredentialStore(new Database(":memory:")));
+	const runner = new ExtensionRunner(
+		result.extensions,
+		result.runtime,
+		cwd,
+		SessionManager.inMemory(cwd),
+		new ModelRegistry(authStorage, undefined, { ignoreLocalModelConfig: true }),
+	);
+	await emitSessionShutdownEvent(runner);
 }
 
 interface PluginPackageSnapshot {
@@ -432,6 +460,7 @@ export class PluginManager {
 
 		if (loadable.length > 0) {
 			const result = await loadExtensions(loadable, this.#cwd);
+			await shutdownValidatedExtensions(result, this.#cwd);
 			for (const failure of result.errors) {
 				errors.push(`${failure.path}: ${failure.error}`);
 			}

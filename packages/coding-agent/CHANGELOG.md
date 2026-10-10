@@ -16,6 +16,7 @@
 
 ### Fixed
 
+- Fixed `omp plugin install`/`upgrade` hanging after printing success when the installed plugin starts background work (child processes, timers) on load; install-time validation now shuts the plugin down again ([#15167](https://github.com/can1357/oh-my-pi/issues/15167))
 - Fixed `/usage` (or clicking the status-line cost) while the usage dashboard was already open stacking a second dashboard on top; it now focuses the open one ([#15145](https://github.com/can1357/oh-my-pi/pull/15145) by [@H4vC](https://github.com/H4vC))
 - Fixed the custom-tool examples' full-documentation link opening a missing page ([#15076](https://github.com/can1357/oh-my-pi/pull/15076) by [@qingshungLI](https://github.com/qingshungLI))
 - Fixed the `/models` compaction limit preview and **Compacts at** row rounding fractional percentages (`12.5%` showed as `13%`) ([#15074](https://github.com/can1357/oh-my-pi/pull/15074) by [@H4vC](https://github.com/H4vC))

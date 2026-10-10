@@ -249,6 +249,38 @@ describe("PluginManager.install load validation", () => {
 		);
 	});
 
+	// #15167: validation runs the factory for real, so whatever it starts
+	// (bridge child processes, timers) must be shut down before install returns
+	// or a one-shot `omp plugin install`/`upgrade` never exits.
+	test("shuts down extensions activated by install validation", async () => {
+		const marker = path.join(tmpRoot, "shutdown-marker");
+		vi.spyOn(Bun, "spawn").mockImplementation(((cmd: string[]) => {
+			expect(cmd).toEqual(["bun", "install", "--no-cache", "eager-plugin"]);
+
+			const prepare = (async () => {
+				await Bun.write(
+					pluginsPkgJson,
+					JSON.stringify({ name: "omp-plugins", private: true, dependencies: { "eager-plugin": "1.0.0" } }),
+				);
+				await writePluginPackage(pluginsNodeModules, "eager-plugin", {
+					version: "1.0.0",
+					source: `export default function(pi) { pi.on("session_shutdown", () => Bun.write(${JSON.stringify(marker)}, "down")); }\n`,
+				});
+			})();
+
+			return {
+				pid: 1,
+				stdout: emptyStream(),
+				stderr: emptyStream(),
+				exited: prepare.then(() => 0),
+			} as Subprocess;
+		}) as typeof Bun.spawn);
+
+		await new PluginManager(tmpRoot).install("eager-plugin");
+
+		expect(await Bun.file(marker).text()).toBe("down");
+	});
+
 	test("rejects an install whose extension entry cannot resolve its dependencies", async () => {
 		vi.spyOn(Bun, "spawn").mockImplementation(((cmd: string[]) => {
 			expect(cmd).toEqual(["bun", "install", "--no-cache", "broken-plugin"]);
