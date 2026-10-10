@@ -314,6 +314,7 @@
 
 ### Changed
 
+- Log unreadable extension-directory entries and malformed plugin manifests without aborting discovery ([#14542](https://github.com/can1357/oh-my-pi/pull/14542) by [@Dante-dan](https://github.com/Dante-dan)).
 - In Tern the spinner, elapsed time and intent share one activity line with the todo, which stays in place between turns, and the tok/s readout moves into the composer bar after the thinking level
 - Computer-use desktop captures now default to the focused window's monitor, with primary-monitor fallback; `computer.display: all` remains available explicitly.
 - Computer-use guidance selects AX for semantic controls and screenshots for custom-drawn surfaces, with grouped actions and explicit state verification.

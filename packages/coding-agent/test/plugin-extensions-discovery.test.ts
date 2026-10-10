@@ -4,7 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { discoverAndLoadExtensions } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
 import { __closeExtensionParseCacheForTests } from "@oh-my-pi/pi-coding-agent/extensibility/plugins/legacy-pi-compat";
-import { getAgentDir, getPluginsDir, removeSyncWithRetries, setAgentDir, TempDir } from "@oh-my-pi/pi-utils";
+import { getAgentDir, getPluginsDir, logger, removeSyncWithRetries, setAgentDir, TempDir } from "@oh-my-pi/pi-utils";
 
 const currentPiCodingAgentPath = Bun.resolveSync("@oh-my-pi/pi-coding-agent", import.meta.dir);
 const currentPiExtensionsPath = Bun.resolveSync("@oh-my-pi/pi-coding-agent/extensibility/extensions", import.meta.dir);
@@ -95,6 +95,52 @@ describe("plugin extension discovery", () => {
 		expect(result.errors).toHaveLength(0);
 		expect(extension).toBeDefined();
 		expect(extension?.commands.has("plugin-ext")).toBe(true);
+	});
+
+	it.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
+		"logs unreadable plugin extension directories while loading readable siblings",
+		async () => {
+			const pluginDir = path.join(getPluginsDir(), "node_modules", "@demo", "plugin");
+			const denied = path.join(pluginDir, "dist", "denied");
+			fs.mkdirSync(denied);
+			fs.writeFileSync(path.join(denied, "index.ts"), "");
+			fs.writeFileSync(
+				path.join(pluginDir, "package.json"),
+				JSON.stringify({ name: "@demo/plugin", version: "1.0.0", omp: { extensions: ["./dist"] } }),
+			);
+			fs.chmodSync(denied, 0);
+			const warnSpy = spyOn(logger, "warn").mockImplementation(() => {});
+			try {
+				const result = await discoverAndLoadExtensions([], projectDir.path());
+				expect(result.errors).toHaveLength(0);
+				expect(result.extensions.some(ext => ext.commands.has("plugin-ext"))).toBe(true);
+				expect(warnSpy.mock.calls.some(([, details]) => String(details?.path).startsWith(denied + path.sep))).toBe(
+					true,
+				);
+			} finally {
+				fs.chmodSync(denied, 0o700);
+				warnSpy.mockRestore();
+			}
+		},
+	);
+
+	it("logs malformed plugin extension manifests and keeps convention fallback", async () => {
+		const pluginDir = path.join(getPluginsDir(), "node_modules", "@demo", "plugin");
+		const manifest = path.join(pluginDir, "dist", "package.json");
+		fs.writeFileSync(manifest, "{");
+		fs.writeFileSync(
+			path.join(pluginDir, "package.json"),
+			JSON.stringify({ name: "@demo/plugin", version: "1.0.0", omp: { extensions: ["./dist"] } }),
+		);
+		const warnSpy = spyOn(logger, "warn").mockImplementation(() => {});
+		try {
+			const result = await discoverAndLoadExtensions([], projectDir.path());
+			expect(result.errors).toHaveLength(0);
+			expect(result.extensions.some(ext => ext.commands.has("plugin-ext"))).toBe(true);
+			expect(warnSpy.mock.calls.some(([, details]) => details?.path === manifest)).toBe(true);
+		} finally {
+			warnSpy.mockRestore();
+		}
 	});
 
 	it("loads installed plugin extensions that detach API methods", async () => {
