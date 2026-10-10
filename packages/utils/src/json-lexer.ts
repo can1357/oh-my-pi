@@ -32,6 +32,8 @@ export const LBRACKET = 0x5b;
 export const RBRACKET = 0x5d;
 const U = 0x75;
 
+const STRING_BULK_SCAN_MIN = 32;
+
 /** Valid chars after `\` in a strict JSON escape: `" \ / b f n r t u`. */
 export const VALID_ESCAPE_CHAR = new Uint8Array(128);
 for (const ch of '"\\/bfnrtu') VALID_ESCAPE_CHAR[ch.charCodeAt(0)] = 1;
@@ -218,11 +220,29 @@ export class JsonLexer {
 		// malformed structure fails loudly instead of silently swallowing
 		// commas/colons or sibling members.
 		const lenient = quote === SQUOTE || this.mode === "streaming";
+		const quoteChar = String.fromCharCode(quote);
+		// Cache each next delimiter so escape-dense strings do not repeatedly
+		// search for a distant closing quote and turn the scan quadratic.
+		let nextQuote = quoteChar.charCodeAt(0) === quote ? -1 : n;
+		let nextBackslash = -1;
 		while (i < n) {
-			const cc = s.charCodeAt(i);
+			let cc = s.charCodeAt(i);
 			if (cc !== BACKSLASH && cc !== quote) {
-				i++;
-				continue;
+				if (i - runStart < STRING_BULK_SCAN_MIN || n - i <= STRING_BULK_SCAN_MIN) {
+					i++;
+					continue;
+				}
+				if (nextQuote < i) {
+					const q = s.indexOf(quoteChar, i);
+					nextQuote = q === -1 ? n : q;
+				}
+				if (nextBackslash < i) {
+					const b = s.indexOf("\\", i);
+					nextBackslash = b === -1 ? n : b;
+				}
+				i = nextQuote < nextBackslash ? nextQuote : nextBackslash;
+				if (i >= n) break;
+				cc = s.charCodeAt(i);
 			}
 			if (cc === quote) {
 				const look = lenient ? this.#quoteLookahead(i + 1) : QuoteLook.Closes;
