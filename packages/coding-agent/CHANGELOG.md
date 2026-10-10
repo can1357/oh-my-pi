@@ -4,7 +4,7 @@
 
 ### Changed
 
-- The `computer` guide explains the new `ax()` line states, `actions=`, local dates and how to read a value cut at 200 characters
+- The `computer` guide explains the new `ax()` line states, `actions=`, local dates and how to read a value cut at 200 characters ([#15282](https://github.com/can1357/oh-my-pi/pull/15282) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.8.9] - 2026-10-10
 
