@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- `@path` mentions inside HTML comments (`<!-- @protected: name -->`) in AGENTS.md and other context files are no longer treated as file imports ([#12953](https://github.com/can1357/oh-my-pi/issues/12953), [#14594](https://github.com/can1357/oh-my-pi/pull/14594) by [@tahakotil](https://github.com/tahakotil))
+
 ### Added
 
 - Added `ctx.annotations` so extensions can submit or collect `/annotate` feedback on text and diffs ([#15260](https://github.com/can1357/oh-my-pi/pull/15260) by [@Shadorain](https://github.com/Shadorain)).

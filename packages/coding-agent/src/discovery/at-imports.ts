@@ -15,6 +15,8 @@
  * - Imports inside fenced code blocks (` ``` ` / `~~~`) and inline code
  *   spans (`` `…` ``) are preserved verbatim so technical examples like
  *   `npm install @types/node` survive intact.
+ * - Imports inside HTML comments (`<!-- … -->`, single- or multi-line) are
+ *   preserved verbatim. An unterminated comment runs to the end of the file.
  * - Recursive imports are followed up to {@link MAX_AT_IMPORT_DEPTH} hops;
  *   cycles are broken silently.
  * - When the referenced file cannot be read, the original `@token` is
@@ -104,14 +106,18 @@ async function expandTextSegment(
 	visited: Set<string>,
 ): Promise<string> {
 	const lines = text.split("\n");
+	let inComment = false;
 	for (let i = 0; i < lines.length; i++) {
-		lines[i] = await expandLine(lines[i], baseDir, depth, maxDepth, home, visited);
+		const scan = scanHtmlComments(lines[i], inComment);
+		inComment = scan.inComment;
+		lines[i] = await expandLine(lines[i], scan.ranges, baseDir, depth, maxDepth, home, visited);
 	}
 	return lines.join("\n");
 }
 
 async function expandLine(
 	line: string,
+	commentRanges: ReadonlyArray<readonly [number, number]>,
 	baseDir: string,
 	depth: number,
 	maxDepth: number,
@@ -127,6 +133,7 @@ async function expandLine(
 		const rawToken = m[2];
 		const atPos = matchIndex + leading.length;
 		if (isInsideInlineCode(line, atPos)) continue;
+		if (commentRanges.some(([start, end]) => atPos >= start && atPos < end)) continue;
 
 		const trimmedToken = rawToken.replace(TRAILING_PUNCT, "");
 		if (trimmedToken.length === 0) continue;
@@ -205,6 +212,7 @@ function splitMarkdownSegments(content: string): MarkdownSegment[] {
 	let bufferKind: MarkdownSegment["kind"] = "text";
 	let fenceChar = "";
 	let fenceLen = 0;
+	let inComment = false;
 
 	const flush = (): void => {
 		if (buffer.length === 0) return;
@@ -218,7 +226,10 @@ function splitMarkdownSegments(content: string): MarkdownSegment[] {
 		// Re-attach each line's trailing newline so adjacent segments
 		// concatenate without losing the boundary `\n`.
 		const lineText = isLast ? line : `${line}\n`;
-		const fence = matchFence(line);
+		// A fence-looking line inside an HTML comment is comment text, not a fence.
+		const fence = bufferKind === "text" && inComment ? null : matchFence(line);
+		// Skip fence-opener lines: expandTextSegment never sees them, so scanning would diverge.
+		if (bufferKind === "text" && !fence) inComment = scanHtmlComments(line, inComment).inComment;
 
 		if (fence && bufferKind === "text") {
 			flush();
@@ -239,6 +250,41 @@ function splitMarkdownSegments(content: string): MarkdownSegment[] {
 		if (isLast) flush();
 	}
 	return segments;
+}
+
+/**
+ * Locate HTML comment regions on one line. `inComment` is the state carried
+ * in from the previous line; the returned state carries out. Ranges are
+ * `[start, end)` character offsets covering `<!--` through `-->`; a comment
+ * still open at end of line extends to the end of the line. `<!--` inside an
+ * inline code span does not open a comment.
+ */
+function scanHtmlComments(
+	line: string,
+	inComment: boolean,
+): { ranges: Array<readonly [number, number]>; inComment: boolean } {
+	const ranges: Array<readonly [number, number]> = [];
+	let pos = 0;
+	while (pos < line.length) {
+		let searchFrom = pos;
+		if (!inComment) {
+			let open = line.indexOf("<!--", pos);
+			while (open !== -1 && isInsideInlineCode(line, open)) open = line.indexOf("<!--", open + 4);
+			if (open === -1) break;
+			pos = open;
+			searchFrom = open + 2; // `<!-->` and `<!--->` are complete comments
+			inComment = true;
+		}
+		const close = line.indexOf("-->", searchFrom);
+		if (close === -1) {
+			ranges.push([pos, line.length]);
+			return { ranges, inComment: true };
+		}
+		ranges.push([pos, close + 3]);
+		pos = close + 3;
+		inComment = false;
+	}
+	return { ranges, inComment };
 }
 
 function matchFence(line: string): { char: string; len: number } | null {
