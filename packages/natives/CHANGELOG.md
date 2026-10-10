@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed macOS `setValue` on native text fields that Contacts, Reminders, Calendar, Font Book and System Settings showed but never stored: the text is now entered the way `win.type` enters it, and a mismatch names what the field reads
+
 ## [18.8.8] - 2026-10-10
 
 ### Changed
