@@ -2,15 +2,12 @@
 
 ## [Unreleased]
 
+## [18.8.0] - 2026-10-07
+
 ### Changed
 
-
-- Reduced web guest re-rendering and Markdown re-parsing while responses stream ([#14728](https://github.com/can1357/oh-my-pi/pull/14728) by [@H4vC](https://github.com/H4vC))
-- Stopped polling transcripts of finished subagents in the agent drawer ([#14728](https://github.com/can1357/oh-my-pi/pull/14728) by [@H4vC](https://github.com/H4vC))
-### Fixed
-
-- Fixed slow Markdown rendering for transcripts with many unclosed `\[`/`$$` openers ([#14667](https://github.com/can1357/oh-my-pi/pull/14667) by [@H4vC](https://github.com/H4vC))
-- Fixed memory growth from subagents the host no longer lists ([#14728](https://github.com/can1357/oh-my-pi/pull/14728) by [@H4vC](https://github.com/H4vC))
+- Improved streaming transcript performance by reducing unnecessary guest updates and Markdown re-rendering, including faster rendering for transcripts with many unclosed LaTeX delimiters.
+- Stopped tracking finished or no-longer-listed subagents, reducing unnecessary polling and memory usage in the agent drawer.
 
 ## [18.4.10] - 2026-10-02
 

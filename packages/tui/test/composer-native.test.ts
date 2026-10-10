@@ -117,7 +117,7 @@ describe("native composer", () => {
 		expect(placeholder({ running: false })).toMatchObject({ placeholder: "What are we cooking?" });
 		expect(placeholder({ running: false, title: "" })).toMatchObject({ placeholder: "What are we cooking?" });
 		expect(placeholder({ running: false, title: "Fix login" })).toMatchObject({
-			placeholder: [{ t: '"Fix login"', s: "em" }],
+			placeholder: [{ t: "“Fix login”", s: "em" }],
 		});
 		expect(placeholder({ running: false, title: "Fix login", viewing: ["Scout"] })).toMatchObject({
 			placeholder: "Message Scout",

@@ -980,10 +980,10 @@ function blockTokens(src: string, lexer: Lexer, output: Token[]): Token[] {
 	const lheadingOverride = lexer.tokenizerOverrides.lheading;
 	let lineStarts: number[] | undefined;
 	if (blockExtensions.length > 0 || lheadingOverride) {
-		lineStarts = new Array<number>(lines.length);
+		lineStarts = [];
 		let offset = 0;
 		for (let index = 0; index < lines.length; index++) {
-			lineStarts[index] = offset;
+			lineStarts.push(offset);
 			offset += lines[index]!.length;
 		}
 	}

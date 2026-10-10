@@ -119,6 +119,8 @@ export interface NativeToolView {
 	readonly tone?: TspTone;
 	/** Body clamp while collapsed; `{tail}` keeps the end (terminal output). Defaults to the transcript's preview size. */
 	readonly preview?: TspPreview | { readonly tail: number } | "none";
+	/** Starts expanded whatever the transcript's expand state (the todo checklist); the user can still fold it. */
+	readonly open?: boolean;
 	/** Render frameless (`frame:"inline"`): a head line plus a disclosed body. */
 	readonly inline?: boolean;
 	/** Head actions offered on hover (`copy`, `retry`). */

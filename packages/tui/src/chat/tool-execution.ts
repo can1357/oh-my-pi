@@ -170,6 +170,24 @@ class SafeToolRendererComponent implements Component {
 		invalidate.call(this.#component);
 	}
 
+	releaseRenderCaches(): void {
+		const release = this.#component.releaseRenderCaches;
+		if (release === undefined) return;
+		try {
+			release.call(this.#component);
+		} catch (err) {
+			if (!this.#warned) {
+				this.#warned = true;
+				logger.warn("Tool renderer failed", {
+					tool: this.#toolName,
+					stage: this.#stage,
+					phase: "releaseRenderCaches",
+					error: String(err),
+				});
+			}
+		}
+	}
+
 	setIgnoreTight(ignore: boolean): void {
 		const setIgnoreTight = this.#component.setIgnoreTight;
 		if (setIgnoreTight === undefined) return;
@@ -949,11 +967,13 @@ export class ToolExecutionComponent extends Container {
 
 	/**
 	 * The native `collapsed` prop: the transcript's expand state, except that a
-	 * call streaming its body (edit, write) stays open until it settles, then
+	 * view that asks to be {@link NativeToolView.open} never starts folded, and
+	 * a call streaming its body (edit, write) stays open until it settles, then
 	 * folds like a finished thought. The user's own toggle still wins meanwhile:
 	 * the terminal keeps local collapse state until this prop changes.
 	 */
-	#nativeCollapsed(status: TspCardStatus): boolean {
+	#nativeCollapsed(status: TspCardStatus, view: NativeToolView): boolean {
+		if (view.open) return false;
 		const live = status === "pending" || status === "running";
 		return !this.#expanded && !(live && streamsBody(this.#toolName));
 	}
@@ -1016,7 +1036,7 @@ export class ToolExecutionComponent extends Container {
 				intent: typeof intent === "string" && intent ? plainText(intent) : undefined,
 				frame: inline ? "inline" : "card",
 				collapsible: hasBody,
-				collapsed: hasBody ? this.#nativeCollapsed(status) : undefined,
+				collapsed: hasBody ? this.#nativeCollapsed(status, view) : undefined,
 				preview: hasBody ? (preview === "auto" ? { lines: DEFAULT_TERMINAL_PREVIEW_LINES } : preview) : undefined,
 				tools: view.tools,
 				tone: view.tone,
@@ -1084,7 +1104,7 @@ export class ToolExecutionComponent extends Container {
 				tone: view.tone ?? NATIVE_STATUS_TONE[status],
 				status,
 				collapsible: hasBody,
-				collapsed: hasBody ? this.#nativeCollapsed(status) : undefined,
+				collapsed: hasBody ? this.#nativeCollapsed(status, view) : undefined,
 				preview: hasBody ? cardPreview(view.preview) : undefined,
 			},
 			children,
@@ -1140,6 +1160,7 @@ export class ToolExecutionComponent extends Container {
 				body: [...(callView.body ?? []), ...(resultView.body ?? [])],
 				tone: resultView.tone ?? callView.tone,
 				preview: resultView.preview ?? callView.preview,
+				open: resultView.open ?? callView.open,
 				inline: resultView.inline ?? callView.inline,
 				tools: resultView.tools ?? callView.tools,
 			};

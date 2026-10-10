@@ -571,7 +571,7 @@ function renderSymbols(symbolsMatch: RegExpMatchArray, lines: string[], expanded
 	// One linear pass each: `isLast[i]` — the next symbol at indent <= mine is
 	// not a sibling (monotonic stack, right to left); `prefixes[i]` — per
 	// ancestor level, the nearest earlier symbol at that indent decides the rail.
-	const isLast: boolean[] = new Array(symbols.length);
+	const isLast = Array.from({ length: symbols.length }, () => false);
 	const pending: number[] = [];
 	for (let i = symbols.length - 1; i >= 0; i--) {
 		const myIndent = symbols[i].indent;
@@ -581,7 +581,7 @@ function renderSymbols(symbolsMatch: RegExpMatchArray, lines: string[], expanded
 		pending.push(i);
 	}
 	const getPrefixes = (): string[] => {
-		const prefixes: string[] = new Array(symbols.length);
+		const prefixes: string[] = [];
 		const lastAtIndent = new Map<number, number>();
 		for (let i = 0; i < symbols.length; i++) {
 			const myIndent = symbols[i].indent;
@@ -590,7 +590,7 @@ function renderSymbols(symbolsMatch: RegExpMatchArray, lines: string[], expanded
 				const ancestorIdx = lastAtIndent.get(level - 2);
 				prefix += ancestorIdx !== undefined && isLast[ancestorIdx] ? "   " : `${theme.tree.vertical}  `;
 			}
-			prefixes[i] = prefix;
+			prefixes.push(prefix);
 			lastAtIndent.set(myIndent, i);
 		}
 		return prefixes;

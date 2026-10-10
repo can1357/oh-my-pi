@@ -1,0 +1,13 @@
+// `/v1/models` is key-protected — it answers `401 missing_api_key` without a
+// bearer key and `401 invalid_api_key` to a rejected one (verified
+// 2026-10-02) — so login validates the pasted key there. The probe bills
+// nothing, unlike a chat-completions ping against a prepaid balance.
+auth "coralbricks" {
+	name "CoralBricks"
+	login "api-key" {
+		auth-url "https://www.coralbricks.ai/api-keys"
+		instructions "Create or copy your API key from the CoralBricks dashboard (keys look like cb_...)"
+		prompt "Paste your CoralBricks API key" placeholder="cb_..."
+		validate "models-endpoint" label="CoralBricks" url="https://inference.coralbricks.ai/v1/models"
+	}
+}

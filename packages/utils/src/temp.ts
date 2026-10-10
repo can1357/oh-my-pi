@@ -3,6 +3,13 @@ import * as fsPromises from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 
+/**
+ * Owned temporary directory, removed via `remove()` or `using`/`await using`.
+ *
+ * Prefixes follow `mkdtemp`: `"@name-"` creates under the OS temp dir, any other
+ * prefix is a path (a bare `"name-"` lands in the process cwd), and no prefix
+ * means `"@pi-temp-"`.
+ */
 export class TempDir {
 	#path: string;
 	private constructor(path: string) {

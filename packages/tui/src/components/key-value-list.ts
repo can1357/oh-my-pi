@@ -54,6 +54,10 @@ export class KeyValueList implements Component {
 		this.#native = undefined;
 	}
 
+	releaseRenderCaches(): void {
+		this.#cache = undefined;
+	}
+
 	/** An aligned `kv` grid; label width and value wrapping are the terminal's. */
 	describe(_cx: DescribeContext): NativeNode {
 		this.#native ??= node("kv", {
