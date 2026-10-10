@@ -441,7 +441,42 @@ export interface PickTargetOptions {
 	preferVisible?: boolean;
 	/** Relay /json endpoint (e.g. http://127.0.0.1:9224); enables metadata-first target selection. */
 	relayJson?: string;
+	/** Target ids already driven by a live managed tab, mapped to that tab's name; never adopted again. */
+	bound?: ReadonlyMap<string, string>;
 	signal?: AbortSignal;
+}
+
+/** CDP target id of `target`; Puppeteer's cached id first, `Target.getTargetInfo` otherwise. */
+export async function targetIdForTarget(target: Target): Promise<string> {
+	if ("_targetId" in target && typeof target._targetId === "string") return target._targetId;
+	const session = await target.createCDPSession();
+	try {
+		const { targetInfo } = await session.send("Target.getTargetInfo");
+		if (targetInfo.targetId) return targetInfo.targetId;
+		throw new ToolError("Target id unavailable from CDP target info");
+	} finally {
+		await session.detach().catch(() => undefined);
+	}
+}
+
+/** Name of the live managed tab already driving `page`, if any. */
+async function boundTabName(page: Page, bound: ReadonlyMap<string, string> | undefined): Promise<string | undefined> {
+	if (!bound?.size) return undefined;
+	const id = await targetIdForTarget(page.target()).catch(() => "");
+	return bound.get(id);
+}
+
+/** Refuses to adopt a page another managed tab drives; two names on one page navigate each other away. */
+function boundTabError(holders: Iterable<string>, matcher: string | undefined): ToolError {
+	const names = [...new Set(holders)].map(name => JSON.stringify(name)).join(", ");
+	if (matcher) {
+		return new ToolError(
+			`The page matching ${JSON.stringify(matcher)} is already driven by tab ${names}. Reuse that tab, or close it before opening another tab on this page.`,
+		);
+	}
+	return new ToolError(
+		`Every page on the attached browser is already driven by tab ${names}. Reuse that tab, or open another page in the browser and select it with app.target.`,
+	);
 }
 
 const PAGE_ATTACH_TIMEOUT_MS = 10_000;
@@ -571,6 +606,23 @@ function selectRelayEntry(entries: RelayJsonEntry[], options: PickTargetOptions)
 	return usable.find(e => e.active === "true") ?? usable[0] ?? null;
 }
 
+/**
+ * Whether relay /json already answers `needle`: an unbound live page matches, or
+ * only discarded unbound pages match and no bound page does (reported at once).
+ * A match held by another managed tab keeps the settle window open, since the
+ * user may have just opened a second matching page that /json has yet to list.
+ */
+function relayMatchSettled(
+	entries: RelayJsonEntry[],
+	needle: string,
+	bound: ReadonlyMap<string, string> | undefined,
+): boolean {
+	const matches = entries.filter(e => e.type === "page" && relayEntryMatches(e, needle));
+	const unbound = matches.filter(e => !bound?.has(e.id));
+	if (unbound.some(e => e.discarded !== "true")) return true;
+	return unbound.length > 0 && unbound.length === matches.length;
+}
+
 /** Select relay pages from /json metadata before probing pages; enumerate targets when metadata offers no selection. */
 export async function pickElectronTarget(browser: Browser, options: PickTargetOptions = {}): Promise<Page> {
 	throwIfAborted(options.signal);
@@ -582,7 +634,7 @@ export async function pickElectronTarget(browser: Browser, options: PickTargetOp
 		while (
 			needle &&
 			entries?.some(e => e.type === "page") &&
-			!entries.some(e => e.type === "page" && relayEntryMatches(e, needle)) &&
+			!relayMatchSettled(entries, needle, options.bound) &&
 			Date.now() < settleDeadline
 		) {
 			await abortable(options.signal, () => Bun.sleep(Math.min(RELAY_MATCH_POLL_MS, settleDeadline - Date.now())));
@@ -595,7 +647,16 @@ export async function pickElectronTarget(browser: Browser, options: PickTargetOp
 			entries = polled ?? entries;
 		}
 		if (entries) {
-			const pageEntries = entries.filter(e => e.type === "page");
+			const bound = options.bound;
+			const allPageEntries = entries.filter(e => e.type === "page");
+			const pageEntries = bound?.size ? allPageEntries.filter(e => !bound.has(e.id)) : allPageEntries;
+			if (needle && !pageEntries.some(e => e.discarded !== "true" && relayEntryMatches(e, needle))) {
+				const holders = allPageEntries.flatMap(e => {
+					const holder = relayEntryMatches(e, needle) ? bound?.get(e.id) : undefined;
+					return holder ? [holder] : [];
+				});
+				if (holders.length > 0) throw boundTabError(holders, options.matcher);
+			}
 			const selected = pageEntries.length > 0 ? selectRelayEntry(pageEntries, options) : null;
 			const targets = browser.targets();
 			if (options.preferVisible && !options.matcher) {
@@ -684,10 +745,31 @@ export async function pickElectronTarget(browser: Browser, options: PickTargetOp
 		}
 		targets = browser.targets();
 	}
+	const heldTargets: Array<{ name: string; url: string; title: string }> = [];
 	let hasUnreadablePage = false;
 	const discoveredPages = await Promise.all(
 		targets.map(async target => {
 			if (String(target.type()) !== "page") return null;
+			// A managed tab already holds this target. Do not let its readiness
+			// failure veto a different, readable page requested by this open.
+			if (options.bound?.size) {
+				const id = await targetIdForTarget(target).catch(() => "");
+				const name = options.bound.get(id);
+				if (name !== undefined) {
+					// Puppeteer keeps the CDP title on the target even when its page
+					// cannot be attached or its main frame is not ready.
+					const info =
+						"_getTargetInfo" in target && typeof target._getTargetInfo === "function"
+							? target._getTargetInfo()
+							: null;
+					const title =
+						info && typeof info === "object" && "title" in info && typeof info.title === "string"
+							? info.title
+							: "";
+					heldTargets.push({ name, url: target.url(), title });
+					return null;
+				}
+			}
 			const page = await attachPageWithTimeout(target, PAGE_ATTACH_TIMEOUT_MS, options.signal);
 			if (!page || !(await waitForMainFrame(page, FRAME_READY_TIMEOUT_MS, options.signal))) {
 				hasUnreadablePage = true;
@@ -699,18 +781,27 @@ export async function pickElectronTarget(browser: Browser, options: PickTargetOp
 	const usablePages = discoveredPages.filter((page): page is Page => page !== null);
 	if (hasUnreadablePage && (options.preferVisible || options.matcher)) {
 		if (options.preferVisible && !options.matcher) {
-			const visible = await firstVisiblePage(usablePages, options.signal);
+			const holders = await Promise.all(usablePages.map(page => boundTabName(page, options.bound)));
+			const visible = await firstVisiblePage(
+				usablePages.filter((_, index) => holders[index] === undefined),
+				options.signal,
+			);
 			if (visible) return visible;
 		}
 		throw new ToolError("A browser tab is not ready; retry after it loads to avoid selecting a different tab");
 	}
-	if (usablePages.length > 0) return pickPageFromList(usablePages, options);
+	if (usablePages.length > 0) return pickPageFromList(usablePages, options, heldTargets);
 
 	const fallbackPages = await abortable(options.signal, () => browser.pages());
 	if (!fallbackPages.length) {
+		if (!options.matcher && heldTargets.length > 0)
+			throw boundTabError(
+				heldTargets.map(target => target.name),
+				undefined,
+			);
 		throw new ToolError("No page targets available on the attached browser");
 	}
-	return pickPageFromList(fallbackPages, options);
+	return pickPageFromList(fallbackPages, options, heldTargets);
 }
 
 async function enrichPages(
@@ -748,16 +839,41 @@ async function firstVisiblePage(pages: Page[], signal?: AbortSignal): Promise<Pa
 	return foreground >= 0 ? pages[foreground]! : null;
 }
 
-async function pickPageFromList(pages: Page[], options: PickTargetOptions): Promise<Page> {
+async function pickPageFromList(
+	pages: Page[],
+	options: PickTargetOptions,
+	heldTargets: readonly { name: string; url: string; title: string }[] = [],
+): Promise<Page> {
 	const enriched = await enrichPages(pages, options.signal);
+	const holders = await Promise.all(enriched.map(p => boundTabName(p.page, options.bound)));
+	const free = enriched.filter((_, index) => holders[index] === undefined);
 	if (options.matcher) {
 		const needle = options.matcher.toLowerCase();
-		const hit = enriched.find(p => p.url.toLowerCase().includes(needle) || p.title.toLowerCase().includes(needle));
+		const matches = (p: { url: string; title: string }) =>
+			p.url.toLowerCase().includes(needle) || p.title.toLowerCase().includes(needle);
+		const hit = free.find(matches);
 		if (hit) return hit.page;
+		const held = enriched.flatMap((p, index) => {
+			const holder = holders[index];
+			return holder && matches(p) ? [holder] : [];
+		});
+		if (held.length > 0) throw boundTabError(held, options.matcher);
+		const heldMatches = heldTargets.filter(matches);
+		if (heldMatches.length > 0)
+			throw boundTabError(
+				heldMatches.map(target => target.name),
+				options.matcher,
+			);
 		const summary = enriched.map(p => `- ${p.title || "(untitled)"}  ${p.url}`).join("\n");
 		throw new ToolError(`No page target matched ${JSON.stringify(options.matcher)}. Available pages:\n${summary}`);
 	}
-	const usable = enriched.filter(
+	if (free.length === 0) {
+		throw boundTabError(
+			holders.filter((holder): holder is string => holder !== undefined),
+			undefined,
+		);
+	}
+	const usable = free.filter(
 		p => !ATTACH_TARGET_SKIP_PATTERN.test(p.url) && !ATTACH_TARGET_SKIP_PATTERN.test(p.title),
 	);
 	if (options.preferVisible && usable.length > 1) {
@@ -767,7 +883,7 @@ async function pickPageFromList(pages: Page[], options: PickTargetOptions): Prom
 		);
 		if (foreground) return foreground;
 	}
-	return usable[0]?.page ?? enriched[0]!.page;
+	return usable[0]?.page ?? free[0]!.page;
 }
 
 /**

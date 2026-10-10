@@ -7,7 +7,7 @@ import {
 	withTimeout,
 	workerHostEntry,
 } from "@oh-my-pi/pi-utils";
-import type { CDPSession, Page, Target } from "puppeteer-core";
+import type { CDPSession, Target } from "puppeteer-core";
 import { callSessionTool } from "../../eval/js/tool-bridge";
 import { webpExclusionForModel } from "@oh-my-pi/pi-tui/chat/image-loading";
 import type { ToolSession } from "../index";
@@ -15,7 +15,12 @@ import { expandPath } from "../path-utils";
 import { CELL_BUDGET_SLACK_MS } from "../run-scope";
 import { ToolAbortError, toWorkerErrorPayload } from "../tool-errors";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
-import { gracefulKillTreeOnce, pickElectronTarget, shouldPreserveConnectedBrowserFocus } from "./attach";
+import {
+	gracefulKillTreeOnce,
+	pickElectronTarget,
+	shouldPreserveConnectedBrowserFocus,
+	targetIdForTarget,
+} from "./attach";
 import { CmuxTab } from "./cmux/cmux-tab";
 import { mapWaitUntil } from "./cmux/rpc";
 import { runInProcessTab } from "./in-process-run";
@@ -37,6 +42,7 @@ import {
 	releaseBrowser,
 	type TernBrowserHandle,
 } from "./registry";
+import { isLoopbackRelayUrl } from "./relay/daemon";
 import type {
 	ReadyInfo,
 	RunErrorPayload,
@@ -210,6 +216,19 @@ const workerPageTargets = new WeakMap<WorkerHandle, string>();
 // same tab name so the existence check and `tabs.set` (separated by several
 // awaits) cannot interleave and leak a worker + browser refCount.
 const acquireChains = new Map<string, Promise<void>>();
+// Attached targets an in-flight open picked but has not yet published in
+// `tabs`, mapped to the opening tab's name. Opens of different names run
+// concurrently, so each pick must exclude these or two opens adopt one page.
+// `acquireChains` keeps one acquisition per name in flight, so an entry is
+// dropped by name once that acquisition settles.
+const reservedTargets = new Map<string, string>();
+// Per-browser pick chain: serializes attached-target selection and its
+// reservation so two picks on one browser never read the same snapshot. A
+// Chromium debugger websocket path (`/devtools/browser/<id>`) names the
+// instance however its discovery URL was spelled (localhost vs 127.0.0.1).
+// Every relay serves `/cdp`, so a relay is named by its endpoint, with
+// loopback spellings folded together. Worker startup runs outside the chain.
+const targetPicks = new Map<string, Promise<void>>();
 const GRACE_MS = 750;
 // Cold-start guard for the worker's `setup` handshake (realm usable: puppeteer
 // loaded, browser connected, page acquired). On hosts where the worker's cold
@@ -304,7 +323,14 @@ export function acquireTab(name: string, browser: BrowserHandle, opts: AcquireTa
 	// run through a disconnected handle and leave the worker's page behind.
 	holdBrowser(browser);
 	const prior = acquireChains.get(name) ?? Promise.resolve();
-	const acquisition = prior.then(() => acquireTabImpl(name, browser, opts));
+	const acquisition = prior
+		.then(() => acquireTabImpl(name, browser, opts))
+		.finally(() => {
+			// Published tabs are excluded through `tabs`; failed opens free the page.
+			for (const [targetId, holder] of reservedTargets) {
+				if (holder === name) reservedTargets.delete(targetId);
+			}
+		});
 	const result = acquisition.then(
 		async value => {
 			await releaseBrowser(browser, { kill: false });
@@ -440,7 +466,7 @@ async function acquireTabImpl(
 	let initPayload: WorkerInitPayload;
 	let worker: WorkerHandle;
 	try {
-		initPayload = await buildInitPayload(browser, opts);
+		initPayload = await buildInitPayload(name, browser, opts);
 		worker = await spawnTabWorker();
 	} catch (error) {
 		// Failing before the worker took its own hold must release the
@@ -1491,7 +1517,11 @@ function sameAllowedDomains(left: readonly string[], right: readonly string[] | 
 	return left.every((domain, index) => domain === right[index]);
 }
 
-async function buildInitPayload(browser: PuppeteerBrowserHandle, opts: AcquireTabOptions): Promise<WorkerInitPayload> {
+async function buildInitPayload(
+	name: string,
+	browser: PuppeteerBrowserHandle,
+	opts: AcquireTabOptions,
+): Promise<WorkerInitPayload> {
 	const safeDir = getPuppeteerDir();
 	const browserWSEndpoint = browser.browser.wsEndpoint();
 	if (!browserWSEndpoint) throw new ToolError("Browser websocket endpoint is unavailable");
@@ -1517,13 +1547,37 @@ async function buildInitPayload(browser: PuppeteerBrowserHandle, opts: AcquireTa
 	// target may be backgrounded, so retain activation for target-correct pixels.
 	const userDriven = browser.kind.kind === "connected" || browser.kind.kind === "relay";
 	const activateForScreenshot = !userDriven || !shouldPreserveConnectedBrowserFocus(opts.target);
-	const page = await pickElectronTarget(browser.browser, {
-		matcher: opts.target,
-		preferVisible: !activateForScreenshot,
-		relayJson: browser.kind.kind === "relay" ? browser.kind.cdpUrl : undefined,
-		signal: opts.signal,
-	});
-	const targetId = await targetIdForPage(page);
+	const ws = new URL(browserWSEndpoint);
+	const pickKey =
+		browser.kind.kind === "relay"
+			? `${isLoopbackRelayUrl(ws.href) ? "loopback" : ws.hostname}:${ws.port}${ws.pathname}`
+			: ws.pathname;
+	const prior = targetPicks.get(pickKey) ?? Promise.resolve();
+	const { promise: picked, resolve: pickDone } = Promise.withResolvers<void>();
+	targetPicks.set(pickKey, picked);
+	let targetId: string;
+	try {
+		await prior;
+		// Target ids are unique per Chromium instance, so a page held by any live
+		// tab worker or reserved by an in-flight open is off limits even when
+		// another handle connected to it.
+		const bound = new Map(reservedTargets);
+		for (const tab of tabs.values()) {
+			if (tab.backend === "worker" && tab.state === "alive") bound.set(tab.targetId, tab.name);
+		}
+		const page = await pickElectronTarget(browser.browser, {
+			matcher: opts.target,
+			preferVisible: !activateForScreenshot,
+			relayJson: browser.kind.kind === "relay" ? browser.kind.cdpUrl : undefined,
+			bound,
+			signal: opts.signal,
+		});
+		targetId = await targetIdForTarget(page.target());
+		reservedTargets.set(targetId, name);
+	} finally {
+		pickDone();
+		if (targetPicks.get(pickKey) === picked) targetPicks.delete(pickKey);
+	}
 	return {
 		mode: "attach",
 		browserWSEndpoint,
@@ -1821,23 +1875,6 @@ async function waitForClosed(tab: WorkerTabSession): Promise<void> {
 function expandBrowserScreenshotDir(session: ToolSession): string | undefined {
 	const value = cfgBrowserScreenshotDir.get(session.settings);
 	return value ? expandPath(value) : undefined;
-}
-
-async function targetIdForPage(page: Page): Promise<string> {
-	return await targetIdForTarget(page.target());
-}
-
-async function targetIdForTarget(target: Target): Promise<string> {
-	const raw = target as unknown as { _targetId?: unknown };
-	if (typeof raw._targetId === "string") return raw._targetId;
-	const session = await target.createCDPSession();
-	try {
-		const info = (await session.send("Target.getTargetInfo")) as { targetInfo?: { targetId?: string } };
-		if (info.targetInfo?.targetId) return info.targetInfo.targetId;
-		throw new ToolError("Target id unavailable from CDP target info");
-	} finally {
-		await session.detach().catch(() => undefined);
-	}
 }
 
 function errorFromPayload(payload: RunErrorPayload): Error {

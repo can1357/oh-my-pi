@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed a second named browser tab on `app.cdp_url` (or the relay) adopting the page another live tab already drives, so navigating one navigated the other away; the open now picks a different page or fails naming the tab that holds it ([#15256](https://github.com/can1357/oh-my-pi/issues/15256))
+
 ## [18.8.9] - 2026-10-10
 
 ### Added

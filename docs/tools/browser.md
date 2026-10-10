@@ -140,7 +140,7 @@ Python `tab.run` accepts a JavaScript string only; it does not accept a Python c
 
 - **Managed Chromium:** creates an omp-owned page in project-shared Chromium and applies stealth patches. Installation happens automatically on first use. `headed` overrides the default hidden mode.
 - **Spawned (`app.path`):** starts or reuses a CDP-enabled browser/Electron executable. `app.args` applies only here; Chromium-family processes use an omp-owned profile unless args specify `--user-data-dir`.
-- **Connected (`app.cdp_url`):** attaches to an existing HTTP CDP discovery endpoint.
+- **Connected (`app.cdp_url`):** attaches to an existing HTTP CDP discovery endpoint and adopts one of its pages: the `app.target` match, else the visible usable page. A page another live tab already drives is never adopted again; when no other page is left, the open fails naming that tab.
 - **Relay (`app.relay: true`):** adopts the user's real Chrome tab. `app.target` selects by URL/title substring; without it the visible usable tab is adopted. Passing `url` navigates the adopted tab.
 - **Tern:** inside a Tern pane, opens a visible browser picture-in-picture over the pane using native WKWebView, not Chromium. `headed: false` or `app.tern: false` opts out; `app.tern: true` requires Tern. Automatic Tern selection falls back to Chromium with an explanatory result when Tern cannot host the page.
 - **Cmux:** drives an available cmux WKWebView surface.
