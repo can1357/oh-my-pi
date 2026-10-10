@@ -25,8 +25,12 @@ import { loadCapability } from "../../discovery";
 import { getExtensionNameFromPath } from "../../discovery/helpers";
 import type { ExecOptions } from "../../exec/exec";
 import { execCommand } from "../../exec/exec";
-// Runtime self-reference: dereference this namespace only inside loader functions to keep the index.ts cycle safe.
-import * as PiCodingAgent from "../../index";
+// Runtime self-reference: type-only so the barrel's module graph is not
+// evaluated when this loader loads. `loadPiCodingAgent()` dereferences the
+// namespace inside the loader functions that hand it to extensions, which
+// keeps the index.ts cycle safe (same idiom as cli-commands.ts's
+// `loadLaunchHelp`).
+import type * as PiCodingAgent from "../../index";
 import type { SendUserMessageOptions } from "../../session/agent-session";
 import type { CustomMessagePayload } from "../../session/messages";
 import type { FileDeleteFallbackHandler, FileWriteFallbackHandler } from "../../tools/file-write-fallback";
@@ -60,6 +64,19 @@ installLegacyPiSpecifierShim();
 
 type HandlerFn = (...args: unknown[]) => Promise<unknown>;
 type LoadedExtensionModule = ExtensionFactory | { default?: ExtensionFactory };
+
+/**
+ * Dereference the package barrel on first extension construction.
+ *
+ * First-use boundary: evaluating `../../index` at import time would pull the
+ * package barrel (and through it sdk/tools/modes/task-executor) into every
+ * graph that loads an extension loader, so the namespace resolves through
+ * Bun's synchronous CommonJS bridge inside the loader functions instead.
+ */
+function loadPiCodingAgent(): typeof PiCodingAgent {
+	const module: typeof PiCodingAgent = require("../../index");
+	return module;
+}
 
 function getExtensionFactory(module: LoadedExtensionModule): ExtensionFactory | null {
 	const candidate = typeof module === "function" ? module : module.default;
@@ -448,7 +465,7 @@ async function bindExtension(
 	}
 	try {
 		const extension = createExtension(extensionPath, imported.resolvedPath);
-		const api = new ConcreteExtensionAPI(PiCodingAgent, extension, runtime, cwd, eventBus);
+		const api = new ConcreteExtensionAPI(loadPiCodingAgent(), extension, runtime, cwd, eventBus);
 		await withHostGuard(() => runExtensionFactory(factory, api, runtime));
 
 		return { extension, error: null };
@@ -469,7 +486,7 @@ export async function loadExtensionFromFactory(
 	name = "<inline>",
 ): Promise<Extension> {
 	const extension = createExtension(name, name);
-	const api = new ConcreteExtensionAPI(PiCodingAgent, extension, runtime, cwd, eventBus);
+	const api = new ConcreteExtensionAPI(loadPiCodingAgent(), extension, runtime, cwd, eventBus);
 	await runExtensionFactory(factory, api, runtime);
 	return extension;
 }
