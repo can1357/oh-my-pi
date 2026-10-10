@@ -1388,7 +1388,7 @@ describe("formatUsageBreakdown", () => {
 		expect(text).toContain("→ not spent automatically  (claudeResets.autoRedeem: no)");
 	});
 
-	it("names the auth broker for a provider whose saved resets it spends, whatever this machine's setting says", () => {
+	it("names the auth broker for a provider whose saved resets it sweeps, whatever this machine's setting says", () => {
 		const now = Date.parse("2026-01-01T00:00:00.000Z");
 		const reports = [
 			codexResetReport({ nowMs: now, accountId: "ws-team", weeklyUsed: 1, expiresInMs: [6 * HOUR] }),
@@ -1401,9 +1401,25 @@ describe("formatUsageBreakdown", () => {
 		const text = stripVTControlCharacters(formatUsageBreakdown(reports, [], now, undefined, [], undefined, options));
 		expect(text).toContain("▲ 2 saved resets expire within 24h\n");
 		expect(text).toContain(
-			"→ the auth broker spends it before it expires, per its host's codexResets.autoRedeem and account policies",
+			"→ the auth broker handles these resets; its host's codexResets.autoRedeem and account policies decide whether this one is spent",
 		);
 		expect(text).toContain("→ not spent automatically  (claudeResets.autoRedeem: no)");
+	});
+
+	it("promises neither a spend nor a loss for a broker-swept account the broker host may have opted out", () => {
+		// The broker advertises a provider while any of its accounts is on; this
+		// client cannot see whether the broker host's policy opted this one out.
+		const now = Date.parse("2026-01-01T00:00:00.000Z");
+		const reports = [
+			claudeResetReport(now, { "anthropic:5h": 0.1, "anthropic:7d": 0.6 }, [cedarGrant(now, "cedar", 3 * HOUR)]),
+		];
+		const options = resetExpiryOptions({ "claudeResets.autoRedeem": "no" }, provider => provider === "anthropic");
+		const text = stripVTControlCharacters(formatUsageBreakdown(reports, [], now, undefined, [], undefined, options));
+		expect(text).toContain("▲ 1 saved reset expires within 24h\n");
+		expect(text).toContain(
+			"→ the auth broker handles these resets; its host's claudeResets.autoRedeem and account policies decide whether this one is spent",
+		);
+		expect(text).not.toMatch(/spends it|spent automatically|will be lost/);
 	});
 
 	it.each([

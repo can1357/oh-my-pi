@@ -1365,7 +1365,7 @@ export interface ResetsApi {
 	 * Business refusals return a code; transport errors may throw without losing Claude's request ID.
 	 */
 	redeem(options: RedeemResetCreditOptions): Promise<ResetCreditRedeemOutcome>;
-	/** Whether the auth broker spends `provider`'s saved resets itself, per its latest usage response. */
+	/** Whether the auth broker sweeps `provider`'s saved resets itself, per its latest usage response. */
 	brokerSweeps(provider: string): boolean;
 }
 

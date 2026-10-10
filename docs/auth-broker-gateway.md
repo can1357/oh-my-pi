@@ -151,7 +151,7 @@ The CLI broker refresh hook also handles managed `mcp_oauth:*` credentials using
 
 The sweep runs at start, then hourly, and wakes early when a known credit enters its last 5 minutes (then once a minute until it is gone, including while that provider's usage or listing is failing). Each run reads the broker's cached usage (the same reports `/v1/usage` serves) and lists Codex reset credits live. Claude accounts are listed live only when the reset inventory in their usage reports shows a credit to spend, and redeem re-checks the offer before spending.
 
-Clients that send the `reset-sweep` capability on `GET /v1/usage` get `resetSweep`, the providers this sweep covers (any whose `autoRedeem` is not `no`, or that an account policy turns on). Sessions on such a client skip their own background sweep for those providers, and `omp usage` says the broker spends their expiring resets; a turn blocked on a usage limit still restores its own account as before. Older clients never ask, and a client of an older broker gets no answer, so both keep sweeping themselves.
+Clients that send the `reset-sweep` capability on `GET /v1/usage` get `resetSweep`, the providers this sweep covers (any whose `autoRedeem` is not `no`, or that an account policy turns on). Sessions on such a client skip their own background sweep for those providers, and `omp usage` says the broker handles their expiring resets, without promising a spend: the broker host's settings and account policies, which the client cannot see, decide per account; a turn blocked on a usage limit still restores its own account as before. Older clients never ask, and a client of an older broker gets no answer, so both keep sweeping themselves.
 
 ## auth-gateway
 

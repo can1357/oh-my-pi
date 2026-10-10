@@ -80,7 +80,7 @@ export interface UsageResetExpiryOptions {
 	settings: Settings;
 	/** Stored OAuth accounts, as `/usage reset <provider>/<credential id>` addresses them. */
 	accounts: (provider: string) => readonly OAuthAccountSummary[];
-	/** Whether the auth broker spends `provider`'s saved resets itself, which makes its host's settings decide. */
+	/** Whether the auth broker sweeps `provider`'s saved resets itself, which makes its host's settings decide. */
 	brokerSweeps: (provider: string) => boolean;
 }
 
@@ -744,7 +744,7 @@ function formatResetExpiryBanner(
 		);
 		const verdict = verdicts[index]!;
 		const spender = brokerSweeps[index]
-			? `→ the auth broker spends it before it expires, per its host's ${verdict.setting} and account policies`
+			? `→ the auth broker handles these resets; its host's ${verdict.setting} and account policies decide whether this one is spent`
 			: formatResetSpendVerdict(verdict);
 		lines.push(`    ${chalk.dim(spender)}`);
 		if (!warning.usableNow) return;
