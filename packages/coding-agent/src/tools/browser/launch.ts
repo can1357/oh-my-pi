@@ -1,9 +1,27 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { $which, getPuppeteerDir, logger, removeWithRetries } from "@oh-my-pi/pi-utils";
+import {
+	$which,
+	getPuppeteerDir,
+	isRecord,
+	logger,
+	removeWithRetries,
+	toError,
+	untilAborted,
+} from "@oh-my-pi/pi-utils";
 import type * as BrowsersNs from "@oh-my-pi/pi-utils/browsers";
-import type { Browser, CDPSession, Page, default as Puppeteer, Target } from "puppeteer-core";
+import type {
+	Browser,
+	CDPSession,
+	ConnectOptions,
+	Device,
+	JSHandle,
+	NetworkConditions,
+	Page,
+	default as Puppeteer,
+	Target,
+} from "puppeteer-core";
 import stealthTamperingScript from "../puppeteer/00_stealth_tampering.txt" with { type: "text" };
 import stealthActivityScript from "../puppeteer/01_stealth_activity.txt" with { type: "text" };
 import stealthHairlineScript from "../puppeteer/02_stealth_hairline.txt" with { type: "text" };
@@ -18,7 +36,8 @@ import stealthPluginsScript from "../puppeteer/10_stealth_plugins.txt" with { ty
 import stealthHardwareScript from "../puppeteer/11_stealth_hardware.txt" with { type: "text" };
 import stealthCodecsScript from "../puppeteer/12_stealth_codecs.txt" with { type: "text" };
 import stealthWorkerScript from "../puppeteer/13_stealth_worker.txt" with { type: "text" };
-import { ToolError } from "../tool-errors";
+import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { withDownload } from "../../downloads/activity";
 
 export const DEFAULT_VIEWPORT = { width: 1365, height: 768, deviceScaleFactor: 1.25 };
 
@@ -73,7 +92,6 @@ const STEALTH_ACCEPT_LANGUAGE = "en-US,en";
 
 const USER_AGENT_TARGET_TIMEOUT_MS = 5_000;
 const USER_AGENT_TARGET_TYPES = new Set(["page", "webview", "background_page"]);
-const PUPPETEER_SOURCE_URL_SUFFIX = "//# sourceURL=__puppeteer_evaluation_script__";
 
 /**
  * Lazy-import puppeteer while hiding the user's cwd from cosmiconfig. The
@@ -82,6 +100,14 @@ const PUPPETEER_SOURCE_URL_SUFFIX = "//# sourceURL=__puppeteer_evaluation_script
  */
 let puppeteerCwdFailed = false;
 let puppeteerCwdFailure: unknown;
+let jsHandleConstructor: typeof JSHandle | undefined;
+let knownDevices: Readonly<Record<string, Device>> | undefined;
+let predefinedNetworkConditions: Readonly<Record<string, NetworkConditions>> | undefined;
+
+/** Identify handles using the lazily loaded Puppeteer instance without triggering an early import. */
+export function isPuppeteerHandle(value: unknown): value is JSHandle {
+	return jsHandleConstructor !== undefined && value instanceof jsHandleConstructor;
+}
 async function importPuppeteerWithSafeCwd(safeDir: string): Promise<typeof Puppeteer> {
 	const cwdDescriptor = Object.getOwnPropertyDescriptor(process, "cwd");
 	if (!cwdDescriptor || typeof cwdDescriptor.value !== "function") {
@@ -103,7 +129,11 @@ async function importPuppeteerWithSafeCwd(safeDir: string): Promise<typeof Puppe
 	try {
 		try {
 			// Dynamic import is intentional: Puppeteer probes cwd during module initialization.
-			loaded = (await import("puppeteer-core")).default;
+			const module = await import("puppeteer-core");
+			loaded = module.default;
+			jsHandleConstructor = module.JSHandle;
+			knownDevices = module.KnownDevices;
+			predefinedNetworkConditions = module.PredefinedNetworkConditions;
 		} catch (error) {
 			importFailed = true;
 			importFailure = error;
@@ -162,6 +192,32 @@ export async function loadPuppeteerInWorker(safeDir: string): Promise<typeof Pup
 	return loaded;
 }
 
+/** Normalize transport event rejections before they cross browser or worker boundaries. */
+export async function connectPuppeteer(puppeteer: typeof Puppeteer, options: ConnectOptions): Promise<Browser> {
+	try {
+		return await puppeteer.connect(options);
+	} catch (error) {
+		// The WebSocket transports can reject with ErrorEvent rather than Error.
+		// Its message includes the actual debugger endpoint and handshake failure.
+		if (!(error instanceof Error) && isRecord(error) && typeof error.message === "string") {
+			throw new Error(error.message, { cause: error });
+		}
+		throw toError(error);
+	}
+}
+
+/** Return device descriptors from the already-loaded Puppeteer module. */
+export function loadedKnownDevices(): Readonly<Record<string, Device>> {
+	if (!knownDevices) throw new ToolError("Puppeteer device descriptors are not loaded");
+	return knownDevices;
+}
+
+/** Return network presets from the already-loaded Puppeteer module. */
+export function loadedNetworkConditions(): Readonly<Record<string, NetworkConditions>> {
+	if (!predefinedNetworkConditions) throw new ToolError("Puppeteer network presets are not loaded");
+	return predefinedNetworkConditions;
+}
+
 let browsersModule: typeof BrowsersNs | undefined;
 async function loadBrowsers(): Promise<typeof BrowsersNs> {
 	if (!browsersModule) {
@@ -209,9 +265,8 @@ export async function ensureChromiumExecutable(): Promise<string | undefined> {
 		}
 		const cacheDir = getPuppeteerDir();
 		const { PUPPETEER_REVISIONS } = await import("puppeteer-core/internal/revisions.js");
-		const buildId = await browsers.resolveBuildId(browsers.Browser.CHROME, platform, PUPPETEER_REVISIONS.chrome);
+		const buildId = PUPPETEER_REVISIONS.chrome;
 		const executablePath = browsers.computeExecutablePath({
-			browser: browsers.Browser.CHROME,
 			buildId,
 			cacheDir,
 			platform,
@@ -223,23 +278,25 @@ export async function ensureChromiumExecutable(): Promise<string | undefined> {
 			platform,
 			cacheDir,
 		});
-		let lastReportedPercent = -1;
-		await browsers.install({
-			browser: browsers.Browser.CHROME,
-			buildId,
-			cacheDir,
-			platform,
-			downloadProgressCallback: ({ downloadedBytes, totalBytes }) => {
-				if (totalBytes <= 0) return;
-				const pct = Math.floor((downloadedBytes / totalBytes) * 100);
-				if (pct >= lastReportedPercent + 10 || downloadedBytes === totalBytes) {
-					lastReportedPercent = pct;
-					logger.debug(
-						`Chromium download: ${pct}% (${Math.round(downloadedBytes / 1_000_000)} / ${Math.round(totalBytes / 1_000_000)} MB)`,
+		await withDownload("Chromium", tracker =>
+			browsers.install({
+				buildId,
+				cacheDir,
+				platform,
+				downloadProgressCallback: ({ downloadedBytes, totalBytes }) => {
+					if (totalBytes <= 0) {
+						tracker.update({ loaded: downloadedBytes });
+						return;
+					}
+					// The archive is unpacked after the last byte arrives.
+					tracker.update(
+						downloadedBytes >= totalBytes
+							? { loaded: downloadedBytes, total: totalBytes, detail: "extracting" }
+							: { loaded: downloadedBytes, total: totalBytes },
 					);
-				}
-			},
-		});
+				},
+			}),
+		);
 		return executablePath;
 	})().catch(async err => {
 		// Cache a successful fallback too: the open preflight and the actual
@@ -407,8 +464,16 @@ async function resolveSystemChromium(): Promise<string | undefined> {
 	return undefined;
 }
 
+/** Per-process launch features controlled by browser.open options. */
+export interface HeadlessLaunchFeatures {
+	/** Trust invalid HTTPS certificates in this Chromium process. */
+	ignoreHttpsErrors?: boolean;
+	/** Permit file: documents to read other local files. */
+	allowFileAccess?: boolean;
+}
+
 /** Options shared by headless Chromium consumers. */
-export interface LaunchHeadlessOptions {
+export interface LaunchHeadlessOptions extends HeadlessLaunchFeatures {
 	headless: boolean;
 	viewport?: { width: number; height: number; deviceScaleFactor?: number };
 	/** Additional Chromium arguments merged with the centralized launch defaults. */
@@ -433,13 +498,20 @@ export interface LaunchHeadlessResult {
  * broker-owned shared browser: sandbox/stealth flags, window size, and
  * PUPPETEER_PROXY* env-derived proxy flags.
  */
-export function buildHeadlessLaunchArgs(viewport: { width: number; height: number }): string[] {
+export function buildHeadlessLaunchArgs(
+	viewport: { width: number; height: number },
+	features: HeadlessLaunchFeatures = {},
+): string[] {
 	const launchArgs = [
 		"--no-sandbox",
 		"--disable-setuid-sandbox",
 		"--disable-blink-features=AutomationControlled",
+		"--hide-scrollbars",
+		"--enable-features=WebMCPTesting,DevToolsWebMCPSupport",
 		`--window-size=${viewport.width},${viewport.height}`,
 	];
+	if (features.ignoreHttpsErrors) launchArgs.push("--ignore-certificate-errors");
+	if (features.allowFileAccess) launchArgs.push("--allow-file-access-from-files");
 	const proxy = process.env.PUPPETEER_PROXY;
 	if (proxy) {
 		launchArgs.push(`--proxy-server=${proxy}`);
@@ -451,7 +523,10 @@ export function buildHeadlessLaunchArgs(viewport: { width: number; height: numbe
 		}
 	}
 	const ignoreCert = process.env.PUPPETEER_PROXY_IGNORE_CERT_ERRORS?.toLowerCase();
-	if (ignoreCert === "true" || ignoreCert === "1" || ignoreCert === "yes" || ignoreCert === "on") {
+	if (
+		(ignoreCert === "true" || ignoreCert === "1" || ignoreCert === "yes" || ignoreCert === "on") &&
+		!launchArgs.includes("--ignore-certificate-errors")
+	) {
 		launchArgs.push("--ignore-certificate-errors");
 	}
 	return launchArgs;
@@ -465,7 +540,10 @@ export async function launchHeadlessBrowser(opts: LaunchHeadlessOptions): Promis
 		deviceScaleFactor: vp.deviceScaleFactor ?? DEFAULT_VIEWPORT.deviceScaleFactor,
 	};
 	const puppeteer = await loadPuppeteer();
-	const launchArgs = buildHeadlessLaunchArgs(initialViewport);
+	const launchArgs = buildHeadlessLaunchArgs(initialViewport, {
+		ignoreHttpsErrors: opts.ignoreHttpsErrors,
+		allowFileAccess: opts.allowFileAccess,
+	});
 	for (const arg of opts.args ?? []) {
 		if (!launchArgs.includes(arg)) launchArgs.push(arg);
 	}
@@ -568,6 +646,21 @@ export async function applyViewport(
 	});
 }
 
+/** The emulated viewport, else the window's own: connected and visible browsers emulate none. */
+export async function readPageViewport(
+	page: Page,
+	signal?: AbortSignal,
+): Promise<{ width: number; height: number; deviceScaleFactor?: number }> {
+	const emulated = page.viewport();
+	if (emulated) return emulated;
+	return await untilAborted(signal, () =>
+		page.evaluate(() => {
+			const win = globalThis as unknown as { innerWidth: number; innerHeight: number; devicePixelRatio: number };
+			return { width: win.innerWidth, height: win.innerHeight, deviceScaleFactor: win.devicePixelRatio };
+		}),
+	);
+}
+
 // =====================================================================
 // Stealth patches
 // =====================================================================
@@ -599,52 +692,6 @@ function resolvePageClient(page: Page): PuppeteerCdpClient | null {
 	};
 	if (!pageWithClient._client) return null;
 	return typeof pageWithClient._client === "function" ? pageWithClient._client() : pageWithClient._client;
-}
-
-const patchedClients = new WeakSet<object>();
-
-function patchSourceUrl(page: Page): void {
-	const client = resolvePageClient(page);
-	if (!client) return;
-	const clientKey = client as object;
-	if (patchedClients.has(clientKey)) return;
-	patchedClients.add(clientKey);
-	const originalSend = client.send.bind(client);
-	client.send = async (method: string, params?: Record<string, unknown>) => {
-		const next = async (payload?: Record<string, unknown>) => {
-			try {
-				return await originalSend(method, payload);
-			} catch (error) {
-				if (
-					error instanceof Error &&
-					error.message.includes(
-						"Protocol error (Network.getResponseBody): No resource with given identifier found",
-					)
-				) {
-					return undefined;
-				}
-				throw error;
-			}
-		};
-		if (!method || !params) {
-			return next(params);
-		}
-		const key =
-			method === "Runtime.evaluate"
-				? "expression"
-				: method === "Runtime.callFunctionOn"
-					? "functionDeclaration"
-					: null;
-		if (!key) {
-			return next(params);
-		}
-		const value = params[key];
-		if (typeof value !== "string" || !value.includes(PUPPETEER_SOURCE_URL_SUFFIX)) {
-			return next(params);
-		}
-		const patchedParams = { ...params, [key]: value.replace(PUPPETEER_SOURCE_URL_SUFFIX, "") };
-		return next(patchedParams);
-	};
 }
 
 async function resolveMacOsProductVersion(): Promise<string> {
@@ -984,10 +1031,11 @@ export async function applyStealthPatches(
 	page: Page,
 	state: { browserSession: CDPSession | null; override: UserAgentOverride | null },
 ): Promise<void> {
-	patchSourceUrl(page);
 	if (!state.override) {
 		state.override = await resolveUserAgentOverride(page);
 	}
+	// UA/language overrides are session-scoped; detached target sessions do not
+	// replace the primary client override, and setUserAgent has no language option.
 	const client = resolvePageClient(page);
 	if (client) {
 		await sendUserAgentOverride(client, state.override);

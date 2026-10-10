@@ -1,6 +1,8 @@
 import { describe, expect, it } from "bun:test";
+import { withoutTerminalMultiplexer } from "./terminal-multiplexer-environment";
 import {
 	type Component,
+	CURSOR_MARKER,
 	type TerminalFramePlan,
 	type TerminalFrameProvider,
 	TUI,
@@ -8,6 +10,7 @@ import {
 } from "@oh-my-pi/pi-tui";
 import { VirtualRenderScheduler } from "./virtual-render-scheduler";
 import { VirtualTerminal } from "./virtual-terminal";
+import { WidthReplayProvider } from "./width-replay-provider";
 
 class Provider implements TerminalFrameProvider {
 	plan: TerminalFramePlan;
@@ -79,37 +82,6 @@ class ResizeScheduler {
 		const pending = [...this.#pending];
 		this.#pending.clear();
 		for (const callback of pending) callback();
-	}
-}
-class WidthReplayProvider implements TerminalFrameProvider {
-	#nextHistoryId = 1;
-	#retired = false;
-	readonly #historyRows: readonly string[];
-	resetCount = 0;
-
-	constructor(historyRows: readonly string[] = ["history-one", "history-two"]) {
-		this.#historyRows = historyRows;
-	}
-
-	renderFrame(viewport: ViewportSize): TerminalFramePlan {
-		const width = viewport.columns;
-		return {
-			history: this.#retired
-				? undefined
-				: { id: this.#nextHistoryId, rows: this.#historyRows.map(row => `${row}@${width}`) },
-			viewport: [`editor@${width}`],
-		};
-	}
-
-	acknowledgeHistory(id: number): void {
-		if (id !== this.#nextHistoryId) return;
-		this.#nextHistoryId++;
-		this.#retired = true;
-	}
-
-	beginHistoryReplay(): void {
-		this.#retired = false;
-		this.resetCount++;
 	}
 }
 
@@ -188,8 +160,31 @@ class TmuxPreservedClearTerminal extends VirtualTerminal {
 		super.write(translated);
 	}
 }
+/**
+ * Models ConPTY materializing a pending wrap before the cursor move that follows
+ * an exact-width bottom-row repaint, as observed in issue #9783's PTY capture.
+ */
+class ConptyPendingWrapTerminal extends VirtualTerminal {
+	override write(data: string): void {
+		const cursorMove = /\x1b\[\d+;\d+H/g;
+		let offset = 0;
+		for (let match = cursorMove.exec(data); match; match = cursorMove.exec(data)) {
+			const beforeMove = data.slice(offset, match.index);
+			super.write(beforeMove);
+			const lastReturn = Math.max(beforeMove.lastIndexOf("\r"), beforeMove.lastIndexOf("\n"));
+			const trailingText = Bun.stripANSI(beforeMove.slice(lastReturn + 1));
+			if (trailingText.length >= this.columns && this.getCursor().row === this.rows - 1) {
+				super.write("\r\n");
+			}
+			super.write(match[0]);
+			offset = match.index + match[0].length;
+		}
+		super.write(data.slice(offset));
+	}
+}
 
 describe("terminal frame plans", () => {
+	withoutTerminalMultiplexer();
 	it("appends finalized history once and leaves the requested mutable viewport intact", () => {
 		const terminal = new VirtualTerminal(20, 3);
 		const provider = new Provider({
@@ -202,6 +197,48 @@ describe("terminal frame plans", () => {
 		expect(provider.acknowledged).toEqual([1]);
 		expect(terminal.getBufferPosition().baseY).toBe(1);
 		expect(terminal.getViewport().map(row => row.trimEnd())).toEqual(["history two", "editor", "status"]);
+		tui.stop();
+	});
+	it("keeps an exact-width live row out of scrollback when ConPTY materializes pending wrap", () => {
+		const terminal = new ConptyPendingWrapTerminal(20, 4);
+		const provider = new Provider({
+			history: { id: 1, rows: ["history one", "history two"] },
+			viewport: [`editor${CURSOR_MARKER}`, "status one".padEnd(20, ".")],
+		});
+		const tui = new TUI(terminal, undefined, { renderScheduler: scheduler });
+		tui.setFrameProvider(provider);
+
+		for (let frame = 2; frame <= 8; frame++) {
+			provider.plan = { viewport: [`editor${CURSOR_MARKER}`, `status ${frame}`.padEnd(20, ".")] };
+			tui.requestRender(true);
+		}
+
+		expect(terminal.getBufferPosition().baseY).toBe(0);
+		expect(plainBuffer(terminal)).toEqual(["history one", "history two", "editor", "status 8............"]);
+		tui.stop();
+	});
+	it("places the cursor from a moved marker row and hides it once the marker is gone", () => {
+		const terminal = new CountingTerminal(20, 4);
+		const provider = new Provider({ viewport: ["alpha", `ed${CURSOR_MARKER}it`, "status"] });
+		const tui = new TUI(terminal, true, { renderScheduler: scheduler });
+		tui.setFrameProvider(provider);
+
+		// Every row moved, so each is reused by content rather than position.
+		terminal.writes.length = 0;
+		provider.plan = { viewport: [`ed${CURSOR_MARKER}it`, "status", "alpha"] };
+		tui.requestRender(true);
+		let written = terminal.writes.join("");
+		expect(written).not.toContain(CURSOR_MARKER);
+		expect(written).toContain("\x1b[1;3H\x1b[?25h");
+
+		// The marker-free row now matches the stripped row painted last frame.
+		terminal.writes.length = 0;
+		provider.plan = { viewport: ["status", "alpha", "edit"] };
+		tui.requestRender(true);
+		written = terminal.writes.join("");
+		expect(written).not.toContain("\x1b[?25h");
+		expect(written).toContain("\x1b[?25l");
+		expect(terminal.getViewport().map(row => row.trimEnd())).toEqual(["status", "alpha", "edit", ""]);
 		tui.stop();
 	});
 	it("keeps live viewport rows out of tmux-style preserved-clear scrollback on a scrolling append", () => {
@@ -435,6 +472,7 @@ describe("terminal frame plans", () => {
 		renderScheduler.settle(); // restore the normal buffer, start the anchor probe
 		renderScheduler.settle(); // probe timeout → one bounded retry under a multiplexer
 		renderScheduler.settle(); // final timeout → settled repaint (no-op settle on direct)
+		renderScheduler.settle(); // drag-end quiet window → destructive rebuild
 
 		const scrollback = plainBuffer(terminal).slice(0, terminal.getBufferPosition().baseY);
 		expect(scrollback.some(row => row.includes("dot-live"))).toBe(false);
@@ -456,6 +494,9 @@ describe("terminal frame plans", () => {
 		expect(plainBuffer(terminal)).toContain("history-one@20");
 
 		terminal.resize(30, 2);
+		// A refresh-capable settle waits out the 120 ms settle window plus the
+		// 40 ms drain horizon and then replays the ledger at the settled width
+		// in the same transaction.
 		await renderScheduler.advance(terminal, 160);
 
 		const resized = plainBuffer(terminal);
@@ -485,6 +526,59 @@ describe("terminal frame plans", () => {
 		expect(provider.resetCount).toBe(0);
 		expect(resized.filter(row => row === "history-one@20")).toEqual(["history-one@20"]);
 		tui.stop();
+	});
+
+	it("skips the destructive rebuild on a height-only zoom grow", async () => {
+		const terminal = new CountingTerminal(20, 2);
+		const provider = new WidthReplayProvider();
+		const renderScheduler = new VirtualRenderScheduler();
+		const tui = new TUI(terminal, undefined, { renderScheduler });
+		tui.setResizeScrollback("rebuild");
+		tui.setFrameProvider(provider);
+		tui.start();
+		await renderScheduler.settle(terminal);
+		provider.resetCount = 0;
+		terminal.writes.length = 0;
+
+		// A tmux zoom toggles the pane height at a constant width: nothing
+		// rewraps, so the settled transaction must not clear and re-stream the
+		// ledger, and it commits at the normal settle window.
+		terminal.resize(20, 6);
+		await renderScheduler.advance(terminal, 160);
+
+		expect(provider.resetCount).toBe(0);
+		expect(terminal.writes.join("")).not.toContain("\x1b[3J");
+		const resized = plainBuffer(terminal);
+		expect(resized.filter(row => row === "history-one@20")).toEqual(["history-one@20"]);
+		expect(resized).toContain("editor@20");
+		tui.stop();
+	});
+
+	it("rebuilds on a multiplexer height shrink to repair clipped and pushed live rows", async () => {
+		Bun.env.TMUX = "/tmp/tmux-0/default,1,0"; // isInsideTerminalMultiplexer ← authoritative
+		try {
+			const terminal = new CountingTerminal(20, 6);
+			const provider = new WidthReplayProvider();
+			const renderScheduler = new VirtualRenderScheduler();
+			const tui = new TUI(terminal, undefined, { renderScheduler });
+			tui.setResizeScrollback("rebuild");
+			tui.setFrameProvider(provider);
+			tui.start();
+			await renderScheduler.settle(terminal);
+			provider.resetCount = 0;
+			terminal.writes.length = 0;
+
+			// tmux discards below the cursor first, then pushes above it. A
+			// current-width replay must replace that damaged physical copy.
+			terminal.resize(20, 2);
+			await renderScheduler.advance(terminal, 160);
+
+			expect(provider.resetCount).toBe(1);
+			expect(plainBuffer(terminal)).toEqual(["history-one@20", "history-two@20", "editor@20"]);
+			tui.stop();
+		} finally {
+			delete Bun.env.TMUX;
+		}
 	});
 
 	it("re-anchors retained history after a height grow behind a fullscreen overlay", async () => {
@@ -524,6 +618,9 @@ describe("terminal frame plans", () => {
 		await renderScheduler.settle(terminal);
 
 		terminal.resize(30, 2);
+		// A refresh-capable settle waits out the 120 ms settle window plus the
+		// 40 ms drain horizon and then erases and re-streams the ledger at the
+		// settled width in the same transaction.
 		await renderScheduler.advance(terminal, 160);
 
 		const resized = plainBuffer(terminal);
@@ -532,4 +629,66 @@ describe("terminal frame plans", () => {
 		expect(resized).toEqual(["history-one@30", "history-two@30", "editor@30"]);
 		tui.stop();
 	});
+
+	it("commits one history refresh for a resize burst", async () => {
+		const terminal = new VirtualTerminal(20, 2);
+		const provider = new WidthReplayProvider();
+		const renderScheduler = new VirtualRenderScheduler();
+		const tui = new TUI(terminal, undefined, { renderScheduler });
+		tui.setResizeScrollback("rebuild");
+		tui.setFrameProvider(provider);
+		tui.start();
+		await renderScheduler.settle(terminal);
+		provider.resetCount = 0;
+
+		// A pane drag delivers every step inside one settle window. Each step
+		// repaints the borrowed resize frame at its own geometry, but the
+		// transaction that clears and re-streams the ledger waits for 120 ms
+		// without another resize.
+		for (const width of [30, 32, 34]) {
+			terminal.resize(width, 2);
+			await renderScheduler.advance(terminal, 60);
+			expect(provider.resetCount).toBe(0);
+			// The borrowed resize frame tracks the dragged geometry; the ledger
+			// refresh — the clear-and-replay this guard exists for — has not run.
+			expect(plainBuffer(terminal)).toContain(`editor@${width}`);
+		}
+
+		// Drag end: the 120 ms window plus the 40 ms drain horizon elapses and
+		// the burst commits exactly one settled refresh.
+		await renderScheduler.advance(terminal, 160);
+
+		expect(provider.resetCount).toBe(1);
+		expect(plainBuffer(terminal)).toEqual(["history-one@34", "history-two@34", "editor@34"]);
+		tui.stop();
+	});
+
+	for (const mode of ["rebuild", "append"] as const) {
+		it(`refreshes history in ${mode} mode after a burst that returns to its starting width`, async () => {
+			const terminal = new VirtualTerminal(20, 2);
+			const provider = new WidthReplayProvider();
+			const renderScheduler = new VirtualRenderScheduler();
+			const tui = new TUI(terminal, undefined, { renderScheduler });
+			tui.setResizeScrollback(mode);
+			tui.setFrameProvider(provider);
+			tui.start();
+			await renderScheduler.settle(terminal);
+			provider.resetCount = 0;
+
+			// A drag out and back coalesces into one transaction whose settled size
+			// equals the committed one, but the terminal reflowed the normal buffer
+			// at the intermediate width. Gating the refresh on the net change left
+			// that reflow's stale rows stacked above the repainted viewport.
+			terminal.resize(30, 2);
+			await renderScheduler.advance(terminal, 60);
+			terminal.resize(20, 2);
+			// The re-armed 120 ms settle window plus the 40 ms drain horizon
+			// elapses, and the burst commits one refresh even though its settled
+			// size equals the committed one.
+			await renderScheduler.advance(terminal, 160);
+
+			expect(provider.resetCount).toBe(1);
+			tui.stop();
+		});
+	}
 });

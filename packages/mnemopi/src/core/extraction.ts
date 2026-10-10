@@ -10,6 +10,7 @@ import {
 	type RemoteLlmOptions,
 } from "./local-llm";
 import { getMnemopiRuntimeOptions } from "./runtime-options";
+import { clipToWindow, DEFAULT_INPUT_CHARS } from "./text-window";
 
 const TRUE_VALUES: Record<string, true> = { "1": true, true: true, yes: true, on: true };
 
@@ -378,7 +379,8 @@ export async function extractFactCategories(
 	if (typeof text !== "string" || text.trim() === "") {
 		return emptyFactCategories();
 	}
-	const prompt = buildExtractionPrompt(text);
+	const input = clipToWindow(text, DEFAULT_INPUT_CHARS);
+	const prompt = buildExtractionPrompt(input);
 
 	// Configured completion (host-injected runtime LLM, e.g. the coding-agent's smol
 	// or a local on-device model). Mirrors consolidation's precedence: when a
@@ -389,7 +391,7 @@ export async function extractFactCategories(
 		try {
 			const raw = await callConfiguredCompletion(prompt, 0, {
 				maxTokens: llmMaxTokens(),
-				task: { kind: "memory-extraction", input: text },
+				task: { kind: "memory-extraction", input },
 			});
 			if (typeof raw === "string" && raw.trim() !== "") {
 				const extracted = parseExtractedFactCategories(raw);
@@ -407,7 +409,7 @@ export async function extractFactCategories(
 			console.warn(`extractFacts: configured completion raised: ${safeForLog(exc)}`);
 			return emptyFactCategories();
 		}
-		return localFallback(prompt, text, diag);
+		return localFallback(prompt, input, diag);
 	}
 
 	try {
@@ -424,7 +426,7 @@ export async function extractFactCategories(
 				}
 			}
 			diag.recordNoOutput("host");
-			return localFallback(prompt, text, diag);
+			return localFallback(prompt, input, diag);
 		}
 	} catch (exc) {
 		diag.recordAttempt("host");
@@ -436,7 +438,7 @@ export async function extractFactCategories(
 
 	if (!llmAvailable()) {
 		diag.recordAttempt("local");
-		const heuristic = heuristicExtractFacts(text);
+		const heuristic = heuristicExtractFacts(input);
 		if (heuristic.length > 0) {
 			diag.recordSuccess("local", heuristic.length);
 			diag.recordCall({ succeeded: true });
@@ -465,7 +467,7 @@ export async function extractFactCategories(
 		console.warn(`extractFacts: remote LLM raised: ${safeForLog(exc)}`);
 	}
 
-	return localFallback(prompt, text, diag);
+	return localFallback(prompt, input, diag);
 }
 
 /** Extract legacy flat fact strings from text. */

@@ -3,10 +3,10 @@ import * as path from "node:path";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { AssistantThinkingRenderer } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
-import { AssistantMessageComponent } from "@oh-my-pi/pi-coding-agent/modes/components/assistant-message";
-import { TranscriptContainer } from "@oh-my-pi/pi-coding-agent/modes/components/transcript-container";
-import { clearMermaidCache } from "@oh-my-pi/pi-coding-agent/modes/theme/mermaid-cache";
-import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { AssistantMessageComponent } from "@oh-my-pi/pi-tui/chat/assistant-message";
+import { TranscriptContainer } from "@oh-my-pi/pi-tui/chrome/transcript-container";
+import { clearMermaidCache } from "@oh-my-pi/pi-tui/theme/mermaid-cache";
+import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { ImageProtocol, setTerminalImageProtocol, TERMINAL, Text } from "@oh-my-pi/pi-tui";
 
 const originalImageProtocol = TERMINAL.imageProtocol;
@@ -125,6 +125,59 @@ describe("AssistantMessageComponent transcript lifecycle", () => {
 		expect(flushText).toContain("Newer tail");
 	});
 
+	it("retires frozen prose into history while an append-only wire is still streaming", () => {
+		const component = new AssistantMessageComponent();
+		const transcript = new TranscriptContainer();
+		transcript.addChild(component);
+
+		component.updateContent(createAssistantMessage("Alpha completed paragraph.\n\nPartial tail"), {
+			transient: true,
+		});
+		transcript.renderViewport(80, 20, { now: 0, tick: 0 });
+		component.updateContent(createAssistantMessage("Alpha completed paragraph.\n\nPartial tail grows.\n\nNew tail"), {
+			transient: true,
+		});
+		transcript.renderViewport(80, 20, { now: 1, tick: 1 });
+
+		const batch = transcript.peekFinalizedBatch(80, 0);
+		expect(Bun.stripANSI(batch?.rows.join("\n") ?? "")).toContain("Alpha completed paragraph.");
+	});
+
+	it("withholds mid-stream retirement when the wire may revise streamed text", () => {
+		const thinkingMessage = (thinking: string): AssistantMessage => ({
+			...createAssistantMessage(""),
+			content: [{ type: "thinking", thinking }],
+		});
+		const component = new AssistantMessageComponent();
+		const transcript = new TranscriptContainer();
+		transcript.addChild(component);
+		// `stream-revision "possible"`: bytes may be revised after they stream.
+		component.setMidStreamPublication(false);
+
+		component.updateContent(
+			thinkingMessage("Alpha reasoning paragraph.\n\nBeta reasoning paragraph.\n\nPartial tail"),
+			{ transient: true },
+		);
+		transcript.renderViewport(80, 20, { now: 0, tick: 0 });
+		component.updateContent(
+			thinkingMessage(
+				"Alpha reasoning paragraph.\n\nBeta reasoning paragraph.\n\nPartial tail keeps growing.\n\nNewer tail",
+			),
+			{ transient: true },
+		);
+		transcript.renderViewport(80, 20, { now: 1, tick: 1 });
+
+		// Nothing publishes under pressure: a revision could not be retracted from history.
+		expect(component.getTranscriptStableRows()).toHaveLength(0);
+		expect(transcript.peekFinalizedBatch(80, 0)).toBeUndefined();
+
+		// Withholding costs reachability only — finalization still retires the whole block.
+		component.markTranscriptBlockFinalized();
+		const flushText = Bun.stripANSI(transcript.peekFlushBatch(80)?.rows.join("\n") ?? "");
+		expect(flushText).toContain("Alpha reasoning paragraph.");
+		expect(flushText).toContain("Newer tail");
+	});
+
 	it("appends a late cache-miss marker after assistant output", () => {
 		const component = new AssistantMessageComponent();
 		component.updateContent(
@@ -159,9 +212,9 @@ describe("AssistantMessageComponent mermaid markdown", () => {
 	});
 
 	it("aligns box borders for CJK labels in display columns", () => {
-		// Defends the first-party vendored Mermaid ASCII renderer's CJK/East-Asian
-		// display-width handling (packages/utils/src/vendor/mermaid-ascii): Hangul is 2
-		// terminal columns wide, so every row of a single-node diagram must
+		// Defends the native Mermaid ASCII renderer's CJK/East-Asian display-width
+		// handling: Hangul is 2 terminal columns wide, so every row of a single-node
+		// diagram must
 		// measure the same display width or the right border drifts.
 		const rendered = renderAssistantMessage("```mermaid\nflowchart TD\n  A[수집 스케줄러]\n```");
 		const displayCols = (line: string): number => {

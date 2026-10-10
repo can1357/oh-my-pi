@@ -2,7 +2,13 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { applyDirenvPreflight, executeBash } from "@oh-my-pi/pi-coding-agent/exec/bash-executor";
-import { findEnvrc, loadDirenvEnv, parseDirenvExport } from "@oh-my-pi/pi-coding-agent/exec/direnv";
+import {
+	cleanSpawnEnvForTests,
+	clearDirenvCachesForTests,
+	findEnvrc,
+	loadDirenvEnv,
+	parseDirenvExport,
+} from "@oh-my-pi/pi-coding-agent/exec/direnv";
 import { $which, TempDir } from "@oh-my-pi/pi-utils";
 
 /** Real-direnv cases need the binary on PATH; skip cleanly when it's absent so
@@ -18,6 +24,7 @@ function tmp(): string {
 
 afterEach(async () => {
 	for (const dir of tmpDirs.splice(0)) await dir.remove();
+	clearDirenvCachesForTests();
 });
 
 /** Explicitly `direnv allow` an `.envrc` (against the test-isolated HOME/XDG
@@ -59,6 +66,25 @@ describe("findEnvrc", () => {
 		await fs.mkdir(nested, { recursive: true });
 
 		expect(await findEnvrc(nested)).toBeNull();
+	});
+});
+
+describe("cleanSpawnEnv versioning", () => {
+	it("picks up Bun.env mutations after the first cached call", () => {
+		const marker = `OMP_DIRENV_TEST_${process.pid}`;
+		delete Bun.env[marker];
+		clearDirenvCachesForTests();
+		expect(cleanSpawnEnvForTests()[marker]).toBeUndefined();
+		// Deferred MCP discovery mutates Bun.env mid-process (sdk.ts sets
+		// EXA_API_KEY after the session is usable); a permanently cached
+		// baseline would spawn direnv with stale values forever.
+		Bun.env[marker] = "v1";
+		try {
+			expect(cleanSpawnEnvForTests()[marker]).toBe("v1");
+		} finally {
+			delete Bun.env[marker];
+			clearDirenvCachesForTests();
+		}
 	});
 });
 
@@ -138,6 +164,40 @@ describe.skipIf(!hasDirenv)("loadDirenvEnv (real direnv, allow-list honored)", (
 		expect(await loadDirenvEnv(tmp())).toBeNull();
 	});
 
+	it("drops a warm export when the .envrc is denied", async () => {
+		const root = tmp();
+		await Bun.write(path.join(root, ".envrc"), "export DIRENV_DENY_TEST=allowed\n");
+		await allowEnvrc(root);
+		expect((await loadDirenvEnv(root))?.set.DIRENV_DENY_TEST).toBe("allowed");
+		const proc = Bun.spawn(["direnv", "deny"], {
+			cwd: root,
+			env: cleanSpawnEnvForTests(),
+			stdout: "ignore",
+			stderr: "ignore",
+		});
+		expect(await proc.exited).toBe(0);
+		expect(await loadDirenvEnv(root)).toBeNull();
+		expect(await loadDirenvEnv(root)).toBeNull();
+		await allowEnvrc(root);
+		expect((await loadDirenvEnv(root))?.set.DIRENV_DENY_TEST).toBe("allowed");
+	});
+
+	it("restarts from a clean baseline when the OMP process environment changes", async () => {
+		const root = tmp();
+		await Bun.write(path.join(root, ".envrc"), "export PI_DIRENV_CHILD_TEST=$PI_DIRENV_PARENT_TEST\n");
+		await allowEnvrc(root);
+		const saved = Bun.env.PI_DIRENV_PARENT_TEST;
+		Bun.env.PI_DIRENV_PARENT_TEST = "first";
+		try {
+			expect((await loadDirenvEnv(root))?.set.PI_DIRENV_CHILD_TEST).toBe("first");
+			Bun.env.PI_DIRENV_PARENT_TEST = "second";
+			expect((await loadDirenvEnv(root))?.set.PI_DIRENV_CHILD_TEST).toBe("second");
+		} finally {
+			if (saved === undefined) delete Bun.env.PI_DIRENV_PARENT_TEST;
+			else Bun.env.PI_DIRENV_PARENT_TEST = saved;
+		}
+	});
+
 	it("re-exports when the .envrc content changes (no stale cache)", async () => {
 		// direnv's allow entry is content-hashed, so each rewrite is re-allowed —
 		// mirroring what a user does after editing their own .envrc.
@@ -151,23 +211,98 @@ describe.skipIf(!hasDirenv)("loadDirenvEnv (real direnv, allow-list honored)", (
 		expect((await loadDirenvEnv(root))?.set.DIRENV_CACHE_TEST).toBe("two");
 	});
 
-	it("always re-invokes direnv so a changed watched file re-exports even when .envrc text is unchanged", async () => {
-		// direnv's own `watch_file` invalidation — not a content hash of the
-		// `.envrc` — is the freshness authority. The `.envrc` bytes never change
-		// here; only the watched file's contents do. A content-hash early-return
-		// (the old behavior) would serve the stale first value; always running
-		// `direnv export json` picks up the new one.
+	it("reuses a warm export but refreshes after a same-second watched file change", async () => {
 		const root = tmp();
-		await Bun.write(path.join(root, "watched.env"), "one\n");
+		const countFile = path.join(root, "runs");
+		const watched = path.join(root, "watched.env");
+		const second = Math.floor(Date.now() / 1000) - 10;
+		await Bun.write(watched, "one\n");
+		await fs.utimes(watched, second + 0.1, second + 0.1);
 		await Bun.write(
 			path.join(root, ".envrc"),
-			'watch_file watched.env\nexport DIRENV_WATCH_TEST="$(cat watched.env)"\n',
+			'watch_file watched.env\nprintf "x" >> runs\nexport DIRENV_WATCH_TEST="$(cat watched.env)"\n',
 		);
 		await allowEnvrc(root);
 		expect((await loadDirenvEnv(root))?.set.DIRENV_WATCH_TEST).toBe("one");
+		expect((await loadDirenvEnv(root))?.set.DIRENV_WATCH_TEST).toBe("one");
+		expect(await Bun.file(countFile).text()).toBe("x");
 
-		await Bun.write(path.join(root, "watched.env"), "two\n");
+		await Bun.write(watched, "two\n");
+		await fs.utimes(watched, second + 0.2, second + 0.2);
 		expect((await loadDirenvEnv(root))?.set.DIRENV_WATCH_TEST).toBe("two");
+		expect((await loadDirenvEnv(root))?.set.DIRENV_WATCH_TEST).toBe("two");
+		expect(await Bun.file(countFile).text()).toBe("xx");
+	});
+
+	it("refreshes when a missing watched file appears or an existing one disappears", async () => {
+		const root = tmp();
+		const watched = path.join(root, "optional.env");
+		await Bun.write(
+			path.join(root, ".envrc"),
+			'watch_file optional.env\nif [[ -f optional.env ]]; then\nexport PI_DIRENV_OPTIONAL="$(cat optional.env)"\nelse\nexport PI_DIRENV_OPTIONAL=missing\nfi\nprintf "x" >> runs\n',
+		);
+		await allowEnvrc(root);
+		expect((await loadDirenvEnv(root))?.set.PI_DIRENV_OPTIONAL).toBe("missing");
+		expect((await loadDirenvEnv(root))?.set.PI_DIRENV_OPTIONAL).toBe("missing");
+		expect(await Bun.file(path.join(root, "runs")).text()).toBe("x");
+
+		await Bun.write(watched, "created\n");
+		expect((await loadDirenvEnv(root))?.set.PI_DIRENV_OPTIONAL).toBe("created");
+
+		await fs.unlink(watched);
+		expect((await loadDirenvEnv(root))?.set.PI_DIRENV_OPTIONAL).toBe("missing");
+		expect(await Bun.file(path.join(root, "runs")).text()).toBe("xxx");
+	});
+
+	it("keeps independent warm environments for different directories", async () => {
+		const a = tmp();
+		const b = tmp();
+		await Bun.write(
+			path.join(a, ".envrc"),
+			'export PI_CACHE_PROJECT=a PI_CACHE_ONLY_A=present\nprintf "x" >> runs\n',
+		);
+		await Bun.write(path.join(b, ".envrc"), 'export PI_CACHE_PROJECT=b\nprintf "x" >> runs\n');
+		await allowEnvrc(a);
+		await allowEnvrc(b);
+		expect((await loadDirenvEnv(a))?.set.PI_CACHE_PROJECT).toBe("a");
+		const second = await loadDirenvEnv(b);
+		expect(second?.set.PI_CACHE_PROJECT).toBe("b");
+		expect(second?.set.PI_CACHE_ONLY_A).toBeUndefined();
+		expect((await loadDirenvEnv(a))?.set.PI_CACHE_PROJECT).toBe("a");
+		expect(await Bun.file(path.join(a, "runs")).text()).toBe("x");
+		expect(await Bun.file(path.join(b, "runs")).text()).toBe("x");
+	});
+
+	it("recomputes refreshed overrides and unsets relative to the original baseline", async () => {
+		const root = tmp();
+		const mode = path.join(root, "mode");
+		const restored = Bun.env.PI_CACHE_RESTORED;
+		const removed = Bun.env.PI_CACHE_REMOVED;
+		Bun.env.PI_CACHE_RESTORED = "baseline";
+		Bun.env.PI_CACHE_REMOVED = "baseline";
+		try {
+			await Bun.write(mode, "first\n");
+			await Bun.write(
+				path.join(root, ".envrc"),
+				'watch_file mode\nif [[ "$(cat mode)" == first ]]; then\nexport PI_CACHE_RESTORED=override\nelse\nunset PI_CACHE_REMOVED\nfi\n',
+			);
+			await allowEnvrc(root);
+			expect((await loadDirenvEnv(root))?.set.PI_CACHE_RESTORED).toBe("override");
+			await Bun.write(mode, "second\n");
+			const refreshed = await loadDirenvEnv(root);
+			expect(refreshed).not.toBeNull();
+			expect(refreshed?.set.PI_CACHE_RESTORED).toBeUndefined();
+			expect(refreshed?.unset).not.toContain("PI_CACHE_RESTORED");
+			expect(refreshed?.unset).toContain("PI_CACHE_REMOVED");
+			const warm = await loadDirenvEnv(root);
+			expect(warm?.set.PI_CACHE_RESTORED).toBeUndefined();
+			expect(warm?.unset).toContain("PI_CACHE_REMOVED");
+		} finally {
+			if (restored === undefined) delete Bun.env.PI_CACHE_RESTORED;
+			else Bun.env.PI_CACHE_RESTORED = restored;
+			if (removed === undefined) delete Bun.env.PI_CACHE_REMOVED;
+			else Bun.env.PI_CACHE_REMOVED = removed;
+		}
 	});
 });
 

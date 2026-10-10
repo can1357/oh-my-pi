@@ -67,8 +67,8 @@ If omitted, it resolves:
 
 - `cwd`: `getProjectDir()`
 - `agentDir`: `~/.omp/agent` (via `getAgentDir()`)
-- `authStorage`: `discoverAuthStorage(agentDir)`
-- `modelRegistry`: `new ModelRegistry(authStorage)` + background `refreshInBackground()` when the registry is not provided
+- `authStorage`: `discoverAuthStorage(agentDir, { settings, cwd })`
+- `modelRegistry`: a `ModelRegistry` using that auth store, `<agentDir>/models.yml`, effective settings, and the agent-directory model cache; background `refreshInBackground()` when the registry is not provided
 - `settings`: `await Settings.init({ cwd, agentDir })`
 - `sessionManager`: `SessionManager.create(cwd, SessionManager.getDefaultSessionDir(cwd, agentDir))` (file-backed)
 - skills/rules/context files/prompt templates/slash commands/extensions/custom TS commands
@@ -191,15 +191,16 @@ If restore fails, `modelFallbackMessage` explains fallback.
 
 ### Auth priority
 
-`AuthStorage.getApiKey(...)` resolves in this order:
+`AuthStorage.keys.get(...)` resolves in this order:
 
-1. runtime override (`setRuntimeApiKey`, used by CLI `--api-key`)
+1. runtime override (`keys.setRuntime`, used by CLI `--api-key`)
 2. config-sourced API key override (`models.yml` provider `apiKey`)
 3. stored OAuth credential, including refresh when needed
 4. API key persisted by a successful `/login`
 5. provider environment variables
 6. other stored API-key credential in `agent.db` / broker-backed storage
-7. custom-provider resolver fallback
+
+Configured values are resolved asynchronously through the registry-installed resolver; catalog construction does not execute credential commands. `ModelRegistry.getProviderHeaders(provider)` and `resolveModelHeaders(model, signal?)` return promises. For direct provider requests, await the latter instead of reading config-backed values from `model.headers`. The AI client's `stream()` and `streamSimple()` materialize `model.resolveHeaders` automatically for each request attempt, including authentication retries.
 
 ## Event subscription model
 
@@ -233,12 +234,22 @@ const unsubscribe = session.subscribe((event) => {
 - `irc_message`
 - `notice`
 - `goal_updated`
+- `queue_update` (displayable `steering` and `followUp` string-array snapshots)
+- `cache_warming_start` / `cache_warming_end`
+- `config_warnings_changed`
+- `advisor_cost_changed` / `advisor_yielded`
 
 `agent_end` includes `messages`, optional telemetry fields, and
 `isTerminal?: boolean`. When `isTerminal` is `false`, maintenance or async
 delivery will resume the session before its true final settle. Subscribers that
 use `agent_end` as a completion signal MUST wait for `isTerminal !== false`.
 Treat an absent field as terminal for compatibility with older runtimes.
+
+`yielded?: boolean` distinguishes an agent that finished its work from one
+continuing through retry, compaction, or stop-time reminders.
+`awaitingAsyncWork?: boolean` marks a non-terminal end whose only possible wake
+is a background-job result; that wake is not guaranteed if the job is cancelled
+or its delivery is suppressed.
 
 ## Prompt lifecycle
 
@@ -258,13 +269,13 @@ Behavior:
 
 Related APIs:
 
-- `sendUserMessage(content, { deliverAs? })`
-- `steer(text, images?)`
-- `followUp(text, images?)`
+- `sendUserMessage(content, { deliverAs?, attribution? })`
+- `steer(text, images?, { attribution? })`
+- `followUp(text, images?, { synthetic?, attribution? })`
 - `sendCustomMessage({ customType, content, ... }, { deliverAs?, triggerTurn? })`
 - `abort()`
 
-`deliverAs: "aside"` (both APIs) delivers at the next agent step boundary without interrupting the current tool batch, instead of steering (which skips remaining tools) or waiting for the run to finish. When the session is idle both start a turn instead (in plan mode the custom message is folded into context without a turn).
+`deliverAs: "aside"` (both APIs) delivers at the next agent step boundary without interrupting the current tool batch, instead of steering (which skips remaining tools) or waiting for the run to finish. The one exception is a running interruptible `wait` or `vibe_wait`, which an aside ends so the message is not delayed behind it. When the session is idle both start a turn instead (in plan mode the custom message is folded into context without a turn).
 
 ## `AgentSession` lifecycle and disposal
 
@@ -299,6 +310,9 @@ Only after work capable of appending session entries has settled does disposal c
 - Set `restrictToolNames: true` to limit the session to the names in
   `toolNames`. Restricted sessions disable ambient MCP, extensions, custom
   commands, and LSP by default.
+- Restricted children retain hooks/providers from the parent's
+  `preloadedPreparedExtensions`, rebound to their own session. Contributed tools
+  cannot extend or replace the restricted tool set, even when registered later.
 - In a restricted session, SDK-supplied `customTools` are excluded unless
   `allowRestrictedCustomTools: true` and their names also appear in
   `toolNames`.
@@ -320,8 +334,13 @@ const { session } = await createAgentSession({
   inline factories still load
 - `preloadedExtensions`: reuse an extension set loaded early by the same
   session-owning process. Never pass loaded extension instances from a parent
-  to another session; use `preloadedExtensionPaths` so each session gets its
+  to another session; use `preloadedPreparedExtensions` so each session gets its
   own `ExtensionAPI` binding.
+- `preloadedPreparedExtensions`: already-imported factories to rebind, including
+  in restricted children; does not reevaluate the module graph.
+- `extensionRoots`: a live owner-root provider for child discovery and revival.
+  Its explicit roots, discovery mode, and configured roots take precedence over
+  the child's local extension-loading inputs.
 
 ### Runtime tool set changes
 
@@ -338,7 +357,7 @@ System prompt is rebuilt to reflect active tool changes.
 
 Use these when you want partial control without recreating internal discovery logic:
 
-- `discoverAuthStorage(agentDir?)`
+- `discoverAuthStorage(agentDir?, options?)` (effective settings/cwd and credential-discovery options)
 - `discoverExtensions(cwd?)`
 - `discoverSkills(cwd?, _agentDir?, settings?)`
 - `discoverContextFiles(cwd?, _agentDir?, disabledExtensions?)`
@@ -347,6 +366,22 @@ Use these when you want partial control without recreating internal discovery lo
 - `discoverCustomTSCommands(cwd?, agentDir?)`
 - `discoverMCPServers(cwd?)`
 - `buildSystemPrompt(options?)`
+
+## Host integration options
+
+- `hasUI` defaults to `false`; enable it only for hosts with interactive UI.
+- `interactivePrompts` defaults to `hasUI`. A non-TUI host that can answer
+  synchronous prompts can set it to `true` to enable `ask` without enabling
+  UI-only startup behavior such as LSP warmup.
+- `telemetry: {}` enables agent-loop OpenTelemetry spans. Without a registered
+  host OpenTelemetry SDK, the API uses a no-op tracer.
+- `additionalDirectories` adds absolute or cwd-relative workspace roots.
+- `providerSessionId` can reuse provider-side session identity while session
+  persistence stays isolated; `providerPromptCacheKey` sets a separate cache key.
+- `systemPromptTemplate`, `customSystemPrompt`, `appendSystemPrompt`, and
+  `systemPrompt` control different prompt layers. See
+  [System prompt customization](./system-prompt-customization.md) for their
+  replacement and discovery contracts.
 
 ## Subagent-oriented options
 
@@ -357,8 +392,11 @@ For SDK consumers building orchestrators (similar to task executor flow):
 - `requireYieldTool`: forces `yield` tool inclusion
 - `taskDepth`: recursion-depth context for nested task sessions
 - `parentTaskPrefix`: artifact naming prefix for nested task outputs
+- `bindProcessState`: `false` for helper sessions spawned on a host session's behalf (see below)
 
 These are optional for normal single-agent embedding.
+
+Process-wide state that follows one settings instance — setting effects (theme, request limits, the fallback credential-redaction switch) and discovery provider toggles — is held by every top-level session on its own `settings` until it is disposed. With several live sessions the newest holder drives it, and disposing a session hands it back to the previous holder. Sessions with `parentTaskPrefix`/`taskDepth` or `bindProcessState: false` never take it. Independently of the holder, each session's own provider requests redact credential-shaped tokens per that session's `secrets.enabled`.
 
 ## `createAgentSession()` return value
 
@@ -375,23 +413,27 @@ type CreateAgentSessionResult = {
     fileTypes: string[];
     error?: string;
   }>;
+  startBackgroundModelDiscovery?: () => Promise<void>;
   eventBus: EventBus;
+  subagentEventBus?: EventBus;
 };
 ```
 
 Use `setToolUIContext(...)` only if your embedder provides UI capabilities that tools/extensions should call into.
 
+`subagentEventBus` carries `task:subagent:*` observability frames across the session tree. UI hosts can call `startBackgroundModelDiscovery()` after their first paint to start cache-aware online model discovery.
+
 ## Startup performance
 
 `createAgentSession()` runs two background optimizations to overlap I/O with the rest of session setup:
 
-- **Model-host preconnect.** As soon as the model is resolved, the SDK fires a best-effort `fetch.preconnect(model.baseUrl)` so DNS + TCP + TLS + HTTP/2 to the provider's host happens in parallel with extension/skill load, tool registry build, and system-prompt assembly. The first real `fetch(...)` then reuses the warm connection, saving 100–300 ms on transcontinental hops (e.g. residential IP → `api.anthropic.com`). Implementation lives in `preconnectModelHost()` in `packages/coding-agent/src/sdk.ts`. If `fetch.preconnect` is unavailable (non-Bun runtime) or the call throws, the optimization is silently skipped — never a hard dependency. Applies to every mode (interactive, print, RPC, ACP).
+- **Model-host preconnect.** As soon as the model is resolved, the SDK fires a best-effort `fetch.preconnect(model.baseUrl)` so DNS + TCP + TLS + HTTP/2 to the provider's host happens in parallel with extension/skill load, tool registry build, and system-prompt assembly. The first real `fetch(...)` then reuses the warm connection, avoiding a fresh connection handshake when the runtime can reuse it. Implementation lives in `preconnectModelHost()` in `packages/coding-agent/src/sdk.ts`. If `fetch.preconnect` is unavailable (non-Bun runtime) or the call throws, the optimization is silently skipped — never a hard dependency. Applies to every mode (interactive, print, RPC, ACP).
 - **Conditional LSP warmup.** Startup LSP servers (those returned by `discoverStartupLspServers(cwd)`) are only warmed when **all** of these hold:
-  - `enableLsp !== false` on the session options, **and**
+  - LSP integration is enabled on the session options and `lsp.enabled` is `true`, **and**
   - `options.hasUI === true` (interactive TUI), **and**
   - the `lsp.lazy` setting is disabled (it defaults to `true`).
 
-  With `lsp.lazy` enabled — the default — no language servers are launched at startup at all; each server cold-starts on first use, i.e. when the agent invokes the `lsp` tool or an edit/write touches a file whose extension matches the server's `fileTypes`. Print / script / RPC / ACP invocations (`hasUI=false`) skip the warmup regardless of the setting: they don't render the warmup status indicator and typically finish before the language servers would stabilize, so warming them just spends CPU parsing big `initialize` responses concurrently with the LLM stream consumer and jitters perceived latency. Tools that actually need an LSP server still spin one up on demand through `getOrCreateClient()` — only the _startup_ warmup is skipped. The returned `lspServers` field in `CreateAgentSessionResult` is still populated for UI sessions in lazy mode — recognized servers are discovered (no processes spawned) and reported with status `"available"` so the welcome screen and `/status` can list them; it is `undefined` only when `enableLsp === false` or `hasUI === false`.
+  With `lsp.lazy` enabled — the default — no language servers are launched at startup at all; each server cold-starts on first use, i.e. when the agent invokes the `lsp` tool or an edit/write touches a file whose extension matches the server's `fileTypes`. Print / script / RPC / ACP invocations (`hasUI=false`) skip the warmup regardless of the setting: they don't render the warmup status indicator and typically finish before the language servers would stabilize, so warming them just spends CPU parsing big `initialize` responses concurrently with the LLM stream consumer and jitters perceived latency. Tools that actually need an LSP server still spin one up on demand through `getOrCreateClient()` — only the _startup_ warmup is skipped. The returned `lspServers` field in `CreateAgentSessionResult` is still populated for UI sessions in lazy mode — recognized servers are discovered (no processes spawned) and reported with status `"available"` so the welcome screen and `/status` can list them; it is `undefined` when LSP integration or `lsp.enabled` is disabled, or `hasUI` is false. Turning `lsp.lazy` off mid-session (via `/settings` or any `settings.set()`/reload) runs the same warmup once for those servers, updating their status in place and emitting the usual `lsp:startup` event.
 
 ## Minimal controlled embed example
 
@@ -419,6 +461,7 @@ const { session } = await createAgentSession({
   settings,
   sessionManager: SessionManager.inMemory(),
   toolNames: ["read", "grep", "glob", "edit", "write"],
+  restrictToolNames: true,
   enableMCP: false,
   enableLsp: true,
 });

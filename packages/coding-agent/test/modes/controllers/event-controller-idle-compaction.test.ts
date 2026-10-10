@@ -3,17 +3,24 @@ import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { resetSettingsForTest, Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { GoalModeState } from "@oh-my-pi/pi-coding-agent/goals/state";
 import { EventController } from "@oh-my-pi/pi-coding-agent/modes/controllers/event-controller";
-import { SelectorController } from "@oh-my-pi/pi-coding-agent/modes/controllers/selector-controller";
-import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import type { Component } from "@oh-my-pi/pi-tui";
+import { RecapNotice } from "@oh-my-pi/pi-tui/chat/recap-notice";
+import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { createInteractiveModeContext } from "../../helpers/interactive-mode-context";
+
+import { cfgCompactionIdleEnabled } from "@oh-my-pi/pi-coding-agent/session/context-settings";
+import { cfgRecapEnabled, cfgRecapIdleSeconds } from "@oh-my-pi/pi-coding-agent/modes/settings";
 
 async function flushMicrotasks(): Promise<void> {
 	for (let i = 0; i < 10; i++) {
 		await Promise.resolve();
 	}
 }
+
+/** `present` stand-in for spies: the controller only hands content over. */
+function recordPresented(_content: Component | readonly Component[]): void {}
 
 function createAssistantMessage(): AssistantMessage {
 	return {
@@ -37,14 +44,13 @@ function createAssistantMessage(): AssistantMessage {
 
 function createContext(
 	options: {
-		editorText?: string;
 		goalObjective?: string;
 		isCompacting?: boolean;
 		isStreaming?: boolean;
 		runIdleCompaction?: AgentSession["runIdleCompaction"];
 		runEphemeralTurn?: AgentSession["runEphemeralTurn"];
+		present?: InteractiveModeContext["present"];
 		sessionName?: string;
-		showStatus?: InteractiveModeContext["showStatus"];
 		todoPhases?: InteractiveModeContext["todoPhases"];
 	} = {},
 ) {
@@ -67,10 +73,9 @@ function createContext(
 			}
 		: undefined;
 	return createInteractiveModeContext({
-		editor: { getText: () => options.editorText ?? "" },
 		sessionManager: { getSessionName: () => options.sessionName },
 		todoPhases: options.todoPhases ?? [],
-		...(options.showStatus ? { showStatus: options.showStatus } : {}),
+		...(options.present ? { present: options.present } : {}),
 		session: {
 			isCompacting: options.isCompacting ?? false,
 			isStreaming: options.isStreaming ?? false,
@@ -129,15 +134,47 @@ describe("EventController idle compaction teardown", () => {
 		const runIdleCompaction = vi.fn();
 		const context = createContext({ runIdleCompaction });
 		const controller = new EventController(context);
-		Object.defineProperty(context, "eventController", { value: controller });
-		const selector = new SelectorController(context);
 		await controller.handleEvent({ type: "agent_end", messages: [createAssistantMessage()] });
 
-		settings.set("compaction.idleEnabled", true);
-		selector.handleSettingChange("compaction.idleEnabled", true);
+		cfgCompactionIdleEnabled.set(settings, true);
+		controller.refreshIdleCompactionTimer();
 		vi.advanceTimersByTime(60_000);
 
 		expect(runIdleCompaction).toHaveBeenCalledTimes(1);
+		controller.dispose();
+	});
+
+	it("arms the idle recap when enabled mid-idle and never re-delivers a shown recap", async () => {
+		resetSettingsForTest();
+		await Settings.init({
+			inMemory: true,
+			overrides: {
+				"compaction.idleEnabled": false,
+				"completion.notify": "off",
+				"recap.enabled": false,
+				"recap.idleSeconds": 60,
+			},
+		});
+		const runEphemeralTurn = vi.fn(async () => ({
+			replyText: "Recap body.",
+			assistantMessage: createAssistantMessage(),
+		}));
+		const context = createContext({ runEphemeralTurn });
+		const controller = new EventController(context);
+		await controller.handleEvent({ type: "agent_end", messages: [createAssistantMessage()] });
+
+		cfgRecapEnabled.override(settings, true);
+		controller.refreshIdleRecapTimer();
+		vi.advanceTimersByTime(60_000);
+		await flushMicrotasks();
+		expect(runEphemeralTurn).toHaveBeenCalledTimes(1);
+
+		// Same idle window: a later setting change must not schedule a second recap.
+		cfgRecapIdleSeconds.override(settings, 90);
+		controller.refreshIdleRecapTimer();
+		vi.advanceTimersByTime(90_000);
+		await flushMicrotasks();
+		expect(runEphemeralTurn).toHaveBeenCalledTimes(1);
 		controller.dispose();
 	});
 
@@ -150,7 +187,7 @@ describe("EventController idle compaction teardown", () => {
 				"completion.notify": "off",
 			},
 		});
-		const showStatus = vi.fn((_: string, _options?: { dim?: boolean }) => {});
+		const present = vi.fn(recordPresented);
 		let capturedPrompt = "";
 		const runEphemeralTurn = vi.fn(async (args: { promptText: string; signal?: AbortSignal }) => {
 			capturedPrompt = args.promptText;
@@ -161,7 +198,7 @@ describe("EventController idle compaction teardown", () => {
 		});
 		const context = createContext({
 			sessionName: "Fix login flow",
-			showStatus,
+			present,
 			runEphemeralTurn,
 			todoPhases: [{ name: "Work", tasks: [{ content: "Wire focused tests", status: "pending" }] }],
 		});
@@ -179,64 +216,13 @@ describe("EventController idle compaction teardown", () => {
 		expect(capturedPrompt).toContain("Fix login flow");
 		expect(capturedPrompt).toContain("Wire focused tests");
 
-		expect(showStatus).toHaveBeenCalledTimes(1);
-		const [message, options] = showStatus.mock.calls[0] ?? [];
-		expect(Bun.stripANSI(message ?? "")).toBe(
+		const notice = present.mock.calls
+			.map(([content]) => content)
+			.find((content): content is RecapNotice => content instanceof RecapNotice);
+		expect(notice?.render(200).map(line => Bun.stripANSI(line).trim())).toEqual([
+			"",
 			"※ recap: Reworking the login flow; auth suite passes. Next: wire the focused token-refresh test.",
-		);
-		expect(options).toEqual({ dim: false });
-		controller.dispose();
-	});
-
-	it("keeps the idle recap silent when disabled", async () => {
-		resetSettingsForTest();
-		await Settings.init({
-			inMemory: true,
-			overrides: {
-				"compaction.idleEnabled": false,
-				"completion.notify": "off",
-				"recap.enabled": false,
-				"recap.idleSeconds": 1,
-			},
-		});
-		const showStatus = vi.fn((_: string, _options?: { dim?: boolean }) => {});
-		const context = createContext({
-			sessionName: "Fix login flow",
-			showStatus,
-			todoPhases: [{ name: "Work", tasks: [{ content: "Wire focused tests", status: "pending" }] }],
-		});
-
-		const controller = new EventController(context);
-		await controller.handleEvent({ type: "agent_end", messages: [createAssistantMessage()] });
-		vi.advanceTimersByTime(1_000);
-
-		expect(showStatus).not.toHaveBeenCalled();
-		controller.dispose();
-	});
-
-	it("keeps the idle recap silent while the editor has a draft", async () => {
-		resetSettingsForTest();
-		await Settings.init({
-			inMemory: true,
-			overrides: {
-				"compaction.idleEnabled": false,
-				"completion.notify": "off",
-				"recap.idleSeconds": 1,
-			},
-		});
-		const showStatus = vi.fn((_: string, _options?: { dim?: boolean }) => {});
-		const context = createContext({
-			editorText: "draft",
-			sessionName: "Fix login flow",
-			showStatus,
-			todoPhases: [{ name: "Work", tasks: [{ content: "Wire focused tests", status: "pending" }] }],
-		});
-
-		const controller = new EventController(context);
-		await controller.handleEvent({ type: "agent_end", messages: [createAssistantMessage()] });
-		vi.advanceTimersByTime(1_000);
-
-		expect(showStatus).not.toHaveBeenCalled();
+		]);
 		controller.dispose();
 	});
 
@@ -249,14 +235,14 @@ describe("EventController idle compaction teardown", () => {
 				"completion.notify": "off",
 			},
 		});
-		const showStatus = vi.fn((_: string, _options?: { dim?: boolean }) => {});
 		const { promise, resolve } = Promise.withResolvers<{ replyText: string; assistantMessage: AssistantMessage }>();
 		let receivedSignal: AbortSignal | undefined;
 		const runEphemeralTurn = vi.fn((args: { promptText: string; signal?: AbortSignal }) => {
 			receivedSignal = args.signal;
 			return promise;
 		});
-		const context = createContext({ sessionName: "Fix login flow", showStatus, runEphemeralTurn });
+		const present = vi.fn(recordPresented);
+		const context = createContext({ sessionName: "Fix login flow", present, runEphemeralTurn });
 
 		const controller = new EventController(context);
 		await controller.handleEvent({ type: "agent_end", messages: [createAssistantMessage()] });
@@ -272,6 +258,6 @@ describe("EventController idle compaction teardown", () => {
 		// A reply that lands after cancellation must not paint a stale recap.
 		resolve({ replyText: "stale recap", assistantMessage: createAssistantMessage() });
 		await flushMicrotasks();
-		expect(showStatus).not.toHaveBeenCalled();
+		expect(present.mock.calls.some(([content]) => content instanceof RecapNotice)).toBe(false);
 	});
 });

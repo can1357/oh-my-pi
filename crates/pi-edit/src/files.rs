@@ -6,19 +6,25 @@
 //! for the lifetime of one preview/apply pass. Engines never touch
 //! `std::fs` directly; the session clears the cache before `apply` so a final
 //! stage always sees fresh bytes.
+//!
+//! [`FileCache`] also owns the host's internal-URL answers: a URL target
+//! missing from that table is recorded (see [`FileCache::take_unresolved`])
+//! and fails with [`EditError::UnresolvedUrl`] until the host
+//! [`FileCache::provide`]s it.
 
 use std::{
 	collections::HashMap,
+	fs::FileType,
 	path::{Path, PathBuf},
 	sync::Arc,
 	time::SystemTime,
 };
 
 use crate::{
-	engine::Resolved,
+	engine::{FileOp, Resolved},
 	error::{EditError, EditResult},
 	notebook,
-	path_policy::{PathPolicy, canonical_key},
+	path_policy::{PathPolicy, UrlResolution, canonical_key},
 	text::{LineEnding, detect_line_ending, normalize_to_lf, restore_line_endings, strip_bom},
 };
 
@@ -71,7 +77,8 @@ pub trait FileSource {
 
 	/// Resolve an authored path without reading it. When `must_exist` and
 	/// the resolved file is missing, unique-suffix recovery may substitute a
-	/// different display/absolute pair.
+	/// different display/absolute pair (never for internal URLs, which fail
+	/// with [`EditError::UnresolvedUrl`] until the host answers them).
 	fn resolve(&mut self, authored: &str, must_exist: bool) -> EditResult<Resolved>;
 
 	/// Whether `absolute` currently exists (file or directory).
@@ -84,19 +91,50 @@ pub trait FileSource {
 	/// Read an already-resolved target; `Ok(None)` when it does not exist.
 	fn try_read(&mut self, resolved: &Resolved) -> EditResult<Option<Arc<FileRead>>>;
 
-	/// Drop every cached read.
+	/// Drop every cached read and path resolution. Host URL answers survive.
 	fn clear(&mut self);
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct Stamp {
-	mtime: Option<SystemTime>,
-	len:   u64,
+	mtime:        Option<SystemTime>,
+	len:          u64,
+	special_kind: Option<&'static str>,
+}
+
+/// Kind of a non-regular, non-directory file, or `None`. Reading one can block
+/// forever (a FIFO, a terminal) or never end (`/dev/zero`). `metadata` follows
+/// symlinks, so a link reports its target's kind.
+fn special_file_kind(file_type: FileType) -> Option<&'static str> {
+	if file_type.is_file() || file_type.is_dir() {
+		return None;
+	}
+	#[cfg(unix)]
+	{
+		use std::os::unix::fs::FileTypeExt;
+		if file_type.is_char_device() {
+			return Some("character device");
+		}
+		if file_type.is_block_device() {
+			return Some("block device");
+		}
+		if file_type.is_fifo() {
+			return Some("FIFO");
+		}
+		if file_type.is_socket() {
+			return Some("socket");
+		}
+	}
+	Some("special file")
 }
 
 fn stamp(absolute: &Path) -> Option<Stamp> {
 	let meta = std::fs::metadata(absolute).ok()?;
-	Some(Stamp { mtime: meta.modified().ok(), len: meta.len() })
+	Some(Stamp {
+		mtime:        meta.modified().ok(),
+		len:          meta.len(),
+		special_kind: special_file_kind(meta.file_type()),
+	})
 }
 
 /// Default [`FileSource`] backed by `std::fs`.
@@ -105,17 +143,72 @@ pub struct FileCache {
 	reads:       HashMap<PathBuf, (Stamp, Arc<FileRead>)>,
 	/// Authored path → resolution (so paired hunks share one recovery).
 	resolutions: HashMap<(String, bool), Resolved>,
+	/// Host answers keyed by [`PathPolicy::url_target`].
+	urls:        HashMap<String, UrlResolution>,
+	/// URLs that missed `urls`, deduped in first-seen order.
+	unresolved:  Vec<String>,
 }
 
 impl FileCache {
+	/// Empty cache over `policy`.
 	pub fn new(policy: PathPolicy) -> Self {
-		Self { policy, reads: HashMap::new(), resolutions: HashMap::new() }
+		Self {
+			policy,
+			reads: HashMap::new(),
+			resolutions: HashMap::new(),
+			urls: HashMap::new(),
+			unresolved: Vec::new(),
+		}
+	}
+
+	/// Record the host answer for `url`, dropping cached resolutions and
+	/// reads made for it.
+	pub fn provide(&mut self, url: String, resolution: UrlResolution) {
+		let policy = &self.policy;
+		let names_url = |authored: &str| policy.url_target(authored).as_deref() == Some(url.as_str());
+		self
+			.resolutions
+			.retain(|(authored, _), _| !names_url(authored));
+		self
+			.reads
+			.retain(|_, (_, read)| !names_url(&read.resolved.display));
+		self.unresolved.retain(|missed| *missed != url);
+		self.urls.insert(url, resolution);
+	}
+
+	/// Drain URLs that missed the resolution table since the last call
+	/// (deduped, first-seen order).
+	pub fn take_unresolved(&mut self) -> Vec<String> {
+		std::mem::take(&mut self.unresolved)
+	}
+
+	/// Drop every host URL answer and recorded miss, plus every cached read
+	/// and resolution (some were made from those answers), so URL targets ask
+	/// the host again.
+	pub fn forget_urls(&mut self) {
+		self.clear();
+		self.urls.clear();
+		self.unresolved.clear();
+	}
+
+	/// Plan-mode write guard, judging URL targets by their host answers.
+	///
+	/// # Errors
+	/// [`EditError::Plan`] when plan mode refuses the write.
+	pub fn enforce_write(&self, display: &str, op: FileOp, move_to: Option<&str>) -> EditResult<()> {
+		self.policy.enforce_write(display, op, move_to, &self.urls)
 	}
 
 	fn read_resolved(&mut self, resolved: &Resolved) -> EditResult<Option<Arc<FileRead>>> {
 		let Some(current) = stamp(&resolved.absolute) else {
 			return Ok(None);
 		};
+		if let Some(kind) = current.special_kind {
+			return Err(EditError::apply(format!(
+				"Cannot edit '{}': it is a {kind}, not a regular file or directory.",
+				resolved.display
+			)));
+		}
 		if let Some((cached_stamp, read)) = self.reads.get(&resolved.absolute)
 			&& *cached_stamp == current
 			&& read.resolved.display == resolved.display
@@ -133,7 +226,10 @@ impl FileCache {
 		{
 			return Err(EditError::apply(message));
 		}
-		let raw = String::from_utf8_lossy(&bytes).into_owned();
+		let raw = String::from_utf8(bytes).map_err(|err| EditError::InvalidUtf8 {
+			display:     resolved.display.clone(),
+			valid_up_to: err.utf8_error().valid_up_to(),
+		})?;
 		let is_notebook = notebook::is_notebook_path(&resolved.absolute);
 		let (bom, text) = if is_notebook {
 			let editable = notebook::notebook_to_editable_text(&raw, &resolved.display)
@@ -174,9 +270,15 @@ impl FileSource for FileCache {
 		if let Some(resolved) = self.resolutions.get(&key) {
 			return Ok(resolved.clone());
 		}
-		let mut resolved = self.policy.resolve(authored)?;
+		let resolved = self.policy.resolve(authored, &self.urls);
+		if let Err(EditError::UnresolvedUrl(url)) = &resolved
+			&& !self.unresolved.contains(url)
+		{
+			self.unresolved.push(url.clone());
+		}
+		let mut resolved = resolved?;
 		if must_exist
-			&& !crate::path_policy::is_internal_url(authored)
+			&& !self.policy.is_internal_url(authored)
 			&& stamp(&resolved.absolute).is_none()
 			&& let Some(recovered) = self.policy.recover_missing(authored)
 		{

@@ -1,6 +1,10 @@
 // Provider-wire compat for "opencode-go"; regenerated from the frozen census using deployment contract selectors.
 
 provider "opencode-go" {
+	default-model "kimi-k2.7-code"
+	env "OPENCODE_API_KEY"
+	dynamic-models-authoritative #true
+
 	// The Flash lanes accept images despite their IDs lacking a vision suffix;
 	// verified against the gateway (unguessable pixel-rendered text read back
 	// verbatim). Mirrors the OpenRouter carve-out for deepseek-v4.1-flash.
@@ -73,6 +77,17 @@ provider "opencode-go" {
 			thinking-efforts "minimal" "low" "medium" "high" 
 			thinking-mode "effort"
 		}
+	}
+	// LongCat exposes a reasoning toggle, not selectable effort tiers.
+	// Off uses the gateway's boolean reasoning switch, never a fake lowest tier.
+	models "longcat-2.5-preview-free" {
+		thinking-efforts
+		supports-reasoning-effort #false
+		reasoning-disable-mode "openrouter-enabled-false"
+	}
+	// Space Bunny publishes low through max, without the generic minimal tier.
+	models "space-bunny-free" {
+		thinking-efforts "low" "medium" "high" "xhigh" "max"
 	}
 	// residue: taxonomy ranks and exact globs do not isolate these models.
 	models "glm-5" "glm-5.1" {

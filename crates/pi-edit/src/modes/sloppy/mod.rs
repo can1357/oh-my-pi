@@ -1,5 +1,6 @@
-//! `sloppy` mode: `<SM:EDIT>`/`<SM:FIND>`/`<SM:PUT>` anchored edits with
-//! tolerant matching. Port of `packages/coding-agent/src/edit/sloppy.ts`.
+//! `sloppy` mode: `*** Find` anchors with `*** Replace` replacements or
+//! `*** Insert Before`/`*** Insert After` insertions inside `*** Edit File:`
+//! file sections, with tolerant matching.
 
 pub mod apply;
 pub mod parse;
@@ -68,8 +69,7 @@ impl ModeEngine for SloppyEngine {
 			if !streaming && Self::missing_target(args) {
 				return vec![PreviewFile {
 					error: Some(
-						"Missing file target: start the payload with <SM:EDIT \
-						 path=\"relative/path.ts\">."
+						"Missing file target: start the payload with *** Edit File: relative/path.ts."
 							.to_owned(),
 					),
 					..PreviewFile::default()
@@ -82,9 +82,12 @@ impl ModeEngine for SloppyEngine {
 			.into_iter()
 			.enumerate()
 			.filter_map(|(index, section)| {
+				// Only the last section can still be streaming; the next
+				// `*** Edit File:` header closes every earlier one.
+				let streaming = streaming && index == last;
 				let read = match files.read(&section.path) {
 					Ok(read) => read,
-					Err(_error) if streaming && index == last => return None,
+					Err(_error) if streaming => return None,
 					Err(error) => {
 						return Some(PreviewFile {
 							display: section.path,
@@ -99,12 +102,14 @@ impl ModeEngine for SloppyEngine {
 					notes: &mut notes,
 					store,
 					canonical: &read.canonical,
+					streaming,
 				}) {
 					Ok(after) => {
 						let output =
 							generate_diff_string(&read.text, &after, None, &BlockContextSource {
 								path: Some(&read.resolved.display),
 								lang: None,
+								streaming,
 							});
 						Some(PreviewFile {
 							display: read.resolved.display.clone(),
@@ -114,7 +119,7 @@ impl ModeEngine for SloppyEngine {
 							..PreviewFile::default()
 						})
 					},
-					Err(_) if streaming && index == last => None,
+					Err(_) if streaming => None,
 					Err(error) => Some(PreviewFile {
 						display: read.resolved.display.clone(),
 						error: Some(error.to_string()),
@@ -137,14 +142,16 @@ impl ModeEngine for SloppyEngine {
 		let sections = split_sloppy_sections(input);
 		if sections.is_empty() {
 			return Err(EditError::parse(
-				"Missing file target: start the payload with <SM:EDIT path=\"relative/path.ts\">.",
+				"Missing file target: start the payload with *** Edit File: relative/path.ts.",
 			));
 		}
 		let multi_file = sections.len() > 1;
 		let mut staged = Vec::with_capacity(sections.len());
 		for section in sections {
 			let read = files.read(&section.path).map_err(|error| {
-				if multi_file {
+				// An unresolved internal URL stays typed so the host can
+				// resolve it and retry.
+				if multi_file && !matches!(error, EditError::UnresolvedUrl(_)) {
 					EditError::matched(format!(
 						"[{}]: {error}\nNo files were modified — sections apply atomically.",
 						section.path
@@ -159,6 +166,7 @@ impl ModeEngine for SloppyEngine {
 				notes: &mut notes,
 				store,
 				canonical: &read.canonical,
+				streaming: false,
 			})
 			.map_err(|error| {
 				if multi_file {
@@ -172,8 +180,9 @@ impl ModeEngine for SloppyEngine {
 			})?;
 			let persisted = read.persist(&after)?;
 			let output = generate_diff_string(&read.text, &after, None, &BlockContextSource {
-				path: Some(&read.resolved.display),
-				lang: None,
+				path:      Some(&read.resolved.display),
+				lang:      None,
+				streaming: false,
 			});
 			let mut file = StagedFile::new(
 				read.resolved.display.clone(),

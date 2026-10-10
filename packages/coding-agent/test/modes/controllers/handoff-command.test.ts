@@ -1,7 +1,9 @@
 import { afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
 import { CommandController } from "@oh-my-pi/pi-coding-agent/modes/controllers/command-controller";
-import { getThemeByName, setThemeInstance } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { getThemeByName, setThemeInstance } from "@oh-my-pi/pi-tui/theme";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
+
+const keybindings = { getKeys: () => ["escape"] };
 
 function createContainer() {
 	return {
@@ -60,6 +62,7 @@ describe("/handoff command", () => {
 			},
 			loadingAnimation: undefined,
 			statusContainer,
+			keybindings,
 			chatContainer,
 			ui: { requestRender, requestComponentRender: vi.fn() },
 			editor: { onEscape: originalOnEscape },
@@ -68,6 +71,7 @@ describe("/handoff command", () => {
 			updateEditorTopBorder: vi.fn(),
 			updateEditorBorderColor: vi.fn(),
 			reloadTodos: vi.fn(async () => undefined),
+			flushCompactionQueue: vi.fn(async () => undefined),
 			showStatus: vi.fn(),
 			showWarning: vi.fn(),
 			showError: vi.fn(),
@@ -109,6 +113,7 @@ describe("/handoff command", () => {
 				loadingAnimation = value;
 			},
 			statusContainer,
+			keybindings,
 			ui: { requestRender: vi.fn(), requestComponentRender: vi.fn() },
 			clearTransientSessionUi: vi.fn(() => {
 				loadingAnimation?.stop();
@@ -123,6 +128,7 @@ describe("/handoff command", () => {
 			statusLine: { invalidate: vi.fn() },
 			updateEditorBorderColor: vi.fn(),
 			reloadTodos: vi.fn(async () => undefined),
+			flushCompactionQueue: vi.fn(async () => undefined),
 			present: vi.fn(),
 			showStatus: vi.fn(),
 			showWarning: vi.fn(),
@@ -161,6 +167,7 @@ describe("/handoff command", () => {
 				loadingAnimation = value;
 			},
 			statusContainer,
+			keybindings,
 			ui: { requestRender: vi.fn(), requestComponentRender: vi.fn() },
 			clearTransientSessionUi: vi.fn(() => {
 				loadingAnimation?.stop();
@@ -182,6 +189,7 @@ describe("/handoff command", () => {
 			statusLine: { invalidate: vi.fn() },
 			updateEditorBorderColor: vi.fn(),
 			reloadTodos: vi.fn(async () => undefined),
+			flushCompactionQueue: vi.fn(async () => undefined),
 			present: vi.fn(),
 			showStatus: vi.fn(),
 			showWarning: vi.fn(),
@@ -225,6 +233,7 @@ describe("/handoff command", () => {
 				activeRetryLoader = value;
 			},
 			statusContainer,
+			keybindings,
 			ui: { requestRender: vi.fn(), requestComponentRender: vi.fn() },
 			clearTransientSessionUi: vi.fn(() => {
 				statusContainer.disposeChildren();
@@ -238,6 +247,7 @@ describe("/handoff command", () => {
 			statusLine: { invalidate: vi.fn() },
 			updateEditorBorderColor: vi.fn(),
 			reloadTodos: vi.fn(async () => undefined),
+			flushCompactionQueue: vi.fn(async () => undefined),
 			present: vi.fn(),
 			showStatus: vi.fn(),
 			showWarning: vi.fn(),
@@ -273,10 +283,12 @@ describe("/handoff command", () => {
 			},
 			loadingAnimation: undefined,
 			statusContainer,
+			keybindings,
 			chatContainer: createContainer(),
 			ui: { requestRender: vi.fn(), requestComponentRender: vi.fn() },
 			editor: { onEscape: vi.fn() },
 			showError,
+			flushCompactionQueue: vi.fn(async () => undefined),
 			showStatus: vi.fn(),
 			showWarning: vi.fn(),
 		} as unknown as InteractiveModeContext;
@@ -302,6 +314,7 @@ describe("/handoff command", () => {
 			session: { isStreaming: true, handoff },
 			loadingAnimation: undefined,
 			statusContainer,
+			keybindings,
 			ui: { requestRender: vi.fn(), requestComponentRender: vi.fn() },
 			showWarning,
 			showError: vi.fn(),
@@ -333,6 +346,7 @@ describe("/handoff command", () => {
 			autoCompactionLoader,
 			retryLoader: undefined,
 			statusContainer,
+			keybindings,
 			ui: { requestRender: vi.fn(), requestComponentRender: vi.fn() },
 			showWarning,
 			showError: vi.fn(),

@@ -5,21 +5,28 @@
 //! Port of `packages/coding-agent/src/edit/sloppy.ts` lines 1651–4258.
 
 use std::{
+	borrow::Cow,
 	collections::{BTreeMap, BTreeSet, HashMap, HashSet},
 	path::Path,
 };
 
 use super::{
-	parse::{has_marker_lines, missing_unmarked_lines, operation_payload, parse_operations},
+	parse::{
+		decode_literal_markers, edit_header, has_marker_lines, missing_unmarked_lines,
+		operation_payload, parse_section,
+	},
 	types::{
-		ATOMICITY_NOTICE, Candidate, CandidateResult, LiteralFallback, MAX_CANDIDATES,
+		ATOMICITY_NOTICE, Candidate, CandidateResult, EdgeGaps, LiteralFallback, MAX_CANDIDATES,
 		MAX_COMBINATIONS, NormalizedText, Occurrence, Operation, OperationRewrite, ParsedPattern,
-		PatternToken, PlannedEdit, SelectionPair,
+		PatternToken, Placement, PlannedEdit, SelectionPair,
 		markers::{GAP, SELECT_CLOSE, SELECT_DIVIDER, SELECT_OPEN},
 	},
 };
 use crate::{
-	error::EditError, fuzzy::levenshtein_distance, store::EditStore, text::normalize_unicode,
+	error::EditError,
+	fuzzy::{PatternDistance, levenshtein_within},
+	store::{EditStore, payload_hash},
+	text::normalize_unicode,
 };
 
 /// State shared by every operation in one file section.
@@ -28,6 +35,9 @@ pub struct ApplyContext<'a> {
 	pub notes:     &'a mut Vec<String>,
 	pub store:     &'a EditStore,
 	pub canonical: &'a Path,
+	/// The payload is still streaming: a trailing `*** Find` without its
+	/// `*** Replace` is dropped instead of run through the recovery ladder.
+	pub streaming: bool,
 }
 
 /// Normalize matching text while retaining source byte boundaries.
@@ -97,6 +107,7 @@ pub(crate) fn parse_pattern(
 				text: pattern.to_owned(),
 				normalized,
 			}],
+			edge_gaps:                EdgeGaps::default(),
 			selection_start:          0,
 			selection_end:            1,
 			insertion:                false,
@@ -178,8 +189,31 @@ pub(crate) fn parse_pattern(
 		tokens.remove(0);
 		stripped_leading += 1;
 	}
+	let mut stripped_trailing = 0;
 	while matches!(tokens.last(), Some(PatternToken::Gap { .. })) {
 		tokens.pop();
+		stripped_trailing += 1;
+	}
+	let edge_gaps = EdgeGaps { leading: stripped_leading > 0, trailing: stripped_trailing > 0 };
+	// An edge gap spans nothing inside the match: the newline joining a
+	// whole-line `…` to its neighbour belongs to the gap, not the anchor, and
+	// the surviving captures renumber from zero.
+	if edge_gaps.leading
+		&& let Some(PatternToken::Literal { text, .. }) = tokens.first_mut()
+		&& let Some(rest) = text.strip_prefix('\n')
+	{
+		*text = rest.strip_prefix('\r').unwrap_or(rest).to_owned();
+	}
+	if edge_gaps.trailing
+		&& let Some(PatternToken::Literal { text, .. }) = tokens.last_mut()
+		&& let Some(rest) = text.strip_suffix('\n')
+	{
+		*text = rest.strip_suffix('\r').unwrap_or(rest).to_owned();
+	}
+	for token in &mut tokens {
+		if let PatternToken::Gap { capture_index, .. } = token {
+			*capture_index -= stripped_leading;
+		}
 	}
 	for boundary in &mut selection_boundaries {
 		*boundary = boundary.saturating_sub(stripped_leading).min(tokens.len());
@@ -294,6 +328,7 @@ pub(crate) fn parse_pattern(
 	};
 	Ok(ParsedPattern {
 		tokens,
+		edge_gaps,
 		selection_start,
 		selection_end,
 		insertion,
@@ -401,10 +436,18 @@ fn fuzzy_occurrences(content: &str, pattern: &str, allow_punctuation: bool) -> V
 	if starts.is_empty() && content.len() <= 10_000 {
 		starts.extend(content.char_indices().map(|(index, _)| index));
 	}
+	let pattern_chars: Vec<char> = pattern.chars().collect();
+	let mut candidate_chars = Vec::new();
 	let mut raw = Vec::new();
 	for start in starts {
 		let mut best: Option<Occurrence> = None;
 		for length in pattern.len().saturating_sub(limit).max(1)..=pattern.len() + limit {
+			// Only a distance within `limit` that beats the best so far counts.
+			let max = match best {
+				Some(current) if current.distance == 0 => break,
+				Some(current) => limit.min(current.distance - 1),
+				None => limit,
+			};
 			let end = start + length;
 			if end > content.len() || !content.is_char_boundary(end) {
 				continue;
@@ -418,10 +461,11 @@ fn fuzzy_occurrences(content: &str, pattern: &str, allow_punctuation: bool) -> V
 			{
 				continue;
 			}
-			let distance = levenshtein_distance(pattern, candidate);
-			if distance > limit || best.is_some_and(|current| distance >= current.distance) {
+			candidate_chars.clear();
+			candidate_chars.extend(candidate.chars());
+			let Some(distance) = levenshtein_within(&pattern_chars, &candidate_chars, max) else {
 				continue;
-			}
+			};
 			best = Some(Occurrence { start, end, distance, punctuation_edits });
 		}
 		if let Some(best) = best {
@@ -452,6 +496,36 @@ fn source_end(normalized: &NormalizedText, offset: usize, fallback: usize) -> us
 	} else {
 		normalized.ends.get(offset - 1).copied().unwrap_or(fallback)
 	}
+}
+
+/// Whether a candidate's selection spans can be applied without corrupting the
+/// rewrite.
+///
+/// Consumers ([`rewrite_selection_spans`], the ambiguity-outcome projector, and
+/// [`rewrite_proves_whole_span`]) assume the spans are ordered,
+/// non-overlapping, distinct-start sub-ranges of `[start, end]`. Garbled `⟪…⟫`
+/// marker glyphs can resolve pairs that overlap or fall outside that range;
+/// splicing such a pair would index `content` (or the mutated
+/// `content[start..end]` buffer) on an out-of-range or mid-char edge and panic
+/// the worker instead of reporting a miss. Rejecting the candidate lets the
+/// miss surface as an [`EditError`].
+fn selection_spans_usable(spans: &[(usize, usize)], start: usize, end: usize) -> bool {
+	let mut ordered: Vec<(usize, usize)> = spans.to_vec();
+	ordered.sort_unstable();
+	let mut cursor = start;
+	let mut previous_start: Option<usize> = None;
+	for (span_start, span_end) in ordered {
+		if span_start < cursor
+			|| span_start > span_end
+			|| span_end > end
+			|| previous_start == Some(span_start)
+		{
+			return false;
+		}
+		previous_start = Some(span_start);
+		cursor = span_end;
+	}
+	true
 }
 fn preceding_literal(tokens: &[PatternToken], boundary: usize) -> Option<usize> {
 	(0..boundary)
@@ -689,7 +763,14 @@ fn collect_candidates(
 						)
 					})
 					.collect::<Vec<_>>();
-				if selection_spans.iter().any(|(start, end)| start > end) {
+				// Every selection span must be an ordered, non-overlapping,
+				// char-boundary sub-range of the candidate's own [start, end].
+				// Garbled marker glyphs can otherwise resolve overlapping or
+				// out-of-range pairs that later slice `content` (or the
+				// `content[start..end]` rewrite buffer) on a mid-char or
+				// out-of-range edge and panic the worker instead of reporting a
+				// miss.
+				if !selection_spans_usable(&selection_spans, start, end) {
 					return;
 				}
 				let candidate = Candidate {
@@ -704,6 +785,7 @@ fn collect_candidates(
 						.iter()
 						.map(|index| self.chosen[index].start)
 						.collect(),
+					literal_gaps: false,
 				};
 				if let Some(existing) = self.candidates.iter_mut().find(|existing| {
 					existing.start == candidate.start
@@ -854,7 +936,7 @@ fn no_match_error(
 		)
 	};
 	let first = if operation.all {
-		format!("Operation {operation_number} <SM:EDIT all> found 0 matches in {path}. {reason}")
+		format!("Operation {operation_number} (all) found 0 matches in {path}. {reason}")
 	} else {
 		format!("Operation {operation_number} did not match {path}. {reason}")
 	};
@@ -884,11 +966,11 @@ fn no_match_error(
 			let corrected = operation.pattern_text.replacen(literal, &closest.0, 1);
 			format!(
 				"Copy-ready corrected operation:\n{}",
-				operation_payload(operation, if operation.all { "*" } else { "" }, Some(&corrected))
+				operation_payload(operation, path, operation.all, Some(&corrected))
 			)
 		} else if standalone {
 			"No copy-ready correction — the closest current text is only a fuzzy match. Re-read the \
-			 region above and rebuild <SM:FIND> from the exact current text."
+			 region above and rebuild *** Find from the exact current text."
 				.to_owned()
 		} else {
 			"No copy-ready correction — retrying this operation alone would drop sibling operations. \
@@ -903,13 +985,18 @@ fn no_match_error(
 }
 
 fn closest_fragment(content: &str, pattern: &str) -> (String, usize, f64) {
+	let pattern_chars: Vec<char> = pattern.chars().collect();
+	let pattern_distance = PatternDistance::new(&pattern_chars);
+	let mut candidate_chars = Vec::new();
 	let mut ranked = Vec::new();
 	let mut offset = 0;
 	for line in content.split('\n') {
 		let normalized = normalize_text(line);
 		if !normalized.text.is_empty() {
 			let denominator = pattern.len().max(normalized.text.len()).max(1);
-			let score = levenshtein_distance(pattern, &normalized.text) as f64 / denominator as f64;
+			candidate_chars.clear();
+			candidate_chars.extend(normalized.text.chars());
+			let score = pattern_distance.distance(&candidate_chars) as f64 / denominator as f64;
 			ranked.push((line, offset, normalized, score));
 			ranked.sort_by(|left, right| left.3.total_cmp(&right.3));
 			ranked.truncate(3);
@@ -923,19 +1010,27 @@ fn closest_fragment(content: &str, pattern: &str) -> (String, usize, f64) {
 	if pattern.len() <= 160 {
 		for (line, line_offset, normalized, _) in ranked {
 			let width = pattern.len().min(normalized.text.len());
+			// The tail window only adds coverage when `len - width` lands on a
+			// char boundary (e.g. width 0 appends `len`); `char_indices` already
+			// yields every other boundary, and an unaligned fallback slices
+			// inside multibyte chars (e.g. CJK) and panics.
+			let tail = normalized.text.len().saturating_sub(width);
+			let tail = normalized.text.is_char_boundary(tail).then_some(tail);
 			for start in normalized
 				.text
 				.char_indices()
 				.map(|(index, _)| index)
-				.chain(std::iter::once(normalized.text.len().saturating_sub(width)))
+				.chain(tail)
 			{
 				let end = start + width;
 				if end > normalized.text.len() || !normalized.text.is_char_boundary(end) {
 					continue;
 				}
 				let candidate = &normalized.text[start..end];
-				let score = levenshtein_distance(pattern, candidate) as f64
-					/ pattern.len().max(candidate.len()).max(1) as f64;
+				let denominator = pattern.len().max(candidate.len()).max(1);
+				candidate_chars.clear();
+				candidate_chars.extend(candidate.chars());
+				let score = pattern_distance.distance(&candidate_chars) as f64 / denominator as f64;
 				if score >= best.2 {
 					continue;
 				}
@@ -954,6 +1049,7 @@ fn same_rewrite_for_all(
 	candidates: &[Candidate],
 ) -> bool {
 	match &operation.rewrite {
+		OperationRewrite::Insert { .. } => true,
 		OperationRewrite::Explicit { text } => {
 			let gaps = text.matches(GAP).count();
 			pattern
@@ -1042,6 +1138,7 @@ pub(crate) fn locate(
 							.then_some(vec![(start, end)])
 							.unwrap_or_default(),
 						tuple: vec![occurrence.start],
+						literal_gaps: true,
 					}
 				})
 				.collect::<Vec<_>>();
@@ -1104,27 +1201,33 @@ pub(crate) fn locate(
 			standalone_operation,
 		));
 	}
-	if candidates.len() <= 4 && !operation.desired_state {
+	if candidates.len() <= 4
+		&& !operation.desired_state
+		&& !matches!(operation.rewrite, OperationRewrite::Insert { .. })
+	{
 		let outcomes = candidates
 			.iter()
-			.map(|candidate| match &operation.rewrite {
-				OperationRewrite::Explicit { text } => {
-					format!("{}{}{}", &content[..candidate.start], text, &content[candidate.end..])
-				},
-				OperationRewrite::Inline { replacements } => {
-					let mut result = content.to_owned();
-					let mut spans = candidate
-						.selection_spans
-						.iter()
-						.copied()
-						.zip(replacements)
-						.collect::<Vec<_>>();
-					spans.sort_by_key(|((start, _), _)| std::cmp::Reverse(*start));
-					for ((start, end), replacement) in spans {
-						result.replace_range(start..end, replacement);
-					}
-					result
-				},
+			.filter_map(|candidate| {
+				Some(match &operation.rewrite {
+					OperationRewrite::Insert { .. } => return None,
+					OperationRewrite::Explicit { text } => {
+						format!("{}{}{}", &content[..candidate.start], text, &content[candidate.end..])
+					},
+					OperationRewrite::Inline { replacements } => {
+						let mut result = content.to_owned();
+						let mut spans = candidate
+							.selection_spans
+							.iter()
+							.copied()
+							.zip(replacements)
+							.collect::<Vec<_>>();
+						spans.sort_by_key(|((start, _), _)| std::cmp::Reverse(*start));
+						for ((start, end), replacement) in spans {
+							result.replace_range(start..end, replacement);
+						}
+						result
+					},
+				})
 			})
 			.map(|outcome| normalize_text(&outcome).text)
 			.collect::<HashSet<_>>();
@@ -1139,22 +1242,22 @@ pub(crate) fn locate(
 			format!(
 				"Near line {}:\n{}",
 				line_number_at(content, candidate.start),
-				operation_payload(operation, "", None)
+				operation_payload(operation, path, false, None)
 			)
 		})
 		.collect::<Vec<_>>()
 		.join("\n\n");
 	let all_retry = if same_rewrite_for_all(pattern, operation, &candidates) {
 		format!(
-			"All candidates receive the same rewrite; retry every match:\n{}\n\n",
-			operation_payload(operation, "*", None)
+			"\n\nAll candidates receive the same rewrite; retry every match:\n{}",
+			operation_payload(operation, path, true, None)
 		)
 	} else {
 		String::new()
 	};
 	Err(EditError::matched(format!(
-		"Operation {operation_number} is ambiguous: {} ordered tuples match.\n\n{all_retry}Add \
-		 context that only the intended match has — one of these:\n\n{retries}",
+		"Operation {operation_number} is ambiguous: {} ordered tuples match.\n\nAdd context that \
+		 only the intended match has — one of these:\n\n{retries}{all_retry}",
 		candidates.len()
 	)))
 }
@@ -1169,13 +1272,25 @@ pub(crate) fn closest_desired_block(content: &str, stated_text: &str) -> Option<
 	if lines.len() < count {
 		return None;
 	}
+	// normalize_text drops the joining newlines, so a window's normalized text
+	// is its lines' normalized texts back to back: normalize every line once
+	// and slice windows out of the result.
+	let mut normalized = String::with_capacity(content.len());
+	let mut line_starts = Vec::with_capacity(lines.len() + 1);
+	for line in &lines {
+		line_starts.push(normalized.len());
+		normalized.push_str(&normalize_text(line).text);
+	}
+	line_starts.push(normalized.len());
+	let stated_distance = PatternDistance::new(&stated.chars().collect::<Vec<_>>());
+	let mut current_chars = Vec::new();
 	let mut scores = Vec::new();
 	for index in 0..=lines.len() - count {
-		let current = normalize_text(&lines[index..index + count].join("\n")).text;
+		let current = &normalized[line_starts[index]..line_starts[index + count]];
 		let max = stated.len().max(current.len()).max(1);
-		let affix = stated.starts_with(&current)
+		let affix = stated.starts_with(current)
 			|| current.starts_with(&stated)
-			|| stated.ends_with(&current)
+			|| stated.ends_with(current)
 			|| current.ends_with(&stated);
 		let score = if current.is_empty()
 			|| affix
@@ -1183,7 +1298,9 @@ pub(crate) fn closest_desired_block(content: &str, stated_text: &str) -> Option<
 		{
 			1.0
 		} else {
-			levenshtein_distance(&stated, &current) as f64 / max as f64
+			current_chars.clear();
+			current_chars.extend(current.chars());
+			stated_distance.distance(&current_chars) as f64 / max as f64
 		};
 		scores.push((index, score));
 	}
@@ -1313,25 +1430,89 @@ pub(crate) fn diff_shaped_candidates(pattern_text: &str) -> Vec<String> {
 	}
 }
 
-fn decode_literal_markers(text: String) -> String {
+/// Drop the `*** Replace` ellipses that re-emit `*** Find`'s open edges. An
+/// edge gap captured nothing, so re-emitting it writes nothing; a whole-line
+/// edge `…` takes the newline joining it to the rest of the rewrite with it.
+/// The leading edge is positional; the trailing one is only claimed by an
+/// ellipsis left over after the inner captures, since `…` re-emits captures
+/// in order.
+fn strip_edge_gaps(rewrite: &str, edges: EdgeGaps, inner: usize) -> Cow<'_, str> {
+	// A rewrite that is nothing but edge ellipses is context elision, not a
+	// deletion; leave it for `render_rewrite` to reject.
+	let keep = |stripped: String, current: &str| {
+		if stripped.trim().is_empty() {
+			current.to_owned()
+		} else {
+			stripped
+		}
+	};
+	let mut text = Cow::Borrowed(rewrite);
+	if edges.leading {
+		let at = text.len() - text.trim_start().len();
+		if text[at..].starts_with(GAP) {
+			let after = at + GAP.len();
+			let line_end = text[after..]
+				.find('\n')
+				.map_or(text.len(), |offset| after + offset);
+			let stripped = if text[after..line_end].trim().is_empty() {
+				let line_start = text[..at].rfind('\n').map_or(0, |offset| offset + 1);
+				format!("{}{}", &text[..line_start], &text[(line_end + 1).min(text.len())..])
+			} else {
+				format!("{}{}", &text[..at], &text[after..])
+			};
+			text = Cow::Owned(keep(stripped, &text));
+		}
+	}
+	if edges.trailing && text.matches(GAP).count() > inner {
+		let end = text.trim_end().len();
+		if text[..end].ends_with(GAP) {
+			let at = end - GAP.len();
+			let line_start = text[..at].rfind('\n').map_or(0, |offset| offset + 1);
+			let cut = if text[line_start..at].trim().is_empty() {
+				text[..line_start]
+					.strip_suffix('\n')
+					.map_or(line_start, |rest| rest.strip_suffix('\r').map_or(rest.len(), str::len))
+			} else {
+				at
+			};
+			let stripped = text[..cut].to_owned();
+			text = Cow::Owned(keep(stripped, &text));
+		}
+	}
 	text
-		.replace("\0V8LITOPEN\0", SELECT_OPEN)
-		.replace("\0V8LITCLOSE\0", SELECT_CLOSE)
-		.replace("\0V8LITDIV\0", SELECT_DIVIDER)
+}
+
+/// Edges of `*** Find` that an inline selection borders; its replacement may
+/// re-emit them.
+fn selection_edges(
+	pattern: &ParsedPattern,
+	candidate: &Candidate,
+	pair: &SelectionPair,
+) -> EdgeGaps {
+	if candidate.literal_gaps {
+		return EdgeGaps::default();
+	}
+	EdgeGaps {
+		leading:  pattern.edge_gaps.leading && pair.start == 0,
+		trailing: pattern.edge_gaps.trailing && pair.end == pattern.tokens.len(),
+	}
 }
 
 fn render_rewrite(
 	rewrite: &str,
 	indices: &[usize],
 	captures: &[String],
+	edges: EdgeGaps,
 	operation_number: usize,
 ) -> Result<String, EditError> {
 	if rewrite.contains(SELECT_OPEN) || rewrite.contains(SELECT_CLOSE) {
 		return Err(EditError::matched(format!(
-			"Operation {operation_number} has selection markers in <SM:PUT>; <SM:FIND> is current \
-			 text, <SM:PUT> is final text."
+			"Operation {operation_number} has selection markers in *** Replace; *** Find is current \
+			 text, *** Replace is final text."
 		)));
 	}
+	let stripped = strip_edge_gaps(rewrite, edges, indices.len());
+	let rewrite = stripped.as_ref();
 	let mut rendered = String::new();
 	let mut marker = 0;
 	let mut index = 0;
@@ -1345,10 +1526,10 @@ fn render_rewrite(
 			if marker >= indices.len() {
 				if line.trim() == GAP {
 					return Err(EditError::matched(format!(
-						"Operation {operation_number} <SM:PUT> has a whole-line {GAP} with no <SM:FIND> \
-						 gap to re-emit. <SM:PUT> is final text written verbatim: type the elided lines \
-						 out, or add a matching {GAP} gap to <SM:FIND>. To write a literal {GAP} line, \
-						 use the write tool."
+						"Operation {operation_number} *** Replace has a whole-line {GAP} with no *** \
+						 Find gap to re-emit. *** Replace is final text written verbatim: type the \
+						 elided lines out, or add a matching {GAP} gap to *** Find. To write a literal \
+						 {GAP} line, use the write tool."
 					)));
 				}
 				rendered.push_str(GAP);
@@ -1370,7 +1551,7 @@ fn render_rewrite(
 		rendered.push(character);
 		index += character.len_utf8();
 	}
-	Ok(decode_literal_markers(rendered))
+	Ok(decode_literal_markers(&rendered))
 }
 
 fn align_boundary_echoes(content: &str, candidate: &Candidate, replacement: &str) -> String {
@@ -1621,6 +1802,7 @@ fn prepare_inline(
 	span: (usize, usize),
 	selection: &SelectionPair,
 	rewrite: &str,
+	edges: EdgeGaps,
 	operation_number: usize,
 	lenient: bool,
 ) -> Result<(Candidate, String, Option<String>), EditError> {
@@ -1661,8 +1843,13 @@ fn prepare_inline(
 	} else {
 		desired.to_owned()
 	};
-	let replacement =
-		render_rewrite(&framed, &selection.capture_indices, &candidate.captures, operation_number)?;
+	let replacement = render_rewrite(
+		&framed,
+		&selection.capture_indices,
+		&candidate.captures,
+		edges,
+		operation_number,
+	)?;
 	if replacement.is_empty() && start != end {
 		let deleted = content[start..end].to_owned();
 		candidate = expand_full_line_deletion(content, &candidate);
@@ -1965,7 +2152,11 @@ fn duplicate_collapse_span(
 	let match_start = normalized_index_at(&normalized, candidate.start);
 	let match_end = normalized_index_at(&normalized, candidate.end);
 	for overlap in (MIN_OVERLAP..=rewrite.len().min(match_start)).rev() {
-		if normalized.text[match_start - overlap..match_start] != rewrite[..overlap] {
+		if !normalized
+			.text
+			.get(match_start - overlap..match_start)
+			.is_some_and(|prefix| rewrite.starts_with(prefix))
+		{
 			continue;
 		}
 		let mut start = normalized
@@ -1988,7 +2179,11 @@ fn duplicate_collapse_span(
 			.min(normalized.text.len().saturating_sub(match_end)))
 		.rev()
 	{
-		if normalized.text[match_end..match_end + overlap] != rewrite[rewrite.len() - overlap..] {
+		if !normalized
+			.text
+			.get(match_end..match_end + overlap)
+			.is_some_and(|suffix| rewrite.ends_with(suffix))
+		{
 			continue;
 		}
 		let mut end = normalized
@@ -2031,15 +2226,6 @@ fn resolve_references(rewrite: &str, removed: &[Option<String>]) -> Result<Strin
 	Ok(lines.join("\n"))
 }
 
-fn fnv_payload(input: &str) -> u64 {
-	let mut hash = 2_166_136_261_u32;
-	for unit in input.encode_utf16() {
-		hash ^= u32::from(unit);
-		hash = hash.wrapping_mul(16_777_619);
-	}
-	u64::from(hash)
-}
-
 fn no_op_error(
 	context: &ApplyContext<'_>,
 	payload: u64,
@@ -2058,8 +2244,8 @@ fn no_op_error(
 	} else if let Some(operation) = operation {
 		if let Some(matches) = match_count {
 			format!(
-				"Operation {operation} <SM:EDIT all> matched {matches} occurrences but all make no \
-				 change to {}.",
+				"Operation {operation} (all) matched {matches} occurrences but all make no change to \
+				 {}.",
 				context.path
 			)
 		} else {
@@ -2071,7 +2257,7 @@ fn no_op_error(
 	let grounding = preview.map_or(String::new(), |(content, offset)| {
 		format!(
 			"\nYour rewrite normalized to text identical to these lines. Indentation-only changes \
-			 are applied verbatim; adjust the authored <SM:PUT> if another whitespace change was \
+			 are applied verbatim; adjust the authored *** Replace if another whitespace change was \
 			 intended.\nCurrent file content near the closest match (no re-read needed):\n{}",
 			numbered_preview(content, offset)
 		)
@@ -2125,8 +2311,8 @@ fn apply_operations(
 	input: &str,
 	context: &mut ApplyContext<'_>,
 ) -> Result<String, EditError> {
-	let payload = fnv_payload(input);
-	let operations = parse_operations(input, content)?;
+	let payload = payload_hash(input);
+	let operations = parse_section(input, content, context.path, context.streaming)?;
 	let mut removed = vec![None; operations.len()];
 	let mut planned = Vec::new();
 	let mut recovery_notes = Vec::new();
@@ -2171,7 +2357,7 @@ fn apply_operations(
 		};
 		if operation.whitespace_matched {
 			recovery_notes.push(format!(
-				"Note: operation {number}'s <SM:FIND> differed from the file in whitespace only and \
+				"Note: operation {number}'s *** Find differed from the file in whitespace only and \
 				 was matched leniently. Inserted lines are written exactly as authored — verify their \
 				 indentation."
 			));
@@ -2180,6 +2366,39 @@ fn apply_operations(
 			candidates.sort_by_key(|candidate| std::cmp::Reverse(candidate.start));
 		}
 		match &operation.rewrite {
+			OperationRewrite::Insert { text, at } => {
+				let body = text.strip_suffix('\n').unwrap_or(text);
+				for candidate in &candidates {
+					let (offset, replacement) = match at {
+						// Insert at the first anchor line's start, ahead of its indentation.
+						Placement::Before => {
+							let start = candidate.match_start;
+							let offset = content[..start].rfind('\n').map_or(0, |at| at + 1);
+							(offset, format!("{body}\n"))
+						},
+						// Insert before the final anchor line's newline, retaining its EOF
+						// convention.
+						Placement::After => {
+							let end = candidate.match_end;
+							let offset = if end > 0 && content.as_bytes()[end - 1] == b'\n' {
+								end - 1
+							} else {
+								content[end..]
+									.find('\n')
+									.map_or(content.len(), |at| end + at)
+							};
+							(offset, format!("\n{body}"))
+						},
+					};
+					planned.push(PlannedEdit {
+						start: offset,
+						end: offset,
+						replacement,
+						operation_number: number,
+					});
+					last_match = candidate.match_start;
+				}
+			},
 			OperationRewrite::Inline { replacements } => {
 				let replacements = replacements
 					.iter()
@@ -2200,12 +2419,14 @@ fn apply_operations(
 						.collect::<Vec<_>>();
 					selections.sort_by_key(|(_, (start, _))| std::cmp::Reverse(*start));
 					for (selection_index, span) in selections {
+						let pair = &pattern.selection_pairs[selection_index];
 						let (prepared, replacement, deleted) = prepare_inline(
 							content,
 							candidate,
 							span,
-							&pattern.selection_pairs[selection_index],
+							pair,
 							&replacements[selection_index],
+							selection_edges(&pattern, candidate, pair),
 							number,
 							operation.whitespace_matched,
 						)?;
@@ -2303,28 +2524,24 @@ fn apply_operations(
 				{
 					let one_line = base.split_whitespace().collect::<Vec<_>>().join(" ");
 					let repeated = vec![one_line; pattern.selection_ranges.len()];
-					let header = if operation.all {
-						"<SM:EDIT all>"
-					} else {
-						"<SM:EDIT>"
-					};
+					let header = edit_header(context.path, operation.all);
 					let candidate = &candidates[0];
 					return Err(EditError::matched(
 						[
 							format!(
-								"Operation {number} has {} selections, but <SM:PUT> proves neither \
+								"Operation {number} has {} selections, but *** Replace proves neither \
 								 positional substitution nor whole-span replacement.",
 								pattern.selection_ranges.len()
 							),
 							"Copy-ready per-selection interpretation:".to_owned(),
 							format!(
-								"{header}\n<SM:FIND>\n{}\n</SM:FIND>\n<SM:PUT>\n{}\n</SM:PUT>\n</SM:EDIT>",
+								"{header}\n*** Find\n{}\n*** Replace\n{}",
 								operation.pattern_text,
 								repeated.join("\n")
 							),
 							"Copy-ready whole-span interpretation:".to_owned(),
 							format!(
-								"{header}\n<SM:FIND>\n{}\n</SM:FIND>\n<SM:PUT>\n{}\n</SM:PUT>\n</SM:EDIT>",
+								"{header}\n*** Find\n{}\n*** Replace\n{}",
 								operation.pattern_text,
 								rewrite_selection_spans(content, candidate, &repeated)
 							),
@@ -2357,6 +2574,11 @@ fn apply_operations(
 							&pattern.selected_capture_indices
 						},
 						&candidate.captures,
+						if candidate.literal_gaps {
+							EdgeGaps::default()
+						} else {
+							pattern.edge_gaps
+						},
 						number,
 					)?;
 					let replacement = align_boundary_echoes(content, &candidate, &rendered);
@@ -2380,13 +2602,14 @@ fn apply_operations(
 							number,
 							if operation.assumed_deletion {
 								format!(
-									"Note: operation {number} had no <SM:PUT> and was applied as a move \
+									"Note: operation {number} had no *** Replace and was applied as a move \
 									 deletion (a later operation re-emits its block)."
 								)
 							} else {
 								format!(
-									"Note: operation {number} deleted {lines} line(s); an empty <SM:PUT> \
-									 means deletion — resend with the final text if you meant to replace."
+									"Note: operation {number} deleted {lines} line(s); an empty *** \
+									 Replace means deletion — resend with the final text if you meant to \
+									 replace."
 								)
 							},
 						);
@@ -2485,9 +2708,9 @@ fn apply_operations(
 			previous.operation_number,
 			current.operation_number,
 			previous.operation_number,
-			operation_payload(&operations[previous.operation_number - 1], "", None),
+			operation_payload(&operations[previous.operation_number - 1], context.path, false, None),
 			current.operation_number,
-			operation_payload(&operations[current.operation_number - 1], "", None)
+			operation_payload(&operations[current.operation_number - 1], context.path, false, None)
 		)));
 	}
 	let mut result = content.to_owned();
@@ -2510,11 +2733,11 @@ pub fn apply_sloppy(
 	mut context: ApplyContext<'_>,
 ) -> Result<String, EditError> {
 	apply_operations(content, input, &mut context).map_err(|error| {
-		let mut message = error.to_string();
-		if !message.contains(ATOMICITY_NOTICE) {
-			message.push('\n');
-			message.push_str(ATOMICITY_NOTICE);
-		}
-		EditError::matched(message)
+		let message = error.to_string();
+		EditError::matched(if message.contains(ATOMICITY_NOTICE) {
+			message
+		} else {
+			format!("{ATOMICITY_NOTICE}\n{message}")
+		})
 	})
 }

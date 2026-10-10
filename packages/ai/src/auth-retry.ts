@@ -1,5 +1,5 @@
 import { extractHttpStatusFromError } from "@oh-my-pi/pi-utils";
-import type { OAuthAccess } from "./auth-storage";
+import type { LimitsApi, OAuthAccess, OAuthApi, OAuthRequestIdentity } from "./auth/types";
 import * as AIError from "./error";
 import { isAuthRetryableError, isInvalidatedOAuthTokenError } from "./error/auth-classify";
 import { isAccountPolicyError, isUsageLimit } from "./error/flags";
@@ -18,10 +18,10 @@ import { isConcurrencyCapExclusion, isUsageLimitOutcome } from "./error/rate-lim
  * - `error !== undefined && lastChance` → **step (c): switch account**
  *   (invalidate/usage-limit the current credential and rotate to a sibling).
  *
- * Current drivers preserve that bounded a/b/c sequence for ordinary 401/auth
- * failures. Account-scoped policy denials, 403s, and usage-limit failures skip
- * refresh and may repeat step (c) until the resolver returns `undefined`,
- * cycles, or hits {@link AUTH_RETRY_MAX_ATTEMPTS}.
+ * Current drivers give an ordinary 401/auth failure one step (b) before
+ * repeating step (c) through distinct siblings. Account-scoped policy denials,
+ * 403s, and usage-limit failures skip refresh. Rotation stops when the resolver
+ * returns `undefined`, cycles, or hits {@link AUTH_RETRY_MAX_ATTEMPTS}.
  */
 export interface ApiKeyResolveContext {
 	/** True when the resolver should rotate to a sibling credential. */
@@ -38,10 +38,47 @@ export interface ApiKeyResolveContext {
  * Resolves the API key to send for a request, retried through the a/b/c policy
  * described on {@link ApiKeyResolveContext}.
  */
-export type ApiKeyResolver = (ctx: ApiKeyResolveContext) => Promise<string | undefined> | string | undefined;
+export interface ResolvedApiKey {
+	apiKey: string;
+	/** Durable row id of the credential that supplied this bearer, when known. */
+	credentialId?: number;
+	/**
+	 * Resolved after `LimitsApi.rotate` slept out a sibling's short block
+	 * (`afterSiblingWait`): the driver accepts this bearer even if the request
+	 * already sent it before that block.
+	 */
+	afterSiblingWait?: boolean;
+	/** Non-secret request scope belonging to this bearer, replaced on account rotation. */
+	oauthIdentity?: OAuthRequestIdentity;
+}
+
+export type ApiKeyResolution = string | ResolvedApiKey | undefined;
+
+export type ApiKeyResolver = (ctx: ApiKeyResolveContext) => Promise<ApiKeyResolution> | ApiKeyResolution;
+
+/** Extract the bearer while preserving optional credential provenance for streaming callers. */
+export function resolvedApiKeyBearer(resolved: ApiKeyResolution): string | undefined {
+	return (typeof resolved === "string" ? resolved : resolved?.apiKey) || undefined;
+}
+
+/**
+ * Mark a post-rotation resolution as following a sibling-unblock wait so the
+ * retry driver may resend a bearer it already tried. Used by the rotating
+ * resolvers (`KeyCascade.resolver`, coding-agent `createApiKeyResolver`).
+ */
+export function markAfterSiblingWait(resolved: ApiKeyResolution): ApiKeyResolution {
+	const apiKey = resolvedApiKeyBearer(resolved);
+	if (apiKey === undefined) return resolved;
+	return typeof resolved === "string"
+		? { apiKey, afterSiblingWait: true }
+		: { ...resolved, apiKey, afterSiblingWait: true };
+}
 
 /** A static bearer string, or a {@link ApiKeyResolver} that mints/rotates one. */
 export type ApiKey = string | ApiKeyResolver;
+
+/** Keyless-provider credential marker; transports must not send it in authentication headers. */
+export const NO_AUTH_SENTINEL = "N/A";
 
 /** Narrows {@link ApiKey} to its resolver form. */
 export function isApiKeyResolver(key: ApiKey | undefined): key is ApiKeyResolver {
@@ -52,22 +89,30 @@ export function isApiKeyResolver(key: ApiKey | undefined): key is ApiKeyResolver
  * Performs the initial resolve of an {@link ApiKey} (`error: undefined`,
  * `lastChance: false`). Static keys pass through unchanged.
  */
-export async function resolveApiKeyOnce(key: ApiKey | undefined, signal?: AbortSignal): Promise<string | undefined> {
+export async function resolveApiKeyOnce(
+	key: ApiKey | undefined,
+	signal?: AbortSignal,
+	onResolved?: (resolved: ApiKeyResolution) => void,
+): Promise<string | undefined> {
 	if (key === undefined) return undefined;
-	if (isApiKeyResolver(key)) return (await key({ lastChance: false, error: undefined, signal })) || undefined;
+	if (isApiKeyResolver(key)) {
+		const resolved = await key({ lastChance: false, error: undefined, signal });
+		onResolved?.(resolved);
+		return resolvedApiKeyBearer(resolved);
+	}
 	return key;
 }
 
 /**
- * Wraps a resolver with a bearer that was already selected for this request.
+ * Wraps a resolver with a credential already selected for this request.
  *
  * Callers that preflight credentials can pass the returned resolver to the
  * auth-retry driver without making the driver know about that preflight: the
- * first initial resolution reuses `seed`, and all later resolutions delegate to
- * `resolver`.
+ * first initial resolution reuses `seed` (including its credential identity),
+ * and all later resolutions delegate to `resolver`.
  */
-export function seedApiKeyResolver(seed: string | undefined, resolver: ApiKeyResolver): ApiKeyResolver {
-	let seedPending = seed !== undefined;
+export function seedApiKeyResolver(seed: ApiKeyResolution, resolver: ApiKeyResolver): ApiKeyResolver {
+	let seedPending = resolvedApiKeyBearer(seed) !== undefined;
 	return ctx => {
 		if (seedPending && ctx.error === undefined) {
 			seedPending = false;
@@ -81,9 +126,8 @@ export function seedApiKeyResolver(seed: string | undefined, resolver: ApiKeyRes
 export { isAuthRetryableError };
 
 /**
- * Legacy bounded a/b/c retry sequence retained for public compatibility:
- * `false` → refresh-same, `true` → rotate/switch. Current drivers consume it
- * once for ordinary 401/auth failures; usage/account-limit failures may repeat
+ * Legacy a/b/c retry sequence retained for public compatibility:
+ * `false` → refresh-same, `true` → rotate/switch. Current drivers may repeat
  * sibling rotation until a termination guard fires.
  */
 export const AUTH_RETRY_STEPS: readonly boolean[] = [false, true];
@@ -112,10 +156,13 @@ export async function resolveRetryKey(
 	error: unknown,
 	signal?: AbortSignal,
 	previousKey?: string,
+	onResolved?: (resolved: ApiKeyResolution) => void,
 ): Promise<string | undefined> {
 	try {
 		const rotateSibling = lastChance || (!lastChance && isDirectCredentialRotationError(error));
-		return (await resolver({ lastChance: rotateSibling, error, signal, previousKey })) || undefined;
+		const resolved = await resolver({ lastChance: rotateSibling, error, signal, previousKey });
+		onResolved?.(resolved);
+		return resolvedApiKeyBearer(resolved);
 	} catch {
 		return undefined;
 	}
@@ -128,8 +175,6 @@ export interface AuthRetryKeyState {
 	lastKey: string;
 	/** Whether the current credential already consumed its 401 refresh-same retry. */
 	refreshedCurrent: boolean;
-	/** Whether the legacy non-usage auth path already switched to one sibling. */
-	legacyAuthSwitchUsed: boolean;
 	/** Whether this operation already replayed once after an explicit token-refresh request. */
 	tokenRefreshReplayUsed?: boolean;
 	/** Total outbound attempts accepted for this logical operation, including the initial request. */
@@ -141,14 +186,20 @@ export function createAuthRetryKeyState(initialKey: string): AuthRetryKeyState {
 		attemptedKeys: new Set([initialKey]),
 		lastKey: initialKey,
 		refreshedCurrent: false,
-		legacyAuthSwitchUsed: false,
 		tokenRefreshReplayUsed: false,
 		attempts: 1,
 	};
 }
 
-function acceptRetryKey(state: AuthRetryKeyState, key: string, refreshedCurrent: boolean): string | undefined {
-	if (state.attemptedKeys.has(key) || state.attempts >= AUTH_RETRY_MAX_ATTEMPTS) return undefined;
+function acceptRetryKey(
+	state: AuthRetryKeyState,
+	key: string,
+	refreshedCurrent: boolean,
+	afterSiblingWait = false,
+): string | undefined {
+	if ((!afterSiblingWait && state.attemptedKeys.has(key)) || state.attempts >= AUTH_RETRY_MAX_ATTEMPTS) {
+		return undefined;
+	}
 	state.attemptedKeys.add(key);
 	state.attempts += 1;
 	state.lastKey = key;
@@ -161,22 +212,22 @@ export async function resolveNextAuthRetryKey(
 	resolver: ApiKeyResolver,
 	error: unknown,
 	signal?: AbortSignal,
+	onResolved?: (resolved: ApiKeyResolution) => void,
 ): Promise<string | undefined> {
 	if (signal?.aborted) return undefined;
 	if (state.attempts >= AUTH_RETRY_MAX_ATTEMPTS) return undefined;
 	if (error instanceof AIError.OAuthError && error.kind === "token-refresh") {
 		if (state.tokenRefreshReplayUsed) return undefined;
 		state.tokenRefreshReplayUsed = true;
-		const refreshed = await resolveRetryKey(resolver, false, error, signal, state.lastKey);
+		const refreshed = await resolveRetryKey(resolver, false, error, signal, state.lastKey, onResolved);
 		state.refreshedCurrent = true;
 		if (signal?.aborted || refreshed === undefined) return undefined;
 		return acceptRetryKey(state, refreshed, true);
 	}
 	const directRotation = isDirectCredentialRotationError(error);
 	if (!directRotation) {
-		if (state.legacyAuthSwitchUsed) return undefined;
 		if (!state.refreshedCurrent) {
-			const refreshed = await resolveRetryKey(resolver, false, error, signal, state.lastKey);
+			const refreshed = await resolveRetryKey(resolver, false, error, signal, state.lastKey, onResolved);
 			state.refreshedCurrent = true;
 			if (signal?.aborted) return undefined;
 			if (refreshed !== undefined) {
@@ -187,11 +238,13 @@ export async function resolveNextAuthRetryKey(
 	}
 
 	if (signal?.aborted) return undefined;
-	const rotated = await resolveRetryKey(resolver, true, error, signal, state.lastKey);
+	let afterSiblingWait = false;
+	const rotated = await resolveRetryKey(resolver, true, error, signal, state.lastKey, resolved => {
+		afterSiblingWait = typeof resolved === "object" && resolved.afterSiblingWait === true;
+		onResolved?.(resolved);
+	});
 	if (signal?.aborted || rotated === undefined) return undefined;
-	const accepted = acceptRetryKey(state, rotated, !directRotation);
-	if (accepted !== undefined && !directRotation) state.legacyAuthSwitchUsed = true;
-	return accepted;
+	return acceptRetryKey(state, rotated, !directRotation, afterSiblingWait);
 }
 
 function oauthCredentialIdentity(access: OAuthAccess): string {
@@ -220,9 +273,9 @@ async function runOAuthAttempt<T>(
  *   applicable policy is exhausted, the resolver declines or cycles, or the
  *   operation reaches {@link AUTH_RETRY_MAX_ATTEMPTS}. An explicit typed
  *   token-refresh request gets exactly one refresh-current replay and never
- *   enters sibling rotation. Ordinary 401/auth failures retain one
- *   refresh-same plus one sibling switch; 403/usage-limit failures rotate
- *   directly through distinct siblings.
+ *   enters sibling rotation. Ordinary 401/auth failures get one refresh-same,
+ *   then rotate through distinct siblings; 403/usage-limit failures skip the
+ *   refresh and rotate directly.
  *
  * Used by non-streaming consumers (image generation, web search, completion
  * helpers). The streaming driver in `stream.ts` implements the same policy with
@@ -271,20 +324,12 @@ export async function withAuth<T>(
 
 /**
  * Minimal structural slice of `AuthStorage` consumed by {@link withOAuthAccess}.
- * Typed structurally (and importing only the `OAuthAccess` type) so this module
- * never takes a runtime dependency on `./auth-storage`.
+ * Typed structurally (type-only imports) so this module never takes a runtime
+ * dependency on `./auth-storage`.
  */
 export interface OAuthAccessSource {
-	getOAuthAccess(
-		provider: string,
-		sessionId?: string,
-		options?: { forceRefresh?: boolean; signal?: AbortSignal },
-	): Promise<OAuthAccess | undefined>;
-	rotateSessionCredential(
-		provider: string,
-		sessionId: string | undefined,
-		options?: { error?: unknown; signal?: AbortSignal; apiKey?: string; credentialId?: number },
-	): Promise<boolean>;
+	readonly oauth: Pick<OAuthApi, "access">;
+	readonly limits: Pick<LimitsApi, "rotate">;
 }
 
 export interface WithOAuthAccessOptions {
@@ -311,7 +356,7 @@ export interface WithOAuthAccessOptions {
  * - initial → `getOAuthAccess` (or `opts.seed`).
  * - typed token-refresh request → one forced refresh-current replay, then stop.
  * - 401/auth failure → one `getOAuthAccess` with `forceRefresh: true` for the
- *   current account, then sibling rotation.
+ *   current account, then sibling rotation through distinct credentials.
  * - 403/usage-limit failure → `rotateSessionCredential` directly, without a
  *   force-refresh detour.
  *
@@ -332,7 +377,7 @@ export async function withOAuthAccess<T>(
 	const isAuthError = opts?.isAuthError ?? isAuthRetryableError;
 	const { sessionId, signal } = opts ?? {};
 
-	let lastAccess = opts?.seed ?? (await storage.getOAuthAccess(provider, sessionId, { signal }));
+	let lastAccess = opts?.seed ?? (await storage.oauth.access(provider, sessionId, { signal }));
 	if (!lastAccess) {
 		throw new AIError.MissingApiKeyError(
 			provider,
@@ -343,7 +388,6 @@ export async function withOAuthAccess<T>(
 	const attemptedBearers = new Set([lastAccess.accessToken]);
 	const attemptedCredentialIdentities = new Set([oauthCredentialIdentity(lastAccess)]);
 	let attemptCount = 1;
-	let legacyAuthSwitchUsed = false;
 	let refreshedCurrent = false;
 	let tokenRefreshReplayUsed = false;
 	let attemptResult = await runOAuthAttempt(lastAccess, attempt, isAuthError);
@@ -359,7 +403,7 @@ export async function withOAuthAccess<T>(
 			tokenRefreshReplayUsed = true;
 			refreshedCurrent = true;
 			try {
-				next = await storage.getOAuthAccess(provider, sessionId, { forceRefresh: true, signal });
+				next = await storage.oauth.access(provider, sessionId, { forceRefresh: true, signal });
 			} catch {
 				next = undefined;
 			}
@@ -378,11 +422,14 @@ export async function withOAuthAccess<T>(
 
 		const directRotation = isDirectCredentialRotationError(lastError);
 		if (!directRotation) {
-			if (legacyAuthSwitchUsed) break;
 			if (!refreshedCurrent) {
 				refreshedCurrent = true;
 				try {
-					next = await storage.getOAuthAccess(provider, sessionId, { forceRefresh: true, signal });
+					next = await storage.oauth.access(provider, sessionId, {
+						forceRefresh: true,
+						refreshReason: AIError.status(lastError) === 401 ? "auth-recovery" : undefined,
+						signal,
+					});
 				} catch {
 					next = undefined;
 				}
@@ -404,23 +451,25 @@ export async function withOAuthAccess<T>(
 		}
 
 		if (signal?.aborted || attemptCount >= AUTH_RETRY_MAX_ATTEMPTS) break;
+		let afterSiblingWait = false;
 		try {
-			const rotated = await storage.rotateSessionCredential(provider, sessionId, {
+			const rotation = await storage.limits.rotate(provider, sessionId, {
 				error: lastError,
 				signal,
 				apiKey: lastAccess.accessToken,
 				credentialId: lastAccess.credentialId,
 			});
-			if (!rotated) break;
-			next = await storage.getOAuthAccess(provider, sessionId, { signal });
+			if (!rotation.switched) break;
+			afterSiblingWait = rotation.afterSiblingWait === true;
+			next = await storage.oauth.access(provider, sessionId, { signal });
 		} catch {
 			next = undefined;
 		}
 		if (signal?.aborted || !next) break;
 		const credentialIdentity = oauthCredentialIdentity(next);
 		if (
-			attemptedCredentialIdentities.has(credentialIdentity) ||
-			attemptedBearers.has(next.accessToken) ||
+			(!afterSiblingWait &&
+				(attemptedCredentialIdentities.has(credentialIdentity) || attemptedBearers.has(next.accessToken))) ||
 			attemptCount >= AUTH_RETRY_MAX_ATTEMPTS
 		) {
 			break;
@@ -430,7 +479,6 @@ export async function withOAuthAccess<T>(
 		attemptCount += 1;
 		lastAccess = next;
 		refreshedCurrent = !directRotation;
-		if (!directRotation) legacyAuthSwitchUsed = true;
 		attemptResult = await runOAuthAttempt(next, attempt, isAuthError);
 		if (attemptResult.ok) return attemptResult.result;
 		lastError = attemptResult.error;

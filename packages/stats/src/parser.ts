@@ -1,9 +1,11 @@
+import type * as nodeFs from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import {
 	type AssistantMessage,
 	coerceServiceTierByFamily,
-	getPriorityPremiumRequests,
+	getPremiumServiceTierRequests,
+	parseServiceTier,
 	resolveModelServiceTier,
 	type ServiceTierByFamily,
 	type ToolCall,
@@ -24,10 +26,13 @@ import type {
 	UserMessageLink,
 	UserMessageStats,
 } from "./types";
-import { computeUserMessageMetrics } from "./user-metrics";
+import { computeUserMessageMetrics, judgeProse } from "./user-metrics";
 
 /** Basename of an advisor agent's transcript inside a session artifacts dir. */
 const ADVISOR_TRANSCRIPT_BASENAME = "__advisor.jsonl";
+
+/** Characters a persisted tool name may consist of without sanitization. */
+const TOOL_NAME_PATTERN = /^[\w.:-]+$/;
 
 /**
  * Classify which agent produced a transcript from its path within the sessions
@@ -131,6 +136,7 @@ function extractUserStats(sessionFile: string, folder: string, entry: SessionMes
 	const text = extractUserText(msg.content);
 	if (!text.trim()) return null;
 	const metrics = computeUserMessageMetrics(text);
+	const prose = judgeProse(text);
 	const ts = Date.parse(entry.timestamp);
 	return {
 		sessionFile,
@@ -147,6 +153,8 @@ function extractUserStats(sessionFile: string, folder: string, entry: SessionMes
 		negation: metrics.negation,
 		repetition: metrics.repetition,
 		blame: metrics.blame,
+		prose,
+		proseHash: prose ? Bun.hash(prose).toString(16) : "",
 	};
 }
 
@@ -229,20 +237,26 @@ function extractStats(
 	const rawUsage = msg.usage as Partial<Usage> | undefined;
 	if (!rawUsage || typeof rawUsage !== "object") return null;
 
-	// Backfill: when the session recorded `priority` as the active service tier
-	// at this point but the AI usage payload was captured before priority
-	// requests were folded into `premiumRequests`, derive the count here so the
-	// "Premium Reqs" stat aggregates priority traffic on re-sync. Trust any
-	// non-zero value already in `usage.premiumRequests` (Copilot multipliers or
-	// the new AI code path) and only synthesise when the field is missing/zero.
+	// Backfill: when the session recorded a premium tier (`priority`/`ultrafast`)
+	// as the active service tier at this point but the AI usage payload was
+	// captured before premium requests were folded into `premiumRequests`, derive
+	// the count here so the "Premium Reqs" stat aggregates premium traffic on
+	// re-sync. The tier the provider reported serving the turn (`msg.serviceTier`)
+	// is authoritative — it is proof the tier reached the wire, so the
+	// discovery-metadata gate is skipped; the session's live setting is only a
+	// fallback for turns recorded before that field existed. Trust any non-zero
+	// value already in `usage.premiumRequests` (Copilot multipliers or the new AI
+	// code path) and only synthesise when the field is missing/zero.
 	const recorded = rawUsage.premiumRequests ?? 0;
 	const model = {
 		provider: msg.provider,
 		api: msg.api,
 		identity: classifyModel(msg.provider, msg.model, { lenient: true }),
 	};
-	const tier = resolveModelServiceTier(currentServiceTier, model);
-	const derived = recorded > 0 ? recorded : getPriorityPremiumRequests(tier, model);
+	const servedTier = parseServiceTier(msg.serviceTier);
+	const tier = servedTier ?? resolveModelServiceTier(currentServiceTier, model);
+	const derived =
+		recorded > 0 ? recorded : getPremiumServiceTierRequests(tier, model, { served: servedTier !== undefined });
 	const wellFormed =
 		isFiniteCount(rawUsage.input) &&
 		isFiniteCount(rawUsage.output) &&
@@ -284,6 +298,7 @@ function extractStats(
 		errorMessage: msg.errorMessage ?? null,
 		usage,
 		agentType,
+		serviceTier: servedTier ?? null,
 	};
 }
 
@@ -354,27 +369,51 @@ function extractToolCalls(
 	);
 	if (blocks.length === 0) return [];
 
-	return blocks.map(block => {
+	const calls: ToolCallStats[] = [];
+	for (const block of blocks) {
+		// Names reduced to nothing by sanitization carry no tool identity:
+		// skip them rather than attributing usage to garbage (see
+		// sanitizeToolName). callsInTurn still counts the raw block total.
+		const toolName = sanitizeToolName(block.name);
+		if (toolName === null) continue;
 		let argsChars = 0;
 		try {
 			argsChars = JSON.stringify(block.arguments ?? {}).length;
 		} catch {
 			// Non-serializable arguments (shouldn't happen in persisted JSONL); size unknown.
 		}
-		return {
+		calls.push({
 			sessionFile,
 			entryId: entry.id,
 			toolCallId: block.id,
 			folder,
-			toolName: block.name,
+			toolName,
 			model: msg.model,
 			provider: msg.provider,
 			timestamp: coerceEntryTimestamp(msg.timestamp, entry),
 			agentType,
 			callsInTurn: blocks.length,
 			argsChars,
-		};
-	});
+		});
+	}
+	return calls;
+}
+
+/**
+ * Tool names as persisted can be polluted by provider-side parse garbage — a
+ * gateway may hand the model's whole invocation text back as the function
+ * name (e.g. `bash command="ls -la …"` with a stray in-band closer), which
+ * then shows up verbatim in every `GROUP BY tool_name` aggregate and the
+ * dashboard tool filter. Reduce such names to their leading identifier token;
+ * names that yield no identifier at all carry no tool identity and are
+ * returned as `null` so the row is skipped.
+ */
+function sanitizeToolName(name: string): string | null {
+	const trimmed = name.trim();
+	if (trimmed.length === 0) return null;
+	if (TOOL_NAME_PATTERN.test(trimmed)) return trimmed;
+	const candidate = trimmed.split(/[^\w.:-]/)[0] ?? "";
+	return candidate.length > 0 ? candidate : null;
 }
 
 /**
@@ -437,14 +476,11 @@ function visitSessionEntriesLenient(bytes: Uint8Array, visit: (entry: SessionEnt
 	return read;
 }
 
-function parseSessionEntriesLenient(bytes: Uint8Array): { entries: SessionEntry[]; read: number } {
-	const entries: SessionEntry[] = [];
-	const read = visitSessionEntriesLenient(bytes, entry => entries.push(entry));
-	return { entries, read };
-}
 /** Parse every well-formed entry in a transcript buffer (malformed lines skipped). */
 export function parseAllSessionEntries(bytes: Uint8Array): SessionEntry[] {
-	return parseSessionEntriesLenient(bytes).entries;
+	const entries: SessionEntry[] = [];
+	visitSessionEntriesLenient(bytes, entry => entries.push(entry));
+	return entries;
 }
 
 function scanLastServiceTier(bytes: Uint8Array): ServiceTierByFamily | undefined {
@@ -454,22 +490,18 @@ function scanLastServiceTier(bytes: Uint8Array): ServiceTierByFamily | undefined
 	});
 	return currentServiceTier;
 }
-/**
- * Parse a session file and extract all assistant message stats.
- * Uses incremental reading with offset tracking.
- *
- * Service-tier carry-over: `currentServiceTier` is a session-scoped piece of
- * state derived from `service_tier_change` entries that affects whether
- * subsequent OpenAI assistant replies count as premium requests. Incremental
- * syncs that resume past the most-recent tier change would otherwise lose
- * that state and silently record `premiumRequests = 0` for priority traffic
- * (the coding-agent stopped folding the tier into `usage.premiumRequests`
- * after 13f59162e — the parser is now the sole source of truth). When
- * `fromOffset > 0` we therefore scan the bytes preceding `fromOffset`
- * for the latest service-tier value before parsing the unprocessed tail.
- * The scan only keeps the current tier and does not materialize prefix
- * entries, preserving offset-based memory behavior for large sessions.
- */
+export interface SessionParserState {
+	version: 1;
+	offset: number;
+	dev: number;
+	ino: number;
+	birthtimeMs: number;
+	size: number;
+	mtimeMs: number;
+	checkpoint: string;
+	serviceTier: ServiceTierByFamily | null;
+}
+
 export interface ParseSessionResult {
 	stats: MessageStatsInput[];
 	userStats: UserMessageStats[];
@@ -477,17 +509,43 @@ export interface ParseSessionResult {
 	toolCalls: ToolCallStats[];
 	toolResults: ToolResultLink[];
 	newOffset: number;
+	parserState?: SessionParserState;
+	reset?: boolean;
 }
-export async function parseSessionFile(sessionPath: string, fromOffset = 0): Promise<ParseSessionResult> {
-	let bytes: Uint8Array;
-	try {
-		bytes = await Bun.file(sessionPath).bytes();
-	} catch (err) {
-		if (isEnoent(err))
-			return { stats: [], userStats: [], userLinks: [], toolCalls: [], toolResults: [], newOffset: fromOffset };
-		throw err;
-	}
 
+const CHECKPOINT_BYTES = 256;
+
+async function readCheckpoint(handle: fs.FileHandle, end: number): Promise<Uint8Array> {
+	// Positional reads keep the descriptor at zero for Bun.file(fd)'s subsequent tail read.
+	const start = Math.max(0, end - CHECKPOINT_BYTES);
+	const bytes = new Uint8Array(end - start);
+	let read = 0;
+	while (read < bytes.length) {
+		const result = await handle.read(bytes, read, bytes.length - read, start + read);
+		if (result.bytesRead === 0) break;
+		read += result.bytesRead;
+	}
+	return bytes.subarray(0, read);
+}
+
+export function matchesSessionFile(state: SessionParserState, info: nodeFs.Stats): boolean {
+	return state.dev === info.dev && state.ino === info.ino && state.birthtimeMs === info.birthtimeMs;
+}
+
+/** Offset-only callers reconstruct service-tier state once; persisted cursors read only the appended tail. */
+export async function parseSessionFile(
+	sessionPath: string,
+	fromOffset = 0,
+	state?: SessionParserState,
+	replay = false,
+): Promise<ParseSessionResult> {
+	let bytes: Uint8Array;
+	let start = fromOffset;
+	let reset = false;
+	let currentServiceTier: ServiceTierByFamily | undefined;
+	let info: nodeFs.Stats;
+	let checkpoint: string;
+	let read: number;
 	const folder = extractFolderFromPath(sessionPath);
 	const agentType = classifyAgentType(sessionPath);
 	const stats: MessageStatsInput[] = [];
@@ -495,64 +553,109 @@ export async function parseSessionFile(sessionPath: string, fromOffset = 0): Pro
 	const userLinks: UserMessageLink[] = [];
 	const toolCalls: ToolCallStats[] = [];
 	const toolResults: ToolResultLink[] = [];
-	const userByEntryId = new Map<string, UserMessageStats>();
-	const start = Math.max(0, Math.min(fromOffset, bytes.length));
-	const unprocessed = bytes.subarray(start);
-	const { entries, read } = parseSessionEntriesLenient(unprocessed);
-	let currentServiceTier: ServiceTierByFamily | undefined;
-	if (start > 0) {
-		currentServiceTier = scanLastServiceTier(bytes.subarray(0, start));
-	}
-	for (const entry of entries) {
+
+	// Reduce each entry immediately so full replays do not retain tool-output/message bodies.
+	const visit = (entry: SessionEntry): void => {
 		if (isServiceTierChange(entry)) {
 			currentServiceTier = coerceServiceTierByFamily(entry.serviceTier);
-			continue;
+			return;
 		}
 		if (isUserMessage(entry)) {
 			const userMsg = extractUserStats(sessionPath, folder, entry);
-			if (userMsg) {
-				userStats.push(userMsg);
-				userByEntryId.set(entry.id, userMsg);
-			}
-			continue;
+			if (userMsg) userStats.push(userMsg);
+			return;
 		}
 		if (isToolResultMessage(entry)) {
 			const link = extractToolResultLink(sessionPath, entry);
 			if (link) toolResults.push(link);
-			continue;
+			return;
 		}
 		if (isModelUsage(entry)) {
 			const modelUsageStats = extractModelUsageStats(sessionPath, folder, entry, agentType);
 			if (modelUsageStats) stats.push(modelUsageStats);
-			continue;
+			return;
 		}
 		if (isAssistantMessage(entry)) {
 			const msgStats = extractStats(sessionPath, folder, entry, currentServiceTier, agentType);
 			if (msgStats) stats.push(msgStats);
 			toolCalls.push(...extractToolCalls(sessionPath, folder, entry, agentType));
-			// Link assistant's responding model back to the user message it answered.
-			const parentId = (entry as SessionMessageEntry).parentId;
-			if (parentId) {
-				const msg = entry.message as AssistantMessage;
-				if (msg.model && msg.provider) {
-					// Emit unconditionally. The aggregator's UPDATE is guarded by
-					// `model IS NULL` so this is idempotent: a no-op for already
-					// linked rows, a fix-up for fresh inserts (which start NULL
-					// because the user row is recorded before its reply lands) and
-					// for cross-pass orphans whose parent was committed by an
-					// earlier incremental sync.
-					userLinks.push({
-						sessionFile: sessionPath,
-						entryId: parentId,
-						model: msg.model,
-						provider: msg.provider,
-					});
-				}
+			// Persist links even when the user entry was ingested in an earlier tail read.
+			const parentId = entry.parentId;
+			const msg = entry.message;
+			if (parentId && msg.role === "assistant" && msg.model && msg.provider) {
+				userLinks.push({
+					sessionFile: sessionPath,
+					entryId: parentId,
+					model: msg.model,
+					provider: msg.provider,
+				});
 			}
 		}
+	};
+
+	try {
+		const handle = await fs.open(sessionPath, "r");
+		try {
+			info = await handle.stat();
+			const file = Bun.file(handle.fd);
+			let resume = state?.version === 1 && state.offset === fromOffset;
+			if (resume && state) {
+				reset =
+					!matchesSessionFile(state, info) ||
+					info.size < state.size ||
+					(info.size === state.size && info.mtimeMs !== state.mtimeMs);
+				if (!reset) {
+					const previous = await readCheckpoint(handle, fromOffset);
+					reset = Bun.hash(previous).toString(16) !== state.checkpoint;
+				}
+				resume = !reset;
+			}
+			if (fromOffset > info.size) reset = true;
+			if (replay) resume = false;
+			start = reset || replay ? 0 : Math.max(0, fromOffset);
+			const readStart = resume ? start : 0;
+			bytes = await file.slice(readStart, info.size).bytes();
+			currentServiceTier = resume
+				? (state?.serviceTier ?? undefined)
+				: scanLastServiceTier(bytes.subarray(0, start));
+			read = visitSessionEntriesLenient(bytes.subarray(start - readStart), visit);
+			const newOffset = start + read;
+			const checkpointStart = Math.max(0, newOffset - CHECKPOINT_BYTES);
+			const previous =
+				checkpointStart >= readStart
+					? bytes.subarray(checkpointStart - readStart, newOffset - readStart)
+					: await readCheckpoint(handle, newOffset);
+			checkpoint = Bun.hash(previous).toString(16);
+		} finally {
+			await handle.close();
+		}
+	} catch (err) {
+		if (isEnoent(err))
+			return { stats: [], userStats: [], userLinks: [], toolCalls: [], toolResults: [], newOffset: fromOffset };
+		throw err;
 	}
 
-	return { stats, userStats, userLinks, toolCalls, toolResults, newOffset: start + read };
+	const newOffset = start + read;
+	return {
+		stats,
+		userStats,
+		userLinks,
+		toolCalls,
+		toolResults,
+		newOffset,
+		reset,
+		parserState: {
+			version: 1,
+			offset: newOffset,
+			dev: info.dev,
+			ino: info.ino,
+			birthtimeMs: info.birthtimeMs,
+			size: info.size,
+			mtimeMs: info.mtimeMs,
+			checkpoint,
+			serviceTier: currentServiceTier ?? null,
+		},
+	};
 }
 
 /**
@@ -585,14 +688,7 @@ export async function listSessionFiles(folderPath: string): Promise<string[]> {
  */
 export async function listAllSessionFiles(): Promise<string[]> {
 	const folders = await listSessionFolders();
-	const allFiles: string[] = [];
-
-	for (const folder of folders) {
-		const files = await listSessionFiles(folder);
-		allFiles.push(...files);
-	}
-
-	return allFiles;
+	return (await Promise.all(folders.map(listSessionFiles))).flat();
 }
 
 /**

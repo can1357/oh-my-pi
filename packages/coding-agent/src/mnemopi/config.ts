@@ -5,6 +5,32 @@ import type { MnemopiOptions } from "@oh-my-pi/pi-mnemopi";
 import { getMemoriesDir, logger } from "@oh-my-pi/pi-utils";
 import type { Settings } from "../config/settings";
 
+import {
+	cfgMnemopiAutoRecall,
+	cfgMnemopiAutoRetain,
+	cfgMnemopiBank,
+	cfgMnemopiDbPath,
+	cfgMnemopiDebug,
+	cfgMnemopiEmbeddingApiKey,
+	cfgMnemopiEmbeddingApiUrl,
+	cfgMnemopiEmbeddingModel,
+	cfgMnemopiEmbeddingVariant,
+	cfgMnemopiEnhancedRecall,
+	cfgMnemopiInjectionTokenLimit,
+	cfgMnemopiLlmApiKey,
+	cfgMnemopiLlmBaseUrl,
+	cfgMnemopiLlmMode,
+	cfgMnemopiLlmModel,
+	cfgMnemopiNoEmbeddings,
+	cfgMnemopiPolyphonicRecall,
+	cfgMnemopiProactiveLinking,
+	cfgMnemopiRecallContextTurns,
+	cfgMnemopiRecallLimit,
+	cfgMnemopiRecallMaxQueryChars,
+	cfgMnemopiRetainEveryNTurns,
+	cfgMnemopiScoping,
+} from "./settings";
+
 export type MnemopiLlmMode = "none" | "smol" | "remote";
 
 export type MnemopiScoping = "global" | "per-project" | "per-project-tagged";
@@ -41,27 +67,24 @@ export interface MnemopiBackendConfig {
 }
 
 export function loadMnemopiConfig(settings: Settings, agentDir: string): MnemopiBackendConfig {
-	const configuredDbPath = settings.get("mnemopi.dbPath");
+	const configuredDbPath = cfgMnemopiDbPath.get(settings);
 	const cwd = settings.getCwd();
-	const scoping = settings.get("mnemopi.scoping");
+	const scoping = cfgMnemopiScoping.get(settings);
 	const dbPath = configuredDbPath?.trim()
 		? configuredDbPath
 		: path.join(getMemoriesDir(agentDir), "mnemopi", "mnemopi.db");
-	const scope = computeMnemopiBankScope(settings.get("mnemopi.bank"), cwd, scoping);
+	const scope = computeMnemopiBankScope(cfgMnemopiBank.get(settings), cwd, scoping);
 	const recallBanks =
 		scoping === "global" ? scope.recallBanks : extendRecallWithLegacyBanks(scope.recallBanks, dbPath, cwd);
-	const llmMode = settings.get("mnemopi.llmMode");
-	const embeddingOverride = settings.get("mnemopi.embeddingModel");
-	const embeddingVariant = settings.get("mnemopi.embeddingVariant");
+	const llmMode = cfgMnemopiLlmMode.get(settings);
+	const embeddingOverride = cfgMnemopiEmbeddingModel.get(settings);
+	const embeddingVariant = cfgMnemopiEmbeddingVariant.get(settings);
 	// Map the variant explicitly rather than indexing an object with the raw config
 	// value (which could resolve an inherited property like `__proto__`); any value
 	// other than the multilingual variant falls back to the English default.
 	const variantModel =
 		embeddingVariant === "multilingual" ? "intfloat/multilingual-e5-large" : "BAAI/bge-base-en-v1.5";
-	// Precedence: explicit `mnemopi.embeddingModel` setting > `MNEMOPI_EMBEDDING_MODEL`
-	// env (documented model-level override) > variant-derived default. Without the env
-	// term a variant default would silently shadow a user's configured env model.
-	const embeddingModel = embeddingOverride?.trim() || Bun.env.MNEMOPI_EMBEDDING_MODEL?.trim() || variantModel;
+	const embeddingModel = embeddingOverride?.trim() || variantModel;
 	return {
 		dbPath,
 		baseBank: scope.baseBank,
@@ -70,36 +93,36 @@ export function loadMnemopiConfig(settings: Settings, agentDir: string): Mnemopi
 		retainBank: scope.retainBank,
 		recallBanks,
 		scoping,
-		autoRecall: settings.get("mnemopi.autoRecall"),
-		autoRetain: settings.get("mnemopi.autoRetain"),
-		polyphonicRecall: settings.get("mnemopi.polyphonicRecall"),
-		enhancedRecall: settings.get("mnemopi.enhancedRecall"),
-		proactiveLinking: settings.get("mnemopi.proactiveLinking"),
-		retainEveryNTurns: Math.max(1, Math.floor(settings.get("mnemopi.retainEveryNTurns"))),
-		recallLimit: Math.max(1, Math.floor(settings.get("mnemopi.recallLimit"))),
-		recallContextTurns: Math.max(1, Math.floor(settings.get("mnemopi.recallContextTurns"))),
-		recallMaxQueryChars: Math.max(256, Math.floor(settings.get("mnemopi.recallMaxQueryChars"))),
-		injectionTokenLimit: Math.max(256, Math.floor(settings.get("mnemopi.injectionTokenLimit"))),
-		debug: settings.get("mnemopi.debug"),
+		autoRecall: cfgMnemopiAutoRecall.get(settings),
+		autoRetain: cfgMnemopiAutoRetain.get(settings),
+		polyphonicRecall: cfgMnemopiPolyphonicRecall.get(settings),
+		enhancedRecall: cfgMnemopiEnhancedRecall.get(settings),
+		proactiveLinking: cfgMnemopiProactiveLinking.get(settings),
+		retainEveryNTurns: Math.max(1, Math.floor(cfgMnemopiRetainEveryNTurns.get(settings))),
+		recallLimit: Math.max(1, Math.floor(cfgMnemopiRecallLimit.get(settings))),
+		recallContextTurns: Math.max(1, Math.floor(cfgMnemopiRecallContextTurns.get(settings))),
+		recallMaxQueryChars: Math.max(256, Math.floor(cfgMnemopiRecallMaxQueryChars.get(settings))),
+		injectionTokenLimit: Math.max(256, Math.floor(cfgMnemopiInjectionTokenLimit.get(settings))),
+		debug: cfgMnemopiDebug.get(settings),
 		providerOptions: {
-			noEmbeddings: settings.get("mnemopi.noEmbeddings"),
-			debug: settings.get("mnemopi.debug"),
+			noEmbeddings: cfgMnemopiNoEmbeddings.get(settings),
+			debug: cfgMnemopiDebug.get(settings),
 			embeddingModel,
-			embeddingApiUrl: settings.get("mnemopi.embeddingApiUrl"),
-			embeddingApiKey: settings.get("mnemopi.embeddingApiKey"),
+			embeddingApiUrl: cfgMnemopiEmbeddingApiUrl.get(settings),
+			embeddingApiKey: cfgMnemopiEmbeddingApiKey.get(settings),
 			llm:
 				llmMode === "remote"
 					? {
-							baseUrl: settings.get("mnemopi.llmBaseUrl"),
-							apiKey: settings.get("mnemopi.llmApiKey"),
-							model: settings.get("mnemopi.llmModel"),
+							baseUrl: cfgMnemopiLlmBaseUrl.get(settings),
+							apiKey: cfgMnemopiLlmApiKey.get(settings),
+							model: cfgMnemopiLlmModel.get(settings),
 						}
 					: false,
 		},
 		llmMode,
-		llmBaseUrl: settings.get("mnemopi.llmBaseUrl"),
-		llmApiKey: settings.get("mnemopi.llmApiKey"),
-		llmModel: settings.get("mnemopi.llmModel"),
+		llmBaseUrl: cfgMnemopiLlmBaseUrl.get(settings),
+		llmApiKey: cfgMnemopiLlmApiKey.get(settings),
+		llmModel: cfgMnemopiLlmModel.get(settings),
 	};
 }
 
@@ -232,15 +255,17 @@ function bankOnlyHasCwd(dbPath: string, cwd: string): boolean {
 	let db: Database | undefined;
 	try {
 		db = new Database(dbPath, { readonly: true });
+		// "Safe" = no row with a different/missing cwd AND at least one matching row. Both probes stop at
+		// the first hit, and CASE skips the matching probe once an unsafe row disqualifies the bank.
 		const row = db
-			.prepare<{ matching: number; unsafe: number }, [string, string]>(`
-				SELECT
-					SUM(CASE WHEN json_extract(metadata_json, '$.cwd') = ? THEN 1 ELSE 0 END) AS matching,
-					SUM(CASE WHEN json_extract(metadata_json, '$.cwd') IS NULL OR json_extract(metadata_json, '$.cwd') <> ? THEN 1 ELSE 0 END) AS unsafe
-				FROM working_memory
+			.prepare<{ safe: number }, [string]>(`
+				SELECT CASE
+					WHEN EXISTS(SELECT 1 FROM working_memory WHERE json_extract(metadata_json, '$.cwd') IS NOT ?1) THEN 0
+					ELSE EXISTS(SELECT 1 FROM working_memory WHERE json_extract(metadata_json, '$.cwd') = ?1)
+				END AS safe
 			`)
-			.get(cwd, cwd);
-		return (row?.matching ?? 0) > 0 && (row?.unsafe ?? 0) === 0;
+			.get(cwd);
+		return row?.safe === 1;
 	} catch (error) {
 		logger.debug("Mnemopi: legacy bank probe failed", { dbPath, error: String(error) });
 		return false;

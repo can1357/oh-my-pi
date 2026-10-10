@@ -9,7 +9,7 @@ import * as oauthFlow from "@oh-my-pi/pi-coding-agent/mcp/oauth-flow";
 import type { SourceMeta } from "@oh-my-pi/pi-coding-agent/capability/types";
 import type { MCPServerConfig } from "@oh-my-pi/pi-coding-agent/mcp/types";
 import { MCPCommandController } from "@oh-my-pi/pi-coding-agent/modes/controllers/mcp-command-controller";
-import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import {
 	getConfigRootDir,
 	getMCPConfigPath,
@@ -150,8 +150,23 @@ describe("/mcp auth commands", () => {
 	});
 
 	test("stores definition-only OAuth credentials under the expanded URL key", async () => {
+		await Bun.write(
+			configPath,
+			`${JSON.stringify(
+				{
+					mcpServers: {
+						"MaaS Slack": {
+							type: "http",
+							url: RAW_SERVER_URL,
+						},
+					},
+				},
+				null,
+				2,
+			)}\n`,
+		);
 		const authStorage = freshAuthStorage();
-		await authStorage.reload();
+		await authStorage.credentials.reload();
 		const connectToServer = vi.spyOn(mcpClient, "connectToServer").mockRejectedValue(AUTH_ERROR);
 		vi.spyOn(oauthFlow.MCPOAuthFlow.prototype, "login").mockResolvedValue({
 			access: "fresh-access",
@@ -160,7 +175,7 @@ describe("/mcp auth commands", () => {
 		});
 		const { controller, showError, prepareConfig } = createController(authStorage);
 
-		await controller.handle("/mcp reauth envserver");
+		await controller.handle("/mcp reauth MaaS Slack");
 
 		expect(showError).not.toHaveBeenCalled();
 		expect(prepareConfig).toHaveBeenCalledWith(
@@ -171,16 +186,16 @@ describe("/mcp auth commands", () => {
 			expect.any(String),
 			expect.objectContaining({ url: EXPANDED_SERVER_URL }),
 		);
-		expect(authStorage.get(oauthFlow.mcpOAuthCredentialId(EXPANDED_SERVER_URL))).toMatchObject({
+		expect(authStorage.credentials.get(oauthFlow.mcpOAuthCredentialId(EXPANDED_SERVER_URL))).toMatchObject({
 			type: "oauth",
 			access: "fresh-access",
 			tokenUrl: "https://auth.example.com/token",
 			resource: EXPANDED_SERVER_URL,
 		});
-		expect(authStorage.get(oauthFlow.mcpOAuthCredentialId(RAW_SERVER_URL))).toBeUndefined();
+		expect(authStorage.credentials.get(oauthFlow.mcpOAuthCredentialId(RAW_SERVER_URL))).toBeUndefined();
 
 		const saved = JSON.parse(await Bun.file(configPath).text()) as TestConfigFile;
-		const savedServer = saved.mcpServers?.envserver;
+		const savedServer = saved.mcpServers?.["MaaS Slack"];
 		const savedUrl = savedServer?.type === "http" || savedServer?.type === "sse" ? savedServer.url : undefined;
 		expect(savedUrl).toBe(RAW_SERVER_URL);
 		expect(savedServer?.auth).toBeUndefined();
@@ -188,7 +203,7 @@ describe("/mcp auth commands", () => {
 
 	test("uses the registration endpoint discovered from a pathful issuer", async () => {
 		const authStorage = freshAuthStorage();
-		await authStorage.reload();
+		await authStorage.credentials.reload();
 		const resourceMetadataUrl = "https://gateway.example.com/.well-known/oauth-protected-resource/my-service/mcp";
 		vi.spyOn(mcpClient, "connectToServer").mockRejectedValue(
 			new Error(`HTTP 401: WWW-Authenticate: Bearer resource_metadata="${resourceMetadataUrl}"`),
@@ -246,7 +261,7 @@ describe("/mcp auth commands", () => {
 
 		expect(showError).not.toHaveBeenCalled();
 		expect(registrationRequests).toEqual(["https://auth.example.com/auth/v1/oauth/register"]);
-		expect(authStorage.get(oauthFlow.mcpOAuthCredentialId(EXPANDED_SERVER_URL))).toMatchObject({
+		expect(authStorage.credentials.get(oauthFlow.mcpOAuthCredentialId(EXPANDED_SERVER_URL))).toMatchObject({
 			type: "oauth",
 			clientId: "pathful-dcr-client",
 		});
@@ -254,7 +269,7 @@ describe("/mcp auth commands", () => {
 
 	test("uses tool challenge resource metadata and scopes during reauth", async () => {
 		const authStorage = freshAuthStorage();
-		await authStorage.reload();
+		await authStorage.credentials.reload();
 		await Bun.write(
 			configPath,
 			JSON.stringify({
@@ -322,7 +337,7 @@ describe("/mcp auth commands", () => {
 
 	test("reauthorizes on a tool challenge even when the anonymous handshake succeeds", async () => {
 		const authStorage = freshAuthStorage();
-		await authStorage.reload();
+		await authStorage.credentials.reload();
 		// Server allows the unauthenticated handshake; only tool calls are protected.
 		vi.spyOn(mcpClient, "connectToServer").mockResolvedValue({} as never);
 		vi.spyOn(mcpClient, "disconnectServer").mockResolvedValue(undefined as never);
@@ -372,7 +387,7 @@ describe("/mcp auth commands", () => {
 
 	test("/mcp reauth acquires a credential when the handshake succeeds but tools need OAuth", async () => {
 		const authStorage = freshAuthStorage();
-		await authStorage.reload();
+		await authStorage.credentials.reload();
 		// The anonymous handshake (`initialize`) succeeds; only `tools/call` is
 		// gated behind OAuth. The unauthenticated probe must not treat this as
 		// proof that reauthorization is unnecessary.
@@ -410,7 +425,7 @@ describe("/mcp auth commands", () => {
 		await controller.handle("/mcp reauth envserver");
 
 		expect(showError).not.toHaveBeenCalled();
-		expect(authStorage.get(oauthFlow.mcpOAuthCredentialId(EXPANDED_SERVER_URL))).toMatchObject({
+		expect(authStorage.credentials.get(oauthFlow.mcpOAuthCredentialId(EXPANDED_SERVER_URL))).toMatchObject({
 			type: "oauth",
 			access: "fresh-access",
 			tokenUrl: "https://auth.example.com/token",
@@ -419,7 +434,7 @@ describe("/mcp auth commands", () => {
 
 	test("prefers dynamic registration over a metadata-advertised client", async () => {
 		const authStorage = freshAuthStorage();
-		await authStorage.reload();
+		await authStorage.credentials.reload();
 		vi.spyOn(mcpClient, "connectToServer").mockResolvedValue({} as never);
 		vi.spyOn(mcpClient, "disconnectServer").mockResolvedValue(undefined as never);
 
@@ -474,14 +489,14 @@ describe("/mcp auth commands", () => {
 		expect(registrationRequests).toHaveLength(1);
 		expect(new URL(authorizationUrl).searchParams.get("client_id")).toBe("dcr-client");
 		expect(tokenRequest?.get("client_id")).toBe("dcr-client");
-		expect(authStorage.get(oauthFlow.mcpOAuthCredentialId(EXPANDED_SERVER_URL))).toMatchObject({
+		expect(authStorage.credentials.get(oauthFlow.mcpOAuthCredentialId(EXPANDED_SERVER_URL))).toMatchObject({
 			clientId: "dcr-client",
 		});
 	});
 
 	test("does not persist a whitespace-only embedded client id", async () => {
 		const authStorage = freshAuthStorage();
-		await authStorage.reload();
+		await authStorage.credentials.reload();
 		vi.spyOn(mcpClient, "connectToServer").mockRejectedValue(
 			new Error(
 				'HTTP 401: {"authorization_url":"https://auth.example.com/authorize?client_id=%20%09","token_url":"https://auth.example.com/token"}',
@@ -518,7 +533,7 @@ describe("/mcp auth commands", () => {
 		expect(showError).not.toHaveBeenCalled();
 		expect(new URL(authorizationUrl).searchParams.get("client_id")).toBeNull();
 		expect(tokenRequest?.has("client_id")).toBe(false);
-		const savedCredential = authStorage.get(oauthFlow.mcpOAuthCredentialId(EXPANDED_SERVER_URL)) as
+		const savedCredential = authStorage.credentials.get(oauthFlow.mcpOAuthCredentialId(EXPANDED_SERVER_URL)) as
 			| oauthFlow.MCPStoredOAuthCredential
 			| undefined;
 		expect(savedCredential).toMatchObject({ type: "oauth", access: "fresh-access" });
@@ -529,7 +544,7 @@ describe("/mcp auth commands", () => {
 
 	test("uses configured OAuth scope when endpoint metadata omits scopes", async () => {
 		const authStorage = freshAuthStorage();
-		await authStorage.reload();
+		await authStorage.credentials.reload();
 		await Bun.write(
 			configPath,
 			JSON.stringify({
@@ -583,7 +598,7 @@ describe("/mcp auth commands", () => {
 
 	test("uses configured OAuth client credentials as a pair when discovery advertises another client", async () => {
 		const authStorage = freshAuthStorage();
-		await authStorage.reload();
+		await authStorage.credentials.reload();
 		await Bun.write(
 			configPath,
 			JSON.stringify({
@@ -657,7 +672,7 @@ describe("/mcp auth commands", () => {
 
 	test("does not persist or reuse a configured-only OAuth secret", async () => {
 		const authStorage = freshAuthStorage();
-		await authStorage.reload();
+		await authStorage.credentials.reload();
 		await Bun.write(
 			configPath,
 			JSON.stringify({
@@ -738,17 +753,17 @@ describe("/mcp auth commands", () => {
 		expect(savedAuthAfterSecondReauth?.clientSecret).toBeUndefined();
 		expect(savedAfterSecondReauth.mcpServers?.envserver?.oauth?.clientId).toBeUndefined();
 		expect(savedAfterSecondReauth.mcpServers?.envserver?.oauth?.clientSecret).toBe("configured-secret");
-		const savedCredentialAfterSecond = authStorage.get(oauthFlow.mcpOAuthCredentialId(EXPANDED_SERVER_URL)) as
-			| oauthFlow.MCPStoredOAuthCredential
-			| undefined;
+		const savedCredentialAfterSecond = authStorage.credentials.get(
+			oauthFlow.mcpOAuthCredentialId(EXPANDED_SERVER_URL),
+		) as oauthFlow.MCPStoredOAuthCredential | undefined;
 		expect(savedCredentialAfterSecond).toMatchObject({ clientId: "discovered-client" });
 		expect(savedCredentialAfterSecond?.clientSecret).toBeUndefined();
 	});
 
 	test("reuses embedded DCR client secret during reauth token exchange", async () => {
 		const authStorage = freshAuthStorage();
-		await authStorage.reload();
-		await authStorage.set(oauthFlow.mcpOAuthCredentialId(EXPANDED_SERVER_URL), {
+		await authStorage.credentials.reload();
+		await authStorage.credentials.set(oauthFlow.mcpOAuthCredentialId(EXPANDED_SERVER_URL), {
 			type: "oauth",
 			access: "old-access",
 			refresh: "old-refresh",
@@ -810,7 +825,7 @@ describe("/mcp auth commands", () => {
 		const tokenRequest = new URLSearchParams(tokenRequestBody);
 		expect(tokenRequest.get("client_id")).toBe("dcr-client");
 		expect(tokenRequest.get("client_secret")).toBe("dcr-secret");
-		expect(authStorage.get(oauthFlow.mcpOAuthCredentialId(EXPANDED_SERVER_URL))).toMatchObject({
+		expect(authStorage.credentials.get(oauthFlow.mcpOAuthCredentialId(EXPANDED_SERVER_URL))).toMatchObject({
 			type: "oauth",
 			access: "fresh-access",
 			clientId: "dcr-client",
@@ -820,7 +835,7 @@ describe("/mcp auth commands", () => {
 
 	test("Esc aborts the OAuth flow during /mcp reauth", async () => {
 		const authStorage = freshAuthStorage();
-		await authStorage.reload();
+		await authStorage.credentials.reload();
 		vi.spyOn(mcpClient, "connectToServer").mockRejectedValue(AUTH_ERROR);
 
 		// Simulate the real flow: login hangs waiting for the OAuth callback and
@@ -861,7 +876,7 @@ describe("/mcp auth commands", () => {
 
 	test("reauth supersedes an unfinished MCP OAuth flow", async () => {
 		const authStorage = freshAuthStorage();
-		await authStorage.reload();
+		await authStorage.credentials.reload();
 		vi.spyOn(mcpClient, "connectToServer").mockRejectedValue(AUTH_ERROR);
 		let loginAttempt = 0;
 		vi.spyOn(oauthFlow.MCPOAuthFlow.prototype, "login").mockImplementation(function (this: oauthFlow.MCPOAuthFlow) {
@@ -912,14 +927,14 @@ describe("/mcp auth commands", () => {
 		expect(loginAttempt).toBe(2);
 		expect(showError).not.toHaveBeenCalled();
 		expect(showStatus).toHaveBeenCalledWith(expect.stringMatching(/cancel/i));
-		expect(authStorage.get(oauthFlow.mcpOAuthCredentialId(EXPANDED_SERVER_URL))).toMatchObject({
+		expect(authStorage.credentials.get(oauthFlow.mcpOAuthCredentialId(EXPANDED_SERVER_URL))).toMatchObject({
 			access: "replacement-access",
 		});
 	});
 
 	test("Esc cancels even when OAuth login has not registered its signal listener yet", async () => {
 		const authStorage = freshAuthStorage();
-		await authStorage.reload();
+		await authStorage.credentials.reload();
 		vi.spyOn(mcpClient, "connectToServer").mockRejectedValue(AUTH_ERROR);
 
 		// Simulates the review race: Esc aborts oauthTimeout before
@@ -944,7 +959,7 @@ describe("/mcp auth commands", () => {
 
 	test("OAuth deadline still surfaces as a reauthorization error, not a cancellation", async () => {
 		const authStorage = freshAuthStorage();
-		await authStorage.reload();
+		await authStorage.credentials.reload();
 		vi.spyOn(mcpClient, "connectToServer").mockRejectedValue(AUTH_ERROR);
 
 		// Deadline path bypasses both the editor's Esc hook and any external
@@ -968,14 +983,14 @@ describe("/mcp auth commands", () => {
 
 	test("clears both expanded and stale raw URL-keyed credentials on unauth", async () => {
 		const authStorage = freshAuthStorage();
-		await authStorage.reload();
-		await authStorage.set(oauthFlow.mcpOAuthCredentialId(EXPANDED_SERVER_URL), {
+		await authStorage.credentials.reload();
+		await authStorage.credentials.set(oauthFlow.mcpOAuthCredentialId(EXPANDED_SERVER_URL), {
 			type: "oauth",
 			access: "expanded-access",
 			refresh: "expanded-refresh",
 			expires: Date.now() + 3_600_000,
 		});
-		await authStorage.set(oauthFlow.mcpOAuthCredentialId(RAW_SERVER_URL), {
+		await authStorage.credentials.set(oauthFlow.mcpOAuthCredentialId(RAW_SERVER_URL), {
 			type: "oauth",
 			access: "raw-access",
 			refresh: "raw-refresh",
@@ -986,8 +1001,8 @@ describe("/mcp auth commands", () => {
 		await controller.handle("/mcp unauth envserver");
 
 		expect(showError).not.toHaveBeenCalled();
-		expect(authStorage.get(oauthFlow.mcpOAuthCredentialId(EXPANDED_SERVER_URL))).toBeUndefined();
-		expect(authStorage.get(oauthFlow.mcpOAuthCredentialId(RAW_SERVER_URL))).toBeUndefined();
+		expect(authStorage.credentials.get(oauthFlow.mcpOAuthCredentialId(EXPANDED_SERVER_URL))).toBeUndefined();
+		expect(authStorage.credentials.get(oauthFlow.mcpOAuthCredentialId(RAW_SERVER_URL))).toBeUndefined();
 		const saved = JSON.parse(await Bun.file(configPath).text()) as TestConfigFile;
 		const savedServer = saved.mcpServers?.envserver;
 		const savedUrl = savedServer?.type === "http" || savedServer?.type === "sse" ? savedServer.url : undefined;
@@ -997,8 +1012,8 @@ describe("/mcp auth commands", () => {
 
 	test("clears url-keyed auth for discovered definition-only servers", async () => {
 		const authStorage = freshAuthStorage();
-		await authStorage.reload();
-		await authStorage.set(oauthFlow.mcpOAuthCredentialId(EXPANDED_SERVER_URL), {
+		await authStorage.credentials.reload();
+		await authStorage.credentials.set(oauthFlow.mcpOAuthCredentialId(EXPANDED_SERVER_URL), {
 			type: "oauth",
 			access: "discovered-access",
 			refresh: "discovered-refresh",
@@ -1017,7 +1032,7 @@ describe("/mcp auth commands", () => {
 		await controller.handle("/mcp unauth discovered");
 
 		expect(showError).not.toHaveBeenCalled();
-		expect(authStorage.get(oauthFlow.mcpOAuthCredentialId(EXPANDED_SERVER_URL))).toBeUndefined();
+		expect(authStorage.credentials.get(oauthFlow.mcpOAuthCredentialId(EXPANDED_SERVER_URL))).toBeUndefined();
 		const userConfigPath = getMCPConfigPath("user", projectDir);
 		const userConfig = JSON.parse(
 			await Bun.file(userConfigPath)
@@ -1029,7 +1044,7 @@ describe("/mcp auth commands", () => {
 
 	test("passes env-expanded OAuth client credentials to the reauth flow", async () => {
 		const authStorage = freshAuthStorage();
-		await authStorage.reload();
+		await authStorage.credentials.reload();
 		const originalClientId = Bun.env.MCP_OAUTH_CLIENT_ID;
 		const originalClientSecret = Bun.env.MCP_OAUTH_CLIENT_SECRET;
 		Bun.env.MCP_OAUTH_CLIENT_ID = "expanded-client-id";

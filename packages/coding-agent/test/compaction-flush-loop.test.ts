@@ -1,5 +1,5 @@
 import { beforeAll, describe, expect, mock, test } from "bun:test";
-import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import type { CompactionQueuedMessage, InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { UiHelpers } from "@oh-my-pi/pi-coding-agent/modes/utils/ui-helpers";
 
@@ -25,10 +25,12 @@ function makeCtx(
 	});
 	const ctx = {
 		session: {
+			customCommands: [],
 			prompt,
 			promptCustomMessage: mock(async () => true),
 			clearQueue: () => ({ steering: [], followUp: [] }),
 		},
+		editor: { setText: () => {} },
 		compactionQueuedMessages: [...initialQueue],
 		skillCommands: new Map(),
 		fileSlashCommands: new Set<string>(),
@@ -54,6 +56,64 @@ function makeCtx(
 		getLoopPrompt: () => currentLoopPrompt,
 	};
 }
+
+function makeBuiltinCtx(queue: CompactionQueuedMessage[]) {
+	const { ctx } = makeCtx(queue, undefined);
+	const helpers = new UiHelpers(ctx);
+	ctx.isKnownSlashCommand = text => helpers.isKnownSlashCommand(text);
+	return { ctx, helpers };
+}
+
+test("queued /new starts a new session before the next prompt", async () => {
+	const { ctx, helpers } = makeBuiltinCtx([
+		{ text: "/new", mode: "followUp" },
+		{ text: "work in the new session", mode: "steer" },
+	]);
+	let sessionId = "previous";
+	ctx.handleClearCommand = async () => {
+		sessionId = "new";
+	};
+	const requests: Array<{ sessionId: string; text: string }> = [];
+	ctx.session.prompt = mock(async text => {
+		requests.push({ sessionId, text });
+		return true;
+	});
+
+	await helpers.flushCompactionQueue({ willRetry: false });
+	await Promise.resolve();
+	await Promise.resolve();
+
+	expect(requests).toEqual([{ sessionId: "new", text: "work in the new session" }]);
+});
+
+test("a queued builtin without a following prompt runs locally", async () => {
+	const { ctx, helpers } = makeBuiltinCtx([{ text: "/new", mode: "followUp" }]);
+	let sessionId = "previous";
+	ctx.handleClearCommand = async () => {
+		sessionId = "new";
+	};
+	const prompt = mock(async () => true);
+	ctx.session.prompt = prompt;
+
+	await helpers.flushCompactionQueue({ willRetry: false });
+
+	expect(sessionId).toBe("new");
+	expect(prompt).not.toHaveBeenCalled();
+});
+
+test("a queued builtin's inline prompt starts a turn without sending the slash text", async () => {
+	const { ctx, helpers } = makeBuiltinCtx([{ text: "/loop 2 investigate", mode: "followUp" }]);
+	ctx.handleLoopCommand = async () => "investigate";
+	const requests: string[] = [];
+	ctx.session.prompt = mock(async text => {
+		requests.push(text);
+		return true;
+	});
+
+	await helpers.flushCompactionQueue({ willRetry: false });
+
+	expect(requests).toEqual(["investigate"]);
+});
 
 describe("flushCompactionQueue loop parking", () => {
 	test("all-slash drain parks the loop when the body is consumed locally", async () => {

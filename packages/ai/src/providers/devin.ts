@@ -1,5 +1,6 @@
 import { gunzipSync, gzipSync } from "node:zlib";
 
+import { classifyModel } from "@oh-my-pi/pi-catalog/compat/taxonomy";
 import {
 	AssignModelRequestSchema,
 	AssignModelResponseSchema,
@@ -20,6 +21,7 @@ import {
 	GetUserJwtResponseSchema,
 	type ImageData,
 	ImageDataSchema,
+	type Metadata,
 	MetadataSchema,
 	type ModelAssignment,
 	PromptCacheOptionsSchema,
@@ -27,10 +29,12 @@ import {
 } from "@oh-my-pi/pi-catalog/discovery/devin-proto";
 import { create, fromBinary, toBinary } from "@oh-my-pi/pi-catalog/discovery/protobuf";
 import { calculateCost } from "@oh-my-pi/pi-catalog/models";
-import { DEVIN_DEFAULT_BASE_URL, devinCliMetadata } from "@oh-my-pi/pi-catalog/wire/devin";
+import { DEVIN_DEFAULT_BASE_URL, devinCliMetadata, devinWireMetadata } from "@oh-my-pi/pi-catalog/wire/devin";
 import { decodeDevinUnaryMessage } from "@oh-my-pi/pi-catalog/wire/devin-proto";
-import { logger, parseStreamingJson, parseStreamingJsonThrottled } from "@oh-my-pi/pi-utils";
+import { isRecord, logger, parseStreamingJsonThrottled, sanitizeText } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error";
+import { parseToolCallArguments } from "../utils/tool-call-arguments";
+
 import type {
 	Api,
 	AssistantMessage,
@@ -50,7 +54,13 @@ import { normalizeSystemPrompts } from "../utils";
 import { isDemotedThinking } from "../utils/block-symbols";
 import { deterministicUuid } from "../utils/deterministic-id";
 import { AssistantMessageEventStream } from "../utils/event-stream";
-import { toolWireSchema } from "../utils/schema/wire";
+import { normalizeSchemaForGoogle, toolWireSchema } from "../utils/schema";
+import {
+	CONNECT_COMPRESSED_FLAG,
+	CONNECT_END_STREAM_FLAG,
+	ConnectFrameDecoder,
+	frameConnectMessage,
+} from "./connect-frame";
 import { transformMessages } from "./transform-messages";
 
 /** Base host for Codeium/Windsurf's Cascade chat API (Connect protocol over HTTP/1.1). */
@@ -70,15 +80,12 @@ const DEVIN_ASSIGN_MODEL_PATH = "/exa.api_server_pb.ApiServerService/AssignModel
 const DEVIN_AUTH_PATH = "/exa.auth_pb.AuthService/GetUserJwt";
 const DEVIN_DEFAULT_STOP_PATTERNS = ["<|user|>", "<|bot|>", "<|context_request|>", "<|endoftext|>", "<|end_of_turn|>"];
 
-/** Connect streaming framing: flag byte bit 0x01 = gzip payload, 0x02 = end-of-stream JSON trailers. */
-const CONNECT_COMPRESSED_FLAG = 0x01;
-const CONNECT_END_STREAM_FLAG = 0x02;
 /**
  * Hard upper bound on a single Connect frame payload. The 4-byte length prefix
  * is otherwise attacker-controlled (up to `2**32 - 1`), so a malicious or buggy
- * peer could force {@link streamDevin}'s reader to buffer gigabytes via
- * `Buffer.concat` before the idle-timeout wrapper aborts. Well above any
- * legitimate Cascade response but tight enough that a corrupt length prefix
+ * peer could force {@link streamDevin}'s reader to buffer gigabytes before the
+ * idle-timeout wrapper aborts. Well above any legitimate Cascade response but
+ * tight enough that a corrupt length prefix
  * fails fast instead of consuming memory.
  */
 const MAX_CONNECT_FRAME_PAYLOAD = 16 * 1024 * 1024;
@@ -89,6 +96,58 @@ const MAX_CONNECT_FRAME_PAYLOAD = 16 * 1024 * 1024;
  * to benefit from the existing context-overflow maintenance path.
  */
 const LARGE_HISTORY_RECOVERY_BYTES = 512 * 1024;
+const MAX_DEVIN_ERROR_DETAIL_CHARS = 4096;
+const HTML_ERROR_BODY_PATTERN = /^\s*(?:<!doctype\s+html\b|<html\b)/i;
+
+/** Extract a bounded human error without leaking proxy HTML or binary protobuf. */
+function devinErrorDetail(response: Response, payload: Uint8Array): string | undefined {
+	let text: string;
+	try {
+		text = new TextDecoder("utf-8", { fatal: true }).decode(payload).trim();
+	} catch {
+		return undefined;
+	}
+	if (response.headers.get("content-type")?.toLowerCase().includes("text/html")) return undefined;
+	try {
+		const decoded: unknown = JSON.parse(text);
+		if (isRecord(decoded)) {
+			const error = decoded.error;
+			if (isRecord(error) && typeof error.message === "string") text = error.message.trim();
+			else if (typeof error === "string") text = error.trim();
+			else if (typeof decoded.message === "string") text = decoded.message.trim();
+		}
+	} catch {}
+	// Validate after envelope extraction: JSON escapes (`\u001b`, `<html>` inside a
+	// message) materialize bytes the raw-source scan cannot see. Whitespace is
+	// collapsed first so benign CRLF does not trip the control detection; after
+	// that, any text `sanitizeText` would alter (C0/C1 controls, DEL, malformed
+	// Unicode) is untrustworthy diagnostics and suppresses to status-only.
+	const normalized = text.replace(/\s+/g, " ").trim();
+	if (normalized.length === 0 || HTML_ERROR_BODY_PATTERN.test(normalized) || sanitizeText(normalized) !== normalized) {
+		return undefined;
+	}
+	if (normalized.length <= MAX_DEVIN_ERROR_DETAIL_CHARS) return normalized;
+	// Truncate on a code-point boundary: slicing through a surrogate pair would
+	// re-introduce the malformed text the sanitizeText gate just ruled out.
+	const boundaryUnit = normalized.charCodeAt(MAX_DEVIN_ERROR_DETAIL_CHARS - 1);
+	const cut =
+		boundaryUnit >= 0xd800 && boundaryUnit <= 0xdbff
+			? MAX_DEVIN_ERROR_DETAIL_CHARS - 1
+			: MAX_DEVIN_ERROR_DETAIL_CHARS;
+	return normalized.slice(0, cut);
+}
+
+function createDevinHttpError(operation: string, response: Response, payload: Uint8Array): AIError.DevinApiError {
+	const status = `${response.status}${response.statusText ? ` ${response.statusText}` : ""}`;
+	const detail = devinErrorDetail(response, payload);
+	return new AIError.DevinApiError(
+		`Devin ${operation} error ${status}${detail ? `: ${detail}` : ""}`,
+		response.status,
+		{
+			headers: response.headers,
+		},
+	);
+}
 
 export const streamDevin: StreamFunction<"devin-agent"> = (
 	model: Model<"devin-agent">,
@@ -130,6 +189,8 @@ export const streamDevin: StreamFunction<"devin-agent"> = (
 		// the authoritative final parse still runs unconditionally in the
 		// toolcall_end loop below.
 		const toolLastParseLen = new Map<string, number>();
+		// Content index recorded at push, so deltas never scan `output.content`.
+		const blockIndices = new Map<TextContent | ThinkingContent | ToolCall, number>();
 		let activeToolCallId: string | undefined;
 		let latestStopReason = StopReason.UNSPECIFIED;
 
@@ -143,7 +204,7 @@ export const streamDevin: StreamFunction<"devin-agent"> = (
 			currentTextBlock = null;
 			stream.push({
 				type: "text_end",
-				contentIndex: output.content.indexOf(block),
+				contentIndex: blockIndices.get(block)!,
 				content: block.text,
 				partial: output,
 			});
@@ -155,7 +216,7 @@ export const streamDevin: StreamFunction<"devin-agent"> = (
 			currentThinkingBlock = null;
 			stream.push({
 				type: "thinking_end",
-				contentIndex: output.content.indexOf(block),
+				contentIndex: blockIndices.get(block)!,
 				content: block.thinking,
 				partial: output,
 			});
@@ -167,7 +228,7 @@ export const streamDevin: StreamFunction<"devin-agent"> = (
 			const auth = await fetchDevinAuthMetadata(options?.apiKey, baseUrl, fetchImpl, options?.signal);
 			const chatBaseUrl = auth.baseUrl ?? baseUrl;
 			const turn: DevinTurn = {
-				apiKey: options?.apiKey,
+				apiKey: auth.apiKey,
 				userJwt: auth.userJwt,
 				cascadeId: options?.conversationId ?? options?.sessionId ?? crypto.randomUUID(),
 				messages: transformMessages(context.messages, model),
@@ -180,7 +241,9 @@ export const streamDevin: StreamFunction<"devin-agent"> = (
 				assignment = await assignDevinModel(model, turn, chatBaseUrl, fetchImpl, options?.signal);
 				output.upstreamModel = assignment.modelUid;
 			}
-			const request = buildDevinChatRequest(model, context, options, turn, assignment);
+			let request = buildDevinChatRequest(model, context, options, turn, assignment);
+			const replacementRequest = await options?.onPayload?.(request, model);
+			if (replacementRequest !== undefined) request = replacementRequest as typeof request;
 			const reqBytes = toBinary(GetChatMessageRequestSchema, request);
 			const gz = gzipSync(reqBytes);
 			logger.debug("devin: sending chat request", {
@@ -189,10 +252,7 @@ export const streamDevin: StreamFunction<"devin-agent"> = (
 				requestBytes: reqBytes.byteLength,
 				compressedBytes: gz.byteLength,
 			});
-			const frame = Buffer.alloc(5 + gz.length);
-			frame[0] = CONNECT_COMPRESSED_FLAG;
-			frame.writeUInt32BE(gz.length, 1);
-			frame.set(gz, 5);
+			const frame = frameConnectMessage(gz, CONNECT_COMPRESSED_FLAG);
 
 			const response = await fetchImpl(chatBaseUrl + CHAT_MESSAGE_PATH, {
 				method: "POST",
@@ -210,11 +270,8 @@ export const streamDevin: StreamFunction<"devin-agent"> = (
 			});
 
 			if (!response.ok) {
-				const text = await response.text();
-				throw new AIError.DevinApiError(
-					`Devin API error ${response.status} ${response.statusText}: ${text}`,
-					response.status,
-				);
+				const payload = new Uint8Array(await response.arrayBuffer());
+				throw createDevinHttpError("API", response, payload);
 			}
 			if (!response.body) {
 				throw new AIError.ProviderResponseError("Devin API error: response body is empty", {
@@ -227,32 +284,21 @@ export const streamDevin: StreamFunction<"devin-agent"> = (
 			stream.push({ type: "start", partial: output });
 
 			const reader = body.getReader();
-			let pending = Buffer.alloc(0);
+			const frameDecoder = new ConnectFrameDecoder({
+				limit: {
+					maxPayloadBytes: MAX_CONNECT_FRAME_PAYLOAD,
+					error: len =>
+						new AIError.ProviderResponseError(
+							`Devin Connect frame length ${len} exceeds ${MAX_CONNECT_FRAME_PAYLOAD}-byte cap`,
+							{ provider: model.provider, kind: "envelope" },
+						),
+				},
+			});
 
 			for (;;) {
 				const { done, value } = await reader.read();
-				if (value && value.length > 0) {
-					// Steady state drains fully per chunk; view the fresh reader chunk
-					// instead of copying it through Buffer.concat (see aws-eventstream.ts).
-					pending =
-						pending.length === 0
-							? Buffer.from(value.buffer, value.byteOffset, value.byteLength)
-							: Buffer.concat([pending, value]);
-				}
 
-				while (pending.length >= 5) {
-					const flag = pending[0];
-					const len = pending.readUInt32BE(1);
-					if (len > MAX_CONNECT_FRAME_PAYLOAD) {
-						throw new AIError.ProviderResponseError(
-							`Devin Connect frame length ${len} exceeds ${MAX_CONNECT_FRAME_PAYLOAD}-byte cap`,
-							{ provider: model.provider, kind: "envelope" },
-						);
-					}
-					if (pending.length < 5 + len) break;
-					const payload = pending.subarray(5, 5 + len);
-					pending = pending.subarray(5 + len);
-
+				for (const { flags: flag, payload } of frameDecoder.decode(value)) {
 					if (flag & CONNECT_END_STREAM_FLAG) {
 						const trailerBytes = flag & CONNECT_COMPRESSED_FLAG ? gunzipSync(payload) : payload;
 						const trailerError = readConnectTrailerError(trailerBytes.toString("utf8").trim());
@@ -332,7 +378,7 @@ export const streamDevin: StreamFunction<"devin-agent"> = (
 						markFirstToken();
 						const block: ThinkingContent = currentThinkingBlock ?? { type: "thinking", thinking: "" };
 						if (currentThinkingBlock !== block) {
-							output.content.push(block);
+							blockIndices.set(block, output.content.push(block) - 1);
 							currentThinkingBlock = block;
 							stream.push({
 								type: "thinking_start",
@@ -344,7 +390,7 @@ export const streamDevin: StreamFunction<"devin-agent"> = (
 						if (msg.deltaSignature) block.thinkingSignature = msg.deltaSignature;
 						stream.push({
 							type: "thinking_delta",
-							contentIndex: output.content.indexOf(block),
+							contentIndex: blockIndices.get(block)!,
 							delta: msg.deltaThinking,
 							partial: output,
 						});
@@ -355,14 +401,14 @@ export const streamDevin: StreamFunction<"devin-agent"> = (
 						endThinkingBlock();
 						const block: TextContent = currentTextBlock ?? { type: "text", text: "" };
 						if (currentTextBlock !== block) {
-							output.content.push(block);
+							blockIndices.set(block, output.content.push(block) - 1);
 							currentTextBlock = block;
 							stream.push({ type: "text_start", contentIndex: output.content.length - 1, partial: output });
 						}
 						block.text += msg.deltaText;
 						stream.push({
 							type: "text_delta",
-							contentIndex: output.content.indexOf(block),
+							contentIndex: blockIndices.get(block)!,
 							delta: msg.deltaText,
 							partial: output,
 						});
@@ -378,7 +424,7 @@ export const streamDevin: StreamFunction<"devin-agent"> = (
 							let block = toolBlocks.get(toolCallId);
 							if (!block) {
 								block = { type: "toolCall", id: toolCallId, name: tc.name, arguments: {} };
-								output.content.push(block);
+								blockIndices.set(block, output.content.push(block) - 1);
 								toolBlocks.set(toolCallId, block);
 								toolPartialJson.set(toolCallId, "");
 								stream.push({
@@ -403,7 +449,7 @@ export const streamDevin: StreamFunction<"devin-agent"> = (
 							}
 							stream.push({
 								type: "toolcall_delta",
-								contentIndex: output.content.indexOf(block),
+								contentIndex: blockIndices.get(block)!,
 								delta,
 								partial: output,
 							});
@@ -437,10 +483,10 @@ export const streamDevin: StreamFunction<"devin-agent"> = (
 			endTextBlock();
 			endThinkingBlock();
 			for (const [id, block] of toolBlocks) {
-				block.arguments = parseStreamingJson(toolPartialJson.get(id));
+				block.arguments = parseToolCallArguments(toolPartialJson.get(id));
 				stream.push({
 					type: "toolcall_end",
-					contentIndex: output.content.indexOf(block),
+					contentIndex: blockIndices.get(block)!,
 					toolCall: block,
 					partial: output,
 				});
@@ -475,7 +521,7 @@ export const streamDevin: StreamFunction<"devin-agent"> = (
 
 /** Per-turn wire state shared by `AssignModel` and `GetChatMessage`. */
 interface DevinTurn {
-	apiKey: string | undefined;
+	apiKey: string;
 	userJwt: string;
 	/** Cascade thread id; assignment and chat must agree on it or the JWT is rejected. */
 	cascadeId: string;
@@ -483,13 +529,18 @@ interface DevinTurn {
 	messages: Message[];
 }
 
-async function fetchDevinAuthMetadata(
-	apiKey: string | undefined,
+interface DevinAuthAttempt {
+	response: Response;
+	payload: Uint8Array;
+}
+
+async function requestDevinAuth(
+	metadata: Metadata,
 	baseUrl: string,
 	fetchImpl: NonNullable<StreamOptions["fetch"]>,
 	signal: AbortSignal | undefined,
-): Promise<{ userJwt: string; baseUrl?: string }> {
-	const request = create(GetUserJwtRequestSchema, { metadata: create(MetadataSchema, devinCliMetadata(apiKey)) });
+): Promise<DevinAuthAttempt> {
+	const request = create(GetUserJwtRequestSchema, { metadata });
 	const response = await fetchImpl(`${baseUrl}${DEVIN_AUTH_PATH}`, {
 		method: "POST",
 		headers: {
@@ -500,14 +551,29 @@ async function fetchDevinAuthMetadata(
 		body: toBinary(GetUserJwtRequestSchema, request),
 		signal,
 	});
-	const payload = new Uint8Array(await response.arrayBuffer());
-	if (!response.ok) {
-		throw new AIError.DevinApiError(
-			`Devin auth error ${response.status} ${response.statusText}: ${new TextDecoder().decode(payload)}`,
-			response.status,
-		);
+	return { response, payload: new Uint8Array(await response.arrayBuffer()) };
+}
+
+async function fetchDevinAuthMetadata(
+	apiKey: string | undefined,
+	baseUrl: string,
+	fetchImpl: NonNullable<StreamOptions["fetch"]>,
+	signal: AbortSignal | undefined,
+): Promise<{ userJwt: string; apiKey: string; baseUrl?: string }> {
+	const sessionMetadata = create(MetadataSchema, devinCliMetadata(apiKey));
+	let wireApiKey = sessionMetadata.apiKey;
+	let attempt = await requestDevinAuth(sessionMetadata, baseUrl, fetchImpl, signal);
+
+	if (attempt.response.status === 401) {
+		const apiKeyMetadata = create(MetadataSchema, devinWireMetadata(apiKey));
+		if (apiKeyMetadata.apiKey && apiKeyMetadata.apiKey !== sessionMetadata.apiKey) {
+			attempt = await requestDevinAuth(apiKeyMetadata, baseUrl, fetchImpl, signal);
+			wireApiKey = apiKeyMetadata.apiKey;
+		}
 	}
-	const decoded = decodeDevinUnaryMessage(GetUserJwtResponseSchema, payload);
+
+	if (!attempt.response.ok) throw createDevinHttpError("auth", attempt.response, attempt.payload);
+	const decoded = decodeDevinUnaryMessage(GetUserJwtResponseSchema, attempt.payload);
 	if (!decoded?.userJwt) {
 		throw new AIError.ProviderResponseError("Devin auth error: GetUserJwt returned an empty user JWT", {
 			provider: "devin",
@@ -515,7 +581,11 @@ async function fetchDevinAuthMetadata(
 		});
 	}
 	const customBaseUrl = decoded.customApiServerUrl.trim();
-	return { userJwt: decoded.userJwt, ...(customBaseUrl ? { baseUrl: customBaseUrl.replace(/\/+$/, "") } : undefined) };
+	return {
+		userJwt: decoded.userJwt,
+		apiKey: wireApiKey,
+		...(customBaseUrl ? { baseUrl: customBaseUrl.replace(/\/+$/, "") } : undefined),
+	};
 }
 
 /**
@@ -532,7 +602,7 @@ async function assignDevinModel(
 	signal: AbortSignal | undefined,
 ): Promise<ModelAssignment> {
 	const request = create(AssignModelRequestSchema, {
-		metadata: create(MetadataSchema, devinCliMetadata(turn.apiKey)),
+		metadata: create(MetadataSchema, devinWireMetadata(turn.apiKey)),
 		modelRouterUid: model.requestModelId ?? model.id,
 		cascadeId: turn.cascadeId,
 		chatMessagePrompt: buildRouterPrompt(turn.messages),
@@ -548,12 +618,7 @@ async function assignDevinModel(
 		signal,
 	});
 	const payload = new Uint8Array(await response.arrayBuffer());
-	if (!response.ok) {
-		throw new AIError.DevinApiError(
-			`Devin AssignModel error ${response.status} ${response.statusText}: ${new TextDecoder().decode(payload)}`,
-			response.status,
-		);
-	}
+	if (!response.ok) throw createDevinHttpError("AssignModel", response, payload);
 	const assignment = decodeDevinUnaryMessage(AssignModelResponseSchema, payload)?.assignment;
 	if (!assignment?.assignmentJwt || !assignment.modelUid) {
 		throw new AIError.ProviderResponseError(
@@ -598,11 +663,31 @@ function buildDevinChatRequest(
 		options?.stopSequences && options.stopSequences.length > 0
 			? [...DEVIN_DEFAULT_STOP_PATTERNS, ...options.stopSequences]
 			: DEVIN_DEFAULT_STOP_PATTERNS;
+	const chatModelUid = assignment?.modelUid ?? options?.chatModelUid ?? model.requestModelId ?? model.id;
+	// Devin routes multiple provider families through one Cascade envelope. Its
+	// Gemini backend applies Google's tool-schema constraints and rejects JSON
+	// Schema type arrays (e.g. `["number", "null"]`) as an opaque internal
+	// `invalid_argument`; normalize both direct Gemini models and router-assigned
+	// enum-style UIDs (`MODEL_GOOGLE_GEMINI_*`) before serializing tools. The UID
+	// prefix is the server's own enum namespace, which classifyModel cannot parse.
+	const googleToolSchema =
+		classifyModel("devin", model.id, { lenient: true }).class === "gemini" ||
+		classifyModel("devin", chatModelUid, { lenient: true }).class === "gemini" ||
+		chatModelUid.startsWith("MODEL_GOOGLE_GEMINI_");
+	const tools = (context.tools ?? []).map((tool: Tool) => {
+		const schema = toolWireSchema(tool);
+		return create(ChatToolDefinitionSchema, {
+			name: tool.name,
+			description: tool.description,
+			jsonSchemaString: JSON.stringify(googleToolSchema ? normalizeSchemaForGoogle(schema) : schema),
+			strict: tool.strict ?? false,
+		});
+	});
 	return create(GetChatMessageRequestSchema, {
-		metadata: create(MetadataSchema, devinCliMetadata(turn.apiKey, turn.userJwt)),
+		metadata: create(MetadataSchema, devinWireMetadata(turn.apiKey, turn.userJwt)),
 		prompt: normalizeSystemPrompts(context.systemPrompt).join("\n\n"),
 		chatMessagePrompts: buildChatMessagePrompts(turn.messages, turn.cascadeId, model),
-		chatModelUid: assignment?.modelUid ?? options?.chatModelUid ?? model.requestModelId ?? model.id,
+		chatModelUid,
 		...(assignment ? { modelAssignmentJwt: assignment.assignmentJwt } : undefined),
 		requestType: ChatMessageRequestType.CASCADE,
 		plannerMode: ConversationalPlannerMode.DEFAULT,
@@ -622,14 +707,7 @@ function buildDevinChatRequest(
 			stopPatterns,
 			fimEotProbThreshold: 1,
 		}),
-		tools: (context.tools ?? []).map((tool: Tool) =>
-			create(ChatToolDefinitionSchema, {
-				name: tool.name,
-				description: tool.description,
-				jsonSchemaString: JSON.stringify(toolWireSchema(tool)),
-				strict: tool.strict ?? false,
-			}),
-		),
+		tools,
 	});
 }
 

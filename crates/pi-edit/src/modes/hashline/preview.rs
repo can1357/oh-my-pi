@@ -1,6 +1,8 @@
 //! Streaming section previews
 //! (`packages/coding-agent/src/edit/hashline/diff.ts`).
 
+use std::borrow::Cow;
+
 use super::{
 	apply::EmptyPaste,
 	block::{Unresolved, resolve_block_edits},
@@ -28,11 +30,14 @@ fn cursor_line(cursor: Cursor, file_line_count: usize) -> u32 {
 	}
 }
 
+/// The streaming diff rows, first changed line, and parsed whole-file op.
+type StreamingDiff = (String, Option<u32>, Option<FileOp>);
+
 fn streaming_diff(
 	section: &PatchSection,
 	normalized: &str,
 	clipboard: &mut Clipboard,
-) -> Result<(String, Option<u32>), String> {
+) -> Result<StreamingDiff, String> {
 	let parsed = parse_patch_streaming(&section.diff).map_err(|error| error.to_string())?;
 	let block_resolved = resolve_block_edits(
 		&parsed.edits,
@@ -43,10 +48,7 @@ fn streaming_diff(
 		&mut |_| {},
 	)
 	.map_err(|error| error.to_string())?;
-	let file_lines = normalized
-		.split('\n')
-		.map(str::to_owned)
-		.collect::<Vec<_>>();
+	let file_lines = normalized.split('\n').collect::<Vec<_>>();
 	let mut scratch = clipboard.fork();
 	let resolved = match resolve_clipboard_edits(
 		&block_resolved,
@@ -59,14 +61,17 @@ fn streaming_diff(
 			*clipboard = scratch;
 			edits
 		},
-		Err(_) => block_resolved
-			.into_iter()
-			.filter(|edit| !matches!(edit, Edit::Cut { .. } | Edit::Paste { .. }))
-			.collect(),
+		Err(_) => Cow::Owned(
+			block_resolved
+				.iter()
+				.filter(|edit| !matches!(edit, Edit::Cut { .. } | Edit::Paste { .. }))
+				.cloned()
+				.collect(),
+		),
 	};
 	if resolved.is_empty() {
 		if parsed.file_op.is_some() {
-			return Ok((String::new(), None));
+			return Ok((String::new(), None, parsed.file_op));
 		}
 		return Err(format!("No changes would be made to {}.", section.path));
 	}
@@ -83,7 +88,7 @@ fn streaming_diff(
 				Edit::Delete { anchor, .. } => deletes.push(anchor.line),
 				Edit::Insert { cursor, text, .. } => {
 					insert_base.get_or_insert_with(|| cursor_line(*cursor, file_lines.len()));
-					inserts.push(text.clone());
+					inserts.push(text.as_str());
 				},
 				Edit::Cut { .. } | Edit::Paste { .. } | Edit::Block { .. } => {},
 			}
@@ -96,7 +101,8 @@ fn streaming_diff(
 				.ok()
 				.and_then(|value| value.checked_sub(1))
 				.and_then(|value| file_lines.get(value))
-				.map_or("", String::as_str);
+				.copied()
+				.unwrap_or("");
 			rows.push(format!("-{line}|{content}"));
 		}
 		let mut line = insert_base
@@ -111,7 +117,7 @@ fn streaming_diff(
 	if rows.is_empty() {
 		Err(format!("No changes would be made to {}.", section.path))
 	} else {
-		Ok((rows.join("\n"), first))
+		Ok((rows.join("\n"), first, parsed.file_op))
 	}
 }
 
@@ -125,19 +131,43 @@ fn preview_section(
 	let mut result = PreviewFile { display: section.path.clone(), ..PreviewFile::default() };
 	let outcome = (|| {
 		let initial = files.resolve(&section.path, false)?;
-		let (target, resolved) = recover_target(section, &initial, files, store);
+		let recovered = recover_target(section, &initial, files, store);
+		let (target, resolved) = recovered
+			.as_ref()
+			.map_or((section, &initial), |(target, resolved)| (target, resolved));
 		result.display.clone_from(&target.path);
-		let read = files.try_read(&resolved)?.ok_or_else(|| {
-			crate::error::EditError::apply(format!("File not found: {}", target.path))
-		})?;
+		let read = match files.try_read(resolved) {
+			Ok(Some(read)) => read,
+			Ok(None) => {
+				return Err(crate::error::EditError::apply(format!("File not found: {}", target.path)));
+			},
+			// Whole-file delete preview needs existence, not text. Streaming
+			// sections parse partially, so a trailing-incomplete section must
+			// not claim the delete preview; the drop at preview_patch already
+			// hides the last section while more payload may arrive.
+			Err(err) if err.is_invalid_utf8() => {
+				let is_delete = !streaming
+					|| parse_patch_streaming(&target.diff)
+						.is_ok_and(|parsed| !parsed.edits.is_empty() || parsed.file_op.is_some());
+				let is_delete = is_delete
+					&& target.parse().is_ok_and(|parsed| {
+						target.file_hash.is_some() && matches!(parsed.file_op, Some(FileOp::Rem))
+					});
+				if !is_delete {
+					return Err(err);
+				}
+				result.op = Some(EngineFileOp::Delete);
+				result.diff = Some(String::new());
+				return Ok(());
+			},
+			Err(err) => return Err(err),
+		};
 		if streaming {
-			let (diff, first) = streaming_diff(&target, &read.text, clipboard)
+			let (diff, first, file_op) = streaming_diff(target, &read.text, clipboard)
 				.map_err(crate::error::EditError::apply)?;
 			result.diff = Some(diff);
 			result.first_changed_line = first;
-			let parsed = parse_patch_streaming(&target.diff)
-				.map_err(|error| crate::error::EditError::parse(error.to_string()))?;
-			result.op = Some(if matches!(parsed.file_op, Some(FileOp::Rem)) {
+			result.op = Some(if matches!(file_op, Some(FileOp::Rem)) {
 				EngineFileOp::Delete
 			} else {
 				EngineFileOp::Update
@@ -156,7 +186,7 @@ fn preview_section(
 			parsed.edits.as_slice()
 		};
 		let applied =
-			apply_with_recovery(&target, &read.canonical, &read.text, edits, clipboard, store, false)?;
+			apply_with_recovery(target, &read.canonical, &read.text, edits, clipboard, store, false)?;
 		result.op = Some(if matches!(parsed.file_op, Some(FileOp::Rem)) {
 			EngineFileOp::Delete
 		} else {
@@ -177,8 +207,9 @@ fn preview_section(
 			)));
 		}
 		let diff = generate_diff_string(&read.text, &applied.text, None, &BlockContextSource {
-			path: Some(&target.path),
-			lang: None,
+			path:      Some(&target.path),
+			lang:      None,
+			streaming: false,
 		});
 		result.diff = Some(diff.diff);
 		result.first_changed_line = applied.first_changed_line.or(diff.first_changed_line);

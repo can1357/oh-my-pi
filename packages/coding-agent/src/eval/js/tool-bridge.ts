@@ -1,15 +1,22 @@
-import type { AgentTool, AgentToolResult } from "@oh-my-pi/pi-agent-core";
-import { toolWireSchema, validateToolArguments } from "@oh-my-pi/pi-ai";
+import { type AgentTool, type AgentToolResult, validateAgentToolArguments } from "@oh-my-pi/pi-agent-core";
+import { type ImageContent, toolWireSchema } from "@oh-my-pi/pi-ai";
 import { isRecord } from "@oh-my-pi/pi-utils";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
 import type { ToolSession } from "../../tools";
-import { ToolError } from "../../tools/tool-errors";
+import { committedTodoPhases } from "../../tools/todo";
+import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { schemaDeclaresIntentField } from "../../utils/tool-schema";
-import { invokeEvalPrelude } from "../preludes";
+import { findEnabledEvalPrelude, invokeEvalPrelude } from "../preludes";
 import { EVAL_AGENT_BRIDGE_NAME, type EvalAgentHandleResult, runEvalAgent } from "../agent-bridge";
 import { EVAL_BUDGET_BRIDGE_NAME, type EvalBudgetResult, runEvalBudget } from "../budget-bridge";
 import { withBridgeTimeoutPause } from "../bridge-timeout";
 import { EVAL_COMPLETION_BRIDGE_NAME, type EvalCompletionHandleResult, runEvalCompletion } from "../completion-bridge";
+import {
+	EVAL_JUDGMENT_BATCH_BRIDGE_NAME,
+	type EvalJudgmentBatchResult,
+	runEvalJudgmentBatch,
+} from "../judgment-batch-bridge";
+import { EVAL_JUDGMENT_BRIDGE_NAME, type EvalJudgmentResult, runEvalJudgment } from "../judgment-bridge";
 import {
 	EVAL_CANCEL_BRIDGE_NAME,
 	type EvalHandleSnapshot,
@@ -31,7 +38,6 @@ export interface ToolBridgeOptions {
 	session: ToolSession;
 	signal?: AbortSignal;
 	emitStatus?: (event: JsStatusEvent) => void;
-	defaultIntent?: string;
 	identity?: RuntimeCallIdentity;
 	shadowCell?: EvalShadowCellSession;
 }
@@ -41,6 +47,8 @@ type ToolValue =
 	| EvalBudgetResult
 	| EvalAgentHandleResult
 	| EvalCompletionHandleResult
+	| EvalJudgmentResult
+	| EvalJudgmentBatchResult
 	| EvalHandleSnapshot
 	| EvalWorkpoolResult
 	| { items: EvalHandleSnapshot[] }
@@ -48,7 +56,7 @@ type ToolValue =
 	| {
 			text: string;
 			details?: unknown;
-			images?: Array<{ mimeType: string; data: string }>;
+			images?: Omit<ImageContent, "type">[];
 			hasError?: boolean;
 	  };
 function toolResultHasError(result: AgentToolResult): boolean {
@@ -64,15 +72,6 @@ function getTool(session: ToolSession, name: string): AgentTool {
 	return tool;
 }
 
-function normalizeArgs(args: unknown, defaultIntent?: string): unknown {
-	if (!isRecord(args)) return args;
-	const record = { ...args };
-	if (defaultIntent !== undefined && !(INTENT_FIELD in record)) {
-		record[INTENT_FIELD] = defaultIntent;
-	}
-	return record;
-}
-
 function parsePreludeRequest(args: unknown): { name: string; parameters: unknown } {
 	if (!isRecord(args)) throw new ToolError("Invalid eval prelude bridge request");
 	const name = args.name;
@@ -82,13 +81,16 @@ function parsePreludeRequest(args: unknown): { name: string; parameters: unknown
 	return { name, parameters: args.parameters };
 }
 
-function summarizeToolResult(
+/** Builds the status event recorded for one bridged host call; `undefined` records nothing. */
+type StatusSummarizer = (
 	name: string,
 	args: unknown,
 	result: AgentToolResult,
 	text: string,
 	hasError: boolean,
-): JsStatusEvent {
+) => JsStatusEvent | undefined;
+
+const summarizeToolResult: StatusSummarizer = (name, args, result, text, hasError) => {
 	const record = isRecord(args) ? args : {};
 	const details = isRecord(result.details) ? result.details : {};
 	const withError = (event: JsStatusEvent): JsStatusEvent =>
@@ -124,9 +126,24 @@ function summarizeToolResult(
 				code: typeof details.exitCode === "number" ? details.exitCode : undefined,
 				output: text.slice(0, 500),
 			});
+		case "todo":
+			return withError({ op: "todo", chars: text.length, committed: committedTodoPhases(result) !== undefined });
 		default:
 			return withError({ op: name, chars: text.length });
 	}
+};
+
+/**
+ * Prelude calls (browser, computer) describe themselves: a bare op name with a
+ * byte count is noise, so a prelude without a `status` hook records nothing on
+ * success. Failures always surface.
+ */
+function summarizePreludeResult(session: ToolSession): StatusSummarizer {
+	return (name, args, result, text, hasError) => {
+		if (hasError) return { op: name, error: text.slice(0, 500) };
+		const detail = findEnabledEvalPrelude(session, name)?.status?.(args, result);
+		return detail === undefined ? undefined : { op: name, detail };
+	};
 }
 
 export function bridgeValueFromToolResult(
@@ -134,34 +151,29 @@ export function bridgeValueFromToolResult(
 	args: unknown,
 	result: AgentToolResult,
 	emitStatus?: (event: JsStatusEvent) => void,
+	summarize: StatusSummarizer = summarizeToolResult,
 ): ToolValue {
 	const textBlocks = result.content.filter(
 		(content): content is { type: "text"; text: string } =>
 			content.type === "text" && typeof content.text === "string",
 	);
 	const imageBlocks = result.content.filter(
-		(content): content is { type: "image"; mimeType: string; data: string } =>
+		(content): content is ImageContent =>
 			content.type === "image" && typeof content.mimeType === "string" && typeof content.data === "string",
 	);
 	const text = textBlocks.map(block => block.text).join("");
 	const hasError = toolResultHasError(result);
-	emitStatus?.(summarizeToolResult(name, args, result, text, hasError));
+	if (emitStatus) {
+		const event = summarize(name, args, result, text, hasError);
+		if (event) emitStatus(event);
+	}
 	if (result.details === undefined && imageBlocks.length === 0 && !hasError) return text;
 	const value: Exclude<ToolValue, string> = { text, details: result.details };
 	if (imageBlocks.length > 0) {
-		value.images = imageBlocks.map(block => ({ mimeType: block.mimeType, data: block.data }));
+		value.images = imageBlocks.map(({ type: _type, ...image }) => image);
 	}
 	if (hasError) value.hasError = true;
 	return value;
-}
-
-function normalizeAgentToolResult(
-	name: string,
-	args: unknown,
-	result: AgentToolResult,
-	options: ToolBridgeOptions,
-): ToolValue {
-	return bridgeValueFromToolResult(name, args, result, options.emitStatus);
 }
 
 function waitForSpeculativeClaim<T>(claim: Promise<T>, signal?: AbortSignal): Promise<T> {
@@ -203,7 +215,13 @@ export async function callSessionTool(name: string, args: unknown, options: Tool
 					context: options.session.getToolContext?.(),
 				}),
 			);
-			return normalizeAgentToolResult(request.name, request.parameters, result, options);
+			return bridgeValueFromToolResult(
+				request.name,
+				request.parameters,
+				result,
+				options.emitStatus,
+				summarizePreludeResult(options.session),
+			);
 		} catch (error) {
 			options.emitStatus?.({
 				op: request.name,
@@ -214,6 +232,12 @@ export async function callSessionTool(name: string, args: unknown, options: Tool
 	}
 	if (name === EVAL_COMPLETION_BRIDGE_NAME) {
 		return await runEvalCompletion(args, options);
+	}
+	if (name === EVAL_JUDGMENT_BRIDGE_NAME) {
+		return await runEvalJudgment(args, options);
+	}
+	if (name === EVAL_JUDGMENT_BATCH_BRIDGE_NAME) {
+		return await runEvalJudgmentBatch(args, options);
 	}
 	if (name === EVAL_AGENT_BRIDGE_NAME) {
 		return await runEvalAgent(args, options);
@@ -242,60 +266,51 @@ export async function callSessionTool(name: string, args: unknown, options: Tool
 	const toolCallId = `js-${name}-${crypto.randomUUID()}`;
 	// A schema-owned name stays tool data across alternatives. Deleting an
 	// invalid value to make another branch match could select a different operation.
+	// Harness `i` is dropped here exactly as `extractIntent` drops it on the direct
+	// path, so tools see identical args from both entry points.
 	const intentIsDeclared = schemaDeclaresIntentField(toolWireSchema(tool));
-	const suppliedIntent = isRecord(args) ? args[INTENT_FIELD] : undefined;
 	const validationArgs = isRecord(args) ? { ...args } : args;
 	if (isRecord(validationArgs) && !intentIsDeclared) delete validationArgs[INTENT_FIELD];
 	let validatedArgs: unknown;
 	try {
-		validatedArgs = validateToolArguments(tool, {
-			type: "toolCall",
-			id: toolCallId,
-			name,
-			arguments: validationArgs as Record<string, unknown>,
-		});
+		// Script-written args: `__parseError`/`__rawJson` keys are forged, so lenience strips them.
+		validatedArgs = validateAgentToolArguments(
+			tool,
+			{ type: "toolCall", id: toolCallId, name, arguments: validationArgs as Record<string, unknown> },
+			"payload",
+		);
 	} catch (error) {
-		if (!tool.lenientArgValidation) {
-			options.emitStatus?.({
-				op: name,
-				error: error instanceof Error ? error.message : String(error),
-			});
-			throw error;
-		}
-		if (isRecord(validationArgs)) {
-			const fallback = { ...validationArgs };
-			delete fallback.__parseError;
-			delete fallback.__rawJson;
-			validatedArgs = fallback;
-		} else {
-			validatedArgs = validationArgs;
-		}
+		options.emitStatus?.({
+			op: name,
+			error: error instanceof Error ? error.message : String(error),
+		});
+		throw error;
 	}
-	if (isRecord(validatedArgs) && !intentIsDeclared && suppliedIntent !== undefined) {
-		validatedArgs[INTENT_FIELD] = suppliedIntent;
-	}
-	const normalizedArgs = normalizeArgs(
-		validatedArgs,
-		!intentIsDeclared ? (options.defaultIntent ?? "js prelude") : undefined,
-	);
 	const shadowCell = options.shadowCell ?? getActiveEvalShadowCell();
 	if (shadowCell && options.identity) {
 		const claimed = await waitForSpeculativeClaim(
-			shadowCell.claim(name, normalizedArgs, options.identity, Number.MAX_SAFE_INTEGER, options.signal),
+			shadowCell.claim(name, validatedArgs, options.identity, Number.MAX_SAFE_INTEGER, options.signal),
 			options.signal,
 		);
 		options.signal?.throwIfAborted();
-		if (claimed) return bridgeValueFromToolResult(name, normalizedArgs, claimed, options.emitStatus);
+		if (claimed) return bridgeValueFromToolResult(name, validatedArgs, claimed, options.emitStatus);
 	}
 	try {
 		const result = await tool.execute(
 			toolCallId,
-			normalizedArgs,
+			validatedArgs,
 			options.signal,
 			undefined,
 			options.session.getToolContext?.(),
 		);
-		return normalizeAgentToolResult(name, normalizedArgs, result, options);
+		if (name === "todo") {
+			// A bridged call emits no `todo` toolResult entry, the only thing branch
+			// rehydration reads; without this the in-memory update is lost on the
+			// next resume/rewind/fork and stale todos trigger a false reminder.
+			const phases = committedTodoPhases(result);
+			if (phases) options.session.persistTodoPhases?.(phases);
+		}
+		return bridgeValueFromToolResult(name, validatedArgs, result, options.emitStatus);
 	} catch (error) {
 		options.emitStatus?.({
 			op: name,

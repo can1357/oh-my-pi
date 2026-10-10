@@ -12,6 +12,9 @@ class "qwen" {
 
     revision prefix="qwen"
 
+    override id="yolo-auto-yolo-flash-identity" provider="yolo-auto" model="yolo" class="qwen" revision="3.8" rationale="Yolo-Auto's paid yolo route is initially backed by the same Qwen3.8 Flash deployment as qwen3.8-flash; the opaque alias carries no lineage tokens" provenance="yolo-auto.com/models (2026-09)"
+    override id="prismml-bonsai-27b-qwen-3-6" glob="*bonsai-27b*" class="qwen" revision="3.6" rationale="Reviewed PrismML Bonsai and Ternary-Bonsai 27B lineage is Qwen3.6-27B; the wire basename may carry a prefix or GGUF quantization suffix" provenance="packages/coding-agent/src/config/model-discovery.ts; original reviewed alias e3aa6594e5"
+    override id="prismml-bonsai-2-27b-qwen-3-8" glob="*bonsai-2-27b*" class="qwen" revision="3.8" rationale="Reviewed PrismML Bonsai 2 27B lineage is Qwen3.8-27B; the wire basename may carry a prefix or GGUF quantization suffix" provenance="packages/coding-agent/src/config/model-discovery.ts"
     override id="kilo-qwq-32b-family" provider="kilo" model="qwq-32b" logical="qwen/qwq-32b" class="qwen" rationale="The reviewed Kilo QwQ deployment belongs to the Qwen family despite its opaque product spelling" provenance="fixtures/llm-oracle/catalog/models.normalized.json"
     override id="nanogpt-eva-qwen-2-5-family" provider="nanogpt" model="EVA-Qwen2.5-32B-v0.2" logical="EVA-UNIT-01/EVA-Qwen2.5-32B-v0.2" class="qwen" rationale="The reviewed EVA deployment is a Qwen 2.5 derivative despite its opaque product namespace" provenance="fixtures/llm-oracle/catalog/models.normalized.json"
     override id="nanogpt-eva-qwen-2-5-72b-family" provider="nanogpt" model="EVA-Qwen2.5-72B-v0.2" logical="EVA-UNIT-01/EVA-Qwen2.5-72B-v0.2" class="qwen" rationale="The reviewed EVA 72B deployment is a Qwen 2.5 derivative despite its opaque product namespace" provenance="fixtures/llm-oracle/catalog/models.normalized.json"

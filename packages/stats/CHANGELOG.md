@@ -2,6 +2,91 @@
 
 ## [Unreleased]
 
+## [18.8.0] - 2026-10-07
+
+### Changed
+
+- Improved dashboard responsiveness and efficiency by reducing unnecessary data refreshes and re-rendering, speeding up session synchronization, database access, package imports, and usage, model, and time-series requests, and avoiding repeated downloads of unchanged traces.
+- Dashboard requests are now cancelled when no longer needed, improving responsiveness when switching sessions or closing trace views during loading.
+
+## [18.7.0] - 2026-10-06
+
+### Fixed
+
+- Fixed Ultrafast turns not being counted toward the Premium Requests statistic.
+- Fixed the desktop stats dashboard menu button so it no longer appears unnecessarily or dims the page without opening navigation.
+
+## [18.6.0] - 2026-10-03
+
+### Fixed
+
+- Fixed the Frustration page splitting DeepSeek V4 provider variants and the V4.1 Flash alias into separate model-version rows ([#14194](https://github.com/can1357/oh-my-pi/issues/14194)).
+
+## [18.5.1] - 2026-10-03
+
+### Fixed
+
+- Fixed stats dashboard request rows for Judge and other role-model calls so they open correctly and display usage details.
+- Fixed stats and summary error-rate formatting so small nonzero percentages are displayed accurately instead of as 0.0%.
+- Fixed a visual fringe on the edges of the stats dashboard’s “Classify with judge” button.
+
+## [18.4.4] - 2026-09-29
+
+### Added
+
+- Added the `printStatsSummary` export, shared by `omp-stats --sync` and `omp stats --summary`.
+
+## [18.4.3] - 2026-09-28
+
+### Fixed
+
+- Fixed `omp stats` dashboard numbers following the browser locale while the rest of the UI is English (e.g. `546 B` meaning 546 thousand and `$38.003,33` on a Turkish browser); figures now always use en-US formatting ([#13640](https://github.com/can1357/oh-my-pi/pull/13640) by [@NaC-L](https://github.com/NaC-L))
+
+## [18.4.1] - 2026-09-28
+
+### Fixed
+
+- Fixed `/trace` and `omp stats` dashboards failing to load after operating-system temporary-file cleanup ([#13487](https://github.com/can1357/oh-my-pi/pull/13487) by [@Peter-Tam](https://github.com/Peter-Tam)).
+
+## [18.4.0] - 2026-09-28
+
+### Changed
+
+- Redesigned the dashboard: new layout, navigation (`g` + letter to jump, `1`–`6` to pick a range), sortable tables and in-house charts on every page
+- The dashboard opens immediately and ingests sessions in the background, most recent activity first, with live progress in the header; pages update as data lands and new session activity appears within seconds
+- Switching time ranges is now near-instant: range queries read hourly rollups instead of scanning every request (seconds → milliseconds on large histories)
+- Frustration judge runs now scale how many requests they keep in flight (up to 256, backing off on rate limits and retrying after a short delay) and save verdicts in batches; the progress line shows the rate and requests in flight
+- Provider subscription windows load separately from the rest of the Providers page, and the Projects page lists the 2,000 busiest folders
+- Replaced the dashboard's Behavior page with a Frustration page showing, per model version, how often users are annoyed, annoyed at the assistant, and angry at it; a button judges unclassified messages with the host's `judge` model (after a cost estimate) and the chart refines live as verdicts arrive
+
+### Fixed
+
+- Made session-statistics synchronization atomic to prevent duplicate entries when synchronization is interrupted.
+- Improved the speed and reliability of initial and repeat `omp stats` imports, including large session histories and already-indexed histories.
+
+## [18.2.9] - 2026-09-22
+
+### Fixed
+
+- Fixed background statistics spans to use unique identifiers and close jobs correctly.
+
+## [18.2.5] - 2026-09-17
+
+### Fixed
+
+- Improved session and fork-detection polling performance, reducing unnecessary filesystem and database work when monitoring sessions.
+
+## [18.2.1] - 2026-09-15
+
+### Fixed
+
+- Fixed the sessions API returning an encoded storage key instead of the session working directory ([#12078](https://github.com/can1357/oh-my-pi/pull/12078) by [@Dante-dan](https://github.com/Dante-dan)).
+- Fixed Traces search inputs and checkbox using unthemed browser defaults, and iOS viewport zoom on search focus.
+- Fixed garbage tool names from provider-side parse failures (e.g. a gateway returning the model's whole invocation text as the tool name) polluting the tools dashboard's per-tool rows and filter dropdown; such names now collapse to their leading identifier, and existing databases re-ingest cleaned on next sync.
+- Reduced repeat stats-sync reads to appended transcript data while preserving service-tier accounting across restarts.
+- Rebuilt stats for replaced or truncated session files instead of retaining stale totals.
+- Reclaimed lingering stats dashboards from older releases using their versioned HTTP identity when process command lines are unavailable, so upgrades no longer leave `omp stats` blocked by an opaque Bun listener.
+
 ## [18.1.17] - 2026-09-10
 
 ### Fixed

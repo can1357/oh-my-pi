@@ -44,11 +44,15 @@ describe("canonicalMCPToolNameCandidates", () => {
 	});
 
 	it("recovers a name whose server segment carries digits", () => {
-		// The sanitizer maps `[^a-z_]+` to `_`, so the digit in `context7` is
-		// dropped when the name is minted. The doubled spelling must still land.
+		// Digits survive minting, including when the raw server name also carries
+		// spaces. The doubled spelling must still land on that exact key.
 		const registered = createMCPToolName("context7", "resolve-library-id");
-		expect(registered).toBe("mcp__context_resolve_library_id");
+		expect(registered).toBe("mcp__context7_resolve_library_id");
 		expect(recover("mcp__context7__resolve_library_id", registered)).toBe(registered);
+
+		const spaced = createMCPToolName("MaaS Slack 7", "send");
+		expect(spaced).toBe("mcp__maas_slack_7_send");
+		expect(recover("mcp__MaaS Slack 7__send", spaced)).toBe(spaced);
 	});
 
 	it("recovers a tool whose name repeats the server prefix", () => {
@@ -108,12 +112,11 @@ describe("canonicalMCPToolNameCandidates", () => {
 	});
 
 	it("recovers a server name the sanitizer reduces to its placeholder", () => {
-		// `validateServerName` accepts `^[a-zA-Z0-9_.:-]+$`, so an all-digit or
-		// all-punctuation server name is configurable — and sanitizes away, which
+		// All-punctuation server names are configurable but sanitize away, which
 		// makes `createMCPToolName` substitute its `server` placeholder. That is
 		// the key registration really produces, so re-minting the split has to
 		// reproduce it rather than refuse the name.
-		for (const serverName of ["123", "1-2", "..."]) {
+		for (const serverName of ["...", "---", ":::"]) {
 			const registered = createMCPToolName(serverName, "bank");
 			expect(registered).toBe("mcp__server_bank");
 			expect(recover(`mcp__${serverName}__bank`, registered)).toBe(registered);

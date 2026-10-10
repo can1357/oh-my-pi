@@ -15,16 +15,18 @@ In the TUI, `/marketplace` with no arguments opens the interactive plugin browse
 
 A **marketplace** is a Git repository (or local directory) containing a catalog file at `.omp-plugin/marketplace.json` (preferred) or `.claude-plugin/marketplace.json` (Claude Code-compatible fallback). The catalog lists available plugins with their sources, descriptions, and metadata.
 
-A **plugin** is a directory containing Claude/OMP plugin content such as skills, commands, agents, rules, hooks, tools, MCP servers, or LSP servers. Marketplace installs also load extension modules declared by `package.json` `omp.extensions`: installation symlinks the cached plugin into the scope's `node_modules` tree and records it in `omp-plugins.lock.json`, the same runtime surfaces used by npm-installed and `omp plugin link`ed plugins. Plugins are identified by `name@marketplace` (e.g. `code-review@claude-plugins-official`).
+A **plugin** is a directory containing Claude/OMP plugin content such as skills, commands, agents, rules, hooks, tools, MCP servers, LSP servers, or DAP adapters. Root `plugin.json` packages declaring the Agent Plugins 1.0.0 schema use the portable `agent-plugins` discovery provider for skills and `mcp.json`; hybrid packages can still expose OMP-specific content. Marketplace installs also load extension modules declared by `package.json` `omp.extensions`: installation symlinks the cached plugin into the scope's `node_modules` tree and records it in `omp-plugins.lock.json`, the same runtime surfaces used by npm-installed and `omp plugin link`ed plugins. Plugins are identified by `name@marketplace` (e.g. `code-review@claude-plugins-official`).
 
 **Scopes**: marketplace plugins can be installed at two scopes:
 
 - **user** (default) -- available in all projects, stored in the user plugins data root's `installed_plugins.json` (`~/.omp/plugins/installed_plugins.json` by default)
-- **project** -- available only in the active project, stored in the nearest project `.omp/plugins/installed_plugins.json`
+- **project** -- available only in the active project, stored in `.omp/plugins/installed_plugins.json` under the nearest ancestor with `.omp/`, or the nearest Git root if no `.omp/` exists. An explicit project install can create this tree in cwd when neither anchor exists; the home directory is not treated as a project.
 
 Enabled project-scoped installs shadow enabled user-scoped installs of the same plugin. A disabled project install does not shadow the user install.
 
-On Linux and macOS, `omp config init-xdg` creates the XDG data, state, and cache roots; it does not move existing data. Once the relevant roots exist and `XDG_DATA_HOME`, `XDG_STATE_HOME`, and `XDG_CACHE_HOME` are set, new user marketplace/plugin state resolves under `$XDG_DATA_HOME/omp` (including `marketplaces.json` and `plugins/`). The `~/.omp` paths below are the non-XDG defaults.
+On Linux and macOS, `omp config init-xdg` initializes the XDG data, state, and cache roots; it does not move existing data. With `XDG_DATA_HOME` set and its `omp/` directory initialized, user marketplace/plugin state resolves under `$XDG_DATA_HOME/omp` (including `marketplaces.json` and `plugins/`). Named profiles use their own roots; XDG routing requires the corresponding `omp/profiles/<name>/` directory. The `~/.omp` paths below are the default-profile, non-XDG defaults.
+
+On first XDG registry resolution, an existing config-root `marketplaces.json` is copied best-effort if the XDG target is absent; the old file remains. Plugin installation trees are not copied by this helper.
 
 ## Commands
 
@@ -32,7 +34,7 @@ On Linux and macOS, `omp config init-xdg` creates the XDG data, state, and cache
 
 | Command        | Effect                                    |
 | -------------- | ----------------------------------------- |
-| `/marketplace` | Open interactive plugin browser (install) |
+| `/marketplace` or `/marketplace install` | Open interactive plugin browser (install) |
 
 ### Marketplace management
 
@@ -66,8 +68,8 @@ omp plugin marketplace remove <name>
 omp plugin marketplace update [name]
 omp plugin marketplace list
 omp plugin discover [marketplace]
-omp plugin install [--force] [--scope user|project] name@marketplace
-omp plugin uninstall [--scope user|project] name@marketplace
+omp plugin install [--dry-run] [--force] [--scope user|project] name@marketplace
+omp plugin uninstall [--dry-run] [--scope user|project] name@marketplace
 omp plugin upgrade [--scope user|project] [name@marketplace]
 omp plugin enable [--scope user|project] name@marketplace
 omp plugin disable [--scope user|project] name@marketplace
@@ -75,7 +77,9 @@ omp plugin list
 
 ```
 
-TUI marketplace mutations (explicit commands and the selector) update disk state and invalidate discovery caches but do not refresh the active session. Run `/reload-plugins` to refresh skills, slash commands, and MCP servers; restart the session for newly installed tools, hooks, or extension modules. ACP/RPC marketplace handlers refresh skills and slash commands automatically, but likewise do not rebuild every initialized capability set.
+TUI marketplace mutations (explicit commands and the selector) update disk state and invalidate discovery caches but do not refresh the active session. Run `/reload-plugins` to refresh task agents, skills, slash commands, and MCP servers; restart the session for newly installed non-MCP tools, hooks, or extension modules. ACP/RPC marketplace handlers refresh skills and slash commands automatically; ACP also refreshes task-agent discovery. Neither remote handler reconnects MCP servers or rebuilds every initialized capability set.
+
+CLI `--dry-run` install validates the cached catalog, scope, existing install, and locally checkable source constraints without fetching plugin repositories or writing plugin state. Uninstall previews retain installed-scope ambiguity checks without removing anything. TUI/ACP/RPC slash commands do not accept `--dry-run`.
 
 ## Marketplace sources
 
@@ -124,11 +128,13 @@ A marketplace catalog lives at `.omp-plugin/marketplace.json` in the repository 
 
 | Field        | Description                                                                                                      |
 | ------------ | ---------------------------------------------------------------------------------------------------------------- |
-| `name`       | Marketplace name. Lowercase alphanumeric, hyphens, and dots. Must start and end with alphanumeric. Max 64 chars. |
+| `name`       | Marketplace name. ASCII letters, digits, hyphens, and dots. Must start and end with a letter or digit. Max 64 chars. |
 | `owner.name` | Marketplace owner name                                                                                           |
 | `plugins`    | Array of plugin entries                                                                                          |
 
 Top-level `metadata.description`, `metadata.version`, and `metadata.pluginRoot` are optional. When `metadata.pluginRoot` is set, it is prepended to relative plugin `source` paths.
+
+Install version resolution tries catalog `version`, `.claude-plugin/plugin.json`, root `plugin.json`, then `package.json`; it then falls back to the source definition's first seven SHA characters or `0.0.0`. Versions used in cache paths must be 1–128 ASCII letters/digits or `._+-` and cannot contain `..`.
 
 ### Plugin entry fields
 
@@ -208,13 +214,14 @@ The `source` field supports these formats. String sources must start with `./` a
 
 Current installer behavior rejects npm marketplace sources with `npm plugin sources are not yet supported`; use relative, GitHub, URL, or git-subdir sources.
 
-Invalid catalog JSON or invalid required top-level fields reject the catalog. An invalid plugin entry is logged and skipped so other valid entries remain available.
+Invalid catalog JSON or invalid required top-level fields reject the catalog. An invalid plugin entry is logged and skipped so other valid entries remain available. Plugin names within a catalog and configured marketplace names must not collide case-insensitively, even on case-sensitive filesystems.
 
 ## Updates, removal, and scope
 
 - `/marketplace update [name]` refreshes catalogs only; it does not reinstall plugins.
 - `omp plugin upgrade name@marketplace` reinstalls every installed scope when `--scope` is omitted. `/marketplace upgrade name@marketplace`, uninstall, and enable/disable require `--scope user|project` when the plugin exists in both scopes.
-- Upgrading all plugins compares only catalog entries that declare `version`. Semver versions must be newer; non-semver versions are treated as changed when unequal. Per-plugin failures are skipped, so an all-plugin upgrade can partially succeed.
+- Upgrading all plugins compares only catalog entries that declare `version`. Semver versions must be newer; non-semver versions are treated as changed when unequal. Each installed scope is checked independently. Per-plugin failures are skipped, so an all-plugin upgrade can partially succeed. CLI `--scope` is ignored when upgrading all plugins.
+- Reinstall/upgrade preserves disabled state, feature selection, and settings. User and project installs share version-keyed cache directories, so forcing a reinstall of the same version replaces content used by both scopes. Runtime package-name and cache-path collisions with other plugins are rejected.
 - `marketplace.autoUpdate` controls startup checks: `off`, `notify` (default), or `auto`. Catalogs older than 24 hours are refreshed best-effort before version checks. Despite its name, current `notify` mode writes update availability only to the debug log; it does not show a user-facing notification.
 - Removing a marketplace removes its registry entry and catalog cache; it does not uninstall plugins already cached and registered.
 
@@ -242,11 +249,11 @@ Invalid catalog JSON or invalid required top-level fields reject the catalog. An
 
 Marketplace and plugin names must:
 
-- Start and end with a lowercase letter or digit
-- Contain only lowercase letters, digits, hyphens, and dots
+- Start and end with an ASCII letter or digit
+- Contain only ASCII letters, digits, hyphens, and dots
 - Be at most 64 characters
 
-Plugin IDs (`name@marketplace`) must be at most 128 characters total.
+Building plugin IDs (`name@marketplace`) enforces a 128-character total limit. Names preserve case; use the catalog's spelling when referring to a plugin.
 
-Valid examples: `my-plugin`, `code-review`, `wordpress.com`, `ai-firstify`
-Invalid examples: `-bad`, `bad-`, `.bad`, `Bad`, `under_score`
+Valid examples: `my-plugin`, `code-review`, `wordpress.com`, `ai-firstify`, `MixedCase`
+Invalid examples: `-bad`, `bad-`, `.bad`, `under_score`

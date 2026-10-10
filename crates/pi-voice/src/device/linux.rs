@@ -82,23 +82,28 @@ impl PulseApi {
 		let simple = open_library(c"libpulse-simple.so.0", libc::RTLD_NOW | libc::RTLD_GLOBAL)?;
 		let pulse = open_library(c"libpulse.so.0", libc::RTLD_NOW | libc::RTLD_GLOBAL)?;
 
-		// SAFETY: each symbol is resolved from the library defining this exact C API.
+		// SAFETY: each symbol is resolved from the library defining this exact C
+		// API.
 		let simple_new = unsafe {
 			std::mem::transmute::<*mut c_void, PaSimpleNew>(symbol(simple, c"pa_simple_new")?)
 		};
-		// SAFETY: each symbol is resolved from the library defining this exact C API.
+		// SAFETY: each symbol is resolved from the library defining this exact C
+		// API.
 		let simple_free = unsafe {
 			std::mem::transmute::<*mut c_void, PaSimpleFree>(symbol(simple, c"pa_simple_free")?)
 		};
-		// SAFETY: each symbol is resolved from the library defining this exact C API.
+		// SAFETY: each symbol is resolved from the library defining this exact C
+		// API.
 		let simple_write = unsafe {
 			std::mem::transmute::<*mut c_void, PaSimpleWrite>(symbol(simple, c"pa_simple_write")?)
 		};
-		// SAFETY: each symbol is resolved from the library defining this exact C API.
+		// SAFETY: each symbol is resolved from the library defining this exact C
+		// API.
 		let simple_read = unsafe {
 			std::mem::transmute::<*mut c_void, PaSimpleRead>(symbol(simple, c"pa_simple_read")?)
 		};
-		// SAFETY: each symbol is resolved from the library defining this exact C API.
+		// SAFETY: each symbol is resolved from the library defining this exact C
+		// API.
 		let strerror =
 			unsafe { std::mem::transmute::<*mut c_void, PaStrerror>(symbol(pulse, c"pa_strerror")?) };
 
@@ -106,8 +111,8 @@ impl PulseApi {
 	}
 
 	fn error(&self, code: c_int) -> String {
-		// SAFETY: pa_strerror accepts every PulseAudio error code and returns a static
-		// string.
+		// SAFETY: pa_strerror accepts every PulseAudio error code and returns a
+		// static string.
 		let message = unsafe { (self.strerror)(code) };
 		cstring_lossy(message, "unknown PulseAudio error")
 	}
@@ -143,42 +148,51 @@ impl AlsaApi {
 
 	fn load() -> Result<&'static Self, String> {
 		let library = open_library(c"libasound.so.2", libc::RTLD_NOW | libc::RTLD_GLOBAL)?;
-		// SAFETY: each symbol is resolved from the library defining this exact C API.
+		// SAFETY: each symbol is resolved from the library defining this exact C
+		// API.
 		let pcm_open = unsafe {
 			std::mem::transmute::<*mut c_void, SndPcmOpen>(symbol(library, c"snd_pcm_open")?)
 		};
-		// SAFETY: each symbol is resolved from the library defining this exact C API.
+		// SAFETY: each symbol is resolved from the library defining this exact C
+		// API.
 		let pcm_set_params = unsafe {
 			std::mem::transmute::<*mut c_void, SndPcmSetParams>(symbol(
 				library,
 				c"snd_pcm_set_params",
 			)?)
 		};
-		// SAFETY: each symbol is resolved from the library defining this exact C API.
+		// SAFETY: each symbol is resolved from the library defining this exact C
+		// API.
 		let pcm_writei = unsafe {
 			std::mem::transmute::<*mut c_void, SndPcmIo>(symbol(library, c"snd_pcm_writei")?)
 		};
-		// SAFETY: each symbol is resolved from the library defining this exact C API.
+		// SAFETY: each symbol is resolved from the library defining this exact C
+		// API.
 		let pcm_readi = unsafe {
 			std::mem::transmute::<*mut c_void, SndPcmIo>(symbol(library, c"snd_pcm_readi")?)
 		};
-		// SAFETY: each symbol is resolved from the library defining this exact C API.
+		// SAFETY: each symbol is resolved from the library defining this exact C
+		// API.
 		let pcm_recover = unsafe {
 			std::mem::transmute::<*mut c_void, SndPcmRecover>(symbol(library, c"snd_pcm_recover")?)
 		};
-		// SAFETY: each symbol is resolved from the library defining this exact C API.
+		// SAFETY: each symbol is resolved from the library defining this exact C
+		// API.
 		let pcm_wait = unsafe {
 			std::mem::transmute::<*mut c_void, SndPcmWait>(symbol(library, c"snd_pcm_wait")?)
 		};
-		// SAFETY: each symbol is resolved from the library defining this exact C API.
+		// SAFETY: each symbol is resolved from the library defining this exact C
+		// API.
 		let pcm_start = unsafe {
 			std::mem::transmute::<*mut c_void, SndPcmControl>(symbol(library, c"snd_pcm_start")?)
 		};
-		// SAFETY: each symbol is resolved from the library defining this exact C API.
+		// SAFETY: each symbol is resolved from the library defining this exact C
+		// API.
 		let pcm_close = unsafe {
 			std::mem::transmute::<*mut c_void, SndPcmControl>(symbol(library, c"snd_pcm_close")?)
 		};
-		// SAFETY: each symbol is resolved from the library defining this exact C API.
+		// SAFETY: each symbol is resolved from the library defining this exact C
+		// API.
 		let strerror = unsafe {
 			std::mem::transmute::<*mut c_void, SndStrerror>(symbol(library, c"snd_strerror")?)
 		};
@@ -197,7 +211,8 @@ impl AlsaApi {
 	}
 
 	fn error(&self, code: c_int) -> String {
-		// SAFETY: snd_strerror accepts ALSA status codes and returns a static string.
+		// SAFETY: snd_strerror accepts ALSA status codes and returns a static
+		// string.
 		let message = unsafe { (self.strerror)(code) };
 		cstring_lossy(message, "unknown ALSA error")
 	}
@@ -215,7 +230,8 @@ fn open_library(name: &CStr, flags: c_int) -> Result<*mut c_void, String> {
 }
 
 fn symbol(library: *mut c_void, name: &CStr) -> Result<*mut c_void, String> {
-	// SAFETY: library is a live handle deliberately retained for process lifetime.
+	// SAFETY: library is a live handle deliberately retained for process
+	// lifetime.
 	unsafe { libc::dlerror() };
 	// SAFETY: library is live and name is a valid NUL-terminated symbol name.
 	let address = unsafe { libc::dlsym(library, name.as_ptr()) };
@@ -233,7 +249,8 @@ fn symbol(library: *mut c_void, name: &CStr) -> Result<*mut c_void, String> {
 }
 
 fn dlerror() -> String {
-	// SAFETY: dlerror returns either null or a thread-local NUL-terminated string.
+	// SAFETY: dlerror returns either null or a thread-local NUL-terminated
+	// string.
 	let error = unsafe { libc::dlerror() };
 	cstring_lossy(error, "unknown dynamic-loader error")
 }
@@ -242,8 +259,8 @@ fn cstring_lossy(value: *const c_char, fallback: &str) -> String {
 	if value.is_null() {
 		fallback.to_owned()
 	} else {
-		// SAFETY: callers only pass pointers returned by APIs specifying NUL-terminated
-		// strings.
+		// SAFETY: callers only pass pointers returned by APIs specifying
+		// NUL-terminated strings.
 		unsafe { CStr::from_ptr(value) }
 			.to_string_lossy()
 			.into_owned()
@@ -274,7 +291,7 @@ impl PulseStream {
 		let stream = unsafe {
 			(api.simple_new)(
 				ptr::null(),
-				c"oh-my-pi".as_ptr(),
+				c"omp".as_ptr(),
 				direction,
 				ptr::null(),
 				c"voice".as_ptr(),
@@ -335,8 +352,8 @@ impl AlsaStream {
 			)));
 		}
 		let stream = Self(pcm);
-		// SAFETY: pcm is an open handle owned by this thread and all enum values match
-		// ALSA.
+		// SAFETY: pcm is an open handle owned by this thread and all enum values
+		// match ALSA.
 		let status = unsafe {
 			(api.pcm_set_params)(
 				stream.0,
@@ -528,7 +545,8 @@ fn pulse_playback_loop(
 			break;
 		}
 		let mut error = 0;
-		// SAFETY: stream is open and buffer contains exactly the supplied byte count.
+		// SAFETY: stream is open and buffer contains exactly the supplied byte
+		// count.
 		let status = unsafe {
 			(api.simple_write)(
 				stream.0,
@@ -559,8 +577,8 @@ fn pulse_capture_loop(
 	let mut buffer = vec![0.0_f32; samples];
 	while !stop.load(Ordering::Acquire) {
 		let mut error = 0;
-		// SAFETY: stream is open and buffer has writable storage for the supplied byte
-		// count.
+		// SAFETY: stream is open and buffer has writable storage for the supplied
+		// byte count.
 		let status = unsafe {
 			(api.simple_read)(
 				stream.0,
@@ -639,8 +657,8 @@ fn alsa_playback_loop(
 					"audio period exceeds ALSA frame range".to_owned(),
 				);
 			};
-			// SAFETY: stream is open and the remaining buffer contains frames of mono f32
-			// audio.
+			// SAFETY: stream is open and the remaining buffer contains frames of
+			// mono f32 audio.
 			let status = unsafe {
 				(api.pcm_writei)(stream.0, buffer.as_ptr().add(offset).cast_mut().cast(), frames)
 			};
@@ -668,7 +686,8 @@ fn alsa_playback_loop(
 					);
 				};
 				if written > samples - offset {
-					// SAFETY: stream is still open and exclusively owned by this thread.
+					// SAFETY: stream is still open and exclusively owned by this
+					// thread.
 					unsafe { (api.pcm_close)(stream.0) };
 					return Err(format!(
 						"ALSA wrote {written} frames after receiving {}",
@@ -702,8 +721,8 @@ fn alsa_capture_loop(
 		);
 	};
 	while !stop.load(Ordering::Acquire) {
-		// SAFETY: stream is open and buffer has writable storage for frames mono f32
-		// frames.
+		// SAFETY: stream is open and buffer has writable storage for frames mono
+		// f32 frames.
 		let status = unsafe { (api.pcm_readi)(stream.0, buffer.as_mut_ptr().cast(), frames) };
 		if status == -c_long::from(libc::EAGAIN) {
 			if let Err(error) = wait_for_alsa(api, stream, timeout_ms) {
@@ -733,7 +752,8 @@ fn alsa_capture_loop(
 				);
 			};
 			if captured > samples {
-				// SAFETY: stream is still open and exclusively owned by this thread.
+				// SAFETY: stream is still open and exclusively owned by this
+				// thread.
 				unsafe { (api.pcm_close)(stream.0) };
 				return Err(format!("ALSA captured {captured} frames into a {samples}-frame buffer"));
 			}
@@ -794,8 +814,9 @@ fn finish(
 				.map_err(|_| "audio worker thread panicked".to_owned())?;
 		} else {
 			// A pathological PulseAudio server can stall pa_simple I/O forever.
-			// Detaching keeps stop/Drop bounded; the worker owns and eventually frees
-			// the handle if the server ever unblocks. The delivery gate prevents callbacks.
+			// Detaching keeps stop/Drop bounded; the worker owns and eventually
+			// frees the handle if the server ever unblocks. The delivery gate
+			// prevents callbacks.
 			drop(handle);
 		}
 	}
@@ -807,118 +828,67 @@ fn finish(
 		.map_or(Ok(()), Err)
 }
 
-/// Running `PulseAudio` or ALSA playback worker.
-pub struct PlaybackDevice {
-	device: Arc<RunningDevice>,
-	thread: Option<JoinHandle<()>>,
-	done:   Option<mpsc::Receiver<()>>,
+/// The per-direction parts of a Linux worker: stream constants and the
+/// `PulseAudio`/ALSA loops driving callback `C`.
+struct Direction<C> {
+	name:       &'static str,
+	pulse:      c_int,
+	alsa:       c_int,
+	pulse_loop:
+		fn(&PulseApi, &PulseStream, &AtomicBool, &DeliveryGate, &mut C, usize) -> VoiceResult<()>,
+	alsa_loop: fn(
+		&AlsaApi,
+		&AlsaStream,
+		&AtomicBool,
+		&DeliveryGate,
+		&mut C,
+		usize,
+		c_int,
+	) -> VoiceResult<()>,
 }
 
-impl PlaybackDevice {
+const PLAYBACK: Direction<PlaybackFill> = Direction {
+	name:       "playback",
+	pulse:      PA_STREAM_PLAYBACK,
+	alsa:       SND_PCM_STREAM_PLAYBACK,
+	pulse_loop: pulse_playback_loop,
+	alsa_loop:  alsa_playback_loop,
+};
+
+const CAPTURE: Direction<CaptureSink> = Direction {
+	name:       "capture",
+	pulse:      PA_STREAM_RECORD,
+	alsa:       SND_PCM_STREAM_CAPTURE,
+	pulse_loop: pulse_capture_loop,
+	alsa_loop:  alsa_capture_loop,
+};
+
+/// Running `PulseAudio` or ALSA worker for either direction.
+pub struct Device {
+	running: Arc<RunningDevice>,
+	thread:  Option<JoinHandle<()>>,
+	done:    Option<mpsc::Receiver<()>>,
+}
+
+impl Device {
 	/// Opens the default playback device and starts its worker thread.
-	pub fn start(config: DeviceConfig, mut fill: PlaybackFill) -> VoiceResult<Self> {
-		let samples = config.period_samples();
-		let attr = pulse_attr(config, PA_STREAM_PLAYBACK, pulse_latency_ms(config.period_ms))?;
-		let timeout_ms = c_int::try_from(config.period_ms)
-			.unwrap_or(c_int::MAX)
-			.max(1);
-		let delivery = Arc::new((AtomicBool::new(true), parking_lot::Mutex::new(())));
-		let device = Arc::new(RunningDevice {
-			stop: AtomicBool::new(false),
-			delivery,
-			error: Mutex::new(None),
-			worker_id: OnceLock::new(),
-		});
-		let worker_device = Arc::clone(&device);
-		let (opened_tx, opened_rx) = mpsc::sync_channel(1);
-		let (done_tx, done_rx) = mpsc::channel();
-		let thread = thread::Builder::new()
-			.name("pi-voice-playback".to_owned())
-			.spawn(move || {
-				let _done = ThreadDone(done_tx);
-				let _ = worker_device.worker_id.set(thread::current().id());
-				let pulse_error = match PulseApi::get().and_then(|api| {
-					PulseStream::open(api, config, PA_STREAM_PLAYBACK, &attr).map(|stream| (api, stream))
-				}) {
-					Ok((api, stream)) => {
-						let _ = opened_tx.send(Ok(()));
-						if let Err(error) = pulse_playback_loop(
-							api,
-							&stream,
-							&worker_device.stop,
-							worker_device.delivery.as_ref(),
-							&mut fill,
-							samples,
-						) {
-							remember_error(&worker_device.error, error);
-						}
-						return;
-					},
-					Err(error) => error,
-				};
-				match AlsaApi::get().and_then(|api| {
-					AlsaStream::open(api, config, SND_PCM_STREAM_PLAYBACK).map(|stream| (api, stream))
-				}) {
-					Ok((api, stream)) => {
-						let _ = opened_tx.send(Ok(()));
-						if let Err(error) = alsa_playback_loop(
-							api,
-							&stream,
-							&worker_device.stop,
-							worker_device.delivery.as_ref(),
-							&mut fill,
-							samples,
-							timeout_ms,
-						) {
-							remember_error(&worker_device.error, error);
-						}
-					},
-					Err(alsa_error) => {
-						let _ = opened_tx.send(Err(format!(
-							"no Linux playback backend available; PulseAudio: {pulse_error}; ALSA: \
-							 {alsa_error}"
-						)));
-					},
-				}
-			})
-			.map_err(|error| format!("could not start playback worker: {error}"))?;
-		match opened_rx.recv() {
-			Ok(Ok(())) => Ok(Self { device, thread: Some(thread), done: Some(done_rx) }),
-			Ok(Err(error)) => {
-				let _ = thread.join();
-				Err(error)
-			},
-			Err(error) => {
-				let _ = thread.join();
-				Err(format!("playback worker exited during startup: {error}"))
-			},
-		}
+	pub fn start_playback(config: DeviceConfig, fill: PlaybackFill) -> VoiceResult<Self> {
+		Self::start(config, fill, &PLAYBACK)
 	}
 
-	/// Stops playback, waiting out delivery when called off the worker thread.
-	pub fn stop(&mut self) -> VoiceResult<()> {
-		finish(&self.device, &mut self.thread, &mut self.done)
-	}
-}
-
-impl Drop for PlaybackDevice {
-	fn drop(&mut self) {
-		let _ = self.stop();
-	}
-}
-
-/// Running `PulseAudio` or ALSA capture worker.
-pub struct CaptureDevice {
-	device: Arc<RunningDevice>,
-	thread: Option<JoinHandle<()>>,
-	done:   Option<mpsc::Receiver<()>>,
-}
-
-impl CaptureDevice {
 	/// Opens the default capture device and starts its worker thread.
-	pub fn start(config: DeviceConfig, mut sink: CaptureSink) -> VoiceResult<Self> {
+	pub fn start_capture(config: DeviceConfig, sink: CaptureSink) -> VoiceResult<Self> {
+		Self::start(config, sink, &CAPTURE)
+	}
+
+	fn start<C: Send + 'static>(
+		config: DeviceConfig,
+		mut callback: C,
+		direction: &Direction<C>,
+	) -> VoiceResult<Self> {
+		let &Direction { name, pulse, alsa, pulse_loop, alsa_loop } = direction;
 		let samples = config.period_samples();
-		let attr = pulse_attr(config, PA_STREAM_RECORD, pulse_latency_ms(config.period_ms))?;
+		let attr = pulse_attr(config, pulse, pulse_latency_ms(config.period_ms))?;
 		let timeout_ms = c_int::try_from(config.period_ms)
 			.unwrap_or(c_int::MAX)
 			.max(1);
@@ -933,21 +903,21 @@ impl CaptureDevice {
 		let (opened_tx, opened_rx) = mpsc::sync_channel(1);
 		let (done_tx, done_rx) = mpsc::channel();
 		let thread = thread::Builder::new()
-			.name("pi-voice-capture".to_owned())
+			.name(format!("pi-voice-{name}"))
 			.spawn(move || {
 				let _done = ThreadDone(done_tx);
 				let _ = worker_device.worker_id.set(thread::current().id());
 				let pulse_error = match PulseApi::get().and_then(|api| {
-					PulseStream::open(api, config, PA_STREAM_RECORD, &attr).map(|stream| (api, stream))
+					PulseStream::open(api, config, pulse, &attr).map(|stream| (api, stream))
 				}) {
 					Ok((api, stream)) => {
 						let _ = opened_tx.send(Ok(()));
-						if let Err(error) = pulse_capture_loop(
+						if let Err(error) = pulse_loop(
 							api,
 							&stream,
 							&worker_device.stop,
 							worker_device.delivery.as_ref(),
-							&mut sink,
+							&mut callback,
 							samples,
 						) {
 							remember_error(&worker_device.error, error);
@@ -956,17 +926,17 @@ impl CaptureDevice {
 					},
 					Err(error) => error,
 				};
-				match AlsaApi::get().and_then(|api| {
-					AlsaStream::open(api, config, SND_PCM_STREAM_CAPTURE).map(|stream| (api, stream))
-				}) {
+				match AlsaApi::get()
+					.and_then(|api| AlsaStream::open(api, config, alsa).map(|stream| (api, stream)))
+				{
 					Ok((api, stream)) => {
 						let _ = opened_tx.send(Ok(()));
-						if let Err(error) = alsa_capture_loop(
+						if let Err(error) = alsa_loop(
 							api,
 							&stream,
 							&worker_device.stop,
 							worker_device.delivery.as_ref(),
-							&mut sink,
+							&mut callback,
 							samples,
 							timeout_ms,
 						) {
@@ -975,33 +945,34 @@ impl CaptureDevice {
 					},
 					Err(alsa_error) => {
 						let _ = opened_tx.send(Err(format!(
-							"no Linux capture backend available; PulseAudio: {pulse_error}; ALSA: \
+							"no Linux {name} backend available; PulseAudio: {pulse_error}; ALSA: \
 							 {alsa_error}"
 						)));
 					},
 				}
 			})
-			.map_err(|error| format!("could not start capture worker: {error}"))?;
+			.map_err(|error| format!("could not start {name} worker: {error}"))?;
 		match opened_rx.recv() {
-			Ok(Ok(())) => Ok(Self { device, thread: Some(thread), done: Some(done_rx) }),
+			Ok(Ok(())) => Ok(Self { running: device, thread: Some(thread), done: Some(done_rx) }),
 			Ok(Err(error)) => {
 				let _ = thread.join();
 				Err(error)
 			},
 			Err(error) => {
 				let _ = thread.join();
-				Err(format!("capture worker exited during startup: {error}"))
+				Err(format!("{name} worker exited during startup: {error}"))
 			},
 		}
 	}
 
-	/// Stops capture, waiting out delivery when called off the worker thread.
+	/// Stops the stream, waiting out delivery when called off the worker
+	/// thread.
 	pub fn stop(&mut self) -> VoiceResult<()> {
-		finish(&self.device, &mut self.thread, &mut self.done)
+		finish(&self.running, &mut self.thread, &mut self.done)
 	}
 }
 
-impl Drop for CaptureDevice {
+impl Drop for Device {
 	fn drop(&mut self) {
 		let _ = self.stop();
 	}

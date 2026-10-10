@@ -13,7 +13,7 @@ import * as net from "node:net";
 import * as os from "node:os";
 import * as path from "node:path";
 import { logger, ptree } from "@oh-my-pi/pi-utils";
-import { MessageFramer } from "../../jsonrpc/message-framing";
+import { encodeMessageFrame, MessageFramer } from "../../jsonrpc/message-framing";
 import { daemonClientForProject } from "../../launch/client";
 import { describeQuietly, stopQuietly, waitReady } from "../../launch/ensure";
 import { daemonRuntimeDir } from "../../launch/paths";
@@ -78,21 +78,27 @@ function requestOnSocket(
 		reject(new Error(`LSP mux ${request.method} timed out`));
 	}, timeoutMs);
 	const onData = (chunk: Buffer) => {
-		framer.push(chunk);
-		for (const text of framer.drain(() => {})) {
-			let message: LspJsonRpcResponse;
-			try {
-				message = JSON.parse(text);
-			} catch (error) {
+		try {
+			framer.push(chunk);
+			for (const text of framer.drain(() => {})) {
+				let message: LspJsonRpcResponse;
+				try {
+					message = JSON.parse(text);
+				} catch (error) {
+					cleanup();
+					reject(error instanceof Error ? error : new Error(String(error)));
+					return;
+				}
+				if (message.id !== request.id) continue;
 				cleanup();
-				reject(error instanceof Error ? error : new Error(String(error)));
+				if (message.error) reject(new Error(`LSP mux ${request.method} failed: ${message.error.message}`));
+				else resolve({ response: message, leftover: framer.remainder() });
 				return;
 			}
-			if (message.id !== request.id) continue;
+		} catch (error) {
 			cleanup();
-			if (message.error) reject(new Error(`LSP mux ${request.method} failed: ${message.error.message}`));
-			else resolve({ response: message, leftover: framer.remainder() });
-			return;
+			socket.destroy();
+			reject(error instanceof Error ? error : new Error(String(error)));
 		}
 	};
 	const onClose = () => {
@@ -108,8 +114,7 @@ function requestOnSocket(
 	socket.on("data", onData);
 	socket.once("close", onClose);
 	socket.once("error", onClose);
-	const content = JSON.stringify(request);
-	socket.write(`Content-Length: ${Buffer.byteLength(content, "utf-8")}\r\n\r\n${content}`);
+	socket.write(encodeMessageFrame(request));
 	return promise;
 }
 

@@ -187,7 +187,7 @@ function collectMessageParts(error: unknown, captured: CapturedHttpErrorResponse
  * the same rejection with `Supported values are: …`, so value lists count too.
  */
 const REASONING_EFFORT_FIELD_PATTERN =
-	/reasoning[_. ]effort|reasoning value|(?:valid|supported|allowed) (?:levels?|values?)/i;
+	/reasoning[_. ]?effort|reasoning value|(?:valid|supported|allowed) (?:levels?|values?)/i;
 
 function mentionsReasoningEffort(error: unknown, captured: CapturedHttpErrorResponse | undefined): boolean {
 	const param = capturedStringField(captured, "param");
@@ -224,17 +224,17 @@ interface EffortRejectionSignal {
 	rejectedMatches: boolean;
 }
 
-const EFFORT_FIELD_PATTERN = /reasoning[_. ]effort|reasoning value/i;
+const EFFORT_FIELD_PATTERN = /reasoning[_. ]?effort|reasoning value/i;
 const ALLOWED_LEVELS_PATTERN = /(?:valid|supported|allowed) levels?/i;
 
 /** Fielded rejection verdicts in any word order: verdict-first, field-first, or bare mention plus verdict. */
 function messageCarriesEffortVerdict(message: string): boolean {
 	return (
-		/invalid[^\n]*(?:reasoning[_. ]effort|reasoning value)/i.test(message) ||
-		/(?:reasoning[_. ]effort|reasoning value)[^\n]*(?:invalid|unsupported|not supported|not permitted|must be|expected|unknown|unexpected|unrecognized)/i.test(
+		/invalid[^\n]*(?:reasoning[_. ]?effort|reasoning value)/i.test(message) ||
+		/(?:reasoning[_. ]?effort|reasoning value)[^\n]*(?:invalid|unsupported|not supported|not permitted|must be|expected|unknown|unexpected|unrecognized)/i.test(
 			message,
 		) ||
-		/(?:unsupported|not supported|not permitted|unknown|unexpected|unrecognized|extra)[^\n]*(?:reasoning[_. ]effort|reasoning value)/i.test(
+		/(?:unsupported|not supported|not permitted|unknown|unexpected|unrecognized|extra)[^\n]*(?:reasoning[_. ]?effort|reasoning value)/i.test(
 			message,
 		)
 	);
@@ -367,7 +367,7 @@ function nearestEnabledReasoningFallback(currentEffort: string, allowed: Set<str
  * supported`).
  */
 const TEMPLATE_KWARG_EFFORT_PATTERN =
-	/chat_template_kwargs[^\n]{0,120}reasoning[_. ]effort|reasoning[_. ]effort[^\n]{0,120}chat_template_kwargs/i;
+	/chat_template_kwargs[^\n]{0,120}reasoning[_. ]?effort|reasoning[_. ]?effort[^\n]{0,120}chat_template_kwargs/i;
 const FIELD_REJECTION_PATTERN =
 	/invalid|unsupported|not supported|not permitted|unknown|unexpected|unrecognized|rejected|extra input/i;
 

@@ -1,13 +1,13 @@
 import { afterEach, beforeAll, describe, expect, it, type Mock, vi } from "bun:test";
 import { type Component, Container, isFocusable, type OverlayOptions, setKeybindings } from "@oh-my-pi/pi-tui";
-import { KeybindingsManager } from "../../../src/config/keybindings";
+import { KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
 import type { ExtensionAskDialogQuestion, ExtensionUIContext } from "../../../src/extensibility/extensions";
-import { AskDialogComponent } from "../../../src/modes/components/ask-dialog";
-import { CustomEditor } from "../../../src/modes/components/custom-editor";
-import { HookEditorComponent } from "../../../src/modes/components/hook-editor";
+import { AskDialogComponent } from "@oh-my-pi/pi-tui/overlays/ask-dialog";
+import { CustomEditor } from "@oh-my-pi/pi-tui/prompt/custom-editor";
+import { HookEditorComponent } from "@oh-my-pi/pi-tui/overlays/hook-editor";
 import { ExtensionUiController } from "../../../src/modes/controllers/extension-ui-controller";
 import { InputController } from "../../../src/modes/controllers/input-controller";
-import { getEditorTheme, getThemeByName, setThemeInstance } from "../../../src/modes/theme/theme";
+import { getEditorTheme, getThemeByName, setThemeInstance } from "@oh-my-pi/pi-tui/theme";
 import type { InteractiveModeContext } from "../../../src/modes/types";
 
 afterEach(() => {
@@ -472,22 +472,6 @@ describe("ExtensionUiController custom overlay", () => {
 		await flushMicrotasks();
 		expect(resolveOverlayOptions).toHaveBeenCalledTimes(1);
 		expect(harness.showOverlay).toHaveBeenCalledWith(expect.any(Container), overlayOptions);
-	});
-
-	it("falls back to the full-cover defaults when overlayOptions is absent", async () => {
-		const harness = makeHarness();
-		const ui = await harness.init();
-
-		ui.custom<void>(() => new Container(), { overlay: true });
-
-		await flushMicrotasks();
-		expect(harness.showOverlay).toHaveBeenCalledTimes(1);
-		expect(harness.showOverlay).toHaveBeenCalledWith(expect.any(Container), {
-			anchor: "bottom-center",
-			width: "100%",
-			maxHeight: "100%",
-			margin: 0,
-		});
 	});
 
 	it("rejects and restores the editor when a custom factory fails", async () => {

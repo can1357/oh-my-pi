@@ -50,20 +50,7 @@ pub fn filter(ctx: &MinimizerCtx<'_>, input: &str, exit_code: i32) -> MinimizerO
 }
 
 fn is_log_short(command: &str) -> bool {
-	has_ordered_tokens(command, "log", "short")
-}
-
-fn has_ordered_tokens(command: &str, first: &str, second: &str) -> bool {
-	let mut saw_first = false;
-	for part in command.split_whitespace() {
-		if saw_first && part == second {
-			return true;
-		}
-		if part == first {
-			saw_first = true;
-		}
-	}
-	false
+	primitives::command_has_ordered_tokens(command, "log", "short")
 }
 
 fn compact_log(input: &str) -> String {
@@ -85,7 +72,7 @@ fn compact_log(input: &str) -> String {
 
 		let trimmed = remove_email_fragments(line.trim_end());
 		if !trimmed.trim().is_empty() || !out.ends_with("\n\n") {
-			out.push_str(&trim_line(&trimmed, 140));
+			out.push_str(&primitives::truncate_line(&trimmed, 140));
 			out.push('\n');
 		}
 	}
@@ -165,12 +152,13 @@ fn dense_sync_summary(input: &str, exit_code: i32) -> Option<String> {
 
 	let mut summary = format!("ok sync: {synced} synced, {deleted} deleted");
 	if !deleted_names.is_empty() {
-		// Cap the inline name list: a long-lived stack cleanup can delete hundreds
-		// of merged branches at once, and this fast path bypasses the
-		// head_tail_lines bound that compact_noisy_command (the fallback) applies.
-		// Without a cap every name lands on one unbounded line, defeating the
-		// minimizer's bounding guarantee. Show the first DELETED_NAME_CAP names and
-		// summarize the rest as `[…N names elided…]` (the count above stays exact).
+		// Cap the inline name list: a long-lived stack cleanup can delete
+		// hundreds of merged branches at once, and this fast path bypasses the
+		// head_tail_lines bound that compact_noisy_command (the fallback)
+		// applies. Without a cap every name lands on one unbounded line,
+		// defeating the minimizer's bounding guarantee. Show the first
+		// DELETED_NAME_CAP names and summarize the rest as `[…N names elided…]`
+		// (the count above stays exact).
 		const DELETED_NAME_CAP: usize = 20;
 		let shown = deleted_names.len().min(DELETED_NAME_CAP);
 		let names = deleted_names[..shown].join(", ");
@@ -259,18 +247,6 @@ fn remove_email_fragments(line: &str) -> String {
 		words.push(word);
 	}
 	words.join(" ")
-}
-
-fn trim_line(line: &str, max_chars: usize) -> String {
-	let mut out = String::new();
-	for (idx, ch) in line.chars().enumerate() {
-		if idx >= max_chars {
-			out.push('…');
-			return out;
-		}
-		out.push(ch);
-	}
-	out
 }
 
 fn is_progress_noise(line: &str) -> bool {
@@ -437,8 +413,8 @@ mod tests {
 	fn sync_dense_summary_caps_deleted_name_list() {
 		// A long-lived stack cleanup can delete hundreds of merged branches at
 		// once. The dense summary must stay bounded: cap the inline name list and
-		// summarize the remainder as `[…N names elided…]`, never emit one unbounded
-		// line.
+		// summarize the remainder as `[…N names elided…]`, never emit one
+		// unbounded line.
 		let cfg = MinimizerConfig { enabled: true, ..Default::default() };
 		let ctx = test_ctx(Some("sync"), &cfg);
 		let mut input = String::from("Synced with remote\n");
@@ -451,7 +427,8 @@ mod tests {
 		assert!(out.changed);
 		// Exact deleted count is preserved.
 		assert!(out.text.contains("ok sync: 1 synced, 500 deleted"));
-		// First names stay visible; the rest collapse to a `[…N names elided…]` marker.
+		// First names stay visible; the rest collapse to a `[…N names elided…]`
+		// marker.
 		assert!(out.text.contains("feat/merged-0"));
 		assert!(out.text.contains("[…480 names elided…]"));
 		// Bounded: a single short line, not 500 names concatenated.
@@ -479,8 +456,8 @@ mod tests {
 		let ctx = test_ctx(Some("sync"), &cfg);
 		let input = "Synced branch feat/a with remote\nerror: failed to rebase feat/b\n";
 
-		// Error line present -> fast path declines, compact_noisy_command keeps the
-		// error.
+		// Error line present -> fast path declines, compact_noisy_command keeps
+		// the error.
 		let out = filter(&ctx, input, 0);
 
 		assert!(!out.text.starts_with("ok sync:"));

@@ -9,7 +9,7 @@
   - `packages/coding-agent/src/session/agent-session.ts` — captures the active checkpoint after tool success.
   - `packages/coding-agent/src/session/session-manager.ts` — persists the normal session entry stream; not the active checkpoint marker.
   - `packages/coding-agent/src/tools/index.ts` — registers the tool and gates it behind `checkpoint.enabled`.
-  - `packages/coding-agent/src/config/settings-schema.ts` — defines the disabled-by-default feature flag.
+  - `packages/coding-agent/src/tools/settings.ts` — defines the disabled-by-default feature flag (`cfgCheckpointEnabled`).
 
 ## Registration / Visibility
 - Tool metadata: `approval = "read"`, `strict = true`, `loadMode = "discoverable"`. Execution is single-shot; the tool does not stream progress updates.
@@ -28,9 +28,8 @@
 The tool returns a single text result plus structured details:
 
 - text body:
-  - `Checkpoint created.`
-  - `Goal: <goal>`
-  - `Run your investigation, then call rewind with a concise report.`
+  - `Checkpoint: <goal>`
+  - `Finish exploration and formulate findings.`
 - `details`:
   - `goal: string`
   - `startedAt: string` — ISO timestamp created inside `CheckpointTool.execute()`
@@ -41,11 +40,11 @@ No checkpoint ID, artifact URI, job handle, file path, or restore token is retur
 1. Tool registration in `packages/coding-agent/src/tools/index.ts` enforces `checkpoint.enabled` and the top-level/explicit-subagent visibility rules. `CheckpointTool.createIf()` itself always constructs the tool.
 2. `CheckpointTool.execute()` rejects nested checkpoints with `ToolError("Checkpoint already active.")` when `session.getCheckpointState?.()` is already set.
 3. It creates `startedAt = new Date().toISOString()` and returns a normal `toolResult()` payload. The tool method itself does not mutate checkpoint state.
-4. On the later successful checkpoint tool-result event, `AgentSession` captures three runtime fields:
+4. On successful checkpoint `message_end`, `AgentSession` synchronously captures:
    - `checkpointMessageCount` — current `agent.state.messages.length`, after the checkpoint tool result has already been appended
-   - `checkpointEntryId` — `sessionManager.getEntries().at(-1)?.id ?? null`, i.e. the last persisted session entry ID at checkpoint time
+   - `checkpointEntryId` — initially `null`, then backfilled with the persisted checkpoint tool-result entry's own ID by message identity
    - `startedAt` — copied from tool details or regenerated
-5. `AgentSession` stores that object in `#checkpointState`, clears `#pendingRewindReport`, and clears the prior `#lastCompletedRewind`.
+5. It clears `#pendingRewindReport` and `#lastCompletedRewind`, and queues a hidden `checkpoint-active-reminder` as steering before any awaited work. That reminder reaches the next provider call and is persisted after the checkpoint entry; rewind's branch cut removes it.
 6. On resume, session switch, or tree navigation, `#rehydrateCheckpointRewindState()` scans the current persisted branch. A most-recent successful checkpoint without a later retained rewind report reconstructs the active checkpoint boundary and guard.
 
 ## Side Effects
@@ -55,7 +54,7 @@ No checkpoint ID, artifact URI, job handle, file path, or restore token is retur
   - The ordinary successful tool-result entry is enough to reconstruct an unfinished checkpoint after resume; there is no separate checkpoint-marker entry.
   - Enables the later settle guard: if a checkpoint is active and no rewind report is pending, `#enforceRewindBeforeYield()` injects a developer-role warning and schedules another turn.
 - User-visible prompts / interactive UI
-  - The tool result tells the model to call `rewind` after the investigation.
+  - The tool prompt and hidden checkpoint-active reminder tell the model to call `rewind` after the investigation.
   - If the agent tries to `yield` first, `AgentSession` injects:
 
 ```text

@@ -1,4 +1,5 @@
 import { type } from "@oh-my-pi/omptype";
+import type { FetchImpl } from "@oh-my-pi/pi-utils";
 import { collapseVariants, type VariantCollapseTable } from "../compat/collapse";
 import type { ModelSpec } from "../types";
 import { discoveryFetch, toPositiveNumber } from "../utils";
@@ -51,6 +52,7 @@ export interface AntigravityDiscoveryAgentModelSort {
 export interface AntigravityDiscoveryApiResponse {
 	models?: Record<string, AntigravityDiscoveryApiModel>;
 	agentModelSorts?: AntigravityDiscoveryAgentModelSort[];
+	imageGenerationModelIds?: string[];
 }
 const AntigravityDiscoveryApiModelSchema = type({
 	"displayName?": type("unknown").pipe(value => (typeof value === "string" ? value : undefined)),
@@ -123,6 +125,9 @@ const AntigravityDiscoveryApiResponseSchema = type({
 		}
 		return result;
 	}),
+	"imageGenerationModelIds?": type("unknown").pipe(value =>
+		Array.isArray(value) ? value.filter((modelId): modelId is string => typeof modelId === "string") : undefined,
+	),
 });
 /**
  * Options for fetching Antigravity discovery models.
@@ -139,7 +144,7 @@ export interface FetchAntigravityDiscoveryModelsOptions {
 	/** Optional abort signal for request cancellation. */
 	signal?: AbortSignal;
 	/** Optional fetch implementation override for tests. */
-	fetcher?: typeof fetch;
+	fetcher?: FetchImpl;
 	/**
 	 * Hand collapse table to apply to the discovered list. Defaults to the
 	 * Antigravity (budget-transport) table; `googleGeminiCli` passes the
@@ -149,14 +154,96 @@ export interface FetchAntigravityDiscoveryModelsOptions {
 }
 
 /**
+ * A complete account roster, or a definitive 401/403 credential rejection.
+ * `null` from {@link fetchAntigravityDiscoveryModels} instead means a transient
+ * failure or invalid response, which must not replace an authoritative catalog.
+ */
+export interface AntigravityModelDiscoveryResult {
+	models: ModelSpec<"google-gemini-cli">[];
+	rejectedStatus?: 401 | 403;
+}
+
+/**
  * Fetches discoverable Antigravity models and normalizes them into canonical model entries.
  *
- * Returns `null` on network/payload/auth failures.
- * Returns `[]` only when the endpoint responds successfully with no usable models.
+ * Returns `null` on network, server, or payload failures; a 401/403 is reported
+ * separately so multi-account discovery can skip a rejected credential.
+ * A successful empty roster has `models: []` without `rejectedStatus`.
  */
 export async function fetchAntigravityDiscoveryModels(
 	options: FetchAntigravityDiscoveryModelsOptions,
-): Promise<ModelSpec<"google-gemini-cli">[] | null> {
+): Promise<AntigravityModelDiscoveryResult | null> {
+	const discovered = await fetchAntigravityDiscoveryResponse(options);
+	if (!discovered) return null;
+	if ("rejectedStatus" in discovered) return { models: [], rejectedStatus: discovered.rejectedStatus };
+
+	const models: ModelSpec<"google-gemini-cli">[] = [];
+	const apiModels = discovered.payload.models;
+	if (apiModels) {
+		for (const modelId in apiModels) {
+			const model = apiModels[modelId];
+			if (ANTIGRAVITY_DISCOVERY_DENYLIST.has(modelId)) {
+				continue;
+			}
+			if (model.isInternal === true) {
+				continue;
+			}
+
+			const supportsImages = model.supportsImages === true;
+			models.push({
+				id: modelId,
+				name: model.displayName || modelId,
+				api: "google-gemini-cli",
+				provider: "google-antigravity",
+				baseUrl: discovered.endpoint,
+				reasoning: model.supportsThinking === true,
+				input: supportsImages ? ["text", "image"] : ["text"],
+				cost: {
+					input: 0,
+					output: 0,
+					cacheRead: 0,
+					cacheWrite: 0,
+				},
+				contextWindow: toPositiveNumber(model.maxTokens, DEFAULT_CONTEXT_WINDOW),
+				maxTokens: toPositiveNumber(model.maxOutputTokens, DEFAULT_MAX_TOKENS),
+			});
+		}
+	}
+
+	// Collapse effort-tier variants at the source so runtime discovery,
+	// the gemini-cli re-provision, and the catalog generator all see
+	// logical ids only.
+	const collapsed = collapseVariants(
+		models,
+		options.collapseTable === undefined ? undefined : { table: options.collapseTable },
+	);
+	collapsed.sort((a, b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id));
+	return { models: collapsed };
+}
+
+/** Advertised image model and serving endpoint for one Antigravity account. */
+export interface AntigravityImageModel {
+	id: string;
+	endpoint: string;
+}
+
+/** Resolves the first image-generation model advertised by an Antigravity account. */
+export async function fetchAntigravityImageModel(
+	options: FetchAntigravityDiscoveryModelsOptions,
+): Promise<AntigravityImageModel | null> {
+	const discovered = await fetchAntigravityDiscoveryResponse(options);
+	if (!discovered || "rejectedStatus" in discovered) return null;
+	const id = discovered.payload.imageGenerationModelIds?.find(modelId => modelId.length > 0);
+	return id ? { id, endpoint: discovered.endpoint } : null;
+}
+
+type AntigravityDiscoveryResponse =
+	| { payload: AntigravityDiscoveryApiResponse; endpoint: string }
+	| { rejectedStatus: 401 | 403 };
+
+async function fetchAntigravityDiscoveryResponse(
+	options: FetchAntigravityDiscoveryModelsOptions,
+): Promise<AntigravityDiscoveryResponse | null> {
 	if (options.userAgent === undefined) {
 		await ensureAntigravityVersion(options.fetcher ?? fetch, options.signal);
 	}
@@ -166,6 +253,8 @@ export async function fetchAntigravityDiscoveryModels(
 		? [trimTrailingSlashes(options.endpoint)]
 		: DEFAULT_ANTIGRAVITY_DISCOVERY_ENDPOINTS.map(trimTrailingSlashes);
 
+	let rejectedStatus: 401 | 403 | undefined;
+	let transientFailure = false;
 	for (const endpoint of endpoints) {
 		let response: Response;
 		try {
@@ -180,10 +269,14 @@ export async function fetchAntigravityDiscoveryModels(
 				signal: options.signal,
 			});
 		} catch {
+			transientFailure = true;
 			continue;
 		}
 
 		if (!response.ok) {
+			if (response.status === 401) rejectedStatus = 401;
+			else if (response.status === 403) rejectedStatus = 403;
+			else transientFailure = true;
 			continue;
 		}
 
@@ -191,56 +284,16 @@ export async function fetchAntigravityDiscoveryModels(
 		try {
 			payload = await response.json();
 		} catch {
+			transientFailure = true;
 			continue;
 		}
 
 		const parsed = parseAntigravityDiscoveryResponse(payload);
-		if (!parsed) {
-			continue;
-		}
-
-		const models: ModelSpec<"google-gemini-cli">[] = [];
-
-		for (const [modelId, model] of Object.entries(parsed.models ?? {})) {
-			if (ANTIGRAVITY_DISCOVERY_DENYLIST.has(modelId)) {
-				continue;
-			}
-			if (model.isInternal === true) {
-				continue;
-			}
-
-			const supportsImages = model.supportsImages === true;
-			models.push({
-				id: modelId,
-				name: model.displayName || modelId,
-				api: "google-gemini-cli",
-				provider: "google-antigravity",
-				baseUrl: endpoint,
-				reasoning: model.supportsThinking === true,
-				input: supportsImages ? ["text", "image"] : ["text"],
-				cost: {
-					input: 0,
-					output: 0,
-					cacheRead: 0,
-					cacheWrite: 0,
-				},
-				contextWindow: toPositiveNumber(model.maxTokens, DEFAULT_CONTEXT_WINDOW),
-				maxTokens: toPositiveNumber(model.maxOutputTokens, DEFAULT_MAX_TOKENS),
-			});
-		}
-
-		// Collapse effort-tier variants at the source so runtime discovery,
-		// the gemini-cli re-provision, and the catalog generator all see
-		// logical ids only.
-		const collapsed = collapseVariants(
-			models,
-			options.collapseTable === undefined ? undefined : { table: options.collapseTable },
-		);
-		collapsed.sort((a, b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id));
-		return collapsed;
+		if (parsed) return { payload: parsed, endpoint };
+		transientFailure = true;
 	}
 
-	return null;
+	return rejectedStatus !== undefined && !transientFailure ? { rejectedStatus } : null;
 }
 
 function parseAntigravityDiscoveryResponse(value: unknown): AntigravityDiscoveryApiResponse | null {

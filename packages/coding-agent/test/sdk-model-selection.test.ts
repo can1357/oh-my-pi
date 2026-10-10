@@ -7,16 +7,28 @@ import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { writeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { resolveModelCacheProviderId } from "@oh-my-pi/pi-catalog/provider-models";
+import { DEFAULT_MODEL_PER_PROVIDER } from "@oh-my-pi/pi-catalog/provider-models/descriptors";
 import { parseArgs } from "@oh-my-pi/pi-coding-agent/cli/args";
 import { ModelRegistry, type ProviderConfigInput } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { getModelMatchPreferences, resolveModelScope } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
-import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { buildSessionOptions as buildCliSessionOptions } from "@oh-my-pi/pi-coding-agent/main";
 import { createAgentSession, type ExtensionFactory } from "@oh-my-pi/pi-coding-agent/sdk";
+import * as discoveryModule from "@oh-my-pi/pi-coding-agent/task/discovery";
+import * as executorModule from "@oh-my-pi/pi-coding-agent/task/executor";
+import { getBundledAgent } from "@oh-my-pi/pi-coding-agent/task/agents";
+import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import type { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
+
+import {
+	cfgCompactionModelThresholds,
+	cfgCompactionModelThresholdsEnabled,
+} from "@oh-my-pi/pi-coding-agent/session/context-settings";
+import { cfgRetryFallbackChains } from "@oh-my-pi/pi-coding-agent/session/settings";
 
 describe("createAgentSession deferred model pattern resolution", () => {
 	let tempDir: string;
@@ -43,6 +55,10 @@ describe("createAgentSession deferred model pattern resolution", () => {
 			authStorage.close();
 		}
 		authStoragesToClose.length = 0;
+		// Sessions without explicit settings run `Settings.init({ agentDir: tempDir })`, which
+		// opens `<tempDir>/agent.db` process-wide; release it so Windows can delete tempDir.
+		resetSettingsForTest();
+		AgentStorage.close();
 		if (tempDir && fs.existsSync(tempDir)) {
 			removeSyncWithRetries(tempDir);
 		}
@@ -145,6 +161,209 @@ describe("createAgentSession deferred model pattern resolution", () => {
 		}
 	});
 
+	test("lets a child task spawn a model agent inherited from its parent", async () => {
+		const bundledTask = getBundledAgent("task");
+		if (!bundledTask) throw new Error("Expected bundled task agent");
+		const modelAgent: AgentDefinition = {
+			...bundledTask,
+			name: "m1",
+			model: ["runtime-provider/runtime-model"],
+		};
+		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({ agents: [bundledTask], projectAgentsDir: null });
+		const dispatched: executorModule.ExecutorOptions[] = [];
+		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+			dispatched.push(options);
+			return {
+				index: options.index,
+				id: options.id,
+				agent: options.agent.name,
+				agentSource: options.agent.source,
+				task: options.task,
+				exitCode: 0,
+				output: "done",
+				stderr: "",
+				truncated: false,
+				durationMs: 1,
+				tokens: 0,
+				requests: 1,
+			};
+		});
+		const { session } = await createAgentSession({
+			...buildSessionOptions("runtime-provider/runtime-model"),
+			settings: Settings.isolated({ "async.enabled": false }),
+			toolNames: ["task"],
+			inheritedSessionAgents: [modelAgent],
+		});
+
+		try {
+			const taskTool = session.getToolByName("task");
+			if (!taskTool) throw new Error("Expected child task tool");
+			await taskTool.execute("nested-model-agent-call", {
+				agent: "m1",
+				task: "Inspect the target with the tagged model.",
+			});
+
+			expect(dispatched[0]?.modelOverride).toEqual(["runtime-provider/runtime-model"]);
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	async function startPrewalkSession(
+		prewalkInto: string | undefined,
+		{
+			model = "runtime-provider/runtime-model",
+			defaultRole,
+			smolRole,
+			extension = providerExtension,
+			authenticatedProvider,
+			hasUI = false,
+			onPrewalkWarning,
+		}: {
+			model?: string;
+			defaultRole?: string;
+			smolRole?: string;
+			extension?: ExtensionFactory;
+			authenticatedProvider?: string;
+			hasUI?: boolean;
+			onPrewalkWarning?: (warning: string) => void;
+		} = {},
+	) {
+		const authStorage = createInMemoryAuthStorage();
+		authStoragesToClose.push(authStorage);
+		if (authenticatedProvider) authStorage.keys.setRuntime(authenticatedProvider, "test-key");
+		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "models.yml"));
+		const settings = Settings.isolated();
+		if (defaultRole) settings.setModelRole("default", defaultRole);
+		if (smolRole) settings.setModelRole("smol", smolRole);
+		const cliOptions = await buildCliSessionOptions(
+			parseArgs(["--model", model, ...(prewalkInto ? ["--prewalk-into", prewalkInto] : ["--prewalk"])]),
+			[],
+			SessionManager.inMemory(),
+			modelRegistry,
+			settings,
+		);
+		const { session } = await createAgentSession({
+			...cliOptions,
+			cwd: tempDir,
+			agentDir: tempDir,
+			authStorage,
+			modelRegistry,
+			settings,
+			hasUI,
+			onPrewalkWarning,
+			disableExtensionDiscovery: true,
+			extensions: [extension],
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableMCP: false,
+			enableLsp: false,
+			skipPythonPreflight: true,
+			rules: [],
+			preloadedCustomToolPaths: [],
+			toolNames: ["read"],
+		});
+		return session;
+	}
+
+	test("resolves prewalk target registered by an extension", async () => {
+		const session = await startPrewalkSession("runtime-provider/runtime-fallback-model:low");
+		try {
+			expect(session.model?.id).toBe("runtime-model");
+			expect(session.getPrewalkState()?.target.id).toBe("runtime-fallback-model");
+			expect(session.getPrewalkState()?.thinkingLevel).toBe(Effort.Low);
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	test("resolves the default smol prewalk role from an extension", async () => {
+		const session = await startPrewalkSession(undefined, {
+			smolRole: "runtime-provider/runtime-fallback-model:low",
+		});
+		try {
+			expect(session.getPrewalkState()?.target.id).toBe("runtime-fallback-model");
+			expect(session.getPrewalkState()?.thinkingLevel).toBe(Effort.Low);
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	test("prefers an earlier extension role target to a later bundled fallback", async () => {
+		const fallback = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!fallback) throw new Error("expected claude-sonnet-4-5 to be bundled");
+		const session = await startPrewalkSession("@default", {
+			defaultRole: `runtime-provider/runtime-fallback-model:low,${fallback.provider}/${fallback.id}`,
+			authenticatedProvider: fallback.provider,
+		});
+		try {
+			expect(session.getPrewalkState()?.target.provider).toBe("runtime-provider");
+			expect(session.getPrewalkState()?.target.id).toBe("runtime-fallback-model");
+			expect(session.getPrewalkState()?.thinkingLevel).toBe(Effort.Low);
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	test("keeps a bundled fallback when the earlier extension target is absent", async () => {
+		const startup = getBundledModel("anthropic", "claude-opus-4-5");
+		const fallback = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!startup || !fallback) throw new Error("expected bundled models");
+		const session = await startPrewalkSession("@default", {
+			model: `${startup.provider}/${startup.id}`,
+			defaultRole: `runtime-provider/missing,${fallback.provider}/${fallback.id}`,
+			authenticatedProvider: fallback.provider,
+			extension: () => {},
+		});
+		try {
+			expect(session.model?.id).toBe(startup.id);
+			expect(session.getPrewalkState()?.target.id).toBe(fallback.id);
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	test("fetches a mixed-case cold extension provider without probing unrelated providers", async () => {
+		const unrelatedFetch = vi.fn(async () => []);
+		const extension: ExtensionFactory = pi => {
+			pi.registerProvider("runtime-provider", dynamicOnlyProviderConfig);
+			pi.registerProvider("unrelated-provider", {
+				...dynamicOnlyProviderConfig,
+				fetchDynamicModels: unrelatedFetch,
+			});
+		};
+		const session = await startPrewalkSession("Runtime-Provider/cached-runtime-model", {
+			model: "anthropic/claude-sonnet-4-5",
+			authenticatedProvider: "anthropic",
+			extension,
+			hasUI: true,
+		});
+		try {
+			expect(session.getPrewalkState()?.target.id).toBe("cached-runtime-model");
+			expect(unrelatedFetch).not.toHaveBeenCalled();
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	test("warns and continues when an extension prewalk target never registers", async () => {
+		const writes = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+		const warnings: string[] = [];
+		const session = await startPrewalkSession("missing-provider/missing-model", {
+			onPrewalkWarning: warning => warnings.push(warning),
+		});
+		try {
+			expect(session.getPrewalkState()).toBeUndefined();
+			expect(warnings).toHaveLength(1);
+			expect(warnings[0]).toContain("missing-provider/missing-model");
+			expect(writes).not.toHaveBeenCalled();
+		} finally {
+			await session.dispose();
+		}
+	});
+
 	test("resolves explicit dynamic-only modelPattern from fresh runtime cache", async () => {
 		const authStorage = createInMemoryAuthStorage();
 		authStoragesToClose.push(authStorage);
@@ -187,7 +406,7 @@ describe("createAgentSession deferred model pattern resolution", () => {
 	test("defers online runtime discovery until the UI starts it after first paint", async () => {
 		const authStorage = createInMemoryAuthStorage();
 		authStoragesToClose.push(authStorage);
-		authStorage.setRuntimeApiKey("anthropic", "anthropic-test-key");
+		authStorage.keys.setRuntime("anthropic", "anthropic-test-key");
 		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "models.yml"));
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!model) throw new Error("missing bundled startup model");
@@ -250,7 +469,7 @@ describe("createAgentSession deferred model pattern resolution", () => {
 	test("preserves an explicit model when a reused registry already finished discovery", async () => {
 		const authStorage = createInMemoryAuthStorage();
 		authStoragesToClose.push(authStorage);
-		authStorage.setRuntimeApiKey("anthropic", "anthropic-test-key");
+		authStorage.keys.setRuntime("anthropic", "anthropic-test-key");
 		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "models.yml"));
 		modelRegistry.refreshInBackground("offline");
 		await modelRegistry.awaitInitialBackgroundRefresh();
@@ -310,11 +529,11 @@ describe("createAgentSession deferred model pattern resolution", () => {
 			{ id: "opencode-zen", apiKey: "zen-test-key", baseUrl: "https://opencode.ai/zen/v1" },
 			{ id: "github-copilot", apiKey: "copilot-test-key", baseUrl: "https://api.githubcopilot.com" },
 		];
-		authStorage.setRuntimeApiKey("openai", "openai-test-key");
+		authStorage.keys.setRuntime("openai", "openai-test-key");
 		const modelsPath = path.join(tempDir, "models.yml");
 		const fallbackSelectors: string[] = [];
 		for (const provider of providers) {
-			authStorage.setRuntimeApiKey(provider.id, provider.apiKey);
+			authStorage.keys.setRuntime(provider.id, provider.apiKey);
 			const cachedModel = buildModel({
 				id: "discovered-only-model",
 				name: "Discovered Only Model",
@@ -389,7 +608,7 @@ describe("createAgentSession deferred model pattern resolution", () => {
 			contextWindow: 128_000,
 			maxTokens: 16_384,
 		});
-		authStorage.setRuntimeApiKey(provider, "first-key");
+		authStorage.keys.setRuntime(provider, "first-key");
 		writeModelCache(
 			resolveModelCacheProviderId(provider, { apiKey: "first-key" }),
 			Date.now(),
@@ -408,7 +627,7 @@ describe("createAgentSession deferred model pattern resolution", () => {
 			id: "second-credential-model",
 			name: "Second Credential Model",
 		});
-		authStorage.setRuntimeApiKey(provider, "second-key");
+		authStorage.keys.setRuntime(provider, "second-key");
 		writeModelCache(
 			resolveModelCacheProviderId(provider, { apiKey: "second-key" }),
 			Date.now(),
@@ -435,6 +654,90 @@ describe("createAgentSession deferred model pattern resolution", () => {
 		}
 	});
 
+	test("does not resolve a disabled provider through deferred subagent model selection", async () => {
+		const settings = Settings.isolated({ disabledProviders: ["runtime-provider"] });
+		const { session, modelFallbackMessage } = await createAgentSession({
+			...buildSessionOptions("runtime-provider/runtime-model"),
+			settings,
+			modelPatternAuthFallback: "runtime-provider/runtime-fallback-model",
+		});
+
+		try {
+			expect(session.model).toBeUndefined();
+			expect(modelFallbackMessage).toBe('Model "runtime-provider/runtime-model" not found');
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	test("advances past a disabled first selector to an enabled discovery-backed model", async () => {
+		// A disabled provider's model already sits in the static catalog, so
+		// resolveCliModel resolves the first selector against the full registry. If
+		// that match short-circuited the deferred discovery refresh, the enabled
+		// second selector (only reachable after a models.yml discovery fetch) would
+		// never be discovered and dispatch would report it as not found.
+		const disabledModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!disabledModel) {
+			throw new Error("Expected bundled anthropic model");
+		}
+		const authStorage = createInMemoryAuthStorage();
+		authStoragesToClose.push(authStorage);
+		const modelsPath = path.join(tempDir, "disabled-first-models.yml");
+		await Bun.write(
+			modelsPath,
+			JSON.stringify({
+				providers: {
+					gateway: {
+						baseUrl: "http://127.0.0.1:9995",
+						api: "openai-completions",
+						auth: "none",
+						discovery: { type: "openai-models-list" },
+					},
+				},
+			}),
+		);
+		let modelListCalls = 0;
+		const fetchMock: FetchImpl = async input => {
+			const url = String(input);
+			if (url === "http://127.0.0.1:9995/v1/models") {
+				modelListCalls++;
+				return Response.json({ data: [{ id: "dynamic-model", context_length: 65_536 }] });
+			}
+			throw new Error(`Unexpected URL: ${url}`);
+		};
+		const modelRegistry = new ModelRegistry(authStorage, modelsPath, { fetch: fetchMock });
+
+		const { session, modelFallbackMessage } = await createAgentSession({
+			cwd: tempDir,
+			agentDir: tempDir,
+			authStorage,
+			modelRegistry,
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated({ disabledProviders: [disabledModel.provider] }),
+			disableExtensionDiscovery: true,
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableMCP: false,
+			enableLsp: false,
+			skipPythonPreflight: true,
+			rules: [],
+			preloadedCustomToolPaths: [],
+			toolNames: ["read"],
+			modelPattern: [`${disabledModel.provider}/${disabledModel.id}`, "gateway/dynamic-model"],
+		});
+
+		try {
+			expect(modelListCalls).toBeGreaterThan(0);
+			expect(session.model?.provider).toBe("gateway");
+			expect(session.model?.id).toBe("dynamic-model");
+			expect(modelFallbackMessage).toBeUndefined();
+		} finally {
+			await session.dispose();
+		}
+	});
+
 	test("uses auth fallback when deferred subagent modelPattern resolves without working credentials", async () => {
 		const parentModel = getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!parentModel) {
@@ -442,7 +745,7 @@ describe("createAgentSession deferred model pattern resolution", () => {
 		}
 		const authStorage = createInMemoryAuthStorage();
 		authStoragesToClose.push(authStorage);
-		authStorage.setRuntimeApiKey(parentModel.provider, "test-key");
+		authStorage.keys.setRuntime(parentModel.provider, "test-key");
 		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "fallback-models.yml"));
 		const getApiKeySpy = vi.spyOn(modelRegistry, "getApiKey").mockImplementation(async requested => {
 			if (requested.provider === "runtime-provider") return undefined;
@@ -635,7 +938,7 @@ describe("createAgentSession deferred model pattern resolution", () => {
 		});
 		settings.setModelRole("task", "missing-provider/missing-model,gpt-4o-mini");
 		const authStorage = createInMemoryAuthStorage();
-		authStorage.setRuntimeApiKey("openai", "test-key");
+		authStorage.keys.setRuntime("openai", "test-key");
 		authStoragesToClose.push(authStorage);
 		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "ambiguous-role-models.yml"));
 		const parsed = parseArgs(["--model", "task"]);
@@ -692,7 +995,7 @@ describe("createAgentSession deferred model pattern resolution", () => {
 		});
 		settings.setModelRole("slow", "missing-provider/missing-model");
 		const authStorage = createInMemoryAuthStorage();
-		authStorage.setRuntimeApiKey("runtime-provider", "test-key");
+		authStorage.keys.setRuntime("runtime-provider", "test-key");
 		authStoragesToClose.push(authStorage);
 		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "missing-role-models.yml"));
 		const parsed = parseArgs(["--model", "slow:low"]);
@@ -759,7 +1062,7 @@ describe("createAgentSession deferred model pattern resolution", () => {
 			expect(session.model?.provider).toBe("runtime-provider");
 			expect(session.model?.id).toBe("runtime-model");
 			expect(session.settings.getModelRole("subagent:deferred")).toBe("runtime-provider/runtime-model");
-			expect(session.settings.get("retry.fallbackChains")["subagent:deferred"]).toEqual([
+			expect(cfgRetryFallbackChains.get(session.settings)["subagent:deferred"]).toEqual([
 				"runtime-provider/runtime-fallback-model",
 			]);
 			expect(modelFallbackMessage).toBeUndefined();
@@ -768,19 +1071,22 @@ describe("createAgentSession deferred model pattern resolution", () => {
 		}
 	});
 
-	test("skips a depleted coding-plan model before creating a noninteractive subagent session", async () => {
+	test.each([
+		["depleted", "runtime-model"],
+		["reserve", "runtime-provider/runtime-m*"],
+	] as const)("resolves the source selector when skipping a %s startup model", async (state, pattern) => {
 		const settings = Settings.isolated({
 			"retry.usageAwareFallback": true,
 			"retry.usageReservePolicy": "confirm",
 		});
-		settings.setModelRole("task", "runtime-provider/runtime-model,runtime-provider/runtime-fallback-model");
+		settings.setModelRole("task", `${pattern},runtime-provider/runtime-fallback-model`);
 		const options = buildSessionOptions("task");
-		vi.spyOn(options.authStorage, "getModelUsageHealth").mockImplementation(async (_provider, healthOptions) =>
+		vi.spyOn(options.authStorage.health, "model").mockImplementation(async (_provider, healthOptions) =>
 			healthOptions.modelId === "runtime-model"
-				? { state: "depleted", accounts: [{ credentialId: 1, credentialType: "oauth", state: "depleted" }] }
+				? { state, accounts: [{ credentialId: 1, credentialType: "oauth", state }] }
 				: { state: "healthy", accounts: [{ credentialId: 2, credentialType: "oauth", state: "healthy" }] },
 		);
-		const { session } = await createAgentSession({
+		const { session, modelFallbackMessage } = await createAgentSession({
 			...options,
 			modelPatternFallbackRole: "subagent:usage-aware",
 			settings,
@@ -789,6 +1095,11 @@ describe("createAgentSession deferred model pattern resolution", () => {
 		try {
 			expect(session.model?.provider).toBe("runtime-provider");
 			expect(session.model?.id).toBe("runtime-fallback-model");
+			expect(modelFallbackMessage).toContain(
+				"runtime-provider/runtime-model -> runtime-provider/runtime-fallback-model",
+			);
+			expect(modelFallbackMessage).toMatch(/preflight/i);
+			expect(modelFallbackMessage).toMatch(/no request.*source model/i);
 		} finally {
 			await session.dispose();
 		}
@@ -801,7 +1112,7 @@ describe("createAgentSession deferred model pattern resolution", () => {
 		});
 		settings.setModelRole("task", "runtime-provider/runtime-model,runtime-provider/runtime-fallback-model");
 		const options = buildSessionOptions("task");
-		const usageHealth = vi.spyOn(options.authStorage, "getModelUsageHealth").mockResolvedValue({
+		const usageHealth = vi.spyOn(options.authStorage.health, "model").mockResolvedValue({
 			state: "depleted",
 			accounts: [{ credentialId: 1, credentialType: "oauth", state: "depleted" }],
 		});
@@ -828,7 +1139,7 @@ describe("createAgentSession deferred model pattern resolution", () => {
 		});
 		settings.setModelRole("task", "runtime-provider/runtime-model,runtime-provider/runtime-fallback-model");
 		const options = buildSessionOptions("task");
-		vi.spyOn(options.authStorage, "getModelUsageHealth").mockImplementation(async (_provider, healthOptions) =>
+		vi.spyOn(options.authStorage.health, "model").mockImplementation(async (_provider, healthOptions) =>
 			healthOptions.modelId === "runtime-model"
 				? {
 						state: "reserve",
@@ -864,7 +1175,7 @@ describe("createAgentSession deferred model pattern resolution", () => {
 			"retry.usageReservePolicy": "fail-closed",
 		});
 		const options = buildSessionOptions("runtime-provider/runtime-model");
-		vi.spyOn(options.authStorage, "getModelUsageHealth").mockResolvedValue({
+		vi.spyOn(options.authStorage.health, "model").mockResolvedValue({
 			state: "reserve",
 			accounts: [{ credentialId: 1, credentialType: "oauth", state: "reserve", remainingFraction: 0.05 }],
 		});
@@ -888,7 +1199,7 @@ describe("createAgentSession deferred model pattern resolution", () => {
 			expect(session.model?.provider).toBe("runtime-provider");
 			expect(session.model?.id).toBe("runtime-model");
 			expect(session.settings.getModelRole("subagent:deferred")).toBe("runtime-provider/runtime-model");
-			expect(session.settings.get("retry.fallbackChains")["subagent:deferred"]).toEqual([
+			expect(cfgRetryFallbackChains.get(session.settings)["subagent:deferred"]).toEqual([
 				"runtime-provider/runtime-fallback-model",
 			]);
 		} finally {
@@ -914,7 +1225,7 @@ describe("createAgentSession deferred model pattern resolution", () => {
 			expect(session.model?.provider).toBe("runtime-provider");
 			expect(session.model?.id).toBe("runtime-model");
 			expect(session.settings.getModelRole("subagent:deferred-default")).toBe("runtime-provider/runtime-model");
-			expect(session.settings.get("retry.fallbackChains")["subagent:deferred-default"]).toEqual([
+			expect(cfgRetryFallbackChains.get(session.settings)["subagent:deferred-default"]).toEqual([
 				"runtime-provider/runtime-fallback-model",
 			]);
 		} finally {
@@ -932,7 +1243,7 @@ describe("createAgentSession deferred model pattern resolution", () => {
 			expect(session.model?.provider).toBe("runtime-provider");
 			expect(session.model?.id).toBe("runtime-model");
 			expect(session.settings.getModelRole("subagent:deferred")).toBe("runtime-provider/runtime-model");
-			expect(session.settings.get("retry.fallbackChains")["subagent:deferred"]).toEqual([
+			expect(cfgRetryFallbackChains.get(session.settings)["subagent:deferred"]).toEqual([
 				"runtime-provider/runtime-fallback-model",
 			]);
 		} finally {
@@ -941,7 +1252,7 @@ describe("createAgentSession deferred model pattern resolution", () => {
 	});
 
 	test("does not apply default role thinking override when modelPattern is explicit", async () => {
-		const settings = Settings.isolated({ defaultThinkingLevel: "off" });
+		const settings = Settings.isolated({ defaultThinkingLevel: Effort.Low });
 		settings.setModelRole("smol", "runtime-provider/runtime-fallback-model");
 		settings.setModelRole("default", "@smol:high");
 
@@ -953,7 +1264,7 @@ describe("createAgentSession deferred model pattern resolution", () => {
 		try {
 			expect(session.model?.provider).toBe("runtime-provider");
 			expect(session.model?.id).toBe("runtime-fallback-model");
-			expect(session.thinkingLevel).toBe("off");
+			expect(session.thinkingLevel).toBe(Effort.Low);
 		} finally {
 			await session.dispose();
 		}
@@ -985,7 +1296,7 @@ describe("createAgentSession deferred model pattern resolution", () => {
 		}
 
 		const authStorage = createInMemoryAuthStorage();
-		authStorage.setRuntimeApiKey(defaultModel.provider, "test-key");
+		authStorage.keys.setRuntime(defaultModel.provider, "test-key");
 		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "models.yml"));
 		const settings = Settings.isolated();
 		settings.setModelRole("default", `${defaultModel.provider}/${defaultModel.id}`);
@@ -1116,7 +1427,7 @@ describe("createAgentSession deferred model pattern resolution", () => {
 
 		const authStorage = createInMemoryAuthStorage();
 		authStoragesToClose.push(authStorage);
-		authStorage.setRuntimeApiKey(savedModel.provider, "test-key");
+		authStorage.keys.setRuntime(savedModel.provider, "test-key");
 		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "models.yml"));
 
 		const targetSessionFile = path.join(tempDir, "resume-saved-model.jsonl");
@@ -1178,6 +1489,247 @@ describe("createAgentSession deferred model pattern resolution", () => {
 		}
 	});
 
+	function buildResumeOptions() {
+		const authStorage = createInMemoryAuthStorage();
+		authStoragesToClose.push(authStorage);
+		authStorage.keys.setRuntime("anthropic", "test-key");
+		const sessionManager = SessionManager.inMemory();
+		sessionManager.appendModelChange("missing-provider/missing-model");
+		return {
+			...buildSessionOptions(""),
+			authStorage,
+			modelRegistry: new ModelRegistry(authStorage, path.join(tempDir, "models.yml")),
+			sessionManager,
+			settings: Settings.isolated({ modelRoles: { default: "anthropic/claude-sonnet-4-5" } }),
+			extensions: [],
+		};
+	}
+
+	test("rejects a headless resume instead of substituting the settings default", async () => {
+		await expect(createAgentSession(buildResumeOptions())).rejects.toThrow(
+			"Could not restore model missing-provider/missing-model",
+		);
+	});
+
+	test("rejects a headless resume instead of selecting the first available model", async () => {
+		await expect(createAgentSession({ ...buildResumeOptions(), settings: Settings.isolated() })).rejects.toThrow(
+			"Could not restore model missing-provider/missing-model",
+		);
+	});
+
+	test("rejects an interactive resume when retry model fallback is disabled", async () => {
+		await expect(
+			createAgentSession({
+				...buildResumeOptions(),
+				hasUI: true,
+				settings: Settings.isolated({
+					modelRoles: { default: "anthropic/claude-sonnet-4-5" },
+					retry: { modelFallback: false },
+				}),
+			}),
+		).rejects.toThrow("Could not restore model missing-provider/missing-model");
+	});
+
+	test("rejects a resume when tool UI is available but startup fallback warnings are not", async () => {
+		await expect(
+			createAgentSession({ ...buildResumeOptions(), hasUI: true, allowSessionModelFallback: false }),
+		).rejects.toThrow("Could not restore model missing-provider/missing-model");
+	});
+
+	test("keeps the fallback warning and settings default for interactive resume", async () => {
+		const { session, modelFallbackMessage } = await createAgentSession({ ...buildResumeOptions(), hasUI: true });
+		try {
+			expect(session.model?.provider).toBe("anthropic");
+			expect(session.model?.id).toBe("claude-sonnet-4-5");
+			expect(modelFallbackMessage).toContain("Could not restore model missing-provider/missing-model");
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	test.each(["model", "modelPattern"] as const)(
+		"honors an explicit %s instead of the unavailable saved model",
+		async selection => {
+			const options = buildResumeOptions();
+			const model = options.modelRegistry.find("anthropic", "claude-sonnet-4-5");
+			if (!model) throw new Error("Expected bundled anthropic default model");
+			const { session, modelFallbackMessage } = await createAgentSession({
+				...options,
+				...(selection === "model" ? { model } : { modelPattern: "anthropic/claude-sonnet-4-5" }),
+			});
+			try {
+				expect(session.model?.provider).toBe("anthropic");
+				expect(session.model?.id).toBe("claude-sonnet-4-5");
+				expect(modelFallbackMessage).toBeUndefined();
+			} finally {
+				await session.dispose();
+			}
+		},
+	);
+
+	test("restores an extension-discovered session model before rejecting headless resume", async () => {
+		const options = buildResumeOptions();
+		options.sessionManager.appendModelChange("runtime-provider/cached-runtime-model");
+		const discoveryStarted = Promise.withResolvers<void>();
+		const finishDiscovery = Promise.withResolvers<void>();
+		const extension: ExtensionFactory = pi => {
+			pi.registerProvider("runtime-provider", {
+				...dynamicOnlyProviderConfig,
+				fetchDynamicModels: async context => {
+					discoveryStarted.resolve();
+					await finishDiscovery.promise;
+					return dynamicOnlyProviderConfig.fetchDynamicModels!(context);
+				},
+			});
+		};
+		const startup = createAgentSession({ ...options, extensions: [extension] });
+		await discoveryStarted.promise;
+		finishDiscovery.resolve();
+		const { session, modelFallbackMessage } = await startup;
+		try {
+			expect(session.model?.provider).toBe("runtime-provider");
+			expect(session.model?.id).toBe("cached-runtime-model");
+			expect(modelFallbackMessage).toBeUndefined();
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	/** A fresh persisted session on the settings default, ready to switch at runtime. */
+	function buildSwitchOptions() {
+		return {
+			...buildResumeOptions(),
+			sessionManager: SessionManager.create(tempDir, path.join(tempDir, "sessions")),
+		};
+	}
+
+	/** A session file whose only saved model is `model`, holding one user turn. */
+	async function writeSavedModelSession(model: string): Promise<string> {
+		const sessionFile = path.join(tempDir, `saved-${Snowflake.next()}.jsonl`);
+		const timestamp = "2026-06-01T00:00:00.000Z";
+		await Bun.write(
+			sessionFile,
+			`${[
+				{ type: "session", version: 3, id: `saved-${Snowflake.next()}`, timestamp, cwd: tempDir },
+				{ type: "model_change", id: "model", parentId: null, timestamp, model, role: "default" },
+				{
+					type: "message",
+					id: "user",
+					parentId: "model",
+					timestamp,
+					message: { role: "user", content: "Remember ZEBRA-42.", timestamp: Date.parse(timestamp) },
+				},
+			]
+				.map(entry => JSON.stringify(entry))
+				.join("\n")}\n`,
+		);
+		return sessionFile;
+	}
+
+	test.each([
+		["headless", {}],
+		["tool-UI-only", { hasUI: true, allowSessionModelFallback: false }],
+		[
+			"retry-fallback-disabled UI",
+			{
+				hasUI: true,
+				settings: Settings.isolated({
+					modelRoles: { default: "anthropic/claude-sonnet-4-5" },
+					retry: { modelFallback: false },
+				}),
+			},
+		],
+	] as const)("keeps a %s session when switching to one whose saved model is unavailable", async (_host, host) => {
+		const { session } = await createAgentSession({ ...buildSwitchOptions(), ...host });
+		try {
+			const previousFile = session.sessionFile;
+			const target = await writeSavedModelSession("missing-provider/missing-model");
+			await expect(session.switchSession(target)).rejects.toThrow(
+				"Could not restore model missing-provider/missing-model",
+			);
+			expect(session.sessionFile).toBe(previousFile);
+			expect(session.messages).toEqual([]);
+			expect(session.model?.id).toBe("claude-sonnet-4-5");
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	test("switches a UI session to an unavailable saved model with a restore warning", async () => {
+		const { session } = await createAgentSession({ ...buildSwitchOptions(), hasUI: true });
+		const notices: string[] = [];
+		session.subscribe(event => {
+			if (event.type === "notice") notices.push(`${event.level}: ${event.message}`);
+		});
+		try {
+			const target = await writeSavedModelSession("missing-provider/missing-model");
+			await expect(session.switchSession(target)).resolves.toBe(true);
+			expect(session.sessionFile).toBe(target);
+			expect(session.model?.id).toBe("claude-sonnet-4-5");
+			const warning = "Could not restore model missing-provider/missing-model. Using anthropic/claude-sonnet-4-5";
+			expect(notices).toEqual([`warning: ${warning}`]);
+
+			// A host that re-renders after switching takes the warning itself.
+			const reported: string[] = [];
+			const next = await writeSavedModelSession("missing-provider/missing-model");
+			await session.switchSession(next, { onModelFallback: message => reported.push(message) });
+			expect(reported).toEqual([warning]);
+			expect(notices).toHaveLength(1);
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	test("restores an extension-discovered model when switching before discovery ran", async () => {
+		// UI startup defers runtime discovery until after the first paint, so
+		// `/resume` can run before the provider's models exist in the registry.
+		const { session } = await createAgentSession({
+			...buildSwitchOptions(),
+			hasUI: true,
+			extensions: [dynamicOnlyProviderExtension],
+		});
+		try {
+			const target = await writeSavedModelSession("runtime-provider/cached-runtime-model");
+			await expect(session.switchSession(target)).resolves.toBe(true);
+			expect(session.model?.provider).toBe("runtime-provider");
+			expect(session.model?.id).toBe("cached-runtime-model");
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	test("binds an explicit switch model and restores it on the next switch", async () => {
+		const { session } = await createAgentSession(buildSwitchOptions());
+		try {
+			const settingsDefault = session.modelRegistry.find("anthropic", "claude-sonnet-4-5");
+			const explicit = session.modelRegistry.find("anthropic", "claude-sonnet-4-6");
+			if (!settingsDefault || !explicit) throw new Error("Expected bundled anthropic Sonnet models");
+			const target = await writeSavedModelSession("missing-provider/missing-model");
+			await expect(session.switchSession(target, { model: explicit })).resolves.toBe(true);
+			expect(session.model?.id).toBe("claude-sonnet-4-6");
+
+			// The target recorded the explicit model, so a later switch restores it.
+			await session.newSession();
+			await session.setModel(settingsDefault);
+			await expect(session.switchSession(target)).resolves.toBe(true);
+			expect(session.model?.id).toBe("claude-sonnet-4-6");
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	test("keeps the current model for a replica switch that mirrors another host's model", async () => {
+		const { session } = await createAgentSession(buildSwitchOptions());
+		try {
+			const target = await writeSavedModelSession("missing-provider/missing-model");
+			await expect(session.switchSession(target, { keepModel: true })).resolves.toBe(true);
+			expect(session.sessionFile).toBe(target);
+			expect(session.model?.id).toBe("claude-sonnet-4-5");
+		} finally {
+			await session.dispose();
+		}
+	});
+
 	test("restores a discovery-backed session model instead of falling back to the default role", async () => {
 		// Regression: on `omp --resume`, the session-model restore probed
 		// candidates only against the static+cached catalog. A discovery-backed
@@ -1195,7 +1747,7 @@ describe("createAgentSession deferred model pattern resolution", () => {
 		authStoragesToClose.push(authStorage);
 		// A resolvable default role gives the buggy path a concrete model to wrongly
 		// fall back to (mirrors a real config with Claude as the default role).
-		authStorage.setRuntimeApiKey(defaultModel.provider, "test-key");
+		authStorage.keys.setRuntime(defaultModel.provider, "test-key");
 
 		const modelsPath = path.join(tempDir, "models.yml");
 		await Bun.write(
@@ -1293,9 +1845,8 @@ describe("createAgentSession deferred model pattern resolution", () => {
 		// Regression: with an Anthropic key but no configured `default` role and no
 		// session/CLI model, the step-4 startup fallback used to pick the first
 		// anthropic model in models.json catalog order (claude-3-5-sonnet-20240620)
-		// instead of the provider's configured default from DEFAULT_MODEL_PER_PROVIDER
-		// (claude-opus-4-8).
-		const providerDefault = getBundledModel("anthropic", "claude-opus-4-8");
+		// instead of the provider's configured default from DEFAULT_MODEL_PER_PROVIDER.
+		const providerDefault = getBundledModel("anthropic", DEFAULT_MODEL_PER_PROVIDER.anthropic);
 		const catalogFirst = getBundledModel("anthropic", "claude-3-5-sonnet-20240620");
 		if (!providerDefault || !catalogFirst) {
 			throw new Error("Expected bundled anthropic models for fallback regression");
@@ -1303,7 +1854,7 @@ describe("createAgentSession deferred model pattern resolution", () => {
 
 		const authStorage = createInMemoryAuthStorage();
 		authStoragesToClose.push(authStorage);
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		authStorage.keys.setRuntime("anthropic", "test-key");
 		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "models.yml"));
 		// No `default` model role configured: forces the step-4 startup fallback.
 		const settings = Settings.isolated({ enabledModels: ["anthropic/*"] });
@@ -1337,17 +1888,19 @@ describe("createAgentSession deferred model pattern resolution", () => {
 		}
 	});
 
-	test("prefers Codex OAuth over plain OpenAI for the shared startup default", async () => {
-		const openaiDefault = getBundledModel("openai", "gpt-5.5");
-		const codexDefault = getBundledModel("openai-codex", "gpt-5.5");
-		if (!openaiDefault || !codexDefault) {
-			throw new Error("Expected bundled OpenAI and Codex GPT-5.5 defaults");
+	test("resolves the default thinking level against the startup fallback model", async () => {
+		// Regression: with no configured model, the provider-default fallback kept
+		// the settings default thinking level (`high`) unresolved, so a reasoning
+		// model without an effort ladder failed its first turn with
+		// "Thinking effort high is not supported by devin/swe-1-6".
+		const fallbackModel = getBundledModel("devin", "swe-1-6");
+		if (!fallbackModel?.reasoning || fallbackModel.thinking) {
+			throw new Error("Expected bundled devin/swe-1-6 as a reasoning model without an effort ladder");
 		}
 
 		const authStorage = createInMemoryAuthStorage();
 		authStoragesToClose.push(authStorage);
-		authStorage.setRuntimeApiKey("openai", "sk-or-v1-invalid-openai-key");
-		authStorage.setRuntimeApiKey("openai-codex", "codex-oauth-token");
+		authStorage.keys.setRuntime("devin", "test-key");
 		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "models.yml"));
 
 		const { session } = await createAgentSession({
@@ -1355,7 +1908,7 @@ describe("createAgentSession deferred model pattern resolution", () => {
 			agentDir: tempDir,
 			authStorage,
 			modelRegistry,
-			settings: Settings.isolated({ enabledModels: ["openai/gpt-5.5", "openai-codex/gpt-5.5"] }),
+			settings: Settings.isolated({ enabledModels: ["devin/swe-1-6"], defaultThinkingLevel: Effort.High }),
 			sessionManager: SessionManager.inMemory(),
 			disableExtensionDiscovery: true,
 			skills: [],
@@ -1371,9 +1924,9 @@ describe("createAgentSession deferred model pattern resolution", () => {
 		});
 
 		try {
-			expect(session.model?.provider).toBe("openai-codex");
-			expect(session.model?.id).toBe(codexDefault.id);
-			expect(session.model?.id).toBe(openaiDefault.id);
+			expect(session.model?.provider).toBe("devin");
+			expect(session.model?.id).toBe("swe-1-6");
+			expect(session.thinkingLevel).toBeUndefined();
 		} finally {
 			await session.dispose();
 		}
@@ -1382,7 +1935,7 @@ describe("createAgentSession deferred model pattern resolution", () => {
 	test("caps premium Codex context before a new session starts", async () => {
 		const authStorage = createInMemoryAuthStorage();
 		authStoragesToClose.push(authStorage);
-		authStorage.setRuntimeApiKey("openai-codex", "codex-oauth-token");
+		authStorage.keys.setRuntime("openai-codex", "codex-oauth-token");
 
 		const { session } = await createAgentSession({
 			cwd: tempDir,
@@ -1413,6 +1966,96 @@ describe("createAgentSession deferred model pattern resolution", () => {
 		}
 	});
 
+	test("a subagent with its own compaction override does not inherit a model's compaction-point opt-in", async () => {
+		const authStorage = createInMemoryAuthStorage();
+		authStoragesToClose.push(authStorage);
+		authStorage.keys.setRuntime("openai", "sk-test");
+		const root = Settings.isolated({
+			extendedContext: false,
+			"compaction.modelThresholds": { "openai/gpt-5.6-terra": 400_000 },
+		});
+		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "models.yml"), { settings: root });
+		const child = executorModule.createSubagentSettings(
+			root,
+			executorModule.compactionThresholdSettings({ thresholdPercent: 80, thresholdTokens: -1 }),
+		);
+		const open = (settings: Settings) =>
+			createAgentSession({
+				cwd: tempDir,
+				agentDir: tempDir,
+				authStorage,
+				modelRegistry,
+				settings,
+				sessionManager: SessionManager.inMemory(),
+				disableExtensionDiscovery: true,
+				skills: [],
+				contextFiles: [],
+				promptTemplates: [],
+				slashCommands: [],
+				enableMCP: false,
+				enableLsp: false,
+				skipPythonPreflight: true,
+				rules: [],
+				preloadedCustomToolPaths: [],
+				toolNames: ["read"],
+				modelPattern: "openai/gpt-5.6-terra",
+			});
+
+		const { session: parent } = await open(root);
+		const { session: subagent } = await open(child);
+		try {
+			expect(parent.model?.contextWindow).toBe(1_050_000);
+			expect(subagent.model?.contextWindow).toBe(272_000);
+			// Re-selecting the shared catalog row keeps the subagent on its own tier.
+			const row = modelRegistry.find("openai", "gpt-5.6-terra");
+			if (!row) throw new Error("Expected bundled gpt-5.6-terra");
+			await subagent.setModel(row, "default", { persist: false });
+			expect(subagent.model?.contextWindow).toBe(272_000);
+		} finally {
+			await subagent.dispose();
+			await parent.dispose();
+		}
+	});
+
+	test("a compaction point edit switches the bound window before the next prompt can start", async () => {
+		const authStorage = createInMemoryAuthStorage();
+		authStoragesToClose.push(authStorage);
+		authStorage.keys.setRuntime("openai", "sk-test");
+		const settings = Settings.isolated();
+		const { session } = await createAgentSession({
+			cwd: tempDir,
+			agentDir: tempDir,
+			authStorage,
+			settings,
+			sessionManager: SessionManager.inMemory(),
+			disableExtensionDiscovery: true,
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableMCP: false,
+			enableLsp: false,
+			skipPythonPreflight: true,
+			rules: [],
+			preloadedCustomToolPaths: [],
+			toolNames: ["read"],
+			modelPattern: "openai/gpt-5.6-terra",
+		});
+		try {
+			expect(session.model?.contextWindow).toBe(272_000);
+			// Setting listeners run one microtask after the write; no catalog rebuild
+			// may be awaited before the bound row carries the new tier.
+			cfgCompactionModelThresholds.set(settings, { "openai/gpt-5.6-terra": 400_000 });
+			await Promise.resolve();
+			expect(session.model?.contextWindow).toBe(1_050_000);
+			cfgCompactionModelThresholdsEnabled.set(settings, false);
+			await Promise.resolve();
+			expect(session.model?.contextWindow).toBe(272_000);
+		} finally {
+			await session.dispose();
+		}
+	});
+
 	test("loads model overrides from the supplied agent directory", async () => {
 		await Bun.write(
 			path.join(tempDir, "models.yml"),
@@ -1426,7 +2069,7 @@ describe("createAgentSession deferred model pattern resolution", () => {
 		);
 		const authStorage = createInMemoryAuthStorage();
 		authStoragesToClose.push(authStorage);
-		authStorage.setRuntimeApiKey("openai-codex", "codex-oauth-token");
+		authStorage.keys.setRuntime("openai-codex", "codex-oauth-token");
 
 		const { session } = await createAgentSession({
 			cwd: tempDir,
@@ -1464,7 +2107,7 @@ describe("createAgentSession deferred model pattern resolution", () => {
 		}
 
 		const authStorage = createInMemoryAuthStorage();
-		authStorage.setRuntimeApiKey(defaultModel.provider, "test-key");
+		authStorage.keys.setRuntime(defaultModel.provider, "test-key");
 		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "models.yml"));
 
 		const targetSessionFile = path.join(tempDir, "resume-extension.jsonl");
@@ -1533,7 +2176,7 @@ describe("createAgentSession deferred model pattern resolution", () => {
 		}
 
 		const authStorage = createInMemoryAuthStorage();
-		authStorage.setRuntimeApiKey(settingsDefaultModel.provider, "test-key");
+		authStorage.keys.setRuntime(settingsDefaultModel.provider, "test-key");
 		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "models.yml"));
 
 		// Saved default points at a provider that has no usable credentials. The
@@ -1609,7 +2252,7 @@ describe("createAgentSession deferred model pattern resolution", () => {
 		authStoragesToClose.push(authStorage);
 		// The extension provider carries an inline apiKey; the "normally
 		// configured" provider needs credentials so it lands in the startup scope.
-		authStorage.setRuntimeApiKey(configuredModel.provider, "test-key");
+		authStorage.keys.setRuntime(configuredModel.provider, "test-key");
 		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "scope-6694-models.yml"));
 
 		const enabledModels = ["runtime-provider/runtime-model", `${configuredModel.provider}/${configuredModel.id}`];
@@ -1684,8 +2327,8 @@ describe("createAgentSession deferred model pattern resolution", () => {
 		}
 		const authStorage = createInMemoryAuthStorage();
 		authStoragesToClose.push(authStorage);
-		authStorage.setRuntimeApiKey(scopedTarget.provider, "test-key");
-		authStorage.setRuntimeApiKey(savedDefault.provider, "test-key");
+		authStorage.keys.setRuntime(scopedTarget.provider, "test-key");
+		authStorage.keys.setRuntime(savedDefault.provider, "test-key");
 		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "cli-scope-models.yml"));
 		const settings = Settings.isolated({});
 		settings.setModelRole("default", `${savedDefault.provider}/${savedDefault.id}`);

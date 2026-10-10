@@ -12,16 +12,26 @@ export type OAuthCredentials = {
 	apiEndpoint?: string;
 	/**
 	 * Organization/workspace the token is scoped to (e.g. an Anthropic org
-	 * UUID or a ChatGPT workspace id). Captured once at login; token refreshes
-	 * never rewrite it. Lets one account email hold credentials for multiple
-	 * subscriptions.
+	 * UUID or canonical Factory org ID). Lets one account email hold
+	 * credentials for multiple subscriptions.
 	 */
 	orgId?: string;
 	/** Human-readable organization name for display (may embed the email). */
 	orgName?: string;
 	/**
+	 * Account residency region (e.g. `"eu"`), when the provider is
+	 * region-partitioned. Captured at login; refreshed identity may update it
+	 * when the account migrates, while failed lookups preserve the stored value.
+	 * Residency selects the API host, not inference eligibility.
+	 */
+	region?: string;
+	/** Factory organization inference scope, independent of account residency. */
+	inferenceRegion?: "global" | "eu" | "us";
+	/** WorkOS selected organization; never used as a Factory API organization header. */
+	activeOrganizationId?: string;
+	/**
 	 * Epoch ms of the interactive login that minted this grant. Set by
-	 * `AuthStorage.login`; token refreshes preserve it. Providers with an
+	 * `AuthStorage.oauth.login`; token refreshes preserve it. Providers with an
 	 * absolute grant lifetime (Anthropic expires the whole refresh-token
 	 * family ~30 days after authorization regardless of rotation) use it to
 	 * surface re-login deadlines before the grant dies.
@@ -37,6 +47,8 @@ export type OAuthPrompt = {
 	message: string;
 	placeholder?: string;
 	allowEmpty?: boolean;
+	/** Request masked entry from interactive hosts. Hosts that cannot hide input must reject the prompt. */
+	secret?: boolean;
 };
 
 export type OAuthAuthInfo = {
@@ -70,12 +82,21 @@ export interface OAuthProviderInfo {
 	storeCredentialsAs?: string;
 }
 
+/** Sign-in URL and accepted cookies for an isolated, host-owned browser. */
+export type OAuthBrowserSessionRequest = {
+	url: string;
+	/** Cookie names in preference order; return the first non-empty matching value. */
+	cookieNames: readonly string[];
+};
+
 export interface OAuthController {
 	onAuth?(info: OAuthAuthInfo): void;
 	onProgress?(message: string): void;
 	/** Request pasted callback input; stop any visible prompt when `signal` aborts. */
 	onManualCodeInput?(signal?: AbortSignal): Promise<string>;
 	onPrompt?(prompt: OAuthPrompt): Promise<string>;
+	/** Complete browser login and return one matching cookie value privately. Reject on cancellation or failure. */
+	onBrowserSession?(request: OAuthBrowserSessionRequest, signal?: AbortSignal): Promise<string>;
 	signal?: AbortSignal;
 	fetch?: FetchImpl;
 }

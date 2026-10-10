@@ -1,6 +1,32 @@
 // Provider-wire compat for "xiaomi-token-plan-cn"; regenerated from the frozen census using deployment contract selectors.
 
 provider "xiaomi-token-plan-cn" {
+	default-model "mimo-v2.5"
+	env "XIAOMI_TOKEN_PLAN_CN_API_KEY"
+
+	// Xiaomi's credential-scoped roster returns bare ids, so these documented
+	// V2.6 capabilities must remain authoritative across online refreshes.
+	seed api="openai-completions" base-url="https://token-plan-cn.xiaomimimo.com/v1" bundle="always" precedence="seed" {
+		model "mimo-v2.6-pro" name="MiMo-V2.6-Pro" {
+			reasoning #true
+			input "text" "image"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits context=1048576 max-tokens=131072
+		}
+		model "mimo-v2.6-flash" name="MiMo-V2.6-Flash" {
+			reasoning #true
+			input "text" "image"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits context=1048576 max-tokens=131072
+		}
+		model "mimo-v2.6-pro-ultraspeed" name="MiMo-V2.6-Pro-Ultraspeed" {
+			reasoning #true
+			input "text" "image"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits context=1048576 max-tokens=131072
+		}
+	}
+
 	class "mimo" {
 		family "v2" {
 			thinking-mode "effort"

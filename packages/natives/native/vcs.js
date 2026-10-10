@@ -1,3 +1,4 @@
+import { $ } from "bun";
 import * as fs from "node:fs";
 import { loadNative } from "./loader-state.js";
 
@@ -39,6 +40,11 @@ export function git(dir) {
 /** Discover the repository owning `dir`; `null` outside any repository. */
 export function repo(dir) {
 	return api().vcsDiscover(dir);
+}
+
+/** Like {@link repo}, but equal-root jj+git ties prefer Jujutsu for display. Git-safe automation must keep using {@link repo}. */
+export function repoForDisplay(dir) {
+	return api().vcsDiscoverForDisplay(dir);
 }
 
 /** Like {@link repo}, asserting any requested backend capabilities. */
@@ -88,6 +94,19 @@ export function clone(url, target, options = {}, signal) {
 /** Sever a copied working tree from shared git metadata. */
 export function detachGitDir(worktreeRoot, sourceCommonDir, signal) {
 	return api().vcsDetachGitDir(worktreeRoot, sourceCommonDir, signal);
+}
+
+/**
+ * Run Git's checkout hook in a newly created linked worktree, using the same
+ * null old HEAD and branch-switch flag as `git worktree add`.
+ */
+export async function runPostCheckoutHook(worktreeRoot, head) {
+	const nullOid = "0".repeat(head.length);
+	const result = await $`git hook run --ignore-missing post-checkout -- ${nullOid} ${head} 1`
+		.cwd(worktreeRoot)
+		.quiet()
+		.nothrow();
+	return { exitCode: result.exitCode, stdout: result.stdout, stderr: result.stderr };
 }
 
 /** Join patch fragments, preserving each part's trailing newline. */

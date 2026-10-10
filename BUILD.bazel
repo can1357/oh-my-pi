@@ -22,6 +22,7 @@ _ADDONS = {
     "darwin-x64-baseline": ("//bazel/platforms:darwin-x64-baseline", "pi_natives.darwin-x64-baseline.node"),
     "darwin-arm64": ("//bazel/platforms:darwin-arm64", "pi_natives.darwin-arm64.node"),
     "win32-x64-baseline": ("//bazel/platforms:win32-x64-baseline", "pi_natives.win32-x64-baseline.node"),
+    "win32-arm64": ("//bazel/platforms:win32-arm64", "pi_natives.win32-arm64.node"),
 }
 
 [
@@ -34,16 +35,19 @@ _ADDONS = {
     for target, (platform, out) in _ADDONS.items()
 ]
 
-# Every addon buildable from a linux-x64 host (the omp-kata pods): all linux
-# targets plus the msvc cross build. darwin addons build on mac hosts.
+# Every shipped addon. Linux hosts (the omp-kata pods) build all of them: the
+# zig, msvc and darwin cross toolchains all run there.
 filegroup(
-    name = "natives-linux-all",
+    name = "natives-all",
     srcs = [
+        ":natives-darwin-arm64",
+        ":natives-darwin-x64-baseline",
         ":natives-linux-arm64",
         ":natives-linux-musl-arm64",
         ":natives-linux-musl-x64-baseline",
         ":natives-linux-x64-baseline",
         ":natives-linux-x64-modern",
+        ":natives-win32-arm64",
         ":natives-win32-x64-baseline",
     ],
 )

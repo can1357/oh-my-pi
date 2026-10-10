@@ -88,6 +88,38 @@ describe("AgentLifecycleManager", () => {
 		expect(registry.get("generation-Sub")).toBeUndefined();
 	});
 
+	it("global() rebinds to the current registry after a lone AgentRegistry reset so release still emits aborted", async () => {
+		// A prior test file constructed the lifecycle global against registry A,
+		// then reset only the registry — the global is now registry B. The stranded
+		// manager (issue #11432) would run the terminal transition on the dead A
+		// while consumers subscribe to B, so status_changed never arrives.
+		const staleManager = lifecycle;
+		AgentRegistry.resetGlobalForTests();
+		const rebound = AgentLifecycleManager.global();
+		expect(rebound).not.toBe(staleManager);
+
+		const current = AgentRegistry.global();
+		const ref = current.register({
+			id: "Remote-Killed-Sub",
+			displayName: "remote kill",
+			kind: "sub",
+			session: makeSessionStub().session,
+			sessionFile: null,
+			status: "running",
+		});
+		const killed = deferred();
+		const unsubscribe = current.onChange(event => {
+			if (event.ref === ref && event.type === "status_changed" && event.ref.status === "aborted") killed.resolve();
+		});
+		try {
+			await rebound.release("Remote-Killed-Sub", ref, { tombstone: true });
+			await killed.promise;
+			expect(current.get("Remote-Killed-Sub")).toMatchObject({ status: "aborted", session: null });
+		} finally {
+			unsubscribe();
+		}
+	});
+
 	it("adopt arms the TTL: an idle agent is parked — session disposed, ref + sessionFile retained", async () => {
 		vi.useFakeTimers();
 		const stub = makeSessionStub();
@@ -211,11 +243,14 @@ describe("AgentLifecycleManager", () => {
 			status: "parked",
 		});
 		let factoryCalls = 0;
-		lifecycle.setPersistedSubagentReviverFactory(async ref => {
-			factoryCalls++;
-			expect(ref).toBe(cold);
-			return async () => revived.session;
-		}, 0);
+		lifecycle.setPersistedSubagentReviverFactory(
+			async ref => {
+				factoryCalls++;
+				expect(ref).toBe(cold);
+				return async () => revived.session;
+			},
+			() => 0,
+		);
 
 		expect(await lifecycle.reclaimDeadCorpse("Cold-Sub", cold)).toBe(false);
 		expect(registry.get("Cold-Sub")).toBe(cold);
@@ -314,10 +349,13 @@ describe("AgentLifecycleManager", () => {
 			status: "parked",
 		});
 		let factoryCalls = 0;
-		lifecycle.setPersistedSubagentReviverFactory(async () => {
-			factoryCalls++;
-			return async () => revived.session;
-		}, TTL);
+		lifecycle.setPersistedSubagentReviverFactory(
+			async () => {
+				factoryCalls++;
+				return async () => revived.session;
+			},
+			() => TTL,
+		);
 
 		const session = await lifecycle.ensureLive("6-Sub");
 
@@ -342,7 +380,10 @@ describe("AgentLifecycleManager", () => {
 			sessionFile: "/tmp/7-Sub.jsonl",
 			status: "parked",
 		});
-		lifecycle.setPersistedSubagentReviverFactory(async () => undefined, TTL);
+		lifecycle.setPersistedSubagentReviverFactory(
+			async () => undefined,
+			() => TTL,
+		);
 
 		await expect(lifecycle.ensureLive("7-Sub")).rejects.toThrow(/cannot be revived.*no reviver registered/);
 	});
@@ -358,14 +399,17 @@ describe("AgentLifecycleManager", () => {
 			status: "parked",
 		});
 		let factoryCalls = 0;
-		lifecycle.setPersistedSubagentReviverFactory(async () => {
-			factoryCalls++;
-			const failFirst = factoryCalls === 1;
-			return async () => {
-				if (failFirst) throw new Error("stale context");
-				return revived.session;
-			};
-		}, TTL);
+		lifecycle.setPersistedSubagentReviverFactory(
+			async () => {
+				factoryCalls++;
+				const failFirst = factoryCalls === 1;
+				return async () => {
+					if (failFirst) throw new Error("stale context");
+					return revived.session;
+				};
+			},
+			() => TTL,
+		);
 
 		await expect(lifecycle.ensureLive("8-Sub")).rejects.toThrow(/stale context/);
 		expect(registry.get("8-Sub")?.status).toBe("parked");
@@ -393,6 +437,25 @@ describe("AgentLifecycleManager", () => {
 		await flushAsync();
 		expect(stub.disposeCalls()).toBe(1);
 		expect(registry.get("6-Sub")).toBeUndefined();
+	});
+
+	it("keeps owned resources through parking and releases them with the agent", async () => {
+		vi.useFakeTimers();
+		const stub = makeSessionStub();
+		const releaseResource = vi.fn(async () => {});
+		registerIdleSub("Owned-Sub", stub.session);
+		lifecycle.adopt("Owned-Sub", { idleTtlMs: TTL, onRelease: releaseResource });
+
+		vi.advanceTimersByTime(TTL);
+		await flushAsync();
+
+		expect(registry.get("Owned-Sub")?.status).toBe("parked");
+		expect(stub.disposeCalls()).toBe(1);
+		expect(releaseResource).not.toHaveBeenCalled();
+
+		await lifecycle.release("Owned-Sub");
+
+		expect(releaseResource).toHaveBeenCalledTimes(1);
 	});
 
 	it("does not let one stuck adopted agent block sibling disposal", async () => {
@@ -812,13 +875,16 @@ describe("AgentLifecycleManager", () => {
 			sessionFile: "/tmp/Cold-DisposeRace.jsonl",
 			status: "parked",
 		});
-		lifecycle.setPersistedSubagentReviverFactory(async () => {
-			await gate.promise;
-			return async () => {
-				reviverRuns++;
-				return revived.session;
-			};
-		}, TTL);
+		lifecycle.setPersistedSubagentReviverFactory(
+			async () => {
+				await gate.promise;
+				return async () => {
+					reviverRuns++;
+					return revived.session;
+				};
+			},
+			() => TTL,
+		);
 
 		const revival = lifecycle.ensureLive("Cold-DisposeRace");
 		await flushAsync(); // reach the factory await
@@ -856,7 +922,7 @@ describe("AgentLifecycleManager", () => {
 				await gate.promise;
 				return revived.session;
 			},
-			TTL,
+			() => TTL,
 		);
 
 		const revival = lifecycle.ensureLive("Cold-SessionRace");
@@ -883,7 +949,10 @@ describe("AgentLifecycleManager", () => {
 		});
 
 		const nextLifecycle = AgentLifecycleManager.global();
-		nextLifecycle.setPersistedSubagentReviverFactory(async () => async () => revived.session, 0);
+		nextLifecycle.setPersistedSubagentReviverFactory(
+			async () => async () => revived.session,
+			() => 0,
+		);
 
 		await expect(nextLifecycle.ensureLive("Next-Owner")).resolves.toBe(revived.session);
 		expect(registry.get("Next-Owner")).toMatchObject({ status: "idle", session: revived.session });

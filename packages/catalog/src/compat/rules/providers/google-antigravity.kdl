@@ -1,6 +1,30 @@
 // Provider-wire compat for "google-antigravity"; regenerated from the frozen census using deployment contract selectors.
 
 provider "google-antigravity" {
+	default-model "gemini-3.1-pro"
+	// `fetchAvailableModels` is the account's served roster; bundled rows it
+	// omits (e.g. Claude 5.5 on plans without it) 404 on every request (#14328).
+	dynamic-models-authoritative #true
+	kind-apis {
+		image "google-gemini-cli"
+	}
+	web-search "gemini"
+
+	seed api="google-gemini-cli" base-url="https://daily-cloudcode-pa.googleapis.com" bundle="always" {
+		model "gemini-3-pro-image" name="Gemini 3 Pro Image" {
+			reasoning #false
+			input "text" "image"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits
+			supports-tools #false
+		}
+	}
+
+	// Routed wire profiles overwrite caller caps with fixed output limits.
+	// Conservatively reject requested bounds for this provider, including
+	// logical ids whose effort routing selects a profiled wire id later.
+	preserves-max-output-tokens #false
+
 	class "anthropic" {
 		family "opus" {
 			thinking-mode "budget"
@@ -42,6 +66,13 @@ provider "google-antigravity" {
 	// residue: taxonomy ranks and exact globs do not isolate these models.
 	models "gemini-3-pro" {
 		thinking-mode "google-level"
+	}
+	// Antigravity discovery lists image SKUs beside chat models with no output
+	// modality, so they would build as chat. Accounts advertise either SKU in
+	// `imageGenerationModelIds` (gemini-3.1-flash-image replaced
+	// gemini-3-pro-image on some accounts, #11106).
+	models "gemini-3-pro-image" "gemini-3.1-flash-image" {
+		kind "image"
 	}
 	// residue: taxonomy ranks and exact globs do not isolate these models.
 	models "gemini-3.1-flash-lite" {

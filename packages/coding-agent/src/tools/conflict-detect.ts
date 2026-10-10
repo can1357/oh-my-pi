@@ -1,3 +1,4 @@
+import type { ConflictBlock, ConflictEntry, ConflictScope } from "@oh-my-pi/pi-tui/tools/conflict-detect";
 /**
  * Detect and resolve unresolved git merge conflicts that surface in `read`
  * output.
@@ -19,29 +20,12 @@
  */
 
 import type { ToolSession } from "./index";
-import { ToolError } from "./tool-errors";
+import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 
 const OURS_PREFIX = "<<<<<<<";
 const BASE_PREFIX = "|||||||";
 const SEPARATOR = "=======";
 const THEIRS_PREFIX = ">>>>>>>";
-
-export interface ConflictBlock {
-	/** 1-indexed line of the `<<<<<<<` marker. */
-	startLine: number;
-	/** 1-indexed line of the `=======` separator. */
-	separatorLine: number;
-	/** 1-indexed line of the `>>>>>>>` marker. */
-	endLine: number;
-	/** 1-indexed line of the `|||||||` base marker (diff3 only). */
-	baseLine?: number;
-	oursLabel?: string;
-	baseLabel?: string;
-	theirsLabel?: string;
-	oursLines: string[];
-	baseLines?: string[];
-	theirsLines: string[];
-}
 
 /**
  * Scan an already-collected array of file lines for completed conflict
@@ -175,17 +159,6 @@ function matchMarker(line: string, prefix: string): string | null {
 	return line.slice(prefix.length + 1);
 }
 
-/**
- * Recorded conflict block keyed by a session-stable id. The history is
- * append-only; ids stay valid even after later writes resolve other
- * blocks in the same file, so retries don't depend on re-reading.
- */
-export interface ConflictEntry extends ConflictBlock {
-	id: number;
-	absolutePath: string;
-	displayPath: string;
-}
-
 /** Per-session log of conflict regions surfaced by `read`. */
 export class ConflictHistory {
 	#nextId = 1;
@@ -242,9 +215,6 @@ export function getConflictHistory(session: ToolSession): ConflictHistory {
 	return session.conflictHistory;
 }
 
-/** A side of a conflict block that the `read` tool can render via `conflict://N/<scope>`. */
-export type ConflictScope = "ours" | "theirs" | "base";
-
 const CONFLICT_SCOPES = new Set<ConflictScope>(["ours", "theirs", "base"]);
 
 /** Parsed `conflict://<N>` / `conflict://<N>/<scope>` / `conflict://*` URI. */
@@ -252,19 +222,28 @@ export interface ParsedConflictUri {
 	/** `"*"` selects every currently-registered conflict (bulk write only). */
 	id: number | "*";
 	scope?: ConflictScope;
-	/**
-	 * When `raw` was a malformed `<file-prefix>:conflict://…` path, the
-	 * stripped prefix is preserved here so callers can surface a gentle
-	 * "you don't need the file path" note. `undefined` for clean URIs.
-	 */
-	recoveredPrefix?: string;
 }
 
-// Accept an optional `<prefix>:` before the scheme so paths like
-// `path/to/file.ts:conflict://3` (where the agent mixed the `:conflicts`
-// read selector with the `conflict://` scheme) still resolve. The prefix
-// is greedy so the LAST `:conflict://` wins for multi-colon inputs.
-const CONFLICT_URI_RE = /^(?:(.+):)?conflict:\/\/(.+)$/;
+const CONFLICT_URI_RE = /^conflict:\/\/(.+)$/;
+// `path/to/file.ts:conflict://3`: the agent mixed the `:conflicts` read
+// selector with the `conflict://` scheme. The prefix is greedy so the LAST
+// `:conflict://` wins for multi-colon inputs.
+const PREFIXED_CONFLICT_URI_RE = /^(.+):(conflict:\/\/.+)$/;
+
+/**
+ * Tool-entry normalization for a `<file>:conflict://…` target, which is not a
+ * URL the router can route. Returns the bare `conflict://…` URL plus a note for
+ * the model; any other input passes through unchanged without a note.
+ */
+export function recoverConflictUriPrefix(raw: string): { path: string; note?: string } {
+	const match = raw.match(PREFIXED_CONFLICT_URI_RE);
+	if (!match) return { path: raw };
+	const [, prefix, url] = match;
+	return {
+		path: url,
+		note: `Note: stripped erroneous '${prefix}:' prefix from path; conflict URIs are global (use \`${url}\`, not \`<file>:${url}\`).`,
+	};
+}
 
 /**
  * Parse a `conflict://<N>`, `conflict://<N>/<scope>`, or `conflict://*` URI.
@@ -281,8 +260,7 @@ const CONFLICT_URI_RE = /^(?:(.+):)?conflict:\/\/(.+)$/;
 export function parseConflictUri(raw: string): ParsedConflictUri | null {
 	const match = raw.match(CONFLICT_URI_RE);
 	if (!match) return null;
-	const recoveredPrefix = match[1];
-	const tail = match[2];
+	const tail = match[1];
 	const slashIdx = tail.indexOf("/");
 	const idPart = slashIdx === -1 ? tail : tail.slice(0, slashIdx);
 	const scopePart = slashIdx === -1 ? undefined : tail.slice(slashIdx + 1);
@@ -293,7 +271,7 @@ export function parseConflictUri(raw: string): ParsedConflictUri | null {
 				`Invalid conflict URI '${raw}': wildcard 'conflict://*' does not accept a scope segment. Drop '/${scopePart}' or use a numeric id.`,
 			);
 		}
-		return recoveredPrefix !== undefined ? { id: "*", recoveredPrefix } : { id: "*" };
+		return { id: "*" };
 	}
 
 	if (!/^\d+$/.test(idPart)) {
@@ -316,7 +294,7 @@ export function parseConflictUri(raw: string): ParsedConflictUri | null {
 		scope = scopePart as ConflictScope;
 	}
 
-	return recoveredPrefix !== undefined ? { id, scope, recoveredPrefix } : { id, scope };
+	return { id, scope };
 }
 
 /** Result of {@link spliceConflict}: the new file text plus any boundary-echo repair applied. */
@@ -580,56 +558,6 @@ export function expandContentTokens(content: string, entry: ConflictEntry): stri
 		}
 	}
 	return out.join("\n");
-}
-
-/** Reconstruct a conflict-marker line from prefix and optional label. */
-function markerLine(prefix: string, label: string | undefined): string {
-	return label && label.length > 0 ? `${prefix} ${label}` : prefix;
-}
-
-/**
- * Materialise a conflict block for `conflict://<N>` reads (and their
- * `/ours` / `/theirs` / `/base` scopes).
- *
- * Returns:
- * - `lines`: the lines to render, ordered top-to-bottom.
- * - `startLine`: the 1-indexed file line number `lines[0]` corresponds
- *   to, so the read formatter can label hashline anchors with the
- *   original file positions.
- *
- * Bare (no scope) returns the full block including marker lines. A
- * scoped view returns only that side's body — `base` throws when the
- * recorded conflict is a 2-way merge with no base section.
- */
-export function renderConflictRegion(
-	entry: ConflictEntry,
-	scope: ConflictScope | undefined,
-): { lines: string[]; startLine: number } {
-	if (scope === "ours") {
-		return { lines: [...entry.oursLines], startLine: entry.startLine + 1 };
-	}
-	if (scope === "theirs") {
-		return { lines: [...entry.theirsLines], startLine: entry.separatorLine + 1 };
-	}
-	if (scope === "base") {
-		if (entry.baseLines === undefined || entry.baseLine === undefined) {
-			throw new ToolError(
-				`Conflict #${entry.id} has no base section (2-way merge). 'conflict://${entry.id}/base' is only valid for diff3 conflicts.`,
-			);
-		}
-		return { lines: [...entry.baseLines], startLine: entry.baseLine + 1 };
-	}
-	const out: string[] = [];
-	out.push(markerLine("<<<<<<<", entry.oursLabel));
-	out.push(...entry.oursLines);
-	if (entry.baseLines !== undefined) {
-		out.push(markerLine("|||||||", entry.baseLabel));
-		out.push(...entry.baseLines);
-	}
-	out.push("=======");
-	out.push(...entry.theirsLines);
-	out.push(markerLine(">>>>>>>", entry.theirsLabel));
-	return { lines: out, startLine: entry.startLine };
 }
 
 const PREVIEW_SIDE_LINES = 6;

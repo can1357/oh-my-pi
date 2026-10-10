@@ -1,0 +1,2700 @@
+[
+	{
+		"model": "kimi-k3",
+		"upstream": "fireworks",
+		"effort": "high",
+		"requests": [
+			{
+				"path": "/api/llm/o/v1/chat/completions",
+				"headers": {
+					"user-agent": "factory-cli/0.230.0",
+					"x-api-provider": "fireworks",
+					"x-client-version": "0.230.0",
+					"x-factory-client": "cli",
+					"x-provider-routing-source": "configured_order",
+					"x-stainless-lang": "js",
+					"x-stainless-package-version": "6.25.0",
+					"x-stainless-retry-count": "0",
+					"x-stainless-runtime": "node",
+					"x-stainless-runtime-version": "v26.3.0"
+				},
+				"body": {
+					"model": "kimi-k3",
+					"stream": true,
+					"stream_options": {
+						"include_usage": true
+					},
+					"max_tokens": 65536,
+					"temperature": 1,
+					"reasoning_effort": "high",
+					"reasoning_history": "preserved",
+					"<tool-keys>": []
+				}
+			},
+			{
+				"path": "/api/llm/o/v1/chat/completions",
+				"headers": {
+					"user-agent": "factory-cli/0.230.0",
+					"x-api-provider": "fireworks",
+					"x-client-version": "0.230.0",
+					"x-factory-client": "cli",
+					"x-provider-routing-source": "session_lock",
+					"x-stainless-lang": "js",
+					"x-stainless-package-version": "6.25.0",
+					"x-stainless-retry-count": "0",
+					"x-stainless-runtime": "node",
+					"x-stainless-runtime-version": "v26.3.0"
+				},
+				"body": {
+					"model": "kimi-k3",
+					"stream": true,
+					"stream_options": {
+						"include_usage": true
+					},
+					"max_tokens": 65536,
+					"temperature": 1,
+					"reasoning_effort": "high",
+					"reasoning_history": "preserved",
+					"<tool-keys>": []
+				}
+			}
+		]
+	},
+	{
+		"model": "kimi-k3",
+		"upstream": "fireworks",
+		"effort": "off",
+		"requests": [
+			{
+				"path": "/api/llm/o/v1/chat/completions",
+				"headers": {
+					"user-agent": "factory-cli/0.230.0",
+					"x-api-provider": "fireworks",
+					"x-client-version": "0.230.0",
+					"x-factory-client": "cli",
+					"x-provider-routing-source": "configured_order",
+					"x-stainless-lang": "js",
+					"x-stainless-package-version": "6.25.0",
+					"x-stainless-retry-count": "0",
+					"x-stainless-runtime": "node",
+					"x-stainless-runtime-version": "v26.3.0"
+				},
+				"body": {
+					"model": "kimi-k3",
+					"stream": true,
+					"stream_options": {
+						"include_usage": true
+					},
+					"max_tokens": 65536,
+					"temperature": 1,
+					"reasoning_effort": "none",
+					"<tool-keys>": []
+				}
+			},
+			{
+				"path": "/api/llm/o/v1/chat/completions",
+				"headers": {
+					"user-agent": "factory-cli/0.230.0",
+					"x-api-provider": "fireworks",
+					"x-client-version": "0.230.0",
+					"x-factory-client": "cli",
+					"x-provider-routing-source": "session_lock",
+					"x-stainless-lang": "js",
+					"x-stainless-package-version": "6.25.0",
+					"x-stainless-retry-count": "0",
+					"x-stainless-runtime": "node",
+					"x-stainless-runtime-version": "v26.3.0"
+				},
+				"body": {
+					"model": "kimi-k3",
+					"stream": true,
+					"stream_options": {
+						"include_usage": true
+					},
+					"max_tokens": 65536,
+					"temperature": 1,
+					"reasoning_effort": "none",
+					"<tool-keys>": []
+				}
+			}
+		]
+	},
+	{
+		"model": "kimi-k3",
+		"upstream": "baseten",
+		"effort": "high",
+		"requests": [
+			{
+				"path": "/api/llm/o/v1/chat/completions",
+				"headers": {
+					"user-agent": "factory-cli/0.230.0",
+					"x-api-provider": "baseten",
+					"x-client-version": "0.230.0",
+					"x-factory-client": "cli",
+					"x-provider-routing-source": "configured_order",
+					"x-stainless-lang": "js",
+					"x-stainless-package-version": "6.25.0",
+					"x-stainless-retry-count": "0",
+					"x-stainless-runtime": "node",
+					"x-stainless-runtime-version": "v26.3.0"
+				},
+				"body": {
+					"model": "kimi-k3",
+					"stream": true,
+					"stream_options": {
+						"include_usage": true
+					},
+					"max_tokens": 65536,
+					"temperature": 1,
+					"reasoning_effort": "high",
+					"<tool-keys>": []
+				}
+			},
+			{
+				"path": "/api/llm/o/v1/chat/completions",
+				"headers": {
+					"user-agent": "factory-cli/0.230.0",
+					"x-api-provider": "baseten",
+					"x-client-version": "0.230.0",
+					"x-factory-client": "cli",
+					"x-provider-routing-source": "session_lock",
+					"x-stainless-lang": "js",
+					"x-stainless-package-version": "6.25.0",
+					"x-stainless-retry-count": "0",
+					"x-stainless-runtime": "node",
+					"x-stainless-runtime-version": "v26.3.0"
+				},
+				"body": {
+					"model": "kimi-k3",
+					"stream": true,
+					"stream_options": {
+						"include_usage": true
+					},
+					"max_tokens": 65536,
+					"temperature": 1,
+					"reasoning_effort": "high",
+					"<tool-keys>": []
+				}
+			}
+		]
+	},
+	{
+		"model": "kimi-k3",
+		"upstream": "baseten",
+		"effort": "off",
+		"requests": [
+			{
+				"path": "/api/llm/o/v1/chat/completions",
+				"headers": {
+					"user-agent": "factory-cli/0.230.0",
+					"x-api-provider": "baseten",
+					"x-client-version": "0.230.0",
+					"x-factory-client": "cli",
+					"x-provider-routing-source": "configured_order",
+					"x-stainless-lang": "js",
+					"x-stainless-package-version": "6.25.0",
+					"x-stainless-retry-count": "0",
+					"x-stainless-runtime": "node",
+					"x-stainless-runtime-version": "v26.3.0"
+				},
+				"body": {
+					"model": "kimi-k3",
+					"stream": true,
+					"stream_options": {
+						"include_usage": true
+					},
+					"max_tokens": 65536,
+					"temperature": 1,
+					"reasoning_effort": "none",
+					"<tool-keys>": []
+				}
+			},
+			{
+				"path": "/api/llm/o/v1/chat/completions",
+				"headers": {
+					"user-agent": "factory-cli/0.230.0",
+					"x-api-provider": "baseten",
+					"x-client-version": "0.230.0",
+					"x-factory-client": "cli",
+					"x-provider-routing-source": "session_lock",
+					"x-stainless-lang": "js",
+					"x-stainless-package-version": "6.25.0",
+					"x-stainless-retry-count": "0",
+					"x-stainless-runtime": "node",
+					"x-stainless-runtime-version": "v26.3.0"
+				},
+				"body": {
+					"model": "kimi-k3",
+					"stream": true,
+					"stream_options": {
+						"include_usage": true
+					},
+					"max_tokens": 65536,
+					"temperature": 1,
+					"reasoning_effort": "none",
+					"<tool-keys>": []
+				}
+			}
+		]
+	},
+	{
+		"model": "nemotron-3-ultra",
+		"upstream": "baseten",
+		"effort": "high",
+		"requests": [
+			{
+				"path": "/api/llm/o/v1/chat/completions",
+				"headers": {
+					"user-agent": "factory-cli/0.230.0",
+					"x-api-provider": "baseten",
+					"x-client-version": "0.230.0",
+					"x-factory-client": "cli",
+					"x-provider-routing-source": "configured_order",
+					"x-stainless-lang": "js",
+					"x-stainless-package-version": "6.25.0",
+					"x-stainless-retry-count": "0",
+					"x-stainless-runtime": "node",
+					"x-stainless-runtime-version": "v26.3.0"
+				},
+				"body": {
+					"model": "nemotron-3-ultra",
+					"stream": true,
+					"stream_options": {
+						"include_usage": true
+					},
+					"max_tokens": 65536,
+					"temperature": 1,
+					"chat_template_args": {
+						"enable_thinking": true
+					},
+					"<tool-keys>": []
+				}
+			},
+			{
+				"path": "/api/llm/o/v1/chat/completions",
+				"headers": {
+					"user-agent": "factory-cli/0.230.0",
+					"x-api-provider": "baseten",
+					"x-client-version": "0.230.0",
+					"x-factory-client": "cli",
+					"x-provider-routing-source": "session_lock",
+					"x-stainless-lang": "js",
+					"x-stainless-package-version": "6.25.0",
+					"x-stainless-retry-count": "0",
+					"x-stainless-runtime": "node",
+					"x-stainless-runtime-version": "v26.3.0"
+				},
+				"body": {
+					"model": "nemotron-3-ultra",
+					"stream": true,
+					"stream_options": {
+						"include_usage": true
+					},
+					"max_tokens": 65536,
+					"temperature": 1,
+					"chat_template_args": {
+						"enable_thinking": true
+					},
+					"<tool-keys>": []
+				}
+			}
+		]
+	},
+	{
+		"model": "nemotron-3-ultra",
+		"upstream": "baseten",
+		"effort": "off",
+		"requests": [
+			{
+				"path": "/api/llm/o/v1/chat/completions",
+				"headers": {
+					"user-agent": "factory-cli/0.230.0",
+					"x-api-provider": "baseten",
+					"x-client-version": "0.230.0",
+					"x-factory-client": "cli",
+					"x-provider-routing-source": "configured_order",
+					"x-stainless-lang": "js",
+					"x-stainless-package-version": "6.25.0",
+					"x-stainless-retry-count": "0",
+					"x-stainless-runtime": "node",
+					"x-stainless-runtime-version": "v26.3.0"
+				},
+				"body": {
+					"model": "nemotron-3-ultra",
+					"stream": true,
+					"stream_options": {
+						"include_usage": true
+					},
+					"max_tokens": 65536,
+					"temperature": 1,
+					"chat_template_args": {
+						"enable_thinking": false
+					},
+					"<tool-keys>": []
+				}
+			},
+			{
+				"path": "/api/llm/o/v1/chat/completions",
+				"headers": {
+					"user-agent": "factory-cli/0.230.0",
+					"x-api-provider": "baseten",
+					"x-client-version": "0.230.0",
+					"x-factory-client": "cli",
+					"x-provider-routing-source": "session_lock",
+					"x-stainless-lang": "js",
+					"x-stainless-package-version": "6.25.0",
+					"x-stainless-retry-count": "0",
+					"x-stainless-runtime": "node",
+					"x-stainless-runtime-version": "v26.3.0"
+				},
+				"body": {
+					"model": "nemotron-3-ultra",
+					"stream": true,
+					"stream_options": {
+						"include_usage": true
+					},
+					"max_tokens": 65536,
+					"temperature": 1,
+					"chat_template_args": {
+						"enable_thinking": false
+					},
+					"<tool-keys>": []
+				}
+			}
+		]
+	},
+	{
+		"model": "nemotron-3-ultra",
+		"upstream": "fireworks",
+		"effort": "high",
+		"requests": [
+			{
+				"path": "/api/llm/o/v1/chat/completions",
+				"headers": {
+					"user-agent": "factory-cli/0.230.0",
+					"x-api-provider": "fireworks",
+					"x-client-version": "0.230.0",
+					"x-factory-client": "cli",
+					"x-provider-routing-source": "configured_order",
+					"x-stainless-lang": "js",
+					"x-stainless-package-version": "6.25.0",
+					"x-stainless-retry-count": "0",
+					"x-stainless-runtime": "node",
+					"x-stainless-runtime-version": "v26.3.0"
+				},
+				"body": {
+					"model": "nemotron-3-ultra",
+					"stream": true,
+					"stream_options": {
+						"include_usage": true
+					},
+					"max_tokens": 65536,
+					"temperature": 1,
+					"reasoning_effort": "high",
+					"reasoning_history": "preserved",
+					"<tool-keys>": []
+				}
+			},
+			{
+				"path": "/api/llm/o/v1/chat/completions",
+				"headers": {
+					"user-agent": "factory-cli/0.230.0",
+					"x-api-provider": "fireworks",
+					"x-client-version": "0.230.0",
+					"x-factory-client": "cli",
+					"x-provider-routing-source": "session_lock",
+					"x-stainless-lang": "js",
+					"x-stainless-package-version": "6.25.0",
+					"x-stainless-retry-count": "0",
+					"x-stainless-runtime": "node",
+					"x-stainless-runtime-version": "v26.3.0"
+				},
+				"body": {
+					"model": "nemotron-3-ultra",
+					"stream": true,
+					"stream_options": {
+						"include_usage": true
+					},
+					"max_tokens": 65536,
+					"temperature": 1,
+					"reasoning_effort": "high",
+					"reasoning_history": "preserved",
+					"<tool-keys>": []
+				}
+			}
+		]
+	},
+	{
+		"model": "deepseek-v4.1-flash",
+		"upstream": "fireworks",
+		"effort": "high",
+		"requests": [
+			{
+				"path": "/api/llm/o/v1/chat/completions",
+				"headers": {
+					"user-agent": "factory-cli/0.230.0",
+					"x-api-provider": "fireworks",
+					"x-client-version": "0.230.0",
+					"x-factory-client": "cli",
+					"x-provider-routing-source": "configured_order",
+					"x-stainless-lang": "js",
+					"x-stainless-package-version": "6.25.0",
+					"x-stainless-retry-count": "0",
+					"x-stainless-runtime": "node",
+					"x-stainless-runtime-version": "v26.3.0"
+				},
+				"body": {
+					"model": "deepseek-v4.1-flash",
+					"stream": true,
+					"stream_options": {
+						"include_usage": true
+					},
+					"max_tokens": 131072,
+					"temperature": 1,
+					"reasoning_effort": "high",
+					"reasoning_history": "interleaved",
+					"<tool-keys>": []
+				}
+			},
+			{
+				"path": "/api/llm/o/v1/chat/completions",
+				"headers": {
+					"user-agent": "factory-cli/0.230.0",
+					"x-api-provider": "fireworks",
+					"x-client-version": "0.230.0",
+					"x-factory-client": "cli",
+					"x-provider-routing-source": "session_lock",
+					"x-stainless-lang": "js",
+					"x-stainless-package-version": "6.25.0",
+					"x-stainless-retry-count": "0",
+					"x-stainless-runtime": "node",
+					"x-stainless-runtime-version": "v26.3.0"
+				},
+				"body": {
+					"model": "deepseek-v4.1-flash",
+					"stream": true,
+					"stream_options": {
+						"include_usage": true
+					},
+					"max_tokens": 131072,
+					"temperature": 1,
+					"reasoning_effort": "high",
+					"reasoning_history": "interleaved",
+					"<tool-keys>": []
+				}
+			}
+		]
+	},
+	{
+		"model": "deepseek-v4.1-flash",
+		"upstream": "baseten",
+		"effort": "high",
+		"requests": [
+			{
+				"path": "/api/llm/o/v1/chat/completions",
+				"headers": {
+					"user-agent": "factory-cli/0.230.0",
+					"x-api-provider": "baseten",
+					"x-client-version": "0.230.0",
+					"x-factory-client": "cli",
+					"x-provider-routing-source": "configured_order",
+					"x-stainless-lang": "js",
+					"x-stainless-package-version": "6.25.0",
+					"x-stainless-retry-count": "0",
+					"x-stainless-runtime": "node",
+					"x-stainless-runtime-version": "v26.3.0"
+				},
+				"body": {
+					"model": "deepseek-v4.1-flash",
+					"stream": true,
+					"stream_options": {
+						"include_usage": true
+					},
+					"max_tokens": 131072,
+					"temperature": 1,
+					"reasoning_effort": "high",
+					"<tool-keys>": []
+				}
+			},
+			{
+				"path": "/api/llm/o/v1/chat/completions",
+				"headers": {
+					"user-agent": "factory-cli/0.230.0",
+					"x-api-provider": "baseten",
+					"x-client-version": "0.230.0",
+					"x-factory-client": "cli",
+					"x-provider-routing-source": "session_lock",
+					"x-stainless-lang": "js",
+					"x-stainless-package-version": "6.25.0",
+					"x-stainless-retry-count": "0",
+					"x-stainless-runtime": "node",
+					"x-stainless-runtime-version": "v26.3.0"
+				},
+				"body": {
+					"model": "deepseek-v4.1-flash",
+					"stream": true,
+					"stream_options": {
+						"include_usage": true
+					},
+					"max_tokens": 131072,
+					"temperature": 1,
+					"reasoning_effort": "high",
+					"<tool-keys>": []
+				}
+			}
+		]
+	},
+	{
+		"model": "deepseek-v4.1-flash",
+		"upstream": "baseten",
+		"effort": "off",
+		"requests": [
+			{
+				"path": "/api/llm/o/v1/chat/completions",
+				"headers": {
+					"user-agent": "factory-cli/0.230.0",
+					"x-api-provider": "baseten",
+					"x-client-version": "0.230.0",
+					"x-factory-client": "cli",
+					"x-provider-routing-source": "configured_order",
+					"x-stainless-lang": "js",
+					"x-stainless-package-version": "6.25.0",
+					"x-stainless-retry-count": "0",
+					"x-stainless-runtime": "node",
+					"x-stainless-runtime-version": "v26.3.0"
+				},
+				"body": {
+					"model": "deepseek-v4.1-flash",
+					"stream": true,
+					"stream_options": {
+						"include_usage": true
+					},
+					"max_tokens": 131072,
+					"temperature": 1,
+					"reasoning_effort": "low",
+					"<tool-keys>": []
+				}
+			},
+			{
+				"path": "/api/llm/o/v1/chat/completions",
+				"headers": {
+					"user-agent": "factory-cli/0.230.0",
+					"x-api-provider": "baseten",
+					"x-client-version": "0.230.0",
+					"x-factory-client": "cli",
+					"x-provider-routing-source": "session_lock",
+					"x-stainless-lang": "js",
+					"x-stainless-package-version": "6.25.0",
+					"x-stainless-retry-count": "0",
+					"x-stainless-runtime": "node",
+					"x-stainless-runtime-version": "v26.3.0"
+				},
+				"body": {
+					"model": "deepseek-v4.1-flash",
+					"stream": true,
+					"stream_options": {
+						"include_usage": true
+					},
+					"max_tokens": 131072,
+					"temperature": 1,
+					"reasoning_effort": "low",
+					"<tool-keys>": []
+				}
+			}
+		]
+	},
+	{
+		"model": "glm-5.3",
+		"upstream": "fireworks",
+		"effort": "high",
+		"requests": [
+			{
+				"path": "/api/llm/o/v1/chat/completions",
+				"headers": {
+					"user-agent": "factory-cli/0.230.0",
+					"x-api-provider": "fireworks",
+					"x-client-version": "0.230.0",
+					"x-factory-client": "cli",
+					"x-provider-routing-source": "configured_order",
+					"x-stainless-lang": "js",
+					"x-stainless-package-version": "6.25.0",
+					"x-stainless-retry-count": "0",
+					"x-stainless-runtime": "node",
+					"x-stainless-runtime-version": "v26.3.0"
+				},
+				"body": {
+					"model": "glm-5.3",
+					"stream": true,
+					"stream_options": {
+						"include_usage": true
+					},
+					"max_tokens": 131072,
+					"temperature": 1,
+					"reasoning_effort": "high",
+					"reasoning_history": "preserved",
+					"<tool-keys>": []
+				}
+			},
+			{
+				"path": "/api/llm/o/v1/chat/completions",
+				"headers": {
+					"user-agent": "factory-cli/0.230.0",
+					"x-api-provider": "fireworks",
+					"x-client-version": "0.230.0",
+					"x-factory-client": "cli",
+					"x-provider-routing-source": "session_lock",
+					"x-stainless-lang": "js",
+					"x-stainless-package-version": "6.25.0",
+					"x-stainless-retry-count": "0",
+					"x-stainless-runtime": "node",
+					"x-stainless-runtime-version": "v26.3.0"
+				},
+				"body": {
+					"model": "glm-5.3",
+					"stream": true,
+					"stream_options": {
+						"include_usage": true
+					},
+					"max_tokens": 131072,
+					"temperature": 1,
+					"reasoning_effort": "high",
+					"reasoning_history": "preserved",
+					"<tool-keys>": []
+				}
+			}
+		]
+	},
+	{
+		"model": "glm-5.3",
+		"upstream": "baseten",
+		"effort": "high",
+		"requests": [
+			{
+				"path": "/api/llm/o/v1/chat/completions",
+				"headers": {
+					"user-agent": "factory-cli/0.230.0",
+					"x-api-provider": "baseten",
+					"x-client-version": "0.230.0",
+					"x-factory-client": "cli",
+					"x-provider-routing-source": "configured_order",
+					"x-stainless-lang": "js",
+					"x-stainless-package-version": "6.25.0",
+					"x-stainless-retry-count": "0",
+					"x-stainless-runtime": "node",
+					"x-stainless-runtime-version": "v26.3.0"
+				},
+				"body": {
+					"model": "glm-5.3",
+					"stream": true,
+					"stream_options": {
+						"include_usage": true
+					},
+					"max_tokens": 131072,
+					"temperature": 1,
+					"reasoning_effort": "high",
+					"<tool-keys>": []
+				}
+			},
+			{
+				"path": "/api/llm/o/v1/chat/completions",
+				"headers": {
+					"user-agent": "factory-cli/0.230.0",
+					"x-api-provider": "baseten",
+					"x-client-version": "0.230.0",
+					"x-factory-client": "cli",
+					"x-provider-routing-source": "session_lock",
+					"x-stainless-lang": "js",
+					"x-stainless-package-version": "6.25.0",
+					"x-stainless-retry-count": "0",
+					"x-stainless-runtime": "node",
+					"x-stainless-runtime-version": "v26.3.0"
+				},
+				"body": {
+					"model": "glm-5.3",
+					"stream": true,
+					"stream_options": {
+						"include_usage": true
+					},
+					"max_tokens": 131072,
+					"temperature": 1,
+					"reasoning_effort": "high",
+					"<tool-keys>": []
+				}
+			}
+		]
+	},
+	{
+		"model": "mistral-medium-3.5",
+		"upstream": "mistral",
+		"effort": "high",
+		"requests": [
+			{
+				"path": "/api/llm/o/v1/chat/completions",
+				"headers": {
+					"user-agent": "factory-cli/0.230.0",
+					"x-api-provider": "mistral",
+					"x-client-version": "0.230.0",
+					"x-factory-client": "cli",
+					"x-provider-routing-source": "configured_order",
+					"x-stainless-lang": "js",
+					"x-stainless-package-version": "6.25.0",
+					"x-stainless-retry-count": "0",
+					"x-stainless-runtime": "node",
+					"x-stainless-runtime-version": "v26.3.0"
+				},
+				"body": {
+					"model": "mistral-medium-3.5",
+					"stream": true,
+					"stream_options": {
+						"include_usage": true
+					},
+					"max_tokens": 64000,
+					"temperature": 1,
+					"reasoning_effort": "high",
+					"<tool-keys>": []
+				}
+			},
+			{
+				"path": "/api/llm/o/v1/chat/completions",
+				"headers": {
+					"user-agent": "factory-cli/0.230.0",
+					"x-api-provider": "mistral",
+					"x-client-version": "0.230.0",
+					"x-factory-client": "cli",
+					"x-provider-routing-source": "session_lock",
+					"x-stainless-lang": "js",
+					"x-stainless-package-version": "6.25.0",
+					"x-stainless-retry-count": "0",
+					"x-stainless-runtime": "node",
+					"x-stainless-runtime-version": "v26.3.0"
+				},
+				"body": {
+					"model": "mistral-medium-3.5",
+					"stream": true,
+					"stream_options": {
+						"include_usage": true
+					},
+					"max_tokens": 64000,
+					"temperature": 1,
+					"reasoning_effort": "high",
+					"<tool-keys>": []
+				}
+			}
+		]
+	},
+	{
+		"model": "mistral-medium-3.5",
+		"upstream": "mistral",
+		"effort": "off",
+		"requests": [
+			{
+				"path": "/api/llm/o/v1/chat/completions",
+				"headers": {
+					"user-agent": "factory-cli/0.230.0",
+					"x-api-provider": "mistral",
+					"x-client-version": "0.230.0",
+					"x-factory-client": "cli",
+					"x-provider-routing-source": "configured_order",
+					"x-stainless-lang": "js",
+					"x-stainless-package-version": "6.25.0",
+					"x-stainless-retry-count": "0",
+					"x-stainless-runtime": "node",
+					"x-stainless-runtime-version": "v26.3.0"
+				},
+				"body": {
+					"model": "mistral-medium-3.5",
+					"stream": true,
+					"stream_options": {
+						"include_usage": true
+					},
+					"max_tokens": 64000,
+					"temperature": 1,
+					"reasoning_effort": "none",
+					"<tool-keys>": []
+				}
+			},
+			{
+				"path": "/api/llm/o/v1/chat/completions",
+				"headers": {
+					"user-agent": "factory-cli/0.230.0",
+					"x-api-provider": "mistral",
+					"x-client-version": "0.230.0",
+					"x-factory-client": "cli",
+					"x-provider-routing-source": "session_lock",
+					"x-stainless-lang": "js",
+					"x-stainless-package-version": "6.25.0",
+					"x-stainless-retry-count": "0",
+					"x-stainless-runtime": "node",
+					"x-stainless-runtime-version": "v26.3.0"
+				},
+				"body": {
+					"model": "mistral-medium-3.5",
+					"stream": true,
+					"stream_options": {
+						"include_usage": true
+					},
+					"max_tokens": 64000,
+					"temperature": 1,
+					"reasoning_effort": "none",
+					"<tool-keys>": []
+				}
+			}
+		]
+	},
+	{
+		"model": "minimax-m3",
+		"upstream": "fireworks",
+		"effort": "high",
+		"requests": [
+			{
+				"path": "/api/llm/o/v1/chat/completions",
+				"headers": {
+					"user-agent": "factory-cli/0.230.0",
+					"x-api-provider": "fireworks",
+					"x-client-version": "0.230.0",
+					"x-factory-client": "cli",
+					"x-provider-routing-source": "configured_order",
+					"x-stainless-lang": "js",
+					"x-stainless-package-version": "6.25.0",
+					"x-stainless-retry-count": "0",
+					"x-stainless-runtime": "node",
+					"x-stainless-runtime-version": "v26.3.0"
+				},
+				"body": {
+					"model": "minimax-m3",
+					"stream": true,
+					"stream_options": {
+						"include_usage": true
+					},
+					"max_tokens": 64000,
+					"temperature": 1,
+					"reasoning_effort": "high",
+					"<tool-keys>": []
+				}
+			},
+			{
+				"path": "/api/llm/o/v1/chat/completions",
+				"headers": {
+					"user-agent": "factory-cli/0.230.0",
+					"x-api-provider": "fireworks",
+					"x-client-version": "0.230.0",
+					"x-factory-client": "cli",
+					"x-provider-routing-source": "session_lock",
+					"x-stainless-lang": "js",
+					"x-stainless-package-version": "6.25.0",
+					"x-stainless-retry-count": "0",
+					"x-stainless-runtime": "node",
+					"x-stainless-runtime-version": "v26.3.0"
+				},
+				"body": {
+					"model": "minimax-m3",
+					"stream": true,
+					"stream_options": {
+						"include_usage": true
+					},
+					"max_tokens": 64000,
+					"temperature": 1,
+					"reasoning_effort": "high",
+					"<tool-keys>": []
+				}
+			}
+		]
+	},
+	{
+		"model": "qwen3.8-max",
+		"upstream": "fireworks",
+		"effort": "xhigh",
+		"requests": [
+			{
+				"path": "/api/llm/o/v1/chat/completions",
+				"headers": {
+					"user-agent": "factory-cli/0.230.0",
+					"x-api-provider": "fireworks",
+					"x-client-version": "0.230.0",
+					"x-factory-client": "cli",
+					"x-provider-routing-source": "configured_order",
+					"x-stainless-lang": "js",
+					"x-stainless-package-version": "6.25.0",
+					"x-stainless-retry-count": "0",
+					"x-stainless-runtime": "node",
+					"x-stainless-runtime-version": "v26.3.0"
+				},
+				"body": {
+					"model": "qwen3.8-max",
+					"stream": true,
+					"stream_options": {
+						"include_usage": true
+					},
+					"max_tokens": 131072,
+					"temperature": 1,
+					"reasoning_effort": "xhigh",
+					"reasoning_history": "preserved",
+					"<tool-keys>": []
+				}
+			},
+			{
+				"path": "/api/llm/o/v1/chat/completions",
+				"headers": {
+					"user-agent": "factory-cli/0.230.0",
+					"x-api-provider": "fireworks",
+					"x-client-version": "0.230.0",
+					"x-factory-client": "cli",
+					"x-provider-routing-source": "session_lock",
+					"x-stainless-lang": "js",
+					"x-stainless-package-version": "6.25.0",
+					"x-stainless-retry-count": "0",
+					"x-stainless-runtime": "node",
+					"x-stainless-runtime-version": "v26.3.0"
+				},
+				"body": {
+					"model": "qwen3.8-max",
+					"stream": true,
+					"stream_options": {
+						"include_usage": true
+					},
+					"max_tokens": 131072,
+					"temperature": 1,
+					"reasoning_effort": "xhigh",
+					"reasoning_history": "preserved",
+					"<tool-keys>": []
+				}
+			}
+		]
+	},
+	{
+		"model": "inkling",
+		"upstream": "fireworks",
+		"effort": "medium",
+		"requests": [
+			{
+				"path": "/api/llm/o/v1/chat/completions",
+				"headers": {
+					"user-agent": "factory-cli/0.230.0",
+					"x-api-provider": "fireworks",
+					"x-client-version": "0.230.0",
+					"x-factory-client": "cli",
+					"x-provider-routing-source": "configured_order",
+					"x-stainless-lang": "js",
+					"x-stainless-package-version": "6.25.0",
+					"x-stainless-retry-count": "0",
+					"x-stainless-runtime": "node",
+					"x-stainless-runtime-version": "v26.3.0"
+				},
+				"body": {
+					"model": "inkling",
+					"stream": true,
+					"stream_options": {
+						"include_usage": true
+					},
+					"max_tokens": 32768,
+					"temperature": 1,
+					"reasoning_effort": "medium",
+					"reasoning_history": "preserved",
+					"<tool-keys>": []
+				}
+			},
+			{
+				"path": "/api/llm/o/v1/chat/completions",
+				"headers": {
+					"user-agent": "factory-cli/0.230.0",
+					"x-api-provider": "fireworks",
+					"x-client-version": "0.230.0",
+					"x-factory-client": "cli",
+					"x-provider-routing-source": "session_lock",
+					"x-stainless-lang": "js",
+					"x-stainless-package-version": "6.25.0",
+					"x-stainless-retry-count": "0",
+					"x-stainless-runtime": "node",
+					"x-stainless-runtime-version": "v26.3.0"
+				},
+				"body": {
+					"model": "inkling",
+					"stream": true,
+					"stream_options": {
+						"include_usage": true
+					},
+					"max_tokens": 32768,
+					"temperature": 1,
+					"reasoning_effort": "medium",
+					"reasoning_history": "preserved",
+					"<tool-keys>": []
+				}
+			}
+		]
+	},
+	{
+		"model": "gpt-5.6-sol",
+		"upstream": "openai",
+		"effort": "high",
+		"requests": [
+			{
+				"path": "/api/llm/o/v1/responses",
+				"headers": {
+					"user-agent": "factory-cli/0.230.0",
+					"x-api-provider": "openai",
+					"x-client-version": "0.230.0",
+					"x-factory-client": "cli",
+					"x-provider-routing-source": "configured_order",
+					"x-stainless-lang": "js",
+					"x-stainless-package-version": "6.25.0",
+					"x-stainless-retry-count": "0",
+					"x-stainless-runtime": "node",
+					"x-stainless-runtime-version": "v26.3.0"
+				},
+				"body": {
+					"model": "gpt-5.6-sol",
+					"store": false,
+					"stream": true,
+					"tool_choice": "auto",
+					"parallel_tool_calls": true,
+					"include": [
+						"reasoning.encrypted_content"
+					],
+					"reasoning": {
+						"effort": "high",
+						"summary": "auto"
+					},
+					"prompt_cache_key": "<session>",
+					"prompt_cache_retention": "24h",
+					"text": {
+						"verbosity": "low"
+					},
+					"safety_identifier": "<session>",
+					"<tool-keys>": [
+						"strict"
+					]
+				}
+			},
+			{
+				"path": "/api/llm/o/v1/responses",
+				"headers": {
+					"user-agent": "factory-cli/0.230.0",
+					"x-api-provider": "openai",
+					"x-client-version": "0.230.0",
+					"x-factory-client": "cli",
+					"x-provider-routing-source": "session_lock",
+					"x-stainless-lang": "js",
+					"x-stainless-package-version": "6.25.0",
+					"x-stainless-retry-count": "0",
+					"x-stainless-runtime": "node",
+					"x-stainless-runtime-version": "v26.3.0"
+				},
+				"body": {
+					"model": "gpt-5.6-sol",
+					"store": false,
+					"stream": true,
+					"tool_choice": "auto",
+					"parallel_tool_calls": true,
+					"include": [
+						"reasoning.encrypted_content"
+					],
+					"reasoning": {
+						"effort": "high",
+						"summary": "auto"
+					},
+					"prompt_cache_key": "<session>",
+					"prompt_cache_retention": "24h",
+					"text": {
+						"verbosity": "low"
+					},
+					"safety_identifier": "<session>",
+					"<tool-keys>": [
+						"strict"
+					]
+				}
+			}
+		]
+	},
+	{
+		"model": "gpt-5.6-sol",
+		"upstream": "openai",
+		"effort": "none",
+		"requests": [
+			{
+				"path": "/api/llm/o/v1/responses",
+				"headers": {
+					"user-agent": "factory-cli/0.230.0",
+					"x-api-provider": "openai",
+					"x-client-version": "0.230.0",
+					"x-factory-client": "cli",
+					"x-provider-routing-source": "configured_order",
+					"x-stainless-lang": "js",
+					"x-stainless-package-version": "6.25.0",
+					"x-stainless-retry-count": "0",
+					"x-stainless-runtime": "node",
+					"x-stainless-runtime-version": "v26.3.0"
+				},
+				"body": {
+					"model": "gpt-5.6-sol",
+					"store": false,
+					"stream": true,
+					"tool_choice": "auto",
+					"parallel_tool_calls": true,
+					"prompt_cache_key": "<session>",
+					"prompt_cache_retention": "24h",
+					"text": {
+						"verbosity": "low"
+					},
+					"safety_identifier": "<session>",
+					"<tool-keys>": [
+						"strict"
+					]
+				}
+			},
+			{
+				"path": "/api/llm/o/v1/responses",
+				"headers": {
+					"user-agent": "factory-cli/0.230.0",
+					"x-api-provider": "openai",
+					"x-client-version": "0.230.0",
+					"x-factory-client": "cli",
+					"x-provider-routing-source": "session_lock",
+					"x-stainless-lang": "js",
+					"x-stainless-package-version": "6.25.0",
+					"x-stainless-retry-count": "0",
+					"x-stainless-runtime": "node",
+					"x-stainless-runtime-version": "v26.3.0"
+				},
+				"body": {
+					"model": "gpt-5.6-sol",
+					"store": false,
+					"stream": true,
+					"tool_choice": "auto",
+					"parallel_tool_calls": true,
+					"prompt_cache_key": "<session>",
+					"prompt_cache_retention": "24h",
+					"text": {
+						"verbosity": "low"
+					},
+					"safety_identifier": "<session>",
+					"<tool-keys>": [
+						"strict"
+					]
+				}
+			}
+		]
+	},
+	{
+		"model": "gpt-5.6-sol",
+		"upstream": "azure_openai",
+		"effort": "high",
+		"requests": [
+			{
+				"path": "/api/llm/o/v1/responses",
+				"headers": {
+					"user-agent": "factory-cli/0.230.0",
+					"x-api-provider": "azure_openai",
+					"x-client-version": "0.230.0",
+					"x-factory-client": "cli",
+					"x-provider-routing-source": "configured_order",
+					"x-stainless-lang": "js",
+					"x-stainless-package-version": "6.25.0",
+					"x-stainless-retry-count": "0",
+					"x-stainless-runtime": "node",
+					"x-stainless-runtime-version": "v26.3.0"
+				},
+				"body": {
+					"model": "gpt-5.6-sol",
+					"store": false,
+					"stream": true,
+					"tool_choice": "auto",
+					"parallel_tool_calls": true,
+					"include": [
+						"reasoning.encrypted_content"
+					],
+					"reasoning": {
+						"effort": "high",
+						"summary": "auto"
+					},
+					"prompt_cache_key": "<session>",
+					"text": {
+						"verbosity": "low"
+					},
+					"safety_identifier": "<session>",
+					"<tool-keys>": [
+						"strict"
+					]
+				}
+			},
+			{
+				"path": "/api/llm/o/v1/responses",
+				"headers": {
+					"user-agent": "factory-cli/0.230.0",
+					"x-api-provider": "azure_openai",
+					"x-client-version": "0.230.0",
+					"x-factory-client": "cli",
+					"x-provider-routing-source": "session_lock",
+					"x-stainless-lang": "js",
+					"x-stainless-package-version": "6.25.0",
+					"x-stainless-retry-count": "0",
+					"x-stainless-runtime": "node",
+					"x-stainless-runtime-version": "v26.3.0"
+				},
+				"body": {
+					"model": "gpt-5.6-sol",
+					"store": false,
+					"stream": true,
+					"tool_choice": "auto",
+					"parallel_tool_calls": true,
+					"include": [
+						"reasoning.encrypted_content"
+					],
+					"reasoning": {
+						"effort": "high",
+						"summary": "auto"
+					},
+					"prompt_cache_key": "<session>",
+					"text": {
+						"verbosity": "low"
+					},
+					"safety_identifier": "<session>",
+					"<tool-keys>": [
+						"strict"
+					]
+				}
+			}
+		]
+	},
+	{
+		"model": "gpt-5.6-sol",
+		"upstream": "snowflake",
+		"effort": "none",
+		"requests": [
+			{
+				"path": "/api/llm/o/v1/responses",
+				"headers": {
+					"user-agent": "factory-cli/0.230.0",
+					"x-api-provider": "snowflake",
+					"x-client-version": "0.230.0",
+					"x-factory-client": "cli",
+					"x-provider-routing-source": "configured_order",
+					"x-stainless-lang": "js",
+					"x-stainless-package-version": "6.25.0",
+					"x-stainless-retry-count": "0",
+					"x-stainless-runtime": "node",
+					"x-stainless-runtime-version": "v26.3.0"
+				},
+				"body": {
+					"model": "gpt-5.6-sol",
+					"store": false,
+					"stream": true,
+					"tool_choice": "auto",
+					"parallel_tool_calls": true,
+					"reasoning": {
+						"effort": "none"
+					},
+					"prompt_cache_key": "<session>",
+					"text": {
+						"verbosity": "low"
+					},
+					"safety_identifier": "<session>",
+					"<tool-keys>": [
+						"strict"
+					]
+				}
+			},
+			{
+				"path": "/api/llm/o/v1/responses",
+				"headers": {
+					"user-agent": "factory-cli/0.230.0",
+					"x-api-provider": "snowflake",
+					"x-client-version": "0.230.0",
+					"x-factory-client": "cli",
+					"x-provider-routing-source": "session_lock",
+					"x-stainless-lang": "js",
+					"x-stainless-package-version": "6.25.0",
+					"x-stainless-retry-count": "0",
+					"x-stainless-runtime": "node",
+					"x-stainless-runtime-version": "v26.3.0"
+				},
+				"body": {
+					"model": "gpt-5.6-sol",
+					"store": false,
+					"stream": true,
+					"tool_choice": "auto",
+					"parallel_tool_calls": true,
+					"reasoning": {
+						"effort": "none"
+					},
+					"prompt_cache_key": "<session>",
+					"text": {
+						"verbosity": "low"
+					},
+					"safety_identifier": "<session>",
+					"<tool-keys>": [
+						"strict"
+					]
+				}
+			}
+		]
+	},
+	{
+		"model": "gpt-5.6-terra",
+		"upstream": "bedrock_openai",
+		"effort": "none",
+		"requests": [
+			{
+				"path": "/api/llm/o/v1/responses",
+				"headers": {
+					"user-agent": "factory-cli/0.230.0",
+					"x-api-provider": "bedrock_openai",
+					"x-client-version": "0.230.0",
+					"x-factory-client": "cli",
+					"x-provider-routing-source": "configured_order",
+					"x-stainless-lang": "js",
+					"x-stainless-package-version": "6.25.0",
+					"x-stainless-retry-count": "0",
+					"x-stainless-runtime": "node",
+					"x-stainless-runtime-version": "v26.3.0"
+				},
+				"body": {
+					"model": "gpt-5.6-terra",
+					"store": false,
+					"stream": true,
+					"tool_choice": "auto",
+					"parallel_tool_calls": true,
+					"reasoning": {
+						"effort": "none"
+					},
+					"prompt_cache_key": "<session>",
+					"text": {
+						"verbosity": "low"
+					},
+					"safety_identifier": "<session>",
+					"<tool-keys>": [
+						"strict"
+					]
+				}
+			},
+			{
+				"path": "/api/llm/o/v1/responses",
+				"headers": {
+					"user-agent": "factory-cli/0.230.0",
+					"x-api-provider": "bedrock_openai",
+					"x-client-version": "0.230.0",
+					"x-factory-client": "cli",
+					"x-provider-routing-source": "session_lock",
+					"x-stainless-lang": "js",
+					"x-stainless-package-version": "6.25.0",
+					"x-stainless-retry-count": "0",
+					"x-stainless-runtime": "node",
+					"x-stainless-runtime-version": "v26.3.0"
+				},
+				"body": {
+					"model": "gpt-5.6-terra",
+					"store": false,
+					"stream": true,
+					"tool_choice": "auto",
+					"parallel_tool_calls": true,
+					"reasoning": {
+						"effort": "none"
+					},
+					"prompt_cache_key": "<session>",
+					"text": {
+						"verbosity": "low"
+					},
+					"safety_identifier": "<session>",
+					"<tool-keys>": [
+						"strict"
+					]
+				}
+			}
+		]
+	},
+	{
+		"model": "gpt-5.6-sol-fast",
+		"upstream": "openai",
+		"effort": "medium",
+		"requests": [
+			{
+				"path": "/api/llm/o/v1/responses",
+				"headers": {
+					"user-agent": "factory-cli/0.230.0",
+					"x-api-provider": "openai",
+					"x-client-version": "0.230.0",
+					"x-factory-client": "cli",
+					"x-provider-routing-source": "configured_order",
+					"x-stainless-lang": "js",
+					"x-stainless-package-version": "6.25.0",
+					"x-stainless-retry-count": "0",
+					"x-stainless-runtime": "node",
+					"x-stainless-runtime-version": "v26.3.0"
+				},
+				"body": {
+					"model": "gpt-5.6-sol-fast",
+					"store": false,
+					"stream": true,
+					"tool_choice": "auto",
+					"parallel_tool_calls": true,
+					"include": [
+						"reasoning.encrypted_content"
+					],
+					"reasoning": {
+						"effort": "medium",
+						"summary": "auto"
+					},
+					"prompt_cache_key": "<session>",
+					"prompt_cache_retention": "24h",
+					"text": {
+						"verbosity": "low"
+					},
+					"safety_identifier": "<session>",
+					"service_tier": "priority",
+					"<tool-keys>": [
+						"strict"
+					]
+				}
+			},
+			{
+				"path": "/api/llm/o/v1/responses",
+				"headers": {
+					"user-agent": "factory-cli/0.230.0",
+					"x-api-provider": "openai",
+					"x-client-version": "0.230.0",
+					"x-factory-client": "cli",
+					"x-provider-routing-source": "session_lock",
+					"x-stainless-lang": "js",
+					"x-stainless-package-version": "6.25.0",
+					"x-stainless-retry-count": "0",
+					"x-stainless-runtime": "node",
+					"x-stainless-runtime-version": "v26.3.0"
+				},
+				"body": {
+					"model": "gpt-5.6-sol-fast",
+					"store": false,
+					"stream": true,
+					"tool_choice": "auto",
+					"parallel_tool_calls": true,
+					"include": [
+						"reasoning.encrypted_content"
+					],
+					"reasoning": {
+						"effort": "medium",
+						"summary": "auto"
+					},
+					"prompt_cache_key": "<session>",
+					"prompt_cache_retention": "24h",
+					"text": {
+						"verbosity": "low"
+					},
+					"safety_identifier": "<session>",
+					"service_tier": "priority",
+					"<tool-keys>": [
+						"strict"
+					]
+				}
+			}
+		]
+	},
+	{
+		"model": "gpt-5.2",
+		"upstream": "openai",
+		"effort": "off",
+		"requests": [
+			{
+				"path": "/api/llm/o/v1/responses",
+				"headers": {
+					"user-agent": "factory-cli/0.230.0",
+					"x-api-provider": "openai",
+					"x-client-version": "0.230.0",
+					"x-factory-client": "cli",
+					"x-provider-routing-source": "configured_order",
+					"x-stainless-lang": "js",
+					"x-stainless-package-version": "6.25.0",
+					"x-stainless-retry-count": "0",
+					"x-stainless-runtime": "node",
+					"x-stainless-runtime-version": "v26.3.0"
+				},
+				"body": {
+					"model": "gpt-5.2",
+					"store": false,
+					"stream": true,
+					"tool_choice": "auto",
+					"parallel_tool_calls": true,
+					"prompt_cache_key": "<session>",
+					"text": {
+						"verbosity": "low"
+					},
+					"<tool-keys>": [
+						"strict"
+					]
+				}
+			},
+			{
+				"path": "/api/llm/o/v1/responses",
+				"headers": {
+					"user-agent": "factory-cli/0.230.0",
+					"x-api-provider": "openai",
+					"x-client-version": "0.230.0",
+					"x-factory-client": "cli",
+					"x-provider-routing-source": "session_lock",
+					"x-stainless-lang": "js",
+					"x-stainless-package-version": "6.25.0",
+					"x-stainless-retry-count": "0",
+					"x-stainless-runtime": "node",
+					"x-stainless-runtime-version": "v26.3.0"
+				},
+				"body": {
+					"model": "gpt-5.2",
+					"store": false,
+					"stream": true,
+					"tool_choice": "auto",
+					"parallel_tool_calls": true,
+					"prompt_cache_key": "<session>",
+					"text": {
+						"verbosity": "low"
+					},
+					"<tool-keys>": [
+						"strict"
+					]
+				}
+			}
+		]
+	},
+	{
+		"model": "gpt-6-sol",
+		"upstream": "openai",
+		"effort": "max",
+		"requests": [
+			{
+				"path": "/api/llm/o/v1/responses",
+				"headers": {
+					"user-agent": "factory-cli/0.230.0",
+					"x-api-provider": "openai",
+					"x-client-version": "0.230.0",
+					"x-factory-client": "cli",
+					"x-provider-routing-source": "configured_order",
+					"x-stainless-lang": "js",
+					"x-stainless-package-version": "6.25.0",
+					"x-stainless-retry-count": "0",
+					"x-stainless-runtime": "node",
+					"x-stainless-runtime-version": "v26.3.0"
+				},
+				"body": {
+					"model": "gpt-6-sol",
+					"store": false,
+					"stream": true,
+					"tool_choice": "auto",
+					"parallel_tool_calls": true,
+					"include": [
+						"reasoning.encrypted_content"
+					],
+					"reasoning": {
+						"effort": "max",
+						"summary": "auto"
+					},
+					"prompt_cache_key": "<session>",
+					"prompt_cache_retention": "24h",
+					"text": {
+						"verbosity": "low"
+					},
+					"safety_identifier": "<session>",
+					"<tool-keys>": [
+						"strict"
+					]
+				}
+			},
+			{
+				"path": "/api/llm/o/v1/responses",
+				"headers": {
+					"user-agent": "factory-cli/0.230.0",
+					"x-api-provider": "openai",
+					"x-client-version": "0.230.0",
+					"x-factory-client": "cli",
+					"x-provider-routing-source": "session_lock",
+					"x-stainless-lang": "js",
+					"x-stainless-package-version": "6.25.0",
+					"x-stainless-retry-count": "0",
+					"x-stainless-runtime": "node",
+					"x-stainless-runtime-version": "v26.3.0"
+				},
+				"body": {
+					"model": "gpt-6-sol",
+					"store": false,
+					"stream": true,
+					"tool_choice": "auto",
+					"parallel_tool_calls": true,
+					"include": [
+						"reasoning.encrypted_content"
+					],
+					"reasoning": {
+						"effort": "max",
+						"summary": "auto"
+					},
+					"prompt_cache_key": "<session>",
+					"prompt_cache_retention": "24h",
+					"text": {
+						"verbosity": "low"
+					},
+					"safety_identifier": "<session>",
+					"<tool-keys>": [
+						"strict"
+					]
+				}
+			}
+		]
+	},
+	{
+		"model": "grok-4.7",
+		"upstream": "xai",
+		"effort": "high",
+		"requests": [
+			{
+				"path": "/api/llm/o/v1/responses",
+				"headers": {
+					"user-agent": "factory-cli/0.230.0",
+					"x-api-provider": "xai",
+					"x-client-version": "0.230.0",
+					"x-factory-client": "cli",
+					"x-provider-routing-source": "session_lock",
+					"x-stainless-lang": "js",
+					"x-stainless-package-version": "6.25.0",
+					"x-stainless-retry-count": "0",
+					"x-stainless-runtime": "node",
+					"x-stainless-runtime-version": "v26.3.0"
+				},
+				"body": {
+					"model": "grok-4.7",
+					"store": false,
+					"stream": true,
+					"parallel_tool_calls": true,
+					"max_output_tokens": 63356,
+					"include": [
+						"reasoning.encrypted_content"
+					],
+					"reasoning": {
+						"effort": "high"
+					},
+					"prompt_cache_key": "<session>",
+					"<tool-keys>": [
+						"strict"
+					]
+				}
+			},
+			{
+				"path": "/api/llm/o/v1/responses",
+				"headers": {
+					"user-agent": "factory-cli/0.230.0",
+					"x-api-provider": "xai",
+					"x-client-version": "0.230.0",
+					"x-factory-client": "cli",
+					"x-provider-routing-source": "session_lock",
+					"x-stainless-lang": "js",
+					"x-stainless-package-version": "6.25.0",
+					"x-stainless-retry-count": "0",
+					"x-stainless-runtime": "node",
+					"x-stainless-runtime-version": "v26.3.0"
+				},
+				"body": {
+					"model": "grok-4.7",
+					"store": false,
+					"stream": true,
+					"parallel_tool_calls": true,
+					"max_output_tokens": 63356,
+					"include": [
+						"reasoning.encrypted_content"
+					],
+					"reasoning": {
+						"effort": "high"
+					},
+					"prompt_cache_key": "<session>",
+					"<tool-keys>": [
+						"strict"
+					]
+				}
+			}
+		]
+	},
+	{
+		"model": "claude-opus-4-5-20251101",
+		"upstream": "anthropic",
+		"effort": "high",
+		"requests": [
+			{
+				"path": "/api/llm/a/v1/messages",
+				"headers": {
+					"anthropic-beta": "effort-2025-11-24,fine-grained-tool-streaming-2025-05-14",
+					"user-agent": "factory-cli/0.230.0",
+					"x-api-provider": "anthropic",
+					"x-client-version": "0.230.0",
+					"x-factory-client": "cli",
+					"x-provider-routing-source": "configured_order",
+					"x-stainless-lang": "js",
+					"x-stainless-package-version": "0.70.1",
+					"x-stainless-retry-count": "0",
+					"x-stainless-runtime": "node",
+					"x-stainless-runtime-version": "v26.3.0"
+				},
+				"body": {
+					"model": "claude-opus-4-5-20251101",
+					"max_tokens": 64000,
+					"thinking": {
+						"type": "enabled",
+						"budget_tokens": 24576
+					},
+					"output_config": {
+						"effort": "high"
+					},
+					"stream": true,
+					"<tool-keys>": [
+						"eager_input_streaming"
+					]
+				}
+			},
+			{
+				"path": "/api/llm/a/v1/messages",
+				"headers": {
+					"anthropic-beta": "effort-2025-11-24,fine-grained-tool-streaming-2025-05-14",
+					"user-agent": "factory-cli/0.230.0",
+					"x-api-provider": "anthropic",
+					"x-client-version": "0.230.0",
+					"x-factory-client": "cli",
+					"x-provider-routing-source": "session_lock",
+					"x-stainless-lang": "js",
+					"x-stainless-package-version": "0.70.1",
+					"x-stainless-retry-count": "0",
+					"x-stainless-runtime": "node",
+					"x-stainless-runtime-version": "v26.3.0"
+				},
+				"body": {
+					"model": "claude-opus-4-5-20251101",
+					"max_tokens": 64000,
+					"thinking": {
+						"type": "enabled",
+						"budget_tokens": 24576
+					},
+					"output_config": {
+						"effort": "high"
+					},
+					"stream": true,
+					"<tool-keys>": [
+						"eager_input_streaming"
+					]
+				}
+			}
+		]
+	},
+	{
+		"model": "claude-opus-4-5-20251101",
+		"upstream": "bedrock_anthropic",
+		"effort": "high",
+		"requests": [
+			{
+				"path": "/api/llm/a/v1/messages",
+				"headers": {
+					"anthropic-beta": "effort-2025-11-24,fine-grained-tool-streaming-2025-05-14",
+					"user-agent": "factory-cli/0.230.0",
+					"x-api-provider": "bedrock_anthropic",
+					"x-client-version": "0.230.0",
+					"x-factory-client": "cli",
+					"x-provider-routing-source": "configured_order",
+					"x-stainless-lang": "js",
+					"x-stainless-package-version": "0.70.1",
+					"x-stainless-retry-count": "0",
+					"x-stainless-runtime": "node",
+					"x-stainless-runtime-version": "v26.3.0"
+				},
+				"body": {
+					"model": "claude-opus-4-5-20251101",
+					"max_tokens": 64000,
+					"thinking": {
+						"type": "enabled",
+						"budget_tokens": 24576
+					},
+					"output_config": {
+						"effort": "high"
+					},
+					"stream": true,
+					"<tool-keys>": []
+				}
+			},
+			{
+				"path": "/api/llm/a/v1/messages",
+				"headers": {
+					"anthropic-beta": "effort-2025-11-24,fine-grained-tool-streaming-2025-05-14",
+					"user-agent": "factory-cli/0.230.0",
+					"x-api-provider": "bedrock_anthropic",
+					"x-client-version": "0.230.0",
+					"x-factory-client": "cli",
+					"x-provider-routing-source": "session_lock",
+					"x-stainless-lang": "js",
+					"x-stainless-package-version": "0.70.1",
+					"x-stainless-retry-count": "0",
+					"x-stainless-runtime": "node",
+					"x-stainless-runtime-version": "v26.3.0"
+				},
+				"body": {
+					"model": "claude-opus-4-5-20251101",
+					"max_tokens": 64000,
+					"thinking": {
+						"type": "enabled",
+						"budget_tokens": 24576
+					},
+					"output_config": {
+						"effort": "high"
+					},
+					"stream": true,
+					"<tool-keys>": []
+				}
+			}
+		]
+	},
+	{
+		"model": "claude-sonnet-4-5-20250929",
+		"upstream": "anthropic",
+		"effort": "high",
+		"requests": [
+			{
+				"path": "/api/llm/a/v1/messages",
+				"headers": {
+					"anthropic-beta": "fine-grained-tool-streaming-2025-05-14,interleaved-thinking-2025-05-14",
+					"user-agent": "factory-cli/0.230.0",
+					"x-api-provider": "anthropic",
+					"x-client-version": "0.230.0",
+					"x-factory-client": "cli",
+					"x-provider-routing-source": "configured_order",
+					"x-stainless-lang": "js",
+					"x-stainless-package-version": "0.70.1",
+					"x-stainless-retry-count": "0",
+					"x-stainless-runtime": "node",
+					"x-stainless-runtime-version": "v26.3.0"
+				},
+				"body": {
+					"model": "claude-sonnet-4-5-20250929",
+					"max_tokens": 32000,
+					"thinking": {
+						"type": "enabled",
+						"budget_tokens": 24576
+					},
+					"stream": true,
+					"<tool-keys>": [
+						"eager_input_streaming"
+					]
+				}
+			},
+			{
+				"path": "/api/llm/a/v1/messages",
+				"headers": {
+					"anthropic-beta": "fine-grained-tool-streaming-2025-05-14,interleaved-thinking-2025-05-14",
+					"user-agent": "factory-cli/0.230.0",
+					"x-api-provider": "anthropic",
+					"x-client-version": "0.230.0",
+					"x-factory-client": "cli",
+					"x-provider-routing-source": "session_lock",
+					"x-stainless-lang": "js",
+					"x-stainless-package-version": "0.70.1",
+					"x-stainless-retry-count": "0",
+					"x-stainless-runtime": "node",
+					"x-stainless-runtime-version": "v26.3.0"
+				},
+				"body": {
+					"model": "claude-sonnet-4-5-20250929",
+					"max_tokens": 32000,
+					"thinking": {
+						"type": "enabled",
+						"budget_tokens": 24576
+					},
+					"stream": true,
+					"<tool-keys>": [
+						"eager_input_streaming"
+					]
+				}
+			}
+		]
+	},
+	{
+		"model": "claude-sonnet-4-5-20250929",
+		"upstream": "bedrock_anthropic",
+		"effort": "high",
+		"requests": [
+			{
+				"path": "/api/llm/a/v1/messages",
+				"headers": {
+					"anthropic-beta": "fine-grained-tool-streaming-2025-05-14,interleaved-thinking-2025-05-14",
+					"user-agent": "factory-cli/0.230.0",
+					"x-api-provider": "bedrock_anthropic",
+					"x-client-version": "0.230.0",
+					"x-factory-client": "cli",
+					"x-provider-routing-source": "configured_order",
+					"x-stainless-lang": "js",
+					"x-stainless-package-version": "0.70.1",
+					"x-stainless-retry-count": "0",
+					"x-stainless-runtime": "node",
+					"x-stainless-runtime-version": "v26.3.0"
+				},
+				"body": {
+					"model": "claude-sonnet-4-5-20250929",
+					"max_tokens": 32000,
+					"thinking": {
+						"type": "enabled",
+						"budget_tokens": 24576
+					},
+					"stream": true,
+					"<tool-keys>": []
+				}
+			},
+			{
+				"path": "/api/llm/a/v1/messages",
+				"headers": {
+					"anthropic-beta": "fine-grained-tool-streaming-2025-05-14,interleaved-thinking-2025-05-14",
+					"user-agent": "factory-cli/0.230.0",
+					"x-api-provider": "bedrock_anthropic",
+					"x-client-version": "0.230.0",
+					"x-factory-client": "cli",
+					"x-provider-routing-source": "session_lock",
+					"x-stainless-lang": "js",
+					"x-stainless-package-version": "0.70.1",
+					"x-stainless-retry-count": "0",
+					"x-stainless-runtime": "node",
+					"x-stainless-runtime-version": "v26.3.0"
+				},
+				"body": {
+					"model": "claude-sonnet-4-5-20250929",
+					"max_tokens": 32000,
+					"thinking": {
+						"type": "enabled",
+						"budget_tokens": 24576
+					},
+					"stream": true,
+					"<tool-keys>": []
+				}
+			}
+		]
+	},
+	{
+		"model": "claude-sonnet-4-5-20250929",
+		"upstream": "anthropic",
+		"effort": "off",
+		"requests": [
+			{
+				"path": "/api/llm/a/v1/messages",
+				"headers": {
+					"anthropic-beta": "fine-grained-tool-streaming-2025-05-14",
+					"user-agent": "factory-cli/0.230.0",
+					"x-api-provider": "anthropic",
+					"x-client-version": "0.230.0",
+					"x-factory-client": "cli",
+					"x-provider-routing-source": "configured_order",
+					"x-stainless-lang": "js",
+					"x-stainless-package-version": "0.70.1",
+					"x-stainless-retry-count": "0",
+					"x-stainless-runtime": "node",
+					"x-stainless-runtime-version": "v26.3.0"
+				},
+				"body": {
+					"model": "claude-sonnet-4-5-20250929",
+					"max_tokens": 32000,
+					"stream": true,
+					"<tool-keys>": [
+						"eager_input_streaming"
+					]
+				}
+			},
+			{
+				"path": "/api/llm/a/v1/messages",
+				"headers": {
+					"anthropic-beta": "fine-grained-tool-streaming-2025-05-14",
+					"user-agent": "factory-cli/0.230.0",
+					"x-api-provider": "anthropic",
+					"x-client-version": "0.230.0",
+					"x-factory-client": "cli",
+					"x-provider-routing-source": "session_lock",
+					"x-stainless-lang": "js",
+					"x-stainless-package-version": "0.70.1",
+					"x-stainless-retry-count": "0",
+					"x-stainless-runtime": "node",
+					"x-stainless-runtime-version": "v26.3.0"
+				},
+				"body": {
+					"model": "claude-sonnet-4-5-20250929",
+					"max_tokens": 32000,
+					"stream": true,
+					"<tool-keys>": [
+						"eager_input_streaming"
+					]
+				}
+			}
+		]
+	},
+	{
+		"model": "claude-opus-4-6",
+		"upstream": "anthropic",
+		"effort": "max",
+		"requests": [
+			{
+				"path": "/api/llm/a/v1/messages",
+				"headers": {
+					"anthropic-beta": "fine-grained-tool-streaming-2025-05-14",
+					"user-agent": "factory-cli/0.230.0",
+					"x-api-provider": "anthropic",
+					"x-client-version": "0.230.0",
+					"x-factory-client": "cli",
+					"x-provider-routing-source": "configured_order",
+					"x-stainless-lang": "js",
+					"x-stainless-package-version": "0.70.1",
+					"x-stainless-retry-count": "0",
+					"x-stainless-runtime": "node",
+					"x-stainless-runtime-version": "v26.3.0"
+				},
+				"body": {
+					"model": "claude-opus-4-6",
+					"max_tokens": 128000,
+					"thinking": {
+						"type": "adaptive"
+					},
+					"output_config": {
+						"effort": "max"
+					},
+					"stream": true,
+					"<tool-keys>": [
+						"eager_input_streaming"
+					]
+				}
+			},
+			{
+				"path": "/api/llm/a/v1/messages",
+				"headers": {
+					"anthropic-beta": "fine-grained-tool-streaming-2025-05-14",
+					"user-agent": "factory-cli/0.230.0",
+					"x-api-provider": "anthropic",
+					"x-client-version": "0.230.0",
+					"x-factory-client": "cli",
+					"x-provider-routing-source": "session_lock",
+					"x-stainless-lang": "js",
+					"x-stainless-package-version": "0.70.1",
+					"x-stainless-retry-count": "0",
+					"x-stainless-runtime": "node",
+					"x-stainless-runtime-version": "v26.3.0"
+				},
+				"body": {
+					"model": "claude-opus-4-6",
+					"max_tokens": 128000,
+					"thinking": {
+						"type": "adaptive"
+					},
+					"output_config": {
+						"effort": "max"
+					},
+					"stream": true,
+					"<tool-keys>": [
+						"eager_input_streaming"
+					]
+				}
+			}
+		]
+	},
+	{
+		"model": "claude-opus-4-8",
+		"upstream": "vertex_anthropic",
+		"effort": "high",
+		"requests": [
+			{
+				"path": "/api/llm/a/v1/messages",
+				"headers": {
+					"anthropic-beta": "effort-2025-11-24,fine-grained-tool-streaming-2025-05-14",
+					"user-agent": "factory-cli/0.230.0",
+					"x-api-provider": "vertex_anthropic",
+					"x-client-version": "0.230.0",
+					"x-factory-client": "cli",
+					"x-provider-routing-source": "configured_order",
+					"x-stainless-lang": "js",
+					"x-stainless-package-version": "0.70.1",
+					"x-stainless-retry-count": "0",
+					"x-stainless-runtime": "node",
+					"x-stainless-runtime-version": "v26.3.0"
+				},
+				"body": {
+					"model": "claude-opus-4-8",
+					"max_tokens": 128000,
+					"thinking": {
+						"type": "adaptive",
+						"display": "summarized"
+					},
+					"output_config": {
+						"effort": "high"
+					},
+					"stream": true,
+					"<tool-keys>": [
+						"eager_input_streaming"
+					]
+				}
+			},
+			{
+				"path": "/api/llm/a/v1/messages",
+				"headers": {
+					"anthropic-beta": "effort-2025-11-24,fine-grained-tool-streaming-2025-05-14",
+					"user-agent": "factory-cli/0.230.0",
+					"x-api-provider": "vertex_anthropic",
+					"x-client-version": "0.230.0",
+					"x-factory-client": "cli",
+					"x-provider-routing-source": "session_lock",
+					"x-stainless-lang": "js",
+					"x-stainless-package-version": "0.70.1",
+					"x-stainless-retry-count": "0",
+					"x-stainless-runtime": "node",
+					"x-stainless-runtime-version": "v26.3.0"
+				},
+				"body": {
+					"model": "claude-opus-4-8",
+					"max_tokens": 128000,
+					"thinking": {
+						"type": "adaptive",
+						"display": "summarized"
+					},
+					"output_config": {
+						"effort": "high"
+					},
+					"stream": true,
+					"<tool-keys>": [
+						"eager_input_streaming"
+					]
+				}
+			}
+		]
+	},
+	{
+		"model": "claude-opus-4-8",
+		"upstream": "anthropic",
+		"effort": "off",
+		"requests": [
+			{
+				"path": "/api/llm/a/v1/messages",
+				"headers": {
+					"anthropic-beta": "fine-grained-tool-streaming-2025-05-14",
+					"user-agent": "factory-cli/0.230.0",
+					"x-api-provider": "anthropic",
+					"x-client-version": "0.230.0",
+					"x-factory-client": "cli",
+					"x-provider-routing-source": "configured_order",
+					"x-stainless-lang": "js",
+					"x-stainless-package-version": "0.70.1",
+					"x-stainless-retry-count": "0",
+					"x-stainless-runtime": "node",
+					"x-stainless-runtime-version": "v26.3.0"
+				},
+				"body": {
+					"model": "claude-opus-4-8",
+					"max_tokens": 128000,
+					"stream": true,
+					"<tool-keys>": [
+						"eager_input_streaming"
+					]
+				}
+			},
+			{
+				"path": "/api/llm/a/v1/messages",
+				"headers": {
+					"anthropic-beta": "fine-grained-tool-streaming-2025-05-14",
+					"user-agent": "factory-cli/0.230.0",
+					"x-api-provider": "anthropic",
+					"x-client-version": "0.230.0",
+					"x-factory-client": "cli",
+					"x-provider-routing-source": "session_lock",
+					"x-stainless-lang": "js",
+					"x-stainless-package-version": "0.70.1",
+					"x-stainless-retry-count": "0",
+					"x-stainless-runtime": "node",
+					"x-stainless-runtime-version": "v26.3.0"
+				},
+				"body": {
+					"model": "claude-opus-4-8",
+					"max_tokens": 128000,
+					"stream": true,
+					"<tool-keys>": [
+						"eager_input_streaming"
+					]
+				}
+			}
+		]
+	},
+	{
+		"model": "claude-opus-4-8",
+		"upstream": "azure_anthropic",
+		"effort": "high",
+		"requests": [
+			{
+				"path": "/api/llm/a/v1/messages",
+				"headers": {
+					"user-agent": "factory-cli/0.230.0",
+					"x-api-provider": "azure_anthropic",
+					"x-client-version": "0.230.0",
+					"x-factory-client": "cli",
+					"x-provider-routing-source": "configured_order",
+					"x-stainless-lang": "js",
+					"x-stainless-package-version": "0.70.1",
+					"x-stainless-retry-count": "0",
+					"x-stainless-runtime": "node",
+					"x-stainless-runtime-version": "v26.3.0"
+				},
+				"body": {
+					"model": "claude-opus-4-8",
+					"max_tokens": 128000,
+					"thinking": {
+						"type": "adaptive",
+						"display": "summarized"
+					},
+					"output_config": {
+						"effort": "high"
+					},
+					"stream": true,
+					"<tool-keys>": []
+				}
+			},
+			{
+				"path": "/api/llm/a/v1/messages",
+				"headers": {
+					"user-agent": "factory-cli/0.230.0",
+					"x-api-provider": "azure_anthropic",
+					"x-client-version": "0.230.0",
+					"x-factory-client": "cli",
+					"x-provider-routing-source": "session_lock",
+					"x-stainless-lang": "js",
+					"x-stainless-package-version": "0.70.1",
+					"x-stainless-retry-count": "0",
+					"x-stainless-runtime": "node",
+					"x-stainless-runtime-version": "v26.3.0"
+				},
+				"body": {
+					"model": "claude-opus-4-8",
+					"max_tokens": 128000,
+					"thinking": {
+						"type": "adaptive",
+						"display": "summarized"
+					},
+					"output_config": {
+						"effort": "high"
+					},
+					"stream": true,
+					"<tool-keys>": []
+				}
+			}
+		]
+	},
+	{
+		"model": "claude-opus-5",
+		"upstream": "snowflake",
+		"effort": "off",
+		"requests": [
+			{
+				"path": "/api/llm/a/v1/messages",
+				"headers": {
+					"user-agent": "factory-cli/0.230.0",
+					"x-api-provider": "snowflake",
+					"x-client-version": "0.230.0",
+					"x-factory-client": "cli",
+					"x-provider-routing-source": "configured_order",
+					"x-stainless-lang": "js",
+					"x-stainless-package-version": "0.70.1",
+					"x-stainless-retry-count": "0",
+					"x-stainless-runtime": "node",
+					"x-stainless-runtime-version": "v26.3.0"
+				},
+				"body": {
+					"model": "claude-opus-5",
+					"max_tokens": 128000,
+					"thinking": {
+						"type": "disabled"
+					},
+					"stream": true,
+					"<tool-keys>": []
+				}
+			},
+			{
+				"path": "/api/llm/a/v1/messages",
+				"headers": {
+					"user-agent": "factory-cli/0.230.0",
+					"x-api-provider": "snowflake",
+					"x-client-version": "0.230.0",
+					"x-factory-client": "cli",
+					"x-provider-routing-source": "session_lock",
+					"x-stainless-lang": "js",
+					"x-stainless-package-version": "0.70.1",
+					"x-stainless-retry-count": "0",
+					"x-stainless-runtime": "node",
+					"x-stainless-runtime-version": "v26.3.0"
+				},
+				"body": {
+					"model": "claude-opus-5",
+					"max_tokens": 128000,
+					"thinking": {
+						"type": "disabled"
+					},
+					"stream": true,
+					"<tool-keys>": []
+				}
+			}
+		]
+	},
+	{
+		"model": "claude-fable-5",
+		"upstream": "anthropic",
+		"effort": "high",
+		"requests": [
+			{
+				"path": "/api/llm/a/v1/messages",
+				"headers": {
+					"anthropic-beta": "fallback-credit-2026-06-01,fine-grained-tool-streaming-2025-05-14,server-side-fallback-2026-06-01",
+					"user-agent": "factory-cli/0.230.0",
+					"x-api-provider": "anthropic",
+					"x-client-version": "0.230.0",
+					"x-factory-client": "cli",
+					"x-provider-routing-source": "configured_order",
+					"x-stainless-lang": "js",
+					"x-stainless-package-version": "0.70.1",
+					"x-stainless-retry-count": "0",
+					"x-stainless-runtime": "node",
+					"x-stainless-runtime-version": "v26.3.0"
+				},
+				"body": {
+					"model": "claude-fable-5",
+					"max_tokens": 128000,
+					"thinking": {
+						"type": "adaptive",
+						"display": "summarized"
+					},
+					"output_config": {
+						"effort": "high"
+					},
+					"fallbacks": [
+						{
+							"model": "claude-opus-5"
+						}
+					],
+					"stream": true,
+					"<tool-keys>": [
+						"eager_input_streaming"
+					]
+				}
+			},
+			{
+				"path": "/api/llm/a/v1/messages",
+				"headers": {
+					"anthropic-beta": "fallback-credit-2026-06-01,fine-grained-tool-streaming-2025-05-14,server-side-fallback-2026-06-01",
+					"user-agent": "factory-cli/0.230.0",
+					"x-api-provider": "anthropic",
+					"x-client-version": "0.230.0",
+					"x-factory-client": "cli",
+					"x-provider-routing-source": "session_lock",
+					"x-stainless-lang": "js",
+					"x-stainless-package-version": "0.70.1",
+					"x-stainless-retry-count": "0",
+					"x-stainless-runtime": "node",
+					"x-stainless-runtime-version": "v26.3.0"
+				},
+				"body": {
+					"model": "claude-fable-5",
+					"max_tokens": 128000,
+					"thinking": {
+						"type": "adaptive",
+						"display": "summarized"
+					},
+					"output_config": {
+						"effort": "high"
+					},
+					"fallbacks": [
+						{
+							"model": "claude-opus-5"
+						}
+					],
+					"stream": true,
+					"<tool-keys>": [
+						"eager_input_streaming"
+					]
+				}
+			}
+		]
+	},
+	{
+		"model": "claude-opus-5-5-fast",
+		"upstream": "anthropic",
+		"effort": "high",
+		"requests": [
+			{
+				"path": "/api/llm/a/v1/messages",
+				"headers": {
+					"anthropic-beta": "fast-mode-2026-02-01,fine-grained-tool-streaming-2025-05-14",
+					"user-agent": "factory-cli/0.230.0",
+					"x-api-provider": "anthropic",
+					"x-client-version": "0.230.0",
+					"x-factory-client": "cli",
+					"x-provider-routing-source": "configured_order",
+					"x-stainless-lang": "js",
+					"x-stainless-package-version": "0.70.1",
+					"x-stainless-retry-count": "0",
+					"x-stainless-runtime": "node",
+					"x-stainless-runtime-version": "v26.3.0"
+				},
+				"body": {
+					"model": "claude-opus-5-5-fast",
+					"max_tokens": 128000,
+					"thinking": {
+						"type": "adaptive",
+						"display": "summarized"
+					},
+					"output_config": {
+						"effort": "high"
+					},
+					"speed": "fast",
+					"stream": true,
+					"<tool-keys>": [
+						"eager_input_streaming"
+					]
+				}
+			},
+			{
+				"path": "/api/llm/a/v1/messages",
+				"headers": {
+					"anthropic-beta": "fast-mode-2026-02-01,fine-grained-tool-streaming-2025-05-14",
+					"user-agent": "factory-cli/0.230.0",
+					"x-api-provider": "anthropic",
+					"x-client-version": "0.230.0",
+					"x-factory-client": "cli",
+					"x-provider-routing-source": "session_lock",
+					"x-stainless-lang": "js",
+					"x-stainless-package-version": "0.70.1",
+					"x-stainless-retry-count": "0",
+					"x-stainless-runtime": "node",
+					"x-stainless-runtime-version": "v26.3.0"
+				},
+				"body": {
+					"model": "claude-opus-5-5-fast",
+					"max_tokens": 128000,
+					"thinking": {
+						"type": "adaptive",
+						"display": "summarized"
+					},
+					"output_config": {
+						"effort": "high"
+					},
+					"speed": "fast",
+					"stream": true,
+					"<tool-keys>": [
+						"eager_input_streaming"
+					]
+				}
+			}
+		]
+	},
+	{
+		"model": "minimax-m2.7",
+		"upstream": "fireworks",
+		"effort": "high",
+		"requests": [
+			{
+				"path": "/api/llm/a/v1/messages",
+				"headers": {
+					"user-agent": "factory-cli/0.230.0",
+					"x-api-provider": "fireworks",
+					"x-client-version": "0.230.0",
+					"x-factory-client": "cli",
+					"x-provider-routing-source": "configured_order",
+					"x-stainless-lang": "js",
+					"x-stainless-package-version": "0.70.1",
+					"x-stainless-retry-count": "0",
+					"x-stainless-runtime": "node",
+					"x-stainless-runtime-version": "v26.3.0"
+				},
+				"body": {
+					"model": "minimax-m2.7",
+					"max_tokens": 64000,
+					"thinking": {
+						"type": "enabled",
+						"budget_tokens": 24576
+					},
+					"output_config": {
+						"effort": "high"
+					},
+					"stream": true,
+					"<tool-keys>": []
+				}
+			},
+			{
+				"path": "/api/llm/a/v1/messages",
+				"headers": {
+					"user-agent": "factory-cli/0.230.0",
+					"x-api-provider": "fireworks",
+					"x-client-version": "0.230.0",
+					"x-factory-client": "cli",
+					"x-provider-routing-source": "session_lock",
+					"x-stainless-lang": "js",
+					"x-stainless-package-version": "0.70.1",
+					"x-stainless-retry-count": "0",
+					"x-stainless-runtime": "node",
+					"x-stainless-runtime-version": "v26.3.0"
+				},
+				"body": {
+					"model": "minimax-m2.7",
+					"max_tokens": 64000,
+					"thinking": {
+						"type": "enabled",
+						"budget_tokens": 24576
+					},
+					"output_config": {
+						"effort": "high"
+					},
+					"stream": true,
+					"<tool-keys>": []
+				}
+			}
+		]
+	},
+	{
+		"model": "gemini-3.8-flash",
+		"upstream": "google",
+		"effort": "medium",
+		"requests": [
+			{
+				"path": "/api/llm/g/v1/generate",
+				"headers": {
+					"user-agent": "factory-cli/0.230.0",
+					"x-api-provider": "google",
+					"x-client-version": "0.230.0",
+					"x-factory-client": "cli",
+					"x-provider-routing-source": "session_lock"
+				},
+				"body": {
+					"model": "gemini-3.8-flash",
+					"generationConfig": {
+						"temperature": 1,
+						"topP": 0.95,
+						"topK": 64,
+						"thinkingConfig": {
+							"includeThoughts": true,
+							"thinkingLevel": "MEDIUM"
+						}
+					},
+					"<tool-keys>": []
+				}
+			},
+			{
+				"path": "/api/llm/g/v1/generate",
+				"headers": {
+					"user-agent": "factory-cli/0.230.0",
+					"x-api-provider": "google",
+					"x-client-version": "0.230.0",
+					"x-factory-client": "cli",
+					"x-provider-routing-source": "session_lock"
+				},
+				"body": {
+					"model": "gemini-3.8-flash",
+					"generationConfig": {
+						"temperature": 1,
+						"topP": 0.95,
+						"topK": 64,
+						"thinkingConfig": {
+							"includeThoughts": true,
+							"thinkingLevel": "MEDIUM"
+						}
+					},
+					"<tool-keys>": []
+				}
+			}
+		]
+	},
+	{
+		"model": "gemini-3.6-flash",
+		"upstream": "google",
+		"effort": "medium",
+		"requests": [
+			{
+				"path": "/api/llm/g/v1/generate",
+				"headers": {
+					"user-agent": "factory-cli/0.230.0",
+					"x-api-provider": "google",
+					"x-client-version": "0.230.0",
+					"x-factory-client": "cli",
+					"x-provider-routing-source": "session_lock"
+				},
+				"body": {
+					"model": "gemini-3.6-flash",
+					"generationConfig": {
+						"temperature": 1,
+						"topP": 0.95,
+						"topK": 64,
+						"thinkingConfig": {
+							"includeThoughts": true,
+							"thinkingLevel": "HIGH"
+						}
+					},
+					"<tool-keys>": []
+				}
+			},
+			{
+				"path": "/api/llm/g/v1/generate",
+				"headers": {
+					"user-agent": "factory-cli/0.230.0",
+					"x-api-provider": "google",
+					"x-client-version": "0.230.0",
+					"x-factory-client": "cli",
+					"x-provider-routing-source": "session_lock"
+				},
+				"body": {
+					"model": "gemini-3.6-flash",
+					"generationConfig": {
+						"temperature": 1,
+						"topP": 0.95,
+						"topK": 64,
+						"thinkingConfig": {
+							"includeThoughts": true,
+							"thinkingLevel": "HIGH"
+						}
+					},
+					"<tool-keys>": []
+				}
+			}
+		]
+	},
+	{
+		"model": "gemini-3.1-pro-preview",
+		"upstream": "google",
+		"effort": "low",
+		"requests": [
+			{
+				"path": "/api/llm/g/v1/generate",
+				"headers": {
+					"user-agent": "factory-cli/0.230.0",
+					"x-api-provider": "google",
+					"x-client-version": "0.230.0",
+					"x-factory-client": "cli",
+					"x-provider-routing-source": "session_lock"
+				},
+				"body": {
+					"model": "gemini-3.1-pro-preview",
+					"generationConfig": {
+						"temperature": 1,
+						"topP": 0.95,
+						"topK": 64,
+						"thinkingConfig": {
+							"includeThoughts": true,
+							"thinkingLevel": "LOW"
+						}
+					},
+					"<tool-keys>": []
+				}
+			},
+			{
+				"path": "/api/llm/g/v1/generate",
+				"headers": {
+					"user-agent": "factory-cli/0.230.0",
+					"x-api-provider": "google",
+					"x-client-version": "0.230.0",
+					"x-factory-client": "cli",
+					"x-provider-routing-source": "session_lock"
+				},
+				"body": {
+					"model": "gemini-3.1-pro-preview",
+					"generationConfig": {
+						"temperature": 1,
+						"topP": 0.95,
+						"topK": 64,
+						"thinkingConfig": {
+							"includeThoughts": true,
+							"thinkingLevel": "LOW"
+						}
+					},
+					"<tool-keys>": []
+				}
+			}
+		]
+	}
+]

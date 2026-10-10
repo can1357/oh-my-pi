@@ -12,10 +12,10 @@ use std::collections::BTreeSet;
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
-use tree_sitter::{Point, TreeCursor};
+use tree_sitter::{Node, Point, TreeCursor};
 
 use crate::{
-	parse_cache::parse_cached,
+	parse_cache::{MAX_ENTRY_SOURCE_BYTES, parse_cached},
 	summary::{node_content_end_line, node_start_line, resolve_language},
 };
 
@@ -98,14 +98,19 @@ pub fn block_range_at(options: BlockRangeOptions) -> Result<Option<BlockRange>> 
 		return Ok(None);
 	}
 	// Climb to the outermost named ancestor that still begins on `row`,
-	// excluding the whole-file root. Ancestors can only begin on an earlier
-	// row, so the first parent that starts before `row` stops the climb.
+	// excluding the whole-file root. The first parent that starts before `row`
+	// stops the climb, and so does a statement-sequence container: it begins
+	// exactly where its first statement does, so adopting it would swallow
+	// every following sibling statement.
 	let mut node = leaf;
 	while let Some(parent) = node.parent() {
 		if parent.id() == root.id() {
 			break;
 		}
 		if parent.start_position().row != row {
+			break;
+		}
+		if is_statement_sequence(parent, node) {
 			break;
 		}
 		node = parent;
@@ -121,6 +126,57 @@ pub fn block_range_at(options: BlockRangeOptions) -> Result<Option<BlockRange>> 
 		start_line: node_start_line(node),
 		end_line:   node_content_end_line(node),
 	}))
+}
+
+/// Is `parent` a statement-sequence container that `node` merely opens? These
+/// nodes wrap the sibling statements or entries of a body without a token of
+/// their own, so they begin exactly where their first child does: Go and
+/// PowerShell `statement_list`, Python/Starlark/Lua `block`, Ruby
+/// `body_statement`, Swift/Kotlin `statements`, HCL/CMake `body`, Scala
+/// `indented_block`, YAML `block_mapping`/`block_sequence`, Kotlin
+/// `import_list`, PowerShell `hash_literal_body`.
+///
+/// The container is matched by kind because grammars expose no uniform
+/// structural marker: field-less prefix runs such as Java/Kotlin/Swift
+/// `modifiers` (one annotation per line) look identical but must be climbed
+/// through to reach the declaration. Braced `block`s never match because they
+/// begin at `{`; requiring the next sibling to start a later row at `node`'s
+/// column also rules out a leading label (`'a: {` in Rust). Extras (comments)
+/// are skipped when looking for that next sibling, so `if … {} // note` and
+/// comment-only lines — even dedented ones — still stop the climb. When only
+/// extras follow `node`, the container merely adds those trailing comments to
+/// `node`'s span, so the climb stops there too rather than swallowing them.
+fn is_statement_sequence(parent: Node<'_>, node: Node<'_>) -> bool {
+	if !matches!(
+		parent.kind(),
+		"statement_list"
+			| "block"
+			| "body_statement"
+			| "statements"
+			| "body"
+			| "indented_block"
+			| "block_mapping"
+			| "block_sequence"
+			| "import_list"
+			| "hash_literal_body"
+	) || parent.start_byte() != node.start_byte()
+	{
+		return false;
+	}
+	let end_row = node.end_position().row;
+	let mut next = node.next_named_sibling();
+	let mut skipped_extra = false;
+	while let Some(sibling) = next.filter(|s| s.is_extra()) {
+		skipped_extra = true;
+		next = sibling.next_named_sibling();
+	}
+	match next {
+		Some(next) => {
+			let next_start = next.start_position();
+			next_start.row > end_row && next_start.column == node.start_position().column
+		},
+		None => skipped_extra,
+	}
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -282,6 +338,22 @@ pub struct NodeSpan {
 	pub end_line:   u32,
 	/// Tree-sitter grammar node kind (e.g. `attribute_item`, `function_item`).
 	pub kind:       String,
+}
+
+/// Parse `code` into the shared tree cache.
+///
+/// The next block query over the same source and language is then a cache
+/// hit. Does nothing for empty source or an unrecognized language, where the
+/// queries never parse either, nor for a source the cache will not retain
+/// (the tree would be discarded and parsed again by the query).
+pub fn warm_parse(code: &str, lang: Option<&str>, path: Option<&str>) -> Result<()> {
+	if !code.is_empty()
+		&& code.len() <= MAX_ENTRY_SOURCE_BYTES
+		&& let Some(language) = resolve_language(lang, path)
+	{
+		parse_cached(code, language)?;
+	}
+	Ok(())
 }
 
 /// Named-node chain containing `options.line`, innermost-first, excluding the
@@ -499,6 +571,82 @@ mod tests {
 		let code =
 			"def f(xs):\n    total = 0\n    for x in xs:\n        total += x\n    return total\n";
 		assert_eq!(resolve(code, "f.py", 3), Some(BlockRange { start_line: 3, end_line: 4 }));
+	}
+
+	#[test]
+	fn go_leading_statement_excludes_following_siblings() {
+		// tree-sitter-go wraps a block body in a `statement_list` that begins
+		// exactly at its first statement; the leading `if` must not resolve to
+		// the whole list and swallow the statements after it.
+		let code = "package p\n\nfunc f() error {\n\tif err := step(); err != nil {\n\t\treturn \
+		            err\n\t}\n\tother()\n\treturn nil\n}\n";
+		assert_eq!(resolve(code, "x.go", 4), Some(BlockRange { start_line: 4, end_line: 6 }));
+		assert_eq!(resolve(code, "x.go", 3), Some(BlockRange { start_line: 3, end_line: 9 }));
+	}
+
+	#[test]
+	fn python_leading_statement_excludes_following_siblings() {
+		let code = "def f(x):\n    if x:\n        return 1\n    y = 2\n    return y\n";
+		assert_eq!(resolve(code, "f.py", 2), Some(BlockRange { start_line: 2, end_line: 3 }));
+	}
+
+	#[test]
+	fn leading_statement_with_trailing_comment_excludes_following_siblings() {
+		// A comment on the statement's last row is a named sibling; it must not
+		// hide the next statement and let the climb swallow the whole body.
+		let go = "package p\n\nfunc f() error {\n\tif err := step(); err != nil {\n\t\treturn \
+		          err\n\t} // note\n\tother()\n\treturn nil\n}\n";
+		assert_eq!(resolve(go, "x.go", 4), Some(BlockRange { start_line: 4, end_line: 6 }));
+		let py = "def f(x):\n    y = 2  # note\n    z = 3\n    return y\n";
+		assert_eq!(resolve(py, "f.py", 2), Some(BlockRange { start_line: 2, end_line: 2 }));
+	}
+
+	#[test]
+	fn leading_statement_with_dedented_comment_excludes_following_siblings() {
+		// A comment-only line at a different column is still an extra between
+		// statements; it must not hide the next statement and let the climb
+		// swallow the whole body.
+		let code = "def f(x):\n    y = 2\n# dedented\n    z = 3\n    return y\n";
+		assert_eq!(resolve(code, "f.py", 2), Some(BlockRange { start_line: 2, end_line: 2 }));
+	}
+
+	// Only comments follow the body's last statement: the container adds
+	// nothing but those comments, so they must stay outside the block.
+	#[test]
+	fn python_last_statement_with_trailing_comments_excludes_them() {
+		let one = "def f(x):\n    y = 2\n    # trailing\n";
+		assert_eq!(resolve(one, "f.py", 2), Some(BlockRange { start_line: 2, end_line: 2 }));
+		let two = "def f(x):\n    y = 2\n    # one\n    # two\n";
+		assert_eq!(resolve(two, "f.py", 2), Some(BlockRange { start_line: 2, end_line: 2 }));
+	}
+
+	#[test]
+	fn ruby_last_statement_with_trailing_comment_excludes_it() {
+		let code = "def f\n  x = 1\n  # c\nend\n";
+		assert_eq!(resolve(code, "f.rb", 2), Some(BlockRange { start_line: 2, end_line: 2 }));
+	}
+
+	#[test]
+	fn yaml_last_entry_with_trailing_comment_excludes_it() {
+		let top = "a: 1\n# c\n";
+		assert_eq!(resolve(top, "c.yml", 1), Some(BlockRange { start_line: 1, end_line: 1 }));
+		let nested = "jobs:\n  build: 1\n  # c\nother: 2\n";
+		assert_eq!(resolve(nested, "c.yml", 2), Some(BlockRange { start_line: 2, end_line: 2 }));
+	}
+
+	#[test]
+	fn yaml_first_top_level_key_resolves_only_its_entry() {
+		let code = "name: ci\non:\n  push:\n    branches: [main]\njobs:\n  build: {}\n";
+		assert_eq!(resolve(code, "ci.yml", 1), Some(BlockRange { start_line: 1, end_line: 1 }));
+		assert_eq!(resolve(code, "ci.yml", 3), Some(BlockRange { start_line: 3, end_line: 4 }));
+	}
+
+	#[test]
+	fn java_stacked_annotations_still_resolve_the_declaration() {
+		// One annotation per line forms a `modifiers` run that also begins at
+		// its first child; unlike a statement list it must be climbed through.
+		let code = "class A {\n  @Override\n  @Deprecated\n  public void f() {\n    g();\n  }\n}\n";
+		assert_eq!(resolve(code, "A.java", 2), Some(BlockRange { start_line: 2, end_line: 6 }));
 	}
 
 	#[test]

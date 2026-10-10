@@ -1,15 +1,9 @@
 import { type } from "@oh-my-pi/omptype";
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
-import { logger, untilAborted } from "@oh-my-pi/pi-utils";
+import { isRecord, logger, untilAborted } from "@oh-my-pi/pi-utils";
 import type { EvalPreludeContext, EvalPreludeDefinition } from "../eval/preludes";
-import browserDescription from "../prompts/tools/browser.md" with { type: "text" };
 import type { ToolSession } from "../sdk";
-import { enforceInlineByteCap } from "../session/streaming-output";
-// @ts-expect-error Bun imports this declaration source as text instead of a TypeScript module.
-import browserDeclarations from "./browser/declarations.d.ts" with { type: "text" };
-// @ts-expect-error Bun imports this JavaScript source as text instead of evaluating its module shape.
-import browserJavascript from "./browser/prelude.js" with { type: "text" };
-import browserPython from "./browser/prelude.py" with { type: "text" };
+import { enforceInlineByteCap } from "@oh-my-pi/pi-tui/tools/streaming-output";
 import { resolveCmuxKind } from "./browser/cmux/rpc";
 import { resolveSpawnArgs } from "./browser/attach";
 import {
@@ -22,15 +16,20 @@ import {
 	releaseBrowser,
 } from "./browser/registry";
 import { ensureChromiumExecutable } from "./browser/launch";
+import { resolveInitScriptSources } from "./browser/open-options";
 import { resolveRelayKind } from "./browser/relay/kind";
+import { resolveTernKind } from "./browser/tern/kind";
+import { isTernUnavailable } from "./browser/tern/wire";
+import type { AriaSnapshotOptions } from "./browser/aria/aria-snapshot";
 import type { ScreenshotResult } from "./browser/tab-protocol";
-import type { OutputMeta } from "./output-meta";
+import type { OutputMeta } from "@oh-my-pi/pi-tui/tools/output-meta";
 import {
 	type AcquireTabResult,
 	acquireTab,
 	cancelIdleCloseForOwner,
 	dropHeadlessTabs,
 	getTab,
+	listTabs,
 	releaseAllTabs,
 	releaseIdleTabsForOwner,
 	releaseTab,
@@ -38,16 +37,56 @@ import {
 } from "./browser/tab-supervisor";
 import { renderTabCall } from "./browser/tab-call";
 import { resolveToCwd } from "./path-utils";
-import { renderFunctionRun } from "./run-code";
-import { ToolAbortError, ToolError, throwIfAborted } from "./tool-errors";
+import { renderCallChain, renderFunctionRun } from "./run-code";
+import { ToolAbortError, throwIfAborted } from "./tool-errors";
+import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { toolResult } from "./tool-result";
 import { clampTimeout } from "./tool-timeouts";
 
-export { type AriaSnapshotOptions, buildAriaSnapshotScript, parseAriaRefSelector } from "./browser/aria/aria-snapshot";
+import {
+	cfgBrowserCdpUrl,
+	cfgBrowserCmux,
+	cfgBrowserHeadless,
+	cfgBrowserIdleCloseSec,
+	cfgBrowserRelay,
+	cfgBrowserRelayUrl,
+	cfgBrowserTern,
+} from "./browser/settings";
+import { cfgToolsMaxTimeout } from "./settings";
+
+export type { AriaSnapshotOptions } from "./browser/aria/aria-snapshot";
+
+/** First-use boundary for the generated Playwright ARIA evaluator bundle. */
+export function buildAriaSnapshotScript(selector: string | undefined, options: AriaSnapshotOptions = {}): string {
+	return require("./browser/aria/aria-snapshot").buildAriaSnapshotScript(selector, options);
+}
+
+/** First-use boundary for ARIA-ref parsing; keeps evaluator construction out of tool registration. */
+export function parseAriaRefSelector(selector: string): string | null {
+	return require("./browser/aria/aria-snapshot").parseAriaRefSelector(selector);
+}
+
 export { cmuxSnapshotToObservation, mapWaitUntil, resolveCmuxKind, serializeEval } from "./browser/cmux/rpc";
 export { CmuxSocketClient } from "./browser/cmux/socket-client";
-export { extractReadableFromHtml, type ReadableFormat, type ReadableResult } from "./browser/readable";
+export {
+	extractMarkdownOutline,
+	extractReadableFromHtml,
+	filterMarkdownSections,
+	type ReadableExtractOptions,
+	type ReadableFormat,
+	type ReadableResult,
+} from "./browser/readable";
+export {
+	ariaSnapshotBaselineKey,
+	collectAriaSnapshotRefs,
+	diffAriaSnapshot,
+	postProcessAriaSnapshot,
+	type AriaSnapshotBaseline,
+	type AriaSnapshotDiffResult,
+	type SnapshotPostProcessOptions,
+} from "./browser/snapshot-plus";
 export { DEFAULT_RELAY_URL, type RelayKind, resolveRelayKind } from "./browser/relay/kind";
+export { type TernKind, resolveTernKind } from "./browser/tern/kind";
 export type { Observation, ObservationEntry } from "./browser/tab-protocol";
 
 const DEFAULT_TAB_NAME = "main";
@@ -57,6 +96,7 @@ const appSchema = type({
 	"path?": type("string").describe("binary path to spawn"),
 	"cdp_url?": type("string").describe("existing cdp endpoint"),
 	"relay?": type("boolean").describe("drive the user's own tabs via the omp browser relay"),
+	"tern?": type("boolean").describe("inside Tern: true forces a Tern picture-in-picture, false opts out"),
 	"args?": type("string[]").describe("extra cli args"),
 	"target?": type("string").describe("substring to pick a window"),
 });
@@ -67,7 +107,7 @@ const tabCallStepSchema = type({
 });
 
 const browserSchema = type({
-	action: type("'open' | 'close' | 'run' | 'call'").describe("operation"),
+	action: type("'open' | 'close' | 'run' | 'call' | 'tabs'").describe("operation"),
 	"name?": type("string").describe("tab id (default 'main')"),
 	"url?": type("string").describe("url to open"),
 	"app?": appSchema,
@@ -80,6 +120,13 @@ const browserSchema = type({
 		"navigation wait condition",
 	),
 	"dialogs?": type("'accept' | 'dismiss'").describe("auto-handle dialogs"),
+	"allowed_domains?": type("string[]").describe("allowed request hostnames"),
+	"init_scripts?": type("string[]").describe("document-start JavaScript sources or cwd-relative file paths"),
+	"downloads?": type("string").describe("cwd-relative download directory"),
+	"user_agent?": type("string").describe("tab user agent override"),
+	"ignore_https_errors?": type("boolean").describe("ignore invalid HTTPS certificates"),
+	"allow_file_access?": type("boolean").describe("allow file URLs to read local files"),
+	"headed?": type("boolean").describe("override the configured Chromium display mode"),
 	"code?": type("string").describe("js body to run in tab"),
 	"fn?": type("string").describe("serialized JavaScript function to run in tab"),
 	"args?": type("unknown[]").describe("arguments passed to a serialized function"),
@@ -94,7 +141,7 @@ type BrowserParams = typeof browserSchema.infer;
 
 interface BrowserPreludeDetails {
 	meta?: OutputMeta;
-	action: "open" | "close" | "run" | "call";
+	action: "open" | "close" | "run" | "call" | "tabs";
 	name: string;
 	url?: string;
 	browser?: BrowserKindTag;
@@ -103,60 +150,123 @@ interface BrowserPreludeDetails {
 	value?: unknown;
 }
 
-function resolveBrowserKind(params: BrowserParams, session: ToolSession): BrowserKind {
+/**
+ * The browser an open drives, by precedence: explicit `app.*` options, the
+ * relay, `browser.cdpUrl`, a Tern PiP (inside a Tern pane, unless
+ * `app.tern: false`; `app.tern: true` forces it; `headed` does not opt out),
+ * a cmux surface, then Chromium.
+ */
+export function resolveBrowserKind(
+	params: BrowserParams,
+	session: ToolSession,
+	env: Record<string, string | undefined> = process.env,
+): BrowserKind {
 	const app = params.app;
 	if (app?.cdp_url) {
 		return { kind: "connected", cdpUrl: app.cdp_url.replace(/\/+$/, "") };
 	}
 	if (app?.path) {
 		const exe = resolveToCwd(app.path, session.cwd);
-		return { kind: "spawned", path: exe, args: resolveSpawnArgs(exe, app.args, session.cwd) };
+		const args = resolveSpawnArgs(exe, app.args, session.cwd);
+		if (params.ignore_https_errors && !args.includes("--ignore-certificate-errors")) {
+			args.push("--ignore-certificate-errors");
+		}
+		if (params.allow_file_access && !args.includes("--allow-file-access-from-files")) {
+			args.push("--allow-file-access-from-files");
+		}
+		return { kind: "spawned", path: exe, args };
 	}
-	const relayUrl = session.settings.get("browser.relayUrl");
+	const relayUrl = cfgBrowserRelayUrl.get(session.settings);
 	// Explicit app.relay wins over every setting; PI_BROWSER_RELAY stays the
 	// final kill switch (a relay that is down would otherwise brick the tool).
 	if (app?.relay) {
-		const relayKind = resolveRelayKind({ settingEnabled: true, url: relayUrl });
+		const relayKind = resolveRelayKind({ settingEnabled: true, url: relayUrl }, env);
 		if (relayKind) return relayKind;
+	}
+	if (app?.tern === true) {
+		const ternKind = resolveTernKind({ settingEnabled: true }, env);
+		if (!ternKind) {
+			throw new ToolError(
+				"app.tern:true requires running inside a Tern pane (TERN_PANE_SOCKET and TERN_PANE are not set) with PI_BROWSER_TERN not set to 0.",
+			);
+		}
+		return ternKind;
 	}
 	// Relay before cdpUrl among settings: enabling the opt-out-by-default relay
 	// is a deliberate mode selection, while cdpUrl is a standing fallback
 	// endpoint. A configured endpoint is a default, not an override: explicit
 	// app options win.
 	if (app?.relay !== false) {
-		const relayKind = resolveRelayKind({
-			settingEnabled: session.settings.get("browser.relay"),
-			url: relayUrl,
-		});
+		const relayKind = resolveRelayKind(
+			{
+				settingEnabled: cfgBrowserRelay.get(session.settings),
+				url: relayUrl,
+			},
+			env,
+		);
 		if (relayKind) return relayKind;
 	}
-	const configuredCdpUrl = session.settings.get("browser.cdpUrl")?.trim();
+	const configuredCdpUrl = cfgBrowserCdpUrl.get(session.settings)?.trim();
 	if (configuredCdpUrl) {
 		return { kind: "connected", cdpUrl: configuredCdpUrl.replace(/\/+$/, "") };
 	}
-	const cmuxKind = resolveCmuxKind({
-		settingEnabled: session.settings.get("browser.cmux"),
-	});
+	if (app?.tern !== false) {
+		const ternKind = resolveTernKind({ settingEnabled: cfgBrowserTern.get(session.settings) }, env);
+		if (ternKind) return ternKind;
+	}
+	const cmuxKind = resolveCmuxKind(
+		{
+			settingEnabled: cfgBrowserCmux.get(session.settings),
+		},
+		env,
+	);
 	if (cmuxKind) {
 		return cmuxKind;
 	}
-	const headless = session.settings.get("browser.headless");
-	return { kind: "headless", headless };
+	return chromiumKind(params, session);
+}
+
+/** The Chromium browser an open launches when no attach/app mode applies. */
+function chromiumKind(params: BrowserParams, session: ToolSession): BrowserKind {
+	const headless = params.headed === undefined ? cfgBrowserHeadless.get(session.settings) : !params.headed;
+	return {
+		kind: "headless",
+		headless,
+		ignoreHttpsErrors: params.ignore_https_errors,
+		allowFileAccess: params.allow_file_access,
+	};
 }
 
 /** Create the enabled-only browser host prelude for one tool session. */
 export function createBrowserPrelude(session: ToolSession): EvalPreludeDefinition {
-	return {
-		name: "browser",
-		documentation: browserDescription,
-		javascript: browserJavascript,
-		python: browserPython,
-		exports: ["browser"],
-		codeModeDeclarations: browserDeclarations,
-		approval: "exec",
-		enabled: () => session.settings.get("browser.enabled"),
-		invoke: (parameters, context) => invokeBrowser(session, parameters, context),
-	};
+	// Eval-first-use boundary: source/declaration assets stay unloaded until a
+	// JavaScript or Python kernel actually asks for its enabled preludes.
+	const { createBrowserPreludeDefinition } = require("./browser/prelude-definition");
+	return createBrowserPreludeDefinition(session, {
+		invoke: (parameters: unknown, context: EvalPreludeContext) => invokeBrowser(session, parameters, context),
+		status: describeBrowserCall,
+	});
+}
+
+/** Status-tree line for a completed browser call: `open main https://…`, `main.id(5).click()`, `close all`. */
+function describeBrowserCall(parameters: unknown, result: AgentToolResult<unknown>): string | undefined {
+	const parsed = browserSchema(parameters);
+	if (parsed instanceof type.errors) return undefined;
+	const name = parsed.name ?? DEFAULT_TAB_NAME;
+	switch (parsed.action) {
+		case "open": {
+			const url = isRecord(result.details) ? result.details.url : undefined;
+			return typeof url === "string" && url.length > 0 ? `open ${name} ${url}` : `open ${name}`;
+		}
+		case "close":
+			return parsed.all ? "close all" : `close ${name}`;
+		case "run":
+			return `${name}.run(${parsed.fn !== undefined ? "fn" : (parsed.code?.trim().split("\n", 1)[0] ?? "")})`;
+		case "call":
+			return `${name}.${renderCallChain(parsed.chain ?? [])}`;
+		case "tabs":
+			return "tabs";
+	}
 }
 
 /** Drop headless tabs so a browser mode change applies to the next open. */
@@ -172,7 +282,7 @@ export async function restartBrowserForModeChange(): Promise<void> {
 function sweepIdleOwnedTabs(session: ToolSession): Promise<number> {
 	const ownerId = session.getSessionId?.() ?? undefined;
 	if (!ownerId) return Promise.resolve(0);
-	const idleSec = session.settings.get("browser.idleCloseSec");
+	const idleSec = cfgBrowserIdleCloseSec.get(session.settings);
 	if (!(idleSec > 0)) {
 		cancelIdleCloseForOwner(ownerId);
 		return Promise.resolve(0);
@@ -197,7 +307,7 @@ async function invokeBrowser(
 
 	try {
 		throwIfAborted(context.signal);
-		const timeoutSeconds = clampTimeout("browser", parsed.timeout, session.settings.get("tools.maxTimeout"));
+		const timeoutSeconds = clampTimeout("browser", parsed.timeout, cfgToolsMaxTimeout.get(session.settings));
 		const timeoutMs = timeoutSeconds * 1000;
 		const name = parsed.name ?? DEFAULT_TAB_NAME;
 		const details: BrowserPreludeDetails = { action: parsed.action, name };
@@ -207,6 +317,9 @@ async function invokeBrowser(
 				return await openBrowser(session, name, parsed, details, timeoutMs, context.signal);
 			case "close":
 				return await closeBrowser(name, parsed, details, timeoutMs, context.signal);
+			case "tabs":
+				details.value = listTabs();
+				return toolResult(details).done();
 			case "run":
 			case "call":
 				return await runBrowser(session, name, parsed, details, timeoutMs, context.signal);
@@ -220,6 +333,12 @@ async function invokeBrowser(
 	}
 }
 
+/**
+ * Open (or reuse) a tab. A Tern PiP chosen automatically (not forced with
+ * `app.tern: true`) falls back to Chromium when Tern cannot host it — no
+ * window, an unsupported platform, a refused or failed connection — and the
+ * result says so; a tab that already fell back keeps its browser.
+ */
 async function openBrowser(
 	session: ToolSession,
 	name: string,
@@ -228,7 +347,45 @@ async function openBrowser(
 	timeoutMs: number,
 	signal?: AbortSignal,
 ): Promise<AgentToolResult<unknown>> {
-	const kind = resolveBrowserKind(params, session);
+	const resolved = resolveBrowserKind(params, session);
+	const autoTern = resolved.kind === "tern" && params.app?.tern !== true;
+	const existing = getTab(name);
+	const kind = autoTern && existing && existing.kindTag !== "tern" ? existing.browser.kind : resolved;
+	const startedAt = performance.now();
+	try {
+		return await openOnKind(session, name, params, details, kind, timeoutMs, [], signal);
+	} catch (error) {
+		if (kind.kind !== "tern" || !autoTern || !isTernUnavailable(error) || signal?.aborted) throw error;
+		// A Tern tab under this name whose window went away still holds the name: release
+		// that one (and only that one) so the Chromium tab can take it.
+		if (getTab(name)?.kindTag === "tern") await releaseTab(name, { kill: false, timeoutMs }).catch(() => false);
+		const note = `Tern cannot show a browser here (${error.message}); opened Chromium instead. Pass app.tern:false to skip Tern, or app.tern:true to require it.`;
+		logger.debug("Tern browser unavailable; falling back to Chromium", { error: error.message });
+		const remainingMs = Math.max(1, timeoutMs - (performance.now() - startedAt));
+		return await openOnKind(
+			session,
+			name,
+			params,
+			details,
+			chromiumKind(params, session),
+			remainingMs,
+			[note],
+			signal,
+		);
+	}
+}
+
+async function openOnKind(
+	session: ToolSession,
+	name: string,
+	params: BrowserParams,
+	details: BrowserPreludeDetails,
+	kind: BrowserKind,
+	timeoutMs: number,
+	notes: readonly string[],
+	signal?: AbortSignal,
+): Promise<AgentToolResult<unknown>> {
+	const downloadsPath = params.downloads === undefined ? undefined : resolveToCwd(params.downloads, session.cwd);
 	details.browser = kind.kind;
 
 	// If a tab with this name already exists on a different browser kind, fail fast — caller must close first.
@@ -284,6 +441,20 @@ async function openBrowser(
 		holdBrowser(browser);
 		let result: AcquireTabResult;
 		try {
+			const initScripts = await untilAborted(openSignal, () =>
+				resolveInitScriptSources(params.init_scripts, session.cwd),
+			);
+			// Worker-init options cannot be applied to a live tab: recycle it so the
+			// reopened tab starts with them.
+			if (
+				existing &&
+				(initScripts.length > 0 ||
+					params.downloads !== undefined ||
+					params.user_agent !== undefined ||
+					params.ignore_https_errors === true)
+			) {
+				await untilAborted(openSignal, () => releaseTab(name, { kill: false, timeoutMs }));
+			}
 			result = await untilAborted(openSignal, () =>
 				acquireTab(name, browser, {
 					url: params.url,
@@ -299,6 +470,11 @@ async function openBrowser(
 					timeoutMs,
 					deadlineStartMs: deadlineStart,
 					dialogs: params.dialogs,
+					allowedDomains: params.allowed_domains,
+					initScripts,
+					downloadsPath,
+					userAgent: params.user_agent,
+					ignoreHttpsErrors: params.ignore_https_errors,
 					signal: openSignal,
 					ownerSessionId: session.getSessionId?.() ?? undefined,
 					// Omitted stays undefined: creation defaults it to false
@@ -331,6 +507,7 @@ async function openBrowser(
 			`${verb} tab ${JSON.stringify(name)} on ${describeBrowser(browser)}`,
 			`URL: ${url}`,
 			title ? `Title: ${title}` : null,
+			...notes,
 		].filter((line): line is string => typeof line === "string");
 		return toolResult(details).text(lines.join("\n")).done();
 	} catch (error) {
@@ -430,6 +607,9 @@ async function saveBrowserOutputArtifact(session: ToolSession, fullText: string)
 }
 
 function describeBrowser(handle: BrowserHandle): string {
+	if ("tern" in handle) {
+		return `Tern browser picture-in-picture (pane ${handle.kind.pane})`;
+	}
 	if (!("browser" in handle)) {
 		return `cmux browser (${handle.kind.surface ?? "split"})`;
 	}
@@ -457,5 +637,7 @@ function describeKind(kind: BrowserKind): string {
 			return `relay:${kind.cdpUrl}`;
 		case "cmux":
 			return `cmux:${kind.surface ?? "split"}`;
+		case "tern":
+			return `tern:pane ${kind.pane}`;
 	}
 }

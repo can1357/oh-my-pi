@@ -1,7 +1,7 @@
 import type { AgentToolContext, AgentToolResult, AgentToolUpdateCallback, ToolApproval } from "@oh-my-pi/pi-agent-core";
 import { untilAborted } from "@oh-my-pi/pi-utils";
 import type { ToolSession } from "../tools";
-import { type ApprovalMode, denyError, formatApprovalPrompt, resolveApproval } from "../tools/approval";
+import { denyError, formatApprovalPrompt, resolveApproval, resolveApprovalFromContext } from "../tools/approval";
 
 /** Host context supplied when an eval prelude calls back out of its language VM. */
 export interface EvalPreludeContext {
@@ -34,6 +34,12 @@ export interface EvalPreludeDefinition {
 	python: string;
 	/** Globals owned by the snippets and removed when the prelude is replaced or disabled. */
 	exports: readonly string[];
+	/**
+	 * Model-facing policy appended as its own system-prompt block while this
+	 * prelude is advertised. Replayed by the hidden prelude notice when enabled
+	 * mid-session, since the cached system prompt is not rebuilt for the toggle.
+	 */
+	guidance?: string;
 	/** Optional declarations appended to code-mode TypeScript context while enabled. */
 	codeModeDeclarations?: string;
 	/** Approval tier or argument-dependent approval decision for host calls. */
@@ -42,6 +48,13 @@ export interface EvalPreludeDefinition {
 	enabled?: () => boolean;
 	/** Execute a host call outside the language VM. */
 	invoke(parameters: unknown, context: EvalPreludeContext): Promise<AgentToolResult<unknown>>;
+	/**
+	 * One-line description of a successful host call for the eval status tree
+	 * (`main.goto("https://…")`). `undefined` records nothing; omit the hook
+	 * when the call has nothing worth showing. Failures are recorded by the
+	 * bridge regardless.
+	 */
+	status?(parameters: unknown, result: AgentToolResult<unknown>): string | undefined;
 }
 
 /**
@@ -57,21 +70,16 @@ export function getEnabledEvalPreludes(definitions: readonly EvalPreludeDefiniti
 	return Array.from(enabledByName.values());
 }
 
+/** First documentation line, advertised as the prelude's one-line summary; undefined when undocumented. */
+export function evalPreludeSummary(definition: Pick<EvalPreludeDefinition, "documentation">): string | undefined {
+	const doc = definition.documentation.trim();
+	return doc ? doc.split("\n", 1)[0] : undefined;
+}
+
 /** Resolve a prelude from the session's live enabled set. Captured stale VM functions therefore fail closed. */
 export function findEnabledEvalPrelude(session: ToolSession, name: string): EvalPreludeDefinition | undefined {
 	const definition = session.getEvalPreludes?.().find(candidate => candidate.name === name);
 	return definition?.enabled?.() === false ? undefined : definition;
-}
-
-function configuredApprovalMode(context: AgentToolContext | undefined): ApprovalMode {
-	if (context?.autoApprove === true) return "yolo";
-	const mode = context?.settings?.get("tools.approvalMode");
-	if (mode === "always-ask" || mode === "write" || mode === "yolo") return mode;
-	return "yolo";
-}
-
-function isUnknownRecord(value: unknown): value is Record<string, unknown> {
-	return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
 async function approvePreludeInvocation(
@@ -80,9 +88,12 @@ async function approvePreludeInvocation(
 	context: EvalPreludeContext,
 ): Promise<void> {
 	context.signal?.throwIfAborted();
-	const mode = configuredApprovalMode(context.context);
-	const configuredPolicies = context.context?.settings?.get("tools.approval");
-	const policies = isUnknownRecord(configuredPolicies) ? configuredPolicies : {};
+	// Fourth execute-time site: same helper as wrapper/cursor/mcp so a missing
+	// context cannot silently yolo. Empty `context.context` fail-closes;
+	// omitting it inherits the live session settings (schema default yolo).
+	const { approvalMode: mode, userPolicies: policies } = resolveApprovalFromContext(
+		context.context ?? (context.session.settings ? { settings: context.session.settings } : undefined),
+	);
 	const subject: { name: string; approval?: ToolApproval } = { name: definition.name };
 	if (definition.approval !== undefined) subject.approval = definition.approval;
 	const resolved = resolveApproval(subject, parameters, mode, policies);

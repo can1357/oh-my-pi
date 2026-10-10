@@ -1,5 +1,4 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
-import { createHash } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -36,7 +35,7 @@ describe("compute_fact_id", () => {
 			Buffer.from("9:"),
 			Buffer.from("developer"),
 		]);
-		expect(id).toBe(`cf_${createHash("sha256").update(framed).digest("hex").slice(0, 24)}`);
+		expect(id).toBe(`cf_${Bun.SHA256.hash(framed, "hex").slice(0, 24)}`);
 	});
 
 	it("distinguishes long, separator-smuggled, and differently bucketed SPOs", () => {

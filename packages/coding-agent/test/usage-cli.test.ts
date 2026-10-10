@@ -1,14 +1,24 @@
-import { describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, vi } from "bun:test";
+import * as path from "node:path";
 import { stripVTControlCharacters } from "node:util";
 import type { UsageReport } from "@oh-my-pi/pi-ai";
+import { TempDir } from "@oh-my-pi/pi-utils";
 import {
 	buildRedactionMap,
-	collectUnreportedAccounts,
+	collectHistoryIdentityStrings,
 	computeProviderWindowStats,
 	formatUsageBreakdown,
 	formatUsageHistory,
-	type UsageAccountIdentity,
+	runUsageCommand,
+	type UsagePolicyDiagnosticsOptions,
 } from "@oh-my-pi/pi-coding-agent/cli/usage-cli";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import * as sdkModule from "@oh-my-pi/pi-coding-agent/sdk";
+import {
+	collectUnreportedAccounts,
+	type UsageAccountIdentity,
+} from "@oh-my-pi/pi-coding-agent/slash-commands/helpers/usage-accounts";
+import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
 
 const HOUR = 3_600_000;
 const FIVE_HOURS = 5 * HOUR;
@@ -16,6 +26,7 @@ const SEVEN_DAYS = 7 * 24 * HOUR;
 
 function makeLimit(opts: {
 	id: string;
+	label?: string;
 	usedFraction: number;
 	durationMs?: number;
 	windowId?: string;
@@ -23,15 +34,20 @@ function makeLimit(opts: {
 	accountId?: string;
 	provider?: string;
 	notes?: string[];
+	shared?: boolean;
+	sharedGroup?: string;
+	status?: UsageReport["limits"][number]["status"];
 }): UsageReport["limits"][number] {
 	return {
 		id: opts.id,
-		label: opts.id,
+		label: opts.label ?? opts.id,
 		scope: {
 			provider: opts.provider ?? "anthropic",
 			windowId: opts.windowId,
 			tier: opts.tier,
 			accountId: opts.accountId,
+			...(opts.shared !== undefined ? { shared: opts.shared } : {}),
+			...(opts.sharedGroup !== undefined ? { shared: true, sharedGroup: opts.sharedGroup } : {}),
 		},
 		window:
 			opts.durationMs !== undefined
@@ -39,6 +55,7 @@ function makeLimit(opts: {
 				: undefined,
 		amount: { unit: "percent", usedFraction: opts.usedFraction },
 		...(opts.notes ? { notes: opts.notes } : {}),
+		...(opts.status ? { status: opts.status } : {}),
 	};
 }
 
@@ -77,12 +94,13 @@ describe("buildRedactionMap", () => {
 });
 
 describe("computeProviderWindowStats", () => {
-	it("buckets by window duration, binds each account to its worst meter, and reports remaining capacity", () => {
+	it("buckets by window duration, binds each account to its worst limit, and reports remaining capacity", () => {
 		const reports = [
 			makeReport("anthropic", "account-a@example.test", [
 				makeLimit({ id: "5h", usedFraction: 0.9, durationMs: FIVE_HOURS, windowId: "5h" }),
 				makeLimit({ id: "7d", usedFraction: 0.1, durationMs: SEVEN_DAYS, windowId: "7d" }),
-				// Tiered meter on the same window: higher burn must bind.
+				// A model-scoped cap on the same window holds its own pool: it must not be read as
+				// the umbrella window's burn, and the umbrella must not hide it either.
 				makeLimit({ id: "7d-opus", usedFraction: 0.4, durationMs: SEVEN_DAYS, windowId: "7d", tier: "opus" }),
 			]),
 			makeReport("anthropic", "account-b@example.test", [
@@ -91,16 +109,108 @@ describe("computeProviderWindowStats", () => {
 			]),
 		];
 		const stats = computeProviderWindowStats(reports);
-		expect(stats).toHaveLength(2);
-		const [fiveHour, sevenDay] = stats;
-		// Sorted shortest window first.
-		expect(fiveHour.window).toBe("5h");
+		expect(stats.map(stat => [stat.window, stat.meter])).toEqual([
+			["5h", undefined],
+			["7d", undefined],
+			["7d", "opus"],
+		]);
+		const [fiveHour, sevenDay, scoped] = stats;
+		// Sorted shortest window first, then by meter.
 		expect(fiveHour.accounts).toBe(2);
 		expect(fiveHour.usedAccounts).toBeCloseTo(1.3);
 		expect(fiveHour.remainingAccounts).toBeCloseTo(0.7);
-		expect(sevenDay.window).toBe("7d");
-		expect(sevenDay.usedAccounts).toBeCloseTo(0.6); // 0.4 (opus binds) + 0.2
-		expect(sevenDay.remainingAccounts).toBeCloseTo(1.4);
+		expect(sevenDay.accounts).toBe(2);
+		expect(sevenDay.usedAccounts).toBeCloseTo(0.3);
+		expect(sevenDay.remainingAccounts).toBeCloseTo(1.7);
+		expect(scoped.accounts).toBe(1);
+		expect(scoped.usedAccounts).toBeCloseTo(0.4);
+		expect(scoped.remainingAccounts).toBeCloseTo(0.6);
+	});
+
+	it("keeps a spent model-scoped cap visible next to the shared window it caps", () => {
+		// Anthropic reports the umbrella weekly window as shared and the Fable cap as a tier with
+		// no shared flag, so a spent Fable cap must not read as a partly-spent weekly window.
+		const report = makeReport("anthropic", "scoped@example.test", [
+			makeLimit({ id: "anthropic:7d", usedFraction: 0.51, durationMs: SEVEN_DAYS, windowId: "7d", shared: true }),
+			makeLimit({
+				id: "anthropic:7d:fable",
+				usedFraction: 1,
+				durationMs: SEVEN_DAYS,
+				windowId: "7d",
+				tier: "fable",
+			}),
+		]);
+		const stats = computeProviderWindowStats([report]);
+		expect(stats.map(stat => [stat.window, stat.meter, stat.usedAccounts, stat.remainingAccounts])).toEqual([
+			["7d", undefined, 0.51, 0.49],
+			["7d", "fable", 1, 0],
+		]);
+
+		const text = stripVTControlCharacters(formatUsageBreakdown([report], [], Date.now()));
+		expect(text).toContain("7d → 0.51/1");
+		expect(text).toContain("7d (Fable) → 1.00/1");
+	});
+
+	it("does not meter routing copies of one shared upstream pool", () => {
+		// Antigravity reports one third-party pool once per model family; the shared group keeps
+		// them one pool with the worst fraction binding, not one meter per copy.
+		const report = makeReport("google-antigravity", "shared@example.test", [
+			makeLimit({
+				id: "google-antigravity:anthropic:default:5h",
+				label: "Claude & GPT (shared)",
+				provider: "google-antigravity",
+				usedFraction: 0.4,
+				durationMs: FIVE_HOURS,
+				windowId: "5h",
+				sharedGroup: "third-party:5h",
+			}),
+			makeLimit({
+				id: "google-antigravity:openai:default:5h",
+				label: "Claude & GPT (shared)",
+				provider: "google-antigravity",
+				usedFraction: 0.7,
+				durationMs: FIVE_HOURS,
+				windowId: "5h",
+				sharedGroup: "third-party:5h",
+			}),
+		]);
+		const stats = computeProviderWindowStats([report]);
+		expect(stats.map(stat => [stat.window, stat.meter])).toEqual([["5h", undefined]]);
+		expect(stats[0].accounts).toBe(1);
+		expect(stats[0].usedAccounts).toBeCloseTo(0.7);
+		expect(stats[0].remainingAccounts).toBeCloseTo(0.3);
+	});
+
+	it("does not split one window by subscription plan", () => {
+		// Copilot, Devin, and Muse Code carry the plan name in `scope.tier`; accounts on different
+		// plans still burn the same window, so they stay one capacity bucket.
+		const monthly = 30 * 24 * HOUR;
+		const reports = [
+			makeReport("github-copilot", "individual@example.test", [
+				makeLimit({
+					id: "copilot:premium",
+					provider: "github-copilot",
+					tier: "individual",
+					usedFraction: 0.3,
+					durationMs: monthly,
+					windowId: "monthly",
+				}),
+			]),
+			makeReport("github-copilot", "business@example.test", [
+				makeLimit({
+					id: "copilot:premium",
+					provider: "github-copilot",
+					tier: "business",
+					usedFraction: 0.5,
+					durationMs: monthly,
+					windowId: "monthly",
+				}),
+			]),
+		];
+		const stats = computeProviderWindowStats(reports);
+		expect(stats.map(stat => [stat.window, stat.meter, stat.accounts])).toEqual([["30d", undefined, 2]]);
+		expect(stats[0].usedAccounts).toBeCloseTo(0.8);
+		expect(stats[0].remainingAccounts).toBeCloseTo(1.2);
 	});
 
 	it("reports Spark-only capacity instead of dropping the meter", () => {
@@ -268,6 +378,22 @@ describe("collectUnreportedAccounts", () => {
 		expect(collectUnreportedAccounts([aliceReport], [alice, bob, orgOnly])).toEqual([bob]);
 	});
 
+	it("does not let one Antigravity account's report cover a sibling on the same Google project", () => {
+		const project = "aicode-consumers";
+		const alice: UsageAccountIdentity = {
+			provider: "google-antigravity",
+			type: "oauth",
+			email: "alice@example.test",
+			projectId: project,
+		};
+		const bob: UsageAccountIdentity = { ...alice, email: "bob@example.test" };
+		const aliceReport = {
+			...makeReport("google-antigravity", alice.email!, []),
+			metadata: { email: alice.email, projectId: project },
+		};
+		expect(collectUnreportedAccounts([aliceReport], [alice, bob])).toEqual([bob]);
+	});
+
 	it("keeps an org-less account covered by its own org-less report when org-scoped siblings exist", () => {
 		// Live incident shape: legacy org-less rows (pre-org-capture logins)
 		// beside fresh org-scoped logins. Every account fetched successfully —
@@ -338,6 +464,246 @@ describe("formatUsageBreakdown", () => {
 		expect(text).toContain("Cerebras");
 		expect(text).toContain("API key — no usage data");
 		expect(text).toContain("capacity: 5h → 1.34/2 accounts used (0.66× quota left)");
+		expect(text).not.toContain("policy:");
+	});
+
+	it("shows an explicit priority and reserve override with the observed eligibility reason", () => {
+		const report = makeReport("openai-codex", "protected@example.test", [
+			makeLimit({
+				id: "5h",
+				provider: "openai-codex",
+				usedFraction: 0.2,
+				durationMs: FIVE_HOURS,
+				windowId: "5h",
+			}),
+		]);
+		const policyOptions: UsagePolicyDiagnosticsOptions = {
+			globalReservePct: 10,
+			getAccountPolicy: (_provider, identity) =>
+				identity.email === "protected@example.test"
+					? {
+							provider: "openai-codex",
+							account: { email: "protected@example.test" },
+							priority: 100,
+							reservePct: 50,
+						}
+					: undefined,
+		};
+
+		const text = stripVTControlCharacters(
+			formatUsageBreakdown([report], [], Date.now(), undefined, [], policyOptions),
+		);
+
+		expect(text).toContain("policy: priority 100 · reserve 50% (override) · eligible · 80.0% left");
+	});
+
+	it("shows the inherited global reserve for an unconfigured sibling in a policy-enabled provider", () => {
+		const reports = [
+			makeReport("openai-codex", "preferred@example.test", [
+				makeLimit({
+					id: "5h",
+					provider: "openai-codex",
+					usedFraction: 0.2,
+					durationMs: FIVE_HOURS,
+					windowId: "5h",
+				}),
+			]),
+			makeReport("openai-codex", "inherited@example.test", [
+				makeLimit({
+					id: "5h",
+					provider: "openai-codex",
+					usedFraction: 0.95,
+					durationMs: FIVE_HOURS,
+					windowId: "5h",
+				}),
+			]),
+		];
+		const policyOptions: UsagePolicyDiagnosticsOptions = {
+			globalReservePct: 10,
+			getAccountPolicy: (_provider, identity) =>
+				identity.email === "preferred@example.test"
+					? {
+							provider: "openai-codex",
+							account: { email: "preferred@example.test" },
+							priority: 20,
+						}
+					: undefined,
+		};
+
+		const text = stripVTControlCharacters(
+			formatUsageBreakdown(reports, [], Date.now(), undefined, [], policyOptions),
+		);
+		const inheritedSection = text.slice(text.indexOf("inherited@example.test"));
+		expect(inheritedSection).toContain("policy: priority 0 · reserve 10% (global) · inside reserve · 5.0% left");
+	});
+
+	it("reports an exhausted account as exhausted rather than inside a 0% reserve", () => {
+		const report = makeReport("openai-codex", "team@example.test", [
+			makeLimit({ id: "5h", provider: "openai-codex", usedFraction: 1, durationMs: FIVE_HOURS, windowId: "5h" }),
+		]);
+		const policyOptions: UsagePolicyDiagnosticsOptions = {
+			globalReservePct: 10,
+			getAccountPolicy: () => ({
+				provider: "openai-codex",
+				account: { email: "team@example.test" },
+				priority: 10,
+				reservePct: 0,
+			}),
+		};
+
+		const text = stripVTControlCharacters(
+			formatUsageBreakdown([report], [], Date.now(), undefined, [], policyOptions),
+		);
+
+		expect(text).toContain("policy: priority 10 · reserve 0% (override) · exhausted · 0.0% left");
+	});
+
+	it("reports an account sitting exactly on its reserve as inside reserve", () => {
+		const reports = [
+			makeReport("openai-codex", "boundary@example.test", [
+				makeLimit({
+					id: "5h",
+					provider: "openai-codex",
+					usedFraction: 0.7,
+					durationMs: FIVE_HOURS,
+					windowId: "5h",
+				}),
+			]),
+		];
+		const policyOptions: UsagePolicyDiagnosticsOptions = {
+			globalReservePct: 10,
+			getAccountPolicy: () => ({
+				provider: "openai-codex",
+				account: { email: "boundary@example.test" },
+				reservePct: 30,
+			}),
+		};
+
+		const text = stripVTControlCharacters(
+			formatUsageBreakdown(reports, [], Date.now(), undefined, [], policyOptions),
+		);
+		const policyLine = text.split("\n").find(line => line.includes("policy:"));
+		expect(policyLine).toContain("· inside reserve ·");
+		expect(policyLine).toContain("30.0% left");
+	});
+
+	it("reports a provider-flagged exhausted window as exhausted even with fractional quota left", () => {
+		const report = makeReport("anthropic", "flagged@example.test", [
+			makeLimit({ id: "5h", usedFraction: 0.995, durationMs: FIVE_HOURS, windowId: "5h", status: "exhausted" }),
+		]);
+		const policyOptions: UsagePolicyDiagnosticsOptions = {
+			globalReservePct: 0,
+			getAccountPolicy: () => ({ provider: "anthropic", account: { email: "flagged@example.test" }, priority: 0 }),
+		};
+
+		const text = stripVTControlCharacters(
+			formatUsageBreakdown([report], [], Date.now(), undefined, [], policyOptions),
+		);
+
+		expect(text).toContain("policy: priority 0 · reserve 0% (global) · exhausted · 0.5% left");
+	});
+
+	it("marks reserve state unknown when a configured account has no transient usage report", () => {
+		const accounts: UsageAccountIdentity[] = [
+			{ provider: "anthropic", type: "oauth", email: "offline@example.test" },
+		];
+		const policyOptions: UsagePolicyDiagnosticsOptions = {
+			globalReservePct: 10,
+			getAccountPolicy: (_provider, identity) =>
+				identity.email === "offline@example.test"
+					? {
+							provider: "anthropic",
+							account: { email: "offline@example.test" },
+							priority: -5,
+							reservePct: 40,
+						}
+					: undefined,
+		};
+
+		const text = stripVTControlCharacters(
+			formatUsageBreakdown([], accounts, Date.now(), undefined, [], policyOptions),
+		);
+
+		expect(text).toContain("offline@example.test — no usage data");
+		expect(text).toContain("policy: priority -5 · reserve 40% (override) · reserve unknown");
+	});
+
+	it("shows the live Codex plan without exposing an ID for one account", () => {
+		const codex = makeReport("openai-codex", "user@example.test", [
+			makeLimit({ id: "7d", provider: "openai-codex", usedFraction: 0.81, durationMs: SEVEN_DAYS }),
+		]);
+		codex.metadata = { email: "user@example.test", orgId: "workspace-id", orgName: "free", planType: "prolite" };
+
+		const text = stripVTControlCharacters(formatUsageBreakdown([codex], [], Date.now()));
+		expect(text).toContain("user@example.test · plan: prolite");
+		expect(text).not.toContain("workspace-id");
+		expect(text).not.toContain(" · free");
+	});
+
+	it("qualifies colliding Codex emails but never falls back to the stale plan", () => {
+		const reports = ["workspace-one", "workspace-two"].map((orgId, index) => ({
+			...makeReport("openai-codex", "shared@example.test", [
+				makeLimit({ id: "7d", provider: "openai-codex", usedFraction: 0.2, durationMs: SEVEN_DAYS }),
+			]),
+			metadata: {
+				email: "shared@example.test",
+				orgId,
+				orgName: "free",
+				...(index === 0 ? { planType: "prolite" } : {}),
+			},
+		}));
+		const text = stripVTControlCharacters(formatUsageBreakdown(reports, [], Date.now()));
+		expect(text).toContain("shared@example.test · workspace-one · plan: prolite");
+		expect(text).toContain("shared@example.test · workspace-two");
+		expect(text).not.toContain(" · free");
+	});
+
+	it("keeps other providers' live plan tier in the account header", () => {
+		const report = makeReport("devin", "user@example.test", []);
+		report.metadata = { email: "user@example.test", planType: "team" };
+		const text = stripVTControlCharacters(formatUsageBreakdown([report], [], Date.now()));
+		expect(text).toContain("user@example.test · plan: team");
+	});
+
+	it("renders marked Antigravity shared quotas once per account", () => {
+		const antigravity = makeReport("google-antigravity", "user@example.test", [
+			makeLimit({
+				id: "google-antigravity:google:default:gemini-5h",
+				label: "Gemini",
+				provider: "google-antigravity",
+				usedFraction: 0.25,
+				durationMs: FIVE_HOURS,
+				windowId: "5h",
+			}),
+			makeLimit({
+				id: "google-antigravity:google:default:gemini-weekly",
+				label: "Gemini",
+				provider: "google-antigravity",
+				usedFraction: 0.25,
+				durationMs: SEVEN_DAYS,
+				windowId: "weekly",
+			}),
+			...(["5h", "weekly"] as const).flatMap((windowId, index) =>
+				(["anthropic", "openai"] as const).map(counter =>
+					makeLimit({
+						id: `google-antigravity:${counter}:default:3p-${windowId}`,
+						label: "Claude & GPT (shared)",
+						provider: "google-antigravity",
+						usedFraction: 0.25,
+						durationMs: index === 0 ? FIVE_HOURS : SEVEN_DAYS,
+						windowId,
+						sharedGroup: `3p-${windowId}`,
+					}),
+				),
+			),
+		]);
+
+		const text = stripVTControlCharacters(formatUsageBreakdown([antigravity], [], Date.now()));
+
+		expect(text.match(/Claude & GPT \(shared\)/g)).toHaveLength(2);
+		expect(text.match(/Gemini/g)).toHaveLength(2);
+		expect(text).not.toContain("Usage (Anthropic)");
+		expect(text).not.toContain("Usage (OpenAI)");
 	});
 
 	it("keeps near-exhausted capacity fractional instead of rounding it to an exact need", () => {
@@ -386,6 +752,92 @@ describe("formatUsageBreakdown", () => {
 		expect(accountASection).toContain("not reported");
 		expect(accountBSection).toContain("Claude 7 Day (Fable)");
 		expect(accountBSection).toContain("60.0% used");
+	});
+
+	it("aligns rows by window when accounts report the same window under different limit ids", () => {
+		// A Codex account without a 5-hour window reports its 7-day one as `primary`.
+		const codexLimit = (key: "primary" | "secondary", window: "5 hours" | "7 days", usedFraction: number) =>
+			makeLimit({
+				id: `openai-codex:${key}`,
+				label: window,
+				provider: "openai-codex",
+				usedFraction,
+				durationMs: window === "5 hours" ? FIVE_HOURS : SEVEN_DAYS,
+				windowId: window,
+			});
+		const providerReports = [
+			makeReport("openai-codex", "weekly-only@example.test", [codexLimit("primary", "7 days", 0.07)]),
+			makeReport("openai-codex", "both-windows@example.test", [
+				codexLimit("primary", "5 hours", 1),
+				codexLimit("secondary", "7 days", 0.16),
+			]),
+		];
+
+		const text = stripVTControlCharacters(formatUsageBreakdown(providerReports, [], Date.now()));
+		const limitRows = text
+			.split("\n")
+			.map(line =>
+				line
+					.trim()
+					.replace(/\s+[█░·]+\s+/, " ")
+					.replace(/\s+/g, " "),
+			)
+			.filter(line => /^[●○] /.test(line) && !line.includes("@"));
+		expect(limitRows).toEqual([
+			// weekly-only@example.test
+			"○ 5 hours not reported",
+			"● 7 days 7.0% used",
+			// both-windows@example.test
+			"● 5 hours 100.0% used",
+			"● 7 days 16.0% used",
+		]);
+	});
+
+	it("keeps one row per window for accounts on different plans", () => {
+		const dailyQuota = (tier: string, usedFraction: number) => ({
+			...makeLimit({ id: "devin:quota:daily", label: "Daily Quota", provider: "devin", usedFraction }),
+			window: { id: "1d", label: "Daily Quota", durationMs: 24 * HOUR },
+			scope: { provider: "devin", windowId: "1d", tier },
+		});
+		const providerReports = [
+			makeReport("devin", "free@example.test", [dailyQuota("Free", 0.1)]),
+			makeReport("devin", "pro@example.test", [dailyQuota("Pro", 0.2)]),
+		];
+
+		const text = stripVTControlCharacters(formatUsageBreakdown(providerReports, [], Date.now()));
+		expect(text).toContain("Daily Quota (Free)");
+		expect(text).toContain("Daily Quota (Pro)");
+		expect(text).not.toContain("not reported");
+	});
+
+	it("keeps one row per tier when a report repeats a meter per tier in the same window", () => {
+		const tierUsage = (tier: string, usedFraction: number) => ({
+			...makeLimit({ id: `antigravity:${tier}`, label: "Usage", provider: "google-antigravity", usedFraction }),
+			window: { id: "5h", label: "5 hours", durationMs: FIVE_HOURS },
+			scope: { provider: "google-antigravity", windowId: "5h", tier },
+		});
+		const providerReports = [
+			makeReport("google-antigravity", "both@example.test", [tierUsage("Pro", 0.1), tierUsage("Longer Tier", 0.2)]),
+			makeReport("google-antigravity", "one@example.test", [tierUsage("Longer Tier", 0.3)]),
+		];
+
+		const text = stripVTControlCharacters(formatUsageBreakdown(providerReports, [], Date.now()));
+		const rows = text.split("\n").filter(line => /^\s+[●○] /.test(line) && !line.includes("@"));
+		expect(
+			rows.map(line =>
+				line
+					.trim()
+					.replace(/\s+[█░·]+\s+/, " ")
+					.replace(/\s+/g, " "),
+			),
+		).toEqual([
+			"● Usage (Pro) (5 hours) 10.0% used",
+			"● Usage (Longer Tier) (5 hours) 20.0% used",
+			"○ Usage (Pro) (5 hours) not reported",
+			"● Usage (Longer Tier) (5 hours) 30.0% used",
+		]);
+		// Bars start in the same column on every row.
+		expect(new Set(rows.map(line => line.search(/[█░·]/))).size).toBe(1);
 	});
 
 	it("redacts account labels through the provided map without leaking the originals", () => {
@@ -616,6 +1068,31 @@ describe("formatUsageBreakdown", () => {
 					credits: [{ expiresAt: "2025-12-30T00:00:00.000Z" }],
 				},
 			},
+			{
+				provider: "anthropic",
+				fetchedAt: now,
+				limits: [],
+				metadata: { email: "claude@example.test" },
+				resetCredits: {
+					availableCount: 3,
+					redeemableCount: 0,
+					reason: "weekly cooldown",
+					credits: [
+						{
+							id: "cedar",
+							title: "Claude reset",
+							program: "cedar_ember",
+							remainingCount: 3,
+							usable: false,
+							requiresLimit: true,
+							clears: ["anthropic:5h", "anthropic:7d"],
+							blocking: [],
+							usedFractions: {},
+							expiresAt: "2026-01-04T00:00:00.000Z",
+						},
+					],
+				},
+			},
 		];
 
 		const text = stripVTControlCharacters(formatUsageBreakdown(reports, [], now));
@@ -623,6 +1100,10 @@ describe("formatUsageBreakdown", () => {
 		expect(text).toContain("soonest expires in 2d (2026-01-03)");
 		expect(text).toContain("expired@example.test");
 		expect(text).toContain("expired (2025-12-30)");
+		expect(text).toContain("claude@example.test");
+		expect(text).toContain("3 saved resets");
+		expect(text).toContain("0 usable now");
+		expect(text).toContain("unavailable: weekly cooldown");
 	});
 
 	it("deduplicates identical per-limit notes across accounts sharing a window", () => {
@@ -686,5 +1167,159 @@ describe("formatUsageHistory", () => {
 		const text = stripVTControlCharacters(formatUsageHistory(entries, SINCE, NOW, redaction));
 		expect(text).not.toContain("dummy.primary@example.test");
 		expect(text).toContain("du*");
+	});
+
+	it("qualifies Codex accounts that share an email the way the main view does", () => {
+		const shared = { provider: "openai-codex", email: "dummy.shared@example.test", limitId: "openai-codex:primary" };
+		const text = stripVTControlCharacters(
+			formatUsageHistory(
+				[
+					historyEntry(NOW - HOUR, 0.1, { ...shared, accountKey: "codex|team", accountId: "acct-team" }),
+					historyEntry(NOW - HOUR, 0.5, { ...shared, accountKey: "codex|pro", accountId: "acct-pro" }),
+					// Anthropic multi-org logins share email and account uuid; the main view's qualifier is Codex-only.
+					historyEntry(NOW - HOUR, 0.3, { accountKey: "anthropic|org-a", accountId: "uuid-user" }),
+					historyEntry(NOW - HOUR, 0.4, { accountKey: "anthropic|org-b", accountId: "uuid-user" }),
+				],
+				SINCE,
+				NOW,
+			),
+		);
+		const accountLines = text.split("\n").filter(line => line.startsWith("  ") && !line.startsWith("    "));
+		expect(accountLines.toSorted()).toEqual([
+			"  dummy.primary@example.test",
+			"  dummy.primary@example.test",
+			"  dummy.shared@example.test · acct-pro",
+			"  dummy.shared@example.test · acct-team",
+		]);
+	});
+
+	it("redacts the Codex account ids shown as same-email qualifiers", () => {
+		const shared = { provider: "openai-codex", email: "dummy.shared@example.test", limitId: "openai-codex:primary" };
+		const history = [
+			historyEntry(NOW - HOUR, 0.1, { ...shared, accountKey: "codex|team", accountId: "acct-team" }),
+			historyEntry(NOW - HOUR, 0.5, { ...shared, accountKey: "codex|pro", accountId: "acct-pro" }),
+		];
+		const redaction = buildRedactionMap(collectHistoryIdentityStrings(history));
+		const text = stripVTControlCharacters(formatUsageHistory(history, SINCE, NOW, redaction));
+		for (const secret of ["dummy.shared@example.test", "acct-team", "acct-pro"]) expect(text).not.toContain(secret);
+		for (const id of ["acct-team", "acct-pro"]) expect(text).toContain(redaction.get(id) ?? id);
+	});
+});
+
+describe("usage command configuration", () => {
+	it("uses PI_CONFIG_FILES account policies during auth discovery", async () => {
+		using tempDir = TempDir.createSync("@omp-usage-overlay-");
+		const overlayPath = tempDir.join("overlay.yml");
+		await Promise.all([
+			Bun.write(
+				tempDir.join("config.yml"),
+				[
+					"auth:",
+					"  accountPolicies:",
+					"    - provider: openai-codex",
+					"      account:",
+					"        email: stale@example.test",
+					"      unsupported: true",
+					"",
+				].join("\n"),
+			),
+			Bun.write(
+				overlayPath,
+				[
+					"auth:",
+					"  accountPolicies:",
+					"    - provider: openai-codex",
+					"      account:",
+					"        email: overlay@example.test",
+					"      priority: 20",
+					"retry:",
+					"  usageReservePct: 17",
+					"",
+				].join("\n"),
+			),
+		]);
+		const cliEntry = path.join(import.meta.dir, "..", "src", "cli.ts");
+		const proc = Bun.spawn([process.execPath, cliEntry, "usage", "invalidate"], {
+			stdout: "pipe",
+			stderr: "pipe",
+			env: {
+				...process.env,
+				NO_COLOR: "1",
+				PI_CODING_AGENT_DIR: tempDir.path(),
+				PI_CONFIG_FILES: overlayPath,
+			},
+		});
+		const [exitCode, output, error] = await Promise.all([
+			proc.exited,
+			new Response(proc.stdout).text(),
+			new Response(proc.stderr).text(),
+		]);
+
+		expect(error).toBe("");
+		expect(exitCode).toBe(0);
+		expect(output).toBe("Invalidated cached usage reports for all providers.\n");
+	});
+});
+
+describe("omp usage accounts", () => {
+	afterEach(() => {
+		vi.restoreAllMocks();
+	});
+
+	it("lists the identity keys that restrict a session, and no token material", async () => {
+		const authStorage = createInMemoryAuthStorage();
+		const oauth = (
+			suffix: string,
+			identity: { email?: string; accountId?: string; orgId?: string; orgName?: string },
+		) => ({
+			type: "oauth" as const,
+			access: `access-${suffix}`,
+			refresh: `refresh-${suffix}`,
+			expires: Date.now() + 60 * 60_000,
+			...identity,
+		});
+		await authStorage.credentials.set("anthropic", [
+			oauth("team", { email: "dev@example.com", orgId: "org-team", orgName: "Team" }),
+			oauth("personal", { email: "dev@example.com", orgId: "org-personal" }),
+			{ type: "api_key", key: "sk-stored" },
+		]);
+		await authStorage.credentials.set("openai-codex", oauth("codex", { accountId: "acct-codex" }));
+		vi.spyOn(Settings, "loadReadOnly").mockResolvedValue(Settings.isolated());
+		vi.spyOn(sdkModule, "discoverAuthStorage").mockResolvedValue(authStorage);
+		// The command closes the storage it discovered; keep it open to check the keys after.
+		vi.spyOn(authStorage, "close").mockImplementation(() => {});
+		const output: string[] = [];
+		vi.spyOn(process.stdout, "write").mockImplementation(chunk => {
+			output.push(String(chunk));
+			return true;
+		});
+
+		try {
+			await runUsageCommand({ action: "accounts", json: true });
+			const listed = JSON.parse(output.join("")) as {
+				accounts: Array<{ provider: string; identityKey: string; orgName?: string }>;
+			};
+			expect(listed.accounts).toEqual([
+				{ provider: "anthropic", identityKey: "email:dev@example.com|org:org-team", orgName: "Team" },
+				{ provider: "anthropic", identityKey: "email:dev@example.com|org:org-personal" },
+				{ provider: "openai-codex", identityKey: "account:acct-codex" },
+			]);
+
+			// Each listed key, used as a pool, routes a session to exactly that account.
+			for (const [index, account] of listed.accounts.entries()) {
+				authStorage.sessions.restrict(account.provider, `pooled-${index}`, [account.identityKey]);
+			}
+			expect(await authStorage.keys.get("anthropic", "pooled-0")).toBe("access-team");
+			expect(await authStorage.keys.get("anthropic", "pooled-1")).toBe("access-personal");
+
+			output.length = 0;
+			await runUsageCommand({ action: "accounts" });
+			const text = stripVTControlCharacters(output.join(""));
+			for (const account of listed.accounts) expect(text).toContain(account.identityKey);
+			expect(text).not.toMatch(/access-|refresh-|sk-stored/);
+		} finally {
+			vi.restoreAllMocks();
+			authStorage.close();
+		}
 	});
 });

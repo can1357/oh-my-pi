@@ -12,7 +12,7 @@
  * Compared to AJV this is single-pass, synchronous, dependency-free, and
  * tolerates non-standard shapes (`nullable`) that LLM-emitted schemas carry.
  */
-import { logger } from "@oh-my-pi/pi-utils";
+import { isRecord, logger } from "@oh-my-pi/pi-utils";
 import { areJsonValuesEqual } from "./equality";
 
 export interface JsonSchemaValidationIssue {
@@ -65,9 +65,6 @@ function getValueIdentity(ctx: ValidationContext, value: object): number {
 	return id;
 }
 
-function isJsonObject(value: unknown): value is Record<string, unknown> {
-	return typeof value === "object" && value !== null && !Array.isArray(value);
-}
 /**
  * Whether `value` matches every `const`/`enum` discriminator property the
  * branch declares (with at least one such property present and matching).
@@ -76,13 +73,13 @@ function isJsonObject(value: unknown): value is Record<string, unknown> {
  * repairs to them; without a unique tag, branch issues are guesses.
  */
 function isTagSelectedBranch(branch: unknown, value: unknown): boolean {
-	if (!isJsonObject(branch) || !isJsonObject(value)) return false;
+	if (!isRecord(branch) || !isRecord(value)) return false;
 	const props = branch.properties;
-	if (!isJsonObject(props)) return false;
+	if (!isRecord(props)) return false;
 	let matched = false;
 	for (const key in props) {
 		const propSchema = props[key];
-		if (!isJsonObject(propSchema)) continue;
+		if (!isRecord(propSchema)) continue;
 		const hasConst = Object.hasOwn(propSchema, "const");
 		const enumValues = Array.isArray(propSchema.enum) ? propSchema.enum : undefined;
 		if (!hasConst && !enumValues) continue;
@@ -96,6 +93,17 @@ function isTagSelectedBranch(branch: unknown, value: unknown): boolean {
 		matched = true;
 	}
 	return matched;
+}
+
+/** The unique discriminator-selected branch, or undefined when selection is ambiguous or absent. */
+export function getTagSelectedUnionBranch(branches: readonly unknown[], value: unknown): unknown {
+	let selected: unknown;
+	for (const branch of branches) {
+		if (!isTagSelectedBranch(branch, value)) continue;
+		if (selected !== undefined) return undefined;
+		selected = branch;
+	}
+	return selected;
 }
 
 function pushIssue(
@@ -127,7 +135,7 @@ function matchesJsonSchemaType(value: unknown, type: string): boolean {
 		case "boolean":
 			return typeof value === "boolean";
 		case "object":
-			return isJsonObject(value);
+			return isRecord(value);
 		case "array":
 			return Array.isArray(value);
 		case "null":
@@ -167,7 +175,7 @@ function resolveLocalRef(root: unknown, ref: string): unknown | undefined {
 	let current: unknown = root;
 	for (const rawToken of ref.slice(2).split("/")) {
 		const token = decodePointerToken(rawToken);
-		if (!isJsonObject(current) && !Array.isArray(current)) return undefined;
+		if (!isRecord(current) && !Array.isArray(current)) return undefined;
 		current = (current as Record<string, unknown>)[token];
 	}
 	return current;
@@ -175,7 +183,7 @@ function resolveLocalRef(root: unknown, ref: string): unknown | undefined {
 
 /** A presence-only constraint, as distinct from restrictions on a property's value. */
 function requiresOnlyPropertyPresence(schema: unknown, key: string, root: unknown, depth = 0): boolean {
-	if (!isJsonObject(schema) || depth >= MAX_REF_DEPTH) return false;
+	if (!isRecord(schema) || depth >= MAX_REF_DEPTH) return false;
 	for (const keyword of Object.keys(schema)) {
 		switch (keyword) {
 			case "required":
@@ -206,17 +214,17 @@ export function schemaDefinesProperty(schema: unknown, key: string): boolean {
 	const root = schema;
 	const visited = new WeakMap<object, number>();
 	const visit = (node: unknown, context: "positive" | "negative" | "predicate" = "positive"): boolean => {
-		if (!isJsonObject(node)) return false;
+		if (!isRecord(node)) return false;
 		const contextBit = context === "positive" ? 1 : context === "negative" ? 2 : 4;
 		const previousContexts = visited.get(node) ?? 0;
 		if (previousContexts & contextBit) return false;
 		visited.set(node, previousContexts | contextBit);
-		if (isJsonObject(node.const) && Object.hasOwn(node.const, key)) return true;
-		if (Array.isArray(node.enum) && node.enum.some(value => isJsonObject(value) && Object.hasOwn(value, key))) {
+		if (isRecord(node.const) && Object.hasOwn(node.const, key)) return true;
+		if (Array.isArray(node.enum) && node.enum.some(value => isRecord(value) && Object.hasOwn(value, key))) {
 			return true;
 		}
 		const properties = node.properties;
-		if (isJsonObject(properties) && Object.hasOwn(properties, key)) {
+		if (isRecord(properties) && Object.hasOwn(properties, key)) {
 			return properties[key] !== false || context !== "positive";
 		}
 		const required = node.required;
@@ -229,7 +237,7 @@ export function schemaDefinesProperty(schema: unknown, key: string): boolean {
 			return true;
 		}
 		const patternProperties = node.patternProperties;
-		if (isJsonObject(patternProperties)) {
+		if (isRecord(patternProperties)) {
 			for (const [pattern, patternSchema] of Object.entries(patternProperties)) {
 				try {
 					if (new RegExp(pattern).test(key)) {
@@ -240,8 +248,8 @@ export function schemaDefinesProperty(schema: unknown, key: string): boolean {
 				}
 			}
 		}
-		if (isJsonObject(node.unevaluatedProperties)) return true;
-		if (isJsonObject(node.additionalProperties)) return true;
+		if (isRecord(node.unevaluatedProperties)) return true;
+		if (isRecord(node.additionalProperties)) return true;
 		for (const keyword of ["anyOf", "oneOf", "allOf"] as const) {
 			const branches = node[keyword];
 			if (Array.isArray(branches) && branches.some(branch => visit(branch, context))) return true;
@@ -259,19 +267,19 @@ export function schemaDefinesProperty(schema: unknown, key: string): boolean {
 			return true;
 		}
 		const dependentSchemas = node.dependentSchemas;
-		if (isJsonObject(dependentSchemas)) {
+		if (isRecord(dependentSchemas)) {
 			if (Object.hasOwn(dependentSchemas, key)) return true;
 			if (Object.values(dependentSchemas).some(dependency => visit(dependency, context))) return true;
 		}
 		const dependentRequired = node.dependentRequired;
-		if (isJsonObject(dependentRequired)) {
+		if (isRecord(dependentRequired)) {
 			if (Object.hasOwn(dependentRequired, key)) return true;
 			for (const dependencies of Object.values(dependentRequired)) {
 				if (Array.isArray(dependencies) && dependencies.includes(key)) return true;
 			}
 		}
 		const dependencies = node.dependencies;
-		if (isJsonObject(dependencies)) {
+		if (isRecord(dependencies)) {
 			if (Object.hasOwn(dependencies, key)) return true;
 			for (const dependency of Object.values(dependencies)) {
 				if (Array.isArray(dependency) && dependency.includes(key)) return true;
@@ -313,7 +321,7 @@ function validateSchemaNode(
 		pushIssue(issues, path, "must not match false schema", { keyword: "false" });
 		return false;
 	}
-	if (!isJsonObject(schema)) {
+	if (!isRecord(schema)) {
 		pushIssue(issues, path, "schema must be an object or boolean", { keyword: "schema" });
 		return false;
 	}
@@ -383,7 +391,7 @@ function validateSchemaNode(
 		let matches = 0;
 		let firstIssues: JsonSchemaValidationIssue[] | undefined;
 		let selectedIssues: JsonSchemaValidationIssue[] | undefined;
-		let selectedCount = 0;
+		const selectedBranch = getTagSelectedUnionBranch(branches, value);
 		for (const branch of branches) {
 			const branchIssues: JsonSchemaValidationIssue[] = [];
 			if (validateSchemaNode(branch, value, path, ctx, branchIssues)) {
@@ -391,14 +399,11 @@ function validateSchemaNode(
 				continue;
 			}
 			if (!firstIssues) firstIssues = branchIssues;
-			if (isTagSelectedBranch(branch, value)) {
-				selectedCount += 1;
-				if (selectedCount === 1) selectedIssues = branchIssues;
-			}
+			if (branch === selectedBranch) selectedIssues = branchIssues;
 		}
 		const branchValid = keyword === "anyOf" ? matches > 0 : matches === 1;
 		if (!branchValid) {
-			if (matches === 0 && selectedCount === 1 && selectedIssues && selectedIssues.length > 0) {
+			if (matches === 0 && selectedIssues && selectedIssues.length > 0) {
 				// A const/enum discriminator uniquely identifies the intended
 				// variant, so its diagnosis is authoritative: surface untagged and
 				// keep every repair (including lossy ones) available.
@@ -461,7 +466,7 @@ function validateSchemaNode(
 		);
 	}
 
-	if (isJsonObject(value)) {
+	if (isRecord(value)) {
 		valid = validateObjectKeywords(schema, value, path, ctx, issues) && valid;
 	}
 	if (Array.isArray(value)) {
@@ -486,7 +491,7 @@ function validateObjectKeywords(
 	issues: JsonSchemaValidationIssue[],
 ): boolean {
 	let valid = true;
-	const properties = isJsonObject(schema.properties) ? schema.properties : {};
+	const properties = isRecord(schema.properties) ? schema.properties : {};
 	if (isRequiredSet(schema.required)) {
 		for (const key of schema.required) {
 			if (!(key in value)) {
@@ -508,7 +513,7 @@ function validateObjectKeywords(
 	}
 
 	const known = new Set(Object.keys(properties));
-	if (isJsonObject(schema.patternProperties)) {
+	if (isRecord(schema.patternProperties)) {
 		const patternProperties = schema.patternProperties;
 		for (const pattern in patternProperties) {
 			const patternSchema = patternProperties[pattern];
@@ -528,7 +533,7 @@ function validateObjectKeywords(
 		}
 	}
 
-	if (isJsonObject(schema.dependentRequired)) {
+	if (isRecord(schema.dependentRequired)) {
 		const dependentRequired = schema.dependentRequired;
 		for (const key in dependentRequired) {
 			const deps = dependentRequired[key];
@@ -546,7 +551,7 @@ function validateObjectKeywords(
 		}
 	}
 
-	if (isJsonObject(schema.dependentSchemas)) {
+	if (isRecord(schema.dependentSchemas)) {
 		const dependentSchemas = schema.dependentSchemas;
 		for (const key in dependentSchemas) {
 			if (!(key in value)) continue;
@@ -741,10 +746,15 @@ function validateSchemaValueInRoot(schema: unknown, value: unknown, root: unknow
 	return { success, issues };
 }
 
-export function validateJsonSchemaValue(schema: unknown, value: unknown): JsonSchemaValidationResult {
-	return validateSchemaValueInRoot(schema, value, schema);
+export function validateJsonSchemaValue(
+	schema: unknown,
+	value: unknown,
+	root: unknown = schema,
+): JsonSchemaValidationResult {
+	return validateSchemaValueInRoot(schema, value, root);
 }
 
-export function isJsonSchemaValueValid(schema: unknown, value: unknown): boolean {
-	return validateJsonSchemaValue(schema, value).success;
+/** Validate a subschema using its complete schema's local-reference context. */
+export function isJsonSchemaValueValid(schema: unknown, value: unknown, root: unknown = schema): boolean {
+	return validateSchemaValueInRoot(schema, value, root).success;
 }

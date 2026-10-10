@@ -16,18 +16,11 @@
  */
 
 import { logger } from "@oh-my-pi/pi-utils";
+import type { LoopConditionConfig } from "@oh-my-pi/pi-tui/status-line/loop";
 import type { BashResult } from "../exec/bash-executor";
 import { executeBash } from "../exec/bash-executor";
-import { TRUNCATE_LENGTHS, truncateToWidth } from "../tools/render-utils";
-import { sanitizeStatusText } from "./shared";
-
-/** A `/loop --while` / `/loop --until` continue-condition. */
-export interface LoopConditionConfig {
-	/** Shell command line, run through the user's configured shell. */
-	command: string;
-	/** `--until`: continue while the command *fails*. `--while`: while it succeeds. */
-	until: boolean;
-}
+import { TRUNCATE_LENGTHS, truncateToWidth } from "@oh-my-pi/pi-tui/render/render-utils";
+import { sanitizeStatusText } from "@oh-my-pi/pi-tui/chrome/shared";
 
 export type LoopConditionVerdict =
 	/** The condition says run another iteration. */
@@ -88,12 +81,6 @@ function formatTimeout(timeoutMs: number): string {
 /** Human-readable form of the condition, for enable/status messages. */
 export function describeLoopCondition(condition: LoopConditionConfig): string {
 	return `${condition.until ? "until" : "while"} ${quoteCommand(condition.command)} succeeds`;
-}
-
-/** Compact status-line form: `until: bun test`. */
-export function summarizeLoopCondition(condition: LoopConditionConfig, maxWidth: number): string {
-	const label = condition.until ? "until" : "while";
-	return `${label}: ${truncateToWidth(sanitizeStatusText(condition.command), Math.max(1, maxWidth - label.length - 2))}`;
 }
 
 /**

@@ -38,6 +38,10 @@ import {
 	type CollabParticipant,
 	type CollabPromptDetails,
 	type CollabSessionState,
+	encodeEntryFrame,
+	encodeEventFrame,
+	encodeSnapshotChunk,
+	type EncodedFrame,
 	formatCollabLink,
 	formatCollabWebLink,
 	generateRoomId,
@@ -51,7 +55,15 @@ import {
 	publishCollabHost,
 } from "./registry";
 import { CollabSocket } from "./relay-client";
-import { shrinkForReplication } from "./replication-shrink";
+import {
+	COLLAB_ENTRY_OMITTED_CUSTOM_TYPE,
+	copyForReplication,
+	MAX_REPLICATED_PAYLOAD_BYTES,
+	oversizedEntryNotice,
+	type ReplicatedEntry,
+	serializeReplicatedEntry,
+	serializeReplicatedEvent,
+} from "./replication-shrink";
 
 /** Events that change the footer state guests render. */
 const STATE_TRIGGER_EVENTS: Record<string, true> = {
@@ -116,7 +128,8 @@ const TRANSCRIPT_ENTRY_TOO_LARGE_ERROR = `transcript entry exceeds transcript fe
  * Soft byte cap per `snapshot-chunk` frame. The first MB of a snapshot takes
  * ~3s through the default relay, so a 512 KB chunk lands well under the
  * guest's 30 s per-chunk progress timeout; oversized single entries still
- * ship in a chunk of their own.
+ * ship in a chunk of their own. Measured in UTF-8 bytes — the unit the relay
+ * and the seal step care about — not UTF-16 code units (#11433).
  */
 const SNAPSHOT_CHUNK_BYTES = 512 * 1024;
 const MAX_PENDING_UI_REQUESTS = 64;
@@ -153,6 +166,12 @@ export interface CollabHostOptions {
 	 * Defaults to always ready.
 	 */
 	guestActionsReady?: () => boolean;
+	/**
+	 * Called once when the relay ends the room for good after it opened —
+	 * a non-retryable close or fatal socket failure (e.g. send backlog), not
+	 * `stop()`. Teardown has already begun; the owner may start a successor.
+	 */
+	onEnded?: () => void;
 }
 
 /**
@@ -164,6 +183,18 @@ export class CollabHostStoppedError extends Error {
 	constructor(message: string) {
 		super(message);
 		this.name = "CollabHostStoppedError";
+	}
+}
+
+/**
+ * `start()` rejects with this when the relay never opened the room: the first
+ * connection closed or timed out. The room was never joinable or published, so
+ * an owner may retry it without guests or the registry having seen it.
+ */
+export class CollabRelayUnavailableError extends Error {
+	constructor(message: string) {
+		super(message);
+		this.name = "CollabRelayUnavailableError";
 	}
 }
 
@@ -180,6 +211,7 @@ export class CollabHost {
 	readonly #instanceId: string;
 	readonly #generation: number;
 	readonly #guestActionsReady: () => boolean;
+	readonly #onEnded: (() => void) | undefined;
 	readonly #access: CollabAccess;
 	#relayConnected = false;
 	#registryPublication: CollabHostPublication | null = null;
@@ -190,7 +222,20 @@ export class CollabHost {
 	/** Rejects the in-flight first-open wait when `stop()` overtakes `start()`. */
 	#abortStart: ((reason: Error) => void) | null = null;
 	#unsubscribe?: () => void;
+	/**
+	 * Guest identity and permission, keyed by relay peer id. Drives the
+	 * participant list, notices, the status segment and the writable-peer fan-out.
+	 * Deliverability is not its job: {@link CollabSocket.isServing} owns that, and
+	 * the two disagree on purpose while a peer is connected but has not said hello
+	 * yet, and after a shed, when the peer leaves the participant list but is
+	 * still owed a resync error.
+	 */
 	#peers = new Map<number, { name: string; canWrite: boolean }>();
+	/**
+	 * Never reset, including across a room recreation: ids must not be reissued, or
+	 * a late `ui-response` carrying an old id would settle an unrelated new request.
+	 * An old id that maps to nothing is harmless.
+	 */
 	#uiReqSeq = 0;
 	#pendingUi = new Map<number, PendingCollabUiRequest>();
 	#lastStateJson = "";
@@ -211,6 +256,7 @@ export class CollabHost {
 		this.#generation = options.generation ?? 1;
 		this.#access = options.access ?? "control";
 		this.#guestActionsReady = options.guestActionsReady ?? (() => true);
+		this.#onEnded = options.onEnded;
 		// The room mirrors the session that is active when it is created; the
 		// frame guard and the registry snapshot compare against this from then on.
 		this.#sessionId = ctx.sessionManager.getSessionId();
@@ -360,15 +406,18 @@ export class CollabHost {
 				firstOpen.resolve();
 			}
 		};
+		socket.onRoomRecreated = () => this.#handleRoomRecreated();
 		socket.onFrame = (frame, fromPeer) => this.#handleFrame(frame, fromPeer);
 		socket.onControl = msg => {
 			if (msg.t === "peer-left") this.#handlePeerLeft(msg.peer);
 		};
 		socket.onClose = (reason, willReconnect) => {
 			this.#relayConnected = false;
-			if (this.#stopped) return;
+			if (this.#stopping || this.#stopped) return;
 			if (!opened) {
-				firstOpen.reject(new Error(reason));
+				// A close the socket would retry (unreachable relay, dropped handshake)
+				// means the relay is unavailable; a fatal one means it refused the room.
+				firstOpen.reject(willReconnect ? new CollabRelayUnavailableError(reason) : new Error(reason));
 				return;
 			}
 			if (willReconnect) {
@@ -376,12 +425,13 @@ export class CollabHost {
 			} else {
 				void this.#teardown();
 				this.#ctx.session.emitNotice("warning", `Collab ended: ${reason}`, "collab");
+				this.#onEnded?.();
 			}
 		};
 		socket.connect();
 
 		const timeout = setTimeout(
-			() => firstOpen.reject(new Error("timed out connecting to relay")),
+			() => firstOpen.reject(new CollabRelayUnavailableError("timed out connecting to relay")),
 			CONNECT_TIMEOUT_MS,
 		);
 		try {
@@ -400,12 +450,13 @@ export class CollabHost {
 		}
 
 		this.#startedAt = Date.now();
-		// Mirror from the moment the relay is open. A guest can join as soon as
-		// the link is visible (auto-start installs the room before this
-		// resolves), and anything that happens after its welcome snapshot must
-		// reach it; the local registry work below is independent of that.
+		// Subscribe as soon as the relay is open. A guest can join as soon as the
+		// link is visible (auto-start installs the room before this resolves).
+		// Frames are mirrored only while #broadcastAllowed() holds (at least one
+		// peer); a joining guest's welcome snapshot covers everything before that.
+		// The local registry work below is independent of this.
 		this.#unsubscribe = this.#ctx.session.subscribe(event => {
-			if (isWireAgentEvent(event)) this.#send({ t: "event", event: shrinkForReplication(event) });
+			if (isWireAgentEvent(event)) this.#broadcastEvent(event);
 			this.#onEventForState(event);
 		});
 		// Subagent frames publish on the session tree's observability bus at
@@ -415,12 +466,27 @@ export class CollabHost {
 		const observabilityBus = this.#ctx.subagentEventBus ?? this.#ctx.eventBus;
 		if (observabilityBus) {
 			for (const channel of COLLAB_BUS_CHANNELS) {
-				this.#busUnsubscribers.push(observabilityBus.on(channel, data => this.#send({ t: "bus", channel, data })));
+				this.#busUnsubscribers.push(
+					observabilityBus.on(channel, data => {
+						if (this.#broadcastAllowed()) this.#send({ t: "bus", channel, data });
+					}),
+				);
 			}
 		}
 		this.#registryUnsubscribe = AgentRegistry.global().onChange(() => this.#scheduleAgentsBroadcast());
 		this.#ctx.sessionManager.onEntryAppended = entry => {
-			if (isWireSessionEntry(entry)) this.#send({ t: "entry", entry: shrinkForReplication(entry) });
+			if (isWireSessionEntry(entry) && this.#broadcastAllowed()) {
+				const bounded = serializeReplicatedEntry(entry);
+				const shrunk = bounded.value;
+				if (shrunk.type === "custom_message" && shrunk.customType === COLLAB_ENTRY_OMITTED_CUSTOM_TYPE) {
+					// The live path also emits a guest-visible notice: guests only
+					// apply `message` entries to their agent context, so without
+					// this the substitution would be silently invisible there
+					// (PR #11999 review). Notices never enter agent state.
+					this.#send({ t: "event", event: oversizedEntryNotice(entry.type) });
+				}
+				this.#socket?.send(encodeEntryFrame(bounded.json));
+			}
 			// Model/thinking/title changes land as entries while idle; refresh
 			// guest state promptly (debounce + JSON diff dedupe).
 			this.#scheduleStateBroadcast();
@@ -589,6 +655,11 @@ export class CollabHost {
 			participants: this.participants.length,
 			relayConnected: this.#relayConnected,
 			inputRequired: this.inputRequired,
+			// Same source as the guest footer's `isStreaming`, read at query time:
+			// true for the whole turn, including tool execution, and false once
+			// the agent ends — so a poller sees the session stop while the room
+			// is still published.
+			busy: this.#ctx.session.isStreaming,
 			access: this.#access,
 		};
 	}
@@ -598,7 +669,11 @@ export class CollabHost {
 		return !this.ending && this.#sessionStillCurrent();
 	}
 
-	/** Only outbound path; stop() deliberately bypasses it for the final goodbye. */
+	/**
+	 * Outbound path for frame objects; stop() deliberately bypasses it for the
+	 * final goodbye. Pre-serialized broadcasts gate on {@link #broadcastAllowed},
+	 * which applies the same liveness/session checks.
+	 */
 	#send(frame: CollabFrame, toPeer = 0): void {
 		// Ending an existing dialog contains only its old-room request ID, never
 		// current-session data. Do not strand guests if it settles during a
@@ -607,7 +682,32 @@ export class CollabHost {
 		this.#socket?.send(frame, toPeer);
 	}
 
+	/**
+	 * Whether a mirrored broadcast has anyone to reach. Checked before any
+	 * bound/serialize/seal work: an auto-started room usually has no guest, and
+	 * the relay would discard the frame anyway. Nothing is lost by skipping it —
+	 * guests ignore traffic until their welcome, which carries fresh state,
+	 * agents, and the full snapshot.
+	 */
+	#broadcastAllowed(): boolean {
+		return this.#peers.size > 0 && this.#guestTrafficAllowed();
+	}
+
+	/** Broadcast one session event, bounded and serialized exactly once. */
+	#broadcastEvent(event: AgentSessionEvent): void {
+		if (!this.#broadcastAllowed()) return;
+		this.#socket?.send(encodeEventFrame(serializeReplicatedEvent(event).json));
+	}
+
 	#handleFrame(frame: CollabFrame, fromPeer: number): void {
+		// Controls are dispatched synchronously while frames finish decrypting, so
+		// a hello can land after its sender's `peer-left`. The socket settled the
+		// peer's lifetime at reception; re-read it here rather than acting on a
+		// sender that is already gone and registering a ghost participant.
+		if (!this.#socket?.isServing(fromPeer)) {
+			logger.debug("collab host ignoring frame from a peer it no longer serves", { type: frame.t, fromPeer });
+			return;
+		}
 		// An old-room answer may wait for rollback, but cannot settle against
 		// another session. The response handler owns that bounded deferral.
 		if (frame.t === "ui-response") {
@@ -683,36 +783,36 @@ export class CollabHost {
 		}
 		const cleanName = name.trim().slice(0, 64) || `guest-${fromPeer}`;
 		const canWrite = this.#verifyWriteToken(writeToken);
+		const firstPeer = this.#peers.size === 0;
 		this.#peers.set(fromPeer, { name: cleanName, canWrite });
 
-		// Snapshot and send synchronously: no awaits between snapshot, welcome,
-		// and chunk sends, so subsequent broadcast frames (entry/event/state/bus)
-		// queue behind the snapshot on the same socket and the guest can't
-		// observe a gap between the snapshot fragment and live traffic.
-		const snapshot = this.#ctx.sessionManager.snapshotForReplication();
-		if (JSON.stringify(snapshot).length > WELCOME_IMAGE_STRIP_THRESHOLD) {
-			let stripped = 0;
-			for (const entry of snapshot.entries) {
-				if (entry.type === "message") stripped += stripImagesFromMessage(entry.message);
-			}
-			logger.info("collab welcome exceeded size threshold; stripped images", { stripped });
-		}
-		const entries = snapshot.entries.filter(isWireSessionEntry);
 		const socket = this.#socket;
 		if (!socket) return;
+		// Serialize the snapshot synchronously: live traffic queued after this
+		// cannot overtake it, and host rewrites of an entry in place cannot leak
+		// into it later, so the live entries are read without a defensive deep
+		// copy. Chunk frames are assembled from these strings only as the
+		// transport drains.
+		const snapshot = this.#ctx.sessionManager.snapshotForReplication();
+		const snapshotEntries = this.#serializeSnapshotEntries(snapshot.entries.filter(isWireSessionEntry));
+		const state = this.#buildState();
+		// State broadcasts pause while no guest is joined, so the dedupe baseline
+		// may predate this welcome; with no other peer to keep current, the welcome
+		// becomes the baseline.
+		if (firstPeer) this.#lastStateJson = JSON.stringify(state);
 		this.#send(
 			{
 				t: "welcome",
 				proto: COLLAB_PROTO,
 				header: snapshot.header,
-				state: this.#buildState(),
+				state,
 				agents: this.#snapshotAgents(),
-				entryCount: entries.length,
+				entryCount: snapshotEntries.json.length,
 				readOnly: canWrite ? undefined : true,
 			},
 			fromPeer,
 		);
-		this.#sendSnapshotChunks(entries, fromPeer);
+		socket.sendBatch(this.#snapshotChunks(snapshotEntries.json, snapshotEntries.bytes), fromPeer);
 		if (canWrite) {
 			for (const pending of this.#pendingUi.values()) {
 				this.#send({ t: "ui-request", request: pending.request }, fromPeer);
@@ -728,37 +828,97 @@ export class CollabHost {
 	}
 
 	/**
-	 * Slice {@link entries} into byte-bounded `snapshot-chunk` frames targeted
-	 * at {@link fromPeer}. Each entry is first run through
-	 * {@link shrinkForReplication} so a single oversized tool-result entry
-	 * cannot ship as an oversized chunk that trips the relay's per-frame
-	 * `maxPayloadLength` (issue #3739). Every batch carries at least one
-	 * entry, and the last batch is tagged `final: true` so the guest can
-	 * finalize the replica. An empty snapshot still emits one `final` chunk
-	 * so the guest never blocks on a missing terminator.
+	 * Serialize every snapshot entry exactly once, bounded under
+	 * {@link MAX_REPLICATED_PAYLOAD_BYTES}. Only an entry that throws or exceeds
+	 * the ceiling pays for {@link serializeReplicatedEntry}'s shrink passes, so a
+	 * single oversized tool-result entry cannot ship as an oversized chunk that
+	 * trips the relay's per-frame `maxPayloadLength` (issue #3739), and an entry
+	 * that cannot be shrunk at all ships as a bounded placeholder instead of
+	 * stranding the guest without a terminator (issue #11433).
+	 *
+	 * When the snapshot exceeds {@link WELCOME_IMAGE_STRIP_THRESHOLD} — or holds
+	 * an entry that does not serialize as-is (a non-JSON leaf such as `BigInt`,
+	 * a throwing `toJSON`, nesting past the engine limit) — images are stripped
+	 * from private copies of the message entries first, so the chunker falls
+	 * back to clipping or placeholders only for what is still too large.
 	 */
-	#sendSnapshotChunks(entries: (StoredSessionEntry & WireSessionEntry)[], fromPeer: number): void {
-		const socket = this.#socket;
-		if (!socket) return;
+	#serializeSnapshotEntries(entries: ReplicatedEntry[]): { json: string[]; bytes: number[] } {
+		const raw: (string | null)[] = [];
+		const bytes: number[] = [];
+		let total = 0;
+		let unserializable = false;
+		for (const entry of entries) {
+			let json: string | null = null;
+			let entryBytes = 0;
+			try {
+				// `byteLength` throws on the `undefined` a top-level `toJSON` may yield.
+				const text = JSON.stringify(entry);
+				entryBytes = Buffer.byteLength(text, "utf8");
+				json = text;
+			} catch {
+				unserializable = true;
+			}
+			raw.push(json);
+			bytes.push(entryBytes);
+			total += entryBytes;
+		}
+		const stripImages = unserializable || total > WELCOME_IMAGE_STRIP_THRESHOLD;
+		let stripped = 0;
+		const json: string[] = [];
+		for (const [i, entry] of entries.entries()) {
+			let text = raw[i] ?? null;
+			let source = entry;
+			// `"image` covers every image carrier the stripper handles: `image`
+			// content blocks, `images` arrays, and file-mention `image` fields.
+			if (stripImages && entry.type === "message" && (text === null || text.includes('"image'))) {
+				// The JSON round-trip is exactly what a guest would receive; an entry
+				// that does not serialize goes through the depth-bounded walk instead.
+				const copy: ReplicatedEntry = text === null ? copyForReplication(entry) : JSON.parse(text);
+				const removed = copy.type === "message" ? stripImagesFromMessage(copy.message) : 0;
+				if (removed > 0) {
+					stripped += removed;
+					source = copy;
+					text = null;
+				}
+			}
+			if (text === null || (bytes[i] ?? 0) > MAX_REPLICATED_PAYLOAD_BYTES) {
+				// Never throws, and always returns a bounded payload: a throw here
+				// would end the train without its `final: true` terminator, and the
+				// guest would time out its join while the host lists it as joined.
+				text = serializeReplicatedEntry(source).json;
+				bytes[i] = Buffer.byteLength(text, "utf8");
+			}
+			json.push(text);
+		}
+		if (stripImages) logger.info("collab welcome exceeded size threshold; stripped images", { stripped });
+		return { json, bytes };
+	}
+
+	/**
+	 * Slice pre-serialized entries into byte-bounded `snapshot-chunk` frames.
+	 * Every batch carries at least one entry, and the last batch is tagged
+	 * `final: true` so the guest can finalize the replica. An empty snapshot
+	 * still emits one `final` chunk so the guest never blocks on a missing
+	 * terminator. Each batch's strings are released once its frame is built.
+	 */
+	*#snapshotChunks(entries: string[], bytes: number[]): Generator<EncodedFrame> {
 		if (entries.length === 0) {
-			this.#send({ t: "snapshot-chunk", entries: [], final: true }, fromPeer);
+			yield encodeSnapshotChunk([], true);
 			return;
 		}
 		let i = 0;
 		while (i < entries.length) {
-			const batch: (StoredSessionEntry & WireSessionEntry)[] = [];
+			const start = i;
 			let batchBytes = 0;
 			while (i < entries.length) {
-				const entry = entries[i];
-				if (!entry) break;
-				const shrunk = shrinkForReplication(entry);
-				const entryBytes = JSON.stringify(shrunk).length;
-				if (batch.length > 0 && batchBytes + entryBytes > SNAPSHOT_CHUNK_BYTES) break;
-				batch.push(shrunk);
+				const entryBytes = bytes[i] ?? 0;
+				if (i > start && batchBytes + entryBytes > SNAPSHOT_CHUNK_BYTES) break;
 				batchBytes += entryBytes;
 				i++;
 			}
-			this.#send({ t: "snapshot-chunk", entries: batch, final: i >= entries.length }, fromPeer);
+			const batch = entries.slice(start, i);
+			entries.fill("", start, i);
+			yield encodeSnapshotChunk(batch, i >= entries.length);
 		}
 	}
 
@@ -883,6 +1043,35 @@ export class CollabHost {
 			.catch(err => logger.warn("collab guest abort failed", { error: String(err) }));
 	}
 
+	/**
+	 * The relay recreated the room and will reissue peer ids from 1, so every id in
+	 * {@link #peers} is meaningless — and `#peers` is the permission registry, not
+	 * just the roster. Leaving it populated lets whoever takes a reissued id inherit
+	 * the `canWrite` of the guest that held it, which a read-only link is enough to
+	 * exploit: `#handleFrame` admits a frame before its sender has said hello, so a
+	 * `prompt`, `abort`, `agent-cmd` or `ui-response` would be authorized against
+	 * the stale entry. Runs before the socket reports the open, so no frame from the
+	 * new room can be dispatched against the old identities.
+	 */
+	#handleRoomRecreated(): void {
+		if (this.#stopped) return;
+		if (this.#peers.size === 0 && this.#pendingUi.size === 0) return;
+		// Identities first: settle() fans `ui-request-end` out over #peers, and those
+		// ids belong to the room that just went away.
+		this.#peers.clear();
+		// The relay closed everyone who could answer, so an outstanding ask has no
+		// recipient. Leaving it pending hangs callers that await it without racing a
+		// local dialog, and #handleHello re-poses every pending request to the next
+		// writable guest — a different occupant of a different room. Matches the
+		// teardown path; settle() is guarded against a second resolve, so a teardown
+		// after this is a no-op.
+		for (const pending of this.#pendingUi.values()) pending.settle({ kind: "unavailable" });
+		this.#pendingUi.clear();
+		this.#updateStatusSegment();
+		this.#scheduleStateBroadcast();
+	}
+
+	/** Identity and UI only: the socket already retired the peer and dropped its backlog. */
 	#handlePeerLeft(peer: number): void {
 		const name = this.#peers.get(peer)?.name;
 		this.#peers.delete(peer);
@@ -950,7 +1139,8 @@ export class CollabHost {
 	}
 
 	#scheduleAgentsBroadcast(): void {
-		if (this.ending || this.#agentsDebounce) return;
+		// No guest, nothing to refresh: a joining guest's welcome carries agents.
+		if (this.ending || this.#agentsDebounce || this.#peers.size === 0) return;
 		this.#agentsDebounce = setTimeout(() => {
 			this.#agentsDebounce = null;
 			this.#send({ t: "agents", agents: this.#snapshotAgents() });
@@ -1012,11 +1202,12 @@ export class CollabHost {
 	async #handleFetchTranscript(reqId: number, agentId: string, fromByte: number, fromPeer: number): Promise<void> {
 		const reply = (text: string, newSize: number, error?: string) =>
 			this.#send({ t: "transcript", reqId, text, newSize, error }, fromPeer);
-		const file = AgentRegistry.global().get(agentId)?.sessionFile;
-		if (!file) {
+		const ref = AgentRegistry.global().get(agentId);
+		if (!ref?.sessionFile || ref.kind === "advisor") {
 			reply("", fromByte, "no transcript available");
 			return;
 		}
+		const file = ref.sessionFile;
 		try {
 			const stat = await fs.stat(file);
 			if (stat.size <= fromByte) {
@@ -1051,7 +1242,8 @@ export class CollabHost {
 	}
 
 	#scheduleStateBroadcast(): void {
-		if (this.ending || this.#stateDebounce) return;
+		// No guest, nothing to refresh: a joining guest's welcome carries state.
+		if (this.ending || this.#stateDebounce || this.#peers.size === 0) return;
 		this.#stateDebounce = setTimeout(() => {
 			this.#stateDebounce = null;
 			const state = this.#buildState();

@@ -6,7 +6,7 @@
 common --enable_platform_specific_config
 
 # Hermetic-ish action env: no host env leaks into action keys. Build scripts
-# that need host tools (cmake for audiopus_sys' bundled opus) get an explicit
+# that need host tools (cmake for opusic-sys' bundled Opus) get an explicit
 # PATH through crate annotations in MODULE.bazel.
 build --incompatible_strict_action_env
 
@@ -31,6 +31,23 @@ common --repo_env=CARGO_BAZEL_TIMEOUT=1800
 build --@rules_rust//rust/settings:error_format=human
 # Generated toolchains carry target_settings requiring the nightly channel.
 build --@rules_rust//rust/toolchain/channel=nightly
+
+# Pin the macOS deployment target for target and exec links. Unset, the
+# autodetected cc toolchain on mac hosts uses the selected SDK version: 10.11
+# under Command Line Tools but 27.0 under full Xcode 27, which would lock the
+# addon to macOS 27+; the linux-hosted darwin cross toolchain
+# (//bazel/toolchains/darwin) has no Xcode to ask. 12.0 is the shipped addon
+# floor on every host.
+build --macos_minimum_os=12.0
+build:macos --host_macos_minimum_os=12.0
+# rustc strips Apple binaries with its bundled rust-objcopy, which leaves
+# minos >= 12.0 dylibs with a LINKEDIT string pool dyld rejects ("mis-aligned
+# LINKEDIT string pool"); rustc reports that for every proc-macro as E0463
+# "can't find crate". Strip at link time instead (-S drops debug info, the
+# opt-mode `strip=debuginfo` equivalent). Exec links (proc-macros, build
+# scripts) are covered here; the shipped addon in bazel/defs.bzl.
+build:macos --@rules_rust//rust/settings:extra_exec_rustc_flag=-Cstrip=none
+build:macos --@rules_rust//rust/settings:extra_exec_rustc_flag=-Clink-arg=-Wl,-S
 
 
 # --- Rust validation (replaces cargo clippy/nextest in CI) --------------------

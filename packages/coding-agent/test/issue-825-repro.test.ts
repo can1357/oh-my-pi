@@ -20,7 +20,7 @@
 
 import { beforeAll, describe, expect, mock, test } from "bun:test";
 import { AgentBusyError } from "@oh-my-pi/pi-agent-core";
-import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import type { CompactionQueuedMessage, InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { UiHelpers } from "@oh-my-pi/pi-coding-agent/modes/utils/ui-helpers";
 
@@ -91,7 +91,7 @@ function makeCtx(initialQueue: CompactionQueuedMessage[]) {
 		compactionQueuedMessages: [...initialQueue],
 		pendingMessagesContainer: { clear: () => {}, addChild: () => {}, removeChild: () => {} },
 		editor: { addToHistory: () => {}, setText: () => {}, getText: () => "" },
-		keybindings: { getDisplayString: () => "Alt+Up" },
+		keybindings: { getKeys: () => ["alt+up"] },
 		fileSlashCommands: new Set<string>(),
 		locallySubmittedUserSignatures,
 		isKnownSlashCommand,

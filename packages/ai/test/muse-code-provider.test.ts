@@ -1,9 +1,12 @@
 import { Database } from "bun:sqlite";
 import { describe, expect, test } from "bun:test";
+import { type } from "@oh-my-pi/omptype";
 import { AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai/auth-storage";
+import { mapOpenAIResponsesToolChoiceForTools } from "@oh-my-pi/pi-ai/providers/openai-responses";
 import { getProviderDefinition } from "@oh-my-pi/pi-ai/registry/registry";
+import type { Tool, ToolChoice } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
-import { MUSE_CODE_STATIC_MODELS } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
+import { seedModels } from "@oh-my-pi/pi-catalog/compat/providers";
 
 const encodedMuseCredential = JSON.stringify({
 	oauthAccessToken: "meta-account-access",
@@ -16,7 +19,7 @@ describe("Muse Code provider", () => {
 		if (!provider?.prepareRequest || !provider.prepareModelDiscovery) {
 			throw new Error("Muse Code transport is not registered");
 		}
-		const model = buildModel(MUSE_CODE_STATIC_MODELS[0]!);
+		const model = buildModel(seedModels("muse-code")[0]!);
 		const request = provider.prepareRequest(model, { apiKey: encodedMuseCredential });
 		const discovery = provider.prepareModelDiscovery({ apiKey: encodedMuseCredential });
 
@@ -30,9 +33,9 @@ describe("Muse Code provider", () => {
 			usageProviderResolver: () => undefined,
 		});
 		try {
-			await storage.reload();
-			await storage.set("meta", [{ type: "api_key", key: "LLM|payg-key", source: "login" }]);
-			await storage.set("muse-code", [
+			await storage.credentials.reload();
+			await storage.credentials.set("meta", [{ type: "api_key", key: "LLM|payg-key", source: "login" }]);
+			await storage.credentials.set("muse-code", [
 				{
 					type: "oauth",
 					access: encodedMuseCredential,
@@ -42,16 +45,16 @@ describe("Muse Code provider", () => {
 				},
 			]);
 
-			expect(await storage.getApiKey("meta", "payg-session")).toBe("LLM|payg-key");
-			expect(await storage.getApiKey("muse-code", "muse-session")).toBe(encodedMuseCredential);
+			expect(await storage.keys.get("meta", "payg-session")).toBe("LLM|payg-key");
+			expect(await storage.keys.get("muse-code", "muse-session")).toBe(encodedMuseCredential);
 			expect(
-				await storage.markUsageLimitReached("muse-code", "muse-session", {
+				await storage.limits.markReached("muse-code", "muse-session", {
 					apiKey: encodedMuseCredential,
 					retryAfterMs: 60_000,
 				}),
 			).toMatchObject({ switched: false });
-			expect(await storage.getApiKey("muse-code", "muse-session")).toBe(encodedMuseCredential);
-			expect(await storage.getApiKey("meta", "payg-session")).toBe("LLM|payg-key");
+			expect(await storage.keys.get("muse-code", "muse-session")).toBe(encodedMuseCredential);
+			expect(await storage.keys.get("meta", "payg-session")).toBe("LLM|payg-key");
 		} finally {
 			storage.close();
 		}
@@ -62,8 +65,8 @@ describe("Muse Code provider", () => {
 			usageProviderResolver: () => undefined,
 		});
 		try {
-			await storage.reload();
-			await storage.set("muse-code", [
+			await storage.credentials.reload();
+			await storage.credentials.set("muse-code", [
 				{
 					type: "oauth",
 					access: encodedMuseCredential,
@@ -73,17 +76,25 @@ describe("Muse Code provider", () => {
 				},
 			]);
 
-			expect(await storage.getApiKey("muse-code", "stale-expiry-session")).toBe(encodedMuseCredential);
+			expect(await storage.keys.get("muse-code", "stale-expiry-session")).toBe(encodedMuseCredential);
 		} finally {
 			storage.close();
 		}
 	});
 
-	test("keeps the existing Meta Model API login distinct", () => {
-		expect(getProviderDefinition("meta")).toMatchObject({ id: "meta", name: "Meta Model API" });
-		expect(getProviderDefinition("muse-code")).toMatchObject({
-			id: "muse-code",
-			name: "Muse Code (Subscription)",
-		});
+	test("omits tool_choice on api.meta.ai, which accepts only auto", () => {
+		// Verified 2026-09-10 against muse-spark-1.3: "none", "required" and named
+		// function choices all 400 with `only "auto" is supported for tool_choice`.
+		const tool: Tool = { name: "yield", description: "Finish.", parameters: type({}) };
+		const choices: ToolChoice[] = ["none", "required", { type: "tool", name: "yield" }];
+		for (const spec of [
+			seedModels<"openai-responses">("meta")[0]!,
+			seedModels<"openai-responses">("muse-code")[0]!,
+		]) {
+			const model = buildModel(spec);
+			for (const choice of choices) {
+				expect(mapOpenAIResponsesToolChoiceForTools(choice, [tool], model)).toBeUndefined();
+			}
+		}
 	});
 });

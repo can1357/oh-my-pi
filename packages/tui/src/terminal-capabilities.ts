@@ -1,5 +1,6 @@
 import { encodeSixel } from "@oh-my-pi/pi-natives";
-import { $env, isBunTestRuntime, isTerminalHeadless, isWsl } from "@oh-my-pi/pi-utils";
+import { $env, isBunTestRuntime, isTerminalHeadless, isWsl } from "@oh-my-pi/pi-utils/env";
+import { writeTerminalSequence } from "./active-terminal";
 import { sendDesktopNotification, shouldDeliverDesktopNotification } from "./desktop-notify";
 import {
 	detectKittyUnicodePlaceholdersSupport,
@@ -10,7 +11,7 @@ import {
 	setKittyGraphics,
 } from "./kitty-graphics";
 import { isInsideHerdr, isInsideTerminalMultiplexer } from "./terminal-multiplexer";
-import { isInsideTmux, wrapTmuxPassthrough, wrapTmuxPassthroughIfNeeded } from "./tmux";
+import { isInsideTmux, resolveTmuxClientTerminalName, wrapTmuxPassthrough, wrapTmuxPassthroughIfNeeded } from "./tmux";
 import type { HangulCompatibilityJamoWidth } from "./utils";
 
 export * from "./terminal-multiplexer";
@@ -37,10 +38,14 @@ export type TerminalId =
 	| "alacritty"
 	| "warp"
 	| "orca"
+	| "otty"
+	| "rio"
+	| "tern"
+	| "monstar"
 	| "base"
 	| "trueColor";
 
-const CMUX_NOTIFICATION_TITLE = "Oh My Pi";
+const CMUX_NOTIFICATION_TITLE = "omp";
 const CMUX_SURFACE_ID_PATTERN = /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/iu;
 
 /** Title and body for an out-of-band multiplexer notification (cmux, Herdr). */
@@ -126,30 +131,10 @@ function sendHerdrNotification(message: string | TerminalNotification, env: Node
 	return true;
 }
 
-function hasNeedleBefore(line: string, needle: string, limit: number): boolean {
-	const index = line.indexOf(needle);
-	return index !== -1 && index + needle.length <= limit;
-}
-
-function hasSixelDcsStart(line: string): boolean {
-	const limit = Math.min(line.length, 128);
-	let from = 0;
-	for (;;) {
-		const start = line.indexOf("\x1bP", from);
-		if (start === -1 || start + 3 > limit) return false;
-		let i = start + 2;
-		while (i < limit) {
-			const code = line.charCodeAt(i);
-			if ((code >= 0x30 && code <= 0x39) || code === 0x3b) {
-				i++;
-				continue;
-			}
-			break;
-		}
-		if (i < limit && line.charCodeAt(i) === 0x71) return true;
-		from = start + 2;
-	}
-}
+const IMAGE_MARKER_SCAN_LIMIT = 512;
+const SIXEL_MARKER_SCAN_LIMIT = 128;
+const KITTY_PLACEHOLDER_HIGH_SURROGATE = KITTY_PLACEHOLDER.charCodeAt(0);
+const KITTY_PLACEHOLDER_LOW_SURROGATE = KITTY_PLACEHOLDER.charCodeAt(1);
 
 /** Terminal capability details used for rendering and protocol selection. */
 export class TerminalInfo {
@@ -181,18 +166,56 @@ export class TerminalInfo {
 		return Object.assign(Object.create(TerminalInfo.prototype), this) as RuntimeTerminal;
 	}
 
+	/**
+	 * Whether an image marker begins at `start`. Kept as the shared primitive
+	 * for both standalone image checks and the renderer's combined ANSI/width
+	 * scan, so their protocol windows and sixel grammar cannot drift.
+	 */
+	hasImageMarkerAt(line: string, start: number): boolean {
+		const protocol = this.imageProtocol;
+		if (!protocol) return false;
+		if (protocol === ImageProtocol.Sixel) {
+			const limit = Math.min(line.length, SIXEL_MARKER_SCAN_LIMIT);
+			if (start + 3 > limit || line.charCodeAt(start) !== 0x1b || line.charCodeAt(start + 1) !== 0x50) {
+				return false;
+			}
+			let i = start + 2;
+			while (i < limit) {
+				const code = line.charCodeAt(i);
+				if ((code >= 0x30 && code <= 0x39) || code === 0x3b) {
+					i++;
+					continue;
+				}
+				break;
+			}
+			return i < limit && line.charCodeAt(i) === 0x71;
+		}
+
+		const limit = Math.min(line.length, IMAGE_MARKER_SCAN_LIMIT);
+		let protocolMatches = start + protocol.length <= limit;
+		for (let offset = 0; protocolMatches && offset < protocol.length; offset++) {
+			protocolMatches = line.charCodeAt(start + offset) === protocol.charCodeAt(offset);
+		}
+		return (
+			protocolMatches ||
+			(start + 2 <= limit &&
+				line.charCodeAt(start) === KITTY_PLACEHOLDER_HIGH_SURROGATE &&
+				line.charCodeAt(start + 1) === KITTY_PLACEHOLDER_LOW_SURROGATE)
+		);
+	}
+
 	isImageLine(line: string): boolean {
 		if (!this.imageProtocol) return false;
-		if (this.imageProtocol === ImageProtocol.Sixel) {
-			return hasSixelDcsStart(line);
+		const limit = Math.min(
+			line.length,
+			this.imageProtocol === ImageProtocol.Sixel ? SIXEL_MARKER_SCAN_LIMIT : IMAGE_MARKER_SCAN_LIMIT,
+		);
+		for (let i = 0; i < limit; i++) {
+			const code = line.charCodeAt(i);
+			if (code !== 0x1b && code !== KITTY_PLACEHOLDER_HIGH_SURROGATE) continue;
+			if (this.hasImageMarkerAt(line, i)) return true;
 		}
-		// 512-unit window: placeholder cells can sit deep in a composed row —
-		// the composer attachment band prefixes each thumbnail row with border
-		// SGRs and stacks cards side by side, so the first placeholder of a
-		// later card starts hundreds of units in. Rows past the window would
-		// silently lose the verbatim image-line path (no truncation, no SGR
-		// coalescing) that placeholder grids and placement APCs rely on.
-		return hasNeedleBefore(line, this.imageProtocol, 512) || hasNeedleBefore(line, KITTY_PLACEHOLDER, 512);
+		return false;
 	}
 
 	formatNotification(message: string | TerminalNotification): string {
@@ -230,17 +253,17 @@ export class TerminalInfo {
 		// has that the agent finished or is waiting for input. `Bell` protocol
 		// already self-flags via tmux's bell monitoring, so leave it alone.
 		if (this.notifyProtocol !== NotifyProtocol.Bell && isInsideTmux()) {
-			process.stdout.write(`${wrapTmuxPassthrough(formatted)}\x07`);
+			writeTerminalSequence(`${wrapTmuxPassthrough(formatted)}\x07`);
 			return;
 		}
 		// Zellij drops OSC 9/99 and has no DCS passthrough envelope, but raises its
 		// `[!]` bell flag on a bare BEL — the same backgrounded-pane signal tmux
 		// users get. So follow the (Zellij-swallowed) OSC with a plain BEL.
 		if (this.notifyProtocol !== NotifyProtocol.Bell && isInsideZellij()) {
-			process.stdout.write(`${formatted}\x07`);
+			writeTerminalSequence(`${formatted}\x07`);
 			return;
 		}
-		process.stdout.write(formatted);
+		writeTerminalSequence(formatted);
 		// VTE-family terminals (Ptyxis, GNOME Terminal, Tilix, …) plus Alacritty
 		// and bare xterm-on-Wayland have no in-band escape that surfaces an
 		// arbitrary desktop toast (#3685). When the chosen `notifyProtocol` is
@@ -260,6 +283,14 @@ export class TerminalInfo {
  */
 export function isInsideZellij(env: NodeJS.ProcessEnv = Bun.env): boolean {
 	return Boolean(env.ZELLIJ);
+}
+
+/**
+ * Whether the agent process runs in an SSH session, so the terminal emulator
+ * is remote and host-local input/keyboard modes cannot be assumed.
+ */
+export function isSshSession(env: NodeJS.ProcessEnv = Bun.env): boolean {
+	return Boolean(env.SSH_CONNECTION || env.SSH_TTY || env.SSH_CLIENT);
 }
 
 export function isNotificationSuppressed(): boolean {
@@ -307,9 +338,11 @@ export function isWindowsTerminalPreviewSixelSupported(
 	env: NodeJS.ProcessEnv = Bun.env,
 	platform: NodeJS.Platform = process.platform,
 ): boolean {
-	if (platform !== "win32") return false;
-	if (!env.WT_SESSION) return false;
-	if (env.TERM_PROGRAM && env.TERM_PROGRAM.toLowerCase() !== "windows_terminal") {
+	if (
+		platform !== "win32" ||
+		!env.WT_SESSION ||
+		(env.TERM_PROGRAM && env.TERM_PROGRAM.toLowerCase() !== "windows_terminal")
+	) {
 		return false;
 	}
 	const version = parseMajorMinorVersion(env.TERM_PROGRAM_VERSION);
@@ -368,7 +401,7 @@ export function shouldEnableSynchronizedOutputByDefault(
 	if (override !== null) return override;
 
 	if (advertisesSynchronizedOutput(env.TERM_FEATURES)) return true;
-	if (env.WT_SESSION) return true;
+	if (env.WT_SESSION && (!env.TERM_PROGRAM || env.TERM_PROGRAM.toLowerCase() === "windows_terminal")) return true;
 	if (isInsideHerdr(env)) return true;
 
 	// Risky multiplexers start off even when an inner terminal id leaks through:
@@ -382,6 +415,7 @@ export function shouldEnableSynchronizedOutputByDefault(
 	switch (terminalId) {
 		case "kitty":
 		case "ghostty":
+		case "monstar":
 		case "wezterm":
 		case "iterm2":
 		case "alacritty":
@@ -425,6 +459,46 @@ export function detectRectangularSgrSupport(terminalId: TerminalId, env: NodeJS.
 	return true;
 }
 /**
+ * Whether the terminal implements colon-subparameter SGR styled underlines —
+ * `CSI 4 : 3 m` (curly) plus `CSI 58` / `CSI 59` underline color — as opposed to
+ * only the legacy `CSI 4 m` / `CSI 24 m` on/off underline.
+ *
+ * This is an underline-style capability, not a color depth, so it is keyed on
+ * the detected terminal, never on `TERM`/`COLORTERM`. kitty, Ghostty, WezTerm,
+ * and iTerm2 (>= 3.5) implement the full pair. Apple Terminal does NOT: it
+ * renders `CSI 4 : 0 m` (the reset half) as a solid black background that
+ * persists to end of line, and ignores SGR 58/59 — so it, along with every
+ * other unproven terminal, gets the flat underline instead. Disabled under any
+ * multiplexer: GNU screen and older tmux drop colon-form SGR, and the outer
+ * terminal's id leaks into the session env, so a proven id is not proof the
+ * bytes survive — the same reason DECCARA and synchronized output gate on it.
+ */
+export function detectStyledUnderlineSupport(terminalId: TerminalId, env: NodeJS.ProcessEnv = Bun.env): boolean {
+	// A multiplexer in the path (GNU screen, older tmux) does not forward the
+	// colon-form underline, yet the outer terminal's id leaks through the session
+	// env, so the switch below would otherwise trust an unreachable capability.
+	if (isInsideTerminalMultiplexer(env)) return false;
+	switch (terminalId) {
+		case "kitty":
+		case "ghostty":
+		case "monstar":
+		case "wezterm":
+			return true;
+		case "iterm2": {
+			// The full curly-and-colored pair did not ship together until iTerm2 3.5
+			// (curly first targeted 3.3.12; SGR 58/59 underline color was beta,
+			// expected for 3.5), so 3.0–3.4 would receive the colon reset they cannot
+			// render. Enable only on a confirmed major.minor >= 3.5; an absent or
+			// unparseable version keeps the flat fallback so only proven terminals
+			// get the colon form.
+			const version = parseMajorMinorVersion(env.TERM_PROGRAM_VERSION);
+			return version !== null && (version.major > 3 || (version.major === 3 && version.minor >= 5));
+		}
+		default:
+			return false;
+	}
+}
+/**
  * Resolve an explicit user override for OSC 8 hyperlinks. Returns `false` for
  * an opt-out, `true` for a force-on, or `null` when the user has expressed no
  * preference. Opt-out beats force-on so a kill switch is unambiguous, mirroring
@@ -453,11 +527,15 @@ function parseTmuxVersionFromEnv(env: NodeJS.ProcessEnv): { major: number; minor
  * Policy (highest precedence first):
  *   1. Explicit user override (`PI_NO_HYPERLINKS=1` off, `PI_FORCE_HYPERLINKS=1`
  *      on). Opt-out wins ties.
- *   2. Static terminal capability — terminals whose {@link TerminalInfo} marks
+ *   2. Herdr pane with no nested screen/tmux: on. Herdr hides the outer
+ *      terminal (`TERM=xterm-256color`, no `TERM_PROGRAM`), but it renders
+ *      OSC 8 in its own grid and opens links itself on Ctrl+click, so the
+ *      outer terminal's support does not matter.
+ *   3. Static terminal capability — terminals whose {@link TerminalInfo} marks
  *      `hyperlinks: false` (e.g. `base`) stay off unless the user forced on.
- *   3. GNU screen's explicit session marker (`STY`) always off, even if tmux is
+ *   4. GNU screen's explicit session marker (`STY`) always off, even if tmux is
  *      also present: a screen layer anywhere in the path cannot forward OSC 8.
- *   4. tmux session (`TMUX` set): enabled when tmux self-reports >= 3.4 via
+ *   5. tmux session (`TMUX` set): enabled when tmux self-reports >= 3.4 via
  *      `TERM_PROGRAM_VERSION` (tmux 3.4 stores OSC 8 as a cell attribute and
  *      forwards it to outer terminals whose `terminal-features` include
  *      `hyperlinks`). Older or unknown versions stay off; on outer terminals
@@ -465,11 +543,11 @@ function parseTmuxVersionFromEnv(env: NodeJS.ProcessEnv): { major: number; minor
  *      identical to today. Checked before the screen-family TERM heuristic
  *      because tmux's historical `default-terminal` is `screen-256color`, so
  *      `TERM=screen*` inside a tmux session must NOT short-circuit to off.
- *   5. screen-family TERM without `TMUX` always off: screen never gained OSC 8
+ *   6. screen-family TERM without `TMUX` always off: screen never gained OSC 8
  *      support.
- *   6. tmux-family TERM without `TMUX` env — unusual (e.g. inspection scripts);
+ *   7. tmux-family TERM without `TMUX` env — unusual (e.g. inspection scripts);
  *      no version available, so off.
- *   7. Otherwise honor the static terminal capability.
+ *   8. Otherwise honor the static terminal capability.
  */
 export function shouldEnableHyperlinksByDefault(
 	env: NodeJS.ProcessEnv = Bun.env,
@@ -477,6 +555,8 @@ export function shouldEnableHyperlinksByDefault(
 ): boolean {
 	const override = hyperlinksUserOverride(env);
 	if (override !== null) return override;
+
+	if (isInsideHerdr(env) && !env.STY && !env.TMUX) return true;
 
 	if (!getTerminalInfo(terminalId).hyperlinks) return false;
 
@@ -610,12 +690,68 @@ const KNOWN_TERMINALS = Object.freeze({
 	// honor OSC 8 yet (the escape renders as visible text), so hyperlinks stay off,
 	// but it does support OSC 9 notifications.
 	warp: new TerminalInfo("warp", ImageProtocol.Kitty, true, false, NotifyProtocol.Osc9, false, false, false, 1),
+	// Otty (appmakes, macOS) identifies via TERM_PROGRAM=otty. Its documented
+	// Kitty implementation covers direct and virtual (U+10EEEE placeholder)
+	// placement, and it honors OSC 8 hyperlinks and OSC 99 notifications
+	// (docs.otty.sh terminal comparison). Sixel is not implemented, DECCARA and
+	// OSC 66 text sizing are unverified, so those stay on conservative defaults;
+	// synchronized output is left to the runtime DECRQM probe.
+	otty: new TerminalInfo("otty", ImageProtocol.Kitty, true, true, NotifyProtocol.Osc99),
+	// rio publishes its supported escape sequences at
+	// rioterm.com/docs/escape-sequence-support: OSC 8 hyperlinks are opened via
+	// the hints system (Alt+click on Windows/Linux) — live-verified on
+	// rio 0.5.28/Win11 26100 where an OSC 8 span Alt+click opened the target
+	// URL in the browser, and an OSC 52 clipboard query round-tripped. Kitty
+	// graphics direct placement plus U=1 Unicode placeholders verified by the
+	// reporter (#12205). Notifications stay on BEL: rio parses OSC 9/777 into
+	// its own notifier, but its Windows path raises an unpackaged WinRT toast
+	// with AppId "Rio" that Windows silently drops without a registered AUMID
+	// shortcut — observed as a no-op live — so flipping it would only remove
+	// the D-Bus fallback for Linux rio users. DECCARA, screen-to-scrollback,
+	// OSC 99, and OSC 66 text sizing are outside rio's supported set and keep
+	// the conservative defaults.
+	rio: new TerminalInfo("rio", ImageProtocol.Kitty, true, true),
+	// Tern (Stencil's terminal, `stencil-term`) sets TERM_PROGRAM=tern and
+	// implements Kitty graphics, OSC 8 and OSC 9/99 notifications. Whether omp
+	// renders natively (Tern Surface Protocol) is decided by the `hello`
+	// handshake alone, never by this identity.
+	tern: new TerminalInfo("tern", ImageProtocol.Kitty, true, true, NotifyProtocol.Osc99),
+	// Monstar (rockorager/monstar) is a Wayland terminal built on libghostty. It
+	// sets TERM=monstar and answers XTVERSION with `monstar <version>`. It
+	// documents Kitty graphics with Unicode placeholders, OSC 8 hyperlinks, and
+	// synchronized output. libghostty reports Hangul Jamo as 2 cells, and the
+	// Monstar renderer draws curly underlines in the SGR 58 underline color, so
+	// the id-keyed allowlists treat Monstar like Ghostty.
+	// Monstar clears OSC 9;4 progress after 15 s without an update, so it also
+	// gets the Ghostty progress keepalive. The Ghostty initial image delay stays
+	// Ghostty-only: it works around a Ghostty app startup race, not libghostty.
+	// Monstar turns OSC 9 into a D-Bus notification with a default action;
+	// activating it focuses the Monstar window. The BEL path uses omp's own
+	// `notify-send` fallback instead, which cannot focus a window.
+	monstar: new TerminalInfo("monstar", ImageProtocol.Kitty, true, true, NotifyProtocol.Osc9, false, false, false, 2),
 });
 
 /** Resolve terminal identity from environment markers used by common emulators. */
 export function detectTerminalId(env: NodeJS.ProcessEnv = Bun.env): TerminalId {
 	function caseEq(a: string, b: string): boolean {
 		return a.toLowerCase() === b.toLowerCase(); // For compiler to pattern match
+	}
+
+	function fromProgram(program: string | undefined): TerminalId | null {
+		if (!program) return null;
+		if (caseEq(program, "kitty")) return "kitty";
+		if (caseEq(program, "ghostty")) return "ghostty";
+		if (caseEq(program, "wezterm")) return "wezterm";
+		if (caseEq(program, "iterm.app") || caseEq(program, "iterm2")) return "iterm2";
+		if (caseEq(program, "vscode")) return "vscode";
+		if (caseEq(program, "alacritty")) return "alacritty";
+		if (caseEq(program, "warpterminal")) return "warp";
+		if (caseEq(program, "orca")) return "orca";
+		if (caseEq(program, "otty")) return "otty";
+		if (caseEq(program, "rio")) return "rio";
+		if (caseEq(program, "tern")) return "tern";
+		if (caseEq(program, "monstar")) return "monstar";
+		return null;
 	}
 
 	const {
@@ -637,18 +773,16 @@ export function detectTerminalId(env: NodeJS.ProcessEnv = Bun.env): TerminalId {
 	if (VSCODE_PID) return "vscode";
 	if (ALACRITTY_WINDOW_ID) return "alacritty";
 
-	if (TERM_PROGRAM) {
-		if (caseEq(TERM_PROGRAM, "kitty")) return "kitty";
-		if (caseEq(TERM_PROGRAM, "ghostty")) return "ghostty";
-		if (caseEq(TERM_PROGRAM, "wezterm")) return "wezterm";
-		if (caseEq(TERM_PROGRAM, "iterm.app")) return "iterm2";
-		if (caseEq(TERM_PROGRAM, "vscode")) return "vscode";
-		if (caseEq(TERM_PROGRAM, "alacritty")) return "alacritty";
-		if (caseEq(TERM_PROGRAM, "warpterminal")) return "warp";
-		if (caseEq(TERM_PROGRAM, "orca")) return "orca";
-	}
+	const programId = fromProgram(TERM_PROGRAM);
+	if (programId) return programId;
+
+	// tmux >= 3.2 replaces the pane's identity with `TERM_PROGRAM=tmux`.
+	// Its server still holds the attached client's terminal-type reply.
+	const clientProgramId = fromProgram(resolveTmuxClientTerminalName(env) ?? undefined);
+	if (clientProgramId) return clientProgramId;
 
 	if (TERM?.toLowerCase().includes("ghostty")) return "ghostty";
+	if (TERM && caseEq(TERM, "monstar")) return "monstar";
 
 	if (COLORTERM) {
 		if (caseEq(COLORTERM, "truecolor") || caseEq(COLORTERM, "24bit")) return "trueColor";
@@ -671,6 +805,14 @@ export interface RuntimeTerminal extends TerminalInfo {
 	supportsScreenToScrollback: boolean;
 	/** Whether OSC 66 text sizing is currently enabled. */
 	textSizing: boolean;
+	/** Whether the terminal implements colon-subparameter styled underlines (curly + colored). */
+	styledUnderlines: boolean;
+	/**
+	 * Whether the terminal answered the Glyph Protocol support query with a
+	 * `glyf`-capable reply and the bundled icons have been registered. Probe-
+	 * driven: false until {@link ProcessTerminal} resolves it.
+	 */
+	glyphProtocol: boolean;
 }
 
 export const TERMINAL: RuntimeTerminal = (() => {
@@ -697,11 +839,17 @@ export const TERMINAL: RuntimeTerminal = (() => {
 	// ignores DECCARA) exercises the padded-string fallback. Integration tests opt
 	// in explicitly through setTerminalDeccara.
 	resolved.deccara = detectRectangularSgrSupport(resolved.id, Bun.env) && !isBunTestRuntime();
+	// Styled-underline capability: colon-form curly underline + SGR 58/59 color.
+	// Keyed on the detected terminal (an underline-style capability, not a color
+	// depth), so Apple Terminal and other unproven hosts fall back to the flat
+	// CSI 4 m / CSI 24 m underline the typo renderer needs to avoid black bars.
+	resolved.styledUnderlines = detectStyledUnderlineSupport(resolved.id, Bun.env);
+	resolved.glyphProtocol = false;
 	return resolved;
 })();
 
 // Seed Kitty Unicode placeholder support from the resolved terminal id. Only
-// kitty/ghostty are known to honor `U=1` placement; other Kitty-protocol paths
+// kitty/ghostty/otty are known to honor `U=1` placement; other Kitty-protocol paths
 // (wezterm, tmux/screen fallback) treat the placeholder cells as literal PUA
 // glyphs, which is the "ASCII artifact + laggy scrolling" reported in #1877.
 setKittyGraphics({ unicodePlaceholders: detectKittyUnicodePlaceholdersSupport(TERMINAL.id, Bun.env) });
@@ -720,6 +868,11 @@ export function setTerminalImageProtocol(imageProtocol: ImageProtocol | null): v
  */
 export function setTerminalDeccara(enabled: boolean): void {
 	TERMINAL.deccara = enabled;
+}
+
+/** Record the Glyph Protocol probe result (called by ProcessTerminal). */
+export function setTerminalGlyphProtocol(supported: boolean): void {
+	TERMINAL.glyphProtocol = supported;
 }
 
 /** Override screen-to-scrollback clear support for targeted renderer tests. */
@@ -780,6 +933,13 @@ export interface ImageRenderOptions {
 	placementId?: number;
 	/** When true (Kitty + {@link imageId}), also return the one-time transmit sequence. */
 	includeTransmit?: boolean;
+	/**
+	 * SIXEL sequence for the target pixel size renderImage computes, so the
+	 * caller can encode off the JS thread: answer `undefined` while the encode
+	 * is pending (the image's rows stay reserved) and `null` once it failed.
+	 * Without a provider, renderImage encodes synchronously.
+	 */
+	sixel?: (widthPx: number, heightPx: number) => string | null | undefined;
 }
 
 // Default cell dimensions - updated by TUI when terminal responds to query
@@ -1180,6 +1340,19 @@ export function getImageDimensions(base64Data: string, mimeType: string): ImageD
 	return null;
 }
 
+/**
+ * SIXEL sequence for `base64Data` at the given pixel size, encoded on the JS
+ * thread; `null` when the encode fails. For output that cannot wait for an
+ * off-thread encode.
+ */
+export function encodeSixelNow(base64Data: string, widthPx: number, heightPx: number): string | null {
+	try {
+		return encodeSixel(new Uint8Array(Buffer.from(base64Data, "base64")), widthPx, heightPx);
+	} catch {
+		return null;
+	}
+}
+
 export function renderImage(
 	base64Data: string,
 	imageDimensions: ImageDimensions,
@@ -1233,29 +1406,28 @@ export function renderImage(
 	}
 
 	if (TERMINAL.imageProtocol === ImageProtocol.Sixel) {
-		try {
-			// SIXEL encodes in 6-pixel vertical bands. A height that is not a
-			// multiple of 6 is padded with transparent rows, but the terminal
-			// still allocates cell rows for the padded height. When the padded
-			// height crosses a cell boundary the terminal uses one more row
-			// than fit.rows, so the next line of content overwrites the bottom
-			// of the image — a visible slice stripped from the image. Round the
-			// encode height DOWN to the largest multiple of 6 that fits within
-			// the requested row budget, so the band boundary aligns without
-			// padding and the reserved row count never exceeds fit.rows. Scale
-			// the width by the same ratio so resize_exact preserves the aspect
-			// ratio instead of squashing the image vertically.
-			const rawHeightPx = Math.max(1, fit.rows * cellDims.heightPx);
-			const targetHeightPx = Math.max(6, Math.floor(rawHeightPx / 6) * 6);
-			const heightScale = targetHeightPx / rawHeightPx;
-			const targetWidthPx = Math.max(1, Math.round(fit.columns * cellDims.widthPx * heightScale));
-			const rows = Math.max(1, Math.ceil(targetHeightPx / cellDims.heightPx));
-			const decoded = new Uint8Array(Buffer.from(base64Data, "base64"));
-			const sequence = encodeSixel(decoded, targetWidthPx, targetHeightPx);
-			return { sequence, rows };
-		} catch {
-			return null;
-		}
+		// SIXEL encodes in 6-pixel vertical bands. A height that is not a
+		// multiple of 6 is padded with transparent rows, but the terminal
+		// still allocates cell rows for the padded height. When the padded
+		// height crosses a cell boundary the terminal uses one more row
+		// than fit.rows, so the next line of content overwrites the bottom
+		// of the image — a visible slice stripped from the image. Round the
+		// encode height DOWN to the largest multiple of 6 that fits within
+		// the requested row budget, so the band boundary aligns without
+		// padding and the reserved row count never exceeds fit.rows. Scale
+		// the width by the same ratio so resize_exact preserves the aspect
+		// ratio instead of squashing the image vertically.
+		const rawHeightPx = Math.max(1, fit.rows * cellDims.heightPx);
+		const targetHeightPx = Math.max(6, Math.floor(rawHeightPx / 6) * 6);
+		const heightScale = targetHeightPx / rawHeightPx;
+		const targetWidthPx = Math.max(1, Math.round(fit.columns * cellDims.widthPx * heightScale));
+		const rows = Math.max(1, Math.ceil(targetHeightPx / cellDims.heightPx));
+		const sequence = options.sixel
+			? options.sixel(targetWidthPx, targetHeightPx)
+			: encodeSixelNow(base64Data, targetWidthPx, targetHeightPx);
+		if (sequence === null) return null;
+		// Undefined while the provider's encode is pending: the rows stay reserved.
+		return { sequence, rows };
 	}
 	if (TERMINAL.imageProtocol === ImageProtocol.Iterm2) {
 		const sequence = encodeITerm2(base64Data, {
@@ -1320,7 +1492,7 @@ function notificationToLine(n: TerminalNotification): string {
 // C0/C1 control characters that are unsafe inside an OSC payload (must base64).
 const OSC99_UNSAFE = /[\x00-\x1f\x7f\x80-\x9f]/u;
 const OSC99_MAX_PAYLOAD_BYTES = 2048;
-const OSC99_APP_NAME = "Oh My Pi";
+const OSC99_APP_NAME = "omp";
 let nextOsc99NotificationId = 1;
 
 function base64Utf8(value: string): string {

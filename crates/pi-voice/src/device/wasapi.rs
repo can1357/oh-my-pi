@@ -255,7 +255,8 @@ impl ComApartment {
 
 impl Drop for ComApartment {
 	fn drop(&mut self) {
-		// SAFETY: paired with the successful `CoInitializeEx` on this same thread.
+		// SAFETY: paired with the successful `CoInitializeEx` on this same
+		// thread.
 		unsafe { CoUninitialize() };
 	}
 }
@@ -308,8 +309,8 @@ impl BaseStream {
 			ComPtr::new(device_raw, "IMMDeviceEnumerator::GetDefaultAudioEndpoint")?;
 
 		let mut client_raw = null_mut();
-		// SAFETY: the device is live, activation parameters are optional and null,
-		// and `client_raw` receives the requested interface.
+		// SAFETY: the device is live, activation parameters are optional and
+		// null, and `client_raw` receives the requested interface.
 		let hr = unsafe {
 			(device.vtable().activate)(
 				device.as_void(),
@@ -425,7 +426,12 @@ struct PlaybackStream {
 	started:       bool,
 }
 
-impl PlaybackStream {
+impl Stream for PlaybackStream {
+	type Callback = PlaybackFill;
+
+	const NAME: &'static str = "playback";
+	const RUN: fn(&Self, &AtomicBool, &mut PlaybackFill) -> Result<(), RunError> = run_playback;
+
 	fn open(config: DeviceConfig, event: Option<Arc<OwnedEvent>>) -> VoiceResult<Self> {
 		let base = BaseStream::open(config, eRender, event)?;
 		let period_frames = u32::try_from(config.period_samples())
@@ -454,6 +460,10 @@ impl PlaybackStream {
 		stream.started = true;
 		Ok(stream)
 	}
+
+	fn event(&self) -> &Arc<OwnedEvent> {
+		&self.base.event
+	}
 }
 
 impl Drop for PlaybackStream {
@@ -470,7 +480,12 @@ struct CaptureStream {
 	started: bool,
 }
 
-impl CaptureStream {
+impl Stream for CaptureStream {
+	type Callback = CaptureSink;
+
+	const NAME: &'static str = "capture";
+	const RUN: fn(&Self, &AtomicBool, &mut CaptureSink) -> Result<(), RunError> = run_capture;
+
 	fn open(config: DeviceConfig, event: Option<Arc<OwnedEvent>>) -> VoiceResult<Self> {
 		let base = BaseStream::open(config, eCapture, event)?;
 		let mut capture_raw = null_mut();
@@ -490,6 +505,10 @@ impl CaptureStream {
 		stream.started = true;
 		Ok(stream)
 	}
+
+	fn event(&self) -> &Arc<OwnedEvent> {
+		&self.base.event
+	}
 }
 
 impl Drop for CaptureStream {
@@ -500,87 +519,71 @@ impl Drop for CaptureStream {
 	}
 }
 
-pub struct PlaybackDevice {
-	stop:   Arc<AtomicBool>,
-	event:  Arc<OwnedEvent>,
-	thread: Option<JoinHandle<VoiceResult<()>>>,
+/// One WASAPI stream direction: how to open it and the loop that drives its
+/// callback.
+trait Stream: Sized {
+	type Callback: Send + 'static;
+
+	const NAME: &'static str;
+	const RUN: fn(&Self, &AtomicBool, &mut Self::Callback) -> Result<(), RunError>;
+
+	/// Open and start the default endpoint, reusing `event` after a reopen.
+	fn open(config: DeviceConfig, event: Option<Arc<OwnedEvent>>) -> VoiceResult<Self>;
+
+	fn event(&self) -> &Arc<OwnedEvent>;
 }
 
-impl PlaybackDevice {
+/// Running WASAPI worker for either direction.
+pub struct Device {
+	stop:      Arc<AtomicBool>,
+	event:     Arc<OwnedEvent>,
+	thread:    Option<JoinHandle<VoiceResult<()>>>,
+	direction: &'static str,
+}
+
+impl Device {
 	/// Open and start shared-mode playback on the default console endpoint.
-	pub fn start(config: DeviceConfig, fill: PlaybackFill) -> VoiceResult<Self> {
-		let stop = Arc::new(AtomicBool::new(false));
-		let worker_stop = Arc::clone(&stop);
-		let (startup_tx, startup_rx) = mpsc::channel();
-		let thread = thread::Builder::new()
-			.name("pi-voice-wasapi-playback".to_owned())
-			.spawn(move || playback_thread(config, fill, worker_stop, startup_tx))
-			.map_err(|error| format!("failed to spawn WASAPI playback thread: {error}"))?;
-
-		match startup_rx.recv() {
-			Ok(Ok(event)) => Ok(Self { stop, event, thread: Some(thread) }),
-			Ok(Err(error)) => {
-				let _ = thread.join();
-				Err(error)
-			},
-			Err(_) => match thread.join() {
-				Ok(Err(error)) => Err(error),
-				Ok(Ok(())) => Err("WASAPI playback thread exited during startup".to_owned()),
-				Err(_) => Err("WASAPI playback thread panicked during startup".to_owned()),
-			},
-		}
+	pub fn start_playback(config: DeviceConfig, fill: PlaybackFill) -> VoiceResult<Self> {
+		Self::start::<PlaybackStream>(config, fill)
 	}
 
-	/// Stop playback and wait until its worker can no longer invoke `fill`.
-	pub fn stop(&mut self) -> VoiceResult<()> {
-		stop_worker(&self.stop, &self.event, &mut self.thread, "playback")
-	}
-}
-
-impl Drop for PlaybackDevice {
-	fn drop(&mut self) {
-		let _ = self.stop();
-	}
-}
-
-pub struct CaptureDevice {
-	stop:   Arc<AtomicBool>,
-	event:  Arc<OwnedEvent>,
-	thread: Option<JoinHandle<VoiceResult<()>>>,
-}
-
-impl CaptureDevice {
 	/// Open and start shared-mode capture on the default console endpoint.
-	pub fn start(config: DeviceConfig, sink: CaptureSink) -> VoiceResult<Self> {
+	pub fn start_capture(config: DeviceConfig, sink: CaptureSink) -> VoiceResult<Self> {
+		Self::start::<CaptureStream>(config, sink)
+	}
+
+	fn start<S: Stream>(config: DeviceConfig, callback: S::Callback) -> VoiceResult<Self> {
+		let direction = S::NAME;
 		let stop = Arc::new(AtomicBool::new(false));
 		let worker_stop = Arc::clone(&stop);
 		let (startup_tx, startup_rx) = mpsc::channel();
 		let thread = thread::Builder::new()
-			.name("pi-voice-wasapi-capture".to_owned())
-			.spawn(move || capture_thread(config, sink, worker_stop, startup_tx))
-			.map_err(|error| format!("failed to spawn WASAPI capture thread: {error}"))?;
+			.name(format!("pi-voice-wasapi-{direction}"))
+			.spawn(move || worker_thread::<S>(config, callback, worker_stop, startup_tx))
+			.map_err(|error| format!("failed to spawn WASAPI {direction} thread: {error}"))?;
 
 		match startup_rx.recv() {
-			Ok(Ok(event)) => Ok(Self { stop, event, thread: Some(thread) }),
+			Ok(Ok(event)) => Ok(Self { stop, event, thread: Some(thread), direction }),
 			Ok(Err(error)) => {
 				let _ = thread.join();
 				Err(error)
 			},
 			Err(_) => match thread.join() {
 				Ok(Err(error)) => Err(error),
-				Ok(Ok(())) => Err("WASAPI capture thread exited during startup".to_owned()),
-				Err(_) => Err("WASAPI capture thread panicked during startup".to_owned()),
+				Ok(Ok(())) => Err(format!("WASAPI {direction} thread exited during startup")),
+				Err(_) => Err(format!("WASAPI {direction} thread panicked during startup")),
 			},
 		}
 	}
 
-	/// Stop capture and wait until its worker can no longer invoke `sink`.
+	/// Stop the stream and wait until its worker can no longer invoke the
+	/// callback.
 	pub fn stop(&mut self) -> VoiceResult<()> {
-		stop_worker(&self.stop, &self.event, &mut self.thread, "capture")
+		stop_worker(&self.stop, &self.event, &mut self.thread, self.direction)
 	}
 }
 
-impl Drop for CaptureDevice {
+impl Drop for Device {
 	fn drop(&mut self) {
 		let _ = self.stop();
 	}
@@ -591,31 +594,31 @@ enum RunError {
 	Other(String),
 }
 
-fn playback_thread(
+fn worker_thread<S: Stream>(
 	config: DeviceConfig,
-	mut fill: PlaybackFill,
+	mut callback: S::Callback,
 	stop: Arc<AtomicBool>,
 	startup: Sender<VoiceResult<Arc<OwnedEvent>>>,
 ) -> VoiceResult<()> {
-	let mut stream = match PlaybackStream::open(config, None) {
+	let mut stream = match S::open(config, None) {
 		Ok(stream) => stream,
 		Err(error) => {
 			let _ = startup.send(Err(error.clone()));
 			return Err(error);
 		},
 	};
-	let event = Arc::clone(&stream.base.event);
+	let event = Arc::clone(stream.event());
 	startup
 		.send(Ok(Arc::clone(&event)))
-		.map_err(|_| "WASAPI playback startup receiver was dropped".to_owned())?;
+		.map_err(|_| format!("WASAPI {} startup receiver was dropped", S::NAME))?;
 
 	loop {
-		match run_playback(&stream, &stop, &mut fill) {
+		match S::RUN(&stream, &stop, &mut callback) {
 			Ok(()) => return Ok(()),
 			Err(RunError::Other(error)) => return Err(error),
 			Err(RunError::DeviceInvalidated) => {
 				drop(stream);
-				let Some(reopened) = reopen_playback(config, &event, &stop)? else {
+				let Some(reopened) = reopen::<S>(config, &event, &stop)? else {
 					return Ok(());
 				};
 				stream = reopened;
@@ -705,39 +708,6 @@ fn run_playback(
 	}
 }
 
-fn capture_thread(
-	config: DeviceConfig,
-	mut sink: CaptureSink,
-	stop: Arc<AtomicBool>,
-	startup: Sender<VoiceResult<Arc<OwnedEvent>>>,
-) -> VoiceResult<()> {
-	let mut stream = match CaptureStream::open(config, None) {
-		Ok(stream) => stream,
-		Err(error) => {
-			let _ = startup.send(Err(error.clone()));
-			return Err(error);
-		},
-	};
-	let event = Arc::clone(&stream.base.event);
-	startup
-		.send(Ok(Arc::clone(&event)))
-		.map_err(|_| "WASAPI capture startup receiver was dropped".to_owned())?;
-
-	loop {
-		match run_capture(&stream, &stop, &mut sink) {
-			Ok(()) => return Ok(()),
-			Err(RunError::Other(error)) => return Err(error),
-			Err(RunError::DeviceInvalidated) => {
-				drop(stream);
-				let Some(reopened) = reopen_capture(config, &event, &stop)? else {
-					return Ok(());
-				};
-				stream = reopened;
-			},
-		}
-	}
-}
-
 fn run_capture(
 	stream: &CaptureStream,
 	stop: &AtomicBool,
@@ -817,8 +787,8 @@ fn run_capture(
 							"IAudioCaptureClient::GetBuffer returned null".to_owned(),
 						));
 					}
-					// SAFETY: WASAPI returned `frames` readable mono IEEE-float samples
-					// for the format used to initialize this client.
+					// SAFETY: WASAPI returned `frames` readable mono IEEE-float
+					// samples for the format used to initialize this client.
 					let samples = unsafe { slice::from_raw_parts(data.cast::<f32>(), frames as usize) };
 					sink(samples);
 				}
@@ -836,11 +806,11 @@ fn run_capture(
 // We deliberately omit `IMMNotificationClient`: a live endpoint stays selected
 // across default-device changes. Device invalidation is the unambiguous point
 // at which these retries reopen whichever endpoint is currently the default.
-fn reopen_playback(
+fn reopen<S: Stream>(
 	config: DeviceConfig,
 	event: &Arc<OwnedEvent>,
 	stop: &AtomicBool,
-) -> VoiceResult<Option<PlaybackStream>> {
+) -> VoiceResult<Option<S>> {
 	let mut last_error = "default endpoint remained unavailable".to_owned();
 	for attempt in 0..REOPEN_ATTEMPTS {
 		if stop.load(Ordering::Acquire) {
@@ -852,39 +822,14 @@ fn reopen_playback(
 				return Ok(None);
 			}
 		}
-		match PlaybackStream::open(config, Some(Arc::clone(event))) {
+		match S::open(config, Some(Arc::clone(event))) {
 			Ok(stream) => return Ok(Some(stream)),
 			Err(error) => last_error = error,
 		}
 	}
 	Err(format!(
-		"WASAPI playback endpoint recovery failed after {REOPEN_ATTEMPTS} attempts: {last_error}"
-	))
-}
-
-fn reopen_capture(
-	config: DeviceConfig,
-	event: &Arc<OwnedEvent>,
-	stop: &AtomicBool,
-) -> VoiceResult<Option<CaptureStream>> {
-	let mut last_error = "default endpoint remained unavailable".to_owned();
-	for attempt in 0..REOPEN_ATTEMPTS {
-		if stop.load(Ordering::Acquire) {
-			return Ok(None);
-		}
-		if attempt != 0 {
-			thread::sleep(REOPEN_BACKOFF);
-			if stop.load(Ordering::Acquire) {
-				return Ok(None);
-			}
-		}
-		match CaptureStream::open(config, Some(Arc::clone(event))) {
-			Ok(stream) => return Ok(Some(stream)),
-			Err(error) => last_error = error,
-		}
-	}
-	Err(format!(
-		"WASAPI capture endpoint recovery failed after {REOPEN_ATTEMPTS} attempts: {last_error}"
+		"WASAPI {} endpoint recovery failed after {REOPEN_ATTEMPTS} attempts: {last_error}",
+		S::NAME
 	))
 }
 

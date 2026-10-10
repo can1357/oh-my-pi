@@ -96,6 +96,8 @@ const MUX_SIGNALS = [
 	"CMUX_WORKSPACE_ID",
 	"CMUX_SURFACE_ID",
 	"CMUX_REMOTE_TRANSPORT",
+	"WMUX",
+	"WMUX_SURFACE_ID",
 	"TERM",
 	"TERM_PROGRAM",
 	"PI_TUI_RESIZE_IN_PLACE",
@@ -203,6 +205,27 @@ describe("resize anchoring inside a terminal multiplexer", () => {
 		expect(cup).not.toBeNull();
 		expect(Number(cup![1])).toBe(6);
 		tui.stop();
+	});
+
+	it("waits for the new height when tmux answers from a grid taller than the application's cached size", () => {
+		const { terminal, tui, renderScheduler, writes } = startRig();
+		try {
+			terminal.resize(40, 20);
+			renderScheduler.settle();
+			writes.length = 0;
+			// tmux has grown again but throttles the corresponding SIGWINCH.
+			// Painting this cursor row using height 20 would erase the newly
+			// revealed history and leave the editor above a large blank band.
+			terminal.sendInput("\x1b[35;17R");
+			expect(writes).toEqual([]);
+			terminal.resize(40, 40);
+			renderScheduler.settle();
+			writes.length = 0;
+			terminal.sendInput("\x1b[35;18R");
+			expect(writes.join("")).toContain("\x1b[35;1H");
+		} finally {
+			tui.stop();
+		}
 	});
 
 	it("accounts for tmux width reflow in the CPR offset math", () => {

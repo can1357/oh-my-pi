@@ -110,7 +110,7 @@ describe("AgentSession.newSession boundary", () => {
 		expect(session.sessionId).toBe(sessionManager.getSessionId());
 	});
 
-	it("does not persist a delayed old-session message into the new session", async () => {
+	it("keeps old-session messages out of the new session when notifications finish late", async () => {
 		const reached = Promise.withResolvers<void>();
 		const release = Promise.withResolvers<void>();
 		const { agent, session, sessionManager } = await createHarness({
@@ -143,22 +143,24 @@ describe("AgentSession.newSession boundary", () => {
 		};
 
 		agent.emitExternalEvent({ type: "message_end", message });
-		await reached.promise;
-		expect(sessionManager.getEntries()).toHaveLength(0);
-
-		expect(await session.newSession()).toBe(true);
-		const newSessionFile = sessionManager.getSessionFile();
-		if (!newSessionFile) throw new Error("Expected persisted new session file");
-		release.resolve();
-		await session.settleInFlightMessagePersistence();
-		await sessionManager.flush();
-
-		expect(JSON.stringify(sessionManager.getEntries())).not.toContain("previous conversation answer");
-		const reopened = await SessionManager.open(newSessionFile);
 		try {
-			expect(JSON.stringify(reopened.getEntries())).not.toContain("previous conversation answer");
+			await reached.promise;
+			expect(await session.newSession()).toBe(true);
+			const newSessionFile = sessionManager.getSessionFile();
+			if (!newSessionFile) throw new Error("Expected persisted new session file");
+			release.resolve();
+			await session.settleInFlightMessagePersistence();
+			await sessionManager.flush();
+
+			expect(JSON.stringify(sessionManager.getEntries())).not.toContain("previous conversation answer");
+			const reopened = await SessionManager.open(newSessionFile);
+			try {
+				expect(JSON.stringify(reopened.getEntries())).not.toContain("previous conversation answer");
+			} finally {
+				await reopened.close();
+			}
 		} finally {
-			await reopened.close();
+			release.resolve();
 		}
 	});
 

@@ -15,8 +15,8 @@ describe("AuthStorage MiniMax login", () => {
 	};
 
 	const storedApiKeys = (): string[] =>
-		authStorage
-			.listStoredCredentials("minimax-code")
+		authStorage.credentials
+			.list("minimax-code")
 			.map(row => (row.credential.type === "api_key" ? row.credential.key : null))
 			.filter((key): key is string => key !== null)
 			.sort();
@@ -31,31 +31,31 @@ describe("AuthStorage MiniMax login", () => {
 	});
 
 	test("relogin with a different API key keeps both stored keys", async () => {
-		await authStorage.login("minimax-code", loginCallbacks);
+		await authStorage.oauth.login("minimax-code", loginCallbacks);
 		currentApiKey = "sk-new";
-		await authStorage.login("minimax-code", loginCallbacks);
+		await authStorage.oauth.login("minimax-code", loginCallbacks);
 
 		expect(storedApiKeys()).toEqual(["sk-new", "sk-old"]);
 	});
 
 	test("relogin with the same API key does not duplicate it", async () => {
-		await authStorage.login("minimax-code", loginCallbacks);
-		await authStorage.login("minimax-code", loginCallbacks);
+		await authStorage.oauth.login("minimax-code", loginCallbacks);
+		await authStorage.oauth.login("minimax-code", loginCallbacks);
 
 		expect(storedApiKeys()).toEqual(["sk-old"]);
 	});
 
 	test("logout removes an individual stored API key, leaving the rest", async () => {
-		await authStorage.login("minimax-code", loginCallbacks);
+		await authStorage.oauth.login("minimax-code", loginCallbacks);
 		currentApiKey = "sk-new";
-		await authStorage.login("minimax-code", loginCallbacks);
+		await authStorage.oauth.login("minimax-code", loginCallbacks);
 
-		const oldRow = authStorage
-			.listStoredCredentials("minimax-code")
+		const oldRow = authStorage.credentials
+			.list("minimax-code")
 			.find(row => row.credential.type === "api_key" && row.credential.key === "sk-old");
 		if (!oldRow) throw new Error("expected stored sk-old credential");
 
-		const removed = await authStorage.removeCredential("minimax-code", oldRow.id);
+		const removed = await authStorage.credentials.removeById("minimax-code", oldRow.id);
 		expect(removed).toBe(true);
 		expect(storedApiKeys()).toEqual(["sk-new"]);
 	});

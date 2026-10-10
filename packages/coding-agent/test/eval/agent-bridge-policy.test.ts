@@ -21,7 +21,8 @@ import type { ExecutorOptions } from "../../src/task/executor";
 import * as taskExecutor from "../../src/task/executor";
 import * as isolationRunner from "../../src/task/isolation-runner";
 import { AgentOutputManager } from "../../src/task/output-manager";
-import type { AgentDefinition, AgentProgress, SingleResult, StructuredSubagentOutput } from "../../src/task/types";
+import type { AgentDefinition } from "../../src/task/types";
+import type { AgentProgress, SingleResult, StructuredSubagentOutput } from "@oh-my-pi/pi-tui/tools/task";
 import type { ToolSession } from "../../src/tools";
 
 const taskAgent = {
@@ -399,7 +400,7 @@ describe("runEvalAgent", () => {
 		]);
 	});
 
-	it("keeps bridge kernels independent while inheriting non-plan LSP and IRC policy", async () => {
+	it("inherits non-plan LSP and IRC policy", async () => {
 		mockAgents();
 		const runSpy = vi.spyOn(taskExecutor, "runSubprocess").mockImplementation(async options => singleResult(options));
 		// makeSession() defaults to enableLsp: true and task.enableLsp: true.
@@ -412,7 +413,6 @@ describe("runEvalAgent", () => {
 		expect(options.enableLsp).toBe(true);
 		expect(options.enableIrc).toBe(true);
 		expect(options.keepAlive).toBe(true);
-		expect(options.parentEvalSessionId).toBeUndefined();
 	});
 
 	it("registers temp artifact dirs for in-memory handle results so agent URLs resolve", async () => {
@@ -1057,13 +1057,7 @@ describe("runEvalAgent isolation", () => {
 
 	function mockIsolationContext(): { repoRoot: string } {
 		const repoRoot = "/repo-root";
-		vi.spyOn(isolationRunner, "prepareIsolationContext").mockResolvedValue({
-			repoRoot,
-			baseline: {
-				root: { repoRoot, headCommit: "HEAD", staged: "", unstaged: "", untracked: [], untrackedPatch: "" },
-				nested: [],
-			},
-		});
+		vi.spyOn(isolationRunner, "prepareIsolationContext").mockResolvedValue({ repoRoot });
 		return { repoRoot };
 	}
 
@@ -1111,19 +1105,6 @@ describe("runEvalAgent isolation", () => {
 		expect(plainSpy).toHaveBeenCalledTimes(1);
 		expect(explicitOn.details.isolated).toBe(true);
 		expect(mergeSpy).toHaveBeenCalledTimes(1);
-	});
-
-	it("preserves temp artifacts for non-isolated handle outputs", async () => {
-		mockAgents();
-		const rmSpy = vi.spyOn(fs, "rm").mockResolvedValue(undefined);
-		vi.spyOn(taskExecutor, "runSubprocess").mockImplementation(async options => singleResult(options));
-
-		await runEvalAgentAndWait({ prompt: "plain handle", handle: true }, { session: makeSession() });
-
-		const removedArtifactsDir = rmSpy.mock.calls.some(
-			([target]) => typeof target === "string" && target.includes("omp-eval-agent-"),
-		);
-		expect(removedArtifactsDir).toBe(false);
 	});
 
 	it("forwards merge=false as patch mode and passes the worktree cwd through baseOptions", async () => {

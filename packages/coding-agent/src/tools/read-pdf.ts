@@ -3,7 +3,8 @@ import { untilAborted } from "@oh-my-pi/pi-utils";
 import type { ToolSession } from "../sdk";
 import type { BrowserHandle } from "./browser/registry";
 import type { ScreenshotResult } from "./browser/tab-protocol";
-import { ToolAbortError, ToolError } from "./tool-errors";
+import { ToolAbortError } from "./tool-errors";
+import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 
 const PDF_IMAGE_MEMBER_RE = /^(.*\.pdf):(.*)$/i;
 const PDF_PAGE_MEMBER_RE = /^(?:p|page[-_]?)(\d+)(?:[-_].*)?\.png$/i;
@@ -95,7 +96,6 @@ export async function renderPdfPageScreenshot(
 	url.hash = `page=${page}&toolbar=0&navpanes=0&view=Fit`;
 
 	let browserLease = false;
-	let tabOpened = false;
 	let browser: BrowserHandle | undefined;
 	try {
 		const acquiredBrowser = await untilAborted(renderSignal, () =>
@@ -114,7 +114,6 @@ export async function renderPdfPageScreenshot(
 				ownerSessionId: session.getSessionId?.() ?? undefined,
 			}),
 		);
-		tabOpened = true;
 		await releaseBrowser(acquiredBrowser, { kill: false });
 		browserLease = false;
 
@@ -134,7 +133,11 @@ export async function renderPdfPageScreenshot(
 		}
 		throw error;
 	} finally {
-		if (tabOpened) await releaseTab(tabName, { kill: false });
-		if (browserLease && browser) await releaseBrowser(browser, { kill: false });
+		try {
+			// A timed-out navigation keeps the published tab, so release it by name.
+			await releaseTab(tabName, { kill: false });
+		} finally {
+			if (browserLease && browser) await releaseBrowser(browser, { kill: false });
+		}
 	}
 }

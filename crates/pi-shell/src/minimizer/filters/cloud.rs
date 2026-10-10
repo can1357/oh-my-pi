@@ -1,6 +1,6 @@
 //! Cloud and data command output filters.
 
-use std::fmt::Write as _;
+use std::{collections::HashSet, fmt::Write as _};
 
 use serde_json::{Map, Value};
 
@@ -46,7 +46,7 @@ pub fn filter(ctx: &MinimizerCtx<'_>, input: &str, exit_code: i32) -> MinimizerO
 				filter_psql(&cleaned, exit_code)
 			}
 		},
-		_ => head_tail_dedup(&cleaned, 80, 40),
+		_ => primitives::head_tail_lines(&primitives::dedup_consecutive_lines(&cleaned), 80, 40),
 	};
 
 	if text == input {
@@ -525,11 +525,14 @@ fn generic_columns(rows: &[Map<String, Value>]) -> Vec<String> {
 			if (matches!(
 				lower.as_str(),
 				"id"
-					| "name" | "arn"
-					| "status" | "state"
+					| "name"
+					| "arn"
+					| "status"
+					| "state"
 					| "created"
 					| "modified"
-					| "type" | "engine"
+					| "type"
+					| "engine"
 					| "version"
 			) || lower.ends_with("id")
 				|| lower.ends_with("name")
@@ -886,18 +889,27 @@ fn filter_psql(input: &str, exit_code: i32) -> String {
 		return String::new();
 	}
 
-	let compacted = if looks_like_psql_table(input) {
+	let table = looks_like_psql_table(input);
+	let expanded = !table && looks_like_psql_expanded(input);
+	let compacted = if table {
 		compact_psql_table(input)
-	} else if looks_like_psql_expanded(input) {
+	} else if expanded {
 		compact_psql_expanded(input)
 	} else {
 		compact_jsonish_or_text(input, 120, 80, 40)
 	};
+	// Table rows and expanded `key | value` fields are data, already capped by
+	// the compactors; only messages outside them need preserving.
+	let structured = table || expanded;
 
 	if exit_code == 0 {
-		preserve_important_lines(input, &compacted)
+		preserve_important_lines(input, &compacted, structured)
 	} else {
-		preserve_important_lines(input, &head_tail_dedup(&compacted, 80, 40))
+		preserve_important_lines(
+			input,
+			&primitives::head_tail_lines(&primitives::dedup_consecutive_lines(&compacted), 80, 40),
+			structured,
+		)
 	}
 }
 
@@ -1001,14 +1013,24 @@ fn compact_long_lines(input: &str) -> String {
 }
 
 fn compact_line(line: &str, max_chars: usize) -> String {
-	let chars: Vec<char> = line.chars().collect();
-	if chars.len() <= max_chars {
+	// Byte length bounds char count, so short lines skip the char walk.
+	if line.len() <= max_chars {
+		return line.to_string();
+	}
+	let char_count = line.chars().count();
+	if char_count <= max_chars {
 		return line.to_string();
 	}
 	let edge = max_chars / 2;
-	let start: String = chars.iter().take(edge).collect();
-	let end: String = chars.iter().skip(chars.len() - edge).collect();
-	format!("{start}[…{}ch elided…]{end}", chars.len() - edge * 2)
+	let start_end = line
+		.char_indices()
+		.nth(edge)
+		.map_or(line.len(), |(idx, _)| idx);
+	let end_start = line
+		.char_indices()
+		.nth(char_count - edge)
+		.map_or(line.len(), |(idx, _)| idx);
+	format!("{}[…{}ch elided…]{}", &line[..start_end], char_count - edge * 2, &line[end_start..])
 }
 
 fn looks_like_table(input: &str) -> bool {
@@ -1073,7 +1095,7 @@ fn compact_delimited_table(input: &str, max_rows: usize) -> String {
 	if data_rows > max_rows {
 		out.push(format!("[…{} rows elided…]", data_rows - max_rows));
 	}
-	join_lines(out)
+	primitives::join_lines(&out)
 }
 
 fn compact_psql_table(input: &str) -> String {
@@ -1091,7 +1113,11 @@ fn compact_psql_table(input: &str) -> String {
 			row_count_lines.push(trimmed.to_string());
 			continue;
 		}
-		if is_important_line(trimmed) {
+		// psql's own messages stay verbatim, even when they quote SQL with `|`
+		// (`ERROR:  operator does not exist: integer || integer`). Any other
+		// line with a `|` is a table row, whatever its first cell says, and
+		// counts against the row cap.
+		if is_psql_message(line) {
 			out.push(trimmed.to_string());
 			continue;
 		}
@@ -1115,7 +1141,7 @@ fn compact_psql_table(input: &str) -> String {
 		out.push(format!("[…{} rows elided…]", data_rows - MAX_PSQL_ROWS));
 	}
 	out.extend(row_count_lines);
-	join_lines(out)
+	primitives::join_lines(&out)
 }
 
 fn compact_psql_expanded(input: &str) -> String {
@@ -1138,6 +1164,13 @@ fn compact_psql_expanded(input: &str) -> String {
 			current.push(trimmed.to_string());
 			continue;
 		}
+		// A psql message ends the record before it and stays verbatim, even
+		// when it quotes SQL with `|`.
+		if is_psql_message(line) {
+			flush_record(&mut out, &mut current, records);
+			out.push(trimmed.to_string());
+			continue;
+		}
 		if is_important_line(trimmed) && current.is_empty() {
 			out.push(trimmed.to_string());
 			continue;
@@ -1153,7 +1186,7 @@ fn compact_psql_expanded(input: &str) -> String {
 		out.push(format!("[…{} records elided…]", records - MAX_PSQL_ROWS));
 	}
 	out.extend(row_count_lines);
-	join_lines(out)
+	primitives::join_lines(&out)
 }
 
 fn flush_record(out: &mut Vec<String>, current: &mut Vec<String>, records: usize) {
@@ -1192,53 +1225,70 @@ fn is_psql_row_count(line: &str) -> bool {
 		&& trimmed.chars().any(|ch| ch.is_ascii_digit())
 }
 
-fn preserve_important_lines(original: &str, compacted: &str) -> String {
+/// Puts important lines the compaction dropped back in front of it. In
+/// `structured` (table or expanded) output, a line holding a `|` is a cell or
+/// field rather than a message unless psql printed it as one.
+fn preserve_important_lines(original: &str, compacted: &str, structured: bool) -> String {
+	let mut kept: Option<HashSet<&str>> = None;
+	let mut seen = HashSet::new();
 	let mut out = Vec::new();
 	for line in original.lines() {
 		let trimmed = line.trim();
-		if is_important_line(trimmed)
-			&& !contains_line(&out, trimmed)
-			&& !compacted.lines().any(|existing| existing.trim() == trimmed)
-		{
-			out.push(trimmed.to_string());
+		let important = if structured && trimmed.contains('|') {
+			is_psql_message(line)
+		} else {
+			is_important_line(trimmed)
+		};
+		if !important {
+			continue;
+		}
+		let kept = kept.get_or_insert_with(|| compacted.lines().map(str::trim).collect());
+		if !kept.contains(trimmed) && seen.insert(trimmed) {
+			out.push(trimmed);
 		}
 	}
 	if out.is_empty() {
 		return compacted.to_string();
 	}
-	out.push(compacted.trim_end().to_string());
-	join_lines(out)
+	let mut text = String::with_capacity(
+		out.iter().map(|line| line.len() + 1).sum::<usize>() + compacted.len() + 1,
+	);
+	for line in out {
+		text.push_str(line);
+		text.push('\n');
+	}
+	text.push_str(compacted.trim_end());
+	text.push('\n');
+	text
+}
+
+/// A message psql printed itself (`ERROR:  …`, `HINT:  …`, `LINE 1: …`), as
+/// opposed to a table cell or an expanded-record field that merely starts
+/// with such a word. psql writes messages from column 0 as the level and a
+/// colon; table rows start with cell padding or a border, and record fields
+/// with a column name followed by ` | `.
+fn is_psql_message(line: &str) -> bool {
+	const LEVELS: [&str; 5] = ["ERROR:", "FATAL:", "PANIC:", "DETAIL:", "HINT:"];
+	LEVELS.iter().any(|level| line.starts_with(level))
+		|| line.strip_prefix("LINE ").is_some_and(|rest| {
+			let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
+			digits > 0 && rest.as_bytes().get(digits) == Some(&b':')
+		})
 }
 
 fn is_important_line(line: &str) -> bool {
-	let upper = line.trim_start().to_ascii_uppercase();
-	upper.starts_with("ERROR")
-		|| upper.starts_with("FATAL")
-		|| upper.starts_with("PANIC")
-		|| upper.starts_with("DETAIL")
-		|| upper.starts_with("HINT")
-		|| upper.starts_with("LINE ")
-		|| upper.starts_with("SQLSTATE")
-		|| upper.starts_with("AN ERROR OCCURRED")
-		|| upper.contains("EXCEPTION")
-}
-
-fn contains_line(lines: &[String], needle: &str) -> bool {
-	lines.iter().any(|line| line == needle)
-}
-
-fn head_tail_dedup(input: &str, head: usize, tail: usize) -> String {
-	primitives::head_tail_lines(&primitives::dedup_consecutive_lines(input), head, tail)
-}
-
-fn join_lines(lines: Vec<String>) -> String {
-	if lines.is_empty() {
-		String::new()
-	} else {
-		let mut out = lines.join("\n");
-		out.push('\n');
-		out
-	}
+	const PREFIXES: [&str; 8] =
+		["ERROR", "FATAL", "PANIC", "DETAIL", "HINT", "LINE ", "SQLSTATE", "AN ERROR OCCURRED"];
+	let line = line.trim_start();
+	PREFIXES.iter().any(|prefix| {
+		line
+			.as_bytes()
+			.get(..prefix.len())
+			.is_some_and(|head| head.eq_ignore_ascii_case(prefix.as_bytes()))
+	}) || line
+		.as_bytes()
+		.windows(b"EXCEPTION".len())
+		.any(|window| window.eq_ignore_ascii_case(b"EXCEPTION"))
 }
 
 #[cfg(test)]
@@ -1335,6 +1385,77 @@ mod tests {
 				.contains("ERROR: duplicate key value violates unique constraint")
 		);
 		assert!(out.text.contains("(2 rows)"));
+	}
+
+	/// Data rows whose first cell reads like a message (`ERROR`, `exception`)
+	/// are table rows: they stay normalized and under the row cap rather than
+	/// all being re-emitted in front of the table.
+	#[test]
+	fn psql_message_like_data_rows_stay_under_the_row_cap() {
+		let cfg = MinimizerConfig { enabled: true, ..Default::default() };
+		let ctx = ctx("psql", &cfg);
+		let mut input = String::from(" level | message\n-------+---------\n");
+		for idx in 0..5000 {
+			input.push_str(&format!(" ERROR | disk full on volume {idx}\n"));
+		}
+		input.push_str("(5000 rows)\n");
+		let out = filter(&ctx, &input, 0);
+		assert!(out.text.starts_with("level\tmessage\n"), "{}", out.text);
+		assert_eq!(out.text.matches("disk full").count(), MAX_PSQL_ROWS);
+		assert!(
+			out.text
+				.contains(&format!("[…{} rows elided…]", 5000 - MAX_PSQL_ROWS))
+		);
+		assert!(out.text.ends_with("(5000 rows)\n"));
+	}
+
+	/// psql messages after a table that quote SQL with `||` are messages, not
+	/// rows: they stay verbatim even once the table has used up the row cap.
+	#[test]
+	fn psql_messages_quoting_pipes_after_a_table_stay_verbatim() {
+		let cfg = MinimizerConfig { enabled: true, ..Default::default() };
+		let ctx = ctx("psql", &cfg);
+		let mut input = String::from(" id | name\n----+------\n");
+		for idx in 0..50 {
+			input.push_str(&format!(" {idx:>2} | n{idx}\n"));
+		}
+		input.push_str(
+			"(50 rows)\n\nERROR:  operator does not exist: integer || integer\nLINE 1: select 1 || \
+			 2\n                 ^\nHINT:  No operator matches the given name and argument types.\n",
+		);
+		let out = filter(&ctx, &input, 1);
+		assert!(
+			out.text
+				.contains("ERROR:  operator does not exist: integer || integer\n"),
+			"{}",
+			out.text
+		);
+		assert!(out.text.contains("LINE 1: select 1 || 2\n"), "{}", out.text);
+		assert!(
+			out.text
+				.contains(&format!("[…{} rows elided…]", 50 - MAX_PSQL_ROWS)),
+			"{}",
+			out.text
+		);
+	}
+
+	/// The same in expanded output: the message after the records stays
+	/// verbatim instead of turning into a field of the last record.
+	#[test]
+	fn psql_messages_quoting_pipes_after_expanded_records_stay_verbatim() {
+		let cfg = MinimizerConfig { enabled: true, ..Default::default() };
+		let ctx = ctx("psql", &cfg);
+		let input = "-[ RECORD 1 ]-----\nid | 1\nname | alice\nERROR:  operator does not exist: \
+		             integer || integer\nLINE 1: select 1 || 2\n";
+		let out = filter(&ctx, input, 1);
+		assert!(out.text.contains("-[ RECORD 1 ]----- id=1 name=alice\n"), "{}", out.text);
+		assert!(
+			out.text
+				.contains("ERROR:  operator does not exist: integer || integer\n"),
+			"{}",
+			out.text
+		);
+		assert!(out.text.contains("LINE 1: select 1 || 2\n"), "{}", out.text);
 	}
 
 	#[test]
@@ -1599,9 +1720,9 @@ mod tests {
 	fn s3_ls_summarize_footer_is_not_parsed_as_row() {
 		let cfg = MinimizerConfig { enabled: true, ..Default::default() };
 		let ctx = aws_ctx("s3", "aws s3 ls --summarize s3://b/", &cfg);
-		// `--summarize` appends `Total Objects:`/`Total Size:` footers that lack a
-		// real date/time prefix; they must not be reshaped into bogus object rows or
-		// silently dropped.
+		// `--summarize` appends `Total Objects:`/`Total Size:` footers that lack
+		// a real date/time prefix; they must not be reshaped into bogus object
+		// rows or silently dropped.
 		let input = "2026-05-27 01:02:03 100 builds\n\nTotal Objects: 1\nTotal Size: 100\n";
 		let out = filter(&ctx, input, 0);
 		assert!(out.text.contains("builds\t2026-05-27 01:02:03"), "{:?}", out.text);
@@ -1613,8 +1734,8 @@ mod tests {
 	fn s3_ls_common_prefix_with_spaces_is_preserved() {
 		let cfg = MinimizerConfig { enabled: true, ..Default::default() };
 		let ctx = aws_ctx("s3", "aws s3 ls s3://b/", &cfg);
-		// `PRE` common-prefix names can contain spaces; the full name must survive
-		// rather than being truncated to the first token.
+		// `PRE` common-prefix names can contain spaces; the full name must
+		// survive rather than being truncated to the first token.
 		let out = filter(&ctx, "                           PRE my folder/\n", 0);
 		assert!(out.text.contains("my folder"), "{:?}", out.text);
 	}

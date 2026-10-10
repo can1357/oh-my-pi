@@ -1,10 +1,12 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import { streamOpenAIResponses } from "@oh-my-pi/pi-ai/providers/openai-responses";
+import { stream } from "@oh-my-pi/pi-ai/stream";
 import type { Context, FetchImpl, Model, ModelSpec, ProviderSessionState } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { resolveModelPolicy } from "@oh-my-pi/pi-catalog/compat/resolve";
 import { classifyModel } from "@oh-my-pi/pi-catalog/compat/taxonomy";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
+import * as utils from "@oh-my-pi/pi-utils";
 
 const model = getBundledModel("openai", "gpt-5-mini") as Model<"openai-responses">;
 
@@ -48,6 +50,72 @@ function createStatefulSse(text: string, responseId: string): Response {
 				role: "assistant",
 				status: "completed",
 				content: [{ type: "output_text", text }],
+			},
+		},
+		{
+			type: "response.completed",
+			response: {
+				id: responseId,
+				status: "completed",
+				usage: { input_tokens: 5, output_tokens: 3, total_tokens: 8, input_tokens_details: { cached_tokens: 0 } },
+			},
+		},
+	];
+	return new Response(`${events.map(event => `data: ${JSON.stringify(event)}`).join("\n\n")}\n\n`, {
+		status: 200,
+		headers: { "content-type": "text/event-stream" },
+	});
+}
+
+function createStatefulSseWithEmptyFinal(responseId: string): Response {
+	const commentary = "Waiting for the background job.";
+	const events = [
+		{ type: "response.created", response: { id: responseId } },
+		{
+			type: "response.output_item.added",
+			item: {
+				type: "message",
+				id: `msg_${responseId}_commentary`,
+				role: "assistant",
+				status: "in_progress",
+				phase: "commentary",
+				content: [],
+			},
+		},
+		{ type: "response.content_part.added", part: { type: "output_text", text: "" } },
+		{ type: "response.output_text.delta", delta: commentary },
+		{
+			type: "response.output_item.done",
+			item: {
+				type: "message",
+				id: `msg_${responseId}_commentary`,
+				role: "assistant",
+				status: "completed",
+				phase: "commentary",
+				content: [{ type: "output_text", text: commentary }],
+			},
+		},
+		{
+			type: "response.output_item.added",
+			item: {
+				type: "message",
+				id: `msg_${responseId}_final`,
+				role: "assistant",
+				status: "in_progress",
+				phase: "final_answer",
+				content: [],
+			},
+		},
+		{ type: "response.content_part.added", part: { type: "output_text", text: "" } },
+		{
+			type: "response.output_item.done",
+			item: {
+				type: "message",
+				id: `msg_${responseId}_final`,
+				role: "assistant",
+				status: "completed",
+				phase: "final_answer",
+				content: [{ type: "output_text", text: "" }],
 			},
 		},
 		{
@@ -116,6 +184,50 @@ describe("openai-responses stateful chaining", () => {
 		expect(deltaInput[0]?.role).toBe("user");
 		expect(JSON.stringify(deltaInput)).toContain("Second question");
 		expect(JSON.stringify(deltaInput)).not.toContain("Answer 1");
+	});
+
+	it("breaks the response chain when replay sanitization removes an output item", async () => {
+		const sentRequests: Array<Record<string, unknown>> = [];
+		const fetchMock = vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+			sentRequests.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+			if (sentRequests.length === 1) return createStatefulSseWithEmptyFinal("resp_1");
+			return createStatefulSse("Second answer", "resp_2");
+		}) as FetchImpl;
+		const providerSessionState = new Map<string, ProviderSessionState>();
+		const options = {
+			apiKey: "test-key",
+			sessionId: "stateful-sanitized-replay",
+			providerSessionState,
+			statefulResponses: true,
+			reasoning: "low" as const,
+			fetch: fetchMock,
+		};
+		const firstUser = { role: "user" as const, content: "First question", timestamp: 1000 };
+		const firstResponse = await streamOpenAIResponses(
+			model,
+			{ systemPrompt, messages: [firstUser] },
+			options,
+		).result();
+		await streamOpenAIResponses(
+			model,
+			{
+				systemPrompt,
+				messages: [firstUser, firstResponse, { role: "user", content: "Second question", timestamp: 1001 }],
+			},
+			options,
+		).result();
+
+		expect(sentRequests).toHaveLength(2);
+		expect(sentRequests[1]?.previous_response_id).toBeUndefined();
+		const replay = sentRequests[1]?.input as Array<Record<string, unknown>>;
+		expect(replay).toContainEqual(
+			expect.objectContaining({
+				role: "assistant",
+				phase: "commentary",
+				content: [{ type: "output_text", text: "Waiting for the background job." }],
+			}),
+		);
+		expect(replay).not.toContainEqual(expect.objectContaining({ role: "assistant", phase: "final_answer" }));
 	});
 
 	it("keeps the automatic explicit cache breakpoint stable across chained turns", async () => {
@@ -670,6 +782,73 @@ describe("openai-responses stateful chaining", () => {
 		expect(sentRequests[2]?.store).toBe(false);
 		expect(sentRequests[3]?.previous_response_id).toBeUndefined();
 		expect(sentRequests[3]?.store).toBe(false);
+	});
+
+	it.each([
+		["opts a custom endpoint into chaining without official-only fields", "custom", true, undefined, undefined, true],
+		["opts an official endpoint out of chaining", "openai", false, undefined, undefined, false],
+		["lets the env opt-out override model opt-in", "custom", true, "0", undefined, false],
+		["lets the env opt-in override model opt-out", "openai", false, "1", undefined, true],
+		["lets the call opt-in override env and model opt-outs", "custom", false, "0", true, true],
+		["lets the call opt-out override env and model opt-ins", "openai", true, "1", false, false],
+		[
+			"preserves model opt-in through OpenRouter's Responses dispatch",
+			"openrouter",
+			true,
+			undefined,
+			undefined,
+			true,
+		],
+	] as const)("%s", async (_name, provider, compatValue, envValue, callValue, enabled) => {
+		const originalFlag = utils.$flag;
+		vi.spyOn(utils, "$flag").mockImplementation((name, fallback) =>
+			name === "PI_OPENAI_STATEFUL" ? utils.parseFlag(envValue, fallback) : originalFlag(name, fallback),
+		);
+		const endpointModel = buildModel({
+			...model,
+			api: provider === "openrouter" ? "openrouter" : "openai-responses",
+			provider,
+			baseUrl: provider === "openai" ? model.baseUrl : "https://proxy.example.com/v1",
+			compat: { statefulResponses: compatValue },
+		});
+		const sentRequests: Array<Record<string, unknown>> = [];
+		const options = {
+			apiKey: "test-key",
+			sessionId: "stateful-compat-session",
+			providerSessionState: new Map<string, ProviderSessionState>(),
+			statefulResponses: callValue,
+			textVerbosity: "medium" as const,
+			fetch: createCapturingFetch(sentRequests),
+		};
+		const firstUser = { role: "user" as const, content: "First question", timestamp: 1000 };
+		const firstResponse = await stream(endpointModel, { systemPrompt, messages: [firstUser] }, options).result();
+		const secondResponse = await stream(
+			endpointModel,
+			{
+				systemPrompt,
+				messages: [firstUser, firstResponse, { role: "user", content: "Second question", timestamp: 1001 }],
+			},
+			options,
+		).result();
+
+		expect(firstResponse.stopReason).toBe("stop");
+		expect(secondResponse.stopReason).toBe("stop");
+		expect(sentRequests).toHaveLength(2);
+		expect(sentRequests[0]?.store).toBe(enabled);
+		expect(sentRequests[1]?.store).toBe(enabled);
+		expect(sentRequests[1]?.previous_response_id).toBe(enabled ? "resp_1" : undefined);
+		if (enabled) {
+			expect(sentRequests[1]?.input).toEqual([
+				{ role: "user", content: [{ type: "input_text", text: "Second question" }] },
+			]);
+		} else {
+			expect(JSON.stringify(sentRequests[1]?.input)).toContain("First question");
+		}
+		if (provider !== "openai") {
+			expect(sentRequests[0]?.text).toBeUndefined();
+			expect(sentRequests[0]?.stream_options).toBeUndefined();
+			expect(sentRequests[0]?.prompt_cache_retention).toBeUndefined();
+		}
 	});
 
 	it("chains by default against the official OpenAI API", async () => {

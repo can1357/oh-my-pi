@@ -17,6 +17,7 @@
  */
 
 import { afterEach, describe, expect, it, spyOn, vi } from "bun:test";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { CmuxKind } from "@oh-my-pi/pi-coding-agent/tools/browser/cmux/rpc";
 import { CmuxSocketClient } from "@oh-my-pi/pi-coding-agent/tools/browser/cmux/socket-client";
 import { acquireBrowser } from "@oh-my-pi/pi-coding-agent/tools/browser/registry";
@@ -52,7 +53,7 @@ function makeSession(cwd: string): ToolSession {
 	return {
 		cwd,
 		hasUI: false,
-		settings: { get: () => undefined },
+		settings: Settings.isolated(),
 		getSessionFile: () => null,
 	} as unknown as ToolSession;
 }

@@ -1,4 +1,6 @@
-import { logger } from "@oh-my-pi/pi-utils";
+import { isFastembedModelCached } from "@oh-my-pi/pi-mnemopi/core/fastembed-model-cache";
+import { getFastembedCacheDir, logger } from "@oh-my-pi/pi-utils";
+import { trackDownload } from "../downloads/activity";
 import {
 	createUnavailableWorker,
 	createWorkerHandle,
@@ -10,7 +12,7 @@ import {
 	type SpawnedSubprocess,
 	smokeTestWorker,
 	spawnWorkerOrUnavailable,
-	type WorkerHandle,
+	type RefCountedWorkerHandle,
 } from "../subprocess/worker-client";
 import type { MnemopiEmbedModelId, MnemopiEmbedWorkerInbound, MnemopiEmbedWorkerOutbound } from "./embed-protocol";
 
@@ -22,10 +24,10 @@ import type { MnemopiEmbedModelId, MnemopiEmbedWorkerInbound, MnemopiEmbedWorker
  * provider loads fastembed in the main process (issue #3031; the mnemopi
  * sibling of the tiny-model fix from #1606 / #1607).
  */
-export type MnemopiEmbedWorkerHandle = WorkerHandle<MnemopiEmbedWorkerInbound, MnemopiEmbedWorkerOutbound>;
+export type MnemopiEmbedWorkerHandle = RefCountedWorkerHandle<MnemopiEmbedWorkerInbound, MnemopiEmbedWorkerOutbound>;
 
 type PendingRequest =
-	| { kind: "init"; model: MnemopiEmbedModelId; resolve: (ok: boolean) => void }
+	| { kind: "init"; model: MnemopiEmbedModelId; resolve: (error: string | undefined) => void }
 	| { kind: "embed"; model: MnemopiEmbedModelId; resolve: (vectors: number[][] | Error) => void };
 
 /**
@@ -54,21 +56,45 @@ function wrapSubprocess(spawned: SpawnedSubprocess<MnemopiEmbedWorkerOutbound>):
 	// Embed keeps its own guarded `proc.send` (neutralizes only the synchronous
 	// throw, not the async EPIPE rejection) rather than the shared `safeSend`
 	// the other workers use — behaviour preserved verbatim.
-	return createWorkerHandle<MnemopiEmbedWorkerInbound, MnemopiEmbedWorkerOutbound>(spawned, message => {
-		try {
-			proc.send(message);
-		} catch (error) {
-			logger.debug("mnemopi-embed: send to subprocess failed", {
-				error: error instanceof Error ? error.message : String(error),
-			});
-		}
-	});
+	return {
+		...createWorkerHandle<MnemopiEmbedWorkerInbound, MnemopiEmbedWorkerOutbound>(spawned, message => {
+			try {
+				proc.send(message);
+			} catch (error) {
+				logger.debug("mnemopi-embed: send to subprocess failed", {
+					error: error instanceof Error ? error.message : String(error),
+				});
+			}
+		}),
+		ref() {
+			try {
+				proc.ref();
+			} catch {
+				// Already gone.
+			}
+		},
+		unref() {
+			try {
+				proc.unref();
+			} catch {
+				// Already gone.
+			}
+		},
+	};
+}
+
+function createUnavailableMnemopiEmbedWorker(error: unknown): MnemopiEmbedWorkerHandle {
+	return {
+		...createUnavailableWorker<MnemopiEmbedWorkerInbound, MnemopiEmbedWorkerOutbound>(error),
+		ref() {},
+		unref() {},
+	};
 }
 
 function spawnMnemopiEmbedWorker(): MnemopiEmbedWorkerHandle {
 	return spawnWorkerOrUnavailable(
 		() => wrapSubprocess(createMnemopiEmbedSubprocess()),
-		createUnavailableWorker<MnemopiEmbedWorkerInbound, MnemopiEmbedWorkerOutbound>,
+		createUnavailableMnemopiEmbedWorker,
 		"mnemopi embed worker spawn failed; local embeddings disabled",
 	);
 }
@@ -106,6 +132,7 @@ export class MnemopiEmbedClient {
 	#unsubscribeError: (() => void) | null = null;
 	#pending = new Map<string, PendingRequest>();
 	#nextRequestId = 0;
+	#refed = false;
 	#spawnWorker: () => MnemopiEmbedWorkerHandle;
 	#requestTimeoutMs: number;
 
@@ -129,19 +156,28 @@ export class MnemopiEmbedClient {
 		model: MnemopiEmbedModelId,
 		cacheDir: string | undefined,
 	): Promise<MnemopiSubprocessEmbeddingModel | null> {
+		// fastembed exposes no byte progress; any missing model file means this
+		// init downloads it.
+		const cached = await isFastembedModelCached(model, cacheDir ?? getFastembedCacheDir());
+		const tracker = cached ? undefined : trackDownload(model.replace(/^fast-/, ""), { detail: "downloading" });
 		try {
 			const worker = this.#ensureWorker();
 			const id = String(++this.#nextRequestId);
-			const { promise, resolve } = Promise.withResolvers<boolean>();
-			this.#pending.set(id, { kind: "init", model, resolve });
+			const { promise, resolve } = Promise.withResolvers<string | undefined>();
+			this.#addPending(id, { kind: "init", model, resolve });
 			try {
 				worker.send({ type: "init", id, model, cacheDir });
-				const ok = await promise;
-				if (!ok) return null;
+				const error = await promise;
+				if (error !== undefined) {
+					tracker?.fail(error);
+					return null;
+				}
+				tracker?.done();
 			} finally {
-				this.#pending.delete(id);
+				this.#deletePending(id);
 			}
 		} catch (error) {
+			tracker?.fail(error);
 			logger.debug("mnemopi-embed: init failed", {
 				model,
 				error: error instanceof Error ? error.message : String(error),
@@ -159,10 +195,11 @@ export class MnemopiEmbedClient {
 		this.#unsubscribeError?.();
 		this.#unsubscribeError = null;
 		for (const pending of this.#pending.values()) {
-			if (pending.kind === "init") pending.resolve(false);
+			if (pending.kind === "init") pending.resolve("mnemopi embed worker terminated");
 			else pending.resolve(new Error("mnemopi embed worker terminated"));
 		}
 		this.#pending.clear();
+		this.#refed = false;
 		try {
 			await worker?.terminate();
 		} catch {
@@ -179,7 +216,7 @@ export class MnemopiEmbedClient {
 		const worker = this.#ensureWorker();
 		const id = String(++this.#nextRequestId);
 		const { promise, resolve } = Promise.withResolvers<number[][] | Error>();
-		this.#pending.set(id, { kind: "embed", model, resolve });
+		this.#addPending(id, { kind: "embed", model, resolve });
 		try {
 			// Carry the (model, cacheDir) the wrapper was bound to in every
 			// embed message: dispose + respawn between two embeds on the same
@@ -191,15 +228,15 @@ export class MnemopiEmbedClient {
 			if (result instanceof Error) throw result;
 			return result;
 		} finally {
-			this.#pending.delete(id);
+			this.#deletePending(id);
 		}
 	}
 
 	/**
 	 * Await one steady-state embed reply, bounded by
 	 * {@link EMBED_REQUEST_TIMEOUT_MS}. The timeout timer is `unref`'d so a
-	 * pending request never keeps the parent event loop alive on its own (the
-	 * awaiting caller does). On expiry the wedged worker is SIGKILL-reaped via
+	 * pending request has only the worker reference keeping the parent event
+	 * loop alive. On expiry the wedged worker is SIGKILL-reaped via
 	 * {@link terminate} — faulting any other in-flight request and letting the
 	 * next call respawn a fresh child — before the request rejects, so a hung
 	 * native runtime cannot pin a turn's recall or shutdown consolidation
@@ -244,6 +281,33 @@ export class MnemopiEmbedClient {
 		return worker;
 	}
 
+	/** Register a pending request and keep the worker referenced while work is in flight. */
+	#addPending(id: string, request: PendingRequest): void {
+		this.#pending.set(id, request);
+		this.#syncWorkerRef();
+	}
+
+	/** Drop a pending request and unref the worker once nothing is in flight. */
+	#deletePending(id: string): void {
+		if (this.#pending.delete(id)) this.#syncWorkerRef();
+	}
+
+	/**
+	 * The embeddings subprocess is spawned unref'd so an idle interactive or
+	 * daemon session never blocks exit. Keep it referenced only while a request
+	 * is pending so short-lived print-mode commands cannot exit before recall
+	 * receives the worker response (issue #12067).
+	 */
+	#syncWorkerRef(): void {
+		const worker = this.#worker;
+		if (!worker) return;
+		const shouldRef = this.#pending.size > 0;
+		if (shouldRef === this.#refed) return;
+		this.#refed = shouldRef;
+		if (shouldRef) worker.ref();
+		else worker.unref();
+	}
+
 	#handleMessage(message: MnemopiEmbedWorkerOutbound): void {
 		if (message.type === "log") {
 			logWorkerMessage(message);
@@ -253,9 +317,9 @@ export class MnemopiEmbedClient {
 
 		const pending = this.#pending.get(message.id);
 		if (!pending) return;
-		this.#pending.delete(message.id);
+		this.#deletePending(message.id);
 		if (message.type === "ready") {
-			if (pending.kind === "init") pending.resolve(true);
+			if (pending.kind === "init") pending.resolve(undefined);
 			return;
 		}
 		if (message.type === "vectors") {
@@ -263,14 +327,14 @@ export class MnemopiEmbedClient {
 			return;
 		}
 		logger.debug("mnemopi-embed: worker returned error", { error: message.error });
-		if (pending.kind === "init") pending.resolve(false);
+		if (pending.kind === "init") pending.resolve(message.error);
 		else pending.resolve(new Error(message.error));
 	}
 
 	#handleWorkerError(error: Error): void {
 		logger.warn("mnemopi-embed: worker error", { error: error.message });
 		for (const pending of this.#pending.values()) {
-			if (pending.kind === "init") pending.resolve(false);
+			if (pending.kind === "init") pending.resolve(error.message);
 			else pending.resolve(error);
 		}
 		this.#pending.clear();

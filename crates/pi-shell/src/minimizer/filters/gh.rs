@@ -11,8 +11,10 @@ pub fn supports(subcommand: Option<&str>) -> bool {
 		Some(
 			"pr"
 				| "issue"
-				| "run" | "workflow"
-				| "repo" | "api"
+				| "run"
+				| "workflow"
+				| "repo"
+				| "api"
 				| "search"
 				| "release"
 				| "codespace"
@@ -32,10 +34,10 @@ pub fn filter(ctx: &MinimizerCtx<'_>, input: &str, exit_code: i32) -> MinimizerO
 		Some("pr") if primitives::command_has_ordered_tokens(ctx.command, "pr", "checks") => {
 			match filter_pr_checks(&cleaned) {
 				Some(summary) => summary,
-				None => filter_pr_issue(&cleaned, exit_code),
+				None => markdown_view(&cleaned, exit_code),
 			}
 		},
-		Some("pr" | "issue") => filter_pr_issue(&cleaned, exit_code),
+		Some("pr" | "issue") => markdown_view(&cleaned, exit_code),
 		Some("run" | "workflow") => filter_run(&cleaned, exit_code),
 		_ => primitives::head_tail_dedup(&cleaned),
 	};
@@ -86,14 +88,6 @@ fn preserves_raw_mode(ctx: &MinimizerCtx<'_>) -> bool {
 	}
 }
 
-fn filter_pr_issue(input: &str, exit_code: i32) -> String {
-	if exit_code != 0 {
-		return primitives::head_tail_dedup(input);
-	}
-	let markdown_filtered = filter_markdown_noise(input);
-	primitives::head_tail_dedup(&markdown_filtered)
-}
-
 /// Summarize the DEFAULT (non-JSON) `gh pr checks` table.
 ///
 /// Default human output is a tab-separated table:
@@ -113,12 +107,13 @@ fn filter_pr_checks(input: &str) -> Option<String> {
 
 	for line in input.lines() {
 		let trimmed = line.trim_start();
-		// A real check row is `<symbol>\t<name>\t<duration>\t<url>`: a status glyph
-		// followed by at least one TAB-delimited field. Requiring the tab shape
-		// keyed off the row's first glyph — NOT the leading char alone — rejects
-		// separators (`---`), blank-glyph lines, and bulleted annotation detail
-		// (`- ...`, `* ...`) that gh/CI tools emit, any of which would otherwise be
-		// miscounted as a phantom skipping/pending check and inflate the summary.
+		// A real check row is `<symbol>\t<name>\t<duration>\t<url>`: a status
+		// glyph followed by at least one TAB-delimited field. Requiring the tab
+		// shape keyed off the row's first glyph — NOT the leading char alone —
+		// rejects separators (`---`), blank-glyph lines, and bulleted
+		// annotation detail (`- ...`, `* ...`) that gh/CI tools emit, any of
+		// which would otherwise be miscounted as a phantom skipping/pending
+		// check and inflate the summary.
 		if !trimmed.contains('\t') {
 			continue;
 		}
@@ -177,7 +172,30 @@ fn filter_run(input: &str, exit_code: i32) -> String {
 	primitives::head_tail_lines(&deduped, 120, 80)
 }
 
-fn filter_markdown_noise(input: &str) -> String {
+fn contains_failure_signal(input: &str) -> bool {
+	input.lines().any(|line| {
+		let lower = line.to_ascii_lowercase();
+		lower.contains("error")
+			|| lower.contains("failed")
+			|| lower.contains("failure")
+			|| lower.contains("cancelled")
+	})
+}
+
+/// Issue/PR view filter, shared with `glab` issue/MR view.
+///
+/// On failure keep the raw output (dedup + head/tail) so error context
+/// survives; on success strip markdown body noise (HTML comments,
+/// badges/images, horizontal rules, blank-line runs) first.
+#[must_use]
+pub(super) fn markdown_view(input: &str, exit_code: i32) -> String {
+	if exit_code != 0 {
+		return primitives::head_tail_dedup(input);
+	}
+	primitives::head_tail_dedup(&strip_markdown_noise(input))
+}
+
+fn strip_markdown_noise(input: &str) -> String {
 	let mut out = String::new();
 	let mut in_html_comment = false;
 	let mut previous_blank = false;
@@ -191,6 +209,8 @@ fn filter_markdown_noise(input: &str) -> String {
 				comment_lines = 0;
 			} else {
 				comment_lines += 1;
+				// Cap unclosed comment consumption at 50 lines so malformed or
+				// truncated markdown cannot swallow the rest of the body.
 				if comment_lines > 50 {
 					in_html_comment = false;
 					comment_lines = 0;
@@ -223,16 +243,6 @@ fn filter_markdown_noise(input: &str) -> String {
 	out
 }
 
-fn contains_failure_signal(input: &str) -> bool {
-	input.lines().any(|line| {
-		let lower = line.to_ascii_lowercase();
-		lower.contains("error")
-			|| lower.contains("failed")
-			|| lower.contains("failure")
-			|| lower.contains("cancelled")
-	})
-}
-
 #[cfg(test)]
 mod tests {
 	use super::*;
@@ -250,7 +260,7 @@ mod tests {
 	fn pr_issue_filter_removes_markdown_template_noise() {
 		let input =
 			"<!-- template -->\n# Title\n[![CI](https://img.shields.io/badge.svg)](url)\nBody\n---\n";
-		let out = filter_pr_issue(input, 0);
+		let out = markdown_view(input, 0);
 		assert!(!out.contains("template"));
 		assert!(!out.contains("shields.io"));
 		assert!(out.contains("# Title"));
@@ -341,8 +351,8 @@ mod tests {
 		// `--watch` re-renders the whole table each interval; the captured buffer
 		// is many concatenated frames. Summarizing it would count every row once
 		// per frame (counts x frames) and let duplicate failed rows exhaust the
-		// FAILED_ROW_CAP, hiding distinct later failures. A watch must pass through
-		// raw so the live frames survive intact.
+		// FAILED_ROW_CAP, hiding distinct later failures. A watch must pass
+		// through raw so the live frames survive intact.
 		let cfg = MinimizerConfig { enabled: true, ..Default::default() };
 		let ctx = test_ctx(Some("pr"), "gh pr checks 123 --watch", &cfg);
 		// Three frames of the same 1-pass/1-fail PR (what a watch concatenates).
@@ -397,7 +407,8 @@ mod tests {
 
 	#[test]
 	fn pr_checks_falls_back_when_no_rows() {
-		// No recognizable glyph rows -> generic pr/issue path, not a bogus summary.
+		// No recognizable glyph rows -> generic pr/issue path, not a bogus
+		// summary.
 		let cfg = MinimizerConfig { enabled: true, ..Default::default() };
 		let ctx = test_ctx(Some("pr"), "gh pr checks 123", &cfg);
 		let input = "no checks reported on this pull request\n";

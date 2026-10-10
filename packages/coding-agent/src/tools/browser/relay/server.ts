@@ -4,7 +4,8 @@
  * Impersonates Chrome's CDP discovery endpoint so the omp browser tool (and
  * any puppeteer client) can connect with a plain `browserURL`:
  * - `GET /json/version` → 200 with `webSocketDebuggerUrl` once the extension
- *   is connected, 503 before that (clients like `waitForCdp` keep polling).
+ *   is connected, 503 with a {@link RelayUnavailableInfo} body before that
+ *   (`waitForRelayExtension` decides from it whether polling is worthwhile).
  * - `GET /json` / `/json/list` → attachable page targets (debugging aid).
  * - `WS /cdp` → downstream CDP clients (puppeteer).
  * - `WS /ext` → the Chrome extension (token-gated when configured).
@@ -12,6 +13,7 @@
  * Binds loopback only: anything that can reach this port can drive the
  * user's logged-in browser.
  */
+import { VERSION } from "@oh-my-pi/pi-utils/dirs";
 import { RelayBridge } from "./bridge";
 
 /** Options for {@link startRelayServer}. */
@@ -22,6 +24,19 @@ export interface RelayServerOptions {
 	/** Group tabs the agent actively drives under one per-window Chrome tab group (default on); `false` disables. */
 	group?: boolean | { title: string; color: string };
 	log?: (message: string, data?: Record<string, unknown>) => void;
+}
+
+/** Body of the 503 `/json/version` answer while no extension is connected. */
+export interface RelayUnavailableInfo {
+	/** Version of the OMP binary serving this relay. */
+	ompRelayVersion: string;
+	error: string;
+	/** An extension completed the hello handshake at least once in this server's lifetime. */
+	extensionSeen: boolean;
+	/** Milliseconds this server has been listening. */
+	uptimeMs: number;
+	/** Milliseconds since the last connected extension went away; absent if none has connected yet. */
+	disconnectedMs?: number;
 }
 
 /** A running relay server. */
@@ -61,6 +76,7 @@ export function startRelayServer(opts: RelayServerOptions): RelayServer {
 		opts.group === false ? null : opts.group === true || opts.group === undefined ? DEFAULT_GROUP : opts.group;
 	const bridge = new RelayBridge({ log, group });
 	const sockets = new Set<RelayWebSocket>();
+	const startedAt = Date.now();
 
 	const server = Bun.serve({
 		hostname: "127.0.0.1",
@@ -98,7 +114,15 @@ export function startRelayServer(opts: RelayServerOptions): RelayServer {
 			if (req.method !== "GET") return new Response("Method not allowed", { status: 405 });
 			if (path === "/json/version") {
 				if (!bridge.ready) {
-					return Response.json({ error: "relay extension is not connected" }, { status: 503 });
+					const disconnectedMs = bridge.extensionGoneForMs;
+					const info: RelayUnavailableInfo = {
+						ompRelayVersion: VERSION,
+						error: "relay extension is not connected",
+						extensionSeen: bridge.extensionSeen,
+						uptimeMs: Date.now() - startedAt,
+						...(disconnectedMs === null ? {} : { disconnectedMs }),
+					};
+					return Response.json(info, { status: 503 });
 				}
 				return Response.json(bridge.versionInfo(`ws://${host}/cdp`));
 			}

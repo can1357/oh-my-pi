@@ -1,6 +1,10 @@
 // Provider-wire compat for "together"; regenerated from the frozen census using deployment contract selectors.
 
 provider "together" {
+	default-model "moonshotai/Kimi-K2.7-Code"
+	env "TOGETHER_API_KEY"
+	discovery label="Together"
+
 	// Replaces the strict-mode provider whitelist entry.
 	supports-strict-mode #true
 	thinking-mode "effort"

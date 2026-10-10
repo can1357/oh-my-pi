@@ -226,7 +226,8 @@ mod platform {
 	unsafe extern "C" fn completion_invoke(block: *mut CompletionBlock, token: Id, error: Id) {
 		let completion = catch_unwind(AssertUnwindSafe(|| {
 			if !token.is_null() {
-				// SAFETY: `token` is a live NSData for the duration of the callback.
+				// SAFETY: `token` is a live NSData for the duration of the
+				// callback.
 				let encoded =
 					unsafe { msg_send_u64(token, selector(c"base64EncodedStringWithOptions:"), 0) };
 				if encoded.is_null() {
@@ -236,7 +237,8 @@ mod platform {
 				return Completion::Token(unsafe { ns_string(encoded) });
 			}
 			if !error.is_null() {
-				// SAFETY: `error` is a live NSError for the duration of the callback.
+				// SAFETY: `error` is a live NSError for the duration of the
+				// callback.
 				let description = unsafe { msg_send_noarg(error, selector(c"localizedDescription")) };
 				if description.is_null() {
 					return Completion::Error("DeviceCheck token request failed".to_owned());
@@ -282,7 +284,8 @@ mod platform {
 			sender,
 		};
 		// SAFETY: `device` is a live DCDevice and `block` follows the block ABI;
-		// the runtime copies the literal, so the stack frame may die after the call.
+		// the runtime copies the literal, so the stack frame may die after the
+		// call.
 		unsafe {
 			msg_send_block(
 				device,

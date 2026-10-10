@@ -6,27 +6,58 @@
  */
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import {
+	isUserInterruptAbort,
+	isCustomMessageContent,
+	type BashExecutionMessage,
+	type PythonExecutionMessage,
+	type CustomMessage,
+	type HookMessage,
+	type FileMentionMessage,
+	isUserInvokedSkillPrompt,
+	isUserTurnInitiator,
+} from "@oh-my-pi/pi-tui/chat/messages";
+export {
+	SKILL_PROMPT_MESSAGE_TYPE,
+	LSP_LATE_DIAGNOSTIC_MESSAGE_TYPE,
+	BACKGROUND_TAN_DISPATCH_MESSAGE_TYPE,
+	PREWALK_PLAN_MESSAGE_TYPE,
+	VIBE_MODE_CONTEXT_MESSAGE_TYPE,
+	DEFAULT_CUSTOM_MESSAGE_TYPE,
+	LIVE_DELEGATION_MESSAGE_TYPE,
+	type CustomMessageContent,
+	type CustomMessagePayload,
+	type NormalizedCustomMessagePayload,
+	type BackgroundTanDispatchDetails,
+	type SkillPromptDetails,
+	SILENT_ABORT_MARKER,
+	isSilentAbort,
+	USER_INTERRUPT_LABEL,
+	isUserInterruptAbort,
+	shouldRenderAbortReason,
+	GENERIC_ABORT_SENTINEL,
+	resolveAbortLabel,
+	isCustomMessageContent,
+	normalizeCustomMessagePayload,
+	type BashExecutionMessage,
+	type PythonExecutionMessage,
+	type CustomMessage,
+	type HookMessage,
+	type FileMentionMessage,
+	isUserInvokedSkillPrompt,
+	isUserTurnInitiator,
+} from "@oh-my-pi/pi-tui/chat/messages";
+import {
 	invalidateMessageCache,
 	registerMessageCacheInvalidator,
 } from "@oh-my-pi/pi-agent-core/compaction/message-cache";
-import {
-	type BranchSummaryMessage,
-	type CompactionSummaryMessage,
-	convertMessageToLlm,
-} from "@oh-my-pi/pi-agent-core/compaction/messages";
-import type {
-	AssistantMessage,
-	ImageContent,
-	Message,
-	MessageAttribution,
-	TextContent,
-	UserMessage,
-} from "@oh-my-pi/pi-ai";
-import * as AIError from "@oh-my-pi/pi-ai/error";
+import { convertMessageToLlm } from "@oh-my-pi/pi-agent-core/compaction/messages";
+import type { AssistantMessage, ImageContent, Message, TextContent, UserMessage } from "@oh-my-pi/pi-ai";
+import { copyPerCallContextMessage } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { isRecord, logger, prompt } from "@oh-my-pi/pi-utils";
 import { COLLAB_PROMPT_MESSAGE_TYPE } from "@oh-my-pi/pi-wire";
 import userInterjectionTemplate from "../prompts/steering/user-interjection.md" with { type: "text" };
 import { formatTitleConversationContext, type TitleConversationTurn } from "../tiny/message-preproc";
+import { stripXdUrlPrefix } from "@oh-my-pi/pi-tui/tools/xd-url";
 
 export {
 	type BranchSummaryMessage,
@@ -36,17 +67,8 @@ export {
 	createCustomMessage,
 } from "@oh-my-pi/pi-agent-core/compaction/messages";
 
-import type { OutputMeta } from "../tools/output-meta";
-import { formatOutputNotice } from "../tools/output-meta";
-import { titleTextFromSkillPrompt } from "./skill-title-input";
-
-export const SKILL_PROMPT_MESSAGE_TYPE = "skill-prompt";
-export const LSP_LATE_DIAGNOSTIC_MESSAGE_TYPE = "lsp-late-diagnostic";
-export const BACKGROUND_TAN_DISPATCH_MESSAGE_TYPE = "background-tan-dispatch";
-export const PREWALK_PLAN_MESSAGE_TYPE = "prewalk-plan";
-
-/** Custom message type for the transient Vibe mode directive. */
-export const VIBE_MODE_CONTEXT_MESSAGE_TYPE = "vibe-mode-context";
+import { formatOutputNotice } from "@oh-my-pi/pi-tui/tools/output-meta";
+import { titleTextFromSkillPrompt } from "@oh-my-pi/pi-tui/chat/skill-title-input";
 
 /**
  * Logs provider-error turns so their actual cause is available outside the
@@ -65,6 +87,8 @@ export function logProviderTurnError(msg: AssistantMessage): void {
 
 const EPHEMERAL_REPLY_MAX_BYTES = 4096;
 const REPLAN_TITLE_CONTEXT_TURN_LIMIT = 6;
+/** Max chars kept from each anchored user request in the replan title context. */
+const REPLAN_TITLE_ANCHOR_CHARS = 400;
 
 /**
  * Removes replay-bound provider state before reparenting an assistant message
@@ -85,9 +109,9 @@ export function sanitizeAssistantForReparentedHistory(message: AssistantMessage)
 
 /**
  * Collapses degenerate repeated lines and bounds an ephemeral side-channel
- * reply to 4 KiB.
+ * reply to `maxBytes` (4 KiB unless the caller reads replies in full).
  */
-export function dedupeEphemeralReply(text: string): string {
+export function dedupeEphemeralReply(text: string, maxBytes = EPHEMERAL_REPLY_MAX_BYTES): string {
 	if (!text) return text;
 	const lines = text.split("\n");
 	const out: string[] = [];
@@ -103,29 +127,73 @@ export function dedupeEphemeralReply(text: string): string {
 		}
 		i = j;
 	}
-	let result = out.join("\n");
-	if (Buffer.byteLength(result, "utf8") > EPHEMERAL_REPLY_MAX_BYTES) {
-		const suffix = "\n[…truncated]";
-		const budget = EPHEMERAL_REPLY_MAX_BYTES - Buffer.byteLength(suffix, "utf8");
-		while (Buffer.byteLength(result, "utf8") > budget) {
-			result = result.slice(0, -1);
-		}
-		result += suffix;
-	}
-	return result;
+	const result = out.join("\n");
+	if (Buffer.byteLength(result, "utf8") <= maxBytes) return result;
+	const bytes = Buffer.from(result, "utf8");
+	const suffix = "\n[…truncated]";
+	// Cut on a UTF-8 character boundary: back off continuation bytes (10xxxxxx)
+	// so a multi-byte character straddling the budget is dropped whole.
+	let cut = Math.max(0, maxBytes - Buffer.byteLength(suffix, "utf8"));
+	while (cut > 0 && (bytes[cut] & 0xc0) === 0x80) cut--;
+	return bytes.toString("utf8", 0, cut) + suffix;
 }
 
-/** Builds the recent user/assistant context supplied to title regeneration. */
+/**
+ * Builds the recent user/assistant context supplied to title regeneration.
+ * The session's opening request and the latest user request always lead the
+ * context: in a long tool loop the recent window is all assistant notes, and
+ * follow-ups ("fix all") rarely restate the goal, so without them title models
+ * name the current micro-step (a file or symbol) instead of the session goal.
+ */
 export function buildReplanTitleContext(messages: AgentMessage[]): string {
-	const turns: TitleConversationTurn[] = [];
-	for (let i = messages.length - 1; i >= 0 && turns.length < REPLAN_TITLE_CONTEXT_TURN_LIMIT; i--) {
+	const recent: TitleConversationTurn[] = [];
+	let i = messages.length - 1;
+	for (; i >= 0 && recent.length < REPLAN_TITLE_CONTEXT_TURN_LIMIT; i--) {
 		const message = messages[i];
 		if (!message) continue;
 		const turn = titleConversationTurnFromMessage(message);
-		if (turn) turns.push(turn);
+		if (turn) recent.push(turn);
 	}
-	turns.reverse();
-	return formatTitleConversationContext(turns);
+	recent.reverse();
+	// Earlier user turns outside the window, oldest first.
+	const earlierUsers: TitleConversationTurn[] = [];
+	for (let j = 0; j <= i; j++) {
+		const message = messages[j];
+		const turn = message && titleConversationTurnFromMessage(message);
+		if (turn?.role === "user") earlierUsers.push(turn);
+	}
+	const anchors: TitleConversationTurn[] = [];
+	const opening = earlierUsers[0];
+	if (opening) anchors.push(opening);
+	const latest = earlierUsers.at(-1);
+	if (latest && latest !== opening && !recent.some(turn => turn.role === "user")) anchors.push(latest);
+	// Bound anchors so a long pasted request cannot crowd the recent turns out
+	// of the shared truncation budget.
+	const bounded = anchors.map(turn => ({ ...turn, text: turn.text?.slice(0, REPLAN_TITLE_ANCHOR_CHARS) }));
+	return formatTitleConversationContext([...bounded, ...recent]);
+}
+
+/**
+ * Title text of a message the operator wrote: a typed prompt, or a `/skill:`
+ * invocation as its chip (never the expanded skill body). `undefined` for
+ * agent-attributed and non-user messages, which automatic titles never name.
+ */
+export function operatorTitleText(message: AgentMessage): string | undefined {
+	if (message.role === "custom") return titleTextFromSkillPrompt(message);
+	if (message.role !== "user" || message.attribution !== "user") return undefined;
+	return textFromContent(message.content) || undefined;
+}
+
+/**
+ * Words of thinking plus reply text a settled assistant message contributes to
+ * {@link buildReplanTitleContext}. Deferred auto-titling accumulates these and
+ * retitles once the assistant has said enough to reveal the task; aborted and
+ * errored turns count zero.
+ */
+export function titleContextWordCount(message: AssistantMessage): number {
+	if (message.stopReason === "aborted" || message.stopReason === "error") return 0;
+	const text = `${thinkingFromContent(message.content)} ${textFromContent(message.content)}`;
+	return text.match(/\S+/g)?.length ?? 0;
 }
 
 /**
@@ -254,6 +322,7 @@ function normalizeSessionMessageForProviderReplay(message: AgentMessage): unknow
 				meta: message.meta
 					? {
 							truncation: normalizeProviderReplayValue(message.meta.truncation),
+							artifactError: message.meta.artifactError,
 							limits: normalizeProviderReplayValue(message.meta.limits),
 							diagnostics: message.meta.diagnostics
 								? normalizeProviderReplayValue({
@@ -275,6 +344,7 @@ function normalizeSessionMessageForProviderReplay(message: AgentMessage): unknow
 				meta: message.meta
 					? {
 							truncation: normalizeProviderReplayValue(message.meta.truncation),
+							artifactError: message.meta.artifactError,
 							limits: normalizeProviderReplayValue(message.meta.limits),
 							diagnostics: message.meta.diagnostics
 								? normalizeProviderReplayValue({
@@ -314,26 +384,6 @@ function normalizeSessionMessageForProviderReplay(message: AgentMessage): unknow
 			return normalizeProviderReplayValue(message);
 	}
 }
-
-/** Fallback type for extension-injected messages that omit a custom type. */
-export const DEFAULT_CUSTOM_MESSAGE_TYPE = "custom-message";
-
-/** Custom message carrying a coding request delegated by the live voice model. */
-export const LIVE_DELEGATION_MESSAGE_TYPE = "live-delegation";
-
-/** Content shape accepted for extension-injected messages. */
-export type CustomMessageContent = string | (TextContent | ImageContent)[];
-
-/** Public input accepted by `pi.sendMessage` and `AgentSession.sendCustomMessage`. */
-export type CustomMessagePayload<T = unknown> =
-	| string
-	| Partial<Pick<CustomMessage<T>, "customType" | "content" | "display" | "details" | "attribution">>;
-
-/** Custom message payload after applying runtime defaults. */
-export type NormalizedCustomMessagePayload<T = unknown> = Pick<
-	CustomMessage<T>,
-	"customType" | "content" | "display" | "details" | "attribution"
->;
 
 /** Custom message type for hidden interrupted-thinking continuity context. */
 export const INTERRUPTED_THINKING_MESSAGE_TYPE = "interrupted-thinking";
@@ -425,59 +475,23 @@ function stripDemotedThinkingForLlm(message: AssistantMessage): AssistantMessage
 	return demoted ? { ...message, content: demoted.strippedContent } : message;
 }
 
-/** Details persisted on a `/tan` background-dispatch breadcrumb. */
-export interface BackgroundTanDispatchDetails {
-	jobId: string;
-	work: string;
-	/** Forked clone session file, named `<agentId>.jsonl`; the Agent Hub reads its transcript. */
-	sessionFile: string;
-}
-
-export interface SkillPromptDetails {
-	name: string;
-	path: string;
-	args?: string;
-	lineCount: number;
-	/** Internal: compact label shown for a queued custom message. Optional —
-	 *  non-streaming skill prompts never set it. Stripped from persisted
-	 *  `details` by `SessionManager.appendCustomMessageEntry` via the
-	 *  `INTERNAL_DETAILS_FIELDS` allowlist below. */
-	__queueChipText?: string;
-}
-
-/** Sentinel value for `AssistantMessage.errorMessage` indicating that the abort
- *  was an *expected internal transition* (plan-mode → execution compaction)
- *  and must NOT surface as a red "Operation aborted" line. Distinct from
- *  `undefined` (default) so user-cancel aborts with no errorMessage still
- *  render normally. Persists through SessionManager so history replay
- *  branches identically.
- *
- *  Consumers: `AgentSession.#handleAgentEvent` (stamper) writes this value;
- *  `EventController.#handleMessageEnd`, `AssistantMessageComponent`,
- *  `ui-helpers.addMessageToChat` (renderers), `AgentHubOverlayComponent
- *  #buildTranscriptLines`, `runPrintMode`, and `AcpAgent#replayAssistantMessage`
- *  (fallback error emission) read it via `isSilentAbort`. */
-export const SILENT_ABORT_MARKER = "__omp.silent_abort__";
-
-/** Type-guard for silent aborts. Renderers MUST call this helper so structured
- *  `errorId` and legacy persisted marker messages stay in lockstep. */
-export function isSilentAbort(message: Pick<AssistantMessage, "errorId" | "errorMessage">): boolean {
-	return AIError.is(message.errorId, AIError.Flag.SilentAbort) || message.errorMessage === SILENT_ABORT_MARKER;
-}
-
-/** Reason threaded through `AbortController.abort(reason)` when the user aborts
- *  the turn with Esc (see `AgentSession.abort`). The agent keeps it on the
- *  aborted assistant message's `errorMessage` so queued follow-ups/tool-result
- *  placeholders can distinguish a deliberate interrupt from a bare lifecycle
- *  abort, but interactive renderers suppress this redundant transcript line. */
-export const USER_INTERRUPT_LABEL = "Interrupted by user";
-
-export function isUserInterruptAbort(message: Pick<AssistantMessage, "errorId" | "errorMessage">): boolean {
-	return AIError.is(message.errorId, AIError.Flag.UserInterrupt) || message.errorMessage === USER_INTERRUPT_LABEL;
-}
-
-export function shouldRenderAbortReason(message: Pick<AssistantMessage, "errorId" | "errorMessage">): boolean {
-	return !isSilentAbort(message) && !isUserInterruptAbort(message);
+/**
+ * Replay `xd://<device>` tool-call names under their bare device name. Sessions
+ * saved before the agent loop canonicalized fallback-resolved names persist the
+ * alias, which providers reject as a function name (#13352). Call ids are kept,
+ * so call/result pairing is unchanged.
+ */
+function canonicalizeXdToolCallNames(message: AssistantMessage): AssistantMessage {
+	let content: AssistantMessage["content"] | undefined;
+	for (let i = 0; i < message.content.length; i++) {
+		const block = message.content[i]!;
+		if (block.type !== "toolCall") continue;
+		const name = stripXdUrlPrefix(block.name);
+		if (name === block.name) continue;
+		content ??= message.content.slice();
+		content[i] = { ...block, name };
+	}
+	return content ? { ...message, content } : message;
 }
 
 /** A provider-rejection turn carrying nothing but the error flag: stopReason
@@ -538,6 +552,11 @@ function isActionableContent(content: AssistantMessage["content"][number] | unde
 	}
 }
 
+/** Output the user or the agent loop can act on: reasoning alone does not count. */
+function isDeliverableContent(content: AssistantMessage["content"][number] | undefined): boolean {
+	return content?.type === "toolCall" || content?.type === "image" || (content?.type === "text" && hasText(content));
+}
+
 /** A `stop`/`toolUse` turn that produced nothing actionable. Any other stop
  *  reason is not an "empty stop": an `error`/`aborted` turn is a failure rather
  *  than an empty completion, and a `length` stop was cut off mid-output. */
@@ -577,31 +596,15 @@ export function assistantTurnProducedOutput(message: Pick<AssistantMessage, "sto
 	return !isEmptyAssistantStop(message) && message.content.some(isActionableContent);
 }
 
-/** Sentinel `errorMessage` the agent stamps on any abort that carried no custom
- *  reason (bare `abort()`). Renderers treat it as "no specific reason given". */
-export const GENERIC_ABORT_SENTINEL = "Request was aborted";
-
-/** Resolve the operator-facing label for an aborted assistant turn. A custom
- *  abort reason threaded onto `errorMessage` is returned verbatim; aborts with
- *  no threaded reason fall back to the retry-aware generic label. Call
- *  `shouldRenderAbortReason` before rendering when user interrupts should stay
- *  visually quiet. */
-export function resolveAbortLabel(
-	message: Pick<AssistantMessage, "errorId" | "errorMessage">,
-	retryAttempt = 0,
-): string {
-	const genericAbort =
-		AIError.is(message.errorId, AIError.Flag.Abort) ||
-		!message.errorMessage ||
-		message.errorMessage === GENERIC_ABORT_SENTINEL ||
-		isSilentAbort(message);
-	if (!genericAbort) {
-		return message.errorMessage!;
-	}
-	if (retryAttempt > 0) {
-		return `Aborted after ${retryAttempt} retry attempt${retryAttempt > 1 ? "s" : ""}`;
-	}
-	return "Operation aborted";
+/**
+ * True when the turn emitted text, a tool call, or an image. Stricter than
+ * {@link assistantTurnProducedOutput}: signed reasoning is replay-worthy but
+ * delivers nothing, so length-stop recovery in `checkCompaction` treats a
+ * reasoning-only truncation as budget burned (retry) rather than a truncated
+ * deliverable (keep), and only a delivered turn resets its retry cap.
+ */
+export function assistantTurnDelivered(message: Pick<AssistantMessage, "content">): boolean {
+	return message.content.some(isDeliverableContent);
 }
 
 /** Extract the optional `__queueChipText` field from a CustomMessage's
@@ -640,59 +643,6 @@ export function stripInternalDetailsFields<T>(details: T | undefined): T | undef
 		delete cleaned[key];
 	}
 	return cleaned as T;
-}
-
-/** True when a persisted or extension-supplied value can be sent as custom-message content. */
-export function isCustomMessageContent(content: unknown): content is CustomMessageContent {
-	return typeof content === "string" || Array.isArray(content);
-}
-
-function normalizeCustomMessageContent(content: unknown): CustomMessageContent {
-	return isCustomMessageContent(content) ? content : "";
-}
-
-function normalizeCustomMessageType(customType: unknown): string {
-	return typeof customType === "string" && customType.length > 0 ? customType : DEFAULT_CUSTOM_MESSAGE_TYPE;
-}
-
-function normalizeCustomMessageAttribution(attribution: unknown): MessageAttribution {
-	return attribution === "user" ? "user" : "agent";
-}
-
-function isCustomMessagePayloadObject<T>(
-	payload: unknown,
-): payload is Partial<Pick<CustomMessage<T>, "customType" | "content" | "display" | "details" | "attribution">> {
-	return payload !== null && typeof payload === "object" && !Array.isArray(payload);
-}
-
-/** Normalizes extension-provided custom message input before it reaches session state or disk. */
-export function normalizeCustomMessagePayload<T = unknown>(
-	payload: CustomMessagePayload<T> | unknown,
-): NormalizedCustomMessagePayload<T> {
-	if (typeof payload === "string") {
-		return {
-			customType: DEFAULT_CUSTOM_MESSAGE_TYPE,
-			content: payload,
-			display: true,
-			attribution: "agent",
-		};
-	}
-	if (!isCustomMessagePayloadObject<T>(payload)) {
-		const content = payload === undefined || payload === null ? "" : String(payload);
-		return {
-			customType: DEFAULT_CUSTOM_MESSAGE_TYPE,
-			content,
-			display: content.length > 0,
-			attribution: "agent",
-		};
-	}
-	return {
-		customType: normalizeCustomMessageType(payload.customType),
-		content: normalizeCustomMessageContent(payload.content),
-		display: typeof payload.display === "boolean" ? payload.display : false,
-		details: payload.details,
-		attribution: normalizeCustomMessageAttribution(payload.attribution),
-	};
 }
 
 type SteeringUserMessage =
@@ -756,6 +706,7 @@ function wrapSteeringUserMessage(message: SteeringUserMessage): UserMessage {
 					attribution: "user",
 					timestamp: message.timestamp,
 				};
+	copyPerCallContextMessage(userMessage, message);
 	if (typeof message.content === "string") {
 		if (message.content.length === 0) return message.role === "user" ? message : userMessage;
 		return { ...userMessage, content: renderSteeringEnvelope(message.content) };
@@ -768,6 +719,11 @@ function wrapSteeringUserMessage(message: SteeringUserMessage): UserMessage {
 	return { ...userMessage, content };
 }
 
+// One wrapper per steering message. Per-request transforms key on identity (the
+// date/cwd reminder treats an unseen user turn as new), so a fresh wrapper each
+// request would read as a never-sent turn. Owner edits evict it below.
+const steeringWrapperCache = new WeakMap<AgentMessage, UserMessage>();
+
 export function wrapSteeringForModel(messages: AgentMessage[]): AgentMessage[] {
 	// Wrap EVERY steering message, not just a trailing run. The wire bytes of a
 	// steering message must be a pure function of the message itself, independent
@@ -779,7 +735,11 @@ export function wrapSteeringForModel(messages: AgentMessage[]): AgentMessage[] {
 	for (let i = 0; i < messages.length; i++) {
 		const message = messages[i];
 		if (!isSteeringUserMessage(message)) continue;
-		const wrappedMessage = wrapSteeringUserMessage(message);
+		let wrappedMessage = steeringWrapperCache.get(message);
+		if (wrappedMessage === undefined) {
+			wrappedMessage = wrapSteeringUserMessage(message);
+			steeringWrapperCache.set(message, wrappedMessage);
+		}
 		if (wrappedMessage === message) continue;
 		if (wrappedMessages === undefined) {
 			wrappedMessages = messages.slice();
@@ -932,101 +892,6 @@ export function replaceLlmImagesWithText(messages: Message[], placeholder: strin
 }
 
 /**
- * Message type for bash executions via the ! command.
- */
-export interface BashExecutionMessage {
-	role: "bashExecution";
-	command: string;
-	output: string;
-	exitCode: number | undefined;
-	cancelled: boolean;
-	truncated: boolean;
-	/** Images extracted from terminal graphics in the command's stdout. */
-	images?: ImageContent[];
-	meta?: OutputMeta;
-	timestamp: number;
-	/** If true, this message is excluded from LLM context (!! prefix) */
-	excludeFromContext?: boolean;
-}
-
-/**
- * Message type for user-initiated Python executions via the $ command.
- * Shares the same kernel session as eval's Python backend.
- */
-export interface PythonExecutionMessage {
-	role: "pythonExecution";
-	code: string;
-	output: string;
-	exitCode: number | undefined;
-	cancelled: boolean;
-	truncated: boolean;
-	meta?: OutputMeta;
-	timestamp: number;
-	/** If true, this message is excluded from LLM context ($$ prefix) */
-	excludeFromContext?: boolean;
-}
-
-/**
- * Message type for extension-injected messages via sendMessage().
- */
-export interface CustomMessage<T = unknown> {
-	role: "custom";
-	customType: string;
-	content: CustomMessageContent;
-	display: boolean;
-	details?: T;
-	/** Who initiated this message for billing/attribution semantics. */
-	attribution?: MessageAttribution;
-	timestamp: number;
-}
-
-/**
- * Legacy hook message type (pre-extensions). Kept for session migration.
- */
-export interface HookMessage<T = unknown> {
-	role: "hookMessage";
-	customType: string;
-	content: CustomMessageContent;
-	display: boolean;
-	details?: T;
-	/** Who initiated this message for billing/attribution semantics. */
-	attribution?: MessageAttribution;
-	timestamp: number;
-}
-
-/**
- * Message type for auto-read file mentions via @filepath syntax.
- */
-export interface FileMentionMessage {
-	role: "fileMention";
-	files: Array<{
-		path: string;
-		content: string;
-		lineCount?: number;
-		/** File size in bytes, if known. */
-		byteSize?: number;
-		/** Why the file contents were omitted from auto-read. */
-		skippedReason?: "tooLarge" | "binary";
-		image?: ImageContent;
-	}>;
-	timestamp: number;
-}
-
-// Extend CustomAgentMessages via declaration merging
-// Legacy hookMessage is kept for migration; new code should use custom.
-declare module "@oh-my-pi/pi-agent-core" {
-	interface CustomAgentMessages {
-		bashExecution: BashExecutionMessage;
-		pythonExecution: PythonExecutionMessage;
-		custom: CustomMessage;
-		hookMessage: HookMessage;
-		branchSummary: BranchSummaryMessage;
-		compactionSummary: CompactionSummaryMessage;
-		fileMention: FileMentionMessage;
-	}
-}
-
-/**
  * Convert a BashExecutionMessage to user message text for LLM context.
  */
 export function bashExecutionToText(msg: BashExecutionMessage): string {
@@ -1105,23 +970,6 @@ function customMessageContentToLlmContent(content: CustomMessage["content"]): (T
 	return typeof content === "string" ? [{ type: "text", text: content }] : content;
 }
 
-/** True for a `/skill:<name>` prompt the user invoked directly (attribution `user`), as opposed to an agent/autoload injection. */
-export function isUserInvokedSkillPrompt(message: CustomMessage): boolean {
-	return message.customType === SKILL_PROMPT_MESSAGE_TYPE && message.attribution === "user";
-}
-
-/**
- * True for a custom message that initiates a user-attributed turn: a directly
- * invoked `/skill:` prompt or a writable-collab peer's prompt. Agent redirects,
- * reminders, and auto-continues are not turn starts.
- */
-export function isUserTurnInitiator(message: CustomMessage): boolean {
-	return (
-		isUserInvokedSkillPrompt(message) ||
-		(message.customType === COLLAB_PROMPT_MESSAGE_TYPE && message.attribution === "user")
-	);
-}
-
 function convertImageBearingCustomMessage(message: CustomMessage | HookMessage): Message[] | undefined {
 	if (!isCustomMessageContent(message.content)) return undefined;
 	if (typeof message.content === "string") return undefined;
@@ -1191,7 +1039,13 @@ interface ConvertArrayMemo {
 let convertGeneration = 0;
 const convertArrayCache = new WeakMap<AgentMessage[], ConvertArrayMemo>();
 
+/** Drop the outer-array shortcut when an owner replaces a live history in place. */
+export function invalidateConvertToLlmArrayCache(messages: AgentMessage[]): void {
+	convertArrayCache.delete(messages);
+}
+
 registerMessageCacheInvalidator(message => {
+	steeringWrapperCache.delete(message);
 	convertCache.delete(message);
 	convertGeneration++;
 });
@@ -1297,19 +1151,29 @@ function convertOne(m: AgentMessage, interruptedNext: boolean): Message[] {
 			// stripped whether or not they were long enough for a continuity note.
 			const userInterrupted = m.stopReason === "aborted" && isUserInterruptAbort(m);
 			const source = interruptedNext || userInterrupted ? stripDemotedThinkingForLlm(m) : m;
-			if (userInterrupted && !interruptedNext && source.content.length === 0) return [];
-			const converted = convertMessageToLlm(source);
+			// An empty interrupted response still carries the controls its request
+			// sent (e.g. an Anthropic `tool_removal`); later requests replay them from it.
+			if (userInterrupted && !interruptedNext && source.content.length === 0 && m.requestControls === undefined) {
+				return [];
+			}
+			const converted = convertMessageToLlm(canonicalizeXdToolCallNames(source));
 			return converted ? [converted] : [];
 		}
 		case "branchSummary":
 		case "compactionSummary":
 		case "user":
-		case "developer":
-		case "toolResult": {
+		case "developer": {
 			// Core roles share one transformer with agent-core —
 			// duplicating them here is how snapcompact frames once
 			// silently fell off the provider request.
 			const converted = convertMessageToLlm(m);
+			return converted ? [converted] : [];
+		}
+		case "toolResult": {
+			// Same pre-canonicalization history as `canonicalizeXdToolCallNames`;
+			// Gemini replays the result under this name.
+			const toolName = stripXdUrlPrefix(m.toolName);
+			const converted = convertMessageToLlm(toolName === m.toolName ? m : { ...m, toolName });
 			return converted ? [converted] : [];
 		}
 		default:
@@ -1324,8 +1188,14 @@ function convertOneCached(m: AgentMessage, interruptedNext: boolean): Message[] 
 	const cached = convertCache.get(m);
 	if (cached !== undefined && cached.interruptedNext === interruptedNext) return cached.fragment;
 	const fragment = convertOne(m, interruptedNext);
+	for (const message of fragment) copyPerCallContextMessage(message, m);
 	convertCache.set(m, { interruptedNext, fragment });
 	return fragment;
+}
+
+/** A turn the user wrote: a user message, or a user-initiated custom prompt (`/skill:`, collab). */
+export function isUserAuthoredMessage(message: AgentMessage): boolean {
+	return message.role === "user" || (message.role === "custom" && isUserTurnInitiator(message));
 }
 
 /**

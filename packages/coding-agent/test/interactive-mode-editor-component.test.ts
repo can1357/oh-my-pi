@@ -3,9 +3,9 @@ import * as path from "node:path";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { CustomEditor } from "@oh-my-pi/pi-coding-agent/modes/components/custom-editor";
+import { CustomEditor } from "@oh-my-pi/pi-tui/prompt/custom-editor";
 import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
-import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
@@ -72,5 +72,17 @@ describe("InteractiveMode.setEditorComponent", () => {
 		expect(mode.editor.onSubmit).toBeDefined();
 		expect(mode.editor.onEscape).toBeDefined();
 		expect(refreshSpy).toHaveBeenCalled();
+	});
+
+	it("keeps the startup submit gate on an editor swapped in before init lifts it", () => {
+		vi.spyOn(mode, "refreshSlashCommandState").mockResolvedValue();
+		expect(mode.editor.disableSubmit).toBe(true);
+
+		mode.setEditorComponent((_tui, editorTheme) => new TestModalEditor(editorTheme));
+		expect(mode.editor.disableSubmit).toBe(true);
+
+		mode.editor.disableSubmit = false;
+		mode.setEditorComponent(undefined);
+		expect(mode.editor.disableSubmit).toBe(false);
 	});
 });

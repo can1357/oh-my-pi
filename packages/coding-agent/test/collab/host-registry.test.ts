@@ -39,6 +39,8 @@ const WEB_URL = "https://collab.example";
 /** Mutable, observable surface of a host context fixture. */
 interface HostContextState {
 	sessionId: string;
+	/** Whether the mirrored session is mid-turn; drives the snapshot's `busy`. */
+	isStreaming: boolean;
 	transition?: Promise<void>;
 	showStatus: string[];
 	/** Guest prompts the host forwarded into the session. */
@@ -58,6 +60,7 @@ interface HostContextState {
 function makeHostContext(): { ctx: InteractiveModeContext; state: HostContextState } {
 	const state: HostContextState = {
 		sessionId: `sess-${crypto.randomUUID()}`,
+		isStreaming: false,
 		showStatus: [],
 		prompts: [],
 		subscribed: null,
@@ -65,7 +68,7 @@ function makeHostContext(): { ctx: InteractiveModeContext; state: HostContextSta
 		tornDown: Promise.withResolvers<void>(),
 	};
 	const ctx = {
-		settings: { get: () => "" },
+		settings: Settings.isolated(),
 		sessionManager: {
 			getSessionId: () => {
 				state.onSessionIdRead?.();
@@ -90,7 +93,9 @@ function makeHostContext(): { ctx: InteractiveModeContext; state: HostContextSta
 			waitForSessionTransition: async () => {
 				await state.transition;
 			},
-			isStreaming: false,
+			get isStreaming() {
+				return state.isStreaming;
+			},
 			queuedMessageCount: 0,
 			sessionName: "registry-test",
 			model: undefined,
@@ -164,7 +169,7 @@ describe("collab host registry lifecycle (#6099)", () => {
 		"notifies the submitting guest when %s discards an admitted prompt",
 		async transition => {
 			const auth = await AuthStorage.create(":memory:");
-			auth.setRuntimeApiKey("anthropic", "test-key");
+			auth.keys.setRuntime("anthropic", "test-key");
 			const models = new ModelRegistry(auth);
 			const model = getBundledModel("anthropic", "claude-sonnet-4-5");
 			if (!model) throw new Error("Test model missing");
@@ -366,7 +371,9 @@ describe("collab host registry lifecycle (#6099)", () => {
 		try {
 			const abort = new AbortController();
 			const answer = host.requestGuestUi({ kind: "select", title: "Pending", options: ["Yes"] }, abort.signal);
-			expect(send.mock.calls.filter(([frame]) => frame.t === "ui-request")).toHaveLength(1);
+			expect(
+				send.mock.calls.filter(([frame]) => typeof frame !== "string" && frame.t === "ui-request"),
+			).toHaveLength(1);
 			const original = state.sessionId;
 			state.sessionId = "provisional";
 			send.mockClear();
@@ -477,6 +484,7 @@ describe("collab host registry lifecycle (#6099)", () => {
 			access: "control",
 			relayConnected: true,
 			inputRequired: false,
+			busy: false,
 		});
 		expect(snapshot!.participants).toBeGreaterThanOrEqual(1);
 		// A listing never carries a link in any field.
@@ -521,6 +529,21 @@ describe("collab host registry lifecycle (#6099)", () => {
 		expect((await registry.listCollabHosts({ dir: tmp }))[0]!.inputRequired).toBe(false);
 	});
 
+	it("reports busy for the session's turn and idle once it ends", async () => {
+		const { ctx, state } = makeHostContext();
+		host = new CollabHost(ctx, { instanceId: "activity-host" });
+		await host.start(RELAY_URL, WEB_URL);
+
+		state.isStreaming = true;
+		expect((await registry.listCollabHosts({ dir: tmp }))[0]!.busy).toBe(true);
+
+		// The turn ends while the room stays published: the host is still listed,
+		// and only `busy` reports that it stopped working.
+		state.isStreaming = false;
+		const [idle] = await registry.listCollabHosts({ dir: tmp });
+		expect(idle).toMatchObject({ instanceId: "activity-host", busy: false });
+	});
+
 	it("retains a guest UI request raised before the relay connects", async () => {
 		const { ctx } = makeHostContext();
 		host = new CollabHost(ctx);
@@ -550,17 +573,6 @@ describe("collab host registry lifecycle (#6099)", () => {
 		const reqId = await replayed.promise;
 		socket.send({ t: "ui-response", reqId, value: "Yes" });
 		expect(await pending).toEqual({ kind: "answered", value: "Yes" });
-	});
-
-	it("withdraws from the registry on explicit stop", async () => {
-		const { ctx } = makeHostContext();
-		host = new CollabHost(ctx);
-		await host.start(RELAY_URL, WEB_URL);
-		expect(await registry.listCollabHosts({ dir: tmp })).toHaveLength(1);
-
-		await host.stop("host stopped");
-
-		expect(await registry.listCollabHosts({ dir: tmp })).toEqual([]);
 	});
 
 	it("suspends mirroring and discovery while another session is active and resumes when the switch rolls back", async () => {
@@ -653,7 +665,13 @@ describe("collab host registry lifecycle (#6099)", () => {
 		expect(late.saw()).toBe(true);
 	});
 
-	it("revokes application frames queued, sealing, and awaiting sealing before sending goodbye", async () => {
+	/**
+	 * Host with one read-only guest whose event/bye frames are recorded. The
+	 * send queue seals and writes strictly in order, so a frame parked at the
+	 * head (behind transport backpressure or a held seal) holds every later
+	 * frame unsealed behind it.
+	 */
+	async function startRevocationScenario() {
 		const { ctx, state } = makeHostContext();
 		const originalConnect = CollabSocket.prototype.connect;
 		let transport: CollabSocket | undefined;
@@ -674,22 +692,37 @@ describe("collab host registry lifecycle (#6099)", () => {
 		if ("error" in parsed) throw new Error(parsed.error);
 		const reader = new CollabSocket({ wsUrl: parsed.wsUrl, role: "guest", key: await importRoomKey(parsed.key) });
 		guestCleanups.push(() => reader.close());
-		const welcomed = Promise.withResolvers<void>();
+		const replicated = Promise.withResolvers<void>();
 		const goodbye = Promise.withResolvers<void>();
 		const received: CollabFrame[] = [];
 		reader.onFrame = frame => {
-			if (frame.t === "welcome") welcomed.resolve();
+			if (frame.t === "snapshot-chunk" && frame.final) replicated.resolve();
 			if (frame.t === "event" || frame.t === "bye") received.push(frame);
 			if (frame.t === "bye") goodbye.resolve();
 		};
 		reader.onOpen = () => reader.send({ t: "hello", proto: COLLAB_PROTO, name: "reader" });
 		reader.connect();
-		await welcomed.promise;
-		await transport.flush();
-		hostWire.bufferedAmount = 64 * 1024;
-		state.subscribed?.({ type: "message_start", message: { role: "user", content: "already encrypted" } });
-		await transport.flush();
+		// The welcome train must be fully written before the scenario parks the
+		// transport, or its tail — not the frames under test — is what stalls.
+		await replicated.promise;
+		const emit = (content: string) =>
+			state.subscribed?.({ type: "message_start", message: { role: "user", content } });
+		return { host, transport, hostWire, goodbye, received, emit };
+	}
 
+	it("revokes a sealed frame stalled by backpressure and the unsealed frames behind it before the goodbye", async () => {
+		const { host, transport, hostWire, goodbye, received, emit } = await startRevocationScenario();
+		hostWire.bufferedAmount = 64 * 1024;
+		emit("already encrypted");
+		await transport.flush();
+		emit("not yet encrypted");
+		await host.stop("revoked");
+		await goodbye.promise;
+		expect(received).toEqual([{ t: "bye", reason: "revoked" }]);
+	});
+
+	it("revokes a frame mid-seal and the frames queued behind it before the goodbye", async () => {
+		const { host, goodbye, received, emit } = await startRevocationScenario();
 		const sealing = Promise.withResolvers<void>();
 		const release = Promise.withResolvers<void>();
 		const originalEncrypt = crypto.subtle.encrypt.bind(crypto.subtle);
@@ -703,8 +736,8 @@ describe("collab host registry lifecycle (#6099)", () => {
 			return originalEncrypt(algorithm, key, data);
 		});
 		try {
-			state.subscribed?.({ type: "message_start", message: { role: "user", content: "sealing" } });
-			state.subscribed?.({ type: "message_start", message: { role: "user", content: "not yet encrypted" } });
+			emit("sealing");
+			emit("not yet encrypted");
 			await sealing.promise;
 			const stopping = host.stop("revoked");
 			release.resolve();

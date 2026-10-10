@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { TempDir } from "@oh-my-pi/pi-utils";
+import { formatOutputNotice } from "@oh-my-pi/pi-tui/tools/output-meta";
 import * as evalIndex from "@oh-my-pi/pi-coding-agent/eval";
 import * as pyKernel from "@oh-my-pi/pi-coding-agent/eval/py/kernel";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
@@ -177,5 +179,114 @@ describe("EvalTool display() text surfacing", () => {
 		const text = result.content.map(c => (c.type === "text" ? c.text : "")).join("\n");
 		expect(text).toContain("ch elided");
 		expect(text.length).toBeLessThan(20000);
+	});
+
+	it("keeps oversized display details bounded and spills the full value to the artifact", async () => {
+		using tempDir = TempDir.createSync("@omp-eval-display-");
+		const artifactPath = tempDir.join("eval.log");
+		const huge = `start-${"x".repeat(100_000)}-end`;
+		vi.spyOn(pyKernel, "checkPythonKernelAvailability").mockResolvedValue({ ok: true });
+		vi.spyOn(evalIndex.jsBackend, "execute").mockResolvedValue(
+			baseResult({
+				displayOutputs: [{ type: "json", data: { payload: huge } }],
+			}) as never,
+		);
+
+		const tool = new EvalTool({
+			...makeSession(),
+			allocateOutputArtifact: async () => ({ id: "large-display", path: artifactPath }),
+		});
+		const result = await tool.execute("call-huge-details", {
+			language: "js",
+			code: "display({ payload: huge });",
+		});
+
+		expect(Buffer.byteLength(JSON.stringify(result.details), "utf-8")).toBeLessThan(20_000);
+		expect(await Bun.file(artifactPath).text()).toContain(huge);
+		expect(result.details?.meta?.truncation?.artifactId).toBe("large-display");
+	});
+
+	it("retains the full display value in details when no artifact is available", async () => {
+		const huge = `start-${"x".repeat(100_000)}-end`;
+		vi.spyOn(pyKernel, "checkPythonKernelAvailability").mockResolvedValue({ ok: true });
+		vi.spyOn(evalIndex.jsBackend, "execute").mockResolvedValue(
+			baseResult({
+				displayOutputs: [{ type: "json", data: { payload: huge } }],
+			}) as never,
+		);
+
+		// makeSession() has no allocateOutputArtifact, mirroring a non-persistent
+		// SDK session: there is no session JSONL to bloat, so the full structured
+		// value must survive in details for SDK consumers.
+		const tool = new EvalTool(makeSession());
+		const result = await tool.execute("call-huge-no-artifact", {
+			language: "js",
+			code: "display({ payload: huge });",
+		});
+
+		expect(result.details?.jsonOutputs?.[0]).toEqual({ payload: huge });
+		const text = result.content.map(c => (c.type === "text" ? c.text : "")).join("\n");
+		expect(text).toContain("ch elided");
+		expect(text).not.toContain(huge);
+	});
+
+	it("restores the full display value when the artifact write fails", async () => {
+		using tempDir = TempDir.createSync("@omp-eval-display-fail-");
+		// Parent directory is never created, so the spill FileSink cannot open —
+		// OutputSink swallows the error, so persistence must be treated as
+		// unconfirmed and the full value restored into details.
+		const artifactPath = tempDir.join("missing", "eval.log");
+		const huge = `start-${"x".repeat(100_000)}-end`;
+		vi.spyOn(pyKernel, "checkPythonKernelAvailability").mockResolvedValue({ ok: true });
+		vi.spyOn(evalIndex.jsBackend, "execute").mockResolvedValue(
+			baseResult({
+				displayOutputs: [{ type: "json", data: { payload: huge } }],
+			}) as never,
+		);
+
+		const tool = new EvalTool({
+			...makeSession(),
+			allocateOutputArtifact: async () => ({ id: "doomed-display", path: artifactPath }),
+		});
+		const result = await tool.execute("call-huge-failed-spill", {
+			language: "js",
+			code: "display({ payload: huge });",
+		});
+
+		expect(await Bun.file(artifactPath).exists()).toBe(false);
+		expect(result.details?.jsonOutputs?.[0]).toEqual({ payload: huge });
+		expect(result.details?.meta?.truncation?.artifactId).toBeUndefined();
+	});
+
+	it("restores the full display value when the artifact cap cut the spill", async () => {
+		using tempDir = TempDir.createSync("@omp-eval-display-capped-");
+		const artifactPath = tempDir.join("eval.log");
+		// 3 MiB spill against a 1 MB artifact cap: the middle of the value is
+		// never written, so the artifact cannot stand in for it.
+		const huge = `start-${"x".repeat(3 * 1024 * 1024)}-end`;
+		vi.spyOn(pyKernel, "checkPythonKernelAvailability").mockResolvedValue({ ok: true });
+		vi.spyOn(evalIndex.jsBackend, "execute").mockResolvedValue(
+			baseResult({
+				displayOutputs: [{ type: "json", data: { payload: huge } }],
+			}) as never,
+		);
+
+		const tool = new EvalTool({
+			...makeSession(),
+			settings: Settings.isolated({ "tools.artifactMaxBytes": 1 }),
+			allocateOutputArtifact: async () => ({ id: "capped-display", path: artifactPath }),
+		});
+		const result = await tool.execute("call-huge-capped-spill", {
+			language: "js",
+			code: "display({ payload: huge });",
+		});
+
+		expect(await Bun.file(artifactPath).text()).toContain("[ARTIFACT TRUNCATED:");
+		expect(result.details?.jsonOutputs?.[0]).toEqual({ payload: huge });
+		expect(result.details?.meta?.truncation?.artifactId).toBe("capped-display");
+		expect(result.details?.meta?.truncation?.artifactElidedBytes).toBeGreaterThan(0);
+		const notice = formatOutputNotice(result.details?.meta);
+		expect(notice).toContain("Read artifact://capped-display for a head/tail sample of the output");
+		expect(notice).not.toContain("for full output");
 	});
 });

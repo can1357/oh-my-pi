@@ -1,11 +1,16 @@
+import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { Message } from "@oh-my-pi/pi-ai";
-import { getSessionsDir, logger, parseJsonlLenient, toError } from "@oh-my-pi/pi-utils";
+import { textContent } from "@oh-my-pi/pi-tui/chat/transcript-entry";
+import { getSessionsDir } from "@oh-my-pi/pi-utils/dirs";
+import * as logger from "@oh-my-pi/pi-utils/logger";
 import { LRUCache } from "@oh-my-pi/pi-utils/lru";
+import { parseJsonlLenient } from "@oh-my-pi/pi-utils/stream";
+import { toError } from "@oh-my-pi/pi-utils/type-guards";
 import { computeDefaultSessionDir } from "./session-paths";
 import { FileSessionStorage, type SessionStorage, type SessionStorageStat } from "./session-storage";
-import { lookupSessionTitle, recordSessionTitle } from "./title-index";
+import { lookupSessionTitle, recordSessionTitle } from "./session-index";
 
 /**
  * Coarse lifecycle status of a session, derived from its last persisted message.
@@ -34,6 +39,8 @@ export interface SessionInfo {
 	created: Date;
 	modified: Date;
 	messageCount: number;
+	/** Persisted assistant turns; zero means the agent never replied (0-turn session). */
+	assistantTurns?: number;
 	/** File size in bytes on disk; used for compact list rendering. */
 	size: number;
 	firstMessage: string;
@@ -133,7 +140,7 @@ function formatTimeAgo(date: Date): string {
  * then a timestamp-based label. The raw UUID `id` is intentionally never used —
  * it is unfriendly and indistinguishable from neighboring sessions in the UI.
  */
-function sessionDisplayName(info: SessionInfo): string {
+export function sessionDisplayName(info: SessionInfo): string {
 	const title = sanitizeSessionName(info.title);
 	if (title) return title;
 	const first =
@@ -144,15 +151,6 @@ function sessionDisplayName(info: SessionInfo): string {
 	const date = new Date(ts);
 	const time = date.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
 	return `Untitled · ${time}`;
-}
-
-function extractTextFromContent(content: Message["content"]): string {
-	if (typeof content === "string") return content;
-	const text: string[] = [];
-	for (const block of content) {
-		if (block.type === "text") text.push(block.text);
-	}
-	return text.join(" ");
 }
 
 /**
@@ -271,19 +269,29 @@ function extractStringProperty(source: string, name: string, startIndex = 0): st
 	return decodeJsonStringFragment(source.slice(valueStart));
 }
 
-function countMessageMarkers(content: string): number {
+function countRoleMarkers(content: string, role: "assistant" | "user" | "message"): number {
+	const key = role === "message" ? '"type"' : '"role"';
+	const want = role === "message" ? "message" : role;
 	let count = 0;
 	let index = 0;
 	while (index < content.length) {
-		const typeIndex = content.indexOf('"type"', index);
-		if (typeIndex === -1) break;
-		const colonIndex = content.indexOf(":", typeIndex + 6);
+		const keyIndex = content.indexOf(key, index);
+		if (keyIndex === -1) break;
+		const colonIndex = content.indexOf(":", keyIndex + key.length);
 		if (colonIndex === -1) break;
-		const type = extractStringProperty(content, "type", typeIndex);
-		if (type === "message") count++;
+		const value = extractStringProperty(content, role === "message" ? "type" : "role", keyIndex);
+		if (value === want) count++;
 		index = colonIndex + 1;
 	}
 	return count;
+}
+
+function countMessageMarkers(content: string): number {
+	return countRoleMarkers(content, "message");
+}
+
+function countAssistantMarkers(content: string): number {
+	return countRoleMarkers(content, "assistant");
 }
 
 function extractFirstDisplayMessageFromPrefix(content: string): string | undefined {
@@ -394,10 +402,11 @@ async function scanSessionFile(
 	file: string,
 	storage: SessionStorage,
 	withStatus: boolean,
+	knownStat?: SessionStorageStat,
 ): Promise<SessionInfo | undefined> {
 	let stat: SessionStorageStat;
 	try {
-		stat = storage.statSync(file);
+		stat = knownStat ?? storage.statSync(file);
 	} catch {
 		// Missing/unstatable file: no stat identity to cache under.
 		return undefined;
@@ -427,6 +436,7 @@ async function scanSessionFile(
 		}
 
 		let parsedMessageCount = 0;
+		let assistantTurns = 0;
 		let firstMessage = "";
 		const allMessages: string[] = [];
 		let shortSummary: string | undefined;
@@ -440,15 +450,16 @@ async function scanSessionFile(
 
 			if (entry.type === "message" && entry.message) {
 				parsedMessageCount++;
+				if (entry.message.role === "assistant") assistantTurns++;
 
 				if (entry.message.role === "user" || entry.message.role === "assistant") {
-					const textContent = extractTextFromContent(entry.message.content);
+					const messageText = textContent(entry.message.content, " ");
 
-					if (textContent) {
-						allMessages.push(textContent);
+					if (messageText) {
+						allMessages.push(messageText);
 
 						if (!firstMessage && entry.message.role === "user") {
-							firstMessage = textContent;
+							firstMessage = messageText;
 						}
 					}
 				}
@@ -457,6 +468,18 @@ async function scanSessionFile(
 
 		firstMessage ||= extractFirstDisplayMessageFromPrefix(content) ?? "";
 		const messageCount = Math.max(parsedMessageCount, countMessageMarkers(content));
+		// Either bounded window may hold the only copy of an assistant record,
+		// and neither may: a >prefix record before a >suffix tail leaves the
+		// middle unexamined. When both windows miss, ask the backend for a full
+		// line-boundary scan rather than trusting the gap.
+		assistantTurns = Math.max(assistantTurns, countAssistantMarkers(content), countAssistantMarkers(suffix));
+		if (assistantTurns === 0 && storage.hasAssistantTurn) {
+			try {
+				if (await storage.hasAssistantTurn(file)) assistantTurns = 1;
+			} catch {
+				// Backend unreadable: keep the bounded-window evidence.
+			}
+		}
 		const info: SessionInfo = {
 			path: file,
 			id: header.id,
@@ -466,6 +489,7 @@ async function scanSessionFile(
 			created: new Date(header.timestamp ?? ""),
 			modified: mtime,
 			messageCount,
+			assistantTurns,
 			size,
 			firstMessage: firstMessage || "(no messages)",
 			allMessagesText: allMessages.length > 0 ? allMessages.join(" ") : firstMessage,
@@ -551,7 +575,9 @@ export async function recoverOrphanedBackups(sessionDir: string, storage: Sessio
 		if (dotIdx <= 0) continue;
 		const primaryName = trimmed.slice(0, dotIdx);
 		if (!primaryName.endsWith(".jsonl")) continue;
-		const primaryPath = path.join(sessionDir, primaryName);
+		// The primary is the backup's sibling: strip the suffix from the listed path instead of
+		// re-joining `sessionDir`, so the key keeps the storage's own spelling of the directory.
+		const primaryPath = backup.slice(0, backup.length - (name.length - primaryName.length));
 		let mtimeMs = 0;
 		try {
 			mtimeMs = storage.statSync(backup).mtimeMs;
@@ -585,10 +611,11 @@ async function scanSessionDir(
 	sessionDir: string,
 	storage: SessionStorage,
 	withStatus: boolean,
+	siblingDirs: readonly string[] = [],
 ): Promise<SessionInfo[]> {
 	try {
 		await recoverOrphanedBackups(sessionDir, storage);
-		const files = storage.listFilesSync(sessionDir, "*.jsonl");
+		const files = [sessionDir, ...siblingDirs].flatMap(dir => storage.listFilesSync(dir, "*.jsonl"));
 		return await collectSessionsFromFiles(files, storage, withStatus);
 	} catch {
 		return [];
@@ -610,10 +637,16 @@ async function scanSessionDirReadOnly(
 
 /**
  * List sessions in a resolved session directory (newest first), reading each
- * file's lifecycle {@link SessionStatus}.
+ * file's lifecycle {@link SessionStatus}. `siblingDirs` merge into the same
+ * list; they belong to other working directories (see `worktreeSessionDirs`),
+ * so orphaned-backup recovery runs on `sessionDir` only.
  */
-export function listSessions(sessionDir: string, storage: SessionStorage): Promise<SessionInfo[]> {
-	return scanSessionDir(sessionDir, storage, true);
+export function listSessions(
+	sessionDir: string,
+	storage: SessionStorage,
+	siblingDirs: readonly string[] = [],
+): Promise<SessionInfo[]> {
+	return scanSessionDir(sessionDir, storage, true, siblingDirs);
 }
 
 /**
@@ -637,6 +670,42 @@ export async function listAllSessions(
 		return [];
 	}
 }
+/**
+ * True when a scanned session is a 0-turn stub with no display name: the tail
+ * lifecycle shows no assistant activity (pending user-only or unscannable)
+ * and neither a title nor a first prompt worth showing. Covers header-only
+ * records (`newSession()` boundaries, `ensureOnDisk()` stubs, drafts) and
+ * user-only sessions whose prompt text never made the prefix scan. A title or
+ * first prompt is user intent worth resuming, so named 0-turn sessions stay
+ * discoverable. The tail — not the 4 KB prefix — decides answered-ness, so a
+ * transcript whose first assistant record starts past the prefix is never
+ * elided. The picker and `--continue` skip these; every other consumer (GC,
+ * ACP, `resolveResumableSession`) keeps the unfiltered scan.
+ */
+export function isEmptySession(session: SessionInfo): boolean {
+	if (session.status !== undefined && session.status !== "pending" && session.status !== "unknown") return false;
+	if ((session.assistantTurns ?? 1) > 0) return false;
+	if (sanitizeSessionName(session.title)) return false;
+	if (sanitizeSessionName(session.firstMessage === "(no messages)" ? undefined : session.firstMessage)) return false;
+	return true;
+}
+
+/** Picker-facing view of a session list: empties dropped, pinned sessions kept. */
+export function filterSessionsForPicker(sessions: SessionInfo[], pinnedIds: ReadonlySet<string>): SessionInfo[] {
+	return sessions.filter(session => pinnedIds.has(session.id) || !isEmptySession(session));
+}
+
+/** Most recent session with resumable content, skipping 0-turn empties. Exported for testing. */
+export async function findMostRecentNonEmptySession(
+	sessionDir: string,
+	storage: SessionStorage = new FileSessionStorage(),
+): Promise<string | null> {
+	// Status on: answered-ness comes from the tail lifecycle, not the 4 KB
+	// prefix, so a transcript whose first assistant record starts past the
+	// prefix is never skipped.
+	const sessions = await scanSessionDir(sessionDir, storage, true);
+	return sessions.find(session => !isEmptySession(session))?.path ?? null;
+}
 
 /** Exported for testing */
 export async function findMostRecentSession(
@@ -656,6 +725,156 @@ function sessionIdFromSessionPath(file: string): string | undefined {
 	return base.slice(sep + 1, -".jsonl".length) || undefined;
 }
 
+/** A session file with its stat identity, before any content scan. */
+interface StatedSessionFile {
+	file: string;
+	stat: SessionStorageStat;
+}
+
+/**
+ * Files matching `pattern` under `root`, newest mtime first. Stat-only: costs
+ * one glob plus one stat per file, never a content read. Files that vanish
+ * between discovery and stat are dropped.
+ */
+async function newestSessionFiles(
+	root: string,
+	pattern: string,
+	storage: SessionStorage,
+): Promise<StatedSessionFile[]> {
+	let files: string[];
+	try {
+		files =
+			storage instanceof FileSessionStorage
+				? await Array.fromAsync(new Bun.Glob(pattern).scan(root), name => path.join(root, name))
+				: storage.listFilesSync(root, pattern);
+	} catch {
+		return [];
+	}
+	const stated: StatedSessionFile[] = [];
+	if (storage instanceof FileSessionStorage) {
+		const stats = await Promise.all(
+			files.map(async file => {
+				try {
+					return { file, stat: await fs.promises.stat(file) };
+				} catch {
+					return undefined;
+				}
+			}),
+		);
+		for (const entry of stats) {
+			if (entry) stated.push(entry);
+		}
+	} else {
+		for (const file of files) {
+			try {
+				stated.push({ file, stat: storage.statSync(file) });
+			} catch {}
+		}
+	}
+	return stated.sort((a, b) => b.stat.mtimeMs - a.stat.mtimeMs);
+}
+
+/** Header-level {@link SessionInfo} with status for one session file; undefined when unreadable or not a session. */
+export function readSessionInfo(file: string): Promise<SessionInfo | undefined> {
+	return scanSessionFile(file, new FileSessionStorage(), true);
+}
+
+/** Selects which session files {@link listRecentSessions} considers. */
+export interface RecentSessionsQuery {
+	/** Maximum sessions returned. */
+	limit: number;
+	/** One project's session directory; omitted spans every project under `sessionsRoot`. */
+	sessionDir?: string;
+	/** Root holding one directory per project. Default: {@link getSessionsDir}. */
+	sessionsRoot?: string;
+}
+
+/**
+ * Newest non-empty sessions by mtime, with lifecycle status. Stats every
+ * candidate file but content-scans only until `limit` sessions are found, so
+ * it stays fast across tens of thousands of sessions where
+ * {@link listAllSessions} scans everything.
+ */
+export async function listRecentSessions(query: RecentSessionsQuery): Promise<SessionInfo[]> {
+	const storage = new FileSessionStorage();
+	const files = query.sessionDir
+		? await newestSessionFiles(query.sessionDir, "*.jsonl", storage)
+		: await newestSessionFiles(query.sessionsRoot ?? getSessionsDir(), "*/*.jsonl", storage);
+	const sessions: SessionInfo[] = [];
+	for (const { file, stat } of files) {
+		if (sessions.length >= query.limit) break;
+		const info = await scanSessionFile(file, storage, true, stat);
+		if (info && !isEmptySession(info)) sessions.push(info);
+	}
+	return sessions;
+}
+
+/** One project directory summarized from its session files. */
+export interface ProjectSummary {
+	/** Working directory recorded by the project's newest non-empty session. */
+	cwd: string;
+	/** Session files in the project's directory, 0-turn empties included. */
+	sessionCount: number;
+	/** Newest non-empty session; its `modified` is the project's last activity. */
+	latest: SessionInfo;
+}
+
+/**
+ * Projects by last activity, newest first. Stats every session file under
+ * `sessionsRoot` but content-scans only the files needed to find each listed
+ * project's newest non-empty session. Directories holding only empty sessions
+ * are skipped; directories resolving to an already-listed cwd are not repeated.
+ */
+export async function listRecentProjects(
+	limit: number,
+	sessionsRoot: string = getSessionsDir(),
+): Promise<ProjectSummary[]> {
+	const storage = new FileSessionStorage();
+	// Insertion order follows the newest-first file order, so directories come
+	// out ordered by their newest session file.
+	const byDir = new Map<string, StatedSessionFile[]>();
+	for (const entry of await newestSessionFiles(sessionsRoot, "*/*.jsonl", storage)) {
+		const dir = path.dirname(entry.file);
+		const files = byDir.get(dir);
+		if (files) files.push(entry);
+		else byDir.set(dir, [entry]);
+	}
+	const projects: ProjectSummary[] = [];
+	const listed = new Set<string>();
+	for (const files of byDir.values()) {
+		if (projects.length >= limit) break;
+		for (const { file, stat } of files) {
+			const info = await scanSessionFile(file, storage, true, stat);
+			if (!info || isEmptySession(info)) continue;
+			if (info.cwd && !listed.has(info.cwd)) {
+				listed.add(info.cwd);
+				projects.push({ cwd: info.cwd, sessionCount: files.length, latest: info });
+			}
+			break;
+		}
+	}
+	// A directory's newest file may be an empty stub; order by the activity actually listed.
+	return projects.sort((a, b) => b.latest.modified.getTime() - a.latest.modified.getTime());
+}
+
+/**
+ * Session files under every project directory whose session id starts with
+ * `idPrefix`, located by filename without reading content. Prefixes outside
+ * `[A-Za-z0-9_-]` match nothing, so the prefix is never interpreted as a glob.
+ */
+export async function findSessionFiles(idPrefix: string, sessionsRoot: string = getSessionsDir()): Promise<string[]> {
+	if (!/^[\w-]+$/.test(idPrefix)) return [];
+	try {
+		const files = await Array.fromAsync(new Bun.Glob(`*/*_${idPrefix}*.jsonl`).scan(sessionsRoot), name =>
+			path.join(sessionsRoot, name),
+		);
+		// `*_` can also match an underscore inside an id; keep true id-prefix matches only.
+		return files.filter(file => sessionIdFromSessionPath(file)?.startsWith(idPrefix));
+	} catch {
+		return [];
+	}
+}
+
 /**
  * Get recent sessions for display in the welcome screen.
  *
@@ -671,27 +890,11 @@ export async function getRecentSessions(
 	limit = 4,
 	storage: SessionStorage = new FileSessionStorage(),
 ): Promise<RecentSessionInfo[]> {
-	let files: string[];
-	try {
-		files = storage.listFilesSync(sessionDir, "*.jsonl");
-	} catch {
-		return [];
-	}
-	const byMtime: Array<{ file: string; stat: SessionStorageStat }> = [];
-	for (const file of files) {
-		try {
-			byMtime.push({ file, stat: storage.statSync(file) });
-		} catch {
-			// Vanished between glob and stat; skip.
-		}
-	}
-	byMtime.sort((a, b) => b.stat.mtimeMs - a.stat.mtimeMs);
-
 	// The index is keyed by real session ids; in-memory test storages must not
 	// touch the process-wide history.db.
 	const useIndex = storage instanceof FileSessionStorage;
 	const recent: RecentSessionInfo[] = [];
-	for (const { file, stat } of byMtime) {
+	for (const { file, stat } of await newestSessionFiles(sessionDir, "*.jsonl", storage)) {
 		if (recent.length >= limit) break;
 		const id = useIndex ? sessionIdFromSessionPath(file) : undefined;
 		const indexed = id ? lookupSessionTitle(id) : undefined;
@@ -699,8 +902,8 @@ export async function getRecentSessions(
 			recent.push({ path: file, name: indexed, timeAgo: formatTimeAgo(stat.mtime) });
 			continue;
 		}
-		const info = await scanSessionFile(file, storage, false);
-		if (!info) continue;
+		const info = await scanSessionFile(file, storage, true, stat);
+		if (!info || isEmptySession(info)) continue;
 		const title = sanitizeSessionName(info.title);
 		if (useIndex && title && info.id) recordSessionTitle(info.id, title);
 		recent.push({ path: file, name: sessionDisplayName(info), timeAgo: formatTimeAgo(info.modified) });

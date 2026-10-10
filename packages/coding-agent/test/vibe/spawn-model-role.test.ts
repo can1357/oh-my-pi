@@ -14,9 +14,9 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import type { ExecutorOptions } from "@oh-my-pi/pi-coding-agent/task/executor";
 import * as executorModule from "@oh-my-pi/pi-coding-agent/task/executor";
-import type { SingleResult } from "@oh-my-pi/pi-coding-agent/task/types";
+import type { SingleResult } from "@oh-my-pi/pi-tui/tools/task";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
-import type { VibeCli } from "@oh-my-pi/pi-coding-agent/vibe/lifecycle";
+import type { VibeCli } from "@oh-my-pi/pi-tui/tools/vibe";
 import { VibeSessionRegistry } from "@oh-my-pi/pi-coding-agent/vibe/runtime";
 
 function makeParentSession(settings: Settings): ToolSession {
@@ -104,5 +104,21 @@ describe("vibe worker spawn model role", () => {
 
 		expect(options.modelOverride).toEqual(["openai-codex/sol"]);
 		expect(options.modelRole).toBeUndefined();
+	});
+
+	it("restricts the first spawn to the worker agent's account pool, as revival does", async () => {
+		// Without it a worker runs unrestricted until it is parked and revived.
+		const options = await spawnAndCaptureOptions(
+			"good",
+			Settings.isolated({
+				modelRoles: { default: "anthropic/opus", task: "anthropic/sonnet" },
+				"task.agentAccountPools": {
+					task: { anthropic: ["email:a@example.com|org:org-a"] },
+					sonic: { anthropic: [] },
+				},
+			}),
+		);
+
+		expect(options.oauthAccountPools).toEqual({ anthropic: ["email:a@example.com|org:org-a"] });
 	});
 });

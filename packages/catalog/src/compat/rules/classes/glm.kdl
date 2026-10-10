@@ -107,7 +107,7 @@ class "glm" {
 	// the intentional overlap with census host-dialect residues such as
 	// baseten's `zai-org/GLM-5*`.
 	models "*glm-5.3" "*glm-5.3-air" "*glm-5.3-turbo" "*glm-5.3-flash" "*glm-5.3:*" \
-		"*glm-5.3-flash-uncensored" "*glm-5.3-free" "*glm-5.3-highspeed" "*glm-5.3-flash-lab" priority=10 {
+		"*glm-5.3-flash-uncensored" "*glm-5.3-free" "*glm-5.3-highspeed" "*glm-5.3-fast" "*glm-5.3-flash-lab" priority=10 {
 		thinking-default-level "max"
 		thinking-efforts "low" "high" "max"
 		thinking-requires-effort #true

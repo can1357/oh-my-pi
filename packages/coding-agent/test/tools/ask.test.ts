@@ -1,4 +1,4 @@
-import { beforeAll, describe, expect, it, spyOn, vi } from "bun:test";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, spyOn, vi } from "bun:test";
 import { stripVTControlCharacters } from "node:util";
 import { type } from "@oh-my-pi/omptype";
 import type { AgentToolContext } from "@oh-my-pi/pi-agent-core";
@@ -8,11 +8,21 @@ import type {
 	ExtensionAskDialogResult,
 	ExtensionUISelectItem,
 } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
-import { getThemeByName, initTheme, theme, type Theme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { getThemeByName, initTheme, theme, type Theme } from "@oh-my-pi/pi-tui/theme";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
-import { AskTool, askToolRenderer } from "@oh-my-pi/pi-coding-agent/tools/ask";
+import { AskTool } from "@oh-my-pi/pi-coding-agent/tools/ask";
+import { askToolRenderer } from "@oh-my-pi/pi-tui/tools/ask";
 import { ToolAbortError } from "@oh-my-pi/pi-coding-agent/tools/tool-errors";
 import { TERMINAL } from "@oh-my-pi/pi-tui";
+import { tagImageAttachmentSource } from "@oh-my-pi/pi-tui/prompt/image-source";
+import * as ai from "@oh-my-pi/pi-ai";
+import type { Api, AssistantMessage, Model } from "@oh-my-pi/pi-ai";
+import { TempDir } from "@oh-my-pi/pi-utils";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
+
+// 1x1 transparent PNG.
+const TINY_PNG_BASE64 =
+	"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg==";
 
 function createSession(overrides: Partial<ToolSession> = {}): ToolSession {
 	return {
@@ -575,188 +585,43 @@ describe("AskTool custom input", () => {
 		expect(editor).toHaveBeenCalledTimes(1);
 		expect(abort).not.toHaveBeenCalled();
 	});
-	it("keeps question context visible while entering Other custom input", async () => {
-		const tool = new AskTool(createSession());
-		const editor = vi.fn(async (_title: string) => "custom");
-		const questions = [
-			{
-				id: "details",
-				question: "Share details",
-				options: [{ label: "yes" }, { label: "no", description: "Skip the optional detail." }],
-			},
-		];
-		const context = createContext({
-			select: async () => "Other (type your own)",
-			editor,
-		});
-
-		await tool.execute("call-editor-context", { questions }, undefined, undefined, context);
-
-		const title = editor.mock.calls[0]?.[0] ?? "";
-		expect(title).toContain("Share details");
-		expect(title).toContain("yes");
-		expect(title).toContain("no");
-		expect(title).toContain("Skip the optional detail.");
-		expect(title).toContain("Other (type your own)");
-		expect(title).toContain("Enter your response:");
-	});
-
-	it("caps Other editor context for long option lists with long descriptions", async () => {
-		const tool = new AskTool(createSession());
-		const editor = vi.fn(async (_title: string) => "custom");
-		const longDescription = "x".repeat(400);
-		const optionCount = 20;
-		const options = Array.from({ length: optionCount }, (_, i) => ({
-			label: `option-${i}`,
-			description: longDescription,
-		}));
-		const questions = [{ id: "pick", question: "Pick one", options }];
-		const context = createContext({
-			select: async () => "Other (type your own)",
-			editor,
-		});
-
-		await tool.execute("call-editor-cap", { questions }, undefined, undefined, context);
-
-		const title = editor.mock.calls[0]?.[0] ?? "";
-		const lineCount = title.split("\n").length;
-		// Cap is 8 option rows + their (single-line) descriptions + chrome; far below
-		// 20 options × (label + multi-line description) the unbounded path would emit.
-		expect(lineCount).toBeLessThanOrEqual(22);
-		expect(title).toContain("Pick one");
-		expect(title).toContain("option-0");
-		expect(title).toContain("Other (type your own)");
-		expect(title).toContain("more option");
-		expect(title).toContain("Enter your response:");
-		// Descriptions are flattened to a single line and truncated.
-		expect(title).not.toContain("x".repeat(400));
-		// Every option-row description must fit on one line.
-		for (const line of title.split("\n")) {
-			expect(line.length).toBeLessThanOrEqual(160);
-		}
-	});
-
-	it("keeps user-checked options visible in capped multi-select context", async () => {
-		const tool = new AskTool(createSession());
-		const editor = vi.fn(async (_title: string) => "custom");
-		const options = Array.from({ length: 20 }, (_, i) => ({ label: `opt-${i}` }));
-		const questions = [{ id: "pick", question: "Multi pick", options, multi: true }];
-		let call = 0;
-		const context = createContext({
-			select: async (_prompt, opts) => {
-				call += 1;
-				if (call === 1) return selectItemLabel(opts.find(o => selectItemLabel(o) === "opt-12"));
-				if (call === 2) return selectItemLabel(opts.find(o => selectItemLabel(o) === "opt-17"));
-				return "Other (type your own)";
-			},
-			editor,
-		});
-
-		await tool.execute("call-editor-cap-multi", { questions }, undefined, undefined, context);
-
-		const title = editor.mock.calls[0]?.[0] ?? "";
-		// Checked options must survive the window so the user sees what they had
-		// already toggled before switching to Other.
-		expect(title).toContain("opt-12");
-		expect(title).toContain("opt-17");
-		expect(title).toContain("Other (type your own)");
-		expect(title).toContain("more option");
-	});
-
-	it("summarizes excess checked options instead of exceeding the context cap", async () => {
-		const tool = new AskTool(createSession());
-		const editor = vi.fn(async (_title: string) => "custom");
-		const options = Array.from({ length: 20 }, (_, i) => ({ label: `checked-${i}` }));
-		const questions = [{ id: "pick", question: "Pick many", options, multi: true }];
-		let call = 0;
-		const context = createContext({
-			select: async (_prompt, opts) => {
-				if (call < 12) {
-					const label = `checked-${call}`;
-					call += 1;
-					return selectItemLabel(opts.find(o => selectItemLabel(o) === label));
-				}
-				return "Other (type your own)";
-			},
-			editor,
-		});
-
-		await tool.execute("call-editor-cap-many-checked", { questions }, undefined, undefined, context);
-
-		const title = editor.mock.calls[0]?.[0] ?? "";
-		const optionRows = title
-			.split("\n")
-			.filter(line => line.includes("checked-") || line.includes("Other (type your own)"));
-		expect(optionRows.length).toBeLessThanOrEqual(8);
-		expect(title).toContain("Other (type your own)");
-		expect(title).toContain("checked");
-		expect(title).toContain("more option");
-		expect(title).toContain("Enter your response:");
-	});
-
-	it("keeps sparse checked gap markers within the Other title budget", async () => {
-		const tool = new AskTool(createSession());
-		const editor = vi.fn(async (_title: string) => "custom");
-		const checkedLabels = [10, 20, 30, 40, 50, 60].map(i => `opt-${i}`);
-		const options = Array.from({ length: 61 }, (_, i) => ({ label: `opt-${i}` }));
-		const questions = [{ id: "pick", question: "Pick sparse", options, multi: true }];
-		let call = 0;
-		const context = createContext({
-			select: async (_prompt, opts) => {
-				const next = checkedLabels[call++];
-				return next ? selectItemLabel(opts.find(o => selectItemLabel(o) === next)) : "Other (type your own)";
-			},
-			editor,
-		});
-
-		await tool.execute("call-editor-cap-sparse-checked", { questions }, undefined, undefined, context);
-
-		const title = editor.mock.calls[0]?.[0] ?? "";
-		expect(title.split("\n").length).toBeLessThanOrEqual(16);
-		expect(title).toContain("Other (type your own)");
-		expect(title).toContain("more option");
-		expect(title).toContain("Enter your response:");
-	});
-
-	it("enforces total title row budget under narrow terminals", async () => {
+	it("titles the Other editor with the question text alone, free of terminal layout", async () => {
 		const originalColumns = process.stdout.columns;
-		// Force an 80-wide terminal so long descriptions would wrap to multiple
-		// rendered rows without per-line width truncation + total row budget.
-		Object.defineProperty(process.stdout, "columns", { value: 80, configurable: true });
+		// A narrow terminal must not clip the title: UI surfaces own its layout.
+		Object.defineProperty(process.stdout, "columns", { value: 20, configurable: true });
 		try {
+			const question = "A question long enough to exceed any clipped terminal width, ending here?";
 			const tool = new AskTool(createSession());
 			const editor = vi.fn(async (_title: string) => "custom");
-			const longDescription = "x".repeat(400);
-			const options = Array.from({ length: 8 }, (_, i) => ({
-				label: `option-${i}`,
-				description: longDescription,
-			}));
-			const questions = [{ id: "pick", question: "Pick one", options }];
 			const context = createContext({
 				select: async () => "Other (type your own)",
 				editor,
 			});
+			await tool.execute(
+				"call-editor-title-single",
+				{ questions: [{ id: "one", question, options: [{ label: "yes", description: "Detail." }] }] },
+				undefined,
+				undefined,
+				context,
+			);
+			expect(editor.mock.calls[0]?.[0]).toBe(question);
 
-			await tool.execute("call-editor-row-budget", { questions }, undefined, undefined, context);
-
-			const title = editor.mock.calls[0]?.[0] ?? "";
-			const lines = title.split("\n");
-			// 16-row hard budget keeps the input row + hint reachable on 80x24.
-			expect(lines.length).toBeLessThanOrEqual(16);
-			// Every emitted line must fit on a single 80-cell row after truncation.
-			for (const line of lines) {
-				expect(stripAnsi(line).length).toBeLessThanOrEqual(80);
-			}
-			expect(title).toContain("Pick one");
-			expect(title).toContain("Other (type your own)");
-			expect(title).toContain("Enter your response:");
-			expect(title).not.toContain("x".repeat(400));
+			const multiEditor = vi.fn(async (_title: string) => "custom");
+			let call = 0;
+			const multiContext = createContext({
+				select: async () => (call++ === 0 ? "yes" : "Other (type your own)"),
+				editor: multiEditor,
+			});
+			await tool.execute(
+				"call-editor-title-multi",
+				{ questions: [{ id: "many", question, options: [{ label: "yes" }, { label: "no" }], multi: true }] },
+				undefined,
+				undefined,
+				multiContext,
+			);
+			expect(multiEditor.mock.calls[0]?.[0]).toBe(`(1 selected) ${question}`);
 		} finally {
-			if (originalColumns === undefined) {
-				Object.defineProperty(process.stdout, "columns", { value: undefined, configurable: true });
-			} else {
-				Object.defineProperty(process.stdout, "columns", { value: originalColumns, configurable: true });
-			}
+			Object.defineProperty(process.stdout, "columns", { value: originalColumns, configurable: true });
 		}
 	});
 
@@ -1333,6 +1198,62 @@ describe("AskTool multi-question navigation", () => {
 		expect(result.details?.results?.[1]?.selectedOptions).toEqual(["two"]);
 		expect(editor).toHaveBeenCalledTimes(1);
 	});
+
+	it("offers Done selecting for multi-select inside a multi-question ask without arrow navigation", async () => {
+		const tool = new AskTool(createSession());
+		const context = createContext({
+			select: async (prompt, options) => {
+				const labels = options.map(selectItemLabel);
+				if (prompt.includes("Pick one")) return labels.find(label => label?.endsWith("gamma"));
+				if (!prompt.includes("selected")) return labels.find(label => label?.endsWith("alpha"));
+				return labels.find(label => label?.includes("Done selecting"));
+			},
+		});
+
+		const result = await tool.execute(
+			"call-multi-in-many-done",
+			{
+				questions: [
+					{ id: "many", question: "Pick many", options: [{ label: "alpha" }, { label: "beta" }], multi: true },
+					{ id: "one", question: "Pick one", options: [{ label: "gamma" }, { label: "delta" }] },
+				],
+			},
+			undefined,
+			undefined,
+			context,
+		);
+
+		expect(result.details?.results?.map(r => r.selectedOptions)).toEqual([["alpha"], ["gamma"]]);
+	});
+
+	it("reports ticked options together with Other text for a multi-select question", async () => {
+		const tool = new AskTool(createSession());
+		const featureChoices = ["alpha", "beta", "Other (type your own)"];
+		const questions = [
+			{
+				id: "features",
+				question: "Features?",
+				options: [{ label: "alpha" }, { label: "beta" }, { label: "gamma" }],
+				multi: true,
+			},
+			{
+				id: "summary",
+				question: "Summary?",
+				options: [{ label: "one" }, { label: "two" }],
+			},
+		];
+		const context = createContext({
+			select: async prompt => (prompt.includes("Features?") ? featureChoices.shift() : "two"),
+			editor: async () => "also X",
+		});
+
+		const result = await tool.execute("call-multi-other", { questions }, undefined, undefined, context);
+
+		expect(result.content[0]).toEqual({
+			type: "text",
+			text: 'User answers:\nfeatures: [alpha, beta] + "also X"\nsummary: two',
+		});
+	});
 });
 
 describe("AskTool option markers", () => {
@@ -1585,6 +1506,234 @@ describe("AskTool rich ask dialog", () => {
 			customInput: undefined,
 			note: "My Custom Note",
 			timedOut: undefined,
+		});
+	});
+
+	it("returns custom-answer and note images after text, numbering markers across answers in text and details", async () => {
+		// A clipboard paste committed to the session carries its file; the model gets the same
+		// source notice a main-editor attachment gets, right before the image.
+		const customImage = tagImageAttachmentSource(
+			{ type: "image", data: "custom-image", mimeType: "image/webp" },
+			"local://pasted-image-abc.webp",
+			"image",
+		);
+		const firstImage = { type: "image" as const, data: "first-image", mimeType: "image/png" };
+		const secondImage = { type: "image" as const, data: "second-image", mimeType: "image/jpeg" };
+		const askDialog = vi.fn().mockResolvedValue({
+			kind: "submit",
+			results: [
+				{
+					id: "q1",
+					selectedOptions: [],
+					customInput: "Like [Image #1]",
+					customInputImages: [customImage],
+					note: "Evidence [Image #1]",
+					noteImages: [firstImage],
+				},
+				{
+					id: "q2",
+					selectedOptions: ["B"],
+					note: "Evidence [Image #1]",
+					noteImages: [secondImage],
+				},
+			],
+		});
+		const tool = new AskTool(createSession());
+		const result = await tool.execute(
+			"call-images",
+			{
+				questions: [
+					{ id: "q1", question: "Q1?", options: [{ label: "A" }] },
+					{ id: "q2", question: "Q2?", options: [{ label: "B" }] },
+				],
+			},
+			undefined,
+			undefined,
+			createContext({ askDialog }),
+		);
+
+		expect(result.content).toEqual([
+			{
+				type: "text",
+				text: 'User answers:\nq1: "Like [Image #1]" (note: Evidence [Image #2])\nq2: B (note: Evidence [Image #3])',
+			},
+			{ type: "text", text: expect.stringContaining("local://pasted-image-abc.webp") },
+			// The source tag stays on the block so `attachment://1` resolves to the pasted file.
+			customImage,
+			{ type: "image", data: "first-image", mimeType: "image/png" },
+			{ type: "image", data: "second-image", mimeType: "image/jpeg" },
+		]);
+		expect(result.details).toMatchObject({
+			results: [{ customInput: "Like [Image #1]", note: "Evidence [Image #2]" }, { note: "Evidence [Image #3]" }],
+		});
+		for (const data of ["custom-image", "first-image", "second-image"]) {
+			expect(JSON.stringify(result.details)).not.toContain(data);
+		}
+	});
+
+	it("renumbers only markers that refer to the answer's own images", async () => {
+		const image = { type: "image" as const, data: "image", mimeType: "image/png" };
+		const askDialog = vi.fn().mockResolvedValue({
+			kind: "submit",
+			results: [
+				{ id: "q1", selectedOptions: [], customInput: "Like [Image #1]", customInputImages: [image] },
+				{
+					id: "q2",
+					selectedOptions: [],
+					customInput: "Match the mock in [Image #1]",
+					note: "[Image #1] beside [Image #5]",
+					noteImages: [image],
+				},
+			],
+		});
+		const result = await new AskTool(createSession()).execute(
+			"call-typed-markers",
+			{
+				questions: [
+					{ id: "q1", question: "Q1?", options: [{ label: "A" }] },
+					{ id: "q2", question: "Q2?", options: [{ label: "B" }] },
+				],
+			},
+			undefined,
+			undefined,
+			createContext({ askDialog }),
+		);
+
+		expect(result.details).toMatchObject({
+			results: [
+				{ customInput: "Like [Image #1]" },
+				{ customInput: "Match the mock in [Image #1]", note: "[Image #2] beside [Image #5]" },
+			],
+		});
+	});
+
+	describe("answer images for a text-only model", () => {
+		const visionModel = buildModel({
+			id: "gpt-4o",
+			name: "GPT-4o",
+			api: "openai-responses",
+			provider: "openai",
+			baseUrl: "https://api.openai.com/v1",
+			reasoning: false,
+			input: ["text", "image"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 128000,
+			maxTokens: 4096,
+		});
+		const textModel: Model<Api> = { ...visionModel, id: "gpt-4.1-mini", input: ["text"] };
+		const image = { type: "image" as const, data: TINY_PNG_BASE64, mimeType: "image/png" };
+		const answerText = { type: "text" as const, text: "User selected: A\nUser added note: see [Image #1]" };
+		let tempDir: TempDir;
+		let describeCalls: unknown[][];
+
+		beforeEach(async () => {
+			tempDir = await TempDir.create("@omp-ask-describe-");
+			describeCalls = [];
+			vi.spyOn(ai, "completeSimple").mockImplementation(completeImpl);
+		});
+
+		afterEach(async () => {
+			vi.restoreAllMocks();
+			await tempDir.remove();
+		});
+
+		/** Vision-model stand-in, shaped like `makeCompleteStub` in image-vision-fallback.test.ts. */
+		const completeImpl = async (...args: unknown[]) => {
+			describeCalls.push(args);
+			return {
+				role: "assistant",
+				api: visionModel.api,
+				provider: visionModel.provider,
+				model: visionModel.id,
+				usage: {
+					input: 1,
+					output: 1,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 2,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				},
+				stopReason: "stop",
+				timestamp: Date.now(),
+				content: [{ type: "text", text: "A red banner reading ZEBRA 42." }],
+			} satisfies AssistantMessage;
+		};
+
+		function runAsk(options: {
+			model: Model<Api>;
+			settings?: Settings;
+			getApiKey?: () => Promise<string | undefined>;
+			selectedOptions?: string[];
+		}) {
+			const askDialog = vi.fn().mockResolvedValue({
+				kind: "submit",
+				results: [
+					{
+						id: "q1",
+						selectedOptions: options.selectedOptions ?? ["A"],
+						note: "see [Image #1]",
+						noteImages: [image],
+					},
+				],
+			});
+			return new AskTool(
+				createSession({
+					settings: options.settings ?? Settings.isolated(),
+					getActiveModel: () => options.model,
+					getArtifactsDir: () => tempDir.path(),
+					getSessionId: () => "session",
+					modelRegistry: {
+						getAvailable: () => [visionModel],
+						getApiKey: options.getApiKey ?? (async () => "test-key"),
+						resolver: () => async () => "test-key",
+					} as unknown as ToolSession["modelRegistry"],
+				}),
+			).execute(
+				"call-describe",
+				{ questions: [{ id: "q1", question: "Q?", options: [{ label: "A" }] }] },
+				undefined,
+				undefined,
+				createContext({ askDialog }),
+			);
+		}
+
+		it("follows each answer image with a vision-model description", async () => {
+			const result = await runAsk({ model: textModel });
+
+			expect(result.content).toEqual([
+				answerText,
+				image,
+				{ type: "text", text: expect.stringContaining("A red banner reading ZEBRA 42.") },
+			]);
+		});
+
+		it("keeps the answer and its images when describing them fails", async () => {
+			const result = await runAsk({
+				model: textModel,
+				getApiKey: async () => {
+					throw new Error("credential lookup failed");
+				},
+			});
+
+			expect(result.content).toEqual([answerText, image]);
+		});
+
+		it("makes no vision call for a cancelled ask", async () => {
+			await expect(runAsk({ model: textModel, selectedOptions: [] })).rejects.toBeInstanceOf(ToolAbortError);
+			expect(describeCalls).toHaveLength(0);
+		});
+
+		it("sends the image alone to a vision model, or with the setting off", async () => {
+			expect((await runAsk({ model: visionModel })).content).toEqual([answerText, image]);
+			expect(
+				(
+					await runAsk({
+						model: textModel,
+						settings: Settings.isolated({ "images.describeForTextModels": false }),
+					})
+				).content,
+			).toEqual([answerText, image]);
+			expect(describeCalls).toHaveLength(0);
 		});
 	});
 

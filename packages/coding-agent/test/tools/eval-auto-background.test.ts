@@ -87,7 +87,7 @@ describe("EvalTool auto-background", () => {
 		vi.restoreAllMocks();
 	});
 
-	it("keeps fast cells inline and suppresses their job delivery", async () => {
+	it("keeps fast cells inline without a job row or delivery", async () => {
 		const deliveries: string[] = [];
 		const asyncJobManager = new AsyncJobManager({
 			onJobComplete: async (_jobId, text) => {
@@ -112,7 +112,10 @@ describe("EvalTool auto-background", () => {
 		expect(text).toContain("quick");
 		expect(result.details?.async).toBeUndefined();
 		expect(result.details?.cells?.[0]?.status).toBe("complete");
+		await asyncJobManager.waitForAll();
 		await asyncJobManager.drainDeliveries({ timeoutMs: 1 });
+		expect(asyncJobManager.getAllJobs()).toEqual([]);
+		expect(asyncJobManager.getJob("bg_1")).toBeUndefined();
 		expect(deliveries).toEqual([]);
 		await asyncJobManager.dispose();
 	});
@@ -151,6 +154,9 @@ describe("EvalTool auto-background", () => {
 		expect(result.details?.async?.type).toBe("eval");
 		const text = result.content.map(c => (c.type === "text" ? c.text : "")).join("\n");
 		expect(text).toContain("Backgrounded as job");
+		// No `timeout` given, backgrounded after its foreground wait: the deadline is eval's 30 s
+		// default counted over the cell's whole run, not time left.
+		expect(text).toContain("(killed once it has run 30s in total; `timeout: 0` disables the deadline)");
 		// The snapshot keeps the running cell (with its streamed tail) for the transcript.
 		expect(result.details?.cells?.[0]?.status).toBe("running");
 

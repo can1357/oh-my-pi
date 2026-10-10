@@ -2,15 +2,17 @@
 mod capture;
 mod libei;
 mod portal;
+mod xkb;
 
 use image::RgbaImage;
 
 use crate::desktop::{
 	backend::{AxBackend, Backend, DeliveryMode, PointerEvent},
+	control::{self, OperationToken},
 	error::{CoreResult, DesktopError},
 	frame::FrameGeometry,
 	keys::KeyName,
-	linux::ax::AtSpiAx,
+	linux::ax::{AtSpiAx, AtSpiWindow},
 	types::{
 		CaptureCaps, DesktopCapabilities, DesktopDisplay, DesktopWindow, DisplaySelector, Target,
 	},
@@ -76,29 +78,49 @@ impl PortalGeometry {
 	}
 
 	/// Convert a window's logical bounds (global compositor coordinates) into a
-	/// pixel crop rectangle within the captured buffer. Returns `None` when the
-	/// window lies outside the captured monitor.
-	fn window_crop(&self, window: &DesktopWindow) -> Option<(u32, u32, u32, u32)> {
+	/// pixel crop rectangle within the captured buffer.
+	///
+	/// # Errors
+	/// `CaptureFailed` when the toolkit could not report the window's global
+	/// position (native Wayland clients answer with window-relative `0,0`, which
+	/// would crop whatever sits at the monitor's top-left), or when the window
+	/// lies outside the captured monitor.
+	fn window_crop(&self, window: &AtSpiWindow) -> CoreResult<(u32, u32, u32, u32)> {
+		let AtSpiWindow { window, position_known } = window;
+		if !position_known {
+			return Err(DesktopError::capture_failed(format!(
+				"Wayland window {} has no known screen position: its toolkit reports window-relative \
+				 AT-SPI coordinates, so it cannot be located in the portal capture; capture the \
+				 desktop instead",
+				window.id
+			)));
+		}
+		let outside = || {
+			DesktopError::capture_failed(format!(
+				"Wayland window {} is outside the selected portal monitor",
+				window.id
+			))
+		};
 		let scale_x = f64::from(self.pixel_width) / f64::from(self.logical_width.max(1));
 		let scale_y = f64::from(self.pixel_height) / f64::from(self.logical_height.max(1));
 		let rel_x = window.x - self.logical_x;
 		let rel_y = window.y - self.logical_y;
 		if rel_x < 0 || rel_y < 0 {
-			return None;
+			return Err(outside());
 		}
 		let px_x = (f64::from(rel_x) * scale_x).round() as u32;
 		let px_y = (f64::from(rel_y) * scale_y).round() as u32;
 		if px_x >= self.pixel_width || px_y >= self.pixel_height {
-			return None;
+			return Err(outside());
 		}
 		let px_width = (f64::from(window.width) * scale_x).round().max(1.0) as u32;
 		let px_height = (f64::from(window.height) * scale_y).round().max(1.0) as u32;
 		let width = px_width.min(self.pixel_width - px_x);
 		let height = px_height.min(self.pixel_height - px_y);
 		if width == 0 || height == 0 {
-			return None;
+			return Err(outside());
 		}
-		Some((px_x, px_y, width, height))
+		Ok((px_x, px_y, width, height))
 	}
 }
 
@@ -107,12 +129,11 @@ pub struct WaylandBackend {
 		not(feature = "wayland-pipewire"),
 		expect(dead_code, reason = "only read by the pipewire capture path")
 	)]
-	display:     DisplaySelector,
-	ax:          Option<AtSpiAx>,
-	ax_error:    Option<DesktopError>,
-	input:       Option<libei::Libei>,
-	input_error: Option<DesktopError>,
-	displays:    Vec<DesktopDisplay>,
+	display:  DisplaySelector,
+	ax:       Option<AtSpiAx>,
+	ax_error: Option<DesktopError>,
+	input:    Option<libei::Libei>,
+	displays: Vec<DesktopDisplay>,
 }
 
 impl WaylandBackend {
@@ -124,7 +145,7 @@ impl WaylandBackend {
 			Ok(ax) => (Some(ax), None),
 			Err(err) => (None, Some(err)),
 		};
-		Self { display, ax, ax_error, input: None, input_error: None, displays: Vec::new() }
+		Self { display, ax, ax_error, input: None, displays: Vec::new() }
 	}
 
 	fn window_input_error(target: &Target, kind: &str) -> CoreResult<()> {
@@ -138,33 +159,36 @@ impl WaylandBackend {
 		Ok(())
 	}
 
-	fn prepare_input(&mut self, target: &Target, kind: &str) -> CoreResult<&mut libei::Libei> {
+	fn run_input(
+		&mut self,
+		target: &Target,
+		kind: &str,
+		action: impl FnOnce(&mut libei::Libei) -> CoreResult<()>,
+	) -> CoreResult<()> {
+		control::check()?;
 		Self::window_input_error(target, kind)?;
-		if self.input.is_none() && self.input_error.is_none() {
-			match libei::Libei::new() {
-				Ok(input) => self.input = Some(input),
-				Err(err) => self.input_error = Some(err),
-			}
+		if self.input.is_none() {
+			self.input = Some(libei::Libei::new()?);
 		}
-		if let Some(input) = self.input.as_mut() {
-			return Ok(input);
+		let input = self.input.as_mut().expect("libei was initialized");
+		let result = action(input);
+		if input.disconnected() {
+			self.input = None;
 		}
-		Err(self.input_error.clone().unwrap_or_else(|| {
-			DesktopError::permission_denied(
-				"RemoteDesktop portal or LIBEI_SOCKET is required for Wayland input",
-			)
-		}))
+		result
 	}
 
-	#[cfg(feature = "wayland-pipewire")]
-	fn selected_display_allowed(&self) -> CoreResult<()> {
-		match &self.display {
-			DisplaySelector::All => Ok(()),
-			DisplaySelector::Id(id) if id == "wayland-portal-0" => Ok(()),
-			DisplaySelector::Id(id) => Err(DesktopError::invalid_target(format!(
-				"Wayland portal display '{id}' is unavailable; use 'all' or 'wayland-portal-0'"
-			))),
-		}
+	fn atspi_windows(&self) -> CoreResult<Vec<AtSpiWindow>> {
+		self
+			.ax
+			.as_ref()
+			.ok_or_else(|| {
+				self
+					.ax_error
+					.clone()
+					.unwrap_or_else(DesktopError::ax_unsupported)
+			})?
+			.windows()
 	}
 }
 
@@ -172,8 +196,6 @@ impl Backend for WaylandBackend {
 	fn capabilities(&mut self) -> DesktopCapabilities {
 		let input_permission = if self.input.is_some() {
 			"granted"
-		} else if self.input_error.is_some() {
-			"unavailable"
 		} else {
 			"prompt-or-granted"
 		};
@@ -184,10 +206,15 @@ impl Backend for WaylandBackend {
 			// wayland-pipewire feature; without it capture() hard-errors, so the
 			// capability report must not advertise a capture the binary cannot do.
 			capture: cfg!(feature = "wayland-pipewire"),
-			input: self.input_error.is_none(),
+			input: true,
 			ax: self.ax.is_some(),
 			background_window_input: false,
-			delivery_modes: vec!["background".to_string()],
+			takeover: false,
+			applications: crate::desktop::applications::supported(),
+			menus: self.ax.is_some(),
+			held_input: true,
+			spaces: false,
+			global_escape: false,
 			capture_permission: if cfg!(feature = "wayland-pipewire") {
 				"prompt-or-granted".to_string()
 			} else {
@@ -207,51 +234,91 @@ impl Backend for WaylandBackend {
 		Ok(self.displays.clone())
 	}
 
+	fn validate_frame_layout(&mut self, frame: &FrameGeometry) -> CoreResult<()> {
+		control::check()?;
+		#[cfg(not(feature = "wayland-pipewire"))]
+		{
+			let _ = frame;
+			Err(DesktopError::invalid_coordinate_frame(
+				"validating Wayland display geometry requires the wayland-pipewire feature",
+			))
+		}
+		#[cfg(feature = "wayland-pipewire")]
+		{
+			// ScreenCast exposes geometry only when opening a stream. Enumeration
+			// can use the last snapshot, but coordinate delivery needs fresh
+			// bounds.
+			let geometry = capture::geometry();
+			control::check()?;
+			let geometry = geometry.map_err(|error| {
+				DesktopError::invalid_coordinate_frame(format!(
+					"could not refresh Wayland display geometry: {error}"
+				))
+			})?;
+			self.displays = vec![geometry.display()];
+			frame.validate_layout(&self.displays)
+		}
+	}
+
 	fn windows(&mut self) -> CoreResult<Vec<DesktopWindow>> {
-		self
-			.ax
-			.as_mut()
-			.ok_or_else(|| {
-				self
-					.ax_error
-					.clone()
-					.unwrap_or_else(DesktopError::ax_unsupported)
-			})?
-			.windows()
+		Ok(self
+			.atspi_windows()?
+			.into_iter()
+			.map(|entry| entry.window)
+			.collect())
+	}
+
+	fn focused_keyboard_window(&mut self) -> CoreResult<DesktopWindow> {
+		let entry = self
+			.atspi_windows()?
+			.into_iter()
+			.find(|entry| entry.window.focused)
+			.ok_or_else(|| DesktopError::invalid_target("no focused Wayland window was found"))?;
+		if !entry.position_known {
+			return Err(DesktopError::invalid_target(
+				"the focused Wayland surface has no known global position; cannot safely target \
+				 display keyboard input",
+			));
+		}
+		Ok(entry.window)
 	}
 
 	fn capture(
 		&mut self,
 		target: &Target,
 		_caps: &CaptureCaps,
+		selector: Option<&DisplaySelector>,
 	) -> CoreResult<(RgbaImage, FrameGeometry)> {
 		#[cfg(not(feature = "wayland-pipewire"))]
 		{
-			let _ = target;
+			let _ = (target, selector);
 			Err(DesktopError::capture_failed("Wayland capture requires the wayland-pipewire feature"))
 		}
 		#[cfg(feature = "wayland-pipewire")]
 		{
-			self.selected_display_allowed()?;
 			let (image, geometry) = capture::capture()?;
 			self.displays = vec![geometry.display()];
+			let explicit = target.display_selector();
+			let selected = selector
+				.or(explicit.as_ref())
+				.unwrap_or(&self.display)
+				.select(self.displays.clone(), None)?;
 			match target {
-				Target::Desktop => Ok((image, FrameGeometry::for_displays(&self.displays))),
+				Target::Desktop | Target::Display(_) => {
+					Ok((image, FrameGeometry::for_displays(&selected)))
+				},
 				Target::Window(id) => {
-					let window = self
-						.windows()?
+					let entry = self
+						.atspi_windows()?
 						.into_iter()
-						.find(|window| &window.id == id)
+						.find(|entry| &entry.window.id == id)
 						.ok_or_else(|| {
 							DesktopError::window_not_found(format!("Wayland window {id} not found"))
 						})?;
-					let (x, y, width, height) = geometry.window_crop(&window).ok_or_else(|| {
-						DesktopError::capture_failed(format!(
-							"Wayland window {id} is outside the selected portal monitor"
-						))
-					})?;
+					let (x, y, width, height) = geometry.window_crop(&entry)?;
 					let cropped = image::imageops::crop_imm(&image, x, y, width, height).to_image();
-					let frame = FrameGeometry::for_window(&window, cropped.width(), cropped.height());
+					let frame =
+						FrameGeometry::for_window(&entry.window, cropped.width(), cropped.height());
 					Ok((cropped, frame))
 				},
 			}
@@ -264,14 +331,21 @@ impl Backend for WaylandBackend {
 		ev: PointerEvent,
 		_frame: &FrameGeometry,
 		_mode: DeliveryMode,
+		token: &OperationToken,
 	) -> CoreResult<()> {
-		self.prepare_input(target, "pointer input")?.pointer(ev)
+		token.check()?;
+		self.run_input(target, "pointer input", |input| input.pointer(ev))
 	}
 
-	fn type_text(&mut self, target: &Target, text: &str, _mode: DeliveryMode) -> CoreResult<()> {
-		self
-			.prepare_input(target, "keyboard input")?
-			.type_text(text)
+	fn type_text(
+		&mut self,
+		target: &Target,
+		text: &str,
+		_mode: DeliveryMode,
+		token: &OperationToken,
+	) -> CoreResult<()> {
+		token.check()?;
+		self.run_input(target, "keyboard input", |input| input.type_text(text))
 	}
 
 	fn key_chord(
@@ -279,13 +353,44 @@ impl Backend for WaylandBackend {
 		target: &Target,
 		keys: &[KeyName],
 		_mode: DeliveryMode,
+		token: &OperationToken,
 	) -> CoreResult<()> {
-		self
-			.prepare_input(target, "keyboard input")?
-			.key_chord(keys)
+		token.check()?;
+		self.run_input(target, "keyboard input", |input| input.key_chord(keys))
 	}
 
-	fn raise_window(&mut self, id: &str) -> CoreResult<()> {
+	fn hold_keys(
+		&mut self,
+		target: &Target,
+		keys: &[KeyName],
+		duration: std::time::Duration,
+		_mode: DeliveryMode,
+		token: &OperationToken,
+	) -> CoreResult<()> {
+		token.check()?;
+		self.run_input(target, "held keyboard input", |input| input.hold_keys(keys, duration))
+	}
+
+	fn menu_items(
+		&mut self,
+		window: &DesktopWindow,
+		path: &[String],
+	) -> CoreResult<Vec<crate::desktop::menus::DesktopMenuItem>> {
+		super::menus::items(window, path)
+	}
+
+	fn menu_select(
+		&mut self,
+		window: &DesktopWindow,
+		path: &[String],
+		token: &OperationToken,
+	) -> CoreResult<()> {
+		token.check()?;
+		super::menus::select(window, path)
+	}
+
+	fn raise_window(&mut self, id: &str, token: &OperationToken) -> CoreResult<()> {
+		token.check()?;
 		Err(DesktopError::background_unavailable(format!(
 			"window {id} wayland-compositor-focus-only: Wayland cannot programmatically activate a \
 			 non-focused window; only the currently focused surface is reachable"
@@ -312,12 +417,11 @@ mod tests {
 
 	fn backend_without_services() -> WaylandBackend {
 		WaylandBackend {
-			display:     DisplaySelector::All,
-			ax:          None,
-			ax_error:    None,
-			input:       None,
-			input_error: None,
-			displays:    Vec::new(),
+			display:  DisplaySelector::All,
+			ax:       None,
+			ax_error: None,
+			input:    None,
+			displays: Vec::new(),
 		}
 	}
 	fn with_fake_libei(action: impl FnOnce(&mut WaylandBackend)) -> bool {
@@ -373,9 +477,90 @@ mod tests {
 	#[test]
 	fn desktop_input_connects_to_libei_lazily() {
 		let connected = with_fake_libei(|backend| {
-			let _ = backend.type_text(&Target::Desktop, "hello", DeliveryMode::Foreground);
+			let _ = backend.type_text(
+				&Target::Desktop,
+				"hello",
+				DeliveryMode::Foreground,
+				&control::CancellationSource::default().token(),
+			);
 		});
 		assert!(connected, "desktop input did not connect to libei");
+	}
+
+	#[test]
+	fn failed_input_request_allows_another_connection_attempt() {
+		let connected = with_fake_libei(|backend| {
+			let socket = std::env::var_os("LIBEI_SOCKET").expect("fake libei socket");
+			unsafe {
+				std::env::set_var(
+					"LIBEI_SOCKET",
+					std::path::Path::new(&socket).with_extension("missing"),
+				)
+			};
+			let first = backend
+				.type_text(
+					&Target::Desktop,
+					"hello",
+					DeliveryMode::Foreground,
+					&control::CancellationSource::default().token(),
+				)
+				.expect_err("missing socket must fail");
+			assert_eq!(first.code.as_str(), "PermissionDenied");
+			let caps = backend.capabilities();
+			assert!(caps.input);
+			assert_eq!(caps.input_permission, "prompt-or-granted");
+			unsafe { std::env::set_var("LIBEI_SOCKET", socket) };
+			let _ = backend.type_text(
+				&Target::Desktop,
+				"hello",
+				DeliveryMode::Foreground,
+				&control::CancellationSource::default().token(),
+			);
+		});
+		assert!(connected, "a failed input request prevented the next connection attempt");
+	}
+
+	#[test]
+	fn display_enumeration_preserves_last_capture_snapshot() {
+		let mut backend = backend_without_services();
+		backend
+			.displays
+			.push(PortalGeometry::new(None, None, 1920, 1080).display());
+		let displays = backend.displays().unwrap();
+		assert_eq!(displays.len(), 1);
+		assert_eq!((displays[0].width, displays[0].height), (1920, 1080));
+	}
+
+	#[test]
+	#[cfg(not(feature = "wayland-pipewire"))]
+	fn display_validation_never_trusts_cached_portal_geometry() {
+		let mut backend = backend_without_services();
+		backend
+			.displays
+			.push(PortalGeometry::new(None, None, 1920, 1080).display());
+		let frame = FrameGeometry::for_displays(&backend.displays);
+		let error = backend.validate_frame_layout(&frame).unwrap_err();
+		assert_eq!(error.code.as_str(), "InvalidCoordinateFrame");
+	}
+
+	#[test]
+	fn cancelled_mutations_stop_before_initializing_input() {
+		let mut backend = backend_without_services();
+		let source = control::CancellationSource::default();
+		let token = source.token();
+		source.cancel();
+		assert!(
+			backend
+				.type_text(&Target::Desktop, "hello", DeliveryMode::Foreground, &token)
+				.is_err()
+		);
+		assert!(backend.input.is_none());
+		assert!(
+			backend
+				.key_chord(&Target::Desktop, &[KeyName::Enter], DeliveryMode::Foreground, &token)
+				.is_err()
+		);
+		assert!(backend.input.is_none());
 	}
 
 	#[test]
@@ -383,47 +568,34 @@ mod tests {
 		let mut backend = backend_without_services();
 		let target = Target::Window("w1".to_string());
 		let err = backend
-			.type_text(&target, "hello", DeliveryMode::Foreground)
+			.type_text(
+				&target,
+				"hello",
+				DeliveryMode::Foreground,
+				&control::CancellationSource::default().token(),
+			)
 			.expect_err("window foreground input must fail");
 		assert_eq!(err.code.as_str(), "BackgroundUnavailable");
-		assert_eq!(
-			err.message,
-			"window w1 wayland-compositor-focus-only: Wayland cannot programmatically activate a \
-			 non-focused window for keyboard input; only the currently focused surface is reachable; \
-			 use ax actions or desktop input"
-		);
 	}
 
 	#[test]
 	fn window_raise_reports_compositor_constraint() {
 		let mut backend = backend_without_services();
 		let err = backend
-			.raise_window("w1")
+			.raise_window("w1", &control::CancellationSource::default().token())
 			.expect_err("Wayland window raise must fail");
 		assert_eq!(err.code.as_str(), "BackgroundUnavailable");
-		assert_eq!(
-			err.message,
-			"window w1 wayland-compositor-focus-only: Wayland cannot programmatically activate a \
-			 non-focused window; only the currently focused surface is reachable"
-		);
-	}
-
-	#[test]
-	fn capabilities_do_not_advertise_foreground_delivery() {
-		let mut backend = backend_without_services();
-		assert_eq!(backend.capabilities().delivery_modes, ["background"]);
 	}
 
 	#[test]
 	#[cfg(not(feature = "wayland-pipewire"))]
 	fn capabilities_report_no_capture_without_pipewire_feature() {
 		let mut backend = WaylandBackend {
-			display:     DisplaySelector::All,
-			ax:          None,
-			ax_error:    None,
-			input:       None,
-			input_error: None,
-			displays:    Vec::new(),
+			display:  DisplaySelector::All,
+			ax:       None,
+			ax_error: None,
+			input:    None,
+			displays: Vec::new(),
 		};
 		let caps = backend.capabilities();
 		// Shipped builds compile without wayland-pipewire, so the capture path is
@@ -431,28 +603,32 @@ mod tests {
 		assert!(!caps.capture, "capture must be false when the pipewire feature is off");
 		assert_eq!(caps.capture_permission, "unavailable");
 		let err = backend
-			.capture(&Target::Desktop, &CaptureCaps::default())
+			.capture(&Target::Desktop, &CaptureCaps::default(), None)
 			.expect_err("capture must fail without the pipewire feature");
 		assert_eq!(err.code.as_str(), "CaptureFailed");
 	}
 
-	fn portal_window(id: &str, x: i32, y: i32, width: u32, height: u32) -> DesktopWindow {
-		DesktopWindow {
-			id: id.into(),
-			title: "T".into(),
-			app: "A".into(),
-			pid: None,
-			x,
-			y,
-			width,
-			height,
-			focused: false,
+	fn portal_window(x: i32, y: i32, width: u32, height: u32, position_known: bool) -> AtSpiWindow {
+		AtSpiWindow {
+			window: DesktopWindow {
+				id: "w".into(),
+				title: "T".into(),
+				app: "A".into(),
+				pid: None,
+				x,
+				y,
+				width,
+				height,
+				focused: false,
+			},
+			position_known,
 		}
 	}
 
 	#[test]
 	fn scaled_monitor_maps_screenshot_pixel_to_logical_point() {
-		// 2560x2880 buffer for a 1280x1440 logical region at scale 2 (issue #11540).
+		// 2560x2880 buffer for a 1280x1440 logical region at scale 2 (issue
+		// #11540).
 		let geometry = PortalGeometry::new(Some((0, 0)), Some((1280, 1440)), 2560, 2880);
 		let display = geometry.display();
 		assert_eq!((display.width, display.height), (1280, 1440));
@@ -489,7 +665,7 @@ mod tests {
 	fn window_crop_scales_logical_bounds_to_buffer_pixels() {
 		let geometry = PortalGeometry::new(Some((0, 0)), Some((1280, 1440)), 2560, 2880);
 		let crop = geometry
-			.window_crop(&portal_window("w", 100, 200, 300, 400))
+			.window_crop(&portal_window(100, 200, 300, 400, true))
 			.expect("window inside monitor");
 		assert_eq!(crop, (200, 400, 600, 800));
 	}
@@ -497,15 +673,25 @@ mod tests {
 	#[test]
 	fn window_crop_rejects_window_outside_monitor() {
 		let geometry = PortalGeometry::new(Some((0, 0)), Some((1280, 1440)), 2560, 2880);
-		assert!(
-			geometry
-				.window_crop(&portal_window("w", 2000, 0, 100, 100))
-				.is_none()
-		);
-		assert!(
-			geometry
-				.window_crop(&portal_window("w", -10, 0, 100, 100))
-				.is_none()
-		);
+		for window in [portal_window(2000, 0, 100, 100, true), portal_window(-10, 0, 100, 100, true)]
+		{
+			let err = geometry
+				.window_crop(&window)
+				.expect_err("window outside monitor");
+			assert!(err.message.contains("outside the selected portal monitor"), "{err}");
+		}
+	}
+
+	#[test]
+	fn window_crop_refuses_unknown_screen_position() {
+		// Native Wayland clients report AT-SPI Screen extents of 0,0 wherever
+		// the compositor placed them; cropping there captured whatever sat at the
+		// monitor's top-left instead of the window (issue #13854).
+		let geometry = PortalGeometry::new(Some((0, 0)), Some((1920, 1080)), 1920, 1080);
+		let err = geometry
+			.window_crop(&portal_window(0, 0, 1159, 896, false))
+			.expect_err("unknown position must not be cropped");
+		assert_eq!(err.code.as_str(), "CaptureFailed");
+		assert!(err.message.contains("no known screen position"), "{err}");
 	}
 }

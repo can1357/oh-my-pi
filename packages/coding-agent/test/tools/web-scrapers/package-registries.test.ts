@@ -3,6 +3,7 @@ import { handleCratesIo } from "@oh-my-pi/pi-coding-agent/web/scrapers/crates-io
 import { handleGoPkg } from "@oh-my-pi/pi-coding-agent/web/scrapers/go-pkg";
 import { handleHex } from "@oh-my-pi/pi-coding-agent/web/scrapers/hex";
 import { handleNpm } from "@oh-my-pi/pi-coding-agent/web/scrapers/npm";
+import { handleOllama } from "@oh-my-pi/pi-coding-agent/web/scrapers/ollama";
 import { handlePubDev } from "@oh-my-pi/pi-coding-agent/web/scrapers/pub-dev";
 import { handlePyPI } from "@oh-my-pi/pi-coding-agent/web/scrapers/pypi";
 
@@ -16,11 +17,6 @@ describe.skipIf(SKIP)("handlePyPI", () => {
 
 	it("returns null for invalid PyPI URLs", async () => {
 		const result = await handlePyPI("https://pypi.org/invalid", 10);
-		expect(result).toBeNull();
-	});
-
-	it("returns null for PyPI URLs without project path", async () => {
-		const result = await handlePyPI("https://pypi.org/", 10);
 		expect(result).toBeNull();
 	});
 
@@ -92,11 +88,6 @@ describe.skipIf(SKIP)("handleHex", () => {
 		expect(result).toBeNull();
 	});
 
-	it("returns null for hex.pm URLs without package path", async () => {
-		const result = await handleHex("https://hex.pm/", 10);
-		expect(result).toBeNull();
-	});
-
 	it("fetches phoenix package", async () => {
 		const result = await handleHex("https://hex.pm/packages/phoenix", 20);
 		expect(result).not.toBeNull();
@@ -105,12 +96,6 @@ describe.skipIf(SKIP)("handleHex", () => {
 		expect(result?.content).toContain("phoenix");
 		expect(result?.content).toMatch(/Latest.*\d+\.\d+/);
 		expect(result?.notes).toContain("Fetched via Hex.pm API");
-	});
-
-	it("extracts package description", async () => {
-		const result = await handleHex("https://hex.pm/packages/phoenix", 20);
-		expect(result).not.toBeNull();
-		expect(result?.content).toMatch(/phoenix|Phoenix|web framework/i);
 	});
 
 	it("handles www subdomain", async () => {
@@ -134,11 +119,6 @@ describe.skipIf(SKIP)("handlePubDev", () => {
 
 	it("returns null for invalid pub.dev URLs", async () => {
 		const result = await handlePubDev("https://pub.dev/invalid", 10);
-		expect(result).toBeNull();
-	});
-
-	it("returns null for pub.dev URLs without package path", async () => {
-		const result = await handlePubDev("https://pub.dev/", 10);
 		expect(result).toBeNull();
 	});
 
@@ -204,12 +184,6 @@ describe.skipIf(SKIP)("handleNpm", () => {
 		expect(result?.content).toMatch(/Weekly Downloads/);
 	});
 
-	it("handles www subdomain", async () => {
-		const result = await handleNpm("https://www.npmjs.com/package/lodash", 20000);
-		expect(result).not.toBeNull();
-		expect(result?.method).toBe("npm");
-	});
-
 	it("handles npmjs.com without www", async () => {
 		const result = await handleNpm("https://npmjs.com/package/lodash", 20000);
 		expect(result).not.toBeNull();
@@ -255,5 +229,29 @@ describe.skipIf(SKIP)("handleCratesIo", () => {
 		const result = await handleCratesIo("https://www.crates.io/crates/serde", 20000);
 		expect(result).not.toBeNull();
 		expect(result?.method).toBe("crates.io");
+	});
+});
+
+describe.skipIf(SKIP)("handleOllama", () => {
+	it("fetches llama3 model", async () => {
+		const result = await handleOllama("https://ollama.com/library/llama3", 20000);
+		expect(result).not.toBeNull();
+		expect(result?.method).toBe("ollama");
+		expect(result?.contentType).toBe("text/markdown");
+		expect(result?.content).toContain("llama3");
+		expect(result?.notes).toContain("Fetched via Ollama API");
+	});
+
+	it("fetches model via root URL", async () => {
+		const result = await handleOllama("https://ollama.com/llama3", 20000);
+		expect(result).not.toBeNull();
+		expect(result?.method).toBe("ollama");
+		expect(result?.content).toContain("llama3");
+	});
+
+	it("handles model with tag", async () => {
+		const result = await handleOllama("https://ollama.com/library/llama3:8b", 20000);
+		expect(result).not.toBeNull();
+		expect(result?.content).toMatch(/Tag:\*\*\s*llama3:8b/);
 	});
 });

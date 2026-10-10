@@ -1,14 +1,21 @@
 import type { Api, Model, ModelSpec, RemoteCompactionConfig, ThinkingConfig } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { isVertexExpressOpenAIUrl } from "@oh-my-pi/pi-catalog/hosts";
+import { providerEntry } from "@oh-my-pi/pi-catalog/compat/providers";
 import { PROVIDER_DESCRIPTORS } from "@oh-my-pi/pi-catalog/provider-models";
 import { toModelSpec } from "@oh-my-pi/pi-catalog/provider-models/bundled-references";
+import { apiServesKind, modelKind, type ModelKind, runnerApiKind } from "@oh-my-pi/pi-catalog/types";
 import { isRecord } from "@oh-my-pi/pi-utils";
-import { createLiveConfigHeaders } from "./model-config-values";
+import { createConfigHeaderResolver } from "./resolve-config-value";
+import { SPECIAL_MODEL_MANAGER_PROVIDER_IDS } from "./model-provider-discovery";
 import type { ModelOverride } from "./models-config-schema";
-/** Provider override config (baseUrl, headers, apiKey, compat, transport) without custom models */
+/** Provider override config (baseUrl, headers, apiKey, compat, transport). */
 export interface ProviderOverride {
 	baseUrl?: string;
+	/** APIs covered by the provider `baseUrl`: effective APIs of custom models
+	 * inheriting that URL, plus a provider-level `api` for override-only
+	 * configs. `undefined` preserves the historical provider-wide override. */
+	baseUrlApis?: readonly Api[];
 	headers?: Record<string, string>;
 	apiKey?: string;
 	authHeader?: boolean;
@@ -19,6 +26,28 @@ export interface ProviderOverride {
 	guardrailVersion?: Model<Api>["guardrailVersion"];
 	guardrailTrace?: Model<Api>["guardrailTrace"];
 	requestMetadata?: Model<Api>["requestMetadata"];
+}
+
+/**
+ * Single decision point for provider `baseUrl` application, shared by every
+ * composition path (built-in load, cached load, discovery merge, runtime
+ * overrides). `undefined` `baseUrlApis` keeps the historical provider-wide
+ * override; an explicit scope applies only to models whose API it covers.
+ * `transport: "pi-native"` is provider-wide by documented contract
+ * (docs/models.md): every model under the provider rides the auth-gateway,
+ * so the gateway `baseUrl` follows the transport regardless of the model's
+ * own API — a model must never end up pi-native on a catalog upstream host
+ * (#2555).
+ */
+export function resolveProviderBaseUrl<TApi extends Api>(
+	modelApi: TApi,
+	modelBaseUrl: string | undefined,
+	override: Pick<ProviderOverride, "baseUrl" | "baseUrlApis" | "transport"> | undefined,
+): string | undefined {
+	if (override?.baseUrl === undefined) return modelBaseUrl;
+	if (override.transport === "pi-native") return override.baseUrl;
+	if (override.baseUrlApis !== undefined && !override.baseUrlApis.includes(modelApi)) return modelBaseUrl;
+	return override.baseUrl;
 }
 
 /**
@@ -45,39 +74,37 @@ export interface ProviderOverride {
  * refresh — so the first `/model` switch after boot hits the raw OpenAI
  * chat-completions URL instead of the gateway's `/v1/pi/stream` (#2555).
  *
- * Merged headers are wrapped in `createLiveConfigHeaders` so `!command`
- * values keep resolving per request on the inference path, matching the
- * `modelOverrides`/`applyModelPatch` behavior — otherwise a discovery
- * provider would send the raw `!command` literal upstream (#10457).
- * The `authHeader`/`apiKey` override fields are threaded into the live
- * resolver too, so an `authHeader: true` + `apiKey` provider with no explicit
- * `headers:` block re-derives `Authorization` from the current `apiKey`
- * resolution each request — a 401 force-refresh (command-cache invalidation)
- * reaches the retry instead of resending the discovery-time baked bearer
- * (#10551). See `xiaomi-tp-discovery-merge.test.ts` and the `refresh()`
- * baseUrl-override regression in `model-registry.test.ts`.
+ * Merged config headers are retained behind an async request-boundary
+ * resolver so discovery and catalog composition never execute `!command`
+ * values. `authHeader` is resolved through the same hook, allowing a 401
+ * invalidation to re-mint both the API key and header credentials before the
+ * retry without exposing command-evaluating property access.
  */
 export function mergeDiscoveredModel<TApi extends Api>(
 	model: Model<TApi>,
 	existing: Model<Api> | undefined,
 	providerOverride?: Pick<
 		ProviderOverride,
-		"baseUrl" | "compat" | "headers" | "remoteCompaction" | "transport" | "authHeader" | "apiKey"
+		"baseUrl" | "baseUrlApis" | "compat" | "headers" | "remoteCompaction" | "transport" | "authHeader" | "apiKey"
 	>,
 ): Model<TApi> {
 	if (existing) {
 		const supportsTools = model.supportsTools ?? existing.supportsTools;
-		return buildModel({
+		const merged = buildModel({
 			...toModelSpec(model),
-			baseUrl: providerOverride?.baseUrl ?? model.baseUrl ?? existing.baseUrl,
-			// providerOverride.headers (raw `!command`) must be the last live
-			// source: `model.headers` is a discovery-time resolved snapshot, so
-			// without this a rotated credential (401 → cache invalidation) would
-			// stay shadowed by the stale snapshot on the inference path (#10458).
-			headers: createLiveConfigHeaders([existing.headers, model.headers, providerOverride?.headers], {
-				authHeader: providerOverride?.authHeader,
-				apiKeyConfig: providerOverride?.apiKey,
-			}),
+			baseUrl: resolveProviderBaseUrl(model.api, model.baseUrl ?? existing.baseUrl, providerOverride),
+			headers: undefined,
+			resolveHeaders: createConfigHeaderResolver(
+				[
+					existing.resolveHeaders ?? existing.headers,
+					model.resolveHeaders ?? model.headers,
+					providerOverride?.headers,
+				],
+				{
+					authHeader: providerOverride?.authHeader,
+					apiKeyConfig: providerOverride?.apiKey,
+				},
+			),
 			transport: providerOverride?.transport ?? existing.transport ?? model.transport,
 			remoteCompaction: mergeProviderRemoteCompactionConfig(
 				mergeRemoteCompactionConfig(existing.remoteCompaction, model.remoteCompaction),
@@ -86,12 +113,14 @@ export function mergeDiscoveredModel<TApi extends Api>(
 			...(supportsTools !== undefined ? { supportsTools } : {}),
 			compat: mergeCompat(model.compatConfig, providerOverride?.compat),
 		} as ModelSpec<TApi>);
+		return Bun.deepEquals(merged, model) ? model : merged;
 	}
 	if (providerOverride) {
-		return buildModel({
+		const merged = buildModel({
 			...toModelSpec(model),
-			baseUrl: providerOverride.baseUrl ?? model.baseUrl,
-			headers: createLiveConfigHeaders([model.headers, providerOverride.headers], {
+			baseUrl: resolveProviderBaseUrl(model.api, model.baseUrl, providerOverride),
+			headers: undefined,
+			resolveHeaders: createConfigHeaderResolver([model.resolveHeaders ?? model.headers, providerOverride.headers], {
 				authHeader: providerOverride.authHeader,
 				apiKeyConfig: providerOverride.apiKey,
 			}),
@@ -102,13 +131,15 @@ export function mergeDiscoveredModel<TApi extends Api>(
 			),
 			compat: mergeCompat(model.compatConfig, providerOverride.compat),
 		} as ModelSpec<TApi>);
+		return Bun.deepEquals(merged, model) ? model : merged;
 	}
 	return model;
 }
 
+/** Built-in providers whose KDL entry makes a successful runtime roster replace bundled chat models. */
 export const AUTHORITATIVE_RUNTIME_CATALOG_PROVIDERS = new Set<string>(
-	PROVIDER_DESCRIPTORS.filter(descriptor => descriptor.dynamicModelsAuthoritative).map(
-		descriptor => descriptor.providerId,
+	[...PROVIDER_DESCRIPTORS.map(descriptor => descriptor.providerId), ...SPECIAL_MODEL_MANAGER_PROVIDER_IDS].filter(
+		providerId => providerEntry(providerId)?.dynamicModelsAuthoritative === true,
 	),
 );
 
@@ -130,8 +161,15 @@ export function providersWithAuthoritativeProjectCatalog(models: readonly Model<
 	return providers;
 }
 
-export function dropProviderModels(models: readonly Model<Api>[], providers: ReadonlySet<string>): Model<Api>[] {
-	return models.filter(model => !providers.has(model.provider));
+/** Removes a registry layer's provider models, optionally limited to one catalog kind. */
+export function dropProviderModels(
+	models: readonly Model<Api>[],
+	providers: ReadonlySet<string>,
+	options?: { kind?: ModelKind },
+): Model<Api>[] {
+	return models.filter(
+		model => !providers.has(model.provider) || (options?.kind !== undefined && modelKind(model) !== options.kind),
+	);
 }
 
 /**
@@ -200,6 +238,8 @@ export function mergeProviderRemoteCompactionConfig(
  */
 export interface ModelPatch {
 	name?: string;
+	api?: Api;
+	kind?: ModelKind;
 	reasoning?: boolean;
 	thinking?: ThinkingConfig;
 	input?: ("text" | "image")[];
@@ -207,12 +247,16 @@ export interface ModelPatch {
 	tokenizer?: Model<Api>["tokenizer"];
 	supportsTools?: boolean;
 	cost?: Partial<Model<Api>["cost"]>;
+	promptCache?: Model<Api>["promptCache"];
 	contextWindow?: number;
+	/** Registry-only window preference; never patches the provider-advertised maximum. */
+	maxContextWindow?: number;
 	maxTokens?: number;
 	omitMaxOutputTokens?: boolean;
 	/** Whether Codex requests should prefer WebSocket transport. */
 	preferWebsockets?: boolean;
 	headers?: Record<string, string>;
+	resolveHeaders?: Model<Api>["resolveHeaders"];
 	compat?: ModelSpec<Api>["compat"];
 	contextPromotionTarget?: string;
 	compactionModel?: string;
@@ -231,12 +275,21 @@ type ModelTransportPolicy = "merge" | "replace";
 export function applyModelPatch(base: Model<Api>, patch: ModelPatch, transport: ModelTransportPolicy): Model<Api> {
 	const result = { ...base };
 	if (patch.name !== undefined) result.name = patch.name;
+	if (patch.api !== undefined) result.api = patch.api;
+	if (patch.kind !== undefined) {
+		result.kind = patch.kind;
+		result.kindConfig = patch.kind;
+	}
 	if (patch.reasoning !== undefined) result.reasoning = patch.reasoning;
 	if (patch.thinking !== undefined) result.thinking = patch.thinking;
 	if (patch.input !== undefined) result.input = patch.input;
 	if (patch.tokenizer !== undefined) result.tokenizer = patch.tokenizer;
 	if (patch.imageInputDecoder !== undefined) result.imageInputDecoder = patch.imageInputDecoder;
 	if (patch.supportsTools !== undefined) result.supportsTools = patch.supportsTools;
+	if (patch.promptCache !== undefined) {
+		result.promptCache = patch.promptCache;
+		result.promptCacheConfig = patch.promptCache;
+	}
 	if (patch.contextWindow !== undefined) result.contextWindow = patch.contextWindow;
 	if (patch.maxTokens !== undefined) result.maxTokens = patch.maxTokens;
 	if (patch.omitMaxOutputTokens !== undefined) result.omitMaxOutputTokens = patch.omitMaxOutputTokens;
@@ -259,16 +312,33 @@ export function applyModelPatch(base: Model<Api>, patch: ModelPatch, transport: 
 	}
 	let compat: ModelSpec<Api>["compat"];
 	if (transport === "merge") {
-		if (patch.headers) {
-			// Route merged headers through the live proxy so command-backed (`!cmd`)
-			// override values stay re-resolvable — a 401 refresh invalidates their
-			// cache and the next request re-runs the command (#9760).
-			result.headers = createLiveConfigHeaders([base.headers, patch.headers]);
+		if (patch.headers || patch.resolveHeaders) {
+			result.headers = undefined;
+			result.resolveHeaders = createConfigHeaderResolver([
+				base.resolveHeaders ?? base.headers,
+				patch.resolveHeaders ?? patch.headers,
+			]);
 		}
 		compat = mergeCompat(base.compatConfig, patch.compat);
 	} else {
 		result.headers = patch.headers;
+		result.resolveHeaders = patch.resolveHeaders;
 		compat = patch.compat;
+		// A same-id definition that omits a lifetime or kind must not carry the
+		// previous route's configuration; buildModel reapplies policy for the new route.
+		if (patch.promptCache === undefined) {
+			delete result.promptCache;
+			delete result.promptCacheConfig;
+		}
+		if (patch.kind === undefined) {
+			delete result.kindConfig;
+			// The base row's kind came with its old api; keep it only if the new api serves it.
+			const kind = kindOnApi(result, result.api);
+			if (kind !== undefined) {
+				result.kind = kind;
+				result.kindConfig = kind;
+			}
+		}
 	}
 	const built = buildModel({ ...toModelSpec(result), compat } as ModelSpec<Api>);
 	if (patch.thinking !== undefined && built.thinking !== undefined) {
@@ -288,6 +358,38 @@ export function applyModelPatch(base: Model<Api>, patch: ModelPatch, transport: 
 	return built;
 }
 
+/**
+ * The explicit `kind` of a `modelOverrides` entry that the api `model` ends up
+ * on does not serve. Config validation only sees apis named in models.yml;
+ * built-in, discovered, and `kind-apis` rows are checked here, against their
+ * resolved api, and the override's kind is ignored.
+ */
+export function unservedOverrideKind(model: Model<Api>, override: ModelOverride): ModelKind | undefined {
+	if (override.kind === undefined) return undefined;
+	return apiServesKind(override.api ?? model.api, override.kind) ? undefined : override.kind;
+}
+
+/**
+ * The kind `model` takes on `api`: a runner api's kind, else `undefined` (keep the
+ * current kind) when `api` serves it, else `chat`.
+ */
+function kindOnApi(model: Model<Api>, api: Api): ModelKind | undefined {
+	const runnerKind = runnerApiKind(api);
+	if (runnerKind !== undefined) return runnerKind;
+	return apiServesKind(api, modelKind(model)) ? undefined : "chat";
+}
+
+/**
+ * The kind a `modelOverrides` entry gives `model`; `undefined` leaves it alone.
+ * An explicit kind applies when the api the model ends up on serves it.
+ * Otherwise an `api` change takes a runner api's kind, keeps a kind the new api
+ * still serves, and falls back to `chat`.
+ */
+function overrideKind(model: Model<Api>, override: ModelOverride): ModelKind | undefined {
+	if (override.kind !== undefined && unservedOverrideKind(model, override) === undefined) return override.kind;
+	return override.api === undefined ? undefined : kindOnApi(model, override.api);
+}
+
 export function applyModelOverride(model: Model<Api>, override: ModelOverride): Model<Api> {
-	return applyModelPatch(model, override as ModelPatch, "merge");
+	return applyModelPatch(model, { ...(override as ModelPatch), kind: overrideKind(model, override) }, "merge");
 }

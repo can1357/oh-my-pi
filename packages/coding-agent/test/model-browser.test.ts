@@ -1,20 +1,28 @@
+import { createModelBrowserSource } from "../src/modes/model-browser-source";
 import { beforeAll, describe, expect, test } from "bun:test";
-import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
+import { Agent, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { Model } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
+import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import {
 	buildBrowserItems,
+	buildSearchAffinity,
+	rankModelItems,
 	ModelBrowser,
 	type RoleAssignments,
 	resolveRoleAssignments,
 	sortModelItems,
-} from "@oh-my-pi/pi-coding-agent/modes/components/model-browser";
-import { initTheme, theme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+} from "@oh-my-pi/pi-tui/overlays/model-browser";
+import { initTheme, theme } from "@oh-my-pi/pi-tui/theme";
+import { createModelMentionSource } from "@oh-my-pi/pi-tui/prompt/model-mention-autocomplete";
 
 /** Optional presentation metadata a catalog or discovery source may attach. */
 type NativeMetadata = Pick<Model, "description" | "isNew" | "isBeta" | "isRecommended" | "int" | "tps"> &
-	Partial<Pick<Model, "cost">>;
+	Partial<Pick<Model, "cost" | "kind" | "pricingStatus">>;
 
 function makeModel(provider: string, id: string, metadata?: NativeMetadata): Model {
 	return buildModel({
@@ -38,7 +46,9 @@ function makeBrowser(
 	mruOrder: string[],
 	options: { roles?: RoleAssignments; providerOrder?: string[] } = {},
 ): ModelBrowser {
-	const browser = new ModelBrowser(Settings.isolated({ modelProviderOrder: options.providerOrder ?? [] }));
+	const browser = new ModelBrowser(
+		createModelBrowserSource(Settings.isolated({ modelProviderOrder: options.providerOrder ?? [] })),
+	);
 	const items = buildBrowserItems(models);
 	sortModelItems(items, { mruOrder });
 	browser.setRoles(options.roles ?? {});
@@ -48,6 +58,22 @@ function makeBrowser(
 }
 
 describe("resolveRoleAssignments", () => {
+	test("rejects configured models that do not match the role's accepted kind", () => {
+		const chat = makeModel("demo", "chat");
+		const image = makeModel("demo", "image", { kind: "image" });
+		const settings = Settings.isolated({
+			modelRoles: {
+				default: "demo/image",
+				image: "demo/image",
+			},
+		});
+
+		const roles = resolveRoleAssignments(createModelBrowserSource(settings), [chat, image], [chat, image]);
+
+		expect(roles.default).toBeUndefined();
+		expect(roles.image?.model).toBe(image);
+	});
+
 	test("shows configured smol for an unconfigured tiny role", () => {
 		const smol = makeModel("demo", "custom-smol");
 		const priorityHead = makeModel("demo", "gemini-3.8-flash");
@@ -58,15 +84,101 @@ describe("resolveRoleAssignments", () => {
 			},
 		});
 
-		const roles = resolveRoleAssignments(settings, [smol, priorityHead], [smol, priorityHead]);
+		const roles = resolveRoleAssignments(
+			createModelBrowserSource(settings),
+			[smol, priorityHead],
+			[smol, priorityHead],
+		);
 
 		expect(roles.smol?.model).toBe(smol);
 		expect(roles.tiny?.model).toBe(smol);
 		expect(roles.tiny?.autoSelected).toBe(true);
 	});
+
+	test("shows configured slow for an unconfigured advisor role", () => {
+		const slow = makeModel("demo", "custom-slow");
+		const priorityHead = makeModel("demo", "gpt-5.6-sol");
+		const settings = Settings.isolated({
+			modelRoles: {
+				default: "demo/default",
+				slow: "demo/custom-slow",
+			},
+		});
+
+		const roles = resolveRoleAssignments(
+			createModelBrowserSource(settings),
+			[slow, priorityHead],
+			[slow, priorityHead],
+		);
+
+		expect(roles.slow?.model).toBe(slow);
+		expect(roles.advisor?.model).toBe(slow);
+		expect(roles.advisor?.autoSelected).toBe(true);
+	});
+});
+
+describe("createModelMentionSource", () => {
+	test("refreshes candidates when role settings or availability change between queries", () => {
+		const a = makeModel("a", "example-2");
+		const b = makeModel("b", "example-2");
+		const available = [a, b];
+		const settings = Settings.isolated({ modelRoles: { default: "b/example-2" } });
+		const candidates = createModelMentionSource({
+			source: createModelBrowserSource(settings),
+			registry: { getError: () => undefined, getAvailable: () => [...available], getAll: () => [...available] },
+			scopedModels: () => [],
+		});
+		const selectors = (query: string) => candidates(query).map(item => item.selector);
+
+		expect(selectors("example")).toEqual(["b/example-2", "a/example-2"]);
+
+		settings.setModelRole("default", "a/example-2");
+		expect(selectors("example")).toEqual(["a/example-2", "b/example-2"]);
+
+		available.push(makeModel("c", "example-3"));
+		expect(selectors("example")).toContain("c/example-3");
+	});
 });
 
 describe("ModelBrowser search ranking", () => {
+	test("headless candidates preserve picker relevance and affinity ordering", () => {
+		const models = [makeModel("a", "example-2"), makeModel("b", "example-2"), makeModel("a", "other")];
+		const roles: RoleAssignments = {};
+		const mruOrder = ["b/example-2", "a/example-2"];
+		const providerOrder = ["a"];
+		const browser = makeBrowser(models, mruOrder, { roles, providerOrder });
+		const query = "example";
+		browser.setQuery(query);
+		const items = buildBrowserItems(models);
+		const ranked = rankModelItems(query, items, {
+			roles,
+			mruOrder,
+			affinity: buildSearchAffinity(providerOrder, roles, mruOrder),
+		});
+		expect(ranked.map(item => item.selector)).toEqual(["b/example-2", "a/example-2"]);
+		expect(browser.getSelected()?.selector).toBe(ranked[0].selector);
+		expect(ranked.length).toBe(browser.visibleCount);
+	});
+
+	test("orders same-provider -latest models alphabetically regardless of input order", () => {
+		// Regression: the comparator answered "first wins" for two `-latest` ids, so their
+		// order followed whatever order the catalog or fuzzy pass handed in.
+		const alpha = makeModel("demo", "alpha-latest");
+		const beta = makeModel("demo", "beta-latest");
+		const roles: RoleAssignments = {};
+		const options = { roles, mruOrder: [], affinity: buildSearchAffinity([], roles, []) };
+		for (const models of [
+			[alpha, beta],
+			[beta, alpha],
+		]) {
+			const sorted = buildBrowserItems(models);
+			sortModelItems(sorted);
+			expect(sorted.map(item => item.selector)).toEqual(["demo/alpha-latest", "demo/beta-latest"]);
+			const ranked = rankModelItems("latest", buildBrowserItems(models), options);
+			expect(ranked.map(item => item.selector)).toEqual(["demo/alpha-latest", "demo/beta-latest"]);
+		}
+	});
+
 	test("an exact query match outranks the MRU model", () => {
 		// Regression: with gpt-5.6-sol as the active (MRU) model, typing
 		// "gpt-5.5" must select gpt-5.5, not keep the MRU pinned on top.
@@ -226,7 +338,7 @@ describe("ModelBrowser perf display", () => {
 	});
 
 	function makePerfBrowser(): ModelBrowser {
-		const browser = new ModelBrowser(Settings.isolated({}));
+		const browser = new ModelBrowser(createModelBrowserSource(Settings.isolated({})));
 		browser.setItems(buildBrowserItems([makeModel("openai", "gpt-5")]));
 		browser.setPerfStats(new Map([["openai/gpt-5", { samples: 12, tps: 118.4, ttftMs: 930 }]]));
 		return browser;
@@ -245,6 +357,29 @@ describe("ModelBrowser perf display", () => {
 		expect(wideRow).toContain("0.9s 118t/s");
 	});
 
+	test("narrow rows drop cost, then context, before truncating the model name", () => {
+		const model = makeModel("openai", "gpt-5-codex-mini");
+		model.cost.input = 100;
+		model.contextWindow = 128_000;
+		model.cost.output = 0.001;
+		const browser = new ModelBrowser(createModelBrowserSource(Settings.isolated({})));
+		browser.setItems(buildBrowserItems([model]));
+
+		const wide = renderPlain(browser, 100)[2];
+		expect(wide).toContain("gpt-5-codex-mini");
+		expect(wide).toContain("128k");
+		expect(wide).toContain("$100/0.001");
+
+		const narrow = renderPlain(browser, 34)[2];
+		expect(narrow).toContain("gpt-5-codex-mini");
+		expect(narrow).toContain("128k");
+		expect(narrow).not.toContain("$100");
+
+		const tiny = renderPlain(browser, 16)[2];
+		expect(tiny).toContain("gpt-5");
+		expect(tiny).not.toContain("128k");
+	});
+
 	test("detail line shows measured perf regardless of width", () => {
 		const browser = makePerfBrowser();
 
@@ -253,7 +388,7 @@ describe("ModelBrowser perf display", () => {
 	});
 
 	test("catalog metrics render an intelligence tab and estimated TPS when unmeasured", () => {
-		const browser = new ModelBrowser(Settings.isolated({}));
+		const browser = new ModelBrowser(createModelBrowserSource(Settings.isolated({})));
 		browser.setItems(buildBrowserItems([makeModel("openai", "gpt-5", { int: 45.2, tps: 82.5 })]));
 
 		const lines = renderPlain(browser, 120);
@@ -263,7 +398,7 @@ describe("ModelBrowser perf display", () => {
 	});
 
 	test("measured TPS takes precedence over the catalog estimate", () => {
-		const browser = new ModelBrowser(Settings.isolated({}));
+		const browser = new ModelBrowser(createModelBrowserSource(Settings.isolated({})));
 		browser.setItems(buildBrowserItems([makeModel("openai", "gpt-5", { int: 45.2, tps: 82.5 })]));
 		browser.setPerfStats(new Map([["openai/gpt-5", { samples: 12, tps: 118.4, ttftMs: 930 }]]));
 
@@ -273,7 +408,7 @@ describe("ModelBrowser perf display", () => {
 	});
 
 	test("models without measurements or catalog metrics render no metric cells", () => {
-		const browser = new ModelBrowser(Settings.isolated({}));
+		const browser = new ModelBrowser(createModelBrowserSource(Settings.isolated({})));
 		browser.setItems(buildBrowserItems([makeModel("openai", "gpt-5")]));
 
 		const row = renderPlain(browser, 120)[2];
@@ -288,7 +423,7 @@ describe("ModelBrowser native model metadata", () => {
 	});
 
 	function renderDetail(model: Model): string {
-		const browser = new ModelBrowser(Settings.isolated({}));
+		const browser = new ModelBrowser(createModelBrowserSource(Settings.isolated({})));
 		browser.setItems(buildBrowserItems([model]));
 		const lines = browser.render(160).map(line => Bun.stripANSI(line));
 		return lines[lines.length - 2] as string;
@@ -296,7 +431,7 @@ describe("ModelBrowser native model metadata", () => {
 
 	test("detail line badges upstream flags and appends the provider blurb", () => {
 		const detail = renderDetail(
-			makeModel("devin", "swe-2", {
+			makeModel("fixture", "swe-2", {
 				description: "Fast\tagentic\ncoder",
 				isNew: true,
 				isBeta: true,
@@ -311,5 +446,218 @@ describe("ModelBrowser native model metadata", () => {
 
 	test("models without upstream metadata render the plain detail line", () => {
 		expect(renderDetail(makeModel("openai", "gpt-5"))).toContain("gpt-5 · 128k ctx · 1k out · free per M");
+	});
+
+	test("labels declared pricing states instead of calling the zero rate card free", () => {
+		// Published rates win over any declared state.
+		expect(
+			renderDetail(
+				makeModel("openai", "metered", {
+					cost: { input: 1.25, output: 10, cacheRead: 0.125, cacheWrite: 0 },
+					pricingStatus: "unknown",
+				}),
+			),
+		).toContain("$1.25/10 per M");
+		expect(renderDetail(makeModel("subscription", "included", { pricingStatus: "included" }))).toContain(
+			" · included",
+		);
+		expect(renderDetail(makeModel("fixture", "unpriced", { pricingStatus: "unknown" }))).toContain(
+			" · pricing unknown",
+		);
+
+		const variable = makeModel("cursor", "default", { pricingStatus: "variable" });
+		const browser = makeBrowser([variable], []);
+		const lines = browser.render(160).map(line => Bun.stripANSI(line));
+		expect(lines[2]).toContain("varies");
+		expect(lines[lines.length - 2]).toContain("price varies");
+		// A router priced per request is not free, so the `free` filter skips it.
+		browser.setQuery("free");
+		expect(browser.visibleCount).toBe(0);
+	});
+
+	test("price rows preserve free labels and identify invalid rates", () => {
+		const zero = makeModel("fixture", "zero");
+		const missing = makeModel("fixture", "missing");
+		Object.assign(missing, { cost: undefined });
+		const partial = makeModel("fixture", "partial");
+		partial.cost.input = Number.NaN;
+		partial.cost.output = 2;
+		const negativeZero = makeModel("fixture", "negative-zero");
+		negativeZero.cost.input = -1;
+		negativeZero.cost.output = 0;
+		const invalid = makeModel("fixture", "invalid");
+		invalid.cost.input = -1;
+		invalid.cost.output = Number.POSITIVE_INFINITY;
+		const browser = makeBrowser([zero, missing, partial, negativeZero, invalid], []);
+		const rows = browser.render(100).map(line => Bun.stripANSI(line));
+		expect(rows.find(line => line.includes("fixture/zero"))).toContain("free");
+		expect(rows.find(line => line.includes("fixture/missing"))).toContain("free");
+		expect(rows.find(line => line.includes("fixture/partial"))).toContain("$?/2");
+		expect(rows.find(line => line.includes("fixture/negative-zero"))).toContain("$?/0");
+		expect(rows.find(line => line.includes("fixture/invalid"))).toContain("$?/?");
+
+		browser.setQuery("free");
+		const freeRows = browser.render(100).map(line => Bun.stripANSI(line));
+		expect(freeRows.some(line => line.includes("fixture/zero"))).toBe(true);
+		expect(freeRows.some(line => line.includes("fixture/negative-zero"))).toBe(false);
+	});
+
+	test.each([
+		[0, -1, "$0/?"],
+		[-1, -2, "$?/?"],
+	] as const)("renders invalid rates %s/%s with per-leg markers", (input, output, expected) => {
+		const model = makeModel("demo", "invalid-rate");
+		model.cost.input = input;
+		model.cost.output = output;
+		const browser = makeBrowser([model], []);
+		const rows = browser.render(100).map(line => Bun.stripANSI(line));
+		expect(rows.find(line => line.includes("demo/invalid-rate"))).toContain(expected);
+		expect(renderDetail(model)).toContain(`${expected} per M`);
+		browser.setQuery("free");
+		expect(browser.visibleCount).toBe(0);
+	});
+
+	test("price formatting preserves integer zeros and positive sub-cent rates", () => {
+		const priced = makeModel("fixture", "priced");
+		priced.cost.input = 100;
+		priced.cost.output = 0.001;
+		const tiny = makeModel("fixture", "tiny");
+		tiny.cost.input = 0.0000001;
+		tiny.cost.output = 0.001;
+		const browser = makeBrowser([priced, tiny], []);
+		const rows = browser.render(100).map(line => Bun.stripANSI(line));
+		const listRow = rows.find(line => line.includes("fixture/priced"));
+		const detailRow = rows.find(line => line.includes("$100/0.001 per M"));
+		const tinyRow = rows.find(line => line.includes("fixture/tiny"));
+		expect(listRow).toContain("$100/0.001");
+		expect(detailRow).toContain("$100/0.001 per M");
+		expect(tinyRow).toContain("$0.0000001/0.001");
+		expect(rows.every(line => Bun.stringWidth(line) <= 100)).toBe(true);
+	});
+});
+
+describe("Factory Droid credits badge", () => {
+	beforeAll(async () => {
+		await initTheme(false);
+	});
+
+	/** A Factory Droid row: upstream list price as `cost`, the base Standard Credits rate as the badge. */
+	function makeDroidModel(id: string, credits: number): Model {
+		return {
+			...makeModel("factory-droid", id),
+			cost: { input: 1.25, output: 10, cacheRead: 0, cacheWrite: 0 },
+			factoryDroidCredits: credits,
+		};
+	}
+
+	test("shows list price with the credit badge and never advertises unknown list prices as free", () => {
+		const priced = makeDroidModel("claude-opus-5", 2);
+		const paid = makeDroidModel("preview-credit-model", 2);
+		paid.cost = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+		const browser = makeBrowser([priced, paid], []);
+		const rows = browser.render(120).map(line => Bun.stripANSI(line));
+		const pricedRow = rows.find(row => row.includes("claude-opus-5"));
+		const paidRow = rows.find(row => row.includes("preview-credit-model"));
+
+		expect(pricedRow).toContain("$1.25/10 2×");
+		expect(paidRow).toContain("2×");
+		expect(paidRow).not.toContain("free");
+		browser.setQuery("free");
+		expect(browser.visibleCount).toBe(0);
+	});
+});
+
+describe("serviceTierFor", () => {
+	beforeAll(async () => {
+		await initTheme(false);
+	});
+
+	test("labels the live session tier rather than the configured setting", async () => {
+		// The setting asks for ultrafast, but `/fast ultra` and `/slow` act on the
+		// session's per-family map; the browser must follow the session.
+		const settings = Settings.isolated({ "tier.openai": "ultrafast" });
+		const astra = makeModel("openai", "gpt-6-astra");
+		const auth = await AuthStorage.create(":memory:");
+		try {
+			const session = new AgentSession({
+				agent: new Agent({ initialState: { model: astra, systemPrompt: ["Test"], tools: [], messages: [] } }),
+				sessionManager: SessionManager.inMemory(),
+				modelRegistry: new ModelRegistry(auth),
+				settings,
+			});
+			try {
+				const browser = new ModelBrowser(
+					createModelBrowserSource(settings, model => session.effectiveServiceTier(model)),
+				);
+				browser.setItems(buildBrowserItems([astra]));
+				browser.setPerfStats(
+					new Map([
+						["openai/gpt-6-astra", { samples: 4, tps: 25, ttftMs: null }],
+						["openai/gpt-6-astra@ultrafast", { samples: 2, tps: 300, ttftMs: null }],
+					]),
+				);
+				const row = () => Bun.stripANSI(browser.render(120)[2] ?? "");
+
+				expect(row()).toContain("25t/s");
+				expect(row()).not.toContain("ultrafast");
+
+				expect(session.setUltrafastMode(true)).toBe(true);
+				expect(row()).toContain("300t/s ultrafast");
+
+				session.setUltrafastMode(false);
+				expect(row()).toContain("25t/s");
+				expect(row()).not.toContain("ultrafast");
+			} finally {
+				await session.dispose();
+			}
+		} finally {
+			auth.close();
+		}
+	});
+
+	test("without a session, returns the configured tier only when the request would carry it", () => {
+		const source = createModelBrowserSource(Settings.isolated({ "tier.openai": "ultrafast" }));
+		const firstParty = makeModel("openai", "gpt-6-astra");
+		const codexUnlisted = makeModel("openai-codex", "gpt-6-astra");
+		const codexAdvertised = buildModel({
+			id: "gpt-6-astra",
+			name: "gpt-6-astra",
+			api: "openai-codex-responses",
+			provider: "openai-codex",
+			baseUrl: "https://chatgpt.com/backend-api",
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 10, output: 50, cacheRead: 1, cacheWrite: 0 },
+			contextWindow: 400_000,
+			maxTokens: 128_000,
+			serviceTiers: ["ultrafast"],
+		});
+		const anthropic = buildModel({
+			id: "claude-opus-5-5",
+			name: "claude-opus-5-5",
+			api: "anthropic-messages",
+			provider: "anthropic",
+			baseUrl: "https://api.anthropic.com",
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 5, output: 25, cacheRead: 0.5, cacheWrite: 6.25 },
+			contextWindow: 200_000,
+			maxTokens: 64_000,
+		});
+
+		// First-party OpenAI takes ultrafast as-is.
+		expect(source.serviceTierFor?.(firstParty)).toBe("ultrafast");
+		// Codex realizes it only when discovery advertises it, so the browser must
+		// not label a tier the request would drop.
+		expect(source.serviceTierFor?.(codexUnlisted)).toBeUndefined();
+		expect(source.serviceTierFor?.(codexAdvertised)).toBe("ultrafast");
+		// No configured tier for the family.
+		expect(source.serviceTierFor?.(anthropic)).toBeUndefined();
+
+		// Anthropic realizes priority through fast mode, not a `service_tier` field,
+		// so no served tier is ever recorded for it and there is no row to label.
+		const anthropicPriority = createModelBrowserSource(Settings.isolated({ "tier.anthropic": "priority" }));
+		expect(anthropicPriority.serviceTierFor?.(anthropic)).toBeUndefined();
+		expect(anthropicPriority.serviceTierFor?.(firstParty)).toBeUndefined();
 	});
 });

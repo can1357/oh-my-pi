@@ -66,16 +66,61 @@ interface Component {
 	render(width: number): readonly string[];
 	handleInput?(data: string): void;
 	invalidate?(): void;
+	releaseRenderCaches?(): void;
 }
 ```
 
-| Method               | Description                                                                                                                                                        |
-| -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `render(width)`      | Returns an array of strings, one per line. Each line **must not exceed `width`** or the TUI will error. Use `truncateToWidth()` or manual wrapping to ensure this. The result is component-owned and immutable to callers; return the same array reference when unchanged (enables renderer memoization) and a new array when content changed. |
-| `handleInput?(data)` | Called when the component has focus and receives keyboard input. The `data` string contains raw terminal input (may include ANSI escape sequences).                |
-| `invalidate?()`      | Called to clear any cached render state. Components should re-render from scratch on the next `render()` call.                                                     |
+| Method                   | Description                                                                                                                                                        |
+| ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `render(width)`          | Returns an array of strings, one per line. Each line **must not exceed `width`** or the TUI will error. Use `truncateToWidth()` or manual wrapping to ensure this. The result is component-owned and immutable to callers; return the same array reference when unchanged (enables renderer memoization) and a new array when content changed. |
+| `handleInput?(data)`     | Called when the component has focus and receives keyboard input. The `data` string contains raw terminal input (may include ANSI escape sequences).                |
+| `invalidate?()`          | Called to clear any cached render state. Components should re-render from scratch on the next `render()` call.                                                     |
+| `releaseRenderCaches?()` | Drops only derived render caches. The next `render()` must return the same rows without eager rebuilds, renderer callbacks, image conversions, or child replacement. |
 
 ## Built-in Components
+
+### Composition
+
+Build screens from persistent components and update their data, selection, expansion, or size through setters. Layouts own child bounds and mouse-coordinate translation; controllers retain domain workflows and asynchronous operations. Propagate `invalidate()` after theme changes and `dispose()` when removing an owned component tree.
+
+| Family | Components | Import |
+| --- | --- | --- |
+| Layout | `Stack`, `Row`, `SplitPane` | package root |
+| Panels | `OverlayPanel`, `PanelRows`, `PanelDivider` | `/chrome` |
+| Menus | `SelectList`, `MenuSelection` | package root |
+| Forms | `Form`, `FormField`, `TextFormField`, `SelectFormField`, `SettingsFormField` | package root |
+| Wizard steps | `WizardStep` | package root |
+| Viewports | `ScrollView`, including child rendering, follow-tail, and keyed range anchoring | package root |
+| Trees | `TreeView` | package root |
+| Disclosure | `Disclosure`, with lazy summary/detail children | package root |
+| Messages | `FramedMessageComponent`, `MessageNoticeComponent`, `MessageDividerComponent` | `/chrome` |
+| Tool output | `ToolCard`, `framedToolCard`, `plainToolCard`, `OutputPane` | `/render` |
+| Transcripts | `TranscriptBrowser` | package root |
+| Data | `MetricRow`, `ProgressBar`, `Table`, `KeyValueList`, `Section` | package root |
+
+```typescript
+import { Disclosure, SplitPane, Text } from "@oh-my-pi/pi-tui";
+
+const diagnostics = new Disclosure({
+	summary: new Text("2 build diagnostics", 0, 0),
+	body: () => new Text("src/index.ts:12 — unused import\nsrc/config.ts:8 — missing property", 0, 0),
+});
+
+const view = new SplitPane({
+	left: new Text("Build diagnostics", 0, 0),
+	right: diagnostics,
+	leftSize: { fixed: 24 },
+	rightMinWidth: 30,
+	splitAt: 60,
+	narrowPane: "right",
+	height: 12,
+});
+
+diagnostics.setExpanded(true);
+view.setHeight(16);
+```
+
+`ScrollView.revealRange()` preserves manual scrolling while a selection is unchanged; `mode: "once"` supports asynchronously arriving initial selections. `OutputPane.append()` accepts incremental terminal output, including carriage-return updates; call `finish()` when the stream ends.
 
 ### Container
 
@@ -412,7 +457,7 @@ const spacer = new Spacer(2); // 2 empty lines (default: 1)
 
 ### Image
 
-Renders images inline for terminals that support the Kitty graphics protocol (Kitty, Ghostty, WezTerm, and Warp on macOS/Linux) or iTerm2 inline images. Falls back to a text placeholder on unsupported terminals.
+Renders images inline for terminals that support the Kitty graphics protocol (Kitty, Ghostty, WezTerm, and Warp on macOS/Linux), iTerm2 inline images or SIXEL. Falls back to a text placeholder on unsupported terminals.
 
 ```typescript
 interface ImageTheme {
@@ -423,16 +468,20 @@ interface ImageOptions {
 	maxWidthCells?: number;
 	maxHeightCells?: number;
 	filename?: string;
+	budget?: ImageBudget; // usually tui.imageBudget
+	requestRender?: () => void; // repaint once a SIXEL encode lands; defaults to the budget's
 }
 
 const image = new Image(
 	base64Data, // base64-encoded image data
 	"image/png", // MIME type
 	theme, // ImageTheme
-	options, // optional ImageOptions
+	{ ...options, budget: tui.imageBudget }, // optional ImageOptions
 );
 tui.addChild(image);
 ```
+
+SIXEL images encode off the JavaScript thread: the first render reserves the image's rows and the image appears on the repaint `budget` or `requestRender` triggers once the encode lands. Without either, it waits for an unrelated repaint.
 
 Supported formats: PNG, JPEG, GIF, WebP. Dimensions are parsed from the image headers automatically.
 

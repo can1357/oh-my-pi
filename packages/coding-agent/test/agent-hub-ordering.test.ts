@@ -1,17 +1,15 @@
+import { createAgentHubRuntime } from "@oh-my-pi/pi-coding-agent/modes/agent-hub-runtime";
 /**
- * Regression: the agent hub row order must be stable while the hub is open.
- *
- * The hub is sorted by lastActivity on first open, but after that keyboard
- * selection must not jump around as agents heartbeat or update activity. New
- * agents that appear while the hub is open are appended at the end.
+ * Regression: the agent hub keeps its initial status/recency order while open,
+ * regardless of heartbeats; newly spawned agents appear above existing rows.
  */
 import { afterEach, beforeAll, describe, expect, it, setSystemTime, vi } from "bun:test";
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { IrcBus } from "@oh-my-pi/pi-coding-agent/irc/bus";
-import { type AgentHubDeps, AgentHubOverlayComponent } from "@oh-my-pi/pi-coding-agent/modes/components/agent-hub";
-import { SessionObserverRegistry } from "@oh-my-pi/pi-coding-agent/modes/session-observer-registry";
-import { initTheme, theme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { type AgentHubDeps, AgentHubOverlayComponent } from "@oh-my-pi/pi-tui/overlays/agent-hub";
+import { SessionObserverRegistry } from "@oh-my-pi/pi-tui/overlays/session-observer-registry";
+import { initTheme, theme } from "@oh-my-pi/pi-tui/theme";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { visibleWidth } from "@oh-my-pi/pi-tui/utils";
@@ -45,7 +43,7 @@ function stubStdoutGeometry(cols: number): GeometryStub {
 
 function makeHub(agents: AgentRegistry, overrides: Partial<AgentHubDeps> = {}) {
 	return new AgentHubOverlayComponent({
-		settings: Settings.isolated(),
+		...createAgentHubRuntime({ settings: Settings.isolated(), registry: agents }),
 		observers: new SessionObserverRegistry(),
 		hubKeys: [],
 		onDone: () => {},
@@ -53,6 +51,7 @@ function makeHub(agents: AgentRegistry, overrides: Partial<AgentHubDeps> = {}) {
 		registry: agents,
 		irc: new IrcBus(agents),
 		focusAgent: async () => {},
+		manageActivityLive: !overrides.activity,
 		...overrides,
 	});
 }
@@ -182,7 +181,7 @@ describe("Agent hub row ordering", () => {
 		}
 	});
 
-	it("keeps row order stable as agents heartbeat and appends new agents", () => {
+	it("pins existing rows across activity changes and puts new agents at the top", () => {
 		vi.useFakeTimers();
 		let hub: AgentHubOverlayComponent | undefined;
 		try {
@@ -203,28 +202,39 @@ describe("Agent hub row ordering", () => {
 			hub = makeHub(agents);
 			// Captured once on open: status then recency (most-recent first).
 			expect(renderedAgentIds(hub)).toEqual(["C", "B", "A"]);
+			hub.handleInput("j");
+			expect(selectedAgentId(hub)).toBe("B");
 
-			// A heartbeats far ahead of the others; a stable roster must NOT bubble
-			// it to the top while the hub is open (issue #10524).
+			// A heartbeat and B's status change must not move existing rows.
 			setSystemTime(4000);
 			agents.setActivity("A", "still running");
+			agents.setStatus("B", "idle");
 
-			// A new agent appears and forces a refresh: existing rows keep their
-			// captured order, and the newcomer appends at the end.
 			setSystemTime(5000);
 			const sessionD = {} as AgentSession;
 			agents.register({ id: "D", displayName: "Delta", kind: "sub", session: sessionD, status: "parked" });
-			// Renders coalesce: the immediate frame still shows the captured order.
+			setSystemTime(6000);
+			agents.register({ id: "E", displayName: "Epsilon", kind: "sub", session: {} as AgentSession });
+			// One coalesced refresh: new agents use the existing status/recency
+			// ranking, but both precede the frozen roster.
 			expect(renderedAgentIds(hub)).toEqual(["C", "B", "A"]);
 			vi.advanceTimersByTime(100);
-			expect(renderedAgentIds(hub)).toEqual(["C", "B", "A", "D"]);
+			expect(renderedAgentIds(hub)).toEqual(["E", "D", "C", "B", "A"]);
+			expect(selectedAgentId(hub)).toBe("B");
 
-			// Reusing an unregistered id creates a new agent generation. It must
-			// append rather than reclaiming the removed generation's old rank.
+			// Further tool activity cannot displace either newcomer.
+			setSystemTime(7000);
+			agents.setActivity("A", "active again");
+			vi.advanceTimersByTime(100);
+			expect(renderedAgentIds(hub)).toEqual(["E", "D", "C", "B", "A"]);
+			expect(selectedAgentId(hub)).toBe("B");
+
+			// Reusing an unregistered id creates a new generation at the top,
+			// rather than reclaiming the previous generation's old rank.
 			agents.unregister("B", sessionB);
 			agents.register({ id: "B", displayName: "Beta 2", kind: "sub", session: {} as AgentSession });
 			vi.advanceTimersByTime(100);
-			expect(renderedAgentIds(hub)).toEqual(["C", "A", "D", "B"]);
+			expect(renderedAgentIds(hub)).toEqual(["B", "E", "D", "C", "A"]);
 		} finally {
 			hub?.dispose();
 			vi.useRealTimers();
@@ -271,6 +281,7 @@ describe("Agent hub row ordering", () => {
 		const getSessions = vi.spyOn(observers, "getSessions");
 		const getSession = vi.spyOn(observers, "getSession");
 		const hub = new AgentHubOverlayComponent({
+			...createAgentHubRuntime({ registry: agents }),
 			observers,
 			hubKeys: [],
 			onDone: () => {},
@@ -326,6 +337,7 @@ describe("Agent hub row ordering", () => {
 		const observers = new SessionObserverRegistry();
 		const getSession = vi.spyOn(observers, "getSession");
 		const hub = new AgentHubOverlayComponent({
+			...createAgentHubRuntime({ registry: agents }),
 			observers,
 			hubKeys: [],
 			onDone: () => {},
@@ -933,10 +945,12 @@ describe("Agent hub row ordering", () => {
 		]);
 		const hub = makeHub(agents, {
 			observers,
-			settings: Settings.isolated({
-				modelRoles: { rapid: "openai/gpt-4o" },
-				modelTags: { rapid: { name: "Quick", color: "warning" } },
-			}),
+			getRoleInfo: createAgentHubRuntime({
+				settings: Settings.isolated({
+					modelRoles: { rapid: "openai/gpt-4o" },
+					modelTags: { rapid: { name: "Quick", color: "warning" } },
+				}),
+			}).getRoleInfo,
 		});
 
 		try {
@@ -994,6 +1008,51 @@ describe("Agent hub row ordering", () => {
 		}
 	});
 
+	it("keeps existing tree groups in place when new roots and children arrive", () => {
+		vi.useFakeTimers();
+		geometry = stubStdoutGeometry(120);
+		geometry.setRows(50);
+		const agents = new AgentRegistry();
+		setSystemTime(1_000);
+		agents.register({ id: "P1", displayName: "Parent 1", kind: "sub", parentId: "Main", session: null });
+		setSystemTime(1_100);
+		agents.register({ id: "C0", displayName: "Old child", kind: "sub", parentId: "P1", session: null });
+		setSystemTime(2_000);
+		agents.register({ id: "P2", displayName: "Parent 2", kind: "sub", parentId: "Main", session: null });
+		const hub = makeHub(agents);
+
+		try {
+			hub.handleInput("t");
+			expect(renderedAgentIds(hub)).toEqual(["P2", "P1", "C0"]);
+			expect(selectedAgentId(hub)).toBe("P2");
+
+			setSystemTime(3_000);
+			agents.register({ id: "C1", displayName: "New child", kind: "sub", parentId: "P1", session: null });
+			setSystemTime(4_000);
+			agents.register({ id: "N", displayName: "New root", kind: "sub", parentId: "Main", session: null });
+			vi.advanceTimersByTime(100);
+
+			expect(renderedAgentIds(hub)).toEqual(["N", "P2", "P1", "C1", "C0"]);
+			expect(selectedAgentId(hub)).toBe("P2");
+			expect(Bun.stripANSI(renderedRosterHeaderLineRaw(hub, "C1", 120))).toContain("├──");
+			setSystemTime(5_000);
+			agents.register({ id: "M", displayName: "Newest root", kind: "sub", parentId: "Main", session: null });
+			vi.advanceTimersByTime(100);
+			setSystemTime(6_000);
+			agents.register({ id: "NC", displayName: "New root's child", kind: "sub", parentId: "N", session: null });
+			vi.advanceTimersByTime(100);
+			expect(renderedAgentIds(hub)).toEqual(["M", "N", "NC", "P2", "P1", "C1", "C0"]);
+			expect(selectedAgentId(hub)).toBe("P2");
+
+			hub.handleInput("t");
+			expect(renderedAgentIds(hub)).toEqual(["NC", "M", "N", "C1", "P2", "C0", "P1"]);
+		} finally {
+			hub.dispose();
+			vi.useRealTimers();
+			setSystemTime();
+		}
+	});
+
 	it("renders parent lineage with bash-style tree connectors", () => {
 		geometry = stubStdoutGeometry(120);
 		geometry.setRows(32);
@@ -1014,6 +1073,8 @@ describe("Agent hub row ordering", () => {
 		}
 	});
 	it("keeps tree rails continuous across task and metrics rows", () => {
+		// Equal activity timestamps keep the sibling order used by the rail assertions deterministic.
+		setSystemTime(1_000);
 		geometry = stubStdoutGeometry(120);
 		geometry.setRows(32);
 		const agents = new AgentRegistry();
@@ -1098,7 +1159,6 @@ describe("Agent hub row ordering", () => {
 
 		try {
 			const roster = Bun.stripANSI(hub.render(80).join("\n"));
-			expect(roster).toContain("Tab:details");
 			expect(roster).not.toContain("Registered ");
 
 			hub.handleInput("\t");
@@ -1106,7 +1166,6 @@ describe("Agent hub row ordering", () => {
 			expect(details).toContain("Agent Hub · NarrowAgent");
 			expect(details).toContain("Usage");
 			expect(details).toContain("$0.0000 · 2.0s active · 2 req · 3 tools · 900 tok");
-			expect(details).toContain("Tab:roster");
 			hub.handleInput("\x1b[6~");
 			expect(Bun.stripANSI(hub.render(80).join("\n"))).toContain("Changes");
 			for (const line of hub.render(80)) expect(visibleWidth(line)).toBeLessThanOrEqual(80);

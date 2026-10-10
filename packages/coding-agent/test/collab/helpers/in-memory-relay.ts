@@ -27,6 +27,7 @@ export class FakeWebSocket {
 	static readonly CLOSED = 3;
 
 	binaryType = "blob";
+	/** Always 0 unless a test drives it; CollabSocket reads it as its high-water mark. */
 	bufferedAmount = 0;
 	readyState: number = FakeWebSocket.CONNECTING;
 	readonly role: "host" | "guest";
@@ -53,9 +54,11 @@ export class FakeWebSocket {
 	send(data: Uint8Array): void {
 		if (this.readyState !== FakeWebSocket.OPEN) return;
 		// Snapshot: the relay rewrites the peerId in place, and the sender may
-		// reuse the buffer once send() returns.
+		// reuse the buffer once send() returns. Routing happens now, against the
+		// room as it is at send time, so a frame written just before close() still
+		// reaches peers the close will retire; delivery itself stays asynchronous.
 		const bytes = new Uint8Array(data);
-		queueMicrotask(() => this.#relay.forward(this, bytes));
+		this.#relay.forward(this, bytes);
 	}
 
 	close(_code?: number): void {
@@ -63,6 +66,13 @@ export class FakeWebSocket {
 		this.readyState = FakeWebSocket.CLOSED;
 		this.#relay.disconnect(this);
 		queueMicrotask(() => this.onclose?.({ code: 1000, reason: "closed" }));
+	}
+
+	/** Relay-initiated close with a fatal code, as when the room disappears. */
+	closeFatal(): void {
+		if (this.readyState === FakeWebSocket.CLOSED) return;
+		this.readyState = FakeWebSocket.CLOSED;
+		queueMicrotask(() => this.onclose?.({ code: 4001, reason: "room closed" }));
 	}
 
 	/** Relay → this socket: a binary frame, delivered as ArrayBuffer (binaryType "arraybuffer"). */
@@ -112,7 +122,14 @@ export class InMemoryRelay {
 
 	disconnect(ws: FakeWebSocket): void {
 		if (ws.role === "host") {
-			if (this.#host === ws) this.#host = null;
+			if (this.#host !== ws) return;
+			this.#host = null;
+			// Mirrors local-relay.ts: losing the host destroys the room. Every guest
+			// is closed with the fatal 4001, and a reconnecting host gets a fresh
+			// room that issues peer ids from 1 again.
+			for (const guest of this.#guests.values()) guest.closeFatal();
+			this.#guests.clear();
+			this.#nextPeerId = 1;
 			return;
 		}
 		this.#guests.delete(ws.peerId);

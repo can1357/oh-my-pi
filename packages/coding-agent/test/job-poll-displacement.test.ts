@@ -1,24 +1,24 @@
 /**
- * Repeated `hub` waits must not stack "waiting on N jobs" frames in the
+ * Repeated `wait` calls must not stack "waiting on N jobs" frames in the
  * transcript: a wait whose watched jobs are all still running stays live
- * (displaceable) and the next `hub` call replaces it — one persistent wait.
+ * (displaceable) and the next `wait` call replaces it — one persistent wait.
  *
  * Contracts under test:
  *  - ToolExecutionComponent: a waiting-poll result stays displaceable but
  *    finalizes like any other settled result (so it can retire as history
  *    instead of pinning the live viewport); seal() always freezes.
- *  - EventController: a follow-up `hub` call removes the tracked waiting
+ *  - EventController: a follow-up `wait` call removes the tracked waiting
  *    poll from the transcript; any other tool seals it in place.
  */
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
-import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import {
-	ToolExecutionComponent,
-	type ToolExecutionHandle,
-} from "@oh-my-pi/pi-coding-agent/modes/components/tool-execution";
+import { resetSettingsForTest, Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { ToolExecutionComponent, type ToolExecutionHandle } from "@oh-my-pi/pi-tui/chat/tool-execution";
 import { EventController } from "@oh-my-pi/pi-coding-agent/modes/controllers/event-controller";
-import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { cfgDisplayShowTokenUsage } from "@oh-my-pi/pi-coding-agent/modes/settings";
+import { ChatTranscriptBuilder } from "@oh-my-pi/pi-tui/chat/chat-transcript-builder";
+import { createUsageRowBlock } from "@oh-my-pi/pi-tui/overlays/usage-row";
+import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { UiHelpers } from "@oh-my-pi/pi-coding-agent/modes/utils/ui-helpers";
 import type { SessionContext } from "@oh-my-pi/pi-coding-agent/session/session-context";
 import type { Component, TUI } from "@oh-my-pi/pi-tui";
@@ -69,7 +69,7 @@ function trackComponent(components: ToolExecutionComponent[], component: ToolExe
 	return component;
 }
 
-describe("hub waiting-poll block lifecycle", () => {
+describe("wait block lifecycle", () => {
 	const created: ToolExecutionComponent[] = [];
 
 	beforeEach(async () => {
@@ -87,10 +87,7 @@ describe("hub waiting-poll block lifecycle", () => {
 	});
 
 	function makeJobComponent() {
-		return trackComponent(
-			created,
-			new ToolExecutionComponent("hub", { op: "wait", ids: ["j0", "j1"] }, {}, undefined, uiStub),
-		);
+		return trackComponent(created, new ToolExecutionComponent("wait", {}, {}, undefined, uiStub));
 	}
 
 	it("keeps an all-running poll displaceable yet finalized until sealed", () => {
@@ -103,6 +100,7 @@ describe("hub waiting-poll block lifecycle", () => {
 		component.seal();
 		expect(component.isDisplaceableBlock()).toBe(false);
 		expect(component.isTranscriptBlockFinalized()).toBe(true);
+		expect(Bun.stripANSI(component.render(100).join("\n"))).toContain("job 0");
 	});
 
 	it("finalizes a poll that observed a settled job", () => {
@@ -175,15 +173,15 @@ describe("EventController displaces consecutive waiting polls", () => {
 		await controller.handleEvent({
 			type: "tool_execution_start",
 			toolCallId,
-			toolName: "hub",
-			args: { op: "wait", ids: ["j0"] },
+			toolName: "wait",
+			args: {},
 		});
 		const component = children[children.length - 1] as ToolExecutionComponent;
 		trackComponent(created, component);
 		await controller.handleEvent({
 			type: "tool_execution_end",
 			toolCallId,
-			toolName: "hub",
+			toolName: "wait",
 			result: pollResult(["running", "running"]),
 			isError: false,
 		});
@@ -209,7 +207,7 @@ describe("EventController displaces consecutive waiting polls", () => {
 		return component;
 	}
 
-	it("removes the previous waiting poll when the next hub call starts", async () => {
+	it("removes the previous waiting poll when the next wait call starts", async () => {
 		const { controller, children } = createFixture();
 
 		const first = await runPoll(controller, children, "t1");
@@ -222,6 +220,25 @@ describe("EventController displaces consecutive waiting polls", () => {
 		expect(children).toContain(second);
 		// The displaced block is sealed so its spinner interval is stopped.
 		expect(first.isTranscriptBlockFinalized()).toBe(true);
+	});
+
+	it("keeps a waiting snapshot beside its completed turn's usage when the next wait starts", async () => {
+		const { controller, children } = createFixture();
+		const first = await runPoll(controller, children, "t1");
+		const metrics = createUsageRowBlock({
+			input: 4242,
+			output: 7,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 4249,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		});
+		children.push(metrics);
+		await runPoll(controller, children, "t2");
+		expect(children).toContain(first);
+		expect(children.indexOf(first)).toBe(children.indexOf(metrics) - 1);
+		expect(Bun.stripANSI(first.render(100).join("\n"))).toContain("job 0");
+		expect(Bun.stripANSI(metrics.render(100).join("\n"))).toContain("4.2K");
 	});
 
 	it("seals the waiting poll in place when a different tool runs next", async () => {
@@ -364,14 +381,14 @@ describe("EventController displaces consecutive waiting polls", () => {
 		await controller.handleEvent({
 			type: "tool_execution_start",
 			toolCallId: "t1",
-			toolName: "hub",
-			args: { op: "wait", ids: ["j0"] },
+			toolName: "wait",
+			args: {},
 		});
 		const settled = trackComponent(created, children[children.length - 1] as ToolExecutionComponent);
 		await controller.handleEvent({
 			type: "tool_execution_end",
 			toolCallId: "t1",
-			toolName: "hub",
+			toolName: "wait",
 			result: pollResult(["completed", "running"]),
 			isError: false,
 		});
@@ -381,6 +398,84 @@ describe("EventController displaces consecutive waiting polls", () => {
 		// A poll that carried real results is kept as history.
 		expect(children).toContain(settled);
 		expect(children).toContain(next);
+	});
+});
+
+describe("#12248 completed wait turn replay", () => {
+	beforeEach(async () => {
+		resetSettingsForTest();
+		await Settings.init({ inMemory: true });
+		cfgDisplayShowTokenUsage.set(settings, true);
+		await initTheme();
+	});
+	afterEach(() => {
+		resetSettingsForTest();
+	});
+
+	function waitTurn(id: string, input: number): AgentMessage[] {
+		return [
+			{
+				role: "assistant",
+				content: [{ type: "toolCall", id, name: "wait", arguments: {} }],
+				api: "anthropic-messages",
+				provider: "anthropic",
+				model: "claude-sonnet-4-5",
+				stopReason: "stop",
+				usage: {
+					input,
+					output: 7,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: input + 7,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				},
+				timestamp: Date.now(),
+			},
+			{
+				role: "toolResult",
+				toolCallId: id,
+				toolName: "wait",
+				...pollResult(["running"]),
+				isError: false,
+				timestamp: Date.now(),
+			},
+		] satisfies AgentMessage[];
+	}
+
+	it.each(["session", "transcript"] as const)("retains each wait with its original metrics in %s replay", mode => {
+		const messages = [...waitTurn("w1", 4242), ...waitTurn("w2", 2121)];
+		let children: Component[];
+		if (mode === "session") {
+			const ctx = createInteractiveModeContext({ settings: Settings.isolated({ "display.showTokenUsage": true }) });
+			const helpers = new UiHelpers(ctx);
+			ctx.addMessageToChat = helpers.addMessageToChat.bind(helpers);
+			helpers.renderSessionContext({ messages } as SessionContext);
+			children = ctx.chatContainer.children;
+		} else {
+			const builder = new ChatTranscriptBuilder({ ui: uiStub, cwd: process.cwd(), requestRender() {} });
+			builder.rebuild(
+				messages.map((message, i) => ({
+					type: "message" as const,
+					id: `m${i}`,
+					parentId: i ? `m${i - 1}` : null,
+					timestamp: new Date(0).toISOString(),
+					message,
+				})),
+			);
+			children = builder.container.children;
+		}
+		const polls = children.filter(
+			(child): child is ToolExecutionComponent => child instanceof ToolExecutionComponent,
+		);
+		for (const poll of polls) poll.seal();
+		expect(polls).toHaveLength(2);
+		const output = children.map(child => Bun.stripANSI(child.render(120).join("\n")));
+		for (const [i, label] of ["4.2K", "2.1K"].entries()) {
+			const pollIndex = children.indexOf(polls[i]);
+			expect(output[pollIndex]).toContain("job 0");
+			expect(output[pollIndex + 1]).toContain(label);
+			expect(output.filter(text => text.includes(label))).toHaveLength(1);
+		}
 	});
 });
 

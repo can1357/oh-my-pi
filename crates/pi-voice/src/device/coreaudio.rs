@@ -34,11 +34,11 @@ unsafe impl Send for QueueHandle {}
 
 impl QueueHandle {
 	fn stop_and_dispose(self) -> VoiceResult<()> {
-		// SAFETY: This handle owns a live queue; an immediate stop waits for queue
-		// activity.
+		// SAFETY: This handle owns a live queue; an immediate stop waits for
+		// queue activity.
 		let stop_status = unsafe { AudioQueueStop(self.0, 1) };
-		// SAFETY: The synchronous stop completed, and this handle exclusively owns the
-		// queue.
+		// SAFETY: The synchronous stop completed, and this handle exclusively
+		// owns the queue.
 		let dispose_status = unsafe { AudioQueueDispose(self.0, 1) };
 		if stop_status != 0 {
 			return Err(format!("CoreAudio queue stop failed (OSStatus {stop_status})"));
@@ -123,14 +123,8 @@ unsafe extern "C" {
 	fn pthread_self() -> usize;
 }
 
-struct PlaybackContext {
-	fill:            PlaybackFill,
-	stopped:         Arc<AtomicBool>,
-	callback_thread: Arc<AtomicUsize>,
-}
-
-struct CaptureContext {
-	sink:            CaptureSink,
+struct Context<C> {
+	callback:        C,
 	stopped:         Arc<AtomicBool>,
 	callback_thread: Arc<AtomicUsize>,
 }
@@ -159,22 +153,29 @@ fn buffer_size(config: DeviceConfig) -> VoiceResult<u32> {
 
 fn dispose_failed_start(queue: AudioQueueRef, operation: &str, status: i32) -> String {
 	if !queue.is_null() {
-		// SAFETY: `queue` was returned by AudioQueueNewInput/Output and has not been
-		// disposed.
+		// SAFETY: `queue` was returned by AudioQueueNewInput/Output and has not
+		// been disposed.
 		unsafe { AudioQueueDispose(queue, 1) };
 	}
 	format!("CoreAudio {operation} failed (OSStatus {status})")
 }
 
-unsafe extern "C" fn playback_callback(
+/// Shared queue-callback body: marks the callback thread, runs `deliver` on
+/// the buffer unless stopped, and re-enqueues it while still running.
+///
+/// # Safety
+/// `user_data` must be the live `Context<C>` the queue was created with, and
+/// `queue`/`buffer` the pointers `AudioQueue` passed to the callback.
+unsafe fn on_buffer<C>(
 	user_data: *mut c_void,
 	queue: AudioQueueRef,
 	buffer: *mut AudioQueueBuffer,
+	deliver: impl FnOnce(&mut C, &mut AudioQueueBuffer),
 ) {
 	if user_data.is_null() || queue.is_null() || buffer.is_null() {
 		return;
 	}
-	let context = user_data.cast::<PlaybackContext>();
+	let context = user_data.cast::<Context<C>>();
 	// SAFETY: AudioQueue passes the live context pointer supplied when the queue
 	// was created.
 	unsafe {
@@ -185,31 +186,47 @@ unsafe extern "C" fn playback_callback(
 	// SAFETY: The callback only projects the independently allocated atomic flag
 	// from `context`.
 	if unsafe { (*context).stopped.load(Ordering::Acquire) } {
-		// SAFETY: The context remains live until synchronous queue disposal completes.
+		// SAFETY: The context remains live until synchronous queue disposal
+		// completes.
 		unsafe { (*context).callback_thread.store(0, Ordering::Release) };
 		return;
 	}
 	// SAFETY: AudioQueue passes one of its allocated buffers exclusively to this
 	// callback.
 	let buffer = unsafe { &mut *buffer };
+	// SAFETY: AudioQueue serializes callbacks, so only this callback borrows the
+	// `callback` field.
+	deliver(unsafe { &mut (*context).callback }, buffer);
+	// SAFETY: The callback only projects the independently allocated atomic flag
+	// from `context`.
+	if !unsafe { (*context).stopped.load(Ordering::Acquire) } {
+		// SAFETY: The queue and buffer belong to this callback and remain live
+		// while it returns.
+		let _ = unsafe { AudioQueueEnqueueBuffer(queue, buffer, 0, ptr::null()) };
+	}
+	// SAFETY: The context remains live until synchronous queue disposal
+	// completes.
+	unsafe { (*context).callback_thread.store(0, Ordering::Release) };
+}
+
+/// Fill `buffer` to capacity and mark it full for the queue.
+fn fill_buffer(fill: &mut PlaybackFill, buffer: &mut AudioQueueBuffer) {
 	let sample_count = buffer.mAudioDataBytesCapacity as usize / size_of::<f32>();
 	// SAFETY: AudioQueue allocated `mAudioData` with the reported capacity for
 	// linear PCM data.
 	let samples =
 		unsafe { slice::from_raw_parts_mut(buffer.mAudioData.cast::<f32>(), sample_count) };
-	// SAFETY: AudioQueue serializes callbacks, so only this callback borrows the
-	// `fill` field.
-	unsafe { ((*context).fill)(samples) };
-	// SAFETY: The callback only projects the independently allocated atomic flag
-	// from `context`.
-	if !unsafe { (*context).stopped.load(Ordering::Acquire) } {
-		buffer.mAudioDataByteSize = buffer.mAudioDataBytesCapacity;
-		// SAFETY: The queue and buffer belong to this callback and remain live while it
-		// returns.
-		let _ = unsafe { AudioQueueEnqueueBuffer(queue, buffer, 0, ptr::null()) };
-	}
-	// SAFETY: The context remains live until synchronous queue disposal completes.
-	unsafe { (*context).callback_thread.store(0, Ordering::Release) };
+	fill(samples);
+	buffer.mAudioDataByteSize = buffer.mAudioDataBytesCapacity;
+}
+
+unsafe extern "C" fn playback_callback(
+	user_data: *mut c_void,
+	queue: AudioQueueRef,
+	buffer: *mut AudioQueueBuffer,
+) {
+	// SAFETY: The queue was created with a `Context<PlaybackFill>`.
+	unsafe { on_buffer::<PlaybackFill>(user_data, queue, buffer, fill_buffer) };
 }
 
 unsafe extern "C" fn capture_callback(
@@ -220,109 +237,121 @@ unsafe extern "C" fn capture_callback(
 	_packet_count: u32,
 	_packet_descriptions: *const AudioStreamPacketDescription,
 ) {
-	if user_data.is_null() || queue.is_null() || buffer.is_null() {
-		return;
-	}
-	let context = user_data.cast::<CaptureContext>();
-	// SAFETY: AudioQueue passes the live context pointer supplied when the queue
-	// was created.
+	// SAFETY: The queue was created with a `Context<CaptureSink>`.
 	unsafe {
-		(*context)
-			.callback_thread
-			.store(pthread_self(), Ordering::Release);
+		on_buffer::<CaptureSink>(user_data, queue, buffer, |sink, buffer| {
+			let byte_size = buffer.mAudioDataByteSize as usize;
+			if byte_size != 0 && byte_size.is_multiple_of(size_of::<f32>()) {
+				// SAFETY: AudioQueue filled `mAudioDataByteSize` bytes within this
+				// allocated buffer.
+				let samples =
+					slice::from_raw_parts(buffer.mAudioData.cast::<f32>(), byte_size / size_of::<f32>());
+				sink(samples);
+			}
+		});
 	};
-	// SAFETY: The callback only projects the independently allocated atomic flag
-	// from `context`.
-	if unsafe { (*context).stopped.load(Ordering::Acquire) } {
-		// SAFETY: The context remains live until synchronous queue disposal completes.
-		unsafe { (*context).callback_thread.store(0, Ordering::Release) };
-		return;
-	}
-	// SAFETY: AudioQueue passes one of its allocated buffers exclusively to this
-	// callback.
-	let buffer = unsafe { &mut *buffer };
-	let byte_size = buffer.mAudioDataByteSize as usize;
-	if byte_size != 0 && byte_size.is_multiple_of(size_of::<f32>()) {
-		// SAFETY: AudioQueue filled `mAudioDataByteSize` bytes within this allocated
-		// buffer.
-		let samples = unsafe {
-			slice::from_raw_parts(buffer.mAudioData.cast::<f32>(), byte_size / size_of::<f32>())
-		};
-		// SAFETY: AudioQueue serializes callbacks, so only this callback borrows the
-		// `sink` field.
-		unsafe { ((*context).sink)(samples) };
-	}
-	// SAFETY: The callback only projects the independently allocated atomic flag
-	// from `context`.
-	if !unsafe { (*context).stopped.load(Ordering::Acquire) } {
-		// SAFETY: The queue and buffer belong to this callback and remain live while it
-		// returns.
-		let _ = unsafe { AudioQueueEnqueueBuffer(queue, buffer, 0, ptr::null()) };
-	}
-	// SAFETY: The context remains live until synchronous queue disposal completes.
-	unsafe { (*context).callback_thread.store(0, Ordering::Release) };
 }
 
-/// Running `CoreAudio` default-speaker queue.
-pub struct PlaybackDevice {
+/// Running `CoreAudio` default-device queue for either direction.
+pub struct Device {
 	queue:           Option<QueueHandle>,
-	context:         Option<Box<PlaybackContext>>,
+	/// The type-erased `Context<C>` the queue callbacks point into.
+	context:         Option<Box<dyn Send>>,
 	stopped:         Arc<AtomicBool>,
 	callback_thread: Arc<AtomicUsize>,
+	direction:       &'static str,
 }
 
 // SAFETY: AudioQueue control functions may be called from any thread, and the
 // callback is `Send`.
-unsafe impl Send for PlaybackDevice {}
+unsafe impl Send for Device {}
 
-impl PlaybackDevice {
+impl Device {
 	/// Open and start the default speaker queue.
-	pub fn start(config: DeviceConfig, fill: PlaybackFill) -> VoiceResult<Self> {
+	pub fn start_playback(config: DeviceConfig, fill: PlaybackFill) -> VoiceResult<Self> {
+		Self::start(
+			config,
+			fill,
+			"playback",
+			|format, user_data, queue| {
+				// SAFETY: All pointers are valid for the call; the boxed context
+				// outlives the queue.
+				unsafe {
+					AudioQueueNewOutput(
+						format,
+						playback_callback,
+						user_data,
+						ptr::null(),
+						ptr::null(),
+						0,
+						queue,
+					)
+				}
+			},
+			// Output queues start only with primed buffers.
+			fill_buffer,
+		)
+	}
+
+	/// Open and start the default microphone queue.
+	pub fn start_capture(config: DeviceConfig, sink: CaptureSink) -> VoiceResult<Self> {
+		Self::start(
+			config,
+			sink,
+			"capture",
+			|format, user_data, queue| {
+				// SAFETY: All pointers are valid for the call; the boxed context
+				// outlives the queue.
+				unsafe {
+					AudioQueueNewInput(
+						format,
+						capture_callback,
+						user_data,
+						ptr::null(),
+						ptr::null(),
+						0,
+						queue,
+					)
+				}
+			},
+			|_, _| {},
+		)
+	}
+
+	fn start<C: Send + 'static>(
+		config: DeviceConfig,
+		callback: C,
+		direction: &'static str,
+		new_queue: impl FnOnce(*const AudioStreamBasicDescription, *mut c_void, *mut AudioQueueRef) -> i32,
+		mut prime: impl FnMut(&mut C, &mut AudioQueueBuffer),
+	) -> VoiceResult<Self> {
 		let byte_size = buffer_size(config)?;
 		let format = stream_format(config.sample_rate);
 		let stopped = Arc::new(AtomicBool::new(false));
 		let callback_thread = Arc::new(AtomicUsize::new(0));
-		let mut context = Box::new(PlaybackContext {
-			fill,
+		let mut context = Box::new(Context {
+			callback,
 			stopped: Arc::clone(&stopped),
 			callback_thread: Arc::clone(&callback_thread),
 		});
 		let user_data = ptr::from_mut(&mut *context).cast::<c_void>();
 		let mut queue = ptr::null_mut();
-		// SAFETY: All pointers are valid for the call; the boxed context outlives the
-		// queue.
-		let status = unsafe {
-			AudioQueueNewOutput(
-				&format,
-				playback_callback,
-				user_data,
-				ptr::null(),
-				ptr::null(),
-				0,
-				&mut queue,
-			)
-		};
+		let status = new_queue(&format, user_data, &mut queue);
 		if status != 0 {
 			return Err(dispose_failed_start(queue, "queue creation", status));
 		}
 
 		for _ in 0..BUFFER_COUNT {
 			let mut buffer = ptr::null_mut();
-			// SAFETY: `queue` is live and `buffer` points to writable storage for the
-			// result.
+			// SAFETY: `queue` is live and `buffer` points to writable storage for
+			// the result.
 			let status = unsafe { AudioQueueAllocateBuffer(queue, byte_size, &mut buffer) };
 			if status != 0 {
 				return Err(dispose_failed_start(queue, "buffer allocation", status));
 			}
-			// SAFETY: AudioQueue returned a valid buffer with at least `byte_size` writable
-			// bytes.
-			let buffer_ref = unsafe { &mut *buffer };
-			let sample_count = buffer_ref.mAudioDataBytesCapacity as usize / size_of::<f32>();
-			// SAFETY: AudioQueue allocated the data pointer with the reported capacity.
-			let samples =
-				unsafe { slice::from_raw_parts_mut(buffer_ref.mAudioData.cast::<f32>(), sample_count) };
-			(context.fill)(samples);
-			buffer_ref.mAudioDataByteSize = buffer_ref.mAudioDataBytesCapacity;
+			// SAFETY: AudioQueue returned a valid buffer with at least `byte_size`
+			// bytes, not yet shared with any callback.
+			prime(&mut context.callback, unsafe { &mut *buffer });
 			// SAFETY: `queue` and `buffer` are live, and PCM requires no packet
 			// descriptions.
 			let status = unsafe { AudioQueueEnqueueBuffer(queue, buffer, 0, ptr::null()) };
@@ -336,10 +365,16 @@ impl PlaybackDevice {
 		if status != 0 {
 			return Err(dispose_failed_start(queue, "queue start", status));
 		}
-		Ok(Self { queue: Some(QueueHandle(queue)), context: Some(context), stopped, callback_thread })
+		Ok(Self {
+			queue: Some(QueueHandle(queue)),
+			context: Some(context),
+			stopped,
+			callback_thread,
+			direction,
+		})
 	}
 
-	/// Stop playback and dispose the queue, handing off teardown from its
+	/// Stop the stream and dispose the queue, handing off teardown from its
 	/// callback thread.
 	pub fn stop(&mut self) -> VoiceResult<()> {
 		self.stopped.store(true, Ordering::Release);
@@ -348,9 +383,10 @@ impl PlaybackDevice {
 		};
 		let Some(context) = self.context.take() else {
 			self.queue = Some(queue);
-			return Err("CoreAudio playback queue lost its callback context".to_owned());
+			return Err(format!("CoreAudio {} queue lost its callback context", self.direction));
 		};
-		// SAFETY: `pthread_self` returns the stable identifier for the calling thread.
+		// SAFETY: `pthread_self` returns the stable identifier for the calling
+		// thread.
 		let current_thread = unsafe { pthread_self() };
 		if current_thread != 0 && self.callback_thread.load(Ordering::Acquire) == current_thread {
 			let stopped = Arc::clone(&self.stopped);
@@ -367,108 +403,7 @@ impl PlaybackDevice {
 	}
 }
 
-impl Drop for PlaybackDevice {
-	fn drop(&mut self) {
-		let _ = self.stop();
-	}
-}
-
-/// Running `CoreAudio` default-microphone queue.
-pub struct CaptureDevice {
-	queue:           Option<QueueHandle>,
-	context:         Option<Box<CaptureContext>>,
-	stopped:         Arc<AtomicBool>,
-	callback_thread: Arc<AtomicUsize>,
-}
-
-// SAFETY: AudioQueue control functions may be called from any thread, and the
-// callback is `Send`.
-unsafe impl Send for CaptureDevice {}
-
-impl CaptureDevice {
-	/// Open and start the default microphone queue.
-	pub fn start(config: DeviceConfig, sink: CaptureSink) -> VoiceResult<Self> {
-		let byte_size = buffer_size(config)?;
-		let format = stream_format(config.sample_rate);
-		let stopped = Arc::new(AtomicBool::new(false));
-		let callback_thread = Arc::new(AtomicUsize::new(0));
-		let mut context = Box::new(CaptureContext {
-			sink,
-			stopped: Arc::clone(&stopped),
-			callback_thread: Arc::clone(&callback_thread),
-		});
-		let user_data = ptr::from_mut(&mut *context).cast::<c_void>();
-		let mut queue = ptr::null_mut();
-		// SAFETY: All pointers are valid for the call; the boxed context outlives the
-		// queue.
-		let status = unsafe {
-			AudioQueueNewInput(
-				&format,
-				capture_callback,
-				user_data,
-				ptr::null(),
-				ptr::null(),
-				0,
-				&mut queue,
-			)
-		};
-		if status != 0 {
-			return Err(dispose_failed_start(queue, "queue creation", status));
-		}
-
-		for _ in 0..BUFFER_COUNT {
-			let mut buffer = ptr::null_mut();
-			// SAFETY: `queue` is live and `buffer` points to writable storage for the
-			// result.
-			let status = unsafe { AudioQueueAllocateBuffer(queue, byte_size, &mut buffer) };
-			if status != 0 {
-				return Err(dispose_failed_start(queue, "buffer allocation", status));
-			}
-			// SAFETY: `queue` and `buffer` are live, and input PCM requires no packet
-			// descriptions.
-			let status = unsafe { AudioQueueEnqueueBuffer(queue, buffer, 0, ptr::null()) };
-			if status != 0 {
-				return Err(dispose_failed_start(queue, "buffer enqueue", status));
-			}
-		}
-
-		// SAFETY: `queue` is live and null requests immediate start.
-		let status = unsafe { AudioQueueStart(queue, ptr::null()) };
-		if status != 0 {
-			return Err(dispose_failed_start(queue, "queue start", status));
-		}
-		Ok(Self { queue: Some(QueueHandle(queue)), context: Some(context), stopped, callback_thread })
-	}
-
-	/// Stop capture and dispose the queue, handing off teardown from its
-	/// callback thread.
-	pub fn stop(&mut self) -> VoiceResult<()> {
-		self.stopped.store(true, Ordering::Release);
-		let Some(queue) = self.queue.take() else {
-			return Ok(());
-		};
-		let Some(context) = self.context.take() else {
-			self.queue = Some(queue);
-			return Err("CoreAudio capture queue lost its callback context".to_owned());
-		};
-		// SAFETY: `pthread_self` returns the stable identifier for the calling thread.
-		let current_thread = unsafe { pthread_self() };
-		if current_thread != 0 && self.callback_thread.load(Ordering::Acquire) == current_thread {
-			let stopped = Arc::clone(&self.stopped);
-			drop(std::thread::spawn(move || {
-				stopped.store(true, Ordering::Release);
-				let _ = queue.stop_and_dispose();
-				drop(context);
-			}));
-			return Ok(());
-		}
-		let result = queue.stop_and_dispose();
-		drop(context);
-		result
-	}
-}
-
-impl Drop for CaptureDevice {
+impl Drop for Device {
 	fn drop(&mut self) {
 		let _ = self.stop();
 	}

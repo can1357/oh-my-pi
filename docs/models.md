@@ -8,16 +8,24 @@ Primary implementation files:
 
 - `packages/coding-agent/src/config/model-registry.ts` — loads built-in + custom models, provider overrides, runtime discovery, auth integration
 - `packages/coding-agent/src/config/model-resolver.ts` — parses model patterns and selects initial/smol/slow models
-- `packages/coding-agent/src/config/settings-schema.ts` — model-related settings (`modelRoles`, provider transport preferences)
-- `packages/coding-agent/src/session/auth-storage.ts` — re-exports `AuthStorage` from `@oh-my-pi/pi-ai`; API key + OAuth resolution order
+- `packages/coding-agent/src/config/model-settings.ts` — model selection settings (`modelRoles`, `enabledModels`, `enabledProviders`/`disabledProviders`, `modelProviderOrder`, `cycleOrder`)
+- `packages/coding-agent/src/session/settings.ts` — provider transport preferences (`providers.*`)
+- `packages/coding-agent/src/config/models-config.ts` and `models-config-schema-bundle.ts` — custom provider/model validation
+- `packages/coding-agent/src/session/auth-storage.ts` — re-exports `AuthStorage` from `@oh-my-pi/pi-ai`; credential precedence is implemented in `packages/ai/src/auth/cascade.ts`
+- `packages/catalog/src/compat/resolve.ts` and `compat/rules/` — compatibility and model policy resolution
 - `packages/catalog/src/models.ts` and `packages/catalog/src/types.ts` — built-in providers/models and public model types
 
 ## Config file location and legacy behavior
 
-Default config paths, in precedence order:
+Default-profile config paths, in precedence order:
 
 - `~/.omp/agent/models.yml`
 - `~/.omp/agent/models.yaml`
+
+These are relative to the active agent directory returned by `getAgentDir()`. Named profiles use
+`~/.omp/profiles/<name>/agent/`; `PI_CONFIG_DIR` changes the config-root directory name, and
+`PI_CODING_AGENT_DIR` can override the default-profile agent directory. A programmatic
+`ModelRegistry` path overrides the directory-derived location.
 
 Legacy behavior still present:
 
@@ -34,7 +42,7 @@ providers:
 
 `provider-id` is the canonical provider key used across selection and auth lookup.
 
-The root object currently contains only `providers`; unknown root keys fail schema validation.
+`providers` is the only root key the registry consumes. Unknown root keys are not rejected by the current schema, but do not configure model behavior.
 
 ## Provider-level fields
 
@@ -68,6 +76,7 @@ providers:
           cacheRead: 0
           cacheWrite: 0
         contextWindow: 128000
+        maxContextWindow: 256000 # optional extended-context window
         maxTokens: 16384
         headers:
           X-Model: value
@@ -85,9 +94,37 @@ providers:
             controller: mlx
 ```
 
+`maxContextWindow` is available on both `models` entries and `modelOverrides`.
+Set `contextWindow` to the normal prompt window and `maxContextWindow` to the
+larger prompt window accepted by the provider. `/extended-context on` selects
+the larger window; `off` restores the normal one. An override specifying only
+`contextWindow` remains fixed in both modes, as before. This changes OMP's
+local context budget, not the provider's server-side limit; verify the endpoint
+accepts requests of the configured size.
+Configured maxima do not replace provider-advertised capacity. Models governed
+by a catalog override ceiling (such as Codex Astra) still clamp to that ceiling.
+Per-model overrides, including retired variant aliases, are resolved before
+selecting the extended window.
+
+Custom `models` entries can set their own `baseUrl`; otherwise they inherit the provider URL.
+For built-in models, a provider `baseUrl` override is scoped to the effective APIs of custom models
+that inherit it, or to the provider's `api` for an override-only configuration. Without either
+scope it applies provider-wide. `transport: pi-native` always applies the gateway URL provider-wide.
+
+`preferWebsockets` (on a model or `modelOverrides` entry) controls whether Codex requests prefer
+the WebSocket transport. `omitMaxOutputTokens` omits the model-derived output cap.
+
+### Bedrock request options
+
+Provider-level `guardrailIdentifier`, `guardrailVersion`, and `guardrailTrace` attach a guardrail to
+Converse requests. The version defaults to `"DRAFT"` when an identifier is set; trace accepts
+`enabled`, `disabled`, or `enabled_full`. `requestMetadata` supplies invocation-log tags. Invalid
+entries and entries beyond Bedrock's 16-entry limit are dropped before dispatch; per-request tags
+override matching model tags. These fields do not configure the Anthropic Messages route.
+
 ### Compaction options
 
-- `compactionModel` (per model, including `modelOverrides`) — selector for the model used to summarize/compact context when this model's session is compacted, instead of the model itself.
+- `compactionModel` (per model, including `modelOverrides`) — preferred compaction model, tried before the active model, chat-role candidates, and a largest-context fallback. It does not switch the active conversation model.
 - `remoteCompaction` (provider level or per model) — opts eligible models into provider-native compaction. Supported keys: `enabled`, `api`, `endpoint`, `model`, `v2StreamingEnabled`, `v2Endpoint`, `streamingEndpoint`. Provider-level settings are the baseline; per-model keys override them.
 
 ### Allowed provider/model `api` values
@@ -101,11 +138,34 @@ providers:
 - `google-generative-ai`
 - `google-gemini-cli`
 - `google-vertex`
+- `typesafe`
+- `openrouter-decisions`
+
+`typesafe` and `openrouter-decisions` are judgment APIs, not chat transports: a model declared with one answers System One judgment requests (`{baseUrl}/v1/systemone` and `{baseUrl}/decisions` respectively) and is selected by the `judge` model role. Its `headers` carry gateway routing or custom authentication headers for that traffic.
+
+A model or `modelOverrides` entry may also use a runner API, which serves one model `kind`; `RUNNER_API_KINDS` in `packages/catalog/src/types.ts` lists them (for example `openai-images` serves `image`, `openai-embeddings` serves `embedding`, `openai-speech` serves `tts`). `web-search` is built in and cannot be named here, so neither can `kind: search`. `kind` defaults to the api's kind (`chat` for chat transports), and an explicit `kind` must be one its api serves. Chat transports serve `chat` and `tiny` (small models for the `tiny`, `memory`, and `judge` roles); those that `generate_image` runs (`openai-responses`, `openai-codex-responses`, `google-generative-ai`, `google-gemini-cli`) also serve `image`: on `openai-responses`, the image is generated through the Responses `image_generation` tool, carried by a GPT-5+ chat model on the same provider, instead of `/images/generations`. This moves discovered gateway models to the image role:
+
+```yaml
+providers:
+  my-gateway:
+    api: openai-responses
+    discovery:
+      type: openai-models-list
+    modelOverrides:
+      gpt-image-2:
+        api: openai-images # kind: image, generated via /images/generations
+      gpt-image-1.5:
+        kind: image # stays on openai-responses, generated via the hosted image tool
+```
+
+A configured `kind`, explicit or implied by a runner API, outranks the bundled catalog's classification of the same id and survives `modelOverrides` and refreshes.
+
+Loading models.yml checks a `modelOverrides` `kind` only against an api the file names: the override's own `api`, or that of a `models` entry with the same id. A built-in or discovered model gets its api later, so its override `kind` is checked against that api when the override applies; a kind the api does not serve is ignored and logged. An `api` override without `kind` takes a runner API's kind, keeps a kind the new api still serves, and otherwise makes the model `chat`. A `models` entry that redefines a built-in id on a different api follows the same rule, so redefining an image row on `openai-completions` makes it `chat`.
 
 ### Allowed auth/discovery values
 
-- `auth`: `apiKey` (default), `none`, or `oauth`; for `models.yml` custom models, `oauth` is accepted by schema but does not waive the `apiKey` requirement
-- `discovery.type`: `ollama`, `llama.cpp`, `lm-studio`, `openai-models-list`, `proxy`, or `litellm`
+- `auth`: `apiKey` (default), `none`, or `oauth`. `none` and `oauth` waive the custom-provider `apiKey` requirement, but `oauth` does not create credentials or register a login flow. It forces OAuth-style request shaping; a usable credential must come from stored auth, environment, or a configured key. Custom `anthropic-messages` models also use OAuth-style shaping when `auth` is omitted; set `auth: apiKey` for plain API-key shaping.
+- `discovery.type`: `ollama`, `llama.cpp`, `lm-studio`, `openai-models-list`, `proxy`, `litellm`, or `apple-foundation-models`. Apple's transport is registered implicitly on supported Macs; `apple-foundation-models` is not an allowed `api` value in this YAML schema.
 - `discovery.injectV1`: optional boolean, default `true`, for `openai-models-list`. Set `false` to fetch the model list from `{baseUrl}/models` without injecting `/v1` — for gateways that root their OpenAI-compatible surface at a versioned path (e.g. `https://api.opper.ai/v3/compat`) where the forced `/v1/models` returns a different, smaller model list. Query strings in `baseUrl` are ignored, matching the default mode.
 - `transport`: `pi-native` only. When set, every model under that provider is sent to an `omp auth-gateway` compatible `baseUrl` via `POST /v1/pi/stream`; `apiKey` is the gateway bearer.
 - `imageInputDecoder`: `stb` only. Set this on a custom model or `modelOverrides` entry when the serving backend uses an STB-compatible image decoder that cannot accept WebP; OMP converts attached and historical WebP images before provider dispatch.
@@ -118,7 +178,7 @@ providers:
 Required:
 
 - `baseUrl`
-- `apiKey` unless `auth: none`
+- `apiKey` unless `auth: none` or `auth: oauth`
 - `api` at provider level or each model
 
 ### Override-only provider (`models` missing or empty)
@@ -130,14 +190,17 @@ Must define at least one of:
 - `auth: none`
 - `headers`
 - `compat`
-- `disableStrictTools`
-- `modelOverrides`
+- `disableStrictTools: true`
+- `guardrailIdentifier`
+- `requestMetadata`
+- non-empty `modelOverrides`
 - `discovery`
 - `remoteCompaction`
 
 ### Discovery
 
 - `discovery.timeoutMs` overrides that provider's runtime HTTP probe timeout in milliseconds. It must be a positive finite number.
+- Without an override, Ollama and llama.cpp loopback probes use short endpoint-specific budgets (150–250 ms); remote/LAN probes use 10 s. Generic model-list and proxy probes default to 10 s.
 - `discovery` requires provider-level `api`, except `discovery.type: proxy` (per-model wire auto-detected).
 
 ### Remote compaction
@@ -146,14 +209,30 @@ Must define at least one of:
 It supports `enabled`, `api`, `endpoint`, `model`, `v2StreamingEnabled`,
 `v2Endpoint`, and `streamingEndpoint`.
 
+`openai-responses` models on Amazon Bedrock's OpenAI routes (`/openai/…` on
+`bedrock-runtime.<region>.amazonaws.com` or `bedrock-mantle.<region>.api.aws`,
+Mantle's `/v1` base, the runtime FIPS host, and PrivateLink hosts of both endpoints)
+use native OpenAI compaction without an opt-in, for any provider id. Set
+`enabled: false` to turn it off, or `v2StreamingEnabled: false` to keep only
+the V1 `/responses/compact` request. See [compaction](./compaction.md).
+
 ### Model value checks
 
-- `id` required
-- `contextWindow` and `maxTokens` must be positive if provided
+- `id` is required and non-empty; optional `name`, model `baseUrl`, `contextPromotionTarget`, and `compactionModel` must also be non-empty
+- custom `models` entries require positive `contextWindow` and `maxTokens` when provided; the current auxiliary positivity check does not cover `modelOverrides`
+- on both custom models and overrides, `maxContextWindow` must be a positive safe integer no smaller than `contextWindow` when both are set
+
+### Unknown compatibility keys
+
+Unknown keys in provider, model, and `modelOverrides` `compat` blocks produce non-fatal warnings: a notification at interactive startup, and a stderr line in print and RPC modes and when listing models (including JSON output; stdout is unchanged). Each warning names the config file and the dotted key path; model array entries use zero-based indices, as schema errors do. The configuration still loads and unknown keys are preserved for forward compatibility. A registry reports each unknown key path only once, even after forced refreshes or re-reading an unchanged file.
+
+Known record-level keys, at the top level of `compat` and inside its `whenThinking` override, come from both the models.yml compatibility schemas and the runtime compatibility vocabulary (wire axes). The schemas validate only a curated subset, so a runtime-recognized key such as `streamFirstEventTimeoutMs` does not warn merely because the file schema omits it. A nested `whenThinking.whenThinking` still warns: a thinking override cannot contain another thinking override. Thinking and catalog axes belong outside `compat` and are not included. Other nested checking follows only schema-declared fixed-field objects, including routing blocks and `reasoningEffortMap`; open maps such as `extraBody` accept arbitrary keys and nested payloads. Runtime extension provider registrations are not checked against the file schema: they can register custom APIs with their own compatibility fields.
+
+The runtime vocabulary is not filtered by the provider's `api`: a wire key that only another API family reads (for example an Anthropic-only key in an `openai-completions` provider) does not warn, even though it has no effect there.
 
 ### Command-resolved secrets
 
-Provider `apiKey` values and provider/model `headers` values may start with `!` to read a secret from command stdout. The command is run with a 10 s timeout, stdout is trimmed, and empty/failing commands are omitted:
+Provider `apiKey` values and provider/model `headers` values may start with `!` to read a secret from command stdout. Commands run asynchronously with a 10 s timeout; stdout is trimmed, and empty/failing commands are omitted. Loading or inspecting the catalog does not execute them: credentials resolve when a request or online credential probe needs them.
 
 ```yaml
 providers:
@@ -163,37 +242,43 @@ providers:
       X-Team-Key: "!bw get password omp-team-key"
 ```
 
-Successful command outputs are cached for the process lifetime so the command is not re-run for every model.
+Successful command outputs are cached for the process lifetime, and concurrent requests share an in-flight execution. Failures back off for 30 seconds. Refresh callers that request `refreshCommandCredentials` (including the model hub's explicit refresh) and 401 credential recovery invalidate the relevant cached API keys and headers; an ordinary catalog refresh does not. Runtime API-key overrides, including `--api-key`, take precedence over configured credentials.
 
 ## Merge and override order
 
-ModelRegistry pipeline (on refresh):
+ModelRegistry composition order:
 
-1. Load built-in providers/models from `@oh-my-pi/pi-catalog` (`getBundledProviders` / `getBundledModels`).
-2. Load `models.yml` / `models.yaml` custom config.
-3. Apply provider overrides (`baseUrl`, `headers`, `disableStrictTools`) to built-in models.
-4. Apply `modelOverrides` (per provider + model id).
-5. Merge custom `models`:
-   - same `provider + id` replaces existing
-   - otherwise append
-6. Load cached and runtime-discovered models. This includes local servers, built-in provider managers, and the shared models.dev catalog for known providers. Re-apply model overrides after the merge.
+1. Load `models.yml` / `models.yaml` to establish provider overrides, custom models, model overrides, and discovery configuration.
+2. Load built-in models from `@oh-my-pi/pi-catalog` (`getBundledProviders` / `getBundledModels`), applying provider overrides and context policies.
+3. Merge cached and runtime-discovered rows. Authoritative provider catalogs can replace their bundled chat roster.
+4. Merge configured custom `models`, then extension-registered models:
+   - a matching `provider + id` replaces transport metadata and patches defined model fields
+   - otherwise append a model, filling omitted metadata from a bundled reference or local defaults
+5. Collapse effort-tier variants, apply `modelOverrides`, and select configured extended windows.
+6. Apply provider Bedrock fields, runtime provider overrides, discovery wire policies, and extension OAuth catalog projections.
+
+Background discovery repeats the merge with custom definitions and model overrides applied after
+the discovered rows, so explicit user configuration remains effective.
 
 ### Provider-model cache and static fingerprint
 
-Cached per-provider model lists are persisted in the model-cache SQLite
-database (current schema version 12) with a `static_fingerprint` column that
-hashes the static catalog slice merged into the row. When `resolveProviderModels`
-skips the network fetch and the fingerprint of the in-memory static
-catalog matches the cached one, the cached rows are returned verbatim —
-the static + dynamic merge is bypassed entirely. The fingerprint is
-memoized per process by tagging the static-models array with a symbol
-property, so repeated cold-start calls do not re-hash.
+Cached per-provider model lists are persisted in `models.db` (schema version 13) as materialized
+models. A materialization-policy stamp includes the application version, builder version, and
+compiled-rule hash; incompatible rows are invalidated. Request-header values are never persisted
+and must be restored from trusted local metadata or configuration.
+
+`static_fingerprint` hashes the current static slice and merge policy. It is recomputed from the
+array's current contents, not stored on the array. When a fresh authoritative cache matches and no
+headers remain unresolved, `resolveProviderModels` can skip the full merge. Additive shared-catalog
+caches still reapply static rows, and returned models pass through variant collapsing.
+The model-manager default cache TTL is two hours (individual providers can override it);
+non-authoritative snapshots use a five-minute retry interval.
 
 ### Shared catalog refresh
 
-The bundled catalog remains the startup and offline baseline. After startup loads bundled and cached rows synchronously, the existing background refresh lifecycle fetches the current shared models.dev catalog for known providers. New model IDs are merged additively into each provider's bundled slice, normalized through that provider's catalog descriptor, and persisted in the model-cache database. This allows newly published models to appear without waiting for a new OMP binary.
+The bundled catalog remains the startup and offline baseline. Startup loads configuration and cached rows, materializing provider slices lazily; a local-only credential-scoped hydration pass precedes selector validation. Background refresh fetches the shared models.dev catalog through `https://catalog.stencil.so/models.json.zstd` for supported providers. New model IDs are merged additively into each provider's bundled slice, normalized through that provider's catalog descriptor, and persisted in the model-cache database. This allows newly published models to appear without waiting for a new OMP binary.
 
-Remote rows can supply current limits, pricing, modalities, and capability flags for newly added IDs, but they cannot introduce code, arbitrary headers, or an unregistered provider. A successful provider endpoint discovery remains authoritative for account availability. The shared catalog is not authoritative: it does not remove bundled models when a remote row disappears.
+Remote rows can supply current limits, pricing, modalities, and capability flags for newly added IDs, but they cannot introduce code, arbitrary headers, or an unregistered provider. Providers whose descriptors declare endpoint discovery authoritative use that result for their available chat roster. The shared catalog is not authoritative: it does not remove bundled models when a remote row disappears.
 
 Fresh cached snapshots avoid a network request. If refresh fails, OMP keeps the last usable cached snapshot and marks it stale; without a cache, it falls back to the bundled catalog. Provider discovery state records `source` (`bundled`, `models.dev`, `provider`, or `cache`) and `fetchedAt` so callers can distinguish current remote data from an offline fallback.
 
@@ -207,12 +292,51 @@ Provider defaults vs per-model overrides:
 
 - Provider `headers`, `compat`, and `remoteCompaction` are baselines.
 - Model `headers` override provider header keys.
-- `modelOverrides` can override model metadata (`name`, `reasoning`, `thinking`, `input`, `imageInputDecoder`,
-  `tokenizer`, `supportsTools`, `cost`, `premiumMultiplier`, `contextWindow`, `maxTokens`,
-  `omitMaxOutputTokens`, `headers`, `compat`, `contextPromotionTarget`, `compactionModel`, and
-  `remoteCompaction`).
+- `modelOverrides` can override model metadata (`name`, `api`, `kind`, `reasoning`, `thinking`, `input`,
+  `imageInputDecoder`, `tokenizer`, `supportsTools`, `cost`, `promptCache`, `premiumMultiplier`, `contextWindow`,
+  `maxContextWindow`, `maxTokens`, `omitMaxOutputTokens`, `preferWebsockets`, `headers`, `compat`,
+  `contextPromotionTarget`, `compactionModel`, and `remoteCompaction`).
 - `compat` is deep-merged for nested routing blocks (`openRouterRouting`, `vercelGatewayRouting`,
   `extraBody`, and `whenThinking`).
+
+## Prompt cache lifetimes
+
+`promptCache` states how long the provider keeps a prompt cache entry alive for each retention tier
+OMP can request (`short` is normally the default; Anthropic OAuth subscriber requests default to
+`long` where supported, unless an explicit retention setting or `PI_CACHE_RETENTION` overrides it). Values are seconds and are
+estimates: providers publish ranges, so pick the conservative end.
+
+```yaml
+providers:
+  anthropic:
+    modelOverrides:
+      claude-sonnet-5:
+        promptCache: { short: 300, long: 3600 }
+```
+
+An explicit `promptCache` replaces the model's catalog lifetimes rather than
+merging with them: `promptCache: {}` disables warming for that model, and a
+`short`-only value does not inherit a catalog `long` lifetime. For a matching
+model, `modelOverrides.promptCache` has highest priority. A runtime-registered
+model definition replaces the matching YAML `models` definition for lifetime
+selection, even when the runtime `promptCache` is omitted: the actual effective
+model's catalog defaults apply instead of the YAML lifetime. Without a runtime
+replacement, the matching YAML lifetime applies, or catalog defaults if absent.
+
+The ordinary `bun run gen:models` command recomputes bundled prompt-cache
+lifetimes from current catalog policy; there is no separate cache-regeneration
+command.
+
+Direct Anthropic keeps its existing 5 min / 1 h lifetimes (`short: 300`, `long: 3600`),
+defaulting to 5 min for API keys and 1 h for OAuth subscriber sessions; API keys can
+explicitly select `long`. Claude on native Amazon Bedrock Converse has a 5 min TTL; 1 h is
+available only where both catalog metadata and the request wire support it. Claude on
+Bedrock Runtime or Mantle's Anthropic Messages route has a 5 min lifetime under existing
+request support; an explicit `long` request falls back to `short` when unsupported. Other Amazon Bedrock models,
+including Nova and GPT, are not enabled for warming. A model without a lifetime for the
+retention tier actually used is never warmed; custom models and `modelOverrides` can opt in
+with `promptCache` once the backing cache behavior is known. See `providers.cacheWarming` in
+[Settings](./settings.md).
 
 ## Usage costs and time-based pricing
 
@@ -224,13 +348,18 @@ For the first-party `deepseek` provider, the catalog follows [DeepSeek's officia
 - Flash pricing covers `deepseek-flash` and the retired-but-still-accepted `deepseek-v4-flash` and `deepseek-v4-flash-vision-exp` ids, all billed at the Flash card. Peak rates per million tokens are $0.30 uncached input, $0.006 cached input, and $1.20 output.
 - `deepseek-v4-pro` initially uses peak rates of $1.32 uncached input, $0.044 cached input, and $3.96 output per million tokens. From **2026-09-14 04:00 UTC**, its estimates use the Flash rate card, with the same peak/off-peak schedule.
 
-Local estimates use the assistant message's **request-start timestamp** to choose both the rate card and tariff for the whole request. This is OMP's estimation convention: DeepSeek's pricing page does not specify how its server bills a request spanning a boundary. A request whose timestamp cannot be recovered is left unpriced rather than estimated against a tariff chosen from the wall clock.
+Local estimates use the assistant message's **request-start timestamp** to choose both the rate card and tariff for the whole request. This is OMP's estimation convention: DeepSeek's pricing page does not specify how its server bills a request spanning a boundary. When importing historical usage without recorded cost, the stats importer leaves scheduled pricing unpriced if no request timestamp can be recovered, rather than choosing a wall-clock tariff.
 
 The status line's `cost` segment appends **↑** for peak or **↓** for off-peak pricing on the **currently active provider/model**, using the current wall clock. It refreshes at tariff boundaries even while idle; the arrow is not a label for the accumulated session total. Models without scheduled pricing, including explicit flat-price overrides, show no arrow.
 
-An explicit model `cost` in `models.yml`, including `modelOverrides`, is a flat-price override and disables inherited time-based pricing for that model. Omitting `cost` preserves catalog pricing. `models.yml` does **not** accept a `timeBased` schedule; that metadata belongs to the catalog's [KDL pricing rules](../packages/catalog/src/compat/rules/README.md#time-based-pricing).
+An explicit model `cost` in `models.yml`, including `modelOverrides`, is a flat-price override and disables inherited time-based pricing for that model. Omitting `cost` preserves catalog pricing. `models.yml` does **not** configure a `timeBased` schedule; that metadata belongs to the catalog's [KDL pricing rules](../packages/catalog/src/compat/rules/README.md#time-based-pricing).
 
-A custom model in `models.yml` that omits `cost` inherits its reference row's card, schedule included. That lookup is keyed by model id and prefers the row with the widest limits, so `deepseek-v4-flash` resolves to a reseller's flat card while `deepseek-flash` resolves to the scheduled first-party one. Discovered proxy and gateway models are the opposite case: their pricing is provider-specific and rarely matches the bundled catalog, so discovery keeps them at a local-unknown zero cost and no tariff applies to them.
+A new custom model in `models.yml` that omits `cost` inherits its bundled reference row's card,
+schedule included. References are matched by model id and prefer larger context/output limits,
+then complete cache pricing and first-party OpenAI rows. A same-provider, same-id custom entry
+instead preserves the existing model's pricing when `cost` is omitted. Generic proxy and
+OpenAI-model-list discovery keeps pricing local-unknown (zero) rather than borrowing upstream
+prices; rich provider discovery such as LiteLLM can supply its own prices.
 
 ## Runtime discovery integration
 
@@ -259,6 +388,12 @@ If `llama.cpp` is not explicitly configured, registry adds an implicit discovera
 
 Runtime discovery calls llama.cpp model endpoints and synthesizes model entries with local defaults.
 
+The provider `api` is the default for discovered models; catalog rules can override it per model class. Qwen-class models on any `discovery.type: llama.cpp` provider (implicit or explicit) are discovered as `openai-completions`, because the Responses API cannot carry the chat template's thinking controls (`enable_thinking` / `chat_template_kwargs`). The override lives in `packages/catalog/src/compat/rules/providers/llama.cpp.kdl` (`discovery-api`).
+
+After a first response loads a lazy llama.cpp model, OMP re-probes its runtime context and input
+metadata. Explicit custom-model and `modelOverrides` limits take precedence over that probe.
+The implicit provider is keyless only when no credential source is configured.
+
 ### Implicit LM Studio discovery
 
 If `lm-studio` is not explicitly configured, registry adds an implicit discoverable provider:
@@ -268,9 +403,23 @@ If `lm-studio` is not explicitly configured, registry adds an implicit discovera
 - base URL: `LM_STUDIO_BASE_URL` or `http://127.0.0.1:1234/v1`
 - auth mode: keyless (`auth: none` behavior)
 
-Runtime discovery fetches models (`GET /models`) and synthesizes model entries with local defaults.
+Runtime discovery fetches the OpenAI-compatible model list and native LM Studio metadata when
+available. Native `loaded_context_length` takes precedence over the training window; after a first
+response JIT-loads a model, OMP refreshes that runtime metadata. Explicit custom-model and
+`modelOverrides` limits remain authoritative. Discovered LM Studio models use `imageInputDecoder: stb`.
 
 This path also works for local OpenAI-compatible servers that are not LM Studio. For example, if oMLX is bound to Ollama's usual port, set `LM_STUDIO_BASE_URL=http://127.0.0.1:11434/v1` to discover it through the existing `/v1/models` flow. Running oMLX and Ollama side by side requires assigning a different port to one of them. Do not configure oMLX as `ollama`: Ollama discovery uses native `/api/tags` and `/api/show` endpoints, not OpenAI `/v1/models`.
+
+### Implicit Apple Foundation Models discovery
+
+On Apple Silicon macOS, an unconfigured, non-disabled `apple` provider is probed through the
+in-process Foundation Models bridge. When the bridge reports it usable, `apple/on-device` is
+available without credentials, with context size, reasoning, image input, and tool support derived
+from bridge metadata. It is not selected automatically: its on-device context window may be
+smaller than the default coding-agent prompt and project instructions. Select it deliberately with
+`--model apple/on-device` or `/model`; otherwise use `/login` or configure another local model.
+Ineligible devices, disabled Apple Intelligence, and builds without the bridge yield no models.
+Its internal API is `apple-foundation-models`; no HTTP endpoint is used.
 
 ### LiteLLM provider discovery
 
@@ -283,7 +432,24 @@ When `litellm` is active (for example through `LITELLM_API_KEY` or stored auth),
 
 Runtime discovery probes LiteLLM management metadata in order: `GET /model_group/info`, `GET /v2/model/info`, `GET /model/info`, and `GET /v1/model/info`. The configured key must be authorized to read at least one of these routes; on deployments that restrict management endpoints, grant the route through LiteLLM's `allowed_routes` access controls or use a master/admin key for discovery.
 
-If every metadata route is unavailable, discovery falls back to the OpenAI-compatible `GET /models` list. A forbidden or failed metadata request is logged once with its endpoint and status; `404` is treated as an absent route. Rich metadata maps per-model context, capability, and upstream-provider fields. OpenAI-backed models use LiteLLM's Responses route so reasoning summaries remain available; mixed-provider groups stay on Chat Completions. Bare fallback ids use the known OpenAI model families for routing and bundled reference metadata when available. Models absent from the bundled catalog can therefore have unknown context and pricing after fallback.
+If every metadata route is unavailable, discovery falls back to the OpenAI-compatible `GET /models` list. A forbidden or failed metadata request is logged once with its endpoint and status; `404` is treated as an absent route. Both paths exclude models explicitly marked with known task-specific LiteLLM modes: `audio_speech`, `audio_transcription`, `batch`, `embedding`, `guardrail`, `image_edit`, `image_generation`, `moderation`, `ocr`, `rerank`, `search`, `vector_store`, and `video_generation`. Missing, null, and unrecognized modes remain selectable so router aliases continue to work. Rich metadata maps per-model context, capability, and upstream-provider fields. OpenAI-backed models use LiteLLM's Responses route so reasoning summaries remain available; mixed-provider groups stay on Chat Completions. Bare fallback ids use the known OpenAI model families for routing and bundled reference metadata when available. Fallback pricing remains unknown (represented by zero); configured generic discovery uses a 128,000-token context default when neither the endpoint nor a bundled reference supplies a limit. Rich management metadata can supply provider-specific prices. Later probes fill or override reported metadata for models in the first usable roster rather than unioning every endpoint's roster.
+
+### Generic OpenAI-compatible discovery
+
+`openai-models-list` reads `{baseUrl}/v1/models` by default (without adding a second `/v1`).
+`discovery.injectV1: false` treats the configured URL as the complete API root. Reported
+`max_model_len` wins over `context_length`. If both are absent, nested
+`limits.max_input_tokens` and `limits.max_output_tokens` supply their sum as context only when both
+are positive safe integers and the sum is safe. A valid `max_output_tokens` independently sets the
+chat output cap, clamped to the resolved context; an incomplete or invalid context pair does not
+discard a valid output limit. Otherwise, context follows the existing native/reference/default fallback.
+Silent endpoints can inherit bundled-reference limits, reasoning, and input modalities; unknown models
+use 128,000 context and 32,768 output as generic chat defaults. Output caps are bounded by the resolved context;
+Anthropic-routed models use an 8,192-token fallback output cap.
+
+A row advertising only image output becomes an image-generation runner; embedding-only output
+becomes an embedding runner. Mixed outputs remain chat models. These runners are visible with
+`omp models --kind all`, not the default chat listing.
 
 ### Explicit provider discovery
 
@@ -329,7 +495,7 @@ derives each model's `api` from the entry's `supported_endpoint_types`:
 
 - contains `"anthropic"` -> `api: anthropic-messages` (routes via `/v1/messages`)
 - contains `"openai"` -> `api: openai-completions` (routes via `/v1/chat/completions`)
-- otherwise -> falls back to provider-level `api` if set, else dropped
+- otherwise -> falls back to provider-level `api`, or `openai-completions` when it is omitted
 
 Provider-level `api` is **optional** with `discovery.type: proxy` because the
 per-model wire is auto-detected. The Anthropic SDK strips a trailing `/v1`
@@ -354,6 +520,8 @@ Extensions can register providers at runtime (`pi.registerProvider(...)`), inclu
 - model replacement/append for a provider
 - custom stream handler registration for new API IDs
 - custom OAuth provider registration
+- `fetchDynamicModels` for a credential-aware live roster (cached with a default 24-hour TTL)
+- custom usage reporting and OAuth `modifyModels` projections reapplied after catalog rebuilds
 
 ## Auth and API key resolution order
 
@@ -363,36 +531,51 @@ When requesting a key for a provider, effective order is:
 2. Config override (`models.yml` `providers.<name>.apiKey`)
 3. Stored OAuth credential (with refresh)
 4. Login-sourced stored API key
-5. Environment variable mapping (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, etc.)
-6. Other stored API key, such as a broker-migrated copy
-7. ModelRegistry fallback resolver (`models.yml` custom providers, using env-name-or-literal semantics)
+5. Extension-registered config fallback (`keys.setConfig(..., { fallback: true })`)
+6. Environment variable mapping (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, etc.)
+7. Other stored API key, such as a broker-migrated copy
+
+The fallback tier is for registered providers with their own login flow. Keys explicitly supplied
+in `models.yml` belong to tier 2, not this fallback tier.
 
 `models.yml` `apiKey` behavior:
 
 - Value is first treated as an environment variable name.
-- If no env var exists, the literal string is used as the token.
+- If the env var is unset or empty, the literal string is used as the token.
 
 If `authHeader: true` and provider `apiKey` is set, models get:
 
 - `Authorization: Bearer <resolved-key>` header injected.
 
+Resolution does not fail for a missing variable: with `apiKey: MY_PROVIDER_API_KEY`
+and `authHeader: true`, an unset or empty `MY_PROVIDER_API_KEY` produces
+`Authorization: Bearer MY_PROVIDER_API_KEY`. Launchers using env-backed keys must
+check that the variable is set and non-empty before starting OMP.
+
+[Command-resolved secrets](#command-resolved-secrets) do not use this literal
+fallback: a failing command or empty trimmed stdout resolves to no value, so it
+does not add a derived bearer header.
+
 Keyless providers:
 
-- Providers marked `auth: none` are treated as available without credentials.
-- `getApiKey*` returns `kNoAuth` for them.
+- Providers marked `auth: none`, implicit local providers, and optional-key logins stored in keyless mode can be available without credentials.
+- `ModelRegistry.getApiKey*` returns `kNoAuth` when a provider is keyless and no real credential source is configured; configured credentials still take precedence.
 
 ### Broker mode
 
-When `OMP_AUTH_BROKER_URL` (or `auth.broker.url`) is set, the local SQLite credential store is replaced by `RemoteAuthCredentialStore`. Layers 3, 4, and 6 above (stored OAuth and API-key credentials) are served from a broker-supplied snapshot whose `refresh` tokens are redacted; expiry triggers `POST /v1/credential/:id/refresh` on the broker rather than a local refresh.
+When `OMP_AUTH_BROKER_URL` (or `auth.broker.url`) is set, the local SQLite credential store is replaced by `RemoteAuthCredentialStore`. Layers 3, 4, and 7 above (stored OAuth and API-key credentials) are served from a broker-supplied snapshot whose `refresh` tokens are redacted; expiry triggers `POST /v1/credential/:id/refresh` on the broker rather than a local refresh.
 
-`AuthStorage.setConfigApiKey` lets a `models.yml` `apiKey` win over a broker-resolved OAuth token without overriding a runtime `--api-key`. See [`auth-broker-gateway.md`](./auth-broker-gateway.md) for the full broker / gateway design and env surface (`OMP_AUTH_BROKER_URL`, `OMP_AUTH_BROKER_TOKEN`, `auth.broker.url`, `auth.broker.token`).
+`AuthStorage.keys.setConfig` lets a `models.yml` `apiKey` win over a broker-resolved OAuth token without overriding a runtime `--api-key`. See [`auth-broker-gateway.md`](./auth-broker-gateway.md) for the full broker / gateway design and env surface (`OMP_AUTH_BROKER_URL`, `OMP_AUTH_BROKER_TOKEN`, `auth.broker.url`, `auth.broker.token`).
 
 ## Model availability vs all models
 
-- `getAll()` returns the loaded model registry (built-in + merged custom + discovered).
-- `getAvailable()` filters to models that are keyless or have resolvable auth.
+- `getAll()` returns chat models by default; `getAll("all")` includes every catalog kind.
+- `getAvailable()` is also chat-only by default; a kind or `"all"` includes the corresponding runners.
+- Availability excludes `disabledProviders` and requires a keyless provider or configured credential source. It does not execute secret commands or refresh OAuth tokens.
 
-So a model can exist in registry but not be selectable until auth is available.
+A model can exist in the registry without being available, and a configured credential can still
+fail when resolved for a request. `enabledProviders` controls foreign configuration-source discovery,
+not an allowlist of model transports.
 
 ## Runtime model resolution
 
@@ -404,7 +587,8 @@ So a model can exist in registry but not be selectable until auth is available.
 - exact model id (provider inferred)
 - fuzzy/substring matching
 - glob scope patterns in `--models` (e.g. `openai/*`, `*sonnet*`)
-- optional `:thinkingLevel` suffix (`off|minimal|low|medium|high|xhigh|max`)
+- optional `:thinkingLevel` suffix (`off|minimal|low|medium|high|xhigh|max|auto|inherit`)
+- `@upstream` routing suffix on OpenRouter and Vercel Gateway selectors (for example, `openrouter/anthropic/claude-sonnet-5@anthropic:high`); an exact literal model id still wins
 
 `--provider` is legacy; `--model` is preferred. An exact `provider/modelId` is unambiguous; bare ids
 and fuzzy patterns are resolved against the available concrete models.
@@ -435,30 +619,82 @@ When a bare id matches models from multiple providers, preference order is:
 4. known provider defaults (e.g. OpenAI/Anthropic/etc.) among available models
 5. first available model
 
+The automatic fallback first restricts the pool to providers with concrete credentials (including
+keyless locals) when any exist. Ambient AWS/Vertex credential sentinels remain usable, but do not
+displace providers with explicit credentials. Session restoration is handled separately and checks
+that the saved model still exists and resolves a usable credential.
+
 ### Role aliases and settings
 
-Supported model roles:
+Model roles assign model selectors to workloads. Configure them under `modelRoles` in `config.yml`, not in `models.yml`; `models.yml` defines providers and model metadata.
 
-- `default`, `smol`, `slow`, `vision`, `plan`, `commit`, `tiny`, `task`, `advisor`
+Built-in roles are grouped in the model picker:
 
-The `tiny` role overrides the online model used for lightweight background tasks (session titles, memory, `auto`-thinking difficulty classification, unexpected-stop detection); when unset, these fall back to `@smol`. Pick one in `/models`.
+- **Chat roles:** `default`, `smol`, `slow`, `vision`, `plan`, `commit`, `tiny`, `memory`, `task`, and `advisor`. The `tiny` and `memory` roles accept both ordinary chat models and `tiny` catalog models.
+- **Model-kind roles:** `image`, `web`, `speech`, `dictation`, and `judge`. These select image generation, search/grounded chat, text-to-speech, speech-to-text, and judgment runners respectively. The `judge` role also accepts tiny and chat models.
 
-Role aliases like `@smol` expand through `settings.modelRoles`; `*` selects `@default`. Quote `@` aliases in YAML values (`fable: "@slow"`). Each role value can also append a thinking selector such as `:minimal`, `:low`, `:medium`, or `:high`.
+`vision` and `image` are different workloads: `vision` selects a chat model for image analysis, such as `read screenshot.png?q=...`; `image` selects a model with catalog kind `image` for `generate_image`. Assigning a model to `vision` does not give it image-input support: image questions additionally check that the model can send image input to its provider.
+
+The `tiny` role selects lightweight models for background work such as session titles; when unset, it resolves through `@smol`. The `memory` role resolves through `@tiny` when unset. See [model settings](./settings.md#models) for configuration and fallback-chain examples.
+
+Assigning a non-default role in `/models` normally saves its selector without switching the active conversation model. A workload uses the role when invoked; assigning `plan` does not itself enter plan mode, and calling `todo` does not itself select the plan model. While plan mode is active, changing the `plan` role reapplies its model. Assigning `default` normally also switches the active model, unless a higher-priority settings layer overrides the edited assignment. The session-only model picker changes the active model without rewriting role assignments.
+
+Role aliases like `@smol` expand through `settings.modelRoles`; `*` selects `@default`. Quote `@` aliases in YAML values (`plan: "@slow"`). Chat-role values can append a thinking selector such as `:minimal`, `:low`, `:medium`, or `:high`; model-kind roles do not use chat thinking suffixes.
+
+Role values can contain comma-separated selectors; selection uses the first available match,
+not a per-request retry chain. Request-failure fallbacks are configured separately under
+`retry.fallbackChains` (role, exact model, or provider-wildcard keys; see [Settings](./settings.md)).
+Custom role names
+can be introduced through `modelRoles`, `modelTags`, or `cycleOrder`; they use chat models.
+Unset `smol` and `slow` inherit an explicitly configured `default` before their built-in priority
+lists. The advisor uses an explicitly configured `slow`, otherwise its own strong-model priority
+chain rather than inheriting the active conversation model.
 
 If a role points at another role, the target model still inherits normally and any explicit suffix on the referring role wins for that role-specific use.
+
+### Model presets
+
+A model preset is a named snapshot of every role assignment plus `defaultThinkingLevel`, so you can swap a whole setup at once:
+
+```text
+/modelpreset save cheap      # save the current roles and thinking level
+/modelpreset switch deep     # apply a saved preset
+/modelpreset                 # pick one from a list (interactive)
+/modelpreset list | delete <name>
+```
+
+In `/models`, press `s` in the Roles view to save the current setup under a name. Presets live under `modelPresets` in `config.yml`:
+
+```yaml
+modelPresets:
+  deep:
+    modelRoles:
+      default: anthropic/claude-opus-4-5:high
+      smol: anthropic/claude-sonnet-4-5
+    defaultThinkingLevel: high
+```
+
+Switching writes roles the way the model picker does: into the scope chosen by `modelRoleStorage`, clearing roles the preset leaves out and replacing `--model`/`--smol` session overrides. The preset's `defaultThinkingLevel` is written to the global config. It then switches the active model to the resulting `default` (an automatic provider-default selection when the preset has none) and sets the session's thinking level from the `:level` suffix on that selector, or else the preset's `defaultThinkingLevel`; a `:inherit` suffix leaves the level the model switch set. When a preset's `default` model is unavailable, nothing is changed. Roles that another layer still decides — a `--config` file, a project config in `global` storage, or the global config in `project` storage — are listed in the switch message with the layer that wins, instead of being reported as switched. The same goes for a `defaultThinkingLevel` set by a project config or `--config` file: the session still switches to the preset's level, but the message names that layer, whose level returns on the next start.
+
+When several config layers define a preset of the same name, the highest layer (command line, then `--config` file, then project config, then global config) wins whole: entries are never merged across layers, so a project `deep` that only sets `default` applies without the global `deep`'s other roles. A `null` entry in a `--config` file (or a command-line override) hides the preset from lists and switches; a `null` entry in a project config is ignored, so the global preset of that name still applies. Saving always writes the named entry to the global config and reports when a higher layer still takes precedence for that name.
+
+Saving captures the effective assignments — including any `--model` session override — and the configured `defaultThinkingLevel`, not the session's live thinking level.
 
 Related settings:
 
 - `modelRoles` (record)
 - `enabledModels` (scoped pattern list)
 - `modelProviderOrder` (provider precedence when equivalent concrete choices share an id)
-- `providers.kimiApiFormat` (`openai` or `anthropic` request format)
+- `providers.kimiApiFormat` (`auto|openai|anthropic`; `auto` follows server-declared model metadata)
 - `providers.openaiWebsockets` (`auto|off|on` websocket preference for OpenAI Codex transport)
+- `providers.openaiLiveSteering` (deliver mid-response user messages into GPT-6 responses over the Codex WebSocket)
 
 `modelRoles` stores model selectors such as `provider/modelId`; `enabledModels` and CLI `--models`
-accept exact selectors, globs, and fuzzy matches.
+accept exact selectors, globs, and fuzzy matches. The resulting scope restricts chat models only
+(Ctrl+P cycling, the startup model, chat roles in `/model`); judge, search, image, and speech
+models stay available for their roles, so entries naming them are accepted but have no effect.
 
-Global `enabledModels` and `disabledProviders` entries may also be scoped to a path prefix:
+`enabledModels`, `enabledProviders`, and `disabledProviders` entries may also be scoped to a path prefix:
 
 ```yaml
 enabledModels:
@@ -473,14 +709,19 @@ disabledProviders:
       - anthropic
 ```
 
-String entries apply everywhere. Scoped entries apply when the current working directory is the configured path or one of its subdirectories. Use `path`, `paths`, `pathPrefix`, or `pathPrefixes`; use `models` for `enabledModels`, `providers` for `disabledProviders`, or `values` for either.
+String entries apply everywhere. Scoped entries apply when the current working directory is the configured path or one of its subdirectories. Use `path`, `paths`, `pathPrefix`, or `pathPrefixes`; use `models` for `enabledModels`, `providers` for either provider setting, or `values` for any of them.
 
 ## `/model` and `omp models`
 
 Both surfaces keep provider-prefixed concrete models visible and selectable.
 
-- `/model` shows an all-models view plus one view per provider
-- `omp models` (default `ls` action) prints provider-grouped tables of every available model; `omp models find <substring>` filters by provider, id, or name; `omp models refresh` forces an online catalog re-fetch ignoring the model cache TTL; any provider name doubles as an `ls` filter (e.g. `omp models openai-codex`). Flags: `--json`, `-e <path>` (load extension, repeatable), `--no-extensions`, `--config <overlay>` (extra config overlay, repeatable)
+- `/model` / `/models` opens the model hub with role assignments and provider catalogs; the session-only picker changes the active model without saving a role assignment.
+- `omp models` (default `ls` action) prints provider-grouped tables of available **chat** models; `--kind <kind>` selects another catalog kind and `--kind all` includes every kind.
+- `omp models find <substring>` filters by provider, id, or name; `omp models refresh` forces an online catalog re-fetch ignoring the model cache TTL; a provider name doubles as an `ls` filter (e.g. `omp models openai-codex`).
+- Other flags: `--json`, `-e <path>` / `--extension <path>` (repeatable), `--no-extensions` (skip ambient discovery; explicit `-e` still loads), and `--config <overlay>` (repeatable).
+
+JSON includes `provider`, `kind`, `id`, `selector`, `name`, limits, reasoning/thinking metadata,
+declared `input`, and `cost`; it does not expose the model's transport `api`.
 
 Selecting a provider row stores its explicit `provider/modelId`.
 
@@ -490,7 +731,8 @@ even when its spec declares `input: [text, image]`; `--json` keeps the declared 
 
 ## Context promotion (model-level fallback chains)
 
-Context promotion is an overflow recovery mechanism for small-context variants (for example `*-spark`) that automatically promotes to a larger-context sibling when the API rejects a request with a context length error.
+Context promotion switches to an explicitly configured larger-context model before compaction.
+It is attempted on context overflow errors and at pre-prompt or post-turn compaction thresholds.
 
 ### Trigger and order
 
@@ -506,7 +748,7 @@ Selection is explicit and model-driven:
 
 1. `currentModel.contextPromotionTarget` (if configured)
 
-Only the configured target is considered; context promotion does not automatically choose a larger same-provider/API sibling. Configured targets are ignored unless credentials resolve (`ModelRegistry.getApiKey(...)`).
+Only the configured target is considered; context promotion does not automatically choose a larger same-provider/API sibling. The target must be available, differ from the current model, have a strictly larger known context window, and resolve a usable credential (`ModelRegistry.getApiKey(...)`).
 
 ### OpenAI Codex websocket handoff
 
@@ -516,7 +758,7 @@ If switching from/to `openai-codex-responses`, session provider state key `opena
 
 Promotion uses temporary switching (`setModelTemporary`):
 
-- recorded as a temporary `model_change` in session history
+- recorded as a `model_change` with the ephemeral role `"fallback"` (not a durable user model selection)
 - does not rewrite saved role mapping
 
 ### Configuring explicit fallback chains
@@ -538,34 +780,49 @@ providers:
         contextPromotionTarget: openai-codex/gpt-5.4
 ```
 
-The built-in model policy currently links OpenAI `codex-spark` variants to `gpt-5.5`, and `gpt-5.5` to `gpt-5.4`, when that target exists on the same provider/API.
+Do not rely on a model-name-derived chain: configure the target explicitly or use a target supplied
+by the provider's discovered metadata.
 
 ## Compatibility and routing fields
 
-The `compat` block on a provider or model overrides the URL-based auto-detection in `packages/catalog/src/compat/openai.ts` (`buildOpenAICompat`). It is validated by `OpenAICompatSchema` in `packages/coding-agent/src/config/models-config-schema.ts` and consumed by every `openai-completions` transport (`packages/ai/src/providers/openai-completions.ts`). The canonical type is `OpenAICompat` in `packages/catalog/src/types.ts`.
+The `compat` block supplies sparse overrides to `packages/catalog/src/compat/resolve.ts`, after
+endpoint detection and the KDL provider/model rules in `packages/catalog/src/compat/rules/`.
+The YAML schema is constructed in `packages/coding-agent/src/config/models-config-schema-bundle.ts`.
+The resolved shape depends on the model's API: `OpenAICompat` is the sparse OpenAI input type, while
+chat-completions and Responses transports consume their corresponding resolved records from
+`packages/catalog/src/types.ts`.
 
 Endpoint-specific exceptions that interact with these fields are cataloged in [Provider endpoint constraints](./provider-endpoint-constraints.md).
 
-`models.yml` accepts the following keys (all optional; unset falls back to URL detection):
+`models.yml` supports the following keys (all optional; unset uses catalog rules and endpoint defaults).
+Fields only affect APIs whose resolved compatibility record declares them:
 
 Request shaping:
 
 - `supportsStore` — emit `store: false` on requests. Default: auto (off for non-standard endpoints).
 - `supportsDeveloperRole` — use the `developer` system role for reasoning models instead of `system`. Default: auto.
 - `supportsMultipleSystemMessages` — preserve separate leading system/developer messages instead of coalescing them. Default: auto (known OpenAI-compatible hosted APIs preserve; strict-template/local hosts coalesce).
-- `supportsUsageInStreaming` — send `stream_options: { include_usage: true }` to receive token usage on streaming responses. Default: `true`.
+- `supportsUsageInStreaming` — send `stream_options: { include_usage: true }` to receive token usage on streaming responses. Default: auto (normally on, off for Cerebras hosts).
 - `maxTokensField` — `"max_completion_tokens"` or `"max_tokens"`. Default: auto.
-- `supportsToolChoice` — emit the `tool_choice` parameter when the caller forces a specific tool. Default: `true`. Set `false` for endpoints that 400 on `tool_choice` (e.g. DeepSeek when reasoning is on).
-- `supportsForcedToolChoice` — accept a forced `tool_choice` that requires a specific tool. Default: `true`. When `false`, a forced selector is downgraded to `auto` so the tool stays available for endpoints that reject forced tool calls (e.g. some thinking-required OpenAI-compatible models).
+- `supportsToolChoice` — allow the `tool_choice` parameter. Default: auto. Set `false` for endpoints that 400 on `tool_choice` (e.g. DeepSeek when reasoning is on).
+- `supportsForcedToolChoice` — accept a forced `tool_choice` that requires a specific tool. Default: auto. When `false`, a forced selector is downgraded to `auto` so the tool stays available for endpoints that reject forced tool calls (e.g. some thinking-required OpenAI-compatible models).
 - `disableReasoningOnForcedToolChoice` — drop `reasoning_effort` / OpenRouter `reasoning` whenever `tool_choice` forces a call. Default: auto (Kimi/Anthropic-fronted endpoints).
 - `disableReasoningOnToolChoice` — drop reasoning fields whenever any `tool_choice` is sent. Default: auto (DeepSeek reasoning models).
+- `disableReasoningWithTools` — suppress reasoning when tools are present even without forced tool choice. Default: `false` unless catalog policy overrides it.
 - `alwaysSendMaxTokens` — always send a max-token field when the caller did not provide one. Default: auto (Kimi-family models derive TPM limits from `max_tokens`).
 - `strictResponsesPairing` — Responses-API tool-call/result history must be strictly paired. Default: auto (Azure OpenAI, GitHub Copilot).
+- `statefulResponses` — enable or disable stored `previous_response_id` chaining for `openai-responses`. Enabling it sends `store: true` and delta input on later turns; disabling it replays full context with `store: false`. Precedence: call option > `PI_OPENAI_STATEFUL` > `compat.statefulResponses` > `compat.officialEndpoint` (on for official OpenAI, off elsewhere). This key does not enable `officialEndpoint` or official-only fields such as `text.verbosity`; it does not change Codex or Azure Responses behavior.
 - `streamIdleTimeoutMs` — stream-watchdog idle-timeout floor in ms for slow reasoning hosts. Default: auto (GLM coding-plan hosts, direct DeepSeek reasoning).
+- `streamMarkupHealingPattern` — recover leaked stream control markup with the `kimi`, `dsml`, `qwen`, or `thinking` grammar. Default: endpoint/model policy.
 - `cacheControlFormat` — `"anthropic"` to include Anthropic-style prompt-cache markers in chat-completions payloads. Default: auto (OpenRouter `anthropic/*` models).
 - `supportsLongPromptCacheRetention` — host honors `prompt_cache_retention: "24h"` on the Responses API. Default: auto (api.openai.com).
 - `supportsImageDetailOriginal` — allow the Responses API's nonstandard `detail: "original"` image
-  mode where the endpoint supports it.
+  mode where the endpoint supports it. Default: `true` for OpenAI, Azure OpenAI, and Codex;
+  `false` for other hosts, including custom/local endpoints, xAI, and Copilot. Custom hosts receive
+  `auto` for snapcompact frames and computer screenshots unless they opt in with
+  `compat.supportsImageDetailOriginal: true`. An explicit `false` also overrides the known-host default.
+- `supportsConfigurationUpdate` — let the Responses API change `reasoning.effort` mid-session through a `configuration_update` input item while the request-level effort stays pinned for prompt caching (GPT-6 Astra). Default: auto (`true` for `gpt-6-astra` on every host, `false` otherwise). Set `false` for custom `openai-responses` / `openai-codex-responses` endpoints that reject the item type with HTTP 400; effort changes are then sent as the top-level `reasoning.effort` and no update items are emitted.
+- `supportsSteering` — let the Codex WebSocket transport send `response.steer`, so a message typed while the model responds joins that response instead of waiting for the next request. Default: auto (`true` for the GPT-6 family). Set `false` for proxies that reject the event.
 - `extraBody` — extra top-level fields merged into every request body (gateway hints, controller selectors, etc.).
 
 Image handling:
@@ -582,20 +839,34 @@ Image handling:
 
 Reasoning / thinking:
 
-Custom model entries may define `thinking: { mode, efforts, defaultLevel, requiresEffort }`.
+Custom models and overrides may define `thinking` with required `mode` and `efforts`, plus
+`defaultLevel`, `effortMap`, `supportsDisplay`, and `requiresEffort`. Modes are `effort`, `budget`,
+`google-level`, `anthropic-adaptive`, and `anthropic-budget-effort`. Efforts are ordered
+`minimal|low|medium|high|xhigh|max`. Legacy `levels` or `minLevel`/`maxLevel` shapes are normalized to
+`efforts`; explicit `efforts` wins over either.
 `requiresEffort` defaults to auto-detection; set it to `false` only when the
 configured backend has been verified to accept an explicit reasoning-off
 request. This keeps the `:off` selector from being clamped to the lowest effort.
 
-- `supportsReasoningEffort` — accept `reasoning_effort`. Default: auto (off for Grok, Z.ai/Zhipu, and Xiaomi MiMo).
+For a custom model with the default `thinkingFormat: openai`, `--thinking off`
+has no explicit off payload on `openai-completions`: when `reasoning_effort` is
+sent, it requests the first effort listed in `efforts`, even with
+`requiresEffort: false` (for example, `efforts: [low, medium, high]` sends
+`reasoning_effort: low`), so list efforts lowest-first. Turning reasoning off
+requires a request shape the server treats as off; for example,
+`thinkingFormat: qwen-chat-template` sends
+`chat_template_kwargs: { enable_thinking: false }`.
+
+- `supportsReasoningEffort` — accept `reasoning_effort`. Default: endpoint/model policy; supported dialects can vary within a provider.
 - `supportsReasoningParams` — whether request shaping may send reasoning params at all. Default: auto (off for GitHub Copilot chat-completions).
+- `supportsReasoningSummary` — allow Responses reasoning summaries. Default: endpoint/model policy; set `false` for endpoints that reject `reasoning.summary`.
 - `reasoningEffortMap` — partial map from internal effort levels (`minimal|low|medium|high|xhigh|max`) to provider-specific strings (e.g. Fireworks GLM maps `minimal -> "none"`).
-- `thinkingFormat` — request shape for thinking: `"openai"` (`reasoning_effort`), `"openrouter"` (`reasoning: { effort }`), `"zai"` (`thinking: { type: "enabled" }`), `"qwen"` (top-level `enable_thinking`), or `"qwen-chat-template"` (`chat_template_kwargs.enable_thinking`). Default: `"openai"`.
-- `qwenTemplateReasoningEffort` — route the selected effort onto the Qwen 3.8+ chat template's `reasoning_effort` kwarg (`chat_template_kwargs.reasoning_effort`, plus the top-level field on the `qwen` dialect). Default: auto (on for Qwen 3.8+ ids on local non-Ollama backends). Set `false` for strict servers that reject unknown `chat_template_kwargs`; effort selections are then not sent for the Qwen dialects and the template runs at its own default.
+- `thinkingFormat` — request shape for thinking: `"openai"` (`reasoning_effort`), `"openrouter"` (`reasoning: { effort }`), `"zai"` (`thinking: { type: "enabled" }`), `"qwen"` (top-level `enable_thinking`), or `"qwen-chat-template"` (`chat_template_kwargs.enable_thinking`). Default: endpoint/model policy, normally `"openai"`.
+- `qwenTemplateReasoningEffort` — route the selected effort onto the Qwen 3.8+ chat template's `reasoning_effort` kwarg (`chat_template_kwargs.reasoning_effort`, plus the top-level field on the `qwen` dialect). Default: catalog policy (enabled for Qwen 3.8+ on LM Studio, llama.cpp discovery, and vLLM). Set `false` for strict servers that reject unknown `chat_template_kwargs`; effort selections are then not sent for the Qwen dialects and the template runs at its own default.
 - `reasoningContentField` — assistant field carrying chain-of-thought: `"reasoning_content"`, `"reasoning"`, or `"reasoning_text"`. Default: auto.
-- `requiresReasoningContentForToolCalls` — assistant tool-call turns must round-trip the reasoning field (DeepSeek-R1, Kimi, OpenRouter when reasoning is on). Default: `false`.
-- `allowsSyntheticReasoningContentForToolCalls` — allow a placeholder reasoning field when a prior assistant tool-call turn lacks provider reasoning content. Default: `true`; set `false` for providers that validate the exact reasoning value.
-- `requiresAssistantContentForToolCalls` — assistant tool-call turns must include non-empty text content (Kimi). Default: `false`.
+- `requiresReasoningContentForToolCalls` — assistant tool-call turns must round-trip the reasoning field. Default: endpoint/model policy (including DeepSeek, Kimi, and reasoning-enabled OpenRouter).
+- `allowsSyntheticReasoningContentForToolCalls` — allow a placeholder reasoning field when a prior assistant tool-call turn lacks provider reasoning content. Default: endpoint/model policy; set `false` for providers that validate the exact reasoning value.
+- `requiresAssistantContentForToolCalls` — assistant tool-call turns must include non-empty text content. Default: endpoint/model policy (including Kimi and direct DeepSeek reasoning).
 - `whenThinking` — partial compat overrides applied only when a request actually engages thinking mode (deep-merged over the baseline compat).
 
 Tool / message normalization:
@@ -605,7 +876,7 @@ Tool / message normalization:
 - `requiresThinkingAsText` — convert thinking blocks to text wrapped in `<thinking>` delimiters (Mistral). Default: auto.
 - `requiresMistralToolIds` — normalize tool-call ids to exactly 9 alphanumeric chars. Default: auto.
 - `supportsStrictMode` — accept the per-tool `strict` field on tool schemas. Default: conservative auto-detect per provider/baseUrl.
-- `toolStrictMode` — `"all_strict"` forces strict on every tool, `"none"` forces it off; unset keeps the existing per-tool mixed behavior.
+- `toolStrictMode` — `"all_strict"` forces strict on every tool, `"none"` forces it off; unset uses endpoint/model policy (normally mixed, all-strict on Cerebras hosts).
 
 Gateway routing (only applied when `baseUrl` matches the gateway):
 
@@ -619,19 +890,128 @@ Provider-level `compat` is the baseline; per-model `compat` is deep-merged on to
 
 For `anthropic-messages` models the runtime uses a separate `AnthropicCompat` shape
 (`packages/catalog/src/types.ts`). The `models.yml` schema exposes the strict-tools opt-out as a
-top-level provider field plus `requiresToolResultId`, `replayUnsignedThinking`,
-`supportsEagerToolInputStreaming`, and `allowAnthropicHeaderOverrides` in `compat`. Other
-Anthropic-side knobs are supplied by built-in catalog metadata and are not configurable here.
+top-level provider field; inside `compat` it honors every shared key that also names an
+`AnthropicCompat` field: `supportsContextManagement`, `supportsEagerToolInputStreaming`,
+`supportsForcedToolChoice`, `allowAnthropicHeaderOverrides`, `requiresToolResultId`,
+`replayUnsignedThinking`, `bedrockMessagesApi`, `stripImageInput`, and `streamIdleTimeoutMs`. Other Anthropic-side knobs
+are supplied by built-in catalog metadata and are not configurable here — `applyCompatOverrides`
+drops override keys the resolved shape does not declare.
 
 ### Bedrock compatibility (`bedrock-converse-stream`)
 
 The same `compat` slot accepts `promptCacheMode` (`none`, `automatic`, or `explicit`),
-`supportsLongPromptCacheRetention`, `promptCacheMinimumTokens`, and
-`promptCacheMaximumCheckpoints` for Bedrock models.
+`supportsLongPromptCacheRetention`, `promptCacheMinimumTokens`,
+`promptCacheMaximumCheckpoints`, and `supportsForcedToolChoice` (forced `any`/`tool` choices
+fall back to `auto` when `false`; built in for Claude Opus/Sonnet 5.5) for Bedrock models.
+
+By default `bedrock-converse-stream` requests go to `bedrock-runtime.{region}.amazonaws.com`.
+An explicit per-request region or a model ARN's region wins. Otherwise an ambient region from
+`AWS_REGION`/`AWS_DEFAULT_REGION`/the AWS profile is used when compatible with the inference
+profile's geo prefix; a compatible guardrail ARN region or the geo's default region is the
+fallback. Models without a recognized geo prefix use the ambient region, then the guardrail ARN
+region, then `us-east-1`. Set `baseUrl` on `providers.amazon-bedrock` (or on a custom provider using
+`api: bedrock-converse-stream`) to send requests somewhere else instead — a VPC/PrivateLink
+endpoint, a FIPS host, or a gateway. Any path or query string on the `baseUrl` is kept — the path
+as a prefix, the query appended to the final URL (and included in SigV4's canonical request when
+signing) — so `{baseUrl}/model/{id}/converse-stream[?query]` is the final URL. That covers gateways
+that authenticate via a query parameter instead of a header:
+
+```yaml
+providers:
+  amazon-bedrock:
+    baseUrl: https://vpce-0123456789abcdef0.bedrock-runtime.us-east-1.vpce.amazonaws.com
+```
+
+One host shape is not taken literally: a `baseUrl` of exactly
+`bedrock-runtime.{region}.amazonaws.com` is AWS's own endpoint, and its region segment is replaced
+with the resolved region — signing has to match the region it sends to, and every bundled Bedrock
+model already carries such a `baseUrl`. Use a distinct host (VPC endpoint, `-fips`, gateway) to
+pin an origin exactly.
+
+Region resolution itself is unaffected by `baseUrl`, because SigV4 still signs with a real AWS
+region — set `AWS_REGION` or use a region-scoped model id/ARN if the endpoint expects a specific
+one. A gateway that accepts a bearer token instead of SigV4 needs no AWS signing credentials: set the
+provider's `apiKey` (or `AWS_BEARER_TOKEN_BEDROCK`) and signing is skipped. Region resolution still
+controls AWS's default host.
+
+### Claude on Bedrock's Anthropic Messages API (`/anthropic`)
+
+Amazon Bedrock also serves Claude through the Anthropic Messages API, under `/anthropic` on both of
+its endpoints. AWS recommends `bedrock-runtime` for new applications
+([Inference using Anthropic Messages API](https://docs.aws.amazon.com/bedrock/latest/userguide/inference-messages-api.html)).
+Claude Opus 4.7 and later are served here; Opus 4.6 and earlier stay on Converse
+([Claude in Amazon Bedrock](https://platform.claude.com/docs/en/build-with-claude/claude-in-amazon-bedrock)).
+
+| Route | Base URL | Provider | Model id |
+| --- | --- | --- | --- |
+| bedrock-runtime | `https://bedrock-runtime.<region>.amazonaws.com/anthropic` | `amazon-bedrock` | inference profile, e.g. `us.anthropic.claude-opus-5-5` |
+| bedrock-mantle | `https://bedrock-mantle.<region>.api.aws/anthropic` | `bedrock-mantle` | `anthropic.claude-opus-5-5` |
+
+The FIPS host (`bedrock-runtime-fips.<region>.amazonaws.com`) and AWS PrivateLink endpoint-specific
+hosts (`<vpce-id>[-<az>].bedrock-runtime.<region>.vpce.amazonaws.com`, likewise for
+`bedrock-runtime-fips` and `bedrock-mantle`) are recognized as the same routes. A VPC endpoint with
+private DNS enabled needs no change: it answers on the public hostnames
+([Bedrock VPC endpoints](https://docs.aws.amazon.com/bedrock/latest/userguide/vpc-interface-endpoints.html)).
+
+Define the model under the provider shown in the table, with `api: anthropic-messages`. Those two
+provider ids carry the catalog rule that enables Claude's on-demand compaction
+([Compaction](./compaction.md)). Set `auth: apiKey` so OMP sends plain API-key requests; without
+it, custom `anthropic-messages` models get Claude Code request shaping. The examples authenticate
+with an [Amazon Bedrock API key](https://docs.aws.amazon.com/bedrock/latest/userguide/api-keys.html);
+OMP does not sign runtime-route requests with SigV4. Write the region into the runtime URL. Mantle
+URLs may keep `{region}`, which OMP fills in from your AWS region settings.
+
+```yaml
+providers:
+  amazon-bedrock:
+    baseUrl: https://bedrock-runtime.us-east-1.amazonaws.com
+    apiKey: AWS_BEARER_TOKEN_BEDROCK
+    auth: apiKey
+    models:
+      - id: us.anthropic.claude-opus-5-5
+        api: anthropic-messages
+        baseUrl: https://bedrock-runtime.us-east-1.amazonaws.com/anthropic
+        reasoning: true
+        input: [text, image]
+  bedrock-mantle:
+    baseUrl: https://bedrock-mantle.{region}.api.aws/openai/v1
+    apiKey: AWS_BEARER_TOKEN_BEDROCK
+    auth: apiKey
+    models:
+      - id: anthropic.claude-opus-5-5
+        api: anthropic-messages
+        baseUrl: https://bedrock-mantle.{region}.api.aws/anthropic
+        reasoning: true
+        input: [text, image]
+```
+
+Requests on these routes are shaped by `compat.bedrockMessagesApi`, which OMP detects from a Bedrock
+`/anthropic` `baseUrl` under any provider id. Both routes reject the tool `strict` field, so OMP drops
+it. OMP also fits `metadata.user_id` to
+Bedrock's [request-metadata pattern](https://docs.aws.amazon.com/bedrock/latest/APIReference/API_runtime_Converse.html),
+which the runtime route enforces: a value that fits is kept, otherwise its session id is sent,
+otherwise it is left out. Both run after any `onPayload` hook. Both routes verify thinking
+signatures, so by default OMP does not replay unsigned thinking to them.
+
+The URL check cannot see a Bedrock route behind a proxy or an `ANTHROPIC_BASE_URL` reroute of the
+first-party `anthropic` provider; those keep plain Anthropic requests unless you opt in. Set the flag
+in `compat` (provider-wide or under `modelOverrides`) to opt in, or to `false` to opt a Bedrock URL
+out:
+
+```yaml
+providers:
+  anthropic:
+    compat:
+      bedrockMessagesApi: true # ANTHROPIC_BASE_URL points at bedrock-runtime /anthropic
+```
+
+On-demand compaction still needs a model line the catalog grants it to (`amazon-bedrock`,
+`bedrock-mantle`, `anthropic`, or `google-vertex` provider ids); an arbitrary proxy provider id does
+not acquire that capability just from `bedrockMessagesApi`.
 
 ### Strict tool schemas (`disableStrictTools`)
 
-Anthropic's API supports a `strict` field on tool definitions that forces the model to always follow the provided schema exactly. OMP enables it by default for a small allowlist of high-frequency built-in `anthropic-messages` tools (`bash`, `python`, `edit`, and `find`) whose schemas fit Anthropic's strict grammar limits; other tools still send normalized schemas but omit `strict`.
+Anthropic's API supports a `strict` field on tool definitions that forces the model to always follow the provided schema exactly. OMP enables it by default for a small allowlist of high-frequency built-in `anthropic-messages` tools (`python`, `edit`, and `find`) whose schemas fit Anthropic's strict grammar limits; other tools still send normalized schemas but omit `strict`. `bash` is left out: strict decoding fixes property order, so once a call has written `async`, the `timeout` declared before it can no longer be emitted.
 
 Third-party providers that front the Anthropic API (AWS Bedrock, Azure, self-hosted proxies) do not always implement this field and will reject requests that include it. Set `disableStrictTools: true` at the provider level to opt out of strict mode for the allowlisted tools:
 
@@ -727,6 +1107,7 @@ providers:
     baseUrl: https://proxy.example.com/anthropic
     apiKey: ANTHROPIC_PROXY_API_KEY
     api: anthropic-messages
+    auth: apiKey
     authHeader: true
     disableStrictTools: true # if the proxy doesn't support strict tool schemas
     models:
@@ -754,7 +1135,9 @@ providers:
 
 ## Legacy consumer caveat
 
-Most model configuration now flows through `models.yml` / `models.yaml` via `ModelRegistry`. Explicit `.json` / `.jsonc` paths remain supported only when passed programmatically to `ModelRegistry`; the default user config prefers `~/.omp/agent/models.yml`, then falls back to `~/.omp/agent/models.yaml`.
+Most model configuration now flows through `models.yml` / `models.yaml` via `ModelRegistry`.
+Explicit `.json` / `.jsonc` paths remain supported when passed programmatically; the active agent
+directory's `models.yml` takes precedence over `models.yaml`.
 
 ## Failure mode
 

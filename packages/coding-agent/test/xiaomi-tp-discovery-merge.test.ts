@@ -4,7 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { Model } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
-import { invalidateCommandConfig } from "@oh-my-pi/pi-coding-agent/config/model-config-values";
+import { invalidateCommandConfig } from "@oh-my-pi/pi-coding-agent/config/resolve-config-value";
 import { mergeDiscoveredModel } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 
 /**
@@ -48,7 +48,7 @@ describe("mergeDiscoveredModel", () => {
 		expect(merged.baseUrl).toBe(STANDARD);
 	});
 
-	test("merges headers: existing first, discovered overrides per-key", () => {
+	test("merges headers: existing first, discovered overrides per-key", async () => {
 		const discovered: Model<"openai-completions"> = {
 			...bundled(TOKEN_PLAN),
 			headers: { "x-tp": "1", "x-shared": "discovered" },
@@ -58,7 +58,7 @@ describe("mergeDiscoveredModel", () => {
 			headers: { "x-bundled": "1", "x-shared": "existing" },
 		};
 		const merged = mergeDiscoveredModel(discovered, existing);
-		expect(merged.headers).toEqual({
+		expect(await merged.resolveHeaders?.()).toEqual({
 			"x-bundled": "1",
 			"x-shared": "discovered",
 			"x-tp": "1",
@@ -78,7 +78,7 @@ describe("mergeDiscoveredModel", () => {
 		expect(merged.baseUrl).toBe("https://my-proxy.example.com/v1");
 	});
 
-	test("preserves provider override transport on rediscovery (#2555 openrouter gateway regression)", () => {
+	test("preserves provider override transport on rediscovery (#2555 openrouter gateway regression)", async () => {
 		// Bundled openrouter entry carries transport=pi-native after
 		// applying providerOverride at boot (#loadBuiltInModels). Discovery
 		// refetched the same model from /v1/models — provider catalogs
@@ -97,7 +97,7 @@ describe("mergeDiscoveredModel", () => {
 		});
 		expect(merged.transport).toBe("pi-native");
 		expect(merged.baseUrl).toBe("http://localhost:4000");
-		expect(merged.headers).toEqual({ Authorization: "Bearer gateway-token" });
+		expect(await merged.resolveHeaders?.()).toEqual({ Authorization: "Bearer gateway-token" });
 	});
 
 	test("provider override path (no bundled entry): transport flows through", () => {
@@ -115,24 +115,24 @@ describe("mergeDiscoveredModel", () => {
 		expect(merged).toEqual(discovered);
 	});
 
-	test("resolves provider-override `!command` headers on the inference path (#10457)", () => {
+	test("resolves provider-override `!command` headers on the inference path (#10457)", async () => {
 		const discovered = bundled(STANDARD);
 		const merged = mergeDiscoveredModel(discovered, undefined, {
 			headers: { "X-Project-Id": "!echo resolved-value" },
 		});
 		// Discovery providers previously carried the raw `!command` literal into
 		// the model's headers, leaking it verbatim to the upstream server.
-		expect(merged.headers?.["X-Project-Id"]).toBe("resolved-value");
+		expect((await merged.resolveHeaders?.())?.["X-Project-Id"]).toBe("resolved-value");
 	});
 
-	test("resolves `!command` headers merged from a bundled entry (#10457)", () => {
+	test("resolves `!command` headers merged from a bundled entry (#10457)", async () => {
 		const discovered = bundled(STANDARD);
 		const existing: Model<"openai-completions"> = {
 			...bundled(STANDARD),
 			headers: { "X-Project-Id": "!echo resolved-value" },
 		};
 		const merged = mergeDiscoveredModel(discovered, existing);
-		expect(merged.headers?.["X-Project-Id"]).toBe("resolved-value");
+		expect((await merged.resolveHeaders?.())?.["X-Project-Id"]).toBe("resolved-value");
 	});
 
 	test("raw provider `!command` headers win over the discovery snapshot and re-resolve on rotation (#10458)", async () => {
@@ -158,11 +158,11 @@ describe("mergeDiscoveredModel", () => {
 			};
 			const merged = mergeDiscoveredModel(discovered, existing, { headers: { "X-Token": command } });
 			// Raw provider header wins over the discovery snapshot...
-			expect(merged.headers?.["X-Token"]).toBe("token-A");
+			expect((await merged.resolveHeaders?.())?.["X-Token"]).toBe("token-A");
 			// ...and a 401 auth-retry rotation (cache invalidation) reaches it.
 			await Bun.write(tokenFile, "token-B");
 			invalidateCommandConfig(command);
-			expect(merged.headers?.["X-Token"]).toBe("token-B");
+			expect((await merged.resolveHeaders?.())?.["X-Token"]).toBe("token-B");
 		} finally {
 			invalidateCommandConfig(command);
 			await fs.rm(tokenFile, { force: true });
@@ -185,11 +185,11 @@ describe("mergeDiscoveredModel", () => {
 			};
 			const merged = mergeDiscoveredModel(discovered, undefined, { authHeader: true, apiKey });
 			// Live apiKey wins over the discovery-time baked bearer...
-			expect(merged.headers?.Authorization).toBe("Bearer token-A");
+			expect((await merged.resolveHeaders?.())?.Authorization).toBe("Bearer token-A");
 			// ...and a 401 force-refresh (command-cache invalidation) reaches it.
 			await Bun.write(tokenFile, "token-B");
 			invalidateCommandConfig(apiKey);
-			expect(merged.headers?.Authorization).toBe("Bearer token-B");
+			expect((await merged.resolveHeaders?.())?.Authorization).toBe("Bearer token-B");
 		} finally {
 			invalidateCommandConfig(apiKey);
 			await fs.rm(tokenFile, { force: true });

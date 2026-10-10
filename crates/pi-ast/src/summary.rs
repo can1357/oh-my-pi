@@ -449,7 +449,8 @@ fn is_elidable_kind(language: SupportLang, kind: &str) -> bool {
 			kind,
 			"block"
 				| "dictionary"
-				| "list" | "set"
+				| "list"
+				| "set"
 				| "string"
 				| "tuple"
 				| "argument_list"
@@ -539,8 +540,10 @@ fn is_elidable_kind(language: SupportLang, kind: &str) -> bool {
 				| "method"
 				| "do_block"
 				| "array"
-				| "hash" | "block"
-				| "case" | "heredoc_body"
+				| "hash"
+				| "block"
+				| "case"
+				| "heredoc_body"
 		),
 		SupportLang::Php => matches!(
 			kind,
@@ -625,9 +628,12 @@ fn is_elidable_kind(language: SupportLang, kind: &str) -> bool {
 				| "class"
 				| "instance"
 				| "function"
-				| "do" | "case"
-				| "let" | "local_binds"
-				| "list" | "tuple"
+				| "do"
+				| "case"
+				| "let"
+				| "local_binds"
+				| "list"
+				| "tuple"
 		),
 		SupportLang::Ocaml => matches!(
 			kind,
@@ -649,7 +655,8 @@ fn is_elidable_kind(language: SupportLang, kind: &str) -> bool {
 				| "if_expr"
 				| "receive_expr"
 				| "record_decl"
-				| "list" | "map_expr"
+				| "list"
+				| "map_expr"
 				| "tuple"
 		),
 		SupportLang::EmacsLisp => matches!(
@@ -657,7 +664,8 @@ fn is_elidable_kind(language: SupportLang, kind: &str) -> bool {
 			"function_definition"
 				| "macro_definition"
 				| "special_form"
-				| "list" | "vector"
+				| "list"
+				| "vector"
 				| "hash_table"
 				| "bytecode"
 				| "string_text_properties"
@@ -985,6 +993,19 @@ mod tests {
 		assert!(result.parsed);
 		assert_eq!(result.language.as_deref(), Some("fortran"));
 		assert!(!result.segments.is_empty());
+	}
+
+	#[test]
+	fn parses_go_new_with_expression_operand() {
+		// Go 1.26 `new(expr)` must parse alongside the classic `new(T)` form.
+		let result = summarize(
+			"package p\n\nfunc f() {\n\tframe.Due = new(work.Due.Add(delay))\n\tx := new(g(1))\n\ty \
+			 := new(T)\n\t_, _ = x, y\n}\n",
+			"fixture.go",
+		);
+
+		assert!(result.parsed);
+		assert_eq!(result.language.as_deref(), Some("go"));
 	}
 
 	#[test]
@@ -1364,8 +1385,8 @@ mod tests {
 			kept_text.contains("<section class=\"sec5\">"),
 			"all sibling sections should surface"
 		);
-		// The <style> raw text stays folded as one elided span — no CSS interior leaks
-		// into kept content.
+		// The <style> raw text stays folded as one elided span — no CSS interior
+		// leaks into kept content.
 		assert!(!kept_text.contains(".rule0 {"), "oversized style body must stay folded");
 	}
 }

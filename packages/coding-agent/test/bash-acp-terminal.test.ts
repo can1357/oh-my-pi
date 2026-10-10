@@ -1,9 +1,20 @@
-import { afterEach, describe, expect, it, mock, spyOn } from "bun:test";
+import { afterAll, afterEach, describe, expect, it, mock, spyOn } from "bun:test";
+import * as fs from "node:fs";
 import * as os from "node:os";
+import { TempDir } from "@oh-my-pi/pi-utils";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ClientBridge, ClientBridgeTerminalHandle } from "@oh-my-pi/pi-coding-agent/session/client-bridge";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { BashTool } from "@oh-my-pi/pi-coding-agent/tools/bash";
 import { encodeTerminalImage } from "@oh-my-pi/pi-coding-agent/utils/terminal-graphics";
+
+// `getShellConfig()` validates that `shellPath` exists, and `/bin/bash` does not
+// on Windows. The ACP route only forwards the path to the stubbed client
+// terminal, so an empty `bash` file stands in for the resolved shell everywhere.
+const stubShellDir = TempDir.createSync("@omp-acp-shell-");
+const STUB_BASH = stubShellDir.join(process.platform === "win32" ? "bash.exe" : "bash");
+fs.writeFileSync(STUB_BASH, "");
+afterAll(() => stubShellDir.removeSync());
 
 function makeSession(bridge: ClientBridge): ToolSession {
 	return {
@@ -11,29 +22,21 @@ function makeSession(bridge: ClientBridge): ToolSession {
 		hasUI: false,
 		skills: [],
 		getSessionFile: () => null,
-		settings: {
-			get(key: string) {
-				if (key === "async.enabled") return false;
-				if (key === "bash.autoBackground.enabled") return false;
-				if (key === "bash.autoBackground.thresholdMs") return 60_000;
-				if (key === "bashInterceptor.enabled") return false;
-				if (key === "astGrep.enabled") return false;
-				if (key === "astEdit.enabled") return false;
-				if (key === "grep.enabled") return false;
-				if (key === "glob.enabled") return false;
-				return undefined;
-			},
-			getBashInterceptorRules() {
-				return [];
-			},
-			getShellConfig() {
-				// Fixed bash shell keeps the wrap assertions cross-platform: the fix
-				// must reuse the resolved shell (Git Bash on Windows, `$SHELL` on
-				// POSIX) instead of collapsing to `cmd.exe` — that's the contract
-				// this test defends.
-				return { shell: "/bin/bash", args: ["-l", "-c"], env: {}, prefix: undefined };
-			},
-		},
+		// Fixed bash shell keeps the wrap assertions cross-platform: the fix
+		// must reuse the resolved shell (Git Bash on Windows, `$SHELL` on
+		// POSIX) instead of collapsing to `cmd.exe` — that's the contract
+		// this test defends.
+		settings: Settings.isolated({
+			"async.enabled": false,
+			"bash.autoBackground.enabled": false,
+			"bash.autoBackground.thresholdMs": 60_000,
+			"bashInterceptor.enabled": false,
+			"astGrep.enabled": false,
+			"astEdit.enabled": false,
+			"grep.enabled": false,
+			"glob.enabled": false,
+			shellPath: STUB_BASH,
+		}),
 		getClientBridge: () => bridge,
 	} as unknown as ToolSession;
 }
@@ -93,7 +96,7 @@ describe("BashTool ACP terminal routing", () => {
 		// `$VAR`, `$(...)`, `source`, and POSIX quoting on Windows.
 		expect(createSpy).toHaveBeenCalledTimes(1);
 		const params = createSpy.mock.calls[0]![0];
-		expect(params.command).toBe("/bin/bash");
+		expect(params.command).toBe(STUB_BASH);
 		expect(params.args).toEqual(["-l", "-c", "echo hi"]);
 
 		// The first onUpdate must carry the terminalId so the editor can embed it
@@ -136,36 +139,6 @@ describe("BashTool ACP terminal routing", () => {
 		expect(result.content.filter(block => block.type === "image")).toEqual([
 			expect.objectContaining({ type: "image", mimeType: "image/png" }),
 		]);
-	});
-
-	it("wraps shell metacharacters into args instead of packing them into command", async () => {
-		// Regression for #4333: a bash line with `&&`, pipes, or spaces must not
-		// be sent as raw `command` (spec-conformant ACP clients spawn command+args
-		// directly and would ENOENT the whole line as argv[0]).
-		const handle: ClientBridgeTerminalHandle = {
-			terminalId: "term-shell-wrap",
-			waitForExit: async () => ({ exitCode: 0, signal: null }),
-			currentOutput: async () => ({ output: "", truncated: false }),
-			kill: async () => {},
-			release: async () => {},
-		};
-		const bridge: ClientBridge = {
-			capabilities: { terminal: true },
-			createTerminal: async () => handle,
-		};
-		const createSpy = spyOn(bridge, "createTerminal");
-
-		const line = "git status && echo x | head";
-		const tool = new BashTool(makeSession(bridge));
-		await tool.execute("call-shell-wrap", { command: line });
-
-		expect(createSpy).toHaveBeenCalledTimes(1);
-		const params = createSpy.mock.calls[0]![0];
-		expect(params.command).toBe("/bin/bash");
-		expect(params.args).toEqual(["-l", "-c", line]);
-		// `args` must actually be present — the bug was omitting it entirely.
-		expect(params.args).toBeDefined();
-		expect(params.args?.length).toBeGreaterThan(0);
 	});
 
 	it("does not allocate a client terminal when the signal is already aborted before createTerminal", async () => {

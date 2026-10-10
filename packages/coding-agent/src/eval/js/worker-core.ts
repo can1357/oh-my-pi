@@ -1,4 +1,4 @@
-import { ToolError } from "../../tools/tool-errors";
+import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { JsRuntime, type RuntimeCallIdentity, type RuntimeHooks, shadowSnapshotDigest } from "./shared/runtime";
 import type {
 	RunErrorPayload,
@@ -53,7 +53,7 @@ export type WorkerCoreOptions =
 			 * `process.cwd()`, relative paths, or child processes without an explicit
 			 * `cwd` resolves against the project. Only the dedicated subprocess may
 			 * pass this: `process.chdir` is unavailable in Worker threads and would
-			 * mutate the host's own cwd on the inline fallback.
+			 * mutate the host's own cwd in a same-realm test harness.
 			 */
 			chdir?: (cwd: string) => void;
 			/** Share the subprocess host's fatal-rejection guard when one is installed. */
@@ -132,8 +132,8 @@ export class WorkerCore {
 	 * Capture unhandled rejections floated by eval-cell code (unawaited async
 	 * calls) so they fail the owning run instead of tearing down the worker or —
 	 * via the global postmortem handler — the whole session. On the main thread
-	 * (inline fallback) only cell-attributable rejections are consumed; in the
-	 * dedicated worker realm a rejection during a live run is cell activity even
+	 * (same-realm unit harness) only cell-attributable rejections are consumed;
+	 * in the dedicated worker realm a rejection during a live run is cell activity even
 	 * without a usable stack, while anything else keeps its default fatality.
 	 */
 	#installRejectionGuard(): () => void {
@@ -227,7 +227,7 @@ export class WorkerCore {
 					this.#ensureRuntime(msg.snapshot);
 					this.#transport.send({ type: "ready" });
 				} catch (error) {
-					// Inline fallback delivers messages on a microtask. A sync throw
+					// Same-realm harnesses deliver messages on a microtask. A sync throw
 					// from ensureRuntime/setCwd would otherwise become a process-fatal
 					// unhandledRejection on the main thread.
 					this.#transport.send({ type: "init-failed", error: errorPayload(error) });
@@ -304,12 +304,14 @@ export class WorkerCore {
 		this.#syncProcessCwd(snapshot.cwd, currentRunId);
 		if (this.#runtime) {
 			this.#runtime.setCwd(snapshot.cwd);
+			this.#runtime.setPackageRoot(snapshot.packageRoot);
 			return this.#runtime;
 		}
 		this.#runtime = new JsRuntime({
 			initialCwd: snapshot.cwd,
 			sessionId: snapshot.sessionId,
 			localRoots: snapshot.localRoots,
+			packageRoot: snapshot.packageRoot,
 		});
 		return this.#runtime;
 	}

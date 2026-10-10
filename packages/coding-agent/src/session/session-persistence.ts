@@ -1,4 +1,5 @@
 import { isAnthropicServerToolHistoryBlock } from "@oh-my-pi/pi-ai/providers/anthropic-wire";
+import { countNewlines, isRecord } from "@oh-my-pi/pi-utils";
 import {
 	type BlobStore,
 	externalizeImageDataSync,
@@ -66,9 +67,8 @@ export function isImageDataPayload(value: unknown): value is { data: string; mim
  * True when an image payload sits in a persistence position whose base64 is
  * externalized to the blob store instead of truncated as a generic string: a
  * `content` image block, an `images[]` entry, or a snapcompact frame under
- * `frames[]`. Shared by the persist path ({@link shouldExternalizeImagePayload})
- * and the load path (`resolvePersistedBlobRefs`) so the two never drift and
- * strand a payload externalized on write but not resolved on read.
+ * `frames[]`. The eager load path uses the same position check but deliberately
+ * leaves snapcompact frames as references for lazy context rebuilding.
  */
 export function isExternalizableImagePosition(
 	value: unknown,
@@ -90,6 +90,50 @@ function shouldExternalizeImagePayload(
 /** True for a non-empty string — marks signature/encrypted fields whose block must persist verbatim. */
 function isNonEmptyString(value: unknown): value is string {
 	return typeof value === "string" && value.length > 0;
+}
+
+interface ExternalizedImage {
+	readonly data: string;
+	readonly mimeType: string | undefined;
+	readonly ref: string;
+}
+
+/**
+ * Blob refs already minted for live image payload objects, per blob store.
+ * The persisted copy of an entry is structurally shared while the in-memory
+ * entry keeps its base64, so without this every full rewrite would decode,
+ * hash, and stat every image in the session again. A hit requires the
+ * payload's current data and mime type, so a payload mutated in place is
+ * externalized afresh; keying by store keeps a ref minted into one blob dir
+ * from being reused for another.
+ */
+const externalizedImageRefs = new WeakMap<BlobStore, WeakMap<object, ExternalizedImage>>();
+
+function externalizeImagePayloadSync(
+	blobStore: BlobStore,
+	payload: object,
+	data: string,
+	mimeType: string | undefined,
+): string {
+	let refs = externalizedImageRefs.get(blobStore);
+	const cached = refs?.get(payload);
+	if (cached && cached.data === data && cached.mimeType === mimeType) return cached.ref;
+	const ref = externalizeImageDataSync(blobStore, data, mimeType);
+	if (!refs) {
+		refs = new WeakMap();
+		externalizedImageRefs.set(blobStore, refs);
+	}
+	refs.set(payload, { data, mimeType, ref });
+	return ref;
+}
+
+/**
+ * Drop every image ref remembered for `blobStore`, so the next persist checks
+ * each blob on disk again. Call when a session write failed: a ref whose line
+ * never reached a session file is unreferenced, so `omp gc` may collect its blob.
+ */
+export function forgetExternalizedImages(blobStore: BlobStore): void {
+	externalizedImageRefs.delete(blobStore);
 }
 
 /**
@@ -116,10 +160,10 @@ function truncateForPersistence(obj: unknown, blobStore: BlobStore, key?: string
 		!isBlobRef(obj.result) &&
 		obj.result.length >= BLOB_EXTERNALIZE_THRESHOLD
 	) {
-		return { ...obj, result: externalizeImageDataSync(blobStore, obj.result) };
+		return { ...obj, result: externalizeImagePayloadSync(blobStore, obj, obj.result, undefined) };
 	}
 	if (shouldExternalizeImagePayload(obj, key)) {
-		return { ...obj, data: externalizeImageDataSync(blobStore, obj.data, obj.mimeType) };
+		return { ...obj, data: externalizeImagePayloadSync(blobStore, obj, obj.data, obj.mimeType) };
 	}
 	// Signed content is bound to its exact bytes: a truncated `thinking`/`text`/
 	// `arguments` no longer matches its signature and a truncated
@@ -200,9 +244,16 @@ function truncateForPersistence(obj: unknown, blobStore: BlobStore, key?: string
 	}
 
 	if (typeof obj === "object") {
+		// Two-phase: first a no-allocation scan for the only things that can
+		// change (jsonlEvents presence, oversized/image/signature strings).
+		// The common persisted entry is already clean and returns here with
+		// zero array/tuple allocation; only a dirty node pays for the rebuild.
+		if (!persistenceNodeNeedsRewrite(obj)) return obj;
 		let changed = false;
 		const entries: Array<readonly [string, unknown]> = [];
-		for (const [childKey, value] of Object.entries(obj)) {
+		for (const childKey in obj) {
+			if (!Object.hasOwn(obj, childKey)) continue;
+			const value = (obj as Record<string, unknown>)[childKey];
 			// Strip transient/redundant properties that shouldn't be persisted.
 			// - jsonlEvents: raw subprocess streaming events (already saved to artifact files)
 			if (childKey === "jsonlEvents") {
@@ -223,9 +274,10 @@ function truncateForPersistence(obj: unknown, blobStore: BlobStore, key?: string
 			lineCountEntry &&
 			typeof lineCountEntry[1] === "number"
 		) {
-			const content = contentEntry[1];
+			// Same count as `content.split("\n").length` without the array.
+			const lineCount = countNewlines(contentEntry[1]) + 1;
 			const updatedEntries = entries.map(([childKey, value]) =>
-				childKey === "lineCount" ? ([childKey, content.split("\n").length] as const) : ([childKey, value] as const),
+				childKey === "lineCount" ? ([childKey, lineCount] as const) : ([childKey, value] as const),
 			);
 			return Object.fromEntries(updatedEntries);
 		}
@@ -233,6 +285,120 @@ function truncateForPersistence(obj: unknown, blobStore: BlobStore, key?: string
 	}
 
 	return obj;
+}
+
+/**
+ * Whether this node can possibly change under `truncateForPersistence`:
+ * carries `jsonlEvents`, an oversized or image-position string, or (for
+ * objects) any child that can. Mirrors the change conditions of the rebuild
+ * pass exactly — a false negative silently keeps oversized content, so when
+ * in doubt this must return true.
+ */
+function persistenceNodeNeedsRewrite(obj: unknown, key?: string): boolean {
+	if (obj === null || obj === undefined) return false;
+	if (typeof obj === "string") {
+		if (
+			obj.length > MAX_PERSIST_CHARS &&
+			key !== "thinkingSignature" &&
+			key !== "thoughtSignature" &&
+			key !== "textSignature"
+		)
+			return true;
+		if (key === "image_url" && isImageDataUrl(obj)) return true;
+		return false;
+	}
+	if (Array.isArray(obj)) {
+		for (const item of obj) {
+			if (
+				item !== null && typeof item === "object"
+					? persistenceNodeNeedsRewrite(item, key)
+					: persistenceNodeNeedsRewrite(item, key)
+			)
+				return true;
+		}
+		return false;
+	}
+	if (typeof obj === "object") {
+		if ("jsonlEvents" in obj) return true;
+		// Externalize shapes rewrite (not verbatim): check before the
+		// atomic/verbatim classification below.
+		if (typeof obj === "object" && "type" in obj) {
+			const typed = obj as Record<string, unknown>;
+			if (
+				typed.type === "image_generation_call" &&
+				"result" in typed &&
+				typeof typed.result === "string" &&
+				!isBlobRef(typed.result) &&
+				typed.result.length >= BLOB_EXTERNALIZE_THRESHOLD
+			) {
+				return true;
+			}
+		}
+		if (shouldExternalizeImagePayload(obj, key)) return true;
+		if (isAtomicPersistenceNode(obj, key)) return false;
+		for (const childKey in obj) {
+			if (!Object.hasOwn(obj, childKey)) continue;
+			if (persistenceNodeNeedsRewrite((obj as Record<string, unknown>)[childKey], childKey)) return true;
+		}
+		return false;
+	}
+	return false;
+}
+
+/**
+ * True for nodes `truncateForPersistence` returns verbatim without
+ * descending: image-generation results, externalizable image payloads,
+ * anthropic server-tool/compaction carriers, and signed/encrypted blocks.
+ * Must stay in sync with the early-return guards above the recursion.
+ */
+function isAtomicPersistenceNode(obj: object, key?: string): boolean {
+	// NOTE: image_generation_call results and externalizable image payloads
+	// are NOT atomic — truncateForPersistence rewrites them via the blob
+	// store. They are checked explicitly in the predicate and must never be
+	// classified here.
+	if (typeof obj === "object" && "type" in obj) {
+		const typed = obj as Record<string, unknown>;
+		// Mirror the truncate guard exactly: only a block that passes
+		// isAnthropicServerToolHistoryBlock is atomic. An interrupted,
+		// corrupt, or forward-version block that FAILS validation falls
+		// through here (and in the main function) into the generic
+		// recursion, so oversized strings and jsonlEvents inside it are
+		// still truncated/stripped instead of bypassing size controls.
+		if (typed.type === "anthropicServerTool" && "block" in typed) {
+			const block = typed.block;
+			if (
+				typeof block === "object" &&
+				block !== null &&
+				"type" in block &&
+				typeof (block as { type?: unknown }).type === "string"
+			) {
+				const asBlock = block as Record<string, unknown>;
+				const validationView = {
+					type: asBlock.type as string,
+					...("name" in asBlock ? { name: asBlock.name } : {}),
+					...("id" in asBlock ? { id: asBlock.id } : {}),
+					...("tool_use_id" in asBlock ? { tool_use_id: asBlock.tool_use_id } : {}),
+					...("content" in asBlock ? { content: asBlock.content } : {}),
+				};
+				if (isAnthropicServerToolHistoryBlock(validationView)) return true;
+			}
+			return false;
+		}
+		if (
+			typed.type === "anthropicCompaction" ||
+			(key === "anthropicCompaction" && "content" in typed && typeof typed.content === "string")
+		)
+			return true;
+		const signed =
+			(typed.type === "thinking" && "thinkingSignature" in typed && isNonEmptyString(typed.thinkingSignature)) ||
+			(typed.type === "text" && "textSignature" in typed && isNonEmptyString(typed.textSignature)) ||
+			(typed.type === "toolCall" && "thoughtSignature" in typed && isNonEmptyString(typed.thoughtSignature));
+		const redacted = typed.type === "redactedThinking" && "data" in typed && isNonEmptyString(typed.data);
+		const encryptedReasoning =
+			typed.type === "reasoning" && "encrypted_content" in typed && isNonEmptyString(typed.encrypted_content);
+		if (signed || redacted || encryptedReasoning) return true;
+	}
+	return false;
 }
 
 /**
@@ -329,6 +495,32 @@ function stripReplayedReasoningSignatures(entry: FileEntry): FileEntry {
 	return { ...entry, message: { ...message, content } };
 }
 
+/**
+ * Spilled MCP text already includes the rendered structured payload in its
+ * artifact. Keep the live object for eval, but omit the duplicate from the
+ * serialized top-level tool result. Never mutate the in-memory message.
+ */
+function stripSpilledMcpStructuredContent(entry: FileEntry): FileEntry {
+	if (entry.type !== "message" || entry.message.role !== "toolResult") return entry;
+	const details = entry.message.details;
+	if (
+		!isRecord(details) ||
+		typeof details.serverName !== "string" ||
+		typeof details.mcpToolName !== "string" ||
+		!Object.hasOwn(details, "structuredContent") ||
+		!isRecord(details.meta) ||
+		!isRecord(details.meta.truncation) ||
+		typeof details.meta.truncation.artifactId !== "string" ||
+		details.meta.truncation.artifactId.length === 0
+	) {
+		return entry;
+	}
+	const persistedDetails = { ...details };
+	delete persistedDetails.structuredContent;
+	return { ...entry, message: { ...entry.message, details: persistedDetails } };
+}
+
 export function prepareEntryForPersistence(entry: FileEntry, blobStore: BlobStore): FileEntry {
-	return truncateForPersistence(stripReplayedReasoningSignatures(entry), blobStore) as FileEntry;
+	const projected = stripSpilledMcpStructuredContent(stripReplayedReasoningSignatures(entry));
+	return truncateForPersistence(projected, blobStore) as FileEntry;
 }

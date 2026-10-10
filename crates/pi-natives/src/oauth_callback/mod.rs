@@ -7,6 +7,10 @@ mod darwin;
 mod linux;
 #[cfg(target_os = "windows")]
 mod windows;
+// The relay binary owns publication; tests reuse it to publish callbacks the
+// way the relay does.
+#[cfg(test)]
+mod publication;
 #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
 mod unsupported {
 	use anyhow::bail;
@@ -30,6 +34,8 @@ mod unsupported {
 	}
 }
 
+#[cfg(target_os = "linux")]
+use std::sync::LazyLock;
 use std::{
 	collections::BTreeMap,
 	fs::{self, File},
@@ -47,6 +53,7 @@ use darwin as platform;
 use linux as platform;
 use napi::{Env, Error, Result, bindgen_prelude::PromiseRaw};
 use napi_derive::napi;
+use notify::{RecursiveMode, Watcher as _};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 #[cfg(test)]
@@ -64,10 +71,26 @@ use crate::{
 	task::{self, AbortReason, AbortToken, CancelToken},
 };
 
+/// Whether the host kernel is WSL, read once from `/proc/sys/kernel/osrelease`.
+///
+/// A host probe the hermetic unit tests cannot control, so it is pinned to
+/// `false` under `#[cfg(test)]`; tests exercise WSL rejection through the
+/// `WSL_DISTRO_NAME` / `WSL_INTEROP` env keys they own instead.
+#[cfg(all(target_os = "linux", not(test)))]
+static WSL_KERNEL: LazyLock<bool> = LazyLock::new(|| {
+	fs::read_to_string("/proc/sys/kernel/osrelease")
+		.is_ok_and(|release| release.to_ascii_lowercase().contains("microsoft"))
+});
+
+#[cfg(all(target_os = "linux", test))]
+static WSL_KERNEL: LazyLock<bool> = LazyLock::new(|| false);
+
 const JOURNAL_VERSION: u32 = 1;
 const JOURNAL_LIMIT: u64 = 1024 * 1024;
 const CALLBACK_LIMIT: u64 = 16 * 1024;
-const POLL_INTERVAL: Duration = Duration::from_millis(20);
+// Fallback for a directory watch that failed to start or missed an event; the
+// watch itself wakes the claim as soon as the relay links the callback in.
+const POLL_INTERVAL: Duration = Duration::from_millis(200);
 const CLEANUP_TIMEOUT_MS: u32 = 15_000;
 const SETUP_TIMEOUT_MS: u32 = 30_000;
 const DEFAULT_WAIT_TIMEOUT_MS: u32 = 300_000;
@@ -622,14 +645,46 @@ async fn wait_for_callback_async(
 	cancel: &CancelToken,
 ) -> AnyResult<String> {
 	let claim = path.with_file_name(format!("callback.claimed-{transaction}-{wait}"));
+	// Any change in the transaction directory retries the claim; the permit
+	// `notify_one` stores covers an event landing between a failed rename and
+	// the next await, so the watch is armed before the first attempt.
+	let changed = Arc::new(tokio::sync::Notify::new());
+	let watcher = path.parent().and_then(|directory| {
+		let changed = Arc::clone(&changed);
+		// A failed watch (e.g. exhausted inotify instances) only costs latency,
+		// so the wait falls back to polling; logged because that fallback
+		// is otherwise invisible.
+		let mut watcher =
+			match notify::recommended_watcher(move |_: notify::Result<notify::Event>| {
+				changed.notify_one();
+			}) {
+				Ok(watcher) => watcher,
+				Err(error) => {
+					log::warn!("OAuth callback watcher unavailable, polling instead: {error}");
+					return None;
+				},
+			};
+		if let Err(error) = watcher.watch(directory, RecursiveMode::NonRecursive) {
+			log::warn!(
+				"OAuth callback watch on {} failed, polling instead: {error}",
+				directory.display()
+			);
+			return None;
+		}
+		Some(watcher)
+	});
 	loop {
 		cancel
 			.heartbeat()
 			.map_err(|error| anyhow!(error.to_string()))?;
-		match tokio::fs::rename(path, &claim).await {
+		// A plain rename is one syscall that fails fast with ENOENT; routing it
+		// through tokio::fs would add a blocking-pool round trip to every
+		// attempt.
+		match fs::rename(path, &claim) {
 			Ok(()) => break,
 			Err(error) if error.kind() == io::ErrorKind::NotFound => {
 				tokio::select! {
+					() = changed.notified() => {},
 					() = tokio::time::sleep(POLL_INTERVAL) => {},
 					_ = cancel.wait() => {
 						cancel.heartbeat().map_err(|error| anyhow!(error.to_string()))?;
@@ -640,6 +695,7 @@ async fn wait_for_callback_async(
 			Err(error) => return Err(error).context("failed to claim native OAuth callback"),
 		}
 	}
+	drop(watcher);
 	let result = async {
 		cancel
 			.heartbeat()
@@ -666,21 +722,22 @@ async fn wait_for_callback_async(
 	result
 }
 
-fn validate_scheme(scheme: &str) -> AnyResult<()> {
+pub(super) fn validate_scheme(scheme: &str) -> AnyResult<()> {
 	let mut chars = scheme.chars();
 	if !matches!(chars.next(), Some('a'..='z'))
 		|| !chars.all(|character| {
 			character.is_ascii_lowercase()
 				|| character.is_ascii_digit()
 				|| matches!(character, '+' | '-' | '.')
-		}) || scheme.len() > 128
+		})
+		|| scheme.len() > 128
 	{
 		bail!("invalid native OAuth URL scheme");
 	}
 	Ok(())
 }
 
-fn validate_transaction_id(id: &str) -> AnyResult<()> {
+pub(super) fn validate_transaction_id(id: &str) -> AnyResult<()> {
 	if id.len() != 32
 		|| !id
 			.bytes()
@@ -780,45 +837,30 @@ fn ensure_storage_root(root: &Path) -> AnyResult<()> {
 }
 
 fn session_supported(env: &BTreeMap<String, String>) -> bool {
-	if ["SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY"]
+	let supported = !["SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY"]
 		.iter()
-		.any(|name| env.get(*name).is_some_and(|value| !value.is_empty()))
-	{
-		return false;
-	}
+		.any(|name| env.get(*name).is_some_and(|value| !value.is_empty()));
 	#[cfg(target_os = "linux")]
-	{
-		if env
-			.get("WSL_DISTRO_NAME")
-			.is_some_and(|value| !value.is_empty())
-			|| env
-				.get("WSL_INTEROP")
-				.is_some_and(|value| !value.is_empty())
-			|| fs::read_to_string("/proc/sys/kernel/osrelease")
-				.is_ok_and(|release| release.to_ascii_lowercase().contains("microsoft"))
-		{
-			return false;
-		}
-		if !["DISPLAY", "WAYLAND_DISPLAY"]
+	let supported = supported
+		&& env.get("WSL_DISTRO_NAME").is_none_or(String::is_empty)
+		&& env.get("WSL_INTEROP").is_none_or(String::is_empty)
+		&& !*WSL_KERNEL
+		&& ["DISPLAY", "WAYLAND_DISPLAY"]
 			.iter()
-			.any(|name| env.get(*name).is_some_and(|value| !value.is_empty()))
-		{
-			return false;
-		}
-	}
+			.any(|name| env.get(*name).is_some_and(|value| !value.is_empty()));
 	#[cfg(target_os = "windows")]
-	if env
-		.get("SESSIONNAME")
-		.is_some_and(|value| value.eq_ignore_ascii_case("services"))
-	{
-		return false;
-	}
-	true
+	let supported = supported
+		&& !env
+			.get("SESSIONNAME")
+			.is_some_and(|value| value.eq_ignore_ascii_case("services"));
+	supported
 }
 
 fn napi_error(error: impl std::fmt::Display) -> Error {
 	Error::from_reason(error.to_string())
 }
 
+#[cfg(test)]
+mod darwin_compiler;
 #[cfg(test)]
 mod tests;

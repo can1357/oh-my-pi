@@ -1,5 +1,4 @@
 import { describe, expect, it } from "bun:test";
-import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import {
 	KIMI_K27_CODE_RECOMMENDED_MAX_TOKENS,
 	veniceModelManagerOptions,
@@ -7,13 +6,6 @@ import {
 import type { FetchImpl } from "@oh-my-pi/pi-catalog/types";
 
 describe("Venice provider catalog", () => {
-	it("bundles Kimi K2.7 Code with its recommended output cap", () => {
-		const model = getBundledModel("venice", "kimi-k2-7-code");
-
-		expect(model).toBeDefined();
-		expect(model.maxTokens).toBe(KIMI_K27_CODE_RECOMMENDED_MAX_TOKENS);
-	});
-
 	it("caps Kimi K2.7 Code during runtime discovery", async () => {
 		const requestedUrls: string[] = [];
 		const fetchImpl: FetchImpl = async input => {

@@ -37,11 +37,11 @@ Extensions can combine all of the following in one module:
 
 ## Runtime model
 
-1. Extensions are imported and their factory functions run.
-2. During that load phase, registration methods are valid; runtime action methods are not yet initialized.
+1. Extension modules are imported concurrently; their factory functions then run sequentially in path order.
+2. During that load phase, registration methods are valid; session action methods are not yet initialized.
 3. `ExtensionRunner.initialize(...)` wires live actions/contexts for the active mode.
 4. Session/agent/tool lifecycle events are emitted to handlers.
-5. Every tool execution is wrapped with extension interception (`tool_call` / `tool_result`).
+5. Registry tools are wrapped for extension interception (`tool_call` / `tool_result`).
 
 ```text
 Extension lifecycle (simplified)
@@ -49,7 +49,7 @@ Extension lifecycle (simplified)
 load paths
    │
    ▼
-import module + run factory (registration only)
+import modules + bind factories (no session actions)
    │
    ▼
 ExtensionRunner.initialize(mode/session/tool registry)
@@ -63,6 +63,8 @@ Important constraint from `loader.ts`:
 
 - calling action methods like `pi.sendMessage()` during extension load throws `ExtensionRuntimeNotInitializedError`
 - register first; perform runtime behavior from events/commands/tools
+- `pi.exec()` is directly available during load; provider registration is queued until session setup
+- child sessions reuse imported factories but bind fresh APIs and extension registrations; module-level variables remain shared across those sessions
 
 ## Quick start
 
@@ -79,7 +81,8 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on("tool_call", async (event) => {
-    if (event.toolName === "bash" && event.input.command?.includes("rm -rf")) {
+    const command = event.input.command;
+    if (event.toolName === "bash" && typeof command === "string" && command.includes("rm -rf")) {
       return { block: true, reason: "Blocked by extension policy" };
     }
   });
@@ -123,13 +126,38 @@ Core methods:
 - `getSessionName`, `setSessionName`
 - `setModel`, `getThinkingLevel`, `setThinkingLevel`
 - `getServiceTiers`, `setServiceTier`
-- `registerProvider`
+- `registerProvider`, `unregisterProvider`
 - `registerFileWriteFallback`, `registerFileDeleteFallback`
 - `events` (shared event bus)
 
-`getServiceTiers()` returns a detached snapshot of the session's live per-family tier map. `setServiceTier(family, tier)` changes one family for subsequent requests; pass `undefined` to clear that session override. OpenAI accepts `auto`, `default`, `flex`, `scale`, or `priority`; Anthropic accepts `priority`; Google accepts `flex` or `priority`. Changes made while a response is streaming do not alter that in-flight request.
+`ExtensionAPI` methods retain their extension binding when destructured or passed as callbacks.
+
+`setLabel(label)` sets the extension's display label. It is not a session-entry
+labeling action. `getAllTools()` returns tool schemas and source metadata, while
+`getActiveTools()` returns enabled names.
+
+`getServiceTiers()` returns a detached snapshot of the session's live per-family tier map. `setServiceTier(family, tier)` changes one family for subsequent requests; pass `undefined` to clear that session override. OpenAI accepts `auto`, `default`, `flex`, `scale`, `priority`, or `ultrafast`; Anthropic accepts `priority`; Google accepts `flex` or `priority`. Changes made while a response is streaming do not alter that in-flight request.
 
 ### Provider registration
+
+Provider `models` entries and rows returned by `fetchDynamicModels` accept the same `api`/`kind` pairs as `models.yml` (see [Models](./models.md)): a runner API such as `openai-images` implies its kind, so the model reaches the `image` role and `generate_image` instead of registering as chat. A static `models` entry whose `kind` its api cannot serve fails `registerProvider`; such a `fetchDynamicModels` row is dropped with a logged warning.
+
+```ts
+pi.registerProvider("my-gateway", {
+  baseUrl: "https://gateway.example.com/v1",
+  apiKey: "GATEWAY_API_KEY",
+  models: [{
+    id: "gpt-image-2",
+    name: "GPT Image 2",
+    api: "openai-images", // kind: "image" implied
+    reasoning: false,
+    input: ["text"],
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    contextWindow: 128000,
+    maxTokens: 16384,
+  }],
+});
+```
 
 `pi.registerProvider(name, config)` can include an optional `usage` field containing a
 `UsageProvider` imported from `@oh-my-pi/pi-ai`. Its `fetchUsage` implementation receives the
@@ -178,7 +206,24 @@ long as that extension registration is active. `pi.unregisterProvider(name)` (an
 extension source cleanup) removes only that runtime override, restoring the built-in
 or configured usage resolver.
 
+Cached usage reports live in the shared `agent.db`, keyed by provider name, the
+usage provider's `cacheVersion`, normalized base URL, and credential identity. When overriding a built-in provider, set a `cacheVersion`
+distinct from the built-in one so processes without the extension (older sessions,
+`--no-extensions` runs, SDK scripts) never serve their reports to yours, or yours to them.
+
 Extension-registered providers (`registerProvider`) can supply `fetchDynamicModels` for runtime model discovery; these fetches are hard-bounded to a 15-second timeout (`RUNTIME_DYNAMIC_MODEL_FETCH_TIMEOUT_MS` in `model-provider-discovery.ts`) so a hung endpoint cannot stall discovery.
+
+A provider's `apiKey` (a literal key or an environment variable name) normally overrides any stored OAuth or `/login` credential for that provider. When the registration also supplies `oauth`, `apiKey` becomes a fallback instead: the key the user saved with `/login` wins, and `apiKey` is used only when no stored login credential exists. This keeps an unset env-var name from being sent as the literal key. Registering a built-in provider id with both `oauth` and a gateway `apiKey` therefore lets a stored upstream credential take precedence over the gateway key.
+
+Provider login callbacks can request masked entry with
+`callbacks.onPrompt({ message: "Consumer key", secret: true })`. Native `/login`
+and first-run setup preserve the exact submitted value while hiding it in the
+input, retained answers, and input diagnostic previews. Login prompts do not
+share undo or kill/yank history. Ordinary prompts remain unmasked.
+
+RPC rejects secret prompts instead of forwarding them as ordinary input. SDK
+hosts implementing `onPrompt` must honor `secret` or reject the prompt. Masking
+does not provide encryption, memory erasure, or general log redaction.
 
 In interactive mode, `input` handlers run before the built-in first-message auto-title check. Extensions that call `await pi.setSessionName(...)` from `input` can set the persisted session name and prevent the default auto-generated title from running for that session.
 
@@ -190,26 +235,65 @@ Also exposed:
 - `pi.typebox` (legacy TypeBox-compatible shim)
 - `pi.pi` (package exports)
 
+### Runtime setting overrides
+
+Settings are addressed through typed registry handles (see "Definitions" in [config-usage.md](./config-usage.md#definitions-srcconfigregistryts)); the string-path `settings.get`/`set`/`override` methods were removed in 18.3. Extensions resolve a handle by id with `lookup(id)` (and enumerate them with `all()`) from the `@oh-my-pi/pi-coding-agent/config/registry` subpath, then pass `pi.pi.settings` as the scope:
+
+```ts
+import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
+import { lookup } from "@oh-my-pi/pi-coding-agent/config/registry";
+
+export default function (pi: ExtensionAPI) {
+  const recap = lookup("recap.enabled");
+  // Defer to the user: pin a default only when no env var or settings layer configures it.
+  if (recap && !recap.isConfigured(pi.pi.settings)) recap.override(pi.pi.settings, false);
+}
+```
+
+- `override(scope, value)` writes the in-memory runtime layer; it is never persisted and outranks project, global, and `--config` layers. A setting's environment binding normally takes precedence; definitions using `envFallback` instead defer to configured settings. A value the definition rejects throws, e.g. `Invalid value for recap.enabled: "nope" (expected a boolean)`.
+- `clearOverride(scope)` releases the override, restoring the persisted/default value.
+- `isConfigured(scope)` / `provenance(scope)` tell a user-configured value from the default (`"env" | "runtime" | "overlay" | "project" | "global" | "default"`).
+- `get(scope)` reads the effective value; `listen(scope, cb)` observes changes. Writes go through the settings store, so change listeners and live effects fire.
+- `lookup` returns `undefined` for an unknown id.
+
 ### Message delivery semantics
 
 `pi.sendMessage(message, options)` supports:
 
-- `deliverAs: "steer"` (default) — interrupts current run
-- `deliverAs: "followUp"` — queued to run after current run
-- `deliverAs: "nextTurn"` — stored and injected on the next user prompt
-- `deliverAs: "aside"` — injected at the next agent step boundary without interrupting the current tool batch; when idle it starts a turn (`triggerTurn` is ignored; plan mode folds it into context instead)
+- `deliverAs: "steer"` (default while streaming) — steers the current run
+- `deliverAs: "followUp"` — queued behind the current run while streaming
+- `deliverAs: "nextTurn"` — kept out of the editable pending-message UI; while streaming it waits for the next turn, and when idle without `triggerTurn` it is appended to context/history without starting a turn
+- `deliverAs: "aside"` — injected at the next agent step boundary without interrupting the current tool batch, except that it ends a running interruptible `wait` (the wait returns "Wait interrupted by message." and its job keeps running); when idle it normally starts a turn regardless of `triggerTurn`. Plan mode or user-interrupt auto-resume suppression folds it into context instead
 - `triggerTurn: true` — starts a turn when idle (also honored with `deliverAs: "nextTurn"`: idle prompts immediately; while streaming the queued message schedules an internal continuation)
 
-`pi.sendUserMessage(content, { deliverAs })` always goes through prompt flow. Omit `deliverAs` to start a normal prompt when idle; while streaming, omitted `deliverAs` queues the message as a steer. Set `deliverAs: "followUp"` to wait until the current run finishes. Set `deliverAs: "aside"` to inject the prompt at the next step boundary while a run is live (idle sends start a turn as usual).
+When idle without `triggerTurn`, ordinary `sendMessage` delivery appends the
+message without starting a turn. A `display: true` message is rendered
+immediately; `"nextTurn"` delivery does not emit that immediate display event.
+ACP clients can defer agent-initiated turns, in which case requests that would
+start one are retained as hidden next-turn messages.
 
-Payloads passed to `pi.sendMessage` are normalized before delivery (`normalizeCustomMessagePayload` in `session/messages.ts`): non-object payloads are coerced to string content under the default custom type, missing `customType`/`attribution` fields are defaulted, and invalid content collapses to an empty string — malformed payloads no longer persist entries that crash later session resumes.
+`pi.sendUserMessage(content, { deliverAs })` submits text/images without slash-command
+or prompt-template expansion. Omit `deliverAs` to start a prompt when idle;
+while streaming, omission queues a steer. Explicit `"steer"` or `"followUp"`
+queues the prompt even when idle instead of starting a turn directly. `"aside"`
+injects at the next step boundary while a run is live and starts a turn when
+idle. The message is recorded with `attribution: "user"` unless you pass
+`attribution: "agent"`; use `"agent"` for text the extension generated or relayed
+from another agent.
+
+Payloads passed to `pi.sendMessage` are normalized before delivery
+(`normalizeCustomMessagePayload` in `packages/tui/src/chat/messages.ts`,
+re-exported by `session/messages.ts`): non-object payloads are coerced to string
+content under the default custom type, missing `customType`/`attribution` fields
+are defaulted, and invalid content collapses to an empty string.
 
 ## 2) Handler context (`ExtensionContext`)
 
 Handlers and tool `execute` receive `ctx` with:
 
 - `ui`
-- `hasUI`
+- `mode`: `"tui" | "rpc" | "json" | "print"`; ACP uses `"rpc"`. Check `"tui"` before using terminal-only components
+- `hasUI`: whether this runner has a non-no-op UI context, not whether every UI method is supported
 - `cwd`
 - `sessionManager` (read-only)
 - `modelRegistry`, `model`
@@ -217,12 +301,43 @@ Handlers and tool `execute` receive `ctx` with:
 - `localProtocolOptions` (optional calling-session `local://` root mapping for external tool bridges)
 - `getContextUsage()`
 - `getAsyncJobSnapshot()` returns the current session's read-only async-job snapshot, or `null` when no session owns the context
-- `compact(...)`
+- `compact(instructionsOrOptions?)`: accepts summary focus text or `CompactOptions`, including one-off `mode: "soft" | "remote" | "snapcompact"`, `onComplete`, `onError`, and `suppressContinuation`
 - `isIdle()`, `hasPendingMessages()`, `abort()`
 - `shutdown()`
 - `getSystemPrompt()`
+- `isProjectTrusted()` — always `true`; OMP does not ask for per-directory trust before loading project inputs
+- `agent` — the agent this session runs: `{ kind: "main" | "sub", id, name, depth, parentId? }`. Factories are rebound to every subagent session (task tool, eval `agent()`, `/tan` clones), so a handler can check `ctx.agent.kind === "sub"` or the lowercased agent definition `name` (for example `"explore"`) to act only in subagents. Use `kind`, not `depth`: `depth` counts `task` nesting only, so `/tan` clones are subagents at depth 0 and report `name: "sub"`. An advisor's own tool calls reach the session's `tool_call`/`tool_result` handlers with `{ kind: "sub", id: "advisor", name: "advisor", depth: 0, parentId }`, so `kind === "main"` also excludes advisor activity
+- `runEphemeralTurn(...)` (optional; see below)
 - `memory` (optional structured memory runtime — status/search/save across the configured backend)
 - `setInterval(fn, ms, ...args)` / `setTimeout(fn, ms, ...args)` / `clearTimer(timer)` — managed timers (see below)
+
+### Ephemeral side turns (`ctx.runEphemeralTurn`)
+
+Run the same side-turn pipeline as `/btw` using the current model and conversational context. The question and response are not appended to session history, and the request can run while the main turn is active. The snapshot may include in-flight assistant text.
+
+```ts
+if (!ctx.runEphemeralTurn) {
+  throw new Error("This host does not support ephemeral turns");
+}
+await requireConsultationConsent(remoteCaller);
+await auditConsultationRequest(remoteCaller, remoteQuestion);
+const { replyText } = await ctx.runEphemeralTurn({
+  promptText: remoteQuestion,
+  tools: false,
+  maxTokens: 4096,
+  maxContextBytes: 1_048_576,
+  onTextDelta: delta => sendRemoteChunk(delta),
+  signal: requestAbortController.signal,
+});
+```
+
+For example, a Synadia/NATS bridge can answer another agent's question from the local context and stream the response back without injecting a live user message. **A side turn sends the current conversation snapshot to the configured model provider and returns its answer to the calling extension.** Bridge extensions must obtain user consent where appropriate, authenticate and authorize callers, and audit every remote request before using this API. Agent-to-agent consultation extensions can set `maxTokens` and a serialized, post-transform `maxContextBytes` cap (measured after secret obfuscation) before inference. Transports that omit or overwrite caller output-token limits, including Codex Responses, Cursor, GitLab Duo Workflow, Ollama Cloud discovery models, and Antigravity, reject `maxTokens` before inference instead of silently starting an uncapped request. Antigravity rejects requested caps conservatively across its transport because effort routing can select wire profiles with fixed output limits. A requested cap disables optional budget thinking, since those transports may otherwise raise the wire limit to fit a thinking budget; models that require budget thinking reject the cap. `tools: false` also rejects before inference on Cursor, whose transport exposes native tools independently of the supplied tool catalog. Both caps must be positive safe integers. Omit `maxTokens` only when an uncapped turn is acceptable, or choose an API that supports output limits. The extension owns transport, access controls, request limits, and cancellation (including shutdown); this API adds no network dependency. `onTextDelta` may return a promise: delivery is awaited in order, including the final flush, and a delivery error rejects the side turn and aborts the provider request instead of leaving it streaming.
+
+Hooks may start a side turn, including from delayed callbacks. Only `context`, `before_provider_request`, and `after_provider_response` hooks reached *within* a running side turn reject a nested `runEphemeralTurn` call, which bounds recursion; the caller's `onTextDelta` runs outside that guard. Side turns inherit the active event-handler signal (only while that handler is still running) and, for registered tools, the tool invocation’s abort signal. An explicit `options.signal` is combined with those signals; it does not replace them. `maxContextBytes` is checked before `before_provider_request` hooks run; a hook that replaces the payload is not re-measured.
+
+Tool calls are always discarded rather than executed. Pass `tools: false` to remove tool definitions after context transforms and set `toolChoice: "none"` at the provider boundary. Omitting it preserves `/btw`'s tool catalog for prompt-cache reuse; disabling it may reduce cache hits. Bedrock Converse rejects tool opt-out if the transformed history still contains tool calls or results. Existing context/provider hooks still run. It is not a sandbox or a guarantee that arbitrary extension hooks have no side effects. Model inference consumes the configured provider's resources. `dedupeReply` defaults to `true`, collapses runs of more than three identical lines, and caps the returned reply at 4 KiB. Set it to `false` to disable those transformations; `replyText` is still trimmed. Callers should use `replyText` for the final result.
+
+Use `history` only for detached prior side-turn messages; it is cloned with `structuredClone`, so pass cloneable message data. A `conversationKey` keeps related side turns on one provider lineage. Rotate it after cancellation or failure before retrying. A side turn also rejects with a retryable error if its session or exact model instance changes before dispatch; callers should retry from a new current-context snapshot rather than reuse the old one.
 
 ### Background work (`ctx.setInterval` / `ctx.setTimeout`)
 
@@ -290,6 +405,12 @@ Canonical event unions and payload types are in `types.ts`.
 - `session_before_tree` / `session_tree`
 - `session_shutdown`
 
+`session.compacting` receives `{ sessionId, messages }` and can return
+`{ context?: string[]; prompt?: string; preserveData?: Record<string, unknown> }`
+to customize summary context, the summarizer prompt, and stored compaction data.
+It is skipped when `session_before_compact` already supplied a replacement
+compaction result.
+
 Cancelable pre-events:
 
 - `session_before_switch` → `{ cancel?: boolean }`
@@ -297,31 +418,94 @@ Cancelable pre-events:
 - `session_before_compact` → `{ cancel?: boolean; compaction?: CompactionResult }`
 - `session_before_tree` → `{ cancel?: boolean; summary?: { summary: string; details?: unknown } }`
 
+`session_before_branch` and `session_branch` carry `reason`, which decides what `session_before_branch.entryId` means. For `"branch"` (`branch(entryId)`, `/branch`) it is the user message being rewound: it and everything after it are dropped. For `"fork"` (`AgentSession.fork(entryId)`, RPC `fork` with an `entryId`) and `"btw"` (`/btw` promotion) it is the last entry kept in the new session.
+
 ### Prompt and turn lifecycle
 
 - `input`
 - `before_agent_start`
-- `before_provider_request` (may replace provider request payload — the replacement is applied by every provider that fires the hook, which is all of them except `devin-agent`, which does not fire it)
-- `after_provider_response`
-- `context`
+- `before_provider_request` — receives `{ payload }`; return the replacement payload itself (not `{ payload }`). Handlers chain. Provider transports must invoke `onPayload`; `devin-agent` does not.
+- `after_provider_response` — notification before response-body consumption: `{ status, headers, requestId?, metadata? }`. Provider request/response handlers receive the model used for that request in `ctx.model`.
+- `context` — receives conversation messages and may return `{ messages }`; replacements chain without rewriting persisted history
 - `agent_start` / `agent_end` — agent loop lifecycle notification; `agent_end` remains notification-only
-- `session_stop` — main-session stop hook, awaited before settle; may continue with `{ continue: true, additionalContext }` or `{ decision: "block", reason }`; capped at 8 consecutive continuations, never fires for task/subagent sessions, and defers until agent-owned background jobs are fully idle (`#hasPendingAsyncWake` in `session/agent-session.ts`)
+- `session_stop` — main-session stop hook, awaited before settle. Advisory `{ continue: true, additionalContext }` requests are capped at 8 continuations. Explicit `{ decision: "block", reason }` refusals take precedence over advisory requests, do not consume that allowance, and remain blocking until the hook allows completion or the operator interrupts. A refusal without a reason receives a diagnostic continuation rather than permission to finish. This event never fires for task/subagent sessions and defers until agent-owned background jobs are fully idle (`#hasPendingAsyncWake` in `session/agent-session.ts`).
+- `cache_warming_decision` — fired before each prompt-cache warming refresh with the warmer's economics (`warmCost`, `missCost`, `continuationProbability`, `action`). Return `{ action: "warm" | "stop" }` to override; the last handler returning an action wins, handler failures or answers slower than 2 seconds leave the warmer's decision standing, and a `"stop"` override ends warming until the next real request. Only the main agent loop warms; task/subagent sessions never fire this. The refresh itself replays the real request through the same provider path, so `before_provider_request` and `after_provider_response` fire for it too; a replacement payload must stay byte-identical to the real one for the refresh to hit the cache.
 - `turn_start` / `turn_end`
-- `message_start` / `message_update` / `message_end` — lifecycle notifications; `message_end` receives a detached message snapshot, so use `tool_result` or `context` when an extension needs to change provider context
+- `assistant_message` — awaited once per finalized assistant message before agent context, persistence, `message_end`, or tool dispatch. Return `{ content }` to replace text for history, persistence, `message_end` consumers, and the next provider request; handlers chain. Text already delivered through streaming updates (`message_update`, ACP/RPC chunks) is not retracted, so clients that render from the stream may keep showing the original text. Text blocks must retain their count, order, and positions; only their text may change. All non-text blocks and other block metadata must remain unchanged. Unchanged text retains its original `textSignature` (even if the handler drops or changes it); edited text loses its signature so provider replay state is never reused for different text. Invalid replacements and handler errors are reported and skipped. If aborted while a handler is pending, completed rewrites so far are retained and remaining handlers are skipped.
+- `message_start` / `message_update` / `message_end` — lifecycle notifications; `message_end` receives a detached snapshot, so in-place changes cannot rewrite agent or provider context
+
+```ts
+pi.on("assistant_message", event => ({
+	content: event.message.content.map(block =>
+		block.type === "text" ? { ...block, text: block.text.replaceAll("teh", "the") } : block,
+	),
+}));
+```
+
+`before_agent_start` prepares policy for an ordinary prompt and for each steering or follow-up batch containing user work when that batch is actually dequeued. It is not an enqueue notification: a live batch can fire it without another `agent_start`. Queue peeks, provider retries, tool-only iterations, and synthetic-only queued continuations do not fire it. Explicit synthetic prompts retain their ordinary prompt lifecycle.
+
+For queued batches, `prompt` contains the already-transformed text of every selected user message, joined with two newlines between messages; text blocks within a message are concatenated. `images` contains their already-normalized images in delivery order. Hidden agent-attributed companions are excluded from these event inputs but remain in the delivered batch. Input hooks, commands, templates, and original attachment preprocessing are not rerun.
+
+Handlers chain from the current base system prompt. Their final override governs the next provider request and its continuations until another prompt or user-containing batch prepares policy. Overrides remain complete replacements, including strings or arrays unrelated to the base; the host never infers or rebases text patches. Returned custom messages are appended once after the original batch; originals retain their order, identity, attribution, and metadata. Host application of results is cancelled if the turn is aborted or the session or queue ownership changes while handlers are pending.
+
+If a returned override's source base changes during preparation (for example, a handler awaits `pi.setActiveTools()`), the host discards that attempt's returned custom messages and staged memory, then repeats policy preparation from the winning base. At most three attempts run per delivery; repeated base changes raise an error without delivering the original input. Queued originals remain queued, and settling the failed turn does not retry them automatically. A new prompt or queued delivery can reopen draining, including synthetic follow-ups and custom messages from extensions or advisors; the pause is not restricted to a user-only retry. Ordinary text is returned through the dropped-prompt callback. Unchanged base content does not trigger a retry, even if a refresh replaces the array. Preparations without an override still use the winning base without rerunning handlers or recall. Ownership is checked again synchronously before publishing results; a late change declines the delivery without committing memory or context.
+
+Handlers must tolerate re-entry: a source-base retry can call the entire `before_agent_start` chain again for the same submission, and a cancelled delivery may be prepared again when resumed. Only the accepted attempt's returned context and staged memory are published; external side effects performed by handlers cannot be rolled back. Input hooks, commands, templates, and original attachment preprocessing are never replayed by these policy retries.
+
+If a later queue drain fails, earlier originals that have not reached the
+transcript are restored ahead of newer enqueues. Generated preparation context
+is not requeued, and explicitly cleared or replaced queues are not resurrected.
+#### External input interception
+
+`input` runs once at submission ingress, before command interpretation, skill or
+prompt-template expansion, and queue insertion:
+
+| Submission | `source` |
+|---|---|
+| Main-session Enter or Ctrl+Enter | `"interactive"` |
+| `prompt`, `steer`, `follow_up`, or `abort_and_prompt` in RPC or RPC UI mode | `"rpc"` |
+
+Handlers run in extension/registration order. Returned `text` and `images`
+replacements feed subsequent handlers; omitted fields preserve the current value,
+and `images: []` removes attachments. Replacement text is trimmed before dispatch.
+`handled: true` stops the remaining handlers and normal dispatch. Empty text with
+no remaining images also stops normal dispatch. Work explicitly scheduled by a
+handler through `sendUserMessage` or `sendMessage` is not discarded.
+
+This is an ingress event, not a user-role message event. Queue delivery and replay
+do not emit it again. Programmatic `sendUserMessage`/`sendMessage` calls and
+synthetic continuations do not automatically emit `input`. Main-session Enter's
+`.`/`c` continuation shortcuts retain their synthetic path. Focused-subagent
+input retains its chat-only routing and does not invoke main-session input hooks.
+Print and ACP input are outside this interception contract.
+
+Ctrl+Enter detaches the submitted draft before awaiting native handlers, so
+another submission cannot reuse it and ordinary later typing remains a new draft.
+Handled/empty input consumes only the detached submission. Dispatch failures
+restore its text and attachments alongside any newer draft. This does not make
+the established interactive input-handler chain cancellable by Esc.
+Builtin submission cleanup also preserves the newer draft, including `/clear`
+and `/new`. Commands retain their explicit prefill and session-transition actions.
 
 ### Tool lifecycle
 
-- `tool_call` (pre-exec, may block, or revise the tool's execution `input`; for model-issued calls it fires at arg-prep time in the agent loop, so a revision is revalidated and seen by concurrency scheduling, execution events, the persisted assistant message, and the approval gate alike)
-- `tool_result` (post-exec, may patch content/details/isError)
+- `tool_call` (pre-exec, may block, revise the tool's execution `input`, or return passive `additionalContext`; for model-issued calls it fires at arg-prep time in the agent loop, so a revision is revalidated and seen by concurrency scheduling, execution events, the persisted assistant message, and the approval gate alike; passive context from non-blocking handlers is delivered after the batch's tool results in assistant call order, before the next provider request)
+- `tool_result` (post-exec, may patch content/details/isError or return passive `additionalContext`; result context is delivered outside the tool output even when `event.isError` is true, so a failure-specific handler can guide the next model step)
 - `tool_execution_start` / `tool_execution_update` / `tool_execution_end` (observability)
 - `tool_approval_requested` / `tool_approval_resolved` (observability; emitted by `wrapper.ts` only when a tool requires approval and an approval handler is registered)
 
-`tool_result` is middleware-style: handlers run in extension order and each sees prior modifications.
+`tool_result` is middleware-style: handlers run in extension order and each sees prior modifications. Distinct non-blank `additionalContext` from every handler is preserved in registration order (repeats, compared ignoring surrounding whitespace, are dropped) and delivered before that call's `tool_call` context.
+
+### Subagent lifecycle
+
+- `before_subagent_spawn` → `{ model?: string | string[]; block?: boolean; reason?: string; note?: string }`. Fires in the parent session exactly once per spawned child (`task`, eval `agent()`, workpool workers), at dispatch before the child resolves its model — never during a frontend's validation preflight, so stateful routers (round-robin, quota) advance once per child. The event carries `agent`, `invocationKind`, `modelRole` (the pre-expansion role alias, when any), the expanded `patterns` core would use, and an optional stable `spawnKey`. A returned `model` replaces the spawn's attempt-ordered patterns while keeping the role identity, so the remaining entries become the child's retry fallback chain; handlers run in extension order and the last returned `model` wins, along with its `note`, which the task UI shows as the spawn's routing reason on live, async, and settled rows. `block: true` refuses the spawn with `reason`. Cancelling the spawn releases an awaiting handler (its result is discarded and pending `ctx.ui` dialogs close) instead of holding the spawn until the handler timeout.
 
 ### Reliability/runtime signals
 
 - `auto_compaction_start` / `auto_compaction_end`
 - `auto_retry_start` / `auto_retry_end`
+- `retry_fallback_applied` — `{ from, to, role, reason? }` when auto-retry switches model/provider
+- `retry_fallback_succeeded` — `{ model, role }` when a request succeeds on that fallback
 - `ttsr_triggered`
 - `todo_reminder`
 - `goal_updated`
@@ -340,6 +524,7 @@ pi.on("mcp_notification", (event) => {
   const params = event.params as { from: string; text: string };
   pi.sendUserMessage(`[from ${params.from}] ${params.text}`, {
     deliverAs: "steer",
+    attribution: "agent",
   });
 });
 ```
@@ -360,6 +545,13 @@ Current runtime note: `ExtensionRunner.emitResourcesDiscover(...)` is implemente
 
 `registerTool` uses `ToolDefinition` from `types.ts`. Its `parameters` field accepts omptype schemas; the injected TypeBox compatibility shim remains available for legacy extensions.
 
+Prefer registration in the factory, but tools discovered later (for example in
+`session_start`) are also mounted into the live registry. Registrations made
+inside a dispatched event handler are flushed before that handler completes;
+`await pi.setActiveTools(...)` also waits for pending registration. Restricted
+children do not admit extension tools, including late registrations. Host-RPC
+and SDK custom tools retain precedence over conflicting extension tools.
+
 Current `execute` signature:
 
 ```ts
@@ -371,6 +563,38 @@ execute(
 	ctx,
 ): Promise<AgentToolResult>
 ```
+
+### Adding passive context after a tool call
+
+A `tool_call` handler can return `additionalContext` without changing the tool result:
+
+```ts
+pi.on("tool_call", async event => {
+  if (event.toolName === "search") {
+    return { additionalContext: "Use this result before searching again." };
+  }
+});
+```
+
+`additionalContext` carries trusted handler-authored instructions for the next provider request. The
+host emits them after the tool results with developer/system priority where the selected transport
+supports it. Repeats (compared ignoring surrounding whitespace) are dropped at two levels: a handler value
+identical to an earlier handler's on the same call, and a call's joined context identical to an earlier
+call's in the same batch. Raw tool output and other untrusted data must stay in the ordinary tool result.
+
+Distinct non-empty context from every non-blocking handler is preserved in registration order. OMP waits
+until the tool batch settles, then emits the context after the corresponding tool results in
+assistant tool-call order and before the next provider request. Handler context is delivered only when
+the call actually runs and returns a non-error result: if the call is blocked by this or a later
+handler, denied at the approval prompt, skipped by an interrupt, or fails, its collected context is
+discarded.
+
+Registered tools can add context during execution through
+`ctx.addAdditionalContext?.("...")`. Context a tool adds itself is kept even when the tool then
+returns an error. Within one call, the tool's own context (including tools reached through nested
+`xd://` dispatch) comes before `tool_call` handler context.
+Calls Cursor executes on its exec channel deliver context after their buffered results, on the next
+provider request.
 
 ### Delegating to a native built-in (`ctx.invokeTool`)
 
@@ -387,7 +611,9 @@ ctx.invokeTool?<TDetails>(
 
 It runs the **native** built-in of the same name as your tool (delegation is same-tool only, so it
 cannot reach an arbitrary target or escalate past the approval already granted for this call) and
-returns its result, including the native tool's own side effects and internal bookkeeping. It is
+returns its result, including the native tool's own side effects and internal bookkeeping.
+By default it inherits the outer call's abort signal, progress callback, and tool/provider
+metadata; explicit `signal` / `onUpdate` options override those channels. It is
 present only when a native built-in of that name exists — `ctx.invokeTool` is `undefined` for a
 net-new tool that shadows no built-in. The native call is not re-gated, since it is the same tool you
 are already approved as, and delegation depth is guarded against accidental self-recursion.
@@ -424,7 +650,22 @@ pi.registerTool({
 });
 ```
 
-`tool_call`/`tool_result` intercept all tools once the registry is wrapped in `sdk.ts`, including built-ins and extension/custom tools. `ToolDefinition` also supports optional `hidden`, `defaultInactive`, `loadMode` (`"discoverable"` by default, or `"essential"`), `deferrable`, `approval` (`"exec"` by default), `strict`, `mcpServerName`, `mcpToolName`, `renderCall`, and `renderResult` fields.
+`renderCall`'s `options` argument also answers the `Theme` API, so tool renderers ported from upstream pi — declared `renderCall(args, theme, context)` — style correctly without being rewritten.
+
+`tool_call`/`tool_result` intercept registry tools in `sdk.ts`, including built-ins
+and extension/custom tools; an approval-policy denial can short-circuit before
+`tool_call`, and blocked/denied calls do not execute or emit a normal post-execution result hook.
+
+Additional `ToolDefinition` fields include:
+
+- `hidden`, `defaultInactive`: opt out of automatic activation unless explicitly requested.
+- `loadMode`: `"discoverable"` for new tool names by default; known essential built-in names retain `"essential"` when re-registered without an explicit mode (see `tools/essential-tools.ts`). Explicit modes win.
+- `deferrable`, `readsSkillUris`, `strict`.
+- `approval`: defaults to `"exec"`; accepts a tier, a decision object, or a function of the arguments.
+- `mcpServerName`, `mcpToolName`, `legacyName`, `sourcePath`: discovery, approval, and provenance metadata.
+- `shellEnv`: environment values for the interactive user-shell surface.
+- `renderCall`, `renderResult`: TUI components.
+- `describeCall`, `describeResult`: semantic tool views for TSP terminals.
 
 ### File write fallback (`registerFileWriteFallback`)
 
@@ -439,7 +680,7 @@ via `pi.registerFileWriteFallback` before giving up:
 import type { FileWriteFallbackHandler } from "@oh-my-pi/pi-coding-agent";
 
 const writeThroughBroker: FileWriteFallbackHandler = async (req, ctx) => {
-  // req: { dst: string; content: string; cause: unknown }
+  // req: { dst: string; content: string; cause: unknown; sessionId: string | undefined }
   const ok = await myPrivilegedWriter.write(req.dst, req.content);
   return ok;
 };
@@ -453,9 +694,11 @@ write had succeeded — including recording its file snapshot under the real
 destination path, so a later hashline `edit` on that path keeps working. A
 throwing handler is logged and skipped in favor of the next one — per handler, so a
 later handler registered by the same extension still runs; if every handler
-returns `false` (or none are registered), the original error is rethrown
-unchanged. Intended for a host that embeds the agent inside a sandbox denying
-direct filesystem writes but exposing a privileged write channel.
+returns `false` (or none are registered), the original error is rethrown.
+When Bun masked a denied parent `mkdir` as `ENOENT`, the recovered denial is
+attached as the original error's `cause` if it has none. Intended for a host
+that embeds the agent inside a sandbox denying direct filesystem writes but
+exposing a privileged write channel.
 
 `req.dst` is the **symlink-resolved** destination, not the path the tool was given.
 The kernel follows every component above the last, so `ws/link/file` under a
@@ -545,9 +788,10 @@ Two lifecycle constraints, which apply to both seams:
 - **The registries are process-wide.** A process can host several sessions (a subagent
   gets its own runner), so a handler may be consulted for a denied write or delete
   from any session in the process — not only the one whose extension registered it.
-  This is deliberate: a subagent spawned with restricted tools loads no extensions of
-  its own, and a host that registers once in its top-level session still expects its
-  subagents' writes brokered. `req.sessionId` names the session that issued the
+  This is deliberate: a host that registers once in its top-level session still
+  expects its subagents' writes brokered, including sessions without inherited
+  extension factories. Restricted children retain parent-loaded hooks but do not
+  discover ambient extensions. `req.sessionId` names the session that issued the
   mutation (`undefined` when it did not come from a tool call), and
   `ctx.sessionManager.getSessionId()` names the handler's own — compare them to make
   the decision per session. It matters most before prompting: `ctx.ui` belongs to the
@@ -565,7 +809,7 @@ before and performs no extra syscalls.
 
 Supported:
 
-- dialogs: `select`, `confirm`, `input`, `editor`
+- dialogs: `select`, `confirm`, `input`, `editor`, optional `askDialog`
 - input editing: `setEditorText`, `getEditorText`, `pasteToEditor`, `editor`
 - autocomplete stacking: `addAutocompleteProvider(factory)` wraps the built-in editor provider (factories apply in registration order and re-apply on every slash-command refresh)
 - terminal title and working message (`setTitle`, `setWorkingMessage`)
@@ -578,19 +822,27 @@ Current no-op methods in this controller:
 - `setFooter`
 - `setHeader`
 
-`setEditorComponent` is wired to the live editor (`ctx.setEditorComponent(factory)`). `setWidget` renders real widget components above or below the editor via `setHookWidget(...)` (`placement: "aboveEditor" | "belowEditor"`; string-array content capped at 10 lines). `setEditorText` and `pasteToEditor` schedule a repaint after mutating the editor, so prompt changes don't leave stale content on screen.
+`ctx.ui.setEditorComponent(factory)` is wired to the live editor; the factory
+must return a `CustomEditor` subclass, not a plain `Editor`/`EditorComponent`.
+`setWidget` renders widget components above or below the editor via
+`setHookWidget(...)` (`placement: "aboveEditor" | "belowEditor"`; string arrays show
+up to 10 content lines plus a truncation notice). Pass `undefined` to remove a
+widget. `setEditorText` and `pasteToEditor` request a repaint after mutating the
+editor.
 
 ### RPC mode (`rpc-mode.ts`)
 
 `ctx.ui` is backed by RPC `extension_ui_request` events:
 
 - dialog methods (`select`, `confirm`, `input`, `editor`) round-trip to client responses
-- fire-and-forget methods emit requests (`notify`, `setStatus`, `setWidget` for string arrays, `setEditorText`; `setTitle` emits only when `PI_RPC_EMIT_TITLE=1`)
+- fire-and-forget methods emit requests (`notify`, `setStatus`, `setWidget` for string arrays or removal, and `setEditorText` as `method: "set_editor_text"`); `pasteToEditor` falls back to `setEditorText`
+- `setTitle` emits only when `PI_RPC_EMIT_TITLE` is `1`, `true`, `yes`, or `on` (case-insensitive)
 
 Unsupported/no-op in RPC implementation:
 
 - `onTerminalInput`
-- `custom`
+- `custom`; optional `askDialog` is absent
+- `getEditorText` returns `""`
 - `setFooter`, `setHeader`, `setEditorComponent`, `addAutocompleteProvider`
 - `setWorkingMessage`
 - theme switching/loading (`setTheme` returns failure)
@@ -598,11 +850,16 @@ Unsupported/no-op in RPC implementation:
 
 ### Print/headless/subagent paths
 
-When no UI context is supplied to runner init, `ctx.hasUI` is `false` and methods are no-op/default-returning.
+When no UI context is supplied to runner init, `ctx.hasUI` is `false` and methods are no-op/default-returning. Both `--mode rpc --no-ui` and `--mode rpc-ui --no-ui` take this path for extensions; `rpc-ui` tool dialogs remain enabled.
 
 ### ACP mode
 
-ACP installs an elicitation-bridged UI context (`createAcpExtensionUiContext` in `acp-agent.ts`). `ctx.hasUI` is `true` while `select`/`confirm`/`input`/`editor` round-trip (as ACP elicitations; defaults are returned when the client lacks the `elicitation.form` capability). The non-elicitation surface (widgets, theming, terminal input, autocomplete stacking) is stubbed no-op.
+ACP installs an elicitation-bridged UI context (`createAcpExtensionUiContext` in
+`modes/acp/acp-agent.ts`). `ctx.mode` is `"rpc"` and `ctx.hasUI` is `true`.
+`select`/`confirm`/`input`/`editor` and optional `askDialog` round-trip as ACP form
+elicitations; defaults are returned when the client lacks `elicitation.form`.
+The non-elicitation surface (widgets, editor control, theming, terminal input,
+autocomplete stacking) is inert; `notify` logs a debug notification.
 
 ## Session and state patterns
 
@@ -733,13 +990,14 @@ export default function (pi: ExtensionAPI) {
 - `description`: optional selector detail.
 - `style`: the complete `ComposerStyle` rendering contract. `style.id` is also the persisted `composer.shape` value.
 
-Use a package-qualified, non-empty, trimmed `style.id`. Built-in ids (`box`, `claude`, `pi`, `borderless`, `rule`, `field`, and `rail`) cannot be replaced. If the extension is unavailable while its id remains configured, the editor falls back to `box`.
+Use a package-qualified, non-empty, trimmed `style.id`. Built-in ids (`box`, `band`, `claude`, `pi`, `borderless`, `rule`, `field`, and `rail`) cannot be replaced. For collisions between extensions, the later registration wins. If the extension is unavailable while its id remains configured, the editor falls back to `box`.
 
 ### `ComposerStyle` layout metadata
 
+- `filledSurface`: whether the style paints its own row foreground through `surfaceColor`. Omitted values retain filled behavior for extension-owned ids; set `false` to receive the host's themed text color.
 - `sideBorders`: whether content rows own side chrome. This controls cursor reserve, IME layout, and scrollbar behavior; it is not merely descriptive.
 - `verticalChrome`: exact number of fixed top/bottom chrome rows (`0`, `1`, or `2`) used for editor height budgeting.
-- `statusAttachment`: `"top-border"` receives the embedded status gauge, `"top-rule-chip"` receives the right status group for docking on a rule, and `"none"` detaches status from the editor chrome.
+- `statusAttachment`: `"top-border"` receives the embedded status gauge, `"top-band"` uses the flush soft-capped status band above the input, `"top-rule-chip"` receives the right status group for docking on a rule, and `"none"` detaches status from the editor chrome.
 - `bottomBar`: standalone status content below the editor: `"none"`, `"left"`, or `"full"`.
 - `bottomBarGap`: whether a blank row separates the editor from a standalone bottom status bar.
 - `defaultPromptGutter`: prompt text used when the host supplies no override.
@@ -800,18 +1058,20 @@ Provide `renderCall` / `renderResult` on `registerTool` definitions for custom t
 
 ## Constraints and pitfalls
 
-- Runtime actions are unavailable during extension load.
-- `tool_call` errors block execution (fail-closed).
+- Session actions are unavailable during extension load; registration methods, `getFlag`, and `exec` are available.
+- `tool_call` errors and timeouts block execution (fail-closed). Its budget is `extensionHandlers.toolCallTimeoutMs` (default 30,000 ms), paused during extension UI waits.
+- Most dispatched handlers have a 30-second budget; `session_shutdown` handlers run concurrently with a 2-second budget. Timing out stops waiting and cancels handler UI, but cannot undo arbitrary extension side effects.
 - Command name conflicts with built-ins are skipped with diagnostics.
 - Reserved shortcuts are ignored (`ctrl+c`, `ctrl+d`, `ctrl+z`, `ctrl+k`, `ctrl+p`, `ctrl+l`, `ctrl+o`, `ctrl+t`, `ctrl+g`, `ctrl+q`, `alt+m`, `shift+tab`, `shift+ctrl+p`, `alt+enter`, `escape`, `enter`).
 - Treat `ctx.reload()` as terminal for the current command handler frame.
+- Module globals are shared by parent/child bindings. Keep session-specific state in the factory closure or persisted session entries.
 
 ## Extensions vs hooks vs custom-tools
 
 Use the right surface:
 
 - **Extensions** (`src/extensibility/extensions/*`): unified system (events + tools + commands + renderers + provider registration).
-- **Hooks** (`src/extensibility/hooks/*`): separate legacy event API.
+- **Hooks** (`src/extensibility/hooks/*`): legacy `HookAPI` event API. Hook files load through the extension runner, so they run with extension semantics (see [hooks](./hooks.md)).
 - **Custom-tools** (`src/extensibility/custom-tools/*`): tool-focused modules; when loaded alongside extensions they are adapted and still pass through extension interception wrappers.
 
 If you need one package that owns policy, tools, command UX, and rendering together, use extensions.

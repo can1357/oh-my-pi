@@ -14,25 +14,41 @@ runs:
         shell: bash
         run: |
            # bun is baked into the omp-kata runner image — reuse it only when it
-           # matches the repo pin (package.json "packageManager"). A lagging
-           # preloaded bun skews version-sensitive codegen (gen:tool-views) and
-           # test-runner behavior, so a mismatch fetches the pinned build instead.
+           # satisfies the repo pin (package.json "packageManager"). The pin is
+           # either exact ("bun@1.4.2") or a floor ("bun@>=1.4"): an exact pin
+           # installs that build on mismatch, a floor installs latest when the
+           # preloaded bun is older than the floor. A lagging preloaded bun skews
+           # version-sensitive codegen (gen:tool-views) and test-runner behavior.
            want="$(sed -n 's/.*"packageManager": *"bun@\([^"]*\)".*/\1/p' package.json)"
            if [ -z "$want" ]; then
              echo "::error::could not read pinned bun version from package.json packageManager"
              exit 1
            fi
-           echo "bun_version=$want" >> "$GITHUB_OUTPUT"
+           case "$want" in
+             '>='*) floor="${want#>=}"; install="latest" ;;
+             *)     floor="$want";      install="bun-v$want" ;;
+           esac
+           # bun.sh/install takes a release tag argument; "latest" is spelled as no argument.
+           echo "bun_install=$([ "$install" = latest ] || echo "$install")" >> "$GITHUB_OUTPUT"
            have=""
            if command -v bun >/dev/null 2>&1; then
              have="$(bun --version)"
            fi
-           if [ "$have" = "$want" ]; then
+           ok=false
+           if [ -n "$have" ]; then
+             if [ "$install" = latest ]; then
+               # floor satisfied when the floor sorts first (or equal) under sort -V
+               [ "$(printf '%s\n%s\n' "$floor" "$have" | sort -V | head -n1)" = "$floor" ] && ok=true
+             elif [ "$have" = "$want" ]; then
+               ok=true
+             fi
+           fi
+           if [ "$ok" = true ]; then
              echo "setup_bun=false" >> "$GITHUB_OUTPUT"
-             echo "bun present: $have (matches pin)"
+             echo "bun present: $have (satisfies $want)"
            else
              echo "setup_bun=true" >> "$GITHUB_OUTPUT"
-             echo "bun on runner: ${have:-none}; installing pinned $want"
+             echo "bun on runner: ${have:-none}; does not satisfy $want, installing $install"
            fi
            # The repo keys "are we on can.internal infra?" off $BAZEL_REMOTE_USER
            # (the bazel-remote-ci secret is envFrom-injected into every omp-kata
@@ -51,7 +67,9 @@ runs:
         shell: bash
         run: |
            export BUN_INSTALL="${HOME}/.bun"
-           curl -fsSL https://bun.sh/install | bash -s "bun-v${{ steps.env.outputs.bun_version }}"
+           # Unquoted on purpose: an empty tag (floor pin) must pass no argument, which the
+           # script reads as "latest".
+           curl -fsSL https://bun.sh/install | bash -s -- ${{ steps.env.outputs.bun_install }}
            echo "${BUN_INSTALL}/bin" >> "$GITHUB_PATH"
 
       # Off-infra (GitHub-hosted): actions/cache for the bun store, split into
@@ -59,8 +77,8 @@ runs:
       # against the shared 10 GB repo quota — letting every PR branch save its
       # own copy of the ~500 MB store duplicated it 19x, evicting the far more
       # valuable bazel disk-cache archives (which is why release darwin builds
-      # kept going cold). PRs only restore; non-PR runs (main pushes, releases,
-      # dispatches) produce the shared entry every PR can see.
+      # kept going cold). Only main saves: a tag or branch copy is readable by
+      # that ref alone, so it wastes quota; every other ref restores main's.
       - name: Restore bun store (GitHub cache)
         id: bun-cache
         if: steps.env.outputs.cache == 'gha'
@@ -100,10 +118,10 @@ runs:
            retry_cache="$(mktemp -d "${RUNNER_TEMP:-/tmp}/bun-cache-retry.XXXXXX")"
            bun install --frozen-lockfile --cache-dir="$retry_cache"
 
-      # Producer half of the split cache: only non-PR runs save, so the store
-      # exists once per lockfile generation instead of once per PR ref.
+      # Producer half of the split cache: only main saves, so the store exists
+      # once per lockfile generation instead of once per ref.
       - name: Save bun store (GitHub cache)
-        if: steps.env.outputs.cache == 'gha' && github.event_name != 'pull_request' && steps.bun-cache.outputs.cache-hit != 'true'
+        if: steps.env.outputs.cache == 'gha' && github.ref == 'refs/heads/main' && steps.bun-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
            path: ~/.bun/install/cache

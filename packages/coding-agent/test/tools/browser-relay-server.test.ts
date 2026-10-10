@@ -1,11 +1,16 @@
 import { afterEach, describe, expect, it } from "bun:test";
 import { findFreeCdpPort } from "@oh-my-pi/pi-coding-agent/tools/browser/attach";
-import { type RelayServer, startRelayServer } from "@oh-my-pi/pi-coding-agent/tools/browser/relay/server";
+import {
+	type RelayServer,
+	type RelayUnavailableInfo,
+	startRelayServer,
+} from "@oh-my-pi/pi-coding-agent/tools/browser/relay/server";
 
 const EXTENSION_HELLO = {
 	t: "hello",
 	userAgent: "test",
 	browserVersion: "Chrome/151.0.0.0",
+	discardedTabsProtocol: 1,
 	tabs: [],
 	attachedTabIds: [],
 } as const;
@@ -139,10 +144,28 @@ describe("browser relay discovery endpoint", () => {
 		expect(parseVersion(response).webSocketDebuggerUrl).toBe(`ws://127.0.0.1:${port}/cdp`);
 	});
 
-	it("reports 503 while the extension handshake is pending so the relay daemon keeps polling", async () => {
+	it("reports 503 with extensionSeen=false while no extension has ever handshaken", async () => {
 		const port = await findFreeCdpPort();
 		relay = startRelayServer({ port });
 		const response = await fetch(`http://127.0.0.1:${port}/json/version`);
 		expect(response.status).toBe(503);
+		const info = (await response.json()) as RelayUnavailableInfo;
+		expect(info.extensionSeen).toBeFalse();
+		expect(info.uptimeMs).toBeGreaterThanOrEqual(0);
+	});
+
+	it("keeps extensionSeen=true across an extension disconnect so clients wait for the service-worker revival", async () => {
+		const port = await startReadyRelay();
+		extension!.close();
+		const deadline = Date.now() + 1_000;
+		let response = await fetch(`http://127.0.0.1:${port}/json/version`);
+		while (response.status !== 503 && Date.now() < deadline) {
+			response = await fetch(`http://127.0.0.1:${port}/json/version`);
+		}
+		expect(response.status).toBe(503);
+		const info = (await response.json()) as RelayUnavailableInfo;
+		expect(info.extensionSeen).toBeTrue();
+		// Clients measure the redial window from the disconnect.
+		expect(info.disconnectedMs).toBeGreaterThanOrEqual(0);
 	});
 });

@@ -4,7 +4,7 @@ import { Agent, type AgentMessage, type AgentTool } from "@oh-my-pi/pi-agent-cor
 import { createMockModel, type MockModel, type MockResponse } from "@oh-my-pi/pi-ai/providers/mock";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
-import { type SettingPath, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
@@ -18,12 +18,12 @@ type Harness = {
 	session: AgentSession;
 	tempDir: TempDir;
 };
-type SettingsOverrides = Partial<Record<SettingPath, unknown>>;
+type SettingsOverrides = Record<string, unknown>;
 
 const activeHarnesses: Harness[] = [];
 const sharedAuthStorage = createInMemoryAuthStorage();
-sharedAuthStorage.setRuntimeApiKey("mock", "test-key");
-sharedAuthStorage.setRuntimeApiKey("anthropic", "test-key");
+sharedAuthStorage.keys.setRuntime("mock", "test-key");
+sharedAuthStorage.keys.setRuntime("anthropic", "test-key");
 const sharedModelRegistry = new ModelRegistry(sharedAuthStorage);
 
 afterAll(() => {
@@ -72,6 +72,9 @@ async function createHarness(
 
 	const mock = createMockModel({ responses });
 	const modelRegistry = sharedModelRegistry;
+	const getAvailable = modelRegistry.getAvailable.bind(modelRegistry);
+	vi.spyOn(modelRegistry, "getAvailable").mockImplementation(kind => (kind === "all" ? [mock] : getAvailable(kind)));
+	const modelSelector = `${mock.provider}/${mock.id}`;
 	const settings = Settings.isolated({
 		"compaction.enabled": false,
 		"retry.enabled": false,
@@ -79,8 +82,9 @@ async function createHarness(
 		"todo.eager": "default",
 		"todo.reminders": false,
 		...settingsOverrides,
+		modelRoles: { default: modelSelector, judge: modelSelector },
+		"retry.fallbackChains": { judge: [] },
 	});
-	settings.setModelRole("default", `${mock.provider}/${mock.id}`);
 
 	const model = getBundledModel("anthropic", "claude-sonnet-4-5") ?? mock;
 	const sessionManager = SessionManager.inMemory(tempDir.path());
@@ -177,6 +181,21 @@ describe("AgentSession unexpected stop guard", () => {
 		expect(reminderMessages(session.agent.state.messages)).toHaveLength(1);
 	});
 
+	it("delivers retries scheduled by consecutive thinking-only stops before going idle", async () => {
+		const { session, mock } = await createHarness([
+			thinkingOnlyStop("first thought"),
+			thinkingOnlyStop("second thought"),
+			thinkingOnlyStop("third thought"),
+			{ content: ["finished after retries"], stopReason: "stop" },
+		]);
+
+		await session.prompt("do the thing");
+		await session.waitForIdle();
+
+		expect(mock.calls).toHaveLength(4);
+		expect(assistantText(session.agent.state.messages)).toContain("finished after retries");
+	});
+
 	it("does not retry in mechanical mode when text message was delivered", async () => {
 		const spy = vi.spyOn(unexpectedStopClassifier, "classifyUnexpectedStop").mockResolvedValue(true);
 		const { session, mock } = await createHarness([
@@ -220,7 +239,6 @@ describe("AgentSession unexpected stop guard", () => {
 			],
 			{
 				"features.unexpectedStopDetection": "smart",
-				"providers.unexpectedStopModel": "online",
 			},
 		);
 
@@ -257,7 +275,6 @@ describe("AgentSession unexpected stop guard", () => {
 			[unexpectedStop("I should apply the same fix to the JS eval worker. Doing that now.")],
 			{
 				"features.unexpectedStopDetection": "smart",
-				"providers.unexpectedStopModel": "online",
 			},
 		);
 
@@ -281,7 +298,6 @@ describe("AgentSession unexpected stop guard", () => {
 			],
 			{
 				"features.unexpectedStopDetection": "smart",
-				"providers.unexpectedStopModel": "online",
 			},
 		);
 
@@ -300,7 +316,6 @@ describe("AgentSession unexpected stop guard", () => {
 			[recordCall("alpha", "call-record-alpha"), { content: ["tool path complete"], stopReason: "aborted" }],
 			{
 				"features.unexpectedStopDetection": "smart",
-				"providers.unexpectedStopModel": "online",
 			},
 		);
 
@@ -318,7 +333,6 @@ describe("AgentSession unexpected stop guard", () => {
 			[{ content: ["I should continue but hit the length limit"], stopReason: "length" }],
 			{
 				"features.unexpectedStopDetection": "smart",
-				"providers.unexpectedStopModel": "online",
 			},
 		);
 

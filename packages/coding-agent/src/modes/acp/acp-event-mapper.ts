@@ -7,11 +7,13 @@ import type {
 	ToolCallLocation,
 	ToolKind,
 } from "@oh-my-pi/pi-utils/acp";
-import { parseXdUrl } from "../../internal-urls/xd-protocol";
+import { InternalUrlRouter } from "../../internal-urls/router";
+import { extractUriScheme } from "../../internal-urls/parse";
+import type { SchemeSpec } from "../../internal-urls/types";
 import type { AgentSessionEvent } from "../../session/agent-session";
 import { resolveToCwd, splitPathAndSelPreferringLiteralSync } from "../../tools/path-utils";
-import type { TodoStatus } from "../../tools/todo";
-import { canonicalizeMessage } from "../../utils/thinking-display";
+import type { TodoStatus } from "@oh-my-pi/pi-tui/tools/todo";
+import { canonicalizeMessage } from "@oh-my-pi/pi-tui/chat/thinking-display";
 
 interface MessageProgress {
 	textEmitted: boolean;
@@ -134,57 +136,27 @@ interface TextMessageLike {
 
 const ACP_TEXT_LIMIT = 4_000;
 
-/**
- * Device name when the call is an `xd://` device dispatch riding the
- * read/write transport (`write xd://<tool>` executes the mounted tool,
- * `read xd://` is discovery). Returns `undefined` for plain file paths.
- */
-function xdevDispatchDevice(toolName: string, args: unknown): string | undefined {
-	if (toolName !== "write" && toolName !== "read") return undefined;
+/** Declared spec of the registered scheme a `write` call targets; undefined for file paths and other tools. */
+function writeTargetSpec(toolName: string, args: unknown): SchemeSpec | undefined {
+	if (toolName !== "write") return undefined;
 	const path = extractStringProperty<PathContainer>(args, "path");
 	if (!path) return undefined;
-	return parseXdUrl(path)?.name ?? undefined;
+	const router = InternalUrlRouter.instance();
+	const scheme = extractUriScheme(path);
+	return scheme && router.canHandle(path) ? router.spec(scheme) : undefined;
 }
 
-/** Whether a Hub call carries peer-to-peer coordination rather than process control. */
-function isInternalHubMessageTool(toolName: string, args: unknown): boolean {
-	let hubArgs = args;
-	if (toolName !== "hub") {
-		if (xdevDispatchDevice(toolName, args) !== "hub" || typeof args !== "object" || args === null) {
-			return false;
-		}
-		const content = Reflect.get(args, "content");
-		if (typeof content !== "string") return false;
-		try {
-			hubArgs = JSON.parse(content);
-		} catch {
-			return false;
-		}
-	}
-	if (typeof hubArgs !== "object" || hubArgs === null) return false;
-	const op = Reflect.get(hubArgs, "op");
-	switch (op) {
-		case "list":
-		case "inbox":
-			return true;
-		case "send":
-			return typeof Reflect.get(hubArgs, "to") === "string";
-		case "wait":
-			// A bare wait or an `ids` wait settles on background-job delivery,
-			// whose snapshot IS the job result (hub.md) — keep those visible.
-			// Only a peer-scoped wait (`from`, no jobs) is internal messaging.
-			return typeof Reflect.get(hubArgs, "from") === "string" && Reflect.get(hubArgs, "ids") === undefined;
-		default:
-			return false;
-	}
+/** Peer-to-peer messages (coordination-scoped writes) stay off the external ACP session stream. */
+function isInternalAgentMessageTool(toolName: string, args: unknown): boolean {
+	return writeTargetSpec(toolName, args)?.write?.scope === "coordination";
 }
 
 export function mapToolKind(toolName: string, args?: unknown): ToolKind {
-	// An xd:// device write executes the mounted tool — "edit" would make ACP
-	// clients render it as a file modification to a nonexistent path (and
-	// auto-approve it under edit-tier policies). Reads stay "read": listing
-	// devices or fetching docs is discovery.
-	if (toolName === "write" && xdevDispatchDevice(toolName, args)) return "execute";
+	// A device write (xd:// tool dispatch, proc:// control) executes something —
+	// "edit" would make ACP clients render it as a file modification to a
+	// nonexistent path (and auto-approve it under edit-tier policies). Reads
+	// stay "read": listing devices or fetching docs is discovery.
+	if (writeTargetSpec(toolName, args)?.backing === "device") return "execute";
 	switch (toolName) {
 		case "read":
 			return "read";
@@ -224,7 +196,7 @@ export function mapAgentSessionEventToAcpSessionUpdates(
 		case "message_end":
 			return mapAssistantMessageEnd(event, sessionId, options);
 		case "tool_execution_start": {
-			if (isInternalHubMessageTool(event.toolName, event.args)) return [];
+			if (isInternalAgentMessageTool(event.toolName, event.args)) return [];
 			const update = buildToolCallStartUpdate({
 				toolCallId: event.toolCallId,
 				toolName: event.toolName,
@@ -235,7 +207,7 @@ export function mapAgentSessionEventToAcpSessionUpdates(
 			return [toSessionNotification(sessionId, update)];
 		}
 		case "tool_execution_update": {
-			if (isInternalHubMessageTool(event.toolName, event.args)) return [];
+			if (isInternalAgentMessageTool(event.toolName, event.args)) return [];
 			const content = mergeToolUpdateContent(
 				buildToolStartContent(event.toolName, event.args),
 				extractToolCallContent(event.partialResult, options),
@@ -257,7 +229,7 @@ export function mapAgentSessionEventToAcpSessionUpdates(
 		}
 		case "tool_execution_end": {
 			const args = getToolExecutionEndArgs(event, options);
-			if (isInternalHubMessageTool(event.toolName, args)) return [];
+			if (isInternalAgentMessageTool(event.toolName, args)) return [];
 			const resultContent = [
 				...extractDiffToolCallContent(event.result),
 				...extractToolCallContent(event.result, options),
@@ -1024,7 +996,7 @@ function extractReadableText(value: unknown): string | undefined {
 		// A structured result envelope (`{ content: [...] }`) whose blocks carry no
 		// plain text has nothing readable to surface, and its data already rides the
 		// ACP frame as `rawOutput`. Serializing the whole envelope to JSON would just
-		// render a raw blob as the tool row (e.g. hub wait progress, issue #9511), so
+		// render a raw blob as the tool row (e.g. wait progress, issue #9511), so
 		// stop here instead of falling through to the JSON fallback.
 		return undefined;
 	}

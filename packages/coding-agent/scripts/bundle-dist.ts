@@ -4,13 +4,14 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { isEnoent } from "@oh-my-pi/pi-utils";
 import { buildDocsIndexPayload } from "./generate-docs-index";
+import { createJsonParsePlugin } from "./json-parse-plugin";
 import { createLegacyPiVirtualModulePlugin } from "./legacy-pi-virtual-module";
 
 const packageDir = path.join(import.meta.dir, "..");
-const outDir = path.join(packageDir, "dist");
-const cliPath = path.join(outDir, "cli.js");
+const defaultOutDir = path.join(packageDir, "dist");
 const shebang = "#!/usr/bin/env bun\n";
-const legacyHtmlExportAssetPattern = /^(?:template-[^.]+\.(?:css|html|js)|tool-views\.generated-[^.]+\.js)$/;
+const htmlExportAssetPattern =
+	/^(?:template-[^.]+\.(?:css|html|js)|tool-views\.generated-[^.]+\.js|(?:marked|highlight)\.min-[^.]+\.js)$/;
 
 // Native / optional / platform-specific deps are loaded from installed files.
 const ALWAYS_EXTERNAL = ["@oh-my-pi/pi-natives", "@huggingface/transformers", "fastembed", "onnxruntime-node"];
@@ -34,7 +35,7 @@ async function runCommand(command: string[]): Promise<void> {
 	if (exitCode !== 0) throw new Error(`Command failed with exit code ${exitCode}: ${command.join(" ")}`);
 }
 
-async function ensureShebang(): Promise<void> {
+async function ensureShebang(cliPath: string): Promise<void> {
 	const text = await Bun.file(cliPath).text();
 	if (text.startsWith(shebang)) return;
 	const withoutExisting = text.startsWith("#!") ? text.slice(text.indexOf("\n") + 1) : text;
@@ -46,7 +47,7 @@ function formatBytes(bytes: number): string {
 	return `${(bytes / (1024 * 1024)).toFixed(2)}MB`;
 }
 
-async function cleanBundleOutputs(): Promise<void> {
+async function cleanBundleOutputs(outDir: string): Promise<void> {
 	// dist/ is shared with the dev binary (dist/omp); only remove assets
 	// emitted by this script.
 	let entries: string[];
@@ -65,15 +66,17 @@ async function cleanBundleOutputs(): Promise<void> {
 					entry.endsWith(".node") ||
 					entry.endsWith(".js.map") ||
 					(entry.startsWith("CHANGELOG-") && entry.endsWith(".md")) ||
-					legacyHtmlExportAssetPattern.test(entry),
+					htmlExportAssetPattern.test(entry),
 			)
 			.map(entry => fs.rm(path.join(outDir, entry), { force: true })),
 	);
 }
 
-async function main(): Promise<void> {
+/** Builds the npm CLI bundle into `outDir`; release scripts use the package `dist` directory by default. */
+export async function bundleDist(outDir: string = defaultOutDir): Promise<void> {
+	const cliPath = path.join(outDir, "cli.js");
 	const start = Bun.nanoseconds();
-	await cleanBundleOutputs();
+	await cleanBundleOutputs(outDir);
 	// The npm bundle ships no stats dashboard sources, so embed the dashboard
 	// archive the same way compiled binaries do (scripts/build-binary.ts). Reset
 	// afterwards to keep the checked-in placeholder empty.
@@ -91,7 +94,7 @@ async function main(): Promise<void> {
 			entrypoints: [path.join(packageDir, "src/cli.ts")],
 			outdir: outDir,
 			target: "bun",
-			plugins: [await createLegacyPiVirtualModulePlugin()],
+			plugins: [createJsonParsePlugin(), await createLegacyPiVirtualModulePlugin()],
 			external: [...ALWAYS_EXTERNAL, ...RUNTIME_EXTERNAL],
 			define: {
 				"process.env.PI_BUNDLED": JSON.stringify("true"),
@@ -108,7 +111,7 @@ async function main(): Promise<void> {
 		if (!output.success) {
 			throw new Error(`CLI bundle failed:\n${output.logs.map(log => log.message).join("\n")}`);
 		}
-		await ensureShebang();
+		await ensureShebang(cliPath);
 		await Bun.write(path.join(outDir, "docs-index.generated.txt"), docsPayload.payload);
 	} finally {
 		await runCommand(["bun", "--cwd=../stats", "run", "gen:stats:reset"]);
@@ -116,8 +119,8 @@ async function main(): Promise<void> {
 	const stat = await fs.stat(cliPath);
 	const elapsedMs = (Bun.nanoseconds() - start) / 1_000_000;
 	process.stdout.write(
-		`Bundled coding-agent CLI to dist/cli.js (${formatBytes(stat.size)}) in ${elapsedMs.toFixed(0)}ms\n`,
+		`Bundled coding-agent CLI to ${cliPath} (${formatBytes(stat.size)}) in ${elapsedMs.toFixed(0)}ms\n`,
 	);
 }
 
-await main();
+if (import.meta.main) await bundleDist();

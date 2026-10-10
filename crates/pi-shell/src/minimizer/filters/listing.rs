@@ -1,6 +1,10 @@
 //! Filesystem listing and search filters.
 
-use std::{collections::BTreeMap, path::Path, sync::LazyLock};
+use std::{
+	collections::{BTreeMap, HashSet},
+	path::Path,
+	sync::LazyLock,
+};
 
 use regex::Regex;
 
@@ -31,10 +35,12 @@ fn find_outputs_paths_only(command: &str) -> bool {
 			"-print0"
 				| "-printf"
 				| "-fprintf"
-				| "-ls" | "-fls"
+				| "-ls"
+				| "-fls"
 				| "-exec"
 				| "-execdir"
-				| "-ok" | "-okdir"
+				| "-ok"
+				| "-okdir"
 		)
 	})
 }
@@ -231,15 +237,17 @@ fn center_truncate_match(text: &str, max_chars: usize) -> String {
 	}
 
 	// Heuristic:
-	// - If the line has significant leading whitespace, bias toward the code region
-	//   shortly after indentation (common for grep hits inside indented code).
-	// - If the line is effectively one long token, bias earlier so identifiers that
-	//   appear before a long suffix still remain visible.
+	// - If the line has significant leading whitespace, bias toward the code
+	//   region shortly after indentation (common for grep hits inside indented
+	//   code).
+	// - If the line is effectively one long token, bias earlier so identifiers
+	//   that appear before a long suffix still remain visible.
 	// - Otherwise center in the middle of the full line.
 	// Count leading whitespace in CHARS, not bytes: this value is compared and
-	// combined with char-based quantities (`char_count`, `max_chars`) and used as
-	// a char-stepping floor below. `str::find` returns a byte offset, which would
-	// overstate the index for any multibyte leading whitespace (NBSP, U+3000).
+	// combined with char-based quantities (`char_count`, `max_chars`) and used
+	// as a char-stepping floor below. `str::find` returns a byte offset, which
+	// would overstate the index for any multibyte leading whitespace (NBSP,
+	// U+3000).
 	let first_non_ws = text.chars().take_while(|c| c.is_whitespace()).count();
 	let has_whitespace = text.chars().any(char::is_whitespace);
 	let anchor = if first_non_ws > 0 && first_non_ws < char_count / 3 {
@@ -785,15 +793,21 @@ fn is_source_path(path: &str) -> bool {
 	matches!(
 		ext,
 		"rs"
-			| "ts" | "tsx"
-			| "js" | "jsx"
-			| "py" | "go"
+			| "ts"
+			| "tsx"
+			| "js"
+			| "jsx"
+			| "py"
+			| "go"
 			| "java"
-			| "c" | "cc"
+			| "c"
+			| "cc"
 			| "cpp"
-			| "h" | "hpp"
+			| "h"
+			| "hpp"
 			| "swift"
-			| "kt" | "rb"
+			| "kt"
+			| "rb"
 	)
 }
 
@@ -825,7 +839,7 @@ fn compact_source_outline(input: &str, path: &str, level: OutlineLevel) -> Strin
 		}
 	}
 
-	if has_content(&out) {
+	if primitives::has_content(&out) {
 		out.push('\n');
 	}
 
@@ -1152,38 +1166,31 @@ fn strip_python_bodies(input: &str) -> String {
 }
 
 fn compact_summary_output(input: &str, program: &str) -> String {
-	let lines: Vec<&str> = input.lines().collect();
+	let mut lines: Vec<&str> = input.lines().collect();
 	if lines.len() <= 30 {
 		return input.to_string();
 	}
 
-	let input = if program == "df" {
-		let kept: Vec<&str> = lines
-			.into_iter()
-			.filter(|line| {
-				let trimmed = line.trim_start();
-				if trimmed.starts_with("overlay") || trimmed.starts_with("none") {
-					// Keep container root: overlay/none mounted at "/"
-					return trimmed.split_whitespace().last() == Some("/");
-				}
-				!trimmed.starts_with("tmpfs")
-					&& !trimmed.starts_with("devtmpfs")
-					&& !trimmed.starts_with("udev")
-					&& !trimmed.starts_with("shm")
-			})
-			.collect();
-		kept.join("\n")
-	} else {
-		lines.join("\n")
-	};
+	if program == "df" {
+		lines.retain(|line| {
+			let trimmed = line.trim_start();
+			if trimmed.starts_with("overlay") || trimmed.starts_with("none") {
+				// Keep container root: overlay/none mounted at "/"
+				return trimmed.split_whitespace().last() == Some("/");
+			}
+			!trimmed.starts_with("tmpfs")
+				&& !trimmed.starts_with("devtmpfs")
+				&& !trimmed.starts_with("udev")
+				&& !trimmed.starts_with("shm")
+		});
+	}
 
-	let lines: Vec<&str> = input.lines().collect();
-	let windowed = primitives::head_tail_lines(&input, 12, 12);
+	let windowed = primitives::head_tail_of_lines(&lines, 12, 12);
+	let shown: HashSet<&str> = windowed.lines().collect();
+	let mut emitted = HashSet::new();
 	let mut out = String::new();
-	for line in lines.iter().copied().filter(|line| is_summary_line(line)) {
-		if !windowed.lines().any(|existing| existing == line)
-			&& !out.lines().any(|existing| existing == line)
-		{
+	for &line in &lines {
+		if is_summary_line(line) && !shown.contains(line) && emitted.insert(line) {
 			out.push_str(line);
 			out.push('\n');
 		}
@@ -1193,18 +1200,25 @@ fn compact_summary_output(input: &str, program: &str) -> String {
 }
 
 fn is_summary_line(line: &str) -> bool {
-	let trimmed = line.trim();
-	let lower = trimmed.to_ascii_lowercase();
-	trimmed == "total"
-		|| lower.starts_with("total ")
-		|| lower.ends_with(" total")
-		|| lower.starts_with("filesystem")
-		|| lower.contains(" mounted on")
-		|| lower.contains(" files ")
-}
-
-fn has_content(text: &str) -> bool {
-	text.lines().any(|line| !line.trim().is_empty())
+	let trimmed = line.trim().as_bytes();
+	let contains = |needle: &[u8]| {
+		trimmed
+			.windows(needle.len())
+			.any(|window| window.eq_ignore_ascii_case(needle))
+	};
+	trimmed == b"total"
+		|| trimmed
+			.get(..6)
+			.is_some_and(|prefix| prefix.eq_ignore_ascii_case(b"total "))
+		|| trimmed
+			.len()
+			.checked_sub(6)
+			.is_some_and(|start| trimmed[start..].eq_ignore_ascii_case(b" total"))
+		|| trimmed
+			.get(..10)
+			.is_some_and(|prefix| prefix.eq_ignore_ascii_case(b"filesystem"))
+		|| contains(b" mounted on")
+		|| contains(b" files ")
 }
 
 #[cfg(test)]
@@ -1282,15 +1296,15 @@ mod tests {
 		let line = format!("{indent}{body}");
 		assert!(line.chars().count() > 140, "test line must exceed max_chars");
 		let out = center_truncate_match(&line, 140);
-		// Should show leading … (indentation was skipped), centered code, and …[+N]
-		// tally.
+		// Should show leading … (indentation was skipped), centered code, and
+		// …[+N] tally.
 		assert!(out.starts_with('\u{2026}'), "should start with …: {out}");
 		assert!(out.ends_with(']'), "should end with tally: {out}");
 		assert!(out.contains("result"), "match region 'result' should be visible: {out}");
 		assert!(out.contains("arg5"), "middle args should be visible: {out}");
-		// Should NOT show the raw "let result" from the very front (since indentation
-		// was dropped). But it might appear inside the window. The key assertion:
-		// leading indent chars are dropped.
+		// Should NOT show the raw "let result" from the very front (since
+		// indentation was dropped). But it might appear inside the window. The
+		// key assertion: leading indent chars are dropped.
 		let after_ellipsis = &out['\u{2026}'.len_utf8()..];
 		assert!(
 			!after_ellipsis.starts_with(' '),
@@ -1324,7 +1338,8 @@ mod tests {
 		let line = format!("{prefix}{marker}{suffix}");
 		assert!(line.chars().count() > 140, "test line must exceed max_chars");
 		let out = center_truncate_match(&line, 140);
-		// marker starts at char 40, window is centered, should include the marker.
+		// marker starts at char 40, window is centered, should include the
+		// marker.
 		assert!(out.contains(marker), "match should be visible: {out}");
 	}
 
@@ -1344,7 +1359,8 @@ mod tests {
 		let line = "a".repeat(141);
 		let out = center_truncate_match(&line, 140);
 		assert!(out.contains("\u{2026}[+"), "should have tally: {out}");
-		// With 141 chars, centering produces window_start=0, shows 140 a's, drops 1.
+		// With 141 chars, centering produces window_start=0, shows 140 a's, drops
+		// 1.
 		let content_chars: String = out.chars().filter(|c| *c == 'a').collect();
 		assert_eq!(content_chars.len(), 140);
 	}

@@ -353,4 +353,123 @@ describe("beam consolidation free functions", () => {
 		const facts = beam.db.query("SELECT COUNT(*) AS count FROM memoria_facts").get() as { count: number };
 		expect(facts.count).toBe(0);
 	});
+
+	it("metric prefix stops at a markdown table pipe, not 50 raw chars back (regression, garbled-metric-facts audit 2026-09-03)", () => {
+		const beam = trackedState();
+		// Real garbled sample from a live bank: "iam-role_smrx/sm-secrets_ssm-parameters_api" -> "2api",
+		// produced when the 50-char lookbehind crossed a table row's pipe delimiters and glued
+		// three unrelated cells together.
+		const text = "| iam-role | smrx/sm-secrets | ssm-parameters | uses 2 APIs |\n";
+		extractAndStoreFacts(beam, text, 1, "table-row-source");
+
+		const rows = beam.db.query("SELECT subject, object FROM facts WHERE predicate = 'metric'").all() as Array<{
+			subject: string;
+			object: string;
+		}>;
+		expect(rows.length).toBeGreaterThanOrEqual(1);
+		for (const row of rows) {
+			expect(row.subject).not.toContain("iam-role");
+			expect(row.subject).not.toContain("secrets");
+			expect(row.subject).not.toContain("ssm-parameters");
+		}
+		expect(rows.some(row => row.subject === "uses_api")).toBe(true);
+	});
+
+	it("metric prefix stops at a sentence boundary, not 50 raw chars back", () => {
+		const beam = trackedState();
+		// Real garbled sample: "owns_both+rewrote_one_second" -> "30seconds", from a run-on
+		// sentence where the lookbehind crossed a period into an unrelated prior clause.
+		const text = "Alice owns both services. Bob rewrote the migration step in 30 seconds flat.\n";
+		extractAndStoreFacts(beam, text, 1, "sentence-source");
+
+		const rows = beam.db.query("SELECT subject, object FROM facts WHERE predicate = 'metric'").all() as Array<{
+			subject: string;
+			object: string;
+		}>;
+		expect(rows.length).toBeGreaterThanOrEqual(1);
+		for (const row of rows) {
+			expect(row.subject).not.toContain("owns");
+			expect(row.subject).not.toContain("both");
+		}
+	});
+
+	it("still extracts a clean metric key from a normal single-line sentence (no false negatives)", () => {
+		const beam = trackedState();
+		const text = "The p99 response time is 250ms under load.\n";
+		extractAndStoreFacts(beam, text, 1, "clean-source");
+
+		const rows = beam.db.query("SELECT subject, object FROM facts WHERE predicate = 'metric'").all() as Array<{
+			subject: string;
+			object: string;
+		}>;
+		expect(rows.length).toBe(1);
+		expect(rows[0]?.subject).toBe("p99_response_time_ms");
+		expect(rows[0]?.object).toBe("250ms");
+	});
+
+	it("still extracts known-good short technical metric names that trip the review script's heuristic", () => {
+		const beam = trackedState();
+		const text = "The imdsv2 max lifetime is 15 days by policy.\n";
+		extractAndStoreFacts(beam, text, 1, "short-key-source");
+
+		const rows = beam.db.query("SELECT subject, object FROM facts WHERE predicate = 'metric'").all() as Array<{
+			subject: string;
+			object: string;
+		}>;
+		expect(rows.length).toBe(1);
+		expect(rows[0]?.subject).toBe("imdsv2_max_lifetime_day");
+		expect(rows[0]?.object).toBe("15days");
+	});
+
+	it("does not treat a version/decimal dot as a sentence boundary (regression, blocker-review fix)", () => {
+		const beam = trackedState();
+		// "v1.2" and "3.14"-style dots must NOT truncate the prefix window: only a `.` followed
+		// by whitespace (a real sentence end) is a boundary. Before this correction, the naive
+		// `[.!?;]` boundary set treated every literal dot as a break, silently dropping
+		// "Deployed" from the key and changing extraction behavior for ordinary version mentions.
+		const text = "Deployed v1.2 migration finished in 30 seconds flat.\n";
+		extractAndStoreFacts(beam, text, 1, "version-dot-source");
+
+		const rows = beam.db.query("SELECT subject, object FROM facts WHERE predicate = 'metric'").all() as Array<{
+			subject: string;
+			object: string;
+		}>;
+		expect(rows.length).toBe(1);
+		expect(rows[0]?.subject).toBe("v12_migration_finished_second");
+		expect(rows[0]?.object).toBe("30seconds");
+	});
+
+	it("still truncates at a real sentence-ending period even when an earlier version dot is present", () => {
+		const beam = trackedState();
+		// Confirms the fix distinguishes "v1.2" (decimal, not a boundary) from the period that
+		// actually ends the first sentence -- the extractor must still stop there.
+		const text = "Deployed v1.2. Migration finished in 30 seconds flat.\n";
+		extractAndStoreFacts(beam, text, 1, "sentence-after-version-source");
+
+		const rows = beam.db.query("SELECT subject, object FROM facts WHERE predicate = 'metric'").all() as Array<{
+			subject: string;
+			object: string;
+		}>;
+		expect(rows.length).toBe(1);
+		expect(rows[0]?.subject).toBe("migration_finished_second");
+		expect(rows[0]?.subject).not.toContain("v1");
+		expect(rows[0]?.subject).not.toContain("deployed");
+	});
+
+	it("does not leak words from before a backtick code span into the metric key", () => {
+		const beam = trackedState();
+		// The backtick boundary must stop the window at the code span, not just mask its
+		// contents -- otherwise words before the span could still glue onto the key.
+		const text = "Run `npm install --legacy-peer-deps` then wait about 30 seconds for it to finish.\n";
+		extractAndStoreFacts(beam, text, 1, "backtick-source");
+
+		const rows = beam.db.query("SELECT subject, object FROM facts WHERE predicate = 'metric'").all() as Array<{
+			subject: string;
+			object: string;
+		}>;
+		expect(rows.length).toBe(1);
+		expect(rows[0]?.subject).not.toContain("npm");
+		expect(rows[0]?.subject).not.toContain("install");
+		expect(rows[0]?.subject).not.toContain("run");
+	});
 });

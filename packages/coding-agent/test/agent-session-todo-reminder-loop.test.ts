@@ -21,7 +21,7 @@ import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
  * (e.g. called `todo` or `edit`) between the prior reminder and the next stop.
  */
 const sharedAuthStorage = createInMemoryAuthStorage();
-sharedAuthStorage.setRuntimeApiKey("anthropic", "test-key");
+sharedAuthStorage.keys.setRuntime("anthropic", "test-key");
 const sharedModelRegistry = new ModelRegistry(sharedAuthStorage);
 
 afterAll(() => {
@@ -181,6 +181,30 @@ describe("AgentSession todo reminder self-continuation suppression", () => {
 		expect(continueSpy).not.toHaveBeenCalled();
 	});
 
+	it.each(["**What should I do next?**", "*What should I do next?*", "***What should I do next?***"])(
+		"does not remind when the assistant emphasizes its own question: %s",
+		async text => {
+			const continueSpy = vi.spyOn(session.agent, "continue").mockResolvedValue();
+
+			emitTextOnlyStop(text);
+			await session.waitForIdle();
+
+			expect(reminderAttempts).toEqual([]);
+			expect(todoReminderTranscriptEntry()).toBeUndefined();
+			expect(continueSpy).not.toHaveBeenCalled();
+		},
+	);
+
+	it("still reminds when the assistant strikes through its own question", async () => {
+		vi.spyOn(session.agent, "continue").mockResolvedValue();
+
+		emitTextOnlyStop("~~What should I do next?~~");
+		await session.waitForIdle();
+
+		expect(reminderAttempts).toEqual([1]);
+		expect(todoReminderTranscriptEntry()).toBeDefined();
+	});
+
 	it("does not remind or continue when the assistant yields with a non-English (Chinese) question", async () => {
 		const continueSpy = vi.spyOn(session.agent, "continue").mockResolvedValue();
 
@@ -190,6 +214,40 @@ describe("AgentSession todo reminder self-continuation suppression", () => {
 		expect(reminderAttempts).toEqual([]);
 		expect(todoReminderTranscriptEntry()).toBeUndefined();
 		expect(continueSpy).not.toHaveBeenCalled();
+	});
+
+	it.each([
+		"Go with A?",
+		[
+			"Next question, which decides the sandbox: **do your prototypes need network access?**",
+			"",
+			"1. **Fully offline.** Inline CSS and JS only.",
+			"2. **Read-only CDN access.** Load scripts, styles, fonts and images over HTTPS.",
+			"3. **Unrestricted.** Anything the page asks for.",
+			"",
+			"I'd recommend 2. Offline mode would break mocks that use CDN assets.",
+		].join("\n"),
+		"Which approach?\n1. MCP tool\n2. Markdown fence\n\nI recommend the MCP tool.",
+	])("does not resume an unanswered choice prompt: %s", async text => {
+		const continueSpy = vi.spyOn(session.agent, "continue").mockResolvedValue();
+
+		emitTextOnlyStop(text);
+		await session.waitForIdle();
+
+		expect(reminderAttempts).toEqual([]);
+		expect(todoReminderTranscriptEntry()).toBeUndefined();
+		expect(continueSpy).not.toHaveBeenCalled();
+	});
+
+	it("still resumes unfinished work after a question-headed status list", async () => {
+		const continueSpy = vi.spyOn(session.agent, "continue").mockResolvedValue();
+
+		emitTextOnlyStop("Finished slice 81.\n\n**What's left?**\n- Slice 82\n- Slice 83");
+		await session.waitForIdle();
+
+		expect(reminderAttempts).toEqual([1]);
+		expect(todoReminderTranscriptEntry()).toBeDefined();
+		expect(continueSpy).toHaveBeenCalledTimes(1);
 	});
 
 	it("still reminds when the assistant answers its own prompt-shaped question", async () => {

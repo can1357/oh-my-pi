@@ -1,6 +1,9 @@
 // Provider-wire compat for "github-copilot"; regenerated from the frozen census using deployment contract selectors.
 
 provider "github-copilot" {
+	default-model "gpt-5.5"
+	env "COPILOT_GITHUB_TOKEN"
+
 	// Replaces the strict-mode provider whitelist entry.
 	supports-strict-mode #true
 	// Replaces Anthropic request-builder provider checks: Copilot rejects strict
@@ -58,5 +61,44 @@ provider "github-copilot" {
 	// Discovered rows ride the openai-responses primary route.
 	models "grok-4.6" "grok-4.6-1m" {
 		thinking-efforts "minimal" "low" "medium" "high" "xhigh"
+	}
+	// Copilot bills these OpenAI flagships in two tiers: the default tier ends
+	// at 272K prompt tokens and the long tier is served as the opt-in `-1m`
+	// sibling synthesized from `billing.token_prices.long_context`. Bundled and
+	// cached rows carry the long tier's 1.05M ceiling as the base window, and
+	// the Copilot rows carry no `cost.longContext`, so the standard-pricing cap
+	// had nothing to key on and every session started on the premium tier.
+	// Keep the default tier explicit; `/extended-context on` restores the full
+	// window. Exact ids only — the `-1m` siblings are the long tier itself.
+	models "gpt-5.6-sol" "gpt-5.6-luna" "gpt-5.6-terra" "gpt-6-astra" {
+		limits-patch {
+			context-window 272000
+		}
+		max-context-window 1050000
+	}
+	// Claude Haiku 5.5: `billing.token_prices` reports its input/output rates
+	// but no cache legs, so discovered rows priced cache reads and writes at
+	// $0. Copilot's rate card bills $0.01 read / $0.125 write up to 100K and
+	// $0.05 / $0.625 on the long tier (the `-1m` sibling).
+	// https://docs.github.com/en/copilot/reference/copilot-billing/models-and-pricing
+	// Copilot serves that tier as the `-1m` row (promotion target of the base
+	// row), so both rows opt out of the class-wide 100K 5x band: the base row
+	// would otherwise bill the band on top of the promotion, and the `-1m`
+	// row would charge 5x twice.
+	models "claude-haiku-5.5" {
+		cost-patch {
+			cache-read 0.01
+			cache-write 0.125
+		}
+		long-context-cost {
+		}
+	}
+	models "claude-haiku-5.5-1m" {
+		cost-patch {
+			cache-read 0.05
+			cache-write 0.625
+		}
+		long-context-cost {
+		}
 	}
 }

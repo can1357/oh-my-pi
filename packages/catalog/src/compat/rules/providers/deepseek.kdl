@@ -1,6 +1,10 @@
 // Provider-wire compat for "deepseek"; regenerated from the frozen census using deployment contract selectors.
 
 provider "deepseek" {
+	default-model "deepseek-v4-pro"
+	env "DEEPSEEK_API_KEY"
+	discovery label="DeepSeek"
+
 	extra-body {
 		thinking {
 			type "enabled"
@@ -13,8 +17,8 @@ provider "deepseek" {
 	// First-party peak USD / 1M tokens; all other UTC hours receive 50% off.
 	// Source: https://api-docs.deepseek.com/quick_start/pricing (2026-09-10).
 	// residue: the pricing page's Flash-priced names, not a taxonomy family: the
-	// bare alias carries no family, and the retired `v4-flash`/`-vision-exp` ids
-	// are still accepted and billed at the Flash card.
+	// retired `v4-flash`/`-vision-exp` ids are still accepted and billed at the
+	// Flash card.
 	models "deepseek-flash" "deepseek-v4-flash" "deepseek-v4-flash-vision-exp" {
 		clamp-output-to-model-max #true
 		time-based-cost {
@@ -39,9 +43,9 @@ provider "deepseek" {
 			cache-write 0
 		}
 	}
-	// residue: upstream discovery has not seeded the bare alias's limits; the
-	// pricing page documents this SKU (DeepSeek-V4.1-Flash) as 1M context / 384K
-	// output, and without them the agent cannot enforce its context budget.
+	// residue: the pricing page documents this SKU (DeepSeek-V4.1-Flash) as 1M
+	// context / 384K output; pinned as a reviewed correction so the documented
+	// window survives an upstream metadata gap.
 	models "deepseek-flash" {
 		limits-patch {
 			context-window 1000000

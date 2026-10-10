@@ -111,14 +111,15 @@ describe("startup model cache header restoration (#5780)", () => {
 			},
 		});
 		await primedRegistry.refreshProvider("probe", "online");
-		expect(primedRegistry.find("probe", "probe-model")?.headers?.Authorization).toBe("Bearer test-key");
+		const primed = primedRegistry.find("probe", "probe-model");
+		expect(primed && (await primedRegistry.resolveModelHeaders(primed))?.Authorization).toBe("Bearer test-key");
 		const cacheDbPath = path.join(tempDir, "models.db");
 		const restartedRegistry = new ModelRegistry(authStorage, modelsPath, {
 			fetch: () => Promise.reject(new Error("offline")),
 		});
 		const cached = restartedRegistry.find("probe", "probe-model");
 		expect(cached).toBeDefined();
-		expect(cached?.headers?.Authorization).toBe("Bearer test-key");
+		expect(cached && (await restartedRegistry.resolveModelHeaders(cached))?.Authorization).toBe("Bearer test-key");
 
 		const oldCacheDb = new Database(cacheDbPath);
 		oldCacheDb.run("UPDATE model_cache SET unrestorable_header_model_ids = ?", [JSON.stringify(["probe-model"])]);
@@ -126,14 +127,21 @@ describe("startup model cache header restoration (#5780)", () => {
 		const upgradedRegistry = new ModelRegistry(authStorage, modelsPath, {
 			fetch: () => Promise.reject(new Error("offline")),
 		});
-		expect(upgradedRegistry.find("probe", "probe-model")?.headers?.Authorization).toBe("Bearer test-key");
+		const upgraded = upgradedRegistry.find("probe", "probe-model");
+		expect(upgraded && (await upgradedRegistry.resolveModelHeaders(upgraded))?.Authorization).toBe("Bearer test-key");
 		upgradedRegistry.refreshInBackground();
 		await upgradedRegistry.awaitBackgroundRefresh();
-		expect(upgradedRegistry.find("probe", "probe-model")?.headers?.Authorization).toBe("Bearer test-key");
+		const refreshed = upgradedRegistry.find("probe", "probe-model");
+		expect(refreshed && (await upgradedRegistry.resolveModelHeaders(refreshed))?.Authorization).toBe(
+			"Bearer test-key",
+		);
 
 		const nextRestartRegistry = new ModelRegistry(authStorage, modelsPath, {
 			fetch: () => Promise.reject(new Error("offline")),
 		});
-		expect(nextRestartRegistry.find("probe", "probe-model")?.headers?.Authorization).toBe("Bearer test-key");
+		const nextRestart = nextRestartRegistry.find("probe", "probe-model");
+		expect(nextRestart && (await nextRestartRegistry.resolveModelHeaders(nextRestart))?.Authorization).toBe(
+			"Bearer test-key",
+		);
 	});
 });

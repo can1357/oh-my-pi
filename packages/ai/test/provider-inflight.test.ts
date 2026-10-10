@@ -2,14 +2,16 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { clearCustomApis } from "@oh-my-pi/pi-ai/api-registry";
 import { createMockModel, registerMockApi } from "@oh-my-pi/pi-ai/providers/mock";
 import {
 	__providerInFlightForTesting,
 	configureProviderMaxInFlightRequests,
+	stream,
 	streamSimple,
 } from "@oh-my-pi/pi-ai/stream";
-import type { Context } from "@oh-my-pi/pi-ai/types";
+import type { Context, Model, RawSseEvent } from "@oh-my-pi/pi-ai/types";
 
 function context(): Context {
 	return {
@@ -28,6 +30,11 @@ afterEach(async () => {
 	__providerInFlightForTesting.setHeartbeatWriter(undefined);
 	__providerInFlightForTesting.setLeaseRemover(undefined);
 	__providerInFlightForTesting.setWaitObserver(undefined);
+	__providerInFlightForTesting.setLockCreatedObserver(undefined);
+	__providerInFlightForTesting.setLockIdentifiedObserver(undefined);
+	__providerInFlightForTesting.setLockMkdirOverride(undefined);
+	__providerInFlightForTesting.setLockPlatformOverride(undefined);
+	__providerInFlightForTesting.setLockRetryTimings(undefined);
 	if (limiterRoot !== undefined) {
 		await fs.rm(limiterRoot, { recursive: true, force: true });
 		limiterRoot = undefined;
@@ -95,6 +102,68 @@ describe("provider in-flight request limits", () => {
 		expect(maxActive).toBe(1);
 		expect(mock.calls).toHaveLength(2);
 	});
+
+	test("holds a completions permit until a trailing [DONE] reaches the gateway", async () => {
+		configureProviderMaxInFlightRequests({ tests: 1 });
+		const model: Model<"openai-completions"> = {
+			...getBundledModel<"openai-completions">("openai", "gpt-4o-mini"),
+			provider: "tests",
+			api: "openai-completions",
+			baseUrl: "https://example.test/v1",
+		};
+		const encoder = new TextEncoder();
+		const usageSeen = Promise.withResolvers<void>();
+		const releaseDone = Promise.withResolvers<void>();
+		let calls = 0;
+		let doneSent = false;
+		let overlapped = false;
+		const chunk = (choices: unknown[], usage?: object) =>
+			encoder.encode(`data: ${JSON.stringify({ id: "c1", object: "chat.completion.chunk", choices, usage })}\n\n`);
+		async function mockFetch(): Promise<Response> {
+			calls++;
+			if (calls === 2 && !doneSent) overlapped = true;
+			if (calls === 1) {
+				const body = new ReadableStream<Uint8Array>({
+					async start(controller) {
+						controller.enqueue(chunk([{ index: 0, delta: { content: "first" } }]));
+						controller.enqueue(chunk([{ index: 0, delta: {}, finish_reason: "stop" }]));
+						controller.enqueue(chunk([], { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 }));
+						await releaseDone.promise;
+						doneSent = true;
+						controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+						controller.close();
+					},
+				});
+				return new Response(body, { headers: { "content-type": "text/event-stream" } });
+			}
+			const body = new ReadableStream<Uint8Array>({
+				start(controller) {
+					controller.enqueue(chunk([{ index: 0, delta: { content: "second" }, finish_reason: "stop" }]));
+					controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+					controller.close();
+				},
+			});
+			return new Response(body, { headers: { "content-type": "text/event-stream" } });
+		}
+		const options = {
+			apiKey: "test",
+			fetch: mockFetch,
+			onSseEvent: (event: RawSseEvent) => {
+				if (event.data.includes('"choices":[]')) usageSeen.resolve();
+			},
+		};
+		const firstResult = stream(model, context(), options).result();
+		await usageSeen.promise;
+		const secondResult = stream(model, context(), options).result();
+		// Exercise the real filesystem-backed lease scheduler while the first
+		// transport is parked waiting for its terminal SSE frame.
+		await Bun.sleep(150);
+		releaseDone.resolve();
+		const [first, second] = await Promise.all([firstResult, secondResult]);
+		expect(first.content).toEqual([{ type: "text", text: "first" }]);
+		expect(second.content).toEqual([{ type: "text", text: "second" }]);
+		expect(overlapped).toBe(false);
+	}, 10_000);
 
 	test("releases its provider lease before reporting terminal completion", async () => {
 		registerMockApi();
@@ -486,6 +555,79 @@ describe("provider in-flight request limits", () => {
 
 		const remaining = JSON.parse(await Bun.file(path.join(lockDir, "info.json")).text()) as { token: string };
 		expect(remaining.token).toBe("fresh-lock");
+	});
+
+	test("retries when another process removes a newly created lock", async () => {
+		registerMockApi();
+		const mock = createMockModel({ provider: "tests", responses: [{ content: ["reply"] }] });
+		__providerInFlightForTesting.setLockCreatedObserver(async lockDir => {
+			await fs.rm(lockDir, { recursive: true, force: true });
+			__providerInFlightForTesting.setLockCreatedObserver(undefined);
+		});
+
+		const result = await streamSimple(mock.model, context(), { maxInFlightRequests: { tests: 1 } }).result();
+
+		expect(result.content).toEqual([{ type: "text", text: "reply" }]);
+		expect(mock.calls).toHaveLength(1);
+	});
+
+	test("retries when another process removes an identified lock before its info write", async () => {
+		registerMockApi();
+		const mock = createMockModel({ provider: "tests", responses: [{ content: ["reply"] }] });
+		__providerInFlightForTesting.setLockIdentifiedObserver(async lockDir => {
+			await fs.rm(lockDir, { recursive: true, force: true });
+			__providerInFlightForTesting.setLockIdentifiedObserver(undefined);
+		});
+
+		const result = await streamSimple(mock.model, context(), { maxInFlightRequests: { tests: 1 } }).result();
+
+		expect(result.content).toEqual([{ type: "text", text: "reply" }]);
+		expect(mock.calls).toHaveLength(1);
+	});
+
+	test("retries transient EPERM from the win32 lock mkdir until the lease is acquired", async () => {
+		registerMockApi();
+		__providerInFlightForTesting.setLockPlatformOverride("win32");
+		let mkdirAttempts = 0;
+		__providerInFlightForTesting.setLockMkdirOverride(async lockDir => {
+			mkdirAttempts++;
+			if (mkdirAttempts <= 2) {
+				throw Object.assign(new Error("simulated delete-pending lock mkdir"), { code: "EPERM" });
+			}
+			await fs.mkdir(lockDir);
+		});
+		const mock = createMockModel({ provider: "tests", responses: [{ content: ["reply"] }] });
+
+		const result = await streamSimple(mock.model, context(), { maxInFlightRequests: { tests: 1 } }).result();
+
+		expect(result.content).toEqual([{ type: "text", text: "reply" }]);
+		expect(mock.calls).toHaveLength(1);
+		expect(mkdirAttempts).toBe(3);
+	});
+
+	test("rethrows a persistent EPERM lock mkdir failure after the retry budget elapses", async () => {
+		registerMockApi();
+		__providerInFlightForTesting.setLockPlatformOverride("win32");
+		__providerInFlightForTesting.setLockRetryTimings({ budgetMs: 100, initialDelayMs: 5, maxDelayMs: 10 });
+		let mkdirAttempts = 0;
+		__providerInFlightForTesting.setLockMkdirOverride(async () => {
+			mkdirAttempts++;
+			throw Object.assign(new Error("simulated persistent lock mkdir denial"), { code: "EPERM" });
+		});
+		const mock = createMockModel({ provider: "tests", responses: [{ content: ["reply"] }] });
+
+		const startedAt = Date.now();
+		const request = streamSimple(mock.model, context(), { maxInFlightRequests: { tests: 1 } }).result();
+		const outcome = await request.then(
+			() => undefined,
+			(error: unknown) => error as NodeJS.ErrnoException,
+		);
+
+		expect(outcome?.code).toBe("EPERM");
+		expect(outcome?.message).toBe("simulated persistent lock mkdir denial");
+		expect(mkdirAttempts).toBeGreaterThan(1);
+		expect(Date.now() - startedAt).toBeLessThan(2_000);
+		expect(mock.calls).toHaveLength(0);
 	});
 
 	test("does not dispatch when aborted immediately after slot acquisition", async () => {

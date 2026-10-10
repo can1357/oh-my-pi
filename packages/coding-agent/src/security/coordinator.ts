@@ -16,7 +16,7 @@ import { createAgentSession } from "../sdk";
 import type { AgentSession } from "../session/agent-session";
 import type { AuthStorage } from "../session/auth-storage";
 import { SessionManager } from "../session/session-manager";
-import { createExactSecurityOAuthResolver, selectSecurityAccount } from "./auth";
+import { createSecurityAuthResolver, selectSecurityAuth } from "./auth";
 import type {
 	SecurityCoverage,
 	SecurityModelRef,
@@ -40,6 +40,10 @@ import {
 } from "./provenance";
 import { createSecurityPublicationTool } from "./publication";
 import { SecurityStore, writeSecurityBundleToDirectory } from "./store";
+
+import { cfgRetryFallbackChains, cfgRetryModelFallback, cfgRetryUsageAwareFallback } from "../session/settings";
+import { cfgSecurityEnabled } from "../tools/settings";
+import { cfgTaskAgentModelOverrides, cfgTaskAgentPrewalk } from "../task/settings";
 
 const SECURITY_SESSION_TOOLS = ["read", "grep", "glob", "lsp", "ast_grep", "task", "security_publish"];
 const SECURITY_WORKFLOW_FINGERPRINT = createSecurityWorkflowFingerprint([
@@ -152,7 +156,7 @@ function toIsoTimestamp(now: () => Date): string {
 }
 
 function securityConfigSnapshot(settings: Settings): Record<string, boolean> {
-	return { securityEnabled: settings.get("security.enabled") };
+	return { securityEnabled: cfgSecurityEnabled.get(settings) };
 }
 
 function createOperationId(): string {
@@ -227,28 +231,30 @@ function initialBundle(
 async function createDefaultSecuritySession(input: SecurityScanSessionFactoryInput): Promise<AgentSession> {
 	const scanSettings = await input.host.settings.cloneForCwd(input.executionRoot);
 	const modelSelector = `${input.model.provider}/${input.model.id}`;
-	scanSettings.override("retry.modelFallback", false);
-	scanSettings.override("retry.usageAwareFallback", false);
-	scanSettings.override("retry.fallbackChains", {});
-	scanSettings.override("task.agentModelOverrides", {
-		...scanSettings.get("task.agentModelOverrides"),
+	cfgRetryModelFallback.override(scanSettings, false);
+	cfgRetryUsageAwareFallback.override(scanSettings, false);
+	cfgRetryFallbackChains.override(scanSettings, {});
+	cfgTaskAgentModelOverrides.override(scanSettings, {
+		...cfgTaskAgentModelOverrides.get(scanSettings),
 		"security-reviewer": modelSelector,
 	});
-	scanSettings.override("task.agentPrewalk", {
-		...scanSettings.get("task.agentPrewalk"),
+	cfgTaskAgentPrewalk.override(scanSettings, {
+		...cfgTaskAgentPrewalk.get(scanSettings),
 		"security-reviewer": "off",
 	});
+	const providerSessionId = `security:${input.scanId}`;
 	const { session } = await createAgentSession({
 		cwd: input.executionRoot,
 		authStorage: input.host.authStorage,
 		modelRegistry: input.host.modelRegistry,
 		settings: scanSettings,
 		model: input.model,
-		getApiKey: createExactSecurityOAuthResolver({
+		getApiKey: createSecurityAuthResolver({
 			authStorage: input.host.authStorage,
-			account: input.plan.account,
+			auth: input.plan.account,
+			providerResolver: model => input.host.modelRegistry.resolver(model, providerSessionId),
 		}),
-		providerSessionId: `security:${input.scanId}`,
+		providerSessionId,
 		sessionManager: input.sessionManager,
 		customTools: [input.publicationTool],
 		toolNames: SECURITY_SESSION_TOOLS,
@@ -266,6 +272,8 @@ async function createDefaultSecuritySession(input: SecurityScanSessionFactoryInp
 		skipPythonPreflight: true,
 		agentId: `Security-${input.scanId.slice(-12)}`,
 		agentDisplayName: "security",
+		// A helper for the host session: the host keeps the process-wide effects and provider toggles.
+		bindProcessState: false,
 	});
 	return session;
 }
@@ -421,17 +429,12 @@ export class SecurityCoordinator {
 	}
 
 	async preflight(input: SecurityPreflightInput = {}): Promise<SecurityScanPlan> {
-		if (!this.#host.settings.get("security.enabled")) {
+		if (!cfgSecurityEnabled.get(this.#host.settings)) {
 			throw new Error("Security is disabled; enable security.enabled before planning a scan");
 		}
 		const model = input.model ?? this.#host.activeModel;
 		if (!model) throw new Error("Security scan preflight requires an active model");
-		const account = selectSecurityAccount(
-			this.#host.authStorage,
-			model.provider,
-			input.credentialId,
-			this.#host.sessionId,
-		);
+		const account = selectSecurityAuth(this.#host.authStorage, model, input.credentialId, this.#host.sessionId);
 		const store = await this.#openStore(this.#host.cwd);
 		const workRoot = path.join(store.projectDirectory, "work");
 		await fs.mkdir(workRoot, { recursive: true, mode: 0o700 });
@@ -458,7 +461,7 @@ export class SecurityCoordinator {
 	}
 
 	async start(input: SecurityStartInput): Promise<SecurityOperationSnapshot> {
-		if (!this.#host.settings.get("security.enabled")) {
+		if (!cfgSecurityEnabled.get(this.#host.settings)) {
 			throw new Error("Security is disabled; enable security.enabled before starting a scan");
 		}
 		await this.#ensureRecovered();
@@ -598,6 +601,10 @@ export class SecurityCoordinator {
 				scanId: record.snapshot.scanId,
 				store,
 				startedAt,
+				// Findings must be grounded against the tree the scan session actually
+				// reads: for ref_diff scans that is the detached worktree, not the
+				// live repository root (#7118).
+				resolutionRoot: executionTarget.cwd,
 				sessionId: `security:${record.snapshot.scanId}`,
 				operationId: record.snapshot.operationId,
 				onPublished: async bundle => {

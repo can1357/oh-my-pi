@@ -4,7 +4,7 @@
  * only when a caller requests a link.
  */
 import { formatAge } from "@oh-my-pi/pi-utils";
-import chalk from "chalk";
+import chalk from "@oh-my-pi/pi-utils/chalk";
 import {
 	COLLAB_REGISTRY_VERSION,
 	type CollabHostSnapshot,
@@ -13,8 +13,8 @@ import {
 	listCollabHosts,
 	resolveCollabHostLink,
 } from "../collab/registry";
-import { sanitizeDisplayLine } from "../modes/components/extensions/display-text";
-import { shortenPath } from "../tools/render-utils";
+import { sanitizeDisplayLine } from "@oh-my-pi/pi-tui/overlays/extensions/display-text";
+import { shortenPath } from "@oh-my-pi/pi-tui/render/render-utils";
 
 export interface CollabListCommandArgs {
 	/** Emit deterministic machine-readable JSON. */
@@ -78,6 +78,7 @@ export async function runCollabListCommand(
 			`relay ${host.relayConnected ? "connected" : "reconnecting"}`,
 		];
 		if (host.inputRequired) details.push("input required");
+		if (host.busy !== null) details.push(host.busy ? "working" : "idle");
 		print("");
 		print(`${host.instanceId}  ${session}  ${chalk.dim(cwd)}`);
 		print(`  ${chalk.dim(details.join(" · "))}`);

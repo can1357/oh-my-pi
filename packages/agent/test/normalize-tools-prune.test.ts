@@ -62,6 +62,42 @@ describe("normalizeTools — pruneDescriptions", () => {
 		expect(hasField(tool?.parameters, "nested")).toBe(true);
 	});
 
+	it("leaves a tool-owned intent field untouched when injecting", () => {
+		const ownedSchema = type({
+			path: type("string").describe("where to read"),
+			i: type("string").describe("the tool's own index"),
+		});
+		const tool: AgentTool<typeof ownedSchema, { path: string; i: string }> = {
+			name: "demo",
+			label: "Demo",
+			description: "top-level tool description",
+			parameters: ownedSchema,
+			async execute() {
+				return { content: [{ type: "text", text: "ok" }] };
+			},
+		};
+		const untouched = normalizeTools([tool], { injectIntent: false })?.[0]?.parameters;
+		const injected = normalizeTools([tool], { injectIntent: true })?.[0]?.parameters;
+		// `i` belongs to the tool: injection neither reorders it to the front,
+		// replaces its description, nor adds it to `required`.
+		expect(Object.keys(wireProps(injected))).toEqual(["path", INTENT_FIELD]);
+		expect(fieldDescription(injected, INTENT_FIELD)).toBe("the tool's own index");
+		expect(JSON.stringify(injected)).toBe(JSON.stringify(untouched));
+	});
+
+	it("reuses injected parameters by identity across calls so downstream schema memos hit", () => {
+		const tool = makeTool();
+		for (const pruneDescriptions of [false, true]) {
+			const first = normalizeTools([tool], { injectIntent: true, pruneDescriptions })?.[0]?.parameters;
+			const second = normalizeTools([tool], { injectIntent: true, pruneDescriptions })?.[0]?.parameters;
+			expect(first).toBeDefined();
+			expect(second).toBe(first);
+		}
+		const bare = normalizeTools([tool], { injectIntent: true, pruneDescriptions: true })?.[0]?.parameters;
+		const described = normalizeTools([tool], { injectIntent: true })?.[0]?.parameters;
+		expect(described).not.toBe(bare);
+	});
+
 	it("injects the intent field WITHOUT a description when pruning", () => {
 		const tools = normalizeTools([makeTool()], { injectIntent: true, pruneDescriptions: true });
 		const params = tools?.[0]?.parameters;

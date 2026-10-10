@@ -23,6 +23,8 @@ import { invalidateFsScanAfterWrite } from "../tools/fs-cache-invalidation";
 import repairPromptSource from "./auto-repair.md" with { type: "text" };
 import type { AppliedEditSnapshot } from "./blackbox";
 
+import { cfgEditAutoRepairEnabled } from "./settings";
+
 /** Context lines shown around the culprit hunks. */
 const CONTEXT_LINES = 6;
 /** Largest repair region worth sending to a small model. */
@@ -32,7 +34,7 @@ const MAX_PAIR_SEARCH_HUNKS = 24;
 /** Initial attempt plus one feedback retry. */
 const MAX_ATTEMPTS = 2;
 const COMPLETION_MAX_TOKENS = 8192;
-const REPAIR_TIMEOUT_MS = 60_000;
+const REPAIR_TIMEOUT_MS = 20_000;
 
 /** One changed line run in pre-image (`a`) / post-image (`b`) coordinates. */
 interface EditHunk {
@@ -88,17 +90,25 @@ function buildHunks(prev: string, next: string): { hunks: EditHunk[]; a: string[
 	return { hunks, a, b };
 }
 
-/** Post-image with the given hunks reverted to their pre-image lines. */
-function revertHunks(a: string[], b: string[], hunks: EditHunk[], set: readonly number[]): string {
-	const sorted = [...set].sort((x, y) => x - y);
-	const out: string[] = [];
+/** Append `src[start, end)` to `out` without spreading. */
+function pushRange(out: string[], src: readonly string[], start: number, end: number): void {
+	for (let i = start; i < end; i++) out.push(src[i]);
+}
+
+/**
+ * Post-image with the given hunks reverted to their pre-image lines. `set`
+ * must be ascending; `out` is a scratch buffer reused across trials.
+ */
+function revertHunks(a: string[], b: string[], hunks: EditHunk[], set: readonly number[], out: string[]): string {
+	out.length = 0;
 	let bi = 0;
-	for (const i of sorted) {
+	for (const i of set) {
 		const h = hunks[i];
-		out.push(...b.slice(bi, h.bStart), ...a.slice(h.aStart, h.aEnd));
+		pushRange(out, b, bi, h.bStart);
+		pushRange(out, a, h.aStart, h.aEnd);
 		bi = h.bEnd;
 	}
-	out.push(...b.slice(bi));
+	pushRange(out, b, bi, b.length);
 	return out.join("\n");
 }
 
@@ -110,26 +120,94 @@ function revertHunks(a: string[], b: string[], hunks: EditHunk[], set: readonly 
 function isolateCulpritHunks(path: string, a: string[], b: string[], hunks: EditHunk[]): number[] | undefined {
 	const n = hunks.length;
 	if (n === 0) return undefined;
+	const scratch: string[] = [];
+	const trial: number[] = [];
+	const parsesReverted = (set: readonly number[]): boolean =>
+		parsesSource(revertHunks(a, b, hunks, set, scratch), path);
+
 	for (let i = 0; i < n; i++) {
-		if (parsesSource(revertHunks(a, b, hunks, [i]), path)) return [i];
+		trial[0] = i;
+		trial.length = 1;
+		if (parsesReverted(trial)) return [i];
 	}
+
 	if (n <= MAX_PAIR_SEARCH_HUNKS) {
+		trial.length = 2;
 		for (let i = 0; i < n; i++) {
 			for (let j = i + 1; j < n; j++) {
-				if (parsesSource(revertHunks(a, b, hunks, [i, j]), path)) return [i, j];
+				trial[0] = i;
+				trial[1] = j;
+				if (parsesReverted(trial)) return [i, j];
 			}
 		}
 	}
-	const keep = new Set<number>(Array.from({ length: n }, (_, i) => i));
+
+	const keepBits = new Uint8Array(Math.ceil(n / 8)).fill(0xff);
+	// Whether reverting exactly the current `keepBits` set is known to parse.
+	let keepParses = false;
 	for (let i = 0; i < n; i++) {
-		const trial = new Set(keep);
-		trial.delete(i);
-		if (parsesSource(revertHunks(a, b, hunks, [...trial]), path)) keep.delete(i);
+		trial.length = 0;
+		for (let k = 0; k < n; k++) {
+			if ((keepBits[k >>> 3] & (1 << (k & 7))) !== 0 && k !== i) trial.push(k);
+		}
+		if (parsesReverted(trial)) {
+			keepBits[i >>> 3] &= ~(1 << (i & 7));
+			keepParses = true;
+		}
+	}
+	const culprits: number[] = [];
+	for (let k = 0; k < n; k++) {
+		if ((keepBits[k >>> 3] & (1 << (k & 7))) !== 0) culprits.push(k);
 	}
 	// Reverting every remaining hunk must parse (the full revert is the
 	// pre-image); an empty set would mean the pre-image itself is broken.
-	if (keep.size === 0 || !parsesSource(revertHunks(a, b, hunks, [...keep]), path)) return undefined;
-	return [...keep];
+	if (culprits.length === 0 || (!keepParses && !parsesReverted(culprits))) return undefined;
+	return culprits;
+}
+
+/** A repair region plus the post-image lines it was computed against. */
+interface ComputedRegion {
+	region: RepairRegion;
+	b: string[];
+}
+
+function computeRegion(snapshot: AppliedEditSnapshot): ComputedRegion | undefined {
+	const { path, prev, next } = snapshot;
+	const { hunks, a, b } = buildHunks(prev, next);
+	const culprits = isolateCulpritHunks(path, a, b, hunks);
+	if (!culprits) return undefined;
+
+	// `culprits` is ascending and hunks are ordered by position.
+	const first = hunks[culprits[0]];
+	const last = hunks[culprits[culprits.length - 1]];
+	const bStart = Math.max(0, first.bStart - CONTEXT_LINES);
+	const bEnd = Math.min(b.length, last.bEnd + CONTEXT_LINES);
+	if (bEnd - bStart > MAX_REGION_LINES) return undefined;
+
+	// Reference = post-image context with each culprit hunk's lines swapped for
+	// its pre-image lines, so splicing the reference reproduces the culprit
+	// reversion exactly (which parses by construction).
+	const ref: string[] = [];
+	let bi = bStart;
+	for (const i of culprits) {
+		const h = hunks[i];
+		pushRange(ref, b, bi, h.bStart);
+		pushRange(ref, a, h.aStart, h.aEnd);
+		bi = h.bEnd;
+	}
+	pushRange(ref, b, bi, bEnd);
+
+	const language = summarizeCode({ code: prev.length === 0 ? "\n" : prev, path }).language ?? "source";
+	return {
+		region: {
+			bStart,
+			bEnd,
+			brokenText: b.slice(bStart, bEnd).join("\n"),
+			referenceText: ref.join("\n"),
+			language,
+		},
+		b,
+	};
 }
 
 /**
@@ -138,40 +216,17 @@ function isolateCulpritHunks(path: string, a: string[], b: string[], hunks: Edit
  * {@link MAX_REGION_LINES} — callers fall back to the plain parse warning.
  */
 export function computeRepairRegion(snapshot: AppliedEditSnapshot): RepairRegion | undefined {
-	const { path, prev, next } = snapshot;
-	const { hunks, a, b } = buildHunks(prev, next);
-	const culprits = isolateCulpritHunks(path, a, b, hunks);
-	if (!culprits) return undefined;
-
-	const hs = culprits.map(i => hunks[i]).sort((x, y) => x.bStart - y.bStart);
-	const bStart = Math.max(0, hs[0].bStart - CONTEXT_LINES);
-	const bEnd = Math.min(b.length, (hs.at(-1) as EditHunk).bEnd + CONTEXT_LINES);
-	if (bEnd - bStart > MAX_REGION_LINES) return undefined;
-
-	// Reference = post-image context with each culprit hunk's lines swapped for
-	// its pre-image lines, so splicing the reference reproduces the culprit
-	// reversion exactly (which parses by construction).
-	const ref: string[] = [];
-	let bi = bStart;
-	for (const h of hs) {
-		ref.push(...b.slice(bi, h.bStart), ...a.slice(h.aStart, h.aEnd));
-		bi = h.bEnd;
-	}
-	ref.push(...b.slice(bi, bEnd));
-
-	const language = summarizeCode({ code: prev.length === 0 ? "\n" : prev, path }).language ?? "source";
-	return {
-		bStart,
-		bEnd,
-		brokenText: b.slice(bStart, bEnd).join("\n"),
-		referenceText: ref.join("\n"),
-		language,
-	};
+	return computeRegion(snapshot)?.region;
 }
 
 /** Replace the region's line span in the post-image with `text`. */
 function spliceRegion(b: string[], region: RepairRegion, text: string): string {
-	return [...b.slice(0, region.bStart), ...text.split("\n"), ...b.slice(region.bEnd)].join("\n");
+	const out: string[] = [];
+	pushRange(out, b, 0, region.bStart);
+	const lines = text.split("\n");
+	pushRange(out, lines, 0, lines.length);
+	pushRange(out, b, region.bEnd, b.length);
+	return out.join("\n");
 }
 
 /**
@@ -230,9 +285,9 @@ export async function repairParseRegression(
 	snapshot: AppliedEditSnapshot,
 	complete: (builtPrompt: string) => Promise<string>,
 ): Promise<RegionRepair | undefined> {
-	const region = computeRepairRegion(snapshot);
-	if (!region) return undefined;
-	const b = snapshot.next.split("\n");
+	const computed = computeRegion(snapshot);
+	if (!computed) return undefined;
+	const { region, b } = computed;
 	const normalizedReference = normalizeForRevertCheck(region.referenceText);
 
 	let previousAttempt: string | undefined;
@@ -288,7 +343,7 @@ export async function attemptEditAutoRepair(options: {
 	signal?: AbortSignal;
 }): Promise<EditAutoRepairOutcome | undefined> {
 	const { session, snapshot, writethrough } = options;
-	if (!session.settings.get("edit.autoRepair.enabled")) return undefined;
+	if (!cfgEditAutoRepairEnabled.get(session.settings)) return undefined;
 	const registry = session.modelRegistry;
 	if (!registry) return undefined;
 	const model = resolveRoleSelection(["smol"], session.settings, registry.getAvailable())?.model;
@@ -310,6 +365,10 @@ export async function attemptEditAutoRepair(options: {
 	}
 	if (parsesSource(current, snapshot.path)) return undefined;
 
+	const modelName = `${model.provider}/${model.id}`;
+	logger.debug("Edit auto-repair started", { path: snapshot.path, model: modelName });
+	// One budget across both attempts: the edit tool result blocks on this, so
+	// a slow repair model must not stall the turn past the ceiling.
 	const timeout = AbortSignal.timeout(REPAIR_TIMEOUT_MS);
 	const signal = options.signal ? AbortSignal.any([options.signal, timeout]) : timeout;
 	const complete = async (builtPrompt: string): Promise<string> => {
@@ -326,10 +385,19 @@ export async function attemptEditAutoRepair(options: {
 						signal,
 					},
 				),
-			{ signal },
+			{ signal, provider: model.provider },
 		);
 		if (response.stopReason === "error") {
 			throw new Error(response.errorMessage ?? "auto-repair completion failed");
+		}
+		// An abort resolves (not rejects) with empty content; treating that as a
+		// candidate would silently burn the retry and hide the stall.
+		if (response.stopReason === "aborted") {
+			throw new Error(
+				timeout.aborted
+					? `auto-repair timed out after ${REPAIR_TIMEOUT_MS}ms waiting on ${modelName}`
+					: "auto-repair aborted",
+			);
 		}
 		return response.content.map(block => (block.type === "text" ? block.text : "")).join("");
 	};
@@ -345,5 +413,5 @@ export async function attemptEditAutoRepair(options: {
 		regionLines: repair.region.bEnd - repair.region.bStart,
 	});
 	const diffResult = editDiffString(current, repair.content, snapshot.path);
-	return { diff: diffResult.diff, model: `${model.provider}/${model.id}`, attempts: repair.attempts };
+	return { diff: diffResult.diff, model: modelName, attempts: repair.attempts };
 }

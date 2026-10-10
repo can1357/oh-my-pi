@@ -3,7 +3,7 @@ import { CollabController } from "@oh-my-pi/pi-coding-agent/collab/controller";
 import type { CollabHostSnapshot } from "@oh-my-pi/pi-coding-agent/collab/registry";
 import * as registry from "@oh-my-pi/pi-coding-agent/collab/registry";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import {
 	type BuiltinSlashCommandRuntime,
@@ -33,6 +33,7 @@ function snapshot(over: Partial<CollabHostSnapshot> = {}): CollabHostSnapshot {
 		participants: 2,
 		relayConnected: true,
 		inputRequired: false,
+		busy: false,
 		access: "control",
 		...over,
 	};
@@ -84,6 +85,25 @@ describe("/collab list slash command", () => {
 		// The way to a link is the explicit CLI command, never an inline URL.
 		expect(text).toContain("collab link 0123456789abcdef");
 		expect(text).not.toMatch(/https?:\/\//);
+	});
+
+	it("renders each host's activity state and shows none for a host that does not report it", async () => {
+		vi.spyOn(registry, "listCollabHosts").mockResolvedValue([
+			snapshot({ instanceId: "aaaaaaaaaaaaaaaa", busy: true }),
+			snapshot({ instanceId: "bbbbbbbbbbbbbbbb", busy: false }),
+			snapshot({ instanceId: "cccccccccccccccc", busy: null }),
+		]);
+		const harness = createHarness();
+
+		await executeBuiltinSlashCommand("/collab list", harness.runtime);
+
+		const text = Bun.stripANSI(String(harness.showStatus.mock.calls.at(-1)?.[0] ?? ""));
+		const details = text.split("\n").filter(line => line.includes("pid 42"));
+		expect(details).toHaveLength(3);
+		expect(details[0]).toContain("relay connected, working,");
+		expect(details[1]).toContain("relay connected, idle,");
+		// An older host reports nothing, and the row guesses nothing.
+		expect(details[2]).not.toMatch(/working|idle/);
 	});
 
 	it("points view-only hosts at the --view link command", async () => {

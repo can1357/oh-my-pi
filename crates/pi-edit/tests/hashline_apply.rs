@@ -289,8 +289,9 @@ fn block_replace_lowers_to_replacement_inserts_and_deletes() {
 		index:    0,
 	};
 	let mut resolutions = Vec::new();
+	let edits = [edit];
 	let lowered = resolve_block_edits(
-		&[edit],
+		&edits,
 		text,
 		"x.rs",
 		Unresolved::Throw,
@@ -313,8 +314,9 @@ fn unresolved_insert_after_block_lowers_and_warns() {
 		index:    0,
 	};
 	let mut warnings = Vec::new();
+	let edits = [edit];
 	let lowered = resolve_block_edits(
-		&[edit],
+		&edits,
 		"plain",
 		"x.unknown",
 		Unresolved::Throw,
@@ -353,7 +355,7 @@ fn unresolved_block_replacement_reports_context() {
 
 #[test]
 fn syntax_helpers_use_pi_ast() {
-	let lines = vec!["mod m {".into(), "\t#[test]".into(), "\tfn f() {}".into(), "}".into()];
+	let lines = vec!["mod m {", "\t#[test]", "\tfn f() {}", "}"];
 	assert!(
 		node_chain(&lines, "x.rs", 2)
 			.iter()
@@ -474,15 +476,13 @@ fn named_register_gap_paste_warns_and_does_nothing_when_empty() {
 	};
 	let mut clipboard = Clipboard::default();
 	let mut warnings = Vec::new();
-	let lines = vec!["a".into()];
-	let resolved = resolve_clipboard_edits(
-		&[paste],
-		&lines,
-		&mut clipboard,
-		EmptyPaste::Throw,
-		&mut |warning| warnings.push(warning),
-	)
-	.unwrap();
+	let lines = ["a"];
+	let edits = [paste];
+	let resolved =
+		resolve_clipboard_edits(&edits, &lines, &mut clipboard, EmptyPaste::Throw, &mut |warning| {
+			warnings.push(warning);
+		})
+		.unwrap();
 	assert!(resolved.is_empty());
 	assert!(warnings[0].starts_with("line 4: `@missing` was empty"));
 }
@@ -500,7 +500,7 @@ fn empty_named_span_paste_is_rejected() {
 	};
 	let error = resolve_clipboard_edits(
 		&[paste],
-		&["a".into()],
+		&["a"],
 		&mut Clipboard::default(),
 		EmptyPaste::Throw,
 		&mut |_| {},
@@ -540,9 +540,10 @@ fn empty_paste_drop_removes_the_incomplete_preview_op() {
 		index:       0,
 		block_start: None,
 	};
+	let edits = [paste];
 	let resolved = resolve_clipboard_edits(
-		&[paste],
-		&["a".into()],
+		&edits,
+		&["a"],
 		&mut Clipboard::default(),
 		EmptyPaste::Drop,
 		&mut |_| {},
@@ -716,4 +717,44 @@ fn recovery_rejects_ambiguous_duplicate_anchor_context() {
 	})
 	.unwrap();
 	assert!(recovered.is_none());
+}
+
+#[test]
+fn recovery_refuses_a_remap_into_a_sibling_construct() {
+	// The diff aligns the surviving `"shared",` row of list `a` with the
+	// identical row of the newly added list `b`: a uniform offset with
+	// matching neighbors, landing the insert in the wrong list.
+	let store = EditStore::new();
+	let path = Path::new("/tmp/recovery-sibling.py");
+	let previous = "cfg = {\n    \"a\": [\n        \"shared\",\n    ],\n}\n";
+	let current = "cfg = {\n    \"a\": [\n        \"changed\",\n    ],\n    \"b\": [\n        \
+	               \"shared\",\n    ],\n}\n";
+	let tag = store.record(path, previous, None);
+	let recovered = try_recover(&store, RecoveryArgs {
+		path,
+		current_text: current,
+		file_hash: &tag,
+		edits: &[insert_after(3, "        \"new\",", 1)],
+		clipboard: None,
+	})
+	.unwrap();
+	assert!(recovered.is_none());
+}
+
+#[test]
+fn recovery_remaps_a_shift_inside_the_same_construct() {
+	let store = EditStore::new();
+	let path = Path::new("/tmp/recovery-same-construct.py");
+	let previous = "def f():\n    old()\n";
+	let tag = store.record(path, previous, None);
+	let recovered = try_recover(&store, RecoveryArgs {
+		path,
+		current_text: "import os\n\ndef f():\n    old()\n",
+		file_hash: &tag,
+		edits: &replacement(2, 2, &["    new()"], 1),
+		clipboard: None,
+	})
+	.unwrap()
+	.unwrap();
+	assert_eq!(recovered.text, "import os\n\ndef f():\n    new()\n");
 }

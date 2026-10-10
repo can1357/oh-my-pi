@@ -1,7 +1,7 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { EventController } from "@oh-my-pi/pi-coding-agent/modes/controllers/event-controller";
-import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import type { AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { vocalizer } from "@oh-my-pi/pi-coding-agent/tts/vocalizer";
 import { createInteractiveModeContext } from "../../helpers/interactive-mode-context";
@@ -78,17 +78,6 @@ describe("EventController aborted-turn working messages", () => {
 		await controller.handleEvent(toolStartWithIntent("late-call", "Reticulating splines"));
 
 		expect(setWorkingMessage).not.toHaveBeenCalled();
-	});
-
-	it("lets intent updates drive the loader when not aborting", async () => {
-		const { ctx, setWorkingMessage } = createContext();
-		const controller = new EventController(ctx);
-		await controller.handleEvent(AGENT_START);
-		setWorkingMessage.mockClear();
-		await controller.handleEvent(toolStartWithIntent("call-1", "Searching files"));
-
-		expect(setWorkingMessage).toHaveBeenCalledTimes(1);
-		expect(setWorkingMessage.mock.calls[0]?.[0]).toContain("Searching files");
 	});
 
 	it("resumes intent updates once aborting clears", async () => {

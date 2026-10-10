@@ -1,5 +1,5 @@
 import type { Terminal, TerminalAppearance } from "@oh-my-pi/pi-tui/terminal";
-import { CELL_U32, CellFlags, KittyTerminal, loadModuleSync } from "kitty-vt-wasm";
+import { CELL_U32, CellFlags, type GraphicsPlacement, KittyTerminal, loadModuleSync } from "kitty-vt-wasm";
 
 // ---------------------------------------------------------------------------
 // Shared kitty VT engine
@@ -358,6 +358,17 @@ export class VirtualTerminal implements Terminal {
 	getCursor(): { row: number; col: number } {
 		const cursor = this.#term.cursor;
 		return { row: cursor.y, col: cursor.x };
+	}
+
+	/**
+	 * Kitty-graphics placements the engine currently tracks on the active
+	 * screen (positions only; pixels are host-side). The engine keeps main and
+	 * alternate screen image stores apart exactly as kitty does, so a
+	 * placement that only ever reached the alternate buffer is absent here
+	 * once the normal screen is back.
+	 */
+	graphicsPlacements(): GraphicsPlacement[] {
+		return this.#term.graphicsPlacements();
 	}
 
 	/** Clear the buffer to a blank slate (fresh engine terminal). */

@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { renderDemotedThinking } from "../dialect/demotion";
 import type {
 	Api,
@@ -27,7 +28,7 @@ const enum ToolCallStatus {
  * `convertAnthropicMessages` (and friends) unchanged, so the `_dupN` suffix
  * MUST not push a normalized id past this bound.
  */
-const MAX_TOOL_CALL_ID_LENGTH = 64;
+export const MAX_TOOL_CALL_ID_LENGTH = 64;
 
 /**
  * OpenAI Responses-family APIs mint composite tool ids (`call_id|item_id`);
@@ -127,7 +128,7 @@ function toolCallPairingKey(id: string, originScope: ToolCallOriginScope): strin
 	return originScope.responsesComponents.has(prefix) ? prefix : id;
 }
 
-function appendDuplicateSuffix(originalId: string, suffix: string, maxLength: number): string {
+export function appendDuplicateSuffix(originalId: string, suffix: string, maxLength: number): string {
 	// Responses-family ids are composites (`callId|itemId`): the wire call_id is
 	// the FIRST segment (normalizeResponsesToolCallId splits on `|`), so the
 	// suffix must land on every segment or the duplicate collapses back onto the
@@ -247,8 +248,35 @@ function deduplicateToolCallIds(
 	});
 }
 
+const MAX_TOOL_CALL_NAME_LENGTH = 128;
+const TOOL_CALL_NAME_SEPARATOR_RE = /[\s\p{Cc}]/u;
+
 /**
- * Drop assistant `toolCall` blocks whose `id` or `name` is empty / whitespace-only,
+ * Whether a tool-call name cannot belong to any declared tool: missing, empty,
+ * longer than OpenAI's 128-character replay limit, or containing whitespace or
+ * control characters (tool schemas never allow them; their presence means the
+ * name slot carries invocation text).
+ */
+export function isMalformedToolCallName(name: unknown): boolean {
+	return (
+		typeof name !== "string" ||
+		name.length === 0 ||
+		name.length > MAX_TOOL_CALL_NAME_LENGTH ||
+		TOOL_CALL_NAME_SEPARATOR_RE.test(name)
+	);
+}
+
+function isMalformedToolCallId(id: string | undefined): boolean {
+	return !id || id.trim().length === 0;
+}
+
+function isMalformedToolCall(block: { id: string; name: string }): boolean {
+	return isMalformedToolCallId(block.id) || isMalformedToolCallName(block.name);
+}
+
+/**
+ * Drop assistant `toolCall` blocks with an empty / whitespace-only `id` or a `name`
+ * no provider could have declared (see {@link isMalformedToolCallName}),
  * the `toolResult` messages they point at, and any assistant turn that has no
  * replayable content left.
  *
@@ -261,24 +289,15 @@ function deduplicateToolCallIds(
  * Anthropic 400s on `tool_use.name` / `tool_use.id` (alongside an orphan
  * `tool_result`), OpenAI Chat Completions 400s on malformed
  * `tool_calls[i].function.*` — wedging the session in a 400 loop until manual
- * `/clear`.
+ * `/clear`. Gateways also hand back the model's whole invocation text as the
+ * name (observed: a 9654-char script and a NUL-separated `bash\0arg\0…` string
+ * from GLM-5.3); OpenAI Responses rejects any replayed `input[N].name` over
+ * 128 characters with `string_above_max_length`.
  *
  * Run before any other transform so the rest of the pipeline never sees a
  * malformed call. Idempotent: a re-run on an already-sanitized list returns
  * the input untouched. Provider-agnostic — any wire model could surface this.
  */
-function isMalformedToolCallName(name: string | undefined): boolean {
-	return !name || name.trim().length === 0;
-}
-
-function isMalformedToolCallId(id: string | undefined): boolean {
-	return !id || id.trim().length === 0;
-}
-
-function isMalformedToolCall(block: { id: string; name: string }): boolean {
-	return isMalformedToolCallId(block.id) || isMalformedToolCallName(block.name);
-}
-
 function sanitizeMalformedToolCalls(messages: Message[]): Message[] {
 	// Fast path: skip the rewrite entirely when nothing is malformed.
 	let hasMalformed = false;
@@ -437,14 +456,23 @@ function hasPlausibleCredentialEntropy(token: string): boolean {
 }
 
 /**
- * Whether outbound credential-pattern redaction is active. Off by default;
- * hosts opt in explicitly (the coding agent wires this to the
- * `secrets.enabled` setting).
+ * Whether outbound credential-pattern redaction is active outside any
+ * {@link withCredentialRedaction} scope. Off by default; hosts opt in
+ * explicitly (the coding agent wires this to the `secrets.enabled` setting).
  */
 let credentialRedactionEnabled = false;
 
+/** Per-request override of {@link credentialRedactionEnabled}; see {@link withCredentialRedaction}. */
+const credentialRedactionScope = new AsyncLocalStorage<boolean>();
+
+/** Redaction policy for the request being built: its scope's, else the process-wide switch. */
+function isCredentialRedactionActive(): boolean {
+	return credentialRedactionScope.getStore() ?? credentialRedactionEnabled;
+}
+
 /**
- * Toggle outbound credential-pattern redaction. When disabled (the default),
+ * Toggle process-wide outbound credential-pattern redaction (requests outside
+ * any {@link withCredentialRedaction} scope). When disabled (the default),
  * {@link redactSensitiveCredentials} and {@link redactSensitiveInObject} are
  * pass-throughs and outbound messages/system prompts leave the process
  * unmodified.
@@ -453,8 +481,18 @@ export function configureCredentialRedaction(enabled: boolean): void {
 	credentialRedactionEnabled = enabled;
 }
 
+/**
+ * Runs `fn` with outbound credential-pattern redaction forced on or off for
+ * every request it starts (including the async work those requests spawn),
+ * overriding {@link configureCredentialRedaction}. Lets concurrent sessions in
+ * one process each apply their own policy.
+ */
+export function withCredentialRedaction<T>(enabled: boolean, fn: () => T): T {
+	return credentialRedactionScope.run(enabled, fn);
+}
+
 export function redactSensitiveCredentials(text: string): string {
-	if (!credentialRedactionEnabled) return text;
+	if (!isCredentialRedactionActive()) return text;
 	return text.replace(SENSITIVE_TOKEN_RE, match => {
 		if (!hasPlausibleCredentialEntropy(match)) return match;
 		const lower = match.toLowerCase();
@@ -475,35 +513,39 @@ export function redactSensitiveCredentials(text: string): string {
 }
 
 export function redactSensitiveInObject(val: unknown): { result: unknown; changed: boolean } {
-	if (!credentialRedactionEnabled) return { result: val, changed: false };
+	if (!isCredentialRedactionActive()) return { result: val, changed: false };
 	if (typeof val === "string") {
 		const redacted = redactSensitiveCredentials(val);
 		return { result: redacted, changed: redacted !== val };
 	}
+	// Copy-on-write: history is re-redacted on every request and almost never
+	// contains a credential, so unchanged subtrees are returned as-is.
 	if (Array.isArray(val)) {
-		let changed = false;
-		const result = val.map(item => {
-			const res = redactSensitiveInObject(item);
-			if (res.changed) changed = true;
-			return res.result;
-		});
-		return { result, changed };
+		let result: unknown[] | undefined;
+		for (let i = 0; i < val.length; i++) {
+			const sub = redactSensitiveInObject(val[i]);
+			if (!sub.changed) continue;
+			result ??= val.slice();
+			result[i] = sub.result;
+		}
+		return result ? { result, changed: true } : { result: val, changed: false };
 	}
 	if (val !== null && typeof val === "object") {
-		let changed = false;
-		const res: Record<string, unknown> = {};
-		for (const [k, v] of Object.entries(val)) {
+		const entries = Object.entries(val);
+		let result: Record<string, unknown> | undefined;
+		for (const [k, v] of entries) {
 			const sub = redactSensitiveInObject(v);
-			if (sub.changed) changed = true;
-			res[k] = sub.result;
+			if (!sub.changed) continue;
+			result ??= Object.fromEntries(entries);
+			result[k] = sub.result;
 		}
-		return { result: res, changed };
+		return result ? { result, changed: true } : { result: val, changed: false };
 	}
 	return { result: val, changed: false };
 }
 
 function redactSensitiveCredentialsInMessages(messages: Message[]): Message[] {
-	if (!credentialRedactionEnabled) return messages;
+	if (!isCredentialRedactionActive()) return messages;
 	return messages.map((msg): Message => {
 		if (msg.role === "user" || msg.role === "developer") {
 			const userMsg = msg as UserMessage | DeveloperMessage;
@@ -592,6 +634,7 @@ export function transformMessages<TApi extends Api>(
 	maxNormalizedToolCallIdLength = MAX_TOOL_CALL_ID_LENGTH,
 	duplicateToolCallIdSuffixPrefix = "_dup",
 	targetCompat: Model<TApi>["compat"] = model.compat,
+	targetCredentialId?: number,
 ): Message[] {
 	// Redact sensitive credential-like patterns from all outbound messages when
 	// the host opted in via `configureCredentialRedaction` — prevents security
@@ -703,6 +746,13 @@ export function transformMessages<TApi extends Api>(
 			// conservative direction (degraded reasoning, not broken requests).
 			const isOfficialAnthropicSource = isAnthropicReplay && assistantMsg.provider === "anthropic";
 			const isSigningAnthropicTarget = isAnthropicTarget && model.compat.signingEndpoint;
+			// Signatures and redacted thinking are bound to the credential that minted them.
+			// Unknown provenance preserves legacy replay for imported and older sessions.
+			const foreignCredential =
+				isSigningAnthropicTarget &&
+				assistantMsg.credentialId !== undefined &&
+				targetCredentialId !== undefined &&
+				assistantMsg.credentialId !== targetCredentialId;
 			const signingAnthropicInvolved = isOfficialAnthropicSource || isSigningAnthropicTarget;
 			// Compatible Anthropic-messages reasoning targets that accept
 			// unsigned thinking natively (Z.AI, DeepSeek, the generic
@@ -767,6 +817,7 @@ export function transformMessages<TApi extends Api>(
 				!assistantMsg.content.some(anthropicVisibleThinkingSurvivesReplay);
 
 			const transformedContent = assistantMsg.content.flatMap((block, blockIndex) => {
+				if (foreignCredential && (block.type === "thinking" || block.type === "redactedThinking")) return [];
 				if (
 					invalidBoundThinkingAssistantIndexes.has(index) &&
 					(block.type === "thinking" || block.type === "redactedThinking")

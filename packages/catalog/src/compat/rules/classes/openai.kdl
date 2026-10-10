@@ -1,9 +1,15 @@
 // Model-lineage compat for "openai"; regenerated from the frozen census using class taxonomy selectors.
 
 class "openai" {
-	// Replaces the o-series mandatory-reasoning fallback.
+	// Replaces the o-series mandatory-reasoning fallback. o-series and GPT-5+
+	// reject explicit sampling params (`temperature`, `top_p`) with a 400 on
+	// every serving host (#5606), whichever API fronts them.
 	family "o-series" {
 		thinking-requires-effort #true
+		supports-sampling-params #false
+	}
+	revision ">=5" {
+		supports-sampling-params #false
 	}
 	// GPT wire ladders are model generations, not host contracts: <5.2 keeps
 	// the classic four-tier scale, 5.2+ drops minimal for xhigh, and 5.6+
@@ -37,8 +43,11 @@ class "openai" {
 	revision "=5.6" {
 		delegation-bias "gated"
 	}
+	// GPT-6 accepts `response.steer` over the Responses WebSocket: user input
+	// joins the in-flight response instead of waiting for the next request.
 	revision ">=6" {
 		delegation-bias "restrained"
+		supports-steering #true
 	}
 	// GPT-6 Astra changes reasoning effort mid-conversation through a
 	// `configuration_update` input item so the request-level effort (and the
@@ -52,6 +61,130 @@ class "openai" {
 		revision ">=1" {
 			limits-patch {
 				context-window 272000
+			}
+		}
+	}
+}
+
+// Hosted Responses tools are a GPT-5+ lineage capability on any
+// Responses-compatible host, so proxies exposing these ids inherit them. The
+// swap targets resolve on the same provider only; when a host lacks them the
+// session model runs the tool itself.
+class "openai" {
+	on-api "openai-responses" {
+		revision ">=5" {
+			web-search "openai"
+			web-search-model "gpt-5.6-luna"
+			hosted-image #true
+			image-model "gpt-image-2"
+		}
+	}
+	on-api "openai-codex-responses" {
+		revision ">=5" {
+			web-search-model "gpt-5.6-luna"
+			hosted-image #true
+			image-model "gpt-image-2"
+		}
+	}
+}
+
+// GPT-5.2+ bills images in 32px patches × 1.2, sized per `detail` level:
+// https://developers.openai.com/api/docs/guides/images-vision#calculating-costs
+// Older lines carry no lineage rule and bill at their wire API's fallback
+// (providers/image-tokenization.kdl).
+class "openai" {
+	// gpt-5.6 sizing, shared by later lines. `<10` keeps separator-collapsed
+	// revisions (`openai-gpt-52-codex` parses as 52) off the 5.6+ sizing.
+	revision ">=5.6 <10" {
+		image-tokenization {
+			regime "openai-patch"
+			multiplier 1.2
+			auto "original"
+			low {
+				max-edge 512
+			}
+			high {
+				max-edge 2048
+				patch-budget 2500
+			}
+			original {
+				max-edge 65535
+			}
+		}
+	}
+	revision "=5.5" {
+		image-tokenization {
+			regime "openai-patch"
+			multiplier 1.2
+			auto "original"
+			low {
+				max-edge 512
+			}
+			high {
+				max-edge 2048
+				patch-budget 2500
+			}
+			original {
+				max-edge 6000
+				patch-budget 10000
+			}
+		}
+	}
+	// gpt-5.4: `auto` sizes like `high`, and `low` keeps a 6,144-patch budget.
+	revision "=5.4" {
+		image-tokenization {
+			regime "openai-patch"
+			multiplier 1.2
+			auto "high"
+			low {
+				max-edge 2048
+				patch-budget 6144
+			}
+			high {
+				max-edge 2048
+				patch-budget 2500
+			}
+			original {
+				max-edge 6000
+				patch-budget 10000
+			}
+		}
+	}
+	// gpt-5.2 (and the 5.3 Codex SKU) size every level the same way.
+	revision ">=5.2 <5.4" {
+		image-tokenization {
+			regime "openai-patch"
+			multiplier 1.2
+			auto "high"
+			low {
+				max-edge 2048
+				patch-budget 6144
+			}
+			high {
+				max-edge 2048
+				patch-budget 6144
+			}
+			original {
+				max-edge 2048
+				patch-budget 6144
+			}
+		}
+	}
+	// residue: astra's limits differ from the rest of its revision.
+	models "*gpt-6-astra*" {
+		image-tokenization {
+			regime "openai-patch"
+			multiplier 1.2
+			auto "original"
+			low {
+				max-edge 512
+			}
+			high {
+				max-edge 65535
+				patch-budget 2500
+			}
+			original {
+				max-edge 65535
 			}
 		}
 	}

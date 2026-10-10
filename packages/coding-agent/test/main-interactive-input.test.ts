@@ -2,14 +2,17 @@ import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import {
-	applyResolvedSystemPromptInputs,
-	readPipedInput,
-	submitInteractiveInput,
-} from "@oh-my-pi/pi-coding-agent/main";
+import type { Skill } from "@oh-my-pi/pi-coding-agent/extensibility/skills";
+import { parseArgs } from "@oh-my-pi/pi-coding-agent/cli/args";
+import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { buildSessionOptions, readPipedInput, submitInteractiveInput } from "@oh-my-pi/pi-coding-agent/main";
 import type { SubmittedUserInput } from "@oh-my-pi/pi-coding-agent/modes/types";
-import type { CreateAgentSessionOptions } from "@oh-my-pi/pi-coding-agent/sdk";
+import { SKILL_PROMPT_MESSAGE_TYPE } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { discoverTitleSystemPromptFile } from "@oh-my-pi/pi-coding-agent/system-prompt";
+import type { CreateAgentSessionOptions } from "@oh-my-pi/pi-coding-agent/sdk";
+import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
+import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
 const cleanupDirs: string[] = [];
@@ -57,26 +60,63 @@ describe("readPipedInput", () => {
 	});
 });
 
-describe("applyResolvedSystemPromptInputs", () => {
-	it("routes SYSTEM.md content through template-aware session options", () => {
-		const options: CreateAgentSessionOptions = {};
+describe("system prompt template CLI resolution", () => {
+	async function buildPromptOptions(cwd: string, args: string[]): Promise<CreateAgentSessionOptions> {
+		const authStorage = await AuthStorage.create(":memory:");
+		try {
+			return await buildSessionOptions(
+				parseArgs(["--cwd", cwd, ...args]),
+				[],
+				SessionManager.inMemory(),
+				new ModelRegistry(authStorage),
+				Settings.isolated(),
+			);
+		} finally {
+			authStorage.close();
+		}
+	}
 
-		applyResolvedSystemPromptInputs(options, "project system prompt", "append prompt");
+	it("discovers SYSTEM_TEMPLATE.md and preserves the raw template", async () => {
+		const projectDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-system-template-"));
+		cleanupDirs.push(projectDir);
+		await fs.mkdir(path.join(projectDir, ".omp"), { recursive: true });
+		await fs.writeFile(path.join(projectDir, ".omp", "SYSTEM_TEMPLATE.md"), "Hello {{model}}");
 
-		expect(options.customSystemPrompt).toBe("project system prompt");
-		expect(options.appendSystemPrompt).toBe("append prompt");
-		expect(options.systemPrompt).toBeUndefined();
+		const options = await buildPromptOptions(projectDir, []);
+
+		expect(options.systemPromptTemplate).toBe("Hello {{model}}");
+		expect(options.customSystemPrompt).toBeUndefined();
+	});
+
+	it("lets an explicit literal prompt suppress discovered templates", async () => {
+		const projectDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-system-prompt-"));
+		cleanupDirs.push(projectDir);
+		await fs.mkdir(path.join(projectDir, ".omp"), { recursive: true });
+		await fs.writeFile(path.join(projectDir, ".omp", "SYSTEM_TEMPLATE.md"), "discovered");
+
+		const options = await buildPromptOptions(projectDir, ["--system-prompt", "inline literal"]);
+
+		expect(options.customSystemPrompt).toBe("inline literal");
+		expect(options.systemPromptTemplate).toBeUndefined();
 	});
 });
 
+function createMode(options?: { pendingStart?: boolean; skillCommands?: Map<string, Skill> }) {
+	return {
+		markPendingSubmissionStarted: vi.fn(() => options?.pendingStart ?? true),
+		finishPendingSubmission: vi.fn(),
+		showError: vi.fn(),
+		checkShutdownRequested: vi.fn(async () => {}),
+		skillCommands: options?.skillCommands ?? new Map<string, Skill>(),
+		optimisticSkillMessagePending: false,
+		renderOptimisticSkillMessage: vi.fn(),
+		clearOptimisticSkillMessage: vi.fn(),
+	};
+}
+
 describe("submitInteractiveInput", () => {
 	it("routes already-started synthetic continue submissions to a hidden developer prompt", async () => {
-		const mode = {
-			markPendingSubmissionStarted: vi.fn(() => false),
-			finishPendingSubmission: vi.fn(),
-			showError: vi.fn(),
-			checkShutdownRequested: vi.fn(async () => {}),
-		};
+		const mode = createMode({ pendingStart: false });
 		const session = {
 			prompt: vi.fn(async () => true),
 			promptCustomMessage: vi.fn(async () => true),
@@ -93,12 +133,7 @@ describe("submitInteractiveInput", () => {
 	});
 
 	it("skips prompting when optimistic submission was cancelled before start", async () => {
-		const mode = {
-			markPendingSubmissionStarted: vi.fn(() => false),
-			finishPendingSubmission: vi.fn(),
-			showError: vi.fn(),
-			checkShutdownRequested: vi.fn(async () => {}),
-		};
+		const mode = createMode({ pendingStart: false });
 		const session = {
 			prompt: vi.fn(async () => true),
 			promptCustomMessage: vi.fn(async () => true),
@@ -115,12 +150,7 @@ describe("submitInteractiveInput", () => {
 	});
 
 	it("routes hidden custom submissions through promptCustomMessage with followUp queueing", async () => {
-		const mode = {
-			markPendingSubmissionStarted: vi.fn(() => true),
-			finishPendingSubmission: vi.fn(),
-			showError: vi.fn(),
-			checkShutdownRequested: vi.fn(async () => {}),
-		};
+		const mode = createMode();
 		const session = {
 			prompt: vi.fn(async () => true),
 			promptCustomMessage: vi.fn(async () => true),
@@ -147,12 +177,7 @@ describe("submitInteractiveInput", () => {
 	});
 
 	it("passes followUp on a plain idle submission so a racing turn queues instead of erroring", async () => {
-		const mode = {
-			markPendingSubmissionStarted: vi.fn(() => true),
-			finishPendingSubmission: vi.fn(),
-			showError: vi.fn(),
-			checkShutdownRequested: vi.fn(async () => {}),
-		};
+		const mode = createMode();
 		const session = {
 			prompt: vi.fn(async () => true),
 			promptCustomMessage: vi.fn(async () => true),
@@ -167,12 +192,7 @@ describe("submitInteractiveInput", () => {
 	});
 
 	it("honors a steer intent on the submission (normal Enter) instead of forcing followUp", async () => {
-		const mode = {
-			markPendingSubmissionStarted: vi.fn(() => true),
-			finishPendingSubmission: vi.fn(),
-			showError: vi.fn(),
-			checkShutdownRequested: vi.fn(async () => {}),
-		};
+		const mode = createMode();
 		const session = {
 			prompt: vi.fn(async () => true),
 			promptCustomMessage: vi.fn(async () => true),
@@ -189,64 +209,9 @@ describe("submitInteractiveInput", () => {
 		expect(mode.showError).not.toHaveBeenCalled();
 	});
 
-	it("queues goal-continuation as followUp when streaming", async () => {
-		const mode = {
-			markPendingSubmissionStarted: vi.fn(() => true),
-			finishPendingSubmission: vi.fn(),
-			showError: vi.fn(),
-			checkShutdownRequested: vi.fn(async () => {}),
-		};
-		const session = {
-			prompt: vi.fn(async () => true),
-			promptCustomMessage: vi.fn(async () => true),
-			isStreaming: true,
-		};
-		const input = createInput({ text: "continue goal", customType: "goal-continuation" });
-
-		await submitInteractiveInput(mode, session, input);
-
-		expect(session.prompt).not.toHaveBeenCalled();
-		expect(session.promptCustomMessage).toHaveBeenCalledWith(
-			{
-				customType: "goal-continuation",
-				content: "continue goal",
-				display: false,
-				attribution: "agent",
-			},
-			{ streamingBehavior: "followUp" },
-		);
-		expect(mode.finishPendingSubmission).toHaveBeenCalledWith(input);
-		expect(mode.showError).not.toHaveBeenCalled();
-	});
-
-	it("queues a plain submission as followUp when streaming", async () => {
-		const mode = {
-			markPendingSubmissionStarted: vi.fn(() => true),
-			finishPendingSubmission: vi.fn(),
-			showError: vi.fn(),
-			checkShutdownRequested: vi.fn(async () => {}),
-		};
-		const session = {
-			prompt: vi.fn(async () => true),
-			promptCustomMessage: vi.fn(async () => true),
-			isStreaming: true,
-		};
-		const input = createInput({ text: "loop prompt" });
-
-		await submitInteractiveInput(mode, session, input);
-
-		expect(session.prompt).toHaveBeenCalledWith("loop prompt", { images: undefined, streamingBehavior: "followUp" });
-		expect(session.promptCustomMessage).not.toHaveBeenCalled();
-		expect(mode.finishPendingSubmission).toHaveBeenCalledWith(input);
-		expect(mode.showError).not.toHaveBeenCalled();
-	});
-
 	it("parks the loop when dispatch consumes the armed body locally", async () => {
 		const mode = {
-			markPendingSubmissionStarted: vi.fn(() => true),
-			finishPendingSubmission: vi.fn(),
-			showError: vi.fn(),
-			checkShutdownRequested: vi.fn(async () => {}),
+			...createMode(),
 			loopPrompt: "/void-cmd",
 			pauseLoop: vi.fn(),
 		};
@@ -266,10 +231,7 @@ describe("submitInteractiveInput", () => {
 
 	it("keeps the loop armed when dispatch starts a turn", async () => {
 		const mode = {
-			markPendingSubmissionStarted: vi.fn(() => true),
-			finishPendingSubmission: vi.fn(),
-			showError: vi.fn(),
-			checkShutdownRequested: vi.fn(async () => {}),
+			...createMode(),
 			loopPrompt: "repeat me",
 			pauseLoop: vi.fn(),
 		};
@@ -288,10 +250,7 @@ describe("submitInteractiveInput", () => {
 
 	it("ignores local consumption when it is not the armed body", async () => {
 		const mode = {
-			markPendingSubmissionStarted: vi.fn(() => true),
-			finishPendingSubmission: vi.fn(),
-			showError: vi.fn(),
-			checkShutdownRequested: vi.fn(async () => {}),
+			...createMode(),
 			loopPrompt: "repeat me",
 			pauseLoop: vi.fn(),
 		};
@@ -310,10 +269,7 @@ describe("submitInteractiveInput", () => {
 
 	it("parks the loop when dispatch rejects the armed body", async () => {
 		const mode = {
-			markPendingSubmissionStarted: vi.fn(() => true),
-			finishPendingSubmission: vi.fn(),
-			showError: vi.fn(),
-			checkShutdownRequested: vi.fn(async () => {}),
+			...createMode(),
 			loopPrompt: "failing body",
 			pauseLoop: vi.fn(),
 		};
@@ -333,28 +289,42 @@ describe("submitInteractiveInput", () => {
 		expect(mode.finishPendingSubmission).toHaveBeenCalledWith(input);
 	});
 
-	it("ignores dispatch rejection when it is not the armed body", async () => {
-		const mode = {
-			markPendingSubmissionStarted: vi.fn(() => true),
-			finishPendingSubmission: vi.fn(),
-			showError: vi.fn(),
-			checkShutdownRequested: vi.fn(async () => {}),
-			loopPrompt: "repeat me",
-			pauseLoop: vi.fn(),
-		};
+	it("routes a resubmitted /skill: prompt through promptCustomMessage instead of raw text (regression for #8137-style loop resubmit)", async () => {
+		const skillDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-skill-command-"));
+		cleanupDirs.push(skillDir);
+		const skillPath = path.join(skillDir, "recap.md");
+		await fs.writeFile(skillPath, "---\nname: recap\n---\nSummarize recent changes.\n");
+		const skill: Skill = { name: "recap", description: "", filePath: skillPath, baseDir: skillDir, source: "test" };
+		const mode = createMode({ skillCommands: new Map([["skill:recap", skill]]) });
 		const session = {
-			prompt: vi.fn(async () => {
-				throw new Error("attachment too large");
-			}),
+			prompt: vi.fn(async () => true),
 			promptCustomMessage: vi.fn(async () => true),
 			isStreaming: false,
 		};
-		const input = createInput({ text: "/other-cmd" });
+		const input = createInput({ text: "/skill:recap what changed" });
 
 		await submitInteractiveInput(mode, session, input);
 
-		expect(mode.pauseLoop).not.toHaveBeenCalled();
-		expect(mode.showError).toHaveBeenCalledWith("attachment too large");
-		expect(mode.finishPendingSubmission).toHaveBeenCalledWith(input);
+		expect(session.prompt).not.toHaveBeenCalled();
+		expect(session.promptCustomMessage).toHaveBeenCalledWith(
+			expect.objectContaining({
+				customType: SKILL_PROMPT_MESSAGE_TYPE,
+				attribution: "user",
+				display: true,
+				details: expect.objectContaining({ name: "recap", args: "what changed" }),
+			}),
+			expect.objectContaining({ streamingBehavior: "followUp" }),
+		);
+		// The row paints before the awaited dispatch, so a slow preflight does not
+		// leave a loop iteration invisible (issue #8895).
+		expect(mode.renderOptimisticSkillMessage).toHaveBeenCalledWith(
+			expect.objectContaining({
+				role: "custom",
+				customType: SKILL_PROMPT_MESSAGE_TYPE,
+				attribution: "user",
+			}),
+			expect.anything(),
+		);
+		expect(mode.showError).not.toHaveBeenCalled();
 	});
 });

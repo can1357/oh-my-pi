@@ -1,12 +1,17 @@
+import { encodeSixelAsync } from "@oh-my-pi/pi-natives";
 import { getKittyGraphics } from "../kitty-graphics";
 import {
+	encodeSixelNow,
 	getCellDimensions,
 	getImageDimensions,
 	type ImageDimensions,
+	ImageProtocol,
 	imageFallback,
 	renderImage,
 	TERMINAL,
 } from "../terminal-capabilities";
+import { nativeImageNode } from "../native/blobs";
+import type { DescribeContext, NativeNode } from "../native/node";
 import type { Component } from "../tui";
 
 export interface ImageTheme {
@@ -25,6 +30,29 @@ export interface ImageOptions {
 	 * repaint replaces the placement instead of stacking a duplicate.
 	 */
 	imageKey?: string;
+	/**
+	 * Schedules a repaint once this image's off-thread SIXEL encode lands.
+	 * Defaults to the budget's repaint; a host without a budget must pass one,
+	 * or the image's reserved rows stay blank until an unrelated repaint.
+	 */
+	requestRender?: () => void;
+}
+
+/** Renders in progress whose rows are bound for native scrollback. */
+let scrollbackRenderDepth = 0;
+
+/**
+ * Run `render` for rows bound for native scrollback. Those rows are never
+ * repainted, so an image whose off-thread SIXEL encode has not landed encodes
+ * synchronously instead of committing its reserved blank rows.
+ */
+export function renderForScrollback<T>(render: () => T): T {
+	scrollbackRenderDepth++;
+	try {
+		return render();
+	} finally {
+		scrollbackRenderDepth--;
+	}
 }
 
 const EMPTY_IDS: readonly number[] = [];
@@ -35,6 +63,11 @@ const RESTORE_CURSOR = "\x1b8";
 // Direct placements reserve height with leading zero-width rows. Keep them
 // non-plain so transcript blank-edge trimming does not collapse image-only blocks.
 const RESERVED_IMAGE_ROW = "\x1b[0m";
+
+/** Widest an {@link Image} rendered at `width` columns draws; callers sizing a raster for it (`SvgFigure`) match it. */
+export function imageMaxColumns(width: number): number {
+	return Math.max(1, width - 2);
+}
 
 /** Default count of inline images kept as live graphics before older ones fall back to text. */
 export const DEFAULT_MAX_INLINE_IMAGES = 8;
@@ -57,6 +90,48 @@ interface PlacementEmitState {
 	 */
 	cellsArchived: boolean;
 }
+
+/** A surface the renderer paints frames on. */
+type Surface = "screen" | "alt";
+const SURFACES: readonly Surface[] = ["screen", "alt"];
+
+/**
+ * The live/text split of one drawing surface. The normal screen and the
+ * alternate buffer hold separate frames with separate display orders, so each
+ * carries its own thresholds: a modal's split describes the modal, and applying
+ * it to the transcript would demote — and purge — images the modal never showed.
+ */
+interface SurfaceSplit {
+	/**
+	 * Suppress threshold reflected in the frame currently on this surface: images
+	 * at display indices `[0, onTerminal)` are shown as text there.
+	 */
+	onTerminal: number;
+	/** Suppress threshold the current/next render of this surface should apply. */
+	planned: number;
+	/** Images the last full pass on this surface observed. */
+	lastTotal: number;
+	/**
+	 * Image ids shown as text in the frame currently on this surface: the
+	 * display-order prefix [0, onTerminal) of its last full pass, snapshotted by
+	 * id so a partial pass reproduces the on-screen live/text split without a
+	 * full, correctly-ordered walk.
+	 */
+	readonly suppressedIds: Set<number>;
+}
+
+function newSurfaceSplit(): SurfaceSplit {
+	return { onTerminal: 0, planned: 0, lastTotal: 0, suppressedIds: new Set() };
+}
+
+/** Return a split to "nothing has been painted on this surface yet", in place. */
+function resetSurfaceSplit(split: SurfaceSplit): void {
+	split.onTerminal = 0;
+	split.planned = 0;
+	split.lastTotal = 0;
+	if (split.suppressedIds.size > 0) split.suppressedIds.clear();
+}
+
 let nextImageBudgetSeed = Math.floor(Math.random() * 0xffffff);
 function nextImageIdSeed(): number {
 	nextImageBudgetSeed = (nextImageBudgetSeed + 0x10000) & 0xffffff;
@@ -66,16 +141,26 @@ function nextImageIdSeed(): number {
  * Bounds how many inline images render as live terminal graphics at once.
  *
  * Terminal graphics protocols — Kitty especially — keep every transmitted image
- * in a per-terminal store and re-draw placements as content scrolls; text-clear
- * escapes (`CSI 2 J` / `CSI 3 J`) do not remove them. Unbounded, a session that
- * shows many images piles up placements plus store memory and leaves ghosts in
- * scrollback.
+ * in a per-screen store and re-draw placements as content scrolls; placements
+ * that left the viewport survive text-clear escapes (`CSI 2 J`). Unbounded, a
+ * session that shows many images piles up placements plus store memory and
+ * leaves ghosts in scrollback.
  *
  * The budget keeps the most recent `cap` images live and demotes older ones to
  * their text fallback. Demotion needs a full redraw (so off-screen rows are
  * rewritten) plus an explicit graphics purge of the demoted ids. {@link Image}
  * reports display order via {@link observe}; when that reveals a stricter split,
  * the TUI repeats the pass before emitting its terminal frame.
+ * Retired frames no longer observe their images, so the resident store is also
+ * bounded across passes. Evicting retired graphics removes their scrollback
+ * placements; a later replay can render or demote those images again.
+ *
+ * `cap` bounds one surface's live images, not the terminal's whole store. A
+ * fullscreen overlay's frame and the normal screen standing behind it are both
+ * on the terminal, and neither may delete the other's graphics — see
+ * {@link limitResidentImages} — so while a modal is up the store legitimately
+ * holds up to `cap` per surface. Read `cap` as "how many images one frame shows
+ * as graphics", not as a hard residency ceiling.
  *
  * `cap <= 0` disables budgeting: every image stays a live graphic.
  */
@@ -90,33 +175,53 @@ export class ImageBudget {
 	/** Per-id suppression decision from the first observation in this pass. */
 	#passSuppression = new Map<number, boolean>();
 	/**
-	 * Suppress threshold reflected in the frame currently on the terminal: images
-	 * at display indices `[0, #onTerminal)` are shown as text there.
+	 * Display index each observation was decided at, so {@link #passShowsLive}
+	 * can re-check it against a reconciled threshold without scanning
+	 * {@link #passIds} once per image.
 	 */
-	#onTerminal = 0;
-	/** Suppress threshold the current/next render should apply. */
-	#planned = 0;
+	#passIndex = new Map<number, number>();
+	/** Live/text split of the normal screen. */
+	#screenSplit = newSurfaceSplit();
+	/** Live/text split of the alternate buffer (fullscreen overlay, resize borrow). */
+	#altSplit = newSurfaceSplit();
+	/** The split the in-flight pass reads and writes; selected by {@link beginPass}. */
+	#split = this.#screenSplit;
 	/**
 	 * True while the in-flight pass applies a stricter threshold than the terminal
 	 * shows — the demotion frame that must purge graphics and fully repaint.
 	 */
 	#applyingReset = false;
-	#lastTotal = 0;
 	#purgeIds: number[] = [];
-	/** Image ids whose data is believed to be loaded in the terminal's store. */
-	#transmitted = new Set<number>();
-	/** Transmit sequences (full base64) to write once, before this frame's placements. */
-	#pendingTransmits = new Map<number, string>();
+	/**
+	 * Deletions that belong to a pending destructive reset, kept out of
+	 * {@link #purgeIds} so only that reset's own repaint can emit them. See
+	 * {@link forgetTransmitted}.
+	 */
+	#resetPurgeIds: number[] = [];
+	/**
+	 * Image ids whose data is believed to be loaded in each screen's store.
+	 * kitty and Ghostty keep the normal and alternate buffers' graphics apart
+	 * and wipe the alternate store on every `?1049h`, so data sent while one
+	 * buffer was active is unknown to the other: a placement there resolves
+	 * only after its own transmit.
+	 */
+	#transmitted: Record<Surface, Set<number>> = { screen: new Set(), alt: new Set() };
+	/** Transmit sequences (full base64) to write once per surface, before that frame's placements. */
+	#pendingTransmits: Record<Surface, Map<number, string>> = { screen: new Map(), alt: new Map() };
 	// True while the in-flight pass is a partial/throwaway pass (the
 	// non-multiplexer resize viewport fast path) that walks only the visible
 	// tail, bottom-up. Such a pass cannot derive display order from observe()
 	// call order, so its suppression decisions replay the committed split below.
 	#stablePass = false;
-	// Image ids shown as text in the frame currently on the terminal: the
-	// display-order prefix [0, #onTerminal) of the last full pass, snapshotted by
-	// id so a partial pass reproduces the on-screen live/text split without a
-	// full, correctly-ordered walk.
-	#suppressedIds = new Set<number>();
+	/** The surface the in-flight pass composes for; selected by {@link beginPass}. */
+	#surface: Surface = "screen";
+	/**
+	 * Image ids rendered as live graphics by the frame standing on each surface.
+	 * A pass walks one surface, so the other's entry is what stops {@link #retire}
+	 * from deleting a graphic that is merely out of view — the transcript behind a
+	 * fullscreen overlay keeps its placements and is restored from cache on exit.
+	 */
+	#liveIds: Record<Surface, Set<number>> = { screen: new Set(), alt: new Set() };
 	/**
 	 * Per-image direct-placement emit state: source pixel geometry for the
 	 * renderer's clipped source rectangle, plus the placement-id epoch (see
@@ -133,6 +238,8 @@ export class ImageBudget {
 	 * placements) instead of every image ever registered.
 	 */
 	#watchedPlacements = new Set<PlacementEmitState>();
+	/** Ids whose owner replaced them for good ({@link release}); retired once no frame shows them. */
+	#released = new Set<number>();
 
 	constructor(cap: number = DEFAULT_MAX_INLINE_IMAGES, requestRender: () => void = () => {}) {
 		this.#cap = normalizeCap(cap);
@@ -151,11 +258,16 @@ export class ImageBudget {
 		this.#requestRender = requestRender;
 	}
 
+	/** Ask for a repaint, e.g. once an image's off-thread encode settles. */
+	requestRender(): void {
+		this.#requestRender();
+	}
+
 	setCap(cap: number): void {
 		const next = normalizeCap(cap);
 		if (next === this.#cap) return;
 		this.#cap = next;
-		this.#reconcile(this.#lastTotal);
+		if (!this.#reconcile(this.#split.lastTotal)) this.#requestRender();
 	}
 
 	/**
@@ -179,17 +291,63 @@ export class ImageBudget {
 	}
 
 	/**
+	 * Retire the graphic held under `key` as soon as no frame shows it, instead
+	 * of when the residency sweep reaches it. For an owner that replaced the
+	 * image for good — a streaming SVG figure's earlier raster — so superseded
+	 * revisions never push older images (scrollback included) out of the store.
+	 */
+	release(key: string): void {
+		const id = this.#keyToId.get(key);
+		if (id !== undefined) this.#released.add(id);
+	}
+
+	/**
+	 * Start an alternate-buffer lifecycle. Call once per `?1049h`, before the
+	 * first pass of the fullscreen overlay or resize borrow that owns the buffer.
+	 *
+	 * The alt split is a claim about the frame standing on that surface, and
+	 * `?1049h` hands over a cleared one: the previous occupant's threshold would
+	 * suppress this buffer's leading images against a frame that no longer
+	 * exists, painting them as text until a corrective render lands. Passes
+	 * *within* one lifecycle must keep sharing the split — that is what lets an
+	 * over-cap discovery pass converge before the frame is emitted.
+	 */
+	beginAltScreenLifecycle(): void {
+		resetSurfaceSplit(this.#altSplit);
+		this.#liveIds.alt.clear();
+		// `?1049h` hands over an empty graphics store as well as a cleared grid.
+		this.#transmitted.alt.clear();
+	}
+
+	/**
 	 * Begin a render pass. Called by the renderer before composing the frame.
 	 * Pass `stable: true` for a partial/throwaway pass that does not walk the
 	 * whole tree in display order (the resize viewport fast path): {@link observe}
 	 * then replays the last committed per-id decision instead of one derived from
 	 * call order, and the pass must NOT be closed with {@link endPass}.
+	 *
+	 * Pass `altScreen: true` when the frame is painted on the alternate buffer
+	 * (fullscreen overlay, resize borrow). The pass then reads and writes that
+	 * surface's own {@link SurfaceSplit} and its live set adds to the recorded
+	 * normal-screen one instead of replacing it, so a modal's threshold never
+	 * reaches the transcript standing behind it.
 	 */
-	beginPass(stable = false): void {
+	beginPass(stable = false, altScreen = false): void {
 		this.#passIds.length = 0;
-		this.#passSuppression.clear();
+		if (this.#passSuppression.size > 0) this.#passSuppression.clear();
+		if (this.#passIndex.size > 0) this.#passIndex.clear();
 		this.#stablePass = stable;
-		this.#applyingReset = !stable && this.#cap > 0 && this.#planned > this.#onTerminal;
+		this.#surface = altScreen ? "alt" : "screen";
+		this.#split = altScreen ? this.#altSplit : this.#screenSplit;
+		// Composing for the screen means the alternate buffer holds no frame to
+		// protect: live renders reach the normal-screen paths only when
+		// TUI#doRender has ruled out both alt-buffer owners, and the one caller
+		// outside that dispatch — the shutdown history flush — writes `?1049l`
+		// first. Note that leaving alt mode is not the same as unstacking a
+		// fullscreen overlay: the flush must exclude one that is still stacked
+		// from the pass itself, which is that caller's job, not this line's.
+		if (!altScreen && this.#liveIds.alt.size > 0) this.#liveIds.alt.clear();
+		this.#applyingReset = !stable && this.#cap > 0 && this.#split.planned > this.#split.onTerminal;
 	}
 
 	/**
@@ -198,22 +356,23 @@ export class ImageBudget {
 	 * on a cache hit, so the image keeps its display-order slot.
 	 *
 	 * During a `stable` pass ({@link beginPass}) the call order and visible subset
-	 * are not authoritative, so the decision is the committed on-terminal split
-	 * (`#suppressedIds`) keyed by id — order- and partiality-independent.
+	 * are not authoritative, so the decision is the surface's committed
+	 * on-terminal split, keyed by id — order- and partiality-independent.
 	 */
 	observe(imageId: number): boolean {
 		const existing = this.#passSuppression.get(imageId);
 		if (existing !== undefined) return existing;
 		if (this.#stablePass) {
-			const suppressed = this.#cap > 0 && this.#suppressedIds.has(imageId);
+			const suppressed = this.#cap > 0 && this.#split.suppressedIds.has(imageId);
 			this.#passSuppression.set(imageId, suppressed);
 			if (suppressed) this.#forgetKeyForId(imageId);
 			return suppressed;
 		}
 		const index = this.#passIds.length;
 		this.#passIds.push(imageId);
-		const suppressed = this.#cap > 0 && index < this.#planned;
+		const suppressed = this.#cap > 0 && index < this.#split.planned;
 		this.#passSuppression.set(imageId, suppressed);
+		this.#passIndex.set(imageId, index);
 		if (suppressed) this.#forgetKeyForId(imageId);
 		return suppressed;
 	}
@@ -224,27 +383,123 @@ export class ImageBudget {
 	 */
 	endPass(): boolean {
 		const total = this.#passIds.length;
-		this.#lastTotal = total;
+		const split = this.#split;
+		split.lastTotal = total;
 		if (this.#applyingReset) {
-			for (let i = this.#onTerminal; i < this.#planned && i < total; i++) {
-				const id = this.#passIds[i];
-				// A transmit queued by a discarded discovery pass never reached
-				// the terminal, so cancel it instead of transmitting then purging.
-				if (!this.#pendingTransmits.delete(id)) this.#purgeIds.push(id);
-				this.#transmitted.delete(id);
-				this.#deletePlacementState(id);
-				this.#forgetKeyForId(id);
+			// This frame replaced these with their text fallback, so their graphics
+			// are retired as far as this surface is concerned.
+			for (let i = split.onTerminal; i < split.planned && i < total; i++) {
+				this.#retire(this.#passIds[i]);
 			}
-			this.#onTerminal = this.#planned;
+			split.onTerminal = split.planned;
 			this.#applyingReset = false;
 		}
 		const retry = this.#reconcile(total);
 		// Snapshot the committed display-order suppression by id: the prefix
-		// [0, #onTerminal) is what the terminal currently shows as text. Partial
+		// [0, onTerminal) is what this surface currently shows as text. Partial
 		// passes replay this per id (see #stablePass) instead of re-deriving it
 		// from a reversed, tail-only walk.
-		this.#suppressedIds = new Set(this.#passIds.slice(0, this.#onTerminal));
+		const suppressedIds = split.suppressedIds;
+		if (suppressedIds.size > 0) suppressedIds.clear();
+		const suppressedCount = Math.min(total, split.onTerminal);
+		for (let i = 0; i < suppressedCount; i++) suppressedIds.add(this.#passIds[i]);
 		return retry;
+	}
+
+	/**
+	 * Bound the terminal's image store to `cap`. Demotion ({@link endPass}) already
+	 * retires the graphics this frame replaced with text; this sweeps the ones no
+	 * frame shows any more — images the pass simply stopped observing.
+	 *
+	 * Also records what this frame leaves standing on its surface, which is how
+	 * the next pass on the *other* surface knows what it may not destroy.
+	 */
+	limitResidentImages(): void {
+		const liveIds = this.#liveIds[this.#surface];
+		if (liveIds.size > 0) liveIds.clear();
+		for (let i = 0; i < this.#passIds.length; i++) {
+			const id = this.#passIds[i];
+			if (this.#passShowsLive(id)) liveIds.add(id);
+		}
+		const transmitted = this.#transmitted[this.#surface];
+		for (const id of this.#released) {
+			// #retire refuses while this pass or the other surface still shows it.
+			if (transmitted.has(id)) this.#retire(id);
+			if (this.#isTransmitted(id)) continue;
+			this.#forgetKeyForId(id);
+			this.#released.delete(id);
+		}
+		if (this.#cap <= 0 || transmitted.size <= this.#cap) return;
+		for (const id of transmitted) {
+			if (transmitted.size <= this.#cap) break;
+			this.#retire(id);
+		}
+	}
+
+	/**
+	 * Whether this pass leaves `imageId` on its surface as a live graphic.
+	 *
+	 * Not simply "was not suppressed". A pass decides suppression from the
+	 * threshold standing at {@link beginPass}, and {@link endPass} may then
+	 * reconcile that threshold *downwards* — the frame is emitted with a text
+	 * fallback the very next frame will replace with the graphic again. Reading
+	 * such a decision as retirement would delete an image the surface is about to
+	 * show, and `d=I` takes placements no repaint can restore. So a suppression
+	 * the reconcile has since undercut counts as live.
+	 */
+	#passShowsLive(imageId: number): boolean {
+		const suppressed = this.#passSuppression.get(imageId);
+		if (suppressed === undefined) return false;
+		if (!suppressed) return true;
+		// Absent (a `stable` pass replays the committed split rather than deriving
+		// an order) counts as live, so an unknown decision never authorises a
+		// delete.
+		const index = this.#passIndex.get(imageId);
+		return index === undefined || index >= this.#split.planned;
+	}
+
+	/**
+	 * Drop `imageId` from the painted surface's image store: queue its `d=I` (or
+	 * cancel a transmit that never went out) and, once no surface holds its data,
+	 * forget its placement ledger and key.
+	 *
+	 * The single gate on every destruction path. `d=I` removes an image's
+	 * placements everywhere on its screen, scrollback included, and a frame diff
+	 * only rewrites rows whose text changed — so a graphic some standing frame
+	 * still shows cannot be repaired once deleted, and must never be a
+	 * candidate. Refuses when the in-flight pass renders the image live, or when
+	 * the frame on any surface this pass is not repainting does. Returns whether
+	 * it was retired.
+	 */
+	#retire(imageId: number): boolean {
+		if (this.#passShowsLive(imageId)) return false;
+		for (const surface of SURFACES) {
+			if (surface !== this.#surface && this.#liveIds[surface].has(imageId)) return false;
+		}
+		// A transmit queued by a discarded discovery pass never reached the
+		// terminal, so cancel it instead of transmitting then purging.
+		if (!this.#pendingTransmits[this.#surface].delete(imageId)) this.#purgeIds.push(imageId);
+		this.#transmitted[this.#surface].delete(imageId);
+		if (!this.#isTransmitted(imageId)) this.#deletePlacementState(imageId);
+		this.#forgetKeyForId(imageId);
+		return true;
+	}
+
+	/** Whether any screen's store is believed to hold `imageId`'s data. */
+	#isTransmitted(imageId: number): boolean {
+		for (const surface of SURFACES) if (this.#transmitted[surface].has(imageId)) return true;
+		return false;
+	}
+
+	/**
+	 * Image ids a destructive reset must delete explicitly, alongside its `d=A`.
+	 * Emit only from that reset's repaint; clears the queue.
+	 */
+	takeResetPurgeIds(): readonly number[] {
+		if (this.#resetPurgeIds.length === 0) return EMPTY_IDS;
+		const ids = this.#resetPurgeIds;
+		this.#resetPurgeIds = [];
+		return ids;
 	}
 
 	/** Image ids to delete from the terminal this frame; clears the pending set. */
@@ -255,23 +510,29 @@ export class ImageBudget {
 		return ids;
 	}
 
-	/** All image ids believed to be loaded in the terminal store; clears tracking. */
+	/** All image ids believed to be loaded in any screen's store; clears tracking. */
 	takeAllTransmittedIds(): readonly number[] {
-		if (this.#transmitted.size === 0) return EMPTY_IDS;
-		const ids = [...this.#transmitted];
-		this.#transmitted.clear();
+		const ids = new Set<number>();
+		for (const surface of SURFACES) {
+			for (const id of this.#transmitted[surface]) ids.add(id);
+			this.#transmitted[surface].clear();
+			this.#pendingTransmits[surface].clear();
+		}
+		if (ids.size === 0) return EMPTY_IDS;
 		this.#purgeIds = [];
-		this.#pendingTransmits.clear();
+		this.#resetPurgeIds = [];
 		this.#keyToId.clear();
 		this.#idToKey.clear();
 		this.#placementState.clear();
 		this.#watchedPlacements.clear();
-		return ids;
+		this.#released.clear();
+		for (const surface of SURFACES) this.#liveIds[surface].clear();
+		return [...ids];
 	}
 
-	/** Whether `imageId`'s data still needs to be transmitted to the terminal. */
+	/** Whether `imageId`'s data still needs to be transmitted to the surface the in-flight pass paints. */
 	shouldTransmit(imageId: number): boolean {
-		return !this.#transmitted.has(imageId);
+		return !this.#transmitted[this.#surface].has(imageId);
 	}
 
 	/**
@@ -392,58 +653,89 @@ export class ImageBudget {
 	}
 
 	/**
-	 * Queue a one-time transmit for `imageId`. No-op if already transmitted, so a
-	 * repeated call (e.g. a width-change re-render) never re-sends the data.
+	 * Queue a one-time transmit for `imageId` on the surface the in-flight pass
+	 * paints. No-op if that surface already holds the data, so a repeated call
+	 * (e.g. a width-change re-render) never re-sends it.
 	 */
 	enqueueTransmit(imageId: number, sequence: string): void {
-		if (this.#transmitted.has(imageId)) return;
-		this.#transmitted.add(imageId);
-		this.#pendingTransmits.set(imageId, sequence);
+		const transmitted = this.#transmitted[this.#surface];
+		if (transmitted.has(imageId)) return;
+		transmitted.add(imageId);
+		this.#pendingTransmits[this.#surface].set(imageId, sequence);
 	}
 
-	/** Whether a frame has image data queued but not yet written to the terminal. */
+	/** Whether the in-flight pass's surface has image data queued but not yet written. */
 	hasPendingTransmits(): boolean {
-		return this.#pendingTransmits.size > 0;
+		return this.#pendingTransmits[this.#surface].size > 0;
 	}
 
 	/**
-	 * True when the budget has nothing in flight: no live images observed on
-	 * the last pass, no queued transmits, no pending purges, and no stricter
-	 * threshold left to apply. A component-scoped frame may skip the observe
-	 * pass only then — a partial tree walk would under-count display order.
+	 * True when the budget has nothing in flight on either surface: no live images
+	 * observed on the last pass, no queued transmits, no pending purges, and no
+	 * stricter threshold left to apply. A component-scoped frame may skip the
+	 * observe pass only then — a partial tree walk would under-count display order.
 	 */
 	get quiescent(): boolean {
-		return (
-			this.#lastTotal === 0 &&
-			this.#pendingTransmits.size === 0 &&
-			this.#purgeIds.length === 0 &&
-			this.#planned === this.#onTerminal
-		);
+		if (this.#purgeIds.length > 0) return false;
+		for (const surface of SURFACES) if (this.#pendingTransmits[surface].size > 0) return false;
+		for (const split of [this.#screenSplit, this.#altSplit]) {
+			if (split.lastTotal !== 0 || split.planned !== split.onTerminal) return false;
+		}
+		return true;
 	}
 
-	/** Transmit sequences to write before this frame's placements; clears the queue. */
+	/** Transmit sequences to write before this frame's placements on its surface; clears that queue. */
 	takeTransmits(): readonly string[] {
-		if (this.#pendingTransmits.size === 0) return EMPTY_TRANSMITS;
-		const sequences = [...this.#pendingTransmits.values()];
-		this.#pendingTransmits.clear();
+		const pending = this.#pendingTransmits[this.#surface];
+		if (pending.size === 0) return EMPTY_TRANSMITS;
+		const sequences = [...pending.values()];
+		pending.clear();
 		return sequences;
 	}
 
 	/**
-	 * Drop transmit tracking so every still-live image re-enqueues its data
-	 * (`a=t`) on the next render. Recovers when the terminal dropped the original
-	 * transmit — e.g. Ghostty discarding graphics sent during its post-startup
-	 * window — where a placement-only replay can never bind a Unicode placeholder.
-	 * Pair with a component invalidate + forced repaint so the data and placement
-	 * re-emit together; keeps no base64 in budget state (the transmit-once design).
+	 * Drop the normal screen's transmit tracking so every still-live image
+	 * re-enqueues its data (`a=t`) on the next render. Recovers when the terminal
+	 * dropped the original transmit — e.g. Ghostty discarding graphics sent during
+	 * its post-startup window — where a placement-only replay can never bind a
+	 * Unicode placeholder. Pair with a component invalidate + forced repaint so
+	 * the data and placement re-emit together; keeps no base64 in budget state
+	 * (the transmit-once design).
 	 */
 	forgetTransmitted(): void {
-		if (this.#transmitted.size === 0 && this.#pendingTransmits.size === 0) return;
-		this.#transmitted.clear();
-		this.#pendingTransmits.clear();
+		const transmitted = this.#transmitted.screen;
+		const pending = this.#pendingTransmits.screen;
+		if (transmitted.size === 0 && pending.size === 0) return;
+		for (const id of transmitted) {
+			if (!pending.has(id)) this.#resetPurgeIds.push(id);
+		}
+		// The ids go to #resetPurgeIds, drained only by the destructive repaint
+		// itself — never to #purgeIds, which any frame drains. That is how a
+		// deletion used to ride out on an alternate-buffer frame and leave the
+		// normal screen blank with no repaint left to restore it.
+		//
+		// `d=A` alone is not enough to skip these: Kitty excludes *virtual*
+		// placements from it, and erasing placeholder text does not remove the
+		// prototype either. Forgetting drops the id from tracking, so without an
+		// explicit `d=I` no later sweep can ever find that placement again.
+		transmitted.clear();
+		pending.clear();
 	}
 
+	/**
+	 * Release `id`'s stable key so a component recreated under it gets a fresh id
+	 * — but only once the terminal no longer holds `id`'s data, because a key must
+	 * never resolve to an id whose graphic is gone.
+	 *
+	 * Key lifetime follows residency, not the live/text split. The two usually
+	 * agree: an image shown as text has had its graphic purged. They diverge when
+	 * {@link #retire} refuses, which leaves a suppressed image resident on another
+	 * surface — and releasing a resident id's key orphans it. The recreation mints
+	 * a new id, nothing observes the old one again, and the next pass retires it,
+	 * deleting every placement it ever made including scrollback copies.
+	 */
 	#forgetKeyForId(id: number): void {
+		if (this.#isTransmitted(id)) return;
 		const key = this.#idToKey.get(id);
 		if (key === undefined) return;
 		this.#idToKey.delete(id);
@@ -451,21 +743,22 @@ export class ImageBudget {
 	}
 
 	#reconcile(total: number): boolean {
+		const split = this.#split;
 		const desired = this.#cap > 0 ? Math.max(0, total - this.#cap) : 0;
-		if (desired === this.#planned) {
+		if (desired === split.planned) {
 			// Budget relaxed without a stricter frame (cap raised or images
 			// removed): surviving graphics are untouched and re-exposed rows
 			// repaint normally, so just track the looser threshold.
-			if (this.#planned < this.#onTerminal) this.#onTerminal = this.#planned;
+			if (split.planned < split.onTerminal) split.onTerminal = split.planned;
 			return false;
 		}
-		const retry = desired > this.#onTerminal;
-		this.#planned = desired;
+		const retry = desired > split.onTerminal;
+		split.planned = desired;
 		// More images must be demoted than the terminal shows: schedule the purge +
 		// full-redraw frame. Fewer: no ghosts to clear, so just catch the tracking
 		// up — a normal repaint re-exposes the un-demoted images. Either way a
 		// render is needed to apply the new threshold.
-		if (desired <= this.#onTerminal) this.#onTerminal = desired;
+		if (desired <= split.onTerminal) split.onTerminal = desired;
 		this.#requestRender();
 		return retry;
 	}
@@ -496,6 +789,9 @@ export class Image implements Component {
 	// pads itself to this height so a budget demotion never shrinks the block
 	// (its rows may already be committed to native scrollback).
 	#renderedGraphicRows = 0;
+	#native?: NativeNode;
+	/** Newest SIXEL encode: its target size and, once settled, the sequence (`null` on failure). */
+	#sixel?: { widthPx: number; heightPx: number; sequence?: string | null };
 
 	constructor(
 		base64Data: string,
@@ -529,6 +825,67 @@ export class Image implements Component {
 		this.#cachedWidth = undefined;
 	}
 
+	releaseRenderCaches(): void {
+		this.#cachedLines = undefined;
+		this.#cachedWidth = undefined;
+	}
+
+	/**
+	 * SIXEL sequence for a target size. A new size starts the encode off the JS
+	 * thread and answers `undefined` until it settles; the settled encode
+	 * invalidates the cached lines and requests a repaint. A render bound for
+	 * scrollback cannot wait, so it encodes synchronously.
+	 */
+	#sixelSequence(widthPx: number, heightPx: number): string | null | undefined {
+		const current = this.#sixel;
+		const sameSize = current !== undefined && current.widthPx === widthPx && current.heightPx === heightPx;
+		if (sameSize && current.sequence !== undefined) return current.sequence;
+		if (scrollbackRenderDepth > 0) {
+			// Replacing the entry makes a still-pending async encode settle as stale.
+			const sequence = encodeSixelNow(this.#base64Data, widthPx, heightPx);
+			this.#sixel = { widthPx, heightPx, sequence };
+			return sequence;
+		}
+		if (sameSize) return undefined;
+		const request: { widthPx: number; heightPx: number; sequence?: string | null } = { widthPx, heightPx };
+		this.#sixel = request;
+		const settle = (sequence: string | null): void => {
+			request.sequence = sequence;
+			if (this.#sixel !== request) return;
+			this.invalidate();
+			if (this.#options.requestRender) this.#options.requestRender();
+			else this.#budget?.requestRender();
+		};
+		encodeSixelAsync(new Uint8Array(Buffer.from(this.#base64Data, "base64")), widthPx, heightPx).then(settle, () =>
+			settle(null),
+		);
+		return undefined;
+	}
+
+	/**
+	 * A native `image` backed by a content-addressed blob; the terminal fits
+	 * it. Cell caps become `ch`/`lines` bounds. The inline-image budget and
+	 * graphics protocols do not apply.
+	 */
+	describe(_cx: DescribeContext): NativeNode {
+		if (this.#native) return this.#native;
+		const maxW = this.#options.maxWidthCells;
+		const maxH = this.#options.maxHeightCells;
+		this.#native = nativeImageNode(Buffer.from(this.#base64Data, "base64"), this.#mimeType, {
+			alt: imageFallback(this.#mimeType, this.#dimensions, this.#options.filename),
+			w: this.#dimensions.widthPx,
+			h: this.#dimensions.heightPx,
+			max:
+				(maxW ?? 0) > 0 || (maxH ?? 0) > 0
+					? {
+							w: maxW && maxW > 0 ? `${maxW}ch` : undefined,
+							h: maxH && maxH > 0 ? `${maxH}lines` : undefined,
+						}
+					: undefined,
+		});
+		return this.#native;
+	}
+
 	render(width: number): readonly string[] {
 		const imageProtocol = TERMINAL.imageProtocol;
 		const hasProtocol = imageProtocol != null;
@@ -539,6 +896,13 @@ export class Image implements Component {
 		// toward (and are demoted by) the budget; without a protocol every image is
 		// already text.
 		const suppressed = hasProtocol && this.#budget !== undefined ? this.#budget.observe(this.#imageId ?? 0) : false;
+		// Only Kitty images with a budget id transmit their data separately from
+		// the placement; a pending re-transmit (after a purge or history clear)
+		// must rebuild the lines. SIXEL and iTerm2 carry the image inside the line
+		// itself and never register a transmit, so gating their cache on it would
+		// re-encode the full image on every render pass.
+		const imageId = this.#imageId;
+		const transmitsSeparately = imageProtocol === ImageProtocol.Kitty && imageId != null;
 
 		if (
 			this.#cachedLines &&
@@ -548,25 +912,28 @@ export class Image implements Component {
 			this.#cachedCellWidthPx === cellDimensions.widthPx &&
 			this.#cachedCellHeightPx === cellDimensions.heightPx &&
 			this.#cachedKittyUnicodePlaceholders === kittyUnicodePlaceholders &&
-			(this.#imageId == null || this.#budget?.shouldTransmit(this.#imageId) !== true)
+			(!transmitsSeparately || this.#budget?.shouldTransmit(imageId) !== true) &&
+			// Cached rows reserved for a pending SIXEL encode must not reach scrollback.
+			!(scrollbackRenderDepth > 0 && this.#sixel !== undefined && this.#sixel.sequence === undefined)
 		) {
 			return this.#cachedLines;
 		}
 
 		const cap = this.#options.maxWidthCells;
-		const maxWidth = cap != null && cap > 0 ? Math.min(width - 2, cap) : width - 2;
+		const maxWidth = cap != null && cap > 0 ? Math.min(imageMaxColumns(width), cap) : imageMaxColumns(width);
 
 		let lines: string[];
 
 		if (hasProtocol && !suppressed) {
 			// Transmit the data once (keyed by id); thereafter renderImage returns
 			// just the placement, so repaints never re-send the base64.
-			const needsTransmit = this.#imageId != null && (this.#budget?.shouldTransmit(this.#imageId) ?? false);
+			const needsTransmit = transmitsSeparately && (this.#budget?.shouldTransmit(imageId) ?? false);
 			const result = renderImage(this.#base64Data, this.#dimensions, {
 				maxWidthCells: maxWidth,
 				maxHeightCells: this.#options.maxHeightCells,
 				imageId: this.#imageId,
 				includeTransmit: needsTransmit,
+				sixel: (widthPx, heightPx) => this.#sixelSequence(widthPx, heightPx),
 			});
 
 			if (result?.transmit && this.#imageId != null && this.#budget !== undefined) {

@@ -1,4 +1,5 @@
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import * as path from "node:path";
 import { Agent, CompactionCancelledError, type AgentTool } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, UserMessage } from "@oh-my-pi/pi-ai";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
@@ -19,7 +20,7 @@ import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensi
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TempDir } from "@oh-my-pi/pi-utils";
-import { computeNonMessageTokens } from "@oh-my-pi/pi-coding-agent/modes/utils/context-usage";
+import { computeNonMessageTokens } from "@oh-my-pi/pi-tui/status-line/context-usage";
 import { mnemopiBackend } from "@oh-my-pi/pi-coding-agent/mnemopi/backend";
 import type { Tool, ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { ContextNotesTool, NewContextTool } from "@oh-my-pi/pi-coding-agent/tools/context-notes";
@@ -30,8 +31,8 @@ import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
 import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
 
 const authStorage = createInMemoryAuthStorage();
-authStorage.setRuntimeApiKey("anthropic", "test-key");
-authStorage.setRuntimeApiKey("openai-codex", "test-key");
+authStorage.keys.setRuntime("anthropic", "test-key");
+authStorage.keys.setRuntime("openai-codex", "test-key");
 const modelRegistry = new ModelRegistry(authStorage);
 
 afterAll(() => {
@@ -60,6 +61,34 @@ function assistant(text: string): AssistantMessage {
 		},
 		timestamp: Date.now(),
 	};
+}
+
+const STREAMING_PARENT_ASSIGNMENT = "ASSIGNMENT_A_STREAMING_PARENT_STEER";
+const IDLE_IRC_ASSIGNMENT = "ASSIGNMENT_B_IDLE_IRC";
+
+function appendIdleIrcRolloverScenario(manager: SessionManager, fromParent: boolean): void {
+	manager.appendMessage({
+		...user(STREAMING_PARENT_ASSIGNMENT),
+		attribution: "agent",
+		steering: true,
+	});
+	manager.appendMessage(assistant("Assignment A completed."));
+	manager.appendCustomMessageEntry(
+		"irc:incoming",
+		IDLE_IRC_ASSIGNMENT,
+		true,
+		{
+			id: "idle-irc-b",
+			from: fromParent ? "Parent" : "Peer",
+			message: IDLE_IRC_ASSIGNMENT,
+			...(fromParent ? { fromParent: true } : {}),
+		},
+		"agent",
+	);
+	const firstKeptEntryId = manager.appendMessage(assistant("Assignment B work in progress."));
+	manager.appendCompaction("Context rollover", undefined, firstKeptEntryId, 100, {
+		details: { kind: "experimental-context-rollover", version: 1 },
+	});
 }
 
 describe("experimental context management", () => {
@@ -176,6 +205,52 @@ describe("experimental context management", () => {
 		expect(
 			rebuilt.filter(message => message.role === "user" && JSON.stringify(message.content).includes(request)),
 		).toHaveLength(1);
+	});
+
+	it("retains a newer idle parent assignment instead of an older streaming parent steer", () => {
+		const manager = SessionManager.inMemory();
+		appendIdleIrcRolloverScenario(manager, true);
+
+		const rebuilt = JSON.stringify(manager.buildSessionContext().messages);
+		expect(rebuilt).toContain(IDLE_IRC_ASSIGNMENT);
+		expect(rebuilt).not.toContain(STREAMING_PARENT_ASSIGNMENT);
+	});
+
+	it("does not elevate newer peer IRC above the latest user request", () => {
+		const manager = SessionManager.inMemory();
+		appendIdleIrcRolloverScenario(manager, false);
+
+		const rebuilt = JSON.stringify(manager.buildSessionContext().messages);
+		expect(rebuilt).toContain(STREAMING_PARENT_ASSIGNMENT);
+		expect(rebuilt).not.toContain(IDLE_IRC_ASSIGNMENT);
+	});
+
+	it("retains an idle parent assignment through repeated rollover and resume from the journal", async () => {
+		using tempDir = TempDir.createSync("@pi-parent-irc-rollover-");
+		const sessionDir = path.join(tempDir.path(), "sessions");
+		const manager = SessionManager.create(tempDir.path(), sessionDir);
+		appendIdleIrcRolloverScenario(manager, true);
+		const nextFirstKeptEntryId = manager.appendMessage(assistant("More work on assignment B."));
+		manager.appendCompaction("Second context rollover", undefined, nextFirstKeptEntryId, 50, {
+			details: { kind: "experimental-context-rollover", version: 1 },
+		});
+		await manager.ensureOnDisk();
+		const sessionFile = manager.getSessionFile();
+		if (!sessionFile) throw new Error("Expected persisted rollover session");
+
+		const repeated = JSON.stringify(manager.buildSessionContext().messages);
+		expect(repeated).toContain(IDLE_IRC_ASSIGNMENT);
+		expect(repeated).not.toContain(STREAMING_PARENT_ASSIGNMENT);
+
+		const resumed = await SessionManager.open(sessionFile, sessionDir);
+		try {
+			const rebuilt = JSON.stringify(resumed.buildSessionContext().messages);
+			expect(rebuilt).toContain(IDLE_IRC_ASSIGNMENT);
+			expect(rebuilt).not.toContain(STREAMING_PARENT_ASSIGNMENT);
+		} finally {
+			await resumed.close();
+			await manager.close();
+		}
 	});
 
 	it("closes the lifecycle when cancellation occurs during awaited start dispatch", async () => {
@@ -569,8 +644,8 @@ describe("experimental context management", () => {
 			.find((candidate): candidate is CompactionEntry => candidate.type === "compaction");
 		if (!entry) throw new Error("Expected a rollover boundary");
 		const expected =
-			computeNonMessageTokens(session, agent.tokenizer) +
-			agent.tokenizer.countMessages(manager.buildSessionContext().messages);
+			computeNonMessageTokens(session, agent.tokenizer, session.settings.revision) +
+			agent.tokenizer.countMessages(convertToLlm(manager.buildSessionContext().messages));
 		expect(entry.tokensAfter).toBe(expected);
 		expect(entry.tokensAfter).toBeGreaterThan(agent.tokenizer.countMessages(manager.buildSessionContext().messages));
 	});

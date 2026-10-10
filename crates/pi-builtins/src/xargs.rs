@@ -7,15 +7,15 @@ use std::{
 	error::Error,
 	ffi::{OsStr, OsString},
 	fmt::Display,
-	fs,
 	io::{self, Read, Write},
-	process::Command,
 };
 
 use brush_core::{ShellExtensions, builtins::Registration};
 use clap::{Arg, ArgAction, ArgMatches};
 
-use crate::host::{Host, Utility, matches_parser, util};
+use crate::host::{
+	CommandStatus, Host, RunningCommand, ShellCommand, Utility, matches_parser, util,
+};
 
 mod options {
 	pub const COMMAND: &str = "COMMAND";
@@ -43,6 +43,7 @@ struct Options {
 	max_args:                Option<usize>,
 	max_chars:               Option<usize>,
 	max_lines:               Option<usize>,
+	max_procs:               usize,
 	no_run_if_empty:         bool,
 	null:                    bool,
 	replace:                 Option<String>,
@@ -291,7 +292,6 @@ impl CommandResult {
 	}
 }
 
-#[allow(dead_code, reason = "`Killed` is never constructed on Windows")]
 #[derive(Debug)]
 enum CommandExecutionError {
 	// exit code 255
@@ -299,7 +299,6 @@ enum CommandExecutionError {
 	Killed { signal: i32 },
 	CannotRun(io::Error),
 	NotFound,
-	Unknown,
 }
 
 impl Display for CommandExecutionError {
@@ -311,12 +310,72 @@ impl Display for CommandExecutionError {
 			},
 			Self::CannotRun(err) => write!(f, "Command could not be run: {err}"),
 			Self::NotFound => write!(f, "Command not found"),
-			Self::Unknown => write!(f, "Unknown error running command"),
 		}
 	}
 }
 
 impl Error for CommandExecutionError {}
+
+/// Maps how a command ended onto xargs' verdict for it.
+fn command_outcome(
+	status: io::Result<CommandStatus>,
+) -> Result<CommandResult, CommandExecutionError> {
+	match status {
+		Ok(CommandStatus::Exited(0)) => Ok(CommandResult::Success),
+		Ok(CommandStatus::Exited(255)) => Err(CommandExecutionError::UrgentlyFailed),
+		Ok(CommandStatus::Exited(_)) => Ok(CommandResult::Failure),
+		Ok(CommandStatus::Signaled(signal)) => Err(CommandExecutionError::Killed { signal }),
+		Err(e) if e.kind() == io::ErrorKind::NotFound => Err(CommandExecutionError::NotFound),
+		Err(e) => Err(CommandExecutionError::CannotRun(e)),
+	}
+}
+
+/// Commands launched and not yet reaped, at most `limit` at once (`-P`).
+struct Jobs {
+	limit:   usize,
+	running: Vec<RunningCommand>,
+	result:  CommandResult,
+}
+
+impl Jobs {
+	fn new(limit: usize) -> Self {
+		Self { limit, running: Vec::new(), result: CommandResult::Success }
+	}
+
+	/// Starts `argv`, then waits until fewer than `limit` commands run, so
+	/// `-P 1` runs each command to completion before reading more input.
+	fn spawn(&mut self, host: &mut Host, argv: Vec<OsString>) -> Result<(), CommandExecutionError> {
+		let command = host
+			.spawn_command(ShellCommand::new(argv))
+			.map_err(CommandExecutionError::CannotRun)?;
+		self.running.push(command);
+		while self.running.len() >= self.limit {
+			self.reap()?;
+		}
+		Ok(())
+	}
+
+	/// Waits for one running command and folds its status into the result.
+	fn reap(&mut self) -> Result<(), CommandExecutionError> {
+		if let Some(status) = RunningCommand::wait_any(&mut self.running) {
+			self.result.combine(command_outcome(status)?);
+		}
+		Ok(())
+	}
+
+	/// Waits for every running command, so none outlives xargs; the first
+	/// fatal error is reported only once all have finished.
+	fn finish(mut self) -> Result<CommandResult, CommandExecutionError> {
+		let mut outcome = Ok(());
+		while !self.running.is_empty() {
+			let reaped = self.reap();
+			if outcome.is_ok() {
+				outcome = reaped;
+			}
+		}
+		outcome.map(|()| self.result)
+	}
+}
 
 enum ExecAction {
 	Command(Vec<OsString>),
@@ -366,7 +425,7 @@ impl CommandBuilder<'_> {
 		Ok(())
 	}
 
-	fn execute(self, host: &mut Host) -> Result<CommandResult, CommandExecutionError> {
+	fn execute(self, host: &mut Host, jobs: &mut Jobs) -> Result<(), CommandExecutionError> {
 		let (entry_point, initial_args): (&OsStr, &[OsString]) = match &self.options.action {
 			ExecAction::Command(args) => (&args[0], &args[1..]),
 			ExecAction::Echo => (OsStr::new("echo"), &[]),
@@ -410,7 +469,7 @@ impl CommandBuilder<'_> {
 				response.push(byte[0]);
 			}
 			if !matches!(response.first(), Some(b'y' | b'Y')) {
-				return Ok(CommandResult::Success);
+				return Ok(());
 			}
 		} else if self.options.verbose {
 			// GNU-style `-t`: echo the command line about to run on stderr.
@@ -419,42 +478,8 @@ impl CommandBuilder<'_> {
 
 		match &self.options.action {
 			ExecAction::Command(_) => {
-				let mut command = Command::new(entry_point);
-				command
-					.args(&final_args)
-					.current_dir(host.cwd())
-					.env_clear()
-					.envs(host.env());
-				match host.run_captured(&mut command) {
-					Ok(status) => {
-						if status.success() {
-							Ok(CommandResult::Success)
-						} else if let Some(err) = status.code() {
-							if err == 255 {
-								Err(CommandExecutionError::UrgentlyFailed)
-							} else {
-								Ok(CommandResult::Failure)
-							}
-						} else {
-							#[cfg(unix)]
-							{
-								use std::os::unix::process::ExitStatusExt;
-								if let Some(signal) = status.signal() {
-									Err(CommandExecutionError::Killed { signal })
-								} else {
-									Err(CommandExecutionError::Unknown)
-								}
-							}
-
-							#[cfg(not(unix))]
-							Err(CommandExecutionError::Unknown)
-						}
-					},
-					Err(e) if e.kind() == io::ErrorKind::NotFound => {
-						Err(CommandExecutionError::NotFound)
-					},
-					Err(e) => Err(CommandExecutionError::CannotRun(e)),
-				}
+				let argv = std::iter::once(entry_point.to_owned()).chain(final_args).collect();
+				jobs.spawn(host, argv)
 			},
 			ExecAction::Echo => {
 				let _ = writeln!(
@@ -467,7 +492,7 @@ impl CommandBuilder<'_> {
 						.collect::<Vec<_>>()
 						.join(" ")
 				);
-				Ok(CommandResult::Success)
+				Ok(())
 			},
 		}
 	}
@@ -688,6 +713,7 @@ struct InputProcessOptions {
 	exit_if_pass_char_limit: bool,
 	max_args:                Option<usize>,
 	max_lines:               Option<usize>,
+	max_procs:               usize,
 	no_run_if_empty:         bool,
 }
 
@@ -696,26 +722,43 @@ impl InputProcessOptions {
 		exit_if_pass_char_limit: bool,
 		max_args: Option<usize>,
 		max_lines: Option<usize>,
+		max_procs: usize,
 		no_run_if_empty: bool,
 	) -> Self {
-		Self { exit_if_pass_char_limit, max_args, max_lines, no_run_if_empty }
+		Self { exit_if_pass_char_limit, max_args, max_lines, max_procs, no_run_if_empty }
 	}
 }
 
+/// Runs command lines built from `args`, up to `options.max_procs` at once,
+/// and waits for all of them.
 fn process_input(
+	host: &mut Host,
+	builder_options: &CommandBuilderOptions,
+	args: Box<dyn ArgumentReader>,
+	options: &InputProcessOptions,
+) -> Result<CommandResult, XargsError> {
+	let mut jobs = Jobs::new(options.max_procs);
+	let launched = launch_commands(host, builder_options, args, options, &mut jobs);
+	let finished = jobs.finish();
+	launched?;
+	Ok(finished?)
+}
+
+/// Builds command lines from `args` and hands each to `jobs`.
+fn launch_commands(
 	host: &mut Host,
 	builder_options: &CommandBuilderOptions,
 	mut args: Box<dyn ArgumentReader>,
 	options: &InputProcessOptions,
-) -> Result<CommandResult, XargsError> {
+	jobs: &mut Jobs,
+) -> Result<(), XargsError> {
 	let mut current_builder = CommandBuilder::new(builder_options);
 	let mut have_pending_command = false;
-	let mut result = CommandResult::Success;
 
 	while let Some(arg) = args.next(host)? {
 		// Stop launching new children once the host has cancelled the command.
 		if host.is_cancelled() {
-			return Ok(result);
+			return Ok(());
 		}
 		if let Err(ExhaustedCommandSpace { arg, out_of_chars }) = current_builder.add_arg(arg) {
 			if out_of_chars
@@ -725,7 +768,7 @@ fn process_input(
 				return Err(XargsError::ArgumentTooLarge);
 			}
 			if have_pending_command {
-				result.combine(current_builder.execute(host)?);
+				current_builder.execute(host, jobs)?;
 			}
 
 			current_builder = CommandBuilder::new(builder_options);
@@ -738,14 +781,14 @@ fn process_input(
 	}
 
 	if host.is_cancelled() {
-		return Ok(result);
+		return Ok(());
 	}
 
 	if have_pending_command || (!options.no_run_if_empty && builder_options.replace.is_none()) {
-		result.combine(current_builder.execute(host)?);
+		current_builder.execute(host, jobs)?;
 	}
 
-	Ok(result)
+	Ok(())
 }
 
 fn parse_delimiter(s: &str) -> Result<u8, String> {
@@ -905,7 +948,7 @@ fn app() -> clap::Command {
 			Arg::new(options::MAX_PROCS)
 				.short('P')
 				.long(options::MAX_PROCS)
-				.help("Run up to this many commands in parallel [NOT IMPLEMENTED]")
+				.help("Run up to this many commands in parallel; 0 runs as many as possible")
 				.value_parser(clap::value_parser!(usize)),
 		)
 		.arg(
@@ -980,6 +1023,11 @@ fn do_xargs(matches: &ArgMatches, host: &mut Host) -> Result<CommandResult, Xarg
 		max_args:                matches.get_one::<usize>(options::MAX_ARGS).copied(),
 		max_chars:               matches.get_one::<usize>(options::MAX_CHARS).copied(),
 		max_lines:               matches.get_one::<usize>(options::MAX_LINES).copied(),
+		max_procs:               match matches.get_one::<usize>(options::MAX_PROCS) {
+			None => 1,
+			Some(0) => usize::MAX,
+			Some(&max_procs) => max_procs,
+		},
 		no_run_if_empty:         matches.get_flag(options::NO_RUN_IF_EMPTY),
 		null:                    matches.get_flag(options::NULL),
 		replace:                 [options::REPLACE_I, options::REPLACE]
@@ -1029,12 +1077,12 @@ fn do_xargs(matches: &ArgMatches, host: &mut Host) -> Result<CommandResult, Xarg
 
 	let args: Box<dyn ArgumentReader> = match (&options.arg_file, delimiter) {
 		(Some(path), Some(delimiter)) => {
-			let file = fs::File::open(host.resolve(path))
+			let file = host.fs().open(host.resolve(path))
 				.map_err(|e| format!("Failed to open {path}: {e}"))?;
 			Box::new(ByteDelimitedArgumentReader::new(file, delimiter))
 		},
 		(Some(path), None) => {
-			let file = fs::File::open(host.resolve(path))
+			let file = host.fs().open(host.resolve(path))
 				.map_err(|e| format!("Failed to open {path}: {e}"))?;
 			Box::new(WhitespaceDelimitedArgumentReader::new(file))
 		},
@@ -1050,6 +1098,7 @@ fn do_xargs(matches: &ArgMatches, host: &mut Host) -> Result<CommandResult, Xarg
 			options.exit_if_pass_char_limit,
 			max_args,
 			max_lines,
+			options.max_procs,
 			options.no_run_if_empty,
 		),
 	)?;
@@ -1058,6 +1107,7 @@ fn do_xargs(matches: &ArgMatches, host: &mut Host) -> Result<CommandResult, Xarg
 
 impl Utility for Xargs {
 	const NAME: &'static str = "xargs";
+	const RUNS_COMMANDS: bool = true;
 
 	fn run(self, host: &mut Host) -> i32 {
 		match do_xargs(&self.matches, host) {
@@ -1071,7 +1121,6 @@ impl Utility for Xargs {
 						CommandExecutionError::Killed { .. } => 125,
 						CommandExecutionError::CannotRun(_) => 126,
 						CommandExecutionError::NotFound => 127,
-						CommandExecutionError::Unknown => 1,
 					}
 				} else {
 					1
@@ -1372,163 +1421,206 @@ mod tests {
 		assert!(parse_delimiter("abc").is_err());
 	}
 
-	fn run_simple(argv: &[&str], stdin: &str) -> (i32, String, String) {
-		let (code, capture) = crate::host::run_util::<Xargs>(argv, stdin, ".");
-		(code, capture.out(), capture.err())
+	/// Runs `xargs ARGV` in a real shell from `cwd`, so commands dispatch the
+	/// way they do in the harness.
+	async fn xargs_in(cwd: &std::path::Path, argv: &[&str], stdin: &str) -> (i32, String, String) {
+		let script = std::iter::once("xargs")
+			.chain(argv.iter().copied())
+			.map(crate::host::quote_arg)
+			.collect::<Vec<_>>()
+			.join(" ");
+		crate::host::run_script(&script, stdin, cwd).await
 	}
 
-	#[test]
-	fn child_stdout_is_captured_through_host() {
-		let (code, out, err) = run_simple(&["echo"], "a b c\n");
+	async fn run_simple(argv: &[&str], stdin: &str) -> (i32, String, String) {
+		xargs_in(&std::env::temp_dir(), argv, stdin).await
+	}
+
+	#[tokio::test]
+	async fn child_stdout_is_captured_through_host() {
+		let (code, out, err) = run_simple(&["echo"], "a b c\n").await;
 		assert_eq!(code, 0);
 		assert_eq!(out, "a b c\n");
 		assert_eq!(err, "");
 	}
 
-	#[test]
-	fn max_args_batches_into_two_invocations() {
-		let (code, out, _) = run_simple(&["-n", "2", "echo"], "a b c\n");
+	#[tokio::test]
+	async fn max_args_batches_into_two_invocations() {
+		let (code, out, _) = run_simple(&["-n", "2", "echo"], "a b c\n").await;
 		assert_eq!(code, 0);
 		assert_eq!(out, "a b\nc\n");
 	}
 
-	#[test]
-	fn default_mode_honors_quotes() {
-		let (code, out, _) = run_simple(&["sh", "-c", "echo $#", "_"], "\"a b\" c\n");
+	#[tokio::test]
+	async fn default_mode_honors_quotes() {
+		let (code, out, _) = run_simple(&["sh", "-c", "echo $#", "_"], "\"a b\" c\n").await;
 		assert_eq!(code, 0);
 		assert_eq!(out, "2\n");
 	}
 
-	#[test]
-	fn null_mode_preserves_spaces_and_newlines() {
-		let (code, out, _) = run_simple(&["-0", "echo"], "a b\0c\nd\0");
+	#[tokio::test]
+	async fn null_mode_preserves_spaces_and_newlines() {
+		let (code, out, _) = run_simple(&["-0", "echo"], "a b\0c\nd\0").await;
 		assert_eq!(code, 0);
 		assert_eq!(out, "a b c\nd\n");
 	}
 
-	#[test]
-	fn replace_places_item_mid_command() {
+	#[tokio::test]
+	async fn replace_places_item_mid_command() {
 		let (code, out, _) =
-			run_simple(&["-I", "{}", "echo", "hello", "{}", "!"], "world\n");
+			run_simple(&["-I", "{}", "echo", "hello", "{}", "!"], "world\n").await;
 		assert_eq!(code, 0);
 		assert_eq!(out, "hello world !\n");
 	}
 
-	#[test]
-	fn failing_child_yields_123() {
-		let (code, out, _) = run_simple(&["false"], "x\n");
+	#[tokio::test]
+	async fn failing_child_yields_123() {
+		let (code, out, _) = run_simple(&["false"], "x\n").await;
 		assert_eq!(code, 123);
 		assert_eq!(out, "");
 	}
 
-	#[test]
-	fn missing_command_yields_127() {
-		let (code, _, err) = run_simple(&["definitely-not-a-real-command-xyz"], "x\n");
+	/// Contract: a builtin that runs and fails is a failed command (123) with
+	/// the shell's own diagnostic, not a command that could not be run (126).
+	#[tokio::test]
+	async fn failing_builtin_yields_123() {
+		let (code, _, err) = run_simple(&["cd"], "definitely-missing-dir\n").await;
+		assert_eq!(code, 123);
+		assert!(err.contains("cd:"), "got: {err:?}");
+		assert!(!err.contains("could not be run"), "got: {err:?}");
+	}
+
+	#[tokio::test]
+	async fn missing_command_yields_127() {
+		let (code, _, err) = run_simple(&["definitely-not-a-real-command-xyz"], "x\n").await;
 		assert_eq!(code, 127);
 		assert!(err.contains("Command not found"), "got: {err:?}");
 	}
 
 	#[cfg(unix)]
-	#[test]
-	fn unexecutable_command_yields_126() {
+	#[tokio::test]
+	async fn unexecutable_command_yields_126() {
 		let file = tempfile::NamedTempFile::new().expect("temporary command");
 		let command = file.path().to_str().expect("utf8 temporary path");
-		let (code, _, err) = run_simple(&[command], "x\n");
+		let (code, _, err) = run_simple(&[command], "x\n").await;
 		assert_eq!(code, 126);
 		assert!(err.contains("could not be run"), "got: {err:?}");
 	}
 
-	#[test]
-	fn exit_255_child_yields_124() {
-		let (code, _, err) = run_simple(&["sh", "-c", "exit 255", "_"], "x\n");
+	#[tokio::test]
+	async fn exit_255_child_yields_124() {
+		let (code, _, err) = run_simple(&["sh", "-c", "exit 255", "_"], "x\n").await;
 		assert_eq!(code, 124);
 		assert!(err.contains("255"), "got: {err:?}");
 	}
 
 	#[cfg(unix)]
-	#[test]
-	fn signalled_child_yields_125() {
-		let (code, _, err) = run_simple(&["sh", "-c", "kill -TERM $$", "_"], "x\n");
+	#[tokio::test]
+	async fn signalled_child_yields_125() {
+		let (code, _, err) = run_simple(&["sh", "-c", "kill -TERM $$", "_"], "x\n").await;
 		assert_eq!(code, 125);
 		assert!(err.contains("signal"), "got: {err:?}");
 	}
 
-	#[test]
-	fn no_run_if_empty_skips_command() {
-		let (code, out, err) = run_simple(&["-r", "echo"], "");
+	/// Contract: `-P N` runs up to N commands at once. Each command waits (up
+	/// to 5s) until all three have started, which only succeeds concurrently.
+	#[cfg(unix)]
+	#[tokio::test]
+	async fn max_procs_runs_commands_concurrently() {
+		let dir = tempfile::TempDir::new().expect("tempdir");
+		let script = "touch \"$1\"; i=0; while [ \"$(ls | wc -l)\" -lt 3 ]; do i=$((i+1)); [ $i -gt \
+		              500 ] && exit 1; sleep 0.01; done";
+		let (code, _, err) =
+			xargs_in(dir.path(), &["-n", "1", "-P", "3", "sh", "-c", script, "_"], "a b c\n").await;
+		assert_eq!(code, 0, "stderr: {err:?}");
+	}
+
+	#[tokio::test]
+	async fn no_run_if_empty_skips_command() {
+		let (code, out, err) = run_simple(&["-r", "echo"], "").await;
 		assert_eq!(code, 0);
 		assert_eq!(out, "");
 		assert_eq!(err, "");
 	}
 
-	#[test]
-	fn empty_input_without_r_runs_default_echo_once() {
-		let (code, out, _) = run_simple(&[], "");
+	#[tokio::test]
+	async fn empty_input_without_r_runs_default_echo_once() {
+		let (code, out, _) = run_simple(&[], "").await;
 		assert_eq!(code, 0);
 		assert_eq!(out, "\n");
 	}
 
-	#[test]
-	fn replace_mode_skips_empty_input_without_r() {
-		let result = run_simple(&["-I", "{}", "echo", "{}"], "");
+	#[tokio::test]
+	async fn replace_mode_skips_empty_input_without_r() {
+		let result = run_simple(&["-I", "{}", "echo", "{}"], "").await;
 		assert_eq!(result, (0, String::new(), String::new()));
 	}
 
-	#[test]
-	fn verbose_echoes_command_line_to_stderr() {
-		let (code, out, err) = run_simple(&["-t", "echo", "a"], "b\n");
+	#[tokio::test]
+	async fn verbose_echoes_command_line_to_stderr() {
+		let (code, out, err) = run_simple(&["-t", "echo", "a"], "b\n").await;
 		assert_eq!(code, 0);
 		assert_eq!(out, "a b\n");
 		assert_eq!(err, "echo a b\n");
 	}
 
-	#[test]
-	fn children_run_in_host_cwd() {
+	#[tokio::test]
+	async fn children_run_in_host_cwd() {
 		let dir = tempfile::TempDir::new().expect("tempdir");
-		let (code, capture) = crate::host::run_util::<Xargs>(
-			&["sh", "-c", "touch \"$1\"", "_"],
-			"made.txt\n",
-			dir.path(),
-		);
-		assert_eq!(code, 0, "stderr: {:?}", capture.err());
+		let (code, _, err) =
+			xargs_in(dir.path(), &["sh", "-c", "touch \"$1\"", "_"], "made.txt\n").await;
+		assert_eq!(code, 0, "stderr: {err:?}");
 		assert!(dir.path().join("made.txt").exists());
 	}
 
-	#[test]
-	fn children_see_host_environment() {
-		let (mut host, capture) = Host::for_test("xargs", "x\n", ".");
-		host.set_test_var("XVAR", "hello");
-		let parsed = <Xargs as clap::Parser>::try_parse_from([
-			"xargs",
-			"sh",
-			"-c",
-			"echo \"$XVAR\"",
-			"_",
-		])
-		.expect("parse xargs");
-		let code = parsed.run(&mut host);
+	#[tokio::test]
+	async fn children_see_host_environment() {
+		let (code, out, _) = crate::host::run_script(
+			"export XVAR=hello; xargs sh -c 'echo \"$XVAR\"' _",
+			"x\n",
+			&std::env::temp_dir(),
+		)
+		.await;
 		assert_eq!(code, 0);
-		assert_eq!(capture.out(), "hello\n");
+		assert_eq!(out, "hello\n");
 	}
 
-	#[test]
-	fn arg_file_resolves_against_host_cwd() {
+	/// Contract: a command runs like a child process, so builtins that change
+	/// shell state (`cd`) cannot leak into the invoking shell or into the next
+	/// batch.
+	#[tokio::test]
+	async fn builtin_commands_cannot_change_the_invoking_shell() {
+		let dir = tempfile::TempDir::new().expect("tempdir");
+		std::fs::create_dir(dir.path().join("sub")).expect("subdirectory");
+		let root = std::fs::canonicalize(dir.path()).expect("canonical root");
+		let (code, out, err) = crate::host::run_script(
+			"printf 'sub\\nsub\\n' | xargs -n1 cd && xargs pwd < /dev/null && pwd",
+			"",
+			&root,
+		)
+		.await;
+		assert_eq!(code, 0, "stderr: {err:?}");
+		let expected = format!("{0}\n{0}\n", root.display());
+		assert_eq!(out, expected);
+	}
+
+	#[tokio::test]
+	async fn arg_file_resolves_against_host_cwd() {
 		let dir = tempfile::TempDir::new().expect("tempdir");
 		std::fs::write(dir.path().join("items.txt"), "a b\n").expect("write items");
-		let (code, capture) =
-			crate::host::run_util::<Xargs>(&["-a", "items.txt", "echo"], "", dir.path());
+		let (code, out, _) = xargs_in(dir.path(), &["-a", "items.txt", "echo"], "").await;
 		assert_eq!(code, 0);
-		assert_eq!(capture.out(), "a b\n");
+		assert_eq!(out, "a b\n");
 	}
 
-	#[test]
-	fn interactive_confirmation_reads_stdin_and_prompts_stderr() {
+	#[tokio::test]
+	async fn interactive_confirmation_reads_stdin_and_prompts_stderr() {
 		let dir = tempfile::TempDir::new().expect("tempdir");
 		std::fs::write(dir.path().join("items.txt"), "a\n").expect("write items");
-		let (code, capture) =
-			crate::host::run_util::<Xargs>(&["-a", "items.txt", "-p", "echo"], "y\n", dir.path());
+		let (code, out, err) =
+			xargs_in(dir.path(), &["-a", "items.txt", "-p", "echo"], "y\n").await;
 		assert_eq!(code, 0);
-		assert_eq!(capture.out(), "a\n");
-		assert_eq!(capture.err(), "echo a ?...");
+		assert_eq!(out, "a\n");
+		assert_eq!(err, "echo a ?...");
 	}
 }

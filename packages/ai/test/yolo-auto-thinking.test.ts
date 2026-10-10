@@ -2,10 +2,10 @@ import { describe, expect, test } from "bun:test";
 import type { Context, FetchImpl, Model } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "../../catalog/src/build";
 import { Effort } from "../../catalog/src/effort";
-import { YOLO_AUTO_STATIC_MODELS } from "../../catalog/src/provider-models/openai-compat";
+import { seedModels } from "../../catalog/src/compat/providers";
 import { streamOpenAICompletions } from "../src/providers/openai-completions";
 
-const model = buildModel(YOLO_AUTO_STATIC_MODELS[0]) as Model<"openai-completions">;
+const model = buildModel(seedModels("yolo-auto")[0]) as Model<"openai-completions">;
 
 const context: Context = {
 	messages: [{ role: "user", content: "hello", timestamp: 0 }],

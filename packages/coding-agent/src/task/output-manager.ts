@@ -12,7 +12,7 @@
  */
 import * as fs from "node:fs/promises";
 import { ADVISOR_TRANSCRIPT_STEM } from "../advisor/transcript-recorder";
-import { PINNED_HUD_TOGGLE_ID } from "../modes/composer";
+import { PINNED_HUD_TOGGLE_ID } from "@oh-my-pi/pi-tui/prompt/composer";
 
 /**
  * Manages agent output ID allocation to ensure uniqueness.

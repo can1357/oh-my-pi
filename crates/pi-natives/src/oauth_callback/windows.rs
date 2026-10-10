@@ -176,23 +176,24 @@ pub(super) fn restore(context: &Context, snapshot: &Snapshot) -> Result<()> {
 	// must recognize both encodings as owned — otherwise the project's own value
 	// looks externally changed, the journal is retained, and every later start
 	// retries the same failed recovery.
-	let (command, legacy_command) =
-		if let Ok(normalized) = relay_command(&context.helper_path, &context.callback_path) {
-			// The legacy encoding is 8 units longer on verbatim disk paths; if the
-			// normalized command fits but the legacy one exceeds the command limit,
-			// no older binary could have installed it, so treat it as no match
-			// rather than failing recovery.
-			let legacy = legacy_relay_command(&context.helper_path, &context.callback_path)
-				.ok()
-				.filter(|legacy| *legacy != normalized);
-			(normalized, legacy)
-		} else {
-			// The only way the normalized form fails while the legacy form succeeds is
-			// the shell refusal of volume/device paths; fall back so those dead
-			// registrations still clean up instead of wedging recovery.
-			let legacy = legacy_relay_command(&context.helper_path, &context.callback_path)?;
-			(legacy.clone(), Some(legacy))
-		};
+	let (command, legacy_command) = if let Ok(normalized) =
+		relay_command(&context.helper_path, &context.callback_path)
+	{
+		// The legacy encoding is 8 units longer on verbatim disk paths; if the
+		// normalized command fits but the legacy one exceeds the command limit,
+		// no older binary could have installed it, so treat it as no match
+		// rather than failing recovery.
+		let legacy = legacy_relay_command(&context.helper_path, &context.callback_path)
+			.ok()
+			.filter(|legacy| *legacy != normalized);
+		(normalized, legacy)
+	} else {
+		// The only way the normalized form fails while the legacy form succeeds
+		// is the shell refusal of volume/device paths; fall back so those dead
+		// registrations still clean up instead of wedging recovery.
+		let legacy = legacy_relay_command(&context.helper_path, &context.callback_path)?;
+		(legacy.clone(), Some(legacy))
+	};
 	let owned = owned_values(context, &command);
 	let legacy_owned = legacy_command
 		.as_ref()
@@ -290,21 +291,8 @@ impl Layout {
 }
 
 fn validate_identity(context: &Context) -> Result<()> {
-	let mut scheme = context.scheme.bytes();
-	if !matches!(scheme.next(), Some(b'a'..=b'z'))
-		|| !scheme
-			.all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || b"+.-".contains(&byte))
-	{
-		bail!("invalid OAuth callback scheme {:?}", context.scheme);
-	}
-	if context.id.len() != 32
-		|| !context
-			.id
-			.bytes()
-			.all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
-	{
-		bail!("invalid OAuth callback transaction nonce");
-	}
+	super::validate_scheme(&context.scheme)?;
+	super::validate_transaction_id(&context.id)?;
 	if !context.directory.is_absolute()
 		|| context
 			.directory
@@ -484,8 +472,7 @@ fn refuse_protected_default(scheme: &str) -> Result<()> {
 		.get_raw_value("ProgId")
 		.ok()
 		.and_then(|value| decode_reg_sz(&value))
-		.map(|value| format!(" ({})", value.to_string_lossy()))
-		.unwrap_or_default();
+		.map_or_default(|value| format!(" ({})", value.to_string_lossy()));
 	bail!(
 		"Windows has a protected default-app selection for {scheme:?}{prog_id}; use manual callback \
 		 input or change the default app in Windows Settings"
@@ -625,8 +612,8 @@ fn reg_type(value_type: u32) -> Result<RegType> {
 
 fn notify_association_changed() {
 	// SAFETY: SHChangeNotify with SHCNE_ASSOCCHANGED and null pointers safely
-	// notifies the Windows shell of file association changes without dereferencing
-	// invalid memory.
+	// notifies the Windows shell of file association changes without
+	// dereferencing invalid memory.
 	unsafe {
 		SHChangeNotify(
 			SHCNE_ASSOCCHANGED as i32,
@@ -644,9 +631,9 @@ fn effective_command(scheme: &str) -> Result<OsString> {
 		.collect::<Vec<_>>();
 	let mut output = vec![0u16; 32_768];
 	let mut length = output.len() as u32;
-	// SAFETY: `association` is null-terminated, `output` is allocated with `length`
-	// capacity, and AssocQueryStringW writes within the bounds specified by `&mut
-	// length`.
+	// SAFETY: `association` is null-terminated, `output` is allocated with
+	// `length` capacity, and AssocQueryStringW writes within the bounds
+	// specified by `&mut length`.
 	let result = unsafe {
 		AssocQueryStringW(
 			ASSOCF_IS_PROTOCOL | ASSOCF_NOFIXUPS | ASSOCF_VERIFY,
@@ -865,9 +852,9 @@ mod tests {
 	#[test]
 	fn recovery_accepts_legacy_verbatim_commands_written_before_the_shell_fix() {
 		let (_guard, context) = DisposableScheme::new();
-		// Pre-#11907 binaries saw canonicalized (`\\?\`) paths and registered them
-		// as-is; rebuild the same transaction in verbatim form so the legacy
-		// encoding diverges from the normalized one.
+		// Pre-#11907 binaries saw canonicalized (`\\?\`) paths and registered
+		// them as-is; rebuild the same transaction in verbatim form so the
+		// legacy encoding diverges from the normalized one.
 		let verbatim = Context::new(
 			context.home,
 			PathBuf::from(format!(r"\\?\{}", context.directory.display())),
