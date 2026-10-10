@@ -4,7 +4,7 @@
 
 ### Added
 
-- Open the full focused file from `/annotate` with Ctrl+G in a supported multiplexer pane, keeping annotation active; without pane support, use the existing external-editor flow.
+- Open the full focused file from `/annotate` with Ctrl+G in a supported multiplexer pane, keeping annotation active; without pane support, use the existing external-editor flow ([#15268](https://github.com/can1357/oh-my-pi/pull/15268) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy)).
 
 ## [18.8.9] - 2026-10-10
 
