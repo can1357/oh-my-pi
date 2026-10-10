@@ -40,8 +40,8 @@ const NOTIFICATIONS: [&str; 10] = [
 const TITLE_CHANGED: &str = "AXTitleChanged";
 /// Longest single run-loop wait, so cancellation is observed promptly.
 const CANCEL_POLL: Duration = Duration::from_millis(50);
-/// Bounds registration and title reads against a hung application.
-const MESSAGING_TIMEOUT_SECONDS: f32 = 0.5;
+/// Bounds each registration call and title read against a hung application.
+const MESSAGING_TIMEOUT: Duration = Duration::from_millis(500);
 /// Private run-loop mode: only this wait's observer sources run in it.
 const RUN_LOOP_MODE: &str = "pi.desktop.uiQuiet";
 
@@ -96,6 +96,36 @@ fn quiet_loop(
 	}
 }
 
+/// AX messaging timeout for a call starting at `at` that must end by
+/// `deadline`: the time left, at most [`MESSAGING_TIMEOUT`]. `None` once the
+/// deadline has passed; AX reads a zero timeout as "use the global default"
+/// (seconds), so it is never returned.
+fn messaging_timeout(deadline: Instant, at: Instant) -> Option<Duration> {
+	deadline
+		.checked_duration_since(at)
+		.filter(|left| !left.is_zero())
+		.map(|left| left.min(MESSAGING_TIMEOUT))
+}
+
+/// Adds `names` in order until `deadline`, handing `add` each name with the
+/// messaging timeout that keeps the call inside the deadline. Stops at the
+/// deadline, keeping what was added so far. Whether any `add` succeeded.
+fn add_until(
+	deadline: Instant,
+	names: &[&str],
+	now: impl Fn() -> Instant,
+	mut add: impl FnMut(&str, Duration) -> bool,
+) -> bool {
+	let mut added = false;
+	for name in names {
+		let Some(timeout) = messaging_timeout(deadline, now()) else {
+			break;
+		};
+		added |= add(name, timeout);
+	}
+	added
+}
+
 /// Last title seen per element, so a title notification counts only when the
 /// title actually changed.
 struct TitleMemo<K> {
@@ -144,6 +174,8 @@ struct Shared {
 	titles:        RefCell<TitleMemo<ElementKey>>,
 	events:        Cell<u32>,
 	last:          Cell<Option<Instant>>,
+	/// End of the wait; title reads never run past it.
+	deadline:      Instant,
 }
 
 impl Shared {
@@ -168,16 +200,17 @@ struct Observers {
 }
 
 impl Observers {
-	fn new(run_loop: CFRetained<CFRunLoop>) -> Self {
+	fn new(run_loop: CFRetained<CFRunLoop>, deadline: Instant) -> Self {
 		Self {
 			run_loop,
 			mode: CFString::from_str(RUN_LOOP_MODE),
 			registrations: Vec::new(),
 			shared: Box::new(Shared {
 				title_changed: CFString::from_str(TITLE_CHANGED),
-				titles:        RefCell::new(TitleMemo::new()),
-				events:        Cell::new(0),
-				last:          Cell::new(None),
+				titles: RefCell::new(TitleMemo::new()),
+				events: Cell::new(0),
+				last: Cell::new(None),
+				deadline,
 			}),
 		}
 	}
@@ -224,6 +257,7 @@ pub(super) fn wait_for_quiet(
 	token: &OperationToken,
 ) -> CoreResult<UiQuiet> {
 	let start = Instant::now();
+	let deadline = start + cap;
 	let mut unique = pids.to_vec();
 	unique.sort_unstable();
 	unique.dedup();
@@ -233,15 +267,15 @@ pub(super) fn wait_for_quiet(
 	let Some(run_loop) = CFRunLoop::current() else {
 		return Ok(UiQuiet::unwatched());
 	};
-	let mut observers = Observers::new(run_loop);
+	let mut observers = Observers::new(run_loop, deadline);
 	for pid in unique {
 		token.check()?;
 		// First contact with an app costs an AX round trip per notification;
 		// the cap bounds registration too.
-		if start.elapsed() >= cap {
+		if Instant::now() >= deadline {
 			break;
 		}
-		if let Some(registration) = register(pid, observers.refcon()) {
+		if let Some(registration) = register(pid, observers.refcon(), deadline) {
 			observers.add(registration);
 		}
 	}
@@ -261,16 +295,13 @@ pub(super) fn wait_for_quiet(
 	)
 }
 
-/// Creates an observer for `pid` with every notification it accepts. `None`
-/// when the process cannot be observed at all.
-fn register(pid: u32, refcon: *mut c_void) -> Option<Registration> {
+/// Creates an observer for `pid` with every notification it accepts before
+/// `deadline`. `None` when the process cannot be observed at all in time.
+fn register(pid: u32, refcon: *mut c_void, deadline: Instant) -> Option<Registration> {
 	let pid = libc::pid_t::try_from(pid).ok().filter(|pid| *pid > 0)?;
 	// SAFETY: AXUIElementCreateApplication accepts any process id and returns
 	// a +1 retained element.
 	let app = unsafe { AXUIElement::new_application(pid) };
-	// SAFETY: The retained application element is valid for the timeout
-	// update.
-	let _ = unsafe { app.set_messaging_timeout(MESSAGING_TIMEOUT_SECONDS) };
 	let mut raw: *mut AXObserver = ptr::null_mut();
 	// SAFETY: `on_notification` has the AXObserverCallback ABI and `raw` is a
 	// writable out pointer.
@@ -280,16 +311,18 @@ fn register(pid: u32, refcon: *mut c_void) -> Option<Registration> {
 	}
 	// SAFETY: A successful AXObserverCreate returns its observer at +1.
 	let observer = unsafe { CFRetained::from_raw(NonNull::new(raw)?) };
-	let mut registered = false;
-	for name in NOTIFICATIONS {
+	let registered = add_until(deadline, &NOTIFICATIONS, Instant::now, |name, timeout| {
+		// SAFETY: The retained application element is valid for the timeout
+		// update.
+		let _ = unsafe { app.set_messaging_timeout(timeout.as_secs_f32()) };
 		let name = CFString::from_str(name);
 		// SAFETY: `refcon` points at the boxed `Shared` owned by `Observers`,
 		// which removes this observer's source before dropping it; the
 		// callback only runs inside this thread's run loop in the private
 		// mode.
 		let error = unsafe { observer.add_notification(&app, &name, refcon) };
-		registered |= error == AXError::Success;
-	}
+		error == AXError::Success
+	});
 	if !registered {
 		return None;
 	}
@@ -314,7 +347,7 @@ unsafe extern "C-unwind" fn on_notification(
 		// SAFETY: AX passes a valid element for the callback's duration;
 		// retaining keeps it as the memo key.
 		let element = unsafe { CFRetained::retain(element) };
-		let title = copy_title(&element);
+		let title = copy_title(&element, shared.deadline);
 		if !shared
 			.titles
 			.borrow_mut()
@@ -327,9 +360,11 @@ unsafe extern "C-unwind" fn on_notification(
 	shared.last.set(Some(Instant::now()));
 }
 
-fn copy_title(element: &AXUIElement) -> Option<String> {
+/// The element's title, read only while time is left before `deadline`.
+fn copy_title(element: &AXUIElement, deadline: Instant) -> Option<String> {
+	let timeout = messaging_timeout(deadline, Instant::now())?;
 	// SAFETY: The retained element is valid for the timeout update.
-	let _ = unsafe { element.set_messaging_timeout(MESSAGING_TIMEOUT_SECONDS) };
+	let _ = unsafe { element.set_messaging_timeout(timeout.as_secs_f32()) };
 	let attribute = CFString::from_str("AXTitle");
 	let mut output: *const CFType = ptr::null();
 	// SAFETY: `output` is writable and receives a create-rule retained CF
@@ -354,7 +389,9 @@ mod tests {
 		time::{Duration, Instant},
 	};
 
-	use super::{CANCEL_POLL, Step, TitleMemo, quiet_loop};
+	use super::{
+		CANCEL_POLL, MESSAGING_TIMEOUT, NOTIFICATIONS, Step, TitleMemo, add_until, quiet_loop,
+	};
 	use crate::desktop::error::{CoreResult, DesktopError, ErrorCode};
 
 	const QUIET: Duration = Duration::from_millis(250);
@@ -504,5 +541,67 @@ mod tests {
 		assert!(memo.counts(2, Some("Inbox".into())));
 		assert!(memo.counts(1, Some("Inbox (3)".into())));
 		assert!(!memo.counts(1, Some("Inbox (3)".into())));
+	}
+
+	/// Registers every notification against a hung app: each call takes its
+	/// whole timeout and `fail` lists the calls that are refused.
+	fn register_hung(cap: Duration, fail: &[usize]) -> (bool, Vec<Duration>, Duration) {
+		let start = Instant::now();
+		let clock = Cell::new(start);
+		let mut timeouts = Vec::new();
+		let added = add_until(
+			start + cap,
+			&NOTIFICATIONS,
+			|| clock.get(),
+			|_, timeout| {
+				clock.set(clock.get() + timeout);
+				timeouts.push(timeout);
+				!fail.contains(&(timeouts.len() - 1))
+			},
+		);
+		(added, timeouts, clock.get() - start)
+	}
+
+	#[test]
+	fn registration_stops_at_the_cap() {
+		let (added, timeouts, spent) = register_hung(ms(1200), &[]);
+		assert!(added);
+		assert_eq!(timeouts, vec![MESSAGING_TIMEOUT, MESSAGING_TIMEOUT, ms(200)]);
+		assert_eq!(spent, ms(1200));
+	}
+
+	#[test]
+	fn registration_without_time_left_adds_nothing() {
+		let (added, timeouts, spent) = register_hung(Duration::ZERO, &[]);
+		assert!(!added);
+		assert!(timeouts.is_empty());
+		assert_eq!(spent, Duration::ZERO);
+	}
+
+	#[test]
+	fn registration_keeps_what_succeeded_before_the_cap() {
+		let (added, timeouts, _) = register_hung(ms(1200), &[0, 2]);
+		assert!(added);
+		assert_eq!(timeouts.len(), 3);
+		let (added, ..) = register_hung(ms(1200), &[0, 1, 2]);
+		assert!(!added);
+	}
+
+	#[test]
+	fn a_responsive_app_registers_every_notification() {
+		let start = Instant::now();
+		let mut names = Vec::new();
+		let added = add_until(
+			start + CAP,
+			&NOTIFICATIONS,
+			|| start,
+			|name, timeout| {
+				assert_eq!(timeout, MESSAGING_TIMEOUT);
+				names.push(name.to_owned());
+				true
+			},
+		);
+		assert!(added);
+		assert_eq!(names, NOTIFICATIONS);
 	}
 }
