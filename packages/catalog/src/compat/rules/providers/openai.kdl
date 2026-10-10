@@ -132,6 +132,9 @@ provider "openai" {
 				reasoning-disable-mode "none-effort"
 			}
 		}
+		models "gpt-5.6-astra*" "gpt-5.6-luna*" "gpt-5.6-sol*" "gpt-5.6-terra*" {
+			reasoning-disable-mode "none-effort"
+		}
 		revision ">=5 <7" {
 			apply-patch-tool-type "freeform"
 		}

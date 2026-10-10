@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed Frustration model rows combining GPT Sol, Luna, Astra, and Terra tiers at the same version ([#15261](https://github.com/can1357/oh-my-pi/issues/15261)).
+
 ## [18.8.0] - 2026-10-07
 
 ### Changed

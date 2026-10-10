@@ -222,6 +222,32 @@ describe("frustration dashboard", () => {
 		expect(byModel.at(-1)).toMatchObject({ key: "weird-model", modelClass: "unknown", revision: null });
 	});
 
+	it("keeps GPT tiers separate while merging the same tier across providers and routes", async () => {
+		await initDb();
+		const t = Date.now() - 60_000;
+		insertUserMessageStats([
+			userMessage("luna", "gpt-5.6-luna", "openai", { blame: 1 }, t),
+			userMessage("luna worker", "gpt-5.6-luna-wm", "openai-codex", {}, t + 1),
+			userMessage("sol", "gpt-5.6-sol", "openai", {}, t + 2),
+			userMessage("sol cursor", "gpt-5.6-sol-high", "cursor", {}, t + 3),
+			userMessage("astra", "gpt-6-astra", "openai", {}, t + 4),
+			userMessage("luna 6", "gpt-6-luna", "openai", {}, t + 5),
+			userMessage("sol 6", "gpt-6-sol", "openai", {}, t + 6),
+		]);
+
+		const { byModel } = await getFrustrationDashboardStats("all");
+		expect(byModel.map(({ key, label, messages }) => [key, label, messages])).toEqual([
+			["openai/gpt-luna/5.6.0", "gpt 5.6 luna", 2],
+			["openai/gpt-sol/5.6.0", "gpt 5.6 sol", 2],
+			["openai/gpt-astra/6.0.0", "gpt 6 astra", 1],
+			["openai/gpt-luna/6.0.0", "gpt 6 luna", 1],
+			["openai/gpt-sol/6.0.0", "gpt 6 sol", 1],
+		]);
+		expect(byModel[0].models.toSorted()).toEqual(["gpt-5.6-luna", "gpt-5.6-luna-wm"]);
+		expect(byModel[0]).toMatchObject({ annoyed: 1, atAssistant: 1, firstSeen: t });
+		expect(byModel[1].models.toSorted()).toEqual(["gpt-5.6-sol", "gpt-5.6-sol-high"]);
+	});
+
 	it("groups DeepSeek Flash aliases and V4 provider variants without merging Pro or V4.1 into V4", async () => {
 		await initDb();
 		const t = Date.now() - 60_000;
