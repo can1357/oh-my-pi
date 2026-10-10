@@ -274,6 +274,28 @@
       flex-shrink: 0;
     }
 
+    .tree-collapse {
+      background: none;
+      border: none;
+      color: var(--muted);
+      cursor: pointer;
+      flex-shrink: 0;
+      font: inherit;
+      line-height: 1;
+      padding: 0 0.15rem;
+      width: 1.1em;
+    }
+
+    .tree-collapse:hover {
+      color: var(--accent);
+    }
+
+    /* Childless rows keep the column so the content stays aligned. */
+    .tree-collapse.empty {
+      cursor: default;
+      visibility: hidden;
+    }
+
     .tree-content {
       color: var(--text);
     }
