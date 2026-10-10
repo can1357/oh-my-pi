@@ -343,8 +343,7 @@ mod background {
 
 	fn refusal(id: &str, class: &str, kind: EventKind, reason: &str) -> DesktopError {
 		DesktopError::background_unavailable(format!(
-			"window {id} ({class}) drops background {} events: {reason}; retry with takeover:true or \
-			 use ax actions",
+			"window {id} ({class}) drops background {} events: {reason}; no input was sent",
 			kind.name()
 		))
 	}
@@ -394,8 +393,7 @@ mod background {
 	fn child_under(root: HWND, point: POINT) -> CoreResult<(HWND, POINT)> {
 		window::deepest_child(root, point).ok_or_else(|| {
 			DesktopError::background_unavailable(
-				"cannot map this point into an enabled target client area; use ax actions or \
-				 takeover:true",
+				"cannot map this point into an enabled target client area; no input was sent",
 			)
 		})
 	}
@@ -531,13 +529,13 @@ mod background {
 				let start = screen_point(x, y);
 				let hit = hit_test(root, start).ok_or_else(|| {
 					DesktopError::background_unavailable(
-						"cannot establish the drag start region; use ax actions or takeover:true",
+						"cannot establish the drag start region; no input was sent",
 					)
 				})?;
 				if let Some(region) = non_client_drag_region(hit) {
 					return Err(DesktopError::background_unavailable(format!(
 						"window {id} drag starts on its {region}, where only real pointer input drives \
-						 the system move/size loop; retry with takeover:true or use ax actions"
+						 the system move/size loop; no input was sent"
 					)));
 				}
 				let (target, client) = child_under(root, start)?;
@@ -686,8 +684,7 @@ mod background {
 		fn focused(root: HWND) -> CoreResult<Self> {
 			let hwnd = window::focused_descendant(root).ok_or_else(|| {
 				DesktopError::background_unavailable(
-					"no unambiguous focused control in the target window; use ax actions or \
-					 takeover:true",
+					"no unambiguous focused control in the target window; no input was sent",
 				)
 			})?;
 			Ok(Self { hwnd, alt_depth: 0 })
@@ -809,7 +806,7 @@ mod background {
 			};
 			if let Some(reason) = drop_reason(hwnd, &class, kind) {
 				return Err(DesktopError::background_unavailable(format!(
-					"window {} ({class}) drops held background keys: {reason}; retry with takeover:true",
+					"window {} ({class}) drops held background keys: {reason}; no input was sent",
 					hwnd as usize,
 				)));
 			}

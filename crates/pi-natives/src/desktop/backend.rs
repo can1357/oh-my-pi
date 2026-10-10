@@ -20,12 +20,18 @@ use super::{
 /// unsupported routes refuse, and detected focus side effects surface as
 /// potentially delivered input. `Foreground` is the explicit `takeover: true`
 /// escalation: it activates the target and restores state where the OS allows,
-/// without overwriting a newer user focus choice.
+/// without overwriting a newer user focus choice. `ForegroundReturnFocus`
+/// (`takeover` with `returnFocus`) is the host's own rerun of a refused
+/// background action: it hands focus back to the user's app even when the user
+/// typed or clicked meanwhile, and leaves it only on a third app the user
+/// switched to. Backends that cannot tell the two apart treat it as
+/// `Foreground`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum DeliveryMode {
 	#[default]
 	Background,
 	Foreground,
+	ForegroundReturnFocus,
 }
 
 impl DeliveryMode {
@@ -34,6 +40,14 @@ impl DeliveryMode {
 			Self::Foreground
 		} else {
 			Self::Background
+		}
+	}
+
+	/// Upgrades a foreground mode to return focus; background stays background.
+	pub(crate) const fn returning_focus(self, return_focus: bool) -> Self {
+		match self {
+			Self::Foreground if return_focus => Self::ForegroundReturnFocus,
+			mode => mode,
 		}
 	}
 }

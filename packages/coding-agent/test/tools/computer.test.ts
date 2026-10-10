@@ -27,8 +27,10 @@ import type {
 	DesktopCapabilities,
 	DesktopCapture,
 	DesktopDisplay,
+	DesktopFocusReturn,
 	DesktopPoint,
 	DesktopWindow,
+	HoldOptions as NativeHoldOptions,
 	PointerOptions,
 } from "@oh-my-pi/pi-natives";
 
@@ -184,7 +186,12 @@ class FakeNativeSession implements NativeDesktopSession {
 	async bringToCurrentSpace(target: string) {
 		this.operations.push(`space:${target}`);
 	}
-	async click(_target: string, _x: number, _y: number, _opts?: PointerOptions | null): Promise<void> {
+	async click(
+		_target: string,
+		_x: number,
+		_y: number,
+		_opts?: PointerOptions | null,
+	): Promise<DesktopFocusReturn | null | void> {
 		this.clickCount += 1;
 		this.inputModes.push(_opts?.takeover ?? this.controlActive);
 	}
@@ -307,13 +314,17 @@ class MemoryTransport implements ComputerWorkerTransport {
 	}
 }
 
-const snapshot = (readOnly = false): ComputerSessionSnapshot => ({
+const snapshot = (
+	readOnly = false,
+	backgroundFallback: ComputerSessionSnapshot["backgroundFallback"] = "takeover",
+): ComputerSessionSnapshot => ({
 	cwd: import.meta.dir,
 	sessionId: crypto.randomUUID(),
 	captureMaxWidth: 1280,
 	captureMaxHeight: 896,
 	display: "active",
 	readOnly,
+	backgroundFallback,
 });
 
 async function runWorker(
@@ -1880,5 +1891,157 @@ describe("computer supervisor recovery", () => {
 		const direct = await supervisor.capabilities(snapshot(true));
 		expect(direct).toEqual(capabilities);
 		await supervisor.close();
+	});
+});
+
+describe("computer background fallback", () => {
+	const reason = "window 42 (Wish) reads the hardware pointer for button presses; nothing was sent";
+	const clickTarget = 'await (await desktop.window("42")).click(1, 2)';
+
+	/**
+	 * Refuses background clicks the way the native backend does; a takeover
+	 * click resolves to `report`, native's focus outcome. The window list's
+	 * `focused` flag stays on Notes throughout, as a stale listing would.
+	 */
+	class RefusingSession extends FakeNativeSession {
+		readonly sent: Array<PointerOptions | null | undefined> = [];
+		refusal = `BackgroundUnavailable: ${reason}`;
+		report: DesktopFocusReturn | null = { handedBack: true, previousPid: 300, frontPid: 300 };
+
+		override async listWindows(): Promise<DesktopWindow[]> {
+			return [
+				{ ...windowFixture, id: "42", app: "Wish", pid: 200, focused: false },
+				{ ...windowFixture, id: "7", app: "Notes", pid: 300, focused: true },
+				{ ...windowFixture, id: "9", app: "Mail", pid: 400, focused: false },
+			];
+		}
+
+		override async click(
+			_target: string,
+			_x: number,
+			_y: number,
+			opts?: PointerOptions | null,
+		): Promise<DesktopFocusReturn | null | void> {
+			this.sent.push(opts);
+			if (opts?.takeover !== true) throw new Error(this.refusal);
+			return this.report;
+		}
+	}
+
+	/** The single fallback notice of a successful run. */
+	function notice(result: Extract<ComputerWorkerOutbound, { type: "result" }>): string {
+		const [text, ...rest] = texts(result);
+		expect(rest).toEqual([]);
+		expect(text).toStartWith(`click ran in takeover because ${reason}; `);
+		return text.slice(`click ran in takeover because ${reason}; `.length);
+	}
+
+	async function run(
+		native: NativeDesktopSession,
+		code: string,
+		backgroundFallback: ComputerSessionSnapshot["backgroundFallback"],
+	): Promise<Extract<ComputerWorkerOutbound, { type: "result" }>> {
+		const transport = new MemoryTransport();
+		new ComputerWorkerCore(transport, () => native);
+		const id = crypto.randomUUID();
+		transport.inbound({ type: "run", id, code, timeoutMs: 2_000, session: snapshot(false, backgroundFallback) });
+		const message = await transport.waitFor(candidate => candidate.type === "result" && candidate.id === id);
+		if (message.type !== "result") throw new Error(`Expected computer result, received ${message.type}`);
+		return message;
+	}
+
+	function texts(result: Extract<ComputerWorkerOutbound, { type: "result" }>): string[] {
+		if (!result.ok) throw new Error(`run failed: ${result.error.message}`);
+		return result.payload.displays.flatMap(block => (block.type === "text" ? [block.text] : []));
+	}
+
+	it("reruns a refused background call once in takeover and says so, naming the app focus returned to", async () => {
+		const native = new RefusingSession();
+		const result = await run(native, clickTarget, "takeover");
+		expect(notice(result)).toContain("returned to Notes");
+		expect(native.sent).toEqual([{}, { takeover: true, returnFocus: true }]);
+
+		// Negative control: an error other than BackgroundUnavailable is never rerun.
+		const failing = new RefusingSession();
+		failing.refusal = "InputFailed: window 42 rejected the event";
+		const failed = await run(failing, clickTarget, "takeover");
+		expect(failed.ok).toBe(false);
+		if (failed.ok) return;
+		expect(failed.error.message).toStartWith("InputFailed: window 42 rejected the event");
+		expect(failing.sent).toHaveLength(1);
+	});
+
+	it("refuses without a takeover under refuse, and tells the model so without suggesting one", async () => {
+		const native = new RefusingSession();
+		const result = await run(native, clickTarget, "refuse");
+		expect(result.ok).toBe(false);
+		if (result.ok) return;
+		expect(result.error.message).toStartWith(`BackgroundUnavailable: ${reason}`);
+		expect(result.error.message).toContain('"refuse"');
+		expect(result.error.message).toContain("no takeover happened");
+		expect(result.error.message).not.toContain("takeover:");
+		expect(native.sent).toEqual([{}]);
+	});
+
+	it("leaves an explicit takeover to the model: true takes over under refuse, false never falls back", async () => {
+		const forced = new RefusingSession();
+		const result = await run(forced, 'await (await desktop.window("42")).click(1, 2, { takeover: true })', "refuse");
+		expect(texts(result)).toEqual([]);
+		expect(forced.sent).toEqual([{ takeover: true }]);
+
+		const background = new RefusingSession();
+		const refused = await run(
+			background,
+			'await (await desktop.window("42")).click(1, 2, { takeover: false })',
+			"takeover",
+		);
+		expect(refused.ok).toBe(false);
+		if (refused.ok) return;
+		expect(refused.error.message).toStartWith(`BackgroundUnavailable: ${reason}`);
+		expect(background.sent).toEqual([{ takeover: false }]);
+	});
+
+	it("never forwards a model-supplied returnFocus on holds; only the host's rerun sets it", async () => {
+		const native = new RefusingSession();
+		const holds: NativeHoldOptions[] = [];
+		native.holdKeys = async (_target: string, _keys: string[], options: NativeHoldOptions) => {
+			holds.push(options);
+			if (options.takeover !== true) throw new Error(native.refusal);
+		};
+		native.holdMouse = async (_target: string, _x: number, _y: number, options: NativeHoldOptions) => {
+			holds.push(options);
+		};
+		const code = [
+			'const win = await desktop.window("42");',
+			"await win.holdMouse(1, 2, { duration: 0, takeover: true, returnFocus: true });",
+			"await win.holdKeys(['a'], { duration: 0, returnFocus: true });",
+		].join("\n");
+		await run(native, code, "takeover");
+		expect(holds.map(options => options.returnFocus)).toEqual([undefined, undefined, true]);
+	});
+
+	it("reports where native saw focus end, not the window list's focused flag", async () => {
+		const elsewhere = new RefusingSession();
+		elsewhere.report = { handedBack: false, previousPid: 300, frontPid: 400 };
+		const third = notice(await run(elsewhere, clickTarget, "takeover"));
+		expect(third).toContain("on Mail");
+		expect(third).toContain("did not return to Notes");
+		expect(third).not.toContain("returned to");
+
+		const stuck = new RefusingSession();
+		stuck.report = { handedBack: false, previousPid: 300, frontPid: 200 };
+		const stayed = notice(await run(stuck, clickTarget, "takeover"));
+		expect(stayed).toContain("stayed on Wish");
+		expect(stayed).toContain("did not return to Notes");
+
+		const unknown = new RefusingSession();
+		unknown.report = null;
+		const unread = notice(await run(unknown, clickTarget, "takeover"));
+		expect(unread).toContain("not confirmed");
+		expect(unread).not.toContain("Notes");
+
+		const front = new RefusingSession();
+		front.report = { handedBack: true, previousPid: 300 };
+		expect(notice(await run(front, clickTarget, "takeover"))).toContain("not confirmed");
 	});
 });

@@ -1,6 +1,6 @@
 /** Options shared by every native input helper. */
 interface ComputerInputOptions {
-	/** Omit for background input, or foreground takeover while control is acquired. Explicit false always stays background. */
+	/** Omit: background input (foreground while control is acquired); when the background route is unavailable, the tool reruns the call in takeover or refuses, per the user's setting, and says which. true: take over now. false: background only, never rerun. */
 	takeover?: boolean;
 }
 

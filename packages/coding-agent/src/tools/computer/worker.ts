@@ -17,6 +17,7 @@ import type {
 	DesktopCapabilities,
 	DesktopCapture,
 	DesktopDisplay,
+	DesktopFocusReturn,
 	DesktopPoint,
 	DesktopSessionOptions,
 	DesktopWindow,
@@ -44,6 +45,9 @@ import type {
 	ToolReply,
 } from "./protocol";
 
+/** A native input call; resolves to its takeover focus report when it took over. */
+type InputCall = Promise<DesktopFocusReturn | null | void>;
+
 /** Native desktop operations consumed by the script runtime. */
 export interface NativeDesktopSession {
 	readonly capabilities: DesktopCapabilities;
@@ -66,18 +70,18 @@ export interface NativeDesktopSession {
 		caps?: { maxWidth?: number; maxHeight?: number },
 		options?: AxOptions,
 	): Promise<NativeObservation>;
-	holdKeys(target: string, keys: string[], options: NativeHoldOptions): Promise<void>;
-	holdMouse(target: string, x: number, y: number, options: NativeHoldOptions): Promise<void>;
+	holdKeys(target: string, keys: string[], options: NativeHoldOptions): InputCall;
+	holdMouse(target: string, x: number, y: number, options: NativeHoldOptions): InputCall;
 	acquireControl(): Promise<DesktopControlState>;
 	releaseControl(): void;
 	controlState(): DesktopControlState;
 	bringToCurrentSpace(windowId: string): Promise<void>;
-	click(target: string, x: number, y: number, opts?: PointerOptions | null): Promise<void>;
-	moveMouse(target: string, x: number, y: number, opts?: PointerOptions | null): Promise<void>;
-	drag(target: string, points: DesktopPoint[], opts?: PointerOptions | null): Promise<void>;
-	scroll(target: string, x: number, y: number, dx: number, dy: number, opts?: PointerOptions | null): Promise<void>;
-	typeText(target: string, text: string, opts?: PointerOptions | null): Promise<void>;
-	keyChord(target: string, keys: string[], opts?: PointerOptions | null): Promise<void>;
+	click(target: string, x: number, y: number, opts?: PointerOptions | null): InputCall;
+	moveMouse(target: string, x: number, y: number, opts?: PointerOptions | null): InputCall;
+	drag(target: string, points: DesktopPoint[], opts?: PointerOptions | null): InputCall;
+	scroll(target: string, x: number, y: number, dx: number, dy: number, opts?: PointerOptions | null): InputCall;
+	typeText(target: string, text: string, opts?: PointerOptions | null): InputCall;
+	keyChord(target: string, keys: string[], opts?: PointerOptions | null): InputCall;
 	raiseWindow(windowId: string): Promise<void>;
 	axSnapshot(target: string, opts?: AxSnapshotOptions | null): Promise<{ text: string }>;
 	axQuery(target: string, query: AxQuery): Promise<AxNode[]>;
@@ -90,7 +94,7 @@ export interface NativeDesktopSession {
 	axPerform(ref: string, action: string): Promise<void>;
 	axSetValue(ref: string, value: string): Promise<void>;
 	axFocus(ref: string): Promise<void>;
-	axClick(ref: string, opts?: PointerOptions | null): Promise<void>;
+	axClick(ref: string, opts?: PointerOptions | null): InputCall;
 	close(): Promise<void>;
 }
 
@@ -111,7 +115,7 @@ type DragOptions = InputOptions & { modifiers?: string[]; keys?: string[] };
 type ScrollOptions = InputOptions & { dx?: number; dy?: number };
 type AxOptions = Pick<AxSnapshotOptions, "all" | "maxDepth">;
 type HoldOptions = Pick<NativeHoldOptions, "duration" | "takeover">;
-type HoldMouseOptions = NativeHoldOptions;
+type HoldMouseOptions = Pick<NativeHoldOptions, "duration" | "button" | "keys" | "takeover">;
 type ObservationResult = ScreenshotResult & { ax: string; nodeCount: number; truncated: boolean };
 
 type PendingTool = { resolve(value: unknown): void; reject(reason?: unknown): void };
@@ -176,15 +180,16 @@ async function nativeCall<T>(signal: AbortSignal, call: () => T | Promise<T>): P
 	}
 }
 
-function pointerOptions(options?: ClickOptions | DragOptions | InputOptions): PointerOptions {
+function pointerOptions(options?: ClickOptions | DragOptions | InputOptions, fallback?: Fallback): PointerOptions {
 	const mapped: PointerOptions = {};
-	if (!options) return mapped;
-	if ("button" in options && options.button !== undefined) mapped.button = options.button;
-	if ("count" in options && options.count !== undefined) mapped.count = options.count;
-	if ("modifiers" in options && options.modifiers !== undefined) mapped.modifiers = options.modifiers;
-	if ("keys" in options && options.keys !== undefined) mapped.keys = options.keys;
-	if (options.takeover !== undefined) mapped.takeover = options.takeover;
-	return mapped;
+	if (options) {
+		if ("button" in options && options.button !== undefined) mapped.button = options.button;
+		if ("count" in options && options.count !== undefined) mapped.count = options.count;
+		if ("modifiers" in options && options.modifiers !== undefined) mapped.modifiers = options.modifiers;
+		if ("keys" in options && options.keys !== undefined) mapped.keys = options.keys;
+		if (options.takeover !== undefined) mapped.takeover = options.takeover;
+	}
+	return fallback ? { ...mapped, ...fallback } : mapped;
 }
 
 function chordKeys(chord: string | string[]): string[] {
@@ -243,6 +248,88 @@ function matchesFilter(window: DesktopWindow, filter?: WindowFilter): boolean {
 function guardRun(context: ComputerRunContext, method: string): void {
 	if (context.readOnly) throw new ToolError(`read-only run: '${method}' requires read_only: false`);
 	throwIfAborted(context.signal);
+}
+
+/** Native options for the tool's own takeover rerun of a refused background call. */
+type Fallback = { takeover: true; returnFocus: true };
+const FALLBACK: Fallback = { takeover: true, returnFocus: true };
+const BACKGROUND_UNAVAILABLE = "BackgroundUnavailable: ";
+
+/** App names by pid from the window list, empty when the listing fails. */
+async function appNames(session: NativeDesktopSession, signal: AbortSignal): Promise<Map<number, string>> {
+	try {
+		const windows = await nativeCall(signal, () => session.listWindows());
+		return new Map(windows.flatMap(window => (window.pid === undefined ? [] : [[window.pid, window.app]])));
+	} catch (error) {
+		if (error instanceof ToolAbortError) throw error;
+		return new Map();
+	}
+}
+
+/**
+ * Says where focus ended after a fallback takeover, from native's
+ * WindowServer reading taken when the takeover finished.
+ */
+async function focusReport(
+	session: NativeDesktopSession,
+	signal: AbortSignal,
+	report: DesktopFocusReturn | null | void,
+	target?: number,
+): Promise<string> {
+	if (!report || report.frontPid == null) return "focus was not confirmed afterwards";
+	const { frontPid, previousPid, handedBack } = report;
+	const names = await appNames(session, signal);
+	const name = (pid: number) => names.get(pid) ?? `pid ${pid}`;
+	const front = name(frontPid);
+	if (previousPid == null) return `focus is on ${front}`;
+	if (frontPid === previousPid) return handedBack ? `focus returned to ${front}` : `focus is on ${front}`;
+	const user = name(previousPid);
+	if (handedBack) return `focus was handed back to ${user}, but ${front} is now front`;
+	if (frontPid === target) return `focus stayed on ${front}; it did not return to ${user}`;
+	return `focus is on ${front}; it did not return to ${user}`;
+}
+
+/**
+ * Sends one window input call. When its background route throws
+ * `BackgroundUnavailable` and the call did not set `takeover`,
+ * `computer.backgroundFallback` decides: `takeover` reruns that call in
+ * takeover, handing focus back to the user's app, and reports it in the run
+ * output; `refuse` fails without taking over.
+ */
+async function sendInput(
+	session: NativeDesktopSession,
+	context: ComputerRunContext,
+	method: string,
+	takeover: boolean | undefined,
+	send: (fallback?: Fallback) => InputCall,
+	target?: number,
+): Promise<void> {
+	try {
+		await nativeCall(context.signal, () => send());
+		return;
+	} catch (error) {
+		if (takeover !== undefined || !(error instanceof ToolError) || !error.message.startsWith(BACKGROUND_UNAVAILABLE))
+			throw error;
+		const reason = error.message.slice(BACKGROUND_UNAVAILABLE.length);
+		if (context.snapshot.backgroundFallback === "refuse") {
+			throw new ToolError(`${error.message}; computer.backgroundFallback is "refuse", so no takeover happened`);
+		}
+		if (!session.capabilities.takeover) {
+			throw new ToolError(`${error.message}; this desktop backend has no takeover, so no takeover happened`);
+		}
+		let report: DesktopFocusReturn | null | void;
+		try {
+			report = await nativeCall(context.signal, () => send(FALLBACK));
+		} catch (rerun) {
+			if (rerun instanceof ToolAbortError) throw rerun;
+			const message = rerun instanceof Error ? rerun.message : String(rerun);
+			throw new ToolError(`${method} fell back to takeover because ${reason}, and the takeover failed: ${message}`);
+		}
+		context.output.push({
+			type: "text",
+			text: `${method} ran in takeover because ${reason}; ${await focusReport(session, context.signal, report, target)}`,
+		});
+	}
 }
 
 async function captureScreenshot(
@@ -374,7 +461,9 @@ class El {
 	async click(options?: InputOptions): Promise<void> {
 		const context = this.#getContext();
 		guardRun(context, "click");
-		await nativeCall(context.signal, () => this.#session.axClick(this.ref, pointerOptions(options)));
+		await sendInput(this.#session, context, "click", options?.takeover, fallback =>
+			this.#session.axClick(this.ref, pointerOptions(options, fallback)),
+		);
 	}
 
 	async focus(): Promise<void> {
@@ -432,54 +521,97 @@ class Win {
 	async click(x: number, y: number, options?: ClickOptions): Promise<void> {
 		const context = this.#getContext();
 		guardRun(context, "click");
-		await nativeCall(context.signal, () => this.#session.click(this.id, x, y, pointerOptions(options)));
+		await sendInput(
+			this.#session,
+			context,
+			"click",
+			options?.takeover,
+			fallback => this.#session.click(this.id, x, y, pointerOptions(options, fallback)),
+			this.pid,
+		);
 	}
 
 	async doubleClick(x: number, y: number, options?: Omit<ClickOptions, "count">): Promise<void> {
 		const context = this.#getContext();
 		guardRun(context, "doubleClick");
-		await nativeCall(context.signal, () =>
-			this.#session.click(this.id, x, y, pointerOptions({ ...options, count: 2 })),
+		await sendInput(
+			this.#session,
+			context,
+			"doubleClick",
+			options?.takeover,
+			fallback => this.#session.click(this.id, x, y, pointerOptions({ ...options, count: 2 }, fallback)),
+			this.pid,
 		);
 	}
 
 	async move(x: number, y: number): Promise<void> {
 		const context = this.#getContext();
 		guardRun(context, "move");
-		await nativeCall(context.signal, () => this.#session.moveMouse(this.id, x, y, pointerOptions()));
+		await sendInput(
+			this.#session,
+			context,
+			"move",
+			undefined,
+			fallback => this.#session.moveMouse(this.id, x, y, pointerOptions(undefined, fallback)),
+			this.pid,
+		);
 	}
 
 	async drag(points: Array<[number, number]>, options?: DragOptions): Promise<void> {
 		const context = this.#getContext();
 		guardRun(context, "drag");
-		await nativeCall(context.signal, () =>
-			this.#session.drag(
-				this.id,
-				points.map(([x, y]) => ({ x, y })),
-				pointerOptions(options),
-			),
+		await sendInput(
+			this.#session,
+			context,
+			"drag",
+			options?.takeover,
+			fallback =>
+				this.#session.drag(
+					this.id,
+					points.map(([x, y]) => ({ x, y })),
+					pointerOptions(options, fallback),
+				),
+			this.pid,
 		);
 	}
 
 	async scroll(x: number, y: number, options: ScrollOptions = {}): Promise<void> {
 		const context = this.#getContext();
 		guardRun(context, "scroll");
-		await nativeCall(context.signal, () =>
-			this.#session.scroll(this.id, x, y, options.dx ?? 0, options.dy ?? 0, pointerOptions(options)),
+		await sendInput(
+			this.#session,
+			context,
+			"scroll",
+			options.takeover,
+			fallback =>
+				this.#session.scroll(this.id, x, y, options.dx ?? 0, options.dy ?? 0, pointerOptions(options, fallback)),
+			this.pid,
 		);
 	}
 
 	async type(text: string, options?: InputOptions): Promise<void> {
 		const context = this.#getContext();
 		guardRun(context, "type");
-		await nativeCall(context.signal, () => this.#session.typeText(this.id, text, pointerOptions(options)));
+		await sendInput(
+			this.#session,
+			context,
+			"type",
+			options?.takeover,
+			fallback => this.#session.typeText(this.id, text, pointerOptions(options, fallback)),
+			this.pid,
+		);
 	}
 
 	async press(chord: string | string[], options?: InputOptions): Promise<void> {
 		const context = this.#getContext();
 		guardRun(context, "press");
-		await nativeCall(context.signal, () =>
-			this.#session.keyChord(this.id, chordKeys(chord), pointerOptions(options)),
+		await sendInput(
+			this.#session,
+			context,
+			"press",
+			options?.takeover,
+			fallback => this.#session.keyChord(this.id, chordKeys(chord), pointerOptions(options, fallback)),
+			this.pid,
 		);
 	}
 
@@ -488,7 +620,19 @@ class Win {
 		guardRun(context, "holdKeys");
 		validateHold(options);
 		validateKeys(keys, "keys");
-		await nativeCall(context.signal, () => this.#session.holdKeys(this.id, keys, options));
+		await sendInput(
+			this.#session,
+			context,
+			"holdKeys",
+			options.takeover,
+			fallback =>
+				this.#session.holdKeys(this.id, keys, {
+					duration: options.duration,
+					takeover: options.takeover,
+					...fallback,
+				}),
+			this.pid,
+		);
 	}
 
 	async holdMouse(x: number, y: number, options: HoldMouseOptions): Promise<void> {
@@ -496,7 +640,21 @@ class Win {
 		guardRun(context, "holdMouse");
 		validateHold(options);
 		if (options.keys !== undefined) validateKeys(options.keys, "keys");
-		await nativeCall(context.signal, () => this.#session.holdMouse(this.id, x, y, options));
+		await sendInput(
+			this.#session,
+			context,
+			"holdMouse",
+			options.takeover,
+			fallback =>
+				this.#session.holdMouse(this.id, x, y, {
+					duration: options.duration,
+					button: options.button,
+					keys: options.keys,
+					takeover: options.takeover,
+					...fallback,
+				}),
+			this.pid,
+		);
 	}
 
 	async observe(options?: ScreenshotOptions & AxOptions): Promise<ObservationResult> {
