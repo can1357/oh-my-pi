@@ -4584,7 +4584,14 @@ export class AgentSession implements SettingsScope {
 		coalescedSources: Set<string>,
 	): Promise<AgentContinueOutcome> {
 		try {
-			const reverted = await this.#recovery.maybeRestoreRetryFallbackPrimary();
+			// During an automatic-retry saga the primary model's selector cooldown
+			// can expire while a chain-tail fallback is still mid-backoff. Restoring
+			// the primary then would reset the retry budget and re-enter a model
+			// that just failed — an unbounded loop. Skip the cooldown-expiry revert
+			// for retries; the primary can still be restored on the next user
+			// prompt or after the saga terminates.
+			const isAutomaticRetry = request.options.source === "automatic-retry";
+			const reverted = isAutomaticRetry ? false : await this.#recovery.maybeRestoreRetryFallbackPrimary();
 			if (signal.aborted || this.#isDisposed || this.#abortInProgress) {
 				return { status: "skipped", reason: "post-restore-unavailable" };
 			}
