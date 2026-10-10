@@ -153,7 +153,15 @@ export const eventDefs = {
 		"Goal mode changed, by a host `goal` command or the agent's `goal` tool.",
 	),
 	QueueUpdateEvent: doc(
-		{ type: "'queue_update'", steering: "string[]", followUp: "string[]" },
+		{
+			type: "'queue_update'",
+			steering: "string[]",
+			followUp: "string[]",
+			"attachments?": doc(
+				"QueueAttachments",
+				"Session-host socket clients only; absent means unknown, not that no chip carries one.",
+			),
+		},
 		"Coalesced snapshot of the displayable steering/follow-up queue, sent whenever it changes.",
 	),
 

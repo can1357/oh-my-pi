@@ -1177,7 +1177,8 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 			!this.#collabStatus?.stateOverride &&
 			!status?.stateOverride &&
 			this.#collabStatus?.role === status?.role &&
-			this.#collabStatus?.participantCount === status?.participantCount
+			this.#collabStatus?.participantCount === status?.participantCount &&
+			this.#collabStatus?.contextUsage === status?.contextUsage
 		) {
 			return;
 		}
@@ -2441,12 +2442,13 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 				? (breakdown.usedTokens / contextWindow) * 100
 				: null;
 		// Collab guest: context comes from the host's state frames — the local
-		// replica does no accounting of its own.
+		// replica does no accounting of its own. A hosted client's replica is idle the same way.
 		const collabState = this.#collabStatus?.stateOverride;
-		if (collabState?.contextUsage) {
-			contextWindow = collabState.contextUsage.contextWindow || contextWindow;
-			contextTokens = collabState.contextUsage.tokens ?? contextTokens;
-			contextPercent = collabState.contextUsage.percent ?? contextPercent;
+		const hostContext = collabState?.contextUsage ?? this.#collabStatus?.contextUsage;
+		if (hostContext) {
+			contextWindow = hostContext.contextWindow || contextWindow;
+			contextTokens = hostContext.tokens ?? contextTokens;
+			contextPercent = hostContext.percent ?? contextPercent;
 		}
 
 		const shouldResolveActiveRepo = this.#gitEnabled() && (includePath || includeGit || includePr);

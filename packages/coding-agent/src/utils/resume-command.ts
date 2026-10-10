@@ -16,3 +16,10 @@ export function resumeCommand(sessionId: string): string {
 	const profileFlag = profile ? `--profile ${profile} ` : "";
 	return `${APP_NAME} ${profileFlag}--resume ${sessionId}`;
 }
+
+/** The shell command that attaches a terminal to a running session host (same profile rule as {@link resumeCommand}). */
+export function attachCommand(hostId: string): string {
+	const profile = getActiveProfile();
+	const profileFlag = profile ? `--profile ${profile} ` : "";
+	return `${APP_NAME} ${profileFlag}attach ${hostId}`;
+}

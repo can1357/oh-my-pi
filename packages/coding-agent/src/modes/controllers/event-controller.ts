@@ -2708,6 +2708,8 @@ export class EventController {
 
 	#scheduleIdleCompaction(): void {
 		this.#cancelIdleCompaction();
+		// A hosted client's replica is idle by construction: compacting it would be a second, local run.
+		if (this.ctx.hostedClientMode) return;
 		// Don't schedule idle work while context maintenance is already running; the
 		// maintenance flow may reset the session before this timer fires.
 		if (this.ctx.viewSession.isCompacting) return;
@@ -2738,6 +2740,8 @@ export class EventController {
 
 	#scheduleIdleRecap(): void {
 		this.#cancelIdleRecap();
+		// The recap would be a local model turn over a replica the host owns.
+		if (this.ctx.hostedClientMode) return;
 		if (this.ctx.viewSession.isCompacting) return;
 
 		const recapSettings = cfgRecap.get(this.ctx.settings);

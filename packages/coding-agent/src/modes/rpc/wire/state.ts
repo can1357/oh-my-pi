@@ -43,6 +43,10 @@ export const stateDefs = {
 		{ steering: "string[]", followUp: "string[]" },
 		"Displayable queue-chip text for pending user-authored messages; accepted verbatim by `remove_queued_message`.",
 	),
+	QueueAttachments: doc(
+		{ steering: "boolean[]", followUp: "boolean[]" },
+		"Which queued chips carry an attachment (an image, or its source or description) their text does not; entry `i` describes chip `i`.",
+	),
 	ToolDescriptor: { name: "string", description: "string", "parameters?": "unknown", "examples?": "unknown[]" },
 	Goal: doc(
 		{
@@ -174,6 +178,7 @@ export const stateDefs = {
 			"boolean",
 			"Only ever `true`: the images exceeded the transport limit and were omitted; the removal still happened.",
 		),
+		"refused?": doc("'attachments'", "Nothing was removed: `refuseAttachments` was set and the prompt carries one."),
 	},
 	PromoteQueuedMessageResult: { promoted: "boolean" },
 	RestoredQueuedMessage: doc(

@@ -1,6 +1,7 @@
 # RPC Protocol Reference
 
 RPC mode runs the coding agent as a newline-delimited JSON protocol over stdio.
+A session host (`omp --mode host`) serves the same protocol to several clients over a local socket; see [Session hosts](#session-hosts).
 
 - **stdin**: commands (`RpcCommand`), extension UI responses, host-tool updates/results, and host-URI results
 - **stdout**: a ready frame, command responses (`RpcResponse`), session/agent events, extension UI requests, and host-tool/host-URI requests and cancellations
@@ -10,6 +11,8 @@ This is a custom JSONL protocol, not JSON-RPC 2.0.
 Primary implementation:
 
 - `packages/coding-agent/src/modes/rpc/rpc-mode.ts`
+- `packages/coding-agent/src/modes/rpc/rpc-server.ts`
+- `packages/coding-agent/src/modes/rpc/rpc-connection.ts`
 - `packages/coding-agent/src/modes/rpc/rpc-types.ts`
 - `packages/coding-agent/src/session/agent-session.ts`
 - `packages/coding-agent/src/session/agent-session-events.ts`
@@ -30,6 +33,7 @@ Behavior notes:
 - RPC/ACP pin neutral defaults for settings declaring the corresponding `protocolDefault`, including task isolation/execution, memory, advisor, and advisor tier settings. RPC additionally pins async-job and bash/eval auto-background defaults. Explicit project/global config, `--config`, and isolated settings remain authoritative; on-disk config changes are watched in long-lived CLI RPC processes. Todo settings are not host-defaulted.
 - The process claims stdin before extension discovery, then parses it one non-empty JSONL line at a time. Malformed JSON emits a recoverable `command: "parse"` failure and does not terminate the loop.
 - At startup it writes a `ready` frame before processing commands. The frame advertises supported protocol versions and transport limits.
+- Extension startup (`session_start`) runs after `ready`. While it runs, only `extension_ui_response` (an extension may be waiting on a dialog) and `set_ask_dialog` are handled; every other frame is read and waits, in order, until startup finishes.
 - When stdin closes, pending extension UI, host-tool, and host-URI requests are rejected; accepted commands are drained, the session is disposed, pending stdout is delivered, and normal shutdown exits with code `0`. A session-persistence failure still latched at disposal exits with code `1` after delivering its `notice` frame.
 - Responses/events are written as one JSON object per line.
 
@@ -166,7 +170,7 @@ Important edge behavior from runtime:
 - `{ id?, type: "cycle_model" }`
 - `{ id?, type: "get_available_models" }`
 
-`get_available_models` waits for background model discovery before returning. `set_model` also waits when the requested model is not already in the available catalog; it returns the selected `Model` or a `Model not found: <provider>/<modelId>` failure.
+`get_available_models` waits for background model discovery before returning and answers `data: { models: Model[] }`: complete `Model` records, the same shape `set_model` returns, not a reduced projection. `set_model` also waits when the requested model is not already in the available catalog; it returns the selected `Model` or a `Model not found: <provider>/<modelId>` failure.
 
 ### Thinking
 
@@ -372,6 +376,8 @@ To bind with a specific model instead, pass `provider` and `modelId` together, a
 { "id": "open-1", "type": "open_session", "sessionDir": "/srv/threads/t1", "provider": "anthropic", "modelId": "claude-sonnet-4-5" }
 ```
 
+On a [session host](#session-hosts), `open_session` first resolves the session it would continue; if another running host owns it, the command fails with [`session_hosted`](#session_hosted) and the active session is untouched.
+
 ### `remove_queued_message` payload
 
 Remove the first matching user-authored message from the selected pending queue:
@@ -389,7 +395,12 @@ Agent-authored entries never match, including internal handoffs with `role: "use
 
 The check and removal are synchronous: `data.removed: false` means no matching user message is pending in that queue at dispatch time. Already-dequeued messages and inputs still being preprocessed cannot be cancelled by this command. Live-steered input may remain visible in queue snapshots until the transcript records it, even though it has already left the removable pending queue. It does not resend input, abort a turn, or change interruption behavior. Non-string `message` values and missing or invalid `queue` values produce an error response.
 
-A removal request may hide the chip or restore its draft only after `removed: true`; normal delivery still removes chips through queue snapshots. Older runtimes reject this command; clients must not fall back to aborting or resending queued messages. The TypeScript client exposes `removeQueuedMessage(message, queue): Promise<{ removed, images?, imagesDropped? }>`.
+Optional fields (the command is shared by stdio and socket connections):
+
+- `match`: `"first"` (the default) is the matching rule above. `"last"` removes the newest user prompt in that queue whose queue-chip text equals `message` exactly, without trying the original submitted text first; a client that sees only the chip list uses it to act on the newest chip. Any other value produces an error response.
+- `refuseAttachments: true`: when the prompt the request would remove (chosen by `match`) carries an attachment that its chip text does not show (an image, or a hidden companion that holds an image's or video's source or description), nothing is removed and the response is `{ "removed": false, "refused": "attachments" }`. The check and the removal run in the same synchronous step, so no delivery or enqueue falls between them. `refused` is absent in every other outcome, including no match. A non-boolean value produces an error response.
+
+A removal request may hide the chip or restore its draft only after `removed: true`; normal delivery still removes chips through queue snapshots. Older runtimes reject this command; clients must not fall back to aborting or resending queued messages. A runtime that predates `match` and `refuseAttachments` ignores them and removes the first match, so send them only to a host whose snapshot or `queue_update` reports attachment metadata (see [`queue_update`](#queue_update-event)). The TypeScript client exposes `removeQueuedMessage(message, queue, preconditions?, { match?, refuseAttachments? }): Promise<{ removed, images?, imagesDropped?, refused? }>`.
 
 When the removed message carried images, `data.images` lists them (the same `ImageContent` entries `abort_and_restore_queue` returns), so a client can restore the draft with its attachments; text-only messages and `removed: false` responses omit it. If the images would exceed the negotiated transport limit (see `abort_and_restore_queue`), the server omits them and sets `data.imagesDropped: true` instead of failing; the message is still removed. Older runtimes return neither field.
 
@@ -547,7 +558,7 @@ including those made by the agent's `goal` tool.
 - Failures are ordinary `success: false` responses.
 
 Goals do not continue on their own over RPC unless `goal.continuationModes`
-contains `"rpc"`; this covers both `--mode rpc` and `--mode rpc-ui`. When enabled,
+contains `"rpc"`; this covers `--mode rpc`, `--mode rpc-ui` and `--mode host`. When enabled,
 `create`/`resume` and each terminal `agent_end` decide whether to start another goal
 turn, sent as a hidden `goal-continuation` message.
 
@@ -576,6 +587,8 @@ turn, sent as a hidden `goal-continuation` message.
 
 When the agent completes the goal, the goal tool is removed again and
 `get_state.goal` becomes `null`.
+
+Goals are session-wide in a multiplexed host: every attached client controls the same goal, and an `abort` from any client stops continuation for the session.
 
 ### `set_slow_mode` payload
 
@@ -857,6 +870,8 @@ is still pending. Live-steered messages stay listed until recorded in the
 transcript, even after they cease to be removable. Render the queue from this
 event rather than tracking chips independently, and treat removal replies as
 confirmation of a change rather than independent queue state.
+
+On a socket connection the frame also carries `attachments: { "steering": boolean[], "followUp": boolean[] }`, parallel to the chip lists: entry `i` is `true` when chip `i` stands for a prompt with an attachment that its chip text does not carry (see `refuseAttachments`). Chips and flags are built in one synchronous step, so their lengths match. Stdio receives the event unchanged, without `attachments`. A host that predates the field omits it; read absence as "unknown", never as "none". The snapshots in `attached` and `session_replaced` carry the same lists as `queueAttachments`, under the same rule.
 
 Extension runner errors are emitted separately as:
 
@@ -1159,6 +1174,7 @@ That means:
 - a prompt completes via `data.agentInvoked: false` on its response or via its own `prompt_result`
 - a run completes on an `agent_end` frame where `isTerminal !== false`; that frame carries no prompt identity, so correlate prompts through `prompt_result`
 - native `input` handlers run once, in submission order, before command, skill, or queue dispatch. Later input waits until the earlier submission is admitted, including an idle skill's vision description, and does not wait for its model turn. An `abort` cancels input received before it that is not yet admitted, even if that input is still in a hook. A successful `new_session`, `switch_session`, `branch`, `fork` or `open_session` does the same for input received before it; a vetoed one cancels nothing, and input sent after the session change runs in the new session.
+- on a session host the acceptance order is shared by every attached peer, as is the goal: one peer's `abort` cancels input another peer submitted earlier that is still in a hook, and any peer's `abort` or `abort_and_prompt` pauses goal continuation for the whole session.
 - the session is done only at `session_settled`: background jobs can wake the agent after it yields
 
 ### While streaming
@@ -1255,7 +1271,8 @@ Example:
 - `{ type: "extension_ui_response", id: string, value: string }`
 - `{ type: "extension_ui_response", id: string, confirmed: boolean }`
 - `{ type: "extension_ui_response", id: string, cancelled: true, timedOut?: boolean }`
-- `{ type: "extension_ui_response", id: string, answers: Array<{ id: string, selectedOptions: string[], customInput?: string }> }` (answers an `ask` request)
+- `{ type: "extension_ui_response", id: string, answers: Array<{ id: string, selectedOptions: string[], customInput?: string, customInputImages?: ImageContent[], note?: string, noteImages?: ImageContent[] }> }` (answers an `ask` request)
+- `{ type: "extension_ui_response", id: string, chat: true }` (the user chose to discuss an `ask` request instead of answering it)
 
 `select` and `input` resolve to `undefined`, and `confirm` to `false`, on
 cancellation, timeout, or signal abort. Signal abort emits a `cancel` request
@@ -1271,6 +1288,8 @@ option, else its first.
 `selectedOptions` holds exact option labels without duplicates; a multi-select may be empty. A single-select
 (`multi` absent or false) takes at most one option and not both an option and `customInput`. `customInput`
 is trimmed and ignored when empty. Any other shape fails the `ask` tool call instead of guessing.
+
+Each answer may also carry `customInputImages` (images pasted into the free-text answer; their `[Image #N]` markers sit in `customInput`), `note` (the user's note on the answer, a string), and `noteImages`. Images are `{ "type": "image", "data": "<base64>", "mimeType": "…" }` and reach the `ask` tool as given. A non-string `note` or a malformed image list fails the `ask` tool call, like any other malformed answer. `chat: true` is an outcome of its own: the tool receives a `chat` result, which is neither a submitted answer nor a cancellation. All of these fields are optional, so existing responses are unchanged.
 
 ```json
 {
@@ -1570,6 +1589,228 @@ stdin:
 { "type": "extension_ui_response", "id": "ui_7", "value": "feature/rpc-host" }
 ```
 
+## Session hosts
+
+`omp --mode host` runs one session in a long-lived process that serves any number of local clients over a Unix socket (a named pipe on Windows). Clients attach and detach while the session keeps running. The command grammar, events, and sub-protocols above are unchanged; a socket connection adds a handshake, host-wide sequence numbers, and a few frames. Implementation: `src/session-host/host.ts`, `src/session-host/registry.ts`, `src/modes/rpc/rpc-server.ts`, `src/modes/rpc/rpc-connection.ts`.
+
+**Stdio RPC is unchanged.** `--mode rpc` and `--mode rpc-ui` write the same bytes as before. `hello`, `attached`, `resumed`, `entry` (and its `leafId`), `session_replaced`, `clients_changed`, and `seq` never appear on stdio, a `queue_update` there carries no `attachments`, `ifEpoch`/`ifLeaf` are ignored, and `detach`/`exit` are unknown commands there.
+
+### Starting a host
+
+```bash
+omp --mode host --host-id <16 lowercase hex digits> [regular CLI options]
+```
+
+- `--host-id` is required and must be 16 lowercase hex digits. `--resume`, `--cwd`, and the other session options select the session as in other modes. `@file` arguments are rejected.
+- `--host-registry-dir <absolute path>` is internal: the spawn helper (`spawnSessionHost`) passes it to place the registry elsewhere than the default. Do not rely on it.
+- The host claims the session's owner lease before listening, keyed by the session's transcript id (the id in the session header, not the provider routing id that `--provider-session-id` pins or `/fresh` rotates). If another process holds it, the host fails with `session already open in host <id>` (or `another process`). A `switch_session` target is leased the same way, by the session id in its header; a file with no header holds no session and needs no lease. A session change (`new_session`, `switch_session`, `branch`, `fork`) moves the lease to the session then served; `/move` and `/wt` relocate the same session, so they keep it.
+- Extension UI is routed over the protocol to clients that declare `capabilities.ui`, as in `rpc-ui`. PTY use is disabled as in `rpc-ui`; title generation is disabled as in all RPC modes.
+- `SIGHUP` is ignored, so closing the launching terminal does not end the host. `SIGTERM` and `SIGINT` dispose the session, remove the registry entry and socket, and exit.
+
+### Registry
+
+Each live host publishes `<config root>/run/session-hosts/<hostId>.json`, where the config root is `~/.omp` by default (profile-independent). The directory is mode `0700` and entries are written atomically with mode `0600`. The entry is written after the host owns its session file and is listening, before extension startup, so a client can attach and answer a dialog `session_start` awaits (other commands wait for startup, as on stdio). It is rewritten when its fields change, including `cwd` and `sessionFile` as soon as `/move` or `/wt` relocates the session. A host that cannot bind its endpoint, because a live host already uses that id, fails without removing that host's socket or entry; a host whose extension startup fails withdraws its entry. Fields:
+
+| Field | Meaning |
+|---|---|
+| `version` | Registry schema version (`1`) |
+| `hostId` | The 16-hex host id |
+| `pid` | Host process id |
+| `endpoint` | Unix socket path (`<hostId>.sock` next to the entry, or in a short owner-private directory when that path would be too long) or `\\.\pipe\omp-host-<hostId>` |
+| `token` | Random 256-bit hex bearer token, new on every start |
+| `cwd` | Session working directory |
+| `sessionFile` | Session file, absent for an in-memory session |
+| `title` | Session name, absent when unset |
+| `clients` | Number of attached clients |
+| `busy` | `true` between `agent_start` and `agent_end` |
+| `startedAt` | Start time, epoch milliseconds |
+
+The token is a credential: anyone who can read the entry can control the session. Listing probes each endpoint and deletes entries whose endpoint is gone.
+
+`omp attach` with no target lists live hosts, oldest first, one per line: `<hostId>  <clients>  busy|idle  <cwd>  <title, else session file, else "(new session)">`. `omp attach --json` prints a JSON array of the entries above. Neither output includes `token`. With a target (a host id, session id, or session path), `omp attach <target>` instead opens a terminal as a client of that host, starting a host for a session none runs; `--json` takes no target. See [CLI reference → Hosted sessions](./cli-reference.md#hosted-sessions-experimental).
+
+### Handshake
+
+Connect to `endpoint` and send one line before anything else:
+
+```json
+{
+  "type": "hello",
+  "token": "<token from the registry entry>",
+  "protocolVersion": 2,
+  "client": { "kind": "tui", "label": "optional" },
+  "capabilities": { "ui": true },
+  "resume": { "hostId": "…", "epoch": 1790000000000, "lastSeq": 412 }
+}
+```
+
+- `token` is compared in constant time. `client.kind` / `client.label` are shown to other clients in `clients_changed`; `kind` defaults to `"unknown"`.
+- `capabilities.ui: true` makes the connection a recipient of extension UI frames and an arbiter of dialogs (see below). Any other value means no UI.
+- `protocolVersion: 2` makes every frame from `attached` onward use protocol v2 encoding: a frame over the 1 MiB physical limit (often the `attached` snapshot itself) arrives as `rpc_chunk` frames instead of being shrunk, so do not wait for a `negotiate_protocol` round trip before decoding chunks. Any other value keeps v1, where oversized frames (including `attached`) are shrunk and tool-result text can be truncated; `negotiate_protocol` still switches to v2 later, but only for frames after its response.
+- `resume` is optional. Send `hostId` from `attached`, the current epoch (from `attached`, `resumed`, or the latest `session_replaced`), and the largest `seq` you received.
+
+The hello line must complete within 10 seconds and within 64 KiB. On timeout the host closes the socket without a reply. A wrong or missing token, a first line that is not a JSON `hello` object, or an oversized first line gets one reply and a close, with no `ready` frame:
+
+```json
+{ "type": "response", "command": "hello", "success": false, "code": "unauthorized", "error": "unauthorized" }
+```
+
+On success the frame order is:
+
+1. `ready` (same frame as on stdio).
+2. Either `attached` or `resumed`.
+3. Live frames. After any replayed frames, a `clients_changed` that includes the new client is sent.
+
+Commands may be pipelined behind `hello`.
+
+`attached` carries a full snapshot:
+
+```json
+{
+  "type": "attached",
+  "hostId": "…",
+  "clientId": "…",
+  "epoch": 1790000000000,
+  "seq": 412,
+  "snapshot": {
+    "state": {},
+    "header": {},
+    "entries": [],
+    "leafId": null,
+    "streaming": { "messageId": "…", "message": {} },
+    "pendingUi": [],
+    "uiState": [],
+    "clients": [{ "clientId": "…", "kind": "tui", "label": "…" }],
+    "origin": { "cwd": "/srv/project", "artifactsDir": "/srv/sessions/…/01a0…", "localRoot": "/srv/sessions/…/01a0…/local", "sessionId": "01a0…" }
+  }
+}
+```
+
+- `state` is the `get_state` payload. `streaming` is present only while an assistant message is in flight; later frames for it carry its `messageId`. `pendingUi` lists open dialogs (`select`, `confirm`, `input`, `editor`, `ask`) that a late joiner can answer. `uiState` (optional; absent from hosts that predate it) lists the `setStatus` and `setWidget` requests showing now, the latest per key, so a late joiner shows the statuses and widgets set before it attached. A client that replaces its view with a snapshot should drop the statuses and widgets of the previous view first.
+- `entries`, `leafId`, and the title (`state.sessionName`, `header.title`) are the session as the `entry` frames have announced it, which is not always the host's in-memory state. Entries of an atomic batch that is still publishing, entries recorded meanwhile (titles included), and entries still waiting for announcement are left out; they reach the client once, as `entry` frames after the batch commits, and a batch that rolls back never reaches it. `leafId` is the live leaf, or its nearest announced ancestor while the leaf itself is not announced. Each entry is therefore delivered exactly once, in the snapshot or as a later `entry` frame. A `session_replaced` snapshot follows the same rule.
+- `queueAttachments` (optional; absent from hosts that predate it) has the shape of `attachments` in [`queue_update`](#queue_update-event) and describes `state.queuedMessages` as of the snapshot.
+- `origin` (optional; absent from hosts that predate it) is where the host session lives: its `cwd`, its `artifactsDir` (`null` when it has none, as for an in-memory session), `localRoot` (the directory the host's own `local://` URLs map to: under `artifactsDir` when there is one, otherwise a directory under the host's temp dir) and its transcript `sessionId`. Resolve links in host-authored text (`local://`, relative file paths) against it, not against the client's own cwd, temp dir or local copy of the transcript. It is read when the snapshot is built, so a `session_replaced` snapshot describes the new session; a relocation of the same session is announced by `session_info_update` (see below). Never sent on stdio.
+- Every broadcast frame after `attached` has `seq` greater than the `seq` in `attached`.
+- Fire-and-forget UI frames (`notify`, `setStatus`, `setWidget`, `setTitle`, `set_editor_text`) are not part of a snapshot, so a client that joins with `attached` does not see earlier ones.
+
+`resumed` replaces `attached` when all of these hold: `resume.hostId` equals this host's id, `resume.epoch` equals the current epoch, and frame `resume.lastSeq + 1` is still in the replay ring (or `lastSeq` equals the current `seq`, so nothing was missed). It is followed by every broadcast frame with a `seq` greater than `lastSeq`, re-projected for the new connection:
+
+```json
+{ "type": "resumed", "epoch": 1790000000000, "replayed": 7 }
+```
+
+`replayed` is the number of sequence numbers covered (`current seq - lastSeq`); frames that the new connection does not receive anyway (extension UI frames without `capabilities.ui`) are skipped, so fewer frames can follow. The ring holds the last 4096 broadcast frames. If the `hostId` differs, the epoch is stale, or `lastSeq` is out of the ring, the host sends `attached` with a fresh snapshot instead; it never sends a partial replay. After `attached`, discard local state and rebuild it from the snapshot.
+
+Per-connection settings do not survive a reconnect, whether it ends in `resumed` or `attached`: re-send `set_event_filter`, `set_subagent_subscription`, `set_ask_dialog`, `set_host_tools`, and `set_host_uri_schemes` on the new connection. Frames replayed after `resumed` arrive before any of them can take effect, so they use the default projection: every event type, with full `message_update` frames.
+
+A connection whose unread output exceeds 64 MiB is dropped. Reconnect and resume.
+
+### `seq`, `epoch`, and the frames they order
+
+`seq` is a host-wide counter that increases by one for every broadcast frame. Broadcast frames are those with no originating client: session events, `entry`, `session_replaced`, `clients_changed`, `extension_ui_request`, `available_commands_update`, `session_settled`, `extension_error`, `session_info_update`, `config_update`, and persistence `notice` frames. Each is delivered to a socket connection as `{ ...frame, seq }`.
+
+A connection sees gaps in `seq`:
+
+- for session events dropped by its own `set_event_filter` (the filter affects only session events);
+- for `extension_ui_request` frames when it did not declare `capabilities.ui`;
+- for the `cancel` of a dialog it answered first: only the other UI connections receive that cancel.
+
+`login` sends its `extension_ui_request` frames (`open_url`, `notify`, `input`) only to the requesting connection, without `seq`, whether or not it declared `capabilities.ui`.
+
+`set_model`, `cycle_model`, `set_thinking_level`, and `cycle_thinking_level` each broadcast `config_update` (`model` and `thinkingLevel` as the session reports them after the change) to socket connections only, before the command's response, so every attached client can show the new setting. Stdio receives no frame for these commands; a built-in slash command that changes the model (such as `/model`) still sends `config_update` to stdio as before.
+
+Frames addressed to one connection carry no `seq`: command responses, `prompt_result`, `command_output`, `rpc_chunk`, host tool and host URI requests, and all subagent frames (`subagent_lifecycle`, `subagent_progress`, `subagent_event`, which are filtered per connection by `set_subagent_subscription`). The exception is an extension's failed send (`reportSendError`): it is broadcast to every connection as an error `response` without `id`, and carries `seq`. Clients therefore cannot treat a gap as loss; only the `resumed`/`attached` decision depends on `seq`.
+
+`epoch` starts from the host's start time in milliseconds and increases by one on every session replacement. Treat it as opaque; compare it for equality.
+
+### Live frames
+
+**`entry`** — one per session-file append, for every connection:
+
+```json
+{ "type": "entry", "entry": { "type": "message", "id": "…", "parentId": "…" }, "leafId": "…", "seq": 413 }
+```
+
+Entries are not affected by `set_event_filter`. `entry` carries no epoch.
+
+`leafId` (optional, `string | null`) is the host's active leaf when the entry was announced; `null` means the branch is empty. It is the entry itself for an append on the active branch and the unchanged leaf for an off-branch append (a retained bash result, for example), so a client that follows the host's branch must not treat every entry as the new leaf. Entries are announced in the order they were recorded, and the leaf is the one the host has by then, so it can name an entry announced right after this one (the last entry of an atomic batch): keep the previous leaf until that entry arrives. The leaf is settled once the entry it names has been applied. A host that predates the field omits it, and a client then treats each entry as the leaf.
+
+**`session_replaced`** — the host now serves a different session (or branch of one):
+
+```json
+{
+  "type": "session_replaced",
+  "epoch": 1790000000001,
+  "sessionFile": "/…/session.jsonl",
+  "reason": "new",
+  "snapshot": {},
+  "seq": 414
+}
+```
+
+- `snapshot` has the same shape as in `attached` and is delivered inline, so no frame can fall between the replacement and its snapshot. `sessionFile` is absent for an in-memory session.
+- `reason` is `"new"` for `new_session`, `"fork"` for `branch` or `fork`, and `"resume"` for `switch_session`, `open_session`, or any other change of session id not caused by a command (for example a built-in slash command). The wire type also lists `"tree"`; the host does not currently send it.
+- The command that caused the change responds after the `session_replaced` broadcast, so the requesting client receives the frame first.
+- Entries that a new session appends can arrive as `entry` frames before its `session_replaced`, while the client still holds the old epoch. When `session_replaced` arrives, discard the whole transcript view (including those entries) and rebuild it from `snapshot`.
+- `handoff` does not produce `session_replaced`: it appends a compaction entry to the same session and arrives as an `entry` frame (and the usual events).
+
+**`session_info_update` on relocation**:
+
+```json
+{ "type": "session_info_update", "sessionId": "…", "title": "…", "origin": { "cwd": "/srv/other", "artifactsDir": "/srv/other-sessions/…/01a0…", "localRoot": "/srv/other-sessions/…/01a0…/local", "sessionId": "01a0…" }, "seq": 416 }
+```
+
+`/move` and `/wt` move the same session to another directory: the id stays, no entry is appended and there is no `session_replaced`. Sequenced clients then receive this `session_info_update` with `origin` (the title-only form, which stdio also receives, carries none), after the move finished; replace the client's `origin` with it. A move that fails or changes nothing sends nothing. A host that also advertises itself in the registry republishes the new `cwd` and `sessionFile`.
+
+**`clients_changed`**:
+
+```json
+{ "type": "clients_changed", "clients": [{ "clientId": "…", "kind": "tui", "label": "…" }], "seq": 415 }
+```
+
+Sent to every connection when a client attaches, detaches, exits, or disconnects.
+
+### Dialogs, host tools, and URI schemes
+
+- **Dialogs.** `extension_ui_request` frames go to every connection with `capabilities.ui`. The first `extension_ui_response` for a request id wins; every other UI connection then receives `{ "type": "extension_ui_request", "method": "cancel", "targetId": "<request id>" }` (with its own `seq`; the winner does not receive it) and a later answer is ignored. Dialogs are never rejected for lack of a UI client: with zero UI connections they stay pending, and `pendingUi` in the next snapshot lists them. The `ask` dialog is offered only while every UI connection has enabled it with `set_ask_dialog`. `login` is the exception: its prompts go only to the connection that sent `login`, without `seq`, regardless of `capabilities.ui`.
+- **Host tools.** Every connection may send `set_host_tools`. The agent sees the union of all connections' tools; for a tool name registered by several connections, the connection that registered it most recently serves the call. A connection that leaves ends its in-flight calls with the error `host tool client disconnected` and its tools drop out of the union.
+- **Host URI schemes.** A scheme belongs to the connection that registered it most recently. When that connection removes the scheme or leaves, the newest remaining registrant that still has it takes it back. In-flight requests of a leaving connection fail with `host URI client disconnected`.
+- **Live voice.** The host runs at most one live session. Its `live_*` frames go only to the connection whose `live_start` started it, without `seq`; any connection may send `live_stop` or `live_mute`. When that connection leaves, the live session stops.
+
+### `detach` and `exit`
+
+- `{ "type": "detach" }`: the host responds `{ "type": "response", "command": "detach", "success": true }`, delivers queued output to that connection, closes it, and sends `clients_changed` to the rest. The session keeps running, with or without other clients.
+- `{ "type": "exit" }`: the same response. If other clients remain, it behaves as `detach`. From the last attached client, the host stops listening, delivers queued output to every connection, closes them, removes its registry entry, then disposes the session and exits: code `0`, or `1` when a session-persistence failure is still latched. An extension's `pi.shutdown()` stops the host the same way.
+- Closing the socket is a `detach`. A host with no clients keeps running until a client attaches and sends `exit`, an extension shuts it down, or it receives `SIGTERM`/`SIGINT`.
+- Output queued for a leaving connection is delivered for at most 5 seconds, then discarded.
+
+### Write preconditions and `stale`
+
+Any command on a socket connection may carry:
+
+- `ifEpoch`: run only while the host's epoch equals this value.
+- `ifLeaf`: run only while the session's leaf entry id equals this value (`null` means an empty session).
+
+On mismatch the command does not run and the response is a failure with `code: "stale"`:
+
+```json
+{ "id": "7", "type": "response", "command": "prompt", "success": false, "code": "stale", "error": "Session changed (epoch 1790000000001)", "epoch": 1790000000001 }
+```
+
+`epoch` is checked first and is the field returned for an epoch mismatch; a leaf mismatch returns `leafId` (the current leaf) with `error: "Session tree moved"`. The client has already received the `session_replaced` or `entry` frames that moved the state, so it should re-render and let the user resend rather than retry silently.
+
+Exempt from preconditions (never rejected): `abort`, `abort_bash`, `abort_retry`, `detach`, `exit`, `negotiate_protocol`, `set_event_filter`, `set_subagent_subscription`, `set_ask_dialog`, `set_host_tools`, `set_host_uri_schemes`, `predict_word`, `predict_word_feedback`, `live_start`, `live_stop`, `live_mute`, and every `get_*` command. `extension_ui_response`, `host_tool_*`, and `host_uri_result` are not commands and never take them. `abort_and_prompt` follows the rule for `prompt`: on a stale precondition it is rejected as a whole, so the abort does not run either.
+
+### `session_hosted`
+
+`switch_session` to a file that another running host owns fails without switching:
+
+```json
+{ "id": "8", "type": "response", "command": "switch_session", "success": false, "code": "session_hosted", "error": "Session is open in host 3f9a…", "hostId": "3f9a…" }
+```
+
+`hostId` is `"unknown"` when the file is held by a process that is not a registered host. Switching to the host's own current file is allowed. `open_session` performs the same check on the session it resolved in `sessionDir`, before anything changes (`command: "open_session"` in the response); a fresh or already-open session needs none. A switch started inside the host (an extension's `ctx.switchSession`, a custom command) is held to the same check and reports `cancelled` instead.
+
 ## Client libraries
 
 ### Wire schema and generated clients
@@ -1620,12 +1861,18 @@ Current helper characteristics:
 
 - Spawns `bun <cliPath> --mode rpc` by default (`cliPath` defaults to `dist/cli.js`). A `command` argv prefix receives generated agent arguments; a command builder returns complete argv. A custom `spawn` transport takes precedence.
 - Correlates responses by generated `req_<n>` ids, negotiates v2, reassembles chunks, and pages message history
-- Dispatches recognized core `AgentEvent` types through `onEvent()` and recognized session events through `onSessionEvent()`; the raw server stream can include additional event types
+- Dispatches recognized core `AgentEvent` types through `onEvent()` and recognized session events through `onSessionEvent()`; the raw server stream can include additional event types. `onSessionEvent()` also receives `queue_update`, which `onEvent()` does not, and keeps the `attachments` a socket host adds to it.
 - Exposes `onPromptResult()`, `onSessionSettled()`, command-availability and subagent listeners, plus extension UI requests
 - Supports host-owned custom tools via `setCustomTools()` and automatic handling of `host_tool_call` / `host_tool_cancel`
 - Drives live voice sessions with `liveStart()`, `liveStop()`, `liveMute()`, and delivers live frames through `onLive()`
-- `promptAndWait()` waits for that prompt's result (or synchronous local completion); `waitForSettled()` also waits for session quiescence. `waitForIdle()` and `collectEvents()` stop at the next `agent_end`, including a non-terminal one, and are not settle barriers.
+- `promptAndWait()` waits for that prompt's result (or synchronous local completion); `promptToCompletion(message, { images, streamingBehavior, preconditions, timeoutMs })` does the same without collecting events or a default timeout, and rejects when the result reports an error. `waitForSettled()` also waits for session quiescence. `waitForIdle()` and `collectEvents()` stop at the next `agent_end`, including a non-terminal one, and are not settle barriers.
 - Wraps common protocol commands including OAuth `getLoginProviders()` / `login(...)` and `getLogoutAccounts(...)` / `logout(...)`; use raw protocol frames for unwrapped surfaces such as host-URI registration or delta-only message updates.
+- `detach()` and `exit()` send the session-host commands of those names, then stop the client. `RpcCommandError` carries `code`, plus `epoch` and `leafId` (`stale`) and `hostId` (`session_hosted`) when the host returns them. A host connection comes from `connectSessionHost` (`src/session-host/client.ts`), which fits the custom `spawn` transport; see [Session hosts](#session-hosts).
+- `onHostFrame()` delivers the session-host frames (`attached`, `resumed`, `entry`, `session_replaced`, `clients_changed`, `command_output`, `config_update`, `session_info_update`) as the `RpcHostFrame` union, in arrival order, with any `seq` and an `entry` frame's `leafId` kept. They reach no other listener, so register before `start()` to see `attached`. A frame that lacks a field the client reads is not delivered.
+- `onClose()` reports a transport that ended without `stop()`, `detach()`, or `exit()`: stdout EOF or a failed reader, such as a socket the host closed or that broke. It runs once per close, after the client has stopped and its pending requests have rejected with the same error. It runs only for a transport that finished `start()`. A `start()` that fails, including a transport lost during protocol negotiation or custom-tool registration, rejects `start()` and calls no `onClose` listener, so a caller tells a failed start from a later loss by which of the two reports it. Listeners stay registered across restarts. A closed socket says nothing about whether the host process is alive: check the registry entry's `pid` before telling the user the host is gone.
+- `prompt(message, images?, streamingBehavior?, preconditions?)`, `steer(message, images?, preconditions?)`, `followUp(message, images?, preconditions?)`, `removeQueuedMessage(message, queue, preconditions?, options?)`, `setModel(provider, modelId, preconditions?)`, `cycleModel(preconditions?)`, `setThinkingLevel(level, preconditions?)`, and `cycleThinkingLevel(preconditions?)` take an optional `{ ifEpoch, ifLeaf }`. Only those two fields reach the command, even when the object passed has more keys. A stale one rejects with `RpcCommandError` (`code: "stale"`); stdio hosts ignore them. `abort()` takes none and is never rejected.
+- `getAvailableModels(): Promise<Model[]>` returns complete `Model` records, as `set_model` does. It replaces the reduced `ModelInfo` projection, which is no longer exported.
+- `onExtensionUiRequest(listener)` delivers each `extension_ui_request` frame the host sends. A host sends them only to a client whose hello declared `capabilities.ui`. Answer a dialog with `sendExtensionUiResponse(response)` (it throws when the client is not started); a `cancel` request withdraws a dialog and expects no reply. `setAskDialog(true)` opts in to the `ask` dialog, which every UI client of a host must do before the host sends one `ask` request instead of a `select` per question.
 
 ### Python package
 

@@ -4,7 +4,7 @@ import type { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-regis
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { LoadExtensionsResult } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
 import { IrcBus } from "@oh-my-pi/pi-coding-agent/irc/bus";
-import { RpcSubagentRegistry } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-subagents";
+import { RpcSubagentRegistry, subagentFrameVisible } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-subagents";
 import type { RpcSubagentFrame } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-types";
 import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
@@ -305,13 +305,14 @@ describe("runSubprocess soft request budget", () => {
 			return deferred.promise;
 		};
 		const rpcRegistry = new RpcSubagentRegistry(eventBus, frame => {
+			// What a `progress` subscriber receives.
+			if (!subagentFrameVisible("progress", frame.type)) return;
 			frames.push(frame);
 			if (frame.type !== "subagent_lifecycle" || frame.payload.status === "started") return;
 			const resolve = resolveFollowUpTerminal;
 			resolveFollowUpTerminal = undefined;
 			resolve?.();
 		});
-		rpcRegistry.setSubscriptionLevel("progress");
 		const handle = createMockSession(({ promptIndex, emit, pushMessage }) => {
 			if (promptIndex !== 1) return;
 			// Configuration alone must not show an advisor to remote observers.
@@ -558,7 +559,6 @@ describe("runSubprocess soft request budget", () => {
 			resolveTerminalLatch?.();
 			resolveTerminalLatch = undefined;
 		});
-		rpcRegistry.setSubscriptionLevel("events");
 		const handle = createMockSession(({ promptIndex, emit, pushMessage }) => {
 			if (promptIndex !== 1) return;
 			// The depth-2 executor publishes on the bus its spawner handed down —
@@ -599,6 +599,7 @@ describe("runSubprocess soft request budget", () => {
 		expect(frames.some(frame => frame.type === "subagent_lifecycle" && frame.payload.id === `${id}.Grandkid`)).toBe(
 			true,
 		);
+		rpcRegistry.dispose();
 	});
 
 	it("an aliased observability bus does not duplicate lifecycle frames", async () => {

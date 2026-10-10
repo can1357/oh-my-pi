@@ -207,6 +207,11 @@
 - Fixed `--resume <path>` from silently creating a new session for a missing path; it now reports the missing path, consistent with `--fork <path>` and `--resume <id>`.
 
 ## [18.8.0] - 2026-10-07
+### Breaking Changes
+
+- SDK: removed `SessionManager.onEntryAppended`; use `SessionManager.subscribeEntryAppended(listener)`, which supports several listeners and returns an unsubscribe function ([#14166](https://github.com/can1357/oh-my-pi/pull/14166) by [@andrebrait](https://github.com/andrebrait))
+- SDK: `RpcClient.getAvailableModels()` now returns `Promise<Model[]>` (complete `Model` records, as the host has always sent them) instead of the reduced `ModelInfo[]`; the `ModelInfo` type is no longer exported from the RPC client module ([#14166](https://github.com/can1357/oh-my-pi/pull/14166) by [@andrebrait](https://github.com/andrebrait))
+- SDK deep imports: replaced `ACP_BUILTIN_RESERVED_NAMES` with `acpBuiltinReservedNames()` and removed the unused `ACP_BUILTIN_SLASH_COMMANDS` export from `slash-commands/acp-builtins` ([#14166](https://github.com/can1357/oh-my-pi/pull/14166) by [@andrebrait](https://github.com/andrebrait)).
 
 ### Added
 
@@ -257,6 +262,22 @@
 
 - Improved JSON and JSONL query streaming and pagination to reduce resource usage, support partial results, and provide clearer continuation between result pages.
 - Clarified the `read` tool documentation with complete examples for requesting line ranges.
+- Cancel a pending model handoff with `/prewalk off` without changing the active model, saved prewalk setting, or delivered continuation history ([#14587](https://github.com/can1357/oh-my-pi/pull/14587) by [@NaC-L](https://github.com/NaC-L)).
+- RPC clients can log out like `/logout`: `get_logout_accounts` lists a provider's stored credentials and `logout` removes one; the TypeScript client and the generated Python, Go, and Rust SDKs gain matching methods ([#14588](https://github.com/can1357/oh-my-pi/pull/14588) by [@andrebrait](https://github.com/andrebrait))
+- Added `omp --mode host`: a detached session host that several RPC clients can attach to over a local socket or named pipe, with resume, dialog arbitration, and stale-write protection ([#14166](https://github.com/can1357/oh-my-pi/pull/14166) by [@andrebrait](https://github.com/andrebrait)).
+- Added experimental hosted sessions: with `tui.hosted` (or `OMP_TUI_HOSTED=1`), or with `omp attach <host ID | session ID | session path>`, an interactive terminal runs as a client of a detached session host. Terminals can detach with `/detach`, attach with `/attach [host|session]`, and share one session; `/exit` stops the host only from its last client. `omp attach` with no target still lists running hosts (`--json` for scripts). Unsent editor drafts are not saved, a lost connection exits with status 1 instead of reconnecting, and TUI-only commands (plan, goal, loop, fork, tree, `!`/`$`, settings, panels, and others) report that they are unavailable when attached. Relative and `local://` links in the host's replies open the host's files (its directory and its session's `local://` directory, in the host's own temp directory for an in-memory session) rather than the terminal's own, while the footer, completion, and `@file` stay local; see the CLI reference ([#14166](https://github.com/can1357/oh-my-pi/pull/14166) by [@andrebrait](https://github.com/andrebrait)).
+- Added `RpcClient.detach()` and `RpcClient.exit()` for session hosts; `RpcCommandError` now carries `epoch`, `leafId`, and `hostId` when the host returns them ([#14166](https://github.com/can1357/oh-my-pi/pull/14166) by [@andrebrait](https://github.com/andrebrait)).
+- Added `RpcClient.onHostFrame()` for typed session-host frames (`RpcHostFrame`: `attached`, `resumed`, `entry`, `session_replaced`, `clients_changed`, `command_output`, `config_update`, `session_info_update`; stamped frames keep their `seq`) and `RpcClient.onClose()` for a transport that ended without `stop()`; `prompt`, `steer`, `followUp`, `removeQueuedMessage`, `setModel`, `cycleModel`, `setThinkingLevel`, and `cycleThinkingLevel` accept optional `ifEpoch`/`ifLeaf` preconditions ([#14166](https://github.com/can1357/oh-my-pi/pull/14166) by [@andrebrait](https://github.com/andrebrait)).
+- Session hosts send `config_update` to every attached socket client after `set_model`, `cycle_model`, `set_thinking_level`, or `cycle_thinking_level`, so peers show the live model and thinking level; stdio output is unchanged ([#14166](https://github.com/can1357/oh-my-pi/pull/14166) by [@andrebrait](https://github.com/andrebrait)).
+- Session hosts: `entry` frames carry the host's active leaf as an optional `leafId`, and attached snapshots show only what `entry` frames have announced, so an entry of a still-publishing atomic batch reaches a client once, after the commit. `queue_update` frames and snapshots (`queueAttachments`) tell socket clients which queued messages carry attachments; stdio is unchanged ([#14166](https://github.com/can1357/oh-my-pi/pull/14166) by [@andrebrait](https://github.com/andrebrait)).
+- `remove_queued_message` accepts optional `match: "first" | "last"` and `refuseAttachments`; with `refuseAttachments` a queued prompt that carries an attachment is left in place and the response is `{ removed: false, refused: "attachments" }` ([#14166](https://github.com/can1357/oh-my-pi/pull/14166) by [@andrebrait](https://github.com/andrebrait)).
+- `ask` extension UI responses accept `chat: true` (discuss instead of answering) and per-answer `note`, `noteImages`, and `customInputImages` ([#14166](https://github.com/can1357/oh-my-pi/pull/14166) by [@andrebrait](https://github.com/andrebrait)).
+- Added `RpcClient.onExtensionUiRequest()`, `RpcClient.sendExtensionUiResponse()`, and `RpcClient.setAskDialog()` ([#14166](https://github.com/can1357/oh-my-pi/pull/14166) by [@andrebrait](https://github.com/andrebrait)).
+- Added `RpcClient.promptToCompletion()`: sends a prompt (with optional steering mode and preconditions) and resolves once its work has settled ([#14166](https://github.com/can1357/oh-my-pi/pull/14166) by [@andrebrait](https://github.com/andrebrait)).
+
+### Changed
+
+- `RpcClient.steer()`, `followUp()`, and `setThinkingLevel()` now reject with `RpcCommandError` when the server reports a failure instead of resolving silently ([#14166](https://github.com/can1357/oh-my-pi/pull/14166) by [@andrebrait](https://github.com/andrebrait)).
 
 ### Fixed
 
@@ -287,6 +308,13 @@
 - Fixed `--resume <path>` silently creating a new session when the specified path did not exist; it now reports the missing path.
 - Fixed `/settings` opening duplicate menus when invoked while the settings menu was already open.
 - Fixed native Git operations resolving repositories incorrectly when run through symbolic links.
+- `/new` starts a fresh configured prewalk cycle after a handoff or cancellation, resets the todo gate, and restores the planning model after automatic recovery when no explicit selection supersedes the handoff ([#14587](https://github.com/can1357/oh-my-pi/pull/14587) by [@NaC-L](https://github.com/NaC-L)).
+- Fixed `/logout` for an alias login such as `openai-codex-device` reporting no stored credentials; it now lists and removes the accounts stored under the provider it logs in to ([#14588](https://github.com/can1357/oh-my-pi/pull/14588) by [@andrebrait](https://github.com/andrebrait))
+- Fixed logging in through an alias login such as `openai-codex-device` (`/login` or RPC `login`) not refreshing the logged-in provider's models, and RPC `get_login_providers` reporting alias logins as unauthenticated ([#14588](https://github.com/can1357/oh-my-pi/pull/14588) by [@andrebrait](https://github.com/andrebrait))
+- Fixed model speed aggregates blending an OpenAI or Codex fast service tier's throughput into the standard average; turns served on a non-default tier keep their own row, and `/models` shows that tier's numbers, labeled, for the tier the live session would send ([#14471](https://github.com/can1357/oh-my-pi/pull/14471) by [@eggpeat](https://github.com/eggpeat)).
+- Hosted launches reject invalid file attachments before starting a detached session host, avoiding orphaned background sessions ([#14166](https://github.com/can1357/oh-my-pi/pull/14166) by [@andrebrait](https://github.com/andrebrait)).
+- RPC mode: an extension dialog opened during `session_start` can be answered instead of hanging startup; other commands still wait for startup to finish ([#14166](https://github.com/can1357/oh-my-pi/pull/14166) by [@andrebrait](https://github.com/andrebrait)).
+- Session hosts publish before extension startup, so an attached terminal can answer a startup dialog instead of the launch timing out, and hosted launches with several CLI messages run each as its own turn ([#14166](https://github.com/can1357/oh-my-pi/pull/14166) by [@andrebrait](https://github.com/andrebrait)).
 
 ## [18.6.3] - 2026-10-06
 

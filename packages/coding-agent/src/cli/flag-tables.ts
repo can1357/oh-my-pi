@@ -30,6 +30,7 @@
  * real implementations at the dispatch site.
  */
 
+import * as path from "node:path";
 import { isServiceTierOpenAISettingValue, SERVICE_TIER_OPENAI_VALUES } from "../config/service-tier";
 import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
 import type { Args } from "./args";
@@ -120,13 +121,36 @@ export const STRING_SETTERS: Record<string, StringSetter> = {
 		result.addDir = [...(result.addDir ?? []), value];
 	},
 	"--mode": (result, value) => {
-		if (value === "text" || value === "json" || value === "rpc" || value === "acp" || value === "rpc-ui") {
+		if (
+			value === "text" ||
+			value === "json" ||
+			value === "rpc" ||
+			value === "acp" ||
+			value === "rpc-ui" ||
+			value === "host"
+		) {
 			result.mode = value;
 		} else {
 			result.invalidFlagValues.push(
-				`Invalid --mode value: ${JSON.stringify(value)}. Expected one of: text, json, rpc, rpc-ui, acp.`,
+				`Invalid --mode value: ${JSON.stringify(value)}. Expected one of: text, json, rpc, rpc-ui, acp, host.`,
 			);
 		}
+	},
+	"--host-id": (result, value) => {
+		if (!/^[0-9a-f]{16}$/.test(value)) {
+			throw new CliUsageError(
+				`Invalid --host-id value: ${JSON.stringify(value)}. Expected 16 lowercase hex digits.`,
+			);
+		}
+		result.hostId = value;
+	},
+	"--host-registry-dir": (result, value) => {
+		if (!path.isAbsolute(value)) {
+			throw new CliUsageError(
+				`Invalid --host-registry-dir value: ${JSON.stringify(value)}. Expected an absolute path.`,
+			);
+		}
+		result.hostRegistryDir = value;
 	},
 	"--fork": (result, value) => {
 		result.fork = value;

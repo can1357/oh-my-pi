@@ -713,6 +713,46 @@ jobs:
          - name: CLI smoke test
            run: bun run ci:test:smoke
 
+   # Named pipes, detached spawn and host lifetime differ on Windows. Setup is
+   # the Linux test jobs' with two Windows changes: setup-bun first, because
+   # bun-install's fallback (bun.sh/install under Git Bash) puts a POSIX path
+   # on GITHUB_PATH; and the win32-x64 addon instead of the linux pair. Main
+   # takes it from native_addons_cross (the addon release_binary ships); PRs,
+   # which do not run that job, test against the npm @latest win32-x64 addon,
+   # as native_addons does for linux on a cache miss — so a PR that changes
+   # native code can skew from it. A main-saved win32 cache keyed like
+   # natives-linux-x64-v1-* is deferred until main populates one; bazel
+   # cannot build addons on a Windows host. attach-cli.test.ts is included to
+   # exercise registry listing over named pipes. Intentionally outside
+   # release_gate: release_smoke_win32_arm64 already runs --smoke-test (which
+   # includes the session-host probe) on Windows for every publish.
+   coding_agent_session_host_windows:
+      name: Session host (windows)
+      runs-on: windows-latest
+      needs: [native_addons_cross]
+      if: ${{ !cancelled() && (github.event_name == 'pull_request' || needs.native_addons_cross.result == 'success') }}
+      timeout-minutes: 25
+      steps:
+         - uses: actions/checkout@v4
+         - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+         - uses: ./.github/actions/bun-install
+         - name: Fetch release native addon (npm)
+           if: github.event_name == 'pull_request'
+           shell: bash
+           run: |
+              set -euo pipefail
+              tarball="$(npm view @oh-my-pi/pi-natives-win32-x64@latest dist.tarball)"
+              echo "::notice title=Native addon from npm::Testing against the latest npm release addon ($tarball)."
+              curl -fsSL --retry 3 "$tarball" | tar -xz -C "$RUNNER_TEMP"
+              cp "$RUNNER_TEMP/package/pi_natives.win32-x64-baseline.node" packages/natives/native/
+         - uses: ./.github/actions/native-artifacts
+           if: github.event_name != 'pull_request'
+           with:
+              targets: win32-x64-baseline
+         - name: Session host tests
+           working-directory: packages/coding-agent
+           run: bun test test/session-host test/ipc test/rpc-server-multi.test.ts test/rpc-server-sequencing.test.ts test/cli/attach-cli.test.ts
+
    install_methods:
       name: Install method smoke tests
       runs-on: ${{ github.event_name == 'pull_request' && 'ubuntu-22.04' || 'omp-kata' }}

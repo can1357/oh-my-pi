@@ -86,7 +86,11 @@ import type {
 	ExtensionWidgetContent,
 	ExtensionWidgetOptions,
 } from "../extensibility/extensions";
-import type { CompactOptions } from "../extensibility/extensions/types";
+import type {
+	CompactOptions,
+	ExtensionAskDialogQuestion,
+	ExtensionAskDialogResult,
+} from "../extensibility/extensions/types";
 import type { Skill } from "../extensibility/skills";
 import type { FileSlashCommand } from "../extensibility/slash-commands";
 import { loadSlashCommands } from "../extensibility/slash-commands";
@@ -149,6 +153,8 @@ import {
 } from "../session/session-worktree";
 import type { ShakeMode } from "../session/shake-types";
 import { BUILTIN_SLASH_COMMAND_RESERVED_NAMES, buildTuiBuiltinSlashCommands } from "../slash-commands/builtin-registry";
+import type { HostedClientLink } from "../session-host/hosted-client";
+import type { RpcSessionOrigin } from "./rpc/rpc-types";
 import { buildStaticInlineHint } from "../slash-commands/builtin-completions";
 import { formatCoarseDuration } from "@oh-my-pi/pi-tui/chrome/format";
 import { type DictationTarget, MicCursor, type SttCallbacks, STTController, type SttState } from "../stt";
@@ -203,7 +209,7 @@ import { copyToClipboard } from "../utils/clipboard";
 import type { EventBus } from "../utils/event-bus";
 import { getEditorCommand, openInEditor } from "../utils/external-editor";
 import { openPath } from "../utils/open";
-import { resumeCommand } from "../utils/resume-command";
+import { attachCommand, resumeCommand } from "../utils/resume-command";
 import { getSessionAccentAnsi, getSessionAccentHex } from "@oh-my-pi/pi-tui/theme/session-color";
 import { messageHasDisplayableThinking } from "@oh-my-pi/pi-tui/chat/thinking-display";
 import type { TokenRateMeter } from "../utils/token-rate";
@@ -329,6 +335,7 @@ import type {
 	InteractiveSelectorDialogOptions,
 	RenderSessionContextOptions,
 	ShowStatusOptions,
+	ShutdownOptions,
 	SubmittedUserInput,
 } from "./types";
 import type { TodoItem, TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
@@ -1480,6 +1487,12 @@ export class InteractiveMode implements InteractiveModeContext {
 	/** Owned room; use {@link collabController}.host for current-session reuse and links. */
 	collabHost?: CollabHost;
 	collabGuest?: CollabGuestLink;
+	/** See {@link InteractiveModeContext.hostedClientMode}; the hosted startup sets it before `init()`. */
+	hostedClientMode = false;
+	hostedClient?: HostedClientLink;
+	/** See {@link InteractiveModeContext.hostOrigin}. */
+	hostOrigin?: RpcSessionOrigin;
+	attachHostedSession?: (target?: string) => Promise<void>;
 	#streamPublisher: StreamPublisher | undefined;
 	#recorder: SessionRecorder | undefined;
 	#recorderStarting = false;
@@ -1578,19 +1591,34 @@ export class InteractiveMode implements InteractiveModeContext {
 	get tableChartsVisible(): boolean {
 		return this.#focusController.target === undefined;
 	}
-	resolveAssistantMessageLinkHrefs(hrefs: readonly string[]): Promise<ReadonlyMap<string, string>> {
-		return resolveMarkdownLinkHrefs(hrefs, this.#linkResolveContext());
+	async resolveAssistantMessageLinkHrefs(hrefs: readonly string[]): Promise<ReadonlyMap<string, string>> {
+		for (;;) {
+			const origin = this.hostOrigin;
+			// A hosted terminal shows the host's transcript, so its links never mean this terminal's own directories:
+			// with no origin to resolve against (between hosts, or after the link ended) they stay as written.
+			if (this.hostedClientMode && !origin) return new Map();
+			const targets = await resolveMarkdownLinkHrefs(hrefs, this.#linkResolveContext(origin));
+			// The lookup is async: if the host's session was replaced or moved meanwhile, these targets name a place the
+			// view no longer reads from, and caching them would revive the old destinations. Resolve again.
+			if (this.hostOrigin === origin) return targets;
+		}
 	}
-	#linkResolveContext(): ResolveContext {
+	#linkResolveContext(origin: RpcSessionOrigin | undefined): ResolveContext {
 		const session = this.viewSession;
 		return {
-			cwd: session.sessionManager.getCwd(),
+			cwd: origin?.cwd ?? session.sessionManager.getCwd(),
 			sessionFile: session.sessionFile,
 			settings: session.settings,
-			localProtocolOptions: {
-				getArtifactsDir: () => session.sessionManager.getArtifactsDir(),
-				getSessionId: () => session.sessionManager.getSessionId(),
-			},
+			localProtocolOptions: origin
+				? {
+						getLocalRoot: () => origin.localRoot,
+						getArtifactsDir: () => origin.artifactsDir,
+						getSessionId: () => origin.sessionId,
+					}
+				: {
+						getArtifactsDir: () => session.sessionManager.getArtifactsDir(),
+						getSessionId: () => session.sessionManager.getSessionId(),
+					},
 			skills: session.skills,
 			rules: session.ttsrManager?.getRules(),
 		};
@@ -2046,8 +2074,10 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#signalTeardown = createSessionTeardown({
 			getDraftText: () => this.#inputController.getDraftText(),
 			beginDispose: () => this.session.beginDispose(),
-			saveDraft: text => this.sessionManager.saveDraft(text),
+			// A hosted replica is a disposable copy the link deletes on leaving: saving a draft would recreate its file.
+			saveDraft: text => (this.hostedClientMode ? Promise.resolve() : this.sessionManager.saveDraft(text)),
 			disposeSession: async reason => {
+				await this.#detachHostedClient();
 				await this.#btwController.dispose();
 				await this.session.dispose({
 					mnemopiConsolidateTimeoutMs: SHUTDOWN_CONSOLIDATE_BUDGET_MS,
@@ -2335,7 +2365,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		// block, bash command preview, or file diff does not stall the render thread.
 		setImmediate(() => {
 			void warmHighlighter();
-			if (!$env.PI_NO_TITLE && !this.sessionManager.getSessionName()) {
+			if (!this.hostedClientMode && !$env.PI_NO_TITLE && !this.sessionManager.getSessionName()) {
 				this.#inputController.prewarmTinyTitleModel();
 			}
 		});
@@ -2345,7 +2375,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		// The relay connection proceeds in the background and never blocks init.
 		// The owning caller keeps guest mutations gated through its full outer
 		// startup; early dialog answers do not require that readiness signal.
-		if (options.autoStartCollab === true) this.collabController.autoStart();
+		if (options.autoStartCollab === true && !this.hostedClientMode) this.collabController.autoStart();
 
 		// Initialize hooks with TUI-based UI context
 		await logger.time("InteractiveMode.init:hooks", () => this.initHooksAndCustomTools());
@@ -2371,15 +2401,18 @@ export class InteractiveMode implements InteractiveModeContext {
 		// execution handoff clear never get dragged back into plan mode. #enterPlanMode
 		// is idempotent and self-guards against an already-active plan/goal mode; it
 		// does not check plan.enabled itself.
-		if (shouldEnterPlanModeOnStartup(this.sessionManager, this.session.settings)) {
+		if (!this.hostedClientMode && shouldEnterPlanModeOnStartup(this.sessionManager, this.session.settings)) {
 			await this.#enterPlanMode();
 		}
 
 		// Restore unsent editor draft from previous session shutdown (Ctrl+D).
 		// One-shot: consumeDraft removes the sidecar after read so the next
-		// resume does not re-restore the same text.
+		// resume does not re-restore the same text. A hosted client never saves a draft (see the teardown's
+		// `saveDraft`), so any sidecar next to its local session is someone else's: left where it is, not consumed.
 		try {
-			const draft = await logger.time("InteractiveMode.init:draft", () => this.sessionManager.consumeDraft());
+			const draft = this.hostedClientMode
+				? null
+				: await logger.time("InteractiveMode.init:draft", () => this.sessionManager.consumeDraft());
 			if (draft && !this.editor.getText()) {
 				this.editor.setText(draft);
 				this.updateEditorBorderColor();
@@ -2783,7 +2816,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	async getUserInput(): Promise<SubmittedUserInput> {
-		if (this.session.getGoalModeState()?.mode === "exiting") {
+		if (!this.hostedClientMode && this.session.getGoalModeState()?.mode === "exiting") {
 			await this.#exitGoalMode({ reason: "completed", silent: true });
 		}
 		const { promise, resolve } = Promise.withResolvers<SubmittedUserInput>();
@@ -2800,6 +2833,7 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	#scheduleLoopAutoSubmit(): void {
 		this.#cancelLoopAutoSubmit();
+		if (this.hostedClientMode) return;
 		if (!this.loopModeEnabled || !this.loopPrompt || this.#isShuttingDown) return;
 		const prompt = this.loopPrompt;
 		const loopAction = cfgLoopMode.get(settings);
@@ -2826,6 +2860,7 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	#scheduleGoalContinuation(): void {
 		this.#cancelGoalContinuation();
+		if (this.hostedClientMode) return;
 		if (this.loopModeEnabled) return;
 		if (!this.onInputCallback) return;
 		if (!cfgGoalContinuationModes.get(this.session.settings).includes("interactive")) return;
@@ -4000,6 +4035,8 @@ export class InteractiveMode implements InteractiveModeContext {
 	 * Idempotent: only flips open tasks, never re-touches completed ones.
 	 */
 	#reconcileTodosWithSubagents(): void {
+		// A hosted client's todos belong to the host session: auto-completing one would journal an edit into the replica.
+		if (this.hostedClientMode) return;
 		const completedDescs: string[] = [];
 		for (const session of this.#observerRegistry.getSessions()) {
 			if (session.kind !== "subagent") continue;
@@ -4055,6 +4092,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		const persisted = getTodoHudVisibility(owner.sessionManager.getBranch(), phases);
 		this.#todoHudHidden = persisted === "dismissed";
 		if (persisted || phases.length === 0) return;
+		// The auto-clear timer journals a dismissal into the session: never into a hosted replica.
+		if (this.hostedClientMode) return;
 		const tasks = phases.flatMap(phase => phase.tasks);
 		if (tasks.length === 0 || tasks.some(task => !isClosedTodo(task))) return;
 		const delaySeconds = cfgTasksTodoClearDelay.get(owner.settings);
@@ -4674,7 +4713,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	 * settings.
 	 */
 	async #reapplyPlanModeModelOnRoleChange(): Promise<void> {
-		if (!this.planModeEnabled) return;
+		if (this.hostedClientMode || !this.planModeEnabled) return;
 		const resolved = this.session.resolveRoleModelWithThinking("plan");
 		if (!resolved.model) {
 			this.#clearPendingPlanModelSwitch();
@@ -4731,7 +4770,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		const pending = this.#pendingModelSwitch;
 		this.#pendingModelSwitch = undefined;
 		this.#pendingPlanModelSwitch = false;
-		if (!pending) return;
+		// The host owns the model: a switch queued by local mode machinery must not touch the replica.
+		if (!pending || this.hostedClientMode) return;
 		try {
 			await this.session.setModelTemporary(pending.model, pending.thinkingLevel);
 		} catch (error) {
@@ -4810,6 +4850,8 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	/** Reconcile mode state from session entries on resume/switch. */
 	async #reconcileModeFromSession(options?: { preserveActiveGoal?: boolean }): Promise<void> {
+		// The host's mode entries already ran there; replaying them here would switch models and tools locally.
+		if (this.hostedClientMode) return;
 		const vibeScopeAlreadySuspended = this.#vibeScopeSuspendedForSwitch;
 		this.#vibeScopeSuspendedForSwitch = false;
 		this.#guidedGoalInterviewActive = false;
@@ -6809,7 +6851,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.isInitialized = false;
 	}
 
-	async shutdown(): Promise<void> {
+	async shutdown(options: ShutdownOptions = {}): Promise<void> {
 		if (this.#isShuttingDown) return;
 		// The previous graceful teardown failed AT the memoized session.dispose()
 		// (the session is already disposing), so it re-rejects identically forever
@@ -6829,6 +6871,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 		this.#beginClose();
 		const worktreePlan = await this.#planOwnedWorktreeExit();
+		// The teardown detaches a connected hosted client; the host it leaves keeps running.
+		const detachedFrom = this.hostedClient?.hostId;
 		try {
 			await this.#teardown();
 		} catch (error) {
@@ -6841,14 +6885,20 @@ export class InteractiveMode implements InteractiveModeContext {
 
 		// Print resumption hint only if the session was actually materialized to
 		// durable storage — `--resume <id>` fails on a never-written file (see
-		// #resumableSessionId).
+		// #resumableSessionId). A hosted client has no session of its own to resume: it names the host it left.
 		const sessionId = this.#resumableSessionId();
-		if (sessionId) {
+		if (options.farewell !== undefined) {
+			process.stderr.write(`\n${sanitizeStatusText(options.farewell)}\n`);
+		} else if (detachedFrom !== undefined) {
+			process.stderr.write(
+				`\n${chalk.dim("Detached; the session host keeps running. Attach again with")}\n${chalk.dim(attachCommand(detachedFrom))}\n`,
+			);
+		} else if (sessionId) {
 			// Command on its own line so triple-click selects just the command (#11001).
 			process.stderr.write(`\n${chalk.dim("Resume this session with")}\n${chalk.dim(resumeCommand(sessionId))}\n`);
 		}
 
-		await postmortem.quit(0);
+		await postmortem.quit(options.exitCode ?? 0);
 	}
 
 	#handleTeardownError(action: "close" | "restart", error: unknown): void {
@@ -6942,6 +6992,8 @@ export class InteractiveMode implements InteractiveModeContext {
 	 * is allocated but the file does not exist (issue #8860).
 	 */
 	#resumableSessionId(): string | undefined {
+		// The replica is a copy of the host's session, not something this process can resume.
+		if (this.hostedClientMode) return undefined;
 		const sessionId = this.sessionManager.getSessionId();
 		const sessionFile = this.sessionManager.getSessionFile();
 		return sessionId && sessionFile && this.sessionManager.isSessionOnDisk() ? sessionId : undefined;
@@ -6955,6 +7007,19 @@ export class InteractiveMode implements InteractiveModeContext {
 	#beginClose(): void {
 		this.#isShuttingDown = true;
 		this.showStatus("Closing session…");
+	}
+
+	/**
+	 * A hosted client leaves its session host (which keeps running) before its local replica is disposed, on every
+	 * exit path: keypress, `/exit`, and signals such as SIGHUP when the terminal goes away. A failed detach is logged
+	 * and never keeps the process alive: the host drops a connection that closes without it.
+	 */
+	async #detachHostedClient(): Promise<void> {
+		try {
+			await this.hostedClient?.detach();
+		} catch (error) {
+			logger.warn("Failed to detach from the session host", { error: String(error) });
+		}
 	}
 
 	/** Shared `shutdown()`/`restart()` teardown: dispose the session and hand the terminal back. */
@@ -6994,6 +7059,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			if (this.#signalTeardown) {
 				await this.#signalTeardown();
 			} else {
+				await this.#detachHostedClient();
 				await this.session.dispose({
 					mnemopiConsolidateTimeoutMs: SHUTDOWN_CONSOLIDATE_BUDGET_MS,
 				});
@@ -7558,6 +7624,12 @@ export class InteractiveMode implements InteractiveModeContext {
 		await this.#uiHelpers.renderInitialMessages(options);
 		this.syncRetryHintRow();
 	}
+
+	/** See {@link InteractiveModeContext.refreshTranscriptLinks}. */
+	refreshTranscriptLinks(): Promise<void> {
+		return this.#uiHelpers.refreshTranscriptLinks();
+	}
+
 	/**
 	 * Reconcile the idle "F5 to Retry" status row with the transcript tail:
 	 * mount it when the last turn died on a tool call (Esc mid-execution,
@@ -7567,7 +7639,11 @@ export class InteractiveMode implements InteractiveModeContext {
 	 * dispatched by the editor to `InputController.handleRetry`.
 	 */
 	syncRetryHintRow(): void {
-		const show = !this.collabGuest && !this.viewSession.isStreaming && this.viewSession.hasAbortedToolCallTail;
+		const show =
+			!this.collabGuest &&
+			!this.hostedClientMode &&
+			!this.viewSession.isStreaming &&
+			this.viewSession.hasAbortedToolCallTail;
 		if (this.#retryHintRow) {
 			const mounted = this.statusContainer.children.includes(this.#retryHintRow);
 			if (mounted && show) return;
@@ -8321,8 +8397,12 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#extensionUiController.hideHookSelector();
 	}
 
-	showHookInput(title: string, placeholder?: string): Promise<string | undefined> {
-		return this.#extensionUiController.showHookInput(title, placeholder);
+	showHookInput(
+		title: string,
+		placeholder?: string,
+		dialogOptions?: ExtensionUIDialogOptions,
+	): Promise<string | undefined> {
+		return this.#extensionUiController.showHookInput(title, placeholder, dialogOptions);
 	}
 
 	hideHookInput(): void {
@@ -8344,6 +8424,13 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	showHookNotify(message: string, type?: "info" | "warning" | "error"): void {
 		this.#extensionUiController.showHookNotify(message, type);
+	}
+
+	showAskDialog(
+		questions: ExtensionAskDialogQuestion[],
+		dialogOptions?: ExtensionUIDialogOptions,
+	): Promise<ExtensionAskDialogResult | undefined> {
+		return this.#extensionUiController.showAskDialog(questions, dialogOptions);
 	}
 
 	showHookCustom<T>(

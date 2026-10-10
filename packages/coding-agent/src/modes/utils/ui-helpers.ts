@@ -1142,6 +1142,32 @@ export class UiHelpers {
 		}
 	}
 
+	/**
+	 * Point the links of the transcript already on screen at where the view resolves them now. The cache is rebuilt
+	 * the way {@link renderInitialMessages} fills it, and the assistant components painted from the old one take the
+	 * new destinations in place: no repaint, so the scrollback and live blocks stay. A reply still streaming keeps
+	 * what it has until it closes, as it does for a first resolution.
+	 */
+	async refreshTranscriptLinks(): Promise<void> {
+		const { viewSession } = this.ctx;
+		const context = viewSession.buildTranscriptSessionContext({
+			collapseCompactedHistory: cfgDisplayCollapseCompacted.get(settings),
+			keepDanglingToolCalls: viewSession.isStreaming,
+		});
+		await refreshAssistantMessageLinkTargets(
+			this.ctx,
+			context.messages.filter((message): message is AssistantMessage => message.role === "assistant"),
+		);
+		// Read after the lookup: it is async, and the transcript may have been rebuilt meanwhile.
+		const targets = getAssistantMessageLinkTargets(this.ctx);
+		for (const child of this.ctx.chatContainer.children) {
+			if (!(child instanceof AssistantMessageComponent)) continue;
+			if (child === this.ctx.streamingComponent && !child.isTranscriptBlockFinalized()) continue;
+			child.setLinkTargets(targets);
+		}
+		this.ctx.ui.requestRender();
+	}
+
 	clearEditor(): void {
 		if (cfgComposerRecallClearedDrafts.get(this.ctx.settings)) this.ctx.editor.clearDraftForRecall();
 		else this.ctx.editor.clearDraft();
@@ -1177,7 +1203,9 @@ export class UiHelpers {
 
 	updatePendingMessagesDisplay(): void {
 		this.ctx.pendingMessagesContainer.disposeChildren();
-		const queuedMessages = this.ctx.viewSession.getQueuedMessages() as QueuedMessages;
+		// A hosted client's local replica never queues: the host's queue is the one on screen.
+		const queuedMessages = (this.ctx.hostedClient?.queued ??
+			this.ctx.viewSession.getQueuedMessages()) as QueuedMessages;
 
 		const steeringMessages = [...queuedMessages.steering];
 		const followUpMessages = [...queuedMessages.followUp];

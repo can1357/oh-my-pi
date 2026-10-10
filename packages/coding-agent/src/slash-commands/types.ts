@@ -131,7 +131,7 @@ export interface SlashCommandSpec extends BuiltinSlashCommand {
 	/** When false, the dispatcher refuses to handle invocations that include arguments. */
 	allowArgs?: boolean;
 	/**
-	 * ACP-specific override for `description`. Used by `ACP_BUILTIN_SLASH_COMMANDS`
+	 * ACP-specific override for `description`. Used by `buildAvailableSlashCommands`
 	 * when building `available_commands_update` payloads so the client receives
 	 * mode-appropriate copy (e.g. `/dump` advertises "Return full transcript as
 	 * plain text" in ACP rather than the TUI's clipboard-centric copy).
