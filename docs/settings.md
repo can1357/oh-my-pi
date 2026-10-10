@@ -992,7 +992,7 @@ Every schema path not individually tabulated in this catalog is explicitly defer
 - Agent behavior and safety: `ask.*`, `dev.*`, `eval.*`, `features.*`, `goal.*`, `loop.*`, `model.loopGuard.*`, `model.toolCallLoopGuard.*`, `prewalk.*`, `recap.*`, `sharpshooter.*`, `task.*`, `tools.*`, and `vault.*`.
 - Execution and content: `commit.*`, `completion.*`, `edit.*`, `error.*`, `extensionHandlers.*`, `generate_image.*`, `git.*`, `images.*`, `live.*`, `paste.*`, `power.*`, `read.*`, `shellMinimizer.*`, `speech.*`, `terminal.*`, and `title.*`.
 - Interface and startup: `composer.*`, `display.*`, `input.*`, `marketplace.*`, `spelling.*`, `statusLine.*`, `startup.*`, `stt.*`, `tui.*`, `ttsr.*`, and `update.*`.
-- Discovery, sharing, and auth: `auth.*`, `browser.*`, `claudeResets.*`, `codexResets.*`, `collab.*`, `commands.*`, `gc.*`, `ida.*`, `mcp.*`, `share.*`, `skills.*`, `stream.*`, and `telemetry.*`.
+- Discovery, sharing, and auth: `auth.*`, `browser.*`, `claudeResets.*`, `codexResets.*`, `collab.*`, `commands.*`, `contextFiles.*`, `gc.*`, `ida.*`, `mcp.*`, `share.*`, `skills.*`, `stream.*`, and `telemetry.*`. `contextFiles.extra` is documented in [Context files](./context-files.md#extra-filenames).
 - Ungrouped keys: `setupVersion`, `proseOnlyThinking`, `omitThinking`, `externalThinking`, `includeWorkspaceTree`, `autocompleteMaxVisible`, `emojiAutocomplete`, `disabledExtensions`, `inlineToolDescriptors`, and `treeFilterMode`.
 
 These settings follow the same schema-defined type and default rules shown above.

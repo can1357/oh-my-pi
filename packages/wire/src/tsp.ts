@@ -217,6 +217,8 @@ export interface TspCodeProps {
 	numbers?: boolean;
 	marks?: readonly { line: number; tone: TspTone }[];
 	wrap?: boolean;
+	/** Clamp to the first `lines` drawn lines under a "N more lines" button; gives way inside an open disclosure. */
+	preview?: TspPreview;
 }
 export interface TspDiffHunk {
 	oldStart: number;
@@ -636,6 +638,8 @@ export interface TspToolProps {
 	targetKind?: "command" | "path" | "pattern" | "query" | "text";
 	/** Language for `command` highlighting (`bash`, `python`, `js`). */
 	lang?: string;
+	/** The raw command line the head's Copy command button copies; a `command` target sets it implicitly. */
+	command?: string;
 	/** `file://` link for path targets (⌘-click opens). */
 	href?: string;
 	/** Short facts after the target: `+8 −1`, `5 matches · 2 files`, `22 lines`. */
@@ -656,8 +660,11 @@ export interface TspToolProps {
 	frame?: "card" | "inline";
 	collapsible?: boolean;
 	collapsed?: boolean;
-	/** Body clamp while collapsed: `{lines}` shows the head of the body, `{tail}` the end (bash output). */
-	preview?: { lines: number } | { tail: number } | "none";
+	/**
+	 * Body clamp while collapsed: `{lines}` shows the head of the body, `{tail}` the end (bash output).
+	 * `children`: the collapsed body stays whole and the children's own previews (`ansi`, `code`) clamp instead.
+	 */
+	preview?: { lines: number } | { tail: number } | "none" | "children";
 	/** Actions offered in the head on hover (`copy`, `rerun`, `open`). */
 	tools?: readonly TspPickerAction[];
 }

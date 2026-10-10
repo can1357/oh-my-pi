@@ -1,6 +1,6 @@
 import { beforeAll, beforeEach, describe, expect, afterEach, it } from "bun:test";
 import { stripVTControlCharacters } from "node:util";
-import { KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
+import { formatKeyHint, KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
 import { getKeybindings, setKeybindings, type TUI } from "@oh-my-pi/pi-tui";
 import { getThemeByName, setThemeInstance, type Theme } from "@oh-my-pi/pi-tui/theme";
 import { AnnotationOverlay, type AnnotationOverlayCallbacks } from "@oh-my-pi/pi-tui/overlays/annotation-overlay";
@@ -368,6 +368,97 @@ describe("AnnotationOverlay", () => {
 		expect(render(overlay)).toContain("external");
 		overlay.handleInput(ENTER);
 		expect(overlay.getAnnotations()).toEqual([expect.objectContaining({ note: "external\neditor" })]);
+	});
+
+	it("opens the source editor on the global external-editor key and names that key", () => {
+		const opened: string[] = [];
+		const overlay = new AnnotationOverlay(
+			makeTui(),
+			darkTheme!,
+			KeybindingsManager.inMemory({ "tui.select.cancel": "escape" }),
+			oneLineFiles,
+			"PR #1",
+			{
+				onExternalEditor: () => {
+					opened.push("source");
+				},
+				onComplete: () => {},
+			},
+		);
+		overlay.focused = true;
+		expect(render(overlay)).toContain(`${formatKeyHint("ctrl+e")} editor`);
+		overlay.handleInput(CTRL_E);
+		expect(opened).toEqual(["source"]);
+		expect(overlay.reviewFilePath()).toBe("src/value.ts");
+	});
+
+	it("keeps a note chooser from opening the source editor", () => {
+		const opened: string[] = [];
+		const overlay = new AnnotationOverlay(
+			makeTui(),
+			darkTheme!,
+			getKeybindings() as KeybindingsManager,
+			{ id: "reply", kind: "message", label: "Reply", text: "same line\nsame line" },
+			{
+				onExternalEditor: () => {
+					opened.push("source");
+				},
+				onComplete: () => {},
+			},
+		);
+		overlay.focused = true;
+		render(overlay);
+		overlay.handleInput("a");
+		overlay.handleInput("first");
+		overlay.handleInput(ENTER);
+		overlay.handleInput("A");
+		overlay.handleInput("whole");
+		overlay.handleInput(ENTER);
+		overlay.handleInput("e");
+		overlay.handleInput(CTRL_E);
+		expect(render(overlay)).toContain("choose");
+		expect(opened).toEqual([]);
+		expect(overlay.getTextAnnotations()).toHaveLength(2);
+	});
+
+	it("retargets a moved unique quote, drops a stale one, and pastes the edited text", () => {
+		const completed: Array<TextReviewOverlayResult | undefined> = [];
+		const overlay = makeTextOverlay(
+			{ id: "prompt", kind: "prompt", label: "Text prompt", text: "alpha\nbeta\nalpha" },
+			result => completed.push(result),
+		);
+		render(overlay);
+		overlay.handleInput("a");
+		overlay.handleInput("on alpha");
+		overlay.handleInput(ENTER);
+		overlay.handleInput(DOWN);
+		overlay.handleInput("a");
+		overlay.handleInput("on beta");
+		overlay.handleInput(ENTER);
+		expect(overlay.replaceTextSource("beta\nalpha\nalpha")).toBe(1);
+		overlay.handleInput(TAB);
+		overlay.handleInput(ENTER);
+		expect(completed).toEqual([
+			{
+				action: "paste",
+				annotations: [{ scope: "line", line: 1, quote: "beta", note: "on beta" }],
+				editedText: "beta\nalpha\nalpha",
+			},
+		]);
+	});
+
+	it("does not resurrect a dropped line note when undoing after the source was replaced", () => {
+		const overlay = makeTextOverlay({ id: "prompt", kind: "prompt", label: "Text prompt", text: "old" });
+		render(overlay);
+		overlay.handleInput("a");
+		overlay.handleInput("on old");
+		overlay.handleInput(ENTER);
+		overlay.handleInput("A");
+		overlay.handleInput("whole");
+		overlay.handleInput(ENTER);
+		expect(overlay.replaceTextSource("new")).toBe(1);
+		overlay.handleInput("u");
+		expect(overlay.getTextAnnotations()).toEqual([{ scope: "text", note: "whole" }]);
 	});
 
 	it("returns undefined on cancel without a review result", () => {

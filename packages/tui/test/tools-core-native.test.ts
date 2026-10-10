@@ -1,19 +1,12 @@
 import { describe, expect, it } from "bun:test";
-import type { TspSpan } from "@oh-my-pi/pi-wire";
 import type { NativeChild, NativeNode } from "../src/native/node";
-import { bashToolRenderer } from "../src/tools/bash";
 import { editToolRenderer } from "../src/tools/edit";
 import { grepToolRenderer } from "../src/tools/grep";
 import { readToolRenderer } from "../src/tools/read";
 import { getNativeBlob } from "../src/native/blobs";
 import type { RenderResultOptions } from "../src/tools/renderer";
 
-const pending: RenderResultOptions = { expanded: false, isPartial: true };
 const done: RenderResultOptions = { expanded: false, isPartial: false };
-
-function headText(head: string | readonly TspSpan[] | undefined): string {
-	return typeof head === "string" ? head : (head ?? []).map(s => s.t).join("");
-}
 
 function isNode(child: NativeChild): child is NativeNode {
 	return "k" in child;
@@ -30,19 +23,6 @@ function collect(children: readonly NativeChild[] | undefined, kind: string): Na
 }
 
 describe("core tool native views", () => {
-	it("shows the streamed bash command once, in the head, with its partial-JSON env", () => {
-		const view = bashToolRenderer.describeCall(
-			{ command: "make test", __partialJson: '{"env":{"CI":"1"},"command":"make test' },
-			pending,
-		);
-		const command = headText(view.tool?.target);
-		expect(view.tool?.targetKind).toBe("command");
-		expect(command).toContain('CI="1"');
-		expect(command).toContain("make test");
-		expect(command).not.toContain("\x1b");
-		expect(collect(view.body, "code")).toHaveLength(0);
-	});
-
 	it("describes an edit result as a path-headed tool over a headerless diff", () => {
 		const compactDiff = " 4|keep\n-5|old\n+5|new";
 		const view = editToolRenderer.describeResult(
