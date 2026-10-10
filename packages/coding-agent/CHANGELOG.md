@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Open the full focused file from `/annotate` with Ctrl+G in a supported multiplexer pane, keeping annotation active; without pane support, use the existing external-editor flow.
+
 ## [18.8.9] - 2026-10-10
 
 ### Added

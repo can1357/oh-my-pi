@@ -1,18 +1,23 @@
 import { afterEach, beforeAll, describe, expect, it, spyOn, vi } from "bun:test";
+import { stripVTControlCharacters } from "node:util";
 import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import { KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
-import { getKeybindings, setKeybindings, TUI } from "@oh-my-pi/pi-tui";
+import { Container, getKeybindings, setKeybindings, TUI } from "@oh-my-pi/pi-tui";
+import { CustomEditor } from "@oh-my-pi/pi-tui/prompt/custom-editor";
+import * as terminalMultiplexer from "@oh-my-pi/pi-tui/terminal-multiplexer";
+import { getEditorTheme, initTheme, theme } from "@oh-my-pi/pi-tui/theme";
+import { HookSelectorComponent } from "@oh-my-pi/pi-tui/overlays/hook-selector";
 import type {
 	ExtensionCustomOptions,
 	ExtensionUIContext,
 	ExtensionUiComponent,
 } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
 import type { Theme } from "@oh-my-pi/pi-tui/theme";
-import { initTheme, theme } from "@oh-my-pi/pi-tui/theme";
 import { CopySelectorComponent } from "@oh-my-pi/pi-tui/overlays/copy-selector";
+import { AnnotationOverlay } from "@oh-my-pi/pi-tui/overlays/annotation-overlay";
 import type { SessionPick } from "@oh-my-pi/pi-coding-agent/extensibility/custom-commands/bundled/annotate/text-source";
 import {
 	AnnotateCommand,
@@ -39,10 +44,15 @@ import type {
 	CodeReviewAnnotation,
 	TextReviewAnnotation,
 	TextReviewSource,
+	TextReviewOverlayResult,
 } from "@oh-my-pi/pi-tui/overlays/annotation-types";
 import * as gh from "@oh-my-pi/pi-coding-agent/tools/gh";
 import { github } from "@oh-my-pi/pi-coding-agent/utils/github";
+import { ExtensionUiController } from "../../../src/modes/controllers/extension-ui-controller";
+import type { InteractiveModeContext } from "../../../src/modes/types";
+import { VirtualRenderScheduler } from "../../../../tui/test/virtual-render-scheduler";
 import { VirtualTerminal } from "../../../../tui/test/virtual-terminal";
+import type { TerminalLaunchRequest, TerminalLaunchResult } from "../../../src/subprocess/terminal-launch";
 
 const ENTER = "\r";
 const UP = "\x1b[A";
@@ -182,6 +192,17 @@ function localTarget(): ResolvedReviewTarget {
 	return createResolvedReviewTarget("uncommitted", "Uncommitted changes", SAMPLE_DIFF, "No uncommitted changes");
 }
 
+function messageWithEditorFile(filePath: string, text = "frozen selected excerpt"): TextReviewSource {
+	return {
+		id: "session-message",
+		kind: "message",
+		label: "Selected session message",
+		text,
+		provenance: { kind: "session", entryId: "session-message" },
+		editorFilePath: filePath,
+	};
+}
+
 /**
  * Mounts a real annotation overlay with the external-editor key remapped to Ctrl+E, feeds
  * `keys`, and resolves with whatever it completed. After each key it yields one macrotask so
@@ -191,10 +212,19 @@ async function driveEditorOverlay<T>(
 	cwd: string,
 	keys: readonly string[],
 	show: (ctx: CustomCommandContext) => Promise<T | undefined>,
+	uiOverrides: Partial<Pick<ExtensionUIContext, "openTerminal" | "confirm" | "notify">> = {},
+	onComponent?: (component: ExtensionUiComponent) => void,
+	tuiLifecycle: Partial<Pick<TUI, "stop" | "start" | "requestRender">> = {},
 ): Promise<T | undefined> {
 	const previous = getKeybindings();
 	setKeybindings(KeybindingsManager.inMemory({ "app.editor.external": "ctrl+e" }));
-	const tui = { terminal: { rows: 40 }, requestRender() {}, stop() {}, start() {} } as unknown as TUI;
+	const tui = {
+		terminal: { rows: 40 },
+		requestRender() {},
+		stop() {},
+		start() {},
+		...tuiLifecycle,
+	} as unknown as TUI;
 	const ctx = {
 		cwd,
 		sessionManager: { getCwd: () => cwd },
@@ -210,9 +240,11 @@ async function driveEditorOverlay<T>(
 					component.handleInput?.(key);
 					await new Promise<void>(resolve => setImmediate(resolve));
 					component.render(120);
+					onComponent?.(component);
 				}
 				return result;
 			},
+			...uiOverrides,
 		},
 	} as unknown as CustomCommandContext;
 	try {
@@ -220,6 +252,17 @@ async function driveEditorOverlay<T>(
 	} finally {
 		setKeybindings(previous);
 	}
+}
+
+function overlayText(component: ExtensionUiComponent): string | undefined {
+	if (!("textSourceText" in component) || typeof component.textSourceText !== "function") return undefined;
+	const text = component.textSourceText();
+	return typeof text === "string" ? text : undefined;
+}
+
+async function settleExternalAction(action: Promise<unknown>): Promise<void> {
+	await action;
+	await new Promise<void>(resolve => setImmediate(resolve));
 }
 
 function countOccurrences(text: string, value: string): number {
@@ -800,6 +843,464 @@ describe("/annotate contracts", () => {
 
 			// The open follows a real filesystem check, so wait for the call rather than the key loop.
 			expect(await opened.promise).toBe(join(dir, "src/value.ts"));
+		});
+	});
+
+	it.each([
+		{ label: "without the optional launcher", multiplexer: "tmux" as const, launcherAvailable: false },
+		{ label: "without a multiplexer", multiplexer: null, launcherAvailable: true },
+		{ label: "inside an unsupported multiplexer", multiplexer: "screen" as const, launcherAvailable: true },
+	] as const)("keeps direct-file editing in the current terminal $label and refreshes its source", async scenario => {
+		await withTempDir(async directory => {
+			const filePath = join(directory, "direct file with spaces.txt");
+			const updatedText = "saved direct-file contents";
+			await writeFile(filePath, "original direct-file contents");
+			spyOn(externalEditor, "getEditorCommand").mockReturnValue("vim");
+			spyOn(terminalMultiplexer, "classifyTerminalMultiplexer").mockReturnValue(scenario.multiplexer);
+			const sourceRefreshed = Promise.withResolvers<number>();
+			const originalReplaceTextSource = AnnotationOverlay.prototype.replaceTextSource;
+			const replaceTextSource = spyOn(AnnotationOverlay.prototype, "replaceTextSource").mockImplementation(function (
+				this: AnnotationOverlay,
+				text: string,
+			) {
+				const dropped = originalReplaceTextSource.call(this, text);
+				sourceRefreshed.resolve(dropped);
+				return dropped;
+			});
+			const openEditorOnPath = spyOn(externalEditor, "openEditorOnPath").mockImplementation(
+				async (_editor, path) => {
+					await writeFile(path, updatedText);
+					return 0;
+				},
+			);
+			const openTerminal = vi.fn(async (_request: TerminalLaunchRequest): Promise<TerminalLaunchResult> => ({
+				multiplexer: "tmux",
+				placement: "pane",
+			}));
+			const notify = vi.fn();
+			const uiOverrides: Partial<Pick<ExtensionUIContext, "openTerminal" | "notify">> = { notify };
+			if (scenario.launcherAvailable) uiOverrides.openTerminal = openTerminal;
+			const source: TextReviewSource = {
+				id: `file:${filePath}`,
+				kind: "file",
+				label: filePath,
+				text: "original direct-file contents",
+				provenance: { kind: "file", path: filePath },
+			};
+			let overlayComponent: ExtensionUiComponent | undefined;
+
+			await driveEditorOverlay(
+				directory,
+				[CTRL_E],
+				ctx => showTextReviewOverlay(ctx, source),
+				uiOverrides,
+				component => {
+					overlayComponent = component;
+				},
+			);
+			await sourceRefreshed.promise;
+
+			expect(openEditorOnPath).toHaveBeenCalledWith("vim", filePath);
+			expect(openTerminal).not.toHaveBeenCalled();
+			expect(replaceTextSource).toHaveBeenCalledWith(updatedText);
+			expect(overlayComponent ? overlayText(overlayComponent) : undefined).toBe(updatedText);
+			expect(notify).not.toHaveBeenCalled();
+		});
+	});
+
+	it.each([
+		{ label: "a transcript-associated file", directFile: false },
+		{ label: "direct file provenance", directFile: true },
+	] as const)("opens $label in a pane with safe full-path editor argv and keeps the source frozen", async scenario => {
+		await withTempDir(async directory => {
+			const filePath = join(directory, "source with spaces ; $(not-a-command).txt");
+			const editor = '"Editor With Spaces" --wait';
+			await writeFile(filePath, "original full file");
+			spyOn(externalEditor, "getEditorCommand").mockReturnValue(editor);
+			spyOn(terminalMultiplexer, "classifyTerminalMultiplexer").mockReturnValue("tmux");
+			const paneLaunchCompleted = Promise.withResolvers<void>();
+			const openEditorOnPath = spyOn(externalEditor, "openEditorOnPath").mockResolvedValue(0);
+			spyOn(externalEditor, "openInEditor").mockResolvedValue("unexpected");
+			const openTerminal = vi.fn(async (_request: TerminalLaunchRequest): Promise<TerminalLaunchResult> => {
+				await writeFile(filePath, "new full-file contents from the detached editor");
+				paneLaunchCompleted.resolve();
+				return { multiplexer: "tmux", placement: "pane" };
+			});
+			const notify = vi.fn();
+			const source: TextReviewSource = scenario.directFile
+				? {
+						id: `file:${filePath}`,
+						kind: "file",
+						label: filePath,
+						text: "original full file",
+						provenance: { kind: "file", path: filePath },
+					}
+				: messageWithEditorFile(filePath);
+			let overlayComponent: ExtensionUiComponent | undefined;
+			const stop = vi.fn();
+			const start = vi.fn();
+			const requestRender = vi.fn();
+
+			await driveEditorOverlay(
+				directory,
+				[CTRL_E],
+				ctx => showTextReviewOverlay(ctx, source),
+				{ openTerminal, notify },
+				component => {
+					overlayComponent = component;
+				},
+				{ stop, start, requestRender },
+			);
+			await settleExternalAction(paneLaunchCompleted.promise);
+
+			const request = openTerminal.mock.calls[0]?.[0];
+			expect(request?.multiplexer).toBe("tmux");
+			expect(request?.placement).toBe("pane");
+			const command = request?.command;
+			if (process.platform !== "win32") {
+				expect(command?.[1]).toBe("-c");
+				expect(command?.[2]).toBe(`${editor} "$1"`);
+				expect(command?.[2]).not.toContain(filePath);
+				expect(command?.at(-1)).toBe(filePath);
+			} else {
+				expect(command?.slice(0, 4)).toEqual(["cmd.exe", "/d", "/s", "/c"]);
+				expect(command?.[4]).toContain(`"${filePath}"`);
+			}
+			expect(openEditorOnPath).not.toHaveBeenCalled();
+			expect(stop).not.toHaveBeenCalled();
+			expect(start).not.toHaveBeenCalled();
+			expect(requestRender).toHaveBeenCalledWith(true);
+			expect(overlayComponent ? overlayText(overlayComponent) : undefined).toBe(source.text);
+			expect(source.text).toBe(scenario.directFile ? "original full file" : "frozen selected excerpt");
+			expect(notify).toHaveBeenCalledWith(expect.stringContaining("annotation source remains frozen"), "info");
+		});
+	});
+
+	it("opens the selected local diff file from the repo root in a new pane", async () => {
+		const editor = '"Editor With Spaces" --wait';
+		spyOn(externalEditor, "getEditorCommand").mockReturnValue(editor);
+		spyOn(terminalMultiplexer, "classifyTerminalMultiplexer").mockReturnValue("tmux");
+		const paneLaunchCompleted = Promise.withResolvers<void>();
+		const openEditorOnPath = spyOn(externalEditor, "openEditorOnPath").mockResolvedValue(0);
+		const openTerminal = vi.fn(async (_request: TerminalLaunchRequest): Promise<TerminalLaunchResult> => {
+			paneLaunchCompleted.resolve();
+			return { multiplexer: "tmux", placement: "pane" };
+		});
+		const notify = vi.fn();
+		await withTempDir(async directory => {
+			const repoRoot = await realpath(directory);
+			const cwd = join(repoRoot, "packages");
+			const filePath = join(repoRoot, "src/value.ts");
+			await Bun.$`git init -q ${repoRoot}`.quiet();
+			await mkdir(cwd);
+			await mkdir(join(repoRoot, "src"));
+			await writeFile(filePath, "const value = 2;\n");
+
+			await driveEditorOverlay(cwd, ["\t", CTRL_E], ctx => showCodeReviewOverlay(ctx, localTarget()), {
+				openTerminal,
+				notify,
+			});
+			await settleExternalAction(paneLaunchCompleted.promise);
+
+			const request = openTerminal.mock.calls[0]?.[0];
+			expect(request?.cwd).toBe(cwd);
+			const command = request?.command;
+			if (process.platform !== "win32") {
+				expect(command?.[1]).toBe("-c");
+				expect(command?.[2]).toBe(`${editor} "$1"`);
+				expect(command?.at(-1)).toBe(filePath);
+			} else {
+				expect(command?.slice(0, 4)).toEqual(["cmd.exe", "/d", "/s", "/c"]);
+				expect(command?.[4]).toContain(`"${filePath}"`);
+			}
+			expect(openEditorOnPath).not.toHaveBeenCalled();
+			expect(notify).toHaveBeenCalledWith(expect.stringContaining("review diff remains frozen"), "info");
+		});
+	});
+
+	it("falls back to the stopped local editor for an associated file without refreshing the session excerpt", async () => {
+		const editor = "vim";
+		spyOn(externalEditor, "getEditorCommand").mockReturnValue(editor);
+		const editorCompleted = Promise.withResolvers<void>();
+		const openEditorOnPath = spyOn(externalEditor, "openEditorOnPath").mockImplementation(
+			async (_editor, filePath) => {
+				await writeFile(filePath, "edited associated file");
+				editorCompleted.resolve();
+				return 0;
+			},
+		);
+		const notify = vi.fn();
+		const stop = vi.fn();
+		const start = vi.fn();
+		const requestRender = vi.fn();
+
+		await withTempDir(async directory => {
+			const filePath = join(directory, "associated source.txt");
+			await writeFile(filePath, "original associated file");
+			const source = messageWithEditorFile(filePath);
+			let overlayComponent: ExtensionUiComponent | undefined;
+
+			await driveEditorOverlay(
+				directory,
+				[CTRL_E],
+				ctx => showTextReviewOverlay(ctx, source),
+				{ notify },
+				component => {
+					overlayComponent = component;
+				},
+				{ stop, start, requestRender },
+			);
+			await settleExternalAction(editorCompleted.promise);
+
+			expect(openEditorOnPath).toHaveBeenCalledWith(editor, filePath);
+			expect(await Bun.file(filePath).text()).toBe("edited associated file");
+			expect(overlayComponent ? overlayText(overlayComponent) : undefined).toBe("frozen selected excerpt");
+			expect(source.text).toBe("frozen selected excerpt");
+			expect(stop).toHaveBeenCalledTimes(1);
+			expect(start).toHaveBeenCalledTimes(1);
+			expect(requestRender).toHaveBeenCalledWith(true);
+			expect(notify).toHaveBeenCalledWith(`Opened ${filePath}. The annotation source remains frozen.`, "info");
+		});
+	});
+
+	it.each(["herdr", "cmux", "orca"] as const)(
+		"confirms POSIX shell compatibility before launching in %s",
+		async multiplexer => {
+			await withTempDir(async directory => {
+				const filePath = join(directory, "selected source.txt");
+				await writeFile(filePath, "source");
+				spyOn(externalEditor, "getEditorCommand").mockReturnValue("vim");
+				spyOn(terminalMultiplexer, "classifyTerminalMultiplexer").mockReturnValue(multiplexer);
+				const confirm = vi.fn(async () => true);
+				const paneLaunchCompleted = Promise.withResolvers<void>();
+				const openTerminal = vi.fn(async (_request: TerminalLaunchRequest): Promise<TerminalLaunchResult> => {
+					paneLaunchCompleted.resolve();
+					return { multiplexer, placement: "pane" };
+				});
+
+				await driveEditorOverlay(
+					directory,
+					[CTRL_E],
+					ctx => showTextReviewOverlay(ctx, messageWithEditorFile(filePath)),
+					{
+						confirm,
+						openTerminal,
+					},
+				);
+				await settleExternalAction(paneLaunchCompleted.promise);
+
+				expect(confirm).toHaveBeenCalledWith(
+					"Confirm destination shell compatibility",
+					expect.stringContaining("This editor command uses POSIX shell syntax."),
+				);
+				expect(openTerminal.mock.calls[0]?.[0]).toMatchObject({
+					multiplexer,
+					placement: "pane",
+					shellGrammar: "posix",
+				});
+			});
+		},
+	);
+
+	it("does not fall back locally after POSIX shell compatibility is declined", async () => {
+		spyOn(externalEditor, "getEditorCommand").mockReturnValue("vim");
+		spyOn(terminalMultiplexer, "classifyTerminalMultiplexer").mockReturnValue("cmux");
+		const confirmationCompleted = Promise.withResolvers<void>();
+		const confirm = vi.fn(async () => {
+			confirmationCompleted.resolve();
+			return false;
+		});
+		const openTerminal = vi.fn(async (_request: TerminalLaunchRequest): Promise<TerminalLaunchResult> => ({
+			multiplexer: "cmux",
+			placement: "pane",
+		}));
+		const openEditorOnPath = spyOn(externalEditor, "openEditorOnPath").mockResolvedValue(0);
+		const notify = vi.fn();
+
+		await withTempDir(async directory => {
+			const filePath = join(directory, "selected source.txt");
+			await writeFile(filePath, "source");
+			await driveEditorOverlay(
+				directory,
+				[CTRL_E],
+				ctx => showTextReviewOverlay(ctx, messageWithEditorFile(filePath)),
+				{
+					confirm,
+					notify,
+					openTerminal,
+				},
+			);
+			await settleExternalAction(confirmationCompleted.promise);
+		});
+
+		expect(openTerminal).not.toHaveBeenCalled();
+		expect(openEditorOnPath).not.toHaveBeenCalled();
+		expect(notify).toHaveBeenCalledWith(expect.stringContaining("Editor launch cancelled"), "warning");
+	});
+
+	it("cancels a real POSIX confirmation without losing fullscreen annotation focus", async () => {
+		spyOn(externalEditor, "getEditorCommand").mockReturnValue("vim");
+		spyOn(terminalMultiplexer, "classifyTerminalMultiplexer").mockReturnValue("cmux");
+		const openEditorOnPath = spyOn(externalEditor, "openEditorOnPath").mockResolvedValue(0);
+
+		await withTempDir(async directory => {
+			const filePath = join(directory, "selected source.txt");
+			await writeFile(filePath, "source");
+			const terminal = new VirtualTerminal(120, 40);
+			const scheduler = new VirtualRenderScheduler();
+			const tui = new TUI(terminal, true, { renderScheduler: scheduler });
+			const editor = new CustomEditor(getEditorTheme());
+			const editorContainer = new Container();
+			editorContainer.addChild(editor);
+			tui.addChild(editorContainer);
+			tui.setFocus(editor);
+			let launchCancelled = false;
+			const notify = vi.fn((message: string) => {
+				if (message.startsWith("Editor launch cancelled")) launchCancelled = true;
+			});
+			const openTerminal = vi.fn(async (_request: TerminalLaunchRequest): Promise<TerminalLaunchResult> => ({
+				multiplexer: "cmux",
+				placement: "pane",
+			}));
+			const interactiveContext = { editor, editorContainer, ui: tui } as unknown as InteractiveModeContext;
+			const controller = new ExtensionUiController(interactiveContext);
+			const ui = tui as unknown as ExtensionUIContext;
+			ui.confirm = (title, message, options) => controller.showHookConfirm(title, message, options);
+			ui.custom = (factory, options) => controller.showHookCustom(factory, options);
+			ui.notify = notify;
+			ui.openTerminal = openTerminal;
+			const ctx = {
+				cwd: directory,
+				sessionManager: { getCwd: () => directory },
+				ui,
+			} as unknown as CustomCommandContext;
+			const previousKeybindings = getKeybindings();
+			setKeybindings(KeybindingsManager.inMemory({ "app.editor.external": "ctrl+e" }));
+
+			tui.start();
+			let result: Promise<TextReviewOverlayResult | undefined> | undefined;
+			try {
+				await scheduler.settle(terminal);
+				result = showTextReviewOverlay(ctx, messageWithEditorFile(filePath));
+				for (let attempt = 0; attempt < 50 && !(tui.getFocused() instanceof AnnotationOverlay); attempt++) {
+					await new Promise<void>(resolve => setImmediate(resolve));
+				}
+				await scheduler.settle(terminal);
+				expect(tui.getFocused()).toBeInstanceOf(AnnotationOverlay);
+				const overlay = tui.getFocused() as AnnotationOverlay;
+
+				terminal.sendInput(CTRL_E);
+				for (let attempt = 0; attempt < 50 && !(tui.getFocused() instanceof HookSelectorComponent); attempt++) {
+					await new Promise<void>(resolve => setImmediate(resolve));
+				}
+				await scheduler.settle(terminal);
+				expect(tui.getFocused()).toBeInstanceOf(HookSelectorComponent);
+				const confirmation = stripVTControlCharacters(tui.getDebugDocument().join("\n"));
+				expect(confirmation).toContain("Confirm destination shell compatibility");
+				expect(confirmation).toContain("This editor command uses POSIX shell syntax.");
+
+				terminal.sendInput("\x1b");
+				for (let attempt = 0; attempt < 50 && !launchCancelled; attempt++) {
+					await new Promise<void>(resolve => setImmediate(resolve));
+				}
+				await scheduler.settle(terminal);
+				expect(launchCancelled).toBe(true);
+				expect(tui.getFocused()).toBe(overlay);
+
+				terminal.sendInput("A");
+				for (const character of "responsive note") terminal.sendInput(character);
+				terminal.sendInput(ENTER);
+				await scheduler.settle(terminal);
+				expect(overlay.getTextAnnotations()).toEqual([{ scope: "text", note: "responsive note" }]);
+				expect(openTerminal).not.toHaveBeenCalled();
+				expect(openEditorOnPath).not.toHaveBeenCalled();
+
+				terminal.sendInput("\x1b");
+				expect(await result).toBeUndefined();
+			} finally {
+				tui.stop();
+				setKeybindings(previousKeybindings);
+			}
+		});
+	});
+
+	it("surfaces a pane launch failure instead of opening a second editor locally", async () => {
+		spyOn(externalEditor, "getEditorCommand").mockReturnValue("vim");
+		spyOn(terminalMultiplexer, "classifyTerminalMultiplexer").mockReturnValue("tmux");
+		const launchStarted = Promise.withResolvers<void>();
+		const openTerminal = vi.fn(async (_request: TerminalLaunchRequest): Promise<TerminalLaunchResult> => {
+			launchStarted.resolve();
+			throw new Error("mock pane launcher failure");
+		});
+		const openEditorOnPath = spyOn(externalEditor, "openEditorOnPath").mockResolvedValue(0);
+		const notify = vi.fn();
+
+		await withTempDir(async directory => {
+			const filePath = join(directory, "selected source.txt");
+			await writeFile(filePath, "source");
+			await driveEditorOverlay(
+				directory,
+				[CTRL_E],
+				ctx => showTextReviewOverlay(ctx, messageWithEditorFile(filePath)),
+				{
+					notify,
+					openTerminal,
+				},
+			);
+			await settleExternalAction(launchStarted.promise);
+		});
+
+		expect(openTerminal).toHaveBeenCalledTimes(1);
+		expect(openEditorOnPath).not.toHaveBeenCalled();
+		expect(notify).toHaveBeenCalledWith(
+			expect.stringContaining("Failed to open external editor: mock pane launcher failure"),
+			"warning",
+		);
+	});
+
+	it("surfaces missing editor paths and missing editor configuration", async () => {
+		await withTempDir(async directory => {
+			const missingPath = join(directory, "missing source.txt");
+			const getEditorCommand = spyOn(externalEditor, "getEditorCommand").mockReturnValue("vim");
+			const missingPathShown = Promise.withResolvers<void>();
+			const missingPathNotify = vi.fn(() => missingPathShown.resolve());
+			const openTerminal = vi.fn(async (_request: TerminalLaunchRequest): Promise<TerminalLaunchResult> => ({
+				multiplexer: "tmux",
+				placement: "pane",
+			}));
+			const openEditorOnPath = spyOn(externalEditor, "openEditorOnPath").mockResolvedValue(0);
+			await driveEditorOverlay(
+				directory,
+				[CTRL_E],
+				ctx => showTextReviewOverlay(ctx, messageWithEditorFile(missingPath)),
+				{ notify: missingPathNotify, openTerminal },
+			);
+			await settleExternalAction(missingPathShown.promise);
+			expect(missingPathNotify).toHaveBeenCalledWith(
+				expect.stringContaining("missing source.txt is not on disk."),
+				"warning",
+			);
+			expect(openEditorOnPath).not.toHaveBeenCalled();
+			expect(openTerminal).not.toHaveBeenCalled();
+
+			const existingPath = join(directory, "existing source.txt");
+			await writeFile(existingPath, "source");
+			getEditorCommand.mockReturnValue(undefined);
+			const missingEditorShown = Promise.withResolvers<void>();
+			const missingEditorNotify = vi.fn(() => missingEditorShown.resolve());
+			await driveEditorOverlay(
+				directory,
+				[CTRL_E],
+				ctx => showTextReviewOverlay(ctx, messageWithEditorFile(existingPath)),
+				{ notify: missingEditorNotify, openTerminal },
+			);
+			await settleExternalAction(missingEditorShown.promise);
+			expect(missingEditorNotify).toHaveBeenCalledWith(
+				expect.stringContaining("Set $VISUAL or $EDITOR to edit in an external editor."),
+				"warning",
+			);
+			expect(openTerminal).not.toHaveBeenCalled();
+			expect(openEditorOnPath).not.toHaveBeenCalled();
 		});
 	});
 });
