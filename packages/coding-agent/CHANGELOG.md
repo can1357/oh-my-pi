@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added opt-in `retry.refusalFallbackRevertPolicy: after-success` to return to the previous model after one successful refusal/content-block fallback response, including Codex cybersecurity blocks, without changing outage or rate-limit fallback behavior or overriding explicit model selections during restoration ([#12239](https://github.com/can1357/oh-my-pi/pull/12239) by [@endophysics](https://github.com/endophysics)).
+
+### Fixed
+
+- Fixed resumed `/new` conversations staying on a refusal fallback, and unfinished refusal fallbacks overriding another session's selected model ([#12239](https://github.com/can1357/oh-my-pi/pull/12239) by [@endophysics](https://github.com/endophysics)).
+- Fixed refusal fallback being skipped after Codex account rotations and overriding explicit same-model selections during fallback application ([#12239](https://github.com/can1357/oh-my-pi/pull/12239) by [@endophysics](https://github.com/endophysics)).
+- Fixed `/new` losing refusal-fallback attribution or resuming the primary with the fallback's thinking effort instead of its saved level or `auto` configuration ([#12239](https://github.com/can1357/oh-my-pi/pull/12239) by [@endophysics](https://github.com/endophysics)).
+- Fixed `/new` losing the availability primary beneath nested refusal fallbacks, including its thinking level when a detour cannot support that effort ([#12239](https://github.com/can1357/oh-my-pi/pull/12239) by [@endophysics](https://github.com/endophysics)).
+- Fixed interrupted fallback swaps leaving the active model, saved model, and thinking level inconsistent ([#12239](https://github.com/can1357/oh-my-pi/pull/12239) by [@endophysics](https://github.com/endophysics)).
+- Fixed pending refusal restoration being cancelled by policy changes or delayed by unrelated extension handlers ([#12239](https://github.com/can1357/oh-my-pi/pull/12239) by [@endophysics](https://github.com/endophysics)).
+- Fixed reloading the active transcript reporting primary replies as refusal-fallback successes ([#12239](https://github.com/can1357/oh-my-pi/pull/12239) by [@endophysics](https://github.com/endophysics)).
+
 ## [18.8.9] - 2026-10-10
 
 ### Added

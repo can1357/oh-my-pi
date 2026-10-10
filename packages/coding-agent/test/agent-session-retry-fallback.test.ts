@@ -1,4 +1,5 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
+import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { scheduler } from "node:timers/promises";
 import { type } from "@oh-my-pi/omptype";
@@ -16,12 +17,13 @@ import {
 	type ToolCall,
 } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
-import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
+import { createMockModel, type MockResponse } from "@oh-my-pi/pi-ai/providers/mock";
 import { buildParams } from "@oh-my-pi/pi-ai/providers/openai-responses";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { writeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
+import * as autoThinkingClassifier from "@oh-my-pi/pi-coding-agent/auto-thinking/classifier";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { parseModelString } from "@oh-my-pi/pi-tui/overlays/model-selector";
 import { parseModelPattern } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
@@ -30,14 +32,19 @@ import { editVariantForModel } from "@oh-my-pi/pi-coding-agent/utils/edit-mode";
 import { ExtensionRuntime, loadExtensionFromFactory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
 import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
+import { AUTO_THINKING } from "@oh-my-pi/pi-tui/thinking";
+import { ThinkingLevel } from "@oh-my-pi/pi-agent-core/thinking";
+import { createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import { AgentSession, type AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import {
 	type ServingModel,
 	validateRetryFallbackChains,
 } from "@oh-my-pi/pi-coding-agent/session/retry-fallback-chains";
+import { getRestorableSessionModels } from "@oh-my-pi/pi-coding-agent/session/session-context";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
+import { SessionTools } from "@oh-my-pi/pi-coding-agent/session/session-tools";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { mockSchedulerWaitWithClock } from "./helpers/mock-scheduler-clock";
@@ -3712,6 +3719,853 @@ describe("AgentSession retry fallback", () => {
 		expect(session.consumeActiveFallbackCreditRedemption()).toBeUndefined();
 	});
 
+	it.each([0, 2])("bounds cyclic content-block fallbacks with a retry budget of %s", async maxRetries => {
+		const primaryModel = getBundledModel("openai-codex", "gpt-5.6-sol")!;
+		const fallbackModel = getBundledModel("openai", "gpt-4o-mini")!;
+		const primary = `${primaryModel.provider}/${primaryModel.id}`;
+		const fallback = `${fallbackModel.provider}/${fallbackModel.id}`;
+		const requestedModels: string[] = [];
+		const mock = createMockModel({
+			handler: () => ({ stopReason: "error", errorMessage: "Policy denied (code=cyber_policy)" }),
+		});
+		const agent = new Agent({
+			getApiKey: model => `${model.provider}-test-key`,
+			initialState: { model: primaryModel, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: (model, context, options) => {
+				requestedModels.push(`${model.provider}/${model.id}`);
+				return mock.stream(model, context, options);
+			},
+		});
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.maxRetries": maxRetries,
+			"retry.fallbackChains": { [primary]: [fallback], [fallback]: [primary] },
+			"retry.refusalFallbackRevertPolicy": "after-success",
+		});
+		session = new AgentSession({ agent, sessionManager: SessionManager.inMemory(), settings, modelRegistry });
+		const { retryEndEvents } = trackRetryEvents(session);
+
+		await session.prompt("Handle a persistent policy rejection");
+		await session.waitForIdle();
+
+		expect(requestedModels).toEqual(maxRetries === 0 ? [primary, fallback] : [primary, fallback, primary]);
+		expect(retryEndEvents).toHaveLength(1);
+		expect(retryEndEvents[0]).toMatchObject({ success: false, attempt: maxRetries === 0 ? 1 : 2 });
+		expect(session.getLastAssistantMessage()?.stopReason).toBe("error");
+	});
+
+	it.each(["sensitive", "cyber-policy"] as const)(
+		"restores the primary before a %s fallback's tool-result continuation",
+		async failureType => {
+			const primaryModel =
+				failureType === "sensitive"
+					? getBundledModel("anthropic", "claude-sonnet-4-5")!
+					: getBundledModel("openai-codex", "gpt-5.6-sol")!;
+			const fallbackModel = getBundledModel("openai", "gpt-4o-mini")!;
+			const primary = `${primaryModel.provider}/${primaryModel.id}`;
+			const fallback = `${fallbackModel.provider}/${fallbackModel.id}`;
+			const requestedModels: string[] = [];
+			let executions = 0;
+			const parameters = type({});
+			const tool: AgentTool<typeof parameters> = {
+				name: "inspect",
+				label: "Inspect",
+				description: "Inspect the local fixture",
+				parameters,
+				async execute() {
+					executions++;
+					return { content: [{ type: "text", text: "Inspection complete" }], details: {} };
+				},
+			};
+			const mock = createMockModel({
+				responses: [
+					failureType === "sensitive"
+						? { stopReason: "error", stopDetails: { type: "sensitive" }, errorMessage: "Content rejected" }
+						: {
+								stopReason: "error",
+								errorMessage:
+									"Codex error event: This content was flagged for possible cybersecurity risk. Join Trusted Access for Cyber. (code=cyber_policy)",
+							},
+					{ content: [{ type: "toolCall", id: "inspect-1", name: "inspect", arguments: {} }] },
+					{ content: ["Completed using the inspection result"] },
+					{ content: ["Next request also uses the primary"] },
+				],
+			});
+			const agent = new Agent({
+				getApiKey: model => `${model.provider}-test-key`,
+				initialState: { model: primaryModel, systemPrompt: ["Test"], tools: [tool], messages: [] },
+				streamFn: (model, context, options) => {
+					requestedModels.push(`${model.provider}/${model.id}`);
+					return mock.stream(model, context, options);
+				},
+			});
+			const settings = Settings.isolated({
+				"compaction.enabled": false,
+				"retry.fallbackChains": { [primary]: [fallback] },
+				"retry.refusalFallbackRevertPolicy": "after-success",
+			});
+			session = new AgentSession({ agent, sessionManager: SessionManager.inMemory(), settings, modelRegistry });
+
+			await session.prompt("Inspect the fixture");
+			await session.waitForIdle();
+
+			expect(requestedModels).toEqual([primary, fallback, primary]);
+			expect(executions).toBe(1);
+			expect(mock.calls[2].context.messages).toContainEqual(
+				expect.objectContaining({ role: "toolResult", toolCallId: "inspect-1" }),
+			);
+			expect(session.servingModel).toMatchObject({ modelIdentity: primary, isFallback: false });
+			await session.prompt("Continue");
+			await session.waitForIdle();
+			expect(requestedModels).toEqual([primary, fallback, primary, primary]);
+		},
+	);
+
+	it("does not restore after an aborted refusal fallback response", async () => {
+		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+		const fallbackModel = getBundledModel("openai", "gpt-4o-mini")!;
+		const primary = `${primaryModel.provider}/${primaryModel.id}`;
+		const fallback = `${fallbackModel.provider}/${fallbackModel.id}`;
+		const requestedModels: string[] = [];
+		const mock = createMockModel({
+			responses: [
+				{ stopReason: "error", stopDetails: { type: "refusal" }, errorMessage: "Classifier declined" },
+				{ content: ["Interrupted partial output"], stopReason: "aborted", errorMessage: "Cancelled by user" },
+				{ content: ["Completed the interrupted request"] },
+			],
+		});
+		const agent = new Agent({
+			getApiKey: model => `${model.provider}-test-key`,
+			initialState: { model: primaryModel, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: (model, context, options) => {
+				requestedModels.push(`${model.provider}/${model.id}`);
+				return mock.stream(model, context, options);
+			},
+		});
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.fallbackChains": { [primary]: [fallback] },
+			"retry.refusalFallbackRevertPolicy": "after-success",
+		});
+		session = new AgentSession({ agent, sessionManager: SessionManager.inMemory(), settings, modelRegistry });
+
+		await session.prompt("Start the request");
+		await session.waitForIdle();
+		expect(requestedModels).toEqual([primary, fallback]);
+		expect(session.model?.id).toBe(fallbackModel.id);
+		await session.prompt("Complete the interrupted request");
+		await session.waitForIdle();
+		expect(requestedModels).toEqual([primary, fallback, fallback]);
+		expect(session.model?.id).toBe(primaryModel.id);
+	});
+
+	it.each([false, true])(
+		"uses reloaded model ownership for an unfinished refusal fallback (keepModel: %s)",
+		async keepModel => {
+			const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+			const fallbackModel = getBundledModel("openai", "gpt-4o-mini")!;
+			const primary = `${primaryModel.provider}/${primaryModel.id}`;
+			const fallback = `${fallbackModel.provider}/${fallbackModel.id}`;
+			const requestedModels: string[] = [];
+			const responses: MockResponse[] = [
+				{ stopReason: "error", stopDetails: { type: "refusal" }, errorMessage: "Classifier declined" },
+				{ content: [], stopReason: "aborted", errorMessage: "Cancelled" },
+				{ content: ["Reply after reloading the active transcript"] },
+			];
+			const agent = new Agent({
+				getApiKey: model => `${model.provider}-test-key`,
+				initialState: { model: primaryModel, systemPrompt: ["Test"], tools: [], messages: [] },
+				streamFn: (model, context, options) => {
+					requestedModels.push(`${model.provider}/${model.id}`);
+					const response = responses.shift();
+					if (!response) throw new Error("Unexpected model request after transcript reload");
+					return createMockModel({ provider: model.provider, id: model.id, responses: [response] }).stream(
+						model,
+						context,
+						options,
+					);
+				},
+			});
+			const settings = Settings.isolated({
+				"compaction.enabled": false,
+				"retry.maxRetries": 1,
+				"retry.fallbackChains": { [primary]: [fallback] },
+				"retry.refusalFallbackRevertPolicy": "after-success",
+			});
+			settings.setModelRole("default", primary);
+			const manager = SessionManager.create(tempDir.path(), tempDir.join(`refusal-reload-${keepModel}`));
+			manager.appendModelChange(primary);
+			session = new AgentSession({ agent, sessionManager: manager, settings, modelRegistry });
+			const succeeded: Array<Extract<AgentSessionEvent, { type: "retry_fallback_succeeded" }>> = [];
+			session.subscribe(event => {
+				if (event.type === "retry_fallback_succeeded") succeeded.push(event);
+			});
+
+			await session.prompt("Leave an unfinished refusal fallback");
+			await session.waitForIdle();
+			await session.flushToDisk();
+			const sessionFile = session.sessionFile;
+			if (!sessionFile) throw new Error("Expected persisted active transcript");
+			if (keepModel) {
+				expect(await session.switchSession(sessionFile, { keepModel: true })).toBe(true);
+			} else {
+				await session.reload();
+			}
+			expect(session.model?.id).toBe(keepModel ? fallbackModel.id : primaryModel.id);
+
+			await session.prompt("Continue after transcript reload");
+			await session.waitForIdle();
+			expect(requestedModels).toEqual([primary, fallback, keepModel ? fallback : primary]);
+			expect(
+				succeeded.map(event => parseModelPattern(event.model, [primaryModel, fallbackModel]).model?.id),
+			).toEqual(keepModel ? [fallbackModel.id] : []);
+			expect(session.servingModel).toMatchObject({
+				modelIdentity: keepModel ? fallback : primary,
+				isFallback: keepModel,
+			});
+			expect(session.model?.id).toBe(primaryModel.id);
+		},
+	);
+
+	it.each([false, true])(
+		"restores the primary on cold resume after /new (starts on fallback: %s)",
+		async startsOnFallback => {
+			const primaryModel = getBundledModel("openai-codex", "gpt-5.6-sol")!;
+			const fallbackModel = getBundledModel("openai", "gpt-4o-mini")!;
+			const primary = `${primaryModel.provider}/${primaryModel.id}`;
+			const fallback = `${fallbackModel.provider}/${fallbackModel.id}`;
+			const requestedModels: string[] = [];
+			const responses: MockResponse[] = [
+				...(startsOnFallback ? [{ content: ["Completed work in the previous conversation"] }] : []),
+				{ stopReason: "error", errorMessage: "Content flagged (code=cyber_policy)" },
+				...(startsOnFallback ? [{ content: [], stopReason: "aborted" as const, errorMessage: "Cancelled" }] : []),
+				{ content: ["Recovered using the fallback"] },
+				{ content: ["Continued after restarting"] },
+			];
+			const agent = new Agent({
+				getApiKey: model => `${model.provider}-test-key`,
+				initialState: { model: primaryModel, systemPrompt: ["Test"], tools: [], messages: [] },
+				streamFn: (model, context, options) => {
+					requestedModels.push(`${model.provider}/${model.id}`);
+					const response = responses.shift();
+					if (!response) throw new Error("Unexpected request after refusal recovery");
+					return createMockModel({ provider: model.provider, id: model.id, responses: [response] }).stream(
+						model,
+						context,
+						options,
+					);
+				},
+			});
+			const settings = Settings.isolated({
+				"compaction.enabled": false,
+				"retry.fallbackChains": { [primary]: [fallback] },
+				"retry.refusalFallbackRevertPolicy": "after-success",
+			});
+			settings.setModelRole("default", primary);
+			const manager = SessionManager.create(tempDir.path(), tempDir.join("new-session-refusal"));
+			manager.appendModelChange(primary);
+			session = new AgentSession({ agent, sessionManager: manager, settings, modelRegistry });
+
+			if (startsOnFallback) {
+				await session.prompt("Finish an earlier conversation");
+				await session.waitForIdle();
+				await session.prompt("Leave an unfinished refusal fallback");
+				await session.waitForIdle();
+				expect(session.model?.id).toBe(fallbackModel.id);
+				expect(session.servingModel).toMatchObject({ modelIdentity: primary, isFallback: false });
+			}
+
+			await session.newSession();
+			if (startsOnFallback) {
+				expect(session.servingModel).toMatchObject({ modelIdentity: fallback, isFallback: true });
+			}
+			await session.prompt("Recover this new conversation");
+			await session.waitForIdle();
+			const beforeResume = startsOnFallback ? [primary, primary, fallback, fallback] : [primary, fallback];
+			expect(requestedModels).toEqual(beforeResume);
+			expect(session.model?.id).toBe(primaryModel.id);
+			if (startsOnFallback) {
+				expect(session.servingModel).toMatchObject({ modelIdentity: fallback, isFallback: true });
+			}
+			await session.flushToDisk();
+			const sessionFile = session.sessionFile!;
+			await session.dispose();
+			session = undefined;
+
+			const resumedManager = await SessionManager.open(sessionFile, tempDir.join("resumed-refusal"));
+			if (startsOnFallback) {
+				expect(resumedManager.getEntries()).toContainEqual(
+					expect.objectContaining({
+						type: "model_change",
+						model: fallback,
+						role: "fallback",
+						resolvedModelIsFallback: true,
+					}),
+				);
+			}
+			const resumed = await createAgentSession({
+				cwd: tempDir.path(),
+				agentDir: tempDir.path(),
+				authStorage,
+				modelRegistry,
+				sessionManager: resumedManager,
+				settings,
+				disableExtensionDiscovery: true,
+				skills: [],
+				contextFiles: [],
+				promptTemplates: [],
+				slashCommands: [],
+				enableMCP: false,
+				enableLsp: false,
+				enableIrc: false,
+				skipPythonPreflight: true,
+				toolNames: [],
+				restrictToolNames: true,
+			});
+			session = resumed.session;
+			session.agent.streamFn = agent.streamFn;
+			expect(session.model?.id).toBe(primaryModel.id);
+			await session.prompt("Continue after restarting");
+			await session.waitForIdle();
+			expect(requestedModels).toEqual([...beforeResume, primary]);
+		},
+	);
+
+	it.each([
+		[Effort.High, undefined],
+		[AUTO_THINKING, undefined],
+		[Effort.High, Effort.Medium],
+	] as const)(
+		"cold-resumes the primary's %s thinking across an unfinished /new fallback (manual override: %s)",
+		async (originalThinking, manualOverride) => {
+			const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+			const fallbackModel = getBundledModel("anthropic", "claude-opus-4-1")!;
+			const primary = `${primaryModel.provider}/${primaryModel.id}`;
+			const fallback = `${fallbackModel.provider}/${fallbackModel.id}`;
+			const requestedModels: string[] = [];
+			const responses: MockResponse[] = [
+				{ stopReason: "error", stopDetails: { type: "sensitive" }, errorMessage: "Content rejected" },
+				{ content: ["Interrupted fallback"], stopReason: "aborted", errorMessage: "Cancelled" },
+				{ content: ["Still unfinished in the new conversation"], stopReason: "aborted", errorMessage: "Cancelled" },
+				{ content: ["Continued after restarting"] },
+			];
+			if (originalThinking === AUTO_THINKING) {
+				vi.spyOn(autoThinkingClassifier, "classifyDifficulty").mockResolvedValue(Effort.High);
+			}
+			const agent = new Agent({
+				getApiKey: model => `${model.provider}-test-key`,
+				initialState: { model: primaryModel, systemPrompt: ["Test"], tools: [], messages: [] },
+				streamFn: (model, context, options) => {
+					requestedModels.push(`${model.provider}/${model.id}`);
+					const response = responses.shift();
+					if (!response) throw new Error("Unexpected request after refusal recovery");
+					return createMockModel({ provider: model.provider, id: model.id, responses: [response] }).stream(
+						model,
+						context,
+						options,
+					);
+				},
+			});
+			const settings = Settings.isolated({
+				"compaction.enabled": false,
+				"retry.fallbackChains": { [primary]: [`${fallback}:low`] },
+				"retry.refusalFallbackRevertPolicy": "after-success",
+			});
+			settings.setModelRole("default", `${primary}:${originalThinking}`);
+			const manager = SessionManager.create(tempDir.path(), tempDir.join("new-session-refusal-thinking"));
+			manager.appendModelChange(`${primary}:${originalThinking}`);
+			session = new AgentSession({ agent, sessionManager: manager, settings, modelRegistry });
+			session.setThinkingLevel(originalThinking);
+			await session.prompt("Leave an unfinished refusal fallback");
+			await session.waitForIdle();
+			expect(session.model?.id).toBe(fallbackModel.id);
+			if (manualOverride !== undefined) session.setThinkingLevel(manualOverride);
+			await session.newSession();
+			// Persisting the primary's effort must not prematurely change the live fallback.
+			expect(session.configuredThinkingLevel()).toBe(manualOverride ?? Effort.Low);
+			await session.prompt("Continue the unfinished fallback");
+			await session.waitForIdle();
+			await session.flushToDisk();
+			const sessionFile = session.sessionFile!;
+			await session.dispose();
+			session = undefined;
+
+			const resumedManager = await SessionManager.open(sessionFile, tempDir.join("resumed-refusal-thinking"));
+			const resumed = await createAgentSession({
+				cwd: tempDir.path(),
+				agentDir: tempDir.path(),
+				authStorage,
+				modelRegistry,
+				sessionManager: resumedManager,
+				settings,
+				disableExtensionDiscovery: true,
+				skills: [],
+				contextFiles: [],
+				promptTemplates: [],
+				slashCommands: [],
+				enableMCP: false,
+				enableLsp: false,
+				enableIrc: false,
+				skipPythonPreflight: true,
+				toolNames: [],
+				restrictToolNames: true,
+			});
+			session = resumed.session;
+			session.agent.streamFn = agent.streamFn;
+			expect(session.model?.id).toBe(primaryModel.id);
+			expect(session.configuredThinkingLevel()).toBe(manualOverride ?? originalThinking);
+			await session.prompt("Continue after restarting");
+			await session.waitForIdle();
+			expect(requestedModels).toEqual([primary, fallback, fallback, primary]);
+		},
+	);
+
+	it.each([true, false])(
+		"replaces refusal fallback ownership only after a session switch commits (committed: %s)",
+		async committed => {
+			const primaryModel = getBundledModel("openai-codex", "gpt-5.6-sol")!;
+			const fallbackModel = getBundledModel("openai", "gpt-4o-mini")!;
+			const selectedModel = getBundledModel("openai", "gpt-4o")!;
+			const primary = `${primaryModel.provider}/${primaryModel.id}`;
+			const fallback = `${fallbackModel.provider}/${fallbackModel.id}`;
+			const selected = `${selectedModel.provider}/${selectedModel.id}`;
+			const requestedModels: string[] = [];
+			const mock = createMockModel({
+				responses: [
+					{ stopReason: "error", errorMessage: "Content flagged (code=cyber_policy)" },
+					{ content: ["Interrupted fallback"], stopReason: "aborted", errorMessage: "Cancelled" },
+					{ content: ["Completed in the selected conversation"] },
+					{ content: ["Continued in the selected conversation"] },
+				],
+			});
+			const agent = new Agent({
+				getApiKey: model => `${model.provider}-test-key`,
+				initialState: { model: primaryModel, systemPrompt: ["Test"], tools: [], messages: [] },
+				streamFn: (model, context, options) => {
+					requestedModels.push(`${model.provider}/${model.id}`);
+					return mock.stream(model, context, options);
+				},
+			});
+			const settings = Settings.isolated({
+				"compaction.enabled": false,
+				"retry.fallbackChains": { [primary]: [fallback] },
+				"retry.refusalFallbackRevertPolicy": "after-success",
+			});
+			session = new AgentSession({
+				agent,
+				sessionManager: SessionManager.create(tempDir.path(), tempDir.join(`refusal-switch-source-${committed}`)),
+				settings,
+				modelRegistry,
+			});
+			await session.prompt("Leave an unfinished refusal fallback");
+			await session.waitForIdle();
+			expect(session.model?.id).toBe(fallbackModel.id);
+
+			if (!committed) await fs.mkdir(tempDir.join("rejected-cwd"), { recursive: true });
+			const target = SessionManager.create(
+				committed ? tempDir.path() : tempDir.join("rejected-cwd"),
+				tempDir.join(`refusal-switch-target-${committed}`),
+			);
+			target.appendModelChange(selected);
+			target.appendMessage({ role: "user", content: "Target conversation", timestamp: Date.now() });
+			await target.ensureOnDisk();
+			await target.flush();
+			await target.close();
+			expect(
+				await session.switchSession(target.getSessionFile()!, {
+					model: selectedModel,
+					onCwdChange: async () => false,
+				}),
+			).toBe(committed);
+			await session.prompt("Complete the selected conversation");
+			await session.waitForIdle();
+			expect(session.model?.id).toBe(committed ? selectedModel.id : primaryModel.id);
+			await session.prompt("Continue with the selected model");
+			await session.waitForIdle();
+			expect(requestedModels).toEqual(
+				committed ? [primary, fallback, selected, selected] : [primary, fallback, fallback, primary],
+			);
+		},
+	);
+
+	it("does not overwrite a manual model switch while refusal restoration resolves credentials", async () => {
+		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+		const fallbackModel = getBundledModel("openai", "gpt-4o-mini")!;
+		const selectedModel = getBundledModel("openai", "gpt-4o")!;
+		const primary = `${primaryModel.provider}/${primaryModel.id}`;
+		const fallback = `${fallbackModel.provider}/${fallbackModel.id}`;
+		const selected = `${selectedModel.provider}/${selectedModel.id}`;
+		const requestedModels: string[] = [];
+		let fallbackResponded = false;
+		const mock = createMockModel({
+			responses: [
+				{ stopReason: "error", stopDetails: { type: "refusal" }, errorMessage: "Classifier declined" },
+				{ content: ["Recovered"] },
+				{ content: ["Manually selected model"] },
+			],
+		});
+		const agent = new Agent({
+			getApiKey: model => `${model.provider}-test-key`,
+			initialState: { model: primaryModel, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: (model, context, options) => {
+				requestedModels.push(`${model.provider}/${model.id}`);
+				if (model.id === fallbackModel.id) fallbackResponded = true;
+				return mock.stream(model, context, options);
+			},
+		});
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.fallbackChains": { [primary]: [fallback] },
+			"retry.refusalFallbackRevertPolicy": "after-success",
+		});
+		session = new AgentSession({ agent, sessionManager: SessionManager.inMemory(), settings, modelRegistry });
+		const getApiKey = modelRegistry.getApiKey.bind(modelRegistry);
+		vi.spyOn(modelRegistry, "getApiKey").mockImplementation(async (model, sessionId, options) => {
+			if (model.id === primaryModel.id && fallbackResponded) {
+				fallbackResponded = false;
+				await session!.setModel(selectedModel);
+			}
+			return getApiKey(model, sessionId, options);
+		});
+
+		await session.prompt("Recover this request");
+		await session.waitForIdle();
+		expect(session.model?.id).toBe(selectedModel.id);
+		await session.prompt("Use the model I selected");
+		await session.waitForIdle();
+		expect(requestedModels).toEqual([primary, fallback, selected]);
+	});
+
+	it.each([
+		["application", "different model"],
+		["application", "same model"],
+		["restoration", "different model"],
+		["restoration", "same model"],
+	] as const)(
+		"preserves explicit %s reconciliation selections of the %s, including on reload",
+		async (phase, selection) => {
+			const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+			const fallbackModel = getBundledModel("openai", "gpt-5")!;
+			const primary = `${primaryModel.provider}/${primaryModel.id}`;
+			const fallback = `${fallbackModel.provider}/${fallbackModel.id}`;
+			const requestedModels: string[] = [];
+			const mock = createMockModel({
+				responses: [
+					{ stopReason: "error", stopDetails: { type: "refusal" }, errorMessage: "Classifier declined" },
+					{ content: ["Recovered"] },
+					{ content: ["Explicitly selected model"] },
+				],
+			});
+			const agent = new Agent({
+				getApiKey: model => `${model.provider}-test-key`,
+				initialState: { model: primaryModel, systemPrompt: ["Test"], tools: [], messages: [] },
+				streamFn: (model, context, options) => {
+					requestedModels.push(`${model.provider}/${model.id}`);
+					return mock.stream(model, context, options);
+				},
+			});
+			const settings = Settings.isolated({
+				"compaction.enabled": false,
+				"retry.fallbackChains": { [primary]: [fallback] },
+				"retry.refusalFallbackRevertPolicy": "after-success",
+			});
+			const sessionManager = SessionManager.create(tempDir.path(), tempDir.path());
+			const activeSession = new AgentSession({
+				agent,
+				sessionManager,
+				settings,
+				modelRegistry,
+				thinkingLevel: Effort.High,
+			});
+			session = activeSession;
+			// Model choices must be durable even if application stops before a successful reply.
+			await sessionManager.ensureOnDisk();
+			const reconciliationStarted = Promise.withResolvers<void>();
+			const releaseReconciliation = Promise.withResolvers<void>();
+			let pauseReconciliation = true;
+			const reconcileThinkTool = SessionTools.prototype.reconcileThinkTool;
+			vi.spyOn(SessionTools.prototype, "reconcileThinkTool").mockImplementation(async function (this: SessionTools) {
+				if (
+					pauseReconciliation &&
+					requestedModels.at(-1) === (phase === "application" ? primary : fallback) &&
+					activeSession.model?.id === (phase === "application" ? fallbackModel.id : primaryModel.id)
+				) {
+					pauseReconciliation = false;
+					reconciliationStarted.resolve();
+					await releaseReconciliation.promise;
+				}
+				return reconcileThinkTool.call(this);
+			});
+
+			const prompt = activeSession.prompt("Recover this request");
+			let selectedModel: Model;
+			try {
+				await reconciliationStarted.promise;
+				selectedModel =
+					selection === "same model" ? activeSession.model! : getBundledModel("anthropic", "claude-opus-4-1")!;
+				await activeSession.setModel(selectedModel, "temporary");
+				if (selection === "same model") expect(activeSession.model).toBe(selectedModel);
+				activeSession.setThinkingLevel(Effort.Low);
+			} finally {
+				releaseReconciliation.resolve();
+				await prompt;
+				await activeSession.waitForIdle();
+			}
+
+			const selected = `${selectedModel.provider}/${selectedModel.id}`;
+			expect(activeSession.model?.id).toBe(selectedModel.id);
+			expect(activeSession.thinkingLevel).toBe(Effort.Low);
+			await sessionManager.flush();
+			const reloaded = await SessionManager.open(sessionManager.getSessionFile()!);
+			const restoredContext = reloaded.buildSessionContext();
+			expect(getRestorableSessionModels(restoredContext.models, reloaded.getLastModelChangeRole())[0]).toBe(
+				selected,
+			);
+			expect(restoredContext.thinkingLevel).toBe(Effort.Low);
+
+			await activeSession.prompt("Use the model I selected");
+			await activeSession.waitForIdle();
+			expect(requestedModels).toEqual(phase === "application" ? [primary, selected] : [primary, fallback, selected]);
+			expect(activeSession.model?.id).toBe(selectedModel.id);
+			expect(activeSession.thinkingLevel).toBe(Effort.Low);
+		},
+	);
+
+	it.each([
+		["application", "abort"],
+		["application", "new"],
+		["application", "switch"],
+		["restoration", "abort"],
+		["restoration", "new"],
+		["restoration", "switch"],
+	] as const)(
+		"keeps runtime and persisted model/effort coherent when %s reconciliation is interrupted by %s",
+		async (phase, interruption) => {
+			const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+			const fallbackModel = getBundledModel("anthropic", "claude-opus-4-1")!;
+			const switchedModel = getBundledModel("openai", "gpt-5")!;
+			const primary = `${primaryModel.provider}/${primaryModel.id}`;
+			const fallback = `${fallbackModel.provider}/${fallbackModel.id}`;
+			const switched = `${switchedModel.provider}/${switchedModel.id}`;
+			const requestedModels: string[] = [];
+			const responses: MockResponse[] = [
+				{ stopReason: "error", stopDetails: { type: "refusal" }, errorMessage: "Classifier declined" },
+				{ content: ["Recovered"] },
+				{ content: ["Continued after interruption"] },
+			];
+			const agent = new Agent({
+				getApiKey: model => `${model.provider}-test-key`,
+				initialState: { model: primaryModel, systemPrompt: ["Test"], tools: [], messages: [] },
+				streamFn: (model, context, options) => {
+					requestedModels.push(`${model.provider}/${model.id}`);
+					const response = responses.shift();
+					if (!response) throw new Error("Unexpected model request after interruption");
+					return createMockModel({ provider: model.provider, id: model.id, responses: [response] }).stream(
+						model,
+						context,
+						options,
+					);
+				},
+			});
+			const settings = Settings.isolated({
+				"compaction.enabled": false,
+				"retry.fallbackChains": { [primary]: [`${fallback}:low`] },
+				"retry.refusalFallbackRevertPolicy": "after-success",
+			});
+			const sessionManager = SessionManager.create(tempDir.path(), tempDir.path());
+			sessionManager.appendModelChange(`${primary}:high`);
+			sessionManager.appendThinkingLevelChange(Effort.High, Effort.High);
+			const activeSession = new AgentSession({
+				agent,
+				sessionManager,
+				settings,
+				modelRegistry,
+				thinkingLevel: Effort.High,
+			});
+			session = activeSession;
+			await sessionManager.ensureOnDisk();
+			let targetSessionFile: string | undefined;
+			if (interruption === "switch") {
+				const target = SessionManager.create(tempDir.path(), tempDir.join("interruption-switch"));
+				target.appendModelChange(switched);
+				target.appendThinkingLevelChange(Effort.Medium, Effort.Medium);
+				await target.ensureOnDisk();
+				await target.flush();
+				targetSessionFile = target.getSessionFile();
+				await target.close();
+				if (!targetSessionFile) throw new Error("Expected a persisted switch target");
+			}
+			const reconciliationStarted = Promise.withResolvers<void>();
+			const releaseReconciliation = Promise.withResolvers<void>();
+			let pauseReconciliation = true;
+			const reconcileThinkTool = SessionTools.prototype.reconcileThinkTool;
+			vi.spyOn(SessionTools.prototype, "reconcileThinkTool").mockImplementation(async function (this: SessionTools) {
+				if (
+					pauseReconciliation &&
+					requestedModels.at(-1) === (phase === "application" ? primary : fallback) &&
+					activeSession.model?.id === (phase === "application" ? fallbackModel.id : primaryModel.id)
+				) {
+					pauseReconciliation = false;
+					reconciliationStarted.resolve();
+					await releaseReconciliation.promise;
+				}
+				return reconcileThinkTool.call(this);
+			});
+			const prompt = activeSession.prompt("Interrupt the automatic model change");
+			try {
+				await reconciliationStarted.promise;
+				const transition =
+					interruption === "abort"
+						? activeSession.abort()
+						: interruption === "new"
+							? activeSession.newSession()
+							: activeSession.switchSession(targetSessionFile!);
+				releaseReconciliation.resolve();
+				await Promise.all([prompt, transition]);
+				await activeSession.waitForIdle();
+			} finally {
+				releaseReconciliation.resolve();
+				await prompt;
+			}
+
+			const expected = interruption === "switch" ? switched : primary;
+			const expectedThinking = interruption === "switch" ? Effort.Medium : Effort.High;
+			expect(`${activeSession.model?.provider}/${activeSession.model?.id}`).toBe(expected);
+			expect(activeSession.configuredThinkingLevel()).toBe(expectedThinking);
+			expect(activeSession.thinkingLevel).toBe(expectedThinking);
+			await activeSession.flushToDisk();
+			const reloaded = await SessionManager.open(activeSession.sessionFile!);
+			try {
+				const restoredContext = reloaded.buildSessionContext();
+				const selected = getRestorableSessionModels(restoredContext.models, reloaded.getLastModelChangeRole())[0];
+				expect(parseModelPattern(selected!, [primaryModel, switchedModel]).model?.id).toBe(activeSession.model?.id);
+				expect(restoredContext.thinkingLevel).toBe(expectedThinking);
+			} finally {
+				await reloaded.close();
+			}
+			const beforeContinuation = phase === "application" ? [primary] : [primary, fallback];
+			await activeSession.prompt("Continue after the interruption");
+			await activeSession.waitForIdle();
+			expect(requestedModels).toEqual([...beforeContinuation, expected]);
+		},
+	);
+
+	it("waits for a successful fallback response before restoring and preserves its attribution", async () => {
+		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+		const firstFallback = getBundledModel("openai", "gpt-4o-mini")!;
+		const secondFallback = getBundledModel("openai", "gpt-4o")!;
+		const primary = `${primaryModel.provider}/${primaryModel.id}`;
+		const first = `${firstFallback.provider}/${firstFallback.id}`;
+		const second = `${secondFallback.provider}/${secondFallback.id}`;
+		const requestedModels: string[] = [];
+		const refusal = {
+			stopReason: "error" as const,
+			stopDetails: { type: "refusal" },
+			errorMessage: "Classifier declined",
+		};
+		const mock = createMockModel({
+			responses: [refusal, refusal, { content: ["Recovered"] }, { content: ["Primary resumed"] }],
+		});
+		const agent = new Agent({
+			getApiKey: model => `${model.provider}-test-key`,
+			initialState: { model: primaryModel, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: (model, context, options) => {
+				requestedModels.push(`${model.provider}/${model.id}`);
+				return mock.stream(model, context, options);
+			},
+		});
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.maxRetries": 2,
+			"retry.fallbackChains": { [primary]: [first, second] },
+			"retry.fallbackRevertPolicy": "never",
+			"retry.refusalFallbackRevertPolicy": "after-success",
+		});
+		session = new AgentSession({ agent, sessionManager: SessionManager.inMemory(), settings, modelRegistry });
+		const { retryEndEvents } = trackRetryEvents(session);
+
+		await session.prompt("Recover this request");
+		await session.waitForIdle();
+
+		expect(requestedModels).toEqual([primary, first, second]);
+		expect(session.model?.id).toBe(primaryModel.id);
+		expect(session.servingModel).toMatchObject({ modelIdentity: second, isFallback: true });
+		expect(retryEndEvents).toHaveLength(1);
+		expect(retryEndEvents[0]).toMatchObject({ success: true, attempt: 2 });
+		await session.prompt("A fresh request");
+		await session.waitForIdle();
+		expect(requestedModels).toEqual([primary, first, second, primary]);
+	});
+
+	it.each([false, true])(
+		"resumes an existing availability fallback after a request-scoped refusal fallback (loops back: %s)",
+		async loopsBack => {
+			const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+			const availableModel = getBundledModel("openai", "gpt-4o-mini")!;
+			const refusalModel = getBundledModel("openai", "gpt-4o")!;
+			const primary = `${primaryModel.provider}/${primaryModel.id}`;
+			const available = `${availableModel.provider}/${availableModel.id}`;
+			const refusal = `${refusalModel.provider}/${refusalModel.id}`;
+			const requestedModels: string[] = [];
+			const mock = createMockModel({
+				responses: [
+					{ throw: "overloaded_error: provider returned error 503 retry-after-ms=60000" },
+					{ content: ["Availability fallback"] },
+					{ stopReason: "error", stopDetails: { type: "refusal" }, errorMessage: "Classifier declined" },
+					...(loopsBack
+						? [
+								{
+									stopReason: "error" as const,
+									stopDetails: { type: "refusal" },
+									errorMessage: "Replacement also declined",
+								},
+								{ content: ["Looped back to the availability fallback"] },
+							]
+						: [{ content: ["Request-scoped fallback"] }]),
+					{ content: ["Availability fallback resumed"] },
+					{ content: ["Primary available again"] },
+				],
+			});
+			const agent = new Agent({
+				getApiKey: model => `${model.provider}-test-key`,
+				initialState: { model: primaryModel, systemPrompt: ["Test"], tools: [], messages: [] },
+				streamFn: (model, context, options) => {
+					requestedModels.push(`${model.provider}/${model.id}`);
+					return mock.stream(model, context, options);
+				},
+			});
+			const settings = Settings.isolated({
+				"compaction.enabled": false,
+				"retry.maxRetries": 2,
+				"retry.fallbackChains": { [primary]: [available, refusal], [refusal]: [available] },
+				"retry.refusalFallbackRevertPolicy": "after-success",
+			});
+			session = new AgentSession({ agent, sessionManager: SessionManager.inMemory(), settings, modelRegistry });
+			let now = Date.now();
+			vi.spyOn(Date, "now").mockImplementation(() => now);
+
+			await session.prompt("Primary is unavailable");
+			await session.waitForIdle();
+			await session.prompt("Availability fallback declines this request");
+			await session.waitForIdle();
+			expect(session.model?.id).toBe(availableModel.id);
+			expect(modelRegistry.isSelectorSuppressed(primary)).toBe(true);
+			await session.prompt("Keep using the available model");
+			await session.waitForIdle();
+			const expectedModels = loopsBack
+				? [primary, available, available, refusal, available, available]
+				: [primary, available, available, refusal, available];
+			expect(requestedModels).toEqual(expectedModels);
+			expect(session.servingModel).toMatchObject({ modelIdentity: available, isFallback: true });
+
+			now += 60_001;
+			await session.prompt("Primary is available again");
+			await session.waitForIdle();
+			expect(requestedModels).toEqual([...expectedModels, primary]);
+			expect(session.servingModel).toMatchObject({ modelIdentity: primary, isFallback: false });
+		},
+	);
+
 	it("drops classifier refusal messages before later prompts", async () => {
 		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!primaryModel) {
@@ -3919,6 +4773,7 @@ describe("AgentSession retry fallback", () => {
 			"compaction.enabled": false,
 			"retry.baseDelayMs": 5,
 			"retry.maxRetries": 1,
+			"retry.refusalFallbackRevertPolicy": "after-success",
 			"retry.fallbackChains": {
 				default: [
 					`${firstFallback.provider}/${firstFallback.id}`,
@@ -4927,6 +5782,7 @@ describe("AgentSession retry fallback", () => {
 				default: [`${fallbackModel.provider}/${fallbackModel.id}`],
 			},
 			"retry.fallbackRevertPolicy": "cooldown-expiry",
+			"retry.refusalFallbackRevertPolicy": "after-success",
 		});
 		settings.setModelRole("default", `${primaryModel.provider}/${primaryModel.id}`);
 
@@ -5581,7 +6437,7 @@ describe("AgentSession retry fallback", () => {
 			(session.model?.compat as { openRouterRouting?: { only?: string[] } } | undefined)?.openRouterRouting?.only,
 		).toEqual(["cerebras"]);
 	});
-	it("preserves thinking on bare fallback selectors and does not overwrite user thinking on restore", async () => {
+	it.each([false, true])("restores bare-fallback thinking with explicit disablement: %s", async disableThinking => {
 		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
 		const fallbackModel = getBundledModel("openai", "gpt-4o-mini");
 		if (!primaryModel || !fallbackModel) {
@@ -5621,7 +6477,7 @@ describe("AgentSession retry fallback", () => {
 		expect(session.model?.id).toBe(fallbackModel.id);
 		expect(session.thinkingLevel).toBeUndefined();
 
-		session.setThinkingLevel(Effort.Low);
+		if (disableThinking) session.setThinkingLevel(ThinkingLevel.Off);
 		now += 240;
 		await session.prompt("Second prompt should restore model but preserve user thinking change");
 		await session.waitForIdle();
@@ -5632,7 +6488,7 @@ describe("AgentSession retry fallback", () => {
 		]);
 		expect(session.model?.provider).toBe(primaryModel.provider);
 		expect(session.model?.id).toBe(primaryModel.id);
-		expect(session.thinkingLevel).toBeUndefined();
+		expect(session.thinkingLevel).toBe(disableThinking ? ThinkingLevel.Off : Effort.High);
 	});
 
 	it("clamps a fallback selector's explicit thinking level to the session effort ceiling", async () => {

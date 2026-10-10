@@ -977,6 +977,7 @@ export class AgentSession implements SettingsScope {
 	#turnIndex = 0;
 	#messageEndPersistenceTail: Promise<void> = Promise.resolve();
 	#pendingMessageEndPersistence = new Map<string, Promise<void>>();
+	#assistantResponseSettlements = new WeakMap<AssistantMessage, Promise<void>>();
 	#persistedMessageKeys: { anchor: string; keys: Set<string> } | undefined;
 
 	// Custom commands (TypeScript slash commands)
@@ -1792,7 +1793,7 @@ export class AgentSession implements SettingsScope {
 			promptGeneration: () => this.#promptGeneration,
 			promptSequence: () => this.#promptSequence,
 			sessionId: () => this.sessionId,
-			emitSessionEvent: event => this.#emitSessionEvent(event),
+			emitSessionEvent: (event, options) => this.#emitSessionEvent(event, options),
 			scheduleAgentContinue: options => this.#scheduleAgentContinue(options),
 			waitForSessionMessagePersistence: message => this.#waitForSessionMessagePersistence(message),
 			appendSessionMessage: message => this.#appendSessionMessage(message),
@@ -1925,6 +1926,16 @@ export class AgentSession implements SettingsScope {
 			await this.#prewalk.advanceAtTurnEnd(messages, context);
 			if (context?.willContinue) this.#steerAnthropicWrapUp();
 			await this.#advisors.onPrimaryTurnEnd(messages, context?.willContinue, signal);
+			const response = context?.message;
+			if (response?.role === "assistant" && this.#recovery.hasRequestScopedRetryFallback()) {
+				// The fallback captures its restore policy when installed. Its
+				// response's persistence and bookkeeping must settle before the
+				// model swap, but unrelated event and extension notifications are
+				// not part of that ownership boundary.
+				await this.#waitForAssistantResponseSettlement(response);
+				if (signal?.aborted) return;
+				await this.#recovery.maybeRestoreRetryFallbackPrimary({ afterSuccessOnly: true });
+			}
 			await this.#maintenance.maintainContextMidRun(messages, signal, context);
 		});
 		this.yieldQueue = new YieldQueue({
@@ -3444,6 +3455,56 @@ export class AgentSession implements SettingsScope {
 		return pending;
 	}
 
+	/**
+	 * Queue the one response-settlement pass that owns serving attribution and
+	 * retry completion for an assistant message. It follows that message's
+	 * persistence, not extension notification delivery, so a fallback turn can
+	 * await exactly its own durable response before restoring the primary.
+	 */
+	#queueAssistantResponseSettlement(
+		message: AssistantMessage,
+		persistence: Promise<void>,
+		promptGeneration: number,
+	): Promise<void> {
+		const existing = this.#assistantResponseSettlements.get(message);
+		if (existing) return existing;
+		const settlement = persistence.then(async () => {
+			if (this.#promptGeneration !== promptGeneration) return;
+			await this.#settleAssistantResponse(message);
+		});
+		this.#assistantResponseSettlements.set(message, settlement);
+		void settlement.catch(error => {
+			logger.warn("Failed to settle assistant response", { error: String(error) });
+		});
+		return settlement;
+	}
+
+	async #waitForAssistantResponseSettlement(message: AssistantMessage): Promise<void> {
+		await this.#assistantResponseSettlements.get(message);
+	}
+
+	async #settleAssistantResponse(assistantMsg: AssistantMessage): Promise<void> {
+		await this.#recovery.onAssistantSettledSuccessfully(assistantMsg);
+		// Broker deployments: report this request's burn so the broker can
+		// attribute token usage per install. No-op with a local auth store.
+		this.#modelRegistry.authStorage.usage.observe({
+			provider: assistantMsg.provider,
+			model: assistantMsg.model,
+			at: assistantMsg.timestamp,
+			usage: {
+				input: assistantMsg.usage.input,
+				output: assistantMsg.usage.output,
+				cacheRead: assistantMsg.usage.cacheRead,
+				cacheWrite: assistantMsg.usage.cacheWrite,
+			},
+			costUsd: assistantMsg.usage.cost.total,
+		});
+		// Persist which account served this turn so a resumed process can
+		// re-pin it and keep the provider's account-scoped prompt cache
+		// warm (broker-mode sticky routing is process-local).
+		recordCredentialPin(this.#modelRegistry.authStorage, this.sessionManager, this.sessionId, assistantMsg.provider);
+	}
+
 	async #waitForSessionMessagePersistence(message: AgentMessage): Promise<void> {
 		const key = sessionMessagePersistenceKey(message);
 		if (!key) return;
@@ -3903,6 +3964,14 @@ export class AgentSession implements SettingsScope {
 			event.type === "message_end"
 				? this.#queueMessageEndPersistence(event.message, eventPromptGeneration)
 				: undefined;
+		const assistantResponseSettlement =
+			event.type === "message_end" && event.message.role === "assistant"
+				? this.#queueAssistantResponseSettlement(
+						event.message as AssistantMessage,
+						messageEndPersistence!,
+						eventPromptGeneration,
+					)
+				: undefined;
 
 		// Deobfuscate assistant message content for display emission — the LLM echoes back
 		// obfuscated placeholders, but listeners (TUI, extensions, exporters) must see real
@@ -4059,30 +4128,7 @@ export class AgentSession implements SettingsScope {
 					this.#maintenance.skipPostTurnMaintenanceAssistantTimestamp = assistantMsg.timestamp;
 					this.#skippedPostTurnSpeculationCompletion = this.#maintenance.speculationCompletion;
 				}
-				await this.#recovery.onAssistantSettledSuccessfully(assistantMsg);
-				// Broker deployments: report this request's burn so the broker can
-				// attribute token usage per install. No-op with a local auth store.
-				this.#modelRegistry.authStorage.usage.observe({
-					provider: assistantMsg.provider,
-					model: assistantMsg.model,
-					at: assistantMsg.timestamp,
-					usage: {
-						input: assistantMsg.usage.input,
-						output: assistantMsg.usage.output,
-						cacheRead: assistantMsg.usage.cacheRead,
-						cacheWrite: assistantMsg.usage.cacheWrite,
-					},
-					costUsd: assistantMsg.usage.cost.total,
-				});
-				// Persist which account served this turn so a resumed process can
-				// re-pin it and keep the provider's account-scoped prompt cache
-				// warm (broker-mode sticky routing is process-local).
-				recordCredentialPin(
-					this.#modelRegistry.authStorage,
-					this.sessionManager,
-					this.sessionId,
-					assistantMsg.provider,
-				);
+				await assistantResponseSettlement;
 			}
 			if (event.message.role === "toolResult") {
 				const { toolName, toolCallId, isError, content } = event.message;
@@ -9712,6 +9758,7 @@ export class AgentSession implements SettingsScope {
 		using _transition = this.#beginSessionTransition();
 		this.#assertVibeSessionTransitionAllowed("start a new session");
 		const previousSessionFile = this.sessionFile;
+		const previousSessionId = this.sessionManager.getSessionId();
 
 		// Emit session_before_switch event with reason "new" (can be cancelled)
 		if (this.#extensionRunner?.hasHandlers("session_before_switch")) {
@@ -9794,7 +9841,6 @@ export class AgentSession implements SettingsScope {
 			this.#queuedMessageDrainBlocked = false;
 			this.#usagePreflightReadyForNextModelCall = false;
 
-			this.sessionManager.appendThinkingLevelChange(this.thinkingLevel, this.configuredThinkingLevel());
 			this.sessionManager.appendServiceTierChange(this.#models.serviceTierEntry());
 
 			this.#todo.resetCycle();
@@ -9804,6 +9850,10 @@ export class AgentSession implements SettingsScope {
 			advisorRecordersDetached = false;
 			this.#reconnectToAgent();
 			await this.#reconcileModeAfterTransition();
+			// Match SDK startup: persist the selected model before a fallback response
+			// can become the legacy-inferred default on resume. Mode teardown may
+			// restore the pre-plan model, so record the baseline after it settles.
+			this.#recovery.persistNewSessionModelState(previousSessionId);
 			// Drop the process-lifetime context-file cache so the rebuild re-reads
 			// AGENTS.md and friends from disk: the user may have edited them since
 			// the previous session started, and refreshBaseSystemPrompt() re-runs
@@ -11255,7 +11305,8 @@ export class AgentSession implements SettingsScope {
 	 * run and any in-flight turn has already been aborted (the target's models are
 	 * only known once its file is loaded). A session created with `allowSessionModelFallback` (and
 	 * `retry.modelFallback` on) instead keeps its current model and reports a
-	 * warning. Reloading the current session keeps the current model.
+	 * warning. Reloading the current session keeps the current model when its
+	 * saved models cannot be restored.
 	 * @returns true if switch completed, false if cancelled by hook or cwd change
 	 */
 	async switchSession(
@@ -11570,6 +11621,12 @@ export class AgentSession implements SettingsScope {
 			if (modelFallbackWarning) {
 				if (options?.onModelFallback) options.onModelFallback(modelFallbackWarning);
 				else this.emitNotice("warning", modelFallbackWarning);
+			}
+			// A saved selection owns the transcript even on a same-file reload;
+			// keepModel or an unavailable saved model retains the live fallback.
+			// Clear only after commit so rollback retains restoration ownership.
+			if (switchingToDifferentSession || targetModel) {
+				this.#recovery.clearActiveRetryFallback();
 			}
 			return true;
 		} catch (error) {
