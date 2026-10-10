@@ -496,9 +496,16 @@ impl AxBackend for MacAx {
 		if let Some(current) = copy_date(element, "AXValue") {
 			return set_date_value(element, value, current);
 		}
-		skylight::with_background_guard(element_pid(element)?, || {
+		let pid = element_pid(element)?;
+		skylight::with_background_guard(pid, || {
+			// Apps commit what reaches their field editor; several (Contacts,
+			// Font Book, System Settings search) echo an AXValue write without
+			// ever taking it, so replace the text the way `typeText` inserts it.
+			if replace_native_text(element, value)? {
+				return Ok(());
+			}
 			set_string_value(element, "AXValue", value)?;
-			verify_text_value(element, value)
+			verify_text_value(element, value, value)
 		})
 	}
 
@@ -628,14 +635,14 @@ fn text_surface(element: &AXUIElement) -> TextSurface {
 fn ensure_native_text_target(element: &AXUIElement) -> CoreResult<()> {
 	if process::is_terminal(element_pid(element)?) {
 		return Err(DesktopError::ax_failed(
-			"terminal AX text represents its rendered grid, not terminal input; use typeText or \
+			"terminal AX text represents its rendered grid, not terminal input; use win.type or \
 			 takeover:true instead",
 		));
 	}
 	if text_surface(element) != TextSurface::Native {
 		return Err(DesktopError::ax_failed(
 			"AX text writes cannot be verified in web content or an incomplete AX ancestry; use a \
-			 pixel click followed by typeText, or takeover:true input instead",
+			 pixel click followed by win.type, or takeover:true input instead",
 		));
 	}
 	Ok(())
@@ -661,15 +668,38 @@ fn set_string_value(element: &AXUIElement, name: &str, text: &str) -> CoreResult
 	)
 }
 
-fn verify_text_value(element: &AXUIElement, expected: &str) -> CoreResult<()> {
-	if copy_string(element, "AXValue").as_deref() == Some(expected) {
-		Ok(())
-	} else {
-		Err(DesktopError::ax_failed(
-			"AX accepted the text write but its complete value could not be confirmed; delivery may \
-			 be partial, inspect the target before retrying; no typing fallback was attempted",
-		))
+fn verify_text_value(element: &AXUIElement, sent: &str, expected: &str) -> CoreResult<()> {
+	text_readback(sent, expected, copy_string(element, "AXValue").as_deref())
+}
+
+/// Exact equality is the verdict: a field that shows a rewritten value has
+/// not been shown to hold what was sent (Contacts regroups a phone number in
+/// the field and stores none of it). The error names what the field reads so
+/// the next step needs no extra read.
+fn text_readback(sent: &str, expected: &str, actual: Option<&str>) -> CoreResult<()> {
+	const SHOWN: usize = 200;
+	let quote = |text: &str| format!("{:?}", truncate_chars(text.to_owned(), SHOWN));
+	let Some(actual) = actual else {
+		return Err(DesktopError::ax_failed(format!(
+			"wrote {}, but the field's value could not be read back; inspect the target before \
+			 writing again",
+			quote(sent),
+		)));
+	};
+	if actual == expected {
+		return Ok(());
 	}
+	let whole = if sent == expected {
+		String::new()
+	} else {
+		format!(" instead of {}", quote(expected))
+	};
+	Err(DesktopError::ax_failed(format!(
+		"wrote {}; the field now reads {}{whole}. The app may have reformatted it or not taken it: \
+		 inspect the target before writing again",
+		quote(sent),
+		quote(actual),
+	)))
 }
 
 /// Date and time controls publish `AXValue` as a `CFDate` and refuse the same
@@ -750,8 +780,52 @@ pub(super) fn insert_native_text(pid: libc::pid_t, wid: u32, text: &str) -> Core
 	};
 	skylight::with_background_guard(pid, || {
 		set_string_value(&element, "AXSelectedText", text)?;
-		verify_text_value(&element, &expected)
+		verify_text_value(&element, text, &expected)
 	})?;
+	Ok(true)
+}
+
+/// Replaces a native text field's whole value through `AXSelectedText`, the
+/// path `typeText` uses, after focusing the field and selecting all of it.
+/// `false` means nothing was written and the caller may write `AXValue`.
+fn replace_native_text(element: &AXUIElement, text: &str) -> CoreResult<bool> {
+	if !matches!(
+		copy_string(element, "AXRole").as_deref(),
+		Some("AXTextField" | "AXTextArea" | "AXComboBox")
+	) || !attribute_settable(element, "AXSelectedText")
+		|| !attribute_settable(element, "AXSelectedTextRange")
+	{
+		return Ok(false);
+	}
+	if copy_bool(element, "AXFocused") != Some(true) {
+		let attribute = CFString::from_str("AXFocused");
+		// SAFETY: The singleton CFBoolean and retained element remain valid
+		// for the synchronous setter call.
+		let error = unsafe { element.set_attribute_value(&attribute, CFBoolean::new(true)) };
+		if error != AXError::Success {
+			return Ok(false);
+		}
+	}
+	// Focusing can swap in the field editor, so the length is read afterward.
+	let Some(before) = copy_string(element, "AXValue") else {
+		return Ok(false);
+	};
+	let mut all = CFRange {
+		location: 0,
+		length:   before.encode_utf16().count() as isize,
+	};
+	// SAFETY: `all` is a live CFRange matching the requested AXValue type.
+	let Some(range) = (unsafe { AXValue::new(AXValueType::CFRange, NonNull::from(&mut all).cast()) })
+	else {
+		return Ok(false);
+	};
+	let attribute = CFString::from_str("AXSelectedTextRange");
+	// SAFETY: The element, attribute and range remain retained for the setter.
+	if unsafe { element.set_attribute_value(&attribute, &range) } != AXError::Success {
+		return Ok(false);
+	}
+	set_string_value(element, "AXSelectedText", text)?;
+	verify_text_value(element, text, text)?;
 	Ok(true)
 }
 
@@ -1174,7 +1248,7 @@ mod tests {
 
 	use super::{
 		AttachedCandidate, ax_result, element_action_result, replace_utf16_selection,
-		select_attached, stringify_value,
+		select_attached, stringify_value, text_readback,
 	};
 	use crate::desktop::error::ErrorCode;
 
@@ -1223,6 +1297,43 @@ mod tests {
 		for (start, length) in [(-1, 0), (0, -1), (2, 0), (1, 1), (4, 9), (6, 0)] {
 			assert_eq!(replace_utf16_selection("a😀bc", start, length, "X"), None);
 		}
+	}
+
+	#[test]
+	fn rewritten_readback_fails_and_names_what_the_field_reads() {
+		let error = text_readback("555-789-0123", "555-789-0123", Some("(555) 789-0123")).unwrap_err();
+		assert_eq!(error.code, ErrorCode::AxFailed);
+		assert!(
+			error
+				.message
+				.starts_with(r#"wrote "555-789-0123"; the field now reads "(555) 789-0123". "#),
+			"{}",
+			error.message
+		);
+		assert!(!error.message.contains("instead of"), "{}", error.message);
+		assert!(text_readback("555-789-0123", "555-789-0123", Some("555-789-0123")).is_ok());
+	}
+
+	#[test]
+	fn inserted_readback_names_the_whole_value_it_expected() {
+		let error = text_readback("b", "abc", Some("ac")).unwrap_err();
+		assert!(
+			error
+				.message
+				.starts_with(r#"wrote "b"; the field now reads "ac" instead of "abc". "#),
+			"{}",
+			error.message
+		);
+		let unread = text_readback("b", "abc", None).unwrap_err();
+		assert!(unread.message.contains("could not be read back"), "{}", unread.message);
+	}
+
+	#[test]
+	fn long_readbacks_are_cut() {
+		let long = "x".repeat(500);
+		let error = text_readback("y", "y", Some(&long)).unwrap_err();
+		assert!(error.message.len() < 400, "{}", error.message.len());
+		assert!(error.message.contains('…'), "{}", error.message);
 	}
 
 	#[test]
