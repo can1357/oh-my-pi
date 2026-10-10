@@ -627,6 +627,8 @@ export class Settings {
 	#changeListeners: (Set<SettingChangeListener> | undefined)[] = [];
 	/** Global-layer listeners fire even when a project value masks the changed setting. */
 	#globalChangeListeners: (Set<SettingChangeListener> | undefined)[] = [];
+	/** Project-layer listeners fire even when an equal global value masks the layer transition. */
+	#projectChangeListeners: (Set<SettingChangeListener> | undefined)[] = [];
 	/** Forwarders of every change into live {@link overlay} children. */
 	#childForwarders = new Set<SettingChangeListener>();
 	/** Instance this overlay reads through to ({@link overlay}); overlays never persist or write back. */
@@ -1067,6 +1069,11 @@ export class Settings {
 		return allSettings().map(setting => this.globalValue(setting));
 	}
 
+	#projectSnapshot(): unknown[] {
+		const project = projectLayerForMerge(this.#project);
+		return allSettings().map(setting => configuredValue(project, setting, this.#cwd));
+	}
+
 	/**
 	 * Notifies change listeners for every setting whose effective value differs from
 	 * `previous` (disk reload, save-time merge, project re-scope).
@@ -1087,6 +1094,17 @@ export class Settings {
 		}
 	}
 
+	#fireProjectChangesSince(previous: readonly unknown[], force = false): void {
+		const settings = allSettings();
+		const project = projectLayerForMerge(this.#project);
+		for (let i = 0; i < previous.length; i++) {
+			const setting = settings[i];
+			if (force || !settingValuesEqual(configuredValue(project, setting, this.#cwd), previous[i])) {
+				this.#notifyProjectChange(setting);
+			}
+		}
+	}
+
 	#fireIfChanged(setting: AnySetting, prev: unknown): void {
 		if (!Object.is(setting.get(this), prev)) this.#notifyChange(setting);
 	}
@@ -1100,6 +1118,11 @@ export class Settings {
 
 	#notifyGlobalChange(setting: AnySetting): void {
 		const listeners = this.#globalChangeListeners[setting.slot];
+		if (listeners) runChangeListeners(listeners, setting);
+	}
+
+	#notifyProjectChange(setting: AnySetting): void {
+		const listeners = this.#projectChangeListeners[setting.slot];
 		if (listeners) runChangeListeners(listeners, setting);
 	}
 
@@ -1117,9 +1140,21 @@ export class Settings {
 
 	/** Observe writes to the global layer even when a higher-precedence project value masks them. */
 	onGlobalChange(sources: readonly AnySetting[], listener: SettingChangeListener): () => void {
+		const stopParent = this.#parent?.onGlobalChange(sources, listener);
 		for (const source of sources) (this.#globalChangeListeners[source.slot] ??= new Set()).add(listener);
 		return () => {
+			stopParent?.();
 			for (const source of sources) this.#globalChangeListeners[source.slot]?.delete(listener);
+		};
+	}
+
+	/** Observe project-layer changes even when the effective value stays equal to another layer. */
+	onProjectChange(sources: readonly AnySetting[], listener: SettingChangeListener): () => void {
+		const stopParent = this.#parent?.onProjectChange(sources, listener);
+		for (const source of sources) (this.#projectChangeListeners[source.slot] ??= new Set()).add(listener);
+		return () => {
+			stopParent?.();
+			for (const source of sources) this.#projectChangeListeners[source.slot]?.delete(listener);
 		};
 	}
 
@@ -1471,6 +1506,7 @@ export class Settings {
 
 			const previous = this.#snapshot();
 			const previousGlobal = this.#globalSnapshot();
+			const previousProject = this.#projectSnapshot();
 			for (const refresh of adopted) refresh.commit();
 			this.#global = layers.global;
 			this.#project = layers.project;
@@ -1480,6 +1516,7 @@ export class Settings {
 			this.#rebuildMerged();
 			this.#fireChangesSince(previous);
 			this.#fireGlobalChangesSince(previousGlobal);
+			this.#fireProjectChangesSince(previousProject);
 			return;
 		}
 	}
@@ -1545,6 +1582,7 @@ export class Settings {
 			this.#validateAll(this.#mergeOverParent(this.#mergeOwnLayers(candidate)), normalized);
 
 			const previous = this.#snapshot();
+			const previousProject = this.#projectSnapshot();
 			this.#cwd = normalized;
 			this.#overrides = candidate.overrides;
 			for (const setting of settledPins) this.#softPins.delete(setting);
@@ -1555,6 +1593,7 @@ export class Settings {
 			}
 			this.#rebuildMerged();
 			this.#fireChangesSince(previous);
+			this.#fireProjectChangesSince(previousProject, true);
 			this.#syncFileWatchers();
 		} catch (error) {
 			settled.reject(error);

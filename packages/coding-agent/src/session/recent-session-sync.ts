@@ -30,6 +30,8 @@ function hasDisplayText(content: unknown): boolean {
 function inspectSessionFileSync(sessionFile: string): { created: Date; resumable: boolean } {
 	let file: number | undefined;
 	let created = new Date(0);
+	let hasHeader = false;
+	let hasResumableContent = false;
 	try {
 		file = fs.openSync(sessionFile, "r");
 		const buffer = Buffer.allocUnsafe(64 * 1024);
@@ -54,6 +56,7 @@ function inspectSessionFileSync(sessionFile: string): { created: Date; resumable
 				const timestamp = new Date(record.timestamp);
 				if (Number.isFinite(timestamp.getTime())) created = timestamp;
 			}
+			if (record.type === "session") hasHeader = true;
 			if (
 				!isSessionResumabilityEmpty({
 					assistantTurns: 0,
@@ -65,15 +68,17 @@ function inspectSessionFileSync(sessionFile: string): { created: Date; resumable
 								: undefined,
 				})
 			) {
-				return true;
+				hasResumableContent = true;
+				return hasHeader;
 			}
-			if (record.type !== "message" || !record.message) return false;
+			if (record.type !== "message" || !record.message) return hasHeader && hasResumableContent;
 			const hasDisplayMessage =
 				isSessionDisplayMessageRole(record.message.role) && hasDisplayText(record.message.content);
-			return !isSessionResumabilityEmpty({
+			hasResumableContent ||= !isSessionResumabilityEmpty({
 				assistantTurns: record.message.role === "assistant" ? 1 : 0,
 				firstMessage: hasDisplayMessage ? "display message" : undefined,
 			});
+			return hasHeader && hasResumableContent;
 		};
 
 		for (;;) {
@@ -88,7 +93,8 @@ function inspectSessionFileSync(sessionFile: string): { created: Date; resumable
 			}
 		}
 		pending += decoder.decode();
-		return { created, resumable: pending.trim().length > 0 && inspect(pending.trim()) };
+		if (pending.trim().length > 0) inspect(pending.trim());
+		return { created, resumable: hasHeader && hasResumableContent };
 	} catch {
 		return { created, resumable: false };
 	} finally {

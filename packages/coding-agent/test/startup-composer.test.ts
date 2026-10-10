@@ -150,6 +150,40 @@ describe("startup composer terminal session identity", () => {
 		}
 	});
 
+	it("reads past a fixed title slot before ranking equal-mtime sessions", () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "omp-startup-slotted-created-"));
+		const agentDir = path.join(root, "agent");
+		const project = path.join(root, "project");
+		const originalAgentDir = getAgentDir();
+		setAgentDir(agentDir);
+		const sessions = sessionDirForCwd(project);
+		const olderSessionFile = path.join(sessions, "z-older.jsonl");
+		const newerSessionFile = path.join(sessions, "a-newer.jsonl");
+		fs.mkdirSync(project);
+		fs.mkdirSync(sessions, { recursive: true });
+		for (const [file, id, timestamp] of [
+			[olderSessionFile, "old", "2026-01-01T00:00:00Z"],
+			[newerSessionFile, "new", "2026-01-02T00:00:00Z"],
+		] as const) {
+			fs.writeFileSync(
+				file,
+				`${JSON.stringify({ type: "title", v: 1, title: `${id} title` })}\n${JSON.stringify({
+					type: "session",
+					id,
+					timestamp,
+					cwd: project,
+				})}\n`,
+			);
+			fs.utimesSync(file, new Date("2026-02-01T00:00:00Z"), new Date("2026-02-01T00:00:00Z"));
+		}
+		try {
+			expect(resolveTerminalSessionPrepaint(project)?.sessionFile).toBe(newerSessionFile);
+		} finally {
+			setAgentDir(originalAgentDir);
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
 	it("uses the cached current-project session when a new terminal has no breadcrumb", () => {
 		const root = fs.mkdtempSync(path.join(os.tmpdir(), "omp-startup-fallback-session-"));
 		const agentDir = path.join(root, "agent");

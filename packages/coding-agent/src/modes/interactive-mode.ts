@@ -2410,7 +2410,9 @@ export class InteractiveMode implements InteractiveModeContext {
 					this.settings.globalValue(cfgAutoResume) ?? cfgAutoResume.default,
 				);
 			}),
+			this.settings.onProjectChange([cfgAutoResume], () => this.#syncAutoResumeCache()),
 		);
+		this.#syncAutoResumeCache();
 		// Cache the live model for the next status-bar prepaint: init-time
 		// reconciliations (#reconcileModeFromSession, #enterPlanMode for
 		// plan.defaultOnStartup) can change the model before this subscription
@@ -3617,6 +3619,16 @@ export class InteractiveMode implements InteractiveModeContext {
 
 		if (rebuildChat) this.rebuildChatFromMessages();
 		if (rebuildChat || resetDisplay) this.ui.resetDisplay();
+	}
+
+	#syncAutoResumeCache(): void {
+		const cacheScope = settingCacheScope(cfgAutoResume.provenance(this.settings));
+		if (!cacheScope) return;
+		sharedComposerCache()?.writeAutoResume(
+			this.sessionManager.getCwd(),
+			cfgAutoResume.get(this.settings),
+			cacheScope === "project",
+		);
 	}
 
 	#syncStatusLineSettings(): void {
