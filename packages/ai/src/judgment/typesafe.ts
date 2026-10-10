@@ -170,6 +170,10 @@ export class TypeSafeJudge implements Judge {
 						normalized[wireKey] !== undefined
 					) {
 						normalized[canonicalKey] = normalized[wireKey];
+						// Drop the consumed wire key: callers (and the gateway
+						// encodeResponse path) must see the canonical shape, not
+						// a mix of both spellings.
+						delete normalized[wireKey];
 					}
 				}
 			}

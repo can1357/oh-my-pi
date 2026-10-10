@@ -51,6 +51,15 @@ describe("Vercel AI Gateway provider", () => {
 		expect(control?.maxTokens).toBe(8192);
 	});
 
+	test("strips a trailing /v1 from custom eval base URLs so the route does not double-prefix", async () => {
+		const fetchMock = (async () =>
+			Response.json({ object: "list", data: [{ id: "typesafe-ai/jev", type: "evaluation" }] })) as unknown as typeof fetch;
+		const options = vercelAiGatewayModelManagerOptions({ baseUrl: "https://proxy.example/v1", fetch: fetchMock });
+		const models = await options.fetchDynamicModels?.();
+		const jev = (models ?? []).find(mo => mo.id === "typesafe-ai/jev");
+		expect(jev?.baseUrl).toBe("https://proxy.example");
+	});
+
 	test("maps type:evaluation rows to api typesafe kind judge beside chat rows", async () => {
 		const chatId = "anthropic/claude-sonnet-4-5-20250929";
 		const jevId = "typesafe-ai/jev";

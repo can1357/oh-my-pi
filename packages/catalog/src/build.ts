@@ -70,10 +70,11 @@ function stringRecord(value: unknown): Record<string, string> | undefined {
 	if (payload === undefined) return undefined;
 	const record: Record<string, string> = {};
 	for (const [key, entry] of Object.entries(payload)) {
-		if (typeof entry !== "string") return undefined;
+		// Per-entry skip: one non-string entry must not drop the good ones.
+		if (typeof entry !== "string" || entry === "") continue;
 		record[key] = entry;
 	}
-	return record;
+	return Object.keys(record).length > 0 ? record : undefined;
 }
 
 /**
@@ -86,7 +87,12 @@ function judgmentConfig(value: unknown): JudgmentConfig | undefined {
 	if (payload === undefined) return undefined;
 	const config: JudgmentConfig = {};
 	const route = Reflect.get(payload, "route");
-	if (typeof route === "string" && route.startsWith("/")) config.route = route;
+	if (typeof route === "string") {
+		// Gen-time failure, not a silent drop: a bad route would leave the
+		// spec value to win unexpectedly.
+		if (!route.startsWith("/")) throw new Error(`judgment.route must start with "/": ${JSON.stringify(route)}`);
+		config.route = route;
+	}
 	const typeField = Reflect.get(payload, "typeField");
 	if (typeof typeField === "string" && typeField !== "") config.typeField = typeField;
 	const typeMap = stringRecord(Reflect.get(payload, "typeMap"));

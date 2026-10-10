@@ -228,12 +228,26 @@ export const getModelsConfigSchemaBundle = once(() => {
 		if (value.typeField !== undefined && (typeof value.typeField !== "string" || value.typeField.length === 0)) {
 			return ctx.mustBe("judgment.typeField a non-empty string");
 		}
+		// The discriminator is spread over the question envelope: a typeField
+		// colliding with an envelope key (instructions/criteria/state/model)
+		// silently corrupts the request.
+		if (
+			value.typeField !== undefined &&
+			["instructions", "criteria", "state", "model", "questions"].includes(value.typeField)
+		) {
+			return ctx.mustBe("judgment.typeField must not collide with a question envelope key");
+		}
 		for (const mapKey of ["typeMap", "valueMap"] as const) {
 			const map = (value as Record<string, unknown>)[mapKey] as Record<string, unknown> | undefined;
 			if (map === undefined) continue;
 			for (const k of Object.keys(map)) {
 				if (k.length === 0 || typeof map[k] !== "string" || (map[k] as string).length === 0) {
 					return ctx.mustBe(`judgment.${mapKey} entries must be non-empty strings`);
+				}
+				// Canonical keys are noul/choice/score: a typo'd key is silently
+				// inert and surfaces only as a runtime discriminator mismatch.
+				if (!["noul", "choice", "score"].includes(k)) {
+					return ctx.mustBe(`judgment.${mapKey} key "${k}" is not a canonical question type (noul/choice/score)`);
 				}
 			}
 		}
