@@ -281,6 +281,7 @@ export async function runAnnotateCommand(
 	if (!source) return undefined;
 	const result = await textDependencies.showTextReviewOverlay(ctx, source);
 	if (!result || result.annotations.length === 0) return undefined;
+	if (result.editedText !== undefined) source = { ...source, text: result.editedText };
 	let contextSummary: string | undefined;
 	if (shouldSummarizeTextReviewSource(source)) {
 		ctx.ui.setStatus("annotate-summary", "Rephrasing annotation source with the session model…");
