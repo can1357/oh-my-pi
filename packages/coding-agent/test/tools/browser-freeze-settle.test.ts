@@ -595,7 +595,7 @@ describe("browser settle — lifecycle freeze via CDP", () => {
 				onError: (): (() => void) => () => {},
 				terminate: async (): Promise<void> => undefined,
 			};
-			const { tab } = makeStubTab({ name, worker, activateForScreenshot: false });
+			const { tab } = makeStubTab({ name, worker });
 			getTabsMapForTest().set(name, tab);
 			const controller = new AbortController();
 

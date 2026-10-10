@@ -120,15 +120,33 @@ export function screenshotQuality(opts: ScreenshotOptions): number | undefined {
 	return opts.quality;
 }
 
+/**
+ * Let pending style and layout changes paint before a capture. A hidden page (a
+ * background tab, a minimized or fully covered window) runs no animation frames,
+ * so the wait ends at once there, or as soon as the page turns hidden mid-wait;
+ * `Page.captureScreenshot` renders a hidden page a fresh frame of its own.
+ */
 async function waitForRenderFrame(page: Page, signal: AbortSignal | undefined): Promise<void> {
 	await untilAborted(signal, () =>
 		page.evaluate(
 			() =>
 				new Promise<void>(resolve => {
 					const pageGlobal = globalThis as unknown as {
+						document: {
+							visibilityState: string;
+							addEventListener(type: string, listener: () => void): void;
+							removeEventListener(type: string, listener: () => void): void;
+						};
 						requestAnimationFrame(callback: () => void): number;
 					};
-					pageGlobal.requestAnimationFrame(resolve);
+					const { document } = pageGlobal;
+					if (document.visibilityState === "hidden") return resolve();
+					const done = (): void => {
+						document.removeEventListener("visibilitychange", done);
+						resolve();
+					};
+					document.addEventListener("visibilitychange", done);
+					pageGlobal.requestAnimationFrame(done);
 				}),
 		),
 	);
