@@ -4,17 +4,21 @@
 //! the pointer stay as they were, and no key is sent. Typing or AX insertion
 //! into the app's focused element then replaces the selection.
 
-use std::ptr::NonNull;
+use std::{ptr::NonNull, time::Duration};
 
 use objc2_application_services::{AXUIElement, AXValue, AXValueType};
 use objc2_core_foundation::{CFRange, CFString};
 
 use super::{
 	AxTextSelection, CoreResult, DesktopError, TextSelectRequest, Utf16Range, attribute_settable,
-	ax_result, copy_bool, copy_range, copy_string, element_pid, skylight, utf16_slice,
+	ax_result, copy_bool, copy_range, copy_string, element_pid, popup::poll, skylight, utf16_slice,
 };
 
 const SELECTED_RANGE: &str = "AXSelectedTextRange";
+/// How long a written selection has to show up in the read-back. Native
+/// fields answer on the first read; web content updates its AX selection
+/// asynchronously after the DOM selection has already moved.
+const SELECTION_SETTLE_WAIT: Duration = Duration::from_millis(500);
 
 pub(super) fn select(
 	element: &AXUIElement,
@@ -35,17 +39,18 @@ pub(super) fn select(
 	let wanted = request.locate(&before)?;
 	let applied = skylight::with_background_guard(element_pid(element)?, || {
 		write_range(element, wanted)?;
-		copy_range(element, SELECTED_RANGE).ok_or_else(|| {
+		let mut last = None;
+		poll(SELECTION_SETTLE_WAIT, || {
+			last = read_range(element);
+			(last == Some(wanted)).then_some(())
+		});
+		last.ok_or_else(|| {
 			DesktopError::ax_failed(format!(
 				"AX accepted the selection but {SELECTED_RANGE} could not be read back; inspect the \
 				 element before typing"
 			))
 		})
 	})?;
-	let applied = Utf16Range {
-		start:  usize::try_from(applied.location).unwrap_or_default(),
-		length: usize::try_from(applied.length).unwrap_or_default(),
-	};
 	if copy_string(element, "AXValue").as_deref() != Some(before.as_str()) {
 		return Err(DesktopError::ax_failed(format!(
 			"the element's value changed while selecting; the selection reads back at UTF-16 {} \
@@ -72,6 +77,16 @@ pub(super) fn select(
 		length:  to_u32(applied.length)?,
 		text:    utf16_slice(&before, applied).unwrap_or_default().to_owned(),
 		focused: copy_bool(element, "AXFocused").unwrap_or(false),
+	})
+}
+
+/// The element's selection, or `None` when it has none or reports a
+/// negative offset.
+fn read_range(element: &AXUIElement) -> Option<Utf16Range> {
+	let range = copy_range(element, SELECTED_RANGE)?;
+	Some(Utf16Range {
+		start:  usize::try_from(range.location).ok()?,
+		length: usize::try_from(range.length).ok()?,
 	})
 }
 
