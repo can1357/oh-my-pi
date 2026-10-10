@@ -165,13 +165,15 @@ const OMP_STATUS_LINE_RE = /^\s*in:\s+\d+\s+out:\s+\d+(?:\s+cache\s+\S+)?\s+t:\s
 /**
  * Slash commands that also run from a focused subagent view, keyed by name to a check
  * on their arguments; every other command (and mutating forms such as `/usage reset`,
- * which spends a saved rate-limit reset) still needs the main session. `/advisor on|off`
- * is the deliberate exception: it toggles the focused agent's own advisor (#15055).
+ * which spends a saved rate-limit reset) still needs the main session. `/advisor` is
+ * the deliberate exception among mutators: `on`/`off` (and the bare toggle) flip only
+ * the focused agent's own advisor (#15055).
  */
 const FOCUSED_VIEW_COMMANDS: Record<string, (args: string) => boolean> = {
 	advisor: args => {
 		const { verb } = parseSubcommand(args);
-		return verb === "on" || verb === "off";
+		// Keep in sync with /advisor's TUI arms: `status`, `dump`, `configure` stay main-only.
+		return !verb || verb === "toggle" || verb === "on" || verb === "off";
 	},
 	btw: () => true,
 	export: () => true,
@@ -1415,7 +1417,7 @@ export class InputController {
 		);
 	}
 
-	/** Submit editor text to the focused subagent session (chat and continue shortcuts only). */
+	/** Submit editor text to the focused subagent session (chat, continue shortcuts, and viewer-scoped commands). */
 	async #submitToFocusedSession(text: string, streamingBehavior: "steer" | "followUp"): Promise<void> {
 		const target = this.ctx.viewSession;
 		const images = this.ctx.editor.pendingImages.length > 0 ? [...this.ctx.editor.pendingImages] : undefined;
