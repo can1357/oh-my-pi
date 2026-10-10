@@ -74,6 +74,9 @@ const EXACT_LONG_MIN_REPEATED_CHARS = 1024;
 /** Char cap for an unterminated segment; forces a flush so a wall-of-text loop
  *  (no blank lines / headings) still segments. */
 const SEGMENT_CHAR_CAP = 700;
+/** Blank-line (plus any run of following whitespace) that terminates a segment.
+ *  Non-global, so `exec` never advances a shared lastIndex. */
+const SEGMENT_BOUNDARY_RE = /\n\s*\n/;
 /** Normalized-length floor below which a segment is ignored (too short to be a
  *  meaningful paragraph; bare headings must not trip detection). */
 const SEGMENT_MIN_NORM_CHARS = 60;
@@ -169,10 +172,13 @@ export class ThinkingLoopDetector {
 		// 1. Exact suffix cycles. Scan at a bounded cadence rather than doing
 		// quadratic work for every token-sized delta.
 		this.#tail += delta;
-		if (this.#tail.length > EXACT_TAIL_WINDOW) this.#tail = this.#tail.slice(-EXACT_TAIL_WINDOW);
 		this.#exactScannedAt += delta.length;
 		if (this.#exactScannedAt >= EXACT_CHECK_STRIDE || delta.length >= EXACT_CHECK_STRIDE) {
 			this.#exactScannedAt = 0;
+			// Trim only here, on the cadence the detector actually scans at: between
+			// scans the tail is bounded by the stride plus one delta, so the
+			// window copy no longer runs per streamed delta.
+			if (this.#tail.length > EXACT_TAIL_WINDOW) this.#tail = this.#tail.slice(-EXACT_TAIL_WINDOW);
 			const exact = detectExactSuffixCycle(this.#tail);
 			if (exact) {
 				const [unit, times] = exact;
@@ -185,7 +191,7 @@ export class ThinkingLoopDetector {
 		// 2. Near-duplicate paragraph loop. Append, then drain completed segments.
 		this.#pending += delta;
 		while (true) {
-			const boundary = /\n\s*\n/.exec(this.#pending);
+			const boundary = SEGMENT_BOUNDARY_RE.exec(this.#pending);
 			let raw: string;
 			if (boundary) {
 				raw = this.#pending.slice(0, boundary.index);
@@ -321,6 +327,14 @@ export class ThinkingLoopDetector {
  */
 export const GEMINI_HEADER_RUNAWAY_THRESHOLD = 36;
 
+/** Bound on the unterminated partial line held between deltas. A reasoning-summary
+ *  title is a short markdown heading or bold run, so a partial this long cannot
+ *  complete into a header; the cap keeps a newline-free run from growing a buffer
+ *  that is re-scanned (and re-copied) on every delta. Holding only the tail still
+ *  re-syncs on the next newline. Well above any real title, far below the point
+ *  where retaining it would help detection. */
+const GEMINI_HEADER_PARTIAL_LINE_CAP = 512;
+
 /**
  * True when a single trimmed line is a Gemini reasoning-summary title: a markdown
  * ATX heading (`## …`) or a whole-line bold / bold-italic run (`**Title**`,
@@ -353,16 +367,26 @@ export class GeminiHeaderRunDetector {
 	push(delta: string): boolean {
 		if (this.#fired || !delta) return false;
 		this.#pending += delta;
-		let nl = this.#pending.indexOf("\n");
+		// Drain complete lines by index offset: one tail slice for the whole delta
+		// instead of a re-copy of the remainder per line found.
+		let start = 0;
+		let nl = this.#pending.indexOf("\n", start);
 		while (nl !== -1) {
-			const line = this.#pending.slice(0, nl).trim();
-			this.#pending = this.#pending.slice(nl + 1);
+			const line = this.#pending.slice(start, nl).trim();
+			start = nl + 1;
 			if (line !== "" && isReasoningSummaryHeader(line) && ++this.#count >= GEMINI_HEADER_RUNAWAY_THRESHOLD) {
 				this.#fired = true;
 				return true;
 			}
-			nl = this.#pending.indexOf("\n");
+			nl = this.#pending.indexOf("\n", start);
 		}
+		if (start > 0) this.#pending = this.#pending.slice(start);
+		// Bound the held partial line. A summary title is a short markdown heading or
+		// bold run, so a partial this long can never complete into a header; keeping
+		// only its tail re-syncs on the next newline without rescanning a growing
+		// buffer (and without re-copying it) on every delta.
+		if (this.#pending.length > GEMINI_HEADER_PARTIAL_LINE_CAP)
+			this.#pending = this.#pending.slice(-GEMINI_HEADER_PARTIAL_LINE_CAP);
 		return false;
 	}
 
