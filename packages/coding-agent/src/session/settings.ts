@@ -1278,12 +1278,13 @@ export const cfgCodexResetsAutoRedeem = register({
 		group: "Services",
 		label: "Codex Auto-Redeem Saved Resets",
 		description:
-			"Spend saved Codex rate-limit resets automatically: restore an account blocked by an exhausted 5h or weekly window when a turn is stuck and no other account can take over, and salvage credits that are about to expire. unset asks before the first spend, yes spends without prompting, and no disables both checks.",
+			"Spend saved Codex rate-limit resets automatically: restore an account blocked by an exhausted 5h or weekly window when a turn is stuck and no other account can take over, and salvage credits that are about to expire. unset asks before the first spend (with no prompt UI, it spends only a reset expiring within 5 minutes), yes spends without prompting, and no disables both checks.",
 		options: [
 			{
 				value: "unset",
 				label: "Unset",
-				description: "Check eligibility, then ask before spending the first saved reset.",
+				description:
+					"Check eligibility, then ask before spending the first saved reset. With no prompt UI, spend only a reset expiring within 5 minutes.",
 			},
 			{ value: "yes", label: "Yes", description: "Spend eligible saved resets without prompting." },
 			{ value: "no", label: "No", description: "Do not run the saved-reset auto-redeem check." },
@@ -1352,12 +1353,13 @@ export const cfgClaudeResetsAutoRedeem = register({
 		group: "Services",
 		label: "Claude Auto-Redeem Resets",
 		description:
-			"Spend eligible Claude Cedar or Juniper resets automatically. Cedar is spent only for covered limits; Juniper can only recover a sole 5-hour block. unset asks before the first spend, yes spends without prompting, and no disables blocked recovery and expiry salvage.",
+			"Spend eligible Claude Cedar or Juniper resets automatically. Cedar is spent only for covered limits; Juniper can only recover a sole 5-hour block. unset asks before the first spend (with no prompt UI, it spends only a reset expiring within 5 minutes), yes spends without prompting, and no disables blocked recovery and expiry salvage.",
 		options: [
 			{
 				value: "unset",
 				label: "Unset",
-				description: "Check live eligibility, then ask before spending the first Claude reset.",
+				description:
+					"Check live eligibility, then ask before spending the first Claude reset. With no prompt UI, spend only a reset expiring within 5 minutes.",
 			},
 			{ value: "yes", label: "Yes", description: "Spend eligible Claude resets without prompting." },
 			{ value: "no", label: "No", description: "Do not run Claude reset auto-redeem checks." },

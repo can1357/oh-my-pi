@@ -14,8 +14,10 @@
  *   {@link SALVAGE_MIN_USED_FRACTION} used, so redeeming restores real quota.
  *   As a last chance, credits expiring within {@link IMMINENT_RESET_EXPIRY_MS}
  *   are attempted even with a zero/shorter horizon or zero/unknown usage.
- *   This fallback ignores non-terminal deferrals, but keeps consent, live
- *   credit eligibility, terminal-attempt dedupe, and the account cooldown.
+ *   This fallback ignores non-terminal deferrals, but keeps live credit
+ *   eligibility, terminal-attempt dedupe, and the account cooldown. It still
+ *   needs consent, except that a host with no prompt UI spends it while
+ *   auto-redeem is unset (see {@link headlessApprovedResetActions}).
  *   The `keepCredits` reserve is deliberately ignored here — reserving a
  *   credit that is about to expire preserves nothing. If the window resets
  *   naturally before the credit expires, broader salvage skips the mostly-free
@@ -74,7 +76,7 @@ export const WINDOW_EXHAUSTED_MIN_FRACTION = 0.999;
 export const MAX_PLAUSIBLE_WEEKLY_REMAINING_MS = 7 * 24 * 3_600_000 + 60 * 60_000;
 /** A 5h reset can never be more than one window length (5h) away; +1h slack for skew. */
 export const MAX_PLAUSIBLE_PRIMARY_REMAINING_MS = 5 * 3_600_000 + 60 * 60_000;
-/** Shared last-chance expiry horizon; bypasses salvage usage thresholds and non-terminal deferrals, not consent or cooldown. */
+/** Shared last-chance expiry horizon; bypasses salvage usage thresholds, non-terminal deferrals and, with no prompt UI, unset consent; never cooldown. */
 export const IMMINENT_RESET_EXPIRY_MS = 5 * 60_000;
 /** Below this usage on BOTH chat windows, non-imminent salvage restores too little to bother. */
 export const SALVAGE_MIN_USED_FRACTION = 0.25;
@@ -96,6 +98,19 @@ export function shouldEvaluateCodexAutoRedeem(mode: ResetAutoRedeemMode): boolea
 
 export function shouldPromptCodexAutoRedeem(mode: ResetAutoRedeemMode): boolean {
 	return mode === "unset";
+}
+
+/**
+ * Planned spends a host with no prompt UI may make. Under `unset` only a
+ * credit expiring within {@link IMMINENT_RESET_EXPIRY_MS} qualifies, whether a
+ * salvage or a restore spends it: nobody can be asked before it is lost.
+ */
+export function headlessApprovedResetActions<T extends Pick<CodexResetAction, "expiresInMs">>(
+	mode: ResetAutoRedeemMode,
+	actions: readonly T[],
+): readonly T[] {
+	if (mode !== "unset") return mode === "yes" ? actions : [];
+	return actions.filter(action => action.expiresInMs !== undefined && action.expiresInMs <= IMMINENT_RESET_EXPIRY_MS);
 }
 
 /** What woke the planner. `sweep` may only salvage; `blocked` may also restore. */

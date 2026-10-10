@@ -324,6 +324,7 @@ import {
 	type CodexResetAction,
 	type ResetRecoveryResult,
 	defaultCodexAutoRedeemCoordinator,
+	headlessApprovedResetActions,
 	overlayLiveResetCredits,
 	SWEEP_MIN_INTERVAL_MS,
 	shouldEvaluateCodexAutoRedeem,
@@ -12505,31 +12506,40 @@ export class AgentSession implements SettingsScope {
 		return [...codex, ...claude];
 	}
 	/**
-	 * Ask before a provider's first automatic spend. Consent is persisted in
-	 * that provider's independent settings group; headless hosts only receive a
-	 * one-shot notice and never spend while the mode is unset.
+	 * Ask before a provider's first automatic spend and return the approved
+	 * actions. Consent is persisted in that provider's independent settings
+	 * group; a headless host spends only credits about to expire and gets a
+	 * one-shot notice for the rest while the mode is unset.
 	 */
 	async #confirmAutoRedeem(
 		provider: "openai-codex" | "anthropic",
 		actions: (CodexResetAction | ClaudeResetAction)[],
 		coordinator: CodexAutoRedeemCoordinator,
-	): Promise<boolean> {
-		const first = actions[0];
-		if (!first) return false;
+	): Promise<readonly (CodexResetAction | ClaudeResetAction)[]> {
+		if (actions.length === 0) return [];
 		const providerLabel = provider === "anthropic" ? "Claude" : "Codex";
 		const settingsKey = provider === "anthropic" ? "claudeResets.autoRedeem" : "codexResets.autoRedeem";
 		const source = provider === "anthropic" ? "claude-auto-reset" : "codex-auto-reset";
 		const runner = this.#extensionRunner;
 		if (!runner?.hasUI()) {
-			if (!coordinator.notifiedKeys.has(first.attemptKey)) {
-				coordinator.notifiedKeys.add(first.attemptKey);
+			const approved = headlessApprovedResetActions("unset", actions);
+			const waiting = actions.find(action => !approved.includes(action));
+			if (waiting && !coordinator.notifiedKeys.has(waiting.attemptKey)) {
+				coordinator.notifiedKeys.add(waiting.attemptKey);
 				this.emitNotice(
 					"warning",
 					`Saved ${providerLabel} resets are eligible to spend, but auto-redeem is unset and no prompt UI is available. Run \`/usage reset\` or set ${settingsKey}.`,
 					source,
 				);
 			}
-			return false;
+			for (const action of approved) {
+				this.emitNotice(
+					"info",
+					`Spending a saved ${providerLabel} reset for ${action.label} before it expires in ${formatDuration(action.expiresInMs ?? 0)}; auto-redeem is unset and no prompt UI is available. Set ${settingsKey} to no to let resets expire instead.`,
+					source,
+				);
+			}
+			return approved;
 		}
 
 		const lines = actions.map(action => {
@@ -12566,7 +12576,7 @@ export class AgentSession implements SettingsScope {
 			if (choice === "Yes") {
 				if (provider === "anthropic") cfgClaudeResetsAutoRedeem.set(this.settings, "yes");
 				else cfgCodexResetsAutoRedeem.set(this.settings, "yes");
-				return true;
+				return actions;
 			}
 			if (choice === "No") {
 				if (provider === "anthropic") cfgClaudeResetsAutoRedeem.set(this.settings, "no");
@@ -12575,7 +12585,7 @@ export class AgentSession implements SettingsScope {
 		} catch (error) {
 			logger.warn(`${source} prompt failed`, { error: String(error) });
 		}
-		return false;
+		return [];
 	}
 
 	get #autoResetHost(): AutoResetHost {
@@ -12587,8 +12597,7 @@ export class AgentSession implements SettingsScope {
 			baseUrlResolver: provider => this.#modelRegistry.getProviderBaseUrl?.(provider),
 			notice: (level, message, source) => this.emitNotice(level, message, source),
 			adoptedResetMarkers: this.#adoptedResetMarkers,
-			confirm: async (provider, actions, coordinator) =>
-				(await this.#confirmAutoRedeem(provider, actions, coordinator)) ? actions : [],
+			confirm: (provider, actions, coordinator) => this.#confirmAutoRedeem(provider, actions, coordinator),
 			onRedeemed: () => void this.fetchUsageReports(),
 		};
 	}
@@ -12641,13 +12650,10 @@ export class AgentSession implements SettingsScope {
 				}
 				return { restored: false, retryAfterMs };
 			}
-			if (
-				shouldPromptCodexAutoRedeem(cfg.autoRedeem) &&
-				!(await this.#confirmAutoRedeem(provider, plan.actions, coordinator))
-			) {
-				return { restored: false };
-			}
-			return { restored: (await executeResetActions(host, provider, plan.actions, coordinator)) > 0 };
+			const approved = shouldPromptCodexAutoRedeem(cfg.autoRedeem)
+				? await this.#confirmAutoRedeem(provider, plan.actions, coordinator)
+				: plan.actions;
+			return { restored: (await executeResetActions(host, provider, approved, coordinator)) > 0 };
 		})()
 			.catch((error): ResetRecoveryResult => {
 				logger.warn("auto-reset: blocked pass failed", { provider, account: accountKey, error: String(error) });

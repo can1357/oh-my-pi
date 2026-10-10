@@ -24,6 +24,7 @@ import {
 	ATTEMPT_COOLDOWN_MS,
 	blockedAttemptKey,
 	type CodexResetPlanInput,
+	headlessApprovedResetActions,
 	IMMINENT_RESET_EXPIRY_MS,
 	isTerminalRedeemOutcome,
 	planCodexResetRedemptions,
@@ -877,6 +878,17 @@ describe("codexResets policy plumbing", () => {
 		expect(isTerminalRedeemOutcome("nothing_to_reset")).toBe(false);
 		expect(isTerminalRedeemOutcome("http_500")).toBe(false);
 		expect(isTerminalRedeemOutcome("credit_list_failed")).toBe(false);
+	});
+
+	it("approves only resets expiring within five minutes for a headless unset host", () => {
+		const actions = [
+			{ expiresInMs: IMMINENT_RESET_EXPIRY_MS },
+			{ expiresInMs: IMMINENT_RESET_EXPIRY_MS + 1 },
+			{ expiresInMs: undefined },
+		];
+		expect(headlessApprovedResetActions("unset", actions)).toEqual([actions[0]]);
+		expect(headlessApprovedResetActions("yes", actions)).toEqual(actions);
+		expect(headlessApprovedResetActions("no", actions)).toEqual([]);
 	});
 
 	it("migrates legacy boolean autoRedeem config to the tri-state policy", () => {
