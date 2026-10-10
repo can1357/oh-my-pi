@@ -112,21 +112,23 @@ export class StablePrefix {
 	 * Build or rebuild from live context.
 	 * Returns `true` if the prefix actually changed (cache miss imminent).
 	 *
-	 * Steady-state fast path: when the live prompt reference is unchanged
-	 * AND every tool resolves to the same normalized parameters identity as
-	 * last build, the fingerprint cannot have changed, so the full snapshot
-	 * + stringify is skipped. Comparing resolved parameters (not the tool
+	 * Steady-state fast path: when the live prompt has the same segments as
+	 * last build AND every tool resolves to the same normalized parameters
+	 * identity, the fingerprint cannot have changed, so the full snapshot +
+	 * stringify is skipped. Comparing resolved parameters (not the tool
 	 * container) is load-bearing: tools like ReadTool expose `parameters` as
 	 * a getter over live settings (`skillful`, `memory.backend`), so the
 	 * schema can swap under stable tool references when a setting toggles.
 	 * Any other in-place mutation must go through `invalidate()`.
 	 */
-	#lastPrompt: readonly string[] | undefined;
-	// Joined prompt bytes snapshot: the prompt array is caller-owned and
+	// Segment-level prompt copy: the prompt array is caller-owned and
 	// mutable in place (Agent.setSystemPrompt stores the caller's array;
 	// anyone holding it can push/splice), so reference equality alone cannot
-	// prove the bytes are unchanged. Compared by value on the fast path.
-	#lastPromptText: string | undefined;
+	// prove the bytes are unchanged. Comparing the recorded segments against
+	// the live ones roots out that mutation without concatenating the whole
+	// prompt just to compare it — segments are immutable strings, so `!==`
+	// on two strings is a byte comparison.
+	#lastPromptSegments: readonly string[] | undefined;
 	// Per-tool wire-identity snapshot: every field normalizeTools and
 	// computeFingerprint read (name, description, resolved parameters,
 	// strict, customFormat, customWireName, intent mode, examples
@@ -138,11 +140,20 @@ export class StablePrefix {
 
 	build(context: AgentContext, options: BuildOptions): boolean {
 		const prev = this.#snapshot;
-		if (prev !== null && this.#fastPathHit(context, options)) {
-			return false;
+		// The per-tool keys are rendered once per build and thread from the
+		// fast-path check into the recorded key, so a miss does not re-render
+		// every live tool description a second time (`normalizeTools` reads
+		// the same getters inside takeSnapshot). `prev === null` skips the
+		// check entirely — there is nothing to compare against.
+		let toolKeys: readonly string[] | undefined;
+		if (prev !== null) {
+			toolKeys = (context.tools ?? []).map(tool => toolKeyForPrefix(tool));
+			if (this.#fastPathHit(context, options, toolKeys)) {
+				return false;
+			}
 		}
 		const snapshot = takeSnapshot(context, options);
-		this.#recordFastPathKey(context, options, snapshot.tools);
+		this.#recordFastPathKey(context, options, toolKeys);
 		if (prev && prev.fingerprint === snapshot.fingerprint) {
 			// Identity changed but bytes did not (e.g. equivalent rebuild):
 			// keep serving the cached snapshot so downstream memo identity
@@ -154,47 +165,53 @@ export class StablePrefix {
 		return true;
 	}
 
-	/** True when the cheap key matches: prompt + per-tool resolved identity. */
-	#fastPathHit(context: AgentContext, options: BuildOptions): boolean {
+	/** True when the cheap key matches: prompt segments + per-tool identity. */
+	#fastPathHit(context: AgentContext, options: BuildOptions, toolKeys: readonly string[]): boolean {
 		if (
 			this.#lastIntentTracing !== options.intentTracing ||
 			this.#lastPruneToolDescriptions !== options.pruneToolDescriptions
 		) {
 			return false;
 		}
-		// Prompt by reference first (steady state), then by joined bytes so
-		// an in-place push/splice of the same array still misses.
-		if (this.#lastPrompt !== context.systemPrompt) return false;
-		if (this.#lastPromptText !== undefined) {
-			const text = context.systemPrompt.join("\u0000");
-			if (text !== this.#lastPromptText) return false;
-		}
-		const tools = context.tools ?? [];
-		if (this.#lastToolKey === undefined || this.#lastToolKey.length !== tools.length) {
+		// Prompt segments: the caller may push/splice the live array in place
+		// without any reference change, so compare the recorded segments
+		// rather than concatenating the whole prompt just to compare it.
+		const liveSegments = context.systemPrompt;
+		const cachedSegments = this.#lastPromptSegments;
+		if (
+			cachedSegments === undefined ||
+			cachedSegments.length !== liveSegments.length ||
+			cachedSegments.some((segment, index) => segment !== liveSegments[index])
+		) {
 			return false;
 		}
-		for (let i = 0; i < tools.length; i++) {
-			if (this.#lastToolKey[i] !== toolKeyForPrefix(tools[i]!)) {
+		const recorded = this.#lastToolKey;
+		if (recorded === undefined || recorded.length !== toolKeys.length) {
+			return false;
+		}
+		for (let i = 0; i < toolKeys.length; i++) {
+			if (recorded[i] !== toolKeys[i]) {
 				return false;
 			}
 		}
 		return true;
 	}
 
-	#recordFastPathKey(context: AgentContext, options: BuildOptions, normalized: Tool[]): void {
-		this.#lastPrompt = context.systemPrompt;
-		this.#lastPromptText = context.systemPrompt.join("\u0000");
+	#recordFastPathKey(
+		context: AgentContext,
+		options: BuildOptions,
+		renderedToolKeys?: readonly string[],
+	): void {
+		this.#lastPromptSegments = [...context.systemPrompt];
 		this.#lastIntentTracing = options.intentTracing;
 		this.#lastPruneToolDescriptions = options.pruneToolDescriptions;
-		this.#lastToolKey = (context.tools ?? []).map(tool => toolKeyForPrefix(tool));
-		void normalized;
+		this.#lastToolKey = renderedToolKeys ?? (context.tools ?? []).map(tool => toolKeyForPrefix(tool));
 	}
 
 	/** Force rebuild on the next `build()` call. */
 	invalidate(): void {
 		this.#snapshot = null;
-		this.#lastPrompt = undefined;
-		this.#lastPromptText = undefined;
+		this.#lastPromptSegments = undefined;
 		this.#lastToolKey = undefined;
 		this.#lastIntentTracing = undefined;
 		this.#lastPruneToolDescriptions = undefined;
