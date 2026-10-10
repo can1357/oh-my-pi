@@ -157,6 +157,17 @@ function normalizeIntent(intent: unknown): string | undefined {
 	);
 }
 
+/**
+ * A started call's card args with the model's intent restored. agent-loop
+ * strips `i` before `tool_execution_start` and ships it as `event.intent`, but
+ * cards read it from `args[INTENT_FIELD]` (shell head target, tool node
+ * `intent`), as resumed cards do from the stored assistant message.
+ */
+function cardArgs(args: unknown, intent: string | undefined): unknown {
+	if (!intent || !isRecord(args) || INTENT_FIELD in args) return args;
+	return { [INTENT_FIELD]: intent, ...args };
+}
+
 export class EventController {
 	#lastReadGroup: ReadToolGroupComponent | undefined = undefined;
 	/** Timestamp of the current turn's user prompt; drives the usage row's prompt→yield delta. */
@@ -1875,7 +1886,7 @@ export class EventController {
 			this.#resetReadGroup();
 			const component = new ToolExecutionComponent(
 				renderToolName,
-				event.args,
+				cardArgs(event.args, event.intent),
 				{
 					useBuiltInRenderer: this.ctx.viewSession.hasBuiltInTool(renderToolName),
 					showImages: cfgTerminalShowImages.get(settings),
@@ -1913,7 +1924,7 @@ export class EventController {
 			this.#toolArgsReveal.finish(event.toolCallId);
 			const component = this.ctx.pendingTools.get(event.toolCallId);
 			if (component && typeof component.updateArgs === "function") {
-				component.updateArgs(event.args, event.toolCallId);
+				component.updateArgs(cardArgs(event.args, event.intent), event.toolCallId);
 				if (typeof component.setArgsComplete === "function") {
 					component.setArgsComplete(event.toolCallId);
 				}
