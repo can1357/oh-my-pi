@@ -225,11 +225,6 @@ export interface TurnRecoveryHost {
 	 * `SessionMaintenance.contextFitsModel`.
 	 */
 	contextFitsModel(model: Model, excludedMessage?: AssistantMessage): boolean;
-	/**
-	 * Whether `model` takes the live context plus `pendingMessages` without
-	 * pre-prompt compaction. See `SessionMaintenance.requestFitsModelWithoutCompaction`.
-	 */
-	requestFitsModelWithoutCompaction(model: Model, pendingMessages: AgentMessage[]): boolean;
 	/** Whether streamed text has already been committed to the active output sink. */
 	textOutputCommitted(): boolean;
 	thinkingLevel(): ThinkingLevel | undefined;
@@ -721,7 +716,7 @@ export class TurnRecovery {
 	/**
 	 * Restores the configured primary under `retry.fallbackRevertPolicy:
 	 * cooldown-expiry`. `when-healthy` returns through
-	 * {@link maybeReturnToHealthyPrimary} once the request is assembled.
+	 * `SessionMaintenance.runPrePromptCompactionIfNeeded` once the request is assembled.
 	 * @returns true when the active model was actually switched back to the
 	 * primary, so callers can re-run the pre-send context-fit check against the
 	 * reverted (possibly smaller) window before issuing the next request.
@@ -732,11 +727,13 @@ export class TurnRecovery {
 
 	/**
 	 * Returns to the primary under `retry.fallbackRevertPolicy: when-healthy`.
-	 * `pendingMessages` is the request about to go out on top of the live
-	 * context; the primary must take it without compacting.
+	 * `fitsWithoutCompaction` judges the assembled request against the primary.
 	 */
-	maybeReturnToHealthyPrimary(pendingMessages: AgentMessage[], signal?: AbortSignal): Promise<boolean> {
-		return this.#maybeRestoreRetryFallbackPrimary(signal, pendingMessages);
+	maybeReturnToHealthyPrimary(
+		fitsWithoutCompaction: (primary: Model) => boolean,
+		signal?: AbortSignal,
+	): Promise<boolean> {
+		return this.#maybeRestoreRetryFallbackPrimary(signal, fitsWithoutCompaction);
 	}
 
 	/** Applies model fallback policy from live usage health before a turn starts. */
@@ -2332,14 +2329,14 @@ export class TurnRecovery {
 
 	async #maybeRestoreRetryFallbackPrimary(
 		signal: AbortSignal | undefined,
-		pendingMessages: AgentMessage[] | undefined,
+		fitsWithoutCompaction: ((primary: Model) => boolean) | undefined,
 	): Promise<boolean> {
 		const fallback = this.#activeRetryFallback;
 		if (!fallback) return false;
 		const policy = this.#getRetryFallbackRevertPolicy();
 		if (policy === "never") return false;
 		// `when-healthy` decides on the assembled request; `cooldown-expiry` keeps its earlier slot.
-		if ((policy === "when-healthy") !== (pendingMessages !== undefined)) return false;
+		if ((policy === "when-healthy") !== (fitsWithoutCompaction !== undefined)) return false;
 		// A refusal is the primary's verdict on this conversation, which usage
 		// recovery does not change (#10206).
 		if (fallback.refusalPinned) return false;
@@ -2382,13 +2379,10 @@ export class TurnRecovery {
 		if (!primaryModel) return false;
 		const apiKey = await this.#host.modelRegistry.getApiKey(primaryModel, this.#host.sessionId());
 		if (!apiKey) return false;
-		if (pendingMessages) {
-			const canReturn = await this.#primaryCanTakeSessionBack(
-				primaryModel,
-				fallback.pinned,
-				pendingMessages,
-				signal,
-			);
+		if (fitsWithoutCompaction) {
+			const canReturn =
+				(await this.#primaryUsageAllowsReturn(primaryModel, fallback.pinned, signal)) &&
+				fitsWithoutCompaction(primaryModel);
 			if (
 				!canReturn ||
 				signal?.aborted ||
@@ -2418,17 +2412,14 @@ export class TurnRecovery {
 	}
 
 	/**
-	 * `when-healthy` return gate. The primary must show usage headroom above its
-	 * reserve and take the pending request without compacting. Unknown usage
-	 * keeps cooldown-expiry behavior for an error detour and holds a usage
-	 * detour, so a detour only ends on the same kind of evidence that started it.
-	 * Usage is read first: it is cached, while the fit check measures the whole
-	 * context.
+	 * `when-healthy` usage gate: the primary must show headroom above its
+	 * reserve. Unknown usage keeps cooldown-expiry behavior for an error detour
+	 * and holds a usage detour, so a detour only ends on the same kind of
+	 * evidence that started it.
 	 */
-	async #primaryCanTakeSessionBack(
+	async #primaryUsageAllowsReturn(
 		primaryModel: Model,
 		usagePinned: boolean,
-		pendingMessages: AgentMessage[],
 		signal: AbortSignal | undefined,
 	): Promise<boolean> {
 		let state: ModelUsageHealthState;
@@ -2451,8 +2442,7 @@ export class TurnRecovery {
 			});
 			state = "unknown";
 		}
-		if (state !== "healthy" && (state !== "unknown" || usagePinned)) return false;
-		return this.#host.requestFitsModelWithoutCompaction(primaryModel, pendingMessages);
+		return state === "healthy" || (state === "unknown" && !usagePinned);
 	}
 
 	#parseRetryAfterMsFromError(errorMessage: string): number | undefined {

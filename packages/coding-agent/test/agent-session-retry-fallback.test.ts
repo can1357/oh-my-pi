@@ -6927,11 +6927,12 @@ describe("AgentSession retry fallback", () => {
 		});
 
 		it.each([
-			["a reply grew the stored context", true],
-			["the incoming prompt", false],
+			["a reply grew the stored context", "reply"],
+			["the incoming prompt", "prompt"],
+			["an agent-start hook addition", "hook"],
 		] as const)(
 			"stays on the fallback instead of compacting when %s outgrows a smaller primary",
-			async (_case, bigReply) => {
+			async (_case, grows) => {
 				const modelsConfigPath = path.join(tempDir.path(), "when-healthy-window-models.json");
 				await Bun.write(
 					modelsConfigPath,
@@ -6967,7 +6968,7 @@ describe("AgentSession retry fallback", () => {
 						if (selector === smallSelector && primaryAttempts++ === 0) {
 							mock.push({ throw: "rate limit exceeded retry-after-ms=200" });
 						} else {
-							mock.push({ content: [selector === largeSelector && bigReply ? bigText : "ok"] });
+							mock.push({ content: [selector === largeSelector && grows === "reply" ? bigText : "ok"] });
 						}
 						return mock.stream(model, context, options);
 					},
@@ -6983,7 +6984,33 @@ describe("AgentSession retry fallback", () => {
 				});
 				settings.setModelRole("default", smallSelector);
 				vi.spyOn(modelRegistry.authStorage.health, "model").mockResolvedValue(healthOf("healthy"));
-				session = new AgentSession({ agent, sessionManager: SessionManager.inMemory(), settings, modelRegistry });
+				const sessionManager = SessionManager.inMemory();
+				let extensionRunner: ExtensionRunner | undefined;
+				if (grows === "hook") {
+					const runtime = new ExtensionRuntime();
+					let started = 0;
+					const extension = await loadExtensionFromFactory(
+						pi => {
+							pi.on("before_agent_start", async () =>
+								started++ === 0
+									? undefined
+									: { message: { customType: "review", content: bigText, display: false } },
+							);
+						},
+						tempDir.path(),
+						new EventBus(),
+						runtime,
+						"when-healthy-agent-start",
+					);
+					extensionRunner = new ExtensionRunner(
+						[extension],
+						runtime,
+						tempDir.path(),
+						sessionManager,
+						modelRegistry,
+					);
+				}
+				session = new AgentSession({ agent, sessionManager, settings, modelRegistry, extensionRunner });
 				const compactions: string[] = [];
 				session.subscribe(event => {
 					if (event.type === "auto_compaction_start") compactions.push(event.type);
@@ -6996,7 +7023,7 @@ describe("AgentSession retry fallback", () => {
 				expect(requestedModels).toEqual([smallSelector, largeSelector]);
 
 				now += 60_000;
-				await session.prompt(bigReply ? "Cooldown expired and the primary is healthy" : bigText);
+				await session.prompt(grows === "prompt" ? bigText : "Cooldown expired and the primary is healthy");
 				await session.waitForIdle();
 				expect(requestedModels).toEqual([smallSelector, largeSelector, largeSelector]);
 				expect(compactions).toEqual([]);

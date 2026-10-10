@@ -1737,8 +1737,6 @@ export class AgentSession implements SettingsScope {
 			configWarnings: this.configWarnings,
 			model: () => this.model,
 			contextFitsModel: (model, excludedMessage) => this.#maintenance.contextFitsModel(model, excludedMessage),
-			requestFitsModelWithoutCompaction: (model, pendingMessages) =>
-				this.#maintenance.requestFitsModelWithoutCompaction(model, pendingMessages),
 			textOutputCommitted: () => this.#textOutputCommitted,
 			thinkingLevel: () => this.thinkingLevel,
 			configuredThinkingLevel: () => this.configuredThinkingLevel(),
@@ -2336,6 +2334,8 @@ export class AgentSession implements SettingsScope {
 			runRecoveryCompactionWithRollback: (reason, message, options) =>
 				this.#recovery.runRecoveryCompactionWithRollback(reason, message, options),
 			parseRetryAfterMsFromError: errorMessage => this.#recovery.parseRetryAfterMsFromError(errorMessage),
+			maybeReturnToHealthyPrimary: (fitsWithoutCompaction, signal) =>
+				this.#recovery.maybeReturnToHealthyPrimary(fitsWithoutCompaction, signal),
 			setModelTemporary: (model, thinkingLevel, options) =>
 				this.#models.setModelTemporary(model, thinkingLevel, options, "automatic"),
 			abort: options => this.abort(options),
@@ -4544,9 +4544,7 @@ export class AgentSession implements SettingsScope {
 		coalescedSources: Set<string>,
 	): Promise<AgentContinueOutcome> {
 		try {
-			const reverted =
-				(await this.#recovery.maybeRestoreRetryFallbackPrimary(signal)) ||
-				(await this.#recovery.maybeReturnToHealthyPrimary([], signal));
+			const reverted = await this.#recovery.maybeRestoreRetryFallbackPrimary(signal);
 			if (signal.aborted || this.#isDisposed || this.#abortInProgress) {
 				return { status: "skipped", reason: "post-restore-unavailable" };
 			}
@@ -7840,13 +7838,6 @@ export class AgentSession implements SettingsScope {
 				}
 			}
 
-			// `when-healthy` returns only when the primary takes this request
-			// without compacting, so it waits for the prompt and its attachments.
-			await this.#recovery.maybeReturnToHealthyPrimary(messages, setupAbort.signal);
-			if (this.#promptGeneration !== generation) {
-				return false;
-			}
-
 			const preparation = await this.#prepareAgentStart(
 				message,
 				expandedText,
@@ -7888,7 +7879,7 @@ export class AgentSession implements SettingsScope {
 			if (maintenanceMessages !== messages && previewXdevMountNotice?.notice) {
 				maintenanceMessages.splice(xdevMountNoticeIndex, 0, previewXdevMountNotice.notice);
 			}
-			await this.#maintenance.runPrePromptCompactionIfNeeded(maintenanceMessages);
+			await this.#maintenance.runPrePromptCompactionIfNeeded(maintenanceMessages, setupAbort.signal);
 			if (this.#promptGeneration !== generation) {
 				return false;
 			}

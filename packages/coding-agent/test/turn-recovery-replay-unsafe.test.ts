@@ -76,7 +76,6 @@ function createHost(
 		configWarnings: [],
 		model: () => model,
 		contextFitsModel: () => true,
-		requestFitsModelWithoutCompaction: () => true,
 		textOutputCommitted: () => options.textOutputCommitted !== false,
 		thinkingLevel: () => undefined,
 		configuredThinkingLevel: () => undefined,

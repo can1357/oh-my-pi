@@ -492,6 +492,14 @@ export interface SessionMaintenanceHost {
 		options: { autoContinue: boolean; triggerContextTokens?: number; excludeMediaMethods?: boolean },
 	): Promise<CompactionCheckResult>;
 	parseRetryAfterMsFromError(errorMessage: string): number | undefined;
+	/**
+	 * `retry.fallbackRevertPolicy: when-healthy` return to the primary, taken
+	 * only when `fitsWithoutCompaction` accepts it. True when the model switched.
+	 */
+	maybeReturnToHealthyPrimary(
+		fitsWithoutCompaction: (primary: Model) => boolean,
+		signal: AbortSignal | undefined,
+	): Promise<boolean>;
 	setModelTemporary(
 		model: Model,
 		thinkingLevel?: ConfiguredThinkingLevel,
@@ -2540,7 +2548,7 @@ export class SessionMaintenance {
 		return tokens;
 	}
 
-	async runPrePromptCompactionIfNeeded(messages: AgentMessage[]): Promise<void> {
+	async runPrePromptCompactionIfNeeded(messages: AgentMessage[], signal?: AbortSignal): Promise<void> {
 		const model = this.#model;
 		if (!model) return;
 		const contextWindow = model.contextWindow ?? 0;
@@ -2549,6 +2557,15 @@ export class SessionMaintenance {
 		const contextTokens = this.#estimatePrePromptContextTokens(messages, contextWindow);
 		const pendingMidTurnDeadEnd = this.#midTurnDeadEndPendingPrePrompt;
 		this.#midTurnDeadEndPendingPrePrompt = false;
+		// The estimate does not depend on the window, so it also judges the
+		// primary; a return that would need compaction is not taken.
+		const returned = await this.#host.maybeReturnToHealthyPrimary(primary => {
+			const primaryWindow = primary.contextWindow ?? 0;
+			if (primaryWindow <= 0) return true;
+			const fitBudget = Math.max(0, primaryWindow - resolveBudgetReserveTokens(primaryWindow, compactionSettings));
+			return contextTokens <= fitBudget && !shouldCompact(contextTokens, primaryWindow, compactionSettings);
+		}, signal);
+		if (returned) return;
 		if (!shouldCompact(contextTokens, contextWindow, compactionSettings)) {
 			this.maybeStartSpeculativeCompaction(contextTokens, contextWindow);
 			return;
@@ -3942,20 +3959,6 @@ export class SessionMaintenance {
 		);
 		const fitBudget = Math.max(0, contextWindow - resolveBudgetReserveTokens(contextWindow, compactionSettings));
 		return residualTokens <= fitBudget;
-	}
-
-	/**
-	 * Whether `model` takes the live context plus `pendingMessages` (the request
-	 * about to go out) inside its window and below the pre-prompt compaction
-	 * threshold, i.e. without compacting first.
-	 */
-	requestFitsModelWithoutCompaction(model: Model, pendingMessages: AgentMessage[]): boolean {
-		const contextWindow = model.contextWindow ?? 0;
-		if (contextWindow <= 0) return true;
-		const compactionSettings = this.#compactionSettings;
-		const contextTokens = this.#estimatePrePromptContextTokens(pendingMessages, contextWindow);
-		const fitBudget = Math.max(0, contextWindow - resolveBudgetReserveTokens(contextWindow, compactionSettings));
-		return contextTokens <= fitBudget && !shouldCompact(contextTokens, contextWindow, compactionSettings);
 	}
 
 	/**
