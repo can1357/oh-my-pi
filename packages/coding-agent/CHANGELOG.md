@@ -4,7 +4,8 @@
 
 ### Fixed
 
-- Fixed quota-triggered model cooldowns retaining a fallback after fresh usage confirms an Anthropic or Codex quota reset. Overlapping non-quota cooldowns keep their deadlines, and explicit model choices stay unchanged ([#15257](https://github.com/can1357/oh-my-pi/pull/15257) by [@joshuaswarren](https://github.com/joshuaswarren)).
+- Fixed quota-triggered model cooldowns retaining a fallback after fresh usage confirms an Anthropic or Codex quota reset. Overlapping non-quota cooldowns keep their deadlines, and explicit model choices stay unchanged. Cancelling a retry also cancels candidate probes without switching or persisting a fallback model ([#15257](https://github.com/can1357/oh-my-pi/pull/15257) by [@joshuaswarren](https://github.com/joshuaswarren)).
+
 ### Added
 
 - Added `ctx.annotations` so extensions can submit or collect `/annotate` feedback on text and diffs ([#15260](https://github.com/can1357/oh-my-pi/pull/15260) by [@Shadorain](https://github.com/Shadorain)).

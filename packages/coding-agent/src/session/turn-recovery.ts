@@ -2108,6 +2108,7 @@ export class TurnRecovery {
 	async #tryRetryModelFallback(
 		currentSelector: string,
 		failedMessage: AssistantMessage,
+		signal: AbortSignal,
 		options?: {
 			excludeProvider?: string;
 			pinFallback?: boolean;
@@ -2115,6 +2116,7 @@ export class TurnRecovery {
 			wrapAround?: boolean;
 		},
 	): Promise<boolean> {
+		signal.throwIfAborted();
 		const ceiling = this.#host.thinkingLevelCeiling();
 		const latestAssistant = options?.preserveFailedTurn
 			? failedMessage
@@ -2128,7 +2130,9 @@ export class TurnRecovery {
 		const creditTargets = failedModel ? fallbackCreditTargets(failedModel) : [];
 		for (const role of this.retryFallbackChainKeys(currentSelector)) {
 			for (const selector of this.findRetryFallbackCandidates(role, currentSelector, undefined, options)) {
-				if (await this.isRetryFallbackSelectorSuppressed(selector)) continue;
+				const suppressed = await this.isRetryFallbackSelectorSuppressed(selector, signal);
+				signal.throwIfAborted();
+				if (suppressed) continue;
 				const resolved = resolveModelOverride([selector.raw], this.#host.modelRegistry, this.#host.settings);
 				const candidate = resolved.model ?? this.#host.modelRegistry.find(selector.provider, selector.id);
 				if (!candidate) continue;
@@ -2178,11 +2182,14 @@ export class TurnRecovery {
 				if (!this.#host.contextFitsModel(candidate, options?.preserveFailedTurn ? undefined : failedMessage)) {
 					continue;
 				}
-				const apiKey = await this.#host.modelRegistry.getApiKey(candidate, this.#host.sessionId());
+				const apiKey = await this.#host.modelRegistry.getApiKey(candidate, this.#host.sessionId(), { signal });
+				signal.throwIfAborted();
 				if (!apiKey) continue;
 				const previousEditMode = this.#host.resolveActiveEditMode();
 				const applied = await this.applyRetryFallbackCandidate(role, selector, currentSelector, {
 					...options,
+					apiKey,
+					signal,
 					reason: `Request failed: ${failedMessage.errorMessage ?? "provider returned an error without details"}`,
 				});
 				const editModeChanged = this.#host.resolveActiveEditMode() !== previousEditMode;
@@ -2679,12 +2686,32 @@ export class TurnRecovery {
 						quotaFailureTime,
 					);
 				}
-				switchedModel = await this.#tryRetryModelFallback(currentSelector, message, {
-					excludeProvider: longUsageLimitFallback ? currentModel.provider : undefined,
-					pinFallback: classifierRefusal,
-					preserveFailedTurn,
-					wrapAround: longUsageLimitFallback,
-				});
+				if (this.#host.abortInProgress() || this.#host.promptGeneration() !== generation) {
+					return this.#endCancelledRetry();
+				}
+				const fallbackAbortController = new AbortController();
+				this.#retryAbortController?.abort();
+				this.#retryAbortController = fallbackAbortController;
+				try {
+					switchedModel = await this.#tryRetryModelFallback(
+						currentSelector,
+						message,
+						fallbackAbortController.signal,
+						{
+							excludeProvider: longUsageLimitFallback ? currentModel.provider : undefined,
+							pinFallback: classifierRefusal,
+							preserveFailedTurn,
+							wrapAround: longUsageLimitFallback,
+						},
+					);
+					fallbackAbortController.signal.throwIfAborted();
+				} catch (error) {
+					if (!fallbackAbortController.signal.aborted) throw error;
+					if (this.#retryAbortController !== fallbackAbortController) return false;
+					return this.#endCancelledRetry();
+				} finally {
+					if (this.#retryAbortController === fallbackAbortController) this.#retryAbortController = undefined;
+				}
 			}
 			// Auto fallback from a Fireworks Fast variant to its base model. Independent
 			// of the role-fallback setting: it's intrinsic to the Fast contract (speed
@@ -2885,7 +2912,7 @@ export class TurnRecovery {
 		return true;
 	}
 
-	/** Closes a retry saga whose credential wait or backoff sleep was aborted. */
+	/** Closes a retry saga whose credential wait, fallback probe, or backoff sleep was aborted. */
 	async #endCancelledRetry(): Promise<false> {
 		const attempt = this.#retryAttempt;
 		this.#retryAttempt = 0;
