@@ -257,6 +257,9 @@
 
 - Improved JSON and JSONL query streaming and pagination to reduce resource usage, support partial results, and provide clearer continuation between result pages.
 - Clarified the `read` tool documentation with complete examples for requesting line ranges.
+- Cancel a pending model handoff with `/prewalk off` without changing the active model, saved prewalk setting, or delivered continuation history ([#14587](https://github.com/can1357/oh-my-pi/pull/14587) by [@NaC-L](https://github.com/NaC-L)).
+- RPC clients can log out like `/logout`: `get_logout_accounts` lists a provider's stored credentials and `logout` removes one; the TypeScript client and the generated Python, Go, and Rust SDKs gain matching methods ([#14588](https://github.com/can1357/oh-my-pi/pull/14588) by [@andrebrait](https://github.com/andrebrait))
+- Added an Auto Thinking Source setting (`providers.autoThinkingSource`): `vendor` makes the `auto` thinking level use the model vendor's default effort (for example `medium` on Claude Opus 5.5 and GPT-5.6, `high` on other Claude models) instead of classifying each prompt ([#14114](https://github.com/can1357/oh-my-pi/pull/14114) by [@andrebrait](https://github.com/andrebrait))
 
 ### Fixed
 

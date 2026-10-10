@@ -55,6 +55,45 @@ class "openai" {
 	models "gpt-6-astra" {
 		supports-configuration-update #true
 	}
+	// Vendor default effort: what `reasoning.effort` resolves to when omitted,
+	// per each model's docs page (https://developers.openai.com/api/docs/models/<id>)
+	// and the reasoning guide (GPT-5.6 "defaults to medium in both modes").
+	// Pinned per revision so a new generation is re-checked first. Revisions
+	// whose default is `none` (5.1, 5.2, 5.4) or undocumented (gpt-5,
+	// gpt-6-astra, codex SKUs) stay unset: auto never resolves thinking off.
+	// Each id glob also takes its `:`-suffixed routes (`gpt-5.5-pro:batch`)
+	// and dated snapshots (`gpt-5.5-pro-2026-04-23`).
+	family "gpt" {
+		revision "=5" {
+			models "*gpt-5-pro" "*gpt-5-pro:*" "*gpt-5-pro-*" {
+				vendor-default-effort "high"
+			}
+		}
+		revision "=5.4" {
+			models "*-pro" "*-pro:*" "*-pro-*" {
+				vendor-default-effort "medium"
+			}
+		}
+		revision "=5.5" {
+			vendor-default-effort "medium"
+			models "*-pro" "*-pro:*" "*-pro-*" {
+				vendor-default-effort "high"
+			}
+		}
+		revision "=5.6" {
+			vendor-default-effort "medium"
+		}
+		revision "=6" {
+			models "*gpt-6-sol" "*gpt-6-sol:*" "*gpt-6-luna" "*gpt-6-luna:*" {
+				vendor-default-effort "medium"
+			}
+		}
+		revision "=6.1" {
+			models "*gpt-6.1-sol" "*gpt-6.1-sol:*" {
+				vendor-default-effort "medium"
+			}
+		}
+	}
 	// Codex SKUs: the advertised 400K figure includes the output budget; the
 	// true prompt window is 272K. Spark budgets are its own family's.
 	family "codex" {

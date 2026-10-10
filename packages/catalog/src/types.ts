@@ -1624,6 +1624,14 @@ export interface Model<TApi extends Api = Api> {
 	isRecommended?: boolean;
 	/** Canonical thinking capability metadata for this model. */
 	thinking?: ThinkingConfig;
+	/**
+	 * Effort the vendor applies when a request omits it (Codex discovery
+	 * `default_reasoning_level`, else the `vendor-default-effort` rule). `none`
+	 * records a reported thinking-off default, so a rule cannot replace it.
+	 * Absent when no vendor source documents one. Unlike `thinking.defaultLevel`,
+	 * it never changes the session level on model selection.
+	 */
+	vendorDefaultEffort?: Effort | "none";
 	/** Intelligence score delivered by the model catalog. */
 	int?: number | null;
 	/** Catalog-estimated output speed in tokens per second. */
