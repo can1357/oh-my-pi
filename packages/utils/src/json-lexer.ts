@@ -32,14 +32,6 @@ export const LBRACKET = 0x5b;
 export const RBRACKET = 0x5d;
 const U = 0x75;
 
-/**
- * Minimum remaining string length for bulk-skipping ordinary characters in
- * {@link JsonLexer.string} with two engine `indexOf` scans (nearest quote or
- * backslash) instead of one `charCodeAt` per character. Below this the
- * `indexOf` setup costs more than the per-char loop on quote-dense input;
- * long string runs — the multi-KB tool-argument payloads that dominate
- * streaming re-parses — scan several times faster above it.
- */
 const STRING_BULK_SCAN_MIN = 32;
 
 /** Valid chars after `\` in a strict JSON escape: `" \ / b f n r t u`. */
@@ -229,21 +221,17 @@ export class JsonLexer {
 		// commas/colons or sibling members.
 		const lenient = quote === SQUOTE || this.mode === "streaming";
 		const quoteChar = quote === QUOTE ? '"' : "'";
-		// Next quote / backslash at or after the cursor, cached across iterations
-		// and re-searched only once the cursor passes them, so every character is
-		// scanned at most once per kind and the bulk path stays linear even on
-		// escape-dense input (re-searching the far closing quote after each
-		// escape would be quadratic). `n` means "none before end of input".
+		// Cache each next delimiter so escape-dense strings do not repeatedly
+		// search for a distant closing quote and turn the scan quadratic.
 		let nextQuote = -1;
 		let nextBackslash = -1;
 		while (i < n) {
-			// Bulk-skip a run of ordinary characters: jump to the nearest quote or
-			// backslash instead of one `charCodeAt` per character. Only entered on
-			// an ordinary character, so back-to-back escapes never pay an `indexOf`;
-			// short tails keep the per-char loop. Landing on a special char falls
-			// through to the unchanged handling below, so tokens are identical.
-			const c0 = s.charCodeAt(i);
-			if (c0 !== BACKSLASH && c0 !== quote && n - i > STRING_BULK_SCAN_MIN) {
+			let cc = s.charCodeAt(i);
+			if (cc !== BACKSLASH && cc !== quote) {
+				if (i - runStart < STRING_BULK_SCAN_MIN || n - i <= STRING_BULK_SCAN_MIN) {
+					i++;
+					continue;
+				}
 				if (nextQuote < i) {
 					const q = s.indexOf(quoteChar, i);
 					nextQuote = q === -1 ? n : q;
@@ -254,11 +242,7 @@ export class JsonLexer {
 				}
 				i = nextQuote < nextBackslash ? nextQuote : nextBackslash;
 				if (i >= n) break;
-			}
-			const cc = s.charCodeAt(i);
-			if (cc !== BACKSLASH && cc !== quote) {
-				i++;
-				continue;
+				cc = s.charCodeAt(i);
 			}
 			if (cc === quote) {
 				const look = lenient ? this.#quoteLookahead(i + 1) : QuoteLook.Closes;

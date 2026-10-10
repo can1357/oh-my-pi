@@ -1,45 +1,60 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
-import { JsonLexer } from "@oh-my-pi/pi-utils/json-lexer";
-
-const QUOTE = 0x22;
+import { JsonLexer, QUOTE } from "@oh-my-pi/pi-utils/json-lexer";
+import { parseStreamingJson } from "@oh-my-pi/pi-utils/json-parse";
 
 afterEach(() => {
 	vi.restoreAllMocks();
 });
 
-/**
- * Contract: `JsonLexer.string()` scans a string in linear time whatever its
- * escape density, and decodes it exactly. Streaming tool-call arguments are
- * re-lexed on every growth step, so a superlinear scan on escape-heavy
- * payloads (Windows paths, escaped code) turns each partial parse into a
- * stall. Linearity is asserted structurally — the scan must not search the
- * remaining input once per escape — instead of with wall-clock timing.
- */
 describe("JsonLexer string scan", () => {
-	it("does not re-search the remaining input once per escape", () => {
+	it("does not re-search the remaining input once per adjacent escape", () => {
 		const escapes = 4096;
 		const src = `"${"\\\\".repeat(escapes)}${"x".repeat(64)}"`;
 		const indexOf = vi.spyOn(String.prototype, "indexOf");
-
 		const progress = new JsonLexer(src, "strict").string(QUOTE);
-		// Count before asserting: matchers call indexOf themselves.
 		const searches = indexOf.mock.calls.length;
 		indexOf.mockRestore();
 
-		// A quadratic scan searches for the far closing quote after every escape
-		// (one call per escape at least); a linear one searches a bounded number
-		// of times per ordinary-character run.
 		expect(searches).toBeLessThan(16);
-		expect(progress.complete).toBe(true);
-		expect(progress.value).toBe(`${"\\".repeat(escapes)}${"x".repeat(64)}`);
+		expect(progress).toEqual({
+			value: `${"\\".repeat(escapes)}${"x".repeat(64)}`,
+			complete: true,
+			stableLen: escapes + 64,
+		});
 	});
 
-	it("decodes long mixed runs of text and escapes like the per-character scan", () => {
+	it("does not re-search a distant closing quote after every mixed escape", () => {
+		const src = `"${`${"a".repeat(64)}\\n`.repeat(4096)}${"x".repeat(64)}"`;
+		const indexOf = vi.spyOn(String.prototype, "indexOf");
+		const progress = new JsonLexer(src, "strict").string(QUOTE);
+		const quoteSearches = indexOf.mock.calls.filter(args => args[0] === '"').length;
+		indexOf.mockRestore();
+
+		expect(quoteSearches).toBeLessThan(16);
+		expect(progress.value).toBe(JSON.parse(src));
+	});
+
+	it("decodes long mixed runs of text and escapes", () => {
 		const body = 'C:\\\\Users\\\\me\\\\file \\"quoted\\" \\n line \\u00e9 '.repeat(400);
 		const src = `"${body}"`;
+		expect(new JsonLexer(src, "strict").string(QUOTE).value).toBe(JSON.parse(src));
+	});
 
-		const progress = new JsonLexer(src, "strict").string(QUOTE);
+	it("keeps a trailing split escape unstable after skipping a long run", () => {
+		const prefix = "x".repeat(128);
+		expect(new JsonLexer(`"${prefix}\\uD83D`, "incoming").string(QUOTE)).toEqual({
+			value: `${prefix}\ud83d`,
+			stableLen: prefix.length,
+			complete: false,
+		});
+		expect(parseStreamingJson(`{"text":"${prefix}\\uD83D\\uDE00"}`)).toEqual({ text: `${prefix}😀` });
+	});
 
-		expect(progress.value).toBe(JSON.parse(src));
+	it("preserves inner quote recovery and following fields after a long run", () => {
+		const prefix = "x".repeat(128);
+		expect(parseStreamingJson(`{"text":"${prefix}say "hello" again", "next": 1}`)).toEqual({
+			text: `${prefix}say "hello" again`,
+			next: 1,
+		});
 	});
 });
