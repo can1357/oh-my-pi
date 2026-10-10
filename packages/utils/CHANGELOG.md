@@ -2,11 +2,13 @@
 
 ## [Unreleased]
 
-## [18.8.8] - 2026-10-10
+## [18.8.9] - 2026-10-10
 
 ### Added
 
 - Added `hueDistance`, the angular distance between two OKLCH hues
+
+## [18.8.8] - 2026-10-10
 
 ### Fixed
 

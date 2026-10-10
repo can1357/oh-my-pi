@@ -4,7 +4,13 @@
 
 ### Added
 
-- Added a usage-report freshness cutoff to model health queries, so callers can require quota evidence newer than a failure.
+- Added a usage-report freshness cutoff to model health queries, so callers can require quota evidence newer than a failure ([#15257](https://github.com/can1357/oh-my-pi/pull/15257)).
+
+## [18.8.9] - 2026-10-10
+
+### Changed
+
+- Updated state field rendering to trim trailing whitespace and normalize empty collection formatting for consistent prompt output
 
 ## [18.8.8] - 2026-10-10
 

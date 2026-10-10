@@ -302,7 +302,7 @@ export function resolveReleaseBinaryAsset(
  *
  * The npm dist-tag and the GitHub release channel disagree in both directions.
  * The pipeline publishes the GitHub release first (`release_npm` needs
- * `release_github_verify` in `.github/workflows/ci.yml`), so GitHub leads
+ * `release_github` in `.github/workflows/ci.yml`), so GitHub leads
  * during a release; and a publish that only half-completes leaves the gap
  * permanent — 18.2.9 reached npm `latest` with no `v18.2.9` GitHub release at
  * all (issue #12913). Binary installs therefore install what GitHub actually

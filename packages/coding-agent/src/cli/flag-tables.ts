@@ -369,27 +369,32 @@ export function flagConsumesValue(flag: string, next: string | undefined): boole
 }
 
 /**
- * Session-source launch flags dropped when relaunching into an existing
- * session: the restart supplies its own `--resume`, and replaying a stale
- * continue/fork/import selector would re-run its one-shot session choice.
+ * One-shot launch selectors dropped when relaunching into an existing
+ * session: the relaunch supplies its own session source, and replaying a
+ * stale continue/fork/import selector would re-run its one-shot session
+ * choice. `--goal` belongs here too: it seeds a fresh session only, and
+ * `validateGoalLaunch` rejects it beside any resume/fork selector.
  */
-const SESSION_SOURCE_FLAGS: ReadonlySet<string> = new Set([
-	"--resume",
-	"-r",
-	"--session",
-	"--continue",
-	"-c",
-	"--fork",
-	"--from-claude",
-	"--from-codex",
-]);
+const ONE_SHOT_LAUNCH_FLAGS: Readonly<Record<string, true>> = {
+	"--resume": true,
+	"-r": true,
+	"--session": true,
+	"--continue": true,
+	"-c": true,
+	"--fork": true,
+	"--from-claude": true,
+	"--from-codex": true,
+	"--goal": true,
+};
 
 /**
- * Rewrite the launch argv for an in-place self-restart (`/restart`).
+ * Rewrite the launch argv for a relaunch of this session (`/restart`, and
+ * `/fork pane|window` with `resumeSessionId` undefined).
  *
  * Keeps every configuration flag as launched, but drops:
- * - session-source flags ({@link SESSION_SOURCE_FLAGS}, including inline
+ * - one-shot selectors ({@link ONE_SHOT_LAUNCH_FLAGS}, including inline
  *   `--resume=<id>` forms) — the relaunch resumes `resumeSessionId` instead;
+ * - flags in `drop`, which the caller re-supplies with current values;
  * - positionals (prompt messages, `@file` args, subcommand tokens) — their
  *   effect is already in the resumed transcript, so replaying them would
  *   duplicate the initial prompt.
@@ -399,7 +404,11 @@ const SESSION_SOURCE_FLAGS: ReadonlySet<string> = new Set([
  * `resumeSessionId` is omitted for a session that never materialized on disk;
  * the relaunch then starts fresh with the same configuration.
  */
-export function restartArgv(argv: string[], resumeSessionId: string | undefined): string[] {
+export function restartArgv(
+	argv: string[],
+	resumeSessionId: string | undefined,
+	drop?: Readonly<Record<string, true>>,
+): string[] {
 	const kept: string[] = [];
 	for (let i = 0; i < argv.length; i++) {
 		const arg = argv[i];
@@ -407,7 +416,7 @@ export function restartArgv(argv: string[], resumeSessionId: string | undefined)
 		if (!arg.startsWith("-")) continue; // positional: prompt message, @file, or subcommand
 		const consumesNext = flagConsumesValue(arg, argv[i + 1]);
 		const flag = arg.startsWith("--") ? arg.split("=", 1)[0] : arg;
-		if (SESSION_SOURCE_FLAGS.has(flag)) {
+		if (Object.hasOwn(ONE_SHOT_LAUNCH_FLAGS, flag) || (drop !== undefined && Object.hasOwn(drop, flag))) {
 			if (consumesNext) i++;
 			continue;
 		}
