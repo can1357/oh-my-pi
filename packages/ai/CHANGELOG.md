@@ -117,6 +117,10 @@
 - Fixed Factory Droid Gemini ignoring an error the server reports mid-response, which hid its status and retried errors that cannot succeed ([#15103](https://github.com/can1357/oh-my-pi/pull/15103) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed resumed OpenAI Responses sessions (xAI, Factory Droid, OpenAI and other hosts) dropping all earlier encrypted reasoning on their first request; GitHub Copilot still rebuilds history until its first response ([#15148](https://github.com/can1357/oh-my-pi/pull/15148) by [@will-bogusz](https://github.com/will-bogusz))
 
+### Changed
+
+- `auth.accountPolicies` `priority` now outranks a failed usage fetch, so a preferred account whose usage report is unavailable no longer hands its traffic to a measured lower-priority sibling; blocks, reserve and hot 5-hour windows still come first
+
 ## [18.8.7] - 2026-10-09
 
 ### Added
@@ -245,10 +249,6 @@
 
 - Reduced CPU spent on thinking-loop detection while streaming long reasoning ([#14284](https://github.com/can1357/oh-my-pi/pull/14284) by [@abilliontokens](https://github.com/abilliontokens)).
 - Added `recordAffinity: false` to credential resolution options, selecting as the session would without pinning the choice to that session ([#14512](https://github.com/can1357/oh-my-pi/pull/14512) by [@will-bogusz](https://github.com/will-bogusz))
-
-### Changed
-
-- `auth.accountPolicies` `priority` now outranks a failed usage fetch, so a preferred account whose usage report is unavailable no longer hands its traffic to a measured lower-priority sibling; blocks, reserve and hot 5-hour windows still come first
 
 ### Fixed
 
