@@ -511,12 +511,8 @@ impl AxBackend for MacAx {
 
 	fn focus(&mut self, h: &AxHandle) -> CoreResult<()> {
 		let element = mac_handle(h)?;
-		let attribute = CFString::from_str("AXFocused");
 		skylight::with_background_guard(element_pid(element)?, || {
-			// SAFETY: The singleton CFBoolean and retained element remain valid
-			// for the synchronous setter call.
-			let error = unsafe { element.set_attribute_value(&attribute, CFBoolean::new(true)) };
-			ax_result(error, "setting AXFocused=true failed")
+			ax_result(focus_element(element), "setting AXFocused=true failed")
 		})
 	}
 
@@ -669,15 +665,29 @@ fn set_string_value(element: &AXUIElement, name: &str, text: &str) -> CoreResult
 }
 
 fn verify_text_value(element: &AXUIElement, sent: &str, expected: &str) -> CoreResult<()> {
-	text_readback(sent, expected, copy_string(element, "AXValue").as_deref())
+	text_readback(sent, expected, copy_string(element, "AXValue").as_deref(), is_secure(element))
+}
+
+fn is_secure(element: &AXUIElement) -> bool {
+	copy_string(element, "AXSubrole").as_deref() == Some("AXSecureTextField")
 }
 
 /// Exact equality is the verdict: a field that shows a rewritten value has
 /// not been shown to hold what was sent (Contacts regroups a phone number in
 /// the field and stores none of it). The error names what the field reads so
-/// the next step needs no extra read.
-fn text_readback(sent: &str, expected: &str, actual: Option<&str>) -> CoreResult<()> {
+/// the next step needs no extra read, except in a secure field, whose text
+/// never enters an error.
+fn text_readback(sent: &str, expected: &str, actual: Option<&str>, secure: bool) -> CoreResult<()> {
 	const SHOWN: usize = 200;
+	if actual == Some(expected) {
+		return Ok(());
+	}
+	if secure {
+		return Err(DesktopError::ax_failed(
+			"the secure text field's value could not be confirmed after the write; inspect the \
+			 target before writing again",
+		));
+	}
 	let quote = |text: &str| format!("{:?}", truncate_chars(text.to_owned(), SHOWN));
 	let Some(actual) = actual else {
 		return Err(DesktopError::ax_failed(format!(
@@ -686,9 +696,6 @@ fn text_readback(sent: &str, expected: &str, actual: Option<&str>) -> CoreResult
 			quote(sent),
 		)));
 	};
-	if actual == expected {
-		return Ok(());
-	}
 	let whole = if sent == expected {
 		String::new()
 	} else {
@@ -792,49 +799,68 @@ fn replace_native_text(element: &AXUIElement, text: &str) -> CoreResult<bool> {
 	if !matches!(
 		copy_string(element, "AXRole").as_deref(),
 		Some("AXTextField" | "AXTextArea" | "AXComboBox")
-	) {
-		return Ok(false);
-	}
-	// An unfocused Cocoa field has no field editor, so it publishes no
-	// settable selection until it is focused. Focus moves only inside a
-	// background app: in the front app it would move the user's caret.
-	if copy_bool(element, "AXFocused") != Some(true) {
-		let pid = element_pid(element)?;
-		if skylight::front_pid().is_none_or(|front| front == pid) {
-			return Ok(false);
-		}
-		let attribute = CFString::from_str("AXFocused");
-		// SAFETY: The singleton CFBoolean and retained element remain valid
-		// for the synchronous setter call.
-		let error = unsafe { element.set_attribute_value(&attribute, CFBoolean::new(true)) };
-		if error != AXError::Success {
-			return Ok(false);
-		}
-	}
-	if !attribute_settable(element, "AXSelectedText")
-		|| !attribute_settable(element, "AXSelectedTextRange")
+	) || is_secure(element)
 	{
 		return Ok(false);
 	}
+	// An unfocused Cocoa field has no field editor, so it publishes no
+	// settable selection until it is focused.
+	let mut previous = None;
+	if copy_bool(element, "AXFocused") != Some(true) {
+		let pid = element_pid(element)?;
+		if !may_borrow_focus(skylight::front_pid(), pid) {
+			return Ok(false);
+		}
+		previous = probe_application(pid).and_then(|app| copy_element(&app, "AXFocusedUIElement"));
+		if focus_element(element) != AXError::Success {
+			return Ok(false);
+		}
+	}
+	if !select_whole_value(element) {
+		// Nothing was written: hand focus back before the `AXValue` fallback.
+		if let Some(previous) = previous {
+			let _ = focus_element(&previous);
+		}
+		return Ok(false);
+	}
+	set_string_value(element, "AXSelectedText", text)?;
+	verify_text_value(element, text, text)?;
+	Ok(true)
+}
+
+/// Focus moves only inside a background app: in the front app it would move
+/// the user's caret, and an unknown front process counts as the target's.
+fn may_borrow_focus(front: Option<libc::pid_t>, target: libc::pid_t) -> bool {
+	front.is_some_and(|front| front != target)
+}
+
+fn focus_element(element: &AXUIElement) -> AXError {
+	let attribute = CFString::from_str("AXFocused");
+	// SAFETY: The singleton CFBoolean and retained element remain valid for the
+	// synchronous setter call.
+	unsafe { element.set_attribute_value(&attribute, CFBoolean::new(true)) }
+}
+
+fn select_whole_value(element: &AXUIElement) -> bool {
+	if !attribute_settable(element, "AXSelectedText")
+		|| !attribute_settable(element, "AXSelectedTextRange")
+	{
+		return false;
+	}
 	// Focusing can swap in the field editor, so the length is read afterward.
 	let Some(before) = copy_string(element, "AXValue") else {
-		return Ok(false);
+		return false;
 	};
 	let mut all = CFRange { location: 0, length: before.encode_utf16().count() as isize };
 	// SAFETY: `all` is a live CFRange matching the requested AXValue type.
 	let Some(range) =
 		(unsafe { AXValue::new(AXValueType::CFRange, NonNull::from(&mut all).cast()) })
 	else {
-		return Ok(false);
+		return false;
 	};
 	let attribute = CFString::from_str("AXSelectedTextRange");
 	// SAFETY: The element, attribute and range remain retained for the setter.
-	if unsafe { element.set_attribute_value(&attribute, &range) } != AXError::Success {
-		return Ok(false);
-	}
-	set_string_value(element, "AXSelectedText", text)?;
-	verify_text_value(element, text, text)?;
-	Ok(true)
+	(unsafe { element.set_attribute_value(&attribute, &range) }) == AXError::Success
 }
 
 /// AX text ranges use UTF-16 offsets, not UTF-8 byte or Unicode scalar indices.
@@ -1255,8 +1281,8 @@ mod tests {
 	use objc2_core_foundation::CFNumber;
 
 	use super::{
-		AttachedCandidate, ax_result, element_action_result, replace_utf16_selection,
-		select_attached, stringify_value, text_readback,
+		AttachedCandidate, ax_result, element_action_result, may_borrow_focus,
+		replace_utf16_selection, select_attached, stringify_value, text_readback,
 	};
 	use crate::desktop::error::ErrorCode;
 
@@ -1310,7 +1336,7 @@ mod tests {
 	#[test]
 	fn rewritten_readback_fails_and_names_what_the_field_reads() {
 		let error =
-			text_readback("555-789-0123", "555-789-0123", Some("(555) 789-0123")).unwrap_err();
+			text_readback("555-789-0123", "555-789-0123", Some("(555) 789-0123"), false).unwrap_err();
 		assert_eq!(error.code, ErrorCode::AxFailed);
 		assert!(
 			error
@@ -1320,12 +1346,12 @@ mod tests {
 			error.message
 		);
 		assert!(!error.message.contains("instead of"), "{}", error.message);
-		assert!(text_readback("555-789-0123", "555-789-0123", Some("555-789-0123")).is_ok());
+		assert!(text_readback("555-789-0123", "555-789-0123", Some("555-789-0123"), false).is_ok());
 	}
 
 	#[test]
 	fn inserted_readback_names_the_whole_value_it_expected() {
-		let error = text_readback("b", "abc", Some("ac")).unwrap_err();
+		let error = text_readback("b", "abc", Some("ac"), false).unwrap_err();
 		assert!(
 			error
 				.message
@@ -1333,16 +1359,34 @@ mod tests {
 			"{}",
 			error.message
 		);
-		let unread = text_readback("b", "abc", None).unwrap_err();
+		let unread = text_readback("b", "abc", None, false).unwrap_err();
 		assert!(unread.message.contains("could not be read back"), "{}", unread.message);
 	}
 
 	#[test]
 	fn long_readbacks_are_cut() {
 		let long = "x".repeat(500);
-		let error = text_readback("y", "y", Some(&long)).unwrap_err();
+		let error = text_readback("y", "y", Some(&long), false).unwrap_err();
 		assert!(error.message.len() < 400, "{}", error.message.len());
 		assert!(error.message.contains('…'), "{}", error.message);
+	}
+
+	#[test]
+	fn secure_readbacks_never_quote_the_text() {
+		for actual in [None, Some("••••"), Some("")] {
+			let error = text_readback("hunter2", "sk-hunter2", actual, true).unwrap_err();
+			assert_eq!(error.code, ErrorCode::AxFailed);
+			assert!(!error.message.contains("hunter2"), "{}", error.message);
+			assert!(error.message.contains("secure"), "{}", error.message);
+		}
+		assert!(text_readback("hunter2", "hunter2", Some("hunter2"), true).is_ok());
+	}
+
+	#[test]
+	fn focus_is_borrowed_only_from_a_known_background_app() {
+		assert!(may_borrow_focus(Some(10), 20));
+		assert!(!may_borrow_focus(Some(20), 20));
+		assert!(!may_borrow_focus(None, 20));
 	}
 
 	#[test]
