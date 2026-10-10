@@ -12895,6 +12895,8 @@ export class AgentSession implements SettingsScope {
 					for (const status of statuses) {
 						if (!status.error || status.retryAfterMs === undefined || !Number.isFinite(status.retryAfterMs))
 							continue;
+						// Re-reading an opted-out account's listing can never lead to a spend.
+						if (authStorage.oauth.policy(provider, status)?.autoRedeem === false) continue;
 						const delay = Math.max(0, status.retryAfterMs);
 						retryAfterMs = retryAfterMs === undefined ? delay : Math.min(retryAfterMs, delay);
 					}

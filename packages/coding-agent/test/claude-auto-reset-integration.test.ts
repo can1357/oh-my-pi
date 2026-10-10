@@ -291,6 +291,30 @@ describe("Claude saved-reset trigger integration", () => {
 		expect(session.agent.state.messages.at(-1)).toMatchObject({ role: "assistant", stopReason: "stop" });
 	});
 
+	it("neither spends nor re-reads throttled reset discovery for a blocked account whose policy turns auto-redeem off", async () => {
+		const { session, targets } = buildSession({
+			report: null,
+			status: claudeStatus(true),
+			streamErrorFirst: true,
+			listFailures: 1,
+			maxDelayMs: 2_500,
+		});
+		authStorage.setAccountPolicies({
+			accountPolicies: [{ provider: "anthropic", account: { email: EMAIL, orgId: ORG_ID }, autoRedeem: false }],
+			defaultReservePct: DEFAULT_USAGE_RESERVE_PCT,
+		});
+		mockSchedulerWaitWithClock();
+		try {
+			await session.prompt("hit the limit on a borrowed account");
+			await session.waitForIdle();
+		} finally {
+			authStorage.setAccountPolicies({ accountPolicies: [], defaultReservePct: DEFAULT_USAGE_RESERVE_PCT });
+		}
+
+		expect(targets).toEqual([]);
+		expect(authStorage.resets.list).toHaveBeenCalledTimes(1);
+	});
+
 	it("cancels reset discovery backoff without spending a credit or resuming the task", async () => {
 		const { session, targets } = buildSession({
 			report: null,
