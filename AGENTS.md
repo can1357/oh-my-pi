@@ -43,7 +43,7 @@ When authorized to create or edit a contributor-submitted PR, follow the checkli
 
 - No `any` unless absolutely necessary.
 - **NEVER use `ReturnType<>`** — use the actual type name.
-- **NEVER use inline imports** — no `await import()`, no `import("pkg").Type` in type positions, no dynamic type imports. Always top-level.
+- **Imports**: keep type imports and ordinary module dependencies top-level; never use `import("pkg").Type` in type positions. Runtime `import()` is allowed at deliberate lazy-loading and optional-dependency boundaries, such as CLI dispatch and provider loaders, so unused subsystems do not increase startup cost.
 - Check `node_modules` for external API types instead of guessing.
 - **Barrel exports**: prefer `export * from "./module"` over named re-exports, including `export type { ... } from`. In pure `index.ts` barrels, use star re-exports even for single-specifier cases. If stars create ambiguity, remove the redundant export path; do not keep duplicates.
 - **Class privacy**: use ES `#private` fields; leave externally accessible members bare. **No `private`/`protected`/`public` keyword on fields or methods**, except on **constructor parameter properties** where TypeScript requires it (e.g. `constructor(private readonly session: ToolSession)`).
