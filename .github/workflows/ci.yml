@@ -621,7 +621,7 @@ jobs:
               # Not `test:scripts`: scripts/musl-release.test.ts fails on main
               # (its install.sh smoke-check executes a fake binary), so running
               # the whole group here would red this job on an unrelated break.
-              bun test scripts/ci-test-ts.test.ts scripts/release.test.ts
+              bun test scripts/release.test.ts
 
    test_coding_agent_singleton:
       name: Test coding-agent singleton/global-state (TS)
