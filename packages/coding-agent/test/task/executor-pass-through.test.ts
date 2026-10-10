@@ -286,6 +286,23 @@ describe("runSubprocess parent-discovery pass-through (issue #2190)", () => {
 		expect(forwarded?.parentTaskPrefix).toBe("ChildAgent");
 	});
 
+	it("derives the child's prompt-cache key from the parent's so sibling spawns of one agent share it", async () => {
+		const forwardedKeys: Array<string | undefined> = [];
+		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
+			forwardedKeys.push(options?.providerPromptCacheKey);
+			return createSessionResult(yieldEmittingSession());
+		});
+
+		await runSubprocess({ ...baseOptions, id: "SiblingA", parentPromptCacheKey: "parent-key" });
+		await runSubprocess({ ...baseOptions, id: "SiblingB", parentPromptCacheKey: "parent-key" });
+		await runSubprocess({ ...baseOptions, id: "NoParentKey" });
+
+		expect(forwardedKeys[0]).toBe(`parent-key:${baseAgent.name}`);
+		expect(forwardedKeys[1]).toBe(forwardedKeys[0]);
+		// Without a parent key the child keeps routing on its own session id.
+		expect(forwardedKeys[2]).toBeUndefined();
+	});
+
 	it("removes MCP and fresh discovery sources for a restricted child", async () => {
 		const session = yieldEmittingSession();
 		const persistedInits: Array<{ restrictToolNames?: boolean; tools: string[] }> = [];
