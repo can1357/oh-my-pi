@@ -5,7 +5,7 @@
 ### Changed
 
 - macOS background keystrokes into an app with several windows now reach the target window instead of throwing `BackgroundUnavailable` ([#15184](https://github.com/can1357/oh-my-pi/pull/15184) by [@will-bogusz](https://github.com/will-bogusz))
-- macOS background drags, mouse holds, clicks with modifiers, right-clicks and scrolls in Electron apps now run without bringing the app forward, instead of throwing `BackgroundUnavailable` ([#15185](https://github.com/can1357/oh-my-pi/pull/15185) by [@will-bogusz](https://github.com/will-bogusz))
+- macOS background drags, mouse holds, clicks with modifiers, right-clicks and scrolls in Electron apps now run without bringing the app forward, instead of throwing `BackgroundUnavailable`; holds with the right button or Control, and gestures with modifiers or keys into Apple Screen Sharing, still throw it ([#15185](https://github.com/can1357/oh-my-pi/pull/15185) by [@will-bogusz](https://github.com/will-bogusz))
 - macOS background clicks into apps built on macOS's own Tk 8.5 now run; Tk 8.6 and later still throw `BackgroundUnavailable` ([#15185](https://github.com/can1357/oh-my-pi/pull/15185) by [@will-bogusz](https://github.com/will-bogusz))
 - macOS background keystrokes, left clicks and menu actions aimed at a non-key window of the app the user is in now throw `BackgroundUnavailable` instead of moving the user's typing to that window; pass `takeover: true` for it ([#15184](https://github.com/can1357/oh-my-pi/pull/15184) by [@will-bogusz](https://github.com/will-bogusz))
 
@@ -13,7 +13,7 @@
 
 - Fixed macOS background key presses, typing, held keys, left clicks and menu actions taking keyboard focus from the user's app, which then dropped pastes and shortcuts until clicked again ([#15184](https://github.com/can1357/oh-my-pi/pull/15184) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed macOS background typing into Chrome pages and background shortcuts such as ⌘A in TextEdit doing nothing ([#15184](https://github.com/can1357/oh-my-pi/pull/15184) by [@will-bogusz](https://github.com/will-bogusz))
-- Fixed a macOS background right-click or Control-click that opened a context menu leaving the menu open, which kept the keyboard from the user's app; the menu now closes and the click throws `BackgroundUnavailable` ([#15185](https://github.com/can1357/oh-my-pi/pull/15185) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed a macOS background right-click or Control-click that opened a context menu leaving the menu open, which kept the keyboard from the user's app; the menu now closes and the click throws `InputFailed`, since it was delivered ([#15185](https://github.com/can1357/oh-my-pi/pull/15185) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.8.7] - 2026-10-09
 
