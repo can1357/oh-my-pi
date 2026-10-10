@@ -1374,9 +1374,11 @@ export class ExtensionUiController {
 			signal?.removeEventListener("abort", onAbort);
 			if (started) {
 				hide?.();
-				releaseBlocked?.();
 				this.#dialogActive = false;
+				// Present the next dialog before releasing this hold; no intermediate
+				// done/working report may escape while another prompt is waiting.
 				this.#advanceDialogQueue();
+				releaseBlocked?.();
 			}
 			resolve(value);
 		};
@@ -1396,10 +1398,10 @@ export class ExtensionUiController {
 			} catch (error) {
 				settled = true;
 				signal?.removeEventListener("abort", onAbort);
-				releaseBlocked();
 				this.#dialogActive = false;
-				reject(error);
 				this.#advanceDialogQueue();
+				releaseBlocked();
+				reject(error);
 			}
 		};
 

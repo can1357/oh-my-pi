@@ -566,6 +566,25 @@ describe("ExtensionUiController OSC 7501 run status", () => {
 		expect(writes.slice(1)).toEqual([report("state=done:app=omp")]);
 	});
 
+	it("hands a blocked record to the next queued dialog without reporting completion between prompts", async () => {
+		const harness = makeHarness();
+		const ui = await harness.init();
+		const first = ui.confirm("Approve deployment?", "terraform apply");
+		const second = ui.input("Deployment reason?");
+		setRunStatus({ state: "done" });
+
+		harness.handleInput("\r");
+		expect(await first).toBe(true);
+		expect(writes).toEqual([
+			report(`state=blocked:kind=permission:app=omp:msg=${Buffer.from("Approve deployment?").toString("base64")}`),
+			report(`state=blocked:kind=question:app=omp:msg=${Buffer.from("Deployment reason?").toString("base64")}`),
+		]);
+
+		harness.handleInput("\x1b");
+		expect(await second).toBeUndefined();
+		expect(writes.at(-1)).toBe(report("state=done:app=omp"));
+	});
+
 	it("reports an extension input as blocked on a question", async () => {
 		const harness = makeHarness();
 		const ui = await harness.init();
