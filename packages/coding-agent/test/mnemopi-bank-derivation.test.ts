@@ -1,10 +1,62 @@
 import { Database } from "bun:sqlite";
-import { afterAll, beforeAll, describe, expect, it } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, spyOn } from "bun:test";
+import * as nodeFs from "node:fs";
 import { mkdirSync } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { computeMnemopiBankScope, extendRecallWithLegacyBanks } from "@oh-my-pi/pi-coding-agent/mnemopi/config";
+import {
+	computeMnemopiBankScope,
+	extendRecallWithLegacyBanks,
+	projectBankSegment,
+} from "@oh-my-pi/pi-coding-agent/mnemopi/config";
 import { removeWithRetries, TempDir } from "@oh-my-pi/pi-utils";
+import * as vcsModule from "@oh-my-pi/pi-natives/vcs";
+
+// Isolate `git` invocations in this file from the host's global config —
+// `~/.gitconfig` commit signing or template hooks would otherwise turn the
+// worktree fixture's `git init`/`git commit`/`git worktree add` into a flaky
+// dance. Scoped to each spawned `git` process's own `env` below rather than
+// mutated onto `process.env`, so concurrently loaded tests/hooks in the same
+// worker never observe a disabled global git config.
+function runGit(cwd: string, args: string[]): string {
+	const result = Bun.spawnSync(["git", ...args], {
+		cwd,
+		stdout: "pipe",
+		stderr: "pipe",
+		env: {
+			...process.env,
+			GIT_CONFIG_GLOBAL: "/dev/null",
+			GIT_CONFIG_SYSTEM: "/dev/null",
+			GIT_CONFIG_NOSYSTEM: "1",
+			GIT_TERMINAL_PROMPT: "0",
+			GIT_ASKPASS: "true",
+			XDG_CONFIG_HOME: undefined,
+			GIT_AUTHOR_NAME: "Test User",
+			GIT_AUTHOR_EMAIL: "test@example.com",
+			GIT_COMMITTER_NAME: "Test User",
+			GIT_COMMITTER_EMAIL: "test@example.com",
+		},
+	});
+	if (result.exitCode !== 0) {
+		const stderr = new TextDecoder().decode(result.stderr).trim();
+		const stdout = new TextDecoder().decode(result.stdout).trim();
+		throw new Error(`git ${args.join(" ")} failed: ${stderr || stdout || `exit ${result.exitCode}`}`);
+	}
+	return new TextDecoder().decode(result.stdout).trim();
+}
+
+/**
+ * Write a `.jj/repo` FILE pointing at `primaryJjRepoDir`, matching the shape
+ * `jj workspace add` writes for a non-default workspace (content is a path
+ * relative to the workspace's own `.jj` dir). No real `jj` binary is
+ * invoked — this mirrors the manual-fixture convention in
+ * `test/utils/jj.test.ts` rather than depending on `jj` being installed.
+ */
+async function writeJjWorkspacePointer(workspaceRoot: string, primaryJjRepoDir: string): Promise<void> {
+	const jjDir = path.join(workspaceRoot, ".jj");
+	await fs.mkdir(jjDir, { recursive: true });
+	await fs.writeFile(path.join(jjDir, "repo"), path.relative(jjDir, primaryJjRepoDir));
+}
 
 // Set up a fixture filesystem we can reuse across the two regression
 // suites — same shape as `~/.omp/memories/mnemopi/` on a real install.
@@ -52,21 +104,18 @@ function createBankFixture(bank: string, metadataRows: readonly Record<string, u
 }
 
 describe("computeMnemopiBankScope (#2412)", () => {
-	// Regression: same cwd must hash to the same bank no matter what the
-	// ambient git layout looks like. The previous derivation walked
-	// `git.repo.resolveSync(cwd)?.repoRoot ?? path.resolve(cwd)`, so a
-	// disappearing/appearing ancestor `.git` repointed the same conversation
-	// directory to a different bank and stranded its memories.
-	it("returns the same per-project bank for one cwd regardless of git state", async () => {
+	// #2412: a `.git` above the cwd that is not a repository must not move the
+	// bank; native discovery only accepts a `.git` that resolves to a
+	// repository. A real repository created above the cwd does move it: the
+	// bank follows the enclosing repository's primary root.
+	it("ignores an ancestor .git that is not a repository", async () => {
 		const baseDir = await TempDir.create("@mnemopi-stable-bank-");
 		try {
 			const project = baseDir.join("projects", "omp-workstation");
 			await fs.mkdir(project, { recursive: true });
 			const withoutGit = computeMnemopiBankScope(undefined, project, "per-project").bank;
 
-			// Plant an ancestor `.git` marker — the old code path resolved
-			// `project` to `baseDir/projects` via this file, producing a
-			// `projects-<hash>` bank id distinct from the cwd-derived one.
+			// Plant an ancestor `.git` gitfile whose target is not a repository.
 			await fs.mkdir(baseDir.join("projects"), { recursive: true });
 			await fs.writeFile(baseDir.join("projects", ".git"), "gitdir: /dev/null\n");
 			const withAncestorGit = computeMnemopiBankScope(undefined, project, "per-project").bank;
@@ -87,6 +136,35 @@ describe("computeMnemopiBankScope (#2412)", () => {
 		expect(a).not.toBe(b);
 	});
 
+	// Regression: `resolveProjectRoot` can get a root back as the caller
+	// spelled it: the directory itself outside any repository, and from native
+	// discovery inside one (jj's walk is lexical; git reports the spelled root
+	// when that spelling reaches the same checkout). So a checkout or a plain
+	// directory reached through a symlinked alias hashed a different string
+	// than its real path. Canonicalizing the resolved root (`fs.realpathSync`)
+	// collapses them onto one bank, the same identity contract worktrees and
+	// workspaces already get.
+	it("collapses a symlinked alias onto its real path, inside and outside a repository", async () => {
+		const baseDir = await TempDir.create("@mnemopi-symlink-");
+		try {
+			const realCheckout = baseDir.join("real-checkout");
+			const realPlain = baseDir.join("real-plain");
+			await fs.mkdir(realCheckout, { recursive: true });
+			await fs.mkdir(realPlain, { recursive: true });
+			runGit(realCheckout, ["-c", "init.defaultBranch=main", "init"]);
+			for (const real of [realCheckout, realPlain]) {
+				const alias = `${real}-alias`;
+				await fs.symlink(real, alias, "dir");
+				const fromReal = computeMnemopiBankScope(undefined, real, "per-project").bank;
+				const fromAlias = computeMnemopiBankScope(undefined, alias, "per-project").bank;
+				expect(fromAlias).toBe(fromReal);
+			}
+		} finally {
+			await Bun.sleep(0);
+			await baseDir.remove();
+		}
+	});
+
 	it("per-project-tagged opens both the project bank and the shared default", () => {
 		const scope = computeMnemopiBankScope(undefined, "/projects/repo", "per-project-tagged");
 		expect(scope.retainBank).toBe(scope.bank);
@@ -99,6 +177,22 @@ describe("computeMnemopiBankScope (#2412)", () => {
 		const there = computeMnemopiBankScope(undefined, "/elsewhere", "global");
 		expect(here).toEqual(there);
 		expect(here.bank).toBe("default");
+	});
+
+	// Regression: `global` never reads the derived project bank, but the
+	// project root used to be resolved unconditionally before the scoping
+	// switch, so `global` sessions paid for — and could fail on — VCS
+	// filesystem resolution whose result they never use (e.g. a JJ workspace
+	// whose `.jj/repo` pointer is transiently unreadable while being
+	// rewritten would throw from inside `vcs.repo()`).
+	it("never invokes VCS resolution for global scoping", () => {
+		const repoSpy = spyOn(vcsModule, "repo");
+		try {
+			computeMnemopiBankScope(undefined, "/projects/here", "global");
+			expect(repoSpy).not.toHaveBeenCalled();
+		} finally {
+			repoSpy.mockRestore();
+		}
 	});
 });
 
@@ -145,5 +239,270 @@ describe("extendRecallWithLegacyBanks edge cases", () => {
 		const out = extendRecallWithLegacyBanks(["active"], mainDbPath, path.join(rootDir.path(), "some", "cwd"));
 		expect(out).toContain("active");
 		expect(out).not.toContain("corrupt-C");
+	});
+});
+
+// Regression: the exploratory sibling-bank scan is capped (64 entries) to
+// bound startup cost, but the worktree's pre-root-resolution bank name is
+// deterministic from the raw cwd — it must be probed directly, or an
+// installation with many banks silently strands that worktree's memories
+// when readdir order puts the legacy bank past the cap.
+describe("extendRecallWithLegacyBanks known-legacy candidate past the scan cap", () => {
+	let capRootDir: TempDir;
+	let capBanksDir: string;
+	let capDbPath: string;
+
+	beforeAll(async () => {
+		capRootDir = await TempDir.create("@mnemopi-scan-cap-");
+		const dir = capRootDir.join("mnemopi");
+		capBanksDir = path.join(dir, "banks");
+		await fs.mkdir(capBanksDir, { recursive: true });
+		capDbPath = path.join(dir, "mnemopi.db");
+	});
+
+	// readdir order is filesystem-dependent (ext4 returns hash order), so the
+	// "legacy bank sits past the cap" topology cannot be built from real
+	// directory entries alone. Pin lexical order: the `aaa-*` fillers then
+	// deterministically exhaust the scan budget before any `teambase-*`/`zz-*`
+	// legacy bank is reached, which is exactly the pre-fix failure mode.
+	// Installed per test and restored after it, so hooks and other tests never
+	// observe the pinned order.
+	let restoreReaddirOrder: (() => void) | undefined;
+	beforeEach(() => {
+		const real = nodeFs.readdirSync;
+		// Entries are strings, byte arrays (`encoding: "buffer"`), or Dirents
+		// whose `name` is either, depending on the call's options.
+		const entryName = (entry: string | Uint8Array | nodeFs.Dirent<string | Buffer>): string => {
+			const name = typeof entry === "string" || entry instanceof Uint8Array ? entry : entry.name;
+			return typeof name === "string" ? name : new TextDecoder().decode(name);
+		};
+		const spy = spyOn(nodeFs, "readdirSync").mockImplementation(((...args: Parameters<typeof real>) => {
+			const out = real(...args);
+			return Array.isArray(out)
+				? [...out].sort((a, b) => {
+						const an = entryName(a);
+						const bn = entryName(b);
+						return an < bn ? -1 : an > bn ? 1 : 0;
+					})
+				: out;
+		}) as typeof real);
+		restoreReaddirOrder = () => spy.mockRestore();
+	});
+
+	afterEach(() => {
+		restoreReaddirOrder?.();
+		restoreReaddirOrder = undefined;
+	});
+
+	afterAll(async () => {
+		await Bun.sleep(0);
+		await capRootDir.remove();
+	});
+
+	function createCapBankFixture(bank: string, metadataRows: readonly Record<string, unknown>[]): void {
+		const bankDir = path.join(capBanksDir, bank);
+		const dbPath = path.join(bankDir, "mnemopi.db");
+		mkdirSync(bankDir, { recursive: true });
+		const db = new Database(dbPath, { create: true });
+		try {
+			db.exec(`
+				CREATE TABLE IF NOT EXISTS working_memory (
+					id TEXT PRIMARY KEY,
+					content TEXT,
+					metadata_json TEXT
+				)
+			`);
+			const insert = db.prepare("INSERT INTO working_memory (id, content, metadata_json) VALUES (?, ?, ?)");
+			for (const [index, meta] of metadataRows.entries()) {
+				insert.run(`row-${bank}-${index}`, "content", JSON.stringify(meta));
+			}
+		} finally {
+			db.close();
+		}
+	}
+
+	// Both tests below rely on the same topology: 70 `aaa-*` fillers (tagging
+	// an unrelated cwd) that consume the entire 64-entry scan budget under the
+	// pinned lexical order, so any later-sorting legacy bank is reachable only
+	// through the deterministic known-candidate probe.
+	beforeAll(() => {
+		const otherCwd = capRootDir.join("projects", "elsewhere");
+		for (let i = 0; i < 70; i++) {
+			createCapBankFixture(`aaa-filler-${String(i).padStart(3, "0")}`, [{ cwd: otherCwd }]);
+		}
+	});
+
+	it("rescues the raw-cwd bank even when the capped scan cannot reach it", () => {
+		const activeCwd = capRootDir.join("projects", "zz-scan-cap");
+		const legacyBank = projectBankSegment(path.resolve(activeCwd));
+		createCapBankFixture(legacyBank, [{ session_id: "old", cwd: activeCwd }]);
+		const extended = extendRecallWithLegacyBanks(["root-derived-bank"], capDbPath, activeCwd);
+		expect(extended).toContain("root-derived-bank");
+		expect(extended).toContain(legacyBank);
+	});
+
+	it("derives the base-prefixed legacy name when a shared bank base is configured", () => {
+		const activeCwd = capRootDir.join("projects", "zz-based-cap");
+		const segment = projectBankSegment(path.resolve(activeCwd));
+		const basedLegacyBank = `teambase-${segment}`;
+		createCapBankFixture(basedLegacyBank, [{ session_id: "old", cwd: activeCwd }]);
+		const extended = extendRecallWithLegacyBanks(["teambase-new-root-bank"], capDbPath, activeCwd, "teambase");
+		expect(extended).toContain(basedLegacyBank);
+	});
+});
+
+// Regression: linked git worktrees, colocated jj workspaces (which
+// `jj workspace add --colocate` implements as a real git worktree, verified
+// against the `jj` CLI directly — no separate fixture needed here), and
+// non-colocated jj workspaces of one repository all used to get their own
+// isolated per-project bank. Ports the Hindsight backend's `projectLabel`
+// fix for #2232 into `projectBank`/`resolveProjectRoot`, which resolve the
+// primary root through the shared native `vcs.repo(directory)?.primaryRoot()`
+// (`@oh-my-pi/pi-natives/vcs`, backed by `crates/pi-vcs`).
+describe("computeMnemopiBankScope worktree/workspace collapsing", () => {
+	let baseDir: TempDir;
+	let primaryRoot: string;
+	let gitWorktreeRoot: string;
+	let jjWorkspaceRoot: string;
+	let nonRepoDir: string;
+
+	beforeAll(async () => {
+		baseDir = await TempDir.create("@mnemopi-worktree-");
+		primaryRoot = baseDir.join("myrepo");
+		gitWorktreeRoot = baseDir.join("myrepo-worktree");
+		jjWorkspaceRoot = baseDir.join("myrepo-jj-plain");
+		nonRepoDir = baseDir.join("not-a-repo");
+		await fs.mkdir(primaryRoot, { recursive: true });
+		await fs.mkdir(nonRepoDir, { recursive: true });
+		runGit(primaryRoot, ["-c", "init.defaultBranch=main", "init"]);
+		await fs.writeFile(path.join(primaryRoot, "README.md"), "hi\n");
+		runGit(primaryRoot, ["add", "-A"]);
+		runGit(primaryRoot, ["commit", "-m", "base"]);
+		runGit(primaryRoot, ["worktree", "add", gitWorktreeRoot, "-b", "feature-x"]);
+		// Colocated-jj shape: the primary's `.jj/repo` is a directory (the
+		// default workspace), the linked worktree's is a FILE pointing back at
+		// it — same as `jj workspace add --colocate` on top of this git
+		// worktree would produce.
+		await fs.mkdir(path.join(primaryRoot, ".jj", "repo", "store"), { recursive: true });
+		await writeJjWorkspacePointer(gitWorktreeRoot, path.join(primaryRoot, ".jj", "repo"));
+		// Non-colocated jj workspace: only `.jj/repo`, no `.git` anywhere.
+		await writeJjWorkspacePointer(jjWorkspaceRoot, path.join(primaryRoot, ".jj", "repo"));
+	});
+
+	afterAll(async () => {
+		if (baseDir) await baseDir.remove();
+	});
+
+	it("emits the same per-project bank from the primary checkout and a linked git worktree", () => {
+		const fromPrimary = computeMnemopiBankScope(undefined, primaryRoot, "per-project").bank;
+		const fromWorktree = computeMnemopiBankScope(undefined, gitWorktreeRoot, "per-project").bank;
+		expect(fromWorktree).toBe(fromPrimary);
+		expect(fromPrimary).toBe(`myrepo-${Bun.hash(primaryRoot).toString(36)}`);
+	});
+
+	it("emits the same per-project bank from a non-colocated jj workspace", () => {
+		const fromPrimary = computeMnemopiBankScope(undefined, primaryRoot, "per-project").bank;
+		const fromWorkspace = computeMnemopiBankScope(undefined, jjWorkspaceRoot, "per-project").bank;
+		expect(fromWorkspace).toBe(fromPrimary);
+	});
+
+	it("keeps per-project-tagged recall scoped to the collapsed project bank across worktree and workspace", () => {
+		const fromPrimary = computeMnemopiBankScope(undefined, primaryRoot, "per-project-tagged");
+		const fromWorktree = computeMnemopiBankScope(undefined, gitWorktreeRoot, "per-project-tagged");
+		const fromWorkspace = computeMnemopiBankScope(undefined, jjWorkspaceRoot, "per-project-tagged");
+		expect(fromWorktree).toEqual(fromPrimary);
+		expect(fromWorkspace).toEqual(fromPrimary);
+	});
+
+	it("preserves the plain cwd-hash fallback outside any git/jj repository", () => {
+		const bank = computeMnemopiBankScope(undefined, nonRepoDir, "per-project").bank;
+		expect(bank).toBe(`not-a-repo-${Bun.hash(nonRepoDir).toString(36)}`);
+	});
+});
+
+// Regression: a pure jj workspace nested under an *unrelated* outer Git
+// checkout (the topology `is_pure_jj` in `crates/pi-vcs` reports as a pure
+// Jujutsu workspace) used to derive its bank from the outer checkout,
+// because `resolveProjectRoot` always tried Git resolution before Jujutsu.
+// The nearer VCS root (the jj workspace, since it sits deeper than the
+// unrelated outer `.git`) must win, or the inner project's memories mix into
+// the outer checkout's bank.
+describe("computeMnemopiBankScope pure jj nested under an unrelated outer git checkout", () => {
+	let baseDir: TempDir;
+	let outerGitRoot: string;
+	let jjPrimaryRoot: string;
+	let nestedJjRoot: string;
+
+	beforeAll(async () => {
+		baseDir = await TempDir.create("@mnemopi-nested-jj-");
+		outerGitRoot = baseDir.join("outer-repo");
+		jjPrimaryRoot = baseDir.join("jj-primary");
+		nestedJjRoot = path.join(outerGitRoot, "nested-jj-workspace");
+		await fs.mkdir(outerGitRoot, { recursive: true });
+		await fs.mkdir(nestedJjRoot, { recursive: true });
+		runGit(outerGitRoot, ["-c", "init.defaultBranch=main", "init"]);
+		await fs.writeFile(path.join(outerGitRoot, "README.md"), "hi\n");
+		runGit(outerGitRoot, ["add", "-A"]);
+		runGit(outerGitRoot, ["commit", "-m", "base"]);
+		// An unrelated, wholly separate non-colocated jj repository (no `.git` anywhere).
+		await fs.mkdir(path.join(jjPrimaryRoot, ".jj", "repo", "store"), { recursive: true });
+		// Lives inside the outer git checkout's tree but is its own jj workspace
+		// pointed at the unrelated jj-primary repo above.
+		await writeJjWorkspacePointer(nestedJjRoot, path.join(jjPrimaryRoot, ".jj", "repo"));
+	});
+
+	afterAll(async () => {
+		if (baseDir) await baseDir.remove();
+	});
+
+	it("derives the bank from the nearer jj workspace root, not the outer git checkout", () => {
+		const fromNestedJj = computeMnemopiBankScope(undefined, nestedJjRoot, "per-project").bank;
+		const fromJjPrimary = computeMnemopiBankScope(undefined, jjPrimaryRoot, "per-project").bank;
+		const fromOuterGit = computeMnemopiBankScope(undefined, outerGitRoot, "per-project").bank;
+		expect(fromNestedJj).toBe(fromJjPrimary);
+		expect(fromNestedJj).not.toBe(fromOuterGit);
+	});
+});
+
+// Regression: the nearer-root check used to treat a jj workspace as outside
+// the outer git checkout whenever its `path.relative` result merely
+// *started with* the two-character string "..", which also matches
+// directory names like `..jj-workspace` that are not a parent traversal at
+// all. That false rejection made the nearer jj workspace lose to the
+// unrelated outer git checkout, the topology above with a dotdot-prefixed
+// workspace directory name. The check now lives in native discovery
+// (`is_strict_descendant` in `crates/pi-vcs`), which compares path
+// components.
+describe("computeMnemopiBankScope nested jj workspace name starting with '..'", () => {
+	let baseDir: TempDir;
+	let outerGitRoot: string;
+	let jjPrimaryRoot: string;
+	let nestedJjRoot: string;
+
+	beforeAll(async () => {
+		baseDir = await TempDir.create("@mnemopi-dotdot-jj-");
+		outerGitRoot = baseDir.join("outer-repo");
+		jjPrimaryRoot = baseDir.join("jj-primary");
+		nestedJjRoot = path.join(outerGitRoot, "..jj-workspace");
+		await fs.mkdir(outerGitRoot, { recursive: true });
+		await fs.mkdir(nestedJjRoot, { recursive: true });
+		runGit(outerGitRoot, ["-c", "init.defaultBranch=main", "init"]);
+		await fs.writeFile(path.join(outerGitRoot, "README.md"), "hi\n");
+		runGit(outerGitRoot, ["add", "-A"]);
+		runGit(outerGitRoot, ["commit", "-m", "base"]);
+		await fs.mkdir(path.join(jjPrimaryRoot, ".jj", "repo", "store"), { recursive: true });
+		await writeJjWorkspacePointer(nestedJjRoot, path.join(jjPrimaryRoot, ".jj", "repo"));
+	});
+
+	afterAll(async () => {
+		if (baseDir) await baseDir.remove();
+	});
+
+	it("still treats the dotdot-prefixed workspace as the nearer root, not the outer git checkout", () => {
+		const fromNestedJj = computeMnemopiBankScope(undefined, nestedJjRoot, "per-project").bank;
+		const fromJjPrimary = computeMnemopiBankScope(undefined, jjPrimaryRoot, "per-project").bank;
+		const fromOuterGit = computeMnemopiBankScope(undefined, outerGitRoot, "per-project").bank;
+		expect(fromNestedJj).toBe(fromJjPrimary);
+		expect(fromNestedJj).not.toBe(fromOuterGit);
 	});
 });

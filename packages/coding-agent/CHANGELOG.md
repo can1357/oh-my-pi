@@ -242,6 +242,10 @@
 - Fixed documents served as `application/octet-stream` being downloaded twice.
 - Fixed collaboration guests rebuilding the transcript excessively during streaming.
 
+### Fixed
+
+- Mnemopi's `per-project`/`per-project-tagged` memory banks now derive from the repository's primary checkout root, so every linked git worktree and Jujutsu workspace of one repository shares the same bank instead of each getting its own isolated one ([#9424](https://github.com/can1357/oh-my-pi/pull/9424) by [@sjawhar](https://github.com/sjawhar)).
+
 ## [18.7.0] - 2026-10-06
 
 ### Added
