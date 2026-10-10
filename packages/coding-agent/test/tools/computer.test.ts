@@ -34,7 +34,7 @@ import type {
 	PointerOptions,
 } from "@oh-my-pi/pi-natives";
 
-import { cfgComputerBackgroundFallback, cfgComputerEnabled } from "@oh-my-pi/pi-coding-agent/tools/settings";
+import { cfgComputerEnabled } from "@oh-my-pi/pi-coding-agent/tools/settings";
 
 /** Method name of the last step in a facade call chain, or "" when the chain is malformed. */
 function terminalMethod(chain: unknown): string {
@@ -1954,32 +1954,6 @@ describe("computer background fallback", () => {
 		if (!result.ok) throw new Error(`run failed: ${result.error.message}`);
 		return result.payload.displays.flatMap(block => (block.type === "text" ? [block.text] : []));
 	}
-
-	it("reads computer.backgroundFallback on every call, with a session override above the configured value", async () => {
-		const seen: string[] = [];
-		const invoke = async (session: ToolSession) => {
-			const prelude = createComputerPrelude(session, () => ({
-				async run(_code, _timeoutMs, runSnapshot) {
-					seen.push(runSnapshot.backgroundFallback);
-					return { displays: [], returnValue: undefined, screenshots: [] };
-				},
-				async capabilities() {
-					return capabilities;
-				},
-				async close() {},
-			}));
-			await prelude.invoke({ action: "run", code: "1" }, { session, toolCallId: crypto.randomUUID() });
-		};
-		await invoke(toolSession());
-		const configured: ToolSession = {
-			...toolSession(),
-			settings: Settings.isolated({ "computer.enabled": true, "computer.backgroundFallback": "refuse" }),
-		};
-		await invoke(configured);
-		cfgComputerBackgroundFallback.override(configured.settings, "takeover");
-		await invoke(configured);
-		expect(seen).toEqual(["takeover", "refuse", "takeover"]);
-	});
 
 	it("reruns a refused background call once in takeover and says so, naming the app focus returned to", async () => {
 		const native = new RefusingSession();

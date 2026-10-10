@@ -674,14 +674,15 @@ export const cfgComputerBackgroundFallback = register({
 		group: "Computer",
 		label: "Computer Background Fallback",
 		description:
-			"What window input does when its background route is unavailable: rerun it in takeover and return focus to your app, or refuse",
+			"What window input does when its background route is unavailable: rerun it in takeover and return focus to your app (macOS; elsewhere plain takeover), or refuse",
 		options: [
 			{
 				value: "takeover",
 				label: "Takeover",
-				description: "Briefly bring the target forward for that one call, then return focus to your app",
+				description:
+					"Briefly bring the target forward for that one call, then return focus to your app (on macOS even if you kept typing)",
 			},
-			{ value: "refuse", label: "Refuse", description: "Fail the call; nothing takes over" },
+			{ value: "refuse", label: "Refuse", description: "Fail the call; nothing takes over automatically" },
 		],
 	},
 });
