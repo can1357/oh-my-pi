@@ -1,8 +1,13 @@
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { seedModels } from "@oh-my-pi/pi-catalog/compat/providers";
 import { calculateUsageCost } from "@oh-my-pi/pi-catalog/models";
+import type { FetchImpl } from "@oh-my-pi/pi-catalog/types";
+import { serializeCloudflareAiGatewayCredential } from "@oh-my-pi/pi-catalog/wire/cloudflare-ai-gateway";
 import { describe, expect, it } from "bun:test";
 import {
 	type ApiKeyResolveContext,
 	JudgmentParseError,
+	judgmentRequestPreparer,
 	parseChoiceReply,
 	parseNoulReply,
 	parseScoreReply,
@@ -339,6 +344,25 @@ describe("TypeSafeJudge", () => {
 		expect(keys).toEqual(["Bearer stale", "Bearer fresh", "Bearer fresh"]);
 	});
 
+	it("rejects a mistyped usage figure or model instead of billing it as zero", async () => {
+		const answers = { urgent: { type: "noul", noul: 0.9 } };
+		const respond = (body: Record<string, unknown>) =>
+			new TypeSafeJudge({ apiKey: "k", fetch: async () => Response.json({ answers, ...body }) });
+
+		const stringTokens = respond({ model: "jev-latest", usage: { input_tokens: "5", output_tokens: 1 } });
+		await expect(stringTokens.judge(request)).rejects.toThrow(/non-numeric "usage.input_tokens"/);
+		const stringCost = respond({ model: "jev-latest", usage: { input_tokens: 5, cost: "0.1" } });
+		await expect(stringCost.judge(request)).rejects.toThrow(/non-numeric "usage.cost"/);
+		const numericModel = respond({ model: 42, usage: { input_tokens: 5, output_tokens: 1 } });
+		await expect(numericModel.judge(request)).rejects.toMatchObject({
+			name: "ProviderResponseError",
+			kind: "envelope",
+			message: expect.stringContaining('no string "model"'),
+		});
+		const absent = await respond({ model: "jev-latest", usage: {} }).judge(request);
+		expect(absent.usage.totalTokens).toBe(0);
+	});
+
 	it("surfaces validation errors without retrying and rejects answers of the wrong type", async () => {
 		let calls = 0;
 		const rejecting = new TypeSafeJudge({
@@ -357,5 +381,90 @@ describe("TypeSafeJudge", () => {
 				Response.json({ model: "jev-latest", answers: { urgent: { type: "choice", choice: "x" } }, usage: {} }),
 		});
 		await expect(mismatched.judge(request)).rejects.toThrow(/missing a "noul" answer/);
+	});
+
+	describe("Cloudflare Workers AI (Clef)", () => {
+		const clefSpec = seedModels("cloudflare-ai-gateway").find(
+			seed => seed.id === "workers-ai/@cf/cloudflare/clef-flash",
+		);
+		if (!clefSpec) throw new Error("missing cloudflare-ai-gateway clef-flash seed");
+		const clef = buildModel(clefSpec);
+		const credential = serializeCloudflareAiGatewayCredential("gw-token", "acct", "gw");
+
+		function cloudflareJudge(fetchImpl: FetchImpl): TypeSafeJudge {
+			return new TypeSafeJudge({
+				apiKey: credential,
+				api: "cloudflare-systemone",
+				provider: clef!.provider,
+				model: clef!.id,
+				baseUrl: clef!.baseUrl,
+				prepareRequest: judgmentRequestPreparer(clef!, undefined),
+				fetch: fetchImpl,
+			});
+		}
+
+		it("posts to the gateway's per-model Workers AI path with the short selector and unwraps the result envelope", async () => {
+			const calls: { url: string; init: RequestInit | undefined }[] = [];
+			const judge = cloudflareJudge(async (url, init) => {
+				calls.push({ url: String(url), init });
+				return Response.json({
+					result: {
+						model: "@cf/cloudflare/clef-flash",
+						answers: { urgent: { type: "noul", noul: 0.81 } },
+						usage: { input_tokens: 1000, output_tokens: 3 },
+					},
+					success: true,
+					errors: [],
+					messages: [],
+				});
+			});
+
+			const result = await judge.judge(request);
+
+			expect(calls).toHaveLength(1);
+			expect(calls[0].url).toBe("https://gateway.ai.cloudflare.com/v1/acct/gw/workers-ai/@cf/cloudflare/clef-flash");
+			const headers = new Headers(calls[0].init?.headers);
+			expect(headers.get("cf-aig-authorization")).toBe("Bearer gw-token");
+			expect(headers.get("authorization")).toBe("Bearer gw-token");
+			expect(JSON.parse(String(calls[0].init?.body))).toEqual({
+				state: request.state,
+				model: "clef-flash",
+				questions: request.questions,
+			});
+			expect(result).toMatchObject({
+				api: "cloudflare-systemone",
+				provider: "cloudflare-ai-gateway",
+				model: "@cf/cloudflare/clef-flash",
+				usage: { input: 1000, output: 3 },
+			});
+			expect(result.answers.urgent.noul).toBe(0.81);
+		});
+
+		it("surfaces a success:false envelope's errors and rejects a result-less envelope", async () => {
+			const failed = cloudflareJudge(async () =>
+				Response.json({
+					result: null,
+					success: false,
+					errors: [{ code: 5006, message: "model is out of capacity" }],
+					messages: [],
+				}),
+			);
+			await expect(failed.judge(request)).rejects.toThrow(/5006: model is out of capacity/);
+
+			const empty = cloudflareJudge(async () => Response.json({ result: null, success: true }));
+			await expect(empty.judge(request)).rejects.toThrow(/response is not a JSON object/);
+
+			const stringTokens = cloudflareJudge(async () =>
+				Response.json({
+					result: {
+						model: "clef-flash",
+						answers: { urgent: { type: "noul", noul: 0.5 } },
+						usage: { input_tokens: "154", output_tokens: 0 },
+					},
+					success: true,
+				}),
+			);
+			await expect(stringTokens.judge(request)).rejects.toThrow(/non-numeric "usage.input_tokens"/);
+		});
 	});
 });

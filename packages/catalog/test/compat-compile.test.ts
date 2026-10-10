@@ -583,6 +583,25 @@ describe("provider catalog grammar", () => {
 		).toThrow(/seed bundle must be one of/);
 	});
 
+	test("a seed model's own bundle overrides the seed's for that row only and rejects unknown policies", () => {
+		const row = (id: string, props: string) =>
+			`\t\tmodel "${id}" name="${id}"${props} {\n\t\t\treasoning #false\n\t\t\tinput "text"\n\t\t\tcost input=1 output=1 cache-read=0 cache-write=0\n\t\t\tlimits\n\t\t}`;
+		const compile = (rows: string[]) =>
+			compileProviders(
+				src(
+					provider("p", [
+						'\tdefault-model "m"',
+						`\tseed api="openai-completions" base-url="https://x" bundle="empty" {\n${rows.join("\n")}\n\t}`,
+					]),
+				),
+			).p.seed;
+		expect(compile([row("fallback", ""), row("pinned", ' bundle="always"')])?.rowBundles).toEqual({
+			pinned: "always",
+		});
+		expect(compile([row("fallback", "")])?.rowBundles).toBeUndefined();
+		expect(() => compile([row("bad", ' bundle="sometimes"')])).toThrow(/seed model bundle must be one of/);
+	});
+
 	test("models-from copies rows under the inheriting provider; entries are keyed and sorted by id", () => {
 		const compiled = compileProviders([
 			{

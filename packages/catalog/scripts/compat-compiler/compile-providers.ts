@@ -69,7 +69,7 @@ true satisfies _MissingKnownApis extends never ? true : ["KNOWN_APIS is missing 
 const BUNDLE_POLICIES = ["always", "fallback", "empty", "never"] as const satisfies readonly SeedBundlePolicy[];
 const DEFAULT_BUNDLE: SeedBundlePolicy = "always";
 const SEED_PROPS = ["api", "base-url", "bundle", "precedence"] as const;
-const MODEL_PROPS = ["name", "api", "base-url"] as const;
+const MODEL_PROPS = ["name", "api", "base-url", "bundle"] as const;
 const COST_PROPS = ["input", "output", "cache-read", "cache-write"] as const;
 const LIMIT_PROPS = ["context", "max-tokens"] as const;
 const DISCOVERY_PROPS = ["label", "oauth-provider", "allow-unauthenticated"] as const;
@@ -270,6 +270,7 @@ function parseSeed(node: KdlNodeView, provider: string): ParsedSeed {
 	if (precedence !== "upstream" && precedence !== "seed") malformed(node);
 	const defaults: SeedDefaults = { api: propApi(node), baseUrl: propString(node, "base-url") };
 	const models: CompiledSeedModel[] = [];
+	const rowBundles: Record<string, SeedBundlePolicy> = {};
 	let modelsFrom: string | undefined;
 	for (const child of node.children) {
 		switch (child.name) {
@@ -277,6 +278,17 @@ function parseSeed(node: KdlNodeView, provider: string): ParsedSeed {
 				const model = parseModel(child, provider, defaults);
 				if (models.some(own => own.id === model.id)) {
 					throw new CompatCompileError(child.file, child.line, `duplicate seed model \`${model.id}\``);
+				}
+				const rowBundle = propString(child, "bundle");
+				if (rowBundle !== undefined) {
+					if (!isBundlePolicy(rowBundle)) {
+						throw new CompatCompileError(
+							child.file,
+							child.line,
+							`seed model bundle must be one of "${BUNDLE_POLICIES.join('"|"')}"`,
+						);
+					}
+					rowBundles[model.id] = rowBundle;
 				}
 				models.push(model);
 				break;
@@ -292,7 +304,16 @@ function parseSeed(node: KdlNodeView, provider: string): ParsedSeed {
 		}
 	}
 	if (models.length === 0 && modelsFrom === undefined) malformed(node);
-	return { seed: { bundle: bundle ?? DEFAULT_BUNDLE, precedence, models }, modelsFrom, node };
+	return {
+		seed: {
+			bundle: bundle ?? DEFAULT_BUNDLE,
+			precedence,
+			models,
+			...(Object.keys(rowBundles).length > 0 && { rowBundles }),
+		},
+		modelsFrom,
+		node,
+	};
 }
 
 function parseKindApis(node: KdlNodeView): Partial<Record<KindApiKind, Api>> {

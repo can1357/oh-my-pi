@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added Cloudflare's Clef and Clef Flash decision models to the Cloudflare AI Gateway provider as `judge` models ([#15044](https://github.com/can1357/oh-my-pi/pull/15044) by [@M0Rf30](https://github.com/M0Rf30)).
+
 ## [18.8.8] - 2026-10-10
 
 ### Added

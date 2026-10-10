@@ -5,9 +5,9 @@ provider "cloudflare-ai-gateway" {
 	env "CLOUDFLARE_AI_GATEWAY_API_KEY"
 	discovery label="Cloudflare AI Gateway"
 
-	// Static fallback model injected when Cloudflare AI Gateway discovery returns no
-	// results. Ensures the provider always has at least one usable model entry in
-	// the catalog.
+	// Static fallback injected when discovery returns no results, so the provider
+	// always has a usable model. The Clef rows (System One judges absent from
+	// models.dev; developers.cloudflare.com/workers-ai/models/clef/) are always bundled.
 	seed api="anthropic-messages" base-url="https://gateway.ai.cloudflare.com/v1/<account>/<gateway>/anthropic" bundle="empty" {
 		model "claude-sonnet-4-5" name="Claude Sonnet 4.5" {
 			reasoning #true
@@ -15,6 +15,23 @@ provider "cloudflare-ai-gateway" {
 			cost input=3 output=15 cache-read=0.3 cache-write=3.75
 			limits context=200000 max-tokens=64000
 		}
+		model "workers-ai/@cf/cloudflare/clef" name="Clef" api="cloudflare-systemone" base-url="https://gateway.ai.cloudflare.com/v1/<account>/<gateway>" bundle="always" {
+			reasoning #false
+			input "text" "image"
+			cost input=0.24 output=0 cache-read=0 cache-write=0
+			limits context=65536
+			supports-tools #false
+		}
+		model "workers-ai/@cf/cloudflare/clef-flash" name="Clef Flash" api="cloudflare-systemone" base-url="https://gateway.ai.cloudflare.com/v1/<account>/<gateway>" bundle="always" {
+			reasoning #false
+			input "text" "image"
+			cost input=0.09 output=0 cache-read=0 cache-write=0
+			limits context=65536
+			supports-tools #false
+		}
+	}
+	models "workers-ai/@cf/cloudflare/clef" "workers-ai/@cf/cloudflare/clef-flash" {
+		kind "judge"
 	}
 
 	// residue: the bare `deepseek/*` namespace rides the Anthropic route, whose

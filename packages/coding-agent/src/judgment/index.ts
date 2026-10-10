@@ -22,6 +22,7 @@ import {
 	type AssistantMessage,
 	chatTextBackend,
 	isJudgmentApi,
+	judgmentRequestPreparer,
 	type Judge,
 	type JudgeOptions,
 	type JudgmentRequest,
@@ -345,6 +346,7 @@ export class ChainJudge implements Judge {
 				model: model.id,
 				baseUrl: model.baseUrl,
 				headers,
+				prepareRequest: judgmentRequestPreparer(model, headers),
 			});
 			return nativeJudge(judge, model, this.#deps.cache, attempt => this.#report(attempt));
 		}

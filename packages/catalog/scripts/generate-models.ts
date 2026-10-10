@@ -21,7 +21,7 @@ import { buildModel } from "../src/build";
 import { isRetiredProvider } from "../src/compat/behavior";
 import { collapseVariants } from "../src/compat/collapse";
 import { providerEntries, providerEntry, seedModels } from "../src/compat/providers";
-import type { CompiledProvider } from "../src/compat/types";
+import type { CompiledProvider, SeedBundlePolicy } from "../src/compat/types";
 import { ANTIGRAVITY_PRIMARY_ENDPOINT, fetchAntigravityDiscoveryModels } from "../src/discovery/antigravity";
 import { createModelManager } from "../src/model-manager";
 import { resolveModelTokenizer } from "../src/model-tokenizer";
@@ -93,9 +93,28 @@ const CREDENTIAL_SCOPED_PROVIDERS = new Set(["devin"]);
  */
 const STATIC_SEED_COMPLETE_PROVIDERS = new Set(["yolo-auto", "coralbricks"]);
 
+function seedPolicyAdmits(
+	policy: SeedBundlePolicy | undefined,
+	providerId: string,
+	models: readonly ModelSpec[],
+	authoritativeProviders: ReadonlySet<string>,
+): boolean {
+	switch (policy) {
+		case undefined:
+		case "never":
+			return false;
+		case "fallback":
+			return !authoritativeProviders.has(providerId);
+		case "empty":
+			return !models.some(model => model.provider === providerId);
+		case "always":
+			return true;
+	}
+}
+
 /**
  * The rows one provider's authored seed (`rules/providers/<id>.kdl`) contributes
- * to this regeneration, per its `bundle` policy:
+ * to this regeneration, per its `bundle` policy (a row's own `bundle` overrides it):
  * - `always`: every regen (same-id upstream/discovery rows still win dedup).
  * - `fallback`: only when the provider's authoritative discovery did not succeed.
  * - `empty`: only when no other source produced a row for the provider.
@@ -105,25 +124,17 @@ const STATIC_SEED_COMPLETE_PROVIDERS = new Set(["yolo-auto", "coralbricks"]);
  * runner seed transports. The bundle carries both so configured roles resolve
  * synchronously before live discovery completes.
  */
-function bundledSeedRows(
+export function bundledSeedRows(
 	entry: CompiledProvider,
 	models: readonly ModelSpec[],
 	authoritativeProviders: ReadonlySet<string>,
 ): readonly ModelSpec[] {
-	switch (entry.seed?.bundle) {
-		case undefined:
-		case "never":
-			return [];
-		case "fallback":
-			if (authoritativeProviders.has(entry.id)) return [];
-			break;
-		case "empty":
-			if (models.some(model => model.provider === entry.id)) return [];
-			break;
-		case "always":
-			break;
-	}
-	return entry.id === "xai-oauth" ? buildXaiOAuthStaticSeed() : seedModels(entry.id);
+	const seed = entry.seed;
+	if (seed === undefined) return [];
+	const rows = entry.id === "xai-oauth" ? buildXaiOAuthStaticSeed() : seedModels(entry.id);
+	return rows.filter(row =>
+		seedPolicyAdmits(seed.rowBundles?.[row.id] ?? seed.bundle, entry.id, models, authoritativeProviders),
+	);
 }
 
 /** Catalog providers whose seed rows carry the given precedence. */

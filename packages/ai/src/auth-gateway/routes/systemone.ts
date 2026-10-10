@@ -13,6 +13,7 @@
 import { calculateCost } from "@oh-my-pi/pi-catalog/models";
 import { logger } from "@oh-my-pi/pi-utils";
 import { classifyGatewayError } from "../../error/gateway";
+import { judgmentRequestPreparer } from "../../judgment/transport";
 import { isJudgmentApi, TypeSafeJudge } from "../../judgment/typesafe";
 import * as systemOne from "../../providers/systemone-server";
 import { deterministicUuid } from "../../utils/deterministic-id";
@@ -75,6 +76,8 @@ export async function handleSystemOne(
 	if (controller.signal.aborted) return aborted();
 	if ("status" in apiKey) return systemOne.formatError(apiKey.status, apiKey.type, apiKey.message);
 
+	const headers = model.resolveHeaders ? await model.resolveHeaders(controller.signal) : model.headers;
+	if (controller.signal.aborted) return aborted();
 	const judge = new TypeSafeJudge({
 		apiKey: buildGatewayApiKeyResolver(
 			bootOpts.storage,
@@ -89,6 +92,8 @@ export async function handleSystemOne(
 		provider: model.provider,
 		model: model.id,
 		baseUrl: model.baseUrl,
+		headers,
+		prepareRequest: judgmentRequestPreparer(model, headers),
 		fetch: bootOpts.fetch,
 	});
 

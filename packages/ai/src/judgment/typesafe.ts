@@ -4,7 +4,9 @@
  * Forwards a {@link JudgmentRequest} verbatim to the judgment route of its
  * API ({@link JUDGMENT_ROUTES}) and maps the typed answers back. TypeSafe's
  * own `POST /v1/systemone` and OpenRouter's `POST /api/alpha/decisions` share
- * the request and answer wire shape, so one client serves both. Credentials
+ * the request and answer wire shape, so one client serves both. Cloudflare's
+ * Workers AI serves it per model (`POST <base>/<model id>`) inside a
+ * `{ result, success, errors }` envelope. Credentials
  * flow through {@link withAuth}, so a stored key rotates on 401/403 exactly
  * like chat providers; transient 429/5xx responses retry with bounded,
  * `retry-after`-aware backoff.
@@ -15,12 +17,11 @@
  */
 import { TYPESAFE_DEFAULT_BASE_URL } from "@oh-my-pi/pi-catalog/discovery";
 import type { Api, FetchImpl } from "@oh-my-pi/pi-catalog/types";
-import { $env } from "@oh-my-pi/pi-utils";
-import { type ApiKey, withAuth } from "../auth-retry";
+import { $env, isRecord } from "@oh-my-pi/pi-utils";
+import { type ApiKey, NO_AUTH_SENTINEL, withAuth } from "../auth-retry";
 import * as AIError from "../error";
 import { getRetryAfterMsFromHeaders } from "../utils/retry-after";
 import {
-	type Answer,
 	type Judge,
 	type JudgeOptions,
 	type JudgmentRequest,
@@ -32,10 +33,11 @@ import {
 export const TYPESAFE_PROVIDER = "typesafe";
 export const TYPESAFE_DEFAULT_MODEL = "jev-latest";
 
-/** Judgment `POST` path under a model's base URL, per System One–compatible API. */
+/** Judgment `POST` path under a model's base URL, per System One–compatible API; `{model}` is the catalog id. */
 export const JUDGMENT_ROUTES = {
 	typesafe: "/v1/systemone",
 	"openrouter-decisions": "/decisions",
+	"cloudflare-systemone": "/{model}",
 } as const satisfies Partial<Record<Api, string>>;
 
 /** APIs {@link TypeSafeJudge} can serve. */
@@ -45,6 +47,8 @@ export type JudgmentApi = keyof typeof JUDGMENT_ROUTES;
 export function isJudgmentApi(api: Api): api is JudgmentApi {
 	return Object.hasOwn(JUDGMENT_ROUTES, api);
 }
+
+const CLOUDFLARE_API = "cloudflare-systemone" satisfies JudgmentApi;
 
 /** `TYPESAFE_BASE_URL` when set, else the public API root; trailing slashes stripped. */
 export function typesafeBaseUrl(): string {
@@ -71,6 +75,15 @@ export interface TypeSafeJudgeOptions {
 	fetch?: FetchImpl;
 	/** Per-attempt timeout; defaults to {@link DEFAULT_TIMEOUT_MS}. */
 	timeoutMs?: number;
+	/** Per-attempt endpoint shaping from the provider transport; {@link NO_AUTH_SENTINEL} sends no `Authorization`. */
+	prepareRequest?: (key: string) => JudgmentEndpoint;
+}
+
+/** Where and how one judgment attempt is sent. */
+export interface JudgmentEndpoint {
+	baseUrl: string;
+	headers?: Record<string, string>;
+	apiKey: string;
 }
 
 /** Non-2xx response from the TypeSafe API. */
@@ -85,9 +98,55 @@ const BACKOFF_MAX_MS = 5_000;
 
 interface SystemOneResponse {
 	model: string;
-	answers: Record<string, Answer>;
+	answers: Record<string, unknown>;
 	/** OpenRouter adds the billed `cost` in USD; some routes omit token counts. */
 	usage: { input_tokens?: number; output_tokens?: number; cost?: number };
+}
+
+/** `undefined` when absent, `null` when present but not a finite number. */
+function optionalNumber(value: unknown): number | undefined | null {
+	if (value === undefined || value === null) return undefined;
+	return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+/** Rejects mistyped fields rather than letting them read as zero usage. */
+function parseSystemOneResponse(payload: unknown, label: string, provider: string): SystemOneResponse {
+	const fail = (message: string) =>
+		new AIError.ProviderResponseError(`${label} response ${message}`, { provider, kind: "envelope" });
+	if (!isRecord(payload)) throw fail("is not a JSON object");
+	const { model, answers, usage } = payload;
+	if (typeof model !== "string") throw fail('has no string "model"');
+	if (!isRecord(answers)) throw fail('has no "answers" object');
+	if (!isRecord(usage)) throw fail('has no "usage" object');
+	const input = optionalNumber(usage.input_tokens);
+	const output = optionalNumber(usage.output_tokens);
+	const cost = optionalNumber(usage.cost);
+	if (input === null) throw fail('has a non-numeric "usage.input_tokens"');
+	if (output === null) throw fail('has a non-numeric "usage.output_tokens"');
+	if (cost === null) throw fail('has a non-numeric "usage.cost"');
+	return {
+		model,
+		answers,
+		usage: { input_tokens: input, output_tokens: output, cost },
+	};
+}
+
+/** Unwraps Cloudflare's `{ result, success, errors }` envelope; a bare body passes through. */
+function unwrapCloudflareEnvelope(payload: unknown, label: string, provider: string): unknown {
+	if (!isRecord(payload)) {
+		throw new AIError.ProviderResponseError(`${label} response is not a JSON object`, {
+			provider,
+			kind: "envelope",
+		});
+	}
+	if (payload.success === false) {
+		const errors = Array.isArray(payload.errors) ? payload.errors.filter(isRecord) : [];
+		const detail = errors
+			.map(error => `${error.code === undefined ? "" : `${error.code}: `}${error.message ?? ""}`)
+			.join("; ");
+		throw new AIError.ProviderResponseError(`${label} API error: ${detail || "request failed"}`, { provider });
+	}
+	return "result" in payload ? payload.result : payload;
 }
 
 /** Server hint wins (capped); otherwise exponential backoff from {@link BACKOFF_BASE_MS}. */
@@ -105,6 +164,7 @@ export class TypeSafeJudge implements Judge {
 	readonly baseUrl: string;
 	readonly #apiKey: ApiKey;
 	readonly #headers: Record<string, string> | undefined;
+	readonly #prepareRequest: TypeSafeJudgeOptions["prepareRequest"];
 	readonly #fetch: FetchImpl;
 	readonly #timeoutMs: number;
 
@@ -115,22 +175,28 @@ export class TypeSafeJudge implements Judge {
 		this.baseUrl = (options.baseUrl ?? typesafeBaseUrl()).replace(/\/+$/, "");
 		this.model = options.model ?? typesafeModel();
 		this.#headers = options.headers;
+		this.#prepareRequest = options.prepareRequest;
 		this.#fetch = options.fetch ?? fetch;
 		this.#timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
 		this.label = `${this.provider}/${this.model}`;
 	}
 
 	async judge<Q extends Questions>(request: JudgmentRequest<Q>, options?: JudgeOptions): Promise<JudgmentResult<Q>> {
-		const body = JSON.stringify({ state: request.state, model: this.model, questions: request.questions });
+		const cloudflare = this.api === CLOUDFLARE_API;
+		// Cloudflare takes a short selector (`clef-flash`) in the body; the full id is the path.
+		const requestModel = cloudflare ? this.model.slice(this.model.lastIndexOf("/") + 1) : this.model;
+		const body = JSON.stringify({ state: request.state, model: requestModel, questions: request.questions });
+		const path = JUDGMENT_ROUTES[this.api].replace("{model}", this.model);
 		const signal = options?.signal;
-		const response = await withAuth(
-			this.#apiKey,
-			key => this.#attempt<SystemOneResponse>(JUDGMENT_ROUTES[this.api], body, key, signal),
-			{ signal },
+		const payload = await withAuth(this.#apiKey, key => this.#attempt<unknown>(path, body, key, signal), { signal });
+		const response = parseSystemOneResponse(
+			cloudflare ? unwrapCloudflareEnvelope(payload, this.label, this.provider) : payload,
+			this.label,
+			this.provider,
 		);
 		for (const id in request.questions) {
 			const answer = response.answers[id];
-			if (answer === undefined || answer.type !== request.questions[id].type) {
+			if (!isRecord(answer) || answer.type !== request.questions[id].type) {
 				throw new AIError.ProviderResponseError(
 					`${this.label} response is missing a "${request.questions[id].type}" answer for question "${id}"`,
 					{ provider: this.provider, kind: "envelope" },
@@ -147,13 +213,14 @@ export class TypeSafeJudge implements Judge {
 	}
 
 	async #attempt<T>(path: string, body: string, key: string, signal: AbortSignal | undefined): Promise<T> {
-		const url = `${this.baseUrl}${path}`;
+		const endpoint = this.#prepareRequest?.(key) ?? { baseUrl: this.baseUrl, headers: this.#headers, apiKey: key };
+		const url = `${endpoint.baseUrl.replace(/\/+$/, "")}${path}`;
 		const headers: Record<string, string> = {
-			...this.#headers,
-			Authorization: `Bearer ${key}`,
+			...endpoint.headers,
 			Accept: "application/json",
 			"Content-Type": "application/json",
 		};
+		if (endpoint.apiKey !== NO_AUTH_SENTINEL) headers.Authorization = `Bearer ${endpoint.apiKey}`;
 		for (let attempt = 0; ; attempt++) {
 			signal?.throwIfAborted();
 			const timeout = AbortSignal.timeout(this.#timeoutMs);

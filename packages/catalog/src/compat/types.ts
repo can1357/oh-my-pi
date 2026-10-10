@@ -636,6 +636,8 @@ export interface CompiledSeedModel {
 /** A provider's authored seed rows (`seed` node in `providers/<id>.kdl`). */
 export interface CompiledSeed {
 	bundle: SeedBundlePolicy;
+	/** Per-row `bundle` overrides keyed by model id. */
+	rowBundles?: Record<string, SeedBundlePolicy>;
 	/**
 	 * `seed`: rows are prepended after upstream merging so they outrank same-id
 	 * rows and never receive cross-provider reference fills. `upstream`

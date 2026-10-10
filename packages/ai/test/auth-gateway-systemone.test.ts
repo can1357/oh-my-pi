@@ -6,7 +6,7 @@ import { startAuthGateway } from "@oh-my-pi/pi-ai/auth-gateway";
 import { AuthStorage } from "@oh-my-pi/pi-ai/auth-storage";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
-import type { FetchImpl } from "@oh-my-pi/pi-catalog/types";
+import type { FetchImpl, Model } from "@oh-my-pi/pi-catalog/types";
 
 const REQUEST = {
 	state: "Help! My payouts have been failing for 3 days.",
@@ -26,12 +26,13 @@ interface Harness {
 	close: () => Promise<void>;
 }
 
-async function boot(respond: () => Response): Promise<Harness> {
+async function boot(respond: () => Response, patch: Partial<Model> = {}): Promise<Harness> {
 	const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gw-systemone-"));
 	const storage = await AuthStorage.create(path.join(dir, "auth.db"));
 	storage.keys.setRuntime("typesafe", "ts-secret");
-	const jev = getBundledModel("typesafe", "jev-latest");
-	if (!jev) throw new Error("expected bundled typesafe/jev-latest");
+	const bundled = getBundledModel("typesafe", "jev-latest");
+	if (!bundled) throw new Error("expected bundled typesafe/jev-latest");
+	const jev: Model = { ...bundled, ...patch };
 	const chat = createMockModel({ provider: "openrouter", id: "chat-only" });
 	const upstream: Harness["upstream"] = [];
 	const fetchStub: FetchImpl = async (input, init) => {
@@ -115,6 +116,15 @@ describe("auth-gateway POST /v1/systemone", () => {
 		const response = await post(harness.url, "/alpha/decisions", { model: "jev-latest", ...REQUEST });
 		expect(response.status).toBe(200);
 		expect(harness.upstream).toHaveLength(1);
+	});
+
+	it("sends headers materialized from the model's resolveHeaders", async () => {
+		harness = await boot(() => Response.json(UPSTREAM_ANSWER), {
+			resolveHeaders: async () => ({ "x-custom-routing": "router-1" }),
+		});
+		const response = await post(harness.url, "/v1/systemone", { model: "jev-latest", ...REQUEST });
+		expect(response.status).toBe(200);
+		expect(new Headers(harness.upstream[0].init?.headers).get("x-custom-routing")).toBe("router-1");
 	});
 
 	it("rejects malformed bodies with 422 before touching upstream", async () => {

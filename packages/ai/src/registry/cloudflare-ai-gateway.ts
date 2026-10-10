@@ -95,6 +95,8 @@ export const cloudflareAiGatewayTransport: ProviderTransport = {
 		}
 
 		const isAnthropic = model.api === "anthropic-messages";
+		// The native Workers AI judgment route also needs the bearer token (401 with `cf-aig-authorization` alone).
+		const sendsBearer = isAnthropic || model.api === "cloudflare-systemone";
 		let headers = model.headers;
 		if (!isAnthropic) {
 			headers = { ...headers };
@@ -106,7 +108,7 @@ export const cloudflareAiGatewayTransport: ProviderTransport = {
 		}
 		return {
 			model: { ...model, baseUrl, headers },
-			options: { ...options, apiKey: isAnthropic ? credential.token : NO_AUTH_SENTINEL },
+			options: { ...options, apiKey: sendsBearer ? credential.token : NO_AUTH_SENTINEL },
 		};
 	},
 };

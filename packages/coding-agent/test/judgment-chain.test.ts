@@ -4,7 +4,10 @@ import * as path from "node:path";
 import type { ChatUsageEvent } from "@oh-my-pi/pi-agent-core";
 import type { Api, AssistantMessage, ChoiceQuestion, Model, NoulQuestion } from "@oh-my-pi/pi-ai";
 import * as ai from "@oh-my-pi/pi-ai";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { seedModels } from "@oh-my-pi/pi-catalog/compat/providers";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
+import { serializeCloudflareAiGatewayCredential } from "@oh-my-pi/pi-catalog/wire/cloudflare-ai-gateway";
 import { cfgModelRoles } from "@oh-my-pi/pi-coding-agent/config/model-settings";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -384,6 +387,56 @@ describe("ChainJudge", () => {
 				customTenant: "tenant-abc",
 			},
 		]);
+	});
+
+	it("serves the judge role from Cloudflare's Clef through the AI Gateway's Workers AI route", async () => {
+		const clefSpec = seedModels("cloudflare-ai-gateway").find(
+			seed => seed.id === "workers-ai/@cf/cloudflare/clef-flash",
+		);
+		if (!clefSpec) throw new Error("missing cloudflare-ai-gateway clef-flash seed");
+		const clef = buildModel(clefSpec);
+		const settings = Settings.isolated({ modelRoles: { judge: `${clef.provider}/${clef.id}` } });
+		const registry = makeRegistry([clef], {
+			[clef.provider]: serializeCloudflareAiGatewayCredential("gw-token", "acct", "gw"),
+		});
+		const requests: { url: string; headers: Headers; body: { model: string } }[] = [];
+		vi.spyOn(globalThis, "fetch").mockImplementation(
+			asGlobalFetch((url, init) => {
+				requests.push({
+					url: String(url),
+					headers: new Headers(init?.headers),
+					body: JSON.parse(String(init?.body)) as { model: string },
+				});
+				return Response.json({
+					result: {
+						model: "@cf/cloudflare/clef-flash",
+						answers: {
+							level: { type: "choice", choice: "high", probabilities: { low: 0.1, high: 0.9 }, confidence: 0.9 },
+						},
+						usage: { input_tokens: 100, output_tokens: 2 },
+					},
+					success: true,
+					errors: [],
+					messages: [],
+				});
+			}),
+		);
+		const onUsage = vi.fn();
+
+		const result = await new ChainJudge({ settings, registry, purpose: "test", onUsage }).judge({
+			state: "rewrite the scheduler",
+			questions: { level: TIER_QUESTION },
+		});
+
+		expect(hasNativeJudge(settings, registry)).toBe(true);
+		expect(result.answers.level.choice).toBe("high");
+		expect(requests).toHaveLength(1);
+		expect(requests[0].url).toBe("https://gateway.ai.cloudflare.com/v1/acct/gw/workers-ai/@cf/cloudflare/clef-flash");
+		expect(requests[0].headers.get("cf-aig-authorization")).toBe("Bearer gw-token");
+		expect(requests[0].headers.get("authorization")).toBe("Bearer gw-token");
+		expect(requests[0].body.model).toBe("clef-flash");
+		expect(onUsage.mock.calls[0]?.[0]).toMatchObject({ provider: clef.provider, model: clef.id });
+		expect(onUsage.mock.calls[0]?.[0].usage.cost.total).toBeCloseTo((100 * 0.09) / 1_000_000);
 	});
 
 	it("answers repeated questions from the cache and sends only the unanswered ones", async () => {

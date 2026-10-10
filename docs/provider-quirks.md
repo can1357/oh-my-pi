@@ -811,6 +811,7 @@ Provider-specific overrides in `packages/catalog/src/compat/rules/providers/clou
 - **Custom Authorization Header**: Uses `cf-aig-authorization: Bearer <key>` instead of standard `x-api-key` or `Authorization` headers (`packages/ai/src/providers/anthropic.ts:buildAnthropicHeaders`).
 - **Suppressed Client Credentials**: `apiKey` and `authToken` are set to `null` on the Anthropic client options object so credentials travel exclusively via pre-built default headers (`packages/ai/src/providers/anthropic.ts`).
 - **OAuth Session Protection**: Excluded from receiving Claude OAuth `account_uuid` headers to prevent identity leakage to third-party proxies (`packages/coding-agent/src/session/session-metadata.ts`).
+- **Clef judge models**: `workers-ai/@cf/cloudflare/clef` and `…/clef-flash` use the `cloudflare-systemone` judgment API (`packages/ai/src/judgment/typesafe.ts`); the gateway token is also sent as `Authorization: Bearer`.
 
 ### Auth & usage
 - **Authentication Prompt**: Declared in `packages/catalog/src/compat/rules/auth/cloudflare-ai-gateway.kdl` (`login "custom" hook="cloudflare-ai-gateway"`), implemented in `packages/ai/src/registry/oauth/cloudflare-ai-gateway.ts` (with transport in `packages/ai/src/registry/cloudflare-ai-gateway.ts`), prompting for a Cloudflare AI Gateway token/API key (`cf-aig-...`) and directing users to Cloudflare's authentication documentation.
@@ -819,7 +820,7 @@ Provider-specific overrides in `packages/catalog/src/compat/rules/providers/clou
 
 ### Catalog model handling
 - **Provider entry (`cloudflare-ai-gateway`)**: `packages/catalog/src/compat/rules/providers/cloudflare-ai-gateway.kdl` declares default model `anthropic/claude-opus-5`. Environment keys: `CLOUDFLARE_AI_GATEWAY_API_KEY`.
-- **Authored seeds**: `claude-sonnet-4-5`; bundle policy `empty`. Limits, capabilities, and prices are authored alongside these rows.
+- **Authored seeds**: `claude-sonnet-4-5` (bundle policy `empty`), `workers-ai/@cf/cloudflare/clef`, `workers-ai/@cf/cloudflare/clef-flash` (per-row `always`). Limits, capabilities, and prices are authored alongside these rows.
 - **Priority Wiring**: Assigned catalog priority level 39 in `providerPriority` (`packages/catalog/src/identity/priority.ts`).
 
 ## CoreWeave Serverless Inference (`coreweave`)

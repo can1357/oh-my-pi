@@ -150,6 +150,22 @@ describe("model kind must match its api", () => {
 		expect(checked.summary).toContain('(was "search")');
 	});
 
+	test("accepts every judgment API at provider level and rejects a chat kind on it", () => {
+		for (const api of ["typesafe", "openrouter-decisions", "cloudflare-systemone"] as const) {
+			const checked = ModelsConfigSchema({
+				providers: { judges: { baseUrl, apiKey: "key", api, models: [{ id: "@cf/cloudflare/clef-flash" }] } },
+			});
+			if (checked instanceof OmpErrors) throw new Error(checked.summary);
+			expect(checked.providers?.judges?.api).toBe(api);
+		}
+		expect(
+			validate({ api: "cloudflare-systemone", models: [{ id: "@cf/cloudflare/clef-flash", kind: "judge" }] }),
+		).not.toThrow();
+		expect(validate({ api: "cloudflare-systemone", models: [{ id: "x", kind: "chat" }] })).toThrow(
+			/model x: kind "chat" does not match api "cloudflare-systemone", which serves kind "judge"/,
+		);
+	});
+
 	test("checks an override kind against an api the file names", () => {
 		const provider = { api: "openai-responses" as const, models: [{ id: "gpt-image-2" }] };
 		expect(validate({ ...provider, modelOverrides: { "gpt-image-2": { kind: "tts" } } })).toThrow(
