@@ -10,8 +10,7 @@ import {
 	renderImage,
 	TERMINAL,
 } from "../terminal-capabilities";
-import { registerNativeBlob } from "../native/blobs";
-import { node } from "../native/describe";
+import { nativeImageNode } from "../native/blobs";
 import type { DescribeContext, NativeNode } from "../native/node";
 import type { Component } from "../tui";
 
@@ -826,6 +825,11 @@ export class Image implements Component {
 		this.#cachedWidth = undefined;
 	}
 
+	releaseRenderCaches(): void {
+		this.#cachedLines = undefined;
+		this.#cachedWidth = undefined;
+	}
+
 	/**
 	 * SIXEL sequence for a target size. A new size starts the encode off the JS
 	 * thread and answers `undefined` until it settles; the settled encode
@@ -865,11 +869,9 @@ export class Image implements Component {
 	 */
 	describe(_cx: DescribeContext): NativeNode {
 		if (this.#native) return this.#native;
-		const blob = registerNativeBlob(Buffer.from(this.#base64Data, "base64"), this.#mimeType);
 		const maxW = this.#options.maxWidthCells;
 		const maxH = this.#options.maxHeightCells;
-		this.#native = node("image", {
-			blob,
+		this.#native = nativeImageNode(Buffer.from(this.#base64Data, "base64"), this.#mimeType, {
 			alt: imageFallback(this.#mimeType, this.#dimensions, this.#options.filename),
 			w: this.#dimensions.widthPx,
 			h: this.#dimensions.heightPx,

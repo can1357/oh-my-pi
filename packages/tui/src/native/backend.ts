@@ -305,8 +305,8 @@ export class NativeBackend {
 	#paletteKey: string | undefined;
 	/** Serialized palette last sent, to skip resends of an unchanged theme. */
 	#paletteSent: string | undefined;
-	/** Blobs handled on this connection: asked about in a `blobs` query, or sent (or held by the terminal). */
-	#blobs = new Map<string, "asked" | "sent">();
+	/** Pending delivery owns bytes until sent or confirmed held; settled descriptions may already be released. */
+	#blobs = new Map<string, NativeBlob | "sent">();
 	/** `blobs` queries sent, oldest first: the terminal answers each once, in order. */
 	#blobQueries: BlobQuery[] = [];
 	/** The next pass with new blobs asks the terminal which it holds (a fresh connection). */
@@ -663,13 +663,13 @@ export class NativeBackend {
 		}
 		const dir = Bun.env.TERN_BLOB_DIR;
 		if (dir) {
-			for (const blob of fresh) this.#blobs.set(blob.id, "asked");
+			for (const blob of fresh) this.#blobs.set(blob.id, blob);
 			void this.#cacheBlobs(dir, fresh);
 			return;
 		}
 		if (this.#askHeld) {
 			this.#askHeld = false;
-			this.#askBlobs(fresh.map(blob => blob.id));
+			this.#askBlobs(fresh);
 			return;
 		}
 		for (const blob of fresh) this.#sendBlob(blob);
@@ -680,13 +680,14 @@ export class NativeBackend {
 		const epoch = this.#blobEpoch;
 		await Promise.all(blobs.map(blob => cacheBlob(dir, blob)));
 		if (epoch !== this.#blobEpoch) return;
-		const ids = blobs.map(blob => blob.id).filter(id => this.#blobs.get(id) === "asked");
-		if (ids.length > 0) this.#askBlobs(ids);
+		const pending = blobs.filter(blob => this.#blobs.get(blob.id) === blob);
+		if (pending.length > 0) this.#askBlobs(pending);
 	}
 
-	/** Ask the terminal which of `ids` it holds; the reply (or its absence) settles them. */
-	#askBlobs(ids: readonly string[]): void {
-		for (const id of ids) this.#blobs.set(id, "asked");
+	/** Ask the terminal which of `blobs` it holds; the reply (or its absence) settles them. */
+	#askBlobs(blobs: readonly NativeBlob[]): void {
+		for (const blob of blobs) this.#blobs.set(blob.id, blob);
+		const ids = blobs.map(blob => blob.id);
 		const query: BlobQuery = { ids, timer: undefined };
 		query.timer = this.#scheduler.scheduleRender(() => {
 			query.timer = undefined;
@@ -707,16 +708,16 @@ export class NativeBackend {
 	#onBlobsReply(have: readonly string[]): void {
 		const query = this.#blobQueries.shift();
 		for (const id of have) {
-			if (this.#blobs.get(id) !== "asked") continue;
-			this.#blobs.set(id, "sent");
+			const blob = this.#blobs.get(id);
+			if (blob === undefined || blob === "sent") continue;
 			// The bytes went another way; a recording still carries them so a replay without them shows the image.
-			const blob = this.#recordPath ? getNativeBlob(id) : undefined;
-			if (blob) {
+			if (this.#recordPath) {
 				const body = Buffer.from(blob.bytes.buffer, blob.bytes.byteOffset, blob.bytes.byteLength).toString(
 					"base64",
 				);
 				this.#record("out", "b", blobParams(blob), body);
 			}
+			this.#blobs.set(id, "sent");
 		}
 		if (!query?.timer) return;
 		query.timer.cancel();
@@ -727,8 +728,8 @@ export class NativeBackend {
 	/** Send inline every id of `ids` still waiting on a query. */
 	#sendMissing(ids: readonly string[]): void {
 		for (const id of ids) {
-			const blob = this.#blobs.get(id) === "asked" ? getNativeBlob(id) : undefined;
-			if (blob) this.#sendBlob(blob);
+			const blob = this.#blobs.get(id);
+			if (blob !== undefined && blob !== "sent") this.#sendBlob(blob);
 		}
 	}
 

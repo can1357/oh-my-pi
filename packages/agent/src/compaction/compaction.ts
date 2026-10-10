@@ -163,6 +163,14 @@ export interface CompactionSettings {
 	strategy?: "context-full" | "handoff" | "shake" | "snapcompact" | "off";
 	thresholdPercent?: number;
 	thresholdTokens?: number;
+	/**
+	 * Stands in for the context window when the percentage or reserve-based
+	 * threshold is computed (when `> 0` and smaller than the window); a positive
+	 * `thresholdTokens` still wins and is clamped to the real window. Set by
+	 * per-model compaction limits; request and overflow budgets keep the real
+	 * window.
+	 */
+	baseWindowTokens?: number;
 	midTurnEnabled?: boolean;
 	/**
 	 * Tokens reserved below the context window for the next prompt + response.
@@ -359,11 +367,16 @@ export function compactionContextTokens(providerContextTokens: number, storedCon
 }
 
 export function resolveThresholdTokens(contextWindow: number, settings: CompactionSettings): number {
-	// Fixed token limit takes priority over percentage
+	// Fixed token limit takes priority over percentage, and is checked against
+	// the real window: `baseWindowTokens` only rescales the policies below.
 	const thresholdTokens = settings.thresholdTokens;
 	if (typeof thresholdTokens === "number" && Number.isFinite(thresholdTokens) && thresholdTokens > 0) {
 		// Clamp to [1, contextWindow - 1] so there's always room
 		return Math.min(contextWindow - 1, Math.max(1, thresholdTokens));
+	}
+	const baseWindowTokens = settings.baseWindowTokens;
+	if (typeof baseWindowTokens === "number" && Number.isFinite(baseWindowTokens) && baseWindowTokens > 0) {
+		contextWindow = Math.min(contextWindow, baseWindowTokens);
 	}
 
 	// Percentage-based threshold. The default absolute reserve can exceed bundled
@@ -1845,7 +1858,7 @@ export async function compact(
 						),
 					{ signal },
 				);
-				preserveData = withOpenAiRemoteCompactionPreserveData(previousPreserveData, remote);
+				preserveData = withOpenAiRemoteCompactionPreserveData(preserveData, remote);
 				usedRemoteCompaction = true;
 			} catch (err) {
 				// A user/session abort is a cancellation, not a remote failure —

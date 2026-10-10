@@ -40,7 +40,7 @@ import { buildInitialMessage } from "./cli/initial-message";
 import { formatKeyHint } from "@oh-my-pi/pi-tui/app-keybindings";
 import type { SessionPickerOptions } from "@oh-my-pi/pi-tui/apps/session-picker";
 import { applyStartupCwd } from "./cli/startup-cwd";
-import { getLatestRelease } from "./cli/update-cli";
+import { getLatestRelease, isSourceCheckout, managedInstallName } from "./cli/update-cli";
 import { findConfigFile } from "./config";
 import { ModelRegistry } from "./config/model-registry";
 import { formatModelSelectorValue } from "@oh-my-pi/pi-tui/overlays/model-selector";
@@ -236,6 +236,9 @@ async function checkForNewVersion(currentVersion: string): Promise<string | unde
 		return;
 	}
 	try {
+		// Checkouts update through git and a manager (Tern) updates its omp itself:
+		// "run omp update" would be wrong advice for both.
+		if (isSourceCheckout() || (await managedInstallName(process.execPath))) return;
 		const channel = cfgUpdateChannel.get(settings);
 		const release = await getLatestRelease({ timeoutMs: 5_000, channel });
 		return Bun.semver.order(release.version, currentVersion) > 0 ? release.version : undefined;
@@ -753,7 +756,6 @@ async function runInteractiveMode(
 	}
 
 	if (startupGoal !== undefined) {
-		session.maybeStartTitleGeneration(startupGoal);
 		try {
 			await mode.startGoalAtStartup(startupGoal);
 		} catch (error: unknown) {
@@ -762,7 +764,6 @@ async function runInteractiveMode(
 	}
 
 	if (initialMessage !== undefined) {
-		session.maybeStartTitleGeneration(initialMessage);
 		try {
 			using _keepalive = new EventLoopKeepalive();
 			// `steer` covers the race where the user submits a prompt of their own
@@ -777,7 +778,6 @@ async function runInteractiveMode(
 	}
 
 	for (const message of initialMessages) {
-		session.maybeStartTitleGeneration(message);
 		try {
 			using _keepalive = new EventLoopKeepalive();
 			await session.prompt(message, { streamingBehavior: "steer" });
@@ -2205,6 +2205,7 @@ export async function runRootCommand(
 		sessionOptions.allowSessionModelFallback = isInteractive;
 		sessionOptions.settingsApproval = isInteractive;
 		sessionOptions.tuiTranscript = isInteractive;
+		sessionOptions.autoTitle = isInteractive;
 		sessionOptions.settings = settingsInstance;
 		sessionOptions.onPrewalkWarning = warning => {
 			if (isInteractive) notifs.push({ kind: "warn", message: warning });

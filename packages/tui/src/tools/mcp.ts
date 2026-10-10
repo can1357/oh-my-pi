@@ -121,7 +121,15 @@ function renderMarkdownMCPResult(
 				applyBg: false,
 			};
 		},
-		{ paddingX: 0, paddingY: 0, onInvalidate: () => (bodyMemo = undefined) },
+		{
+			paddingX: 0,
+			paddingY: 0,
+			onInvalidate: () => (bodyMemo = undefined),
+			onReleaseRenderCaches: () => {
+				bodyMemo = undefined;
+				markdown.releaseRenderCaches();
+			},
+		},
 	);
 }
 
@@ -208,7 +216,12 @@ export function renderMCPResult(
 			}
 			return { status, phase, body: bodyMemo.lines, applyBg: false };
 		},
-		{ paddingX: 0, paddingY: 0, onInvalidate: () => (bodyMemo = undefined) },
+		{
+			paddingX: 0,
+			paddingY: 0,
+			onInvalidate: () => (bodyMemo = undefined),
+			onReleaseRenderCaches: () => (bodyMemo = undefined),
+		},
 	);
 
 	function buildMcpResultBody(contentWidth: number): string[] {

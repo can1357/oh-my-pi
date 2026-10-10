@@ -90,7 +90,7 @@ export function mergeDiscoveredModel<TApi extends Api>(
 ): Model<TApi> {
 	if (existing) {
 		const supportsTools = model.supportsTools ?? existing.supportsTools;
-		return buildModel({
+		const merged = buildModel({
 			...toModelSpec(model),
 			baseUrl: resolveProviderBaseUrl(model.api, model.baseUrl ?? existing.baseUrl, providerOverride),
 			headers: undefined,
@@ -113,9 +113,10 @@ export function mergeDiscoveredModel<TApi extends Api>(
 			...(supportsTools !== undefined ? { supportsTools } : {}),
 			compat: mergeCompat(model.compatConfig, providerOverride?.compat),
 		} as ModelSpec<TApi>);
+		return Bun.deepEquals(merged, model) ? model : merged;
 	}
 	if (providerOverride) {
-		return buildModel({
+		const merged = buildModel({
 			...toModelSpec(model),
 			baseUrl: resolveProviderBaseUrl(model.api, model.baseUrl, providerOverride),
 			headers: undefined,
@@ -130,6 +131,7 @@ export function mergeDiscoveredModel<TApi extends Api>(
 			),
 			compat: mergeCompat(model.compatConfig, providerOverride.compat),
 		} as ModelSpec<TApi>);
+		return Bun.deepEquals(merged, model) ? model : merged;
 	}
 	return model;
 }

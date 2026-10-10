@@ -382,6 +382,12 @@ export interface AgentSessionConfig {
 	disconnectOwnedMcpManager?: () => Promise<void>;
 	/** System prompt used by automatic session-title generation. */
 	titleSystemPrompt?: string;
+	/**
+	 * Name the unnamed session from the operator's messages, once each reply
+	 * begins (see `title.generator`). Only the interactive TUI sets this; print,
+	 * RPC, ACP, SDK and subagent sessions stay unnamed. Default: false.
+	 */
+	autoTitle?: boolean;
 }
 
 /** Options for AgentSession.prompt(). */
