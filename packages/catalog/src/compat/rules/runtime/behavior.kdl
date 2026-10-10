@@ -172,7 +172,7 @@ behavior {
 	// SuperGrok's roster interleaves media models the chat picker cannot
 	// serve; the dedicated tool surfaces route them instead.
 	exclude-models provider="xai-oauth" exact="grok-imagine-image-quality" exact="grok-imagine-image-2.0" \
-		exact="grok-imagine-video" exact="grok-imagine-video-1.5" prefix="grok-stt-" prefix="grok-voice-"
+		prefix="grok-imagine-video" prefix="grok-stt-" prefix="grok-voice-"
 	// Meta's /v1/models lists image generation and transcription SKUs beside
 	// the Muse Spark chat models.
 	exclude-models provider="meta" prefix="muse-image-" prefix="muse-voice-"
@@ -212,14 +212,31 @@ behavior {
 		route "openai-responses" prefix="grok-4." prefix="gpt-5" prefix="gpt-6" prefix="oswe" prefix="mai-"
 	}
 	// Command Code serves Claude ids through its Anthropic-compatible Messages
-	// endpoint, its ten GPT ids (the same set command-code@1.67.0 marks
-	// `spec: "responses"`) through its Responses endpoint, and every other id
-	// through chat completions.
+	// endpoint and everything else through chat completions or Responses
+	// (`supported_endpoints` on /provider/v1/models). Chat completions rejects
+	// `reasoning_effort: "none"` (low|medium|high|xhigh|max only), while
+	// Responses accepts `reasoning.effort: "none"`. Every id with a reviewed
+	// effort ladder that lists `/responses` therefore rides Responses, so
+	// thinking-off actually disables reasoning instead of clamping to the
+	// lowest effort. Ladder ids without `/responses` (deepseek-v4-flash-fast,
+	// gemini-3.7-flash, Qwen3.8-Flash, Qwen3.8-Max-0902, hy4-preview,
+	// space-bunny-alpha), the Qwen3.8 ids (chat already disables them through
+	// `enable_thinking: false`), and non-reasoning ids stay on chat completions.
 	api-routes provider="commandcode" default="openai-completions" {
 		route "anthropic-messages" prefix="claude-"
 		route "openai-responses" exact="gpt-5.3-codex" exact="gpt-5.4" exact="gpt-5.4-mini" exact="gpt-5.5" \
 			exact="gpt-5.6-luna" exact="gpt-5.6-sol" exact="gpt-5.6-terra" exact="gpt-6-astra" \
-			exact="gpt-6-luna" exact="gpt-6-sol"
+			exact="gpt-6-luna" exact="gpt-6-sol" \
+			exact="deepseek/deepseek-v4-flash" exact="deepseek/deepseek-v4-flash-vision-exp" \
+			exact="deepseek/deepseek-v4-pro" exact="deepseek/deepseek-v4.1-flash" \
+			exact="deepseek/deepseek-v4.1-flash-fast" exact="moonshotai/Kimi-K3" \
+			exact="z-ai/glm-5.3-flash" exact="z-ai/glm-5.3-flashx" exact="zai-org/GLM-5.2" \
+			exact="zai-org/GLM-5.3" exact="google/gemini-3.1-flash-lite" exact="google/gemini-3.5-flash" \
+			exact="google/gemini-3.5-flash-lite" exact="google/gemini-3.6-flash" \
+			exact="google/gemini-3.8-flash" exact="MiniMaxAI/MiniMax-M3" exact="stepfun/Step-5-Preview" \
+			exact="xai/grok-4.5" exact="xai/grok-4.6" exact="xai/grok-4.7" exact="meta/muse-spark-1.1" \
+			exact="meta/muse-spark-1.2" exact="meta/muse-spark-1.2-contributor" exact="meta/muse-spark-1.3" \
+			exact="meta/muse-spark-1.3-contributor" exact="stealth/pixel-canary" exact="sakana/fugu-ultra"
 	}
 	// ZenMux fronts Anthropic ids on a dedicated Messages endpoint; every
 	// other namespace stays on chat completions.
@@ -334,11 +351,23 @@ behavior {
 		alias "claude-opus-4-6" peer-id="claude-opus-4-6@default"
 		alias "claude-sonnet-4-5" peer-id="claude-sonnet-4-5@20250929"
 		alias "claude-sonnet-4-6" peer-id="claude-sonnet-4-6@default"
+		alias "claude-opus-5-5" peer-id="claude-opus-5-5@default"
+		alias "claude-sonnet-5-5" peer-id="claude-sonnet-5-5@default"
 	}
 	// SuperGrok surfaces a few models under IDs that differ from their public
 	// xai equivalent, so the exact-id price mirror misses them.
 	pricing-peer provider="xai-oauth" peers="xai" {
 		alias "grok-4.20-multi-agent-0309" peer-id="grok-4.20-multi-agent-beta-latest"
+	}
+	// Token Plan rows report zero cost upstream; like the Antigravity and
+	// SuperGrok rules above, they show the pay-as-you-go equivalent (Credits
+	// overflow is billed at the PAYG list price). MiniMax-M3.1-Flash-Preview has
+	// no published price and borrows the MiniMax-M3 rate as an estimate.
+	pricing-peer provider="minimax-code" peers="minimax" {
+		alias "MiniMax-M3.1-Flash-Preview" peer-id="MiniMax-M3"
+	}
+	pricing-peer provider="minimax-code-cn" peers="minimax-cn" "minimax" {
+		alias "MiniMax-M3.1-Flash-Preview" peer-id="MiniMax-M3"
 	}
 	hosted-default provider="zai-search" model="glm-4.7"
 	hosted-default provider="synthetic-search" model="auto"

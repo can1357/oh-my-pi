@@ -32,7 +32,7 @@ const update = (effort: string) => ({ type: "configuration_update", reasoning: {
 
 describe("planStableOpenAIEffort", () => {
 	it("pins the request-level effort to the baseline and carries changes as configuration_update items", () => {
-		const state = createOpenAIEffortControlState<string>();
+		const state = createOpenAIEffortControlState<string>("session");
 
 		const first = [user("one")];
 		expect(planStableOpenAIEffort(state, first, "low")).toBe("low");
@@ -74,7 +74,7 @@ describe("planStableOpenAIEffort", () => {
 	});
 
 	it("appends the update after the latest tool result when the level changes inside a tool loop", () => {
-		const state = createOpenAIEffortControlState<string>();
+		const state = createOpenAIEffortControlState<string>("session");
 		planStableOpenAIEffort(state, [user("one")], "medium");
 
 		const loop: TestItem[] = [
@@ -106,7 +106,7 @@ describe("planStableOpenAIEffort", () => {
 	});
 
 	it("drops a change that returns to the effort already in force at that position", () => {
-		const state = createOpenAIEffortControlState<string>();
+		const state = createOpenAIEffortControlState<string>("session");
 		planStableOpenAIEffort(state, [user("one")], "low");
 		const turn = [user("one"), assistant("msg_1", "a"), user("two")];
 		planStableOpenAIEffort(state, turn, "high");
@@ -119,7 +119,7 @@ describe("planStableOpenAIEffort", () => {
 	});
 
 	it("re-baselines from the requested effort when the history under a transition is rewritten", () => {
-		const state = createOpenAIEffortControlState<string>();
+		const state = createOpenAIEffortControlState<string>("session");
 		planStableOpenAIEffort(state, [user("one")], "low");
 		planStableOpenAIEffort(state, [user("one"), assistant("msg_1", "a"), user("two")], "high");
 

@@ -2,13 +2,13 @@ use std::{
 	collections::VecDeque,
 	io::Write,
 	path::{Path, PathBuf},
-	sync::Arc,
+	sync::{Arc, atomic::AtomicBool},
 };
 
 use brush_parser::ast::{self, CommandPrefixOrSuffixItem};
 use itertools::Itertools;
 
-use tokio_util::sync::CancellationToken;
+use tokio_util::{sync::CancellationToken, task::AbortOnDropHandle};
 
 use crate::{
 	ShellFd,
@@ -106,6 +106,9 @@ pub struct ExecutionParameters {
 	pub suppress_errexit:     bool,
 	/// Optional hook reporting spawned external children for scoped teardown.
 	spawn_observer:           Option<Arc<dyn SpawnObserver>>,
+	/// Optional flag a command raises when it reports an error yet goes on,
+	/// so its exit status does not show the failure.
+	reported_error:           Option<Arc<AtomicBool>>,
 }
 
 impl ExecutionParameters {
@@ -154,6 +157,17 @@ impl ExecutionParameters {
 	/// Returns the active spawn-observer hook, if any.
 	pub fn spawn_observer(&self) -> Option<&Arc<dyn SpawnObserver>> {
 		self.spawn_observer.as_ref()
+	}
+
+	/// Assigns the flag commands raise when they report an error yet go on.
+	pub fn set_reported_error(&mut self, flag: Arc<AtomicBool>) {
+		self.reported_error = Some(flag);
+	}
+
+	/// Returns the flag commands raise when they report an error yet go on,
+	/// if any.
+	pub fn reported_error(&self) -> Option<&Arc<AtomicBool>> {
+		self.reported_error.as_ref()
 	}
 
 	/// Returns the standard input file; usable with `write!` et al.
@@ -595,7 +609,7 @@ fn spawn_async_ao_list_in_task<SE: extensions::ShellExtensions>(
 	});
 
 	jobs::Job::new(
-		[jobs::JobTask::Internal(join_handle)],
+		[jobs::JobTask::Internal(AbortOnDropHandle::new(join_handle))],
 		ao_list.to_string(),
 		jobs::JobState::Running,
 	)
@@ -860,6 +874,24 @@ async fn wait_for_pipeline_processes_and_update_status(
 
 	// Clear our the pipeline status so we can start filling it out.
 	shell.last_pipeline_statuses_mut().clear();
+
+	// Use the exact external member set as the stop scope for a multi-process
+	// pipeline. A process group remains an additional scope because a detached
+	// pipe-input stage can leave the recorded group while still belonging to
+	// the pipeline. A lone process needs no shared scope: its wait checks its
+	// own PID.
+	let external_pid = |result: &ExecutionSpawnResult| match result {
+		ExecutionSpawnResult::StartedProcess(child) => child.pid(),
+		ExecutionSpawnResult::Completed(_) | ExecutionSpawnResult::StartedTask(_) => None,
+	};
+	if process_spawn_results.iter().filter_map(external_pid).nth(1).is_some() {
+		let pipeline_pids: Arc<[_]> = process_spawn_results.iter().filter_map(external_pid).collect();
+		for result in &mut process_spawn_results {
+			if let ExecutionSpawnResult::StartedProcess(child) = result {
+				child.set_stop_pids(Arc::clone(&pipeline_pids));
+			}
+		}
+	}
 
 	while let Some(child) = process_spawn_results.pop_front() {
 		ensure_not_cancelled(params)?;
@@ -1131,7 +1163,7 @@ impl Execute for ast::CoprocessCommand {
 		});
 
 		let job = shell.jobs_mut().add_as_current(jobs::Job::new(
-			[jobs::JobTask::Internal(join_handle)],
+			[jobs::JobTask::Internal(AbortOnDropHandle::new(join_handle))],
 			format!("coproc {name}"),
 			jobs::JobState::Running,
 		));

@@ -183,7 +183,9 @@ function getProjectDirDisplay(projectDir: string): ProjectDirDisplay {
 		}
 	}
 	if (!scratch) {
-		displayRoots ??= [path.join(homeDir, "Projects"), "/work"].map(normalizePathForComparison);
+		displayRoots ??= [path.join(homeDir, "Projects"), path.join(homeDir, "repos"), "/work"].map(
+			normalizePathForComparison,
+		);
 		for (const root of displayRoots) {
 			const relative = relativePathWithinNormalizedRoot(root, normalizedProjectDir);
 			if (relative) {
@@ -782,6 +784,13 @@ const tokenRateSegment: StatusLineSegment = {
 /** Billing summary for the `cost` segment, or undefined when there is nothing to bill. */
 function costSummary(ctx: SegmentContext): string | undefined {
 	const { cost, premiumRequests } = ctx.usageStats;
+	// `cost` folds in completed task results; show the session's own spend and
+	// the subagent tree separately. The hub-projected tree total also covers
+	// grandchildren and running/async agents, but it lags persisted-roster
+	// hydration after resume, so the task-result sum is its floor.
+	const taskResultCost = ctx.usageStats.subagentCost ?? 0;
+	const ownCost = Math.max(0, cost - taskResultCost);
+	const subagentCost = Math.max(ctx.subagentTreeCost ?? 0, taskResultCost);
 	const advisorCost = ctx.session.getAdvisorCost?.() ?? 0;
 	const state = ctx.session.state;
 	const pricingPeriod = state.model?.cost
@@ -794,7 +803,8 @@ function costSummary(ctx: SegmentContext): string | undefined {
 	// working-spinner cadence, so an eager per-frame probe pinned CPU (#10129).
 	return formatBillingSummary(
 		{
-			cost,
+			cost: ownCost,
+			subagentCost,
 			usingSubscription,
 			premiumRequests,
 			fractionDigits: 2,
@@ -959,16 +969,19 @@ const sessionSegment: StatusLineSegment = {
 	},
 };
 
+/** Short (first-label) machine hostname; resolved once — `os.hostname()` is a syscall per call. */
+let shortHostname: string | undefined;
+
 const hostnameSegment: StatusLineSegment = {
 	id: "hostname",
 	render(ctx) {
-		const name = ctx.hostname ?? os.hostname().split(".")[0];
+		const name = ctx.hostname ?? (shortHostname ??= os.hostname().split(".")[0]);
 		const content = withIcon(theme.icon.host, name);
 		const ansi = sessionAccentAnsi(ctx);
 		return { content: ansi ? `${ansi}${content}\x1b[39m` : content, visible: true };
 	},
 	describe(ctx) {
-		const name = ctx.hostname ?? os.hostname().split(".")[0];
+		const name = ctx.hostname ?? (shortHostname ??= os.hostname().split(".")[0]);
 		return segView([span(name, sessionAccentAnsi(ctx) ? "accent" : undefined)], "host");
 	},
 };
@@ -1072,6 +1085,7 @@ const VIM_MODE_LABELS: Record<NonNullable<SegmentContext["vim"]>["mode"], string
 	normal: "NORMAL",
 	visual: "VISUAL",
 	"visual-line": "V-LINE",
+	replace: "REPLACE",
 };
 
 /**
@@ -1084,6 +1098,7 @@ const VIM_MODE_ICON_KEYS: Record<NonNullable<SegmentContext["vim"]>["mode"], Sym
 	normal: "icon.vimNormal",
 	visual: "icon.vimVisual",
 	"visual-line": "icon.vimVisualLine",
+	replace: "icon.vimReplace",
 };
 
 const VIM_MODE_COLORS: Record<NonNullable<SegmentContext["vim"]>["mode"], ThemeColor> = {
@@ -1091,6 +1106,7 @@ const VIM_MODE_COLORS: Record<NonNullable<SegmentContext["vim"]>["mode"], ThemeC
 	normal: "accent",
 	visual: "warning",
 	"visual-line": "warning",
+	replace: "accent",
 };
 
 const vimSegment: StatusLineSegment = {

@@ -152,7 +152,11 @@ export interface ExtensionUISelectOption {
 
 export type ExtensionUISelectItem = string | ExtensionUISelectOption;
 
-import type { ExtensionAskDialogQuestion, ExtensionAskDialogResult } from "@oh-my-pi/pi-tui/overlays/ask-dialog";
+import type {
+	ExtensionAskDialogQuestion,
+	ExtensionAskDialogResult,
+	ExtensionAskDialogSubmitResult,
+} from "@oh-my-pi/pi-tui/overlays/ask-dialog";
 export type {
 	ExtensionAskDialogOption,
 	ExtensionAskDialogQuestion,
@@ -164,6 +168,27 @@ export type {
 
 export function getExtensionUISelectOptionLabel(option: ExtensionUISelectItem): string {
 	return typeof option === "string" ? option : option.label;
+}
+
+/** Answers an ask dialog whose timeout elapsed: each question gets its recommended option, else the first. */
+export function timedOutAskDialogResult(questions: ExtensionAskDialogQuestion[]): ExtensionAskDialogSubmitResult {
+	return {
+		kind: "submit",
+		results: questions.map(question => {
+			const labels = question.options.map(option => option.label);
+			const fallbackIndex = Math.min(Math.max(question.recommended ?? 0, 0), Math.max(labels.length - 1, 0));
+			const fallback = labels[fallbackIndex];
+			return {
+				id: question.id,
+				question: question.question,
+				options: labels,
+				multi: question.multi ?? false,
+				selectedOptions: fallback === undefined ? [] : [fallback],
+				customInput: undefined,
+				timedOut: true,
+			};
+		}),
+	};
 }
 
 /**
@@ -435,6 +460,8 @@ export type ExtensionMode = "tui" | "rpc" | "json" | "print";
 /**
  * The agent a session runs. Extension factories are rebound to every subagent session
  * (task tool, eval `agent()`, `/tan` clones), so this tells a handler which agent it is serving.
+ * An advisor's own tool calls reach the advising session's `tool_call`/`tool_result` handlers
+ * with `{ kind: "sub", id: "advisor", name: "advisor", depth: 0, parentId: <session agent id> }`.
  */
 export interface ExtensionAgentIdentity {
 	/**
@@ -774,6 +801,7 @@ export type {
 	SessionBeforeSwitchEvent,
 	SessionBeforeTreeEvent,
 	SessionBranchEvent,
+	SessionBranchReason,
 	SessionCompactEvent,
 	SessionCompactingEvent,
 	SessionEvent,
@@ -1568,7 +1596,7 @@ export interface ExtensionAPI {
 
 	/** Send a user prompt: idle starts a turn; streaming queues as steer unless deliverAs is set.
 	 *  `deliverAs: "aside"` injects at the next step boundary without interrupting the in-flight tool
-	 *  batch while streaming; idle still starts a turn. */
+	 *  batch while streaming, except that it ends a running interruptible `wait`; idle still starts a turn. */
 	sendUserMessage(content: string | (TextContent | ImageContent)[], options?: SendUserMessageOptions): void;
 
 	/** Append a custom entry to the session for state persistence (not sent to LLM). */
@@ -1726,6 +1754,11 @@ export interface ProviderModelConfig {
 	name: string;
 	/** API type override for this model. */
 	api?: Api;
+	/**
+	 * Catalog kind; omitted means the api's kind (`image` for `openai-images`, …) or `chat`.
+	 * Must be a kind the api serves, as in `models.yml`.
+	 */
+	kind?: Model["kind"];
 	/** Whether the model supports extended thinking at all. */
 	reasoning: boolean;
 	/** Optional canonical thinking capability metadata for per-model effort support. */
@@ -1794,13 +1827,13 @@ export type SendMessageHandler = <T = unknown>(
 	 * When paired with `triggerTurn: true` during prompt teardown, the session schedules
 	 * an internal continuation without surfacing the message in the editable pending queue.
 	 * `deliverAs: "aside"` injects at the next step boundary without interrupting the in-flight
-	 * tool batch; idle starts a turn regardless of `triggerTurn` (plan mode folds into context).
+	 * tool batch, except that it ends a running interruptible `wait`; idle starts a turn regardless of `triggerTurn` (plan mode folds into context).
 	 */
 	options?: { triggerTurn?: boolean; deliverAs?: "steer" | "followUp" | "nextTurn" | "aside" },
 ) => void;
 
 /** `deliverAs: "aside"` injects at the next step boundary without interrupting the in-flight tool
- *  batch while streaming; idle still starts a turn. */
+ *  batch while streaming, except that it ends a running interruptible `wait`; idle still starts a turn. */
 export type SendUserMessageHandler = (
 	content: string | (TextContent | ImageContent)[],
 	options?: SendUserMessageOptions,

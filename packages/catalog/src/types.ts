@@ -60,6 +60,59 @@ export const RUNNER_APIS = [
 	"openrouter-video",
 	"openai-transcriptions",
 ] as const;
+/** Kind each single-purpose runner API serves; `local-inference` hosts several kinds. */
+export const RUNNER_API_KINDS: Record<Exclude<(typeof RUNNER_APIS)[number], "local-inference">, ModelKind> = {
+	"web-search": "search",
+	typesafe: "judge",
+	"openrouter-decisions": "judge",
+	"openai-images": "image",
+	"openrouter-images": "image",
+	"xai-tts": "tts",
+	"openai-speech": "tts",
+	"openai-embeddings": "embedding",
+	"openrouter-rerank": "rerank",
+	"openrouter-video": "video",
+	"openai-transcriptions": "stt",
+};
+
+const RUNNER_API_KIND_BY_API: ReadonlyMap<Api, ModelKind> = new Map(Object.entries(RUNNER_API_KINDS));
+
+/** Kind a runner API serves; `undefined` for chat transports and multi-kind `local-inference`. */
+export function runnerApiKind(api: Api): ModelKind | undefined {
+	return RUNNER_API_KIND_BY_API.get(api);
+}
+
+/** Catalog APIs `generate_image` runs through a pi-ai image client; the hosted Responses pair needs a carrier model. */
+export const IMAGE_GENERATION_APIS = [
+	"openai-images",
+	"openrouter-images",
+	"google-generative-ai",
+	"google-gemini-cli",
+	"openai-responses",
+	"openai-codex-responses",
+] as const;
+export type ImageGenerationApi = (typeof IMAGE_GENERATION_APIS)[number];
+
+const CHAT_TRANSPORT_KINDS: readonly ModelKind[] = ["chat", "tiny"];
+const IMAGE_CHAT_TRANSPORT_KINDS: readonly ModelKind[] = ["chat", "tiny", "image"];
+
+/**
+ * Kinds a model on `api` may declare: a runner api serves its own kind; a chat
+ * transport serves `chat` and `tiny`, plus `image` when `generate_image` runs it
+ * (hosted Responses image tool, Gemini image models). `undefined` for
+ * `local-inference`, which hosts several kinds chosen by the model itself.
+ */
+export function servedKinds(api: Api): readonly ModelKind[] | undefined {
+	if (api === "local-inference") return undefined;
+	const runnerKind = runnerApiKind(api);
+	if (runnerKind !== undefined) return [runnerKind];
+	return (IMAGE_GENERATION_APIS as readonly Api[]).includes(api) ? IMAGE_CHAT_TRANSPORT_KINDS : CHAT_TRANSPORT_KINDS;
+}
+
+/** Whether a model of `kind` can run on `api`. */
+export function apiServesKind(api: Api, kind: ModelKind): boolean {
+	return servedKinds(api)?.includes(kind) ?? true;
+}
 
 /** Resolve a model's kind while preserving chat semantics for existing catalog rows. */
 export function modelKind(model: Pick<Model, "kind">): ModelKind {
@@ -255,6 +308,8 @@ export interface OpenAICompat {
 	supportsMultipleSystemMessages?: boolean;
 	/** Whether the provider supports `reasoning_effort`. Default: auto-detected from URL. */
 	supportsReasoningEffort?: boolean;
+	/** Do not infer a thinking dial when discovery supplies no explicit thinking configuration. */
+	trustExplicitThinkingOnly?: boolean;
 	/** Optional mapping from pi-ai reasoning levels to provider/model-specific `reasoning_effort` values. */
 	reasoningEffortMap?: Partial<Record<Effort, string>>;
 	/** Whether the provider supports `stream_options: { include_usage: true }` for token usage in streaming responses. Default: true. */
@@ -457,6 +512,8 @@ export interface OpenAICompat {
 	supportsReasoningParams?: boolean;
 	/** Whether Responses requests may include `reasoning.summary`. Default: true except on known incompatible hosts. */
 	supportsReasoningSummary?: boolean;
+	/** Whether to chain OpenAI Responses turns using stored response ids. Unset uses the official-endpoint default; env and call options take precedence. */
+	statefulResponses?: boolean;
 	/**
 	 * Whether the endpoint accepts explicit sampling parameters (`temperature`,
 	 * `top_p`, `top_k`, `min_p`, penalties). OpenAI proprietary reasoning models
@@ -477,7 +534,7 @@ export interface OpenAICompat {
 	alwaysSendMaxTokens?: boolean;
 	/** Whether Responses-API tool-call/result history must be strictly paired. Default: auto-detected (Azure OpenAI, GitHub Copilot). */
 	strictResponsesPairing?: boolean;
-	/** Whether the Responses API accepts the `detail: "original"` image hint. Default: auto-detected (false for GitHub Copilot, which rejects it with a 400). */
+	/** Whether the Responses API accepts the `detail: "original"` image hint. Default: true for OpenAI, Azure OpenAI, and Codex; false for other hosts. Explicit overrides win. */
 	supportsImageDetailOriginal?: boolean;
 	/**
 	 * Whether the Responses endpoint accepts `configuration_update` input items
@@ -709,6 +766,8 @@ export interface AnthropicCompat {
  * deliberately not used to infer these request-shape capabilities.
  */
 export interface BedrockCompat {
+	/** Explicit disabled-thinking wire form; unset preserves the provider's existing behavior. */
+	disabledThinking?: AnthropicCompat["disabledThinking"];
 	/** Whether this endpoint accepts no checkpoints, automatic caching, or explicit cachePoint blocks. */
 	promptCacheMode?: "none" | "automatic" | "explicit";
 	/** Whether this wire may revise already-streamed text (`stream-revision` axis). Unassigned: append-only. */
@@ -732,16 +791,33 @@ export interface BedrockCompat {
 	 * `PI_OPENAI_STREAM_IDLE_TIMEOUT_MS` alias, then the 300s default.
 	 */
 	streamIdleTimeoutMs?: number;
+	/**
+	 * Whether the served model accepts explicit sampling parameters
+	 * (`temperature`, `topP`, …). Class rules set `false` for model lines that
+	 * reject them on every host. Unassigned: accepted.
+	 */
+	supportsSamplingParams?: boolean;
+	/**
+	 * Whether the model accepts a forced `toolChoice` (`any` / `tool`). Claude
+	 * Opus/Sonnet 5.5 reject it outright; the request builder downgrades forced
+	 * choices to `auto` when this is false. Default: true.
+	 */
+	supportsForcedToolChoice?: boolean;
 }
 
 /** Fully-resolved Bedrock Converse prompt-cache capabilities, materialized once by `buildModel`. */
 export interface ResolvedBedrockCompat {
+	/** See {@link BedrockCompat.disabledThinking}. */
+	disabledThinking?: BedrockCompat["disabledThinking"];
 	promptCacheMode: NonNullable<BedrockCompat["promptCacheMode"]>;
 	/** See {@link BedrockCompat.streamRevision}. */
 	streamRevision?: BedrockCompat["streamRevision"];
 	supportsLongPromptCacheRetention: boolean;
 	promptCacheMinimumTokens: number;
 	promptCacheMaximumCheckpoints: number;
+	/** See {@link BedrockCompat.supportsSamplingParams}. */
+	supportsSamplingParams?: boolean;
+	supportsForcedToolChoice: boolean;
 	/**
 	 * Stream-watchdog idle-timeout fallback in ms for hosts with no keepalive
 	 * events; 0 disables the idle watchdog. Undefined defers to
@@ -791,6 +867,7 @@ export interface ResolvedOpenAISharedCompat {
 	supportsDeveloperRole: boolean;
 	supportsStrictMode: boolean;
 	supportsReasoningEffort: boolean;
+	trustExplicitThinkingOnly?: boolean;
 	reasoningEffortMap: Partial<Record<Effort, string>>;
 	supportsReasoningParams: boolean;
 	supportsSamplingParams: boolean;
@@ -874,9 +951,11 @@ export type ResolvedOpenAICompat = ResolvedOpenAISharedCompat &
 			OpenAICompat,
 			| "supportsDeveloperRole"
 			| "supportsReasoningEffort"
+			| "trustExplicitThinkingOnly"
 			| "reasoningEffortMap"
 			| "supportsReasoningParams"
 			| "supportsReasoningSummary"
+			| "statefulResponses"
 			| "supportsSamplingParams"
 			| "supportsPenaltyAndStopParams"
 			| "thinkingFormat"
@@ -985,6 +1064,16 @@ export interface ResolvedOpenAIResponsesCompat extends ResolvedOpenAISharedCompa
 	 * filling `"auto"`.
 	 */
 	supportsReasoningSummary: boolean;
+	/** Optional chaining override; unset falls back to officialEndpoint at request time. */
+	statefulResponses?: boolean;
+	/**
+	 * Whether the host can store Responses results server-side (`store: true`).
+	 * Rule-owned: hosts that keep generating after a client disconnect so a
+	 * dropped stream can resume via `GET /responses/{id}`. Storage is opt-in
+	 * per request (`storeResponses` stream option, else
+	 * `PI_MUSE_STORE_RESPONSES`); stored runs retain prompts and outputs on the provider.
+	 */
+	storeResponses: boolean;
 	streamIdleTimeoutMs?: number;
 	vercelGatewayRouting?: OpenAICompat["vercelGatewayRouting"];
 	/** The model sits behind Vercel AI Gateway's Responses endpoint. */
@@ -1082,10 +1171,13 @@ export interface DevinCompat {
 	modelRouter?: boolean;
 	/** Whether the upstream model supports native parallel tool calls. */
 	supportsParallelToolCalls?: boolean;
+	/** See {@link BedrockCompat.supportsSamplingParams}. */
+	supportsSamplingParams?: boolean;
 }
 
 /** Fully-resolved devin-agent compat view. */
-export type ResolvedDevinCompat = Required<DevinCompat>;
+export type ResolvedDevinCompat = Required<Omit<DevinCompat, "supportsSamplingParams">> &
+	Pick<DevinCompat, "supportsSamplingParams">;
 /**
  * Compatibility settings for the Google API family (google-generative-ai,
  * google-vertex, google-gemini-cli). Class-driven defaults come from the
@@ -1120,19 +1212,26 @@ export interface GoogleCompat {
 	stripImageInput?: boolean;
 	/** Thinking-loop watchdog guard family applied to streamed reasoning. */
 	thinkingLoopGuard?: "gemini" | "deepseek" | "xai";
+	/** See {@link BedrockCompat.supportsSamplingParams}. */
+	supportsSamplingParams?: boolean;
 }
 
 /** Fully-resolved google-API compat view, materialized once by `buildModel`. */
 export type ResolvedGoogleCompat = Required<
 	Omit<
 		GoogleCompat,
-		"streamFirstEventTimeoutMs" | "streamIdleTimeoutMs" | "thinkingLoopGuard" | "antigravityUsageLabel"
+		| "streamFirstEventTimeoutMs"
+		| "streamIdleTimeoutMs"
+		| "thinkingLoopGuard"
+		| "antigravityUsageLabel"
+		| "supportsSamplingParams"
 	>
 > & {
 	streamFirstEventTimeoutMs?: number;
 	streamIdleTimeoutMs?: number;
 	thinkingLoopGuard?: GoogleCompat["thinkingLoopGuard"];
 	antigravityUsageLabel?: string;
+	supportsSamplingParams?: boolean;
 };
 
 /** Sparse, user-authored compat overrides for a given API (models.json / config vocabulary). */
@@ -1289,6 +1388,12 @@ export interface Model<TApi extends Api = Api> {
 	id: string;
 	/** Role-specific runner capability; omitted for ordinary chat models. */
 	kind?: ModelKind;
+	/**
+	 * Verbatim configured kind (models.yml, `modelOverrides`, runtime
+	 * registrations). `buildModel` applies it over catalog `kind` rules on every
+	 * rebuild, so a configured runner keeps its role.
+	 */
+	kindConfig?: ModelKind;
 	/** Grounding transport supported by this chat model. */
 	webSearch?: WebSearchGrounding;
 	/** Cheaper same-provider model to run hosted web search in this model's place (model id or provider/id). */
@@ -1386,11 +1491,11 @@ export interface Model<TApi extends Api = Api> {
 	cursorMaxModeRoutes?: Readonly<Record<string, boolean>>;
 	/**
 	 * Per-account availability recorded by multi-account discovery: provider
-	 * account id (Codex: ChatGPT `chatgpt_account_id`) → that account's
-	 * entitlements on this model. An account appears only when its own catalog
-	 * lists the model, so credential selection can route account-gated models
-	 * (e.g. `gpt-daybreak-blue-latest`) straight to eligible accounts. Absent on
-	 * bundled/config rows and on single-account discovery.
+	 * account key (Codex: ChatGPT `chatgpt_account_id`; Antigravity: login
+	 * email) → that account's entitlements on this model. An account appears
+	 * only when its own catalog lists the model, so credential selection can
+	 * route account-gated models (e.g. `gpt-daybreak-blue-latest`, Antigravity
+	 * Claude 5.5) straight to eligible accounts. Absent on bundled/config rows.
 	 */
 	accountAccess?: Readonly<Record<string, ModelAccountAccess>>;
 	/** Cursor `RequestedModel.parameters` for this model's default variant. */
@@ -1425,6 +1530,12 @@ export interface Model<TApi extends Api = Api> {
 	 * Custom models and provider overrides opt in via models.yml `promptCache`.
 	 */
 	promptCache?: ModelPromptCache;
+	/**
+	 * Verbatim configured lifetimes (models.yml, `modelOverrides`, runtime
+	 * registrations). `buildModel` applies them over catalog `prompt-cache`
+	 * rules on every rebuild; `{}` keeps warming disabled.
+	 */
+	promptCacheConfig?: ModelPromptCache;
 	/**
 	 * Interpretation of an all-zero token-rate card. Omitted zero-rate cards
 	 * are unknown; any non-zero rate is always treated as fixed pricing.
@@ -1495,9 +1606,9 @@ export interface Model<TApi extends Api = Api> {
 	/**
 	 * Per-service-tier cost multipliers baked from the `service-tier-cost`
 	 * catalog axis (e.g. `{ priority: 2.5 }`). Absent tiers use the API-generic
-	 * defaults.
+	 * defaults, and a tier with no published price stays at 1x.
 	 */
-	serviceTierCost?: Readonly<Partial<Record<"flex" | "priority", number>>>;
+	serviceTierCost?: Readonly<Partial<Record<"flex" | "priority" | "ultrafast", number>>>;
 	/**
 	 * Provider-supplied one-line blurb for this model. Set only when an upstream
 	 * ships one (Devin's `GetCliModelConfigs`); never synthesized locally.

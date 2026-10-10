@@ -86,7 +86,7 @@ describe("memory secret redaction", () => {
 
 	it("redacts global Mnemopi memories and metadata before persistence", async () => {
 		await Promise.all([loadMnemopi(), loadMnemopiCore()]);
-		using dbDir = TempDir.createSync("memory-redaction-global-");
+		using dbDir = TempDir.createSync("@memory-redaction-global-");
 		const settings = Settings.isolated({
 			"memory.backend": "mnemopi",
 			"mnemopi.dbPath": dbDir.join("mnemopi.db"),

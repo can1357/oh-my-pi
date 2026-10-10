@@ -1,4 +1,8 @@
 Tired of typing "keep going"? Just send a '.'
+Type `#` anywhere in your prompt for quick actions — copy the line or the whole prompt, undo, jump the cursor
+Type `/` at the start of your prompt to browse every command
+Start your prompt with `!` to run it as bash — `!!` runs it without adding the output to context
+Start your prompt with `$ ` to run Python — `$$ ` runs it without adding the output to context
 You can /btw to ask a side question
 Use /tan to fork the current conversation into a background agent
 With default keybindings, {key:ctrl+d} deletes the character under the cursor instead of quitting your draft — see /hotkeys for your exit key
@@ -27,3 +31,4 @@ Try starting your prompt with a ->, and writing a list (1. Do X, 2. Do Y)
 Press {key:shift+tab} to cycle through reasoning effort levels
 omp can reconfigure and extend itself — ask any questions you have!
 Lint/type errors piling up? `omp cleanse` (or /cleanse right here) hunts project diagnostics and fixes them with parallel subagents — {key:escape} cancels
+[NO-TERN] Psst, omp has a natural habitat 🐦 [tern](https://scl.so/tern)

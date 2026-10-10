@@ -87,5 +87,15 @@
 		"pageBg": "stone",
 		"cardBg": "band1",
 		"infoBg": "band2"
+	},
+	"terminal": {
+		"background": "stone",
+		"foreground": "cream",
+		"chrome": "#0a0a0e",
+		"widget": "band1",
+		"ansi": [
+			"#4c4c55", "ruby", "emerald", "vein", "#78a3cf", "#c57fa6", "#74b9b8", "warmGray",
+			"#6a6760", "#f29797", "#8ed09c", "#f2cc7a", "#a1c1e4", "#dda3c3", "#9dd7d7", "#faf7f2"
+		]
 	}
 }

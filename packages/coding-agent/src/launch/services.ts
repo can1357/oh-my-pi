@@ -4,7 +4,7 @@ import { TERMINAL_STATES } from "@oh-my-pi/pi-tui/apps/ps-data";
 import type { DaemonSnapshot, DaemonSpec } from "@oh-my-pi/pi-tui/tools/daemon";
 import { formatDuration, replaceTabs } from "@oh-my-pi/pi-tui/render/render-utils";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
-import { getDaemonRuntimeDir, sanitizeText } from "@oh-my-pi/pi-utils";
+import { getDaemonRuntimeDir, logger, sanitizeText } from "@oh-my-pi/pi-utils";
 import { type DaemonBrokerClient, daemonClientForProject } from "./client";
 import { canonicalProjectDir } from "./paths";
 import type { DaemonOperation, DaemonRpcResult } from "./protocol";
@@ -124,6 +124,26 @@ export async function listServices(session: ToolSession, signal?: AbortSignal): 
 	const result = await request(session, { op: "list" }, signal);
 	if (result.op !== "list") throw new Error("Unexpected daemon list response");
 	return result.daemons;
+}
+
+/**
+ * {@link listServices} for callers whose jobs and agents live in-process (`wait`,
+ * `proc://`): a broker failure (timeout, crash) must not hide that state. Returns
+ * the failure message alongside an empty list; owned-service tracking keeps its
+ * last known state. A caller abort still throws.
+ */
+export async function listServicesTolerant(
+	session: ToolSession,
+	signal?: AbortSignal,
+): Promise<{ services: DaemonSnapshot[]; error?: string }> {
+	try {
+		return { services: await listServices(session, signal) };
+	} catch (error) {
+		if (signal?.aborted) throw error;
+		const message = error instanceof Error ? error.message : String(error);
+		logger.warn("Daemon broker list failed; continuing without service state", { error: message });
+		return { services: [], error: message };
+	}
 }
 
 export async function findService(

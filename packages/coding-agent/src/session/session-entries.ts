@@ -9,6 +9,7 @@ import type {
 } from "@oh-my-pi/pi-ai";
 import type { StructuredSubagentSchemaMode } from "@oh-my-pi/pi-tui/tools/task";
 import type { CompactionMethod } from "./compaction-methods";
+import type { WorkPoolYieldItem } from "../task/workpool-yield";
 import type { RetryFallbackRole } from "./retry-fallback-chains";
 
 export const CURRENT_SESSION_VERSION = 3;
@@ -234,8 +235,8 @@ export interface CredentialPinEntry extends SessionEntryBase {
 /** Session init entry - captures initial context for subagent sessions (debugging/replay). */
 export interface SessionInitEntry extends SessionEntryBase {
 	type: "session_init";
-	/** Full system prompt sent to the model */
-	systemPrompt: string;
+	/** System prompt blocks exactly as sent to the model; files written before blocks were kept store one joined string. */
+	systemPrompt: string[] | string;
 	/** Initial task/user message */
 	task: string;
 	/** Tools available to the agent */
@@ -266,6 +267,8 @@ export interface SessionInitEntry extends SessionEntryBase {
 	compactionThreshold?: { thresholdPercent: number; thresholdTokens: number };
 	/** True when the subagent ran inside an isolation worktree: never revivable, transcript-only after park. Absent on older files. */
 	isolated?: boolean;
+	/** Work-pool yield items of the last model call; revival restores them so the yield tool matches. Absent when none. */
+	workPoolYieldItems?: WorkPoolYieldItem[];
 }
 
 /** Mode change entry - tracks agent mode transitions (e.g. plan mode). */
@@ -343,6 +346,8 @@ export interface UsageStatistics {
 	orchestrationCacheRead: number;
 	premiumRequests: number;
 	cost: number;
+	/** Portion of {@link cost} carried by completed `task` results (direct children's spend). */
+	subagentCost: number;
 }
 /**
  * True when a raw JSONL line is a complete `message` record carrying an

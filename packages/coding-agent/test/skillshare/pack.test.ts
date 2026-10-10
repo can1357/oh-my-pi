@@ -72,7 +72,8 @@ describe("packSkill", () => {
 			"reference/root-only.txt",
 			"scripts/run.sh",
 		]);
-		expect(pack.files.find(file => file.path === "scripts/run.sh")?.executable).toBe(true);
+		// Windows file modes carry no execute bits, so nothing packs as executable there.
+		expect(pack.files.find(file => file.path === "scripts/run.sh")?.executable).toBe(process.platform !== "win32");
 		expect(pack.files.find(file => file.path === "SKILL.md")?.executable).toBe(false);
 		expect(pack.hasScripts).toBe(true);
 		expect(pack.secrets).toEqual([]);

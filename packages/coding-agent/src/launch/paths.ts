@@ -7,6 +7,19 @@ export { getDaemonRuntimeDir as daemonRuntimeDir };
 
 /** File in a broker runtime dir recording which project (or global service dir) owns the scope. */
 const SCOPE_FILE = "scope.json";
+/**
+ * Small mutable lifecycle state (snapshot, completion bookkeeping) in
+ * `<runtimeDir>/daemons/<name>/`. Rewritten on transitions, and only when its
+ * serialized form changes.
+ */
+export const DAEMON_META_FILE = "meta.json";
+/**
+ * The launch spec, including its environment (often the whole parent env,
+ * tens of KB). Written when the record is created or its mode changes, never
+ * on lifecycle transitions. Older brokers embedded it in `meta.json`; readers
+ * still accept that layout and broker recovery migrates it.
+ */
+export const DAEMON_SPEC_FILE = "spec.json";
 
 /**
  * Canonicalize a project directory the same way every broker client does, so
@@ -44,6 +57,28 @@ export async function readDaemonScopeMeta(runtimeDir: string): Promise<string | 
 		// Missing or malformed scope metadata reads as unknown.
 	}
 	return undefined;
+}
+
+/** One daemon record dir as stored on disk, before parsing. */
+export interface StoredDaemonRecord {
+	/** Decoded `meta.json`. */
+	meta: object & { daemon: unknown };
+	/** Decoded launch spec, from `meta.json` (legacy layout) or `spec.json`. */
+	spec: unknown;
+	/** The spec was embedded in `meta.json` by an older broker. */
+	legacyLayout: boolean;
+}
+
+/**
+ * Read a daemon record dir in either layout. Undefined when `meta.json` has no
+ * daemon snapshot; throws when a file is missing or malformed.
+ */
+export async function readStoredDaemonRecord(dir: string): Promise<StoredDaemonRecord | undefined> {
+	const meta: unknown = await Bun.file(path.join(dir, DAEMON_META_FILE)).json();
+	if (typeof meta !== "object" || meta === null || !("daemon" in meta)) return undefined;
+	if ("spec" in meta) return { meta, spec: meta.spec, legacyLayout: true };
+	const spec: unknown = await Bun.file(path.join(dir, DAEMON_SPEC_FILE)).json();
+	return { meta, spec, legacyLayout: false };
 }
 
 /** Resolve the Unix socket or Windows named pipe used by one daemon broker scope. */

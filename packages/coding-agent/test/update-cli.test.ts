@@ -16,6 +16,7 @@ import {
 	downloadVerifiedBinary,
 	type InstalledVersionVerification,
 	isMuslLinuxForTest,
+	managedInstallName,
 	type ManagerUpdateSteps,
 	migrateRenamedInstall,
 	parseReportedVersion,
@@ -26,6 +27,7 @@ import {
 	replaceBinaryForUpdate,
 	resolveBunGlobalNodeModulesDirFromLocations,
 	resolveReleaseBinaryAsset,
+	selectFallbackBinaryAsset,
 	resolveReleaseDist,
 	resolveReleaseRename,
 	resolveGitHubTokenForTest,
@@ -52,19 +54,38 @@ async function makeTempDir(): Promise<string> {
 	return dir;
 }
 /**
- * Run `fn` with `process.platform` reporting win32. Windows launcher
- * classification is platform-gated, so the gate itself has to be driven from
- * the POSIX host running this suite.
+ * Run `fn` with `process.platform` reporting `platform`. Launcher
+ * classification and recovery hints are platform-gated, so the gate itself has
+ * to be driven from whichever host runs this suite.
  */
-function withWin32<T>(fn: () => T): T {
+function withPlatform<T>(platform: NodeJS.Platform, fn: () => T): T {
 	const platformDescriptor = Object.getOwnPropertyDescriptor(process, "platform");
 	if (!platformDescriptor) throw new Error("process.platform descriptor missing");
-	Object.defineProperty(process, "platform", { ...platformDescriptor, value: "win32" });
+	Object.defineProperty(process, "platform", { ...platformDescriptor, value: platform });
 	try {
 		return fn();
 	} finally {
 		Object.defineProperty(process, "platform", platformDescriptor);
 	}
+}
+
+/** Async {@link withPlatform}: keeps the override until the returned promise settles. */
+async function withPlatformAsync<T>(platform: NodeJS.Platform, fn: () => Promise<T>): Promise<T> {
+	const platformDescriptor = Object.getOwnPropertyDescriptor(process, "platform");
+	if (!platformDescriptor) throw new Error("process.platform descriptor missing");
+	Object.defineProperty(process, "platform", { ...platformDescriptor, value: platform });
+	try {
+		return await fn();
+	} finally {
+		Object.defineProperty(process, "platform", platformDescriptor);
+	}
+}
+
+/** npm's global layout: `<prefix>/bin` + `<prefix>/lib/node_modules` on POSIX; both rooted at `<prefix>` on Windows. */
+function npmGlobalLayout(prefix: string): { binDir: string; nodeModulesDir: string } {
+	return process.platform === "win32"
+		? { binDir: prefix, nodeModulesDir: path.join(prefix, "node_modules") }
+		: { binDir: path.join(prefix, "bin"), nodeModulesDir: path.join(prefix, "lib", "node_modules") };
 }
 
 afterEach(async () => {
@@ -241,19 +262,24 @@ describe("update-cli install target detection", () => {
 		// Regression: with `npm prefix -g` pointed at the installer's default
 		// (~/.local), directory containment alone misclassified the standalone
 		// binary as npm-managed, so `npm install -g` failed with EEXIST refusing
-		// to overwrite the existing executable.
-		const method = resolveUpdateMethodForTest("/home/u/.local/bin/omp", undefined, {
-			npmBinDir: "/home/u/.local/bin",
-			ompIsRegularFile: true,
-		});
+		// to overwrite the existing executable. POSIX layout: on Windows an
+		// extensionless launcher is npm's sh shim (covered by the win32 cases).
+		const method = withPlatform("linux", () =>
+			resolveUpdateMethodForTest("/home/u/.local/bin/omp", undefined, {
+				npmBinDir: "/home/u/.local/bin",
+				ompIsRegularFile: true,
+			}),
+		);
 
 		expect(method).toBe("binary");
 	});
 
 	it("uses binary update when a plain file in the bun global bin dir is the standalone binary", () => {
-		const method = resolveUpdateMethodForTest("/home/u/.local/bin/omp", "/home/u/.local/bin", {
-			ompIsRegularFile: true,
-		});
+		const method = withPlatform("linux", () =>
+			resolveUpdateMethodForTest("/home/u/.local/bin/omp", "/home/u/.local/bin", {
+				ompIsRegularFile: true,
+			}),
+		);
 
 		expect(method).toBe("binary");
 	});
@@ -264,7 +290,7 @@ describe("update-cli install target detection", () => {
 		// off file type — it keys off bun's `<name>.bunx` metadata sidecar, which
 		// only a bun-managed launcher has. Paths use forward slashes so the
 		// lexical containment check works on the POSIX host running this suite.
-		const method = withWin32(() =>
+		const method = withPlatform("win32", () =>
 			resolveUpdateMethodForTest("C:/Users/test/.bun/bin/omp.exe", "C:/Users/test/.bun/bin", {
 				ompIsRegularFile: true,
 				bunShimMarker: true,
@@ -280,7 +306,7 @@ describe("update-cli install target detection", () => {
 		// update back through `bun install -g`, which cannot overwrite the
 		// running .exe — bun tolerates that EBUSY — so the install stayed pinned
 		// to the old version with no way forward.
-		const method = withWin32(() =>
+		const method = withPlatform("win32", () =>
 			resolveUpdateMethodForTest("C:/Users/test/.bun/bin/omp.exe", "C:/Users/test/.bun/bin", {
 				ompIsRegularFile: true,
 			}),
@@ -324,8 +350,8 @@ describe("update-cli install target detection", () => {
 	it("keeps an npm-linked checkout under npm management instead of overwriting its resolved script", async () => {
 		const dir = await makeTempDir();
 		const npmPrefix = path.join(dir, ".npm-global");
-		const npmBinDir = path.join(npmPrefix, "bin");
-		const packagePath = path.join(npmPrefix, "lib", "node_modules", "@oh-my-pi", "pi-coding-agent");
+		const { binDir: npmBinDir, nodeModulesDir } = npmGlobalLayout(npmPrefix);
+		const packagePath = path.join(nodeModulesDir, "@oh-my-pi", "pi-coding-agent");
 		const checkoutPath = path.join(dir, "checkout");
 		const checkoutCli = path.join(checkoutPath, "dist", "cli.js");
 		const aliasPath = path.join(npmBinDir, "omp");
@@ -429,8 +455,11 @@ describe("update-cli install target detection", () => {
 		"refuses a foreign native target that does not report an OMP version",
 		async () => {
 			const dir = await makeTempDir();
+			const foreignPath = path.join(dir, "foreign");
 			const aliasPath = path.join(dir, "omp");
-			await fs.symlink(process.execPath, aliasPath);
+			await fs.copyFile(process.execPath, foreignPath);
+			await fs.chmod(foreignPath, 0o755);
+			await fs.symlink(foreignPath, aliasPath);
 			const fetchImpl = vi.fn(async () => new Response());
 			const target = resolveUpdateTargetFromPath(aliasPath, undefined, {
 				allowPackageManagers: true,
@@ -454,8 +483,8 @@ describe("update-cli install target detection", () => {
 		// launcher is deliberately replaced in place, keeping the PATH entry live.
 		const dir = await makeTempDir();
 		const npmPrefix = path.join(dir, ".npm-global");
-		const npmBinDir = path.join(npmPrefix, "bin");
-		const managedBinary = path.join(npmPrefix, "lib", "node_modules", "@oh-my-pi", "pi-coding-agent", "omp");
+		const { binDir: npmBinDir, nodeModulesDir } = npmGlobalLayout(npmPrefix);
+		const managedBinary = path.join(nodeModulesDir, "@oh-my-pi", "pi-coding-agent", "omp");
 		const aliasPath = path.join(npmBinDir, "omp");
 		await fs.mkdir(npmBinDir, { recursive: true });
 		await fs.mkdir(path.dirname(managedBinary), { recursive: true });
@@ -767,7 +796,9 @@ describe("migrateRenamedInstall transaction", () => {
 		vi.spyOn(console, "log").mockImplementation(() => {});
 		const { steps, calls } = scriptedSteps({ install: [0, 0], verify: [false, false] });
 
-		await expect(migrateRenamedInstall(release, steps)).rejects.toThrow("curl -fsSL https://omp.sh/install");
+		await withPlatformAsync("linux", async () => {
+			await expect(migrateRenamedInstall(release, steps)).rejects.toThrow("curl -fsSL https://omp.sh/install");
+		});
 		expect(calls).toEqual(["install", "removeOld", "verify", "install", "verify"]);
 	});
 
@@ -990,6 +1021,7 @@ describe("update-cli release binary integrity", () => {
 
 	it("selects an uploaded asset with a valid SHA-256 digest", () => {
 		expect(resolveReleaseBinaryAsset(releaseAsset(), tag, binaryName)).toEqual({
+			version: "17.1.2",
 			url,
 			size: Buffer.byteLength(content),
 			digest,
@@ -1035,7 +1067,7 @@ describe("update-cli release binary integrity", () => {
 		// rejected even then.
 		expect(
 			resolveReleaseBinaryAsset({ ...releaseAsset(), prerelease: true }, tag, binaryName, { allowPrerelease: true }),
-		).toEqual({ url, size: Buffer.byteLength(content), digest });
+		).toEqual({ version: "17.1.2", url, size: Buffer.byteLength(content), digest });
 		expect(() =>
 			resolveReleaseBinaryAsset({ ...releaseAsset(), draft: true }, tag, binaryName, { allowPrerelease: true }),
 		).toThrow("is a draft");
@@ -1054,7 +1086,8 @@ describe("update-cli release binary integrity", () => {
 		});
 
 		expect(await Bun.file(targetPath).text()).toBe(content);
-		expect((await fs.stat(targetPath)).mode & 0o777).toBe(0o755);
+		// Windows has no POSIX mode bits; the executable bit is only observable elsewhere.
+		if (process.platform !== "win32") expect((await fs.stat(targetPath)).mode & 0o777).toBe(0o755);
 	});
 
 	it("aborts the response stream as soon as it exceeds the expected size", async () => {
@@ -1176,7 +1209,7 @@ describe("update-cli release binary integrity", () => {
 			).rejects.toThrow("digest mismatch");
 			expect(metadataAuthorizations).toEqual(["Bearer test-token"]);
 			expect(await Bun.file(targetPath).text()).toBe(installed);
-			expect((await fs.stat(targetPath)).mode & 0o777).toBe(0o755);
+			if (process.platform !== "win32") expect((await fs.stat(targetPath)).mode & 0o777).toBe(0o755);
 			const newResidue = (await fs.readdir(dir)).filter(name => name.endsWith(".new"));
 			expect(newResidue).toEqual([]);
 		} finally {
@@ -1198,6 +1231,95 @@ describe("update-cli release binary integrity", () => {
 			}),
 		).rejects.toThrow("retry later or set GITHUB_TOKEN or GH_TOKEN");
 		expect(await Bun.file(targetPath).exists()).toBe(false);
+	});
+
+	function publishedRelease(version: string, body: string, overrides: Record<string, unknown> = {}) {
+		return {
+			tag_name: `v${version}`,
+			draft: false,
+			prerelease: false,
+			assets: [
+				{
+					name: binaryName,
+					state: "uploaded",
+					size: Buffer.byteLength(body),
+					digest: `sha256:${Bun.SHA256.hash(body, "hex")}`,
+					browser_download_url: `https://github.com/can1357/oh-my-pi/releases/download/v${version}/${binaryName}`,
+				},
+			],
+			...overrides,
+		};
+	}
+
+	it("installs the newest published release when the advertised tag has none", async () => {
+		// npm `latest` can name a version GitHub never published: 18.2.9 reached
+		// the npm dist-tag while `v18.2.9` 404'd and `v18.2.10` was the newest
+		// published release (#12913). Drafts and stable-channel prereleases are
+		// not installable, so the scan walks past them.
+		const dir = await makeTempDir();
+		const targetPath = path.join(dir, binaryName);
+		const published = "published 999.9.8 binary";
+		const fetchImpl = async (input: string | URL | Request): Promise<Response> => {
+			const requestUrl = String(input);
+			if (requestUrl.endsWith("/releases/tags/v999.9.9")) {
+				return new Response(null, { status: 404, statusText: "Not Found" });
+			}
+			if (requestUrl.includes("/releases?")) {
+				return new Response(
+					JSON.stringify([
+						publishedRelease("999.9.10", "draft binary", { draft: true }),
+						publishedRelease("999.9.9-canary.1", "canary binary", { prerelease: true }),
+						publishedRelease("999.9.8", published),
+					]),
+				);
+			}
+			if (requestUrl.endsWith(`/download/v999.9.8/${binaryName}`)) return new Response(published);
+			throw new Error(`Unexpected request: ${requestUrl}`);
+		};
+		const verified: string[] = [];
+
+		await updateViaBinaryAt(targetPath, "999.9.9", {
+			binaryName,
+			fetchImpl,
+			githubToken: "test-token",
+			verifyInstalledVersion: async version => {
+				verified.push(version);
+				return { ok: true, path: targetPath };
+			},
+		});
+
+		expect(verified).toEqual(["999.9.8"]);
+		expect(await Bun.file(targetPath).text()).toBe(published);
+	});
+
+	it("names the missing tag and the npm mismatch when no published release can replace it", async () => {
+		const dir = await makeTempDir();
+		const targetPath = path.join(dir, binaryName);
+		const fetchImpl = async (input: string | URL | Request): Promise<Response> => {
+			const requestUrl = String(input);
+			if (requestUrl.includes("/releases/tags/")) {
+				return new Response(null, { status: 404, statusText: "Not Found" });
+			}
+			if (requestUrl.includes("/releases?")) {
+				// Older than the running version: installing it would be a downgrade.
+				return new Response(JSON.stringify([publishedRelease("17.1.2", content)]));
+			}
+			throw new Error(`Unexpected request: ${requestUrl}`);
+		};
+
+		await expect(
+			updateViaBinaryAt(targetPath, "999.9.9", { binaryName, fetchImpl, githubToken: "test-token" }),
+		).rejects.toThrow("npm advertises 999.9.9 but GitHub release v999.9.9 is not published");
+		expect(await Bun.file(targetPath).exists()).toBe(false);
+	});
+
+	it("falls back to a prerelease only for canary updates", () => {
+		const releases = [publishedRelease("999.9.9", content, { prerelease: true })];
+
+		expect(selectFallbackBinaryAsset(releases, binaryName, "999.0.0")).toBeUndefined();
+		expect(selectFallbackBinaryAsset(releases, binaryName, "999.0.0", { allowPrerelease: true })?.version).toBe(
+			"999.9.9",
+		);
 	});
 });
 
@@ -1494,6 +1616,20 @@ describe("update-cli script-shim takeover", () => {
 		}
 	}
 
+	/**
+	 * The fake release binaries are `#!/bin/sh` scripts, which Windows cannot
+	 * launch as `omp.exe`. There, "run" the explicit path the takeover verifies
+	 * by reading the version the script echoes; POSIX hosts execute it for real.
+	 */
+	const verifyBinary =
+		process.platform === "win32"
+			? async (binaryPath: string, expectedVersion: string): Promise<InstalledVersionVerification> => {
+					const script = await Bun.file(binaryPath).text();
+					const actual = parseReportedVersion(script.match(/^echo (.+)$/m)?.[1] ?? "");
+					return { ok: actual === expectedVersion, actual, path: binaryPath };
+				}
+			: undefined;
+
 	it("installs omp.exe beside the shims and retires them", async () => {
 		const dir = await makeTempDir();
 		await writeShims(dir);
@@ -1506,6 +1642,7 @@ describe("update-cli script-shim takeover", () => {
 			binaryName,
 			fetchImpl: makeFetch(exe),
 			githubToken: "test-token",
+			verifyBinary,
 		});
 
 		expect(await Bun.file(path.join(dir, "omp.exe")).text()).toBe(exe);
@@ -1528,6 +1665,7 @@ describe("update-cli script-shim takeover", () => {
 				binaryName,
 				fetchImpl: makeFetch(exe, true),
 				githubToken: "test-token",
+				verifyBinary,
 			}),
 		).rejects.toThrow("is a prerelease");
 		expect(await Bun.file(path.join(dir, "omp.exe")).exists()).toBe(false);
@@ -1539,6 +1677,7 @@ describe("update-cli script-shim takeover", () => {
 			fetchImpl: makeFetch(exe, true),
 			allowPrerelease: true,
 			githubToken: "test-token",
+			verifyBinary,
 		});
 		expect(await Bun.file(path.join(dir, "omp.exe")).text()).toBe(exe);
 	});
@@ -1597,6 +1736,7 @@ describe("update-cli script-shim takeover", () => {
 				binaryName,
 				fetchImpl: makeFetch(exe),
 				githubToken: "test-token",
+				verifyBinary,
 			}),
 		).rejects.toThrow(/still reports 17\.2\.12 \(expected 18\.0\.0\); restored previous omp launcher/);
 
@@ -1628,6 +1768,7 @@ describe("update-cli script-shim takeover", () => {
 				binaryName,
 				fetchImpl: makeFetch(exe),
 				githubToken: "test-token",
+				verifyBinary,
 			});
 		} finally {
 			renameSpy.mockRestore();
@@ -1652,6 +1793,7 @@ describe("update-cli script-shim takeover", () => {
 					binaryName,
 					fetchImpl: makeFetch(exe),
 					githubToken: "test-token",
+					verifyBinary,
 				}),
 			).rejects.toThrow("restored previous omp launcher");
 		} finally {
@@ -1782,6 +1924,49 @@ describe("update-cli concurrent binary updates", () => {
 		expect(await Bun.file(targetPath).bytes()).toEqual(new Uint8Array(payload));
 		const residue = (await fs.readdir(dir)).filter(name => name.endsWith(".bak") || name.endsWith(".new"));
 		expect(residue).toEqual([]);
+	});
+});
+
+describe("managedInstallName", () => {
+	async function managedRoot(): Promise<string> {
+		const root = await makeTempDir();
+		await fs.mkdir(path.join(root, "versions"));
+		await fs.mkdir(path.join(root, "bin"));
+		await Bun.write(path.join(root, "versions", "1.0.0"), "omp");
+		await Bun.write(path.join(root, "manager.json"), JSON.stringify({ manager: "tern", name: "Tern" }));
+		return root;
+	}
+
+	it.skipIf(process.platform === "win32")(
+		"names the manager through the launcher symlink and a link outside the root",
+		async () => {
+			const root = await managedRoot();
+			const launcher = path.join(root, "bin", "omp");
+			await fs.symlink(path.join("..", "versions", "1.0.0"), launcher);
+			const outside = path.join(await makeTempDir(), "omp");
+			await fs.symlink(launcher, outside);
+
+			expect(await managedInstallName(launcher)).toBe("Tern");
+			expect(await managedInstallName(outside)).toBe("Tern");
+		},
+	);
+
+	it("names the manager of a copied launcher (Windows layout)", async () => {
+		const root = await managedRoot();
+		const copy = path.join(root, "bin", "omp.exe");
+		await Bun.write(copy, "omp");
+
+		expect(await managedInstallName(copy)).toBe("Tern");
+	});
+
+	it("treats a binary without a readable manifest as unmanaged", async () => {
+		const plain = path.join(await makeTempDir(), "bin", "omp");
+		await Bun.write(plain, "omp");
+		expect(await managedInstallName(plain)).toBeUndefined();
+
+		const root = await managedRoot();
+		await Bun.write(path.join(root, "manager.json"), "{not json");
+		expect(await managedInstallName(path.join(root, "versions", "1.0.0"))).toBeUndefined();
 	});
 });
 

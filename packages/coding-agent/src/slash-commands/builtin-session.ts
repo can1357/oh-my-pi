@@ -13,8 +13,10 @@ import {
 import { formatTokenCount, refreshStatusLine } from "./builtin-modes";
 import { buildContextReportText } from "./helpers/context-report";
 import { formatCoarseDuration } from "@oh-my-pi/pi-tui/chrome/format";
+import { truncateToWidth } from "@oh-my-pi/pi-tui/render/render-utils";
 import { sanitizeText } from "@oh-my-pi/pi-utils";
 import { handleMcpAcp } from "./helpers/mcp";
+import { markdownFenceFor } from "../utils/markdown-fence";
 import { commandConsumed, errorMessage, parseSubcommand, usage } from "./helpers/parse";
 import { describeRedeemOutcome, toResetUsageAccounts } from "./helpers/reset-usage";
 import type { ResetUsageAccount } from "@oh-my-pi/pi-tui/overlays/reset-usage-selector";
@@ -114,6 +116,51 @@ async function handleUsageResetCommand(
 	}
 	const outcome = await session.redeemResetCredit(target.target);
 	await output(safe(describeRedeemOutcome(outcome, target.label)));
+}
+
+/**
+ * `/jobs kill <id>|all`: cancel one running background job this session owns,
+ * or every running one. Routes through the same owner-scoped
+ * `AgentSession.cancelAsyncJob` the jobs sheet's `x`-to-cancel and
+ * `proc://<id>/kill` use, so it can only touch jobs `/jobs` lists.
+ */
+async function handleJobsKillCommand(
+	arg: string,
+	session: AgentSession,
+	output: SlashCommandRuntime["output"],
+): Promise<void> {
+	const target = arg.trim();
+	if (!target) {
+		await output("Usage: /jobs kill <id>|all");
+		return;
+	}
+	const snapshot = session.getAsyncJobSnapshot({ recentLimit: 0 });
+	if (!snapshot) {
+		await output("Async background jobs are unavailable in this session.");
+		return;
+	}
+	if (target === "all") {
+		let cancelled = 0;
+		for (const job of snapshot.running) {
+			if (session.cancelAsyncJob(job.id)) cancelled += 1;
+		}
+		await output(
+			cancelled === 0
+				? "No running background jobs to cancel."
+				: `Cancelled ${cancelled} background job${cancelled === 1 ? "" : "s"}.`,
+		);
+		return;
+	}
+	const safeTarget = truncateToWidth(sanitizeText(target).replace(/\s+/g, " ").trim(), 60);
+	if (!snapshot.running.some(job => job.id === target)) {
+		await output(`No running background job with id "${safeTarget}".`);
+		return;
+	}
+	await output(
+		session.cancelAsyncJob(target)
+			? `Cancelled background job ${safeTarget}.`
+			: `Could not cancel background job ${safeTarget}.`,
+	);
 }
 
 async function handleSessionPinCommand(
@@ -324,12 +371,25 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 		icon: "jobs",
 		description: "Show async background jobs status",
 		acpDescription: "Show background jobs",
+		acpInputHint: "[full|kill <id>|kill all]",
+		subcommands: [
+			{ name: "full", description: "Show full, untruncated command lines" },
+			{ name: "kill", description: "Cancel a running background job", usage: "<id>|all" },
+		],
+		allowArgs: true,
 		getTuiAutocompleteDescription: runtime => {
 			const snapshot = runtime.ctx.session.getAsyncJobSnapshot({ recentLimit: 5 });
 			if (!snapshot || (snapshot.running.length === 0 && snapshot.recent.length === 0)) return "Jobs: none";
 			return `Jobs: ${snapshot.running.length} running, ${snapshot.recent.length} recent`;
 		},
-		handle: async (_command, runtime) => {
+		handle: async (command, runtime) => {
+			const { verb, rest } = parseSubcommand(command.args);
+			if (verb === "kill") {
+				await handleJobsKillCommand(rest, runtime.session, runtime.output);
+				return commandConsumed();
+			}
+			if (rest || (verb && verb !== "full")) return usage("Usage: /jobs [full|kill <id>|kill all]", runtime);
+			const full = verb === "full";
 			const snapshot = runtime.session.getAsyncJobSnapshot({ recentLimit: 5 });
 			if (!snapshot || (snapshot.running.length === 0 && snapshot.recent.length === 0)) {
 				await runtime.output(
@@ -338,12 +398,18 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 				return commandConsumed();
 			}
 			const now = Date.now();
+			const describe = (job: { label: string; command?: string }): string => {
+				if (!full) return `    ${job.label}`;
+				const text = sanitizeText(job.command ?? job.label);
+				const fence = markdownFenceFor(text);
+				return `${fence}\n${text}\n${fence}`;
+			};
 			const lines: string[] = ["Background Jobs", `Running: ${snapshot.running.length}`];
 			if (snapshot.running.length > 0) {
 				lines.push("", "Running Jobs");
 				for (const job of snapshot.running) {
 					lines.push(`  [${job.id}] ${job.type} (${job.status}) — ${formatCoarseDuration(now - job.startTime)}`);
-					lines.push(`    ${job.label}`);
+					lines.push(describe(job));
 				}
 			}
 			if (snapshot.recent.length > 0) {
@@ -352,14 +418,21 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 					lines.push(
 						`  [${job.id}] ${job.type} (${job.status}) — ${formatCoarseDuration((job.endTime ?? now) - job.startTime)}`,
 					);
-					lines.push(`    ${job.label}`);
+					lines.push(describe(job));
 				}
 			}
 			await runtime.output(lines.join("\n"));
 			return commandConsumed();
 		},
-		handleTui: async (_command, runtime) => {
-			await runtime.ctx.handleJobsCommand();
+		handleTui: async (command, runtime) => {
+			const { verb, rest } = parseSubcommand(command.args);
+			if (verb === "kill") {
+				await handleJobsKillCommand(rest, runtime.ctx.session, text => runtime.ctx.showStatus(text));
+			} else if (rest || (verb && verb !== "full")) {
+				runtime.ctx.showStatus("Usage: /jobs [full|kill <id>|kill all]");
+			} else {
+				await runtime.ctx.handleJobsCommand({ full: verb === "full" });
+			}
 			clearSubmittedText(runtime);
 		},
 	},

@@ -17,6 +17,7 @@ export function toExecutorBackendResult(result: {
 	cancelled: boolean;
 	truncated: boolean;
 	artifactId?: string | undefined;
+	artifactElidedBytes?: number;
 	artifactError?: OutputArtifactError;
 	totalLines: number;
 	totalBytes: number;
@@ -30,6 +31,7 @@ export function toExecutorBackendResult(result: {
 		cancelled: result.cancelled,
 		truncated: result.truncated,
 		artifactId: result.artifactId,
+		artifactElidedBytes: result.artifactElidedBytes,
 		artifactError: result.artifactError,
 		totalLines: result.totalLines,
 		totalBytes: result.totalBytes,

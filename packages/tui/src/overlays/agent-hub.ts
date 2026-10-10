@@ -49,7 +49,8 @@ import {
 	type AgentMetrics,
 	type AggregateMetrics,
 	aggregateMetrics,
-	progressMetrics,
+	hubFallbackStatsSession,
+	hubRowMetrics,
 	projectAgentTree,
 	STATUS_ORDER,
 } from "./agent-hub-projection";
@@ -199,6 +200,12 @@ const DATA_CHANGE_RENDER_COALESCE_MS = 100;
 /** Double-tap window for the table's left-left "close hub" gesture. */
 const LEFT_TAP_WINDOW_MS = 500;
 
+function compareRosterAgents(a: AgentRecordLike, b: AgentRecordLike): number {
+	return (
+		STATUS_ORDER[a.status] - STATUS_ORDER[b.status] || b.lastActivity - a.lastActivity || a.id.localeCompare(b.id)
+	);
+}
+
 function activityGlyph(row: AgentActivityRow): string {
 	if (row.status === "error") return theme.fg("error", theme.status.error);
 	if (row.status === "aborted") return theme.fg("warning", theme.status.aborted);
@@ -299,6 +306,7 @@ export interface AgentHubDeps<TRecord extends AgentRecordLike = AgentRecordLike>
 	/** Mirrors the main transcript's thinking-block visibility. */
 	hideThinkingBlock?: () => boolean;
 	proseOnlyThinking?: () => boolean;
+	expandThinkingBlocks?: () => boolean;
 	/** Keys toggling tool output expansion (app.tools.expand). */
 	expandKeys?: KeyId[];
 	/** Focus the main view on this agent's live session (ctx.focusAgentSession). When absent (collab guest, tests), Enter opens the in-hub chat view instead. */
@@ -356,11 +364,10 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 	#rows: TRecord[] = [];
 	#statusCounts: Record<AgentStatus, number> = { running: 0, idle: 0, parked: 0, aborted: 0 };
 	#selectedRow = 0;
-	/** Stable roster order captured on first refresh: keyboard navigation must
-	 *  not jump as agents heartbeat. Existing agent generations keep their rank
-	 *  while the hub is open; newly appearing generations append at the end. */
+	/** Initial status/recency rank stays fixed while open; new generations
+	 *  prepend without changing the relative order of existing rows. */
 	#rowOrder: Map<TRecord, number> | undefined;
-	#nextRowOrder = 0;
+	#nextNewRowOrder = 0;
 	#hoveredRow: number | null = null;
 	/** Per-render screen-line to agent-row map, shared by click and hover routing. */
 	#hitRows: Array<number | undefined> = [];
@@ -444,6 +451,7 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 	#cwd: string;
 	#hideThinkingBlock: (() => boolean) | undefined;
 	#proseOnlyThinking: (() => boolean) | undefined;
+	#expandThinkingBlocks: (() => boolean) | undefined;
 	#expandKeys: KeyId[];
 	#focusAgent: ((id: string) => Promise<void>) | undefined;
 
@@ -489,6 +497,7 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 		this.#cwd = deps.cwd ?? getProjectDir();
 		this.#hideThinkingBlock = deps.hideThinkingBlock;
 		this.#proseOnlyThinking = deps.proseOnlyThinking;
+		this.#expandThinkingBlocks = deps.expandThinkingBlocks;
 		this.#expandKeys = deps.expandKeys ?? ["ctrl+o"];
 		this.#focusAgent = deps.focusAgent;
 
@@ -612,6 +621,11 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 		this.#lastLeftTap = Date.now();
 	}
 
+	/** Show `section`, as a slash-command deep link into an already-open hub does. */
+	showSection(section: AgentHubSection): void {
+		this.#switchSection(section);
+	}
+
 	/**
 	 * Open the fullscreen transcript viewer for an agent id (public for table Enter
 	 * and tests). Mounts {@link AgentTranscriptViewer} as a `fullscreen` overlay so it
@@ -638,6 +652,7 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 			cwd: this.#cwd,
 			hideThinkingBlock: this.#hideThinkingBlock,
 			proseOnlyThinking: this.#proseOnlyThinking,
+			expandThinkingBlocks: this.#expandThinkingBlocks,
 			expandKeys: this.#expandKeys,
 			hubKeys: this.#hubKeys,
 			requestRender: this.#requestRender,
@@ -936,12 +951,16 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 			return { ...item, depth, open: this.#childrenByParent.has(ref.id) ? true : undefined };
 		}
 		if (!metrics) return item;
+		// A running agent's active time ticks terminal-side from the age at send; a settled one
+		// is frozen text. Progress `durationMs` was current when its frame arrived, so age it to now
+		// — re-sending the stale value on every repaint rewinds Tern's clock. A first frame can
+		// report 0 ms, so a progress timestamp alone makes the row clockable.
+		const progressAt = observed?.progress ? observed.progressAt : undefined;
 		const facts: Record<string, string | number> = {
 			cost: formatCost(metrics.cost),
-			// A running agent's active time ticks terminal-side; a settled one is frozen text.
 			time:
-				ref.status === "running" && metrics.durationMs > 0
-					? metrics.durationMs
+				ref.status === "running" && (metrics.durationMs > 0 || progressAt !== undefined)
+					? metrics.durationMs + (progressAt === undefined ? 0 : Math.max(0, Date.now() - progressAt))
 					: formatDuration(metrics.durationMs),
 			req: metrics.requests,
 			tools: metrics.tools,
@@ -1514,35 +1533,35 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 		const refs = this.#registry.list().filter(ref => ref.id !== MAIN_AGENT_ID);
 		this.#observedById = new Map();
 		for (const session of this.#observers.getSessions()) this.#observedById.set(session.id, session);
-		// Stable roster order: capture the status+recency ranking once so keyboard
-		// navigation is not disrupted by heartbeats (issue #10524). Existing rows
-		// keep their rank while the hub is open; new agents append at the end.
-		// Defer the capture until persisted-subagent discovery settles so a
-		// mid-scan refresh cannot freeze a partial roster (the remaining agents
-		// would otherwise append in readdir order instead of being ranked).
+		// Capture the status+recency ranking once so keyboard navigation does
+		// not jump on heartbeats. Defer until persisted-subagent discovery
+		// settles so a partial roster is not frozen in readdir order.
 		const rowOrder = this.#rowOrder;
 		let ordered: TRecord[];
 		if (!rowOrder) {
-			ordered = refs.sort(
-				(a, b) =>
-					STATUS_ORDER[a.status] - STATUS_ORDER[b.status] ||
-					b.lastActivity - a.lastActivity ||
-					a.id.localeCompare(b.id),
-			);
+			ordered = refs.sort(compareRosterAgents);
 			if (!this.#loadingPersistedSubagents && ordered.length > 0) {
-				this.#rowOrder = new Map();
-				for (const ref of ordered) this.#rowOrder.set(ref, this.#nextRowOrder++);
+				const rowOrder = new Map<TRecord, number>();
+				for (const [index, ref] of ordered.entries()) rowOrder.set(ref, index);
+				this.#rowOrder = rowOrder;
 			}
 		} else {
 			for (const rankedRef of rowOrder.keys()) {
 				if (!refs.includes(rankedRef)) rowOrder.delete(rankedRef);
 			}
-			ordered = refs.sort(
-				(a, b) => (rowOrder.get(a) ?? Number.MAX_SAFE_INTEGER) - (rowOrder.get(b) ?? Number.MAX_SAFE_INTEGER),
-			);
-			for (const ref of ordered) {
-				if (!rowOrder.has(ref)) rowOrder.set(ref, this.#nextRowOrder++);
+			// Each batch of newly appearing generations uses the initial sort,
+			// then takes ranks above every agent already on screen.
+			let newcomers: TRecord[] | undefined;
+			for (const ref of refs) {
+				if (!rowOrder.has(ref)) (newcomers ??= []).push(ref);
 			}
+			if (newcomers) {
+				newcomers.sort(compareRosterAgents);
+				for (let i = newcomers.length - 1; i >= 0; i--) {
+					rowOrder.set(newcomers[i]!, --this.#nextNewRowOrder);
+				}
+			}
+			ordered = refs.sort((a, b) => rowOrder.get(a)! - rowOrder.get(b)!);
 		}
 		const query = this.#agentFilter.getValue().trim();
 		const rosterRows =
@@ -1551,7 +1570,7 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 				: ordered;
 
 		if (this.#viewMode === "tree") {
-			const tree = projectAgentTree(rosterRows);
+			const tree = projectAgentTree(rosterRows, rowOrder);
 			this.#rows = tree.rows;
 			this.#treeDepthById = tree.depthById;
 			this.#treeParentById = tree.parentById;
@@ -1584,7 +1603,8 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 		for (const ref of rosterRows) this.#statusCounts[ref.status]++;
 		this.#refreshAggregate();
 		this.#refreshActivityData(rosterRows);
-		this.#refreshActivityRows();
+		// The 2,000-row activity query only feeds the Activity tab; switching to it refreshes.
+		if (this.#section === "activity") this.#refreshActivityRows();
 	}
 
 	#refreshActivityData(refs: readonly TRecord[]): void {
@@ -1615,7 +1635,7 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 		void Promise.all(pending)
 			.then(() => {
 				if (this.#disposed || generation !== this.#activitySyncGeneration) return;
-				this.#refreshActivityRows();
+				if (this.#section === "activity") this.#refreshActivityRows();
 				this.#requestRender();
 			})
 			.catch(() => {
@@ -1661,19 +1681,7 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 	}
 
 	#metricsFor(ref: TRecord, observed: ObservableSession | undefined): AgentMetrics | undefined {
-		if (observed?.progress) return progressMetrics(observed);
-		if (ref.history?.metrics) return ref.history.metrics;
-		const session = this.#fallbackStatsSession(ref, observed);
-		return session ? this.#sessionMetrics.get(session)?.metrics : undefined;
-	}
-
-	#fallbackStatsSession(
-		ref: TRecord,
-		observed: ObservableSession | undefined,
-	): NonNullable<TRecord["session"]> | undefined {
-		if (observed?.progress) return undefined;
-		const session = ref.session;
-		return session && typeof session.getSessionStats === "function" ? session : undefined;
+		return hubRowMetrics(ref, observed, this.#sessionMetrics);
 	}
 
 	// ========================================================================
@@ -2009,7 +2017,7 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 			rows: this.#rows,
 			observedById: this.#observedById,
 			metricsFor: (ref, observed) => this.#metricsFor(ref, observed),
-			fallbackStatsSession: (ref, observed) => this.#fallbackStatsSession(ref, observed),
+			fallbackStatsSession: hubFallbackStatsSession,
 			sessionMetrics: this.#sessionMetrics,
 			refreshFallback,
 		});

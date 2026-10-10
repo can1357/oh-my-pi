@@ -102,7 +102,7 @@ Generated blocks that are outside block 0 remain normal: the `<project-context>`
 
 The generated project/footer route already renders `contextFiles` and `appendPrompt` once. A template SHOULD NOT render those fields in block 0 unless it intentionally wants duplicate copies.
 
-Use effective session settings and live tool data rather than copying today's rendered prose. `eagerTasks` and `eagerTasksAlways` reflect task settings captured when the session starts, while `xdevDocs`, `toolInventory`, and `toolRefs` reflect mounted devices and tool state whenever the prompt rebuilds. `xdevDocs` also reflects the `tools.xdevDocs` / `tools.xdevInlineDevices` settings used for that rebuild.
+Use effective session settings and live tool data rather than copying today's rendered prose. `subagent` is true when rendering a task subagent's prompt; the bundled templates use it to replace verification duties with a hand-off to the main agent. `eagerTasks` and `eagerTasksAlways` reflect task settings captured when the session starts, while `xdevDocs`, `toolInventory`, and `toolRefs` reflect mounted devices and tool state whenever the prompt rebuilds. `xdevDocs` also reflects the `tools.xdevDocs` / `tools.xdevInlineDevices` settings used for that rebuild.
 
 The template has the same helper set used by the bundled prompt (`if`, `each`, `unless`, `list`, `when`, `has`, `ifAny`, `includes`, and the other registered helpers). No extra helper is created for a user file. Values inserted into a template are data, not a second template pass: Handlebars-looking text inside `xdevDocs`, context files, tool descriptions, or other values is not recursively rendered.
 
@@ -205,7 +205,7 @@ Generate a session name using lowercase `<type>:<primary-objective>`.
 If the message has no concrete task, output exactly `none`.
 ```
 
-`TITLE_SYSTEM.md` uses project-first config-base discovery with no ancestor walk. Foreign user bases require `enabledProviders` opt-in (or `CLAUDE_CONFIG_DIR` for Claude). When absent, OMP uses its bundled title prompt. The override is used for both initial automatic titles and replan-driven title refreshes.
+`TITLE_SYSTEM.md` uses project-first config-base discovery with no ancestor walk. Foreign user bases require `enabledProviders` opt-in (or `CLAUDE_CONFIG_DIR` for Claude). When absent, OMP titles a new session from a fork of its first reply (the session's own model, on the cached prompt) with the bundled tiny-model title prompt as the fallback. The override is used for both initial automatic titles and replan-driven title refreshes, and turns the reply fork off: titles come from the tiny title model.
 
 Generated title output has an enforced normalization contract even with a custom prompt. OMP considers only the first trimmed line, strips surrounding quotes, `<title>...</title>` markers, and terminal punctuation, and treats `none` or `<title/>` as “no title yet.” A result longer than 80 characters or 12 words is rejected rather than truncated. Empty, deferred, or rejected output leaves the session unnamed, so a later eligible title attempt can name it.
 

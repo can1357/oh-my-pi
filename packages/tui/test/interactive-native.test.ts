@@ -138,6 +138,32 @@ describe("native interactive primitives", () => {
 		}
 	});
 
+	it("keeps plain editors and inputs unsendable even with keyboard submit handlers", () => {
+		const editor = new Editor(getEditorTheme());
+		editor.onSubmit = vi.fn();
+		expect(editorNode(editor).p).toMatchObject({ sendable: false });
+
+		const input = new Input();
+		input.onSubmit = vi.fn();
+		expect(input.describe(cx).p).toMatchObject({ sendable: false });
+	});
+
+	it("leaves Vim Insert unlabelled so the host keeps native editing, labelling only modal states", () => {
+		const editor = new Editor(getEditorTheme());
+		editor.setVimMode(true);
+		editor.setText("abc");
+		expect(editorNode(editor).p?.mode).toBeUndefined();
+
+		editor.handleInput("\x1b");
+		expect(editorNode(editor).p?.mode).toBe("NORMAL");
+		editor.handleInput("v");
+		expect(editorNode(editor).p).toMatchObject({ mode: "VISUAL", anchor: expect.any(Number) });
+
+		editor.handleInput("\x1b");
+		editor.handleInput("i");
+		expect(editorNode(editor).p?.mode).toBeUndefined();
+	});
+
 	it("changes only text and cursor when typing and only the cursor when moving", () => {
 		const editor = new Editor(getEditorTheme());
 		editor.focused = true;
@@ -155,6 +181,20 @@ describe("native interactive primitives", () => {
 		const moved = editorNode(editor);
 		expect(changedProps(typed, moved)).toEqual(["cursor"]);
 		expect(moved.p).toMatchObject({ cursor: 5 });
+	});
+
+	it("takes the terminal's wrap natively: Up and Down reach it only on the first and last drawn row", () => {
+		const editor = new Editor(getEditorTheme());
+		editor.focused = true;
+		const text = `${"word ".repeat(40)}end`;
+		editor.setText(text);
+		expect(editorNode(editor).p).toMatchObject({ cursor: text.length });
+		// Tern moves the caret between the rows it drew; an Up it hands over comes
+		// from its first row, which is on the first line whatever width omp assumes.
+		editor.handleInput("\x1b[A");
+		expect(editorNode(editor).p).toMatchObject({ cursor: 0 });
+		editor.handleInput("\x1b[B");
+		expect(editorNode(editor).p).toMatchObject({ cursor: text.length });
 	});
 
 	it("never describes a masked input's secret", () => {

@@ -12,9 +12,20 @@
  * - Space/Enter or click: toggle selected item (or provider master switch)
  * - Wheel over the inspector, or PageUp/PageDown when the inspector overflows: scroll the detail pane
  * - Esc: clear search (if active) then close
+ *
+ * Natively (Tern) it is a `picker` sheet: provider scopes, the inventory as
+ * rows grouped by kind, the inspector as the side preview, and Toggle /
+ * Expand / Close actions; without `picker` it describes a page with the same
+ * parts. Pointer events run the key paths above.
  */
+import type { TspPickerAction, TspPickerColumn, TspPickerScope } from "@oh-my-pi/pi-wire";
 import type { Component } from "../../tui";
-import { matchesKey } from "../../keys";
+import { col, keyed, node, span, text } from "../../native/describe";
+import { Memo } from "../../native/memo";
+import type { DescribeContext, NativeNode, NativeScroll, NativeUiEvent } from "../../native/node";
+import { actionBar, actionButton } from "../../native/overlay";
+import { CLOSE_ACTION, type PickerEvent, picker, pickerAction, pickerEvent } from "../../native/picker";
+import { type KeyId, matchesKey } from "../../keys";
 import { parseSgrMouse } from "../../mouse";
 import { SplitPane, type SplitPaneHit } from "../../components/layout/split-pane";
 import { Stack } from "../../components/layout/stack";
@@ -30,10 +41,10 @@ import {
 	matchesSelectPageUp,
 } from "../../keybinding-matchers";
 import { expandKeyHint } from "../../render/render-utils";
-import { formatKeyHint, formatKeyHints } from "../../app-keybindings";
-import { editorKeys, interruptKey } from "../../chrome/keybinding-hints";
+import { formatKeyHint, formatKeyHints, formatTooltipKey } from "../../app-keybindings";
+import { boundKeys, editorKeys, interruptKey } from "../../chrome/keybinding-hints";
 import { bottomBorder, divider, PanelRows, row, topBorder } from "../../chrome/overlay-box";
-import { ExtensionList } from "./extension-list";
+import { ExtensionList, type ExtensionListSwitch } from "./extension-list";
 import { InspectorPanel, type ToolRuntimeSource } from "./inspector-panel";
 import type { ExtensionInspectorSource } from "./inspector-model";
 import { snapshotToolRuntimeSource } from "./live-tool-session";
@@ -99,8 +110,50 @@ export function buildTabBarTabs(tabs: ProviderTab[]): Tab[] {
 	});
 }
 
+/** The sheet/page title, shared by the ANSI frame and the native views. */
+const DASHBOARD_TITLE = "Extension Control Center";
+
+/** The kind column shown when rows are not grouped under kind headers (a provider scope or a search). */
+const KIND_COLUMNS: readonly TspPickerColumn[] = [{ id: "kind", format: "dim", priority: 1 }];
+
+/** Up to two initials of a provider label, for its scope mark. */
+function providerInitials(label: string): string {
+	const words = label.split(/[\s()_-]+/).filter(word => word.length > 0);
+	return words
+		.slice(0, 2)
+		.map(word => word[0]?.toUpperCase() ?? "")
+		.join("");
+}
+
+/**
+ * Picker scopes from the provider tabs: "all" first, then each provider with
+ * its mark and count. Empty enabled providers are disabled (muted in the
+ * {@link TabBar}); switched-off providers keep a muted dot and stay
+ * selectable so their master switch can be turned back on.
+ */
+export function buildPickerScopes(tabs: ProviderTab[]): TspPickerScope[] {
+	return tabs.map(tab => {
+		if (tab.id === "all") return { id: tab.id, label: "All", icon: "extension", count: tab.count };
+		const emptyEnabled = tab.count === 0 && tab.enabled;
+		return {
+			id: tab.id,
+			label: tab.label,
+			mark: { text: providerInitials(tab.label), seed: tab.id },
+			count: tab.count,
+			group: "Providers",
+			dot: !tab.enabled ? "muted" : emptyEnabled ? "warning" : "success",
+			disabled: emptyEnabled ? "No extensions" : undefined,
+		};
+	});
+}
+
 export class ExtensionDashboard implements Component {
 	#state!: DashboardState;
+	/** Bumped by every state change that reaches the screen; keys {@link #native}. */
+	#nativeVersion = 0;
+	readonly #native = new Memo<NativeNode>();
+	/** The last inspector page key, forwarded to the native preview (see {@link NativeNode.scroll}). */
+	#inspectorScroll: NativeScroll | undefined;
 	#mainList!: ExtensionList;
 	#inspector!: InspectorPanel;
 	#tabBar!: TabBar;
@@ -231,7 +284,7 @@ export class ExtensionDashboard implements Component {
 		this.#mainList.setToolSource(toolFrame);
 		this.#inspector.setToolSource(toolFrame);
 
-		this.#frameTop.setLines([topBorder(width, "Extension Control Center")]);
+		this.#frameTop.setLines([topBorder(width, DASHBOARD_TITLE)]);
 		this.#frameTabs.setLines(tabLines.map(line => row(line, width)));
 		this.#frameUpperDivider.setLines([divider(width)]);
 		this.#frameBody.setLines(this.#body.render(innerWidth).map(line => row(line, width)));
@@ -242,6 +295,7 @@ export class ExtensionDashboard implements Component {
 	}
 
 	invalidate(): void {
+		this.#nativeVersion++;
 		this.#frame.invalidate();
 		this.#tabBar.invalidate();
 		this.#mainList.invalidate();
@@ -280,10 +334,10 @@ export class ExtensionDashboard implements Component {
 		if (event.wheel !== null) {
 			if (overList) {
 				this.#mainList.handleWheel(event.wheel);
-				this.onRequestRender?.();
+				this.#requestRender();
 			} else if (overInspector) {
 				this.#body.scrollInspector(event.wheel);
-				this.onRequestRender?.();
+				this.#requestRender();
 			}
 			return;
 		}
@@ -292,7 +346,7 @@ export class ExtensionDashboard implements Component {
 			const hoveredTab = overTabs ? this.#tabBar.tabAt(tabLine, innerCol) : undefined;
 			this.#tabBar.setHoverTab(hoveredTab && !hoveredTab.muted ? hoveredTab.id : null);
 			this.#mainList.setHoverIndex(overList ? this.#mainList.hitTest(paneLine) : null);
-			this.onRequestRender?.();
+			this.#requestRender();
 			return;
 		}
 
@@ -305,7 +359,7 @@ export class ExtensionDashboard implements Component {
 		}
 		if (overList) {
 			this.#mainList.handleClick(paneLine);
-			this.onRequestRender?.();
+			this.#requestRender();
 		}
 	}
 
@@ -329,7 +383,7 @@ export class ExtensionDashboard implements Component {
 			this.#inspector.setExtension(this.#state.selected);
 		}
 		this.#body.resetInspectorScroll();
-		this.onRequestRender?.();
+		this.#requestRender();
 	}
 
 	#handleProviderToggle(providerId: string): void {
@@ -479,7 +533,7 @@ export class ExtensionDashboard implements Component {
 		}
 
 		this.#tabBar.setTabs(buildTabBarTabs(this.#state.tabs), currentTabId);
-		this.onRequestRender?.();
+		this.#requestRender();
 	}
 
 	#applyDisabledExtensions(disabledIds: string[]): void {
@@ -489,7 +543,7 @@ export class ExtensionDashboard implements Component {
 			this.#inspector.setExtension(this.#state.selected);
 		}
 		this.#tabBar.setTabs(buildTabBarTabs(this.#state.tabs), this.#state.tabs[this.#state.activeTabIndex]?.id);
-		this.onRequestRender?.();
+		this.#requestRender();
 	}
 
 	handleInput(data: string): void {
@@ -501,34 +555,32 @@ export class ExtensionDashboard implements Component {
 
 		// Ctrl+C - close immediately
 		if (matchesKey(data, "ctrl+c")) {
-			this.dispose();
-			this.onClose?.();
+			this.#close();
 			return;
 		}
 
 		// Escape - clear search first, then close
 		if (matchesAppInterrupt(data)) {
 			if (this.#state.searchQuery.length > 0) {
-				this.#state.searchQuery = "";
-				this.#state.searchFiltered = this.#state.tabFiltered;
-				this.#mainList.setExtensions(this.#state.searchFiltered);
-				this.#mainList.clearSearch();
-				this.onRequestRender?.();
+				this.#clearSearch();
 				return;
 			}
-			this.dispose();
-			this.onClose?.();
+			this.#close();
 			return;
 		}
 
 		if (matchesAppToolsExpand(data)) {
 			this.#inspector.toggleExpanded();
-			this.onRequestRender?.();
+			this.#requestRender();
 			return;
 		}
 
-		if (this.#body.pageInspector(matchesSelectPageUp(data) ? -1 : matchesSelectPageDown(data) ? 1 : 0)) {
-			this.onRequestRender?.();
+		const page = matchesSelectPageUp(data) ? -1 : matchesSelectPageDown(data) ? 1 : 0;
+		if (page !== 0) {
+			this.#inspectorScroll = { by: page < 0 ? "page-up" : "page-down", n: (this.#inspectorScroll?.n ?? 0) + 1 };
+		}
+		if (this.#body.pageInspector(page)) {
+			this.#requestRender();
 			return;
 		}
 
@@ -546,7 +598,207 @@ export class ExtensionDashboard implements Component {
 			this.#state.searchQuery = query;
 			this.#state.searchFiltered = applyFilter(this.#state.tabFiltered, query);
 		}
+		this.#requestRender();
+	}
+
+	#close(): void {
+		this.dispose();
+		this.onClose?.();
+	}
+
+	#clearSearch(): void {
+		this.#state.searchQuery = "";
+		this.#state.searchFiltered = this.#state.tabFiltered;
+		this.#mainList.setExtensions(this.#state.searchFiltered);
+		this.#mainList.clearSearch();
+		this.#requestRender();
+	}
+
+	/** Every repaint request: the native description is stale too. */
+	#requestRender(): void {
+		this.#nativeVersion++;
 		this.onRequestRender?.();
+	}
+
+	/** The dashboard is a `picker` sheet (scopes = providers, preview = inspector) wherever Tern draws pickers. */
+	nativeSheet(cx: DescribeContext): boolean {
+		return cx.supports("picker");
+	}
+
+	/**
+	 * The picker sheet, or without `picker` a page: head, provider tabs,
+	 * search, the inventory list beside the inspector, and an action bar.
+	 * Rebuilt when state moves or the live tool set changes (MCP health
+	 * changes arrive as render requests, which bump the version).
+	 */
+	describe(cx: DescribeContext): NativeNode {
+		const sheet = this.nativeSheet(cx);
+		const toolFrame = snapshotToolRuntimeSource(this.#toolSource);
+		let tools = "";
+		for (const tool of toolFrame?.listLiveTools?.() ?? []) tools += `${tool.name}${tool.hidden ? "!" : ""}\0`;
+		return this.#native.get([this.#nativeVersion, sheet, tools, this.#inspectorScroll], () => {
+			this.#mainList.setToolSource(toolFrame);
+			this.#inspector.setToolSource(toolFrame);
+			return sheet ? this.#describePicker() : this.#describePage();
+		});
+	}
+
+	#describePicker(): NativeNode {
+		const view = this.#mainList.pickerView();
+		const activeTab = this.#state.tabs[this.#state.activeTabIndex];
+		return picker(
+			{
+				title: DASHBOARD_TITLE,
+				icon: "extension",
+				noun: "extensions",
+				size: "lg",
+				layout: "rows",
+				preview: "side",
+				...this.#mainList.nativeQuery(),
+				placeholder: "Search extensions…",
+				scopes: buildPickerScopes(this.#state.tabs),
+				scope: activeTab?.id ?? "all",
+				columns: view.grouped ? undefined : KIND_COLUMNS,
+				items: view.items,
+				order: view.order,
+				hits: view.hits,
+				selected: view.selected,
+				total: this.#state.tabFiltered.length,
+				empty: "No extensions found for this provider.",
+				actions: this.#pickerActions(this.#mainList.selectedSwitch()),
+				focus: "list",
+			},
+			this.#inspectorPreview(),
+		);
+	}
+
+	/** The inspector's preview nodes, the first carrying the page-key scroll so Tern scrolls the pane holding it. */
+	#inspectorPreview(): NativeNode[] {
+		const preview = this.#inspector.describePreview();
+		const scroll = this.#inspectorScroll;
+		const [first, ...rest] = preview;
+		return scroll && first ? [{ ...first, scroll }, ...rest] : preview;
+	}
+
+	/** Action bar: Toggle (Space/Enter), Expand (the tools-expand key), Close (Esc). */
+	#pickerActions(selected: ExtensionListSwitch | undefined): TspPickerAction[] {
+		const expanded = this.#inspector.isExpanded();
+		return [
+			pickerAction("toggle", "Toggle", "space", {
+				primary: true,
+				on: selected?.on,
+				disabled: selected ? selected.blocked : "Select an extension",
+			}),
+			pickerAction("expand", expanded ? "Collapse" : "Expand", this.#expandKey(), { on: expanded }),
+			CLOSE_ACTION,
+		];
+	}
+
+	#expandKey(): KeyId {
+		return boundKeys("app.tools.expand", ["ctrl+o"])[0] ?? "ctrl+o";
+	}
+
+	#describePage(): NativeNode {
+		const selected = this.#mainList.selectedSwitch();
+		const query = this.#state.searchQuery;
+		const shown = this.#state.searchFiltered.length;
+		const total = this.#state.tabFiltered.length;
+		const head = node(
+			"row",
+			{ justify: "between", align: "center", role: "omp.app.head" },
+			[
+				node("row", { gap: "sm", align: "center", role: "omp.app.where" }, [
+					text(DASHBOARD_TITLE, { role: "omp.app.title" }),
+					text([span(query ? `${shown} of ${total}` : `${total} extensions`, "muted")], { truncate: "end" }),
+				]),
+				node("icon", {
+					name: "x",
+					role: "omp.app.ibtn",
+					title: `Close  ${formatTooltipKey(boundKeys("app.interrupt", ["escape"])[0] ?? "escape")}`,
+					aria: "Close",
+					actions: { click: "close" },
+				}),
+			],
+			"head",
+		);
+		const search = text([span("Search: ", "muted"), query ? span(query, "accent") : span("type to filter", "dim")], {
+			truncate: "end",
+		});
+		const body = node(
+			"row",
+			{ gap: "md", grow: 1 },
+			[
+				this.#mainList.describeList("list"),
+				{
+					...keyed(col(this.#inspector.describePreview(), { gap: "sm", grow: 1, basis: 0 }), "inspector"),
+					scroll: this.#inspectorScroll,
+				},
+			],
+			"body",
+		);
+		const expanded = this.#inspector.isExpanded();
+		const buttons: (NativeNode | null)[] = [
+			actionButton(selected?.on === false ? "Enable" : selected ? "Disable" : "Toggle", "toggle", {
+				keys: "space",
+				tone: "accent",
+				title: selected?.blocked ?? (selected ? undefined : "Select an extension"),
+			}),
+			actionButton(expanded ? "Collapse" : "Expand", "expand", { keys: this.#expandKey() }),
+		];
+		if (query) buttons.push(actionButton("Clear search", "clear", { keys: "escape" }));
+		buttons.push(null, actionButton("Close", "close", { keys: "escape" }));
+		return col([head, this.#tabBar, keyed(search, "search"), body, actionBar(buttons)], { gap: "md", grow: 1 });
+	}
+
+	/**
+	 * Pointer input, each on the path of the key it stands for: a row click
+	 * selects (click on the selected row or double click toggles, like
+	 * Space/Enter), a scope switches provider (←/→), `toggle`/`expand` run
+	 * Space and the expand key, `clear` empties the search (first Esc) and
+	 * `close` closes. Provider tabs in the page route to the {@link TabBar}.
+	 */
+	handleNativeEvent(event: NativeUiEvent): void {
+		const pick = pickerEvent(event);
+		if (pick) {
+			this.#handlePick(pick);
+			return;
+		}
+		if (event.type === "action") {
+			this.#handlePick({ kind: "action", act: event.act, value: event.value });
+			return;
+		}
+		if (
+			(event.type === "select" || event.type === "activate") &&
+			event.key.slice(event.key.lastIndexOf("/") + 1) === "list"
+		) {
+			this.#handlePick({ kind: event.type, item: event.item });
+		}
+	}
+
+	#handlePick(pick: PickerEvent): void {
+		if (pick.kind !== "action") {
+			if (this.#mainList.pickNative(pick.item, pick.kind === "activate")) this.#requestRender();
+			return;
+		}
+		switch (pick.act) {
+			case "close":
+				this.#close();
+				return;
+			case "clear":
+				this.#clearSearch();
+				return;
+			case "scope":
+				if (pick.value) this.#tabBar.selectTab(pick.value);
+				return;
+			case "toggle":
+				this.#mainList.activateSelected();
+				this.#requestRender();
+				return;
+			case "expand":
+				this.#inspector.toggleExpanded();
+				this.#requestRender();
+				return;
+		}
 	}
 
 	/**
@@ -555,7 +807,7 @@ export class ExtensionDashboard implements Component {
 	 * rewrite Extension.raw.
 	 */
 	#subscribeMcpRuntime(): void {
-		this.#unsubscribers.push(...this.#runtime.subscribeMcpChanges(() => this.onRequestRender?.()));
+		this.#unsubscribers.push(...this.#runtime.subscribeMcpChanges(() => this.#requestRender()));
 	}
 
 	dispose(): void {

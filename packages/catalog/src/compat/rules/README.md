@@ -183,14 +183,16 @@ provider "openrouter" {
 | ---------- | ---------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `class`    | `class "id" { ... }`                     | Exact class ID. At document root it may contain `on`, `on-api`, `family`, `revision`, and `models`. Under `provider` it may contain `family`, `revision`, and `models`.        |
 | `provider` | `provider "id" { ... }`                  | Exact provider ID. It is root-only and may contain `class`, `on-api`, and `models`.                                                                                           |
-| `on`       | `on "provider-a" "provider-b" { ... }`   | One or more provider IDs, combined as OR. It is allowed only under a root `class`, and may contain `family`, `revision`, and `models`.                                         |
-| `on-api`   | `on-api "adapter-a" "adapter-b" { ... }` | One or more request adapter IDs, combined as OR. At document root it may contain `class` and `models`; under a root `class` or `provider` it may contain `family`, `revision`, and `models`. |
+| `on`       | `on "provider-a" "provider-b" { ... }`   | One or more provider IDs, combined as OR. It is allowed under a root `class`, and may contain `on-api` to conjoin an API scope plus `family`, `revision`, and `models`. |
+| `on-api`   | `on-api "adapter-a" "adapter-b" { ... }` | One or more request adapter IDs, combined as OR. At document root it may contain `class` and `models`; under a root `class` (directly or nested inside `on`) or `provider` it may contain `family`, `revision`, and `models`. |
 | `family`   | `family "id" { ... }`                    | Exact classified family ID. It may contain `revision` and `models`. A target with no family does not match.                                                                    |
 | `revision` | `revision ">=2.5 <4" { ... }`            | A non-empty, whitespace-separated conjunction of comparisons. It may contain `models`. A target with no revision does not match.                                               |
 | `models`   | `models "id" "vendor/*" { ... }`         | One or more alternatives, combined as OR. It may contain only `on-upstream`. `token="name"` matches an ASCII-case-insensitive token bounded by non-alphanumerics.                 |
 | `on-upstream` | `on-upstream "a" "b" { ... }`        | Exact selected upstream IDs, combined as OR. Allowed inside any selector scope once; preserves the containing scope's other permitted children. Absent upstream never matches. |
 
 Every selector scope may additionally contain `on-upstream`; it cannot replace an already constrained upstream. Class, provider/`on`, `on-api`, `on-upstream`, and family values are compared exactly and case-sensitively to the structured resolve target. Revision operators are `>=`, `>`, `<=`, `<`, and `=`; operands have one to three dot-separated unsigned 8-bit components, omitted components zero.
+
+An `on-api` nested inside `on` under a class requires both the selected provider and request adapter; values within each selector remain alternatives.
 
 A `models` string without `*` is an exact, case-sensitive match against the provider-relative model identifier. A string containing `*` is an anchored, ASCII-case-insensitive wildcard match. Prefer taxonomy ranks; retain exact/glob lists only when they isolate the census member set exactly, and keep a `// residue:` comment explaining why ranks do not.
 
@@ -207,13 +209,17 @@ The directive vocabulary is closed and lives in **`src/compat/axes.ts`** — one
 The three value shapes are:
 
 - **Scalar**: exactly one KDL boolean, integer, float, or string argument and no children. `#null` is rejected.
-- **Array**: one or more scalar arguments and no children; it resolves to a JSON array. Axes marked `emptyArray` in `axes.ts` also accept a bare directive, which assigns an explicit empty list (`region-upstreams-eu` with no arguments: the region never serves the model).
+- **Array**: one or more scalar arguments and no children; it resolves to a JSON array. Axes marked `emptyArray` in `axes.ts` also accept a bare directive, which assigns an explicit empty list (`region-upstreams-eu` with no arguments: the region never serves the model). Bare `thinking-efforts` keeps a reasoning-capable deployment without selectable effort tiers off the effort dial.
 - **Object**: no arguments and a child block, including an empty block. Child names are kebab-case: an axis-directive spelling compiles to its resolved axis key (`template-reasoning-effort` → `qwenTemplateReasoningEffort`), anything else converts mechanically (`input-threshold` → `inputThreshold`); camelCase names are a compile error. `extra-body` payloads (top-level or nested) are the exception — their child names are literal wire JSON keys copied verbatim (`enable_thinking`). Each child is either one scalar or another object; arrays are not representable inside an object payload.
 
 A rule cannot assign the same resolved axis twice in one block.
-One object axis carries a computed form: `long-context-cost` accepts either the absolute rates (`input-threshold` + `input`/`output`/`cache-read`/`cache-write`) or `input-threshold` + `multiplier` (with optional `input-threshold-inclusive`), which derives the tier from the row's live base price at build time so the rule tracks upstream list-price updates (xAI's SuperGrok 200K tier). Rows without a token price carry no tier.
+One object axis carries a computed form: `long-context-cost` accepts either the absolute rates (`input-threshold` + `input`/`output`/`cache-read`/`cache-write`) or `input-threshold` + `multiplier` (with optional `input-threshold-inclusive`), which derives the tier from the row's base price at build time, after `cost-patch` and `cost-fallback`, so the rule tracks upstream list-price updates (xAI's SuperGrok 200K tier). Rows without a token price carry no tier. An empty `long-context-cost {}` adds no tier; a more specific rule uses it to opt a host out of a broader rule's band (GitHub Copilot's Haiku 5.5 rows, whose long tier is the `-1m` sibling).
 
 `context-window-authoritative #true` preserves a host's supplied context window through runtime model selection instead of applying inferred expansion or reference-price-tier caps. Explicit user context overrides still apply afterward. It applies to rows materialized through `buildModel` (discovery and regenerated bundles). See [`providers/factory-droid.kdl`](providers/factory-droid.kdl).
+
+`inline-image-byte-budget` caps retained base64 image characters for a deployment's request body. It leaves room for tool schemas and text beneath the provider's body-size limit; the coding agent reads it through `resolveInlineImageByteBudget` before sending live history. The budget applies only while `compat.officialEndpoint` holds: a custom `baseUrl` imposes its own body limit.
+
+`prompt-cache-lookback` is how many block positions back from a cache breakpoint the model's prompt cache looks for an earlier request's entry (Claude: 20, counting the breakpoint; a run of consecutive `tool_use` or `tool_result` blocks is one position). The coding agent reads it through `resolvePromptCacheLookback` and keeps warm-cache tool-result pruning inside the window; unassigned means no known bound.
 
 The routed-subscription registry axes (`upstream-rotation`, `region-upstreams-global|us|eu`, `region-limits-eu`, `credit-rates`, `list-price-from`, `routing-family`, `policy-aliases`, `entitlement`, `default-reasoning-off`) describe a gateway whose proxy fans one model out to several upstreams. They are read through `src/compat/factory-droid.ts` by Factory Droid discovery and its request provider, not materialized by `buildModel`. A provider-wide `region-upstreams-*` rule is the upstream serving table and a model rule replaces it for that region. `list-price-from "<provider>" ["<id>"]` shows a bundled row's list price beside the subscription's own billing; unlike seed values it is resolved at runtime and degrades to the seed's zero cost when the row is gone. See [`providers/factory-droid.kdl`](providers/factory-droid.kdl), whose wire and billing pool per model are `api-routes` and `quota-tiers` rules in `runtime/behavior.kdl`.
 
@@ -410,6 +416,10 @@ provider "muse-code" {
 ```
 
 Only `discovery` enrolls a provider in `generate-models.ts`; providers without it are never fetched at generation time (see the `charm-hyper` entry for why a live gateway deliberately omits it).
+
+`automatic-default #false` keeps a provider available for explicit selection but excludes it from startup fallback and automatic model presets. The default is `#true`; `apple` opts out because its on-device context cannot accommodate the standard coding-agent prompt in many projects.
+
+`kind-apis { <kind> "<api>" }` maps each non-chat kind (`image`, `tts`, `stt`, `embedding`, `rerank`, `video`) to the API discovery assigns rows of that kind. A runner API must sit under the kind it serves (`RUNNER_API_KINDS` in `src/types.ts`); chat APIs, which serve hosted image generation, and multi-kind `local-inference` may back any kind.
 
 ### Seed rows
 

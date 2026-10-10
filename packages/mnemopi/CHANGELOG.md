@@ -2,6 +2,30 @@
 
 ## [Unreleased]
 
+## [18.8.7] - 2026-10-09
+
+### Fixed
+
+- Fixed proactive linking freezing the host for seconds per stored memory on large banks; a memory's graph links are now written in one commit instead of one per link ([#14998](https://github.com/can1357/oh-my-pi/issues/14998)).
+
+## [18.8.5] - 2026-10-08
+
+### Fixed
+
+- Fixed long retained transcripts exhausting local memory extraction models by limiting each extraction input to 8192 characters while keeping the opening context and newest turns ([#14956](https://github.com/can1357/oh-my-pi/issues/14956)).
+- Fixed new memories gaining graph links (`related_to`, `references`, `ctx`) to memories that were already invalidated, superseded, or expired; proactive linking and consolidation now link only to memories recall can still return, so the graph stops growing toward retired memories ([#14427](https://github.com/can1357/oh-my-pi/pull/14427) by [@tickernelz](https://github.com/tickernelz)).
+
+## [18.5.1] - 2026-10-03
+
+### Changed
+
+- Upgraded local embedding support to fastembed 3.0.0. Models now download from Hugging Face into the updated cache layout, with interrupted downloads resuming automatically; existing models are migrated on first use while producing the same vectors.
+
+### Fixed
+
+- Fixed enhanced recall returning cached results from an unrelated longer query when answering a shorter query.
+- Fixed local embedding setup on fresh caches and Linux ARM64, including compatibility with current model downloads and ARM64 tokenization support.
+
 ## [18.4.4] - 2026-09-29
 
 ### Added

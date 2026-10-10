@@ -201,6 +201,47 @@ describe("cache warming scheduling math", () => {
 		}
 	});
 
+	test("uses the actual short TTL when Bedrock emits its five-minute fallback for long retention", () => {
+		const bedrockMessages = buildModel({
+			id: "anthropic.claude-opus-5-5",
+			name: "Claude Opus 5.5",
+			api: "anthropic-messages",
+			provider: "amazon-bedrock",
+			baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com/anthropic",
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 5, output: 25, cacheRead: 0.5, cacheWrite: 6.25 },
+			promptCache: { short: 300 },
+			contextWindow: 200_000,
+			maxTokens: 8_192,
+			compat: { supportsLongCacheRetention: false },
+		});
+		expect(getPromptCacheTtlMs(bedrockMessages, { cacheRetention: "long" })).toBe(300_000);
+
+		const converse = buildModel({
+			id: "us.anthropic.claude-opus-5-5",
+			name: "Claude Opus 5.5",
+			api: "bedrock-converse-stream",
+			provider: "amazon-bedrock",
+			baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com",
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 5, output: 25, cacheRead: 0.5, cacheWrite: 6.25 },
+			promptCache: { short: 300, long: 3600 },
+			contextWindow: 200_000,
+			maxTokens: 8_192,
+			compat: {
+				promptCacheMode: "explicit",
+				supportsLongPromptCacheRetention: false,
+				promptCacheMinimumTokens: 0,
+				promptCacheMaximumCheckpoints: 2,
+			},
+		});
+		expect(getPromptCacheTtlMs(converse, { cacheRetention: "long" })).toBe(300_000);
+		converse.compat.supportsLongPromptCacheRetention = true;
+		expect(getPromptCacheTtlMs(converse, { cacheRetention: "long" })).toBe(3_600_000);
+	});
+
 	test("never warms without a declared lifetime or with caching off", () => {
 		const model = makeModel();
 		model.promptCache = undefined;
@@ -208,7 +249,7 @@ describe("cache warming scheduling math", () => {
 		expect(getPromptCacheTtlMs(makeModel(), { cacheRetention: "none" })).toBeUndefined();
 	});
 
-	test("skips budget-based Anthropic thinking but allows adaptive thinking and other providers", () => {
+	test("rejects budget-based reasoning replays on Converse but preserves adaptive and effort models", () => {
 		const model = makeModel();
 		model.thinking = { mode: "anthropic-budget-effort", efforts: [Effort.High] };
 		expect(isReplayable(model, { reasoning: Effort.High })).toBe(false);
@@ -216,6 +257,28 @@ describe("cache warming scheduling math", () => {
 		expect(isReplayable(model, { reasoning: Effort.High })).toBe(true);
 		expect(isReplayable(model, { reasoning: Effort.High, forceReasoningOff: true })).toBe(true);
 		expect(isReplayable(model, undefined)).toBe(true);
+
+		const bedrock = buildModel({
+			id: "us.anthropic.claude-opus-5-5",
+			name: "Claude Opus 5.5",
+			api: "bedrock-converse-stream",
+			provider: "amazon-bedrock",
+			baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com",
+			reasoning: true,
+			thinking: { mode: "budget", efforts: [Effort.High], requiresEffort: true },
+			input: ["text"],
+			cost: { input: 5, output: 25, cacheRead: 0.5, cacheWrite: 6.25 },
+			contextWindow: 200_000,
+			maxTokens: 8_192,
+		});
+		expect(isReplayable(bedrock, { reasoning: Effort.High })).toBe(false);
+		expect(isReplayable(bedrock, undefined)).toBe(false);
+		expect(isReplayable(bedrock, { forceReasoningOff: true })).toBe(false);
+		bedrock.thinking = { mode: "anthropic-adaptive", efforts: [Effort.High], requiresEffort: true };
+		expect(isReplayable(bedrock, { forceReasoningOff: true })).toBe(true);
+		bedrock.thinking = { mode: "effort", efforts: [Effort.High] };
+		expect(isReplayable(bedrock, { reasoning: Effort.High })).toBe(false);
+
 		const openai = buildModel({
 			id: "gpt-5.4",
 			name: "GPT-5.4",

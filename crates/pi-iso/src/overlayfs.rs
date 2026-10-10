@@ -79,12 +79,15 @@ mod imp {
 		os::unix::ffi::OsStrExt,
 		path::{Path, PathBuf},
 		process::{Command, Stdio},
-		sync::LazyLock,
+		sync::{
+			LazyLock,
+			atomic::{AtomicBool, Ordering},
+		},
 	};
 
 	use parking_lot::Mutex;
 
-	use crate::{IsoError, IsoResult, ProbeResult, command_failed};
+	use crate::{IsoError, IsoResult, ProbeResult, command_failed, tree};
 
 	#[derive(Clone, Copy)]
 	enum MountFlavor {
@@ -95,11 +98,24 @@ mod imp {
 	static ACTIVE_MOUNTS: LazyLock<Mutex<BTreeMap<PathBuf, MountFlavor>>> =
 		LazyLock::new(|| Mutex::new(BTreeMap::new()));
 
+	/// Set once `fuse-overlayfs` has run; a host that has it keeps it, so later
+	/// probes skip the spawn. A failure is not cached: it can be installed while
+	/// a long-running session is up, so the next probe spawns again.
+	static FUSE_OVERLAYFS: AtomicBool = AtomicBool::new(false);
+
 	pub fn probe() -> ProbeResult {
-		if kernel_overlay_supported() {
+		if kernel_overlay_supported() || FUSE_OVERLAYFS.load(Ordering::Relaxed) {
 			return ProbeResult::available();
 		}
-		if fuse_overlayfs_available() {
+		let fuse_runs = Command::new("fuse-overlayfs")
+			.arg("--version")
+			.stdin(Stdio::null())
+			.stdout(Stdio::null())
+			.stderr(Stdio::null())
+			.status()
+			.is_ok();
+		if fuse_runs {
+			FUSE_OVERLAYFS.store(true, Ordering::Relaxed);
 			return ProbeResult::available();
 		}
 		ProbeResult::unavailable(
@@ -109,8 +125,8 @@ mod imp {
 	}
 
 	pub fn start(lower: &Path, merged: &Path) -> IsoResult<()> {
-		let lower = canonical_existing_dir(lower)?;
-		let merged = absolutize(merged);
+		let lower = tree::canonical_existing_dir(lower, "overlay lower", IsoError::other)?;
+		let merged = std::path::absolute(merged).unwrap_or_else(|_| merged.to_path_buf());
 		let base = merged.parent().ok_or_else(|| {
 			IsoError::other(format!("merged path has no parent: {}", merged.display()))
 		})?;
@@ -151,7 +167,7 @@ mod imp {
 	}
 
 	pub fn stop(merged: &Path) -> IsoResult<()> {
-		let merged = absolutize(merged);
+		let merged = std::path::absolute(merged).unwrap_or_else(|_| merged.to_path_buf());
 		let result = {
 			let flavor = ACTIVE_MOUNTS.lock().remove(&merged);
 			match flavor {
@@ -293,38 +309,6 @@ mod imp {
 		text
 			.lines()
 			.any(|line| line.split_whitespace().any(|word| word == "overlay"))
-	}
-
-	fn fuse_overlayfs_available() -> bool {
-		Command::new("fuse-overlayfs")
-			.arg("--version")
-			.stdin(Stdio::null())
-			.stdout(Stdio::null())
-			.stderr(Stdio::null())
-			.status()
-			.is_ok()
-	}
-
-	fn canonical_existing_dir(path: &Path) -> IsoResult<PathBuf> {
-		let resolved = absolutize(path);
-		let meta = fs::metadata(&resolved).map_err(|err| {
-			IsoError::other(format!("invalid overlay lower {}: {err}", resolved.display()))
-		})?;
-		if !meta.is_dir() {
-			return Err(IsoError::other(format!(
-				"overlay lower {} is not a directory",
-				resolved.display()
-			)));
-		}
-		Ok(fs::canonicalize(&resolved).unwrap_or(resolved))
-	}
-
-	fn absolutize(path: &Path) -> PathBuf {
-		if path.is_absolute() {
-			path.to_path_buf()
-		} else {
-			std::env::current_dir().map_or_else(|_| path.to_path_buf(), |cwd| cwd.join(path))
-		}
 	}
 
 	fn remove_dir_if_exists(path: &Path, label: &str) -> IsoResult<()> {

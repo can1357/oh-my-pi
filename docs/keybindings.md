@@ -47,9 +47,19 @@ app.history.search: []
 | `app.clipboard.copyPrompt`   | `Alt+Shift+C`                                                         | Copy the whole prompt                                                                                                                                                                |
 | `app.clipboard.pasteTextRaw` | `Ctrl+Shift+V`, `Alt+Shift+V`                                         | Paste clipboard text without collapsing it                                                                                                                                           |
 | `app.clipboard.pasteImage`   | Linux: `Ctrl+V`; macOS: `Ctrl+V`, `Cmd+V`; Windows: `Ctrl+V`, `Alt+V` | Paste from the clipboard (image preferred, text fallback)                                                                                                                            |
-| `app.stt.toggle`             | Unbound (hold `Space`)                                                | Toggle speech-to-text. By default there is no key chord — hold the space bar to record (push-to-talk) and release to transcribe; bind a chord here for a press-to-toggle alternative |
+| `app.stt.pushToTalk`         | `Space`                                                               | Hold to record and release to transcribe. Remap this action or set it to `[]` to disable push-to-talk without disabling speech-to-text.                                              |
+| `app.stt.toggle`             | Unbound                                                               | Start or stop speech-to-text recording with each press; independent of push-to-talk.                                                                                                 |
 | `app.live.toggle`            | `Ctrl+L`                                                              | Start or stop live voice mode (same as `/live`)                                                                                                                                      |
 | `app.agents.hub`             | `Alt+A`                                                               | [Open the Agent Hub](./agent-hub.md)                                                                                                                                                 |
+
+To disable push-to-talk while keeping speech-to-text available through a separate toggle binding:
+
+```yaml
+app.stt.pushToTalk: []
+app.stt.toggle: Ctrl+Shift+S
+```
+
+While speech-to-text is enabled, non-printable keys and chords assigned to `app.stt.pushToTalk` are reserved: a tap is swallowed instead of running its normal editing or application action. A plain printable key tap still types normally. Text-assistance transformations from initial taps are preserved; only unchanged literal repeat text is removed when a hold is recognized. Each configured alternative is independent; alternating between alternatives does not combine them into one hold. Hold detection requires a terminal that delivers key auto-repeat.
 
 ## Recover a cleared prompt
 
@@ -93,11 +103,18 @@ The status line also shows the mode, pending command, and multi-line Visual sele
 | `h` `j` `k` `l`               | Move by character and line (arrow keys work too)               |
 | `0` `^` `$`                   | Line start / first non-blank / line end                        |
 | `w` `b` `e`                   | Next word, previous word, end of word                          |
+| `f` `F` `t` `T` + char        | Find / till that character on the line (`;` repeats, `,` reverses) |
 | `gg` `G`                      | First line, last line (`5gg` and `5G` jump to line 5)          |
 | `1`–`9` prefix                | Repeat a motion or operator, e.g. `3w`, `5j`, `2dd`            |
 | `i` `a` `I` `A`               | Insert before / after cursor, at line start / line end         |
 | `o` `O`                       | Open a line below / above and insert                           |
 | `x` `D` `C`                   | Delete character, delete to line end (`2D` takes `count` lines), change to line end (`2C` likewise) |
+| `r` + char                    | Replace the character under the cursor (`3rx` replaces three)  |
+| `R`                           | Replace mode: typed characters overwrite until Escape          |
+| `%`                           | Jump to the matching `()` `[]` `{}` `"` `'` on or after the cursor. Quotes stay on the line; brackets can cross lines. With a count, `50%` goes to that percentage of the buffer. |
+| `{` `}`                       | Previous / next paragraph (blank-line boundary)                |
+| `J`                           | Join lines, dropping the indent of the following line (an empty line joins without a space) |
+| `>>` `<<`                     | Indent / outdent by two spaces (`3>>` shifts three lines; `>}` shifts a motion). Empty lines are left alone. |
 | `d` `y` `c` + motion          | Operate over a motion, e.g. `dw`, `d$`, `yb`, `cw`             |
 | `dd` `yy` `cc`                | Linewise delete / yank / change                                |
 | `d` `y` `c` + text object     | Operate over a text object, e.g. `diw`, `ca(`, `ci"`, `dap`    |
@@ -129,6 +146,7 @@ A selection that would cut through an attachment placeholder such as `[Image #1,
 
 - **Insert mode** → switch to Normal mode (an open autocomplete popup gets the first Escape to dismiss it).
 - **Visual mode**, or a half-typed count or operator → cancel back to a quiet Normal mode.
+- **Replace mode** (`R`) → switch to Normal mode, stepping back onto the last overwritten character.
 - **Normal mode with nothing pending** → falls through to app behavior: dismiss autocomplete, abort active work, or run the configured double-Escape action with an empty editor. An idle main-session draft is preserved; bash/python and focused-agent views have their own Escape behavior.
 
-Vim keys never shadow app chords: `Ctrl`-combinations, `Enter`, and `Tab` keep their normal behavior in every mode, so `Enter` still submits from Normal mode. Prompt history stays on `Up`/`Down` in Insert mode only — in Normal mode those keys are `k` and `j`, so navigating a multi-line draft never loads a previous prompt.
+Vim keys never shadow app chords: `Ctrl`-combinations, `Enter`, and `Tab` keep their normal behavior in every mode, so `Enter` still submits from Normal mode. Such a key also cancels a half-typed command (`d`, `r`, `f`) first, so the command never carries over into the next prompt. Prompt history stays on `Up`/`Down` in Insert mode only — in Normal mode those keys are `k` and `j`, so navigating a multi-line draft never loads a previous prompt.

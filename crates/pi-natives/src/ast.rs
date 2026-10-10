@@ -2,7 +2,7 @@
 
 use std::{
 	cmp::Ordering,
-	collections::{BTreeMap, BTreeSet, BinaryHeap, HashMap},
+	collections::{BTreeMap, BTreeSet, BinaryHeap, HashMap, HashSet},
 	path::{Path, PathBuf},
 };
 
@@ -11,6 +11,7 @@ use napi::bindgen_prelude::*;
 use napi_derive::napi;
 use pi_ast::{
 	SupportLang,
+	language::grammar::LanguageGrammar,
 	ops::{self as shared_ops},
 };
 use pi_vfs::BlockingFs;
@@ -250,6 +251,9 @@ pub struct AstFindResult {
 	pub limit_reached:      bool,
 	/// Non-fatal parse or pattern errors collected during the run.
 	pub parse_errors:       Option<Vec<String>>,
+	/// Languages whose on-demand grammar is not installed; their files were
+	/// skipped (see `wasmGrammarFor`).
+	pub missing_grammars:   Option<Vec<String>>,
 }
 
 /// Options for `astMatch`: run ast-grep patterns against an in-memory source
@@ -381,6 +385,9 @@ pub struct AstReplaceResult {
 	pub limit_reached:      bool,
 	/// Parse or pattern errors when not failing the whole operation.
 	pub parse_errors:       Option<Vec<String>>,
+	/// Languages whose on-demand grammar is not installed; their files were
+	/// skipped (see `wasmGrammarFor`).
+	pub missing_grammars:   Option<Vec<String>>,
 }
 
 struct FileCandidate {
@@ -494,7 +501,10 @@ fn compile_pattern(
 		.map_err(|err| Error::from_reason(err.to_string()))
 }
 
-fn apply_edits(content: &str, edits: &[Edit<String>]) -> Result<String> {
+fn apply_edits<'e>(
+	content: &str,
+	edits: impl IntoIterator<Item = &'e Edit<String>>,
+) -> Result<String> {
 	shared_ops::apply_edits(content, edits).map_err(|err| Error::from_reason(err.to_string()))
 }
 
@@ -566,18 +576,50 @@ struct ResolvedCandidate {
 	language_error: Option<String>,
 }
 
+/// Candidates with their languages, plus the distinct languages to compile
+/// patterns for and the languages skipped because their on-demand grammar is
+/// not installed.
+struct ResolvedCandidates {
+	candidates:       Vec<ResolvedCandidate>,
+	languages:        HashMap<String, SupportLang>,
+	missing_grammars: BTreeSet<&'static str>,
+}
+
+impl ResolvedCandidates {
+	fn missing_grammars(&self) -> Option<Vec<String>> {
+		(!self.missing_grammars.is_empty()).then(|| {
+			self
+				.missing_grammars
+				.iter()
+				.map(|name| (*name).to_string())
+				.collect()
+		})
+	}
+}
+
 fn resolve_candidates_for_find(
 	candidates: Vec<FileCandidate>,
 	lang: Option<&str>,
 	ct: &task::CancelToken,
-) -> Result<(Vec<ResolvedCandidate>, HashMap<String, SupportLang>)> {
+) -> Result<ResolvedCandidates> {
 	let mut resolved = Vec::with_capacity(candidates.len());
 	let mut languages = HashMap::new();
+	let mut missing_grammars = BTreeSet::new();
+	let mut installed: HashMap<SupportLang, bool> = HashMap::new();
 
 	for candidate in candidates {
 		ct.heartbeat()?;
 		match resolve_language(lang, &candidate.absolute_path) {
 			Ok(language) => {
+				let available = *installed.entry(language).or_insert_with(|| {
+					language
+						.wasm_grammar()
+						.is_none_or(|grammar| grammar.is_installed())
+				});
+				if !available {
+					missing_grammars.insert(language.canonical_name());
+					continue;
+				}
 				let key = language.canonical_name().to_string();
 				languages.entry(key).or_insert(language);
 				resolved.push(ResolvedCandidate {
@@ -596,7 +638,7 @@ fn resolve_candidates_for_find(
 		}
 	}
 
-	Ok((resolved, languages))
+	Ok(ResolvedCandidates { candidates: resolved, languages, missing_grammars })
 }
 
 fn compile_find_patterns(
@@ -637,7 +679,10 @@ fn compile_find_patterns(
 /// Search source files with ast-grep patterns; returns a promise resolved on a
 /// worker thread.
 #[napi]
-pub fn ast_grep(options: AstFindOptions<'_>) -> task::Promise<AstFindResult> {
+pub fn ast_grep<'env>(
+	env: &'env Env,
+	options: AstFindOptions<'_>,
+) -> Result<PromiseRaw<'env, AstFindResult>> {
 	let AstFindOptions {
 		patterns,
 		lang,
@@ -659,7 +704,7 @@ pub fn ast_grep(options: AstFindOptions<'_>) -> task::Promise<AstFindResult> {
 	let normalized_limit = limit.unwrap_or(DEFAULT_FIND_LIMIT).max(1);
 	let normalized_offset = offset.unwrap_or(0);
 
-	task::blocking("ast_grep", ct, move |ct| {
+	task::filesystem(env, "ast_grep", ct, fs, move |fs, ct| {
 		let patterns = normalize_pattern_list(patterns)?;
 		let strictness = resolve_strictness(strictness);
 		let include_meta = include_meta.unwrap_or(false);
@@ -669,8 +714,9 @@ pub fn ast_grep(options: AstFindOptions<'_>) -> task::Promise<AstFindResult> {
 			.filter(|candidate| is_supported_file(&candidate.absolute_path, lang_str))
 			.collect();
 
-		let (resolved_candidates, languages) =
-			resolve_candidates_for_find(candidates, lang_str, &ct)?;
+		let resolved = resolve_candidates_for_find(candidates, lang_str, &ct)?;
+		let missing_grammars = resolved.missing_grammars();
+		let ResolvedCandidates { candidates: resolved_candidates, languages, .. } = resolved;
 		let compiled_patterns =
 			compile_find_patterns(&patterns, &languages, selector.as_deref(), &strictness, &ct)?;
 		let files_searched = to_u32(resolved_candidates.len());
@@ -790,6 +836,7 @@ pub fn ast_grep(options: AstFindOptions<'_>) -> task::Promise<AstFindResult> {
 			files_searched,
 			limit_reached,
 			parse_errors: (!parse_errors.is_empty()).then_some(parse_errors),
+			missing_grammars,
 		})
 	})
 }
@@ -829,6 +876,10 @@ pub fn ast_match(options: AstMatchOptions<'_>) -> task::Promise<AstMatchResult> 
 			return Err(Error::from_reason("`lang` is required for ast_match".to_string()));
 		}
 		let language = resolve_supported_lang(lang_str)?;
+		language
+			.grammar()
+			.load()
+			.map_err(|err| Error::from_reason(err.to_string()))?;
 
 		let mut parse_errors = Vec::new();
 		let mut compiled_patterns = Vec::with_capacity(patterns.len());
@@ -907,7 +958,10 @@ pub fn ast_match(options: AstMatchOptions<'_>) -> task::Promise<AstMatchResult> 
 /// Apply ast-grep rewrite rules to matching files; honors `dryRun` and returns
 /// a promise.
 #[napi]
-pub fn ast_edit(options: AstReplaceOptions<'_>) -> task::Promise<AstReplaceResult> {
+pub fn ast_edit<'env>(
+	env: &'env Env,
+	options: AstReplaceOptions<'_>,
+) -> Result<PromiseRaw<'env, AstReplaceResult>> {
 	let AstReplaceOptions {
 		rewrites,
 		lang,
@@ -926,7 +980,7 @@ pub fn ast_edit(options: AstReplaceOptions<'_>) -> task::Promise<AstReplaceResul
 
 	let fs = ShellFilesystem::blocking(filesystem);
 	let ct = task::CancelToken::new(timeout_ms, signal);
-	task::blocking("ast_edit", ct, move |ct| {
+	task::filesystem(env, "ast_edit", ct, fs, move |fs, ct| {
 		ast_edit_blocking(
 			ct,
 			&fs,
@@ -982,7 +1036,9 @@ fn ast_edit_blocking(
 		));
 	}
 
-	let (resolved_candidates, languages) = resolve_candidates_for_find(candidates, lang_str, &ct)?;
+	let resolved = resolve_candidates_for_find(candidates, lang_str, &ct)?;
+	let missing_grammars = resolved.missing_grammars();
+	let ResolvedCandidates { candidates: resolved_candidates, languages, .. } = resolved;
 	let files_searched = to_u32(resolved_candidates.len());
 
 	let mut parse_errors = Vec::new();
@@ -1039,6 +1095,7 @@ fn ast_edit_blocking(
 			applied: !dry_run,
 			limit_reached: false,
 			parse_errors: (!parse_errors.is_empty()).then_some(parse_errors),
+			missing_grammars,
 			changes: vec![],
 		});
 	}
@@ -1105,6 +1162,8 @@ fn ast_edit_blocking(
 		}
 
 		let mut file_changes = Vec::new();
+		// Spans already staged for this file, to drop repeats in O(1).
+		let mut staged = HashSet::new();
 		let mut reached_max_replacements = false;
 		'patterns: for &(rewrite, compiled) in &runnable_rules {
 			for matched in ast.root().find_all(compiled.clone()) {
@@ -1113,12 +1172,7 @@ fn ast_edit_blocking(
 				// Multiple rules matching the same node with the same output are
 				// one deterministic edit; list and count it once instead of
 				// staging a duplicate that trips the apply-time overlap check.
-				let duplicate = file_changes.iter().any(|entry: &PendingFileChange| {
-					entry.edit.position == edit.position
-						&& entry.edit.deleted_length == edit.deleted_length
-						&& entry.edit.inserted_text == edit.inserted_text
-				});
-				if duplicate {
+				if !staged.insert((edit.position, edit.deleted_length, edit.inserted_text.clone())) {
 					continue;
 				}
 				if changes.len() + file_changes.len() >= max_replacements as usize {
@@ -1167,15 +1221,7 @@ fn ast_edit_blocking(
 		file_counts.insert(candidate.display_path.clone(), to_u32(file_changes.len()));
 
 		if !dry_run {
-			let edits: Vec<Edit<String>> = file_changes
-				.iter()
-				.map(|entry| Edit {
-					position:       entry.edit.position,
-					deleted_length: entry.edit.deleted_length,
-					inserted_text:  entry.edit.inserted_text.clone(),
-				})
-				.collect();
-			let output = apply_edits(&source, &edits)?;
+			let output = apply_edits(&source, file_changes.iter().map(|entry| &entry.edit))?;
 			if output != source {
 				pending_writes
 					.push(PendingWrite { absolute_path: candidate.absolute_path.clone(), output });
@@ -1214,6 +1260,7 @@ fn ast_edit_blocking(
 		applied: !dry_run,
 		limit_reached,
 		parse_errors: (!parse_errors.is_empty()).then_some(parse_errors),
+		missing_grammars,
 		changes,
 	})
 }

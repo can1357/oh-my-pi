@@ -8,7 +8,12 @@ import {
 	type SessionStorageBackend,
 	type SessionStorageIndexEntry,
 } from "@oh-my-pi/pi-coding-agent/session/indexed-session-storage";
-import { FileSessionStorage, SessionLockError } from "@oh-my-pi/pi-coding-agent/session/session-storage";
+import {
+	FileSessionStorage,
+	SessionLockError,
+	SessionWriteConflictError,
+	type WriteTextAtomicOptions,
+} from "@oh-my-pi/pi-coding-agent/session/session-storage";
 import { type SessionTitleUpdate, serializeTitleSlot } from "@oh-my-pi/pi-coding-agent/session/session-title-slot";
 
 class ControlledTitleUpdateBackend implements SessionStorageBackend {
@@ -113,6 +118,72 @@ describe("FileSessionStorage writer", () => {
 		expect(fs.readFileSync(sessionPath, "utf8")).toBe("one\n");
 		appendSync("two\n");
 		expect(fs.readFileSync(sessionPath, "utf8")).toBe("one\ntwo\n");
+		void writer.close();
+	});
+
+	it("appends without creating or removing a lockfile beside the session", () => {
+		const sessionPath = path.join(tempDir, "no-lockfile.jsonl");
+		const writer = storage.openWriter(sessionPath, { flags: "w" });
+		const appendSync = writer.appendSync?.bind(writer);
+		if (!appendSync) throw new Error("File writer must expose appendSync");
+		// Each transcript line used to claim `.<session>.lock` (create, record,
+		// stat, close) and unlink it again: two directory mutations per append.
+		// The OS gate alone serializes current writers, so appends must leave
+		// the session directory untouched apart from the transcript itself.
+		const openSpy = vi.spyOn(fs, "openSync");
+		const unlinkSpy = vi.spyOn(fs, "unlinkSync");
+		for (const line of ["one\n", "two\n", "three\n"]) appendSync(line);
+		const touched = [...openSpy.mock.calls, ...unlinkSpy.mock.calls].map(call => String(call[0]));
+		vi.restoreAllMocks();
+		expect(fs.readFileSync(sessionPath, "utf8")).toBe("one\ntwo\nthree\n");
+		expect(touched.filter(file => file.endsWith(".lock"))).toEqual([]);
+		void writer.close();
+	});
+
+	it("fails an append closed while a previous-binary publisher holds the lockfile", async () => {
+		const sessionPath = path.join(tempDir, "legacy-held.jsonl");
+		fs.writeFileSync(sessionPath, "old\n");
+		const writer = storage.openWriter(sessionPath);
+		const appendSync = writer.appendSync?.bind(writer);
+		if (!appendSync) throw new Error("File writer must expose appendSync");
+		// A binary that predates the OS gate publishes under the lockfile alone:
+		// it claimed the name and passed its size check, and its rename will
+		// replace this file. Appending now would land a line that rename erases.
+		fs.writeFileSync(path.join(tempDir, ".legacy-held.jsonl.lock"), `${process.pid}:${Date.now()}\n`);
+		expect(() => appendSync("new-entry\n")).toThrow(SessionLockError);
+		expect(fs.readFileSync(sessionPath, "utf8")).toBe("old\n");
+		await expect(writer.close()).rejects.toBeInstanceOf(SessionLockError);
+	});
+
+	it("re-appends a line a previous-binary publisher renamed away mid-append", () => {
+		const sessionPath = path.join(tempDir, "legacy-race.jsonl");
+		const lockPath = path.join(tempDir, ".legacy-race.jsonl.lock");
+		const stagedPath = path.join(tempDir, ".legacy-race.jsonl.staged.tmp");
+		fs.writeFileSync(sessionPath, "old\n");
+		fs.writeFileSync(stagedPath, "old\nrewrite\n");
+		const writer = storage.openWriter(sessionPath);
+		const appendSync = writer.appendSync?.bind(writer);
+		if (!appendSync) throw new Error("File writer must expose appendSync");
+		// The previous binary claims the lockfile after our check, sizes the
+		// session before our line lands, then publishes its rewrite over the path
+		// and releases: the line is now only in the replaced inode. Publishing
+		// moves the old file aside first, as Windows publishers do when a writer
+		// still holds it open.
+		const existsSync = fs.existsSync;
+		let published = false;
+		vi.spyOn(fs, "existsSync").mockImplementation((file: fs.PathLike) => {
+			if (!published && String(file) === lockPath && fs.readFileSync(sessionPath, "utf8") === "old\nnew-entry\n") {
+				published = true;
+				fs.renameSync(sessionPath, path.join(tempDir, "legacy-race.jsonl.bak"));
+				fs.renameSync(stagedPath, sessionPath);
+			}
+			return existsSync(file);
+		});
+		appendSync("new-entry\n");
+		vi.restoreAllMocks();
+		expect(published).toBe(true);
+		expect(fs.readFileSync(sessionPath, "utf8")).toBe("old\nrewrite\nnew-entry\n");
+		expect(fs.existsSync(lockPath)).toBe(false);
 		void writer.close();
 	});
 
@@ -463,6 +534,59 @@ describe("FileSessionStorage.writeTextSync", () => {
 		fs.writeFileSync(lockPath, `${2 ** 30}:${Date.now()}\n`);
 		storage.writeTextSync(sessionPath, "replacement\n");
 		expect(fs.readFileSync(sessionPath, "utf8")).toBe("replacement\n");
+	});
+});
+
+describe("FileSessionStorage line streaming", () => {
+	let tempDir: string;
+
+	beforeEach(async () => {
+		tempDir = await fsp.mkdtemp(path.join(os.tmpdir(), "omp-session-storage-lines-"));
+	});
+
+	afterEach(async () => {
+		await fsp.rm(tempDir, { recursive: true, force: true });
+	});
+
+	// Multi-byte text and a line past the 1 MiB chunk size cross every chunk boundary.
+	const lines = ['{"title":"é 😀"}\n', `${"x".repeat((1 << 20) + 7)}\n`, '{"tail":"ü"}\n'];
+	const body = lines.join("");
+
+	it("publishes the joined lines under the same size check as text", async () => {
+		const storage = new FileSessionStorage();
+		const sessionPath = path.join(tempDir, "session.jsonl");
+
+		storage.writeLinesSync(sessionPath, lines, { expectedSize: null });
+		expect(fs.readFileSync(sessionPath, "utf8")).toBe(body);
+		await storage.writeLinesAtomic(sessionPath, [...lines].reverse(), { expectedSize: Buffer.byteLength(body) });
+		expect(fs.readFileSync(sessionPath, "utf8")).toBe([...lines].reverse().join(""));
+
+		expect(() => storage.writeLinesSync(sessionPath, ["stale\n"], { expectedSize: 1 })).toThrow(
+			SessionWriteConflictError,
+		);
+		expect(fs.readdirSync(tempDir).filter(name => name.endsWith(".tmp"))).toEqual([]);
+	});
+
+	it("routes streamed rewrites through overridden text writers", async () => {
+		const seen: string[] = [];
+		class InterceptingStorage extends FileSessionStorage {
+			override writeTextSync(fpath: string, content: string): void {
+				seen.push(`sync:${content}`);
+				super.writeTextSync(fpath, content);
+			}
+			override async writeTextAtomic(fpath: string, content: string, options?: WriteTextAtomicOptions) {
+				seen.push(`atomic:${content}`);
+				await super.writeTextAtomic(fpath, content, options);
+			}
+		}
+		const storage = new InterceptingStorage();
+		const sessionPath = path.join(tempDir, "session.jsonl");
+
+		storage.writeLinesSync(sessionPath, ["a\n", "b\n"]);
+		await storage.writeLinesAtomic(sessionPath, ["c\n", "d\n"]);
+
+		expect(seen).toEqual(["sync:a\nb\n", "atomic:c\nd\n"]);
+		expect(fs.readFileSync(sessionPath, "utf8")).toBe("c\nd\n");
 	});
 });
 

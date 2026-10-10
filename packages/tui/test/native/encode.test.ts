@@ -1,5 +1,12 @@
 import { describe, expect, it } from "bun:test";
-import { encodeTspMessage, parseTspMessage, splitTspMessage, TspReader } from "@oh-my-pi/pi-tui/native/encode";
+import {
+	encodeTspHelloQuery,
+	encodeTspMessage,
+	parseTspMessage,
+	splitTspMessage,
+	TspReader,
+} from "@oh-my-pi/pi-tui/native/encode";
+import type { TspEvent } from "@oh-my-pi/pi-wire";
 
 const encoder = new TextEncoder();
 
@@ -12,6 +19,56 @@ function messages(stream: string): string[] {
 }
 
 describe("TSP framing", () => {
+	it("advertises explicit prompt submission alongside native edit and undo", () => {
+		const raw = splitTspMessage(encodeTspHelloQuery("test"))!;
+		expect(JSON.parse(raw.body)).toEqual({
+			q: "hello",
+			v: [1],
+			app: "omp",
+			features: ["edit", "undo", "send"],
+			ver: "test",
+		});
+	});
+
+	it("reassembles a multiline send without altering its supplied text", () => {
+		const reader = new TspReader();
+		const event: Extract<TspEvent, { ev: "send" }> = {
+			ev: "send",
+			sf: "s:1",
+			id: "a.line/input",
+			text: "first\n€漢字🙂\nlast",
+		};
+		const decoded = messages(encodeTspMessage("e", JSON.stringify(event), undefined, 8)).map(message =>
+			reader.feed(message),
+		);
+		expect(decoded.slice(0, -1).every(message => message === null)).toBe(true);
+		expect(decoded.at(-1)).toEqual({ verb: "e", event });
+	});
+
+	it("rejects send events without a surface, target or string prompt", () => {
+		const valid: Extract<TspEvent, { ev: "send" }> = { ev: "send", sf: "s:1", id: "a.line/input", text: "prompt" };
+		for (const event of [
+			{ ...valid, sf: undefined },
+			{ ...valid, sf: null },
+			{ ...valid, sf: 1 },
+			{ ...valid, sf: "" },
+			{ ...valid, id: undefined },
+			{ ...valid, id: null },
+			{ ...valid, id: 1 },
+			{ ...valid, id: "" },
+			{ ...valid, text: undefined },
+			{ ...valid, text: null },
+			{ ...valid, text: 1 },
+			{ ...valid, text: ["prompt"] },
+		]) {
+			expect(parseTspMessage(encodeTspMessage("e", JSON.stringify(event)))).toBeNull();
+		}
+		expect(parseTspMessage(encodeTspMessage("e", JSON.stringify({ ...valid, text: "" })))).toEqual({
+			verb: "e",
+			event: { ...valid, text: "" },
+		});
+	});
+
 	it("chunks a body over the APC limit and reassembles it byte-exact, never splitting a code point", () => {
 		const body = JSON.stringify({ text: 'ab€漢字🙂🙃 é\u001b"quote" '.repeat(9) });
 		const limit = 23;
@@ -23,6 +80,7 @@ describe("TSP framing", () => {
 		expect(chunks.map(chunk => chunk.params.m)).toEqual([...Array(chunks.length - 1).fill("1"), undefined]);
 		for (const chunk of chunks) {
 			expect(chunk.verb).toBe("f");
+			expect(Object.keys(chunk.params).every(key => key === "c" || key === "m")).toBe(true);
 			expect(encoder.encode(chunk.body).length).toBeLessThanOrEqual(limit);
 			// Each chunk is whole UTF-8: no lone surrogates survive encoding.
 			expect(chunk.body.isWellFormed()).toBe(true);
@@ -30,6 +88,66 @@ describe("TSP framing", () => {
 		}
 		const joined = Buffer.concat(chunks.map(chunk => encoder.encode(chunk.body)));
 		expect(joined.equals(Buffer.from(encoder.encode(body)))).toBe(true);
+	});
+
+	it("frames the Tern SDK's conformance chunking cases byte for byte", () => {
+		// From the Tern SDK's conformance/framing.json; chunk ids normalized to the case's.
+		const cases = [
+			{
+				body: '{"sf":"s1","s":9,"ops":[["text","log","append","0123456789abcdefghij"]]}',
+				limit: 24,
+				out: '\x1b_tsp;f;c=k7;m=1;{"sf":"s1","s":9,"ops":[\x1b\\\x1b_tsp;f;c=k7;m=1;["text","log","append","\x1b\\\x1b_tsp;f;c=k7;0123456789abcdefghij"]]}\x1b\\',
+			},
+			{
+				body: '{"sf":"s1","s":2,"ops":[["text","m","append","héllo wörld ✓ 𝄞 done"]]}',
+				limit: 11,
+				out: '\x1b_tsp;f;c=k7;m=1;{"sf":"s1",\x1b\\\x1b_tsp;f;c=k7;m=1;"s":2,"ops"\x1b\\\x1b_tsp;f;c=k7;m=1;:[["text","\x1b\\\x1b_tsp;f;c=k7;m=1;m","append"\x1b\\\x1b_tsp;f;c=k7;m=1;,"héllo w\x1b\\\x1b_tsp;f;c=k7;m=1;örld ✓ \x1b\\\x1b_tsp;f;c=k7;m=1;𝄞 done"]\x1b\\\x1b_tsp;f;c=k7;]}\x1b\\',
+			},
+			{
+				body: '{"sf":"s1","s":3,"ops":[["text","m","replace","xab=1;q"]]}',
+				limit: 48,
+				out: '\x1b_tsp;f;c=k7;m=1;{"sf":"s1","s":3,"ops":[["text","m","replace",\x1b\\\x1b_tsp;f;c=k7;"xab=1;q"]]}\x1b\\',
+			},
+			{
+				body: '{"k":"zzzzzzzzzzzzzzzz=1;"}',
+				limit: 10,
+				out: '\x1b_tsp;f;c=k7;m=1;{"k":\x1b\\\x1b_tsp;f;c=k7;m=1;"zzzzzzzzzzzzzzzz\x1b\\\x1b_tsp;f;c=k7;=1;"}\x1b\\',
+			},
+		];
+		for (const { body, limit, out } of cases) {
+			expect(encodeTspMessage("f", body, undefined, limit).replace(/;c=[0-9a-z]+;/g, ";c=k7;")).toBe(out);
+		}
+	});
+
+	it("never cuts where the next chunk would lead with a parameter-shaped segment", () => {
+		const event: TspEvent = { ev: "error", msg: "aaaaaaaaaax=1;tail" };
+		const body = JSON.stringify(event);
+		// A cut at exactly `limit` bytes would start the next chunk with `x=1;`.
+		const limit = body.indexOf("x=1;");
+		const stream = encodeTspMessage("e", body, undefined, limit);
+		const chunks = messages(stream).map(message => splitTspMessage(message)!);
+		expect(chunks.length).toBeGreaterThan(1);
+		for (const chunk of chunks) {
+			expect(chunk.body).not.toStartWith("x=1;");
+			expect(Object.keys(chunk.params).every(key => key === "c" || key === "m")).toBe(true);
+		}
+		expect(chunks.map(chunk => chunk.body).join("")).toBe(body);
+		const reader = new TspReader();
+		const decoded = messages(stream).map(message => reader.feed(message));
+		expect(decoded.at(-1)).toEqual({ verb: "e", event });
+	});
+
+	it("cuts a large base64 body at exactly the limit, with its parameters on the first chunk only", () => {
+		const body = Buffer.from(crypto.getRandomValues(new Uint8Array(60_000))).toString("base64");
+		const limit = 8192;
+		const chunks = messages(encodeTspMessage("b", body, { mime: "image/png" }, limit)).map(message =>
+			splitTspMessage(message)!,
+		);
+		expect(chunks.length).toBe(Math.ceil(body.length / limit));
+		expect(chunks.slice(0, -1).every(chunk => chunk.body.length === limit)).toBe(true);
+		expect(chunks[0]!.params).toEqual({ mime: "image/png", c: chunks[0]!.params.c!, m: "1" });
+		expect(chunks.at(-1)!.params).toEqual({ c: chunks[0]!.params.c! });
+		expect(chunks.map(chunk => chunk.body).join("")).toBe(body);
 	});
 
 	it("sends a body at the limit as a single unchunked message", () => {
@@ -49,6 +167,15 @@ describe("TSP framing", () => {
 			verb: "e",
 			event: { ev: "toggle", sf: "s:1", id: "a.b", collapsed: false, future: { x: 1 } },
 		});
+	});
+
+	it("decodes prefs change events whatever their value", () => {
+		for (const value of [true, 50, "branch", ["c", "a"], null]) {
+			const event = { ev: "change", sf: "s:1", id: "pf", item: "task.isolation.merge", value };
+			const decoded: unknown = parseTspMessage(`\x1b_tsp;e;${JSON.stringify(event)}\x1b\\`);
+			expect(decoded).toEqual({ verb: "e", event });
+		}
+		expect(parseTspMessage('\x1b_tsp;e;{"ev":"change","sf":"s:1","id":"pf"}\x1b\\')).toBeNull();
 	});
 
 	it("rejects malformed replies and events", () => {

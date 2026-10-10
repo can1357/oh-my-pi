@@ -71,6 +71,7 @@ function createDelayedSession(
 			buildSessionContext: () => ({ messages: [] }),
 			getEntries: () => [],
 			onPersistenceError: () => () => {},
+			onPersistenceNotice: () => () => {},
 			appendModeChange: (mode: string, data?: Record<string, unknown>) => {
 				modeChanges.push({ mode, data });
 				return "mode-change";
@@ -304,6 +305,7 @@ describe("print mode working indicator", () => {
 				buildSessionContext: () => ({ messages: [] }),
 				getEntries: () => [],
 				onPersistenceError: () => () => {},
+				onPersistenceNotice: () => () => {},
 			},
 			settings: Settings.isolated(),
 			extensionRunner: undefined,
@@ -366,6 +368,7 @@ describe("print mode working indicator", () => {
 				buildSessionContext: () => ({ messages: [] }),
 				getEntries: () => [],
 				onPersistenceError: () => () => {},
+				onPersistenceNotice: () => () => {},
 			},
 			settings: Settings.isolated(),
 			extensionRunner: undefined,
@@ -411,6 +414,7 @@ describe("print mode working indicator", () => {
 				buildSessionContext: () => ({ messages: [] }),
 				getEntries: () => [],
 				onPersistenceError: () => () => {},
+				onPersistenceNotice: () => () => {},
 			},
 			settings: Settings.isolated(),
 			extensionRunner: undefined,

@@ -146,3 +146,98 @@ describe("trailing finalization without done/error events (#12543)", () => {
 		expect(assistantBeforeToolResult).toBe(true);
 	});
 });
+
+describe("trailing finalization of a transient stream error after completed tool calls", () => {
+	const STREAM_READ_ERROR = "Error Code stream_read_error: stream_read_error";
+
+	function createPingHarness() {
+		const toolSchema = type({});
+		const executed: string[] = [];
+		const tool: AgentTool<typeof toolSchema> = {
+			name: "ping",
+			label: "Ping",
+			description: "Records executed tool calls",
+			parameters: toolSchema,
+			async execute(toolCallId) {
+				executed.push(toolCallId);
+				return { content: [{ type: "text", text: "pong" }], details: {} };
+			},
+		};
+		const context: AgentContext = { systemPrompt: [""], messages: [], tools: [tool] };
+		return { context, executed };
+	}
+
+	/**
+	 * First call streams `ping` tool calls, then settles the stream via
+	 * `end(result)` with a transient stream-read error and no terminal
+	 * `done`/`error` event. Calls listed in `unfinished` get `toolcall_start`
+	 * but never `toolcall_end`. The second call ends the loop normally.
+	 */
+	function makeResultOnlyErrorStreamFn(finished: string[], unfinished: string[] = []) {
+		let calls = 0;
+		const streamFn = (): AssistantMessageEventStream => {
+			calls += 1;
+			const stream = new AssistantMessageEventStream();
+			if (calls > 1) {
+				const finalMessage = createAssistantMessage([{ type: "text", text: "wrapped up" }], "stop");
+				stream.push({ type: "start", partial: finalMessage });
+				stream.push({ type: "done", reason: "stop", message: finalMessage });
+				return stream;
+			}
+			const output = createAssistantMessage([], "toolUse");
+			stream.push({ type: "start", partial: output });
+			for (const id of [...finished, ...unfinished]) {
+				const toolCall = { type: "toolCall" as const, id, name: "ping", arguments: {} };
+				output.content.push(toolCall);
+				const contentIndex = output.content.length - 1;
+				stream.push({ type: "toolcall_start", contentIndex, partial: output });
+				if (finished.includes(id)) stream.push({ type: "toolcall_end", contentIndex, toolCall, partial: output });
+			}
+			output.stopReason = "error";
+			output.errorMessage = STREAM_READ_ERROR;
+			stream.end(output);
+			return stream;
+		};
+		return { streamFn, callCount: () => calls };
+	}
+
+	async function runLoop(context: AgentContext, streamFn: () => AssistantMessageEventStream) {
+		const config: AgentLoopConfig = {
+			model: createMockModel({ responses: [] }).model,
+			convertToLlm: identityConverter,
+		};
+		const stream = agentLoop([createUserMessage("run the tool")], context, config, undefined, streamFn as never);
+		for await (const _event of stream) {
+			// drain
+		}
+		return stream.result();
+	}
+
+	it("dispatches completed tool calls like the done/error-event path", async () => {
+		const { context, executed } = createPingHarness();
+		const provider = makeResultOnlyErrorStreamFn(["call-1"]);
+
+		const messages = await runLoop(context, provider.streamFn);
+
+		expect(executed).toEqual(["call-1"]);
+		expect(provider.callCount()).toBe(2);
+		expect(messages.map(message => message.role)).toEqual(["user", "assistant", "toolResult", "assistant"]);
+		const recoveredTurn = messages[1] as AssistantMessage;
+		expect(recoveredTurn.stopReason).toBe("toolUse");
+		expect(recoveredTurn.errorMessage).toBeUndefined();
+		expect(recoveredTurn.stopDetails?.type).toBe("stream_interrupted_after_content");
+	});
+
+	it("drops a tool call that never finished streaming instead of dispatching it", async () => {
+		const { context, executed } = createPingHarness();
+		const provider = makeResultOnlyErrorStreamFn(["call-1"], ["call-2"]);
+
+		const messages = await runLoop(context, provider.streamFn);
+
+		expect(executed).toEqual(["call-1"]);
+		const recoveredTurn = messages[1] as AssistantMessage;
+		expect(recoveredTurn.content.filter(block => block.type === "toolCall").map(block => block.id)).toEqual([
+			"call-1",
+		]);
+	});
+});

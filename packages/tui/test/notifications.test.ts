@@ -550,4 +550,36 @@ describe("terminal notifications", () => {
 			terminal.stop();
 		}
 	});
+
+	// While a TUI owns stdout, its frames go through an off-thread pump; a
+	// notification written straight to stdout could split a frame's escape
+	// sequence. Each of the three write sites must take the terminal's path;
+	// each row's bytes prove which site it reached.
+	it.each([
+		["direct", undefined, "\x1b]9;ping\x1b\\"],
+		["tmux", "TMUX", "\x1bPtmux;\x1b\x1b]9;ping\x1b\x1b\\\x1b\\\x07"],
+		["Zellij", "ZELLIJ", "\x1b]9;ping\x1b\\\x07"],
+	] as const)(
+		"routes a %s notification through the active terminal, never straight to stdout",
+		(_host, envKey, sequence) => {
+			if (envKey === "TMUX") Bun.env.TMUX = "/tmp/tmux-1000/default,1234,0";
+			if (envKey === "ZELLIJ") Bun.env.ZELLIJ = "0";
+			mutableTerminal.notifyProtocol = NotifyProtocol.Osc9;
+			const { terminal, writes } = setupProcessTerminal();
+			try {
+				const routed: string[] = [];
+				vi.spyOn(terminal, "write").mockImplementation(data => {
+					routed.push(data);
+				});
+				writes.length = 0;
+
+				TERMINAL.sendNotification("ping");
+
+				expect(routed).toEqual([sequence]);
+				expect(writes.join("")).not.toContain("]9;");
+			} finally {
+				terminal.stop();
+			}
+		},
+	);
 });

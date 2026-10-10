@@ -1,7 +1,7 @@
 /**
  * A fake Tern daemon for browser-backend tests: a Unix socket that speaks
- * Tern's wire frames, records the script's hello and answers `Browser`
- * requests through a handler.
+ * Tern's JSON script protocol (`u32` LE length-prefixed JSON objects), records
+ * the script's hellos and answers browser ops (and fork requests) through handlers.
  */
 import * as fs from "node:fs/promises";
 import * as net from "node:net";
@@ -11,21 +11,22 @@ import * as path from "node:path";
 /** What a handler answers: `{ ok }`, `{ error }`, or `null` to never answer. */
 export type FakeAnswer = { ok: unknown } | { error: { kind: string; message: string } } | null;
 
-/** One browser request the fake daemon received. */
+/** One browser or fork request the fake daemon received. */
 export interface FakeRequest {
-	id: bigint;
+	id: number;
 	op: Record<string, unknown>;
 }
 
 /** Handle of a running fake daemon. */
 export interface FakeDaemon {
 	socketPath: string;
+	/** Every hello frame's raw payload, in order. */
 	hellos: Uint8Array[];
 	requests: FakeRequest[];
-	/** Send a raw reply payload to every connected client. */
-	broadcast(payload: Uint8Array): void;
+	/** Every fork request, in order (`op` is its body). */
+	forks: FakeRequest[];
 	/** Answer request `id` later (for requests the handler left unanswered). */
-	answer(id: bigint, answer: FakeAnswer): void;
+	answer(id: number, answer: FakeAnswer): void;
 	close(): Promise<void>;
 }
 
@@ -37,43 +38,39 @@ export function frame(payload: Uint8Array): Uint8Array {
 	return out;
 }
 
-/** A reply payload: tag + optional id + optional u32-length string. */
-export function replyPayload(tag: number, fields: { id?: bigint; text?: string }): Uint8Array {
-	const text = fields.text === undefined ? new Uint8Array(0) : new TextEncoder().encode(fields.text);
-	const size = 1 + (fields.id === undefined ? 0 : 8) + (fields.text === undefined ? 0 : 4 + text.length);
-	const out = new Uint8Array(size);
-	const view = new DataView(out.buffer);
-	out[0] = tag;
-	let offset = 1;
-	if (fields.id !== undefined) {
-		view.setBigUint64(offset, fields.id, true);
-		offset += 8;
-	}
-	if (fields.text !== undefined) {
-		view.setUint32(offset, text.length, true);
-		out.set(text, offset + 4);
-	}
-	return out;
+/** `message` as a frame payload. */
+export function jsonPayload(message: unknown): Uint8Array {
+	return new TextEncoder().encode(JSON.stringify(message));
 }
 
-/** Start a fake daemon; `welcome: false` refuses every hello with `refusal`. */
+/**
+ * Start a fake daemon. `hangUp` makes it a Tern from before the JSON protocol:
+ * it reads the hello and closes the connection without a word. `welcome` is
+ * the welcome's body; `fork` answers fork requests (without it they go
+ * unanswered, as an older Tern skips them).
+ */
 export async function startFakeDaemon(
-	handler: (op: Record<string, unknown>, id: bigint) => FakeAnswer | Promise<FakeAnswer>,
-	opts: { refusal?: string } = {},
+	handler: (op: Record<string, unknown>, id: number) => FakeAnswer | Promise<FakeAnswer>,
+	opts: {
+		hangUp?: boolean;
+		welcome?: Record<string, unknown>;
+		fork?: (request: Record<string, unknown>, id: number) => FakeAnswer;
+	} = {},
 ): Promise<FakeDaemon> {
 	const dir = await fs.mkdtemp(path.join(os.tmpdir(), "tern-fake-"));
 	const socketPath = path.join(dir, "daemon.sock");
 	const hellos: Uint8Array[] = [];
 	const requests: FakeRequest[] = [];
+	const forks: FakeRequest[] = [];
 	const sockets = new Set<net.Socket>();
-	const owners = new Map<bigint, net.Socket>();
+	const owners = new Map<number, net.Socket>();
 	const send = (socket: net.Socket, payload: Uint8Array): void => {
 		if (!socket.destroyed) socket.write(frame(payload));
 	};
-	const answer = (id: bigint, value: FakeAnswer): void => {
+	const answer = (id: number, value: FakeAnswer): void => {
 		const socket = owners.get(id);
 		if (!socket || value === null) return;
-		send(socket, replyPayload(30, { id, text: JSON.stringify(value) }));
+		send(socket, jsonPayload({ id, [forks.some(fork => fork.id === id) ? "fork" : "browser"]: value }));
 	};
 	const server = net.createServer(socket => {
 		sockets.add(socket);
@@ -94,29 +91,32 @@ export async function startFakeDaemon(
 			}
 			buffer = joined.slice(offset);
 			for (const payload of payloads) {
-				if (payload[0] === 0) {
-					hellos.push(payload);
-					if (opts.refusal !== undefined) {
-						send(socket, replyPayload(1, { text: opts.refusal }));
-						socket.end();
-					} else {
-						// Welcome carries fields omp ignores; an unknown tag follows to prove it is skipped.
-						send(socket, new Uint8Array([0, 1, 2, 3, 4, 5, 6, 7, 8, 0, 0, 0, 0]));
-						send(socket, new Uint8Array([99, 1, 2, 3]));
-					}
-					continue;
+				if (opts.hangUp) {
+					socket.end();
+					return;
 				}
-				if (payload[0] !== 40) continue;
-				const view = new DataView(payload.buffer, payload.byteOffset, payload.byteLength);
-				const id = view.getBigUint64(1, true);
-				const length = view.getUint32(9, true);
-				const op = JSON.parse(new TextDecoder().decode(payload.subarray(13, 13 + length))) as Record<
-					string,
-					unknown
-				>;
-				requests.push({ id, op });
-				owners.set(id, socket);
-				answer(id, await handler(op, id));
+				const message = JSON.parse(new TextDecoder().decode(payload)) as {
+					hello?: unknown;
+					id?: number;
+					browser?: Record<string, unknown>;
+					fork?: Record<string, unknown>;
+				};
+				if (message.hello !== undefined) {
+					hellos.push(payload);
+					// A welcome with members omp does not know, then a message kind it does not know, to prove both are skipped.
+					send(socket, jsonPayload({ welcome: opts.welcome ?? { version: 99 } }));
+					send(socket, jsonPayload({ id: 0, output: { pane: 7 } }));
+				} else if (message.browser !== undefined && message.id !== undefined) {
+					const { id, browser: op } = message;
+					requests.push({ id, op });
+					owners.set(id, socket);
+					answer(id, await handler(op, id));
+				} else if (message.fork !== undefined && message.id !== undefined) {
+					const { id, fork: request } = message;
+					forks.push({ id, op: request });
+					owners.set(id, socket);
+					if (opts.fork) answer(id, opts.fork(request, id));
+				}
 			}
 		});
 	});
@@ -128,9 +128,7 @@ export async function startFakeDaemon(
 		socketPath,
 		hellos,
 		requests,
-		broadcast: payload => {
-			for (const socket of sockets) send(socket, payload);
-		},
+		forks,
 		answer,
 		close: async () => {
 			for (const socket of sockets) socket.destroy();

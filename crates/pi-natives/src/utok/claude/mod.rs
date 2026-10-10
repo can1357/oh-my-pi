@@ -128,28 +128,21 @@ pub fn content_token_count<U: Unit>(units: &[U], family: Family) -> u32 {
 	let core = family.core();
 	let p = family.params();
 	let head_space = raw_head_space_units(units);
+	let mut tiler = core.tiler();
 	if p.ladder {
 		let norm = nfc_units(units, p.fold_quotes);
 		// The frame appends newline(s) and one token can span into them: read
 		// the content-final newline run before `stream_norm` strips it.
 		let n_tail = norm.bytes().rev().take_while(|&b| b == b'\n').count();
-		let stream = stream_norm(&norm, &p, head_space);
-		let tail = core.ladder_tail_cost(n_tail, family.appended_newlines());
-		if stream.is_empty() {
-			return tail;
-		}
-		core.tile_cost(&stream) + tail
+		stream_norm(&norm, &p, head_space, |chunk| tiler.push(chunk));
+		tiler.finish() + core.ladder_tail_cost(n_tail, family.appended_newlines())
 	} else {
 		// The v5 frame absorbs raw ASCII whitespace, so strip before NFC:
 		// NFC folds NBSP etc. to U+0020, and those are not free at the end.
 		let stripped = trim_end_ws(units);
 		let norm = nfc_units(stripped, p.fold_quotes);
-		let stream = stream_norm(&norm, &p, head_space);
-		if stream.is_empty() {
-			0
-		} else {
-			core.tile_cost(&stream)
-		}
+		stream_norm(&norm, &p, head_space, |chunk| tiler.push(chunk));
+		tiler.finish()
 	}
 }
 

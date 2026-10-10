@@ -108,7 +108,7 @@ Types: `OpenAICompat` / `ResolvedOpenAISharedCompat` in `packages/catalog/src/ty
 | --- | --- | --- |
 | `reasoningDeltasMayBeCumulative` | MiniMax hosts | Stream parser treats reasoning deltas as cumulative snapshots, not increments |
 | `stripDeepseekSpecialTokens` | DeepSeek on NVIDIA NIM or direct API | Strips leaked chat-template tokens (`<｜User｜>`, …) from visible text |
-| `streamMarkupHealingPattern` | `"kimi"` (K2-family or Kimi/Moonshot provider), `"dsml"` (DeepSeek DSML hosts), `"thinking"` otherwise; unset on official OpenAI | Selects the leaked-markup healer; `"qwen"` is also an explicit supported pattern |
+| `streamMarkupHealingPattern` | `"kimi"` (K2-family or Kimi/Moonshot provider), `"dsml"` (any DeepSeek-class model, on any host including local backends and custom providers), `"thinking"` otherwise; unset on official OpenAI | Selects the leaked-markup healer; `"qwen"` is also an explicit supported pattern |
 | `emptyLengthFinishIsContextError` | Ollama | Empty completion with `finish_reason: "length"` → context-overflow error |
 | `streamFirstEventTimeoutMs` | `0` for local backends | First-event watchdog hint (`0` = unbounded prefill/model-load time) |
 | `streamIdleTimeoutMs` | GLM/Alibaba coding plans 600 s; selected MiMo/Kimi/DeepSeek and local backends 300 s; some deployments use `0` | Fallback idle budget; request options and timeout env vars take precedence |
@@ -140,7 +140,8 @@ Types: `OpenAICompat` / `ResolvedOpenAISharedCompat` in `packages/catalog/src/ty
 | --- | --- | --- |
 | `supportsLongPromptCacheRetention` | Official OpenAI | Sends `prompt_cache_retention: "24h"` when requested |
 | `strictResponsesPairing` | Azure OpenAI, Copilot Responses | Enforces strict 1:1 tool-call/tool-result pairing when building Responses input items |
-| `supportsImageDetailOriginal` | `false` for Copilot and xAI hosts | `detail: "original"` vs `detail: "auto"` on input images |
+| `statefulResponses` | Unset; falls back to `officialEndpoint` at request time | On the OpenAI Responses handler (including OpenRouter Responses dispatch), enables `previous_response_id` plus delta input and forces `store: true`; `false` uses full replay with `store: false`. Does not change Codex or Azure handlers |
+| `supportsImageDetailOriginal` | `true` for OpenAI, Azure OpenAI, and Codex; `false` for other hosts | Clamps `detail: "original"` to `"auto"` on input images when disabled. Custom hosts that accept `original` can opt in with `compat.supportsImageDetailOriginal: true`; explicit overrides win in both directions |
 | `supportsReasoningSummary` | `false` on first-party xAI | Omits `reasoning.summary` on hosts that reject it |
 | `supportsAllTurnsReasoningContext` | GPT-5.4+ on Codex | Gates explicit `reasoning.context: "all_turns"` overrides; Responses Lite always requires that scope |
 | `requiresReasoningOffJuiceInstruction` | GPT-5.6+ class rule | Forced-off requests add a developer `# Juice: … !important` instruction |
@@ -149,6 +150,15 @@ Types: `OpenAICompat` / `ResolvedOpenAISharedCompat` in `packages/catalog/src/ty
 | `supportsConfigurationUpdate` | `true` for `gpt-6-astra` (class rule, any host); `false` otherwise | Pins request-level `reasoning.effort` to the session baseline and carries later changes as `configuration_update` input items; set `false` in `models.yml` for custom proxies that 400 on the item type — the changed effort is then sent at the request level and no item is emitted |
 | `supportsSteering` | `true` for GPT-6+ (class rule, any host); `false` otherwise | Codex WebSocket turns send queued user steering as `response.steer` into the streaming response; the next request reads the server's automatic continuation or sends only the pending tool output |
 | `supportsObfuscationOptOut` | Official OpenAI | Allows `stream_options: { include_obfuscation: false }` |
+
+Stateful chaining precedence is the call's `statefulResponses` option, then
+`PI_OPENAI_STATEFUL`, then `compat.statefulResponses`, then
+`compat.officialEndpoint`. The environment enables chaining for `1`, `y`, `yes`,
+`true`, or `on` (all-lowercase or all-uppercase) and disables it for any other non-empty value;
+unset or empty preserves the model default. The compat key
+does not imply `officialEndpoint` or enable `text.verbosity`, obfuscation opt-out,
+or any other official-only behavior. Chaining requires `sessionId` and
+`providerSessionState`.
 
 ## 2. Reasoning levels
 

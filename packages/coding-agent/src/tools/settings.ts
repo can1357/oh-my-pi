@@ -124,6 +124,27 @@ export const cfgToolsArtifactTailLines = register({
 	},
 });
 
+export const cfgToolsArtifactMaxBytes = register({
+	id: "tools.artifactMaxBytes",
+	type: "number",
+	default: 16,
+	ui: {
+		tab: "tools",
+		group: "Output Limits",
+		label: "Artifact File Cap (MB)",
+		description:
+			"Maximum size of the artifact file saved for streaming tool output (bash, python, js eval). Larger output keeps its beginning (up to 3 MB) and its most recent remainder, with a truncation notice between them. 0 = unlimited.",
+		options: [
+			{ value: "0", label: "Unlimited", description: "Save the complete output" },
+			{ value: "4", label: "4 MB" },
+			{ value: "16", label: "16 MB", description: "Default" },
+			{ value: "64", label: "64 MB" },
+			{ value: "256", label: "256 MB" },
+			{ value: "1024", label: "1 GB" },
+		],
+	},
+});
+
 export const cfgReadLineNumbers = register({
 	id: "readLineNumbers",
 	type: "boolean",
@@ -594,15 +615,28 @@ export const cfgRatchetEnabled = register({
 	},
 });
 
+export const cfgArchiveEnabled = register({
+	id: "archive.enabled",
+	type: "boolean",
+	default: true,
+	ui: {
+		tab: "tools",
+		group: "Available Tools",
+		label: "Archive",
+		description:
+			"Enable the read-only archive eval prelude: prompt history, recent projects, past sessions and recaps",
+	},
+});
+
 export const cfgComputerDisplay = register({
 	id: "computer.display",
 	type: "string",
-	default: "all",
+	default: "active",
 	ui: {
 		tab: "tools",
 		group: "Computer",
 		label: "Computer Display",
-		description: "Composite all displays or select a native display id",
+		description: "Active window's display (active), all displays (all), or a native display id",
 	},
 });
 
@@ -614,7 +648,7 @@ export const cfgComputerMaxWidth = register({
 		tab: "tools",
 		group: "Computer",
 		label: "Computer Screenshot Width",
-		description: "Maximum composite screenshot width in pixels",
+		description: "Maximum screenshot width in pixels",
 	},
 });
 
@@ -626,7 +660,7 @@ export const cfgComputerMaxHeight = register({
 		tab: "tools",
 		group: "Computer",
 		label: "Computer Screenshot Height",
-		description: "Maximum composite screenshot height in pixels",
+		description: "Maximum screenshot height in pixels",
 	},
 });
 
@@ -884,7 +918,7 @@ export const cfgToolsXdev = register({
 		group: "Discovery & MCP",
 		label: "xd:// Tools",
 		description:
-			"Mount rarely-used (discoverable) tools under xd:// device URLs driven via read/write instead of shipping their schemas on every request. Sessions whose explicit tool list grants read but omits write mount devices through a device-only write transport (filesystem writes stay rejected). Disable to expose every enabled tool top-level.",
+			"Mount rarely-used (discoverable) tools under xd:// device URLs driven via read/write instead of shipping their schemas on every request. Sessions whose explicit tool list grants read but omits write mount devices through a device-only write transport (only local:// scratch stays writable besides devices). Disable to expose every enabled tool top-level.",
 	},
 });
 

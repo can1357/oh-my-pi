@@ -100,6 +100,7 @@ Literal filesystem paths take precedence over selector interpretation, so an exi
 7. Otherwise it treats the input as a local filesystem path.
    - `resolveReadPath()` expands `~`, resolves relative to session cwd, treats bare `/` as session cwd, and retries macOS screenshot/NFD/curly-quote variants.
    - If the path does not exist, `findUniqueWorkspaceSuffix()` attempts a workspace-wide unique suffix match (skipped for remote mounts). A cwd-root filename matching the active `local://` plan basename may recover that plan. As a final guarded recovery, a mistakenly delimited list of existing paths is read part by part; callers should still issue one `read` per path.
+   - A resolved target that is neither a regular file nor a directory (character or block device, FIFO, socket) is rejected with a `ToolError` naming its kind. Reads run in-process, so reading `/dev/stdin` or a FIFO would block, and `/dev/zero` would never finish, on a native thread that no timeout or abort can cancel.
 8. Directories go through `#readDirectory()`.
 9. Non-directories branch by content type:
    - image metadata / inline image
@@ -292,6 +293,11 @@ Notes: ...
 ---
 ```
 
+- X URLs (`x.com`, `twitter.com`, and their `www.`/`mobile.` hosts) never reach `loadPage()`; X blocks scraping. `handleTwitter()` (`packages/coding-agent/src/web/scrapers/twitter.ts`) classifies the page with `parseXUrl()` (`packages/coding-agent/src/web/x.ts`) and has Grok's `x_search` tool read it with a fixed call plan and output format (`packages/coding-agent/src/prompts/system/x-read.md`):
+   - post (`/<handle>/status/<id>`, `/i/web/status/<id>`, trailing `/photo/N` etc.) → `x_thread_fetch`: the post, parent thread, quoted post, replies, metrics, and media URLs;
+   - profile (`/<handle>`, `/with_replies`, `/media`) → `x_user_search` plus a `from:<handle>` `x_keyword_search` (Latest, 10 posts), with `allowed_x_handles` pinned to the handle;
+   - search (`/search?q=`; `f=live` → Latest, `f=media` → `filter:media`, `f=user` → `x_user_search`) and hashtag (`/hashtag/<tag>`) → `x_keyword_search`.
+   - Models are tried in `xaiModelChain()` order (`web` role xAI candidates plus the provider default's `webSearchModel`, ranked by provider priority so `xai-oauth` runs before `xai` unless `modelProviderOrder` says otherwise) with `max_turns: 2` and low reasoning effort; the call bills the xAI account per post and profile fetched. The answer is the model's rendering of the tool output, which the API does not expose raw; the `Notes:` header names the model and fetch counts. Without xAI credentials, for other X pages (home, explore, followers, lists), or when every model fails, the result is a `text/plain` explanation with method `x-unavailable`.
 - `method` records the winning path (`json`, `feed`, `text`, `alternate-markdown`, `md-suffix`, `content-negotiation`, `image`, `markit`, `llms.txt`, `raw`, `raw-html`, etc.).
 - URL reads may return an inline image block when the fetched resource is a supported image and survives resizing.
 
@@ -357,6 +363,7 @@ Notes: ...
    - multi-ranges on directory/archive-directory listings
 - `conflict://*` reads are rejected; unknown/stale conflict ids require re-reading `<path>:conflicts`.
 - Missing local/archive/sqlite paths first attempt unique suffix resolution; if no unique match or guarded recovery exists they error.
+- Targets that are neither regular files nor directories (character or block device, FIFO, socket) throw a `ToolError` naming the file kind; SQLite detection skips them rather than sniffing their header.
 - Out-of-bounds line reads do not throw. They return explanatory text with a suggestion such as `Use :1 ...` or `Use :<last line> ...`.
 - Probable binary local files return a notice unless `:raw` was requested or an available IDA-backed executable/database view handles them.
 - Binary archive entries do not throw; they return a text notice.

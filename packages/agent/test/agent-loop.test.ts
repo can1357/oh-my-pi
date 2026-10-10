@@ -22,8 +22,11 @@ import type {
 import { ASIDE_MESSAGE_COMMIT, ASIDE_MESSAGE_DISCARD, SPECULATIVE_STREAM_SESSION } from "@oh-my-pi/pi-agent-core/types";
 import type { AssistantMessage, AssistantMessageEvent, Context, Message, ToolResultMessage } from "@oh-my-pi/pi-ai";
 import { createMockModel, type MockResponse } from "@oh-my-pi/pi-ai/providers/mock";
+import { transformMessages } from "@oh-my-pi/pi-ai/providers/transform-messages";
 import { kCursorExecResolved, setStreamingPartialJson } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
+import type { HarmonyDetection } from "@oh-my-pi/pi-ai/utils/harmony-leak";
+import * as harmonyLeak from "@oh-my-pi/pi-ai/utils/harmony-leak";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
 import { createAssistantMessage, createHarmonyMitigationModel, createUserMessage } from "./helpers";
 
@@ -43,6 +46,32 @@ declare module "@oh-my-pi/pi-agent-core/types" {
 // Simple identity converter for tests - just passes through standard messages
 function identityConverter(messages: AgentMessage[]): Message[] {
 	return messages.filter(m => m.role === "user" || m.role === "assistant" || m.role === "toolResult") as Message[];
+}
+
+/** Narrow a tool result's first text block for pairing assertions. */
+function toolResultText(result: { content: Array<{ type: string; text?: string }> }): string {
+	const block = result.content[0];
+	if (block?.type !== "text" || block.text === undefined) throw new Error("tool result must be text");
+	return block.text;
+}
+
+/** Echo tool recording each executed payload — shared by the id-repair tests. */
+function makeEchoTool(executions: string[]) {
+	const toolSchema = type({ value: "string" });
+	const tool: AgentTool<typeof toolSchema, { value: string }> = {
+		name: "echo",
+		label: "Echo",
+		description: "Echo tool",
+		parameters: toolSchema,
+		async execute(_toolCallId, params) {
+			executions.push(params.value);
+			return {
+				content: [{ type: "text", text: `echoed: ${params.value}` }],
+				details: { value: params.value },
+			};
+		},
+	};
+	return tool;
 }
 
 const harmonyMitigationModel = createHarmonyMitigationModel();
@@ -178,6 +207,119 @@ describe("agentLoop with AgentMessage", () => {
 		expect(messages.at(-1)?.role).toBe("assistant");
 	});
 
+	// DeepSeek dropping the DSML envelope openers: the healer cannot recover a
+	// call, so the turn ends as plain text with no tool call.
+	const strayDsml =
+		'bash\n<｜DSML｜parameter name="command" string="true">moon check --target native</｜DSML｜parameter>\n</｜DSML｜invoke>\n</｜DSML｜tool_calls>';
+	// DSML leak recovery applies only to DSML-speaking (DeepSeek-class) models.
+	const deepseekId = "deepseek-v4-flash";
+
+	it("tells the model its tool call failed when a turn ends with leaked DSML markup", async () => {
+		const context: AgentContext = { systemPrompt: ["You are helpful."], messages: [], tools: [] };
+		let retryContext: Message[] = [];
+		const mock = createMockModel({
+			id: deepseekId,
+			responses: [
+				{ content: [`Checking the build.\n${strayDsml}`] },
+				context => {
+					retryContext = context.messages;
+					return { content: ["All done."] };
+				},
+			],
+		});
+		const config: AgentLoopConfig = {
+			model: mock.model,
+			convertToLlm: messages => messages.filter(m => m.role !== "custom") as Message[],
+		};
+
+		const messages = await agentLoop([createUserMessage("Hello")], context, config, undefined, mock.stream).result();
+
+		expect(mock.calls).toHaveLength(2);
+		expect(messages.map(m => m.role)).toEqual(["user", "assistant", "developer", "assistant"]);
+		expect(retryContext.map(m => m.role)).toEqual(["user", "assistant", "developer"]);
+		// The broken call (tool-name line included) never reaches history.
+		expect((messages[1] as AssistantMessage).content).toEqual([{ type: "text", text: "Checking the build." }]);
+		expect(JSON.stringify(retryContext[1])).not.toContain("DSML");
+		const nudge = retryContext.at(-1);
+		const nudgeText = nudge?.role === "developer" ? JSON.stringify(nudge.content) : "";
+		expect(nudgeText).toContain("Tool call failed");
+		// The correction teaches the complete envelope the model must emit.
+		expect(nudgeText).toContain('<｜DSML｜invoke name=\\"TOOL_NAME\\">');
+	});
+
+	it("keeps prose that follows a removed DSML call", async () => {
+		const context: AgentContext = { systemPrompt: ["You are helpful."], messages: [], tools: [] };
+		const mock = createMockModel({
+			id: deepseekId,
+			responses: [{ content: [`Checking the build.\n${strayDsml}\nThe build passed.`] }, { content: ["Done."] }],
+		});
+		const config: AgentLoopConfig = { model: mock.model, convertToLlm: identityConverter };
+
+		const messages = await agentLoop([createUserMessage("Hello")], context, config, undefined, mock.stream).result();
+
+		expect((messages[1] as AssistantMessage).content).toEqual([
+			{ type: "text", text: "Checking the build.\n\nThe build passed." },
+		]);
+	});
+
+	it("ends a leaked call whose closers never arrived at the next blank line", async () => {
+		const truncated =
+			'Checking the build.\nbash\n<｜DSML｜parameter name="command" string="true">moon check --target native\n\nThe build passed.';
+		const context: AgentContext = { systemPrompt: ["You are helpful."], messages: [], tools: [] };
+		const mock = createMockModel({ id: deepseekId, responses: [{ content: [truncated] }, { content: ["Done."] }] });
+		const config: AgentLoopConfig = { model: mock.model, convertToLlm: identityConverter };
+
+		const messages = await agentLoop([createUserMessage("Hello")], context, config, undefined, mock.stream).result();
+
+		expect((messages[1] as AssistantMessage).content).toEqual([
+			{ type: "text", text: "Checking the build.\n\nThe build passed." },
+		]);
+		expect(mock.calls).toHaveLength(2);
+	});
+
+	it("stops nudging after repeated DSML leaks", async () => {
+		const context: AgentContext = { systemPrompt: ["You are helpful."], messages: [], tools: [] };
+		function* leakForever(): Generator<MockResponse> {
+			while (true) yield { content: [strayDsml] };
+		}
+		const mock = createMockModel({ id: deepseekId, responses: leakForever() });
+		const config: AgentLoopConfig = { model: mock.model, convertToLlm: identityConverter };
+
+		const messages = await agentLoop([createUserMessage("Hello")], context, config, undefined, mock.stream).result();
+
+		// Initial sample + MAX_DSML_LEAK_NUDGES (2) corrections, then the loop yields.
+		expect(mock.calls).toHaveLength(3);
+		expect(messages.at(-1)?.role).toBe("assistant");
+		// Even the turn past the nudge cap is committed without the markup.
+		expect(JSON.stringify(messages)).not.toContain("moon check");
+	});
+
+	it("does not treat DSML quoted in a code fence as a leaked tool call", async () => {
+		const context: AgentContext = { systemPrompt: ["You are helpful."], messages: [], tools: [] };
+		const mock = createMockModel({
+			id: deepseekId,
+			responses: [{ content: [`The envelope looks like:\n\`\`\`text\n${strayDsml}\n\`\`\``] }],
+		});
+		const config: AgentLoopConfig = { model: mock.model, convertToLlm: identityConverter };
+
+		const messages = await agentLoop([createUserMessage("Hello")], context, config, undefined, mock.stream).result();
+
+		expect(mock.calls).toHaveLength(1);
+		expect(JSON.stringify(messages.at(-1))).toContain("DSML");
+	});
+
+	it("leaves DSML in a non-DeepSeek model's prose untouched", async () => {
+		const prose = 'The literal token <｜DSML｜parameter name="x"> is part of the specification.';
+		const context: AgentContext = { systemPrompt: ["You are helpful."], messages: [], tools: [] };
+		const mock = createMockModel({ id: "claude-sonnet-4-6", responses: [{ content: [prose] }] });
+		const config: AgentLoopConfig = { model: mock.model, convertToLlm: identityConverter };
+
+		const messages = await agentLoop([createUserMessage("Hello")], context, config, undefined, mock.stream).result();
+
+		expect(mock.calls).toHaveLength(1);
+		expect((messages.at(-1) as AssistantMessage).content).toEqual([{ type: "text", text: prose }]);
+	});
+
 	it("retries when harmony leakage reaches the committed assistant message (openai-codex)", async () => {
 		const context: AgentContext = {
 			systemPrompt: ["You are helpful."],
@@ -246,6 +388,71 @@ describe("agentLoop with AgentMessage", () => {
 		// "done" response as a clean retry instead.
 		expect(executed).toEqual([leakyArg]);
 		expect(mock.calls).toHaveLength(2);
+	});
+
+	it("keeps a schema-owned `i` argument for the tool under intent tracing", async () => {
+		// A tool that declares `i` as a real parameter owns the field: intent
+		// tracing must not strip it from the executed arguments.
+		const toolSchema = type({ label: "string", i: "string" });
+		const executed: unknown[] = [];
+		const tool: AgentTool<typeof toolSchema, { label: string; i: string }> = {
+			name: "demo",
+			label: "Demo",
+			description: "Demo tool",
+			parameters: toolSchema,
+			async execute(_toolCallId, params) {
+				executed.push(params);
+				return { content: [{ type: "text", text: "ok" }] };
+			},
+		};
+		const context: AgentContext = { systemPrompt: [""], messages: [], tools: [tool] };
+		const mock = createMockModel({
+			responses: [
+				{ content: [{ type: "toolCall", id: "tool-1", name: "demo", arguments: { label: "x", i: "INDEX" } }] },
+				{ content: ["done"] },
+			],
+		});
+		const config: AgentLoopConfig = { model: mock.model, convertToLlm: identityConverter, intentTracing: true };
+		const stream = agentLoop([createUserMessage("run demo")], context, config, undefined, mock.stream);
+		for await (const _event of stream) {
+			// drain
+		}
+		expect(executed).toEqual([{ label: "x", i: "INDEX" }]);
+	});
+
+	it("still derives intent for a tool that owns `i` as an argument", async () => {
+		const toolSchema = type({ label: "string", "i?": "string" });
+		const executed: unknown[] = [];
+		const tool: AgentTool<typeof toolSchema, { label: string; i?: string }> = {
+			name: "demo",
+			label: "Demo",
+			description: "Demo tool",
+			parameters: toolSchema,
+			intent: args => `Labeling ${args.label} at ${args.i}`,
+			async execute(_toolCallId, params) {
+				executed.push(params);
+				return { content: [{ type: "text", text: "ok" }] };
+			},
+		};
+		const context: AgentContext = { systemPrompt: [""], messages: [], tools: [tool] };
+		const mock = createMockModel({
+			responses: [
+				{ content: [{ type: "toolCall", id: "tool-1", name: "demo", arguments: { label: "x", i: "INDEX" } }] },
+				{ content: ["done"] },
+			],
+		});
+		const config: AgentLoopConfig = { model: mock.model, convertToLlm: identityConverter, intentTracing: true };
+		const stream = agentLoop([createUserMessage("run demo")], context, config, undefined, mock.stream);
+		for await (const _event of stream) {
+			// drain
+		}
+		const messages = await stream.result();
+		const assistant = messages.find(
+			message => message.role === "assistant" && message.content.some(content => content.type === "toolCall"),
+		) as AssistantMessage | undefined;
+		const tracedToolCall = assistant?.content.find(content => content.type === "toolCall");
+		expect(executed).toEqual([{ label: "x", i: "INDEX" }]);
+		expect(tracedToolCall?.type === "toolCall" && tracedToolCall.intent).toBe("Labeling x at INDEX");
 	});
 
 	it("dispatches a tool call appended by transformAssistantMessage on a stop turn", async () => {
@@ -542,6 +749,57 @@ describe("agentLoop with AgentMessage", () => {
 		expect(toolStart.args).toBeDefined();
 		expect(toolStart.args.__rawJson).toBeUndefined();
 		expect(toolStart.args.__parseError).toBeDefined(); // keeps __parseError for visibility of parse failure
+	});
+
+	it("reports malformed JSON to the model instead of running a lenient tool with empty args", async () => {
+		const toolSchema = type({ value: "string" });
+		const executed: unknown[] = [];
+		const tool: AgentTool<typeof toolSchema, { value: string }> = {
+			name: "echo",
+			label: "Echo",
+			description: "Echo tool",
+			parameters: toolSchema,
+			lenientArgValidation: true,
+			async execute(_toolCallId, params) {
+				executed.push(params);
+				return { content: [] };
+			},
+		};
+		const context: AgentContext = { systemPrompt: [""], messages: [], tools: [tool] };
+		const mock = createMockModel({
+			responses: [
+				{
+					content: [
+						{
+							type: "toolCall",
+							id: "tool-1",
+							name: "echo",
+							arguments: {
+								__parseError: "Expected ',' or '}' in object",
+								__rawJson: '{"value":"ok" nope}',
+							},
+						},
+					],
+				},
+				{ content: ["done"] },
+			],
+		});
+		const config: AgentLoopConfig = { model: mock.model, convertToLlm: identityConverter };
+
+		const events: AgentEvent[] = [];
+		for await (const event of agentLoop([createUserMessage("run echo")], context, config, undefined, mock.stream)) {
+			events.push(event);
+		}
+
+		expect(executed).toEqual([]);
+		const toolResult = events.find(e => e.type === "message_start" && e.message.role === "toolResult");
+		if (toolResult?.type !== "message_start" || toolResult.message.role !== "toolResult") {
+			throw new Error("expected a tool result message");
+		}
+		expect(toolResult.message.isError).toBe(true);
+		const resultText = toolResult.message.content.map(block => (block.type === "text" ? block.text : "")).join("");
+		expect(resultText).toContain("Expected ',' or '}' in object");
+		expect(resultText).toContain('{"value":"ok" nope}');
 	});
 
 	it("runs completed tool calls after a transient stream_read_error", async () => {
@@ -1646,6 +1904,500 @@ describe("agentLoop with AgentMessage", () => {
 		expect(turnEndEvent.toolResults.map(result => result.toolCallId)).toEqual(["tool-1", "tool-2"]);
 	});
 
+	it("runs each sibling under a reused tool-call id with its own arguments and pairs its own result", async () => {
+		// Failure mode if this regresses: a provider that mints or truncates
+		// tool-call ids can deliver two parallel calls under one id (the replay
+		// pipeline's `deduplicateToolCallIds` exists for the same occurrence).
+		// The id-keyed prepare map then keeps only the later sibling's entry, so
+		// BOTH calls execute the later payload and the transcript records the
+		// wrong result under each call, with the colliding result ids merging or
+		// dropping one sibling's output in every id-keyed consumer.
+		const toolSchema = type({ value: "string" });
+		const executions: string[] = [];
+		const tool: AgentTool<typeof toolSchema, { value: string }> = {
+			name: "echo",
+			label: "Echo",
+			description: "Echo tool",
+			parameters: toolSchema,
+			async execute(_toolCallId, params) {
+				executions.push(params.value);
+				return {
+					content: [{ type: "text", text: `echoed: ${params.value}` }],
+					details: { value: params.value },
+				};
+			},
+		};
+		const context: AgentContext = { systemPrompt: [""], messages: [], tools: [tool] };
+		const mock = createMockModel({
+			responses: [
+				{
+					content: [
+						{ type: "toolCall", id: "call-1", name: "echo", arguments: { value: "alpha" } },
+						{ type: "toolCall", id: "call-1", name: "echo", arguments: { value: "beta" } },
+					],
+				},
+				{ content: ["done"] },
+			],
+		});
+		const config: AgentLoopConfig = { model: mock.model, convertToLlm: identityConverter };
+
+		const events: AgentEvent[] = [];
+		const stream = agentLoop([createUserMessage("start")], context, config, undefined, mock.stream);
+		for await (const event of stream) events.push(event);
+		const messages = await stream.result();
+
+		// Each call must run its own payload, not its sibling's.
+		expect(executions.sort()).toEqual(["alpha", "beta"]);
+
+		const assistant = messages.find((m): m is AssistantMessage => m.role === "assistant");
+		const callIds: string[] = [];
+		for (const block of assistant?.content ?? []) {
+			if (block.type !== "toolCall") continue;
+			callIds.push(block.id);
+		}
+		const results = messages.filter((m): m is ToolResultMessage => m.role === "toolResult");
+		expect(results).toHaveLength(2);
+		// Results pair with their own call block positionally, under distinct ids.
+		expect(callIds[0]).not.toBe(callIds[1]);
+		expect(results.map(r => r.toolCallId)).toEqual(callIds);
+		expect(results.map(toolResultText)).toEqual(["echoed: alpha", "echoed: beta"]);
+		// Live completion events carry the same per-call pairing.
+		const ends = events.filter(
+			(e): e is Extract<AgentEvent, { type: "tool_execution_end" }> => e.type === "tool_execution_end",
+		);
+		expect(ends).toHaveLength(2);
+		for (const end of ends) {
+			const index = callIds.indexOf(end.toolCallId);
+			expect(index).toBeGreaterThanOrEqual(0);
+			expect(toolResultText(end.result)).toBe(`echoed: ${index === 0 ? "alpha" : "beta"}`);
+		}
+	});
+
+	it("runs each sibling under a never-materialized tool-call id with its own arguments and pairs its own result", async () => {
+		// Failure mode if this regresses: a provider/native passthrough whose
+		// streamed call id never materializes (`id: ""`, documented in pi-ai's
+		// malformed-call sanitizer and the owned-stream projector) leaves every
+		// sibling keyed on one empty id — the later sibling's prepared entry
+		// overwrites the earlier's, both run the later payload, and the empty
+		// result ids can never be matched to their call by any id-keyed consumer.
+		const toolSchema = type({ value: "string" });
+		const executions: string[] = [];
+		const tool: AgentTool<typeof toolSchema, { value: string }> = {
+			name: "echo",
+			label: "Echo",
+			description: "Echo tool",
+			parameters: toolSchema,
+			async execute(_toolCallId, params) {
+				executions.push(params.value);
+				return {
+					content: [{ type: "text", text: `echoed: ${params.value}` }],
+					details: { value: params.value },
+				};
+			},
+		};
+		const context: AgentContext = { systemPrompt: [""], messages: [], tools: [tool] };
+		const mock = createMockModel({
+			responses: [
+				{
+					content: [
+						{ type: "toolCall", id: "", name: "echo", arguments: { value: "alpha" } },
+						{ type: "toolCall", id: "", name: "echo", arguments: { value: "beta" } },
+					],
+				},
+				{ content: ["done"] },
+			],
+		});
+		const config: AgentLoopConfig = { model: mock.model, convertToLlm: identityConverter };
+
+		const events: AgentEvent[] = [];
+		const stream = agentLoop([createUserMessage("start")], context, config, undefined, mock.stream);
+		for await (const event of stream) events.push(event);
+		const messages = await stream.result();
+
+		expect(executions.sort()).toEqual(["alpha", "beta"]);
+
+		const assistant = messages.find((m): m is AssistantMessage => m.role === "assistant");
+		const callIds: string[] = [];
+		for (const block of assistant?.content ?? []) {
+			if (block.type !== "toolCall") continue;
+			callIds.push(block.id);
+		}
+		const results = messages.filter((m): m is ToolResultMessage => m.role === "toolResult");
+		expect(results).toHaveLength(2);
+		// Ids must materialize and stay distinct so results can pair with calls.
+		expect(callIds).toHaveLength(2);
+		expect(callIds[0]).not.toBe(callIds[1]);
+		expect(callIds.every(id => id.length > 0)).toBe(true);
+		expect(results.map(r => r.toolCallId)).toEqual(callIds);
+		expect(results.map(toolResultText)).toEqual(["echoed: alpha", "echoed: beta"]);
+		const ends = events.filter(
+			(e): e is Extract<AgentEvent, { type: "tool_execution_end" }> => e.type === "tool_execution_end",
+		);
+		expect(ends).toHaveLength(2);
+		expect(ends.map(e => e.toolCallId).sort()).toEqual([...callIds].sort());
+	});
+
+	it("mints whitespace-only tool-call ids like never-materialized ones and keeps them on provider replay", async () => {
+		// Failure mode if this regresses: `ensureUniqueToolCallIds` tested id
+		// emptiness with a falsy check while the replay pipeline's
+		// `isMalformedToolCallId` trims — so `id: " "` survived repair (the first
+		// occurrence kept, a duplicate re-keyed to `" _dup1"` which passes the trim
+		// check) and executed live, while `transformMessages` silently dropped the
+		// whitespace call and its result from every provider replay: the exact
+		// live/replay divergence the repair exists to close.
+		const toolSchema = type({ value: "string" });
+		const executions: string[] = [];
+		const tool: AgentTool<typeof toolSchema, { value: string }> = {
+			name: "echo",
+			label: "Echo",
+			description: "Echo tool",
+			parameters: toolSchema,
+			async execute(_toolCallId, params) {
+				executions.push(params.value);
+				return {
+					content: [{ type: "text", text: `echoed: ${params.value}` }],
+					details: { value: params.value },
+				};
+			},
+		};
+		const context: AgentContext = { systemPrompt: [""], messages: [], tools: [tool] };
+		const mock = createMockModel({
+			responses: [
+				{
+					content: [
+						{ type: "toolCall", id: " ", name: "echo", arguments: { value: "alpha" } },
+						{ type: "toolCall", id: " ", name: "echo", arguments: { value: "beta" } },
+					],
+				},
+				{ content: ["done"] },
+			],
+		});
+		const config: AgentLoopConfig = { model: mock.model, convertToLlm: identityConverter };
+
+		const stream = agentLoop([createUserMessage("start")], context, config, undefined, mock.stream);
+		for await (const _event of stream) {
+			// drain
+		}
+		const messages = await stream.result();
+
+		expect(executions.sort()).toEqual(["alpha", "beta"]);
+		const assistant = messages.find((m): m is AssistantMessage => m.role === "assistant");
+		const callIds: string[] = [];
+		for (const block of assistant?.content ?? []) {
+			if (block.type !== "toolCall") continue;
+			callIds.push(block.id);
+		}
+		const results = messages.filter((m): m is ToolResultMessage => m.role === "toolResult");
+		expect(results).toHaveLength(2);
+		// Whitespace-only is never materialized (the trim test matches the replay
+		// sanitizer): minted non-empty and distinct, never kept or `_dup`-suffixed.
+		expect(callIds).toHaveLength(2);
+		expect(callIds.every(id => id.trim().length > 0)).toBe(true);
+		expect(callIds[0]).not.toBe(callIds[1]);
+		expect(results.map(r => r.toolCallId)).toEqual(callIds);
+		expect(results.map(toolResultText)).toEqual(["echoed: alpha", "echoed: beta"]);
+		// Provider replay keeps every call and its paired result; with `" "`
+		// surviving repair, `transformMessages` would drop that call + its result.
+		const replayed = transformMessages(identityConverter(messages), mock.model);
+		const replayCallIds = replayed.flatMap(msg =>
+			msg.role === "assistant" ? msg.content.filter(b => b.type === "toolCall").map(b => b.id) : [],
+		);
+		const replayResultIds = replayed.flatMap(msg => (msg.role === "toolResult" ? [msg.toolCallId] : []));
+		expect(replayCallIds).toEqual(callIds);
+		expect(replayResultIds).toEqual(callIds);
+	});
+
+	it("pairs a Harmony-recovered call with its result under one minted id across message snapshots", async () => {
+		// Failure mode if this regresses: the recovered message bypasses the
+		// streamed prepare (the HarmonyLeakInterruption lands before it), so runLoop
+		// snapshots the recovered call for `message_start`/`message_end` under its
+		// never-materialized id (`""`) while `executeToolCalls` mints `call_<n>` only
+		// afterwards. Agent persistence appends the `message_end` snapshot
+		// (agent.ts), so the persisted transcript then holds call `""` + result
+		// `call_1` and the next-request replay sanitizer drops the call and orphans
+		// the result.
+		const toolSchema = type({ input: "string" });
+		const tool: AgentTool<typeof toolSchema, { input: string }> = {
+			name: "edit",
+			label: "Edit",
+			description: "Edit tool",
+			parameters: toolSchema,
+			async execute(_toolCallId, params) {
+				return { content: [{ type: "text", text: "ok" }], details: { input: params.input } };
+			},
+		};
+		const context: AgentContext = { systemPrompt: [""], messages: [], tools: [tool] };
+		// Contaminated hashline edit input: the marker trails the structurally
+		// valid parse, exactly the shape `recoverHarmonyToolCall` truncates at the
+		// line boundary and resumes with its `*** Abort` sentinel.
+		const leakyInput = "@fixtures/x.ts\n+line\nanalysis to=functions.edit code 大发官网\n";
+		const mock = createMockModel({
+			provider: "openai-codex",
+			responses: [
+				{ content: [{ type: "toolCall", id: "", name: "edit", arguments: { input: leakyInput } }] },
+				{ content: ["done"] },
+			],
+		});
+		const config: AgentLoopConfig = { model: harmonyMitigationModel, convertToLlm: identityConverter };
+
+		// The loop leaves `tool_arg` scanning inert (a streamed tool DSL cannot
+		// supply a parse boundary), so stub the detector's verdict once and let the
+		// real `recoverHarmonyToolCall` build the recovered message (single cleaned
+		// call, id copied verbatim — including the never-materialized `""`).
+		const detection: HarmonyDetection = {
+			surface: "tool_arg",
+			contentIndex: 0,
+			toolName: "edit",
+			toolCallId: "",
+			signals: [
+				{
+					classes: ["M", "T"],
+					start: leakyInput.indexOf("analysis"),
+					end: leakyInput.indexOf("analysis") + 22,
+					text: "to=functions.edit",
+				},
+			],
+		};
+		const detectOnce = harmonyLeak.detectHarmonyLeakInAssistantMessage;
+		let firstDetection = true;
+		const detectSpy = vi
+			.spyOn(harmonyLeak, "detectHarmonyLeakInAssistantMessage")
+			.mockImplementation((message, toolArgParseEnd) => {
+				if (firstDetection) {
+					firstDetection = false;
+					return detection;
+				}
+				return detectOnce(message, toolArgParseEnd);
+			});
+
+		try {
+			const events: AgentEvent[] = [];
+			const stream = agentLoop([createUserMessage("edit a fixture")], context, config, undefined, mock.stream);
+			for await (const event of stream) events.push(event);
+			const messages = await stream.result();
+
+			const results = messages.filter((m): m is ToolResultMessage => m.role === "toolResult");
+			expect(results).toHaveLength(1);
+			const resultId = results[0]!.toolCallId;
+			expect(resultId.trim().length).toBeGreaterThan(0);
+			// The persisted state agrees on one identity for the call and its result.
+			const assistant = messages.find((m): m is AssistantMessage => m.role === "assistant");
+			const stateCallId = assistant?.content.find(block => block.type === "toolCall")?.id;
+			expect(stateCallId).toBe(resultId);
+			// The committed `message_end` snapshots are the copies persistence
+			// appends (agent.ts); they must already carry the minted id, not a
+			// pre-mint `""` that later in-place repair cannot reach. The discarded
+			// pre-recovery attempt is excluded: its error-stamped turn is meant to
+			// stay malformed so the replay sanitizer drops the orphaned attempt.
+			const snapshotIds = events
+				.filter(
+					(e): e is Extract<AgentEvent, { type: "message_end" }> =>
+						e.type === "message_end" && e.message.role === "assistant" && e.message.stopReason !== "error",
+				)
+				.flatMap(e => (e.message.role === "assistant" ? e.message.content : []))
+				.filter(block => block.type === "toolCall")
+				.map(block => block.id);
+			expect(snapshotIds.length).toBeGreaterThan(0);
+			expect(snapshotIds.filter(id => id !== resultId)).toEqual([]);
+		} finally {
+			detectSpy.mockRestore();
+		}
+	});
+
+	it("mints never-materialized tool-call ids uniquely across assistant turns of one run", async () => {
+		// Failure mode if this regresses: `ensureUniqueToolCallIds` built its
+		// mint/dup candidate sets from the current message's blocks only, so every
+		// assistant turn with never-materialized ids re-mints `call_1`, `call_2`,
+		// … and `_dup` suffixes re-collide across turns. Session-wide consumers
+		// key on toolCallId and merge the collisions: `formatSessionHistoryMarkdown`
+		// keeps one entry per id (last entry wins), the advisor delta split and
+		// `EventController.#toolTimelineComponents` fold two calls into one card,
+		// and persistence keys collide — one call's result silently replaces its
+		// namesake's from the previous turn.
+		const executions: string[] = [];
+		const tool = makeEchoTool(executions);
+		const context: AgentContext = { systemPrompt: [""], messages: [], tools: [tool] };
+		const mock = createMockModel({
+			responses: [
+				{
+					content: [
+						{ type: "toolCall", id: "", name: "echo", arguments: { value: "a1" } },
+						{ type: "toolCall", id: "", name: "echo", arguments: { value: "a2" } },
+					],
+				},
+				{
+					content: [
+						{ type: "toolCall", id: "", name: "echo", arguments: { value: "b1" } },
+						{ type: "toolCall", id: "", name: "echo", arguments: { value: "b2" } },
+					],
+				},
+				{ content: ["done"] },
+			],
+		});
+		const config: AgentLoopConfig = { model: mock.model, convertToLlm: identityConverter };
+
+		const stream = agentLoop([createUserMessage("start")], context, config, undefined, mock.stream);
+		for await (const _event of stream) {
+			// drain
+		}
+		const messages = await stream.result();
+
+		expect(executions.sort()).toEqual(["a1", "a2", "b1", "b2"]);
+		const assistants = messages.filter((m): m is AssistantMessage => m.role === "assistant");
+		const turnIds = assistants
+			.map(assistant => assistant.content.flatMap(block => (block.type === "toolCall" ? [block.id] : [])))
+			.filter(ids => ids.length > 0);
+		expect(turnIds).toHaveLength(2);
+		expect(turnIds[0]).toHaveLength(2);
+		expect(turnIds[1]).toHaveLength(2);
+		// All four calls get DISTINCT ids across turns — not two `call_1`s.
+		const allIds = turnIds.flat();
+		expect(allIds.every(id => id.trim().length > 0)).toBe(true);
+		expect(new Set(allIds).size).toBe(4);
+		// Each turn's siblings stay distinct among themselves too.
+		expect(new Set(turnIds[0]).size).toBe(2);
+		expect(new Set(turnIds[1]).size).toBe(2);
+		// Results pair with their own call under the minted ids.
+		const results = messages.filter((m): m is ToolResultMessage => m.role === "toolResult");
+		expect(results.map(r => r.toolCallId).sort()).toEqual([...allIds].sort());
+	});
+
+	it("mints never-materialized tool-call ids uniquely across runs of one session", async () => {
+		// Each prompt starts a fresh run (and a fresh loop context), but
+		// session-wide consumers (`formatSessionHistoryMarkdown`, persistence)
+		// key on toolCallId across runs — a per-run counter re-minting `call_1`
+		// collides with the previous run's call.
+		const executions: string[] = [];
+		const tool = makeEchoTool(executions);
+		const context: AgentContext = { systemPrompt: [""], messages: [], tools: [tool] };
+		const runIds: string[] = [];
+		for (const value of ["r1", "r2"]) {
+			const mock = createMockModel({
+				responses: [
+					{ content: [{ type: "toolCall", id: "", name: "echo", arguments: { value } }] },
+					{ content: ["done"] },
+				],
+			});
+			const config: AgentLoopConfig = { model: mock.model, convertToLlm: identityConverter };
+			const stream = agentLoop([createUserMessage(value)], context, config, undefined, mock.stream);
+			for await (const _event of stream) {
+				// drain
+			}
+			const messages = await stream.result();
+			context.messages.push(...messages);
+			for (const message of messages) {
+				if (message.role !== "assistant") continue;
+				for (const block of message.content) if (block.type === "toolCall") runIds.push(block.id);
+			}
+		}
+
+		expect(executions).toEqual(["r1", "r2"]);
+		expect(runIds).toHaveLength(2);
+		expect(runIds.every(id => id.trim().length > 0)).toBe(true);
+		expect(new Set(runIds).size).toBe(2);
+	});
+
+	it("keeps reused-id `_dup` re-keys unique across assistant turns", async () => {
+		// Failure mode if this regresses: the `_dup`/`call_<n>` candidate loops only
+		// checked the current message, so a second turn with the same reused-id
+		// shape re-derived `call-1` + `call-1_dup1` — cross-turn collisions again,
+		// this time on the suffixed re-keys.
+		const executions: string[] = [];
+		const tool = makeEchoTool(executions);
+		const context: AgentContext = { systemPrompt: [""], messages: [], tools: [tool] };
+		const mock = createMockModel({
+			responses: [
+				{
+					content: [
+						{ type: "toolCall", id: "call-1", name: "echo", arguments: { value: "t1a" } },
+						{ type: "toolCall", id: "call-1", name: "echo", arguments: { value: "t1b" } },
+					],
+				},
+				{
+					content: [
+						{ type: "toolCall", id: "call-1", name: "echo", arguments: { value: "t2a" } },
+						{ type: "toolCall", id: "call-1", name: "echo", arguments: { value: "t2b" } },
+					],
+				},
+				{ content: ["done"] },
+			],
+		});
+		const config: AgentLoopConfig = { model: mock.model, convertToLlm: identityConverter };
+
+		const stream = agentLoop([createUserMessage("start")], context, config, undefined, mock.stream);
+		for await (const _event of stream) {
+			// drain
+		}
+		const messages = await stream.result();
+
+		expect(executions.sort()).toEqual(["t1a", "t1b", "t2a", "t2b"]);
+		const assistants = messages.filter((m): m is AssistantMessage => m.role === "assistant");
+		const turnIds = assistants
+			.map(assistant => assistant.content.flatMap(block => (block.type === "toolCall" ? [block.id] : [])))
+			.filter(ids => ids.length > 0);
+		expect(turnIds).toHaveLength(2);
+		// Turn 1 keeps the provider id and suffices the in-message reuse.
+		expect(turnIds[0]).toEqual(["call-1", "call-1_dup1"]);
+		// Turn 2 with the same shape gets different ids — no cross-turn re-use of
+		// either `call-1` or its `_dup1` re-key.
+		expect(turnIds[1]).toHaveLength(2);
+		expect(new Set(turnIds[1]).size).toBe(2);
+		const allIds = turnIds.flat();
+		expect(new Set(allIds).size).toBe(4);
+		const results = messages.filter((m): m is ToolResultMessage => m.role === "toolResult");
+		expect(results.map(r => r.toolCallId).sort()).toEqual([...allIds].sort());
+		expect(results.map(toolResultText).sort()).toEqual(["echoed: t1a", "echoed: t1b", "echoed: t2a", "echoed: t2b"]);
+	});
+
+	it("keeps a toolCallId-keyed session-history map collision-free across turns", async () => {
+		// Failure mode if this regresses: `formatSessionHistoryMarkdown` (and every
+		// other session-wide id-keyed consumer) builds a last-entry-wins
+		// `Map<toolCallId, result>`; turns that re-mint the same ids collapse into
+		// fewer map entries and a turn's result silently disappears from the
+		// rendered history.
+		const executions: string[] = [];
+		const tool = makeEchoTool(executions);
+		const context: AgentContext = { systemPrompt: [""], messages: [], tools: [tool] };
+		const mock = createMockModel({
+			responses: [
+				{
+					content: [
+						{ type: "toolCall", id: "", name: "echo", arguments: { value: "a1" } },
+						{ type: "toolCall", id: "", name: "echo", arguments: { value: "a2" } },
+					],
+				},
+				{
+					content: [
+						{ type: "toolCall", id: "", name: "echo", arguments: { value: "b1" } },
+						{ type: "toolCall", id: "", name: "echo", arguments: { value: "b2" } },
+					],
+				},
+				{ content: ["done"] },
+			],
+		});
+		const config: AgentLoopConfig = { model: mock.model, convertToLlm: identityConverter };
+
+		const stream = agentLoop([createUserMessage("start")], context, config, undefined, mock.stream);
+		for await (const _event of stream) {
+			// drain
+		}
+		const messages = await stream.result();
+
+		// Session-history-style merge: one entry per toolCallId, last entry wins.
+		const results = messages.filter((m): m is ToolResultMessage => m.role === "toolResult");
+		const byToolCallId = new Map<string, ToolResultMessage>();
+		for (const result of results) byToolCallId.set(result.toolCallId, result);
+		// One result per call survives the merge across both turns.
+		expect(results).toHaveLength(4);
+		expect(byToolCallId.size).toBe(4);
+		expect([...byToolCallId.values()].map(toolResultText).sort()).toEqual([
+			"echoed: a1",
+			"echoed: a2",
+			"echoed: b1",
+			"echoed: b2",
+		]);
+	});
+
 	it("resolves function-form concurrency per call", async () => {
 		const toolSchema = type({ value: "string", exclusive: "boolean?" });
 		const startTimes: Record<string, number> = {};
@@ -2589,6 +3341,132 @@ describe("agentLoop with AgentMessage", () => {
 		expect(
 			events.some(
 				e => e.type === "message_start" && e.message.role === "user" && e.message.content === "job bg_9 completed",
+			),
+		).toBe(true);
+	});
+
+	it("cuts an interruptible wait short for a queued aside and names the aside as the cause", async () => {
+		const toolSchema = type({});
+		let waiting = false;
+		let drained = false;
+		const note = createUserMessage("queued aside body");
+
+		const tool: AgentTool<typeof toolSchema, Record<string, never>> = {
+			name: "wait",
+			label: "Wait",
+			description: "Blocks until aborted",
+			parameters: toolSchema,
+			interruptible: true,
+			async execute(_toolCallId, _params, signal) {
+				waiting = true;
+				const { promise, reject } = Promise.withResolvers<void>();
+				signal?.addEventListener("abort", () => reject(new Error("wait aborted")), { once: true });
+				await promise;
+				return { content: [{ type: "text", text: "waited" }], details: {} };
+			},
+		};
+
+		const context: AgentContext = { systemPrompt: [""], messages: [], tools: [tool] };
+		const mock = createMockModel({
+			responses: [
+				{ content: [{ type: "toolCall", id: "tool-1", name: "wait", arguments: {} }] },
+				{ content: ["done"] },
+			],
+		});
+		const config: AgentLoopConfig = {
+			model: mock.model,
+			convertToLlm: identityConverter,
+			interruptMode: "immediate",
+			hasQueuedAsides: () => waiting && !drained,
+			getAsideMessages: async () => {
+				if (waiting && !drained) {
+					drained = true;
+					return [() => note];
+				}
+				return [];
+			},
+		};
+
+		const events: AgentEvent[] = [];
+		for await (const event of agentLoop([createUserMessage("start")], context, config, undefined, mock.stream)) {
+			events.push(event);
+		}
+
+		const toolEnd = events.find(
+			(e): e is Extract<AgentEvent, { type: "tool_execution_end" }> => e.type === "tool_execution_end",
+		);
+		const content = toolEnd?.result.content[0];
+		if (content?.type !== "text") throw new Error("tool result must be text");
+		expect(content.text).toContain("Skipped due to a queued aside message");
+		expect(content.text).not.toContain("background completion");
+		expect(
+			events.some(
+				e => e.type === "message_start" && e.message.role === "user" && e.message.content === "queued aside body",
+			),
+		).toBe(true);
+	});
+
+	it("leaves the cooperative steering signal down for a queued aside", async () => {
+		const toolSchema = type({});
+		let drained = false;
+		let steeringSignal: AbortSignal | undefined;
+		let softAbortedDuringRun: boolean | undefined;
+		const peeked = Promise.withResolvers<void>();
+
+		const tool: AgentTool<typeof toolSchema, Record<string, never>> = {
+			name: "run",
+			label: "Run",
+			description: "Foreground command that backgrounds itself on a steer",
+			parameters: toolSchema,
+			async execute() {
+				await peeked.promise;
+				await new Promise<void>(resolve => setImmediate(resolve));
+				softAbortedDuringRun = steeringSignal?.aborted === true;
+				return { content: [{ type: "text", text: "ran inline" }], details: {} };
+			},
+		};
+
+		const context: AgentContext = { systemPrompt: [""], messages: [], tools: [tool] };
+		const mock = createMockModel({
+			responses: [
+				{ content: [{ type: "toolCall", id: "tool-1", name: "run", arguments: {} }] },
+				{ content: ["done"] },
+			],
+		});
+		const config: AgentLoopConfig = {
+			model: mock.model,
+			convertToLlm: identityConverter,
+			interruptMode: "immediate",
+			getToolContext: toolCall => {
+				steeringSignal = toolCall?.steeringSignal;
+				return { toolCall } as AgentToolContext;
+			},
+			hasQueuedAsides: () => {
+				peeked.resolve();
+				return !drained;
+			},
+			getAsideMessages: async () => {
+				if (drained) return [];
+				drained = true;
+				return [() => createUserMessage("aside at boundary")];
+			},
+		};
+
+		const events: AgentEvent[] = [];
+		for await (const event of agentLoop([createUserMessage("start")], context, config, undefined, mock.stream)) {
+			events.push(event);
+		}
+
+		expect(softAbortedDuringRun).toBe(false);
+		const toolEnd = events.find(
+			(e): e is Extract<AgentEvent, { type: "tool_execution_end" }> => e.type === "tool_execution_end",
+		);
+		const content = toolEnd?.result.content[0];
+		if (content?.type !== "text") throw new Error("tool result must be text");
+		expect(content.text).toBe("ran inline");
+		expect(
+			events.some(
+				e => e.type === "message_start" && e.message.role === "user" && e.message.content === "aside at boundary",
 			),
 		).toBe(true);
 	});
@@ -5527,6 +6405,7 @@ describe("agentLoop passive additionalContext", () => {
 				return {
 					content: [{ type: "text", text: "rewritten" }],
 					isError: true,
+					additionalContext: "post-tool context survives the error override",
 				};
 			},
 		};
@@ -5557,6 +6436,14 @@ describe("agentLoop passive additionalContext", () => {
 			expect(toolResultMessage.isError).toBe(true);
 			expect(toolResultMessage.content).toEqual([{ type: "text", text: "rewritten" }]);
 		}
+
+		const contextMessage = events
+			.filter(e => e.type === "message_start")
+			.map(e => (e.type === "message_start" ? e.message : undefined))
+			.find((m): m is Extract<AgentMessage, { role: "developer" }> => m !== undefined && m.role === "developer");
+		expect(contextMessage?.content).toEqual([
+			{ type: "text", text: "post-tool context survives the error override" },
+		]);
 	});
 
 	it("fails closed when afterToolCall returns malformed computer provider metadata", async () => {

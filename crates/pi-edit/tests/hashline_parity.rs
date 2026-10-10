@@ -189,6 +189,9 @@ fn check_apply(source: &str, case_name: &str, call: &Value) {
 
 #[test]
 fn legacy_parser_and_applier_cases_match_byte_for_byte() {
+	// The Lua boundary-repair cases need a grammar; Lua's is downloaded on
+	// demand in production, so link the native crate instead.
+	pi_ast::language::wasm_grammars::LUA.register(tree_sitter_lua::LANGUAGE.into());
 	let mut covered_names = 0_usize;
 	let mut calls = 0_usize;
 	for fixture_name in FIXTURES {
@@ -359,7 +362,8 @@ fn snapshot_store_matches_snapshot_contract_cases() {
 		snapshot
 			.seen_lines
 			.expect("seen")
-			.into_iter()
+			.iter()
+			.copied()
 			.collect::<Vec<_>>(),
 		vec![1]
 	);
@@ -368,11 +372,7 @@ fn snapshot_store_matches_snapshot_contract_cases() {
 	let shared_text = "shared\n";
 	let shared_tag = shared.record(&path, shared_text, None);
 	shared.record(&other, shared_text, None);
-	let mut matches = shared
-		.find_by_hash(&shared_tag)
-		.into_iter()
-		.map(|snapshot| snapshot.path)
-		.collect::<Vec<_>>();
+	let mut matches = shared.paths_with_hash(&shared_tag);
 	matches.sort();
 	assert_eq!(
 		matches,
@@ -408,7 +408,7 @@ fn snapshot_store_matches_snapshot_contract_cases() {
 		.seen_lines
 		.expect("seen lines");
 	assert_eq!(
-		seen.into_iter().collect::<Vec<_>>(),
+		seen.iter().copied().collect::<Vec<_>>(),
 		vec![1, 2],
 		"still fuses identical repeated reads of one colliding text onto one snapshot"
 	);
@@ -1096,7 +1096,55 @@ async fn edit_results_carry_unshifted_prior_provenance_only() {
 }
 
 #[tokio::test]
-async fn edit_of_first_line_with_prior_read_carries_no_provenance() {
+async fn edit_results_carry_prior_provenance_past_line_neutral_hunks() {
+	let source = (1..=40)
+		.map(|n| format!("line{n}\n"))
+		.collect::<Vec<_>>()
+		.concat();
+	let all_lines = (1..=40).collect::<Vec<u32>>();
+
+	let mut workspace = Workspace::new(EditMode::Hashline);
+	workspace.config.enforce_seen_lines = true;
+	workspace.write("a.txt", &source);
+	let read_tag = workspace.snapshot("a.txt", &source, Some(&all_lines));
+	let writer = common::DiskWriter::default();
+
+	// One inserted row and one cut row: lines 21-40 keep number and content.
+	workspace
+		.apply_json(
+			&json!({ "input": format!("[a.txt#{read_tag}]\nPUT >10:\n+new\nCUT 20.=20") }),
+			&writer,
+		)
+		.await
+		.expect("line-neutral edit applies");
+	let edited_source = workspace.read("a.txt").expect("edited file");
+	let edited_tag = file_hash(&edited_source);
+
+	let shifted = workspace
+		.apply_json(
+			&json!({ "input": format!("[a.txt#{edited_tag}]\nPUT 16.=16:\n+LINE16") }),
+			&writer,
+		)
+		.await
+		.expect_err("line 16 now holds old line 15, so its number must not carry");
+	assert!(shifted.to_string().contains("lines 16"), "{shifted}");
+
+	workspace
+		.apply_json(
+			&json!({ "input": format!("[a.txt#{edited_tag}]\nPUT 35.=35:\n+LINE35") }),
+			&writer,
+		)
+		.await
+		.expect("line 35 kept its number and content, so the full read still covers it");
+	let expected = source
+		.replacen("line10\n", "line10\nnew\n", 1)
+		.replacen("line20\n", "", 1)
+		.replacen("line35\n", "LINE35\n", 1);
+	assert_eq!(workspace.read("a.txt").as_deref(), Some(expected.as_str()));
+}
+
+#[tokio::test]
+async fn edit_of_first_line_with_prior_read_applies() {
 	let source: String = (1..=5).map(|n| format!("line{n}\n")).collect();
 	let all_lines = (1..=5).collect::<Vec<u32>>();
 

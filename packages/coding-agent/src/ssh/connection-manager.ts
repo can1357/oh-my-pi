@@ -1,6 +1,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { $which, getRemoteHostDir, getSshControlDir, isEnoent, logger, postmortem, ptree } from "@oh-my-pi/pi-utils";
+import { assertOwnerPrivateDir } from "../utils/owner-private-dir";
 import { buildSshTarget, sanitizeHostName } from "./utils";
 
 export interface SSHConnectionTarget {
@@ -81,7 +82,8 @@ export function sshControlFallbackDir(canonicalDir: string, uid: number, tmpBase
 		.update(canonicalDir)
 		.digest("hex")
 		.slice(0, 20);
-	return path.join(tmpBase, `omp-${key}`);
+	// Only ControlMaster (POSIX) platforms reach this, so the socket dir is a POSIX path.
+	return path.posix.join(tmpBase, `omp-${key}`);
 }
 
 interface ControlDirChoice {
@@ -106,29 +108,6 @@ export function resolveSshControlDir(opts: {
 	if (!supportsSshControlMaster(platform) || uid === undefined) return { dir: canonicalDir, shared: false };
 	if (controlPathFitsBudget(canonicalDir, platform)) return { dir: canonicalDir, shared: false };
 	return { dir: sshControlFallbackDir(canonicalDir, uid, tmpBase), shared: true };
-}
-
-interface ControlDirGuardStat {
-	isSymlink: boolean;
-	isDir: boolean;
-	uid: number;
-	mode: number;
-}
-
-/**
- * Reject reasons for an owner-private control directory reused from a shared
- * temp base: it must be a real directory (not a symlink an attacker planted),
- * owned by us, with no group/other access. Returns `null` when the directory is
- * safe to use. Pure so the rejection matrix is testable without root.
- */
-export function controlDirGuardError(stat: ControlDirGuardStat, expectedUid: number | undefined): string | null {
-	if (stat.isSymlink) return "is a symlink";
-	if (!stat.isDir) return "is not a directory";
-	if (expectedUid !== undefined && stat.uid !== expectedUid) {
-		return `is owned by uid ${stat.uid}, not ${expectedUid}`;
-	}
-	if ((stat.mode & 0o777) !== 0o700) return `must be mode 0700, got ${(stat.mode & 0o777).toString(8)}`;
-	return null;
 }
 
 const { dir: CONTROL_DIR, shared: CONTROL_DIR_SHARED } = resolveSshControlDir({
@@ -160,69 +139,13 @@ interface SSHArgsOptions {
 export function ensureSshControlDir(): void {
 	fs.mkdirSync(CONTROL_DIR, { recursive: true, mode: 0o700 });
 	if (CONTROL_DIR_SHARED) {
-		assertOwnerPrivateDir(CONTROL_DIR);
+		assertOwnerPrivateDir(CONTROL_DIR, "SSH control directory");
 		return;
 	}
 	try {
 		fs.chmodSync(CONTROL_DIR, 0o700);
 	} catch (err) {
 		logger.debug("SSH control dir chmod failed", { path: CONTROL_DIR, error: String(err) });
-	}
-}
-
-/**
- * Harden a control directory pulled from a shared temp base ({@link CONTROL_DIR_SHARED}).
- *
- * Opens the final path component with `O_NOFOLLOW | O_DIRECTORY` so a symlink or
- * non-directory is refused atomically at open time, then inspects and normalizes
- * that one pinned inode through the fd (`fstat`/`fchmod`) — never a second
- * pathname lookup. This closes the swap window where another local user could
- * replace the entry with a symlink between two `stat`s and slip a victim-owned
- * 0700 target past the checks (#9070). Rejects a symlink, a non-directory, a
- * foreign owner, or lingering group/other access via {@link controlDirGuardError}.
- * Exported as a test seam.
- */
-export function assertOwnerPrivateDir(dir: string): void {
-	const uid = process.getuid?.();
-	let fd: number;
-	try {
-		fd = fs.openSync(dir, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_DIRECTORY);
-	} catch (err) {
-		const code = (err as NodeJS.ErrnoException).code;
-		// O_NOFOLLOW rejects a symlinked final component; kernels report it as
-		// either ELOOP or (with O_DIRECTORY) ENOTDIR. Either way the entry is
-		// already refused — we only lstat here to label the failure precisely, so
-		// a swap after this point cannot weaken the (already-final) rejection.
-		if (code === "ELOOP" || code === "ENOTDIR") {
-			let isSymlink = false;
-			try {
-				isSymlink = fs.lstatSync(dir).isSymbolicLink();
-			} catch {}
-			throw new Error(`SSH control directory ${dir} ${isSymlink ? "is a symlink" : "is not a directory"}`);
-		}
-		throw err;
-	}
-	try {
-		let st = fs.fstatSync(fd);
-		// Normalize perms on the pinned inode only when it is ours; never fchmod a
-		// directory another user owns.
-		if ((uid === undefined || st.uid === uid) && (st.mode & 0o777) !== 0o700) {
-			try {
-				fs.fchmodSync(fd, 0o700);
-				st = fs.fstatSync(fd);
-			} catch (err) {
-				logger.debug("SSH control dir chmod failed", { path: dir, error: String(err) });
-			}
-		}
-		const reason = controlDirGuardError(
-			{ isSymlink: false, isDir: st.isDirectory(), uid: st.uid, mode: st.mode },
-			uid,
-		);
-		if (reason) {
-			throw new Error(`SSH control directory ${dir} ${reason}`);
-		}
-	} finally {
-		fs.closeSync(fd);
 	}
 }
 
@@ -731,8 +654,34 @@ export async function buildRemoteCommand(
 
 let registered = false;
 
+/**
+ * How long a successful {@link ensureConnection} stays trusted. Within this
+ * window repeated ssh:// operations skip the `ssh -O check` spawn and the key
+ * stat; the control-dir ownership check still runs on every call. A master
+ * that died in the meantime is harmless: every command runs with
+ * `ControlMaster=auto`, which opens a new connection on demand.
+ */
+const CONNECTION_VERIFY_TTL_MS = 30_000;
+
+/** Per host: when the connection was last verified, and the target it was verified for. */
+const verifiedConnections = new Map<string, { at: number; fingerprint: string }>();
+
 export async function ensureConnection(host: SSHConnectionTarget): Promise<void> {
 	const key = host.name;
+	const fingerprint = `${host.username ?? ""}@${host.host}:${host.port ?? ""}\0${host.keyPath ?? ""}`;
+	const verified = verifiedConnections.get(key);
+	if (
+		verified &&
+		Date.now() - verified.at < CONNECTION_VERIFY_TTL_MS &&
+		verified.fingerprint === fingerprint &&
+		activeHosts.has(key) &&
+		hostInfoCache.has(key)
+	) {
+		// The socket directory can be replaced after verification; never hand
+		// OpenSSH an untrusted ControlPath.
+		ensureSshControlDir();
+		return;
+	}
 	const pending = pendingConnections.get(key);
 	if (pending) {
 		await pending;
@@ -784,6 +733,7 @@ export async function ensureConnection(host: SSHConnectionTarget): Promise<void>
 	pendingConnections.set(key, promise);
 	try {
 		await promise;
+		verifiedConnections.set(key, { at: Date.now(), fingerprint });
 	} finally {
 		pendingConnections.delete(key);
 	}
@@ -792,6 +742,7 @@ export async function ensureConnection(host: SSHConnectionTarget): Promise<void>
 export async function invalidateHostMetadata(hostNames: Iterable<string>): Promise<void> {
 	const names = [...hostNames];
 	for (const hostName of names) {
+		verifiedConnections.delete(hostName);
 		hostInfoCache.delete(hostName);
 		await deleteHostInfoFromDisk(hostName);
 	}
@@ -820,6 +771,7 @@ export async function closeAllConnections(): Promise<void> {
 	for (const [name, host] of Array.from(activeHosts.entries())) {
 		await closeConnectionInternal(host);
 		activeHosts.delete(name);
+		verifiedConnections.delete(name);
 	}
 }
 

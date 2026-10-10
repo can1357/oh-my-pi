@@ -1,7 +1,7 @@
 {
   "type": "module",
   "name": "@oh-my-pi/pi-mnemopi",
-  "version": "18.4.5",
+  "version": "18.8.7",
   "description": "Local SQLite memory engine for omp agents",
   "homepage": "https://omp.sh",
   "author": { "name": "Stencil Labs, Inc.", "url": "https://stencil.so" },
@@ -45,7 +45,7 @@
     "@oh-my-pi/pi-utils": "catalog:"
   },
   "peerDependencies": {
-    "fastembed": "2.1.0",
+    "fastembed": "3.0.0",
     "onnxruntime-node": "1.21.0"
   },
   "peerDependenciesMeta": {

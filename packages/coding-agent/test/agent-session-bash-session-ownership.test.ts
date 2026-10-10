@@ -370,6 +370,8 @@ describe("AgentSession bash session ownership", () => {
 					break;
 				case "switch": {
 					const targetManager = SessionManager.create(tempDir.path(), sessionDir);
+					// The mock reply's model id is not registered; record one the switch can restore.
+					targetManager.appendModelChange("anthropic/claude-sonnet-4-5");
 					targetManager.appendMessage({ role: "user", content: "target", timestamp: Date.now() });
 					targetManager.appendMessage(createAssistantMessage("target reply"));
 					await targetManager.ensureOnDisk();
