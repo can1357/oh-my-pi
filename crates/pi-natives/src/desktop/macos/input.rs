@@ -324,9 +324,10 @@ fn keyboard_conflict(wid: u32, records: &[ax::AxWindowRecord]) -> Option<Keyboar
 /// After a background shortcut with a modifier, fails when `stopped_answering`
 /// reports that the application no longer answers accessibility requests.
 ///
-/// A shortcut can start work that never returns: `TextEdit`'s first background
-/// ⌘S on a document has blocked in `NSDocument`'s save serialization. Posting
-/// succeeded, but only the application's reply shows the command ran.
+/// A shortcut can start work that never returns, as `TextEdit`'s first
+/// background ⌘S on a document did before [`activate_then_await`] waited for
+/// its activation. Posting succeeded, but only the application's reply shows
+/// the command ran.
 fn confirm_shortcut_answered(
 	window: &DesktopWindow,
 	keys: &[KeyName],
@@ -472,6 +473,42 @@ const ACTIVATION_FLAGS: u64 = 0xc0000;
 /// [`make_key_in_background`] asked for.
 const KEY_WINDOW_TIMEOUT: Duration = Duration::from_millis(250);
 const KEY_WINDOW_POLL: Duration = Duration::from_millis(10);
+/// How long an application may take to report the activation
+/// [`activate_then_await`] posted.
+const ACTIVE_STATE_TIMEOUT: Duration = Duration::from_millis(500);
+
+/// Posts the activation through `activate` and, when the application reported
+/// itself inactive before (`was_active`), waits until `reports_active` shows
+/// it active, polling through `wait`.
+///
+/// `AppKit` closes a pending undo group after each event it handles, so the
+/// activation can be what makes `NSDocument` record an edit made through
+/// accessibility. On a document's first edit, `NSDocument` then holds its save
+/// lock until its main run loop next turns, and events queued behind the
+/// activation are handled before the loop turns: `TextEdit` and Script Editor
+/// blocked forever on a ⌘S posted that way. The application answers
+/// accessibility only from a turn of that loop, so once it reports itself
+/// active, the work the activation started has finished. An application that
+/// already reports itself active, or reports nothing, gives no such signal. A
+/// report that does not come within `timeout` is not an error; delivery then
+/// goes ahead as it would without the wait.
+fn activate_then_await(
+	was_active: Option<bool>,
+	timeout: Duration,
+	activate: impl FnOnce() -> CoreResult<()>,
+	mut reports_active: impl FnMut() -> Option<bool>,
+	mut wait: impl FnMut() -> CoreResult<()>,
+) -> CoreResult<()> {
+	activate()?;
+	if was_active != Some(false) {
+		return Ok(());
+	}
+	let deadline = Instant::now() + timeout;
+	while reports_active() != Some(true) && Instant::now() < deadline {
+		wait()?;
+	}
+	Ok(())
+}
 
 /// Where a background input's target window stands relative to the user's
 /// keyboard focus.
@@ -515,8 +552,10 @@ fn front_target(
 /// A background application drops pid-routed keystrokes and key equivalents,
 /// and Chromium ignores its clicks, until it believes it is active. The
 /// application-activated event `AppKit` builds for a real activation gives it
-/// that belief; a press and release just outside the window's frame then make
-/// exactly `wid` key among its windows without reaching any of its controls.
+/// that belief, and [`activate_then_await`] waits until an inactive
+/// application reports it; a press and release just outside the window's
+/// frame then make exactly `wid` key among its windows without reaching any
+/// of its controls.
 /// `WindowServer`'s front process and key-focus application, which route the
 /// user's keystrokes and key equivalents, stay with the user's app. In the
 /// frontmost application itself, nothing is posted: the target already is
@@ -561,18 +600,27 @@ pub(super) fn make_key_in_background(
 		},
 	}
 	let context = skylight::sender_connection()?;
-	let activated = CGEvent::new(source.clone())
-		.map_err(|()| DesktopError::input_failed("failed to create a Quartz activation event"))?;
-	// SAFETY: `activated` is a live CGEvent and the type is a valid CGEventType
-	// value the core-graphics enum lacks.
-	unsafe { set_event_type(activated.as_ptr(), APPKIT_DEFINED_EVENT) };
-	activated.set_flags(CGEventFlags::from_bits_retain(ACTIVATION_FLAGS));
-	skylight::set_fields(&activated, &[
-		(FIELD_WINDOW_NUMBER, i64::from(wid)),
-		(FIELD_WINDOW_CONTEXT, context),
-		(FIELD_APPKIT_SUBTYPE, APPLICATION_ACTIVATED),
-	])?;
-	skylight::post_routed(pid, &activated)?;
+	let activate = || -> CoreResult<()> {
+		let activated = CGEvent::new(source.clone())
+			.map_err(|()| DesktopError::input_failed("failed to create a Quartz activation event"))?;
+		// SAFETY: `activated` is a live CGEvent and the type is a valid
+		// CGEventType value the core-graphics enum lacks.
+		unsafe { set_event_type(activated.as_ptr(), APPKIT_DEFINED_EVENT) };
+		activated.set_flags(CGEventFlags::from_bits_retain(ACTIVATION_FLAGS));
+		skylight::set_fields(&activated, &[
+			(FIELD_WINDOW_NUMBER, i64::from(wid)),
+			(FIELD_WINDOW_CONTEXT, context),
+			(FIELD_APPKIT_SUBTYPE, APPLICATION_ACTIVATED),
+		])?;
+		skylight::post_routed(pid, &activated)
+	};
+	activate_then_await(
+		ax::reports_active(pid),
+		ACTIVE_STATE_TIMEOUT,
+		activate,
+		|| ax::reports_active(pid),
+		|| control::wait(KEY_WINDOW_POLL),
+	)?;
 	still_behind_user(pid, wid)?;
 	let (location, local) = activating_press(window);
 	let press = |event_type: CGEventType, number: i64| -> CoreResult<()> {
@@ -2985,6 +3033,52 @@ mod tests {
 		assert!(!left_background(Some(9), 7));
 		assert!(left_background(Some(7), 7));
 		assert!(left_background(None, 7));
+	}
+
+	#[test]
+	fn input_into_an_inactive_application_waits_until_it_reports_the_activation() {
+		use std::cell::RefCell;
+		// The activation flushes an accessibility edit into NSDocument, whose
+		// first edit holds the save lock until the run loop turns; a ⌘S queued
+		// right behind it blocked TextEdit forever. The app's report of the
+		// activation comes from such a turn. Here it reports three polls late.
+		let app = RefCell::new((false, 0usize));
+		let log = RefCell::new(Vec::new());
+		activate_then_await(
+			Some(false),
+			ACTIVE_STATE_TIMEOUT,
+			|| {
+				log.borrow_mut().push("activate".to_owned());
+				app.borrow_mut().1 = 3;
+				Ok(())
+			},
+			|| {
+				let mut app = app.borrow_mut();
+				app.1 = app.1.saturating_sub(1);
+				app.0 |= app.1 == 0;
+				log.borrow_mut().push(format!("reports {}", app.0));
+				Some(app.0)
+			},
+			|| Ok(()),
+		)
+		.expect("activation");
+		assert_eq!(log.into_inner(), ["activate", "reports false", "reports false", "reports true"]);
+	}
+
+	#[test]
+	fn activation_waits_only_for_a_report_it_can_observe_in_time() {
+		let unread = || -> Option<bool> { panic!("no report is awaited") };
+		let no_wait = || -> CoreResult<()> { panic!("no poll interval is slept") };
+		// Already active, or no readable state: the activation changes nothing
+		// observable, so delivery follows at once.
+		for was_active in [Some(true), None] {
+			activate_then_await(was_active, ACTIVE_STATE_TIMEOUT, || Ok(()), unread, no_wait)
+				.expect("activation");
+		}
+		// An application that never reports the activation does not stop the
+		// input once the bound has passed.
+		activate_then_await(Some(false), Duration::ZERO, || Ok(()), || Some(false), no_wait)
+			.expect("an unreported activation is not an error");
 	}
 
 	#[test]
