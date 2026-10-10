@@ -176,14 +176,14 @@ export const cfgReadDefaultLimit = register({
 	},
 });
 
-export const cfgReadPageMaxBytes = register({
-	id: "read.pageMaxBytes",
+export const cfgReadPageBudget = register({
+	id: "read.pageBudget",
 	type: "number",
 	default: 32,
 	ui: {
 		tab: "files",
 		group: "Reading",
-		label: "Read Page Max Bytes (KB)",
+		label: "Read Page Budget (KB)",
 		description:
 			"Maximum inline bytes one read call may return across all of its ranges. An `artifact://` recovery page past it is cut on a line boundary and names the next range to read on the same artifact; plain files still spill to an artifact past the output threshold. 0 = unlimited.",
 		options: [
