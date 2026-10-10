@@ -389,6 +389,28 @@ describe("Claude saved-reset trigger integration", () => {
 		expect(listCalls()).toBe(0);
 	});
 
+	it.each([
+		{ brokerSweeps: "anthropic", spent: 0 },
+		{ brokerSweeps: "openai-codex", spent: 1 },
+	])(
+		"salvages $spent Claude grants when the auth broker sweeps $brokerSweeps resets itself",
+		async ({ brokerSweeps, spent }) => {
+			const status = claudeStatus(false);
+			const { session, coordinator, targets, listCalls } = buildSession({
+				report: withInventory(claudeReport(0.5), status),
+				status,
+			});
+			vi.spyOn(authStorage.resets, "brokerSweep").mockImplementation(provider =>
+				provider === brokerSweeps ? { provider, autoRedeem: "yes" } : undefined,
+			);
+
+			await session.fetchUsageReports();
+			await coordinator.sweepPromise;
+			expect(targets).toHaveLength(spent);
+			expect(listCalls()).toBe(0);
+		},
+	);
+
 	it.each(["yes", "no", "unset"] as const)(
 		"only consumes an imminent reset with consent when auto-redeem is %s",
 		async autoRedeem => {

@@ -30,7 +30,11 @@ import type {
 	UsageResponse,
 	UsageStaleResponse,
 } from "./types";
-import { AUTH_BROKER_CAPABILITIES_HEADER, AUTH_BROKER_CAPABILITY_CODEX_METER_BLOCK_SCOPES } from "./types";
+import {
+	AUTH_BROKER_CAPABILITIES_HEADER,
+	AUTH_BROKER_CAPABILITY_CODEX_METER_BLOCK_SCOPES,
+	AUTH_BROKER_CAPABILITY_RESET_SWEEP,
+} from "./types";
 import { parseGenerationTag } from "./protocol";
 import {
 	clientUsageReportResponseSchema,
@@ -272,6 +276,7 @@ export class AuthBrokerClient {
 		const timeoutMs = perAccountTimeoutMs * (accountCount + 1);
 		return this.#request<UsageResponse>("GET", "/v1/usage", {
 			schema: "usageResponseSchema",
+			headers: { [AUTH_BROKER_CAPABILITIES_HEADER]: AUTH_BROKER_CAPABILITY_RESET_SWEEP },
 			signal: options.signal,
 			timeoutMs,
 		});
@@ -413,6 +418,7 @@ export class AuthBrokerClient {
 			schema: AuthBrokerResponseSchemaName;
 			auth?: boolean;
 			body?: unknown;
+			headers?: Record<string, string>;
 			signal?: AbortSignal;
 			timeoutMs?: number;
 		},

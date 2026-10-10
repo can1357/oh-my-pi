@@ -12,7 +12,12 @@
 
 import { type Type, type } from "@oh-my-pi/omptype";
 import { logger } from "@oh-my-pi/pi-utils";
-import type { AuthCredentialSnapshotEntry, AuthStorage, StoredCredentialBlock } from "../auth-storage";
+import type {
+	AuthCredentialSnapshotEntry,
+	AuthStorage,
+	BrokerResetSweep,
+	StoredCredentialBlock,
+} from "../auth-storage";
 import { parseBind } from "../utils/parse-bind";
 import { resolvePeer } from "../utils/resolve-peer";
 import { AuthBrokerRefresher, type AuthBrokerRefresherSchedule } from "./refresher";
@@ -36,11 +41,13 @@ import type {
 import {
 	AUTH_BROKER_CAPABILITIES_HEADER,
 	AUTH_BROKER_CAPABILITY_CODEX_METER_BLOCK_SCOPES,
+	AUTH_BROKER_CAPABILITY_RESET_SWEEP,
 	DEFAULT_AUTH_BROKER_BIND,
 	DEFAULT_REFRESH_INTERVAL_MS,
 	DEFAULT_REFRESH_SKEW_MS,
 	DEFAULT_SERVER_IDLE_TIMEOUT_S,
 	DEFAULT_STREAM_KEEPALIVE_MS,
+	type UsageResponse,
 } from "./types";
 import { compareCredentialBlockSnapshots, parseGenerationTag } from "./protocol";
 import {
@@ -84,6 +91,8 @@ export interface AuthBrokerServerOptions {
 	 * Internal-only — tests use a short interval. Default 250ms.
 	 */
 	externalChangePollMs?: number;
+	/** Providers whose saved resets this broker spends itself; clients that ask skip their own sweep for them. */
+	resetSweep?: () => BrokerResetSweep[];
 }
 
 export interface AuthBrokerServerHandle {
@@ -114,13 +123,9 @@ function isAuthorized(req: Request, tokens: ReadonlySet<string>): boolean {
 	return tokens.has(match[1].trim());
 }
 
-function supportsCodexMeterBlockScopes(req: Request): boolean {
+function hasCapability(req: Request, capability: string): boolean {
 	const capabilities = req.headers.get(AUTH_BROKER_CAPABILITIES_HEADER);
-	return (
-		capabilities
-			?.split(",")
-			.some(capability => capability.trim() === AUTH_BROKER_CAPABILITY_CODEX_METER_BLOCK_SCOPES) ?? false
-	);
+	return capabilities?.split(",").some(candidate => candidate.trim() === capability) ?? false;
 }
 
 /**
@@ -482,7 +487,7 @@ async function serveSnapshot(
 	peer: string,
 ): Promise<Response> {
 	await source.reload();
-	const clientSupportsCodexMeterBlockScopes = supportsCodexMeterBlockScopes(req);
+	const clientSupportsCodexMeterBlockScopes = hasCapability(req, AUTH_BROKER_CAPABILITY_CODEX_METER_BLOCK_SCOPES);
 	let currentGeneration = source.generation;
 	const clientGeneration = parseGenerationTag(req.headers.get("if-none-match"));
 	const waitMs = parseWaitMs(url);
@@ -762,7 +767,7 @@ function serveSnapshotStream(
 
 	const subscriber: SnapshotStreamSubscriber = {
 		peer,
-		codexMeterBlockScopes: supportsCodexMeterBlockScopes(req),
+		codexMeterBlockScopes: hasCapability(req, AUTH_BROKER_CAPABILITY_CODEX_METER_BLOCK_SCOPES),
 		sent: new Map(),
 		lastGeneration: -1,
 		write,
@@ -866,7 +871,11 @@ export function startAuthBroker(opts: AuthBrokerServerOptions): AuthBrokerServer
 						// `metadata`.
 						const trimmed = reports.map(({ raw: _raw, ...rest }) => rest);
 						logger.info("auth-broker usage served", { peer, reports: trimmed.length });
-						return json(200, { generatedAt: Date.now(), reports: trimmed });
+						const body: UsageResponse = { generatedAt: Date.now(), reports: trimmed };
+						if (opts.resetSweep && hasCapability(req, AUTH_BROKER_CAPABILITY_RESET_SWEEP)) {
+							body.resetSweep = opts.resetSweep();
+						}
+						return json(200, body, { Vary: AUTH_BROKER_CAPABILITIES_HEADER });
 					} catch (error) {
 						const message = error instanceof Error ? error.message : String(error);
 						logger.warn("auth-broker usage fetch failed", { peer, error: message });

@@ -150,19 +150,20 @@ async function runServe(flags: AuthBrokerCommandArgs["flags"]): Promise<void> {
 	const store = await SqliteAuthCredentialStore.open(dbPath);
 	const storage = createBrokerAuthStorage(store);
 	await storage.credentials.reload();
+	let sweeper: BrokerResetSweeper | undefined;
 	const handle = startAuthBroker({
 		storage,
 		bind,
 		bearerTokens: [token],
 		trustProxyHeaders: flags.trustProxyHeaders,
 		version: VERSION,
+		resetSweep: () => sweeper?.sweeps() ?? [],
 	});
 	logger.info("auth-broker listening", { url: handle.url });
 	logger.info("auth-broker bearer token loaded", { path: getTokenFilePath(), mode: "0600" });
 
 	// The broker spends saved resets under its own host's settings and account
 	// policies; a policy it cannot load could be an opt-out, so the sweep stays off.
-	let sweeper: BrokerResetSweeper | undefined;
 	try {
 		const settings = await resolveEffectiveSettings();
 		storage.setAccountPolicies(await loadEffectiveAuthAccountPolicyConfig({ settings }));

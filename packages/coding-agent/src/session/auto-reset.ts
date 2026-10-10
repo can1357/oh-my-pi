@@ -347,10 +347,13 @@ export async function executeResetActions(
 	return redeemed;
 }
 
-/** Whether this host's background sweep covers `provider`'s saved resets. */
+/**
+ * Whether this host's background sweep covers `provider`'s saved resets: its
+ * auto-redeem is not `no`, and no auth broker it uses sweeps them instead.
+ */
 export function sweepsResets(host: AutoResetHost, provider: ResetProvider): boolean {
 	const mode = (provider === "anthropic" ? cfgClaudeResetsAutoRedeem : cfgCodexResetsAutoRedeem).get(host.settings);
-	return shouldEvaluateCodexAutoRedeem(mode);
+	return shouldEvaluateCodexAutoRedeem(mode) && !host.authStorage.resets.brokerSweep(provider);
 }
 
 /**

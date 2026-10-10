@@ -11,6 +11,7 @@ import type {
 } from "../usage";
 import type {
 	AuthCredential,
+	BrokerResetSweep,
 	DisabledCredentialSummary,
 	OAuthCredential,
 	OAuthRefreshReason,
@@ -222,6 +223,8 @@ export interface CredentialUpstream {
 	 * {@link AuthStorage.limits.invalidateMatching} fall back to `reload()`.
 	 */
 	markCredentialSuspect(credentialId: number, opts?: { signal?: AbortSignal }): Promise<void>;
+	/** Optional: how the upstream broker sweeps `provider`'s saved resets itself, per its latest usage response. */
+	brokerResetSweep(provider: string): BrokerResetSweep | undefined;
 }
 
 /**

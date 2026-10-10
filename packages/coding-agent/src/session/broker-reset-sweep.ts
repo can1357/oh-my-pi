@@ -5,7 +5,7 @@
  * `claudeResets.*` settings; with no one to ask, `unset` approves only what
  * {@link headlessApprovedResetActions} allows.
  */
-import type { AuthStorage, ResetCreditAccountStatus } from "@oh-my-pi/pi-ai";
+import type { AuthStorage, BrokerResetSweep, ResetCreditAccountStatus } from "@oh-my-pi/pi-ai";
 import { logger } from "@oh-my-pi/pi-utils";
 import type { Settings } from "../config/settings";
 import { type AutoResetHost, sweepResets } from "./auto-reset";
@@ -16,6 +16,7 @@ import {
 	IMMINENT_RESET_EXPIRY_MS,
 	SWEEP_MIN_INTERVAL_MS,
 } from "./codex-auto-reset";
+import { cfgClaudeResetsAutoRedeem, cfgCodexResetsAutoRedeem } from "./settings";
 
 /**
  * Longest wait between broker sweeps. Each sweep reads the broker's cached
@@ -67,6 +68,16 @@ export class BrokerResetSweeper {
 	/** Settles after the first sweep; later sweeps follow on their own timer. */
 	start(): Promise<void> {
 		return this.#sweep();
+	}
+
+	/** Providers this sweep covers, with the broker host's auto-redeem mode for each. */
+	sweeps(): BrokerResetSweep[] {
+		return (["openai-codex", "anthropic"] as const).flatMap(provider => {
+			const autoRedeem = (provider === "anthropic" ? cfgClaudeResetsAutoRedeem : cfgCodexResetsAutoRedeem).get(
+				this.#host.settings,
+			);
+			return autoRedeem === "no" ? [] : [{ provider, autoRedeem }];
+		});
 	}
 
 	close(): void {

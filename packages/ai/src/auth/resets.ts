@@ -11,6 +11,7 @@ import type { OAuthAccounts } from "./oauth";
 import type { CredentialPool } from "./pool";
 import type { AuthCredentialStore } from "./store";
 import type {
+	BrokerResetSweep,
 	ListResetCreditsOptions,
 	OAuthAccess,
 	OAuthAccountSummary,
@@ -154,6 +155,10 @@ export class ResetCredits implements ResetsApi {
 		}).finally(() => this.#resetInFlight.delete(accountKey));
 		this.#resetInFlight.set(accountKey, { creditId, promise });
 		return promise;
+	}
+
+	brokerSweep(provider: string): BrokerResetSweep | undefined {
+		return this.#deps.store.brokerResetSweep?.(provider);
 	}
 
 	async #redeemAccountReset(

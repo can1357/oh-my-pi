@@ -13,6 +13,7 @@ import type { AuthCredentialStore } from "../auth/store";
 import {
 	type AuthCredential,
 	type AuthCredentialSnapshotEntry,
+	type BrokerResetSweep,
 	type DisabledCredentialSummary,
 	type OAuthCredential,
 	type OAuthRefreshReason,
@@ -291,6 +292,8 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 	#cache: Map<string, CacheEntry> = new Map();
 	#usageCache?: UsageCacheEntry;
 	#usageInflight?: Promise<UsageReport[] | null>;
+	/** Providers the broker's saved-reset sweep covers, from its latest usage response. */
+	#resetSweep: BrokerResetSweep[] = [];
 	#credentialBlockReconcileAfter: Map<string, number> = new Map();
 	/** Exact deleted rows suppressed until their old deadline, including snapshots racing the DELETE acknowledgement. */
 	#deletedCredentialBlocks: Map<string, CredentialBlockSnapshot> = new Map();
@@ -1299,6 +1302,10 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 		return this.#filterUsageReports(this.#applyUsageOverlays(reports));
 	}
 
+	brokerResetSweep(provider: string): BrokerResetSweep | undefined {
+		return this.#resetSweep.find(entry => entry.provider === provider);
+	}
+
 	/**
 	 * Per-credential usage hook consumed by `UsageService.report`. Pulls
 	 * the aggregate broker `/v1/usage` once and serves all callers from the
@@ -1443,6 +1450,7 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 					return this.#loadUsageReports();
 				}
 				this.#usageCache = { reports: body.reports, fetchedAt: Date.now() };
+				this.#resetSweep = body.resetSweep ?? [];
 				return body.reports;
 			})
 			.catch(error => {

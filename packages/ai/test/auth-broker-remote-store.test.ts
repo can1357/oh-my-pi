@@ -231,6 +231,45 @@ describe("RemoteAuthCredentialStore SSE integration", () => {
 		}
 	});
 
+	test("tells clients which providers' saved resets a sweeping broker spends itself", async () => {
+		vi.spyOn(storage!.usage, "reports").mockResolvedValue([]);
+		const sweeping = startAuthBroker({
+			storage: storage!,
+			bind: "127.0.0.1:0",
+			bearerTokens: [token],
+			disableRefresher: true,
+			resetSweep: () => [{ provider: "anthropic", autoRedeem: "unset" }],
+		});
+		const clientStorages: AuthStorage[] = [];
+		const connect = async (url: string): Promise<AuthStorage> => {
+			const client = new AuthBrokerClient({ url, token });
+			const initial = await client.fetchSnapshot();
+			if (initial.status !== 200) throw new Error("expected initial broker snapshot");
+			const clientStorage = new AuthStorage(
+				new RemoteAuthCredentialStore({ client, initialSnapshot: initial.snapshot }),
+			);
+			clientStorages.push(clientStorage);
+			await clientStorage.usage.reports();
+			return clientStorage;
+		};
+		try {
+			const current = await connect(sweeping.url);
+			expect(current.resets.brokerSweep("anthropic")).toEqual({ provider: "anthropic", autoRedeem: "unset" });
+			expect(current.resets.brokerSweep("openai-codex")).toBeUndefined();
+
+			// A broker without a sweep, every release before this one, leaves its clients sweeping.
+			const older = await connect(handle!.url);
+			expect(older.resets.brokerSweep("anthropic")).toBeUndefined();
+
+			// Earlier clients reject unknown `/v1/usage` fields, so only clients that ask get it.
+			const legacy = await fetch(`${sweeping.url}/v1/usage`, { headers: { Authorization: `Bearer ${token}` } });
+			expect(await legacy.json()).not.toHaveProperty("resetSweep");
+		} finally {
+			for (const clientStorage of clientStorages) clientStorage.close();
+			await sweeping.close();
+		}
+	});
+
 	test("batches observed usage and reports it to the broker as per-install client usage", async () => {
 		const client = new AuthBrokerClient({ url: handle!.url, token });
 		remote = new RemoteAuthCredentialStore({ client, observedUsageFlushMs: 25 });

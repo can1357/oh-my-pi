@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- The auth broker's `/v1/usage` tells clients that send the `reset-sweep` capability which providers' saved resets it spends itself, and `AuthStorage.resets.brokerSweep()` exposes that to broker clients
+
 ## [18.8.7] - 2026-10-09
 
 ### Added
