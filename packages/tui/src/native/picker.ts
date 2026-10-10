@@ -18,7 +18,6 @@
  */
 import type { TspPickerAction, TspPickerItem, TspPickerProps } from "@oh-my-pi/pi-wire";
 import type { KeyName } from "../key-hint-format";
-import { getKeybindings, type Keybinding } from "../keybindings";
 import type { Input } from "../components/input";
 import type { SelectItem, SelectList } from "../components/select-list";
 import { col, node } from "./describe";
@@ -55,12 +54,6 @@ export function pickerKeys(key: KeyName | string): string[] {
 	if (key === "+") return ["+"];
 	const parts = key.endsWith("++") ? [...key.slice(0, -2).split("+"), "+"] : key.split("+");
 	return parts.filter(part => part.length > 0).map(part => (part === "escape" ? "esc" : part));
-}
-
-/** The keycaps of a keybinding's primary key, empty when unbound. */
-export function bindingKeys(binding: Keybinding): string[] {
-	const [key] = getKeybindings().getKeys(binding);
-	return key ? pickerKeys(key) : [];
 }
 
 /** An action-bar button; `keys` is a key id (`"alt+enter"`), a keybinding's keycaps, or none. */

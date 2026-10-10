@@ -5,7 +5,7 @@ import { matchesKey } from "../keys";
 import { theme } from "../theme/theme";
 import { truncateToWidth, visibleWidth } from "../utils";
 import type { TspText } from "@oh-my-pi/pi-wire";
-import { node, span, text } from "../native/describe";
+import { node, span } from "../native/describe";
 import type { NativeChild, NativeNode } from "../native/node";
 import { overlayCard } from "../native/overlay";
 import { plainText } from "../native/spans";
@@ -97,24 +97,6 @@ export function describeHubSidebar<TEntry extends SidebarEntry<string>>(
 		);
 	}
 	return node("list", { selected: selectedId }, items, key);
-}
-
-/**
- * Native footer chip strip: a `tabs` node whose tab ids are the chip indices
- * (`select` events carry the index as `item`), with an optional prefix label.
- */
-export function describeHubChips(strip: StripState<StripChip<unknown>>, prefix?: TspText, key = "chips"): NativeNode {
-	const tabs = node(
-		"tabs",
-		{
-			items: strip.chips.map((chip, index) => ({ id: String(index), label: chip.label })),
-			active: String(strip.index),
-		},
-		undefined,
-		"tabs",
-	);
-	const children: NativeChild[] = prefix === undefined ? [tabs] : [text(prefix), tabs];
-	return node("row", { gap: "sm", align: "center" }, children, key);
 }
 
 /**
