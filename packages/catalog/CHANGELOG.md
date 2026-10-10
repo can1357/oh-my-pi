@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed Claude Haiku 5.5 failing with HTTP 400 on OpenCode Go and Zen; it now uses the Messages endpoint ([#15243](https://github.com/can1357/oh-my-pi/issues/15243))
+
 ## [18.8.8] - 2026-10-10
 
 ### Added
