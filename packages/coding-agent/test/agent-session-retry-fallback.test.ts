@@ -8,12 +8,14 @@ import {
 	type AnthropicFallbackCreditHandle,
 	type Api,
 	type AssistantMessage,
+	type CredentialRankingStrategy,
 	Effort,
 	type Message,
 	type Model,
 	type ModelUsageHealth,
 	type ProviderSessionState,
 	type ToolCall,
+	type UsageProvider,
 } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { createMockModel, type MockResponse } from "@oh-my-pi/pi-ai/providers/mock";
@@ -6946,26 +6948,103 @@ describe("AgentSession retry fallback", () => {
 			expect(session!.autoResolvedThinkingLevel()).toBe(Effort.Low);
 		});
 
-		it("releases a selected account still inside the margin so a sibling with headroom serves the return", async () => {
-			const requestedModels = startSession({}, () => "healthy", undefined, {
-				role: "default",
-				originalSelector: primarySelector,
-				originalThinkingLevel: undefined,
-				pinned: true,
+		it("lets the usage preflight move a returned session off a sticky account inside its reserve", async () => {
+			// The return gate reads the pool; the account that serves is picked by
+			// the ordinary pre-model-call preflight, as on every other turn.
+			const tmp = TempDir.createSync("@retry-fallback-return-account-");
+			let usedFraction: Record<string, number> = { "account-1": 0.4, "account-2": 1 };
+			const strategy: CredentialRankingStrategy = {
+				findWindowLimits: report => ({ primary: report.limits[0] }),
+				scopeLimits: report => report.limits,
+				blockScope: context => `model:${context?.modelId}`,
+				blockScopes: () => ["shared"],
+				windowDefaults: { primaryMs: 60_000, secondaryMs: 60_000 },
+			};
+			const usageProvider: UsageProvider = {
+				id: "anthropic",
+				fetchUsage: async params => {
+					const accountId = params.credential.accountId ?? "";
+					return {
+						provider: "anthropic",
+						fetchedAt: Date.now(),
+						metadata: { accountId },
+						limits: [
+							{
+								id: "short",
+								label: "short",
+								scope: { provider: "anthropic" },
+								window: { id: "short", label: "short", resetsAt: Date.now() + 60_000 },
+								amount: { usedFraction: usedFraction[accountId], unit: "percent" },
+								status: "ok",
+							},
+						],
+					};
+				},
+			};
+			const auth = await AuthStorage.create(tmp.join("auth.db"), {
+				usageProviderResolver: provider => (provider === "anthropic" ? usageProvider : undefined),
+				rankingStrategyResolver: provider => (provider === "anthropic" ? strategy : undefined),
+				configValueResolver: async value => value,
 			});
-			vi.spyOn(modelRegistry.authStorage.health, "model").mockResolvedValue({
-				state: "healthy",
-				accounts: [
-					{ credentialId: 1, credentialType: "oauth", state: "reserve", remainingFraction: 0.15, selected: true },
-					{ credentialId: 2, credentialType: "oauth", state: "healthy", remainingFraction: 0.8 },
-				],
-			});
-			const release = vi.spyOn(modelRegistry.authStorage.sessions, "release");
+			try {
+				await auth.credentials.set(
+					"anthropic",
+					[1, 2].map(id => ({
+						type: "oauth" as const,
+						access: `access-${id}`,
+						refresh: `refresh-${id}`,
+						accountId: `account-${id}`,
+						expires: Date.now() + 3_600_000,
+					})),
+				);
+				auth.keys.setRuntime("openai", "test-key");
+				const settings = Settings.isolated({
+					"compaction.enabled": false,
+					"retry.usageAwareFallback": true,
+					"retry.fallbackRevertPolicy": "when-healthy",
+					"retry.fallbackChains": { default: [fallbackSelector] },
+				});
+				settings.setModelRole("default", primarySelector);
+				const registry = new ModelRegistry(auth, tmp.join("models.json"), { settings });
+				const served: string[] = [];
+				const mock = createMockModel();
+				const agent = new Agent({
+					getApiKey: model => auth.keys.get(model.provider, session!.sessionId, { modelId: model.id }),
+					initialState: { model: fallbackModel!, systemPrompt: ["Test"], tools: [], messages: [] },
+					streamFn: (model, context, options) => {
+						const account = auth.oauth.accounts(model.provider, session!.sessionId).find(entry => entry.active);
+						served.push(`${model.provider}/${model.id}@${account?.accountId ?? "key"}`);
+						mock.push({ content: ["ok"] });
+						return mock.stream(model, context, options);
+					},
+				});
+				session = new AgentSession({
+					agent,
+					settings,
+					modelRegistry: registry,
+					sessionManager: SessionManager.inMemory(),
+					initialRetryFallback: {
+						role: "default",
+						originalSelector: primarySelector,
+						originalThinkingLevel: undefined,
+						pinned: true,
+					},
+				});
+				// account-1 becomes the session's sticky pick, then drains into its
+				// ordinary reserve while account-2 recovers.
+				await auth.keys.get("anthropic", session.sessionId, { modelId: primaryModel!.id });
+				usedFraction = { "account-1": 0.95, "account-2": 0.2 };
+				await auth.usage.invalidate("anthropic");
 
-			await session!.prompt("Primary pool is healthy, the selected account is not");
-			await session!.waitForIdle();
-			expect(requestedModels).toEqual([primarySelector]);
-			expect(release).toHaveBeenCalledWith(primaryModel!.provider, session!.sessionId);
+				await session.prompt("Primary quota recovered on a sibling account");
+				await session.waitForIdle();
+				expect(served).toEqual([`${primarySelector}@account-2`]);
+			} finally {
+				await session?.dispose();
+				session = undefined;
+				auth.close();
+				tmp.removeSync();
+			}
 		});
 
 		it.each([

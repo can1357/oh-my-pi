@@ -13,6 +13,7 @@ import type {
 	Effort,
 	Model,
 	ModelUsageHealth,
+	ModelUsageHealthState,
 	TextContent,
 	ThinkingContent,
 	ToolChoice,
@@ -2379,18 +2380,16 @@ export class TurnRecovery {
 		const apiKey = await this.#host.modelRegistry.getApiKey(primaryModel, this.#host.sessionId());
 		if (!apiKey) return false;
 		if (fitsWithoutCompaction) {
-			const usage = await this.#primaryUsageAllowsReturn(primaryModel, fallback.pinned, signal);
+			const canReturn =
+				(await this.#primaryUsageAllowsReturn(primaryModel, fallback.pinned, signal)) &&
+				fitsWithoutCompaction(primaryModel);
 			if (
-				!usage ||
-				!fitsWithoutCompaction(primaryModel) ||
+				!canReturn ||
 				signal?.aborted ||
 				this.#activeRetryFallback !== fallback ||
 				!modelsAreEqual(this.#host.model(), currentModel)
 			) {
 				return false;
-			}
-			if (usage === "return-on-sibling") {
-				this.#host.modelRegistry.authStorage.sessions.release(primaryModel.provider, this.#host.sessionId());
 			}
 		}
 
@@ -2422,10 +2421,10 @@ export class TurnRecovery {
 		primaryModel: Model,
 		usagePinned: boolean,
 		signal: AbortSignal | undefined,
-	): Promise<false | "return" | "return-on-sibling"> {
-		let health: ModelUsageHealth;
+	): Promise<boolean> {
+		let state: ModelUsageHealthState;
 		try {
-			health = await this.#host.modelRegistry.authStorage.health.model(primaryModel.provider, {
+			const health = await this.#host.modelRegistry.authStorage.health.model(primaryModel.provider, {
 				modelId: primaryModel.id,
 				sessionId: this.#host.sessionId(),
 				baseUrl: primaryModel.baseUrl,
@@ -2433,6 +2432,7 @@ export class TurnRecovery {
 				reserveMarginFraction: FALLBACK_RETURN_HEADROOM_FRACTION,
 				signal,
 			});
+			state = health.state;
 		} catch (error) {
 			if (signal?.aborted) return false;
 			logger.debug("Fallback return usage check failed", {
@@ -2440,14 +2440,10 @@ export class TurnRecovery {
 				model: primaryModel.id,
 				error: String(error),
 			});
-			return usagePinned ? false : "return";
+			state = "unknown";
 		}
-		if (health.state === "unknown") return usagePinned ? false : "return";
-		if (health.state !== "healthy") return false;
-		// The session's selected account serves the return unless its affinity is
-		// released, as the usage-aware preflight does, onto a sibling with headroom.
-		const selectedAccount = health.accounts.find(account => account.selected);
-		return selectedAccount && selectedAccount.state !== "healthy" ? "return-on-sibling" : "return";
+		// Model-level hysteresis on the pool: the account that serves is chosen by normal selection and the usage preflight.
+		return state === "healthy" || (state === "unknown" && !usagePinned);
 	}
 
 	#parseRetryAfterMsFromError(errorMessage: string): number | undefined {

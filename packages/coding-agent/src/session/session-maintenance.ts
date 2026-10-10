@@ -10,6 +10,7 @@ import {
 	type StreamFn,
 	type ThinkingLevel,
 	Tokenizer,
+	tokenizerEncodingForModel,
 } from "@oh-my-pi/pi-agent-core";
 import {
 	AGGRESSIVE_SHAKE_CONFIG,
@@ -560,6 +561,8 @@ export class SessionMaintenance {
 	/** Latest rollover boundary that already received its pre-threshold notebook reminder. */
 	#experimentalNotesReminderBoundaryId: string | undefined;
 	readonly #host: SessionMaintenanceHost;
+	/** Primary-domain tokenizer for `when-healthy` return checks across tokenizers. */
+	#returnTokenizer: Tokenizer | undefined;
 
 	get #model(): Model | undefined {
 		return this.#host.model();
@@ -2566,14 +2569,22 @@ export class SessionMaintenance {
 			if (primaryWindow <= 0) return true;
 			const primarySettings = resolveModelCompactionSettings(this.#host.settings, primary);
 			// The shared estimate counts in the fallback's tokenizer; a primary
-			// that tokenizes differently is also counted in its own domain.
-			const primaryTokenizer = new Tokenizer(primary);
-			const sameDomain =
-				primaryTokenizer.encoding === this.#tokenizer.encoding &&
-				primaryTokenizer.frameBillingKey === this.#tokenizer.frameBillingKey;
-			const tokens = sameDomain
-				? estimate()
-				: Math.max(estimate(), this.#estimateStoredContextTokens(messages, primaryTokenizer));
+			// that tokenizes differently is also counted in its own domain, with
+			// one tokenizer reused across declined attempts.
+			const encoding = tokenizerEncodingForModel(primary);
+			const frameBillingKey = snapcompact.frameBillingKey(snapcompact.frameBilling(primary));
+			let tokens: number;
+			if (encoding === this.#tokenizer.encoding && frameBillingKey === this.#tokenizer.frameBillingKey) {
+				tokens = estimate();
+			} else {
+				if (
+					this.#returnTokenizer?.encoding !== encoding ||
+					this.#returnTokenizer.frameBillingKey !== frameBillingKey
+				) {
+					this.#returnTokenizer = new Tokenizer(primary);
+				}
+				tokens = Math.max(estimate(), this.#estimateStoredContextTokens(messages, this.#returnTokenizer));
+			}
 			const fitBudget = Math.max(0, primaryWindow - resolveBudgetReserveTokens(primaryWindow, primarySettings));
 			return tokens <= fitBudget && !shouldCompact(tokens, primaryWindow, primarySettings);
 		}, signal);
