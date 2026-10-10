@@ -92,7 +92,7 @@ export interface InteractiveModeInitOptions {
 }
 
 export type InteractiveSelectorDialogOptions = ExtensionUIDialogOptions &
-	Pick<HookSelectorOptions, "disabledIndices" | "inline">;
+	Pick<HookSelectorOptions, "disabledIndices" | "inline" | "hotkeys">;
 
 export interface RenderSessionContextOptions {
 	updateFooter?: boolean;
@@ -283,8 +283,11 @@ export interface InteractiveModeContext {
 	init(options?: InteractiveModeInitOptions): Promise<void>;
 	playWelcomeIntro(): void;
 	shutdown(): Promise<void>;
-	/** Tear down like {@link shutdown}, then relaunch the CLI with the original launch flags, resuming this session. */
-	restart(): Promise<void>;
+	/**
+	 * Tear down like {@link shutdown}, then relaunch the CLI with the original launch flags, resuming this session.
+	 * `entry` replaces the command that re-enters the CLI (e.g. an updated install on PATH); launch flags still apply.
+	 */
+	restart(options?: { entry?: string[] }): Promise<void>;
 	/** Request graceful shutdown at the next fully settled boundary, including background turns. */
 	requestShutdown(): void;
 	checkShutdownRequested(): Promise<void>;
