@@ -566,7 +566,6 @@ pub(super) fn with_focus_without_raise<T>(
 	action: impl FnOnce() -> CoreResult<T>,
 ) -> CoreResult<T> {
 	control::check()?;
-	let activity = control::user_activity();
 	let spi = required()?;
 	let previous = front_process(spi.get_front).ok_or_else(|| {
 		DesktopError::background_unavailable(format!(
@@ -602,7 +601,7 @@ pub(super) fn with_focus_without_raise<T>(
 				 takeover:true or use ax actions",
 			))),
 			control::cleanup(|| {
-				restore_focus_after_without_raise(spi, previous, previous_key, target, wid, activity)
+				restore_focus_after_without_raise(spi, previous, previous_key, target, wid)
 			}),
 		);
 	}
@@ -612,7 +611,7 @@ pub(super) fn with_focus_without_raise<T>(
 	after_cleanup(
 		result,
 		control::cleanup(|| {
-			restore_focus_after_without_raise(spi, previous, previous_key, target, wid, activity)
+			restore_focus_after_without_raise(spi, previous, previous_key, target, wid)
 		}),
 	)
 }
@@ -621,18 +620,17 @@ pub(super) fn with_focus_without_raise<T>(
 /// status back to `previous_key` in the previous front process. A target that
 /// activated itself in response to the input (a link opening in a browser) is
 /// first sent back behind the previous front process, without raising either;
-/// a third application that took focus meanwhile is left alone.
+/// a third application that took focus meanwhile is left alone, and so is a
+/// key window the user picked in the previous front process. Typing in that
+/// window is not a focus choice and does not stop the hand-back: background
+/// input watches no keys, so the user's own keys stay theirs.
 fn restore_focus_after_without_raise(
 	spi: &RequiredSpi,
 	previous: FrontProcess,
 	previous_key: u32,
 	target: ProcessSerialNumber,
 	wid: u32,
-	activity: u64,
 ) -> CoreResult<()> {
-	if control::user_activity() != activity {
-		return Ok(());
-	}
 	let front = front_process(spi.get_front).ok_or_else(|| {
 		DesktopError::input_failed("cannot establish current focus for background restoration")
 	})?;
@@ -648,9 +646,7 @@ fn restore_focus_after_without_raise(
 	{
 		return Ok(());
 	}
-	if control::user_activity() != activity
-		|| !front_process(spi.get_front).is_some_and(|front| front.psn == previous.psn)
-	{
+	if !front_process(spi.get_front).is_some_and(|front| front.psn == previous.psn) {
 		return Ok(());
 	}
 	let defocused = post_record(spi.post_record, target, &focus_record(wid, DEFOCUS_MARKER));

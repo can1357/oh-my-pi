@@ -81,8 +81,9 @@ pub struct DesktopCapabilities {
 	pub menus: bool,
 	pub held_input: bool,
 	pub spaces: bool,
-	/// Native global Escape cancellation while input/control ownership is held.
-	/// Wayland requires the host interrupt action instead.
+	/// Native global Escape cancellation of takeover input (`takeover: true` or
+	/// held control). Background input never watches the user's keys; it and
+	/// Wayland stop only through the host interrupt.
 	pub global_escape: bool,
 	pub capture_permission: String,
 	pub input_permission: String,

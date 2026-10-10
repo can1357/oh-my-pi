@@ -33,8 +33,9 @@ struct CancellationState {
 	generation:    AtomicU64,
 	state:         Mutex<Option<Arc<ControlLease>>>,
 	wake:          Condvar,
-	/// Whether the latest control lease started without its physical-Escape
-	/// monitor; stays set until a later lease starts one.
+	/// Whether the latest takeover lease started without its physical-Escape
+	/// monitor; stays set until a later takeover lease starts one. Background
+	/// leases never arm the monitor and leave it unchanged.
 	escape_failed: AtomicBool,
 	#[cfg(target_os = "linux")]
 	async_wake:    tokio::sync::Notify,
@@ -81,7 +82,7 @@ impl CancellationSource {
 			return Err(busy());
 		}
 		if state.is_none() {
-			*state = Some(Arc::new(ControlLease::acquire(self)?));
+			*state = Some(Arc::new(ControlLease::acquire_takeover(self)?));
 		}
 		Ok(())
 	}
@@ -96,8 +97,8 @@ impl CancellationSource {
 		self.0.state.lock().is_some()
 	}
 
-	/// Whether this session's latest input ran without its physical-Escape
-	/// monitor, held or one-shot.
+	/// Whether this session's latest takeover input ran without its
+	/// physical-Escape monitor, held or one-shot.
 	pub(crate) fn escape_unavailable(&self) -> bool {
 		self.0.escape_failed.load(Ordering::Acquire)
 	}
@@ -336,8 +337,23 @@ struct ControlLease {
 }
 
 impl ControlLease {
+	/// Physical Escape anywhere stops takeover input only. A background
+	/// operation leaves the user's keyboard alone, so an Escape they press in
+	/// their own app cancels nothing; the host interrupt still cancels it.
+	fn acquire(source: &CancellationSource, takeover: bool) -> CoreResult<Self> {
+		if takeover {
+			Self::acquire_takeover(source)
+		} else {
+			Ok(Self {
+				escape:  None,
+				_kernel: KernelOwner::acquire()?,
+				running: AtomicBool::new(false),
+			})
+		}
+	}
+
 	#[cfg(target_os = "macos")]
-	fn acquire(source: &CancellationSource) -> CoreResult<Self> {
+	fn acquire_takeover(source: &CancellationSource) -> CoreResult<Self> {
 		Self::acquire_with(source, macos::EscapeMonitor::start)
 	}
 
@@ -355,7 +371,7 @@ impl ControlLease {
 	}
 
 	#[cfg(not(target_os = "macos"))]
-	fn acquire(source: &CancellationSource) -> CoreResult<Self> {
+	fn acquire_takeover(source: &CancellationSource) -> CoreResult<Self> {
 		let kernel = KernelOwner::acquire()?;
 		#[cfg(windows)]
 		let escape = windows::EscapeMonitor::start(EmergencyStop(Arc::downgrade(&source.0)))?;
@@ -431,14 +447,16 @@ pub(crate) struct InputLease {
 }
 
 impl InputLease {
-	pub(crate) fn acquire(token: &OperationToken) -> CoreResult<Self> {
+	/// `takeover` arms the physical-Escape stop for this operation; held control
+	/// keeps the stop it armed when it was granted.
+	pub(crate) fn acquire(token: &OperationToken, takeover: bool) -> CoreResult<Self> {
 		token.check()?;
 		let owner = {
 			let state = token.source.0.state.lock();
 			token.check()?;
 			match state.as_ref() {
 				Some(owner) => owner.clone(),
-				None => Arc::new(ControlLease::acquire(&token.source)?),
+				None => Arc::new(ControlLease::acquire(&token.source, takeover)?),
 			}
 		};
 		owner
@@ -626,15 +644,15 @@ mod tests {
 			.expect("idempotent acquisition");
 		let old = source.token();
 		{
-			let _operation = InputLease::acquire(&old).expect("reuse task ownership");
-			assert!(InputLease::acquire(&source.token()).is_err());
-			assert!(InputLease::acquire(&CancellationSource::default().token()).is_err());
+			let _operation = InputLease::acquire(&old, false).expect("reuse task ownership");
+			assert!(InputLease::acquire(&source.token(), false).is_err());
+			assert!(InputLease::acquire(&CancellationSource::default().token(), false).is_err());
 		}
 		source.retire();
 		assert!(source.control_active());
 		assert!(old.check().is_err());
 		let fresh = source.token();
-		let running = InputLease::acquire(&fresh).expect("fresh run reuses ownership");
+		let running = InputLease::acquire(&fresh, false).expect("fresh run reuses ownership");
 		source.cancel();
 		assert!(!source.control_active());
 		assert!(fresh.check().is_err());
@@ -671,6 +689,37 @@ mod tests {
 		remove_test_lock();
 	}
 
+	#[test]
+	fn background_input_leaves_physical_escape_to_the_user() {
+		let _serial = OWNERSHIP_TEST.lock();
+		let source = CancellationSource::default();
+		let token = source.token();
+		let lease =
+			InputLease::acquire(&token, false).expect("background input needs no Escape stop");
+		assert!(lease.owner.escape.is_none(), "background input must not watch the user's Escape");
+		assert!(!source.escape_unavailable(), "an unarmed stop is not a failed one");
+		source.cancel();
+		assert!(token.check().is_err(), "the host interrupt still cancels background input");
+		drop(lease);
+		drop(KernelOwner::acquire().expect("background input releases kernel ownership"));
+		remove_test_lock();
+	}
+
+	#[cfg(target_os = "macos")]
+	#[test]
+	fn takeover_input_arms_physical_escape() {
+		let _serial = OWNERSHIP_TEST.lock();
+		let source = CancellationSource::default();
+		let lease = InputLease::acquire(&source.token(), true).expect("takeover input");
+		assert!(
+			lease.owner.escape.is_some() || source.escape_unavailable(),
+			"takeover input starts the Escape stop or reports that it could not"
+		);
+		drop(lease);
+		drop(KernelOwner::acquire().expect("takeover input releases kernel ownership"));
+		remove_test_lock();
+	}
+
 	#[cfg(target_os = "macos")]
 	#[test]
 	fn input_proceeds_when_the_escape_monitor_cannot_start() {
@@ -683,7 +732,7 @@ mod tests {
 		.expect("a missing Escape monitor does not block control");
 		assert!(source.escape_unavailable());
 		*source.0.state.lock() = Some(Arc::new(lease));
-		drop(InputLease::acquire(&source.token()).expect("input runs without the monitor"));
+		drop(InputLease::acquire(&source.token(), false).expect("input runs without the monitor"));
 		source.release_control();
 		// One-shot input drops its lease when the operation ends; the failure
 		// must still be reported by later capabilities reads.
