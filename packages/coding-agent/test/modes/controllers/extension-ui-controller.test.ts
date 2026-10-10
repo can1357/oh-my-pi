@@ -546,15 +546,15 @@ describe("ExtensionUiController OSC 7501 run status", () => {
 		setTerminalHeadless(prevHeadless);
 	});
 
-	it("reports an extension confirm as blocked on permission until answered, then the run's current status", async () => {
+	it("keeps confirm details in the dialog but reports only its title until answered", async () => {
 		const harness = makeHarness();
 		const ui = await harness.init();
 
 		const answer = ui.confirm("Run terraform apply?", "This changes production.");
+		const dialog = harness.editorContainer.children[0];
+		expect(Bun.stripANSI(dialog?.render(120).join("\n") ?? "")).toContain("This changes production.");
 		expect(writes).toEqual([
-			report(
-				`state=blocked:kind=permission:app=omp:msg=${Buffer.from("Run terraform apply? This changes production.").toString("base64")}`,
-			),
+			report(`state=blocked:kind=permission:app=omp:msg=${Buffer.from("Run terraform apply?").toString("base64")}`),
 		]);
 
 		// The run settles while the dialog still waits: the dialog keeps the record.

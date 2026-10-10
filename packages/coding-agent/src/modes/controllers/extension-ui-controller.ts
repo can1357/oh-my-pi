@@ -973,59 +973,63 @@ export class ExtensionUiController {
 
 	/**
 	 * Show a selector for hooks. The run reports `blocked` on `extra.kind`
-	 * (default `question`) with the title while it is open.
+	 * (default `question`) with `extra.msg` or the title while it is open.
 	 */
 	showHookSelector(
 		title: string,
 		options: ExtensionUISelectItem[],
 		dialogOptions?: InteractiveSelectorDialogOptions,
-		extra?: { slider?: HookSelectorSlider; kind?: BlockedKind },
+		extra?: { slider?: HookSelectorSlider; kind?: BlockedKind; msg?: string },
 	): Promise<string | undefined> {
 		const kind = extra?.kind ?? "question";
-		return this.#presentDialog({ state: "blocked", kind, msg: title }, dialogOptions?.signal, settle => {
-			const maxVisible = Math.max(4, Math.min(15, this.ctx.ui.terminal.rows - 12));
-			this.ctx.hookSelector = new HookSelectorComponent(
-				title,
-				options,
-				option => settle(option),
-				() => settle(undefined),
-				{
-					onLeft: dialogOptions?.onLeft
-						? () => {
-								dialogOptions.onLeft?.();
-								settle(undefined);
-							}
-						: undefined,
-					onRight: dialogOptions?.onRight
-						? () => {
-								dialogOptions.onRight?.();
-								settle(undefined);
-							}
-						: undefined,
-					onExternalEditor: dialogOptions?.onExternalEditor,
-					helpText: dialogOptions?.helpText,
-					initialIndex: dialogOptions?.initialIndex,
-					timeout: dialogOptions?.timeout,
-					onTimeout: dialogOptions?.onTimeout,
-					onTimeoutStart: dialogOptions?.onTimeoutStart,
-					onTimeoutReset: dialogOptions?.onTimeoutReset,
-					tui: this.ctx.ui,
-					outline: dialogOptions?.outline,
-					disabledIndices: dialogOptions?.disabledIndices,
-					selectionMarker: dialogOptions?.selectionMarker,
-					checkedIndices: dialogOptions?.checkedIndices,
-					markableCount: dialogOptions?.markableCount,
-					maxVisible,
-					inline: dialogOptions?.inline,
-					slider: extra?.slider,
-				},
-			);
-			this.ctx.editorContainer.clear();
-			this.ctx.editorContainer.addChild(this.ctx.hookSelector);
-			this.ctx.ui.setFocus(this.ctx.hookSelector);
-			this.ctx.ui.requestRender();
-			return () => this.hideHookSelector();
-		});
+		return this.#presentDialog(
+			{ state: "blocked", kind, msg: extra?.msg ?? title },
+			dialogOptions?.signal,
+			settle => {
+				const maxVisible = Math.max(4, Math.min(15, this.ctx.ui.terminal.rows - 12));
+				this.ctx.hookSelector = new HookSelectorComponent(
+					title,
+					options,
+					option => settle(option),
+					() => settle(undefined),
+					{
+						onLeft: dialogOptions?.onLeft
+							? () => {
+									dialogOptions.onLeft?.();
+									settle(undefined);
+								}
+							: undefined,
+						onRight: dialogOptions?.onRight
+							? () => {
+									dialogOptions.onRight?.();
+									settle(undefined);
+								}
+							: undefined,
+						onExternalEditor: dialogOptions?.onExternalEditor,
+						helpText: dialogOptions?.helpText,
+						initialIndex: dialogOptions?.initialIndex,
+						timeout: dialogOptions?.timeout,
+						onTimeout: dialogOptions?.onTimeout,
+						onTimeoutStart: dialogOptions?.onTimeoutStart,
+						onTimeoutReset: dialogOptions?.onTimeoutReset,
+						tui: this.ctx.ui,
+						outline: dialogOptions?.outline,
+						disabledIndices: dialogOptions?.disabledIndices,
+						selectionMarker: dialogOptions?.selectionMarker,
+						checkedIndices: dialogOptions?.checkedIndices,
+						markableCount: dialogOptions?.markableCount,
+						maxVisible,
+						inline: dialogOptions?.inline,
+						slider: extra?.slider,
+					},
+				);
+				this.ctx.editorContainer.clear();
+				this.ctx.editorContainer.addChild(this.ctx.hookSelector);
+				this.ctx.ui.setFocus(this.ctx.hookSelector);
+				this.ctx.ui.requestRender();
+				return () => this.hideHookSelector();
+			},
+		);
 	}
 	/**
 	 * Hide the hook selector.
@@ -1050,6 +1054,7 @@ export class ExtensionUiController {
 	): Promise<boolean> {
 		const result = await this.showHookSelector(`${title}\n${message}`, ["Yes", "No"], dialogOptions, {
 			kind: "permission",
+			msg: title,
 		});
 		return result === "Yes";
 	}
