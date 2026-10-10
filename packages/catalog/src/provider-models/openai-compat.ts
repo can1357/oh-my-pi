@@ -3270,6 +3270,7 @@ export function ollamaModelManagerOptions(config?: OllamaModelManagerConfig): Mo
 						if (metadata.input) {
 							model.input = metadata.input;
 						}
+						return undefined;
 					}),
 				);
 				return openAiCompatible;
@@ -7847,16 +7848,24 @@ export function exLlama3ModelManagerOptions(
 				baseUrl,
 				apiKey,
 				mapModel: (entry, defaults) => {
-					const identity = classifyModel("exllama3", defaults.id, { lenient: true });
+					// TabbyAPI serializes `parameters: null` on every card (Pydantic v2 keeps
+					// null fields), while a generic OpenAI `/v1/models` roster (text-generation-
+					// webui, a Flask dev server) carries only the bare OpenAI fields. A foreign
+					// roster on the crowded default port must not be listed under exllama3 with
+					// TabbyAPI-specific compat.
+					if (!("parameters" in entry) && !("logging" in entry)) {
+						return null;
+					}
+					// With an admin key TabbyAPI lists every subdirectory of `model_dir`, and it
+					// filters nothing: HuggingFace's download cache (`.cache`) shows up beside real
+					// checkpoints. A dot-directory is never a loadable model choice, so the catalog
+					// path drops it exactly as the coding-agent discovery path does.
+					if (defaults.id.startsWith(".")) {
+						return null;
+					}
 					return {
 						...defaults,
 						contextWindow: exLlama3ReportedContextWindow(entry) ?? defaults.contextWindow,
-						// TabbyAPI's roster never advertises reasoning. Qwen 3.8+ open weights
-						// always think (their template cannot disable it), so light up the effort
-						// dial; buildModel derives the template ladder from the id plus the
-						// `exllama3` × `qwen` KDL rules, exactly as the vLLM sibling does.
-						reasoning:
-							defaults.reasoning || (identity.class === "qwen" && revisionAtLeast(identity.revision, "3.8")),
 					};
 				},
 				fetch: config?.fetch,

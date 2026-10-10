@@ -49,16 +49,7 @@ class "qwen" {
 			thinking-requires-effort #true
 		}
 	}
-	on "vllm" {
-		revision ">=3.8" {
-			supports-reasoning-effort #true
-			template-reasoning-effort #true
-			thinking-efforts "low" "medium" "xhigh"
-			thinking-format "qwen-chat-template"
-			thinking-requires-effort #true
-		}
-	}
-	on "exllama3" {
+	on "vllm" "exllama3" {
 		revision ">=3.8" {
 			supports-reasoning-effort #true
 			template-reasoning-effort #true

@@ -52,6 +52,9 @@ provider "exllama3" {
 		// (the same repair llama.cpp's provider rule performs), instead of inferring
 		// capability from the id in TypeScript.
 		thinking-upgrade-neutral #true
+		// Pre-3.8 templates expose only the `enable_thinking` toggle: no effort
+		// reaches the wire, so the ladder is a single on-rung beside off.
+		thinking-efforts "high"
 		// Qwen3.6+ templates render prior thinking only when `preserve_thinking` is
 		// set; without it a thinking turn loses its `` block on history replay.
 		qwen-preserve-thinking #true

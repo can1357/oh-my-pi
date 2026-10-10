@@ -32,11 +32,19 @@ const TABBY_ROSTER = [
 		object: "model",
 		owned_by: "tabbyAPI",
 		meta: { n_ctx_train: 8192, n_ctx: null },
+		parameters: null,
 	},
 	{
 		// A thin/odd entry: no meta, no parameters.
 		id: "llama-3.1-8b-instruct-exl3",
 		object: "model",
+		parameters: null,
+	},
+	{
+		// A HuggingFace `.cache` subdirectory: never loadable, dropped by the mapper.
+		id: ".cache",
+		object: "model",
+		parameters: null,
 	},
 ];
 
@@ -64,6 +72,8 @@ describe("ExLlama3 (TabbyAPI) provider discovery", () => {
 		expect(models?.find(model => model.id === "Qwama-0.5B-Instruct")?.contextWindow).toBe(8192);
 		// No metadata at all -> stay unresolved rather than invent a window.
 		expect(models?.find(model => model.id === "llama-3.1-8b-instruct-exl3")?.contextWindow).toBeNull();
+		// A HuggingFace `.cache` subdirectory is never loadable; the mapper drops it.
+		expect(models?.find(model => model.id === ".cache")).toBeUndefined();
 	});
 
 	test("honours EXLLAMA3_BASE_URL for a non-loopback server", async () => {
@@ -76,13 +86,14 @@ describe("ExLlama3 (TabbyAPI) provider discovery", () => {
 		expect(models?.[0]?.baseUrl).toBe("http://10.0.0.7:5000/v1");
 	});
 
-	test("lights up the Qwen 3.8+ effort dial despite a roster that never advertises reasoning", async () => {
+	test("the roster never advertises reasoning; the KDL cascade lifts it at build time", async () => {
 		const fetchMock: FetchImpl = async () => tabbyResponse(TABBY_ROSTER);
 		const models = await exLlama3ModelManagerOptions({ fetch: fetchMock }).fetchDynamicModels?.();
 
-		const qwen = models?.find(model => model.id === "Qwen3.8-27B-exl3");
-		expect(qwen?.reasoning).toBe(true);
-		// Non-reasoning generations keep the wire-reported default.
+		// The roster carries no reasoning flag; the mapper reports the wire default.
+		// The KDL `thinking-upgrade-neutral` rule (asserted through `buildModel` below)
+		// is what lights up the Qwen 3.8+ effort dial, not a TypeScript id match.
+		expect(models?.find(model => model.id === "Qwen3.8-27B-exl3")?.reasoning).toBe(false);
 		expect(models?.find(model => model.id === "Qwama-0.5B-Instruct")?.reasoning).toBe(false);
 	});
 });
@@ -122,6 +133,7 @@ describe("ExLlama3 (TabbyAPI) provider compat", () => {
 		expect(model.compat.qwenPreserveThinking).toBe(true);
 		// Discovered rows arrive `reasoning: false`; the KDL upgrade opt-in is what
 		// materialises the ladder instead of a TypeScript id match.
+		expect(model.reasoning).toBe(true);
 		expect(model.thinking).toMatchObject({ mode: "effort", efforts: ["low", "medium", "xhigh"] });
 	});
 

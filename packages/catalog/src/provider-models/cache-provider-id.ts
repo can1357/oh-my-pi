@@ -33,6 +33,9 @@ export function isCredentialScopedModelCacheProvider(providerId: string): boolea
 	return CREDENTIAL_SCOPED_MODEL_CACHE_PROVIDERS[providerId] === true;
 }
 
+/** TabbyAPI's default `network.port` is 5000, served under `/v1`. */
+export const EXLLAMA3_DEFAULT_BASE_URL = "http://127.0.0.1:5000/v1";
+
 export function getDefaultModelDiscoveryBaseUrl(providerId: string): string | undefined {
 	switch (providerId) {
 		case "charm-hyper":
@@ -51,8 +54,7 @@ export function getDefaultModelDiscoveryBaseUrl(providerId: string): string | un
 		case "vllm":
 			return "http://127.0.0.1:8000/v1";
 		case "exllama3":
-			// TabbyAPI's default `network.port` is 5000, served under `/v1`.
-			return Bun.env.EXLLAMA3_BASE_URL ?? "http://127.0.0.1:5000/v1";
+			return EXLLAMA3_DEFAULT_BASE_URL;
 		default:
 			return undefined;
 	}
@@ -84,8 +86,8 @@ function cursorCredentialSubject(apiKey: string): string | undefined {
 	try {
 		const payload: unknown = JSON.parse(Buffer.from(parts[1], "base64url").toString("utf-8"));
 		if (typeof payload !== "object" || payload === null) return undefined;
-		const { sub } = payload as { sub?: unknown };
-		return typeof sub === "string" && sub.length > 0 ? `sub:${sub}` : undefined;
+		const subject = Reflect.get(payload, "sub");
+		return typeof subject === "string" && subject.length > 0 ? `sub:${subject}` : undefined;
 	} catch {
 		return undefined;
 	}
