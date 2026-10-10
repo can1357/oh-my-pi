@@ -88,7 +88,7 @@ import { supportsOutputTokenLimit } from "@oh-my-pi/pi-catalog/compat/output-lim
 import { requiresNativeTools, requiresToolFreeHistoryForToolOptOut } from "@oh-my-pi/pi-catalog/compat/tools";
 import { preferredDialect } from "@oh-my-pi/pi-catalog/identity";
 import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
-import { type EditStore, PowerAssertion, type PowerAssertionOptions } from "@oh-my-pi/pi-natives";
+import { type EditStore, type PowerAssertion, type PowerAssertionOptions } from "@oh-my-pi/pi-natives";
 import {
 	$env,
 	escapeXmlText,
@@ -294,6 +294,7 @@ import type {
 	UsageFallbackConfirmer,
 } from "./agent-session-types";
 import { writeArtifact } from "./artifacts";
+import { startPowerAssertion } from "./power-assertion-backend";
 import { renderAttachmentSourceNotice } from "./attachment-source-notice";
 import { formatArtifactErrorNotice, type OutputMeta, stripOutputNotice } from "@oh-my-pi/pi-tui/tools/output-meta";
 import { truncateMiddle } from "@oh-my-pi/pi-tui/tools/streaming-output";
@@ -1131,11 +1132,7 @@ export class AgentSession implements SettingsScope {
 		if (this.#powerAssertion) return;
 		const options = powerAssertionOptions(cfgPowerSleepPrevention.get(this.settings));
 		if (!options) return;
-		try {
-			this.#powerAssertion = PowerAssertion.start(options);
-		} catch (error) {
-			logger.warn("Failed to acquire power assertion", { error: String(error) });
-		}
+		this.#powerAssertion = startPowerAssertion(options);
 	}
 
 	#releasePowerAssertion(): void {
