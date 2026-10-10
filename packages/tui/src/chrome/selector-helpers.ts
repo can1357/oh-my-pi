@@ -5,7 +5,7 @@
  * padding. Behaviour is identical to the per-component copies these helpers
  * replace.
  */
-import { centeredViewportRange, scrollOffsetForRow, viewportOverflows } from "../components/scroll-viewport";
+import { scrollOffsetForRow, viewportOverflows } from "../components/scroll-viewport";
 import { matchesKey } from "../keys";
 import { ScrollView } from "../components/scroll-view";
 import { theme } from "../theme/index";
@@ -26,20 +26,6 @@ export function renderScrollableList(
 	});
 	sv.setScrollOffset(options.scrollOffset);
 	return sv.render(options.width);
-}
-
-/**
- * Center a viewport window of `maxVisible` rows on `selectedIndex` within a
- * list of `total` rows, clamped to valid bounds. Used by the selection-centered
- * list panes (history search, tree selector).
- */
-export function centeredWindow(
-	selectedIndex: number,
-	total: number,
-	maxVisible: number,
-): { startIndex: number; endIndex: number } {
-	const range = centeredViewportRange(selectedIndex, total, maxVisible);
-	return { startIndex: range.start, endIndex: range.end };
 }
 
 /**

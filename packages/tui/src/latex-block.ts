@@ -23,8 +23,6 @@
 // scratch here on this module's ANSI-aware Box model.
 
 import { latexColorScope, latexToUnicode, MATH_FONT_COMMANDS } from "./latex-to-unicode";
-import { node } from "./native/describe";
-import type { NativeNode } from "./native/node";
 import { visibleWidth } from "./utils";
 
 /**
@@ -1428,15 +1426,6 @@ function splitLines(src: string): string[] {
 	}
 	lines.push(src.slice(last));
 	return lines;
-}
-
-/**
- * The native form of {@link latexToBlock}: the TeX source as a `math` node
- * the terminal typesets (display style by default, `display: false` for
- * inline `$…$` math).
- */
-export function describeLatex(src: string, display = true): NativeNode {
-	return node("math", { text: src, display });
 }
 
 /**

@@ -14,7 +14,7 @@
  * the Tern SDK's Surface Protocol reference (`docs/sdk/src/protocol` in the
  * Stencil repository, https://docs.stencil.so/tern/protocol/) for the spec.
  */
-import type { TspEvent, TspKind, TspProps, TspScrollBy, TspSpan } from "@oh-my-pi/pi-wire";
+import type { TspKind, TspProps, TspScrollBy, TspSpan } from "@oh-my-pi/pi-wire";
 import type { Component } from "../tui";
 
 /** A described node: a wire node minus its id, with components allowed as children. */
@@ -240,14 +240,6 @@ export function rootToggleExpanded(event: NativeUiEvent): boolean | undefined {
 /** The last segment of an event keypath (`"split/sidebar/toc"` → `"toc"`). */
 export function leafKey(path: string): string {
 	return path.slice(path.lastIndexOf("/") + 1);
-}
-
-/** Terminal-level events the backend doesn't route to a single component. */
-export type NativeTerminalEvent = Extract<TspEvent, { ev: "theme" | "motion" | "visible" | "resize" }>;
-
-/** Implemented by components that react to user actions on their described nodes. */
-export interface NativeEventTarget {
-	handleNativeEvent(event: NativeUiEvent): void;
 }
 
 /** Implemented by frame providers (the composer) that describe the whole surface. */

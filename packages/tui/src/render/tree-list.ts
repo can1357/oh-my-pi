@@ -2,10 +2,6 @@
  * Hierarchical tree list rendering helper.
  */
 
-import type { TspTreeNode } from "@oh-my-pi/pi-wire";
-import { styledSpans } from "../native/spans";
-import { node, span } from "../native/describe";
-import type { NativeNode } from "../native/node";
 import type { Theme } from "../theme/theme";
 import { visibleWidth } from "../utils";
 import { TreeView } from "../components/tree-view";
@@ -171,41 +167,6 @@ export function renderTreeList<T>(options: TreeListOptions<T>, theme: Theme): st
 		roots.push({ kind: "summary", text: theme.fg("muted", formatMoreItems(remaining, itemType)) });
 	}
 	return renderTreeListRows(roots, theme);
-}
-
-/**
- * The native form of {@link renderTreeList}: a flat `tree` whose branch
- * gutters are the terminal's. The collapsed item cap (and the caller's
- * trailing summary) are kept as a muted "… N more" node; the visual line
- * budget (`maxCollapsedLines`) is layout and is left to the terminal.
- */
-export function describeTreeList<T>(options: TreeListOptions<T>, theme: Theme): NativeNode {
-	const { items, expanded = false, maxCollapsed = 8, itemType = "item", truncateFrom = "end", renderItem } = options;
-	const itemNode = (index: number): TspTreeNode => {
-		const rendered = renderItem(items[index], {
-			index,
-			isLast: index === items.length - 1,
-			depth: 0,
-			theme,
-			prefix: "",
-			continuePrefix: "",
-		});
-		return { id: `i${index}`, label: styledSpans(Array.isArray(rendered) ? rendered.join("\n") : rendered) };
-	};
-	const summaryNode = (text: string): TspTreeNode => ({ id: "more", label: [span(text, "muted")] });
-	const nodes: TspTreeNode[] = [];
-	if (!expanded && options.trailingSummary !== undefined) {
-		for (let index = 0; index < items.length; index++) nodes.push(itemNode(index));
-		if (options.trailingSummary !== "") nodes.push(summaryNode(options.trailingSummary));
-		return node("tree", { nodes });
-	}
-	const shown = expanded ? items.length : Math.min(items.length, maxCollapsed);
-	const hidden = items.length - shown;
-	const start = truncateFrom === "start" ? items.length - shown : 0;
-	if (hidden > 0 && truncateFrom === "start") nodes.push(summaryNode(formatMoreItems(hidden, itemType)));
-	for (let index = start; index < start + shown; index++) nodes.push(itemNode(index));
-	if (hidden > 0 && truncateFrom === "end") nodes.push(summaryNode(formatMoreItems(hidden, itemType)));
-	return node("tree", { nodes });
 }
 
 /**

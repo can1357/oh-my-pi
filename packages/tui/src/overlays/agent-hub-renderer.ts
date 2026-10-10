@@ -409,10 +409,3 @@ export function treeContinuation(
 export function treeMetadataIndent(maxWidth: number, maxDepth: number): number {
 	return Math.min(Math.max(0, maxWidth - 1), TREE_DETAIL_BASE_INDENT + Math.max(0, maxDepth) * TREE_SEGMENT_WIDTH);
 }
-
-/** Right-align `text` inside a fixed-width cell, truncating overflow. */
-export function alignRightCell(text: string, width: number): string {
-	return renderTableRow([{ text }], [{ width, align: "right", overflow: "truncate" }], undefined, {
-		fit: false,
-	});
-}

@@ -676,15 +676,6 @@ export function getDiffStats(diffText: string): DiffStats {
 	return { added, removed, hunks, lines: lines.length };
 }
 
-/** Render a compact themed summary of diff counts. */
-export function formatDiffStats(added: number, removed: number, hunks: number, theme: Theme): string {
-	const parts: string[] = [];
-	if (added > 0) parts.push(theme.fg("toolDiffAdded", `+${added}`));
-	if (removed > 0) parts.push(theme.fg("toolDiffRemoved", `-${removed}`));
-	if (hunks > 0) parts.push(theme.fg("dim", `${hunks} hunk${hunks !== 1 ? "s" : ""}`));
-	return parts.join(theme.fg("dim", " / "));
-}
-
 interface DiffSegment {
 	lines: string[];
 	isChange: boolean;

@@ -4,13 +4,10 @@ import {
 	type DashboardState,
 	type DisabledReason,
 	type Extension,
-	type ExtensionKind,
 	type ExtensionState,
-	type FlatTreeItem,
 	isShadowedExtension,
 	type ProviderTab,
 	type ExtensionProvider,
-	type TreeNode,
 } from "./types";
 
 export function resolveExtensionState(
@@ -30,92 +27,6 @@ export function resolveExtensionState(
 		return { state: "disabled", disabledReason: "user-opt-in" };
 	}
 	return { state: "active" };
-}
-
-/**
- * Build sidebar tree from extensions.
- * Groups by provider → kind.
- */
-export function buildSidebarTree(extensions: Extension[], providers: readonly ExtensionProvider[]): TreeNode[] {
-	const tree: TreeNode[] = [];
-
-	// Group extensions by provider and kind
-	const byProvider = new Map<string, Map<ExtensionKind, Extension[]>>();
-
-	for (const ext of extensions) {
-		const providerId = ext.source.provider;
-		if (!byProvider.has(providerId)) {
-			byProvider.set(providerId, new Map());
-		}
-		const byKind = byProvider.get(providerId)!;
-		if (!byKind.has(ext.kind)) {
-			byKind.set(ext.kind, []);
-		}
-		byKind.get(ext.kind)!.push(ext);
-	}
-
-	// Build tree nodes for each provider (show ALL providers, even if disabled/empty)
-	for (const provider of providers) {
-		// Skip the 'native' provider as it cannot be toggled
-		if (provider.id === "native") continue;
-
-		const byKind = byProvider.get(provider.id);
-		const kindNodes: TreeNode[] = [];
-		let totalCount = 0;
-
-		if (byKind && byKind.size > 0) {
-			for (const [kind, exts] of byKind) {
-				totalCount += exts.length;
-				kindNodes.push({
-					id: `${provider.id}:${kind}`,
-					label: getKindDisplayName(kind),
-					type: "kind",
-					enabled: provider.enabled,
-					collapsed: true,
-					children: [],
-					count: exts.length,
-				});
-			}
-
-			// Sort kind nodes by count (most items first)
-			kindNodes.sort((a, b) => (b.count || 0) - (a.count || 0));
-		}
-
-		tree.push({
-			id: provider.id,
-			label: provider.displayName,
-			type: "provider",
-			enabled: provider.enabled,
-			collapsed: false,
-			children: kindNodes,
-			count: totalCount,
-		});
-	}
-
-	return tree;
-}
-
-/**
- * Flatten tree for keyboard navigation.
- */
-export function flattenTree(tree: TreeNode[]): FlatTreeItem[] {
-	const flat: FlatTreeItem[] = [];
-	let index = 0;
-
-	function walk(node: TreeNode, depth: number): void {
-		flat.push({ node, depth, index: index++ });
-		if (!node.collapsed) {
-			for (const child of node.children) {
-				walk(child, depth + 1);
-			}
-		}
-	}
-
-	for (const node of tree) {
-		walk(node, 0);
-	}
-
-	return flat;
 }
 
 /** Searchable fields an extension's cached {@link FuzzyText} was built from. */
@@ -183,36 +94,6 @@ export function applyFilter(extensions: Extension[], query: string): Extension[]
 		const searchable = extensionSearchText(ext);
 		return tokens.every(token => token.match(searchable).matches);
 	});
-}
-
-/**
- * Get display name for extension kind.
- */
-function getKindDisplayName(kind: ExtensionKind): string {
-	switch (kind) {
-		case "extension-module":
-			return "Extension Modules";
-		case "skill":
-			return "Skills";
-		case "rule":
-			return "Rules";
-		case "tool":
-			return "Tools";
-		case "mcp":
-			return "MCP Servers";
-		case "prompt":
-			return "Prompts";
-		case "instruction":
-			return "Instructions";
-		case "context-file":
-			return "Context Files";
-		case "hook":
-			return "Hooks";
-		case "slash-command":
-			return "Slash Commands";
-		default:
-			return kind;
-	}
 }
 
 /**

@@ -26,10 +26,6 @@ function nativeHangulCompatibilityJamoOverride(width: HangulCompatibilityJamoWid
 	return 0;
 }
 
-export function getHangulCompatibilityJamoWidth(): HangulCompatibilityJamoWidth {
-	return hangulCompatibilityJamoWidth;
-}
-
 // Monotonic epoch for width-affecting runtime configuration. Any cache or
 // carried-width sidecar derived from `visibleWidth` results must be stamped
 // with the epoch at computation time and discarded on mismatch, so a Hangul
@@ -520,37 +516,6 @@ const THAI_LAO_AM_GLOBAL_REGEX = /[\u0e33\u0eb3]/g;
 export function normalizeTerminalOutput(str: string): string {
 	if (str.indexOf("\u0e33") === -1 && str.indexOf("\u0eb3") === -1) return str;
 	return str.replace(THAI_LAO_AM_GLOBAL_REGEX, char => (char === "\u0e33" ? "\u0e4d\u0e32" : "\u0ecd\u0eb2"));
-}
-
-const makeBoolArray = (chars: string): Uint8Array => {
-	const table = new Uint8Array(128);
-	for (let i = 0; i < chars.length; i++) {
-		const code = chars.charCodeAt(i);
-		if (code < table.length) {
-			table[code] = 1;
-		}
-	}
-	return table;
-};
-
-const ASCII_WHITESPACE = makeBoolArray("\x09\x0a\x0b\x0c\x0d\x20");
-
-/**
- * Check if a character is whitespace.
- */
-export function isWhitespaceChar(char: string): boolean {
-	const code = char.codePointAt(0) ?? 0;
-	return code < 128 && ASCII_WHITESPACE[code] === 1;
-}
-
-const ASCII_PUNCTUATION = makeBoolArray("(){}[]<>.,;:'\"!?+-=*/\\|&%^$#@~`");
-
-/**
- * Check if a character is punctuation.
- */
-export function isPunctuationChar(char: string): boolean {
-	const code = char.codePointAt(0) ?? 0;
-	return code < 128 && ASCII_PUNCTUATION[code] === 1;
 }
 
 export type WordNavKind = "whitespace" | "delimiter" | "cjk" | "word" | "other";
