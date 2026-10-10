@@ -12,7 +12,7 @@ import type { ContextUsage } from "../../extensibility/extensions/types";
 import type { AgentSessionEvent, SessionStats } from "../../session/agent-session";
 import type { RestoredQueuedMessage } from "../../session/agent-session-types";
 import type { CacheWarmingMode } from "../../session/cache-warmer";
-import type { FileEntry, SessionEntry, SessionTreeNode } from "../../session/session-entries";
+import type { FileEntry, SessionEntry, SessionHeader, SessionTreeNode } from "../../session/session-entries";
 import type { UsageLimitState } from "../../session/usage-limit";
 import type { AvailableSlashCommandSource } from "../../slash-commands/available-commands";
 import type { AgentProgress } from "@oh-my-pi/pi-tui/tools/task";
@@ -32,15 +32,38 @@ import type { BtwHistoryRecord } from "../../session/btw-history";
 /** `set_event_filter` projection: `"full"` keeps both accumulated snapshots in `message_update`, `"delta"` sends only the increment. */
 export type RpcMessageUpdates = "full" | "delta";
 
-export type RpcCommand =
+/**
+ * Write preconditions for sequenced (socket) clients. On mismatch the command does not run and
+ * fails with `code: "stale"`; abort, detach, exit, the side-channel setters, and `get_*` reads are exempt.
+ */
+export interface RpcPreconditions {
+	/** Run only while the host's session epoch equals this. */
+	ifEpoch?: number;
+	/** Run only while the session leaf equals this entry id. */
+	ifLeaf?: string | null;
+}
+
+type RpcCommandBody =
 	// Protocol
 	| { id?: string; type: "negotiate_protocol"; protocolVersion: number }
+	// Session host: leave the host running / end it once no other client remains
+	| { id?: string; type: "detach" }
+	| { id?: string; type: "exit" }
 
 	// Prompting
 	| { id?: string; type: "prompt"; message: string; images?: ImageContent[]; streamingBehavior?: "steer" | "followUp" }
 	| { id?: string; type: "steer"; message: string; images?: ImageContent[] }
 	| { id?: string; type: "follow_up"; message: string; images?: ImageContent[] }
-	| { id?: string; type: "remove_queued_message"; message: string; queue: "steering" | "followUp" }
+	| {
+			id?: string;
+			type: "remove_queued_message";
+			message: string;
+			queue: "steering" | "followUp";
+			/** `"last"`: the newest prompt whose chip text is `message`. Default `"first"` (the raw-text-then-chip match). */
+			match?: "first" | "last";
+			/** Remove nothing, and answer `refused: "attachments"`, when the prompt to remove carries an attachment. */
+			refuseAttachments?: boolean;
+	  }
 	| { id?: string; type: "promote_queued_message"; message: string }
 	| { id?: string; type: "abort" }
 	| { id?: string; type: "abort_and_prompt"; message: string; images?: ImageContent[] }
@@ -60,6 +83,7 @@ export type RpcCommand =
 			token_budget?: number;
 	  }
 	| { id?: string; type: "set_ask_dialog"; enabled: boolean }
+	| { id?: string; type: "set_idle_activity"; isComposing: boolean }
 	| { id?: string; type: "get_available_commands" }
 	| { id?: string; type: "get_entries"; since?: string }
 	| { id?: string; type: "get_tree" }
@@ -143,6 +167,8 @@ export type RpcCommand =
 	| { id?: string; type: "btw"; question: string; recordId?: string }
 	| { id?: string; type: "btw_cancel"; recordId?: string }
 	| { id?: string; type: "get_btw_history" };
+
+export type RpcCommand = RpcCommandBody & RpcPreconditions;
 
 // ============================================================================
 // RPC State
@@ -302,6 +328,8 @@ export interface RpcRemoveQueuedMessageResult {
 	images?: ImageContent[];
 	/** Set when the images exceeded the transport limit and were omitted; the removal still happened. */
 	imagesDropped?: true;
+	/** Nothing was removed: `refuseAttachments` was set and the prompt carries an attachment. */
+	refused?: "attachments";
 }
 
 /** `abort_and_restore_queue` result: the user-authored queued input withdrawn before the abort, oldest first. */
@@ -313,6 +341,160 @@ export interface RpcAbortAndRestoreQueueResult {
 	/** Set when even the text-only result exceeded the limit: only an oldest-first prefix is listed. */
 	truncated?: true;
 }
+
+/**
+ * Which of the queued chips carry an attachment (an image, or a companion holding an image's source or description)
+ * that the chip's text does not. Parallel to the chip lists they accompany: entry `i` describes chip `i`, and the two
+ * always travel in the same frame, so their lengths match.
+ */
+export interface RpcQueueAttachments {
+	steering: boolean[];
+	followUp: boolean[];
+}
+
+/** A connected session-host client, as listed in snapshots and `clients_changed`. */
+export interface RpcClientInfo {
+	clientId: string;
+	kind: string;
+	label?: string;
+}
+
+/**
+ * Where the host session lives, for resolving links in what it authored (`local://`, relative file paths): the host's
+ * cwd, artifacts directory (`null`: none, e.g. an in-memory session), the actual directory its `local://` URLs map to
+ * (the host's own resolution, so an in-memory session reports the host's temp root), and its transcript id. Socket
+ * clients only.
+ */
+export interface RpcSessionOrigin {
+	cwd: string;
+	artifactsDir: string | null;
+	localRoot: string;
+	sessionId: string;
+}
+
+/**
+ * Everything a client needs to render the session from scratch. `entries`, `leafId` and the title are the session as
+ * the `entry` frames have announced it: entries of an atomic batch that is still publishing, and entries recorded
+ * meanwhile, are not in it and reach the client once, as entry frames after the commit.
+ */
+export interface RpcSnapshot {
+	state: RpcSessionState;
+	header: SessionHeader | null;
+	entries: SessionEntry[];
+	leafId: string | null;
+	/** The in-flight message of a mid-turn join; later frames for it carry `messageId`. */
+	streaming?: { messageId: string; message: AgentMessage };
+	/** Open extension dialogs a late joiner can answer. */
+	pendingUi: RpcExtensionUIRequest[];
+	/**
+	 * Extension statuses and widgets showing now (the latest `setStatus`/`setWidget` per key), for a client that attached
+	 * after they were set. Absent from hosts that predate it.
+	 */
+	uiState?: RpcExtensionUIRequest[];
+	clients: RpcClientInfo[];
+	/**
+	 * Which queued chips of `state.queuedMessages` carry an attachment, parallel to them (see {@link RpcQueueAttachments}).
+	 * Absent from hosts that predate it.
+	 */
+	queueAttachments?: RpcQueueAttachments;
+	/** Where the host session lives (see {@link RpcSessionOrigin}). Absent from hosts that predate it. */
+	origin?: RpcSessionOrigin;
+}
+
+/** First frame a socket client sends; anything else, or a wrong token, gets `unauthorized` and a close. */
+export interface RpcHelloFrame {
+	type: "hello";
+	token: string;
+	protocolVersion: 1 | 2;
+	client: { kind: string; label?: string };
+	capabilities: { ui: boolean };
+	/** Ignored, so the client gets `attached`, unless `hostId` names this host. */
+	resume?: { hostId: string; epoch: number; lastSeq: number };
+}
+
+/** First frame of a fresh attach: frames after it carry `seq` > this `seq`. */
+export interface RpcAttachedFrame {
+	type: "attached";
+	hostId: string;
+	clientId: string;
+	epoch: number;
+	seq: number;
+	snapshot: RpcSnapshot;
+}
+
+/** First frame of a resume: the `replayed` frames after `lastSeq` follow it. */
+export interface RpcResumedFrame {
+	type: "resumed";
+	epoch: number;
+	replayed: number;
+}
+
+/** A session-file append. Sequenced clients only. */
+export interface RpcEntryFrame {
+	type: "entry";
+	entry: SessionEntry;
+	/**
+	 * The host's active leaf at the time the entry was announced (`null`: the session has no entries on its branch).
+	 * It is the entry itself for an append on the active branch, the unchanged leaf for an off-branch append such as a
+	 * retained bash result, and may name an entry announced right after this one. A client that follows the host's
+	 * branch applies it with the entry. Additive: a host that predates it omits the field, and the client then keeps
+	 * its previous behavior (the entry becomes the leaf).
+	 */
+	leafId?: string | null;
+	seq: number;
+}
+
+/** The host now serves a different session (or transcript); `snapshot` replaces the client's view. Sequenced clients only. */
+export interface RpcSessionReplacedFrame {
+	type: "session_replaced";
+	epoch: number;
+	sessionFile: string | undefined;
+	reason: "new" | "resume" | "fork" | "tree";
+	snapshot: RpcSnapshot;
+	seq: number;
+}
+
+/** Client presence changed. Sequenced clients only. */
+export interface RpcClientsChangedFrame {
+	type: "clients_changed";
+	clients: RpcClientInfo[];
+	seq: number;
+}
+
+/** Output of a builtin slash command run by this client's `prompt`; sent to that connection only, never stamped with `seq`. */
+export interface RpcCommandOutputFrame {
+	type: "command_output";
+	text: string;
+}
+
+/** The live model or thinking level changed. `seq` is present for sequenced clients only. */
+export interface RpcConfigUpdateFrame {
+	type: "config_update";
+	model?: Model;
+	thinkingLevel?: ThinkingLevel;
+	seq?: number;
+}
+
+/** The session title changed. `seq` is present for sequenced clients only. */
+export interface RpcSessionInfoUpdateFrame {
+	type: "session_info_update";
+	title?: string;
+	sessionId: string;
+	/** Sequenced clients only: the session was relocated (`/move`, `/wt`), so this is where it lives now. */
+	origin?: RpcSessionOrigin;
+	seq?: number;
+}
+
+/** Every frame `RpcClient.onHostFrame` delivers: the session-host handshake, replica updates, and state notices. */
+export type RpcHostFrame =
+	| RpcAttachedFrame
+	| RpcResumedFrame
+	| RpcEntryFrame
+	| RpcSessionReplacedFrame
+	| RpcClientsChangedFrame
+	| RpcCommandOutputFrame
+	| RpcConfigUpdateFrame
+	| RpcSessionInfoUpdateFrame;
 
 export interface RpcReadyFrame {
 	type: "ready";
@@ -375,7 +557,9 @@ export type RpcResponse =
 			success: true;
 			data: { protocolVersion: 2 };
 	  }
-
+	// Session host
+	| { id?: string; type: "response"; command: "detach"; success: true }
+	| { id?: string; type: "response"; command: "exit"; success: true }
 	// Prompting (async - events follow)
 	| { id?: string; type: "response"; command: "prompt"; success: true; data?: { agentInvoked: boolean } }
 	| { id?: string; type: "response"; command: "steer"; success: true }
@@ -412,6 +596,7 @@ export type RpcResponse =
 	| { id?: string; type: "response"; command: "set_slow_mode"; success: true; data: { enabled: boolean } }
 	| { id?: string; type: "response"; command: "goal"; success: true; data: RpcGoalResult }
 	| { id?: string; type: "response"; command: "set_ask_dialog"; success: true; data: { enabled: boolean } }
+	| { id?: string; type: "response"; command: "set_idle_activity"; success: true; data: { isComposing: boolean } }
 	| {
 			id?: string;
 			type: "response";
@@ -598,7 +783,18 @@ export type RpcResponse =
 	  }
 
 	// Error response (any command can fail); `code` is an optional machine-readable reason.
-	| { id?: string; type: "response"; command: string; success: false; error: string; code?: string };
+	// `stale` carries the current `epoch` or `leafId`; `session_hosted` the owning `hostId`.
+	| {
+			id?: string;
+			type: "response";
+			command: string;
+			success: false;
+			error: string;
+			code?: string;
+			epoch?: number;
+			leafId?: string | null;
+			hostId?: string;
+	  };
 
 // ============================================================================
 // Side question (/btw) frames (stdout)
@@ -659,9 +855,19 @@ export type RpcDeltaMessageUpdateFrame = Omit<
 	assistantMessageEvent: WithoutPartial<AssistantMessageEvent>;
 };
 
+/**
+ * `queue_update` as a sequenced (socket) client receives it: the chip lists plus which chips carry an attachment.
+ * Stdio gets the plain event. Absent from hosts that predate it, so a reader that needs it must treat absence as
+ * "unknown", not "none".
+ */
+export type RpcQueueUpdateFrame = Extract<AgentSessionEvent, { type: "queue_update" }> & {
+	attachments?: RpcQueueAttachments;
+};
+
 /** Session event as written to stdout by default: message lifecycle events carry a `messageId`. */
 export type RpcAgentSessionEventFrame =
-	| Exclude<AgentSessionEvent, { type: RpcMessageEventType }>
+	| Exclude<AgentSessionEvent, { type: RpcMessageEventType | "queue_update" }>
+	| RpcQueueUpdateFrame
 	| RpcMessageEventFrame;
 
 /** Every session event shape RPC mode can write, including the opt-in `messageUpdates: "delta"` projection. */
@@ -869,17 +1075,27 @@ export interface RpcHostUriResult {
 // Extension UI Commands (stdin)
 // ============================================================================
 
+/** One question's answer in an `ask` response. */
+export interface RpcAskDialogAnswer {
+	id: string;
+	selectedOptions: string[];
+	customInput?: string;
+	/** Images pasted into the custom answer; their `[Image #N]` markers sit in `customInput`. */
+	customInputImages?: ImageContent[];
+	/** The user's note on the answer. */
+	note?: string;
+	noteImages?: ImageContent[];
+}
+
 /** Response to an extension UI request */
 export type RpcExtensionUIResponse =
 	| { type: "extension_ui_response"; id: string; value: string }
 	| { type: "extension_ui_response"; id: string; confirmed: boolean }
 	| { type: "extension_ui_response"; id: string; cancelled: true; timedOut?: boolean }
 	/** Answers to an `ask` request, one per question in request order. */
-	| {
-			type: "extension_ui_response";
-			id: string;
-			answers: Array<{ id: string; selectedOptions: string[]; customInput?: string }>;
-	  };
+	| { type: "extension_ui_response"; id: string; answers: RpcAskDialogAnswer[] }
+	/** The user chose to discuss an `ask` request instead of answering it; distinct from cancelling. */
+	| { type: "extension_ui_response"; id: string; chat: true };
 
 // ============================================================================
 // Helper type for extracting command types

@@ -20,6 +20,11 @@ export const authGatewayHelp = {
 		"Run an auth-gateway: an HTTP forward proxy backed by the configured broker, or JSON lines on stdio with your own credentials",
 } satisfies CommandMetadata;
 
+export const attachHelp = {
+	description:
+		"List running session hosts (omp --mode host), or attach to one by host id, session id, or session path",
+} satisfies CommandMetadata;
+
 export const benchHelp = {
 	description:
 		"Benchmark models: TTFT/prefill vs decode throughput with p50/p95, across chat, prefill, generation, and prompt-cache workloads, or single-user vs parallel load (--detailed)",

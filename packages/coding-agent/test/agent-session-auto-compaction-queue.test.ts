@@ -10,12 +10,15 @@ import { ExtensionRuntime, loadExtensionFromFactory } from "@oh-my-pi/pi-coding-
 import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
 import type { CompactOptions } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
 import { AgentSession, type AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { SessionMaintenance } from "@oh-my-pi/pi-coding-agent/session/session-maintenance";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import * as unexpectedStopClassifier from "@oh-my-pi/pi-coding-agent/session/unexpected-stop-classifier";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
+import * as imageLoading from "@oh-my-pi/pi-coding-agent/utils/image-loading";
 import { TempDir, withTimeout } from "@oh-my-pi/pi-utils";
 import * as logger from "@oh-my-pi/pi-utils/logger";
+import { createAssistantMessage } from "./helpers/agent-session-setup";
 import { mockSchedulerWaitWithClock } from "./helpers/mock-scheduler-clock";
 
 import {
@@ -1288,6 +1291,77 @@ describe("AgentSession auto-compaction queue resume", () => {
 		expect(prompted).toHaveLength(1);
 		expect(prompted[0]?.some(message => message.customType === "extension-directive")).toBe(true);
 		expect(prompted[0]?.some(message => message.synthetic === true)).toBe(false);
+	});
+
+	it("holds text and image input until idle compaction finishes", async () => {
+		// Admission uses a real event-loop yield, not a timer boundary; the surrounding suite freezes timers.
+		vi.useRealTimers();
+		// Normalize immediately so native image I/O cannot accidentally delay a wrongly admitted prompt.
+		vi.spyOn(imageLoading, "normalizeModelContextImages").mockImplementation(async images => images);
+		cfgCompactionAutoContinue.set(session.settings, false);
+		cfgCompactionKeepRecentTokens.set(session.settings, 1);
+		sessionManager.appendMessage(createAssistantMessage("previous answer"));
+		sessionManager.appendMessage({ role: "user", content: "second turn", timestamp: Date.now() });
+		session.agent.replaceMessages(session.buildDisplaySessionContext().messages);
+		const mock = createMockModel({ responses: [{ content: ["next answer"] }] });
+		const requests: Array<{ text: string; images: number }> = [];
+		const order: string[] = [];
+		session.agent.streamFn = (model, context, options) => {
+			const content = context.messages.findLast(message => message.role === "user")?.content;
+			requests.push({
+				text:
+					typeof content === "string"
+						? content
+						: (content?.flatMap(part => (part.type === "text" ? [part.text] : [])).join("\n") ?? ""),
+				images: typeof content === "string" ? 0 : (content?.filter(part => part.type === "image").length ?? 0),
+			});
+			order.push("model request");
+			return mock.stream(model, context, options);
+		};
+		session.agent.getApiKey = () => "test-key";
+
+		const gate = Promise.withResolvers<void>();
+		(globalThis as typeof globalThis & { __ompManualCompactGate?: Promise<void> }).__ompManualCompactGate =
+			gate.promise;
+		const entered = Promise.withResolvers<void>();
+		session.subscribe(event => {
+			if (event.type === "auto_compaction_start") entered.resolve();
+			if (event.type === "auto_compaction_end") order.push("compaction ended");
+		});
+		const compacted = session.runIdleCompaction();
+		await entered.promise;
+
+		// Observe entry into admission, then yield an event-loop turn without guessing a wall-clock duration.
+		const admissionEntered = Promise.withResolvers<void>();
+		const waitForCleanup = SessionMaintenance.prototype.waitForMaintenanceCleanup;
+		vi.spyOn(SessionMaintenance.prototype, "waitForMaintenanceCleanup").mockImplementation(
+			function (this: SessionMaintenance) {
+				admissionEntered.resolve();
+				return waitForCleanup.call(this);
+			},
+		);
+		const prompted = session.prompt("after idle compaction", {
+			onPromptAdmitted: () => order.push("prompt admitted"),
+			images: [
+				{
+					type: "image",
+					mimeType: "image/png",
+					data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg==",
+				},
+			],
+		});
+		try {
+			await admissionEntered.promise;
+			await scheduler.yield();
+			expect(requests).toHaveLength(0);
+			expect(order).toEqual([]);
+		} finally {
+			gate.resolve();
+			await Promise.all([compacted, prompted]);
+		}
+		expect(requests).toHaveLength(1);
+		expect(requests[0]).toEqual({ text: "after idle compaction", images: 1 });
+		expect(order).toEqual(["compaction ended", "prompt admitted", "model request"]);
 	});
 
 	it("cancels an in-flight auto-compaction when manual compact startup aborts", async () => {

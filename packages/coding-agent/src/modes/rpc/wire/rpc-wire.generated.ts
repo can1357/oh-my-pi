@@ -420,6 +420,12 @@ export interface QueuedMessagesState {
 	followUp: string[];
 }
 
+/** Which queued chips carry an attachment (an image, or its source or description) their text does not; entry `i` describes chip `i`. */
+export interface QueueAttachments {
+	steering: boolean[];
+	followUp: boolean[];
+}
+
 export interface ToolDescriptor {
 	name: string;
 	description: string;
@@ -575,6 +581,8 @@ export interface RemoveQueuedMessageResult {
 	images?: ImageContent[];
 	/** Only ever `true`: the images exceeded the transport limit and were omitted; the removal still happened. */
 	imagesDropped?: boolean;
+	/** Nothing was removed: `refuseAttachments` was set and the prompt carries one. */
+	refused?: "attachments";
 }
 
 export interface PromoteQueuedMessageResult {
@@ -985,10 +993,18 @@ export interface QueueUpdateEvent {
 	type: "queue_update";
 	steering: string[];
 	followUp: string[];
+	/** Session-host socket clients only; absent means unknown, not that no chip carries one. */
+	attachments?: QueueAttachments;
+}
+
+/** The host produced a recap while the session sat idle: the full reply (de-duplicated and capped like any side-channel reply), journaled in the session history database. It never enters the transcript or the model context. */
+export interface IdleRecapEvent {
+	type: "idle_recap";
+	recap: string;
 }
 
 /** A session event, discriminated by `type`; `set_event_filter` selects which are sent. */
-export type RpcAgentEvent = AgentStartEvent | AgentEndEvent | TurnStartEvent | TurnEndEvent | MessageStartEvent | MessageUpdateEvent | MessageEndEvent | ToolExecutionStartEvent | ToolExecutionUpdateEvent | ToolStreamUpdateEvent | ToolExecutionEndEvent | AutoCompactionStartEvent | AutoCompactionEndEvent | AutoRetryStartEvent | AutoRetryEndEvent | CacheWarmingStartEvent | CacheWarmingEndEvent | RetryFallbackAppliedEvent | RetryFallbackSucceededEvent | ModelChangedEvent | ConfigWarningsChangedEvent | AdvisorCostChangedEvent | AdvisorYieldedEvent | TtsrTriggeredEvent | TodoReminderEvent | TodoAutoClearEvent | IrcMessageEvent | NoticeEvent | ThinkingLevelChangedEvent | GoalUpdatedEvent | QueueUpdateEvent;
+export type RpcAgentEvent = AgentStartEvent | AgentEndEvent | TurnStartEvent | TurnEndEvent | MessageStartEvent | MessageUpdateEvent | MessageEndEvent | ToolExecutionStartEvent | ToolExecutionUpdateEvent | ToolStreamUpdateEvent | ToolExecutionEndEvent | AutoCompactionStartEvent | AutoCompactionEndEvent | AutoRetryStartEvent | AutoRetryEndEvent | CacheWarmingStartEvent | CacheWarmingEndEvent | RetryFallbackAppliedEvent | RetryFallbackSucceededEvent | ModelChangedEvent | ConfigWarningsChangedEvent | AdvisorCostChangedEvent | AdvisorYieldedEvent | TtsrTriggeredEvent | TodoReminderEvent | TodoAutoClearEvent | IrcMessageEvent | NoticeEvent | ThinkingLevelChangedEvent | GoalUpdatedEvent | QueueUpdateEvent | IdleRecapEvent;
 
 /** First frame after startup; transport fields are absent on servers without protocol v2. */
 export interface ReadyEvent {
@@ -1141,18 +1157,24 @@ export interface CommandOutputEvent {
 	text: string;
 }
 
-/** A builtin slash command changed the session title. */
+/** The session title changed. */
 export interface SessionInfoUpdateEvent {
 	type: "session_info_update";
 	sessionId: string;
 	title?: string;
+	/** Socket clients: the session was relocated (`/move`, `/wt`); where it lives now. */
+	origin?: SessionOrigin;
+	/** Host sequence number; socket clients only. */
+	seq?: number;
 }
 
-/** A builtin slash command changed the model configuration. */
+/** The live model or thinking level changed. */
 export interface ConfigUpdateEvent {
 	type: "config_update";
 	model?: ModelInfo;
 	thinkingLevel?: ThinkingLevel;
+	/** Host sequence number; socket clients only. */
+	seq?: number;
 }
 
 /** An event could not fit within the transport limits and was dropped. */
@@ -1160,6 +1182,117 @@ export interface RpcFrameErrorEvent {
 	type: "rpc_frame_error";
 	error: string;
 	originalType?: string;
+}
+
+/** A connected session-host client, as listed in snapshots and `clients_changed`. */
+export interface ClientInfo {
+	clientId: string;
+	kind: string;
+	label?: string;
+}
+
+/** Where a host session lives, for resolving `local://` URLs and relative paths in what it authored. */
+export interface SessionOrigin {
+	cwd: string;
+	artifactsDir: string | null;
+	localRoot: string;
+	sessionId: string;
+}
+
+/** The in-flight message of a mid-turn join; later frames for it carry `messageId`. */
+export interface StreamingMessage {
+	messageId: string;
+	message: AgentMessage;
+}
+
+/** The session as the `entry` frames have announced it: everything a socket client needs to render it from scratch. */
+export interface SessionSnapshot {
+	state: SessionState;
+	header: Record<string, unknown> | null;
+	entries: Record<string, unknown>[];
+	leafId: string | null;
+	/** Open extension dialogs a late joiner can answer. */
+	pendingUi: ExtensionUiRequest[];
+	clients: ClientInfo[];
+	streaming?: StreamingMessage;
+	/** Extension statuses and widgets showing now: the latest `setStatus`/`setWidget` per key. */
+	uiState?: ExtensionUiRequest[];
+	/** Parallel to `state.queuedMessages`. */
+	queueAttachments?: QueueAttachments;
+	origin?: SessionOrigin;
+}
+
+/** Socket clients: first frame of a fresh attach; later frames carry a greater `seq`. */
+export interface AttachedEvent {
+	type: "attached";
+	hostId: string;
+	clientId: string;
+	epoch: number;
+	seq: number;
+	snapshot: SessionSnapshot;
+}
+
+/** Socket clients: first frame of a resume; the `replayed` frames after `lastSeq` follow it. */
+export interface ResumedEvent {
+	type: "resumed";
+	epoch: number;
+	replayed: number;
+}
+
+/** Socket clients: a session-file append. */
+export interface EntryEvent {
+	type: "entry";
+	entry: Record<string, unknown>;
+	seq: number;
+	/** The host's active leaf when the entry was announced; absent from older hosts. */
+	leafId?: string | null;
+}
+
+export type SessionReplacedReason = "new" | "resume" | "fork" | "tree";
+
+/** Socket clients: the host now serves a different session or transcript; `snapshot` replaces the client's view. */
+export interface SessionReplacedEvent {
+	type: "session_replaced";
+	epoch: number;
+	reason: SessionReplacedReason;
+	snapshot: SessionSnapshot;
+	seq: number;
+	sessionFile?: string;
+}
+
+/** Socket clients: client presence changed. */
+export interface ClientsChangedEvent {
+	type: "clients_changed";
+	clients: ClientInfo[];
+	seq: number;
+}
+
+export interface ClientIdentity {
+	kind: string;
+	label?: string;
+}
+
+export interface ClientCapabilities {
+	/** Receive extension UI requests. */
+	ui: boolean;
+}
+
+export interface ResumePoint {
+	hostId: string;
+	epoch: number;
+	lastSeq: number;
+}
+
+/** First frame a session-host socket client sends; anything else, or a wrong token, gets `unauthorized` and a close. */
+export interface HelloFrame {
+	type: "hello";
+	token: string;
+	/** 1 or 2, as `negotiate_protocol` would select. */
+	protocolVersion: number;
+	client: ClientIdentity;
+	capabilities: ClientCapabilities;
+	/** Ignored, so the client gets `attached`, unless `hostId` names this host. */
+	resume?: ResumePoint;
 }
 
 export type WidgetPlacement = "aboveEditor" | "belowEditor";
@@ -1297,6 +1430,11 @@ export interface AskAnswer {
 	id: string;
 	selectedOptions: string[];
 	customInput?: string;
+	/** Images pasted into the free text; their `[Image #N]` markers sit in it. */
+	customInputImages?: ImageContent[];
+	/** The user's note on the answer. */
+	note?: string;
+	noteImages?: ImageContent[];
 }
 
 /** Answers a `select`, `input`, or `editor` request. */
@@ -1328,8 +1466,15 @@ export interface AnswersUiResponse {
 	answers: AskAnswer[];
 }
 
+/** Declines an `ask` request to discuss it instead; distinct from cancelling. */
+export interface ChatUiResponse {
+	type: "extension_ui_response";
+	id: string;
+	chat: true;
+}
+
 /** Host reply to an extension UI request; variants share `type` and differ by their payload key. */
-export type ExtensionUiResponse = ValueUiResponse | ConfirmUiResponse | CancelUiResponse | AnswersUiResponse;
+export type ExtensionUiResponse = ValueUiResponse | ConfirmUiResponse | CancelUiResponse | AnswersUiResponse | ChatUiResponse;
 
 export interface HostToolCallRequest {
 	type: "host_tool_call";
@@ -1418,6 +1563,20 @@ export interface RpcResponse {
 	error?: string;
 	/** Machine-readable failure reason, when one applies. */
 	code?: string;
+	/** `stale`: the host's current session epoch. */
+	epoch?: number;
+	/** `stale`: the session's current leaf. */
+	leafId?: string | null;
+	/** `session_hosted`: the host that owns the session. */
+	hostId?: string;
+}
+
+/** Write preconditions any command may carry beside `id`/`type`, honored for session-host socket clients only; on mismatch the command fails with `code: "stale"`. */
+export interface RpcPreconditions {
+	/** Run only while the host's session epoch equals this. */
+	ifEpoch?: number;
+	/** Run only while the session leaf equals this entry id (`null`: empty session). */
+	ifLeaf?: string | null;
 }
 
 export type ToolLoadMode = "essential" | "discoverable";
@@ -1440,7 +1599,7 @@ export interface HostUriSchemeDefinition {
 }
 
 /** Unsolicited outbound frame (everything except responses and host tool/URI requests), discriminated by `type`. */
-export type RpcNotification = ReadyEvent | PromptResultEvent | SessionSettledEvent | ExtensionError | ExtensionUiRequest | AvailableCommandsUpdateEvent | SubagentLifecycleEvent | SubagentProgressEvent | SubagentEvent | LivePhaseEvent | LiveLevelsEvent | LiveTranscriptEvent | LiveEndEvent | BtwDeltaEvent | BtwRecordEvent | CommandOutputEvent | SessionInfoUpdateEvent | ConfigUpdateEvent | RpcFrameErrorEvent | RpcAgentEvent;
+export type RpcNotification = ReadyEvent | PromptResultEvent | SessionSettledEvent | ExtensionError | ExtensionUiRequest | AvailableCommandsUpdateEvent | SubagentLifecycleEvent | SubagentProgressEvent | SubagentEvent | LivePhaseEvent | LiveLevelsEvent | LiveTranscriptEvent | LiveEndEvent | BtwDeltaEvent | BtwRecordEvent | CommandOutputEvent | SessionInfoUpdateEvent | ConfigUpdateEvent | AttachedEvent | ResumedEvent | EntryEvent | SessionReplacedEvent | ClientsChangedEvent | RpcFrameErrorEvent | RpcAgentEvent;
 
 /** Any frame the server writes to stdout (after reassembling `rpc_chunk` sequences), discriminated by `type`. */
 export type RpcServerFrame = RpcResponse | RpcHostRequest | RpcNotification;
@@ -1475,6 +1634,10 @@ export interface FollowUpParams {
 export interface RemoveQueuedMessageParams {
 	message: string;
 	queue: QueuedMessageQueue;
+	/** `last`: the newest prompt whose chip text is `message`; default `first` (raw text, then chip text). */
+	match?: "first" | "last";
+	/** Remove nothing, answering `refused: "attachments"`, when the prompt carries an attachment. */
+	refuseAttachments?: boolean;
 }
 
 export interface PromoteQueuedMessageParams {
@@ -1521,6 +1684,14 @@ export interface SetAskDialogParams {
 
 export interface SetAskDialogResult {
 	enabled: boolean;
+}
+
+export interface SetIdleActivityParams {
+	isComposing: boolean;
+}
+
+export interface SetIdleActivityResult {
+	isComposing: boolean;
 }
 
 export interface GetAvailableCommandsResult {
@@ -1782,6 +1953,8 @@ export interface GetBtwHistoryResult {
 /** Every RPC command's parameters and successful response `data`. */
 export interface RpcWireCommands {
 	negotiate_protocol: { params: NegotiateProtocolParams; result: NegotiateProtocolResult };
+	detach: { params: undefined; result: undefined };
+	exit: { params: undefined; result: undefined };
 	prompt: { params: PromptParams; result: PromptAck };
 	steer: { params: SteerParams; result: undefined };
 	follow_up: { params: FollowUpParams; result: undefined };
@@ -1797,6 +1970,7 @@ export interface RpcWireCommands {
 	set_slow_mode: { params: SetSlowModeParams; result: SetSlowModeResult };
 	goal: { params: GoalParams; result: GoalResult };
 	set_ask_dialog: { params: SetAskDialogParams; result: SetAskDialogResult };
+	set_idle_activity: { params: SetIdleActivityParams; result: SetIdleActivityResult };
 	get_available_commands: { params: undefined; result: GetAvailableCommandsResult };
 	get_entries: { params: GetEntriesParams; result: SessionEntries };
 	get_tree: { params: undefined; result: SessionTree };

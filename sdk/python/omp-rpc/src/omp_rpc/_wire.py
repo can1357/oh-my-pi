@@ -186,6 +186,11 @@ _LIVE_ROLE_VALUES: Final[frozenset[str]] = frozenset({"user", "assistant"})
 _decode_live_role = cast("Decoder[LiveRole]", literal(_LIVE_ROLE_VALUES))
 
 
+SessionReplacedReason: TypeAlias = Literal["new", "resume", "fork", "tree"]
+_SESSION_REPLACED_REASON_VALUES: Final[frozenset[str]] = frozenset({"new", "resume", "fork", "tree"})
+_decode_session_replaced_reason = cast("Decoder[SessionReplacedReason]", literal(_SESSION_REPLACED_REASON_VALUES))
+
+
 WidgetPlacement: TypeAlias = Literal["aboveEditor", "belowEditor"]
 _WIDGET_PLACEMENT_VALUES: Final[frozenset[str]] = frozenset({"aboveEditor", "belowEditor"})
 _decode_widget_placement = cast("Decoder[WidgetPlacement]", literal(_WIDGET_PLACEMENT_VALUES))
@@ -577,6 +582,13 @@ class QueuedMessagesState:
 
 
 @dataclass(slots=True, frozen=True, kw_only=True)
+class QueueAttachments:
+    """Which queued chips carry an attachment (an image, or its source or description) their text does not; entry `i` describes chip `i`."""
+    steering: tuple[bool, ...]
+    follow_up: tuple[bool, ...]
+
+
+@dataclass(slots=True, frozen=True, kw_only=True)
 class ToolDescriptor:
     name: str
     description: str
@@ -740,6 +752,8 @@ class RemoveQueuedMessageResult:
     """The removed message's images, so the client can restore them with its text."""
     images_dropped: bool | None = None
     """Only ever `true`: the images exceeded the transport limit and were omitted; the removal still happened."""
+    refused: Literal["attachments"] | None = None
+    """Nothing was removed: `refuseAttachments` was set and the prompt carries one."""
 
 
 @dataclass(slots=True, frozen=True, kw_only=True)
@@ -1190,6 +1204,15 @@ class QueueUpdateEvent:
     type: Literal["queue_update"] = "queue_update"
     steering: tuple[str, ...]
     follow_up: tuple[str, ...]
+    attachments: QueueAttachments | None = None
+    """Session-host socket clients only; absent means unknown, not that no chip carries one."""
+
+
+@dataclass(slots=True, frozen=True, kw_only=True)
+class IdleRecapEvent:
+    """The host produced a recap while the session sat idle: the full reply (de-duplicated and capped like any side-channel reply), journaled in the session history database. It never enters the transcript or the model context."""
+    type: Literal["idle_recap"] = "idle_recap"
+    recap: str
 
 
 @dataclass(slots=True, frozen=True, kw_only=True)
@@ -1356,18 +1379,24 @@ class CommandOutputEvent:
 
 @dataclass(slots=True, frozen=True, kw_only=True)
 class SessionInfoUpdateEvent:
-    """A builtin slash command changed the session title."""
+    """The session title changed."""
     type: Literal["session_info_update"] = "session_info_update"
     session_id: str
     title: str | None = None
+    origin: SessionOrigin | None = None
+    """Socket clients: the session was relocated (`/move`, `/wt`); where it lives now."""
+    seq: int | None = None
+    """Host sequence number; socket clients only."""
 
 
 @dataclass(slots=True, frozen=True, kw_only=True)
 class ConfigUpdateEvent:
-    """A builtin slash command changed the model configuration."""
+    """The live model or thinking level changed."""
     type: Literal["config_update"] = "config_update"
     model: ModelInfo | None = None
     thinking_level: ThinkingLevel | None = None
+    seq: int | None = None
+    """Host sequence number; socket clients only."""
 
 
 @dataclass(slots=True, frozen=True, kw_only=True)
@@ -1376,6 +1405,96 @@ class RpcFrameErrorEvent:
     type: Literal["rpc_frame_error"] = "rpc_frame_error"
     error: str
     original_type: str | None = None
+
+
+@dataclass(slots=True, frozen=True, kw_only=True)
+class ClientInfo:
+    """A connected session-host client, as listed in snapshots and `clients_changed`."""
+    client_id: str
+    kind: str
+    label: str | None = None
+
+
+@dataclass(slots=True, frozen=True, kw_only=True)
+class SessionOrigin:
+    """Where a host session lives, for resolving `local://` URLs and relative paths in what it authored."""
+    cwd: str
+    artifacts_dir: str | None
+    local_root: str
+    session_id: str
+
+
+@dataclass(slots=True, frozen=True, kw_only=True)
+class StreamingMessage:
+    """The in-flight message of a mid-turn join; later frames for it carry `messageId`."""
+    message_id: str
+    message: AgentMessage
+
+
+@dataclass(slots=True, frozen=True, kw_only=True)
+class SessionSnapshot:
+    """The session as the `entry` frames have announced it: everything a socket client needs to render it from scratch."""
+    state: SessionState
+    header: JsonObject | None
+    entries: tuple[JsonObject, ...]
+    leaf_id: str | None
+    pending_ui: tuple[ExtensionUiRequest, ...]
+    """Open extension dialogs a late joiner can answer."""
+    clients: tuple[ClientInfo, ...]
+    streaming: StreamingMessage | None = None
+    ui_state: tuple[ExtensionUiRequest, ...] | None = None
+    """Extension statuses and widgets showing now: the latest `setStatus`/`setWidget` per key."""
+    queue_attachments: QueueAttachments | None = None
+    """Parallel to `state.queuedMessages`."""
+    origin: SessionOrigin | None = None
+
+
+@dataclass(slots=True, frozen=True, kw_only=True)
+class AttachedEvent:
+    """Socket clients: first frame of a fresh attach; later frames carry a greater `seq`."""
+    type: Literal["attached"] = "attached"
+    host_id: str
+    client_id: str
+    epoch: int
+    seq: int
+    snapshot: SessionSnapshot
+
+
+@dataclass(slots=True, frozen=True, kw_only=True)
+class ResumedEvent:
+    """Socket clients: first frame of a resume; the `replayed` frames after `lastSeq` follow it."""
+    type: Literal["resumed"] = "resumed"
+    epoch: int
+    replayed: int
+
+
+@dataclass(slots=True, frozen=True, kw_only=True)
+class EntryEvent:
+    """Socket clients: a session-file append."""
+    type: Literal["entry"] = "entry"
+    entry: JsonObject
+    seq: int
+    leaf_id: str | None = None
+    """The host's active leaf when the entry was announced; absent from older hosts."""
+
+
+@dataclass(slots=True, frozen=True, kw_only=True)
+class SessionReplacedEvent:
+    """Socket clients: the host now serves a different session or transcript; `snapshot` replaces the client's view."""
+    type: Literal["session_replaced"] = "session_replaced"
+    epoch: int
+    reason: SessionReplacedReason
+    snapshot: SessionSnapshot
+    seq: int
+    session_file: str | None = None
+
+
+@dataclass(slots=True, frozen=True, kw_only=True)
+class ClientsChangedEvent:
+    """Socket clients: client presence changed."""
+    type: Literal["clients_changed"] = "clients_changed"
+    clients: tuple[ClientInfo, ...]
+    seq: int
 
 
 @dataclass(slots=True, frozen=True, kw_only=True)
@@ -1547,6 +1666,11 @@ class AskAnswer:
     id: str
     selected_options: tuple[str, ...]
     custom_input: str | None = None
+    custom_input_images: tuple[ImageContent, ...] | None = None
+    """Images pasted into the free text; their `[Image #N]` markers sit in it."""
+    note: str | None = None
+    """The user's note on the answer."""
+    note_images: tuple[ImageContent, ...] | None = None
 
 
 @dataclass(slots=True, frozen=True, kw_only=True)
@@ -1574,6 +1698,11 @@ class NegotiateProtocolResult:
 
 
 @dataclass(slots=True, frozen=True, kw_only=True)
+class SetIdleActivityResult:
+    is_composing: bool
+
+
+@dataclass(slots=True, frozen=True, kw_only=True)
 class LogoutResult:
     remaining_source: str | None = None
 
@@ -1596,11 +1725,11 @@ UsageLimitState: TypeAlias = UsageLimitLowPriority | UsageLimitWrapUp
 """Provider-neutral state of an account past its usage limit, discriminated by `stage`."""
 
 
-RpcAgentEvent: TypeAlias = AgentStartEvent | AgentEndEvent | TurnStartEvent | TurnEndEvent | MessageStartEvent | MessageUpdateEvent | MessageEndEvent | ToolExecutionStartEvent | ToolExecutionUpdateEvent | ToolStreamUpdateEvent | ToolExecutionEndEvent | AutoCompactionStartEvent | AutoCompactionEndEvent | AutoRetryStartEvent | AutoRetryEndEvent | CacheWarmingStartEvent | CacheWarmingEndEvent | RetryFallbackAppliedEvent | RetryFallbackSucceededEvent | ModelChangedEvent | ConfigWarningsChangedEvent | AdvisorCostChangedEvent | AdvisorYieldedEvent | TtsrTriggeredEvent | TodoReminderEvent | TodoAutoClearEvent | IrcMessageEvent | NoticeEvent | ThinkingLevelChangedEvent | GoalUpdatedEvent | QueueUpdateEvent
+RpcAgentEvent: TypeAlias = AgentStartEvent | AgentEndEvent | TurnStartEvent | TurnEndEvent | MessageStartEvent | MessageUpdateEvent | MessageEndEvent | ToolExecutionStartEvent | ToolExecutionUpdateEvent | ToolStreamUpdateEvent | ToolExecutionEndEvent | AutoCompactionStartEvent | AutoCompactionEndEvent | AutoRetryStartEvent | AutoRetryEndEvent | CacheWarmingStartEvent | CacheWarmingEndEvent | RetryFallbackAppliedEvent | RetryFallbackSucceededEvent | ModelChangedEvent | ConfigWarningsChangedEvent | AdvisorCostChangedEvent | AdvisorYieldedEvent | TtsrTriggeredEvent | TodoReminderEvent | TodoAutoClearEvent | IrcMessageEvent | NoticeEvent | ThinkingLevelChangedEvent | GoalUpdatedEvent | QueueUpdateEvent | IdleRecapEvent
 """A session event, discriminated by `type`; `set_event_filter` selects which are sent."""
 
 
-RpcNotification: TypeAlias = ReadyEvent | PromptResultEvent | SessionSettledEvent | ExtensionError | ExtensionUiRequest | AvailableCommandsUpdateEvent | SubagentLifecycleEvent | SubagentProgressEvent | SubagentEvent | LivePhaseEvent | LiveLevelsEvent | LiveTranscriptEvent | LiveEndEvent | BtwDeltaEvent | BtwRecordEvent | CommandOutputEvent | SessionInfoUpdateEvent | ConfigUpdateEvent | RpcFrameErrorEvent | RpcAgentEvent | UnknownNotification
+RpcNotification: TypeAlias = ReadyEvent | PromptResultEvent | SessionSettledEvent | ExtensionError | ExtensionUiRequest | AvailableCommandsUpdateEvent | SubagentLifecycleEvent | SubagentProgressEvent | SubagentEvent | LivePhaseEvent | LiveLevelsEvent | LiveTranscriptEvent | LiveEndEvent | BtwDeltaEvent | BtwRecordEvent | CommandOutputEvent | SessionInfoUpdateEvent | ConfigUpdateEvent | AttachedEvent | ResumedEvent | EntryEvent | SessionReplacedEvent | ClientsChangedEvent | RpcFrameErrorEvent | RpcAgentEvent | UnknownNotification
 """Unsolicited outbound frame (everything except responses and host tool/URI requests), discriminated by `type`."""
 
 
@@ -1849,6 +1978,14 @@ def parse_queued_messages_state(value: object, path: str = "QueuedMessagesState"
     )
 
 
+def parse_queue_attachments(value: object, path: str = "QueueAttachments") -> QueueAttachments:
+    payload = expect_object(value, path)
+    return QueueAttachments(
+        steering=required(payload, "steering", array(decode_bool), path),
+        follow_up=required(payload, "followUp", array(decode_bool), path),
+    )
+
+
 def parse_tool_descriptor(value: object, path: str = "ToolDescriptor") -> ToolDescriptor:
     payload = expect_object(value, path)
     return ToolDescriptor(
@@ -2022,6 +2159,7 @@ def parse_remove_queued_message_result(value: object, path: str = "RemoveQueuedM
         removed=required(payload, "removed", decode_bool, path),
         images=optional(payload, "images", array(parse_image_content), path),
         images_dropped=optional(payload, "imagesDropped", decode_bool, path),
+        refused=optional(payload, "refused", cast('Decoder[Literal["attachments"]]', literal(frozenset({"attachments"}))), path),
     )
 
 
@@ -2544,6 +2682,15 @@ def parse_queue_update_event(value: object, path: str = "QueueUpdateEvent") -> Q
     return QueueUpdateEvent(
         steering=required(payload, "steering", array(decode_str), path),
         follow_up=required(payload, "followUp", array(decode_str), path),
+        attachments=optional(payload, "attachments", parse_queue_attachments, path),
+    )
+
+
+def parse_idle_recap_event(value: object, path: str = "IdleRecapEvent") -> IdleRecapEvent:
+    payload = expect_object(value, path)
+    required(payload, "type", cast('Decoder[Literal["idle_recap"]]', literal(frozenset({"idle_recap"}))), path)
+    return IdleRecapEvent(
+        recap=required(payload, "recap", decode_str, path),
     )
 
 
@@ -2735,6 +2882,8 @@ def parse_session_info_update_event(value: object, path: str = "SessionInfoUpdat
     return SessionInfoUpdateEvent(
         session_id=required(payload, "sessionId", decode_str, path),
         title=optional(payload, "title", decode_str, path),
+        origin=optional(payload, "origin", parse_session_origin, path),
+        seq=optional(payload, "seq", decode_int, path),
     )
 
 
@@ -2744,6 +2893,7 @@ def parse_config_update_event(value: object, path: str = "ConfigUpdateEvent") ->
     return ConfigUpdateEvent(
         model=optional(payload, "model", parse_model_info, path),
         thinking_level=optional(payload, "thinkingLevel", _decode_thinking_level, path),
+        seq=optional(payload, "seq", decode_int, path),
     )
 
 
@@ -2753,6 +2903,101 @@ def parse_rpc_frame_error_event(value: object, path: str = "RpcFrameErrorEvent")
     return RpcFrameErrorEvent(
         error=required(payload, "error", decode_str, path),
         original_type=optional(payload, "originalType", decode_str, path),
+    )
+
+
+def parse_client_info(value: object, path: str = "ClientInfo") -> ClientInfo:
+    payload = expect_object(value, path)
+    return ClientInfo(
+        client_id=required(payload, "clientId", decode_str, path),
+        kind=required(payload, "kind", decode_str, path),
+        label=optional(payload, "label", decode_str, path),
+    )
+
+
+def parse_session_origin(value: object, path: str = "SessionOrigin") -> SessionOrigin:
+    payload = expect_object(value, path)
+    return SessionOrigin(
+        cwd=required(payload, "cwd", decode_str, path),
+        artifacts_dir=required(payload, "artifactsDir", nullable(decode_str), path),
+        local_root=required(payload, "localRoot", decode_str, path),
+        session_id=required(payload, "sessionId", decode_str, path),
+    )
+
+
+def parse_streaming_message(value: object, path: str = "StreamingMessage") -> StreamingMessage:
+    payload = expect_object(value, path)
+    return StreamingMessage(
+        message_id=required(payload, "messageId", decode_str, path),
+        message=required(payload, "message", parse_agent_message, path),
+    )
+
+
+def parse_session_snapshot(value: object, path: str = "SessionSnapshot") -> SessionSnapshot:
+    payload = expect_object(value, path)
+    return SessionSnapshot(
+        state=required(payload, "state", parse_session_state, path),
+        header=required(payload, "header", nullable(decode_json_object), path),
+        entries=required(payload, "entries", array(decode_json_object), path),
+        leaf_id=required(payload, "leafId", nullable(decode_str), path),
+        pending_ui=required(payload, "pendingUi", array(parse_extension_ui_request), path),
+        clients=required(payload, "clients", array(parse_client_info), path),
+        streaming=optional(payload, "streaming", parse_streaming_message, path),
+        ui_state=optional(payload, "uiState", array(parse_extension_ui_request), path),
+        queue_attachments=optional(payload, "queueAttachments", parse_queue_attachments, path),
+        origin=optional(payload, "origin", parse_session_origin, path),
+    )
+
+
+def parse_attached_event(value: object, path: str = "AttachedEvent") -> AttachedEvent:
+    payload = expect_object(value, path)
+    required(payload, "type", cast('Decoder[Literal["attached"]]', literal(frozenset({"attached"}))), path)
+    return AttachedEvent(
+        host_id=required(payload, "hostId", decode_str, path),
+        client_id=required(payload, "clientId", decode_str, path),
+        epoch=required(payload, "epoch", decode_int, path),
+        seq=required(payload, "seq", decode_int, path),
+        snapshot=required(payload, "snapshot", parse_session_snapshot, path),
+    )
+
+
+def parse_resumed_event(value: object, path: str = "ResumedEvent") -> ResumedEvent:
+    payload = expect_object(value, path)
+    required(payload, "type", cast('Decoder[Literal["resumed"]]', literal(frozenset({"resumed"}))), path)
+    return ResumedEvent(
+        epoch=required(payload, "epoch", decode_int, path),
+        replayed=required(payload, "replayed", decode_int, path),
+    )
+
+
+def parse_entry_event(value: object, path: str = "EntryEvent") -> EntryEvent:
+    payload = expect_object(value, path)
+    required(payload, "type", cast('Decoder[Literal["entry"]]', literal(frozenset({"entry"}))), path)
+    return EntryEvent(
+        entry=required(payload, "entry", decode_json_object, path),
+        seq=required(payload, "seq", decode_int, path),
+        leaf_id=optional(payload, "leafId", nullable(decode_str), path),
+    )
+
+
+def parse_session_replaced_event(value: object, path: str = "SessionReplacedEvent") -> SessionReplacedEvent:
+    payload = expect_object(value, path)
+    required(payload, "type", cast('Decoder[Literal["session_replaced"]]', literal(frozenset({"session_replaced"}))), path)
+    return SessionReplacedEvent(
+        epoch=required(payload, "epoch", decode_int, path),
+        reason=required(payload, "reason", _decode_session_replaced_reason, path),
+        snapshot=required(payload, "snapshot", parse_session_snapshot, path),
+        seq=required(payload, "seq", decode_int, path),
+        session_file=optional(payload, "sessionFile", decode_str, path),
+    )
+
+
+def parse_clients_changed_event(value: object, path: str = "ClientsChangedEvent") -> ClientsChangedEvent:
+    payload = expect_object(value, path)
+    required(payload, "type", cast('Decoder[Literal["clients_changed"]]', literal(frozenset({"clients_changed"}))), path)
+    return ClientsChangedEvent(
+        clients=required(payload, "clients", array(parse_client_info), path),
+        seq=required(payload, "seq", decode_int, path),
     )
 
 
@@ -2948,6 +3193,9 @@ def parse_ask_answer(value: object, path: str = "AskAnswer") -> AskAnswer:
         id=required(payload, "id", decode_str, path),
         selected_options=required(payload, "selectedOptions", array(decode_str), path),
         custom_input=optional(payload, "customInput", decode_str, path),
+        custom_input_images=optional(payload, "customInputImages", array(parse_image_content), path),
+        note=optional(payload, "note", decode_str, path),
+        note_images=optional(payload, "noteImages", array(parse_image_content), path),
     )
 
 
@@ -2978,6 +3226,13 @@ def parse_negotiate_protocol_result(value: object, path: str = "NegotiateProtoco
     payload = expect_object(value, path)
     return NegotiateProtocolResult(
         protocol_version=required(payload, "protocolVersion", decode_int, path),
+    )
+
+
+def parse_set_idle_activity_result(value: object, path: str = "SetIdleActivityResult") -> SetIdleActivityResult:
+    payload = expect_object(value, path)
+    return SetIdleActivityResult(
+        is_composing=required(payload, "isComposing", decode_bool, path),
     )
 
 
@@ -3043,6 +3298,7 @@ _RPC_AGENT_EVENT_CASES: Final[dict[str, Decoder[RpcAgentEvent]]] = {
         "thinking_level_changed": parse_thinking_level_changed_event,
         "goal_updated": parse_goal_updated_event,
         "queue_update": parse_queue_update_event,
+        "idle_recap": parse_idle_recap_event,
 }
 
 
@@ -3065,6 +3321,11 @@ _RPC_NOTIFICATION_CASES: Final[dict[str, Decoder[RpcNotification]]] = {
         "command_output": parse_command_output_event,
         "session_info_update": parse_session_info_update_event,
         "config_update": parse_config_update_event,
+        "attached": parse_attached_event,
+        "resumed": parse_resumed_event,
+        "entry": parse_entry_event,
+        "session_replaced": parse_session_replaced_event,
+        "clients_changed": parse_clients_changed_event,
         "rpc_frame_error": parse_rpc_frame_error_event,
         "agent_start": parse_rpc_agent_event,
         "agent_end": parse_rpc_agent_event,
@@ -3097,6 +3358,7 @@ _RPC_NOTIFICATION_CASES: Final[dict[str, Decoder[RpcNotification]]] = {
         "thinking_level_changed": parse_rpc_agent_event,
         "goal_updated": parse_rpc_agent_event,
         "queue_update": parse_rpc_agent_event,
+        "idle_recap": parse_rpc_agent_event,
 }
 
 
@@ -3110,6 +3372,16 @@ class WireClient:
 
     def _listen(self, frame_type: str, listener: Callable[..., None]) -> Callable[[], None]:
         raise NotImplementedError
+
+    def detach(self) -> None:
+        """Session-host socket clients: leave; the session keeps running. Unknown on stdio."""
+        params: dict[str, object] = {}
+        self._command("detach", params)
+
+    def exit(self) -> None:
+        """Session-host socket clients: leave, and stop the host when no other client remains. Unknown on stdio."""
+        params: dict[str, object] = {}
+        self._command("exit", params)
 
     def steer(self, message: str, *, images: Sequence[ImageContent] | None = None) -> None:
         """Queue a steering message."""
@@ -3127,11 +3399,15 @@ class WireClient:
             params["images"] = list(images)
         self._command("follow_up", params)
 
-    def remove_queued_message(self, message: str, queue: QueuedMessageQueue) -> RemoveQueuedMessageResult:
+    def remove_queued_message(self, message: str, queue: QueuedMessageQueue, *, match: Literal["first", "last"] | None = None, refuse_attachments: bool | None = None) -> RemoveQueuedMessageResult:
         """Remove one pending queued message by its queue-chip text."""
         params: dict[str, object] = {}
         params["message"] = message
         params["queue"] = queue
+        if match is not None:
+            params["match"] = match
+        if refuse_attachments is not None:
+            params["refuseAttachments"] = refuse_attachments
         return parse_remove_queued_message_result(self._command("remove_queued_message", params), "remove_queued_message")
 
     def promote_queued_message(self, message: str) -> PromoteQueuedMessageResult:
@@ -3199,6 +3475,12 @@ class WireClient:
         params: dict[str, object] = {}
         params["enabled"] = enabled
         return required(expect_object(self._command("set_ask_dialog", params), "set_ask_dialog"), "enabled", decode_bool, "set_ask_dialog")
+
+    def set_idle_activity(self, is_composing: bool) -> SetIdleActivityResult:
+        """Socket clients only: report whether this client has an unsent draft, so host-owned idle maintenance (recap and idle compaction) stays out of its way. Answered at once, even while another command runs. Like any write it honors the common `ifEpoch` precondition; generated SDK methods send none and bind to the current epoch."""
+        params: dict[str, object] = {}
+        params["isComposing"] = is_composing
+        return parse_set_idle_activity_result(self._command("set_idle_activity", params), "set_idle_activity")
 
     def get_available_commands(self) -> tuple[AvailableSlashCommand, ...]:
         """List the slash-command catalog."""
@@ -3566,12 +3848,32 @@ class WireClient:
         return self._listen("command_output", listener)
 
     def on_session_info_update(self, listener: Callable[[SessionInfoUpdateEvent], None]) -> Callable[[], None]:
-        """Subscribe to `session_info_update`: A builtin slash command changed the session title."""
+        """Subscribe to `session_info_update`: The session title changed."""
         return self._listen("session_info_update", listener)
 
     def on_config_update(self, listener: Callable[[ConfigUpdateEvent], None]) -> Callable[[], None]:
-        """Subscribe to `config_update`: A builtin slash command changed the model configuration."""
+        """Subscribe to `config_update`: The live model or thinking level changed."""
         return self._listen("config_update", listener)
+
+    def on_attached(self, listener: Callable[[AttachedEvent], None]) -> Callable[[], None]:
+        """Subscribe to `attached`: Socket clients: first frame of a fresh attach; later frames carry a greater `seq`."""
+        return self._listen("attached", listener)
+
+    def on_resumed(self, listener: Callable[[ResumedEvent], None]) -> Callable[[], None]:
+        """Subscribe to `resumed`: Socket clients: first frame of a resume; the `replayed` frames after `lastSeq` follow it."""
+        return self._listen("resumed", listener)
+
+    def on_entry(self, listener: Callable[[EntryEvent], None]) -> Callable[[], None]:
+        """Subscribe to `entry`: Socket clients: a session-file append."""
+        return self._listen("entry", listener)
+
+    def on_session_replaced(self, listener: Callable[[SessionReplacedEvent], None]) -> Callable[[], None]:
+        """Subscribe to `session_replaced`: Socket clients: the host now serves a different session or transcript; `snapshot` replaces the client's view."""
+        return self._listen("session_replaced", listener)
+
+    def on_clients_changed(self, listener: Callable[[ClientsChangedEvent], None]) -> Callable[[], None]:
+        """Subscribe to `clients_changed`: Socket clients: client presence changed."""
+        return self._listen("clients_changed", listener)
 
     def on_rpc_frame_error(self, listener: Callable[[RpcFrameErrorEvent], None]) -> Callable[[], None]:
         """Subscribe to `rpc_frame_error`: An event could not fit within the transport limits and was dropped."""
@@ -3701,6 +4003,10 @@ class WireClient:
         """Subscribe to `queue_update`: Coalesced snapshot of the displayable steering/follow-up queue, sent whenever it changes."""
         return self._listen("queue_update", listener)
 
+    def on_idle_recap(self, listener: Callable[[IdleRecapEvent], None]) -> Callable[[], None]:
+        """Subscribe to `idle_recap`: The host produced a recap while the session sat idle: the full reply (de-duplicated and capped like any side-channel reply), journaled in the session history database. It never enters the transcript or the model context."""
+        return self._listen("idle_recap", listener)
+
 
 __all__ = [
     "AbortAndRestoreQueueResult",
@@ -3731,6 +4037,7 @@ __all__ = [
     "AssistantToolCallDeltaEvent",
     "AssistantToolCallEndEvent",
     "AssistantToolCallStartEvent",
+    "AttachedEvent",
     "Attribution",
     "AutoCompactionAction",
     "AutoCompactionEndEvent",
@@ -3757,6 +4064,8 @@ __all__ = [
     "CacheWarmingStartEvent",
     "CancelUiRequest",
     "CancellationResult",
+    "ClientInfo",
+    "ClientsChangedEvent",
     "CommandOutputEvent",
     "CompactionResult",
     "CompactionSummaryMessage",
@@ -3769,6 +4078,7 @@ __all__ = [
     "DeveloperMessage",
     "EditorUiRequest",
     "Effort",
+    "EntryEvent",
     "ExtensionError",
     "ExtensionUiMethod",
     "ExtensionUiRequest",
@@ -3786,6 +4096,7 @@ __all__ = [
     "HookMessage",
     "HostToolDefinition",
     "HostUriSchemeDefinition",
+    "IdleRecapEvent",
     "ImageContent",
     "InputUiRequest",
     "InterruptMode",
@@ -3821,6 +4132,7 @@ __all__ = [
     "PromptResultEvent",
     "PromptStatus",
     "PythonExecutionMessage",
+    "QueueAttachments",
     "QueueMode",
     "QueueUpdateEvent",
     "QueuedMessageQueue",
@@ -3829,6 +4141,7 @@ __all__ = [
     "RedactedThinkingContent",
     "RemoveQueuedMessageResult",
     "RestoredQueuedMessage",
+    "ResumedEvent",
     "RetryFallbackAppliedEvent",
     "RetryFallbackSucceededEvent",
     "RpcAgentEvent",
@@ -3839,11 +4152,16 @@ __all__ = [
     "SessionCredits",
     "SessionEntries",
     "SessionInfoUpdateEvent",
+    "SessionOrigin",
+    "SessionReplacedEvent",
+    "SessionReplacedReason",
     "SessionSettledEvent",
+    "SessionSnapshot",
     "SessionState",
     "SessionStats",
     "SessionTree",
     "SetEditorTextUiRequest",
+    "SetIdleActivityResult",
     "SetStatusUiRequest",
     "SetTitleUiRequest",
     "SetWidgetUiRequest",
@@ -3853,6 +4171,7 @@ __all__ = [
     "SlowModeScope",
     "StopReason",
     "StreamingBehavior",
+    "StreamingMessage",
     "SubagentEvent",
     "SubagentEventPayload",
     "SubagentLifecycleEvent",
@@ -3922,6 +4241,7 @@ __all__ = [
     "parse_assistant_tool_call_delta_event",
     "parse_assistant_tool_call_end_event",
     "parse_assistant_tool_call_start_event",
+    "parse_attached_event",
     "parse_auto_compaction_end_event",
     "parse_auto_compaction_start_event",
     "parse_auto_retry_end_event",
@@ -3941,6 +4261,8 @@ __all__ = [
     "parse_cache_warming_start_event",
     "parse_cancel_ui_request",
     "parse_cancellation_result",
+    "parse_client_info",
+    "parse_clients_changed_event",
     "parse_command_output_event",
     "parse_compaction_result",
     "parse_compaction_summary_message",
@@ -3951,6 +4273,7 @@ __all__ = [
     "parse_custom_message",
     "parse_developer_message",
     "parse_editor_ui_request",
+    "parse_entry_event",
     "parse_extension_error",
     "parse_extension_ui_request",
     "parse_fallback_content",
@@ -3965,6 +4288,7 @@ __all__ = [
     "parse_hook_message",
     "parse_host_tool_definition",
     "parse_host_uri_scheme_definition",
+    "parse_idle_recap_event",
     "parse_image_content",
     "parse_input_ui_request",
     "parse_irc_message_event",
@@ -3994,12 +4318,14 @@ __all__ = [
     "parse_prompt_error",
     "parse_prompt_result_event",
     "parse_python_execution_message",
+    "parse_queue_attachments",
     "parse_queue_update_event",
     "parse_queued_messages_state",
     "parse_ready_event",
     "parse_redacted_thinking_content",
     "parse_remove_queued_message_result",
     "parse_restored_queued_message",
+    "parse_resumed_event",
     "parse_retry_fallback_applied_event",
     "parse_retry_fallback_succeeded_event",
     "parse_rpc_agent_event",
@@ -4009,16 +4335,21 @@ __all__ = [
     "parse_session_credits",
     "parse_session_entries",
     "parse_session_info_update_event",
+    "parse_session_origin",
+    "parse_session_replaced_event",
     "parse_session_settled_event",
+    "parse_session_snapshot",
     "parse_session_state",
     "parse_session_stats",
     "parse_session_tree",
     "parse_set_editor_text_ui_request",
+    "parse_set_idle_activity_result",
     "parse_set_status_ui_request",
     "parse_set_title_ui_request",
     "parse_set_widget_ui_request",
     "parse_slash_command_input",
     "parse_slash_subcommand",
+    "parse_streaming_message",
     "parse_subagent_event",
     "parse_subagent_event_payload",
     "parse_subagent_lifecycle_event",

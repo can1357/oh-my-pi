@@ -2223,6 +2223,28 @@ func (v *QueuedMessagesState) decodeFrom(raw map[string]json.RawMessage) error {
 	return nil
 }
 
+// Which queued chips carry an attachment (an image, or its source or description) their text does not; entry `i` describes chip `i`.
+type QueueAttachments struct {
+	Steering []bool `json:"steering"`
+	FollowUp []bool `json:"followUp"`
+}
+
+func (v *QueueAttachments) UnmarshalJSON(data []byte) error {
+	return decodeWith(data, "QueueAttachments", v.decodeFrom)
+}
+
+func (v *QueueAttachments) decodeFrom(raw map[string]json.RawMessage) error {
+	var out QueueAttachments
+	d := fieldDecoder{raw: raw, owner: "QueueAttachments"}
+	d.required("steering", &out.Steering)
+	d.required("followUp", &out.FollowUp)
+	if d.err != nil {
+		return d.err
+	}
+	*v = out
+	return nil
+}
+
 type ToolDescriptor struct {
 	Name        string            `json:"name"`
 	Description string            `json:"description"`
@@ -2763,6 +2785,8 @@ type RemoveQueuedMessageResult struct {
 	Images []ImageContent `json:"images,omitempty"`
 	// Only ever `true`: the images exceeded the transport limit and were omitted; the removal still happened.
 	ImagesDropped *bool `json:"imagesDropped,omitempty"`
+	// Nothing was removed: `refuseAttachments` was set and the prompt carries one.
+	Refused *RemoveQueuedMessageResultRefused `json:"refused,omitempty"`
 }
 
 func (v *RemoveQueuedMessageResult) UnmarshalJSON(data []byte) error {
@@ -2775,11 +2799,31 @@ func (v *RemoveQueuedMessageResult) decodeFrom(raw map[string]json.RawMessage) e
 	d.required("removed", &out.Removed)
 	d.optional("images", &out.Images)
 	d.optional("imagesDropped", &out.ImagesDropped)
+	d.optional("refused", &out.Refused)
 	if d.err != nil {
 		return d.err
 	}
 	*v = out
 	return nil
+}
+
+type RemoveQueuedMessageResultRefused string
+
+const (
+	RemoveQueuedMessageResultRefusedAttachments RemoveQueuedMessageResultRefused = "attachments"
+)
+
+func (v *RemoveQueuedMessageResultRefused) UnmarshalJSON(data []byte) error {
+	s, err := decodeString(data, "RemoveQueuedMessageResultRefused")
+	if err != nil {
+		return err
+	}
+	switch value := RemoveQueuedMessageResultRefused(s); value {
+	case RemoveQueuedMessageResultRefusedAttachments:
+		*v = value
+		return nil
+	}
+	return unknownValue("RemoveQueuedMessageResultRefused", s)
 }
 
 type PromoteQueuedMessageResult struct {
@@ -4370,6 +4414,8 @@ func (v GoalUpdatedEvent) MarshalJSON() ([]byte, error) {
 type QueueUpdateEvent struct {
 	Steering []string `json:"steering"`
 	FollowUp []string `json:"followUp"`
+	// Session-host socket clients only; absent means unknown, not that no chip carries one.
+	Attachments *QueueAttachments `json:"attachments,omitempty"`
 }
 
 func (v *QueueUpdateEvent) UnmarshalJSON(data []byte) error {
@@ -4382,6 +4428,7 @@ func (v *QueueUpdateEvent) decodeFrom(raw map[string]json.RawMessage) error {
 	d.constant("type", "queue_update")
 	d.required("steering", &out.Steering)
 	d.required("followUp", &out.FollowUp)
+	d.optional("attachments", &out.Attachments)
 	if d.err != nil {
 		return d.err
 	}
@@ -4392,6 +4439,32 @@ func (v *QueueUpdateEvent) decodeFrom(raw map[string]json.RawMessage) error {
 func (v QueueUpdateEvent) MarshalJSON() ([]byte, error) {
 	type plain QueueUpdateEvent
 	return encodeObject(plain(v), `"type":"queue_update"`, nil)
+}
+
+// The host produced a recap while the session sat idle: the full reply (de-duplicated and capped like any side-channel reply), journaled in the session history database. It never enters the transcript or the model context.
+type IdleRecapEvent struct {
+	Recap string `json:"recap"`
+}
+
+func (v *IdleRecapEvent) UnmarshalJSON(data []byte) error {
+	return decodeWith(data, "IdleRecapEvent", v.decodeFrom)
+}
+
+func (v *IdleRecapEvent) decodeFrom(raw map[string]json.RawMessage) error {
+	var out IdleRecapEvent
+	d := fieldDecoder{raw: raw, owner: "IdleRecapEvent"}
+	d.constant("type", "idle_recap")
+	d.required("recap", &out.Recap)
+	if d.err != nil {
+		return d.err
+	}
+	*v = out
+	return nil
+}
+
+func (v IdleRecapEvent) MarshalJSON() ([]byte, error) {
+	type plain IdleRecapEvent
+	return encodeObject(plain(v), `"type":"idle_recap"`, nil)
 }
 
 // A session event, discriminated by `type`; `set_event_filter` selects which are sent.
@@ -4437,6 +4510,7 @@ func (NoticeEvent) isRpcAgentEvent()                 {}
 func (ThinkingLevelChangedEvent) isRpcAgentEvent()   {}
 func (GoalUpdatedEvent) isRpcAgentEvent()            {}
 func (QueueUpdateEvent) isRpcAgentEvent()            {}
+func (IdleRecapEvent) isRpcAgentEvent()              {}
 func (UnknownNotification) isRpcAgentEvent()         {}
 
 func (v RpcAgentEvent) MarshalJSON() ([]byte, error) {
@@ -4520,6 +4594,8 @@ func (v *RpcAgentEvent) decodeFrom(raw map[string]json.RawMessage) error {
 		value, err = decodeVariant[GoalUpdatedEvent](raw)
 	case "queue_update":
 		value, err = decodeVariant[QueueUpdateEvent](raw)
+	case "idle_recap":
+		value, err = decodeVariant[IdleRecapEvent](raw)
 	default:
 		return unknownValue("RpcAgentEvent.type", tag)
 	}
@@ -5153,10 +5229,14 @@ func (v CommandOutputEvent) MarshalJSON() ([]byte, error) {
 	return encodeObject(plain(v), `"type":"command_output"`, nil)
 }
 
-// A builtin slash command changed the session title.
+// The session title changed.
 type SessionInfoUpdateEvent struct {
 	SessionID string  `json:"sessionId"`
 	Title     *string `json:"title,omitempty"`
+	// Socket clients: the session was relocated (`/move`, `/wt`); where it lives now.
+	Origin *SessionOrigin `json:"origin,omitempty"`
+	// Host sequence number; socket clients only.
+	Seq *int64 `json:"seq,omitempty"`
 }
 
 func (v *SessionInfoUpdateEvent) UnmarshalJSON(data []byte) error {
@@ -5169,6 +5249,8 @@ func (v *SessionInfoUpdateEvent) decodeFrom(raw map[string]json.RawMessage) erro
 	d.constant("type", "session_info_update")
 	d.required("sessionId", &out.SessionID)
 	d.optional("title", &out.Title)
+	d.optional("origin", &out.Origin)
+	d.optional("seq", &out.Seq)
 	if d.err != nil {
 		return d.err
 	}
@@ -5181,10 +5263,12 @@ func (v SessionInfoUpdateEvent) MarshalJSON() ([]byte, error) {
 	return encodeObject(plain(v), `"type":"session_info_update"`, nil)
 }
 
-// A builtin slash command changed the model configuration.
+// The live model or thinking level changed.
 type ConfigUpdateEvent struct {
 	Model         *ModelInfo     `json:"model,omitempty"`
 	ThinkingLevel *ThinkingLevel `json:"thinkingLevel,omitempty"`
+	// Host sequence number; socket clients only.
+	Seq *int64 `json:"seq,omitempty"`
 }
 
 func (v *ConfigUpdateEvent) UnmarshalJSON(data []byte) error {
@@ -5197,6 +5281,7 @@ func (v *ConfigUpdateEvent) decodeFrom(raw map[string]json.RawMessage) error {
 	d.constant("type", "config_update")
 	d.optional("model", &out.Model)
 	d.optional("thinkingLevel", &out.ThinkingLevel)
+	d.optional("seq", &out.Seq)
 	if d.err != nil {
 		return d.err
 	}
@@ -5235,6 +5320,296 @@ func (v *RpcFrameErrorEvent) decodeFrom(raw map[string]json.RawMessage) error {
 func (v RpcFrameErrorEvent) MarshalJSON() ([]byte, error) {
 	type plain RpcFrameErrorEvent
 	return encodeObject(plain(v), `"type":"rpc_frame_error"`, nil)
+}
+
+// A connected session-host client, as listed in snapshots and `clients_changed`.
+type ClientInfo struct {
+	ClientID string  `json:"clientId"`
+	Kind     string  `json:"kind"`
+	Label    *string `json:"label,omitempty"`
+}
+
+func (v *ClientInfo) UnmarshalJSON(data []byte) error {
+	return decodeWith(data, "ClientInfo", v.decodeFrom)
+}
+
+func (v *ClientInfo) decodeFrom(raw map[string]json.RawMessage) error {
+	var out ClientInfo
+	d := fieldDecoder{raw: raw, owner: "ClientInfo"}
+	d.required("clientId", &out.ClientID)
+	d.required("kind", &out.Kind)
+	d.optional("label", &out.Label)
+	if d.err != nil {
+		return d.err
+	}
+	*v = out
+	return nil
+}
+
+// Where a host session lives, for resolving `local://` URLs and relative paths in what it authored.
+type SessionOrigin struct {
+	Cwd          string  `json:"cwd"`
+	ArtifactsDir *string `json:"artifactsDir"`
+	LocalRoot    string  `json:"localRoot"`
+	SessionID    string  `json:"sessionId"`
+}
+
+func (v *SessionOrigin) UnmarshalJSON(data []byte) error {
+	return decodeWith(data, "SessionOrigin", v.decodeFrom)
+}
+
+func (v *SessionOrigin) decodeFrom(raw map[string]json.RawMessage) error {
+	var out SessionOrigin
+	d := fieldDecoder{raw: raw, owner: "SessionOrigin"}
+	d.required("cwd", &out.Cwd)
+	d.nullable("artifactsDir", &out.ArtifactsDir)
+	d.required("localRoot", &out.LocalRoot)
+	d.required("sessionId", &out.SessionID)
+	if d.err != nil {
+		return d.err
+	}
+	*v = out
+	return nil
+}
+
+// The in-flight message of a mid-turn join; later frames for it carry `messageId`.
+type StreamingMessage struct {
+	MessageID string       `json:"messageId"`
+	Message   AgentMessage `json:"message"`
+}
+
+func (v *StreamingMessage) UnmarshalJSON(data []byte) error {
+	return decodeWith(data, "StreamingMessage", v.decodeFrom)
+}
+
+func (v *StreamingMessage) decodeFrom(raw map[string]json.RawMessage) error {
+	var out StreamingMessage
+	d := fieldDecoder{raw: raw, owner: "StreamingMessage"}
+	d.required("messageId", &out.MessageID)
+	d.required("message", &out.Message)
+	if d.err != nil {
+		return d.err
+	}
+	*v = out
+	return nil
+}
+
+// The session as the `entry` frames have announced it: everything a socket client needs to render it from scratch.
+type SessionSnapshot struct {
+	State   SessionState                 `json:"state"`
+	Header  map[string]json.RawMessage   `json:"header"`
+	Entries []map[string]json.RawMessage `json:"entries"`
+	LeafID  *string                      `json:"leafId"`
+	// Open extension dialogs a late joiner can answer.
+	PendingUI []ExtensionUiRequest `json:"pendingUi"`
+	Clients   []ClientInfo         `json:"clients"`
+	Streaming *StreamingMessage    `json:"streaming,omitempty"`
+	// Extension statuses and widgets showing now: the latest `setStatus`/`setWidget` per key.
+	UIState []ExtensionUiRequest `json:"uiState,omitempty"`
+	// Parallel to `state.queuedMessages`.
+	QueueAttachments *QueueAttachments `json:"queueAttachments,omitempty"`
+	Origin           *SessionOrigin    `json:"origin,omitempty"`
+}
+
+func (v *SessionSnapshot) UnmarshalJSON(data []byte) error {
+	return decodeWith(data, "SessionSnapshot", v.decodeFrom)
+}
+
+func (v *SessionSnapshot) decodeFrom(raw map[string]json.RawMessage) error {
+	var out SessionSnapshot
+	d := fieldDecoder{raw: raw, owner: "SessionSnapshot"}
+	d.required("state", &out.State)
+	d.nullable("header", &out.Header)
+	d.required("entries", &out.Entries)
+	d.nullable("leafId", &out.LeafID)
+	d.required("pendingUi", &out.PendingUI)
+	d.required("clients", &out.Clients)
+	d.optional("streaming", &out.Streaming)
+	d.optional("uiState", &out.UIState)
+	d.optional("queueAttachments", &out.QueueAttachments)
+	d.optional("origin", &out.Origin)
+	if d.err != nil {
+		return d.err
+	}
+	*v = out
+	return nil
+}
+
+// Socket clients: first frame of a fresh attach; later frames carry a greater `seq`.
+type AttachedEvent struct {
+	HostID   string          `json:"hostId"`
+	ClientID string          `json:"clientId"`
+	Epoch    int64           `json:"epoch"`
+	Seq      int64           `json:"seq"`
+	Snapshot SessionSnapshot `json:"snapshot"`
+}
+
+func (v *AttachedEvent) UnmarshalJSON(data []byte) error {
+	return decodeWith(data, "AttachedEvent", v.decodeFrom)
+}
+
+func (v *AttachedEvent) decodeFrom(raw map[string]json.RawMessage) error {
+	var out AttachedEvent
+	d := fieldDecoder{raw: raw, owner: "AttachedEvent"}
+	d.constant("type", "attached")
+	d.required("hostId", &out.HostID)
+	d.required("clientId", &out.ClientID)
+	d.required("epoch", &out.Epoch)
+	d.required("seq", &out.Seq)
+	d.required("snapshot", &out.Snapshot)
+	if d.err != nil {
+		return d.err
+	}
+	*v = out
+	return nil
+}
+
+func (v AttachedEvent) MarshalJSON() ([]byte, error) {
+	type plain AttachedEvent
+	return encodeObject(plain(v), `"type":"attached"`, nil)
+}
+
+// Socket clients: first frame of a resume; the `replayed` frames after `lastSeq` follow it.
+type ResumedEvent struct {
+	Epoch    int64 `json:"epoch"`
+	Replayed int64 `json:"replayed"`
+}
+
+func (v *ResumedEvent) UnmarshalJSON(data []byte) error {
+	return decodeWith(data, "ResumedEvent", v.decodeFrom)
+}
+
+func (v *ResumedEvent) decodeFrom(raw map[string]json.RawMessage) error {
+	var out ResumedEvent
+	d := fieldDecoder{raw: raw, owner: "ResumedEvent"}
+	d.constant("type", "resumed")
+	d.required("epoch", &out.Epoch)
+	d.required("replayed", &out.Replayed)
+	if d.err != nil {
+		return d.err
+	}
+	*v = out
+	return nil
+}
+
+func (v ResumedEvent) MarshalJSON() ([]byte, error) {
+	type plain ResumedEvent
+	return encodeObject(plain(v), `"type":"resumed"`, nil)
+}
+
+// Socket clients: a session-file append.
+type EntryEvent struct {
+	Entry map[string]json.RawMessage `json:"entry"`
+	Seq   int64                      `json:"seq"`
+	// The host's active leaf when the entry was announced; absent from older hosts.
+	LeafID *string `json:"leafId,omitempty"`
+}
+
+func (v *EntryEvent) UnmarshalJSON(data []byte) error {
+	return decodeWith(data, "EntryEvent", v.decodeFrom)
+}
+
+func (v *EntryEvent) decodeFrom(raw map[string]json.RawMessage) error {
+	var out EntryEvent
+	d := fieldDecoder{raw: raw, owner: "EntryEvent"}
+	d.constant("type", "entry")
+	d.required("entry", &out.Entry)
+	d.required("seq", &out.Seq)
+	d.optional("leafId", &out.LeafID)
+	if d.err != nil {
+		return d.err
+	}
+	*v = out
+	return nil
+}
+
+func (v EntryEvent) MarshalJSON() ([]byte, error) {
+	type plain EntryEvent
+	return encodeObject(plain(v), `"type":"entry"`, nil)
+}
+
+type SessionReplacedReason string
+
+const (
+	SessionReplacedReasonNew    SessionReplacedReason = "new"
+	SessionReplacedReasonResume SessionReplacedReason = "resume"
+	SessionReplacedReasonFork   SessionReplacedReason = "fork"
+	SessionReplacedReasonTree   SessionReplacedReason = "tree"
+)
+
+func (v *SessionReplacedReason) UnmarshalJSON(data []byte) error {
+	s, err := decodeString(data, "SessionReplacedReason")
+	if err != nil {
+		return err
+	}
+	switch value := SessionReplacedReason(s); value {
+	case SessionReplacedReasonNew, SessionReplacedReasonResume, SessionReplacedReasonFork, SessionReplacedReasonTree:
+		*v = value
+		return nil
+	}
+	return unknownValue("SessionReplacedReason", s)
+}
+
+// Socket clients: the host now serves a different session or transcript; `snapshot` replaces the client's view.
+type SessionReplacedEvent struct {
+	Epoch       int64                 `json:"epoch"`
+	Reason      SessionReplacedReason `json:"reason"`
+	Snapshot    SessionSnapshot       `json:"snapshot"`
+	Seq         int64                 `json:"seq"`
+	SessionFile *string               `json:"sessionFile,omitempty"`
+}
+
+func (v *SessionReplacedEvent) UnmarshalJSON(data []byte) error {
+	return decodeWith(data, "SessionReplacedEvent", v.decodeFrom)
+}
+
+func (v *SessionReplacedEvent) decodeFrom(raw map[string]json.RawMessage) error {
+	var out SessionReplacedEvent
+	d := fieldDecoder{raw: raw, owner: "SessionReplacedEvent"}
+	d.constant("type", "session_replaced")
+	d.required("epoch", &out.Epoch)
+	d.required("reason", &out.Reason)
+	d.required("snapshot", &out.Snapshot)
+	d.required("seq", &out.Seq)
+	d.optional("sessionFile", &out.SessionFile)
+	if d.err != nil {
+		return d.err
+	}
+	*v = out
+	return nil
+}
+
+func (v SessionReplacedEvent) MarshalJSON() ([]byte, error) {
+	type plain SessionReplacedEvent
+	return encodeObject(plain(v), `"type":"session_replaced"`, nil)
+}
+
+// Socket clients: client presence changed.
+type ClientsChangedEvent struct {
+	Clients []ClientInfo `json:"clients"`
+	Seq     int64        `json:"seq"`
+}
+
+func (v *ClientsChangedEvent) UnmarshalJSON(data []byte) error {
+	return decodeWith(data, "ClientsChangedEvent", v.decodeFrom)
+}
+
+func (v *ClientsChangedEvent) decodeFrom(raw map[string]json.RawMessage) error {
+	var out ClientsChangedEvent
+	d := fieldDecoder{raw: raw, owner: "ClientsChangedEvent"}
+	d.constant("type", "clients_changed")
+	d.required("clients", &out.Clients)
+	d.required("seq", &out.Seq)
+	if d.err != nil {
+		return d.err
+	}
+	*v = out
+	return nil
+}
+
+func (v ClientsChangedEvent) MarshalJSON() ([]byte, error) {
+	type plain ClientsChangedEvent
+	return encodeObject(plain(v), `"type":"clients_changed"`, nil)
 }
 
 type WidgetPlacement string
@@ -5789,6 +6164,11 @@ type AskAnswer struct {
 	ID              string   `json:"id"`
 	SelectedOptions []string `json:"selectedOptions"`
 	CustomInput     *string  `json:"customInput,omitempty"`
+	// Images pasted into the free text; their `[Image #N]` markers sit in it.
+	CustomInputImages []ImageContent `json:"customInputImages,omitempty"`
+	// The user's note on the answer.
+	Note       *string        `json:"note,omitempty"`
+	NoteImages []ImageContent `json:"noteImages,omitempty"`
 }
 
 func (v *AskAnswer) UnmarshalJSON(data []byte) error {
@@ -5801,6 +6181,9 @@ func (v *AskAnswer) decodeFrom(raw map[string]json.RawMessage) error {
 	d.required("id", &out.ID)
 	d.required("selectedOptions", &out.SelectedOptions)
 	d.optional("customInput", &out.CustomInput)
+	d.optional("customInputImages", &out.CustomInputImages)
+	d.optional("note", &out.Note)
+	d.optional("noteImages", &out.NoteImages)
 	if d.err != nil {
 		return d.err
 	}
@@ -5921,6 +6304,33 @@ func (v AnswersUiResponse) MarshalJSON() ([]byte, error) {
 	return encodeObject(plain(v), `"type":"extension_ui_response"`, nil)
 }
 
+// Declines an `ask` request to discuss it instead; distinct from cancelling.
+type ChatUiResponse struct {
+	ID string `json:"id"`
+}
+
+func (v *ChatUiResponse) UnmarshalJSON(data []byte) error {
+	return decodeWith(data, "ChatUiResponse", v.decodeFrom)
+}
+
+func (v *ChatUiResponse) decodeFrom(raw map[string]json.RawMessage) error {
+	var out ChatUiResponse
+	d := fieldDecoder{raw: raw, owner: "ChatUiResponse"}
+	d.constant("type", "extension_ui_response")
+	d.required("id", &out.ID)
+	d.constant("chat", true)
+	if d.err != nil {
+		return d.err
+	}
+	*v = out
+	return nil
+}
+
+func (v ChatUiResponse) MarshalJSON() ([]byte, error) {
+	type plain ChatUiResponse
+	return encodeObject(plain(v), `"type":"extension_ui_response","chat":true`, nil)
+}
+
 // Host reply to an extension UI request; variants share `type` and differ by their payload key.
 type ExtensionUiResponse struct {
 	// Value holds one variant. Encode-only: no discriminator tells the variants apart.
@@ -5936,6 +6346,7 @@ func (ValueUiResponse) isExtensionUiResponse()   {}
 func (ConfirmUiResponse) isExtensionUiResponse() {}
 func (CancelUiResponse) isExtensionUiResponse()  {}
 func (AnswersUiResponse) isExtensionUiResponse() {}
+func (ChatUiResponse) isExtensionUiResponse()    {}
 
 func (v ExtensionUiResponse) MarshalJSON() ([]byte, error) {
 	return encodeVariant("ExtensionUiResponse", v.Value)
@@ -6288,6 +6699,7 @@ func (ValueUiResponse) isRpcInbound()   {}
 func (ConfirmUiResponse) isRpcInbound() {}
 func (CancelUiResponse) isRpcInbound()  {}
 func (AnswersUiResponse) isRpcInbound() {}
+func (ChatUiResponse) isRpcInbound()    {}
 func (HostToolUpdate) isRpcInbound()    {}
 func (HostToolResult) isRpcInbound()    {}
 func (HostUriResult) isRpcInbound()     {}
@@ -6308,6 +6720,12 @@ type RpcResponse struct {
 	Error *string `json:"error,omitempty"`
 	// Machine-readable failure reason, when one applies.
 	Code *string `json:"code,omitempty"`
+	// `stale`: the host's current session epoch.
+	Epoch *int64 `json:"epoch,omitempty"`
+	// `stale`: the session's current leaf.
+	LeafID *string `json:"leafId,omitempty"`
+	// `session_hosted`: the host that owns the session.
+	HostID *string `json:"hostId,omitempty"`
 }
 
 func (v *RpcResponse) UnmarshalJSON(data []byte) error {
@@ -6324,6 +6742,9 @@ func (v *RpcResponse) decodeFrom(raw map[string]json.RawMessage) error {
 	d.optional("data", &out.Data)
 	d.optional("error", &out.Error)
 	d.optional("code", &out.Code)
+	d.optional("epoch", &out.Epoch)
+	d.optional("leafId", &out.LeafID)
+	d.optional("hostId", &out.HostID)
 	if d.err != nil {
 		return d.err
 	}
@@ -6441,6 +6862,11 @@ func (BtwRecordEvent) isRpcNotification()               {}
 func (CommandOutputEvent) isRpcNotification()           {}
 func (SessionInfoUpdateEvent) isRpcNotification()       {}
 func (ConfigUpdateEvent) isRpcNotification()            {}
+func (AttachedEvent) isRpcNotification()                {}
+func (ResumedEvent) isRpcNotification()                 {}
+func (EntryEvent) isRpcNotification()                   {}
+func (SessionReplacedEvent) isRpcNotification()         {}
+func (ClientsChangedEvent) isRpcNotification()          {}
 func (RpcFrameErrorEvent) isRpcNotification()           {}
 func (AgentStartEvent) isRpcNotification()              {}
 func (AgentEndEvent) isRpcNotification()                {}
@@ -6473,6 +6899,7 @@ func (NoticeEvent) isRpcNotification()                  {}
 func (ThinkingLevelChangedEvent) isRpcNotification()    {}
 func (GoalUpdatedEvent) isRpcNotification()             {}
 func (QueueUpdateEvent) isRpcNotification()             {}
+func (IdleRecapEvent) isRpcNotification()               {}
 func (UnknownNotification) isRpcNotification()          {}
 
 func (v RpcNotification) MarshalJSON() ([]byte, error) {
@@ -6523,6 +6950,16 @@ func (v *RpcNotification) UnmarshalJSON(data []byte) error {
 		value, err = decodeVariant[SessionInfoUpdateEvent](raw)
 	case "config_update":
 		value, err = decodeVariant[ConfigUpdateEvent](raw)
+	case "attached":
+		value, err = decodeVariant[AttachedEvent](raw)
+	case "resumed":
+		value, err = decodeVariant[ResumedEvent](raw)
+	case "entry":
+		value, err = decodeVariant[EntryEvent](raw)
+	case "session_replaced":
+		value, err = decodeVariant[SessionReplacedEvent](raw)
+	case "clients_changed":
+		value, err = decodeVariant[ClientsChangedEvent](raw)
 	case "rpc_frame_error":
 		value, err = decodeVariant[RpcFrameErrorEvent](raw)
 	case "agent_start":
@@ -6587,6 +7024,8 @@ func (v *RpcNotification) UnmarshalJSON(data []byte) error {
 		value, err = decodeVariant[GoalUpdatedEvent](raw)
 	case "queue_update":
 		value, err = decodeVariant[QueueUpdateEvent](raw)
+	case "idle_recap":
+		value, err = decodeVariant[IdleRecapEvent](raw)
 	default:
 		value = newUnknownNotification(tag, data)
 	}
@@ -6631,6 +7070,11 @@ func (BtwRecordEvent) isRpcServerFrame()               {}
 func (CommandOutputEvent) isRpcServerFrame()           {}
 func (SessionInfoUpdateEvent) isRpcServerFrame()       {}
 func (ConfigUpdateEvent) isRpcServerFrame()            {}
+func (AttachedEvent) isRpcServerFrame()                {}
+func (ResumedEvent) isRpcServerFrame()                 {}
+func (EntryEvent) isRpcServerFrame()                   {}
+func (SessionReplacedEvent) isRpcServerFrame()         {}
+func (ClientsChangedEvent) isRpcServerFrame()          {}
 func (RpcFrameErrorEvent) isRpcServerFrame()           {}
 func (AgentStartEvent) isRpcServerFrame()              {}
 func (AgentEndEvent) isRpcServerFrame()                {}
@@ -6663,6 +7107,7 @@ func (NoticeEvent) isRpcServerFrame()                  {}
 func (ThinkingLevelChangedEvent) isRpcServerFrame()    {}
 func (GoalUpdatedEvent) isRpcServerFrame()             {}
 func (QueueUpdateEvent) isRpcServerFrame()             {}
+func (IdleRecapEvent) isRpcServerFrame()               {}
 func (UnknownNotification) isRpcServerFrame()          {}
 
 func (v RpcServerFrame) MarshalJSON() ([]byte, error) {
@@ -6723,6 +7168,16 @@ func (v *RpcServerFrame) UnmarshalJSON(data []byte) error {
 		value, err = decodeVariant[SessionInfoUpdateEvent](raw)
 	case "config_update":
 		value, err = decodeVariant[ConfigUpdateEvent](raw)
+	case "attached":
+		value, err = decodeVariant[AttachedEvent](raw)
+	case "resumed":
+		value, err = decodeVariant[ResumedEvent](raw)
+	case "entry":
+		value, err = decodeVariant[EntryEvent](raw)
+	case "session_replaced":
+		value, err = decodeVariant[SessionReplacedEvent](raw)
+	case "clients_changed":
+		value, err = decodeVariant[ClientsChangedEvent](raw)
 	case "rpc_frame_error":
 		value, err = decodeVariant[RpcFrameErrorEvent](raw)
 	case "agent_start":
@@ -6787,6 +7242,8 @@ func (v *RpcServerFrame) UnmarshalJSON(data []byte) error {
 		value, err = decodeVariant[GoalUpdatedEvent](raw)
 	case "queue_update":
 		value, err = decodeVariant[QueueUpdateEvent](raw)
+	case "idle_recap":
+		value, err = decodeVariant[IdleRecapEvent](raw)
 	default:
 		value = newUnknownNotification(tag, data)
 	}
@@ -6847,6 +7304,25 @@ func (v *SetAskDialogResult) decodeFrom(raw map[string]json.RawMessage) error {
 	var out SetAskDialogResult
 	d := fieldDecoder{raw: raw, owner: "SetAskDialogResult"}
 	d.required("enabled", &out.Enabled)
+	if d.err != nil {
+		return d.err
+	}
+	*v = out
+	return nil
+}
+
+type SetIdleActivityResult struct {
+	IsComposing bool `json:"isComposing"`
+}
+
+func (v *SetIdleActivityResult) UnmarshalJSON(data []byte) error {
+	return decodeWith(data, "SetIdleActivityResult", v.decodeFrom)
+}
+
+func (v *SetIdleActivityResult) decodeFrom(raw map[string]json.RawMessage) error {
+	var out SetIdleActivityResult
+	d := fieldDecoder{raw: raw, owner: "SetIdleActivityResult"}
+	d.required("isComposing", &out.IsComposing)
 	if d.err != nil {
 		return d.err
 	}
@@ -7343,6 +7819,16 @@ func (c Commands) NegotiateProtocol(ctx context.Context, p NegotiateProtocolComm
 	return out, err
 }
 
+// Detach sends "detach": Session-host socket clients: leave; the session keeps running. Unknown on stdio.
+func (c Commands) Detach(ctx context.Context) error {
+	return c.call(ctx, "detach", nil, 0, nil)
+}
+
+// Exit sends "exit": Session-host socket clients: leave, and stop the host when no other client remains. Unknown on stdio.
+func (c Commands) Exit(ctx context.Context) error {
+	return c.call(ctx, "exit", nil, 0, nil)
+}
+
 // PromptCommand holds the parameters of "prompt".
 type PromptCommand struct {
 	Message string `json:"message"`
@@ -7387,6 +7873,10 @@ func (c Commands) FollowUp(ctx context.Context, p FollowUpCommand) error {
 type RemoveQueuedMessageCommand struct {
 	Message string             `json:"message"`
 	Queue   QueuedMessageQueue `json:"queue"`
+	// `last`: the newest prompt whose chip text is `message`; default `first` (raw text, then chip text).
+	Match *RemoveQueuedMessageCommandMatch `json:"match,omitempty"`
+	// Remove nothing, answering `refused: "attachments"`, when the prompt carries an attachment.
+	RefuseAttachments *bool `json:"refuseAttachments,omitempty"`
 }
 
 // RemoveQueuedMessage sends "remove_queued_message": Remove one pending queued message by its queue-chip text.
@@ -7394,6 +7884,26 @@ func (c Commands) RemoveQueuedMessage(ctx context.Context, p RemoveQueuedMessage
 	var out RemoveQueuedMessageResult
 	err := c.call(ctx, "remove_queued_message", p, 0, &out)
 	return out, err
+}
+
+type RemoveQueuedMessageCommandMatch string
+
+const (
+	RemoveQueuedMessageCommandMatchFirst RemoveQueuedMessageCommandMatch = "first"
+	RemoveQueuedMessageCommandMatchLast  RemoveQueuedMessageCommandMatch = "last"
+)
+
+func (v *RemoveQueuedMessageCommandMatch) UnmarshalJSON(data []byte) error {
+	s, err := decodeString(data, "RemoveQueuedMessageCommandMatch")
+	if err != nil {
+		return err
+	}
+	switch value := RemoveQueuedMessageCommandMatch(s); value {
+	case RemoveQueuedMessageCommandMatchFirst, RemoveQueuedMessageCommandMatchLast:
+		*v = value
+		return nil
+	}
+	return unknownValue("RemoveQueuedMessageCommandMatch", s)
 }
 
 // PromoteQueuedMessageCommand holds the parameters of "promote_queued_message".
@@ -7514,6 +8024,18 @@ func (c Commands) SetAskDialog(ctx context.Context, p SetAskDialogCommand) (bool
 	var out SetAskDialogResult
 	err := c.call(ctx, "set_ask_dialog", p, 0, &out)
 	return out.Enabled, err
+}
+
+// SetIdleActivityCommand holds the parameters of "set_idle_activity".
+type SetIdleActivityCommand struct {
+	IsComposing bool `json:"isComposing"`
+}
+
+// SetIdleActivity sends "set_idle_activity": Socket clients only: report whether this client has an unsent draft, so host-owned idle maintenance (recap and idle compaction) stays out of its way. Answered at once, even while another command runs. Like any write it honors the common `ifEpoch` precondition; generated SDK methods send none and bind to the current epoch.
+func (c Commands) SetIdleActivity(ctx context.Context, p SetIdleActivityCommand) (SetIdleActivityResult, error) {
+	var out SetIdleActivityResult
+	err := c.call(ctx, "set_idle_activity", p, 0, &out)
+	return out, err
 }
 
 // GetAvailableCommands sends "get_available_commands": List the slash-command catalog.

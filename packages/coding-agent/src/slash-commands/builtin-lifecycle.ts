@@ -36,12 +36,33 @@ function formatFreshSessionResult(result: FreshSessionResult): string {
 	return `Fresh provider session started (${result.closedProviderSessions} ${stateLabel} pruned).`;
 }
 
-export const shutdownHandlerTui = (
+/**
+ * `/exit` and `/quit`. A hosted client first sends the host `exit`: it stops the host when this is its last client
+ * and otherwise only leaves, so the other terminals keep their session.
+ */
+export const shutdownHandlerTui = async (
 	_command: ParsedSlashCommand,
 	runtime: TuiSlashCommandRuntime,
-): SlashCommandResult => {
+): Promise<SlashCommandResult> => {
 	clearSubmittedText(runtime);
-	void runtime.ctx.shutdown();
+	const { ctx } = runtime;
+	const link = ctx.hostedClientMode ? ctx.hostedClient : undefined;
+	if (!link) {
+		void ctx.shutdown();
+		return commandConsumed();
+	}
+	// The link has left the host by then; the shutdown has nothing more to detach and names no host to come back to.
+	try {
+		await link.exit();
+		ctx.hostedClient = undefined;
+		void ctx.shutdown();
+	} catch (error) {
+		ctx.hostedClient = undefined;
+		void ctx.shutdown({
+			exitCode: 1,
+			farewell: `Could not stop session host ${link.hostId}: ${errorMessage(error)}`,
+		});
+	}
 	return commandConsumed();
 };
 
@@ -833,6 +854,38 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 		name: "exit",
 		description: "Exit the application",
 		handleTui: shutdownHandlerTui,
+	},
+	{
+		name: "detach",
+		icon: "signOut",
+		description: "Leave the session host running and close this terminal",
+		handleTui: (_command, runtime) => {
+			clearSubmittedText(runtime);
+			const { ctx } = runtime;
+			if (!ctx.hostedClientMode) {
+				ctx.showStatus("Not attached to a session host");
+				return commandConsumed();
+			}
+			// The shutdown detaches the link, so the host keeps its session for the next terminal.
+			void ctx.shutdown();
+			return commandConsumed();
+		},
+	},
+	{
+		name: "attach",
+		icon: "signIn",
+		description: "Attach this terminal to another session host",
+		inlineHint: "[host|session]",
+		allowArgs: true,
+		handleTui: async (command, runtime) => {
+			clearSubmittedText(runtime);
+			const { ctx } = runtime;
+			if (!ctx.hostedClientMode || !ctx.attachHostedSession) {
+				ctx.showStatus("/attach needs a hosted session: start with `omp attach` or enable tui.hosted");
+				return;
+			}
+			await ctx.attachHostedSession(command.args.trim() || undefined);
+		},
 	},
 	{
 		name: "restart",

@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessageEvent } from "@oh-my-pi/pi-ai";
 import { MAX_RPC_FRAME_BYTES, RpcFrameEncoder } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-frame";
-import { RpcSessionEventForwarder } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-session-events";
+import { RpcMessageIdStamper, RpcSessionEventForwarder } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-session-events";
 import type { RpcProjectedSessionEventFrame } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-types";
 import type { AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { makeAssistantMessage } from "./session-manager/helpers";
@@ -27,6 +27,13 @@ function update(): AgentSessionEvent {
 
 function idsOf(frames: RpcProjectedSessionEventFrame[]): Array<[string, string | undefined]> {
 	return frames.map(frame => [frame.type, "messageId" in frame ? frame.messageId : undefined]);
+}
+
+/** The server's path for one connection: host-wide id stamping, then this connection's filter and projection. */
+function eventPipeline(output: (frame: RpcProjectedSessionEventFrame) => void) {
+	const stamper = new RpcMessageIdStamper();
+	const forwarder = new RpcSessionEventForwarder(output);
+	return { forwarder, forward: (event: AgentSessionEvent) => forwarder.forward(stamper.stamp(event)) };
 }
 
 describe("RpcSessionEventForwarder", () => {
@@ -54,14 +61,14 @@ describe("RpcSessionEventForwarder", () => {
 			{ type: "error", reason: "error", error: message },
 		];
 		const frames: RpcProjectedSessionEventFrame[] = [];
-		const forwarder = new RpcSessionEventForwarder(frame => frames.push(frame));
+		const { forwarder, forward } = eventPipeline(frame => frames.push(frame));
 		forwarder.setFilter(null, "delta");
 		for (const assistantMessageEvent of events) {
 			const event = { type: "message_update" as const, message, assistantMessageEvent, extra: "preserved" };
 			const before = JSON.stringify(event);
 			Object.freeze(assistantMessageEvent);
 			Object.freeze(event);
-			forwarder.forward(event);
+			forward(event);
 			const { partial: _partial, ...expected } = assistantMessageEvent as AssistantMessageEvent & {
 				partial?: unknown;
 			};
@@ -77,18 +84,18 @@ describe("RpcSessionEventForwarder", () => {
 
 	test("switching projection mid-message keeps identity and omission restores byte-identical full updates", () => {
 		const frames: RpcProjectedSessionEventFrame[] = [];
-		const forwarder = new RpcSessionEventForwarder(frame => frames.push(frame));
+		const { forwarder, forward } = eventPipeline(frame => frames.push(frame));
 		const event = update();
-		forwarder.forward(messageEvent("message_start", reply));
-		forwarder.forward(event);
+		forward(messageEvent("message_start", reply));
+		forward(event);
 		forwarder.setFilter(["message_update", "message_end"], "delta");
-		forwarder.forward(event);
+		forward(event);
 		forwarder.setFilter(null);
-		forwarder.forward(event);
+		forward(event);
 		forwarder.setFilter(null, "full");
-		forwarder.forward(event);
+		forward(event);
 		forwarder.setFilter(null, "delta");
-		forwarder.forward(messageEvent("message_end", reply));
+		forward(messageEvent("message_end", reply));
 		expect(idsOf(frames)).toEqual([
 			["message_start", "msg-1"],
 			["message_update", "msg-1"],
@@ -119,29 +126,29 @@ describe("RpcSessionEventForwarder", () => {
 		const encoder = new RpcFrameEncoder();
 		encoder.setProtocolVersion(2);
 		const lines: string[] = [];
-		const forwarder = new RpcSessionEventForwarder(frame => lines.push(...encoder.encodeFrames(frame)));
+		const { forwarder, forward } = eventPipeline(frame => lines.push(...encoder.encodeFrames(frame)));
 		forwarder.setFilter(null, "delta");
-		forwarder.forward(event);
+		forward(event);
 		expect(lines).toHaveLength(1);
 		expect(Buffer.byteLength(lines[0])).toBeLessThan(MAX_RPC_FRAME_BYTES);
 		expect(JSON.parse(lines[0]).assistantMessageEvent.delta).toBe("x".repeat(512000));
 		expect(JSON.parse(lines[0]).type).toBe("message_update");
 		lines.length = 0;
 		forwarder.setFilter(null, "full");
-		forwarder.forward(event);
+		forward(event);
 		expect(JSON.parse(lines[0]).type).toBe("rpc_chunk");
 	});
 	test("keeps one messageId per message while an external record nests inside a streaming reply", () => {
 		const frames: RpcProjectedSessionEventFrame[] = [];
-		const forwarder = new RpcSessionEventForwarder(frame => frames.push(frame));
+		const { forward } = eventPipeline(frame => frames.push(frame));
 
-		forwarder.forward(messageEvent("message_start", reply));
-		forwarder.forward(update());
-		forwarder.forward(messageEvent("message_start", card));
-		forwarder.forward(messageEvent("message_end", card));
-		forwarder.forward(update());
-		forwarder.forward(messageEvent("message_end", reply));
-		forwarder.forward(messageEvent("message_start", reply));
+		forward(messageEvent("message_start", reply));
+		forward(update());
+		forward(messageEvent("message_start", card));
+		forward(messageEvent("message_end", card));
+		forward(update());
+		forward(messageEvent("message_end", reply));
+		forward(messageEvent("message_start", reply));
 
 		expect(idsOf(frames)).toEqual([
 			["message_start", "msg-1"],
@@ -156,17 +163,17 @@ describe("RpcSessionEventForwarder", () => {
 
 	test("filters unlisted event types without shifting message ids, and null restores everything", () => {
 		const frames: RpcProjectedSessionEventFrame[] = [];
-		const forwarder = new RpcSessionEventForwarder(frame => frames.push(frame));
+		const { forwarder, forward } = eventPipeline(frame => frames.push(frame));
 
 		expect(forwarder.setFilter(["message_end", "agent_end"])).toEqual(["message_end", "agent_end"]);
-		forwarder.forward({ type: "agent_start" });
-		forwarder.forward(messageEvent("message_start", reply));
-		forwarder.forward(update());
-		forwarder.forward(messageEvent("message_end", reply));
-		forwarder.forward({ type: "agent_end", messages: [reply] });
+		forward({ type: "agent_start" });
+		forward(messageEvent("message_start", reply));
+		forward(update());
+		forward(messageEvent("message_end", reply));
+		forward({ type: "agent_end", messages: [reply] });
 
 		expect(forwarder.setFilter(null)).toBeNull();
-		forwarder.forward(messageEvent("message_start", reply));
+		forward(messageEvent("message_start", reply));
 
 		expect(idsOf(frames)).toEqual([
 			["message_end", "msg-1"],

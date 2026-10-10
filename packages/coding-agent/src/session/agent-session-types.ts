@@ -233,6 +233,12 @@ export interface AgentSessionConfig {
 	skillsSettings?: SkillsSettings;
 	/** Whether this session may start memory backends. Defaults to true. */
 	memoryEnabled?: boolean;
+	/**
+	 * A passive local replica of a session another process runs (a hosted TUI client). It adopts that session's
+	 * id, so disposing it must not release resources the id scopes (browser tabs), and it never starts memory
+	 * backends (implies `memoryEnabled: false`). The owning process does all execution and its cleanup.
+	 */
+	passiveReplica?: boolean;
 	/** Agent directory used when changing memory backends in a live session. */
 	memoryAgentDir?: string;
 	/** Recursion depth used to suppress live backend replacement in subagents. */

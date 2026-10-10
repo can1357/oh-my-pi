@@ -556,7 +556,16 @@ export class InputController {
 				}
 				return;
 			}
-			if (this.ctx.loadingAnimation) {
+			if (this.ctx.hostedClientMode) {
+				// The local replica never streams: the host's run state decides, and the host does the aborting.
+				const host = this.ctx.hostedClient;
+				if (host && (host.isStreaming || host.isCompacting)) {
+					void this.#hostWrite(host.abort());
+					return;
+				}
+			}
+			// A hosted replica's loader mirrors the host's run, which Esc interrupts above.
+			if (this.ctx.loadingAnimation && !this.ctx.hostedClientMode) {
 				if (this.ctx.cancelPendingSubmission()) {
 					return;
 				}
@@ -665,11 +674,17 @@ export class InputController {
 		this.registerExtensionShortcuts();
 		const planModeKeys = this.ctx.keybindings.getKeys("app.plan.toggle");
 		for (const key of planModeKeys) {
-			this.ctx.editor.setCustomKeyHandler(key, () => void this.ctx.handlePlanModeCommand());
+			this.ctx.editor.setCustomKeyHandler(
+				key,
+				this.#local("Plan mode", () => this.ctx.handlePlanModeCommand()),
+			);
 		}
 
 		for (const key of this.ctx.keybindings.getKeys("app.session.new")) {
-			this.ctx.editor.setCustomKeyHandler(key, () => this.ctx.handleClearCommand());
+			this.ctx.editor.setCustomKeyHandler(
+				key,
+				this.#local("New session", () => this.ctx.handleClearCommand()),
+			);
 		}
 		for (const key of this.ctx.keybindings.getKeys("app.session.tree")) {
 			this.ctx.editor.setCustomKeyHandler(key, () => this.ctx.showTreeSelector());
@@ -687,7 +702,10 @@ export class InputController {
 			this.ctx.editor.setCustomKeyHandler(key, () => void this.ctx.handleSTTToggle());
 		}
 		for (const key of this.ctx.keybindings.getKeys("app.live.toggle")) {
-			this.ctx.editor.setCustomKeyHandler(key, () => void this.ctx.handleLiveCommand());
+			this.ctx.editor.setCustomKeyHandler(
+				key,
+				this.#local("Live mode", () => this.ctx.handleLiveCommand()),
+			);
 		}
 		// Push-to-talk uses its own binding, separate from the STT toggle.
 		this.ctx.editor.spaceHold.keys = this.ctx.keybindings.getKeys("app.stt.pushToTalk");
@@ -726,7 +744,17 @@ export class InputController {
 		this.#setupEnhancedPaste();
 
 		this.ctx.editor.onChange = (text: string) => {
+			const wasComposing = (this.#draftText ?? "").trim() !== "";
 			this.#draftText = text;
+			const isComposing = text.trim() !== "";
+			if (wasComposing !== isComposing) {
+				if (this.ctx.hostedClientMode) {
+					const host = this.ctx.hostedClient;
+					if (host) void this.#hostWrite(host.setIdleActivity(isComposing));
+				} else {
+					this.ctx.syncIdleMaintenanceView();
+				}
+			}
 			const wasBashMode = this.ctx.isBashMode;
 			const wasPythonMode = this.ctx.isPythonMode;
 			const trimmed = text.trimStart();
@@ -951,8 +979,17 @@ export class InputController {
 			// Focused subagent session: the editor is a plain chat box for it.
 			// Everything below (slash/bash/python, loop,
 			// compaction queueing) is main-session-only.
-			if (this.ctx.focusedAgentId) {
+			if (this.ctx.focusedAgentId && !this.ctx.hostedClientMode) {
 				await this.#submitToFocusedSession(text, "steer");
+				return;
+			}
+
+			// Hosted client: the host's run is the one an empty Enter interrupts when input waits behind it.
+			if (!text && !hasPendingImages && this.ctx.hostedClientMode) {
+				const host = this.ctx.hostedClient;
+				if (host?.isStreaming && host.queued.steering.length + host.queued.followUp.length > 0) {
+					await this.#hostWrite(host.abort());
+				}
 				return;
 			}
 
@@ -977,6 +1014,11 @@ export class InputController {
 			// During a /guided-goal interview "c" is a plausible answer (e.g. option C),
 			// so it is sent as a normal reply there.
 			if (text === "." || (text === "c" && !this.ctx.isGuidedGoalInterviewActive())) {
+				if (this.ctx.hostedClientMode) {
+					this.ctx.showStatus("The continue shortcut is unavailable when attached");
+					this.ctx.editor.setCollapsedText(text);
+					return;
+				}
 				if (this.ctx.onInputCallback) {
 					this.ctx.editor.clearDraft();
 					this.ctx.onInputCallback({
@@ -997,7 +1039,7 @@ export class InputController {
 			let hasInputImages = (inputImages?.length ?? 0) > 0;
 			const submittedImages = inputImages;
 
-			if (runner?.hasHandlers("input")) {
+			if (!this.ctx.hostedClientMode && runner?.hasHandlers("input")) {
 				const input = await this.#runInputHandlers(text, inputImages, inputImageLinks);
 				if (!input) {
 					// The handler consumed the submission. The editor text was reset
@@ -1031,6 +1073,13 @@ export class InputController {
 
 			const queueBody = parseQueueShorthand(text);
 			if (queueBody !== undefined) {
+				if (this.ctx.hostedClientMode) {
+					this.ctx.showStatus(
+						`Queue shorthand is unavailable when attached; ${appKey(this.ctx.keybindings, "app.message.followUp")} queues a follow-up`,
+					);
+					this.ctx.editor.setCollapsedText(text);
+					return;
+				}
 				await this.#queueForYield(queueBody, {
 					historyText: text,
 					images: inputImages,
@@ -1081,6 +1130,12 @@ export class InputController {
 					if (!shouldSkipHistory(text)) this.ctx.editor.addToHistory(text);
 					text = slashResult;
 				}
+			}
+
+			// Hosted client: the host runs the prompt; builtins it can run were not consumed above.
+			if (this.ctx.hostedClientMode) {
+				await this.#promptHost(text, "steer", inputImages, inputImageLinks, draftDetached);
+				return;
 			}
 
 			// Collab guest: prompts execute on the host; local slash/skill/bash/
@@ -1476,12 +1531,15 @@ export class InputController {
 		// process-level SIGINT handler never fires. shutdown() awaits its own
 		// async flush — this sync pass is a superset that also covers the
 		// first-press case and the hard-abort path below.
-		try {
-			this.ctx.sessionManager.flushSync();
-		} catch (err) {
-			logger.warn("session-manager sync flush on Ctrl+C failed", {
-				error: err instanceof Error ? err.message : String(err),
-			});
+		// A hosted replica is a disposable copy the link deletes on leaving: flushing it would only recreate its file.
+		if (!this.ctx.hostedClientMode) {
+			try {
+				this.ctx.sessionManager.flushSync();
+			} catch (err) {
+				logger.warn("session-manager sync flush on Ctrl+C failed", {
+					error: err instanceof Error ? err.message : String(err),
+				});
+			}
 		}
 
 		// Hard-abort: a Ctrl+C arriving while shutdown() is already running
@@ -1603,6 +1661,10 @@ export class InputController {
 	}
 
 	handleDequeue(): void {
+		if (this.ctx.hostedClientMode) {
+			void this.#dequeueFromHost();
+			return;
+		}
 		const popped = this.#popLastQueuedMessage();
 		if (!popped) {
 			this.ctx.showStatus("No queued messages to restore");
@@ -1690,6 +1752,10 @@ export class InputController {
 	}
 
 	async handleRetry(): Promise<void> {
+		if (this.ctx.hostedClientMode) {
+			this.ctx.showStatus("Retry is unavailable when attached");
+			return;
+		}
 		if (this.ctx.collabGuest) {
 			this.ctx.showStatus("/retry is host-only during a collab session");
 			return;
@@ -1857,7 +1923,7 @@ export class InputController {
 		if (!text && !images) return;
 
 		// Focused subagent session: follow-ups go to it; non-chat input is gated.
-		if (this.ctx.focusedAgentId) {
+		if (this.ctx.focusedAgentId && !this.ctx.hostedClientMode) {
 			await this.#submitToFocusedSession(text, "followUp");
 			return;
 		}
@@ -1866,7 +1932,7 @@ export class InputController {
 		// same draft, and later typing belongs to the next submission.
 		this.ctx.editor.clearDraft();
 
-		if (this.ctx.session.extensionRunner?.hasHandlers("input")) {
+		if (!this.ctx.hostedClientMode && this.ctx.session.extensionRunner?.hasHandlers("input")) {
 			try {
 				const input = await this.#runInputHandlers(text, images, imageLinks);
 				if (!input) return;
@@ -1910,6 +1976,12 @@ export class InputController {
 			}
 		}
 
+		// Hosted client: the host runs the prompt; builtins it can run were not consumed above.
+		if (this.ctx.hostedClientMode) {
+			await this.#promptHost(text, "followUp", images, imageLinks, true);
+			return;
+		}
+
 		// Skill commands invoke through the custom-message path regardless of
 		// which keybinding submitted them. Enter routes them as `steer`;
 		// Ctrl+Enter (this handler) routes them as `followUp`.
@@ -1949,6 +2021,99 @@ export class InputController {
 			});
 		} catch (error) {
 			restoreOnError(error);
+		}
+	}
+
+	/** A gesture that only makes sense on this machine: it runs here, or says so when this UI is a client of a session host. */
+	#local(what: string, run: () => unknown): () => void {
+		return () => {
+			if (this.ctx.hostedClientMode) this.ctx.showStatus(`${what} is unavailable when attached`);
+			else void run();
+		};
+	}
+
+	/** The link to the session host, or a status (and nothing sent) while the connection is not up. */
+	#connectedHost(): InteractiveModeContext["hostedClient"] {
+		const host = this.ctx.hostedClient;
+		if (!host) this.ctx.showStatus("Not connected to the session host yet");
+		return host;
+	}
+
+	/** Await a write to the host. A rejection (stale view, lost connection) is shown and never retried: `undefined`. */
+	async #hostWrite<T>(write: Promise<T>): Promise<T | undefined> {
+		try {
+			return await write;
+		} catch (error) {
+			this.ctx.showError(error instanceof Error ? error.message : String(error));
+			return undefined;
+		}
+	}
+
+	/**
+	 * Send a submission to the session host. The host runs it and its turn returns as events, so nothing is
+	 * titled, echoed, or executed here. A submission that cannot be sent returns to the editor with its
+	 * attachments; a write is never retried. `draftDetached`: the attachments already left the editor (the text
+	 * always has).
+	 */
+	async #promptHost(
+		text: string,
+		streamingBehavior: "steer" | "followUp",
+		images: ImageContent[] | undefined,
+		imageLinks: (string | undefined)[] | undefined,
+		draftDetached: boolean,
+	): Promise<void> {
+		const editor = this.ctx.editor;
+		if (!draftDetached) {
+			editor.imageLinks = undefined;
+			editor.pendingImages = [];
+			editor.pendingImageLinks = [];
+		}
+		const restore = (): void => restoreDetachedDraft(editor, text, images, imageLinks);
+		if (text.startsWith("!") || parsePythonCommandInput(text)) {
+			this.ctx.showStatus("Local execution is unavailable when attached");
+			restore();
+			return;
+		}
+		const host = this.#connectedHost();
+		if (!host) {
+			restore();
+			return;
+		}
+		try {
+			// The behavior always goes along: the host may have started a run this client has not heard about yet.
+			await host.prompt(text, images, streamingBehavior);
+		} catch (error) {
+			restore();
+			this.ctx.showError(error instanceof Error ? error.message : String(error));
+			return;
+		}
+		if (!shouldSkipHistory(text)) editor.addToHistory(text);
+	}
+
+	/** Alt+Up when attached: take the newest queued message back from the host into the editor. */
+	async #dequeueFromHost(): Promise<void> {
+		const host = this.#connectedHost();
+		if (!host) return;
+		const result = await this.#hostWrite(host.takeBackQueued());
+		switch (result?.outcome) {
+			case undefined:
+				return;
+			case "empty":
+				this.ctx.showStatus("No queued messages to restore");
+				return;
+			case "delivered":
+				this.ctx.showStatus("That message was already delivered");
+				return;
+			case "attachment":
+				this.ctx.showStatus("That queued message has an attachment; it cannot be taken back when attached");
+				return;
+			case "unreported":
+				this.ctx.showStatus("This session host does not report queued attachments; nothing was taken back");
+				return;
+			case "restored":
+				this.#restoreEntriesToEditor([{ text: result.text }]);
+				this.ctx.showStatus("Restored last queued message to editor");
+				return;
 		}
 	}
 
@@ -2138,6 +2303,9 @@ export class InputController {
 	 * undefined when the write fails; the image still attaches, just without a reference.
 	 */
 	async #persistPastedImage(image: ImageContent): Promise<string | undefined> {
+		// The host cannot open a file in this replica's artifact directory (and that directory is deleted on
+		// leaving): the image goes to the host as bytes, and its chip simply carries no file reference.
+		if (this.ctx.hostedClientMode) return undefined;
 		const bytes = Buffer.from(image.data, "base64");
 		const extension = blobExtensionForImageMimeType(image.mimeType) ?? "png";
 		const url = `local://pasted-image-${Bun.hash(bytes).toString(16)}.${extension}`;
@@ -2502,17 +2670,19 @@ export class InputController {
 		const LOCAL_FILE = "Attach as local file";
 		const INLINE = "Paste inline";
 
+		// A `local://` file would live in this replica's artifact directory, which the host cannot read.
+		const options = [
+			{ label: WRAPPED_BLOCK, description: "Wrap the text in <attachment> tags, collapsed to a marker" },
+			...(this.ctx.hostedClientMode
+				? []
+				: [{ label: LOCAL_FILE, description: "Save the text to a local://paste file" }]),
+			{ label: INLINE, description: "Collapse the text to an inline paste marker" },
+		];
 		let choice: string | undefined;
 		try {
-			choice = await this.ctx.showHookSelector(
-				`Pasted ${lineCount} lines`,
-				[
-					{ label: WRAPPED_BLOCK, description: "Wrap the text in <attachment> tags, collapsed to a marker" },
-					{ label: LOCAL_FILE, description: "Save the text to a local://paste file" },
-					{ label: INLINE, description: "Collapse the text to an inline paste marker" },
-				],
-				{ helpText: `${editorKey("tui.select.cancel")} to paste inline` },
-			);
+			choice = await this.ctx.showHookSelector(`Pasted ${lineCount} lines`, options, {
+				helpText: `${editorKey("tui.select.cancel")} to paste inline`,
+			});
 		} catch (error) {
 			logger.warn("large-paste menu failed", { error: error instanceof Error ? error.message : String(error) });
 			choice = undefined;
@@ -2655,6 +2825,15 @@ export class InputController {
 	}
 
 	cycleThinkingLevel(): void {
+		if (this.ctx.hostedClientMode) {
+			const host = this.#connectedHost();
+			if (host) {
+				void this.#hostWrite(host.cycleThinkingLevel()).then(changed => {
+					if (changed === false) this.ctx.showStatus("Current model does not support thinking");
+				});
+			}
+			return;
+		}
 		if (this.ctx.focusedAgentId) {
 			this.ctx.showStatus(
 				`Model/thinking apply to the main session — press ${formatDoubleTap("left")} to return first`,
@@ -2671,6 +2850,17 @@ export class InputController {
 	}
 
 	async cycleRoleModel(direction: "forward" | "backward" = "forward"): Promise<void> {
+		if (this.ctx.hostedClientMode) {
+			if (direction === "backward") {
+				this.ctx.showStatus("Cycling to the previous model is unavailable when attached");
+				return;
+			}
+			const host = this.#connectedHost();
+			if (host && (await this.#hostWrite(host.cycleModel())) === false) {
+				this.ctx.showStatus("Only one model available");
+			}
+			return;
+		}
 		if (this.ctx.focusedAgentId) {
 			this.ctx.showStatus(
 				`Model/thinking apply to the main session — press ${formatDoubleTap("left")} to return first`,
@@ -2815,7 +3005,9 @@ export class InputController {
 
 	registerExtensionShortcuts(): void {
 		const runner = this.ctx.session.extensionRunner;
-		if (!runner) return;
+		// A hosted client's local runner is never initialized (the host runs the extensions), so its handlers have no
+		// session to act on: they are not bound, whatever the replica's runner holds.
+		if (!runner || this.ctx.hostedClientMode) return;
 
 		const shortcuts = runner.getShortcuts();
 		for (const [keyId, shortcut] of shortcuts) {

@@ -512,7 +512,9 @@ export class SessionMaintenance {
 	#manualCompactionCleanup: Promise<void> | undefined;
 	/** Resolves after a manual handoff commits or fails; blocks prompts while its history snapshot is pending. */
 	#handoffCleanup: Promise<void> | undefined;
-	/** Dispatches holding an unreleased claim from {@link waitForManualMaintenanceCleanup}/{@link claimPendingResume}; any one may supersede the interrupted-turn resume. */
+	/** Resolves after an idle pass finishes rewriting history; holds new prompt setup outside that pass. */
+	#idleCompactionCleanup: Promise<void> | undefined;
+	/** Dispatches holding an unreleased claim from {@link waitForMaintenanceCleanup}/{@link claimPendingResume}; any one may supersede the interrupted-turn resume. */
 	#promptsAwaitingCleanup = 0;
 	/** Interrupted-turn resume withheld from a compaction `finally` because a claim was open; consumed by `release(false)`, {@link noteTurnStarted}, or the next manual pass. */
 	#deferredResumeGeneration: number | undefined;
@@ -1935,15 +1937,16 @@ export class SessionMaintenance {
 	}
 
 	/**
-	 * Park a prompt until manual compaction reconnects the agent or manual handoff
-	 * finishes committing its history. A parked prompt supersedes the interrupted
-	 * turn's synthetic resume after compaction; local commands and failed dispatches
-	 * release that claim so the interrupted turn is not stranded.
+	 * Park prompt setup until idle compaction, manual compaction, or manual handoff
+	 * finishes rewriting history. A prompt parked by a manual pass supersedes its
+	 * interrupted-turn resume; local commands and failed dispatches release that
+	 * claim so the interrupted turn is not stranded.
 	 *
 	 * Returns `undefined` when neither maintenance pass nor a resume decision is
 	 * open. Otherwise the caller MUST invoke the returned `release` after dispatch.
 	 */
-	async waitForManualMaintenanceCleanup(): Promise<((startedTurn: boolean) => void) | undefined> {
+	async waitForMaintenanceCleanup(): Promise<((startedTurn: boolean) => void) | undefined> {
+		while (this.#idleCompactionCleanup) await this.#idleCompactionCleanup;
 		const cleanup = this.#manualCompactionCleanup ?? this.#handoffCleanup;
 		// No compaction to wait for, but an earlier parked prompt is still settling:
 		// this prompt competes for the same session, so it takes part in the
@@ -1956,7 +1959,7 @@ export class SessionMaintenance {
 
 	/**
 	 * Register a dispatch that may start a turn while an interrupted-turn resume
-	 * decision is open (a prompt parked by {@link waitForManualMaintenanceCleanup}
+	 * decision is open (a prompt parked by {@link waitForMaintenanceCleanup}
 	 * has not released yet). `undefined` when no decision is open.
 	 *
 	 * The caller MUST invoke the returned `release` once the dispatch settles.
@@ -2003,8 +2006,15 @@ export class SessionMaintenance {
 
 	/** Trigger idle compaction through the auto-compaction flow (with UI events). */
 	async runIdleCompaction(): Promise<void> {
-		if (this.#host.isStreaming() || this.isCompacting) return;
-		await this.runAutoCompaction("idle", false);
+		if (this.#host.isStreaming() || this.isCompacting || this.#idleCompactionCleanup) return;
+		const cleanup = Promise.withResolvers<void>();
+		this.#idleCompactionCleanup = cleanup.promise;
+		try {
+			await this.runAutoCompaction("idle", false);
+		} finally {
+			this.#idleCompactionCleanup = undefined;
+			cleanup.resolve();
+		}
 	}
 
 	/**

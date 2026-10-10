@@ -6,13 +6,12 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { RpcClient } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-client";
 import { RpcGoalController, type RpcGoalSession } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-goal";
 import {
-	isRpcSessionSettled,
 	RpcSessionSettleWatcher,
-	type RpcSettleSession,
 	watchedScheduledTurnProbe,
 } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-session-settle";
 import type { RpcSessionState } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-types";
 import type { AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { isSessionSettled, type SessionSettleState } from "@oh-my-pi/pi-coding-agent/session/session-settle";
 import type { GoalModeState } from "@oh-my-pi/pi-coding-agent/goals/state";
 import { removeWithRetries, withTimeout } from "@oh-my-pi/pi-utils";
 
@@ -783,12 +782,12 @@ describe("RpcGoalController continuation gate", () => {
 		ref.watcher = watcher;
 		await controller.beginSessionChange();
 		await controller.handle({ op: "create", objective: "held during the change" });
-		expect(isRpcSessionSettled(session as unknown as RpcSettleSession, probe)).toBe(false);
+		expect(isSessionSettled(session as unknown as SessionSettleState, probe)).toBe(false);
 		// The change switches away, so the held turn is abandoned and nothing will run.
 		transcript.id = "t2";
 		await controller.endSessionChange();
 		await watcher.check();
-		expect(isRpcSessionSettled(session as unknown as RpcSettleSession, probe)).toBe(true);
+		expect(isSessionSettled(session as unknown as SessionSettleState, probe)).toBe(true);
 		expect(frames).toEqual(["session_settled"]);
 	});
 

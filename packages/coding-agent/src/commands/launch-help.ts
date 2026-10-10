@@ -48,8 +48,8 @@ export const launchHelp = {
 		alias: Flags.string({ description: "Create a shell shortcut for the selected profile and exit" }),
 		cwd: Flags.string({ description: "Directory to start in (overrides the launch cwd)" }),
 		mode: Flags.string({
-			description: "Output mode: text (default), json, rpc, or rpc-ui",
-			options: ["text", "json", "rpc", "acp", "rpc-ui"],
+			description: "Output mode: text (default), json, rpc, rpc-ui, or host (internal session host, spawned by omp)",
+			options: ["text", "json", "rpc", "acp", "rpc-ui", "host"],
 		}),
 		config: Flags.string({
 			description: "Load an extra config.yml-style overlay for this run (repeatable)",

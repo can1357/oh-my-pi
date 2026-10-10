@@ -93,6 +93,15 @@ export function getAssistantMessageLinkTargets(ctx: AssistantMessageHost): Reado
 	return session[kMarkdownLinkTargets] ?? EMPTY_LINK_TARGETS;
 }
 
+/**
+ * Forget every resolved destination of the current session. They were resolved against a place the view no longer
+ * reads from (another host, session, or location), and a link that appears before the next refresh must not open them.
+ */
+export function clearAssistantMessageLinkTargets(ctx: Pick<AssistantMessageHost, "viewSession">): void {
+	const session: SessionWithMarkdownLinkTargets = ctx.viewSession;
+	delete session[kMarkdownLinkTargets];
+}
+
 /** Limit a session snapshot to destinations authored by one rendered segment. */
 export function assistantMessageLinkTargets(
 	message: AssistantMessage,

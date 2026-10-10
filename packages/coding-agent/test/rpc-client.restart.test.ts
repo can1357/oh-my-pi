@@ -186,6 +186,25 @@ describe("RpcClient lifecycle (issue #4079 B)", () => {
 		}
 	}, 10_000);
 
+	test("a transport lost during protocol negotiation rejects start() without onClose, and the same client then starts", async () => {
+		const env: Record<string, string> = { MOCK_RPC_V2: "1", MOCK_RPC_INVALID_OUTPUT: "1" };
+		using client = new RpcClient({ cliPath: MOCK_AGENT, env, terminationGraceMs: 10 });
+		const closes: Error[] = [];
+		client.onClose(error => closes.push(error));
+
+		// `ready` arrives, then the worker's answer to `negotiate_protocol` is unparseable.
+		await expect(client.start()).rejects.toThrow(/Agent output reader failed/);
+		expect(closes).toEqual([]);
+
+		// Without v2 there is no negotiation: the retry starts, and only then does a lost transport notify.
+		delete env.MOCK_RPC_V2;
+		await client.start();
+		expect(closes).toEqual([]);
+		await expect(client.getState()).rejects.toThrow(/Agent output reader failed/);
+		expect(closes).toHaveLength(1);
+		expect(closes[0].message).toMatch(/Agent output reader failed/);
+	}, 10_000);
+
 	test("reports exit code and stderr when a ready worker exits", async () => {
 		using client = new RpcClient({
 			cliPath: MOCK_AGENT,
@@ -211,4 +230,26 @@ describe("RpcClient lifecycle (issue #4079 B)", () => {
 			message: expect.stringContaining("skill file was deleted"),
 		});
 	});
+
+	test("rejects promptToCompletion when the transport closes after the prompt ack", async () => {
+		using client = new RpcClient({
+			cliPath: MOCK_AGENT,
+			env: { MOCK_RPC_EXIT_AFTER_PROMPT_ACK: "1" },
+		});
+		await client.start();
+		expect(await rejectionOf(client.promptToCompletion("lost"))).toMatchObject({
+			message: expect.stringContaining("Agent process exited"),
+		});
+	}, 10_000);
+
+	test("rejects promptToCompletion when the client stops after the prompt ack", async () => {
+		using client = new RpcClient({ cliPath: MOCK_AGENT });
+		await client.start();
+		// The fixture acks the prompt but never sends prompt_result.
+		const completion = rejectionOf(client.promptToCompletion("orphaned"));
+		// Commands are answered in order, so this response proves the prompt ack was handled first.
+		await client.getState();
+		await client.stop();
+		expect(await completion).toMatchObject({ message: "Client stopped" });
+	}, 10_000);
 });

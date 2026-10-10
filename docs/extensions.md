@@ -830,7 +830,7 @@ up to 10 content lines plus a truncation notice). Pass `undefined` to remove a
 widget. `setEditorText` and `pasteToEditor` request a repaint after mutating the
 editor.
 
-### RPC mode (`rpc-mode.ts`)
+### RPC mode (`rpc-server.ts`)
 
 `ctx.ui` is backed by RPC `extension_ui_request` events:
 

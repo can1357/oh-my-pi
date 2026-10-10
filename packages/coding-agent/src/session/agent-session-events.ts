@@ -81,6 +81,9 @@ export type AgentSessionEvent =
 			resolved?: Effort;
 	  }
 	| { type: "goal_updated"; goal: Goal | null; state?: GoalModeState }
+	// A recap of where the session stands, generated after it has been idle for a while. Carries the full
+	// nonblank reply; presenters shorten it. Journaled to history.db, never added to the model context.
+	| { type: "idle_recap"; recap: string }
 	// Coalesced snapshot of the displayable steering/follow-up queue: emitted
 	// whenever it differs from the last `queue_update` (enqueue, dequeue on
 	// delivery, remove, clear/restore, or session switch), never on a no-op

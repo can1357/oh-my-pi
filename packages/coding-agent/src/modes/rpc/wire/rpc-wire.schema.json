@@ -21,6 +21,28 @@
 				"clientOmit": []
 			},
 			{
+				"name": "detach",
+				"doc": "Session-host socket clients: leave; the session keeps running. Unknown on stdio.",
+				"params": null,
+				"result": null,
+				"nullable": false,
+				"unwrap": null,
+				"timeoutMs": null,
+				"completion": null,
+				"clientOmit": []
+			},
+			{
+				"name": "exit",
+				"doc": "Session-host socket clients: leave, and stop the host when no other client remains. Unknown on stdio.",
+				"params": null,
+				"result": null,
+				"nullable": false,
+				"unwrap": null,
+				"timeoutMs": null,
+				"completion": null,
+				"clientOmit": []
+			},
+			{
 				"name": "prompt",
 				"doc": "Submit a prompt; acknowledged once admitted, completed by its `prompt_result`.",
 				"params": "PromptParams",
@@ -181,6 +203,17 @@
 				"result": "SetAskDialogResult",
 				"nullable": false,
 				"unwrap": "enabled",
+				"timeoutMs": null,
+				"completion": null,
+				"clientOmit": []
+			},
+			{
+				"name": "set_idle_activity",
+				"doc": "Socket clients only: report whether this client has an unsent draft, so host-owned idle maintenance (recap and idle compaction) stays out of its way. Answered at once, even while another command runs. Like any write it honors the common `ifEpoch` precondition; generated SDK methods send none and bind to the current epoch.",
+				"params": "SetIdleActivityParams",
+				"result": "SetIdleActivityResult",
+				"nullable": false,
+				"unwrap": null,
 				"timeoutMs": null,
 				"completion": null,
 				"clientOmit": []
@@ -2343,6 +2376,28 @@
 			],
 			"description": "Displayable queue-chip text for pending user-authored messages; accepted verbatim by `remove_queued_message`."
 		},
+		"QueueAttachments": {
+			"type": "object",
+			"properties": {
+				"steering": {
+					"type": "array",
+					"items": {
+						"type": "boolean"
+					}
+				},
+				"followUp": {
+					"type": "array",
+					"items": {
+						"type": "boolean"
+					}
+				}
+			},
+			"required": [
+				"steering",
+				"followUp"
+			],
+			"description": "Which queued chips carry an attachment (an image, or its source or description) their text does not; entry `i` describes chip `i`."
+		},
 		"ToolDescriptor": {
 			"type": "object",
 			"properties": {
@@ -2850,6 +2905,10 @@
 				"imagesDropped": {
 					"type": "boolean",
 					"description": "Only ever `true`: the images exceeded the transport limit and were omitted; the removal still happened."
+				},
+				"refused": {
+					"const": "attachments",
+					"description": "Nothing was removed: `refuseAttachments` was set and the prompt carries one."
 				}
 			},
 			"required": [
@@ -4157,6 +4216,10 @@
 					"items": {
 						"type": "string"
 					}
+				},
+				"attachments": {
+					"$ref": "#/$defs/QueueAttachments",
+					"description": "Session-host socket clients only; absent means unknown, not that no chip carries one."
 				}
 			},
 			"required": [
@@ -4165,6 +4228,22 @@
 				"followUp"
 			],
 			"description": "Coalesced snapshot of the displayable steering/follow-up queue, sent whenever it changes."
+		},
+		"IdleRecapEvent": {
+			"type": "object",
+			"properties": {
+				"type": {
+					"const": "idle_recap"
+				},
+				"recap": {
+					"type": "string"
+				}
+			},
+			"required": [
+				"type",
+				"recap"
+			],
+			"description": "The host produced a recap while the session sat idle: the full reply (de-duplicated and capped like any side-channel reply), journaled in the session history database. It never enters the transcript or the model context."
 		},
 		"RpcAgentEvent": {
 			"anyOf": [
@@ -4260,6 +4339,9 @@
 				},
 				{
 					"$ref": "#/$defs/QueueUpdateEvent"
+				},
+				{
+					"$ref": "#/$defs/IdleRecapEvent"
 				}
 			],
 			"description": "A session event, discriminated by `type`; `set_event_filter` selects which are sent."
@@ -4724,13 +4806,21 @@
 				},
 				"title": {
 					"type": "string"
+				},
+				"origin": {
+					"$ref": "#/$defs/SessionOrigin",
+					"description": "Socket clients: the session was relocated (`/move`, `/wt`); where it lives now."
+				},
+				"seq": {
+					"type": "integer",
+					"description": "Host sequence number; socket clients only."
 				}
 			},
 			"required": [
 				"type",
 				"sessionId"
 			],
-			"description": "A builtin slash command changed the session title."
+			"description": "The session title changed."
 		},
 		"ConfigUpdateEvent": {
 			"type": "object",
@@ -4743,12 +4833,16 @@
 				},
 				"thinkingLevel": {
 					"$ref": "#/$defs/ThinkingLevel"
+				},
+				"seq": {
+					"type": "integer",
+					"description": "Host sequence number; socket clients only."
 				}
 			},
 			"required": [
 				"type"
 			],
-			"description": "A builtin slash command changed the model configuration."
+			"description": "The live model or thinking level changed."
 		},
 		"RpcFrameErrorEvent": {
 			"type": "object",
@@ -4768,6 +4862,375 @@
 				"error"
 			],
 			"description": "An event could not fit within the transport limits and was dropped."
+		},
+		"ClientInfo": {
+			"type": "object",
+			"properties": {
+				"clientId": {
+					"type": "string"
+				},
+				"kind": {
+					"type": "string"
+				},
+				"label": {
+					"type": "string"
+				}
+			},
+			"required": [
+				"clientId",
+				"kind"
+			],
+			"description": "A connected session-host client, as listed in snapshots and `clients_changed`."
+		},
+		"SessionOrigin": {
+			"type": "object",
+			"properties": {
+				"cwd": {
+					"type": "string"
+				},
+				"artifactsDir": {
+					"anyOf": [
+						{
+							"type": "string"
+						},
+						{
+							"type": "null"
+						}
+					]
+				},
+				"localRoot": {
+					"type": "string"
+				},
+				"sessionId": {
+					"type": "string"
+				}
+			},
+			"required": [
+				"cwd",
+				"artifactsDir",
+				"localRoot",
+				"sessionId"
+			],
+			"description": "Where a host session lives, for resolving `local://` URLs and relative paths in what it authored."
+		},
+		"StreamingMessage": {
+			"type": "object",
+			"properties": {
+				"messageId": {
+					"type": "string"
+				},
+				"message": {
+					"$ref": "#/$defs/AgentMessage"
+				}
+			},
+			"required": [
+				"messageId",
+				"message"
+			],
+			"description": "The in-flight message of a mid-turn join; later frames for it carry `messageId`."
+		},
+		"SessionSnapshot": {
+			"type": "object",
+			"properties": {
+				"state": {
+					"$ref": "#/$defs/SessionState"
+				},
+				"header": {
+					"anyOf": [
+						{
+							"type": "object",
+							"properties": {},
+							"additionalProperties": {}
+						},
+						{
+							"type": "null"
+						}
+					]
+				},
+				"entries": {
+					"type": "array",
+					"items": {
+						"type": "object",
+						"properties": {},
+						"additionalProperties": {}
+					}
+				},
+				"leafId": {
+					"anyOf": [
+						{
+							"type": "string"
+						},
+						{
+							"type": "null"
+						}
+					]
+				},
+				"pendingUi": {
+					"type": "array",
+					"items": {
+						"$ref": "#/$defs/ExtensionUiRequest"
+					},
+					"description": "Open extension dialogs a late joiner can answer."
+				},
+				"clients": {
+					"type": "array",
+					"items": {
+						"$ref": "#/$defs/ClientInfo"
+					}
+				},
+				"streaming": {
+					"$ref": "#/$defs/StreamingMessage"
+				},
+				"uiState": {
+					"type": "array",
+					"items": {
+						"$ref": "#/$defs/ExtensionUiRequest"
+					},
+					"description": "Extension statuses and widgets showing now: the latest `setStatus`/`setWidget` per key."
+				},
+				"queueAttachments": {
+					"$ref": "#/$defs/QueueAttachments",
+					"description": "Parallel to `state.queuedMessages`."
+				},
+				"origin": {
+					"$ref": "#/$defs/SessionOrigin"
+				}
+			},
+			"required": [
+				"state",
+				"header",
+				"entries",
+				"leafId",
+				"pendingUi",
+				"clients"
+			],
+			"description": "The session as the `entry` frames have announced it: everything a socket client needs to render it from scratch."
+		},
+		"AttachedEvent": {
+			"type": "object",
+			"properties": {
+				"type": {
+					"const": "attached"
+				},
+				"hostId": {
+					"type": "string"
+				},
+				"clientId": {
+					"type": "string"
+				},
+				"epoch": {
+					"type": "integer"
+				},
+				"seq": {
+					"type": "integer"
+				},
+				"snapshot": {
+					"$ref": "#/$defs/SessionSnapshot"
+				}
+			},
+			"required": [
+				"type",
+				"hostId",
+				"clientId",
+				"epoch",
+				"seq",
+				"snapshot"
+			],
+			"description": "Socket clients: first frame of a fresh attach; later frames carry a greater `seq`."
+		},
+		"ResumedEvent": {
+			"type": "object",
+			"properties": {
+				"type": {
+					"const": "resumed"
+				},
+				"epoch": {
+					"type": "integer"
+				},
+				"replayed": {
+					"type": "integer"
+				}
+			},
+			"required": [
+				"type",
+				"epoch",
+				"replayed"
+			],
+			"description": "Socket clients: first frame of a resume; the `replayed` frames after `lastSeq` follow it."
+		},
+		"EntryEvent": {
+			"type": "object",
+			"properties": {
+				"type": {
+					"const": "entry"
+				},
+				"entry": {
+					"type": "object",
+					"properties": {},
+					"additionalProperties": {}
+				},
+				"seq": {
+					"type": "integer"
+				},
+				"leafId": {
+					"anyOf": [
+						{
+							"type": "string"
+						},
+						{
+							"type": "null"
+						}
+					],
+					"description": "The host's active leaf when the entry was announced; absent from older hosts."
+				}
+			},
+			"required": [
+				"type",
+				"entry",
+				"seq"
+			],
+			"description": "Socket clients: a session-file append."
+		},
+		"SessionReplacedReason": {
+			"enum": [
+				"new",
+				"resume",
+				"fork",
+				"tree"
+			],
+			"type": "string"
+		},
+		"SessionReplacedEvent": {
+			"type": "object",
+			"properties": {
+				"type": {
+					"const": "session_replaced"
+				},
+				"epoch": {
+					"type": "integer"
+				},
+				"reason": {
+					"$ref": "#/$defs/SessionReplacedReason"
+				},
+				"snapshot": {
+					"$ref": "#/$defs/SessionSnapshot"
+				},
+				"seq": {
+					"type": "integer"
+				},
+				"sessionFile": {
+					"type": "string"
+				}
+			},
+			"required": [
+				"type",
+				"epoch",
+				"reason",
+				"snapshot",
+				"seq"
+			],
+			"description": "Socket clients: the host now serves a different session or transcript; `snapshot` replaces the client's view."
+		},
+		"ClientsChangedEvent": {
+			"type": "object",
+			"properties": {
+				"type": {
+					"const": "clients_changed"
+				},
+				"clients": {
+					"type": "array",
+					"items": {
+						"$ref": "#/$defs/ClientInfo"
+					}
+				},
+				"seq": {
+					"type": "integer"
+				}
+			},
+			"required": [
+				"type",
+				"clients",
+				"seq"
+			],
+			"description": "Socket clients: client presence changed."
+		},
+		"ClientIdentity": {
+			"type": "object",
+			"properties": {
+				"kind": {
+					"type": "string"
+				},
+				"label": {
+					"type": "string"
+				}
+			},
+			"required": [
+				"kind"
+			]
+		},
+		"ClientCapabilities": {
+			"type": "object",
+			"properties": {
+				"ui": {
+					"type": "boolean",
+					"description": "Receive extension UI requests."
+				}
+			},
+			"required": [
+				"ui"
+			]
+		},
+		"ResumePoint": {
+			"type": "object",
+			"properties": {
+				"hostId": {
+					"type": "string"
+				},
+				"epoch": {
+					"type": "integer"
+				},
+				"lastSeq": {
+					"type": "integer"
+				}
+			},
+			"required": [
+				"hostId",
+				"epoch",
+				"lastSeq"
+			]
+		},
+		"HelloFrame": {
+			"type": "object",
+			"properties": {
+				"type": {
+					"const": "hello"
+				},
+				"token": {
+					"type": "string"
+				},
+				"protocolVersion": {
+					"type": "integer",
+					"description": "1 or 2, as `negotiate_protocol` would select."
+				},
+				"client": {
+					"$ref": "#/$defs/ClientIdentity"
+				},
+				"capabilities": {
+					"$ref": "#/$defs/ClientCapabilities"
+				},
+				"resume": {
+					"$ref": "#/$defs/ResumePoint",
+					"description": "Ignored, so the client gets `attached`, unless `hostId` names this host."
+				}
+			},
+			"required": [
+				"type",
+				"token",
+				"protocolVersion",
+				"client",
+				"capabilities"
+			],
+			"description": "First frame a session-host socket client sends; anything else, or a wrong token, gets `unauthorized` and a close."
 		},
 		"WidgetPlacement": {
 			"enum": [
@@ -5233,6 +5696,23 @@
 				},
 				"customInput": {
 					"type": "string"
+				},
+				"customInputImages": {
+					"type": "array",
+					"items": {
+						"$ref": "#/$defs/ImageContent"
+					},
+					"description": "Images pasted into the free text; their `[Image #N]` markers sit in it."
+				},
+				"note": {
+					"type": "string",
+					"description": "The user's note on the answer."
+				},
+				"noteImages": {
+					"type": "array",
+					"items": {
+						"$ref": "#/$defs/ImageContent"
+					}
 				}
 			},
 			"required": [
@@ -5327,6 +5807,26 @@
 			],
 			"description": "Answers an `ask` request: one `AskAnswer` per question, in question order."
 		},
+		"ChatUiResponse": {
+			"type": "object",
+			"properties": {
+				"type": {
+					"const": "extension_ui_response"
+				},
+				"id": {
+					"type": "string"
+				},
+				"chat": {
+					"const": true
+				}
+			},
+			"required": [
+				"type",
+				"id",
+				"chat"
+			],
+			"description": "Declines an `ask` request to discuss it instead; distinct from cancelling."
+		},
 		"ExtensionUiResponse": {
 			"anyOf": [
 				{
@@ -5340,6 +5840,9 @@
 				},
 				{
 					"$ref": "#/$defs/AnswersUiResponse"
+				},
+				{
+					"$ref": "#/$defs/ChatUiResponse"
 				}
 			],
 			"description": "Host reply to an extension UI request; variants share `type` and differ by their payload key."
@@ -5618,6 +6121,25 @@
 				"code": {
 					"type": "string",
 					"description": "Machine-readable failure reason, when one applies."
+				},
+				"epoch": {
+					"type": "integer",
+					"description": "`stale`: the host's current session epoch."
+				},
+				"leafId": {
+					"anyOf": [
+						{
+							"type": "string"
+						},
+						{
+							"type": "null"
+						}
+					],
+					"description": "`stale`: the session's current leaf."
+				},
+				"hostId": {
+					"type": "string",
+					"description": "`session_hosted`: the host that owns the session."
 				}
 			},
 			"required": [
@@ -5626,6 +6148,27 @@
 				"success"
 			],
 			"description": "Response to a command, correlated by `id`."
+		},
+		"RpcPreconditions": {
+			"type": "object",
+			"properties": {
+				"ifEpoch": {
+					"type": "integer",
+					"description": "Run only while the host's session epoch equals this."
+				},
+				"ifLeaf": {
+					"anyOf": [
+						{
+							"type": "string"
+						},
+						{
+							"type": "null"
+						}
+					],
+					"description": "Run only while the session leaf equals this entry id (`null`: empty session)."
+				}
+			},
+			"description": "Write preconditions any command may carry beside `id`/`type`, honored for session-host socket clients only; on mismatch the command fails with `code: \"stale\"`."
 		},
 		"ToolLoadMode": {
 			"enum": [
@@ -5744,6 +6287,21 @@
 					"$ref": "#/$defs/ConfigUpdateEvent"
 				},
 				{
+					"$ref": "#/$defs/AttachedEvent"
+				},
+				{
+					"$ref": "#/$defs/ResumedEvent"
+				},
+				{
+					"$ref": "#/$defs/EntryEvent"
+				},
+				{
+					"$ref": "#/$defs/SessionReplacedEvent"
+				},
+				{
+					"$ref": "#/$defs/ClientsChangedEvent"
+				},
+				{
 					"$ref": "#/$defs/RpcFrameErrorEvent"
 				},
 				{
@@ -5853,6 +6411,18 @@
 				},
 				"queue": {
 					"$ref": "#/$defs/QueuedMessageQueue"
+				},
+				"match": {
+					"enum": [
+						"first",
+						"last"
+					],
+					"type": "string",
+					"description": "`last`: the newest prompt whose chip text is `message`; default `first` (raw text, then chip text)."
+				},
+				"refuseAttachments": {
+					"type": "boolean",
+					"description": "Remove nothing, answering `refused: \"attachments\"`, when the prompt carries an attachment."
 				}
 			},
 			"required": [
@@ -5984,6 +6554,28 @@
 			},
 			"required": [
 				"enabled"
+			]
+		},
+		"SetIdleActivityParams": {
+			"type": "object",
+			"properties": {
+				"isComposing": {
+					"type": "boolean"
+				}
+			},
+			"required": [
+				"isComposing"
+			]
+		},
+		"SetIdleActivityResult": {
+			"type": "object",
+			"properties": {
+				"isComposing": {
+					"type": "boolean"
+				}
+			},
+			"required": [
+				"isComposing"
 			]
 		},
 		"GetAvailableCommandsResult": {
