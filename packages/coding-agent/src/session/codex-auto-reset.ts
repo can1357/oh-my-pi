@@ -102,16 +102,14 @@ export function shouldPromptCodexAutoRedeem(mode: ResetAutoRedeemMode): boolean 
 }
 
 /**
- * Planned spends a host with no prompt UI may make. Under `unset` only a
- * credit expiring within {@link IMMINENT_RESET_EXPIRY_MS} qualifies, whether a
- * salvage or a restore spends it: nobody can be asked before it is lost. The
- * approved target names that credit, so redeem cannot pick a later one.
+ * Planned spends a host with no prompt UI may make while auto-redeem is unset:
+ * only a credit expiring within {@link IMMINENT_RESET_EXPIRY_MS} qualifies,
+ * whether a salvage or a restore spends it, since nobody can be asked before it
+ * is lost. The approved target names that credit, so redeem cannot pick a later one.
  */
 export function headlessApprovedResetActions<T extends Pick<CodexResetAction, "expiresInMs" | "target" | "creditId">>(
-	mode: ResetAutoRedeemMode,
 	actions: readonly T[],
 ): readonly T[] {
-	if (mode !== "unset") return mode === "yes" ? actions : [];
 	const approved: T[] = [];
 	for (const action of actions) {
 		if (action.expiresInMs === undefined || action.expiresInMs > IMMINENT_RESET_EXPIRY_MS) continue;
