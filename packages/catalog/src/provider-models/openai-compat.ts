@@ -3951,6 +3951,12 @@ export function alibabaTokenPlanModelManagerOptions(
 								}
 							: defaults;
 
+						// Discovered Qwen 3.8 SKUs are reasoning-capable; the
+						// effort ladder and wire contract resolve from the KDL
+						// class revision rule, not here.
+						if (isQwen38Generation("alibaba-token-plan", normalizedId)) {
+							return { ...enriched, reasoning: true };
+						}
 						if (isDeepseekV4Generation("alibaba-token-plan", normalizedId)) {
 							return {
 								...enriched,
@@ -7183,6 +7189,12 @@ function isDeepseekV4Generation(providerId: string, modelId: string): boolean {
 	const identity = classifyModel(providerId, modelId, { lenient: true });
 	if (identity.class !== "deepseek") return false;
 	return identity.family === "v4" || identity.family === "flash" || identity.family === "pro";
+}
+
+function isQwen38Generation(providerId: string, modelId: string): boolean {
+	const identity = classifyModel(providerId, modelId, { lenient: true });
+	if (identity.class !== "qwen" || identity.revision === undefined) return false;
+	return revisionAtLeast(identity.revision, "3.8") && !revisionAtLeast(identity.revision, "3.9");
 }
 
 const MODELS_DEV_PROVIDER_DESCRIPTORS_CORE: readonly ModelsDevProviderDescriptor[] = [

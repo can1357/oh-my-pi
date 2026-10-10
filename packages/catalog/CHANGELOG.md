@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed QwenCloud Token Plan dropping every effort selection on discovered Qwen 3.8 models that lack curated rows (e.g. `qwen3.8-plus`): the OpenAI `reasoning_effort` dialect and reasoning-history replay now apply to the whole Qwen 3.8 revision instead of only the exact `qwen3.8-max`/`qwen3.8-flash` ids, with `qwen3.8-max-preview` still pinned to the binary `enable_thinking` toggle ([#12376](https://github.com/can1357/oh-my-pi/issues/12376)).
+
 ## [18.8.7] - 2026-10-09
 
 ### Added

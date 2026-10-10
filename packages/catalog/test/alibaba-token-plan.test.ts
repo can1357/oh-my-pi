@@ -6,7 +6,7 @@ import {
 	ALIBABA_TOKEN_PLAN_BASE_URL,
 	alibabaTokenPlanModelManagerOptions,
 } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
-import type { FetchImpl } from "@oh-my-pi/pi-catalog/types";
+import type { FetchImpl, ModelSpec } from "@oh-my-pi/pi-catalog/types";
 import { serializeAlibabaTokenPlanCredential } from "@oh-my-pi/pi-catalog/wire/alibaba-token-plan";
 
 describe("QwenCloud Token Plan provider", () => {
@@ -17,6 +17,55 @@ describe("QwenCloud Token Plan provider", () => {
 			contextWindow: 983_616,
 			maxTokens: 131_072,
 		});
+	});
+
+	test("keeps qwen3.8-max-preview on the binary toggle through the cascade", () => {
+		// The revision rule widens the OpenAI effort dialect to every Qwen 3.8
+		// SKU; the exact-id preview pin must win it back to the Qwen dialect
+		// with replay off. Resolves through buildModel (not the baked row) so
+		// the pin itself is asserted, not the models.json snapshot.
+		const preview = buildModel({
+			id: "qwen3.8-max-preview",
+			name: "Qwen3.8 Max Preview",
+			api: "openai-completions",
+			provider: "alibaba-token-plan",
+			baseUrl: "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1",
+			reasoning: true,
+			input: ["text", "image"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 983_616,
+			maxTokens: 131_072,
+			thinking: { mode: "effort", efforts: [Effort.Low, Effort.High, Effort.XHigh], requiresEffort: true },
+		} satisfies ModelSpec<"openai-completions">);
+		const compat = preview.compat;
+		if (compat?.thinkingFormat !== "qwen") throw new Error("preview compat lost its Qwen dialect");
+		expect(compat.whenThinking).toMatchObject({ thinkingFormat: "qwen" });
+		expect(compat.whenThinking?.extraBody).toBeUndefined();
+		expect(compat.replayReasoningContent).toBe(false);
+		expect(compat.supportsReasoningEffort).toBe(true);
+	});
+
+	test("leaves non-3.8 Qwen siblings off the OpenAI effort dialect", () => {
+		// The revision window (>=3.8 <3.9) gates the dialect + replay, not the
+		// seed-declared supportsReasoningEffort flag: a 3.7 or 3.10 sibling
+		// must stay on the Qwen dialect with replay off.
+		for (const id of ["qwen3.7-plus", "qwen3.10-plus"]) {
+			const sibling = buildModel({
+				id,
+				name: id,
+				api: "openai-completions",
+				provider: "alibaba-token-plan",
+				baseUrl: "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1",
+				reasoning: true,
+				input: ["text"],
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				contextWindow: 1_000_000,
+				maxTokens: 64_000,
+			} satisfies ModelSpec<"openai-completions">);
+			expect(sibling.compat?.thinkingFormat).toBe("qwen");
+			expect(sibling.compat?.replayReasoningContent).toBe(false);
+			expect(sibling.compat?.whenThinking?.thinkingFormat ?? "qwen").toBe("qwen");
+		}
 	});
 
 	test("discovers subscribed chat models from the native models endpoint", async () => {
@@ -43,6 +92,7 @@ describe("QwenCloud Token Plan provider", () => {
 						{ id: "qwen3.6-plus", owned_by: "qwencloud" },
 						{ id: "qwen3.8-max", owned_by: "qwencloud" },
 						{ id: "qwen3.8-flash", owned_by: "qwencloud" },
+						{ id: "qwen3.8-plus", owned_by: "qwencloud" },
 						{ id: "deepseek-v3.2", owned_by: "qwencloud" },
 						{ id: "glm-5.1", owned_by: "qwencloud" },
 						{ id: "glm-5", owned_by: "qwencloud" },
@@ -82,6 +132,7 @@ describe("QwenCloud Token Plan provider", () => {
 			"qwen3.7-plus",
 			"qwen3.8-flash",
 			"qwen3.8-max",
+			"qwen3.8-plus",
 		]);
 		const expectedLimits = [
 			["qwen3.6-plus", 1_000_000, 65_536],
@@ -141,6 +192,19 @@ describe("QwenCloud Token Plan provider", () => {
 					extraBody: { enable_thinking: true },
 				},
 			},
+		});
+		const plus = models?.find(model => model.id === "qwen3.8-plus");
+		if (!plus) throw new Error("qwen3.8-plus missing from discovery");
+		// Discovery stamps capability only; the ladder and wire contract
+		// resolve from the KDL class revision rule via buildModel.
+		expect(plus).toMatchObject({ id: "qwen3.8-plus", reasoning: true });
+		expect(plus.thinking).toBeUndefined();
+		const plusModel = buildModel(plus);
+		expect(plusModel.thinking).toMatchObject({ mode: "effort", efforts: [Effort.Low, Effort.Medium, Effort.High] });
+		expect(plusModel.compat).toMatchObject({
+			supportsReasoningEffort: true,
+			replayReasoningContent: true,
+			whenThinking: { thinkingFormat: "openai", extraBody: { enable_thinking: true } },
 		});
 		const flash = models?.find(model => model.id === "qwen3.8-flash");
 		if (!flash) throw new Error("qwen3.8-flash missing from discovery");

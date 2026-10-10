@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- models.yml `compat` now accepts the `replayReasoningContent` and `qwenPreserveThinking` keys, so remote OpenAI-compatible endpoints that require historical reasoning content (e.g. DashScope Qwen 3.8) can opt into reasoning-history replay instead of the schema rejecting the override ([#12376](https://github.com/can1357/oh-my-pi/issues/12376)).
 ### Added
 
 - Added `/jobs kill <id>|all` to cancel a running background job (or every one this session owns) from the command line, even while the agent is busy ([#14160](https://github.com/can1357/oh-my-pi/pull/14160) by [@KanwarGill](https://github.com/KanwarGill))
