@@ -62,7 +62,7 @@ import type { EffectiveExtensionRoots } from "./capability/types";
 import { type OAuthAccountPools, SessionAccountPoolScope } from "./config/account-pools";
 import { shouldEnableAppendOnlyContext } from "./config/append-only-context-mode";
 import { shouldInlineToolDescriptors } from "./config/inline-tool-descriptors-mode";
-import { ModelRegistry } from "./config/model-registry";
+import { isAuthenticated, kNoAuth, ModelRegistry } from "./config/model-registry";
 import {
 	disabledProviderIds,
 	formatModelString,
@@ -201,6 +201,7 @@ import {
 import {
 	expandDefaultRetryFallbackChains,
 	findRetryFallbackCandidates,
+	installRetryFallbackRole,
 	type RetryFallbackResolutionContext,
 	resolveRetryFallbackChainKey,
 } from "./session/retry-fallback-chains";
@@ -594,9 +595,17 @@ export interface CreateAgentSessionOptions {
 	deferRetryFallbackValidation?: boolean;
 	/** Host-issued primary-request routing authority, never reconstructed from session metadata. */
 	roleRoute?: RoleRoutePermit;
+	/** Original operator grant source for nested dispatch; execution overlays never grant explicit models. */
+	modelAuthoritySettings?: Settings;
 	/** Raw model pattern(s) (e.g. from --model CLI flag) to resolve after extensions load.
 	 * Used when model lookup is deferred because extension-provided models aren't registered yet. */
 	modelPattern?: string | string[];
+	/** Authenticated parent fallback selector for deferred implicit subagent patterns. */
+	modelPatternAuthFallback?: string;
+	/** Session-scoped role used to install retry fallbacks after implicit patterns resolve. */
+	modelPatternFallbackRole?: string;
+	/** Configured implicit retry chain used when a deferred singleton pattern resolves. */
+	modelPatternDefaultFallbackChain?: string[];
 	/** Thinking selector. Default: from settings, else unset */
 	thinkingLevel?: ConfiguredThinkingLevel;
 	/** Hard ceiling on the session's thinking effort (e.g. a task spawn's `task.maxEffort`-capped hint); retry-fallback recovery re-clamps to it. */
@@ -1356,7 +1365,7 @@ const TOOL_DEFINITION_MARKER = Symbol("__isToolDefinition");
 /** Matches the truncation applied to per-server instructions inside `rebuildSystemPrompt`. */
 const MAX_MCP_INSTRUCTIONS_LENGTH = 4000;
 /** Built-ins `createTools` force-includes into explicit tool lists; the active set mirrors them. */
-const SESSION_MANAGED_BUILTIN_TOOL_NAMES = ["manage_skill", "learn", "context_notes", "new_context"];
+const SESSION_MANAGED_BUILTIN_TOOL_NAMES = ["manage_skill", "learn", "context_notes", "new_context", "think"];
 
 let sshCleanupRegistered = false;
 
@@ -2269,6 +2278,11 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		const getActiveModelString = (): string | undefined => {
 			if (session?.isDisposed) return undefined;
 			const activeModel = agent?.state.model ?? model;
+			return activeModel ? formatModelString(activeModel) : undefined;
+		};
+		const getActiveModelSelector = (): string | undefined => {
+			if (session?.isDisposed) return undefined;
+			const activeModel = agent?.state.model ?? model;
 			if (!activeModel) return undefined;
 			// Inherit the live route and effective effort, not just the model identity.
 			// A later effort change must not reuse the startup selector or restart auto triage.
@@ -2380,10 +2394,11 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			advertisedSessionAgents: () => session?.getAdvertisedSessionAgents() ?? [],
 			getModelString: () => (hasExplicitModel && model ? formatModelString(model) : undefined),
 			getActiveModelString,
+			getActiveModelSelector,
 			getActiveModel: () => (session?.isDisposed ? undefined : (agent?.state.model ?? model)),
 			getModelAuthoritySettings: () => {
 				const permit = session?.roleRoute ?? options.roleRoute;
-				return permit ? taskModelAuthoritySettings(permit) : settings;
+				return permit ? taskModelAuthoritySettings(permit) : (options.modelAuthoritySettings ?? settings);
 			},
 			getServiceTierByFamily: () => session?.serviceTierByFamily,
 			getImageAttachments: () => session?.getImageAttachments() ?? [],
@@ -3106,7 +3121,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 						}
 					}
 				}
-				const selectedModel = primary.model;
+				let selectedModel = primary.model;
 				let selectedThinkingLevel = primary.thinkingLevel;
 				let selectedExplicitThinkingLevel = primary.explicitThinkingLevel;
 				// A chain entry without its own `:level` suffix inherits the
@@ -3115,6 +3130,58 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				if (retryFallback && !selectedExplicitThinkingLevel && retryFallback.originalThinkingLevel !== undefined) {
 					selectedThinkingLevel = retryFallback.originalThinkingLevel;
 					selectedExplicitThinkingLevel = true;
+				}
+				let authFallbackUsed = false;
+				if (options.modelPatternAuthFallback) {
+					const primaryKey = await modelRegistry.getApiKey(primary.model);
+					if (primaryKey !== kNoAuth && !isAuthenticated(primaryKey)) {
+						const fallback = parseModelPattern(
+							options.modelPatternAuthFallback,
+							resolutionModels,
+							matchPreferences,
+						);
+						if (fallback.model) {
+							const fallbackKey = await modelRegistry.getApiKey(fallback.model);
+							if (isAuthenticated(fallbackKey)) {
+								selectedModel = fallback.model;
+								selectedThinkingLevel = fallback.thinkingLevel;
+								selectedExplicitThinkingLevel = fallback.explicitThinkingLevel;
+								authFallbackUsed = true;
+							}
+						}
+					}
+				}
+				if (!authFallbackUsed && options.modelPatternFallbackRole) {
+					const primarySelector = formatModelSelectorValue(
+						formatModelStringWithRouting(primary.model),
+						primary.thinkingLevel,
+					);
+					const seenSelectors = new Set<string>([primarySelector]);
+					const fallbackSelectors: string[] = [];
+					for (const fallbackEntry of expandedModelPatterns.slice(patternIndex + 1)) {
+						const fallback = parseModelPattern(fallbackEntry.pattern, resolutionModels, matchPreferences);
+						if (!fallback.model) continue;
+						const fallbackSelector = formatModelSelectorValue(
+							formatModelStringWithRouting(fallback.model),
+							fallback.thinkingLevel,
+						);
+						if (seenSelectors.has(fallbackSelector)) continue;
+						seenSelectors.add(fallbackSelector);
+						fallbackSelectors.push(fallbackSelector);
+					}
+					if (fallbackSelectors.length === 0) {
+						for (const selector of options.modelPatternDefaultFallbackChain ?? []) {
+							if (typeof selector !== "string" || seenSelectors.has(selector)) continue;
+							seenSelectors.add(selector);
+							fallbackSelectors.push(selector);
+						}
+					}
+					if (fallbackSelectors.length > 0) {
+						installRetryFallbackRole(settings, options.modelPatternFallbackRole, {
+							primary: primarySelector,
+							chain: fallbackSelectors,
+						});
+					}
 				}
 				model = selectedModel;
 				initialRetryFallback =
@@ -3408,6 +3475,28 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// unwrapped native execute (inheriting the caller's already-granted approval, not re-gating).
 		for (const [name, tool] of toolRegistry) {
 			nativeToolsByName.set(name, tool);
+		}
+		// Tools were constructed before deferred selectors, role routes and model
+		// metadata settled. Register the scratchpad against the final model before
+		// extension overrides and active-set assembly, reusing any existing native.
+		const thinkRequested =
+			cfgExternalThinking.get(settings) &&
+			supportsExternalThinking(model) &&
+			(!restrictToolNames ||
+				(options.toolNames !== undefined && normalizeToolNames(options.toolNames).includes("think")));
+		if (!thinkRequested) {
+			toolRegistry.delete("think");
+			builtInRegistryToolNames.delete("think");
+			nativeToolsByName.delete("think");
+		} else if (!toolRegistry.has("think")) {
+			const thinkTool = await logger.time("createTools:think:session", HIDDEN_TOOLS.think, toolSession);
+			if (thinkTool) {
+				const wrapped = wrapToolWithMetaNotice(thinkTool);
+				toolRegistry.set(thinkTool.name, wrapped);
+				builtInRegistryToolNames.add(thinkTool.name);
+				nativeToolsByName.set(thinkTool.name, wrapped);
+				builtInToolNames.push(thinkTool.name);
+			}
 		}
 		if (!restrictToolNames && !toolRegistry.has("goal") && cfgGoalEnabled.get(settings)) {
 			const goalTool = await logger.time("createTools:goal:session", HIDDEN_TOOLS.goal, toolSession);
@@ -4383,8 +4472,11 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 						});
 					}
 				}
+				const activePermit = session?.roleRoute ?? options.roleRoute;
+				const requestedThinking = activePermit ? roleRouteThinkingLevel(activePermit, streamModel) : undefined;
+				const fixedEffort = requestedThinking !== undefined && requestedThinking !== AUTO_THINKING;
 				const externalThinking =
-					!options.roleRoute &&
+					!fixedEffort &&
 					cfgExternalThinking.get(settings) &&
 					agent.state.tools.some(tool => tool.name === "think") &&
 					supportsExternalThinking(streamModel);

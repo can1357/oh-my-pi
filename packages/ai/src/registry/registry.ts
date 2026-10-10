@@ -22,6 +22,10 @@ const TRANSPORTS: Record<string, ProviderTransport> = {
 	snowflake: snowflakeTransport,
 };
 
+const BUILTIN_TRANSPORTS: Record<string, Readonly<ProviderTransport>> = Object.fromEntries(
+	Object.entries(TRANSPORTS).map(([id, transport]) => [id, Object.freeze({ ...transport })]),
+);
+
 /**
  * The single per-provider list, derived from the compiled auth stratum
  * (`@oh-my-pi/pi-catalog` `rules/auth/*.kdl`) in `/login` display order.
@@ -38,6 +42,11 @@ const BY_ID: Record<string, ProviderDefinition> = Object.fromEntries(PROVIDER_RE
 
 export function getProviderDefinition(id: string): ProviderDefinition | undefined {
 	return BY_ID[id];
+}
+
+/** @internal Immutable native derivations may change an endpoint or wire dialect, not admission. */
+export function getBuiltinProviderTransport(id: string): Readonly<ProviderTransport> | undefined {
+	return BUILTIN_TRANSPORTS[id];
 }
 
 /** Compile-time completeness: every catalog chat-model provider must have an auth policy. */

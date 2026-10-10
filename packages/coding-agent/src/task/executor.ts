@@ -8,7 +8,7 @@ import * as fs from "node:fs/promises";
 import path from "node:path";
 import type { AgentEvent, AgentIdentity, AgentMessage, AgentTelemetryConfig } from "@oh-my-pi/pi-agent-core";
 import { AgentBusyError, EventLoopKeepalive, recordHandoff, resolveTelemetry } from "@oh-my-pi/pi-agent-core";
-import type { Model, ServiceTierByFamily, Usage } from "@oh-my-pi/pi-ai";
+import type { Api, Model, ServiceTierByFamily, Usage } from "@oh-my-pi/pi-ai";
 import { isRecord, logger, popLoopPhase, prompt, pushLoopPhase, sanitizeText, untilAborted } from "@oh-my-pi/pi-utils";
 import { ASYNC_JOB_MANAGER_SHUTDOWN_REASON, AsyncJobError, AsyncJobManager, type AsyncJobRunResult } from "../async";
 import type { Rule } from "../capability/rule";
@@ -25,9 +25,13 @@ import { type EditMode, getEditInputPaths } from "@oh-my-pi/pi-tui/tools/edit";
 import {
 	formatModelStringWithRouting,
 	resolveAgentAdvisorRolePattern,
+	resolveAgentModelSelection,
 	resolveAgentAdvisorSelection,
 	resolveAgentPrewalkPattern,
+	resolveConfiguredModelPatterns,
+	resolveExplicitModelRole,
 	resolveModelOverride,
+	resolveModelOverrideWithAuthFallback,
 	normalizeModelPatternList,
 } from "../config/model-resolver";
 import type { PromptTemplate } from "../config/prompt-templates";
@@ -78,6 +82,7 @@ import { SKILL_PROMPT_MESSAGE_TYPE } from "../session/messages";
 import { hasConversationalHistory, SessionManager } from "../session/session-manager";
 import { truncateTail } from "@oh-my-pi/pi-tui/tools/streaming-output";
 import {
+	AUTO_THINKING,
 	type ConfiguredThinkingLevel,
 	prewalkWouldBeNoop,
 	resolveTaskEffortLevel,
@@ -106,6 +111,7 @@ import {
 	resolveRoleRoute,
 	roleRouteCandidateSelectors,
 	roleRouteMetadata,
+	roleRouteThinkingLevel,
 	type RoleRouteModelSelection,
 	type RoleRoutePermit,
 	type TaskModelAuthority,
@@ -150,12 +156,15 @@ import {
 	cfgTierAnthropic,
 	cfgTierOpenai,
 	cfgDefaultThinkingLevel,
+	cfgRetryFallbackChains,
 } from "../session/settings";
 import {
 	cfgCompactionModelThresholdsEnabled,
 	cfgCompactionThresholdPercent,
 	cfgCompactionThresholdTokens,
 } from "../session/context-settings";
+import { cfgDisabledProviders } from "../config/model-settings";
+import { getRetryFallbackRole, installRetryFallbackRole } from "../session/retry-fallback-chains";
 
 export type { YieldItem } from "@oh-my-pi/pi-tui/tools/task";
 
@@ -221,6 +230,88 @@ const agentEventTypes = new Set<AgentEvent["type"]>([
 
 const isAgentEvent = (event: AgentSessionEvent): event is AgentEvent =>
 	agentEventTypes.has(event.type as AgentEvent["type"]);
+
+/** Session-scoped configured retry routing for an implicit subagent. */
+export function subagentRetryFallbackRole(id: string): string {
+	return `subagent:${id}`;
+}
+
+interface SubagentRetryFallbackCandidate {
+	model: Model<Api>;
+	selector: string;
+}
+
+function resolveSubagentRetryFallbackCandidates(
+	modelPatterns: string[],
+	modelRegistry: ModelRegistry,
+	settings: Settings,
+): SubagentRetryFallbackCandidate[] {
+	const candidates: SubagentRetryFallbackCandidate[] = [];
+	const seen = new Set<string>();
+	const disabledProviders = new Set(cfgDisabledProviders.get(settings));
+	for (const pattern of modelPatterns) {
+		const resolved = resolveModelOverride([pattern], modelRegistry, settings);
+		if (!resolved.model || disabledProviders.has(resolved.model.provider)) continue;
+		const selector = resolved.explicitThinkingLevel
+			? formatModelSelectorValue(formatModelStringWithRouting(resolved.model), resolved.thinkingLevel)
+			: formatModelStringWithRouting(resolved.model);
+		if (seen.has(selector)) continue;
+		seen.add(selector);
+		candidates.push({ model: resolved.model, selector });
+	}
+	return candidates;
+}
+
+/** A singleton implicit route inherits its configured role chain, then default. */
+function resolveSubagentInheritedRetryFallbackChain(
+	settings: Settings,
+	modelRegistry: ModelRegistry,
+	role: string | undefined,
+): string[] | undefined {
+	const configuredChains = cfgRetryFallbackChains.get(settings);
+	// An explicitly empty role chain means no fallbacks, not default inheritance.
+	const fallbackChain = (role !== undefined ? configuredChains?.[role] : undefined) ?? configuredChains?.default;
+	if (
+		!Array.isArray(fallbackChain) ||
+		fallbackChain.length === 0 ||
+		!fallbackChain.every(entry => typeof entry === "string")
+	) {
+		return undefined;
+	}
+	const disabledProviders = new Set(cfgDisabledProviders.get(settings));
+	return fallbackChain.filter(entry => {
+		const resolved = resolveModelOverride([entry], modelRegistry, settings);
+		return !resolved.model || !disabledProviders.has(resolved.model.provider);
+	});
+}
+
+function installSubagentRetryFallbackChain(args: {
+	settings: Settings;
+	id: string;
+	candidates: SubagentRetryFallbackCandidate[];
+	inheritedFallbackChain: string[] | undefined;
+	model: Model<Api> | undefined;
+	authFallbackUsed: boolean;
+}): string | undefined {
+	const { settings, id, candidates, inheritedFallbackChain, model, authFallbackUsed } = args;
+	if (!model || authFallbackUsed || candidates.length === 0) return undefined;
+	const selectedIndex = candidates.findIndex(
+		candidate => candidate.model.provider === model.provider && candidate.model.id === model.id,
+	);
+	if (selectedIndex < 0) return undefined;
+	const fallbackSelectors = candidates.slice(selectedIndex + 1).map(candidate => candidate.selector);
+	const fallbackChain = fallbackSelectors.length > 0 ? fallbackSelectors : inheritedFallbackChain;
+	if (
+		!Array.isArray(fallbackChain) ||
+		fallbackChain.length === 0 ||
+		!fallbackChain.every(entry => typeof entry === "string")
+	) {
+		return undefined;
+	}
+	const role = subagentRetryFallbackRole(id);
+	installRetryFallbackRole(settings, role, { primary: candidates[selectedIndex].selector, chain: fallbackChain });
+	return role;
+}
 
 export interface IrcPeerRosterRow {
 	id: string;
@@ -320,8 +411,8 @@ export interface ExecutorOptions {
 	modelRoute?: string;
 	/** Raw per-call selection was supplied; do not add implicit fallback candidates. */
 	explicitModelSelection?: boolean;
-	/** Host-only operator-role fallback used for normal implicit agent routing. */
-	configuredModelRole?: string;
+	/** Parent model identity used only by implicit auth fallback. */
+	parentActiveModelPattern?: string;
 	thinkingLevel?: ConfiguredThinkingLevel;
 	/** Coarse effort applies only when the approved occurrence does not fix effort; never overrides a selector suffix. */
 	effort?: TaskEffort;
@@ -2330,8 +2421,6 @@ async function driveSessionToYield(
 			if (!recoverableStop || abortSignal.aborted || err instanceof PromptDispatchError) throw err;
 		}
 
-		const reminderToolChoice = buildNamedToolChoice("yield", session.model);
-
 		const runYieldLadder = async (): Promise<void> => {
 			let retryCount = 0;
 			let retriesForced = false;
@@ -2363,8 +2452,17 @@ async function driveSessionToYield(
 					});
 
 					const isFinalRetry = retryCount >= MAX_YIELD_RETRIES;
+					const activePermit = session.roleRoute;
+					const requestedThinking =
+						activePermit && session.model ? roleRouteThinkingLevel(activePermit, session.model) : undefined;
+					const reminderToolChoice = isFinalRetry
+						? buildNamedToolChoice("yield", session.model, {
+								preserveThinkingEffort: requestedThinking !== undefined && requestedThinking !== AUTO_THINKING,
+								reasoning: session.agent.state.disableReasoning ? undefined : session.agent.state.thinkingLevel,
+							})
+						: undefined;
 					// Last chance: the next accepted yield ends the run, incremental
-					// or not, so the pinned model cannot answer the pin forever.
+					// or not, even when preserving effort allows only a reminder.
 					// Armed for this prompt's turn only — the quiescence barrier's
 					// later notice turn may legitimately submit more sections.
 					retriesForced = isFinalRetry;
@@ -3891,7 +3989,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 		isIrcEnabled(subagentSettings, childDepth) &&
 		(toolNames === undefined || toolNames.includes("write"));
 
-	const modelPatterns = normalizeModelPatternList(modelOverride ?? agent.model);
+	let modelPatterns = normalizeModelPatternList(modelOverride ?? agent.model);
 	const sessionFile = subtaskSessionFile ?? null;
 	const spawnsEnv = atMaxDepth
 		? ""
@@ -4015,25 +4113,83 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			}
 			checkAbort();
 
-			const roleRoute =
-				options.roleRoute ??
-				(
+			const parentModel = options.modelAuthority?.getParentModel?.();
+			const parentActiveModelPattern =
+				options.parentActiveModelPattern ?? (parentModel ? formatModelStringWithRouting(parentModel) : undefined);
+			let roleRoute = options.roleRoute;
+			let selection: RoleRouteModelSelection | undefined;
+			let inheritedRetryFallbackChain: string[] | undefined;
+			let authFallbackUsed = false;
+			let model: Model | undefined;
+			let resolvedThinkingLevel: ConfiguredThinkingLevel | undefined;
+			let explicitThinkingLevel = false;
+			let implicitModelRole = modelRole;
+			if (roleRoute || options.explicitModelSelection === true) {
+				roleRoute ??= (
 					await createTaskModelRoute({
 						authority: options.modelAuthority ?? { settings, agentName: agent.name, agentModel: agent.model },
 						modelRegistry,
 						selectors: modelPatterns.length > 0 ? modelPatterns : ["@default"],
-						explicit: options.explicitModelSelection === true,
-						configuredRole: options.configuredModelRole,
+						explicit: true,
 						signal: abortSignal,
 					})
 				).permit;
-			let selection: RoleRouteModelSelection | undefined;
-			if (roleRouteMetadata(roleRoute)?.selectedOccurrence !== undefined) {
-				selection = resolveRoleRoute(roleRoute, modelRegistry);
+				if (roleRouteMetadata(roleRoute)?.selectedOccurrence !== undefined) {
+					selection = resolveRoleRoute(roleRoute, modelRegistry);
+				}
+				model = selection?.model;
+				resolvedThinkingLevel = selection?.thinkingLevel;
+				explicitThinkingLevel = resolvedThinkingLevel !== undefined;
+			} else {
+				const implicitSelection = resolveAgentModelSelection({
+					settingsOverride: modelOverride,
+					agentModel: agent.model,
+					settings,
+					activeModelPattern: parentActiveModelPattern,
+				});
+				modelPatterns = implicitSelection.patterns;
+				implicitModelRole ??= implicitSelection.role;
+				const configuredModelPatterns = resolveConfiguredModelPatterns(modelPatterns, settings);
+				inheritedRetryFallbackChain =
+					configuredModelPatterns.length === 1
+						? resolveSubagentInheritedRetryFallbackChain(
+								subagentSettings,
+								modelRegistry,
+								implicitModelRole ?? resolveExplicitModelRole(modelPatterns, subagentSettings),
+							)
+						: undefined;
+				const resolved = await awaitAbortable(
+					resolveModelOverrideWithAuthFallback(modelPatterns, parentActiveModelPattern, modelRegistry, settings),
+				);
+				model = resolved.model;
+				resolvedThinkingLevel = resolved.thinkingLevel;
+				explicitThinkingLevel = resolved.explicitThinkingLevel;
+				authFallbackUsed = resolved.authFallbackUsed;
+				if (resolved.warning) {
+					logger.warn("Subagent model resolution warning", {
+						warning: resolved.warning,
+						requested: modelPatterns,
+					});
+				}
+				if (authFallbackUsed && model) {
+					logger.warn("Subagent model has no working credentials; falling back to parent session model", {
+						requested: modelPatterns,
+						parentModel: parentActiveModelPattern,
+						resolvedProvider: model.provider,
+						resolvedModel: model.id,
+					});
+				}
 			}
-			const model = selection?.model;
-			const resolvedThinkingLevel = selection?.thinkingLevel;
-			const explicitThinkingLevel = selection?.fixedEffort === true || resolvedThinkingLevel !== undefined;
+			const retryFallbackRole = roleRoute
+				? undefined
+				: installSubagentRetryFallbackChain({
+						settings: subagentSettings,
+						id,
+						candidates: resolveSubagentRetryFallbackCandidates(modelPatterns, modelRegistry, subagentSettings),
+						inheritedFallbackChain: inheritedRetryFallbackChain,
+						model,
+						authFallbackUsed,
+					});
 			// The exact-name `task.agentServiceTierOverrides` entry dispatch resolved
 			// for this agent. The session evaluates it against its final model —
 			// including patterns only it can resolve — so a concrete tier lands on
@@ -4052,15 +4208,19 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			if (model?.contextWindow && model.contextWindow > 0) {
 				progress.contextWindow = model.contextWindow;
 			}
-			// An exact selector (including inherited parent effort) wins over coarse
-			// task effort. Never clamp a fixed request into another serving effort.
+			// Only an admitted fixed effort defeats the ordinary coarse-effort
+			// selector. Omitted-model calls retain effort > suffix > agent default.
+			const fixedEffort = selection?.fixedEffort === true;
 			const spawnEffortCeiling =
-				options.effort !== undefined && !explicitThinkingLevel ? cfgTaskMaxEffort.get(settings) : undefined;
+				options.effort !== undefined && !fixedEffort ? cfgTaskMaxEffort.get(settings) : undefined;
 			const effortLevel =
-				options.effort !== undefined && !explicitThinkingLevel
+				options.effort !== undefined && !fixedEffort
 					? resolveTaskEffortLevel(model, options.effort, spawnEffortCeiling)
 					: undefined;
-			const effectiveThinkingLevel = explicitThinkingLevel ? resolvedThinkingLevel : (effortLevel ?? thinkingLevel);
+			const effectiveThinkingLevel = fixedEffort
+				? resolvedThinkingLevel
+				: (effortLevel ??
+					(explicitThinkingLevel ? resolvedThinkingLevel : (thinkingLevel ?? resolvedThinkingLevel)));
 			if (model) {
 				progress.resolvedModelIdentity = formatModelStringWithRouting(model);
 				progress.resolvedThinkingLevel = effectiveThinkingLevel;
@@ -4164,9 +4324,20 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					credentialSourceSessionId: options.credentialSourceSessionId,
 					oauthAccountPools: options.oauthAccountPools,
 					inheritedSessionAgents: options.inheritedSessionAgents,
+					modelAuthoritySettings: options.modelAuthority?.settings ?? settings,
 					model,
 					roleRoute,
-					modelPattern: model ? undefined : [...roleRouteCandidateSelectors(roleRoute)],
+					modelPattern: model
+						? undefined
+						: roleRoute
+							? [...roleRouteCandidateSelectors(roleRoute)]
+							: modelOverride === undefined
+								? undefined
+								: modelPatterns,
+					modelPatternAuthFallback: !roleRoute && !model ? parentActiveModelPattern : undefined,
+					modelPatternFallbackRole:
+						!roleRoute && !model && modelOverride !== undefined ? subagentRetryFallbackRole(id) : undefined,
+					modelPatternDefaultFallbackChain: !roleRoute && !model ? inheritedRetryFallbackChain : undefined,
 					thinkingLevel: effectiveThinkingLevel,
 					thinkingLevelCeiling: spawnEffortCeiling,
 					// Subagents are short-lived; never schedule background warm requests.
@@ -4229,6 +4400,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				sessionManager.adoptArtifactManager(options.parentArtifactManager);
 			}
 			sessionOpenedAt = performance.now();
+			const hasExistingModelRole = sessionManager.getLastModelChangeRole() !== undefined;
 			await refreshSubagentIrcRoot(sessionSpec.prompt, sessionManager, sessionFile);
 
 			// Subscribe before the builder mints proxies so a manager change during
@@ -4261,6 +4433,15 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				throw err;
 			}
 			mcpFollower?.bind(session);
+			if (
+				!hasExistingModelRole &&
+				retryFallbackRole &&
+				model &&
+				session.model &&
+				formatModelStringWithRouting(session.model) === formatModelStringWithRouting(model)
+			) {
+				sessionManager.appendModelChange(formatModelStringWithRouting(model), retryFallbackRole);
+			}
 			sessionCreatedAt = performance.now();
 
 			monitor.setActiveSession(session);
@@ -4333,15 +4514,19 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					? enabledSubagentTools.filter(name => name !== "write")
 					: enabledSubagentTools;
 
+			const routeMetadata = roleRouteMetadata(roleRoute);
 			session.sessionManager.appendSessionInit({
 				// Blocks as sent; the session appends a newer session_init whenever a model call's base changes.
 				systemPrompt: session.agent.state.systemPrompt,
 				task,
 				tools: persistedSubagentTools,
 				agent: agent.name,
-				modelRole: roleRouteMetadata(roleRoute)?.role ?? modelRole,
+				modelRole: routeMetadata?.role ?? implicitModelRole,
 				resolvedModel: progress.resolvedModel,
-				roleRouting: roleRouteMetadata(roleRoute),
+				roleRouting: routeMetadata,
+				retryFallback: roleRoute
+					? undefined
+					: getRetryFallbackRole(subagentSettings, subagentRetryFallbackRole(id)),
 				readOnly: isReadOnlyAgent(agent),
 				spawns: spawnsEnv,
 				readSummarize: agent.readSummarize,

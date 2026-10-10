@@ -34,6 +34,19 @@ export class ConfigurationError extends Error {
 	}
 }
 
+/**
+ * The host rejected a model/effort selection or its current admission authority.
+ * Only local selection guards construct this error; provider diagnostics cannot
+ * establish this identity. Retrying or changing credentials cannot admit it.
+ */
+export class ModelSelectionError extends Error {
+	constructor(message: string, options?: { cause?: unknown }) {
+		super(message, options?.cause === undefined ? undefined : { cause: options.cause });
+		this.name = "ModelSelectionError";
+		attach(this, create(Flag.HostAdmission));
+	}
+}
+
 /** A request was abandoned because it exceeded a stream/idle/first-event deadline. */
 export class StreamTimeoutError extends Error {
 	constructor(message = "Request timed out.", options?: { cause?: unknown }) {

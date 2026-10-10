@@ -892,6 +892,7 @@ describe("openai-responses cache affinity", () => {
 		expect(requestBodies[2]?.input).toEqual([
 			{ role: "user", content: [{ type: "input_text", text: "replacement-3" }] },
 		]);
+		expect(payloadCall).toBe(3);
 	});
 
 	it("omits OpenRouter Responses session_id when cache retention is disabled", async () => {

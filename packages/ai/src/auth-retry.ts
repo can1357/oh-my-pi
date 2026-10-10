@@ -135,6 +135,7 @@ export const AUTH_RETRY_STEPS: readonly boolean[] = [false, true];
 export const AUTH_RETRY_MAX_ATTEMPTS = 64;
 
 function isDirectCredentialRotationError(error: unknown): boolean {
+	if (AIError.is(AIError.classify(error), AIError.Flag.HostAdmission)) return false;
 	if (isAccountPolicyError(error)) return true;
 	if (isUsageLimit(error) || isInvalidatedOAuthTokenError(error)) return true;
 	const status = AIError.status(error);
@@ -158,12 +159,14 @@ export async function resolveRetryKey(
 	previousKey?: string,
 	onResolved?: (resolved: ApiKeyResolution) => void,
 ): Promise<string | undefined> {
+	if (AIError.is(AIError.classify(error), AIError.Flag.HostAdmission)) throw error;
 	try {
 		const rotateSibling = lastChance || (!lastChance && isDirectCredentialRotationError(error));
 		const resolved = await resolver({ lastChance: rotateSibling, error, signal, previousKey });
 		onResolved?.(resolved);
 		return resolvedApiKeyBearer(resolved);
-	} catch {
+	} catch (error) {
+		if (AIError.is(AIError.classify(error), AIError.Flag.HostAdmission)) throw error;
 		return undefined;
 	}
 }
@@ -214,6 +217,7 @@ export async function resolveNextAuthRetryKey(
 	signal?: AbortSignal,
 	onResolved?: (resolved: ApiKeyResolution) => void,
 ): Promise<string | undefined> {
+	if (AIError.is(AIError.classify(error), AIError.Flag.HostAdmission)) return undefined;
 	if (signal?.aborted) return undefined;
 	if (state.attempts >= AUTH_RETRY_MAX_ATTEMPTS) return undefined;
 	if (error instanceof AIError.OAuthError && error.kind === "token-refresh") {
@@ -259,7 +263,7 @@ async function runOAuthAttempt<T>(
 	try {
 		return { ok: true, result: await attempt(access) };
 	} catch (error) {
-		if (!isAuthError(error)) throw error;
+		if (AIError.is(AIError.classify(error), AIError.Flag.HostAdmission) || !isAuthError(error)) throw error;
 		return { ok: false, error };
 	}
 }
@@ -304,7 +308,7 @@ export async function withAuth<T>(
 	try {
 		return await attempt(initialKey);
 	} catch (error) {
-		if (!isAuthError(error)) throw error;
+		if (AIError.is(AIError.classify(error), AIError.Flag.HostAdmission) || !isAuthError(error)) throw error;
 		lastError = error;
 	}
 
@@ -314,7 +318,7 @@ export async function withAuth<T>(
 		try {
 			return await attempt(nextKey);
 		} catch (error) {
-			if (!isAuthError(error)) throw error;
+			if (AIError.is(AIError.classify(error), AIError.Flag.HostAdmission) || !isAuthError(error)) throw error;
 			lastError = error;
 		}
 	}

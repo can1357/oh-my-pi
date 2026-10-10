@@ -21,6 +21,7 @@ import {
 import {
 	AgentClientMessageSchema,
 	AgentConversationTurnStructureSchema,
+	type AgentRunRequest,
 	AgentRunRequestSchema,
 	type AgentServerMessage,
 	AgentServerMessageSchema,
@@ -226,6 +227,12 @@ import { deterministicUuid } from "../utils/deterministic-id";
 import { AssistantMessageEventStream } from "../utils/event-stream";
 import { connectProxiedSocket, getProxyForUrl, wrapFetchForProxy } from "../utils/proxy";
 import { createRequestDebugSession, isRequestDebugEnabled, type RequestDebugResponseLog } from "../utils/request-debug";
+import {
+	assertSafeGovernedProtobuf,
+	invokeBeforeRequest,
+	serializeRequestBody,
+	shouldAwaitPayloadHookResult,
+} from "../utils/request-selection";
 import { sanitizeSchemaForCursor, toolWireSchema } from "../utils/schema";
 import { formatConnectEndStreamError, hasRetryableCursorErrorDetail } from "./connect-error-detail";
 import { CONNECT_END_STREAM_FLAG, ConnectFrameDecoder, frameConnectMessage } from "./connect-frame";
@@ -392,6 +399,11 @@ export interface CursorOptions extends StreamOptions {
 
 type CursorWireMode = "normalized" | "discovered";
 
+type CursorRequestControls = Pick<
+	StreamOptions,
+	"preserveModelSelection" | "preserveThinkingEffort" | "onBeforeRequest"
+>;
+
 interface CursorRetryContext {
 	attempt: number;
 	originalRequestId: string;
@@ -405,6 +417,8 @@ interface CursorRetryContext {
 	conversationId: string;
 	blobStore: Map<string, Uint8Array>;
 	firstTokenTime?: number;
+	/** Reuse an already-hooked logical payload when only the transport is replayed. */
+	request?: CursorTransportRequest;
 }
 
 interface CursorStreamTiming {
@@ -412,6 +426,8 @@ interface CursorStreamTiming {
 	timestamp: number;
 	retry?: CursorRetryContext;
 	transport?: "http2" | "http1";
+	controls?: CursorRequestControls;
+	requestSelection?: string;
 }
 
 interface CursorRequestState {
@@ -430,6 +446,7 @@ interface CursorGrpcRequest {
 interface CursorTransportRequest extends CursorGrpcRequest {
 	/** Exact discovery id eligible for a retry because the normalized effort payload was serialized unchanged. */
 	fallbackWireModelId?: string;
+	requestSelection?: string;
 }
 
 interface CursorLogEntry {
@@ -462,10 +479,12 @@ function log(type: string, subtype?: string, data?: unknown): void {
 
 class ConnectEndStreamError extends AIError.ProviderResponseError {
 	readonly diagnosticMessage: string;
+	readonly status: number | undefined;
 
-	constructor(classificationMessage: string, diagnosticMessage: string) {
+	constructor(classificationMessage: string, diagnosticMessage: string, status?: number) {
 		super(classificationMessage, { kind: "envelope" });
 		this.diagnosticMessage = diagnosticMessage;
+		this.status = status;
 	}
 }
 
@@ -626,6 +645,7 @@ function classifyConnectError(error: Record<string, unknown>): Error {
 	const endStreamError = new ConnectEndStreamError(
 		`Connect error ${code}: ${message}`,
 		formatConnectEndStreamError(error),
+		code === "unavailable" ? 503 : undefined,
 	);
 	// Without a decodable binary detail, Cursor's retry verdict survives only in
 	// the detail's debug JSON; the classification text drops it, so carry it as
@@ -703,6 +723,7 @@ interface CursorHttp1RunTransportOptions {
 	headers: Record<string, string>;
 	requestId: string;
 	signal?: AbortSignal;
+	onBeforeRequest?: StreamOptions["onBeforeRequest"];
 }
 
 interface CursorPendingAppend {
@@ -764,10 +785,14 @@ function createHttp1RunTransport(options: CursorHttp1RunTransportOptions): Curso
 		const timeoutMs =
 			CURSOR_HTTP1_APPEND_BASE_TIMEOUT_MS +
 			Math.ceil(append.data.byteLength / CURSOR_HTTP1_APPEND_BYTES_PER_SECOND) * 1_000;
+		const encoded = toBinary(BidiAppendRequestSchema, body);
+		// RunSSE opens the channel; the first append starts inference.
+		if (append.seqno === 0n) await invokeBeforeRequest(options.onBeforeRequest);
+		if (closed || signal.aborted) return;
 		const response = await fetchImpl(new URL(CURSOR_BIDI_APPEND_PATH, options.baseUrl), {
 			method: "POST",
 			headers: { ...options.headers, "content-type": "application/proto" },
-			body: toBinary(BidiAppendRequestSchema, body),
+			body: encoded,
 			signal: AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)]),
 		});
 		if (response.ok) {
@@ -1017,6 +1042,11 @@ function streamCursorWithWireMode(
 	wireMode: CursorWireMode,
 	timing?: CursorStreamTiming,
 ): AssistantMessageEventStream {
+	const controls = timing?.controls ?? {
+		preserveModelSelection: options?.preserveModelSelection,
+		preserveThinkingEffort: options?.preserveThinkingEffort,
+		onBeforeRequest: options?.onBeforeRequest,
+	};
 	const stream = new AssistantMessageEventStream();
 
 	(async () => {
@@ -1024,6 +1054,19 @@ function streamCursorWithWireMode(
 		const transportMode = timing?.transport ?? (options?.transport === "http1" ? "http1" : "http2");
 		const startTime = timing?.startTime ?? performance.now();
 		let firstTokenTime = retryContext?.firstTokenTime;
+		let admissionAbortError: AIError.AbortError | undefined;
+		// A trusted admission callback can cancel without aborting the request signal.
+		const admissionCallback = controls.onBeforeRequest;
+		const onBeforeRequest = admissionCallback
+			? async () => {
+					try {
+						await admissionCallback();
+					} catch (error) {
+						if (error instanceof AIError.AbortError) admissionAbortError = error;
+						throw error;
+					}
+				}
+			: undefined;
 
 		const output: AssistantMessage =
 			retryContext?.output ??
@@ -1087,6 +1130,8 @@ function streamCursorWithWireMode(
 		let heartbeatTimer: NodeJS.Timeout | null = null;
 		let debugResponseLogPromise: Promise<RequestDebugResponseLog | undefined> | undefined;
 		const h2Completion = Promise.withResolvers<void>();
+		// Local admission can end startup before the transport completion is awaited.
+		void h2Completion.promise.catch(() => {});
 		let h2Settled = false;
 		let sawTurnEnded = false;
 		// After the final step's `stepCompleted`, only a repeat checkpoint and the
@@ -1150,6 +1195,7 @@ function streamCursorWithWireMode(
 		let serializedFallbackWireModelId: string | undefined;
 		let activeBlobStore: Map<string, Uint8Array> | undefined;
 		let originalRequestId: string | undefined;
+		let activeRequest: CursorTransportRequest | undefined;
 		// Removed in `finally`: the request signal outlives this stream, and a
 		// listener left on it would retain this request's scope (request bytes,
 		// output, blob store) until the caller's whole prompt ends.
@@ -1180,18 +1226,23 @@ function streamCursorWithWireMode(
 			const conversationEntry: CursorConversationEntry = { state: cachedConversation?.state, blobs: blobStore };
 			cursorConversations.set(conversationId, conversationEntry);
 			const cachedState = retryContext?.checkpoint ?? (rotatedFresh ? undefined : cachedConversation?.state);
-			const builtRequest = await buildGrpcRequestForWireMode(
-				model,
-				context,
-				options,
-				{
-					conversationId,
-					blobStore,
-					conversationState: cachedState,
-					resume: retryContext?.checkpoint !== undefined,
-				},
-				wireMode,
-			);
+			const builtRequest =
+				retryContext?.request ??
+				(await buildGrpcRequestForWireMode(
+					model,
+					context,
+					options,
+					{
+						conversationId,
+						blobStore,
+						conversationState: cachedState,
+						resume: retryContext?.checkpoint !== undefined,
+					},
+					wireMode,
+					controls,
+					timing?.requestSelection,
+				));
+			activeRequest = builtRequest;
 			const { requestBytes, conversationState } = builtRequest;
 			serializedFallbackWireModelId = builtRequest.fallbackWireModelId;
 			conversationEntry.state = conversationState;
@@ -1261,6 +1312,7 @@ function streamCursorWithWireMode(
 					headers: requestHeaders,
 					requestId,
 					signal: options?.signal,
+					onBeforeRequest,
 				});
 			}
 
@@ -1471,6 +1523,7 @@ function streamCursorWithWireMode(
 				options.signal.addEventListener("abort", onTransportAbort, { once: true });
 			}
 
+			if (transportMode === "http2") await invokeBeforeRequest(onBeforeRequest);
 			runTransport.write(frameConnectMessage(requestBytes));
 			heartbeatTimer = setInterval(sendHeartbeat, 5000);
 			await h2Completion.promise;
@@ -1502,7 +1555,12 @@ function streamCursorWithWireMode(
 			stream.end();
 		} catch (caughtError) {
 			let error = caughtError;
-			const h2Unavailable = transportMode === "http2" && isHttp2Unavailable(error);
+			const errorId = AIError.classify(error);
+			const localRejection =
+				AIError.is(errorId, AIError.Flag.HostAdmission) ||
+				AIError.is(errorId, AIError.Flag.Abort) ||
+				AIError.is(errorId, AIError.Flag.UserInterrupt);
+			const h2Unavailable = !localRejection && transportMode === "http2" && isHttp2Unavailable(error);
 			if (
 				h2Unavailable &&
 				options?.transport !== "http2" &&
@@ -1525,6 +1583,8 @@ function streamCursorWithWireMode(
 					startTime,
 					timestamp: output.timestamp,
 					transport: "http1",
+					controls,
+					requestSelection: activeRequest?.requestSelection,
 					retry: {
 						attempt: retryContext?.attempt ?? 0,
 						originalRequestId,
@@ -1538,6 +1598,7 @@ function streamCursorWithWireMode(
 						conversationId,
 						blobStore: activeBlobStore,
 						firstTokenTime,
+						request: activeRequest,
 					},
 				});
 				stream.forwardLocalWorkFrom(http1Stream);
@@ -1556,7 +1617,8 @@ function streamCursorWithWireMode(
 			if (h2Unavailable) error = mapH2TransportError(error, model.baseUrl || CURSOR_API_URL);
 			const fallbackWireModelId =
 				wireMode === "normalized" &&
-				!options?.preserveModelSelection &&
+				!controls.preserveModelSelection &&
+				!controls.preserveThinkingEffort &&
 				!sawProgressOrSideEffect &&
 				!options?.signal?.aborted &&
 				isCursorModelNotFound(error)
@@ -1613,6 +1675,7 @@ function streamCursorWithWireMode(
 			const repeatedCheckpoint = checkpointHash !== undefined && checkpointHash === retryContext?.checkpointHash;
 			const noProgressResumes = repeatedCheckpoint ? (retryContext?.noProgressResumes ?? 0) + 1 : 0;
 			const canRetryFromCheckpoint =
+				!localRejection &&
 				replaySafe &&
 				!options?.signal?.aborted &&
 				retryAttempt < CURSOR_MAX_STREAM_RETRIES &&
@@ -1665,6 +1728,8 @@ function streamCursorWithWireMode(
 						startTime,
 						timestamp: output.timestamp,
 						transport: transportMode,
+						controls,
+						requestSelection: activeRequest?.requestSelection,
 						retry: {
 							attempt: retryAttempt + 1,
 							originalRequestId: retryOriginalRequestId,
@@ -1678,6 +1743,7 @@ function streamCursorWithWireMode(
 							conversationId: retryConversationId,
 							blobStore: retryBlobStore,
 							firstTokenTime,
+							request: hasFreshCheckpoint && !repeatedCheckpoint ? undefined : activeRequest,
 						},
 					});
 					stream.forwardLocalWorkFrom(retryStream);
@@ -1719,6 +1785,7 @@ function streamCursorWithWireMode(
 				baseConversationId === undefined ? undefined : rotatedConversationIds.get(baseConversationId);
 			const canRotate = currentRotated === undefined || successfulRotatedConversationIds.has(currentRotated);
 			if (
+				!localRejection &&
 				conversationId !== undefined &&
 				baseConversationId !== undefined &&
 				usageState !== undefined &&
@@ -1738,7 +1805,8 @@ function streamCursorWithWireMode(
 					to: rotated,
 				});
 			}
-			output.stopReason = result.stopReason;
+			output.stopReason =
+				admissionAbortError !== undefined && admissionAbortError === error ? "aborted" : result.stopReason;
 			output.errorStatus = result.status;
 			output.errorId = result.id;
 			if (error instanceof ConnectEndStreamError) {
@@ -6281,12 +6349,55 @@ function resolveCursorWireModel(
 	return { modelId: wireModelId, modelDetailsId: wireModelId, parameters: [], maxMode, discoveredRoute: false };
 }
 
+function cursorRequestSelection(request: AgentRunRequest, options: CursorRequestControls): unknown {
+	const parameters = request.requestedModel?.parameters.map(({ id, value }) => ({ id, value }));
+	return {
+		...(options?.preserveModelSelection
+			? {
+					modelDetailsId: request.modelDetails?.modelId,
+					requestedModelId: request.requestedModel?.modelId,
+					modelDetailsMaxMode: request.modelDetails?.maxMode,
+					requestedMaxMode: request.requestedModel?.maxMode,
+					modelDetailsAliases: request.modelDetails?.aliases,
+					modelDetailsCredentials: request.modelDetails?.credentials,
+					requestedCredentials: request.requestedModel?.credentials,
+					routeParameters: parameters?.filter(({ id }) => id !== "reasoning" && id !== "thinking"),
+				}
+			: {}),
+		...(options?.preserveThinkingEffort
+			? {
+					// Cursor may express effort in a sibling id as well as a parameter.
+					effortModelDetailsId: request.modelDetails?.modelId,
+					effortRequestedModelId: request.requestedModel?.modelId,
+					parameters,
+					modelDetailsMaxMode: request.modelDetails?.maxMode,
+					requestedMaxMode: request.requestedModel?.maxMode,
+					thinkingDetails: request.modelDetails?.thinkingDetails,
+				}
+			: {}),
+	};
+}
+
+/** The protobuf encoder may read message fields; never let it execute hook-owned accessors. */
+function assertSafeCursorProtobuf(payload: unknown): void {
+	if (typeof payload !== "object" || payload === null || Array.isArray(payload)) {
+		throw new AIError.ModelSelectionError("The governed Cursor request must be a protobuf message.");
+	}
+	assertSafeGovernedProtobuf(payload);
+}
+
 async function buildGrpcRequestForWireMode(
 	model: Model<"cursor-agent">,
 	context: Context,
 	options: CursorOptions | undefined,
 	state: CursorRequestState,
 	wireMode: CursorWireMode,
+	controls: CursorRequestControls = {
+		preserveModelSelection: options?.preserveModelSelection,
+		preserveThinkingEffort: options?.preserveThinkingEffort,
+		onBeforeRequest: options?.onBeforeRequest,
+	},
+	previousSelection?: string,
 ): Promise<CursorTransportRequest> {
 	const blobStore = state.blobStore;
 
@@ -6372,15 +6483,25 @@ async function buildGrpcRequestForWireMode(
 		runRequest.customSystemPrompt = options.customSystemPrompt;
 	}
 
+	const governed = controls.preserveModelSelection || controls.preserveThinkingEffort;
+	if (governed) assertSafeCursorProtobuf(runRequest);
+	const expectedSelection = governed
+		? (previousSelection ?? serializeRequestBody(cursorRequestSelection(runRequest, controls), controls))
+		: undefined;
 	// Tools are sent later via requestContext (exec handshake)
-	const replacementRequest = await options?.onPayload?.(runRequest, model);
+	const payloadHookResult = options?.onPayload?.(runRequest, model);
+	const replacementRequest = shouldAwaitPayloadHookResult(payloadHookResult, !!governed)
+		? await payloadHookResult
+		: payloadHookResult;
 	if (replacementRequest !== undefined) runRequest = replacementRequest as typeof runRequest;
+	if (governed) assertSafeCursorProtobuf(runRequest);
 
 	const discoveredWireModelId = options?.wireModelId ?? model.requestModelId ?? model.id;
-	const serializedParameters = runRequest.requestedModel?.parameters;
+	const serializedParameters = governed ? undefined : runRequest.requestedModel?.parameters;
 	// A discovered route is already the exact server-declared pair; the
 	// discovered-mode retry would resend the same bytes.
 	const normalizedEffortPayloadSerialized =
+		!governed &&
 		wireMode === "normalized" &&
 		!discoveredRoute &&
 		wireParameters.length > 0 &&
@@ -6398,7 +6519,27 @@ async function buildGrpcRequestForWireMode(
 		message: { case: "runRequest", value: runRequest },
 	});
 
-	const requestBytes = toBinary(AgentClientMessageSchema, clientMessage);
+	let requestBytes: Uint8Array;
+	try {
+		requestBytes = toBinary(AgentClientMessageSchema, clientMessage);
+		if (governed) {
+			const decoded = fromBinary(AgentClientMessageSchema, requestBytes);
+			if (
+				decoded.message.case !== "runRequest" ||
+				serializeRequestBody(cursorRequestSelection(decoded.message.value, controls), controls) !==
+					expectedSelection
+			) {
+				throw new AIError.ModelSelectionError(
+					"The encoded Cursor request changed the approved model or fixed thinking effort.",
+				);
+			}
+		}
+	} catch (error) {
+		if (!governed || error instanceof AIError.ModelSelectionError) throw error;
+		throw new AIError.ModelSelectionError("The governed Cursor request could not be encoded safely.", {
+			cause: error,
+		});
+	}
 
 	const toolNames = context.tools?.map(tool => tool.name) ?? [];
 	const detail =
@@ -6412,7 +6553,7 @@ async function buildGrpcRequestForWireMode(
 		detail: detail || undefined,
 	});
 
-	return { requestBytes, blobStore, conversationState, fallbackWireModelId };
+	return { requestBytes, blobStore, conversationState, fallbackWireModelId, requestSelection: expectedSelection };
 }
 
 /**

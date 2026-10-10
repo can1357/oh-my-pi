@@ -1,5 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import * as AIError from "@oh-my-pi/pi-ai/error";
+import { createAbortSourceTracker } from "@oh-my-pi/pi-ai/utils/abort";
 
 describe("AIError.classify — structural provider errors", () => {
 	it("classifies an Anthropic connection timeout as timeout + transient (no regex)", () => {
@@ -187,6 +188,98 @@ describe("AIError.finalize", () => {
 		// The transient flag survives a re-classify from the persisted message fields.
 		const reId = AIError.classifyMessage({ errorId: result.id, errorMessage: result.message });
 		expect(AIError.retriable(reId)).toBe(true);
+	});
+});
+
+describe("local model admission errors", () => {
+	it("keeps local rejection terminal through provider finalization and persisted recovery", async () => {
+		for (const cause of [
+			new AIError.ProviderHttpError("503 service unavailable", 503),
+			new AIError.ProviderHttpError("invalidated oauth token; usage limit reached", 401),
+		]) {
+			const admission = new AIError.ModelSelectionError("The selected model is no longer admitted.", { cause });
+			expect(admission.cause).toBe(cause);
+			for (const error of [admission, new Error("Request preparation failed", { cause: admission })]) {
+				expect(AIError.isProviderRetryableError(error)).toBe(false);
+				expect(AIError.isAuthRetryableError(error)).toBe(false);
+				expect(AIError.isInvalidatedOAuthTokenError(error)).toBe(false);
+				const result = await AIError.finalize(error);
+				expect(result.stopReason).toBe("error");
+				expect(result.status).toBe(cause.status);
+				expect(AIError.is(result.id, AIError.Flag.Class)).toBe(true);
+				expect(AIError.is(result.id, AIError.Flag.HostAdmission)).toBe(true);
+				expect(AIError.is(result.id, AIError.Flag.Transient)).toBe(false);
+				expect(AIError.is(result.id, AIError.Flag.AuthFailed)).toBe(false);
+				expect(AIError.is(result.id, AIError.Flag.UsageLimit)).toBe(false);
+
+				const persisted = JSON.parse(
+					JSON.stringify({ errorId: result.id, errorMessage: result.message, errorStatus: result.status }),
+				);
+				const id = AIError.classifyMessage(persisted);
+				expect(AIError.retriable(id)).toBe(false);
+				expect(AIError.is(id, AIError.Flag.HostAdmission)).toBe(true);
+				// Message-to-error consumers must deliberately rehydrate host identity.
+				const rehydrated = AIError.attach(new Error(result.message), id);
+				expect(AIError.isProviderRetryableError(rehydrated)).toBe(false);
+				expect(AIError.isAuthRetryableError(rehydrated)).toBe(false);
+			}
+		}
+	});
+
+	it("retains recovery for ordinary transient credential configuration failures", async () => {
+		const error = new AIError.ConfigurationError("Credential resolution failed", {
+			cause: new AIError.StreamTimeoutError("Credential broker request timed out"),
+		});
+		const result = await AIError.finalize(error);
+		const id = AIError.classifyMessage({
+			errorId: result.id,
+			errorMessage: result.message,
+			errorStatus: result.status,
+		});
+		expect(AIError.is(id, AIError.Flag.HostAdmission)).toBe(false);
+		expect(AIError.is(id, AIError.Flag.Timeout)).toBe(true);
+		expect(AIError.retriable(id)).toBe(true);
+	});
+
+	it("does not let provider names or forged raw flags suppress transport recovery", async () => {
+		const fields = {
+			name: "ModelSelectionError",
+			message: "Host role preflight blocked: 503 service unavailable",
+			status: 503,
+			errorId: AIError.create(AIError.Flag.HostAdmission),
+		};
+		for (const error of [fields, Object.assign(new Error(fields.message), fields)]) {
+			const result = await AIError.finalize(error);
+			expect(result.stopReason).toBe("error");
+			expect(result.status).toBe(503);
+			expect(AIError.is(result.id, AIError.Flag.HostAdmission)).toBe(false);
+			expect(AIError.retriable(result.id)).toBe(true);
+			if (error instanceof Error) expect(AIError.isProviderRetryableError(error)).toBe(true);
+		}
+	});
+
+	it("preserves caller cancellation and user interruption when admission also fails", async () => {
+		for (const callerFirst of [false, true]) {
+			const controller = new AbortController();
+			const tracker = createAbortSourceTracker(controller.signal);
+			const admission = new AIError.ModelSelectionError("Admission refresh failed", {
+				cause: new AIError.ProviderHttpError("503 service unavailable", 503),
+			});
+			const error = AIError.attach(
+				new Error("Interrupted by user", { cause: admission }),
+				AIError.create(AIError.Flag.HostAdmission, AIError.Flag.UserInterrupt),
+			);
+			if (callerFirst) controller.abort();
+			tracker.abortLocally(new AIError.StreamTimeoutError());
+			if (!callerFirst) controller.abort();
+
+			const result = await AIError.finalize(error, { abortTracker: tracker });
+			expect(result.stopReason).toBe("aborted");
+			expect(AIError.is(result.id, AIError.Flag.Abort)).toBe(true);
+			expect(AIError.is(result.id, AIError.Flag.UserInterrupt)).toBe(true);
+			expect(AIError.is(result.id, AIError.Flag.HostAdmission)).toBe(false);
+			expect(AIError.retriable(result.id)).toBe(false);
+		}
 	});
 });
 

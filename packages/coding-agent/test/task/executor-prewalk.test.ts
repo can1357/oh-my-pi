@@ -39,7 +39,7 @@ afterEach(async () => {
 function installRecordingSession() {
 	const requests: string[] = [];
 	vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
-		if (!options?.model || !options.sessionManager || !options.roleRoute) throw new Error("Expected admitted worker");
+		if (!options?.model || !options.sessionManager) throw new Error("Expected resolved worker");
 		const mock = createMockModel({
 			responses: [
 				{ content: [{ type: "toolCall", name: "write", arguments: {} }] },
@@ -85,9 +85,9 @@ function installRecordingSession() {
 	return requests;
 }
 
-describe("governed subagent prewalk handoff", () => {
+describe("implicit and governed subagent prewalk handoff", () => {
 	for (const mode of ["frontmatter", "agent override", "task setting"] as const) {
-		it(`serves on the approved prewalk candidate selected by ${mode}`, async () => {
+		it(`omitted model serves on the prewalk target selected by ${mode}`, async () => {
 			const requests = installRecordingSession();
 			const settings = Settings.isolated({
 				modelRoles: { smol: fixture.selectors.fallback },
@@ -99,7 +99,7 @@ describe("governed subagent prewalk handoff", () => {
 				description: "test",
 				systemPrompt: "test",
 				source: "bundled",
-				model: [fixture.selectors.primary, fixture.selectors.fallback],
+				model: [fixture.selectors.primary],
 				...(mode === "frontmatter" ? { prewalk: fixture.selectors.fallback } : {}),
 			};
 			const result = await runSubprocess({
@@ -107,7 +107,7 @@ describe("governed subagent prewalk handoff", () => {
 				agent,
 				task: "work",
 				index: 0,
-				id: "prewalk-approved",
+				id: "prewalk-implicit",
 				settings,
 				modelRegistry: fixture.modelRegistry,
 				enableLsp: false,
@@ -119,7 +119,7 @@ describe("governed subagent prewalk handoff", () => {
 	}
 
 	for (const mode of ["override off", "identical target", "unarmed"] as const) {
-		it(`stays on the approved primary with prewalk ${mode}`, async () => {
+		it(`omitted model stays on the primary with prewalk ${mode}`, async () => {
 			const requests = installRecordingSession();
 			const result = await runSubprocess({
 				cwd: cwd.path(),
@@ -131,7 +131,7 @@ describe("governed subagent prewalk handoff", () => {
 					description: "test",
 					systemPrompt: "test",
 					source: "bundled",
-					model: [fixture.selectors.primary, fixture.selectors.fallback],
+					model: [fixture.selectors.primary],
 					...(mode === "unarmed"
 						? {}
 						: { prewalk: mode === "identical target" ? fixture.selectors.primary : fixture.selectors.fallback }),
@@ -146,13 +146,15 @@ describe("governed subagent prewalk handoff", () => {
 		});
 	}
 
-	it("does not let a prewalk setting widen a literal approved model closure", async () => {
+	it("explicit literal selection rejects prewalk outside its admitted current route", async () => {
 		const requests = installRecordingSession();
 		const result = await runSubprocess({
 			cwd: cwd.path(),
 			task: "work",
 			index: 0,
 			id: "prewalk-outside-pin",
+			modelOverride: fixture.selectors.primary,
+			explicitModelSelection: true,
 			agent: {
 				name: "task",
 				description: "test",

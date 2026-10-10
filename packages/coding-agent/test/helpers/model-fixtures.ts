@@ -26,13 +26,14 @@ export interface TaskModelFixture {
 	selectors: Record<TaskModelFixtureKey, string>;
 	getActiveModel(): Model;
 	getActiveModelString(): string;
+	getActiveModelSelector(): string;
 	close(): void;
 }
 
 /** Local-only catalog/auth fixture; callers must grant models independently in settings or agent frontmatter. */
 export function createTaskModelFixture(
 	settings?: Settings,
-	options: { authenticated?: boolean } = {},
+	options: { authenticated?: boolean; baseUrl?: string } = {},
 ): TaskModelFixture {
 	const directory = TempDir.createSync("@omp-task-models-");
 	const authStorage = createInMemoryAuthStorage();
@@ -51,7 +52,7 @@ export function createTaskModelFixture(
 		JSON.stringify({
 			providers: {
 				[provider]: {
-					baseUrl: "http://127.0.0.1:1/v1",
+					baseUrl: options.baseUrl ?? "http://127.0.0.1:1/v1",
 					api: "openai-completions",
 					auth: "oauth",
 					models: Object.values(ids).map(id => ({
@@ -59,7 +60,10 @@ export function createTaskModelFixture(
 						name: id,
 						reasoning: id !== ids.plain,
 						...(id !== ids.plain
-							? { thinking: { mode: "effort", efforts: [Effort.Low, Effort.Medium, Effort.High] } }
+							? {
+									thinking: { mode: "effort", efforts: [Effort.Low, Effort.Medium, Effort.High] },
+									compat: { supportsReasoningEffort: true, thinkingFormat: "openai" },
+								}
 							: {}),
 						input: ["text", "image"],
 						supportsTools: true,
@@ -94,7 +98,8 @@ export function createTaskModelFixture(
 		models,
 		selectors,
 		getActiveModel: () => models.parent,
-		getActiveModelString: () => `${selectors.parent}:medium`,
+		getActiveModelString: () => selectors.parent,
+		getActiveModelSelector: () => `${selectors.parent}:medium`,
 		close: () => {
 			authStorage.close();
 			directory.removeSync();

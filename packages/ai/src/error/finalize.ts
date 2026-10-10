@@ -1,9 +1,8 @@
 import type { Api } from "../types";
 import type { AbortSourceTracker } from "../utils/abort";
 import type { CapturedHttpErrorResponse, RawHttpRequestDump } from "../utils/http-inspector";
-import { classify, classifyMessage, status } from "./flags";
+import { classify, classifyMessage, create, Flag, is, status } from "./flags";
 import { formatMessage } from "./format";
-import { ConfigurationError } from "./validation";
 
 /** Context a provider catch block hands to {@link finalize}. */
 export interface FinalizeOptions {
@@ -45,7 +44,6 @@ export interface FinalizeResult {
  * wrapped so a formatter throw can never skip the caller's `stream.end()`.
  */
 export async function finalize(error: unknown, opts: FinalizeOptions = {}): Promise<FinalizeResult> {
-	const aborted = opts.abortTracker ? opts.abortTracker.wasCallerAbort() : opts.signal?.aborted === true;
 	const errorStatus = status(error);
 	const currentStatus = errorStatus ?? opts.capturedErrorResponse?.status;
 
@@ -57,10 +55,7 @@ export async function finalize(error: unknown, opts: FinalizeOptions = {}): Prom
 	} catch {
 		message = error instanceof Error ? error.message : String(error);
 	}
-	if (!aborted && localReason === undefined && error instanceof ConfigurationError) {
-		const prefix = "ConfigurationError:";
-		if (!message.startsWith(prefix)) message = `${prefix} ${message}`;
-	}
+	const aborted = opts.abortTracker ? opts.abortTracker.wasCallerAbort() : opts.signal?.aborted === true;
 
 	// A captured status is transport context for the original error. Put it at
 	// the root of the classification cause chain so terminal 4xx policy governs
@@ -68,7 +63,7 @@ export async function finalize(error: unknown, opts: FinalizeOptions = {}): Prom
 	const classificationError =
 		errorStatus === undefined && currentStatus !== undefined ? { status: currentStatus, cause: error } : error;
 
-	const id = classifyMessage({
+	let id = classifyMessage({
 		api: opts.api,
 		provider: opts.provider,
 		model: opts.model,
@@ -76,6 +71,10 @@ export async function finalize(error: unknown, opts: FinalizeOptions = {}): Prom
 		errorMessage: message,
 		errorStatus: currentStatus,
 	});
+	// Caller cancellation owns the outcome even if admission failed concurrently.
+	if (aborted && is(id, Flag.HostAdmission)) {
+		id = create(Flag.Abort, id & Flag.UserInterrupt, id & Flag.SilentAbort);
+	}
 
 	return {
 		id,

@@ -38,6 +38,7 @@ function makeSession(): ToolSession {
 		modelRegistry: fixture.modelRegistry,
 		getActiveModel: fixture.getActiveModel,
 		getActiveModelString: fixture.getActiveModelString,
+		getActiveModelSelector: fixture.getActiveModelSelector,
 		asyncJobManager: manager,
 		getAgentId: () => "Main",
 		getSessionFile: () => null,

@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- Fixed local worker admission failures surviving finalization and cancellation handling without entering retry or fallback recovery; ordinary transient configuration failures remain recoverable ([#12229](https://github.com/can1357/oh-my-pi/pull/12229) by [@Xytronix](https://github.com/Xytronix)).
 - Fixed OpenAI V1 remote compaction re-attaching a prior Anthropic native payload after a successful compact ([#15041](https://github.com/can1357/oh-my-pi/pull/15041) by [@PaleRoses](https://github.com/PaleRoses))
 
 ### Added

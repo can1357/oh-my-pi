@@ -36,9 +36,6 @@ import {
 	roleRouteFallbackCandidates,
 	roleRouteFallbackSelectors,
 	roleRouteMetadata,
-	ROLE_ROUTE_BLOCKED_PREFIX,
-	ROLE_ROUTE_UNAVAILABLE_PREFIX,
-	RoleRouteUnavailableError,
 	type RoleRoutePermit,
 } from "../task/role-routing";
 
@@ -1338,13 +1335,7 @@ export class TurnRecovery {
 	}
 
 	#isTerminalAdmissionError(message: AssistantMessage): boolean {
-		const errorMessage = message.errorMessage;
-		return (
-			errorMessage !== undefined &&
-			(errorMessage.startsWith(ROLE_ROUTE_BLOCKED_PREFIX) ||
-				errorMessage.startsWith(ROLE_ROUTE_UNAVAILABLE_PREFIX) ||
-				errorMessage.startsWith("ConfigurationError:"))
-		);
+		return AIError.is(message.errorId, AIError.Flag.Class) && AIError.is(message.errorId, AIError.Flag.HostAdmission);
 	}
 
 	#isUsagePreflightBlocked(message: AssistantMessage): boolean {
@@ -1377,6 +1368,13 @@ export class TurnRecovery {
 		}
 
 		const id = this.#classifyRetryMessage(message);
+		if (
+			AIError.is(id, AIError.Flag.HostAdmission) ||
+			AIError.is(id, AIError.Flag.UserInterrupt) ||
+			AIError.is(id, AIError.Flag.SilentAbort)
+		) {
+			return false;
+		}
 		if (message.stopReason === "aborted" && AIError.is(id, AIError.Flag.Abort)) return true;
 		if (message.errorMessage === undefined || !Object.hasOwn(GENERIC_ABORT_MESSAGES, message.errorMessage)) {
 			return false;
@@ -1391,7 +1389,11 @@ export class TurnRecovery {
 	 * cannot fall through to the generic 408 replay path.
 	 */
 	async handleResponsesRequestBodyReadTimeout(message: AssistantMessage): Promise<RequestBodyReadTimeoutRecovery> {
-		if (message.stopReason !== "error" || !AIError.isResponsesRequestBodyReadTimeout(message)) {
+		if (
+			message.stopReason !== "error" ||
+			this.#isTerminalAdmissionError(message) ||
+			!AIError.isResponsesRequestBodyReadTimeout(message)
+		) {
 			return "not-applicable";
 		}
 		const generation = this.#host.promptGeneration();
@@ -1532,6 +1534,13 @@ export class TurnRecovery {
 	 */
 	classifyResolvedInterruptedToolTurn(message: AssistantMessage): "reasonless-abort" | "stream-stall" | undefined {
 		const id = this.#classifyRetryMessage(message);
+		if (
+			AIError.is(id, AIError.Flag.HostAdmission) ||
+			AIError.is(id, AIError.Flag.UserInterrupt) ||
+			AIError.is(id, AIError.Flag.SilentAbort)
+		) {
+			return undefined;
+		}
 		const genericAbort =
 			message.errorMessage !== undefined && Object.hasOwn(GENERIC_ABORT_MESSAGES, message.errorMessage);
 		const reasonlessAbort =
@@ -1663,6 +1672,7 @@ export class TurnRecovery {
 	/** Checks whether a provider error represents a classifier refusal. */
 	isClassifierRefusal(message: AssistantMessage): boolean {
 		if (message.stopReason !== "error") return false;
+		if (this.#isTerminalAdmissionError(message)) return false;
 		const stopType = message.stopDetails?.type;
 		return stopType === "refusal" || stopType === "sensitive";
 	}
@@ -2090,7 +2100,9 @@ export class TurnRecovery {
 		const candidate = this.#resolveRetryFallbackModel(selector);
 		if (!candidate) {
 			if (this.#host.roleRoute)
-				throw new Error(`Host role retry model/effort is not a remaining approved occurrence: ${selector.raw}`);
+				throw new AIError.ModelSelectionError(
+					`Host role retry model/effort is not a remaining approved occurrence: ${selector.raw}`,
+				);
 			throw new Error(`Retry fallback model not found: ${selector.raw}`);
 		}
 		const rolePreview = this.#host.roleRoute
@@ -2100,6 +2112,8 @@ export class TurnRecovery {
 			options?.apiKey ??
 			(await this.#host.modelRegistry.getApiKey(candidate, this.#host.sessionId(), { signal: options?.signal }));
 		if (!apiKey) {
+			if (this.#host.roleRoute)
+				throw new AIError.ModelSelectionError(`No API key for retry fallback ${selector.raw}`);
 			throw new Error(`No API key for retry fallback ${selector.raw}`);
 		}
 		if (options?.signal?.aborted) return false;
@@ -2124,7 +2138,7 @@ export class TurnRecovery {
 				: concreteThinkingLevel(nextThinkingLevel),
 		);
 		if (rolePreview && reasoning !== undefined && !getSupportedEfforts(candidate).includes(reasoning)) {
-			throw new Error("Host role retry cannot apply an unsupported serving effort.");
+			throw new AIError.ModelSelectionError("Host role retry cannot apply an unsupported serving effort.");
 		}
 		const roleSelection = this.#host.roleRoute
 			? adoptRoleRouteCandidate(this.#host.roleRoute, selector.raw, candidate, this.#host.modelRegistry)
@@ -2270,16 +2284,10 @@ export class TurnRecovery {
 				const apiKey = await this.#host.modelRegistry.getApiKey(candidate, this.#host.sessionId());
 				if (!apiKey) continue;
 				const previousEditMode = this.#host.resolveActiveEditMode();
-				let applied: boolean;
-				try {
-					applied = await this.applyRetryFallbackCandidate(role, selector, currentSelector, {
-						...options,
-						reason: `Request failed: ${failedMessage.errorMessage ?? "provider returned an error without details"}`,
-					});
-				} catch (error) {
-					if (this.#host.roleRoute && error instanceof RoleRouteUnavailableError) continue;
-					throw error;
-				}
+				const applied = await this.applyRetryFallbackCandidate(role, selector, currentSelector, {
+					...options,
+					reason: `Request failed: ${failedMessage.errorMessage ?? "provider returned an error without details"}`,
+				});
 				const editModeChanged = this.#host.resolveActiveEditMode() !== previousEditMode;
 				if (applied && options?.pinFallback === true && canRedeemFallbackCredit && !editModeChanged) {
 					this.#activeFallbackCreditRedemption = {

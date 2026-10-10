@@ -637,9 +637,9 @@ function resolveCompactionEffort(model: Model, level: ThinkingLevel | undefined)
  */
 function createSummarizationError(prefix: string, response: AssistantMessage): Error {
 	const text = `${prefix}: ${response.errorMessage || "Unknown error"}`;
-	return response.errorStatus === undefined
-		? new Error(text)
-		: new AIError.ProviderHttpError(text, response.errorStatus);
+	const error =
+		response.errorStatus === undefined ? new Error(text) : new AIError.ProviderHttpError(text, response.errorStatus);
+	return response.errorId === undefined ? error : AIError.attach(error, response.errorId);
 }
 
 function shouldRetryHandoffWithAutoToolChoice(response: AssistantMessage): boolean {
@@ -1807,6 +1807,7 @@ export async function compact(
 				// swallowing it here would downgrade Esc into "fall back to local
 				// summarization" and keep compaction running on an aborted signal.
 				if (signal?.aborted) throw err;
+				if (AIError.is(AIError.classify(err), AIError.Flag.HostAdmission)) throw err;
 				nativeCompactionError = selectNativeCompactionError(nativeCompactionError, err);
 				// Claim the V1 fallback only when the V1 block below will run.
 				logger.warn(
@@ -1865,6 +1866,7 @@ export async function compact(
 				// swallowing it here would downgrade Esc into "fall back to local
 				// summarization" and keep compaction running on an aborted signal.
 				if (signal?.aborted) throw err;
+				if (AIError.is(AIError.classify(err), AIError.Flag.HostAdmission)) throw err;
 				nativeCompactionError = selectNativeCompactionError(nativeCompactionError, err);
 				logger.warn("OpenAI remote compaction failed", {
 					error: err instanceof Error ? err.message : String(err),
@@ -2013,6 +2015,7 @@ export async function compact(
 			// swallowing it here would downgrade Esc into "fall back to local
 			// summarization" and keep compaction running on an aborted signal.
 			if (signal?.aborted) throw err;
+			if (AIError.is(AIError.classify(err), AIError.Flag.HostAdmission)) throw err;
 			nativeCompactionError = selectNativeCompactionError(nativeCompactionError, err);
 			logger.warn("Anthropic server-side compaction failed", {
 				error: err instanceof Error ? err.message : String(err),

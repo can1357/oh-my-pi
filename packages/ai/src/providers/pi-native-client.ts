@@ -31,6 +31,15 @@ import { createAbortSourceTracker } from "../utils/abort";
 import { AssistantMessageEventStream } from "../utils/event-stream";
 import { getStreamFirstEventTimeoutMs, getStreamIdleTimeoutMs, iterateWithIdleTimeout } from "../utils/idle-iterator";
 import { notifyProviderResponse } from "../utils/provider-response";
+import { assertSafeGovernedJson, createRequestSelectionGuard, serializeRequestBody } from "../utils/request-selection";
+import {
+	PI_NATIVE_ADMISSION_HEADER,
+	PI_NATIVE_ADMISSION_PATH,
+	PI_NATIVE_ADMISSION_VERSION,
+	PI_NATIVE_GOVERNED_STREAM_PATH,
+	isPiNativeAdmissionEvent,
+	type PiNativeAdmissionEvent,
+} from "./pi-native-admission";
 
 /**
  * Fields that must not cross the wire — either non-serializable (functions,
@@ -44,6 +53,7 @@ const NON_WIRE_KEYS = new Set<keyof SimpleStreamOptions>([
 	"apiKey",
 	"fetch",
 	"onPayload",
+	"onBeforeRequest",
 	"onResponse",
 	"onSseEvent",
 	"execHandlers",
@@ -56,12 +66,21 @@ const PI_NATIVE_STREAM_FIRST_EVENT_TIMEOUT_ERROR = "pi-native stream timed out w
 
 function isPiNativeProgressEvent(event: unknown): boolean {
 	if (typeof event !== "object" || event === null || !("type" in event)) return true;
-	return event.type !== "start";
+	return event.type !== "start" && event.type !== "inference_admission";
 }
 
 function buildWireOptions(options: SimpleStreamOptions | undefined): Record<string, unknown> {
 	if (!options) return {};
 	const wire: Record<string, unknown> = {};
+	if (options.preserveModelSelection || options.preserveThinkingEffort) {
+		const descriptors = Object.getOwnPropertyDescriptors(options);
+		for (const key of NON_WIRE_KEYS) delete descriptors[key];
+		assertSafeGovernedJson(Object.create(Object.getPrototypeOf(options), descriptors));
+		for (const [key, descriptor] of Object.entries(descriptors)) {
+			if (descriptor.enumerable && descriptor.value !== undefined) wire[key] = descriptor.value;
+		}
+		return wire;
+	}
 	for (const [k, v] of Object.entries(options)) {
 		if (v === undefined) continue;
 		if (NON_WIRE_KEYS.has(k as keyof SimpleStreamOptions)) continue;
@@ -105,13 +124,13 @@ async function decodeGatewayError(response: Response): Promise<AIError.AuthGatew
  * the baseUrl is missing (transport=pi-native without a gateway target is
  * a configuration error, not a runtime recoverable one).
  */
-function resolveStreamUrl(model: Model<Api>): string {
+function resolveStreamUrl(model: Model<Api>, governed = false): string {
 	if (!model.baseUrl) {
 		throw new AIError.ConfigurationError(
 			`pi-native transport requires \`baseUrl\` on model ${model.id} (set it on the provider config in models.yml)`,
 		);
 	}
-	return `${model.baseUrl.replace(/\/+$/, "")}/v1/pi/stream`;
+	return `${model.baseUrl.replace(/\/+$/, "")}${governed ? PI_NATIVE_GOVERNED_STREAM_PATH : "/v1/pi/stream"}`;
 }
 
 function buildHeaders(model: Model<Api>, apiKey: string | undefined): Record<string, string> {
@@ -175,23 +194,51 @@ export function streamPiNative<TApi extends Api>(
 		}
 
 		try {
-			const url = resolveStreamUrl(model as Model<Api>);
+			const governed = options?.preserveModelSelection === true || options?.preserveThinkingEffort === true;
+			const url = resolveStreamUrl(model as Model<Api>, governed);
+			const admissionUrl = governed
+				? `${url.slice(0, -PI_NATIVE_GOVERNED_STREAM_PATH.length)}${PI_NATIVE_ADMISSION_PATH}`
+				: undefined;
 			const fetchImpl = options?.fetch ?? globalThis.fetch;
 			const headers = buildHeaders(
 				model as Model<Api>,
 				typeof options?.apiKey === "string" ? options.apiKey : undefined,
 			);
-			const body = JSON.stringify({
+			const envelope = {
 				modelId: `${model.provider}/${model.id}`,
 				context,
 				options: buildWireOptions(options),
 				stream: true,
-			});
+				...(governed ? { admission: { version: PI_NATIVE_ADMISSION_VERSION } } : {}),
+			};
+			const selectionGuard = createRequestSelectionGuard(options, envelope, payload => ({
+				...(options?.preserveModelSelection
+					? { modelId: payload.modelId, preserveModelSelection: payload.options.preserveModelSelection }
+					: {}),
+				...(options?.preserveThinkingEffort
+					? {
+							reasoning: payload.options.reasoning,
+							disableReasoning: payload.options.disableReasoning,
+							forceReasoningOff: payload.options.forceReasoningOff,
+							thinkingBudgets: payload.options.thinkingBudgets,
+							preserveThinkingEffort: payload.options.preserveThinkingEffort,
+						}
+					: {}),
+			}));
+			const body = serializeRequestBody(envelope, options, selectionGuard);
 
+			await options?.onBeforeRequest?.();
 			response = await fetchImpl(url, { method: "POST", headers, body, signal: abortTracker.requestSignal });
 			if (!response.ok) {
 				stream.fail(await decodeGatewayError(response));
 				return;
+			}
+			const requestId = response.headers.get("x-request-id") ?? response.headers.get("request-id");
+			if (
+				governed &&
+				(response.headers.get(PI_NATIVE_ADMISSION_HEADER) !== String(PI_NATIVE_ADMISSION_VERSION) || !requestId)
+			) {
+				throw new AIError.ModelSelectionError("The gateway did not accept request-scoped origin admission.");
 			}
 			// Callers can truthfully inspect the gateway HTTP response, but its
 			// request body is opaque here; callbacks themselves never cross the wire.
@@ -210,7 +257,7 @@ export function streamPiNative<TApi extends Api>(
 
 			const idleTimeoutMs = options?.streamIdleTimeoutMs ?? getStreamIdleTimeoutMs();
 			const firstEventTimeoutMs = options?.streamFirstEventTimeoutMs ?? getStreamFirstEventTimeoutMs(idleTimeoutMs);
-			const source = readSseJson<AssistantMessageEvent>(
+			const source = readSseJson<AssistantMessageEvent | PiNativeAdmissionEvent>(
 				response.body as ReadableStream<Uint8Array>,
 				abortTracker.requestSignal,
 			);
@@ -226,7 +273,53 @@ export function streamPiNative<TApi extends Api>(
 				isProgressItem: isPiNativeProgressEvent,
 			});
 			let sawTerminal = false;
+			let admittedAttempts = 0;
 			for await (const event of watchedSource) {
+				if (event.type === "inference_admission") {
+					if (
+						!isPiNativeAdmissionEvent(event) ||
+						!governed ||
+						event.requestId !== requestId ||
+						event.attempt !== admittedAttempts + 1
+					) {
+						throw new AIError.ModelSelectionError("The gateway sent an unrelated or replayed admission request.");
+					}
+					const decide = async (allow: boolean): Promise<void> => {
+						const decisionResponse = await fetchImpl(admissionUrl!, {
+							method: "POST",
+							headers: { ...headers, Accept: "application/json" },
+							body: JSON.stringify({ requestId: event.requestId, nonce: event.nonce, allow }),
+							signal: abortTracker.requestSignal,
+						});
+						if (!decisionResponse.ok) throw await decodeGatewayError(decisionResponse);
+						const acknowledgment = await decisionResponse.json();
+						if (
+							typeof acknowledgment !== "object" ||
+							acknowledgment === null ||
+							!("accepted" in acknowledgment) ||
+							acknowledgment.accepted !== true
+						) {
+							throw new AIError.ModelSelectionError("The gateway did not acknowledge this admission decision.");
+						}
+					};
+					try {
+						await options?.onBeforeRequest?.();
+					} catch (error) {
+						await decide(false).catch(() => {});
+						throw error;
+					}
+					await decide(true);
+					admittedAttempts = event.attempt;
+					continue;
+				}
+				if (governed && admittedAttempts === 0 && event.type !== "start" && event.type !== "error") {
+					throw new AIError.ModelSelectionError("The gateway produced inference output without origin admission.");
+				}
+				const message =
+					event.type === "error" ? event.error : event.type === "done" ? event.message : event.partial;
+				if (message && typeof message.errorId === "number") {
+					message.errorId &= ~AIError.Flag.HostAdmission;
+				}
 				if (event.type === "done" || event.type === "error") sawTerminal = true;
 				stream.push(event);
 				// `stream.push` resolves `.result()` on `done`/`error`; subsequent
@@ -258,6 +351,7 @@ export function streamPiNative<TApi extends Api>(
 			stream.end();
 		} catch (err) {
 			stream.fail(err);
+			abortTracker.abortLocally(err instanceof Error ? err : new Error(String(err)));
 		} finally {
 			if (callerSignal) callerSignal.removeEventListener("abort", onAbort);
 		}

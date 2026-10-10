@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
+import * as AIError from "@oh-my-pi/pi-ai/error";
 import {
 	type AzureOpenAIResponsesOptions,
 	streamAzureOpenAIResponses,
@@ -163,6 +164,100 @@ describe("azure openai responses streaming", () => {
 		expect(result.stopReason).toBe("stop");
 		expect(capturedBody?.input).toEqual([{ role: "user", content: [{ type: "input_text", text: "replacement" }] }]);
 	});
+
+	for (const rewrite of ["unchanged", "model", "effort", "serializer"] as const) {
+		it(`protects an admitted Azure deployment from ${rewrite} wire changes`, async () => {
+			const reasoningModel: Model<"azure-openai-responses"> = buildModel({
+				...azureModel,
+				reasoning: true,
+				compat: azureModel.compatConfig,
+			} as ModelSpec<"azure-openai-responses">);
+			const bodies: Array<Record<string, unknown>> = [];
+			let serializers = 0;
+			const result = await streamAzureOpenAIResponses(
+				reasoningModel,
+				{
+					messages: [{ role: "user", content: "Serve this deployment.", timestamp: 0 }],
+				},
+				{
+					apiKey: "test-key",
+					azureBaseUrl: azureModel.baseUrl,
+					azureDeploymentName: "approved-private-deployment",
+					reasoning: "high",
+					preserveModelSelection: true,
+					preserveThinkingEffort: true,
+					fetch: async (_input, init) => {
+						bodies.push(JSON.parse(init?.body as string) as Record<string, unknown>);
+						return createSseResponse([
+							{
+								type: "response.completed",
+								response: {
+									status: "completed",
+									usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+								},
+							},
+						]);
+					},
+					onPayload: payload => {
+						const body = payload as Record<string, unknown>;
+						if (rewrite === "model") body.model = "unapproved-deployment";
+						if (rewrite === "effort") body.reasoning = { effort: "low" };
+						if (rewrite === "serializer") {
+							return {
+								...body,
+								toJSON() {
+									serializers++;
+									return { ...body, model: "unapproved-deployment" };
+								},
+							};
+						}
+					},
+				},
+			).result();
+			expect(result.stopReason).toBe(rewrite === "unchanged" ? "stop" : "error");
+			expect(bodies).toHaveLength(rewrite === "unchanged" ? 1 : 0);
+			expect(serializers).toBe(0);
+			if (rewrite === "unchanged") {
+				expect(bodies[0]?.model).toBe("approved-private-deployment");
+				expect(bodies[0]?.reasoning).toMatchObject({ effort: "high" });
+			} else {
+				expect(AIError.is(result.errorId, AIError.Flag.HostAdmission)).toBe(true);
+			}
+		});
+	}
+
+	it("stops Azure transport retry when admission is revoked, even with a transient cause", async () => {
+		let requests = 0;
+		let allowed = true;
+		let hooks = 0;
+		const result = await streamAzureOpenAIResponses(
+			azureModel,
+			{
+				messages: [{ role: "user", content: "One authorized attempt.", timestamp: 0 }],
+			},
+			{
+				apiKey: "test-key",
+				azureDeploymentName: "approved-private-deployment",
+				preserveModelSelection: true,
+				onPayload: () => {
+					hooks++;
+				},
+				onBeforeRequest: () => {
+					if (!allowed)
+						throw new Error("Azure deployment grant revoked.", { cause: new Error("503 Service Unavailable") });
+				},
+				fetch: async () => {
+					requests++;
+					allowed = false;
+					return new Response("temporarily unavailable", { status: 503, headers: { "retry-after": "0" } });
+				},
+			},
+		).result();
+		expect(result.stopReason).toBe("error");
+		expect(AIError.is(result.errorId, AIError.Flag.HostAdmission)).toBe(true);
+		expect(requests).toBe(1);
+		expect(hooks).toBe(1);
+	}, 10_000);
 
 	it("uses developer role for Azure Responses reasoning model system prompts", async () => {
 		const reasoningModel: Model<"azure-openai-responses"> = buildModel({

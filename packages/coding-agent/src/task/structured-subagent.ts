@@ -12,9 +12,9 @@ import { shortenPath } from "@oh-my-pi/pi-tui/render/render-utils";
 import {
 	normalizeModelPatternList,
 	resolveAgentModelSelection,
+	resolveConfiguredModelPatterns,
 	splitRoleAliasThinkingSuffix,
 } from "../config/model-resolver";
-import { MODEL_ROLE_IDS } from "../config/model-roles";
 import {
 	createTaskModelRoute,
 	narrowRoleRoute,
@@ -182,6 +182,8 @@ export interface EffectiveSubagentPolicy {
 	compactionThresholdOverride?: CompactionThresholdPair;
 	/** Exact-name `task.agentAccountPools` entry: the only OAuth accounts the child may use, per listed provider. */
 	oauthAccountPools?: OAuthAccountPools;
+	/** Parent's model identity used only by ordinary implicit auth fallback. */
+	parentActiveModelPattern?: string;
 	schema: StructuredSubagentSchemaResolution;
 	planMode: boolean;
 	isIsolated: boolean;
@@ -444,88 +446,67 @@ export async function resolveEffectiveSubagentPolicy(
 	const configuredOverride = Object.hasOwn(agentModelOverrides, agentName)
 		? agentModelOverrides[agentName]
 		: undefined;
-	let source =
-		request.model ??
-		(normalizeModelPatternList(configuredOverride).length > 0 ? configuredOverride : undefined) ??
-		(normalizeModelPatternList(effectiveAgent.model).length > 0 ? effectiveAgent.model : ["@default"]);
-	let configuredRole: string | undefined;
-	if (request.model === undefined && source === effectiveAgent.model) {
-		const patterns = normalizeModelPatternList(source);
-		if (patterns.length === 1) {
-			const { base, level } = splitRoleAliasThinkingSuffix(patterns[0]);
-			const role = base.startsWith("@") ? base.slice(1) : undefined;
-			const authoritySettings = request.session.getModelAuthoritySettings?.() ?? request.session.settings;
-			if (
-				(role === "smol" || role === "slow") &&
-				!authoritySettings.getModelRole(role) &&
-				authoritySettings.getModelRole("default")
-			) {
-				configuredRole = "default";
-				source = level === undefined ? "@default" : `@default:${level}`;
-			} else if (role === "task" && !authoritySettings.getModelRole(role)) {
-				source = level === undefined ? "@default" : `@default:${level}`;
-			} else if (
-				role &&
-				role !== "default" &&
-				MODEL_ROLE_IDS.some(known => known === role) &&
-				!authoritySettings.getModelRole(role)
-			) {
-				const selection = resolveAgentModelSelection({
-					agentModel: effectiveAgent.model,
-					settings: authoritySettings,
-					activeModelPattern: request.session.getActiveModelString?.(),
-				});
-				source = selection.patterns;
-			}
-		}
-	}
-	const { modelRegistry } = request.session;
-	if (!modelRegistry) {
-		throw new StructuredSubagentError("preflight", "Model discovery is required to authorize a task model.");
-	}
-	let roleRoute: RoleRoutePermit;
+	const parentActiveModelPattern = request.session.getActiveModelString?.();
+	let roleRoute: RoleRoutePermit | undefined;
 	let modelOverride: string[];
 	let modelRole: string | undefined;
-	try {
-		const route = await createTaskModelRoute({
-			authority: {
-				settings: request.session.getModelAuthoritySettings?.() ?? request.session.settings,
-				agentName,
-				agentModel: effectiveAgent.model,
-				getAgentModel: async () => {
-					const current = await discoverAgentsShared(
-						request.session.cwd,
-						request.session.effectiveExtensionRoots?.(),
-					);
-					const definition = getAgent(
-						[...current.agents, ...(request.session.getSessionAgents?.() ?? [])],
-						agentName,
-					);
-					if (!definition || cfgTaskDisabledAgents.get(request.session.settings).includes(agentName)) {
-						throw new StructuredSubagentError(
-							"preflight",
-							`Agent "${agentName}" is no longer available for dispatch.`,
+	if (request.model === undefined) {
+		// Omission retains the established agent resolver, including stock roles,
+		// legacy aliases and session inheritance. A resolved override is not a pin.
+		const selection = resolveAgentModelSelection({
+			settingsOverride: configuredOverride,
+			agentModel: effectiveAgent.model,
+			settings: request.session.settings,
+			activeModelPattern: parentActiveModelPattern,
+			fallbackModelPattern: request.session.getModelString?.(),
+		});
+		modelOverride = selection.patterns;
+		modelRole = selection.role;
+	} else {
+		const { modelRegistry } = request.session;
+		if (!modelRegistry) {
+			throw new StructuredSubagentError("preflight", "Model discovery is required to authorize a task model.");
+		}
+		try {
+			const route = await createTaskModelRoute({
+				authority: {
+					settings: request.session.getModelAuthoritySettings?.() ?? request.session.settings,
+					agentName,
+					agentModel: effectiveAgent.model,
+					getAgentModel: async () => {
+						const current = await discoverAgentsShared(
+							request.session.cwd,
+							request.session.effectiveExtensionRoots?.(),
 						);
-					}
-					return definition.model;
+						const definition = getAgent(
+							[...current.agents, ...(request.session.getSessionAgents?.() ?? [])],
+							agentName,
+						);
+						if (!definition || cfgTaskDisabledAgents.get(request.session.settings).includes(agentName)) {
+							throw new StructuredSubagentError(
+								"preflight",
+								`Agent "${agentName}" is no longer available for dispatch.`,
+							);
+						}
+						return definition.model;
+					},
+					getParentSelector: () =>
+						request.session.isDisposed?.() ? undefined : request.session.getActiveModelSelector?.(),
+					getParentModel: () => (request.session.isDisposed?.() ? undefined : request.session.getActiveModel?.()),
 				},
-				getParentSelector: () =>
-					request.session.isDisposed?.() ? undefined : request.session.getActiveModelString?.(),
-				getParentModel: () => (request.session.isDisposed?.() ? undefined : request.session.getActiveModel?.()),
-			},
-			modelRegistry,
-			selectors: normalizeModelPatternList(source),
-			explicit: request.model !== undefined,
-			configuredRole,
-			signal: request.signal,
-		});
-		roleRoute = route.permit;
-		modelOverride = [...roleRouteCandidateSelectors(roleRoute)];
-		modelRole = route.metadata.role;
-	} catch (error) {
-		throw new StructuredSubagentError("preflight", error instanceof Error ? error.message : String(error), {
-			cause: error,
-		});
+				modelRegistry,
+				selectors: normalizeModelPatternList(request.model),
+				explicit: true,
+				signal: request.signal,
+			});
+			roleRoute = route.permit;
+			modelOverride = [...roleRouteCandidateSelectors(roleRoute)];
+			modelRole = route.metadata.role;
+		} catch (error) {
+			throw new StructuredSubagentError("preflight", error instanceof Error ? error.message : String(error), {
+				cause: error,
+			});
+		}
 	}
 	const isolationEnabled = cfgTaskIsolationEnabled.get(request.session.settings);
 	const isIsolated = request.isolation?.requested === true;
@@ -546,6 +527,7 @@ export async function resolveEffectiveSubagentPolicy(
 		serviceTierOverride,
 		compactionThresholdOverride,
 		oauthAccountPools,
+		parentActiveModelPattern,
 		schema,
 		planMode,
 		isIsolated,
@@ -595,9 +577,15 @@ async function applySpawnHook(
 		throw new StructuredSubagentError("preflight", spawnResult.reason ?? "Subagent spawn blocked by extension.");
 	}
 	if (spawnResult?.model === undefined) return policy;
+	if (!policy.roleRoute) {
+		const replacement = resolveConfiguredModelPatterns(spawnResult.model, request.session.settings);
+		return replacement.length === 0
+			? policy
+			: { ...policy, modelOverride: replacement, modelRoute: spawnResult.note };
+	}
 	const selectorProblem = invalidModelSelectorReason(spawnResult.model, "Extension model replacement");
 	if (selectorProblem) throw new StructuredSubagentError("preflight", selectorProblem);
-	if (!policy.roleRoute || !request.session.modelRegistry) {
+	if (!request.session.modelRegistry) {
 		throw new StructuredSubagentError(
 			"preflight",
 			"Extension model replacement requires a host-authorized dispatch permit.",
@@ -701,6 +689,15 @@ function buildExecutorOptions(
 		modelOverride: policy.modelOverride,
 		modelRole: policy.modelRole,
 		roleRoute: policy.roleRoute,
+		explicitModelSelection: request.model !== undefined,
+		parentActiveModelPattern: policy.parentActiveModelPattern,
+		modelAuthority: {
+			settings: session.getModelAuthoritySettings?.() ?? session.settings,
+			agentName: policy.agentName,
+			agentModel: policy.effectiveAgent.model,
+			getParentSelector: () => (session.isDisposed?.() ? undefined : session.getActiveModelSelector?.()),
+			getParentModel: () => (session.isDisposed?.() ? undefined : session.getActiveModel?.()),
+		},
 		modelRoute: policy.modelRoute,
 		serviceTierOverride: policy.serviceTierOverride,
 		compactionThresholdOverride: policy.compactionThresholdOverride,

@@ -1,5 +1,6 @@
 import type { StreamFn } from "@oh-my-pi/pi-agent-core";
 import type { Api, Effort, Model } from "@oh-my-pi/pi-ai";
+import { ModelSelectionError } from "@oh-my-pi/pi-ai/error";
 import { modelKind } from "@oh-my-pi/pi-catalog/types";
 import { getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
 import {
@@ -14,13 +15,13 @@ import {
 	toReasoningEffort,
 	type ConfiguredThinkingLevel,
 } from "@oh-my-pi/pi-tui/thinking";
-import { isRecord } from "@oh-my-pi/pi-utils";
 import type { ModelRegistry } from "../config/model-registry";
 import {
 	filterAvailableModelsByEnabledPatterns,
 	formatModelStringWithRouting,
 	normalizeModelPatternList,
 	parseModelPattern,
+	resolveExplicitModelRole,
 	splitRoleAliasThinkingSuffix,
 } from "../config/model-resolver";
 import { cfgDisabledProviders, cfgEnabledModels } from "../config/model-settings";
@@ -102,20 +103,12 @@ interface HostRoleRoute {
 	selected?: RoleRouteModelSelection;
 }
 
-export const ROLE_ROUTE_BLOCKED_PREFIX = "Host role preflight blocked:";
-export const ROLE_ROUTE_UNAVAILABLE_PREFIX = "Host role preflight unavailable:";
-
-export class RoleRouteUnavailableError extends Error {
-	constructor(message: string) {
-		super(`${ROLE_ROUTE_UNAVAILABLE_PREFIX} ${message}`);
-		this.name = "RoleRouteUnavailableError";
-	}
-}
+export class RoleRouteUnavailableError extends ModelSelectionError {}
 
 const routeByPermit = new WeakMap<RoleRoutePermit, HostRoleRoute>();
 
 function blocked(message: string): never {
-	throw new Error(`${ROLE_ROUTE_BLOCKED_PREFIX} ${message}`);
+	throw new ModelSelectionError(`Host role preflight blocked: ${message}`);
 }
 
 function routeFor(permit: RoleRoutePermit): HostRoleRoute {
@@ -124,11 +117,13 @@ function routeFor(permit: RoleRoutePermit): HostRoleRoute {
 	return route;
 }
 
-function alias(pattern: string): { role: string; level?: ConfiguredThinkingLevel } | undefined {
+function alias(pattern: string, settings: Settings): { role: string; level?: ConfiguredThinkingLevel } | undefined {
 	if (!pattern.startsWith("@") && !pattern.startsWith("pi/") && pattern !== "*" && !pattern.startsWith("*:")) return;
 	const { base, level } = splitRoleAliasThinkingSuffix(pattern);
-	const role = base === "*" ? "default" : base.slice(base.startsWith("@") ? 1 : 3);
-	if (!role || role.includes(":")) blocked(`Invalid model role selector ${JSON.stringify(pattern)}.`);
+	const role =
+		resolveExplicitModelRole(base, settings) ?? (base === "*" ? "default" : base.slice(base.startsWith("@") ? 1 : 3));
+	if (!role || (role.includes(":") && settings.getModelRole(role) === undefined))
+		blocked(`Invalid model role selector ${JSON.stringify(pattern)}.`);
 	if (role.toLowerCase() === "inherit")
 		blocked("@inherit is not a per-call model selector; use @default for the live parent.");
 	return { role, level };
@@ -160,10 +155,6 @@ function parse(
 	return resolved;
 }
 
-function qualityRole(settings: Settings): string | undefined {
-	return ["best", "slow", "review"].find(role => settings.getModelRole(role)?.trim());
-}
-
 function expandRole(
 	role: string,
 	settings: Settings,
@@ -172,14 +163,6 @@ function expandRole(
 	level?: ConfiguredThinkingLevel,
 	includeFallbacks = true,
 ): Array<{ pattern: string; thinkingLevel?: ConfiguredThinkingLevel }> {
-	if (role === "best" && !settings.getModelRole(role)?.trim()) {
-		const selected = qualityRole(settings);
-		for (const candidate of ["best", "slow", "review"]) {
-			dependencies.push({ role: candidate, value: settings.getModelRole(candidate)?.trim() ?? "" });
-			if (candidate === selected) break;
-		}
-		role = selected ?? role;
-	}
 	if (visiting.has(role)) blocked(`Configured model roles contain a cycle at @${role}.`);
 	const value = settings.getModelRole(role)?.trim();
 	if (!value) blocked(`Model role @${role} is not configured.`);
@@ -196,7 +179,7 @@ function expandRole(
 		...(includeFallbacks && cfgRetryModelFallback.get(settings) ? (fallbacks ?? []) : []),
 	];
 	return sources.flatMap(pattern => {
-		const nested = alias(pattern);
+		const nested = alias(pattern, settings);
 		const expanded = nested
 			? expandRole(nested.role, settings, dependencies, next, nested.level, includeFallbacks)
 			: [{ pattern }];
@@ -254,12 +237,19 @@ function liveParent(
 	return { model: resolved.model, thinkingLevel: resolved.thinkingLevel };
 }
 
-function authorityPatterns(authority: TaskModelAuthority, catalog: Model[]): string[] {
+function authorityPatterns(authority: TaskModelAuthority): string[] {
 	const { settings, agentName, agentModel } = authority;
+	const agentPatterns = normalizeModelPatternList(agentModel);
+	if (
+		agentPatterns.length === 1 &&
+		["default", "inherit"].includes(splitRoleAliasThinkingSuffix(agentPatterns[0]!).base.toLowerCase())
+	) {
+		agentPatterns.length = 0;
+	}
 	const sources = [
 		...Object.values(settings.getModelRoles()),
 		...Object.values(cfgRetryFallbackChains.get(settings)).flat(),
-		...normalizeModelPatternList(agentModel),
+		...agentPatterns,
 		...normalizeModelPatternList(
 			Object.hasOwn(cfgTaskAgentModelOverrides.get(settings), agentName)
 				? cfgTaskAgentModelOverrides.get(settings)[agentName]
@@ -270,17 +260,11 @@ function authorityPatterns(authority: TaskModelAuthority, catalog: Model[]): str
 	for (const source of sources) {
 		for (const pattern of normalizeModelPatternList(source)) {
 			try {
-				const named = alias(pattern);
+				const named = alias(pattern, settings);
 				const expanded = named
 					? expandRole(named.role, settings, [], new Set(), named.level, false).map(candidate => candidate.pattern)
 					: [pattern];
-				concrete.push(
-					...expanded.filter(
-						value =>
-							!/[*?[]/.test(value) ||
-							catalog.some(model => formatModelStringWithRouting(model) === value || model.id === value),
-					),
-				);
+				concrete.push(...expanded);
 			} catch {
 				// A broken, unrelated role is not a grant and cannot disable independent grants.
 			}
@@ -298,24 +282,46 @@ export function assertTaskModelAuthority(
 	const identity = formatModelStringWithRouting(model);
 	const parent = liveParent(authority, catalog);
 	if (parent && formatModelStringWithRouting(parent.model) === identity) return;
-	for (const pattern of authorityPatterns(authority, catalog)) {
-		const resolved = parse(pattern, catalog);
-		if (resolved.model && formatModelStringWithRouting(resolved.model) === identity) return;
-	}
+	const patterns = authorityPatterns(authority);
+	if (
+		patterns.length > 0 &&
+		filterAvailableModelsByEnabledPatterns(catalog, patterns, authority.settings).some(
+			granted => formatModelStringWithRouting(granted) === identity,
+		)
+	)
+		return;
 	blocked(
 		`${identity} is not authorized by actual configured roles/fallbacks, agent "${authority.agentName}" frontmatter/exact task override, or the live parent. Catalog/auth/enabled scope alone is not authority.`,
 	);
 }
 
-function assertDeferredAuthority(authority: TaskModelAuthority, pattern: string, catalog: Model[]): void {
+function assertDeferredAuthority(authority: TaskModelAuthority, pattern: string): void {
 	const base = splitThinkingSuffix(pattern, -1, MAX_THINKING_SUFFIX_OPTIONS).base;
 	if (
-		authorityPatterns(authority, catalog).some(
+		authorityPatterns(authority).some(
 			grant => grant === pattern || splitThinkingSuffix(grant, -1, MAX_THINKING_SUFFIX_OPTIONS).base === base,
 		)
 	)
 		return;
 	blocked(`Unresolved selector ${JSON.stringify(pattern)} has no current operator grant.`);
+}
+
+function fixedThinkingLevel(level: ConfiguredThinkingLevel | undefined): boolean {
+	return level !== undefined && level !== AUTO_THINKING;
+}
+
+function wirePolicy(model: Model): string {
+	return JSON.stringify({
+		requestModelId: model.requestModelId,
+		thinking: model.thinking,
+		reasoningMode: model.reasoningMode,
+		compat: model.compat,
+		compatConfig: model.compatConfig,
+		cursorModelRoutes: model.cursorModelRoutes,
+		cursorModelParameters: model.cursorModelParameters,
+		cursorMaxMode: model.cursorMaxMode,
+		cursorMaxModeRoutes: model.cursorMaxModeRoutes,
+	});
 }
 
 function occurrence(
@@ -324,7 +330,10 @@ function occurrence(
 	role?: string,
 	effortOverride?: ConfiguredThinkingLevel,
 ): RoleRouteOccurrence {
-	const resolved = parse(pattern, catalog);
+	const resolved =
+		role === undefined
+			? parse(pattern, catalog)
+			: parseModelPattern(pattern, catalog, undefined, { allowInvalidThinkingSelectorFallback: false });
 	if (!resolved.model) {
 		const recovered = parseModelPattern(pattern, catalog);
 		if (recovered.model && recovered.warning)
@@ -335,7 +344,7 @@ function occurrence(
 			role,
 			effortOverride,
 			thinkingLevel,
-			fixedEffort: thinkingLevel !== undefined && thinkingLevel !== AUTO_THINKING,
+			fixedEffort: fixedThinkingLevel(thinkingLevel),
 		};
 	}
 	return {
@@ -346,20 +355,14 @@ function occurrence(
 		role,
 		effortOverride,
 		thinkingLevel: effortOverride ?? (resolved.explicitThinkingLevel ? resolved.thinkingLevel : undefined),
-		fixedEffort:
-			effortOverride !== undefined
-				? effortOverride !== AUTO_THINKING
-				: resolved.explicitThinkingLevel && resolved.thinkingLevel !== AUTO_THINKING,
+		fixedEffort: fixedThinkingLevel(
+			effortOverride ?? (resolved.explicitThinkingLevel ? resolved.thinkingLevel : undefined),
+		),
 		identity: formatModelStringWithRouting(resolved.model),
 		api: resolved.model.api,
 		baseUrl: resolved.model.baseUrl,
 		transport: resolved.model.transport,
-		wirePolicy: JSON.stringify({
-			requestModelId: resolved.model.requestModelId,
-			thinking: resolved.model.thinking,
-			compat: resolved.model.compat,
-			cursorModelRoutes: resolved.model.cursorModelRoutes,
-		}),
+		wirePolicy: wirePolicy(resolved.model),
 	};
 }
 
@@ -379,7 +382,12 @@ function resolvedOccurrence(
 	assertCurrent(route);
 	const candidate = route.candidates[index];
 	const catalog = registry.getAll("all");
-	const resolved = candidate.identity === undefined ? parse(candidate.pattern, catalog) : undefined;
+	const resolved =
+		candidate.identity === undefined
+			? candidate.role === undefined
+				? parse(candidate.pattern, catalog)
+				: parseModelPattern(candidate.pattern, catalog, undefined, { allowInvalidThinkingSelectorFallback: false })
+			: undefined;
 	const model =
 		candidate.identity === undefined
 			? resolved?.model
@@ -398,16 +406,7 @@ function resolvedOccurrence(
 		candidate.transport !== model.transport
 	)
 		blocked("Model discovery changed an already-admitted identity or transport.");
-	if (
-		candidate.wirePolicy &&
-		candidate.wirePolicy !==
-			JSON.stringify({
-				requestModelId: model.requestModelId,
-				thinking: model.thinking,
-				compat: model.compat,
-				cursorModelRoutes: model.cursorModelRoutes,
-			})
-	)
+	if (candidate.wirePolicy && candidate.wirePolicy !== wirePolicy(model))
 		blocked("Model discovery changed an already-admitted wire model/effort policy.");
 	assertTaskModelAuthority(route.authority, registry, model);
 	supported(candidate, model);
@@ -440,12 +439,11 @@ export async function createTaskModelRoute(options: {
 	authority: TaskModelAuthority;
 	modelRegistry: ModelRegistry;
 	selectors: string[];
-	explicit: boolean;
-	/** Host-only implicit fallback to a configured role, never a model-facing alias. */
-	configuredRole?: string;
+	explicit: true;
 	requiresVision?: boolean;
 	signal?: AbortSignal;
 }): Promise<RoleRouteResult> {
+	if (options.explicit !== true) blocked("Implicit routing must not issue a model-selection permit.");
 	options.signal?.throwIfAborted();
 	const { authority, modelRegistry, selectors } = options;
 	const catalog = modelRegistry.getAll("all");
@@ -455,8 +453,8 @@ export async function createTaskModelRoute(options: {
 		const { base } = splitThinkingSuffix(selector, -1, MAX_THINKING_SUFFIX_OPTIONS);
 		if (["default", "inherit"].includes(base.toLowerCase()))
 			blocked("Bare default/inherit selectors are ambiguous; use @default for the live parent.");
-		const named = alias(selector);
-		if (named?.role === "default" && options.configuredRole === undefined) {
+		const named = alias(selector, authority.settings);
+		if (named?.role === "default") {
 			const parent = liveParent(authority, catalog);
 			if (!parent) blocked("@default requires an actual live parent model and effort, not modelRoles.default.");
 			const level = named.level ?? parent.thinkingLevel;
@@ -465,49 +463,33 @@ export async function createTaskModelRoute(options: {
 				role: "default",
 				parent: true,
 				thinkingLevel: level,
-				fixedEffort: level !== AUTO_THINKING,
+				effortOverride: named.level,
+				fixedEffort: fixedThinkingLevel(level),
 				identity: formatModelStringWithRouting(parent.model),
 				api: parent.model.api,
 				baseUrl: parent.model.baseUrl,
 				transport: parent.model.transport,
-				wirePolicy: JSON.stringify({
-					requestModelId: parent.model.requestModelId,
-					thinking: parent.model.thinking,
-					compat: parent.model.compat,
-					cursorModelRoutes: parent.model.cursorModelRoutes,
-				}),
+				wirePolicy: wirePolicy(parent.model),
 			});
 			continue;
 		}
-		const selectedRole = options.configuredRole ?? named?.role;
+		const selectedRole = named?.role;
 		const patterns: Array<{ pattern: string; thinkingLevel?: ConfiguredThinkingLevel }> = selectedRole
 			? expandRole(selectedRole, authority.settings, dependencies, new Set(), named?.level)
 			: [{ pattern: selector }];
 		for (const entry of patterns) {
 			const { pattern } = entry;
 			const provider = pattern.slice(0, pattern.indexOf("/"));
-			const candidate = occurrence(
-				pattern,
-				catalog,
-				selectedRole === "best" ? qualityRole(authority.settings) : selectedRole,
-				entry.thinkingLevel,
-			);
-			const resolved = parse(pattern, catalog);
+			const candidate = occurrence(pattern, catalog, selectedRole, entry.thinkingLevel);
+			const resolved =
+				selectedRole === undefined
+					? parse(pattern, catalog)
+					: parseModelPattern(pattern, catalog, undefined, { allowInvalidThinkingSelectorFallback: false });
 			if (resolved.model) {
-				try {
-					assertTaskModelAuthority(authority, modelRegistry, resolved.model);
-				} catch (error) {
-					if (!options.explicit && selectedRole === undefined) continue;
-					throw error;
-				}
+				assertTaskModelAuthority(authority, modelRegistry, resolved.model);
 				supported(candidate, resolved.model);
 			} else {
-				try {
-					assertDeferredAuthority(authority, pattern, catalog);
-				} catch (error) {
-					if (!options.explicit && selectedRole === undefined) continue;
-					throw error;
-				}
+				assertDeferredAuthority(authority, pattern);
 			}
 			if (
 				!named &&
@@ -678,16 +660,7 @@ export function assertRoleModel(
 	if (model.supportsTools === false || (route.metadata.requiresVision && !model.input.includes("image")))
 		blocked("Serving model lost required tool/image capability.");
 	const candidate = route.candidates[selected.occurrence];
-	if (
-		candidate.wirePolicy &&
-		candidate.wirePolicy !==
-			JSON.stringify({
-				requestModelId: model.requestModelId,
-				thinking: model.thinking,
-				compat: model.compat,
-				cursorModelRoutes: model.cursorModelRoutes,
-			})
-	)
+	if (candidate.wirePolicy && candidate.wirePolicy !== wirePolicy(model))
 		blocked("The final serving model changed the approved wire model/effort policy.");
 }
 
@@ -703,7 +676,7 @@ export function assertRoleDispatch(
 	const selected = routeFor(permit).selected!;
 	if (selected.fixedEffort && reasoning !== toReasoningEffort(concreteThinkingLevel(selected.thinkingLevel)))
 		blocked("The actual serving effort escaped the fixed requested occurrence.");
-	if (reasoning !== undefined && !getSupportedEfforts(model).includes(reasoning))
+	if (selected.fixedEffort && reasoning !== undefined && !getSupportedEfforts(model).includes(reasoning))
 		blocked("The actual serving effort is not supported by the selected model.");
 }
 
@@ -718,13 +691,17 @@ export function wrapRoleRouteStream(
 		if (!permit) return base(model, context, options);
 		const route = routeFor(permit);
 		const refreshAuthority = async (): Promise<void> => {
-			await route.authority.settings.reloadFromDisk();
-			if (route.authority.getAgentModel) route.authority.agentModel = await route.authority.getAgentModel();
+			try {
+				await route.authority.settings.reloadFromDisk();
+				if (route.authority.getAgentModel) route.authority.agentModel = await route.authority.getAgentModel();
+			} catch (cause) {
+				throw new ModelSelectionError("Could not refresh the original operator's model authority.", { cause });
+			}
 		};
 		await refreshAuthority();
-		const validate = (serving: Model = model): void => {
+		const validate = (): void => {
 			if (getPermit() !== permit) blocked("The dispatch permit changed during provider preparation.");
-			assertRoleDispatch(permit, serving, options?.reasoning, options?.signal, registry);
+			assertRoleDispatch(permit, model, options?.reasoning, options?.signal, registry);
 		};
 		if (options?.fallbacks?.length) blocked("Provider-side fallback options cannot override the approved selection.");
 		if (
@@ -746,65 +723,12 @@ export function wrapRoleRouteStream(
 		return base(model, context, {
 			...options,
 			preserveModelSelection: true,
+			preserveThinkingEffort: route.selected?.fixedEffort === true,
 			fallbacks: [],
-			onPayload: async (payload, serving) => {
-				if (
-					isRecord(payload) &&
-					((Array.isArray(payload.models) && payload.models.length > 0) ||
-						(Array.isArray(payload.fallbacks) && payload.fallbacks.length > 0))
-				)
-					blocked("Provider payload supplied model alternatives outside the selected approved occurrence.");
-				const fields = [
-					"model",
-					"models",
-					"fallbacks",
-					"provider",
-					"providerOptions",
-					"reasoning",
-					"reasoning_effort",
-					"thinking",
-					"enable_thinking",
-					"thinkingConfig",
-					"thinking_config",
-					"generationConfig",
-					"output_config",
-					"chat_template_kwargs",
-					"config",
-					"requestedModel",
-					"modelDetails",
-					"modelConfig",
-					"requestModelId",
-					"wireModelId",
-					"response",
-				];
-				const before = isRecord(payload) ? fields.map(key => JSON.stringify(payload[key])) : undefined;
-				const controlsBefore =
-					isRecord(payload) && Array.isArray(payload.input)
-						? JSON.stringify(payload.input.filter(item => isRecord(item) && item.type === "configuration_update"))
-						: undefined;
-				const transformed = options?.onPayload
-					? await options.onPayload(payload, serving ?? model, options?.signal)
-					: payload;
-				const effective = transformed === undefined ? payload : transformed;
-				if (before && !isRecord(effective)) blocked("Provider payload discarded the selected approved occurrence.");
-				const controlsAfter =
-					isRecord(effective) && Array.isArray(effective.input)
-						? JSON.stringify(
-								effective.input.filter(item => isRecord(item) && item.type === "configuration_update"),
-							)
-						: undefined;
-				if (controlsBefore !== controlsAfter)
-					blocked("Provider payload changed the approved in-band effort controls.");
-				if (
-					isRecord(effective) &&
-					((Array.isArray(effective.models) && effective.models.length > 0) ||
-						(Array.isArray(effective.fallbacks) && effective.fallbacks.length > 0) ||
-						(before && fields.some((key, index) => JSON.stringify(effective[key]) !== before[index])))
-				)
-					blocked("Provider payload changed the approved serving model/effort selection.");
+			onBeforeRequest: async () => {
+				await options?.onBeforeRequest?.();
 				await refreshAuthority();
-				validate(serving ?? model);
-				return transformed;
+				validate();
 			},
 		});
 	};
@@ -824,7 +748,7 @@ export function narrowRoleRoute(
 	const used = new Set<number>();
 	const requestedOccurrences: RoleRouteOccurrence[] = [];
 	for (const pattern of replacements) {
-		const named = alias(pattern);
+		const named = alias(pattern, route.authority.settings);
 		if (named?.role === "default") {
 			const parent = liveParent(route.authority, catalog);
 			if (!parent) blocked("A hook cannot manufacture live-parent authority.");
@@ -834,7 +758,7 @@ export function narrowRoleRoute(
 				role: "default",
 				identity: formatModelStringWithRouting(parent.model),
 				thinkingLevel: level,
-				fixedEffort: level !== AUTO_THINKING,
+				fixedEffort: fixedThinkingLevel(level),
 			});
 		} else if (named) {
 			for (const candidate of expandRole(named.role, route.authority.settings, [], new Set(), named.level)) {
@@ -907,7 +831,7 @@ export async function restoreTaskModelRoute(
 	for (const candidate of route.candidates) {
 		const resolved = parse(candidate.identity ?? candidate.pattern, modelRegistry.getAll("all"));
 		if (resolved.model) assertTaskModelAuthority(authority, modelRegistry, resolved.model);
-		else assertDeferredAuthority(authority, candidate.identity ?? candidate.pattern, modelRegistry.getAll("all"));
+		else assertDeferredAuthority(authority, candidate.identity ?? candidate.pattern);
 	}
 	routeByPermit.set(permit, route);
 	if (restored.selectedOccurrence !== undefined) {

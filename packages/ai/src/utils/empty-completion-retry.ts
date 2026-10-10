@@ -15,7 +15,7 @@
  */
 import { scheduler } from "node:timers/promises";
 import * as AIError from "../error";
-import type { AssistantMessage, AssistantMessageEvent, Context } from "../types";
+import type { AssistantMessage, AssistantMessageEvent, Context, StreamOptions } from "../types";
 import { AssistantMessageEventStream } from "./event-stream";
 
 export const MAX_EMPTY_COMPLETION_RETRIES = 2;
@@ -57,7 +57,10 @@ function isMeaningfulCompletionEvent(event: AssistantMessageEvent): boolean {
 	}
 }
 
-interface StreamRetryOptions {
+interface StreamRetryOptions extends Pick<
+	StreamOptions,
+	"preserveModelSelection" | "preserveThinkingEffort" | "onBeforeRequest"
+> {
 	signal?: AbortSignal;
 	providerRetryWait?: (delayMs: number, signal?: AbortSignal) => Promise<void>;
 	acceptEmptyResponse?: boolean;
@@ -76,8 +79,14 @@ export interface ReplaySafeStreamRetryPolicy {
 class FinalizedProviderStreamError extends Error {
 	readonly status?: number;
 
-	constructor(message: string, status: number | undefined) {
-		super(message);
+	constructor(message: string, status: number | undefined, errorId: number) {
+		super(
+			message,
+			AIError.is(errorId, AIError.Flag.HostAdmission)
+				? { cause: new AIError.ModelSelectionError(message) }
+				: undefined,
+		);
+		AIError.attach(this, errorId);
 		this.name = "FinalizedProviderStreamError";
 		this.status = status;
 	}
@@ -95,6 +104,14 @@ export function withReplaySafeStreamRetry<M, O extends StreamRetryOptions>(
 	attempt: (model: M, context: Context, options?: O) => AssistantMessageEventStream,
 	policy: ReplaySafeStreamRetryPolicy,
 ): AssistantMessageEventStream {
+	if (options?.preserveModelSelection || options?.preserveThinkingEffort) {
+		options = {
+			...options,
+			preserveModelSelection: options.preserveModelSelection,
+			preserveThinkingEffort: options.preserveThinkingEffort,
+			onBeforeRequest: options.onBeforeRequest,
+		};
+	}
 	const outer = new AssistantMessageEventStream();
 	const signal = options?.signal;
 	void (async () => {
@@ -155,7 +172,11 @@ export function withReplaySafeStreamRetry<M, O extends StreamRetryOptions>(
 				failedMessage.errorMessage !== undefined &&
 				providerErrorRetries < (policy.maxProviderErrorRetries ?? 0) &&
 				AIError.isProviderRetryableError(
-					new FinalizedProviderStreamError(failedMessage.errorMessage, failedMessage.errorStatus),
+					new FinalizedProviderStreamError(
+						failedMessage.errorMessage,
+						failedMessage.errorStatus,
+						AIError.classifyMessage(failedMessage),
+					),
 				);
 
 			let delayMs: number | undefined;

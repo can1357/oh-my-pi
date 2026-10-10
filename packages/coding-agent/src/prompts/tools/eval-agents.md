@@ -8,8 +8,9 @@ workpool(agent?=None, name?=None, context?=None{{#if evalTools}}, tools?=None{{/
 
 # Model routing
 - `model`: raw `provider/model[:level]`, configured `@role[:level]`, `@default[:level]`, or ordered non-empty array. `agent` = semantic instructions/tools; `model` = independent routing; effort is distinct.
-- Concrete models MUST be authorized by actual operator roles/fallbacks, selected-agent frontmatter/exact override, or actual live parent. Availability, auth, enabled/catalog membership, and recommendations NEVER grant permission.
-- Request → exact `task.agentModelOverrides[agentName]` → agent model → live parent, within approved routes. Actual custom configured chat roles support `@role:high`; no automatic-classifier roster allowlist.
+- Omitted `model` retains ordinary configured agent routing, coarse effort/AUTO, authentication fallback, retries, and prewalk. It is not an explicit pin; do not synthesize a selector just to copy that routing.
+- Supplied `model` overrides exact `task.agentModelOverrides[agentName]` and agent frontmatter, and bypasses automatic classification, not permissions. Concrete selections MUST be authorized by actual operator roles/fallbacks, selected-agent frontmatter/exact override, or actual live parent. Availability, auth, enabled/catalog membership, and recommendations NEVER grant explicit permission.
+- Actual custom configured chat roles support `@role:high`; no automatic-classifier roster allowlist.
 - `@default` = exact live parent + actual effort, not `modelRoles.default` or a parent-role fallback chain. `@default:high` changes effort only. NEVER use `@inherit`, bare `default`/`inherit` (also suffixed), unknown roles, empty selections, or invalid suffixes.
 - Role aliases retain identity and may use approved configured fallbacks; disclose that behavior. Arrays stay inside requested candidate closure; raw literals NEVER gain unrelated role/default/auth chains. Exact approved `provider/model:high` pins the model.
 - Requested fixed suffix outranks agent default/task coarse `effort`; unsupported effort fails, NEVER clamp or discard it. Unqualified routes permit runtime effort selection; configured `auto` remains `auto`.

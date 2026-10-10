@@ -5,10 +5,10 @@ import { MAIN_AGENT_RULE_NAME, SUB_AGENT_RULE_NAME } from "../capability/rule";
 import { validateAgentAccountPools } from "../config/account-pools";
 import type { ModelRegistry } from "../config/model-registry";
 import { resolveAgentAdvisorRolePattern } from "../config/model-resolver";
+import { formatModelRoleAlias } from "../config/model-roles";
 import { formatModelSelectorValue } from "@oh-my-pi/pi-tui/overlays/model-selector";
 import { formatModelStringWithRouting } from "../config/model-resolver";
 import {
-	createTaskModelRoute,
 	restoreTaskModelRoute,
 	resolveRoleRoute,
 	taskModelAuthoritySettings,
@@ -25,6 +25,7 @@ import { AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
 import { createAgentSession } from "../sdk";
 import type { AgentSession } from "../session/agent-session";
 import type { AuthStorage } from "../session/auth-storage";
+import { installRetryFallbackRole } from "../session/retry-fallback-chains";
 import { extractSessionInit, hasConversationalHistory, SessionManager } from "../session/session-manager";
 import type { EventBus } from "../utils/event-bus";
 import {
@@ -33,6 +34,7 @@ import {
 	createMCPProxyTools,
 	createSubagentSettings,
 	followMCPTools,
+	subagentRetryFallbackRole,
 } from "./executor";
 import { cfgTaskAgentAccountPools, cfgTaskDisabledAgents } from "./settings";
 import type { AgentDefinition } from "./types";
@@ -163,8 +165,16 @@ export function createPersistedSubagentReviverFactory(
 					: undefined),
 				...compactionThresholdSettings(init.compactionThreshold),
 			});
-			// A transcript remembers a selection; only current operator grants can
-			// authorize its revival. Never install a historical fallback chain.
+			// Only an explicit persisted selection is re-admitted as governed.
+			// Implicit workers keep their established session-scoped retry routing.
+			const explicitSelection = init.roleRouting?.explicit === true;
+			if (!explicitSelection && init.retryFallback) {
+				installRetryFallbackRole(subagentSettings, subagentRetryFallbackRole(ref.id), init.retryFallback);
+			}
+			const persistedModelPattern =
+				init.modelRole && init.modelRole !== "default"
+					? [formatModelRoleAlias(init.modelRole), ...(init.resolvedModel ? [init.resolvedModel] : [])]
+					: init.resolvedModel;
 			// Account pools are owner policy, like the extension roots below: take the
 			// live exact-name `task.agentAccountPools` entry, never a transcript copy.
 			const agentAccountPools = validateAgentAccountPools(cfgTaskAgentAccountPools.get(ctx.settings));
@@ -179,7 +189,7 @@ export function createPersistedSubagentReviverFactory(
 			const currentAgent = getAgent([...discovery.agents, ...ctx.session.getSessionAgents()], agentName);
 			if (
 				(init.agent && !currentAgent) ||
-				(init.roleRouting && !init.agent) ||
+				(explicitSelection && !init.agent) ||
 				cfgTaskDisabledAgents.get(ctx.settings).includes(agentName)
 			) {
 				await reopened.close();
@@ -220,23 +230,16 @@ export function createPersistedSubagentReviverFactory(
 						: undefined;
 				},
 			};
-			let roleRoute: RoleRoutePermit;
-			let selection: RoleRouteModelSelection;
-			try {
-				roleRoute = init.roleRouting
-					? (await restoreTaskModelRoute(authority, ctx.modelRegistry, init.roleRouting)).permit
-					: (
-							await createTaskModelRoute({
-								authority,
-								modelRegistry: ctx.modelRegistry,
-								selectors: init.resolvedModel ? [init.resolvedModel] : [],
-								explicit: true,
-							})
-						).permit;
-				selection = resolveRoleRoute(roleRoute, ctx.modelRegistry);
-			} catch (error) {
-				await reopened.close();
-				throw error;
+			let roleRoute: RoleRoutePermit | undefined;
+			let selection: RoleRouteModelSelection | undefined;
+			if (explicitSelection) {
+				try {
+					roleRoute = (await restoreTaskModelRoute(authority, ctx.modelRegistry, init.roleRouting!)).permit;
+					selection = resolveRoleRoute(roleRoute, ctx.modelRegistry);
+				} catch (error) {
+					await reopened.close();
+					throw error;
+				}
 			}
 			// Older session files persisted the synthetic xd:// write transport in the
 			// enabled set. A read-only agent definition could never grant full write,
@@ -263,9 +266,12 @@ export function createPersistedSubagentReviverFactory(
 					// frames ride the same bus the RPC/collab surfaces subscribed to.
 					subagentEventBus: ctx.subagentEventBus,
 					modelRegistry: ctx.modelRegistry,
-					model: selection.model,
-					thinkingLevel: selection.thinkingLevel,
+					model: selection?.model,
+					thinkingLevel: selection?.thinkingLevel,
 					roleRoute,
+					modelAuthoritySettings: authoritySettings,
+					modelPattern: explicitSelection ? undefined : persistedModelPattern,
+					modelPatternAuthFallback: explicitSelection ? undefined : init.resolvedModel,
 					settings: subagentSettings,
 					sessionManager: reopened,
 					agentId: ref.id,

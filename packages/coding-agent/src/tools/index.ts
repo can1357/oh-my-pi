@@ -410,8 +410,10 @@ export interface ToolSession {
 	advertisedSessionAgents?: () => readonly AgentDefinition[];
 	/** Get resolved model string if explicitly set for this session */
 	getModelString?: () => string | undefined;
-	/** Get the current session model string, regardless of how it was chosen */
+	/** Get the current provider/model display identity, regardless of how it was chosen. */
 	getActiveModelString?: () => string | undefined;
+	/** Exact live-parent selector for governed inheritance, including upstream routing and effective effort. */
+	getActiveModelSelector?: () => string | undefined;
 	/** Get the current session model object (provider/api capabilities), regardless of how it was chosen. */
 	getActiveModel?: () => Model | undefined;
 	/** Get the session's live per-family service tiers (undefined = none). Source of truth for subagent `tier.subagent: inherit`. */

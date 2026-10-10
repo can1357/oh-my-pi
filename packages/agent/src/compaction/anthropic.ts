@@ -259,9 +259,11 @@ export async function requestAnthropicNativeCompaction(
 	}
 	if (response.stopReason === "error") {
 		const message = `Anthropic compaction failed: ${response.errorMessage ?? "unknown error"}`;
-		throw response.errorStatus === undefined
-			? new Error(message)
-			: new AIError.ProviderHttpError(message, response.errorStatus);
+		const error =
+			response.errorStatus === undefined
+				? new Error(message)
+				: new AIError.ProviderHttpError(message, response.errorStatus);
+		throw response.errorId === undefined ? error : AIError.attach(error, response.errorId);
 	}
 	const payload = response.providerPayload;
 	if (

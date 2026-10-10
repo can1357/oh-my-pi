@@ -370,6 +370,7 @@ describe("OpenAI reasoning effort fallback retry", () => {
 			fetch: fetchMock,
 			reasoning: "xhigh",
 			preserveModelSelection: true,
+			preserveThinkingEffort: true,
 		}).result();
 		expect(result.stopReason).toBe("error");
 		expect(efforts).toEqual(["xhigh"]);
@@ -402,6 +403,7 @@ describe("OpenAI reasoning effort fallback retry", () => {
 			reasoning: "xhigh",
 			providerSessionState,
 			preserveModelSelection: true,
+			preserveThinkingEffort: true,
 		}).result();
 		expect(governed.stopReason).toBe("error");
 		expect(efforts).toEqual(["xhigh", "max", "xhigh"]);
@@ -422,6 +424,7 @@ describe("OpenAI reasoning effort fallback retry", () => {
 			fetch: fetchMock,
 			reasoning: "xhigh",
 			preserveModelSelection: true,
+			preserveThinkingEffort: true,
 		}).result();
 		expect(result.stopReason).toBe("error");
 		expect(efforts).toEqual(["xhigh"]);
@@ -442,7 +445,13 @@ describe("OpenAI reasoning effort fallback retry", () => {
 				messages: testContext.messages,
 				tools: [{ name: "read", description: "Read a file", parameters: { type: "object", properties: {} } }],
 			},
-			{ apiKey: "test-key", fetch: fetchMock, reasoning: "max", preserveModelSelection: true },
+			{
+				apiKey: "test-key",
+				fetch: fetchMock,
+				reasoning: "max",
+				preserveModelSelection: true,
+				preserveThinkingEffort: true,
+			},
 		).result();
 		expect(result.stopReason).toBe("error");
 		expect(result.errorMessage).toContain("effort suppression");

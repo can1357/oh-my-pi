@@ -16,7 +16,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import { Agent, type AgentTool } from "@oh-my-pi/pi-agent-core";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
+import { convertTools } from "@oh-my-pi/pi-ai/providers/google-shared";
 import { toolWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async/job-manager";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
@@ -28,7 +30,6 @@ import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
 import type { SingleResult, TaskParams } from "@oh-my-pi/pi-tui/tools/task";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { isRecord } from "@oh-my-pi/pi-utils";
-import { resolveRoleRoute } from "@oh-my-pi/pi-coding-agent/task/role-routing";
 import { createTaskModelFixture, type TaskModelFixture } from "../helpers/model-fixtures";
 
 import { cfgTaskEnableEffort } from "@oh-my-pi/pi-coding-agent/task/settings";
@@ -39,6 +40,19 @@ const taskAgent: AgentDefinition = {
 	systemPrompt: "You are a task agent.",
 	source: "bundled",
 };
+
+const ccaModel = buildModel({
+	id: "claude-sonnet-4-5",
+	name: "Cloud Code Assist schema fixture",
+	api: "google-gemini-cli",
+	provider: "google-antigravity",
+	baseUrl: "https://example.com",
+	reasoning: false,
+	input: ["text"],
+	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+	contextWindow: 200_000,
+	maxTokens: 8192,
+});
 
 const modelFixtures: TaskModelFixture[] = [];
 const managers: AsyncJobManager[] = [];
@@ -70,6 +84,7 @@ function createSession(
 		modelRegistry: fixture.modelRegistry,
 		getActiveModel: fixture.getActiveModel,
 		getActiveModelString: fixture.getActiveModelString,
+		getActiveModelSelector: fixture.getActiveModelSelector,
 		getSessionFile: () => null,
 		getSessionSpawns: () => options.spawns ?? "*",
 		getAgentId: () => options.agentId ?? null,
@@ -210,6 +225,42 @@ describe("task.batch schema gating", () => {
 		const batch = await TaskTool.create(createSession({ settings: { "task.batch": true } }));
 		expect(getSchemaProperties(batch).schema).toBeUndefined();
 	});
+
+	for (const isolationEnabled of [false, true]) {
+		for (const effortEnabled of [false, true]) {
+			it(`retains the task batch contract on CCA (isolation=${isolationEnabled}, effort=${effortEnabled})`, async () => {
+				mockDiscovery();
+				const session = createSession({
+					settings: { "task.batch": true, "task.isolation.enabled": isolationEnabled },
+				});
+				cfgTaskEnableEffort.override(session.settings, effortEnabled);
+				const tool = await TaskTool.create(session);
+				const declaration = convertTools([tool], ccaModel)?.[0]?.functionDeclarations[0];
+				const parameters = declaration?.parameters;
+				if (!isRecord(parameters) || !isRecord(parameters.properties)) {
+					throw new Error("Missing CCA batch parameters");
+				}
+				const tasks = parameters.properties.tasks;
+				if (!isRecord(tasks) || !isRecord(tasks.items) || !isRecord(tasks.items.properties)) {
+					throw new Error("Missing CCA task item schema");
+				}
+				const item = tasks.items.properties;
+				expect(parameters.required).toEqual(["context", "tasks"]);
+				expect(parameters.properties.context).toMatchObject({ type: "string" });
+				expect(parameters.properties.model).toBeUndefined();
+				expect(tasks.type).toBe("array");
+				expect(tasks.items.required).toEqual(expect.arrayContaining(["task", "solutionSpace"]));
+				expect(item.task).toMatchObject({ type: "string" });
+				expect(item.solutionSpace).toMatchObject({ type: "string" });
+				expect(item.agent).toMatchObject({ type: "string" });
+				expect(item.outputSchema).toBeDefined();
+				if (!isRecord(item.model) || typeof item.model.type !== "string") {
+					throw new Error("Missing CCA per-item model selector");
+				}
+				expect(["string", "array"]).toContain(item.model.type);
+			});
+		}
+	}
 });
 
 describe("task.batch validation", () => {
@@ -345,12 +396,17 @@ describe("task.batch spawning", () => {
 		AgentLifecycleManager.resetGlobalForTests();
 	});
 
-	it("spawns independent jobs and exposes each caller's schema result with shared context", async () => {
+	it("spawns independent jobs and exposes each caller's schema-validated result", async () => {
 		mockDiscovery({ ...taskAgent, output: { type: "object" } });
 		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
-			const data = { id: options.id, context: options.context };
-			return makeResult(options.id, { output: JSON.stringify(data) });
+			return makeResult(options.id, { output: '{"answer":"complete"}' });
 		});
+		const outputSchema = {
+			type: "object",
+			properties: { answer: { type: "string" } },
+			required: ["answer"],
+			additionalProperties: false,
+		};
 		const manager = createManager();
 		const tool = await TaskTool.create(
 			createSession({ manager, settings: { "async.enabled": true, "task.batch": true } }),
@@ -358,8 +414,8 @@ describe("task.batch spawning", () => {
 		const result = await tool.execute("tc-batch", {
 			context: "# Goal\nShared background.",
 			tasks: [
-				{ name: "Alpha", task: "Do A.", outputSchema: { type: "object" }, schemaMode: "strict" },
-				{ name: "Beta", task: "Do B.", outputSchema: { type: "object" }, schemaMode: "permissive" },
+				{ name: "Alpha", task: "Do A.", outputSchema, schemaMode: "strict" },
+				{ name: "Beta", task: "Do B.", outputSchema, schemaMode: "permissive" },
 			],
 		} as TaskParams);
 		expect(getFirstText(result)).toContain("Spawned 2 background agents");
@@ -376,64 +432,9 @@ describe("task.batch spawning", () => {
 				source: "caller",
 				mode,
 				status: "valid",
-				data: { id, context: "# Goal\nShared background." },
+				data: { answer: "complete" },
 			});
 		}
-	});
-
-	it("keeps semantic agent tools separate from per-item routing and reports schema provenance", async () => {
-		const scoutAgent: AgentDefinition = {
-			...taskAgent,
-			name: "scout",
-			tools: ["read"],
-			model: ["routing-test/primary:low"],
-			output: { type: "object" },
-		};
-		const reviewerAgent: AgentDefinition = {
-			...taskAgent,
-			name: "reviewer",
-			tools: ["read", "bash"],
-			model: ["routing-test/parent:medium"],
-			output: { type: "object" },
-		};
-		mockDiscovery([scoutAgent, reviewerAgent]);
-		const session = createSession({
-			settings: {
-				"async.enabled": false,
-				"task.batch": true,
-				modelRoles: { alternate: "routing-test/fallback" },
-			},
-		});
-		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
-			const selection = resolveRoleRoute(options.roleRoute!, session.modelRegistry);
-			return makeResult(options.id, {
-				agent: options.agent.name,
-				output: JSON.stringify({ selector: selection.selector, tools: options.agent.tools }),
-			});
-		});
-		const tool = await TaskTool.create(session);
-		const result = await tool.execute("tc-mixed-agents", {
-			context: "Shared routing context.",
-			tasks: [
-				{ name: "Scout", agent: "scout", task: "Investigate." },
-				{
-					name: "Review",
-					agent: "reviewer",
-					task: "Review.",
-					model: "@alternate:high",
-					outputSchema: { type: "object" },
-				},
-			],
-		} as TaskParams);
-		const byId = Object.fromEntries((result.details?.results ?? []).map(item => [item.id, item]));
-		expect(byId.Scout?.structuredOutput).toMatchObject({
-			source: "agent",
-			data: { selector: "routing-test/primary:low", tools: ["read"] },
-		});
-		expect(byId.Review?.structuredOutput).toMatchObject({
-			source: "caller",
-			data: { selector: "routing-test/fallback:high", tools: ["read", "bash"] },
-		});
 	});
 
 	it("accepts the flat single-spawn form at runtime under batch mode", async () => {
@@ -594,17 +595,95 @@ describe("task.batch spawning", () => {
 });
 
 describe("batch model placement", () => {
-	it("rejects a top-level model before dispatch even when wire validation is bypassed", async () => {
+	it("accepts a valid CCA task call but rejects batch-container model before dispatch", async () => {
 		mockDiscovery();
-		const run = vi.spyOn(executorModule, "runSubprocess").mockResolvedValue(makeResult("Unexpected"));
+		const run = vi
+			.spyOn(executorModule, "runSubprocess")
+			.mockResolvedValue(makeResult("Accepted", { output: '{"answer":"complete"}' }));
 		const tool = await TaskTool.create(createSession({ settings: { "task.batch": true, "async.enabled": false } }));
-		const result = await tool.execute("batch-model", {
-			context: "Shared context",
-			model: "p/requested",
-			tasks: [{ task: "Do work" }],
+		const declaration = convertTools([tool], ccaModel)?.[0]?.functionDeclarations[0];
+		const parameters = declaration?.parameters;
+		if (!isRecord(parameters) || !isRecord(parameters.properties)) throw new Error("Missing CCA parameters");
+		const tasks = parameters.properties.tasks;
+		if (!isRecord(tasks) || !isRecord(tasks.items) || !isRecord(tasks.items.properties)) {
+			throw new Error("Missing CCA task arguments");
+		}
+		const model = tasks.items.properties.model;
+		if (!isRecord(model) || typeof model.type !== "string") throw new Error("Missing CCA model selector");
+		expect(["string", "array"]).toContain(model.type);
+		const modelSelector = model.type === "array" ? ["@default:high"] : "@default:high";
+		const mock = createMockModel({
+			responses: [
+				{
+					content: [
+						{
+							type: "toolCall",
+							id: "cca-batch-model",
+							name: "task",
+							arguments: {
+								context: "Shared CCA context",
+								model: "routing-test/primary",
+								tasks: [{ name: "Rejected", task: "Do work", solutionSpace: "single task" }],
+							},
+						},
+					],
+				},
+				{
+					content: [
+						{
+							type: "toolCall",
+							id: "cca-valid-task",
+							name: "task",
+							arguments: {
+								context: "Shared CCA context",
+								tasks: [
+									{
+										name: "Accepted",
+										agent: "task",
+										task: "Do work",
+										solutionSpace: "single task",
+										model: modelSelector,
+										outputSchema: {
+											type: "object",
+											properties: { answer: { type: "string" } },
+											required: ["answer"],
+											additionalProperties: false,
+										},
+										schemaMode: "strict",
+									},
+								],
+							},
+						},
+					],
+				},
+				{ content: ["Task completed"], stopReason: "stop" },
+			],
 		});
-		expect(getFirstText(result)).toMatch(/model.*tasks|model.*item/i);
-		expect(result.isError).toBe(true);
-		expect(run).not.toHaveBeenCalled();
+		const agent = new Agent({
+			initialState: { model: ccaModel, systemPrompt: ["Test"], tools: [tool as unknown as AgentTool], messages: [] },
+			streamFn: mock.stream,
+		});
+
+		await agent.prompt("Run a task through Cloud Code Assist");
+
+		const results = agent.state.messages.filter(message => message.role === "toolResult");
+		expect(results.map(message => ({ toolCallId: message.toolCallId, isError: message.isError }))).toEqual([
+			{ toolCallId: "cca-batch-model", isError: true },
+			{ toolCallId: "cca-valid-task", isError: false },
+		]);
+		expect(run.mock.calls.map(([options]) => options.id)).toEqual(["Accepted"]);
+		expect(results[1]?.details).toMatchObject({
+			results: [
+				{
+					id: "Accepted",
+					structuredOutput: { source: "caller", mode: "strict", status: "valid", data: { answer: "complete" } },
+				},
+			],
+		});
+		expect(agent.state.messages.at(-1)).toMatchObject({
+			role: "assistant",
+			stopReason: "stop",
+			content: [{ type: "text", text: "Task completed" }],
+		});
 	});
 });

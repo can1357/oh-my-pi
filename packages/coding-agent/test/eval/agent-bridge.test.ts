@@ -92,6 +92,7 @@ function createBudgetSession(sessionManager: SessionManager): ToolSession {
 		modelRegistry: fixture.modelRegistry,
 		getActiveModel: fixture.getActiveModel,
 		getActiveModelString: fixture.getActiveModelString,
+		getActiveModelSelector: fixture.getActiveModelSelector,
 		getSessionSpawns: () => "*",
 		getSessionFile: () => null,
 		getTurnBudget: () => sessionManager.getTurnBudget(),

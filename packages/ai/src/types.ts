@@ -477,8 +477,12 @@ export type OpenAIResponseInclude =
 	| "message.output_text.logprobs";
 
 export interface StreamOptions {
-	/** @internal A governed caller forbids provider-side model or effort substitution. */
+	/** @internal A governed caller forbids provider-side model or route substitution. */
 	preserveModelSelection?: boolean;
+	/** @internal Preserve a fixed thinking effort independently of model selection. */
+	preserveThinkingEffort?: boolean;
+	/** @internal Re-admit against current host authority immediately before each inference attempt. */
+	onBeforeRequest?: () => void | Promise<void>;
 	temperature?: number;
 	topP?: number;
 	topK?: number;

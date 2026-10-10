@@ -228,7 +228,7 @@ review = agent("Review the change", agent="reviewer", model=["@review:high", "@d
 pool = workpool("scout", name="research", model=["@smol", "@default"])
 ```
 
-A concrete model must be authorized by the current operator's configured roles/fallbacks, the selected agent's frontmatter or exact model override, or the actual live parent. Availability, authentication, enabled/catalog membership, and project recommendations do not grant permission. Choosing a role changes neither the semantic agent nor its allowed tools. Actual custom configured roles are valid; there is no automatic-classifier roster allowlist.
+Omitting `model` retains ordinary configured agent routing, authentication fallback, retries, agent thinking/AUTO, and prewalk; it does not create an explicit pin. For a supplied selector, each concrete candidate must be authorized by current operator roles/fallbacks, selected-agent frontmatter or an exact model override, or the actual live parent. Availability, authentication, enabled/catalog membership, and recommendations do not grant explicit permission. Choosing a role changes neither the semantic agent nor its tools. Actual custom configured roles are valid; no automatic-classifier roster is an allowlist.
 
 Requested arrays remain inside their candidate closure. Role aliases retain identity and may use their currently configured approved fallback chains; raw literal entries do not gain an unrelated role/default/auth chain. Hooks may narrow, not enlarge, this closure; retries and revival revalidate it against current configuration. An invalid, unauthorized, unavailable, or exhausted explicit selection stops without dropping `model` or substituting a lower-precedence source.
 

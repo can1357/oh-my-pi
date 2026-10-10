@@ -28,6 +28,12 @@ import type {
 import { normalizeSystemPrompts } from "../utils";
 import { clearStreamingPartialJson, kStreamingLastParseLen, kStreamingPartialJson } from "../utils/block-symbols";
 import { AssistantMessageEventStream } from "../utils/event-stream";
+import {
+	createRequestSelectionGuard,
+	invokeBeforeRequest,
+	serializeRequestBody,
+	shouldAwaitPayloadHookResult,
+} from "../utils/request-selection";
 import { decodeFoundationModelsArguments, toFoundationModelsSchema, toolWireSchema } from "../utils/schema";
 import { transformMessages } from "./transform-messages";
 import { joinTextWithImagePlaceholder, partitionVisionContent } from "./vision-guard";
@@ -207,10 +213,15 @@ function buildRequest(
 }
 
 /** Runs one bridge generation, yielding its events until the terminal one. */
-async function* generate(request: GenerateRequest, signal: AbortSignal | undefined): AsyncGenerator<BridgeEvent> {
+async function* generate(
+	serialized: string,
+	signal: AbortSignal | undefined,
+	onBeforeRequest: StreamOptions["onBeforeRequest"],
+): AsyncGenerator<BridgeEvent> {
 	const queue: BridgeEvent[] = [];
 	let wake: (() => void) | undefined;
-	const handle = appleFmGenerate(JSON.stringify(request), (error, event) => {
+	await invokeBeforeRequest(onBeforeRequest);
+	const handle = appleFmGenerate(serialized, (error, event) => {
 		queue.push(
 			error ? { type: "error", code: "runtime", message: error.message } : (JSON.parse(event) as BridgeEvent),
 		);
@@ -245,8 +256,9 @@ async function* generate(request: GenerateRequest, signal: AbortSignal | undefin
 export const streamAppleFoundationModels: StreamFunction<"apple-foundation-models"> = (
 	model,
 	context,
-	options = {},
+	options: AppleFoundationModelsOptions = {},
 ) => {
+	if (options.preserveModelSelection || options.preserveThinkingEffort) options = { ...options };
 	const stream = new AssistantMessageEventStream();
 	const output: AssistantMessage = {
 		role: "assistant",
@@ -291,10 +303,35 @@ export const streamAppleFoundationModels: StreamFunction<"apple-foundation-model
 			thinkingIndex = undefined;
 		};
 		try {
+			if (
+				options.preserveModelSelection &&
+				(model.provider !== "apple" ||
+					model.id !== "on-device" ||
+					(model.requestModelId !== undefined && model.requestModelId !== "on-device"))
+			) {
+				throw new AIError.ModelSelectionError("The native Apple bridge only serves the on-device system model.");
+			}
+			if (options.preserveThinkingEffort && model.reasoning && options.reasoning === undefined) {
+				throw new AIError.ModelSelectionError(
+					"The native Apple bridge cannot explicitly disable reasoning on this model.",
+				);
+			}
 			const { request, encodedPaths } = buildRequest(model, context, options);
-			await options.onPayload?.(request, model);
+			const preserveThinkingEffort = options.preserveThinkingEffort;
+			const guard = createRequestSelectionGuard(options, request, value =>
+				preserveThinkingEffort ? { reasoningLevel: value.reasoningLevel } : {},
+			);
+			const governed = options.preserveModelSelection === true || preserveThinkingEffort === true;
+			const hookResult = options.onPayload?.(request, model);
+			const replacement = shouldAwaitPayloadHookResult(hookResult, governed) ? await hookResult : hookResult;
+			if (governed && replacement !== undefined) {
+				throw new AIError.ModelSelectionError(
+					"The native Apple bridge does not support replacing a governed payload.",
+				);
+			}
+			const serialized = serializeRequestBody(request, options, guard);
 			stream.push({ type: "start", partial: output });
-			for await (const event of generate(request, options.signal)) {
+			for await (const event of generate(serialized, options.signal, options.onBeforeRequest)) {
 				switch (event.type) {
 					case "text": {
 						endThinking();

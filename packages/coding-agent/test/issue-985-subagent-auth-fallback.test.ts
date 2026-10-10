@@ -1,21 +1,96 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test, vi } from "bun:test";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
-import { kNoAuth, ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
+import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
+import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
+import * as sdkModule from "@oh-my-pi/pi-coding-agent/sdk";
+import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
-import { createTaskModelRoute, resolveRoleRoute } from "@oh-my-pi/pi-coding-agent/task/role-routing";
+import { type ExecutorOptions, runSubprocess } from "@oh-my-pi/pi-coding-agent/task/executor";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import * as path from "node:path";
+
+interface AuthFixture {
+	registry: ModelRegistry;
+	cwd: string;
+	requests: Array<{ selector: string; reasoning_effort?: string }>;
+}
 
 const parentSelector = "issue985-parent/parent";
 const taskSelector = "issue985-task/task";
 const alternateSelector = "issue985-parent/alternate";
-const resources: Array<{ dir: TempDir; authStorage: AuthStorage }> = [];
+const createAgentSession = sdkModule.createAgentSession;
+const sessions: AgentSession[] = [];
+const resources: Array<{ dir: TempDir; authStorage: AuthStorage; stop: () => void }> = [];
 
-async function createRegistry(taskAuth: "apiKey" | "none" | "oauth" = "oauth") {
+beforeEach(() => {
+	AgentRegistry.resetGlobalForTests();
+	AgentLifecycleManager.resetGlobalForTests();
+	// Keep the real SDK's model resolution, auth and provider transport.
+	vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
+		if (!options) throw new Error("Expected worker options");
+		const result = await createAgentSession({
+			...options,
+			agentDir: options.cwd,
+			disableExtensionDiscovery: true,
+			extensions: [],
+			skills: [],
+			rules: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableMCP: false,
+			enableLsp: false,
+			skipPythonPreflight: true,
+			preloadedCustomToolPaths: [],
+			toolNames: ["yield"],
+		});
+		sessions.push(result.session);
+		return result;
+	});
+});
+
+async function createRegistry(taskAuth: "apiKey" | "none" | "oauth" = "oauth"): Promise<AuthFixture> {
+	const requests: Array<{ selector: string; reasoning_effort?: string }> = [];
+	const server = Bun.serve({
+		hostname: "127.0.0.1",
+		port: 0,
+		fetch: async request => {
+			const body = (await request.json()) as { model: string; reasoning_effort?: string };
+			const provider = new URL(request.url).pathname.startsWith("/parent/") ? "issue985-parent" : "issue985-task";
+			requests.push({ selector: `${provider}/${body.model}`, reasoning_effort: body.reasoning_effort });
+			return new Response(
+				`data: ${JSON.stringify({
+					id: "auth-fixture",
+					object: "chat.completion.chunk",
+					created: 0,
+					choices: [
+						{
+							index: 0,
+							delta: {
+								role: "assistant",
+								tool_calls: [
+									{
+										index: 0,
+										id: "auth-yield",
+										type: "function",
+										function: { name: "yield", arguments: '{"data":{"completed":true}}' },
+									},
+								],
+							},
+						},
+					],
+				})}\n\n` +
+					'data: {"id":"auth-fixture","object":"chat.completion.chunk","created":0,"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}\n\n' +
+					"data: [DONE]\n\n",
+				{ headers: { "content-type": "text/event-stream" } },
+			);
+		},
+	});
 	const dir = TempDir.createSync("omp-subagent-route-auth-");
 	const authStorage = await AuthStorage.create(":memory:");
-	resources.push({ dir, authStorage });
+	resources.push({ dir, authStorage, stop: () => server.stop(true) });
 	const modelsPath = path.join(dir.path(), "models.yml");
 	await Bun.write(
 		modelsPath,
@@ -23,157 +98,179 @@ async function createRegistry(taskAuth: "apiKey" | "none" | "oauth" = "oauth") {
 			providers: {
 				"issue985-parent": {
 					api: "openai-completions",
-					baseUrl: "https://parent.example.test/v1",
+					baseUrl: new URL("parent/v1", server.url).toString(),
 					apiKey: "parent-test-key",
 					models: [
-						{ id: "parent", reasoning: false },
+						{ id: "parent", reasoning: false, supportsTools: true },
 						{
 							id: "alternate",
 							reasoning: true,
+							supportsTools: true,
 							thinking: { mode: "effort", efforts: [Effort.Low, Effort.High] },
+							compat: { supportsReasoningEffort: true, thinkingFormat: "openai" },
 						},
 					],
 				},
 				"issue985-task": {
 					api: "openai-completions",
-					baseUrl: "https://task.example.test/v1",
+					baseUrl: new URL("task/v1", server.url).toString(),
 					auth: taskAuth,
 					...(taskAuth === "apiKey" ? { apiKey: "task-test-key" } : {}),
-					models: [{ id: "task", reasoning: false }],
+					models: [{ id: "task", reasoning: false, supportsTools: true }],
 				},
 			},
 		}),
 	);
-	return new ModelRegistry(authStorage, modelsPath);
+	return { registry: new ModelRegistry(authStorage, modelsPath), cwd: dir.path(), requests };
 }
 
-function authority(
-	registry: ModelRegistry,
-	settings = Settings.isolated(),
-	agentModel: string | string[] = taskSelector,
-) {
+function workerOptions(
+	fixture: AuthFixture,
+	settings = Settings.isolated({ "compaction.enabled": false, "todo.enabled": false }),
+	agentModel: string[] = [taskSelector],
+): ExecutorOptions {
 	return {
+		cwd: fixture.cwd,
+		agent: {
+			name: "task",
+			description: "test",
+			systemPrompt: "test",
+			source: "bundled",
+			model: agentModel,
+			tools: ["yield"],
+		},
+		task: "work",
+		index: 0,
+		id: "auth-worker",
 		settings,
-		agentName: "task",
-		agentModel,
-		getParentModel: () => registry.find("issue985-parent", "parent"),
-		getParentSelector: () => parentSelector,
+		modelRegistry: fixture.registry,
+		parentActiveModelPattern: parentSelector,
+		modelAuthority: {
+			settings,
+			agentName: "task",
+			agentModel,
+			getParentModel: () => fixture.registry.find("issue985-parent", "parent"),
+			getParentSelector: () => parentSelector,
+		},
+		enableLsp: false,
+		enableIrc: false,
+		restrictToolNames: true,
 	};
 }
 
 afterEach(async () => {
-	for (const { dir, authStorage } of resources.splice(0)) {
+	await AgentLifecycleManager.global().dispose();
+	await Promise.all(sessions.splice(0).map(session => session.dispose()));
+	vi.restoreAllMocks();
+	AgentLifecycleManager.resetGlobalForTests();
+	AgentRegistry.resetGlobalForTests();
+	for (const { dir, authStorage, stop } of resources.splice(0)) {
+		stop();
 		authStorage.close();
 		await dir.remove();
 	}
 });
 
-describe("issue #985: governed subagent authentication", () => {
-	test("denies an unauthenticated pin without substituting the authenticated live parent", async () => {
-		const registry = await createRegistry();
-		const settings = Settings.isolated({
-			modelRoles: { default: parentSelector },
-			"retry.fallbackChains": { default: [alternateSelector] },
-		});
-		expect(registry.hasConfiguredAuth(registry.find("issue985-parent", "parent")!)).toBe(true);
-		await expect(
-			createTaskModelRoute({
-				authority: authority(registry, settings),
-				modelRegistry: registry,
-				selectors: [taskSelector],
-				explicit: true,
-			}),
-		).rejects.toThrow(/Host role preflight unavailable/);
+describe("issue #985: implicit auth fallback and explicit admission", () => {
+	test("serves an omitted unauthenticated agent model on the authenticated live parent", async () => {
+		const fixture = await createRegistry();
+		const result = await runSubprocess(workerOptions(fixture));
+		expect(result.exitCode, result.stderr).toBe(0);
+		expect(fixture.requests.map(request => request.selector)).toEqual([parentSelector]);
+		expect(result.resolvedModelIdentity).toBe(parentSelector);
 	});
 
-	test("keeps an authenticated authorized pin on the requested provider", async () => {
-		const registry = await createRegistry("apiKey");
-		const route = await createTaskModelRoute({
-			authority: authority(registry),
-			modelRegistry: registry,
-			selectors: [taskSelector],
-			explicit: true,
+	for (const selector of [taskSelector, "issue985-task/missing", alternateSelector]) {
+		test(`rejects explicit ${selector} without substituting the authenticated parent`, async () => {
+			const fixture = await createRegistry();
+			const settings = Settings.isolated({
+				modelRoles: { default: parentSelector },
+				"retry.fallbackChains": { default: [selector === alternateSelector ? parentSelector : alternateSelector] },
+			});
+			const result = await runSubprocess({
+				...workerOptions(fixture, settings),
+				modelOverride: selector,
+				explicitModelSelection: true,
+			});
+			expect(result.exitCode, result.stderr).toBe(1);
+			expect(fixture.requests).toEqual([]);
 		});
-		expect(resolveRoleRoute(route.permit).selector).toBe(taskSelector);
+	}
+
+	for (const auth of ["apiKey", "none"] as const) {
+		for (const explicit of [false, true]) {
+			test(`serves ${auth} task auth without parent substitution (${explicit ? "explicit" : "omitted"})`, async () => {
+				const fixture = await createRegistry(auth);
+				const result = await runSubprocess({
+					...workerOptions(fixture),
+					...(explicit ? { modelOverride: taskSelector, explicitModelSelection: true } : {}),
+				});
+				expect(result.exitCode, result.stderr).toBe(0);
+				expect(fixture.requests.map(request => request.selector)).toEqual([taskSelector]);
+				expect(result.resolvedModelIdentity).toBe(taskSelector);
+			});
+		}
+	}
+
+	test("serves a later authorized explicit candidate at its exact supported effort", async () => {
+		const fixture = await createRegistry();
+		const result = await runSubprocess({
+			...workerOptions(fixture, undefined, [taskSelector, alternateSelector]),
+			modelOverride: [taskSelector, `${alternateSelector}:high`],
+			explicitModelSelection: true,
+		});
+		expect(result.exitCode, result.stderr).toBe(0);
+		expect(fixture.requests).toEqual([{ selector: alternateSelector, reasoning_effort: "high" }]);
+		expect(result.resolvedThinkingLevel).toBe(Effort.High);
 	});
 
-	test("admits a keyless authorized provider without sending it to the remote parent (#1008)", async () => {
-		const registry = await createRegistry("none");
-		const requested = registry.find("issue985-task", "task")!;
-		expect(await registry.getApiKey(requested)).toBe(kNoAuth);
-		const route = await createTaskModelRoute({
-			authority: authority(registry),
-			modelRegistry: registry,
-			selectors: [taskSelector],
-			explicit: true,
-		});
-		expect(resolveRoleRoute(route.permit).selector).toBe(taskSelector);
-	});
-
-	test("uses a later authorized candidate with its exact supported effort", async () => {
-		const registry = await createRegistry();
-		const route = await createTaskModelRoute({
-			authority: authority(registry, Settings.isolated(), [taskSelector, alternateSelector]),
-			modelRegistry: registry,
-			selectors: [taskSelector, `${alternateSelector}:high`],
-			explicit: true,
-		});
-		expect(resolveRoleRoute(route.permit)).toMatchObject({
-			selector: `${alternateSelector}:high`,
-			thinkingLevel: "high",
-			fixedEffort: true,
-			occurrence: 1,
-		});
-	});
-
-	test("walks only the actual configured role chain when the primary has no auth", async () => {
-		const registry = await createRegistry();
+	test("uses only the explicit role's auth fallback rather than the default chain", async () => {
+		const fixture = await createRegistry();
 		const settings = Settings.isolated({
 			modelRoles: { qa: taskSelector, default: parentSelector },
 			"retry.fallbackChains": { qa: [alternateSelector], default: [parentSelector] },
 		});
-		const route = await createTaskModelRoute({
-			authority: authority(registry, settings),
-			modelRegistry: registry,
-			selectors: ["@qa"],
-			explicit: true,
+		const result = await runSubprocess({
+			...workerOptions(fixture, settings),
+			modelOverride: "@qa",
+			explicitModelSelection: true,
 		});
-		expect(resolveRoleRoute(route.permit).selector).toBe(alternateSelector);
+		expect(result.exitCode, result.stderr).toBe(0);
+		expect(fixture.requests.map(request => request.selector)).toEqual([alternateSelector]);
 	});
 
-	test("walks a configured role past a disabled provider but rejects an explicit disabled pin (#11709)", async () => {
-		const registry = await createRegistry("apiKey");
+	test("omitted role routing skips a disabled provider while an explicit disabled pin fails (#11709)", async () => {
+		const fixture = await createRegistry("apiKey");
 		const settings = Settings.isolated({
 			disabledProviders: ["issue985-task"],
-			modelRoles: { qa: taskSelector },
+			// Startup skips disabled candidates in the configured selection, not the runtime retry chain.
+			modelRoles: { qa: `${taskSelector},${alternateSelector}` },
 			"retry.fallbackChains": { qa: [alternateSelector] },
 		});
-		const route = await createTaskModelRoute({
-			authority: authority(registry, settings, [taskSelector, alternateSelector]),
-			modelRegistry: registry,
-			selectors: ["@qa"],
-			explicit: true,
+		const options = workerOptions(fixture, settings, ["@qa"]);
+		const implicit = await runSubprocess({ ...options, id: "disabled-implicit" });
+		expect(implicit.exitCode, implicit.stderr).toBe(0);
+		expect(fixture.requests.map(request => request.selector)).toEqual([alternateSelector]);
+		const explicit = await runSubprocess({
+			...options,
+			id: "disabled-explicit",
+			modelOverride: taskSelector,
+			explicitModelSelection: true,
 		});
-		expect(resolveRoleRoute(route.permit).selector).toBe(alternateSelector);
-		await expect(
-			createTaskModelRoute({
-				authority: authority(registry, settings),
-				modelRegistry: registry,
-				selectors: [taskSelector],
-				explicit: true,
-			}),
-		).rejects.toThrow(/Requested provider issue985-task is disabled/);
+		expect(explicit.exitCode, explicit.stderr).toBe(1);
+		expect(fixture.requests.map(request => request.selector)).toEqual([alternateSelector]);
 	});
 
-	test("rejects an invalid suffix instead of replacing the effort or using the parent", async () => {
-		const registry = await createRegistry("apiKey");
-		await expect(
-			createTaskModelRoute({
-				authority: authority(registry),
-				modelRegistry: registry,
-				selectors: [`${taskSelector}:invalid`],
-				explicit: true,
-			}),
-		).rejects.toThrow(/Invalid thinking suffix/);
-	});
+	for (const selector of [`${taskSelector}:invalid`, "default:high"]) {
+		test(`rejects explicit ${selector} instead of weakening or inheriting the parent`, async () => {
+			const fixture = await createRegistry("apiKey");
+			const result = await runSubprocess({
+				...workerOptions(fixture),
+				modelOverride: selector,
+				explicitModelSelection: true,
+			});
+			expect(result.exitCode, result.stderr).toBe(1);
+			expect(fixture.requests).toEqual([]);
+		});
+	}
 });

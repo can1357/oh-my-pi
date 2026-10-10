@@ -2034,8 +2034,10 @@ export class Agent {
 		} catch (err) {
 			if (this.#abortController !== loopAbortController) return;
 			let stoppedForAbort = loopSignal.aborted;
-			const configurationError =
-				!stoppedForAbort && err instanceof AIError.ConfigurationError
+			const finalizedError =
+				!stoppedForAbort &&
+				(err instanceof AIError.ConfigurationError ||
+					AIError.is(AIError.classify(err, model.api), AIError.Flag.HostAdmission))
 					? await AIError.finalize(err, {
 							api: model.api,
 							provider: model.provider,
@@ -2043,13 +2045,13 @@ export class Agent {
 							signal: loopSignal,
 						})
 					: undefined;
-			if (configurationError) {
+			if (finalizedError) {
 				if (this.#abortController !== loopAbortController) return;
 				stoppedForAbort = loopSignal.aborted;
 			}
 			const errorMessage = stoppedForAbort
 				? abortReasonText(loopSignal)
-				: (configurationError?.message ?? (err instanceof Error ? err.message : String(err)));
+				: (finalizedError?.message ?? (err instanceof Error ? err.message : String(err)));
 			const shouldEmitVisibleError = !stoppedForAbort;
 			const assistantPartial = partial?.role === "assistant" ? partial : undefined;
 			const hadAssistantStart = assistantPartial !== undefined;
@@ -2096,9 +2098,9 @@ export class Agent {
 							errorMessage,
 							timestamp: Date.now(),
 						};
-			if (configurationError && !stoppedForAbort) {
-				errorMsg.errorId = configurationError.id;
-				errorMsg.errorStatus = configurationError.status;
+			if (finalizedError && !stoppedForAbort) {
+				errorMsg.errorId = finalizedError.id;
+				errorMsg.errorStatus = finalizedError.status;
 			}
 
 			if (shouldEmitVisibleError) {

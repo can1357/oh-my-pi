@@ -3,6 +3,7 @@ import * as fsSync from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { scheduler } from "node:timers/promises";
+import { types as utilTypes } from "node:util";
 import { isOfficialAnthropicApiUrl } from "@oh-my-pi/pi-catalog/compat/anthropic";
 import type { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { isVertexExpressOpenAIUrl, isVertexRawPredictUrl, resolveVertexEndpointHost } from "@oh-my-pi/pi-catalog/hosts";
@@ -10,6 +11,7 @@ import {
 	defaultSupportedEffort,
 	mapEffortToAnthropicAdaptiveEffort,
 	mapEffortToGoogleThinkingLevel,
+	getSupportedEfforts,
 	requireSupportedEffort,
 	resolveWireModelId,
 } from "@oh-my-pi/pi-catalog/model-thinking";
@@ -54,7 +56,7 @@ import {
 	streamOpenAICompletions,
 	streamOpenAIResponses,
 } from "./providers/register-builtins";
-import { getProviderDefinition } from "./registry";
+import { getBuiltinProviderTransport, getProviderDefinition } from "./registry";
 import type {
 	Api,
 	AssistantMessage,
@@ -74,6 +76,12 @@ import { isFoundryEnabled } from "./utils/foundry";
 import { applyGlyphCodec } from "./utils/glyph-codec";
 import { wrapLeakedThinkingStream } from "./utils/leaked-thinking-stream";
 import { withThinkingLoopGuard } from "./utils/thinking-loop";
+import {
+	assertSafeGovernedJson,
+	createRequestSelectionGuard,
+	invokeBeforeRequest,
+	serializeRequestBody,
+} from "./utils/request-selection";
 import { withTransportFetch } from "./utils/transport-fetch";
 
 function isGoogleVertexAuthenticatedModel(model: Model<Api>): boolean {
@@ -783,17 +791,34 @@ function withProviderInFlightLimit<TOptions extends Pick<StreamOptions, "signal"
 	return outer;
 }
 
-function createVertexAuthenticatedFetch(options: StreamOptions | undefined): FetchImpl {
+function createVertexAuthenticatedFetch(model: Model<Api>, options: StreamOptions | undefined): FetchImpl {
 	const baseFetch = options?.fetch ?? fetch;
+	const preserveModelSelection = options?.preserveModelSelection === true;
+	const preserveThinkingEffort = options?.preserveThinkingEffort === true;
+	const onBeforeRequest = options?.onBeforeRequest;
+	const endpoint = preserveModelSelection ? new URL(resolveVertexRequest(model.baseUrl).toString()) : undefined;
 	const vertexFetch = async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
 		const token = await getVertexAccessToken({ signal: options?.signal, fetch: baseFetch });
 		const headers = new Headers(init?.headers);
 		headers.set("Authorization", `Bearer ${token}`);
 		const rewritten = resolveVertexRequest(input);
 		const url = rewritten instanceof Request ? rewritten.url : rewritten.toString();
+		if (endpoint) {
+			const actual = new URL(url);
+			const basePath = endpoint.pathname.endsWith("/") ? endpoint.pathname.slice(0, -1) : endpoint.pathname;
+			if (
+				actual.origin !== endpoint.origin ||
+				(actual.pathname !== basePath &&
+					actual.pathname !== `${basePath}/chat/completions` &&
+					actual.pathname !== `${basePath}/responses`)
+			) {
+				throw new AIError.ModelSelectionError("Vertex authentication changed the approved URL model or endpoint.");
+			}
+		}
 		if (isVertexRawPredictUrl(url)) {
 			const bodyText = await readVertexRequestBody(rewritten, init);
-			const transformed = transformVertexAnthropicBody(bodyText);
+			const transformed = transformVertexAnthropicBody(bodyText, { preserveModelSelection, preserveThinkingEffort });
+			if (onBeforeRequest) await invokeBeforeRequest(onBeforeRequest);
 			return baseFetch(url, {
 				...init,
 				method: init?.method ?? (rewritten instanceof Request ? rewritten.method : "POST"),
@@ -801,6 +826,7 @@ function createVertexAuthenticatedFetch(options: StreamOptions | undefined): Fet
 				body: transformed,
 			});
 		}
+		if (onBeforeRequest) await invokeBeforeRequest(onBeforeRequest);
 		return baseFetch(rewritten, { ...init, headers });
 	};
 	return Object.assign(vertexFetch, baseFetch.preconnect ? { preconnect: baseFetch.preconnect } : {});
@@ -818,14 +844,38 @@ async function readVertexRequestBody(input: string | URL | Request, init: Reques
 // Vertex Claude rejects the standard Anthropic body shape: the `model` field
 // is encoded in the URL path and `anthropic_version: "vertex-2023-10-16"` is
 // required in the JSON body instead of the `anthropic-version` HTTP header.
-function transformVertexAnthropicBody(bodyText: string): string {
+function transformVertexAnthropicBody(
+	bodyText: string,
+	options?: Pick<StreamOptions, "preserveModelSelection" | "preserveThinkingEffort">,
+): string {
 	if (!bodyText) return bodyText;
 	try {
 		const payload = JSON.parse(bodyText) as Record<string, unknown>;
+		const preserveThinkingEffort = options?.preserveThinkingEffort;
+		const guard = createRequestSelectionGuard(options, payload, value =>
+			preserveThinkingEffort
+				? {
+						thinking: value.thinking,
+						output_config: value.output_config,
+						messageEfforts: Array.isArray(value.messages)
+							? value.messages
+									.filter(
+										(message): message is Record<string, unknown> =>
+											message !== null && typeof message === "object" && "output_config" in message,
+									)
+									.map(message => message.output_config)
+							: undefined,
+					}
+				: {},
+		);
 		delete payload.model;
 		payload.anthropic_version = "vertex-2023-10-16";
-		return JSON.stringify(payload);
-	} catch {
+		return serializeRequestBody(payload, options, guard);
+	} catch (cause) {
+		if (options?.preserveModelSelection || options?.preserveThinkingEffort) {
+			if (AIError.is(AIError.classify(cause), AIError.Flag.HostAdmission)) throw cause;
+			throw new AIError.ModelSelectionError("The governed Vertex request has an invalid JSON envelope.", { cause });
+		}
 		return bodyText;
 	}
 }
@@ -851,7 +901,9 @@ function resolveVertexRequest(input: string | URL | Request): string | URL | Req
 					.replaceAll("{location}", encodeURIComponent(location))
 					.replaceAll("%7Blocation%7D", encodeURIComponent(location))
 			: url;
-		return rewritten.replace(":streamRawPredict/v1/messages", ":streamRawPredict");
+		return rewritten
+			.replace(":streamRawPredict/v1/messages", ":streamRawPredict")
+			.replace(":rawPredict/v1/messages", ":rawPredict");
 	};
 
 	if (input instanceof Request) {
@@ -869,15 +921,23 @@ function withResolvedModelHeaders<TApi extends Api>(
 	model: Model<TApi>,
 	signal: AbortSignal | undefined,
 	run: (resolvedModel: Model<TApi>) => AssistantMessageEventStream,
+	options?: Pick<StreamOptions, "preserveModelSelection" | "preserveThinkingEffort">,
 ): AssistantMessageEventStream {
 	const resolveHeaders = model.resolveHeaders;
 	if (!resolveHeaders) return run(model);
+	const policy =
+		options?.preserveModelSelection || options?.preserveThinkingEffort
+			? dispatchControlSnapshot(model, WIRE_MODEL_CONTROLS)
+			: undefined;
 
 	const outer = new AssistantMessageEventStream();
 	void (async () => {
 		try {
 			const headers = await untilAborted(signal, () => resolveHeaders(signal));
 			signal?.throwIfAborted();
+			if (policy !== undefined && dispatchControlSnapshot(model, WIRE_MODEL_CONTROLS) !== policy) {
+				throw new AIError.ModelSelectionError("Header resolution changed the admitted model or wire policy.");
+			}
 			const inner = run({ ...model, resolveHeaders: undefined, headers: headers ? { ...headers } : undefined });
 			for await (const event of inner) {
 				outer.push(event);
@@ -896,8 +956,16 @@ export function stream<TApi extends Api>(
 	context: Context,
 	options?: OptionsForApi<TApi>,
 ): AssistantMessageEventStream {
+	if (options?.preserveModelSelection || options?.preserveThinkingEffort) {
+		dispatchControlSnapshot(model, WIRE_MODEL_CONTROLS);
+	}
 	if (model.resolveHeaders) {
-		return withResolvedModelHeaders(model, options?.signal, resolvedModel => stream(resolvedModel, context, options));
+		return withResolvedModelHeaders(
+			model,
+			options?.signal,
+			resolvedModel => stream(resolvedModel, context, options),
+			options,
+		);
 	}
 	if (!model.requiresGlyphTokenization) {
 		return withThinkingLoopGuard(model, options, opts =>
@@ -915,6 +983,94 @@ export function stream<TApi extends Api>(
 	);
 }
 
+function dispatchControlSnapshot(value: object, keys: readonly string[]): string {
+	if (utilTypes.isProxy(value)) {
+		throw new AIError.ModelSelectionError("Governed model/request controls cannot be proxy-defined.");
+	}
+	const prototype = Object.getPrototypeOf(value);
+	if (prototype !== Object.prototype && prototype !== null) {
+		throw new AIError.ModelSelectionError("Governed model/request controls require plain definitions.");
+	}
+	const controls: Record<string, unknown> = {};
+	for (const key of keys) {
+		const descriptor = Object.getOwnPropertyDescriptor(value, key);
+		if (
+			(key === "id" || key === "provider" || key === "api") &&
+			(!descriptor || typeof descriptor.value !== "string" || descriptor.value.length === 0)
+		) {
+			throw new AIError.ModelSelectionError("The governed serving model has no stable model or API identity.");
+		}
+		if (descriptor && !Object.hasOwn(descriptor, "value")) {
+			throw new AIError.ModelSelectionError("Governed model/request controls cannot use stateful accessors.");
+		}
+		if (
+			key === "baseUrl" &&
+			((descriptor && descriptor.value !== undefined && typeof descriptor.value !== "string") ||
+				(!descriptor && prototype !== null && Object.hasOwn(prototype, key)))
+		) {
+			throw new AIError.ModelSelectionError(
+				"The governed serving endpoint must be an optional string data property.",
+			);
+		}
+		controls[key] = descriptor?.value;
+	}
+	assertSafeGovernedJson(controls);
+	return JSON.stringify(controls);
+}
+
+const LOGICAL_MODEL_CONTROLS = ["id", "provider", "transport", "factoryDroidApiProviders"] as const;
+const WIRE_MODEL_CONTROLS = [
+	...LOGICAL_MODEL_CONTROLS,
+	"api",
+	"baseUrl",
+	"requestModelId",
+	"thinking",
+	"reasoning",
+	"reasoningMode",
+	"compat",
+	"compatConfig",
+	"cursorModelRoutes",
+	"cursorModelParameters",
+	"cursorMaxMode",
+	"cursorMaxModeRoutes",
+] as const;
+const MODEL_OPTION_CONTROLS = ["requestModelId", "wireModelId", "chatModelUid", "reasoningMode"] as const;
+const EFFORT_OPTION_CONTROLS = [
+	"reasoning",
+	"disableReasoning",
+	"forceReasoningOff",
+	"thinking",
+	"thinkingEnabled",
+	"thinkingBudgetTokens",
+	"thinkingBudgets",
+	"effort",
+	"requestModelId",
+	"wireModelId",
+	"chatModelUid",
+	"reasoningBody",
+] as const;
+
+function prepareDispatchModel<TApi extends Api>(
+	model: Model<TApi>,
+	options?: Pick<StreamOptions, "preserveModelSelection" | "preserveThinkingEffort">,
+): Model<TApi> {
+	const prepare = getProviderDefinition(model.provider)?.prepareModel;
+	if (!prepare) return model;
+	const governed = options?.preserveModelSelection || options?.preserveThinkingEffort;
+	const logical = governed ? dispatchControlSnapshot(model, LOGICAL_MODEL_CONTROLS) : undefined;
+	const wire = governed ? dispatchControlSnapshot(model, WIRE_MODEL_CONTROLS) : undefined;
+	const prepared = prepare(model) as Model<TApi>;
+	if (
+		governed &&
+		(dispatchControlSnapshot(prepared, LOGICAL_MODEL_CONTROLS) !== logical ||
+			(prepare !== getBuiltinProviderTransport(model.provider)?.prepareModel &&
+				dispatchControlSnapshot(prepared, WIRE_MODEL_CONTROLS) !== wire))
+	) {
+		throw new AIError.ModelSelectionError("Late provider preparation escaped the admitted model or wire transport.");
+	}
+	return prepared;
+}
+
 function streamDispatch<TApi extends Api>(
 	model: Model<TApi>,
 	context: Context,
@@ -930,6 +1086,11 @@ function streamDispatch<TApi extends Api>(
 	// Check custom API registry first (extension-provided APIs like "vertex-claude-api")
 	const customApiProvider = getCustomApi(model.api);
 	if (customApiProvider) {
+		if (requestOptions.preserveModelSelection || requestOptions.preserveThinkingEffort) {
+			throw new AIError.ModelSelectionError(
+				`Custom API ${model.api} does not expose a governed final-encoding and per-attempt admission contract.`,
+			);
+		}
 		return customApiProvider.stream(model, context, { ...requestOptions, waitForTerminalDrain: limited });
 	}
 
@@ -971,21 +1132,63 @@ function streamDispatch<TApi extends Api>(
 	}
 
 	const providerDefinition = getProviderDefinition(model.provider);
-	const requestModel = providerDefinition?.prepareModel?.(model) ?? model;
+	const preserveModelSelection = requestOptions.preserveModelSelection === true;
+	const preserveThinkingEffort = requestOptions.preserveThinkingEffort === true;
+	const governed = preserveModelSelection || preserveThinkingEffort;
+	const onBeforeRequest = requestOptions.onBeforeRequest;
+	const requestModel = prepareDispatchModel(model, requestOptions);
+	const logical = governed ? dispatchControlSnapshot(requestModel, LOGICAL_MODEL_CONTROLS) : undefined;
+	const wire = governed ? dispatchControlSnapshot(requestModel, WIRE_MODEL_CONTROLS) : undefined;
+	const wireOptions = preserveModelSelection
+		? dispatchControlSnapshot(requestOptions, MODEL_OPTION_CONTROLS)
+		: undefined;
+	const effort = preserveThinkingEffort ? dispatchControlSnapshot(requestOptions, EFFORT_OPTION_CONTROLS) : undefined;
+	const originalFetch = requestOptions.fetch;
 	const prepared = providerDefinition?.prepareRequest?.(requestModel, requestOptions as StreamOptions);
 	const providerModel = prepared?.model ?? requestModel;
 	const preparedOptions = prepared?.options ?? (requestOptions as StreamOptions);
-	const apiKey = preparedOptions.apiKey || getEnvApiKey(providerModel.provider);
+	if (
+		governed &&
+		(dispatchControlSnapshot(providerModel, LOGICAL_MODEL_CONTROLS) !== logical ||
+			(providerDefinition?.prepareRequest !== getBuiltinProviderTransport(model.provider)?.prepareRequest &&
+				(dispatchControlSnapshot(providerModel, WIRE_MODEL_CONTROLS) !== wire ||
+					preparedOptions.fetch !== originalFetch)) ||
+			(preserveModelSelection && dispatchControlSnapshot(preparedOptions, MODEL_OPTION_CONTROLS) !== wireOptions) ||
+			(preserveThinkingEffort && dispatchControlSnapshot(preparedOptions, EFFORT_OPTION_CONTROLS) !== effort))
+	) {
+		throw new AIError.ModelSelectionError(
+			"Late provider request preparation escaped the approved model, transport, or effort.",
+		);
+	}
+	const providerPolicy = governed ? dispatchControlSnapshot(providerModel, WIRE_MODEL_CONTROLS) : undefined;
+	const preparedBeforeRequest = preparedOptions.onBeforeRequest;
+	const protectedOptions = governed
+		? {
+				...preparedOptions,
+				preserveModelSelection,
+				preserveThinkingEffort,
+				onPayload: requestOptions.onPayload,
+				...(preserveModelSelection ? { fallbacks: [] } : {}),
+				onBeforeRequest: async () => {
+					if (preparedBeforeRequest !== onBeforeRequest) await invokeBeforeRequest(preparedBeforeRequest);
+					await invokeBeforeRequest(onBeforeRequest);
+					if (dispatchControlSnapshot(providerModel, WIRE_MODEL_CONTROLS) !== providerPolicy) {
+						throw new AIError.ModelSelectionError("The final prepared model changed before inference.");
+					}
+				},
+			}
+		: preparedOptions;
+	const apiKey = protectedOptions.apiKey || getEnvApiKey(providerModel.provider);
 	if (!apiKey) {
 		throw new AIError.MissingApiKeyError(providerModel.provider);
 	}
 	const providerOptions = isGoogleVertexAuthenticatedModel(providerModel)
 		? {
-				...preparedOptions,
+				...protectedOptions,
 				apiKey: "vertex-adc",
-				fetch: createVertexAuthenticatedFetch(preparedOptions),
+				fetch: createVertexAuthenticatedFetch(providerModel, protectedOptions),
 			}
-		: { ...preparedOptions, apiKey };
+		: { ...protectedOptions, apiKey };
 
 	const api: Api = providerModel.api;
 	if (api === "openrouter" && $env.PI_OPENROUTER_RESPONSES !== "0") {
@@ -1142,6 +1345,7 @@ function isRetryableUpstreamError(
 	status: number | undefined,
 	message: string | undefined,
 ): boolean {
+	if (AIError.is(AIError.classify(error), AIError.Flag.HostAdmission)) return false;
 	if (AIError.isAuthRetryableError(error)) return true;
 	// 401 means the credential is bad; 403 is its valid-token twin (access
 	// denied by plan, model policy, or org restriction — a sibling account may
@@ -1170,10 +1374,14 @@ function createAssistantAuthError(message: AssistantMessage): Error {
 		status === undefined
 			? new AIError.ProviderResponseError(text, { kind: "runtime" })
 			: new ProviderHttpError(text, status);
+	if (AIError.is(AIError.classifyMessage(message), AIError.Flag.HostAdmission)) {
+		return new AIError.ModelSelectionError(text, { cause: error });
+	}
 	return typeof message.errorId === "number" ? AIError.attach(error, message.errorId) : error;
 }
 
 function contextualizeAuthRetryError(model: Model<Api>, error: unknown): unknown {
+	if (AIError.is(AIError.classify(error), AIError.Flag.HostAdmission)) return error;
 	if (
 		!error ||
 		typeof error !== "object" ||
@@ -1428,8 +1636,11 @@ function streamSimpleRequest<TApi extends Api>(
 	}
 
 	if (model.resolveHeaders) {
-		return withResolvedModelHeaders(model, requestOptions.signal, resolvedModel =>
-			streamSimpleRequest(resolvedModel, context, requestOptions),
+		return withResolvedModelHeaders(
+			model,
+			requestOptions.signal,
+			resolvedModel => streamSimpleRequest(resolvedModel, context, requestOptions),
+			requestOptions,
 		);
 	}
 
@@ -1469,6 +1680,11 @@ function streamSimpleRequest<TApi extends Api>(
 	// Check custom API registry (extension-provided APIs)
 	const customApiProvider = getCustomApi(model.api);
 	if (customApiProvider) {
+		if (requestOptions.preserveModelSelection || requestOptions.preserveThinkingEffort) {
+			throw new AIError.ModelSelectionError(
+				`Custom API ${model.api} does not expose a governed final-encoding and per-attempt admission contract.`,
+			);
+		}
 		return withThinkingLoopGuard(model, requestOptions, opts =>
 			withProviderInFlightLimit(model, opts, limited =>
 				customApiProvider.streamSimple(model, context, { ...opts, waitForTerminalDrain: limited }),
@@ -1562,7 +1778,7 @@ function streamSimpleRequest<TApi extends Api>(
 			),
 		);
 	}
-	const providerModel = getProviderDefinition(model.provider)?.prepareModel?.(model) ?? model;
+	const providerModel = prepareDispatchModel(model, requestOptions);
 	const providerOptions = mapOptionsForApi(providerModel, requestOptions, apiKey);
 	return stream(providerModel, context, providerOptions);
 }
@@ -1727,7 +1943,12 @@ function resolveOpenAiReasoningEffort<TApi extends Api>(
 	// undefined here avoids a redundant requireSupportedEffort throw that would
 	// defeat the gate and surface a confusing "Compaction failed: Thinking effort
 	// high is not supported by..." to the user.
-	if (!model.thinking) return undefined;
+	if (!model.thinking) {
+		if (options?.preserveThinkingEffort) {
+			throw new AIError.ModelSelectionError("The selected OpenAI wire does not expose a controllable fixed effort.");
+		}
+		return undefined;
+	}
 	if (model.thinking.efforts.includes(reasoning)) return reasoning;
 	const mappedReasoning = resolveSupportedMappedReasoningEffort(model, reasoning);
 	if (mappedReasoning) return mappedReasoning;
@@ -1773,8 +1994,8 @@ function normalizeMandatoryReasoningOptions<TApi extends Api>(
 	}
 	const floor = defaultSupportedEffort(model);
 	if (floor === undefined) return options;
-	if (options?.preserveModelSelection && (options.disableReasoning || options.forceReasoningOff)) {
-		throw new AIError.ConfigurationError(
+	if (options?.preserveThinkingEffort && (options.disableReasoning || options.forceReasoningOff)) {
+		throw new AIError.ModelSelectionError(
 			"The selected model cannot honor the requested reasoning-off state without effort substitution.",
 		);
 	}
@@ -1821,8 +2042,47 @@ function mapOptionsForApi<TApi extends Api>(
 	rawOptions?: SimpleStreamOptions,
 	apiKey?: string,
 ): OptionsForApi<TApi> {
-	const options = normalizeMandatoryReasoningOptions(model, rawOptions);
+	if (
+		rawOptions?.preserveThinkingEffort &&
+		rawOptions.reasoning !== undefined &&
+		(!model.reasoning ||
+			rawOptions.disableReasoning ||
+			rawOptions.forceReasoningOff ||
+			!getSupportedEfforts(model).includes(rawOptions.reasoning))
+	) {
+		throw new AIError.ModelSelectionError("The selected model cannot honor the fixed requested thinking effort.");
+	}
+	const preserveModelSelection = rawOptions?.preserveModelSelection === true;
+	const preserveThinkingEffort = rawOptions?.preserveThinkingEffort === true;
+	const governed = preserveModelSelection || preserveThinkingEffort;
+	const onBeforeRequest = rawOptions?.onBeforeRequest;
+	const onPayload = rawOptions?.onPayload;
+	let options = normalizeMandatoryReasoningOptions(model, rawOptions);
+	const effort =
+		preserveThinkingEffort && options ? dispatchControlSnapshot(options, EFFORT_OPTION_CONTROLS) : undefined;
+	const policy = governed ? dispatchControlSnapshot(model, WIRE_MODEL_CONTROLS) : undefined;
 	const simpleProviderOptions = getProviderDefinition(model.provider)?.mapSimpleOptions?.(options ?? {});
+	const mappedBeforeRequest = simpleProviderOptions?.onBeforeRequest;
+	if (mappedBeforeRequest !== undefined && typeof mappedBeforeRequest !== "function") {
+		throw new AIError.ModelSelectionError("Provider option mapping supplied an invalid admission callback.");
+	}
+	const beforeRequest =
+		mappedBeforeRequest && mappedBeforeRequest !== onBeforeRequest
+			? async () => {
+					await invokeBeforeRequest(mappedBeforeRequest as StreamOptions["onBeforeRequest"]);
+					await invokeBeforeRequest(onBeforeRequest);
+				}
+			: onBeforeRequest;
+	if (
+		governed &&
+		(dispatchControlSnapshot(model, WIRE_MODEL_CONTROLS) !== policy ||
+			(preserveThinkingEffort && options && dispatchControlSnapshot(options, EFFORT_OPTION_CONTROLS) !== effort))
+	) {
+		throw new AIError.ModelSelectionError("Simple-option mapping changed the approved model or fixed effort.");
+	}
+	if (governed) {
+		options = { ...options, preserveModelSelection, preserveThinkingEffort, onBeforeRequest, onPayload };
+	}
 	const base = {
 		temperature: options?.temperature,
 		topP: options?.topP,
@@ -1862,8 +2122,13 @@ function mapOptionsForApi<TApi extends Api>(
 		anthropicSlowMode: options?.anthropicSlowMode,
 		userProfileId: options?.userProfileId,
 		...simpleProviderOptions,
-		preserveModelSelection: options?.preserveModelSelection,
-		...(options?.preserveModelSelection ? { onPayload: options.onPayload, fallbacks: [] } : {}),
+		preserveModelSelection,
+		preserveThinkingEffort,
+		onBeforeRequest: beforeRequest,
+		...(governed ? { onPayload, ...(preserveModelSelection ? { fallbacks: [] } : {}) } : {}),
+		...(governed && model.api === "anthropic-messages"
+			? { reasoning: options?.disableReasoning || options?.forceReasoningOff ? undefined : options?.reasoning }
+			: {}),
 	};
 
 	switch (model.api) {
@@ -1885,8 +2150,16 @@ function mapOptionsForApi<TApi extends Api>(
 				});
 			}
 
-			let thinkingBudget = options.thinkingBudgets?.[reasoning] ?? ANTHROPIC_THINKING[reasoning];
+			let thinkingBudget = options?.thinkingBudgets?.[reasoning] ?? ANTHROPIC_THINKING[reasoning];
+			if (preserveThinkingEffort && !Number.isInteger(thinkingBudget)) {
+				throw new AIError.ModelSelectionError(
+					"The fixed Anthropic effort requires a concrete native thinking budget.",
+				);
+			}
 			if (thinkingBudget <= 0) {
+				if (options?.preserveThinkingEffort) {
+					throw new AIError.ModelSelectionError("The thinking budget would suppress the fixed requested effort.");
+				}
 				return castApi<"anthropic-messages">({
 					...base,
 					requestModelId: resolveWireModelId(model, undefined),
@@ -1933,6 +2206,9 @@ function mapOptionsForApi<TApi extends Api>(
 					model.maxTokens !== undefined &&
 					model.maxTokens < thinkingBudget + OUTPUT_FALLBACK_BUFFER
 				) {
+					if (options?.preserveThinkingEffort) {
+						throw new AIError.ModelSelectionError("The model token cap would reduce the fixed thinking budget.");
+					}
 					thinkingBudget = model.maxTokens - OUTPUT_FALLBACK_BUFFER;
 				}
 				if (thinkingBudget >= ANTHROPIC_THINKING.minimal) {
@@ -1956,11 +2232,17 @@ function mapOptionsForApi<TApi extends Api>(
 			// Keep the provider's output buffer after thinking, reducing the
 			// budget before its wire-level clamp could fall below the API minimum.
 			if (maxTokens < thinkingBudget + OUTPUT_FALLBACK_BUFFER) {
+				if (options?.preserveThinkingEffort) {
+					throw new AIError.ModelSelectionError("The output token cap would reduce the fixed thinking budget.");
+				}
 				thinkingBudget = maxTokens - OUTPUT_FALLBACK_BUFFER;
 			}
 
 			// If thinking budget is too low, disable thinking
 			if (thinkingBudget < ANTHROPIC_THINKING.minimal) {
+				if (options?.preserveThinkingEffort) {
+					throw new AIError.ModelSelectionError("The thinking budget would disable the fixed requested effort.");
+				}
 				return castApi<"anthropic-messages">({
 					...base,
 					requestModelId: resolveWireModelId(model, undefined),
@@ -2035,6 +2317,11 @@ function mapOptionsForApi<TApi extends Api>(
 				}
 			}
 			if (maxTokens <= budgetInfo.budget) {
+				if (preserveThinkingEffort) {
+					throw new AIError.ModelSelectionError(
+						"The output token cap would reduce the fixed Bedrock thinking budget.",
+					);
+				}
 				const adjustedBudget = Math.max(0, maxTokens - MIN_OUTPUT_TOKENS);
 				thinkingBudgets = { ...thinkingBudgets, [budgetInfo.level]: adjustedBudget };
 			}
@@ -2167,7 +2454,7 @@ function mapOptionsForApi<TApi extends Api>(
 				...base,
 				thinking: {
 					enabled: true,
-					budgetTokens: getGoogleBudget(googleModel, effort, options?.thinkingBudgets),
+					budgetTokens: getGoogleBudget(googleModel, effort, options?.thinkingBudgets, preserveThinkingEffort),
 				},
 				hideThinkingSummary: options?.hideThinkingSummary,
 				toolChoice: mapGoogleToolChoice(options?.toolChoice),
@@ -2197,13 +2484,23 @@ function mapOptionsForApi<TApi extends Api>(
 				}
 
 				let thinkingBudget =
-					options.thinkingBudgets?.[effort] ?? model.thinking?.effortBudgets?.[effort] ?? GOOGLE_THINKING[effort];
+					options?.thinkingBudgets?.[effort] ?? model.thinking?.effortBudgets?.[effort] ?? GOOGLE_THINKING[effort];
+				if (preserveThinkingEffort && (!Number.isInteger(thinkingBudget) || thinkingBudget <= 0)) {
+					throw new AIError.ModelSelectionError(
+						"The fixed Gemini effort requires a positive native thinking budget.",
+					);
+				}
 
 				// Caller's maxTokens is desired output, so add thinking budget on top. With no caller/model cap, use a finite total fallback.
 				const maxTokens = maxTokensWithThinkingBudget(base.maxTokens, model.maxTokens, thinkingBudget);
 
 				// If not enough room for thinking + output, reduce thinking budget
 				if (maxTokens <= thinkingBudget) {
+					if (options?.preserveThinkingEffort) {
+						throw new AIError.ModelSelectionError(
+							"The output token cap would reduce the fixed Gemini thinking budget.",
+						);
+					}
 					thinkingBudget = Math.max(0, maxTokens - MIN_OUTPUT_TOKENS);
 				}
 
@@ -2219,6 +2516,11 @@ function mapOptionsForApi<TApi extends Api>(
 					});
 				}
 				// Budget clamped to zero — fall through to the thinking-off path.
+				if (options?.preserveThinkingEffort) {
+					throw new AIError.ModelSelectionError(
+						"The Gemini thinking budget would disable the fixed requested effort.",
+					);
+				}
 			}
 
 			const thinking: GoogleGeminiCliOptions["thinking"] = { enabled: false };
@@ -2273,7 +2575,7 @@ function mapOptionsForApi<TApi extends Api>(
 				serviceTier: options?.serviceTier,
 				thinking: {
 					enabled: true,
-					budgetTokens: getGoogleBudget(geminiModel, effort, options?.thinkingBudgets),
+					budgetTokens: getGoogleBudget(geminiModel, effort, options?.thinkingBudgets, preserveThinkingEffort),
 				},
 				hideThinkingSummary: options?.hideThinkingSummary,
 				toolChoice: mapGoogleToolChoice(options?.toolChoice),
@@ -2341,11 +2643,12 @@ function mapOptionsForApi<TApi extends Api>(
 		case "devin-agent": {
 			const devinModel = model as Model<"devin-agent">;
 			const effort =
-				options?.reasoning && !options.disableReasoning
+				options?.reasoning && !options.disableReasoning && (!governed || !options.forceReasoningOff)
 					? requireSupportedEffort(devinModel, options.reasoning)
 					: undefined;
 			return castApi<"devin-agent">({
 				...base,
+				reasoning: effort,
 				chatModelUid: resolveWireModelId(devinModel, effort),
 			});
 		}
@@ -2358,18 +2661,18 @@ function getGoogleBudget(
 	model: Model<"google-generative-ai">,
 	effort: Effort,
 	customBudgets?: ThinkingBudgets,
+	preserveThinkingEffort = false,
 ): number {
 	requireSupportedEffort(model, effort);
 
-	// Custom budgets take precedence if provided for this level
-	if (customBudgets?.[effort] !== undefined) {
-		return customBudgets[effort]!;
-	}
-
-	// See https://ai.google.dev/gemini-api/docs/thinking#set-budget
+	// Caller overrides precede the catalog's provider-native budget mapping.
+	const customBudget = customBudgets?.[effort];
 	const resolvedBudget = model.thinking?.effortBudgets?.[effort];
-	if (resolvedBudget !== undefined) return resolvedBudget;
-
-	// Unknown model - use dynamic
-	return -1;
+	const budget = customBudget !== undefined ? customBudget : (resolvedBudget ?? -1);
+	if (preserveThinkingEffort && (!Number.isInteger(budget) || budget <= 0)) {
+		throw new AIError.ModelSelectionError(
+			"The Google wire has no positive native budget for the fixed requested effort.",
+		);
+	}
+	return budget;
 }

@@ -29,7 +29,8 @@ import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { snapshotJobs } from "@oh-my-pi/pi-coding-agent/async/job-control";
 import { cfgTaskAgentModelOverrides, cfgTaskMaxConcurrency } from "@oh-my-pi/pi-coding-agent/task/settings";
 import { createTaskModelFixture, type TaskModelFixture } from "../helpers/model-fixtures";
-import { resolveRoleRoute } from "@oh-my-pi/pi-coding-agent/task/role-routing";
+import * as sdk from "@oh-my-pi/pi-coding-agent/sdk";
+import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 
 const taskAgent: AgentDefinition = {
 	name: "task",
@@ -53,10 +54,99 @@ function createSession(options: { manager?: AsyncJobManager; settings?: Record<s
 		modelRegistry: fixture.modelRegistry,
 		getActiveModel: fixture.getActiveModel,
 		getActiveModelString: fixture.getActiveModelString,
+		getActiveModelSelector: fixture.getActiveModelSelector,
 		getSessionFile: () => null,
 		getSessionSpawns: () => "*",
 		asyncJobManager: options.manager,
 	} as unknown as ToolSession;
+}
+
+async function createServedTaskSession(manager: AsyncJobManager) {
+	const requests: Array<{ model: string; reasoning_effort?: string }> = [];
+	const server = Bun.serve({
+		hostname: "127.0.0.1",
+		port: 0,
+		fetch: async request => {
+			requests.push((await request.json()) as (typeof requests)[number]);
+			return new Response(
+				`data: ${JSON.stringify({
+					id: "spawn-result",
+					object: "chat.completion.chunk",
+					created: 0,
+					choices: [
+						{
+							index: 0,
+							delta: {
+								role: "assistant",
+								tool_calls: [
+									{
+										index: 0,
+										id: "spawn-yield",
+										type: "function",
+										function: { name: "yield", arguments: '{"data":{"completed":true}}' },
+									},
+								],
+							},
+						},
+					],
+				})}\n\n` +
+					`data: ${JSON.stringify({
+						id: "spawn-result",
+						object: "chat.completion.chunk",
+						created: 0,
+						choices: [{ index: 0, delta: {}, finish_reason: "tool_calls" }],
+					})}\n\ndata: [DONE]\n\n`,
+				{ headers: { "content-type": "text/event-stream" } },
+			);
+		},
+	});
+	const session = createSession({
+		manager,
+		settings: {
+			enabledModels: ["routing-test/*"],
+			"compaction.enabled": false,
+			"todo.enabled": false,
+			"task.maxRuntimeMs": 0,
+		},
+	});
+	const fixture = createTaskModelFixture(session.settings, { baseUrl: `${server.url.origin}/v1` });
+	modelFixtures.push(fixture);
+	session.modelRegistry = fixture.modelRegistry;
+	session.getActiveModel = fixture.getActiveModel;
+	session.getActiveModelString = fixture.getActiveModelString;
+	session.getActiveModelSelector = fixture.getActiveModelSelector;
+	const createAgentSession = sdk.createAgentSession;
+	const sessions: AgentSession[] = [];
+	vi.spyOn(sdk, "createAgentSession").mockImplementation(async options => {
+		if (!options) throw new Error("Expected child session options");
+		const created = await createAgentSession({
+			...options,
+			agentDir: options.cwd,
+			disableExtensionDiscovery: true,
+			extensions: [],
+			skills: [],
+			rules: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			preloadedCustomToolPaths: [],
+			enableMCP: false,
+			enableLsp: false,
+			skipPythonPreflight: true,
+			toolNames: ["yield"],
+			restrictToolNames: true,
+		});
+		sessions.push(created.session);
+		return created;
+	});
+	return {
+		session,
+		requests,
+		close: async () => {
+			await Promise.all(sessions.map(child => child.dispose()));
+			server.stop(true);
+		},
+	};
 }
 
 function getFirstText(result: { content: Array<{ type: string; text?: string }> }): string {
@@ -184,59 +274,57 @@ describe("task spawn routing", () => {
 		expect(runSpy).toHaveBeenCalledTimes(1);
 	});
 
-	it("uses the current /agents model for each newly admitted worker", async () => {
+	it("serves the current /agents model and effort for each omitted-model worker", async () => {
 		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({ agents: [taskAgent], projectAgentsDir: null });
 		const manager = createManager();
-		const session = createSession({ manager });
-		const selected: string[] = [];
-		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
-			selected.push(resolveRoleRoute(options.roleRoute!, session.modelRegistry).selector);
-			return makeResult(options.id);
-		});
-		const deps = createAgentsHubDeps(session.cwd, session.settings, session.modelRegistry!, () => ({
-			explicit: [],
-			configured: [],
-			configuredLevel: "user",
-			mode: "explicit-only",
-		}));
-		const tool = await TaskTool.create(session);
-		cfgTaskAgentModelOverrides.override(session.settings, { task: "routing-test/primary:low" });
-		const first = await tool.execute("tc-old", { agent: "task", name: "Old", task: "First task" } as TaskParams);
-		const firstJob = manager.getJob(first.details?.async?.jobId ?? "");
-		if (!firstJob) throw new Error("First task did not spawn");
-		await firstJob.promise;
-		deps.setAgentOverride("model", "task", "routing-test/fallback:high");
-		await tool.execute("tc-new", { agent: "task", name: "New", task: "Second task" } as TaskParams);
-		await Promise.all(manager.getAllJobs().map(job => job.promise));
-		expect(selected).toEqual(["routing-test/primary:low", "routing-test/fallback:high"]);
+		const { session, requests, close } = await createServedTaskSession(manager);
+		try {
+			const deps = createAgentsHubDeps(session.cwd, session.settings, session.modelRegistry!, () => ({
+				explicit: [],
+				configured: [],
+				configuredLevel: "user",
+				mode: "explicit-only",
+			}));
+			const tool = await TaskTool.create(session);
+			cfgTaskAgentModelOverrides.override(session.settings, { task: "routing-test/primary:low" });
+			const first = await tool.execute("tc-old", { agent: "task", name: "Old", task: "First task" } as TaskParams);
+			const firstJob = manager.getJob(first.details?.async?.jobId ?? "");
+			if (!firstJob) throw new Error("First task did not spawn");
+			await firstJob.promise;
+			deps.setAgentOverride("model", "task", "routing-test/fallback:high");
+			await tool.execute("tc-new", { agent: "task", name: "New", task: "Second task" } as TaskParams);
+			await Promise.all(manager.getAllJobs().map(job => job.promise));
+			expect(requests.map(body => [body.model, body.reasoning_effort])).toEqual([
+				["primary", "low"],
+				["fallback", "high"],
+			]);
+		} finally {
+			await close();
+		}
 	});
 
-	it("fires before_subagent_spawn once per child even though the task preflight resolves policy first", async () => {
+	it("runs the spawn hook once and serves its omitted-model replacement", async () => {
 		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({
 			agents: [{ ...taskAgent, model: ["routing-test/primary", "routing-test/fallback"] }],
 			projectAgentsDir: null,
 		});
-		const runSpy = vi
-			.spyOn(executorModule, "runSubprocess")
-			.mockImplementation(async options => makeResult(options.id ?? "?"));
 		const manager = createManager();
-		const session = createSession({ manager });
-		const signals: Array<AbortSignal | undefined> = [];
-		session.emitBeforeSubagentSpawn = async (_event, signal) => {
-			signals.push(signal);
-			return { model: "routing-test/fallback:high", note: `pool ${signals.length}` };
-		};
-		const tool = await TaskTool.create(session);
-
-		const result = await tool.execute("tc-route", { agent: "task", name: "Routed", task: "Do it." } as TaskParams);
-		await manager.getJob(result.details!.async!.jobId!)!.promise;
-
-		expect(signals).toHaveLength(1);
-		expect(signals[0]).toBeInstanceOf(AbortSignal);
-		expect(resolveRoleRoute(runSpy.mock.calls[0]![0].roleRoute!, session.modelRegistry)).toMatchObject({
-			selector: "routing-test/fallback:high",
-			fixedEffort: true,
-		});
+		const { session, requests, close } = await createServedTaskSession(manager);
+		try {
+			const signals: Array<AbortSignal | undefined> = [];
+			session.emitBeforeSubagentSpawn = async (_event, signal) => {
+				signals.push(signal);
+				return { model: "routing-test/fallback:high", note: `pool ${signals.length}` };
+			};
+			const tool = await TaskTool.create(session);
+			const result = await tool.execute("tc-route", { agent: "task", name: "Routed", task: "Do it." } as TaskParams);
+			await manager.getJob(result.details!.async!.jobId!)!.promise;
+			expect(signals).toHaveLength(1);
+			expect(signals[0]).toBeInstanceOf(AbortSignal);
+			expect(requests.map(body => [body.model, body.reasoning_effort])).toEqual([["fallback", "high"]]);
+		} finally {
+			await close();
+		}
 	});
 
 	for (const { label, runnerOverrides, expectRetained } of [

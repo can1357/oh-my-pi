@@ -94,13 +94,11 @@ const taskSchemaNoIsolation = type({
 });
 const taskSchemaBatch = type({
 	context: "string",
-	"model?": "never",
 	tasks: taskItemSchemaIsolated.array(),
 	"+": "delete",
 });
 const taskSchemaBatchNoIsolation = type({
 	context: "string",
-	"model?": "never",
 	tasks: taskItemSchema.array(),
 	"+": "delete",
 });
@@ -149,7 +147,6 @@ function createTaskSchema(options: {
 			});
 			return type.raw({
 				context: "string",
-				"model?": "never",
 				tasks: item.array(),
 				"+": "delete",
 			});
@@ -168,7 +165,6 @@ function createTaskSchema(options: {
 		});
 		return type.raw({
 			context: "string",
-			"model?": "never",
 			tasks: item.array(),
 			"+": "delete",
 		});

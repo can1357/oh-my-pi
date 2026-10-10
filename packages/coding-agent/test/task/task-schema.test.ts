@@ -97,20 +97,6 @@ describe("task spawn validation", () => {
 });
 
 describe("per-call model schema boundaries", () => {
-	for (const isolationEnabled of [false, true]) {
-		for (const effortEnabled of [false, true]) {
-			it(`rejects batch-container model (isolation=${isolationEnabled}, effort=${effortEnabled})`, () => {
-				const schema = getTaskSchema({ isolationEnabled, effortEnabled, batchEnabled: true });
-				const result = schema({
-					context: "Shared context",
-					model: "routing-test/primary",
-					tasks: [{ task: "Do work", solutionSpace: "c" }],
-				});
-				expect(result instanceof type.errors).toBe(true);
-			});
-		}
-	}
-
 	for (const model of [42, true, {}, ["routing-test/primary", 42]]) {
 		it(`rejects a non-selector wire value ${JSON.stringify(model)} on flat and batch calls`, () => {
 			const flat = taskSchema({ task: "Do work", solutionSpace: "c", model });

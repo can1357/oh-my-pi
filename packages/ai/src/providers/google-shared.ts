@@ -3,6 +3,7 @@
  */
 
 import { scheduler } from "node:timers/promises";
+import { types as utilTypes } from "node:util";
 import { calculateCost } from "@oh-my-pi/pi-catalog/models";
 import { readSseJson, type SseEventObserver } from "@oh-my-pi/pi-utils";
 import { renderDemotedThinking } from "../dialect/demotion";
@@ -28,6 +29,13 @@ import { shouldSendServiceTier } from "../types";
 import { normalizeSystemPrompts } from "../utils";
 import { AssistantMessageEventStream } from "../utils/event-stream";
 import type { RawHttpRequestDump } from "../utils/http-inspector";
+import {
+	assertSafeGovernedJson,
+	createRequestSelectionGuard,
+	invokeBeforeRequest,
+	serializeRequestBody,
+	shouldAwaitPayloadHookResult,
+} from "../utils/request-selection";
 import { normalizeSchemaForCCA, normalizeSchemaForGoogle, toolWireSchema } from "../utils/schema";
 import type {
 	Content,
@@ -70,6 +78,51 @@ function convertGoogleImagePart(image: ImageContent): Part {
  * without inducing a circular dependency.
  */
 export type GoogleThinkingLevel = "THINKING_LEVEL_UNSPECIFIED" | "MINIMAL" | "LOW" | "MEDIUM" | "HIGH";
+
+/** Fixed Google effort must be concrete on the wire, not a server-default thinking mode. */
+export function assertFixedGoogleThinking(
+	model: Model<GoogleApiType>,
+	enabled: boolean | undefined,
+	config: ThinkingConfig | undefined,
+	wireModelId: string,
+): void {
+	const routing = model.thinking?.effortRouting;
+	const offRoute = typeof routing?.off === "string" && routing.off === wireModelId;
+	if (!enabled) {
+		const nativeBudgetOff =
+			model.thinking?.mode === "budget" &&
+			(!model.thinking.requiresEffort || model.thinking.suppressWhenOff) &&
+			config?.thinkingBudget === 0 &&
+			config.thinkingLevel === undefined;
+		if (!model.reasoning || offRoute || nativeBudgetOff) return;
+		throw new AIError.ModelSelectionError(
+			"This Google route cannot honor fixed reasoning off; MINIMAL and omitted thinking are not off.",
+		);
+	}
+	if (!model.reasoning) {
+		throw new AIError.ModelSelectionError("This Google model cannot honor the requested fixed thinking effort.");
+	}
+	const level = config?.thinkingLevel;
+	if (
+		model.thinking?.mode !== "budget" &&
+		(level === "MINIMAL" || level === "LOW" || level === "MEDIUM" || level === "HIGH")
+	)
+		return;
+	if (
+		model.thinking?.mode !== "google-level" &&
+		config?.thinkingBudget !== undefined &&
+		Number.isFinite(config.thinkingBudget) &&
+		config.thinkingBudget > 0
+	)
+		return;
+	const routedEffort =
+		config?.thinkingLevel === undefined &&
+		config?.thinkingBudget === undefined &&
+		routing &&
+		Object.entries(routing).some(([effort, id]) => effort !== "off" && id === wireModelId);
+	if (routedEffort) return;
+	throw new AIError.ModelSelectionError("This Google request cannot express a concrete fixed thinking effort.");
+}
 
 /**
  * Sampling/thinking options shared by `streamGoogle` and `streamGoogleVertex`.
@@ -876,6 +929,9 @@ export function buildGoogleGenerateContentParams<T extends "google-generative-ai
 		}
 		config.thinkingConfig = cfg;
 	}
+	if (options.preserveThinkingEffort) {
+		assertFixedGoogleThinking(model, thinking?.enabled, config.thinkingConfig, model.id);
+	}
 
 	if (options.signal) {
 		if (options.signal.aborted) {
@@ -935,6 +991,11 @@ export function streamGoogleGenAI<T extends "google-generative-ai" | "google-ver
 	prepare: () => GoogleGenAIRequestPlan | Promise<GoogleGenAIRequestPlan>;
 }): AssistantMessageEventStream {
 	const { model, options, api, retainTextSignature, prepare } = args;
+	const selectionOptions = {
+		preserveModelSelection: options?.preserveModelSelection,
+		preserveThinkingEffort: options?.preserveThinkingEffort,
+	};
+	const onBeforeRequest = options?.onBeforeRequest;
 	const stream = new AssistantMessageEventStream();
 
 	(async () => {
@@ -962,24 +1023,46 @@ export function streamGoogleGenAI<T extends "google-generative-ai" | "google-ver
 
 		try {
 			const plan = await prepare();
+			const requestUrl = plan.url;
+			const fallbackUrl = plan.fallbackUrl;
 			let params = plan.params;
-			const replacement = await options?.onPayload?.(params, model);
+			const governed = selectionOptions.preserveModelSelection || selectionOptions.preserveThinkingEffort;
+			if (governed) assertSafeGoogleParams(params);
+			const selectionGuard = governed
+				? createRequestSelectionGuard(selectionOptions, paramsToWireBody(params), body => {
+						const generationConfig = body.generationConfig;
+						const thinkingConfig =
+							generationConfig && typeof generationConfig === "object" && "thinkingConfig" in generationConfig
+								? generationConfig.thinkingConfig
+								: undefined;
+						return {
+							...(selectionOptions.preserveModelSelection ? { url: requestUrl, fallbackUrl } : {}),
+							...(selectionOptions.preserveThinkingEffort ? { thinkingConfig } : {}),
+						};
+					})
+				: undefined;
+			const payloadHookResult = options?.onPayload?.(params, model);
+			const replacement = shouldAwaitPayloadHookResult(payloadHookResult, !!governed)
+				? await payloadHookResult
+				: payloadHookResult;
 			if (replacement !== undefined) {
 				params = replacement as GenerateContentParameters;
 			}
+			if (governed) assertSafeGoogleParams(params);
 			rawRequestDump = {
 				provider: model.provider,
 				api: output.api,
 				model: model.id,
 				method: "POST",
-				url: plan.url,
+				url: requestUrl,
 				body: params,
 				headers: plan.headers,
 			};
 
-			const bodyJson = JSON.stringify(paramsToWireBody(params));
+			const bodyJson = serializeRequestBody(paramsToWireBody(params), selectionOptions, selectionGuard);
 			const fetchImpl = plan.fetch ?? options?.fetch ?? (globalThis.fetch.bind(globalThis) as FetchImpl);
 			const openStreamAt = async (requestUrl: string): Promise<ReadableStream<Uint8Array>> => {
+				await invokeBeforeRequest(onBeforeRequest);
 				const response = await fetchImpl(requestUrl, {
 					method: "POST",
 					headers: { ...plan.headers, "Content-Type": "application/json", Accept: "text/event-stream" },
@@ -1006,12 +1089,12 @@ export function streamGoogleGenAI<T extends "google-generative-ai" | "google-ver
 			// global endpoint; retry global once so a stale/ambient region never
 			// breaks a request that worked before regional routing existed.
 			const openStream = async (): Promise<ReadableStream<Uint8Array>> => {
-				if (!plan.fallbackUrl) return openStreamAt(plan.url);
+				if (!fallbackUrl) return openStreamAt(requestUrl);
 				try {
-					return await openStreamAt(plan.url);
+					return await openStreamAt(requestUrl);
 				} catch (error) {
 					if (error instanceof AIError.GoogleApiError && error.status === 404) {
-						return openStreamAt(plan.fallbackUrl);
+						return openStreamAt(fallbackUrl);
 					}
 					throw error;
 				}
@@ -1083,6 +1166,31 @@ export function streamGoogleGenAI<T extends "google-generative-ai" | "google-ver
 	})();
 
 	return stream;
+}
+
+/** Validate before the REST transformer reads hook-owned properties. */
+function assertSafeGoogleParams(params: GenerateContentParameters): void {
+	if (typeof params !== "object" || params === null || Array.isArray(params)) {
+		throw new AIError.ModelSelectionError("The governed Google request must be a parameter object.");
+	}
+	if (utilTypes.isProxy(params)) {
+		throw new AIError.ModelSelectionError("Governed Google parameters cannot use Proxy traps.");
+	}
+	const descriptors = Object.getOwnPropertyDescriptors(params);
+	const config = descriptors.config;
+	// abortSignal is transport-only, not a JSON field in the REST request.
+	if (config && Object.hasOwn(config, "value") && config.value && typeof config.value === "object") {
+		if (utilTypes.isProxy(config.value)) {
+			throw new AIError.ModelSelectionError("Governed Google config cannot use Proxy traps.");
+		}
+		const configDescriptors = Object.getOwnPropertyDescriptors(config.value);
+		delete configDescriptors.abortSignal;
+		descriptors.config = {
+			...config,
+			value: Object.create(Object.getPrototypeOf(config.value), configDescriptors),
+		};
+	}
+	assertSafeGovernedJson(Object.create(Object.getPrototypeOf(params), descriptors));
 }
 
 /**

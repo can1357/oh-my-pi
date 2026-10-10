@@ -50,6 +50,11 @@ import {
 import { OpenAIHttpError, postOpenAIStream } from "../utils/openai-http";
 import { notifyProviderResponse } from "../utils/provider-response";
 import {
+	assertSafeGovernedJson,
+	createRequestSelectionGuard,
+	shouldAwaitPayloadHookResult,
+} from "../utils/request-selection";
+import {
 	adaptSchemaForStrict,
 	findStrictToolSchemaViolation,
 	flattenExclusiveRequiredRootUnion,
@@ -634,6 +639,8 @@ export interface OpenAICompletionsOptions extends StreamOptions {
 	reasoning?: "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 	/** Force-disable reasoning where supported, or request the lowest effort on generic effort endpoints. */
 	disableReasoning?: boolean;
+	/** @internal Native adapter-produced effort dialect, applied before guarded config. */
+	reasoningBody?: Record<string, unknown>;
 	serviceTier?: ServiceTier;
 	/** @internal True when maxTokens came from the caller, not the model default. */
 	maxTokensExplicit?: boolean;
@@ -791,6 +798,11 @@ const streamOpenAICompletionsOnce = (
 	options?: OpenAICompletionsOptions,
 ): AssistantMessageEventStream => {
 	const stream = new AssistantMessageEventStream();
+	const selectionOptions = {
+		preserveModelSelection: options?.preserveModelSelection,
+		preserveThinkingEffort: options?.preserveThinkingEffort,
+		onBeforeRequest: options?.onBeforeRequest,
+	};
 
 	(async () => {
 		const startTime = performance.now();
@@ -881,13 +893,18 @@ const streamOpenAICompletionsOnce = (
 				: `${trimmedBaseUrl}/chat/completions`;
 			const createCompletionsStream = async (toolStrictModeOverride?: ToolStrictModeOverride) => {
 				const effectiveToolStrictModeOverride = disableStrictTools ? "none" : toolStrictModeOverride;
-				const builtParams = buildParams(model, context, options, effectiveToolStrictModeOverride);
+				const builtParams = buildParams(
+					model,
+					context,
+					{ ...options, ...selectionOptions },
+					effectiveToolStrictModeOverride,
+				);
 				appliedStrictTools = builtParams.strictToolsApplied;
 				let params = builtParams.params;
 				// Tool-triggered suppression is a hard wire constraint; cached
 				// enabled-effort negotiation must not overwrite its `none`.
 				const reasoningEffortFallbackKey =
-					builtParams.reasoningEffortFallbackAllowed && !options?.preserveModelSelection
+					builtParams.reasoningEffortFallbackAllowed && !selectionOptions.preserveThinkingEffort
 						? createOpenAIReasoningEffortFallbackKey("chat-completions", trimmedBaseUrl, params.model)
 						: undefined;
 				const requestReasoningEffortFallback =
@@ -900,14 +917,13 @@ const streamOpenAICompletionsOnce = (
 					applyOpenAIReasoningEffortFallback(params, requestReasoningEffortFallback);
 				}
 				activeReasoningEffortFallbackKey = reasoningEffortFallbackKey;
-				const governedSelection = options?.preserveModelSelection
-					? governedCompletionsSelection(params)
-					: undefined;
-				const replacedParams = await options?.onPayload?.(params, model);
+				const selectionGuard = builtParams.selectionGuard;
+				const hookResult = options?.onPayload?.(params, model);
+				const replacedParams = shouldAwaitPayloadHookResult(hookResult, selectionGuard !== undefined)
+					? await hookResult
+					: hookResult;
 				if (replacedParams !== undefined) params = replacedParams as typeof params;
-				if (governedSelection !== undefined && governedCompletionsSelection(params) !== governedSelection) {
-					throw new AIError.ConfigurationError("Provider payload changed the governed model/effort selection.");
-				}
+				if (selectionGuard) assertSafeGovernedJson(params);
 				activeRequestParams = params;
 				rawRequestDump = {
 					provider: model.provider,
@@ -934,6 +950,8 @@ const streamOpenAICompletionsOnce = (
 						url: completionsUrl,
 						headers: headersWithTimeout,
 						body: params,
+						...selectionOptions,
+						validateSerializedBody: selectionGuard,
 						signal: requestSignal,
 						fetch: wrapFetchForCopilotFallback(
 							options?.fetch,
@@ -941,6 +959,7 @@ const streamOpenAICompletionsOnce = (
 							resolveCopilotRequestIdentity(options?.headers),
 							copilotCacheKey,
 							copilotCacheSnapshot,
+							selectionOptions.onBeforeRequest,
 						),
 						// Transient 408/429/5xx get Retry-After-aware transport retries.
 						// The first-event watchdog above aborts `requestSignal`, which
@@ -971,6 +990,7 @@ const streamOpenAICompletionsOnce = (
 			try {
 				openaiStream = await createCompletionsStream();
 			} catch (error) {
+				if (AIError.is(AIError.classify(error), AIError.Flag.HostAdmission)) throw error;
 				const capturedErrorResponse = error instanceof OpenAIHttpError ? error.captured : undefined;
 				// A caller disable with a retained effort preference is still an
 				// explicit disable: without this, a fieldless rejection of the
@@ -978,7 +998,10 @@ const streamOpenAICompletionsOnce = (
 				// cached and strips later enabled turns.
 				const isExplicitDisable = options?.disableReasoning === true;
 				const reasoningEffortFallback =
-					activeReasoningEffortFallbackKey && activeRequestParams && !requestSignal.aborted
+					activeReasoningEffortFallbackKey &&
+					activeRequestParams &&
+					!requestSignal.aborted &&
+					!selectionOptions.preserveThinkingEffort
 						? resolveOpenAIReasoningEffortFallback(error, capturedErrorResponse, activeRequestParams, {
 								explicitDisable: isExplicitDisable,
 							})
@@ -1963,28 +1986,45 @@ function applyOpenAIChatCompletionsPromptCachePolicy(
 }
 
 /** Capture policy-encoded controls, not caller effort labels or raw model-id guesses. */
-function governedCompletionsSelection(params: OpenAICompletionsParams): string {
+function governedCompletionsSelection(
+	params: OpenAICompletionsParams,
+	options: Pick<StreamOptions, "preserveModelSelection" | "preserveThinkingEffort"> | undefined,
+	effortRoutedModel = false,
+): Record<string, unknown> {
 	if (!isRecord(params)) {
-		throw new AIError.ConfigurationError("Provider payload discarded the governed model/effort selection.");
+		throw new AIError.ModelSelectionError("Provider payload discarded the governed model/effort selection.");
 	}
-	const alternatives = params as OpenAICompletionsParams & { models?: unknown; fallbacks?: unknown };
-	if (
-		(Array.isArray(alternatives.models) && alternatives.models.length > 0) ||
-		(Array.isArray(alternatives.fallbacks) && alternatives.fallbacks.length > 0)
-	) {
-		throw new AIError.ConfigurationError("Provider payload supplied model alternatives for a governed selection.");
-	}
-	return JSON.stringify({
-		model: params.model,
-		reasoning_effort: params.reasoning_effort,
-		reasoning: params.reasoning,
-		thinking: params.thinking,
-		enable_thinking: params.enable_thinking,
-		chat_template_kwargs: params.chat_template_kwargs,
-		venice_disable_thinking: params.venice_parameters?.disable_thinking,
-		provider: params.provider,
-		providerOptions: params.providerOptions,
-	});
+	const templateArgs =
+		"chat_template_args" in params && isRecord(params.chat_template_args) ? params.chat_template_args : undefined;
+	const reasoning = isRecord(params.reasoning) ? params.reasoning : undefined;
+	return {
+		...(options?.preserveModelSelection
+			? {
+					model: params.model,
+					models: "models" in params ? params.models : undefined,
+					fallbacks: "fallbacks" in params ? params.fallbacks : undefined,
+					provider: params.provider,
+					providerOptions: params.providerOptions,
+					reasoning_mode: reasoning?.mode,
+				}
+			: {}),
+		...(options?.preserveThinkingEffort
+			? {
+					...(effortRoutedModel ? { effort_model: params.model } : {}),
+					reasoning_effort: params.reasoning_effort,
+					reasoning: params.reasoning && {
+						effort: params.reasoning.effort,
+						enabled: params.reasoning.enabled,
+						max_tokens: params.reasoning.max_tokens,
+					},
+					thinking: params.thinking,
+					enable_thinking: params.enable_thinking,
+					chat_template_kwargs: params.chat_template_kwargs,
+					chat_template_args: templateArgs,
+					venice_disable_thinking: params.venice_parameters?.disable_thinking,
+				}
+			: {}),
+	};
 }
 
 function buildParams(
@@ -1997,7 +2037,12 @@ function buildParams(
 	toolStrictMode: AppliedToolStrictMode;
 	strictToolsApplied: boolean;
 	reasoningEffortFallbackAllowed: boolean;
+	selectionGuard?: (serialized: string) => void;
 } {
+	const selectionOptions = {
+		preserveModelSelection: options?.preserveModelSelection,
+		preserveThinkingEffort: options?.preserveThinkingEffort,
+	};
 	const initialPolicy = resolveOpenAICompatForRequest(model, options, Boolean(context.tools?.length));
 	const initialCompat = initialPolicy.compat as ResolvedOpenAICompat;
 	const cacheRetention = resolveCacheRetention(options?.cacheRetention);
@@ -2108,6 +2153,11 @@ function buildParams(
 		params.tool_choice = "required";
 	}
 	if (isForcedToolChoice(params.tool_choice) && !initialCompat.supportsForcedToolChoice) {
+		if (options?.preserveThinkingEffort) {
+			throw new AIError.ModelSelectionError(
+				"The forced tool selection cannot be honored with the fixed thinking effort.",
+			);
+		}
 		// Some thinking-required OpenAI-compatible models reject forced
 		// `tool_choice` while still accepting tools with the default auto
 		// selector. Keep the tool available and let the model choose it.
@@ -2155,12 +2205,12 @@ function buildParams(
 		hasTools: Array.isArray(params.tools) && params.tools.length > 0,
 	});
 	if (
-		options?.preserveModelSelection &&
+		options?.preserveThinkingEffort &&
 		options.reasoning !== undefined &&
 		!options.disableReasoning &&
 		!finalPolicy.reasoning.enabled
 	) {
-		throw new AIError.ConfigurationError(
+		throw new AIError.ModelSelectionError(
 			"The selected reasoning effort cannot be honored with this tool request; no effort suppression is permitted.",
 		);
 	}
@@ -2193,23 +2243,111 @@ function buildParams(
 		hasTools: Array.isArray(params.tools) && params.tools.length > 0,
 	});
 	dropOpenRouterKimiForcedToolReasoning(params, model, finalPolicy);
-
 	applyOpenAIGatewayRouting(params, compat, cacheRetention !== "none");
-	const governedSelection = options?.preserveModelSelection
-		? { model: params.model, reasoningEffort: params.reasoning_effort, reasoning: JSON.stringify(params.reasoning) }
+	const nativeModelOptions = {
+		preserveModelSelection:
+			selectionOptions.preserveModelSelection ||
+			(selectionOptions.preserveThinkingEffort && model.thinking?.effortRouting !== undefined),
+	};
+	const nativeModelGuard = options?.reasoningBody
+		? createRequestSelectionGuard(nativeModelOptions, params, payload =>
+				governedCompletionsSelection(payload, nativeModelOptions),
+			)
 		: undefined;
+	const reasoningBody = options?.reasoningBody;
+	if (reasoningBody !== undefined) {
+		assertSafeGovernedJson(reasoningBody);
+		if (
+			!isRecord(reasoningBody) ||
+			Object.keys(reasoningBody).some(
+				key => key !== "reasoning_effort" && key !== "reasoning_history" && key !== "chat_template_args",
+			)
+		) {
+			throw new AIError.ModelSelectionError(
+				"Native reasoning fragments may contain only their generated effort dialect.",
+			);
+		}
+		if (
+			(reasoningBody.reasoning_effort !== undefined && typeof reasoningBody.reasoning_effort !== "string") ||
+			(reasoningBody.reasoning_history !== undefined && typeof reasoningBody.reasoning_history !== "string") ||
+			(reasoningBody.chat_template_args !== undefined &&
+				(!isRecord(reasoningBody.chat_template_args) ||
+					Object.keys(reasoningBody.chat_template_args).some(key => key !== "enable_thinking") ||
+					typeof reasoningBody.chat_template_args.enable_thinking !== "boolean"))
+		) {
+			throw new AIError.ModelSelectionError(
+				"The native reasoning fragment does not match its producer's wire dialect.",
+			);
+		}
+		if (
+			selectionOptions.preserveThinkingEffort &&
+			(options?.reasoning !== undefined || options?.disableReasoning !== undefined)
+		) {
+			throw new AIError.ModelSelectionError(
+				"A native reasoning fragment cannot replace the admitted caller effort controls.",
+			);
+		}
+	}
+	applyOpenAIExtraBody(params, reasoningBody, {
+		dropThinkingWhenReasoningEffort: compat.dropThinkingWhenReasoningEffort,
+	});
+	if (selectionOptions.preserveThinkingEffort && model.reasoning) {
+		const templateArgs =
+			"chat_template_args" in params && isRecord(params.chat_template_args) ? params.chat_template_args : undefined;
+		const hasEffortControl =
+			model.thinking?.effortRouting !== undefined ||
+			params.reasoning_effort !== undefined ||
+			params.reasoning?.effort !== undefined ||
+			params.reasoning?.enabled !== undefined ||
+			params.reasoning?.max_tokens !== undefined ||
+			params.thinking?.type !== undefined ||
+			params.thinking?.effort !== undefined ||
+			params.enable_thinking !== undefined ||
+			params.chat_template_kwargs?.enable_thinking !== undefined ||
+			params.chat_template_kwargs?.thinking !== undefined ||
+			params.chat_template_kwargs?.reasoning_effort !== undefined ||
+			templateArgs?.enable_thinking !== undefined ||
+			templateArgs?.thinking !== undefined ||
+			templateArgs?.reasoning_effort !== undefined ||
+			params.venice_parameters?.disable_thinking !== undefined;
+		if (!hasEffortControl) {
+			throw new AIError.ModelSelectionError(
+				"The Chat Completions request cannot encode the selected fixed thinking effort.",
+			);
+		}
+		if (options?.disableReasoning && !model.thinking?.effortRouting) {
+			const disabled =
+				params.reasoning_effort === "none" ||
+				params.reasoning?.enabled === false ||
+				params.thinking?.type === "disabled" ||
+				params.enable_thinking === false ||
+				params.chat_template_kwargs?.enable_thinking === false ||
+				params.chat_template_kwargs?.thinking === false ||
+				templateArgs?.enable_thinking === false ||
+				templateArgs?.thinking === false ||
+				params.venice_parameters?.disable_thinking === true;
+			if (!disabled)
+				throw new AIError.ModelSelectionError("This Chat Completions endpoint cannot honor fixed Thinking Off.");
+		}
+	}
+	const encodedSelectionGuard = createRequestSelectionGuard(selectionOptions, params, payload =>
+		governedCompletionsSelection(payload, selectionOptions, model.thinking?.effortRouting !== undefined),
+	);
+	const selectionGuard = encodedSelectionGuard
+		? (serialized: string) => {
+				nativeModelGuard?.(serialized);
+				encodedSelectionGuard(serialized);
+			}
+		: undefined;
+	if (selectionOptions.preserveModelSelection || selectionOptions.preserveThinkingEffort) {
+		assertSafeGovernedJson(compat.extraBody);
+	}
 
 	applyOpenAIExtraBody(params, compat.extraBody, {
 		dropThinkingWhenReasoningEffort: compat.dropThinkingWhenReasoningEffort,
 	});
-	if (
-		governedSelection &&
-		(params.model !== governedSelection.model ||
-			params.reasoning_effort !== governedSelection.reasoningEffort ||
-			JSON.stringify(params.reasoning) !== governedSelection.reasoning)
-	) {
-		throw new AIError.ConfigurationError("Provider extraBody changed the governed model/effort selection.");
-	}
+	// The captured pre-config selection is checked against the final serialized
+	// body after the hook, so config and hook cannot jointly weaken the request.
 	applyOpenAIChatCompletionsPromptCachePolicy(params, model, options);
 
 	return {
@@ -2217,6 +2355,7 @@ function buildParams(
 		toolStrictMode,
 		strictToolsApplied,
 		reasoningEffortFallbackAllowed: finalPolicy.reasoning.disableReason !== "tools",
+		selectionGuard,
 	};
 }
 

@@ -10,6 +10,7 @@ import {
 	type ToolResultWithAdditionalContext,
 } from "@oh-my-pi/pi-agent-core";
 import type { Context, SimpleStreamOptions, ToolResultMessage } from "@oh-my-pi/pi-ai";
+import * as AIError from "@oh-my-pi/pi-ai/error";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { kCursorExecResolved } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
@@ -777,6 +778,70 @@ describe("Agent", () => {
 		}
 		expect(assistantEnd.message.stopReason).toBe("error");
 		expect(assistantEnd.message.errorMessage).toBe(errorText);
+	});
+
+	it("persists terminal admission identity from a wrapped pre-output dispatch failure", async () => {
+		const mock = createMockModel({ responses: [] });
+		const admission = new AIError.ModelSelectionError("Current model authority was revoked.", {
+			cause: new AIError.ProviderHttpError("503 service unavailable", 503),
+		});
+		const agent = new Agent({
+			initialState: { model: mock.model, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: () => {
+				const stream = new AssistantMessageEventStream();
+				queueMicrotask(() => stream.fail(new Error("Dispatch preparation failed", { cause: admission })));
+				return stream;
+			},
+		});
+		const events: AgentEvent[] = [];
+		agent.subscribe(event => events.push(event));
+
+		await agent.prompt("Run the selected model");
+
+		const message = agent.state.messages.at(-1);
+		if (message?.role !== "assistant") throw new Error("Expected a persisted admission failure");
+		expect(message.stopReason).toBe("error");
+		expect(message.errorStatus).toBe(503);
+		expect(AIError.is(message.errorId, AIError.Flag.HostAdmission)).toBe(true);
+		expect(AIError.retriable(AIError.classifyMessage(message))).toBe(false);
+		const assistantEvents = events.filter(
+			event =>
+				(event.type === "message_start" || event.type === "message_end") && event.message.role === "assistant",
+		);
+		expect(assistantEvents.map(event => event.type)).toEqual(["message_start", "message_end"]);
+		expect(events.slice(-2).map(event => event.type)).toEqual(["turn_end", "agent_end"]);
+		expect(agent.state.isStreaming).toBe(false);
+	});
+
+	it("settles caller cancellation instead of a concurrent admission failure", async () => {
+		const started = Promise.withResolvers<void>();
+		const agent = new Agent({
+			streamFn: (_model, _context, options) => {
+				const signal = options?.signal;
+				if (!signal) throw new Error("Expected the active caller signal");
+				const stream = new AssistantMessageEventStream();
+				signal.addEventListener(
+					"abort",
+					() => stream.fail(new AIError.ModelSelectionError("Admission refresh failed")),
+					{ once: true },
+				);
+				started.resolve();
+				return stream;
+			},
+		});
+		agent.replaceMessages([createAssistantMessage([{ type: "text", text: "ready" }])]);
+		agent.followUp({ role: "user", content: "continue", timestamp: Date.now() });
+		const controller = new AbortController();
+		const running = agent.continue(controller.signal);
+		await started.promise;
+		controller.abort("Interrupted by user");
+		await running;
+
+		const message = agent.state.messages.at(-1);
+		if (message?.role !== "assistant") throw new Error("Expected a persisted cancellation");
+		expect(message.stopReason).toBe("aborted");
+		expect(AIError.is(message.errorId, AIError.Flag.HostAdmission)).toBe(false);
+		expect(agent.state.isStreaming).toBe(false);
 	});
 
 	it("pairs tool calls from failed partial streams with synthetic tool results", async () => {

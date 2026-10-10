@@ -27,12 +27,7 @@ import * as path from "node:path";
 import { logger, prompt, Snowflake } from "@oh-my-pi/pi-utils";
 import type { AsyncJob, AsyncJobManager } from "../async/job-manager";
 import { validateAgentAccountPools } from "../config/account-pools";
-import {
-	normalizeModelPatternList,
-	resolveAgentModelSelection,
-	resolveExplicitModelRole,
-	splitRoleAliasThinkingSuffix,
-} from "../config/model-resolver";
+import { resolveAgentModelSelection } from "../config/model-resolver";
 import { sessionLocalProtocolOptions } from "../internal-urls/context";
 import { registerArtifactsDir } from "../internal-urls/registry-helpers";
 import { MCPManager } from "../mcp/manager";
@@ -110,6 +105,7 @@ export interface VibeParentSession {
 	asyncJobManager?: AsyncJobManager;
 	settings: ToolSession["settings"];
 	getActiveModelString?: () => string | undefined;
+	getActiveModelSelector?: () => string | undefined;
 	getModelString?: () => string | undefined;
 	getModelAuthoritySettings?: ToolSession["getModelAuthoritySettings"];
 }
@@ -127,7 +123,6 @@ interface ResolvedVibeWorker {
 	modelOverride?: string | string[];
 	/** Pre-expansion role alias behind {@link modelOverride}, when the worker agent named one. */
 	modelRole?: string;
-	configuredModelRole?: string;
 }
 
 interface VibeTurn {
@@ -151,7 +146,6 @@ interface VibeRecord {
 	modelOverride?: string | string[];
 	/** Pre-expansion role alias behind {@link modelOverride}, when the worker agent named one. */
 	modelRole?: string;
-	configuredModelRole?: string;
 	state: VibeSessionState;
 	createdAt: number;
 	lastActivityAt: number;
@@ -364,29 +358,19 @@ export class VibeSessionRegistry {
 		if (!agent) {
 			throw new ToolError(`Bundled agent "${agentName}" for vibe cli "${cli}" is unavailable.`);
 		}
-		const authoritySettings = session.getModelAuthoritySettings?.() ?? session.settings;
-		const agentModelOverrides = cfgTaskAgentModelOverrides.get(authoritySettings);
+		const agentModelOverrides = cfgTaskAgentModelOverrides.get(session.settings);
 		const override = Object.hasOwn(agentModelOverrides, agentName) ? agentModelOverrides[agentName] : undefined;
-		let source = normalizeModelPatternList(override).length > 0 ? override : agent.model;
-		let configuredModelRole: string | undefined;
-		const patterns = normalizeModelPatternList(source);
-		if (source === agent.model && patterns.length === 1) {
-			const { base, level } = splitRoleAliasThinkingSuffix(patterns[0]);
-			if (base === "@task" && !authoritySettings.getModelRole("task")) {
-				source = level === undefined ? "@default" : `@default:${level}`;
-			} else if (base === "@smol" && !authoritySettings.getModelRole("smol")) {
-				if (authoritySettings.getModelRole("default")) {
-					configuredModelRole = "default";
-					source = level === undefined ? "@default" : `@default:${level}`;
-				} else
-					source = resolveAgentModelSelection({ agentModel: agent.model, settings: authoritySettings }).patterns;
-			}
-		}
+		const { patterns, role } = resolveAgentModelSelection({
+			settingsOverride: override,
+			agentModel: agent.model,
+			settings: session.settings,
+			activeModelPattern: session.getActiveModelString?.(),
+			fallbackModelPattern: session.getModelString?.(),
+		});
 		return {
 			agent,
-			modelOverride: source ?? ["@default"],
-			modelRole: resolveExplicitModelRole(source, authoritySettings),
-			configuredModelRole,
+			modelOverride: patterns.length > 0 ? patterns : undefined,
+			modelRole: role,
 		};
 	}
 
@@ -779,7 +763,7 @@ export class VibeSessionRegistry {
 				existing.sessionFile === childSessionFile &&
 				(existing.status === "idle" || existing.status === "parked");
 			const blockedByCollision = Boolean(existing && !existingIsResumable);
-			const { agent, modelOverride, modelRole, configuredModelRole } = this.#resolveWorker(session, spawn.cli);
+			const { agent, modelOverride, modelRole } = this.#resolveWorker(session, spawn.cli);
 			if (!existing) {
 				AgentRegistry.global().register({
 					id: spawn.id,
@@ -801,7 +785,6 @@ export class VibeSessionRegistry {
 				agent,
 				modelOverride,
 				modelRole,
-				configuredModelRole,
 				state: "idle",
 				createdAt: spawn.createdAt,
 				lastActivityAt: candidate.lastActivityAt,
@@ -836,7 +819,7 @@ export class VibeSessionRegistry {
 			throw new ToolError("Vibe mode has exited; enter Vibe mode again before spawning a worker.");
 		}
 		const manager = this.#manager(session);
-		const { agent, modelOverride, modelRole, configuredModelRole } = this.#resolveWorker(session, args.cli);
+		const { agent, modelOverride, modelRole } = this.#resolveWorker(session, args.cli);
 		if (!session.agentOutputManager) {
 			session.agentOutputManager = new AgentOutputManager(session.getArtifactsDir ?? (() => null));
 		}
@@ -861,7 +844,6 @@ export class VibeSessionRegistry {
 			agent,
 			modelOverride,
 			modelRole,
-			configuredModelRole,
 			state: "starting",
 			createdAt,
 			lastActivityAt: createdAt,
@@ -1318,12 +1300,12 @@ export class VibeSessionRegistry {
 			detached: true,
 			modelOverride: record.modelOverride,
 			modelRole: record.modelRole,
-			configuredModelRole: record.configuredModelRole,
+			parentActiveModelPattern: session.getActiveModelString?.(),
 			modelAuthority: {
 				settings: session.getModelAuthoritySettings?.() ?? session.settings,
 				agentName: record.agent.name,
 				agentModel: record.agent.model,
-				getParentSelector: () => session.getActiveModelString?.(),
+				getParentSelector: () => session.getActiveModelSelector?.(),
 				getParentModel: () => session.getActiveModel?.(),
 			},
 			thinkingLevel: record.agent.thinkingLevel,

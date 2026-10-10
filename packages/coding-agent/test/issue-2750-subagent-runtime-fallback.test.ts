@@ -1,24 +1,32 @@
-import { afterEach, describe, expect, it, vi } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
-import type { AssistantMessage, Model } from "@oh-my-pi/pi-ai";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { ModelRegistry, type ProviderConfigInput } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import type { CreateAgentSessionOptions } from "@oh-my-pi/pi-coding-agent/sdk";
+import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
+import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import * as sdkModule from "@oh-my-pi/pi-coding-agent/sdk";
-import type { AgentSession, AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
-import { parseRetryFallbackSelector } from "@oh-my-pi/pi-coding-agent/session/retry-fallback-chains";
-import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { TurnRecovery, type TurnRecoveryHost } from "@oh-my-pi/pi-coding-agent/session/turn-recovery";
-import { runSubprocess } from "@oh-my-pi/pi-coding-agent/task/executor";
-import { resolveRoleRoute } from "@oh-my-pi/pi-coding-agent/task/role-routing";
+import { getBundledAgent, parseAgent } from "@oh-my-pi/pi-coding-agent/task/agents";
+import { type ExecutorOptions, runSubprocess } from "@oh-my-pi/pi-coding-agent/task/executor";
 import type { AgentProgress } from "@oh-my-pi/pi-tui/tools/task";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import * as path from "node:path";
-import { createSessionDefaults } from "./helpers/session-defaults";
 
 type RuntimeModelDefinition = NonNullable<ProviderConfigInput["models"]>[number] & { provider: string };
+interface ServedRequest {
+	selector: string;
+	purpose: "classification" | "work";
+	reasoning_effort?: string;
+	tool_choice?: unknown;
+}
+interface RuntimeFixture {
+	registry: ModelRegistry;
+	cwd: string;
+	requests: ServedRequest[];
+}
+type ScriptedResponse = "yield" | "answer" | "read" | "unavailable";
 
 function modelDefinition(provider: string, id: string): RuntimeModelDefinition {
 	return {
@@ -26,9 +34,10 @@ function modelDefinition(provider: string, id: string): RuntimeModelDefinition {
 		id,
 		name: id,
 		api: "openai-completions",
-		baseUrl: `https://${provider}.example.test/v1`,
 		reasoning: true,
-		thinking: { mode: "effort", efforts: [Effort.Low, Effort.High, Effort.Max] },
+		thinking: { mode: "effort", efforts: [Effort.Low, Effort.Medium, Effort.High, Effort.Max] },
+		compat: { supportsReasoningEffort: true, thinkingFormat: "openai" },
+		supportsTools: true,
 		input: ["text"],
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 		contextWindow: 128000,
@@ -42,164 +51,134 @@ const unrelated = modelDefinition("issue2750-global", "other-model");
 const primarySelector = `${primary.provider}/${primary.id}`;
 const fallbackSelector = `${fallback.provider}/${fallback.id}`;
 const unrelatedSelector = `${unrelated.provider}/${unrelated.id}`;
-const resources: Array<{ dir: TempDir; authStorage: AuthStorage }> = [];
+const createAgentSession = sdkModule.createAgentSession;
+const sessions: AgentSession[] = [];
+const resources: Array<{ dir: TempDir; authStorage: AuthStorage; stop: () => void }> = [];
 
-async function createRegistry(models: RuntimeModelDefinition[] = [primary, fallback, unrelated]) {
+beforeEach(() => {
+	AgentRegistry.resetGlobalForTests();
+	AgentLifecycleManager.resetGlobalForTests();
+	// Only discovery/tool breadth is isolated; the SDK and recovery are real.
+	vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
+		if (!options) throw new Error("Expected worker options");
+		const result = await createAgentSession({
+			...options,
+			agentDir: options.cwd,
+			disableExtensionDiscovery: true,
+			extensions: [],
+			skills: [],
+			rules: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableMCP: false,
+			enableLsp: false,
+			skipPythonPreflight: true,
+			preloadedCustomToolPaths: [],
+			toolNames: ["read", "yield"],
+		});
+		sessions.push(result.session);
+		return result;
+	});
+});
+
+async function createRegistry(
+	models: RuntimeModelDefinition[] = [primary, fallback, unrelated],
+	response: (request: ServedRequest, index: number) => ScriptedResponse = () => "yield",
+): Promise<RuntimeFixture> {
+	const requests: ServedRequest[] = [];
+	let workRequestCount = 0;
+	const server = Bun.serve({
+		hostname: "127.0.0.1",
+		port: 0,
+		fetch: async request => {
+			const body = (await request.json()) as {
+				model: string;
+				reasoning_effort?: string;
+				tool_choice?: unknown;
+				tools?: Array<{ function?: { name?: string } }>;
+			};
+			const provider = new URL(request.url).pathname.split("/")[1]!;
+			// AUTO judgments use the real text-judge protocol, not the worker's yield schema.
+			const classification = !body.tools?.some(tool => tool.function?.name === "yield");
+			const served: ServedRequest = {
+				selector: `${provider}/${body.model}`,
+				purpose: classification ? "classification" : "work",
+				reasoning_effort: body.reasoning_effort,
+				tool_choice: body.tool_choice,
+			};
+			requests.push(served);
+			const next = classification ? "classification" : response(served, workRequestCount++);
+			if (next === "unavailable") {
+				return Response.json({ error: { message: "Model unavailable at this endpoint" } }, { status: 404 });
+			}
+			const delta =
+				next === "classification" || next === "answer"
+					? { role: "assistant", content: next === "classification" ? "medium" : "work completed" }
+					: {
+							role: "assistant",
+							tool_calls: [
+								{
+									index: 0,
+									id: "runtime-yield",
+									type: "function",
+									function:
+										next === "read"
+											? { name: "read", arguments: '{"path":"worker-input.txt"}' }
+											: { name: "yield", arguments: '{"data":{"completed":true}}' },
+								},
+							],
+						};
+			return new Response(
+				`data: ${JSON.stringify({
+					id: "runtime-fixture",
+					object: "chat.completion.chunk",
+					created: 0,
+					choices: [{ index: 0, delta }],
+				})}\n\n` +
+					`data: ${JSON.stringify({
+						id: "runtime-fixture",
+						object: "chat.completion.chunk",
+						created: 0,
+						choices: [
+							{
+								index: 0,
+								delta: {},
+								finish_reason: next === "answer" || next === "classification" ? "stop" : "tool_calls",
+							},
+						],
+					})}\n\n` +
+					"data: [DONE]\n\n",
+				{ headers: { "content-type": "text/event-stream" } },
+			);
+		},
+	});
 	const dir = TempDir.createSync("omp-subagent-runtime-route-");
+	await Bun.write(dir.join("worker-input.txt"), "worker fixture input");
 	const authStorage = await AuthStorage.create(":memory:");
-	resources.push({ dir, authStorage });
+	resources.push({ dir, authStorage, stop: () => server.stop(true) });
 	const registry = new ModelRegistry(authStorage, path.join(dir.path(), "models.yml"));
 	for (const provider of new Set(models.map(candidate => candidate.provider))) {
-		const candidates = models.filter(candidate => candidate.provider === provider);
+		const baseUrl = new URL(`${provider}/v1`, server.url).toString();
 		registry.registerProvider(provider, {
-			api: candidates[0]!.api,
-			baseUrl: candidates[0]!.baseUrl,
+			api: "openai-completions",
+			baseUrl,
 			apiKey: "test-key",
-			models: candidates,
+			models: models
+				.filter(candidate => candidate.provider === provider)
+				.map(candidate => ({ ...candidate, baseUrl })),
 		});
 	}
-	return { registry, cwd: dir.path() };
+	return { registry, cwd: dir.path(), requests };
 }
 
-function answer(model: Model): AssistantMessage {
-	return {
-		role: "assistant",
-		provider: model.provider,
-		model: model.id,
-		api: model.api,
-		content: [{ type: "text", text: "work completed" }],
-		stopReason: "stop",
-		timestamp: 0,
-		usage: {
-			input: 1,
-			output: 1,
-			cacheRead: 0,
-			cacheWrite: 0,
-			totalTokens: 2,
-			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-		},
-	};
-}
-
-/** Real retry recovery, with only the provider turn and SDK construction replaced. */
-function createYieldingSession(
-	options: CreateAgentSessionOptions,
-	retry: "served" | "unproven" | "if-available" | "none" = "none",
-	attempt?: string,
-): AgentSession {
-	if (!options.roleRoute || !options.modelRegistry || !options.sessionManager)
-		throw new Error("Expected admitted worker");
-	const selection = resolveRoleRoute(options.roleRoute, options.modelRegistry);
-	let activeModel = selection.model;
-	let activeLevel = selection.thinkingLevel as ThinkingLevel | undefined;
-	const listeners = new Set<(event: AgentSessionEvent) => void>();
-	const emit = async (event: AgentSessionEvent) => {
-		for (const listener of listeners) listener(event);
-	};
-	// Only direct route validation, retry adoption and served-turn attribution are
-	// exercised; compaction, continuation and provider-error recovery are not driven.
-	const recoveryHost = {
-		roleRoute: options.roleRoute,
-		modelRegistry: options.modelRegistry,
-		settings: options.settings!,
-		sessionManager: options.sessionManager,
-		model: () => activeModel,
-		thinkingLevel: () => activeLevel,
-		configuredThinkingLevel: () => activeLevel,
-		thinkingLevelCeiling: () => options.thinkingLevelCeiling,
-		setThinkingLevel: level => {
-			activeLevel = level as ThinkingLevel | undefined;
-		},
-		setModelWithProviderSessionReset: async (next, nextOptions) => {
-			activeModel = next;
-			if (nextOptions) activeLevel = nextOptions.thinkingLevel as ThinkingLevel | undefined;
-		},
-		sessionId: () => options.sessionManager!.getSessionId(),
-		resolveActiveEditMode: () => "replace",
-		syncAfterModelChange: async () => {},
-		emitSessionEvent: emit,
-		configWarnings: [],
-	} satisfies Pick<
-		TurnRecoveryHost,
-		| "roleRoute"
-		| "modelRegistry"
-		| "settings"
-		| "sessionManager"
-		| "model"
-		| "thinkingLevel"
-		| "configuredThinkingLevel"
-		| "thinkingLevelCeiling"
-		| "setThinkingLevel"
-		| "setModelWithProviderSessionReset"
-		| "sessionId"
-		| "resolveActiveEditMode"
-		| "syncAfterModelChange"
-		| "emitSessionEvent"
-		| "configWarnings"
-	>;
-	const recovery = new TurnRecovery(recoveryHost as unknown as TurnRecoveryHost);
-	return {
-		...createSessionDefaults(),
-		agent: { state: { systemPrompt: ["test"] } },
-		state: { messages: [] },
-		get model() {
-			return activeModel;
-		},
-		get thinkingLevel() {
-			return activeLevel;
-		},
-		get servingModel() {
-			return recovery.servingModel;
-		},
-		extensionRunner: undefined,
-		sessionManager: options.sessionManager,
-		dispose: async () => {
-			await options.sessionManager!.close();
-		},
-		getActiveToolNames: () => ["yield"],
-		getEnabledToolNames: () => ["yield"],
-		subscribe: (listener: (event: AgentSessionEvent) => void) => {
-			listeners.add(listener);
-			return () => {
-				listeners.delete(listener);
-			};
-		},
-		prompt: async () => {
-			await recovery.onAssistantSettledSuccessfully(answer(activeModel));
-			if (retry !== "none" || attempt) {
-				const role = recovery.retryFallbackChainKeys(selection.selector)[0]!;
-				const candidate = attempt
-					? parseRetryFallbackSelector(attempt, options.modelRegistry!)
-					: recovery.findRetryFallbackCandidates(role, selection.selector)[0];
-				if (!candidate && retry !== "if-available") throw new Error("Expected an approved retry candidate");
-				if (candidate) {
-					await recovery.applyRetryFallbackCandidate(role, candidate, selection.selector);
-					if (retry !== "unproven") await recovery.onAssistantSettledSuccessfully(answer(activeModel));
-				}
-			}
-			await emit({
-				type: "tool_execution_end",
-				toolCallId: "tool-yield",
-				toolName: "yield",
-				result: {
-					content: [{ type: "text", text: "Result submitted." }],
-					details: { status: "success", data: { completed: true } },
-				},
-				isError: false,
-			});
-			return true;
-		},
-	} as unknown as AgentSession;
-}
-
-function installSession(retry: "served" | "unproven" | "if-available" | "none" = "none", attempt?: string) {
-	return vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
-		if (!options) throw new Error("Expected worker options");
-		return {
-			session: createYieldingSession(options, retry, attempt),
-			extensionsResult: {},
-			setToolUIContext: () => {},
-		} as never;
+function retrySettings(overrides: Readonly<Record<string, unknown>> = {}) {
+	return Settings.isolated({
+		"compaction.enabled": false,
+		"todo.enabled": false,
+		"retry.baseDelayMs": 1,
+		"retry.maxRetries": 1,
+		...overrides,
 	});
 }
 
@@ -209,11 +188,32 @@ const agent = {
 	systemPrompt: "test",
 	source: "bundled" as const,
 	model: [primarySelector],
+	tools: ["yield"],
 };
 
+function workerOptions(fixture: RuntimeFixture, settings = retrySettings()): ExecutorOptions {
+	return {
+		cwd: fixture.cwd,
+		agent,
+		task: "work",
+		index: 0,
+		id: "runtime-worker",
+		settings,
+		modelRegistry: fixture.registry,
+		enableLsp: false,
+		enableIrc: false,
+		restrictToolNames: true,
+	};
+}
+
 afterEach(async () => {
+	await AgentLifecycleManager.global().dispose();
+	await Promise.all(sessions.splice(0).map(session => session.dispose()));
 	vi.restoreAllMocks();
-	for (const { dir, authStorage } of resources.splice(0)) {
+	AgentLifecycleManager.resetGlobalForTests();
+	AgentRegistry.resetGlobalForTests();
+	for (const { dir, authStorage, stop } of resources.splice(0)) {
+		stop();
 		authStorage.close();
 		await dir.remove();
 	}
@@ -221,153 +221,376 @@ afterEach(async () => {
 
 describe("subagent runtime model resolution", () => {
 	for (const level of [undefined, ThinkingLevel.High]) {
-		it(`keeps a literal model-id colon separate from effort (${level ?? "unset"})`, async () => {
+		it(`serves a literal model-id colon separately from effort (${level ?? "unset"})`, async () => {
 			const literal = modelDefinition("issue2750-literal", "coding-router:max");
-			const { registry, cwd } = await createRegistry([literal]);
-			const selector = `${literal.provider}/${literal.id}${level ? `:${level}` : ""}`;
+			const fixture = await createRegistry([literal]);
+			const identity = `${literal.provider}/${literal.id}`;
+			const selector = `${identity}${level ? `:${level}` : ""}`;
 			const snapshots: AgentProgress[] = [];
-			installSession();
 			const result = await runSubprocess({
-				cwd,
-				agent: { ...agent, model: [`${literal.provider}/${literal.id}`] },
-				task: "work",
-				index: 0,
-				id: "literal-model",
+				...workerOptions(fixture),
+				agent: { ...agent, model: [identity] },
 				modelOverride: selector,
-				settings: Settings.isolated(),
-				modelRegistry: registry,
-				enableLsp: false,
+				explicitModelSelection: true,
 				onProgress: progress => snapshots.push({ ...progress }),
 			});
 			expect(result.exitCode, result.stderr).toBe(0);
-			expect(result.resolvedModel).toBe(selector);
-			expect(result.resolvedModelIdentity).toBe(`${literal.provider}/${literal.id}`);
-			expect(result.resolvedThinkingLevel).toBe(level);
-			expect(snapshots.findLast(progress => progress.resolvedModel)?.resolvedModelIdentity).toBe(
-				`${literal.provider}/${literal.id}`,
-			);
+			expect(fixture.requests.map(request => request.selector)).toEqual([identity]);
+			if (level) expect(fixture.requests[0]?.reasoning_effort).toBe(level);
+			expect(result.resolvedModelIdentity).toBe(identity);
+			expect(snapshots.findLast(progress => progress.resolvedModel)?.resolvedModelIdentity).toBe(identity);
 		});
 	}
 
-	it("retries inside the actual selected role chain even when default shares its primary", async () => {
-		const { registry, cwd } = await createRegistry();
-		const settings = Settings.isolated({
+	for (const mode of ["agent alias", "pre-expanded implicit role"] as const) {
+		it(`omitted retries inherit the selected singleton role rather than a shared-primary default (${mode})`, async () => {
+			const fixture = await createRegistry(undefined, request =>
+				request.selector === primarySelector ? "unavailable" : "yield",
+			);
+			const settings = retrySettings({
+				modelRoles: { qa: primarySelector, default: primarySelector },
+				"retry.fallbackChains": { qa: [`${fallbackSelector}:high`], default: [unrelatedSelector] },
+			});
+			const result = await runSubprocess({
+				...workerOptions(fixture, settings),
+				agent: { ...agent, model: ["@qa"] },
+				...(mode === "pre-expanded implicit role" ? { modelOverride: [primarySelector], modelRole: "qa" } : {}),
+			});
+			expect(result.exitCode, result.stderr).toBe(0);
+			expect(fixture.requests.map(request => request.selector)).toEqual([primarySelector, fallbackSelector]);
+			expect(fixture.requests.at(-1)?.reasoning_effort).toBe("high");
+			expect(result.resolvedModel).toBe(`${fallbackSelector}:high`);
+			expect(result.resolvedModelIsFallback).toBe(true);
+		});
+	}
+
+	for (const model of [[primarySelector], ["@qa"]]) {
+		it(`omitted singleton ${model[0]} inherits the configured default retry chain`, async () => {
+			const fixture = await createRegistry(undefined, request =>
+				request.selector === primarySelector ? "unavailable" : "yield",
+			);
+			const settings = retrySettings({
+				modelRoles: { qa: primarySelector, default: primarySelector },
+				"retry.fallbackChains": { default: [`${fallbackSelector}:high`] },
+			});
+			const result = await runSubprocess({
+				...workerOptions(fixture, settings),
+				agent: { ...agent, model },
+			});
+			expect(result.exitCode, result.stderr).toBe(0);
+			expect(fixture.requests.map(request => request.selector)).toEqual([primarySelector, fallbackSelector]);
+			expect(fixture.requests.at(-1)?.reasoning_effort).toBe("high");
+			expect(result.resolvedModelIdentity).toBe(fallbackSelector);
+		});
+	}
+
+	it("omitted ordered agent models keep their fallback reachable when default shares the primary", async () => {
+		const fixture = await createRegistry(undefined, request =>
+			request.selector === primarySelector ? "unavailable" : "yield",
+		);
+		const result = await runSubprocess({
+			...workerOptions(
+				fixture,
+				retrySettings({
+					modelRoles: { default: primarySelector },
+					"retry.fallbackChains": { default: [unrelatedSelector] },
+				}),
+			),
+			agent: { ...agent, model: [primarySelector, `${fallbackSelector}:high`] },
+		});
+		expect(result.exitCode, result.stderr).toBe(0);
+		expect(fixture.requests.map(request => request.selector)).toEqual([primarySelector, fallbackSelector]);
+		expect(fixture.requests.at(-1)?.reasoning_effort).toBe("high");
+	});
+
+	for (const explicit of [false, true]) {
+		it(`${explicit ? "explicit pin refuses" : "omitted worker serves"} the configured provider-wildcard fallback`, async () => {
+			const mirror = modelDefinition(fallback.provider, primary.id);
+			const mirrorSelector = `${mirror.provider}/${mirror.id}`;
+			const fixture = await createRegistry([primary, mirror, unrelated], request =>
+				request.selector === primarySelector ? "unavailable" : "yield",
+			);
+			const settings = retrySettings({
+				modelRoles: { default: primarySelector },
+				"retry.fallbackChains": { [`${primary.provider}/*`]: [`${mirror.provider}/*`] },
+			});
+			const result = await runSubprocess({
+				...workerOptions(fixture, settings),
+				...(explicit ? { modelOverride: primarySelector, explicitModelSelection: true } : {}),
+			});
+			expect(result.exitCode, result.stderr).toBe(explicit ? 1 : 0);
+			expect(fixture.requests.map(request => request.selector)).toEqual(
+				explicit ? [primarySelector] : [primarySelector, mirrorSelector],
+			);
+			if (!explicit) expect(result.resolvedModelIdentity).toBe(mirrorSelector);
+		});
+	}
+
+	it("explicit role retries stay in that role's chain and retain exact fallback effort above the coarse ceiling", async () => {
+		const fixture = await createRegistry(undefined, request =>
+			request.selector === primarySelector ? "unavailable" : "yield",
+		);
+		const settings = retrySettings({
 			modelRoles: { qa: primarySelector, default: primarySelector },
 			"retry.fallbackChains": { qa: [`${fallbackSelector}:high`], default: [unrelatedSelector] },
 			"task.maxEffort": "low",
 		});
-		const snapshots: AgentProgress[] = [];
-		installSession("served");
 		const result = await runSubprocess({
-			cwd,
-			agent,
-			task: "work",
-			index: 0,
-			id: "configured-role",
+			...workerOptions(fixture, settings),
 			modelOverride: "@qa",
-			settings,
-			modelRegistry: registry,
-			enableLsp: false,
-			onProgress: progress => snapshots.push({ ...progress }),
+			explicitModelSelection: true,
 		});
 		expect(result.exitCode, result.stderr).toBe(0);
-		expect(result.resolvedModel).toBe(`${fallbackSelector}:high`);
+		expect(fixture.requests.map(request => request.selector)).toEqual([primarySelector, fallbackSelector]);
+		expect(fixture.requests.at(-1)?.reasoning_effort).toBe("high");
 		expect(result.resolvedThinkingLevel).toBe(ThinkingLevel.High);
-		expect(result.resolvedModelIsFallback).toBe(true);
-		expect(snapshots.findLast(progress => progress.resolvedModel)?.resolvedModel).toBe(`${fallbackSelector}:high`);
 	});
 
-	it("keeps a literal pin closed instead of inheriting the default retry chain", async () => {
-		const { registry, cwd } = await createRegistry();
-		installSession("if-available");
+	it("explicit literal retries stay closed even when another role and default authorize the fallback", async () => {
+		const fixture = await createRegistry(undefined, request =>
+			request.selector === primarySelector ? "unavailable" : "yield",
+		);
 		const result = await runSubprocess({
-			cwd,
-			agent,
-			task: "work",
-			index: 0,
-			id: "literal-pin",
+			...workerOptions(
+				fixture,
+				retrySettings({
+					modelRoles: { other: unrelatedSelector, default: primarySelector },
+					"retry.fallbackChains": { default: [unrelatedSelector] },
+				}),
+			),
 			modelOverride: primarySelector,
-			settings: Settings.isolated({
-				modelRoles: { default: primarySelector },
-				"retry.fallbackChains": { default: [unrelatedSelector] },
-			}),
-			modelRegistry: registry,
-			enableLsp: false,
-		});
-		expect(result.exitCode, result.stderr).toBe(0);
-		expect(result.resolvedModel).toBe(primarySelector);
-	});
-
-	it("blocks a retry outside the literal closure even when another role authorizes its model", async () => {
-		const { registry, cwd } = await createRegistry();
-		installSession("served", unrelatedSelector);
-		const result = await runSubprocess({
-			cwd,
-			agent,
-			task: "work",
-			index: 0,
-			id: "escaped-retry",
-			modelOverride: primarySelector,
-			settings: Settings.isolated({ modelRoles: { other: unrelatedSelector } }),
-			modelRegistry: registry,
-			enableLsp: false,
+			explicitModelSelection: true,
 		});
 		expect(result.exitCode, result.stderr).toBe(1);
-		expect(result.stderr).toContain("remaining approved occurrence");
-		expect(result.resolvedModel).toBe(primarySelector);
+		expect(fixture.requests.map(request => request.selector)).toEqual([primarySelector]);
 	});
 
-	it("does not credit an approved fallback that was armed but never served a turn", async () => {
-		const { registry, cwd } = await createRegistry();
-		installSession("unproven");
+	it("does not credit an approved fallback that failed before serving any work", async () => {
+		const fixture = await createRegistry(undefined, (_request, index) => (index === 0 ? "answer" : "unavailable"));
 		const result = await runSubprocess({
-			cwd,
-			agent,
-			task: "work",
-			index: 0,
-			id: "unproven-fallback",
+			...workerOptions(
+				fixture,
+				retrySettings({
+					modelRoles: { qa: primarySelector },
+					"retry.fallbackChains": { qa: [fallbackSelector] },
+				}),
+			),
 			modelOverride: "@qa",
-			settings: Settings.isolated({
-				modelRoles: { qa: primarySelector },
-				"retry.fallbackChains": { qa: [fallbackSelector] },
-			}),
-			modelRegistry: registry,
-			enableLsp: false,
+			explicitModelSelection: true,
 		});
-		expect(result.exitCode, result.stderr).toBe(0);
-		expect(result.resolvedModel).toBe(primarySelector);
-	});
-
-	it("persists role-routing selection diagnostics instead of a transcript retry grant (#13789)", async () => {
-		const { registry, cwd } = await createRegistry();
-		installSession();
-		const result = await runSubprocess({
-			cwd,
-			agent,
-			task: "work",
-			index: 0,
-			id: "persisted-route",
-			modelOverride: "@qa",
-			settings: Settings.isolated({
-				modelRoles: { qa: primarySelector },
-				"retry.fallbackChains": { qa: [fallbackSelector] },
-			}),
-			modelRegistry: registry,
-			enableLsp: false,
-			artifactsDir: cwd,
-		});
-		expect(result.exitCode, result.stderr).toBe(0);
-		const persisted = (await SessionManager.peekSessionInit(path.join(cwd, "persisted-route.jsonl")))?.init;
-		expect(persisted?.roleRouting?.occurrences.map(candidate => candidate.pattern)).toEqual([
+		expect(result.exitCode, result.stderr).toBe(1);
+		expect(fixture.requests.map(request => request.selector)).toEqual([
+			primarySelector,
 			primarySelector,
 			fallbackSelector,
 		]);
-		expect(persisted?.roleRouting?.dependencies).toContainEqual({
-			role: "qa",
-			value: primarySelector,
-			fallbacks: [fallbackSelector],
-			fallbacksConfigured: true,
-		});
-		expect(persisted?.retryFallback).toBeUndefined();
+		expect(result.resolvedModelIdentity).toBe(primarySelector);
+		expect(result.resolvedModelIsFallback).toBe(false);
 	});
+
+	for (const [name, id] of [
+		["scout", "claude-haiku-5-5"],
+		["reviewer", "gpt-5.6-sol"],
+	] as const) {
+		it(`stock ${name} omission serves a fresh-role priority candidate instead of the live parent`, async () => {
+			const priority = modelDefinition("issue2750-priority", id);
+			const fixture = await createRegistry([primary, priority]);
+			const stock = getBundledAgent(name);
+			if (!stock) throw new Error(`Expected stock ${name} agent`);
+			const settings = retrySettings();
+			const result = await runSubprocess({
+				...workerOptions(fixture, settings),
+				agent: stock,
+				thinkingLevel: stock.thinkingLevel,
+				modelAuthority: {
+					settings,
+					agentName: stock.name,
+					agentModel: stock.model,
+					getParentModel: () => fixture.registry.find(primary.provider, primary.id),
+					getParentSelector: () => `${primarySelector}:high`,
+				},
+			});
+			expect(result.exitCode, result.stderr).toBe(0);
+			expect(fixture.requests.map(request => request.selector)).toEqual([`${priority.provider}/${priority.id}`]);
+		});
+	}
+
+	for (const [alias, selector] of [
+		["pi/task", primarySelector],
+		["pi/smol", fallbackSelector],
+		["pi/slow", unrelatedSelector],
+	] as const) {
+		it(`omitted agent-file ${alias} retains legacy role resolution`, async () => {
+			const fixture = await createRegistry();
+			const settings = retrySettings({
+				modelRoles: { task: primarySelector, smol: fallbackSelector, slow: unrelatedSelector },
+			});
+			const result = await runSubprocess({
+				...workerOptions(fixture, settings),
+				agent: parseAgent(
+					path.join(fixture.cwd, "legacy-agent.md"),
+					`---\nname: legacy-agent\ndescription: test\nmodel: ${alias}\ntools: yield\n---\nWork`,
+					"project",
+				),
+			});
+			expect(result.exitCode, result.stderr).toBe(0);
+			expect(fixture.requests.map(request => request.selector)).toEqual([selector]);
+		});
+	}
+
+	it("omitted agent-file model: default inherits the live parent rather than the configured default", async () => {
+		const fixture = await createRegistry();
+		const settings = retrySettings({ modelRoles: { default: unrelatedSelector } });
+		const fileAgent = parseAgent(
+			path.join(fixture.cwd, "inherit-agent.md"),
+			"---\nname: inherit-agent\ndescription: test\nmodel: default\ntools: yield\n---\nWork",
+			"project",
+		);
+		const result = await runSubprocess({
+			...workerOptions(fixture, settings),
+			agent: fileAgent,
+			parentActiveModelPattern: primarySelector,
+			modelAuthority: {
+				settings,
+				agentName: fileAgent.name,
+				agentModel: fileAgent.model,
+				getParentModel: () => fixture.registry.find(primary.provider, primary.id),
+				getParentSelector: () => `${primarySelector}:high`,
+			},
+		});
+		expect(result.exitCode, result.stderr).toBe(0);
+		expect(fixture.requests.map(request => request.selector)).toEqual([primarySelector]);
+	});
+
+	for (const [pattern, id] of [
+		["claude-sonnet", "claude-sonnet-fixture"],
+		["gpt-5", "gpt-5-fixture"],
+	] as const) {
+		it(`omitted configured fuzzy ${pattern} serves the matching catalog model without an exact pin`, async () => {
+			const fuzzy = modelDefinition("issue2750-fuzzy", id);
+			const fixture = await createRegistry([primary, fuzzy]);
+			const result = await runSubprocess({
+				...workerOptions(fixture, retrySettings({ modelRoles: { task: pattern } })),
+				agent: { ...agent, model: ["@task"] },
+			});
+			expect(result.exitCode, result.stderr).toBe(0);
+			expect(fixture.requests.map(request => request.selector)).toEqual([`${fuzzy.provider}/${fuzzy.id}`]);
+		});
+	}
+
+	it("omitted disabled frontmatter serves the enabled configured default", async () => {
+		const fixture = await createRegistry();
+		const settings = retrySettings({
+			disabledProviders: [primary.provider],
+			modelRoles: { default: fallbackSelector },
+		});
+		const result = await runSubprocess({
+			...workerOptions(fixture, settings),
+			agent: parseAgent(
+				path.join(fixture.cwd, "disabled-agent.md"),
+				`---\nname: disabled-agent\ndescription: test\nmodel: ${primarySelector}\ntools: yield\n---\nWork`,
+				"project",
+			),
+		});
+		expect(result.exitCode, result.stderr).toBe(0);
+		expect(fixture.requests.map(request => request.selector)).toEqual([fallbackSelector]);
+	});
+
+	it("fixed-high final yield survives forced-tool reasoning suppression without weakening the request", async () => {
+		const fixed = modelDefinition("issue2750-forced-tool", "kimi-style");
+		fixed.compat = {
+			...fixed.compat,
+			supportsForcedToolChoice: true,
+			disableReasoningOnForcedToolChoice: true,
+		};
+		const selector = `${fixed.provider}/${fixed.id}`;
+		const fixture = await createRegistry([fixed], (_request, index) => (index < 3 ? "answer" : "yield"));
+		const result = await runSubprocess({
+			...workerOptions(fixture),
+			agent: { ...agent, model: [selector] },
+			modelOverride: `${selector}:high`,
+			explicitModelSelection: true,
+		});
+		expect(result.exitCode, result.stderr).toBe(0);
+		expect(fixture.requests).toHaveLength(4);
+		expect(
+			fixture.requests.every(request => request.selector === selector && request.reasoning_effort === "high"),
+		).toBe(true);
+		const toolChoice = fixture.requests.at(-1)?.tool_choice;
+		if (toolChoice !== undefined && typeof toolChoice !== "string") {
+			throw new Error("Expected final yield tool choice to be omitted or a string");
+		}
+		expect([undefined, "auto"]).toContain(toolChoice);
+	});
+
+	for (const explicit of [false, true]) {
+		it(`${explicit ? "explicit @default refuses its next inference" : "stock @task omission keeps serving its initial parent"} after the live parent switches`, async () => {
+			let liveParent = primary;
+			const fixture = await createRegistry(undefined, (_request, index) => {
+				if (index === 0) {
+					liveParent = fallback;
+					return "read";
+				}
+				return "yield";
+			});
+			const stockTask = getBundledAgent("task");
+			if (!stockTask) throw new Error("Expected stock task agent");
+			const settings = retrySettings();
+			const result = await runSubprocess({
+				...workerOptions(fixture, settings),
+				agent: stockTask,
+				thinkingLevel: stockTask.thinkingLevel,
+				...(explicit ? { modelOverride: "@default", explicitModelSelection: true } : {}),
+				modelAuthority: {
+					settings,
+					agentName: stockTask.name,
+					agentModel: stockTask.model,
+					getParentModel: () => fixture.registry.find(liveParent.provider, liveParent.id),
+					getParentSelector: () => `${liveParent.provider}/${liveParent.id}:high`,
+				},
+			});
+			expect(result.exitCode, result.stderr).toBe(explicit ? 1 : 0);
+			const workRequests = fixture.requests.filter(request => request.purpose === "work");
+			expect(workRequests.map(request => request.selector)).toEqual(
+				explicit ? [primarySelector] : [primarySelector, primarySelector],
+			);
+			if (!explicit) {
+				expect(fixture.requests.some(request => request.purpose === "classification")).toBe(true);
+				expect(workRequests.every(request => request.reasoning_effort === Effort.Medium)).toBe(true);
+			}
+			expect(result.resolvedModelIdentity).toBe(primarySelector);
+		});
+	}
+
+	for (const effort of [undefined, "lo"] as const) {
+		it(`stock @task omission accepts a concrete parent effort with its role unset (${effort ?? "AUTO"})`, async () => {
+			const fixture = await createRegistry();
+			const stockTask = getBundledAgent("task");
+			if (!stockTask) throw new Error("Expected stock task agent");
+			const settings = retrySettings({ modelRoles: { default: primarySelector } });
+			const result = await runSubprocess({
+				...workerOptions(fixture, settings),
+				agent: stockTask,
+				thinkingLevel: stockTask.thinkingLevel,
+				effort,
+				modelAuthority: {
+					settings,
+					agentName: stockTask.name,
+					agentModel: stockTask.model,
+					getParentModel: () => fixture.registry.find(primary.provider, primary.id),
+					getParentSelector: () => `${primarySelector}:high`,
+				},
+			});
+			expect(result.exitCode, result.stderr).toBe(0);
+			const workRequests = fixture.requests.filter(request => request.purpose === "work");
+			expect(workRequests.map(request => request.selector)).toEqual([primarySelector]);
+			if (effort === "lo") {
+				expect(workRequests[0]?.reasoning_effort).toBe(Effort.Low);
+				expect(fixture.requests.some(request => request.purpose === "classification")).toBe(false);
+			} else {
+				expect(fixture.requests.some(request => request.purpose === "classification")).toBe(true);
+				expect(workRequests[0]?.reasoning_effort).toBe(Effort.Medium);
+			}
+		});
+	}
 });

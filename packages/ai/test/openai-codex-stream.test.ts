@@ -5075,6 +5075,140 @@ describe("openai-codex streaming", () => {
 		expect(JSON.stringify(thirdInput)).not.toContain("First question");
 	});
 
+	for (const revoke of [false, true]) {
+		it(`${revoke ? "denies revoked" : "permits approved"} Codex admission before websocket reconnect and resend`, async () => {
+			const tempDir = TempDir.createSync("@pi-codex-wire-guard-");
+			setAgentDir(tempDir.path());
+			let allowed = true;
+			let hooks = 0;
+			let connections = 0;
+			let httpRequests = 0;
+			const frames: string[] = [];
+			class RetryingWebSocket extends MockWebSocket {
+				constructor(url: string, options?: WsOptions) {
+					super(url, options);
+					connections++;
+					this.scheduleOpen();
+				}
+				override send(frame: string): void {
+					frames.push(frame);
+					if (frames.length === 1) {
+						if (revoke) allowed = false;
+						this.readyState = MockWebSocket.CLOSED;
+						this.emit("close", { code: 1006 } as unknown as Event);
+						return;
+					}
+					this.emitCodexResponse({
+						messageId: "msg_guarded_retry",
+						responseId: "resp_guarded_retry",
+						text: "reconnected answer",
+						terminalType: "response.completed",
+						includeCreated: true,
+					});
+				}
+			}
+			global.WebSocket = RetryingWebSocket as unknown as typeof WebSocket;
+			const model = {
+				...createCodexTestModel("https://chatgpt.com/backend-api"),
+				requestModelId: "authorized-wire-codex",
+			};
+			const result = await streamOpenAICodexResponses(model, createCodexTestContext(), {
+				apiKey: createCodexTestToken(),
+				sessionId: `guarded-reconnect-${revoke}`,
+				providerSessionState: new Map<string, ProviderSessionState>(),
+				reasoning: "high",
+				preserveModelSelection: true,
+				preserveThinkingEffort: true,
+				onPayload: () => {
+					hooks++;
+				},
+				onBeforeRequest: () => {
+					if (!allowed) throw new Error("The websocket model grant was revoked.");
+				},
+				fetch: async () => {
+					httpRequests++;
+					throw new Error("This websocket retry must not fall back to HTTP.");
+				},
+			}).result();
+			expect(result.stopReason).toBe(revoke ? "error" : "stop");
+			expect(frames).toHaveLength(revoke ? 1 : 2);
+			expect(connections).toBe(revoke ? 1 : 2);
+			expect(httpRequests).toBe(0);
+			expect(hooks).toBe(1);
+			expect(JSON.parse(frames[0]!)).toMatchObject({
+				type: "response.create",
+				model: "authorized-wire-codex",
+				reasoning: { effort: "high" },
+			});
+			if (revoke) expect(AIError.is(result.errorId, AIError.Flag.HostAdmission)).toBe(true);
+			else {
+				expect(frames[1]).toBe(frames[0]);
+				expect(result.content.some(block => block.type === "text" && block.text === "reconnected answer")).toBe(
+					true,
+				);
+			}
+		}, 10_000);
+	}
+
+	for (const mutation of ["effort", "toJSON", "getter"] as const) {
+		it(`rejects a governed websocket ${mutation} before any inference send`, async () => {
+			const tempDir = TempDir.createSync("@pi-codex-unsafe-wire-");
+			setAgentDir(tempDir.path());
+			let sends = 0;
+			let httpRequests = 0;
+			let executions = 0;
+			class GuardedWebSocket extends MockWebSocket {
+				constructor(url: string, options?: WsOptions) {
+					super(url, options);
+					this.scheduleOpen();
+				}
+				override send(): void {
+					sends++;
+				}
+			}
+			global.WebSocket = GuardedWebSocket as unknown as typeof WebSocket;
+			const result = await streamOpenAICodexResponses(
+				createCodexTestModel("https://chatgpt.com/backend-api"),
+				createCodexTestContext(),
+				{
+					apiKey: createCodexTestToken(),
+					sessionId: `unsafe-frame-${mutation}`,
+					providerSessionState: new Map<string, ProviderSessionState>(),
+					reasoning: "high",
+					preserveModelSelection: true,
+					preserveThinkingEffort: true,
+					fetch: async () => {
+						httpRequests++;
+						throw new Error("An unsafe frame cannot trigger an HTTP fallback.");
+					},
+					onPayload: payload => {
+						const replacement = { ...(payload as Record<string, unknown>) };
+						if (mutation === "effort") replacement.reasoning = { effort: "low" };
+						if (mutation === "toJSON")
+							replacement.toJSON = () => {
+								executions++;
+								return { ...replacement, toJSON: undefined, model: "different-model" };
+							};
+						if (mutation === "getter")
+							Object.defineProperty(replacement, "model", {
+								enumerable: true,
+								get: () => {
+									executions++;
+									return executions === 1 ? "gpt-5.3-codex-spark" : "different-model";
+								},
+							});
+						return replacement;
+					},
+				},
+			).result();
+			expect(result.stopReason).toBe("error");
+			expect(AIError.is(result.errorId, AIError.Flag.HostAdmission)).toBe(true);
+			expect(sends).toBe(0);
+			expect(httpRequests).toBe(0);
+			expect(executions).toBe(0);
+		});
+	}
+
 	it("preserves turn-state when append matching falls back to full context", async () => {
 		const tempDir = TempDir.createSync("@pi-codex-stream-");
 		setAgentDir(tempDir.path());

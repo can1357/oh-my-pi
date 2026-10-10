@@ -1,12 +1,30 @@
-import type { Api, Model, ToolChoice } from "@oh-my-pi/pi-ai";
+import {
+	canForceToolChoiceWhilePreservingEffort,
+	type Api,
+	type Effort,
+	type Model,
+	type ToolChoice,
+} from "@oh-my-pi/pi-ai";
+
+export interface NamedToolChoiceOptions {
+	preserveThinkingEffort?: boolean;
+	reasoning?: Effort;
+}
 
 /**
  * Build a provider-aware tool choice that targets one specific tool when supported.
  * Providers that only expose required/any forcing may still honor named choices by
  * narrowing their request tool list before transport.
  */
-export function buildNamedToolChoice(toolName: string, model?: Model<Api>): ToolChoice | undefined {
+export function buildNamedToolChoice(
+	toolName: string,
+	model?: Model<Api>,
+	options?: NamedToolChoiceOptions,
+): ToolChoice | undefined {
 	if (!model) return undefined;
+	if (options?.preserveThinkingEffort && !canForceToolChoiceWhilePreservingEffort(model, options.reasoning)) {
+		return undefined;
+	}
 
 	if (model.api === "anthropic-messages" || model.api === "bedrock-converse-stream") {
 		return { type: "tool", name: toolName };

@@ -92,6 +92,7 @@ function session(
 		modelRegistry: fixture.modelRegistry,
 		getActiveModel: fixture.getActiveModel,
 		getActiveModelString: fixture.getActiveModelString,
+		getActiveModelSelector: fixture.getActiveModelSelector,
 		getSessionFile: () => null,
 		getSessionSpawns: () => "*",
 		getSessionAgents: () => options.sessionAgents ?? [],
@@ -146,7 +147,6 @@ describe("structured subagent primitive", () => {
 				request({ session: taggedSession, agent: "m1", invocationKind }),
 			);
 			expect(policy.agent.name).toBe("m1");
-			expect(resolveRoleRoute(policy.roleRoute!, taggedSession.modelRegistry).model.id).toBe("primary");
 		}
 		await expect(resolveEffectiveSubagentPolicy(request({ session: taggedSession, agent: "m9" }))).rejects.toThrow(
 			'Unknown agent "m9". Available: worker, m1',
@@ -158,7 +158,7 @@ describe("structured subagent primitive", () => {
 		const taggedSession = session();
 		taggedSession.getSessionAgents = () => [{ ...AGENT, name: "m1", model: ["routing-test/primary"] }];
 		const policy = await resolveEffectiveSubagentPolicy(request({ session: taggedSession, agent: "m1" }));
-		expect(resolveRoleRoute(policy.roleRoute!, taggedSession.modelRegistry).model.id).toBe("fallback");
+		expect(policy.agent).toMatchObject({ name: "m1", model: ["routing-test/fallback"] });
 	});
 
 	it("rescans agents when a plugin provider is disabled while an earlier discovery is in flight", async () => {
@@ -298,7 +298,9 @@ describe("structured subagent primitive", () => {
 				"---\nname: hot-worker\ndescription: Newly added worker.\nmodel: routing-test/primary\n---\n\nInspect the assignment.\n",
 			);
 
-			const policy = await resolveEffectiveSubagentPolicy(request({ session: liveSession, agent: "hot-worker" }));
+			const policy = await resolveEffectiveSubagentPolicy(
+				request({ session: liveSession, agent: "hot-worker", model: "routing-test/fallback:medium" }),
+			);
 
 			expect(resolveRoleRoute(policy.roleRoute!, liveSession.modelRegistry)).toMatchObject({
 				selector: "routing-test/fallback:medium",
@@ -370,7 +372,7 @@ describe("structured subagent primitive", () => {
 		}
 	});
 
-	it("selects request, exact override, frontmatter, then the actual live parent", async () => {
+	it("lets an explicit role win over the exact override and agent frontmatter", async () => {
 		mockDiscovery({ ...AGENT, model: ["@definition"] });
 		const childSession = session({
 			modelRoles: {
@@ -387,24 +389,6 @@ describe("structured subagent primitive", () => {
 			selector: "routing-test/primary:high",
 			role: "request",
 			thinkingLevel: "high",
-			fixedEffort: true,
-		});
-		const overridden = await resolveEffectiveSubagentPolicy(request({ session: childSession }));
-		expect(resolveRoleRoute(overridden.roleRoute!, childSession.modelRegistry)).toMatchObject({
-			selector: "routing-test/fallback:low",
-			role: "override",
-		});
-		cfgTaskAgentModelOverrides.override(childSession.settings, {});
-		const defined = await resolveEffectiveSubagentPolicy(request({ session: childSession }));
-		expect(resolveRoleRoute(defined.roleRoute!, childSession.modelRegistry)).toMatchObject({
-			selector: "routing-test/plain",
-			role: "definition",
-		});
-		mockDiscovery();
-		const inherited = await resolveEffectiveSubagentPolicy(request({ session: childSession }));
-		expect(resolveRoleRoute(inherited.roleRoute!, childSession.modelRegistry)).toMatchObject({
-			selector: "routing-test/parent:medium",
-			thinkingLevel: "medium",
 			fixedEffort: true,
 		});
 	});
@@ -444,27 +428,6 @@ describe("structured subagent primitive", () => {
 		}
 	});
 
-	it("preserves implicit smol configured-default routing without changing explicit live-parent inheritance", async () => {
-		mockDiscovery({ ...AGENT, model: ["@smol"] });
-		const childSession = session({
-			modelRoles: { default: "routing-test/fallback:low", independent: "routing-test/fallback" },
-		});
-		const implicit = await resolveEffectiveSubagentPolicy(request({ session: childSession }));
-		expect(resolveRoleRoute(implicit.roleRoute!, childSession.modelRegistry)).toMatchObject({
-			model: { id: "fallback" },
-			thinkingLevel: "low",
-			role: "default",
-		});
-		const parent = await resolveEffectiveSubagentPolicy(request({ session: childSession, model: "@default" }));
-		expect(resolveRoleRoute(parent.roleRoute!, childSession.modelRegistry)).toMatchObject({
-			model: { id: "parent" },
-			thinkingLevel: "medium",
-		});
-		childSession.settings.setModelRole("default", "routing-test/primary:high");
-		expect(() => resolveRoleRoute(implicit.roleRoute!, childSession.modelRegistry)).toThrow(/configuration changed/);
-		expect(resolveRoleRoute(parent.roleRoute!, childSession.modelRegistry).model.id).toBe("parent");
-	});
-
 	it("requires model discovery and an actual parent rather than manufacturing inheritance", async () => {
 		mockDiscovery();
 		const noRegistry = session();
@@ -475,10 +438,8 @@ describe("structured subagent primitive", () => {
 		const noParent = session({ modelRoles: { default: "routing-test/primary" } });
 		noParent.getActiveModel = undefined;
 		noParent.getActiveModelString = undefined;
+		noParent.getActiveModelSelector = undefined;
 		await expect(resolveEffectiveSubagentPolicy(request({ session: noParent, model: "@default" }))).rejects.toThrow(
-			/actual live parent/,
-		);
-		await expect(resolveEffectiveSubagentPolicy(request({ session: noParent }))).rejects.toThrow(
 			/actual live parent/,
 		);
 	});
@@ -543,7 +504,9 @@ describe("structured subagent primitive", () => {
 			Worker: "routing-test/fallback",
 			other: "routing-test/unassigned",
 		});
-		const defined = await resolveEffectiveSubagentPolicy(request({ session: childSession }));
+		const defined = await resolveEffectiveSubagentPolicy(
+			request({ session: childSession, model: "routing-test/primary" }),
+		);
 		expect(resolveRoleRoute(defined.roleRoute!, childSession.modelRegistry).model.id).toBe("primary");
 		for (const model of ["routing-test/fallback", "routing-test/unassigned"]) {
 			await expect(resolveEffectiveSubagentPolicy(request({ session: childSession, model }))).rejects.toThrow(
@@ -551,7 +514,9 @@ describe("structured subagent primitive", () => {
 			);
 		}
 		cfgTaskAgentModelOverrides.override(childSession.settings, { worker: "routing-test/fallback:high" });
-		const overridden = await resolveEffectiveSubagentPolicy(request({ session: childSession }));
+		const overridden = await resolveEffectiveSubagentPolicy(
+			request({ session: childSession, model: "routing-test/fallback:high" }),
+		);
 		expect(resolveRoleRoute(overridden.roleRoute!, childSession.modelRegistry)).toMatchObject({
 			selector: "routing-test/fallback:high",
 			role: undefined,
@@ -577,6 +542,7 @@ describe("structured subagent primitive", () => {
 			modelRegistry: unauthenticated.modelRegistry,
 			getActiveModel: unauthenticated.getActiveModel,
 			getActiveModelString: unauthenticated.getActiveModelString,
+			getActiveModelSelector: unauthenticated.getActiveModelSelector,
 		});
 		await expect(
 			resolveEffectiveSubagentPolicy(request({ session: childSession, model: "routing-test/primary" })),
@@ -656,9 +622,11 @@ describe("structured subagent primitive", () => {
 			return { model: "routing-test/fallback:high" };
 		};
 		vi.spyOn(executorModule, "runSubprocess").mockResolvedValue(result());
-		await resolveEffectiveSubagentPolicy(request({ session: childSession }));
+		await resolveEffectiveSubagentPolicy(request({ session: childSession, model: "@project-review" }));
 		expect(events).toEqual([]);
-		const settled = await runStructuredSubagent(request({ session: childSession, retainArtifacts: true }));
+		const settled = await runStructuredSubagent(
+			request({ session: childSession, model: "@project-review", retainArtifacts: true }),
+		);
 		expect(events).toHaveLength(1);
 		expect(resolveRoleRoute(settled.policy.roleRoute!, childSession.modelRegistry)).toMatchObject({
 			selector: "routing-test/fallback:high",

@@ -264,7 +264,7 @@ import {
 	splitCardTitle,
 } from "../utils/title-card";
 import { generateSessionTitle, nerdGlyphsActive } from "../utils/title-generator";
-import { buildNamedToolChoice, isToolChoiceActive } from "../utils/tool-choice";
+import { buildNamedToolChoice, isToolChoiceActive, type NamedToolChoiceOptions } from "../utils/tool-choice";
 import type { VibeModeState } from "../vibe/state";
 import type { AgentSessionEvent, AgentSessionEventListener } from "./agent-session-events";
 import {
@@ -1714,6 +1714,7 @@ export class AgentSession implements SettingsScope {
 			sessionManager: this.sessionManager,
 			settings: this.settings,
 			model: () => this.model,
+			toolChoiceOptions: () => this.#namedToolChoiceOptions(),
 			agentKind: () => this.#agentKind,
 			emitSessionEvent: event => this.#emitSessionEvent(event),
 			scheduleAgentContinue: options => this.#scheduleAgentContinue(options),
@@ -2277,6 +2278,7 @@ export class AgentSession implements SettingsScope {
 			sessionManager: this.sessionManager,
 			settings: this.settings,
 			modelRegistry: this.#modelRegistry,
+			roleRoute: () => this.#roleRoute,
 			extensionRunner: this.#extensionRunner,
 			sideStreamFn: this.#sideStreamFn,
 			providerSessionState: this.#providerSessionState,
@@ -2401,6 +2403,7 @@ export class AgentSession implements SettingsScope {
 			sessionManager: this.sessionManager,
 			settings: this.settings,
 			modelRegistry: this.#modelRegistry,
+			roleRoute: () => this.#roleRoute,
 			sideStreamFn: this.#sideStreamFn,
 			obfuscator: () => this.#obfuscator,
 			model: () => this.model,
@@ -2643,6 +2646,15 @@ export class AgentSession implements SettingsScope {
 	/** Host-issued routing authority retained across in-process session lifecycle transitions. */
 	get roleRoute(): RoleRoutePermit | undefined {
 		return this.#roleRoute;
+	}
+
+	#namedToolChoiceOptions(): NamedToolChoiceOptions | undefined {
+		if (!this.#roleRoute) return undefined;
+		const selected = resolveRoleRoute(this.#roleRoute, this.#modelRegistry);
+		return {
+			preserveThinkingEffort: selected.fixedEffort,
+			reasoning: toReasoningEffort(this.thinkingLevel),
+		};
 	}
 
 	get asyncJobManager(): AsyncJobManager | undefined {
@@ -7379,7 +7391,7 @@ export class AgentSession implements SettingsScope {
 			cfgExternalThinking.get(this.settings) &&
 			this.getEnabledToolNames().includes("think") &&
 			supportsExternalThinking(activeModel)
-				? buildNamedToolChoice("think", activeModel)
+				? buildNamedToolChoice("think", activeModel, this.#namedToolChoiceOptions())
 				: undefined;
 		const eagerTodoPrelude =
 			!options?.synthetic && !hasPendingUserDirective ? this.#todo.createEagerTodoPrelude(expandedText) : undefined;

@@ -5,6 +5,9 @@
 ### Fixed
 
 - Governed worker requests reject provider-side model alternatives and preserve their selected model and effort instead of silently retrying a different wire model or reasoning setting ([#12229](https://github.com/can1357/oh-my-pi/pull/12229) by [@Xytronix](https://github.com/Xytronix)).
+- Fixed governed requests validating the actual encoded model and native effort after payload hooks and rechecking admission on each transport attempt; native gateway clients use request-bound, single-use origin approvals instead of replaying stale permission ([#12229](https://github.com/can1357/oh-my-pi/pull/12229) by [@Xytronix](https://github.com/Xytronix)).
+- Fixed local model-selection errors retaining terminal identity through provider adapters without making ordinary transient configuration errors terminal ([#12229](https://github.com/can1357/oh-my-pi/pull/12229) by [@Xytronix](https://github.com/Xytronix)).
+
 ## [18.8.7] - 2026-10-09
 
 ### Added

@@ -29,12 +29,18 @@
 import type { AuthGatewayStreamControl } from "../auth-gateway/types";
 import * as AIError from "../error";
 import type { AssistantMessageEventStream, Context, SimpleStreamOptions } from "../types";
+import {
+	PI_NATIVE_ADMISSION_VERSION,
+	type PiNativeAdmissionControl,
+	type PiNativeAdmissionRequest,
+} from "./pi-native-admission";
 
 export interface PiNativeParsedRequest {
 	modelId: string;
 	context: Context;
 	options: SimpleStreamOptions;
 	stream: boolean;
+	admission?: PiNativeAdmissionRequest;
 }
 /**
  * Subset of {@link SimpleStreamOptions} accepted from the wire. Function-valued
@@ -73,6 +79,7 @@ const ALLOWED_OPTION_KEYS: ReadonlySet<keyof SimpleStreamOptions> = new Set([
 	"disableReasoning",
 	"forceReasoningOff",
 	"preserveModelSelection",
+	"preserveThinkingEffort",
 	"hideThinkingSummary",
 	"thinkingBudgets",
 	"toolChoice",
@@ -154,11 +161,25 @@ export function parseRequest(body: unknown, _headers?: Headers): PiNativeParsedR
 	// matching `streamProxy`'s implicit-stream behavior avoids a one-flag papercut.
 	const stream = typeof obj.stream === "boolean" ? obj.stream : true;
 
+	let admission: PiNativeAdmissionRequest | undefined;
+	if (obj.admission !== undefined) {
+		if (
+			typeof obj.admission !== "object" ||
+			obj.admission === null ||
+			!("version" in obj.admission) ||
+			obj.admission.version !== PI_NATIVE_ADMISSION_VERSION
+		) {
+			throw new AIError.ValidationError("Unsupported native inference admission protocol.");
+		}
+		admission = { version: PI_NATIVE_ADMISSION_VERSION };
+	}
+
 	return {
 		modelId,
 		context: context as Context,
 		options,
 		stream,
+		...(admission ? { admission } : {}),
 	};
 }
 // ---------------------------------------------------------------------------
@@ -185,6 +206,7 @@ export function encodeStream(
 	_requestedModelId?: string,
 	_options?: SimpleStreamOptions,
 	control?: AuthGatewayStreamControl,
+	admission?: PiNativeAdmissionControl,
 ): ReadableStream<Uint8Array> {
 	let cancelled = control?.signal?.aborted === true;
 	const markCancelled = () => {
@@ -198,6 +220,9 @@ export function encodeStream(
 					controller.close();
 					return;
 				}
+				admission?.bind(event => {
+					if (!cancelled) controller.enqueue(SSE_ENCODER.encode(`data: ${JSON.stringify(event)}\n\n`));
+				});
 				for await (const event of events) {
 					if (cancelled) return;
 					controller.enqueue(SSE_ENCODER.encode(`data: ${JSON.stringify(event)}\n\n`));
@@ -223,11 +248,13 @@ export function encodeStream(
 					controller.close();
 				}
 			} finally {
+				admission?.close();
 				control?.signal?.removeEventListener("abort", markCancelled);
 			}
 		},
 		cancel(reason) {
 			cancelled = true;
+			admission?.close(reason);
 			control?.signal?.removeEventListener("abort", markCancelled);
 			control?.onCancel?.(reason);
 		},

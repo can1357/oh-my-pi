@@ -18,6 +18,7 @@ import * as discoveryModule from "@oh-my-pi/pi-coding-agent/task/discovery";
 import * as executorModule from "@oh-my-pi/pi-coding-agent/task/executor";
 import { getBundledAgent } from "@oh-my-pi/pi-coding-agent/task/agents";
 import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
+import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import type { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
@@ -29,7 +30,6 @@ import {
 	cfgCompactionModelThresholds,
 	cfgCompactionModelThresholdsEnabled,
 } from "@oh-my-pi/pi-coding-agent/session/context-settings";
-import { cfgRetryFallbackChains } from "@oh-my-pi/pi-coding-agent/session/settings";
 describe("createAgentSession deferred model pattern resolution", () => {
 	let tempDir: string;
 	let fixtureDir: string;
@@ -757,9 +757,185 @@ describe("createAgentSession deferred model pattern resolution", () => {
 			model => model.provider === parentModel.provider,
 		);
 		await expect(createAgentSession({ ...options, settings, roleRoute: permit })).rejects.toThrow(
-			"Host role preflight unavailable:",
+			/No usable model remains|selected occurrence is unavailable/,
 		);
 	});
+
+	test.each(["omitted", "sdk-pattern", "explicit-unpinned", "explicit-high"] as const)(
+		"keeps external thinking for %s selection without weakening a fixed request",
+		async selectionKind => {
+			const requests: Array<{
+				model: string;
+				reasoning?: { effort?: string };
+				tools?: Array<{ type: string; name?: string }>;
+				input?: Array<{ type?: string; call_id?: string }>;
+			}> = [];
+			const server = Bun.serve({
+				hostname: "127.0.0.1",
+				port: 0,
+				fetch: async request => {
+					requests.push((await request.json()) as (typeof requests)[number]);
+					if (requests.length === 1) {
+						const argumentsJson = JSON.stringify({ thoughts: "Check the request before answering." });
+						const item = { type: "function_call", id: "fc_think", call_id: "call_think", name: "think" };
+						const events = [
+							{ type: "response.output_item.added", output_index: 0, item: { ...item, arguments: "" } },
+							{
+								type: "response.function_call_arguments.done",
+								output_index: 0,
+								item_id: item.id,
+								arguments: argumentsJson,
+							},
+							{
+								type: "response.output_item.done",
+								output_index: 0,
+								item: { ...item, arguments: argumentsJson },
+							},
+							{
+								type: "response.completed",
+								response: {
+									id: "resp_external_think",
+									status: "completed",
+									usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+								},
+							},
+						];
+						return new Response(events.map(event => `data: ${JSON.stringify(event)}\n\n`).join(""), {
+							headers: { "content-type": "text/event-stream" },
+						});
+					}
+					const events = [
+						{ type: "response.created", response: { id: "resp_external", status: "in_progress" } },
+						{
+							type: "response.output_item.added",
+							output_index: 0,
+							item: {
+								type: "message",
+								id: "msg_external",
+								role: "assistant",
+								status: "in_progress",
+								content: [],
+							},
+						},
+						{ type: "response.output_text.delta", output_index: 0, item_id: "msg_external", delta: "Done." },
+						{
+							type: "response.output_item.done",
+							output_index: 0,
+							item: {
+								type: "message",
+								id: "msg_external",
+								role: "assistant",
+								status: "completed",
+								content: [{ type: "output_text", text: "Done." }],
+							},
+						},
+						{
+							type: "response.completed",
+							response: {
+								id: "resp_external",
+								status: "completed",
+								usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+							},
+						},
+					];
+					return new Response(events.map(event => `data: ${JSON.stringify(event)}\n\n`).join(""), {
+						headers: { "content-type": "text/event-stream" },
+					});
+				},
+			});
+			let session: AgentSession | undefined;
+			try {
+				const selector = "external-thinking-local/worker";
+				const settings = Settings.isolated({
+					modelRoles: { default: selector, worker: selector },
+					externalThinking: true,
+					"compaction.enabled": false,
+					"todo.enabled": false,
+				});
+				const authStorage = createInMemoryAuthStorage();
+				authStoragesToClose.push(authStorage);
+				const modelPath = path.join(tempDir, "external-thinking-models.yml");
+				await Bun.write(
+					modelPath,
+					JSON.stringify({
+						providers: {
+							"external-thinking-local": {
+								baseUrl: `${server.url.origin}/v1`,
+								api: "openai-responses",
+								apiKey: "test-only-key",
+								models: [
+									{
+										id: "worker",
+										name: "External thinking worker",
+										reasoning: true,
+										thinking: { mode: "effort", efforts: [Effort.Low, Effort.Medium, Effort.High] },
+										input: ["text"],
+										supportsTools: true,
+										cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+										contextWindow: 32768,
+										maxTokens: 1024,
+									},
+								],
+							},
+						},
+					}),
+				);
+				const modelRegistry = new ModelRegistry(authStorage, modelPath, { settings });
+				const roleRoute = selectionKind.startsWith("explicit")
+					? (
+							await createTaskModelRoute({
+								authority: { settings, agentName: "worker" },
+								modelRegistry,
+								selectors: [selectionKind === "explicit-high" ? `${selector}:high` : selector],
+								explicit: true,
+							})
+						).permit
+					: undefined;
+				({ session } = await createAgentSession({
+					cwd: tempDir,
+					agentDir: tempDir,
+					authStorage,
+					modelRegistry,
+					settings,
+					roleRoute,
+					modelPattern: selectionKind === "sdk-pattern" ? selector : undefined,
+					thinkingLevel: Effort.High,
+					sessionManager: SessionManager.inMemory(tempDir),
+					cacheWarming: false,
+					disableExtensionDiscovery: true,
+					skills: [],
+					contextFiles: [],
+					promptTemplates: [],
+					slashCommands: [],
+					rules: [],
+					preloadedCustomToolPaths: [],
+					toolNames: ["think"],
+					restrictToolNames: true,
+					enableMCP: false,
+					enableLsp: false,
+					skipPythonPreflight: true,
+					taskDepth: 1,
+				}));
+				await session.sendUserMessage("Answer briefly.");
+				expect(session.getLastAssistantMessage()?.stopReason).toBe("stop");
+				expect(requests).toHaveLength(2);
+				for (const request of requests) {
+					expect(request.model).toBe("worker");
+					expect(request.reasoning?.effort).toBe(selectionKind === "explicit-high" ? "high" : "none");
+					expect(request.tools).toContainEqual(expect.objectContaining({ type: "function", name: "think" }));
+				}
+				expect(session.agent.state.messages).toContainEqual(
+					expect.objectContaining({ role: "toolResult", toolName: "think", details: { recorded: true } }),
+				);
+				expect(requests[1]?.input).toContainEqual(
+					expect.objectContaining({ type: "function_call_output", call_id: "call_think" }),
+				);
+			} finally {
+				await session?.dispose();
+				server.stop(true);
+			}
+		},
+	);
 
 	test("resolves deferred role-alias modelPattern after extension providers register", async () => {
 		const settings = Settings.isolated();

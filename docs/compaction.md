@@ -503,6 +503,8 @@ Post-navigation event exposing new/old leaf and optional summary entry.
    - threshold/idle paths emit `Auto-compaction failed: ...`
 - Branch summarization can be cancelled via abort signal (e.g., Escape), returning canceled/aborted navigation result.
 
+Explicitly selected task/eval workers retain their admitted model and fixed effort through manual, speculative, and automatic summary requests and handoff. Each summarization inference rechecks the original operator's current permission; a local admission failure cannot trigger another model or method. These workers skip provider-native remote compaction because that path cannot preserve the same admission contract; a remote-only policy reports a selection error. Local `soft`, handoff, snapcompact, and shake methods remain available when otherwise eligible. Workers that omit `model` retain ordinary compaction routing.
+
 ## Settings and defaults
 
 Defined in `packages/coding-agent/src/session/context-settings.ts`:

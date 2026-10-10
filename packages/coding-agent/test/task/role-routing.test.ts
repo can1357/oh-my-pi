@@ -1,7 +1,7 @@
-import { describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it } from "bun:test";
 import type { StreamFn } from "@oh-my-pi/pi-agent-core";
-import { Effort, type Model } from "@oh-my-pi/pi-ai";
-import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
+import { Effort, streamSimple, type Model } from "@oh-my-pi/pi-ai";
+import * as AIError from "@oh-my-pi/pi-ai/error";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { parseModelString } from "@oh-my-pi/pi-tui/overlays/model-selector";
 import type { ModelRegistry } from "../../src/config/model-registry";
@@ -22,6 +22,14 @@ import {
 	type TaskModelAuthority,
 } from "../../src/task/role-routing";
 
+const servers: Array<{ stop(closeActiveConnections?: boolean): void }> = [];
+const requestSinks = new Map<string, string[]>();
+
+afterEach(() => {
+	for (const server of servers) server.stop(true);
+	servers.length = 0;
+	requestSinks.clear();
+});
 function model(id: string, changes: Partial<Model<"openai-completions">> = {}): Model<"openai-completions"> {
 	const base = buildModel({
 		provider: "route-fixture",
@@ -31,6 +39,7 @@ function model(id: string, changes: Partial<Model<"openai-completions">> = {}): 
 		baseUrl: "http://127.0.0.1:1/v1",
 		reasoning: true,
 		thinking: { mode: "effort", efforts: [Effort.Low, Effort.Medium, Effort.High] },
+		compat: { supportsReasoningEffort: true },
 		input: ["text", "image"],
 		supportsTools: true,
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
@@ -41,9 +50,29 @@ function model(id: string, changes: Partial<Model<"openai-completions">> = {}): 
 }
 
 function fixture() {
-	const primary = model("primary");
-	const fallback = model("fallback");
-	const outsider = model("outsider");
+	const transport: { onRequest?: (body: Record<string, unknown>, attempt: number) => Response | undefined } = {};
+	const received: Record<string, unknown>[] = [];
+	const server = Bun.serve({
+		port: 0,
+		hostname: "127.0.0.1",
+		async fetch(request, server) {
+			const body = (await request.json()) as Record<string, unknown>;
+			received.push(body);
+			requestSinks.get(`${server.url}v1`)?.push(`route-fixture/${body.model}:${body.reasoning_effort ?? "unset"}`);
+			const rejected = transport.onRequest?.(body, received.length);
+			if (rejected) return rejected;
+			return new Response(
+				'data: {"id":"route","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"ok"},"finish_reason":null}]}\n\n' +
+					'data: {"id":"route","object":"chat.completion.chunk","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\n' +
+					"data: [DONE]\n\n",
+				{ headers: { "Content-Type": "text/event-stream" } },
+			);
+		},
+	});
+	servers.push(server);
+	const primary = model("primary", { baseUrl: `${server.url}v1` });
+	const fallback = model("fallback", { baseUrl: `${server.url}v1` });
+	const outsider = model("outsider", { baseUrl: `${server.url}v1` });
 	const state = { models: [primary, fallback, outsider] as Model[], available: true };
 	const registry = {
 		getAll: () => state.models,
@@ -56,14 +85,21 @@ function fixture() {
 		"retry.fallbackChains": { review: ["route-fixture/fallback:low"] },
 	});
 	const authority: TaskModelAuthority = { settings, agentName: "worker" };
-	return { primary, fallback, outsider, state, registry, settings, authority };
+	return { primary, fallback, outsider, state, registry, settings, authority, transport, received };
 }
 
 function recordingStream(delivered: string[]): StreamFn {
-	return async (serving, _context, options) => {
-		await options?.onPayload?.({ model: serving.id, reasoning_effort: options?.reasoning }, serving);
-		delivered.push(`${serving.provider}/${serving.id}:${options?.reasoning ?? "unset"}`);
-		return new AssistantMessageEventStream();
+	return async (serving, context, options) => {
+		requestSinks.set(serving.baseUrl, delivered);
+		const stream = streamSimple(serving, context, { ...options, apiKey: "test-only-key" });
+		const result = await stream.result();
+		if (result.stopReason === "error") {
+			if (AIError.is(AIError.classifyMessage(result), AIError.Flag.HostAdmission)) {
+				throw new AIError.ModelSelectionError(result.errorMessage ?? "Admission rejected");
+			}
+			throw new Error(result.errorMessage ?? "Loopback provider failed");
+		}
+		return stream;
 	};
 }
 
@@ -161,14 +197,14 @@ describe("governed provider dispatch closure", () => {
 				{ messages: [] },
 				{ reasoning: Effort.High, onPayload: () => ({ model: "outsider", reasoning_effort: "high" }) },
 			),
-		).rejects.toThrow(/payload/);
+		).rejects.toThrow(AIError.ModelSelectionError);
 		await expect(
 			guarded(
 				f.primary,
 				{ messages: [] },
 				{ reasoning: Effort.High, onPayload: () => ({ model: "primary", reasoning_effort: "low" }) },
 			),
-		).rejects.toThrow(/payload/);
+		).rejects.toThrow(AIError.ModelSelectionError);
 		expect(delivered).toEqual([]);
 	});
 
@@ -369,4 +405,153 @@ describe("governed provider dispatch closure", () => {
 		f.state.models = [{ ...f.primary, supportsTools: false }, f.fallback, f.outsider];
 		expect(() => resolveRoleRoute(permit, f.registry)).toThrow(/unavailable/);
 	});
+
+	it("keeps @default with unset parent effort unpinned through real provider encoding and hook edits", async () => {
+		const f = fixture();
+		cfgModelRoles.override(f.settings, {});
+		cfgRetryFallbackChains.override(f.settings, {});
+		const authority: TaskModelAuthority = {
+			...f.authority,
+			getParentModel: () => f.primary,
+			getParentSelector: () => "route-fixture/primary",
+		};
+		const { permit } = await createTaskModelRoute({
+			authority,
+			modelRegistry: f.registry,
+			selectors: ["@default"],
+			explicit: true,
+		});
+		expect(resolveRoleRoute(permit).fixedEffort).toBe(false);
+		const narrowed = narrowRoleRoute(permit, ["@default"], f.registry);
+		expect(resolveRoleRoute(narrowed.permit).fixedEffort).toBe(false);
+		const delivered: string[] = [];
+		await wrapRoleRouteStream(() => narrowed.permit, recordingStream(delivered), f.registry)(
+			f.primary,
+			{ messages: [] },
+			{
+				reasoning: Effort.High,
+				onPayload: payload => {
+					(payload as Record<string, unknown>).reasoning_effort = "low";
+				},
+			},
+		);
+		expect(delivered).toEqual(["route-fixture/primary:low"]);
+	});
+
+	it("re-admits current authority before a real HTTP retry without repeating the mutable payload hook", async () => {
+		const f = fixture();
+		const { permit } = await createTaskModelRoute({
+			authority: f.authority,
+			modelRegistry: f.registry,
+			selectors: ["@review"],
+			explicit: true,
+		});
+		let hooks = 0;
+		let beforeRequests = 0;
+		f.transport.onRequest = () => {
+			cfgModelRoles.override(f.settings, { independent: "route-fixture/primary" });
+			return new Response("temporary overload", { status: 503, headers: { "Retry-After": "0" } });
+		};
+		const delivered: string[] = [];
+		await expect(
+			wrapRoleRouteStream(() => permit, recordingStream(delivered), f.registry)(
+				f.primary,
+				{ messages: [] },
+				{
+					reasoning: Effort.High,
+					onPayload: () => {
+						hooks++;
+					},
+					onBeforeRequest: () => {
+						beforeRequests++;
+					},
+				},
+			),
+		).rejects.toThrow(AIError.ModelSelectionError);
+		expect(f.received).toHaveLength(1);
+		expect(hooks).toBe(1);
+		expect(beforeRequests).toBe(2);
+	});
+
+	it("uses configured wildcard and fuzzy grants without granting a catalog-only model", async () => {
+		const f = fixture();
+		cfgRetryFallbackChains.override(f.settings, {});
+		cfgModelRoles.override(f.settings, { wildcard: "route-fixture/prim*", fuzzy: "route-fixture/fall" });
+		for (const selector of ["route-fixture/primary", "route-fixture/fallback"]) {
+			const { permit } = await createTaskModelRoute({
+				authority: f.authority,
+				modelRegistry: f.registry,
+				selectors: [selector],
+				explicit: true,
+			});
+			await wrapRoleRouteStream(() => permit, recordingStream([]), f.registry)(
+				resolveRoleRoute(permit).model,
+				{ messages: [] },
+				{},
+			);
+		}
+		expect(f.received.map(body => body.model)).toEqual(["primary", "fallback"]);
+		await expect(
+			createTaskModelRoute({
+				authority: f.authority,
+				modelRegistry: f.registry,
+				selectors: ["route-fixture/outsider"],
+				explicit: true,
+			}),
+		).rejects.toThrow(AIError.ModelSelectionError);
+	});
+
+	it("does not invent @best authority from an unrelated configured slow or review role", async () => {
+		const f = fixture();
+		await expect(
+			createTaskModelRoute({
+				authority: f.authority,
+				modelRegistry: f.registry,
+				selectors: ["@best"],
+				explicit: true,
+			}),
+		).rejects.toThrow(AIError.ModelSelectionError);
+		expect(f.received).toHaveLength(0);
+	});
+
+	it("admits actually configured colon role names through the same real provider boundary", async () => {
+		const f = fixture();
+		cfgModelRoles.override(f.settings, { "subagent:worker": "route-fixture/primary:high" });
+		cfgRetryFallbackChains.override(f.settings, {});
+		const { permit } = await createTaskModelRoute({
+			authority: f.authority,
+			modelRegistry: f.registry,
+			selectors: ["@subagent:worker"],
+			explicit: true,
+		});
+		await wrapRoleRouteStream(() => permit, recordingStream([]), f.registry)(
+			f.primary,
+			{ messages: [] },
+			{ reasoning: Effort.High },
+		);
+		expect(f.received).toHaveLength(1);
+		expect(f.received[0]).toMatchObject({ model: "primary", reasoning_effort: "high" });
+	});
+});
+
+it("does not turn legacy agent inheritance into a fuzzy catalog grant", async () => {
+	const f = fixture();
+	const unassigned = model("default-extra", { baseUrl: f.primary.baseUrl });
+	f.state.models.push(unassigned);
+	cfgModelRoles.override(f.settings, {});
+	cfgRetryFallbackChains.override(f.settings, {});
+	await expect(
+		createTaskModelRoute({
+			authority: {
+				...f.authority,
+				agentModel: "default:high",
+				getParentModel: () => f.primary,
+				getParentSelector: () => "route-fixture/primary:high",
+			},
+			modelRegistry: f.registry,
+			selectors: ["route-fixture/default-extra"],
+			explicit: true,
+		}),
+	).rejects.toThrow(AIError.ModelSelectionError);
+	expect(f.received).toHaveLength(0);
 });

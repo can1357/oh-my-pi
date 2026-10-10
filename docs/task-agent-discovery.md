@@ -40,11 +40,11 @@ Parsing comes from frontmatter via `parseAgentFields()` (`src/discovery/helpers.
 - backward-compat behavior: if `spawns` missing but `tools` includes `task`, `spawns` becomes `*`
 - `output` is passed through as opaque schema data
 - `read-summarize: false` (normalized to `readSummarize`) disables structural summaries for the subagent's `read` tool — `runSubprocess` applies a `read.summarize.enabled: false` override on the child's isolated settings (`src/task/executor.ts`). `scout` ships with it disabled. When absent, the child inherits the parent's read-summary setting.
-- `model` accepts one selector, CSV, or an array. Entries are tried in order after role aliases are expanded, within the current approved route. Per-call `model` outranks an exact `task.agentModelOverrides[agentName]` entry, which outranks frontmatter.
+- `model` accepts one selector, CSV, or an array. Without a per-call selector, frontmatter follows ordinary configured agent routing and authentication/retry policy. A supplied per-call `model` independently overrides an exact `task.agentModelOverrides[agentName]` entry and frontmatter, and stays within its approved route.
 - `thinking-level` / `thinking` selects the agent's configured effort, including `auto`. When `task.enableEffort` (default `false`) exposes it, a task item's coarse `effort` (`lo`, `med`, `hi`) overrides that default only for a route without fixed effort. OMP maps the hint to the model's supported ladder and applies `task.maxEffort` (default `max`) to runtime-selected effort across approved retry candidates. A fixed model suffix outranks both the agent default and coarse field, is not clamped or discarded, and fails when unsupported; unsuffixed `@default` instead inherits the actual parent's concrete effort.
 - `blocking: true` makes the parent wait for that agent even when async task execution is enabled
 - `autoloadSkills` names skills from the parent session to inject before the first child prompt; unknown names are ignored
-- `prewalk: true` starts the subagent on its resolved model and requests the default prewalk target (the `smol` role) at its first edit/write; a string value (e.g. `prewalk: "@smol"` or `prewalk: "openai/gpt-5-mini"`) picks a custom target. The `task.agentPrewalk` settings record (agent name → `"on"` / `"off"` / pattern, configured per agent from the `/agents` hub via its prewalk strip) overrides frontmatter. Task sessions can hand off only within their current approved route and with fixed effort preserved. An unavailable target or exact model+effort no-op is skipped; a same-model effort change is a real handoff only when the route permits it.
+- `prewalk: true` starts the subagent on its resolved model and requests the default prewalk target (the `smol` role) at its first edit/write; a string value (e.g. `prewalk: "@smol"` or `prewalk: "openai/gpt-5-mini"`) picks a custom target. The `task.agentPrewalk` settings record (agent name → `"on"` / `"off"` / pattern, configured per agent from the `/agents` hub via its prewalk strip) overrides frontmatter. Omitted-model workers retain ordinary prewalk switching. Explicitly pinned workers can hand off only within their current approved route and with fixed effort preserved. An unavailable target or exact model+effort no-op is skipped; a same-model effort change is a real handoff only when the route permits it.
 - `advisor: true` pairs spawned sessions of the agent with an advisor running the model resolved for the `advisor` role; a string value (e.g. `advisor: "deepseek/deepseek-v4-flash"` or `advisor: "@smol:high"`) sets an explicit advisor model pattern (optional `:level` suffix), applied as the spawned session's `modelRoles.advisor`. The `task.agentAdvisor` settings record (agent name → `"on"` / `"off"` / pattern, configured per agent from the `/agents` hub via its advisor strip) overrides the frontmatter. Resolution happens in `runSubprocess` (`src/task/executor.ts`); subagents default to no advisor, and the effective opt-in is persisted in `session_init` so cold revival restores it.
 
 ## Role-backed custom agents
@@ -220,20 +220,21 @@ A missing name fails preflight with `Unknown agent "...". Available: ...`; no su
 
 ## Model and structured-output precedence
 
-For task dispatch, model precedence is:
+A supplied per-call `model` takes precedence over configured agent sources and creates a governed candidate closure. It never falls through to settings, frontmatter, or parent selection after an explicit failure.
 
-1. the call's own `model` selector (task item / flat call, eval `agent(model=…)`, or creation of a `workpool(model=…)` worker)
-2. `task.agentModelOverrides[agentName]`
-3. the agent frontmatter's prioritized `model` list
-4. the actual live parent model and its actual effort
+With `model` omitted, ordinary source precedence remains:
 
-Precedence chooses among approved routes, not arbitrary available models. Concrete selections must already be authorized by the current operator's configured roles/fallbacks, the selected agent's frontmatter or exact model override, or the actual live parent. Availability, authentication, enabled/catalog membership, and project recommendations are not permission.
+1. `task.agentModelOverrides[agentName]`
+2. the agent frontmatter's prioritized `model` list and configured role resolution
+3. the live parent model
+
+Omission retains authentication fallback, configured retries, agent thinking/AUTO and task coarse effort, and prewalk. An already-running implicit worker does not acquire a new explicit pin when its parent changes models. Explicit concrete selections must be authorized by current operator roles/fallbacks, selected-agent frontmatter or an exact model override, or the actual live parent; availability, authentication, enabled/catalog membership, and recommendations are not permission.
 
 `@default` names the exact live parent's provider/model, not `modelRoles.default` or a parent-role fallback chain. Unsuffixed `@default` inherits the parent's actual effort; `@default:high` overrides only effort. A requested fixed suffix such as `@review:high` outranks agent thinking defaults and the supported coarse `effort` field. Unsupported fixed effort fails rather than clamping or discarding it. Unqualified routes permit runtime effort selection; configured `auto` remains `auto`.
 
 A per-call `model` accepts one selector or an ordered, non-empty array. Role aliases retain identity and may use their currently configured approved fallback chain; raw literals stay inside the requested candidate closure rather than acquiring another role/default/auth chain. `@inherit`, bare `default`/`inherit` (including suffixed forms), unknown roles, malformed selectors, and unauthorized or unavailable requests fail. Explicit failure stops without dropping `model`, substituting another model, or falling through to settings/frontmatter/parent selection.
 
-After policy resolution, `before_subagent_spawn` runs once for actual dispatch. It may block or narrow the current approved model candidates, never enlarge them or weaken fixed effort; a routing note is carried into progress metadata. Retries and revival remain inside the same candidate closure and revalidate current permission. Workpool follow-ups retain the worker's existing model/effort contract; they are not per-item rerouting.
+After policy resolution, `before_subagent_spawn` runs once for actual dispatch. For an explicit selection it may block or narrow the approved candidates, never enlarge them or weaken fixed effort; retries and revival revalidate that closure against the original operator's current grants. Omitted-model hooks and revival retain ordinary routing rather than reconstructing a permit from saved metadata. Workpool follow-ups reuse each worker's existing session and model/effort contract; they are not per-item rerouting.
 
 The `Alt+P` task model pick is session-only; saving a model in `/agents` replaces that runtime selection for the current session and persists the new value for future sessions.
 

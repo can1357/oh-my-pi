@@ -17,6 +17,8 @@
  *   POST /v1/messages                      → Anthropic messages in/out
  *   POST /v1/responses                     → OpenAI Responses in/out
  *   POST /v1/pi/stream                     → native pi-ai stream in/out
+ *   POST /v1/pi/stream/admitted            → governed native stream with origin re-admission
+ *   POST /v1/pi/admission                  → request-bound, one-use origin approval
  *   POST /v1/systemone | /alpha/decisions  → TypeSafe System One judgments (routes/systemone)
  *   POST /v1/images[/generations|/edits]   → image generation, OpenAI/OpenRouter wire (routes/images)
  *   POST /v1/audio/speech                  → text-to-speech, raw audio out (routes/speech)
@@ -36,6 +38,14 @@ import * as anthropicMessages from "../providers/anthropic-messages-server";
 import * as openaiChat from "../providers/openai-chat-server";
 import * as openaiResponses from "../providers/openai-responses-server";
 import * as piNative from "../providers/pi-native-server";
+import {
+	PI_NATIVE_ADMISSION_HEADER,
+	PI_NATIVE_ADMISSION_PATH,
+	PI_NATIVE_ADMISSION_VERSION,
+	PI_NATIVE_GOVERNED_STREAM_PATH,
+	isPiNativeAdmissionDecision,
+	type PiNativeAdmissionControl,
+} from "../providers/pi-native-admission";
 import { completeSimple, streamSimple } from "../stream";
 import type { Api, AssistantMessageEventStream, Context, Model, SimpleStreamOptions } from "../types";
 import { deterministicUuid } from "../utils/deterministic-id";
@@ -69,6 +79,7 @@ import { handleSystemOne } from "./routes/systemone";
 import { handleTranscriptions } from "./routes/transcriptions";
 import { handleVideoContent, handleVideoPoll, handleVideoSubmit } from "./routes/video";
 import { AuthGatewaySessionStateStore } from "./session-state";
+import { NativeAdmissionRegistry } from "./native-admission";
 import type {
 	AuthGatewayServerHandle,
 	AuthGatewayFormatModule as FormatModule,
@@ -511,6 +522,8 @@ async function handlePiNative(
 	req: Request,
 	peer: string,
 	sessionStates: AuthGatewaySessionStateStore,
+	nativeAdmissions: NativeAdmissionRegistry,
+	governed = false,
 ): Promise<Response> {
 	const startedAt = performance.now();
 	const requestId = crypto.randomUUID();
@@ -535,6 +548,20 @@ async function handlePiNative(
 		const message = error instanceof Error ? error.message : String(error);
 		return piNative.formatError(400, "invalid_request_error", message);
 	}
+	if (governed && (!parsed.stream || !parsed.admission)) {
+		return piNative.formatError(400, "invalid_request_error", "Governed native inference requires origin admission.");
+	}
+	if (
+		!governed &&
+		(parsed.admission || parsed.options.preserveModelSelection || parsed.options.preserveThinkingEffort)
+	) {
+		return piNative.formatError(
+			400,
+			"invalid_request_error",
+			"Governed native inference requires the admitted stream endpoint.",
+		);
+	}
+	if (governed) parsed.options.preserveModelSelection = true;
 
 	const model = bootOpts.resolveModel(parsed.modelId);
 	if (!model) {
@@ -659,7 +686,13 @@ async function handlePiNative(
 	// event stream and is released when the turn settles. Until that handoff
 	// happens, the `finally` below owns it.
 	let streamOwnsLease = false;
+	let admission: PiNativeAdmissionControl | undefined;
 	try {
+		if (governed) {
+			admission = nativeAdmissions.open(requestId, req.headers.get("authorization") ?? "", controller.signal);
+			const currentAdmission = admission;
+			streamOpts.onBeforeRequest = () => currentAdmission.beforeRequest();
+		}
 		let events: AssistantMessageEventStream;
 		try {
 			if (controller.signal.aborted) return aborted();
@@ -676,21 +709,31 @@ async function handlePiNative(
 				recordGatewayUsage(bootOpts.storage, model, client, message.usage, message.timestamp || undefined),
 			)
 			.catch(() => {})
-			.finally(() => lease.release());
+			.finally(() => {
+				admission?.close();
+				lease.release();
+			});
 		streamOwnsLease = true;
 
-		const sseStream = piNative.encodeStream(events, parsed.modelId, parsed.options, {
-			signal: controller.signal,
-			onCancel: reason => {
-				if (!controller.signal.aborted) {
-					controller.abort(reason instanceof Error ? reason : new Error("client closed request"));
-				}
+		const sseStream = piNative.encodeStream(
+			events,
+			parsed.modelId,
+			parsed.options,
+			{
+				signal: controller.signal,
+				onCancel: reason => {
+					if (!controller.signal.aborted) {
+						controller.abort(reason instanceof Error ? reason : new Error("client closed request"));
+					}
+				},
 			},
-		});
+			admission,
+		);
 		return new Response(sseStream, {
 			status: 200,
 			headers: {
 				...gatewayResponseHeaders(model, { requestId }),
+				...(admission ? { [PI_NATIVE_ADMISSION_HEADER]: String(PI_NATIVE_ADMISSION_VERSION) } : {}),
 				"Content-Type": "text/event-stream; charset=utf-8",
 				"Cache-Control": "no-cache",
 				Connection: "keep-alive",
@@ -698,8 +741,27 @@ async function handlePiNative(
 			},
 		});
 	} finally {
-		if (!streamOwnsLease) lease.release();
+		if (!streamOwnsLease) {
+			admission?.close();
+			lease.release();
+		}
 	}
+}
+
+async function handlePiNativeAdmission(registry: NativeAdmissionRegistry, req: Request): Promise<Response> {
+	let decision: unknown;
+	try {
+		decision = await req.json();
+	} catch {
+		return piNative.formatError(400, "invalid_request_error", "Invalid native admission decision.");
+	}
+	if (!isPiNativeAdmissionDecision(decision)) {
+		return piNative.formatError(400, "invalid_request_error", "Invalid native admission decision.");
+	}
+	if (!registry.decide(decision, req.headers.get("authorization") ?? "")) {
+		return piNative.formatError(404, "invalid_admission", "Native admission is no longer pending for this caller.");
+	}
+	return json(200, { accepted: true });
 }
 
 /**
@@ -791,6 +853,8 @@ const LOGGABLE_PATHS: Record<string, true> = {
 	"/v1/usage": true,
 	"/v1/credentials/check": true,
 	"/v1/pi/stream": true,
+	"/v1/pi/stream/admitted": true,
+	"/v1/pi/admission": true,
 	"/v1/systemone": true,
 	"/alpha/decisions": true,
 	"/v1/images/generations": true,
@@ -826,6 +890,7 @@ export interface AuthGatewayRouter {
  */
 export function createAuthGatewayRouter(opts: AuthGatewayRouteOptions): AuthGatewayRouter {
 	const sessionStates = new AuthGatewaySessionStateStore();
+	const nativeAdmissions = new NativeAdmissionRegistry();
 	const route = async (req: Request, peer: string): Promise<Response> => {
 		const pathname = new URL(req.url).pathname;
 		try {
@@ -851,8 +916,18 @@ export function createAuthGatewayRouter(opts: AuthGatewayRouteOptions): AuthGate
 
 			// Pi-native fast path. Same auth + provider plumbing as the
 			// foreign-wire routes, just without the wire-format translation.
-			if (req.method === "POST" && pathname === "/v1/pi/stream") {
-				return await handlePiNative(opts, req, peer, sessionStates);
+			if (req.method === "POST" && pathname === PI_NATIVE_ADMISSION_PATH) {
+				return await handlePiNativeAdmission(nativeAdmissions, req);
+			}
+			if (req.method === "POST" && (pathname === "/v1/pi/stream" || pathname === PI_NATIVE_GOVERNED_STREAM_PATH)) {
+				return await handlePiNative(
+					opts,
+					req,
+					peer,
+					sessionStates,
+					nativeAdmissions,
+					pathname === PI_NATIVE_GOVERNED_STREAM_PATH,
+				);
 			}
 
 			// TypeSafe System One judgments (jev). TypeSafe SDKs and omp's own
@@ -922,7 +997,13 @@ export function createAuthGatewayRouter(opts: AuthGatewayRouteOptions): AuthGate
 			return json(500, { error: "internal error" });
 		}
 	};
-	return { route, close: () => sessionStates.close() };
+	return {
+		route,
+		close: () => {
+			nativeAdmissions.close();
+			sessionStates.close();
+		},
+	};
 }
 
 export function startAuthGateway(opts: AuthGatewayBootOptions): AuthGatewayServerHandle {

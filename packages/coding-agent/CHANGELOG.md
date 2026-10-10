@@ -17,6 +17,9 @@
 
 ### Fixed
 
+- Restored ordinary agent routing, authentication fallback, configured retries, effort/AUTO, and prewalk for omitted-model workers while explicit selectors remain governed; task schemas remain available through Google CCA conversion ([#12229](https://github.com/can1357/oh-my-pi/pull/12229) by [@Xytronix](https://github.com/Xytronix)).
+- Fixed automatic and manual compaction and handoff escaping an explicit worker's admitted model, fixed effort, or current operator grants; governed workers use eligible local methods instead of provider-native remote compaction ([#12229](https://github.com/can1357/oh-my-pi/pull/12229) by [@Xytronix](https://github.com/Xytronix)).
+- Fixed external thinking tools being omitted when a worker's model resolves after initial tool setup, without weakening explicitly fixed native reasoning effort ([#12229](https://github.com/can1357/oh-my-pi/pull/12229) by [@Xytronix](https://github.com/Xytronix)).
 - Fixed `/usage` (or clicking the status-line cost) while the usage dashboard was already open stacking a second dashboard on top; it now focuses the open one ([#15145](https://github.com/can1357/oh-my-pi/pull/15145) by [@H4vC](https://github.com/H4vC))
 - Fixed the custom-tool examples' full-documentation link opening a missing page ([#15076](https://github.com/can1357/oh-my-pi/pull/15076) by [@qingshungLI](https://github.com/qingshungLI))
 - Fixed the `/models` compaction limit preview and **Compacts at** row rounding fractional percentages (`12.5%` showed as `13%`) ([#15074](https://github.com/can1357/oh-my-pi/pull/15074) by [@H4vC](https://github.com/H4vC))

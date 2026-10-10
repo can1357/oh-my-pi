@@ -528,7 +528,7 @@ describe("persisted subagent revival", () => {
 		expect(reviver).toBeUndefined();
 	});
 
-	it("readmits a legacy exact model only from the currently selected agent's frontmatter", async () => {
+	it("restores a legacy implicit model from its saved history", async () => {
 		const cwd = makeTempDir("@pi-revive-current-grant-");
 		const fixture = createTaskModelFixture();
 		routeFixtures.push(fixture);
@@ -560,62 +560,96 @@ describe("persisted subagent revival", () => {
 		}
 	});
 
-	it("denies a legacy model when only catalog, auth, and its old retry transcript authorize it", async () => {
-		const cwd = makeTempDir("@pi-revive-transcript-grant-");
-		const fixture = createTaskModelFixture();
-		routeFixtures.push(fixture);
-		const sessionFile = await createPersistedSession(cwd, true, "qa", undefined, {
-			agent: "ReviveWorker",
-			resolvedModel: fixture.selectors.unassigned,
-			retryFallback: { primary: fixture.selectors.unassigned, chain: [fixture.selectors.primary] },
-		});
-		const before = await Bun.file(sessionFile).text();
-		const createSession = vi.spyOn(sdkModule, "createAgentSession");
-		const ref = createRef(sessionFile);
-		const reviver = await createFactory(cwd, undefined, {
-			settings: Settings.isolated({ modelRoles: { qa: fixture.selectors.primary } }),
-			modelRegistry: fixture.modelRegistry,
-			agents: [{ name: "ReviveWorker", description: "current", systemPrompt: "current", source: "user" }],
-		})(ref);
-		if (!reviver) throw new Error("Expected a persisted reviver");
-		await expect(reviver(ref)).rejects.toThrow(/not authorized/);
-		expect(createSession).not.toHaveBeenCalled();
-		expect(ref.status).toBe("parked");
-		expect(await Bun.file(sessionFile).text()).toBe(before);
-	});
-
-	it("does not restore a legacy retry chain even when its exact primary is currently authorized", async () => {
-		const cwd = makeTempDir("@pi-revive-legacy-retry-");
-		const fixture = createTaskModelFixture();
-		routeFixtures.push(fixture);
-		const sessionFile = await createPersistedSession(cwd, true, undefined, undefined, {
-			agent: "ReviveWorker",
-			resolvedModel: fixture.selectors.primary,
-			retryFallback: { primary: fixture.selectors.primary, chain: [fixture.selectors.unassigned] },
-		});
-		const ref = AgentRegistry.global().register(createRef(sessionFile));
-		const reviver = await createFactory(cwd, undefined, {
-			settings: Settings.isolated(),
-			modelRegistry: fixture.modelRegistry,
-			agents: [
-				{
+	for (const selectionKind of ["implicit", "explicit"] as const) {
+		it(`revives ${selectionKind} workers without turning recorded retries into explicit grants`, async () => {
+			const cwd = makeTempDir("@pi-revive-route-boundary-");
+			const requests: string[] = [];
+			const server = Bun.serve({
+				hostname: "127.0.0.1",
+				port: 0,
+				fetch: async request => {
+					const body = (await request.json()) as { model: string };
+					requests.push(body.model);
+					if (body.model === "primary") {
+						return Response.json({ error: { message: "Model unavailable at this endpoint" } }, { status: 404 });
+					}
+					return new Response(
+						`data: ${JSON.stringify({
+							id: "cold-revive",
+							object: "chat.completion.chunk",
+							created: 0,
+							choices: [{ index: 0, delta: { role: "assistant", content: "Recovered." } }],
+						})}\n\n` +
+							`data: ${JSON.stringify({
+								id: "cold-revive",
+								object: "chat.completion.chunk",
+								created: 0,
+								choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
+							})}\n\ndata: [DONE]\n\n`,
+						{ headers: { "content-type": "text/event-stream" } },
+					);
+				},
+			});
+			let revived: AgentSession | undefined;
+			try {
+				const settings = Settings.isolated({
+					"retry.baseDelayMs": 1,
+					"retry.maxRetries": 1,
+					"retry.modelFallback": true,
+					"compaction.enabled": false,
+					"todo.enabled": false,
+				});
+				const fixture = createTaskModelFixture(settings, { baseUrl: `${server.url.origin}/v1` });
+				routeFixtures.push(fixture);
+				const currentAgent: AgentDefinition = {
 					name: "ReviveWorker",
 					description: "current",
 					systemPrompt: "current",
 					source: "user",
 					model: [fixture.selectors.primary],
-				},
-			],
-		})(ref);
-		if (!reviver) throw new Error("Expected a persisted reviver");
-		const revived = await reviver(ref);
-		try {
-			expect(revived.model?.id).toBe(fixture.models.primary.id);
-			expect(roleRouteFallbackSelectors(revived.roleRoute!)).toEqual([]);
-		} finally {
-			await revived.dispose();
-		}
-	});
+				};
+				const route =
+					selectionKind === "explicit"
+						? await createTaskModelRoute({
+								authority: { settings, agentName: "ReviveWorker", agentModel: currentAgent.model },
+								modelRegistry: fixture.modelRegistry,
+								selectors: [fixture.selectors.primary],
+								explicit: true,
+							})
+						: undefined;
+				const sessionFile = await createPersistedSession(cwd, true, undefined, undefined, {
+					agent: "ReviveWorker",
+					resolvedModel: fixture.selectors.primary,
+					...(route ? { roleRouting: route.metadata } : {}),
+					retryFallback: { primary: fixture.selectors.primary, chain: [fixture.selectors.unassigned] },
+				});
+				const ref = AgentRegistry.global().register(createRef(sessionFile));
+				const reviver = await createFactory(cwd, undefined, {
+					settings,
+					modelRegistry: fixture.modelRegistry,
+					agents: [currentAgent],
+					parentModel: fixture.models.fallback,
+					parentThinkingLevel: Effort.Low,
+				})(ref);
+				if (!reviver) throw new Error("Expected a persisted reviver");
+				revived = await reviver(ref);
+				await revived.sendUserMessage("Finish the saved assignment.");
+				expect(requests).toContain("primary");
+				if (selectionKind === "implicit") {
+					expect(requests.at(-1)).toBe("unassigned");
+					expect(revived.model?.id).toBe("unassigned");
+					expect(revived.getLastAssistantMessage()?.stopReason).toBe("stop");
+				} else {
+					expect(requests).not.toContain("unassigned");
+					expect(revived.model?.id).toBe("primary");
+					expect(revived.getLastAssistantMessage()?.stopReason).toBe("error");
+				}
+			} finally {
+				await revived?.dispose();
+				server.stop(true);
+			}
+		});
+	}
 
 	it("readmits modern selected effort and governed retry occurrences under unchanged current roles", async () => {
 		const cwd = makeTempDir("@pi-revive-modern-route-");
@@ -814,13 +848,21 @@ describe("persisted subagent revival", () => {
 		});
 	}
 
-	it("denies a legacy pin after the selected agent frontmatter changes to another authenticated model", async () => {
+	it("denies an explicit pin after the selected agent frontmatter changes to another authenticated model", async () => {
 		const cwd = makeTempDir("@pi-revive-changed-agent-");
 		const fixture = createTaskModelFixture();
 		routeFixtures.push(fixture);
+		const settings = Settings.isolated();
+		const route = await createTaskModelRoute({
+			authority: { settings, agentName: "ReviveWorker", agentModel: [fixture.selectors.primary] },
+			modelRegistry: fixture.modelRegistry,
+			selectors: [fixture.selectors.primary],
+			explicit: true,
+		});
 		const sessionFile = await createPersistedSession(cwd, true, undefined, undefined, {
 			agent: "ReviveWorker",
 			resolvedModel: fixture.selectors.primary,
+			roleRouting: route.metadata,
 		});
 		const currentAgent: AgentDefinition = {
 			name: "ReviveWorker",
@@ -831,7 +873,7 @@ describe("persisted subagent revival", () => {
 		};
 		const ref = createRef(sessionFile);
 		const reviver = await createFactory(cwd, undefined, {
-			settings: Settings.isolated(),
+			settings,
 			modelRegistry: fixture.modelRegistry,
 			agents: [currentAgent],
 		})(ref);
@@ -884,7 +926,7 @@ describe("persisted subagent revival", () => {
 				settings,
 				agentName: "ReviveWorker",
 				getParentModel: fixture.getActiveModel,
-				getParentSelector: fixture.getActiveModelString,
+				getParentSelector: fixture.getActiveModelSelector,
 			},
 			modelRegistry: fixture.modelRegistry,
 			selectors: ["@default"],
@@ -892,7 +934,7 @@ describe("persisted subagent revival", () => {
 		});
 		const sessionFile = await createPersistedSession(cwd, true, "default", undefined, {
 			agent: "ReviveWorker",
-			resolvedModel: fixture.getActiveModelString(),
+			resolvedModel: fixture.getActiveModelSelector(),
 			roleRouting: route.metadata,
 		});
 		const createSession = vi.spyOn(sdkModule, "createAgentSession");
@@ -918,7 +960,7 @@ describe("persisted subagent revival", () => {
 				settings: spawnSettings,
 				agentName: "ReviveWorker",
 				getParentModel: fixture.getActiveModel,
-				getParentSelector: fixture.getActiveModelString,
+				getParentSelector: fixture.getActiveModelSelector,
 			},
 			modelRegistry: fixture.modelRegistry,
 			selectors: ["@default"],
@@ -926,7 +968,7 @@ describe("persisted subagent revival", () => {
 		});
 		const sessionFile = await createPersistedSession(cwd, true, "default", undefined, {
 			agent: "ReviveWorker",
-			resolvedModel: fixture.getActiveModelString(),
+			resolvedModel: fixture.getActiveModelSelector(),
 			roleRouting: route.metadata,
 		});
 		const ref = AgentRegistry.global().register({ ...createRef(sessionFile), parentId: "AbsentParent" });

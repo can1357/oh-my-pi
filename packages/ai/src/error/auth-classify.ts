@@ -1,5 +1,5 @@
 import { extractHttpStatusFromError } from "@oh-my-pi/pi-utils";
-import { isAccountPolicyError, isClinePassSurfaceGateMessage, isOAuthExpiry, isUsageLimit } from "./flags";
+import { classify, Flag, is, isClinePassSurfaceGateMessage, isOAuthExpiry } from "./flags";
 import { OAuthError } from "./oauth";
 import { isConcurrencyCapExclusion, isUsageLimitOutcome } from "./rate-limit";
 
@@ -17,6 +17,7 @@ const INVALIDATED_OAUTH_TOKEN_PATTERN = /\binvalidated oauth token\b/i;
 
 /** Whether an upstream response explicitly says the supplied OAuth bearer was invalidated. */
 export function isInvalidatedOAuthTokenError(error: unknown): boolean {
+	if (is(classify(error), Flag.HostAdmission)) return false;
 	if (typeof error === "object" && error !== null && "errorMessage" in error) {
 		const errorMessage =
 			"errorClassificationMessage" in error ? error.errorClassificationMessage : error.errorMessage;
@@ -37,9 +38,10 @@ export function isInvalidatedOAuthTokenError(error: unknown): boolean {
  * 429s (`Too many requests`, per-minute caps) stay in the upstream-backoff lane.
  */
 export function isAuthRetryableError(error: unknown): boolean {
+	const id = classify(error);
+	if (is(id, Flag.HostAdmission)) return false;
 	if (error instanceof OAuthError && error.kind === "token-refresh") return true;
-	if (isUsageLimit(error)) return true;
-	if (isAccountPolicyError(error)) return true;
+	if (is(id, Flag.UsageLimit) || is(id, Flag.AccountPolicy)) return true;
 	if (isInvalidatedOAuthTokenError(error)) return true;
 	let httpStatus = extractHttpStatusFromError(error);
 	let message = error instanceof Error ? error.message : typeof error === "string" ? error : undefined;

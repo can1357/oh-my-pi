@@ -58,6 +58,7 @@ function createSession(options: { manager?: AsyncJobManager; settings?: Record<s
 		modelRegistry: fixture.modelRegistry,
 		getActiveModel: fixture.getActiveModel,
 		getActiveModelString: fixture.getActiveModelString,
+		getActiveModelSelector: fixture.getActiveModelSelector,
 		getSessionFile: () => null,
 		getSessionSpawns: () => "*",
 		getAgentId: () => null,

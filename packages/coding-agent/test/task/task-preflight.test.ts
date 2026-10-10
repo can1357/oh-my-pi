@@ -12,7 +12,8 @@ import * as executorModule from "@oh-my-pi/pi-coding-agent/task/executor";
 import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
 import type { SingleResult, TaskParams } from "@oh-my-pi/pi-tui/tools/task";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
-import { resolveRoleRoute } from "@oh-my-pi/pi-coding-agent/task/role-routing";
+import * as sdk from "@oh-my-pi/pi-coding-agent/sdk";
+import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { createTaskModelFixture, type TaskModelFixture } from "../helpers/model-fixtures";
 
 const taskAgent: AgentDefinition = {
@@ -40,6 +41,7 @@ function createSession(options: {
 		modelRegistry: fixture.modelRegistry,
 		getActiveModel: fixture.getActiveModel,
 		getActiveModelString: fixture.getActiveModelString,
+		getActiveModelSelector: fixture.getActiveModelSelector,
 		getSessionFile: () => null,
 		getSessionSpawns: () => options.spawns ?? "*",
 		asyncJobManager: options.manager,
@@ -200,31 +202,100 @@ describe("task async preflight", () => {
 		}
 	});
 
-	it("admits a task item's configured model with fixed effort before executor dispatch", async () => {
+	it("serves a task item's configured custom role at its fixed requested effort", async () => {
 		mockDiscovery();
-		const jobs = manager();
-		const session = createSession({
-			manager: jobs,
-			settings: {
-				"async.enabled": false,
-				"task.batch": true,
-				modelRoles: { "project-review": "routing-test/primary" },
+		const requests: Array<{ model: string; reasoning_effort?: string }> = [];
+		const server = Bun.serve({
+			hostname: "127.0.0.1",
+			port: 0,
+			fetch: async request => {
+				requests.push((await request.json()) as (typeof requests)[number]);
+				return new Response(
+					`data: ${JSON.stringify({
+						id: "item-result",
+						object: "chat.completion.chunk",
+						created: 0,
+						choices: [
+							{
+								index: 0,
+								delta: {
+									role: "assistant",
+									tool_calls: [
+										{
+											index: 0,
+											id: "item-yield",
+											type: "function",
+											function: { name: "yield", arguments: '{"data":{"completed":true}}' },
+										},
+									],
+								},
+							},
+						],
+					})}\n\n` +
+						`data: ${JSON.stringify({
+							id: "item-result",
+							object: "chat.completion.chunk",
+							created: 0,
+							choices: [{ index: 0, delta: {}, finish_reason: "tool_calls" }],
+						})}\n\ndata: [DONE]\n\n`,
+					{ headers: { "content-type": "text/event-stream" } },
+				);
 			},
 		});
-		const selected: string[] = [];
-		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
-			const route = resolveRoleRoute(options.roleRoute!, session.modelRegistry);
-			selected.push(route.selector);
-			expect(route.fixedEffort).toBe(true);
-			return resultFor(options.id);
-		});
-		const tool = await TaskTool.create(session);
-		const result = await tool.execute("per-call-model", {
-			context: "Shared context.",
-			tasks: [{ name: "Router", agent: "task", task: "Do the work.", model: "@project-review:high" }],
-		} as TaskParams);
-		expect(result.isError).not.toBe(true);
-		expect(selected).toEqual(["routing-test/primary:high"]);
+		const sessions: AgentSession[] = [];
+		try {
+			const jobs = manager();
+			const session = createSession({
+				manager: jobs,
+				settings: {
+					"async.enabled": false,
+					"task.batch": true,
+					"compaction.enabled": false,
+					"todo.enabled": false,
+					enabledModels: ["routing-test/*"],
+					modelRoles: { "project-review": "routing-test/primary" },
+				},
+			});
+			const fixture = createTaskModelFixture(session.settings, { baseUrl: `${server.url.origin}/v1` });
+			modelFixtures.push(fixture);
+			session.modelRegistry = fixture.modelRegistry;
+			session.getActiveModel = fixture.getActiveModel;
+			session.getActiveModelString = fixture.getActiveModelString;
+			session.getActiveModelSelector = fixture.getActiveModelSelector;
+			const createAgentSession = sdk.createAgentSession;
+			vi.spyOn(sdk, "createAgentSession").mockImplementation(async options => {
+				if (!options) throw new Error("Expected child session options");
+				const created = await createAgentSession({
+					...options,
+					agentDir: options.cwd,
+					disableExtensionDiscovery: true,
+					extensions: [],
+					skills: [],
+					rules: [],
+					contextFiles: [],
+					promptTemplates: [],
+					slashCommands: [],
+					preloadedCustomToolPaths: [],
+					enableMCP: false,
+					enableLsp: false,
+					skipPythonPreflight: true,
+					toolNames: ["yield"],
+					restrictToolNames: true,
+				});
+				sessions.push(created.session);
+				return created;
+			});
+			const tool = await TaskTool.create(session);
+			const result = await tool.execute("per-call-model", {
+				context: "Shared context.",
+				tasks: [{ name: "Router", agent: "task", task: "Do the work.", model: "@project-review:high" }],
+			} as TaskParams);
+			expect(result.isError).not.toBe(true);
+			expect(requests.map(body => [body.model, body.reasoning_effort])).toEqual([["primary", "high"]]);
+		} finally {
+			await Promise.all(sessions.map(child => child.dispose()));
+			server.stop(true);
+		}
 	});
 
 	it("rejects an unauthorized batch item atomically without registering otherwise valid siblings", async () => {

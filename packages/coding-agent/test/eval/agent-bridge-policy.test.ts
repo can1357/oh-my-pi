@@ -26,6 +26,8 @@ import type { AgentDefinition } from "../../src/task/types";
 import type { AgentProgress, SingleResult, StructuredSubagentOutput } from "@oh-my-pi/pi-tui/tools/task";
 import type { ToolSession } from "../../src/tools";
 import { createTaskModelFixture, type TaskModelFixture } from "../helpers/model-fixtures";
+import * as sdk from "../../src/sdk";
+import { getBundledAgent } from "../../src/task/agents";
 
 const taskAgent = {
 	name: "task",
@@ -122,6 +124,7 @@ function makeSession(options: SessionOptions = {}): ToolSession {
 		modelRegistry: fixture.modelRegistry,
 		getActiveModel: fixture.getActiveModel,
 		getActiveModelString: fixture.getActiveModelString,
+		getActiveModelSelector: fixture.getActiveModelSelector,
 		getArtifactsDir: () => artifactsDir,
 		getSessionId: () => "test-session",
 		getEvalSessionId: () => "test-eval-session",
@@ -562,6 +565,153 @@ describe("agent() through eval runtimes", () => {
 		expect(dispatch).not.toHaveBeenCalled();
 		expect(session.asyncJobManager!.getAllJobs()).toHaveLength(0);
 	});
+
+	for (const runtime of ["js", "py"] as const) {
+		it(`serves omitted stock routing, a fixed custom role and ordered requested recovery through ${runtime}`, async () => {
+			using tempDir = TempDir.createSync("@omp-eval-agent-served-");
+			const settings = Settings.isolated({
+				enabledModels: ["routing-test/*"],
+				modelRoles: {
+					"project-review": "routing-test/primary",
+					leading: "routing-test/primary:high",
+					trailing: "routing-test/fallback:low",
+				},
+				"async.enabled": false,
+				"compaction.enabled": false,
+				"todo.enabled": false,
+				"task.enableLsp": false,
+				"retry.baseDelayMs": 1,
+				"retry.maxRetries": 1,
+			});
+			const { session, sessionFile, sessionId } = makeEvalSession(tempDir, `served-${runtime}`, settings);
+			const requests: Array<{ model: string; reasoning_effort?: string; purpose: "classification" | "work" }> = [];
+			let primaryWorkRequestCount = 0;
+			const server = Bun.serve({
+				hostname: "127.0.0.1",
+				port: 0,
+				fetch: async request => {
+					const body = (await request.json()) as {
+						model: string;
+						reasoning_effort?: string;
+						tools?: Array<{ function?: { name?: string } }>;
+					};
+					const classification = !body.tools?.some(tool => tool.function?.name === "yield");
+					requests.push({ ...body, purpose: classification ? "classification" : "work" });
+					if (!classification && body.model === "primary" && ++primaryWorkRequestCount === 2) {
+						return Response.json({ error: { message: "Model unavailable at this endpoint" } }, { status: 404 });
+					}
+					const delta = classification
+						? { role: "assistant", content: "medium" }
+						: {
+								role: "assistant",
+								tool_calls: [
+									{
+										index: 0,
+										id: "eval-yield",
+										type: "function",
+										function: { name: "yield", arguments: '{"data":{"completed":true}}' },
+									},
+								],
+							};
+					return new Response(
+						`data: ${JSON.stringify({
+							id: "eval-result",
+							object: "chat.completion.chunk",
+							created: 0,
+							choices: [{ index: 0, delta }],
+						})}\n\n` +
+							`data: ${JSON.stringify({
+								id: "eval-result",
+								object: "chat.completion.chunk",
+								created: 0,
+								choices: [{ index: 0, delta: {}, finish_reason: classification ? "stop" : "tool_calls" }],
+							})}\n\ndata: [DONE]\n\n`,
+						{ headers: { "content-type": "text/event-stream" } },
+					);
+				},
+			});
+			const sessions: AgentSession[] = [];
+			try {
+				const fixture = createTaskModelFixture(settings, { baseUrl: `${server.url.origin}/v1` });
+				modelFixtures.push(fixture);
+				session.modelRegistry = fixture.modelRegistry;
+				session.getActiveModel = fixture.getActiveModel;
+				session.getActiveModelString = fixture.getActiveModelString;
+				session.getActiveModelSelector = fixture.getActiveModelSelector;
+				const stockTask = getBundledAgent("task");
+				if (!stockTask) throw new Error("Expected the stock task agent");
+				mockAgents([stockTask, reviewerAgent]);
+				const createAgentSession = sdk.createAgentSession;
+				vi.spyOn(sdk, "createAgentSession").mockImplementation(async options => {
+					if (!options) throw new Error("Expected child session options");
+					const created = await createAgentSession({
+						...options,
+						agentDir: tempDir.path(),
+						disableExtensionDiscovery: true,
+						extensions: [],
+						skills: [],
+						rules: [],
+						contextFiles: [],
+						promptTemplates: [],
+						slashCommands: [],
+						preloadedCustomToolPaths: [],
+						enableMCP: false,
+						enableLsp: false,
+						skipPythonPreflight: true,
+						toolNames: ["yield"],
+						restrictToolNames: true,
+					});
+					sessions.push(created.session);
+					return created;
+				});
+				const schema = {
+					type: "object",
+					properties: { completed: { type: "boolean" } },
+					required: ["completed"],
+					additionalProperties: false,
+				};
+				for (const model of [undefined, "@project-review:high", ["@leading", "@trailing"]]) {
+					const invocation = model === undefined ? {} : { model };
+					const result =
+						runtime === "js"
+							? await executeJs(
+									`const h = await agent("work", ${JSON.stringify({ schema, ...invocation })}); return JSON.stringify((await wait([h]))[0]);`,
+									{ cwd: tempDir.path(), sessionId: sharedJsSessionId, session, sessionFile },
+								)
+							: await executePython(
+									[
+										"import json",
+										`options = json.loads(${JSON.stringify(JSON.stringify({ schema, ...invocation }))})`,
+										'handle = agent("work", **options)',
+										"print(json.dumps(wait([handle])[0]))",
+									].join("\n"),
+									{
+										cwd: tempDir.path(),
+										sessionId,
+										sessionFile,
+										kernelMode: "per-call",
+										toolSession: session,
+									},
+								);
+					expect(result.exitCode, result.output).toBe(0);
+					expect(JSON.parse(result.output.trim())).toEqual({ completed: true });
+				}
+				expect(requests.some(body => body.purpose === "classification")).toBe(true);
+				expect(
+					requests.filter(body => body.purpose === "work").map(body => [body.model, body.reasoning_effort]),
+				).toEqual([
+					["parent", "medium"],
+					["primary", "high"],
+					["primary", "high"],
+					["fallback", "low"],
+				]);
+			} finally {
+				await AgentLifecycleManager.global().dispose();
+				await Promise.all(sessions.map(child => child.dispose()));
+				server.stop(true);
+			}
+		});
+	}
 
 	it("exposes agent() in JavaScript and parses structured output", async () => {
 		using tempDir = TempDir.createSync("@omp-eval-agent-js-");

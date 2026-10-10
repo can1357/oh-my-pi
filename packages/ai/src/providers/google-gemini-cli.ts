@@ -32,6 +32,12 @@ import { AssistantMessageEventStream } from "../utils/event-stream";
 import { extractGoogleValidationUrl, formatGoogleValidationRequiredMessage } from "../utils/google-validation";
 import type { RawHttpRequestDump } from "../utils/http-inspector";
 import { armPreResponseTimeout, getStreamFirstEventTimeoutMs, iterateWithIdleTimeout } from "../utils/idle-iterator";
+import {
+	createRequestSelectionGuard,
+	invokeBeforeRequest,
+	serializeRequestBody,
+	shouldAwaitPayloadHookResult,
+} from "../utils/request-selection";
 // Refresh is the sole responsibility of AuthStorage (broker-aware, single-flighted);
 // the stream provider trusts the access token threaded through `options.apiKey`.
 import { normalizeSchemaForCCA } from "../utils/schema";
@@ -39,6 +45,7 @@ import { StreamMarkupHealing, type StreamMarkupHealingEvent } from "../utils/str
 import forcedToolDirective from "./google-antigravity-forced-tool.md" with { type: "text" };
 import type { Content, FunctionCallingConfigMode, ThinkingConfig } from "./google-shared";
 import {
+	assertFixedGoogleThinking,
 	convertMessages,
 	convertTools,
 	EMPTY_STREAM_BASE_DELAY_MS,
@@ -410,10 +417,13 @@ export function shouldRefreshGeminiCliCredentials(
 	return nowMs + skewMs >= expiresAt;
 }
 
-interface CloudCodeAssistRequest {
+export interface CloudCodeAssistRequest {
 	project: string;
 	model: string;
 	request: {
+		model?: string;
+		thinkingConfig?: ThinkingConfig;
+		thinking_config?: ThinkingConfig;
 		contents: Content[];
 		sessionId?: string;
 		systemInstruction?: { role?: string; parts: { text: string }[] };
@@ -424,7 +434,9 @@ interface CloudCodeAssistRequest {
 			topK?: number;
 			presencePenalty?: number;
 			thinkingConfig?: ThinkingConfig;
+			thinking_config?: ThinkingConfig;
 		};
+		generation_config?: CloudCodeAssistRequest["request"]["generationConfig"];
 		tools?: { functionDeclarations: Record<string, unknown>[] }[] | undefined;
 		toolConfig?: {
 			functionCallingConfig: {
@@ -478,6 +490,11 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 	context: Context,
 	options?: GoogleGeminiCliOptions,
 ): AssistantMessageEventStream => {
+	const selectionOptions = {
+		preserveModelSelection: options?.preserveModelSelection,
+		preserveThinkingEffort: options?.preserveThinkingEffort,
+	};
+	const onBeforeRequest = options?.onBeforeRequest;
 	const stream = new AssistantMessageEventStream();
 
 	(async () => {
@@ -574,7 +591,35 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 			}
 
 			let requestBody = buildRequest(model, context, projectId, options, isAntigravity);
-			const replacementPayload = await options?.onPayload?.(requestBody, model);
+			const effortModelRouted = model.thinking?.effortRouting !== undefined;
+			const selectionGuard = createRequestSelectionGuard(selectionOptions, requestBody, body => ({
+				...(selectionOptions.preserveModelSelection
+					? {
+							model: body?.model,
+							project: body?.project,
+							requestType: body?.requestType,
+							userAgent: body?.userAgent,
+							modelEnum: body?.request?.labels?.model_enum,
+							usedClaude: body?.request?.labels?.used_claude,
+							usedClaudeConservative: body?.request?.labels?.used_claude_conservative,
+							requestModel: body?.request?.model,
+						}
+					: {}),
+				...(selectionOptions.preserveThinkingEffort
+					? {
+							effortModel: effortModelRouted ? body?.model : undefined,
+							thinkingConfig: body?.request?.generationConfig?.thinkingConfig,
+							generationThinkingAlias: body?.request?.generationConfig?.thinking_config,
+							generationAlias: body?.request?.generation_config,
+							requestThinkingConfig: body?.request?.thinkingConfig,
+							requestThinkingAlias: body?.request?.thinking_config,
+						}
+					: {}),
+			}));
+			const payloadHookResult = options?.onPayload?.(requestBody, model);
+			const replacementPayload = shouldAwaitPayloadHookResult(payloadHookResult, !!selectionGuard)
+				? await payloadHookResult
+				: payloadHookResult;
 			if (replacementPayload !== undefined) {
 				requestBody = replacementPayload as typeof requestBody;
 			}
@@ -593,7 +638,7 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 					: {}),
 				...options?.headers,
 			};
-			const requestBodyJson = JSON.stringify(requestBody);
+			const requestBodyJson = serializeRequestBody(requestBody, selectionOptions, selectionGuard);
 			rawRequestDump = {
 				provider: model.provider,
 				api: output.api,
@@ -940,6 +985,11 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 							defaultDelayMs: attempt => BASE_DELAY_MS * 2 ** attempt,
 							maxDelayMs: options?.maxRetryDelayMs ?? RATE_LIMIT_BUDGET_MS,
 							fetch: options?.fetch,
+							shouldRetryError: error => !AIError.is(AIError.classify(error), AIError.Flag.HostAdmission),
+							prepareInit: async () => {
+								await invokeBeforeRequest(onBeforeRequest);
+								return {};
+							},
 							timeout: false,
 						});
 					} finally {
@@ -988,6 +1038,7 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 								throw new AIError.ConfigurationError("Missing request URL");
 							}
 
+							await invokeBeforeRequest(onBeforeRequest);
 							currentResponse = await (options?.fetch ?? fetch)(requestUrl, {
 								method: "POST",
 								headers: requestHeaders,
@@ -1078,13 +1129,19 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 					break;
 				} catch (error) {
 					const status = extractHttpStatusFromError(error);
+					const errorId = AIError.classify(error);
+					const localRejection =
+						AIError.is(errorId, AIError.Flag.HostAdmission) ||
+						AIError.is(errorId, AIError.Flag.Abort) ||
+						AIError.is(errorId, AIError.Flag.UserInterrupt);
 					if (
+						!localRejection &&
 						!isLastEndpoint &&
 						!started &&
 						(AIError.isTransientStatus(status) ||
 							(status === undefined &&
 								!(error instanceof AIError.ProviderResponseError && error.kind === "output") &&
-								AIError.retriable(AIError.classify(error))))
+								AIError.retriable(errorId)))
 					) {
 						continue;
 					}
@@ -1294,6 +1351,14 @@ export function buildRequest(
 		} else {
 			generationConfig.thinkingConfig.thinkingBudget = suppress.budget;
 		}
+	}
+	if (options.preserveThinkingEffort) {
+		assertFixedGoogleThinking(
+			model,
+			options.thinking?.enabled,
+			generationConfig.thinkingConfig,
+			options.requestModelId ?? model.requestModelId ?? model.id,
+		);
 	}
 
 	const request: CloudCodeAssistRequest["request"] = {

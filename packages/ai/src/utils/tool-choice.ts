@@ -1,7 +1,8 @@
 /**
  * Utility functions for mapping unified ToolChoice to provider-specific formats.
  */
-import type { ToolChoice } from "../types";
+import { resolveFactoryDroidPolicy } from "@oh-my-pi/pi-catalog/compat/factory-droid";
+import type { Effort, Model, ToolChoice } from "../types";
 
 /** OpenAI Completions API tool choice format */
 export type OpenAICompletionsToolChoice =
@@ -64,6 +65,31 @@ export function mapToOpenAICompletionsToolChoice(choice?: ToolChoice): OpenAICom
  */
 export function isForcedToolChoice(choice: unknown): boolean {
 	if (choice === undefined || choice === "auto" || choice === "none") return false;
+	return true;
+}
+
+/** Whether forced tools can retain this model's enabled, fixed thinking effort. */
+export function canForceToolChoiceWhilePreservingEffort(model: Model, reasoning?: Effort): boolean {
+	if (model.supportsTools === false) return false;
+	const compat = model.compat;
+	if (compat && typeof compat === "object") {
+		if ("supportsToolChoice" in compat && compat.supportsToolChoice === false) return false;
+		if ("supportsForcedToolChoice" in compat && compat.supportsForcedToolChoice === false) return false;
+		if ("supportsNamedToolChoice" in compat && compat.supportsNamedToolChoice === false) return false;
+	}
+	if (reasoning === undefined || !model.reasoning) return true;
+	if (
+		model.api === "anthropic-messages" ||
+		model.api === "bedrock-converse-stream" ||
+		(model.api === "factory-droid-agent" && resolveFactoryDroidPolicy(model)?.wire === "anthropic-messages")
+	) {
+		return false;
+	}
+	if (compat && typeof compat === "object") {
+		if ("disableReasoningOnForcedToolChoice" in compat && compat.disableReasoningOnForcedToolChoice) return false;
+		if ("disableReasoningOnToolChoice" in compat && compat.disableReasoningOnToolChoice) return false;
+		if ("disableReasoningWithTools" in compat && compat.disableReasoningWithTools) return false;
+	}
 	return true;
 }
 

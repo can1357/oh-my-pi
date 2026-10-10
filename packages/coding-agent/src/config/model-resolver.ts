@@ -46,7 +46,7 @@ import {
 	parseConfiguredThinkingLevel,
 	resolveThinkingLevelForModel,
 } from "@oh-my-pi/pi-tui/thinking";
-import type { ModelRegistry } from "./model-registry";
+import { isAuthenticated, kNoAuth, type ModelRegistry } from "./model-registry";
 import {
 	DEFAULT_MODEL_ROLE_ALIAS,
 	formatModelRoleAlias,
@@ -1727,6 +1727,79 @@ export function sessionModelDiscoveryProviders(
 		if (provider && !disabledProviders.has(provider)) providers.add(provider);
 	}
 	return providers;
+}
+
+/**
+ * Resolve a list of override patterns to the first matching model, with an
+ * auth-aware fallback to the parent session's active model.
+ *
+ * Providers disabled through settings are removed before matching so ordered
+ * overrides skip them and an all-disabled list resolves to no model.
+ *
+ * If the resolved subagent model has no working credentials (provider has no
+ * usable auth), and the parent's active model resolves with working auth,
+ * use the parent's model instead. This prevents subagent dispatch from
+ * silently routing to a provider the user can't actually call (e.g.
+ * `modelRoles.task` pointing at an unqualified id whose only available
+ * provider variant has no configured credentials — see #985).
+ *
+ * `sessionId` is forwarded to `getApiKey` so that session-sticky OAuth
+ * credentials resolve correctly during the pre-flight auth check. Without it,
+ * providers with multiple OAuth accounts may return `undefined` even though
+ * the credential is usable once the subagent session starts — see #5325.
+ *
+ * Keyless-by-design providers (llama.cpp, ollama, lm-studio) advertise the
+ * `kNoAuth` sentinel from `getApiKey` to signal that they do not require
+ * credentials. Those are treated as authenticated here so an explicitly
+ * configured local model is never silently rerouted to the parent's remote
+ * provider (see #1008).
+ *
+ * If neither the subagent nor the parent has working auth, returns the
+ * primary resolution unchanged so the existing error path still surfaces
+ * a meaningful failure downstream.
+ */
+export async function resolveModelOverrideWithAuthFallback(
+	modelPatterns: string[],
+	parentActiveModelPattern: string | undefined,
+	modelRegistry: ModelLookupRegistry & Pick<ModelRegistry, "getApiKey">,
+	settings?: Settings,
+	sessionId?: string,
+): Promise<{
+	model?: Model<Api>;
+	thinkingLevel?: ConfiguredThinkingLevel;
+	explicitThinkingLevel: boolean;
+	authFallbackUsed: boolean;
+	warning?: string;
+}> {
+	const disabledProviders = disabledProviderIds(settings);
+	let lookupRegistry: ModelLookupRegistry = modelRegistry;
+	if (disabledProviders.size > 0) {
+		const enabledModels = modelRegistry.getAvailable().filter(model => !disabledProviders.has(model.provider));
+		lookupRegistry = { getAvailable: () => enabledModels };
+	}
+	const primary = resolveModelOverride(modelPatterns, lookupRegistry, settings);
+	if (!primary.model || !parentActiveModelPattern) {
+		return { ...primary, authFallbackUsed: false };
+	}
+
+	const primaryKey = await modelRegistry.getApiKey(primary.model, sessionId);
+	if (primaryKey === kNoAuth || isAuthenticated(primaryKey)) {
+		return { ...primary, authFallbackUsed: false };
+	}
+
+	const fallback = resolveModelOverride([parentActiveModelPattern], lookupRegistry, settings);
+	if (!fallback.model) {
+		return { ...primary, authFallbackUsed: false };
+	}
+	if (modelsAreEqual(fallback.model, primary.model)) {
+		return { ...primary, authFallbackUsed: false };
+	}
+	const fallbackKey = await modelRegistry.getApiKey(fallback.model, sessionId);
+	if (!isAuthenticated(fallbackKey)) {
+		return { ...primary, authFallbackUsed: false };
+	}
+
+	return { ...fallback, authFallbackUsed: true, warning: primary.warning ?? fallback.warning };
 }
 
 /**

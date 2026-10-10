@@ -362,6 +362,93 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 		expect(recovery.isHardErrorFallbackEligible(message)).toBe(true);
 	});
 
+	it("does not revive local admission through special provider recovery metadata", async () => {
+		const finalized = await AIError.finalize(
+			new AIError.ModelSelectionError("Current selection authority was revoked.", {
+				cause: new AIError.ProviderHttpError("503 service unavailable", 503),
+			}),
+		);
+		const message: AssistantMessage = {
+			...makeMessage([], model),
+			errorId: finalized.id,
+			errorMessage: "abort()",
+		};
+		const recovery = new TurnRecovery(
+			createHost(model, modelRegistry, {
+				fallbackChains: { [`${model.provider}/${model.id}`]: ["openai/gpt-4o-mini"] },
+			}),
+		);
+		expect(recovery.isRetryableReasonlessAbort(message)).toBe(false);
+		expect(recovery.isRetryableError(message)).toBe(false);
+		expect(recovery.isHardErrorFallbackEligible(message)).toBe(false);
+
+		const interrupted: AssistantMessage = {
+			...message,
+			content: [{ type: "toolCall", id: "blocked-call", name: "read", arguments: { path: "/tmp/input" } }],
+		};
+		const unexecuted: ToolResultMessage<SyntheticToolResultDetails> = {
+			role: "toolResult",
+			toolCallId: "blocked-call",
+			toolName: "read",
+			content: [{ type: "text", text: "Tool call was not executed." }],
+			isError: true,
+			details: { __synthetic: true, source: "assistant_stop_error", executed: false },
+			timestamp: Date.now(),
+		};
+		const interruptedRecovery = new TurnRecovery(
+			createHost(model, modelRegistry, { messages: [interrupted, unexecuted] }),
+		);
+		expect(interruptedRecovery.classifyResolvedInterruptedToolTurn(interrupted)).toBeUndefined();
+		expect(AIError.is(interrupted.errorId, AIError.Flag.HostAdmission)).toBe(true);
+
+		const timeout: AssistantMessage = {
+			...message,
+			api: "openai-responses",
+			errorStatus: 408,
+			errorMessage: "timed out reading request body",
+			requestBodyReadTimeoutFullReplay: true,
+		};
+		expect(await recovery.handleResponsesRequestBodyReadTimeout(timeout)).toBe("not-applicable");
+		const refusal: AssistantMessage = { ...message, stopDetails: { type: "refusal" } };
+		expect(recovery.isClassifierRefusal(refusal)).toBe(false);
+		expect(recovery.isHardErrorFallbackEligible(refusal)).toBe(false);
+	});
+
+	it("keeps local admission out of text and usage-driven compaction recovery", async () => {
+		const contextWindow = model.contextWindow;
+		if (contextWindow === null || !Number.isFinite(contextWindow) || contextWindow <= 0) {
+			throw new Error("Expected a positive context window for bundled model claude-sonnet-4-5");
+		}
+		const finalized = await AIError.finalize(new AIError.ModelSelectionError("Selection is no longer admitted."));
+		const message: AssistantMessage = {
+			...makeMessage([], model),
+			errorId: finalized.id,
+			errorStatus: 413,
+			errorMessage: "413 request_too_large: prompt is too long",
+			usage: { ...USAGE, contextTokens: contextWindow + 1 },
+		};
+		const recovery = new TurnRecovery(createHost(model, modelRegistry));
+		expect(AIError.isUsageBackedContextOverflow(message, contextWindow)).toBe(false);
+		expect(AIError.isContextOverflow(message, contextWindow)).toBe(false);
+		expect(AIError.isPayloadRejection(message)).toBe(false);
+		expect(recovery.isRetryableError(message)).toBe(false);
+		expect(recovery.isHardErrorFallbackEligible(message)).toBe(false);
+	});
+
+	it("honors structured user and silent interrupts instead of a generic abort replay", () => {
+		const recovery = new TurnRecovery(createHost(model, modelRegistry));
+		for (const interrupt of [AIError.Flag.UserInterrupt, AIError.Flag.SilentAbort]) {
+			const message: AssistantMessage = {
+				...makeMessage([], model),
+				stopReason: "aborted",
+				errorId: AIError.create(interrupt),
+				errorMessage: "abort()",
+			};
+			expect(recovery.isRetryableReasonlessAbort(message)).toBe(false);
+			expect(AIError.is(message.errorId, interrupt)).toBe(true);
+		}
+	});
+
 	it("excludes a Fireworks Fast failed turn with partial visible text from Fast→base fallback", () => {
 		const fastModel = getBundledModel("fireworks", "kimi-k3-fast");
 		if (!fastModel) throw new Error("Expected bundled model kimi-k3-fast");
