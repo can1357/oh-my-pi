@@ -1,11 +1,18 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import { Agent } from "@oh-my-pi/pi-agent-core";
-import type { ResetCreditAccountStatus, ResetCreditTarget, UsageReport } from "@oh-my-pi/pi-ai";
+import type {
+	ResetCreditAccountStatus,
+	ResetCreditTarget,
+	SessionRestrictionLease,
+	UsageReport,
+} from "@oh-my-pi/pi-ai";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import * as envApiKey from "@oh-my-pi/pi-ai/env-api-key";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { ExtensionRuntime } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
+import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import {
@@ -128,6 +135,8 @@ describe("Claude saved-reset trigger integration", () => {
 		autoRedeem?: "unset" | "yes" | "no";
 		salvageHorizonHours?: number;
 		keepCredits?: number;
+		/** Answers the auto-redeem consent prompt; without it the session has no prompt UI. */
+		consent?: () => Promise<string | undefined>;
 	}): { session: AgentSession; coordinator: CodexAutoRedeemCoordinator; targets: ResetCreditTarget[] } {
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!model) throw new Error("Expected bundled anthropic/claude-sonnet-4-5 to exist");
@@ -195,12 +204,25 @@ describe("Claude saved-reset trigger integration", () => {
 		managers.push(sessionManager);
 		const coordinator = createCodexAutoRedeemCoordinator();
 		coordinator.resetLockPath = `${tempDir.path()}/auth.db`;
+		let extensionRunner: ExtensionRunner | undefined;
+		if (options.consent) {
+			extensionRunner = new ExtensionRunner(
+				[],
+				new ExtensionRuntime(),
+				tempDir.path(),
+				sessionManager,
+				modelRegistry,
+			);
+			vi.spyOn(extensionRunner, "hasUI").mockReturnValue(true);
+			vi.spyOn(extensionRunner.getUIContext(), "select").mockImplementation(options.consent);
+		}
 		const session = new AgentSession({
 			agent,
 			sessionManager,
 			settings,
 			modelRegistry,
 			codexResetCoordinator: coordinator,
+			extensionRunner,
 		});
 		sessions.push(session);
 		return { session, coordinator, targets };
@@ -389,6 +411,36 @@ describe("Claude saved-reset trigger integration", () => {
 
 		expect(targets.map(target => target.credentialId)).toEqual([pool.pooledId]);
 		expect(session.agent.state.messages.at(-1)).toMatchObject({ role: "assistant", stopReason: "stop" });
+	});
+
+	it("drops a planned restore whose account leaves the session's pool before it is spent", async () => {
+		let replaced: SessionRestrictionLease | undefined;
+		const { session, coordinator, targets } = buildSession({
+			report: null,
+			status: claudeStatus(true),
+			streamErrorFirst: true,
+			autoRedeem: "unset",
+			// The pool is replaced while the planned restore waits for consent.
+			consent: async () => {
+				replaced = authStorage.sessions.restrict("anthropic", session.sessionId, []);
+				return "Yes";
+			},
+		});
+		const pool = await poolToSessionAccount(session, 3 * 24 * HOUR);
+		mockSchedulerWaitWithClock();
+
+		try {
+			await session.prompt("lose the pooled account mid-recovery");
+			await session.waitForIdle();
+		} finally {
+			if (replaced) authStorage.sessions.unrestrict("anthropic", session.sessionId, replaced);
+			await pool.release();
+		}
+
+		expect(replaced).toBeDefined();
+		expect(targets).toEqual([]);
+		expect(coordinator.attemptedKeys.size).toBe(0);
+		expect(session.agent.state.messages.at(-1)).toMatchObject({ role: "assistant", stopReason: "error" });
 	});
 
 	it("cancels reset discovery backoff without spending a credit or resuming the task", async () => {

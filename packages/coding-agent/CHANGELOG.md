@@ -21,7 +21,7 @@
 - Fixed the `/models` compaction limit preview and **Compacts at** row rounding fractional percentages (`12.5%` showed as `13%`) ([#15074](https://github.com/can1357/oh-my-pi/pull/15074) by [@H4vC](https://github.com/H4vC))
 - Fixed `/omfg` save, overwrite, and validation prompts in Tern opening as a sheet over the candidate rule; they now sit in the composer slot like `ask`, so the rule stays readable while you choose ([#15058](https://github.com/can1357/oh-my-pi/pull/15058) by [@H4vC](https://github.com/H4vC))
 - Fixed hotkeys pressed in Tern while omp is still starting (such as Alt+P for the model selector) being ignored; like in other terminals, they now take effect once startup finishes ([#15120](https://github.com/can1357/oh-my-pi/pull/15120) by [@H4vC](https://github.com/H4vC))
-- Fixed a usage-limited session with an account pool (such as a task agent under `task.agentAccountPools`) auto-redeeming the saved reset of an account outside its pool, which it cannot use ([#15135](https://github.com/can1357/oh-my-pi/pull/15135) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed a usage-limited session with an account pool (such as a task agent under `task.agentAccountPools`) spending a saved reset to restore an account outside its pool, which it cannot use; resets about to expire are still salvaged on every account ([#15135](https://github.com/can1357/oh-my-pi/pull/15135) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.8.7] - 2026-10-09
 

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- Custom `SessionsApi` implementations must now implement `permits(provider, sessionId, credentialId)` ([#15135](https://github.com/can1357/oh-my-pi/pull/15135) by [@will-bogusz](https://github.com/will-bogusz))
+
 ### Added
 
 - Added `AuthStorage.sessions.permits(provider, sessionId, credentialId)`, which tells whether a stored account may serve a session restricted to an account pool ([#15135](https://github.com/can1357/oh-my-pi/pull/15135) by [@will-bogusz](https://github.com/will-bogusz))

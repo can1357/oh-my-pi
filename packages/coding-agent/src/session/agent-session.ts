@@ -12756,13 +12756,20 @@ export class AgentSession implements SettingsScope {
 		const authStorage = this.#modelRegistry.authStorage;
 		const providerLabel = provider === "anthropic" ? "Claude" : "Codex";
 		const source = provider === "anthropic" ? "claude-auto-reset" : "codex-auto-reset";
+		// Consent, earlier actions, the fence and the live listing all wait after
+		// planning: a restore the session's account pool no longer allows is dropped.
+		const outsidePool = (action: CodexResetAction | ClaudeResetAction): boolean =>
+			action.reason === "blocked-account" &&
+			!authStorage.sessions.permits(provider, this.sessionId, action.target.credentialId);
 		let redeemed = 0;
 		for (const action of actions) {
 			if (coordinator.attemptedKeys.has(action.attemptKey)) continue;
+			const previousAttemptAt = coordinator.lastAttemptAtByAccount.get(action.accountKey);
 			coordinator.attemptedKeys.add(action.attemptKey);
 			coordinator.lastAttemptAtByAccount.set(action.accountKey, Date.now());
 			let outcome: ResetCreditRedeemOutcome | undefined;
 			let sharedReset = false;
+			let leftPool = false;
 			try {
 				const redeemOptions = {
 					target: action.target,
@@ -12773,7 +12780,8 @@ export class AgentSession implements SettingsScope {
 				const lockKey = resetAccountLockKey(action.target);
 				if (!lockKey) {
 					// An account without an upstream identity cannot share a cross-process fence.
-					outcome = await authStorage.resets.redeem(redeemOptions);
+					leftPool = outsidePool(action);
+					if (!leftPool) outcome = await authStorage.resets.redeem(redeemOptions);
 				} else {
 					// The coordinator is process-local. Fence concurrent processes and
 					// remember a recent attempt so a late 429 cannot spend again.
@@ -12809,6 +12817,8 @@ export class AgentSession implements SettingsScope {
 									return { ok: false, code: "no_credit", provider } satisfies ResetCreditRedeemOutcome;
 								}
 							}
+							leftPool = outsidePool(action);
+							if (leftPool) return undefined;
 							const attemptedAt = Date.now();
 							await Bun.write(lockPath, `pending:${attemptedAt}`);
 							const result = await authStorage.resets.redeem(redeemOptions);
@@ -12834,6 +12844,15 @@ export class AgentSession implements SettingsScope {
 			}
 			if (!outcome) {
 				if (sharedReset) redeemed++;
+				if (leftPool) {
+					// Never attempted: the episode and cooldown stay free if the pool allows it again.
+					coordinator.attemptedKeys.delete(action.attemptKey);
+					if (previousAttemptAt === undefined) coordinator.lastAttemptAtByAccount.delete(action.accountKey);
+					else coordinator.lastAttemptAtByAccount.set(action.accountKey, previousAttemptAt);
+					logger.debug(`${source}: restore dropped, account left the session's pool`, {
+						account: action.accountKey,
+					});
+				}
 				continue;
 			}
 			if (!isTerminalRedeemOutcome(outcome.code)) {

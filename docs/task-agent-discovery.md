@@ -261,7 +261,8 @@ environment, and stored API keys
 are not used; a `models.yml` `apiKey` for the provider fails the request instead of sending a pooled
 token to that endpoint. When no pooled account can serve, the request fails with `No API key for
 provider: … restricted to its OAuth account pool` instead of borrowing another account; an empty
-list allows no account. Pools do not pick models, so model and retry-fallback policy still decide
+list allows no account. Saved resets about to expire are still salvaged on every account, because
+salvage serves the account that holds the reset. Pools do not pick models, so model and retry-fallback policy still decide
 which provider the child calls. The pool covers every key lookup the agent makes, whatever provider
 session id it carries: fresh or reset sessions, advisors, title generation, skill compression, and
 subagents it spawns without their own entry (an entry of their own replaces it). Vibe workers take
