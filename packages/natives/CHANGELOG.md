@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed `rasterizeSvg` dropping every `<text>` element when the system's default serif font is not installed, which left inline SVG figures and `read :img` previews without labels ([#15181](https://github.com/can1357/oh-my-pi/issues/15181))
+
 ## [18.8.7] - 2026-10-09
 
 ### Added
