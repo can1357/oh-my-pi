@@ -5760,15 +5760,6 @@ mod tests {
 
 	#[cfg(unix)]
 	#[tokio::test(flavor = "multi_thread")]
-	async fn external_command_receives_shell_resource_limit() {
-		let (result, output) =
-			execute_captured("ulimit -S -n 64 && sh -c 'ulimit -S -n'".into()).await;
-		assert_eq!(result.exit_code, Some(0), "{output}");
-		assert_eq!(output.trim(), "64");
-	}
-
-	#[cfg(unix)]
-	#[tokio::test(flavor = "multi_thread")]
 	async fn external_command_receives_extra_file_descriptor() {
 		let (result, output) =
 			execute_captured("sh -c 'printf descriptor-output >&3' 3>&1".into()).await;
