@@ -20,6 +20,7 @@ pkgs.mkShell (
     packages =
       [ bun bun2nix rustToolchain ]
       ++ (with pkgs; [
+        lychee
         cargo-nextest
         rustPlatform.bindgenHook
         nixfmt
