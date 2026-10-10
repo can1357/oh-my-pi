@@ -295,17 +295,19 @@ fn with_background_keyboard<T>(
 			 proven to reach it; retry with takeover:true or use ax actions",
 		)));
 	}
+	let focus = ax::key_focus(pid);
 	// The target cannot become key while a window attached to it has focus,
 	// so waiting for that would only delay the same refusal.
-	let destination = ax::key_focus(pid).destination(pid, wid);
+	let destination = focus.destination(pid, wid, skylight::window_parent);
 	if let ax::KeyDestination::Other(Some(other)) = destination
 		&& attached_under(other, skylight::window_parent, |parent| parent == wid)
 	{
 		return Err(key_refusal(wid, destination, conflict, skylight::window_parent));
 	}
+	let in_overlay = focus.in_overlay_of(wid, skylight::window_parent);
 	let entry_front = skylight::front_pid();
 	skylight::with_background_guard(pid, || {
-		let prepared = make_key_in_background(source, pid, wid, window, entry_front)?;
+		let prepared = make_key_in_background(source, pid, wid, window, entry_front, in_overlay)?;
 		let to = await_key_destination(pid, wid, conflict)?;
 		if prepared {
 			still_behind_user(pid, wid)?;
@@ -367,7 +369,7 @@ fn await_key_destination(
 ) -> CoreResult<libc::pid_t> {
 	let deadline = Instant::now() + KEY_WINDOW_TIMEOUT;
 	loop {
-		let destination = ax::key_focus(pid).destination(pid, wid);
+		let destination = ax::key_focus(pid).destination(pid, wid, skylight::window_parent);
 		if let KeyRoute::Deliver(to) = key_route(pid, destination, conflict) {
 			return Ok(to);
 		}
@@ -662,6 +664,13 @@ fn front_target(
 /// began; a target that has come forward since then refuses, because the
 /// user may have just picked the window that would receive the input.
 ///
+/// `focus_in_overlay` says the caller has seen the application's keyboard
+/// focus in an overlay window attached to `wid`, such as Finder's inline
+/// rename field or a popover: the target then counts as the frontmost
+/// application's key window, and in a background application the activation
+/// goes out without the press, which would make `wid` key and so end that
+/// overlay's editing.
+///
 /// Returns whether the activation step ran. The user can bring the target app
 /// forward at any moment, which would turn the step into a key-window switch
 /// in the app they type into, so the front process is re-read before the
@@ -672,8 +681,16 @@ pub(super) fn make_key_in_background(
 	wid: u32,
 	window: &DesktopWindow,
 	entry_front: Option<libc::pid_t>,
+	focus_in_overlay: bool,
 ) -> CoreResult<bool> {
-	match front_target(entry_front, skylight::front_pid(), pid, wid, || ax::focused_window_id(pid)) {
+	let focused = || {
+		if focus_in_overlay {
+			Some(wid)
+		} else {
+			ax::focused_window_id(pid)
+		}
+	};
+	match front_target(entry_front, skylight::front_pid(), pid, wid, focused) {
 		FrontTarget::Background => {},
 		FrontTarget::Key => return Ok(false),
 		FrontTarget::CameForward => {
@@ -720,6 +737,9 @@ pub(super) fn make_key_in_background(
 		|| control::wait(KEY_WINDOW_POLL),
 	)?;
 	still_behind_user(pid, wid)?;
+	if focus_in_overlay {
+		return Ok(true);
+	}
 	let (location, local) = activating_press(window);
 	let press = |event_type: CGEventType, number: i64| -> CoreResult<()> {
 		let event = mouse_event(source, event_type, location, CGMouseButton::Left)?;
@@ -922,7 +942,7 @@ fn background_pointer(
 ) -> CoreResult<()> {
 	match event {
 		PointerEvent::Click { x, y, button: MouseButton::Left, count, .. } => {
-			if make_key_in_background(source, pid, wid, window, entry_front)? {
+			if make_key_in_background(source, pid, wid, window, entry_front, false)? {
 				still_behind_user(pid, wid)?;
 			}
 			background_left_click(source, pid, wid, window, x, y, count)

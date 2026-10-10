@@ -16,6 +16,7 @@
 - Fixed TextEdit and Script Editor freezing for good when a macOS background ⌘S followed a background edit of a just-opened document; background input now waits until the app reports the activation it was sent ([#15184](https://github.com/can1357/oh-my-pi/pull/15184) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed macOS background typing and keys for a window landing in a sheet or panel attached to it, such as Finder's Go to Folder, with no error; they now throw `InvalidTarget` naming that window, and keys for a window whose application reports another focused window throw `BackgroundUnavailable` ([#15184](https://github.com/can1357/oh-my-pi/pull/15184) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed macOS background keys for a sheet or panel that its app leaves out of its accessibility windows, such as Finder's Go to Folder, throwing `BackgroundUnavailable` every time; they now go out in the background once it is the app's focused window ([#15184](https://github.com/can1357/oh-my-pi/pull/15184) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed macOS background typing into an inline editor, such as Finder's rename field, reporting success while the editor closed and the keys went to the file list; when keyboard focus sits in an overlay window attached to the target, the step that makes the window key no longer clicks, so the keys reach the editor ([#15184](https://github.com/can1357/oh-my-pi/pull/15184) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.8.7] - 2026-10-09
 

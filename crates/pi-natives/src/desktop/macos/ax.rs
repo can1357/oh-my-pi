@@ -137,26 +137,60 @@ pub(super) enum KeyDestination {
 	/// Into another window the application reports as focused; `None` when
 	/// that window cannot be mapped to an id.
 	Other(Option<u32>),
-	/// The application reports no focused window.
+	/// The application reports no focused window, and its focused element is
+	/// not in `wid` or in a window attached to it.
 	Unreported,
 }
 
 impl KeyFocus {
-	/// Where keystrokes for window `wid` of process `pid` would go: the
-	/// focused window decides. A sheet or panel the application reports is
-	/// another window, even when attached to `wid`.
-	pub(super) const fn destination(&self, pid: libc::pid_t, wid: u32) -> KeyDestination {
+	/// Where keystrokes for window `wid` of process `pid` would go.
+	///
+	/// The focused window decides when the application reports one; a sheet
+	/// or panel it reports is another window, even when attached to `wid`.
+	/// When it reports none, as Finder does while its inline rename field (an
+	/// overlay window of its own) has focus, the focused element's window
+	/// decides: `wid` itself, or a window `parent_of` says is attached to it.
+	pub(super) fn destination(
+		&self,
+		pid: libc::pid_t,
+		wid: u32,
+		parent_of: impl FnOnce(u32) -> Option<u32>,
+	) -> KeyDestination {
 		match self.window {
 			FocusedWindow::Id(id) if id == wid => KeyDestination::Target(pid),
 			FocusedWindow::Id(id) => KeyDestination::Other(Some(id)),
 			FocusedWindow::Unmapped => KeyDestination::Other(None),
-			FocusedWindow::Unreported => KeyDestination::Unreported,
+			FocusedWindow::Unreported => match self.element_window {
+				Some(id) if [Some(id), parent_of(id)].contains(&Some(wid)) => {
+					KeyDestination::Target(pid)
+				},
+				_ => KeyDestination::Unreported,
+			},
 		}
 	}
 
-	/// Whether text inserted into the focused element lands in `wid`.
-	pub(super) const fn holds_text_for(&self, wid: u32) -> bool {
-		matches!(self.element_window, Some(id) if id == wid)
+	/// Whether text inserted into the focused element lands in `wid`: the
+	/// element is in `wid`, or keys for `wid` would reach it.
+	pub(super) fn holds_text_for(
+		&self,
+		pid: libc::pid_t,
+		wid: u32,
+		parent_of: impl FnOnce(u32) -> Option<u32>,
+	) -> bool {
+		self.element_window == Some(wid)
+			|| matches!(self.destination(pid, wid, parent_of), KeyDestination::Target(_))
+	}
+
+	/// Whether keyboard focus sits in an overlay window attached to `wid`,
+	/// such as Finder's inline rename field or a popover, while the
+	/// application reports `wid`, or nothing, as its focused window.
+	pub(super) fn in_overlay_of(&self, wid: u32, parent_of: impl FnOnce(u32) -> Option<u32>) -> bool {
+		let reported = match self.window {
+			FocusedWindow::Unreported => true,
+			FocusedWindow::Id(id) => id == wid,
+			FocusedWindow::Unmapped => false,
+		};
+		reported && self.element_window.is_some_and(|id| id != wid && parent_of(id) == Some(wid))
 	}
 }
 
@@ -805,7 +839,7 @@ pub(super) fn insert_native_text(pid: libc::pid_t, wid: u32, text: &str) -> Core
 	let (focus, Some(element)) = read_key_focus(&app) else {
 		return Ok(false);
 	};
-	if !focus.holds_text_for(wid)
+	if !focus.holds_text_for(pid, wid, skylight::window_parent)
 		|| text_surface(&element) != TextSurface::Native
 		|| !matches!(
 			copy_string(&element, "AXRole").as_deref(),
@@ -1283,9 +1317,32 @@ mod tests {
 		// reports 41732 as its AXWindow but lives in the sheet's own window.
 		let focus =
 			KeyFocus { window: FocusedWindow::Id(41740), element_window: Some(41740) };
-		assert_eq!(focus.destination(7, 41732), KeyDestination::Other(Some(41740)));
-		assert!(!focus.holds_text_for(41732));
-		assert_eq!(focus.destination(7, 41740), KeyDestination::Target(7));
-		assert!(focus.holds_text_for(41740));
+		let attached = |id| (id == 41740).then_some(41732);
+		assert_eq!(focus.destination(7, 41732, attached), KeyDestination::Other(Some(41740)));
+		assert!(!focus.holds_text_for(7, 41732, attached));
+		assert_eq!(focus.destination(7, 41740, attached), KeyDestination::Target(7));
+		assert!(focus.holds_text_for(7, 41740, attached));
+	}
+
+	#[test]
+	fn an_editor_overlay_attached_to_the_target_holds_its_focus() {
+		// Finder's inline rename field is overlay window 41743, attached to
+		// window 41732; while it has focus Finder reports no focused window.
+		let focus =
+			KeyFocus { window: FocusedWindow::Unreported, element_window: Some(41743) };
+		let attached = |id| (id == 41743).then_some(41732);
+		assert_eq!(focus.destination(7, 41732, attached), KeyDestination::Target(7));
+		assert!(focus.holds_text_for(7, 41732, attached));
+		assert!(focus.in_overlay_of(41732, attached));
+		// The same overlay in another Finder window is not this window's.
+		assert_eq!(focus.destination(7, 35240, attached), KeyDestination::Unreported);
+		assert!(!focus.holds_text_for(7, 35240, attached));
+		assert!(!focus.in_overlay_of(35240, attached));
+		// A popover attached to its focused window (Reminders' details popover
+		// is window 90 on window 79) is an overlay too; the window itself is not.
+		let popover = KeyFocus { window: FocusedWindow::Id(79), element_window: Some(90) };
+		assert!(popover.in_overlay_of(79, |id| (id == 90).then_some(79)));
+		let window = KeyFocus { window: FocusedWindow::Id(79), element_window: Some(79) };
+		assert!(!window.in_overlay_of(79, |_| None));
 	}
 }
