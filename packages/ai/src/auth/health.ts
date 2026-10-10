@@ -133,7 +133,8 @@ export class CredentialHealth implements HealthApi {
 			? Math.max(0, Math.min(1, options.reserveFraction))
 			: this.#deps.policies.defaultReservePct / 100;
 
-		const reserveMarginFraction = options.reserveMarginFraction ?? 0;
+		const requestedMargin = options.reserveMarginFraction ?? 0;
+		const reserveMarginFraction = Number.isFinite(requestedMargin) ? Math.max(0, requestedMargin) : 0;
 		const resolveReserveFraction = (entry: StoredCredential): number => {
 			const policy = this.#deps.policies.forCredential(provider, entry.credential);
 			const configured = policy?.reservePct;

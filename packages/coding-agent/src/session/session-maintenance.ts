@@ -2548,9 +2548,10 @@ export class SessionMaintenance {
 		return tokens;
 	}
 
-	async runPrePromptCompactionIfNeeded(messages: AgentMessage[], signal?: AbortSignal): Promise<void> {
+	/** @returns true when a `retry.fallbackRevertPolicy: when-healthy` return switched to the primary. */
+	async runPrePromptCompactionIfNeeded(messages: AgentMessage[], signal?: AbortSignal): Promise<boolean> {
 		const model = this.#model;
-		if (!model) return;
+		if (!model) return false;
 		const contextWindow = model.contextWindow ?? 0;
 		// The estimate does not depend on the window, so one count serves both the
 		// primary below and this model; it runs only when something needs it.
@@ -2567,21 +2568,21 @@ export class SessionMaintenance {
 			const fitBudget = Math.max(0, primaryWindow - resolveBudgetReserveTokens(primaryWindow, primarySettings));
 			return tokens <= fitBudget && !shouldCompact(tokens, primaryWindow, primarySettings);
 		}, signal);
-		if (signal?.aborted) return;
+		if (signal?.aborted) return false;
 		if (returned) {
 			this.#midTurnDeadEndPendingPrePrompt = false;
-			return;
+			return true;
 		}
 		// The model moved while usage was read: judge the request against it instead.
 		if (this.#model !== model) return this.runPrePromptCompactionIfNeeded(messages, signal);
-		if (contextWindow <= 0) return;
+		if (contextWindow <= 0) return false;
 		const compactionSettings = this.#compactionSettings;
 		const contextTokens = estimate();
 		const pendingMidTurnDeadEnd = this.#midTurnDeadEndPendingPrePrompt;
 		this.#midTurnDeadEndPendingPrePrompt = false;
 		if (!shouldCompact(contextTokens, contextWindow, compactionSettings)) {
 			this.maybeStartSpeculativeCompaction(contextTokens, contextWindow);
-			return;
+			return false;
 		}
 		if (
 			pendingMidTurnDeadEnd &&
@@ -2591,7 +2592,7 @@ export class SessionMaintenance {
 			// The prior tool loop already attempted the rescue and warned for this
 			// persisted oversized turn. Only a later persisted cut point makes a
 			// pre-prompt retry useful; the new agent loop may warn for its own turn.
-			return;
+			return false;
 		}
 		// Grace band: a live (or just-started) background speculation absorbs the
 		// blocking summarization; the user's prompt goes out immediately and the
@@ -2601,7 +2602,7 @@ export class SessionMaintenance {
 				contextTokens,
 				contextWindow,
 			});
-			return;
+			return false;
 		}
 
 		// Auto-promote first: switching to a larger-context model avoids compacting
@@ -2614,7 +2615,7 @@ export class SessionMaintenance {
 				contextWindow,
 				model: `${model.provider}/${model.id}`,
 			});
-			return;
+			return false;
 		}
 
 		logger.debug("Pre-prompt context maintenance triggered by pending prompt size", {
@@ -2629,6 +2630,7 @@ export class SessionMaintenance {
 			preparedContextTokens: this.#estimateStoredContextTokens(),
 			phase: "pre_turn",
 		});
+		return false;
 	}
 
 	/**

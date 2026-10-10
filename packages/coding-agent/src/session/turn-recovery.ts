@@ -721,8 +721,8 @@ export class TurnRecovery {
 	 * primary, so callers can re-run the pre-send context-fit check against the
 	 * reverted (possibly smaller) window before issuing the next request.
 	 */
-	maybeRestoreRetryFallbackPrimary(signal?: AbortSignal): Promise<boolean> {
-		return this.#maybeRestoreRetryFallbackPrimary(signal, undefined);
+	maybeRestoreRetryFallbackPrimary(): Promise<boolean> {
+		return this.#maybeRestoreRetryFallbackPrimary(undefined, undefined);
 	}
 
 	/**

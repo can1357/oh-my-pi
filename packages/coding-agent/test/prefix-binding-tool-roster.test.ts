@@ -487,6 +487,7 @@ describe("prefix-bound tool roster changes", () => {
 			.spyOn(SessionMaintenance.prototype, "runPrePromptCompactionIfNeeded")
 			.mockImplementation(async () => {
 				await harness.session.refreshBaseSystemPrompt();
+				return false;
 			});
 
 		await harness.session.prompt("second");
@@ -518,6 +519,7 @@ describe("prefix-bound tool roster changes", () => {
 			.spyOn(SessionMaintenance.prototype, "runPrePromptCompactionIfNeeded")
 			.mockImplementation(async () => {
 				await harness.session.refreshBaseSystemPrompt();
+				return false;
 			});
 
 		await harness.session.prompt("second");
@@ -576,6 +578,7 @@ describe("prefix-bound tool roster changes", () => {
 			.spyOn(SessionMaintenance.prototype, "runPrePromptCompactionIfNeeded")
 			.mockImplementationOnce(async () => {
 				await harness.session.setActiveToolPresentation(["read", "bash"], []);
+				return false;
 			});
 
 		await harness.session.prompt("second");

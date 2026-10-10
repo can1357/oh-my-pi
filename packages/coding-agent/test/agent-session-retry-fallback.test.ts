@@ -22,6 +22,7 @@ import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream"
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { writeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
+import * as autoThinkingClassifier from "@oh-my-pi/pi-coding-agent/auto-thinking/classifier";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { parseModelString } from "@oh-my-pi/pi-tui/overlays/model-selector";
 import { parseModelPattern } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
@@ -30,6 +31,7 @@ import { editVariantForModel } from "@oh-my-pi/pi-coding-agent/utils/edit-mode";
 import { ExtensionRuntime, loadExtensionFromFactory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
 import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
+import { AUTO_THINKING } from "@oh-my-pi/pi-tui/thinking";
 import {
 	AgentSession,
 	type AgentSessionEvent,
@@ -6924,6 +6926,24 @@ describe("AgentSession retry fallback", () => {
 			await session!.prompt("Primary is healthy again");
 			await session!.waitForIdle();
 			expect(requestedModels).toEqual([expected]);
+		});
+
+		it("classifies an auto-thinking prompt again for the primary it returns to", async () => {
+			const requestedModels = startSession({}, () => "healthy", undefined, {
+				role: "default",
+				originalSelector: primarySelector,
+				originalThinkingLevel: undefined,
+				pinned: true,
+			});
+			const classifier = vi.spyOn(autoThinkingClassifier, "classifyDifficulty").mockResolvedValue(Effort.Low);
+			session!.setThinkingLevel(AUTO_THINKING);
+
+			await session!.prompt("Primary is healthy again");
+			await session!.waitForIdle();
+			expect(requestedModels).toEqual([primarySelector]);
+			// The fallback has no reasoning to classify for; the primary does.
+			expect(classifier).toHaveBeenCalledTimes(1);
+			expect(session!.autoResolvedThinkingLevel()).toBe(Effort.Low);
 		});
 
 		it.each([

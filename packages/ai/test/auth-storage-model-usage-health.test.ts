@@ -225,6 +225,15 @@ describe("AuthStorage model usage health", () => {
 		);
 	});
 
+	it.each([Number.NaN, -0.5])("ignores an invalid reserve margin (%p)", async reserveMarginFraction => {
+		const storage = await createStorage([oauthRow(1)], { "account-1": report("account-1", [limit("short", 0.95)]) });
+
+		expect(
+			(await storage.health.model("anthropic", { modelId: "claude", reserveFraction: 0.1, reserveMarginFraction }))
+				.state,
+		).toBe("reserve");
+	});
+
 	it("expires short and long usage windows independently", async () => {
 		const now = Date.now();
 		const usageReport = report("account-1", [limit("5-hour", 1), limit("7-day", 0.95)]);
