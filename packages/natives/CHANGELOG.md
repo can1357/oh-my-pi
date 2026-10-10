@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Fixed macOS `el.setValue()` reporting `AxFailed` when the app stored the written value in its own format, such as a Contacts phone number shown as `(555) 789-0123`
+- Fixed macOS `el.setValue()` reporting `AxFailed` when the app regrouped a written phone number, such as Contacts storing `555-789-0123` as `(555) 789-0123` ([#15276](https://github.com/can1357/oh-my-pi/pull/15276) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.8.8] - 2026-10-10
 
