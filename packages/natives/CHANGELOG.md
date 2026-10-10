@@ -4,7 +4,7 @@
 
 ### Changed
 
-- Desktop window input with `takeover` omitted is now background on every platform even while task control is held; only `takeover: true` selects foreground delivery
+- Desktop window input with `takeover` omitted is now background on every platform even while task control is held; only `takeover: true` selects foreground delivery ([#15173](https://github.com/can1357/oh-my-pi/pull/15173) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.8.7] - 2026-10-09
 
