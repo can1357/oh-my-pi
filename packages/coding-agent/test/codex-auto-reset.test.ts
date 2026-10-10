@@ -1041,11 +1041,9 @@ describe("codexResets policy plumbing", () => {
 			{ target, creditId: "later", expiresInMs: IMMINENT_RESET_EXPIRY_MS + 1 },
 			{ target, expiresInMs: undefined },
 		];
-		expect(headlessApprovedResetActions("unset", actions)).toEqual([
+		expect(headlessApprovedResetActions(actions)).toEqual([
 			{ ...actions[0], target: { ...target, creditId: "dying" } },
 		]);
-		expect(headlessApprovedResetActions("yes", actions)).toEqual(actions);
-		expect(headlessApprovedResetActions("no", actions)).toEqual([]);
 	});
 
 	it("migrates legacy boolean autoRedeem config to the tri-state policy", () => {

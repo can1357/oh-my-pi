@@ -401,7 +401,7 @@ export function headlessApprovals(actions: readonly ResetAction[]): ApprovedRese
 		.filter(action => action.autoRedeem === "yes")
 		.map(action => ({ action, approval: "auto-redeem-yes" }));
 	const unset = actions.filter(action => action.autoRedeem === "unset");
-	for (const action of headlessApprovedResetActions("unset", unset)) {
+	for (const action of headlessApprovedResetActions(unset)) {
 		approved.push({ action, approval: "headless-last-chance" });
 	}
 	return approved;
