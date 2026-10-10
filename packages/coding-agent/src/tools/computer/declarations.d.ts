@@ -159,7 +159,7 @@ interface ComputerCapabilities {
 	backgroundWindowInput: boolean;
 	/** Whether window input accepts `takeover: true`. */
 	takeover: boolean;
-	/** Whether pressing Escape anywhere can revoke native control. Otherwise use the host interrupt. */
+	/** Whether pressing Escape anywhere stops takeover input (`takeover: true`, held control, desktop-level input, raises, activating launches). Background window input ignores the user's Escape; stop it with the host interrupt. */
 	globalEscape: boolean;
 	capturePermission: string;
 	inputPermission: string;

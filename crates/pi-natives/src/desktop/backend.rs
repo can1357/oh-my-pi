@@ -14,6 +14,13 @@ use super::{
 	},
 };
 
+/// Whether an AX `perform` action names a raise: `raise` in any case, or the
+/// native `AXRaise`. Matches the macOS action naming, so a raise that arms the
+/// physical-Escape stop is exactly a raise that runs as `AXRaise`.
+pub(crate) fn is_raise_action(action: &str) -> bool {
+	action.trim().eq_ignore_ascii_case("raise") || action == "AXRaise"
+}
+
 /// How window-targeted input reaches its target.
 ///
 /// `Background` avoids deliberate activation and physical pointer movement;

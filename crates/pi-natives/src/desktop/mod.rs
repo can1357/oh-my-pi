@@ -29,7 +29,7 @@ use std::{
 
 pub use applications::{Application, ApplicationOpenOptions, ApplicationQuery};
 use ax::{AxRegistry, register_node};
-use backend::{Backend, DeliveryMode, MouseButton, PointerEvent};
+use backend::{Backend, DeliveryMode, MouseButton, PointerEvent, is_raise_action};
 use control::{CancellationSource, InputLease, OperationToken};
 use error::{CoreResult, DesktopError};
 use frame::{FrameGeometry, apply_capture_caps, encode_png};
@@ -301,6 +301,32 @@ impl Request {
 		)
 	}
 
+	/// Whether this mutation takes over the user's own input or foreground,
+	/// which arms the physical-Escape stop: takeover delivery (explicit or
+	/// through held control), input to a desktop or display target (it drives
+	/// the user's real pointer and keyboard), an explicit raise, and an
+	/// activating launch.
+	fn takes_over(&self, token: &OperationToken) -> bool {
+		let (target, takeover) = match self {
+			Self::HoldKeys { target, takeover, .. }
+			| Self::HoldMouse { target, takeover, .. }
+			| Self::MoveMouse { target, takeover, .. }
+			| Self::Scroll { target, takeover, .. }
+			| Self::TypeText { target, takeover, .. }
+			| Self::KeyChord { target, takeover, .. } => (Some(target), *takeover),
+			Self::Click { target, options, .. } | Self::Drag { target, options, .. } => {
+				(Some(target), options.takeover)
+			},
+			Self::AxClick { options, .. } => (None, options.takeover),
+			Self::RaiseWindow { .. } => return true,
+			Self::OpenApplication { options, .. } => return options.activate.unwrap_or(false),
+			Self::AxPerform { action, .. } => return is_raise_action(action),
+			_ => return false,
+		};
+		target.is_some_and(|target| !matches!(target, Target::Window(_)))
+			|| delivery_mode(takeover, token) == DeliveryMode::Foreground
+	}
+
 	const fn frame_target(&self) -> Option<&Target> {
 		match self {
 			Self::Capture { target, .. } | Self::Observe { target, .. } => Some(target),
@@ -493,7 +519,7 @@ impl Worker {
 		self.frames.insert(target.key().to_string(), geometry);
 		// Refreshing here keeps the snapshot current for getter reads that
 		// land while a later operation holds the worker.
-		let capabilities = self.backend()?.capabilities();
+		let capabilities = self.read_capabilities(token)?;
 		*self.capabilities.lock() = Some(capabilities.clone());
 		Ok(DesktopCapture {
 			data: Uint8Array::from(png),
@@ -571,7 +597,7 @@ impl Worker {
 		let _scope = token.enter();
 		let _lease = request
 			.is_mutation()
-			.then(|| InputLease::acquire(token))
+			.then(|| InputLease::acquire(token, request.takes_over(token)))
 			.transpose()?;
 		token.check()?;
 		// A full capture replaces coordinates only if it completes in its
@@ -606,13 +632,20 @@ impl Worker {
 			.ok_or_else(DesktopError::ax_unsupported)
 	}
 
+	/// Backend capabilities, without global Escape once this session's input
+	/// has run without its monitor.
+	fn read_capabilities(&mut self, token: &OperationToken) -> CoreResult<DesktopCapabilities> {
+		let mut capabilities = self.backend()?.capabilities();
+		capabilities.global_escape &= !token.escape_unavailable();
+		Ok(capabilities)
+	}
+
 	fn process(&mut self, request: &Request, token: &OperationToken) -> CoreResult<Response> {
 		match request {
 			Request::Capabilities { .. } => {
-				let caps = match self.backend.as_mut() {
-					Ok(backend) => backend.capabilities(),
-					Err(_) => DesktopCapabilities::unavailable(),
-				};
+				let caps = self
+					.read_capabilities(token)
+					.unwrap_or_else(|_| DesktopCapabilities::unavailable());
 				*self.capabilities.lock() = Some(caps.clone());
 				Ok(Response::Capabilities(caps))
 			},
@@ -707,7 +740,7 @@ impl Worker {
 				let (coordinate_width, coordinate_height) = base.dimensions();
 				token.check()?;
 				let png = encode_png(image)?;
-				let capabilities = self.backend()?.capabilities();
+				let capabilities = self.read_capabilities(token)?;
 				*self.capabilities.lock() = Some(capabilities.clone());
 				Ok(Response::Capture(DesktopCapture {
 					data: Uint8Array::from(png),
@@ -1132,8 +1165,15 @@ impl DesktopSession {
 	/// behind it.
 	#[napi(getter)]
 	pub fn capabilities(&self) -> DesktopCapabilities {
+		// An in-flight takeover may have failed to start its stop after the
+		// snapshot was taken; the session's record is current.
+		let snapshot = || {
+			let mut snapshot = self.core.capabilities.lock().clone()?;
+			snapshot.global_escape &= !self.core.cancellation.escape_unavailable();
+			Some(snapshot)
+		};
 		if self.core.in_flight.load(Ordering::Acquire) > 0
-			&& let Some(snapshot) = self.core.capabilities.lock().clone()
+			&& let Some(snapshot) = snapshot()
 		{
 			return snapshot;
 		}
@@ -1142,12 +1182,7 @@ impl DesktopSession {
 			.call(self.core.cancellation.token(), |reply| Request::Capabilities { reply })
 		{
 			Ok(Response::Capabilities(c)) => c,
-			_ => self
-				.core
-				.capabilities
-				.lock()
-				.clone()
-				.unwrap_or_else(DesktopCapabilities::unavailable),
+			_ => snapshot().unwrap_or_else(DesktopCapabilities::unavailable),
 		}
 	}
 
@@ -2079,6 +2114,18 @@ mod capture_tests {
 	}
 
 	#[test]
+	fn busy_snapshot_reports_an_escape_stop_that_failed_after_it_was_taken() {
+		let core = SessionCore::new(DisplaySelector::Active);
+		let mut snapshot = DesktopCapabilities::unavailable();
+		snapshot.global_escape = true;
+		*core.capabilities.lock() = Some(snapshot);
+		core.cancellation.fail_escape_for_test();
+		core.in_flight.store(1, Ordering::Release);
+		let session = DesktopSession { core };
+		assert!(!session.capabilities().global_escape);
+	}
+
+	#[test]
 	fn cancelled_calls_never_start_the_worker_or_count_as_in_flight() {
 		let core = SessionCore::new(DisplaySelector::Active);
 		let token = core.cancellation.token();
@@ -2425,6 +2472,76 @@ mod capture_tests {
 			.unwrap();
 			assert_eq!(options.takeover, Some(takeover));
 			assert_eq!(options.mode(&token), expected);
+		}
+	}
+
+	#[test]
+	fn only_takeover_requests_arm_the_physical_escape_stop() {
+		let token = CancellationSource::default().token();
+		let window = Target::Window("42".to_string());
+		let reply = || flume::unbounded().0;
+		let typing = |target: &Target, takeover| Request::TypeText {
+			target: target.clone(),
+			text: "abc".to_string(),
+			takeover,
+			reply: reply(),
+		};
+		let holding = |target: &Target, takeover| Request::HoldKeys {
+			target: target.clone(),
+			keys: parse_keys(&["shift".to_string()]).unwrap(),
+			duration: Duration::ZERO,
+			takeover,
+			reply: reply(),
+		};
+		let clicking = |target: &Target, takeover| Request::Click {
+			target:  target.clone(),
+			x:       0.0,
+			y:       0.0,
+			options: ParsedPointerOptions::parse(Some(PointerOptions {
+				takeover,
+				..PointerOptions::default()
+			}))
+			.unwrap(),
+			reply:   reply(),
+		};
+		let perform = |action: &str| Request::AxPerform {
+			reference: "e1".to_string(),
+			action:    action.to_string(),
+			reply:     reply(),
+		};
+		let open = |activate| Request::OpenApplication {
+			id:      "com.apple.TextEdit".to_string(),
+			options: ApplicationOpenOptions { activate },
+			reply:   reply(),
+		};
+		let background = [
+			typing(&window, None),
+			typing(&window, Some(false)),
+			holding(&window, None),
+			clicking(&window, Some(false)),
+			perform("AXPress"),
+			perform("showMenu"),
+			open(None),
+			open(Some(false)),
+		];
+		for request in background {
+			assert!(!request.takes_over(&token), "background input leaves Escape to the user");
+		}
+		let display = Target::parse("display:screen-1");
+		let takeover = [
+			typing(&window, Some(true)),
+			holding(&window, Some(true)),
+			clicking(&window, Some(true)),
+			typing(&Target::Desktop, None),
+			holding(&Target::Desktop, Some(false)),
+			clicking(&display, None),
+			Request::RaiseWindow { id: "42".to_string(), reply: reply() },
+			perform("raise"),
+			perform("AXRaise"),
+			open(Some(true)),
+		];
+		for request in takeover {
+			assert!(request.takes_over(&token), "takeover input keeps the Escape stop");
 		}
 	}
 

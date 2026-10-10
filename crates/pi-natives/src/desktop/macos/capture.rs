@@ -22,7 +22,7 @@ use super::{
 		frame::{FrameGeometry, MAX_COMPOSITE_PIXELS, compose},
 		types::{DesktopDisplay, DesktopWindow, DisplaySelector, Target},
 	},
-	ax,
+	ax, permission,
 };
 
 const MAX_LISTED_WINDOWS: usize = 48;
@@ -56,9 +56,7 @@ impl MacCapture {
 	#[allow(clippy::unused_self, reason = "keeps discovery on the backend capture object")]
 	pub(super) fn displays(&self) -> CoreResult<Vec<DesktopDisplay>> {
 		if !capture_permission() {
-			return Err(DesktopError::permission_denied(
-				"macOS Screen Recording permission is not granted for this process",
-			));
+			return Err(permission::denied("Screen Recording"));
 		}
 		let monitors = Monitor::all().map_err(|error| {
 			DesktopError::capture_failed(format!("Quartz monitor enumeration failed: {error}"))
@@ -268,9 +266,7 @@ type WindowDictionary = CFDictionary<CFString, CFType>;
 /// property getters would re-enumerate the whole desktop for every field.
 fn window_snapshot(target: Option<u32>) -> CoreResult<Vec<DesktopWindow>> {
 	if !capture_permission() {
-		return Err(DesktopError::permission_denied(
-			"macOS Screen Recording permission is not granted for this process",
-		));
+		return Err(permission::denied("Screen Recording"));
 	}
 	let options = if target.is_some() {
 		CGWindowListOption::OptionIncludingWindow

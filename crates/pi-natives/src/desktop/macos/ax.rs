@@ -20,11 +20,11 @@ use objc2_core_foundation::{
 use super::{
 	super::{
 		ax::{AxBounds, AxHandle, AxProps, normalize_role_macos},
-		backend::AxBackend,
+		backend::{AxBackend, is_raise_action},
 		error::{CoreResult, DesktopError},
 		types::DesktopWindow,
 	},
-	date, process, skylight,
+	date, permission, process, skylight,
 };
 
 const AX_TIMEOUT_SECONDS: f32 = 2.0;
@@ -464,7 +464,7 @@ impl AxBackend for MacAx {
 		let perform = || perform_action(element, &native);
 		// AXRaise is an explicit request to change stacking, including the
 		// takeover preparation path. Other semantic actions must stay background.
-		if native == "AXRaise" {
+		if is_raise_action(action) {
 			perform()
 		} else {
 			skylight::with_background_guard(element_pid(element)?, perform)
@@ -776,9 +776,7 @@ fn ensure_trusted() -> CoreResult<()> {
 	if is_trusted() {
 		Ok(())
 	} else {
-		Err(DesktopError::permission_denied(
-			"macOS Accessibility permission is not granted for this process",
-		))
+		Err(permission::denied("Accessibility"))
 	}
 }
 
@@ -1098,7 +1096,19 @@ fn ax_result(error: AXError, context: impl Into<String>) -> CoreResult<()> {
 mod tests {
 	use objc2_core_foundation::CFNumber;
 
-	use super::{AttachedCandidate, replace_utf16_selection, select_attached, stringify_value};
+	use super::{
+		AttachedCandidate, action_name, is_raise_action, replace_utf16_selection, select_attached,
+		stringify_value,
+	};
+
+	#[test]
+	fn the_escape_stop_arms_for_exactly_the_actions_that_run_as_axraise() {
+		for action in
+			["raise", " Raise ", "RAISE", "AXRaise", "axraise", "AXRAISE", "Raise", "press", "AXPress"]
+		{
+			assert_eq!(is_raise_action(action), action_name(action) == "AXRaise", "{action:?}");
+		}
+	}
 
 	#[test]
 	fn numeric_values_render_as_numbers_at_stored_precision() {

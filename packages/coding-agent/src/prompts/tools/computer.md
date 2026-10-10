@@ -16,7 +16,7 @@ Control the host desktop from JavaScript or Python Eval with the global `compute
 - Python helpers use the same names with keyword arguments becoming the trailing options object (`await win.click(10, 20, button="right")`); `win.raise_()` replaces the keyword `raise`. Python `computer.run(code, read_only=…, timeout=…)` accepts a JavaScript code string only.
 - Approval: inspection helpers (`windows`, `screenshot`, `ax`, `find`, `value`, `bounds`, `clipboard.read`, …) need read approval; input and mutation helpers need exec approval. `computer.run` uses `read_only: true` for the read tier, which also blocks facade mutation.
 - `computer.run` executes in the persistent JavaScript session with full Bun/Node and tool-bridge access; it is not sandboxed. Window handles, screenshot frames, and AX refs persist across calls.
-- `computer.capabilities()` reports native permissions and `applications`, `menus`, `heldInput`, `spaces`, and `globalEscape` support; unsupported operations fail explicitly. Wayland uses the host interrupt instead of global Escape. `computer.close()` ends the desktop session and later calls fail.
+- `computer.capabilities()` reports native permissions and `applications`, `menus`, `heldInput`, `spaces`, and `globalEscape` support; unsupported operations fail explicitly. `globalEscape` means physical Escape anywhere stops takeover input (`takeover: true`, held control, desktop-level input, raises, activating launches); background window input ignores the user's Escape, so they can keep working in their own app, and only the host interrupt stops it. Wayland uses the host interrupt instead of global Escape. `computer.close()` ends the desktop session and later calls fail.
 </instruction>
 
 <examples>
