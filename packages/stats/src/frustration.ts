@@ -178,7 +178,11 @@ export function mergeFrustrationRows(rows: readonly FrustrationModelRow[]): Frus
 		const shortRevision = revision?.replace(/(?:\.0)+$/, "");
 		merged.set(key, {
 			key,
-			label: shortRevision ? [family, shortRevision].filter(Boolean).join(" ") : row.model,
+			label: shortRevision
+				? family?.startsWith("gpt-")
+					? `gpt ${shortRevision} ${family.slice(4)}`
+					: [family, shortRevision].filter(Boolean).join(" ")
+				: row.model,
 			modelClass: identity.class,
 			family,
 			revision,

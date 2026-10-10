@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed GPT Sol, Luna, Astra, and Terra models sharing one product-family identity across versions and providers ([#15261](https://github.com/can1357/oh-my-pi/issues/15261)).
+
 ## [18.8.8] - 2026-10-10
 
 ### Added

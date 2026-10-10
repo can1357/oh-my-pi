@@ -15,6 +15,15 @@ class "openai" {
 	prefix "o4."
 
 	family "gpt" glob="gpt-*"
+	// GPT product tiers share a generation but have distinct behavior and pricing.
+	family "gpt-astra" glob="gpt-*-astra" priority=1
+	family "gpt-astra" glob="gpt-*-astra-*" priority=1
+	family "gpt-luna" glob="gpt-*-luna" priority=1
+	family "gpt-luna" glob="gpt-*-luna-*" priority=1
+	family "gpt-sol" glob="gpt-*-sol" priority=1
+	family "gpt-sol" glob="gpt-*-sol-*" priority=1
+	family "gpt-terra" glob="gpt-*-terra" priority=1
+	family "gpt-terra" glob="gpt-*-terra-*" priority=1
 	family "chatgpt" glob="chatgpt-*"
 	family "o-series" glob="o1"
 	family "o-series" glob="o1-*"
