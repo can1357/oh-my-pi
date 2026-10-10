@@ -4,7 +4,7 @@
 
 ### Added
 
-- Added `Agent.historyRevision`, which counts conversation rewrites so tools can tell when output the model saw may be gone ([#15280](https://github.com/can1357/oh-my-pi/pull/15280) by [@will-bogusz](https://github.com/will-bogusz))
+- Added `Agent.historyRevision`, which counts conversation rewrites that drop or replace a tool result (`replaceMessages` takes `toolResultsRewritten` for in-place rewrites), so tools can tell when output the model saw may be gone ([#15280](https://github.com/can1357/oh-my-pi/pull/15280) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.8.8] - 2026-10-10
 

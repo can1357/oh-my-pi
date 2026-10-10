@@ -159,7 +159,7 @@ describe("eval prelude cell settlement", () => {
 			},
 			async settleCell() {
 				abort.abort();
-				return await new Promise<never>(() => {});
+				return await Promise.withResolvers<never>().promise;
 			},
 		};
 		const tool = new EvalTool(evalSession([hanging], `prelude-settle-hang-${crypto.randomUUID()}`));

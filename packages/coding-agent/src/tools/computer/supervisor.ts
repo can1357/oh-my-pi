@@ -25,11 +25,11 @@ const SMOKE_TIMEOUT_MS = 5_000;
 // the first ensure may load the desktop addon, so it shares the start budget.
 const CAPABILITIES_TIMEOUT_MS = 10_000;
 const RESTART_MESSAGE = "computer worker restarted; captures and ax refs were reset";
-// Budget for reporting what one cell's input changed: the quiet wait (5 s cap),
-// then one tree read per touched window within the worker's 10 s read budget.
+// Budget for reporting what one cell's input changed: the quiet wait (5 s cap), then one tree read per touched
+// window; the worker stops reading 2 s short of this and returns the report built so far.
 const SETTLE_TIMEOUT_MS = 16_000;
 
-/** Runs desktop scripts and owns their persistent worker session. */
+/** Runs desktop scripts and owns their persistent worker session. `cell` names the Eval cell a call belongs to. */
 export interface ComputerController {
 	run(
 		code: string,
@@ -37,6 +37,7 @@ export interface ComputerController {
 		snapshot: ComputerSessionSnapshot,
 		signal?: AbortSignal,
 		context?: AgentToolContext,
+		cell?: string,
 	): Promise<ComputerRunOk>;
 	revokeControl?(): Promise<void>;
 	capabilities(snapshot: ComputerSessionSnapshot, signal?: AbortSignal): Promise<DesktopCapabilities | undefined>;
@@ -49,7 +50,10 @@ export interface ComputerController {
 		output: string,
 		signal?: AbortSignal,
 		forget?: boolean,
+		cell?: string,
 	): Promise<string | undefined>;
+	/** The cell was cancelled: what its input left is reported to no one. */
+	discard?(cell: string): void;
 	close(): Promise<void>;
 }
 
@@ -209,8 +213,14 @@ export class ComputerSupervisor implements ComputerController {
 		snapshot: ComputerSessionSnapshot,
 		signal?: AbortSignal,
 		context?: AgentToolContext,
+		cell?: string,
 	): Promise<ComputerRunOk> {
-		return this.#request(id => ({ type: "run", id, code, timeoutMs, session: snapshot }), timeoutMs, signal, context);
+		return this.#request(
+			id => ({ type: "run", id, code, timeoutMs, session: snapshot, cell }),
+			timeoutMs,
+			signal,
+			context,
+		);
 	}
 
 	async settle(
@@ -218,15 +228,20 @@ export class ComputerSupervisor implements ComputerController {
 		output: string,
 		signal?: AbortSignal,
 		forget?: boolean,
+		cell?: string,
 	): Promise<string | undefined> {
 		// A worker that never started has seen no input.
 		if (!this.#worker) return undefined;
 		const result = await this.#request(
-			id => ({ type: "settle", id, timeoutMs: SETTLE_TIMEOUT_MS, session: snapshot, output, forget }),
+			id => ({ type: "settle", id, timeoutMs: SETTLE_TIMEOUT_MS, session: snapshot, output, forget, cell }),
 			SETTLE_TIMEOUT_MS,
 			signal,
 		);
 		return typeof result.returnValue === "string" ? result.returnValue : undefined;
+	}
+
+	discard(cell: string): void {
+		if (this.#worker && !this.#closed) this.#safeSend({ type: "discard", cell });
 	}
 
 	async #request(

@@ -258,7 +258,7 @@ describe("computer post-input reports across conversation rewrites", () => {
 		});
 	});
 
-	it("forgets the baseline after rewinding to an earlier entry", async () => {
+	it("forgets the baseline after rewinding past a tool result", async () => {
 		const {
 			session: current,
 			sessionManager,
@@ -267,13 +267,33 @@ describe("computer post-input reports across conversation rewrites", () => {
 			"compaction.dropUseless": false,
 			"compaction.supersedeReads": false,
 		});
+		// The assistant turn that called the tool: rewinding to it drops the tool result from the context.
+		const callId = sessionManager.getEntry(toolResultId)?.parentId;
+		if (!callId) throw new Error("Expected the tool result to follow its call");
 
 		await expectRewriteForgets(current, async () => {
-			const result = await current.navigateTree(toolResultId, { summarize: false });
+			const result = await current.navigateTree(callId, { summarize: false });
 			expect(result.cancelled).toBe(false);
 		});
 
-		expect(sessionManager.getLeafId()).toBe(toolResultId);
+		expect(sessionManager.getLeafId()).toBe(callId);
+		expect(current.agent.state.messages.some(message => message.role === "toolResult")).toBe(false);
+	});
+
+	it("keeps the baseline after a rewind that keeps every tool result", async () => {
+		const { session: current, toolResultId } = await openSession({
+			"compaction.dropUseless": false,
+			"compaction.supersedeReads": false,
+		});
+		const { forgets, act } = recordingPrelude(current);
+		await act();
+		const before = current.agent.historyRevision;
+		// Only the closing answer after the tool result is dropped.
+		const result = await current.navigateTree(toolResultId, { summarize: false });
+		expect(result.cancelled).toBe(false);
 		expect(current.agent.state.messages.at(-1)?.role).toBe("toolResult");
+		expect(current.agent.historyRevision).toBe(before);
+		await act();
+		expect(forgets).toEqual([false, false]);
 	});
 });

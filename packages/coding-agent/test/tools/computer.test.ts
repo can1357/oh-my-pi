@@ -42,6 +42,7 @@ import type {
 	UiQuietOptions,
 } from "@oh-my-pi/pi-natives";
 
+import { DEFAULT_MAX_BYTES } from "@oh-my-pi/pi-tui/tools/streaming-output";
 import { cfgComputerEnabled } from "@oh-my-pi/pi-coding-agent/tools/settings";
 
 /** Method name of the last step in a facade call chain, or "" when the chain is malformed. */
@@ -1969,12 +1970,28 @@ class EditableWindowSession extends FakeNativeSession {
 	}
 }
 
-/** Settle the cell that just ended; `output` is what that cell printed, `forget` that the conversation was rewritten. */
-async function settleWorker(transport: MemoryTransport, id: string, output = "", forget = false): Promise<unknown> {
-	transport.inbound({ type: "settle", id, timeoutMs: 5_000, session: snapshot(true), output, forget });
+/**
+ * Settle the cell that just ended; `output` is what that cell printed, `forget` that the conversation was
+ * rewritten, `cell` the cell's id when runs carried one, `timeoutMs` the settle request's budget.
+ */
+async function settleWorker(
+	transport: MemoryTransport,
+	id: string,
+	output = "",
+	forget = false,
+	{ cell, timeoutMs = 5_000 }: { cell?: string; timeoutMs?: number } = {},
+): Promise<unknown> {
+	transport.inbound({ type: "settle", id, timeoutMs, session: snapshot(true), output, forget, cell });
 	const message = await transport.waitFor(candidate => candidate.type === "result" && candidate.id === id);
 	if (message.type !== "result" || !message.ok) throw new Error(`settle ${id} failed`);
 	return message.payload.returnValue;
+}
+
+/** Run desktop code as part of Eval cell `cell`. */
+async function runInCell(transport: MemoryTransport, cell: string, id: string, code: string): Promise<void> {
+	transport.inbound({ type: "run", id, code, timeoutMs: 2_000, session: snapshot(false), cell });
+	const message = await transport.waitFor(candidate => candidate.type === "result" && candidate.id === id);
+	if (message.type !== "result" || !message.ok) throw new Error(`run ${id} failed`);
 }
 
 /** A cell that prints the window's tree, settled: the model has now seen that tree. */
@@ -2104,9 +2121,7 @@ describe("computer cell settlement", () => {
 		await runWorker(transport, "key", 'await (await desktop.window("42")).press("shift")');
 		const report = String(await settleWorker(transport, "settle-key"));
 		expect(Date.now() - started).toBeGreaterThanOrEqual(490);
-		expect(report).toMatch(
-			/^window "42" Code "Editor": no change since your last tree, \d\.\d s after the input$/,
-		);
+		expect(report).toMatch(/^window "42" Code "Editor": no change since your last tree, \d\.\d s after the input$/);
 	});
 
 	it("says the app was still changing when the cap ended the wait", async () => {
@@ -2237,9 +2252,13 @@ describe("computer cell settlement", () => {
 		const other: DesktopWindow = { ...windowFixture, id: "43", title: "Other", focused: false };
 		native.windows = [windowFixture, other];
 		let hang = false;
+		const hung = Promise.withResolvers<void>();
 		const read = native.axSnapshot.bind(native);
 		native.axSnapshot = async (target: string) => {
-			if (hang && target === "43") return await Promise.withResolvers<{ text: string }>().promise;
+			if (hang && target === "43") {
+				hung.resolve();
+				return await Promise.withResolvers<{ text: string }>().promise;
+			}
 			return await read();
 		};
 		native.keyChord = async (target: string) => {
@@ -2259,11 +2278,14 @@ describe("computer cell settlement", () => {
 		transport.inbound({
 			type: "settle",
 			id: "cancelled",
-			timeoutMs: 50,
+			timeoutMs: 5_000,
 			session: snapshot(true),
 			output: "",
 			forget: false,
 		});
+		// Window 42 is read; the report is cancelled while it reads window 43.
+		await hung.promise;
+		transport.inbound({ type: "abort", id: "cancelled" });
 		const cancelled = await transport.waitFor(
 			candidate => candidate.type === "result" && candidate.id === "cancelled",
 		);
@@ -2354,23 +2376,25 @@ describe("computer cell settlement", () => {
 	it("holds one tree per window across a read loop, and a bounded few after an input", () => {
 		const ledger = new ObservationLedger();
 		const window = { id: "42" };
-		for (let index = 0; index < 100; index++) ledger.recordRead(window, `- statictext "${index}" [ref=e1]`, {});
+		for (let index = 0; index < 100; index++)
+			ledger.recordRead("cell", window, `- statictext "${index}" [ref=e1]`, {});
 		expect(ledger.retainedReads).toBe(1);
-		ledger.noteInput(window);
-		for (let index = 0; index < 100; index++) ledger.recordRead(window, `- statictext "after ${index}" [ref=e1]`, {});
+		ledger.noteInput("cell", window);
+		for (let index = 0; index < 100; index++)
+			ledger.recordRead("cell", window, `- statictext "after ${index}" [ref=e1]`, {});
 		expect(ledger.retainedReads).toBeLessThanOrEqual(8);
 	});
 
 	it("reports a window whose post-input reads overflowed the bound even when the cell printed the last", () => {
 		const ledger = new ObservationLedger();
 		const window = { id: "42" };
-		ledger.noteInput(window);
+		ledger.noteInput("cell", window);
 		let last = "";
 		for (let index = 0; index < 20; index++) {
 			last = `- statictext "after ${index}" [ref=e1]`;
-			ledger.recordRead(window, last, {});
+			ledger.recordRead("cell", window, last, {});
 		}
-		expect(ledger.take(last)?.touched.map(touched => touched.id)).toEqual(["42"]);
+		expect(ledger.take("cell", last)?.touched.map(touched => touched.id)).toEqual(["42"]);
 	});
 
 	it("does not count an empty post-input read as printed", async () => {
@@ -2625,6 +2649,246 @@ describe("computer cell settlement", () => {
 			"No post-input report for this cell (computer worker restarted",
 		);
 	});
+
+	it("keeps the report within the inline budget, naming windows left out, which keep the model's last tree", async () => {
+		const transport = new MemoryTransport();
+		const native = new EditableWindowSession();
+		native.filler = 300;
+		const ids = ["42", "43", "44", "45", "46"];
+		native.windows = ids.map(id =>
+			id === "42" ? windowFixture : { ...windowFixture, id, title: `W${id}`, focused: false },
+		);
+		new ComputerWorkerCore(transport, () => native);
+
+		// The model has no tree of any of them: each would print whole.
+		await runWorker(
+			transport,
+			"press-all",
+			`for (const id of ${JSON.stringify(ids)}) await (await desktop.window(id)).press("shift")`,
+		);
+		const report = String(await settleWorker(transport, "settle-all"));
+		expect(Buffer.byteLength(report)).toBeLessThanOrEqual(DEFAULT_MAX_BYTES);
+		expect(report).toStartWith('window "42" Code "Editor":\n- window "Editor"');
+		expect(report).toContain(
+			'\n\nwindow "46" Code "W46": its tree was left out to keep this report short; win.ax() prints it',
+		);
+
+		// A window printed in that report is the model's tree; one left out is still unseen, so it prints whole.
+		await runWorker(transport, "press-46", 'await (await desktop.window("46")).press("shift")');
+		expect(String(await settleWorker(transport, "settle-46"))).toStartWith(
+			'window "46" Code "W46":\n- window "Editor"',
+		);
+		await runWorker(transport, "press-42", 'await (await desktop.window("42")).press("shift")');
+		expect(await settleWorker(transport, "settle-42")).toBe(
+			'window "42" Code "Editor": no change since your last tree',
+		);
+	});
+
+	it("returns what it read before the time budget ran out and names the windows it did not read", async () => {
+		const transport = new MemoryTransport();
+		const native = new EditableWindowSession();
+		native.windows = [
+			windowFixture,
+			{ ...windowFixture, id: "43", title: "Slow", focused: false },
+			{ ...windowFixture, id: "44", title: "Later", focused: false },
+		];
+		const read = native.axSnapshot.bind(native);
+		let hang = false;
+		native.axSnapshot = async (target: string) => {
+			if (hang && target === "43") return await Promise.withResolvers<{ text: string }>().promise;
+			return await read();
+		};
+		native.keyChord = async (target: string) => {
+			if (target === "42") native.status = "Saving";
+		};
+		new ComputerWorkerCore(transport, () => native);
+
+		await readCell(transport, "read");
+		await runWorker(
+			transport,
+			"press",
+			'for (const id of ["42", "43", "44"]) await (await desktop.window(id)).press("shift")',
+		);
+		hang = true;
+		// Reads stop 2 s short of the request's budget: 0.3 s here.
+		expect(await settleWorker(transport, "settle", "", false, { timeoutMs: 2_300 })).toBe(
+			[
+				'window "42" Code "Editor": 1 change since your last tree\n  ~ statictext [ref=e5]: "Saving"',
+				`window "43" was not read back: the report's time budget is spent; read it yourself`,
+				`window "44" was not read back: the report's time budget is spent; read it yourself`,
+			].join("\n\n"),
+		);
+	});
+
+	it("says a settle that ran out of time was the post-input report, not code execution", async () => {
+		const transport = new MemoryTransport();
+		const native = new EditableWindowSession();
+		native.waitForUiQuiet = async () => await Promise.withResolvers<UiQuiet>().promise;
+		new ComputerWorkerCore(transport, () => native);
+
+		await runWorker(transport, "press", 'await (await desktop.window("42")).press("shift")');
+		transport.inbound({ type: "settle", id: "settle", timeoutMs: 100, session: snapshot(true), output: "" });
+		const result = await transport.waitFor(candidate => candidate.type === "result" && candidate.id === "settle");
+		expect(result.type === "result" && !result.ok && result.error.message).toBe(
+			"the post-input report timed out after 100ms",
+		);
+	});
+
+	it("reports each cell's own input when a backgrounded cell and a foreground one interleave", async () => {
+		const transport = new MemoryTransport();
+		const native = new EditableWindowSession();
+		native.windows = [windowFixture, { ...windowFixture, id: "43", title: "Other", focused: false }];
+		new ComputerWorkerCore(transport, () => native);
+
+		await runInCell(transport, "background", "bg-1", 'await (await desktop.window("42")).press("shift")');
+		await runInCell(transport, "foreground", "fg-1", 'await (await desktop.window("43")).press("shift")');
+		await runInCell(transport, "background", "bg-2", 'await (await desktop.window("42")).press("shift")');
+
+		const foreground = String(await settleWorker(transport, "settle-fg", "", false, { cell: "foreground" }));
+		expect(foreground).toStartWith('window "43" Code "Other":\n');
+		expect(foreground).not.toContain('window "42"');
+		const background = String(await settleWorker(transport, "settle-bg", "", false, { cell: "background" }));
+		expect(background).toStartWith('window "42" Code "Editor":\n');
+		expect(background).not.toContain('window "43"');
+	});
+
+	it("drops a cancelled cell's input so another cell's report does not show it", async () => {
+		const transport = new MemoryTransport();
+		const native = new EditableWindowSession();
+		native.windows = [windowFixture, { ...windowFixture, id: "43", title: "Other", focused: false }];
+		new ComputerWorkerCore(transport, () => native);
+
+		await runInCell(transport, "cancelled", "a", 'await (await desktop.window("42")).press("shift")');
+		transport.inbound({ type: "discard", cell: "cancelled" });
+		await runInCell(transport, "next", "b", 'await (await desktop.window("43")).press("shift")');
+
+		const next = String(await settleWorker(transport, "settle-next", "", false, { cell: "next" }));
+		expect(next).toStartWith('window "43" Code "Other":\n');
+		expect(next).not.toContain('window "42"');
+		expect(await settleWorker(transport, "settle-cancelled", "", false, { cell: "cancelled" })).toBeUndefined();
+	});
+
+	it("still says an app was changing when a later wait in the cell, for another app, went quiet", async () => {
+		const transport = new MemoryTransport();
+		const native = new EditableWindowSession();
+		native.windows = [windowFixture, { ...windowFixture, id: "43", title: "Other", pid: 456, focused: false }];
+		const waits: UiQuiet[] = [
+			{ waitedMs: 5_000, events: 120, timedOut: true, watched: 1 },
+			{ waitedMs: 300, events: 2, timedOut: false, watched: 1 },
+		];
+		native.waitForUiQuiet = async pids => {
+			native.quietWaits.push([...pids]);
+			return waits.shift() ?? native.quiet;
+		};
+		new ComputerWorkerCore(transport, () => native);
+
+		// App 123 hits the cap at the lookup of window 43; app 456 goes quiet before the read.
+		await runWorker(
+			transport,
+			"two-apps",
+			'await (await desktop.window("42")).press("shift"); const b = await desktop.window("43"); await b.press("shift"); await b.ax()',
+		);
+		expect(native.quietWaits).toEqual([[123], [456]]);
+		expect(String(await settleWorker(transport, "settle"))).toMatch(
+			/\n\nthe app was still changing when this was read, \d\.\d s after the input$/,
+		);
+	});
+
+	it("passes a rewrite on until a settle delivers it, and forgets trees of a report its cancelled cell dropped", async () => {
+		let revision = 0;
+		let fail = false;
+		let cancelOnReturn: AbortController | undefined;
+		const forgets: boolean[] = [];
+		const discards: string[] = [];
+		const session: ToolSession = { ...toolSession(), getHistoryRevision: () => revision };
+		const prelude = createComputerPrelude(session, () => ({
+			async run() {
+				return { displays: [], returnValue: undefined, screenshots: [] };
+			},
+			async capabilities() {
+				return undefined;
+			},
+			async settle(_snapshot, _output, _signal, forget) {
+				forgets.push(forget === true);
+				if (fail) throw new Error("Computer session is closed");
+				// The cell is cancelled once the worker built its report.
+				cancelOnReturn?.abort();
+				return 'window "42": no change';
+			},
+			discard(cell) {
+				discards.push(cell);
+			},
+			async close() {},
+		}));
+		const press = {
+			action: "call",
+			chain: [
+				{ method: "ref", args: ["e3"] },
+				{ method: "press", args: [] },
+			],
+		};
+		const act = async (controller = new AbortController()) => {
+			const cell = { signal: controller.signal };
+			await prelude.invoke(press, { session, toolCallId: "press", cell });
+			return await prelude.settleCell?.(cell, { failed: false, output: "" });
+		};
+
+		// A settle that fails does not deliver the rewrite: the next one still forgets.
+		revision = 1;
+		fail = true;
+		expect((await act())?.text).toBe(
+			"No post-input report for this cell (Computer session is closed); read the windows it touched before continuing.",
+		);
+		fail = false;
+		expect(await act()).toEqual({ text: 'window "42": no change' });
+		expect(await act()).toEqual({ text: 'window "42": no change' });
+		expect(forgets).toEqual([true, true, false]);
+
+		// Cancelled after the report was built: it never reached the model, so the next report forgets.
+		cancelOnReturn = new AbortController();
+		expect(await act(cancelOnReturn)).toBeUndefined();
+		cancelOnReturn = undefined;
+		await act();
+		await act();
+		expect(forgets).toEqual([true, true, false, false, true, false]);
+		// Settled cells are not discarded, even when cancelled afterwards.
+		expect(discards).toEqual([]);
+	});
+
+	it("discards what a cancelled cell left once its signal aborts", async () => {
+		const discards: string[] = [];
+		const session = toolSession();
+		const prelude = createComputerPrelude(session, () => ({
+			async run() {
+				return { displays: [], returnValue: undefined, screenshots: [] };
+			},
+			async capabilities() {
+				return undefined;
+			},
+			async settle() {
+				return undefined;
+			},
+			discard(cell) {
+				discards.push(cell);
+			},
+			async close() {},
+		}));
+		const press = {
+			action: "call",
+			chain: [
+				{ method: "ref", args: ["e3"] },
+				{ method: "press", args: [] },
+			],
+		};
+		const cancelled = new AbortController();
+		// Two calls of one cell: one id, discarded once.
+		const cell = { signal: cancelled.signal };
+		await prelude.invoke(press, { session, toolCallId: "a", cell });
+		await prelude.invoke(press, { session, toolCallId: "b", cell });
+		cancelled.abort();
+		expect(discards).toHaveLength(1);
+		expect(discards[0]).toMatch(/^cell-/);
+	});
 });
 
 describe("post-input report diff", () => {
@@ -2666,11 +2930,7 @@ describe("post-input report diff", () => {
 		]);
 		expect(change.removed).toEqual(["e4", "e5"]);
 		expect(renderReadBack({ touched: { id: "7", options: {} }, text: after, change })).toBe(
-			[
-				'window "7": 5 changes since your last tree',
-				...change.lines,
-				"removed: e4-e5",
-			].join("\n"),
+			['window "7": 5 changes since your last tree', ...change.lines, "removed: e4-e5"].join("\n"),
 		);
 	});
 
@@ -2704,6 +2964,36 @@ describe("post-input report diff", () => {
 		expect(renderReadBack({ touched: { id: "7", options: {} }, text: after, change })).toBe(`window "7":\n${after}`);
 	});
 
+	it("keeps rows past a truncated read's node limit apart from removed ones", () => {
+		const before = tree(
+			'- window "A" [ref=e1] app=X',
+			'  - row "a" [ref=e2]',
+			'  - row "b" [ref=e3]',
+			'  - row "c" [ref=e4]',
+			'  - row "d" [ref=e5]',
+			'  - row "e" [ref=e6]',
+			"… truncated (6 nodes)",
+		);
+		// A row added above the cut pushes the last rows past the node limit; "b" is really gone.
+		const after = tree(
+			'- window "A" [ref=e1] app=X',
+			'  - row "new" [ref=e9]',
+			'  - row "a" [ref=e2]',
+			'  - row "c" [ref=e4]',
+			"… truncated (4 nodes)",
+		);
+		const change = diffTree(before, after);
+		expect(change.removed).toEqual(["e3"]);
+		expect(change.pastLimit).toEqual(["e5", "e6"]);
+		expect(renderReadBack({ touched: { id: "7", options: {} }, text: after, change }).split("\n")).toEqual([
+			'window "7": 3 changes since your last tree',
+			'  + row "new" [ref=e9] (in e1)',
+			"… truncated (4 nodes)",
+			"removed: e3",
+			"past this read's node limit: e5-e6",
+		]);
+	});
+
 	it("carries a new trailer and ignores a label holding ref-shaped text", () => {
 		const before = tree('- window "A [ref=e9]" [ref=e1] app=X', "  - list [ref=e2]");
 		const after = tree('- window "A [ref=e9]" [ref=e1] app=X', "  - list [ref=e2]", "… truncated (800 nodes)");
@@ -2712,6 +3002,7 @@ describe("post-input report diff", () => {
 			added: 0,
 			changed: 0,
 			removed: [],
+			pastLimit: [],
 		});
 		expect(parseTreeRow('- window "A [ref=e9]" [ref=e1] app=X')?.ref).toBe("e1");
 		expect(refRuns(["e3", "e4", "e5", "e9", "e11", "e12"])).toBe("e3-e5, e9, e11-e12");

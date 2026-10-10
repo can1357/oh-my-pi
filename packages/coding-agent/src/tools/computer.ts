@@ -9,6 +9,7 @@ import type { EvalPreludeCell, EvalPreludeContext, EvalPreludeDefinition } from 
 import computerUsePrompt from "../prompts/system/computer-use.md" with { type: "text" };
 import { enforceInlineByteCap } from "@oh-my-pi/pi-tui/tools/streaming-output";
 import { type ComputerCallStep, isReadOnlyComputerCall, renderComputerCall } from "./computer/call";
+import { reportNote } from "./computer/observation";
 import type { ComputerScreenshot, ComputerSessionSnapshot } from "./computer/protocol";
 import { type ComputerController, ComputerSupervisor, registerComputerController } from "./computer/supervisor";
 import type { ToolSession } from "./index";
@@ -129,11 +130,25 @@ export function createComputerPrelude(
 	// JavaScript or Python kernel actually asks for its enabled preludes.
 	const { computerPreludeAssets } = require("./computer/prelude-definition");
 	let closed = false;
-	// Cells whose code reached the desktop; only these are settled.
-	const cells = new WeakSet<EvalPreludeCell>();
-	// The conversation revision at the last settle: reports diff against trees the model saw, so a rewrite since
-	// (compaction, pruning, a rewind) makes the next report print windows whole.
+	// Cells whose code reached the desktop, with the id their calls and settle carry; only these are settled.
+	const cells = new WeakMap<EvalPreludeCell, { id: string; discard(): void }>();
+	let cellCount = 0;
+	// The conversation revision at the last delivered report: reports diff against trees the model saw, so a
+	// rewrite since (compaction, pruning, a rewind) makes the next report print windows whole.
 	let settledRevision = session.getHistoryRevision?.() ?? 0;
+	// A report the worker built was not delivered (its cell was cancelled): the worker took its trees as the
+	// model's, so the next report must not diff against them.
+	let undelivered = false;
+	const trackCell = (cell: EvalPreludeCell): string => {
+		const tracked = cells.get(cell);
+		if (tracked) return tracked.id;
+		const id = `cell-${++cellCount}`;
+		// A cancelled cell is never settled: what its input left must not show up in another cell's report.
+		const discard = (): void => controller.discard?.(id);
+		cell.signal.addEventListener("abort", discard, { once: true });
+		cells.set(cell, { id, discard });
+		return id;
+	};
 	const lifetime: ComputerLifetime = {
 		isClosed: () => closed,
 		close: async () => {
@@ -163,29 +178,43 @@ export function createComputerPrelude(
 			if (parsed instanceof type.errors) {
 				throw new ToolError(`computer received invalid arguments: ${parsed.summary}`);
 			}
-			if (context.cell && (parsed.action === "run" || parsed.action === "call")) cells.add(context.cell);
-			return await invokeComputer(session, controller, parsed, context, lifetime);
+			const cell =
+				context.cell && (parsed.action === "run" || parsed.action === "call") ? trackCell(context.cell) : undefined;
+			return await invokeComputer(session, controller, parsed, context, lifetime, cell);
 		},
 		status: describeComputerCall,
 		settleCell: async (cell, { output }) => {
-			if (!cells.has(cell) || closed || !controller.settle) return undefined;
+			const tracked = cells.get(cell);
+			if (!tracked || closed || !controller.settle) return undefined;
 			cells.delete(cell);
+			cell.signal.removeEventListener("abort", tracked.discard);
 			const revision = session.getHistoryRevision?.() ?? 0;
-			const forget = revision !== settledRevision;
-			settledRevision = revision;
+			const forget = undelivered || revision !== settledRevision;
+			let text: string | undefined;
 			try {
-				const text = await controller.settle(buildComputerSnapshot(session, true), output, cell.signal, forget);
-				return text === undefined ? undefined : { text };
+				text = await controller.settle(
+					buildComputerSnapshot(session, true),
+					output,
+					cell.signal,
+					forget,
+					tracked.id,
+				);
 			} catch (error) {
 				// Cancellation of the turn needs no report; anything else leaves the
 				// model without its post-input observation, so it is told to look.
 				if (cell.signal.aborted) return undefined;
 				const message = error instanceof Error ? error.message : String(error);
 				logger.debug("Computer cell settle failed", { error: message });
-				return {
-					text: `No post-input report for this cell (${message}); read the windows it touched before continuing.`,
-				};
+				return { text: reportNote({ noReport: message }) };
 			}
+			// Cancelled once the report was built: EvalTool drops it, though the worker took its trees as seen.
+			if (cell.signal.aborted) {
+				undelivered = true;
+				return undefined;
+			}
+			settledRevision = revision;
+			undelivered = false;
+			return text === undefined ? undefined : { text };
 		},
 	};
 }
@@ -216,6 +245,7 @@ async function invokeComputer(
 	params: ComputerParams,
 	context: EvalPreludeContext,
 	lifetime: ComputerLifetime,
+	cell?: string,
 ): Promise<AgentToolResult<unknown>> {
 	throwIfAborted(context.signal);
 
@@ -223,7 +253,7 @@ async function invokeComputer(
 		case "run":
 		case "call":
 			if (lifetime.isClosed()) throw new ToolError("Computer session is closed");
-			return await runComputer(session, controller, params, context);
+			return await runComputer(session, controller, params, context, cell);
 		case "capabilities": {
 			const capabilities = lifetime.isClosed()
 				? undefined
@@ -288,6 +318,7 @@ async function runComputer(
 	controller: ComputerController,
 	params: ComputerRunParams | ComputerCallParams,
 	context: EvalPreludeContext,
+	cell?: string,
 ): Promise<AgentToolResult<unknown>> {
 	const signal = context.signal;
 	const code = resolveComputerRunCode(params);
@@ -295,7 +326,7 @@ async function runComputer(
 	const readOnly = params.action === "call" ? isReadOnlyComputerCall(params.chain) : (params.read_only ?? false);
 	const timeoutSeconds = clampTimeout("computer", params.timeout, cfgToolsMaxTimeout.get(session.settings));
 	const snapshot = buildComputerSnapshot(session, readOnly);
-	const run = await controller.run(code, timeoutSeconds * 1000, snapshot, signal, context.context);
+	const run = await controller.run(code, timeoutSeconds * 1000, snapshot, signal, context.context, cell);
 	throwIfAborted(signal);
 
 	const details: ComputerPreludeDetails = {

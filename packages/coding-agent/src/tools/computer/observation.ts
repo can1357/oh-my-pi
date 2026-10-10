@@ -7,6 +7,8 @@
  * in that tree is still live.
  */
 import type { DesktopDisplay, DesktopWindow } from "@oh-my-pi/pi-natives";
+import * as prompt from "@oh-my-pi/pi-utils/prompt";
+import reportTemplate from "../../prompts/tools/computer-report.md" with { type: "text" };
 
 /** One `ax()` tree row: its indent and its ref token span `[refStart, refEnd)`, leading space included. */
 export interface TreeRow {
@@ -72,6 +74,30 @@ export interface TouchedWindow {
 	options: AxReadOptions;
 }
 
+/**
+ * The Eval cell desktop calls belong to: the prelude's id for the cell, or
+ * undefined for calls made outside a cell. What input left to report is kept
+ * per cell, so a backgrounded cell and a foreground one each settle only
+ * their own; what the model saw of each window is shared.
+ */
+export type CellKey = string | undefined;
+
+/** How the UI settled after input: watched going quiet (or still changing at the cap), or given a fixed time. */
+export interface SettleOutcome {
+	watched: boolean;
+	timedOut: boolean;
+	/** Time from the end of the last input to the end of the wait. */
+	sinceInputMs: number;
+}
+
+/** How the waits a cell's input paid for ended since its last report. */
+export interface CellOutcome {
+	/** The latest wait. */
+	latest: SettleOutcome;
+	/** The latest wait the cap ended: its apps were never seen going quiet. */
+	capped?: SettleOutcome;
+}
+
 /** Everything one cell's input left for the settle to report. */
 export interface PendingSettle {
 	/** Windows whose post-input state the model has not read. */
@@ -85,6 +111,8 @@ export interface PendingSettle {
 	unattributed: number;
 	/** Roster captured before the cell's first input; absent when it could not be read. */
 	rosterBefore?: DesktopWindow[];
+	/** How the waits for the cell's input ended; absent when none ran. */
+	outcome?: CellOutcome;
 }
 
 interface WindowRecord {
@@ -240,7 +268,16 @@ export interface TreeChange {
 	changed: number;
 	/** Refs of rows the new tree no longer has, in the old tree's order. */
 	removed: string[];
+	/**
+	 * Refs of rows the new tree lacks because its read stopped at the node
+	 * limit before reaching them: they follow, in the old tree's order, the last
+	 * row the new tree still has, so they may still be on screen.
+	 */
+	pastLimit: string[];
 }
+
+/** The trailer the native walk ends with when it stopped at its node limit (`crates/pi-natives/src/desktop/ax.rs`). */
+const TRUNCATED_TRAILER = /^… truncated \(\d+ nodes\)$/;
 
 /**
  * Rows of `after` that `before` lacks or held differently, matched by ref: an
@@ -294,7 +331,17 @@ export function diffTree(before: string, after: string): TreeChange {
 	const oldOther = new Set(old.other);
 	for (const line of now.other) if (!oldOther.has(line)) lines.push(line);
 	const removed = old.rows.filter(row => !nowRefs.has(row.ref)).map(row => row.ref);
-	return { lines, added, changed, removed };
+	if (!now.other.some(line => TRUNCATED_TRAILER.test(line))) return { lines, added, changed, removed, pastLimit: [] };
+	// The read stopped at the node limit: rows past the last one it still reached may only lie beyond that limit.
+	const lastKept = old.rows.findLastIndex(row => nowRefs.has(row.ref));
+	const beyond = new Set(old.rows.slice(lastKept + 1).map(row => row.ref));
+	return {
+		lines,
+		added,
+		changed,
+		removed: removed.filter(ref => !beyond.has(ref)),
+		pastLimit: removed.filter(ref => beyond.has(ref)),
+	};
 }
 
 /** `e7-e9, e12`: refs as runs of consecutive numbers, in the order given. */
@@ -318,26 +365,49 @@ export function refRuns(refs: readonly string[]): string {
 	return runs.join(", ");
 }
 
-/** Per-session record of what the model saw and what input touched since. */
+/** What one cell's calls left since its last report. */
+interface CellState {
+	/** Windows input or a failure touched, each with its latest touch's sequence number, which orders it against reads. */
+	touched: Map<string, number>;
+	/** `ax()`/`observe()` reads the cell made, per window; they count as shown once the cell's output carries them. */
+	reads: Map<string, CellReads>;
+	pids: Set<number>;
+	unattributed: number;
+	inputs: number;
+	rosterBefore?: DesktopWindow[];
+	rosterClaimed: boolean;
+	outcome?: CellOutcome;
+}
+
+/** Per-session record of what the model saw, and per cell what its calls touched since. */
 export class ObservationLedger {
 	readonly #windows = new Map<string, WindowRecord>();
 	/** Ref → window id, for elements resolved without their window. Oldest first. */
 	readonly #refs = new Map<string, string>();
-	/** Windows input or a failure touched since the last settle, each with its latest touch's sequence number, which orders it against reads. */
-	#touched = new Map<string, number>();
-	/** `ax()`/`observe()` reads the cell made, per window; they count as shown once the cell's output carries them. */
-	#reads = new Map<string, CellReads>();
+	/** Cells with input, reads or failures not yet reported. */
+	readonly #cells = new Map<CellKey, CellState>();
 	#sequence = 0;
-	#pids = new Set<number>();
-	#unattributed = 0;
-	#inputs = 0;
-	#rosterBefore?: DesktopWindow[];
-	#rosterClaimed = false;
 
 	#record(id: string): WindowRecord {
 		let record = this.#windows.get(id);
 		if (!record) this.#windows.set(id, (record = { options: {} }));
 		return record;
+	}
+
+	#cell(cell: CellKey): CellState {
+		let state = this.#cells.get(cell);
+		if (!state) {
+			state = {
+				touched: new Map(),
+				reads: new Map(),
+				pids: new Set(),
+				unattributed: 0,
+				inputs: 0,
+				rosterClaimed: false,
+			};
+			this.#cells.set(cell, state);
+		}
+		return state;
 	}
 
 	/** Remember which window these refs belong to. */
@@ -358,17 +428,13 @@ export class ObservationLedger {
 		return id === undefined ? undefined : { id, pid: this.#windows.get(id)?.pid };
 	}
 
-	/**
-	 * The model received this tree of the window: it is the baseline the next
-	 * read-back is marked against, and the window's post-input state is known.
-	 */
+	/** The model received this tree of the window: it is the baseline the next read-back is marked against. */
 	recordShown(window: InputWindow, text: string, options: AxReadOptions): void {
 		const record = this.#record(window.id);
 		if (window.pid !== undefined) record.pid = window.pid;
 		record.shown = text;
 		record.options = { ...options };
 		this.recordRefs(window.id, treeRefs(text));
-		this.#touched.delete(window.id);
 	}
 
 	/**
@@ -376,12 +442,13 @@ export class ObservationLedger {
 	 * at once; it becomes what the model saw only if the cell's output carries
 	 * it (see `take`), since code can read a tree without printing it.
 	 */
-	recordRead(window: InputWindow, text: string, options: AxReadOptions): void {
+	recordRead(cell: CellKey, window: InputWindow, text: string, options: AxReadOptions): void {
 		this.recordRefs(window.id, treeRefs(text));
-		let reads = this.#reads.get(window.id);
+		const state = this.#cell(cell);
+		let reads = state.reads.get(window.id);
 		if (!reads) {
 			reads = { recent: [], recentChars: 0, since: new Set(), before: new Set(), lost: false };
-			this.#reads.set(window.id, reads);
+			state.reads.set(window.id, reads);
 		}
 		const read: CellRead = { window, text, hash: Bun.hash(text), options: { ...options }, sequence: this.#sequence };
 		reads.since.add(read.hash);
@@ -390,7 +457,7 @@ export class ObservationLedger {
 			reads.lost = true;
 		}
 		// Before any input to the window only the latest read matters: it is what the model saw if printed.
-		const touched = this.#touched.get(window.id);
+		const touched = state.touched.get(window.id);
 		if (touched === undefined) {
 			reads.recent = [];
 			reads.recentChars = 0;
@@ -407,9 +474,9 @@ export class ObservationLedger {
 		}
 	}
 
-	/** Input or a failure reached the window: everything it read so far was read before that input. */
-	#readsBeforeInput(id: string): void {
-		const reads = this.#reads.get(id);
+	/** Input or a failure reached the window: everything the cell read of it so far was read before that input. */
+	#readsBeforeInput(state: CellState, id: string): void {
+		const reads = state.reads.get(id);
 		if (!reads) return;
 		for (const hash of reads.since) reads.before.add(hash);
 		if (reads.before.size > MAX_READ_HASHES) {
@@ -422,70 +489,93 @@ export class ObservationLedger {
 		reads.recentChars = reads.recent[0]?.text.length ?? 0;
 	}
 
-	/** Tree texts held for the current cell's reads, across windows. */
+	/** Tree texts held for unreported cells' reads, across cells and windows. */
 	get retainedReads(): number {
 		let count = 0;
-		for (const reads of this.#reads.values()) count += reads.recent.length;
+		for (const state of this.#cells.values()) for (const reads of state.reads.values()) count += reads.recent.length;
 		return count;
 	}
 
-	/** Whether no input since the last settle has claimed the roster-before read yet. */
-	get wantsRoster(): boolean {
-		return !this.#rosterClaimed;
+	/** Whether no input of the cell since its last report has claimed the roster-before read yet. */
+	wantsRoster(cell: CellKey): boolean {
+		return this.#cells.get(cell)?.rosterClaimed !== true;
 	}
 
-	/** Claim the roster-before read; resolve it with the roster, or undefined when it could not be read. */
-	claimRoster(): { resolve(roster: DesktopWindow[] | undefined): void } {
-		this.#rosterClaimed = true;
+	/** Claim the cell's roster-before read; resolve it with the roster, or undefined when it could not be read. */
+	claimRoster(cell: CellKey): { resolve(roster: DesktopWindow[] | undefined): void } {
+		const state = this.#cell(cell);
+		state.rosterClaimed = true;
 		return {
 			resolve: roster => {
-				this.#rosterBefore = roster;
+				state.rosterBefore = roster;
 			},
 		};
 	}
 
 	/**
-	 * An input is being sent. `window` is undefined when the target window is
-	 * unknown (desktop-root input, elements found by position or focus).
-	 * Returns the process it reaches, when known.
+	 * The cell is sending an input. `window` is undefined when the target
+	 * window is unknown (desktop-root input, elements found by position or
+	 * focus). Returns the process it reaches, when known.
 	 */
-	noteInput(window: InputWindow | undefined): number | undefined {
-		this.#inputs++;
+	noteInput(cell: CellKey, window: InputWindow | undefined): number | undefined {
+		const state = this.#cell(cell);
+		state.inputs++;
 		if (!window) {
-			this.#unattributed++;
+			state.unattributed++;
 			return undefined;
 		}
 		const record = this.#record(window.id);
 		const pid = window.pid ?? record.pid;
 		if (pid !== undefined) {
 			record.pid = pid;
-			this.#pids.add(pid);
+			state.pids.add(pid);
 		}
-		this.#touch(window.id);
+		this.#touch(state, window.id);
 		return pid;
 	}
 
-	/** A call failed on one of the window's refs: the settle reports the window, so the model has its current refs. */
-	noteFailure(window: InputWindow | undefined): void {
-		if (window) this.#touch(window.id);
+	/** A call of the cell failed on one of the window's refs: its report shows the window, so the model has its current refs. */
+	noteFailure(cell: CellKey, window: InputWindow | undefined): void {
+		if (window) this.#touch(this.#cell(cell), window.id);
 	}
 
-	/** Input or a failure reached the window: everything it read so far was read before that. */
-	#touch(id: string): void {
-		this.#readsBeforeInput(id);
-		this.#touched.set(id, ++this.#sequence);
+	#touch(state: CellState, id: string): void {
+		this.#readsBeforeInput(state, id);
+		state.touched.set(id, ++this.#sequence);
+	}
+
+	/** Whether the cell sent input, or had a call fail, since its last report. */
+	hasInput(cell: CellKey): boolean {
+		const state = this.#cells.get(cell);
+		return state !== undefined && (state.inputs > 0 || state.touched.size > 0);
+	}
+
+	/**
+	 * A wait for the UI to go quiet ended; `cells` sent the input it waited
+	 * for. A capped wait stays on each cell's record until its report, whatever
+	 * later waits end in.
+	 */
+	noteOutcome(cells: Iterable<CellKey>, outcome: SettleOutcome): void {
+		for (const cell of cells) {
+			const state = this.#cells.get(cell);
+			if (state) state.outcome = { latest: outcome, capped: outcome.timedOut ? outcome : state.outcome?.capped };
+		}
 	}
 
 	/**
 	 * Take what the cell left to settle, or undefined when it sent no input and
-	 * nothing failed. First, the latest `ax()` read of each window whose tree the
-	 * cell's `output` carries becomes what the model saw, and settles its window
-	 * only if it was read after the window's last input, its text was not also
-	 * seen before that input (the printed copy could be the earlier one), and
-	 * no read of the window was dropped by the bounds.
+	 * nothing failed; the cell's record is gone afterwards. First, the latest
+	 * `ax()` read of each window whose tree the cell's `output` carries becomes
+	 * what the model saw, and settles its window only if it was read after the
+	 * window's last input, its text was not also seen before that input (the
+	 * printed copy could be the earlier one), and no read of the window was
+	 * dropped by the bounds.
 	 */
-	take(output: string): PendingSettle | undefined {
-		for (const [id, reads] of this.#reads) {
+	take(cell: CellKey, output: string): PendingSettle | undefined {
+		const state = this.#cells.get(cell);
+		if (!state) return undefined;
+		this.#cells.delete(cell);
+		for (const [id, reads] of state.reads) {
 			// Printed verbatim, or JSON-escaped inside a `display(...)`. Refs alone do not tell:
 			// an element keeps its ref across reads, so an earlier printed tree names them too.
 			const printed = reads.recent.findLast(
@@ -494,32 +584,30 @@ export class ObservationLedger {
 					(output.includes(read.text) || output.includes(JSON.stringify(read.text).slice(1, -1))),
 			);
 			if (!printed) continue;
-			const touched = this.#touched.get(id);
+			const touched = state.touched.get(id);
 			const ambiguous =
 				touched !== undefined &&
 				(reads.lost || reads.before.has(printed.hash) || this.#windows.get(id)?.shown === printed.text);
 			this.recordShown(printed.window, printed.text, printed.options);
-			if (touched !== undefined && (touched > printed.sequence || ambiguous)) this.#touched.set(id, touched);
+			if (touched !== undefined && touched <= printed.sequence && !ambiguous) state.touched.delete(id);
 		}
-		this.#reads.clear();
-		if (this.#inputs === 0 && this.#touched.size === 0) return undefined;
-		const touched: TouchedWindow[] = [...this.#touched.keys()].map(id => {
+		if (state.inputs === 0 && state.touched.size === 0) return undefined;
+		const touched: TouchedWindow[] = [...state.touched.keys()].map(id => {
 			const record = this.#windows.get(id);
 			return { id, baseline: record?.shown, options: { ...record?.options } };
 		});
-		const pending: PendingSettle = {
+		return {
 			touched,
-			pids: this.#pids,
-			unattributed: this.#unattributed,
-			rosterBefore: this.#rosterBefore,
+			pids: state.pids,
+			unattributed: state.unattributed,
+			rosterBefore: state.rosterBefore,
+			outcome: state.outcome,
 		};
-		this.#touched = new Map();
-		this.#pids = new Set();
-		this.#unattributed = 0;
-		this.#inputs = 0;
-		this.#rosterBefore = undefined;
-		this.#rosterClaimed = false;
-		return pending;
+	}
+
+	/** The cell was cancelled: what its calls left is reported to no one. */
+	discard(cell: CellKey): void {
+		this.#cells.delete(cell);
 	}
 
 	/**
@@ -575,6 +663,11 @@ export interface ReadBack {
 	unwatchedMs?: number;
 }
 
+/** The heading naming a re-read window in its section: `window "42" Code "main.ts"`. */
+export function readBackName(readBack: ReadBack): string {
+	return windowName(readBack.window, readBack.touched);
+}
+
 /**
  * The post-input section for one window: what changed since the model's last
  * tree of it, a one-line verdict when nothing did, or the whole tree when the
@@ -582,9 +675,11 @@ export interface ReadBack {
  */
 export function renderReadBack(readBack: ReadBack): string {
 	const { change, text } = readBack;
-	const name = windowName(readBack.window, readBack.touched);
+	const name = readBackName(readBack);
 	if (!change) return `${name}:\n${text}`;
-	const lines = change.removed.length > 0 ? [...change.lines, `removed: ${refRuns(change.removed)}`] : change.lines;
+	const lines = [...change.lines];
+	if (change.removed.length > 0) lines.push(`removed: ${refRuns(change.removed)}`);
+	if (change.pastLimit.length > 0) lines.push(`past this read's node limit: ${refRuns(change.pastLimit)}`);
 	if (lines.length === 0) {
 		const after =
 			readBack.unwatchedMs === undefined ? "" : `, ${(readBack.unwatchedMs / 1000).toFixed(1)} s after the input`;
@@ -596,21 +691,42 @@ export function renderReadBack(readBack: ReadBack): string {
 	return `${name}: ${count} ${count === 1 ? "change" : "changes"} since your last tree\n${diff}`;
 }
 
+/** The heading of a window the cell's input opened and focused: `new window "43" Code "Save" 30×12 (focused)`. */
+export function newWindowName(window: DesktopWindow): string {
+	return `new window ${windowLabel(window)} ${Math.round(window.width)}×${Math.round(window.height)} (focused)`;
+}
+
 /** A window the cell's input opened and focused: the model has no tree of it, so it gets all of it. */
 export function renderNewWindow(window: DesktopWindow, text: string): string {
-	return `new window ${windowLabel(window)} ${Math.round(window.width)}×${Math.round(window.height)} (focused):\n${text}`;
+	return `${newWindowName(window)}:\n${text}`;
 }
 
 /** A web view's row in a tree: web content changes without accessibility notifications. */
 export const WEB_AREA_ROW = /^\s*[-+~] webarea\b/m;
 
 /**
- * Web views post no accessibility notification while a page waits on the
- * network or a timer (measured in Chrome: none for a fetch, a slow navigation
- * or a form post until it loads), so the quiet wait cannot cover them.
+ * One instruction line of a post-input report, from `prompts/tools/computer-report.md`:
+ * - `webContent`: web views post no accessibility notification while a page waits on the
+ *   network or a timer (measured in Chrome: none for a fetch, a slow navigation or a form
+ *   post until it loads), so the quiet wait cannot cover them.
+ * - `stillChanging`: seconds from the input to the end of a wait the cap ended.
+ * - `budgetSpent`: a window (JSON-quoted id) the report had no time left to read.
+ * - `noFocusedWindow`: input whose window was unknown, with no focused window to show it on.
+ * - `leftOut`: the heading of a window section the byte budget left out.
+ * - `noReport`: why a cell's report could not be made.
  */
-export const WEB_CONTENT_NOTE =
-	"web pages send no accessibility notification while they wait on the network or a timer, so this read may predate a load; the next report shows what lands later";
+export type ReportNote =
+	| { webContent: true }
+	| { stillChanging: string }
+	| { budgetSpent: string }
+	| { noFocusedWindow: true }
+	| { leftOut: string }
+	| { noReport: string };
+
+/** Render one post-input report instruction line. */
+export function reportNote(note: ReportNote): string {
+	return prompt.render(reportTemplate, note).trim();
+}
 
 /** A touched window whose tree could not be read back. */
 export function renderUnreadable(touched: TouchedWindow, window: DesktopWindow | undefined, message: string): string {

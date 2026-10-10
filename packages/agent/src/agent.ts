@@ -78,6 +78,17 @@ function defaultConvertToLlm(messages: AgentMessage[]): Message[] {
 	});
 }
 
+/** Whether some `toolResult` message of `previous` is no longer present (by identity) in `next`. */
+function droppedToolResult(previous: readonly AgentMessage[], next: readonly AgentMessage[]): boolean {
+	let kept: Set<AgentMessage> | undefined;
+	for (const message of previous) {
+		if (message.role !== "toolResult") continue;
+		kept ??= new Set(next);
+		if (!kept.has(message)) return true;
+	}
+	return false;
+}
+
 function refreshToolChoiceForActiveTools(
 	toolChoice: ToolChoice | undefined,
 	tools: AgentContext["tools"] = [],
@@ -1267,16 +1278,25 @@ export class Agent {
 		this.#state.tools = t;
 	}
 
-	/** Times the conversation was rewritten or cleared (`replaceMessages`, `clearMessages`, `reset`): a change means earlier messages may be gone from it. */
+	/**
+	 * Times a tool result the model saw may have left the conversation or changed: bumped by `replaceMessages`
+	 * when a previous `toolResult` message is absent (by identity) from the new list or the caller passes
+	 * `toolResultsRewritten`, and by `clearMessages`/`reset`. Appends and dropping other messages leave it unchanged.
+	 */
 	get historyRevision(): number {
 		return this.#historyRevision;
 	}
 
-	replaceMessages(ms: AgentMessage[]) {
+	/**
+	 * Replace the conversation. Pass `toolResultsRewritten` when tool results were rewritten in place (same
+	 * objects, new content), which identity comparison cannot detect.
+	 */
+	replaceMessages(ms: AgentMessage[], options?: { toolResultsRewritten?: boolean }) {
+		const previous = this.#state.messages;
 		// New array assignment is intentional: caller-owned `ms` may be mutated
 		// after handoff; snapshot it so external mutations cannot leak in.
 		this.#state.messages = ms.slice();
-		this.#historyRevision++;
+		if (options?.toolResultsRewritten || droppedToolResult(previous, this.#state.messages)) this.#historyRevision++;
 	}
 
 	/** Signal that the steering/follow-up queue contents may have changed. Every
