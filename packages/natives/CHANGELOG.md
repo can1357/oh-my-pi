@@ -6,6 +6,10 @@
 
 - Reduced external-command launch latency in the embedded shell on glibc 2.29+ Linux when no explicit `ulimit`, `umask`, or extra file descriptors are needed ([#14847](https://github.com/can1357/oh-my-pi/issues/14847), [#14858](https://github.com/can1357/oh-my-pi/pull/14858) by [@farnoy](https://github.com/farnoy)).
 
+### Fixed
+
+- Kept executable shell scripts without a shebang working with faster external-command launches ([#15271](https://github.com/can1357/oh-my-pi/pull/15271) by [@iliaal](https://github.com/iliaal)).
+
 ## [18.8.8] - 2026-10-10
 
 ### Changed
