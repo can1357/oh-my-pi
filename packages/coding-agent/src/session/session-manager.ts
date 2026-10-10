@@ -8,6 +8,8 @@ import type {
 	TextContent,
 	Usage,
 } from "@oh-my-pi/pi-ai";
+import { type AgentMessage, createSyntheticToolResultMessage } from "@oh-my-pi/pi-agent-core";
+import { messageEstimateVersion } from "@oh-my-pi/pi-agent-core/compaction";
 import {
 	directoryIsEnterable,
 	directoryIsMissing,
@@ -761,6 +763,65 @@ interface SessionFileBody {
 	stamp: SessionBodyStamp;
 }
 
+/**
+ * One entry's serialized line plus the state it was computed from, so a full
+ * rewrite re-serializes only the entries that changed.
+ *
+ * {@link #lineFor} projects the entry through `prepareEntryForPersistence`,
+ * which is a pure function of the entry's own **field values** — it strips
+ * replayed reasoning signatures, drops spilled MCP structured content,
+ * truncates oversized strings, and externalizes image payloads to
+ * content-addressed `blob:sha256:` refs (so the same payload always projects
+ * to the same ref). A line is therefore valid exactly while every field value
+ * it was derived from still holds, which the snapshots below check by
+ * identity — one comparison per field, no JSON walk.
+ *
+ * `rewriteEntries()` announces an in-place update with a global `#bodyRevision`
+ * bump that cannot say *which* entry moved (it bumps on every prune pass, hot
+ * path included), so each entry carries its own evidence instead:
+ *
+ * - `fields` — the entry's own field values. Catches every in-place write this
+ *   repository makes to a persisted entry: a re-parented `parentId`, a stamped
+ *   `warning`, a replaced `message`, rewritten `content`/`prunedAt`
+ *   (prune/shake/strip-images), and `retryRecovery`.
+ * - `messageFields` + `version` — the message's own field values plus its
+ *   `messageEstimateVersion` owner-invalidation tag, so a mutation that writes
+ *   through to a nested state the shallow snapshot cannot see (a `usage.cost`
+ *   recompute, a `details` rewrite) still invalidates.
+ */
+interface CachedEntryLine {
+	line: string;
+	/** UTF-8 byte length of `line`, cached with it so the body sum never re-measures. */
+	bytes: number;
+	/** The entry's own field values when the line was produced. */
+	fields: Record<string, unknown>;
+	/** The message's own field values when the line was produced. */
+	messageFields: Record<string, unknown> | undefined;
+	/** {@link messageEstimateVersion} of the entry's message, or 0 when it has none. */
+	version: number;
+}
+
+/** Own enumerable field values of `obj`, for shallow change detection. */
+function shallowFieldValues(obj: object): Record<string, unknown> {
+	const values: Record<string, unknown> = {};
+	for (const key of Object.keys(obj)) {
+		values[key] = (obj as Record<string, unknown>)[key];
+	}
+	return values;
+}
+
+/** Whether a snapshot from {@link shallowFieldValues} still describes `obj`. */
+function shallowFieldsUnchanged(snapshot: Record<string, unknown>, obj: object): boolean {
+	const next = obj as Record<string, unknown>;
+	const keys = Object.keys(snapshot);
+	const live = Object.keys(next);
+	if (keys.length !== live.length) return false;
+	for (const key of keys) {
+		if (snapshot[key] !== next[key]) return false;
+	}
+	return true;
+}
+
 /** Whether `text` is exactly the concatenation of `lines`, compared without building it. */
 function textMatchesLines(text: string, lines: readonly string[]): boolean {
 	let offset = 0;
@@ -862,6 +923,12 @@ export class SessionManager {
 	#titleRevision = 0;
 	/** Bumped by in-place entry updates, which a {@link SessionBodyStamp} cannot otherwise see. */
 	#bodyRevision = 0;
+	/**
+	 * Serialized line per entry, reused until that entry changes (see
+	 * {@link #bodyLineFor}). Weak, so replaced or released entries drop their
+	 * cached bytes with the entries themselves.
+	 */
+	#entryLines = new WeakMap<SessionEntry, CachedEntryLine>();
 	#sessionFile: string | undefined;
 	#header!: SessionHeader;
 	#titleUpdatedAt = "";
@@ -1466,6 +1533,48 @@ export class SessionManager {
 	#lineFor(entry: FileEntry): string {
 		return `${stringifyJson(prepareEntryForPersistence(entry, this.#blobs)) ?? "null"}\n`;
 	}
+
+	/**
+	 * {@link #lineFor} for the full-body path, memoized per entry so a rewrite
+	 * serializes only the entries that actually changed.
+	 *
+	 * Keying on `#bodyRevision` cannot work: every `rewriteEntries()` bumps it,
+	 * and a global bump says nothing about which entry moved, so a
+	 * revision-keyed memo would miss on every rewrite. Each entry validates its
+	 * own cache record instead — see {@link CachedEntryLine}.
+	 *
+	 * Only message entries are memoized: they carry the file's bytes, while the
+	 * small metadata entries (compaction, label, branch_summary, …) cost less
+	 * to re-serialize than to validate and cache.
+	 */
+	#bodyLineFor(entry: SessionEntry): CachedEntryLine {
+		// Non-message entries hold no bytes worth memoizing, and some of them
+		// (compaction, label) are mutated in place after their first write.
+		const message = entry.type === "message" ? entry.message : undefined;
+		if (message === undefined) {
+			const line = this.#lineFor(entry);
+			return { line, bytes: Buffer.byteLength(line, "utf8"), fields: {} };
+		}
+		const cached = this.#entryLines.get(entry);
+		if (
+			cached !== undefined &&
+			cached.version === messageEstimateVersion(message) &&
+			shallowFieldsUnchanged(cached.fields, entry) &&
+			shallowFieldsUnchanged(cached.messageFields!, message)
+		) {
+			return cached;
+		}
+		const line = this.#lineFor(entry);
+		const memo: CachedEntryLine = {
+			line,
+			bytes: Buffer.byteLength(line, "utf8"),
+			fields: shallowFieldValues(entry),
+			messageFields: shallowFieldValues(message),
+			version: messageEstimateVersion(message),
+		};
+		this.#entryLines.set(entry, memo);
+		return memo;
+	}
 	#recordDurableAppend(line: string): void {
 		this.#expectedDiskSize = (this.#expectedDiskSize ?? 0) + Buffer.byteLength(line, "utf8");
 	}
@@ -1528,9 +1637,9 @@ export class SessionManager {
 		const lines = [titleLine, headerLine];
 		let bytes = Buffer.byteLength(titleLine, "utf8") + Buffer.byteLength(headerLine, "utf8");
 		for (const entry of entries) {
-			const line = this.#lineFor(entry);
-			bytes += Buffer.byteLength(line, "utf8");
-			lines.push(line);
+			const memo = this.#bodyLineFor(entry);
+			lines.push(memo.line);
+			bytes += memo.bytes;
 		}
 		const stamp: SessionBodyStamp = {
 			entries,
