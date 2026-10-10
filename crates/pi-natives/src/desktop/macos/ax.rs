@@ -23,7 +23,7 @@ use super::{
 		ax::{AxBounds, AxHandle, AxProps, normalize_role_macos},
 		backend::AxBackend,
 		error::{CoreResult, DesktopError},
-		text_range::{TextSelectRequest, Utf16Range, utf16_slice},
+		text_range::{TextSelectRequest, Utf16Range, utf16_byte_range, utf16_slice},
 		types::{AxTextSelection, DesktopWindow},
 	},
 	date, process, skylight,
@@ -737,32 +737,13 @@ fn replace_utf16_selection(
 	length: isize,
 	text: &str,
 ) -> Option<String> {
-	let start = usize::try_from(location).ok()?;
-	let end = start.checked_add(usize::try_from(length).ok()?)?;
-	let mut units = 0;
-	let mut start_byte = None;
-	let mut end_byte = None;
-	for (byte, character) in before.char_indices() {
-		if units == start {
-			start_byte = Some(byte);
-		}
-		if units == end {
-			end_byte = Some(byte);
-			break;
-		}
-		units += character.len_utf16();
-	}
-	if units == start && start_byte.is_none() {
-		start_byte = Some(before.len());
-	}
-	if units == end && end_byte.is_none() {
-		end_byte = Some(before.len());
-	}
-	let (start_byte, end_byte) = (start_byte?, end_byte?);
-	let mut result = String::with_capacity(before.len() - (end_byte - start_byte) + text.len());
-	result.push_str(&before[..start_byte]);
+	let range =
+		Utf16Range { start: usize::try_from(location).ok()?, length: usize::try_from(length).ok()? };
+	let bytes = utf16_byte_range(before, range)?;
+	let mut result = String::with_capacity(before.len() - bytes.len() + text.len());
+	result.push_str(&before[..bytes.start]);
 	result.push_str(text);
-	result.push_str(&before[end_byte..]);
+	result.push_str(&before[bytes.end..]);
 	Some(result)
 }
 

@@ -145,9 +145,16 @@ impl TextSelectRequest {
 /// The text of `value` in a UTF-16 range, or `None` when the range runs past
 /// the end or splits a surrogate pair.
 pub fn utf16_slice(value: &str, range: Utf16Range) -> Option<&str> {
+	value.get(utf16_byte_range(value, range)?)
+}
+
+/// The UTF-8 byte range of a UTF-16 range in `value`, or `None` when the range
+/// runs past the end or splits a surrogate pair. AX text ranges count UTF-16
+/// units; every AX read and write converts through here.
+pub fn utf16_byte_range(value: &str, range: Utf16Range) -> Option<std::ops::Range<usize>> {
 	let start = utf16_byte_offset(value, range.start)?;
 	let end = utf16_byte_offset(value, range.start.checked_add(range.length)?)?;
-	value.get(start..end)
+	Some(start..end)
 }
 
 fn utf16_byte_offset(value: &str, offset: usize) -> Option<usize> {
