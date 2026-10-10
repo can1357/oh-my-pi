@@ -13,6 +13,8 @@
 - Fixed macOS background typing into Chrome pages and background shortcuts such as ⌘A in TextEdit doing nothing ([#15184](https://github.com/can1357/oh-my-pi/pull/15184) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed the user's typing landing in the macOS app a background action targets when that app brings itself to the front while they type ([#15195](https://github.com/can1357/oh-my-pi/pull/15195) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed macOS background input sending the user back to their previous app after they opened the target app from Spotlight during the action ([#15195](https://github.com/can1357/oh-my-pi/pull/15195) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed macOS background keystrokes into Finder throwing `BackgroundUnavailable`, because its desktop is listed among its windows without a window id ([#15184](https://github.com/can1357/oh-my-pi/pull/15184) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed macOS background shortcuts with a modifier reporting success when the app stopped answering right after, as TextEdit can on a document's first ⌘S; they now throw `InputFailed` saying the outcome is unknown ([#15184](https://github.com/can1357/oh-my-pi/pull/15184) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.8.7] - 2026-10-09
 
