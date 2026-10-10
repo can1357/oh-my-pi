@@ -65,6 +65,8 @@ export interface ReadToolDetails {
 	fileSize?: number;
 	/** Full source line count when the read reached EOF and the count is exact. */
 	totalLines?: number;
+	/** Rows this result replaced with an "unchanged since earlier read" marker because an earlier read still in context holds them. */
+	reusedRows?: number;
 	/** Raw text + start line for user-visible TUI rendering, set when content is text-like.
 	 * Mirrors the same lines the model receives but without hashline/line-number prefixes,
 	 * so the TUI can render the file content with its own gutter without re-parsing the formatted text. */

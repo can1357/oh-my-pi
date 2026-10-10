@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Re-reading a file now replaces runs of rows that an earlier read still in context already returned with a one-line `[N-M unchanged since earlier read]` marker; such reads never supersede the read they point at when stale results are pruned ([#15267](https://github.com/can1357/oh-my-pi/issues/15267))
+
 ## [18.8.9] - 2026-10-10
 
 ### Added
