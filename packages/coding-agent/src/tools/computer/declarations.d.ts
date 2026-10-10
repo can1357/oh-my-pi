@@ -1,6 +1,6 @@
 /** Options shared by every native input helper. */
 interface ComputerInputOptions {
-	/** Omit for background input, or foreground takeover while control is acquired. Explicit false always stays background. */
+	/** Omit or false for background input; true takes over the target in the foreground, with or without acquired control. */
 	takeover?: boolean;
 }
 
@@ -205,7 +205,7 @@ interface ComputerInputTarget {
 	zoom(region: CaptureRegion, options?: ComputerScreenshotOptions): Promise<ComputerScreenshotResult>;
 	click(x: number, y: number, options?: ComputerClickOptions): Promise<void>;
 	doubleClick(x: number, y: number, options?: Omit<ComputerClickOptions, "count">): Promise<void>;
-	move(x: number, y: number): Promise<void>;
+	move(x: number, y: number, options?: ComputerInputOptions): Promise<void>;
 	drag(points: Array<[number, number]>, options?: ComputerDragOptions): Promise<void>;
 	scroll(x: number, y: number, options?: ComputerScrollOptions): Promise<void>;
 	type(text: string, options?: ComputerInputOptions): Promise<void>;

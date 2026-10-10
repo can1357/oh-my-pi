@@ -333,13 +333,9 @@ impl ParsedPointerOptions {
 		})
 	}
 
-	fn mode(&self, token: &OperationToken) -> DeliveryMode {
-		delivery_mode(self.takeover, token)
+	const fn mode(&self) -> DeliveryMode {
+		DeliveryMode::from_takeover(self.takeover)
 	}
-}
-
-fn delivery_mode(takeover: Option<bool>, token: &OperationToken) -> DeliveryMode {
-	DeliveryMode::from_takeover(Some(takeover.unwrap_or_else(|| token.control_active())))
 }
 
 fn hold_duration(seconds: f64) -> CoreResult<Duration> {
@@ -658,7 +654,7 @@ impl Worker {
 					target,
 					keys,
 					*duration,
-					delivery_mode(*takeover, token),
+					DeliveryMode::from_takeover(*takeover),
 					token,
 				)?;
 				Ok(Response::Unit)
@@ -678,7 +674,7 @@ impl Worker {
 						duration: *duration,
 					},
 					&frame,
-					delivery_mode(*takeover, token),
+					DeliveryMode::from_takeover(*takeover),
 					token,
 				)?;
 				Ok(Response::Unit)
@@ -739,7 +735,7 @@ impl Worker {
 						modifiers: options.modifiers,
 					},
 					&frame,
-					options.mode(token),
+					options.mode(),
 					token,
 				)?;
 				Ok(Response::Unit)
@@ -750,7 +746,7 @@ impl Worker {
 					target,
 					PointerEvent::Move { x, y },
 					&frame,
-					delivery_mode(*takeover, token),
+					DeliveryMode::from_takeover(*takeover),
 					token,
 				)?;
 				Ok(Response::Unit)
@@ -773,7 +769,7 @@ impl Worker {
 						keys:      options.keys.clone(),
 					},
 					&frame,
-					options.mode(token),
+					options.mode(),
 					token,
 				)?;
 				Ok(Response::Unit)
@@ -784,23 +780,29 @@ impl Worker {
 					target,
 					PointerEvent::Scroll { x, y, dx: *dx, dy: *dy },
 					&frame,
-					delivery_mode(*takeover, token),
+					DeliveryMode::from_takeover(*takeover),
 					token,
 				)?;
 				Ok(Response::Unit)
 			},
 			Request::TypeText { target, text, takeover, .. } => {
 				self.validate_keyboard_target(target)?;
-				self
-					.backend()?
-					.type_text(target, text, delivery_mode(*takeover, token), token)?;
+				self.backend()?.type_text(
+					target,
+					text,
+					DeliveryMode::from_takeover(*takeover),
+					token,
+				)?;
 				Ok(Response::Unit)
 			},
 			Request::KeyChord { target, keys, takeover, .. } => {
 				self.validate_keyboard_target(target)?;
-				self
-					.backend()?
-					.key_chord(target, keys, delivery_mode(*takeover, token), token)?;
+				self.backend()?.key_chord(
+					target,
+					keys,
+					DeliveryMode::from_takeover(*takeover),
+					token,
+				)?;
 				Ok(Response::Unit)
 			},
 			Request::RaiseWindow { id, .. } => {
@@ -939,7 +941,7 @@ impl Worker {
 						modifiers: options.modifiers,
 					},
 					&FrameGeometry::identity_global(),
-					options.mode(token),
+					options.mode(),
 					token,
 				)?;
 				Ok(Response::Unit)
@@ -1739,6 +1741,7 @@ mod capture_tests {
 		overlap:                Option<DesktopWindow>,
 		window_present:         bool,
 		clicks:                 Arc<Mutex<Vec<String>>>,
+		modes:                  Arc<Mutex<Vec<DeliveryMode>>>,
 		layout:                 Arc<Mutex<Vec<DesktopDisplay>>>,
 		active_display:         Arc<Mutex<String>>,
 		captures:               Arc<Mutex<u8>>,
@@ -1765,6 +1768,7 @@ mod capture_tests {
 				overlap:                None,
 				window_present:         true,
 				clicks:                 Arc::new(Mutex::new(Vec::new())),
+				modes:                  Arc::new(Mutex::new(Vec::new())),
 				layout:                 Arc::new(Mutex::new(vec![DesktopDisplay {
 					id:           "screen-1".to_string(),
 					name:         "Test screen".to_string(),
@@ -1929,10 +1933,11 @@ mod capture_tests {
 			target: &Target,
 			_: PointerEvent,
 			_: &FrameGeometry,
-			_: DeliveryMode,
+			mode: DeliveryMode,
 			_: &OperationToken,
 		) -> CoreResult<()> {
 			self.clicks.lock().push(target.key().to_string());
+			self.modes.lock().push(mode);
 			Ok(())
 		}
 
@@ -1940,20 +1945,22 @@ mod capture_tests {
 			&mut self,
 			_: &Target,
 			_: &str,
-			_: DeliveryMode,
+			mode: DeliveryMode,
 			_: &OperationToken,
 		) -> CoreResult<()> {
-			unreachable!("type_text not exercised")
+			self.modes.lock().push(mode);
+			Ok(())
 		}
 
 		fn key_chord(
 			&mut self,
 			_: &Target,
 			_: &[KeyName],
-			_: DeliveryMode,
+			mode: DeliveryMode,
 			_: &OperationToken,
 		) -> CoreResult<()> {
-			unreachable!("key_chord not exercised")
+			self.modes.lock().push(mode);
+			Ok(())
 		}
 
 		fn hold_keys(
@@ -2411,10 +2418,9 @@ mod capture_tests {
 		}
 		assert_eq!(hold_duration(0.0).unwrap(), Duration::ZERO);
 		assert_eq!(hold_duration(100.0).unwrap(), Duration::from_secs(100));
-		let token = CancellationSource::default().token();
 		let default = ParsedPointerOptions::parse(None).unwrap();
 		assert_eq!(default.takeover, None);
-		assert_eq!(default.mode(&token), DeliveryMode::Background);
+		assert_eq!(default.mode(), DeliveryMode::Background);
 		for (takeover, expected) in
 			[(false, DeliveryMode::Background), (true, DeliveryMode::Foreground)]
 		{
@@ -2424,8 +2430,53 @@ mod capture_tests {
 			}))
 			.unwrap();
 			assert_eq!(options.takeover, Some(takeover));
-			assert_eq!(options.mode(&token), expected);
+			assert_eq!(options.mode(), expected);
 		}
+	}
+
+	#[test]
+	fn held_control_leaves_omitted_takeover_in_the_background() {
+		let _serial = control::tests::OWNERSHIP_TEST.lock();
+		let backend = FakeWaylandBackend::new();
+		let modes = Arc::clone(&backend.modes);
+		let mut worker = worker_with(backend);
+		let source = CancellationSource::default();
+		control::tests::grant_for_test(&source);
+		assert!(source.control_active());
+		let token = source.token();
+		let target = Target::Window(WAYLAND_ID.to_string());
+		worker
+			.process(&capture_request(target.clone()), &token)
+			.unwrap();
+		for takeover in [None, Some(true)] {
+			let options = ParsedPointerOptions::parse(Some(PointerOptions {
+				takeover,
+				..PointerOptions::default()
+			}))
+			.unwrap();
+			let (reply, _rx) = flume::bounded(1);
+			let click = Request::Click { target: target.clone(), x: 10.0, y: 10.0, options, reply };
+			worker.process(&click, &token).unwrap();
+			let (reply, _rx) = flume::bounded(1);
+			let text = "a".to_string();
+			let typed = Request::TypeText { target: target.clone(), text, takeover, reply };
+			worker.process(&typed, &token).unwrap();
+			let (reply, _rx) = flume::bounded(1);
+			let keys = parse_keys(&["a".to_string()]).unwrap();
+			let chord = Request::KeyChord { target: target.clone(), keys, takeover, reply };
+			worker.process(&chord, &token).unwrap();
+			let (reply, _rx) = flume::bounded(1);
+			let hover =
+				Request::MoveMouse { target: target.clone(), x: 10.0, y: 10.0, takeover, reply };
+			worker.process(&hover, &token).unwrap();
+		}
+		source.release_control();
+		control::tests::remove_test_lock();
+		let (background, foreground) = (DeliveryMode::Background, DeliveryMode::Foreground);
+		assert_eq!(*modes.lock(), [
+			background, background, background, background, foreground, foreground, foreground,
+			foreground
+		]);
 	}
 
 	#[test]

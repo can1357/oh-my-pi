@@ -100,7 +100,7 @@ Window methods include:
 - `screenshot({ silent? })`
 - `zoom({ x, y, width, height }, { silent? })`
 - `click(x, y, { button?, count?, modifiers?, takeover? })` and `doubleClick(x, y)`
-- `move(x, y)`, `drag([[x, y], ...], options?)`, and `scroll(x, y, { dx?, dy?, takeover? })`
+- `move(x, y, { takeover? })`, `drag([[x, y], ...], options?)`, and `scroll(x, y, { dx?, dy?, takeover? })`
 - `type(text, { takeover? })` and `press(chord, { takeover? })`
 - `raise()`
 
@@ -146,7 +146,7 @@ Use `win.menu.items()` for top-level menus, `win.menu.items("File")` for a subme
 
 `holdKeys(keys, { duration, takeover? })` and `holdMouse(x, y, { button?, duration, keys?, takeover? })` hold input for 0–100 seconds. `drag(points, { keys?, modifiers?, takeover? })` supports gestures such as Space-drag. Every call releases attempted keys/buttons on success, error, and cancellation; no pressed state survives into another call.
 
-For deliberate foreground work, `await computer.control.acquire({ reason })` requests live human confirmation. Headless execution, refusal, or cancellation never grants control. While acquired, an omitted `takeover` option uses foreground delivery; explicit `takeover: false` still requests background delivery. Use `control.release()` in `finally`. User interruption, task completion, and session disposal also revoke the grant and native ownership. `control.state()` reports the current native state. The grant does not authorize unrelated consequential actions.
+For deliberate foreground work, `await computer.control.acquire({ reason })` requests live human confirmation. Headless execution, refusal, or cancellation never grants control. The grant does not change delivery: an omitted `takeover` option stays background, and only an explicit `takeover: true` uses foreground delivery. Use `control.release()` in `finally`. User interruption, task completion, and session disposal also revoke the grant and native ownership. `control.state()` reports the current native state. The grant does not authorize unrelated consequential actions.
 
 On macOS, `win.bringToCurrentSpace()` requests an actual move of that window without activating its app or switching the user's Space. The result is checked against WindowServer membership; missing APIs or OS refusal produce `SpaceUnsupported` or `SpaceMoveDenied`. No security settings are changed. Capture a new full screenshot afterward.
 
