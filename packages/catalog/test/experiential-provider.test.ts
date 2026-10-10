@@ -7,7 +7,8 @@ import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { resolveProviderModels } from "@oh-my-pi/pi-catalog/model-manager";
 import { resolveModelCacheProviderId } from "@oh-my-pi/pi-catalog/provider-models/cache-provider-id";
 import { experientialModelManagerOptions } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
-import { EXPERIENTIAL_API_BASE_URL, normalizeExperientialBaseUrl } from "@oh-my-pi/pi-catalog/wire/experiential";
+import { EXPERIENTIAL_API_BASE_URL } from "@oh-my-pi/pi-catalog/wire/experiential";
+import { normalizeV1BaseUrl } from "@oh-my-pi/pi-catalog/wire/v1-base-url";
 
 /**
  * Rows copied from a live `GET https://api.experientiallabs.ai/v1/models`
@@ -276,9 +277,9 @@ describe("Experiential Labs built-in provider", () => {
 	});
 
 	test("normalizes configured base URLs onto the /v1 surface", () => {
-		expect(normalizeExperientialBaseUrl(undefined)).toBe(EXPERIENTIAL_API_BASE_URL);
-		expect(normalizeExperientialBaseUrl("   ")).toBe(EXPERIENTIAL_API_BASE_URL);
-		expect(normalizeExperientialBaseUrl("https://gw.example/")).toBe("https://gw.example/v1");
-		expect(normalizeExperientialBaseUrl("https://gw.example/v1/")).toBe("https://gw.example/v1");
+		expect(normalizeV1BaseUrl(undefined, EXPERIENTIAL_API_BASE_URL)).toBe(EXPERIENTIAL_API_BASE_URL);
+		expect(normalizeV1BaseUrl("   ", EXPERIENTIAL_API_BASE_URL)).toBe(EXPERIENTIAL_API_BASE_URL);
+		expect(normalizeV1BaseUrl("https://gw.example/", EXPERIENTIAL_API_BASE_URL)).toBe("https://gw.example/v1");
+		expect(normalizeV1BaseUrl("https://gw.example/v1/", EXPERIENTIAL_API_BASE_URL)).toBe("https://gw.example/v1");
 	});
 });

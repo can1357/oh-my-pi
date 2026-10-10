@@ -4,7 +4,7 @@
 
 ### Added
 
-- Added built-in Experiential Labs support with `/login`, live per-key model discovery, gateway pricing, and per-model reasoning levels. ([#PR_NUMBER](https://github.com/can1357/oh-my-pi/pull/PR_NUMBER) by [@YOUR_GITHUB_USERNAME](https://github.com/YOUR_GITHUB_USERNAME))
+- Added built-in Experiential Labs support with `/login`, live per-key model discovery, gateway pricing, and per-model reasoning levels. ([#15179](https://github.com/can1357/oh-my-pi/pull/15179) by [@dbk216](https://github.com/dbk216))
 
 ## [18.8.7] - 2026-10-09
 

@@ -44,9 +44,9 @@ import { discoveryFetch, isAnthropicOAuthToken, isRecord, toBoolean, toNumber, t
 import { ALIBABA_TOKEN_PLAN_BASE_URL, parseAlibabaTokenPlanCredential } from "../wire/alibaba-token-plan";
 import { normalizeCharmHyperBaseUrl } from "../wire/charm-hyper";
 import { CLINEPASS_API_BASE_URL, clinePassClientHeaders } from "../wire/cline-pass";
-import { normalizeExperientialBaseUrl } from "../wire/experiential";
 import { CLOUDFLARE_AI_GATEWAY_COMPAT_BASE_URL } from "../wire/cloudflare-ai-gateway";
 import { coreWeaveProjectHeaders } from "../wire/coreweave";
+import { EXPERIENTIAL_API_BASE_URL } from "../wire/experiential";
 import {
 	COPILOT_API_HEADERS,
 	COPILOT_DISCOVERY_HEADERS,
@@ -61,6 +61,7 @@ import {
 	SINGULARITYAPI_TECH_API_BASE_URL,
 	normalizeSingularityApiBaseUrl,
 } from "../wire/singularityapi";
+import { normalizeV1BaseUrl } from "../wire/v1-base-url";
 import { createBundledReferenceMap, createReferenceResolver, toModelSpec } from "./bundled-references";
 import { getDefaultModelDiscoveryBaseUrl, resolveModelCacheProviderId } from "./cache-provider-id";
 import { getClinePassModelMetadata } from "./cline-pass";
@@ -8061,7 +8062,7 @@ export function experientialModelManagerOptions(
 	config?: ExperientialModelManagerConfig,
 ): ModelManagerOptions<"openai-completions"> {
 	const apiKey = config?.apiKey;
-	const baseUrl = normalizeExperientialBaseUrl(config?.baseUrl);
+	const baseUrl = normalizeV1BaseUrl(config?.baseUrl, EXPERIENTIAL_API_BASE_URL);
 	return {
 		providerId: "experiential",
 		cacheProviderId: resolveModelCacheProviderId("experiential", { apiKey, baseUrl }),

@@ -25,7 +25,6 @@ const DEFAULT_MODEL_PROVIDER_ORDER = [
 	"deepinfra",
 	"openrouter",
 	"aimlapi",
-	"experiential",
 	"together",
 
 	// Generic gateways and editor/proxy providers. These are useful when picked
