@@ -17,6 +17,10 @@
 - Added `TUI.releaseHeldInput()`: on a terminal expected to speak TSP, a `deferInput` start now holds keystrokes (TSP events and the cell-size reply still apply; Ctrl+C/Ctrl+D release early) until the app calls it once its session is wired; such terminals also skip the sixel probe ([#15120](https://github.com/can1357/oh-my-pi/pull/15120) by [@H4vC](https://github.com/H4vC))
 - Added `TUI.replaceHeldFocus(previous, next)`, which `Composer.setEditor()` calls so a swapped-in editor inherits held startup keys; only keys for the start-time focus owner are now held, and a dialog that takes focus gets its input live ([#15122](https://github.com/can1357/oh-my-pi/pull/15122) by [@H4vC](https://github.com/H4vC))
 
+### Changed
+
+- Expanded tool output (Ctrl+O) now soft-wraps the full body of IRC cards - outgoing `agent://` messages and incoming IRC bubbles - instead of cutting every line at 100/110 columns, and a collapsed IRC card with hidden text now shows the `Ctrl+O: Expand` hint ([#15049](https://github.com/can1357/oh-my-pi/issues/15049) by [@farnoy](https://github.com/farnoy))
+
 ### Fixed
 
 - Fixed the Agents hub Time column rewinding and freezing for running subagents between progress updates ([#15140](https://github.com/can1357/oh-my-pi/pull/15140) by [@H4vC](https://github.com/H4vC))
