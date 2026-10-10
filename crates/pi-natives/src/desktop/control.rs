@@ -102,6 +102,11 @@ impl CancellationSource {
 	pub(crate) fn escape_unavailable(&self) -> bool {
 		self.0.escape_failed.load(Ordering::Acquire)
 	}
+
+	#[cfg(test)]
+	pub(crate) fn fail_escape_for_test(&self) {
+		self.0.escape_failed.store(true, Ordering::Release);
+	}
 }
 
 /// Weak callback ownership avoids a lease -> monitor -> source -> lease cycle.
@@ -366,6 +371,11 @@ impl ControlLease {
 	/// The physical-Escape stop never gates input: a monitor that cannot start
 	/// is recorded on the session, which then reports `globalEscape: false`, and
 	/// the lease runs without it.
+	///
+	/// The monitor is also what advances [`user_activity`], the veto foreground
+	/// restoration checks. Without it that veto sees no user keys or clicks, as
+	/// on a blind tap with Input Monitoring off; no other observer exists
+	/// without event-listening access.
 	#[cfg(target_os = "macos")]
 	fn acquire_with(
 		source: &CancellationSource,
