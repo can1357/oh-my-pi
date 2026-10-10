@@ -2286,7 +2286,7 @@ export function convertMessages(
 		? 9
 		: compat.usesOpenAIToolCallIdLimit
 			? 40
-			: undefined;
+			: compat.maxToolCallIdLength;
 	const duplicateToolCallIdSuffixPrefix = compat.requiresMistralToolIds ? "dup" : undefined;
 	const normalizeToolCallId = (id: string, source?: AssistantMessage): string => {
 		if (compat.requiresMistralToolIds) return normalizeMistralToolId(id, true);
@@ -2305,6 +2305,12 @@ export function convertMessages(
 		}
 
 		if (compat.usesOpenAIToolCallIdLimit) return id.length > 40 ? id.slice(0, 40) : id;
+		// Only targets with a known limit may discard opaque gateway state.
+		// Hashing keeps long IDs with identical prefixes distinct.
+		if (!isSameModelSource && compat.maxToolCallIdLength !== undefined && id.length > compat.maxToolCallIdLength) {
+			const hash = Bun.hash(id).toString(36);
+			return `${id.slice(0, compat.maxToolCallIdLength - hash.length - 1)}_${hash}`;
+		}
 		return id;
 	};
 	const transformedMessages = transformMessages(

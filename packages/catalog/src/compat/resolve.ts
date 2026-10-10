@@ -587,6 +587,7 @@ function detectOpenAICompat(
 		reasoningDeltasMayBeCumulative: false,
 		emptyLengthFinishIsContextError: false,
 		usesOpenAIToolCallIdLimit: false,
+		maxToolCallIdLength: undefined,
 		promptCacheSessionHeader: hostMatchesUrl(baseUrl, "xai") ? "x-grok-conv-id" : undefined,
 		dropThinkingWhenReasoningEffort: false,
 		nativeKimiK3Reasoning: false,

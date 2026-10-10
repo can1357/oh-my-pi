@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed `400 string_above_max_length` after switching from a LiteLLM Gemini model to `gpt-5.6-sol` in a session with signed tool-call IDs; switching between Gemini models keeps their signatures intact ([#15056](https://github.com/can1357/oh-my-pi/issues/15056)).
+
 ## [18.8.7] - 2026-10-09
 
 ### Added

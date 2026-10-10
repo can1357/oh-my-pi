@@ -565,6 +565,8 @@ export interface OpenAICompat {
 	emptyLengthFinishIsContextError?: boolean;
 	/** Normalize tool call ids to OpenAI's 40-character limit. Default: auto-detected. */
 	usesOpenAIToolCallIdLimit?: boolean;
+	/** Maximum Chat Completions tool-call ID length imposed by this target; unset preserves opaque gateway IDs. */
+	maxToolCallIdLength?: number;
 	/**
 	 * Compat deltas applied when a request actually engages thinking mode
 	 * (reasoning requested and not disabled, model reasoning-capable, and not
@@ -909,6 +911,8 @@ export interface ResolvedOpenAISharedCompat {
 	reasoningDeltasMayBeCumulative: boolean;
 	emptyLengthFinishIsContextError: boolean;
 	usesOpenAIToolCallIdLimit: boolean;
+	/** See {@link OpenAICompat.maxToolCallIdLength}. */
+	maxToolCallIdLength?: number;
 	promptCacheSessionHeader?: OpenAICompat["promptCacheSessionHeader"];
 	/**
 	 * Whether this model accepts explicit OpenAI prompt-cache breakpoints.
@@ -989,6 +993,7 @@ export type ResolvedOpenAICompat = ResolvedOpenAISharedCompat &
 			| "reasoningDeltasMayBeCumulative"
 			| "emptyLengthFinishIsContextError"
 			| "usesOpenAIToolCallIdLimit"
+			| "maxToolCallIdLength"
 			| "promptCacheSessionHeader"
 			| "supportsPromptCacheBreakpoints"
 			| "promptCacheBreakpointTtl"

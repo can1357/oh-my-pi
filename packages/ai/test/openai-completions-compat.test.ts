@@ -748,6 +748,90 @@ describe("openai-completions compatibility", () => {
 		expect(replayMessages.find(message => message.role === "tool")?.tool_call_id).toBe(toolCallId);
 	});
 
+	it("caps oversized IDs for a limited target without stripping Gemini gateway signatures (#15056)", () => {
+		const modelSpec: ModelSpec<"openai-completions"> = {
+			id: "gpt-5.6-sol",
+			name: "GPT via LiteLLM",
+			api: "openai-completions",
+			provider: "litellm",
+			baseUrl: "http://localhost:4000/v1",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 128_000,
+			maxTokens: 8_192,
+		};
+		const model = buildModel(modelSpec);
+		const gemini = buildModel({ ...modelSpec, id: "gemini-3-flash", name: "Gemini via LiteLLM" });
+		// Identical first 64+ chars: plain truncation would collapse both calls onto one id.
+		const prefix = `vertex_tool_00000000-0000-0000-0000-000000000000__sig_${"Q".repeat(1200)}`;
+		const ids = [`${prefix}+first==`, `${prefix}/second=`];
+		const history = (sourceModel: string): Context => ({
+			messages: [
+				{ role: "user", content: "Read both", timestamp: 1 },
+				{
+					role: "assistant",
+					content: ids.map(id => ({ type: "toolCall", id, name: "read", arguments: { path: id.slice(-6) } })),
+					api: "openai-completions",
+					provider: "litellm",
+					model: sourceModel,
+					usage: {
+						input: 0,
+						output: 0,
+						cacheRead: 0,
+						cacheWrite: 0,
+						totalTokens: 0,
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+					},
+					stopReason: "toolUse",
+					timestamp: 2,
+				},
+				...ids.map((id): ToolResultMessage => ({
+					role: "toolResult",
+					toolCallId: id,
+					toolName: "read",
+					content: [{ type: "text", text: `result ${id.slice(-6)}` }],
+					isError: false,
+					timestamp: 3,
+				})),
+			],
+		});
+		const pairs = (target: Model<"openai-completions">, context: Context) => {
+			const messages = convertMessages(target, context, target.compat);
+			const callIds = messages.flatMap(message =>
+				message.role === "assistant" ? (message.tool_calls ?? []).map(call => call.id) : [],
+			);
+			const resultIds = messages.flatMap(message => (message.role === "tool" ? [message.tool_call_id] : []));
+			return { callIds, resultIds };
+		};
+
+		const crossModel = pairs(model, history("gemini-3-pro"));
+		expect(crossModel.callIds).toHaveLength(2);
+		expect(new Set(crossModel.callIds).size).toBe(2);
+		for (const id of crossModel.callIds) expect(id.length).toBeLessThanOrEqual(64);
+		expect(crossModel.resultIds).toEqual(crossModel.callIds);
+
+		const sameGateway = pairs(gemini, history("gemini-3-pro"));
+		expect(sameGateway.callIds).toEqual(ids);
+		expect(sameGateway.resultIds).toEqual(ids);
+
+		const sameModel = pairs(gemini, history(gemini.id));
+		expect(sameModel.callIds).toEqual(ids);
+		expect(sameModel.resultIds).toEqual(ids);
+
+		// A models.yml/SDK `compat.maxToolCallIdLength` on an unlisted gateway must take effect.
+		const configured = buildModel({
+			...modelSpec,
+			id: "custom-limited",
+			provider: "custom-gateway",
+			compat: { maxToolCallIdLength: 48 },
+		});
+		const overridden = pairs(configured, history("gemini-3-pro"));
+		expect(new Set(overridden.callIds).size).toBe(2);
+		for (const id of overridden.callIds) expect(id.length).toBeLessThanOrEqual(48);
+		expect(overridden.resultIds).toEqual(overridden.callIds);
+	});
+
 	it("keeps unindexed batched tool-call arguments isolated", async () => {
 		const model: Model<"openai-completions"> = buildModel({
 			...gpt4oMiniSpec,
