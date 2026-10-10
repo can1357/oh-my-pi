@@ -2,6 +2,7 @@ mod ax;
 mod capture;
 mod date;
 mod input;
+mod keymap;
 mod process;
 mod skylight;
 mod spaces;
