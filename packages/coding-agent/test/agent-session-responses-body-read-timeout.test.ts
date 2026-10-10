@@ -536,6 +536,20 @@ describe("AgentSession Responses request-body timeout recovery", () => {
 		}
 	});
 
+	it("does not rewrite when no resolvable artifact is reserved, even if an unreachable copy could be saved", async () => {
+		const harness = await createSessionHarness();
+		// Non-persisted sessions allocate nothing and only keep an in-memory copy that `artifact://` cannot read.
+		const allocateArtifactPath = vi.spyOn(harness.sessionManager, "allocateArtifactPath").mockResolvedValue({});
+		try {
+			await runPrompt(harness);
+			expect(harness.requests).toHaveLength(1);
+			assertTerminalErrorState(harness);
+		} finally {
+			allocateArtifactPath.mockRestore();
+			await harness.cleanup();
+		}
+	});
+
 	it("rolls back the in-memory rewrite when durable history write fails", async () => {
 		const harness = await createSessionHarness();
 		const rewriteEntries = vi

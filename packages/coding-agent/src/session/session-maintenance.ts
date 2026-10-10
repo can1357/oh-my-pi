@@ -940,16 +940,9 @@ export class SessionMaintenance {
 				artifactId = undefined;
 				({ replacements, replacementTokenCounts, savings } = calculateReplacementState(artifactId));
 			}
-		} else {
-			artifactId = await this.#saveShakeArtifact(regions);
-			assertCurrent();
-			if (opts.requireArtifact && !artifactId) {
-				throw new Error("shake could not save a recovery artifact");
-			}
-			({ replacements, replacementTokenCounts, savings } = calculateReplacementState(artifactId));
-			if (opts.toolResultsOnly && savings < config.minSavings) {
-				return { mode, toolResultsDropped: 0, blocksDropped: 0, tokensFreed: 0 };
-			}
+		} else if (opts.requireArtifact) {
+			// No on-disk artifact (non-persisted session): `artifact://` cannot resolve an in-memory copy.
+			throw new Error("shake could not save a recovery artifact");
 		}
 
 		assertCurrent();
@@ -1054,15 +1047,6 @@ export class SessionMaintenance {
 			parts.push(`### region ${i + 1} (${region.label}, ~${region.tokens} tok)`, "", region.originalText, "");
 		}
 		return parts.join("\n");
-	}
-
-	/** Persist the shake artifact, using the session manager's in-memory fallback when needed. */
-	async #saveShakeArtifact(regions: ShakeRegion[]): Promise<string | undefined> {
-		try {
-			return await this.#host.sessionManager.saveArtifact(this.#shakeArtifactText(regions), "shake");
-		} catch {
-			return undefined;
-		}
 	}
 
 	/**
