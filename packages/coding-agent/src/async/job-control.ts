@@ -324,6 +324,18 @@ export function buildJobResult(
 			lines.push("");
 		}
 	}
+	if (op === "wait" && completed.length > 0) {
+		// The task description tells the parent to gate sibling outputs, but by
+		// delivery time that guidance sits far back in context; surface it at
+		// the point of review so large fan-outs don't default to full reads.
+		const { count, resultBytes } = manager.consumedAgentReportStats();
+		if (count >= 3 && resultBytes >= 5000 && (session.isToolActive?.("eval") ?? true)) {
+			lines.push(
+				`${count} agent reports to review: gate first — one \`judge_batch()\` (\`judgeBatch()\` in JS; signature in \`xd://eval/judge\`) of bool "does this report meet its acceptance criterion?" with each report's full text as the state (\`output(id)\` returns it; \`read agent://<id>\` gives only a preview), then read only the flagged, failed, and low-confidence.`,
+			);
+			lines.push("");
+		}
+	}
 
 	if (op !== "jobs" && running.length > 0) {
 		lines.push(`## Still Running (${running.length})\n`);

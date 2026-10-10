@@ -142,3 +142,62 @@ describe("wait structured output rendering", () => {
 		expect(text).toContain(`full payload at agent://Foo,`);
 	});
 });
+
+describe("wait sibling-output gating cue", () => {
+	beforeEach(() => {
+		AgentRegistry.resetGlobalForTests();
+		IrcBus.resetGlobalForTests();
+	});
+	afterEach(() => {
+		AgentRegistry.resetGlobalForTests();
+		IrcBus.resetGlobalForTests();
+	});
+
+	/** Build the settled-wait snapshot for one job and return its text. */
+	const snapshotText = (manager: AsyncJobManager, jobId: string): string => {
+		const result = buildJobResult(makeSession(manager), manager, "wait", [manager.getJob(jobId)!], []);
+		return result.content[0]?.type === "text" ? result.content[0].text : "";
+	};
+
+	test("surfaces the judge_batch cue once 3 large task reports are consumed", async () => {
+		const manager = new AsyncJobManager({ onJobComplete: () => {} });
+		const texts = "narrative ".repeat(600); // ~6k chars each
+		const jobIds = ["A", "B", "C"].map(label =>
+			registerSettledJob(
+				manager,
+				label,
+				texts,
+				{ source: "agent", mode: "permissive", status: "valid", data: { ok: true } },
+				label,
+			),
+		);
+		for (const id of jobIds) await manager.getJob(id)!.promise;
+		// Consume one settled report per wait, as a parent reviewing a fan-out.
+		expect(snapshotText(manager, jobIds[0])).not.toContain("agent reports to review");
+		expect(snapshotText(manager, jobIds[1])).not.toContain("agent reports to review");
+		const third = snapshotText(manager, jobIds[2]);
+		expect(third).toContain("3 agent reports to review");
+		expect(third).toContain("judge_batch()");
+		expect(third).toContain("agent://<id>");
+	});
+
+	test("no cue for small task reports or non-task jobs", async () => {
+		const manager = new AsyncJobManager({ onJobComplete: () => {} });
+		const valid = {
+			source: "agent" as const,
+			mode: "permissive" as const,
+			status: "valid" as const,
+			data: { ok: true },
+		};
+		// Three small task reports stay under the byte threshold.
+		const small = ["A", "B", "C"].map(label => registerSettledJob(manager, label, "short report", valid, label));
+		for (const id of small) await manager.getJob(id)!.promise;
+		expect(snapshotText(manager, small[2])).not.toContain("agent reports to review");
+		// Large bash job outputs are not agent reports.
+		const bashId = manager.register("bash", "bigbash", async () => ({ text: "x".repeat(9000) }), {
+			ownerId: SELF_ID,
+		});
+		await manager.getJob(bashId)!.promise;
+		expect(snapshotText(manager, bashId)).not.toContain("agent reports to review");
+	});
+});

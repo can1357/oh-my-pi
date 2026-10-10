@@ -272,6 +272,10 @@ export class AsyncJobManager {
 	readonly #suppressedDeliveries = new Set<string>();
 	readonly #watchedJobs = new Set<string>();
 	readonly #consumedJobResults = new Set<string>();
+	/** Cumulative `task` results consumed this manager's lifetime (monotonic; eviction-proof). */
+	#consumedReportCount = 0;
+	/** Sum of consumed `task` result-text lengths (chars), same lifetime scope as {@link #consumedReportCount}. */
+	#consumedReportBytes = 0;
 	readonly #evictionTimers = new Map<string, NodeJS.Timeout>();
 	readonly #releasedForegroundJobs = new Set<string>();
 	#nextAutoId = 1;
@@ -596,6 +600,16 @@ export class AsyncJobManager {
 	}
 
 	/**
+	 * Cumulative `task` results consumed over this manager's lifetime
+	 * (auto-delivered or snapshot-recovered). Monotonic and eviction-proof, so
+	 * a `wait` snapshot can surface the sibling-output gate once reviewing the
+	 * accumulated reports is real work.
+	 */
+	consumedAgentReportStats(): { count: number; resultBytes: number } {
+		return { count: this.#consumedReportCount, resultBytes: this.#consumedReportBytes };
+	}
+
+	/**
 	 * Cancel running jobs. With a filter, cancels only jobs the matching owner
 	 * registered; with no filter, cancels every running job
 	 * (used by `dispose()` to nuke the manager's state).
@@ -807,6 +821,10 @@ export class AsyncJobManager {
 		if (!job || job.status === "running" || this.#consumedJobResults.has(jobId)) return false;
 		if (job.resultText === undefined && job.errorText === undefined) return false;
 		this.#consumedJobResults.add(jobId);
+		if (job.type === "task") {
+			this.#consumedReportCount += 1;
+			this.#consumedReportBytes += job.resultText?.length ?? 0;
+		}
 		// The result reached its consumer (sink delivery or foreground snapshot):
 		// the row no longer needs to outlive the full retention window. Re-arm the
 		// eviction timer with the short consumed grace — but only when no delivery

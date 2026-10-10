@@ -3,6 +3,8 @@
 
 # Results
 `outputSchema` parsed payload, even invalid: `agent://<id>` (field `/<field>`, nested `/reports/0/data`); invalid preview inline.
+{{#if evalAvailable}}Reviewing 3+ sibling outputs? Gate before reading them all: one `judge_batch()` (`judgeBatch()` in JS; signature in `xd://eval/judge`) of bool "does this report meet its acceptance criterion?" over the results; read only the flagged, failed, and low-confidence ones yourself. An exact verdict field is an exact read — extract it; gate any report you would otherwise have to read.
+{{/if}}
 {{/if}}
 
 # Delegation

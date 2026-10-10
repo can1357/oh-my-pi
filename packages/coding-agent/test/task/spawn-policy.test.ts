@@ -130,3 +130,42 @@ describe("task tool description scout gating", () => {
 		expect(description).toContain("- `reviewer`: Reviewer.");
 	});
 });
+
+describe("task tool description sibling-output gating", () => {
+	afterEach(() => {
+		vi.restoreAllMocks();
+	});
+
+	async function renderDescription(evalActive: boolean): Promise<string> {
+		vi.spyOn(taskDiscovery, "discoverAgents").mockResolvedValue({
+			agents: [{ name: "scout", description: "Read-only scout.", systemPrompt: "Scout.", source: "bundled" }],
+			projectAgentsDir: null,
+		});
+		const settings = Settings.isolated({
+			"async.enabled": true,
+			"task.batch": true,
+			"task.isolation.enabled": false,
+		});
+		const tool = await TaskTool.create({
+			cwd: process.cwd(),
+			hasUI: false,
+			settings,
+			getSessionFile: () => null,
+			getSessionSpawns: () => "*",
+			isToolActive: () => evalActive,
+		} as unknown as ToolSession);
+		return tool.description;
+	}
+
+	it("renders the judge_batch gate when the eval tool is active", async () => {
+		const description = await renderDescription(true);
+		expect(description).toContain("Gate before reading them all");
+		expect(description).toContain("judge_batch");
+	});
+
+	it("omits the judge_batch gate when the eval tool is inactive", async () => {
+		const description = await renderDescription(false);
+		expect(description).not.toContain("Gate before reading them all");
+		expect(description).not.toContain("judge_batch");
+	});
+});

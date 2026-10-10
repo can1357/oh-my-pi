@@ -400,6 +400,10 @@
 - Fixed Mnemopi embedding workers (and other local-model workers) staying alive and holding gigabytes of RAM after the omp process that started them exited mid-embedding ([#14340](https://github.com/can1357/oh-my-pi/issues/14340))
 - Fixed a supervised PTY service on Windows hanging when it asks the terminal for the cursor position; the launch broker now answers the query as it does on Linux and macOS
 
+### Added
+
+- Task fan-outs now gate sibling reports: the task tool tells the agent to screen 3+ subagent reports with one `judge_batch()` and read only the flagged, failed, or low-confidence ones, and `wait` snapshots repeat the cue once 3+ large agent reports have landed (cumulative across staggered deliveries) ([#14432](https://github.com/can1357/oh-my-pi/pull/14432) by [@bradhallett](https://github.com/bradhallett))
+
 ## [18.6.2] - 2026-10-04
 
 ### Fixed
