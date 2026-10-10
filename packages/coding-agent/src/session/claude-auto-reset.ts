@@ -67,8 +67,8 @@ export interface ClaudeResetPlanInput {
 	/** Fresh usage for every stored Claude account. */
 	reports: UsageReport[] | null;
 	/**
-	 * Cedar/Juniper eligibility for every stored account: a live listing for a
-	 * blocked retry, the usage reports' inventory for background salvage.
+	 * Cedar/Juniper eligibility for every stored account: a live listing before
+	 * any spend, or the usage reports' inventory to find salvage candidates.
 	 */
 	statuses: readonly ResetCreditAccountStatus[];
 	attemptedKeys: ReadonlySet<string>;
@@ -138,23 +138,41 @@ function reportMatchesStatus(report: UsageReport, status: ResetCreditAccountStat
 }
 
 /**
- * Background salvage reads each account's Cedar/Juniper inventory from the
- * usage report it already holds, which the report fetch discovered; redeem
- * re-lists the chosen account live before spending. An account whose report
- * carries no inventory is unknown, never empty.
+ * Each stored account's Cedar/Juniper status from the inventory on its usage
+ * report, which the report fetch discovered, so a background sweep finds
+ * salvage candidates without listing. The inventory can be carried over a
+ * failed probe, so a spend re-plans from a live listing. An account whose
+ * report carries no inventory is unknown, never empty.
  */
 export function claudeResetStatusesFromReports(
 	accounts: readonly OAuthAccountSummary[],
 	reports: readonly UsageReport[],
 ): ResetCreditAccountStatus[] {
-	return accounts.map(account => {
-		const status: ResetCreditAccountStatus = {
-			...account,
-			provider: CLAUDE_PROVIDER,
-			availableCount: 0,
-			credits: [],
-		};
-		const report = reports.find(candidate => reportMatchesStatus(candidate, status));
+	const stored = accounts.map((account): ResetCreditAccountStatus => ({
+		...account,
+		provider: CLAUDE_PROVIDER,
+		availableCount: 0,
+		credits: [],
+	}));
+	return stored.map(base => {
+		let status = base;
+		let report = reports.find(candidate => reportMatchesStatus(candidate, base));
+		if (!report && !base.orgId) {
+			// Discovery stamps the organization it resolves for a credential stored
+			// without one, as a live listing does on its status. A report another
+			// stored credential's identity matches is that credential's.
+			const adoptable: ResetCreditAccountStatus[] = [];
+			for (const candidate of reports) {
+				const orgId = candidate.metadata?.orgId;
+				if (typeof orgId !== "string" || stored.some(other => reportMatchesStatus(candidate, other))) continue;
+				const adopted = { ...base, orgId, report: candidate };
+				if (reportMatchesStatus(candidate, adopted)) adoptable.push(adopted);
+			}
+			if (adoptable.length === 1) {
+				status = adoptable[0]!;
+				report = status.report;
+			}
+		}
 		const inventory = report?.resetCredits;
 		if (!report || !inventory) return { ...status, error: "Usage report has no saved-reset inventory" };
 		const credits = inventory.credits?.filter((credit): credit is UsageResetCredit => typeof credit.id === "string");
@@ -219,10 +237,9 @@ function skipForEpisode(
 }
 
 /**
- * Pure Claude Cedar/Juniper auto-spend planner. The statuses are the sole
+ * Pure Claude Cedar/Juniper auto-spend planner. The live listing is the sole
  * authority for eligibility and grant selection: an absent/failed status never
- * falls back to a cached report or guesses a different grant, and redeem
- * re-checks the selected grant live before spending.
+ * falls back to a cached report or guesses a different grant.
  */
 export function planClaudeResetRedemptions(input: ClaudeResetPlanInput): ClaudeResetPlan {
 	const skipped: ClaudeResetSkip[] = [];

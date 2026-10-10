@@ -358,7 +358,7 @@ describe("Claude saved-reset trigger integration", () => {
 		expect(peer.session.agent.state.messages.at(-1)).toMatchObject({ role: "assistant", stopReason: "error" });
 	});
 
-	it("salvages an expiring early-use Cedar grant from the usage heartbeat exactly once, without listing", async () => {
+	it("salvages an expiring early-use Cedar grant from the usage heartbeat exactly once, listing only to confirm it", async () => {
 		const status = claudeStatus(false);
 		const { session, coordinator, targets, listCalls } = buildSession({
 			report: withInventory(claudeReport(0.5), status),
@@ -374,10 +374,10 @@ describe("Claude saved-reset trigger integration", () => {
 		await session.fetchUsageReports();
 		await coordinator.sweepPromise;
 		expect(targets).toHaveLength(1);
-		expect(listCalls()).toBe(0);
+		expect(listCalls()).toBe(1);
 	});
 
-	it("leaves an account unsalvaged when its usage report carries no reset inventory", async () => {
+	it("lists no Claude account and salvages nothing when its usage report carries no reset inventory", async () => {
 		const { session, coordinator, targets, listCalls } = buildSession({
 			report: claudeReport(0.5),
 			status: claudeStatus(false),
@@ -387,6 +387,48 @@ describe("Claude saved-reset trigger integration", () => {
 		await coordinator.sweepPromise;
 		expect(targets).toEqual([]);
 		expect(listCalls()).toBe(0);
+	});
+
+	it("does not salvage on usage a carried-over inventory recorded before the window rolled over", async () => {
+		// A failed reset probe keeps the previous report's inventory, usage figures included.
+		const carried = claudeStatus(false);
+		carried.credits[0]!.usedFractions = { "anthropic:7d": 0.8 };
+		const live = claudeStatus(false);
+		live.report = claudeReport(0.01);
+		live.credits[0]!.usedFractions = { "anthropic:7d": 0.01 };
+		const { session, coordinator, targets, listCalls } = buildSession({
+			report: withInventory(claudeReport(0.01), carried),
+			status: live,
+		});
+
+		await session.fetchUsageReports();
+		await coordinator.sweepPromise;
+		expect(listCalls()).toBe(1);
+		expect(targets).toEqual([]);
+	});
+
+	it("spends for a credential stored without its organization under the organization its live listing resolves", async () => {
+		const status = claudeStatus(false);
+		const report = withInventory(claudeReport(0.5), status);
+		report.metadata = { accountId: ACCOUNT_ID, email: EMAIL };
+		const { session, coordinator, targets } = buildSession({ report, status });
+		vi.spyOn(authStorage.oauth, "accounts").mockReturnValue([
+			{ position: 0, credentialId: CREDENTIAL_ID, accountId: ACCOUNT_ID, email: EMAIL, active: true },
+		]);
+
+		await session.fetchUsageReports();
+		await coordinator.sweepPromise;
+		expect(targets).toEqual([
+			{
+				provider: "anthropic",
+				credentialId: CREDENTIAL_ID,
+				creditId: "cedar-grant-1",
+				accountId: ACCOUNT_ID,
+				email: EMAIL,
+				orgId: ORG_ID,
+			},
+		]);
+		expect([...coordinator.lastAttemptAtByAccount.keys()]).toEqual([`anthropic|${ORG_ID}|${CREDENTIAL_ID}`]);
 	});
 
 	it.each(["yes", "no", "unset"] as const)(

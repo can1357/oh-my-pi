@@ -356,10 +356,11 @@ export function sweepsResets(host: AutoResetHost, provider: ResetProvider): bool
 /**
  * One salvage sweep over both providers, planned and consented independently.
  * Last-chance expiry checks remain active even with the broader salvage
- * horizon disabled. Codex candidates are refreshed through a live listing
- * before spend; Claude plans from the reset inventory in the usage reports,
- * and redeem re-lists the chosen account live before spending. Resolves with
- * the saved-reset inventory the sweep planned from.
+ * horizon disabled. Every candidate is refreshed through its live listing
+ * before spend; a failed listing cannot fall back to stale usage. Claude finds
+ * its candidates in the usage reports' reset inventory first, so a sweep with
+ * nothing to salvage lists no Claude account. Resolves with the saved-reset
+ * inventory the sweep screened.
  */
 export async function sweepResets(
 	host: AutoResetHost,
@@ -391,16 +392,31 @@ export async function sweepResets(
 	if (sweepsResets(host, "anthropic") && reports.some(report => report.provider === "anthropic")) {
 		try {
 			const accounts = host.authStorage.oauth.accounts("anthropic", host.sessionId);
-			const statuses = claudeResetStatusesFromReports(accounts, reports);
-			inventory.push(...statuses);
-			const plan = planClaudeResets(host, "sweep", reports, statuses, coordinator);
+			const reported = claudeResetStatusesFromReports(accounts, reports);
+			inventory.push(...reported);
+			const candidates = planClaudeResets(host, "sweep", reports, reported, coordinator);
+			const plan =
+				candidates.actions.length > 0
+					? planClaudeResets(
+							host,
+							"sweep",
+							reports,
+							await host.authStorage.resets.list({
+								provider: "anthropic",
+								sessionId: host.sessionId,
+								baseUrlResolver: host.baseUrlResolver,
+								signal: AbortSignal.timeout(10_000),
+							}),
+							coordinator,
+						)
+					: candidates;
 			const approved =
 				plan.actions.length > 0 && shouldPromptCodexAutoRedeem(cfgClaudeResetsAutoRedeem.get(host.settings))
 					? await host.confirm("anthropic", plan.actions, coordinator)
 					: plan.actions;
 			if (approved.length > 0) await executeResetActions(host, "anthropic", approved, coordinator);
 		} catch (error) {
-			logger.warn("claude-auto-reset: salvage failed", { error: String(error) });
+			logger.warn("claude-auto-reset: salvage listing failed", { error: String(error) });
 		}
 	}
 	return inventory;
