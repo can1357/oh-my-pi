@@ -1983,9 +1983,9 @@ describe("computer background fallback", () => {
 		expect(native.sent).toEqual([{}]);
 	});
 
-	it("leaves an explicit takeover to the model: true takes over under refuse, false never falls back", async () => {
+	it("passes an explicit takeover through under takeover; false never falls back", async () => {
 		const forced = new RefusingSession();
-		const result = await run(forced, 'await (await desktop.window("42")).click(1, 2, { takeover: true })', "refuse");
+		const result = await run(forced, 'await (await desktop.window("42")).click(1, 2, { takeover: true })', "takeover");
 		expect(texts(result)).toEqual([]);
 		expect(forced.sent).toEqual([{ takeover: true }]);
 
@@ -1999,6 +1999,127 @@ describe("computer background fallback", () => {
 		if (refused.ok) return;
 		expect(refused.error.message).toStartWith(`BackgroundUnavailable: ${reason}`);
 		expect(background.sent).toEqual([{ takeover: false }]);
+	});
+
+	describe("refuse beats the model's own foreground requests", () => {
+		/** Records every native call that could take the user's foreground. */
+		class ForegroundSession extends FakeNativeSession {
+			readonly calls: string[] = [];
+
+			override async click(target: string, _x: number, _y: number, opts?: PointerOptions | null): Promise<void> {
+				this.calls.push(`click:${target}:${opts?.takeover ?? "-"}`);
+			}
+			override async keyChord(target: string, _keys: string[], opts?: PointerOptions | null): Promise<void> {
+				this.calls.push(`press:${target}:${opts?.takeover ?? "-"}`);
+			}
+			override async typeText(target: string, _text: string, opts?: PointerOptions | null): Promise<void> {
+				this.calls.push(`type:${target}:${opts?.takeover ?? "-"}`);
+			}
+			override async raiseWindow(windowId: string): Promise<void> {
+				this.calls.push(`raise:${windowId}`);
+			}
+			override async axPerform(_ref: string, action: string): Promise<void> {
+				this.calls.push(`perform:${action}`);
+			}
+			override async axClick(_ref: string, opts?: PointerOptions | null): Promise<void> {
+				this.calls.push(`axClick:${opts?.takeover ?? "-"}`);
+			}
+			override async openApplication(id: string, options?: { activate?: boolean }) {
+				this.calls.push(`open:${id}:${options?.activate ?? "-"}`);
+				return (await this.listApplications())[0]!;
+			}
+		}
+
+		/** Each call that would bring an app forward or drive the user's own input, and the route its refusal names. */
+		const foreground: Array<{ code: string; call: string; route: string }> = [
+			{
+				code: 'await (await desktop.window("42")).press("a", { takeover: true })',
+				call: "press:42:true",
+				route: "Call it without takeover",
+			},
+			{
+				code: 'await (await desktop.ref("e1")).click({ takeover: true })',
+				call: "axClick:true",
+				route: "Call it without takeover",
+			},
+			{ code: 'await (await desktop.window("42")).raise()', call: "raise:42", route: "no raise is needed" },
+			{ code: 'await (await desktop.ref("e1")).perform("AXRaise")', call: "perform:AXRaise", route: "no raise is needed" },
+			{ code: 'await (await desktop.ref("e1")).perform(" Raise ")', call: "perform: Raise ", route: "no raise is needed" },
+			{
+				code: 'await desktop.apps.open("test.editor", { activate: true })',
+				call: "open:test.editor:true",
+				route: "without activate",
+			},
+			{ code: 'await desktop.type("x")', call: "type:desktop:-", route: "window handle" },
+			{
+				code: 'await (await desktop.display("active")).click(1, 2)',
+				call: "click:display:active:-",
+				route: "window handle",
+			},
+		];
+
+		it("refuses each before anything is sent, saying the user's setting keeps the agent in the background", async () => {
+			for (const { code, route } of foreground) {
+				const native = new ForegroundSession();
+				const result = await run(native, code, "refuse");
+				expect(result.ok, code).toBe(false);
+				if (result.ok) continue;
+				expect(result.error.message, code).toStartWith("BackgroundUnavailable: ");
+				expect(result.error.message, code).toContain("keeps the agent in the background; nothing was sent");
+				expect(result.error.message, code).toContain(route);
+				expect(native.calls, code).toEqual([]);
+			}
+		});
+
+		it("sends each as before under takeover", async () => {
+			for (const { code, call } of foreground) {
+				const native = new ForegroundSession();
+				const result = await run(native, code, "takeover");
+				expect(result.ok, code).toBe(true);
+				expect(native.calls, code).toEqual([call]);
+			}
+		});
+
+		it("still sends background requests under refuse", async () => {
+			const native = new ForegroundSession();
+			const code = [
+				'await (await desktop.window("42")).press("a");',
+				'await (await desktop.window("42")).press("a", { takeover: false });',
+				'await (await desktop.ref("e1")).perform("press");',
+				'await desktop.apps.open("test.editor");',
+			].join("\n");
+			expect((await run(native, code, "refuse")).ok).toBe(true);
+			expect(native.calls).toEqual(["press:42:-", "press:42:false", "perform:press", "open:test.editor:-"]);
+		});
+
+		it("refuses control.acquire without asking the user", async () => {
+			const transport = new MemoryTransport();
+			const native = new ForegroundSession();
+			new ComputerWorkerCore(transport, () => native);
+			const id = crypto.randomUUID();
+			transport.inbound({
+				type: "run",
+				id,
+				code: 'await desktop.control.acquire({ reason: "Test task" })',
+				timeoutMs: 2_000,
+				session: snapshot(false, "refuse"),
+			});
+			const result = await transport.waitFor(candidate => candidate.type === "result" && candidate.id === id);
+			if (result.type !== "result" || result.ok) throw new Error("control.acquire was not refused");
+			expect(result.error.message).toStartWith("BackgroundUnavailable: control.acquire would");
+			expect(result.error.message).toContain("Window input needs no control");
+			expect(transport.outbound.some(message => message.type === "control-request")).toBe(false);
+			expect(native.acquireCount).toBe(0);
+		});
+
+		it("releases a grant acquired before the user chose refuse, at the next run", async () => {
+			const held = new ForegroundSession();
+			held.controlActive = true;
+			expect((await run(held, "return 1", "takeover")).ok).toBe(true);
+			expect(held.controlActive).toBe(true);
+			expect((await run(held, "return 1", "refuse")).ok).toBe(true);
+			expect(held.controlActive).toBe(false);
+		});
 	});
 
 	it("never forwards a model-supplied returnFocus on holds; only the host's rerun sets it", async () => {

@@ -1,6 +1,6 @@
 /** Options shared by every native input helper. */
 interface ComputerInputOptions {
-	/** Omit: background input (foreground while control is acquired); when the background route is unavailable, the tool reruns the call in takeover or refuses, per the user's setting, and says which. true: take over now. false: background only, never rerun. */
+	/** Omit: background input (foreground while control is acquired); when the background route is unavailable, the tool reruns the call in takeover or refuses, per the user's setting, and says which. true: take over now, unless the user's setting refuses. false: background only, never rerun. */
 	takeover?: boolean;
 }
 
@@ -230,6 +230,7 @@ interface ComputerWindow extends ComputerInputTarget {
 	readonly pid?: number;
 	readonly bounds: ComputerBounds;
 	readonly focused: boolean;
+	/** Brings the window's app forward and takes the user's keyboard; refused under the user's `refuse` setting. */
 	raise(): Promise<void>;
 	/** Move this macOS window to the current Space without switching Spaces; recapture afterward. */
 	bringToCurrentSpace(): Promise<void>;
@@ -255,11 +256,11 @@ interface ComputerDesktop extends ComputerInputTarget {
 	readonly apps: {
 		/** Discover native application identities without requiring capture permission. */
 		list(options?: ComputerApplicationQuery): Promise<ComputerApplication[]>;
-		/** Launch an exact identity/path or unique name; deliberate activation is opt-in. */
+		/** Launch an exact identity/path or unique name; deliberate activation is opt-in and refused under the user's `refuse` setting. */
 		open(idOrNameOrNativeAppPath: string, options?: { activate?: boolean }): Promise<ComputerApplication>;
 	};
 	readonly control: {
-		/** Requires a live human UI confirmation; headless/refused requests never acquire. */
+		/** Requires a live human UI confirmation; headless/refused requests never acquire, and the user's `refuse` setting refuses it. */
 		acquire(options: { reason: string }): Promise<{ active: boolean }>;
 		/** Revoke foreground permission and release native task ownership. */
 		release(): Promise<void>;

@@ -33,7 +33,7 @@ User setup, permissions, safety guidance, examples, and platform limitations: [S
 | `computer.display`   | string  | `active` | Capture the display with the largest focused-window overlap (primary fallback); use `all` or a native display ID explicitly. |
 | `computer.maxWidth`  | number  |   `3840` | Maximum screenshot width.                                                                                                    |
 | `computer.maxHeight` | number  |   `2400` | Maximum screenshot height.                                                                                                   |
-| `computer.backgroundFallback` | enum | `takeover` | When a window input call's background route is unavailable: `takeover` reruns that call once in takeover, returns focus to the user's app and reports it in the run output; `refuse` throws `BackgroundUnavailable` without taking over. |
+| `computer.backgroundFallback` | enum | `takeover` | When a window input call's background route is unavailable: `takeover` reruns that call once in takeover, returns focus to the user's app and reports it in the run output; `refuse` throws `BackgroundUnavailable` without taking over, and also refuses, before anything is sent, `takeover: true`, `raise()` and AX `raise`, `apps.open(…, { activate: true })`, `control.acquire` and input to the desktop or a display. |
 
 There is no `computer.backend` setting. The native addon selects the platform backend.
 
@@ -117,7 +117,7 @@ Zoom requires a previous full capture of the same target. Its rectangle is in th
 - `win.observe({ silent?, all?, maxDepth? })` returns screenshot metadata plus `{ ax, nodeCount, truncated }`, normally emitting both image and AX text. Capture/AX failure restores the previous delivered coordinate frame.
 - `win.menu.items(path?)` lists `{ title, path, enabled, checked, hasSubmenu, shortcut? }[]`; `win.menu.select(path)` invokes one enabled unambiguous command in the target window's context.
 - `holdKeys(keys, { duration, takeover? })` and `holdMouse(x, y, { duration, button?, keys?, takeover? })` use seconds in `[0, 100]`. `drag` also accepts arbitrary `keys`. Held input is always released within the call.
-- `desktop.control.acquire({ reason })` needs live human confirmation, returns `{ active }`, and holds native task ownership between calls. `release()` revokes it; `state()` reads live state. Normal run retirement preserves an acquired grant, while interruption, task completion, and disposal revoke it. Omitted takeover follows that live grant; explicit false remains background.
+- `desktop.control.acquire({ reason })` needs live human confirmation, returns `{ active }`, and holds native task ownership between calls. `release()` revokes it; `state()` reads live state. Normal run retirement preserves an acquired grant, while interruption, task completion, and disposal revoke it. Omitted takeover follows that live grant; explicit false remains background. Under `computer.backgroundFallback: refuse`, `acquire` throws `BackgroundUnavailable` without asking, and each run releases a grant acquired before.
 - `win.bringToCurrentSpace()` is macOS-only, verifies actual movement without switching Spaces/activating, and invalidates the old frame.
 
 Menu/app labels are untrusted data. A takeover grant does not authorize unrelated external effects. Inspect `applications`, `menus`, `heldInput`, `spaces`, and `globalEscape` capabilities.
@@ -166,7 +166,7 @@ Result details contain the resolved `code`, `readOnly`, `screenshots`, optional 
 ## Side effects
 
 - Captures real windows or the selected desktop composite into provider context and writes PNGs to the OS temp directory.
-- Sends real keyboard/pointer input. Window background delivery is intended to preserve focus, pointer, and window order; `takeover: true`, and the `computer.backgroundFallback: takeover` rerun of a refused background call, temporarily activate the target. Desktop-root pointer calls affect the user's real pointer.
+- Sends real keyboard/pointer input. Window background delivery is intended to preserve focus, pointer, and window order; `takeover: true`, and the `computer.backgroundFallback: takeover` rerun of a refused background call, temporarily activate the target. Desktop-root pointer calls affect the user's real pointer. Under `computer.backgroundFallback: refuse`, every call that would activate an application or drive the user's pointer or keyboard is refused before anything is sent.
 - Reads or writes the system clipboard.
 - Executes full-access JavaScript and may invoke other session tools through `tool.*`.
 - Keeps a native desktop session and Bun worker alive across calls.
@@ -185,7 +185,7 @@ Prelude/worker errors include `Computer session is closed`, `Computer worker is 
 
 `InputBusy` means another native operation owns input/focus and no input was sent. On macOS a listen-only, operation-scoped Escape monitor cancels physical Escape but ignores synthetic events. An unavailable monitor refuses input with `PermissionDenied`. `Cancelled` may follow partial input or an atomic OS/AX operation: cancellation cannot undo effects already delivered.
 
-Recover by refreshing the exact target screenshot after coordinate-frame errors, taking a new AX snapshot after `StaleRef`, and inspecting `desktop.capabilities()` for platform/permission failures. A background refusal reaches the script as `BackgroundUnavailable` only when `computer.backgroundFallback` is `refuse`, the call set `takeover: false`, or the backend has no takeover; otherwise the tool has already rerun the call in takeover and the run output says `<method> ran in takeover because <reason>; <where focus ended>`. After partial-delivery or restoration errors, inspect the target before retrying because input may already have landed.
+Recover by refreshing the exact target screenshot after coordinate-frame errors, taking a new AX snapshot after `StaleRef`, and inspecting `desktop.capabilities()` for platform/permission failures. A background refusal reaches the script as `BackgroundUnavailable` only when `computer.backgroundFallback` is `refuse`, the call set `takeover: false`, or the backend has no takeover; otherwise the tool has already rerun the call in takeover and the run output says `<method> ran in takeover because <reason>; <where focus ended>`. Under `refuse`, a foreground request is `BackgroundUnavailable` too: the message says the user's setting keeps the agent in the background and names the background route where there is one. After partial-delivery or restoration errors, inspect the target before retrying because input may already have landed.
 
 ## Platform constraints
 
