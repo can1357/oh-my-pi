@@ -110,16 +110,7 @@ impl MacCapture {
 
 	#[allow(clippy::unused_self, reason = "keeps discovery on the backend capture object")]
 	pub(super) fn window(&self, id: &str) -> CoreResult<DesktopWindow> {
-		let missing = || {
-			DesktopError::window_not_found(format!(
-				"window '{id}' was not found; it may be closed or minimized"
-			))
-		};
-		let id = id.parse::<u32>().map_err(|_| missing())?;
-		window_snapshot(Some(id))?
-			.into_iter()
-			.next()
-			.ok_or_else(missing)
+		window_by_id(id)
 	}
 
 	pub(super) fn capture(
@@ -262,6 +253,20 @@ impl MacCapture {
 	}
 }
 
+/// Window `id` as the window list reports it.
+pub(super) fn window_by_id(id: &str) -> CoreResult<DesktopWindow> {
+	let missing = || {
+		DesktopError::window_not_found(format!(
+			"window '{id}' was not found; it may be closed or minimized"
+		))
+	};
+	let id = id.parse::<u32>().map_err(|_| missing())?;
+	window_snapshot(Some(id))?
+		.into_iter()
+		.next()
+		.ok_or_else(missing)
+}
+
 type WindowDictionary = CFDictionary<CFString, CFType>;
 
 /// Reads each window from one immutable Quartz snapshot; individual xcap
@@ -350,6 +355,27 @@ pub(super) fn menu_windows(pid: libc::pid_t) -> Option<Vec<u32>> {
 		}
 	}
 	Some(menus)
+}
+
+/// Frame of on-screen window `id` in global points, or `None` once it is gone.
+/// Bounds need no Screen Recording permission.
+pub(super) fn window_frame(id: u32) -> Option<CGRect> {
+	let snapshot = CGWindowListCopyWindowInfo(CGWindowListOption::OptionIncludingWindow, id)?;
+	// SAFETY: CoreGraphics returns an immutable array of dictionaries whose
+	// documented window keys are CFStrings and whose values are CFTypes.
+	let snapshot = unsafe { CFRetained::cast_unchecked::<CFArray<WindowDictionary>>(snapshot) };
+	// SAFETY: This copy-rule snapshot remains alive and is never mutated.
+	let dictionary = unsafe { snapshot.iter_unchecked() }.next()?;
+	// SAFETY: The CoreGraphics key constants are process-lived. Typed
+	// downcasts reject absent or malformed window metadata.
+	unsafe {
+		if window_number(dictionary, kCGWindowNumber)? != i64::from(id) {
+			return None;
+		}
+		let bounds = window_value(dictionary, kCGWindowBounds)?.downcast_ref::<CFDictionary>()?;
+		let mut rect = CGRect::default();
+		CGRectMakeWithDictionaryRepresentation(Some(bounds), &mut rect).then_some(rect)
+	}
 }
 
 fn window_value<'a>(dictionary: &'a WindowDictionary, key: &CFString) -> Option<&'a CFType> {

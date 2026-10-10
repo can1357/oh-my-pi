@@ -1,4 +1,5 @@
 pub(crate) mod menus;
+pub(super) mod open_menu;
 mod popup;
 
 use std::{
@@ -24,7 +25,7 @@ use super::{
 		error::{CoreResult, DesktopError},
 		types::DesktopWindow,
 	},
-	date, process, skylight,
+	capture, date, input, process, skylight,
 };
 
 const AX_TIMEOUT_SECONDS: f32 = 2.0;
@@ -492,10 +493,32 @@ impl AxBackend for MacAx {
 		// AXRaise is an explicit request to change stacking, including the
 		// takeover preparation path. Other semantic actions must stay background.
 		if native == "AXRaise" {
-			perform()
-		} else {
-			skylight::with_background_guard(element_pid(element)?, perform)
+			return perform();
 		}
+		let pid = element_pid(element)?;
+		// A menu that a background application opens takes the keyboard from
+		// the user's app, so it is closed before the action returns; a
+		// frontmost application's menu stays open for the next call.
+		let entry_front = skylight::front_pid();
+		let watch = entry_front != Some(pid)
+			&& open_menu::may_open(&native, || copy_string(element, "AXRole"));
+		skylight::with_background_guard(pid, || {
+			let before = if watch {
+				let before = capture::menu_windows(pid).ok_or_else(|| {
+					DesktopError::ax_failed(format!(
+						"cannot list the open menus of process {pid}, so a menu that {native} opens \
+						 could not be closed; nothing was performed"
+					))
+				})?;
+				activate_for_menu(element, pid, entry_front)?;
+				Some(before)
+			} else {
+				None
+			};
+			open_menu::guard(open_menu::Press::Action(&native), before.as_deref(), perform, |before| {
+				open_menu::settle(pid, before, open_menu::CONTROL_MENU_TIMEOUT)
+			})
+		})
 	}
 
 	fn set_value(&mut self, h: &AxHandle, value: &str) -> CoreResult<()> {
@@ -589,6 +612,30 @@ impl AxBackend for MacAx {
 		}
 		Ok(result)
 	}
+}
+
+/// Makes the window holding `element` key within its background
+/// application, as a background click does, before an action that opens a
+/// menu: `AppKit` validates a menu's items when it opens, and an inactive
+/// Finder read every Action-menu command but three as disabled. An element
+/// whose window cannot be resolved is acted on as it is.
+fn activate_for_menu(
+	element: &AXUIElement,
+	pid: libc::pid_t,
+	entry_front: Option<libc::pid_t>,
+) -> CoreResult<()> {
+	let Some(wid) = element_window(element).as_deref().and_then(window_id) else {
+		return Ok(());
+	};
+	let Ok(window) = capture::window_by_id(&wid.to_string()) else {
+		return Ok(());
+	};
+	let prepared = input::make_key_in_background(&input::source()?, pid, wid, &window, entry_front)?;
+	input::await_key_window(pid, wid)?;
+	if prepared {
+		input::still_behind_user(pid, wid)?;
+	}
+	Ok(())
 }
 
 fn element_pid(element: &AXUIElement) -> CoreResult<libc::pid_t> {

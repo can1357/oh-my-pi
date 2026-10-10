@@ -154,7 +154,7 @@ fn children(
 	Ok((elements, items))
 }
 
-fn bounded_children(
+pub(super) fn bounded_children(
 	element: &AXUIElement,
 	optional: bool,
 ) -> CoreResult<Vec<CFRetained<AXUIElement>>> {

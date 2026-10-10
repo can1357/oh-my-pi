@@ -700,13 +700,6 @@ const DRAG_STEP_GAP: Duration = Duration::from_millis(16);
 /// Wait at the end point before a background drag's release, so the target
 /// handles the last move as a move rather than coalescing it into the release.
 const DRAG_RELEASE_GAP: Duration = Duration::from_millis(50);
-/// How long a background right-click's context menu may take to appear; menus
-/// in Chrome and `AppKit` appeared within 40 ms.
-const MENU_OPEN_TIMEOUT: Duration = Duration::from_millis(250);
-/// How long a context menu may take to close after Escape; it fades out for
-/// about 270 ms.
-const MENU_CLOSE_TIMEOUT: Duration = Duration::from_millis(600);
-const MENU_POLL: Duration = Duration::from_millis(5);
 /// Wait after a background shortcut before asking its application for a
 /// reply. A save that blocks `TextEdit` already does so at this point.
 const SHORTCUT_REPLY_DELAY: Duration = Duration::from_millis(100);
@@ -839,26 +832,43 @@ fn background_pointer(
 	event: PointerEvent,
 	entry_front: Option<libc::pid_t>,
 ) -> CoreResult<()> {
-	let before = if may_open_context_menu(&event) {
-		Some(capture::menu_windows(pid).ok_or_else(|| {
+	// An open menu takes the keyboard from the user's app: a context menu, or
+	// the menu of a menu button or popup button that a left click lands on.
+	let timeout = if may_open_context_menu(&event) {
+		Some(ax::open_menu::CONTEXT_MENU_TIMEOUT)
+	} else if clicks_menu_control(&event, pid) {
+		Some(ax::open_menu::CONTROL_MENU_TIMEOUT)
+	} else {
+		None
+	};
+	let before = match timeout {
+		Some(_) => Some(capture::menu_windows(pid).ok_or_else(|| {
 			DesktopError::background_unavailable(format!(
-				"cannot list the open menus of window {} ({}), so a context menu this {} opens could \
-				 not be closed; nothing was sent; retry with takeover:true or use ax actions",
+				"cannot list the open menus of window {} ({}), so a menu this {} opens could not be \
+				 closed; nothing was sent; retry with takeover:true or use ax actions",
 				window.id,
 				window.app,
 				pointer_kind(&event),
 			))
-		})?)
-	} else {
-		None
+		})?),
+		None => None,
 	};
-	with_menu_dismissal(
-		window,
-		pointer_kind(&event),
+	ax::open_menu::guard(
+		ax::open_menu::Press::Pointer { kind: pointer_kind(&event), window },
 		before.as_deref(),
 		|| background_gesture(source, pid, wid, window, event, entry_front),
-		|before| dismiss_new_menu(source, pid, before),
+		|before| ax::open_menu::settle(pid, before, timeout.unwrap_or_default()),
 	)
+}
+
+/// Whether `event` is a left click that lands on a menu button or popup
+/// button of `pid` while another application is frontmost; the control opens
+/// its menu on the click. Other clicks pay no accessibility hit-test.
+fn clicks_menu_control(event: &PointerEvent, pid: libc::pid_t) -> bool {
+	let PointerEvent::Click { x, y, button: MouseButton::Left, .. } = *event else {
+		return false;
+	};
+	skylight::front_pid() != Some(pid) && ax::open_menu::opens_menu_at(pid, x, y)
 }
 
 fn background_gesture(
@@ -925,92 +935,13 @@ fn may_open_context_menu(event: &PointerEvent) -> bool {
 	matches!(button, MouseButton::Right) || (matches!(button, MouseButton::Left) && control)
 }
 
-/// Runs `gesture`, then, when `before` lists the target's menus from before
-/// it, `dismiss`es a context menu the gesture opened. The dismissal runs
-/// whatever the gesture returned, cancellation included, because an open menu
-/// takes the keyboard from the user's app until it closes. `dismiss` yields
-/// whether a menu opened and then closed; `kind` names the gesture in errors.
-fn with_menu_dismissal(
-	window: &DesktopWindow,
-	kind: &str,
-	before: Option<&[u32]>,
-	gesture: impl FnOnce() -> CoreResult<()>,
-	dismiss: impl FnOnce(&[u32]) -> CoreResult<Option<bool>>,
-) -> CoreResult<()> {
-	let delivered = gesture();
-	let Some(before) = before else {
-		return delivered;
-	};
-	let menu = control::cleanup(|| dismiss(before));
-	match (delivered, menu) {
-		(_, Ok(Some(false))) => Err(DesktopError::input_failed(format!(
-			"window {} ({}) opened a context menu that is still open after Escape, which keeps the \
-			 keyboard from the user's app; inspect the desktop before retrying",
-			window.id, window.app,
-		))),
-		(Ok(()), Ok(Some(true))) => Err(DesktopError::input_failed(format!(
-			"the {kind} reached window {} ({}) and opened a context menu, which takes the keyboard \
-			 from the user's app; the menu was closed with Escape, with nothing chosen, but the \
-			 {kind} may already have taken effect; inspect the window before retrying, and retry \
-			 with takeover:true only to use the menu",
-			window.id, window.app,
-		))),
-		(delivered, Ok(_)) => delivered,
-		(delivered, Err(error)) => skylight::after_cleanup(delivered, Err(error)),
-	}
-}
-
-/// Closes a menu of `pid` that was not open `before`: it waits briefly for one
-/// to appear, then posts Escape and waits for it to close. `None` when no menu
-/// opened, otherwise whether it closed.
-fn dismiss_new_menu(
-	source: &CGEventSource,
-	pid: libc::pid_t,
-	before: &[u32],
-) -> CoreResult<Option<bool>> {
-	let mut read = false;
-	let opened = poll(MENU_OPEN_TIMEOUT, || {
-		let now = capture::menu_windows(pid)?;
-		read = true;
-		new_menu(before, &now)
-	})?;
-	let Some(menu) = opened else {
-		return if read {
-			Ok(None)
-		} else {
-			Err(DesktopError::input_failed(
-				"cannot list the target's open menus after the input, so a context menu it opened may \
-				 still be open",
-			))
-		};
-	};
+/// Posts Escape to `pid`, which closes the menu it has open.
+pub(super) fn post_escape(pid: libc::pid_t) -> CoreResult<()> {
+	let source = source()?;
 	let mut post = |event: &CGEvent| skylight::post_keyboard(pid, event);
 	let flags = CGEventFlags::CGEventFlagNull;
-	post_key(source, KeyName::Escape, true, flags, &mut post)?;
-	post_key(source, KeyName::Escape, false, flags, &mut post)?;
-	let closed =
-		poll(MENU_CLOSE_TIMEOUT, || capture::menu_windows(pid).filter(|now| !now.contains(&menu)))?;
-	Ok(Some(closed.is_some()))
-}
-
-/// Calls `probe` every [`MENU_POLL`] until it yields a value or `timeout`
-/// passes.
-fn poll<T>(timeout: Duration, mut probe: impl FnMut() -> Option<T>) -> CoreResult<Option<T>> {
-	let deadline = Instant::now() + timeout;
-	loop {
-		if let Some(value) = probe() {
-			return Ok(Some(value));
-		}
-		if Instant::now() >= deadline {
-			return Ok(None);
-		}
-		control::wait(MENU_POLL)?;
-	}
-}
-
-/// A menu window listed in `now` that was not open `before`.
-fn new_menu(before: &[u32], now: &[u32]) -> Option<u32> {
-	now.iter().copied().find(|menu| !before.contains(menu))
+	post_key(&source, KeyName::Escape, true, flags, &mut post)?;
+	post_key(&source, KeyName::Escape, false, flags, &mut post)
 }
 
 /// Readies a background window for a held press and the keys held around it.
@@ -2786,26 +2717,6 @@ mod tests {
 	}
 
 	#[test]
-	fn a_right_click_waits_only_for_a_menu_it_opened() {
-		// Menus open before the click (another menu of the app) do not count.
-		assert_eq!(new_menu(&[5], &[5]), None);
-		assert_eq!(new_menu(&[5], &[5, 9]), Some(9));
-		assert_eq!(new_menu(&[], &[]), None);
-		// The menu appears a few polls after the click.
-		let mut polls = 0;
-		let opened = poll(Duration::from_secs(1), || {
-			polls += 1;
-			new_menu(&[5], if polls < 3 { &[5] } else { &[5, 9] })
-		});
-		assert_eq!(opened.expect("poll"), Some(9));
-		assert_eq!(polls, 3);
-		// No menu: the click returns once the timeout passes.
-		let started = Instant::now();
-		assert_eq!(poll(Duration::from_millis(30), || new_menu(&[5], &[5])).expect("poll"), None);
-		assert!(started.elapsed() >= Duration::from_millis(30));
-	}
-
-	#[test]
 	fn secondary_presses_are_the_gestures_that_can_open_a_context_menu() {
 		let ctrl = Modifiers { ctrl: true, ..Modifiers::default() };
 		let click =
@@ -2843,69 +2754,6 @@ mod tests {
 			PointerEvent::Move { x: 1.0, y: 1.0 },
 		] {
 			assert!(!may_open_context_menu(&event), "{event:?}");
-		}
-	}
-
-	#[test]
-	fn a_context_menu_is_dismissed_even_when_the_gesture_is_cancelled() {
-		let window = background_window("TextEdit");
-		let cancellation = control::CancellationSource::default();
-		let token = cancellation.token();
-		let mut dismissed = Vec::new();
-		// The press landed and opened a menu, then the user cancelled before
-		// the gesture returned: the menu is still closed, under cleanup, and the
-		// cancellation is what the call reports.
-		let result = control::with_token_for_test(&token, || {
-			with_menu_dismissal(
-				&window,
-				"click",
-				Some(&[5]),
-				|| {
-					cancellation.cancel();
-					control::wait(Duration::from_secs(100))
-				},
-				|before| {
-					control::check()?;
-					control::wait(Duration::from_millis(1))?;
-					dismissed.push(before.to_vec());
-					Ok(Some(true))
-				},
-			)
-		});
-		assert_eq!(dismissed, [vec![5]]);
-		assert_eq!(result.expect_err("cancelled").code.as_str(), "Cancelled");
-
-		let outcome = |delivered: CoreResult<()>, menu: CoreResult<Option<bool>>| {
-			with_menu_dismissal(&window, "click", Some(&[]), || delivered, |_| menu)
-				.map_err(|error| error.code.as_str())
-		};
-		assert_eq!(outcome(Ok(()), Ok(None)), Ok(()));
-		assert_eq!(outcome(Ok(()), Ok(Some(false))), Err("InputFailed"));
-		assert_eq!(
-			outcome(Err(DesktopError::cancelled("cancelled")), Ok(Some(false))),
-			Err("InputFailed")
-		);
-		assert_eq!(outcome(Ok(()), Err(DesktopError::input_failed("unread"))), Err("InputFailed"));
-		// No snapshot from before: no menu handling at all.
-		let unread = |_: &[u32]| -> CoreResult<Option<bool>> { panic!("no menu handling") };
-		assert!(with_menu_dismissal(&window, "click", None, || Ok(()), unread).is_ok());
-	}
-
-	#[test]
-	fn a_gesture_whose_context_menu_was_closed_reports_that_it_was_delivered() {
-		// The page's handlers already ran, and a drag ran its whole stroke, so
-		// the caller must inspect rather than take the error for "nothing sent".
-		let window = background_window("TextEdit");
-		for kind in ["click", "drag"] {
-			let error = with_menu_dismissal(&window, kind, Some(&[]), || Ok(()), |_| Ok(Some(true)))
-				.expect_err("menu closed");
-			assert_eq!(error.code.as_str(), "InputFailed", "{kind}");
-			assert!(
-				error
-					.message
-					.contains(&format!("the {kind} may already have taken effect"))
-			);
-			assert!(error.message.contains("inspect the window before retrying"));
 		}
 	}
 
