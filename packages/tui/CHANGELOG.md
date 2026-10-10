@@ -24,6 +24,7 @@
 - Tern draws each bash run, eval cell and `!`/`$` run as one box: the command or code, its output, status lines and a foot with state, time and facts; images sit below the box and the bash head shows the intent instead of the command
 
 ### Fixed
+- The status-line footer added usage only from assistant messages, so a task subagent cost, which arrives in the toolResult the task tool returns, never appeared in the total; the footer now reads the cumulative `getUsageStatistics()` rollup, the same source the interactive status line uses ([#14393](https://github.com/can1357/oh-my-pi/pull/14393)).
 
 - Fixed the Agents hub Time column rewinding and freezing for running subagents between progress updates ([#15140](https://github.com/can1357/oh-my-pi/pull/15140) by [@H4vC](https://github.com/H4vC))
 

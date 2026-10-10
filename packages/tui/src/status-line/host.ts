@@ -71,7 +71,12 @@ export interface FooterSession {
 	autoResolvedThinkingLevel(): string | undefined;
 	getContextUsage: StatusLineSession["getContextUsage"];
 	modelRegistry: Pick<StatusLineSession["modelRegistry"], "isUsingOAuth">;
-	sessionManager: { getEntries(): readonly { type: string; message?: AgentMessage }[] };
+	/**
+	 * Cumulative session rollup. Unlike the active-window stats it spans every
+	 * entry in the session, so compaction does not reset the counters, and it
+	 * folds in usage carried by completed `task` tool results.
+	 */
+	sessionManager: { getUsageStatistics: StatusLineSession["sessionManager"]["getUsageStatistics"] };
 }
 
 /**
