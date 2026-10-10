@@ -163,6 +163,22 @@ describe("read group tool node", () => {
 		group.updateArgs({ path: "src/a.ts" }, "a");
 		expect(group.describe().k).toBe("card");
 	});
+
+	it("shows passive context in both native serializers", () => {
+		const group = new ReadToolGroupComponent();
+		group.updateArgs({ path: "src/a.ts" }, "a");
+		group.describe(toolCx);
+		group.describe();
+		group.setAdditionalContext("read guidance");
+		for (const described of [group.describe(toolCx), group.describe()]) {
+			// The read card's collapsed preview clamp never hides the context: it is the card's sibling.
+			expect(described.k).toBe("col");
+			const [readCard, ...rest] = (described.c ?? []).filter(isNode);
+			expect(collect([readCard!], n => role(n) === "omp.tool.context")).toHaveLength(0);
+			expect(rest.map(role)).toEqual(["omp.tool.context"]);
+			expect(JSON.stringify(rest)).toContain("↳ Context: read guidance");
+		}
+	});
 });
 
 describe("glob native view", () => {

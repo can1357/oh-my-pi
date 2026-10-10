@@ -4,6 +4,7 @@ import type { AssistantMessage, Usage } from "@oh-my-pi/pi-ai";
 import { type Component } from "../tui";
 import { Container } from "../tui";
 import { Text } from "../components/text";
+import { WidthAwareText } from "../render/index";
 import { getLanguageFromPath, theme } from "../theme";
 import { parseLineRanges, selectorLineRanges } from "../tools/line-ranges";
 import {
@@ -17,12 +18,12 @@ import { PREVIEW_LIMITS, shortenPath } from "../render/render-utils";
 import { fileHyperlink, renderCodeCell } from "../render";
 import { canonicalizeMessage } from "./thinking-display";
 import { internalUrlSchemeSpec, splitUrlScheme } from "../tools/url-scheme-host";
-import type { ToolExecutionHandle } from "./tool-execution";
+import { describeToolAdditionalContext, renderToolAdditionalContext, type ToolExecutionHandle } from "./tool-execution";
 import { formatUsageRow } from "../overlays/usage-row";
 import { formatCount } from "@oh-my-pi/pi-utils";
 import type { TspCardStatus, TspSpan, TspText } from "@oh-my-pi/pi-wire";
 import type { NativeToolHead } from "../tools/renderer";
-import { card, code, keyed, node, span, text, withHidden } from "../native/describe";
+import { card, code, col, keyed, node, span, text, withHidden } from "../native/describe";
 import {
 	type DescribeContext,
 	type NativeChild,
@@ -350,6 +351,7 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 	#text: Text;
 	#expanded = false;
 	#toolActivityVisible = true;
+	#additionalContext: string | undefined;
 	#showContentPreview: boolean;
 	// A read group accretes entries across multiple assistant completions for as
 	// long as the run of reads is uninterrupted. It remains active while its
@@ -547,6 +549,13 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 		this.#updateDisplay();
 	}
 
+	setAdditionalContext(context: string): void {
+		if (context === this.#additionalContext) return;
+		this.#additionalContext = context;
+		this.#blockVersion++;
+		this.#updateDisplay();
+	}
+
 	setToolActivityVisible(visible: boolean): void {
 		this.#toolActivityVisible = visible;
 		super.invalidate();
@@ -584,9 +593,12 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 	override describe(cx?: DescribeContext): NativeNode {
 		const dataFirst = cx?.supports("tool") === true;
 		const key = [dataFirst, this.#displayVersion, this.#toolActivityVisible, this.#sealed];
-		return this.#native.get(key, () =>
-			withHidden(dataFirst ? this.#describeTool() : this.#describeGroup(), !this.#toolActivityVisible),
-		);
+		return this.#native.get(key, () => {
+			const described = dataFirst ? this.#describeTool() : this.#describeGroup();
+			// Passive context sits below the card, outside its preview clamp, as on ordinary tool cards.
+			const context = describeToolAdditionalContext(this.#additionalContext, this.#expanded);
+			return withHidden(context.length > 0 ? col([described, ...context]) : described, !this.#toolActivityVisible);
+		});
 	}
 
 	/**
@@ -867,6 +879,7 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 		if (displayRows.length === 0) {
 			this.#text.setText(` ${theme.format.bullet} ${theme.fg("toolTitle", theme.bold("Read"))}`);
 			this.addChild(this.#text);
+			this.#appendAdditionalContext();
 			return;
 		}
 
@@ -885,6 +898,7 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 				this.#addContentPreview(entry);
 				this.#addPreviewUsage(entry);
 			}
+			this.#appendAdditionalContext();
 			return;
 		}
 
@@ -907,8 +921,19 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 				this.#addPreviewUsage(entry);
 			}
 		}
+		this.#appendAdditionalContext();
 	}
 
+	#appendAdditionalContext(): void {
+		if (this.#additionalContext === undefined) return;
+		this.addChild(
+			new WidthAwareText(
+				width => renderToolAdditionalContext(this.#additionalContext ?? "", width, this.#expanded),
+				1,
+				0,
+			),
+		);
+	}
 	#displayTargetsForEntries(entries: ReadEntry[]): ReadDisplayTarget[] {
 		const targets: ReadDisplayTarget[] = [];
 		for (const entry of entries) {

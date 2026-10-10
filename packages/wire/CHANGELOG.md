@@ -13,6 +13,10 @@
 ### Changed
 
 - Updated `TspEditorProps.placeholder` and `TspInputProps.placeholder` to accept `TspText`, enabling styled placeholder text.
+- `TspEditorProps.placeholder` (and `TspInputProps.placeholder`) take `TspText`, so a placeholder can be styled spans
+### Added
+
+- Developer messages accept an optional `passiveToolContext` marker so hosts can recognize passive context emitted after a tool batch ([#13269](https://github.com/can1357/oh-my-pi/pull/13269) by [@andrebrait](https://github.com/andrebrait)).
 
 ## [18.5.1] - 2026-10-03
 

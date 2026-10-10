@@ -39,6 +39,7 @@
 ### Fixed
 
 - Fixed interrupted runs so assistant message boundaries are emitted reliably, allowing subscribers to persist and recover the interrupted turn.
+- Passive tool context developer messages now carry a presentation marker so host UIs can show their provenance without inspecting instruction text ([#13269](https://github.com/can1357/oh-my-pi/pull/13269) by [@andrebrait](https://github.com/andrebrait)).
 
 ## [18.6.3] - 2026-10-06
 
