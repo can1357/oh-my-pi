@@ -1,19 +1,12 @@
 import { $which } from "@oh-my-pi/pi-utils";
 import { isBunTestRuntime } from "@oh-my-pi/pi-utils/env";
+import { tmuxMultiplexer, wrapTmuxPassthrough } from "./multiplexers/tmux";
 
-/** Whether the process is running inside a tmux session. */
-export function isInsideTmux(env: NodeJS.ProcessEnv = Bun.env): boolean {
-	return Boolean(env.TMUX);
-}
-
-/** Wrap a control sequence in tmux's DCS passthrough envelope. */
-export function wrapTmuxPassthrough(payload: string): string {
-	return `\x1bPtmux;${payload.replaceAll("\x1b", "\x1b\x1b")}\x1b\\`;
-}
+export { wrapTmuxPassthrough } from "./multiplexers/tmux";
 
 /** Pass a control sequence through tmux, leaving direct-terminal output unchanged. */
 export function wrapTmuxPassthroughIfNeeded(payload: string, env: NodeJS.ProcessEnv = Bun.env): string {
-	return isInsideTmux(env) ? wrapTmuxPassthrough(payload) : payload;
+	return tmuxMultiplexer.isInside(env) ? wrapTmuxPassthrough(payload) : payload;
 }
 
 const CLIENT_TERMTYPE_NAME = /^([A-Za-z][A-Za-z0-9._+-]*)(?=\s|\(|$)/u;
@@ -46,7 +39,7 @@ function queryTmuxClientTerminalName(env: NodeJS.ProcessEnv): string | null {
  * query runs once per process and degrades to `null` when unavailable.
  */
 export function resolveTmuxClientTerminalName(env: NodeJS.ProcessEnv = Bun.env): string | null {
-	if (!isInsideTmux(env) || isBunTestRuntime()) return null;
+	if (!tmuxMultiplexer.isInside(env) || isBunTestRuntime()) return null;
 	if (cachedClientTerminalName === undefined) cachedClientTerminalName = queryTmuxClientTerminalName(env);
 	return cachedClientTerminalName;
 }

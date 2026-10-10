@@ -139,6 +139,7 @@ import type {
 	TurnStartEvent,
 } from "../shared-events";
 import type { SlashCommandInfo } from "../slash-commands";
+import type { TerminalLaunchRequest, TerminalLaunchResult } from "../../subprocess/terminal-launch";
 
 export type { OverlayHandle, OverlayOptions } from "@oh-my-pi/pi-tui";
 export type { AppKeybinding, KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
@@ -279,6 +280,8 @@ export interface ExtensionUIContext {
 
 	/** Show a confirmation dialog. */
 	confirm(title: string, message: string, dialogOptions?: ExtensionUIDialogOptions): Promise<boolean>;
+	/** Create a pane or multiplexer group and run an argv command when the TUI host supports it. */
+	openTerminal?(request: TerminalLaunchRequest): Promise<TerminalLaunchResult>;
 
 	/** Show a text input dialog. */
 	input(title: string, placeholder?: string, dialogOptions?: ExtensionUIDialogOptions): Promise<string | undefined>;

@@ -67,6 +67,8 @@ function isKnownProvider(provider: string): provider is KnownProvider {
 
 /**
  * Pick the first auto-selectable provider-default model in availability order.
+ * A provider's default is the model its discovery marks as the account default
+ * (`isProviderDefault`), else its bundled `default-model`.
  *
  * When `hasConcreteCredential` is supplied and at least one available model
  * belongs to a provider with a concrete credential, the candidate pool is
@@ -102,18 +104,18 @@ export function pickDefaultAvailableModel(
 					});
 					return concrete.length > 0 ? concrete : autoSelectable;
 				})();
-	const firstDefault = models.find(
-		model => isKnownProvider(model.provider) && DEFAULT_MODEL_PER_PROVIDER[model.provider] === model.id,
+	const accountDefaultProviders = new Set(
+		models.filter(model => model.isProviderDefault).map(model => model.provider),
 	);
+	const isDefaultForProvider = (model: Model<Api>): boolean =>
+		accountDefaultProviders.has(model.provider)
+			? model.isProviderDefault === true
+			: isKnownProvider(model.provider) && DEFAULT_MODEL_PER_PROVIDER[model.provider] === model.id;
+	const firstDefault = models.find(isDefaultForProvider);
 	if (!firstDefault) return models[0];
 
 	const providerPriority = buildModelProviderPriorityRank();
-	const sharedDefaultMatches = models.filter(
-		model =>
-			model.id === firstDefault.id &&
-			isKnownProvider(model.provider) &&
-			DEFAULT_MODEL_PER_PROVIDER[model.provider] === model.id,
-	);
+	const sharedDefaultMatches = models.filter(model => model.id === firstDefault.id && isDefaultForProvider(model));
 	return [...sharedDefaultMatches].sort((a, b) => {
 		const aRank = providerPriority.get(a.provider.toLowerCase()) ?? Number.POSITIVE_INFINITY;
 		const bRank = providerPriority.get(b.provider.toLowerCase()) ?? Number.POSITIVE_INFINITY;

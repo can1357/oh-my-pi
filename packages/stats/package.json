@@ -1,7 +1,7 @@
 {
   "type": "module",
   "name": "@oh-my-pi/omp-stats",
-  "version": "18.8.7",
+  "version": "18.8.9",
   "description": "Local observability dashboard for omp AI usage statistics",
   "homepage": "https://omp.sh",
   "author": {

@@ -10741,11 +10741,16 @@ export class AgentSession implements SettingsScope {
 
 	#resetCurrentResponsesProviderSession(reason: string): void {
 		const currentModel = this.model;
-		if (currentModel?.api !== "openai-responses" && currentModel?.api !== "openai-codex-responses") {
+		if (currentModel?.api === "openai-responses") {
+			// Keep the closed record: it rebuilds history from message content until
+			// the next success, while a fresh one on a host without connection
+			// binding would resend the native items the server just refused.
+			this.#providerSessionState.get(`openai-responses:${currentModel.provider}`)?.close();
+		} else if (currentModel?.api === "openai-codex-responses") {
+			this.#closeProviderSessionsForModelSwitch(currentModel, currentModel);
+		} else {
 			return;
 		}
-
-		this.#closeProviderSessionsForModelSwitch(currentModel, currentModel);
 		this.agent.appendOnlyContext?.invalidateForModelChange();
 		logger.debug("Reset Responses provider session after stale replay error", {
 			provider: currentModel.provider,

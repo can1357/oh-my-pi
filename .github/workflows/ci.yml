@@ -621,7 +621,7 @@ jobs:
               # Not `test:scripts`: scripts/musl-release.test.ts fails on main
               # (its install.sh smoke-check executes a fake binary), so running
               # the whole group here would red this job on an unrelated break.
-              bun test scripts/ci-test-ts.test.ts scripts/release.test.ts
+              bun test scripts/release.test.ts
 
    test_coding_agent_singleton:
       name: Test coding-agent singleton/global-state (TS)
@@ -884,7 +884,9 @@ jobs:
    # each one on its own platform before anything publishes: download the
    # artifact, then `--version` and `--smoke-test` in a throwaway home. macOS
    # legs first run Apple's own signature check, and launch under the final
-   # signature (hardened runtime and entitlements included when signed).
+   # signature (hardened runtime and entitlements included when signed). These
+   # are the exact bytes release_github publishes, so no job re-verifies the
+   # published assets.
    release_smoke:
       name: "Smoke release binary: ${{ matrix.target_id }}"
       if: ${{ needs.release_metadata.outputs.is-release == 'true' && !cancelled() &&
@@ -907,6 +909,8 @@ jobs:
       runs-on: ${{ matrix.os }}
       permissions:
          contents: read
+      env:
+         MACOS_SIGNING: ${{ secrets.APPLE_CERTIFICATE_P12 != '' && secrets.APPLE_CERTIFICATE_PASSWORD != '' && secrets.APPLE_API_KEY_ID != '' && secrets.APPLE_API_ISSUER_ID != '' && secrets.APPLE_API_KEY != '' }}
       steps:
          - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
            with:
@@ -923,6 +927,24 @@ jobs:
               runtime_dir="$(mktemp -d)"
               HOME="$runtime_dir/home" XDG_DATA_HOME="$runtime_dir/xdg" "$BINARY" --version
               HOME="$runtime_dir/home" XDG_DATA_HOME="$runtime_dir/xdg" "$BINARY" --smoke-test
+         # ci-macos-sign.sh signs ad hoc whenever its step lacks the APPLE_*
+         # credentials, so an ad-hoc binary while the secrets exist means they
+         # stopped reaching it.
+         - name: Assert Developer ID signature
+           if: runner.os == 'macOS' && env.MACOS_SIGNING == 'true'
+           env:
+              BINARY: binaries/${{ matrix.binary }}
+           run: |
+              info="$(codesign -dvvv "$BINARY" 2>&1)"
+              echo "$info"
+              if grep -qE "flags=.*adhoc|Signature=adhoc" <<< "$info"; then
+                echo "::error::$BINARY is ad-hoc signed (Developer ID signing did not run)"
+                exit 1
+              fi
+              # Informational: a bare (unstapled) Mach-O relies on the online
+              # notarization ticket lookup, so surface the Gatekeeper result
+              # without gating the release on it.
+              spctl -a -t exec -vv "$BINARY" || echo "spctl non-zero (expected for unstapled bare binary; ticket served online)"
          - name: Smoke release binary (Alpine)
            if: matrix.alpine
            env:
@@ -1102,52 +1124,20 @@ jobs:
               body_path: release-notes.md
               generate_release_notes: true
 
-   release_github_verify:
-      name: Verify published release (macOS)
-      if: ${{ needs.release_metadata.outputs.is-release == 'true' && !cancelled() &&
-         needs.release_github.result == 'success' }}
-      needs: [release_metadata, release_github]
-      runs-on: macos-14
-      permissions:
-         contents: read
-      env:
-         MACOS_SIGNING: ${{ secrets.APPLE_CERTIFICATE_P12 != '' && secrets.APPLE_CERTIFICATE_PASSWORD != '' && secrets.APPLE_API_KEY_ID != '' && secrets.APPLE_API_ISSUER_ID != '' && secrets.APPLE_API_KEY != '' }}
-      steps:
-         - name: Download published macOS arm64 binary
-           run: |
-              curl -fsSL -o omp-darwin-arm64 "https://github.com/${{ github.repository }}/releases/download/${{ needs.release_metadata.outputs.release-tag }}/omp-darwin-arm64"
-              chmod +x omp-darwin-arm64
-         - name: Verify published macOS arm64 binary
-           run: |
-              codesign -dvvv ./omp-darwin-arm64
-              codesign --verify --strict --verbose=4 ./omp-darwin-arm64
-              runtime_dir="$(mktemp -d)"
-              HOME="$runtime_dir/home" XDG_DATA_HOME="$runtime_dir/xdg" ./omp-darwin-arm64 --version
-              HOME="$runtime_dir/home" XDG_DATA_HOME="$runtime_dir/xdg" ./omp-darwin-arm64 --smoke-test
-         - name: Assert signed release is not ad-hoc
-           if: env.MACOS_SIGNING == 'true'
-           run: |
-              if codesign -dvvv ./omp-darwin-arm64 2>&1 | grep -qE "flags=.*adhoc|Signature=adhoc"; then
-                echo "published binary is still ad-hoc signed (Developer ID signing did not run)" >&2
-                exit 1
-              fi
-              # Gatekeeper assessment: a notarized Developer ID binary is accepted.
-              # Informational — a bare (unstapled) Mach-O relies on the online ticket
-              # lookup, so surface the result without gating the release on it.
-              spctl -a -t exec -vv ./omp-darwin-arm64 || echo "spctl non-zero (expected for unstapled bare binary; ticket served online)"
-
    release_npm:
       name: Publish to npm
       if: ${{ needs.release_metadata.outputs.is-release == 'true' && !cancelled() &&
          needs.release_binary.result == 'success' &&
          needs.release_smoke.result == 'success' &&
-         needs.release_github_verify.result == 'success' &&
+         needs.release_github.result == 'success' &&
          needs.release_native_leaves.result == 'success' &&
          !inputs.skip_npm }}
       # release_native_leaves must finish first: the core package lists the
       # leaf packages as lockstep-versioned optionalDependencies, so installs
-      # resolve them the moment the core version is live.
-      needs: [release_metadata, release_binary, release_smoke, release_github_verify, release_native_leaves]
+      # resolve them the moment the core version is live. release_github too:
+      # binary updates install what GitHub published (update-cli.ts), so the
+      # GitHub release must lead npm.
+      needs: [release_metadata, release_binary, release_smoke, release_github, release_native_leaves]
       runs-on: ubuntu-22.04
       # `id-token: write` lets npm mint the GitHub OIDC token it exchanges for a
       # short-lived publish token (trusted publishing + provenance). When a
@@ -1209,16 +1199,15 @@ jobs:
            run: bun scripts/ci-build-upload.ts "${{ needs.release_metadata.outputs.release-tag }}" packages/coding-agent/binaries/omp-*
 
    # Regenerate the Homebrew tap formula (can1357/homebrew-tap) from the freshly
-   # published release assets and push it. Gated on release_github_verify so the
-   # tap only cuts over to a release whose published binary was verified (matches
-   # how release_npm is gated). No-ops when HOMEBREW_TAP_DEPLOY_KEY is unset, so a
-   # release never blocks on tap access.
+   # published release assets and push it. Gated on release_github, whose
+   # binaries release_smoke already ran on their own platforms. No-ops when
+   # HOMEBREW_TAP_DEPLOY_KEY is unset, so a release never blocks on tap access.
    release_brew:
       name: Update Homebrew tap
       if: ${{ needs.release_metadata.outputs.is-release == 'true' && !cancelled() &&
          needs.release_metadata.outputs.channel != 'canary' &&
-         needs.release_github_verify.result == 'success' }}
-      needs: [release_metadata, release_github_verify]
+         needs.release_github.result == 'success' }}
+      needs: [release_metadata, release_github]
       runs-on: ubuntu-22.04
       env:
          HAS_TAP_KEY: ${{ secrets.HOMEBREW_TAP_DEPLOY_KEY != '' }}

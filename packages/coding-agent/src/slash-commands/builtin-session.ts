@@ -733,10 +733,41 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 	{
 		name: "fork",
 		icon: "branch",
-		description: "Create a new fork from a previous message",
-		handleTui: async (_command, runtime) => {
+		description: "Fork this session, or open it in a multiplexer pane or window",
+		subcommands: [
+			{ name: "pane", description: "Open the fork in a new terminal pane" },
+			{ name: "window", description: "Open the fork in a new multiplexer window" },
+			{ name: "tab", description: "Alias for window" },
+		],
+		subcommandOptional: true,
+		allowArgs: true,
+		handleTui: async (command, runtime) => {
+			const args = command.args.trim();
+			let placement: "pane" | "window" | undefined;
+			if (args) {
+				const [keyword, ...extra] = args.split(/\s+/);
+				if (extra.length > 0) {
+					clearSubmittedText(runtime);
+					runtime.ctx.showError("Usage: /fork [pane|window|tab]");
+					return;
+				}
+				switch (keyword?.toLowerCase()) {
+					case "pane":
+						placement = "pane";
+						break;
+					case "window":
+					case "tab":
+						placement = "window";
+						break;
+					default:
+						clearSubmittedText(runtime);
+						runtime.ctx.showError("Usage: /fork [pane|window|tab]");
+						return;
+				}
+			}
 			clearSubmittedText(runtime);
-			await runtime.ctx.handleForkCommand();
+			if (placement) await runtime.ctx.handleForkCommand(placement);
+			else await runtime.ctx.handleForkCommand();
 		},
 	},
 	{
