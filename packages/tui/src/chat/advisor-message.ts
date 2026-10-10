@@ -6,7 +6,8 @@ import { formatBadge, replaceTabs, type ToolUIColor, wrapTextWithAnsi } from "..
 import { Ellipsis, truncateToWidth } from "../render";
 import { getThemeEpoch, type Theme } from "../theme";
 import type { TspSpan } from "@oh-my-pi/pi-wire";
-import { card, span, text } from "../native/describe";
+import { card, span, text, withHidden } from "../native/describe";
+import { chatTranscriptDisplayPreferences } from "./display-preferences";
 import { type NativeNode, type NativeUiEvent, rootToggleExpanded } from "../native/node";
 import { plainText } from "../native/spans";
 import { Memo } from "../native/memo";
@@ -171,6 +172,10 @@ export interface AdvisorMessageCard extends Component {
  *
  * `getExpanded` owns expansion; a native toggle overrides it for this card
  * until the next transcript-wide change.
+ *
+ * With `display.hideAdvisorNotes` on, the card renders no rows (and its native
+ * node is hidden). It stays mounted, so turning the setting off shows it again.
+ * The notes still reach the agent; this only changes the transcript.
  */
 export function createAdvisorMessageCard(
 	details: AdvisorMessageDetails | undefined,
@@ -226,12 +231,16 @@ export function createAdvisorMessageCard(
 	// disclosure from the callback on every render.
 	return {
 		render(width: number): readonly string[] {
+			if (chatTranscriptDisplayPreferences.hideAdvisorNotes) return [];
 			disclosure.setExpanded(expanded());
 			return disclosure.render(width);
 		},
 		describe(): NativeNode {
 			const isExpanded = expanded();
-			return nativeMemo.get([isExpanded, getThemeEpoch()], () => describeCard(isExpanded));
+			const hidden = chatTranscriptDisplayPreferences.hideAdvisorNotes;
+			return nativeMemo.get([isExpanded, hidden, getThemeEpoch()], () =>
+				withHidden(describeCard(isExpanded), hidden),
+			);
 		},
 		setExpanded(value: boolean): void {
 			lastGlobal = value;
