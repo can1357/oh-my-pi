@@ -678,6 +678,37 @@ describe("Claude saved-reset trigger integration", () => {
 		expect(peer.session.agent.state.messages.at(-1)).toMatchObject({ role: "assistant", stopReason: "error" });
 	});
 
+	it("does not adopt a peer's reset of an account outside the session's pool", async () => {
+		// The shared account holds only the kept reserve, so the unrestricted peer restores the outside account.
+		const openQuota = { restored: false };
+		const open = buildSession({
+			report: null,
+			status: claudeStatus(true),
+			streamErrorFirst: true,
+			keepCredits: 1,
+			quota: openQuota,
+		});
+		const pooled = buildSession({ report: null, status: claudeStatus(true), streamErrorFirst: true, keepCredits: 1 });
+		const pool = await poolToSessionAccount(pooled.session, 3 * 24 * HOUR);
+		const spent = recordSpends(credentialId => (credentialId === pool.outsideId ? openQuota : undefined));
+		mockSchedulerWaitWithClock();
+
+		try {
+			await open.session.prompt("restore the outside account");
+			await open.session.waitForIdle();
+			await pooled.session.prompt("nothing in the pool can be restored");
+			await pooled.session.waitForIdle();
+		} finally {
+			await pool.release();
+		}
+
+		expect(spent).toEqual([pool.outsideId]);
+		expect(open.session.agent.state.messages.at(-1)).toMatchObject({ role: "assistant", stopReason: "stop" });
+		// No retry of the still-blocked pooled account on the outside account's reset marker.
+		expect(pooled.modelCalls()).toBe(1);
+		expect(pooled.session.agent.state.messages.at(-1)).toMatchObject({ role: "assistant", stopReason: "error" });
+	});
+
 	it("salvages an expiring early-use Cedar grant from the usage heartbeat exactly once", async () => {
 		const { session, coordinator, targets } = buildSession({
 			report: claudeReport(0.5),

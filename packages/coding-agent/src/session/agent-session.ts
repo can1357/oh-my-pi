@@ -12735,6 +12735,10 @@ export class AgentSession implements SettingsScope {
 	): Promise<number | undefined> {
 		for (const status of statuses) {
 			if (status.provider !== this.model?.provider) continue;
+			// A peer's reset of an account outside the session's pool cannot serve its retry.
+			if (!this.#modelRegistry.authStorage.sessions.permits(status.provider, this.sessionId, status.credentialId)) {
+				continue;
+			}
 			const lockKey = resetAccountLockKey(status);
 			if (!lockKey) continue;
 			const lockPath = this.#resetLockPath(lockKey, coordinator);
