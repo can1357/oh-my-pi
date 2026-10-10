@@ -10,7 +10,7 @@ import computerUsePrompt from "../prompts/system/computer-use.md" with { type: "
 import { enforceInlineByteCap } from "@oh-my-pi/pi-tui/tools/streaming-output";
 import { type ComputerCallStep, isReadOnlyComputerCall, renderComputerCall } from "./computer/call";
 import { reportNote } from "./computer/observation";
-import type { ComputerScreenshot, ComputerSessionSnapshot } from "./computer/protocol";
+import type { ComputerScreenshot, ComputerSessionSnapshot, SettleReport } from "./computer/protocol";
 import { type ComputerController, ComputerSupervisor, registerComputerController } from "./computer/supervisor";
 import type { ToolSession } from "./index";
 import { renderCallChain, renderFunctionRun } from "./run-code";
@@ -190,9 +190,9 @@ export function createComputerPrelude(
 			cell.signal.removeEventListener("abort", tracked.discard);
 			const revision = session.getHistoryRevision?.() ?? 0;
 			const forget = undelivered || revision !== settledRevision;
-			let text: string | undefined;
+			let report: SettleReport | undefined;
 			try {
-				text = await controller.settle(
+				report = await controller.settle(
 					buildComputerSnapshot(session, true),
 					output,
 					cell.signal,
@@ -212,9 +212,14 @@ export function createComputerPrelude(
 				undelivered = true;
 				return undefined;
 			}
-			settledRevision = revision;
 			undelivered = false;
-			return text === undefined ? undefined : { text };
+			// Rewritten while the report was made (compaction during a backgrounded cell's report): its diffs may
+			// refer to trees gone from the context, so the windows go whole. The revision stays unconsumed, so
+			// the next report forgets every baseline too.
+			if ((session.getHistoryRevision?.() ?? 0) !== revision)
+				return report === undefined ? undefined : { text: report.whole ?? report.text };
+			settledRevision = revision;
+			return report === undefined ? undefined : { text: report.text };
 		},
 	};
 }

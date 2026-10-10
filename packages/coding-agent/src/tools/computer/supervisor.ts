@@ -15,6 +15,7 @@ import {
 	type ComputerWorkerInbound,
 	type ComputerWorkerOutbound,
 	type RunErrorPayload,
+	type SettleReport,
 } from "./protocol";
 
 const START_TIMEOUT_MS = 10_000;
@@ -51,7 +52,7 @@ export interface ComputerController {
 		signal?: AbortSignal,
 		forget?: boolean,
 		cell?: string,
-	): Promise<string | undefined>;
+	): Promise<SettleReport | undefined>;
 	/** The cell was cancelled: what its input left is reported to no one. */
 	discard?(cell: string): void;
 	close(): Promise<void>;
@@ -229,7 +230,7 @@ export class ComputerSupervisor implements ComputerController {
 		signal?: AbortSignal,
 		forget?: boolean,
 		cell?: string,
-	): Promise<string | undefined> {
+	): Promise<SettleReport | undefined> {
 		// A worker that never started has seen no input.
 		if (!this.#worker) return undefined;
 		const result = await this.#request(
@@ -237,7 +238,12 @@ export class ComputerSupervisor implements ComputerController {
 			SETTLE_TIMEOUT_MS,
 			signal,
 		);
-		return typeof result.returnValue === "string" ? result.returnValue : undefined;
+		const report = result.returnValue;
+		if (typeof report !== "object" || report === null || !("text" in report) || typeof report.text !== "string")
+			return undefined;
+		return "whole" in report && typeof report.whole === "string"
+			? { text: report.text, whole: report.whole }
+			: { text: report.text };
 	}
 
 	discard(cell: string): void {

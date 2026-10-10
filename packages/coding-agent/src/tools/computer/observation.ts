@@ -410,16 +410,22 @@ export class ObservationLedger {
 		return state;
 	}
 
-	/** Remember which window these refs belong to. */
-	recordRefs(windowId: string, refs: Iterable<string>): void {
+	/** Remember which window these refs belong to, and the window's process when the caller knows it. */
+	recordRefs(window: InputWindow, refs: Iterable<string>): void {
+		if (window.pid !== undefined) this.#record(window.id).pid = window.pid;
 		for (const ref of refs) {
 			this.#refs.delete(ref);
-			this.#refs.set(ref, windowId);
+			this.#refs.set(ref, window.id);
 		}
 		for (const ref of this.#refs.keys()) {
 			if (this.#refs.size <= MAX_REFS) break;
 			this.#refs.delete(ref);
 		}
+	}
+
+	/** Orders reads against inputs: take it when a read is issued and pass it to `recordRead` once the read returns. */
+	get sequence(): number {
+		return this.#sequence;
 	}
 
 	/** The window a ref was read from, when the session read it. */
@@ -434,35 +440,47 @@ export class ObservationLedger {
 		if (window.pid !== undefined) record.pid = window.pid;
 		record.shown = text;
 		record.options = { ...options };
-		this.recordRefs(window.id, treeRefs(text));
+		this.recordRefs(window, treeRefs(text));
 	}
 
 	/**
 	 * The cell's code read this tree of the window. Its refs map to the window
 	 * at once; it becomes what the model saw only if the cell's output carries
-	 * it (see `take`), since code can read a tree without printing it.
+	 * it (see `take`), since code can read a tree without printing it. `issued`
+	 * is the ledger's `sequence` when the read was sent: a read sent before an
+	 * input to the window counts as read before it, however late it returns.
 	 */
-	recordRead(cell: CellKey, window: InputWindow, text: string, options: AxReadOptions): void {
-		this.recordRefs(window.id, treeRefs(text));
+	recordRead(
+		cell: CellKey,
+		window: InputWindow,
+		text: string,
+		options: AxReadOptions,
+		issued: number = this.#sequence,
+	): void {
+		this.recordRefs(window, treeRefs(text));
 		const state = this.#cell(cell);
 		let reads = state.reads.get(window.id);
 		if (!reads) {
 			reads = { recent: [], recentChars: 0, since: new Set(), before: new Set(), lost: false };
 			state.reads.set(window.id, reads);
 		}
-		const read: CellRead = { window, text, hash: Bun.hash(text), options: { ...options }, sequence: this.#sequence };
-		reads.since.add(read.hash);
-		if (reads.since.size > MAX_READ_HASHES) {
-			reads.since.clear();
+		const read: CellRead = { window, text, hash: Bun.hash(text), options: { ...options }, sequence: issued };
+		const touched = state.touched.get(window.id);
+		const beforeInput = touched !== undefined && issued < touched;
+		const hashes = beforeInput ? reads.before : reads.since;
+		hashes.add(read.hash);
+		if (hashes.size > MAX_READ_HASHES) {
+			hashes.clear();
 			reads.lost = true;
 		}
 		// Before any input to the window only the latest read matters: it is what the model saw if printed.
-		const touched = state.touched.get(window.id);
 		if (touched === undefined) {
 			reads.recent = [];
 			reads.recentChars = 0;
 		}
-		reads.recent.push(read);
+		// Newest issued last: a read that returns late goes before reads issued after it.
+		const at = reads.recent.findLastIndex(earlier => earlier.sequence <= issued) + 1;
+		reads.recent.splice(at, 0, read);
 		reads.recentChars += text.length;
 		while (
 			reads.recent.length > 1 &&

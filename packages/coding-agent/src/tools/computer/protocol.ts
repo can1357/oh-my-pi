@@ -26,7 +26,7 @@ export type ComputerWorkerInbound =
 	| { type: "run"; id: string; code: string; timeoutMs: number; session: ComputerSessionSnapshot; cell?: string }
 	| { type: "capabilities"; id: string; session: ComputerSessionSnapshot }
 	/**
-	 * Report what the cell that just ended changed; the result's `returnValue` is the report text or undefined.
+	 * Report what the cell that just ended changed; the result's `returnValue` is a `SettleReport` or undefined.
 	 * `output` is what the cell printed: an `ax()` tree it carries counts as seen by the model. `forget`: the
 	 * model's context was rewritten since the last settle, so trees it saw before may be gone from it. The
 	 * report's reads stop short of `timeoutMs`, so it returns what it has before the request times out.
@@ -46,6 +46,15 @@ export type ComputerWorkerInbound =
 	| { type: "revoke-control"; id: string }
 	| { type: "tool-reply"; id: string; reply: ToolReply }
 	| { type: "close" };
+
+/**
+ * What a cell's input changed. `text` diffs each window against the model's last tree of it; `whole`, present
+ * when it differs, prints every window whole, for a conversation rewritten while the report was made.
+ */
+export interface SettleReport {
+	text: string;
+	whole?: string;
+}
 
 /** Successful computer run output returned to the host supervisor. */
 export interface ComputerRunOk {

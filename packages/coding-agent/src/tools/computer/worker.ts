@@ -66,6 +66,7 @@ import type {
 	ComputerWorkerInbound,
 	ComputerWorkerTransport,
 	RunErrorPayload,
+	SettleReport,
 	ToolReply,
 } from "./protocol";
 
@@ -170,6 +171,9 @@ type ObservationResult = ScreenshotResult & { ax: string; nodeCount: number; tru
 type PendingTool = { resolve(value: unknown): void; reject(reason?: unknown): void };
 interface ActiveRun {
 	id: string;
+	kind: "run" | "settle";
+	/** Settles once the run has let go of the worker. */
+	ended: Promise<void>;
 	ac: AbortController;
 	signal: AbortSignal;
 	pendingTools: Map<string, PendingTool>;
@@ -597,6 +601,8 @@ class Win {
 	async observe(options?: ScreenshotOptions & AxOptions): Promise<ObservationResult> {
 		const context = this.#getContext();
 		await this.#observer.settle(context.signal);
+		// Sent now: an input sent after it does not make this a post-input read, however late it returns.
+		const issued = this.#observer.ledger.sequence;
 		const result = await nativeCall(context.signal, () =>
 			this.#session.observe(
 				this.id,
@@ -614,6 +620,7 @@ class Win {
 				{ id: this.id, pid: this.pid },
 				result.accessibility.text,
 				axReadOptions(options),
+				issued,
 			);
 		const screenshot = await emitScreenshot(context, result.capture, options);
 		if (!options?.silent) context.output.push({ type: "text", text: result.accessibility.text });
@@ -654,8 +661,10 @@ class Win {
 	async ax(options?: AxOptions): Promise<string> {
 		const { signal, cell } = this.#getContext();
 		await this.#observer.settle(signal);
+		// Sent now: an input sent after it does not make this a post-input read, however late it returns.
+		const issued = this.#observer.ledger.sequence;
 		const text = (await nativeCall(signal, () => this.#session.axSnapshot(this.id, options))).text;
-		this.#observer.ledger.recordRead(cell, { id: this.id, pid: this.pid }, text, axReadOptions(options));
+		this.#observer.ledger.recordRead(cell, { id: this.id, pid: this.pid }, text, axReadOptions(options), issued);
 		return text;
 	}
 
@@ -707,7 +716,7 @@ class InputObserver {
 
 	/** Wrap a resolved node, remembering the window it was read from. */
 	element(getContext: RunContextAccessor, node: AxNode, window: InputWindow | undefined): El {
-		if (window) this.ledger.recordRefs(window.id, [node.ref]);
+		if (window) this.ledger.recordRefs(window, [node.ref]);
 		return new El(this.#session, getContext, this, node);
 	}
 
@@ -863,6 +872,8 @@ export class ComputerWorkerCore {
 	#observer?: InputObserver;
 	#runtime?: JsRuntime;
 	#active: ActiveRun | null = null;
+	/** Runs and settles waiting for the other kind to end, by request id, so an abort reaches them. */
+	readonly #queued = new Map<string, AbortController>();
 	/**
 	 * Per-run context, carried through AsyncLocalStorage so async work leaked
 	 * from an ended run (timers, dangling promises) keeps that run's aborted
@@ -896,6 +907,7 @@ export class ComputerWorkerCore {
 				return;
 			case "abort":
 				if (this.#active?.id === message.id) this.#active.ac.abort(new ToolAbortError());
+				else this.#queued.get(message.id)?.abort(new ToolAbortError());
 				return;
 			case "revoke-control":
 				this.#active?.ac.abort(new ToolAbortError("Computer control revoked"));
@@ -942,32 +954,65 @@ export class ComputerWorkerCore {
 		return this.#runtime;
 	}
 
-	/** Runs desktop code, or settles the cell that just ended (`settle`), as one abortable run. */
+	/**
+	 * Runs desktop code, or settles the cell that just ended (`settle`), as one
+	 * abortable run. A cell's report and another cell's run take turns: each
+	 * waits for the other to end, within its own budget and abort. A run that
+	 * finds another run in flight is refused as busy.
+	 */
 	async #run(message: Extract<ComputerWorkerInbound, { type: "run" | "settle" }>): Promise<void> {
-		if (this.#closed) {
-			this.#transport.send({
-				type: "result",
-				id: message.id,
-				ok: false,
-				error: errorPayload(new ToolError("Computer worker is closed")),
-			});
-			return;
-		}
-		if (this.#active) {
-			this.#transport.send({
-				type: "result",
-				id: message.id,
-				ok: false,
-				error: errorPayload(new ToolError("Computer worker is busy")),
-			});
-			return;
-		}
 		const startedAt = Date.now();
 		const timeoutSignal = AbortSignal.timeout(message.timeoutMs);
 		const ac = new AbortController();
+		const timedOut = (): ToolError =>
+			new ToolError(
+				message.type === "settle"
+					? `the post-input report timed out after ${message.timeoutMs}ms`
+					: `Computer code execution timed out after ${message.timeoutMs}ms`,
+			);
+		for (;;) {
+			if (this.#closed) {
+				this.#transport.send({
+					type: "result",
+					id: message.id,
+					ok: false,
+					error: errorPayload(new ToolError("Computer worker is closed")),
+				});
+				return;
+			}
+			const busy = this.#active;
+			if (!busy) break;
+			if (message.type === "run" && busy.kind === "run") {
+				this.#transport.send({
+					type: "result",
+					id: message.id,
+					ok: false,
+					error: errorPayload(new ToolError("Computer worker is busy")),
+				});
+				return;
+			}
+			this.#queued.set(message.id, ac);
+			try {
+				await untilAborted(AbortSignal.any([timeoutSignal, ac.signal]), busy.ended);
+			} catch {
+				const error = timeoutSignal.aborted ? timedOut() : new ToolAbortError();
+				this.#transport.send({ type: "result", id: message.id, ok: false, error: errorPayload(error) });
+				return;
+			} finally {
+				this.#queued.delete(message.id);
+			}
+		}
 		const runAc = new AbortController();
 		const signal = AbortSignal.any([timeoutSignal, ac.signal, runAc.signal]);
-		const active: ActiveRun = { id: message.id, ac, signal, pendingTools: new Map() };
+		const ended = Promise.withResolvers<void>();
+		const active: ActiveRun = {
+			id: message.id,
+			kind: message.type,
+			ac,
+			signal,
+			pendingTools: new Map(),
+			ended: ended.promise,
+		};
 		this.#active = active;
 		// Cancel synchronously while this run owns the native session, including
 		// fire-and-forget operations still pending when the script returns.
@@ -1040,15 +1085,7 @@ export class ComputerWorkerCore {
 					signal.reason instanceof ToolAbortError
 						? signal.reason
 						: new ToolAbortError(undefined, { cause: signal.reason });
-				rejectCancel(
-					timeoutSignal.aborted
-						? new ToolError(
-								message.type === "settle"
-									? `the post-input report timed out after ${message.timeoutMs}ms`
-									: `Computer code execution timed out after ${message.timeoutMs}ms`,
-							)
-						: abortError,
-				);
+				rejectCancel(timeoutSignal.aborted ? timedOut() : abortError);
 				const toolAbort = timeoutSignal.aborted
 					? postmortem.markExpectedCleanupError(new ToolAbortError(undefined, { cause: timeoutSignal.reason }))
 					: abortError;
@@ -1073,6 +1110,7 @@ export class ComputerWorkerCore {
 			else if (!nativeCancelled) this.#session?.cancel();
 			runAc.abort(postmortem.markExpectedCleanupError(new ToolAbortError("Computer run ended")));
 			if (this.#active?.id === message.id) this.#active = null;
+			ended.resolve();
 		}
 		if (failure !== undefined) {
 			this.#transport.send({ type: "result", id: message.id, ok: false, error: errorPayload(failure.error) });
@@ -1118,7 +1156,7 @@ export class ComputerWorkerCore {
 		observer: InputObserver,
 		signal: AbortSignal,
 		request: { output: string; forget: boolean; cell: CellKey; readDeadline: number },
-	): Promise<string | undefined> {
+	): Promise<SettleReport | undefined> {
 		const { ledger } = observer;
 		try {
 			if (request.forget) ledger.forgetShown();
@@ -1138,7 +1176,9 @@ export class ComputerWorkerCore {
 	 * named, and the sections already built still return. The report stays
 	 * within the inline output budget: a window section that would pass it is
 	 * replaced by a line naming the window, and that window keeps the model's
-	 * last tree as its baseline.
+	 * last tree as its baseline. `whole` is the same report with every window
+	 * printed whole, for a host whose conversation was rewritten while the
+	 * report was made, so the trees the diffs refer to may be gone.
 	 */
 	async #report(
 		session: NativeDesktopSession,
@@ -1146,7 +1186,7 @@ export class ComputerWorkerCore {
 		signal: AbortSignal,
 		pending: PendingSettle,
 		readDeadline: number,
-	): Promise<string | undefined> {
+	): Promise<SettleReport | undefined> {
 		const deadline = AbortSignal.timeout(Math.max(0, readDeadline - Date.now()));
 		const readSignal = AbortSignal.any([signal, deadline]);
 		/** A native read under the deadline: its value, its failure, or neither once the deadline passed. */
@@ -1164,8 +1204,11 @@ export class ComputerWorkerCore {
 		const roster = "value" in listed ? listed.value : undefined;
 		const focused = roster?.find(window => window.focused);
 		type Shown = { window: InputWindow; text: string; options: AxReadOptions };
-		/** A window's section carries the line that names it instead, and the tree it would make the model's. */
-		const sections: Array<{ text: string } | { text: string; leftOut: string; shown: Shown }> = [];
+		/**
+		 * A window's section, whole too, with the line that names it instead and the tree it would make the
+		 * model's.
+		 */
+		const sections: Array<{ text: string } | { text: string; whole: string; leftOut: string; shown: Shown }> = [];
 		if (focused) ledger.attributeToFocused(pending, focused);
 		else if (pending.unattributed > 0) sections.push({ text: reportNote({ noFocusedWindow: true }) });
 		const latest = pending.outcome?.latest;
@@ -1183,6 +1226,7 @@ export class ComputerWorkerCore {
 				const readBack = { touched, window, text, change, unwatchedMs };
 				sections.push({
 					text: renderReadBack(readBack),
+					whole: renderReadBack({ ...readBack, change: undefined }),
 					leftOut: reportNote({ leftOut: readBackName(readBack) }),
 					shown: { window: { id: touched.id, pid: window?.pid }, text, options: touched.options },
 				});
@@ -1205,6 +1249,7 @@ export class ComputerWorkerCore {
 				const text = read.value.text;
 				sections.push({
 					text: renderNewWindow(opened, text),
+					whole: renderNewWindow(opened, text),
 					leftOut: reportNote({ leftOut: newWindowName(opened) }),
 					shown: { window: { id: opened.id, pid: opened.pid }, text, options: {} },
 				});
@@ -1220,27 +1265,33 @@ export class ComputerWorkerCore {
 		if (capped) tail.push(reportNote({ stillChanging: (capped.sinceInputMs / 1000).toFixed(1) }));
 		const webNote = reportNote({ webContent: true });
 		const mayNoteWeb = sections.some(section => "shown" in section && WEB_AREA_ROW.test(section.shown.text));
-		// Budget left once every window is named by its short line; each section in turn takes its line's place if it fits.
-		let room =
-			DEFAULT_MAX_BYTES -
-			Buffer.byteLength(
-				[...sections.map(section => ("leftOut" in section ? section.leftOut : section.text)), ...tail]
-					.concat(mayNoteWeb ? [webNote] : [])
-					.join("\n\n"),
-			);
-		const shown: Shown[] = [];
-		const texts = sections.map(section => {
-			if (!("shown" in section)) return section.text;
-			const extra = Buffer.byteLength(section.text) - Buffer.byteLength(section.leftOut);
-			if (extra > room) return section.leftOut;
-			room -= extra;
-			shown.push(section.shown);
-			return section.text;
-		});
-		if (shown.some(({ text }) => WEB_AREA_ROW.test(text))) tail.push(webNote);
-		for (const { window, text, options } of shown) ledger.recordShown(window, text, options);
-		const report = [...texts, ...tail];
-		return report.length > 0 ? report.join("\n\n") : undefined;
+		/** The report with each window's section in its `form`, and the trees it printed. */
+		const fit = (form: "text" | "whole"): { text: string; shown: Shown[] } => {
+			// Budget left once every window is named by its short line; each section in turn takes its line's place if it fits.
+			let room =
+				DEFAULT_MAX_BYTES -
+				Buffer.byteLength(
+					[...sections.map(section => ("leftOut" in section ? section.leftOut : section.text)), ...tail]
+						.concat(mayNoteWeb ? [webNote] : [])
+						.join("\n\n"),
+				);
+			const shown: Shown[] = [];
+			const texts = sections.map(section => {
+				if (!("shown" in section)) return section.text;
+				const extra = Buffer.byteLength(section[form]) - Buffer.byteLength(section.leftOut);
+				if (extra > room) return section.leftOut;
+				room -= extra;
+				shown.push(section.shown);
+				return section[form];
+			});
+			const notes = shown.some(({ text }) => WEB_AREA_ROW.test(text)) ? [webNote] : [];
+			return { text: [...texts, ...tail, ...notes].join("\n\n"), shown };
+		};
+		const report = fit("text");
+		if (report.text === "") return undefined;
+		for (const { window, text, options } of report.shown) ledger.recordShown(window, text, options);
+		const whole = fit("whole").text;
+		return whole === report.text ? { text: report.text } : { text: report.text, whole };
 	}
 
 	/**

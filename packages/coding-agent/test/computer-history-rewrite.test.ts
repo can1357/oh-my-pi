@@ -165,7 +165,7 @@ describe("computer post-input reports across conversation rewrites", () => {
 			},
 			async settle(_snapshot, _output, _signal, forget) {
 				forgets.push(forget === true);
-				return 'window "42": no change';
+				return { text: 'window "42": no change' };
 			},
 			async close() {},
 		}));

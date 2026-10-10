@@ -12,6 +12,7 @@ import type {
 	ComputerWorkerInbound,
 	ComputerWorkerOutbound,
 	ComputerWorkerTransport,
+	SettleReport,
 } from "@oh-my-pi/pi-coding-agent/tools/computer/protocol";
 import {
 	type ComputerController,
@@ -1974,17 +1975,34 @@ class EditableWindowSession extends FakeNativeSession {
  * Settle the cell that just ended; `output` is what that cell printed, `forget` that the conversation was
  * rewritten, `cell` the cell's id when runs carried one, `timeoutMs` the settle request's budget.
  */
-async function settleWorker(
+async function settleWorkerReport(
 	transport: MemoryTransport,
 	id: string,
 	output = "",
 	forget = false,
 	{ cell, timeoutMs = 5_000 }: { cell?: string; timeoutMs?: number } = {},
-): Promise<unknown> {
+): Promise<SettleReport | undefined> {
 	transport.inbound({ type: "settle", id, timeoutMs, session: snapshot(true), output, forget, cell });
 	const message = await transport.waitFor(candidate => candidate.type === "result" && candidate.id === id);
 	if (message.type !== "result" || !message.ok) throw new Error(`settle ${id} failed`);
-	return message.payload.returnValue;
+	const report = message.payload.returnValue;
+	if (report === undefined) return undefined;
+	if (typeof report !== "object" || report === null || !("text" in report) || typeof report.text !== "string")
+		throw new Error(`settle ${id} returned ${JSON.stringify(report)}`);
+	return "whole" in report && typeof report.whole === "string"
+		? { text: report.text, whole: report.whole }
+		: { text: report.text };
+}
+
+/** The report text of `settleWorkerReport`, diffed against the model's last trees. */
+async function settleWorker(
+	transport: MemoryTransport,
+	id: string,
+	output = "",
+	forget = false,
+	options: { cell?: string; timeoutMs?: number } = {},
+): Promise<string | undefined> {
+	return (await settleWorkerReport(transport, id, output, forget, options))?.text;
 }
 
 /** Run desktop code as part of Eval cell `cell`. */
@@ -2613,7 +2631,7 @@ describe("computer cell settlement", () => {
 			async settle(_snapshot, _output, _signal, forget) {
 				forgets.push(forget === true);
 				if (fail) throw new Error("computer worker restarted; captures and ax refs were reset");
-				return 'window "42": no change';
+				return { text: 'window "42": no change' };
 			},
 			async close() {},
 		}));
@@ -2813,7 +2831,7 @@ describe("computer cell settlement", () => {
 				if (fail) throw new Error("Computer session is closed");
 				// The cell is cancelled once the worker built its report.
 				cancelOnReturn?.abort();
-				return 'window "42": no change';
+				return { text: 'window "42": no change' };
 			},
 			discard(cell) {
 				discards.push(cell);
@@ -2888,6 +2906,189 @@ describe("computer cell settlement", () => {
 		cancelled.abort();
 		expect(discards).toHaveLength(1);
 		expect(discards[0]).toMatch(/^cell-/);
+	});
+
+	it.each([
+		{ via: "find()", element: 'const [el] = await (await desktop.window("42")).find({ role: "button" })' },
+		{ via: "elementAt()", element: "const el = await desktop.elementAt(10, 10)" },
+	])("watches the app of an element first found by $via", async ({ element }) => {
+		const transport = new MemoryTransport();
+		const native = new FakeNativeSession();
+		new ComputerWorkerCore(transport, () => native);
+
+		const run = await runWorker(transport, "press", `${element}; await el.press()`);
+		expect(run.ok).toBe(true);
+		await settleWorker(transport, "settle");
+		// The element's window came with its process: the report waits for that app, not a fixed time.
+		expect(native.quietWaits).toEqual([[123]]);
+	});
+
+	it("counts a read sent before an input as read before it, however late it returns", async () => {
+		const transport = new MemoryTransport();
+		const native = new EditableWindowSession();
+		native.keyChord = async () => {
+			native.status = "Saved";
+		};
+		new ComputerWorkerCore(transport, () => native);
+
+		await readCell(transport, "read");
+		native.status = "Edited";
+		// The tree is taken when the read is sent and returns after the input.
+		const read = native.axSnapshot.bind(native);
+		native.axSnapshot = async (target: string) => {
+			const snapshot = read(target);
+			const later = Promise.withResolvers<void>();
+			setImmediate(later.resolve);
+			await later.promise;
+			return await snapshot;
+		};
+		const cell = await runWorker(
+			transport,
+			"read-press",
+			'const w = await desktop.window("42"); const t = w.ax(); await w.press("cmd+s"); return await t',
+		);
+		const printed = String(cell.ok && cell.payload.returnValue);
+		expect(printed).toContain('"Edited"');
+		// The printed tree predates the input: the report still shows what the input changed.
+		expect(await settleWorker(transport, "settle", printed)).toBe(
+			'window "42" Code "Editor": 1 change since your last tree\n  ~ statictext [ref=e5]: "Saved"',
+		);
+	});
+
+	it("makes a report and another cell's run take turns instead of refusing either as busy", async () => {
+		const transport = new MemoryTransport();
+		const native = new EditableWindowSession();
+		let keyGate: PromiseWithResolvers<void> | undefined;
+		const keyEntered = Promise.withResolvers<void>();
+		native.keyChord = async (_target: string, keys: string[]) => {
+			if (keys.includes("cmd") && keyGate) {
+				keyEntered.resolve();
+				await keyGate.promise;
+			}
+		};
+		let readGate: PromiseWithResolvers<void> | undefined;
+		let readEntered = Promise.withResolvers<void>();
+		const read = native.axSnapshot.bind(native);
+		native.axSnapshot = async (target: string) => {
+			if (readGate) {
+				readEntered.resolve();
+				await readGate.promise;
+			}
+			return await read(target);
+		};
+		new ComputerWorkerCore(transport, () => native);
+		const result = (id: string) => transport.waitFor(candidate => candidate.type === "result" && candidate.id === id);
+		const settleMessage = (id: string, cell: string): ComputerWorkerInbound => ({
+			type: "settle",
+			id,
+			timeoutMs: 5_000,
+			session: snapshot(true),
+			output: "",
+			cell,
+		});
+		const runMessage = (id: string, cell: string, keys: string): ComputerWorkerInbound => ({
+			type: "run",
+			id,
+			code: `await (await desktop.window("42")).press("${keys}")`,
+			timeoutMs: 5_000,
+			session: snapshot(false),
+			cell,
+		});
+
+		// A report arriving during another cell's run waits for it.
+		await runInCell(transport, "b", "b-press", 'await (await desktop.window("42")).press("shift")');
+		keyGate = Promise.withResolvers<void>();
+		transport.inbound(runMessage("a-run", "a", "cmd+s"));
+		await keyEntered.promise;
+		transport.inbound(settleMessage("b-settle", "b"));
+		keyGate.resolve();
+		keyGate = undefined;
+		const aRun = await result("a-run");
+		const bSettle = await result("b-settle");
+		expect(aRun.type === "result" && aRun.ok).toBe(true);
+		expect(bSettle.type === "result" && bSettle.ok).toBe(true);
+
+		// A run arriving during another cell's report waits for it.
+		readGate = Promise.withResolvers<void>();
+		transport.inbound(settleMessage("a-settle", "a"));
+		await readEntered.promise;
+		transport.inbound(runMessage("c-run", "c", "shift"));
+		readGate.resolve();
+		readGate = undefined;
+		const aSettle = await result("a-settle");
+		const cRun = await result("c-run");
+		expect(aSettle.type === "result" && aSettle.ok).toBe(true);
+		expect(cRun.type === "result" && cRun.ok).toBe(true);
+
+		// A waiting run still answers its abort.
+		readEntered = Promise.withResolvers<void>();
+		readGate = Promise.withResolvers<void>();
+		transport.inbound(settleMessage("c-settle", "c"));
+		await readEntered.promise;
+		transport.inbound(runMessage("d-run", "d", "shift"));
+		transport.inbound({ type: "abort", id: "d-run" });
+		const dRun = await result("d-run");
+		expect(dRun.type === "result" && !dRun.ok && dRun.error.isAbort).toBe(true);
+		readGate.resolve();
+		const cSettle = await result("c-settle");
+		expect(cSettle.type === "result" && cSettle.ok).toBe(true);
+	});
+
+	it("carries the report with every window whole, for a conversation rewritten while it was made", async () => {
+		const transport = new MemoryTransport();
+		const native = new EditableWindowSession();
+		new ComputerWorkerCore(transport, () => native);
+
+		await readCell(transport, "read");
+		await runWorker(transport, "press", 'await (await desktop.ref("e3")).press()');
+		const report = await settleWorkerReport(transport, "settle");
+		expect(report?.text).toStartWith('window "42" Code "Editor": 3 changes since your last tree\n');
+		expect(report?.whole).toStartWith('window "42" Code "Editor":\n- window "Editor" [ref=e1]');
+		expect(report?.whole).toContain('- button "Done" [ref=e6]');
+		// Already whole: nothing else to carry.
+		await runWorker(transport, "press-2", 'await (await desktop.window("42")).press("shift")');
+		expect((await settleWorkerReport(transport, "settle-2", "", true))?.whole).toBeUndefined();
+	});
+
+	it("delivers whole trees when the conversation is rewritten during a report, and forgets on the next", async () => {
+		let revision = 0;
+		const forgets: boolean[] = [];
+		const session: ToolSession = { ...toolSession(), getHistoryRevision: () => revision };
+		let rewriteDuring = false;
+		const prelude = createComputerPrelude(session, () => ({
+			async run() {
+				return { displays: [], returnValue: undefined, screenshots: [] };
+			},
+			async capabilities() {
+				return undefined;
+			},
+			async settle(_snapshot, _output, _signal, forget) {
+				forgets.push(forget === true);
+				// Compaction lands while the report is made.
+				if (rewriteDuring) revision++;
+				return { text: "diff", whole: "whole" };
+			},
+			async close() {},
+		}));
+		const press = {
+			action: "call",
+			chain: [
+				{ method: "ref", args: ["e3"] },
+				{ method: "press", args: [] },
+			],
+		};
+		const act = async () => {
+			const cell = { signal: new AbortController().signal };
+			await prelude.invoke(press, { session, toolCallId: "press", cell });
+			return await prelude.settleCell?.(cell, { failed: false, output: "" });
+		};
+
+		rewriteDuring = true;
+		expect(await act()).toEqual({ text: "whole" });
+		rewriteDuring = false;
+		expect(await act()).toEqual({ text: "diff" });
+		expect(await act()).toEqual({ text: "diff" });
+		expect(forgets).toEqual([false, true, false]);
 	});
 });
 
