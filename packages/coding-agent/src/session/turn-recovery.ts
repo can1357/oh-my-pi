@@ -710,9 +710,11 @@ export class TurnRecovery {
 	 * @returns true when the active model was actually switched back to the
 	 * primary, so callers can re-run the pre-send context-fit check against the
 	 * reverted (possibly smaller) window before issuing the next request.
+	 * @param signal cancels the in-flight usage probe; an aborted restore keeps
+	 * the cooldown and leaves the active fallback in place.
 	 */
-	maybeRestoreRetryFallbackPrimary(): Promise<boolean> {
-		return this.#maybeRestoreRetryFallbackPrimary();
+	maybeRestoreRetryFallbackPrimary(signal?: AbortSignal): Promise<boolean> {
+		return this.#maybeRestoreRetryFallbackPrimary(signal);
 	}
 
 	/** Applies model fallback policy from live usage health before a turn starts. */
@@ -2306,7 +2308,8 @@ export class TurnRecovery {
 		return true;
 	}
 
-	async #maybeRestoreRetryFallbackPrimary(): Promise<boolean> {
+	async #maybeRestoreRetryFallbackPrimary(signal?: AbortSignal): Promise<boolean> {
+		if (signal?.aborted) return false;
 		if (!this.#activeRetryFallback) return false;
 		if (this.#activeRetryFallback.pinned) return false;
 		if (this.#getRetryFallbackRevertPolicy() !== "cooldown-expiry") return false;
@@ -2333,14 +2336,14 @@ export class TurnRecovery {
 		const currentSelector = formatRetryFallbackSelector(currentModel, this.#host.thinkingLevel());
 		if (currentSelector === originalSelector.raw) {
 			if (
-				!(await this.isRetryFallbackSelectorSuppressed(originalSelector)) &&
+				!(await this.isRetryFallbackSelectorSuppressed(originalSelector, signal)) &&
 				this.#activeRetryFallback === activeFallback
 			) {
 				this.clearActiveRetryFallback();
 			}
 			return false;
 		}
-		if (await this.isRetryFallbackSelectorSuppressed(originalSelector)) return false;
+		if (await this.isRetryFallbackSelectorSuppressed(originalSelector, signal)) return false;
 		if (this.#activeRetryFallback !== activeFallback || !modelsAreEqual(this.#host.model(), currentModel))
 			return false;
 
@@ -2352,11 +2355,15 @@ export class TurnRecovery {
 		const primaryModel =
 			resolvedPrimary.model ?? this.#host.modelRegistry.find(originalSelector.provider, originalSelector.id);
 		if (!primaryModel) return false;
-		const apiKey = await this.#host.modelRegistry.getApiKey(primaryModel, this.#host.sessionId());
+		const apiKey = await this.#host.modelRegistry.getApiKey(primaryModel, this.#host.sessionId(), { signal });
 		if (!apiKey) return false;
 
 		const currentThinkingLevel = this.#host.configuredThinkingLevel();
-		if (this.#activeRetryFallback !== activeFallback || !modelsAreEqual(this.#host.model(), currentModel))
+		if (
+			signal?.aborted ||
+			this.#activeRetryFallback !== activeFallback ||
+			!modelsAreEqual(this.#host.model(), currentModel)
+		)
 			return false;
 		const thinkingToApply =
 			currentThinkingLevel === lastAppliedFallbackThinkingLevel ? originalThinkingLevel : currentThinkingLevel;

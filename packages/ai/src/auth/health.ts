@@ -26,7 +26,7 @@ import type {
 	ModelUsageHealth,
 	ModelUsageHealthOptions,
 } from "./types";
-import { buildRefreshableOauthCredential, mergeRefreshedUsageCredential } from "./usage";
+import { buildRefreshableOauthCredential, mergeRefreshedUsageCredential, reportPassesUsageCutoff } from "./usage";
 import type { UsageService } from "./usage";
 import { REMOTE_REFRESH_SENTINEL } from "./types";
 import { oauthUsageRequest, usageCacheIdentity, usageRequest } from "./usage-cache";
@@ -114,7 +114,9 @@ export class CredentialHealth implements HealthApi {
 		const loginApiKeyPool = apiKeyPool.filter(
 			({ entry }) => entry.credential.type === "api_key" && entry.credential.source === "login",
 		);
-		const pool = origin.kind === "oauth" ? oauthPool : loginApiKeyPool;
+		const pool = (origin.kind === "oauth" ? oauthPool : loginApiKeyPool).filter(({ entry }) =>
+			this.#deps.affinity.allows(provider, options.sessionId, entry.credential),
+		);
 		if (pool.length === 0) return { state: "unknown", accounts: [] };
 		const sessionCredential = this.#deps.affinity.get(provider, options.sessionId);
 		const selectedCredentialId =
@@ -166,6 +168,7 @@ export class CredentialHealth implements HealthApi {
 							baseUrl: options.baseUrl,
 							timeoutMs: this.#deps.usage.requestTimeoutMs,
 							signal: options.signal,
+							usageAfter: options.usageAfter,
 						}),
 						options.signal,
 						"usage fetch aborted",
@@ -174,10 +177,7 @@ export class CredentialHealth implements HealthApi {
 					if (options.signal?.aborted) throw error;
 					report = null;
 				}
-				if (report !== null && options.usageAfter !== undefined) {
-					const fetchedAt = report.fetchedAt;
-					if (!Number.isFinite(fetchedAt) || fetchedAt <= options.usageAfter) report = null;
-				}
+				if (report !== null && !reportPassesUsageCutoff(report, options.usageAfter)) report = null;
 				if (planGate) {
 					planEligibilityByCredential.set(entry.id, planGate(report));
 				}

@@ -433,6 +433,33 @@ describe("early quota reset recovery", () => {
 		expect(registry.isSelectorSuppressed(PRIMARY_SELECTOR)).toBe(false);
 	});
 
+	it("resolves concurrent probes independently so the peer of a retired suppression reports unsuppressed", async () => {
+		env = await createEnv();
+		const { registry } = env;
+		const options = { sessionId: "session-a", reserveFraction: 0.1 };
+		const clock = useMockClock();
+		registry.suppressSelector(PRIMARY_SELECTOR, clock.now() + 30 * 60_000, clock.now());
+		clock.advance(1500);
+		scriptedReports.anthropic = { status: "healthy" };
+		const released = Promise.withResolvers<void>();
+		const started = Promise.withResolvers<void>();
+		fetchGate = {
+			promise: released.promise,
+			open: () => released.resolve(),
+			started: () => started.resolve(),
+		};
+		const gate = fetchGate;
+
+		const first = registry.isSelectorSuppressedWithRecovery(PRIMARY_SELECTOR, options);
+		const second = registry.isSelectorSuppressedWithRecovery(PRIMARY_SELECTOR, options);
+		await started.promise;
+		gate.open();
+
+		expect(await first).toBe(false);
+		expect(await second).toBe(false);
+		expect(registry.isSelectorSuppressed(PRIMARY_SELECTOR)).toBe(false);
+	});
+
 	it("preserves the quota suppression when the recovery probe aborts", async () => {
 		env = await createEnv();
 		const { registry } = env;

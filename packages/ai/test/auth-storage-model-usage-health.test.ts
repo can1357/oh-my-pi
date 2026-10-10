@@ -89,6 +89,11 @@ const strategy: CredentialRankingStrategy = {
 	windowDefaults: { primaryMs: 60_000, secondaryMs: 60_000 },
 };
 
+const healingStrategy: CredentialRankingStrategy = {
+	...strategy,
+	healableBlockScopes: usage => [{ blockScope: "shared", limits: usage.limits, healthy: true }],
+};
+
 function makeUsageProvider(reports: Record<string, UsageReport | null>): UsageProvider {
 	return {
 		id: "anthropic",
@@ -294,6 +299,31 @@ describe("AuthStorage model usage health", () => {
 		});
 		expect(health.accounts[0]).toMatchObject({ state: "depleted", resetsAt: resetAt });
 		expect(health.state).toBe("unknown");
+	});
+
+	it("does not let a session-forbidden sibling recover a restricted depleted account", async () => {
+		const resetAt = Date.now() + 60_000;
+		const storage = await createStorage(
+			[oauthRow(3), oauthRow(7)],
+			{
+				"account-3": report("account-3", [limit("short", 0.2)]),
+				"account-7": report("account-7", [limit("short", 0.2)]),
+			},
+			new Map([[7, resetAt]]),
+		);
+		storage.sessions.restrict("anthropic", "session-r", ["account:account-7"]);
+
+		const health = await storage.health.model("anthropic", {
+			modelId: "claude",
+			sessionId: "session-r",
+			reserveFraction: 0.1,
+		});
+
+		// The allowed pool is account-7 alone, still addressed by its original
+		// pool index (1); the healthy forbidden account-3 must not surface.
+		expect(health.state).toBe("depleted");
+		expect(health.accounts.map(account => account.credentialId)).toEqual([7]);
+		expect(health.accounts[0]).toMatchObject({ state: "depleted", resetsAt: resetAt });
 	});
 
 	it("inspects only login API keys when that higher-precedence pool exists", async () => {
@@ -504,6 +534,79 @@ describe("AuthStorage model usage health usageAfter cutoff", () => {
 		});
 		expect(health.accounts[0]).toMatchObject({ credentialId: 1, state: "depleted", resetsAt: resetAt });
 		expect(blocked.get(1)).toBe(resetAt);
+	});
+
+	/**
+	 * Broker-backed store serving one OAuth report, with a persisted "shared"
+	 * block that only a cutoff-passing healthy report may heal.
+	 */
+	async function createBrokerStorage(
+		brokerReport: UsageReport,
+		resetAt: number,
+	): Promise<{
+		storage: AuthStorage;
+		sharedBlockUntil: () => number | undefined;
+		blockDeletes: () => number;
+	}> {
+		let sharedBlockUntil: number | undefined = resetAt;
+		let blockDeletes = 0;
+		const store = makeStore([oauthRow(1)]);
+		store.getCredentialBlock = (credentialId, _providerKey, blockScope) =>
+			credentialId === 1 && blockScope === "shared" ? sharedBlockUntil : undefined;
+		store.deleteCredentialBlock = (credentialId, _providerKey, blockScope) => {
+			if (credentialId === 1 && blockScope === "shared") {
+				sharedBlockUntil = undefined;
+				blockDeletes += 1;
+			}
+		};
+		store.getUsageReport = async () => brokerReport;
+		const storage = new AuthStorage(store, {
+			rankingStrategyResolver: provider => (provider === "anthropic" ? healingStrategy : undefined),
+		});
+		await storage.credentials.reload();
+		storages.push(storage);
+		return { storage, sharedBlockUntil: () => sharedBlockUntil, blockDeletes: () => blockDeletes };
+	}
+
+	it("keeps a persisted block authoritative when a broker report predates the cutoff", async () => {
+		const now = Date.now();
+		const resetAt = now + 60_000;
+		const staleHealthy = report("account-1", [limit("short", 0.2)]);
+		staleHealthy.fetchedAt = now - 120_000;
+		const { storage, sharedBlockUntil, blockDeletes } = await createBrokerStorage(staleHealthy, resetAt);
+
+		const health = await storage.health.model("anthropic", {
+			modelId: "claude",
+			reserveFraction: 0.1,
+			usageAfter: now - 60_000,
+		});
+
+		// The report passes the reconcile TTL guard (120s old < 5m) but predates
+		// the caller's stricter cutoff: it must not initiate block healing.
+		expect(blockDeletes()).toBe(0);
+		expect(health.state).toBe("depleted");
+		expect(health.accounts[0]).toMatchObject({ credentialId: 1, state: "depleted", resetsAt: resetAt });
+		expect(sharedBlockUntil()).toBe(resetAt);
+	});
+
+	it("recovers a blocked account when a fresh broker report passes the cutoff", async () => {
+		const now = Date.now();
+		const resetAt = now + 60_000;
+		const freshHealthy = report("account-1", [limit("short", 0.2)]);
+		freshHealthy.fetchedAt = now;
+		const { storage, sharedBlockUntil, blockDeletes } = await createBrokerStorage(freshHealthy, resetAt);
+
+		const health = await storage.health.model("anthropic", {
+			modelId: "claude",
+			reserveFraction: 0.1,
+			usageAfter: now - 60_000,
+		});
+
+		expect(blockDeletes()).toBe(1);
+		expect(sharedBlockUntil()).toBeUndefined();
+		expect(health.state).toBe("healthy");
+		expect(health.accounts[0]).toMatchObject({ credentialId: 1, state: "healthy" });
+		expect(health.accounts[0]?.remainingFraction).toBeCloseTo(0.8);
 	});
 });
 

@@ -47,6 +47,11 @@ import {
 	usageReportScopeAccountId,
 } from "./usage-report";
 
+/** Reject stale evidence before block reconciliation can remove a cooldown. */
+export function reportPassesUsageCutoff(report: UsageReport, usageAfter: number | undefined): boolean {
+	return usageAfter === undefined || (Number.isFinite(report.fetchedAt) && report.fetchedAt > usageAfter);
+}
+
 /** Convert an OAuth usage credential into a refreshable stored shape; used by probes and health. */
 export function buildRefreshableOauthCredential(credential: UsageCredential): OAuthCredential | null {
 	if (!credential.accessToken || !credential.refreshToken || credential.expiresAt === undefined) {
@@ -320,7 +325,7 @@ export class UsageService implements UsageApi {
 	/** Cache a credential report with jitter and failure cooldown. */
 	async #fetchUsageCached(
 		request: UsageRequestDescriptor,
-		options: { timeoutMs?: number } = {},
+		options: { timeoutMs?: number; usageAfter?: number } = {},
 	): Promise<UsageReport | null> {
 		const timeoutMs = options.timeoutMs;
 		const cacheKey = this.#deps.cache.reportKey(request);
@@ -358,7 +363,9 @@ export class UsageService implements UsageApi {
 			const invalidated = usageCacheEpoch !== this.#deps.cache.epoch;
 			if (report !== null) {
 				if (invalidated) return report;
-				this.#deps.blocks.reconcileRequest(request, report);
+				if (reportPassesUsageCutoff(report, options.usageAfter)) {
+					this.#deps.blocks.reconcileRequest(request, report);
+				}
 				const ttlJitter = USAGE_REPORT_TTL_MS * (Math.random() * 0.5 - 0.25);
 				// Success: stagger per-credential cache expiry so all accounts don't
 				// refresh in the same window — Anthropic / OpenAI rate-limit `/usage`
@@ -664,11 +671,18 @@ export class UsageService implements UsageApi {
 		return requests;
 	}
 
-	/** Fetch the best available report for one stored credential. */
+	/**
+	 * Fetch the best available report for one stored credential.
+	 *
+	 * When `options.usageAfter` is set, only a report with finite `fetchedAt`
+	 * strictly newer than the cutoff may reconcile blocks on this lookup; stale
+	 * evidence is still returned (default report semantics are unchanged) but
+	 * never heals.
+	 */
 	async report(
 		provider: Provider,
 		credential: AuthCredential,
-		options?: { baseUrl?: string; timeoutMs?: number; signal?: AbortSignal },
+		options?: { baseUrl?: string; timeoutMs?: number; signal?: AbortSignal; usageAfter?: number },
 	): Promise<UsageReport | null> {
 		// Store-level hook (e.g. `RemoteAuthCredentialStore`) is authoritative
 		// when present for OAuth: the broker already aggregates usage from a
@@ -680,7 +694,7 @@ export class UsageService implements UsageApi {
 			const storeHook = this.#deps.store.getUsageReport?.bind(this.#deps.store);
 			if (storeHook) {
 				const report = await storeHook(provider, credential, options?.signal);
-				if (report) {
+				if (report && reportPassesUsageCutoff(report, options?.usageAfter)) {
 					this.#deps.blocks.reconcileRequest(oauthUsageRequest(provider, credential, options?.baseUrl), report);
 				}
 				return report;
@@ -694,6 +708,7 @@ export class UsageService implements UsageApi {
 		}
 		return this.#fetchUsageCached(usageRequest(provider, usageCredential, options?.baseUrl), {
 			timeoutMs: options?.timeoutMs ?? this.requestTimeoutMs,
+			usageAfter: options?.usageAfter,
 		});
 	}
 

@@ -149,6 +149,8 @@ import { matchModelCompactionThreshold } from "./compaction-threshold";
 // requests; the pi-ai provider resolves it just-in-time per request.
 setCodexAttestationProvider(generateCodexAttestation);
 
+/** Reject older evidence even if a jittered cache entry is still valid. */
+const RECOVERY_EVIDENCE_MAX_AGE_MS = 5 * 60_000;
 /** One built-in discovery pass rewriting more payload rows than this is debug-logged. */
 const MODEL_CACHE_REWRITE_LOG_THRESHOLD = 5;
 const BUILT_IN_MODEL_MANAGER_PROVIDER_IDS: Readonly<Record<string, true>> = Object.freeze(
@@ -3627,21 +3629,26 @@ export class ModelRegistry {
 		);
 	}
 
-	/**
-	 * Check if a model selector is currently suppressed due to rate limits.
-	 */
-	isSelectorSuppressed(selector: string): boolean {
+	/** Active, unexpired suppression record for `selector`, deleting an expired entry. */
+	#activeSuppressedRecord(selector: string): { selector: string; record: SuppressedSelectorRecord } | undefined {
 		const normalizedSelector = normalizeSuppressedSelector(
 			selector,
 			(provider, id) => this.find(provider, id) !== undefined,
 		);
 		const record = this.#suppressedSelectors.get(normalizedSelector);
-		if (!record) return false;
+		if (!record) return undefined;
 		if (record.untilMs <= Date.now()) {
 			this.#suppressedSelectors.delete(normalizedSelector);
-			return false;
+			return undefined;
 		}
-		return true;
+		return { selector: normalizedSelector, record };
+	}
+
+	/**
+	 * Check if a model selector is currently suppressed due to rate limits.
+	 */
+	isSelectorSuppressed(selector: string): boolean {
+		return this.#activeSuppressedRecord(selector) !== undefined;
 	}
 
 	/** Retires quota cooldowns only when fresh usage proves recovery; concurrent failures remain authoritative. */
@@ -3649,16 +3656,9 @@ export class ModelRegistry {
 		selector: string,
 		options: { sessionId?: string; reserveFraction: number; signal?: AbortSignal },
 	): Promise<boolean> {
-		const normalizedSelector = normalizeSuppressedSelector(
-			selector,
-			(provider, id) => this.find(provider, id) !== undefined,
-		);
-		const record = this.#suppressedSelectors.get(normalizedSelector);
-		if (!record) return false;
-		if (record.untilMs <= Date.now()) {
-			this.#suppressedSelectors.delete(normalizedSelector);
-			return false;
-		}
+		const active = this.#activeSuppressedRecord(selector);
+		if (!active) return false;
+		const { selector: normalizedSelector, record } = active;
 		const failureTime = record.usageLimitFailureTime;
 		if (failureTime === undefined) return true;
 		const separatorIndex = normalizedSelector.indexOf("/");
@@ -3673,12 +3673,13 @@ export class ModelRegistry {
 				baseUrl: model.baseUrl,
 				sessionId: options.sessionId,
 				reserveFraction: options.reserveFraction,
-				usageAfter: Math.max(failureTime, Date.now() - 5 * 60_000),
+				usageAfter: Math.max(failureTime, Date.now() - RECOVERY_EVIDENCE_MAX_AGE_MS),
 				signal: options.signal,
 			});
 			if (options.signal?.aborted) return true;
 			if (health.state !== "healthy") return true;
-			if (this.#suppressedSelectors.get(normalizedSelector) !== record) return true;
+			const current = this.#suppressedSelectors.get(normalizedSelector);
+			if (current !== record) return current !== undefined;
 			this.#suppressedSelectors.delete(normalizedSelector);
 			return false;
 		} catch (error) {
