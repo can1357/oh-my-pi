@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added collapsible `/tree` branches: `Space` or `Tab` folds the selected subtree (marked `▸` with the number of hidden entries), and `Shift+Tab` folds every branch off the active thread ([#7762](https://github.com/can1357/oh-my-pi/pull/7762) by [@ParadaCarleton](https://github.com/ParadaCarleton)).
 ### Changed
 
 - In terminals that speak the Tern Surface Protocol (Tern), the composer's bottom bar shows the git branch and its status beside the model chip when the status line has the `git` segment; it outlasts the other facts as the bar narrows, and clicking it opens `/git` ([#15220](https://github.com/can1357/oh-my-pi/pull/15220) by [@H4vC](https://github.com/H4vC))
