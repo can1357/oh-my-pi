@@ -1847,7 +1847,95 @@ async function updateViaBun(release: ReleaseInfo): Promise<InstalledVersionVerif
 	return verification;
 }
 
-async function updateViaNpm(release: ReleaseInfo): Promise<InstalledVersionVerification | undefined> {
+/** Result of a deferred background update hand-off. */
+export interface DeferredUpdateResult {
+	deferred: true;
+	logPath: string;
+}
+
+/** Result of a manager install step: verified PATH launcher, deferred background update, or rename migration. */
+export type ManagerInstallResult = InstalledVersionVerification | DeferredUpdateResult | undefined;
+
+/** Test options for Windows npm trampoline execution. */
+export interface WindowsNpmTrampolineOptions {
+	parentPid?: number;
+	tempDir?: string;
+	logFile?: string;
+	spawnImpl?: (
+		cmd: string[],
+		options: { detached?: boolean; stdio?: ["ignore", "ignore", "ignore"]; windowsHide?: boolean },
+	) => { unref?: () => void };
+}
+
+/**
+ * Batch helper that waits for this process to exit before running npm, so
+ * Windows releases locks on cli.js and loaded native addons.
+ */
+export function buildWindowsNpmTrampolineScript(parentPid: number, npmArgs: string[], logFilePath: string): string {
+	if (!Number.isInteger(parentPid) || parentPid <= 0) {
+		throw new Error(`Invalid parentPid: ${parentPid}`);
+	}
+	if (/[\r\n"]/.test(logFilePath)) {
+		throw new Error(`Invalid logFilePath: ${logFilePath}`);
+	}
+	const escapedArgs = npmArgs
+		.map(arg => {
+			if (/[\r\n]/.test(arg)) throw new Error(`Invalid newline in npm argument: ${arg}`);
+			const escaped = arg.replace(/%/g, "%%%%").replace(/"/g, '""');
+			return /[\s"^&|<>%]/.test(arg) ? `"${escaped}"` : escaped;
+		})
+		.join(" ");
+
+	return [
+		"@echo off",
+		"setlocal",
+		`powershell -NoProfile -Command "Wait-Process -Id ${parentPid} -Timeout 30 -ErrorAction SilentlyContinue" 2>nul`,
+		`call npm ${escapedArgs} > "${logFilePath}" 2>&1`,
+		"set EXIT_CODE=%ERRORLEVEL%",
+		`if %EXIT_CODE% equ 0 del /f /q "${logFilePath}" 2>nul`,
+		`start "" /b cmd /c "ping 127.0.0.1 -n 2 >nul & del /f /q "%~f0" >nul 2>&1"`,
+		"exit /b %EXIT_CODE%",
+		"",
+	].join("\r\n");
+}
+
+/** Spawn the detached Windows trampoline script so npm can replace locked files. */
+export async function spawnWindowsNpmTrampoline(
+	args: string[],
+	release: ReleaseInfo,
+	options: WindowsNpmTrampolineOptions = {},
+): Promise<{ scriptPath: string; logPath: string }> {
+	const parentPid = options.parentPid ?? process.pid;
+	const tempDir = options.tempDir ?? os.tmpdir();
+	const timestamp = Date.now();
+	const scriptPath = path.join(tempDir, `omp-update-${parentPid}-${timestamp}.bat`);
+	const logPath = options.logFile ?? path.join(tempDir, `omp-update-${parentPid}-${timestamp}.log`);
+
+	const scriptContent = buildWindowsNpmTrampolineScript(parentPid, args, logPath);
+	await Bun.write(scriptPath, scriptContent);
+
+	const spawnFn = options.spawnImpl ?? Bun.spawn;
+	const child = spawnFn(["cmd.exe", "/c", scriptPath], {
+		detached: true,
+		stdio: ["ignore", "ignore", "ignore"],
+		windowsHide: true,
+	});
+	child.unref?.();
+
+	console.log(chalk.cyan(`Spawning detached updater to update to ${release.version}...`));
+	console.log(chalk.dim(`The current process will exit so npm can replace active files. Log: ${logPath}`));
+
+	return { scriptPath, logPath };
+}
+
+export async function updateViaNpm(
+	release: ReleaseInfo,
+	options: {
+		platform?: NodeJS.Platform;
+		trampoline?: boolean;
+		trampolineOptions?: WindowsNpmTrampolineOptions;
+	} = {},
+): Promise<ManagerInstallResult> {
 	console.log(chalk.dim("Updating via npm..."));
 	if (release.packages.pkg !== PACKAGE) {
 		await migrateRenamedInstall(release, packageManagerMigrationSteps("npm", release));
@@ -1856,6 +1944,16 @@ async function updateViaNpm(release: ReleaseInfo): Promise<InstalledVersionVerif
 	const args = buildNpmInstallArgs(release.version, currentNativeTag(), release.packages, {
 		registry: release.registry,
 	});
+
+	// On Windows, in-process npm updates hit EBUSY while this process holds
+	// cli.js and native addons open. Hand off to a detached helper instead.
+	const platform = options.platform ?? process.platform;
+	const enableTrampoline = options.trampoline ?? platform === "win32";
+	if (enableTrampoline) {
+		const { logPath } = await spawnWindowsNpmTrampoline(args, release, options.trampolineOptions);
+		return { deferred: true, logPath };
+	}
+
 	const result = await $`npm ${args}`.nothrow();
 	if (result.exitCode !== 0) {
 		throw new Error(`npm install failed with exit code ${result.exitCode}`);
@@ -1863,16 +1961,17 @@ async function updateViaNpm(release: ReleaseInfo): Promise<InstalledVersionVerif
 
 	return await verifyInstalledVersion(release.version);
 }
+
 /** Injectable steps for {@link updateViaManager}; mirrors {@link RenameMigrationSteps}. */
 export interface ManagerUpdateSteps {
 	/** Manager name used in progress and recovery messages. */
 	manager: string;
 	/**
 	 * Run the manager's global install. Resolves to the PATH-resolved launcher
-	 * check, or `undefined` when a rename migration already verified and
-	 * reported its own result.
+	 * check, a deferred background handoff, or `undefined` when a rename
+	 * migration already verified and reported its own result.
 	 */
-	install(): Promise<InstalledVersionVerification | undefined>;
+	install(): Promise<ManagerInstallResult>;
 	/** Re-check the PATH-resolved launcher after the install threw. */
 	verify(): Promise<InstalledVersionVerification>;
 	/** Take `launcherPath` over with the standalone release binary. */
@@ -1922,13 +2021,17 @@ export async function updateViaManager(
 	release: ReleaseInfo,
 	launcherPath: string | undefined,
 	steps: ManagerUpdateSteps,
-): Promise<void> {
+): Promise<DeferredUpdateResult | void> {
 	let installError: unknown;
 	let verification: InstalledVersionVerification | undefined;
 	try {
-		verification = await steps.install();
+		const installResult = await steps.install();
+		if (installResult && "deferred" in installResult) {
+			return installResult;
+		}
 		// A rename migration verifies and reports on its own.
-		if (!verification) return;
+		if (!installResult) return;
+		verification = installResult;
 	} catch (err) {
 		installError = err;
 	}
@@ -2354,11 +2457,20 @@ export async function runUpdateCommand(opts: {
 					),
 				);
 			} else {
-				await updateViaManager(
+				const outcome = await updateViaManager(
 					release,
 					target.path,
 					packageManagerUpdateSteps(target.method, release, allowPrerelease),
 				);
+				if (outcome?.deferred) {
+					if (opts.channel) persistChannel(channel);
+					console.log(
+						chalk.cyan(
+							`\nUpdate to ${release.version} handed off to background process; will complete once ${APP_NAME} exits.\nLog: ${outcome.logPath}`,
+						),
+					);
+					return;
+				}
 			}
 		} else {
 			if (forceBinary && target.replacesSymlink) {
