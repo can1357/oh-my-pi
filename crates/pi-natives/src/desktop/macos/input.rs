@@ -297,13 +297,14 @@ fn with_background_keyboard<T>(
 }
 
 fn keyboard_conflict(wid: u32, records: &[ax::AxWindowRecord]) -> Option<KeyboardConflict> {
-	if !records.iter().any(|record| record.id == wid) {
+	if !records.iter().any(|record| record.id == Some(wid)) {
 		return Some(KeyboardConflict::Unmapped);
 	}
-	// A minimized window cannot be key; an unreadable state could be.
+	// A minimized window cannot be key; an unreadable state could be. An entry
+	// with no window id, such as Finder's desktop, could be key too.
 	let siblings = records
 		.iter()
-		.filter(|record| record.id != wid && record.minimized != Some(true))
+		.filter(|record| record.id != Some(wid) && record.minimized != Some(true))
 		.count();
 	(siblings > 0).then_some(KeyboardConflict::Siblings(siblings))
 }
@@ -1957,7 +1958,7 @@ mod tests {
 	}
 
 	fn record(id: u32, minimized: Option<bool>) -> ax::AxWindowRecord {
-		ax::AxWindowRecord { id, minimized }
+		ax::AxWindowRecord { id: Some(id), minimized }
 	}
 
 	#[test]
@@ -1975,6 +1976,16 @@ mod tests {
 		assert_eq!(
 			keyboard_conflict(10, &[record(11, Some(false))]),
 			Some(KeyboardConflict::Unmapped),
+		);
+	}
+
+	#[test]
+	fn ax_window_without_an_id_is_a_sibling_not_a_failure() {
+		// Finder lists its desktop in AXWindows with no window id.
+		let desktop = ax::AxWindowRecord { id: None, minimized: None };
+		assert_eq!(
+			keyboard_conflict(10, &[record(10, Some(false)), desktop]),
+			Some(KeyboardConflict::Siblings(1)),
 		);
 	}
 
