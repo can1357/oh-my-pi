@@ -41,6 +41,24 @@ const MINIMAL_TO_XHIGH: ThinkingConfig = {
 	requiresEffort: false,
 };
 
+const LOW_MEDIUM_HIGH: ThinkingConfig = {
+	mode: "effort",
+	efforts: [Effort.Low, Effort.Medium, Effort.High],
+	defaultLevel: Effort.Medium,
+	requiresEffort: false,
+};
+
+const STEP_5_PREVIEW_FREE: ClinePassModelMetadata = {
+	name: "Step 5 Preview (free)",
+	contextWindow: 1_000_000,
+	maxTokens: 64_000,
+	input: ["text", "image"],
+	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+	reasoning: true,
+	thinking: LOW_MEDIUM_HIGH,
+	tier: "free",
+};
+
 const DEEPSEEK_V41_FLASH_FREE: ClinePassModelMetadata = {
 	name: "DeepSeek V4.1 Flash (free)",
 	contextWindow: 1_048_576,
@@ -252,6 +270,8 @@ export const CLINE_PASS_MODEL_METADATA: Readonly<Record<string, ClinePassModelMe
 	"deepseek/deepseek-v4.1-flash": DEEPSEEK_V41_FLASH_FREE,
 	"cline-free/muse-spark-1.3-contributor": MUSE_SPARK_13_CONTRIBUTOR_FREE,
 	"meta/muse-spark-1.3-contributor": MUSE_SPARK_13_CONTRIBUTOR_FREE,
+	"cline-free/step-5-preview": STEP_5_PREVIEW_FREE,
+	"stepfun/step-5-preview": STEP_5_PREVIEW_FREE,
 };
 
 export function getClinePassModelMetadata(id: string): ClinePassModelMetadata | undefined {

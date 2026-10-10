@@ -442,4 +442,27 @@ describe("ClinePass catalog", () => {
 		expect(muse?.thinking?.efforts).toEqual([Effort.Minimal, Effort.Low, Effort.Medium, Effort.High, Effort.XHigh]);
 		expect(resolveModelPolicy(muse!).compat.supportsReasoningEffort).toBe(true);
 	});
+
+	it("exposes supported effort levels for Step 5 Preview (free)", async () => {
+		const options = clinePassModelManagerOptions({
+			fetch: async () =>
+				new Response(
+					JSON.stringify({
+						clinePass: [{ id: "cline-pass/kimi-k3", name: "cline-pass/kimi-k3" }],
+						free: [{ id: "cline-free/step-5-preview", name: "Step 5 Preview" }],
+					}),
+					{ status: 200, headers: { "Content-Type": "application/json" } },
+				),
+		});
+
+		const models = await options.fetchDynamicModels?.();
+		const step5 = models?.find(model => model.id === "cline-free/step-5-preview");
+
+		expect(step5).toBeDefined();
+		expect(step5?.name).toBe("Step 5 Preview (free)");
+		expect(step5?.contextWindow).toBe(1_000_000);
+		expect(step5?.maxTokens).toBe(64_000);
+		expect(step5?.thinking?.efforts).toEqual([Effort.Low, Effort.Medium, Effort.High]);
+		expect(resolveModelPolicy(step5!).compat.supportsReasoningEffort).toBe(true);
+	});
 });
