@@ -7,7 +7,7 @@ import {
 	withTimeout,
 	workerHostEntry,
 } from "@oh-my-pi/pi-utils";
-import type { CDPSession, Page, Target } from "puppeteer-core";
+import type { CDPSession, Target } from "puppeteer-core";
 import { callSessionTool } from "../../eval/js/tool-bridge";
 import { webpExclusionForModel } from "@oh-my-pi/pi-tui/chat/image-loading";
 import type { ToolSession } from "../index";
@@ -15,7 +15,12 @@ import { expandPath } from "../path-utils";
 import { CELL_BUDGET_SLACK_MS } from "../run-scope";
 import { ToolAbortError, toWorkerErrorPayload } from "../tool-errors";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
-import { gracefulKillTreeOnce, pickElectronTarget, shouldPreserveConnectedBrowserFocus } from "./attach";
+import {
+	gracefulKillTreeOnce,
+	pickElectronTarget,
+	shouldPreserveConnectedBrowserFocus,
+	targetIdForTarget,
+} from "./attach";
 import { CmuxTab } from "./cmux/cmux-tab";
 import { mapWaitUntil } from "./cmux/rpc";
 import { runInProcessTab } from "./in-process-run";
@@ -1517,13 +1522,20 @@ async function buildInitPayload(browser: PuppeteerBrowserHandle, opts: AcquireTa
 	// target may be backgrounded, so retain activation for target-correct pixels.
 	const userDriven = browser.kind.kind === "connected" || browser.kind.kind === "relay";
 	const activateForScreenshot = !userDriven || !shouldPreserveConnectedBrowserFocus(opts.target);
+	// Target ids are unique per Chromium instance, so a page held by any live
+	// tab worker is off limits even when another handle connected to it.
+	const bound = new Map<string, string>();
+	for (const tab of tabs.values()) {
+		if (tab.backend === "worker" && tab.state === "alive") bound.set(tab.targetId, tab.name);
+	}
 	const page = await pickElectronTarget(browser.browser, {
 		matcher: opts.target,
 		preferVisible: !activateForScreenshot,
 		relayJson: browser.kind.kind === "relay" ? browser.kind.cdpUrl : undefined,
+		bound,
 		signal: opts.signal,
 	});
-	const targetId = await targetIdForPage(page);
+	const targetId = await targetIdForTarget(page.target());
 	return {
 		mode: "attach",
 		browserWSEndpoint,
@@ -1821,23 +1833,6 @@ async function waitForClosed(tab: WorkerTabSession): Promise<void> {
 function expandBrowserScreenshotDir(session: ToolSession): string | undefined {
 	const value = cfgBrowserScreenshotDir.get(session.settings);
 	return value ? expandPath(value) : undefined;
-}
-
-async function targetIdForPage(page: Page): Promise<string> {
-	return await targetIdForTarget(page.target());
-}
-
-async function targetIdForTarget(target: Target): Promise<string> {
-	const raw = target as unknown as { _targetId?: unknown };
-	if (typeof raw._targetId === "string") return raw._targetId;
-	const session = await target.createCDPSession();
-	try {
-		const info = (await session.send("Target.getTargetInfo")) as { targetInfo?: { targetId?: string } };
-		if (info.targetInfo?.targetId) return info.targetInfo.targetId;
-		throw new ToolError("Target id unavailable from CDP target info");
-	} finally {
-		await session.detach().catch(() => undefined);
-	}
 }
 
 function errorFromPayload(payload: RunErrorPayload): Error {

@@ -601,6 +601,91 @@ describe("pickElectronTarget", () => {
 		30_000,
 	);
 
+	test.skipIf(!CHROMIUM_AVAILABLE)(
+		"never binds a second named tab to the page another connected tab drives",
+		async () => {
+			const exe = await ensureChromiumExecutable();
+			if (!exe) throw new Error("Expected a Chromium executable");
+			const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-connected-two-tabs-"));
+			const port = await findFreeCdpPort();
+			const cdpUrl = `http://127.0.0.1:${port}`;
+			const child = Bun.spawn(
+				[
+					exe,
+					"--headless=new",
+					"--no-sandbox",
+					"--no-first-run",
+					"--use-mock-keychain",
+					`--user-data-dir=${root}`,
+					`--remote-debugging-port=${port}`,
+				],
+				{ stdin: "ignore", stdout: "ignore", stderr: "ignore" },
+			);
+			const session = makeSession();
+			const prelude = createBrowserPrelude(session);
+			const invoke = (parameters: unknown) =>
+				prelude.invoke(parameters, { session, toolCallId: "connected-two-tabs" });
+			const first = `connected-first-${crypto.randomUUID()}`;
+			const second = `connected-second-${crypto.randomUUID()}`;
+			const firstUrl = "data:text/html,<title>First</title>";
+			const pageOf = async (name: string) => {
+				const result = await invoke({
+					action: "run",
+					name,
+					code: "return { url: page.url(), id: page.target()._targetId };",
+				});
+				const details = result.details;
+				if (!details || typeof details !== "object" || !("value" in details))
+					throw new Error("run returned no value");
+				return details.value;
+			};
+			try {
+				await waitForCdp(cdpUrl, 15_000);
+				await invoke({ action: "open", name: first, url: firstUrl, app: { cdp_url: cdpUrl } });
+
+				const refused = await rejectionOf(
+					invoke({
+						action: "open",
+						name: second,
+						url: "data:text/html,<title>Second</title>",
+						app: { cdp_url: cdpUrl },
+					}),
+				);
+				expect(refused).toBeInstanceOf(Error);
+				expect((refused as Error).message).toContain(`already driven by tab ${JSON.stringify(first)}`);
+				expect(await pageOf(first)).toMatchObject({ url: firstUrl });
+
+				// The open's own connection must already know the page, so create it there.
+				const attached = await acquireBrowser({ kind: "connected", cdpUrl }, { cwd: process.cwd() });
+				try {
+					if (!("browser" in attached)) throw new Error("Expected a Puppeteer browser");
+					await attached.browser.newPage();
+				} finally {
+					await releaseBrowser(attached, { kill: false });
+				}
+				await invoke({
+					action: "open",
+					name: second,
+					url: "data:text/html,<title>Second</title>",
+					app: { cdp_url: cdpUrl },
+				});
+
+				const firstPage = await pageOf(first);
+				const secondPage = await pageOf(second);
+				expect(firstPage).toMatchObject({ url: firstUrl });
+				expect(secondPage).toMatchObject({ url: "data:text/html,<title>Second</title>" });
+				expect(secondPage).not.toEqual(firstPage);
+			} finally {
+				await invoke({ action: "close", name: second }).catch(() => {});
+				await invoke({ action: "close", name: first }).catch(() => {});
+				child.kill();
+				await child.exited;
+				await fs.rm(root, { recursive: true, force: true });
+			}
+		},
+		30_000,
+	);
+
 	// Launches real headless Chromium; skipped where Chrome's system libraries are absent.
 	test.skipIf(!CHROMIUM_AVAILABLE)(
 		"navigates a fresh attached tab and releases its handle without closing the target",
@@ -807,6 +892,28 @@ describe("pickElectronTarget relay path", () => {
 			t => (t as unknown as { page: { mock: { calls: unknown[] } } }).page.mock.calls.length,
 		);
 		expect(attachCalls).toEqual([0, 1, 0]);
+	});
+
+	it("skips the active tab when another managed tab already drives it", async () => {
+		const docs = makePage([() => {}]);
+		const cart = makePage([() => {}]);
+		const browser = makeBrowser([makeTarget("PAGE10", docs.page).target, makeTarget("PAGE11", cart.page).target]);
+
+		const picked = await pickElectronTarget(browser, { relayJson, bound: new Map([["PAGE11", "login"]]) });
+
+		expect(picked).toBe(docs.page);
+	});
+
+	it("names the managed tab driving the only live page the matcher selects", async () => {
+		const cart = makePage([() => {}]);
+		const browser = makeBrowser([makeTarget("PAGE11", cart.page).target]);
+
+		const error = await rejectionOf(
+			pickElectronTarget(browser, { relayJson, matcher: "cart", bound: new Map([["PAGE11", "login"]]) }),
+		);
+
+		expect(error).toBeInstanceOf(Error);
+		expect((error as Error).message).toMatch(/^The page matching "cart" is already driven by tab "login"\./);
 	});
 
 	it("matcher skips a discarded matching tab", async () => {
