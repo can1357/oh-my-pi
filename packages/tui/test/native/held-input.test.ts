@@ -70,6 +70,67 @@ describe("keystrokes during a Tern startup prepaint", () => {
 		}
 	});
 
+	it("reach a dialog that takes focus live, and resume holding when focus returns", async () => {
+		const editor = new KeyLog();
+		const dialog = new KeyLog();
+		harness = await TspHarness.start(tui => tui.setFocus(editor), TERN_PREPAINT);
+		const h = harness;
+
+		h.terminal.send("\x1bp");
+		h.flush();
+		h.tui.setFocus(dialog);
+		h.terminal.send("\r");
+		h.flush();
+		expect(dialog.keys).toEqual(["\r"]);
+
+		h.tui.setFocus(editor);
+		h.terminal.send("a");
+		h.flush();
+		expect(editor.keys).toEqual([]);
+
+		h.tui.releaseHeldInput();
+		expect(editor.keys).toEqual(["\x1bp", "a"]);
+		expect(dialog.keys).toEqual(["\r"]);
+	});
+
+	it("stay in typing order when the app swaps in a replacement editor", async () => {
+		const editor = new KeyLog();
+		const replacement = new KeyLog();
+		harness = await TspHarness.start(tui => tui.setFocus(editor), TERN_PREPAINT);
+		const h = harness;
+
+		h.terminal.send("a");
+		h.flush();
+		h.tui.replaceHeldFocus(editor, replacement);
+		h.tui.setFocus(replacement);
+		h.terminal.send("b");
+		h.flush();
+		expect(replacement.keys).toEqual([]);
+
+		h.tui.releaseHeldInput();
+		expect(replacement.keys).toEqual(["a", "b"]);
+	});
+
+	it("survive a dialog stopping and restarting the TUI (an external editor)", async () => {
+		const editor = new KeyLog();
+		const dialog = new KeyLog();
+		harness = await TspHarness.start(tui => tui.setFocus(editor), TERN_PREPAINT);
+		const h = harness;
+
+		h.terminal.send("\x1bp");
+		h.flush();
+		h.tui.setFocus(dialog);
+		h.tui.stop();
+		h.tui.start();
+		h.tui.setFocus(editor);
+		h.terminal.send("a");
+		h.flush();
+		expect(editor.keys).toEqual([]);
+
+		h.tui.releaseHeldInput();
+		expect(editor.keys).toEqual(["\x1bp", "a"]);
+	});
+
 	it("are released by Ctrl+C so a stalled startup stays interruptible", async () => {
 		const log = new KeyLog();
 		harness = await TspHarness.start(tui => tui.setFocus(log), TERN_PREPAINT);

@@ -168,12 +168,20 @@ theme token as hex, dark and light variants) after `o` and before its first
 frame, and again when the resolved palette changes. The first row paint waits
 up to 300 ms for the probe. Direct Tern sessions optimistically open a surface
 immediately and fall back to rows if the terminal does not confirm it. Such a
-session needs raw input from the start, so a `deferInput` start holds keystrokes
-instead of leaving the tty cooked. The cell-size reply is still consumed on
-arrival, and the sixel probe is skipped on a TSP terminal, so no probe listener
-sees held keys. `TUI.releaseHeldInput()`, called at the end of
-`InteractiveMode.init()`, replays them once the session is fully wired, so a
-startup hotkey still fires. Ctrl+C/Ctrl+D release the queue early. The
+session needs raw input from the start, so a `deferInput` start holds the
+keystrokes meant for the component focused at start instead of leaving the tty
+cooked; a dialog that takes focus meanwhile (a startup hook's select or confirm)
+gets its input live, and the hold survives the TUI stop/start of an external
+editor opened from such a dialog. A swapped-in custom editor inherits the hold
+through `Composer.setEditor()` (`TUI.replaceHeldFocus()`), so its keys queue
+behind the held ones, and it keeps the startup submit gate. The cell-size reply
+is still consumed on arrival, and the sixel probe is skipped on a TSP terminal,
+so no probe listener sees held keys. `InteractiveMode.init()` calls
+`TUI.releaseHeldInput()` after startup hooks, mode reconcile, draft restore and
+every session subscription, just before lifting the submit gate: held keys edit
+the restored draft instead of racing it, a startup shortcut acts on the final,
+observed session, and a held Enter is still ignored. Ctrl+C/Ctrl+D release the
+queue early. The
 debug socket's `doc` op returns the reference document
 (every sent frame applied by `native/apply.ts`), and `tsp` returns recent frames.
 

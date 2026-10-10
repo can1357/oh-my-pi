@@ -2500,6 +2500,14 @@ export class InteractiveMode implements InteractiveModeContext {
 			onTerminalAppearanceChange(mode, appearanceRefreshWasRequested ? {} : undefined);
 		});
 
+		// Keys pressed while a Tern startup loaded were held until hooks ran, the
+		// session mode settled, the draft was restored and every subscription
+		// above was installed. They replay into the restored draft, never over
+		// it, a startup shortcut (Alt+P, Ctrl+G, extension shortcuts) acts on the
+		// final mode, editor contents and observed session, and a held Enter
+		// still meets the bootstrap submit gate lifted just below.
+		this.ui.releaseHeldInput();
+
 		// Everything is wired: subscriptions observe agent events, the session
 		// mode is reconciled, and the submit handler is installed. Lift the
 		// composer's bootstrap submit gate (`disableSubmit = true` since
@@ -2510,9 +2518,6 @@ export class InteractiveMode implements InteractiveModeContext {
 		// `streamingBehavior: "steer"`, so whichever lands second queues into the
 		// other's turn instead of dying.
 		this.editor.disableSubmit = false;
-		// Keys pressed while a Tern startup loaded were held until this point,
-		// so they reach the same fully wired session a live keystroke would.
-		this.ui.releaseHeldInput();
 		// Publish native send readiness even when no user input triggers another frame.
 		this.ui.requestRender();
 	}
@@ -7100,6 +7105,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		nextEditor.onAutocompleteUpdate = () => {
 			this.ui.requestRender();
 		};
+		// A swap during startup keeps the bootstrap submit gate until init lifts it.
+		nextEditor.disableSubmit = previousEditor.disableSubmit;
 		nextEditor.setShimmerRepaintHandler(() => this.ui.requestComponentRender(nextEditor));
 		this.editor = nextEditor;
 		this.composer.setEditor(nextEditor);

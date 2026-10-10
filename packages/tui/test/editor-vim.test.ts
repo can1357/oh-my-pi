@@ -833,6 +833,22 @@ describe("Editor vim mode", () => {
 			expect(editor.getText()).toBe("aYZ");
 		});
 
+		it("turns a recalled prompt into a draft once replace mode overwrites it", () => {
+			const editor = new Editor(defaultEditorTheme);
+			editor.setVimMode(true);
+			editor.addToHistory("previous");
+			editor.handleInput(UP);
+			expect(editor.getText()).toBe("previous");
+			editor.handleInput(ESC);
+			editor.handleInput("0");
+			editor.handleInput("R");
+			editor.handleInput("X");
+			editor.handleInput(ESC);
+			editor.handleInput("i");
+			editor.handleInput(DOWN);
+			expect(editor.getText()).toBe("Xrevious");
+		});
+
 		it("keeps appending after Right at the end of the line", () => {
 			const editor = vimEditor("abc");
 			editor.handleInput("R");

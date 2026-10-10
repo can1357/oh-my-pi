@@ -5,6 +5,7 @@ import {
 	type ResetCreditAccountStatus,
 	type ResetCreditTarget,
 	type UsageReport,
+	type UsageResetCredit,
 } from "@oh-my-pi/pi-ai";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
@@ -62,6 +63,23 @@ function codexStatus(expiresAtMs: number, account: CodexAccount = CODEX): ResetC
 	};
 }
 
+/** The account's Cedar grant, as its usage report and its live listing both carry it. */
+function claudeOffer(expiresAtMs: number) {
+	const credit: UsageResetCredit = {
+		id: "cedar-grant-1",
+		program: "cedar_ember",
+		remainingCount: 1,
+		usable: true,
+		requiresLimit: false,
+		clears: ["anthropic:7d"],
+		blocking: [],
+		usedFractions: { "anthropic:7d": 0 },
+		expiresAt: new Date(expiresAtMs).toISOString(),
+		status: "available",
+	};
+	return { availableCount: 1, redeemableCount: 1, eligible: true, nextCreditId: credit.id, credits: [credit] };
+}
+
 /** A Claude usage report carrying the account's Cedar inventory, as the usage fetch discovers it. */
 function claudeReport(nowMs: number, expiresAtMs: number): UsageReport {
 	return {
@@ -76,33 +94,15 @@ function claudeReport(nowMs: number, expiresAtMs: number): UsageReport {
 				amount: { usedFraction: 0, unit: "percent" },
 			},
 		],
-		resetCredits: {
-			availableCount: 1,
-			redeemableCount: 1,
-			eligible: true,
-			nextCreditId: "cedar-grant-1",
-			credits: [
-				{
-					id: "cedar-grant-1",
-					program: "cedar_ember",
-					remainingCount: 1,
-					usable: true,
-					requiresLimit: false,
-					clears: ["anthropic:7d"],
-					blocking: [],
-					usedFractions: { "anthropic:7d": 0 },
-					expiresAt: new Date(expiresAtMs).toISOString(),
-					status: "available",
-				},
-			],
-		},
+		resetCredits: claudeOffer(expiresAtMs),
 		metadata: { accountId: CLAUDE.accountId, email: CLAUDE.email, orgId: CLAUDE.orgId },
 	};
 }
 
 /** The live listing of the Claude account, carrying the same offer as its report. */
-function claudeStatus(report: UsageReport): ResetCreditAccountStatus {
-	return { provider: "anthropic", ...CLAUDE, active: false, report, ...report.resetCredits! };
+function claudeStatus(nowMs: number, expiresAtMs: number): ResetCreditAccountStatus {
+	const report = claudeReport(nowMs, expiresAtMs);
+	return { provider: "anthropic", ...CLAUDE, active: false, report, ...claudeOffer(expiresAtMs) };
 }
 
 function autoRedeemPolicy(provider: string, email: string, autoRedeem: boolean): AuthAccountPolicy {
@@ -249,11 +249,11 @@ describe("auth broker saved-reset sweep", () => {
 
 	it("spends a Claude credit expiring in four minutes once a live listing confirms the report inventory's candidate", async () => {
 		const now = { ms: Date.parse("2026-10-09T12:00:00Z") };
-		const report = () => claudeReport(now.ms, Date.parse("2026-10-09T12:04:00Z"));
+		const expiresAtMs = now.ms + 4 * 60_000;
 		const broker = startBroker({
 			now,
-			reports: () => [report()],
-			live: provider => (provider === "anthropic" ? [claudeStatus(report())] : []),
+			reports: () => [claudeReport(now.ms, expiresAtMs)],
+			live: provider => (provider === "anthropic" ? [claudeStatus(now.ms, expiresAtMs)] : []),
 			settings: { "codexResets.autoRedeem": "no", "claudeResets.autoRedeem": "unset" },
 		});
 

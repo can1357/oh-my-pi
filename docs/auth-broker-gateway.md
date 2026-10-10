@@ -147,9 +147,9 @@ The CLI broker refresh hook also handles managed `mcp_oauth:*` credentials using
 
 ### Saved-reset sweep
 
-`serve` also spends saved Codex and Claude rate-limit resets so they are not lost while no session is open. It follows the broker host's own `codexResets.*` and `claudeResets.*` settings and `auth.accountPolicies` (loaded at start; restart the broker after changing them), with the same planner and executor a session uses. With no one to ask, `unset` spends only a credit expiring within 5 minutes; `yes` also salvages earlier; `no` turns that provider's sweep off. If the account policies fail to load, the sweep stays off and the broker logs `auth-broker reset sweep disabled`.
+`serve` also spends saved Codex and Claude rate-limit resets so they are not lost while no session is open. It follows the broker host's own `codexResets.*` and `claudeResets.*` settings and `auth.accountPolicies` (loaded at start; restart the broker after changing them), with the same planner and executor a session uses. With no one to ask, `unset` spends only a credit expiring within 5 minutes; `yes` also salvages earlier; `no` turns that provider's sweep off. An account policy's `autoRedeem: true|false` overrides the provider setting for that account, so `true` keeps the sweep running for it under `no`. If the account policies fail to load, the sweep stays off and the broker logs `auth-broker reset sweep disabled`.
 
-The sweep runs at start, then hourly, and wakes early when a known credit enters its last 5 minutes (then once a minute until it is gone). Each run reads the broker's cached usage (the same reports `/v1/usage` serves) and lists Codex reset credits live; Claude credits come from the inventory in the usage reports, and redeem re-checks the offer live before spending.
+The sweep runs at start, then hourly, and wakes early when a known credit enters its last 5 minutes (then once a minute until it is gone). Each run reads the broker's cached usage (the same reports `/v1/usage` serves) and lists Codex reset credits live. Claude accounts are listed live only when the reset inventory in their usage reports shows a credit to spend, and redeem re-checks the offer before spending.
 
 ## auth-gateway
 
