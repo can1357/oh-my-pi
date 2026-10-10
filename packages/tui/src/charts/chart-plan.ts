@@ -13,6 +13,7 @@
  * out of the scale, and units never share an axis.
  */
 import {
+	type Cell,
 	type Dimension,
 	isMonotonic,
 	isNumber,
@@ -32,6 +33,8 @@ import {
  * - `share`: parts of a whole (percentages summing to 100).
  * - `diverging`: signed changes around zero.
  * - `scatter`: two continuous measures per item.
+ * - `change`: metrics in different units against a baseline column (before/after), as factors.
+ * - `progress`: scores out of a total (`12/12`), as filled tracks.
  */
 export type ChartKind =
 	| "bar"
@@ -42,14 +45,16 @@ export type ChartKind =
 	| "multiples"
 	| "share"
 	| "diverging"
-	| "scatter";
+	| "scatter"
+	| "change"
+	| "progress";
 
 /** What to draw from a table: the kind, the column naming each category, and the columns plotted. */
 export interface ChartPlan {
 	readonly kind: ChartKind;
 	/** Column naming each category (or holding the x values of a line); rows are numbered without one. */
 	readonly label: number | undefined;
-	/** Plotted columns, in order. */
+	/** Plotted columns, in order; a `change` measures the rest against the first (or its `a → b` cells). */
 	readonly series: readonly number[];
 	/** Each data row is its own series (a metric with its own unit) and the plotted columns are the categories. */
 	readonly transpose: boolean;
@@ -94,6 +99,8 @@ export interface ChartSpec {
 	readonly caption?: string;
 	/** Name of the category axis (the label column's header). */
 	readonly axis: string;
+	/** What a `change` measures against (its baseline column); its points are factors of it. */
+	readonly baseline?: string;
 }
 
 const BEFORE =
@@ -102,6 +109,8 @@ const AFTER = /\b(?:after|new|patched|optimi[sz]ed|fixed|warm|now|to|v2|with|pro
 const DELTA = /(?:Δ|delta|change|diff|improvement|speedup|reduction|savings|saved|gain|regression|% chg)/i;
 /** Aggregate columns that restate the others; dropped when enough same-unit series remain. */
 const AGGREGATE = /^(?:total|sum|cumulative|cum\.?|running total|avg|average|mean)\b/i;
+/** The arrow of an `a → b` header or cell, with the spaces around it. */
+const ARROW = /\s*(?:→|->|⇒)\s*/;
 /** Row labels that name an ordered step (`Run 3`, `Day 2`, `N=1000`, `Q3`). */
 const SEQUENCE_LABEL =
 	/^(?:run|day|week|month|iter(?:ation)?|round|step|phase|epoch|v|version|n\s*=|wave|attempt|pass|batch|q[1-4]|#)\s*\d/i;
@@ -110,11 +119,18 @@ const MONTH = /^(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\b/i;
 const MAX_PANELS = 6;
 /** Most lines one line chart keeps apart. */
 const MAX_LINES = 6;
+/** Most series a `progress` pick draws as tracks per category; more read as bars or a heatmap. */
+const MAX_TRACKS = 3;
+/** Smallest factor (either way) that makes a `change` chart say more than its table. */
+const NOTABLE_FACTOR = 1.5;
 
 /** The local best guess at a chart for `table`, or `undefined` when no chart fits. */
 export function planChart(table: TableAnalysis): ChartPlan | undefined {
 	const { rows } = table;
 	let label = table.label;
+	const change = changeColumns(table);
+	if (change)
+		return { kind: "change", label: label?.index, series: change.map(column => column.index), transpose: false };
 	let measures = dropAggregates(table.measures);
 	if (measures.length === 0 || rows.length < 2) return undefined;
 
@@ -136,9 +152,11 @@ export function planChart(table: TableAnalysis): ChartPlan | undefined {
 		transpose,
 	});
 
+	// `a → b` cells: one axis when the rows share a unit, factors of change when each row has its own.
+	if (measures.length === 1 && measures[0]!.arrowShare >= 0.6)
+		return plan(measures[0]!.mixed ? "change" : "paired", measures);
 	const mixed = measures.filter(column => column.mixed);
 	if (mixed.length > 0 && mixed.length * 2 >= measures.length) return plan("multiples", measures, true);
-	if (measures.length === 1 && measures[0]!.arrowShare >= 0.6) return plan("paired", measures);
 
 	const dims = new Set(measures.map(column => column.dim));
 	if (dims.size === 1 && measures.length >= 2 && measures.length <= 4) {
@@ -151,6 +169,8 @@ export function planChart(table: TableAnalysis): ChartPlan | undefined {
 		const lead = measures[0]!.dim;
 		return plan("line", measures.filter(column => column.dim === lead).slice(0, MAX_LINES));
 	}
+	// Several score columns compare like any same-unit measures (as rates); a lone one fills tracks.
+	if (measures.length === 1 && measures[0]!.scores) return plan("progress", measures);
 	if (measures.length <= 2) {
 		const delta = measures.find(
 			column =>
@@ -159,7 +179,7 @@ export function planChart(table: TableAnalysis): ChartPlan | undefined {
 		);
 		if (delta) return plan("diverging", [delta]);
 	}
-	const share = measures.find(column => column.dim === "percent");
+	const share = measures.find(column => column.dim === "percent" && !column.scores);
 	if (share && rows.length <= 10 && (measures.length === 1 || (measures.length === 2 && dims.size === 2))) {
 		const values = columnValues(share, rows);
 		const sum = values.reduce((total, value) => total + value, 0);
@@ -183,6 +203,7 @@ export function buildChart(table: TableAnalysis, plan: ChartPlan): ChartSpec | u
 	const label = plan.label === undefined ? undefined : table.columns[plan.label];
 	const columns = plan.series.map(index => table.columns[index]).filter(column => column !== undefined);
 	if (columns.length === 0) return undefined;
+	if (plan.kind === "change" && !plan.transpose) return changeChart(table, label, columns);
 	const rowName = (row: number, at: number) => (label ? label.cells[row]!.text : "") || `#${at + 1}`;
 
 	let categories: string[];
@@ -193,11 +214,11 @@ export function buildChart(table: TableAnalysis, plan: ChartPlan): ChartSpec | u
 	} else if (plan.kind === "paired" && columns.length === 1) {
 		// `a → b` cells: the column splits into its from and to values.
 		const column = columns[0]!;
-		const [from, to] = column.header.split(/\s*(?:→|->|⇒)\s*/);
-		const before = columnSeries(column, table.rows, from && to ? from : "before");
+		const [from, to] = arrowNames(column.header);
+		const before = columnSeries(column, table.rows, from);
 		const after: ChartSeries = {
 			...before,
-			name: from && to ? to : "after",
+			name: to,
 			points: table.rows.map(row => {
 				const cell = column.cells[row];
 				return isNumber(cell) && cell.to !== undefined
@@ -247,15 +268,27 @@ export function buildChart(table: TableAnalysis, plan: ChartPlan): ChartSpec | u
 
 /**
  * Whether a chart of `spec` reads faster than its table: at least four
- * categories, and either nine plotted values or a 3× spread within a series.
- * On a model-judged sample of assistant tables this gate kept 85% of the
- * tables a chart clearly helped while rejecting most two- and three-row ones.
+ * categories (or small-multiple panels), and either nine plotted values or a
+ * 3× spread within a series. On a model-judged sample of assistant tables this
+ * gate kept 85% of the tables a chart clearly helped while rejecting most two-
+ * and three-row ones. A `change` needs three metrics and one moving by
+ * {@link NOTABLE_FACTOR} either way: its factors are what the table lacks.
  */
 export function worthCharting(spec: ChartSpec): boolean {
-	if (spec.categories.length < 4) return false;
+	const { kind, categories, series } = spec;
+	// Factors share no unit with the table's figures: three metrics are enough once one moves noticeably.
+	if (kind === "change")
+		return (
+			categories.length >= 3 &&
+			series.some(entry =>
+				entry.points.some(point => point && Math.abs(Math.log(point.value)) >= Math.log(NOTABLE_FACTOR)),
+			)
+		);
+	// Small multiples compare within each panel, so four metrics count like four categories.
+	if ((kind === "multiples" ? Math.max(categories.length, series.length) : categories.length) < 4) return false;
 	let points = 0;
 	let spread = 1;
-	for (const entry of spec.series) {
+	for (const entry of series) {
 		const positive: number[] = [];
 		for (const point of entry.points) {
 			if (!point) continue;
@@ -277,8 +310,115 @@ function fitKind(kind: ChartKind, series: readonly ChartSeries[], hasX: boolean)
 	if (kind === "scatter" && hasX) return kind;
 	if (new Set(series.map(entry => `${entry.dim}:${entry.unit}`)).size > 1) return "multiples";
 	if (kind === "share" || kind === "diverging" || kind === "line" || kind === "heatmap") return kind;
+	if (
+		kind === "progress" &&
+		series.length <= MAX_TRACKS &&
+		series.every(
+			entry =>
+				entry.dim === "percent" && entry.points.every(point => !point || (point.value >= 0 && point.value <= 100)),
+		)
+	)
+		return kind;
 	const count = series.length;
 	return count === 1 ? "bar" : count === 2 ? "paired" : count <= 4 ? "grouped" : "heatmap";
+}
+
+/**
+ * Baseline and compared columns of a before/after table a shared axis cannot
+ * hold: rows in different units, or prose cells (`none seen`) keeping its
+ * columns from reading as measures. The baseline is the `before` column; the
+ * compared ones are the `after` column and any measure beside it pairing with
+ * the baseline in two or more rows. Deltas and columns holding their own
+ * `a → b` transitions take no part.
+ */
+function changeColumns(table: TableAnalysis): TableColumn[] | undefined {
+	const { label } = table;
+	if (label?.role !== "label") return undefined;
+	const values = table.columns.filter(
+		column =>
+			column !== label &&
+			(column.role === "measure" || column.role === "label") &&
+			!DELTA.test(column.header) &&
+			!ARROW.test(column.header) &&
+			column.arrowShare < 0.6,
+	);
+	const baseline = values.find(column => BEFORE.test(column.header));
+	if (!baseline) return undefined;
+	const rows = [...table.rows, ...table.totals];
+	const compared = values.filter(
+		column =>
+			column !== baseline &&
+			(column.role === "measure" || AFTER.test(column.header)) &&
+			rows.filter(row => changePoint(baseline.cells[row], column.cells[row])).length >= 2,
+	);
+	if (!compared.some(column => AFTER.test(column.header))) return undefined;
+	const columns = [baseline, ...compared];
+	// One unit throughout: a shared axis holds the values themselves (`paired`, `grouped`).
+	if (columns.every(column => column.role === "measure" && !column.mixed)) return undefined;
+	return columns;
+}
+
+/**
+ * A `change` over `columns`: per row, each compared column as a factor of the
+ * baseline's value, or the `a → b` cells of a lone column as factors of their
+ * start. Total rows stay (a factor never skews the scale); rows with no pair
+ * are named in the caption instead.
+ */
+function changeChart(
+	table: TableAnalysis,
+	label: TableColumn | undefined,
+	columns: readonly TableColumn[],
+): ChartSpec | undefined {
+	const [baseline, ...compared] = columns;
+	if (!baseline) return undefined;
+	const [from, to] = arrowNames(baseline.header);
+	const pairs = compared.length
+		? compared.map(column => ({
+				name: column.header,
+				at: (row: number) => changePoint(baseline.cells[row], column.cells[row]),
+			}))
+		: [{ name: to, at: (row: number) => arrowChange(baseline.cells[row]) }];
+	const rows = [...table.rows, ...table.totals].sort((a, b) => a - b);
+	const name = (row: number) => (label ? label.cells[row]!.text : "") || `#${row + 1}`;
+	const kept = rows.filter(row => pairs.some(pair => pair.at(row)));
+	if (kept.length < 2) return undefined;
+	const skipped = rows.filter(row => !kept.includes(row)).map(name);
+	return {
+		kind: "change",
+		categories: kept.map(name),
+		series: pairs.map(pair => ({
+			name: pair.name,
+			dim: "ratio",
+			unit: "",
+			points: kept.map(row => pair.at(row) ?? null),
+			notes: kept.map(() => undefined),
+		})),
+		caption: skipped.length ? `Not plotted: ${skipped.join(" · ")}` : undefined,
+		axis: label?.header ?? "",
+		baseline: compared.length ? baseline.header : from,
+	};
+}
+
+/** `to` as a factor of `from` (`59.4 s → 1.23 s` is 0.0207), when both are numbers of one dimension. */
+function changePoint(from: Cell | undefined, to: Cell | undefined): ChartPoint | undefined {
+	if (!isNumber(from) || !isNumber(to) || from.dim !== to.dim || from.value <= 0 || to.value < 0) return undefined;
+	return {
+		value: to.value / from.value,
+		text: `${from.figure} → ${to.figure}`,
+		emphasis: from.emphasis || to.emphasis,
+	};
+}
+
+/** An `a → b` cell as the factor `b ÷ a`. */
+function arrowChange(cell: Cell | undefined): ChartPoint | undefined {
+	if (!isNumber(cell) || cell.to === undefined || cell.value <= 0 || cell.to < 0) return undefined;
+	return { value: cell.to / cell.value, text: `${cell.figure} → ${cell.toFigure ?? ""}`, emphasis: cell.emphasis };
+}
+
+/** The from and to names in an `a → b` header (`out tokens r5 → r6`), else `before` and `after`. */
+function arrowNames(header: string): [string, string] {
+	const [from, to] = header.split(ARROW);
+	return from && to ? [from, to] : ["before", "after"];
 }
 
 /** Same-unit aggregate columns (`Total`, `avg`) restate the series beside them. */

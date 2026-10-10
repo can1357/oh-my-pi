@@ -105,6 +105,35 @@ const PROSE = `| File | Change |
 | a.ts | renamed the helper |
 | b.ts | dropped the shim |`;
 
+// Rows in their own units, two of them prose that keeps the columns from reading as measures.
+const IMPROVEMENTS = `| Metric | Before | After |
+|---|---|---|
+| Time to return | 59.4 s | 1.23 s |
+| UI thread blocked | ~58 s | none seen |
+| Memory | 3.65 GB | 197 MB |
+| Characters drawn | 1,847,791 | 4,096 + "… 1843695 more" |
+| Text sent for highlighting | the whole line | the first 4,096 bytes |
+| Dropped frames | 12 | 0 |`;
+
+const VARIANTS = `| | A: old commit | B: short prompt | C: new headers |
+|---|---|---|---|
+| Verified runs | 155/160 | 149/160 | 154/159 |
+| Edit tool errors | 11 | 13 | **7** |
+| Input tokens | 681,772 | 597,914 | 543,357 |`;
+
+const ARROW_METRICS = `| Metric | r5 → r6 |
+|---|---|
+| Wall time | 59.4 s → 1.23 s |
+| Memory | 3.65 GB → 197 MB |
+| Errors | 11 → 7 |`;
+
+const SCORES = `| Suite | Passed |
+|---|---|
+| parser | 48/48 |
+| layout | 112/130 |
+| paint | 9/40 |
+| input | 30/32 |`;
+
 describe("parseCell", () => {
 	it("normalizes units to base values and keeps the written figure", () => {
 		expect(parseCell("1.2 s")).toMatchObject({ value: 1.2, dim: "duration" });
@@ -126,6 +155,12 @@ describe("parseCell", () => {
 		expect(parseCell("cf89bee60").kind).toBe("id");
 		expect(parseCell("renamed the helper").kind).toBe("text");
 		expect(parseCell("—").kind).toBe("missing");
+	});
+
+	// Regression: unit lookups read inherited keys, and `3 constructor` threw while rendering.
+	it("reads words named like object members as nouns, not units", () => {
+		expect(parseCell("3 constructor")).toMatchObject({ kind: "number", value: 3, dim: "count", fit: "note" });
+		expect(parseCell("constructor").kind).toBe("text");
 	});
 
 	it("reads a lone m as millions unless the column holds other durations", () => {
@@ -152,6 +187,18 @@ describe("analyzeTable", () => {
 		expect(analysis.measures.map(column => column.header)).toEqual(["score"]);
 	});
 
+	it("reads whole-number scores as the percent of their total, but not pairs or lists", () => {
+		const scores = analyze(SCORES);
+		expect(scores.measures[0]).toMatchObject({ dim: "percent", scores: true });
+		expect(scores.measures[0]!.cells[1]).toMatchObject({ value: (100 * 112) / 130, figure: "112/130" });
+		const dims = analyze(
+			"| | old | new |\n|---|---|---|\n| Edit / read calls | 85 / 147 | 83 / 143 |\n| Options | 327 / 333 / 339 | 1 / 2 / 3 |\n| Runs | 155/160 | 154/159 |",
+		).columns[1]!.cells.map(cell => cell.kind === "number" && cell.dim);
+		expect(dims).toEqual(["fraction", "fraction", "percent"]);
+		const paired = analyze("| Case | p50 / p95 |\n|---|---|\n| a | 3 / 9 |\n| b | 4 / 8 |\n| c | 2 / 5 |");
+		expect(paired.measures[0]).toMatchObject({ dim: "fraction", scores: false });
+	});
+
 	it("keeps a mostly numeric column whose other cells are status words", () => {
 		const analysis = analyze(
 			"| Input | GNU | uutils |\n|---|---|---|\n| a | 36ms | 112ms |\n| b | 31ms | 1,222ms |\n| c | 30ms | TIMEOUT |",
@@ -172,6 +219,10 @@ describe("planChart", () => {
 		["a same-unit matrix", MATRIX, "heatmap"],
 		// Regression: a sorted leading % column beside a name column is a measure, not a line's x axis.
 		["a sorted measure beside a name column", PROFILE, "multiples"],
+		["before/after rows in their own units, some in prose", IMPROVEMENTS, "change"],
+		["variants of a baseline across metrics", VARIANTS, "change"],
+		["a → b cells in their own units", ARROW_METRICS, "change"],
+		["one column of scores", SCORES, "progress"],
 	];
 	it.each(kinds)("charts %s as %s", (_name, markdown, kind) => {
 		expect(planChart(analyze(markdown))?.kind).toBe(kind);
@@ -205,6 +256,32 @@ describe("planChart", () => {
 		expect(one?.kind).toBe("bar");
 		const lone = buildChart(matrix, { kind: "scatter", label: 0, series: [1], transpose: false });
 		expect(lone?.kind).toBe("bar");
+		// Tracks fill toward 100%: counts fall back to bars.
+		const counts = buildChart(matrix, { kind: "progress", label: 0, series: [1, 2], transpose: false });
+		expect(counts?.kind).toBe("paired");
+	});
+
+	it("measures each after value as a factor of its before value, naming the rows it skips", () => {
+		const analysis = analyze(IMPROVEMENTS);
+		const spec = buildChart(analysis, planChart(analysis)!)!;
+		expect(spec.categories).toEqual(["Time to return", "Memory", "Characters drawn", "Dropped frames"]);
+		expect(spec.baseline).toBe("Before");
+		expect(spec.series[0]!.points.map(point => point?.value)).toEqual([
+			1.23 / 59.4,
+			197e6 / 3.65e9,
+			4096 / 1847791,
+			0,
+		]);
+		expect(spec.series[0]!.points[0]!.text).toBe("59.4 s → 1.23 s");
+		expect(spec.caption).toContain("UI thread blocked");
+		expect(spec.caption).toContain("Text sent for highlighting");
+		expect(spec.caption).not.toContain("Memory");
+
+		const variants = analyze(VARIANTS);
+		const grouped = buildChart(variants, planChart(variants)!)!;
+		expect(grouped.baseline).toBe("A: old commit");
+		expect(grouped.series.map(series => series.name)).toEqual(["B: short prompt", "C: new headers"]);
+		expect(grouped.series[1]!.points[1]!.value).toBeCloseTo(7 / 11);
 	});
 
 	it("splits a → b cells into from and to series named by the header", () => {
@@ -227,6 +304,17 @@ describe("worthCharting", () => {
 		expect(worthCharting(spec(RUNS))).toBe(false);
 		expect(worthCharting(spec(BEFORE_AFTER))).toBe(true);
 	});
+
+	it("counts small-multiple panels like categories", () => {
+		expect(worthCharting(spec(METRICS))).toBe(true);
+	});
+
+	it("draws a change from three metrics once one moves by half again either way", () => {
+		expect(worthCharting(spec(IMPROVEMENTS))).toBe(true);
+		const flat = `| Metric | Before | After |\n|---|---|---|\n| Time | 10 s | 9 s |\n| Memory | 100 MB | 90 MB |\n| Errors | 10 | 9 |`;
+		expect(spec(flat).kind).toBe("change");
+		expect(worthCharting(spec(flat))).toBe(false);
+	});
 });
 
 describe("renderChartSvg", () => {
@@ -244,13 +332,18 @@ describe("renderChartSvg", () => {
 			METRICS,
 			DELTAS,
 			MATRIX,
+			IMPROVEMENTS,
+			VARIANTS,
+			ARROW_METRICS,
+			SCORES,
 		].map(markdown => [markdown, planChart(analyze(markdown))]);
 		const scatter = analyze("| a | b |\n|---|---|\n| 1 | 9 |\n| 4 | 2 |\n| 2 | 7 |\n| 8 | 1 |\n| 5 | 3 |\n| 3 | 6 |");
 		plans.push(["scatter", { kind: "scatter", label: undefined, series: [0, 1], transpose: false }]);
 		for (const [markdown, plan] of plans) {
 			const analysis = markdown === "scatter" ? scatter : analyze(markdown);
 			const { svg } = renderChartSvg(buildChart(analysis, plan!)!);
-			expect(svg).not.toMatch(/(?:fill|stroke)="(?!var\(--|none")/);
+			// Gradients count as themed: their stops are tokens too.
+			expect(svg).not.toMatch(/(?:fill|stroke|stop-color)="(?!var\(--|none"|url\(#)/);
 			for (const [, name] of svg.matchAll(/var\(--([\w-]+)\)/g)) expect(palette[name!]).toBeDefined();
 			expect(prepareSvg(svg, palette)).not.toContain("var(--");
 		}

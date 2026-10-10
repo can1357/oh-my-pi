@@ -1323,7 +1323,7 @@ async function runRpc(
 				msg.params,
 			);
 		case "createTab": {
-			const tab = await chrome.tabs.create({ url: msg.url });
+			const tab = await chrome.tabs.create({ url: msg.url, active: msg.active ?? true });
 			const snap = snapshot(tab);
 			if (!snap) throw new Error("created tab has no id");
 			return { tab: snap };

@@ -6,10 +6,11 @@ Drive real Chromium tabs from JavaScript or Python Eval with the global `browser
 - Python: `await browser.open(name=…, url=…)`, synchronous `browser.tab(name)`, `await browser.tabs()`, and `await browser.close(name=…)`. Python methods accept keyword arguments.
 - `open` options: `name`, `url`, `app`, `viewport`, `wait_until`, `dialogs`, `allowed_domains`, `init_scripts`, `downloads`, `user_agent`, `ignore_https_errors`, `allow_file_access`, `headed`, `timeout`, `persist`.
 - `close` options: `name`, `all`, `kill`, `timeout`.
+- `open`, `close`, and `run` take `timeout` in seconds (default 30, capped by `tools.maxTimeout` when set, clamped to 1–300); `waitFor*` helpers take `timeout` in milliseconds.
 - Direct tab helpers:
   - Navigation: `url`, `title`, `goto`, `back`, `forward`, `reload`, `pushState`.
   - Inspection: `observe`, `ariaSnapshot`, `a11y`, `screenshot`, `diffScreenshot`, `pdf`, `extract`, `text`, `html`, `value`, `attr`, `count`, `box`, `styles`, `isVisible`, `isEnabled`, `isChecked`.
-  - Snapshot options: `observe({selector?, compact?})`; `ariaSnapshot(selector?, {interactive?, compact?, urls?, diff?})`.
+  - Snapshot options: `observe({selector?, compact?, viewportOnly?, includeAll?})` (`viewportOnly`: on-screen elements only, ignored on cmux; `includeAll`: non-interactive nodes too); `ariaSnapshot(selector?, {interactive?, compact?, urls?, diff?})`.
   - Screenshot options: `screenshot({selector?, fullPage?, silent?, annotate?, format?, quality?, ifChanged?, threshold?})`; `diffScreenshot(baselinePath, {threshold?, output?})`; `pdf({path?, format?, landscape?, scale?, printBackground?, margin?, pageRanges?})`.
   - Extraction options: `extract(format?, {selector?, outline?, filter?})`.
   - Interaction: `click`, `dblclick`, `hover`, `focus`, `check`, `uncheck`, `type`, `fill`, `press`, `keyDown`, `keyUp`, `mouseMove`, `mouseDown`, `mouseUp`, `clickAt`, `wheel`, `scroll`, `drag`, `highlight`, `scrollIntoView`, `select`, `uploadFile`.

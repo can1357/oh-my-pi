@@ -6,6 +6,11 @@
 
 - Fixed orphaned debugger attachments and the Chrome debugging infobar surviving relay outages or extension restarts ([#8930](https://github.com/can1357/oh-my-pi/issues/8930)).
 - Fixed reconnect races that could lose, duplicate, or misclassify recovered browser-relay attachments ([#8930](https://github.com/can1357/oh-my-pi/issues/8930)).
+## [18.8.8] - 2026-10-10
+
+### Fixed
+
+- Fixed tabs a relay client asks to open in the background being created as the selected tab ([#15109](https://github.com/can1357/oh-my-pi/pull/15109) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.6.3] - 2026-10-06
 
