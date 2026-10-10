@@ -6,6 +6,10 @@
 
 - In terminals that speak the Tern Surface Protocol (Tern), the composer's bottom bar shows the git branch and its status beside the model chip when the status line has the `git` segment; it outlasts the other facts as the bar narrows, and clicking it opens `/git` ([#15220](https://github.com/can1357/oh-my-pi/pull/15220) by [@H4vC](https://github.com/H4vC))
 
+### Fixed
+
+- Sessions past the provider image cap (or Anthropic's inline image byte budget) no longer rewrite the whole prompt cache on every new screenshot: the oldest images are now evicted a quarter of the budget at a time, so the cached prefix only changes once per step ([#15230](https://github.com/can1357/oh-my-pi/issues/15230))
+
 ## [18.8.8] - 2026-10-10
 
 ### Added

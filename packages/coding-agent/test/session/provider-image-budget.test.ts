@@ -83,6 +83,21 @@ function textData(context: Context): string[] {
 	return data;
 }
 
+function screenshotContext(count: number, data: (index: number) => string): Context {
+	return {
+		systemPrompt: [],
+		tools: [],
+		messages: Array.from({ length: count }, (_, index) => ({
+			role: "toolResult",
+			toolCallId: `call-${index}`,
+			toolName: "screenshot",
+			content: [text(`result-${index}`), image(data(index))],
+			isError: false,
+			timestamp: index,
+		})),
+	};
+}
+
 describe("provider context image budgets", () => {
 	it("drops oldest images above the active provider cap while preserving text", () => {
 		const context: Context = {
@@ -120,7 +135,8 @@ describe("provider context image budgets", () => {
 		const clamped = clampProviderContextImages(context, UMANS_MODEL);
 		const firstMessage = clamped.messages[0];
 
-		expect(imageData(clamped)).toEqual(Array.from({ length: 10 }, (_, index) => `image-${index + 1}`));
+		// One image over UMANS' 10 evicts a whole step of ceil(10 / 4) = 3.
+		expect(imageData(clamped)).toEqual(Array.from({ length: 8 }, (_, index) => `image-${index + 3}`));
 		expect(firstMessage?.role).toBe("toolResult");
 		expect(firstMessage?.content).toEqual([text("[image omitted: provider image limit]")]);
 	});
@@ -168,7 +184,7 @@ describe("provider context image budgets", () => {
 		expect(clampedDeveloper.providerPayload).toBeUndefined();
 		expect(originalUser.providerPayload).toBe(userPayload);
 		expect(originalDeveloper.providerPayload).toBe(developerPayload);
-		expect(imageData(clamped)).toEqual(Array.from({ length: 10 }, (_, index) => `kept-image-${index}`));
+		expect(imageData(clamped)).toEqual(Array.from({ length: 9 }, (_, index) => `kept-image-${index + 1}`));
 	});
 
 	it("does not charge assistant images against the budget user and tool result images pay", () => {
@@ -234,7 +250,26 @@ describe("provider context image budgets", () => {
 
 		const clamped = clampProviderContextImages(context, OPENAI_RESPONSES_MODEL);
 
-		expect(imageData(clamped)).toEqual(Array.from({ length: 200 }, (_, index) => `input-${index + 2}`));
+		// Two over OpenAI's 200 rounds up to one eviction step of 50.
+		expect(imageData(clamped)).toEqual(Array.from({ length: 152 }, (_, index) => `input-${index + 50}`));
+	});
+
+	it("keeps the evicted prefix identical while new images arrive within one eviction step", () => {
+		// Anthropic budgets 90 images, so evictions advance in steps of 23.
+		const sent = (count: number) =>
+			clampProviderContextImages(
+				screenshotContext(count, index => `image-${index}`),
+				ANTHROPIC_MODEL,
+			).messages;
+
+		for (let count = 92; count <= 113; count++) {
+			// Every earlier message goes out byte-identical; only the new tail is appended.
+			expect(sent(count).slice(0, count - 1)).toEqual(sent(count - 1));
+		}
+		expect(imageData({ systemPrompt: [], tools: [], messages: sent(113) })[0]).toBe("image-23");
+		// Crossing the step moves the boundary once, by a whole step.
+		expect(sent(114)[23]).not.toEqual(sent(113)[23]);
+		expect(imageData({ systemPrompt: [], tools: [], messages: sent(114) })[0]).toBe("image-46");
 	});
 
 	it("retains exactly the configured inline byte budget, then drops oldest images without mutating the context", () => {
@@ -273,26 +308,31 @@ describe("provider context image budgets", () => {
 
 	it("removes oldest live screenshots before Anthropic's 32 MB request cap", () => {
 		const screenshot = "A".repeat(534_000);
-		const context: Context = {
-			systemPrompt: [],
-			tools: [],
-			messages: Array.from({ length: 62 }, (_, index) => ({
-				role: "toolResult",
-				toolCallId: `call-${index}`,
-				toolName: "screenshot",
-				content: [text(`result-${index}`), image(screenshot)],
-				isError: false,
-				timestamp: index,
-			})),
-		};
+		const context = screenshotContext(62, () => screenshot);
 		const clamped = clampProviderContextImageBytes(context, ANTHROPIC_MODEL);
 		const keptImages = imageData(clamped);
-		expect(keptImages).toHaveLength(44);
-		expect(keptImages.reduce((size, data) => size + data.length, 0)).toBe(23_496_000);
-		expect(clamped.messages.slice(0, 18).every(message => message.content.length === 1)).toBe(true);
-		expect(clamped.messages.slice(18).every(message => message.content.length === 2)).toBe(true);
+		// 9.1 MB over the 24 MB budget rounds up to two 6 MB eviction steps.
+		expect(keptImages).toHaveLength(39);
+		expect(keptImages.reduce((size, data) => size + data.length, 0)).toBe(20_826_000);
+		expect(clamped.messages.slice(0, 23).every(message => message.content.length === 1)).toBe(true);
+		expect(clamped.messages.slice(23).every(message => message.content.length === 2)).toBe(true);
 		expect(textData(clamped)).toEqual(Array.from({ length: 62 }, (_, index) => `result-${index}`));
 		expect(imageData(context)).toHaveLength(62);
+	});
+
+	it("keeps the byte-evicted prefix identical while new screenshots arrive within one eviction step", () => {
+		const sent = (count: number) =>
+			clampProviderContextImageBytes(
+				screenshotContext(count, index => `${index}`.padEnd(534_000, "A")),
+				ANTHROPIC_MODEL,
+			).messages;
+
+		// 57..67 screenshots exceed the 24 MB budget by 6–12 MB: one fixed 12 MB eviction.
+		for (let count = 58; count <= 67; count++) {
+			const messages = sent(count);
+			expect(messages.slice(0, count - 1)).toEqual(sent(count - 1));
+			expect(imageData({ systemPrompt: [], tools: [], messages })[0]).toBe("23".padEnd(534_000, "A"));
+		}
 	});
 
 	it("removes an oversized single tool image but keeps its tool result meaningful", () => {
@@ -372,7 +412,7 @@ describe("provider context image budgets", () => {
 		};
 		const countClamped = clampProviderContextImages(countLimited, UMANS_MODEL);
 		expect(countClamped.messages[0]?.content).toEqual([text("ref-0")]);
-		expect(imageData(countClamped)).toHaveLength(10);
+		expect(imageData(countClamped)).toHaveLength(8);
 		expect(textData(countClamped)).toEqual(Array.from({ length: 11 }, (_, index) => `ref-${index}`));
 	});
 
@@ -437,7 +477,7 @@ describe("provider context image budgets", () => {
 		};
 		const decorated = decorateContextImages(context, () => "https://images.example/frame.png");
 
-		expect(imageData(clampProviderContextImageBytes(context, ANTHROPIC_MODEL))).toHaveLength(44);
+		expect(imageData(clampProviderContextImageBytes(context, ANTHROPIC_MODEL))).toHaveLength(39);
 		expect(clampProviderContextImageBytes(decorated, ANTHROPIC_MODEL)).toBe(decorated);
 	});
 

@@ -65,6 +65,25 @@ function needsImageDrop(state: ImageBudgetState): boolean {
 	return state.remainingDrops > 0 || state.inlineBytes > state.byteBudget;
 }
 
+/**
+ * Evictions advance in steps of `1 / EVICTION_STEP_DIVISOR` of the budget.
+ *
+ * The clamps are stateless and run on every request, and they always drop the
+ * oldest images. Dropping exactly the excess would move the eviction boundary
+ * one image later on every new image, rewriting a message deep inside the warm
+ * provider prefix each time: the provider re-writes its whole prompt cache and
+ * prefix-bound thinking is discarded (#15230). Rounding the excess up to a
+ * step keeps the dropped prefix byte-identical across requests until the
+ * excess crosses the next step, so the cache is rewritten once per step.
+ */
+const EVICTION_STEP_DIVISOR = 4;
+
+/** Rounds a positive `excess` over `budget` up to the next eviction step. */
+function quantizeEviction(excess: number, budget: number): number {
+	const step = Math.max(1, Math.ceil(budget / EVICTION_STEP_DIVISOR));
+	return Math.ceil(excess / step) * step;
+}
+
 function clampContent(
 	content: readonly (TextContent | ImageContent)[],
 	state: ImageBudgetState,
@@ -128,19 +147,27 @@ function clampImages(context: Context, state: ImageBudgetState): Context {
  *
  * {@link countImages} counts exactly the roles {@link clampImages} can drop, so the
  * budget is always fully spendable and the clamp never evicts an input image
- * on behalf of a model output.
+ * on behalf of a model output. The drop count is rounded up to an eviction
+ * step ({@link quantizeEviction}) so new images do not shift the cached prefix.
  */
 export function clampProviderContextImages(context: Context, model: Model): Context {
 	if (!model.input.includes("image")) return context;
-	const totalImages = countImages(context);
-	const remainingDrops = totalImages - providerImageBudget(model.provider);
-	if (remainingDrops <= 0) return context;
-	return clampImages(context, { remainingDrops, inlineBytes: 0, byteBudget: Number.POSITIVE_INFINITY, model });
+	const budget = providerImageBudget(model.provider);
+	const excess = countImages(context) - budget;
+	if (excess <= 0) return context;
+	return clampImages(context, {
+		remainingDrops: quantizeEviction(excess, budget),
+		inlineBytes: 0,
+		byteBudget: Number.POSITIVE_INFINITY,
+		model,
+	});
 }
 
 /**
  * Drops oldest inline image blocks so their base64 fits the deployment's request-body budget.
  * Runs after URL/provider-file decoration: blocks the provider receives as references carry no inline bytes.
+ * Once over budget, the dropped byte amount is rounded up to an eviction step
+ * ({@link quantizeEviction}) so new images do not shift the cached prefix.
  */
 export function clampProviderContextImageBytes(context: Context, model: Model): Context {
 	if (!model.input.includes("image")) return context;
@@ -155,7 +182,9 @@ export function clampProviderContextImageBytes(context: Context, model: Model): 
 		}
 	}
 	if (inlineBytes <= byteBudget) return context;
-	return clampImages(context, { remainingDrops: 0, inlineBytes, byteBudget, model });
+	// Drop oldest inline images until the remainder fits the step-rounded target.
+	const target = inlineBytes - quantizeEviction(inlineBytes - byteBudget, byteBudget);
+	return clampImages(context, { remainingDrops: 0, inlineBytes, byteBudget: target, model });
 }
 
 /**
