@@ -4,6 +4,7 @@
 
 ### Added
 
+- Added `/account` for inspecting and strictly selecting a session's OAuth account, plus `auth.defaultAccounts` for strict per-provider defaults that persist across resume and subagents without sibling-account fallback; a selector that matches no account or several accounts shows a warning
 - Table charts (`tui.autoGraph`) now cover before/after tables whose rows are different metrics (time, memory, counts): each row's change is drawn as a factor of its "before" value (`48× less`, `+27%`), and rows written in prose are skipped and named under the chart. A single column of scores like `12/12` is drawn as bars filling toward 100%
 
 ### Changed

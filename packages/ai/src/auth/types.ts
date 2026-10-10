@@ -1140,19 +1140,26 @@ export type SessionRestrictionLease = symbol;
 /** Session credential affinity operations. */
 export interface SessionsApi {
 	/**
-	 * Pin one stored OAuth account as this session's preferred credential.
+	 * Pin one stored OAuth account to this session.
 	 *
 	 * The durable credential id keeps the pin stable across credential refreshes,
 	 * storage reordering, and process restarts. By default this is an explicit
-	 * user pin: ranking and account reserve never evict it; hard unavailability
-	 * and auth retry may still route around it.
+	 * preference: ranking and account reserve never evict it, but hard
+	 * unavailability and auth retry may still route around it. `strict: true`
+	 * disables that fallback.
 	 *
-	 * `options.restoredAtMs` instead restores an automatic affinity recorded by a
-	 * persisted session, backdated to its last use, so it keeps the provider's
-	 * warm-window semantics: a resume inside the prompt-cache TTL reuses the
-	 * account, a stale resume re-ranks.
+	 * `options.restoredAtMs` restores affinity recorded by a persisted session,
+	 * backdated to its last use so normal automatic pins retain provider
+	 * warm-window semantics. A restored strict pin remains explicit.
+	 * A strict lock survives credential removal, logout, and definitive refresh
+	 * failure; change this session's routing mode explicitly to release it.
 	 */
-	pin(provider: string, sessionId: string, credentialId: number, options?: { restoredAtMs?: number }): boolean;
+	pin(
+		provider: string,
+		sessionId: string,
+		credentialId: number,
+		options?: { restoredAtMs?: number; strict?: boolean },
+	): boolean;
 	/**
 	 * Copy stored credential affinities from one live session to another.
 	 *
@@ -1161,6 +1168,7 @@ export interface SessionsApi {
 	 * through the target session id without retaining a live dependency on the
 	 * source session. `include` limits the copy to the providers it accepts,
 	 * given whether the source's affinity is an explicit user pin.
+	 * The filter also applies to automatic-routing opt-outs (`explicit: false`).
 	 */
 	inherit(
 		sourceSessionId: string,
@@ -1195,6 +1203,10 @@ export interface SessionsApi {
 	 * headroom, before considering a model/provider fallback.
 	 */
 	release(provider: string, sessionId: string): boolean;
+	/** Disable account pinning for this provider in this session and use native automatic routing. */
+	automatic(provider: string, sessionId: string): boolean;
+	/** Current account-routing mode for this provider and session. */
+	mode(provider: string, sessionId: string): "automatic" | "strict" | "pinned" | "affinity";
 }
 
 /** Usage reporting, observation, and provider configuration. */

@@ -226,10 +226,12 @@ export interface TtsrInjectionEntry extends SessionEntryBase {
  */
 export interface CredentialPinEntry extends SessionEntryBase {
 	type: "credential_pin";
-	/** Provider id the pin applies to (e.g. "anthropic"). */
+	/** Provider id the routing choice applies to (e.g. "anthropic"). */
 	provider: string;
-	/** `credentialPinHash()` of the serving account's identity + scope tuple. */
-	hash: string;
+	/** `credentialPinHash()` of the account identity; absent for automatic routing. */
+	hash?: string;
+	/** Explicit user routing choice. Omitted entries are legacy warm-affinity pins. */
+	mode?: "strict" | "automatic";
 }
 
 /** Session init entry - captures initial context for subagent sessions (debugging/replay). */

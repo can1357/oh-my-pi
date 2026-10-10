@@ -27,6 +27,7 @@ type PersistedSticky = {
 	type: AuthCredential["type"];
 	credentialId: number;
 	explicit: boolean;
+	strict: boolean;
 	lastUsedAtMs: number;
 };
 
@@ -38,6 +39,8 @@ export type SessionCredential = {
 	lastUsedAtMs?: number;
 	/** Set only by the public user-facing pin API; automatic warm affinity leaves it absent. */
 	explicit?: true;
+	/** Never route this session to a sibling account when this credential is unavailable. */
+	strict?: true;
 };
 
 /** One installed restriction: the allowed OAuth identity keys and the lease that lifts it. */
@@ -54,6 +57,8 @@ export type SessionRestrictions = Map<string, Map<string, SessionRestriction>>;
 export class SessionAffinity implements SessionsApi {
 	/** Tracks the last used credential per provider for a session (used for rate-limit switching). */
 	#sessionLastCredential: Map<string, LRUCache<string, SessionCredential>> = new Map();
+	/** Sessions that explicitly opted out of configured/default account pins. */
+	#automaticSessions: Map<string, Set<string>> = new Map();
 	/** Persisted sticky rows per provider, keyed by session id, so unchanged re-records skip the write. */
 	#persistedSticky: Map<string, LRUCache<string, PersistedSticky>> = new Map();
 	#store: AuthCredentialStore;
@@ -123,13 +128,34 @@ export class SessionAffinity implements SessionsApi {
 		return sessions;
 	}
 
-	/** Drop every pin for a provider, both in memory and in the persisted cache. */
+	/**
+	 * Reset ordinary affinity after credentials change, preserving explicit strict locks.
+	 * Logout, deletion, or a revoked grant must not authorize sibling/static fallback;
+	 * only a session routing-mode change clears a strict lock.
+	 */
 	clearProvider(provider: string): void {
-		this.#sessionLastCredential.delete(provider);
-		this.#persistedSticky.delete(provider);
+		const sessions = this.#sessionLastCredential.get(provider);
+		if (sessions) {
+			for (const sessionId of sessions.keys()) {
+				if (sessions.peek(sessionId)?.strict !== true) sessions.delete(sessionId);
+			}
+		}
+		this.#automaticSessions.delete(provider);
+		const persisted = this.#persistedSticky.get(provider);
+		if (persisted) {
+			for (const sessionId of persisted.keys()) {
+				if (persisted.peek(sessionId)?.strict !== true) persisted.delete(sessionId);
+			}
+		}
 		const prefix = `${SESSION_STICKY_CACHE_PREFIX}${provider}:`;
 		try {
-			this.#store.deleteCachePrefix?.(prefix);
+			this.#store.deleteCachePrefix?.(prefix, value => {
+				try {
+					return (JSON.parse(value) as SessionCredential).strict !== true;
+				} catch {
+					return true;
+				}
+			});
 		} catch (err) {
 			logger.debug("Failed to clear provider session sticky credentials from persistent store cache", { err });
 		}
@@ -158,22 +184,29 @@ export class SessionAffinity implements SessionsApi {
 		index: number,
 		lastUsedAtMs?: number,
 		explicit = false,
+		strict = false,
+		credentialId = this.#pool.entries(provider)[index]?.id,
 	): void {
-		if (!sessionId || !this.#permits(provider, sessionId, index)) return;
+		if (!sessionId || (!(strict && index === -1) && !this.#permits(provider, sessionId, index))) return;
 		const nowMs = lastUsedAtMs ?? Date.now();
-		const credentialId = this.#pool.entries(provider)[index]?.id;
 		const sessionMap = SessionAffinity.#sessionsFor(this.#sessionLastCredential, provider);
 		const previous = sessionMap.get(sessionId);
 		const sameCredential =
 			previous?.type === type &&
 			(credentialId !== undefined ? previous.credentialId === credentialId : previous.index === index);
-		const isExplicit = explicit || (sameCredential && previous?.explicit === true);
+		const isExplicit = explicit || strict || (sameCredential && previous?.explicit === true);
+		// A non-strict explicit pin must downgrade a previous strict lock on the
+		// same credential — otherwise `/session pin A` after `/account A` would
+		// silently remain strict.
+		const isStrict = strict || (sameCredential && previous?.strict === true && !explicit);
+		if (isExplicit) this.#automaticSessions.get(provider)?.delete(sessionId);
 		const sessionCredential: SessionCredential = {
 			type,
 			index,
 			credentialId,
 			lastUsedAtMs: nowMs,
 			...(isExplicit ? { explicit: true as const } : {}),
+			...(isStrict ? { strict: true as const } : {}),
 		};
 		sessionMap.set(sessionId, sessionCredential);
 
@@ -187,6 +220,7 @@ export class SessionAffinity implements SessionsApi {
 			persisted.type === type &&
 			persisted.credentialId === credentialId &&
 			persisted.explicit === isExplicit &&
+			persisted.strict === isStrict &&
 			Math.abs(nowMs - persisted.lastUsedAtMs) < SESSION_STICKY_PERSIST_INTERVAL_MS
 		) {
 			return;
@@ -197,6 +231,7 @@ export class SessionAffinity implements SessionsApi {
 				type,
 				credentialId,
 				explicit: isExplicit,
+				strict: isStrict,
 				lastUsedAtMs: nowMs,
 			});
 		} catch (err) {
@@ -209,10 +244,12 @@ export class SessionAffinity implements SessionsApi {
 	 * Retrieves the last credential used by a session. A restricted session
 	 * never sees a pin outside its allowlist — inherited, restored, or recorded
 	 * before the restriction — so it re-ranks inside the allowlist instead.
+	 * A missing strict row is still a lock, not a usable out-of-pool credential.
 	 */
 	get(provider: string, sessionId: string | undefined): SessionCredential | undefined {
 		if (!sessionId) return undefined;
 		const credential = this.#lookup(provider, sessionId);
+		if (credential?.strict === true && credential.index === -1) return credential;
 		return credential && this.#permits(provider, sessionId, credential.index) ? credential : undefined;
 	}
 
@@ -227,6 +264,13 @@ export class SessionAffinity implements SessionsApi {
 			const stored = this.#pool.entries(provider);
 			const actualIndex = stored.findIndex(entry => entry.id === live.credentialId);
 			if (actualIndex === -1 || stored[actualIndex]?.credential.type !== live.type) {
+				// A strict pin must survive credential deletion/disable — the session
+				// is locked to an account that no longer exists, and the correct
+				// behavior is to fail, not silently fall through to a sibling.
+				if (live.strict === true) {
+					live.index = -1;
+					return live;
+				}
 				this.#sessionLastCredential.get(provider)?.delete(sessionId);
 				return undefined;
 			}
@@ -243,6 +287,20 @@ export class SessionAffinity implements SessionsApi {
 					const stored = this.#pool.entries(provider);
 					const actualIndex = stored.findIndex(entry => entry.id === val.credentialId);
 					if (actualIndex === -1 || stored[actualIndex]?.credential.type !== val.type) {
+						// Preserve strict pins even when the credential is gone so
+						// callers can still see the lock and refuse fallback.
+						if (val.strict === true) {
+							const preserved: SessionCredential = {
+								type: val.type,
+								index: -1,
+								credentialId: val.credentialId,
+								lastUsedAtMs: val.lastUsedAtMs,
+								...(val.explicit === true ? { explicit: true } : {}),
+								strict: true,
+							};
+							SessionAffinity.#sessionsFor(this.#sessionLastCredential, provider).set(sessionId, preserved);
+							return preserved;
+						}
 						this.#persistedSticky.get(provider)?.delete(sessionId);
 						this.#store.setCache(cacheKey, "", 0);
 						return undefined;
@@ -261,12 +319,14 @@ export class SessionAffinity implements SessionsApi {
 					credentialId: val.credentialId,
 					lastUsedAtMs: val.lastUsedAtMs,
 					...(val.explicit === true ? { explicit: true } : {}),
+					...(val.strict === true ? { strict: true } : {}),
 				};
 				if (typeof val.lastUsedAtMs === "number") {
 					SessionAffinity.#sessionsFor(this.#persistedSticky, provider).set(sessionId, {
 						type: val.type,
 						credentialId: val.credentialId,
 						explicit: val.explicit === true,
+						strict: val.strict === true,
 						lastUsedAtMs: val.lastUsedAtMs,
 					});
 				}
@@ -289,6 +349,7 @@ export class SessionAffinity implements SessionsApi {
 				this.#sessionLastCredential.delete(provider);
 			}
 		}
+		this.#automaticSessions.get(provider)?.delete(sessionId);
 		const cacheKey = `${SESSION_STICKY_CACHE_PREFIX}${provider}:${sessionId}`;
 		this.#persistedSticky.get(provider)?.delete(sessionId);
 		try {
@@ -330,23 +391,22 @@ export class SessionAffinity implements SessionsApi {
 		// filtered array would be off-by-N when any non-OAuth credential precedes the
 		// OAuth ones (e.g. [api_key, oauth_A, oauth_B] stored order).
 		const stickyCredential = sessionPref?.type === "oauth" ? allCredentials[sessionPref.index] : undefined;
+		if (sessionPref?.strict === true && stickyCredential?.type !== "oauth") return undefined;
 		return stickyCredential?.type === "oauth" ? stickyCredential : oauthCredentials[0];
 	}
 
 	/**
-	 * Pin one stored OAuth account as this session's preferred credential.
+	 * Pin one stored OAuth account to this session.
 	 *
-	 * The durable credential id keeps the pin stable across credential refreshes,
-	 * storage reordering, and process restarts. By default this is an explicit
-	 * user pin: ranking and account reserve never evict it; hard unavailability
-	 * and auth retry may still route around it.
-	 *
-	 * `options.restoredAtMs` instead restores an automatic affinity recorded by a
-	 * persisted session, backdated to its last use, so it keeps the provider's
-	 * warm-window semantics: a resume inside the prompt-cache TTL reuses the
-	 * account, a stale resume re-ranks.
+	 * `strict: true` forbids sibling-account fallback. A restored strict pin
+	 * remains explicit; a normal restored pin keeps warm-affinity semantics.
 	 */
-	pin(provider: string, sessionId: string, credentialId: number, options?: { restoredAtMs?: number }): boolean {
+	pin(
+		provider: string,
+		sessionId: string,
+		credentialId: number,
+		options?: { restoredAtMs?: number; strict?: boolean },
+	): boolean {
 		if (!sessionId || this.#overrides.suppressesOAuth(provider, this.isRestricted(provider, sessionId))) {
 			return false;
 		}
@@ -355,7 +415,8 @@ export class SessionAffinity implements SessionsApi {
 		const target = stored[index];
 		if (target?.credential.type !== "oauth" || !this.allows(provider, sessionId, target.credential)) return false;
 		const restoredAtMs = options?.restoredAtMs;
-		this.record(provider, sessionId, "oauth", index, restoredAtMs, restoredAtMs === undefined);
+		const strict = options?.strict === true;
+		this.record(provider, sessionId, "oauth", index, restoredAtMs, restoredAtMs === undefined || strict, strict);
 		return true;
 	}
 
@@ -375,9 +436,22 @@ export class SessionAffinity implements SessionsApi {
 	): number {
 		if (!sourceSessionId || !targetSessionId || sourceSessionId === targetSessionId) return 0;
 		let inherited = 0;
-		for (const provider of this.#pool.providers()) {
+		const providers = new Set([...this.#pool.providers(), ...this.#sessionLastCredential.keys()]);
+		for (const provider of providers) {
+			if (this.isAutomatic(provider, sourceSessionId)) {
+				if (include && !include(provider, false)) continue;
+				this.automatic(provider, targetSessionId);
+				inherited += 1;
+				continue;
+			}
 			const credential = this.get(provider, sourceSessionId);
-			if (!credential || !this.#permits(provider, targetSessionId, credential.index)) continue;
+			if (
+				!credential ||
+				(!(credential.strict === true && credential.index === -1) &&
+					!this.#permits(provider, targetSessionId, credential.index))
+			) {
+				continue;
+			}
 			if (include && !include(provider, credential.explicit === true)) continue;
 			this.record(
 				provider,
@@ -386,21 +460,47 @@ export class SessionAffinity implements SessionsApi {
 				credential.index,
 				credential.lastUsedAtMs,
 				credential.explicit === true,
+				credential.strict === true,
+				credential.credentialId,
 			);
 			inherited += 1;
 		}
 		return inherited;
 	}
 
+	/** True when this session explicitly requested native automatic routing. */
+	isAutomatic(provider: string, sessionId: string | undefined): boolean {
+		return !!sessionId && this.#automaticSessions.get(provider)?.has(sessionId) === true;
+	}
+
+	/** Clear account affinity and bypass configured exclusive defaults for this session. */
+	automatic(provider: string, sessionId: string): boolean {
+		if (!sessionId || this.#overrides.has(provider)) return false;
+		this.clear(provider, sessionId);
+		const sessions = this.#automaticSessions.get(provider) ?? new Set<string>();
+		sessions.add(sessionId);
+		this.#automaticSessions.set(provider, sessions);
+		return true;
+	}
+
+	mode(provider: string, sessionId: string): "automatic" | "strict" | "pinned" | "affinity" {
+		if (this.isAutomatic(provider, sessionId)) return "automatic";
+		const credential = this.get(provider, sessionId);
+		if (credential?.strict === true) return "strict";
+		return credential?.explicit === true ? "pinned" : "affinity";
+	}
+
 	/**
 	 * Release a session's sticky credential so its next `KeyCascade.get` call
-	 * re-runs native pool ranking. This never blocks or penalizes the released
-	 * account; usage-aware routing uses it when another sibling has more
-	 * headroom, before considering a model/provider fallback.
+	 * uses native automatic routing. Returns false for strict pins — a strict
+	 * lock is the user's explicit no-fallback choice and must not be silently
+	 * erased by usage-aware preflight or internal retry logic.
 	 */
 	release(provider: string, sessionId: string): boolean {
-		if (!this.get(provider, sessionId)) return false;
-		this.clear(provider, sessionId);
-		return true;
+		const credential = this.get(provider, sessionId);
+		if (credential?.strict === true) return false;
+		const hadAffinity = credential !== undefined || this.isAutomatic(provider, sessionId);
+		this.automatic(provider, sessionId);
+		return hadAffinity;
 	}
 }

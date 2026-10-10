@@ -1080,6 +1080,10 @@ describe("AuthStorage codex oauth ranking", () => {
 		});
 		expect(authStorage.sessions.pin("openai-codex", sessionId, accountB.credentialId)).toBe(true);
 		expect(await authStorage.keys.get("openai-codex", sessionId)).toBe("api-acct-b");
+
+		// The same pin in strict /account mode never reaches last-resort ordering.
+		expect(authStorage.sessions.pin("openai-codex", sessionId, accountB.credentialId, { strict: true })).toBe(true);
+		expect(await authStorage.keys.get("openai-codex", sessionId)).toBeUndefined();
 	});
 
 	test("retains the pinned row when the first preflight reload reorders later candidates", async () => {

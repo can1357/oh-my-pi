@@ -79,6 +79,22 @@ describe("RemoteAuthCredentialStore SSE integration", () => {
 		}
 	});
 
+	test("filtered cache-prefix deletion preserves selected rows and unrelated prefixes", () => {
+		const client = new AuthBrokerClient({ url: handle!.url, token });
+		remote = new RemoteAuthCredentialStore({ client });
+		const expiresAtSec = Math.floor(Date.now() / 1000) + 60;
+		remote.setCache("sticky:strict", "keep", expiresAtSec);
+		remote.setCache("sticky:ordinary", "drop", expiresAtSec);
+		remote.setCache("other:ordinary", "drop", expiresAtSec);
+
+		remote.deleteCachePrefix("sticky:", value => value === "drop");
+		expect(remote.getCache("sticky:strict")).toBe("keep");
+		expect(remote.getCache("sticky:ordinary")).toBeNull();
+		expect(remote.getCache("other:ordinary")).toBe("drop");
+		remote.deleteCachePrefix("sticky:");
+		expect(remote.getCache("sticky:strict")).toBeNull();
+	});
+
 	test("consumes initial snapshot, upsert, and removal over SSE without manual refresh", async () => {
 		const client = new AuthBrokerClient({ url: handle!.url, token });
 		remote = new RemoteAuthCredentialStore({ client });

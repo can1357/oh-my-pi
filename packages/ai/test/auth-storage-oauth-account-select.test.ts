@@ -123,6 +123,209 @@ describe("AuthStorage OAuth account selection", () => {
 			}),
 		).toBe("a@example.com");
 	});
+	test("strict pins survive inheritance and stop instead of rotating at the usage limit", async () => {
+		const storage = authStorage;
+		if (!storage) throw new Error("test setup failed");
+		vi.spyOn(oauthUtils, "getOAuthApiKey").mockImplementation(async (provider, credentials) => {
+			const credential = credentials[provider];
+			return credential ? { newCredentials: credential, apiKey: credential.access } : null;
+		});
+		await storage.credentials.set(PROVIDER, [oauthCredential("a"), oauthCredential("b")]);
+		const accountB = storage.oauth.accounts(PROVIDER)[1];
+		if (!accountB) throw new Error("expected second OAuth account");
+		expect(storage.sessions.pin(PROVIDER, "strict-parent", accountB.credentialId, { strict: true })).toBe(true);
+		expect(storage.sessions.inherit("strict-parent", "strict-child")).toBe(1);
+		expect(storage.sessions.mode(PROVIDER, "strict-child")).toBe("strict");
+		expect(await storage.keys.get(PROVIDER, "strict-child")).toBe("access-b");
+		expect(await storage.keys.get(PROVIDER, "strict-child", { modelId: "second-model" })).toBe("access-b");
+		expect(await storage.keys.get(PROVIDER, "strict-child", { accountIds: ["acc-a"] })).toBeUndefined();
+		expect(storage.sessions.mode(PROVIDER, "strict-child")).toBe("strict");
+
+		const outcome = await storage.limits.markReached(PROVIDER, "strict-child", { retryAfterMs: 60_000 });
+		expect(outcome.switched).toBe(false);
+		expect(await storage.keys.get(PROVIDER, "strict-child")).toBeUndefined();
+		expect(storage.oauth.identity(PROVIDER, "strict-child")?.email).toBe("b@example.com");
+	});
+
+	test("persists strict upgrades and downgrades on the same explicit row immediately", async () => {
+		const storage = authStorage;
+		const credentialStore = store;
+		if (!storage || !credentialStore) throw new Error("test setup failed");
+		vi.spyOn(Date, "now").mockReturnValue(Date.now());
+		await storage.credentials.set(PROVIDER, [oauthCredential("a")]);
+		const target = storage.oauth.accounts(PROVIDER)[0];
+		if (!target) throw new Error("expected OAuth account");
+		const sessionId = "strict-persistence";
+		expect(storage.sessions.pin(PROVIDER, sessionId, target.credentialId)).toBe(true);
+		expect(storage.sessions.pin(PROVIDER, sessionId, target.credentialId, { strict: true })).toBe(true);
+
+		const restored = new AuthStorage(credentialStore);
+		await restored.credentials.reload();
+		expect(restored.sessions.mode(PROVIDER, sessionId)).toBe("strict");
+		expect(restored.sessions.pin(PROVIDER, sessionId, target.credentialId)).toBe(true);
+
+		const downgraded = new AuthStorage(credentialStore);
+		await downgraded.credentials.reload();
+		expect(downgraded.sessions.mode(PROVIDER, sessionId)).toBe("pinned");
+	});
+
+	test.each(["external", "restricted", "disable", "removeById", "logout"] as const)(
+		"keeps a missing strict row locked after %s removal without sibling or static fallback",
+		async removal => {
+			const storage = authStorage;
+			const credentialStore = store;
+			if (!storage || !credentialStore) throw new Error("test setup failed");
+			const getApiKey = vi.spyOn(oauthUtils, "getOAuthApiKey").mockImplementation(async (provider, credentials) => {
+				const credential = credentials[provider];
+				return credential ? { newCredentials: credential, apiKey: credential.access } : null;
+			});
+			await storage.credentials.set(PROVIDER, [
+				oauthCredential("a"),
+				oauthCredential("b"),
+				{ type: "api_key", key: "login-key", source: "login" },
+				{ type: "api_key", key: "static-key" },
+			]);
+			const target = storage.oauth.accounts(PROVIDER)[0];
+			if (!target) throw new Error("expected OAuth account");
+			const sessionId = `missing-strict-${removal}`;
+			expect(storage.sessions.pin(PROVIDER, sessionId, target.credentialId, { strict: true })).toBe(true);
+			if (removal === "restricted") {
+				storage.sessions.restrict(PROVIDER, sessionId, ["account:acc-a", "account:acc-b"]);
+				storage.sessions.restrict(PROVIDER, `${sessionId}-child`, ["account:acc-a", "account:acc-b"]);
+			}
+			if (removal === "external" || removal === "restricted") {
+				await credentialStore.deleteAuthCredential(target.credentialId, "removed by peer");
+				await storage.credentials.reload();
+			} else if (removal === "disable") {
+				expect(await storage.credentials.disable(target.credentialId, "revoked grant")).toBe(true);
+			} else if (removal === "removeById") {
+				expect(await storage.credentials.removeById(PROVIDER, target.credentialId)).toBe(true);
+			} else {
+				await storage.credentials.remove(PROVIDER);
+			}
+			expect(storage.sessions.inherit(sessionId, `${sessionId}-child`)).toBe(1);
+
+			for (const current of [storage, new AuthStorage(credentialStore)]) {
+				await current.credentials.reload();
+				expect(current.sessions.mode(PROVIDER, sessionId)).toBe("strict");
+				expect(await current.keys.get(PROVIDER, sessionId)).toBeUndefined();
+				expect(await current.oauth.access(PROVIDER, sessionId)).toBeUndefined();
+				expect(current.oauth.identity(PROVIDER, sessionId)).toBeUndefined();
+				expect(current.sessions.mode(PROVIDER, `${sessionId}-child`)).toBe("strict");
+				expect(await current.keys.get(PROVIDER, `${sessionId}-child`)).toBeUndefined();
+			}
+			expect(getApiKey).not.toHaveBeenCalled();
+		},
+	);
+
+	test("strict preflight revocation preserves the lock instead of trying sibling or static credentials", async () => {
+		const credentialStore = store;
+		if (!credentialStore) throw new Error("test setup failed");
+		const refreshedIds: number[] = [];
+		const storage = new AuthStorage(credentialStore, {
+			refreshOAuthCredential: async (_provider, credentialId) => {
+				refreshedIds.push(credentialId);
+				throw new Error("invalid_grant: refresh token revoked");
+			},
+		});
+		await storage.credentials.set(PROVIDER, [
+			{ ...oauthCredential("a"), expires: 0 },
+			oauthCredential("b"),
+			{ type: "api_key", key: "static-key" },
+		]);
+		const target = storage.oauth.accounts(PROVIDER)[0];
+		if (!target) throw new Error("expected OAuth account");
+		const sessionId = "revoked-strict-preflight";
+		expect(storage.sessions.pin(PROVIDER, sessionId, target.credentialId, { strict: true })).toBe(true);
+
+		expect(await storage.keys.get(PROVIDER, sessionId)).toBeUndefined();
+		expect(refreshedIds).toEqual([target.credentialId]);
+		expect(storage.sessions.mode(PROVIDER, sessionId)).toBe("strict");
+		const restored = new AuthStorage(credentialStore);
+		await restored.credentials.reload();
+		expect(restored.sessions.mode(PROVIDER, sessionId)).toBe("strict");
+		expect(await restored.keys.get(PROVIDER, sessionId)).toBeUndefined();
+	});
+
+	test("strict key resolution surfaces retryable refresh failure without static-key fallback", async () => {
+		if (!store) throw new Error("test setup failed");
+		const storage = new AuthStorage(store, {
+			refreshOAuthCredential: async () => {
+				throw new Error("fetch failed: ECONNREFUSED");
+			},
+		});
+		await storage.credentials.set(PROVIDER, [
+			{ ...oauthCredential("a"), expires: 0 },
+			{ type: "api_key", key: "static-key" },
+		]);
+		const target = storage.oauth.accounts(PROVIDER)[0];
+		if (!target) throw new Error("expected OAuth account");
+		expect(storage.sessions.pin(PROVIDER, "transient-strict", target.credentialId, { strict: true })).toBe(true);
+
+		await expect(storage.keys.getWithCredential(PROVIDER, "transient-strict")).rejects.toThrow("ECONNREFUSED");
+		expect(storage.sessions.mode(PROVIDER, "transient-strict")).toBe("strict");
+		expect(await storage.keys.get(PROVIDER, "transient-strict")).toBeUndefined();
+	});
+
+	test("strict selection follows its durable row through a preflight pool reorder", async () => {
+		const storage = authStorage;
+		const credentialStore = store;
+		if (!storage || !credentialStore) throw new Error("test setup failed");
+		vi.spyOn(oauthUtils, "getOAuthApiKey").mockImplementation(async (provider, credentials) => {
+			const credential = credentials[provider];
+			return credential ? { newCredentials: credential, apiKey: credential.access } : null;
+		});
+		await storage.credentials.set(PROVIDER, [oauthCredential("a"), oauthCredential("b")]);
+		const target = storage.oauth.accounts(PROVIDER)[1];
+		if (!target) throw new Error("expected second OAuth account");
+		const sessionId = "strict-reordered-pool";
+		expect(storage.sessions.pin(PROVIDER, sessionId, target.credentialId, { strict: true })).toBe(true);
+		const list = credentialStore.listAuthCredentials.bind(credentialStore);
+		vi.spyOn(credentialStore, "listAuthCredentials").mockImplementation(provider => list(provider).reverse());
+
+		expect(await storage.keys.get(PROVIDER, sessionId)).toBe("access-b");
+		expect(storage.sessions.mode(PROVIDER, sessionId)).toBe("strict");
+		expect(storage.oauth.accounts(PROVIDER, sessionId).find(account => account.active)?.credentialId).toBe(
+			target.credentialId,
+		);
+	});
+
+	test("filtered automatic inheritance does not erase the child's own strict account pin", async () => {
+		const storage = authStorage;
+		if (!storage) throw new Error("test setup failed");
+		await storage.credentials.set(PROVIDER, [oauthCredential("a")]);
+		const target = storage.oauth.accounts(PROVIDER)[0];
+		if (!target) throw new Error("expected OAuth account");
+		expect(storage.sessions.automatic(PROVIDER, "automatic-parent")).toBe(true);
+		expect(storage.sessions.pin(PROVIDER, "pinned-child", target.credentialId, { strict: true })).toBe(true);
+		const include = vi.fn((_provider: string, explicit: boolean) => explicit);
+
+		expect(storage.sessions.inherit("automatic-parent", "pinned-child", include)).toBe(0);
+		expect(include).toHaveBeenCalledWith(PROVIDER, false);
+		expect(storage.sessions.mode(PROVIDER, "pinned-child")).toBe("strict");
+	});
+
+	test("credential mutation resets ordinary pins while retaining unread persisted strict locks", async () => {
+		const storage = authStorage;
+		const credentialStore = store;
+		if (!storage || !credentialStore) throw new Error("test setup failed");
+		await storage.credentials.set(PROVIDER, [oauthCredential("a"), oauthCredential("b")]);
+		const target = storage.oauth.accounts(PROVIDER)[0];
+		if (!target) throw new Error("expected OAuth account");
+		expect(storage.sessions.pin(PROVIDER, "ordinary", target.credentialId)).toBe(true);
+		expect(storage.sessions.pin(PROVIDER, "strict-unread", target.credentialId, { strict: true })).toBe(true);
+		const fresh = new AuthStorage(credentialStore);
+		await fresh.credentials.reload();
+		expect(await fresh.credentials.removeById(PROVIDER, target.credentialId)).toBe(true);
+
+		const restored = new AuthStorage(credentialStore);
+		await restored.credentials.reload();
+		expect(restored.sessions.mode(PROVIDER, "ordinary")).toBe("affinity");
+		expect(restored.sessions.mode(PROVIDER, "strict-unread")).toBe("strict");
+		expect(await restored.keys.get(PROVIDER, "strict-unread")).toBeUndefined();
+		expect(restored.sessions.automatic(PROVIDER, "strict-unread")).toBe(true);
+		expect(restored.sessions.mode(PROVIDER, "strict-unread")).toBe("automatic");
+	});
 
 	test("resolves the account at the requested position by ID and touches only that one", async () => {
 		const storage = authStorage;
