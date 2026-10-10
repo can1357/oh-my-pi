@@ -7,7 +7,8 @@
  * scrollbar, right sidebar (file management + commit form while dirty, HEAD
  * commit details with author avatar when clean). Submitting an empty commit
  * form generates an llm-git-compatible message; submitting populated fields
- * commits them. A footer shows key hints.
+ * commits them. A footer shows key hints; the staging and discarding ones are
+ * omitted while the tree is clean, where they cannot fire.
  *
  * `tab` moves focus between the diff and the sidebar; both panes take
  * arrows/PgUp/PgDn, vim motions (`j`/`k`/`h`/`l`/`g`/`G`), and mouse
@@ -22,7 +23,8 @@
  * refreshes. In the sidebar tree `←`/`→` collapse/expand directories,
  * `enter` opens the selected file in the diff pane, `space` stages or
  * unstages the selected row, and `delete` discards it — on a directory,
- * every file underneath it.
+ * every file underneath it. All of the staging and discarding keys are inert
+ * on a clean tree, which shows the HEAD commit instead of a change list.
  */
 
 import type { TspSpan } from "@oh-my-pi/pi-wire";
@@ -87,6 +89,28 @@ const REFRESH_MS = 2_000;
 const STATUS_TTL_MS = 6_000;
 
 type Focus = "diff" | "sidebar";
+
+/**
+ * Footer key hints. A clean tree renders the HEAD commit view, where stage
+ * and discard cannot fire: `#patchTargetFor` returns null and
+ * `#discardCurrentFile` returns early for `area: "commit"` rows, and the
+ * sidebar only builds stage/discard actions for the unstaged/staged
+ * sections. `commit` needs the commit form (absent on a clean tree) and
+ * `select` feeds the line-level stage/discard actions (no-ops on commit
+ * rows), so the commit view drops those too and says what it is showing.
+ */
+export function gitFooterHints(clean: boolean, focus: Focus): string {
+	const edit = clean
+		? ""
+		: focus === "diff"
+			? ` · ${formatKeyHints(["s", "u"])} stage · ${formatKeyHints(["x", "delete"])} discard`
+			: ` · ${formatKeyHint("space")} stage · ${formatKeyHint("delete")} discard`;
+	const commit = clean ? "" : ` · ${formatKeyHint("c")} commit`;
+	const select = clean || focus !== "diff" ? "" : ` · ${formatKeyHints(["shift+up", "shift+down"])} select`;
+	return focus === "diff"
+		? `${formatKeyHints(["alt+down", "alt+up"])} hunk · ${formatKeyHints(["]", "["])} file${select}${edit} · ${formatKeyHint("v")} view${commit} · ${formatKeyHint("?")} keys · ${formatKeyHint("q")} quit`
+		: `${formatKeyHints(["up", "down"])} move · ${formatKeyHints(["left", "right"])} fold${edit} · ${formatKeyHint("enter")} open · ${formatKeyHints(["alt+down", "alt+up"])} hunk${commit} · ${formatKeyHint("t")} tree · ${formatKeyHint("?")} keys · ${formatKeyHint("q")} quit`;
+}
 
 /** Tone of a status message: its colour in the header and its span token natively. */
 type StatusTone = "success" | "warning" | "error" | "accent" | "dim";
@@ -792,14 +816,7 @@ class GitTuiComponent implements Component {
 
 		// The empty middle carries the key hints (or a fresh status message).
 		const status = this.#visibleStatus() ? theme.fg(this.#statusTone, this.#status) : "";
-		const middle =
-			status ||
-			theme.fg(
-				"dim",
-				this.#focus === "diff"
-					? `${formatKeyHints(["alt+down", "alt+up"])} hunk · ${formatKeyHints(["]", "["])} file · ${formatKeyHints(["shift+up", "shift+down"])} select · ${formatKeyHints(["s", "u"])} stage · ${formatKeyHints(["x", "delete"])} discard · ${formatKeyHint("v")} view · ${formatKeyHint("c")} commit · ${formatKeyHint("?")} keys · ${formatKeyHint("q")} quit`
-					: `${formatKeyHints(["up", "down"])} move · ${formatKeyHints(["left", "right"])} fold · ${formatKeyHint("space")} stage · ${formatKeyHint("delete")} discard · ${formatKeyHint("enter")} open · ${formatKeyHints(["alt+down", "alt+up"])} hunk · ${formatKeyHint("c")} commit · ${formatKeyHint("t")} tree · ${formatKeyHint("?")} keys · ${formatKeyHint("q")} quit`,
-			);
+		const middle = status || theme.fg("dim", gitFooterHints(this.#model.clean, this.#focus));
 		const free = width - row.width - right.width - 1;
 		const middleText = free > visibleWidth(middle) + 4 ? middle : truncateToWidth(middle, Math.max(0, free - 4));
 		const leftPad = Math.max(1, Math.floor((free - visibleWidth(middleText)) / 2));

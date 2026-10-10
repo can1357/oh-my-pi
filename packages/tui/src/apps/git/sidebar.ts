@@ -1667,6 +1667,9 @@ export class Sidebar {
 				text: ` ${theme.fg("dim", "parent:")} ${theme.fg("accent", head.parents.map(sha => sha.slice(0, 8)).join(" "))}`,
 			});
 		}
+		// This view only appears when there is nothing to stage or discard, so say so
+		// rather than letting the file list read as pending work.
+		rows.push({ text: theme.fg("success", ` Working tree clean — showing committed ${head.shortSha}`) });
 		rows.push({ text: theme.fg("borderMuted", "─".repeat(Math.max(0, width))) });
 		if (!head.filesLoaded) {
 			rows.push({ text: theme.fg("dim", " Loading changed files…") });
@@ -1675,8 +1678,9 @@ export class Sidebar {
 
 		const additions = head.files.reduce((sum, file) => sum + (file.additions ?? 0), 0);
 		const deletions = head.files.reduce((sum, file) => sum + (file.deletions ?? 0), 0);
+		const count = `${head.files.length} file${head.files.length === 1 ? "" : "s"}`;
 		rows.push({
-			text: ` ${theme.bold(`${head.files.length} modified`)}  ${theme.fg("success", `+${additions}`)} ${theme.fg("error", `−${deletions}`)} ${theme.fg("dim", `· ${head.shortSha}`)}`,
+			text: ` ${theme.bold(count)} ${theme.fg("dim", `in ${head.shortSha}`)}  ${theme.fg("success", `+${additions}`)} ${theme.fg("error", `−${deletions}`)}`,
 		});
 		rows.push(this.#viewToggleRow(width));
 		rows.push(...this.#entryRows(head.files, "commit"));
