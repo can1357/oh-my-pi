@@ -19,6 +19,7 @@ import {
 	runAnnotateCommand,
 } from "@oh-my-pi/pi-coding-agent/extensibility/custom-commands/bundled/annotate";
 import {
+	type AnnotationOverlayContext,
 	showCodeReviewOverlay,
 	showTextReviewOverlay,
 } from "@oh-my-pi/pi-coding-agent/extensibility/custom-commands/bundled/annotate/fullscreen";
@@ -383,7 +384,7 @@ describe("/annotate contracts", () => {
 			customKeys: [ENTER],
 		});
 		const note = "whole-message note";
-		const showTextReviewOverlay = vi.fn(async (_ctx: CustomCommandContext, source: TextReviewSource) => {
+		const showTextReviewOverlay = vi.fn(async (_ctx: AnnotationOverlayContext, source: TextReviewSource) => {
 			expect(source.kind).toBe("message");
 			expect(source.text).toBe(wholeText);
 			return { action: "paste" as const, annotations: [{ scope: "text" as const, note }] };
@@ -410,7 +411,7 @@ describe("/annotate contracts", () => {
 		const generateTextReviewContextSummary = vi.fn(async () => {
 			throw new Error("code sources must not request a summary");
 		});
-		const showTextReviewOverlay = vi.fn(async (_ctx: CustomCommandContext, source: TextReviewSource) => {
+		const showTextReviewOverlay = vi.fn(async (_ctx: AnnotationOverlayContext, source: TextReviewSource) => {
 			expect(source.kind).toBe("code");
 			expect(source.text).toBe(code);
 			return { action: "paste" as const, annotations: [{ scope: "text" as const, note }] };
@@ -439,7 +440,7 @@ describe("/annotate contracts", () => {
 			throw new Error("command sources must not request a summary");
 		});
 		const note = "general command note";
-		const showTextReviewOverlay = vi.fn(async (_ctx: CustomCommandContext, source: TextReviewSource) => {
+		const showTextReviewOverlay = vi.fn(async (_ctx: AnnotationOverlayContext, source: TextReviewSource) => {
 			expect(source.kind).toBe("command");
 			expect(source.text).toBe(longCommand);
 			return { action: "paste" as const, annotations: [{ scope: "text" as const, note }] };
@@ -613,7 +614,7 @@ describe("/annotate contracts", () => {
 			const generateTextReviewContextSummary = vi.fn(async () => {
 				throw new Error("direct files must not request a summary");
 			});
-			const showTextReviewOverlay = vi.fn(async (_ctx: CustomCommandContext, source: TextReviewSource) => {
+			const showTextReviewOverlay = vi.fn(async (_ctx: AnnotationOverlayContext, source: TextReviewSource) => {
 				expect(source.kind).toBe("file");
 				expect(source.text).toBe(fileText);
 				return {
@@ -642,7 +643,7 @@ describe("/annotate contracts", () => {
 		const generateTextReviewContextSummary = vi.fn(async () => {
 			throw new Error("direct prompts must not request a summary");
 		});
-		const showTextReviewOverlay = vi.fn(async (_ctx: CustomCommandContext, source: TextReviewSource) => {
+		const showTextReviewOverlay = vi.fn(async (_ctx: AnnotationOverlayContext, source: TextReviewSource) => {
 			expect(source.kind).toBe("prompt");
 			expect(source.text).toBe(exactPrompt);
 			return {

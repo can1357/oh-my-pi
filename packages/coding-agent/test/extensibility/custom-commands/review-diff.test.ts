@@ -104,4 +104,27 @@ describe("parseReviewDiffSnapshot", () => {
 			["src/repeated name.ts", 2],
 		]);
 	});
+
+	it("parses CRLF supplied diffs correctly without trailing carriage returns", () => {
+		const snapshot = parseReviewDiffSnapshot(
+			[
+				"diff --git a/test.ts b/test.ts\r",
+				"index a0b1c2d..e3f4g5h 100644\r",
+				"--- a/test.ts\r",
+				"+++ b/test.ts\r",
+				"@@ -1 +1 @@\r",
+				"-hello\r",
+				"+world\r",
+				"",
+			].join("\n"),
+		);
+		expect(snapshot.files).toHaveLength(1);
+		const file = snapshot.files[0]!;
+		expect(file.path).toBe("test.ts");
+		expect(file.linesAdded).toBe(1);
+		expect(file.linesRemoved).toBe(1);
+		const added = rowOfKind(file.rows, "added");
+		expect(added.raw).toBe("+world");
+		expect(added.content).toBe("world");
+	});
 });
