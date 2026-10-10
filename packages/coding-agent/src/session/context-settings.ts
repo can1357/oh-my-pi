@@ -22,6 +22,46 @@ export const cfgWorkspaceAdditionalDirectories = register({
 	},
 });
 
+/** Built-in context filenames. Listing them in `contextFiles.extra` would load a second copy or bypass one-per-depth shadowing. */
+const BUILTIN_CONTEXT_FILE_NAMES: Record<string, true> = {
+	"agents.md": true,
+	"claude.md": true,
+	"gemini.md": true,
+	"copilot-instructions.md": true,
+};
+
+/** Why `entry` is not a valid `contextFiles.extra` name; undefined for a plain, non-built-in file name. */
+function contextFileNameError(entry: unknown): string | undefined {
+	if (typeof entry !== "string") return `contextFiles.extra entries must be strings (${String(entry)})`;
+	const name = entry.trim();
+	if (name === "") return "contextFiles.extra entries must not be empty";
+	if (BUILTIN_CONTEXT_FILE_NAMES[name.toLowerCase()] === true) {
+		return `contextFiles.extra cannot list a built-in context file (${name})`;
+	}
+	if (name === "." || name === ".." || name.includes("/") || name.includes("\\") || name.includes("\0")) {
+		return `contextFiles.extra entries must be file names, not paths (${name})`;
+	}
+	return undefined;
+}
+
+/**
+ * Extra instruction filenames discovered in addition to AGENTS.md / CLAUDE.md / GEMINI.md.
+ * Config-file only: the names are open-ended, so there is no settings-panel vocabulary.
+ */
+export const cfgContextFilesExtra = register({
+	id: "contextFiles.extra",
+	type: "array",
+	default: EMPTY_STRING_ARRAY,
+	validate: raw => {
+		if (raw === undefined) return;
+		if (!Array.isArray(raw)) throw new Error("contextFiles.extra must be a list of file names");
+		for (const entry of raw) {
+			const error = contextFileNameError(entry);
+			if (error !== undefined) throw new Error(error);
+		}
+	},
+});
+
 // ────────────────────────────────────────────────────────────────────────
 // Context
 // ────────────────────────────────────────────────────────────────────────
