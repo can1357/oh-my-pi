@@ -1382,6 +1382,7 @@ export function customToolToDefinition(tool: CustomTool, sourcePath?: string): T
 		label: tool.label,
 		description: tool.description,
 		parameters: tool.parameters,
+		validateRawArguments: tool.validateRawArguments?.bind(tool),
 		hidden: tool.hidden,
 		defaultInactive: tool.hidden === true,
 		loadMode: defaultLoadModeForToolName(tool.name, tool.loadMode),

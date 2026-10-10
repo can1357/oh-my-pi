@@ -1545,6 +1545,8 @@ export interface Tool<TParameters extends TSchema = TSchema> {
 	name: string;
 	description: string;
 	parameters: TParameters;
+	/** Reject raw arguments before normalization/coercion. Throw on failure; do not mutate the input. */
+	validateRawArguments?(args: unknown): void;
 	/** If true, tool is strictly typed and validated against the parameters schema before execution */
 	strict?: boolean;
 	/** Withhold this Anthropic tool until a `tool_addition` message references it. */

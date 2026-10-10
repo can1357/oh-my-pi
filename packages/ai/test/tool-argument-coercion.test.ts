@@ -69,6 +69,57 @@ function workHistoryArgs(): Record<string, unknown> {
 }
 
 describe("Tool argument coercion", () => {
+	for (const schemaKind of ["callable", "json"] as const) {
+		it(`checks raw arguments before ${schemaKind} schema coercion without changing other fields' repairs`, () => {
+			const schema = type({
+				confirmed: "boolean",
+				enabled: "boolean",
+				count: "number",
+				"note?": "string",
+			});
+			const rawSchema = schema.pick("confirmed");
+			const tool: Tool = {
+				name: "guarded",
+				description: "",
+				parameters: schemaKind === "callable" ? schema : schema.toJsonSchema(),
+				validateRawArguments: args => {
+					rawSchema.assert(args);
+				},
+			};
+			for (const confirmed of [false, true]) {
+				const args = { confirmed, enabled: "true", count: "3", note: null };
+				expect(
+					validateToolArguments(tool, { type: "toolCall", id: "valid", name: tool.name, arguments: args }),
+				).toEqual({ confirmed, enabled: true, count: 3 });
+				expect(args).toEqual({ confirmed, enabled: "true", count: "3", note: null });
+			}
+			for (const flag of [
+				{},
+				{ confirmed: undefined },
+				{ confirmed: null },
+				{ confirmed: "false" },
+				{ confirmed: "true" },
+				{ confirmed: 0 },
+				{ confirmed: 1 },
+				{ confirmed: [] },
+				{ confirmed: {} },
+				{ '"confirmed"': true },
+			]) {
+				const args = { ...flag, enabled: "true", count: "3", note: null };
+				const before = structuredClone(args);
+				expect(() =>
+					validateToolArguments(tool, {
+						type: "toolCall",
+						id: "invalid",
+						name: tool.name,
+						arguments: args,
+					}),
+				).toThrow();
+				expect(args).toEqual(before);
+			}
+		});
+	}
+
 	it("coerces numeric strings when schema expects number", () => {
 		const tool: Tool = {
 			name: "t1",

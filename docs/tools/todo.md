@@ -17,6 +17,8 @@
 
 The params object **is** a single op — the discriminator and its fields live at the top level (no `ops` array wrapper).
 
+Every tool call, including `view`, requires an explicit boolean `finish_turn` alongside the op-specific fields below.
+
 | Op | Required fields | Optional fields | Effect |
 | --- | --- | --- | --- |
 | `init` | `list` **or** flat `items` | `phase` (names the phase for the flat `items` form; defaults to `Tasks`) | Replaces the entire list — with `list`, uses the given phases; with a flat `items` array, synthesizes one phase. Every new task starts `pending` before normalization. |
@@ -34,11 +36,21 @@ The params object **is** a single op — the discriminator and its fields live a
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
 | `op` | `"init" \| "start" \| "done" \| "rm" \| "drop" \| "block" \| "unblock" \| "append" \| "view"` | Yes in the schema | Operation discriminator. At execution time, an omitted op is repaired only for unambiguous `list`/`items` payloads (see Flow). |
+| `finish_turn` | `boolean` | Yes, for every op | No default or coercion. `false` makes no finish request from this call; `true` requests ending the reply after the eligible batch succeeds (see below). |
 | `list` | `{ phase: string; items: string[] }[]` | For `init` (unless a flat `items` list is given) | Full replacement payload. Each phase's `items` has `minItems: 1`; an explicit `list: []` clears all phases. |
 | `task` | `string` | For `start`; for task-targeted `done`/`drop`/`block`/`unblock`/`rm` | Exact task content match. |
 | `phase` | `string` | For `append`; for phase-targeted `done`/`drop`/`block`/`unblock`/`rm`; optional for a flat `init` | Exact phase name match, except `append` lazily creates a missing phase and a flat `init` synthesizes one (default `Tasks`). |
 | `items` | `string[]` | For `append`; or as a flat `init` payload | Tasks to append, or the full task list for a flat `init`. Op-specific validation requires at least one item; a stray empty array on an unrelated op is schema-valid and ignored. |
 | `reason` | `string` | No | Optional blocker note for `block`; normalized to a single trimmed line. |
+
+### Ending a reply
+
+- Missing, `null`, or non-boolean `finish_turn` values (including strings) are rejected without mutation, before argument normalization/coercion. Omitted-op inference never supplies or repairs this flag.
+- Ordinary progress uses `finish_turn: false` and continues work. A `false` call does not veto a sibling `true`.
+- Any `true` requests ending only after the whole assistant-message batch finishes: every call must be a direct Todo mutation, with a matching successful result. `view`, other tools, missing results, or any failure make the batch ineligible.
+- The same assistant message must already contain non-whitespace, complete user-facing text that needs no further result handling. An eligible batch avoids an extra model invocation just to acknowledge the updates; ineligible requests follow normal result handling.
+- Normal stop checks, reminders, and queued user/background input still apply and can continue the turn. Ending a reply does not mark tasks complete: waiting on the user may end with blocked or pending tasks.
+- Todo calls nested inside `eval` and `/todo` state-only helpers do not finish a direct Todo batch. The flag is reply control, not durable task state: it is omitted from task snapshots, historical rendering, and slash-command state-only operation payloads.
 
 ## Outputs
 The tool returns a single-shot `AgentToolResult`:

@@ -6,6 +6,7 @@ import { type } from "@oh-my-pi/omptype";
 import type { AgentTool, StreamFn } from "@oh-my-pi/pi-agent-core";
 import type { Model, ToolResultMessage } from "@oh-my-pi/pi-ai";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
+import { validateToolArguments } from "@oh-my-pi/pi-ai/utils/validation";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -135,6 +136,54 @@ describe("createAgentSession defaultInactive tool activation", () => {
 		// The discovered auth DB lives in registryAuthDir; Windows cannot delete it while open.
 		modelRegistry.authStorage.close();
 		removeSyncWithRetries(registryAuthDir);
+	});
+
+	it("preserves raw argument guards through SDK definition and execution wrappers", async () => {
+		const tempDir = makeTempDir();
+		const parameters = type({ confirmed: "boolean", count: "number" });
+		const rawParameters = parameters.pick("confirmed");
+		const execute = vi.fn(async () => ({ content: [{ type: "text" as const, text: "accepted" }] }));
+		const guardedTool = {
+			...sdkCustomTool,
+			parameters,
+			validateRawArguments(args: unknown) {
+				expect(this).toBe(guardedTool);
+				rawParameters.assert(args);
+			},
+			execute,
+		} satisfies CustomTool;
+		const { session } = await createAgentSession({
+			...baseOptions(tempDir),
+			customTools: [guardedTool],
+		});
+		try {
+			const tool = session.getToolByName(guardedTool.name);
+			if (!tool) throw new Error("Expected guarded SDK tool");
+			for (const confirmed of ["true", "false", 1, null, undefined]) {
+				expect(() =>
+					validateToolArguments(tool, {
+						type: "toolCall",
+						id: "invalid",
+						name: tool.name,
+						arguments: { confirmed, count: "3" },
+					}),
+				).toThrow();
+			}
+			expect(execute).not.toHaveBeenCalled();
+			for (const confirmed of [false, true]) {
+				const args = validateToolArguments(tool, {
+					type: "toolCall",
+					id: "valid",
+					name: tool.name,
+					arguments: { confirmed, count: "3" },
+				});
+				expect(args).toEqual({ confirmed, count: 3 });
+				await tool.execute("valid", args);
+			}
+			expect(execute).toHaveBeenCalledTimes(2);
+		} finally {
+			await session.dispose();
+		}
 	});
 
 	it("excludes defaultInactive extension tools from the initial active set unless explicitly requested", async () => {
@@ -1908,9 +1957,10 @@ describe("createAgentSession defaultInactive tool activation", () => {
 
 			await todo.execute("vibe-todo-init", {
 				op: "init",
+				finish_turn: false,
 				list: [{ phase: "Work", items: ["Worker change"] }],
 			});
-			await todo.execute("vibe-todo-done", { op: "done", task: "Worker change" });
+			await todo.execute("vibe-todo-done", { op: "done", task: "Worker change", finish_turn: false });
 			expect(session.getTodoPhases()).toMatchObject([
 				{
 					name: "Work",
@@ -1942,9 +1992,14 @@ describe("createAgentSession defaultInactive tool activation", () => {
 			if (!todo) throw new Error("Expected real Todo tool");
 			const init = await todo.execute("vibe-todo-init", {
 				op: "init",
+				finish_turn: false,
 				list: [{ phase: "Worker flow", items: ["Reconcile worker result"] }],
 			});
-			const done = await todo.execute("vibe-todo-done", { op: "done", task: "Reconcile worker result" });
+			const done = await todo.execute("vibe-todo-done", {
+				op: "done",
+				task: "Reconcile worker result",
+				finish_turn: false,
+			});
 			for (const [toolCallId, result] of [
 				["vibe-todo-init", init],
 				["vibe-todo-done", done],

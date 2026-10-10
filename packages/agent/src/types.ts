@@ -75,7 +75,10 @@ export interface AgentTurnEndContext {
 	 * absent is equivalent to empty for hosts that construct the context.
 	 */
 	additionalMessages?: AgentMessage[];
-	/** True when the current tool-loop batch is continuing without yielding to post-turn steering. */
+	/**
+	 * True when the tool batch would continue. The awaited onTurnEnd hook may
+	 * set this to false to use the normal stop boundary (including queue drains).
+	 */
 	willContinue: boolean;
 }
 
@@ -586,9 +589,9 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	) => Promise<BeforeToolCallResult | undefined> | BeforeToolCallResult | undefined;
 	/**
 	 * Called after a turn ends and before the loop polls steering/asides for the
-	 * next iteration. `context` carries the just-finished turn; `context.willContinue`
-	 * is true when the current tool-loop batch is continuing without yielding to
-	 * post-turn steering.
+	 * next iteration. `context` carries the just-finished turn; the hook may set
+	 * `context.willContinue` to false to stop tool-driven continuation without
+	 * aborting queued steering, asides, or follow-ups.
 	 */
 	onTurnEnd?: (messages: AgentMessage[], signal?: AbortSignal, context?: AgentTurnEndContext) => Promise<void> | void;
 
