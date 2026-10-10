@@ -3914,6 +3914,17 @@ function applyCacheControlToLastBlock(blocks: ContentBlockParam[], cacheControl:
 	return false;
 }
 
+/** True for a mid-conversation tool-control message (`role: "system"`, tool-change blocks only). */
+function isToolControlMessage(message: MessageParam): boolean {
+	return (
+		message.role === "system" &&
+		typeof message.content !== "string" &&
+		Array.isArray(message.content) &&
+		message.content.length > 0 &&
+		message.content.every(block => block.type === "tool_addition" || block.type === "tool_removal")
+	);
+}
+
 const ANTHROPIC_MAX_BREAKPOINTS = 4;
 const ANTHROPIC_DECIMATION_INTERVAL = 15;
 
@@ -3975,85 +3986,97 @@ function applyPromptCaching(params: MessageCreateParamsStreaming, cacheControl?:
 	// the suffix after it. Turn-scoped `clear_at` messages are absent next
 	// request, so they still truncate the decimation range (ordinals would
 	// shift), but per-call marks no longer freeze the tail.
-	let stableMessageEnd = messageEnd;
-	for (let index = 0; index <= messageEnd; index++) {
-		const message = params.messages[index];
-		if (message && (message.clear_at === "next_user_message" || isPerCallContextMessage(message))) {
-			stableMessageEnd = index - 1;
-			break;
-		}
-	}
-
-	// Decimation counts conversational turns, so it reads the provenance marker
-	// `convertAnthropicMessages` records rather than the wire role. A wire `user`
-	// can also be a serialized `developer` message, a tool_result run, or an
-	// interior `Continue.` pad, none of which advance the user turn ordinal.
-	const userIndices: number[] = [];
-	for (let index = 0; index <= stableMessageEnd; index++) {
-		const message = params.messages[index];
-		if (message && isConversationalUser(message)) {
-			userIndices.push(index);
-		}
-	}
-
-	// Stable historical decimation checkpoint every 15 user turns (15th, 30th, 45th...)
-	const decimationIndices = userIndices.filter((_, ordinal) => (ordinal + 1) % ANTHROPIC_DECIMATION_INTERVAL === 0);
-
+	//
+	// One backward walk over the message tail resolves everything the anchor
+	// selection needs at once: the trailing candidates, the stable prefix end,
+	// and the conversational-turn count under it. The first per-call/turn-scoped
+	// message from the start is the last mark this walk sees (so `markIndex` ends
+	// up as that boundary), and the turn counter — reset on every mark — ends up
+	// counting exactly the turns a mark would have excluded. Nothing is
+	// materialized: the checkpoint search below walks the same history backwards
+	// and stops as soon as the breakpoint budget is spent.
+	let markIndex = -1;
+	let stableUserTurns = 0;
 	// Collect up to 2 trailing candidates from the message tail, skipping
 	// per-call messages, turn-scoped messages, and mid-conversation
 	// tool-control messages. A per-call tail candidate is rebuilt next request
 	// (fresh timestamps on appended probes, fresh redaction bytes), so a
 	// breakpoint on it cannot match — it would spend the tail anchor on bytes
-	// that never repeat while the persisted history behind it goes uncached.
+	// that never repeat while the persisted history behind it gets uncached.
 	// Turn-scoped messages are absent next request for the same reason, and
 	// tool controls reject cache_control outright. The walk starts at the
 	// message tail (not the truncated prefix end) so the anchor advances every
 	// turn; the sub-prefix candidate below covers the reusable region behind
 	// a mark.
 	const trailingCandidates: number[] = [];
-	for (let index = messageEnd; index >= 0 && trailingCandidates.length < 2; index--) {
+	for (let index = messageEnd; index >= 0; index--) {
 		const message = params.messages[index];
-		if (!message || message.clear_at === "next_user_message" || isPerCallContextMessage(message)) continue;
-		if (
-			message.role === "system" &&
-			typeof message.content !== "string" &&
-			Array.isArray(message.content) &&
-			message.content.length > 0 &&
-			message.content.every(block => block.type === "tool_addition" || block.type === "tool_removal")
-		) {
+		if (!message) continue;
+		if (message.clear_at === "next_user_message" || isPerCallContextMessage(message)) {
+			markIndex = index;
+			stableUserTurns = 0;
 			continue;
 		}
-		trailingCandidates.push(index);
+		if (trailingCandidates.length < 2 && !isToolControlMessage(message)) {
+			trailingCandidates.push(index);
+		}
+		// Decimation counts conversational turns, so it reads the provenance marker
+		// `convertAnthropicMessages` records rather than the wire role. A wire `user`
+		// can also be a serialized `developer` message, a tool_result run, or an
+		// interior `Continue.` pad, none of which advance the user turn ordinal.
+		if (isConversationalUser(message)) stableUserTurns++;
 	}
-	// Prioritize:
+	const stableMessageEnd = markIndex === -1 ? messageEnd : markIndex - 1;
+
+	// Decimation checkpoints are generated newest-first on demand instead of
+	// being materialized as index arrays: the newest sits `stableUserTurns %
+	// ANTHROPIC_DECIMATION_INTERVAL` conversational turns back from the stable
+	// prefix end and every 15th turn follows it, so the walk stops as soon as the
+	// breakpoint budget is spent. Candidates repeat when a trailing or sub-prefix
+	// anchor is already a checkpoint; re-decorating the same message is a no-op
+	// (its block already carries cache_control), so the budget accounting is
+	// unchanged.
+	//
+	// Priority order:
 	// 1. Most recent trailing message
 	// 2. Latest decimation checkpoints (newest first) to maintain stable long-context anchors
 	// 3. Newest message at or before the first per-call/turn-scoped mark, so a
 	//    volatile interior message costs only its own re-billed bytes instead
 	//    of invalidating the whole reusable prefix behind it
 	// 4. Second trailing message
-	const candidateIndices: number[] = [];
-	if (trailingCandidates.length > 0) {
-		candidateIndices.push(trailingCandidates[0]);
-	}
-	for (let i = decimationIndices.length - 1; i >= 0; i--) {
-		if (!candidateIndices.includes(decimationIndices[i])) {
-			candidateIndices.push(decimationIndices[i]);
-		}
-	}
-	if (stableMessageEnd < messageEnd && stableMessageEnd >= 0 && !candidateIndices.includes(stableMessageEnd)) {
-		candidateIndices.push(stableMessageEnd);
-	}
-	for (const index of trailingCandidates) {
-		if (!candidateIndices.includes(index)) {
-			candidateIndices.push(index);
-		}
-	}
-
+	//
 	// Count only successful block decorations toward the message budget so an uncacheable
 	// block (such as a thinking-only assistant) does not silently consume a breakpoint.
 	let appliedCount = 0;
-	for (const index of candidateIndices) {
+	if (trailingCandidates.length > 0 && appliedCount < messageBudget) {
+		const message = params.messages[trailingCandidates[0]];
+		if (message && applyCacheControlToMessage(message, cacheControl)) {
+			appliedCount++;
+		}
+	}
+	// Stable historical decimation checkpoint every 15 user turns (15th, 30th, 45th...)
+	if (stableUserTurns >= ANTHROPIC_DECIMATION_INTERVAL) {
+		let turnsSinceCheckpoint = stableUserTurns % ANTHROPIC_DECIMATION_INTERVAL;
+		for (let index = stableMessageEnd; index >= 0 && appliedCount < messageBudget; index--) {
+			const message = params.messages[index];
+			if (!message || !isConversationalUser(message)) continue;
+			if (turnsSinceCheckpoint > 0) {
+				turnsSinceCheckpoint--;
+				continue;
+			}
+			turnsSinceCheckpoint = ANTHROPIC_DECIMATION_INTERVAL - 1;
+			if (applyCacheControlToMessage(message, cacheControl)) {
+				appliedCount++;
+			}
+		}
+	}
+	if (stableMessageEnd < messageEnd && stableMessageEnd >= 0 && appliedCount < messageBudget) {
+		const message = params.messages[stableMessageEnd];
+		if (message && applyCacheControlToMessage(message, cacheControl)) {
+			appliedCount++;
+		}
+	}
+	for (const index of trailingCandidates) {
 		if (appliedCount >= messageBudget) break;
 		const message = params.messages[index];
 		if (message && applyCacheControlToMessage(message, cacheControl)) {
