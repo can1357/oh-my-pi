@@ -1,6 +1,7 @@
 /**
  * Extension runner - executes extensions and manages their lifecycle.
  */
+import type { BoundReadonlySubagent } from "../../task/readonly-authority";
 import { AsyncLocalStorage } from "node:async_hooks";
 import {
 	type AgentMessage,
@@ -720,6 +721,7 @@ export class ExtensionRunner {
 		getAsyncJobSnapshot?: () => AsyncJobSnapshot | null,
 		/** Identity of the agent this runner's session runs; defaults to the top-level agent. */
 		private readonly agent: ExtensionAgentIdentity = TOP_LEVEL_AGENT,
+		private readonly readonlySubagent?: BoundReadonlySubagent,
 	) {
 		this.#uiContext = noOpUIContext;
 		this.#getMemoryFn = getMemory;
@@ -1376,6 +1378,7 @@ export class ExtensionRunner {
 			modelRegistry: this.modelRegistry,
 			isProjectTrusted: () => true,
 			agent,
+			readonlySubagent: this.readonlySubagent,
 			get model() {
 				return getModel();
 			},
@@ -2166,7 +2169,7 @@ export class ExtensionRunner {
 	): Promise<BeforeSubagentSpawnEventResult | undefined> {
 		if (!this.hasHandlers("before_subagent_spawn")) return undefined;
 		const ctx = this.createContext();
-		let chosen: Pick<BeforeSubagentSpawnEventResult, "model" | "note"> | undefined;
+		let chosen: BeforeSubagentSpawnEventResult | undefined;
 
 		for (const ext of this.extensions) {
 			const handlers = ext.handlers.get("before_subagent_spawn");
@@ -2185,7 +2188,11 @@ export class ExtensionRunner {
 				if (!handlerResult) continue;
 				const result = handlerResult as BeforeSubagentSpawnEventResult;
 				if (result.block) return result;
-				if (result.model !== undefined) chosen = { model: result.model, note: result.note };
+				if (result.readonlyGrant !== undefined) {
+					if (chosen?.readonlyGrant) return { block: true, reason: "Conflicting readonly parent grants" };
+					chosen = { ...chosen, readonlyGrant: result.readonlyGrant };
+				}
+				if (result.model !== undefined) chosen = { ...chosen, model: result.model, note: result.note };
 			}
 		}
 

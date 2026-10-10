@@ -23,6 +23,7 @@ import {
 } from "../config/compaction-threshold";
 import { type ServiceTierInheritSettingValue, validateAgentServiceTierOverrides } from "../config/service-tier";
 import type { CustomTool } from "../extensibility/custom-tools/types";
+import type { ReadonlySubagentGrant } from "./readonly-authority";
 import { sessionLocalProtocolOptions } from "../internal-urls/context";
 import { registerArtifactsDir } from "../internal-urls/registry-helpers";
 import { MCPManager } from "../mcp/manager";
@@ -157,6 +158,7 @@ export interface StructuredSubagentRequest {
 
 /** A normalized preflight result, reusable by tests and adapters. */
 export interface EffectiveSubagentPolicy {
+	readonlyGrant?: ReadonlySubagentGrant;
 	discovery: DiscoveryResult;
 	agentName: string;
 	agent: AgentDefinition;
@@ -531,11 +533,17 @@ async function applySpawnHook(
 			modelRole: policy.modelRole,
 			patterns: policy.modelOverride ?? [],
 			spawnKey,
+			toolNames: policy.effectiveAgent.tools,
 		},
 		request.signal,
 	);
 	if (spawnResult?.block) {
 		throw new StructuredSubagentError("preflight", spawnResult.reason ?? "Subagent spawn blocked by extension.");
+	}
+	if (spawnResult?.readonlyGrant) {
+		if (policy.isIsolated)
+			throw new StructuredSubagentError("preflight", "Readonly grants cannot create or merge worktrees");
+		policy = { ...policy, readonlyGrant: spawnResult.readonlyGrant, enableLsp: false, enableIrc: false };
 	}
 	if (spawnResult?.model === undefined) return policy;
 	const replacement = resolveConfiguredModelPatterns(spawnResult.model, request.session.settings);
@@ -601,10 +609,11 @@ function buildExecutorOptions(
 	const { session } = request;
 	const { skills, autoloadSkills } = resolveAutoloadSkills(session, policy.agent);
 	const localProtocolOptions = sessionLocalProtocolOptions(session);
-	const restrictToolNames = policy.planMode || session.restrictToolNames === true;
+	const restrictToolNames = !!policy.readonlyGrant || policy.planMode || session.restrictToolNames === true;
 	const enableMCP = !restrictToolNames && (session.enableMCP ?? true);
 	return {
 		cwd: session.cwd,
+		readonlyGrant: policy.readonlyGrant,
 		additionalDirectories: session.additionalDirectories,
 		getApiKey: session.getApiKey,
 		credentialSourceSessionId: session.getCredentialSourceSessionId?.(),

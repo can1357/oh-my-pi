@@ -24,6 +24,7 @@ export {
 	type AssistantThinkingRenderContext,
 	type AssistantThinkingRenderer,
 } from "@oh-my-pi/pi-tui/chat/extension-types";
+import type { BoundReadonlySubagent, ReadonlySubagentGrant } from "../../task/readonly-authority";
 import type { type as ArkType } from "@oh-my-pi/omptype";
 import type * as TypeBox from "@oh-my-pi/omptype/typebox";
 import type * as zod from "@oh-my-pi/omptype/zod";
@@ -483,6 +484,8 @@ export interface ExtensionAgentIdentity {
 }
 
 export interface ExtensionContext {
+	/** Host-bound delegated read authority, never reconstructed from task metadata. */
+	readonlySubagent?: BoundReadonlySubagent;
 	/** UI methods for user interaction */
 	ui: ExtensionUIContext;
 	/** Current run mode. Use `"tui"` to guard terminal-only UI such as custom components. */
@@ -853,6 +856,8 @@ export interface BeforeAgentStartEvent {
 
 /** Fired in the parent session before a subagent (task tool or eval `agent()`) resolves its model. */
 export interface BeforeSubagentSpawnEvent {
+	/** Effective explicit child tools after native policy resolution. */
+	toolNames?: readonly string[];
 	type: "before_subagent_spawn";
 	/** Agent definition name being spawned. */
 	agent: string;
@@ -1299,6 +1304,8 @@ export interface BeforeAgentStartEventResult {
 }
 
 export interface BeforeSubagentSpawnEventResult {
+	/** Process-local trusted parent authorization for this dispatch only. */
+	readonlyGrant?: ReadonlySubagentGrant;
 	/** Replacement model patterns in attempt order (selectors or role aliases). Role identity is preserved. */
 	model?: string | string[];
 	/** Refuse the spawn. */

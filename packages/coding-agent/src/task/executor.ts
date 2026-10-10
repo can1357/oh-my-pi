@@ -380,6 +380,7 @@ export function collectIrcPeerRoster(
 
 /** Options for subagent execution */
 export interface ExecutorOptions {
+	readonlyGrant?: CreateAgentSessionOptions["readonlyGrant"];
 	cwd: string;
 	/** Additional workspace directories to seed on the subagent session (multi-root). */
 	additionalDirectories?: string[];
@@ -4266,6 +4267,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			const sessionSpec: SubagentSessionSpec = {
 				options: {
 					cwd: worktree ?? cwd,
+					readonlyGrant: options.readonlyGrant,
 					additionalDirectories: worktree !== undefined ? undefined : options.additionalDirectories,
 					authStorage,
 					modelRegistry,

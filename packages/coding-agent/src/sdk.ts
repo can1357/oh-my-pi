@@ -1,4 +1,6 @@
 import * as path from "node:path";
+import type { ReadonlySubagentGrant } from "./task/readonly-authority";
+import { ReadonlySandbox } from "./task/readonly-sandbox";
 import {
 	Agent,
 	type AgentEvent,
@@ -746,6 +748,8 @@ export interface CreateAgentSessionOptions {
 	 * and ambient custom tools remain disabled. Default: false.
 	 */
 	allowRestrictedCustomTools?: boolean;
+	/** Trusted process-local parent grant, never accepted from model tool arguments. */
+	readonlyGrant?: ReadonlySubagentGrant;
 
 	/** Output schema for structured completion (subagents). */
 	outputSchema?: unknown;
@@ -1638,6 +1642,22 @@ export function createAutoLearnCaptureRunner(
  * ```
  */
 export async function createAgentSession(options: CreateAgentSessionOptions = {}): Promise<CreateAgentSessionResult> {
+	if (options.readonlyGrant) {
+		if (!options.parentTaskPrefix) throw new Error("Readonly grants require an actual child session");
+		options = {
+			...options,
+			restrictToolNames: true,
+			enableMCP: false,
+			enableLsp: false,
+			enableIrc: false,
+			skipPythonPreflight: true,
+			disableExtensionDiscovery: true,
+			customTools: [],
+			mcpTools: [],
+			allowRestrictedCustomTools: false,
+			additionalDirectories: [],
+		};
+	}
 	registerLocalInferenceApi();
 	const extensionRoots = options.extensionRoots?.();
 	const explicit = extensionRoots?.explicit ?? options.additionalExtensionPaths ?? [];
@@ -2166,6 +2186,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		agentRegistry.unregister(resolvedAgentId, ref);
 	};
 	const evalKernelOwnerId = `agent-session:${Snowflake.next()}`;
+	let readonlySandbox: ReadonlySandbox | undefined;
 
 	try {
 		const getActiveModelString = (): string | undefined => {
@@ -2190,6 +2211,13 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			}
 		};
 		const toolSession: ToolSession = {
+			readonlySubagent: options.readonlyGrant
+				? (readonlySandbox = new ReadonlySandbox(
+						options.readonlyGrant,
+						sessionManager.getSessionId(),
+						sessionManager.getCwd(),
+					))
+				: undefined,
 			get cwd() {
 				return sessionManager.getCwd();
 			},
@@ -3248,6 +3276,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				depth: taskDepth,
 				...(options.parentAgentId ? { parentId: options.parentAgentId } : {}),
 			}),
+			toolSession.readonlySubagent,
 		);
 
 		credentialDisabledTarget = extensionRunner;
@@ -4909,6 +4938,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			const originalDispose = session.dispose.bind(session);
 			session.dispose = async () => {
 				try {
+					await toolSession.readonlySubagent?.dispose();
 					// Reject new session work (eval starts) the moment disposal
 					// begins — the lifecycle await below opens an async gap before
 					// AgentSession.dispose() would otherwise set its guards.
@@ -5274,6 +5304,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			subagentEventBus,
 		};
 	} catch (error) {
+		await readonlySandbox?.dispose();
 		try {
 			if (hasSession) {
 				await session.dispose();

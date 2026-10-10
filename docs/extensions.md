@@ -481,6 +481,40 @@ and `/new`. Commands retain their explicit prefill and session-transition action
 
 - `before_subagent_spawn` → `{ model?: string | string[]; block?: boolean; reason?: string; note?: string }`. Fires in the parent session exactly once per spawned child (`task`, eval `agent()`, workpool workers), at dispatch before the child resolves its model — never during a frontend's validation preflight, so stateful routers (round-robin, quota) advance once per child. The event carries `agent`, `invocationKind`, `modelRole` (the pre-expansion role alias, when any), the expanded `patterns` core would use, and an optional stable `spawnKey`. A returned `model` replaces the spawn's attempt-ordered patterns while keeping the role identity, so the remaining entries become the child's retry fallback chain; handlers run in extension order and the last returned `model` wins, along with its `note`, which the task UI shows as the spawn's routing reason on live, async, and settled rows. `block: true` refuses the spawn with `reason`. Cancelling the spawn releases an awaiting handler (its result is discarded and pending `ctx.ui` dialogs close) instead of holding the spawn until the handler timeout.
 
+
+#### Delegated read-only execution
+
+The spawn event also includes the effective child's optional toolNames. A trusted
+parent extension may return readonlyGrant: { parentSessionId, scopeRoot,
+authorize(binding) }. This in-process capability is separate from model routing;
+conflicting grants block spawning. Never construct it from model arguments or
+serialize full-authority credentials into task metadata.
+
+Core binds the actual child session ID and SessionManager cwd, exposes the bound
+capability as ctx.readonlySubagent, and calls authorize before/after execution and
+every 250 ms while guest processes exist. False, exceptions, or a two-second check
+timeout permanently invalidate the child and kill its process namespaces. The
+authority callback must check the live parent and its generation, not a cached
+boolean. SDK callers must supply parentTaskPrefix and only bash/eval/yield tools.
+
+This mode requires Linux and bubblewrap with user namespaces; unsupported hosts
+fail closed. Bash and stateless Python/JavaScript run in read-only mounts with
+no inherited environment, shell snapshot, direnv, host tool dispatcher, MCP,
+IRC, LSP, custom tools, ambient extension discovery, or isolated worktree creation.
+The requested workspace plus read-only runtime dependencies (/usr, /lib, /lib64;
+the native source tree in JS source mode) are readable. Root .git/.omp carriers
+are masked. Temporary writes stay in guest /tmp. Network and Unix-socket bridges
+are denied by namespace isolation and seccomp. Scope contents are not redacted;
+trusted grant issuers must exclude full-authority credentials from the scope.
+Memory, process-count, and tmpfs quotas are not provided.
+
+Output is bounded to 1 MiB per stream/cell and execution to 300 seconds. Guest
+completion frames are untrusted: each eval starts a fresh process and waits for
+actual process exit, not a guest done frame. No state persists between cells;
+an earlier cell's deadline/abort cannot affect the next cell. Session disposal
+awaits process exit; startup failure also disposes the sandbox. This capability
+does not grant claim/release, child delegation, provider approval, or host writes.
+
 ### Reliability/runtime signals
 
 - `auto_compaction_start` / `auto_compaction_end`

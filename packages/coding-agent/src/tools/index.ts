@@ -1,3 +1,5 @@
+import type { BoundReadonlySubagent } from "../task/readonly-authority";
+import { READONLY_SUBAGENT_TOOLS } from "../task/readonly-authority";
 import type { AgentOptions, AgentTelemetryConfig, AgentTool, AgentToolContext } from "@oh-my-pi/pi-agent-core";
 import type { EditStore } from "@oh-my-pi/pi-natives";
 import type { FetchImpl, ImageContent, Model, ServiceTierByFamily, ToolChoice } from "@oh-my-pi/pi-ai";
@@ -206,6 +208,7 @@ export interface DeferredDiagnosticsEntry {
 
 /** Session context for tool factories */
 export interface ToolSession {
+	readonlySubagent?: BoundReadonlySubagent;
 	/** Current working directory */
 	cwd: string;
 	/** Additional workspace directories beyond cwd (multi-root), forwarded to subagents. */
@@ -838,6 +841,20 @@ export function createXdevState(
  * Create tools from BUILTIN_TOOLS registry.
  */
 export async function createTools(session: ToolSession, toolNames?: string[]): Promise<Tool[]> {
+	if (session.readonlySubagent) {
+		if (!toolNames || toolNames.some(name => !Object.hasOwn(READONLY_SUBAGENT_TOOLS, name)))
+			throw new Error("READONLY_TOOLSET_INVALID");
+		const tools = await session.readonlySubagent.createTools(toolNames);
+		if (toolNames.includes("yield")) {
+			const yieldTool = await HIDDEN_TOOLS.yield(session);
+			if (yieldTool) tools.push(yieldTool);
+		}
+		const registry = session.toolRegistry ?? new Map();
+		session.toolRegistry = registry;
+		for (const tool of tools) registry.set(tool.name, tool);
+		session.setActiveToolNames?.(tools.map(tool => tool.name));
+		return tools;
+	}
 	const restrictToolNames = session.restrictToolNames === true;
 	const { requestedTools, names } = await resolveBuiltinToolPlan(session, toolNames);
 	// createTools may be called more than once for the same ToolSession. A later

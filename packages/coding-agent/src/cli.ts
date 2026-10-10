@@ -63,6 +63,13 @@ try {
 // the process entry, so the define-folded PI_COMPILED marker stands in.
 const isProcessEntry = import.meta.main || process.env.PI_COMPILED === "true";
 
+// Lazy worker-only entry: do not load the evaluator on ordinary CLI startup.
+if (isProcessEntry && process.argv.includes("__omp_worker_readonly_js")) {
+	const { runReadonlyJsGuest } = await import("./task/readonly-guest");
+	await runReadonlyJsGuest();
+	process.exit(0);
+}
+
 /**
  * Worker inboxes must attach before this entry module reaches its first await,
  * so this branch uses Bun's synchronous CommonJS bridge. Ordinary CLI startup

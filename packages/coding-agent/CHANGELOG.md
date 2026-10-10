@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added parent-authorized read-only subagents with Linux bubblewrap/seccomp-contained bash and stateless Python/JavaScript eval, actual session/scope binding, live revocation, bounded output/deadlines, and fail-closed unsupported-host behavior. Spawn hooks can return an in-process readonlyGrant; restricted children cannot access host tools, MCP, custom tools, or nested delegation.
+
 ## [18.6.3] - 2026-10-06
 
 ### Breaking Changes
