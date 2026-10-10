@@ -182,7 +182,9 @@ describe("Codex saved-reset consent without a prompt UI", () => {
 		await session.prompt("trigger a codex usage limit");
 		await session.waitForIdle();
 
-		expect(targets).toEqual([{ provider: "openai-codex", credentialId: 1, accountId: "acct-a", email: EMAIL }]);
+		expect(targets).toEqual([
+			{ provider: "openai-codex", credentialId: 1, accountId: "acct-a", email: EMAIL, creditId: "credit-1" },
+		]);
 		expect(notices).toContainEqual(expect.stringContaining(`Spending a saved Codex reset for ${EMAIL}`));
 		expect(session.agent.state.messages.at(-1)).toMatchObject({
 			role: "assistant",
@@ -230,7 +232,9 @@ describe("Codex saved-reset consent without a prompt UI", () => {
 		await session.fetchUsageReports();
 		await coordinator.sweepPromise;
 
-		expect(targets).toEqual([{ provider: "openai-codex", credentialId: 1, accountId: "acct-a", email: EMAIL }]);
+		expect(targets).toEqual([
+			{ provider: "openai-codex", credentialId: 1, accountId: "acct-a", email: EMAIL, creditId: "credit-1" },
+		]);
 		expect(notices).toContainEqual(expect.stringContaining("auto-redeem is unset and no prompt UI is available"));
 		expect([...coordinator.attemptedKeys]).toEqual([expect.stringContaining("openai-codex|-|1|")]);
 	});

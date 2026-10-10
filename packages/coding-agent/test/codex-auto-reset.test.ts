@@ -18,7 +18,7 @@
  *   consent, live credit eligibility, terminal dedupe, and account cooldown.
  */
 import { describe, expect, it } from "bun:test";
-import type { UsageReport } from "@oh-my-pi/pi-ai";
+import type { ResetCreditTarget, UsageReport } from "@oh-my-pi/pi-ai";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import {
 	ATTEMPT_COOLDOWN_MS,
@@ -880,13 +880,16 @@ describe("codexResets policy plumbing", () => {
 		expect(isTerminalRedeemOutcome("credit_list_failed")).toBe(false);
 	});
 
-	it("approves only resets expiring within five minutes for a headless unset host", () => {
+	it("approves only resets expiring within five minutes for a headless unset host, pinned to that credit", () => {
+		const target: ResetCreditTarget = { provider: "openai-codex", credentialId: CREDENTIAL_ID };
 		const actions = [
-			{ expiresInMs: IMMINENT_RESET_EXPIRY_MS },
-			{ expiresInMs: IMMINENT_RESET_EXPIRY_MS + 1 },
-			{ expiresInMs: undefined },
+			{ target, creditId: "dying", expiresInMs: IMMINENT_RESET_EXPIRY_MS },
+			{ target, creditId: "later", expiresInMs: IMMINENT_RESET_EXPIRY_MS + 1 },
+			{ target, expiresInMs: undefined },
 		];
-		expect(headlessApprovedResetActions("unset", actions)).toEqual([actions[0]]);
+		expect(headlessApprovedResetActions("unset", actions)).toEqual([
+			{ ...actions[0], target: { ...target, creditId: "dying" } },
+		]);
 		expect(headlessApprovedResetActions("yes", actions)).toEqual(actions);
 		expect(headlessApprovedResetActions("no", actions)).toEqual([]);
 	});

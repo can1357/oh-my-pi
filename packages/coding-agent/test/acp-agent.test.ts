@@ -6,7 +6,10 @@ import { AgentBusyError } from "@oh-my-pi/pi-agent-core";
 import type { Model } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import type { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import type { ExtensionUIContext } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
+import { ExtensionRuntime } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
+import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
 import { resolveLocalUrlToPath } from "@oh-my-pi/pi-coding-agent/internal-urls";
 import {
 	ACP_BOOTSTRAP_RACE_GUARD_MS,
@@ -122,7 +125,7 @@ class FakeAgentSession {
 	model: Model | undefined;
 	thinkingLevel: string | undefined;
 	customCommands: [] = [];
-	extensionRunner = undefined;
+	extensionRunner: ExtensionRunner | undefined = undefined;
 	isStreaming = false;
 	queuedMessageCount = 0;
 	systemPrompt = "system";
@@ -492,6 +495,8 @@ async function createHarness(
 		clientCapabilities?: ClientCapabilities;
 		/** Runs before a notification is recorded, so a test can delay one delivery. */
 		sessionUpdateHook?: (notification: SessionNotification) => Promise<void> | void;
+		/** Gives each session the factory creates a real extension runner with no extensions. */
+		extensionRunners?: boolean;
 	} = {},
 ): Promise<AgentHarness> {
 	const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), "omp-acp-test-"));
@@ -528,6 +533,15 @@ async function createHarness(
 	sessions.push(initialSession);
 	const factory = async (cwd: string, factoryOptions?: { interactivePrompts?: boolean }) => {
 		const session = new FakeAgentSession(cwd);
+		if (options.extensionRunners) {
+			session.extensionRunner = new ExtensionRunner(
+				[],
+				new ExtensionRuntime(),
+				cwd,
+				session.sessionManager,
+				{} as ModelRegistry,
+			);
+		}
 		const setToolUIContext = vi.fn();
 		sessions.push(session);
 		setToolUIContextSpies.push(setToolUIContext);
@@ -2925,6 +2939,35 @@ describe("ACP agent", () => {
 		expect(harness.sessionFactoryOptions).toEqual([{ interactivePrompts: false }]);
 		expect(harness.setToolUIContextSpies).toHaveLength(1);
 		expect(harness.setToolUIContextSpies[0]).not.toHaveBeenCalled();
+
+		await harness.agent.dispose();
+	});
+
+	it("initializes extensions without a UI context when the client lacks form elicitation", async () => {
+		const harness = await createHarness({ clientCapabilities: {}, extensionRunners: true });
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+
+		// Nothing can answer a prompt, so the session's saved-reset consent must take its headless path.
+		expect(harness.findSession(created.sessionId)?.extensionRunner?.hasUI()).toBe(false);
+
+		await harness.agent.dispose();
+	});
+
+	it("routes extension prompts to form elicitation when the client supports it", async () => {
+		const messages: string[] = [];
+		const harness = await createHarness({
+			extensionRunners: true,
+			elicitationHandler: async request => {
+				messages.push(request.message);
+				return { action: "accept", content: { value: "Yes" } };
+			},
+		});
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const runner = harness.findSession(created.sessionId)?.extensionRunner;
+
+		expect(runner?.hasUI()).toBe(true);
+		expect(await runner?.getUIContext().select("Spend a saved reset?", ["Yes", "No"])).toBe("Yes");
+		expect(messages).toEqual(["Spend a saved reset?"]);
 
 		await harness.agent.dispose();
 	});

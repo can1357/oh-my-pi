@@ -307,6 +307,7 @@ import {
 	executeResetActions,
 	planClaudeResets,
 	planCodexResets,
+	redeemConsentedResets,
 	sweepResets,
 	sweepsResets,
 } from "./auto-reset";
@@ -12523,7 +12524,7 @@ export class AgentSession implements SettingsScope {
 		const runner = this.#extensionRunner;
 		if (!runner?.hasUI()) {
 			const approved = headlessApprovedResetActions("unset", actions);
-			const waiting = actions.find(action => !approved.includes(action));
+			const waiting = actions.find(action => !approved.some(spend => spend.attemptKey === action.attemptKey));
 			if (waiting && !coordinator.notifiedKeys.has(waiting.attemptKey)) {
 				coordinator.notifiedKeys.add(waiting.attemptKey);
 				this.emitNotice(
@@ -12650,10 +12651,9 @@ export class AgentSession implements SettingsScope {
 				}
 				return { restored: false, retryAfterMs };
 			}
-			const approved = shouldPromptCodexAutoRedeem(cfg.autoRedeem)
-				? await this.#confirmAutoRedeem(provider, plan.actions, coordinator)
-				: plan.actions;
-			return { restored: (await executeResetActions(host, provider, approved, coordinator)) > 0 };
+			return {
+				restored: (await redeemConsentedResets(host, provider, cfg.autoRedeem, plan.actions, coordinator)) > 0,
+			};
 		})()
 			.catch((error): ResetRecoveryResult => {
 				logger.warn("auto-reset: blocked pass failed", { provider, account: accountKey, error: String(error) });

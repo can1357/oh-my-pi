@@ -36,7 +36,13 @@ import {
 	shouldEvaluateCodexAutoRedeem,
 	shouldPromptCodexAutoRedeem,
 } from "./codex-auto-reset";
-import { cfgClaudeResets, cfgClaudeResetsAutoRedeem, cfgCodexResets, cfgCodexResetsAutoRedeem } from "./settings";
+import {
+	cfgClaudeResets,
+	cfgClaudeResetsAutoRedeem,
+	cfgCodexResets,
+	cfgCodexResetsAutoRedeem,
+	type ResetAutoRedeemMode,
+} from "./settings";
 
 export type ResetProvider = "openai-codex" | "anthropic";
 export type ResetAction = CodexResetAction | ClaudeResetAction;
@@ -347,6 +353,18 @@ export async function executeResetActions(
 	return redeemed;
 }
 
+/** Spend every planned action under `yes`, and only the confirmed ones under `unset`. */
+export async function redeemConsentedResets(
+	host: AutoResetHost,
+	provider: ResetProvider,
+	mode: ResetAutoRedeemMode,
+	actions: ResetAction[],
+	coordinator: CodexAutoRedeemCoordinator,
+): Promise<number> {
+	const approved = shouldPromptCodexAutoRedeem(mode) ? await host.confirm(provider, actions, coordinator) : actions;
+	return executeResetActions(host, provider, approved, coordinator);
+}
+
 /** Whether this host's background sweep covers `provider`'s saved resets. */
 export function sweepsResets(host: AutoResetHost, provider: ResetProvider): boolean {
 	const mode = (provider === "anthropic" ? cfgClaudeResetsAutoRedeem : cfgCodexResetsAutoRedeem).get(host.settings);
@@ -380,11 +398,13 @@ export async function sweepResets(
 			const effectiveReports = overlayLiveResetCredits(reports, statuses);
 			const identity = host.authStorage.oauth.identity("openai-codex", host.sessionId);
 			const plan = planCodexResets(host, "sweep", effectiveReports, identity, coordinator);
-			const approved =
-				plan.actions.length > 0 && shouldPromptCodexAutoRedeem(cfgCodexResetsAutoRedeem.get(host.settings))
-					? await host.confirm("openai-codex", plan.actions, coordinator)
-					: plan.actions;
-			if (approved.length > 0) await executeResetActions(host, "openai-codex", approved, coordinator);
+			await redeemConsentedResets(
+				host,
+				"openai-codex",
+				cfgCodexResetsAutoRedeem.get(host.settings),
+				plan.actions,
+				coordinator,
+			);
 		} catch (error) {
 			logger.warn("codex-auto-reset: salvage listing failed", { error: String(error) });
 		}
@@ -410,11 +430,13 @@ export async function sweepResets(
 							coordinator,
 						)
 					: candidates;
-			const approved =
-				plan.actions.length > 0 && shouldPromptCodexAutoRedeem(cfgClaudeResetsAutoRedeem.get(host.settings))
-					? await host.confirm("anthropic", plan.actions, coordinator)
-					: plan.actions;
-			if (approved.length > 0) await executeResetActions(host, "anthropic", approved, coordinator);
+			await redeemConsentedResets(
+				host,
+				"anthropic",
+				cfgClaudeResetsAutoRedeem.get(host.settings),
+				plan.actions,
+				coordinator,
+			);
 		} catch (error) {
 			logger.warn("claude-auto-reset: salvage listing failed", { error: String(error) });
 		}

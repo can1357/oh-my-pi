@@ -854,12 +854,14 @@ When no UI context is supplied to runner init, `ctx.hasUI` is `false` and method
 
 ### ACP mode
 
-ACP installs an elicitation-bridged UI context (`createAcpExtensionUiContext` in
-`modes/acp/acp-agent.ts`). `ctx.mode` is `"rpc"` and `ctx.hasUI` is `true`.
-`select`/`confirm`/`input`/`editor` and optional `askDialog` round-trip as ACP form
-elicitations; defaults are returned when the client lacks `elicitation.form`.
-The non-elicitation surface (widgets, editor control, theming, terminal input,
-autocomplete stacking) is inert; `notify` logs a debug notification.
+When the client advertises `elicitation.form`, ACP installs an elicitation-bridged
+UI context (`createAcpExtensionUiContext` in `modes/acp/acp-agent.ts`).
+`ctx.mode` is `"rpc"` and `ctx.hasUI` is `true`. `select`/`confirm`/`input`/`editor`
+and optional `askDialog` round-trip as ACP form elicitations. The non-elicitation
+surface (widgets, editor control, theming, terminal input, autocomplete stacking)
+is inert; `notify` logs a debug notification. A client without `elicitation.form`
+gets no UI context, like the headless paths above: `ctx.hasUI` is `false` and
+`ctx.mode` stays `"rpc"`.
 
 ## Session and state patterns
 
