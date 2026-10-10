@@ -668,21 +668,21 @@ describe("OpenCode provider discovery", () => {
 		});
 	});
 
-	test("routes gateway-listed Union Alpha to Messages on Go and Zen (#12359)", async () => {
+	test("routes gateway-listed Union Alpha and Claude Haiku 5.5 to Messages on Go and Zen (#12359, #15243)", async () => {
+		const ids = ["union-alpha", "claude-haiku-5-5"];
 		for (const [makeOptions, baseUrl] of [
 			[opencodeGoModelManagerOptions, "https://opencode.ai/zen/go"],
 			[opencodeZenModelManagerOptions, "https://opencode.ai/zen"],
 		] as const) {
 			const options = makeOptions({
 				apiKey: "test-key",
-				fetch: async () => modelListResponse(["union-alpha"]),
+				fetch: async () => modelListResponse(ids),
 			});
 			const models = await options.fetchDynamicModels?.();
-			expect(models?.find(model => model.id === "union-alpha")).toMatchObject({
-				api: "anthropic-messages",
-				baseUrl,
-			});
-			expect(options.dropCachedModelIdsOnStaticMismatch).toContain("union-alpha");
+			for (const id of ids) {
+				expect(models?.find(model => model.id === id)).toMatchObject({ api: "anthropic-messages", baseUrl });
+				expect(options.dropCachedModelIdsOnStaticMismatch).toContain(id);
+			}
 		}
 	});
 
