@@ -606,6 +606,23 @@ function selectRelayEntry(entries: RelayJsonEntry[], options: PickTargetOptions)
 	return usable.find(e => e.active === "true") ?? usable[0] ?? null;
 }
 
+/**
+ * Whether relay /json already answers `needle`: an unbound live page matches, or
+ * only discarded unbound pages match and no bound page does (reported at once).
+ * A match held by another managed tab keeps the settle window open, since the
+ * user may have just opened a second matching page that /json has yet to list.
+ */
+function relayMatchSettled(
+	entries: RelayJsonEntry[],
+	needle: string,
+	bound: ReadonlyMap<string, string> | undefined,
+): boolean {
+	const matches = entries.filter(e => e.type === "page" && relayEntryMatches(e, needle));
+	const unbound = matches.filter(e => !bound?.has(e.id));
+	if (unbound.some(e => e.discarded !== "true")) return true;
+	return unbound.length > 0 && unbound.length === matches.length;
+}
+
 /** Select relay pages from /json metadata before probing pages; enumerate targets when metadata offers no selection. */
 export async function pickElectronTarget(browser: Browser, options: PickTargetOptions = {}): Promise<Page> {
 	throwIfAborted(options.signal);
@@ -617,7 +634,7 @@ export async function pickElectronTarget(browser: Browser, options: PickTargetOp
 		while (
 			needle &&
 			entries?.some(e => e.type === "page") &&
-			!entries.some(e => e.type === "page" && relayEntryMatches(e, needle)) &&
+			!relayMatchSettled(entries, needle, options.bound) &&
 			Date.now() < settleDeadline
 		) {
 			await abortable(options.signal, () => Bun.sleep(Math.min(RELAY_MATCH_POLL_MS, settleDeadline - Date.now())));

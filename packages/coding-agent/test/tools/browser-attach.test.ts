@@ -939,6 +939,30 @@ describe("pickElectronTarget relay path", () => {
 		expect((error as Error).message).toMatch(/^The page matching "cart" is already driven by tab "login"\./);
 	});
 
+	it("keeps waiting for a just-opened matching tab when only a bound tab matches so far", async () => {
+		const opened = {
+			id: "PAGE_NEW",
+			type: "page",
+			title: "Cart (second)",
+			url: "https://www.amazon.com/cart?omp-probe=second",
+			active: "false",
+			discarded: "false",
+		};
+		let served = 0;
+		relay.reload({ fetch: () => Response.json(++served === 1 ? RELAY_ENTRIES : [...RELAY_ENTRIES, opened]) });
+		const openedPage = makePage([() => {}], opened.url).page;
+		const target = makeTarget("PAGE_NEW", openedPage);
+
+		const picked = await pickElectronTarget(makeBrowser([target.target]), {
+			relayJson,
+			matcher: "cart",
+			bound: new Map([["PAGE11", "login"]]),
+		});
+
+		expect(picked).toBe(openedPage);
+		expect(served).toBe(2);
+	});
+
 	it("matcher skips a discarded matching tab", async () => {
 		const made = makePage([() => {}]);
 		const { target } = makeTarget("PAGE11", made.page);
