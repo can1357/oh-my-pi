@@ -35,6 +35,8 @@
 - Grammars for less common languages (Kotlin, Swift, Ruby, PHP, Haskell, Verilog, and others) are now downloaded on first use for code summaries, block context, `ast_grep`, `ast_edit`, and TTSR rules; offline, files in those languages are skipped with a note instead of failing. `PI_GRAMMARS_URL` overrides the download location.
 - Added `bash.gitGuard` (default off) for checkouts shared by concurrent agents: the bash tool refuses `git stash`, `git reset --hard` or to another commit, and `git checkout`/`switch`/`restore` that would overwrite working-tree files unless a merge or rebase conflict is being resolved; unstaging stays allowed, and commands are judged as they actually run, including inside substitutions, functions, and after `cd`.
 
+- Added `modelRoleFast` setting to configure fast mode per model role, automatically applying and syncing fast mode when switching, cycling, or saving role models in presets.
+- Added `modelRoleFast` setting to configure fast mode per model role, automatically applying and syncing fast mode when switching, cycling, or saving role models in presets ([#15033](https://github.com/can1357/oh-my-pi/pull/15033) by [@tuandinh0801](https://github.com/tuandinh0801)).
 ### Changed
 
 - Updated `write` tool error message to mention local:// scratch support

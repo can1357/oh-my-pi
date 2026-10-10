@@ -10022,6 +10022,7 @@ export class AgentSession implements SettingsScope {
 			selector?: string;
 			thinkingLevel?: ThinkingLevel;
 			persist?: boolean;
+			fastMode?: boolean;
 		},
 	): Promise<{ switched: boolean }> {
 		return this.#models.setModel(model, role, options);

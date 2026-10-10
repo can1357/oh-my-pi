@@ -25,7 +25,10 @@ export interface ModelPreset {
 	modelRoles: Record<string, string>;
 	/** `defaultThinkingLevel` at save time; absent in hand-written presets that leave it alone. */
 	defaultThinkingLevel?: SettingValueOf<typeof cfgDefaultThinkingLevel>;
+	modelRoleFast?: Record<string, boolean>;
 }
+
+const EMPTY_BOOLEAN_RECORD: Record<string, boolean> = {};
 
 const EMPTY_STRING_ARRAY: string[] = [];
 const EMPTY_STRING_RECORD: Record<string, string> = {};
@@ -107,6 +110,7 @@ export const cfgModelRoleStorage = register({
 });
 
 export const cfgModelRoles = register({ id: "modelRoles", type: "record", default: EMPTY_STRING_RECORD });
+export const cfgModelRoleFast = register({ id: "modelRoleFast", type: "record", default: EMPTY_BOOLEAN_RECORD });
 
 /** Named model presets; no settings-panel UI — managed by `/modelpreset` and the model hub. */
 export const cfgModelPresets = register({

@@ -53,7 +53,7 @@ import {
 } from "./registry";
 // Registers every setting before any instance is read (definitions live next to their domains).
 import "./all-settings";
-import { cfgModelRoles, cfgModelRoleStorage } from "./model-settings";
+import { cfgModelRoles, cfgModelRoleFast, cfgModelRoleStorage } from "./model-settings";
 import { cfgShellPath } from "../exec/settings";
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -284,16 +284,29 @@ function assertKnownSettingPaths(layer: RawSettings, prefix = ""): void {
 
 /** `project` as it merges over the global layer: `null` (cleared) model roles fall back to global. */
 function projectLayerForMerge(project: RawSettings): RawSettings {
+	let result = project;
 	const projectRoles = getByPath(project, ["modelRoles"]);
-	if (!isRecord(projectRoles)) return project;
-
-	let filteredRoles: Record<string, unknown> | undefined;
-	for (const role in projectRoles) {
-		if (!Object.hasOwn(projectRoles, role) || modelRoleValueFromUnknown(projectRoles[role]) !== undefined) continue;
-		filteredRoles ??= { ...projectRoles };
-		delete filteredRoles[role];
+	if (isRecord(projectRoles)) {
+		let filteredRoles: Record<string, unknown> | undefined;
+		for (const role in projectRoles) {
+			if (!Object.hasOwn(projectRoles, role) || modelRoleValueFromUnknown(projectRoles[role]) !== undefined)
+				continue;
+			filteredRoles ??= { ...projectRoles };
+			delete filteredRoles[role];
+		}
+		if (filteredRoles) result = { ...result, modelRoles: filteredRoles };
 	}
-	return filteredRoles ? { ...project, modelRoles: filteredRoles } : project;
+	const projectRoleFast = getByPath(project, ["modelRoleFast"]);
+	if (isRecord(projectRoleFast)) {
+		let filteredFast: Record<string, unknown> | undefined;
+		for (const role in projectRoleFast) {
+			if (!Object.hasOwn(projectRoleFast, role) || typeof projectRoleFast[role] === "boolean") continue;
+			filteredFast ??= { ...projectRoleFast };
+			delete filteredFast[role];
+		}
+		if (filteredFast) result = { ...result, modelRoleFast: filteredFast };
+	}
+	return result;
 }
 
 /** One instance's own layers, lowest precedence first. */
@@ -631,6 +644,8 @@ export class Settings {
 	#modified = new Map<string, readonly string[]>();
 	/** Individual project model roles modified during this session */
 	#modifiedProjectModelRoles = new Set<string>();
+	/** Individual project role fast settings modified during this session */
+	#modifiedProjectModelRoleFast = new Set<string>();
 	/** Individual global model roles modified during this session (for partial save) */
 	#modifiedGlobalModelRoles = new Set<string>();
 	/** On-disk generations and prior values observed before each pending global mutation, keyed like {@link #modified}. */
@@ -646,6 +661,7 @@ export class Settings {
 	 * when the role had no runtime override).
 	 */
 	#savedRuntimeModelRoleOverrides = new Map<string, string | undefined>();
+	#savedRuntimeModelRoleFastOverrides = new Map<string, boolean | undefined>();
 
 	/** Legacy `lastChangelogVersion` captured from config.yml during migration (now a marker file). */
 	#legacyLastChangelogVersion?: string;
@@ -902,6 +918,9 @@ export class Settings {
 		if (layer === "override" && setting === cfgModelRoles) {
 			this.#savedRuntimeModelRoleOverrides.clear();
 		}
+		if (layer === "override" && setting === cfgModelRoleFast) {
+			this.#savedRuntimeModelRoleFastOverrides.clear();
+		}
 		if (layer === "override") this.#softPins.delete(setting);
 		const prev = setting.get(this);
 		// Re-setting the persisted global value is a no-op for config.yml: staging it would still
@@ -1035,6 +1054,9 @@ export class Settings {
 	clearOverrideValue(setting: AnySetting): void {
 		if (setting === cfgModelRoles) {
 			this.#savedRuntimeModelRoleOverrides.clear();
+		}
+		if (setting === cfgModelRoleFast) {
+			this.#savedRuntimeModelRoleFastOverrides.clear();
 		}
 		this.#softPins.delete(setting);
 		if (getByPath(this.#overrides, setting.segments) === undefined) return;
@@ -1270,7 +1292,7 @@ export class Settings {
 		if (this.#modified.size > 0 || this.#modifiedGlobalModelRoles.size > 0) {
 			await this.#chainSave();
 		}
-		if (this.#modifiedProjectModelRoles.size > 0) {
+		if (this.#modifiedProjectModelRoles.size > 0 || this.#modifiedProjectModelRoleFast.size > 0) {
 			await this.#saveProjectNow();
 		}
 	}
@@ -1498,7 +1520,9 @@ export class Settings {
 				project: project?.settings ?? this.#project,
 				configOverlay: this.#configOverlay,
 				overrides:
-					this.#savedRuntimeModelRoleOverrides.size === 0 ? this.#overrides : this.#buildOriginalOverrides(),
+					this.#savedRuntimeModelRoleOverrides.size === 0 && this.#savedRuntimeModelRoleFastOverrides.size === 0
+						? this.#overrides
+						: this.#buildOriginalOverrides(),
 			};
 			const settledPins = this.#settlePins(candidate);
 			this.#validateAll(this.#mergeOverParent(this.#mergeOwnLayers(candidate)), normalized);
@@ -1508,6 +1532,7 @@ export class Settings {
 			this.#overrides = candidate.overrides;
 			for (const setting of settledPins) this.#softPins.delete(setting);
 			this.#savedRuntimeModelRoleOverrides.clear();
+			this.#savedRuntimeModelRoleFastOverrides.clear();
 			if (project) {
 				this.#project = project.settings;
 				this.#commitProjectRead(project);
@@ -1689,17 +1714,28 @@ export class Settings {
 	 * Does not mutate the current instance's `#overrides`.
 	 */
 	#buildOriginalOverrides(): RawSettings {
-		if (this.#savedRuntimeModelRoleOverrides.size === 0) {
+		if (this.#savedRuntimeModelRoleOverrides.size === 0 && this.#savedRuntimeModelRoleFastOverrides.size === 0) {
 			return structuredClone(this.#overrides);
 		}
 		const overrides = structuredClone(this.#overrides);
 		const runtimeRoles = getByPath(overrides, ["modelRoles"]);
-		if (!isRecord(runtimeRoles)) return overrides;
-		for (const [role, originalValue] of this.#savedRuntimeModelRoleOverrides) {
-			if (originalValue === undefined) {
-				delete runtimeRoles[role];
-			} else {
-				runtimeRoles[role] = originalValue;
+		if (isRecord(runtimeRoles)) {
+			for (const [role, originalValue] of this.#savedRuntimeModelRoleOverrides) {
+				if (originalValue === undefined) {
+					delete runtimeRoles[role];
+				} else {
+					runtimeRoles[role] = originalValue;
+				}
+			}
+		}
+		const runtimeFast = getByPath(overrides, ["modelRoleFast"]);
+		if (isRecord(runtimeFast)) {
+			for (const [role, originalValue] of this.#savedRuntimeModelRoleFastOverrides) {
+				if (originalValue === undefined) {
+					delete runtimeFast[role];
+				} else {
+					runtimeFast[role] = originalValue;
+				}
 			}
 		}
 		return overrides;
@@ -1903,6 +1939,123 @@ export class Settings {
 			}
 		}
 		this.#setRuntimeModelRoleOverrides(next);
+	}
+	#setProjectModelRoleFastValue(role: string, fast: boolean | null): void {
+		const prev = cfgModelRoleFast.get(this);
+		const projectFast = getByPath(this.#project, ["modelRoleFast"]);
+		const current: Record<string, unknown> = isRecord(projectFast) ? { ...projectFast } : {};
+		current[role] = fast;
+		setByPath(this.#project, ["modelRoleFast"], current);
+		this.#modifiedProjectModelRoleFast.add(role);
+		this.#persistedMutationGeneration++;
+		this.#rebuildMerged();
+		this.#fireIfChanged(cfgModelRoleFast, prev);
+		this.#queueProjectSave();
+	}
+	#captureRuntimeModelRoleFastOverride(role: string): void {
+		if (this.#savedRuntimeModelRoleFastOverrides.has(role)) return;
+		const runtimeOverrides = getByPath(this.#overrides, ["modelRoleFast"]);
+		if (!isRecord(runtimeOverrides) || !Object.hasOwn(runtimeOverrides, role)) return;
+		const val = runtimeOverrides[role];
+		this.#savedRuntimeModelRoleFastOverrides.set(role, typeof val === "boolean" ? val : undefined);
+	}
+
+	#updateRuntimeModelRoleFastOverride(role: string, fast: boolean | undefined): void {
+		const runtimeOverrides = getByPath(this.#overrides, ["modelRoleFast"]);
+		if (!isRecord(runtimeOverrides) || !Object.hasOwn(runtimeOverrides, role)) return;
+
+		const current = { ...runtimeOverrides };
+		if (fast === undefined) {
+			delete current[role];
+		} else {
+			current[role] = fast;
+		}
+		setByPath(this.#overrides, ["modelRoleFast"], current);
+		this.#rebuildMerged();
+	}
+
+	/**
+	 * Set whether fast mode is enabled for a model role in the project settings layer.
+	 */
+	setProjectModelRoleFast(role: string, fast: boolean): void {
+		this.#setProjectModelRoleFastValue(role, fast);
+		this.#captureRuntimeModelRoleFastOverride(role);
+		this.#updateRuntimeModelRoleFastOverride(role, fast);
+	}
+
+	/**
+	 * Clear a model role's fast mode configuration from the project settings layer.
+	 */
+	clearProjectModelRoleFast(role: string): void {
+		this.#setProjectModelRoleFastValue(role, null);
+		this.#captureRuntimeModelRoleFastOverride(role);
+		this.#updateRuntimeModelRoleFastOverride(role, undefined);
+	}
+
+	/**
+	 * Set whether fast mode is enabled for a model role. Passing `undefined` clears the setting.
+	 */
+	setModelRoleFast(role: string, fast: boolean | undefined): void {
+		cfgModelRoleFast.setEntry(this, role, fast);
+		if (this.isProjectModelRoleFastRuntimeOverrideActive(role)) {
+			return;
+		}
+		this.#savedRuntimeModelRoleFastOverrides.delete(role);
+		this.#updateRuntimeModelRoleFastOverride(role, fast);
+	}
+
+	/**
+	 * Whether a model role's runtime override slot currently holds the temporary
+	 * project-scoped fast mode value installed by a prior `setProjectModelRoleFast`.
+	 */
+	isProjectModelRoleFastRuntimeOverrideActive(role: string): boolean {
+		if (cfgModelRoleStorage.get(this) !== "project") return false;
+		if (!this.#savedRuntimeModelRoleFastOverrides.has(role)) return false;
+		return this.getProjectModelRoleFast(role) !== undefined;
+	}
+
+	/**
+	 * Get whether fast mode is enabled for a model role from project settings only.
+	 */
+	getProjectModelRoleFast(role: string): boolean | undefined {
+		const projectFast = getByPath(this.#project, ["modelRoleFast"]);
+		if (isRecord(projectFast) && typeof projectFast[role] === "boolean") return projectFast[role];
+		return this.#parent?.getProjectModelRoleFast(role);
+	}
+
+	/**
+	 * Get whether fast mode is enabled for a model role from global settings only.
+	 */
+	getGlobalModelRoleFast(role: string): boolean | undefined {
+		const globalFast = getByPath(this.#global, ["modelRoleFast"]);
+		if (isRecord(globalFast) && typeof globalFast[role] === "boolean") return globalFast[role];
+		return this.#parent?.getGlobalModelRoleFast(role);
+	}
+	/**
+	 * Get whether fast mode is enabled for a model role.
+	 */
+	getModelRoleFast(role: string): boolean | undefined {
+		const rolesFast: unknown = cfgModelRoleFast.get(this);
+		if (!isRecord(rolesFast)) return undefined;
+		const val = rolesFast[role];
+		return typeof val === "boolean" ? val : undefined;
+	}
+
+	/**
+	 * Get all configured role fast mode settings.
+	 */
+	getModelRolesFast(): ReadOnlyDict<boolean> {
+		const rolesFast: unknown = cfgModelRoleFast.get(this);
+		if (!isRecord(rolesFast)) return {};
+		const normalized: Record<string, boolean> = {};
+		for (const role in rolesFast) {
+			if (!Object.hasOwn(rolesFast, role)) continue;
+			const val = rolesFast[role];
+			if (typeof val === "boolean") {
+				normalized[role] = val;
+			}
+		}
+		return normalized;
 	}
 
 	// ─────────────────────────────────────────────────────────────────────────
@@ -2453,6 +2606,10 @@ export class Settings {
 		const nativeModelRoles = getByPath(nativeProject, ["modelRoles"]);
 		if (nativeModelRoles !== undefined) {
 			merged = this.#deepMerge(merged, { modelRoles: nativeModelRoles });
+		}
+		const nativeModelRoleFast = getByPath(nativeProject, ["modelRoleFast"]);
+		if (nativeModelRoleFast !== undefined) {
+			merged = this.#deepMerge(merged, { modelRoleFast: nativeModelRoleFast });
 		}
 		return {
 			settings: this.#migrateRawSettings(merged, quarantineInvalid),
@@ -3814,6 +3971,10 @@ export class Settings {
 		for (const role of this.#modifiedProjectModelRoles) {
 			setByPath(target, ["modelRoles", role], isRecord(liveRoles) ? liveRoles[role] : undefined);
 		}
+		const liveFast = getByPath(this.#project, ["modelRoleFast"]);
+		for (const role of this.#modifiedProjectModelRoleFast) {
+			setByPath(target, ["modelRoleFast", role], isRecord(liveFast) ? liveFast[role] : undefined);
+		}
 	}
 
 	#queueProjectSave(): void {
@@ -3837,12 +3998,18 @@ export class Settings {
 	}
 
 	async #saveProjectNow(): Promise<void> {
-		if (this.#savesCancelled || !this.#persist || this.#modifiedProjectModelRoles.size === 0) return;
+		if (
+			this.#savesCancelled ||
+			!this.#persist ||
+			(this.#modifiedProjectModelRoles.size === 0 && this.#modifiedProjectModelRoleFast.size === 0)
+		)
+			return;
 
 		const projectConfigPath = path.join(getProjectAgentDir(this.#cwd), "config.yml");
 		const modifiedModelRoles = [...this.#modifiedProjectModelRoles];
+		const modifiedModelRoleFast = [...this.#modifiedProjectModelRoleFast];
 		this.#modifiedProjectModelRoles.clear();
-
+		this.#modifiedProjectModelRoleFast.clear();
 		try {
 			await fs.promises.mkdir(path.dirname(projectConfigPath), { recursive: true });
 			await this.#withYamlWriteLock(projectConfigPath, async writePath => {
@@ -3856,6 +4023,11 @@ export class Settings {
 					const value = isRecord(projectRoles) ? projectRoles[role] : undefined;
 					setByPath(projectSettings, ["modelRoles", role], value);
 				}
+				const projectFast = getByPath(this.#project, ["modelRoleFast"]);
+				for (const role of modifiedModelRoleFast) {
+					const value = isRecord(projectFast) ? projectFast[role] : undefined;
+					setByPath(projectSettings, ["modelRoleFast", role], value);
+				}
 
 				await this.#writeYamlAtomically(writePath, stringifyYamlConfig(projectSettings));
 				this.#projectFileSettings = structuredClone(projectSettings);
@@ -3865,6 +4037,9 @@ export class Settings {
 		} catch (error) {
 			for (const role of modifiedModelRoles) {
 				this.#modifiedProjectModelRoles.add(role);
+			}
+			for (const role of modifiedModelRoleFast) {
+				this.#modifiedProjectModelRoleFast.add(role);
 			}
 			throw error;
 		}

@@ -1416,6 +1416,7 @@ export interface ResolvedModelRoleValue {
 	matchedPatternIndex?: number;
 	explicitThinkingLevel: boolean;
 	warning: string | undefined;
+	fastMode?: boolean;
 }
 
 export function resolveModelRoleValue(

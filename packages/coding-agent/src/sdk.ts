@@ -24,6 +24,7 @@ import type {
 	ServiceTierByFamily,
 	SimpleStreamOptions,
 } from "@oh-my-pi/pi-ai";
+import { serviceTierFamily, shouldSendServiceTier } from "@oh-my-pi/pi-ai";
 import { resolveApiKeyOnce } from "@oh-my-pi/pi-ai/auth-retry";
 import type { DiscoverAuthStorageOptions } from "@oh-my-pi/pi-ai/auth-broker/discover";
 import type { Dialect } from "@oh-my-pi/pi-ai/dialect";
@@ -4245,7 +4246,19 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		} else if (options.openAIServiceTier !== undefined) {
 			initialServiceTierByFamily.openai = options.openAIServiceTier;
 		}
-
+		if (
+			!hasServiceTierEntry &&
+			options.openAIServiceTier === undefined &&
+			resolvedServiceTierByFamily === undefined
+		) {
+			const defaultFast = settings.getModelRoleFast("default");
+			if (defaultFast && model) {
+				const family = serviceTierFamily(model);
+				if (family && (family !== "openai" || shouldSendServiceTier("priority", model))) {
+					initialServiceTierByFamily[family] = "priority";
+				}
+			}
+		}
 		// One-shot launch-latency marker: fired the first time the loop dispatches
 		// a chat request to the provider transport. See onFirstChatDispatch.
 		let notifyFirstChatDispatch = options.onFirstChatDispatch;
