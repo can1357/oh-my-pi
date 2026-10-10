@@ -820,12 +820,10 @@ fn replace_native_text(element: &AXUIElement, text: &str) -> CoreResult<bool> {
 	let Some(before) = copy_string(element, "AXValue") else {
 		return Ok(false);
 	};
-	let mut all = CFRange {
-		location: 0,
-		length:   before.encode_utf16().count() as isize,
-	};
+	let mut all = CFRange { location: 0, length: before.encode_utf16().count() as isize };
 	// SAFETY: `all` is a live CFRange matching the requested AXValue type.
-	let Some(range) = (unsafe { AXValue::new(AXValueType::CFRange, NonNull::from(&mut all).cast()) })
+	let Some(range) =
+		(unsafe { AXValue::new(AXValueType::CFRange, NonNull::from(&mut all).cast()) })
 	else {
 		return Ok(false);
 	};
@@ -1311,7 +1309,8 @@ mod tests {
 
 	#[test]
 	fn rewritten_readback_fails_and_names_what_the_field_reads() {
-		let error = text_readback("555-789-0123", "555-789-0123", Some("(555) 789-0123")).unwrap_err();
+		let error =
+			text_readback("555-789-0123", "555-789-0123", Some("(555) 789-0123")).unwrap_err();
 		assert_eq!(error.code, ErrorCode::AxFailed);
 		assert!(
 			error
