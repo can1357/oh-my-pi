@@ -356,6 +356,18 @@ export const cfgTodoEnabled = register({
 	},
 });
 
+export const cfgTodoSticky = register({
+	id: "todo.sticky",
+	type: "boolean",
+	default: true,
+	ui: {
+		tab: "tools",
+		group: "Todos",
+		label: "Pin Todo HUD",
+		description: "Keep the todo list pinned above the editor; off leaves it in the transcript so it scrolls away",
+	},
+});
+
 export const cfgTodoReminders = register({
 	id: "todo.reminders",
 	type: "boolean",

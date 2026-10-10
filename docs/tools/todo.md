@@ -134,6 +134,7 @@ The same file also exposes non-tool helpers used by `/todo`:
 - Renderer collapsed preview: `PREVIEW_LIMITS.COLLAPSED_ITEMS = 8` (`packages/tui/src/render/render-utils.ts`).
 - Execution-time repair: an omitted `op` is inferred only for the unambiguous payloads described above; the schema itself still requires `op`.
 - HUD auto-hide delay: `tasks.todoClearDelay` default `60` seconds; `< 0` disables hiding, `0` hides immediately. Applies only when all tasks are closed; blocked or pending work keeps the HUD visible. Canonical state survives the display change and session resume.
+- HUD pinning: `todo.sticky` default `true`. When `false`, no sticky HUD is rendered; only the transcript tool result shows the todo list. `/todo expand` then warns instead of persisting a reveal. Toggling it in `/settings` repaints immediately.
 - Tool execution mode: `concurrency = "exclusive"`, `strict = true`, `loadMode = "discoverable"`.
 
 ## Errors
