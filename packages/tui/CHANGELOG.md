@@ -15,7 +15,7 @@
 - Added Vim replace (`r`, `R`) in the prompt editor ([#15100](https://github.com/can1357/oh-my-pi/pull/15100) by [@Shadorain](https://github.com/Shadorain))
 - Added Vim bracket and quote matching (`%`), paragraph motions (`{`, `}`), line join (`J`), and indent (`>>`, `<<`) in the prompt editor ([#15100](https://github.com/can1357/oh-my-pi/pull/15100) by [@Shadorain](https://github.com/Shadorain))
 - Added `TUI.releaseHeldInput()`: on a terminal expected to speak TSP, a `deferInput` start now holds keystrokes (TSP events and the cell-size reply still apply; Ctrl+C/Ctrl+D release early) until the app calls it once its session is wired; such terminals also skip the sixel probe ([#15120](https://github.com/can1357/oh-my-pi/pull/15120) by [@H4vC](https://github.com/H4vC))
-- Added optional `StatusLineHost.classifyResetExpiry` and `resetExpiryNotice` plus `StatusLineComponent.setResetExpiryNoticeHandler`: the usage segment marks saved resets expiring within 7 days (`▲ N exp …`), and the handler gets one pool-wide warning per session for resets expiring within 24 hours ([#15134](https://github.com/can1357/oh-my-pi/pull/15134) by [@will-bogusz](https://github.com/will-bogusz))
+- Added optional `StatusLineHost.classifyResetExpiry` and `resetExpiryNotice` plus `StatusLineComponent.setResetExpiryNoticeHandler`: the usage segment marks saved resets expiring within 7 days (`▲ N exp …`), and the handler gets one pool-wide warning per conversation for resets expiring within 24 hours ([#15134](https://github.com/can1357/oh-my-pi/pull/15134) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.8.7] - 2026-10-09
 

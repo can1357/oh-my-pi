@@ -108,6 +108,21 @@ export function effectiveAutoRedeemMode(
 	return policy.autoRedeem ? "yes" : "no";
 }
 
+/** Planner settings from a provider's `codexResets.*` or `claudeResets.*` group. */
+export function resetPlanSettings(cfg: {
+	autoRedeem: ResetAutoRedeemMode;
+	minBlockedMinutes: number;
+	keepCredits: number;
+	salvageHorizonHours: number;
+}): CodexResetPlanInput["settings"] {
+	return {
+		autoRedeem: cfg.autoRedeem,
+		minBlockedMinutes: Math.max(0, cfg.minBlockedMinutes),
+		keepCredits: Math.max(0, Math.trunc(cfg.keepCredits)),
+		salvageHorizonMs: Math.max(0, cfg.salvageHorizonHours) * 3_600_000,
+	};
+}
+
 /** What woke the planner. `sweep` may only salvage; `blocked` may also restore. */
 export type CodexResetTrigger = "blocked" | "sweep";
 

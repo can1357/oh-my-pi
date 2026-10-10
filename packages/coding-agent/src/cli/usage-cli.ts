@@ -688,23 +688,19 @@ function formatExpiringResets(warning: ResetExpiryWarning, nowMs: number): strin
 }
 
 function formatResetSpendVerdict(verdict: ResetSpendVerdict): string {
-	const setting =
-		verdict.accountAutoRedeem === undefined
-			? `(${verdict.setting}: ${verdict.mode})`
-			: `(auth.accountPolicies autoRedeem: ${verdict.accountAutoRedeem})`;
-	switch (verdict.kind) {
-		case "auto":
-			return `→ spent automatically before it expires while an interactive omp session is open  ${setting}`;
-		case "ask":
-			return `→ an interactive omp session asks before spending it  ${setting}`;
-		case "off":
-			return `→ not spent automatically  ${setting}`;
-	}
+	const outcome =
+		verdict.kind === "auto"
+			? "an open interactive omp session spends it by its last 5 min if eligible then"
+			: verdict.kind === "ask"
+				? "an open interactive omp session asks before spending it"
+				: "not spent automatically";
+	return `→ ${outcome}  (${verdict.setting}: ${verdict.mode})${verdict.eligibleNow ? "" : " · not eligible now"}`;
 }
 
 /**
- * Saved resets expiring within 24 hours on accounts worth restoring: who
- * spends each one, and the `/usage reset` target that spends it now.
+ * Saved resets expiring within 24 hours on accounts worth restoring: what the
+ * provider's `autoRedeem` setting does with each one, whether it is eligible
+ * now, and the `/usage reset` target that spends it now when the provider allows.
  */
 function formatResetExpiryBanner(
 	expiring: readonly { report: UsageReport; warning: ResetExpiryWarning }[],
@@ -714,13 +710,7 @@ function formatResetExpiryBanner(
 	options: UsageResetExpiryOptions,
 	policyOptions: UsagePolicyDiagnosticsOptions | undefined,
 ): string[] {
-	const verdicts = expiring.map(({ report, warning }) =>
-		resetSpendVerdict(
-			warning.provider,
-			options.settings,
-			policyOptions?.getAccountPolicy(report.provider, usageReportIdentity(report)),
-		),
-	);
+	const verdicts = expiring.map(({ report, warning }) => resetSpendVerdict(report, warning, options.settings, nowMs));
 	const count = expiring.reduce((sum, { warning }) => sum + warning.count, 0);
 	const lost = verdicts.every(verdict => verdict.kind === "off");
 	const lines = [
@@ -737,8 +727,8 @@ function formatResetExpiryBanner(
 		lines.push(
 			`  ${formatResetProviderName(warning.provider)} · ${identity} · ${formatExpiringResets(warning, nowMs)} (${expiresAt}) · ${used}`,
 		);
-		const verdict = verdicts[index]!;
-		lines.push(`    ${chalk.dim(formatResetSpendVerdict(verdict))}`);
+		lines.push(`    ${chalk.dim(formatResetSpendVerdict(verdicts[index]!))}`);
+		if (!warning.usableNow) return;
 		// Codex usage reports carry no credential id; the stored account with the same identity has it.
 		const stored = options
 			.accounts(warning.provider)
@@ -746,7 +736,7 @@ function formatResetExpiryBanner(
 		const command =
 			stored.length === 1 ? `/usage reset ${warning.provider}/${stored[0]!.credentialId}` : "/usage reset";
 		lines.push(
-			`    ${verdict.kind === "off" ? "spend it" : "or now"}:  ${chalk.cyan(command)} ${chalk.dim("in omp")}`,
+			`    ${verdicts[index]!.kind === "off" ? "spend it" : "or now"}:  ${chalk.cyan(command)} ${chalk.dim("in omp")}`,
 		);
 	});
 	return lines;
