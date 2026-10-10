@@ -30,6 +30,7 @@ import { ensureChromiumExecutable } from "@oh-my-pi/pi-coding-agent/tools/browse
 import {
 	acquireBrowser,
 	type BrowserHandle,
+	type PuppeteerBrowserHandle,
 	normalizeConnectedCdpUrl,
 	releaseBrowser,
 } from "@oh-my-pi/pi-coding-agent/tools/browser/registry";
@@ -809,6 +810,49 @@ describe("pickElectronTarget", () => {
 		},
 		30_000,
 	);
+
+	test("picks a page on one relay while another relay's page pick is stalled", async () => {
+		// Both relays advertise the same `/cdp` websocket path; only the endpoint tells them apart.
+		const relayHandle = (port: number): PuppeteerBrowserHandle => ({
+			key: `relay:http://127.0.0.1:${port}`,
+			kind: { kind: "relay", cdpUrl: `http://127.0.0.1:${port}` },
+			refCount: 0,
+			browser: { wsEndpoint: () => `ws://127.0.0.1:${port}/cdp`, connected: false } as unknown as Browser,
+			stealth: { browserSession: null, override: null },
+		});
+		const stalled = relayHandle(9301);
+		const other = relayHandle(9302);
+		const enteredStalled = Promise.withResolvers<void>();
+		const enteredOther = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		const spy = vi.spyOn(attach, "pickElectronTarget").mockImplementation(async browser => {
+			if (browser === stalled.browser) {
+				enteredStalled.resolve();
+				await release.promise;
+			} else {
+				enteredOther.resolve();
+			}
+			throw new Error("pick stopped by test");
+		});
+		try {
+			const openingStalled = rejectionOf(
+				acquireTab(`relay-stalled-${crypto.randomUUID()}`, stalled, { timeoutMs: 5_000 }),
+			);
+			await enteredStalled.promise;
+			const openingOther = rejectionOf(
+				acquireTab(`relay-other-${crypto.randomUUID()}`, other, { timeoutMs: 5_000 }),
+			);
+			// A pick chain shared across relays would hold this until the test times out.
+			await enteredOther.promise;
+			release.resolve();
+
+			expect(await openingOther).toMatchObject({ message: "pick stopped by test" });
+			expect(await openingStalled).toMatchObject({ message: "pick stopped by test" });
+		} finally {
+			release.resolve();
+			spy.mockRestore();
+		}
+	});
 
 	// Launches real headless Chromium; skipped where Chrome's system libraries are absent.
 	test.skipIf(!CHROMIUM_AVAILABLE)(

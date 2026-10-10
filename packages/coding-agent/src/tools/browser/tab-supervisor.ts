@@ -42,6 +42,7 @@ import {
 	releaseBrowser,
 	type TernBrowserHandle,
 } from "./registry";
+import { isLoopbackRelayUrl } from "./relay/daemon";
 import type {
 	ReadyInfo,
 	RunErrorPayload,
@@ -222,11 +223,11 @@ const acquireChains = new Map<string, Promise<void>>();
 // dropped by name once that acquisition settles.
 const reservedTargets = new Map<string, string>();
 // Per-browser pick chain: serializes attached-target selection and its
-// reservation so two picks on one browser never read the same snapshot. Keyed
-// by the debugger websocket path (`/devtools/browser/<id>` for Chromium,
-// `/cdp` for the relay): it names the browser instance however the discovery
-// URL was spelled (localhost vs 127.0.0.1), while unrelated browsers stay
-// independent. Worker startup runs outside the chain.
+// reservation so two picks on one browser never read the same snapshot. A
+// Chromium debugger websocket path (`/devtools/browser/<id>`) names the
+// instance however its discovery URL was spelled (localhost vs 127.0.0.1).
+// Every relay serves `/cdp`, so a relay is named by its endpoint, with
+// loopback spellings folded together. Worker startup runs outside the chain.
 const targetPicks = new Map<string, Promise<void>>();
 const GRACE_MS = 750;
 // Cold-start guard for the worker's `setup` handshake (realm usable: puppeteer
@@ -1546,7 +1547,11 @@ async function buildInitPayload(
 	// target may be backgrounded, so retain activation for target-correct pixels.
 	const userDriven = browser.kind.kind === "connected" || browser.kind.kind === "relay";
 	const activateForScreenshot = !userDriven || !shouldPreserveConnectedBrowserFocus(opts.target);
-	const pickKey = new URL(browserWSEndpoint).pathname;
+	const ws = new URL(browserWSEndpoint);
+	const pickKey =
+		browser.kind.kind === "relay"
+			? `${isLoopbackRelayUrl(ws.href) ? "loopback" : ws.hostname}:${ws.port}${ws.pathname}`
+			: ws.pathname;
 	const prior = targetPicks.get(pickKey) ?? Promise.resolve();
 	const { promise: picked, resolve: pickDone } = Promise.withResolvers<void>();
 	targetPicks.set(pickKey, picked);
