@@ -25,4 +25,9 @@ provider "experiential" {
 	supports-developer-role #false
 	supports-store #false
 	thinking-mode "effort"
+	// The gateway speaks one OpenAI dialect for every upstream: reasoning
+	// rides `reasoning_effort` with the row's advertised vocabulary. Without
+	// this, Qwen-family ids pick the Qwen template dialect from taxonomy and
+	// send `enable_thinking` instead of the selected effort.
+	thinking-format "openai"
 }

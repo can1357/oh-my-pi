@@ -7994,8 +7994,9 @@ function resolveExperientialCost(pricing: unknown): ModelSpec<"openai-completion
  * Map one Experiential row to a chat model spec. Rows the gateway marks as
  * non-chat (`supports_completions: false`, embeddings, image output) are
  * dropped. Live limits, reasoning, ladder and tariff win; a canonical bundled
- * reference fills only what the wire leaves out (display name, input
- * modality, and limits/reasoning on rows that publish none).
+ * reference fills only the display name, input modality, and limits on rows
+ * that publish none. Reasoning is never borrowed: an effort the route does not
+ * advertise is rejected by the gateway.
  */
 function mapExperientialModel(
 	entry: ExperientialModelRecord,
@@ -8005,10 +8006,13 @@ function mapExperientialModel(
 	if (entry.supports_completions === false || entry.supports_embeddings === true || entry.emits_images === true) {
 		return null;
 	}
-	const hasReasoningFlag = typeof entry.supports_reasoning === "boolean";
-	const reasoning = hasReasoningFlag ? entry.supports_reasoning === true : (canonical?.reasoning ?? false);
+	// A row without reasoning metadata has no known effort vocabulary, and the
+	// gateway rejects efforts a route does not accept (400
+	// `unsupported_parameter`), so it stays non-reasoning and no reasoning
+	// field is ever sent for it.
+	const reasoning = entry.supports_reasoning === true;
 	const wireEfforts = Array.isArray(entry.supported_reasoning_efforts) ? entry.supported_reasoning_efforts : undefined;
-	let thinking: ThinkingConfig | undefined = reasoning && !hasReasoningFlag ? canonical?.thinking : undefined;
+	let thinking: ThinkingConfig | undefined;
 	if (reasoning && wireEfforts) {
 		// `none` is the off switch, not an Effort; it routes through
 		// `reasoningDisableMode` below.
@@ -8019,11 +8023,9 @@ function mapExperientialModel(
 				? { mode: "effort", efforts, ...(defaultLevel !== undefined && { defaultLevel }) }
 				: undefined;
 	}
-	const compat: NonNullable<ModelSpec<"openai-completions">["compat"]> = {};
-	if (hasReasoningFlag || wireEfforts) {
-		// An explicit empty vocabulary must not regrow a guessed dial.
-		compat.trustExplicitThinkingOnly = true;
-	}
+	// Never regrow a guessed dial from identity or KDL: the live vocabulary
+	// (or its absence) is the whole truth for this gateway.
+	const compat: NonNullable<ModelSpec<"openai-completions">["compat"]> = { trustExplicitThinkingOnly: true };
 	if (thinking && wireEfforts?.includes(EXPERIENTIAL_WIRE_EFFORT_NONE)) {
 		compat.reasoningDisableMode = "none-effort";
 	}

@@ -106,6 +106,20 @@ const ROWS = {
 		maximum_output_tokens: 8192,
 	},
 	bare: { id: "glm-5.2-fast", object: "model", owned_by: "exp" },
+	qwenRoute: {
+		id: "qwen3.8-flash-next-uncensored",
+		object: "model",
+		owned_by: "exp",
+		supports_completions: true,
+		supports_tools: true,
+		supports_reasoning: true,
+		reasoning_effort: "xhigh",
+		supported_reasoning_efforts: ["low", "medium", "xhigh"],
+		chat_max_tokens_field: "max_tokens",
+		context_window_tokens: 262144,
+		maximum_output_tokens: 32768,
+		pricing: { input_nano_usd_per_million_tokens: 0, output_nano_usd_per_million_tokens: 0 },
+	},
 } as const;
 
 function fetchReturning(rows: readonly unknown[], seen?: Array<{ url: string; authorization: string | null }>) {
@@ -131,6 +145,7 @@ describe("Experiential Labs built-in provider", () => {
 			"glm-5.3-flash-abliterated",
 			"gpt-5",
 			"ling-3.1-flash",
+			"qwen3.8-flash-next-uncensored",
 		]);
 
 		const glm = models?.find(model => model.id === "glm-5.3-flash-abliterated");
@@ -172,10 +187,13 @@ describe("Experiential Labs built-in provider", () => {
 		expect(plain?.maxTokens).toBeNull();
 		expect(plain?.cost).toEqual({ input: 0.1, output: 0.2, cacheRead: 0, cacheWrite: 0.125 });
 
-		// A metadata-less row is kept but never borrows another host's price.
+		// A metadata-less row is kept, but never borrows another host's price
+		// or reasoning dial: the gateway 400s on unadvertised efforts.
 		const bare = models?.find(model => model.id === "glm-5.2-fast");
 		expect(bare?.cost).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
-		expect(bare?.compat?.trustExplicitThinkingOnly).toBeUndefined();
+		expect(bare?.reasoning).toBe(false);
+		expect(bare?.thinking).toBeUndefined();
+		expect(bare?.compat?.trustExplicitThinkingOnly).toBe(true);
 	});
 
 	test("keeps a live zero tariff and the live ladder through the production manager and cache reload", async () => {
@@ -217,6 +235,25 @@ describe("Experiential Labs built-in provider", () => {
 		expect(built["glm-5.3-flash-abliterated"]?.compat?.maxTokensField).toBe("max_tokens");
 		expect(built["glm-5.3-flash-abliterated"]?.compat?.supportsDeveloperRole).toBe(false);
 		expect(built["glm-5.3-flash-abliterated"]?.compat?.supportsStore).toBe(false);
+	});
+
+	test("keeps every row on the OpenAI reasoning dialect and leaves no-off routes without none-effort", async () => {
+		const options = experientialModelManagerOptions({
+			apiKey: "xpl_test",
+			fetch: fetchReturning([ROWS.qwenRoute, ROWS.glmAbliterated, ROWS.bare]),
+		});
+		const specs = (await options.fetchDynamicModels?.()) ?? [];
+		const built = Object.fromEntries(specs.map(spec => [spec.id, buildModel(spec)]));
+		// Qwen ids must not fall back to the Qwen template dialect (`enable_thinking`).
+		expect(built["qwen3.8-flash-next-uncensored"]?.compat?.thinkingFormat).toBe("openai");
+		expect(built["qwen3.8-flash-next-uncensored"]?.compat?.reasoningDisableMode).not.toBe("none-effort");
+		expect(built["qwen3.8-flash-next-uncensored"]?.thinking?.efforts).toEqual([
+			Effort.Low,
+			Effort.Medium,
+			Effort.XHigh,
+		]);
+		expect(built["glm-5.3-flash-abliterated"]?.compat?.reasoningDisableMode).not.toBe("none-effort");
+		expect(built["glm-5.2-fast"]?.reasoning).toBe(false);
 	});
 
 	test("gates discovery on a key and scopes the cache per key and endpoint", () => {
