@@ -4,7 +4,7 @@ import {
 	createProcessTerminalRenderHarness,
 	type ProcessTerminalRenderHarness,
 } from "./process-terminal-render-harness";
-import { withoutTerminalMultiplexer } from "./terminal-multiplexer-environment";
+import { withoutTerminalMultiplexer } from "./helpers/terminal-multiplexer";
 import { VirtualTerminal } from "./virtual-terminal";
 
 const COLUMNS = 40;

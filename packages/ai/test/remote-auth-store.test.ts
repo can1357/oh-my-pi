@@ -1,7 +1,5 @@
+import { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, test, vi } from "bun:test";
-import * as fs from "node:fs/promises";
-import * as os from "node:os";
-import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
 import { AuthStorage, REMOTE_REFRESH_SENTINEL, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai";
 import {
@@ -17,7 +15,6 @@ import { snapshotResponseSchema } from "@oh-my-pi/pi-ai/auth-broker/wire-schemas
 import * as oauthUtils from "@oh-my-pi/pi-ai/registry/oauth";
 import type { UsageLimit, UsageProvider, UsageReport } from "@oh-my-pi/pi-ai/usage";
 import * as claudeUsage from "@oh-my-pi/pi-ai/usage/claude";
-import { removeWithRetries } from "../../utils/src/temp";
 
 function requireLimit(report: UsageReport, id: string): UsageLimit {
 	const limit = report.limits.find(candidate => candidate.id === id);
@@ -29,7 +26,6 @@ const ANTHROPIC_ENV = ["ANTHROPIC_API_KEY", "ANTHROPIC_OAUTH_TOKEN"] as const;
 const savedEnv: Partial<Record<(typeof ANTHROPIC_ENV)[number], string | undefined>> = {};
 
 describe("RemoteAuthCredentialStore + AuthStorage integration", () => {
-	let tempDir = "";
 	let serverStore: SqliteAuthCredentialStore | undefined;
 	let serverStorage: AuthStorage | undefined;
 	let handle: AuthBrokerServerHandle | undefined;
@@ -42,8 +38,7 @@ describe("RemoteAuthCredentialStore + AuthStorage integration", () => {
 			savedEnv[key] = process.env[key];
 			delete process.env[key];
 		}
-		tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "auth-broker-remote-"));
-		serverStore = await SqliteAuthCredentialStore.open(path.join(tempDir, "agent.db"));
+		serverStore = new SqliteAuthCredentialStore(new Database(":memory:"));
 		await serverStore.saveOAuth("anthropic", {
 			access: "server-access-1",
 			refresh: "server-refresh-1",
@@ -74,7 +69,6 @@ describe("RemoteAuthCredentialStore + AuthStorage integration", () => {
 		await handle?.close();
 		serverStorage?.close();
 		serverStore?.close();
-		await removeWithRetries(tempDir);
 		for (const key of ANTHROPIC_ENV) {
 			if (savedEnv[key] === undefined) delete process.env[key];
 			else process.env[key] = savedEnv[key];
@@ -1008,11 +1002,16 @@ describe("RemoteAuthCredentialStore + AuthStorage integration", () => {
 			refresher: { enabled: false, intervalMs: 0, skewMs: 0, nextSweepInMs: Number.MAX_SAFE_INTEGER },
 			credentials: [entry],
 		};
-		vi.spyOn(brokerClient, "fetchSnapshot").mockImplementation(async () => ({
-			status: 200,
-			generation: incoming.generation,
-			snapshot: incoming,
-		}));
+		// The constructor's background long-poll parks like a broker with nothing
+		// newer; answering it immediately would spin the sync loop until it idles.
+		const backgroundSnapshotFetch = Promise.withResolvers<FetchSnapshotResult>();
+		vi.spyOn(brokerClient, "fetchSnapshot")
+			.mockReturnValueOnce(backgroundSnapshotFetch.promise)
+			.mockImplementation(async () => ({
+				status: 200,
+				generation: incoming.generation,
+				snapshot: incoming,
+			}));
 		vi.spyOn(brokerClient, "upsertCredentialBlock").mockRejectedValue(new Error("broker write unavailable"));
 		const remoteStore = new RemoteAuthCredentialStore({
 			client: brokerClient,

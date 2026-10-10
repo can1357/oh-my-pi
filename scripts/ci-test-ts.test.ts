@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { ptree, TempDir } from "@oh-my-pi/pi-utils";
-import { selectShard } from "./ci-test-ts";
+import { selectShard, testConcurrency } from "./ci-test-ts";
 
 describe("test runner watchdog", () => {
 	// Parent fake timers cannot drive the real watchdog inside the isolated runner process.
@@ -39,6 +39,28 @@ describe("test runner watchdog", () => {
 		expect(await Bun.file(completed).exists()).toBe(false);
 		expect(await Bun.file(continued).text()).toBe("continued");
 	}, 15_000);
+});
+
+describe("OMP_TEST_CONCURRENCY", () => {
+	test("never fans out wider than the cores or the chunk count", () => {
+		expect(testConcurrency(188, undefined, 12)).toBe(12);
+		for (const spec of ["max", "all", "ALL", "188", "10000"]) {
+			expect(testConcurrency(188, spec, 12)).toBe(12);
+		}
+		expect(testConcurrency(3, "max", 12)).toBe(3);
+		expect(testConcurrency(3, undefined, 0)).toBe(1);
+	});
+
+	test("an explicit width below the cap wins", () => {
+		expect(testConcurrency(188, "2", 12)).toBe(2);
+		expect(testConcurrency(188, " 4.9 ", 12)).toBe(4);
+	});
+
+	test("rejects widths that would run nothing", () => {
+		for (const spec of ["0", "-1", "abc"]) {
+			expect(() => testConcurrency(188, spec, 12)).toThrow("Invalid OMP_TEST_CONCURRENCY");
+		}
+	});
 });
 
 describe("OMP_TEST_SHARD", () => {

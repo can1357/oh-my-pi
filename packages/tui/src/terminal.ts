@@ -27,7 +27,8 @@ import {
 	setTerminalGlyphProtocol,
 	TERMINAL,
 } from "./terminal-capabilities";
-import { isInsideTmux, wrapTmuxPassthrough } from "./tmux";
+import type { TerminalMultiplexerBackgroundColorCache } from "./multiplexers/types";
+import { terminalMultiplexerSessions } from "./terminal-multiplexer";
 import { setHangulCompatibilityJamoWidth } from "./utils";
 import { translateWindowsAltGrSequence } from "./windows-altgr";
 import { Win32InputModeDecoder, Win32PasteMarkerNormalizer } from "./windows-input-mode";
@@ -726,8 +727,6 @@ function parseOsc99KeyValues(section: string): Map<string, string> {
 const PROBE_GUARD_BEGIN = "\x1b7\x1b[?7l\x1b[8m";
 const PROBE_GUARD_END = "\x1b[28m\x1b[?7h\x1b8";
 const XTERM_SCROLL_TO_BOTTOM_MODES = [1010, 1011] as const;
-type Osc11QueryRoute = "direct" | "tmux";
-const TMUX_OSC11_CACHE_REFRESH_DELAY_MS = 100;
 
 function isXtermScrollToBottomMode(mode: number): boolean {
 	return mode === 1010 || mode === 1011;
@@ -848,10 +847,10 @@ export class ProcessTerminal implements Terminal {
 	#appearance: TerminalAppearance | undefined;
 	#osc11Pending = false;
 	#osc11ActiveToken?: TerminalAppearanceRequestToken;
-	#osc11QueuedQuery?: { route: Osc11QueryRoute; token?: TerminalAppearanceRequestToken };
+	#osc11QueuedQuery?: { cache?: TerminalMultiplexerBackgroundColorCache; token?: TerminalAppearanceRequestToken };
 	#nextAppearanceRequestToken = 1;
 	#osc11ResponseBuffer = "";
-	#osc11TmuxRefreshTimer?: Timer;
+	#osc11CacheRefreshTimer?: Timer;
 	#osc99PendingId: string | undefined;
 	#osc99ResponseBuffer = "";
 	#osc99Capabilities = new Map<string, string>();
@@ -949,10 +948,11 @@ export class ProcessTerminal implements Terminal {
 
 	/**
 	 * Re-query the terminal background through the startup DA1-sentinel FIFO,
-	 * pending/queued gating, parsing, dedup, and appearance callbacks. Inside
-	 * tmux, only this explicit path first passes an OSC 11 query to the outer
-	 * terminal, waits briefly for tmux to consume the response into its cache,
-	 * then reads that cache with a direct query. The outer query deliberately has
+	 * pending/queued gating, parsing, dedup, and appearance callbacks. Inside a
+	 * multiplexer that answers OSC 11 from a cache (tmux), only this explicit
+	 * path first passes an OSC 11 query to the outer terminal, waits briefly for
+	 * the multiplexer to consume the response into its cache, then reads that
+	 * cache with a direct query. The outer query deliberately has
 	 * no DA1 sentinel: multiplexers can decode a fragmented DA1 response as a key
 	 * sequence and leak the remaining bytes into the editor. Startup and Mode 2031
 	 * probes remain direct. Suppressed while inactive, headless, or after teardown.
@@ -963,7 +963,10 @@ export class ProcessTerminal implements Terminal {
 		if (token >= this.#nextAppearanceRequestToken) {
 			this.#nextAppearanceRequestToken = token + 1;
 		}
-		this.#queryBackgroundColor(isInsideTmux() ? "tmux" : "direct", token);
+		const cache = terminalMultiplexerSessions().find(
+			multiplexer => multiplexer.backgroundColorCache,
+		)?.backgroundColorCache;
+		this.#queryBackgroundColor(cache, token);
 		return token;
 	}
 
@@ -1427,7 +1430,7 @@ export class ProcessTerminal implements Terminal {
 						) {
 							const query = this.#osc11QueuedQuery;
 							this.#osc11QueuedQuery = undefined;
-							this.#startOsc11Query(query.route, query.token);
+							this.#startOsc11Query(query.cache, query.token);
 						}
 						break;
 					}
@@ -1645,36 +1648,39 @@ export class ProcessTerminal implements Terminal {
 	 * DA1 avoids indefinite hangs: if DA1 response arrives before OSC 11,
 	 * the terminal does not support OSC 11.
 	 */
-	#queryBackgroundColor(route: Osc11QueryRoute = "direct", token?: TerminalAppearanceRequestToken): void {
+	#queryBackgroundColor(
+		cache?: TerminalMultiplexerBackgroundColorCache,
+		token?: TerminalAppearanceRequestToken,
+	): void {
 		if (this.#dead) return;
 		// Queue if an OSC 11 query is in flight or its DA1 sentinel hasn't been
 		// consumed yet. Starting a new query while a DA1 is outstanding would
 		// increment the sentinel counter, and the old DA1 arrival would then
 		// prematurely clear the new query's pending state. Preserve a requested
-		// tmux passthrough route when coalescing direct and explicit queries, and
-		// retain the latest explicit request identity across automatic queries.
+		// cache refresh when coalescing direct and explicit queries, and retain
+		// the latest explicit request identity across automatic queries.
 		if (this.#osc11Pending || this.#da1SentinelOwners.some(o => o.kind === "osc11")) {
 			const queued = this.#osc11QueuedQuery;
-			this.#osc11QueuedQuery = {
-				route: queued?.route === "tmux" || route === "tmux" ? "tmux" : "direct",
-				token: token ?? queued?.token,
-			};
+			this.#osc11QueuedQuery = { cache: queued?.cache ?? cache, token: token ?? queued?.token };
 			return;
 		}
-		this.#startOsc11Query(route, token);
+		this.#startOsc11Query(cache, token);
 	}
 
-	#startOsc11Query(route: Osc11QueryRoute, token?: TerminalAppearanceRequestToken): void {
+	#startOsc11Query(
+		cache: TerminalMultiplexerBackgroundColorCache | undefined,
+		token?: TerminalAppearanceRequestToken,
+	): void {
 		this.#osc11Pending = true;
 		this.#osc11ActiveToken = token;
 		this.#osc11ResponseBuffer = "";
-		if (route === "tmux") {
-			this.#safeWrite(wrapTmuxPassthrough("\x1b]11;?\x07"));
-			this.#osc11TmuxRefreshTimer = setTimeout(() => {
-				this.#osc11TmuxRefreshTimer = undefined;
+		if (cache) {
+			this.#safeWrite(cache.passthrough("\x1b]11;?\x07"));
+			this.#osc11CacheRefreshTimer = setTimeout(() => {
+				this.#osc11CacheRefreshTimer = undefined;
 				if (this.#dead || !this.#osc11Pending) return;
 				this.#startDirectOsc11Query();
-			}, TMUX_OSC11_CACHE_REFRESH_DELAY_MS);
+			}, cache.settleMs);
 			return;
 		}
 		this.#startDirectOsc11Query();
@@ -2198,9 +2204,9 @@ export class ProcessTerminal implements Terminal {
 			clearTimeout(this.#mode2031DebounceTimer);
 			this.#mode2031DebounceTimer = undefined;
 		}
-		if (this.#osc11TmuxRefreshTimer) {
-			clearTimeout(this.#osc11TmuxRefreshTimer);
-			this.#osc11TmuxRefreshTimer = undefined;
+		if (this.#osc11CacheRefreshTimer) {
+			clearTimeout(this.#osc11CacheRefreshTimer);
+			this.#osc11CacheRefreshTimer = undefined;
 		}
 		this.#appearanceCallbacks = [];
 		this.#appearanceReportCallbacks = [];

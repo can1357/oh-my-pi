@@ -110,7 +110,7 @@ describe("TextJudge", () => {
 				"<count>2</count>\n" +
 				"<active>true</active>\n" +
 				"<missing>null</missing>\n" +
-				"<config>\nretries: 3\nlabels: \n  - fast\n  - safe\n</config>\n" +
+				"<config>\nretries: 3\nlabels:\n  - fast\n  - safe\n</config>\n" +
 				'<field name="bad key">\nenabled: false\n</field>',
 		);
 		expect(renderJudgmentState(["a", { nested: "<value>" }])).toBe(
