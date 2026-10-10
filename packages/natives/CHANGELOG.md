@@ -9,7 +9,7 @@
 
 ### Added
 
-- Added to macOS `ax()` lines what an element can do: `(selected)`, `(settable)` where `setValue` can write, `actions=` for actions beyond its role's press, names for a window's close, minimize, zoom and full-screen buttons, and dates in local time ([#15282](https://github.com/can1357/oh-my-pi/pull/15282) by [@will-bogusz](https://github.com/will-bogusz))
+- Added to macOS `ax()` lines what an element can do: `(selected)`, `(settable)` on dates `setValue` can write, `actions=` for actions beyond its role's press, names for a window's close, minimize, zoom and full-screen buttons, and dates in local time ([#15282](https://github.com/can1357/oh-my-pi/pull/15282) by [@will-bogusz](https://github.com/will-bogusz))
 
 ### Fixed
 

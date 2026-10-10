@@ -316,7 +316,6 @@ fn walk_raw(
 	handle: AxHandle,
 	depth: u32,
 	in_web: bool,
-	in_row: bool,
 	state: &mut WalkState,
 ) -> CoreResult<Option<WalkNode>> {
 	if depth > state.max_depth || state.visited >= state.max_nodes {
@@ -334,18 +333,13 @@ fn walk_raw(
 	};
 	// `setValue` refuses web content, whose echo it cannot verify.
 	let in_web = in_web || props.role == "webarea";
-	// A text field in a table or outline row is the row's label: writing it
-	// changes what the field reads, not the item. Finder renames no file,
-	// Reminders keeps the list's name, Automator refuses the write.
 	let settable = state.line_states
 		&& !in_web
-		&& !in_row
-		&& takes_value(&props.role)
+		&& keeps_set_value(&props.role)
 		&& backend.value_settable(&handle);
-	let in_row = in_row || props.role == "row";
 	let mut children = Vec::new();
 	for child in child_handles {
-		if let Some(child) = walk_raw(backend, child, depth + 1, in_web, in_row, state)? {
+		if let Some(child) = walk_raw(backend, child, depth + 1, in_web, state)? {
 			children.push(child);
 		}
 		if state.truncated && state.visited >= state.max_nodes {
@@ -355,14 +349,13 @@ fn walk_raw(
 	Ok(Some(WalkNode { handle, props, settable, children }))
 }
 
-/// Roles whose value `setValue` writes: text, which it sets as a string, and
-/// dates. Sliders, steppers and color wells hold numbers or colors it cannot
-/// write.
-fn takes_value(role: &str) -> bool {
-	matches!(
-		role,
-		"textfield" | "textarea" | "combobox" | "datetimearea" | "datefield" | "timefield"
-	)
+/// Roles whose `setValue` write the app keeps: dates. A text field's `AXValue`
+/// write reads back but often never reaches the app: System Settings keeps
+/// the computer name unless the field is focused and confirmed, Reminders the
+/// list's name, Finder the file's. Sliders, steppers and color wells hold
+/// numbers or colors `setValue` cannot write.
+fn keeps_set_value(role: &str) -> bool {
+	matches!(role, "datetimearea" | "datefield" | "timefield")
 }
 
 fn named(props: &AxProps) -> bool {
@@ -670,7 +663,7 @@ pub fn snapshot(
 		bounds:      WalkBounds::Skip,
 		line_states: true,
 	};
-	let root = walk_raw(backend, root, 0, false, false, &mut state)?
+	let root = walk_raw(backend, root, 0, false, &mut state)?
 		.and_then(|node| filter_node(node, options.all.unwrap_or(false)));
 	let mut text = String::new();
 	let mut node_count = 0;
@@ -723,7 +716,7 @@ pub fn query(
 		bounds:      WalkBounds::Read,
 		line_states: false,
 	};
-	let Some(root) = walk_raw(backend, root, 0, false, false, &mut state)? else {
+	let Some(root) = walk_raw(backend, root, 0, false, &mut state)? else {
 		return Ok(Vec::new());
 	};
 	let role = query.role.as_deref().map(str::to_lowercase);
@@ -1389,62 +1382,33 @@ mod tests {
 		assert!(line(&text, "e3").ends_with("(focused)"), "{text}");
 	}
 	#[test]
-	fn values_set_value_can_write_are_marked_settable_outside_web_content() {
+	fn only_dates_outside_web_content_are_marked_settable() {
 		let mut due = p("datetimearea", Some("Due"));
 		due.value = Some("2026-10-16T09:00:00-04:00".into());
 		let mut volume = p("slider", Some("Volume"));
 		volume.value = Some("0.5".into());
-		let mut m = Mock {
-			props: [
-				(1, p("window", Some("Title"))),
-				(2, due),
-				(3, p("webarea", Some("Page"))),
-				(4, p("textfield", Some("Search"))),
-				(5, p("button", Some("Go"))),
-				(6, volume),
-			]
-			.into(),
-			children: [(1, vec![2, 3, 5, 6]), (3, vec![4])].into(),
-			settable: [2, 4, 5, 6].into(),
-			..Default::default()
-		};
-		let text = tree(&mut m);
-		assert!(line(&text, "e2").ends_with("(settable)"), "{text}");
-		for unsettable in ["e4", "e5", "e6"] {
-			assert!(!line(&text, unsettable).contains("(settable)"), "{text}");
-		}
-		assert_eq!(m.settable_reads, 1);
-	}
-	#[test]
-	fn text_fields_in_table_and_outline_rows_are_not_marked_settable() {
-		let mut file = p("textfield", None);
-		file.value = Some("invoice.pdf".into());
-		file.actions = vec!["AXOpen".into(), "AXShowMenu".into(), "AXConfirm".into()];
-		let mut category = p("textfield", None);
-		category.value = Some("Mail".into());
 		let mut name = p("textfield", Some("Name"));
 		name.value = Some("Bench".into());
 		let mut m = Mock {
 			props: [
 				(1, p("window", Some("Title"))),
-				(2, p("outline", Some("Files"))),
-				(3, p("row", None)),
-				(4, p("cell", None)),
-				(5, file),
-				(6, p("row", None)),
-				(7, category),
-				(8, name),
+				(2, due),
+				(3, p("webarea", Some("Page"))),
+				(4, p("datetimearea", Some("Arrival"))),
+				(5, p("button", Some("Go"))),
+				(6, volume),
+				(7, name),
 			]
 			.into(),
-			children: [(1, vec![2, 8]), (2, vec![3, 6]), (3, vec![4]), (4, vec![5]), (6, vec![7])]
-				.into(),
-			settable: [5, 7, 8].into(),
+			children: [(1, vec![2, 3, 5, 6, 7]), (3, vec![4])].into(),
+			settable: [2, 4, 5, 6, 7].into(),
 			..Default::default()
 		};
 		let text = tree(&mut m);
-		assert_eq!(line(&text, "e5"), "- textfield [ref=e5]: \"invoice.pdf\" actions=open");
-		assert_eq!(line(&text, "e7"), "- textfield [ref=e7]: \"Mail\"");
-		assert!(line(&text, "e8").ends_with("(settable)"), "{text}");
+		assert!(line(&text, "e2").ends_with("(settable)"), "{text}");
+		for unsettable in ["e4", "e5", "e6", "e7"] {
+			assert!(!line(&text, unsettable).contains("(settable)"), "{text}");
+		}
 		assert_eq!(m.settable_reads, 1);
 	}
 	#[test]
