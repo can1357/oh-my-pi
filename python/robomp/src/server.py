@@ -53,6 +53,8 @@ class _AppPool(Protocol):
 
     def wake(self) -> None: ...
 
+    def is_ready(self) -> bool: ...
+
     async def cancel_event(self, delivery_id: str) -> bool: ...
 
     async def inflight_snapshot(self) -> list[str]: ...
@@ -359,8 +361,8 @@ def create_app(settings: Settings | None = None, *, pool_factory: _PoolFactory =
     @app.get("/readyz")
     async def readyz(request: Request) -> dict[str, str]:
         pool = request.app.state.bag.get("pool")
-        if pool is None:
-            raise HTTPException(503, "not initialized")
+        if pool is None or not pool.is_ready():
+            raise HTTPException(503, "dispatcher unavailable")
         return {"status": "ready"}
 
     @app.post("/webhook/github")
