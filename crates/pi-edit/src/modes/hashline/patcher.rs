@@ -289,8 +289,18 @@ fn line_carries(body_line: &str, evidence: &str) -> bool {
 /// rejects stale numbers whichever way lines moved: after lines shift down,
 /// a stale range's first line holds content from above the intended range;
 /// after lines shift up, its last line holds content from below it. Either
-/// way that end's content is absent from the payload.
+/// way that end's content is absent from the payload — unless the payload
+/// restates context around the edit. An echoed neighbor of the range makes
+/// the same evidence fit the range shifted by one line, so a payload
+/// carrying the line just above or below the range proves nothing.
 fn body_targets(body: &[String], current_lines: &[&str], first: u32, last: u32) -> bool {
+	let carried = |line: u32| {
+		unique_evidence(current_lines, line)
+			.is_some_and(|evidence| body.iter().any(|row| line_carries(row, evidence)))
+	};
+	if carried(first.saturating_sub(1)) || carried(last.saturating_add(1)) {
+		return false;
+	}
 	let Some(head) = unique_evidence(current_lines, first) else {
 		return false;
 	};
@@ -786,6 +796,20 @@ mod tests {
 		let reversed = body(&["let v0004 = 4;", "let v0001 = 1;"]);
 		assert!(!body_targets(&reversed, &file, 1, 4));
 	}
+
+	#[test]
+	fn body_targets_refuses_payload_echoing_a_neighbor() {
+		let file = ["let v0001 = 1;", "let v0002 = 2;", "let v0003 = 3;", "}"];
+		assert!(body_targets(&body(&["let v0002 = 2; // edit"]), &file, 2, 2));
+		// Echoed line above or below: the evidence also fits a shifted range.
+		let above = body(&["let v0001 = 1;", "let v0002 = 2; // edit"]);
+		assert!(!body_targets(&above, &file, 2, 2));
+		let below = body(&["let v0002 = 2; // edit", "let v0003 = 3;"]);
+		assert!(!body_targets(&below, &file, 2, 2));
+		// A short neighbor is not evidence, so echoing it does not refuse.
+		let closer = body(&["let v0003 = 3; // edit", "}"]);
+		assert!(body_targets(&closer, &file, 3, 3));
+	}
 }
 
 #[cfg(test)]
@@ -931,6 +955,61 @@ mod lifecycle {
 			.unwrap_err();
 		assert!(err.contains("never displayed"), "unexpected error: {err}");
 		assert_eq!(ctx.text("case-b.ts"), before);
+	}
+
+	/// Applies `shift` under a full read, then `stale` (formatted with the
+	/// shifted tag) and asserts the guard rejects it with the file untouched.
+	async fn assert_stale_rejected(file: &str, shift: &str, stale: &str) {
+		let ctx = Lifecycle::new(file, 30);
+		let tag0 = ctx.read(file, &all_seen(30));
+		ctx.edit(&format!("[{file}#{tag0}]\n{shift}")).await.unwrap();
+		let before = ctx.text(file);
+		let tag1 = ctx.head_tag(file);
+		let err = ctx
+			.edit(&format!("[{file}#{tag1}]\n{stale}"))
+			.await
+			.unwrap_err();
+		assert!(err.contains("never displayed"), "unexpected error: {err}");
+		assert_eq!(ctx.text(file), before);
+	}
+
+	/// Lines shift down by one, then a stale range for old lines 18-19
+	/// restates the line above as context. The echo supplies the stale
+	/// range's head (old 17) and the intended first line its tail (old 18),
+	/// so both-end evidence alone would land the edit one line high and
+	/// duplicate old 19 (#15035).
+	#[tokio::test]
+	async fn stale_shifted_range_with_echo_row_stays_rejected() {
+		assert_stale_rejected(
+			"case-k.ts",
+			"PUT >5:\n+// ins a\n",
+			"PUT 18.=19:\n+let v0017 = 17;\n+let v0018 = 18; // edited\n+let v0019 = 19; // edited\n",
+		)
+		.await;
+	}
+
+	/// Single-line form of the echo-row case: would duplicate old 18.
+	#[tokio::test]
+	async fn stale_shifted_line_with_echo_row_stays_rejected() {
+		assert_stale_rejected(
+			"case-l.ts",
+			"PUT >5:\n+// ins a\n",
+			"PUT 18.=18:\n+let v0017 = 17;\n+let v0018 = 18; // edited\n",
+		)
+		.await;
+	}
+
+	/// Mirror image: lines shift up by one, then a stale range for old lines
+	/// 18-19 restates the line below. The echo supplies the stale range's
+	/// tail (old 20), so accepting would duplicate old 18.
+	#[tokio::test]
+	async fn stale_upshifted_range_with_echo_row_stays_rejected() {
+		assert_stale_rejected(
+			"case-m.ts",
+			"CUT 3.=3\n",
+			"PUT 18.=19:\n+let v0018 = 18; // edited\n+let v0019 = 19; // edited\n+let v0020 = 20;\n",
+		)
+		.await;
 	}
 
 	/// Pure insertions carry no replaced content to evidence the boundary
