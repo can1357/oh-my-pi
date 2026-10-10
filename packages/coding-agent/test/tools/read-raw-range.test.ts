@@ -66,6 +66,12 @@ describe("read tool raw range exactness", () => {
 		expect(result.details?.totalLines).toBe(60);
 	});
 
+	it("omits truncation metadata when a raw range reaches EOF without truncation", async () => {
+		const result = await tool.execute("complete-raw-line", { path: `${filePath}:raw:60-60` });
+		expect(result.details?.truncation).toBeUndefined();
+		expect(result.details?.meta?.truncation).toBeUndefined();
+	});
+
 	it("keeps context padding for numbered range reads", async () => {
 		// Numbered mode intentionally pads (leading anchor buffer + trailing
 		// disambiguation lines) — line numbers make the padding self-describing.
@@ -139,6 +145,12 @@ describe("read tool raw range exactness", () => {
 		const result = await tool.execute("call-oversized-line", { path: `${bigFile}:raw:2-2` });
 		const body = getTextOutput(result);
 		expect(Buffer.byteLength(body, "utf-8")).toBeGreaterThan(50000);
+		expect(result.details?.truncation).toMatchObject({
+			firstLineExceedsLimit: true,
+			lastLinePartial: true,
+			outputLines: 1,
+			outputBytes: Buffer.byteLength(body, "utf-8"),
+		});
 
 		const truncation = result.details?.meta?.truncation;
 		expect(truncation).toBeDefined();
