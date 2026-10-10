@@ -177,12 +177,6 @@ pub trait Backend: Send {
 		))
 	}
 	fn raise_window(&mut self, id: &str, token: &OperationToken) -> CoreResult<()>;
-	/// A notice about the last `type_text`, `key_chord` or `hold_keys` call
-	/// (for example, keys a remote screen may have received modified),
-	/// cleared when read.
-	fn take_input_notice(&mut self) -> Option<String> {
-		None
-	}
 	fn ax(&mut self) -> Option<&mut dyn AxBackend>;
 }
 

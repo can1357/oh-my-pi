@@ -83,7 +83,6 @@ impl MacInput {
 		}
 	}
 
-	/// Returns a notice when Screen Sharing may have received keys modified.
 	#[allow(
 		clippy::needless_pass_by_ref_mut,
 		reason = "`&mut self` exclusivity backs the `Send` safety argument for the CF event source"
@@ -94,11 +93,11 @@ impl MacInput {
 		text: &str,
 		mode: DeliveryMode,
 		capture: &MacCapture,
-	) -> CoreResult<Option<String>> {
+	) -> CoreResult<()> {
 		match target {
 			Target::Desktop | Target::Display(_) => {
 				let keys = typed_keys(text, local_strokes(), None)?;
-				type_keys(&self.source, &keys, KEY_GAP, || Ok(()), post_global).map(|()| None)
+				type_keys(&self.source, &keys, KEY_GAP, || Ok(()), post_global)
 			},
 			Target::Window(id) => {
 				let window = capture.window(id)?;
@@ -109,7 +108,7 @@ impl MacInput {
 					&& !process::is_terminal(pid)
 					&& ax::insert_native_text(pid, wid, text)?
 				{
-					return Ok(None);
+					return Ok(());
 				}
 				// The whole text is mapped before anything is posted, so a
 				// character a remote screen cannot receive refuses cleanly.
@@ -122,25 +121,24 @@ impl MacInput {
 				let gap = key_gap(remote);
 				match mode {
 					DeliveryMode::Background => {
-						let modified = modified_text(&keys);
-						let mut watch =
-							(remote == Some(RemoteScreen::KeyEvents)).then(ModifierWatch::physical);
-						if watch.is_some() && !modified.is_empty() {
-							return Err(keyboard_modifiers_refusal(
-								&window,
-								&format!("type {}", modified.join(" ")),
-							));
+						if remote == Some(RemoteScreen::KeyEvents) {
+							let modified = modified_text(&keys);
+							if !modified.is_empty() {
+								return Err(keyboard_modifiers_refusal(
+									&window,
+									&format!("type {}", modified.join(" ")),
+								));
+							}
 						}
-						let result = with_background_keyboard(&self.source, pid, wid, &window, || {
+						with_background_keyboard(&self.source, pid, wid, &window, || {
 							type_keys(
 								&self.source,
 								&keys,
 								gap,
-								|| watch.as_mut().map_or(Ok(()), ModifierWatch::before_press),
+								|| Ok(()),
 								|event| skylight::post_keyboard(pid, event),
 							)
-						});
-						watched(result, watch)
+						})
 					},
 					DeliveryMode::Foreground => skylight::with_foreground(pid, wid, |activated| {
 						control::wait(first_key_settle(activated))?;
@@ -163,14 +161,12 @@ impl MacInput {
 								post_global,
 							)
 						}
-					})
-					.map(|()| None),
+					}),
 				}
 			},
 		}
 	}
 
-	/// Returns a notice when Screen Sharing may have received keys modified.
 	#[allow(
 		clippy::needless_pass_by_ref_mut,
 		reason = "`&mut self` exclusivity backs the `Send` safety argument for the CF event source"
@@ -181,9 +177,9 @@ impl MacInput {
 		keys: &[KeyName],
 		mode: DeliveryMode,
 		capture: &MacCapture,
-	) -> CoreResult<Option<String>> {
+	) -> CoreResult<()> {
 		match target {
-			Target::Desktop | Target::Display(_) => global_chord(&self.source, keys).map(|()| None),
+			Target::Desktop | Target::Display(_) => global_chord(&self.source, keys),
 			Target::Window(id) => {
 				let window = capture.window(id)?;
 				let (pid, wid) = window_identity(&window)?;
@@ -191,25 +187,19 @@ impl MacInput {
 				let gap = key_gap(remote);
 				match mode {
 					DeliveryMode::Background => {
-						let mut watch =
-							(remote == Some(RemoteScreen::KeyEvents)).then(ModifierWatch::physical);
-						if watch.is_some() && keys.iter().copied().any(KeyName::is_modifier) {
+						if remote == Some(RemoteScreen::KeyEvents)
+							&& keys.iter().copied().any(KeyName::is_modifier)
+						{
 							return Err(keyboard_modifiers_refusal(&window, "press this shortcut"));
 						}
-						let result = with_background_keyboard(&self.source, pid, wid, &window, || {
-							key_chord(&self.source, keys, gap, |event| {
-								post_watched(watch.as_mut(), event, |event| {
-									skylight::post_keyboard(pid, event)
-								})
-							})
-						});
-						watched(result, watch)
+						with_background_keyboard(&self.source, pid, wid, &window, || {
+							key_chord(&self.source, keys, gap, |event| skylight::post_keyboard(pid, event))
+						})
 					},
 					DeliveryMode::Foreground => skylight::with_foreground(pid, wid, |activated| {
 						control::wait(first_key_settle(activated))?;
 						key_chord(&self.source, keys, gap, |event| post_takeover_key(pid, wid, event))
-					})
-					.map(|()| None),
+					}),
 				}
 			},
 		}
@@ -217,7 +207,6 @@ impl MacInput {
 }
 
 impl MacInput {
-	/// Returns a notice when Screen Sharing may have received keys modified.
 	pub(super) fn hold_keys(
 		&self,
 		target: &Target,
@@ -225,14 +214,13 @@ impl MacInput {
 		duration: Duration,
 		mode: DeliveryMode,
 		capture: &MacCapture,
-	) -> CoreResult<Option<String>> {
+	) -> CoreResult<()> {
 		for &key in keys {
 			key_code(key)?;
 		}
 		match target {
 			Target::Desktop | Target::Display(_) => {
 				with_held_keys(&self.source, keys, KEY_GAP, post_global, || control::wait(duration))
-					.map(|()| None)
 			},
 			Target::Window(id) => {
 				let window = capture.window(id)?;
@@ -241,25 +229,20 @@ impl MacInput {
 				let gap = key_gap(remote);
 				match mode {
 					DeliveryMode::Background => {
-						let mut watch =
-							(remote == Some(RemoteScreen::KeyEvents)).then(ModifierWatch::physical);
-						if watch.is_some() && keys.iter().copied().any(KeyName::is_modifier) {
+						if remote == Some(RemoteScreen::KeyEvents)
+							&& keys.iter().copied().any(KeyName::is_modifier)
+						{
 							return Err(keyboard_modifiers_refusal(&window, "hold these keys"));
 						}
-						let result = with_background_keyboard(&self.source, pid, wid, &window, || {
+						with_background_keyboard(&self.source, pid, wid, &window, || {
 							with_held_keys(
 								&self.source,
 								keys,
 								gap,
-								|event| {
-									post_watched(watch.as_mut(), event, |event| {
-										skylight::post_keyboard(pid, event)
-									})
-								},
+								|event| skylight::post_keyboard(pid, event),
 								|| control::wait(duration),
 							)
-						});
-						watched(result, watch)
+						})
 					},
 					DeliveryMode::Foreground => skylight::with_foreground(pid, wid, |activated| {
 						control::wait(first_key_settle(activated))?;
@@ -270,8 +253,7 @@ impl MacInput {
 							|event| post_takeover_key(pid, wid, event),
 							|| control::wait(duration),
 						)
-					})
-					.map(|()| None),
+					}),
 				}
 			},
 		}
@@ -283,18 +265,6 @@ impl MacInput {
 fn local_strokes() -> impl Fn(char) -> Option<Keystroke> {
 	let keymap = Keymap::current().ok().flatten();
 	move |character| keymap.as_ref()?.stroke(character)
-}
-
-/// Posts `event` through `watch` when there is one.
-fn post_watched<S: FnMut() -> ModifierSample>(
-	watch: Option<&mut ModifierWatch<S>>,
-	event: &CGEvent,
-	post: impl FnOnce(&CGEvent) -> CoreResult<()>,
-) -> CoreResult<()> {
-	match watch {
-		Some(watch) => watch.post(event, post),
-		None => post(event),
-	}
 }
 
 fn window_identity(window: &DesktopWindow) -> CoreResult<(libc::pid_t, u32)> {
@@ -319,144 +289,6 @@ fn keyboard_modifiers_refusal(window: &DesktopWindow, action: &str) -> DesktopEr
 		 background input cannot hold them to {action}; nothing was sent; retry with takeover:true",
 		window.id, window.app,
 	))
-}
-
-/// The physical keyboard's modifier state, as Screen Sharing reads it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct ModifierSample {
-	/// Shift, Control, Option or Command is down, or Caps Lock is on.
-	held:    bool,
-	/// Modifier changes counted so far.
-	changes: u32,
-}
-
-unsafe extern "C" {
-	fn CGEventSourceFlagsState(state: i32) -> u64;
-	fn CGEventSourceCounterForEventType(state: i32, event_type: u32) -> u32;
-}
-
-fn physical_modifiers() -> ModifierSample {
-	let mask = (CGEventFlags::CGEventFlagAlphaShift
-		| CGEventFlags::CGEventFlagShift
-		| CGEventFlags::CGEventFlagControl
-		| CGEventFlags::CGEventFlagAlternate
-		| CGEventFlags::CGEventFlagCommand)
-		.bits();
-	let state = CGEventSourceStateID::HIDSystemState as i32;
-	// SAFETY: Read-only queries of the HID system state (CGEventSource.h).
-	let (flags, changes) = unsafe {
-		(
-			CGEventSourceFlagsState(state),
-			CGEventSourceCounterForEventType(state, CGEventType::FlagsChanged as u32),
-		)
-	};
-	ModifierSample { held: flags & mask != 0, changes }
-}
-
-/// Longest a background key into Screen Sharing waits for the user to let go
-/// of a modifier.
-const MODIFIER_WAIT: Duration = Duration::from_secs(1);
-const MODIFIER_POLL: Duration = Duration::from_millis(2);
-
-/// Screen Sharing gives each key it forwards the modifiers the physical
-/// keyboard holds when it handles the key. Each background press there waits
-/// until no modifier is down; a press is reported when a modifier was down or
-/// changed between its check and the next press (or the end), the window in
-/// which Screen Sharing reads it.
-struct ModifierWatch<S> {
-	sample:  S,
-	wait:    Duration,
-	presses: usize,
-	open:    Option<(usize, u32)>,
-	flagged: Vec<usize>,
-}
-
-impl ModifierWatch<fn() -> ModifierSample> {
-	fn physical() -> Self {
-		Self::new(physical_modifiers, MODIFIER_WAIT)
-	}
-}
-
-impl<S: FnMut() -> ModifierSample> ModifierWatch<S> {
-	const fn new(sample: S, wait: Duration) -> Self {
-		Self { sample, wait, presses: 0, open: None, flagged: Vec::new() }
-	}
-
-	/// Posts `event`; a press first waits for the user's modifiers.
-	fn post(
-		&mut self,
-		event: &CGEvent,
-		post: impl FnOnce(&CGEvent) -> CoreResult<()>,
-	) -> CoreResult<()> {
-		post_guarded(event, || self.before_press(), post)
-	}
-
-	fn before_press(&mut self) -> CoreResult<()> {
-		self.close();
-		let deadline = Instant::now() + self.wait;
-		let mut sample = (self.sample)();
-		while sample.held {
-			if Instant::now() >= deadline {
-				return Err(DesktopError::background_unavailable(format!(
-					"Screen Sharing adds the physical keyboard's modifiers to the keys it forwards, \
-					 and Shift, Control, Option or Command stayed down (or Caps Lock is on) for {} ms; \
-					 {} key press(es) were sent before this one; retry with takeover:true or when the \
-					 keyboard is idle",
-					self.wait.as_millis(),
-					self.presses,
-				)));
-			}
-			control::wait(MODIFIER_POLL)?;
-			sample = (self.sample)();
-		}
-		self.presses += 1;
-		self.open = Some((self.presses, sample.changes));
-		Ok(())
-	}
-
-	fn close(&mut self) {
-		if let Some((press, changes)) = self.open.take() {
-			let sample = (self.sample)();
-			if sample.held || sample.changes != changes {
-				self.flagged.push(press);
-			}
-		}
-	}
-
-	/// The notice for keys that may have been received modified.
-	fn finish(mut self) -> Option<String> {
-		self.close();
-		if self.flagged.is_empty() {
-			return None;
-		}
-		let presses: Vec<String> = self.flagged.iter().map(ToString::to_string).collect();
-		Some(format!(
-			"warning: a physical modifier key was down or changed while key press(es) {} of {} were \
-			 sent to Screen Sharing, which may have received them modified (capitals or shortcuts); \
-			 check the remote screen",
-			presses.join(", "),
-			self.presses,
-		))
-	}
-}
-
-/// `result` of keys sent under `watch`, with its notice: returned on
-/// success, appended to the error otherwise.
-fn watched<S: FnMut() -> ModifierSample>(
-	result: CoreResult<()>,
-	watch: Option<ModifierWatch<S>>,
-) -> CoreResult<Option<String>> {
-	let notice = watch.and_then(ModifierWatch::finish);
-	match result {
-		Ok(()) => Ok(notice),
-		Err(mut error) => {
-			if let Some(notice) = notice {
-				error.message.push_str("; ");
-				error.message.push_str(&notice);
-			}
-			Err(error)
-		},
-	}
 }
 
 /// Why process-scoped background keystrokes could reach a window other than
@@ -2577,57 +2409,6 @@ mod tests {
 			(56, false),
 			(11, false)
 		]);
-	}
-
-	/// Runs `presses` key presses (and releases) under a watch that reads
-	/// `samples` in turn, repeating the last.
-	fn watch_presses(
-		samples: &[(bool, u32)],
-		presses: usize,
-	) -> (CoreResult<Option<String>>, usize) {
-		let source = source().expect("event source");
-		let mut samples = samples.iter().copied();
-		let mut last = (false, 0);
-		let sample = move || {
-			last = samples.next().unwrap_or(last);
-			ModifierSample { held: last.0, changes: last.1 }
-		};
-		let mut watch = Some(ModifierWatch::new(sample, Duration::from_millis(20)));
-		let mut posted = 0;
-		let result = (|| {
-			for _ in 0..presses {
-				for down in [true, false] {
-					let event = CGEvent::new_keyboard_event(source.clone(), 0, down).unwrap();
-					post_watched(watch.as_mut(), &event, |_| {
-						posted += 1;
-						Ok(())
-					})?;
-				}
-			}
-			Ok(())
-		})();
-		(watched(result, watch), posted)
-	}
-
-	#[test]
-	fn screen_sharing_keys_wait_for_the_users_modifiers_and_report_overlaps() {
-		// Shift is down for two reads, then released: the key waits, then goes.
-		let (result, posted) = watch_presses(&[(true, 1), (true, 1), (false, 2)], 2);
-		assert_eq!(result.unwrap(), None);
-		assert_eq!(posted, 4);
-		// A modifier changes after the second press: it is reported.
-		let (result, posted) = watch_presses(&[(false, 0), (false, 0), (false, 0), (false, 1)], 2);
-		assert_eq!(posted, 4);
-		let notice = result.unwrap().expect("notice");
-		assert!(notice.contains("key press(es) 2 of 2"), "{notice}");
-		// A modifier stays down: the second key is refused before posting, and
-		// the first, sent while it went down, is reported in the error.
-		let (result, posted) = watch_presses(&[(false, 0), (true, 1)], 2);
-		assert_eq!(posted, 2);
-		let error = result.unwrap_err();
-		assert_eq!(error.code, ErrorCode::BackgroundUnavailable);
-		assert!(error.message.contains("1 key press(es) were sent"), "{}", error.message);
-		assert!(error.message.contains("key press(es) 1 of 1"), "{}", error.message);
 	}
 
 	#[test]
