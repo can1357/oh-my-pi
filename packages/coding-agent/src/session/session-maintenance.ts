@@ -118,10 +118,13 @@ import {
 	cfgCompactionEnabled,
 	cfgCompactionMethodOrder,
 	cfgContextPromotionEnabled,
+	cfgSnapcompactFrameBytesBudget,
+	cfgSnapcompactMaxFrames,
 	cfgSnapcompactShape,
 } from "./context-settings";
 import { resolveModelCompactionSettings } from "./model-compaction-threshold";
 import { cfgRetry } from "./settings";
+import { snapcompactFrameBudget, snapcompactFrameBytesBudget } from "./snapcompact-budget";
 
 export type CompactionCheckResult = Readonly<{
 	continuationScheduled: boolean;
@@ -1356,11 +1359,11 @@ export class SessionMaintenance {
 					});
 					snapcompactResult = rendered.result;
 					const framePayloadBytes = rendered.framePayloadBytes;
-					if (framePayloadBytes > snapcompact.FRAME_DATA_BYTES_BUDGET) {
+					if (framePayloadBytes > this.#snapcompactFrameBytesBudget()) {
 						logger.warn("Snapcompact exceeded the per-request frame payload budget", {
 							model: this.#model?.id,
 							framePayloadBytes,
-							budget: snapcompact.FRAME_DATA_BYTES_BUDGET,
+							budget: this.#snapcompactFrameBytesBudget(),
 						});
 						this.#host.emitNotice(
 							"warning",
@@ -3635,13 +3638,7 @@ export class SessionMaintenance {
 	#computeSnapcompactMaxFrames(preparation: CompactionPreparation, settings: EngineCompactionSettings): number {
 		const ctxWindow = this.#model?.contextWindow ?? 0;
 		const shape = snapcompact.resolveShape(this.#model, cfgSnapcompactShape.get(this.#host.settings));
-		if (ctxWindow <= 0) {
-			return Math.min(
-				snapcompact.MAX_FRAMES_DEFAULT,
-				snapcompact.maxFramesForDataBudget(shape),
-				snapcompact.providerFrameBudget(this.#model?.provider),
-			);
-		}
+		if (ctxWindow <= 0) return this.#snapcompactFrameCap(shape);
 		const reserve = effectiveReserveTokens(ctxWindow, settings);
 		let baseTokens = computeNonMessageTokens(
 			this.#host.nonMessageTokenSource(),
@@ -3685,11 +3682,24 @@ export class SessionMaintenance {
 		// per-frame charge never exceeds what this cap assumed.
 		const frameCost = Math.max(snapcompact.FRAME_TOKEN_ESTIMATE, shape.frameTokenEstimate);
 		if (frameBudget < frameCost) return 1;
+		return Math.min(Math.floor(frameBudget / frameCost), this.#snapcompactFrameCap(shape));
+	}
+
+	/** Effective `snapcompact.frameBytesBudget`: base64 frame bytes one rebuilt request may carry. */
+	#snapcompactFrameBytesBudget(): number {
+		return snapcompactFrameBytesBudget(cfgSnapcompactFrameBytesBudget.get(this.#host.settings));
+	}
+
+	/**
+	 * Window-independent frame caps: snapcompact's maximum, the frame-byte budget at
+	 * the shape's per-frame estimate, and the provider frame budget (or a positive
+	 * `snapcompact.maxFrames`).
+	 */
+	#snapcompactFrameCap(shape: snapcompact.Shape): number {
 		return Math.min(
-			Math.floor(frameBudget / frameCost),
 			snapcompact.MAX_FRAMES_DEFAULT,
-			snapcompact.maxFramesForDataBudget(shape),
-			snapcompact.providerFrameBudget(this.#model?.provider),
+			snapcompact.maxFramesForDataBudget(shape, this.#snapcompactFrameBytesBudget()),
+			snapcompactFrameBudget(this.#model?.provider, cfgSnapcompactMaxFrames.get(this.#host.settings)),
 		);
 	}
 
@@ -3699,7 +3709,7 @@ export class SessionMaintenance {
 	}
 
 	/**
-	 * Render the snapcompact archive within {@link snapcompact.FRAME_DATA_BYTES_BUDGET}.
+	 * Render the snapcompact archive within {@link #snapcompactFrameBytesBudget}.
 	 * The frame cap from {@link #computeSnapcompactMaxFrames} sizes bytes from a per-shape
 	 * estimate, and denser frames (CJK prose drawn with fallback glyphs) run heavier, so
 	 * an over-budget render is redone once at the frame count its measured bytes fit:
@@ -3709,11 +3719,12 @@ export class SessionMaintenance {
 		preparation: CompactionPreparation,
 		options: snapcompact.Options<AgentMessage>,
 	): Promise<{ result: snapcompact.CompactionResult; framePayloadBytes: number }> {
+		const budget = this.#snapcompactFrameBytesBudget();
 		const result = await snapcompact.compact(preparation, options);
 		const framePayloadBytes = this.#snapcompactFramePayloadBytes(result);
-		if (framePayloadBytes <= snapcompact.FRAME_DATA_BYTES_BUDGET) return { result, framePayloadBytes };
+		if (framePayloadBytes <= budget) return { result, framePayloadBytes };
 		const frames = snapcompact.getPreservedArchive(result.preserveData)?.frames.length ?? 0;
-		const maxFrames = Math.floor((frames * snapcompact.FRAME_DATA_BYTES_BUDGET) / framePayloadBytes);
+		const maxFrames = Math.floor((frames * budget) / framePayloadBytes);
 		if (maxFrames < 1) return { result, framePayloadBytes };
 		logger.debug("Snapcompact re-rendering under the per-request frame payload budget", {
 			model: this.#model?.id,
@@ -3745,7 +3756,7 @@ export class SessionMaintenance {
 	): number {
 		const archive = snapcompact.getPreservedArchive(result.preserveData);
 		const blocks = archive
-			? snapcompact.historyBlocks(archive, { maxFrameDataBytes: snapcompact.FRAME_DATA_BYTES_BUDGET })
+			? snapcompact.historyBlocks(archive, { maxFrameDataBytes: this.#snapcompactFrameBytesBudget() })
 			: undefined;
 		const summaryMessage = createCompactionSummaryMessage(
 			result.summary,
@@ -3785,7 +3796,7 @@ export class SessionMaintenance {
 		const leaf = branch.at(-1);
 		const archive = snapcompact.getPreservedArchive(args.preserveData);
 		const blocks = archive
-			? snapcompact.historyBlocks(archive, { maxFrameDataBytes: snapcompact.FRAME_DATA_BYTES_BUDGET })
+			? snapcompact.historyBlocks(archive, { maxFrameDataBytes: this.#snapcompactFrameBytesBudget() })
 			: undefined;
 		if (!leaf) {
 			const summaryMessage = createCompactionSummaryMessage(
@@ -3814,7 +3825,9 @@ export class SessionMaintenance {
 			preserveData: args.preserveData,
 			providerReplayThroughEntryId: args.providerReplayThroughEntryId,
 		};
-		const rebuilt = buildSessionContext([...branch, pending]);
+		const rebuilt = buildSessionContext([...branch, pending], undefined, undefined, {
+			snapcompactFrameBytesBudget: this.#snapcompactFrameBytesBudget(),
+		});
 		const rebuiltTokens = this.#countProjectedMessages(rebuilt.messages);
 		const providerPayload = getOpenAiRemoteCompactionPayload(pending);
 		if (!providerPayload) {
@@ -4067,13 +4080,7 @@ export class SessionMaintenance {
 	#computeSnapcompactRescueMaxFrames(settings: EngineCompactionSettings, keptTailTokens: number): number {
 		const ctxWindow = this.#model?.contextWindow ?? 0;
 		const shape = snapcompact.resolveShape(this.#model, cfgSnapcompactShape.get(this.#host.settings));
-		if (ctxWindow <= 0) {
-			return Math.min(
-				snapcompact.MAX_FRAMES_DEFAULT,
-				snapcompact.maxFramesForDataBudget(shape),
-				snapcompact.providerFrameBudget(this.#model?.provider),
-			);
-		}
+		if (ctxWindow <= 0) return this.#snapcompactFrameCap(shape);
 		const thresholdTokens = resolveThresholdTokens(ctxWindow, settings);
 		const recoveryBandTokens = Math.floor(thresholdTokens * COMPACTION_RECOVERY_BAND);
 		const baseTokens = computeNonMessageTokens(
@@ -4091,12 +4098,7 @@ export class SessionMaintenance {
 		// count above the per-request payload or provider image budget would
 		// "shrink" a huge archive to a frame count the rebuilt prompt can never
 		// attach anyway.
-		return Math.min(
-			Math.floor(frameBudget / frameCost),
-			snapcompact.MAX_FRAMES_DEFAULT,
-			snapcompact.maxFramesForDataBudget(shape),
-			snapcompact.providerFrameBudget(this.#model?.provider),
-		);
+		return Math.min(Math.floor(frameBudget / frameCost), this.#snapcompactFrameCap(shape));
 	}
 
 	/**
@@ -4771,11 +4773,11 @@ export class SessionMaintenance {
 						});
 						snapcompactResult = rendered.result;
 						const framePayloadBytes = rendered.framePayloadBytes;
-						if (framePayloadBytes > snapcompact.FRAME_DATA_BYTES_BUDGET) {
+						if (framePayloadBytes > this.#snapcompactFrameBytesBudget()) {
 							logger.warn("Snapcompact exceeded the per-request frame payload budget", {
 								model: this.#model?.id,
 								framePayloadBytes,
-								budget: snapcompact.FRAME_DATA_BYTES_BUDGET,
+								budget: this.#snapcompactFrameBytesBudget(),
 							});
 							snapcompactBlocker =
 								"snapcompact produced too much standing image payload; trying the next preferred compaction method.";

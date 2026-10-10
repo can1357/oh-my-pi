@@ -507,11 +507,12 @@ export const FRAME_DATA_BYTES_BUDGET = 3_000_000;
  *  keep the full {@link FRAME_DATA_BYTES_ESTIMATE} at any frame size. */
 const AREA_PRICED_VARIANTS: readonly ShapeGeometry[] = [SHAPE_VARIANTS["8on22-bw"], SHAPE_VARIANTS["11on16-bw"]];
 
-/** Frame-count cap implied by {@link FRAME_DATA_BYTES_BUDGET} for frames
- *  rendered by `shape`. {@link AREA_PRICED_VARIANTS} below 1932px are charged
+/** Frame-count cap implied by a frame-payload byte `budget` (default
+ *  {@link FRAME_DATA_BYTES_BUDGET}) for frames rendered by `shape`.
+ *  {@link AREA_PRICED_VARIANTS} below 1932px are charged
  *  {@link FRAME_DATA_BYTES_ESTIMATE} scaled by pixel area; every other shape
  *  pays the full estimate. */
-export function maxFramesForDataBudget(shape: ShapeGeometry): number {
+export function maxFramesForDataBudget(shape: ShapeGeometry, budget: number = FRAME_DATA_BYTES_BUDGET): number {
 	const areaPriced = AREA_PRICED_VARIANTS.some(
 		variant =>
 			variant.font === shape.font &&
@@ -525,7 +526,7 @@ export function maxFramesForDataBudget(shape: ShapeGeometry): number {
 	);
 	const areaRatio = areaPriced ? (shape.frameSize / HIGH_RES_ANTHROPIC_VARIANT.frameSize) ** 2 : 1;
 	const frameBytes = Math.min(FRAME_DATA_BYTES_ESTIMATE, Math.ceil(FRAME_DATA_BYTES_ESTIMATE * areaRatio));
-	return Math.max(1, Math.floor(FRAME_DATA_BYTES_BUDGET / frameBytes));
+	return Math.max(1, Math.floor(budget / frameBytes));
 }
 
 /** Base64 byte length for persisted snapcompact frames. */

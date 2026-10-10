@@ -4,6 +4,7 @@
 
 ### Added
 
+- Added `snapcompact.frameBytesBudget` and `snapcompact.maxFrames` to set how many bytes and frames of snapcompact archive images one request may carry; a frame cap above the provider's image limit raises the request's total image limit to match ([#15091](https://github.com/can1357/oh-my-pi/pull/15091) by [@Ikaleio](https://github.com/Ikaleio))
 - Table charts (`tui.autoGraph`) now cover before/after tables whose rows are different metrics (time, memory, counts): each row's change is drawn as a factor of its "before" value (`48× less`, `+27%`), and rows written in prose are skipped and named under the chart. A single column of scores like `12/12` is drawn as bars filling toward 100%
 
 ### Changed

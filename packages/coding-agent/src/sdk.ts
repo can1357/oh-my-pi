@@ -198,6 +198,7 @@ import {
 	clampProviderContextImages,
 	dropUnreadableContextImages,
 } from "./session/provider-image-budget";
+import { providerImageBudget, snapcompactFrameBytesBudget } from "./session/snapcompact-budget";
 import {
 	expandDefaultRetryFallbackChains,
 	findRetryFallbackCandidates,
@@ -379,6 +380,8 @@ import {
 import { cfgPlanEnabled } from "./plan-mode/settings";
 import { cfgSecretsEnabled } from "./secrets/settings";
 import {
+	cfgSnapcompactFrameBytesBudget,
+	cfgSnapcompactMaxFrames,
 	cfgSnapcompactShape,
 	cfgSnapcompactSystemPrompt,
 	cfgSnapcompactToolResults,
@@ -1848,6 +1851,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		logger.time("sessionManager", () =>
 			SessionManager.create(cwd, SessionManager.getDefaultSessionDir(cwd, agentDir)),
 		);
+	// Before the first context build, so a resumed session already attaches the configured frame bytes.
+	sessionManager.setSnapcompactFrameBytesBudget(() =>
+		snapcompactFrameBytesBudget(cfgSnapcompactFrameBytesBudget.get(settings)),
+	);
 	const configuredDirs = options.additionalDirectories
 		? options.additionalDirectories
 		: cfgWorkspaceAdditionalDirectories.get(settings);
@@ -4181,6 +4188,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				get shape() {
 					return cfgSnapcompactShape.get(settings);
 				},
+				get maxFrames() {
+					return cfgSnapcompactMaxFrames.get(settings);
+				},
 			},
 			// Journal the tokens each imaged tool result keeps off the wire
 			// (frames never reach session.jsonl, so this is their only trace).
@@ -4192,7 +4202,11 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		const transformProviderContext = async (context: Context, transformModel: Model): Promise<Context> => {
 			let transformed = obfuscator ? obfuscateProviderContext(obfuscator, context) : context;
 			transformed = await snapcompactInline.transform(transformed, transformModel);
-			transformed = clampProviderContextImages(transformed, transformModel);
+			transformed = clampProviderContextImages(
+				transformed,
+				transformModel,
+				providerImageBudget(transformModel.provider, cfgSnapcompactMaxFrames.get(settings)),
+			);
 			transformed = await normalizeProviderContextImagesForModel(transformed, transformModel);
 			// After the model-specific normalizers: they carry better wording for the
 			// cases they own (STB WebP), so this stays the backstop for everything
@@ -5166,7 +5180,11 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					transformContext: async messages => wrapSteeringForModel(messages),
 					transformProviderContext: async (context, transformModel) => {
 						let transformed = obfuscator ? obfuscateProviderContext(obfuscator, context) : context;
-						transformed = clampProviderContextImages(transformed, transformModel);
+						transformed = clampProviderContextImages(
+							transformed,
+							transformModel,
+							providerImageBudget(transformModel.provider, cfgSnapcompactMaxFrames.get(settings)),
+						);
 						transformed = await normalizeProviderContextImagesForModel(transformed, transformModel);
 						transformed = await dropUnreadableContextImages(transformed, transformModel);
 						transformed = await blobBroker.decorateContext(transformed, transformModel);

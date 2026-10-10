@@ -856,6 +856,8 @@ export class SessionManager {
 	readonly #persist: boolean;
 	readonly #storage: SessionStorage;
 	readonly #blobs: BlobStore;
+	/** Live `snapcompact.frameBytesBudget`; unset keeps the snapcompact default. */
+	#snapcompactFrameBytesBudget: (() => number) | undefined;
 
 	#sessionId = "";
 	#sessionName: string | undefined;
@@ -3696,8 +3698,17 @@ export class SessionManager {
 	buildSessionContext(options?: BuildSessionContextOptions): SessionContext {
 		return buildSessionContext(this.#entries, this.#index.leafId(), this.#index.entriesById(), {
 			resolveFrameData: data => lazyImageDataSync(this.#blobs, data),
+			snapcompactFrameBytesBudget: this.#snapcompactFrameBytesBudget?.(),
 			...options,
 		});
+	}
+
+	/**
+	 * Read the snapcompact frame-byte budget from `resolve` on every context build,
+	 * so a settings change applies to the next rebuilt request.
+	 */
+	setSnapcompactFrameBytesBudget(resolve: () => number): void {
+		this.#snapcompactFrameBytesBudget = resolve;
 	}
 
 	/** Strip stale OpenAI Responses replay metadata from loaded assistant entries. */
