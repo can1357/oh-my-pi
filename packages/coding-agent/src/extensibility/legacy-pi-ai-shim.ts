@@ -24,10 +24,12 @@ import {
 	type AssistantMessage,
 	type AssistantMessageEventStream,
 	type Context,
+	type Tool,
 	type Model,
 	type SimpleStreamOptions,
 	streamSimple,
 } from "@oh-my-pi/pi-ai";
+import { textContent } from "@oh-my-pi/pi-tui/chat/transcript-entry";
 import { streamAnthropic } from "@oh-my-pi/pi-ai/providers/anthropic";
 import type { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { clampThinkingLevelForModel, getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
@@ -128,6 +130,91 @@ export function isRetryableAssistantError(message: AssistantMessage): boolean {
 	const errorMessage = message.errorMessage;
 	if (NON_RETRYABLE_PROVIDER_LIMIT_ERROR_PATTERN.test(errorMessage)) return false;
 	return RETRYABLE_PROVIDER_ERROR_PATTERN.test(errorMessage);
+}
+
+/** Extract text blocks from legacy Pi message content, separating blocks by a newline. */
+export function contentText(
+	content: string | ReadonlyArray<{ type: string; text?: string }>,
+	separator = "\n",
+): string {
+	return textContent(content, separator);
+}
+
+interface LegacyTranscriptMessage {
+	role: string;
+	content?: string | ReadonlyArray<{ type: string; text?: string }>;
+	sections?: Readonly<Record<string, string | null>>;
+	toolsAdded?: readonly Tool[];
+	toolsRemoved?: readonly { name: string }[];
+	timestamp?: number;
+}
+
+function applyToolChanges(tools: Map<string, Tool>, message: LegacyTranscriptMessage): void {
+	for (const tool of message.toolsRemoved ?? []) tools.delete(tool.name);
+	for (const tool of message.toolsAdded ?? []) tools.set(tool.name, tool);
+}
+
+/** Resolve the tool declarations available after replaying system-message updates. */
+export function getCurrentTools(messages: readonly LegacyTranscriptMessage[]): Tool[] {
+	const tools = new Map<string, Tool>();
+	for (const message of messages) {
+		if (message.role === "system") applyToolChanges(tools, message);
+	}
+	return [...tools.values()];
+}
+
+/** The replayed system prompt and tool declarations read by legacy Pi extensions. */
+export interface LegacySystemMessage {
+	role: "system";
+	content: string;
+	sections?: Record<string, string>;
+	toolsAdded?: Tool[];
+	timestamp: number;
+}
+
+/** Replay system-message text, named sections, and tool additions/removals in order. */
+export function getCurrentSystemMessage(messages: readonly LegacyTranscriptMessage[]): LegacySystemMessage | undefined {
+	const content: string[] = [];
+	const sections = new Map<string, string>();
+	const tools = new Map<string, Tool>();
+	let timestamp: number | undefined;
+	for (const message of messages) {
+		if (message.role !== "system") continue;
+		timestamp ??= message.timestamp ?? 0;
+		const text = contentText(message.content ?? "");
+		if (text.length > 0) content.push(text);
+		const updates = message.sections;
+		if (updates) {
+			for (const name in updates) {
+				const value = updates[name];
+				if (value === null) sections.delete(name);
+				else sections.set(name, value);
+			}
+		}
+		applyToolChanges(tools, message);
+	}
+	if (timestamp === undefined && tools.size === 0) return undefined;
+	return {
+		role: "system",
+		content: content.join("\n\n"),
+		...(sections.size > 0 ? { sections: Object.fromEntries(sections) } : {}),
+		...(tools.size > 0 ? { toolsAdded: [...tools.values()] } : {}),
+		timestamp: timestamp ?? 0,
+	};
+}
+
+/** Render the replayed system prompt text and its named sections. */
+export function getCurrentSystemPrompt(messages: readonly LegacyTranscriptMessage[]): string {
+	const message = getCurrentSystemMessage(messages);
+	if (!message) return "";
+	const content = message.content ? [message.content] : [];
+	if (message.sections) {
+		for (const name in message.sections) {
+			const text = message.sections[name];
+			if (text.length > 0) content.push(text);
+		}
+	}
+	return content.join("\n\n");
 }
 
 export * from "@oh-my-pi/pi-ai";

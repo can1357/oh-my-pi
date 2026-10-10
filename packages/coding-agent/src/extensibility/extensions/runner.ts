@@ -79,6 +79,7 @@ import type {
 	CacheWarmingDecisionEvent,
 	CacheWarmingDecisionEventResult,
 	McpNotificationEvent,
+	EntryRenderer,
 	MessageRenderer,
 	RegisteredCommand,
 	RegisteredTool,
@@ -1283,6 +1284,14 @@ export class ExtensionRunner {
 			if (renderer) {
 				return renderer;
 			}
+		}
+		return undefined;
+	}
+
+	getEntryRenderer(customType: string): EntryRenderer | undefined {
+		for (const ext of this.extensions) {
+			const renderer = ext.entryRenderers.get(customType);
+			if (renderer) return renderer;
 		}
 		return undefined;
 	}

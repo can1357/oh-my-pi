@@ -86,6 +86,7 @@ import type { AsyncJobSnapshot, SendUserMessageOptions } from "../../session/age
 import type { EphemeralTurnOptions, EphemeralTurnResult } from "../../session/agent-session-types";
 import type { CompactMode } from "../../session/compact-modes";
 import type { CustomMessagePayload } from "../../session/messages";
+import type { CustomEntry } from "../../session/session-entries";
 import type { ReadonlySessionManager, SessionManager } from "../../session/session-manager";
 import type { BashToolInput, GlobToolInput, GrepToolInput, ReadToolInput, WriteToolInput } from "../../tools";
 import type { GlobToolDetails } from "@oh-my-pi/pi-tui/tools/glob";
@@ -1349,6 +1350,18 @@ export type ExtensionServiceTier<Family extends ServiceTierFamily> = Family exte
 		? "flex" | "priority"
 		: ServiceTier;
 
+/** Options supplied when rendering a persisted custom session entry. */
+export interface EntryRenderOptions {
+	expanded: boolean;
+}
+
+/** Render a custom session entry without injecting it into the model context. */
+export type EntryRenderer<T = unknown> = (
+	entry: CustomEntry<T>,
+	options: EntryRenderOptions,
+	theme: Theme,
+) => Component | undefined;
+
 /**
  * ExtensionAPI passed to extension factory functions.
  *
@@ -1557,6 +1570,9 @@ export interface ExtensionAPI {
 
 	/** Register a custom renderer for CustomMessageEntry. */
 	registerMessageRenderer<T = unknown>(customType: string, renderer: MessageRenderer<T>): void;
+
+	/** Register a renderer for a CustomEntry (not a CustomMessageEntry). */
+	registerEntryRenderer<T = unknown>(customType: string, renderer: EntryRenderer<T>): void;
 
 	/** Register a renderer for assistant thinking blocks. Rendered after the original thinking text. */
 	registerAssistantThinkingRenderer(renderer: AssistantThinkingRenderer): void;
@@ -1935,6 +1951,7 @@ export interface Extension {
 	fileWriteFallbackHandlers: FileWriteFallbackHandler[];
 	fileDeleteFallbackHandlers: FileDeleteFallbackHandler[];
 	messageRenderers: Map<string, MessageRenderer>;
+	entryRenderers: Map<string, EntryRenderer>;
 	composerShapes: Map<string, ComposerShapeDefinition>;
 	commands: Map<string, RegisteredCommand>;
 	flags: Map<string, ExtensionFlag>;

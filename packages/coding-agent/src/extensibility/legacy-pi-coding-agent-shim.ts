@@ -30,6 +30,7 @@ import {
 	createCustomMessage,
 } from "@oh-my-pi/pi-agent-core/compaction/messages";
 import { type AuthCredential, SqliteAuthCredentialStore, type TSchema } from "@oh-my-pi/pi-ai";
+import { diffLines } from "@oh-my-pi/pi-natives";
 import { piEscapeRegexLiteral, piJoinPath } from "@oh-my-pi/pi-ai/providers/cursor-pi-args";
 import { getKeybindings, type Keybinding, Text } from "@oh-my-pi/pi-tui";
 import {
@@ -1483,6 +1484,129 @@ export function readStoredCredential(provider: string): AuthCredential | undefin
 	return storage.get(provider);
 }
 
+function escapeLegacySkillXml(value: string): string {
+	return value.replace(/[&<>"']/g, escapeLegacySkillXmlChar);
+}
+
+function escapeLegacySkillXmlChar(char: string): string {
+	switch (char) {
+		case "&":
+			return "&amp;";
+		case "<":
+			return "&lt;";
+		case ">":
+			return "&gt;";
+		case '"':
+			return "&quot;";
+		default:
+			return "&apos;";
+	}
+}
+
+/** Pi's package-root skill listing, including its model-invocation filter and XML escaping. */
+export function formatSkillsForPrompt(
+	skills: readonly (Pick<Skill, "name" | "description" | "filePath"> & { disableModelInvocation?: boolean })[],
+	fileReadTool: "read" | "bash" = "read",
+): string {
+	const visibleSkills = skills.filter(skill => !skill.disableModelInvocation);
+	if (visibleSkills.length === 0) return "";
+
+	const lines = [
+		"\n\nThe following skills provide specialized instructions for specific tasks.",
+		fileReadTool === "read"
+			? "Use the read tool to load a skill's file when the task matches its description."
+			: "Use bash to load a skill's file when the task matches its description.",
+		"When a skill file references a relative path, resolve it against the skill directory (parent of SKILL.md / dirname of the path) and use that absolute path in tool commands.",
+		"",
+		"<available_skills>",
+	];
+
+	for (const skill of visibleSkills) {
+		lines.push("  <skill>");
+		lines.push(`    <name>${escapeLegacySkillXml(skill.name)}</name>`);
+		lines.push(`    <description>${escapeLegacySkillXml(skill.description)}</description>`);
+		lines.push(`    <location>${escapeLegacySkillXml(skill.filePath)}</location>`);
+		lines.push("  </skill>");
+	}
+	lines.push("</available_skills>");
+	return lines.join("\n");
+}
+
+/**
+ * Pi's display-oriented numbered line diff. The native diffLines binding
+ * supplies jsdiff-compatible line runs; the presentation preserves Pi's
+ * configurable context and first-changed-line result.
+ */
+export function generateDiffString(
+	oldContent: string,
+	newContent: string,
+	contextLines = 4,
+): { diff: string; firstChangedLine: number | undefined } {
+	const parts = diffLines(oldContent, newContent);
+	const output: string[] = [];
+	const lineNumWidth = String(Math.max(oldContent.split("\n").length, newContent.split("\n").length)).length;
+	let oldLineNum = 1;
+	let newLineNum = 1;
+	let lastWasChange = false;
+	let firstChangedLine: number | undefined;
+
+	const showContext = (lines: string[]): void => {
+		for (const line of lines) {
+			output.push(` ${String(oldLineNum).padStart(lineNumWidth, " ")} ${line}`);
+			oldLineNum++;
+			newLineNum++;
+		}
+	};
+	const skipContext = (count: number): void => {
+		if (count <= 0) return;
+		output.push(` ${"".padStart(lineNumWidth, " ")} ...`);
+		oldLineNum += count;
+		newLineNum += count;
+	};
+	for (let i = 0; i < parts.length; i++) {
+		const part = parts[i];
+		const raw = part.value.split("\n");
+		if (raw[raw.length - 1] === "") raw.pop();
+
+		if (part.added || part.removed) {
+			firstChangedLine ??= newLineNum;
+			for (const line of raw) {
+				if (part.added) {
+					output.push(`+${String(newLineNum).padStart(lineNumWidth, " ")} ${line}`);
+					newLineNum++;
+				} else {
+					output.push(`-${String(oldLineNum).padStart(lineNumWidth, " ")} ${line}`);
+					oldLineNum++;
+				}
+			}
+			lastWasChange = true;
+		} else {
+			const nextPartIsChange = i < parts.length - 1 && (parts[i + 1].added || parts[i + 1].removed);
+			if (lastWasChange && nextPartIsChange) {
+				if (raw.length <= contextLines * 2) {
+					showContext(raw);
+				} else {
+					showContext(raw.slice(0, contextLines));
+					skipContext(raw.length - contextLines * 2);
+					showContext(raw.slice(raw.length - contextLines));
+				}
+			} else if (lastWasChange) {
+				showContext(raw.slice(0, contextLines));
+				skipContext(raw.length - Math.min(raw.length, contextLines));
+			} else if (nextPartIsChange) {
+				const skippedLines = Math.max(0, raw.length - contextLines);
+				skipContext(skippedLines);
+				showContext(raw.slice(skippedLines));
+			} else {
+				oldLineNum += raw.length;
+				newLineNum += raw.length;
+			}
+			lastWasChange = false;
+		}
+	}
+	return { diff: output.join("\n"), firstChangedLine };
+}
+
 // Pi SDK path helpers. `export * from "../index"` above only forwards
 // `getAgentDir`; `getProjectDir` (a `@oh-my-pi/pi-utils` helper) and
 // `getPackageDir` are absent from that barrel, so legacy extensions importing
@@ -1513,7 +1637,12 @@ export function getPackageDir(): string {
 // `@oh-my-pi/pi-agent-core/compaction`, and the coding-agent barrel below does
 // not forward them, so legacy extensions importing them fail Bun's static
 // export check during validation (issues #6583, #7174, #7403, #10278).
-export { calculateContextTokens, compact, serializeConversation } from "@oh-my-pi/pi-agent-core/compaction";
+export {
+	calculateContextTokens,
+	compact,
+	generateBranchSummary,
+	serializeConversation,
+} from "@oh-my-pi/pi-agent-core/compaction";
 
 const legacyTokenizer = new Tokenizer();
 

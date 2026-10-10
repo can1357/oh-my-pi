@@ -3,11 +3,12 @@ import * as path from "node:path";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, ImageContent, Usage } from "@oh-my-pi/pi-ai";
 import { getStreamingPartialJson } from "@oh-my-pi/pi-ai/utils/block-symbols";
-import { type Component, Spacer, Text } from "@oh-my-pi/pi-tui";
+import { Box, Container, type Component, Spacer, Text } from "@oh-my-pi/pi-tui";
 import { StatusNotice } from "@oh-my-pi/pi-tui/chrome/status-notice";
 import { QueuedMessagesBand } from "@oh-my-pi/pi-tui/prompt/queued-messages";
 import { logger } from "@oh-my-pi/pi-utils";
 import type { AdvisorMessageDetails } from "../../advisor";
+import type { EntryRenderer } from "../../extensibility/extensions/types";
 import { InternalUrlRouter } from "../../internal-urls";
 import { COLLAB_PROMPT_MESSAGE_TYPE, type CollabPromptDetails } from "../../collab/protocol";
 import { settings } from "../../config/settings";
@@ -52,6 +53,12 @@ import {
 import { normalizeBlobExtension } from "@oh-my-pi/pi-tui/prompt/image-format";
 import { imageAttachmentSource } from "@oh-my-pi/pi-tui/prompt/image-source";
 import { theme } from "@oh-my-pi/pi-tui/theme";
+import {
+	replaceTabs,
+	shortenEmbeddedPaths,
+	TRUNCATE_LENGTHS,
+	truncateToWidth,
+} from "@oh-my-pi/pi-tui/render/render-utils";
 import type {
 	CompactionQueuedMessage,
 	InteractiveModeContext,
@@ -69,6 +76,7 @@ import {
 	type SkillPromptDetails,
 } from "../../session/messages";
 import type { SessionContext, StrippedToolCallsMarker } from "../../session/session-context";
+import type { CustomEntry } from "../../session/session-entries";
 import { executeBuiltinSlashCommand, lookupBuiltinSlashCommand } from "../../slash-commands/builtin-registry";
 import { parseSlashCommand } from "../../slash-commands/helpers/parse";
 import { buildSkillCommandPrompt, invokeSkillCommandFromText, isKnownSkillCommand } from "../skill-command";
@@ -98,6 +106,62 @@ import {
 	cfgTerminalShowImages,
 } from "../settings";
 import { cfgReadToolResultPreview } from "../../tools/settings";
+
+/** Custom session entries render only when an extension supplies a renderer. */
+export class CustomEntryComponent extends Container {
+	#component: Component | undefined;
+	#expanded: boolean;
+
+	constructor(
+		private readonly entry: CustomEntry,
+		private readonly renderer: EntryRenderer,
+		expanded: boolean,
+	) {
+		super();
+		this.#expanded = expanded;
+		this.#rebuild();
+	}
+
+	hasContent(): boolean {
+		return this.#component !== undefined;
+	}
+
+	setExpanded(expanded: boolean): void {
+		if (this.#expanded === expanded) return;
+		this.#expanded = expanded;
+		this.#rebuild();
+	}
+
+	override invalidate(): void {
+		super.invalidate();
+		this.#rebuild();
+	}
+
+	#rebuild(): void {
+		this.clear();
+		let component: Component | undefined;
+		try {
+			component = this.renderer(this.entry, { expanded: this.#expanded }, theme);
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			const detail = truncateToWidth(
+				shortenEmbeddedPaths(replaceTabs(`[${this.entry.customType}] renderer failed: ${message}`)).replace(
+					/[\r\n]+/g,
+					" ",
+				),
+				TRUNCATE_LENGTHS.LINE,
+			);
+			const box = new Box(1, 1, text => theme.bg("customMessageBg", text));
+			box.addChild(new Text(theme.fg("error", detail), 0, 0));
+			component = box;
+		}
+		this.#component = component;
+		if (component) {
+			this.addChild(new Spacer(1));
+			this.addChild(component);
+		}
+	}
+}
 
 interface RenderInitialMessagesOptions {
 	preserveExistingChat?: boolean;
@@ -572,15 +636,23 @@ export class UiHelpers {
 		const backgroundTaskCallIds = new Set<string>();
 		const messages = sessionContext.messages;
 		const count = messages.length;
-		for (let i = 0; i < count; i++) {
-			// Yield BEFORE each message (except the first) rather than after: the
-			// per-message body has several early `continue` paths (preserved live
-			// results, image-only and grouped `read` results), and a trailing yield
-			// is skipped by all of them. A large parallel-read batch is entirely
-			// such results, so an after-body yield never trips the chunk counter and
-			// the whole batch replays in one event-loop turn. Yielding at the top of
-			// the next iteration is reached no matter how the prior message exited.
+		const customEntries = sessionContext.customEntries;
+		let nextEntry = 0;
+		for (let i = 0; i <= count; i++) {
+			// Yield before each message; entry-only stretches yield too, including
+			// a trail of entries after the final message.
 			if (i > 0) yield;
+			while (customEntries?.[nextEntry]?.messageIndex === i) {
+				const entry = customEntries[nextEntry++]!.entry;
+				const renderer = this.ctx.viewSession.extensionRunner?.getEntryRenderer(entry.customType);
+				if (renderer) {
+					flushPendingUsage();
+					const component = new CustomEntryComponent(entry, renderer, this.ctx.toolOutputExpanded);
+					if (component.hasContent()) this.ctx.chatContainer.addChild(component);
+				}
+				yield;
+			}
+			if (i === count) break;
 			const message = messages[i]!;
 			if (message.role !== "toolResult") flushPendingUsage();
 			// Assistant messages need special handling for tool calls

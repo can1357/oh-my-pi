@@ -6,6 +6,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { Type } from "@oh-my-pi/omptype/typebox";
+import { Text } from "@oh-my-pi/pi-tui";
 import type { AgentMessage, AgentTool, AgentToolContext } from "@oh-my-pi/pi-agent-core";
 import { streamAnthropic } from "@oh-my-pi/pi-ai/providers/anthropic";
 import type { MessageCreateParams } from "@oh-my-pi/pi-ai/providers/anthropic-wire";
@@ -31,6 +32,8 @@ import type {
 	InputEventResult,
 } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
 import { ExtensionToolWrapper } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/wrapper";
+import { UiHelpers } from "@oh-my-pi/pi-coding-agent/modes/utils/ui-helpers";
+import { createInteractiveModeContext } from "./helpers/interactive-mode-context";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { getProjectAgentDir, logger, TempDir } from "@oh-my-pi/pi-utils";
@@ -533,6 +536,64 @@ describe("ExtensionRunner", () => {
 			);
 
 			expect(runner.getAssistantThinkingRenderers().length).toBe(1);
+		});
+
+		it("renders persisted workflow entries in transcript order, including after the last message", async () => {
+			fs.writeFileSync(
+				path.join(extensionsDir, "workflow.ts"),
+				`export default function (pi) {
+					pi.registerEntryRenderer("subagents:workflow", (entry, options) => ({
+						render: () => [\`workflow: \${entry.data.name} (\${options.expanded ? "expanded" : "collapsed"})\`],
+						invalidate: () => {},
+					}));
+				}`,
+			);
+			const result = await loadTestExtensions();
+			const runner = new ExtensionRunner(
+				result.extensions,
+				result.runtime,
+				tempDir.path(),
+				sessionManager,
+				modelRegistry,
+			);
+			sessionManager.appendMessage({ role: "user", content: "before", timestamp: 1 });
+			const entryId = sessionManager.appendCustomEntry("subagents:workflow", {
+				name: "verify fixes",
+				status: "completed",
+			});
+			sessionManager.appendCustomEntry("unregistered:state", { secret: true });
+			sessionManager.appendMessage({ role: "user", content: "after", timestamp: 2 });
+			sessionManager.appendCustomEntry("subagents:workflow", { name: "follow-up", status: "completed" });
+			const transcript = sessionManager.buildSessionContext({ transcript: true });
+			expect(transcript.customEntries?.map(({ messageIndex }) => messageIndex)).toEqual([1, 1, 2]);
+			expect(transcript.customEntries?.[0]?.entry.id).toBe(entryId);
+			expect(
+				sessionManager
+					.buildSessionContext()
+					.messages.map(message => (message.role === "user" ? message.content : "")),
+			).toEqual(["before", "after"]);
+
+			const ctx = createInteractiveModeContext({
+				session: { extensionRunner: runner, isStreaming: false },
+				addMessageToChat(message) {
+					if (message.role === "user") ctx.chatContainer.addChild(new Text(String(message.content), 0, 0));
+					return [];
+				},
+			});
+			const chatContainer = ctx.chatContainer;
+			new UiHelpers(ctx).renderSessionContext(transcript);
+			expect(chatContainer.children.map(component => component.render(80).join("\n").trim())).toEqual([
+				"before",
+				"workflow: verify fixes (collapsed)",
+				"after",
+				"workflow: follow-up (collapsed)",
+			]);
+			const workflowCard = chatContainer.children[1];
+			if (!workflowCard || !("setExpanded" in workflowCard) || typeof workflowCard.setExpanded !== "function") {
+				throw new Error("Expected a custom entry card");
+			}
+			workflowCard.setExpanded(true);
+			expect(workflowCard.render(80).join("\n").trim()).toBe("workflow: verify fixes (expanded)");
 		});
 	});
 
@@ -4536,6 +4597,7 @@ describe("ExtensionRunner", () => {
 				fileWriteFallbackHandlers: [],
 				fileDeleteFallbackHandlers: [],
 				messageRenderers: new Map(),
+				entryRenderers: new Map(),
 				composerShapes: new Map(),
 				commands: new Map(),
 				flags: new Map(),
