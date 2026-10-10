@@ -685,10 +685,10 @@ interface TitleInput {
 	tried: boolean;
 }
 
-/** Planned saved-reset spends cleared to run; `prompted` records a Yes to this batch's consent prompt. */
-interface ApprovedResetActions {
-	actions: (CodexResetAction | ClaudeResetAction)[];
-	prompted: boolean;
+/** A planned saved-reset spend cleared to run: its account resolved to `yes`, or a Yes to a prompt listing it. */
+interface ApprovedResetAction {
+	action: CodexResetAction | ClaudeResetAction;
+	approval: "auto-redeem-yes" | "prompt-yes";
 }
 
 const kPersistedSessionEntryId = Symbol("persistedSessionEntryId");
@@ -12522,14 +12522,15 @@ export class AgentSession implements SettingsScope {
 		provider: "openai-codex" | "anthropic",
 		actions: (CodexResetAction | ClaudeResetAction)[],
 		coordinator: CodexAutoRedeemCoordinator,
-	): Promise<ApprovedResetActions> {
+	): Promise<ApprovedResetAction[]> {
 		const asked = actions.filter(action => shouldPromptCodexAutoRedeem(action.autoRedeem));
 		const first = asked[0];
-		if (!first) return { actions, prompted: false };
-		const preapproved = {
-			actions: actions.filter(action => !shouldPromptCodexAutoRedeem(action.autoRedeem)),
-			prompted: false,
-		};
+		const approve = (action: CodexResetAction | ClaudeResetAction): ApprovedResetAction => ({
+			action,
+			approval: shouldPromptCodexAutoRedeem(action.autoRedeem) ? "prompt-yes" : "auto-redeem-yes",
+		});
+		if (!first) return actions.map(approve);
+		const preapproved = actions.filter(action => !shouldPromptCodexAutoRedeem(action.autoRedeem)).map(approve);
 		const providerLabel = provider === "anthropic" ? "Claude" : "Codex";
 		const settingsKey = provider === "anthropic" ? "claudeResets.autoRedeem" : "codexResets.autoRedeem";
 		const source = provider === "anthropic" ? "claude-auto-reset" : "codex-auto-reset";
@@ -12580,7 +12581,7 @@ export class AgentSession implements SettingsScope {
 			if (choice === "Yes") {
 				if (provider === "anthropic") cfgClaudeResetsAutoRedeem.set(this.settings, "yes");
 				else cfgCodexResetsAutoRedeem.set(this.settings, "yes");
-				return { actions, prompted: true };
+				return actions.map(approve);
 			}
 			if (choice === "No") {
 				if (provider === "anthropic") cfgClaudeResetsAutoRedeem.set(this.settings, "no");
@@ -12719,7 +12720,7 @@ export class AgentSession implements SettingsScope {
 	 */
 	async #executeResetActions(
 		provider: "openai-codex" | "anthropic",
-		approved: ApprovedResetActions,
+		approved: ApprovedResetAction[],
 		coordinator: CodexAutoRedeemCoordinator,
 	): Promise<number> {
 		const authStorage = this.#modelRegistry.authStorage;
@@ -12728,14 +12729,15 @@ export class AgentSession implements SettingsScope {
 		const autoRedeemSetting = provider === "anthropic" ? cfgClaudeResetsAutoRedeem : cfgCodexResetsAutoRedeem;
 		// Consent, earlier actions, the fence, the live listing and the pending marker
 		// all wait after planning: spend only while the account's current mode still
-		// allows it, and an `unset` one only after a Yes to this batch's prompt.
-		const consentWithdrawn = (target: ResetCreditTarget): boolean => {
-			const policy = authStorage.oauth.policy(provider, target);
+		// allows it. `no` always wins; under `unset` only an approval given for `unset` itself holds.
+		const consentWithdrawn = ({ action, approval }: ApprovedResetAction): boolean => {
+			const policy = authStorage.oauth.policy(provider, action.target);
 			const mode = effectiveAutoRedeemMode(autoRedeemSetting.get(this.settings), policy);
-			return mode === "no" || (mode === "unset" && !approved.prompted);
+			return mode === "no" || (mode === "unset" && approval === "auto-redeem-yes");
 		};
 		let redeemed = 0;
-		for (const action of approved.actions) {
+		for (const approvedAction of approved) {
+			const { action } = approvedAction;
 			if (coordinator.attemptedKeys.has(action.attemptKey)) continue;
 			const previousAttemptAt = coordinator.lastAttemptAtByAccount.get(action.accountKey);
 			coordinator.attemptedKeys.add(action.attemptKey);
@@ -12753,7 +12755,7 @@ export class AgentSession implements SettingsScope {
 				const lockKey = resetAccountLockKey(action.target);
 				if (!lockKey) {
 					// An account without an upstream identity cannot share a cross-process fence.
-					withdrawn = consentWithdrawn(action.target);
+					withdrawn = consentWithdrawn(approvedAction);
 					if (!withdrawn) outcome = await authStorage.resets.redeem(redeemOptions);
 				} else {
 					// The coordinator is process-local. Fence concurrent processes and
@@ -12792,7 +12794,7 @@ export class AgentSession implements SettingsScope {
 							}
 							const attemptedAt = Date.now();
 							await Bun.write(lockPath, `pending:${attemptedAt}`);
-							withdrawn = consentWithdrawn(action.target);
+							withdrawn = consentWithdrawn(approvedAction);
 							if (withdrawn) {
 								await Bun.write(lockPath, "");
 								return undefined;

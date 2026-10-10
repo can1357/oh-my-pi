@@ -659,6 +659,34 @@ describe("Claude saved-reset trigger integration", () => {
 		expect(targets).toMatchObject([{ credentialId: CREDENTIAL_ID }, { credentialId: SIBLING_CREDENTIAL_ID }]);
 	});
 
+	it("does not carry a Yes for the prompted account to one whose true policy is removed while the prompt is open", async () => {
+		const questions: string[] = [];
+		const { session, coordinator, targets } = buildSession({
+			report: claudeReport(0.5),
+			status: claudeStatus(false),
+			siblings: [siblingStatus()],
+			autoRedeem: "unset",
+			select: async question => {
+				questions.push(question);
+				authStorage.setAccountPolicies({ accountPolicies: [], defaultReservePct: DEFAULT_USAGE_RESERVE_PCT });
+				return "Yes";
+			},
+		});
+		authStorage.setAccountPolicies(accountPolicies(true));
+		try {
+			await session.fetchUsageReports();
+			await coordinator.sweepPromise;
+		} finally {
+			authStorage.setAccountPolicies({ accountPolicies: [], defaultReservePct: DEFAULT_USAGE_RESERVE_PCT });
+		}
+
+		expect(questions).toHaveLength(1);
+		expect(questions[0]).not.toContain(ORG_ID);
+		expect(cfgClaudeResetsAutoRedeem.get(session.settings)).toBe("unset");
+		expect(targets).toMatchObject([{ credentialId: SIBLING_CREDENTIAL_ID }]);
+		expect(targets).toHaveLength(1);
+	});
+
 	it.each(["yes", "no", "unset"] as const)(
 		"only consumes an imminent reset with consent when auto-redeem is %s",
 		async autoRedeem => {
