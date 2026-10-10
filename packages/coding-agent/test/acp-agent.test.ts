@@ -2037,6 +2037,26 @@ describe("ACP agent", () => {
 				{ id: "m-1", from: "Scout", message: "found the flaky test" },
 				"agent",
 			);
+			stored.sessionManager.appendMessage({
+				...makeAssistantMessage(""),
+				content: [
+					{
+						type: "toolCall",
+						id: "tc-irc",
+						name: "write",
+						arguments: { path: "agent://Scout", content: "check Windows" },
+					},
+				],
+				stopReason: "toolUse",
+			});
+			stored.sessionManager.appendMessage({
+				role: "toolResult",
+				toolCallId: "tc-irc",
+				toolName: "write",
+				content: [{ type: "text", text: "Delivered." }],
+				isError: false,
+				timestamp: Date.now(),
+			});
 			await stored.sessionManager.ensureOnDisk();
 			await stored.sessionManager.flush();
 
@@ -2050,11 +2070,47 @@ describe("ACP agent", () => {
 					recipientSessionId: stored.sessionId,
 					content: [{ type: "text", text: "found the flaky test" }],
 				});
+				expect(replayed).toContainEqual({
+					sessionUpdate: "session_message",
+					messageId: "irc-out:tc-irc",
+					senderSessionId: stored.sessionId,
+					content: [{ type: "text", text: "check Windows" }],
+				});
 				expect(replayed.some(update => update.sessionUpdate === "user_message_chunk")).toBe(false);
 			} else {
 				expect(replayed.some(update => update.sessionUpdate === "session_message")).toBe(false);
 			}
 		}
+	});
+
+	it("reports an agent message that reaches the root between ACP prompt turns", async () => {
+		const harness = await createHarness({ clientCapabilities: { subagents: {} }, subagentEventBus: new EventBus() });
+		vi.useFakeTimers();
+		const { sessionId } = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		await advanceBootstrapGuard();
+		vi.useRealTimers();
+		const session = harness.findSession(sessionId)!;
+		for (const listener of session.listeners()) {
+			listener({
+				type: "irc_message",
+				message: {
+					role: "custom",
+					customType: "irc:incoming",
+					content: "<rendered IRC envelope>",
+					display: true,
+					details: { id: "m-idle", from: "Scout", message: "done in the background" },
+					attribution: "agent",
+					timestamp: 1,
+				},
+			} as AgentSessionEvent);
+		}
+		await Promise.resolve();
+		expect(harness.updates.map(n => n.update)).toContainEqual({
+			sessionUpdate: "session_message",
+			messageId: "irc-in:m-idle",
+			recipientSessionId: sessionId,
+			content: [{ type: "text", text: "done in the background" }],
+		});
 	});
 
 	it("replays todo tool results as ACP plan updates", async () => {
