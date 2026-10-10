@@ -391,19 +391,20 @@ export async function redeemConsentedResets(
 }
 
 /**
- * What a host with no prompt UI may spend: each action under its account's
- * effective mode, so `yes` spends and `unset` spends only a credit about to
- * expire, pinned to that credit.
+ * What a host with no prompt UI may spend, per each action's effective mode:
+ * `yes` spends; `unset` goes to the headless last-chance rule, which keeps only
+ * a credit about to expire, pinned to that credit; `no` never spends. The
+ * executor's `no` veto still backs this up.
  */
 export function headlessApprovals(actions: readonly ResetAction[]): ApprovedResetAction[] {
-	return actions.flatMap(action =>
-		headlessApprovedResetActions(action.autoRedeem, [action]).map(
-			(pinned): ApprovedResetAction => ({
-				action: pinned,
-				approval: action.autoRedeem === "unset" ? "headless-last-chance" : "auto-redeem-yes",
-			}),
-		),
-	);
+	const approved: ApprovedResetAction[] = actions
+		.filter(action => action.autoRedeem === "yes")
+		.map(action => ({ action, approval: "auto-redeem-yes" }));
+	const unset = actions.filter(action => action.autoRedeem === "unset");
+	for (const action of headlessApprovedResetActions("unset", unset)) {
+		approved.push({ action, approval: "headless-last-chance" });
+	}
+	return approved;
 }
 
 /** Whether this host's background sweep covers `provider`'s saved resets. */

@@ -329,7 +329,6 @@ import {
 	defaultCodexAutoRedeemCoordinator,
 	effectiveAutoRedeemMode,
 	overlayLiveResetCredits,
-
 	SWEEP_MIN_INTERVAL_MS,
 	shouldEvaluateCodexAutoRedeem,
 	shouldPromptCodexAutoRedeem,
@@ -12580,9 +12579,7 @@ export class AgentSession implements SettingsScope {
 		const runner = this.#extensionRunner;
 		if (!runner?.hasUI() || !this.#interactivePrompts) {
 			const approved = headlessApprovals(actions);
-			const waiting = asked.find(
-				action => !approved.some(spend => spend.action.attemptKey === action.attemptKey),
-			);
+			const waiting = asked.find(action => !approved.some(spend => spend.action.attemptKey === action.attemptKey));
 			if (waiting && !coordinator.notifiedKeys.has(waiting.attemptKey)) {
 				coordinator.notifiedKeys.add(waiting.attemptKey);
 				this.emitNotice(
@@ -12660,7 +12657,6 @@ export class AgentSession implements SettingsScope {
 			confirm: (provider, actions, coordinator) => this.#confirmAutoRedeem(provider, actions, coordinator),
 			onRedeemed: () => void this.fetchUsageReports(),
 		};
-
 	}
 
 	async #maybeAutoRedeemReset(activeBlockUnblockAtMs?: number): Promise<ResetRecoveryResult> {
