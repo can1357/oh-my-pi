@@ -126,6 +126,7 @@ import {
 	cfgAdvisorSyncBacklog,
 } from "../advisor/settings";
 import { cfgCompaction, cfgContextPromotionEnabled } from "./context-settings";
+import { resolveModelCompactionSettings } from "./model-compaction-threshold";
 import { cfgRetry, cfgTierAdvisor } from "./settings";
 
 const ADVISOR_CODEX_SSE_MAX_ATTEMPTS = 1;
@@ -1467,6 +1468,7 @@ export class SessionAdvisors {
 				serviceTierResolver: advisorServiceTierResolver,
 			});
 			advisorAgent.setDisableReasoning(shouldDisableReasoning(advisorThinkingLevel));
+			advisorAgent.setModelResolver(model => this.#host.modelRegistry.fitContextWindow(model, this.#host.settings));
 			let advisorLoopGuardStopped = false;
 			// The advisor's own loop needs the same repeated-tool-call bound the
 			// primary gets from `LoopGuards`; nothing else stops it reissuing one
@@ -2311,12 +2313,12 @@ export class SessionAdvisors {
 		if (!configuredCompaction.enabled || methods.length === 0) {
 			return false;
 		}
-		const compactionSettings = resolveMethodSettings(
-			configuredCompaction,
-			methods.includes("remote") ? "remote" : "soft",
-		);
-
+		const compactionMethod = methods.includes("remote") ? "remote" : "soft";
 		let advisorModel = agent.state.model;
+		let compactionSettings = resolveMethodSettings(
+			resolveModelCompactionSettings(this.#host.settings, advisorModel),
+			compactionMethod,
+		);
 		const contextWindow = advisorModel.contextWindow ?? 0;
 		if (contextWindow <= 0) return false;
 
@@ -2341,8 +2343,12 @@ export class SessionAdvisors {
 
 		// 1. Try promotion first
 		if (await this.#promoteAdvisorContextModel(advisor, advisorModel, signal)) {
-			// Promotion succeeded, check if new model has enough space
+			// Promotion succeeded, check if new model has enough space under its own compaction point
 			const newModel = agent.state.model;
+			compactionSettings = resolveMethodSettings(
+				resolveModelCompactionSettings(this.#host.settings, newModel),
+				compactionMethod,
+			);
 			const newWindow = newModel.contextWindow ?? 0;
 			if (newWindow > 0) {
 				const stillNeedsCompaction = shouldCompact(contextTokens, newWindow, compactionSettings);

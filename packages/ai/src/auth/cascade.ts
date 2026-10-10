@@ -406,7 +406,10 @@ export class KeyCascade implements KeysApi {
 		// silently authenticating through a different auth source.
 		if (sessionId) {
 			const sessionCredential = this.#deps.affinity.get(provider, sessionId);
-			if (sessionCredential?.type === "oauth" && sessionCredential.strict === true) return undefined;
+			if (sessionCredential?.type === "oauth" && sessionCredential.strict === true) {
+				if (oauthRefreshFailure) throw oauthRefreshFailure;
+				return undefined;
+			}
 		}
 		if (restricted) {
 			if (oauthRefreshFailure) throw oauthRefreshFailure;

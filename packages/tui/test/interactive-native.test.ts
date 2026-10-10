@@ -148,6 +148,22 @@ describe("native interactive primitives", () => {
 		expect(input.describe(cx).p).toMatchObject({ sendable: false });
 	});
 
+	it("leaves Vim Insert unlabelled so the host keeps native editing, labelling only modal states", () => {
+		const editor = new Editor(getEditorTheme());
+		editor.setVimMode(true);
+		editor.setText("abc");
+		expect(editorNode(editor).p?.mode).toBeUndefined();
+
+		editor.handleInput("\x1b");
+		expect(editorNode(editor).p?.mode).toBe("NORMAL");
+		editor.handleInput("v");
+		expect(editorNode(editor).p).toMatchObject({ mode: "VISUAL", anchor: expect.any(Number) });
+
+		editor.handleInput("\x1b");
+		editor.handleInput("i");
+		expect(editorNode(editor).p?.mode).toBeUndefined();
+	});
+
 	it("changes only text and cursor when typing and only the cursor when moving", () => {
 		const editor = new Editor(getEditorTheme());
 		editor.focused = true;

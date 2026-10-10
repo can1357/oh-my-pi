@@ -52,8 +52,8 @@ describe("RPC durable history (persisted SessionManager)", () => {
 	// across close/reopen breaks `get_entries(since)` consumers. No LLM is
 	// involved — the history is built with canonical SessionManager APIs.
 	test("linear history, branch siblings, and resume preserve IDs/parentage/tree/leaf", async () => {
-		await using cwdDir = await TempDir.create("rpc-durable-cwd-");
-		await using sessionsDir = await TempDir.create("rpc-durable-sessions-");
+		await using cwdDir = await TempDir.create("@rpc-durable-cwd-");
+		await using sessionsDir = await TempDir.create("@rpc-durable-sessions-");
 		const cwd = cwdDir.path();
 		const sessionDir = sessionsDir.path();
 

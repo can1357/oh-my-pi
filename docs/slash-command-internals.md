@@ -271,7 +271,7 @@ TUI and ACP/RPC dispatch the shared built-in registry before `session.prompt(...
 - then requires `streamingBehavior`:
   - `"steer"` -> queue interrupt message (`agent.steer`)
   - `"followUp"` -> queue post-turn message (`agent.followUp`)
-  - `"aside"` -> inject at the next step boundary without interrupting an in-flight tool batch
+  - `"aside"` -> inject at the next step boundary without interrupting an in-flight tool batch (a running interruptible `wait` ends)
 - if `streamingBehavior` is omitted, prompt throws an error
 
 ### Important command-specific streaming behavior

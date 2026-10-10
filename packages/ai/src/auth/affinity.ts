@@ -27,6 +27,7 @@ type PersistedSticky = {
 	type: AuthCredential["type"];
 	credentialId: number;
 	explicit: boolean;
+	strict: boolean;
 	lastUsedAtMs: number;
 };
 
@@ -127,14 +128,34 @@ export class SessionAffinity implements SessionsApi {
 		return sessions;
 	}
 
-	/** Drop every pin for a provider, both in memory and in the persisted cache. */
+	/**
+	 * Reset ordinary affinity after credentials change, preserving explicit strict locks.
+	 * Logout, deletion, or a revoked grant must not authorize sibling/static fallback;
+	 * only a session routing-mode change clears a strict lock.
+	 */
 	clearProvider(provider: string): void {
-		this.#sessionLastCredential.delete(provider);
+		const sessions = this.#sessionLastCredential.get(provider);
+		if (sessions) {
+			for (const sessionId of sessions.keys()) {
+				if (sessions.peek(sessionId)?.strict !== true) sessions.delete(sessionId);
+			}
+		}
 		this.#automaticSessions.delete(provider);
-		this.#persistedSticky.delete(provider);
+		const persisted = this.#persistedSticky.get(provider);
+		if (persisted) {
+			for (const sessionId of persisted.keys()) {
+				if (persisted.peek(sessionId)?.strict !== true) persisted.delete(sessionId);
+			}
+		}
 		const prefix = `${SESSION_STICKY_CACHE_PREFIX}${provider}:`;
 		try {
-			this.#store.deleteCachePrefix?.(prefix);
+			this.#store.deleteCachePrefix?.(prefix, value => {
+				try {
+					return (JSON.parse(value) as SessionCredential).strict !== true;
+				} catch {
+					return true;
+				}
+			});
 		} catch (err) {
 			logger.debug("Failed to clear provider session sticky credentials from persistent store cache", { err });
 		}
@@ -164,10 +185,10 @@ export class SessionAffinity implements SessionsApi {
 		lastUsedAtMs?: number,
 		explicit = false,
 		strict = false,
+		credentialId = this.#pool.entries(provider)[index]?.id,
 	): void {
-		if (!sessionId || !this.#permits(provider, sessionId, index)) return;
+		if (!sessionId || (!(strict && index === -1) && !this.#permits(provider, sessionId, index))) return;
 		const nowMs = lastUsedAtMs ?? Date.now();
-		const credentialId = this.#pool.entries(provider)[index]?.id;
 		const sessionMap = SessionAffinity.#sessionsFor(this.#sessionLastCredential, provider);
 		const previous = sessionMap.get(sessionId);
 		const sameCredential =
@@ -199,6 +220,7 @@ export class SessionAffinity implements SessionsApi {
 			persisted.type === type &&
 			persisted.credentialId === credentialId &&
 			persisted.explicit === isExplicit &&
+			persisted.strict === isStrict &&
 			Math.abs(nowMs - persisted.lastUsedAtMs) < SESSION_STICKY_PERSIST_INTERVAL_MS
 		) {
 			return;
@@ -209,6 +231,7 @@ export class SessionAffinity implements SessionsApi {
 				type,
 				credentialId,
 				explicit: isExplicit,
+				strict: isStrict,
 				lastUsedAtMs: nowMs,
 			});
 		} catch (err) {
@@ -221,10 +244,12 @@ export class SessionAffinity implements SessionsApi {
 	 * Retrieves the last credential used by a session. A restricted session
 	 * never sees a pin outside its allowlist — inherited, restored, or recorded
 	 * before the restriction — so it re-ranks inside the allowlist instead.
+	 * A missing strict row is still a lock, not a usable out-of-pool credential.
 	 */
 	get(provider: string, sessionId: string | undefined): SessionCredential | undefined {
 		if (!sessionId) return undefined;
 		const credential = this.#lookup(provider, sessionId);
+		if (credential?.strict === true && credential.index === -1) return credential;
 		return credential && this.#permits(provider, sessionId, credential.index) ? credential : undefined;
 	}
 
@@ -242,7 +267,10 @@ export class SessionAffinity implements SessionsApi {
 				// A strict pin must survive credential deletion/disable — the session
 				// is locked to an account that no longer exists, and the correct
 				// behavior is to fail, not silently fall through to a sibling.
-				if (live.strict === true) return live;
+				if (live.strict === true) {
+					live.index = -1;
+					return live;
+				}
 				this.#sessionLastCredential.get(provider)?.delete(sessionId);
 				return undefined;
 			}
@@ -298,6 +326,7 @@ export class SessionAffinity implements SessionsApi {
 						type: val.type,
 						credentialId: val.credentialId,
 						explicit: val.explicit === true,
+						strict: val.strict === true,
 						lastUsedAtMs: val.lastUsedAtMs,
 					});
 				}
@@ -362,6 +391,7 @@ export class SessionAffinity implements SessionsApi {
 		// filtered array would be off-by-N when any non-OAuth credential precedes the
 		// OAuth ones (e.g. [api_key, oauth_A, oauth_B] stored order).
 		const stickyCredential = sessionPref?.type === "oauth" ? allCredentials[sessionPref.index] : undefined;
+		if (sessionPref?.strict === true && stickyCredential?.type !== "oauth") return undefined;
 		return stickyCredential?.type === "oauth" ? stickyCredential : oauthCredentials[0];
 	}
 
@@ -391,24 +421,38 @@ export class SessionAffinity implements SessionsApi {
 	}
 
 	/**
-	 * Copy every stored credential affinity from one live session to another.
+	 * Copy stored credential affinities from one live session to another.
 	 *
 	 * The target receives its own sticky entries, so request resolution, usage
 	 * blocking, credential rotation, metadata, and persisted pins all continue
 	 * through the target session id without retaining a live dependency on the
-	 * source session.
+	 * source session. `include` limits the copy to the providers it accepts,
+	 * given whether the source's affinity is an explicit user pin.
 	 */
-	inherit(sourceSessionId: string, targetSessionId: string): number {
+	inherit(
+		sourceSessionId: string,
+		targetSessionId: string,
+		include?: (provider: string, explicit: boolean) => boolean,
+	): number {
 		if (!sourceSessionId || !targetSessionId || sourceSessionId === targetSessionId) return 0;
 		let inherited = 0;
-		for (const provider of this.#pool.providers()) {
+		const providers = new Set([...this.#pool.providers(), ...this.#sessionLastCredential.keys()]);
+		for (const provider of providers) {
 			if (this.isAutomatic(provider, sourceSessionId)) {
+				if (include && !include(provider, false)) continue;
 				this.automatic(provider, targetSessionId);
 				inherited += 1;
 				continue;
 			}
 			const credential = this.get(provider, sourceSessionId);
-			if (!credential || !this.#permits(provider, targetSessionId, credential.index)) continue;
+			if (
+				!credential ||
+				(!(credential.strict === true && credential.index === -1) &&
+					!this.#permits(provider, targetSessionId, credential.index))
+			) {
+				continue;
+			}
+			if (include && !include(provider, credential.explicit === true)) continue;
 			this.record(
 				provider,
 				targetSessionId,
@@ -417,6 +461,7 @@ export class SessionAffinity implements SessionsApi {
 				credential.lastUsedAtMs,
 				credential.explicit === true,
 				credential.strict === true,
+				credential.credentialId,
 			);
 			inherited += 1;
 		}

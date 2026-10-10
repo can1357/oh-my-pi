@@ -67,42 +67,57 @@ export function recordCredentialPin(
 	provider: string,
 ): void {
 	const current = sessionManager.getCredentialPins().get(provider);
-	if (current?.mode === "automatic") return;
+	const liveMode = authStorage.sessions.mode(provider, sessionId);
+	if (current?.mode === "automatic" && liveMode !== "strict" && liveMode !== "pinned") return;
 	const identity = authStorage.oauth.identity(provider, sessionId);
 	if (!identity) return;
 	const hash = credentialPinHash(provider, identity);
-	if (!hash || current?.hash === hash) return;
-	// Preserve the live strict mode so a subagent's journal entry restores as
-	// strict rather than as a legacy warm-affinity pin.
-	const liveMode = authStorage.sessions.mode(provider, sessionId);
-	sessionManager.appendCredentialPin(provider, hash, liveMode === "strict" ? "strict" : undefined);
+	const mode = liveMode === "strict" ? "strict" : undefined;
+	if (!hash || (current?.hash === hash && current.mode === mode)) return;
+	// Preserve explicit inheritance even when the account hash has not changed.
+	sessionManager.appendCredentialPin(provider, hash, mode);
 }
 
 /**
  * Re-pin the accounts recorded in the session file onto the auth store's
- * session stickiness. No-op per provider when the account is gone (logged out)
- * or when a live sticky for another account exists (same-process
- * branch/session switches must not clobber fresher routing). A sticky for the
- * same account whose last use predates the pin is advanced to the pin's time:
- * the persisted sticky is written lazily, so the session file can be newer.
- * Seeds with the session's effective last-use time so stale resumes still fall
- * through to usage ranking.
+ * session stickiness. Missing warm-affinity accounts and fresher live choices
+ * are left alone; an unavailable strict journal account fails adoption before
+ * configured defaults or sibling credentials can route a request. A warm sticky
+ * for the same account is advanced to the pin's effective last-use time.
+ * `restoreMode: "strict"` carries only explicit locks onto a fresh provider id.
  */
-export function seedCredentialPins(authStorage: AuthStorage, sessionManager: SessionManager, sessionId: string): void {
+export function seedCredentialPins(
+	authStorage: AuthStorage,
+	sessionManager: SessionManager,
+	sessionId: string,
+	restoreMode?: "strict",
+): void {
 	for (const [provider, pin] of sessionManager.getCredentialPins()) {
+		if (restoreMode && pin.mode !== restoreMode) continue;
+		// The spawning parent's explicit choice wins over a revived child's journal,
+		// including an automatic-routing opt-out or an older pin for the same account.
+		const liveMode = authStorage.sessions.mode(provider, sessionId);
+		if (liveMode === "strict" || liveMode === "pinned") continue;
 		if (pin.mode === "automatic") {
 			authStorage.sessions.automatic(provider, sessionId);
 			continue;
 		}
 		const accounts = authStorage.oauth.accounts(provider, sessionId);
-		if (accounts.length === 0) continue;
 		const match = accounts.find(account => credentialPinHash(provider, account) === pin.hash);
-		if (!match) continue;
-		const active = accounts.find(account => account.active);
-		if (active && (active !== match || (active.lastUsedAtMs ?? 0) >= pin.lastUsedAt)) continue;
-		authStorage.sessions.pin(provider, sessionId, match.credentialId, {
-			restoredAtMs: pin.lastUsedAt,
-			strict: pin.mode === "strict",
-		});
+		let restored = false;
+		if (match) {
+			const active = accounts.find(account => account.active);
+			if (pin.mode !== "strict" && active && (active !== match || (active.lastUsedAtMs ?? 0) >= pin.lastUsedAt))
+				continue;
+			restored = authStorage.sessions.pin(provider, sessionId, match.credentialId, {
+				restoredAtMs: pin.lastUsedAt,
+				strict: pin.mode === "strict",
+			});
+		}
+		if (!restored && pin.mode === "strict") {
+			throw new Error(
+				`Cannot restore strict account routing for ${provider}. Re-add the locked account before resuming.`,
+			);
+		}
 	}
 }

@@ -57,7 +57,7 @@ const OSC133_ZONE_CLOSE = OSC133_ZONE_END + OSC133_COMMAND_START + OSC133_COMMAN
 
 /** How a user bubble styles its prose and chips (see {@link userBubbleColor}). */
 export interface UserBubbleOptions {
-	/** Materialized `file://` targets per attached image, indexed by chip number. */
+	/** Filesystem paths for attached image chips, indexed by chip number. */
 	imageLinks?: readonly (string | undefined)[];
 	/** The message's attached images in chip order (`#1` first); a native bubble shows them. */
 	images?: readonly ImageContent[];
@@ -175,6 +175,12 @@ export class UserMessageComponent extends Container implements ReactionTarget {
 		});
 		markdown.setIgnoreTight(true);
 		this.addChild(markdown);
+	}
+
+	override releaseRenderCaches(): void {
+		this.#zoneSource = undefined;
+		this.#zoneLines = undefined;
+		super.releaseRenderCaches();
 	}
 
 	setReaction(emoji: string): void {
@@ -337,6 +343,10 @@ class SyntheticSummary implements Component {
 		this.#summary = summary;
 	}
 
+	releaseRenderCaches(): void {
+		this.#cache = undefined;
+	}
+
 	invalidate(): void {
 		this.#cache = undefined;
 	}
@@ -423,6 +433,10 @@ export class CollapsedSyntheticMessageComponent implements Component {
 
 	invalidate(): void {
 		this.#disclosure.invalidate();
+	}
+
+	releaseRenderCaches(): void {
+		this.#disclosure.releaseRenderCaches();
 	}
 
 	dispose(): void {

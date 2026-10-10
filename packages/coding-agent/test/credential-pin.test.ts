@@ -1,6 +1,11 @@
 import { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { Agent } from "@oh-my-pi/pi-agent-core";
+import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { TempDir } from "@oh-my-pi/pi-utils";
+import { ModelRegistry } from "../src/config/model-registry";
+import { Settings } from "../src/config/settings";
+import { AgentSession } from "../src/session/agent-session";
 import { AuthStorage, SqliteAuthCredentialStore } from "../src/session/auth-storage";
 import { credentialPinHash, recordCredentialPin, seedCredentialPins } from "../src/session/credential-pin";
 import { SessionManager } from "../src/session/session-manager";
@@ -134,6 +139,70 @@ describe("credential pins", () => {
 		);
 	});
 
+	test("inherited strict mode survives a newer same-account affinity journal and is recorded", () => {
+		const manager = SessionManager.create(tempDir.path(), tempDir.path());
+		const sessionId = manager.getSessionId();
+		const account = storage.oauth.accounts("anthropic", sessionId).find(item => item.accountId === "account-b")!;
+		const hash = credentialPinHash("anthropic", account)!;
+		manager.appendCredentialPin("anthropic", hash);
+		const recordedAt = manager.getCredentialPins().get("anthropic")!.lastUsedAt;
+		storage.sessions.pin("anthropic", sessionId, account.credentialId, {
+			restoredAtMs: recordedAt - 60_000,
+			strict: true,
+		});
+
+		seedCredentialPins(storage, manager, sessionId);
+		expect(storage.sessions.mode("anthropic", sessionId)).toBe("strict");
+		recordCredentialPin(storage, manager, sessionId, "anthropic");
+		recordCredentialPin(storage, manager, sessionId, "anthropic");
+		expect(manager.getCredentialPins().get("anthropic")?.mode).toBe("strict");
+		expect(manager.getBranch().filter(entry => entry.type === "credential_pin")).toHaveLength(2);
+	});
+
+	test("an inherited strict account overrides the revived child's automatic opt-out", () => {
+		const manager = SessionManager.create(tempDir.path(), tempDir.path());
+		const sessionId = manager.getSessionId();
+		manager.appendCredentialPin("anthropic", undefined, "automatic");
+		const account = storage.oauth.accounts("anthropic", sessionId).find(item => item.accountId === "account-a")!;
+		storage.sessions.pin("anthropic", "parent-strict", account.credentialId, { strict: true });
+		const ownPins = manager.getCredentialPins();
+		storage.sessions.inherit("parent-strict", sessionId, (provider, explicit) => explicit || !ownPins.has(provider));
+
+		seedCredentialPins(storage, manager, sessionId);
+		expect(storage.sessions.mode("anthropic", sessionId)).toBe("strict");
+		recordCredentialPin(storage, manager, sessionId, "anthropic");
+		expect(manager.getCredentialPins().get("anthropic")?.mode).toBe("strict");
+		expect(manager.getCredentialPins().get("anthropic")?.hash).toBe(credentialPinHash("anthropic", account));
+	});
+
+	test("a revived child's recorded account wins over the parent's automatic affinity", () => {
+		const manager = SessionManager.create(tempDir.path(), tempDir.path());
+		const sessionId = manager.getSessionId();
+		const accounts = storage.oauth.accounts("anthropic", sessionId);
+		const parentAccount = accounts.find(item => item.accountId === "account-a")!;
+		const childAccount = accounts.find(item => item.accountId === "account-b")!;
+		manager.appendCredentialPin("anthropic", credentialPinHash("anthropic", childAccount)!);
+		storage.sessions.pin("anthropic", "parent-affinity", parentAccount.credentialId, { restoredAtMs: Date.now() });
+		const ownPins = manager.getCredentialPins();
+		storage.sessions.inherit("parent-affinity", sessionId, (provider, explicit) => explicit || !ownPins.has(provider));
+
+		seedCredentialPins(storage, manager, sessionId);
+		expect(storage.sessions.mode("anthropic", sessionId)).toBe("affinity");
+		expect(storage.oauth.accounts("anthropic", sessionId).find(item => item.active)?.accountId).toBe("account-b");
+	});
+
+	test("an automatic opt-out restores without being replaced by serving-account records", () => {
+		const manager = SessionManager.create(tempDir.path(), tempDir.path());
+		const sessionId = manager.getSessionId();
+		manager.appendCredentialPin("anthropic", undefined, "automatic");
+
+		seedCredentialPins(storage, manager, sessionId);
+		expect(storage.sessions.mode("anthropic", sessionId)).toBe("automatic");
+		recordCredentialPin(storage, manager, sessionId, "anthropic");
+		expect(manager.getCredentialPins().get("anthropic")?.mode).toBe("automatic");
+		expect(manager.getBranch().filter(entry => entry.type === "credential_pin")).toHaveLength(1);
+	});
+
 	test("pins are org-scoped: the same account in two orgs re-pins the matching org credential", async () => {
 		const store = new SqliteAuthCredentialStore(new Database(":memory:"));
 		await store.saveOAuth("anthropic", mintOAuthCredential("x", { orgId: "org-1" }));
@@ -216,6 +285,94 @@ describe("credential pins", () => {
 		seedCredentialPins(storage, manager, sessionId);
 
 		expect(storage.oauth.accounts("anthropic", sessionId).some(account => account.active)).toBe(false);
+	});
+
+	test.each([undefined, "strict"] as const)("unavailable strict pins fail restoration in mode %s", restoreMode => {
+		const manager = SessionManager.create(tempDir.path(), tempDir.path());
+		const sessionId = manager.getSessionId();
+		const hash = credentialPinHash("anthropic", { accountId: "account-gone" })!;
+		manager.appendCredentialPin("anthropic", hash, "strict");
+
+		expect(() => seedCredentialPins(storage, manager, sessionId, restoreMode)).toThrow(Error);
+		expect(storage.sessions.mode("anthropic", sessionId)).toBe("affinity");
+		expect(storage.oauth.accounts("anthropic", sessionId).some(account => account.active)).toBe(false);
+	});
+
+	test("strict adoption fails before configured defaults choose a sibling and reports no account identity", () => {
+		const manager = SessionManager.create(tempDir.path(), tempDir.path());
+		const hash = credentialPinHash("anthropic", { accountId: "account-gone" })!;
+		manager.appendCredentialPin("anthropic", hash, "strict");
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!model) throw new Error("Expected bundled Anthropic model");
+		let requests = 0;
+		const agent = new Agent({
+			getApiKey: () => {
+				requests++;
+				return "unused-key";
+			},
+			initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
+		});
+		let failure: unknown;
+		expect(() => {
+			try {
+				new AgentSession({
+					agent,
+					sessionManager: manager,
+					modelRegistry: new ModelRegistry(storage),
+					settings: Settings.isolated({ "auth.defaultAccounts": { anthropic: "a" } }),
+				});
+			} catch (error) {
+				failure = error;
+				throw error;
+			}
+		}).toThrow(Error);
+		expect(failure).toBeInstanceOf(Error);
+		expect((failure as Error).message).toContain("anthropic");
+		expect((failure as Error).message).not.toContain(hash);
+		expect((failure as Error).message).not.toContain("account-gone");
+		expect(requests).toBe(0);
+		expect(storage.oauth.accounts("anthropic", manager.getSessionId()).some(account => account.active)).toBe(false);
+	});
+
+	test("a strict journal overrides a live non-explicit sibling affinity", () => {
+		const manager = SessionManager.create(tempDir.path(), tempDir.path());
+		const sessionId = manager.getSessionId();
+		const accounts = storage.oauth.accounts("anthropic", sessionId);
+		const accountA = accounts.find(account => account.accountId === "account-a")!;
+		const accountB = accounts.find(account => account.accountId === "account-b")!;
+		manager.appendCredentialPin("anthropic", credentialPinHash("anthropic", accountB)!, "strict");
+		storage.sessions.pin("anthropic", sessionId, accountA.credentialId, { restoredAtMs: Date.now() });
+
+		seedCredentialPins(storage, manager, sessionId);
+		expect(storage.sessions.mode("anthropic", sessionId)).toBe("strict");
+		expect(storage.oauth.accounts("anthropic", sessionId).find(account => account.active)?.accountId).toBe("account-b");
+	});
+
+	test("configured sibling defaults never replace an unavailable live strict lock", async () => {
+		const manager = SessionManager.create(tempDir.path(), tempDir.path());
+		const sessionId = manager.getSessionId();
+		const account = storage.oauth.accounts("anthropic", sessionId).find(item => item.accountId === "account-b")!;
+		expect(storage.sessions.pin("anthropic", sessionId, account.credentialId, { strict: true })).toBe(true);
+		expect(await storage.credentials.removeById("anthropic", account.credentialId)).toBe(true);
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!model) throw new Error("Expected bundled Anthropic model");
+		const registry = new ModelRegistry(storage);
+		const session = new AgentSession({
+			agent: new Agent({
+				getApiKey: () => "unused-key",
+				initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
+			}),
+			sessionManager: manager,
+			modelRegistry: registry,
+			settings: Settings.isolated({ "auth.defaultAccounts": { anthropic: "a" } }),
+		});
+		try {
+			expect(storage.sessions.mode("anthropic", sessionId)).toBe("strict");
+			expect(storage.oauth.accounts("anthropic", sessionId).some(item => item.active)).toBe(false);
+			expect(await registry.getApiKey(model, sessionId)).toBeUndefined();
+		} finally {
+			await session.dispose();
+		}
 	});
 
 	test("recording appends the serving account's hash once and dedupes repeats", () => {
