@@ -4891,7 +4891,9 @@ export class AgentSession implements SettingsScope {
 		const results = new Map(toolResults.map(result => [result.toolCallId, result]));
 		let finishRequested = false;
 		for (const call of calls) {
-			if (call.name !== "todo" || typeof call.arguments.finish_turn !== "boolean") return false;
+			if (call.name !== "todo" || !isRecord(call.arguments) || typeof call.arguments.finish_turn !== "boolean") {
+				return false;
+			}
 			const result = results.get(call.id);
 			if (
 				!result ||

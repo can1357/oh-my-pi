@@ -667,6 +667,41 @@ describe("AgentSession eager todo enforcement", () => {
 			else expect(session.getTodoPhases()[0]?.tasks[0]?.status).toBe("completed");
 		});
 
+		it("continues with the validation error for null Todo arguments when intent tracing is disabled", async () => {
+			const before = session.getTodoPhases();
+			await recreateSession({ "tools.intentTracing": false });
+			session.agent.intentTracing = false;
+			session.setTodoPhases(before);
+			// Model output can violate ToolCall's static argument type.
+			const args = null as unknown as ToolCall["arguments"];
+			scriptedResponses = [batch("Final text", [args]), createAssistantMessage("Validation error handled")];
+			await session.prompt("Update the tasks");
+
+			expect(streamCallCount).toBe(2);
+			const result = session.agent.state.messages.find(message => message.role === "toolResult");
+			expect(result).toMatchObject({
+				role: "toolResult",
+				toolName: "todo",
+				toolCallId: "todo-final-0",
+				isError: true,
+			});
+			if (!result) throw new Error("Expected Todo validation error result");
+			const errorText = result.content
+				.filter(isTextContentBlock)
+				.map(part => part.text)
+				.join("\n");
+			expect(errorText.length).toBeGreaterThan(0);
+			expect(observedCalls[1]).toMatchObject({
+				lastMessageRole: "toolResult",
+				lastMessageText: errorText,
+			});
+			expect(session.agent.state.messages.at(-1)).toMatchObject({
+				role: "assistant",
+				content: [{ type: "text", text: "Validation error handled" }],
+			});
+			expect(session.getTodoPhases()).toEqual(before);
+		});
+
 		it.each([undefined, " \n\t"])("requires nonblank text in the same message: %j", async text => {
 			const prior = createAssistantMessage("An earlier response is not this reply.");
 			session.agent.appendMessage(prior);
