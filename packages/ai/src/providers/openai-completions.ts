@@ -700,10 +700,14 @@ function getOpenAICompletionsProviderSessionState(
 // user-visible text. Tokens use either fullwidth pipes (｜, U+FF5C) or ASCII pipes.
 // Body is restricted to identifier-like chars (with the DeepSeek tokenizer's `▁`),
 // capped at a sane length to avoid swallowing legitimate angle-bracket text.
-const DEEPSEEK_SPECIAL_TOKEN_REGEX = /<(?:｜|\|)[A-Za-z0-9_.｜|▁]{1,64}(?:｜|\|)>/g;
-const DEEPSEEK_SPECIAL_TOKEN_AT_START_REGEX = /^\s*<(?:｜|\|)[A-Za-z0-9_.｜|▁]{1,64}(?:｜|\|)>/;
-const DEEPSEEK_SPECIAL_TOKEN_AT_END_REGEX = /<(?:｜|\|)[A-Za-z0-9_.｜|▁]{1,64}(?:｜|\|)>\s*$/;
-const DEEPSEEK_OPEN_DELIMS = ["<｜", "<|"] as const;
+// DSML wrapper tags leak the same way, including mangled spellings such as
+// `<｜DSML｜ calls>` (issue #14576). DSML `invoke`/`parameter` tags are kept: they mark
+// a call the host failed to parse, and agent-layer leak recovery needs them to find it.
+const DEEPSEEK_LEAKED_MARKER = String.raw`<(?:[｜|][A-Za-z0-9_.｜|▁]{1,64}[｜|]|\/?[｜|]DSML[｜|](?!\s*(?:invoke|parameter)\b)[^<>｜|\n]{0,32})>`;
+const DEEPSEEK_SPECIAL_TOKEN_REGEX = new RegExp(DEEPSEEK_LEAKED_MARKER, "g");
+const DEEPSEEK_SPECIAL_TOKEN_AT_START_REGEX = new RegExp(String.raw`^\s*${DEEPSEEK_LEAKED_MARKER}`);
+const DEEPSEEK_SPECIAL_TOKEN_AT_END_REGEX = new RegExp(String.raw`${DEEPSEEK_LEAKED_MARKER}\s*$`);
+const DEEPSEEK_OPEN_DELIMS = ["<｜", "<|", "</｜", "</|"] as const;
 
 function stripDeepseekSpecialTokens(text: string): string {
 	const stripped = text.replace(DEEPSEEK_SPECIAL_TOKEN_REGEX, "");
@@ -715,23 +719,16 @@ function stripDeepseekSpecialTokens(text: string): string {
 	return normalized;
 }
 
-// Find a trailing partial `<｜...` (or `<|...`) that has not yet been closed by a
-// matching `｜>`/`|>`, so it can be held back until the next chunk arrives. A solo
-// trailing `<` is also held in case it is the start of a new token.
+// Find a trailing partial `<｜...` / `</｜...` (or ASCII-pipe form) not yet closed by
+// `>`, so it can be held back until the next chunk arrives. A solo trailing `<` is
+// also held in case it is the start of a new marker.
 function getTrailingPartialDeepseekToken(text: string): string {
-	let bestIdx = -1;
-	for (const delim of DEEPSEEK_OPEN_DELIMS) {
-		const idx = text.lastIndexOf(delim);
-		if (idx > bestIdx) bestIdx = idx;
-	}
-	if (bestIdx === -1) {
-		return text.endsWith("<") ? "<" : "";
-	}
-	const tail = text.slice(bestIdx);
-	if (tail.includes("｜>") || tail.includes("|>")) return "";
+	let start = -1;
+	for (const delim of DEEPSEEK_OPEN_DELIMS) start = Math.max(start, text.lastIndexOf(delim));
+	const tail = start === -1 ? "" : text.slice(start);
 	// Cap the held-back length so a stray `<｜` in normal prose can't grow unboundedly.
-	if (tail.length > 256) return "";
-	return tail;
+	if (tail.length > 0 && !tail.includes(">") && tail.length <= 256) return tail;
+	return text.endsWith("<") ? "<" : "";
 }
 const OPENAI_COMPLETIONS_FIRST_EVENT_TIMEOUT_MESSAGE =
 	"OpenAI completions stream timed out while waiting for the first event";

@@ -2360,6 +2360,72 @@ describe("NVIDIA NIM DeepSeek special-token stripping", () => {
 		expect(text).toBe("trailing <\uff5c");
 	});
 
+	it("strips mangled DSML wrapper residue left beside a structured tool call (#14576)", async () => {
+		const model = nvidiaDeepseekModel();
+		const chunk = (delta: Record<string, unknown>, finish_reason?: string) => ({
+			id: "chatcmpl-nim-5",
+			object: "chat.completion.chunk",
+			created: 0,
+			model: model.id,
+			choices: [{ index: 0, delta, ...(finish_reason ? { finish_reason } : {}) }],
+		});
+		const fetchMock = createMockFetch([
+			chunk({ content: "\n\n" }),
+			chunk({
+				tool_calls: [
+					{
+						index: 0,
+						id: "chatcmpl-tool-1",
+						type: "function",
+						function: { name: "bash", arguments: '{"command":"ls"}' },
+					},
+				],
+			}),
+			chunk({ content: "<\uff5cDSML\uff5c" }),
+			chunk({ content: " calls>\n</|DSML| calls>" }),
+			chunk({}, "tool_calls"),
+			"[DONE]",
+		]);
+
+		const result = await streamOpenAICompletions(model, baseContext(), {
+			apiKey: "test-key",
+			fetch: fetchMock,
+		}).result();
+		const text = result.content.flatMap(b => (b.type === "text" ? [b.text] : [])).join("");
+		expect(text).not.toContain("DSML");
+		expect(result.stopReason).toBe("toolUse");
+		expect(result.content.filter(b => b.type === "toolCall")).toHaveLength(1);
+	});
+
+	it("keeps DSML invoke/parameter tags visible for agent-layer leak recovery", async () => {
+		const model = nvidiaDeepseekModel();
+		const leaked = 'Intro.\n<\uff5cDSML\uff5cparameter name="command" string="true">ls</\uff5cDSML\uff5cparameter>';
+		const fetchMock = createMockFetch([
+			{
+				id: "chatcmpl-nim-6",
+				object: "chat.completion.chunk",
+				created: 0,
+				model: model.id,
+				choices: [{ index: 0, delta: { content: `${leaked}\n<\uff5cDSML\uff5c calls>` } }],
+			},
+			{
+				id: "chatcmpl-nim-6",
+				object: "chat.completion.chunk",
+				created: 0,
+				model: model.id,
+				choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
+			},
+			"[DONE]",
+		]);
+
+		const result = await streamOpenAICompletions(model, baseContext(), {
+			apiKey: "test-key",
+			fetch: fetchMock,
+		}).result();
+		const text = result.content.flatMap(b => (b.type === "text" ? [b.text] : [])).join("");
+		expect(text).toBe(leaked);
+	});
+
 	it("leaves visible content alone for non-deepseek nvidia models", async () => {
 		const model: Model<"openai-completions"> = buildModel({
 			...gpt4oMiniSpec,
