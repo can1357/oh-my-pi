@@ -331,14 +331,21 @@ fn background_guard(
 	pid: libc::pid_t,
 	event: &PointerEvent,
 ) -> CoreResult<()> {
-	refuse_pointer(window, event, || process::reads_hardware_pointer(pid))
+	refuse_pointer(
+		window,
+		event,
+		|| process::is_screen_sharing(pid),
+		|| process::reads_hardware_pointer(pid),
+	)
 }
 
-/// [`background_guard`]'s verdict, with the target's Tk probed by
+/// [`background_guard`]'s verdict. The target is probed by
+/// `is_screen_sharing` only for an event that holds keys, and its Tk by
 /// `reads_hardware_pointer` only for an event that presses a button.
 fn refuse_pointer(
 	window: &DesktopWindow,
 	event: &PointerEvent,
+	is_screen_sharing: impl FnOnce() -> bool,
 	reads_hardware_pointer: impl FnOnce() -> bool,
 ) -> CoreResult<()> {
 	let refuse = |reason: &str| {
@@ -357,6 +364,17 @@ fn refuse_pointer(
 			format!("drops background {kind} events in its canvas/game input stack").as_str(),
 		);
 	}
+	if holds_keys(event) && is_screen_sharing() {
+		return Err(screen_sharing_refusal(window, "modifier flags and held keys on pointer input"));
+	}
+	// An open context menu takes the keyboard from the user's app, and a hold
+	// keeps it open until the button is released.
+	if matches!(event, PointerEvent::Hold { .. }) && may_open_context_menu(event) {
+		return refuse(
+			"could open a context menu on this secondary-button hold, which would take the keyboard \
+			 from the user's app for the whole hold",
+		);
+	}
 	if presses_button(event) && reads_hardware_pointer() {
 		return refuse(
 			"uses the Tk toolkit, which places clicks at the hardware pointer rather than the event \
@@ -373,6 +391,18 @@ const fn presses_button(event: &PointerEvent) -> bool {
 		event,
 		PointerEvent::Click { .. } | PointerEvent::Drag { .. } | PointerEvent::Hold { .. }
 	)
+}
+
+/// Whether `event` carries modifier flags or holds keys around its presses.
+fn holds_keys(event: &PointerEvent) -> bool {
+	match event {
+		PointerEvent::Click { modifiers, .. } => *modifiers != Modifiers::default(),
+		PointerEvent::Drag { modifiers, keys, .. } => {
+			*modifiers != Modifiers::default() || !keys.is_empty()
+		},
+		PointerEvent::Hold { keys, .. } => !keys.is_empty(),
+		PointerEvent::Move { .. } | PointerEvent::Scroll { .. } => false,
+	}
 }
 
 const LOCAL_EVENT_FILTER: u32 = 0x01 | 0x02 | 0x04;
@@ -2476,17 +2506,102 @@ mod tests {
 		let refused: Vec<_> = presses
 			.iter()
 			.chain(&others)
-			.filter(|event| refuse_pointer(&window, event, || false).is_err())
+			.filter(|event| refuse_pointer(&window, event, || false, || false).is_err())
 			.collect();
 		assert!(refused.is_empty(), "refused outside Tk: {refused:#?}");
 		// Tk 9 places every press at the user's pointer, wherever the event says.
 		for event in &presses {
-			let refused = refuse_pointer(&window, event, || true).expect_err("press into Tk 9");
+			let refused =
+				refuse_pointer(&window, event, || false, || true).expect_err("press into Tk 9");
 			assert_eq!(refused.code.as_str(), "BackgroundUnavailable");
 		}
 		for event in &others {
-			assert!(refuse_pointer(&window, event, || true).is_ok(), "{event:?} was refused");
+			assert!(
+				refuse_pointer(&window, event, || false, || true).is_ok(),
+				"{event:?} was refused"
+			);
 		}
+	}
+
+	#[test]
+	fn screen_sharing_refuses_pointer_gestures_that_hold_keys() {
+		// Screen Sharing relays only physical key transitions, so the keys and
+		// modifier flags of a background gesture would not reach the remote host.
+		let window = background_window("Screen Sharing");
+		let meta = Modifiers { meta: true, ..Modifiers::default() };
+		let drag = |modifiers, keys| PointerEvent::Drag {
+			path: vec![(10.0, 10.0), (90.0, 40.0)],
+			button: MouseButton::Left,
+			modifiers,
+			keys,
+		};
+		let hold = |keys| PointerEvent::Hold {
+			x: 10.0,
+			y: 10.0,
+			button: MouseButton::Left,
+			keys,
+			duration: Duration::from_secs(1),
+		};
+		let click = |modifiers| PointerEvent::Click {
+			x: 10.0,
+			y: 10.0,
+			button: MouseButton::Left,
+			count: 1,
+			modifiers,
+		};
+		for event in [
+			drag(Modifiers::default(), vec![KeyName::Space]),
+			drag(meta, Vec::new()),
+			hold(vec![KeyName::Shift]),
+			click(meta),
+		] {
+			let refused = refuse_pointer(&window, &event, || true, || false)
+				.expect_err("keys into Screen Sharing");
+			assert_eq!(refused.code.as_str(), "BackgroundUnavailable", "{event:?}");
+			assert!(refuse_pointer(&window, &event, || false, || false).is_ok(), "{event:?}");
+		}
+		for event in [
+			drag(Modifiers::default(), Vec::new()),
+			hold(Vec::new()),
+			click(Modifiers::default()),
+			PointerEvent::Scroll { x: 10.0, y: 10.0, dx: 0.0, dy: -40.0 },
+		] {
+			assert!(refuse_pointer(&window, &event, || true, || false).is_ok(), "{event:?}");
+		}
+	}
+
+	#[test]
+	fn a_hold_that_can_open_a_context_menu_is_refused_before_anything_is_sent() {
+		// The menu would hold the user's keyboard until the button is released.
+		let window = background_window("Google Chrome");
+		let hold = |button, keys| PointerEvent::Hold {
+			x: 10.0,
+			y: 10.0,
+			button,
+			keys,
+			duration: Duration::from_secs(100),
+		};
+		let verdict = |event: &PointerEvent| {
+			refuse_pointer(&window, event, || false, || false).map_err(|error| error.code.as_str())
+		};
+		assert_eq!(verdict(&hold(MouseButton::Right, Vec::new())), Err("BackgroundUnavailable"));
+		assert_eq!(
+			verdict(&hold(MouseButton::Left, vec![KeyName::Ctrl])),
+			Err("BackgroundUnavailable")
+		);
+		assert_eq!(verdict(&hold(MouseButton::Left, Vec::new())), Ok(()));
+		assert_eq!(verdict(&hold(MouseButton::Left, vec![KeyName::Shift])), Ok(()));
+		assert_eq!(verdict(&hold(MouseButton::Middle, vec![KeyName::Ctrl])), Ok(()));
+		// A right-click or right drag ends at once, so its menu is closed
+		// instead.
+		let right_click = PointerEvent::Click {
+			x:         10.0,
+			y:         10.0,
+			button:    MouseButton::Right,
+			count:     1,
+			modifiers: Modifiers::default(),
+		};
+		assert_eq!(verdict(&right_click), Ok(()));
 	}
 
 	#[test]
