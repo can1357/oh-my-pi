@@ -2943,12 +2943,25 @@ describe("ACP agent", () => {
 		await harness.agent.dispose();
 	});
 
-	it("initializes extensions without a UI context when the client lacks form elicitation", async () => {
-		const harness = await createHarness({ clientCapabilities: {}, extensionRunners: true });
+	it("keeps the extension UI context without form elicitation, with prompts that answer nothing", async () => {
+		const messages: string[] = [];
+		const harness = await createHarness({
+			clientCapabilities: {},
+			extensionRunners: true,
+			elicitationHandler: async request => {
+				messages.push(request.message);
+				return { action: "accept", content: { value: "Yes" } };
+			},
+		});
 		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const runner = harness.findSession(created.sessionId)?.extensionRunner;
 
-		// Nothing can answer a prompt, so the session's saved-reset consent must take its headless path.
-		expect(harness.findSession(created.sessionId)?.extensionRunner?.hasUI()).toBe(false);
+		// Commands such as /review branch on hasUI and cancel when the selector answers nothing.
+		// Saved-reset consent reads the session's `interactivePrompts: false` instead.
+		expect(runner?.hasUI()).toBe(true);
+		expect(await runner?.getUIContext().select("Spend a saved reset?", ["Yes", "No"])).toBeUndefined();
+		expect(messages).toEqual([]);
+		expect(harness.sessionFactoryOptions).toEqual([{ interactivePrompts: false }]);
 
 		await harness.agent.dispose();
 	});

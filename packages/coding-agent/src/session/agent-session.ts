@@ -305,7 +305,6 @@ import {
 import {
 	adoptRecentReset,
 	type AutoResetHost,
-	executeResetActions,
 	headlessConsentedActions,
 	planClaudeResets,
 	planCodexResets,
@@ -990,6 +989,8 @@ export class AgentSession implements SettingsScope {
 	#modelRegistry: ModelRegistry;
 	/** Creation-time permission for switchSession to keep the current model when a target's saved model is unrestorable. */
 	readonly #allowSessionModelFallback: boolean;
+	/** Creation-time: false when the extension UI context cannot reach a human (ACP without form elicitation). */
+	readonly #interactivePrompts: boolean;
 	#usageFallbackConfirmer: UsageFallbackConfirmer | undefined;
 	#usagePreflightAbortControllers = new Set<AbortController>();
 	/** In-flight vision descriptions that gate prompt admission; abort() cancels them. */
@@ -1623,6 +1624,7 @@ export class AgentSession implements SettingsScope {
 		this.memoryEnabled = config.memoryEnabled ?? true;
 		this.#modelRegistry = config.modelRegistry;
 		this.#allowSessionModelFallback = config.allowSessionModelFallback === true;
+		this.#interactivePrompts = config.interactivePrompts !== false;
 		this.#extensionRoots =
 			config.extensionRoots ??
 			(() => ({
@@ -12552,7 +12554,8 @@ export class AgentSession implements SettingsScope {
 	/**
 	 * Clear planned automatic spends. An action whose account resolves to `yes`
 	 * spends without asking; `unset` ones ask first, and the answer is persisted
-	 * in that provider's independent settings group. A headless host spends an
+	 * in that provider's independent settings group. A host that cannot prompt
+	 * (no extension UI, or one whose prompts cannot reach a human) spends an
 	 * `unset` action only when its credit is about to expire, and gets a
 	 * one-shot notice for the rest.
 	 */
@@ -12569,7 +12572,7 @@ export class AgentSession implements SettingsScope {
 		const settingsKey = provider === "anthropic" ? "claudeResets.autoRedeem" : "codexResets.autoRedeem";
 		const source = provider === "anthropic" ? "claude-auto-reset" : "codex-auto-reset";
 		const runner = this.#extensionRunner;
-		if (!runner?.hasUI()) {
+		if (!runner?.hasUI() || !this.#interactivePrompts) {
 			const approved = headlessConsentedActions(actions);
 			const waiting = asked.find(action => !approved.some(spend => spend.attemptKey === action.attemptKey));
 			if (waiting && !coordinator.notifiedKeys.has(waiting.attemptKey)) {

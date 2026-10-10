@@ -790,5 +790,4 @@ describe("Claude saved-reset trigger integration", () => {
 		expect(questions).toEqual([expect.stringContaining("Spend a saved Claude rate-limit reset?")]);
 		expect(targets).toEqual([]);
 	});
-
 });

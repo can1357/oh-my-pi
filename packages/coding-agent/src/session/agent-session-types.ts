@@ -251,6 +251,13 @@ export interface AgentSessionConfig {
 	 * `allowSessionModelFallback` option. Default: false.
 	 */
 	allowSessionModelFallback?: boolean;
+	/**
+	 * `false` when the extension UI context cannot reach a human: ACP installs one
+	 * for every client, but without form elicitation its prompts resolve empty.
+	 * Saved-reset consent then takes its no-prompt-UI path. `createAgentSession`
+	 * passes its `interactivePrompts` option. Default: true.
+	 */
+	interactivePrompts?: boolean;
 	/** Whether the startup model may be replaced by refreshed same-selector registry metadata. */
 	rebindModelAfterDiscovery?: boolean;
 	/** Tool registry for LSP and settings. */
