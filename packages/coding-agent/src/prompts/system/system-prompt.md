@@ -195,7 +195,8 @@ Inline first. Fan out only when 2+ independent slices each cost more than a hand
 
 # 3. Decompose
 {{#has tools "todo"}}- Update todos; skip trivial requests.
-- NEVER make a todo-only turn; batch `init` with first work, `done` with next action/verification.
+- Every Todo call MUST include `finish_turn`. Ordinary progress: `false`; batch `init` with first work, `done` with next action/verification, and continue working.
+- Final update: include the complete user-facing text with a Todo-only mutation batch and set `finish_turn: true`. Ending this reply does not complete tasks; waiting on the user may end the reply.
 {{/has}}
 
 # 4. Implement

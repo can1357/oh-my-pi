@@ -136,10 +136,10 @@ describe("AgentSession subscriber event order", () => {
 			type: "toolCall",
 			id: `todo-${index}`,
 			name: "todo",
-			arguments: { op: "done", task },
+			arguments: { op: "done", task, finish_turn: index === 0 },
 		}));
 		const mock = createMockModel({
-			responses: [{ content: calls }, { content: ["Done"] }],
+			responses: [{ content: ["All six tasks are complete.", ...calls] }],
 		});
 		const settings = Settings.isolated({
 			"compaction.enabled": false,
@@ -158,6 +158,7 @@ describe("AgentSession subscriber event order", () => {
 				session?.setTodoPhases(phases);
 			},
 		});
+		let providerCalls = 0;
 		const agent = new Agent({
 			getApiKey: agentModel => `${agentModel.provider}-test-key`,
 			initialState: {
@@ -166,7 +167,10 @@ describe("AgentSession subscriber event order", () => {
 				tools: [todo],
 				messages: [],
 			},
-			streamFn: (streamModel, context, options) => mock.stream(streamModel, context, options),
+			streamFn: (streamModel, context, options) => {
+				providerCalls++;
+				return mock.stream(streamModel, context, options);
+			},
 		});
 		session = new AgentSession({
 			agent,
@@ -188,6 +192,12 @@ describe("AgentSession subscriber event order", () => {
 		await session.waitForIdle();
 		const toolResults = agent.state.messages.filter(message => message.role === "toolResult");
 		expect(toolResults.map(result => result.toolName)).toEqual(tasks.map(() => "todo"));
+		const persistedResults = session.sessionManager
+			.getBranch()
+			.filter(entry => entry.type === "message" && entry.message.role === "toolResult");
+		expect(persistedResults).toHaveLength(tasks.length);
+		expect(toolResults.every(result => !result.isError)).toBe(true);
+		expect(providerCalls).toBe(1);
 
 		expect(session.getTodoPhases()[0]?.tasks.map(task => task.status)).toEqual(tasks.map(() => "completed"));
 	});

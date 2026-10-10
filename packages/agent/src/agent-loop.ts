@@ -759,19 +759,24 @@ async function emitTurnEnd(
 	signal?: AbortSignal,
 	context?: Omit<AgentTurnEndContext, "message" | "toolResults">,
 	runHookOnAbortedMessage = false,
-): Promise<void> {
+): Promise<boolean> {
 	stream.push({ type: "turn_end", message, toolResults });
 	const terminalYield = signal?.reason === TERMINAL_TOOL_RESULT_ABORT_REASON;
 	const isAbortedOrError =
 		message.role === "assistant" && (message.stopReason === "aborted" || message.stopReason === "error");
-	if ((signal?.aborted && !terminalYield) || (isAbortedOrError && !runHookOnAbortedMessage)) return;
-	await config.onTurnEnd?.(currentContext.messages, terminalYield ? undefined : signal, {
+	if ((signal?.aborted && !terminalYield) || (isAbortedOrError && !runHookOnAbortedMessage)) {
+		return context?.willContinue ?? false;
+	}
+	const turnContext: AgentTurnEndContext = {
 		message,
 		toolResults,
 		additionalMessages: [],
 		willContinue: false,
 		...context,
-	});
+	};
+	await config.onTurnEnd?.(currentContext.messages, terminalYield ? undefined : signal, turnContext);
+	// Hosts may end a completed tool batch without aborting the normal queue drain.
+	return (context?.willContinue ?? false) && turnContext.willContinue;
 }
 
 function createGateStopMessage(model: Model, reason: string | undefined): AssistantMessage {
@@ -1251,6 +1256,7 @@ async function runLoopBody(
 		// steering stays parked until after the batch — injecting a message
 		// between the tool_use blocks and their results would break the
 		// provider's pairing invariant.
+		let hasMoreToolCalls = true;
 		const resumeTail = unpairedToolCallTail(currentContext.messages);
 		if (resumeTail) {
 			stream.push({ type: "turn_start" });
@@ -1277,10 +1283,18 @@ async function runLoopBody(
 				stream,
 				executionResult.additionalContext,
 			);
-			await emitTurnEnd(stream, currentContext, resumeTail, executionResult.toolResults, config, signal, {
-				willContinue: !isDeadlineExceeded(config.deadline),
-				...(resumeContextMessage ? { additionalMessages: [resumeContextMessage] } : {}),
-			});
+			hasMoreToolCalls = await emitTurnEnd(
+				stream,
+				currentContext,
+				resumeTail,
+				executionResult.toolResults,
+				config,
+				signal,
+				{
+					willContinue: !isDeadlineExceeded(config.deadline),
+					...(resumeContextMessage ? { additionalMessages: [resumeContextMessage] } : {}),
+				},
+			);
 			turnOpen = false;
 			// A tool hook may mark its completed result as terminal (e.g. subagent
 			// yield) — same stop-before-next-model-call rule as the main loop.
@@ -1292,8 +1306,6 @@ async function runLoopBody(
 
 		// Outer loop: continues when queued follow-up messages arrive after agent would stop
 		while (true) {
-			let hasMoreToolCalls = true;
-
 			// Inner loop: process tool calls and steering messages
 			while (hasMoreToolCalls || pendingMessages.length > 0) {
 				if (isDeadlineExceeded(config.deadline)) {
@@ -1731,7 +1743,7 @@ async function runLoopBody(
 					hasMoreToolCalls = true;
 				}
 
-				await emitTurnEnd(stream, currentContext, message, toolResults, config, signal, {
+				hasMoreToolCalls = await emitTurnEnd(stream, currentContext, message, toolResults, config, signal, {
 					additionalMessages,
 					willContinue: hasMoreToolCalls && !isDeadlineExceeded(config.deadline),
 				});
@@ -1802,6 +1814,7 @@ async function runLoopBody(
 			if (lateSteering.length > 0 || asideMessages.length > 0 || followUpMessages.length > 0) {
 				// Set as pending so the inner loop processes them before stopping.
 				pendingMessages = [...lateSteering, ...asideMessages, ...followUpMessages];
+				hasMoreToolCalls = true;
 				continue;
 			}
 

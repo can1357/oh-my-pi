@@ -59,6 +59,11 @@ const InitListEntry = type({
 
 const todoSchema = type({
 	op: TodoOp,
+	finish_turn: type("boolean").configure({
+		description:
+			"Required. false: no finish request. true: request ending this reply after all Todo calls succeed. Use true only with complete user-facing text already in this reply, no further result handling, and a batch of Todo mutations only (no view). Ends the reply, not tasks.",
+		expected: "a boolean",
+	}),
 	"list?": InitListEntry.array().describe("phases for init"),
 	"task?": type("string").describe("verbatim task content"),
 	"phase?": type("string"),
@@ -69,10 +74,13 @@ const todoSchema = type({
 	"reason?": type("string").describe("blocker note for block"),
 });
 
+// Turn control must be valid before the shared validator repairs ordinary tool arguments.
+const todoRawArgumentSchema = todoSchema.pick("finish_turn");
+
 type TodoParams = TodoSchema;
 type TodoSchema = typeof todoSchema.infer;
-/** A single todo op entry (the params object itself). */
-type TodoOpEntryValue = TodoParams;
+/** A state-only operation, also used by /todo without assistant turn control. */
+type TodoOpEntryValue = Omit<TodoParams, "finish_turn">;
 
 // =============================================================================
 // State helpers
@@ -716,6 +724,9 @@ export class TodoTool implements AgentTool<typeof todoSchema, TodoToolDetails> {
 	readonly summary = "Write a structured todo list to track progress within a session";
 	readonly description: string;
 	readonly parameters = todoSchema;
+	readonly validateRawArguments = (args: unknown): void => {
+		todoRawArgumentSchema.assert(args);
+	};
 	readonly concurrency = "exclusive";
 	readonly strict = true;
 	// Raw args reach execute() on schema failure; resolveTodoParams re-validates

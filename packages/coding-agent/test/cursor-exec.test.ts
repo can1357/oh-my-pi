@@ -1034,6 +1034,7 @@ describe("CursorExecHandlers argument validation", () => {
 	it("preserves a lenient todo tool's omitted-operation repair", async () => {
 		const { handlers, phases } = todoBridge();
 		const result = await mcp(handlers, "todo", {
+			finish_turn: false,
 			list: [{ phase: "Recovered", items: ["From Cursor"] }],
 			__rawJson: "metadata",
 		});

@@ -17,7 +17,7 @@ import type {
 	ToolTier,
 } from "@oh-my-pi/pi-agent-core";
 import type { CompactionResult } from "@oh-my-pi/pi-agent-core/compaction";
-import type { FetchImpl, Model, Static, TSchema } from "@oh-my-pi/pi-ai";
+import type { FetchImpl, Model, Static, Tool, TSchema } from "@oh-my-pi/pi-ai";
 import type { Component } from "@oh-my-pi/pi-tui";
 import type { NativeToolView, RenderResultOptions } from "@oh-my-pi/pi-tui/tools/renderer";
 import type { logger as PiLogger } from "@oh-my-pi/pi-utils";
@@ -201,6 +201,8 @@ export interface CustomTool<TParams extends TSchema = TSchema, TDetails = any> {
 	description: string;
 	/** Parameter schema (arktype, TypeBox, or legacy formats). */
 	parameters: TParams;
+	/** Reject raw arguments before shared normalization or coercion. */
+	validateRawArguments?: Tool["validateRawArguments"];
 	/** If true, tool is excluded unless explicitly listed in --tools or agent's tools field */
 	hidden?: boolean;
 	/** How this tool is presented when enabled. See {@link ToolLoadMode}. Custom tools default to `"discoverable"`; set `"essential"` to stay top-level. */

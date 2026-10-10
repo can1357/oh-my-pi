@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added optional `Tool.validateRawArguments` to validate raw tool arguments before normalization or coercion ([#15204](https://github.com/can1357/oh-my-pi/pull/15204) by [@DCDYSMRZ](https://github.com/DCDYSMRZ)).
+
 ## [18.8.7] - 2026-10-09
 
 ### Added

@@ -241,6 +241,7 @@ import {
 } from "../tools/resolve";
 import { PROPOSE_DEVICE_NAME } from "@oh-my-pi/pi-tui/tools/resolve";
 import { supportsExternalThinking } from "../tools/think";
+import { committedTodoPhases } from "../tools/todo";
 import type { TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import type { WorkPoolYieldItem } from "../task/workpool-yield";
@@ -1114,6 +1115,7 @@ export class AgentSession implements SettingsScope {
 	 */
 	#yieldTerminationPending = false;
 	#synchronouslyTerminatedYieldToolCallIds = new Set<string>();
+	#finishedTodoMessages = new WeakSet<AssistantMessage>();
 	#providerSessionState = new Map<string, ProviderSessionState>();
 	readonly #cacheWarmer: CacheWarmer | undefined;
 	#hindsightSessionState: HindsightSessionState | undefined = undefined;
@@ -1916,6 +1918,13 @@ export class AgentSession implements SettingsScope {
 		this.agent.setRawSseEventInterceptor(this.#onSseEvent);
 		this.agent.setOnTurnEnd(async (messages, signal, context) => {
 			if (signal?.aborted) return;
+			if (context?.message.role === "assistant" && this.#shouldFinishTodoTurn(context)) {
+				context.willContinue = false;
+				this.#finishedTodoMessages.add(context.message);
+				// Replayed calls have no assistant message_end; retain their original
+				// message for settle without publishing or persisting it again.
+				this.#lastAssistantMessage ??= context.message;
+			}
 			const rewindReport = this.#extractRewindReport(messages);
 			if (rewindReport) {
 				this.#pendingRewindReport = undefined;
@@ -3764,6 +3773,7 @@ export class AgentSession implements SettingsScope {
 		// turn: state-based lookups take over again.
 		if (event.type === "agent_start") {
 			this.#activeAgentPromptGeneration = eventPromptGeneration;
+			this.#lastAssistantMessage = undefined;
 			this.#prunedTerminalFailure = undefined;
 			this.#advisors.onPrimaryAgentStart();
 			this.#emitRunState("running");
@@ -4156,6 +4166,12 @@ export class AgentSession implements SettingsScope {
 				(message): message is AssistantMessage => message.role === "assistant",
 			);
 			const msg = this.#lastAssistantMessage ?? fallbackAssistant;
+			// message_end publishes a snapshot, while onTurnEnd and agent_end retain
+			// the loop's original message. Match finality against that original, not
+			// the display/persistence snapshot selected above for maintenance.
+			const finishedTodoAssistant = fallbackAssistant ?? msg;
+			const finishedTodoTurn =
+				finishedTodoAssistant !== undefined && this.#finishedTodoMessages.has(finishedTodoAssistant);
 			this.#lastAssistantMessage = undefined;
 			if (!msg) {
 				this.#lastSuccessfulYieldToolCallId = undefined;
@@ -4456,13 +4472,11 @@ export class AgentSession implements SettingsScope {
 				await this.#recovery.persistTerminalEmptyErrorTurn(msg);
 			}
 			await this.#recovery.onErrorSettledWithoutRetry(msg, compactionResult);
-			// Stop-time todo reconciliation only fires at a text-only final stop. A run
-			// that ends still mid-tool-use (deadline hit, context full, etc.) skips the
-			// reminder so we don't pile a follow-up onto an already in-flight turn.
-			// Mid-run sync is handled separately via #takeMidRunTodoNudge so a long
-			// tool-use loop still gets prodded to keep the live HUD honest (issue #3651).
+			// A successful final Todo batch uses the normal stop maintenance path.
+			// Other tool-use endings (deadline, context full, etc.) remain mid-work;
+			// their reminders are handled by the mid-run Todo nudge instead.
 			const hasToolCalls = msg.content.some(content => content.type === "toolCall");
-			if (hasToolCalls) {
+			if (hasToolCalls && !finishedTodoTurn) {
 				await emitAgentEndNotification();
 				return;
 			}
@@ -4866,6 +4880,34 @@ export class AgentSession implements SettingsScope {
 			}
 			break;
 		}
+	}
+
+	#shouldFinishTodoTurn(context: AgentTurnEndContext): boolean {
+		const { message, toolResults, additionalMessages } = context;
+		if (message.role !== "assistant" || additionalMessages?.length) return false;
+		if (!message.content.some(part => part.type === "text" && part.text.trim().length > 0)) return false;
+		const calls = message.content.filter(part => part.type === "toolCall");
+		if (calls.length === 0 || calls.length !== toolResults.length) return false;
+		const results = new Map(toolResults.map(result => [result.toolCallId, result]));
+		let finishRequested = false;
+		for (const call of calls) {
+			if (call.name !== "todo" || !isRecord(call.arguments) || typeof call.arguments.finish_turn !== "boolean") {
+				return false;
+			}
+			const result = results.get(call.id);
+			if (
+				!result ||
+				result.toolName !== "todo" ||
+				!isRecord(result.details) ||
+				typeof result.details.op !== "string" ||
+				!committedTodoPhases(result)
+			) {
+				return false;
+			}
+			results.delete(call.id);
+			finishRequested ||= call.arguments.finish_turn;
+		}
+		return finishRequested;
 	}
 
 	#afterToolCall(ctx: AfterToolCallContext): AfterToolCallResult | undefined {

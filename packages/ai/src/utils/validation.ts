@@ -2006,6 +2006,13 @@ export function validateToolArguments(tool: Tool, toolCall: ToolCall): ToolCall[
 			`Validation failed for tool "${toolCall.name}": Tool call arguments are not valid JSON.\nParse Error: ${parseError}\nRaw JSON:\n${truncatedRawJson}`,
 		);
 	}
+	try {
+		tool.validateRawArguments?.(originalArgs);
+	} catch (error) {
+		throw new AIError.ValidationError(
+			`Validation failed for tool "${toolCall.name}": ${error instanceof Error ? error.message : String(error)}`,
+		);
+	}
 	const ctx = getValidationContext(tool);
 	const { json } = ctx;
 

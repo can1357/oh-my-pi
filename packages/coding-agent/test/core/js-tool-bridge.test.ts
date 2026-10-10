@@ -130,6 +130,7 @@ describe("callSessionTool", () => {
 			"todo",
 			{
 				op: "done",
+				finish_turn: false,
 				phase: "Regression",
 				list: null,
 				task: null,
@@ -689,6 +690,7 @@ describe("callSessionTool", () => {
 		const result = await callSessionTool(
 			"todo",
 			{
+				finish_turn: false,
 				list: [{ phase: "Recovered", items: ["From malformed JSON"] }],
 				__parseError: "Unexpected token",
 				__rawJson: '{"list": [broken}',
@@ -701,6 +703,82 @@ describe("callSessionTool", () => {
 			{ name: "Recovered", tasks: [{ content: "From malformed JSON", status: "in_progress" }] },
 		]);
 	});
+
+	for (const [label, flag] of [
+		["omitted", {}],
+		["undefined", { finish_turn: undefined }],
+		["null", { finish_turn: null }],
+		["string false", { finish_turn: "false" }],
+		["string true", { finish_turn: "true" }],
+		["number", { finish_turn: 1 }],
+		["array", { finish_turn: [] }],
+		["object", { finish_turn: {} }],
+	] as const) {
+		it(`rejects ${label} Todo finish_turn through the bridge without mutating or persisting`, async () => {
+			const initial: TodoPhase[] = [{ name: "Work", tasks: [{ content: "Keep", status: "pending" }] }];
+			const cases: Array<[Record<string, unknown>, TodoPhase[]]> = [
+				[{ op: "done", task: "Keep" }, initial],
+				[{ op: "view" }, initial],
+				[{ list: [{ phase: "Replacement", items: ["New"] }], __parseError: "Unexpected token" }, initial],
+				[{ phase: "Work", items: ["New"] }, initial],
+				[{ items: ["New"] }, []],
+			];
+			for (const [operation, initialPhases] of cases) {
+				const expected = structuredClone(initialPhases);
+				let phases = initialPhases;
+				const setTodoPhases = vi.fn((next: TodoPhase[]) => {
+					phases = next;
+				});
+				const persistTodoPhases = vi.fn();
+				const session: ToolSession = {
+					...createSession([]),
+					getTodoPhases: () => phases,
+					setTodoPhases,
+					persistTodoPhases,
+					getToolByName: name => (name === "todo" ? (todoTool as unknown as AgentTool) : undefined),
+				};
+				const todoTool = new TodoTool(session);
+				const result = await callSessionTool("todo", { ...operation, ...flag }, { session });
+				expect(result).toMatchObject({
+					hasError: true,
+					text: expect.stringContaining("finish_turn"),
+					details: { phases: expected },
+				});
+				expect(phases).toEqual(expected);
+				expect(setTodoPhases).not.toHaveBeenCalled();
+				expect(persistTodoPhases).not.toHaveBeenCalled();
+			}
+		});
+	}
+
+	for (const finish_turn of [false, true]) {
+		it(`accepts finish_turn=${finish_turn} through omitted-op recovery and persists only Todo state`, async () => {
+			let phases: TodoPhase[] = [];
+			const persisted: TodoPhase[][] = [];
+			const session: ToolSession = {
+				...createSession([]),
+				getTodoPhases: () => phases,
+				setTodoPhases: next => {
+					phases = next;
+				},
+				persistTodoPhases: next => persisted.push(next),
+				getToolByName: name => (name === "todo" ? (todoTool as unknown as AgentTool) : undefined),
+			};
+			const todoTool = new TodoTool(session);
+			const result = await callSessionTool(
+				"todo",
+				{ list: [{ phase: "Work", items: ["Keep open"] }], finish_turn },
+				{ session },
+			);
+			const expected: TodoPhase[] = [{ name: "Work", tasks: [{ content: "Keep open", status: "in_progress" }] }];
+			expect(result).toEqual({
+				text: expect.any(String),
+				details: { op: "init", storage: "memory", phases: expected },
+			});
+			expect(phases).toEqual(expected);
+			expect(persisted).toEqual([expected]);
+		});
+	}
 
 	it("persists bridged todo mutations to the branch, which a direct toolResult would carry", async () => {
 		let phases: TodoPhase[] = [{ name: "Ship", tasks: [{ content: "Persist", status: "in_progress" }] }];
@@ -716,12 +794,12 @@ describe("callSessionTool", () => {
 		};
 		const todoTool = new TodoTool(session);
 
-		await callSessionTool("todo", { op: "done", task: "Persist" }, { session });
+		await callSessionTool("todo", { op: "done", task: "Persist", finish_turn: false }, { session });
 		expect(persisted).toEqual([[{ name: "Ship", tasks: [{ content: "Persist", status: "completed" }] }]]);
 
 		// Reads and rejected batches leave the branch untouched.
-		await callSessionTool("todo", { op: "view" }, { session });
-		await callSessionTool("todo", { op: "done", task: "No such task" }, { session });
+		await callSessionTool("todo", { op: "view", finish_turn: false }, { session });
+		await callSessionTool("todo", { op: "done", task: "No such task", finish_turn: false }, { session });
 		expect(persisted).toHaveLength(1);
 	});
 
@@ -748,10 +826,14 @@ describe("callSessionTool", () => {
 
 		await callSessionTool(
 			"todo",
-			{ op: "done", task: "Task 0" },
+			{ op: "done", task: "Task 0", finish_turn: false },
 			{ session, emitStatus: event => statuses.push(event) },
 		);
-		await callSessionTool("todo", { op: "view" }, { session, emitStatus: event => statuses.push(event) });
+		await callSessionTool(
+			"todo",
+			{ op: "view", finish_turn: false },
+			{ session, emitStatus: event => statuses.push(event) },
+		);
 
 		expect(phases[0]?.tasks[0]?.status).toBe("completed");
 		expect(statuses.map(event => event.committed)).toEqual([true, false]);

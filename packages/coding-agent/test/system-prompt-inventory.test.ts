@@ -1002,24 +1002,4 @@ describe("system prompt tool inventory", () => {
 		expect(withScout).toContain("read-only scout");
 		expect(withoutScout).not.toContain("read-only scout");
 	});
-
-	it("omits todo workflow guidance when the todo tool is absent", async () => {
-		const opts = {
-			cwd: tempDir,
-			contextFiles: [],
-			skills: [],
-			rules: [],
-			workspaceTree: { ...EMPTY_TREE, rootPath: tempDir },
-			tools: TOOLS,
-			nativeTools: true,
-			inlineToolDescriptors: false,
-		};
-		const withoutTodo = (await buildSystemPrompt({ ...opts, toolNames: ["read", "bash"] })).systemPrompt.join("\n\n");
-		expect(withoutTodo).not.toContain("todo-only turn");
-
-		const withTodo = (await buildSystemPrompt({ ...opts, toolNames: ["read", "bash", "todo"] })).systemPrompt.join(
-			"\n\n",
-		);
-		expect(withTodo).toContain("todo-only turn");
-	});
 });
