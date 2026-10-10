@@ -166,6 +166,9 @@
 - Fixed the Space key in the Git diff pane so it stages or unstages the focused hunk instead of scrolling or acting on the wrong change.
 - Fixed the BTW history sheet in Tern: the history list no longer collapses beside a long answer, the panes lose their foldable `##` headings, and the arrow/page keys scroll the answer ([#14331](https://github.com/can1357/oh-my-pi/pull/14331) by [@H4vC](https://github.com/H4vC))
 - Fixed a single saved side question in the BTW history panel opening on its one-row list: its answer now has focus, and Enter or `f` to follow up jumps to the bottom of the conversation ([#14331](https://github.com/can1357/oh-my-pi/pull/14331) by [@H4vC](https://github.com/H4vC))
+### Fixed
+
+- Fixed `@` file autocomplete freezing indefinitely when the project contains a symlink into a large tree. The native walk followed symlinks at unbounded depth with no deadline, and the editor restarts the request per keystroke, so it never settled and the popup stayed on its interim listing; the walk is now bounded at 1.5 s and degrades to the immediate-directory listing, the same fallback the outside-cwd path already uses ([#12317](https://github.com/can1357/oh-my-pi/issues/12317)).
 
 ## [18.6.0] - 2026-10-03
 

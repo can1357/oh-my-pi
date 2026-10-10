@@ -14,6 +14,11 @@ const PATH_DELIMITERS = new Set([" ", "\t", '"', "'", "="]);
  */
 const AT_PARTIAL_DELAY_MS = 150;
 
+/**
+ * Without a deadline the native walk follows symlinks at unbounded depth and never returns.
+ */
+const AT_FUZZY_TIMEOUT_MS = 1_500;
+
 function buildAutocompleteFuzzyDiscoveryProfile(
 	query: string,
 	basePath: string,
@@ -25,6 +30,7 @@ function buildAutocompleteFuzzyDiscoveryProfile(
 	hidden: boolean;
 	gitignore: boolean;
 	cache: boolean;
+	timeoutMs: number;
 	signal?: AbortSignal;
 } {
 	return {
@@ -34,6 +40,7 @@ function buildAutocompleteFuzzyDiscoveryProfile(
 		hidden: true,
 		gitignore: true,
 		cache: true,
+		timeoutMs: AT_FUZZY_TIMEOUT_MS,
 		...(signal ? { signal } : {}),
 	};
 }
