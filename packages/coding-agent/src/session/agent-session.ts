@@ -62,7 +62,6 @@ import type {
 	Message,
 	MessageAttribution,
 	Model,
-	OAuthAccountIdentity,
 	ProviderResponseMetadata,
 	ProviderSessionState,
 	ResetCreditAccountStatus,
@@ -94,7 +93,6 @@ import {
 	escapeXmlText,
 	formatDuration,
 	getAgentDbPath,
-	isEnoent,
 	isBunTestRuntime,
 	isInteractiveHost,
 	isRecord,
@@ -105,7 +103,6 @@ import {
 	stringProperty,
 	toError,
 	withTimeout,
-	withFileLock,
 } from "@oh-my-pi/pi-utils";
 import { writeArchive } from "@oh-my-pi/pi-utils/ar";
 import type { AdvisorConfig } from "@oh-my-pi/pi-tui/overlays/advisor-config";
@@ -304,6 +301,15 @@ import {
 	type AsyncResultEntry,
 	buildAsyncResultBatchMessage,
 } from "./async-job-delivery";
+import {
+	adoptRecentReset,
+	type AutoResetHost,
+	executeResetActions,
+	planClaudeResets,
+	planCodexResets,
+	sweepResets,
+	sweepsResets,
+} from "./auto-reset";
 import { BashRunner, type BashRunnerHost } from "./bash-runner";
 import {
 	checkpointStartedAtFromEntry,
@@ -312,25 +318,13 @@ import {
 	semanticToolResult,
 } from "./checkpoint-entries";
 import type { ClientBridge } from "./client-bridge";
-import {
-	type ClaudeResetAction,
-	type ClaudeResetPlan,
-	claudeResetStatusesFromReports,
-	planClaudeResetRedemptions,
-} from "./claude-auto-reset";
+import type { ClaudeResetAction } from "./claude-auto-reset";
 import {
 	type CodexAutoRedeemCoordinator,
 	type CodexResetAction,
-	type CodexResetPlan,
-	type CodexResetTrigger,
 	type ResetRecoveryResult,
-	ATTEMPT_COOLDOWN_MS,
-	resetAccountLockKey,
 	defaultCodexAutoRedeemCoordinator,
-	isTerminalRedeemOutcome,
 	overlayLiveResetCredits,
-	planCodexResetRedemptions,
-	REDEEM_RETRY_DEFER_MS,
 	SWEEP_MIN_INTERVAL_MS,
 	shouldEvaluateCodexAutoRedeem,
 	shouldPromptCodexAutoRedeem,
@@ -12584,278 +12578,19 @@ export class AgentSession implements SettingsScope {
 		return false;
 	}
 
-	#planCodexResets(
-		trigger: CodexResetTrigger,
-		reports: UsageReport[] | null,
-		identity: OAuthAccountIdentity | undefined,
-		coordinator: CodexAutoRedeemCoordinator,
-		activeBlockUnblockAtMs?: number,
-	): CodexResetPlan {
-		const cfg = cfgCodexResets.get(this.settings);
-		const model = this.model;
-		const plan = planCodexResetRedemptions({
-			nowMs: Date.now(),
-			trigger,
-			provider: model?.provider ?? "",
-			modelId: model?.id ?? "",
-			settings: {
-				enabled: shouldEvaluateCodexAutoRedeem(cfg.autoRedeem),
-				minBlockedMinutes: Math.max(0, cfg.minBlockedMinutes),
-				keepCredits: Math.max(0, Math.trunc(cfg.keepCredits)),
-				salvageHorizonMs: Math.max(0, cfg.salvageHorizonHours) * 3_600_000,
-			},
-			identity,
-			reports,
-			attemptedKeys: coordinator.attemptedKeys,
-			deferredUntilByKey: coordinator.deferredUntilByKey,
-			lastAttemptAtByAccount: coordinator.lastAttemptAtByAccount,
-			activeBlockUnblockAtMs,
-		});
-		if (plan.skipped.length > 0) {
-			logger.debug("codex-auto-reset: plan", { trigger, actions: plan.actions.length, skipped: plan.skipped });
-		}
-		return plan;
-	}
-
-	#planClaudeResets(
-		trigger: CodexResetTrigger,
-		reports: UsageReport[] | null,
-		statuses: readonly ResetCreditAccountStatus[],
-		coordinator: CodexAutoRedeemCoordinator,
-		activeBlockUnblockAtMs?: number,
-	): ClaudeResetPlan {
-		const cfg = cfgClaudeResets.get(this.settings);
-		const model = this.model;
-		const plan = planClaudeResetRedemptions({
-			nowMs: Date.now(),
-			trigger,
-			provider: model?.provider ?? "",
-			modelId: model?.provider === "anthropic" ? model.id : "",
-			settings: {
-				enabled: shouldEvaluateCodexAutoRedeem(cfg.autoRedeem),
-				minBlockedMinutes: Math.max(0, cfg.minBlockedMinutes),
-				keepCredits: Math.max(0, Math.trunc(cfg.keepCredits)),
-				salvageHorizonMs: Math.max(0, cfg.salvageHorizonHours) * 3_600_000,
-			},
-			reports,
-			statuses,
-			attemptedKeys: coordinator.attemptedKeys,
-			deferredUntilByKey: coordinator.deferredUntilByKey,
-			lastAttemptAtByAccount: coordinator.lastAttemptAtByAccount,
-			activeBlockUnblockAtMs,
-		});
-		if (plan.skipped.length > 0) {
-			logger.debug("claude-auto-reset: plan", { trigger, actions: plan.actions.length, skipped: plan.skipped });
-		}
-		return plan;
-	}
-
-	#resetLockPath(lockKey: string, coordinator: CodexAutoRedeemCoordinator): string {
-		return `${coordinator.resetLockPath ?? getAgentDbPath()}.reset-${Bun.hash(lockKey).toString(16)}`;
-	}
-
-	async #readResetMarker(lockPath: string): Promise<{ state: string; atMs: number }> {
-		let text: string;
-		try {
-			text = await Bun.file(lockPath).text();
-		} catch (error) {
-			if (!isEnoent(error)) throw error;
-			text = "";
-		}
-		const [state, timestamp] = text.split(":");
-		return { state, atMs: Number(timestamp) };
-	}
-
-	#adoptResetMarker(lockKey: string, marker: { state: string; atMs: number }): boolean {
-		if (
-			marker.state !== "reset" ||
-			!Number.isFinite(marker.atMs) ||
-			Date.now() - marker.atMs >= ATTEMPT_COOLDOWN_MS ||
-			marker.atMs <= (this.#adoptedResetMarkers.get(lockKey) ?? 0)
-		) {
-			return false;
-		}
-		this.#adoptedResetMarkers.set(lockKey, marker.atMs);
-		return true;
-	}
-
-	async #adoptRecentReset(
-		statuses: readonly ResetCreditAccountStatus[],
-		coordinator: CodexAutoRedeemCoordinator,
-	): Promise<boolean> {
-		for (const status of statuses) {
-			if (status.provider !== this.model?.provider) continue;
-			const lockKey = resetAccountLockKey(status);
-			if (!lockKey) continue;
-			const lockPath = this.#resetLockPath(lockKey, coordinator);
-			await fs.promises.mkdir(path.dirname(lockPath), { recursive: true });
-			const adopted = await withFileLock(
-				lockPath,
-				async () => this.#adoptResetMarker(lockKey, await this.#readResetMarker(lockPath)),
-				{ retries: 300, retryDelayMs: 100 },
-			);
-			if (adopted) {
-				await this.#modelRegistry.authStorage.credentials.revalidate();
-				return true;
-			}
-		}
-		return false;
-	}
-
-	/**
-	 * Shared consume executor for Codex and Claude plans. Attempt keys enter the
-	 * process-wide set before mutation, while nonterminal outcomes release and
-	 * defer the episode so a still-banked grant is not buried permanently.
-	 */
-	async #executeResetActions(
-		provider: "openai-codex" | "anthropic",
-		actions: (CodexResetAction | ClaudeResetAction)[],
-		coordinator: CodexAutoRedeemCoordinator,
-	): Promise<number> {
-		const authStorage = this.#modelRegistry.authStorage;
-		const providerLabel = provider === "anthropic" ? "Claude" : "Codex";
-		const source = provider === "anthropic" ? "claude-auto-reset" : "codex-auto-reset";
-		let redeemed = 0;
-		for (const action of actions) {
-			if (coordinator.attemptedKeys.has(action.attemptKey)) continue;
-			coordinator.attemptedKeys.add(action.attemptKey);
-			coordinator.lastAttemptAtByAccount.set(action.accountKey, Date.now());
-			let outcome: ResetCreditRedeemOutcome | undefined;
-			let sharedReset = false;
-			try {
-				const redeemOptions = {
-					target: action.target,
-					baseUrlResolver: (candidate: string) => this.#modelRegistry.getProviderBaseUrl?.(candidate),
-					// Caller cancellation must not leave an ambiguous consume in flight.
-					signal: AbortSignal.timeout(15_000),
-				};
-				const lockKey = resetAccountLockKey(action.target);
-				if (!lockKey) {
-					// An account without an upstream identity cannot share a cross-process fence.
-					outcome = await authStorage.resets.redeem(redeemOptions);
-				} else {
-					// The coordinator is process-local. Fence concurrent processes and
-					// remember a recent attempt so a late 429 cannot spend again.
-					const lockPath = this.#resetLockPath(lockKey, coordinator);
-					await fs.promises.mkdir(path.dirname(lockPath), { recursive: true });
-					outcome = await withFileLock(
-						lockPath,
-						async () => {
-							const marker = await this.#readResetMarker(lockPath);
-							if (Date.now() - marker.atMs < ATTEMPT_COOLDOWN_MS) {
-								sharedReset = this.#adoptResetMarker(lockKey, marker);
-								if (sharedReset) await authStorage.credentials.revalidate();
-								return undefined;
-							}
-							// Claude's redeem revalidates its exact offer. Codex needs its
-							// balance rechecked after acquiring the cross-process fence.
-							if (provider === "openai-codex") {
-								const statuses = await this.listResetCredits(AbortSignal.timeout(10_000), provider);
-								const live = statuses.find(
-									status => status.credentialId === action.target.credentialId && !status.error,
-								);
-								if (!live) {
-									return {
-										ok: false,
-										code: "credit_list_failed",
-										provider,
-									} satisfies ResetCreditRedeemOutcome;
-								}
-								if (action.availableCount !== undefined && live.availableCount < action.availableCount) {
-									return undefined;
-								}
-								if (live.availableCount < 1) {
-									return { ok: false, code: "no_credit", provider } satisfies ResetCreditRedeemOutcome;
-								}
-							}
-							const attemptedAt = Date.now();
-							await Bun.write(lockPath, `pending:${attemptedAt}`);
-							const result = await authStorage.resets.redeem(redeemOptions);
-							if (result.code === "reset") {
-								await Bun.write(lockPath, `reset:${attemptedAt}`);
-								this.#adoptedResetMarkers.set(lockKey, attemptedAt);
-							} else if (result.code === "no_credit" || result.code === "nothing_to_reset") {
-								await Bun.write(lockPath, "");
-							}
-							return result;
-						},
-						{ retries: 300, retryDelayMs: 100 },
-					);
-				}
-			} catch (error) {
-				coordinator.attemptedKeys.delete(action.attemptKey);
-				coordinator.deferredUntilByKey.set(action.attemptKey, Date.now() + REDEEM_RETRY_DEFER_MS);
-				logger.warn(`${source}: redeem threw, deferred`, {
-					account: action.accountKey,
-					error: String(error),
-				});
-				continue;
-			}
-			if (!outcome) {
-				if (sharedReset) redeemed++;
-				continue;
-			}
-			if (!isTerminalRedeemOutcome(outcome.code)) {
-				coordinator.attemptedKeys.delete(action.attemptKey);
-				coordinator.deferredUntilByKey.set(action.attemptKey, Date.now() + REDEEM_RETRY_DEFER_MS);
-			}
-			switch (outcome.code) {
-				case "reset": {
-					redeemed++;
-					const left =
-						action.availableCount === undefined ? undefined : ` (${Math.max(0, action.availableCount - 1)} left)`;
-					const detail =
-						action.reason === "expiring-credit"
-							? `it was set to expire in ${formatDuration(action.expiresInMs ?? 0)}`
-							: outcome.cleared?.length
-								? `cleared ${outcome.cleared.map(formatUsageResetWindow).join(" + ")}; retrying now`
-								: "retrying now";
-					this.emitNotice(
-						"info",
-						`Auto-redeemed a saved ${providerLabel} rate-limit reset for ${action.label}${left ?? ""}; ${detail}.`,
-						source,
-					);
-					break;
-				}
-				case "already_redeemed":
-					this.emitNotice(
-						"warning",
-						`A saved ${providerLabel} reset for ${action.label} was already redeemed elsewhere.`,
-						source,
-					);
-					break;
-				case "no_credit":
-					logger.debug(`${source}: no_credit (snapshot/live mismatch)`, { account: action.accountKey });
-					break;
-				case "nothing_to_reset":
-					if (action.reason === "blocked-account") {
-						this.emitNotice(
-							"warning",
-							`${providerLabel} reset for ${action.label} reported nothing to reset; will retry later.`,
-							source,
-						);
-					} else {
-						logger.debug(`${source}: nothing_to_reset deferred`, { account: action.accountKey });
-					}
-					break;
-				default:
-					if (action.reason === "blocked-account") {
-						this.emitNotice(
-							"warning",
-							`${providerLabel} auto-redeem for ${action.label} failed (${outcome.code}); will retry later.`,
-							source,
-						);
-					} else {
-						logger.warn(`${source}: consume failed, deferred`, {
-							account: action.accountKey,
-							code: outcome.code,
-						});
-					}
-					break;
-			}
-		}
-		if (redeemed > 0) void this.fetchUsageReports();
-		return redeemed;
+	get #autoResetHost(): AutoResetHost {
+		return {
+			authStorage: this.#modelRegistry.authStorage,
+			settings: this.settings,
+			sessionId: this.sessionId,
+			model: this.model,
+			baseUrlResolver: provider => this.#modelRegistry.getProviderBaseUrl?.(provider),
+			notice: (level, message, source) => this.emitNotice(level, message, source),
+			adoptedResetMarkers: this.#adoptedResetMarkers,
+			confirm: async (provider, actions, coordinator) =>
+				(await this.#confirmAutoRedeem(provider, actions, coordinator)) ? actions : [],
+			onRedeemed: () => void this.fetchUsageReports(),
+		};
 	}
 
 	async #maybeAutoRedeemReset(activeBlockUnblockAtMs?: number): Promise<ResetRecoveryResult> {
@@ -12881,10 +12616,12 @@ export class AgentSession implements SettingsScope {
 			// Claude's live reset listing includes the same response's quota
 			// windows; a second broker usage poll adds no evidence and can 429.
 			const statuses = await this.listResetCredits(AbortSignal.timeout(10_000), provider);
+			const host = this.#autoResetHost;
 			const plan =
 				provider === "anthropic"
-					? this.#planClaudeResets("blocked", reports, statuses, coordinator, activeBlockUnblockAtMs)
-					: this.#planCodexResets(
+					? planClaudeResets(host, "blocked", reports, statuses, coordinator, activeBlockUnblockAtMs)
+					: planCodexResets(
+							host,
 							"blocked",
 							overlayLiveResetCredits(reports, statuses, { synthesizeActive: true, nowMs: Date.now() }),
 							identity,
@@ -12892,7 +12629,7 @@ export class AgentSession implements SettingsScope {
 							activeBlockUnblockAtMs,
 						);
 			if (plan.actions.length === 0) {
-				if (await this.#adoptRecentReset(statuses, coordinator)) return { restored: true };
+				if (await adoptRecentReset(host, statuses, coordinator)) return { restored: true };
 				let retryAfterMs: number | undefined;
 				if (provider === "anthropic" && cfg.autoRedeem === "yes") {
 					for (const status of statuses) {
@@ -12910,7 +12647,7 @@ export class AgentSession implements SettingsScope {
 			) {
 				return { restored: false };
 			}
-			return { restored: (await this.#executeResetActions(provider, plan.actions, coordinator)) > 0 };
+			return { restored: (await executeResetActions(host, provider, plan.actions, coordinator)) > 0 };
 		})()
 			.catch((error): ResetRecoveryResult => {
 				logger.warn("auto-reset: blocked pass failed", { provider, account: accountKey, error: String(error) });
@@ -12922,62 +12659,23 @@ export class AgentSession implements SettingsScope {
 	}
 
 	/**
-	 * One process-wide salvage sweep handles both providers, but plans and asks
-	 * consent independently. Last-chance expiry checks remain active even with
-	 * the broader salvage horizon disabled. Codex candidates are refreshed through
-	 * a live listing before spend; Claude plans from the reset inventory in the
-	 * usage reports, and redeem re-lists the chosen account live before spending.
+	 * One process-wide salvage sweep handles both providers; {@link sweepResets}
+	 * plans and asks consent for each independently.
 	 */
 	#maybeScheduleResetSweep(reports: UsageReport[]): void {
 		const coordinator = this.#resetCoordinator;
-		const codexCfg = cfgCodexResets.get(this.settings);
-		const claudeCfg = cfgClaudeResets.get(this.settings);
-		const codexEnabled =
-			shouldEvaluateCodexAutoRedeem(codexCfg.autoRedeem) &&
-			reports.some(report => report.provider === "openai-codex");
-		const claudeEnabled =
-			shouldEvaluateCodexAutoRedeem(claudeCfg.autoRedeem) && reports.some(report => report.provider === "anthropic");
-		if (!codexEnabled && !claudeEnabled) return;
+		const host = this.#autoResetHost;
+		const due = (["openai-codex", "anthropic"] as const).some(
+			provider => sweepsResets(host, provider) && reports.some(report => report.provider === provider),
+		);
+		if (!due) return;
 		if (coordinator.sweepInFlight || coordinator.inFlightByAccount.size > 0) return;
 		const now = Date.now();
 		if (now - coordinator.lastSweepAt < SWEEP_MIN_INTERVAL_MS) return;
 		coordinator.sweepInFlight = true;
 		coordinator.lastSweepAt = now;
-		coordinator.sweepPromise = (async () => {
-			if (codexEnabled) {
-				try {
-					const statuses = await this.listResetCredits(AbortSignal.timeout(10_000), "openai-codex");
-					const effectiveReports = overlayLiveResetCredits(reports, statuses);
-					const identity = this.#modelRegistry.authStorage.oauth.identity("openai-codex", this.sessionId);
-					const plan = this.#planCodexResets("sweep", effectiveReports, identity, coordinator);
-					if (
-						plan.actions.length > 0 &&
-						(!shouldPromptCodexAutoRedeem(codexCfg.autoRedeem) ||
-							(await this.#confirmAutoRedeem("openai-codex", plan.actions, coordinator)))
-					) {
-						await this.#executeResetActions("openai-codex", plan.actions, coordinator);
-					}
-				} catch (error) {
-					logger.warn("codex-auto-reset: salvage listing failed", { error: String(error) });
-				}
-			}
-			if (claudeEnabled) {
-				try {
-					const accounts = this.#modelRegistry.authStorage.oauth.accounts("anthropic", this.sessionId);
-					const statuses = claudeResetStatusesFromReports(accounts, reports);
-					const plan = this.#planClaudeResets("sweep", reports, statuses, coordinator);
-					if (
-						plan.actions.length > 0 &&
-						(!shouldPromptCodexAutoRedeem(claudeCfg.autoRedeem) ||
-							(await this.#confirmAutoRedeem("anthropic", plan.actions, coordinator)))
-					) {
-						await this.#executeResetActions("anthropic", plan.actions, coordinator);
-					}
-				} catch (error) {
-					logger.warn("claude-auto-reset: salvage failed", { error: String(error) });
-				}
-			}
-		})()
+		coordinator.sweepPromise = sweepResets(host, reports, coordinator)
+			.then(() => {})
 			.catch(error => logger.warn("reset salvage sweep failed", { error: String(error) }))
 			.finally(() => {
 				coordinator.sweepInFlight = false;

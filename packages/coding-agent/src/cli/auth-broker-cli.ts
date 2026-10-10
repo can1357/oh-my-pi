@@ -2,7 +2,7 @@
  * `omp auth-broker` command handlers.
  *
  * Sub-verbs:
- *   - `serve [--bind=…] [--trust-proxy-headers]` — boots the broker against the local SQLite store.
+ *   - `serve [--bind=…] [--trust-proxy-headers]` — boots the broker against the local SQLite store and runs the saved-reset sweep.
  *   - `token` / `token --regenerate` — manages the bearer token file.
  *   - `login <provider> [--via=user@host]` — logs into a provider locally, or
  *     via SSH tunnel into a remote broker host.
@@ -37,7 +37,12 @@ import { setTransports as setLoggerTransports } from "@oh-my-pi/pi-utils/logger"
 import { $ } from "bun";
 import { refreshManagedMcpOAuthCredential } from "../mcp/oauth-credentials";
 import { isManagedMCPOAuthCredentialId, mcpOAuthServerUrlFromCredentialId } from "../mcp/oauth-flow";
-import { resolveAuthBrokerConfig } from "../session/auth-broker-config";
+import {
+	loadEffectiveAuthAccountPolicyConfig,
+	resolveAuthBrokerConfig,
+	resolveEffectiveSettings,
+} from "../session/auth-broker-config";
+import { BrokerResetSweeper } from "../session/broker-reset-sweep";
 import { pickIndex, pickOAuthProvider, runTerminalOAuthLogin } from "./oauth-terminal";
 import { generateToken, readTokenFile, writeTokenFile } from "./token-file";
 
@@ -155,8 +160,21 @@ async function runServe(flags: AuthBrokerCommandArgs["flags"]): Promise<void> {
 	logger.info("auth-broker listening", { url: handle.url });
 	logger.info("auth-broker bearer token loaded", { path: getTokenFilePath(), mode: "0600" });
 
+	// The broker spends saved resets under its own host's settings and account
+	// policies; a policy it cannot load could be an opt-out, so the sweep stays off.
+	let sweeper: BrokerResetSweeper | undefined;
+	try {
+		const settings = await resolveEffectiveSettings();
+		storage.setAccountPolicies(await loadEffectiveAuthAccountPolicyConfig({ settings }));
+		sweeper = new BrokerResetSweeper(storage, settings);
+		void sweeper.start();
+	} catch (error) {
+		logger.warn("auth-broker reset sweep disabled", { error: String(error) });
+	}
+
 	const shutdown = async (signal: NodeJS.Signals): Promise<void> => {
 		logger.info("auth-broker shutting down", { signal });
+		sweeper?.close();
 		await handle.close();
 		storage.close();
 		process.exit(0);

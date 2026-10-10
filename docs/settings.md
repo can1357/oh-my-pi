@@ -985,6 +985,8 @@ When a usage refresh detects an eligible banked reset expiring within the next *
 
 `salvageHorizonHours` controls earlier, usage-based salvage; setting it to `0` leaves the five-minute last-chance rule active. Set the provider's `autoRedeem` to `no` to disable all automatic spending.
 
+`omp auth-broker serve` runs the same sweep on the broker host's settings, so credits are salvaged while no session is open (see [Auth Broker](auth-broker-gateway.md#saved-reset-sweep)).
+
 ### Other groups
 
 Every schema path not individually tabulated in this catalog is explicitly deferred to `omp config list`. Additional groups include:

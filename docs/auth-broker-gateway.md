@@ -145,6 +145,12 @@ Capability-dependent responses include `Vary: OMP-Auth-Broker-Capabilities` so i
 
 The CLI broker refresh hook also handles managed `mcp_oauth:*` credentials using their stored MCP token endpoint/client metadata; it does not need to load the MCP manager.
 
+### Saved-reset sweep
+
+`serve` also spends saved Codex and Claude rate-limit resets so they are not lost while no session is open. It follows the broker host's own `codexResets.*` and `claudeResets.*` settings and `auth.accountPolicies` (loaded at start; restart the broker after changing them), with the same planner and executor a session uses. With no one to ask, `unset` spends only a credit expiring within 5 minutes; `yes` also salvages earlier; `no` turns that provider's sweep off. If the account policies fail to load, the sweep stays off and the broker logs `auth-broker reset sweep disabled`.
+
+The sweep runs at start, then hourly, and wakes early when a known credit enters its last 5 minutes (then once a minute until it is gone). Each run reads the broker's cached usage (the same reports `/v1/usage` serves) and lists Codex reset credits live; Claude credits come from the inventory in the usage reports, and redeem re-checks the offer live before spending.
+
 ## auth-gateway
 
 ### CLI
