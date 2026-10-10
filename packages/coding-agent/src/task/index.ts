@@ -1058,6 +1058,17 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		// oxlint-disable-next-line prefer-const -- read by buildAsyncDetails before assignment
 		let syncOutputPaths: string[] | undefined;
 		let syncProjectAgentsDir: string | null = null;
+		// The contract is static text: while an earlier spawn result carrying it is still in the live
+		// context (not compacted or pruned away), repeating it adds nothing.
+		const contractInContext =
+			this.session.sessionManager
+				?.buildSessionContext?.()
+				.messages.some(
+					message =>
+						message.role === "toolResult" &&
+						message.toolName === "task" &&
+						(message.details as TaskToolDetails | undefined)?.async?.contractDelivered === true,
+				) ?? false;
 		const buildAsyncDetails = (): TaskToolDetails => ({
 			projectAgentsDir: syncProjectAgentsDir,
 			results: [...syncResults],
@@ -1069,6 +1080,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				state: settledCount < asyncSpawns.length ? "running" : failedCount > 0 ? "failed" : "completed",
 				jobId: primaryJobId,
 				type: "task",
+				contractDelivered: contractInContext ? undefined : true,
 			},
 		});
 
@@ -1120,9 +1132,9 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			failedSchedules.length > 0
 				? ` Failed to schedule ${failedSchedules.length} spawn${failedSchedules.length === 1 ? "" : "s"}: ${failedSchedules.join("; ")}.`
 				: "";
-		const guidance = prompt
-			.render(taskAsyncContractTemplate, { ircEnabled, waitTool: hasWaitTool(this.session) })
-			.trim();
+		const guidance = contractInContext
+			? ""
+			: prompt.render(taskAsyncContractTemplate, { ircEnabled, waitTool: hasWaitTool(this.session) }).trim();
 		const renderSpawnFeedback = (mixed: boolean): string =>
 			prompt
 				.render(taskSpawnFeedbackTemplate, {

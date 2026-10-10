@@ -2518,6 +2518,8 @@ export interface TaskToolDetails {
 		state: "running" | "completed" | "failed";
 		jobId: string;
 		type: "task";
+		/** This result carried the async-task contract; later spawns skip it while this result stays in context. */
+		contractDelivered?: true;
 	};
 }
 

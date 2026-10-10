@@ -306,12 +306,11 @@ function applyLineCap(
 }
 
 function formatLines(lines: readonly RenderedLine[]): string {
-	const maxLabelLength = lines.reduce((max, line) => Math.max(max, line.label.length), 0);
 	return lines
 		.map(line => {
 			if (!line.age) return line.label;
-			const sizeColumn = (line.size ?? "").padEnd(8);
-			return `${line.label.padEnd(maxLabelLength + 2)}${sizeColumn}  ${line.age.padEnd(4)}`.trimEnd();
+			// Parenthesised metadata keeps entry names unambiguous without column padding.
+			return `${line.label} (${line.size ? `${line.size}, ` : ""}${line.age})`;
 		})
 		.join("\n");
 }
