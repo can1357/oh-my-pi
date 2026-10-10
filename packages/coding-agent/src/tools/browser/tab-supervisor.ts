@@ -215,6 +215,15 @@ const workerPageTargets = new WeakMap<WorkerHandle, string>();
 // same tab name so the existence check and `tabs.set` (separated by several
 // awaits) cannot interleave and leak a worker + browser refCount.
 const acquireChains = new Map<string, Promise<void>>();
+// Attached targets an in-flight open picked but has not yet published in
+// `tabs`, mapped to the opening tab's name. Opens of different names run
+// concurrently, so each pick must exclude these or two opens adopt one page.
+// `acquireChains` keeps one acquisition per name in flight, so an entry is
+// dropped by name once that acquisition settles.
+const reservedTargets = new Map<string, string>();
+// Per-browser pick chain: serializes attached-target selection and its
+// reservation so two picks never read the same snapshot.
+const targetPicks = new Map<string, Promise<void>>();
 const GRACE_MS = 750;
 // Cold-start guard for the worker's `setup` handshake (realm usable: puppeteer
 // loaded, browser connected, page acquired). On hosts where the worker's cold
@@ -309,7 +318,14 @@ export function acquireTab(name: string, browser: BrowserHandle, opts: AcquireTa
 	// run through a disconnected handle and leave the worker's page behind.
 	holdBrowser(browser);
 	const prior = acquireChains.get(name) ?? Promise.resolve();
-	const acquisition = prior.then(() => acquireTabImpl(name, browser, opts));
+	const acquisition = prior
+		.then(() => acquireTabImpl(name, browser, opts))
+		.finally(() => {
+			// Published tabs are excluded through `tabs`; failed opens free the page.
+			for (const [targetId, holder] of reservedTargets) {
+				if (holder === name) reservedTargets.delete(targetId);
+			}
+		});
 	const result = acquisition.then(
 		async value => {
 			await releaseBrowser(browser, { kill: false });
@@ -445,7 +461,7 @@ async function acquireTabImpl(
 	let initPayload: WorkerInitPayload;
 	let worker: WorkerHandle;
 	try {
-		initPayload = await buildInitPayload(browser, opts);
+		initPayload = await buildInitPayload(name, browser, opts);
 		worker = await spawnTabWorker();
 	} catch (error) {
 		// Failing before the worker took its own hold must release the
@@ -1496,7 +1512,11 @@ function sameAllowedDomains(left: readonly string[], right: readonly string[] | 
 	return left.every((domain, index) => domain === right[index]);
 }
 
-async function buildInitPayload(browser: PuppeteerBrowserHandle, opts: AcquireTabOptions): Promise<WorkerInitPayload> {
+async function buildInitPayload(
+	name: string,
+	browser: PuppeteerBrowserHandle,
+	opts: AcquireTabOptions,
+): Promise<WorkerInitPayload> {
 	const safeDir = getPuppeteerDir();
 	const browserWSEndpoint = browser.browser.wsEndpoint();
 	if (!browserWSEndpoint) throw new ToolError("Browser websocket endpoint is unavailable");
@@ -1522,20 +1542,32 @@ async function buildInitPayload(browser: PuppeteerBrowserHandle, opts: AcquireTa
 	// target may be backgrounded, so retain activation for target-correct pixels.
 	const userDriven = browser.kind.kind === "connected" || browser.kind.kind === "relay";
 	const activateForScreenshot = !userDriven || !shouldPreserveConnectedBrowserFocus(opts.target);
-	// Target ids are unique per Chromium instance, so a page held by any live
-	// tab worker is off limits even when another handle connected to it.
-	const bound = new Map<string, string>();
-	for (const tab of tabs.values()) {
-		if (tab.backend === "worker" && tab.state === "alive") bound.set(tab.targetId, tab.name);
+	const prior = targetPicks.get(browser.key) ?? Promise.resolve();
+	const { promise: picked, resolve: pickDone } = Promise.withResolvers<void>();
+	targetPicks.set(browser.key, picked);
+	let targetId: string;
+	try {
+		await prior;
+		// Target ids are unique per Chromium instance, so a page held by any live
+		// tab worker or reserved by an in-flight open is off limits even when
+		// another handle connected to it.
+		const bound = new Map(reservedTargets);
+		for (const tab of tabs.values()) {
+			if (tab.backend === "worker" && tab.state === "alive") bound.set(tab.targetId, tab.name);
+		}
+		const page = await pickElectronTarget(browser.browser, {
+			matcher: opts.target,
+			preferVisible: !activateForScreenshot,
+			relayJson: browser.kind.kind === "relay" ? browser.kind.cdpUrl : undefined,
+			bound,
+			signal: opts.signal,
+		});
+		targetId = await targetIdForTarget(page.target());
+		reservedTargets.set(targetId, name);
+	} finally {
+		pickDone();
+		if (targetPicks.get(browser.key) === picked) targetPicks.delete(browser.key);
 	}
-	const page = await pickElectronTarget(browser.browser, {
-		matcher: opts.target,
-		preferVisible: !activateForScreenshot,
-		relayJson: browser.kind.kind === "relay" ? browser.kind.cdpUrl : undefined,
-		bound,
-		signal: opts.signal,
-	});
-	const targetId = await targetIdForTarget(page.target());
 	return {
 		mode: "attach",
 		browserWSEndpoint,

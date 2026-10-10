@@ -601,86 +601,109 @@ describe("pickElectronTarget", () => {
 		30_000,
 	);
 
+	/** Headless Chromium on a free CDP port plus a browser-tool `invoke` and a page probe for named tabs. */
+	async function connectedChromium(label: string) {
+		const exe = await ensureChromiumExecutable();
+		if (!exe) throw new Error("Expected a Chromium executable");
+		const root = await fs.mkdtemp(path.join(os.tmpdir(), `omp-${label}-`));
+		const port = await findFreeCdpPort();
+		const cdpUrl = `http://127.0.0.1:${port}`;
+		const child = Bun.spawn(
+			[
+				exe,
+				"--headless=new",
+				"--no-sandbox",
+				"--no-first-run",
+				"--use-mock-keychain",
+				`--user-data-dir=${root}`,
+				`--remote-debugging-port=${port}`,
+			],
+			{ stdin: "ignore", stdout: "ignore", stderr: "ignore" },
+		);
+		const session = makeSession();
+		const prelude = createBrowserPrelude(session);
+		const invoke = (parameters: unknown) => prelude.invoke(parameters, { session, toolCallId: label });
+		const open = (name: string, url: string) => invoke({ action: "open", name, url, app: { cdp_url: cdpUrl } });
+		const pageOf = async (name: string) => {
+			const result = await invoke({
+				action: "run",
+				name,
+				code: "return { url: page.url(), id: page.target()._targetId };",
+			});
+			const details = result.details;
+			if (!details || typeof details !== "object" || !("value" in details)) throw new Error("run returned no value");
+			return details.value;
+		};
+		// Creating the page on the open's own connection guarantees that connection already knows it.
+		const newPage = async () => {
+			const attached = await acquireBrowser({ kind: "connected", cdpUrl }, { cwd: process.cwd() });
+			try {
+				if (!("browser" in attached)) throw new Error("Expected a Puppeteer browser");
+				await attached.browser.newPage();
+			} finally {
+				await releaseBrowser(attached, { kill: false });
+			}
+		};
+		const dispose = async (names: string[]) => {
+			for (const name of names) await invoke({ action: "close", name }).catch(() => {});
+			child.kill();
+			await child.exited;
+			await fs.rm(root, { recursive: true, force: true });
+		};
+		await waitForCdp(cdpUrl, 15_000);
+		return { open, pageOf, newPage, dispose };
+	}
+
 	test.skipIf(!CHROMIUM_AVAILABLE)(
 		"never binds a second named tab to the page another connected tab drives",
 		async () => {
-			const exe = await ensureChromiumExecutable();
-			if (!exe) throw new Error("Expected a Chromium executable");
-			const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-connected-two-tabs-"));
-			const port = await findFreeCdpPort();
-			const cdpUrl = `http://127.0.0.1:${port}`;
-			const child = Bun.spawn(
-				[
-					exe,
-					"--headless=new",
-					"--no-sandbox",
-					"--no-first-run",
-					"--use-mock-keychain",
-					`--user-data-dir=${root}`,
-					`--remote-debugging-port=${port}`,
-				],
-				{ stdin: "ignore", stdout: "ignore", stderr: "ignore" },
-			);
-			const session = makeSession();
-			const prelude = createBrowserPrelude(session);
-			const invoke = (parameters: unknown) =>
-				prelude.invoke(parameters, { session, toolCallId: "connected-two-tabs" });
+			const chromium = await connectedChromium("connected-two-tabs");
 			const first = `connected-first-${crypto.randomUUID()}`;
 			const second = `connected-second-${crypto.randomUUID()}`;
 			const firstUrl = "data:text/html,<title>First</title>";
-			const pageOf = async (name: string) => {
-				const result = await invoke({
-					action: "run",
-					name,
-					code: "return { url: page.url(), id: page.target()._targetId };",
-				});
-				const details = result.details;
-				if (!details || typeof details !== "object" || !("value" in details))
-					throw new Error("run returned no value");
-				return details.value;
-			};
+			const secondUrl = "data:text/html,<title>Second</title>";
 			try {
-				await waitForCdp(cdpUrl, 15_000);
-				await invoke({ action: "open", name: first, url: firstUrl, app: { cdp_url: cdpUrl } });
+				await chromium.open(first, firstUrl);
 
-				const refused = await rejectionOf(
-					invoke({
-						action: "open",
-						name: second,
-						url: "data:text/html,<title>Second</title>",
-						app: { cdp_url: cdpUrl },
-					}),
-				);
+				const refused = await rejectionOf(chromium.open(second, secondUrl));
 				expect(refused).toBeInstanceOf(Error);
 				expect((refused as Error).message).toContain(`already driven by tab ${JSON.stringify(first)}`);
-				expect(await pageOf(first)).toMatchObject({ url: firstUrl });
+				expect(await chromium.pageOf(first)).toMatchObject({ url: firstUrl });
 
-				// The open's own connection must already know the page, so create it there.
-				const attached = await acquireBrowser({ kind: "connected", cdpUrl }, { cwd: process.cwd() });
-				try {
-					if (!("browser" in attached)) throw new Error("Expected a Puppeteer browser");
-					await attached.browser.newPage();
-				} finally {
-					await releaseBrowser(attached, { kill: false });
-				}
-				await invoke({
-					action: "open",
-					name: second,
-					url: "data:text/html,<title>Second</title>",
-					app: { cdp_url: cdpUrl },
-				});
+				await chromium.newPage();
+				await chromium.open(second, secondUrl);
 
-				const firstPage = await pageOf(first);
-				const secondPage = await pageOf(second);
+				const firstPage = await chromium.pageOf(first);
+				const secondPage = await chromium.pageOf(second);
 				expect(firstPage).toMatchObject({ url: firstUrl });
-				expect(secondPage).toMatchObject({ url: "data:text/html,<title>Second</title>" });
+				expect(secondPage).toMatchObject({ url: secondUrl });
 				expect(secondPage).not.toEqual(firstPage);
 			} finally {
-				await invoke({ action: "close", name: second }).catch(() => {});
-				await invoke({ action: "close", name: first }).catch(() => {});
-				child.kill();
-				await child.exited;
-				await fs.rm(root, { recursive: true, force: true });
+				await chromium.dispose([second, first]);
+			}
+		},
+		30_000,
+	);
+
+	test.skipIf(!CHROMIUM_AVAILABLE)(
+		"gives concurrently opened connected tabs distinct pages",
+		async () => {
+			const chromium = await connectedChromium("connected-concurrent-tabs");
+			const first = `concurrent-first-${crypto.randomUUID()}`;
+			const second = `concurrent-second-${crypto.randomUUID()}`;
+			const firstUrl = "data:text/html,<title>First</title>";
+			const secondUrl = "data:text/html,<title>Second</title>";
+			try {
+				await chromium.newPage();
+				await Promise.all([chromium.open(first, firstUrl), chromium.open(second, secondUrl)]);
+
+				const firstPage = await chromium.pageOf(first);
+				const secondPage = await chromium.pageOf(second);
+				expect(firstPage).toMatchObject({ url: firstUrl });
+				expect(secondPage).toMatchObject({ url: secondUrl });
+				expect(secondPage).not.toEqual(firstPage);
+			} finally {
+				await chromium.dispose([second, first]);
 			}
 		},
 		30_000,
