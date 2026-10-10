@@ -505,15 +505,18 @@ export class VimState {
 			this.#replaceChar = false;
 			const count = this.#count.length > 0 ? Math.max(1, Number.parseInt(this.#count, 10)) : 1;
 			const line = buf.lines[buf.cursorLine] ?? "";
-			let end = buf.cursorCol;
-			for (let n = 0; n < count; n++) {
-				if (end >= line.length) {
-					this.#count = "";
-					return [];
+			// One segmenter pass: stepping with `nextGraphemeStart` would rescan the line per grapheme.
+			let end = -1;
+			let taken = 0;
+			for (const seg of segmenter.segment(line)) {
+				if (seg.index < buf.cursorCol) continue;
+				if (++taken === count) {
+					end = seg.index + seg.segment.length;
+					break;
 				}
-				end = nextGraphemeStart(line, end);
 			}
 			this.#count = "";
+			if (end < 0) return [];
 			return [
 				{
 					kind: "replace",

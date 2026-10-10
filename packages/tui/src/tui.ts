@@ -1000,6 +1000,12 @@ export class TUI extends Container {
 	 * releaseHeldInput(); undefined when not holding.
 	 */
 	#heldInput: string[] | undefined;
+	/**
+	 * The component focused when holding began. Only its keystrokes are held:
+	 * a dialog that takes focus meanwhile (a startup hook's select or confirm)
+	 * gets its input live.
+	 */
+	#heldFocus: Component | null = null;
 	// Always-on event-loop lag probe. The high default threshold keeps it quiet;
 	// it only logs `ui.loop-blocked` (with the current loop phase) when a frame
 	// budget is genuinely starved. Armed in start(), disarmed in stop().
@@ -1444,7 +1450,12 @@ export class TUI extends Container {
 		// `hello` query must go out now to confirm the surface.
 		const nativeExpected = this.terminal.tspExpected === true;
 		this.#inputDeferred = options?.deferInput === true && !nativeExpected;
-		this.#heldInput = options?.deferInput === true && nativeExpected ? [] : undefined;
+		// A restart (a startup dialog's external editor stops and restarts the
+		// TUI) keeps an existing hold: those keys still belong to the editor.
+		if (options?.deferInput === true && nativeExpected) {
+			this.#heldInput = [];
+			this.#heldFocus = this.#focusedComponent;
+		}
 		this.#watchdog.start();
 		this.#ghosttyInitialImageDelayDone = false;
 		this.#ghosttyImageReadyAtMs = this.#renderScheduler.now() + TUI.#GHOSTTY_INITIAL_IMAGE_DELAY_MS;
@@ -2287,7 +2298,9 @@ export class TUI extends Container {
 	 * Replay the keystrokes held since a TSP `deferInput` start through the
 	 * normal input path, then deliver input live. Call once the app's key
 	 * handlers are installed so a hotkey pressed during startup still fires.
-	 * Idempotent; no-op when nothing is held.
+	 * Only keys typed while the start-time focus owner had focus are held. The
+	 * hold survives a stop/start until released. Idempotent; no-op when nothing
+	 * is held.
 	 */
 	releaseHeldInput(): void {
 		const held = this.#heldInput;
@@ -2295,6 +2308,16 @@ export class TUI extends Container {
 		this.#heldInput = undefined;
 		if (this.#stopped) return;
 		for (const data of held) this.#handleInput(data);
+	}
+
+	/**
+	 * Hand held-key ownership from `previous` to `next` when the app replaces
+	 * the component focused at start (a swapped-in custom editor), so keys
+	 * typed into the replacement stay queued behind the held ones instead of
+	 * overtaking them. No-op unless `previous` owns the held keys.
+	 */
+	replaceHeldFocus(previous: Component, next: Component): void {
+		if (this.#heldInput !== undefined && this.#heldFocus === previous) this.#heldFocus = next;
 	}
 
 	addStartListener(listener: StartListener): () => void {
@@ -2492,7 +2515,6 @@ export class TUI extends Container {
 		this.#nativeHoldTimer?.cancel();
 		this.#nativeHoldTimer = undefined;
 		this.#clearNativeConfirm();
-		this.#heldInput = undefined;
 		const nativeWasLive = this.#nativeLive;
 		if (nativeWasLive) {
 			this.#native!.stop();
@@ -2810,7 +2832,7 @@ export class TUI extends Container {
 		}
 		if (data.length === 0) return;
 
-		if (this.#heldInput !== undefined) {
+		if (this.#heldInput !== undefined && this.#focusedComponent === this.#heldFocus) {
 			this.#holdInput(data);
 			return;
 		}
