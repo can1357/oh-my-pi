@@ -175,6 +175,10 @@ export class AcpSubagentStreams {
 	#handleLifecycle(payload: SubagentLifecyclePayload): void {
 		const existing = this.#children.get(payload.id);
 		if (existing) {
+			// A generated label can arrive after the first frame (e.g. on the terminal one).
+			const description =
+				payload.description && payload.description !== existing.description ? payload.description : undefined;
+			if (description) existing.description = description;
 			// IRC wake turns, follow-up assignments and revivals restart work in the same child conversation.
 			if (payload.status === "started") {
 				existing.runs++;
@@ -188,10 +192,13 @@ export class AcpSubagentStreams {
 			} else {
 				existing.activeRuns = Math.max(0, existing.activeRuns - 1);
 				// An older run ending while a newer one is active leaves the child running.
-				if (existing.activeRuns > 0) return;
+				if (existing.activeRuns > 0) {
+					if (description) this.#sendUpdate(existing, { description });
+					return;
+				}
 				existing.state = IDLE_STATE_BY_LIFECYCLE[payload.status];
 			}
-			this.#sendUpdate(existing, { state: existing.state });
+			this.#sendUpdate(existing, { ...(description ? { description } : {}), state: existing.state });
 			return;
 		}
 		if (payload.status !== "started") return;

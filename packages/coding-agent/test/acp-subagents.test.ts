@@ -168,6 +168,17 @@ describe("AcpSubagentStreams", () => {
 		expect(sent).toHaveLength(3);
 	});
 
+	it("forwards a description that first arrives on a later lifecycle frame and re-announces it", async () => {
+		registerAgent("Scout", ROOT_AGENT_ID);
+		bus.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, lifecycle("Scout", "started"));
+		bus.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, { ...lifecycle("Scout", "completed"), description: "Find flaky test" });
+		const [, idle] = await delivered(2);
+		expect(idle!.update).toMatchObject({ description: "Find flaky test", state: { state: "idle" } });
+		sent.length = 0;
+		streams.announceAll();
+		expect((await delivered(1))[0]!.update).toMatchObject({ title: "Scout", description: "Find flaky test" });
+	});
+
 	it("re-establishes known children for a reloaded parent, routing first and current state after", async () => {
 		registerAgent("Lead", ROOT_AGENT_ID);
 		registerAgent("Helper", "Lead");
