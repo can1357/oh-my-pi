@@ -2,17 +2,16 @@
  * Saved-reset salvage run by `omp auth-broker serve`, which holds every
  * credential and outlives any session. It plans and spends through the same
  * executor as a session sweep, under the broker host's `codexResets.*` and
- * `claudeResets.*` settings; with no one to ask, `unset` approves only what
- * {@link headlessApprovedResetActions} allows.
+ * `claudeResets.*` settings and account policies; with no one to ask, each
+ * action spends only what {@link headlessConsentedActions} allows.
  */
 import type { AuthStorage, ResetCreditAccountStatus } from "@oh-my-pi/pi-ai";
 import { logger } from "@oh-my-pi/pi-utils";
 import type { Settings } from "../config/settings";
-import { type AutoResetHost, sweepResets } from "./auto-reset";
+import { type AutoResetHost, headlessConsentedActions, sweepResets } from "./auto-reset";
 import {
 	type CodexAutoRedeemCoordinator,
 	createCodexAutoRedeemCoordinator,
-	headlessApprovedResetActions,
 	IMMINENT_RESET_EXPIRY_MS,
 	SWEEP_MIN_INTERVAL_MS,
 } from "./codex-auto-reset";
@@ -60,7 +59,7 @@ export class BrokerResetSweeper {
 			notice: (level, message, source) =>
 				level === "info" ? logger.info(message, { source }) : logger.warn(message, { source }),
 			adoptedResetMarkers: new Map(),
-			confirm: async (_provider, actions) => headlessApprovedResetActions("unset", actions),
+			confirm: async (_provider, actions) => headlessConsentedActions(actions),
 		};
 	}
 

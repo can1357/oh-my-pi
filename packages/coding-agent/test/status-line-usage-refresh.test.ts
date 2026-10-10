@@ -65,6 +65,8 @@ interface CodexUsageState {
 	sevenDayPercent: number;
 	sevenDayResetAt: number;
 	savedResets?: number;
+	/** Expiry (epoch ms) of each saved reset, when the report lists them. */
+	creditExpiresAt?: number[];
 	omitFetchedAt?: boolean;
 	tier?: string;
 	plan?: string;
@@ -86,7 +88,17 @@ function codexUsageReport(
 				...(orgId ? { orgId } : {}),
 				...(state.plan ? { planType: state.plan } : {}),
 			},
-			...(state.savedResets === undefined ? {} : { resetCredits: { availableCount: state.savedResets } }),
+			...(state.savedResets === undefined
+				? {}
+				: {
+						resetCredits: {
+							availableCount: state.savedResets,
+							credits: state.creditExpiresAt?.map(at => ({
+								expiresAt: new Date(at).toISOString(),
+								status: "available",
+							})),
+						},
+					}),
 			limits: [
 				{
 					id: "openai-codex:secondary",
@@ -285,6 +297,83 @@ describe("StatusLineComponent usage refresh", () => {
 		expect(output).toContain("✦ 3 (0 usable)");
 		expect(output).toContain("exp 2d");
 		expect(output).toContain("weekly cooldown");
+	});
+
+	it.each([
+		{ name: "keeps a reset beyond 7 days plain", expiresInHours: 8 * 24, text: "✦ 1 exp 8d" },
+		{ name: "flags a reset expiring within 7 days", expiresInHours: 5 * 24, text: "✦ 1 ▲ 1 exp 5d" },
+		{ name: "flags a reset expiring within 24 hours", expiresInHours: 6, text: "✦ 1 ▲ 1 exp 6h" },
+	])("$name in the active account's usage segment", async ({ expiresInHours, text }) => {
+		const state: CodexUsageState = {
+			sevenDayPercent: 60,
+			sevenDayResetAt: Date.now() + 80 * 3_600_000,
+			savedResets: 1,
+			creditExpiresAt: [Date.now() + expiresInHours * 3_600_000],
+		};
+		const component = new StatusLineComponent(
+			makeCodexSession(async () => codexUsageReport(state)),
+			statusLineHost,
+		);
+		component.updateSettings({ preset: "custom", leftSegments: ["usage"], rightSegments: [] });
+
+		await refreshUsage(component);
+
+		expect(plain(component.getTopBorder(120).content)).toContain(text);
+		component.dispose();
+	});
+
+	it("warns once per session about another account's reset expiring within 24 hours", async () => {
+		const sevenDayResetAt = Date.now() + 80 * 3_600_000;
+		let fetches = 0;
+		const reports = () => {
+			fetches++;
+			return [
+				...codexUsageReport({ sevenDayPercent: 10, sevenDayResetAt }),
+				...codexUsageReport(
+					{ sevenDayPercent: 60, sevenDayResetAt, savedResets: 1, creditExpiresAt: [Date.now() + 6 * 3_600_000] },
+					"account-2",
+					"codex@example.com",
+					"ws-team",
+				),
+			];
+		};
+		const component = new StatusLineComponent(
+			makeCodexSession(async () => reports()),
+			statusLineHost,
+		);
+		const notices: string[] = [];
+		component.setResetExpiryNoticeHandler(notice => notices.push(notice));
+
+		await refreshUsage(component);
+		await refreshUsage(component, 5 * 60_000);
+
+		expect(fetches).toBe(2);
+		expect(notices).toHaveLength(1);
+		expect(notices[0]).toContain("Saved Codex reset on codex@example.com (ws-team) expires in 6h");
+		expect(notices[0]).toContain("/usage");
+		component.dispose();
+	});
+
+	it("does not warn about a reset that expires in more than 24 hours", async () => {
+		const state: CodexUsageState = {
+			sevenDayPercent: 60,
+			sevenDayResetAt: Date.now() + 80 * 3_600_000,
+			savedResets: 1,
+			creditExpiresAt: [Date.now() + 25 * 3_600_000],
+		};
+		const component = new StatusLineComponent(
+			makeCodexSession(async () => codexUsageReport(state)),
+			statusLineHost,
+		);
+		component.updateSettings({ preset: "custom", leftSegments: ["usage"], rightSegments: [] });
+		const notices: string[] = [];
+		component.setResetExpiryNoticeHandler(notice => notices.push(notice));
+
+		await refreshUsage(component);
+
+		expect(plain(component.getTopBorder(120).content)).toContain("▲ 1 exp 1d 1h");
+		expect(notices).toEqual([]);
+		component.dispose();
 	});
 
 	it("re-fetches usage immediately when the session rotates to another org under the same email", async () => {

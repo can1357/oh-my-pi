@@ -143,14 +143,21 @@ function input(reports: UsageReport[] | null, overrides: Partial<CodexResetPlanI
 		trigger: "blocked",
 		provider: "openai-codex",
 		modelId: "gpt-5.3-codex",
-		settings: { enabled: true, minBlockedMinutes: 60, keepCredits: 0, salvageHorizonMs: 12 * HOUR },
+		settings: { autoRedeem: "yes", minBlockedMinutes: 60, keepCredits: 0, salvageHorizonMs: 12 * HOUR },
 		identity: IDENTITY,
+		accountPolicy: () => undefined,
 		reports,
 		attemptedKeys: new Set<string>(),
 		deferredUntilByKey: new Map<string, number>(),
 		lastAttemptAtByAccount: new Map<string, number>(),
 		...overrides,
 	};
+}
+
+/** Account policy lookup that sets `autoRedeem` on one account id. */
+function accountAutoRedeem(accountId: string, autoRedeem: boolean): CodexResetPlanInput["accountPolicy"] {
+	return identity =>
+		identity.accountId === accountId ? { provider: "openai-codex", account: { accountId }, autoRedeem } : undefined;
 }
 
 describe("planCodexResetRedemptions: blocked-account", () => {
@@ -168,6 +175,7 @@ describe("planCodexResetRedemptions: blocked-account", () => {
 				accountKey: ACCOUNT_KEY,
 				attemptKey: blockedAttemptKey(ACCOUNT_KEY, NOW + 3 * DAY),
 				label: EMAIL,
+				autoRedeem: "yes",
 				availableCount: 1,
 				weeklyUsedFraction: 1.0,
 				remainingMs: 3 * DAY,
@@ -334,7 +342,9 @@ describe("planCodexResetRedemptions: blocked-account", () => {
 
 	it("respects the reserve: 1 credit with keepCredits 1 is held back", () => {
 		const plan = planCodexResetRedemptions(
-			input([report()], { settings: { enabled: true, minBlockedMinutes: 60, keepCredits: 1, salvageHorizonMs: 0 } }),
+			input([report()], {
+				settings: { autoRedeem: "yes", minBlockedMinutes: 60, keepCredits: 1, salvageHorizonMs: 0 },
+			}),
 		);
 		expect(plan.actions).toEqual([]);
 		expect(plan.skipped).toContainEqual({ accountKey: ACCOUNT_KEY, rule: "blocked-account", reason: "reserve" });
@@ -343,7 +353,7 @@ describe("planCodexResetRedemptions: blocked-account", () => {
 	it("restores above the reserve: 2 credits with keepCredits 1", () => {
 		const plan = planCodexResetRedemptions(
 			input([report({ credits: 2 })], {
-				settings: { enabled: true, minBlockedMinutes: 60, keepCredits: 1, salvageHorizonMs: 0 },
+				settings: { autoRedeem: "yes", minBlockedMinutes: 60, keepCredits: 1, salvageHorizonMs: 0 },
 			}),
 		);
 		expect(plan.actions).toMatchObject([{ reason: "blocked-account", availableCount: 2 }]);
@@ -492,13 +502,16 @@ describe("planCodexResetRedemptions: blocked-account", () => {
 		expect(plan.actions).toEqual([]);
 	});
 
-	it("returns nothing when the policy is disabled", () => {
+	it("returns nothing when auto-redeem is off", () => {
 		const plan = planCodexResetRedemptions(
 			input([report()], {
-				settings: { enabled: false, minBlockedMinutes: 60, keepCredits: 0, salvageHorizonMs: 0 },
+				settings: { autoRedeem: "no", minBlockedMinutes: 60, keepCredits: 0, salvageHorizonMs: 0 },
 			}),
 		);
-		expect(plan).toEqual({ actions: [], skipped: [{ accountKey: "*", rule: "account", reason: "disabled" }] });
+		expect(plan).toEqual({
+			actions: [],
+			skipped: [{ accountKey: ACCOUNT_KEY, rule: "account", reason: "auto-redeem-off" }],
+		});
 	});
 
 	it("skips a stale usage report", () => {
@@ -574,6 +587,7 @@ describe("planCodexResetRedemptions: expiring-credit", () => {
 				accountKey: ACCOUNT_KEY,
 				attemptKey: salvageAttemptKey(ACCOUNT_KEY, NOW + 2 * HOUR),
 				label: EMAIL,
+				autoRedeem: "yes",
 				availableCount: 1,
 				weeklyUsedFraction: 0.8,
 				salvageWindow: "weekly",
@@ -680,7 +694,7 @@ describe("planCodexResetRedemptions: expiring-credit", () => {
 		const plan = planCodexResetRedemptions(
 			input([report({ weeklyUsed: 0.8, creditExpiries: [2 * HOUR] })], {
 				trigger: "sweep",
-				settings: { enabled: true, minBlockedMinutes: 60, keepCredits: 5, salvageHorizonMs: 12 * HOUR },
+				settings: { autoRedeem: "yes", minBlockedMinutes: 60, keepCredits: 5, salvageHorizonMs: 12 * HOUR },
 			}),
 		);
 		expect(plan.actions).toHaveLength(1);
@@ -719,7 +733,7 @@ describe("planCodexResetRedemptions: expiring-credit", () => {
 		const plan = planCodexResetRedemptions(
 			input([report({ weeklyUsed: 0.8, creditExpiries: [2 * HOUR] })], {
 				trigger: "sweep",
-				settings: { enabled: true, minBlockedMinutes: 60, keepCredits: 0, salvageHorizonMs: 0 },
+				settings: { autoRedeem: "yes", minBlockedMinutes: 60, keepCredits: 0, salvageHorizonMs: 0 },
 			}),
 		);
 		expect(plan.actions).toEqual([]);
@@ -728,7 +742,7 @@ describe("planCodexResetRedemptions: expiring-credit", () => {
 	it("salvages at five minutes inclusively despite a zero horizon", () => {
 		const base = input([], {
 			trigger: "sweep",
-			settings: { enabled: true, minBlockedMinutes: 60, keepCredits: 5, salvageHorizonMs: 0 },
+			settings: { autoRedeem: "yes", minBlockedMinutes: 60, keepCredits: 5, salvageHorizonMs: 0 },
 		});
 		for (const expiresInMs of [1, 5 * 60_000, 5 * 60_000 + 1]) {
 			const plan = planCodexResetRedemptions({
@@ -770,7 +784,7 @@ describe("planCodexResetRedemptions: expiring-credit", () => {
 		const plan = planCodexResetRedemptions(
 			input([zero, unknown], {
 				trigger: "sweep",
-				settings: { enabled: true, minBlockedMinutes: 60, keepCredits: 5, salvageHorizonMs: 0 },
+				settings: { autoRedeem: "yes", minBlockedMinutes: 60, keepCredits: 5, salvageHorizonMs: 0 },
 			}),
 		);
 		expect(plan.actions).toMatchObject([
@@ -794,10 +808,13 @@ describe("planCodexResetRedemptions: expiring-credit", () => {
 		const plan = planCodexResetRedemptions(
 			input([report({ creditExpiries: [IMMINENT_RESET_EXPIRY_MS] })], {
 				trigger: "sweep",
-				settings: { enabled: false, minBlockedMinutes: 60, keepCredits: 0, salvageHorizonMs: 12 * HOUR },
+				settings: { autoRedeem: "no", minBlockedMinutes: 60, keepCredits: 0, salvageHorizonMs: 12 * HOUR },
 			}),
 		);
-		expect(plan).toEqual({ actions: [], skipped: [{ accountKey: "*", rule: "account", reason: "disabled" }] });
+		expect(plan).toEqual({
+			actions: [],
+			skipped: [{ accountKey: ACCOUNT_KEY, rule: "account", reason: "auto-redeem-off" }],
+		});
 	});
 
 	it.each([undefined, 0])("requires live available credits for imminent salvage (count %s)", credits => {
@@ -862,6 +879,143 @@ describe("planCodexResetRedemptions: expiring-credit", () => {
 		expect(plan.actions).toMatchObject([
 			{ reason: "blocked-account", accountKey: ACCOUNT_KEY },
 			{ reason: "expiring-credit", accountKey: "openai-codex|-|2" },
+		]);
+	});
+});
+
+describe("planCodexResetRedemptions: account autoRedeem override", () => {
+	const lastChance = {
+		weeklyUsed: 0,
+		primaryUsed: 0,
+		limitReached: false,
+		creditExpiries: [IMMINENT_RESET_EXPIRY_MS],
+	};
+
+	it("restores only the account whose policy turns auto-redeem on while the provider says no", () => {
+		const active = report({ credits: 1 });
+		const sibling = report({ accountId: "acct-sib", email: "sib@example.com", credits: 3 });
+		const plan = planCodexResetRedemptions(
+			input([active, sibling], {
+				settings: { autoRedeem: "no", minBlockedMinutes: 60, keepCredits: 0, salvageHorizonMs: 12 * HOUR },
+				accountPolicy: accountAutoRedeem("acct-sib", true),
+			}),
+		);
+		expect(plan.actions).toMatchObject([
+			{ reason: "blocked-account", accountKey: "openai-codex|-|2", autoRedeem: "yes" },
+		]);
+		expect(plan.skipped).toContainEqual({ accountKey: ACCOUNT_KEY, rule: "account", reason: "auto-redeem-off" });
+	});
+
+	it("salvages only the account whose policy turns auto-redeem on while the provider says no", () => {
+		const a = report({ accountId: "acct-a", email: "a@example.com", weeklyUsed: 0.9, creditExpiries: [2 * HOUR] });
+		const b = report({ accountId: "acct-b", email: "b@example.com", weeklyUsed: 0.7, creditExpiries: [5 * HOUR] });
+		const plan = planCodexResetRedemptions(
+			input([a, b], {
+				trigger: "sweep",
+				identity: undefined,
+				settings: { autoRedeem: "no", minBlockedMinutes: 60, keepCredits: 0, salvageHorizonMs: 12 * HOUR },
+				accountPolicy: accountAutoRedeem("acct-a", true),
+			}),
+		);
+		expect(plan.actions).toMatchObject([
+			{ reason: "expiring-credit", accountKey: "openai-codex|-|3", autoRedeem: "yes" },
+		]);
+		expect(plan.skipped).toContainEqual({
+			accountKey: "openai-codex|-|4",
+			rule: "account",
+			reason: "auto-redeem-off",
+		});
+	});
+
+	it("spends a last-chance credit only on the account whose policy turns auto-redeem on while the provider says no", () => {
+		const a = report({ accountId: "acct-a", email: "a@example.com", ...lastChance });
+		const b = report({ accountId: "acct-b", email: "b@example.com", ...lastChance });
+		const plan = planCodexResetRedemptions(
+			input([a, b], {
+				trigger: "sweep",
+				identity: undefined,
+				settings: { autoRedeem: "no", minBlockedMinutes: 60, keepCredits: 1, salvageHorizonMs: 0 },
+				accountPolicy: accountAutoRedeem("acct-a", true),
+			}),
+		);
+		expect(plan.actions).toMatchObject([
+			{
+				reason: "expiring-credit",
+				accountKey: "openai-codex|-|3",
+				expiresInMs: IMMINENT_RESET_EXPIRY_MS,
+				autoRedeem: "yes",
+			},
+		]);
+		expect(plan.skipped).toContainEqual({
+			accountKey: "openai-codex|-|4",
+			rule: "account",
+			reason: "auto-redeem-off",
+		});
+	});
+
+	it("restores a blocked sibling instead of the active account whose policy turns auto-redeem off", () => {
+		const active = report({ credits: 1 });
+		const sibling = report({ accountId: "acct-sib", email: "sib@example.com", credits: 3 });
+		const plan = planCodexResetRedemptions(
+			input([active, sibling], { accountPolicy: accountAutoRedeem(ACCOUNT_ID, false) }),
+		);
+		expect(plan.actions).toMatchObject([
+			{ reason: "blocked-account", accountKey: "openai-codex|-|2", autoRedeem: "yes" },
+		]);
+		expect(plan.skipped).toContainEqual({ accountKey: ACCOUNT_KEY, rule: "account", reason: "auto-redeem-off" });
+	});
+
+	it("salvages only the sibling of an account whose policy turns auto-redeem off", () => {
+		const a = report({ accountId: "acct-a", email: "a@example.com", weeklyUsed: 0.9, creditExpiries: [2 * HOUR] });
+		const b = report({ accountId: "acct-b", email: "b@example.com", weeklyUsed: 0.7, creditExpiries: [5 * HOUR] });
+		const plan = planCodexResetRedemptions(
+			input([a, b], { trigger: "sweep", identity: undefined, accountPolicy: accountAutoRedeem("acct-a", false) }),
+		);
+		expect(plan.actions).toMatchObject([
+			{ reason: "expiring-credit", accountKey: "openai-codex|-|4", autoRedeem: "yes" },
+		]);
+		expect(plan.skipped).toContainEqual({
+			accountKey: "openai-codex|-|3",
+			rule: "account",
+			reason: "auto-redeem-off",
+		});
+	});
+
+	it("lets the last-chance credit of an account whose policy turns auto-redeem off expire while the sibling's is spent", () => {
+		const a = report({ accountId: "acct-a", email: "a@example.com", ...lastChance });
+		const b = report({ accountId: "acct-b", email: "b@example.com", ...lastChance });
+		const plan = planCodexResetRedemptions(
+			input([a, b], {
+				trigger: "sweep",
+				identity: undefined,
+				settings: { autoRedeem: "yes", minBlockedMinutes: 60, keepCredits: 1, salvageHorizonMs: 0 },
+				accountPolicy: accountAutoRedeem("acct-a", false),
+			}),
+		);
+		expect(plan.actions).toMatchObject([
+			{ reason: "expiring-credit", accountKey: "openai-codex|-|4", expiresInMs: IMMINENT_RESET_EXPIRY_MS },
+		]);
+		expect(plan.skipped).toContainEqual({
+			accountKey: "openai-codex|-|3",
+			rule: "account",
+			reason: "auto-redeem-off",
+		});
+	});
+
+	it("leaves accounts without an override on the provider mode", () => {
+		const a = report({ accountId: "acct-a", email: "a@example.com", weeklyUsed: 0.9, creditExpiries: [2 * HOUR] });
+		const b = report({ accountId: "acct-b", email: "b@example.com", weeklyUsed: 0.7, creditExpiries: [5 * HOUR] });
+		const plan = planCodexResetRedemptions(
+			input([a, b], {
+				trigger: "sweep",
+				identity: undefined,
+				settings: { autoRedeem: "unset", minBlockedMinutes: 60, keepCredits: 0, salvageHorizonMs: 12 * HOUR },
+				accountPolicy: accountAutoRedeem("acct-a", true),
+			}),
+		);
+		expect(plan.actions).toMatchObject([
+			{ reason: "expiring-credit", accountKey: "openai-codex|-|3", autoRedeem: "yes" },
+			{ reason: "expiring-credit", accountKey: "openai-codex|-|4", autoRedeem: "unset" },
 		]);
 	});
 });
