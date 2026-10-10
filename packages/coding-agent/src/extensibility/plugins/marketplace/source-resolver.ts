@@ -22,7 +22,7 @@ const GIT_CLONE_TIMEOUT_MS = 30 * 60 * 1000;
 export interface ResolveContext {
 	/** Absolute path to the cloned/local marketplace directory. Required for relative sources. */
 	marketplaceClonePath?: string;
-	/** Catalog metadata — used for `pluginRoot` prepend. */
+	/** Catalog metadata — `pluginRoot` is the base for bare source names. */
 	catalogMetadata?: MarketplaceCatalogMetadata;
 	/** Scratch directory for sources that require cloning or extraction. */
 	tmpDir: string;
@@ -95,7 +95,10 @@ function resolveRelativeSourcePath(
 	source: string,
 	context: Pick<ResolveContext, "marketplaceClonePath" | "catalogMetadata">,
 ): string {
-	if (!source.startsWith("./")) {
+	// Bare name (no "/", not "."-prefixed): resolves under `metadata.pluginRoot`.
+	// Sources starting with "./" are relative to the marketplace root and ignore it.
+	const isBareName = !source.includes("/") && !source.startsWith(".");
+	if (!isBareName && !source.startsWith("./")) {
 		throw new Error(`Relative plugin source paths must start with "./" — got: "${source}"`);
 	}
 	if (!context.marketplaceClonePath) {
@@ -103,7 +106,10 @@ function resolveRelativeSourcePath(
 	}
 
 	const pluginRoot = context.catalogMetadata?.pluginRoot;
-	const relativePath = pluginRoot ? `./${path.join(pluginRoot, source.slice(2))}` : source;
+	if (isBareName && !pluginRoot) {
+		throw new Error(`Bare plugin source "${source}" requires metadata.pluginRoot in the marketplace catalog`);
+	}
+	const relativePath = isBareName && pluginRoot ? `./${path.join(pluginRoot, source)}` : source;
 	const resolved = path.resolve(context.marketplaceClonePath, relativePath);
 	if (!pathIsWithin(context.marketplaceClonePath, resolved)) {
 		throw new Error(
