@@ -26,8 +26,13 @@ import { type FileEntry, listFiles, type SearchRoot } from "./tree";
 
 /** Requests in flight per dispatched phase. */
 const PARALLEL = 16;
-/** Files per filename-ranking request. */
-const NAME_BATCH = 64;
+/**
+ * Questions per judgment request. System One gateways reject an oversized
+ * `questions` map before judging anything (OpenJEV answers HTTP 422, `at most
+ * 16 items`), so no wave may pack more than this, whatever the byte budgets
+ * would allow: a rejected batch is a batch nobody answered.
+ */
+const QUESTIONS_MAX = 16;
 /** Lexically ranked files that receive a filename judgment. */
 const CANDIDATES = 128;
 /** Files whose content is read and sketched. */
@@ -46,10 +51,6 @@ const CUTOFF = 0.45;
 const THRESHOLD = 0.2;
 /** Bytes of a file read for windowing. */
 const READ_LIMIT = 4 * 1024 * 1024;
-/** Sketch state budget per request; sized so cards stay well inside the judge's context. */
-const SKETCH_STATE_BYTES = 18_000;
-/** Hard cap on sketch cards per request. */
-const SKETCH_CARDS_MAX = 48;
 /** Passage state budget per verification request, tags included. */
 const VERIFY_STATE_BYTES = 24 * 1024;
 /** Wall-clock budget for the native lexical scan. */
@@ -196,7 +197,7 @@ class Cascade {
 		const project = path.basename(root.path);
 		const nameJobs = chunks(
 			ranked.map(candidate => candidate.node),
-			NAME_BATCH,
+			QUESTIONS_MAX,
 		).map(batch => ({
 			batch,
 			request: nameBatch(
@@ -252,10 +253,7 @@ class Cascade {
 		const cards: { f: number; p: number }[] = [];
 		files.forEach((plan, f) => plan.passages.forEach((_, p) => cards.push({ f, p })));
 		let sketchSentBytes = 0;
-		const sketchJobs = chunks(
-			cards,
-			Math.min(SKETCH_CARDS_MAX, Math.max(1, Math.floor(SKETCH_STATE_BYTES / SKETCH_BYTES))),
-		).map(batch => {
+		const sketchJobs = chunks(cards, QUESTIONS_MAX).map(batch => {
 			const sketches: SketchCard[] = batch.map(({ f, p }) => {
 				const text = sketch(files[f]!.passages[p]!, keywords, weights, SKETCH_BYTES);
 				sketchSentBytes += Buffer.byteLength(text);
