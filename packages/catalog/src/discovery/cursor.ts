@@ -1062,6 +1062,8 @@ function normalizeCursorModel(
 
 	const name = pickModelDisplayName(details, id);
 	const reference = references.get(id);
+	// Preserve every authoritative roster wire identity. Synthetic catalog
+	// routing is supplied by KDL, not special-cased in this mapper.
 	// Versioned Cursor Grok ids (`cursor-grok-4.5`, `cursor-grok-4.6-high`)
 	// are reasoning models whose effort rides the per-tier sibling id;
 	// `GetUsableModels` ships no `thinkingDetails` for them and the bundled
@@ -1083,6 +1085,7 @@ function normalizeCursorModel(
 			input: resolveCursorInput(id, reference.input),
 			contextWindow: resolveCursorContextWindow(details, id, reference.contextWindow),
 			cursorMaxMode: details.maxMode,
+			requestModelId: id,
 		};
 	}
 	return {
@@ -1097,6 +1100,7 @@ function normalizeCursorModel(
 		contextWindow: resolveCursorContextWindow(details, id, DEFAULT_CONTEXT_WINDOW),
 		maxTokens: DEFAULT_MAX_TOKENS,
 		cursorMaxMode: details.maxMode,
+		requestModelId: id,
 	};
 }
 

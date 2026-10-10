@@ -433,7 +433,11 @@ function deriveCursorEffortFamilies<TSpec extends VariantSpecLike>(specs: readon
 			byId.has(`${baseId}-thinking`) ||
 			byId.has(`${baseId}-thinking-fast`) ||
 			byId.has(`${baseId}-fast-thinking`) ||
-			group.some(member => member.spec.thinking !== undefined || member.spec.requestModelId !== undefined) ||
+			group.some(
+				member =>
+					member.spec.thinking !== undefined ||
+					(member.spec.requestModelId !== undefined && member.spec.requestModelId !== member.spec.id),
+			) ||
 			group.some(member => candidateBases.has(`${baseId}-${member.tier}`))
 		) {
 			unsafeBases.add(baseId);
@@ -848,7 +852,8 @@ function collapseWithTable<TSpec extends VariantSpecLike>(
 		const existing = byId.get(family.id);
 		const existingCollapsed =
 			existing !== undefined &&
-			(existing.requestModelId !== undefined || existing.thinking?.effortRouting !== undefined);
+			((existing.requestModelId !== undefined && existing.requestModelId !== existing.id) ||
+				existing.thinking?.effortRouting !== undefined);
 		const reconciled =
 			existing !== undefined && existingCollapsed && retired !== undefined
 				? reconcileRetiredRouting(existing, family, retired)

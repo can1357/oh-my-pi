@@ -14,6 +14,8 @@ import {
 	AgentServerMessageSchema,
 	FetchArgsSchema,
 	InteractionQuerySchema,
+	InteractionUpdateSchema,
+	RoutedModelUpdateSchema,
 	WebFetchRequestQuerySchema,
 } from "@oh-my-pi/pi-catalog/discovery/cursor-proto";
 import { create, fromBinary, toBinary } from "@oh-my-pi/pi-catalog/discovery/protobuf";
@@ -67,6 +69,43 @@ function newBlockState(): BlockState {
 		setFirstTokenTime: () => {},
 	};
 }
+
+describe("Cursor routed-model telemetry", () => {
+	it("decodes a routed wire update into upstreamModel without rewriting explicit selection", () => {
+		const encoded = toBinary(
+			InteractionUpdateSchema,
+			create(InteractionUpdateSchema, {
+				message: {
+					case: "routedModel",
+					value: create(RoutedModelUpdateSchema, { modelId: "  server-selected-model  " }),
+				},
+			}),
+		);
+		const output = cursorAssistantMessage();
+		const requestedModel = output.model;
+		processInteractionUpdate(
+			fromBinary(InteractionUpdateSchema, encoded),
+			output,
+			new AssistantMessageEventStream(),
+			newBlockState(),
+			{ sawTokenDelta: false },
+		);
+		expect(output.upstreamModel).toBe("server-selected-model");
+		expect(output.model).toBe(requestedModel);
+	});
+
+	it("ignores a blank routed identity rather than erasing an earlier server attribution", () => {
+		const output = cursorAssistantMessage();
+		output.upstreamModel = "previous-server-model";
+		const update = create(InteractionUpdateSchema, {
+			message: { case: "routedModel", value: create(RoutedModelUpdateSchema, { modelId: "  " }) },
+		});
+		processInteractionUpdate(update, output, new AssistantMessageEventStream(), newBlockState(), {
+			sawTokenDelta: false,
+		});
+		expect(output.upstreamModel).toBe("previous-server-model");
+	});
+});
 
 function decodeClientFrame(frame: Buffer): AgentClientMessage {
 	const length = frame.readUInt32BE(1);

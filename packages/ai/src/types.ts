@@ -791,6 +791,13 @@ export interface SimpleStreamOptions extends Omit<StreamOptions, "apiKey"> {
 	cursorOnToolResult?: CursorToolResultHandler;
 	/** Cursor hands unhandled MCP calls to an external executor instead of reporting them as missing. */
 	cursorExternalToolExecutor?: boolean;
+	/** Cursor AgentRunRequest capability flags; false unless explicitly enabled. */
+	cursorClientSupportsInlineImages?: boolean;
+	cursorClientSupportsRoutedModelUpdate?: boolean;
+	cursorClientSupportsPromptContextUsageRpc?: boolean;
+	/** Explicit Cursor run/session identity; omitted run IDs are freshly generated. */
+	cursorRunId?: string;
+	cursorAgentSessionId?: string;
 	/**
 	 * Amazon Bedrock Guardrail settings forwarded through transports that do not
 	 * dispatch directly to the Bedrock provider. Model-level values take

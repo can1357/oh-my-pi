@@ -388,6 +388,12 @@ export interface CursorOptions extends StreamOptions {
 	wireModelId?: string;
 	/** Run transport. `auto` starts with HTTP/2 and falls back on failed ALPN negotiation. */
 	transport?: "auto" | "http2" | "http1";
+	/** Cursor AgentRunRequest capability/session wiring echoed by the CLI. */
+	cursorClientSupportsInlineImages?: boolean;
+	cursorClientSupportsRoutedModelUpdate?: boolean;
+	cursorClientSupportsPromptContextUsageRpc?: boolean;
+	cursorRunId?: string;
+	cursorAgentSessionId?: string;
 }
 
 type CursorWireMode = "normalized" | "discovered";
@@ -428,6 +434,8 @@ interface CursorGrpcRequest {
 }
 
 interface CursorTransportRequest extends CursorGrpcRequest {
+	/** Final serialized run ID, including a caller's onPayload replacement. */
+	runId: string;
 	/** Exact discovery id eligible for a retry because the normalized effort payload was serialized unchanged. */
 	fallbackWireModelId?: string;
 }
@@ -1203,7 +1211,7 @@ function streamCursorWithWireMode(
 
 			const baseUrl = model.baseUrl || CURSOR_API_URL;
 			const requestPath = transportMode === "http2" ? CURSOR_RUN_PATH : CURSOR_RUN_SSE_PATH;
-			const requestId = crypto.randomUUID();
+			const requestId = builtRequest.runId;
 			originalRequestId = retryContext?.originalRequestId ?? requestId;
 			const callerHeaders = sanitizeCursorCallerHeaders(options?.headers);
 			const sharedRequestHeaders = {
@@ -5402,6 +5410,10 @@ export function processInteractionUpdate(
 				{ model: output.model, messageTimestamp: output.timestamp },
 			);
 		}
+	} else if (updateCase === "routedModel") {
+		const routed = update.message.value;
+		const modelId = typeof routed?.modelId === "string" ? routed.modelId.trim() : "";
+		if (modelId) output.upstreamModel = modelId;
 	} else if (updateCase === "tokenDelta") {
 		const tokenDelta = update.message.value;
 		usageState.sawTokenDelta = true;
@@ -6117,9 +6129,12 @@ function createCursorUserMessage(
 	messageId = crypto.randomUUID(),
 ) {
 	const images = typeof content === "string" ? [] : extractImages(content);
+	// The CLI maps a missing/default session mode to AgentMode.AGENT (= 1);
+	// leaving mode unset serializes 0 (UNSPECIFIED), which the CLI never sends.
 	return create(UserMessageSchema, {
 		text,
 		messageId,
+		mode: 1,
 		...(images.length > 0
 			? {
 					selectedContext: create(SelectedContextSchema, {
@@ -6361,6 +6376,7 @@ async function buildGrpcRequestForWireMode(
 		modelDetails,
 		requestedModel,
 		conversationId: state.conversationId,
+		conversationGroupId: state.conversationId,
 	});
 
 	// Apply customSystemPrompt BEFORE the hook so the onPayload replacement is the
@@ -6370,6 +6386,11 @@ async function buildGrpcRequestForWireMode(
 	if (options?.customSystemPrompt) {
 		runRequest.customSystemPrompt = options.customSystemPrompt;
 	}
+	runRequest.clientSupportsInlineImages = options?.cursorClientSupportsInlineImages === true;
+	runRequest.clientSupportsRoutedModelUpdate = options?.cursorClientSupportsRoutedModelUpdate === true;
+	runRequest.clientSupportsPromptContextUsageRpc = options?.cursorClientSupportsPromptContextUsageRpc === true;
+	runRequest.runId = options?.cursorRunId ?? crypto.randomUUID();
+	runRequest.agentSessionId = options?.cursorAgentSessionId ?? "";
 
 	// Tools are sent later via requestContext (exec handshake)
 	const replacementRequest = await options?.onPayload?.(runRequest, model);
@@ -6411,7 +6432,7 @@ async function buildGrpcRequestForWireMode(
 		detail: detail || undefined,
 	});
 
-	return { requestBytes, blobStore, conversationState, fallbackWireModelId };
+	return { requestBytes, blobStore, conversationState, fallbackWireModelId, runId: runRequest.runId };
 }
 
 /**
