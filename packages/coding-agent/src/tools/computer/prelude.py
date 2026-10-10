@@ -127,7 +127,10 @@ def _make_computer():
             return await self._method("list", (options,), kwargs)
 
         async def open(self, id_or_name_or_path, options=None, **kwargs):
-            return await self._method("open", (id_or_name_or_path, options), kwargs)
+            app = await self._method("open", (id_or_name_or_path, options), kwargs)
+            if isinstance(app, dict) and isinstance(app.get("window"), dict):
+                app["window"] = _Window(app["window"])
+            return app
 
     class _Control(_Namespace):
         async def acquire(self, options=None, **kwargs):

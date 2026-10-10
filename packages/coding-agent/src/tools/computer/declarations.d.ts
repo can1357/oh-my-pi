@@ -255,8 +255,15 @@ interface ComputerDesktop extends ComputerInputTarget {
 	readonly apps: {
 		/** Discover native application identities without requiring capture permission. */
 		list(options?: ComputerApplicationQuery): Promise<ComputerApplication[]>;
-		/** Launch an exact identity/path or unique name; deliberate activation is opt-in. */
-		open(idOrNameOrNativeAppPath: string, options?: { activate?: boolean }): Promise<ComputerApplication>;
+		/**
+		 * Launch an exact identity/path or unique name; deliberate activation is opt-in. Returns the app with
+		 * `window`, its frontmost window: on macOS a running app without one is shown in the background, and the
+		 * first window gets up to 3 s to appear; null if none did (always null elsewhere).
+		 */
+		open(
+			idOrNameOrNativeAppPath: string,
+			options?: { activate?: boolean },
+		): Promise<ComputerApplication & { window: ComputerWindow | null }>;
 	};
 	readonly control: {
 		/** Requires a live human UI confirmation; headless/refused requests never acquire. */

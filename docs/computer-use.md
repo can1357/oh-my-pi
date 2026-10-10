@@ -80,7 +80,9 @@ display(await computer.capabilities());
 
 ### Applications and live display targets
 
-`computer.apps.list({ query?, runningOnly? })` returns native application IDs, names, paths, running state, and an observed PID when available. `computer.apps.open(idOrNameOrNativeAppPath, { activate? })` resolves an exact ID/path before a unique case-insensitive name; ambiguous names fail. Deliberate activation defaults off, but an application can still request focus itself.
+`computer.apps.list({ query?, runningOnly? })` returns native application IDs, names, paths, running state, and an observed PID when available. `computer.apps.open(idOrNameOrNativeAppPath, { activate? })` resolves an exact ID/path before a unique case-insensitive name; ambiguous names fail. It returns the application with `window`: its frontmost window as a window handle, or `null` when none appeared. Deliberate activation defaults off, but an application can still request focus itself.
+
+On macOS, `apps.open` waits up to 3 seconds for a launched application's first window. A running application that shows a window is not opened again, since Launch Services would send it the reopen event, which Notes and Contacts answer by coming to the front. One without a window on screen is shown behind the user's app: a hidden application (AppleScript launches applications hidden) is unhidden through AX, and any other gets Launch Services' reopen event without activation. Other platforms return `window: null`.
 
 `await computer.display(id | "active" | "all")` selects a live monitor target without rewriting configuration or resetting the worker. Each target owns its screenshot frame. `"active"` is resolved again for each full screenshot; subsequent input and zoom remain pinned to the delivered frame. Display-targeted keyboard input refuses a focused window on another monitor.
 

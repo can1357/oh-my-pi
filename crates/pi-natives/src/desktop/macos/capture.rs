@@ -10,8 +10,8 @@ use objc2_core_foundation::{
 };
 use objc2_core_graphics::{
 	CGRectMakeWithDictionaryRepresentation, CGWindowListCopyWindowInfo, CGWindowListOption,
-	kCGWindowBounds, kCGWindowIsOnscreen, kCGWindowName, kCGWindowNumber, kCGWindowOwnerName,
-	kCGWindowOwnerPID, kCGWindowSharingState,
+	kCGWindowBounds, kCGWindowIsOnscreen, kCGWindowLayer, kCGWindowName, kCGWindowNumber,
+	kCGWindowOwnerName, kCGWindowOwnerPID, kCGWindowSharingState,
 };
 use screen_capture_kit::{CaptureRequest, CaptureTarget};
 use xcap::Monitor;
@@ -105,7 +105,7 @@ impl MacCapture {
 	// no selector state.
 	#[allow(clippy::unused_self, reason = "keeps discovery on the backend capture object")]
 	pub(super) fn windows(&self) -> CoreResult<Vec<DesktopWindow>> {
-		window_snapshot(None)
+		window_snapshot(None, None)
 	}
 
 	#[allow(clippy::unused_self, reason = "keeps discovery on the backend capture object")]
@@ -116,7 +116,7 @@ impl MacCapture {
 			))
 		};
 		let id = id.parse::<u32>().map_err(|_| missing())?;
-		window_snapshot(Some(id))?
+		window_snapshot(Some(id), None)?
 			.into_iter()
 			.next()
 			.ok_or_else(missing)
@@ -262,11 +262,18 @@ impl MacCapture {
 	}
 }
 
+/// The windows `pid` has on screen at the normal window layer, front to back,
+/// as `windows()` lists them; its status items and other system-layer
+/// surfaces are left out.
+pub(in crate::desktop) fn application_windows(pid: u32) -> CoreResult<Vec<DesktopWindow>> {
+	window_snapshot(None, Some(pid))
+}
+
 type WindowDictionary = CFDictionary<CFString, CFType>;
 
 /// Reads each window from one immutable Quartz snapshot; individual xcap
 /// property getters would re-enumerate the whole desktop for every field.
-fn window_snapshot(target: Option<u32>) -> CoreResult<Vec<DesktopWindow>> {
+fn window_snapshot(target: Option<u32>, owner: Option<u32>) -> CoreResult<Vec<DesktopWindow>> {
 	if !capture_permission() {
 		return Err(DesktopError::permission_denied(
 			"macOS Screen Recording permission is not granted for this process",
@@ -295,6 +302,13 @@ fn window_snapshot(target: Option<u32>) -> CoreResult<Vec<DesktopWindow>> {
 		let Some((id, window)) = window_metadata(dictionary) else {
 			continue;
 		};
+		if owner.is_some() && window.pid != owner {
+			continue;
+		}
+		// SAFETY: The CoreGraphics key constant is process-lived.
+		if owner.is_some() && window_number(dictionary, unsafe { kCGWindowLayer }) != Some(0) {
+			continue;
+		}
 		if window.pid.is_some() && window.pid == active_pid {
 			active.push(id);
 		}
