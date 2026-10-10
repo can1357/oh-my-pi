@@ -8,8 +8,9 @@ import {
 	resetRegisteredArtifactDirsForTests,
 } from "@oh-my-pi/pi-coding-agent/internal-urls/registry-helpers";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
-import { formatTruncationMetaNotice } from "@oh-my-pi/pi-tui/tools/output-meta";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
+import { cfgReadSummarizeEnabled } from "@oh-my-pi/pi-coding-agent/tools/settings";
+import { formatTruncationMetaNotice } from "@oh-my-pi/pi-tui/tools/output-meta";
 
 function getTextOutput(result: { content: Array<{ type: string; text?: string }> }): string {
 	return result.content
@@ -18,7 +19,7 @@ function getTextOutput(result: { content: Array<{ type: string; text?: string }>
 		.join("\n");
 }
 
-function makeSession(cwd: string): ToolSession {
+function makeSession(cwd: string, overrides: Readonly<Record<string, unknown>> = {}): ToolSession {
 	return {
 		cwd,
 		hasUI: false,
@@ -29,7 +30,7 @@ function makeSession(cwd: string): ToolSession {
 			id: "a1",
 			path: path.join(cwd, "session", `a1.${toolType}.log`),
 		}),
-		settings: Settings.isolated(),
+		settings: Settings.isolated(overrides),
 	};
 }
 
@@ -46,6 +47,16 @@ function oversizedSelectedLineArtifact(): string {
 
 function byteLimitedRangeArtifact(): string {
 	return Array.from({ length: 100 }, (_, index) => `line-${index + 1} ${"x".repeat(1_016)}`).join("\n");
+}
+
+/** The 400-line ~265 B artifact with `lineNumber` widened to `fillBytes` bytes. */
+function artifactWithOversizedLine(lineNumber: number, fillBytes: number): string {
+	const lines = Array.from(
+		{ length: 400 },
+		(_, index) => `line-${String(index + 1).padStart(3, "0")} ${"x".repeat(256)}`,
+	);
+	lines[lineNumber - 1] = `line-${String(lineNumber).padStart(3, "0")} ${"y".repeat(fillBytes)}`;
+	return lines.join("\n");
 }
 
 describe("read tool large artifact handling", () => {
@@ -143,8 +154,10 @@ describe("read tool large artifact handling", () => {
 
 		expect(output).toContain("leading-context");
 		expect(output).toContain("Line 2 is 68.4KB");
-		expect(output).toContain("50.0KB read budget");
+		expect(output).toContain("32.0KB read budget");
 		expect(output).toContain("artifact://0:raw:2-2");
+		// The page budget is the binding cap, so a wider range cannot raise it.
+		expect(output).not.toContain("widen the requested range");
 		const truncation = result.details?.meta?.truncation;
 		expect(truncation?.totalBytes).toBeGreaterThan(70_000);
 		expect(truncation?.nextOffset).toBeUndefined();
@@ -152,16 +165,163 @@ describe("read tool large artifact handling", () => {
 		expect(formatTruncationMetaNotice(truncation)).not.toContain("Use :2 to continue");
 	});
 
-	it("still returns the oversized selected line when a wider range raises the byte budget", async () => {
+	it("cuts a wide artifact range at the per-call page budget instead of raising it past it", async () => {
 		await Bun.write(path.join(artifactDir, "0.mcp.log"), oversizedSelectedLineArtifact());
 
 		const result = await tool.execute("call-wide-oversized-selected", { path: "artifact://0:2-142" });
 		const output = getTextOutput(result);
 
-		expect(output).toContain("oversized-");
-		expect(output).toContain("trailing-two");
-		expect(output).not.toContain("could not fit after preceding context");
-		expect(result.details?.meta?.truncation).toBeUndefined();
+		// The page budget bounds the window even when the requested range would
+		// scale the byte budget above it, so the oversized line stays behind the
+		// raw-range hint rather than being widened back into the page.
+		expect(output).toContain("leading-context");
+		expect(output).toContain("32.0KB read budget");
+		expect(output).toContain("artifact://0:raw:2-2");
+		expect(output).not.toContain("trailing-two");
+		expect(result.details?.meta?.truncation).toBeDefined();
+	});
+
+	it("bounds one artifact range at the per-call page budget and names the next line", async () => {
+		// 300 lines of ~265 B ≈ 79 KB; the 32 KB page budget cuts at a line
+		// boundary instead of the line-scaled ~150 KB the range would otherwise get.
+		const result = await tool.execute("call-page-budget-range", { path: "artifact://0:1-300" });
+		const output = getTextOutput(result);
+		const truncation = result.details?.meta?.truncation;
+
+		expect(output).toContain("line-001");
+		expect(output).toContain("line-123");
+		expect(output).not.toContain("line-124");
+		expect(output).not.toContain("line-300");
+		expect(truncation).toBeDefined();
+		if (!truncation) throw new Error("expected truncation metadata");
+		expect(truncation.truncatedBy).toBe("bytes");
+		expect(truncation.shownRange).toEqual({ start: 1, end: 123 });
+		expect(truncation.nextOffset).toBe(124);
+		expect(truncation.outputBytes).toBeLessThanOrEqual(32 * 1024);
+		expect(formatTruncationMetaNotice(truncation)).toContain("Use :124 to continue");
+	});
+
+	it("bounds a multi-range artifact read at one per-call page budget", async () => {
+		const result = await tool.execute("call-page-budget-multi", { path: "artifact://0:1-100,200-300" });
+		const output = getTextOutput(result);
+
+		// The first range consumes most of the 32 KB budget; the second is cut at
+		// a line boundary and the notice names where to continue on the artifact.
+		expect(output).toContain("line-001");
+		expect(output).toContain("line-100");
+		expect(output).toContain("line-200");
+		expect(output).toContain("line-222");
+		expect(output).not.toContain("line-223");
+		expect(output).not.toContain("line-300");
+		expect(output).toContain("Read page budget (32.0KB) reached after lines 200-222");
+		expect(output).toContain("use artifact://0:223-300 to continue");
+	});
+
+	it("bounds a raw multi-range artifact read at the same per-call page budget", async () => {
+		const result = await tool.execute("call-page-budget-raw-multi", { path: "artifact://0:raw:1-100,200-300" });
+		const output = getTextOutput(result);
+
+		expect(output).toContain("line-001");
+		expect(output).toContain("line-100");
+		expect(output).toContain("line-200");
+		expect(output).toContain("line-222");
+		expect(output).not.toContain("line-223");
+		expect(output).toContain("Read page budget (32.0KB) reached after lines 200-222");
+		expect(output).toContain("use artifact://0:raw:223-300 to continue");
+	});
+
+	it("continues from the cut range itself when it showed no line", async () => {
+		// Line 150 (10 KB) overshoots the ~6 KB left of the page after range 1-100,
+		// so the cut range renders nothing and the hint must start inside it.
+		await Bun.write(path.join(artifactDir, "0.mcp.log"), artifactWithOversizedLine(150, 10_000));
+
+		const result = await tool.execute("call-page-budget-zero-line-range", { path: "artifact://0:1-100,150-160" });
+		const output = getTextOutput(result);
+
+		expect(output).toContain("line-001");
+		expect(output).toContain("line-100");
+		expect(output).not.toContain("line-101");
+		expect(output).not.toContain("line-150");
+		expect(output).toContain("Read page budget (32.0KB) reached after lines 1-100");
+		expect(output).toContain("use artifact://0:150-160 to continue");
+		// One line past the previous range was never requested.
+		expect(output).not.toContain("use artifact://0:101 to continue");
+	});
+
+	it("keeps the rest of the request in the continuation hint", async () => {
+		const result = await tool.execute("call-page-budget-remaining", { path: "artifact://0:1-100,200-300,380-390" });
+		const output = getTextOutput(result);
+
+		expect(output).toContain("line-200");
+		expect(output).toContain("line-222");
+		expect(output).not.toContain("line-223");
+		expect(output).not.toContain("line-300");
+		expect(output).not.toContain("line-380");
+		// The hint carries the cut range's end bound and every later range, so the
+		// recovery page asks for exactly the lines still owed.
+		expect(output).toContain("use artifact://0:223-300,380-390 to continue");
+	});
+
+	it("keeps raw mode in the continuation hint of a raw multi-range read", async () => {
+		const result = await tool.execute("call-page-budget-remaining-raw", {
+			path: "artifact://0:raw:1-100,200-300,380-390",
+		});
+		const output = getTextOutput(result);
+
+		expect(output).toContain("line-222");
+		expect(output).not.toContain("line-380");
+		expect(output).toContain("use artifact://0:raw:223-300,380-390 to continue");
+	});
+
+	it("keeps later ranges when the page budget is above the line-scaled budget", async () => {
+		await Bun.write(path.join(artifactDir, "0.mcp.log"), byteLimitedRangeArtifact());
+		const wideTool = new ReadTool(makeSession(testDir, { "read.pageBudget": 256 }));
+
+		const result = await wideTool.execute("call-page-budget-wide-multi", { path: "artifact://0:raw:1-60,80-85" });
+		const output = getTextOutput(result);
+
+		// Range 1-60 stops on the line-scaled 50 KB budget, which is not a page cut:
+		// the ~200 KB left of the 256 KB page still delivers range 80-85.
+		expect(output).toContain("line-1 ");
+		expect(output).toContain("line-80 ");
+		expect(output).toContain("line-85 ");
+		expect(output).not.toContain("Read page budget");
+		expect(output).not.toContain("line-51 ");
+	});
+
+	it("skips a range no page can hold and still returns the ranges that fit", async () => {
+		await Bun.write(path.join(artifactDir, "0.mcp.log"), artifactWithOversizedLine(350, 40_000));
+
+		const result = await tool.execute("call-page-budget-undeliverable", { path: "artifact://0:350-350,360-370" });
+		const output = getTextOutput(result);
+
+		// A one-line range cannot get smaller, so the read must not end on a dead
+		// end: the oversized line is skipped with a raw selector while the budget
+		// is still spent on the range that fits.
+		expect(output).toContain("line-360");
+		expect(output).toContain("line-370");
+		expect(output).not.toContain("line-350");
+		expect(output).not.toContain("read a smaller range");
+		expect(output).not.toContain("Read page budget");
+		expect(output).toContain("Line 350 is");
+		expect(output).toContain("cannot fit the 32.0KB read page budget");
+		expect(output).toContain("use artifact://0:raw:350-350 to read that line on its own");
+	});
+
+	it("skips a multi-line range whose first line no page can hold", async () => {
+		await Bun.write(path.join(artifactDir, "0.mcp.log"), artifactWithOversizedLine(350, 40_000));
+
+		const result = await tool.execute("call-page-budget-undeliverable-multi", {
+			path: "artifact://0:350-370,380-395",
+		});
+		const output = getTextOutput(result);
+
+		expect(output).toContain("line-380");
+		expect(output).toContain("line-395");
+		expect(output).not.toContain("line-360");
+		expect(output).toContain("range 350-370 skipped");
+		expect(output).toContain("use artifact://0:raw:350-350 to read that line on its own");
+		expect(output).toContain("use artifact://0:351-370 for the rest of the range");
 	});
 
 	it("keeps raw oversized-line reads context-free and byte-capped", async () => {
@@ -206,5 +366,23 @@ describe("read tool large artifact handling", () => {
 		} finally {
 			homeSpy.mockRestore();
 		}
+	});
+
+	it("keeps the widen-range advice for plain files, whose budget still scales with the range", async () => {
+		const filePath = path.join(testDir, "plain-oversized.txt");
+		await Bun.write(filePath, ["leading-context", `oversized-${"y".repeat(60_000)}-end`, "trailing-one"].join("\n"));
+		const settings = Settings.isolated();
+		cfgReadSummarizeEnabled.set(settings, false);
+		const plainTool = new ReadTool({ ...makeSession(testDir), settings });
+
+		const result = await plainTool.execute("call-plain-oversized", { path: `${filePath}:2-2` });
+		const output = getTextOutput(result);
+
+		// No page budget clamps a plain-file window, so the line-scaled budget is
+		// what a wider range raises — the advice has to stay.
+		expect(output).toContain("leading-context");
+		expect(output).toContain("Line 2 is 58.6KB");
+		expect(output).toContain("50.0KB read budget");
+		expect(output).toContain("or widen the requested range to increase the budget");
 	});
 });
