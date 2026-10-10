@@ -219,6 +219,9 @@ function restoreRecoverableState(target, storedIds, mutatedTabIds) {
 function extensionOwnedAttachedTabIds(targets, recoverableTabIds) {
   return targets.filter((target) => target.attached && target.tabId !== undefined && recoverableTabIds.has(target.tabId)).map((target) => target.tabId);
 }
+function recoverableHelloTabIds(recoverableTabIds, attachedTabIds) {
+  return [...new Set([...recoverableTabIds, ...attachedTabIds])];
+}
 function requireRecoveryStateLoaded(loaded) {
   if (!loaded)
     throw new Error("browser relay recovery state failed to load");
@@ -978,7 +981,7 @@ async function buildHello() {
     discardedTabsProtocol: 1,
     tabs: snapshots,
     attachedTabIds,
-    recoverableTabIds: [...recoverableTabIds],
+    recoverableTabIds: recoverableHelloTabIds(recoverableTabIds, attachedTabIds),
     relayDetachedTabIds: [...relayDetachedTabIds],
     recoveryLoaderIds: Object.fromEntries([...recoveryLoaderIds].map(([tabId, loaderId]) => [
       String(tabId),
