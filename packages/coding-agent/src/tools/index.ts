@@ -334,6 +334,11 @@ export interface ToolSession {
 		Partial<Pick<SessionManager, "getSessionId" | "getLeafId" | "appendModelUsage">>;
 	/** Get eval kernel owner ID for session-scoped retained-kernel cleanup. */
 	getEvalKernelOwnerId?: () => string | null;
+	/**
+	 * Counts rewrites of the model's conversation (compaction, pruning, rewinds,
+	 * branch switches): tool output it received before a change may be gone from its context.
+	 */
+	getHistoryRevision?: () => number;
 	/** Current enabled eval prelude definitions. */
 	getEvalPreludes?: () => readonly EvalPreludeDefinition[];
 	/**

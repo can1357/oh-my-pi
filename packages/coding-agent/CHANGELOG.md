@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added a report to `computer` Eval cells that send desktop input: once the apps go quiet, the cell ends with what changed in each touched window since the model's last tree of it ([#15280](https://github.com/can1357/oh-my-pi/pull/15280) by [@will-bogusz](https://github.com/will-bogusz))
+
 ## [18.8.9] - 2026-10-10
 
 ### Added

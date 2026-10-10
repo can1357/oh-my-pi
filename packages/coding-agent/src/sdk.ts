@@ -2306,6 +2306,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			getSessionFile: () => sessionManager.getSessionFile() ?? null,
 			sessionManager,
 			getEvalKernelOwnerId: () => evalKernelOwnerId,
+			getHistoryRevision: () => session?.agent.historyRevision ?? 0,
 			getEvalSessionId: () => session?.getEvalSessionId() ?? defaultEvalSessionId(toolSession),
 			assertEvalExecutionAllowed: () => session?.assertEvalExecutionAllowed(),
 			trackEvalExecution: (execution, abortController) =>

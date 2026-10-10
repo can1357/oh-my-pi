@@ -21,6 +21,19 @@ export type ComputerWorkerInbound =
 	| { type: "ping"; id: string }
 	| { type: "run"; id: string; code: string; timeoutMs: number; session: ComputerSessionSnapshot }
 	| { type: "capabilities"; id: string; session: ComputerSessionSnapshot }
+	/**
+	 * Report what the cell that just ended changed; the result's `returnValue` is the report text or undefined.
+	 * `output` is what the cell printed: an `ax()` tree it carries counts as seen by the model. `forget`: the
+	 * model's context was rewritten since the last settle, so trees it saw before may be gone from it.
+	 */
+	| {
+			type: "settle";
+			id: string;
+			timeoutMs: number;
+			session: ComputerSessionSnapshot;
+			output: string;
+			forget?: boolean;
+	  }
 	| { type: "abort"; id: string }
 	| { type: "revoke-control"; id: string }
 	| { type: "tool-reply"; id: string; reply: ToolReply }

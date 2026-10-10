@@ -448,6 +448,7 @@ export class Agent {
 	#steeringMode: "all" | "one-at-a-time";
 	#followUpMode: "all" | "one-at-a-time";
 	#interruptMode: "immediate" | "wait";
+	#historyRevision = 0;
 	#sessionId?: string;
 	#deadline?: number;
 	#promptCacheKey?: string;
@@ -1266,10 +1267,16 @@ export class Agent {
 		this.#state.tools = t;
 	}
 
+	/** Times the conversation was rewritten or cleared (`replaceMessages`, `clearMessages`, `reset`): a change means earlier messages may be gone from it. */
+	get historyRevision(): number {
+		return this.#historyRevision;
+	}
+
 	replaceMessages(ms: AgentMessage[]) {
 		// New array assignment is intentional: caller-owned `ms` may be mutated
 		// after handoff; snapshot it so external mutations cannot leak in.
 		this.#state.messages = ms.slice();
+		this.#historyRevision++;
 	}
 
 	/** Signal that the steering/follow-up queue contents may have changed. Every
@@ -1510,6 +1517,7 @@ export class Agent {
 
 	clearMessages() {
 		this.#state.messages.length = 0;
+		this.#historyRevision++;
 	}
 
 	abort(reason?: unknown) {
@@ -1552,6 +1560,7 @@ export class Agent {
 			this.#resolveRunningPrompt = undefined;
 		}
 		this.#state.messages.length = 0;
+		this.#historyRevision++;
 		this.#state.isStreaming = false;
 		this.#state.streamMessage = null;
 		this.#state.pendingToolCalls.clear();

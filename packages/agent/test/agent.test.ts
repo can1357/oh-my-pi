@@ -1742,6 +1742,21 @@ describe("Agent — F3 in-place state mutation", () => {
 		expect(agent.state.pendingToolCalls.size).toBe(0);
 	});
 
+	it("historyRevision advances on every conversation rewrite, but not on appends", () => {
+		const agent = new Agent();
+		const revisions = [agent.historyRevision];
+		agent.appendMessage({ role: "user", content: "x", timestamp: 1 });
+		revisions.push(agent.historyRevision);
+		agent.replaceMessages([{ role: "user", content: "y", timestamp: 2 }]);
+		revisions.push(agent.historyRevision);
+		agent.clearMessages();
+		revisions.push(agent.historyRevision);
+		agent.appendMessage({ role: "user", content: "z", timestamp: 3 });
+		agent.reset();
+		revisions.push(agent.historyRevision);
+		expect(revisions).toEqual([0, 0, 1, 2, 3]);
+	});
+
 	it("replaceMessages still snapshots the input (callers may keep mutating their array)", () => {
 		const agent = new Agent();
 		const external = [{ role: "user" as const, content: "x", timestamp: 1 }];
