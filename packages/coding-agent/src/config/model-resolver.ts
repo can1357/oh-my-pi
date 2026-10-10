@@ -1665,9 +1665,10 @@ export function resolveSessionModelSelector(
 }
 
 /**
- * Discovery-backed providers (models.yml `discovery:` or extension
- * `fetchDynamicModels`) that could still supply one of the saved selectors
- * after a provider-scoped refresh. Disabled providers are skipped.
+ * Discovery-backed providers (models.yml `discovery:`, extension
+ * `fetchDynamicModels`, or a built-in live-only catalog) that could still
+ * supply one of the saved selectors after a provider-scoped refresh.
+ * Disabled providers are skipped.
  */
 export function sessionModelDiscoveryProviders(
 	modelRegistry: ModelRegistry,

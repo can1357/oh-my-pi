@@ -201,7 +201,30 @@ export class KeyCascade implements KeysApi {
 	#hasDedicatedEnvAuth(provider: string): boolean {
 		const oauthTokenEnv = authPolicyFor(provider)?.oauthTokenEnv;
 		if (oauthTokenEnv) return oauthTokenEnv.some(name => Boolean($env[name]?.trim()));
-		return Boolean(getEnvApiKey(provider));
+		return this.#envApiKey(provider) !== undefined;
+	}
+
+	/**
+	 * Env key the cascade may treat as a credential. A synthesized
+	 * `empty-fallback` (openzoo's `openzoo-local` when `OPENZOO_API_KEY` is
+	 * unset) is only the keyless stand-in: a stored API key that is not itself
+	 * that marker — including a source-less broker credential — wins, and the
+	 * placeholder is returned only when nothing stored can authenticate.
+	 */
+	#envApiKey(provider: string): string | undefined {
+		const envKey = getEnvApiKey(provider);
+		if (!envKey) return undefined;
+		return this.#keylessEnvYieldsToStored(provider, envKey) ? undefined : envKey;
+	}
+
+	#keylessEnvYieldsToStored(provider: string, envKey: string): boolean {
+		const login = authPolicyFor(provider)?.login;
+		if (login?.kind !== "api-key") return false;
+		const fallback = login.emptyFallback;
+		if (fallback === undefined || fallback === "" || envKey !== fallback) return false;
+		return this.#deps.pool
+			.credentials(provider)
+			.some(credential => credential.type === "api_key" && !this.isKeylessFallback(provider, credential));
 	}
 
 	/**
@@ -225,7 +248,7 @@ export class KeyCascade implements KeysApi {
 		if (this.#deps.overrides.fallbackKey(provider) !== undefined) return { kind: "config", concrete: true };
 		if (
 			(env === "dedicated" && this.#hasDedicatedEnvAuth(provider)) ||
-			(env === "aliases" && (this.#hasDedicatedEnvAuth(provider) || Boolean(getEnvApiKey(provider))))
+			(env === "aliases" && (this.#hasDedicatedEnvAuth(provider) || this.#envApiKey(provider) !== undefined))
 		) {
 			return { kind: "env", envVar: getEnvApiKeyName(provider), concrete };
 		}
@@ -298,10 +321,15 @@ export class KeyCascade implements KeysApi {
 		const fallbackKey = this.#deps.overrides.fallbackKey(provider);
 		if (fallbackKey !== undefined) return this.#deps.overrides.resolve(fallbackKey);
 
-		const envKey = getEnvApiKey(provider);
+		const envKey = this.#envApiKey(provider);
 		if (envKey) return envKey;
 
-		const apiKeySelection = this.#deps.selector.selectByType(provider, "api_key");
+		const apiKeySelection = this.#deps.selector.selectByType(
+			provider,
+			"api_key",
+			undefined,
+			credential => !this.isKeylessFallback(provider, credential),
+		);
 		if (apiKeySelection) {
 			return this.#deps.overrides.resolve(apiKeySelection.credential.key);
 		}
@@ -432,7 +460,7 @@ export class KeyCascade implements KeysApi {
 		const fallbackKey = this.#deps.overrides.fallbackKey(provider);
 		if (fallbackKey !== undefined) return this.#deps.overrides.resolve(fallbackKey);
 
-		const envKey = getEnvApiKey(provider);
+		const envKey = this.#envApiKey(provider);
 		if (envKey) return envKey;
 		const apiKeySelection = await this.#deps.selector.selectApiKey(
 			provider,
@@ -560,7 +588,7 @@ export class KeyCascade implements KeysApi {
 		);
 		if (loginApiKeySource) return loginApiKeySource;
 		if (this.#deps.overrides.fallbackKey(provider) !== undefined) return "provider config (fallback)";
-		if (getEnvApiKey(provider)) return `env (over ${baseLabel})`;
+		if (this.#envApiKey(provider)) return `env (over ${baseLabel})`;
 		const apiKeySource = describeStored(
 			"api_key",
 			credential => credential.type !== "api_key" || credential.source !== "login",

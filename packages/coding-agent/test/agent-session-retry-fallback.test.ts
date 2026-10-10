@@ -5449,7 +5449,6 @@ describe("AgentSession retry fallback", () => {
 			arguments: { path: "report.txt", content: "lorem ipsum ".repeat(5000) },
 		};
 		const requestedModels: string[] = [];
-		let requestCount = 0;
 		const agent = new Agent({
 			getApiKey: model => `${model.provider}-test-key`,
 			initialState: {
@@ -5459,10 +5458,13 @@ describe("AgentSession retry fallback", () => {
 				messages: [],
 			},
 			streamFn: (model, context, options) => {
-				requestCount++;
 				requestedModels.push(`${model.provider}/${model.id}`);
-				// The first mid-stream drop gets one same-model retry before fallback selection.
-				if (requestCount <= 2) return transportErrorAfterToolCallStream(model, toolCall);
+				// A mid-stream socket drop retries the same model once before the
+				// chain is consulted. Keep failing on the primary so that consult
+				// still has to fit the preserved unexecuted tool turn.
+				if (model.provider === primaryModel.provider && model.id === primaryModel.id) {
+					return transportErrorAfterToolCallStream(model, toolCall);
+				}
 				const mock = createMockModel({ id: model.id, provider: model.provider });
 				mock.push({ content: ["Recovered on a fitting fallback"] });
 				return mock.stream(mock, context, options);
