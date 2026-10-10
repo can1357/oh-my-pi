@@ -224,13 +224,46 @@ describe("startup composer terminal session identity", () => {
 		fs.mkdirSync(project);
 		setAgentDir(agentDir);
 		process.env.TMUX_PANE = "%startup-no-auto-resume-scan";
-		let scan: ReturnType<typeof vi.spyOn> | undefined;
 		try {
-			scan = vi.spyOn(fs, "readdirSync");
-			expect(resolveTerminalSessionPrepaint(project, { canAutoResume: () => false })).toBeUndefined();
-			expect(scan).not.toHaveBeenCalled();
+			const scan = vi.spyOn(fs, "readdirSync");
+			try {
+				expect(resolveTerminalSessionPrepaint(project, { canAutoResume: () => false })).toBeUndefined();
+				expect(scan).not.toHaveBeenCalled();
+			} finally {
+				scan.mockRestore();
+			}
 		} finally {
-			scan?.mockRestore();
+			setAgentDir(originalAgentDir);
+			if (originalTmuxPane === undefined) delete process.env.TMUX_PANE;
+			else process.env.TMUX_PANE = originalTmuxPane;
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("honors a fresh missing breadcrumb before scanning a different cwd", () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "omp-startup-fresh-cross-cwd-"));
+		const agentDir = path.join(root, "agent");
+		const projectA = path.join(root, "project-a");
+		const projectB = path.join(root, "project-b");
+		const originalAgentDir = getAgentDir();
+		const originalTmuxPane = process.env.TMUX_PANE;
+		fs.mkdirSync(projectA);
+		fs.mkdirSync(projectB);
+		setAgentDir(agentDir);
+		process.env.TMUX_PANE = "%startup-fresh-cross-cwd";
+		const sessionB = path.join(sessionDirForCwd(projectB), "session-b.jsonl");
+		fs.mkdirSync(path.dirname(sessionB), { recursive: true });
+		fs.writeFileSync(
+			sessionB,
+			`${JSON.stringify({ type: "session", id: "b", cwd: projectB })}\n${JSON.stringify({
+				type: "message",
+				message: { role: "user", content: "project b work" },
+			})}\n`,
+		);
+		try {
+			writeTerminalBreadcrumb(projectA, path.join(root, "missing-a.jsonl"), true);
+			expect(resolveTerminalSessionPrepaint(projectB)).toBeUndefined();
+		} finally {
 			setAgentDir(originalAgentDir);
 			if (originalTmuxPane === undefined) delete process.env.TMUX_PANE;
 			else process.env.TMUX_PANE = originalTmuxPane;
@@ -400,6 +433,57 @@ describe("startup composer terminal session identity", () => {
 		}
 	});
 
+	it("ignores display text beyond the prefix on a line that starts inside it", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "omp-startup-prefix-line-"));
+		const agentDir = path.join(root, "agent");
+		const project = path.join(root, "project");
+		const originalAgentDir = getAgentDir();
+		const originalTmuxPane = process.env.TMUX_PANE;
+		fs.mkdirSync(project);
+		process.env.TMUX_PANE = "%startup-prefix-line";
+		setAgentDir(agentDir);
+		const sessions = sessionDirForCwd(project);
+		const resumable = path.join(sessions, "resumable.jsonl");
+		const imageFirst = path.join(sessions, "image-first.jsonl");
+		fs.mkdirSync(sessions, { recursive: true });
+		fs.writeFileSync(
+			resumable,
+			`${JSON.stringify({ type: "session", id: "resumable", cwd: project })}\n${JSON.stringify({
+				type: "message",
+				message: { role: "user", content: "real work" },
+			})}\n`,
+		);
+		fs.writeFileSync(
+			imageFirst,
+			`${JSON.stringify({ type: "session", id: "image-first", cwd: project })}\n${JSON.stringify({
+				type: "message",
+				message: {
+					role: "user",
+					content: [
+						{ type: "image", data: "x".repeat(5_000) },
+						{ type: "text", text: "late text" },
+					],
+				},
+			})}\n`,
+		);
+		fs.utimesSync(resumable, new Date("2026-01-01T00:00:00Z"), new Date("2026-01-01T00:00:00Z"));
+		fs.utimesSync(imageFirst, new Date("2026-01-02T00:00:00Z"), new Date("2026-01-02T00:00:00Z"));
+		try {
+			expect(resolveTerminalSessionPrepaint(project)?.sessionFile).toBe(resumable);
+			const live = await SessionManager.continueRecent(project);
+			try {
+				expect(live.getSessionFile()).toBe(resumable);
+			} finally {
+				await live.close();
+			}
+		} finally {
+			setAgentDir(originalAgentDir);
+			if (originalTmuxPane === undefined) delete process.env.TMUX_PANE;
+			else process.env.TMUX_PANE = originalTmuxPane;
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
 	it("normalizes an artifact breadcrumb to the interactive parent session", () => {
 		const root = fs.mkdtempSync(path.join(os.tmpdir(), "omp-startup-artifact-breadcrumb-"));
 		const agentDir = path.join(root, "agent");
@@ -440,14 +524,16 @@ describe("startup composer terminal session identity", () => {
 		fs.writeFileSync(sessionFile, `${JSON.stringify({ type: "session", id: "current", cwd: project })}\n`);
 		process.env.TMUX_PANE = "%startup-breadcrumb-no-scan";
 		setAgentDir(agentDir);
-		let scan: ReturnType<typeof vi.spyOn> | undefined;
 		try {
 			writeTerminalBreadcrumb(project, sessionFile);
-			scan = vi.spyOn(fs, "readdirSync");
-			expect(resolveTerminalSessionPrepaint(project)).toEqual({ cacheCwd: project, sessionFile });
-			expect(scan).not.toHaveBeenCalled();
+			const scan = vi.spyOn(fs, "readdirSync");
+			try {
+				expect(resolveTerminalSessionPrepaint(project)).toEqual({ cacheCwd: project, sessionFile });
+				expect(scan).not.toHaveBeenCalled();
+			} finally {
+				scan.mockRestore();
+			}
 		} finally {
-			scan?.mockRestore();
 			setAgentDir(originalAgentDir);
 			if (originalTmuxPane === undefined) delete process.env.TMUX_PANE;
 			else process.env.TMUX_PANE = originalTmuxPane;

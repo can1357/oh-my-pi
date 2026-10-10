@@ -46,6 +46,8 @@ export interface PrepaintComposerPreferences extends ComposerPreferences {
 	/** Persisted settings layer that may safely seed the next launch. */
 	readonly autoResumeCacheScope?: "global" | "project";
 	readonly autoResumeSourcePaths?: readonly string[];
+	/** Potential project sources that can override inherited global intent. */
+	readonly autoResumeProjectSourcePaths?: readonly string[];
 }
 
 interface PendingComposer {
@@ -91,6 +93,9 @@ export function resolveTerminalSessionPrepaint(
 	const breadcrumb = readTerminalBreadcrumbEntrySync();
 	const resolvedCwd = path.resolve(cwd);
 	const canAutoResume = options.canAutoResume ?? (() => true);
+	// Match continueRecent(): a lazy /new boundary that never materialized must
+	// not leak an older current-project session into prepaint, even after cwd changes.
+	if (breadcrumb?.fresh && !breadcrumb.exists) return undefined;
 	// A terminal without a breadcrumb follows continueRecent()'s project-local
 	// fallback. Resolve it from the same canonical session directory as the live
 	// selector, rather than the last cache writer's possibly custom directory. The
@@ -229,6 +234,7 @@ export function applyStartupComposerPreferences(update: PrepaintComposerPreferen
 			update.autoResume,
 			update.autoResumeCacheScope === "project",
 			update.autoResumeSourcePaths,
+			update.autoResumeProjectSourcePaths,
 		);
 	}
 }

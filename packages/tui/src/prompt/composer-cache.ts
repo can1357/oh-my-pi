@@ -30,7 +30,7 @@ import type { SymbolPreset } from "../theme/theme";
 import { isWordCompletionMethod } from "./word-completion";
 
 /** Bump whenever any payload format changes; older stores are cleared on open. */
-const FORMAT_VERSION = 8;
+const FORMAT_VERSION = 9;
 /** Project key of rows that serve every project lacking its own. */
 const ANY_PROJECT = "";
 
@@ -256,7 +256,6 @@ export class ComposerCache {
 	readonly #db: Database;
 	readonly #select: Statement<{ project: string; kind: EntryKind; value: string }, [string, string]>;
 	readonly #upsert: Statement<unknown, [string, EntryKind, string]>;
-	readonly #delete: Statement<unknown, [string, EntryKind]>;
 	/**
 	 * Value this connection last read or wrote per `project\0kind`. Startup and
 	 * model/status events re-send identical payloads; matching ones skip the
@@ -278,7 +277,6 @@ export class ComposerCache {
 		this.#upsert = db.prepare(
 			"INSERT INTO entries (project, kind, value) VALUES (?, ?, ?) ON CONFLICT (project, kind) DO UPDATE SET value = excluded.value WHERE value IS NOT excluded.value",
 		);
-		this.#delete = db.prepare("DELETE FROM entries WHERE project = ? AND kind = ?");
 	}
 
 	/**
@@ -309,7 +307,7 @@ export class ComposerCache {
 		const ui = parseUiState(parseJson(own.ui)) ?? parseUiState(parseJson(anyProject.ui));
 		const ownAutoResume = parseCachedAutoResume(parseJson(own["auto-resume"]));
 		const globalAutoResume = parseCachedAutoResume(parseJson(anyProject["auto-resume"]));
-		const autoResume = ownAutoResume?.projectScoped
+		const autoResume = ownAutoResume
 			? cachedAutoResumeIsFresh(ownAutoResume)
 				? ownAutoResume.value
 				: undefined
@@ -373,7 +371,7 @@ export class ComposerCache {
 			logger.debug("composer cache auto-resume read failed", { error: String(error) });
 			return undefined;
 		}
-		if (own?.projectScoped) return cachedAutoResumeIsFresh(own) ? own.value : undefined;
+		if (own) return cachedAutoResumeIsFresh(own) ? own.value : undefined;
 		return cachedAutoResumeIsFresh(global) ? global.value : undefined;
 	}
 
@@ -390,32 +388,48 @@ export class ComposerCache {
 	}
 
 	/** Refresh the live auto-resume setting without replacing the cached UI snapshot. */
-	writeAutoResume(cwd: string, autoResume: boolean, projectScoped = false, sourcePaths: readonly string[] = []): void {
+	writeAutoResume(
+		cwd: string,
+		autoResume: boolean,
+		projectScoped = false,
+		sourcePaths: readonly string[] = [],
+		projectSourcePaths: readonly string[] = [],
+	): void {
 		const project = path.resolve(cwd);
-		const value: CachedAutoResume = {
+		const globalValue: CachedAutoResume = {
 			value: autoResume,
-			projectScoped,
+			projectScoped: false,
 			sources: sourcePaths.length > 0 ? snapshotSources(sourcePaths) : undefined,
 		};
-		const json = JSON.stringify(value);
+		const ownValue: CachedAutoResume = projectScoped
+			? { ...globalValue, projectScoped: true }
+			: {
+					...globalValue,
+					sources:
+						sourcePaths.length + projectSourcePaths.length > 0
+							? snapshotSources([...sourcePaths, ...projectSourcePaths])
+							: undefined,
+				};
+		const ownJson = JSON.stringify(ownValue);
+		const globalJson = JSON.stringify(globalValue);
 		const ownKey = `${project}\0auto-resume`;
 		const globalKey = `${ANY_PROJECT}\0auto-resume`;
 		try {
 			if (projectScoped) {
-				if (this.#known.get(ownKey) === json) return;
-				this.#upsert.run(project, "auto-resume", json);
-				this.#known.set(ownKey, json);
+				if (this.#known.get(ownKey) === ownJson) return;
+				this.#upsert.run(project, "auto-resume", ownJson);
+				this.#known.set(ownKey, ownJson);
 				return;
 			}
-			// Global/default values belong only in the shared row. Removing this
-			// project's inherited snapshot prevents it from shadowing later global
-			// changes, while explicitly project-scoped rows remain distinguishable.
+			// Keep a project-specific inherited snapshot so creating the first local
+			// override invalidates speculation. Its global source snapshots also make
+			// it stale when inherited intent changes, so it cannot mask the shared row.
 			this.#db.transaction(() => {
-				this.#delete.run(project, "auto-resume");
-				this.#upsert.run(ANY_PROJECT, "auto-resume", json);
+				this.#upsert.run(project, "auto-resume", ownJson);
+				this.#upsert.run(ANY_PROJECT, "auto-resume", globalJson);
 			})();
-			this.#known.delete(ownKey);
-			this.#known.set(globalKey, json);
+			this.#known.set(ownKey, ownJson);
+			this.#known.set(globalKey, globalJson);
 		} catch (error) {
 			logger.debug("composer cache write failed", { kind: "auto-resume", error: String(error) });
 		}
@@ -492,7 +506,6 @@ export class ComposerCache {
 		// Unfinalized statements keep the file handle open on Windows.
 		this.#select.finalize();
 		this.#upsert.finalize();
-		this.#delete.finalize();
 		this.#db.close();
 	}
 

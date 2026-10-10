@@ -206,6 +206,21 @@ describe("composer startup cache", () => {
 		cache.close();
 	});
 
+	it("rejects inherited auto-resume when the first project override appears", async () => {
+		const project = path.join(root, "project");
+		const globalConfig = path.join(root, "agent", "config.yml");
+		const projectConfig = path.join(project, ".omp", "config.yml");
+		await Bun.write(globalConfig, "autoResume: true\n");
+		const cache = ComposerCache.open(dbPath);
+		cache.writeAutoResume(project, true, false, [globalConfig], [projectConfig]);
+
+		expect(cache.cachedAutoResume(project)).toBeTrue();
+		await Bun.write(projectConfig, "autoResume: false\n");
+
+		expect(cache.cachedAutoResume(project)).toBeUndefined();
+		cache.close();
+	});
+
 	it("refreshes zero-turn layout while preserving resumable-session facts", () => {
 		const project = path.join(root, "project");
 		const sessionFile = path.join(root, "sessions", "resumable.jsonl");

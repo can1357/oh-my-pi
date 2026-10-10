@@ -1953,6 +1953,8 @@ export async function runRootCommand(
 			autoResumeSourcePaths: autoResumeCacheScope
 				? settingsInstance.settingCacheSourcePaths(autoResumeCacheScope)
 				: undefined,
+			autoResumeProjectSourcePaths:
+				autoResumeCacheScope === "global" ? settingsInstance.settingCacheSourcePaths("project") : undefined,
 			quiet: cfgStartupQuiet.get(settingsInstance),
 			composerShape: cfgComposerShape.get(settingsInstance),
 			showHardwareCursor: cfgShowHardwareCursor.get(settingsInstance),

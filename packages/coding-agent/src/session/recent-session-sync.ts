@@ -1,7 +1,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import {
-	isSessionDisplayMessageRole,
+	extractFirstDisplayMessageFromPrefix,
 	isSessionResumabilityEmpty,
 	SESSION_RESUMABILITY_PREFIX_BYTES,
 } from "./session-resumability";
@@ -21,16 +21,6 @@ export function compareSessionRecency(a: SessionRecency, b: SessionRecency): num
 	);
 }
 
-function hasDisplayText(content: unknown): boolean {
-	if (typeof content === "string") return content.trim().length > 0;
-	if (!Array.isArray(content)) return false;
-	return content.some(part => {
-		if (!part || typeof part !== "object") return false;
-		const text = (part as { text?: unknown }).text;
-		return typeof text === "string" && text.trim().length > 0;
-	});
-}
-
 function inspectSessionFileSync(sessionFile: string): { created: Date; resumable: boolean } {
 	let file: number | undefined;
 	let created = new Date(0);
@@ -38,6 +28,10 @@ function inspectSessionFileSync(sessionFile: string): { created: Date; resumable
 	let hasResumableContent = false;
 	try {
 		file = fs.openSync(sessionFile, "r");
+		const prefixBuffer = Buffer.allocUnsafe(SESSION_RESUMABILITY_PREFIX_BYTES);
+		const prefixBytes = fs.readSync(file, prefixBuffer, 0, prefixBuffer.length, 0);
+		const hasPrefixDisplayMessage =
+			extractFirstDisplayMessageFromPrefix(prefixBuffer.subarray(0, prefixBytes).toString("utf8")) !== undefined;
 		const buffer = Buffer.allocUnsafe(64 * 1024);
 		const decoder = new TextDecoder();
 		let pending = "";
@@ -62,6 +56,7 @@ function inspectSessionFileSync(sessionFile: string): { created: Date; resumable
 				if (Number.isFinite(timestamp.getTime())) created = timestamp;
 			}
 			if (withinPrefix && record.type === "session") hasHeader = true;
+			if (hasHeader && hasPrefixDisplayMessage) hasResumableContent = true;
 			if (
 				withinPrefix &&
 				!isSessionResumabilityEmpty({
@@ -78,11 +73,9 @@ function inspectSessionFileSync(sessionFile: string): { created: Date; resumable
 				return hasHeader;
 			}
 			if (record.type !== "message" || !record.message) return hasHeader && hasResumableContent;
-			const hasDisplayMessage =
-				withinPrefix && isSessionDisplayMessageRole(record.message.role) && hasDisplayText(record.message.content);
 			hasResumableContent ||= !isSessionResumabilityEmpty({
 				assistantTurns: record.message.role === "assistant" ? 1 : 0,
-				firstMessage: hasDisplayMessage ? "display message" : undefined,
+				firstMessage: hasPrefixDisplayMessage ? "display message" : undefined,
 			});
 			return hasHeader && hasResumableContent;
 		};
