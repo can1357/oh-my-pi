@@ -126,15 +126,21 @@ async function readBunLockResolution(name: string): Promise<string | undefined> 
  *
  * Validation runs each factory for real, so anything a plugin starts eagerly
  * (bridge child processes, timers, watchers) would otherwise outlive the check
- * and keep one-shot `omp plugin install`/`upgrade` from exiting (#15167). Binds
- * an inert runner — in-memory auth and session, no local model config — purely
- * to deliver `session_shutdown` and clear managed timers, mirroring `omp models`.
+ * and keep one-shot `omp plugin install`/`upgrade` from exiting (#15167). That
+ * includes factories that threw after starting work, whose partial instances
+ * ride along on `result.errors`. Binds an inert runner — in-memory auth and
+ * session, no local model config — purely to deliver `session_shutdown` and
+ * clear managed timers, mirroring `omp models`.
  */
 async function shutdownValidatedExtensions(result: LoadExtensionsResult, cwd: string): Promise<void> {
-	if (result.extensions.length === 0) return;
+	const extensions = [...result.extensions];
+	for (const failure of result.errors) {
+		if (failure.extension) extensions.push(failure.extension);
+	}
+	if (extensions.length === 0) return;
 	const authStorage = new AuthStorage(new SqliteAuthCredentialStore(new Database(":memory:")));
 	const runner = new ExtensionRunner(
-		result.extensions,
+		extensions,
 		result.runtime,
 		cwd,
 		SessionManager.inMemory(cwd),

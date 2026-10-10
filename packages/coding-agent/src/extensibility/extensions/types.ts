@@ -1953,10 +1953,22 @@ export interface PreparedExtension {
 	error: string | null;
 }
 
+/** Extension that failed to import or bind. */
+export interface ExtensionLoadError {
+	path: string;
+	error: string;
+	/**
+	 * Partially initialized instance when the factory threw after it started.
+	 * Holds the handlers registered before the throw; never activated, but hosts
+	 * that must tear down the factory's side effects emit `session_shutdown` to it.
+	 */
+	extension?: Extension;
+}
+
 /** Result of loading extensions. */
 export interface LoadExtensionsResult {
 	extensions: Extension[];
-	errors: Array<{ path: string; error: string }>;
+	errors: ExtensionLoadError[];
 	runtime: ExtensionRuntime;
 	/** Session-independent imported factories safe to rebind in child sessions. */
 	preparedExtensions?: PreparedExtension[];
