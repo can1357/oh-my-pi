@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Fixed `/fork pane|tab` and Herdr `ctx.ui.openTerminal()` launches failing in panes whose shell is not POSIX (such as Nushell): the launcher now types only the path of a self-deleting `/bin/sh` script that runs the exact argv, so Herdr launches no longer ask for POSIX-shell confirmation
+- Fixed `/fork pane|tab` and Herdr `ctx.ui.openTerminal()` launches failing in panes whose shell is not POSIX (such as Nushell): the launcher now types only the path of a self-deleting `/bin/sh` script that runs the exact argv, so Herdr launches no longer ask for POSIX-shell confirmation ([#15262](https://github.com/can1357/oh-my-pi/pull/15262) by [@shgew](https://github.com/shgew))
 
 ## [18.8.9] - 2026-10-10
 
