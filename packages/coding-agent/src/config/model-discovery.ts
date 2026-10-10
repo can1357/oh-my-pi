@@ -15,6 +15,7 @@ import {
 	resolveModelReference,
 	stripBracketedModelIdAffixes,
 } from "@oh-my-pi/pi-catalog/identity";
+import { EXLLAMA3_DEFAULT_BASE_URL } from "@oh-my-pi/pi-catalog/provider-models/cache-provider-id";
 import {
 	fetchLiteLLMRichModels,
 	fetchLmStudioNativeModelMetadata,
@@ -218,17 +219,24 @@ type DiscoveredModelRuntimeMetadata = {
 	input?: ("text" | "image")[];
 };
 
+/**
+ * A llama-server-shaped model-list entry, shared by the llama.cpp and ExLlama3
+ * (TabbyAPI) discovery paths: TabbyAPI shapes its roster after llama-server
+ * deliberately, so both parsers normalize into this one shape.
+ */
 type LlamaCppModelListEntry = {
 	id: string;
 	input?: ("text" | "image")[];
 	runtimeContextWindow?: number;
 	/**
-	 * `--ctx-size` extracted from the entry's `status.args` (rendered CLI arg
-	 * vector) or `status.preset` INI. Populated for llama-server router-mode
-	 * presets so unloaded models surface the user's configured window instead
-	 * of falling through to the 128K default — the router-level `/props`
-	 * reports a dummy `n_ctx: 0` and `meta.n_ctx` is only merged in after a
-	 * child instance loads (issue #4190).
+	 * The context window the server declares for this entry outside the loaded
+	 * runtime. For llama.cpp this is `--ctx-size` extracted from the entry's
+	 * `status.args` (rendered CLI arg vector) or `status.preset` INI — populated
+	 * for llama-server router-mode presets so unloaded models surface the user's
+	 * configured window instead of falling through to the 128K default, since the
+	 * router-level `/props` reports a dummy `n_ctx: 0` and `meta.n_ctx` is only
+	 * merged in after a child instance loads (issue #4190). For ExLlama3
+	 * (TabbyAPI) this is `parameters.max_seq_len` from the model card.
 	 */
 	configuredContextWindow?: number;
 	trainingContextWindow?: number;
@@ -611,42 +619,87 @@ async function discoverLlamaCppServerMetadata(
 	}
 }
 
-export async function discoverLlamaCppModels(
+/**
+ * Options for the shared local-server roster probe, which both llama.cpp and
+ * ExLlama3 (TabbyAPI) discovery run: the two servers expose a llama-server-shaped
+ * model list and a `/props` endpoint, and differ only in the list URL, the roster
+ * parser, and which HTTP statuses count as an auth rejection.
+ */
+type LocalServerRosterOptions = {
+	/** The model-list URL to probe. */
+	modelsUrl: string;
+	/** The native base URL for the `/props` probe and the loopback timeout budget. */
+	nativeBaseUrl: string;
+	/**
+	 * HTTP statuses that count as an auth rejection for this provider. llama.cpp
+	 * treats both 401 and 403 as "needs a key"; TabbyAPI answers 401 for every
+	 * auth failure (its `check_api_key` never raises 403), so a 403 on its default
+	 * port is more likely a foreign service (macOS AirPlay answers 403 for unknown
+	 * paths) than a missing key, and exllama3 lists only 401.
+	 */
+	authRejectionStatuses: readonly number[];
+	/** Parse the roster payload into normalized entries. */
+	parse: (payload: unknown) => LlamaCppModelListEntry[];
+};
+
+/**
+ * Probe a local server's model list and server-wide `/props` metadata in
+ * parallel, applying the provider's auth-rejection statuses to the non-OK
+ * response, and build the discovered models from the parsed roster.
+ *
+ * Shared by {@link discoverLlamaCppModels} and {@link discoverExLlama3Models}:
+ * the two differ only in the list URL, the roster parser, and the auth-rejection
+ * statuses, so the fetch/auth/timeout dance and the build loop live here once.
+ */
+async function discoverLocalServerModels(
 	providerConfig: DiscoveryProviderConfig,
 	ctx: DiscoveryContext,
+	options: LocalServerRosterOptions,
 ): Promise<Model<Api>[]> {
-	const baseUrl = normalizeLlamaCppBaseUrl(providerConfig.baseUrl);
-	const modelsUrl = `${baseUrl}/models`;
-
+	const { modelsUrl, nativeBaseUrl, authRejectionStatuses, parse } = options;
 	const baseHeaders: Record<string, string> = { ...providerConfig.headers };
 	let headers = baseHeaders;
 	const customTimeoutMs = providerConfig.discovery.timeoutMs;
 	const attempt = async (h: Record<string, string>) => {
-		const [payload, metadata] = await Promise.all([
-			withTimeoutSignal(discoveryProbeTimeoutMs(baseUrl, 250, customTimeoutMs), async signal => {
-				const response = await ctx.fetch(modelsUrl, {
-					headers: h,
-					signal,
-				});
+		const [payload, serverMetadata] = await Promise.all([
+			// Loopback budget: a stopped local server means "not running", not
+			// "slow link", so an implicit provider with no server up must not
+			// stall startup.
+			withTimeoutSignal(discoveryProbeTimeoutMs(nativeBaseUrl, 250, customTimeoutMs), async signal => {
+				const response = await ctx.fetch(modelsUrl, { headers: h, signal });
 				if (!response.ok) {
+					if (response.status === 403 && !authRejectionStatuses.includes(403)) {
+						// A 403 this provider does not treat as an auth rejection is a
+						// foreign service on a crowded default port, not a missing key:
+						// surfacing it as one would prompt for a credential the service
+						// never checks. The message carries no status digits so the
+						// auth-retry classifier cannot parse it as a retryable 403.
+						throw new Error(
+							`${providerConfig.provider} discovery: the service on this port rejected the request without an authentication response`,
+						);
+					}
 					throw new DiscoveryHttpError(response.status, modelsUrl);
 				}
 				headers = h;
 				return (await response.json()) as unknown;
 			}),
-			discoverLlamaCppServerMetadata(ctx, baseUrl, h, customTimeoutMs),
+			discoverLlamaCppServerMetadata(ctx, nativeBaseUrl, h, customTimeoutMs),
 		]);
-		return [payload, metadata] as const;
+		return [payload, serverMetadata] as const;
 	};
 	const apiKey = await ctx.getBearerApiKeyResolver(providerConfig.provider);
 	const [payload, serverMetadata] = apiKey
 		? await withAuth(apiKey, key => attempt({ ...baseHeaders, Authorization: `Bearer ${key}` }))
 		: await attempt(baseHeaders);
-	const models = parseLlamaCppModelList(payload);
 	const discovered: Model<Api>[] = [];
-	for (const item of models) {
+	for (const item of parse(payload)) {
 		const { id } = item;
 		if (!id) continue;
+		// Most-runtime-truth-first: the loaded window beats the server-declared
+		// window, which beats the server-wide `/props` window, which beats the
+		// architectural training window (a 256K-trained model booted at 32K must
+		// not be registered at 256K, or every request 400s after the template is
+		// applied).
 		const contextWindow =
 			item.runtimeContextWindow ??
 			item.configuredContextWindow ??
@@ -660,7 +713,7 @@ export async function discoverLlamaCppModels(
 					name: id,
 					api: providerConfig.api,
 					provider: providerConfig.provider,
-					baseUrl: ensureLlamaCppV1BaseUrl(baseUrl),
+					baseUrl: ensureLlamaCppV1BaseUrl(nativeBaseUrl),
 					reasoning: false,
 					input: item.input ?? serverMetadata?.input ?? ["text"],
 					imageInputDecoder: "stb",
@@ -676,6 +729,19 @@ export async function discoverLlamaCppModels(
 	return discovered;
 }
 
+export async function discoverLlamaCppModels(
+	providerConfig: DiscoveryProviderConfig,
+	ctx: DiscoveryContext,
+): Promise<Model<Api>[]> {
+	const baseUrl = normalizeLlamaCppBaseUrl(providerConfig.baseUrl);
+	return discoverLocalServerModels(providerConfig, ctx, {
+		modelsUrl: `${baseUrl}/models`,
+		nativeBaseUrl: baseUrl,
+		authRejectionStatuses: [401, 403],
+		parse: parseLlamaCppModelList,
+	});
+}
+
 // ---------------------------------------------------------------------------
 // ExLlama3 (TabbyAPI)
 // ---------------------------------------------------------------------------
@@ -689,7 +755,7 @@ export async function discoverLlamaCppModels(
  * and whose OpenAI surface is the `/v1` child.
  */
 export function normalizeExLlama3BaseUrl(baseUrl?: string): string {
-	const raw = baseUrl || "http://127.0.0.1:5000/v1";
+	const raw = baseUrl || EXLLAMA3_DEFAULT_BASE_URL;
 	try {
 		const parsed = new URL(raw);
 		const trimmedPath = parsed.pathname.replace(/\/+$/g, "");
@@ -699,17 +765,6 @@ export function normalizeExLlama3BaseUrl(baseUrl?: string): string {
 		return raw;
 	}
 }
-
-type ExLlama3ModelListEntry = {
-	id: string;
-	/** `meta.n_ctx` — the context length this entry is actually loaded with. */
-	runtimeContextWindow?: number;
-	/** `parameters.max_seq_len` on TabbyAPI's model card. */
-	cardContextWindow?: number;
-	/** `meta.n_ctx_train` — the architectural training window, weakest claim. */
-	trainingContextWindow?: number;
-	input?: ("text" | "image")[];
-};
 
 /**
  * TabbyAPI's model-card extras, which the OpenAI schema it follows defines
@@ -733,7 +788,7 @@ function extractExLlama3CardCapabilities(item: Record<string, unknown>): {
 	return extracted;
 }
 
-function parseExLlama3ModelList(payload: unknown): ExLlama3ModelListEntry[] {
+function parseExLlama3ModelList(payload: unknown): LlamaCppModelListEntry[] {
 	if (!isRecord(payload) || !Array.isArray(payload.data)) {
 		return [];
 	}
@@ -759,7 +814,7 @@ function parseExLlama3ModelList(payload: unknown): ExLlama3ModelListEntry[] {
 				id: item.id,
 				input: card.input,
 				runtimeContextWindow,
-				cardContextWindow: card.contextWindow,
+				configuredContextWindow: card.contextWindow,
 				trainingContextWindow,
 			},
 		];
@@ -780,63 +835,85 @@ export async function discoverExLlama3Models(
 	ctx: DiscoveryContext,
 ): Promise<Model<Api>[]> {
 	const nativeBaseUrl = normalizeExLlama3BaseUrl(providerConfig.baseUrl);
-	const modelsUrl = `${nativeBaseUrl}/v1/models`;
-	const baseHeaders: Record<string, string> = { ...providerConfig.headers };
-	let headers = baseHeaders;
-	const customTimeoutMs = providerConfig.discovery.timeoutMs;
-	const attempt = async (h: Record<string, string>) => {
-		const [payload, serverMetadata] = await Promise.all([
-			// Loopback budget: a stopped TabbyAPI means "not running", not "slow link",
-			// so an implicit provider with no server up must not stall startup.
+	return discoverLocalServerModels(providerConfig, ctx, {
+		modelsUrl: `${nativeBaseUrl}/v1/models`,
+		nativeBaseUrl,
+		authRejectionStatuses: [401],
+		parse: parseExLlama3ModelList,
+	});
+}
+
+/**
+ * Re-probe a single selected model's runtime metadata on a local server, the
+ * shared core of {@link discoverLlamaCppModelRuntimeMetadata} and
+ * {@link discoverExLlama3ModelRuntimeMetadata}.
+ *
+ * A roster captured at discovery time can go stale when the operator reloads the
+ * model at a different context size, so the selected model's window is re-probed
+ * on selection. The probe resolves `undefined` on any failure (a stopped server,
+ * a timeout, a non-JSON body) so the caller keeps the cached row rather than
+ * rejecting the selection.
+ */
+async function discoverLocalServerModelRuntimeMetadata(
+	model: Pick<Model<Api>, "provider" | "id" | "baseUrl" | "headers">,
+	ctx: DiscoveryContext,
+	options: {
+		modelsUrl: string;
+		nativeBaseUrl: string;
+		parse: (payload: unknown) => LlamaCppModelListEntry[];
+		/**
+		 * Whether the architectural training window is a last-resort claim.
+		 * llama.cpp falls back to it; ExLlama3 does not, because patching the
+		 * selected model's window to the training ceiling after a reload could
+		 * overstate what the server accepts (a 256K-trained model booted at 32K).
+		 */
+		fallbackToTraining: boolean;
+	},
+	customTimeoutMs?: number,
+): Promise<DiscoveredModelRuntimeMetadata | undefined> {
+	const { modelsUrl, nativeBaseUrl, parse, fallbackToTraining } = options;
+	const baseHeaders: Record<string, string> = { ...model.headers };
+	const attempt = async (headers: Record<string, string>) => {
+		const [entries, serverMetadata] = await Promise.all([
 			withTimeoutSignal(discoveryProbeTimeoutMs(nativeBaseUrl, 250, customTimeoutMs), async signal => {
-				const response = await ctx.fetch(modelsUrl, { headers: h, signal });
+				const response = await ctx.fetch(modelsUrl, { headers, signal });
 				if (!response.ok) {
-					throw new DiscoveryHttpError(response.status, modelsUrl);
+					return undefined;
 				}
-				headers = h;
-				return (await response.json()) as unknown;
+				return parse(await response.json());
 			}),
-			discoverLlamaCppServerMetadata(ctx, nativeBaseUrl, h, customTimeoutMs),
+			discoverLlamaCppServerMetadata(ctx, nativeBaseUrl, headers, customTimeoutMs),
 		]);
-		return [payload, serverMetadata] as const;
-	};
-	const apiKey = await ctx.getBearerApiKeyResolver(providerConfig.provider);
-	const [payload, serverMetadata] = apiKey
-		? await withAuth(apiKey, key => attempt({ ...baseHeaders, Authorization: `Bearer ${key}` }))
-		: await attempt(baseHeaders);
-	const discovered: Model<Api>[] = [];
-	for (const item of parseExLlama3ModelList(payload)) {
-		// Most-runtime-truth-first: the loaded `meta.n_ctx` beats the card's
-		// `max_seq_len`, which beats the server-wide `/props` window, which beats the
-		// architectural `n_ctx_train` (a 256K-trained model booted at 32K must not be
-		// registered at 256K, or every request 400s after the template is applied).
+		if (!entries) {
+			return undefined;
+		}
+		const entry = entries.find(candidate => candidate.id === model.id);
+		if (!entry) {
+			return undefined;
+		}
 		const contextWindow =
-			item.runtimeContextWindow ??
-			item.cardContextWindow ??
+			entry.runtimeContextWindow ??
+			entry.configuredContextWindow ??
 			serverMetadata?.contextWindow ??
-			item.trainingContextWindow ??
-			DISCOVERY_DEFAULT_CONTEXT_WINDOW;
-		discovered.push(
-			buildDiscoveredModel(
-				{
-					id: item.id,
-					name: item.id,
-					api: providerConfig.api,
-					provider: providerConfig.provider,
-					baseUrl: ensureLlamaCppV1BaseUrl(nativeBaseUrl),
-					reasoning: false,
-					input: item.input ?? serverMetadata?.input ?? ["text"],
-					imageInputDecoder: "stb",
-					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-					contextWindow,
-					maxTokens: resolveLlamaCppMaxTokens(contextWindow, serverMetadata?.maxTokens),
-					headers,
-				},
-				providerConfig.discovery.type,
-			),
-		);
+			(fallbackToTraining ? entry.trainingContextWindow : undefined);
+		const input = entry.input ?? serverMetadata?.input;
+		if (contextWindow === undefined) {
+			return input === undefined ? undefined : { input };
+		}
+		return {
+			contextWindow,
+			maxTokens: resolveLlamaCppMaxTokens(contextWindow, serverMetadata?.maxTokens),
+			...(input !== undefined ? { input } : {}),
+		};
+	};
+	try {
+		const apiKey = await ctx.getBearerApiKeyResolver(model.provider);
+		return apiKey
+			? await withAuth(apiKey, key => attempt({ ...baseHeaders, Authorization: `Bearer ${key}` }))
+			: await attempt(baseHeaders);
+	} catch {
+		return undefined;
 	}
-	return discovered;
 }
 
 /**
@@ -856,32 +933,17 @@ export async function discoverExLlama3ModelRuntimeMetadata(
 	customTimeoutMs?: number,
 ): Promise<DiscoveredModelRuntimeMetadata | undefined> {
 	const nativeBaseUrl = normalizeExLlama3BaseUrl(model.baseUrl);
-	const modelsUrl = `${nativeBaseUrl}/v1/models`;
-	const baseHeaders: Record<string, string> = { ...model.headers };
-	const [entries, serverMetadata] = await Promise.all([
-		withTimeoutSignal(discoveryProbeTimeoutMs(nativeBaseUrl, 250, customTimeoutMs), async signal => {
-			const response = await ctx.fetch(modelsUrl, { headers: baseHeaders, signal });
-			if (!response.ok) {
-				return undefined;
-			}
-			return parseExLlama3ModelList(await response.json());
-		}),
-		discoverLlamaCppServerMetadata(ctx, nativeBaseUrl, baseHeaders, customTimeoutMs),
-	]);
-	if (!entries) {
-		return undefined;
-	}
-	const entry = entries.find(candidate => candidate.id === model.id);
-	if (!entry) {
-		return undefined;
-	}
-	const contextWindow =
-		entry.runtimeContextWindow ?? entry.cardContextWindow ?? serverMetadata?.contextWindow ?? undefined;
-	const input = entry.input ?? serverMetadata?.input;
-	if (contextWindow === undefined && input === undefined) {
-		return undefined;
-	}
-	return { contextWindow, input };
+	return discoverLocalServerModelRuntimeMetadata(
+		model,
+		ctx,
+		{
+			modelsUrl: `${nativeBaseUrl}/v1/models`,
+			nativeBaseUrl,
+			parse: parseExLlama3ModelList,
+			fallbackToTraining: false,
+		},
+		customTimeoutMs,
+	);
 }
 
 export async function discoverLlamaCppModelRuntimeMetadata(
@@ -895,52 +957,17 @@ export async function discoverLlamaCppModelRuntimeMetadata(
 	// fields survive; a Qwen model routed to chat-completions carries a `/v1`
 	// base URL, which would otherwise send this to `/v1/models`.
 	const nativeBaseUrl = toLlamaCppNativeBaseUrl(baseUrl);
-	const modelsUrl = `${nativeBaseUrl}/models`;
-	const baseHeaders: Record<string, string> = { ...model.headers };
-	const attempt = async (headers: Record<string, string>) => {
-		const [entries, serverMetadata] = await Promise.all([
-			withTimeoutSignal(discoveryProbeTimeoutMs(nativeBaseUrl, 250, customTimeoutMs), async signal => {
-				const response = await ctx.fetch(modelsUrl, {
-					headers,
-					signal,
-				});
-				if (!response.ok) {
-					return undefined;
-				}
-				return parseLlamaCppModelList(await response.json());
-			}),
-			discoverLlamaCppServerMetadata(ctx, nativeBaseUrl, headers, customTimeoutMs),
-		]);
-		if (!entries) {
-			return undefined;
-		}
-		const entry = entries.find(entry => entry.id === model.id);
-		if (!entry) {
-			return undefined;
-		}
-		const contextWindow =
-			entry.runtimeContextWindow ??
-			entry.configuredContextWindow ??
-			serverMetadata?.contextWindow ??
-			entry.trainingContextWindow;
-		const input = entry.input ?? serverMetadata?.input;
-		if (contextWindow === undefined) {
-			return input === undefined ? undefined : { input };
-		}
-		return {
-			contextWindow,
-			maxTokens: resolveLlamaCppMaxTokens(contextWindow, serverMetadata?.maxTokens),
-			...(input !== undefined ? { input } : {}),
-		};
-	};
-	try {
-		const apiKey = await ctx.getBearerApiKeyResolver(model.provider);
-		return apiKey
-			? await withAuth(apiKey, key => attempt({ ...baseHeaders, Authorization: `Bearer ${key}` }))
-			: await attempt(baseHeaders);
-	} catch {
-		return undefined;
-	}
+	return discoverLocalServerModelRuntimeMetadata(
+		model,
+		ctx,
+		{
+			modelsUrl: `${nativeBaseUrl}/models`,
+			nativeBaseUrl,
+			parse: parseLlamaCppModelList,
+			fallbackToTraining: true,
+		},
+		customTimeoutMs,
+	);
 }
 
 /**

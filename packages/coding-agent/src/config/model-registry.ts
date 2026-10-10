@@ -34,6 +34,7 @@ import {
 } from "@oh-my-pi/pi-catalog/model-manager";
 import { getBundledModels, getBundledProviders } from "@oh-my-pi/pi-catalog/models";
 import {
+	EXLLAMA3_DEFAULT_BASE_URL,
 	googleAntigravityModelManagerOptions,
 	googleGeminiCliModelManagerOptions,
 	isCredentialScopedModelCacheProvider,
@@ -1545,7 +1546,7 @@ export class ModelRegistry {
 			this.#discoverableProviders.push({
 				provider: "exllama3",
 				api: "openai-completions",
-				baseUrl: Bun.env.EXLLAMA3_BASE_URL || "http://127.0.0.1:5000/v1",
+				baseUrl: Bun.env.EXLLAMA3_BASE_URL || EXLLAMA3_DEFAULT_BASE_URL,
 				discovery: { type: "exllama3" },
 				optional: !Bun.env.EXLLAMA3_BASE_URL,
 			});

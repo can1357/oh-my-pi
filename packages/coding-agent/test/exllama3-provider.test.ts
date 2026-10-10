@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import {
 	discoverExLlama3Models,
 	discoverExLlama3ModelRuntimeMetadata,
+	discoverLlamaCppModels,
 	normalizeExLlama3BaseUrl,
 } from "../src/config/model-discovery";
 import type { DiscoveryContext, DiscoveryProviderConfig } from "../src/config/model-discovery";
@@ -65,10 +66,13 @@ describe("discoverExLlama3Models", () => {
 				const url = typeof input === "string" ? input : String(input);
 				requested.push(url);
 				if (url.endsWith(MODELS_ROUTE)) {
-					return new Response(JSON.stringify({ data: [{ id: "Qwama-0.5B-Instruct", meta: { n_ctx: 8192 } }] }), {
-						status: 200,
-						headers: { "content-type": "application/json" },
-					});
+					return new Response(
+						JSON.stringify({ data: [{ id: "Qwama-0.5B-Instruct", meta: { n_ctx: 8192 }, parameters: null }] }),
+						{
+							status: 200,
+							headers: { "content-type": "application/json" },
+						},
+					);
 				}
 				if (url.endsWith(PROPS_ROUTE)) {
 					return new Response(JSON.stringify({ default_generation_settings: { n_ctx: 8192 } }), {
@@ -135,7 +139,11 @@ describe("discoverExLlama3Models", () => {
 		// `iterdir()` filters nothing, so `.cache` arrives in the roster.
 		const ctx = tabbyContext({
 			[MODELS_ROUTE]: {
-				data: [{ id: ".cache" }, { id: ".hidden-exl3" }, { id: "real-model-exl3", meta: { n_ctx: 8192 } }],
+				data: [
+					{ id: ".cache" },
+					{ id: ".hidden-exl3" },
+					{ id: "real-model-exl3", meta: { n_ctx: 8192 }, parameters: null },
+				],
 			},
 			[PROPS_ROUTE]: { default_generation_settings: { n_ctx: 8192 } },
 		});
@@ -146,7 +154,7 @@ describe("discoverExLlama3Models", () => {
 
 	test("falls back to /props when the roster carries no context at all", async () => {
 		const ctx = tabbyContext({
-			[MODELS_ROUTE]: { data: [{ id: "bare-exl3" }] },
+			[MODELS_ROUTE]: { data: [{ id: "bare-exl3", parameters: null }] },
 			[PROPS_ROUTE]: { default_generation_settings: { n_ctx: 65536 }, modalities: { vision: true } },
 		});
 
@@ -162,7 +170,7 @@ describe("discoverExLlama3ModelRuntimeMetadata", () => {
 		// 16K the server reports the real window.
 		const ctx = tabbyContext({
 			[MODELS_ROUTE]: {
-				data: [{ id: "Qwen3.8-27B-exl3", meta: { n_ctx: 16384, n_ctx_train: 262144 } }],
+				data: [{ id: "Qwen3.8-27B-exl3", meta: { n_ctx: 16384, n_ctx_train: 262144 }, parameters: null }],
 			},
 			[PROPS_ROUTE]: { default_generation_settings: { n_ctx: 16384 } },
 		});
@@ -173,11 +181,14 @@ describe("discoverExLlama3ModelRuntimeMetadata", () => {
 		);
 
 		expect(metadata?.contextWindow).toBe(16384);
+		// S1: the re-probe now returns maxTokens so a reload at a smaller window
+		// re-clamps the selected model's maxTokens (not just its contextWindow).
+		expect(metadata?.maxTokens).toBe(16384);
 	});
 
 	test("returns undefined for a model the server does not list", async () => {
 		const ctx = tabbyContext({
-			[MODELS_ROUTE]: { data: [{ id: "other-model" }] },
+			[MODELS_ROUTE]: { data: [{ id: "other-model", parameters: null }] },
 			[PROPS_ROUTE]: { default_generation_settings: { n_ctx: 4096 } },
 		});
 
@@ -187,5 +198,67 @@ describe("discoverExLlama3ModelRuntimeMetadata", () => {
 		);
 
 		expect(metadata).toBeUndefined();
+	});
+
+	test("resolves undefined when the probe rejects (a stopped server must not break selection)", async () => {
+		// The blocking-defect regression: a stopped TabbyAPI (ECONNREFUSED) or a
+		// timeout abort must resolve undefined, not reject. The unguarded callers
+		// (sdk.ts session creation, model-controls setModel) await this without a
+		// catch, so a rejection here breaks session startup and /model switches.
+		const ctx = {
+			fetch: (async () => {
+				throw new Error("Unable to connect");
+			}) as FetchImpl,
+			getBearerApiKeyResolver: async () => undefined,
+		} as unknown as DiscoveryContext;
+
+		const metadata = await discoverExLlama3ModelRuntimeMetadata(
+			{ provider: "exllama3", id: "Qwen3.8-27B-exl3", baseUrl: "http://127.0.0.1:5000/v1", headers: {} },
+			ctx,
+		);
+
+		expect(metadata).toBeUndefined();
+	});
+});
+
+describe("exllama3 auth-rejection classification (M1)", () => {
+	test("classifies a 401 as an auth rejection (the server wants a key)", async () => {
+		const ctx = {
+			fetch: (async () => new Response("unauthorized", { status: 401 })) as FetchImpl,
+			getBearerApiKeyResolver: async () => undefined,
+		} as unknown as DiscoveryContext;
+
+		await expect(discoverExLlama3Models(exl3Config(), ctx)).rejects.toMatchObject({ status: 401 });
+	});
+
+	test("classifies a 403 as a plain failure, not an auth rejection (AirPlay on port 5000)", async () => {
+		// macOS AirPlay Receiver answers 403 on port 5000. A real TabbyAPI never
+		// 403s /v1/models for auth (it always 401s), so a 403 must surface as a
+		// plain failure (unavailable), not an auth prompt (unauthenticated).
+		const ctx = {
+			fetch: (async () => new Response("forbidden", { status: 403 })) as FetchImpl,
+			getBearerApiKeyResolver: async () => undefined,
+		} as unknown as DiscoveryContext;
+
+		const error = await discoverExLlama3Models(exl3Config(), ctx).catch(error => error);
+		expect(error).toBeInstanceOf(Error);
+		// A plain failure has no HTTP status; an auth rejection would carry one.
+		expect((error as { status?: number }).status).toBeUndefined();
+	});
+
+	test("llama.cpp still classifies a 403 as an auth rejection (unchanged)", async () => {
+		const ctx = {
+			fetch: (async () => new Response("forbidden", { status: 403 })) as FetchImpl,
+			getBearerApiKeyResolver: async () => undefined,
+		} as unknown as DiscoveryContext;
+
+		const config: DiscoveryProviderConfig = {
+			provider: "llama.cpp",
+			api: "openai-completions",
+			baseUrl: "http://127.0.0.1:8080/v1",
+			discovery: { type: "llama.cpp" },
+		};
+
+		await expect(discoverLlamaCppModels(config, ctx)).rejects.toMatchObject({ status: 403 });
 	});
 });
