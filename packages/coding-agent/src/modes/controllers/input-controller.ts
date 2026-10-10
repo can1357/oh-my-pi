@@ -926,12 +926,14 @@ export class InputController {
 		images?: ImageContent[],
 		imageLinks?: (string | undefined)[],
 	): Promise<{ text: string; images?: ImageContent[]; imageLinks?: (string | undefined)[] } | undefined> {
+		const sessionManager = this.ctx.sessionManager;
 		const result = await this.ctx.session.extensionRunner?.emitInput(text, images, "interactive");
+		if (result?.reject !== undefined) throw new Error(result.reject || "Input rejected by extension");
 		if (result?.handled) return undefined;
 		if (result?.text !== undefined) text = result.text.trim();
 		if (result?.images !== undefined) {
 			images = result.images;
-			imageLinks = await materializeImageChipLinks(images, this.ctx.sessionManager);
+			imageLinks = await materializeImageChipLinks(images, sessionManager);
 		}
 		if (!text && !images?.length) return undefined;
 		return { text, images, imageLinks };
@@ -945,6 +947,7 @@ export class InputController {
 			const armedBareCommand =
 				armed && armed.sessionId === this.ctx.sessionManager.getSessionId() ? armed.text : undefined;
 			text = this.#compactDraftImages(text.trim());
+			const originalText = text;
 			const hasPendingImages = this.ctx.editor.pendingImages.length > 0;
 			if ((!isSettingsInitialized() || cfgEmojiAutocomplete.get(settings)) && text) text = expandEmoticons(text);
 
@@ -998,17 +1001,47 @@ export class InputController {
 			const submittedImages = inputImages;
 
 			if (runner?.hasHandlers("input")) {
-				const input = await this.#runInputHandlers(text, inputImages, inputImageLinks);
-				if (!input) {
-					// The handler consumed the submission. The editor text was reset
-					// before this callback ran, so anything in it now is a newer draft;
-					// only the submitted attachments are dropped, and only while they
-					// are still the live prefix.
-					this.#dropSubmittedPending(inputImages, inputImageLinks);
+				const session = this.ctx.session;
+				const sessionId = this.ctx.sessionManager.getSessionId();
+				try {
+					const input = await this.#runInputHandlers(text, inputImages, inputImageLinks);
+					if (
+						this.ctx.session !== session ||
+						this.ctx.sessionManager.getSessionId() !== sessionId ||
+						this.ctx.focusedAgentId
+					) {
+						return;
+					}
+					if (!input) {
+						// "handled" consumes only this submission, not a newer draft.
+						this.#dropSubmittedPending(inputImages, inputImageLinks);
+						return;
+					}
+					({ text, images: inputImages, imageLinks: inputImageLinks } = input);
+					hasInputImages = (inputImages?.length ?? 0) > 0;
+				} catch (error) {
+					if (
+						this.ctx.session !== session ||
+						this.ctx.sessionManager.getSessionId() !== sessionId ||
+						this.ctx.focusedAgentId
+					) {
+						return;
+					}
+					if (
+						inputImages?.length &&
+						inputImages.every((image, index) => this.ctx.editor.pendingImages[index] === image)
+					) {
+						// Enter left these attachments live. Keep their positions (and
+						// any newer image markers) instead of appending them a second time.
+						this.ctx.editor.setCollapsedText(
+							[originalText, this.ctx.editor.getExpandedText()].filter(part => part.trim()).join("\n\n"),
+						);
+					} else {
+						restoreDetachedDraft(this.ctx.editor, originalText, inputImages, inputImageLinks);
+					}
+					this.ctx.showError(error instanceof Error ? error.message : String(error));
 					return;
 				}
-				({ text, images: inputImages, imageLinks: inputImageLinks } = input);
-				hasInputImages = (inputImages?.length ?? 0) > 0;
 			}
 			const submittedMode = parseSlashCommand(text)?.name;
 			const draftDetached =
@@ -1867,11 +1900,27 @@ export class InputController {
 		this.ctx.editor.clearDraft();
 
 		if (this.ctx.session.extensionRunner?.hasHandlers("input")) {
+			const session = this.ctx.session;
+			const sessionId = this.ctx.sessionManager.getSessionId();
 			try {
 				const input = await this.#runInputHandlers(text, images, imageLinks);
+				if (
+					this.ctx.session !== session ||
+					this.ctx.sessionManager.getSessionId() !== sessionId ||
+					this.ctx.focusedAgentId
+				) {
+					return;
+				}
 				if (!input) return;
 				({ text, images, imageLinks } = input);
 			} catch (error) {
+				if (
+					this.ctx.session !== session ||
+					this.ctx.sessionManager.getSessionId() !== sessionId ||
+					this.ctx.focusedAgentId
+				) {
+					return;
+				}
 				restoreDetachedDraft(this.ctx.editor, text, images, imageLinks);
 				this.ctx.showError(error instanceof Error ? error.message : String(error));
 				return;

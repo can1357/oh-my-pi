@@ -14,6 +14,7 @@ import {
 	type ExtensionWidgetContent,
 	type MessageRenderer,
 	type AssistantThinkingRenderer,
+	type AssistantTextDisplayRenderer,
 } from "@oh-my-pi/pi-tui/chat/extension-types";
 export {
 	type ExtensionUiComponent,
@@ -23,6 +24,9 @@ export {
 	type MessageRenderer,
 	type AssistantThinkingRenderContext,
 	type AssistantThinkingRenderer,
+	type AssistantTextDisplayContext,
+	type AssistantTextDisplayResult,
+	type AssistantTextDisplayRenderer,
 } from "@oh-my-pi/pi-tui/chat/extension-types";
 import type { type as ArkType } from "@oh-my-pi/omptype";
 import type * as TypeBox from "@oh-my-pi/omptype/typebox";
@@ -488,6 +492,8 @@ export interface ExtensionAgentIdentity {
 export interface ExtensionContext {
 	/** UI methods for user interaction */
 	ui: ExtensionUIContext;
+	/** Cancellation for this handler, linked to its timeout and main-turn cancellation. */
+	readonly abortSignal?: AbortSignal;
 	/** Current run mode. Use `"tui"` to guard terminal-only UI such as custom components. */
 	mode: ExtensionMode;
 	/** Get current context usage for the active model. */
@@ -1273,6 +1279,12 @@ export type { ToolCallEventResult } from "../shared-events";
 
 /** Result from input event handler */
 export interface InputEventResult {
+	/**
+	 * Reject this submission with a visible reason and restore its original draft
+	 * and attachments. Takes precedence over handled, text and images; no commands,
+	 * queueing or model dispatch may proceed. Handler failures also reject input.
+	 */
+	reject?: string;
 	/** If true, the input was handled and should not continue through normal flow */
 	handled?: boolean;
 	/** Replace the input text */
@@ -1563,6 +1575,9 @@ export interface ExtensionAPI {
 
 	/** Register a renderer for assistant thinking blocks. Rendered after the original thinking text. */
 	registerAssistantThinkingRenderer(renderer: AssistantThinkingRenderer): void;
+
+	/** Project assistant text in the existing component without changing messages or history. */
+	registerAssistantTextDisplay(renderer: AssistantTextDisplayRenderer): void;
 
 	/**
 	 * Register a composer shape for the interactive editor.
@@ -1935,6 +1950,7 @@ export interface Extension {
 	tools: Map<string, RegisteredTool<any, any>>;
 	toolRegistrationListeners?: Set<ToolRegistrationListener>;
 	assistantThinkingRenderers: AssistantThinkingRenderer[];
+	assistantTextDisplayRenderers: AssistantTextDisplayRenderer[];
 	fileWriteFallbackHandlers: FileWriteFallbackHandler[];
 	fileDeleteFallbackHandlers: FileDeleteFallbackHandler[];
 	messageRenderers: Map<string, MessageRenderer>;

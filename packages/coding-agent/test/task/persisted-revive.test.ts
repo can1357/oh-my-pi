@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
+import { Database } from "bun:sqlite";
 import { type } from "@oh-my-pi/omptype";
 import { Agent, type AgentTool } from "@oh-my-pi/pi-agent-core";
 import { createMockModel, type MockResponse, type MockResponseSource } from "@oh-my-pi/pi-ai/providers/mock";
@@ -22,7 +23,7 @@ import { registerPersistedSubagents } from "@oh-my-pi/pi-coding-agent/registry/p
 import type { CreateAgentSessionOptions, CreateAgentSessionResult } from "@oh-my-pi/pi-coding-agent/sdk";
 import * as sdkModule from "@oh-my-pi/pi-coding-agent/sdk";
 import { AgentSession, type AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
-import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
+import { AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import type { CustomMessage } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
@@ -206,10 +207,14 @@ interface ReviveOwnerOptions {
 	authStorage?: AuthStorage;
 	modelRegistry?: ModelRegistry;
 	settings?: Settings;
+	sessionId?: () => string;
 }
 
 function createFactory(cwd: string, eventBus?: EventBus, owner: ReviveOwnerOptions = {}) {
 	const parentSession = {
+		get sessionId() {
+			return owner.sessionId?.() ?? "root-provider-session";
+		},
 		sessionManager: {
 			getCwd: () => cwd,
 			getArtifactManager: () => undefined,
@@ -248,6 +253,65 @@ afterEach(async () => {
 });
 
 describe("persisted subagent revival", () => {
+	it.each(["root", "nested"] as const)("revives a %s child with its live parent's strict account policy", async scope => {
+		const cwd = makeTempDir("@pi-revive-account-policy-");
+		const sessionFile = await createPersistedSession(cwd, true, "default");
+		const authStorage = new AuthStorage(new SqliteAuthCredentialStore(new Database(":memory:")), {
+			usageProviderResolver: () => undefined,
+		});
+		await authStorage.credentials.set("anthropic", ["parent-a", "parent-b"].map(accountId => ({
+			type: "oauth" as const,
+			access: `${accountId}-token`,
+			refresh: `${accountId}-refresh`,
+			expires: Date.now() + 3_600_000,
+			accountId,
+		})));
+		const accounts = authStorage.oauth.accounts("anthropic");
+		const accountA = accounts.find(account => account.accountId === "parent-a")!;
+		const accountB = accounts.find(account => account.accountId === "parent-b")!;
+		let ownerSessionId = "root-before-fresh";
+		let directParentSessionId = "direct-parent-before-fresh";
+		authStorage.sessions.pin("anthropic", ownerSessionId, accountA.credentialId, { strict: true });
+		authStorage.sessions.pin("anthropic", directParentSessionId, accountA.credentialId, { strict: true });
+		const registry = AgentRegistry.global();
+		const parent = scope === "nested" ? registry.register({
+			id: "revive-account-parent",
+			displayName: "Parent",
+			kind: "sub",
+			parentId: "Main",
+			session: { get sessionId() { return directParentSessionId; } } as AgentSession,
+		}) : undefined;
+		const ref = registry.register({ ...createRef(sessionFile), parentId: parent?.id ?? "Main" });
+		let revived: AgentSession | undefined;
+		try {
+			const reviver = await createFactory(cwd, undefined, {
+				authStorage,
+				modelRegistry: new ModelRegistry(authStorage, path.join(cwd, "models.yml")),
+				sessionId: () => ownerSessionId,
+				extensionRoots: () => ({ explicit: [], configured: [], mode: "explicit-only", configuredLevel: "user" }),
+			})(ref);
+			if (!reviver) throw new Error("Expected a persisted reviver");
+			ownerSessionId = "root-after-fresh";
+			directParentSessionId = "direct-parent-after-fresh";
+			authStorage.sessions.pin("anthropic", ownerSessionId, (scope === "root" ? accountB : accountA).credentialId, {
+				strict: true,
+			});
+			authStorage.sessions.pin("anthropic", directParentSessionId, accountB.credentialId, { strict: true });
+			revived = await reviver(ref);
+			expect(authStorage.sessions.mode("anthropic", revived.sessionId)).toBe("strict");
+			expect(authStorage.oauth.accounts("anthropic", revived.sessionId).find(account => account.active)?.accountId)
+				.toBe("parent-b");
+			await authStorage.credentials.removeById("anthropic", accountB.credentialId);
+			expect(await authStorage.keys.get("anthropic", revived.sessionId)).toBeUndefined();
+			expect(authStorage.sessions.mode("anthropic", revived.sessionId)).toBe("strict");
+		} finally {
+			await revived?.dispose();
+			registry.unregister(ref.id, ref);
+			if (parent) registry.unregister(parent.id, parent);
+			authStorage.close();
+		}
+	});
+
 	it("initializes the extension runtime on cold revival so tool_call handlers are not fail-closed blocked", async () => {
 		const cwd = makeTempDir("@pi-revive-ext-init-");
 		const sessionFile = await createPersistedSession(cwd);

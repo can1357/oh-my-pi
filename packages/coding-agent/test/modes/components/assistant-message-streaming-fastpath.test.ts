@@ -2,8 +2,10 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AssistantMessageComponent } from "@oh-my-pi/pi-tui/chat/assistant-message";
+import type { AssistantTextDisplayRenderer } from "@oh-my-pi/pi-tui/chat/extension-types";
+import { TranscriptContainer } from "@oh-my-pi/pi-tui/chrome/transcript-container";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
-import { type Component, Container, Markdown } from "@oh-my-pi/pi-tui";
+import { type Component, Container, Markdown, setTerminalImageProtocol, TERMINAL } from "@oh-my-pi/pi-tui";
 
 const W = 100;
 
@@ -324,5 +326,111 @@ Average Latency: 1,240 ms
 		component.updateContent(m);
 		const rendered = Bun.stripANSI(component.render(W).join("\n"));
 		expect(rendered).toContain("keep me");
+	});
+});
+
+describe("AssistantMessageComponent text display projection", () => {
+	it("projects mixed prose without modifying source messages or tool arguments, including redraws and late images", () => {
+		const source = msg(
+			[
+				{ type: "text", text: "English introduction" },
+				{ type: "thinking", thinking: "Original reasoning" },
+				{ type: "toolCall", id: "read-1", name: "read", arguments: { path: "source.ts" } },
+				{ type: "text", text: "English conclusion" },
+			],
+			{ usage: { ...msg([]).usage, output: 7, totalTokens: 7 } },
+		);
+		const snapshot = JSON.stringify(source);
+		for (const block of source.content) {
+			if (block.type === "toolCall") Object.freeze(block.arguments);
+			Object.freeze(block);
+		}
+		Object.freeze(source.content);
+		Object.freeze(source.usage);
+		Object.freeze(source);
+		const renderer: AssistantTextDisplayRenderer = text => ({
+			text: text === "English introduction" ? "中文开场" : "中文结论",
+		});
+		const component = new AssistantMessageComponent(source, false, undefined, [], undefined, true, undefined, [
+			() => undefined,
+			renderer,
+			() => ({ text: "不应覆盖已选中的显示结果" }),
+		]);
+		const imageProtocol = TERMINAL.imageProtocol;
+		setTerminalImageProtocol(null);
+		try {
+			component.invalidate();
+			component.setToolResultImages("read-1", [{ type: "image", data: "aW1hZ2U=", mimeType: "image/png" }]);
+			const rendered = Bun.stripANSI(component.render(W).join("\n"));
+			expect(rendered).toContain("中文开场");
+			expect(rendered).toContain("中文结论");
+			expect(rendered).toContain("Original reasoning");
+			expect(rendered).toContain("[Image: image/png]");
+			expect(rendered).not.toContain("English introduction");
+			expect(rendered).not.toContain("English conclusion");
+			expect(rendered).not.toContain("不应覆盖已选中的显示结果");
+			expect(JSON.stringify(source)).toBe(snapshot);
+		} finally {
+			setTerminalImageProtocol(imageProtocol);
+		}
+	});
+
+	it("withholds projected prose from immutable history until its canonical replacement is ready", () => {
+		let complete = false;
+		const component = new AssistantMessageComponent(undefined, false, undefined, [], undefined, true, undefined, [
+			() =>
+				complete
+					? { text: "最终中文答案" }
+					: { text: "等待转换的首段。\n\n等待转换的次段。\n\n仍在处理", pending: true },
+		]);
+		const transcript = new TranscriptContainer();
+		transcript.addChild(component);
+		const source = msg([{ type: "text", text: "English paragraph.\n\nMore English.\n\nPartial answer" }]);
+		component.updateContent(source, { transient: true });
+		const live = Bun.stripANSI(transcript.renderViewport(80, 20, { now: 0, tick: 0 }).join("\n"));
+		expect(live).toContain("等待转换的首段");
+		expect(live).not.toContain("English");
+		expect(component.hasPendingTextDisplay()).toBe(true);
+		expect(transcript.peekFinalizedBatch(80, 0)).toBeUndefined();
+
+		complete = true;
+		component.updateContent(source);
+		component.markTranscriptBlockFinalized();
+		expect(component.hasPendingTextDisplay()).toBe(false);
+		const retired = Bun.stripANSI(transcript.peekFlushBatch(80)?.rows.join("\n") ?? "");
+		expect(retired).toContain("最终中文答案");
+		expect(retired).not.toContain("等待转换");
+		expect(retired).not.toContain("English");
+	});
+
+	it("settles an abandoned pending display as a visible failure instead of blocking transcript retirement", () => {
+		const component = new AssistantMessageComponent(undefined, false, undefined, [], undefined, true, undefined, [
+			() => ({ text: "等待文本显示", pending: true }),
+		]);
+		const transcript = new TranscriptContainer();
+		transcript.addChild(component);
+		component.updateContent(msg([{ type: "text", text: "Private English source" }]), { transient: true });
+		component.markTranscriptBlockFinalized();
+		expect(component.hasPendingTextDisplay()).toBe(false);
+		expect(component.isTranscriptBlockFinalized()).toBe(true);
+		const retired = Bun.stripANSI(transcript.peekFlushBatch(80)?.rows.join("\n") ?? "");
+		expect(retired).toContain("显示失败");
+		expect(retired).not.toContain("等待文本显示");
+		expect(retired).not.toContain("Private English source");
+	});
+
+	it("contains a synchronous display failure without leaking source prose or leaving the block live", () => {
+		const component = new AssistantMessageComponent(undefined, false, undefined, [], undefined, true, undefined, [
+			() => {
+				throw new Error("Private English renderer exception");
+			},
+		]);
+		component.updateContent(msg([{ type: "text", text: "Private English source" }]), { transient: true });
+		component.markTranscriptBlockFinalized();
+		const rendered = Bun.stripANSI(component.render(W).join("\n"));
+		expect(rendered).toContain("显示失败");
+		expect(rendered).not.toContain("Private English");
+		expect(component.hasPendingTextDisplay()).toBe(false);
+		expect(component.isTranscriptBlockFinalized()).toBe(true);
 	});
 });

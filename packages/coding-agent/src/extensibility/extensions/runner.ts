@@ -48,6 +48,7 @@ import type {
 	AssistantMessageRewriteEvent,
 	AssistantMessageRewriteResult,
 	AssistantThinkingRenderer,
+	AssistantTextDisplayRenderer,
 	BeforeAgentStartEvent,
 	BeforeAgentStartEventResult,
 	BeforeProviderRequestEvent,
@@ -272,6 +273,11 @@ function createHandlerContext(
 	const scoped: ExtensionContext = Object.create(ctx);
 	Object.defineProperty(scoped, "ui", {
 		value: createHandlerUIContext(ctx.ui, handlerSignal, timeoutBudget),
+		enumerable: true,
+		configurable: true,
+	});
+	Object.defineProperty(scoped, "abortSignal", {
+		value: handlerSignal,
 		enumerable: true,
 		configurable: true,
 	});
@@ -1291,6 +1297,10 @@ export class ExtensionRunner {
 		return this.extensions.flatMap(ext => ext.assistantThinkingRenderers);
 	}
 
+	getAssistantTextDisplayRenderers(): AssistantTextDisplayRenderer[] {
+		return this.extensions.flatMap(ext => ext.assistantTextDisplayRenderers);
+	}
+
 	getRegisteredCommands(reserved?: ReadonlySet<string>): RegisteredCommand[] {
 		this.#commandDiagnostics = [];
 
@@ -1938,7 +1948,7 @@ export class ExtensionRunner {
 		return { skillPaths, promptPaths, themePaths };
 	}
 
-	/** Emit input event. Transforms chain, "handled" short-circuits. */
+	/** Emit input event. Transforms chain; rejection, failure and "handled" short-circuit. */
 	async emitInput(
 		text: string,
 		images: ImageContent[] | undefined,
@@ -1952,10 +1962,15 @@ export class ExtensionRunner {
 		for (const ext of this.extensions) {
 			for (const handler of ext.handlers.get("input") ?? []) {
 				const event: InputEvent = { type: "input", text: currentText, images: currentImages, source };
-				const result = (await this.#runHandlerWithTimeout(handler, event, ctx, ext, extensionHandlerTimeoutMs)) as
-					| InputEventResult
-					| undefined;
-				if (result?.handled) return result;
+				const result = (await this.#runHandlerWithTimeout(
+					handler,
+					event,
+					ctx,
+					ext,
+					extensionHandlerTimeoutMs,
+					(_kind, message) => ({ reject: message }),
+				)) as InputEventResult | undefined;
+				if (result?.reject !== undefined || result?.handled) return result;
 				if (result?.text !== undefined) currentText = result.text;
 				if (result?.images !== undefined) currentImages = result.images;
 			}

@@ -84,6 +84,7 @@ function createHarness(): Harness {
 		emit: async () => undefined,
 		getMessageRenderer: () => undefined,
 		getAssistantThinkingRenderers: () => undefined,
+		getAssistantTextDisplayRenderers: () => [],
 		getComposerShapes: () => [],
 	};
 

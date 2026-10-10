@@ -417,6 +417,7 @@ export class ChatTranscriptBuilder {
 			this.#deps.ui.imageBudget,
 			proseOnlyThinking,
 			this.#deps.linkTargets,
+			undefined,
 			expandThinkingBlocks,
 		);
 		assistantComponent.setImagesVisible(displayPreferences.showImages);
@@ -455,8 +456,9 @@ export class ChatTranscriptBuilder {
 				this.#deps.getMessageRenderer ? undefined : [],
 				undefined,
 				proseOnlyThinking,
-				this.#deps.linkTargets,
-				expandThinkingBlocks,
+			this.#deps.linkTargets,
+			undefined,
+			expandThinkingBlocks,
 			);
 			component.setImagesVisible(displayPreferences.showImages);
 			component.setToolResultImagesVisible(!displayPreferences.hideToolActivity);

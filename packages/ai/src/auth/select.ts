@@ -67,6 +67,8 @@ export type TryOAuthOptions = {
 	blockScopes?: readonly string[];
 	/** When false, a definitive failure of THIS credential returns undefined instead of falling back to the ranked/round-robin selector (target-only resolution). */
 	allowFallback?: boolean;
+	/** Persist the successful selection as a no-sibling-fallback session pin. */
+	strictAffinity?: boolean;
 	/** Receives a non-definitive refresh failure that left this credential unusable; the caller filters for retryable ones. */
 	onTransientRefreshFailure?: (error: unknown) => void;
 };
@@ -512,6 +514,9 @@ export class CredentialSelector {
 	 *    skip it and try every account once; the server is the final arbiter
 	 *    of model access.
 	 *
+	 * A strict session lock tries only its pinned durable row in the first,
+	 * unblocked pass; none of the last-resort or sibling fallbacks apply.
+	 *
 	 * Returns both the API key bytes for outbound requests AND the refreshed
 	 * {@link OAuthCredential} so callers needing identity metadata (account id,
 	 * project id, etc.) do not have to dereference the snapshot themselves.
@@ -570,6 +575,8 @@ export class CredentialSelector {
 			(strategy !== undefined || policyReserveEnabled) && (credentials.length > 1 || hasPlanRequirement);
 		const sessionCredential = this.#deps.affinity.get(provider, sessionId);
 		const sessionPreferredIndex = sessionCredential?.type === "oauth" ? sessionCredential.index : undefined;
+		const strictCredentialIndex =
+			sessionCredential?.type === "oauth" && sessionCredential.strict === true ? sessionCredential.index : undefined;
 		const sessionPreferredCredential =
 			sessionPreferredIndex !== undefined
 				? credentials.find(entry => entry.index === sessionPreferredIndex)?.credential
@@ -640,7 +647,7 @@ export class CredentialSelector {
 				...baseRankingOrder.filter(index => index !== sessionPreferredRankingPos),
 			];
 		}
-		const candidates: OAuthCandidate[] = shouldRank
+		let candidates: OAuthCandidate[] = shouldRank
 			? await this.#rankOAuthSelections({
 					providerKey,
 					provider,
@@ -662,6 +669,9 @@ export class CredentialSelector {
 							? { selection, usage: sessionPreferredUsage, usageChecked: true }
 							: { selection, usage: null, usageChecked: false },
 					);
+		if (strictCredentialIndex !== undefined) {
+			candidates = candidates.filter(candidate => candidate.selection.index === strictCredentialIndex);
+		}
 		// Keep the candidate object: preflight may rebind its positional index
 		// after a peer changes the credential pool.
 		const explicitPin = sessionPinIsExplicit
@@ -889,15 +899,22 @@ export class CredentialSelector {
 			allowBlocked: boolean;
 			enforcePlanRequirement: boolean;
 			enforceAccounts: boolean;
-		}> = [
-			{ allowBlocked: false, enforcePlanRequirement, enforceAccounts },
-			{ allowBlocked: true, enforcePlanRequirement, enforceAccounts },
-		];
-		if (enforcePlanRequirement) passes.push({ allowBlocked: true, enforcePlanRequirement: false, enforceAccounts });
-		if (enforceAccounts) passes.push({ allowBlocked: true, enforcePlanRequirement: false, enforceAccounts: false });
+		}> =
+			strictCredentialIndex === undefined
+				? [
+						{ allowBlocked: false, enforcePlanRequirement, enforceAccounts },
+						{ allowBlocked: true, enforcePlanRequirement, enforceAccounts },
+					]
+				: [{ allowBlocked: false, enforcePlanRequirement, enforceAccounts }];
+		if (strictCredentialIndex === undefined && enforcePlanRequirement) {
+			passes.push({ allowBlocked: true, enforcePlanRequirement: false, enforceAccounts });
+		}
+		if (strictCredentialIndex === undefined && enforceAccounts) {
+			passes.push({ allowBlocked: true, enforcePlanRequirement: false, enforceAccounts: false });
+		}
 		// Blocked candidates rank earliest-unblock first, which would route a
-		// blocked explicit pin to an equally blocked sibling. Once the strict
-		// pass finds no unblocked account, the user's pin goes first.
+		// blocked explicit pin to an equally blocked sibling. Only non-strict
+		// pins may use this last-resort ordering after the unblocked pass fails.
 		const lastResortCandidates = explicitPin
 			? [explicitPin, ...candidates.filter(candidate => candidate !== explicitPin)]
 			: candidates;
@@ -919,6 +936,8 @@ export class CredentialSelector {
 					rankingContext,
 					blockScope,
 					blockScopes,
+					allowFallback: strictCredentialIndex === undefined,
+					strictAffinity: strictCredentialIndex !== undefined,
 					onTransientRefreshFailure: recordTransientRefreshFailure,
 				});
 				if (resolved) return resolved;
@@ -1001,6 +1020,7 @@ export class CredentialSelector {
 			blockScope,
 			blockScopes,
 			allowFallback = true,
+			strictAffinity = false,
 		} = usageOptions;
 		if (
 			!allowBlocked &&
@@ -1125,7 +1145,7 @@ export class CredentialSelector {
 			}
 			this.#deps.pool.noteBearer(provider, result.apiKey, credentialId);
 			if (options?.recordAffinity !== false) {
-				this.#deps.affinity.record(provider, sessionId, "oauth", selection.index);
+				this.#deps.affinity.record(provider, sessionId, "oauth", selection.index, undefined, false, strictAffinity);
 			}
 			return { apiKey: result.apiKey, credential: updated, credentialId };
 		} catch (error) {

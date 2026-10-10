@@ -3,12 +3,15 @@ import type { AssistantMessage, Model, TextContent } from "@oh-my-pi/pi-ai";
 import { getMarkdownLinkUrls } from "../index";
 import { EMPTY_LINK_TARGETS } from "../render/render-utils";
 import type { ImageBudget } from "../components/image";
-import type { AssistantThinkingRenderer } from "../chat/extension-types";
+import type { AssistantTextDisplayRenderer, AssistantThinkingRenderer } from "../chat/extension-types";
 import { AssistantMessageComponent } from "../chat/assistant-message";
 /** Session display capabilities supplied unchanged by the interactive host. */
 export interface AssistantMessageSession {
 	readonly model?: Model;
-	readonly extensionRunner?: { getAssistantThinkingRenderers(): readonly AssistantThinkingRenderer[] };
+	readonly extensionRunner?: {
+		getAssistantThinkingRenderers(): readonly AssistantThinkingRenderer[];
+		getAssistantTextDisplayRenderers(): readonly AssistantTextDisplayRenderer[];
+	};
 }
 
 /** Host state required to construct and refresh assistant transcript segments. */
@@ -124,6 +127,7 @@ export function createAssistantMessageComponent(
 		ctx.ui.imageBudget,
 		ctx.proseOnlyThinking,
 		linkTargets,
+		ctx.viewSession.extensionRunner?.getAssistantTextDisplayRenderers(),
 		ctx.expandThinkingBlocks,
 	);
 	component.setImagesVisible(ctx.assistantImagesVisible);

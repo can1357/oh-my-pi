@@ -64,6 +64,8 @@
 
 ### Added
 
+- Added strict per-session OAuth account pins: `SessionsApi.pin({ strict: true })` prevents all credential fallback (sibling OAuth accounts, login keys, env vars) when the pinned account is blocked or unavailable; strict pins survive credential deletion, `/fresh`, and subagent inheritance. Added `SessionsApi.mode()` and `SessionsApi.automatic()` for routing-mode introspection and explicit opt-out.
+- Added `getOAuthCredentialProvider()` to resolve a login alias (such as `openai-codex-device`) to the provider its credentials are stored under ([#14588](https://github.com/can1357/oh-my-pi/pull/14588) by [@andrebrait](https://github.com/andrebrait))
 - Auth gateway route option `excludeProviders` leaves those providers' accounts out of `/v1/usage` and `/v1/credentials/check` ([#14755](https://github.com/can1357/oh-my-pi/pull/14755) by [@will-bogusz](https://github.com/will-bogusz))
 
 ### Fixed

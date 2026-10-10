@@ -44,6 +44,7 @@ function extension(name: string, handler: (event: BeforeAgentStartEvent) => Prom
 		]),
 		tools: new Map(),
 		assistantThinkingRenderers: [],
+		assistantTextDisplayRenderers: [],
 		fileWriteFallbackHandlers: [],
 		fileDeleteFallbackHandlers: [],
 		messageRenderers: new Map(),

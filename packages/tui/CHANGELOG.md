@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added synchronous assistant text display projections for native Markdown nodes and classic terminal Markdown, with pending-state retirement guards and terminal failure settlement.
+- Assistant ` ```svg ` blocks render as inline images on terminals with graphics: drawn live while the reply streams, sized to the drawing (up to the full width) instead of a thumbnail, rendered pixel-for-pixel on the terminal's cell grid so text stays sharp (redrawn to fit when the terminal narrows), and colored from your theme; an SVG that does not render shows as code
+- Numeric tables in assistant answers can get a themed chart under them, chosen from the table's shape and units; Tern receives it as SVG (recolored on theme switches), other graphics terminals as an image
 ## [18.8.9] - 2026-10-10
 
 ### Breaking Changes

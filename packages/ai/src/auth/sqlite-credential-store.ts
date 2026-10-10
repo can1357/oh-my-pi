@@ -394,6 +394,8 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 	#getCacheIncludingExpiredStmt: Statement;
 	#upsertCacheStmt: Statement;
 	#deleteCachePrefixStmt: Statement;
+	#getCachePrefixStmt: Statement;
+	#deleteCacheKeyStmt: Statement;
 	#deleteExpiredCacheStmt: Statement;
 	#updateIfMatchesWithLeaseStmt: Statement;
 	#deleteIfMatchesWithLeaseStmt: Statement;
@@ -486,6 +488,8 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 			"INSERT INTO cache (key, value, expires_at) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value, expires_at = excluded.expires_at",
 		);
 		this.#deleteCachePrefixStmt = this.#db.prepare("DELETE FROM cache WHERE substr(key, 1, ?) = ?");
+		this.#getCachePrefixStmt = this.#db.prepare("SELECT key, value FROM cache WHERE substr(key, 1, ?) = ?");
+		this.#deleteCacheKeyStmt = this.#db.prepare("DELETE FROM cache WHERE key = ?");
 		this.#deleteExpiredCacheStmt = this.#db.prepare(`DELETE FROM cache WHERE expires_at <= ${SQLITE_NOW_EPOCH}`);
 		this.#getCredentialBlockStmt = this.#db.prepare(
 			"SELECT blocked_until_ms, updated_at FROM auth_credential_blocks WHERE credential_id = ? AND provider_key = ? AND block_scope = ? AND blocked_until_ms > ?",
@@ -1588,10 +1592,20 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 		}
 	}
 
-	/** Drop all cache rows whose keys start with the supplied prefix. */
-	deleteCachePrefix(prefix: string): void {
+	/** Drop prefix-matching rows, optionally filtered by their value. */
+	deleteCachePrefix(prefix: string, shouldDelete?: (value: string) => boolean): void {
 		try {
-			this.#deleteCachePrefixStmt.run(prefix.length, prefix);
+			if (shouldDelete) {
+				const clear = this.#db.transaction(() => {
+					const rows = this.#getCachePrefixStmt.all(prefix.length, prefix) as { key: string; value: string }[];
+					for (const row of rows) {
+						if (shouldDelete(row.value)) this.#deleteCacheKeyStmt.run(row.key);
+					}
+				});
+				clear.immediate();
+			} else {
+				this.#deleteCachePrefixStmt.run(prefix.length, prefix);
+			}
 		} catch {
 			// Ignore cache delete failures
 		}
@@ -2112,6 +2126,8 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 		this.#updateIfMatchesWithLeaseStmt.finalize();
 		this.#deleteIfMatchesWithLeaseStmt.finalize();
 		this.#deleteCachePrefixStmt.finalize();
+		this.#getCachePrefixStmt.finalize();
+		this.#deleteCacheKeyStmt.finalize();
 		this.#acquireCredentialRefreshLeaseStmt.finalize();
 		this.#getCredentialRefreshLeaseStmt.finalize();
 		this.#renewCredentialRefreshLeaseStmt.finalize();

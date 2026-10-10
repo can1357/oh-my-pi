@@ -1481,7 +1481,8 @@ export class EventController {
 			// neither committed nor on screen and the transcript reads as cut.
 			if (
 				this.ctx.streamingMessage.content.some(content => content.type === "toolCall") &&
-				!this.ctx.streamingComponent.isTranscriptBlockFinalized()
+				!this.ctx.streamingComponent.isTranscriptBlockFinalized() &&
+				!this.ctx.streamingComponent.hasPendingTextDisplay()
 			) {
 				const linkTargets = await refreshAssistantMessageLinkTargets(this.ctx, [timeline.beforeTools]);
 				this.ctx.streamingComponent.setLinkTargets(assistantMessageLinkTargets(timeline.beforeTools, linkTargets));
@@ -1593,9 +1594,11 @@ export class EventController {
 					toolCallId,
 					segment,
 					linkTargets ? assistantMessageLinkTargets(segment, linkTargets) : undefined,
-					closed ? undefined : { transient: true },
+					closed && !this.ctx.viewSession.extensionRunner?.getAssistantTextDisplayRenderers().length
+						? undefined
+						: { transient: true },
 				);
-				if (closed) component?.markTranscriptBlockFinalized();
+				if (closed && component && !component.hasPendingTextDisplay()) component.markTranscriptBlockFinalized();
 			}
 
 			// Update working message with the intent of the LAST intent-bearing
