@@ -21,17 +21,9 @@ export function isImageGenerationApi(api: Api): api is ImageGenerationApi {
 	return (IMAGE_GENERATION_APIS as readonly Api[]).includes(api);
 }
 
-/** Whether this model accepts an explicit image background preference. */
+/** Whether catalog policy verified explicit image backgrounds for this deployment. */
 export function supportsImageBackground(model: Model<Api>): boolean {
-	switch (model.api) {
-		case "openai-responses":
-		case "openai-codex-responses":
-			return true;
-		case "openai-images":
-			return model.provider !== "xai" && model.provider !== "xai-oauth";
-		default:
-			return false;
-	}
+	return model.imageBackground === true;
 }
 
 /** Generate (or edit, when `request.inputImages` is set) images through the transport selected by the model's `api`. */

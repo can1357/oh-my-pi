@@ -95,6 +95,10 @@ function applyCatalogAssignments<TApi extends Api>(model: Model<TApi>, catalog: 
 	if (typeof catalog.webSearchModel === "string") model.webSearchModel = catalog.webSearchModel;
 	if (catalog.hostedImage === true) model.hostedImage = true;
 	else if (catalog.hostedImage === false) delete model.hostedImage;
+	// Background support belongs to the reviewed deployment, not a copied
+	// reference row or the shared request adapter. Unknown deployments opt out.
+	if (catalog.imageBackground === true) model.imageBackground = true;
+	else delete model.imageBackground;
 	if (typeof catalog.imageModel === "string") model.imageModel = catalog.imageModel;
 	else if (catalog.imageModel === false) delete model.imageModel;
 	const serviceTierCost = objectPayload(catalog.serviceTierCost);

@@ -2,7 +2,7 @@ import { calculateCost } from "@oh-my-pi/pi-catalog/models";
 import { logger } from "@oh-my-pi/pi-utils";
 import * as AIError from "../../error";
 import { classifyGatewayError } from "../../error/gateway";
-import { generateImage } from "../../images";
+import { generateImage, supportsImageBackground } from "../../images";
 import * as imagesServer from "../../providers/images-server";
 import { deterministicUuid } from "../../utils/deterministic-id";
 import {
@@ -71,6 +71,14 @@ async function handleImages(
 			400,
 			"invalid_request_error",
 			`Model ${parsed.modelId} does not support image generation`,
+		);
+	}
+
+	if (parsed.request.background && parsed.request.background !== "auto" && !supportsImageBackground(model)) {
+		return imagesServer.formatError(
+			400,
+			"invalid_request_error",
+			`Image model ${model.provider}/${model.id} does not support ${parsed.request.background} backgrounds`,
 		);
 	}
 

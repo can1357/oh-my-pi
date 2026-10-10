@@ -97,6 +97,17 @@ function hostedResponse(): Response {
 	);
 }
 
+function codexResponse(): Response {
+	const event = {
+		type: "response.completed",
+		response: { output: [{ type: "image_generation_call", result: WEBP_DATA }] },
+	};
+	return new Response(`data: ${JSON.stringify(event)}\n\n`, {
+		status: 200,
+		headers: { "content-type": "text/event-stream" },
+	});
+}
+
 function collectPaths(result: CustomToolResult<{ imagePaths: string[] }>): void {
 	generatedImagePaths.push(...(result.details?.imagePaths ?? []));
 }
@@ -209,20 +220,21 @@ describe("imageGenTool catalog routing", () => {
 	});
 
 	it("skips models that cannot honor a transparent background and uses a supporting fallback", async () => {
-		const unsupported = catalogModel("xai", "grok-imagine-image", "openai-images");
-		const fallback = catalogModel("deepinfra", "fallback-image", "openai-images");
+		const unsupported = catalogModel("deepinfra", "unsupported-image", "openai-images");
+		const fallback = catalogModel("openai-codex", "gpt-image-2", "openai-codex-responses");
+		const carrier = catalogModel("openai-codex", "gpt-5.4", "openai-codex-responses", "chat");
 		const settings = Settings.isolated({
-			modelRoles: { image: "xai/grok-imagine-image" },
-			"retry.fallbackChains": { image: ["deepinfra/fallback-image"] },
+			modelRoles: { image: "deepinfra/unsupported-image" },
+			"retry.fallbackChains": { image: ["openai-codex/gpt-image-2"] },
 		});
 		const urls: string[] = [];
 		let requestBody: Record<string, unknown> | undefined;
 		const fetchMock: FetchImpl = async (input, init) => {
 			urls.push(input.toString());
 			requestBody = JSON.parse(String(init?.body));
-			return imageResponse();
+			return codexResponse();
 		};
-		const ctx = createContext({ models: [unsupported, fallback], settings, fetch: fetchMock });
+		const ctx = createContext({ models: [unsupported, fallback, carrier], settings, fetch: fetchMock });
 
 		const result = await imageGenTool.execute(
 			"background-fallback",
@@ -232,22 +244,29 @@ describe("imageGenTool catalog routing", () => {
 		);
 		collectPaths(result);
 
-		expect(urls).toEqual(["https://deepinfra.example/v1/images/generations"]);
-		expect(requestBody).toMatchObject({ model: "fallback-image", background: "transparent" });
-		expect(result.details?.model).toBe("fallback-image");
+		expect(urls).toEqual(["https://openai-codex.example/v1/codex/responses"]);
+		expect(requestBody).toMatchObject({
+			model: "gpt-5.4",
+			tools: [{ type: "image_generation", background: "transparent" }],
+		});
+		expect(result.details?.model).toBe("gpt-image-2");
 	});
 
 	it("reports background capability before authentication or input resolution when no candidate supports it", async () => {
 		const xai = catalogModel("xai", "grok-imagine-image", "openai-images");
 		const openrouter = catalogModel("openrouter", "native-image", "openrouter-images");
+		const openai = catalogModel("openai", "gpt-image-2", "openai-responses");
+		const deepinfra = catalogModel("deepinfra", "native-image", "openai-images");
 		let calls = 0;
 		const ctx = createContext({
-			models: [xai, openrouter],
+			models: [xai, openrouter, openai, deepinfra],
 			settings: Settings.isolated({
 				modelRoles: { image: "xai/grok-imagine-image" },
-				"retry.fallbackChains": { image: ["openrouter/native-image"] },
+				"retry.fallbackChains": {
+					image: ["openrouter/native-image", "openai/gpt-image-2", "deepinfra/native-image"],
+				},
 			}),
-			credentials: { xai: undefined, openrouter: undefined },
+			credentials: { xai: undefined, openrouter: undefined, openai: undefined, deepinfra: undefined },
 			fetch: async () => {
 				calls++;
 				return imageResponse();
@@ -268,16 +287,18 @@ describe("imageGenTool catalog routing", () => {
 		expect(error).toHaveProperty("message", expect.stringContaining('supports background "transparent"'));
 		expect(error).toHaveProperty("message", expect.stringContaining("xai/grok-imagine-image"));
 		expect(error).toHaveProperty("message", expect.stringContaining("openrouter/native-image"));
+		expect(error).toHaveProperty("message", expect.stringContaining("openai/gpt-image-2"));
+		expect(error).toHaveProperty("message", expect.stringContaining("deepinfra/native-image"));
 		expect(calls).toBe(0);
 	});
 
 	it("does not fall back from an explicit model that cannot honor the requested background", async () => {
 		const unsupported = catalogModel("xai", "grok-imagine-image", "openai-images");
-		const supporting = catalogModel("deepinfra", "configured-image", "openai-images");
+		const supporting = catalogModel("openai-codex", "gpt-image-2", "openai-codex-responses");
 		let calls = 0;
 		const ctx = createContext({
 			models: [unsupported, supporting],
-			settings: Settings.isolated({ modelRoles: { image: "deepinfra/configured-image" } }),
+			settings: Settings.isolated({ modelRoles: { image: "openai-codex/gpt-image-2" } }),
 			fetch: async () => {
 				calls++;
 				return imageResponse();
@@ -297,13 +318,13 @@ describe("imageGenTool catalog routing", () => {
 
 	it("keeps an auto background candidate even when that provider cannot honor explicit preferences", async () => {
 		const xai = catalogModel("xai", "grok-imagine-image", "openai-images");
-		const supporting = catalogModel("deepinfra", "fallback-image", "openai-images");
+		const supporting = catalogModel("openai-codex", "gpt-image-2", "openai-codex-responses");
 		const urls: string[] = [];
 		const ctx = createContext({
 			models: [xai, supporting],
 			settings: Settings.isolated({
 				modelRoles: { image: "xai/grok-imagine-image" },
-				"retry.fallbackChains": { image: ["deepinfra/fallback-image"] },
+				"retry.fallbackChains": { image: ["openai-codex/gpt-image-2"] },
 			}),
 			fetch: async input => {
 				urls.push(input.toString());
@@ -323,18 +344,17 @@ describe("imageGenTool catalog routing", () => {
 		expect(result.details?.provider).toBe("xai");
 	});
 
-	it("preserves an opaque background and edit inputs across HTTP fallback and exhausted supporting candidates", async () => {
+	it("preserves an auto background and edit inputs across HTTP fallback and exhausted candidates", async () => {
 		const first = catalogModel("deepinfra", "first-image", "openai-images");
-		const unsupported = catalogModel("xai", "grok-imagine-image", "openai-images");
 		const second = catalogModel("image-proxy", "second-image", "openai-images");
-		const models = [first, unsupported, second];
+		const models = [first, second];
 		const settings = Settings.isolated({
 			modelRoles: { image: "deepinfra/first-image" },
-			"retry.fallbackChains": { image: ["xai/grok-imagine-image", "image-proxy/second-image"] },
+			"retry.fallbackChains": { image: ["image-proxy/second-image"] },
 		});
 		const params = {
 			subject: "edit reference",
-			background: "opaque" as const,
+			background: "auto" as const,
 			input: [{ data: ` data:image/png;base64,${PNG_DATA} ` }],
 		};
 		const originalParams = structuredClone(params);
@@ -356,7 +376,7 @@ describe("imageGenTool catalog routing", () => {
 		]);
 		for (const body of bodies) {
 			expect(body).toMatchObject({
-				background: "opaque",
+				background: "auto",
 				input_references: [{ type: "image_url", url: `data:image/png;base64,${PNG_DATA}` }],
 			});
 		}
@@ -561,32 +581,65 @@ describe("imageGenTool catalog routing", () => {
 		expect(result.details?.imageCount).toBe(1);
 	});
 
-	it("omits the image tool model for Codex hosted image requests", async () => {
-		const image = catalogModel("openai-codex", "gpt-image-selected", "openai-codex-responses");
-		const carrier = catalogModel("openai-codex", "gpt-5.5", "openai-codex-responses", "chat");
+	it("preserves opaque edit requests through Codex success and HTTP exhaustion without an image tool model", async () => {
+		const image = catalogModel("openai-codex", "gpt-image-2", "openai-codex-responses");
+		const carrier = catalogModel("openai-codex", "gpt-5.4", "openai-codex-responses", "chat");
 		let requestBody: Record<string, unknown> | undefined;
 		const fetchMock: FetchImpl = async (_input, init) => {
 			requestBody = JSON.parse(String(init?.body));
-			const event = {
-				type: "response.completed",
-				response: { output: [{ type: "image_generation_call", result: WEBP_DATA }] },
-			};
-			return new Response(`data: ${JSON.stringify(event)}\n\n`, {
-				status: 200,
-				headers: { "content-type": "text/event-stream" },
-			});
+			return codexResponse();
 		};
-		const settings = Settings.isolated({ modelRoles: { image: "openai-codex/gpt-image-selected" } });
+		const settings = Settings.isolated({ modelRoles: { image: "openai-codex/gpt-image-2" } });
 		const ctx = createContext({ models: [image, carrier], settings, fetch: fetchMock });
 
-		const result = await imageGenTool.execute("codex-hosted", { subject: "codex" }, undefined, ctx);
+		const params = {
+			subject: "codex",
+			background: "opaque" as const,
+			input: [{ data: ` data:image/png;base64,${PNG_DATA} ` }],
+		};
+		const originalParams = structuredClone(params);
+		const result = await imageGenTool.execute("codex-hosted", params, undefined, ctx);
 		collectPaths(result);
 
-		expect(requestBody?.model).toBe("gpt-5.5");
+		expect(requestBody?.model).toBe("gpt-5.4");
+		expect(requestBody?.input).toMatchObject([
+			{
+				content: [{ type: "input_text" }, { type: "input_image", image_url: `data:image/png;base64,${PNG_DATA}` }],
+			},
+		]);
+		expect(params).toEqual(originalParams);
 		const tools = requestBody?.tools;
 		if (!Array.isArray(tools)) throw new Error("Expected hosted image tools");
-		expect(tools[0]).toMatchObject({ type: "image_generation" });
+		expect(tools[0]).toMatchObject({ type: "image_generation", background: "opaque" });
 		expect(tools[0]).not.toHaveProperty("model");
+
+		let failedCalls = 0;
+		let failedBody: Record<string, unknown> | undefined;
+		const failingContext = createContext({
+			models: [image, carrier],
+			settings,
+			fetch: async (_input, init) => {
+				failedCalls++;
+				failedBody = JSON.parse(String(init?.body));
+				return Response.json({ error: { message: "failed" } }, { status: 503 });
+			},
+		});
+		await expect(imageGenTool.execute("codex-exhausted", params, undefined, failingContext)).rejects.toBeInstanceOf(
+			AggregateError,
+		);
+		expect(failedCalls).toBe(1);
+		expect(failedBody).toMatchObject({
+			tools: [{ type: "image_generation", background: "opaque" }],
+			input: [
+				{
+					content: [
+						{ type: "input_text" },
+						{ type: "input_image", image_url: `data:image/png;base64,${PNG_DATA}` },
+					],
+				},
+			],
+		});
+		expect(params).toEqual(originalParams);
 	});
 
 	it("reports the image model, size, and quality the Codex backend actually ran", async () => {

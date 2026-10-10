@@ -1407,6 +1407,8 @@ export interface Model<TApi extends Api = Api> {
 	webSearchModel?: string;
 	/** Whether this chat model can carry the Responses `image_generation` tool itself. */
 	hostedImage?: boolean;
+	/** Reviewed deployment support for explicit transparent/opaque backgrounds. Only true opts in; rebuilt from catalog policy. */
+	imageBackground?: boolean;
 	/** Same-provider image model to generate images in this model's place (model id or provider/id). */
 	imageModel?: string;
 	/**

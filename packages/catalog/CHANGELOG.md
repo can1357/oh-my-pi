@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added catalog-driven image background capability metadata, opting in only the verified Codex `gpt-image-2` deployment and leaving unverified OpenAI platform and image-compatible hosts unsupported ([#15288](https://github.com/can1357/oh-my-pi/pull/15288) by [@FNDEVVE](https://github.com/FNDEVVE)).
+
 ## [18.8.8] - 2026-10-10
 
 ### Added
