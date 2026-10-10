@@ -332,9 +332,11 @@ export const imageGenTool: CustomTool<typeof imageGenSchema, ImageGenToolDetails
 
 			const attempted = candidates.map(model => `${model.provider}/${model.id}`).join(", ");
 			const suffix = skipped.length > 0 ? ` Skipped: ${skipped.join(", ")}.` : "";
+			const failureSummary =
+				failures.length > 0 ? ` Failures: ${failures.map(error => error.message).join("; ")}.` : "";
 			throw new AggregateError(
 				failures,
-				`Image generation exhausted the resolved image chain${attempted ? `: ${attempted}` : "."}${suffix}`,
+				`Image generation exhausted the resolved image chain${attempted ? `: ${attempted}` : "."}${suffix}${failureSummary}`,
 			);
 		});
 	},

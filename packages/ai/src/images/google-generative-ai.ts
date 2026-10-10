@@ -1,6 +1,7 @@
 import type { Model } from "@oh-my-pi/pi-catalog/types";
 import { withAuth } from "../auth-retry";
 import * as AIError from "../error";
+import { geminiImageConfig } from "./gemini-image-config";
 import { errorMessage, ImageApiError, imageBaseUrl, modelHeaders, usageFromWire } from "./shared";
 import type { GeneratedImage, ImageGenerationOptions, ImageGenerationRequest, ImageGenerationResult } from "./types";
 
@@ -24,10 +25,7 @@ export async function generateGoogleImage(
 		inlineData: image,
 	}));
 	parts.push({ text: request.prompt });
-	const imageConfig =
-		request.aspectRatio || request.imageSize
-			? { aspectRatio: request.aspectRatio, imageSize: request.imageSize }
-			: undefined;
+	const imageConfig = request.aspectRatio || request.imageSize ? geminiImageConfig(request) : undefined;
 	const body = {
 		contents: [{ role: "user", parts }],
 		generationConfig: {

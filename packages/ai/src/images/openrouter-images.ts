@@ -1,4 +1,5 @@
 import type { Model } from "@oh-my-pi/pi-catalog/types";
+import { geminiImageConfig } from "./gemini-image-config";
 import { decodeImageResponse, imageBaseUrl, postJson, toDataUrl } from "./shared";
 import type { ImageGenerationOptions, ImageGenerationRequest, ImageGenerationResult } from "./types";
 
@@ -12,13 +13,16 @@ export async function generateOpenRouterImage(
 		type: "image_url",
 		image_url: { url: toDataUrl(image) },
 	}));
+	const geminiConfig = model.identity.class === "gemini" ? geminiImageConfig(request) : undefined;
+	const aspectRatio = geminiConfig?.aspectRatio ?? request.aspectRatio;
+	const imageSize = geminiConfig?.imageSize ?? request.imageSize;
 	const body = {
 		model: model.requestModelId ?? model.id,
 		prompt: request.prompt,
 		n: request.count ?? 1,
 		response_format: "b64_json",
-		...(request.aspectRatio ? { aspect_ratio: request.aspectRatio } : {}),
-		...(request.imageSize ? { image_size: request.imageSize } : {}),
+		...(aspectRatio ? { aspect_ratio: aspectRatio } : {}),
+		...(imageSize ? { [geminiConfig ? "resolution" : "image_size"]: imageSize } : {}),
 		...(inputReferences.length > 0 ? { input_references: inputReferences } : {}),
 	};
 	const response = await postJson({
