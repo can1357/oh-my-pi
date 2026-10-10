@@ -10,6 +10,7 @@ import {
 	joinAdditionalContext,
 	TOOL_RESULT_ADDITIONAL_CONTEXT,
 	type ToolResultWithAdditionalContext,
+	validateAgentToolArguments,
 } from "@oh-my-pi/pi-agent-core";
 import type {
 	CursorMcpCall,
@@ -311,13 +312,13 @@ async function executeTool(
 
 	const bridgeContext = createBridgeToolContext(options);
 	try {
-		result = await tool.execute(
-			toolCallId,
-			toolArgs as Record<string, unknown>,
-			undefined,
-			onUpdate,
-			bridgeContext.context,
-		);
+		const validatedArgs = validateAgentToolArguments(tool, {
+			type: "toolCall",
+			id: toolCallId,
+			name: toolName,
+			arguments: toolArgs,
+		});
+		result = await tool.execute(toolCallId, validatedArgs, undefined, onUpdate, bridgeContext.context);
 	} catch (error) {
 		const message = error instanceof Error ? error.message : String(error);
 		result = buildToolErrorResult(message);
@@ -664,7 +665,13 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 
 		const bridgeContext = createBridgeToolContext(this.options);
 		try {
-			result = await tool.execute(toolCallId, toolArgs, undefined, onUpdate, bridgeContext.context);
+			const validatedArgs = validateAgentToolArguments(tool, {
+				type: "toolCall",
+				id: toolCallId,
+				name: toolName,
+				arguments: toolArgs,
+			});
+			result = await tool.execute(toolCallId, validatedArgs, undefined, onUpdate, bridgeContext.context);
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
 			result = buildToolErrorResult(message);

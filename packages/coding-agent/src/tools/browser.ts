@@ -126,7 +126,7 @@ const browserSchema = type({
 	"user_agent?": type("string").describe("tab user agent override"),
 	"ignore_https_errors?": type("boolean").describe("ignore invalid HTTPS certificates"),
 	"allow_file_access?": type("boolean").describe("allow file URLs to read local files"),
-	"headed?": type("boolean").describe("override the configured browser display mode"),
+	"headed?": type("boolean").describe("override the configured Chromium display mode"),
 	"code?": type("string").describe("js body to run in tab"),
 	"fn?": type("string").describe("serialized JavaScript function to run in tab"),
 	"args?": type("unknown[]").describe("arguments passed to a serialized function"),
@@ -153,8 +153,8 @@ interface BrowserPreludeDetails {
 /**
  * The browser an open drives, by precedence: explicit `app.*` options, the
  * relay, `browser.cdpUrl`, a Tern PiP (inside a Tern pane, unless
- * `headed: false` or `app.tern: false`; `app.tern: true` forces it), a cmux
- * surface, then Chromium.
+ * `app.tern: false`; `app.tern: true` forces it; `headed` does not opt out),
+ * a cmux surface, then Chromium.
  */
 export function resolveBrowserKind(
 	params: BrowserParams,
@@ -210,7 +210,7 @@ export function resolveBrowserKind(
 	if (configuredCdpUrl) {
 		return { kind: "connected", cdpUrl: configuredCdpUrl.replace(/\/+$/, "") };
 	}
-	if (params.headed !== false && app?.tern !== false) {
+	if (app?.tern !== false) {
 		const ternKind = resolveTernKind({ settingEnabled: cfgBrowserTern.get(session.settings) }, env);
 		if (ternKind) return ternKind;
 	}
@@ -415,6 +415,8 @@ async function openOnKind(
 	const deadlineStart = performance.now();
 	const timeoutSignal = AbortSignal.timeout(timeoutMs);
 	const openSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
+	// The step in flight when the deadline fires; a timeout names it.
+	let stage = `launching or connecting to the browser (${describeKind(kind)})`;
 	try {
 		const browser = await untilAborted(openSignal, () =>
 			acquireBrowser(kind, {
@@ -440,6 +442,7 @@ async function openOnKind(
 		// rolling the fresh browser back on failure.
 		holdBrowser(browser);
 		let result: AcquireTabResult;
+		stage = `opening tab ${JSON.stringify(name)}`;
 		try {
 			const initScripts = await untilAborted(openSignal, () =>
 				resolveInitScriptSources(params.init_scripts, session.cwd),
@@ -453,7 +456,9 @@ async function openOnKind(
 					params.user_agent !== undefined ||
 					params.ignore_https_errors === true)
 			) {
+				stage = `closing tab ${JSON.stringify(name)} to reopen it`;
 				await untilAborted(openSignal, () => releaseTab(name, { kill: false, timeoutMs }));
+				stage = `opening tab ${JSON.stringify(name)}`;
 			}
 			result = await untilAborted(openSignal, () =>
 				acquireTab(name, browser, {
@@ -512,9 +517,10 @@ async function openOnKind(
 		return toolResult(details).text(lines.join("\n")).done();
 	} catch (error) {
 		// Caller cancellation stays a ToolAbortError; the requested timeout
-		// becomes a timeout ToolError; anything else passes through unchanged.
+		// becomes a timeout ToolError naming the stalled step; anything else
+		// passes through unchanged.
 		if (signal?.aborted) throw error instanceof ToolAbortError ? error : new ToolAbortError();
-		if (timeoutSignal.aborted) throw new ToolError(`Browser open timed out after ${timeoutMs}ms`);
+		if (timeoutSignal.aborted) throw new ToolError(`Browser open timed out after ${timeoutMs}ms while ${stage}`);
 		throw error;
 	}
 }

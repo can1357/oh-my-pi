@@ -207,7 +207,10 @@ with RpcClient() as client:
 ```
 
 `open_session()` continues the newest non-empty session in the directory or
-starts a fresh one there (`resumed=False`). The event filter applies only to
+starts a fresh one there (`resumed=False`). Pass `provider=` and `model_id=` to
+use that model instead of the session's saved one; without them, a saved model
+that can no longer be restored fails the call with `RpcCommandError` and the
+previous session stays active. The event filter applies only to
 session events; responses, `prompt_result`, and UI/host frames always arrive,
 so `prompt_and_wait()` still completes when `agent_end` is filtered out.
 
@@ -306,6 +309,9 @@ be parsed).
   (up to 10 minutes) until credentials are stored. The flow arrives as UI
   requests: an `open_url` request (prefer `launch_url` as the copy target) and,
   for pasted-code providers, an `input` request answered with `send_ui_value()`.
+- `get_logout_accounts(provider_id)` lists a provider's stored credentials, active
+  first; `logout(provider_id, credential_id)` removes one and returns a
+  `LogoutResult` whose `remaining_source` names auth that still applies.
 - `handoff(custom_instructions=None)` returns a `HandoffResult`, or `None` when
   no handoff was produced.
 - `predict_word(text, cursor)` returns ghost text for a host-rendered composer

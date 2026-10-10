@@ -1,7 +1,7 @@
 # Vendored from https://github.com/sublimehq/Packages/blob/fa6b8629c95041bf262d4c1dab95c456a0530122/Markdown/Markdown.sublime-syntax
 # (sha256 fe045101a3be4d2ce2773095a323da4296950826e6fa4129ca34f4c7e5c58967 before the patch below).
 # That is the sublimehq/Packages commit syntect v5.3.0 pins, so unpatched this file is the Markdown
-# grammar in syntect's default set. highlight.rs adds it after those defaults, which shadows the
+# grammar in syntect's default set. builder.rs adds it after those defaults, which shadows the
 # built-in for name, extension and token lookups ("Markdown", ".md", "markdown"). The built-in stays
 # in the set: another grammar that embeds Markdown by scope may still be linked to the old copy.
 # Source: sublimehq/Packages. Markdown/ has no "-license" file, so the repository licence applies:
@@ -26,7 +26,7 @@
 # Re-sync when the workspace bumps syntect (the `syntect` entry in the root Cargo.toml):
 #   1. Fetch Markdown/Markdown.sublime-syntax from sublimehq/Packages at the commit the new syntect pins
 #      (its testdata/Packages submodule) and re-apply every patch entry above.
-#   2. cargo nextest run -p pi-natives highlight::tests
+#   2. CI=1 bun run test:rs (includes pi-natives highlight::tests)
 #   3. Time the three line shapes this patch was written for, each as a one-line document passed to
 #      highlight_code_impl(&text, Some("markdown"), &colors), against the same shape with its repeat
 #      count dropped to 2. A grammar that still backtracks costs orders of magnitude more on the long

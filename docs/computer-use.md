@@ -11,25 +11,27 @@ The prelude is disabled by default. Configure it in `~/.omp/agent/config.yml`, p
 
 ```yaml
 computer:
-  enabled: true
-  display: all
-  maxWidth: 3840
-  maxHeight: 2400
+   enabled: true
+   display: active
+   maxWidth: 3840
+   maxHeight: 2400
 
 tools:
-  approvalMode: write
+   approvalMode: write
 ```
 
-| Key                  | Default | Meaning                                                                                                           |
-| -------------------- | ------: | ----------------------------------------------------------------------------------------------------------------- |
-| `computer.enabled`   | `false` | Expose the `computer` Eval prelude.                                                                               |
-| `computer.display`   |   `all` | Composite every display, or select one native display ID. On Wayland the portal display ID is `wayland-portal-0`. |
-| `computer.maxWidth`  |  `3840` | Maximum screenshot width. Some model transports impose an effective coordinate-safe cap of 1280.                  |
-| `computer.maxHeight` |  `2400` | Maximum screenshot height. Some model transports impose an effective coordinate-safe cap of 896.                  |
+| Key                  |  Default | Meaning                                                                                                                                                                                                               |
+| -------------------- | -------: | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `computer.enabled`   |  `false` | Expose the `computer` Eval prelude.                                                                                                                                                                                   |
+| `computer.display`   | `active` | Capture the monitor with the largest overlap with the focused window, falling back to the primary monitor. Use `all` for a composite, or a native display ID. On Wayland the portal display ID is `wayland-portal-0`. |
+| `computer.maxWidth`  |   `3840` | Maximum screenshot width. Some model transports impose an effective coordinate-safe cap of 1280.                                                                                                                      |
+| `computer.maxHeight` |   `2400` | Maximum screenshot height. Some model transports impose an effective coordinate-safe cap of 896.                                                                                                                      |
 
 There is no `computer.backend` setting: the native addon selects the platform backend. The `/computer`, `/computer on`, `/computer off`, and `/computer status` commands toggle or inspect the current session without writing config. Interactive and RPC CLI hosts watch settings files and reconcile enabled preludes for subsequent Eval calls; `/computer status` shows the effective setting. SDK hosts must refresh their settings themselves.
 
 Anthropic-family models and transports whose compatibility metadata disables original-detail images use the lower effective cap of 1280×896.
+
+Both Eval runtimes preserve computer images at the captured dimensions with original-detail metadata; Eval does not resize or re-encode them again.
 
 `tools.approvalMode: write` allows inspection helpers (window listing, screenshots, AX reads, clipboard reads) and `computer.run` calls declared with `read_only: true`; it prompts for input and mutation helpers. An explicit `tools.approval.computer: allow | prompt | deny` overrides the mode.
 
@@ -64,7 +66,7 @@ For multi-step sequences, `computer.run(fnOrCode, { args?, read_only?, timeout? 
 
 Direct inspection helpers run read-only automatically. In `computer.run`, use `read_only: true` to declare an inspection-only call for approval and to block mutation through the `desktop` facade: screenshots and AX reads work, while facade input and clipboard-write methods reject the call. This is **not a sandbox**. The evaluated code still has full Bun/Node host access, including `process`, `require`, and `fs`, so `read_only` does not prevent mutation through arbitrary host APIs.
 
-One lazy worker accepts one active run; overlapping runs fail with `Computer worker is busy`. Run/direct-call timeout defaults to 120 seconds, clamped to 1–300 seconds and a positive `tools.maxTimeout` ceiling; `0` does not disable it. Cancellation normally interrupts the active run without discarding the desktop session. An unresponsive worker is terminated after the timeout plus 750 ms grace, and crashes also reset it; the next call starts fresh and must reacquire frames and AX refs. `computer.close()` permanently closes this prelude session: later action calls fail and `capabilities()` returns `undefined` (`None` in Python).
+One lazy worker accepts one active run; overlapping runs fail with `Computer worker is busy`. Run/direct-call timeout defaults to 120 seconds, clamped to 1–300 seconds and a positive `tools.maxTimeout` ceiling; `0` does not disable it. Cancellation interrupts native event delivery and retires queued work from that run without discarding the desktop session. Completed runs also retire unawaited native work before another run starts. An unresponsive worker is terminated after the timeout plus 750 ms grace, and crashes also reset it; the next call starts fresh and must reacquire frames and AX refs. `computer.close()` permanently closes this prelude session: later action calls fail and `capabilities()` returns `undefined` (`None` in Python).
 
 ## Discover targets
 
@@ -75,6 +77,12 @@ display(await computer.capabilities());
 ```
 
 `computer.windows({ app?, title? })` returns window IDs, app/title, PID, logical bounds, and focus state. Select exactly one target with `computer.window(idOrFilter)`; an ambiguous filter throws and lists candidates. `computer.focusedWindow()` returns the current target or `null`.
+
+### Applications and live display targets
+
+`computer.apps.list({ query?, runningOnly? })` returns native application IDs, names, paths, running state, and an observed PID when available. `computer.apps.open(idOrNameOrNativeAppPath, { activate? })` resolves an exact ID/path before a unique case-insensitive name; ambiguous names fail. Deliberate activation defaults off, but an application can still request focus itself.
+
+`await computer.display(id | "active" | "all")` selects a live monitor target without rewriting configuration or resetting the worker. Each target owns its screenshot frame. `"active"` is resolved again for each full screenshot; subsequent input and zoom remain pinned to the delivered frame. Display-targeted keyboard input refuses a focused window on another monitor.
 
 ## Screenshots and pixel input
 
@@ -90,14 +98,17 @@ await win.press("enter");
 Window methods include:
 
 - `screenshot({ silent? })`
+- `zoom({ x, y, width, height }, { silent? })`
 - `click(x, y, { button?, count?, modifiers?, takeover? })` and `doubleClick(x, y)`
 - `move(x, y)`, `drag([[x, y], ...], options?)`, and `scroll(x, y, { dx?, dy?, takeover? })`
 - `type(text, { takeover? })` and `press(chord, { takeover? })`
 - `raise()`
 
-`computer` itself (and `desktop` inside `computer.run`) exposes the same screenshot and input surface for the all-displays composite.
+`computer` itself (and `desktop` inside `computer.run`) exposes the same screenshot and input surface for the selected monitor or explicit all-displays composite.
 
-Pixel coordinates always belong to the most recent screenshot of the same target. Coordinate input before that capture is rejected. A resized/closed target or changed display layout invalidates the frame; capture again instead of guessing. Screenshots display automatically and are also saved at the captured resolution, subject to `computer.maxWidth` / `computer.maxHeight` and any effective model-transport cap. The screenshot helper returns `{ path, width, height }` for the saved capture. When scaled, its emitted text also reports the native source dimensions. `{ silent: true }` suppresses both the image and screenshot text in loops.
+Pixel coordinates always belong to the most recent full screenshot of the same target. Coordinate input before that capture is rejected. A resized/closed target or changed display layout invalidates the frame; capture again instead of guessing. Screenshots display automatically and are also saved at the captured resolution, subject to `computer.maxWidth` / `computer.maxHeight` and any effective model-transport cap. The screenshot helper returns `{ path, width, height, coordinateWidth, coordinateHeight }` for the saved capture; full screenshots have matching image and coordinate dimensions. When scaled, its emitted text also reports the native source dimensions. `{ silent: true }` suppresses both the image and screenshot text in loops.
+
+Use `await win.zoom({ x: 100, y: 200, width: 300, height: 120 })` to inspect a region at native detail. The rectangle uses the last full screenshot's pixels. Zoom captures the target afresh and returns `region` plus the unchanged `coordinateWidth`/`coordinateHeight`; it never replaces the full click frame. Continue clicking in full-screenshot coordinates, not zoom-image coordinates. Take a new full screenshot after a resize or display-layout change.
 
 Window input defaults to background routes that do not move the user's pointer or deliberately activate the target. Known unsupported routes throw `BackgroundUnavailable`; use AX or retry that call with `{ takeover: true }`. Takeover temporarily activates the exact target and posts real input, then attempts to restore focus and pointer position without overriding a newer user focus choice. OS activation restrictions can still refuse takeover. Desktop-root pointer helpers (`computer.click`, …) always drive the user's real pointer.
 
@@ -105,9 +116,11 @@ Applications and window managers can react to background events by changing focu
 
 Wayland per-window native input and `raise()` remain unavailable without compositor-specific integration; use AX actions, or desktop input after focusing the target yourself.
 
+`await win.observe({ silent?, all?, maxDepth? })` captures a full screenshot and accessibility tree together. It returns screenshot metadata plus `ax`, `nodeCount`, and `truncated`, and normally emits both image and tree. A failed or canceled observation does not replace the previous delivered click frame.
+
 ## Accessibility-first automation
 
-Prefer AX to pixels when controls are exposed:
+Prefer AX when semantic controls are exposed; use window screenshots and pixel input for canvases, mirrored devices, or custom-drawn controls. Do not repeatedly inspect the same AX tree when the relevant controls are absent:
 
 ```js
 const win = await computer.window({ title: "Settings" });
@@ -121,11 +134,25 @@ await buttons[0].press();
 - `await win.ref("e5")`, `computer.elementAt(x, y)`, `computer.focusedElement()`, and `computer.ref("e5")` return live elements.
 - Elements expose `value`, `setValue`, `bounds`, `attributes`, `actions`, `perform`, `press`, `click`, `focus`, `parent`, and `children` operations.
 
-AX element actions need no screenshot. AX bounds and `computer.elementAt` use platform-native global desktop coordinates, not screenshot pixels: Windows uses physical desktop pixels; macOS uses logical points. Element clicks resolve the live element's owning window and refuse missing or ambiguous ownership rather than clicking an overlapping window. Each window AX snapshot advances its reference generation; only current and immediately previous generations are retained. The registry also caps references at 5000 and can evict a target's oldest generation earlier. Recover from `StaleRef` by taking a new AX snapshot and reacquiring the element.
+AX element actions need no screenshot. AX bounds and `computer.elementAt` use platform-native global desktop coordinates, not screenshot pixels: Windows uses physical desktop pixels; macOS uses logical points. Element clicks resolve the live element's owning window and refuse missing or ambiguous ownership rather than clicking an overlapping window. An element keeps the same reference across its window's AX snapshots and `find()` (desktop lookups such as `computer.focusedElement()` keep their own); a reference expires once its element is missing from the window's current and previous AX snapshots. An element whose role or label changes gets a new reference, and the old reference keeps naming the element it was read from until it expires the same way. On Windows, an element that takes over the UI Automation `RuntimeId` of one that is gone also gets a new reference, and an element whose `RuntimeId` cannot be read gets a new one on every read. The registry also caps references at 5000 and can evict a target's oldest generation earlier. Recover from `StaleRef` by taking a new AX snapshot and reacquiring the element.
 
 On macOS, `press()` requires the element to advertise `AXPress` in `actions()`; unsupported actions throw `AxFailed` even if the application would silently accept the request. Use `el.click()` for a coordinate click when the control has no press action.
 
+On macOS, a reference whose element the application has since removed throws `StaleRef` from every element operation, without waiting for the snapshots to expire it.
+
+On macOS, `press()`, `perform()` and `raise()` throw `AxUnconfirmed` when the action was requested but the app did not reply in time or messaging failed, for example because the action opened a modal dialog. The action may already have taken effect, so observe the window before repeating it.
+
 On macOS, native text fields support verified whole-value replacement and exact-window selected-text insertion, including when an app has multiple windows. Web-content or unidentifiable AX value writes refuse before mutation rather than trusting stale accessibility echoes. On Linux, generic `press()` selects an advertised activation action, never an arbitrary first action. On Windows, known self-activating UIA hosts may require explicit takeover coordinate input; background automation does not disable another application's windows or mutate their styles.
+
+## Menus, held input, and task control
+
+Use `win.menu.items()` for top-level menus, `win.menu.items("File")` for a submenu, and `win.menu.select(["File", "Export…"])` to invoke a command. Matching prefers exact titles, otherwise compares case-insensitively while ignoring a trailing ellipsis. Selection rechecks enabled state and refuses ambiguous paths; it does not guess keyboard shortcuts.
+
+`holdKeys(keys, { duration, takeover? })` and `holdMouse(x, y, { button?, duration, keys?, takeover? })` hold input for 0–100 seconds. `drag(points, { keys?, modifiers?, takeover? })` supports gestures such as Space-drag. Every call releases attempted keys/buttons on success, error, and cancellation; no pressed state survives into another call.
+
+For deliberate foreground work, `await computer.control.acquire({ reason })` requests live human confirmation. Headless execution, refusal, or cancellation never grants control. While acquired, an omitted `takeover` option uses foreground delivery; explicit `takeover: false` still requests background delivery. Use `control.release()` in `finally`. User interruption, task completion, and session disposal also revoke the grant and native ownership. `control.state()` reports the current native state. The grant does not authorize unrelated consequential actions.
+
+On macOS, `win.bringToCurrentSpace()` requests an actual move of that window without activating its app or switching the user's Space. The result is checked against WindowServer membership; missing APIs or OS refusal produce `SpaceUnsupported` or `SpaceMoveDenied`. No security settings are changed. Capture a new full screenshot afterward.
 
 ## Clipboard and waiting
 
@@ -133,10 +160,7 @@ On macOS, native text fields support verified whole-value replacement and exact-
 const text = await computer.clipboard.read();
 await computer.clipboard.write("replacement text");
 await computer.run(async ({ desktop, wait }) => {
-  await wait(
-    () => desktop.windows({ title: "Done" }).then((xs) => xs.length > 0),
-    { timeout: 10_000, interval: 100 },
-  );
+	await wait(() => desktop.windows({ title: "Done" }).then(xs => xs.length > 0), { timeout: 10_000, interval: 100 });
 });
 ```
 
@@ -144,19 +168,25 @@ Inside `computer.run`, `wait(milliseconds)` sleeps and `wait(predicate, { timeou
 
 ## Platforms
 
-| Platform                | Current backend                                                                                                                                                                                                             |
-| ----------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| macOS x64/arm64         | ScreenCapture/Quartz plus native AX and input. Grant Screen Recording for capture and Accessibility for input/AX, then restart the launching host.                                                                          |
-| Linux X11 x64/arm64     | X11 capture/input and AT-SPI accessibility. Requires a readable display plus RandR/XTEST.                                                                                                                                   |
+| Platform                | Current backend                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| ----------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| macOS x64/arm64         | ScreenCaptureKit in a persistent native event-loop worker on macOS 14+, in-process CoreGraphics on macOS 12/13, plus native AX and input. Grant Screen Recording for capture and Accessibility for input/AX, then restart the launching host.                                                                                                                                                                                                                                                                                      |
+| Linux X11 x64/arm64     | X11 capture/input and AT-SPI accessibility. Requires a readable display plus RandR/XTEST.                                                                                                                                                                                                                                                                                                                                                                                                                                          |
 | Linux Wayland x64/arm64 | RemoteDesktop portal or `LIBEI_SOCKET` input and AT-SPI accessibility. ScreenCast portal/PipeWire capture ships only in builds compiled with the `wayland-pipewire` Cargo feature; released binaries omit it, so `capabilities()` reports `capture: false` there. RemoteDesktop permission is requested lazily on first native input, is not persisted, and closes with the desktop session; read-only window/AX inspection does not request it. Compositor restrictions apply; background per-window native input is unavailable. |
-| Windows x64/arm64       | Native display/window capture, Win32 input, and UI Automation accessibility.                                                                                                                                                |
-| Other published targets | Unsupported unless the native addon reports capabilities.                                                                                                                                                                   |
+| Windows x64/arm64       | Native display/window capture, Win32 input, and UI Automation accessibility.                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| Other published targets | Unsupported unless the native addon reports capabilities.                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+
+The optional Wayland PipeWire backend refreshes portal stream geometry before coordinate input and zoom so a changed monitor layout cannot silently reuse an old frame. This adds portal overhead and may require renewed consent if the saved ScreenCast permission is no longer reusable.
 
 X11 background input uses an independent XI2 pointer/keyboard and requires writable `/dev/uinput`, working udev/libinput hotplug, and a compatible toolkit/window manager. Core-only clients and popup grabs may require AX or takeover. Windows uses physical screen coordinates throughout capture, AX and input, converting only at the target window's DPI-aware message boundary; mixed-DPI monitor origins are never divided by individual display scales.
 
 Inspect `computer.capabilities()` rather than assuming capture, input, AX, or permission state. On Wayland, input reports `prompt-or-granted` before first native input without opening a RemoteDesktop session. Released builds are compiled without the `wayland-pipewire` feature, so `capabilities()` reports `capture: false`; where the feature is present, a missing portal/PipeWire feature or denied RemoteDesktop portal is reported as a capture/input/permission failure rather than falling back to X11.
 
 ## Safety and troubleshooting
+
+Native mutations acquire an OS-backed input/focus lock shared across processes. Contention returns `InputBusy` before sending input; screenshots and inspection remain available. The lock is released after the operation and its cleanup, not held for the whole conversation.
+
+On macOS, physical `Esc` interrupts the current native input operation without swallowing the key. Synthetic Escape chords do not trigger the emergency stop. Event-tap permission is required; an unavailable monitor fails closed with `PermissionDenied`. Cancellation releases held buttons and modifiers before ownership is released. Synchronous OS/AX calls already in progress cannot be undone: inspect the UI after `Cancelled` or a partial-delivery error before retrying.
 
 - Prefer direct inspection helpers, and use `read_only: true` for `computer.run` whenever no mutation is required.
 - Prefer AX actions because they target a semantic element and do not depend on a stale screenshot.

@@ -11,9 +11,7 @@ use napi::{JsString, Result};
 use napi_derive::napi;
 use pi_shell::rayon_global_pool_available;
 use rayon::prelude::*;
-use syntect::parsing::{
-	ParseState, Scope, ScopeStack, ScopeStackOp, SyntaxDefinition, SyntaxReference, SyntaxSet,
-};
+use syntect::parsing::{ParseState, Scope, ScopeStack, ScopeStackOp, SyntaxReference, SyntaxSet};
 
 use crate::{
 	js::{self, InlineStr},
@@ -36,36 +34,11 @@ thread_local! {
 	static SCOPE_COLOR_CACHE: RefCell<HashMap<Scope, usize>> = RefCell::new(HashMap::with_capacity(256));
 }
 
-/// Syntaxes vendored as `.sublime-syntax` sources and added after syntect's
-/// defaults. Most are grammars syntect lacks; `Markdown` shadows syntect's
-/// built-in one, because a syntax added later wins syntect's name, extension
-/// and token lookups. That file's header records why we carry a copy of a
-/// grammar syntect already ships, and the checks for dropping it again.
-const EXTRA_SYNTAXES: &[&str] = &[
-	include_str!("syntaxes/Julia.sublime-syntax"),
-	include_str!("syntaxes/Nix.sublime-syntax"),
-	include_str!("syntaxes/Mermaid.sublime-syntax"),
-	include_str!("syntaxes/TypeScript.sublime-syntax"),
-	include_str!("syntaxes/TypeScriptReact.sublime-syntax"),
-	include_str!("syntaxes/Astro.sublime-syntax"),
-	include_str!("syntaxes/Markdown.sublime-syntax"),
-];
-
 fn get_syntax_set() -> &'static SyntaxSet {
-	SYNTAX_SET.get_or_init(build_syntax_set)
-}
-
-/// Load syntect's newline-aware defaults and add the vendored extra syntaxes.
-/// A vendored syntax that fails to parse is skipped rather than breaking all
-/// highlighting; the bundled-language tests guard against silent absence.
-fn build_syntax_set() -> SyntaxSet {
-	let mut builder = SyntaxSet::load_defaults_newlines().into_builder();
-	for src in EXTRA_SYNTAXES {
-		if let Ok(def) = SyntaxDefinition::load_from_str(src, true, None) {
-			builder.add(def);
-		}
-	}
-	builder.build()
+	SYNTAX_SET.get_or_init(|| {
+		syntect::dumps::from_uncompressed_data(include_bytes!(env!("OMP_SYNTAX_SET")))
+			.expect("bundled syntax set should match the syntect build")
+	})
 }
 
 /// Pre-compiled scope patterns for fast matching.
@@ -756,8 +729,63 @@ pub fn get_supported_languages() -> Vec<String> {
 }
 
 #[cfg(test)]
+#[path = "syntaxes/builder.rs"]
+mod builder;
+
+#[cfg(test)]
 mod tests {
+	use std::{collections::BTreeSet, sync::LazyLock};
+
 	use super::*;
+
+	/// The syntax set `build.rs` serializes, rebuilt from source.
+	static SOURCE_SYNTAX_SET: LazyLock<SyntaxSet> = LazyLock::new(builder::build_syntax_set);
+
+	#[test]
+	fn generated_syntax_set_preserves_supported_languages() {
+		let expected: BTreeSet<String> = SOURCE_SYNTAX_SET
+			.syntaxes()
+			.iter()
+			.map(|syntax| syntax.name.clone())
+			.collect();
+		let actual: BTreeSet<String> = get_supported_languages().into_iter().collect();
+		assert_eq!(actual, expected);
+	}
+
+	#[test]
+	fn generated_syntax_set_preserves_highlighting() {
+		let colors = test_colors();
+		let ss = &*SOURCE_SYNTAX_SET;
+		let extra_snippets = [
+			("julia", "function greet(name)\n  # Unicode\n  println(\"héllo $name\")\nend\n"),
+			("nix", "let name = \"world\"; in { message = ''héllo ${name}''; }\n"),
+			("mermaid", "graph TD\n  A[\"Start\"] --> B\n  %% note\n"),
+			(
+				"astro",
+				"---\nimport { Menu } from '@lucide/astro';\nconst name: string = \
+				 'world';\n---\n<style>a { color: red; }</style>\n<a>{name}</a>\n",
+			),
+		];
+		for &(language, code) in WARM_SNIPPETS.iter().chain(extra_snippets.iter()) {
+			let syntax = find_syntax(ss, language).unwrap();
+			let mut parse_state = ParseState::new(syntax);
+			let mut scope_stack = ScopeStack::new();
+			let mut expected = String::new();
+			highlight_into(
+				code,
+				ss,
+				&mut parse_state,
+				&mut scope_stack,
+				&palette(&colors),
+				&mut expected,
+			);
+			assert_eq!(
+				highlight_code_impl(code, Some(language), &colors),
+				expected,
+				"generated grammar changed {language} highlighting"
+			);
+		}
+	}
 
 	fn test_colors() -> HighlightColors {
 		HighlightColors {
@@ -836,12 +864,6 @@ mod tests {
 		assert!(out.contains("<k>-->"));
 		assert!(out.contains("<c> note"));
 	}
-
-	/// A Markdown table header must stay recognisable however long its first
-	/// row is — many inline code spans, or many backslash escapes — so the
-	/// row separator keeps its punctuation colour. syntect's built-in grammar
-	/// abandons the table lookahead on these rows, so this also pins the
-	/// vendored grammar as the one resolved for `markdown`.
 	#[test]
 	fn markdown_recognises_table_headers_after_many_inline_spans() {
 		let colors = test_colors();

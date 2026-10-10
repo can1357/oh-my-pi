@@ -27,6 +27,9 @@ function claudeTokenizer(identity: ModelIdentity): ModelTokenizer | undefined {
 	if (identity.family === "sonnet" || identity.family === "fable" || identity.family === "mythos") {
 		return revisionAtLeast(identity.revision, "5") ? "claude-v5-sonnet" : "claude-v3";
 	}
+	// Haiku 5.5 moved to the post-4.7 tokenizer (~30% more tokens than Haiku
+	// 4.5). No Haiku-measured vocabulary is embedded; Sonnet 5's is the nearest.
+	if (identity.family === "haiku" && revisionAtLeast(identity.revision, "5.5")) return "claude-v5-sonnet";
 	return "claude-v3";
 }
 

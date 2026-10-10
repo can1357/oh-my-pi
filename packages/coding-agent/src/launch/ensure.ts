@@ -60,15 +60,18 @@ export async function waitReady(
  * proof the daemon actually ended can require a terminal state; a rejected,
  * unanswered, or aborted stop resolves `undefined` — like the other quiet
  * helpers here, the RPC failure is logged and absorbed rather than thrown.
+ * With `id`, a generation another process started since is left running and
+ * its snapshot returned.
  */
 export async function stopQuietly(
 	client: DaemonBrokerClient,
 	name: string,
 	label: string,
 	signal?: AbortSignal,
+	id?: string,
 ): Promise<DaemonSnapshot | undefined> {
 	try {
-		const result = await client.request({ op: "stop", name, timeoutMs: STOP_TIMEOUT_MS }, signal);
+		const result = await client.request({ op: "stop", name, timeoutMs: STOP_TIMEOUT_MS, id }, signal);
 		return result.op === "stop" ? result.daemon : undefined;
 	} catch (error) {
 		throwIfAborted(signal);

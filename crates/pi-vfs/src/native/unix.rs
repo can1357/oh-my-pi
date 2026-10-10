@@ -263,7 +263,8 @@ fn statfs_impl(target: &Target<'_>) -> io::Result<StatFs> {
 			fs::metadata(path).ok().map(|meta| meta.dev())
 		},
 		Target::Fd(fd) => {
-			// SAFETY: `fd` is a descriptor owned by the caller and `buf` is writable.
+			// SAFETY: `fd` is a descriptor owned by the caller and `buf` is
+			// writable.
 			cvt(unsafe { libc::fstatfs(*fd, &raw mut buf) })?;
 			// SAFETY: `stat` is a plain C output struct fully written on success.
 			let mut st: libc::stat = unsafe { std::mem::zeroed() };
@@ -323,7 +324,8 @@ fn statfs_impl(target: &Target<'_>) -> io::Result<StatFs> {
 			unsafe { libc::pathconf(c.as_ptr(), libc::_PC_NAME_MAX) }
 		},
 		Target::Fd(fd) => {
-			// SAFETY: `fd` is a descriptor owned by the caller and `buf` is writable.
+			// SAFETY: `fd` is a descriptor owned by the caller and `buf` is
+			// writable.
 			cvt(unsafe { libc::fstatfs(*fd, &raw mut buf) })?;
 			// SAFETY: plain query on a valid descriptor.
 			unsafe { libc::fpathconf(*fd, libc::_PC_NAME_MAX) }
@@ -359,7 +361,8 @@ fn statfs_impl(target: &Target<'_>) -> io::Result<StatFs> {
 			cvt(unsafe { libc::statvfs(c.as_ptr(), &raw mut buf) })?;
 		},
 		Target::Fd(fd) => {
-			// SAFETY: `fd` is a descriptor owned by the caller and `buf` is writable.
+			// SAFETY: `fd` is a descriptor owned by the caller and `buf` is
+			// writable.
 			cvt(unsafe { libc::fstatvfs(*fd, &raw mut buf) })?;
 		},
 	}

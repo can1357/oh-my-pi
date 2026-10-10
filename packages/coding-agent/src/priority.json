@@ -1,5 +1,9 @@
 {
 	"smol": [
+		"claude-haiku-5-5",
+		"claude-haiku-5.5",
+		"haiku-5-5",
+		"haiku-5.5",
 		"google-antigravity/gemini-3.8-flash",
 		"gemini-3.8-flash",
 		"gemini-3-8-flash",

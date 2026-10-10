@@ -11,9 +11,11 @@
  * `q` query, `o` open, `f` frame, `b` blob, `t` palette, `x` close. Terminal →
  * program: `r` reply, `e` event (on the pty's input side).
  *
- * The normative spec is `crates/tern/SURFACE_PROTOCOL.md` in the Stencil
- * repository; these types mirror it. Unknown fields and verbs are ignored in
- * both directions, so every addition here is optional.
+ * The normative spec is the Tern SDK's Surface Protocol and Elements reference
+ * (`docs/sdk/src/protocol` and `docs/sdk/src/elements` in the Stencil
+ * repository, https://docs.stencil.so/tern/protocol/); these types mirror it.
+ * Unknown fields and verbs are ignored in both directions, so every addition
+ * here is optional.
  */
 
 /** Protocol version this build speaks. */
@@ -215,6 +217,8 @@ export interface TspCodeProps {
 	numbers?: boolean;
 	marks?: readonly { line: number; tone: TspTone }[];
 	wrap?: boolean;
+	/** Clamp to the first `lines` drawn lines under a "N more lines" button; gives way inside an open disclosure. */
+	preview?: TspPreview;
 }
 export interface TspDiffHunk {
 	oldStart: number;
@@ -350,7 +354,8 @@ export interface TspEditorProps {
 	decor?: readonly TspEditorDecoration[];
 	/** Inline completion suffix drawn after the caret. */
 	ghost?: string;
-	placeholder?: string;
+	/** Dim text while `text` is empty; spans style it (`em` for italics). */
+	placeholder?: TspText;
 	prompt?: TspText;
 	/** Mode label (vim). */
 	mode?: string;
@@ -436,7 +441,7 @@ export interface TspPickerItem {
 export interface TspPickerColumn {
 	id: string;
 	head?: string;
-	/** `elapsed`: the value is an age in ms at send; Tern clocks it (spec §9). */
+	/** `elapsed`: the value is an age in ms at send; Tern clocks it. */
 	format?: "text" | "num" | "price" | "bar" | "time" | "elapsed" | "dim";
 	/** Lower priorities hide first when narrow. */
 	priority?: number;
@@ -633,6 +638,8 @@ export interface TspToolProps {
 	targetKind?: "command" | "path" | "pattern" | "query" | "text";
 	/** Language for `command` highlighting (`bash`, `python`, `js`). */
 	lang?: string;
+	/** The raw command line the head's Copy command button copies; a `command` target sets it implicitly. */
+	command?: string;
 	/** `file://` link for path targets (⌘-click opens). */
 	href?: string;
 	/** Short facts after the target: `+8 −1`, `5 matches · 2 files`, `22 lines`. */
@@ -653,8 +660,11 @@ export interface TspToolProps {
 	frame?: "card" | "inline";
 	collapsible?: boolean;
 	collapsed?: boolean;
-	/** Body clamp while collapsed: `{lines}` shows the head of the body, `{tail}` the end (bash output). */
-	preview?: { lines: number } | { tail: number } | "none";
+	/**
+	 * Body clamp while collapsed: `{lines}` shows the head of the body, `{tail}` the end (bash output).
+	 * `children`: the collapsed body stays whole and the children's own previews (`ansi`, `code`) clamp instead.
+	 */
+	preview?: { lines: number } | { tail: number } | "none" | "children";
 	/** Actions offered in the head on hover (`copy`, `rerun`, `open`). */
 	tools?: readonly TspPickerAction[];
 }
@@ -923,6 +933,8 @@ export type TspReply =
 			cell?: { w: number; h: number };
 			dark?: boolean;
 			reduceMotion?: boolean;
+			/** The user's system reads a 12-hour clock (`false`: 24-hour); absent from older terminals. */
+			hour12?: boolean;
 	  }
 	| { r: "blobs"; have: readonly string[] };
 

@@ -28,6 +28,15 @@ describe("buildOutputValidator", () => {
 		expect(result.validator).toBeUndefined();
 	});
 
+	it("validates against a reused schema object's current declaration after it is edited", () => {
+		const schema = { properties: { result: { type: "string" } } };
+		expect(buildOutputValidator(schema).validator?.validate({ result: "ok" }).success).toBe(true);
+		schema.properties.result.type = "int32";
+		const { validator } = buildOutputValidator(schema);
+		expect(validator?.validate({ result: 7 }).success).toBe(true);
+		expect(validator?.validate({ result: "ok" }).success).toBe(false);
+	});
+
 	it("errors on a malformed JSON Schema", () => {
 		const result = buildOutputValidator({
 			type: "object",
