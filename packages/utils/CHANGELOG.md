@@ -4,7 +4,7 @@
 
 ### Changed
 
-- Sped up streaming JSON string scanning for long tool-argument payloads by bulk-skipping ordinary characters ([#14297](https://github.com/can1357/oh-my-pi/pull/14297) by [@abilliontokens](https://github.com/abilliontokens)).
+- Sped up streaming JSON scanning for long ordinary tool-argument strings while limiting bulk-scan overhead between escapes ([#14297](https://github.com/can1357/oh-my-pi/pull/14297) by [@abilliontokens](https://github.com/abilliontokens), [#15273](https://github.com/can1357/oh-my-pi/pull/15273) by [@iliaal](https://github.com/iliaal)).
 
 ## [18.8.9] - 2026-10-10
 
