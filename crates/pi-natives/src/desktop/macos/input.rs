@@ -368,11 +368,14 @@ fn refuse_pointer(
 		return Err(screen_sharing_refusal(window, "modifier flags and held keys on pointer input"));
 	}
 	// An open context menu takes the keyboard from the user's app, and a hold
-	// keeps it open until the button is released.
-	if matches!(event, PointerEvent::Hold { .. }) && may_open_context_menu(event) {
+	// or a drag keeps it open until the button is released, however long the
+	// hold or stroke runs.
+	if matches!(event, PointerEvent::Hold { .. } | PointerEvent::Drag { .. })
+		&& may_open_context_menu(event)
+	{
 		return refuse(
-			"could open a context menu on this secondary-button hold, which would take the keyboard \
-			 from the user's app for the whole hold",
+			"could open a context menu on this secondary-button hold or drag, which would take the \
+			 keyboard from the user's app until the button is released",
 		);
 	}
 	if presses_button(event) && reads_hardware_pointer() {
@@ -2594,8 +2597,22 @@ mod tests {
 		assert_eq!(verdict(&hold(MouseButton::Left, Vec::new())), Ok(()));
 		assert_eq!(verdict(&hold(MouseButton::Left, vec![KeyName::Shift])), Ok(()));
 		assert_eq!(verdict(&hold(MouseButton::Middle, vec![KeyName::Ctrl])), Ok(()));
-		// A right-click or right drag ends at once, so its menu is closed
-		// instead.
+		let drag = |button, modifiers| PointerEvent::Drag {
+			path: vec![(10.0, 10.0); 500],
+			button,
+			modifiers,
+			keys: Vec::new(),
+		};
+		assert_eq!(
+			verdict(&drag(MouseButton::Right, Modifiers::default())),
+			Err("BackgroundUnavailable")
+		);
+		assert_eq!(
+			verdict(&drag(MouseButton::Left, Modifiers { ctrl: true, ..Modifiers::default() })),
+			Err("BackgroundUnavailable")
+		);
+		assert_eq!(verdict(&drag(MouseButton::Left, Modifiers::default())), Ok(()));
+		// A right-click ends at once, so its menu is closed instead.
 		let right_click = PointerEvent::Click {
 			x:         10.0,
 			y:         10.0,
