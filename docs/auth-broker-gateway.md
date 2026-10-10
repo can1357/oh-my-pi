@@ -175,7 +175,7 @@ omp auth-gateway check   [--strict] [--json]
 - The first output line is `{"ready": true, "version": …}`. `method` defaults to `POST` when the request has a `body`, else `GET`; every route in [Endpoints](#endpoints-1) except `/healthz` is served.
 - Requests run concurrently and answer in completion order; `id` (string or number) matches them up. A line that is not a request answers `400` with its `id` when it had one.
 - A JSON response body is embedded as JSON; a text body (the SSE of a `stream: true` request) as one string once the stream ends; anything else (audio, video) as base64 with `"encoding": "base64"`.
-- `model` takes any `--model` selector: `provider/id`, a fuzzy name, a role (`@smol`), or a comma list whose first entry that resolves wins. An attempt that fails with a status above `400` (other than `499`) moves on along that model's `retry.fallbackChains`, the role's chain when the entry named a role; the response's `model` names the model that answered.
+- `model` takes any `--model` selector: `provider/id`, a fuzzy name, a role (`@smol`, `@judge`), or a comma list whose first entry that resolves wins. Unlike `--model`, it may name any kind the gateway routes (a judge model for `/v1/systemone`, an image model for `/v1/images/generations`, …), and `GET /v1/models` lists those kinds too. An attempt that fails with a status above `400` (other than `499`) moves on along that model's `retry.fallbackChains`, the role's chain when the entry named a role; the response's `model` names the model that answered.
 - The process serves until stdin ends, answers what is in flight, and exits.
 
 ### Endpoints

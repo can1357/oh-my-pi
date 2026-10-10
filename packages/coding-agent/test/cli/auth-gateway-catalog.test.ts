@@ -5,10 +5,10 @@ import { modelKind } from "@oh-my-pi/pi-catalog/types";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import {
 	createSerializedRebuilder,
-	gatewayRoutableModels,
 	gatewayRoutableProviders,
 	indexModelsByRequestId,
 } from "../../src/cli/auth-gateway-cli";
+import { gatewayModels } from "../../src/cli/auth-gateway-models";
 import { ModelRegistry } from "../../src/config/model-registry";
 import { Settings } from "../../src/config/settings";
 
@@ -126,7 +126,7 @@ describe("indexModelsByRequestId (auth-gateway catalog)", () => {
 		const registry = new ModelRegistry(storage, undefined, { ignoreLocalModelConfig: true, settings });
 
 		const routable = gatewayRoutableProviders(storage, settings);
-		const index = indexModelsByRequestId(gatewayRoutableModels(registry), routable);
+		const index = indexModelsByRequestId(gatewayModels(registry).getAll(), routable);
 
 		expect([...routable].sort()).toEqual(["anthropic"]);
 		expect([...index.values()].some(model => model.provider === "openrouter")).toBe(false);
@@ -136,7 +136,7 @@ describe("indexModelsByRequestId (auth-gateway catalog)", () => {
 	test("serves judge-kind models alongside chat and keeps unrouted kinds out", async () => {
 		using tempDir = TempDir.createSync("@omp-auth-gateway-catalog-");
 		const registry = new ModelRegistry(await createAuthStorage(), tempDir.join("models.yml"));
-		const routable = gatewayRoutableModels(registry);
+		const routable = gatewayModels(registry).getAll();
 		// `getAll()` alone is chat-only, which is what left `/v1/systemone` with
 		// "Unknown model: jev-latest" for a credentialed TypeSafe account.
 		expect(registry.getAll().some(model => model.provider === "typesafe")).toBe(false);

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed `omp auth-gateway stdio` answering `404` for judge, image, and speech models such as `@judge` or `typesafe/jev-latest`, and leaving them out of `GET /v1/models` ([#15227](https://github.com/can1357/oh-my-pi/issues/15227))
+
 ## [18.8.8] - 2026-10-10
 
 ### Added

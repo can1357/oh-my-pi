@@ -34,7 +34,7 @@ import {
 } from "@oh-my-pi/pi-ai/auth-broker";
 import { DEFAULT_AUTH_GATEWAY_BIND, startAuthGateway } from "@oh-my-pi/pi-ai/auth-gateway";
 import { type GeneratedProvider, getBundledModels } from "@oh-my-pi/pi-catalog/models";
-import { type ModelKind, modelKind } from "@oh-my-pi/pi-catalog/types";
+import { modelKind } from "@oh-my-pi/pi-catalog/types";
 import { getConfigRootDir, logger, VERSION } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { ModelRegistry } from "../config/model-registry";
@@ -46,6 +46,7 @@ import {
 	resolveAuthBrokerConfig,
 	resolveEffectiveSettings,
 } from "../session/auth-broker-config";
+import { gatewayModels } from "./auth-gateway-models";
 import { runAuthGatewayStdio } from "./auth-gateway-stdio";
 import { generateToken, readTokenFile, writeTokenFile } from "./token-file";
 
@@ -146,32 +147,6 @@ const CATALOG_REFRESH_INTERVAL_MS = 15 * 60 * 1000;
  * advertised.
  */
 const CREDENTIAL_SYNC_INTERVAL_MS = 10 * 1000;
-
-/**
- * Catalog kinds the gateway has a route for: chat (`/v1/chat/completions`,
- * `/v1/messages`, `/v1/responses`, `/v1/pi/stream`), judge (`/v1/systemone`),
- * image (`/v1/images/*`), tts (`/v1/audio/speech`), stt
- * (`/v1/audio/transcriptions`), embedding (`/v1/embeddings`), rerank
- * (`/v1/rerank`), video (`/v1/videos/*`). Other kinds (tiny, search) have no
- * wire and stay off the served catalog so `/v1/models` never advertises them.
- */
-const GATEWAY_MODEL_KINDS: readonly ModelKind[] = [
-	"chat",
-	"judge",
-	"image",
-	"tts",
-	"stt",
-	"embedding",
-	"rerank",
-	"video",
-];
-
-/** Every registry model of a kind the gateway can route, bundled catalog order within each kind. */
-export function gatewayRoutableModels(registry: ModelRegistry): Model<Api>[] {
-	const models: Model<Api>[] = [];
-	for (const kind of GATEWAY_MODEL_KINDS) models.push(...registry.getAll(kind));
-	return models;
-}
 
 /**
  * Providers the broker holds a credential for, minus `disabledProviders`. Recomputed on
@@ -295,7 +270,7 @@ async function runServe(flags: AuthGatewayCommandArgs["flags"]): Promise<void> {
 	// for up to a cache TTL. Periodic rebuilds stay cached.
 	const rebuildCatalog = createSerializedRebuilder(async force => {
 		await registry.refresh(force ? "online" : "online-if-uncached");
-		modelById = indexModelsByRequestId(gatewayRoutableModels(registry), gatewayRoutableProviders(storage, settings));
+		modelById = indexModelsByRequestId(gatewayModels(registry).getAll(), gatewayRoutableProviders(storage, settings));
 	});
 	await rebuildCatalog();
 

@@ -19,6 +19,7 @@ import { Settings } from "../config/settings";
 import { claimRpcInput } from "../modes/rpc/rpc-input";
 import { discoverAuthStorage, loadCliExtensionProviders } from "../sdk";
 import { collectOnlineTinyCandidates, expandOnlineTinyModelFallbacks } from "../tiny/online-candidates";
+import { gatewayModels } from "./auth-gateway-models";
 
 /** Names the caller in the gateway's logs. */
 const STDIO_PEER = "stdio";
@@ -27,16 +28,24 @@ const STDIO_PEER = "stdio";
  * The models a request naming `selector` may run on, in order: the model
  * `--model` would pick (the first entry of a comma list that resolves), then
  * that model's `retry.fallbackChains` (its role's chain when the entry named a
- * role). Empty when no entry resolves.
+ * role). Unlike `--model`, any kind the gateway routes is eligible (a `@judge`
+ * selector for `/v1/systemone`); the route rejects a kind it does not serve.
+ * Empty when no entry resolves.
  */
 export function selectorCandidates(
 	selector: string,
 	settings: Settings,
 	registry: Pick<ModelRegistry, "getAll" | "getAvailable">,
 ): Model<Api>[] {
-	const available = registry.getAvailable();
+	const models = gatewayModels(registry);
+	const available = models.getAvailable();
 	for (const pattern of normalizeModelPatternList(selector)) {
-		const { model, configuredRole } = resolveCliModel({ cliModel: pattern, modelRegistry: registry, settings });
+		const { model, configuredRole } = resolveCliModel({
+			cliModel: pattern,
+			modelRegistry: models,
+			availableModels: available,
+			settings,
+		});
 		if (!model) continue;
 		const chain = configuredRole
 			? collectOnlineTinyCandidates([configuredRole], settings, available).map(candidate => candidate.model)
@@ -69,7 +78,7 @@ export async function runAuthGatewayStdio(): Promise<void> {
 	const router = createAuthGatewayRouter({
 		storage,
 		resolveModel: id => routed.get(id),
-		listModels: () => registry.getAvailable(),
+		listModels: () => gatewayModels(registry).getAvailable(),
 	});
 	const route = async (req: Request): Promise<Response> => {
 		// Unparseable bodies pass through for the route to reject in its own wire format.
