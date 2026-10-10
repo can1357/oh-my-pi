@@ -93,6 +93,86 @@ describe("fromJsonSchema", () => {
 		expect(closed({ a: "x", b: 1 })).toBeInstanceOf(OmpErrors);
 	});
 
+	it.each(["draft-07", "draft-2020-12"])("round-trips closed tuples through %s", target => {
+		const original = type(["string", "number?"]);
+		const imported = fromJsonSchema(original.toJsonSchema({ target }));
+		expect(imported.allows(["x", 1])).toBe(true);
+		expect(imported.allows(["x"])).toBe(true);
+		expect(imported([])).toBeInstanceOf(OmpErrors);
+		expect(imported([false, 1])).toBeInstanceOf(OmpErrors);
+		expect(imported(["x", "wrong"])).toBeInstanceOf(OmpErrors);
+		expect(imported(["x", 1, true])).toBeInstanceOf(OmpErrors);
+	});
+
+	it("imports draft-07 tuple positions as optional unless minItems requires them", () => {
+		const imported = fromJsonSchema({
+			type: "array",
+			items: [
+				{ type: "string", minLength: 2 },
+				{ type: "integer", minimum: 1 },
+			],
+			additionalItems: false,
+		});
+		expect(imported.allows([])).toBe(true);
+		expect(imported.allows(["ok"])).toBe(true);
+		expect(imported.allows(["ok", 1])).toBe(true);
+		expect(imported(["x"])).toBeInstanceOf(OmpErrors);
+		expect(imported(["ok", 0])).toBeInstanceOf(OmpErrors);
+		expect(imported(["ok", 1.5])).toBeInstanceOf(OmpErrors);
+		expect(imported(["ok", 1, null])).toBeInstanceOf(OmpErrors);
+	});
+
+	it("allows draft-07 tuple tails when additionalItems is omitted or true", () => {
+		const schema = { type: "array", items: [{ type: "string" }], minItems: 1 };
+		for (const document of [schema, { ...schema, additionalItems: true }]) {
+			const imported = fromJsonSchema(document);
+			expect(imported.allows(["x", false, { n: 1 }])).toBe(true);
+			expect(imported([])).toBeInstanceOf(OmpErrors);
+			expect(imported([1, false])).toBeInstanceOf(OmpErrors);
+		}
+	});
+
+	it("applies draft-07 additionalItems schemas only after tuple positions", () => {
+		const imported = fromJsonSchema({
+			type: "array",
+			items: [{ type: "string" }, { type: "number" }],
+			minItems: 1,
+			additionalItems: { type: "boolean" },
+		});
+		expect(imported.allows(["x"])).toBe(true);
+		expect(imported.allows(["x", 1, true, false])).toBe(true);
+		expect(imported(["x", true])).toBeInstanceOf(OmpErrors);
+		expect(imported(["x", 1, "wrong"])).toBeInstanceOf(OmpErrors);
+	});
+
+	it("enforces draft-07 tuple length bounds beyond the prefix", () => {
+		const imported = fromJsonSchema({
+			type: "array",
+			items: [{ type: "string" }],
+			minItems: 2,
+			maxItems: 3,
+			additionalItems: { type: "number" },
+		});
+		expect(imported(["x"])).toBeInstanceOf(OmpErrors);
+		expect(imported.allows(["x", 1])).toBe(true);
+		expect(imported.allows(["x", 1, 2])).toBe(true);
+		expect(imported(["x", 1, 2, 3])).toBeInstanceOf(OmpErrors);
+		expect(imported(["x", false])).toBeInstanceOf(OmpErrors);
+		const impossible = fromJsonSchema({ type: "array", items: [], additionalItems: false, minItems: 1 });
+		expect(impossible([])).toBeInstanceOf(OmpErrors);
+		expect(impossible([1])).toBeInstanceOf(OmpErrors);
+	});
+
+	it("honors draft-07 maxItems below the tuple prefix length", () => {
+		const imported = fromJsonSchema({
+			type: "array",
+			items: [{ type: "string" }, { type: "number" }],
+			maxItems: 1,
+		});
+		expect(imported.allows(["x"])).toBe(true);
+		expect(imported(["x", 1])).toBeInstanceOf(OmpErrors);
+	});
+
 	it("emits recursive scopes as $defs/$ref and round-trips them", () => {
 		const Node = type.scope({ Node: { value: "number", "next?": "Node" } }).export().Node;
 		const emitted = Node.toJsonSchema({ target: "draft-2020-12" });
