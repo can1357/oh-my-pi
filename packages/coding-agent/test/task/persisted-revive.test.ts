@@ -39,6 +39,7 @@ import * as executorModule from "@oh-my-pi/pi-coding-agent/task/executor";
 import { createPersistedSubagentReviverFactory } from "@oh-my-pi/pi-coding-agent/task/persisted-revive";
 import { buildWakeRelayBody } from "@oh-my-pi/pi-coding-agent/task/executor";
 import type { SingleResult } from "@oh-my-pi/pi-tui/tools/task";
+import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { IrcBus } from "@oh-my-pi/pi-coding-agent/irc/bus";
 import { type IrcMessage } from "@oh-my-pi/pi-tui/tools/irc";
@@ -206,10 +207,12 @@ interface ReviveOwnerOptions {
 	authStorage?: AuthStorage;
 	modelRegistry?: ModelRegistry;
 	settings?: Settings;
+	sessionAgents?: () => readonly AgentDefinition[];
 }
 
 function createFactory(cwd: string, eventBus?: EventBus, owner: ReviveOwnerOptions = {}) {
 	const parentSession = {
+		getSessionAgents: () => owner.sessionAgents?.() ?? [],
 		sessionManager: {
 			getCwd: () => cwd,
 			getArtifactManager: () => undefined,
@@ -322,6 +325,42 @@ describe("persisted subagent revival", () => {
 			if (!read) throw new Error("Missing revived read tool");
 			await expect(read.execute("denied", { path: blockedPath })).rejects.toThrow("Owner policy denied the read");
 			expect(await Bun.file(ambientMarker).exists()).toBe(false);
+		} finally {
+			await revived?.dispose();
+			authStorage.close();
+		}
+	});
+
+	it("cold-revived children follow the owner's current automatic model scope", async () => {
+		const cwd = makeTempDir("@pi-revive-model-scope-");
+		const sessionFile = await createPersistedSession(cwd, true, "default");
+		const authStorage = await AuthStorage.create(path.join(cwd, "auth.db"));
+		authStorage.keys.setRuntime("anthropic", "test-key");
+		const modelRegistry = new ModelRegistry(authStorage, path.join(cwd, "models.yml"));
+		let pool: AgentDefinition[] = [
+			{
+				name: "anthropic/claude-sonnet-4-5",
+				description: "model",
+				systemPrompt: "test",
+				model: ["anthropic/claude-sonnet-4-5"],
+				source: "bundled",
+				modelAgent: true,
+			},
+		];
+		const ref = AgentRegistry.global().register(createRef(sessionFile));
+		const reviver = await createFactory(cwd, undefined, {
+			authStorage,
+			modelRegistry,
+			sessionAgents: () => pool,
+			extensionRoots: () => ({ explicit: [], mode: "explicit-only", configured: [], configuredLevel: "user" }),
+		})(ref);
+		if (!reviver) throw new Error("Missing persisted reviver");
+		let revived: AgentSession | undefined;
+		try {
+			revived = await reviver(ref);
+			expect(revived.getSessionAgents().map(agent => agent.name)).toEqual(["anthropic/claude-sonnet-4-5"]);
+			pool = [];
+			expect(revived.getSessionAgents()).toEqual([]);
 		} finally {
 			await revived?.dispose();
 			authStorage.close();

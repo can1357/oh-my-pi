@@ -324,6 +324,7 @@ describe("Code Mode session reconciliation", () => {
 			sessionManager: SessionManager.inMemory(),
 			settings,
 			modelRegistry: {
+				getAvailable: () => [codeModel, directModel],
 				getApiKey: async () => "test-key",
 				hasConfiguredAuth: () => true,
 				refreshSelectedModelMetadata: async (value: Model) => value,

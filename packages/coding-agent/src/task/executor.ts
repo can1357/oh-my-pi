@@ -514,7 +514,7 @@ export interface ExecutorOptions {
 	 */
 	preloadedCustomToolPaths?: ToolPathWithSource[];
 	mcpManager?: MCPManager;
-	/** User-authorized model agents available to this child and its descendants. */
+	/** Live parent session agents available to this child and its descendants. */
 	inheritedSessionAgents?: CreateAgentSessionOptions["inheritedSessionAgents"];
 	authStorage?: AuthStorage;
 	modelRegistry?: ModelRegistry;
@@ -3679,6 +3679,14 @@ interface SubagentLaunchInputs {
 	onFirstChatDispatch?: () => void;
 }
 
+function snapshotInheritedSessionAgents(
+	getAgents: CreateAgentSessionOptions["inheritedSessionAgents"],
+): CreateAgentSessionOptions["inheritedSessionAgents"] {
+	if (!getAgents) return undefined;
+	const mentions = getAgents().filter(agent => !agent.modelAgent);
+	return () => [...mentions, ...getAgents().filter(agent => agent.modelAgent)];
+}
+
 /** Names of the child's explicitly supplied tools; they win over same-named MCP proxies on every rebind. */
 function explicitSubagentToolNames(spec: SubagentSessionSpec): ReadonlySet<string> {
 	return new Set((spec.options.customTools ?? []).map(tool => tool.name));
@@ -4297,6 +4305,9 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			}
 
 			const { normalized: normalizedOutputSchema } = normalizeSchema(outputSchema);
+			// Keep aliases fixed for the whole spawn, including warm revivals.
+			const inheritedSessionAgents = snapshotInheritedSessionAgents(options.inheritedSessionAgents);
+
 			// Rebuilding an equivalent session from the same JSONL file re-invokes
 			// createAgentSession with this spec (same agent id, tools, model, system
 			// prompt, artifacts dir) — only the SessionManager and settings differ.
@@ -4309,7 +4320,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					getApiKey: options.getApiKey,
 					credentialSourceSessionId: options.credentialSourceSessionId,
 					oauthAccountPools: options.oauthAccountPools,
-					inheritedSessionAgents: options.inheritedSessionAgents,
+					inheritedSessionAgents,
 					model,
 					modelPattern: model || modelOverride === undefined ? undefined : modelPatterns,
 					modelPatternAuthFallback:

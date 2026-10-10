@@ -580,7 +580,7 @@ function buildExecutorOptions(
 		authStorage: session.authStorage,
 		modelRegistry: session.modelRegistry,
 		settings: session.settings,
-		inheritedSessionAgents: session.getSessionAgents?.(),
+		inheritedSessionAgents: session.getSessionAgents ? () => session.getSessionAgents?.() ?? [] : undefined,
 		mcpManager: enableMCP ? (session.mcpManager ?? MCPManager.instance()) : undefined,
 		enableMCP,
 		customTools: request.customTools,

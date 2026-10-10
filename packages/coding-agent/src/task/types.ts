@@ -243,4 +243,6 @@ export interface AgentDefinition {
 	advisor?: boolean | string;
 	source: AgentSource;
 	filePath?: string;
+	/** Automatic session agent named by its exact provider/model selector. */
+	modelAgent?: true;
 }

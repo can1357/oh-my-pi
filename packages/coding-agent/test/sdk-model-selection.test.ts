@@ -192,7 +192,7 @@ describe("createAgentSession deferred model pattern resolution", () => {
 			...buildSessionOptions("runtime-provider/runtime-model"),
 			settings: Settings.isolated({ "async.enabled": false }),
 			toolNames: ["task"],
-			inheritedSessionAgents: [modelAgent],
+			inheritedSessionAgents: () => [modelAgent],
 		});
 
 		try {

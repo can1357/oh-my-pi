@@ -7,7 +7,6 @@ import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
-import type { CustomMessage } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { expandModelMentionTags } from "@oh-my-pi/pi-tui/prompt/model-mention-syntax";
 import {
 	MODEL_MENTION_ENTRY_TYPE,
@@ -47,7 +46,7 @@ beforeEach(async () => {
 	scoped = [];
 	mentions = new ModelMentionRegistry({
 		sessionManager: session,
-		modelRegistry: registry,
+		availableModels: () => registry.getAvailable(),
 		scopedModels: () => scoped,
 	});
 });
@@ -58,7 +57,7 @@ afterEach(() => {
 });
 
 describe("model mentions", () => {
-	test("only user prompts authorize model agents before dispatch", async () => {
+	test("only user prompts register explicit model pseudonyms before dispatch", async () => {
 		vi.spyOn(registry, "getApiKey").mockResolvedValue("test-key");
 		const agent = new Agent({
 			getApiKey: () => "test-key",
@@ -73,7 +72,7 @@ describe("model mentions", () => {
 		});
 		try {
 			await agentSession.prompt("ask ^a/x", { synthetic: true });
-			expect(agentSession.getSessionAgents()).toEqual([]);
+			expect(agentSession.modelMentions).toEqual([]);
 			await agentSession.prompt("ask ^b/y");
 			expect(agentSession.modelMentions).toEqual([{ agent: "m1", selector: "b/y", name: "Y" }]);
 			const promptText = agent.state.messages
@@ -107,7 +106,7 @@ describe("model mentions", () => {
 			sessionManager: SessionManager.inMemory(),
 			modelRegistry: registry,
 			settings: Settings.isolated({ "compaction.enabled": false }),
-			inheritedSessionAgents: [inheritedAgent],
+			inheritedSessionAgents: () => [inheritedAgent],
 		});
 		try {
 			await childSession.prompt("ask ^a/x");
@@ -117,45 +116,6 @@ describe("model mentions", () => {
 			]);
 		} finally {
 			await childSession.dispose();
-		}
-	});
-
-	test("mid-session tags ride a hidden notice instead of the task description", async () => {
-		vi.spyOn(registry, "getApiKey").mockResolvedValue("test-key");
-		const agent = new Agent({
-			getApiKey: () => "test-key",
-			initialState: { model: models[0], systemPrompt: ["Test"], tools: [], messages: [] },
-			streamFn: createMockModel({ responses: [{ content: ["Synthetic done"] }, { content: ["User done"] }] }).stream,
-		});
-		const agentSession = new AgentSession({
-			agent,
-			sessionManager: session,
-			modelRegistry: registry,
-			settings: Settings.isolated({ "compaction.enabled": false }),
-		});
-		try {
-			expect(agentSession.getAdvertisedSessionAgents()).toEqual([]);
-			await agentSession.prompt("ask ^b/y");
-			// The description surface only absorbs tags at a base-prompt rebuild, so
-			// the new pseudonym must arrive as a notice carrying its selector.
-			expect(agentSession.getAdvertisedSessionAgents()).toEqual([]);
-			const notice = agent.state.messages.find(
-				(message): message is CustomMessage =>
-					message.role === "custom" && message.customType === "session-agent-notice",
-			);
-			if (!notice || typeof notice.content !== "string") throw new Error("Missing session agent notice");
-			expect(notice.content).toContain("`m1`");
-			expect(notice.content).toContain("b/y");
-			expect(notice.display).toBe(false);
-
-			// The notice is not re-emitted: the model already knows m1.
-			await agentSession.prompt("continue");
-			const notices = agent.state.messages.filter(
-				message => message.role === "custom" && message.customType === "session-agent-notice",
-			);
-			expect(notices).toHaveLength(1);
-		} finally {
-			await agentSession.dispose();
 		}
 	});
 
@@ -169,7 +129,7 @@ describe("model mentions", () => {
 			{ agent: "m2", selector: "b/y", name: "Y" },
 		]);
 		expect(session.getBranch()).toHaveLength(2);
-		const agents = mentions.sessionAgents();
+		const agents = mentions.sessionAgents().filter(agent => !agent.modelAgent);
 		expect(agents.map(agent => [agent.name, agent.model])).toEqual([
 			["m1", ["a/x"]],
 			["m2", ["b/y"]],
