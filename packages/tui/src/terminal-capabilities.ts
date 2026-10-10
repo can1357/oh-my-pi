@@ -10,12 +10,17 @@ import {
 	renderKittyPlaceholderLines,
 	setKittyGraphics,
 } from "./kitty-graphics";
-import { isInsideHerdr, isInsideTerminalMultiplexer } from "./terminal-multiplexer";
-import { isInsideTmux, resolveTmuxClientTerminalName, wrapTmuxPassthrough, wrapTmuxPassthroughIfNeeded } from "./tmux";
+import {
+	isInsideTerminalMultiplexer,
+	routeTerminalMultiplexerNotification,
+	terminalMultiplexerForTerm,
+	terminalMultiplexerSessions,
+} from "./terminal-multiplexer";
+import { resolveTmuxClientTerminalName, wrapTmuxPassthroughIfNeeded } from "./tmux";
 import type { HangulCompatibilityJamoWidth } from "./utils";
 
 export * from "./terminal-multiplexer";
-export { isInsideTmux, wrapTmuxPassthrough } from "./tmux";
+export { wrapTmuxPassthrough } from "./tmux";
 
 export enum ImageProtocol {
 	Kitty = "\x1b_G",
@@ -44,92 +49,6 @@ export type TerminalId =
 	| "monstar"
 	| "base"
 	| "trueColor";
-
-const CMUX_NOTIFICATION_TITLE = "omp";
-const CMUX_SURFACE_ID_PATTERN = /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/iu;
-
-/** Title and body for an out-of-band multiplexer notification (cmux, Herdr). */
-function notificationTitleAndBody(message: string | TerminalNotification): { title: string; body: string } {
-	if (typeof message === "string") return { title: CMUX_NOTIFICATION_TITLE, body: message };
-	return { title: message.title?.trim() || CMUX_NOTIFICATION_TITLE, body: message.body ?? "" };
-}
-
-/**
- * Route a notification through cmux when the process belongs to a concrete
- * surface. Workspace/socket state alone is not enough: only the injected
- * surface UUID identifies the pane that should receive the notification.
- * Returns whether cmux owns delivery so the caller can preserve every existing
- * terminal fallback unchanged when no valid surface is present.
- */
-function sendCmuxNotification(message: string | TerminalNotification, env: NodeJS.ProcessEnv = Bun.env): boolean {
-	const surfaceId = env.CMUX_SURFACE_ID?.trim();
-	if (!surfaceId || !CMUX_SURFACE_ID_PATTERN.test(surfaceId)) return false;
-
-	const { title, body } = notificationTitleAndBody(message);
-	try {
-		const child = Bun.spawn({
-			cmd: ["cmux", "notify", "--surface", surfaceId, "--title", title, "--body", body],
-			stdin: "ignore",
-			stdout: "ignore",
-			stderr: "ignore",
-		});
-		child.unref();
-	} catch {
-		// A missing cmux binary leaves delivery to the existing terminal fallback.
-		return false;
-	}
-	return true;
-}
-
-const HERDR_PANE_ID_PATTERN = /^[0-9A-Za-z:_-]{1,64}$/u;
-/**
- * `herdr notification show` takes the title as its first positional and reads
- * exactly these three values there as a help request; it has no `--`
- * terminator. Any other text, including one starting with `-`, is a title.
- */
-const HERDR_USAGE_TOKENS = new Set(["help", "--help", "-h"]);
-
-/**
- * Route a notification through Herdr when the process runs inside one of its
- * panes. Herdr multiplexes panes like tmux but swallows bare OSC 9 / OSC 99 and
- * has no DCS passthrough envelope, and its bell relay does not flag a
- * backgrounded tab — so without this branch a backgrounded pane gets no signal
- * at all that the agent finished or is waiting for input.
- *
- * `sound` maps the notification kind onto what Herdr offers: a question waiting
- * on the user and a turn that stopped with an error both need the human and
- * ring `request`, a settled turn rings `done`, anything else stays
- * silent. Returns whether Herdr owns delivery, so every existing terminal
- * fallback is preserved when the pane id is absent or the binary is missing.
- */
-function sendHerdrNotification(message: string | TerminalNotification, env: NodeJS.ProcessEnv = Bun.env): boolean {
-	// Pane-only detection, like `isInsideHerdr`: an env-sanitizing launcher can
-	// drop HERDR_ENV and keep the pane identity, and that pane can still be
-	// backgrounded. The pane id itself is what the CLI needs, so it stays required.
-	if (!isInsideHerdr(env)) return false;
-	const paneId = env.HERDR_PANE_ID?.trim();
-	if (!paneId || !HERDR_PANE_ID_PATTERN.test(paneId)) return false;
-
-	const parsed = notificationTitleAndBody(message);
-	const title = HERDR_USAGE_TOKENS.has(parsed.title) ? CMUX_NOTIFICATION_TITLE : parsed.title;
-	const body = parsed.body;
-	const kinds = typeof message === "string" ? [] : [message.type ?? []].flat();
-	const sound =
-		kinds.includes("ask") || kinds.includes("error") ? "request" : kinds.includes("completion") ? "done" : "none";
-	try {
-		const child = Bun.spawn({
-			cmd: ["herdr", "notification", "show", title, "--body", body, "--sound", sound],
-			stdin: "ignore",
-			stdout: "ignore",
-			stderr: "ignore",
-		});
-		child.unref();
-	} catch {
-		// A missing herdr binary leaves delivery to the existing terminal fallback.
-		return false;
-	}
-	return true;
-}
 
 const IMAGE_MARKER_SCAN_LIMIT = 512;
 const SIXEL_MARKER_SCAN_LIMIT = 128;
@@ -236,33 +155,16 @@ export class TerminalInfo {
 
 	sendNotification(message: string | TerminalNotification): void {
 		if (isNotificationSuppressed() || isTerminalHeadless()) return;
-		// Innermost surface first. A Herdr pane launched inside a cmux surface
-		// inherits both `HERDR_PANE_ID` and the outer `CMUX_SURFACE_ID`; routing to
-		// cmux there would flag the containing surface and leave the backgrounded
-		// Herdr pane — the one actually waiting — without a sound or a marker.
-		if (sendHerdrNotification(message)) return;
-		if (sendCmuxNotification(message)) return;
 		const formatted = this.formatNotification(message);
-		// Under tmux, terminals whose notify protocol is OSC 9 / OSC 99 would
-		// otherwise lose the notification entirely: tmux does not forward bare
-		// OSC 9/99 to the outer terminal, and the bare sequence does not flag
-		// tmux's own `monitor-bell` / `monitor-activity`. Wrap the OSC in tmux's
-		// DCS passthrough envelope so users with `allow-passthrough on` still
-		// get the desktop toast, then append a BEL so `monitor-bell` flags the
-		// pane/window for everyone else — the only signal a backgrounded pane
-		// has that the agent finished or is waiting for input. `Bell` protocol
-		// already self-flags via tmux's bell monitoring, so leave it alone.
-		if (this.notifyProtocol !== NotifyProtocol.Bell && isInsideTmux()) {
-			writeTerminalSequence(`${wrapTmuxPassthrough(formatted)}\x07`);
-			return;
-		}
-		// Zellij drops OSC 9/99 and has no DCS passthrough envelope, but raises its
-		// `[!]` bell flag on a bare BEL — the same backgrounded-pane signal tmux
-		// users get. So follow the (Zellij-swallowed) OSC with a plain BEL.
-		if (this.notifyProtocol !== NotifyProtocol.Bell && isInsideZellij()) {
-			writeTerminalSequence(`${formatted}\x07`);
-			return;
-		}
+		// Multiplexers that swallow or rewrite the terminal's notification get it
+		// first, innermost target first; the terminal sequence is the fallback.
+		const routed = routeTerminalMultiplexerNotification({
+			message,
+			env: Bun.env,
+			sequence: this.notifyProtocol === NotifyProtocol.Bell ? null : formatted,
+			write: writeTerminalSequence,
+		});
+		if (routed) return;
 		writeTerminalSequence(formatted);
 		// VTE-family terminals (Ptyxis, GNOME Terminal, Tilix, …) plus Alacritty
 		// and bare xterm-on-Wayland have no in-band escape that surfaces an
@@ -274,15 +176,6 @@ export class TerminalInfo {
 			sendDesktopNotification(message);
 		}
 	}
-}
-
-/**
- * Whether the agent process is running inside a Zellij session. Read fresh on
- * each call (like {@link isInsideTmux}) so a session attached/detached mid-run
- * is observed and tests can toggle `Bun.env.ZELLIJ` per case.
- */
-export function isInsideZellij(env: NodeJS.ProcessEnv = Bun.env): boolean {
-	return Boolean(env.ZELLIJ);
 }
 
 /**
@@ -381,12 +274,12 @@ function advertisesSynchronizedOutput(termFeatures: string | undefined): boolean
  *   2. Positive `TERM_FEATURES` advertisement (`Sy`) — survives SSH/mux wrapping.
  *   3. Windows Terminal (1.24+) via `WT_SESSION`, on native win32 and the
  *      WSL/SSH-fronted host alike.
- *   4. Herdr panes. Herdr is otherwise treated as a multiplexer so leaked
- *      kitty/ghostty identities cannot enable placeholder graphics, but its
- *      pane VTE is libghostty and already suppresses compositing while DEC 2026
- *      is set. Leaving sync off lets CUP-diff paints and split write(2) chunks
- *      composite as dirty-row patches — the live viewport tears, with the top
- *      frozen while only the bottom refreshes.
+ *   4. A multiplexer session whose pane VTE honors DEC 2026 regardless of its
+ *      DECRQM reply (Herdr's libghostty pane). Such a multiplexer still owns
+ *      the grid, so leaked kitty/ghostty identities cannot enable placeholder
+ *      graphics, but leaving sync off lets CUP-diff paints and split write(2)
+ *      chunks composite as dirty-row patches — the live viewport tears, with
+ *      the top frozen while only the bottom refreshes.
  *   5. Known direct terminals with confirmed support. SSH does *not* disable —
  *      DEC 2026 passes through SSH when the outer terminal honors it.
  *   6. Everything else starts off, including risky multiplexers; the runtime
@@ -402,7 +295,7 @@ export function shouldEnableSynchronizedOutputByDefault(
 
 	if (advertisesSynchronizedOutput(env.TERM_FEATURES)) return true;
 	if (env.WT_SESSION && (!env.TERM_PROGRAM || env.TERM_PROGRAM.toLowerCase() === "windows_terminal")) return true;
-	if (isInsideHerdr(env)) return true;
+	if (terminalMultiplexerSessions(env).some(multiplexer => multiplexer.honorsSynchronizedOutput)) return true;
 
 	// Risky multiplexers start off even when an inner terminal id leaks through:
 	// older tmux/screen synchronized-output handling is flaky and a mux may not
@@ -511,43 +404,30 @@ export function hyperlinksUserOverride(env: NodeJS.ProcessEnv = Bun.env): boolea
 }
 
 /**
- * Parse tmux's self-reported version from `TERM_PROGRAM_VERSION`. tmux sets
- * `TERM_PROGRAM=tmux` and `TERM_PROGRAM_VERSION=<version>` automatically since
- * 3.2a; older releases (or any path that does not surface the version) yield
- * `null` and the caller treats tmux conservatively.
- */
-function parseTmuxVersionFromEnv(env: NodeJS.ProcessEnv): { major: number; minor: number } | null {
-	if (env.TERM_PROGRAM?.toLowerCase() !== "tmux") return null;
-	return parseMajorMinorVersion(env.TERM_PROGRAM_VERSION);
-}
-
-/**
  * Whether OSC 8 hyperlinks should be enabled by default.
  *
  * Policy (highest precedence first):
  *   1. Explicit user override (`PI_NO_HYPERLINKS=1` off, `PI_FORCE_HYPERLINKS=1`
  *      on). Opt-out wins ties.
- *   2. Herdr pane with no nested screen/tmux: on. Herdr hides the outer
- *      terminal (`TERM=xterm-256color`, no `TERM_PROGRAM`), but it renders
- *      OSC 8 in its own grid and opens links itself on Ctrl+click, so the
- *      outer terminal's support does not matter.
+ *   2. Every multiplexer session with a hyperlink policy renders OSC 8 itself
+ *      (`render`, e.g. Herdr): on. Herdr hides the outer terminal
+ *      (`TERM=xterm-256color`, no `TERM_PROGRAM`), so the outer terminal's
+ *      support does not matter.
  *   3. Static terminal capability — terminals whose {@link TerminalInfo} marks
  *      `hyperlinks: false` (e.g. `base`) stay off unless the user forced on.
- *   4. GNU screen's explicit session marker (`STY`) always off, even if tmux is
- *      also present: a screen layer anywhere in the path cannot forward OSC 8.
- *   5. tmux session (`TMUX` set): enabled when tmux self-reports >= 3.4 via
- *      `TERM_PROGRAM_VERSION` (tmux 3.4 stores OSC 8 as a cell attribute and
- *      forwards it to outer terminals whose `terminal-features` include
- *      `hyperlinks`). Older or unknown versions stay off; on outer terminals
- *      without the feature configured, tmux silently drops the sequence —
- *      identical to today. Checked before the screen-family TERM heuristic
- *      because tmux's historical `default-terminal` is `screen-256color`, so
- *      `TERM=screen*` inside a tmux session must NOT short-circuit to off.
- *   6. screen-family TERM without `TMUX` always off: screen never gained OSC 8
- *      support.
- *   7. tmux-family TERM without `TMUX` env — unusual (e.g. inspection scripts);
- *      no version available, so off.
- *   8. Otherwise honor the static terminal capability.
+ *   4. A session that never forwards OSC 8 (`drop`, e.g. GNU screen's `STY`)
+ *      always off, even when a forwarding multiplexer is also present.
+ *   5. Forwarding sessions (`forward`, e.g. `TMUX`): enabled when every one
+ *      self-reports at least its forwarding version via `TERM_PROGRAM` /
+ *      `TERM_PROGRAM_VERSION` (tmux 3.4). Older or unknown versions stay off;
+ *      on outer terminals without the feature configured, tmux silently drops
+ *      the sequence. Checked before the TERM heuristic because tmux's
+ *      historical `default-terminal` is `screen-256color`, so `TERM=screen*`
+ *      inside a tmux session must NOT short-circuit to off.
+ *   6. TERM naming a multiplexer whose session markers were stripped: off,
+ *      since no session proves the multiplexer forwards OSC 8 (screen never
+ *      does; tmux has no version to check).
+ *   7. Otherwise honor the static terminal capability.
  */
 export function shouldEnableHyperlinksByDefault(
 	env: NodeJS.ProcessEnv = Bun.env,
@@ -556,27 +436,27 @@ export function shouldEnableHyperlinksByDefault(
 	const override = hyperlinksUserOverride(env);
 	if (override !== null) return override;
 
-	if (isInsideHerdr(env) && !env.STY && !env.TMUX) return true;
+	const policies = terminalMultiplexerSessions(env).flatMap(multiplexer =>
+		multiplexer.hyperlinks === undefined ? [] : [multiplexer.hyperlinks],
+	);
+	if (policies.length > 0 && policies.every(policy => policy === "render")) return true;
 
 	if (!getTerminalInfo(terminalId).hyperlinks) return false;
 
-	// STY is GNU screen's explicit session marker. It vetoes tmux enabling when
-	// multiplexers are nested because screen cannot forward OSC 8 anywhere in the
-	// path.
-	if (env.STY) return false;
+	if (policies.includes("drop")) return false;
 
-	// tmux check before TERM heuristics: TMUX is the authoritative current-session
-	// signal and supersedes TERM, which may be `screen-256color` under tmux's
-	// historical default-terminal setting.
-	if (env.TMUX) {
-		const version = parseTmuxVersionFromEnv(env);
-		if (!version) return false;
-		return version.major > 3 || (version.major === 3 && version.minor >= 4);
+	const forwarders = policies.flatMap(policy => (typeof policy === "object" ? [policy.forward] : []));
+	if (forwarders.length > 0) {
+		const termProgram = env.TERM_PROGRAM?.toLowerCase();
+		return forwarders.every(forward => {
+			if (termProgram !== forward.termProgram) return false;
+			const version = parseMajorMinorVersion(env.TERM_PROGRAM_VERSION);
+			if (!version) return false;
+			return version.major > forward.major || (version.major === forward.major && version.minor >= forward.minor);
+		});
 	}
 
-	const term = env.TERM?.toLowerCase() ?? "";
-	if (term.startsWith("screen")) return false;
-	if (term.startsWith("tmux")) return false;
+	if (terminalMultiplexerForTerm(env)) return false;
 
 	return true;
 }
@@ -650,10 +530,14 @@ export function resolveImageProtocol(
 	if (imageProtocol !== null && isPaseoEmbedder(env)) {
 		return null;
 	}
-	// Herdr owns the pane grid but does not expose whether the attached client
-	// enabled its experimental Kitty renderer. Outer-terminal identity variables
-	// can leak into the pane, so only the explicit protocol override is safe.
-	if (imageProtocol !== null && isInsideHerdr(env)) {
+	// Some multiplexers own the pane grid without exposing whether the attached
+	// client renders graphics (Herdr's experimental Kitty renderer). Outer-
+	// terminal identity variables can leak into the pane, so only the explicit
+	// protocol override is safe.
+	if (
+		imageProtocol !== null &&
+		terminalMultiplexerSessions(env).some(multiplexer => multiplexer.imagesRequireOverride)
+	) {
 		return null;
 	}
 	return imageProtocol;
@@ -933,6 +817,13 @@ export interface ImageRenderOptions {
 	placementId?: number;
 	/** When true (Kitty + {@link imageId}), also return the one-time transmit sequence. */
 	includeTransmit?: boolean;
+	/**
+	 * SIXEL sequence for the target pixel size renderImage computes, so the
+	 * caller can encode off the JS thread: answer `undefined` while the encode
+	 * is pending (the image's rows stay reserved) and `null` once it failed.
+	 * Without a provider, renderImage encodes synchronously.
+	 */
+	sixel?: (widthPx: number, heightPx: number) => string | null | undefined;
 }
 
 // Default cell dimensions - updated by TUI when terminal responds to query
@@ -1333,6 +1224,19 @@ export function getImageDimensions(base64Data: string, mimeType: string): ImageD
 	return null;
 }
 
+/**
+ * SIXEL sequence for `base64Data` at the given pixel size, encoded on the JS
+ * thread; `null` when the encode fails. For output that cannot wait for an
+ * off-thread encode.
+ */
+export function encodeSixelNow(base64Data: string, widthPx: number, heightPx: number): string | null {
+	try {
+		return encodeSixel(new Uint8Array(Buffer.from(base64Data, "base64")), widthPx, heightPx);
+	} catch {
+		return null;
+	}
+}
+
 export function renderImage(
 	base64Data: string,
 	imageDimensions: ImageDimensions,
@@ -1386,29 +1290,28 @@ export function renderImage(
 	}
 
 	if (TERMINAL.imageProtocol === ImageProtocol.Sixel) {
-		try {
-			// SIXEL encodes in 6-pixel vertical bands. A height that is not a
-			// multiple of 6 is padded with transparent rows, but the terminal
-			// still allocates cell rows for the padded height. When the padded
-			// height crosses a cell boundary the terminal uses one more row
-			// than fit.rows, so the next line of content overwrites the bottom
-			// of the image — a visible slice stripped from the image. Round the
-			// encode height DOWN to the largest multiple of 6 that fits within
-			// the requested row budget, so the band boundary aligns without
-			// padding and the reserved row count never exceeds fit.rows. Scale
-			// the width by the same ratio so resize_exact preserves the aspect
-			// ratio instead of squashing the image vertically.
-			const rawHeightPx = Math.max(1, fit.rows * cellDims.heightPx);
-			const targetHeightPx = Math.max(6, Math.floor(rawHeightPx / 6) * 6);
-			const heightScale = targetHeightPx / rawHeightPx;
-			const targetWidthPx = Math.max(1, Math.round(fit.columns * cellDims.widthPx * heightScale));
-			const rows = Math.max(1, Math.ceil(targetHeightPx / cellDims.heightPx));
-			const decoded = new Uint8Array(Buffer.from(base64Data, "base64"));
-			const sequence = encodeSixel(decoded, targetWidthPx, targetHeightPx);
-			return { sequence, rows };
-		} catch {
-			return null;
-		}
+		// SIXEL encodes in 6-pixel vertical bands. A height that is not a
+		// multiple of 6 is padded with transparent rows, but the terminal
+		// still allocates cell rows for the padded height. When the padded
+		// height crosses a cell boundary the terminal uses one more row
+		// than fit.rows, so the next line of content overwrites the bottom
+		// of the image — a visible slice stripped from the image. Round the
+		// encode height DOWN to the largest multiple of 6 that fits within
+		// the requested row budget, so the band boundary aligns without
+		// padding and the reserved row count never exceeds fit.rows. Scale
+		// the width by the same ratio so resize_exact preserves the aspect
+		// ratio instead of squashing the image vertically.
+		const rawHeightPx = Math.max(1, fit.rows * cellDims.heightPx);
+		const targetHeightPx = Math.max(6, Math.floor(rawHeightPx / 6) * 6);
+		const heightScale = targetHeightPx / rawHeightPx;
+		const targetWidthPx = Math.max(1, Math.round(fit.columns * cellDims.widthPx * heightScale));
+		const rows = Math.max(1, Math.ceil(targetHeightPx / cellDims.heightPx));
+		const sequence = options.sixel
+			? options.sixel(targetWidthPx, targetHeightPx)
+			: encodeSixelNow(base64Data, targetWidthPx, targetHeightPx);
+		if (sequence === null) return null;
+		// Undefined while the provider's encode is pending: the rows stay reserved.
+		return { sequence, rows };
 	}
 	if (TERMINAL.imageProtocol === ImageProtocol.Iterm2) {
 		const sequence = encodeITerm2(base64Data, {

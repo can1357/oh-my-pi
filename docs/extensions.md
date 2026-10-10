@@ -140,6 +140,25 @@ labeling action. `getAllTools()` returns tool schemas and source metadata, while
 
 ### Provider registration
 
+Provider `models` entries and rows returned by `fetchDynamicModels` accept the same `api`/`kind` pairs as `models.yml` (see [Models](./models.md)): a runner API such as `openai-images` implies its kind, so the model reaches the `image` role and `generate_image` instead of registering as chat. A static `models` entry whose `kind` its api cannot serve fails `registerProvider`; such a `fetchDynamicModels` row is dropped with a logged warning.
+
+```ts
+pi.registerProvider("my-gateway", {
+  baseUrl: "https://gateway.example.com/v1",
+  apiKey: "GATEWAY_API_KEY",
+  models: [{
+    id: "gpt-image-2",
+    name: "GPT Image 2",
+    api: "openai-images", // kind: "image" implied
+    reasoning: false,
+    input: ["text"],
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    contextWindow: 128000,
+    maxTokens: 16384,
+  }],
+});
+```
+
 `pi.registerProvider(name, config)` can include an optional `usage` field containing a
 `UsageProvider` imported from `@oh-my-pi/pi-ai`. Its `fetchUsage` implementation receives the
 normalized credential and returns a normalized `UsageReport`; the result is then handled
@@ -244,7 +263,7 @@ export default function (pi: ExtensionAPI) {
 - `deliverAs: "steer"` (default while streaming) — steers the current run
 - `deliverAs: "followUp"` — queued behind the current run while streaming
 - `deliverAs: "nextTurn"` — kept out of the editable pending-message UI; while streaming it waits for the next turn, and when idle without `triggerTurn` it is appended to context/history without starting a turn
-- `deliverAs: "aside"` — injected at the next agent step boundary without interrupting the current tool batch; when idle it normally starts a turn regardless of `triggerTurn`. Plan mode or user-interrupt auto-resume suppression folds it into context instead
+- `deliverAs: "aside"` — injected at the next agent step boundary without interrupting the current tool batch, except that it ends a running interruptible `wait` (the wait returns "Wait interrupted by message." and its job keeps running); when idle it normally starts a turn regardless of `triggerTurn`. Plan mode or user-interrupt auto-resume suppression folds it into context instead
 - `triggerTurn: true` — starts a turn when idle (also honored with `deliverAs: "nextTurn"`: idle prompts immediately; while streaming the queued message schedules an internal continuation)
 
 When idle without `triggerTurn`, ordinary `sendMessage` delivery appends the
@@ -810,6 +829,147 @@ must return a `CustomEditor` subclass, not a plain `Editor`/`EditorComponent`.
 up to 10 content lines plus a truncation notice). Pass `undefined` to remove a
 widget. `setEditorText` and `pasteToEditor` request a repaint after mutating the
 editor.
+
+#### Launching terminal commands
+
+`ctx.ui.openTerminal(request)` is available only in the interactive TUI. It creates a
+multiplexer pane or provider-native group (a tmux window, Zellij/Herdr/Orca tab, or CMUX
+workspace—not an OS window) and returns the reported native ID, plus a `warning` when
+the provider started the command but could not show it where requested. RPC, ACP,
+print, and headless contexts do not provide this optional method. The request type and
+supported provider set derive from canonical launch capabilities: tmux, Zellij,
+Herdr, CMUX, and Orca are supported; screen and wmux remain recognized by the
+multiplexer taxonomy but are currently unsupported.
+
+Provider-specific session detection is centralized in
+`@oh-my-pi/pi-tui/terminal-multiplexer`, which registers one module per multiplexer.
+`hasTerminalMultiplexerSession(provider, env)` checks explicit session markers, while
+`classifyTerminalMultiplexer(env)` names the multiplexer hosting the process: session
+markers first, then a `tmux`/`screen` `TERM` fallback, then outer applications such as
+Orca, so a multiplexer running inside Orca wins. `isInsideTerminalMultiplexer(env)` is
+true only when the classified multiplexer owns the screen grid; Orca keeps the
+direct-terminal render path. A classified multiplexer does not prove that a nested
+provider session or a native pane ID exists.
+
+The TUI host injects this capability; extensions do not need to import dispatcher
+code to use it.
+
+Built-in OMP callers can pass `classifyTerminalMultiplexer(env)` to
+`getTerminalLaunchPlacement(...)` for support and presentation metadata or as the
+first argument to `createDefaultTerminalLaunchRequest(...)` for a validated
+provider-default request. The factory also takes a placement, command argv, cwd, and
+optional shell confirmation. Both helpers are exported by
+`src/subprocess/terminal-launch.ts`.
+Placement lookup returns the provider display name, user-facing group label (such as
+`pane`, `tab`, or `workspace`), and any required shell grammar, or an error when no
+multiplexer is detected or the provider does not support that placement. The request
+factory returns `{ request }` or `{ error }`, validates the constructed request, and
+leaves provider-specific target, focus, direction, and execution options unset so the
+backend applies its own defaults. For shell-input launches, pass `shellGrammar: "posix"`
+only after confirming the destination shell uses POSIX grammar; the factory rejects
+a missing assertion. Extensions can continue using `ctx.ui.openTerminal(...)` with
+explicit typed requests.
+
+```ts
+const result = await ctx.ui.openTerminal?.({
+  multiplexer: "tmux",
+  placement: "pane",
+  command: ["bun", "run", "dev"],
+  cwd: ctx.cwd,
+  target: process.env.TMUX_PANE!,
+  focus: false,
+  execution: "direct",
+});
+```
+
+Targets are provider-native IDs/refs, with different meanings by placement:
+
+- tmux pane placement targets a pane ID and defaults to `TMUX_PANE`; new-window
+  targets are session names/IDs and may be omitted inside the current TMUX session.
+  An explicit pane or session target can address the CLI when `TMUX` is unset.
+- Zellij pane placement may target an existing tab ID (Zellij 0.44.1 or newer).
+  New-tab creation has no target option. Both require an active `ZELLIJ` session.
+- Herdr pane placement targets a pane ID and defaults to `HERDR_PANE_ID`; tab
+  placement targets a workspace ID and defaults to `HERDR_WORKSPACE_ID`. The
+  destination must be in an active Herdr pane or workspace.
+- Orca pane splits resolve `ORCA_PANE_KEY` to the current terminal handle;
+  detection requires both `ORCA_PANE_KEY` and `ORCA_WORKTREE_ID`. Tab creation
+  defaults to worktree `id:<ORCA_WORKTREE_ID>`; an application label alone is
+  insufficient to detect an Orca session. Targets, titles, and commands are passed
+  as `--flag=value`, so a value starting with `--` stays data.
+- CMUX pane placement targets a surface ID; workspace placement targets a window
+  ID. Both targets may be omitted when the corresponding CMUX context is active.
+  An explicit surface target is authoritative and is not combined with the ambient
+  workspace. Socket-path and transport markers alone do not establish an active
+  local CMUX surface.
+
+Unsupported target combinations fail rather than being ignored. Capability checks
+use provider identity markers or a native target, not `TERM` alone. `focus` controls
+apply only where a placement supports them: tmux uses `-d` when false, Zellij uses
+`--no-focus` (Zellij 0.45.0 or newer), Herdr uses `--focus`/`--no-focus`, and CMUX
+passes `--focus true|false` to both split and workspace creation. Orca tab creation
+maps `focus: true` to `--focus`; otherwise focus follows Orca's default. Orca pane
+splits have no focus option. When Orca cannot show a new tab, it starts the command
+in a background terminal, and the result's `warning` says so.
+
+Execution is provider-specific. tmux execs a multi-argument command directly but runs
+a single argument through its configured `default-shell -c`, which may be fish, Nushell,
+or another non-POSIX shell. For one-argument direct launches the dispatcher prefixes
+`/usr/bin/env --`, keeping executables with spaces, leading dashes, or shell
+metacharacters as data; a one-argument executable name containing `=` is rejected
+because `env` reads it as an assignment. `execution: "shell"` POSIX-quotes the argv
+and runs it with `/bin/sh -c`, independent of `default-shell`. tmux format-expands its
+start directory, so the dispatcher passes every `#` in `cwd` as `##`. Zellij accepts
+direct argv execution. Zellij options that need a newer CLI than the one installed
+(tab placement before 0.44.0, `target` before 0.44.1, `focus: false` before 0.45.0) fail before anything is created,
+with an error naming the required version; the dispatcher checks `zellij --version`
+once per process.
+
+Herdr `pane run`, CMUX `--command`, and Orca `terminal split`/`terminal create`
+submit shell command text to the destination's interactive shell rather than
+launching argv directly. Their requests therefore require `shellGrammar: "posix"`.
+Set it only after confirming that the destination shell accepts POSIX syntax; it
+is not inferred from the local OS or `$SHELL`, and the configured shell is not
+guessed. Without that assertion, do not request a Herdr, CMUX, or Orca launch.
+Once asserted, argv words are quoted with the shared POSIX shell-quoting helpers.
+Orca split/create have no `--cwd` flag, so the adapter prepends
+`cd <quoted-cwd> &&` before the quoted command in `--command`; CMUX split also
+changes directory inside its shell before entering the command. These quotes are
+not claimed to work in Nushell, PowerShell, `cmd.exe`, or other shell grammars.
+The Orca CLI is resolved in Orca's documented order: `ORCA_CLI_COMMAND` when set,
+`orca-dev` in an Orca development checkout (`ORCA_DEV_REPO_ROOT`), `orca-ide` on Linux
+outside an Orca terminal, and `orca` otherwise.
+
+Because these commands are submitted as terminal input, shell-input requests
+reject C0/C1 control bytes and DEL in command arguments before creating a pane or
+workspace; CMUX and Orca also reject them in `cwd`, which is embedded in their
+shell command. The restriction is not applied to direct tmux or Zellij argv,
+where argument newlines remain data rather than terminal input.
+
+Herdr, Zellij, and Orca `window` placements create tabs; CMUX creates a workspace.
+Provider-specific fields include pane direction, Zellij floating panes/names,
+Herdr tab labels, and CMUX workspace names. Zellij floating panes cannot specify a
+split direction, and Zellij new-tab creation cannot target a tab. tmux returns
+required pane (`%...`) or window (`@...`) IDs; Zellij 0.44.0 and newer report the pane ID
+as `terminal_<id>` and tab IDs as numeric strings, while older Zellij pane launches report
+none, so `result.id` is unavailable; Herdr requires pane/tab IDs in
+its JSON response. CMUX reports workspace/pane IDs when present, but its JSON
+response may omit an ID, in which case `result.id` is unavailable.
+Orca returns a pane handle at `result.split.handle` or a tab handle at
+`result.terminal.handle`; the top-level JSON `id` is the RPC request ID, not the
+terminal handle.
+
+`cwd` must be an absolute path. A request that is not an object or names an unknown
+multiplexer or placement rejects with a `TypeError`. Every other failure, including a
+recognized provider or placement without launch support, rejects with a sanitized
+`TerminalLaunchError` naming the provider, operation, and exit status when available;
+command argv and CLI output are not included. CMUX and Orca reject malformed JSON
+responses without retrying creation.
+
+There is no shared environment override: each multiplexer applies its own
+environment propagation rules; the dispatcher does not synthesize uniform variable
+inheritance. Request argv stays separate for direct backends; only shell-input
+backends turn argv into shell text, under the required POSIX grammar assertion.
 
 ### RPC mode (`rpc-mode.ts`)
 

@@ -10,7 +10,7 @@ import {
 } from "@oh-my-pi/omp-stats/rollup";
 import type { MessageStats } from "@oh-my-pi/omp-stats/types";
 import { getBundledModel, getBundledModels } from "@oh-my-pi/pi-catalog/models";
-import { getStatsDbPath } from "@oh-my-pi/pi-utils";
+import { getStatsDbPath, VERSION } from "@oh-my-pi/pi-utils";
 import { installStatsTestIsolation } from "./helpers/temp-agent";
 
 installStatsTestIsolation("@pi-stats-db-");
@@ -256,6 +256,8 @@ describe("stats subscription cost correction", () => {
 			0,
 			0,
 		);
+		// A database whose catalog backfill has not run for this release.
+		database.run("DELETE FROM meta WHERE key = 'catalog_cost_backfill'");
 		database.close();
 
 		await initDb();
@@ -269,6 +271,62 @@ describe("stats subscription cost correction", () => {
 			expectedXaiGrokCost().total,
 			8,
 		);
+	});
+
+	describe("per-release catalog backfill gate", () => {
+		async function seedZeroCostRow(backfillMark: string): Promise<void> {
+			await initDb();
+			closeDb();
+			const database = new Database(getStatsDbPath());
+			database
+				.prepare(`
+					INSERT INTO messages (
+						session_file, entry_id, folder, model, provider, api, timestamp,
+						duration, ttft, stop_reason, error_message,
+						input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, total_tokens, premium_requests,
+						cost_input, cost_output, cost_cache_read, cost_cache_write, cost_total
+					) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+				`)
+				.run(
+					"/tmp/session.jsonl",
+					"codex-gated",
+					"/tmp/project",
+					codexReferenceModel.id,
+					"openai-codex",
+					"openai-codex-responses",
+					Date.now(),
+					1000,
+					100,
+					"stop",
+					null,
+					1000,
+					500,
+					200,
+					0,
+					1700,
+					0,
+					0,
+					0,
+					0,
+					0,
+					0,
+				);
+			database.run("INSERT OR REPLACE INTO meta (key, value) VALUES ('catalog_cost_backfill', ?)", [backfillMark]);
+			database.close();
+			await initDb();
+		}
+
+		it("reprices zero-cost rows when the backfill last ran for an older release", async () => {
+			await seedZeroCostRow("0.0.0-older");
+
+			expect(getRecentRequests(1)[0]?.usage.cost.total).toBeCloseTo(expectedCodexGptCost().total, 8);
+		});
+
+		it("leaves zero-cost rows alone when the backfill already ran for this release", async () => {
+			await seedZeroCostRow(VERSION);
+
+			expect(getRecentRequests(1)[0]?.usage.cost.total).toBe(0);
+		});
 	});
 
 	it("refreshes a historically zero-cost multi-agent row with orchestration usage on re-ingest", async () => {
@@ -380,6 +438,7 @@ describe("stats scheduled response costs", () => {
 
 		// Simulate a database predating the no-cache estimate column's backfill.
 		database.run("UPDATE messages SET cost_no_cache_input = NULL");
+		database.run("DELETE FROM meta WHERE key = 'cost_no_cache_input_v1'");
 		closeDb();
 		await initDb();
 		expect(getOverallStats().totalCost).toBeCloseTo(0.069, 8);

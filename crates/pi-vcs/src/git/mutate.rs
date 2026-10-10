@@ -96,6 +96,11 @@ impl GitRepo {
 	pub fn stage_files(&self, files: &[String]) -> Result<()> {
 		let repo = self.gix()?;
 		let mut index = load_index_or_head(&repo, "git add")?;
+		// Whole seconds since the epoch before any file is stat'ed (see
+		// `stage_one`).
+		let staging_started = std::time::SystemTime::now()
+			.duration_since(std::time::UNIX_EPOCH)
+			.map_or(0, |elapsed| elapsed.as_secs());
 		let all = files.is_empty();
 		let mut requested: BTreeSet<String> = files
 			.iter()
@@ -127,8 +132,41 @@ impl GitRepo {
 		let (mut filter, filter_index) = repo
 			.filter_pipeline(None)
 			.map_err(|err| Error::backend("git add", err))?;
+		// Hash every selected path first, then rewrite the index in one pass:
+		// removing entries path by path rescans the whole index each time.
+		let mut replaced = std::collections::HashSet::<BString>::new();
+		let mut staged = Vec::new();
 		for path in selected {
-			stage_one(&mut filter, &filter_index, &mut index, &path)?;
+			match stage_one(self.root(), &mut filter, &filter_index, &path, staging_started)? {
+				Staged::Entry(entry) => {
+					replaced.insert(path.into());
+					staged.push(entry);
+				},
+				Staged::Removed => {
+					replaced.insert(path.into());
+				},
+				Staged::Kept => {},
+			}
+		}
+		index.remove_entries(|_, path, _| replaced.contains(path));
+		// A kept entry's stat as new as the old index is racy: only that
+		// index's timestamp makes git re-check the file's content, and the
+		// index written here is newer, so the stat is dropped to keep the
+		// check (git smudges such entries when it writes an index).
+		let racy_from = index.timestamp();
+		for entry in index.entries_mut() {
+			if entry.stat.is_racy(racy_from, Default::default()) {
+				entry.stat = gix::index::entry::Stat::default();
+			}
+		}
+		for entry in staged {
+			index.dangerously_push_entry(
+				entry.stat,
+				entry.id,
+				gix::index::entry::Flags::empty(),
+				entry.mode,
+				entry.path.as_bstr(),
+			);
 		}
 		index.sort_entries();
 		index
@@ -940,17 +978,14 @@ fn hook_is_executable(path: &Path) -> bool {
 	let Ok(metadata) = fs::metadata(path) else {
 		return false;
 	};
-	if !metadata.is_file() {
-		return false;
-	}
 	#[cfg(unix)]
 	{
 		use std::os::unix::fs::PermissionsExt;
-		metadata.permissions().mode() & 0o111 != 0
+		metadata.is_file() && metadata.permissions().mode() & 0o111 != 0
 	}
 	#[cfg(not(unix))]
 	{
-		true
+		metadata.is_file()
 	}
 }
 
@@ -1276,40 +1311,59 @@ fn same_worktree_file(_: &fs::Metadata, _: &fs::Metadata) -> bool {
 	false
 }
 
-/// Write the filtered worktree content at `path` into the object database and
-/// replace its index entry. A path that vanished or is untrackable (socket,
-/// plain directory) is left out of the index, as `git add` would.
+/// The new index entry for a staged path.
+struct StagedEntry {
+	path: BString,
+	stat: gix::index::entry::Stat,
+	id:   gix::ObjectId,
+	mode: gix::index::entry::Mode,
+}
+
+/// What staging a path does to its index entries.
+enum Staged {
+	/// Replace them with this entry.
+	Entry(StagedEntry),
+	/// Drop them: the path vanished or is untrackable (socket), as `git add`
+	/// would.
+	Removed,
+	/// Leave them: a plain directory.
+	Kept,
+}
+
+/// Write the filtered worktree content at `path` into the object database.
 fn stage_one(
+	root: &Path,
 	filter: &mut gix::filter::Pipeline<'_>,
 	filter_index: &gix::index::State,
-	index: &mut gix::index::File,
 	path: &str,
-) -> Result<()> {
+	staging_started: u64,
+) -> Result<Staged> {
 	use gix::objs::tree::EntryKind;
 	let rela_path = path.as_bytes().as_bstr();
+	// Stat before reading, as `git add` does, so the entry keeps a valid stat
+	// cache: a write landing after the stat changes the file's stat and later
+	// status calls re-hash it. A file last changed in the second staging
+	// began could change again within that second and keep its stat, so its
+	// stat is not recorded and the next status compares contents instead.
+	let stat = gix::index::fs::Metadata::from_path_no_follow(&root.join(path))
+		.ok()
+		.and_then(|metadata| gix::index::entry::Stat::from_fs(&metadata).ok())
+		.filter(|stat| u64::from(stat.mtime.secs) < staging_started)
+		.unwrap_or_default();
 	let Some((id, kind, _)) = filter
 		.worktree_file_to_object(rela_path, filter_index)
 		.map_err(|err| Error::backend("git add", err))?
 	else {
-		index.remove_entries(|_, p, _| p == rela_path);
-		return Ok(());
+		return Ok(Staged::Removed);
 	};
 	let mode = match kind {
 		EntryKind::Blob => gix::index::entry::Mode::FILE,
 		EntryKind::BlobExecutable => gix::index::entry::Mode::FILE_EXECUTABLE,
 		EntryKind::Link => gix::index::entry::Mode::SYMLINK,
 		EntryKind::Commit => gix::index::entry::Mode::COMMIT,
-		EntryKind::Tree => return Ok(()),
+		EntryKind::Tree => return Ok(Staged::Kept),
 	};
-	index.remove_entries(|_, p, _| p == rela_path);
-	index.dangerously_push_entry(
-		Default::default(),
-		id,
-		gix::index::entry::Flags::empty(),
-		mode,
-		rela_path,
-	);
-	Ok(())
+	Ok(Staged::Entry(StagedEntry { path: rela_path.to_owned(), stat, id, mode }))
 }
 
 fn copy_index_paths(dest: &mut gix::index::File, source: &gix::index::File, files: &[String]) {
@@ -1963,6 +2017,34 @@ mod tests {
 		assert_eq!(git(temp.path(), &["status", "--porcelain"]), "?? new");
 	}
 
+	/// Staged entries record the file's stat so later status calls can skip
+	/// re-hashing them; a zeroed stat would force a content check every time.
+	/// A file changed in the second staging began could change again within
+	/// that second without its stat changing, so it records none.
+	#[test]
+	fn stage_files_records_the_stat_cache_unless_racy() {
+		let (temp, repo) = fixture();
+		let set_mtime = |path: &str, when: std::time::SystemTime| {
+			fs::OpenOptions::new()
+				.write(true)
+				.open(temp.path().join(path))
+				.and_then(|file| file.set_modified(when))
+				.unwrap();
+		};
+		let now = std::time::SystemTime::now();
+		fs::write(temp.path().join("a"), "changed content\n").unwrap();
+		set_mtime("a", now - std::time::Duration::from_secs(30));
+		set_mtime("b", now + std::time::Duration::from_secs(60));
+		repo.stage_files(&[]).unwrap();
+		let index = gix::open(temp.path()).unwrap().open_index().unwrap();
+		let stat = |path: &str| index.entry_by_path(path.into()).unwrap().stat;
+		let size = fs::metadata(temp.path().join("a")).unwrap().len();
+		assert_eq!(u64::from(stat("a").size), size, "a records its size");
+		assert_ne!(stat("a").mtime, gix::index::entry::stat::Time::default(), "a records its mtime");
+		assert_eq!(stat("b"), gix::index::entry::Stat::default(), "a racy stat is not recorded");
+		assert_eq!(git(temp.path(), &["status", "--porcelain"]), "M  a");
+	}
+
 	#[test]
 	fn stage_applies_worktree_to_git_filters() {
 		// Regression: staging stored raw worktree bytes, so under
@@ -2397,8 +2479,8 @@ mod tests {
 		fs::write(temp.path().join("parent-untracked.txt"), "delete\n").unwrap();
 
 		// 4. Global excludesfile (core.excludesFile), configured *after* `repo`'s
-		//    cached gix handle was opened by the staging calls above. The clean below
-		//    must observe it or `global.env` is deleted.
+		//    cached gix handle was opened by the staging calls above. The clean
+		//    below must observe it or `global.env` is deleted.
 		let global_exclude = outside.path().join("global-excludes");
 		fs::write(&global_exclude, "global.env\n").unwrap();
 		git(temp.path(), &["config", "core.excludesFile", global_exclude.to_str().unwrap()]);
@@ -2463,8 +2545,8 @@ mod tests {
 			initially_empty.exists(),
 			"pathspec-scoped clean leaves directories outside the pathspec"
 		);
-		// 10. Pathspec scoping: cleaning with a pathspec prunes empty dirs inside the
-		//     pathspec but preserves the parent
+		// 10. Pathspec scoping: cleaning with a pathspec prunes empty dirs inside
+		//     the pathspec but preserves the parent
 		let pathspec_dir = temp.path().join("pathspec-parent/child/grandchild");
 		fs::create_dir_all(&pathspec_dir).unwrap();
 		fs::write(pathspec_dir.join("leaf.txt"), "leaf\n").unwrap();

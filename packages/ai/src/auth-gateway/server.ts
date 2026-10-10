@@ -31,7 +31,6 @@
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { type ModelKind, modelKind } from "@oh-my-pi/pi-catalog/types";
 import { logger } from "@oh-my-pi/pi-utils";
-import type { AuthStorage } from "../auth-storage";
 import { classifyGatewayError } from "../error/gateway";
 import * as anthropicMessages from "../providers/anthropic-messages-server";
 import * as openaiChat from "../providers/openai-chat-server";
@@ -41,6 +40,7 @@ import { completeSimple, streamSimple } from "../stream";
 import type { Api, AssistantMessageEventStream, Context, Model, SimpleStreamOptions } from "../types";
 import { deterministicUuid } from "../utils/deterministic-id";
 import { parseBind } from "../utils/parse-bind";
+import { resolvePeer } from "../utils/resolve-peer";
 import {
 	type AuthGatewayBootOptions,
 	type AuthGatewayRouteOptions,
@@ -59,7 +59,6 @@ import {
 	isAuthorized,
 	json,
 	resolveClientIdentity,
-	resolvePeer,
 	withCors,
 } from "./http";
 import { handleEmbeddings } from "./routes/embeddings";
@@ -114,14 +113,19 @@ const FORMAT_ROUTES: Record<string, { module: FormatModule; label: string }> = {
  * bucket and can't trample each other's prefix-tree entries.
  *
  * Anthropic-backed requests ignore `sessionId`; the key is harmless there.
+ *
+ * The derivation MUST stay byte-stable: AuthStorage persists credential pins
+ * under this id, so changing it re-routes every in-flight conversation.
+ * `toolsJson` lets the caller share one `JSON.stringify(context.tools)` with
+ * {@link AuthGatewaySessionStateStore.acquire}.
  */
-function deriveSessionId(modelId: string, context: Context): string {
+function deriveSessionId(modelId: string, context: Context, toolsJson = serializeTools(context)): string {
 	const parts: string[] = [modelId];
 	if (context.systemPrompt && context.systemPrompt.length > 0) {
 		parts.push(context.systemPrompt.join("\n\n"));
 	}
-	if (context.tools && context.tools.length > 0) {
-		parts.push(JSON.stringify(context.tools));
+	if (toolsJson !== undefined) {
+		parts.push(toolsJson);
 	}
 	const first = context.messages?.[0];
 	if (first) {
@@ -134,6 +138,11 @@ function deriveSessionId(modelId: string, context: Context): string {
 	// The 36-char UUID flows through unchanged:
 	// `normalizeOpenAIPromptCacheKey` accepts ≤64 chars verbatim.
 	return deterministicUuid(seed);
+}
+
+/** `JSON.stringify(context.tools)`, or `undefined` when the request declares none. */
+function serializeTools(context: Context): string | undefined {
+	return context.tools && context.tools.length > 0 ? JSON.stringify(context.tools) : undefined;
 }
 
 function buildStreamOptions(parsed: ParsedFormatRequest, api: Api, signal: AbortSignal): SimpleStreamOptions {
@@ -341,7 +350,8 @@ async function handleFormatEndpoint(
 	// modelId + system + tools + first message. Mirrored into
 	// streamOpts.sessionId / promptCacheKey by `buildStreamOptions`.
 	const clientKey = normalizeClientSessionKey(parsed.options.promptCacheKey);
-	const sessionId = clientKey ?? deriveSessionId(parsed.modelId, parsed.context);
+	const toolsJson = clientKey === undefined ? serializeTools(parsed.context) : undefined;
+	const sessionId = clientKey ?? deriveSessionId(parsed.modelId, parsed.context, toolsJson);
 	parsed.options.promptCacheKey = sessionId;
 
 	// pi-ai's stream() does NOT consult AuthStorage — the caller (us) is
@@ -364,6 +374,7 @@ async function handleFormatEndpoint(
 		clientKey,
 		model,
 		context: parsed.context,
+		toolsJson,
 		account: resolveGatewayAccount(bootOpts.storage, model.provider, sessionId, apiKey.apiKey),
 	});
 	streamOpts.providerSessionState = lease.states;
@@ -538,7 +549,8 @@ async function handlePiNative(
 	// the next turn of this conversation reuses the same credential until
 	// it hits a usage cap, then markUsageLimitReached can hand off.
 	const clientKey = normalizeClientSessionKey(parsed.options.sessionId);
-	const sessionId = clientKey ?? deriveSessionId(parsed.modelId, parsed.context);
+	const toolsJson = clientKey === undefined ? serializeTools(parsed.context) : undefined;
+	const sessionId = clientKey ?? deriveSessionId(parsed.modelId, parsed.context, toolsJson);
 	parsed.options.sessionId = sessionId;
 
 	const apiKey = await resolveGatewayApiKey(bootOpts.storage, model, sessionId, controller.signal, peer);
@@ -554,6 +566,7 @@ async function handlePiNative(
 		clientKey,
 		model,
 		context: parsed.context,
+		toolsJson,
 		account: resolveGatewayAccount(bootOpts.storage, model.provider, sessionId, apiKey.apiKey),
 	});
 	// Build the SimpleStreamOptions actually handed to `streamSimple`. We
@@ -695,12 +708,14 @@ async function handlePiNative(
  * failure) inside `AuthStorage`, so this handler is a thin wrapper that
  * surfaces the same data to HTTP callers (notably the macOS usage widget).
  */
-async function handleUsage(storage: AuthStorage, signal: AbortSignal): Promise<Response> {
-	const reports = (await storage.usage.reports?.({ signal })) ?? [];
+async function handleUsage(opts: AuthGatewayRouteOptions, signal: AbortSignal): Promise<Response> {
+	const reports = (await opts.storage.usage.reports?.({ signal })) ?? [];
 	// Drop the heavy provider-specific `raw` payload — UI consumers only need
 	// `limits` + `metadata`. Match the broker's `/v1/usage` shape so a single
 	// client struct (Swift widget, llm-git, ...) works against either endpoint.
-	const trimmed = reports.map(({ raw: _raw, ...rest }) => rest);
+	const trimmed = reports
+		.filter(report => !opts.excludeProviders?.has(report.provider))
+		.map(({ raw: _raw, ...rest }) => rest);
 	return json(200, { generatedAt: Date.now(), reports: trimmed });
 }
 
@@ -715,8 +730,8 @@ async function handleUsage(storage: AuthStorage, signal: AbortSignal): Promise<R
  * endpoints. For multi-account pools that's the difference between getting
  * a clean diagnosis and getting a 429 storm.
  */
-async function handleCredentialsCheck(storage: AuthStorage, signal: AbortSignal): Promise<Response> {
-	const credentials = await storage.health.check({ signal });
+async function handleCredentialsCheck(opts: AuthGatewayRouteOptions, signal: AbortSignal): Promise<Response> {
+	const credentials = await opts.storage.health.check({ signal, excludeProviders: opts.excludeProviders });
 	return json(200, { generatedAt: Date.now(), credentials });
 }
 
@@ -818,14 +833,14 @@ export function createAuthGatewayRouter(opts: AuthGatewayRouteOptions): AuthGate
 			// Same shape as the broker's `/v1/usage`, so widget/llm-git speak to either with the
 			// same client struct.
 			if (req.method === "GET" && pathname === "/v1/usage") {
-				return await handleUsage(opts.storage, req.signal);
+				return await handleUsage(opts, req.signal);
 			}
 
 			// Per-credential auth probe — diagnoses which row in a multi-account
 			// pool is producing 401s. Aggregated `/v1/usage` silently drops failed
 			// credentials, so we need a separate endpoint that captures errors.
 			if (req.method === "GET" && pathname === "/v1/credentials/check") {
-				return await handleCredentialsCheck(opts.storage, req.signal);
+				return await handleCredentialsCheck(opts, req.signal);
 			}
 
 			// Provider-format dispatch.

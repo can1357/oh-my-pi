@@ -4,19 +4,44 @@ import * as path from "node:path";
 import type { AutocompleteItem } from "@oh-my-pi/pi-tui";
 import { getMCPConfigPath, getProjectDir, logger } from "@oh-my-pi/pi-utils";
 import { formatModelRoleAlias, getKnownRoleIds } from "../config/model-roles";
+import { cfgCycleOrder } from "../config/model-settings";
 import { readMCPConfigFile } from "../mcp/config-writer";
 import { collectMcpServerNames } from "../modes/controllers/mcp-command-controller";
+import { createModelBrowserSource } from "../modes/model-browser-source";
+import {
+	createModelMentionSource,
+	type ModelMentionCandidateSource,
+} from "@oh-my-pi/pi-tui/prompt/model-mention-autocomplete";
 import { getConfiguredThinkingLevelMetadata } from "@oh-my-pi/pi-tui/thinking";
 import { expandTilde } from "../tools/path-utils";
 import type { SubcommandDef, TuiSlashCommandRuntime } from "./types";
 
+/** Options shared by the declarative subcommand completers. */
+interface SubcommandCompletionOptions {
+	/** Mirrors `BuiltinSlashCommand.subcommandOptional`. */
+	optional?: boolean;
+}
+
+/** Ghost text completing `prefix` to `sub`: its remaining name characters, then its usage. */
+function subcommandRemainderHint(sub: SubcommandDef, prefix: string): string | undefined {
+	const hint = sub.name.slice(prefix.length) + (sub.usage ? ` ${sub.usage}` : "");
+	return hint || undefined;
+}
+
 /**
  * Build getArgumentCompletions from declarative subcommand definitions.
- * Returns subcommand names filtered by prefix in the dropdown.
+ * Returns subcommand names filtered by prefix in the dropdown; each item's
+ * hint is the ghost text the editor shows while that item is selected.
+ * An optional subcommand offers nothing until a prefix is typed, so Enter on
+ * the bare `/name ` submits it instead of accepting the first subcommand.
  */
-export function buildArgumentCompletions(subcommands: SubcommandDef[]): (prefix: string) => AutocompleteItem[] | null {
+export function buildArgumentCompletions(
+	subcommands: SubcommandDef[],
+	options: SubcommandCompletionOptions = {},
+): (prefix: string) => AutocompleteItem[] | null {
 	return (argumentPrefix: string) => {
 		if (argumentPrefix.includes(" ")) return null; // past the subcommand
+		if (options.optional && argumentPrefix.length === 0) return null;
 		const lower = argumentPrefix.toLowerCase();
 		const matches = subcommands
 			.filter(s => s.name.startsWith(lower))
@@ -24,7 +49,7 @@ export function buildArgumentCompletions(subcommands: SubcommandDef[]): (prefix:
 				value: `${s.name} `,
 				label: s.name,
 				description: s.description,
-				hint: s.usage,
+				hint: subcommandRemainderHint(s, lower),
 			}));
 		return matches.length > 0 ? matches : null;
 	};
@@ -193,9 +218,14 @@ async function buildMcpRemoveCompletions(
 
 /**
  * Build getInlineHint from declarative subcommand definitions.
- * Shows remaining completion + usage as dim ghost text after cursor.
+ * Shows remaining completion + usage as dim ghost text after cursor; an
+ * optional subcommand advertises its choices before anything is typed, since
+ * {@link buildArgumentCompletions} opens no dropdown there.
  */
-export function buildSubcommandInlineHint(subcommands: SubcommandDef[]): (argumentText: string) => string | null {
+export function buildSubcommandInlineHint(
+	subcommands: SubcommandDef[],
+	options: SubcommandCompletionOptions = {},
+): (argumentText: string) => string | null {
 	return (argumentText: string) => {
 		const trimmed = argumentText.trimStart();
 		const spaceIndex = trimmed.indexOf(" ");
@@ -203,11 +233,11 @@ export function buildSubcommandInlineHint(subcommands: SubcommandDef[]): (argume
 		if (spaceIndex === -1) {
 			// Still typing subcommand name — show remaining chars + usage
 			const prefix = trimmed.toLowerCase();
-			if (prefix.length === 0) return null;
+			if (prefix.length === 0) {
+				return options.optional ? `[${subcommands.map(s => s.name).join("|")}]` : null;
+			}
 			const match = subcommands.find(s => s.name.startsWith(prefix));
-			if (!match) return null;
-			const remaining = match.name.slice(prefix.length);
-			return remaining + (match.usage ? ` ${match.usage}` : "");
+			return match ? (subcommandRemainderHint(match, prefix) ?? null) : null;
 		}
 
 		// Subcommand typed — show remaining usage params
@@ -236,35 +266,46 @@ export function buildStaticInlineHint(hint: string): (argumentText: string) => s
 }
 
 /**
- * Build getArgumentCompletions for `/switch <model>`: configured `@role`
- * aliases first, then the session's cycle scope (or every authenticated
- * model) as `provider/id`, substring-filtered on the typed prefix. Any
- * `:level` suffix already typed is kept out of the match and re-appended.
- * Returning matches also keeps `@smol` from falling through to `@`-file
- * mention completion.
+ * Build getArgumentCompletions for `/switch <model>`, ordered like the alt+p
+ * picker for the same query: a leading `@` lists configured role aliases
+ * (ctrl+p cycle roles first, in cycle order); anything else lists the
+ * session's cycle scope (or every authenticated model) as `provider/id`,
+ * fuzzy-ranked with the picker's role/MRU/provider affinity. Any `:level`
+ * suffix already typed is kept out of the match and re-appended. Returning
+ * role matches also keeps `@smol` from falling through to `@`-file mention
+ * completion.
  */
 export function buildModelSelectorCompletions(
 	runtime: TuiSlashCommandRuntime,
 ): (argumentPrefix: string) => AutocompleteItem[] | null {
+	let rankModels: ModelMentionCandidateSource | undefined;
 	return (argumentPrefix: string) => {
 		if (argumentPrefix.includes(" ")) return null;
 		const suffixIndex = argumentPrefix.indexOf(":");
 		const suffix = suffixIndex === -1 ? "" : argumentPrefix.slice(suffixIndex);
-		const query = (suffixIndex === -1 ? argumentPrefix : argumentPrefix.slice(0, suffixIndex)).toLowerCase();
-		const { session, settings } = runtime.ctx;
+		const query = suffixIndex === -1 ? argumentPrefix : argumentPrefix.slice(0, suffixIndex);
 		const matches: AutocompleteItem[] = [];
-		for (const role of getKnownRoleIds(settings)) {
-			const configured = settings.getModelRole(role);
-			if (!configured) continue;
-			const alias = formatModelRoleAlias(role);
-			if (!alias.toLowerCase().includes(query)) continue;
-			matches.push({ value: `${alias}${suffix} `, label: alias, description: configured });
-		}
-		const scoped = session.scopedModels.map(entry => entry.model);
-		for (const model of scoped.length > 0 ? scoped : session.modelRegistry.getAvailable()) {
-			const selector = `${model.provider}/${model.id}`;
-			if (!selector.toLowerCase().includes(query)) continue;
-			matches.push({ value: `${selector}${suffix} `, label: selector, description: model.name });
+		if (query.startsWith("@")) {
+			const { settings } = runtime.ctx;
+			const lower = query.toLowerCase();
+			for (const role of new Set([...cfgCycleOrder.get(settings), ...getKnownRoleIds(settings)])) {
+				const configured = settings.getModelRole(role);
+				if (!configured) continue;
+				const alias = formatModelRoleAlias(role);
+				if (!alias.toLowerCase().includes(lower)) continue;
+				matches.push({ value: `${alias}${suffix} `, label: alias, description: configured });
+			}
+		} else {
+			rankModels ??= createModelMentionSource({
+				source: createModelBrowserSource(runtime.ctx.settings, model =>
+					runtime.ctx.session.effectiveServiceTier(model),
+				),
+				registry: runtime.ctx.session.modelRegistry,
+				scopedModels: () => runtime.ctx.session.scopedModels.map(entry => entry.model),
+			});
+			for (const { selector, model } of rankModels(query)) {
+				matches.push({ value: `${selector}${suffix} `, label: selector, description: model.name });
+			}
 		}
 		return matches.length > 0 ? matches : null;
 	};

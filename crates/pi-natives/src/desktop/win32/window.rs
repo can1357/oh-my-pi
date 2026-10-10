@@ -4,7 +4,6 @@
 use std::{
 	mem::size_of,
 	ptr::{null_mut, with_exposed_provenance_mut},
-	thread,
 	time::{Duration, Instant},
 };
 
@@ -38,7 +37,10 @@ use windows_sys::{
 };
 
 use super::{
-	super::error::{CoreResult, DesktopError},
+	super::{
+		control,
+		error::{CoreResult, DesktopError},
+	},
 	delivery::{is_chromium_class, is_wpf_class},
 };
 
@@ -438,28 +440,31 @@ fn executable_is_any(hwnd: HWND, names: &[&str]) -> bool {
 /// Requests activation without attaching to an untrusted input queue or
 /// injecting a dummy key into whichever application currently has focus.
 /// Foreground-lock refusal is handled by the caller before it sends input.
-pub(super) fn activate(target: HWND) -> bool {
+pub(super) fn activate(target: HWND) -> CoreResult<bool> {
+	control::check()?;
 	// SAFETY: both functions take only OS-validated handles and scalar state.
 	unsafe {
 		SetForegroundWindow(target);
-		GetForegroundWindow() == target
+		Ok(GetForegroundWindow() == target)
 	}
 }
 
 /// Waits up to `timeout` for the exact target HWND. An owned modal dialog is
 /// not an equivalent input destination.
-pub(super) fn wait_for_foreground(target: HWND, timeout: Duration) -> bool {
+pub(super) fn wait_for_foreground(target: HWND, timeout: Duration) -> CoreResult<bool> {
 	let deadline = Instant::now() + timeout;
 	loop {
+		control::check()?;
 		// SAFETY: GetForegroundWindow has no preconditions.
 		let foreground = unsafe { GetForegroundWindow() };
 		if foreground == target {
-			return true;
+			return Ok(true);
 		}
-		if Instant::now() >= deadline {
-			return false;
+		let remaining = deadline.saturating_duration_since(Instant::now());
+		if remaining.is_zero() {
+			return Ok(false);
 		}
-		thread::sleep(Duration::from_millis(10));
+		control::wait(remaining.min(Duration::from_millis(10)))?;
 	}
 }
 
