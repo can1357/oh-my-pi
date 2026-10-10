@@ -26,7 +26,7 @@ import {
 	stringifyJson,
 	toError,
 } from "@oh-my-pi/pi-utils";
-import type { StructuredSubagentSchemaMode } from "@oh-my-pi/pi-tui/tools/task";
+import { isTaskToolDetails, type StructuredSubagentSchemaMode } from "@oh-my-pi/pi-tui/tools/task";
 import { moveFileAcrossDevices } from "../utils/atomic-file";
 import { ArtifactManager } from "./artifacts";
 import { type BlobPutOptions, type BlobPutResult, BlobStore, lazyImageDataSync } from "./blob-store";
@@ -447,6 +447,33 @@ function resetUsageCost(usage: Usage | undefined): void {
 	usage.cost = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 };
 	usage.credits = undefined;
 	usage.premiumRequests = undefined;
+}
+
+/** Clear child billing kept in task results without discarding their token counts. */
+function resetTaskResultBilling(details: unknown): void {
+	if (!isTaskToolDetails(details)) return;
+	resetUsageCost(taskUsageFrom(details));
+	for (const result of details.results) {
+		if (result === null || typeof result !== "object") continue;
+		resetUsageCost(taskUsageFrom(result));
+		resetNestedTaskBilling(result.extractedToolData);
+	}
+	const progress = details.progress;
+	if (Array.isArray(progress)) {
+		for (const item of progress) {
+			if (item === null || typeof item !== "object") continue;
+			if (typeof item.cost === "number") item.cost = 0;
+			resetTaskResultBilling(item.inflightTaskDetails);
+			resetNestedTaskBilling(item.extractedToolData);
+		}
+	}
+}
+
+/** Recurse only through task snapshots extracted from the task subprocess tool. */
+function resetNestedTaskBilling(extractedToolData: Record<string, unknown[]> | undefined): void {
+	const tasks = extractedToolData?.task;
+	if (!Array.isArray(tasks)) return;
+	for (const task of tasks) resetTaskResultBilling(task);
 }
 
 function isAssistantEntry(entry: SessionEntry): boolean {
@@ -4007,7 +4034,12 @@ export class SessionManager {
 	 * on them — since only billing attribution is inherited, not context size.
 	 */
 	static #resetInheritedUsageCost(history: SessionEntry[]): void {
-		for (const entry of history) resetUsageCost(entryUsage(entry));
+		for (const entry of history) {
+			resetUsageCost(entryUsage(entry));
+			if (entry.type === "message" && entry.message.role === "toolResult" && entry.message.toolName === "task") {
+				resetTaskResultBilling(entry.message.details);
+			}
+		}
 	}
 
 	/**

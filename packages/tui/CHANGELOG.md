@@ -20,6 +20,7 @@
 ### Fixed
 
 - Fixed the Agents hub Time column rewinding and freezing for running subagents between progress updates ([#15140](https://github.com/can1357/oh-my-pi/pull/15140) by [@H4vC](https://github.com/H4vC))
+- Fixed Agent Hub and status-line spend dropping cumulative subagent cost after compaction, parking, or follow-up turns while keeping nested task-result charges on child rows ([#15038](https://github.com/can1357/oh-my-pi/pull/15038) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy)).
 
 ## [18.8.7] - 2026-10-09
 
