@@ -148,11 +148,19 @@ describe("parseCommandArgs", () => {
 
 	test("should handle newlines in arguments", () => {
 		expect(parseCommandArgs('"line1\nline2" second')).toEqual(["line1\nline2", "second"]);
+		expect(parseCommandArgs("first\nsecond\r\nthird")).toEqual(["first\nsecond\r\nthird"]);
 	});
 
 	test("should handle escaped quotes inside quoted strings", () => {
 		// Note: This implementation doesn't handle escaped quotes - backslash is literal
 		expect(parseCommandArgs('"quoted \\"text\\""')).toEqual(["quoted \\text\\"]);
+	});
+
+	test("strict parsing preserves empty arguments and shell escapes independently of export options", () => {
+		expect(parseCommandArgs('"" a\\ b "quoted \\"text\\""', { strict: true })).toEqual(["", "a b", 'quoted "text"']);
+		expect(parseCommandArgs("'C:\\Users\\me'", { strict: true, escapeQuotes: true })).toEqual(["C:\\Users\\me"]);
+		expect(() => parseCommandArgs("trailing\\", { strict: true })).toThrow(/escape/i);
+		expect(() => parseCommandArgs('"incomplete', { strict: true })).toThrow(/quote/i);
 	});
 });
 
