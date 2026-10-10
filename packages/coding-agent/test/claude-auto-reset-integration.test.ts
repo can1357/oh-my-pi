@@ -618,13 +618,13 @@ describe("Claude saved-reset trigger integration", () => {
 		const writing = Promise.withResolvers<void>();
 		const release = Promise.withResolvers<void>();
 		const write = Bun.write.bind(Bun);
-		vi.spyOn(Bun, "write").mockImplementation(async (destination, data, options) => {
-			if (typeof data === "string" && data.startsWith("pending:")) {
+		vi.spyOn(Bun, "write").mockImplementation((async (destination: string, data: string) => {
+			if (data.startsWith("pending:")) {
 				writing.resolve();
 				await release.promise;
 			}
-			return write(destination, data, options);
-		});
+			return write(destination, data);
+		}) as typeof Bun.write);
 		try {
 			await session.fetchUsageReports();
 			await writing.promise;
