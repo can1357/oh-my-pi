@@ -150,3 +150,18 @@ test("session disposal awaits the actual running guest process exit", async () =
 		spawned.mockRestore();
 	}
 }, 30_000);
+
+test("readonly context cannot use the host annotation API to read outside its scope", async () => {
+	const session = await child();
+	const outside = scope + "-outside";
+	writeFileSync(outside, "synthetic-outside-scope\n");
+	try {
+		await expect(
+			session
+				.extensionRunner!.createContext()
+				.annotations.submit({ source: { kind: "file", path: outside }, notes: [], deliver: "none" }),
+		).rejects.toThrow("not available");
+	} finally {
+		rmSync(outside);
+	}
+}, 30_000);
