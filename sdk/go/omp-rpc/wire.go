@@ -4366,6 +4366,34 @@ func (v GoalUpdatedEvent) MarshalJSON() ([]byte, error) {
 	return encodeObject(plain(v), `"type":"goal_updated"`, nil)
 }
 
+// The active persona changed; `personaName` is null when it was explicitly cleared.
+type PersonaChangedEvent struct {
+	PersonaName *string      `json:"personaName"`
+	Source      *AgentSource `json:"source,omitempty"`
+}
+
+func (v *PersonaChangedEvent) UnmarshalJSON(data []byte) error {
+	return decodeWith(data, "PersonaChangedEvent", v.decodeFrom)
+}
+
+func (v *PersonaChangedEvent) decodeFrom(raw map[string]json.RawMessage) error {
+	var out PersonaChangedEvent
+	d := fieldDecoder{raw: raw, owner: "PersonaChangedEvent"}
+	d.constant("type", "persona_changed")
+	d.nullable("personaName", &out.PersonaName)
+	d.optional("source", &out.Source)
+	if d.err != nil {
+		return d.err
+	}
+	*v = out
+	return nil
+}
+
+func (v PersonaChangedEvent) MarshalJSON() ([]byte, error) {
+	type plain PersonaChangedEvent
+	return encodeObject(plain(v), `"type":"persona_changed"`, nil)
+}
+
 // Coalesced snapshot of the displayable steering/follow-up queue, sent whenever it changes.
 type QueueUpdateEvent struct {
 	Steering []string `json:"steering"`
@@ -4436,6 +4464,7 @@ func (IrcMessageEvent) isRpcAgentEvent()             {}
 func (NoticeEvent) isRpcAgentEvent()                 {}
 func (ThinkingLevelChangedEvent) isRpcAgentEvent()   {}
 func (GoalUpdatedEvent) isRpcAgentEvent()            {}
+func (PersonaChangedEvent) isRpcAgentEvent()         {}
 func (QueueUpdateEvent) isRpcAgentEvent()            {}
 func (UnknownNotification) isRpcAgentEvent()         {}
 
@@ -4518,6 +4547,8 @@ func (v *RpcAgentEvent) decodeFrom(raw map[string]json.RawMessage) error {
 		value, err = decodeVariant[ThinkingLevelChangedEvent](raw)
 	case "goal_updated":
 		value, err = decodeVariant[GoalUpdatedEvent](raw)
+	case "persona_changed":
+		value, err = decodeVariant[PersonaChangedEvent](raw)
 	case "queue_update":
 		value, err = decodeVariant[QueueUpdateEvent](raw)
 	default:
@@ -6472,6 +6503,7 @@ func (IrcMessageEvent) isRpcNotification()              {}
 func (NoticeEvent) isRpcNotification()                  {}
 func (ThinkingLevelChangedEvent) isRpcNotification()    {}
 func (GoalUpdatedEvent) isRpcNotification()             {}
+func (PersonaChangedEvent) isRpcNotification()          {}
 func (QueueUpdateEvent) isRpcNotification()             {}
 func (UnknownNotification) isRpcNotification()          {}
 
@@ -6585,6 +6617,8 @@ func (v *RpcNotification) UnmarshalJSON(data []byte) error {
 		value, err = decodeVariant[ThinkingLevelChangedEvent](raw)
 	case "goal_updated":
 		value, err = decodeVariant[GoalUpdatedEvent](raw)
+	case "persona_changed":
+		value, err = decodeVariant[PersonaChangedEvent](raw)
 	case "queue_update":
 		value, err = decodeVariant[QueueUpdateEvent](raw)
 	default:
@@ -6662,6 +6696,7 @@ func (IrcMessageEvent) isRpcServerFrame()              {}
 func (NoticeEvent) isRpcServerFrame()                  {}
 func (ThinkingLevelChangedEvent) isRpcServerFrame()    {}
 func (GoalUpdatedEvent) isRpcServerFrame()             {}
+func (PersonaChangedEvent) isRpcServerFrame()          {}
 func (QueueUpdateEvent) isRpcServerFrame()             {}
 func (UnknownNotification) isRpcServerFrame()          {}
 
@@ -6785,6 +6820,8 @@ func (v *RpcServerFrame) UnmarshalJSON(data []byte) error {
 		value, err = decodeVariant[ThinkingLevelChangedEvent](raw)
 	case "goal_updated":
 		value, err = decodeVariant[GoalUpdatedEvent](raw)
+	case "persona_changed":
+		value, err = decodeVariant[PersonaChangedEvent](raw)
 	case "queue_update":
 		value, err = decodeVariant[QueueUpdateEvent](raw)
 	default:

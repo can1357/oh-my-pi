@@ -409,6 +409,10 @@ export class EventController {
 				this.ctx.ui.requestRender(true);
 			},
 			goal_updated: async () => {},
+			persona_changed: async () => {
+				this.ctx.updateEditorBorderColor();
+				this.ctx.ui.requestRender();
+			},
 			// The TUI already refreshes the pending-messages bar at every queue
 			// mutation call site (`updatePendingMessagesDisplay()` in ui-helpers.ts);
 			// this event exists for RPC/ACP clients that have no equivalent local
@@ -758,7 +762,11 @@ export class EventController {
 		// the listener's first await, preserving the timing the coalescing
 		// tests assert on. `message_update` enqueue is itself synchronous and
 		// needs no serialization.
-		this.ctx.unsubscribe = this.ctx.session.subscribe(event => this.dispatchSessionEvent(event));
+		// Startup notices (e.g. a persona model/--agent fallback) are emitted during
+		// session creation, before this subscriber exists; replay them so they render.
+		this.ctx.unsubscribe = this.ctx.session.subscribe(event => this.dispatchSessionEvent(event), {
+			replayStartupNotices: true,
+		});
 	}
 
 	/**

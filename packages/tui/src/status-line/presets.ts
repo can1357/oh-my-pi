@@ -3,7 +3,20 @@ import type { PresetDef, StatusLinePreset } from "./types";
 
 export const STATUS_LINE_PRESETS: Record<StatusLinePreset, PresetDef> = {
 	default: {
-		leftSegments: ["pi", "vim", "model", "mode", "collab", "stream", "path", "git", "pr", "context_pct", "cost"],
+		leftSegments: [
+			"pi",
+			"vim",
+			"model",
+			"agent_persona",
+			"mode",
+			"collab",
+			"stream",
+			"path",
+			"git",
+			"pr",
+			"context_pct",
+			"cost",
+		],
 		rightSegments: ["session_name"],
 		separator: "powerline-thin",
 		segmentOptions: {

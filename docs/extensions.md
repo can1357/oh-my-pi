@@ -305,6 +305,7 @@ Handlers and tool `execute` receive `ctx` with:
 - `isIdle()`, `hasPendingMessages()`, `abort()`
 - `shutdown()`
 - `getSystemPrompt()`
+- `activePersonaName`: `string | null` — live getter; each access reads the session's current persona (the active `mode: primary` agent's name, or `null` when none is active) rather than a snapshot taken when `ctx` was created
 - `isProjectTrusted()` — always `true`; OMP does not ask for per-directory trust before loading project inputs
 - `agent` — the agent this session runs: `{ kind: "main" | "sub", id, name, depth, parentId? }`. Factories are rebound to every subagent session (task tool, eval `agent()`, `/tan` clones), so a handler can check `ctx.agent.kind === "sub"` or the lowercased agent definition `name` (for example `"explore"`) to act only in subagents. Use `kind`, not `depth`: `depth` counts `task` nesting only, so `/tan` clones are subagents at depth 0 and report `name: "sub"`. An advisor's own tool calls reach the session's `tool_call`/`tool_result` handlers with `{ kind: "sub", id: "advisor", name: "advisor", depth: 0, parentId }`, so `kind === "main"` also excludes advisor activity
 - `runEphemeralTurn(...)` (optional; see below)

@@ -1,25 +1,32 @@
-import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
+/**
+ * Regression: leaving a collab session must clear the replica persona
+ * override mirrored from the host (`AgentSession#setReplicaPersonaName`).
+ *
+ * Oracle: `#applyHostState()` sets a sticky override whenever the host
+ * reports `activePersonaName`, and `AgentSession.activePersonaName` prefers
+ * that override over the local persona (see agent-session.ts). Without
+ * clearing it on teardown, the guest's restored local session — resumed or
+ * freshly created — would keep showing the host's (possibly now-stale)
+ * persona name in the status line and in the next persisted `agent` stamp,
+ * corrupting resume inference for a session that was never actually using
+ * that persona.
+ *
+ * The clear only fires once the replica has actually activated (joined and
+ * received its first snapshot) — a guest that never got that far never set
+ * the override in the first place. The test drives a real join through the
+ * in-memory relay so `#replicaActivated` is genuinely true before `leave()`.
+ */
 import * as fsp from "node:fs/promises";
+import { afterEach, beforeEach, describe, expect, it, spyOn, vi } from "bun:test";
 import { generateRoomKey, importRoomKey } from "@oh-my-pi/pi-coding-agent/collab/crypto";
+import { cfgCollabDisplayName } from "@oh-my-pi/pi-coding-agent/collab/settings";
 import { CollabGuestLink } from "@oh-my-pi/pi-coding-agent/collab/guest";
-import {
-	type AgentSnapshot,
-	COLLAB_PROTO,
-	type CollabFrame,
-	formatCollabLink,
-} from "@oh-my-pi/pi-coding-agent/collab/protocol";
+import { COLLAB_PROTO, type CollabFrame, formatCollabLink } from "@oh-my-pi/pi-coding-agent/collab/protocol";
 import { CollabSocket } from "@oh-my-pi/pi-coding-agent/collab/relay-client";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import {
-	getRunningSubagentBadgeAgentIds,
-	getRunningSubagentBadgeRegistry,
-} from "@oh-my-pi/pi-tui/overlays/running-subagent-badge";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
-import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
+import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { installInMemoryRelay, uninstallInMemoryRelay } from "./helpers/in-memory-relay";
-
-// In-memory transport: shared FakeWebSocket + InMemoryRelay harness (see
-// ./helpers/in-memory-relay), mirroring the relay's forwarding contract.
 
 function makeState(): Extract<CollabFrame, { t: "welcome" }>["state"] {
 	return {
@@ -31,24 +38,14 @@ function makeState(): Extract<CollabFrame, { t: "welcome" }>["state"] {
 	};
 }
 
-function makeAgents(ids: string[]): AgentSnapshot[] {
-	return ids.map((id, index) => ({
-		id,
-		displayName: `Remote ${index + 1}`,
-		kind: "sub",
-		parentId: "Main",
-		status: "running",
-		hasSessionFile: true,
-		createdAt: 1000 + index,
-		lastActivity: 2000 + index,
-	}));
-}
-
-function makeGuestContext(): InteractiveModeContext {
-	let statusLineCount = 0;
+function makeContext(setReplicaPersonaName: (name: string | null | undefined) => void) {
 	const ctx = {
-		collabGuest: undefined as CollabGuestLink | undefined,
-		settings: Settings.isolated(),
+		collabGuest: undefined,
+		settings: (() => {
+			const s = Settings.isolated();
+			cfgCollabDisplayName.set(s, "");
+			return s;
+		})(),
 		sessionManager: {
 			getSessionFile: () => null,
 			getSessionName: () => "local session",
@@ -58,7 +55,7 @@ function makeGuestContext(): InteractiveModeContext {
 			messages: [],
 			switchSession: () => Promise.resolve(),
 			newSession: () => Promise.resolve(),
-			setReplicaPersonaName: () => {},
+			setReplicaPersonaName,
 			agent: {
 				state: { model: undefined },
 				setModel: () => {},
@@ -74,13 +71,10 @@ function makeGuestContext(): InteractiveModeContext {
 		transcriptMessageComponents: new WeakMap(),
 		pendingTools: new Map(),
 		loadingAnimation: undefined,
+		ensureLoadingAnimation: () => {},
+		autoCompactionLoader: undefined,
+		retryLoader: undefined,
 		statusLine: {
-			setRunningSubagents: (agentIds: readonly string[]) => {
-				statusLineCount = agentIds.length;
-			},
-			get subagentCount() {
-				return statusLineCount;
-			},
 			setCollabStatus: () => {},
 			invalidate: () => {},
 			resetActiveTime: () => {},
@@ -101,80 +95,60 @@ function makeGuestContext(): InteractiveModeContext {
 			takeDisplaceableComponents: () => [],
 			resetTranscriptAnchors: () => {},
 		},
-		syncRunningSubagentBadge: () => {
-			const registry = getRunningSubagentBadgeRegistry(ctx.collabGuest, AgentRegistry.global());
-			const agentIds = getRunningSubagentBadgeAgentIds(registry);
-			ctx.statusLine.setRunningSubagents(agentIds);
-		},
+		syncRunningSubagentBadge: () => {},
+		eventBus: new EventBus(),
 	} as unknown as InteractiveModeContext;
 	return ctx;
 }
 
 beforeEach(() => {
-	AgentRegistry.resetGlobalForTests();
 	installInMemoryRelay();
 });
 
 afterEach(() => {
 	uninstallInMemoryRelay();
-	AgentRegistry.resetGlobalForTests();
 });
 
-describe("collab guest running-subagents badge", () => {
-	it("uses the guest mirror registry and refreshes on join, resnapshot, and leave", async () => {
+describe("CollabGuestLink — persona restore on leave", () => {
+	it("clears the replica persona override before restoring the local session", async () => {
 		const writeSpy = spyOn(Bun, "write").mockResolvedValue(0);
 		const renameSpy = spyOn(fsp, "rename").mockResolvedValue(undefined);
-		const roomId = "badge-room-1";
+		const setReplicaPersonaName = vi.fn();
+
+		const roomId = "persona-restore-room-1";
 		const roomKey = generateRoomKey();
 		const cryptoKey = await importRoomKey(roomKey);
 		const link = formatCollabLink("ws://localhost:8788", roomId, roomKey);
 		const hostSocket = new CollabSocket({ wsUrl: `ws://localhost:8788/r/${roomId}`, role: "host", key: cryptoKey });
 		const hostOpen = Promise.withResolvers<void>();
-		let nextWelcomeAgents = makeAgents(["remote-one"]);
-		const sendWelcome = (agents: AgentSnapshot[]) => {
-			hostSocket.send({
-				t: "welcome",
-				proto: COLLAB_PROTO,
-				header: { type: "session", id: "remote-session", timestamp: "2026-06-26T00:00:00Z", cwd: "/tmp" },
-				state: makeState(),
-				agents,
-				entryCount: 0,
-			});
-		};
 		hostSocket.onOpen = () => hostOpen.resolve();
 		hostSocket.onFrame = frame => {
-			if (frame.t === "hello") sendWelcome(nextWelcomeAgents);
+			if (frame.t === "hello") {
+				hostSocket.send({
+					t: "welcome",
+					proto: COLLAB_PROTO,
+					header: { type: "session", id: "remote-session", timestamp: "2026-06-26T00:00:00Z", cwd: "/tmp" },
+					state: makeState(),
+					agents: [],
+					entryCount: 0,
+				} as CollabFrame);
+			}
 		};
 		hostSocket.connect();
 		await hostOpen.promise;
 
-		const ctx = makeGuestContext();
+		const ctx = makeContext(setReplicaPersonaName);
 		const guest = new CollabGuestLink(ctx);
 
 		try {
 			await guest.join(link);
-			expect(ctx.collabGuest).toBe(guest);
-			expect(ctx.statusLine.subagentCount).toBe(1);
-
-			nextWelcomeAgents = makeAgents(["remote-one", "remote-two"]);
-			const secondSnapshot = Promise.withResolvers<void>();
-			const originalSync = ctx.syncRunningSubagentBadge.bind(ctx);
-			ctx.syncRunningSubagentBadge = () => {
-				originalSync();
-				if (ctx.statusLine.subagentCount === 2) secondSnapshot.resolve();
-			};
-			sendWelcome(nextWelcomeAgents);
-			await secondSnapshot.promise;
-			expect(ctx.statusLine.subagentCount).toBe(2);
-
 			await guest.leave("test cleanup");
-			expect(ctx.collabGuest).toBeUndefined();
-			expect(ctx.statusLine.subagentCount).toBe(0);
+
+			expect(setReplicaPersonaName).toHaveBeenCalledWith(undefined);
 		} finally {
 			hostSocket.close();
 			writeSpy.mockRestore();
 			renameSpy.mockRestore();
-			await guest.leave("test cleanup").catch(() => {});
 		}
 	});
 });

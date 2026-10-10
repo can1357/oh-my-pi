@@ -121,6 +121,8 @@ type ConfigurableEditorAction = Extract<
 	| "app.clipboard.pasteImage"
 	| "app.clipboard.pasteTextRaw"
 	| "app.clipboard.copyPrompt"
+	| "app.persona.cycleForward"
+	| "app.persona.cycleBackward"
 >;
 
 const DEFAULT_ACTION_KEYS: Record<ConfigurableEditorAction, KeyId[]> = {
@@ -139,6 +141,8 @@ const DEFAULT_ACTION_KEYS: Record<ConfigurableEditorAction, KeyId[]> = {
 	"app.clipboard.pasteImage": ["ctrl+v"],
 	"app.clipboard.pasteTextRaw": ["ctrl+shift+v", "alt+shift+v"],
 	"app.clipboard.copyPrompt": ["alt+shift+c"],
+	"app.persona.cycleForward": ["tab"],
+	"app.persona.cycleBackward": ["ctrl+tab"],
 };
 
 function buildMatchKeys(keys: readonly KeyId[]): Set<string> {
@@ -1385,6 +1389,8 @@ export class CustomEditor extends Editor {
 	onExit?: () => void;
 	onDisplayReset?: () => void;
 	onCycleThinkingLevel?: () => void;
+	onCyclePersonaForward?: () => false | undefined;
+	onCyclePersonaBackward?: () => false | undefined;
 	onCycleModelForward?: () => void;
 	onCycleModelBackward?: () => void;
 	onSelectModel?: () => void;
@@ -1729,6 +1735,36 @@ export class CustomEditor extends Editor {
 			if (this.#matchesAction(canonical, "app.thinking.cycle") && this.onCycleThinkingLevel) {
 				this.onCycleThinkingLevel();
 				return;
+			}
+
+			// Intercept configured persona cycle forward/backward.
+			// Three guards: (1) popup not open — autocomplete owns Tab when visible;
+			// (2) editor is empty — any typed text falls through to context-aware
+			// tab-completion in the base class; (3) the handler itself can return
+			// `false` to signal "no personas available — fall through".
+			const editorEmpty = this.getText() === "";
+			if (
+				this.#matchesAction(canonical, "app.persona.cycleForward") &&
+				this.onCyclePersonaForward &&
+				!this.isShowingAutocomplete() &&
+				editorEmpty
+			) {
+				if (this.onCyclePersonaForward() !== false) return;
+			}
+			if (
+				this.#matchesAction(canonical, "app.persona.cycleBackward") &&
+				this.onCyclePersonaBackward &&
+				!this.isShowingAutocomplete() &&
+				editorEmpty
+			) {
+				if (this.onCyclePersonaBackward() !== false) return;
+				// No primary agents: fall through to thinking-level cycle — relevant when a
+				// user's own keybindings.yml rebinds persona.cycleBackward onto the same key
+				// as thinking.cycle; the shipped defaults no longer collide.
+				if (this.onCycleThinkingLevel) {
+					this.onCycleThinkingLevel();
+					return;
+				}
 			}
 
 			// Intercept configured interrupt shortcut.

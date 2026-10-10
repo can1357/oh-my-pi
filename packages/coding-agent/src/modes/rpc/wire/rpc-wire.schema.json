@@ -4140,6 +4140,32 @@
 			],
 			"description": "Goal mode changed, by a host `goal` command or the agent's `goal` tool."
 		},
+		"PersonaChangedEvent": {
+			"type": "object",
+			"properties": {
+				"type": {
+					"const": "persona_changed"
+				},
+				"personaName": {
+					"anyOf": [
+						{
+							"type": "string"
+						},
+						{
+							"type": "null"
+						}
+					]
+				},
+				"source": {
+					"$ref": "#/$defs/AgentSource"
+				}
+			},
+			"required": [
+				"type",
+				"personaName"
+			],
+			"description": "The active persona changed; `personaName` is null when it was explicitly cleared."
+		},
 		"QueueUpdateEvent": {
 			"type": "object",
 			"properties": {
@@ -4257,6 +4283,9 @@
 				},
 				{
 					"$ref": "#/$defs/GoalUpdatedEvent"
+				},
+				{
+					"$ref": "#/$defs/PersonaChangedEvent"
 				},
 				{
 					"$ref": "#/$defs/QueueUpdateEvent"

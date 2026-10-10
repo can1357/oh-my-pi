@@ -1,4 +1,4 @@
-import { afterAll, afterEach, beforeAll, describe, expect, it } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -9,6 +9,7 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { createAgentSession, type ExtensionFactory } from "@oh-my-pi/pi-coding-agent/sdk";
 import type { AsyncJobSnapshot } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
+import * as discovery from "@oh-my-pi/pi-coding-agent/task/discovery";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 
 describe("AsyncJobManager singleton across concurrent top-level sessions", () => {
@@ -33,7 +34,12 @@ describe("AsyncJobManager singleton across concurrent top-level sessions", () =>
 		removeSyncWithRetries(sharedTempDir);
 	});
 
+	beforeEach(() => {
+		vi.spyOn(discovery, "discoverAgents").mockResolvedValue({ agents: [], projectAgentsDir: null });
+	});
+
 	afterEach(async () => {
+		vi.restoreAllMocks();
 		for (const tempDir of tempDirs.splice(0)) {
 			removeSyncWithRetries(tempDir);
 		}

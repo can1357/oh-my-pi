@@ -112,6 +112,7 @@ async function makeHarness(
 			messages: [],
 			switchSession: () => Promise.resolve(),
 			newSession: () => Promise.resolve(),
+			setReplicaPersonaName: () => {},
 			agent: {
 				state: { model: undefined },
 				setModel: () => {},

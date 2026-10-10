@@ -131,6 +131,7 @@ All non-header entries include:
 - `credential_pin`
 - `session_init`
 - `mode_change`
+- `persona_change`
 
 ### `message`
 
@@ -167,6 +168,8 @@ Stores an `AgentMessage` directly.
   }
 }
 ```
+
+A `message` entry may also carry an optional top-level `agent` string: the name of the agent persona active when the message was appended. It is omitted when no persona is active. Persona restoration reads these stamps alongside `persona_change` entries (see [`persona_change`](#persona_change)).
 
 The persisted `message.role` discriminant is **camelCase**, not the snake_case used by
 the LLM wire format or extension hook names. Ordinary conversation records use these
@@ -431,6 +434,22 @@ as a single block.
   "data": { "planFilePath": "local://PLAN.md" }
 }
 ```
+
+### `persona_change`
+
+```json
+{
+  "type": "persona_change",
+  "id": "f2a3b4c5",
+  "parentId": "e2f3a4b5",
+  "timestamp": "2026-02-16T10:31:00.000Z",
+  "personaName": "reviewer"
+}
+```
+
+Records the main-chat agent persona (an agent with `mode: primary`) that became active. `personaName` is the agent name, or `null` when no persona is active after the change (`/new` in a project without an enabled primary agent). The entry is appended when a persona switch is recorded: a Tab/Ctrl+Tab cycle, `/new`, or a startup selection that applies the persona's model (an explicit `--agent`, or a bundled or user-defined default persona in a new, non-forked session, in both cases only when neither `--model` nor `--thinking` is given). Restores (resume, tree navigation, branching) and other startup selections do not append one.
+
+Resume (`--continue`, `--resume`, `/resume`), tree navigation, and branching restore the persona named by the newest `persona_change` or `agent`-stamped `message` on the current branch; sessions written before this entry existed rely on message stamps alone. A recorded name that is no longer an enabled primary agent, or a branch with no record, falls back to the first enabled primary agent (by `order`, then name); a `null` record restores no persona. An explicit `--agent` overrides the recorded persona at startup. A restore applies the persona prompt only: it does not change the model or thinking level and appends no entry.
 
 ## Versioning and Migration
 

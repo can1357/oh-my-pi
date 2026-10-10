@@ -62,6 +62,8 @@ interface AppKeybindings {
 	"app.history.search": true;
 	"app.stt.pushToTalk": true;
 	"app.stt.toggle": true;
+	"app.persona.cycleForward": true;
+	"app.persona.cycleBackward": true;
 	"app.live.toggle": true;
 }
 
@@ -113,6 +115,14 @@ export const KEYBINDINGS = {
 	"app.thinking.toggle": {
 		defaultKeys: "ctrl+t",
 		description: "Toggle thinking mode",
+	},
+	"app.persona.cycleForward": {
+		defaultKeys: "tab",
+		description: "Cycle to next primary agent persona",
+	},
+	"app.persona.cycleBackward": {
+		defaultKeys: "ctrl+tab",
+		description: "Cycle to previous primary agent persona",
 	},
 	"app.model.cycleForward": {
 		defaultKeys: "ctrl+p",

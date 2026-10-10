@@ -27,7 +27,7 @@ It covers runtime behavior as implemented today, including precedence, invalid-d
 Task agents normalize into `AgentDefinition` (`src/task/types.ts`):
 
 - required `name`, `description`, and `systemPrompt`
-- optional `tools`, `spawns`, prioritized `model` list, `thinkingLevel`, `output`, `blocking`, `autoloadSkills`, `readSummarize`, `prewalk`, `advisor`
+- optional `tools`, `spawns`, prioritized `model` list, `thinkingLevel`, `output`, `blocking`, `autoloadSkills`, `readSummarize`, `mode`, `order`, `prewalk`, `advisor`
 - `source`: `"bundled" | "user" | "project"` (extension agents are tagged with their extension root's project/user level)
 - optional `filePath`
 
@@ -40,12 +40,36 @@ Parsing comes from frontmatter via `parseAgentFields()` (`src/discovery/helpers.
 - backward-compat behavior: if `spawns` missing but `tools` includes `task`, `spawns` becomes `*`
 - `output` is passed through as opaque schema data
 - `read-summarize: false` (normalized to `readSummarize`) disables structural summaries for the subagent's `read` tool — `runSubprocess` applies a `read.summarize.enabled: false` override on the child's isolated settings (`src/task/executor.ts`). `scout` ships with it disabled. When absent, the child inherits the parent's read-summary setting.
-- `model` accepts one selector, CSV, or an array. Entries are tried in order after role aliases are expanded.
+- `model` accepts one selector, CSV, or an array. Entries are tried in order after role aliases are expanded. The same list selects the main-session model when the agent is loaded as a persona; see [main-session personas](#main-session-personas).
 - `thinking-level` / `thinking` selects the agent's configured effort. When `task.enableEffort` (default `false`) exposes it, a task item's coarse `effort` (`lo`, `med`, `hi`) takes precedence at launch. OMP maps that hint to the selected model's lowest, middle, or highest supported effort, then clamps it to `task.maxEffort` (default `max`). The ceiling is carried across retry-fallback model switches. If the selected model has no supported effort at or below the ceiling, the spawn fails; models without a controllable effort surface instead fall back to their normal selector.
 - `blocking: true` makes the parent wait for that agent even when async task execution is enabled
 - `autoloadSkills` names skills from the parent session to inject before the first child prompt; unknown names are ignored
 - `prewalk: true` starts the subagent on its resolved model and hands off to the default prewalk target (the `smol` role) at its first edit/write, exactly like the session-level `--prewalk`; a string value (e.g. `prewalk: "@smol"` or `prewalk: "openai/gpt-5-mini"`) picks a custom target. The `task.agentPrewalk` settings record (agent name → `"on"` / `"off"` / pattern, configured per agent from the `/agents` hub via its prewalk strip) overrides the frontmatter. Resolution happens in `runSubprocess` (`src/task/executor.ts`). An unavailable target is skipped instead of failing the spawn. A resolved target is skipped only when both its model identity and its effective thinking mode/level match the starting selection after model clamping; a same-model effort downgrade is a real hand-off and still arms and switches at the first edit/write.
 - `advisor: true` pairs spawned sessions of the agent with an advisor running the model resolved for the `advisor` role; a string value (e.g. `advisor: "deepseek/deepseek-v4-flash"` or `advisor: "@smol:high"`) sets an explicit advisor model pattern (optional `:level` suffix), applied as the spawned session's `modelRoles.advisor`. The `task.agentAdvisor` settings record (agent name → `"on"` / `"off"` / pattern, configured per agent from the `/agents` hub via its advisor strip) overrides the frontmatter. Resolution happens in `runSubprocess` (`src/task/executor.ts`); subagents default to no advisor, and the effective opt-in is persisted in `session_init` so cold revival restores it.
+- `mode` accepts exactly `primary` or `subagent`. Any other value, including a different case such as `Primary`, is dropped without a warning, and the agent behaves as if `mode` were omitted (`subagent`). `primary` makes the agent eligible as a main-session persona; task dispatch ignores `mode`, so a primary agent can still be spawned by name.
+- `order` is the persona Tab-cycle position (lower first). Only finite YAML numbers are kept, including negative and fractional values; quoted numbers such as `"1"` and other non-numeric values are dropped without a warning. It has no effect on `subagent` agents or task dispatch.
+
+### Main-session personas
+
+A `mode: primary` agent can run as the persona of the top-level session. `getPrimaryAgents()` (`src/discovery/helpers.ts`) builds the candidate list from the merged discovery result:
+
+- keeps only `mode: primary` agents whose exact name is not in `task.disabledAgents` (toggled from `/agents`), so disabled agents are excluded from Tab cycling, startup selection, and the resume fallback
+- sorts by ascending `order`; agents without `order` follow all ordered agents, and ties sort alphabetically by name
+
+Loading a persona (`applyAgentPersona()`, `src/session/agent-session.ts`) appends its markdown body to the main system prompt as the final block, replacing any previous persona's block, and keeps it there across system-prompt rebuilds. When the selection applies a model (below), the persona's `model` and `thinking-level` are applied too. Other frontmatter fields (`tools`, `spawns`, `output`, …) do not change the main session.
+
+Selection:
+
+- `Tab` / `Ctrl+Tab` ([keybindings](./keybindings.md#common-action-ids)) step forward/backward through the list, wrapping around, when the editor is empty. Cycling is paused while the session is streaming or a subagent view is focused. Each press rediscovers agents.
+- At startup (`src/sdk.ts`), `--agent <name>` selects a primary agent by case-insensitive name. An unknown or non-primary name shows a warning notice and falls back to the first primary. Without `--agent`, a resumed session restores the persona recorded in its history if that agent is still an enabled primary; otherwise the first primary loads.
+- `/new` loads the first primary.
+
+Model application:
+
+- A Tab switch or an explicit `--agent` applies the persona model: `task.agentModelOverrides[name]` (set from `/agents`) when present, otherwise the frontmatter `model` list. The first selector that resolves and applies wins. If none does, the persona still loads on the current model and a warning is shown. A selector with an explicit thinking suffix (`:high`) takes precedence over frontmatter `thinking-level`.
+- At startup without `--agent`, the model is applied only for a new, non-forked session whose persona has `source: "bundled"` or `"user"`. A `source: "project"` primary — discovered from the opened repository, including project-level extension roots and project-scope plugins — joins the Tab cycle and has its prompt applied, but its `model` is not applied automatically, so opening a repository cannot switch the session's provider or model. Selecting it with `--agent` or Tab applies the model.
+- A startup model or thinking level, such as `--model` or `--thinking`, always wins: the persona's model and thinking level are not applied at startup, even with `--agent`.
+- `/new` applies the first primary's model only when that changes the active persona; otherwise the current model is kept.
 
 ## Role-backed custom agents
 
@@ -296,7 +320,7 @@ An agent can be discoverable but still unavailable to run because of execution g
 
 ### Disabled-agent settings
 
-`resolveEffectiveSubagentPolicy()` checks `task.disabledAgents` after resolving the agent. A disabled name fails preflight and lists enabled alternatives when available.
+`resolveEffectiveSubagentPolicy()` checks `task.disabledAgents` after resolving the agent. A disabled name fails preflight and lists enabled alternatives when available. The same list removes primary agents from [persona selection](#main-session-personas).
 
 ### Parent spawn policy
 

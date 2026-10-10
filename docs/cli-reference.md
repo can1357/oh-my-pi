@@ -166,6 +166,22 @@ See [providers](./providers.md) and [models](./models.md) for model resolution.
 | `--system-prompt <text\|file>` | Plain-text system prompt override (default: coding assistant prompt). See [system prompt customization](./system-prompt-customization.md). |
 | `--system-prompt-template <path>` | Strictly read `<path>` as a Handlebars system-prompt template; mutually exclusive with `--system-prompt`. See [system prompt customization](./system-prompt-customization.md). |
 | `--append-system-prompt <text\|file>` | Append plain text or file contents to the system prompt. |
+| `--agent <name>` | Load a named agent persona at startup; the agent must have `mode: primary` in its frontmatter. The name match is case-insensitive. See [task agent discovery](./task-agent-discovery.md). |
+
+`--agent` falls back to the default persona, with a warning notice, when no
+enabled primary agent has that name (unknown, subagent-only, or disabled through
+`task.disabledAgents`). The default persona is the first enabled primary agent
+ordered by frontmatter `order`, then by name. Without `--agent`, a new session
+loads the default persona and `--continue`/`--resume` restore the persona recorded
+in the session (see [`persona_change`](./session.md#persona_change)); an explicit
+`--agent` overrides the recorded one. The persona's prompt block replaces the
+previous persona's block, while `--append-system-prompt` text stays in the base
+prompt for every persona. An explicit `--agent` applies the persona's model (its
+`task.agentModelOverrides` entry, else frontmatter `model`); a default persona
+applies its model only in a new, non-forked session and only when it is bundled or
+user-defined, so a primary agent defined by the opened project never switches the
+model on its own. `--model` and `--thinking` take precedence over any persona
+model.
 
 #### Output mode
 
