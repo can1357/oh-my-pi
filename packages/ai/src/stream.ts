@@ -1834,6 +1834,13 @@ function mapOptionsForApi<TApi extends Api>(
 		headers: options?.headers,
 		initiatorOverride: options?.initiatorOverride,
 		maxRetryDelayMs: options?.maxRetryDelayMs,
+		// Provider-layer retry knobs (`retry.provider.*`, `retry.baseDelayMs`):
+		// transports read them off the options bag, so a `streamSimple` caller
+		// (including the coding agent's settings wrapper) loses them unless they
+		// are mapped here.
+		providerMaxAttempts: options?.providerMaxAttempts,
+		providerBaseDelayMs: options?.providerBaseDelayMs,
+		providerTimeoutMs: options?.providerTimeoutMs,
 		metadata: options?.metadata,
 		taskBudget: options?.taskBudget,
 		sessionId: options?.sessionId,

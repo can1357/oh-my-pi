@@ -372,6 +372,77 @@ describe("withReplaySafeStreamRetry", () => {
 		expect(result.content).toEqual([{ type: "text", text: "hello" }]);
 	});
 
+	/** Provider error that stays replay-safe (nothing emitted) on every attempt. */
+	function failingAttempt(): AssistantMessageEventStream {
+		const message = assistant();
+		message.stopReason = "error";
+		message.errorMessage = "The socket connection was closed unexpectedly";
+		return streamFromEvents([
+			{ type: "start", partial: message },
+			{ type: "error", reason: "error", error: message },
+		]);
+	}
+
+	it("bounds replay retries by the shared provider budget when a total allowance is set", async () => {
+		let attempts = 0;
+		const stream = withReplaySafeStreamRetry(
+			{},
+			CTX,
+			// The placeholder budget is replaced by the wrapper's; it only exists so
+			// the attempt callback can reach the injected budget in a typed way.
+			{ providerRetryWait: async () => {}, providerAttemptBudget: { remaining: 0 } },
+			(_model, _context, attemptOptions) => {
+				attempts++;
+				// Stand in for the transport, which charges one attempt per request.
+				if (attemptOptions?.providerAttemptBudget) attemptOptions.providerAttemptBudget.remaining -= 1;
+				return failingAttempt();
+			},
+			{ retryProviderErrors: true, maxProviderAttempts: 3 },
+		);
+
+		const events = await drain(stream);
+
+		expect(attempts).toBe(3);
+		expect(events.at(-1)?.type).toBe("error");
+	});
+
+	it("never retries past the declared allowance when the transport never charges the budget", async () => {
+		let attempts = 0;
+		const stream = withReplaySafeStreamRetry(
+			{},
+			CTX,
+			{ providerRetryWait: async () => {}, providerAttemptBudget: { remaining: 0 } },
+			() => {
+				attempts++;
+				return failingAttempt();
+			},
+			{ retryProviderErrors: true, maxProviderAttempts: 2 },
+		);
+
+		await drain(stream);
+
+		expect(attempts).toBe(2);
+	});
+
+	it("stops empty-completion retries once the shared budget is spent", async () => {
+		let attempts = 0;
+		const stream = withReplaySafeStreamRetry(
+			{},
+			CTX,
+			{ providerRetryWait: async () => {}, providerAttemptBudget: { remaining: 0 } },
+			(_model, _context, attemptOptions) => {
+				attempts++;
+				if (attemptOptions?.providerAttemptBudget) attemptOptions.providerAttemptBudget.remaining -= 1;
+				return emptyAttempt();
+			},
+			{ retryEmptyCompletion: true, maxProviderAttempts: 1 },
+		);
+
+		await drain(stream);
+
+		expect(attempts).toBe(1);
+	});
+
 	it("does not retry a transient provider error after output commits", async () => {
 		let attempts = 0;
 		const message = assistant(["partial"]);
@@ -518,5 +589,45 @@ describe("withReplaySafeStreamRetry", () => {
 		// The completed call reaches the consumer instead of being discarded.
 		expect(events.some(e => e.type === "toolcall_end")).toBe(true);
 		expect(result.stopReason).toBe("error");
+	});
+
+	it("schedules provider-error replays with the configured base delay", async () => {
+		let attempts = 0;
+		const waits: number[] = [];
+		const stream = withReplaySafeStreamRetry(
+			{},
+			CTX,
+			{ providerRetryWait: async ms => void waits.push(ms), providerBaseDelayMs: 2_000 },
+			() => {
+				attempts++;
+				return failingAttempt();
+			},
+			{ retryProviderErrors: true, maxProviderErrorRetries: 2 },
+		);
+
+		await drain(stream);
+
+		expect(attempts).toBe(3);
+		// `retry.baseDelayMs` × 2^attempt — not the hardcoded 500ms schedule.
+		expect(waits).toEqual([2_000, 4_000]);
+	});
+
+	it("caps provider-error replay delays and treats a non-positive cap as uncapped", async () => {
+		const waitsFor = async (maxRetryDelayMs: number): Promise<number[]> => {
+			const waits: number[] = [];
+			const stream = withReplaySafeStreamRetry(
+				{},
+				CTX,
+				{ providerRetryWait: async ms => void waits.push(ms), providerBaseDelayMs: 1_000, maxRetryDelayMs },
+				() => failingAttempt(),
+				{ retryProviderErrors: true, maxProviderErrorRetries: 2 },
+			);
+			await drain(stream);
+			return waits;
+		};
+
+		expect(await waitsFor(1_500)).toEqual([1_000, 1_500]);
+		// `0` disables the ceiling instead of zeroing every replay sleep.
+		expect(await waitsFor(0)).toEqual([1_000, 2_000]);
 	});
 });

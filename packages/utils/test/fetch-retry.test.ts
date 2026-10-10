@@ -1,5 +1,10 @@
 import { describe, expect, it } from "bun:test";
-import { extractRetryHint, fetchWithRetry, isUnexpectedSocketCloseMessage } from "@oh-my-pi/pi-utils/fetch-retry";
+import {
+	AttemptBudgetExhaustedError,
+	extractRetryHint,
+	fetchWithRetry,
+	isUnexpectedSocketCloseMessage,
+} from "@oh-my-pi/pi-utils/fetch-retry";
 
 describe("isUnexpectedSocketCloseMessage", () => {
 	it.each(["Socket is closed", "Error: Socket is closed.", "The socket connection was closed unexpectedly"])(
@@ -120,6 +125,45 @@ describe("fetchWithRetry", () => {
 			name: "Error",
 			message: "Request was aborted",
 		});
+	});
+
+	it("charges a shared attempt budget once per physical request", async () => {
+		let attempts = 0;
+		const attemptBudget = { remaining: 3 };
+
+		const response = await fetchWithRetry("https://example.invalid/budget", {
+			fetch: async () => {
+				attempts += 1;
+				return new Response("", { status: 503 });
+			},
+			defaultDelayMs: 1,
+			maxAttempts: attemptBudget.remaining,
+			attemptBudget,
+		});
+
+		expect(response.status).toBe(503);
+		expect(attempts).toBe(3);
+		expect(attemptBudget.remaining).toBe(0);
+	});
+
+	it("charges the budget when an attempt throws before any response", async () => {
+		let attempts = 0;
+		const attemptBudget = { remaining: 2 };
+
+		await expect(
+			fetchWithRetry("https://example.invalid/budget-throw", {
+				fetch: async () => {
+					attempts += 1;
+					throw new TypeError("connection reset");
+				},
+				defaultDelayMs: 1,
+				maxAttempts: 2,
+				attemptBudget,
+			}),
+		).rejects.toThrow();
+
+		expect(attempts).toBe(2);
+		expect(attemptBudget.remaining).toBe(0);
 	});
 });
 
@@ -290,5 +334,42 @@ describe("extractRetryHint", () => {
 	it("still returns undefined when only elapsed account resets are present", () => {
 		const past = new Date(Date.now() - 60_000).toISOString();
 		expect(extractRetryHint(undefined, `Your limit will reset at ${past}`)).toBeUndefined();
+	});
+});
+
+describe("fetchWithRetry attempt budget", () => {
+	it("refuses to issue a request when the shared budget is already spent", async () => {
+		let requests = 0;
+		const customFetch = async () => {
+			requests++;
+			return new Response("ok", { status: 200 });
+		};
+		const budget = { remaining: 0 };
+
+		await expect(
+			fetchWithRetry("https://example.invalid/x", { fetch: customFetch, attemptBudget: budget }),
+		).rejects.toBeInstanceOf(AttemptBudgetExhaustedError);
+		expect(requests).toBe(0);
+		expect(budget.remaining).toBe(0);
+	});
+
+	it("charges one attempt per physical request and stops at the allowance", async () => {
+		let requests = 0;
+		const customFetch = async () => {
+			requests++;
+			// Hinted, but short enough that the retry is admitted.
+			return new Response("nope", { status: 429, headers: { "retry-after-ms": "1" } });
+		};
+		const budget = { remaining: 3 };
+
+		const response = await fetchWithRetry("https://example.invalid/x", {
+			fetch: customFetch,
+			attemptBudget: budget,
+			maxAttempts: budget.remaining,
+		});
+
+		expect(requests).toBe(3);
+		expect(budget.remaining).toBe(0);
+		expect(response.status).toBe(429);
 	});
 });

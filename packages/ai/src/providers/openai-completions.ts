@@ -57,6 +57,7 @@ import {
 	sanitizeSchemaForGrammar,
 	toolWireSchema,
 } from "../utils/schema";
+import { providerAttemptDeadlineMs } from "../utils/sdk-stream-timeout";
 import {
 	type HealedToolCall,
 	StreamMarkupHealing,
@@ -842,8 +843,9 @@ const streamOpenAICompletionsOnce = (
 			const firstEventTimeoutMs =
 				options?.streamFirstEventTimeoutMs ??
 				getOpenAIStreamFirstEventTimeoutMs(idleTimeoutMs, model.compat.streamFirstEventTimeoutMs);
-			const requestTimeoutMs =
-				firstEventTimeoutMs !== undefined && firstEventTimeoutMs > 0 ? firstEventTimeoutMs : undefined;
+			// `retry.provider.timeoutMs` caps one attempt's wait for the first event:
+			// the tighter of it and the first-event watchdog applies.
+			const requestTimeoutMs = providerAttemptDeadlineMs(firstEventTimeoutMs, options?.providerTimeoutMs);
 			const {
 				copilotPremiumRequests,
 				baseUrl,
@@ -938,6 +940,14 @@ const streamOpenAICompletionsOnce = (
 						// The first-event watchdog above aborts `requestSignal`, which
 						// bounds every attempt and backoff sleep — retries cannot
 						// extend the deadline.
+						// Provider retry knobs (`retry.provider.*`, `retry.baseDelayMs`)
+						// ride in on the stream options; the shared attempt budget keeps
+						// this layer and the replay layer under one allowance.
+						maxAttempts: options?.providerAttemptBudget?.remaining,
+						baseDelayMs: options?.providerBaseDelayMs,
+						maxDelayMs: options?.maxRetryDelayMs,
+						timeoutMs: options?.providerTimeoutMs,
+						attemptBudget: options?.providerAttemptBudget,
 						onSseEvent: rawSseObserver,
 						onDoneSentinel: () => {
 							sawDoneSentinel = true;
@@ -963,6 +973,11 @@ const streamOpenAICompletionsOnce = (
 			try {
 				openaiStream = await createCompletionsStream();
 			} catch (error) {
+				// Every fallback below re-enters `createCompletionsStream`, i.e. issues
+				// another physical request. Once the shared provider budget is spent,
+				// surface the failure that consumed it instead of overshooting the
+				// caller's allowance (the transport would refuse the request anyway).
+				if (options?.providerAttemptBudget && options.providerAttemptBudget.remaining <= 0) throw error;
 				const capturedErrorResponse = error instanceof OpenAIHttpError ? error.captured : undefined;
 				// A caller disable with a retained effort preference is still an
 				// explicit disable: without this, a fieldless rejection of the
@@ -1808,6 +1823,11 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions"> = (mo
 	return withReplaySafeStreamRetry(resolvedModel, context, options, streamOpenAICompletionsOnce, {
 		retryEmptyCompletion: true,
 		retryProviderErrors: true,
+		// A caller-declared total provider budget (`retry.provider.maxRetries`)
+		// supersedes the fixed single replay retry, so the transport and replay
+		// layers share one allowance instead of multiplying (6 transport attempts
+		// × 1 replay retry = 12 requests).
+		maxProviderAttempts: options?.providerMaxAttempts,
 		maxProviderErrorRetries: 1,
 	});
 };

@@ -2,7 +2,8 @@
  * Contract: `createSettingsAwareStreamFn` layers session provider settings
  * (`providers.openrouterVariant`, `providers.antigravityEndpoint`,
  * `providers.stream*TimeoutSeconds`, `providers.maxInFlightRequests`,
- * `model.loopGuard.*`, `textVerbosity` for Responses-family requests)
+ * `model.loopGuard.*`, `retry.provider.*`, `retry.baseDelayMs`,
+ * `textVerbosity` for Responses-family requests)
  * options win — the same wiring the main agent and the advisor agent share so
  * OpenRouter sticky-routing / response caching behaves the same on advisor turns
  * (can1357/oh-my-pi#3639).
@@ -12,6 +13,7 @@ import type { StreamFn } from "@oh-my-pi/pi-agent-core";
 import { type Context, type Model, type SimpleStreamOptions, streamSimple } from "@oh-my-pi/pi-ai";
 import { configureProviderStoreResponses } from "@oh-my-pi/pi-ai/providers/openai-responses";
 import type { FetchImpl } from "@oh-my-pi/pi-ai/types";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { bindEffects } from "@oh-my-pi/pi-coding-agent/config/registry";
@@ -32,6 +34,45 @@ const stubModel = {} as unknown as Model;
 const stubCodexModel = { api: "openai-codex-responses" } as unknown as Model;
 const stubResponsesModel = { api: "openai-responses" } as unknown as Model;
 const stubContext = { messages: [], tools: [], systemPrompt: [] } as unknown as Context;
+
+/** A real completions model so the retry-policy tests exercise the provider path. */
+const completionsModel: Model<"openai-completions"> = buildModel({
+	id: "gpt-test",
+	name: "GPT test",
+	api: "openai-completions",
+	provider: "openai",
+	baseUrl: "https://api.openai.test/v1",
+	reasoning: false,
+	input: ["text"],
+	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+	contextWindow: 128_000,
+	maxTokens: 16_384,
+});
+
+const completionsContext: Context = { messages: [{ role: "user", content: "Say hello", timestamp: 1_000 }] };
+
+function rateLimitedResponse(): Response {
+	return new Response(JSON.stringify({ error: { message: "rate limit exceeded", type: "rate_limit_error" } }), {
+		status: 429,
+		headers: { "content-type": "application/json" },
+	});
+}
+
+function completedResponse(): Response {
+	const frames = [
+		{ id: "chatcmpl_1", choices: [{ index: 0, delta: { content: "hello" }, finish_reason: null }] },
+		{
+			id: "chatcmpl_1",
+			choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
+			usage: { prompt_tokens: 5, completion_tokens: 1, total_tokens: 6 },
+		},
+	].map(event => `data: ${JSON.stringify(event)}`);
+	frames.push("data: [DONE]");
+	return new Response(`${frames.join("\n\n")}\n\n`, {
+		status: 200,
+		headers: { "content-type": "text/event-stream" },
+	});
+}
 
 describe("createSettingsAwareStreamFn", () => {
 	it("applies provider settings to the forwarded options when caller omits them", () => {
@@ -120,6 +161,105 @@ describe("createSettingsAwareStreamFn", () => {
 
 		expect(calls[0]?.options?.maxRetryDelayMs).toBe(300_000);
 		expect(calls[1]?.options?.maxRetryDelayMs).toBe(5_000);
+	});
+
+	it("issues exactly the configured provider allowance for a rate-limited turn", async () => {
+		const settings = Settings.isolated({
+			"retry.provider.maxRetries": 0,
+			"retry.baseDelayMs": 0,
+		});
+		const wrapped = createSettingsAwareStreamFn(settings);
+		let requests = 0;
+		const fetchImpl: FetchImpl = async () => {
+			requests++;
+			return rateLimitedResponse();
+		};
+
+		const stream = await wrapped(completionsModel, completionsContext, {
+			apiKey: "test-key",
+			fetch: fetchImpl,
+		});
+		const result = await stream.result();
+
+		// `retries` are retries: one retry-free request still reaches the provider.
+		expect(requests).toBe(1);
+		expect(result.stopReason).toBe("error");
+	});
+
+	it("lets caller options override the configured provider allowance", async () => {
+		const settings = Settings.isolated({
+			"retry.provider.maxRetries": 5,
+			"retry.baseDelayMs": 0,
+		});
+		const wrapped = createSettingsAwareStreamFn(settings);
+		let requests = 0;
+		const fetchImpl: FetchImpl = async () => {
+			requests++;
+			return rateLimitedResponse();
+		};
+
+		const stream = await wrapped(completionsModel, completionsContext, {
+			apiKey: "test-key",
+			fetch: fetchImpl,
+			providerMaxAttempts: 1,
+		});
+		await stream.result();
+
+		expect(requests).toBe(1);
+	});
+
+	it("sleeps the configured base delay between provider retries", async () => {
+		const settings = Settings.isolated({
+			"retry.provider.maxRetries": 2,
+			"retry.baseDelayMs": 20,
+		});
+		const wrapped = createSettingsAwareStreamFn(settings);
+		let requests = 0;
+		const fetchImpl: FetchImpl = async () => {
+			requests++;
+			return rateLimitedResponse();
+		};
+
+		const started = Date.now();
+		const stream = await wrapped(completionsModel, completionsContext, { apiKey: "test-key", fetch: fetchImpl });
+		await stream.result();
+		const elapsedMs = Date.now() - started;
+
+		expect(requests).toBe(3);
+		// Two backoff sleeps: 20ms then 40ms — the configured schedule, not the
+		// 500ms default.
+		expect(elapsedMs).toBeGreaterThanOrEqual(55);
+		expect(elapsedMs).toBeLessThan(400);
+	});
+
+	it("hands the configured pre-response timeout to the provider request", async () => {
+		const inits: Array<RequestInit & { timeout?: number | false }> = [];
+		const fetchImpl: FetchImpl = async (_url, init) => {
+			inits.push(init ?? {});
+			return completedResponse();
+		};
+
+		const withTimeout = Settings.isolated({ "retry.provider.timeoutMs": 1_234 });
+		const timed = await createSettingsAwareStreamFn(withTimeout)(completionsModel, completionsContext, {
+			apiKey: "test-key",
+			fetch: fetchImpl,
+		});
+		await timed.result();
+
+		// The value reaches the physical request, where Bun's native pre-response
+		// ceiling takes over.
+		expect(inits[0]?.timeout).toBe(1_234);
+
+		const withoutTimeout = Settings.isolated({});
+		const untimed = await createSettingsAwareStreamFn(withoutTimeout)(completionsModel, completionsContext, {
+			apiKey: "test-key",
+			fetch: fetchImpl,
+		});
+		await untimed.result();
+
+		// Unset keeps the runtime ceiling disabled — the stream watchdogs own the
+		// request deadline.
+		expect(inits[1]?.timeout).toBe(false);
 	});
 
 	it("treats the default openrouterVariant as absent so the base call carries no variant", () => {

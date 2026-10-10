@@ -685,6 +685,38 @@ export interface StreamOptions {
 	 */
 	codexSseMaxAttempts?: number;
 	/**
+	 * Total provider request budget for one provider call: the initial request
+	 * plus every transport/replay retry, shared across stacked retry layers so
+	 * they cannot multiply each other. `1` sends exactly one request and surfaces
+	 * a rate-limit response to the session layer immediately. Omission preserves
+	 * each transport's own default.
+	 *
+	 * Configured through `retry.provider.maxRetries` (attempts = retries + 1).
+	 */
+	providerMaxAttempts?: number;
+	/**
+	 * Base delay for provider-layer exponential backoff in milliseconds
+	 * (default 500). Configured through `retry.baseDelayMs`.
+	 */
+	providerBaseDelayMs?: number;
+	/**
+	 * Pre-response timeout for provider requests in milliseconds. `0` (or
+	 * negative) leaves it disabled — the default, because the first-event/idle
+	 * watchdogs own that deadline. A positive value caps one attempt's wait for the
+	 * first event: the tighter of it and `streamFirstEventTimeoutMs` applies, and
+	 * the OpenAI-family transports additionally set Bun's native pre-response
+	 * ceiling for the request. Honored by the OpenAI-family transports and
+	 * Anthropic; other protocols ignore it. Configured through
+	 * `retry.provider.timeoutMs`.
+	 */
+	providerTimeoutMs?: number;
+	/**
+	 * @internal Shared provider-attempt budget for the current call, created by
+	 * `withReplaySafeStreamRetry` when {@link providerMaxAttempts} is set.
+	 * Transports charge it per physical request.
+	 */
+	providerAttemptBudget?: { remaining: number };
+	/**
 	 * Optional retry delay hook for tests and transports that need custom scheduling.
 	 */
 	providerRetryWait?: (delayMs: number, signal?: AbortSignal) => Promise<void>;

@@ -700,6 +700,38 @@ export const cfgRetryMaxRetries = register({
 
 export const cfgRetryBaseDelayMs = register({ id: "retry.baseDelayMs", type: "number", default: 500 });
 
+export const cfgRetryProviderMaxRetries = register({
+	id: "retry.provider.maxRetries",
+	type: "number",
+	default: 5,
+	ui: {
+		tab: "model",
+		group: "Retry & Fallback",
+		label: "Provider Attempts",
+		description:
+			"Total attempts one provider request may issue (initial request + retries), shared by the transport fetch retries and the replay-safe retry layer so the two can no longer multiply (6 transport attempts × 1 replay retry = 12 requests). 0 sends exactly one request, surfacing a rate-limit response to the session layer immediately. Default 5 = 6 attempts.",
+		options: [
+			{ value: "0", label: "0 (single request)" },
+			{ value: "1", label: "1 retry" },
+			{ value: "3", label: "3 retries" },
+			{ value: "5", label: "5 retries" },
+		],
+	},
+});
+
+export const cfgRetryProviderTimeoutMs = register({
+	id: "retry.provider.timeoutMs",
+	type: "number",
+	default: 0,
+	ui: {
+		tab: "model",
+		group: "Retry & Fallback",
+		label: "Provider Request Timeout",
+		description:
+			"Pre-response timeout for each provider HTTP request, in ms. 0 (default) leaves it unset: the first-event/idle stream watchdogs own that deadline and Bun's built-in ~300s fetch ceiling stays disabled. A positive value caps a single attempt (not the retry schedule).",
+	},
+});
+
 export const cfgRetryMaxDelayMs = register({
 	id: "retry.maxDelayMs",
 	type: "number",

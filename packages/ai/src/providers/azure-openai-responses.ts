@@ -22,6 +22,7 @@ import {
 } from "../utils/idle-iterator";
 import { OpenAIHttpError, postOpenAIStream } from "../utils/openai-http";
 import { sanitizeSchemaForOpenAIResponses, toolWireSchema } from "../utils/schema";
+import { providerAttemptDeadlineMs } from "../utils/sdk-stream-timeout";
 import { mapToOpenAIResponsesToolChoice } from "../utils/tool-choice";
 import {
 	applyOpenAIReasoningEffortFallback,
@@ -135,8 +136,9 @@ const streamAzureOpenAIResponsesOnce = (
 			const idleTimeoutMs = options?.streamIdleTimeoutMs ?? getOpenAIStreamIdleTimeoutMs();
 			const firstEventTimeoutMs =
 				options?.streamFirstEventTimeoutMs ?? getOpenAIStreamFirstEventTimeoutMs(idleTimeoutMs);
-			const requestTimeoutMs =
-				firstEventTimeoutMs !== undefined && firstEventTimeoutMs > 0 ? firstEventTimeoutMs : undefined;
+			// `retry.provider.timeoutMs` caps one attempt's wait for the first event:
+			// the tighter of it and the first-event watchdog applies.
+			const requestTimeoutMs = providerAttemptDeadlineMs(firstEventTimeoutMs, options?.providerTimeoutMs);
 			rawRequestDump = {
 				provider: model.provider,
 				api: output.api,
@@ -171,6 +173,12 @@ const streamAzureOpenAIResponsesOnce = (
 						body: params,
 						signal: requestSignal,
 						fetch: options?.fetch,
+						// Provider retry knobs (`retry.provider.*`, `retry.baseDelayMs`).
+						maxAttempts: options?.providerAttemptBudget?.remaining,
+						baseDelayMs: options?.providerBaseDelayMs,
+						maxDelayMs: options?.maxRetryDelayMs,
+						timeoutMs: options?.providerTimeoutMs,
+						attemptBudget: options?.providerAttemptBudget,
 						// Transient 408/429/5xx get Retry-After-aware transport retries;
 						// the first-event watchdog aborts `requestSignal`, so retries
 						// cannot extend the caller's deadline.
@@ -179,6 +187,11 @@ const streamAzureOpenAIResponsesOnce = (
 					openaiStream = handle.events;
 					break;
 				} catch (error) {
+					// The reasoning-effort fallback loops back into `postOpenAIStream`,
+					// i.e. another physical request: once the shared provider budget is
+					// spent, surface the failure that consumed it rather than
+					// overshooting the caller's allowance.
+					if (options?.providerAttemptBudget && options.providerAttemptBudget.remaining <= 0) throw error;
 					const capturedErrorResponse = error instanceof OpenAIHttpError ? error.captured : undefined;
 					const reasoningEffortFallback: OpenAIReasoningEffortFallback | undefined = !requestSignal.aborted
 						? resolveOpenAIReasoningEffortFallback(error, capturedErrorResponse, params)
@@ -273,6 +286,7 @@ export const streamAzureOpenAIResponses: StreamFunction<"azure-openai-responses"
 	return withReplaySafeStreamRetry(model, context, options, streamAzureOpenAIResponsesOnce, {
 		retryProviderErrors: true,
 		maxProviderErrorRetries: 1,
+		maxProviderAttempts: options?.providerMaxAttempts,
 	});
 };
 

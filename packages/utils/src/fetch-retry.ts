@@ -315,6 +315,29 @@ export interface FetchWithRetryOptions extends RequestInit {
 	 * number sets a custom ceiling in ms. Bare browser/Node fetch ignores it.
 	 */
 	timeout?: number | false;
+	/**
+	 * Shared provider-attempt budget for stacked retry layers. Decremented once
+	 * per physical request so an outer replay layer (e.g.
+	 * `withReplaySafeStreamRetry`) can see how much of the total provider retry
+	 * budget is left instead of multiplying its own budget on top of this one.
+	 * A call that starts with a spent budget issues no request at all and throws
+	 * {@link AttemptBudgetExhaustedError}, so a re-entry (fallback retry) cannot
+	 * overshoot the allowance. Omitted = unbudgeted (previous behavior).
+	 */
+	attemptBudget?: { remaining: number };
+}
+
+/**
+ * Thrown instead of issuing a physical request when the shared
+ * {@link FetchWithRetryOptions.attemptBudget} is already spent. Callers surface
+ * the failure that consumed the allowance; this marks the attempt that must not
+ * happen.
+ */
+export class AttemptBudgetExhaustedError extends Error {
+	constructor() {
+		super("Provider attempt budget exhausted");
+		this.name = "AttemptBudgetExhaustedError";
+	}
 }
 
 const DEFAULT_MAX_DELAY_MS = 60_000;
@@ -341,6 +364,7 @@ export async function fetchWithRetry(
 		shouldRetryResponse,
 		fetch: fetchImpl = fetch,
 		timeout = false,
+		attemptBudget,
 		...baseInit
 	} = options;
 	const signal = baseInit.signal as AbortSignal | undefined;
@@ -360,6 +384,16 @@ export async function fetchWithRetry(
 			: "timeout" in options
 				? ({ ...baseInit, timeout } as unknown as RequestInit)
 				: baseInit;
+
+		// A spent budget means no request may be issued at all: an exhausted
+		// allowance that still sent one would make every advertised attempt limit
+		// a lie, and re-entries (strict-tool / reasoning-effort fallbacks) are the
+		// easiest way to hit this without a retry loop.
+		if (attemptBudget && attemptBudget.remaining <= 0) throw new AttemptBudgetExhaustedError();
+
+		// Charge the shared budget before the physical request, so an outer retry
+		// layer observes the attempt even when this one throws.
+		if (attemptBudget) attemptBudget.remaining -= 1;
 
 		let response: Response;
 		try {

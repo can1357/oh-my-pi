@@ -78,6 +78,16 @@ export interface OpenAIStreamRequestInit {
 	onSseEvent?: SseEventObserver;
 	/** Called when the stream ends on the OpenAI `[DONE]` sentinel; independent of {@link onSseEvent}. */
 	onDoneSentinel?: () => void;
+	/** Total attempts (initial + retries) for this request; defaults to {@link DEFAULT_MAX_ATTEMPTS}. */
+	maxAttempts?: number;
+	/** Base delay for the fallback exponential backoff schedule, in ms (default 500). */
+	baseDelayMs?: number;
+	/** Per-delay cap in ms; a server hint above it surfaces the response immediately. */
+	maxDelayMs?: number;
+	/** Pre-response timeout in ms; `0`/negative keeps Bun's ceiling disabled (default). */
+	timeoutMs?: number;
+	/** Shared provider-attempt budget charged per physical request (see {@link fetchWithRetry}). */
+	attemptBudget?: { remaining: number };
 }
 
 export interface OpenAIStreamHandle<TEvent> {
@@ -102,7 +112,20 @@ export async function postOpenAIStream<TEvent>(init: OpenAIStreamRequestInit): P
 		body: JSON.stringify(init.body),
 		signal: init.signal,
 		fetch: init.fetch,
-		maxAttempts: DEFAULT_MAX_ATTEMPTS,
+		maxAttempts: init.maxAttempts ?? DEFAULT_MAX_ATTEMPTS,
+		// Caller-configured base delay (`retry.baseDelayMs`) replaces the default
+		// 500ms schedule; the per-delay cap below still bounds each sleep.
+		...(init.baseDelayMs !== undefined
+			? { defaultDelayMs: (attempt: number) => init.baseDelayMs! * 2 ** attempt }
+			: {}),
+		// `retry.maxDelayMs: 0` means "no cap" (settings.md), while `fetchWithRetry`
+		// reads a non-positive cap as "decline any hinted retry and sleep 0ms" —
+		// forward an explicit infinity so the disabled-cap contract survives the
+		// trip into the transport.
+		...(init.maxDelayMs !== undefined
+			? { maxDelayMs: init.maxDelayMs > 0 ? init.maxDelayMs : Number.POSITIVE_INFINITY }
+			: {}),
+		attemptBudget: init.attemptBudget,
 		// A proxy concurrency-admission 429 (`rate_limit_type: max_parallel_requests`)
 		// surfaces immediately instead of being slept-and-retried here; session
 		// recovery owns its backoff/fallback (issue #8854).
@@ -111,8 +134,10 @@ export async function postOpenAIStream<TEvent>(init: OpenAIStreamRequestInit): P
 			(init.shouldRetryResponse === undefined || (await init.shouldRetryResponse(response, bodyText))),
 		// Bun's native fetch enforces a hard ~300s pre-response timeout (issue #2422).
 		// Cold large-context streams legitimately exceed it; the caller's
-		// `firstEventTimeoutMs`/`AbortSignal` already govern stuck requests.
-		timeout: false,
+		// `firstEventTimeoutMs`/`AbortSignal` already govern stuck requests, so the
+		// runtime ceiling stays disabled unless the caller sets an explicit
+		// `retry.provider.timeoutMs`.
+		timeout: init.timeoutMs !== undefined && init.timeoutMs > 0 ? init.timeoutMs : false,
 	});
 	if (!response.ok) {
 		throw await captureOpenAIHttpError(response);
