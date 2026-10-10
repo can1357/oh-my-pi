@@ -66,6 +66,8 @@ export interface TextReviewSource {
 	/** Identifies the active session entry that supplied this source, when applicable. */
 	provenance?: TextReviewSourceProvenance;
 	sessionId?: string;
+	/** Absolute filesystem path unambiguously associated with a selected transcript tool result. */
+	editorFilePath?: string;
 }
 
 export type TextReviewAnnotation =
