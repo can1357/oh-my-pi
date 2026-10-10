@@ -295,6 +295,7 @@ export type ResolvedRequestAuth =
 
 interface SuppressedSelectorRecord {
 	untilMs: number;
+	nonQuotaUntilMs: number;
 	usageLimitFailureTime?: number;
 }
 
@@ -3623,10 +3624,19 @@ export class ModelRegistry {
 
 	/** Quota failures may recover early from usage evidence newer than `usageLimitFailureTime`. */
 	suppressSelector(selector: string, untilMs: number, usageLimitFailureTime?: number): void {
-		this.#suppressedSelectors.set(
-			normalizeSuppressedSelector(selector, (provider, id) => this.find(provider, id) !== undefined),
-			{ untilMs, usageLimitFailureTime },
+		const normalizedSelector = normalizeSuppressedSelector(
+			selector,
+			(provider, id) => this.find(provider, id) !== undefined,
 		);
+		const previous = this.#activeSuppressedRecord(normalizedSelector)?.record;
+		this.#suppressedSelectors.set(normalizedSelector, {
+			untilMs: Math.max(previous?.untilMs ?? 0, untilMs),
+			nonQuotaUntilMs: Math.max(previous?.nonQuotaUntilMs ?? 0, usageLimitFailureTime === undefined ? untilMs : 0),
+			usageLimitFailureTime:
+				usageLimitFailureTime === undefined
+					? previous?.usageLimitFailureTime
+					: Math.max(previous?.usageLimitFailureTime ?? usageLimitFailureTime, usageLimitFailureTime),
+		});
 	}
 
 	/** Active, unexpired suppression record for `selector`, deleting an expired entry. */
@@ -3660,7 +3670,7 @@ export class ModelRegistry {
 		if (!active) return false;
 		const { selector: normalizedSelector, record } = active;
 		const failureTime = record.usageLimitFailureTime;
-		if (failureTime === undefined) return true;
+		if (failureTime === undefined || record.nonQuotaUntilMs > Date.now()) return true;
 		const separatorIndex = normalizedSelector.indexOf("/");
 		if (separatorIndex <= 0) return true;
 		const provider = normalizedSelector.slice(0, separatorIndex);

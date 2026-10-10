@@ -402,6 +402,39 @@ describe("early quota reset recovery", () => {
 		expect(registry.isSelectorSuppressed(PRIMARY_SELECTOR)).toBe(true);
 		expect(usageFetches).toEqual([]);
 	});
+	it.each([
+		{ quotaFirst: false, genericMinutes: 10, quotaMinutes: 30 },
+		{ quotaFirst: true, genericMinutes: 10, quotaMinutes: 30 },
+		{ quotaFirst: false, genericMinutes: 20, quotaMinutes: 10 },
+		{ quotaFirst: true, genericMinutes: 20, quotaMinutes: 10 },
+	])("preserves overlapping cooldowns: %j", async ({ quotaFirst, genericMinutes, quotaMinutes }) => {
+		env = await createEnv();
+		const { registry } = env;
+		const clock = useMockClock();
+		const options = { sessionId: "session-a", reserveFraction: 0.1 };
+		const failureTime = clock.now();
+		const genericUntil = failureTime + genericMinutes * 60_000;
+		const quotaUntil = failureTime + quotaMinutes * 60_000;
+		if (quotaFirst) {
+			registry.suppressSelector(PRIMARY_SELECTOR, quotaUntil, failureTime);
+			registry.suppressSelector(PRIMARY_SELECTOR, genericUntil);
+		} else {
+			registry.suppressSelector(PRIMARY_SELECTOR, genericUntil);
+			registry.suppressSelector(PRIMARY_SELECTOR, quotaUntil, failureTime);
+		}
+		scriptedReports.anthropic = { status: "healthy" };
+		clock.advance(7 * 60_000);
+		expect(await registry.isSelectorSuppressedWithRecovery(PRIMARY_SELECTOR, options)).toBe(true);
+		expect(usageFetches).toEqual([]);
+		clock.advance(4 * 60_000);
+		scriptedReports.anthropic = { status: "exhausted" };
+		expect(await registry.isSelectorSuppressedWithRecovery(PRIMARY_SELECTOR, options)).toBe(true);
+		clock.advance(7 * 60_000);
+		scriptedReports.anthropic = { status: "healthy" };
+		expect(await registry.isSelectorSuppressedWithRecovery(PRIMARY_SELECTOR, options)).toBe(genericMinutes > 18);
+		clock.advance(3 * 60_000);
+		expect(await registry.isSelectorSuppressedWithRecovery(PRIMARY_SELECTOR, options)).toBe(false);
+	});
 
 	it("preserves a newer concurrent suppression when recovery evidence lands in flight", async () => {
 		env = await createEnv();

@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Fixed quota-triggered model cooldowns retaining a fallback after fresh usage confirms an Anthropic or Codex quota reset. Non-quota cooldowns and explicit model choices remain unchanged ([#15257](https://github.com/can1357/oh-my-pi/pull/15257)).
+- Fixed quota-triggered model cooldowns retaining a fallback after fresh usage confirms an Anthropic or Codex quota reset. Overlapping non-quota cooldowns keep their deadlines, and explicit model choices stay unchanged ([#15257](https://github.com/can1357/oh-my-pi/pull/15257)).
 
 ## [18.8.9] - 2026-10-10
 
