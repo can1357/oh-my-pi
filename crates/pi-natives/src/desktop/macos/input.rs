@@ -1246,6 +1246,8 @@ fn route_window_pointer(
 		(FIELD_WINDOW_UNDER_POINTER_THAT_CAN_HANDLE, i64::from(wid)),
 	])?;
 	skylight::set_window_location(event, window_local(window, x, y))?;
+	// Only window-routed events carry a time; the activation press, the
+	// left-click route and wheel events keep 0, which their targets accept.
 	stamp_now(event);
 	Ok(())
 }
