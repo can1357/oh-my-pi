@@ -35,11 +35,11 @@ async function listAsJson(models: Model<Api>[]): Promise<ListedModel[]> {
 		spyOn(modelRegistry, "getAvailable").mockReturnValue(models);
 
 		const captured: string[] = [];
-		const originalWrite = process.stdout.write.bind(process.stdout);
-		process.stdout.write = ((chunk: string | Uint8Array) => {
+		const originalWrite = process.stdout.write;
+		const writeSpy = spyOn(process.stdout, "write").mockImplementation(((chunk: string | Uint8Array) => {
 			captured.push(typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8"));
 			return true;
-		}) as typeof process.stdout.write;
+		}) as typeof process.stdout.write);
 		try {
 			await runModelsListing({
 				modelRegistry,
@@ -49,8 +49,9 @@ async function listAsJson(models: Model<Api>[]): Promise<ListedModel[]> {
 				disableExtensionDiscovery: true,
 			});
 		} finally {
-			process.stdout.write = originalWrite;
+			writeSpy.mockRestore();
 		}
+		expect(process.stdout.write).toBe(originalWrite);
 
 		const payload = JSON.parse(captured.join("")) as { models: ListedModel[] };
 		return payload.models;
@@ -61,17 +62,14 @@ async function listAsJson(models: Model<Api>[]): Promise<ListedModel[]> {
 
 describe("omp models --json catalog metrics", () => {
 	it("prints the catalog intelligence score and output speed the model browser shows", async () => {
-		const model = bundled("anthropic", "claude-fable-5");
-		// Guard: an unscored fixture would let the assertions below pass vacuously.
-		expect(model.int).toBeGreaterThan(0);
-		expect(model.tps).toBeGreaterThan(0);
+		const model = { ...bundled("anthropic", "claude-fable-5"), int: 65.7, tps: 66.2 } as Model<Api>;
 
 		const [listed] = await listAsJson([model]);
 		expect(listed).toMatchObject({
 			provider: model.provider,
 			id: model.id,
-			int: model.int,
-			tps: model.tps,
+			int: 65.7,
+			tps: 66.2,
 		});
 	});
 
