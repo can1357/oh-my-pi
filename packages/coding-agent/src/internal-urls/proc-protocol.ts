@@ -29,6 +29,7 @@ import type {
 	LocateOptions,
 	ProtocolHandler,
 	ResolveContext,
+	SchemeHost,
 	SchemeSpec,
 	WriteContext,
 } from "./types";
@@ -90,8 +91,9 @@ export class ProcProtocolHandler implements ProtocolHandler {
 		},
 	};
 
-	promptDoc(): string {
-		return procPromptDoc.trim();
+	/** Advertised only when an active tool can create jobs; without one the namespace is always empty. */
+	promptDoc(host: SchemeHost): string | undefined {
+		return host.jobTools ? procPromptDoc.trim() : undefined;
 	}
 
 	/**

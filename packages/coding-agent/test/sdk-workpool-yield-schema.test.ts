@@ -368,11 +368,11 @@ describe("SDK workpool yield schema", () => {
 			live = session;
 			const promptText = () => session.agent.state.systemPrompt.join("\n");
 			await session.setWorkPoolYieldItems([{ id: "pool#1", index: 1 }]);
-			expect(promptText()).toContain("{ key: <1-based number>, data: <outcome> }");
-			expect(promptText()).not.toContain("Yield protocol:");
+			expect(promptText()).toContain("Workpool items:");
+			expect(promptText()).not.toContain("only way to return a final result");
 			await session.setWorkPoolYieldItems([]);
-			expect(promptText()).toContain("Yield protocol:");
-			expect(promptText()).not.toContain("{ key: <1-based number>, data: <outcome> }");
+			expect(promptText()).toContain("only way to return a final result");
+			expect(promptText()).not.toContain("Workpool items:");
 		});
 	}
 });
