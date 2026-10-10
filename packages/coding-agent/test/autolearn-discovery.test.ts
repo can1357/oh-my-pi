@@ -190,6 +190,19 @@ describe("managed-skills discovery", () => {
 		expect(skills.some(s => s.source === "omp-managed:user")).toBe(false);
 	});
 
+	it("surfaces a managed skill whose frontmatter name is non-ASCII", async () => {
+		const dir = path.join(managedDir, "hanzi-holder");
+		await fs.mkdir(dir, { recursive: true });
+		await fs.writeFile(
+			path.join(dir, "SKILL.md"),
+			["---", "name: 般若理趣分", "description: 講法。", "---", "", "# 般若理趣分"].join("\n"),
+		);
+		const { skills } = await loadSkills({ cwd: tempCwd });
+		const hanzi = skills.find(s => s.name === "般若理趣分");
+		expect(hanzi).toBeDefined();
+		expect(hanzi?.source).toBe("omp-managed:user");
+	});
+
 	it("is a no-op when the managed dir is absent", async () => {
 		const { skills, warnings } = await loadSkills({ cwd: tempCwd });
 		expect(skills.some(s => s.source === "omp-managed:user")).toBe(false);
