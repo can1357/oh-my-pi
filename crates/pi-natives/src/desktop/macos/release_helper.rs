@@ -24,11 +24,11 @@ use std::{
 	io::{Read, Write},
 	os::{fd::FromRawFd, unix::net::UnixStream},
 	process, ptr,
-	sync::{Arc, Mutex, PoisonError},
+	sync::Arc,
 	thread,
 };
 
-use release::{Input, Open, Record, Route, Step, UserHolds};
+use release::{Input, Observation, Open, Record, Route, Step, Transitions};
 
 type Ref = *mut c_void;
 type TapCallback = unsafe extern "C" fn(Ref, u32, Ref, Ref) -> Ref;
@@ -49,6 +49,8 @@ const SOURCE_PID_FIELD: u32 = 41;
 const TAP_DISABLED: [u32; 2] = [u32::MAX - 1, u32::MAX];
 /// `CLOCK_UPTIME_RAW`, the clock Quartz event timestamps count.
 const CLOCK_UPTIME_RAW: u32 = 8;
+/// `kCFRunLoopRunHandledSource`.
+const HANDLED_SOURCE: i32 = 4;
 const SIGINT: i32 = 2;
 const SIGHUP: i32 = 1;
 const SIGPIPE: i32 = 13;
@@ -85,11 +87,17 @@ unsafe extern "C" {
 #[link(name = "CoreFoundation", kind = "framework")]
 unsafe extern "C" {
 	static kCFRunLoopCommonModes: Ref;
+	static kCFRunLoopDefaultMode: Ref;
 	fn CFDataCreate(allocator: Ref, bytes: *const u8, length: isize) -> Ref;
 	fn CFMachPortCreateRunLoopSource(allocator: Ref, port: Ref, order: isize) -> Ref;
+	fn CFRunLoopSourceCreate(allocator: Ref, order: isize, context: *mut SourceContext) -> Ref;
+	fn CFRunLoopSourceSignal(source: Ref);
 	fn CFRunLoopGetCurrent() -> Ref;
 	fn CFRunLoopAddSource(run_loop: Ref, source: Ref, mode: Ref);
 	fn CFRunLoopRun();
+	fn CFRunLoopRunInMode(mode: Ref, seconds: f64, return_after_source_handled: bool) -> i32;
+	fn CFRunLoopStop(run_loop: Ref);
+	fn CFRunLoopWakeUp(run_loop: Ref);
 	fn CFRelease(object: Ref);
 }
 
@@ -106,9 +114,67 @@ struct Point {
 	y: f64,
 }
 
+/// `CFRunLoopSourceContext`, version 0.
+#[repr(C)]
+struct SourceContext {
+	version:          isize,
+	info:             Ref,
+	retain:           Option<unsafe extern "C" fn(Ref) -> Ref>,
+	release:          Option<unsafe extern "C" fn(Ref)>,
+	copy_description: Option<unsafe extern "C" fn(Ref) -> Ref>,
+	equal:            Option<unsafe extern "C" fn(Ref, Ref) -> bool>,
+	hash:             Option<unsafe extern "C" fn(Ref) -> usize>,
+	schedule:         Option<unsafe extern "C" fn(Ref, Ref, Ref)>,
+	cancel:           Option<unsafe extern "C" fn(Ref, Ref, Ref)>,
+	perform:          Option<unsafe extern "C" fn(Ref)>,
+}
+
 struct Tap {
-	user: Arc<Mutex<UserHolds>>,
-	port: Ref,
+	observation: Arc<Observation>,
+	port:        Ref,
+}
+
+/// The observer thread's run loop, applying the tap's transitions.
+struct RunLoop;
+
+impl Transitions for RunLoop {
+	fn drain(&self) {
+		// The tap queues only key and button transitions, which arrive far
+		// slower than this applies them, so the queue empties.
+		// SAFETY: runs this thread's run loop without waiting.
+		while unsafe { CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.0, true) } == HANDLED_SOURCE {}
+	}
+
+	fn run(&self) {
+		// SAFETY: runs this thread's run loop until `stop_here` stops it.
+		unsafe { CFRunLoopRun() };
+	}
+}
+
+/// A signal that stops the observer thread's run loop, also when it comes
+/// before that loop runs: a signalled source stays pending until it runs.
+struct Stop {
+	source:   Ref,
+	run_loop: Ref,
+}
+
+// SAFETY: signalling a source and waking its run loop are thread-safe, and
+// both objects live until the process exits.
+unsafe impl Send for Stop {}
+
+impl Stop {
+	fn signal(self) {
+		// SAFETY: see `Send` above.
+		unsafe {
+			CFRunLoopSourceSignal(self.source);
+			CFRunLoopWakeUp(self.run_loop);
+		}
+	}
+}
+
+unsafe extern "C" fn stop_here(_info: Ref) {
+	// SAFETY: a source's perform callback runs on its run loop's thread.
+	unsafe { CFRunLoopStop(CFRunLoopGetCurrent()) };
 }
 
 fn main() {
@@ -122,14 +188,14 @@ fn main() {
 	// SAFETY: the addon passes its end of a socket pair as standard input,
 	// which nothing else in this process owns.
 	let mut stream = unsafe { UnixStream::from_raw_fd(0) };
-	let user = Arc::new(Mutex::new(UserHolds::default()));
+	let observation = Arc::new(Observation::default());
 	let ready = stream.try_clone().ok();
 	let open = read_open(&mut stream, || {
 		if let Some(ready) = ready {
-			let user = Arc::clone(&user);
+			let observation = Arc::clone(&observation);
 			let _ = thread::Builder::new()
 				.name("observe-user".into())
-				.spawn(move || observe(&user, ready));
+				.spawn(move || observe(&observation, ready));
 		}
 	});
 	// SAFETY: scheduling SIGALRM has no preconditions.
@@ -137,8 +203,7 @@ fn main() {
 	if open.is_empty() {
 		return;
 	}
-	let user = *user.lock().unwrap_or_else(PoisonError::into_inner);
-	for step in release::plan(&open, user) {
+	for step in release::plan(&open, observation.settle()) {
 		if let Step::Post { id, flags } = step
 			&& let Some(press) = open.iter().find(|press| press.id == id)
 		{
@@ -242,10 +307,11 @@ fn post(press: &Open, flags: Option<u64>) {
 /// their process ids), on top of those down in the HID system state when the
 /// tap starts. The tap starts first and its events queue until the run loop
 /// runs them, after the snapshot, so a key that changes in between ends in
-/// its latest state. Then `READY` lets the request's first HID press go.
+/// its latest state; they run before `READY` lets the request's first HID
+/// press go, and again before the release plan reads the holds.
 /// Without a tap (no Input Monitoring) the helper cannot tell the user's holds
 /// from the request's, so it exits; the request goes on without it.
-fn observe(user: &Arc<Mutex<UserHolds>>, mut ready: UnixStream) {
+fn observe(observation: &Arc<Observation>, mut ready: UnixStream) {
 	// A process's first query loads the state, which takes milliseconds; it
 	// runs before the tap so the tap's events do not pile up meanwhile.
 	// SAFETY: read-only query of the HID system state.
@@ -253,7 +319,10 @@ fn observe(user: &Arc<Mutex<UserHolds>>, mut ready: UnixStream) {
 	let mask = release::TRANSITION_TYPES
 		.iter()
 		.fold(0u64, |mask, &kind| mask | (1 << kind));
-	let context = Box::into_raw(Box::new(Tap { user: Arc::clone(user), port: ptr::null_mut() }));
+	let context = Box::into_raw(Box::new(Tap {
+		observation: Arc::clone(observation),
+		port:        ptr::null_mut(),
+	}));
 	// SAFETY: a listen-only session tap whose context lives for the rest of
 	// the process.
 	let port = unsafe {
@@ -265,18 +334,35 @@ fn observe(user: &Arc<Mutex<UserHolds>>, mut ready: UnixStream) {
 	// SAFETY: `context` is live and only this thread writes it before the run
 	// loop starts.
 	unsafe { (*context).port = port };
-	// SAFETY: `port` is a live tap; the source and run loop stay alive while
-	// the run loop runs, which is until the process exits.
-	unsafe {
+	// SAFETY: `port` is a live tap; the sources and run loop stay alive while
+	// the run loop runs, which is until the process exits. The stop source's
+	// context is copied at creation.
+	let stop = unsafe {
+		let run_loop = CFRunLoopGetCurrent();
 		let source = CFMachPortCreateRunLoopSource(ptr::null_mut(), port, 0);
-		if source.is_null() {
+		let mut stop_context = SourceContext {
+			version:          0,
+			info:             ptr::null_mut(),
+			retain:           None,
+			release:          None,
+			copy_description: None,
+			equal:            None,
+			hash:             None,
+			schedule:         None,
+			cancel:           None,
+			perform:          Some(stop_here),
+		};
+		let stop = CFRunLoopSourceCreate(ptr::null_mut(), 0, &raw mut stop_context);
+		if source.is_null() || stop.is_null() {
 			process::exit(0);
 		}
-		CFRunLoopAddSource(CFRunLoopGetCurrent(), source, kCFRunLoopCommonModes);
+		CFRunLoopAddSource(run_loop, source, kCFRunLoopCommonModes);
+		CFRunLoopAddSource(run_loop, stop, kCFRunLoopCommonModes);
 		CGEventTapEnable(port, true);
-	}
+		Stop { source: stop, run_loop }
+	};
 	{
-		let mut holds = user.lock().unwrap_or_else(PoisonError::into_inner);
+		let mut holds = observation.holds();
 		for code in 0..128u16 {
 			// SAFETY: read-only query of the HID system state.
 			if unsafe { CGEventSourceKeyState(HID_SYSTEM_STATE, code) } {
@@ -290,9 +376,9 @@ fn observe(user: &Arc<Mutex<UserHolds>>, mut ready: UnixStream) {
 			}
 		}
 	}
-	let _ = ready.write_all(&[release::READY]);
-	// SAFETY: runs this thread's run loop until the process exits.
-	unsafe { CFRunLoopRun() };
+	observation.follow(&RunLoop, Box::new(move || stop.signal()), || {
+		let _ = ready.write_all(&[release::READY]);
+	});
 }
 
 unsafe extern "C" fn observed(_proxy: Ref, kind: u32, event: Ref, context: Ref) -> Ref {
@@ -319,7 +405,7 @@ unsafe extern "C" fn observed(_proxy: Ref, kind: u32, event: Ref, context: Ref) 
 	if pid != 0 {
 		return event;
 	}
-	let mut holds = tap.user.lock().unwrap_or_else(PoisonError::into_inner);
+	let mut holds = tap.observation.holds();
 	let code = u16::try_from(code).unwrap_or(u16::MAX);
 	match release::transition(kind, code, flags, button, |input| holds.has(input)) {
 		Some(release::Transition::Press(input)) => holds.set(input, true),

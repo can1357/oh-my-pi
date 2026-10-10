@@ -6,6 +6,12 @@
 //! process died, or a panic unwound the request), the helper posts those
 //! releases itself. Both sides compile this file, so it uses only `std`.
 
+use std::{
+	mem,
+	sync::{Condvar, Mutex, MutexGuard, PoisonError},
+	time::Duration,
+};
+
 /// Sent by the helper once it observes the user's input (after
 /// [`Record::Observe`]), so presses on the shared HID route never race its
 /// first observation.
@@ -249,6 +255,90 @@ impl UserHolds {
 	}
 }
 
+/// The event loop that applies the user's transitions as the helper's tap
+/// queues them.
+pub(crate) trait Transitions {
+	/// Applies the transitions already queued, without waiting for more.
+	fn drain(&self);
+	/// Applies transitions as they arrive, until the stop it was given runs.
+	fn run(&self);
+}
+
+/// How long the release plan waits for the observer thread to apply the
+/// transitions queued before the stream ended; past it, the helper releases
+/// with the holds as they stand rather than not at all.
+const SETTLE_TIMEOUT: Duration = Duration::from_millis(500);
+
+/// The user's holds as the helper's observer thread follows them, readable
+/// for a release plan once that thread has applied every queued transition.
+#[derive(Default)]
+pub(crate) struct Observation {
+	holds:   Mutex<UserHolds>,
+	phase:   Mutex<Phase>,
+	settled: Condvar,
+}
+
+#[derive(Default)]
+enum Phase {
+	/// Not yet `READY`, so no press has gone to the shared HID route.
+	#[default]
+	Starting,
+	/// Applying transitions until the stop runs.
+	Following(Box<dyn FnOnce() + Send>),
+	/// The stop ran; the observer thread applies what queued until then.
+	Stopping,
+	/// Every transition queued before the stop is applied.
+	Settled,
+}
+
+impl Observation {
+	pub(crate) fn holds(&self) -> MutexGuard<'_, UserHolds> {
+		self.holds.lock().unwrap_or_else(PoisonError::into_inner)
+	}
+
+	fn phase(&self) -> MutexGuard<'_, Phase> {
+		self.phase.lock().unwrap_or_else(PoisonError::into_inner)
+	}
+
+	/// Follows the user on the observer thread: applies what queued while the
+	/// holds were snapshotted before `ready` tells the addon, then applies
+	/// transitions until [`Self::settle`] runs `stop`, and what queued until
+	/// then.
+	pub(crate) fn follow(
+		&self,
+		events: &impl Transitions,
+		stop: Box<dyn FnOnce() + Send>,
+		ready: impl FnOnce(),
+	) {
+		events.drain();
+		*self.phase() = Phase::Following(stop);
+		ready();
+		events.run();
+		events.drain();
+		*self.phase() = Phase::Settled;
+		self.settled.notify_all();
+	}
+
+	/// The user's holds for the release plan, once the observer thread has
+	/// applied every transition queued before now, or after `SETTLE_TIMEOUT`
+	/// as they stand. Before `READY` they do not matter, since nothing went to
+	/// the shared HID route.
+	pub(crate) fn settle(&self) -> UserHolds {
+		let mut phase = self.phase();
+		if matches!(*phase, Phase::Following(_))
+			&& let Phase::Following(stop) = mem::replace(&mut *phase, Phase::Stopping)
+		{
+			stop();
+		}
+		drop(
+			self
+				.settled
+				.wait_timeout_while(phase, SETTLE_TIMEOUT, |phase| matches!(phase, Phase::Stopping)),
+		);
+		*self.holds()
+	}
+}
+
 /// Device-independent flag, and the left and right virtual key codes with
 /// their device-dependent flags, of each modifier a held key can carry.
 const MODIFIERS: [(u64, [(u16, u64); 2]); 4] = [
@@ -394,6 +484,8 @@ pub(crate) fn plan(open: &[Open], user: UserHolds) -> Vec<Step> {
 
 #[cfg(test)]
 mod tests {
+	use std::{sync::mpsc, thread};
+
 	use super::*;
 
 	const SHIFT: u16 = 56;
@@ -570,5 +662,50 @@ mod tests {
 		assert_eq!(fresh(4, 0, 0), Some(Transition::Release(Input::Button(1))));
 		assert_eq!(transition(25, 0, 0, 3, |_| false), Some(Transition::Press(Input::Button(3))));
 		assert_eq!(fresh(5, 0, 0), None);
+	}
+
+	/// A run loop that applies queued transitions only when drained, as the
+	/// tap's queue waits until the run loop gets to it.
+	struct Queued<'a> {
+		observation: &'a Observation,
+		queue:       &'a Mutex<Vec<(Input, bool)>>,
+		stopped:     mpsc::Receiver<()>,
+	}
+
+	impl Transitions for Queued<'_> {
+		fn drain(&self) {
+			for (input, down) in self.queue.lock().unwrap().drain(..) {
+				self.observation.holds().set(input, down);
+			}
+		}
+
+		fn run(&self) {
+			let _ = self.stopped.recv();
+		}
+	}
+
+	#[test]
+	fn ready_and_the_release_plan_see_the_users_queued_transitions() {
+		let shift = Input::Key(SHIFT);
+		let observation = &Observation::default();
+		// The user pressed Shift while the holds were snapshotted.
+		let queue = &Mutex::new(vec![(shift, true)]);
+		let (stop, stopped) = mpsc::channel();
+		let (ready, readied) = mpsc::channel();
+		let (at_ready, planned) = thread::scope(|scope| {
+			scope.spawn(move || {
+				observation.follow(
+					&Queued { observation, queue, stopped },
+					Box::new(move || stop.send(()).unwrap()),
+					|| ready.send(*observation.holds()).unwrap(),
+				);
+			});
+			let at_ready = readied.recv().unwrap();
+			// The user lets go as the host dies, before the run loop gets to it.
+			queue.lock().unwrap().push((shift, false));
+			(at_ready, observation.settle())
+		});
+		assert!(at_ready.has(shift), "READY reports the queued press");
+		assert!(!planned.has(shift), "the plan sees the queued release");
 	}
 }
