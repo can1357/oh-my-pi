@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed OpenRouter's Jev Router being classified as a Decisions judge instead of a chat model, preventing custom providers from registering the OpenRouter roster ([#15244](https://github.com/can1357/oh-my-pi/issues/15244)).
+
 ## [18.8.8] - 2026-10-10
 
 ### Added

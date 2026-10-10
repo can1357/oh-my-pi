@@ -1,5 +1,11 @@
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
 import { describe, expect, it } from "bun:test";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { writeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
 import { resolveProviderModels } from "@oh-my-pi/pi-catalog/model-manager";
+import { getBundledModels } from "@oh-my-pi/pi-catalog/models";
 import { openrouterModelManagerOptions } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
 
 const CHAT_PAYLOAD = {
@@ -9,6 +15,12 @@ const CHAT_PAYLOAD = {
 			name: "OpenRouter Auto",
 			supported_parameters: ["tools"],
 			architecture: { input_modalities: ["text"], modality: "text+image" },
+		},
+		{
+			id: "typesafe/jev-router",
+			name: "TypeSafe: Jev Router",
+			supported_parameters: ["tools"],
+			architecture: { input_modalities: ["text"], output_modalities: ["text"] },
 		},
 		{
 			id: "google/gemini-3-pro-image",
@@ -135,6 +147,13 @@ describe("OpenRouter chat, image, decisions, rerank, video, and embedding discov
 			"https://openrouter.ai/api/v1/models?output_modalities=rerank",
 			"https://openrouter.ai/api/v1/videos/models",
 		]);
+		const router = models?.find(model => model.id === "typesafe/jev-router");
+		if (!router) throw new Error("OpenRouter chat roster omitted Jev Router");
+		expect(buildModel(router)).toMatchObject({
+			api: "openrouter",
+			kind: "chat",
+			baseUrl: "https://openrouter.ai/api/v1",
+		});
 		// Decision rows answer only through `/api/alpha/decisions`; they are judge-kind, tool-less, input-priced.
 		expect(models?.find(model => model.id === "~typesafe/jev-latest")).toEqual(
 			expect.objectContaining({
@@ -253,5 +272,34 @@ describe("OpenRouter chat, image, decisions, rerank, video, and embedding discov
 			contextWindow: null,
 			maxTokens: null,
 		});
+	});
+
+	it("replaces a fresh pre-upgrade Jev Router judge cache row before serving models", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-catalog-openrouter-jev-cache-"));
+		const cacheDbPath = path.join(tempDir, "models.db");
+		try {
+			const options = openrouterModelManagerOptions();
+			const router = getBundledModels("openrouter").find(model => model.id === "typesafe/jev-router");
+			if (!router || !options.cacheProviderId) throw new Error("OpenRouter router or cache id missing");
+			writeModelCache(
+				options.cacheProviderId,
+				Date.now(),
+				[{ ...router, kind: "judge" }],
+				true,
+				"pre-upgrade-static-fingerprint",
+				cacheDbPath,
+			);
+
+			const result = await resolveProviderModels(
+				{ ...options, cacheDbPath, fetchDynamicModels: async () => null },
+				"online-if-uncached",
+			);
+			expect(result.models.find(model => model.id === router.id)).toMatchObject({
+				api: "openrouter",
+				kind: "chat",
+			});
+		} finally {
+			await fs.rm(tempDir, { recursive: true, force: true });
+		}
 	});
 });

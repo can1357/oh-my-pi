@@ -115,9 +115,6 @@ provider "openrouter" {
 			supports-tools #false
 		}
 	}
-	models "~typesafe/*" "typesafe/*" {
-		kind "judge"
-	}
 	models "cohere/rerank-v3.5" {
 		kind "rerank"
 	}
