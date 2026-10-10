@@ -813,6 +813,18 @@ describe("AuthStorage codex oauth ranking", () => {
 		await expect(authStorage.keys.get(provider, "after-runtime-usage")).resolves.toBe("api-acct-runtime");
 	});
 
+	test("rejects an autoRedeem override that is not a boolean", () => {
+		if (!store) throw new Error("test setup failed");
+		const activeStore = store;
+		const autoRedeem = "no" as unknown as boolean;
+		expect(
+			() =>
+				new AuthStorage(activeStore, {
+					accountPolicies: [{ provider: "openai-codex", account: { email: "account@example.com" }, autoRedeem }],
+				}),
+		).toThrow("auth.accountPolicies[0].autoRedeem must be true or false");
+	});
+
 	test("requires a base selector identity", () => {
 		if (!store) throw new Error("test setup failed");
 		const activeStore = store;
@@ -828,18 +840,6 @@ describe("AuthStorage codex oauth ranking", () => {
 					accountPolicies: [{ provider: " openai-codex", account: { email: "account@example.com" }, priority: 1 }],
 				}),
 		).toThrow("without surrounding whitespace");
-	});
-
-	test("rejects an autoRedeem override that is not a boolean", () => {
-		if (!store) throw new Error("test setup failed");
-		const activeStore = store;
-		const autoRedeem = "no" as unknown as boolean;
-		expect(
-			() =>
-				new AuthStorage(activeStore, {
-					accountPolicies: [{ provider: "openai-codex", account: { email: "account@example.com" }, autoRedeem }],
-				}),
-		).toThrow("auth.accountPolicies[0].autoRedeem must be true or false");
 	});
 
 	test("keeps hot-window and measured-usage safety ahead of configured priority", async () => {
