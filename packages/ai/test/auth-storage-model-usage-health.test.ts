@@ -7,6 +7,7 @@ import {
 	AuthStorage,
 	type StoredAuthCredential,
 } from "@oh-my-pi/pi-ai/auth-storage";
+import { resolveUsageReserve, windowReserveFraction } from "@oh-my-pi/pi-ai/auth/reserve";
 import type {
 	CredentialRankingStrategy,
 	UsageLimit,
@@ -852,5 +853,18 @@ describe("AuthStorage reset-aware usage reserve", () => {
 	] as const)("%s", async (_name, accountPolicies, fiveHourUsed, weekUsed, hoursToWeeklyReset, expected) => {
 		const usageReport = twoWindowReport(fiveHourUsed, weekUsed, hoursToWeeklyReset);
 		expect(await reserveState(usageReport, { accountPolicies })).toBe(expected);
+	});
+
+	it("protects only the configured window when a policy sets no account or global reserve", () => {
+		const reserve = resolveUsageReserve({ ...account, windows: { "7d": { reservePct: 30 } } }, undefined, 0);
+		if (!reserve) throw new Error("window-only reserve did not resolve");
+		const week: UsageWindow = { id: "7d", label: "7d" };
+		const fiveHour: UsageWindow = { id: "5h", label: "5h" };
+		expect(windowReserveFraction(reserve, week, Date.now())).toBeCloseTo(0.3);
+		expect(windowReserveFraction(reserve, fiveHour, Date.now())).toBe(0);
+	});
+
+	it("resolves no reserve when neither the account, the windows nor the caller set one", () => {
+		expect(resolveUsageReserve({ ...account, windows: { "7d": { taperHours: 72 } } }, undefined, 0)).toBeUndefined();
 	});
 });

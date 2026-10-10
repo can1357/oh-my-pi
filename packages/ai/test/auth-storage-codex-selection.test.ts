@@ -933,6 +933,8 @@ describe("AuthStorage codex oauth ranking", () => {
 			{ "7d": { reservePct: 130 } },
 			"auth.accountPolicies[0].windows.7d.reservePct must be a finite number between 0 and 100",
 		],
+		[{ "7d": { reservePct: 30, taperHour: 72 } }, "auth.accountPolicies[0].windows.7d has unknown fields: taperHour"],
+		[JSON.parse('{ "7d": [30] }'), "auth.accountPolicies[0].windows.7d must be an object"],
 	])("rejects per-window reserve overrides that cannot apply: %j", (windows, error) => {
 		if (!store) throw new Error("test setup failed");
 		const activeStore = store;

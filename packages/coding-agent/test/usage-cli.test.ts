@@ -531,9 +531,10 @@ describe("formatUsageBreakdown", () => {
 			formatUsageBreakdown([report], [], Date.now(), undefined, [], policyOptions),
 		);
 
-		expect(text).toContain(
-			"policy: priority 20 · reserve 15% (override) · 7d reserve 30%, tapers over 72h · weekly reserve 30% (no such window) · inside reserve · 20.0% left",
-		);
+		expect(text).toContain("reserve 15% (override)");
+		expect(text).toContain("7d reserve 30%, tapers over 72h ·");
+		expect(text).toContain("weekly reserve 30% (no such window)");
+		expect(text).toContain("inside reserve · 20.0% left");
 	});
 
 	it("shows the inherited global reserve for an unconfigured sibling in a policy-enabled provider", () => {

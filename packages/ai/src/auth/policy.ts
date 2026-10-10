@@ -120,8 +120,14 @@ export class AccountPolicies {
 				}
 				const windowPath = `${path}.windows.${windowId}`;
 				const override = policy.windows[windowId];
-				if (!override || typeof override !== "object") {
+				if (!override || typeof override !== "object" || Array.isArray(override)) {
 					throw new AIError.ConfigurationError(`${windowPath} must be an object`);
+				}
+				const unknownFields = Object.keys(override).filter(
+					field => field !== "reservePct" && field !== "taperHours",
+				);
+				if (unknownFields.length > 0) {
+					throw new AIError.ConfigurationError(`${windowPath} has unknown fields: ${unknownFields.join(", ")}`);
 				}
 				if (override.reservePct === undefined && override.taperHours === undefined) {
 					throw new AIError.ConfigurationError(`${windowPath} must set reservePct or taperHours`);

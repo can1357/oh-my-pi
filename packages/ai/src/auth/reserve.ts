@@ -33,7 +33,8 @@ function windowReserve(fraction: number, taperHours: number): WindowReserve {
  * Resolve the reserve for one account: a per-account `reservePct` / `taperHours`
  * override wins over the supplied global fallbacks, and a `windows` entry wins
  * over both for its window. Returns `undefined` when no reserve applies (no
- * per-account `reservePct` and no fallback fraction).
+ * per-account or per-window `reservePct` and no fallback fraction); a window-only
+ * reserve leaves the other windows unprotected.
  */
 export function resolveUsageReserve(
 	policy: AuthAccountPolicy | undefined,
@@ -41,9 +42,12 @@ export function resolveUsageReserve(
 	fallbackTaperHours: number,
 ): UsageReserve | undefined {
 	const configuredPct = policy?.reservePct;
-	const fraction =
+	let fraction =
 		configuredPct !== undefined && Number.isFinite(configuredPct) ? configuredPct / 100 : fallbackFraction;
-	if (fraction === undefined || !Number.isFinite(fraction)) return undefined;
+	if (fraction === undefined || !Number.isFinite(fraction)) {
+		if (!Object.values(policy?.windows ?? {}).some(override => override.reservePct !== undefined)) return undefined;
+		fraction = 0;
+	}
 	const configuredTaper = policy?.taperHours;
 	const taperHours =
 		configuredTaper !== undefined && Number.isFinite(configuredTaper) ? configuredTaper : fallbackTaperHours;
