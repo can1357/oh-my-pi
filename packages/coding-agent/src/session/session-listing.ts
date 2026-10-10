@@ -10,6 +10,7 @@ import { parseJsonlLenient } from "@oh-my-pi/pi-utils/stream";
 import { toError } from "@oh-my-pi/pi-utils/type-guards";
 import { computeDefaultSessionDir } from "./session-paths";
 import { compareSessionRecency } from "./recent-session-sync";
+import { isSessionResumabilityEmpty, sanitizeSessionName } from "./session-resumability";
 import { FileSessionStorage, type SessionStorage, type SessionStorageStat } from "./session-storage";
 import { lookupSessionTitle, recordSessionTitle } from "./session-index";
 
@@ -111,14 +112,6 @@ function getSessionScanCache(storage: SessionStorage): SessionScanCache {
 	const holder = storage as StorageWithScanCache;
 	if (!holder[kScanCache]) holder[kScanCache] = new LRUCache({ max: SESSION_SCAN_CACHE_MAX });
 	return holder[kScanCache];
-}
-
-function sanitizeSessionName(value: string | undefined): string | undefined {
-	if (!value) return undefined;
-	const firstLine = value.split(/\r?\n/)[0] ?? "";
-	const stripped = firstLine.replace(/[\x00-\x1F\x7F]/g, "");
-	const trimmed = stripped.trim();
-	return trimmed.length > 0 ? trimmed : undefined;
 }
 
 /** Format a time difference as a human-readable string */
@@ -679,11 +672,7 @@ export async function listAllSessions(
  * ACP, `resolveResumableSession`) keeps the unfiltered scan.
  */
 export function isEmptySession(session: SessionInfo): boolean {
-	if (session.status !== undefined && session.status !== "pending" && session.status !== "unknown") return false;
-	if ((session.assistantTurns ?? 1) > 0) return false;
-	if (sanitizeSessionName(session.title)) return false;
-	if (sanitizeSessionName(session.firstMessage === "(no messages)" ? undefined : session.firstMessage)) return false;
-	return true;
+	return isSessionResumabilityEmpty(session);
 }
 
 /** Picker-facing view of a session list: empties dropped, pinned sessions kept. */

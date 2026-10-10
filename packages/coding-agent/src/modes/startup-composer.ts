@@ -18,6 +18,7 @@ import {
 	hasPositiveMovedProjectEvidence,
 	readTerminalBreadcrumbEntrySync,
 	resolveBreadcrumbToInteractiveRoot,
+	sessionDirForCwd,
 } from "../session/session-paths";
 import { MAGIC_KEYWORDS } from "./magic-keywords";
 import { findMostRecentNonEmptySessionSync } from "../session/recent-session-sync";
@@ -60,40 +61,47 @@ export interface TerminalSessionPrepaint {
 	readonly sessionFile: string;
 }
 
-/** Resolve the newest project-local target `continueRecent()` will choose after skipping empty `/new` stubs. */
-function resolveCurrentProjectSession(currentSessionFile: string | undefined): string | undefined {
-	if (!currentSessionFile || !fs.existsSync(currentSessionFile)) return undefined;
-	return findMostRecentNonEmptySessionSync(path.dirname(currentSessionFile));
+/** Resolve the newest canonical project-local target `continueRecent()` will choose. */
+function resolveCurrentProjectSession(cwd: string): string | undefined {
+	return findMostRecentNonEmptySessionSync(sessionDirForCwd(cwd));
 }
 
 /** Cached usage is unsafe when process-local settings can override the persisted auto-resume intent. */
-export function canReusePrepaintSessionUsage(allowSessionUsage: boolean | undefined, configFiles?: string): boolean {
-	return allowSessionUsage === true && !(configFiles?.split(path.delimiter).some(Boolean) ?? false);
+export function canReusePrepaintSessionUsage(
+	allowSessionUsage: boolean | undefined,
+	configFiles?: string,
+	sessionDirOverride?: string,
+): boolean {
+	return (
+		allowSessionUsage === true && !(configFiles?.split(path.delimiter).some(Boolean) ?? false) && !sessionDirOverride
+	);
 }
 
 /** Resolve the session identity needed by prepaint, without loading the session graph. */
 export function resolveTerminalSessionPrepaint(
 	cwd: string,
-	currentSessionFile?: string,
+	_currentSessionFile?: string,
 ): TerminalSessionPrepaint | undefined {
 	const breadcrumb = readTerminalBreadcrumbEntrySync();
 	const resolvedCwd = path.resolve(cwd);
-	const resolvedCurrentSessionFile = resolveCurrentProjectSession(currentSessionFile);
-	const currentSession = resolvedCurrentSessionFile
-		? { cacheCwd: resolvedCwd, sessionFile: resolvedCurrentSessionFile }
-		: undefined;
 	// A terminal without a breadcrumb follows continueRecent()'s project-local
-	// fallback. The cache identity was written by that live session and lets the
+	// fallback. Resolve it from the same canonical session directory as the live
+	// selector, rather than the last cache writer's possibly custom directory. The
+	// matching cache identity lets the
 	// first frame reserve its usage widths before the session graph loads.
-	if (!breadcrumb) return currentSession;
+	if (!breadcrumb) {
+		const currentSessionFile = resolveCurrentProjectSession(resolvedCwd);
+		return currentSessionFile ? { cacheCwd: resolvedCwd, sessionFile: currentSessionFile } : undefined;
+	}
 	const breadcrumbCwd = path.resolve(breadcrumb.cwd);
 	const breadcrumbSessionFile = resolveBreadcrumbToInteractiveRoot(breadcrumb.sessionFile);
 	if (breadcrumbCwd === resolvedCwd) return { cacheCwd: resolvedCwd, sessionFile: breadcrumbSessionFile };
-	// continueRecent() gives an existing current-project session precedence over
-	// relocating a missing-cwd breadcrumb. Mirror that choice in prepaint.
-	if (currentSession) return currentSession;
 	if (fs.existsSync(breadcrumbCwd)) return undefined;
 	if (!hasPositiveMovedProjectEvidence(breadcrumb.cwdIdentity, resolvedCwd)) return undefined;
+	// Only the moved-project branch needs the fallback scan. Same-cwd breadcrumbs
+	// above are authoritative and must not pay a synchronous directory walk.
+	const currentSessionFile = resolveCurrentProjectSession(resolvedCwd);
+	if (currentSessionFile) return { cacheCwd: resolvedCwd, sessionFile: currentSessionFile };
 	return { cacheCwd: breadcrumbCwd, sessionFile: breadcrumbSessionFile };
 }
 
@@ -132,7 +140,11 @@ export function beginStartupComposer(options: PrepaintComposerOptions = {}): voi
 		: resolveTerminalSessionPrepaint(cwd, cache?.cachedSessionFile(cwd));
 	const cached = cache
 		? cache.read(terminalSession?.cacheCwd ?? cwd, {
-				allowSessionUsage: canReusePrepaintSessionUsage(options.allowSessionUsage, process.env.PI_CONFIG_FILES),
+				allowSessionUsage: canReusePrepaintSessionUsage(
+					options.allowSessionUsage,
+					process.env.PI_CONFIG_FILES,
+					process.env.PI_CODING_AGENT_SESSION_DIR,
+				),
 				sessionFile: terminalSession?.sessionFile,
 			})
 		: { preferences: undefined, theme: undefined, status: undefined };

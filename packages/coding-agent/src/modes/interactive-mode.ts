@@ -3658,12 +3658,9 @@ export class InteractiveMode implements InteractiveModeContext {
 		// A durable zero-turn `/new` boundary is skipped by continueRecent() in a
 		// different terminal. Keep the prior non-empty session's cache row so its
 		// usage remains available when that transcript is the actual resume target.
-		if (
+		const preserveSessionUsage =
 			!this.sessionManager.getSessionName()?.trim() &&
-			!this.sessionManager.getEntries().some(entry => entry.type === "message")
-		) {
-			return;
-		}
+			!this.sessionManager.getEntries().some(entry => entry.type === "message");
 		const model = this.session.model;
 		const usage = this.sessionManager.getUsageStatistics();
 		// Recover the border's ANSI wrapper by coloring a sentinel and splitting around it.
@@ -3700,7 +3697,12 @@ export class InteractiveMode implements InteractiveModeContext {
 					: null,
 			},
 		};
-		sharedComposerCache()?.writeStatus(this.sessionManager.getCwd(), status, sessionFile);
+		const cache = sharedComposerCache();
+		if (preserveSessionUsage) {
+			cache?.writeStatusPreservingSessionUsage(this.sessionManager.getCwd(), status);
+		} else {
+			cache?.writeStatus(this.sessionManager.getCwd(), status, sessionFile);
+		}
 	}
 
 	#handleSessionAccentInputsChanged(): void {

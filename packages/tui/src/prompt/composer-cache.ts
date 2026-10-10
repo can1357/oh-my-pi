@@ -357,6 +357,35 @@ export class ComposerCache {
 		);
 	}
 
+	/** Refresh session-independent status while retaining the last resumable session's usage identity. */
+	writeStatusPreservingSessionUsage(cwd: string, status: ComposerStatusCache): void {
+		const project = path.resolve(cwd);
+		let previous: { status: ComposerStatusCache; sessionFile: string | undefined } | undefined;
+		try {
+			const row = this.#select
+				.all(project, project)
+				.find(entry => entry.project === project && entry.kind === "status");
+			if (row) {
+				this.#known.set(`${row.project}\0${row.kind}`, row.value);
+				previous = parseCachedStatus(parseJson(row.value));
+			}
+		} catch (error) {
+			logger.debug("composer cache session status read failed", { error: String(error) });
+		}
+		this.writeStatus(
+			cwd,
+			{
+				...status,
+				statusLine: {
+					...status.statusLine,
+					contextPercent: previous?.status.statusLine.contextPercent,
+					tokenBreakdown: previous?.status.statusLine.tokenBreakdown,
+				},
+			},
+			previous?.sessionFile,
+		);
+	}
+
 	close(): void {
 		// Unfinalized statements keep the file handle open on Windows.
 		this.#select.finalize();

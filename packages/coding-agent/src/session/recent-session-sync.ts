@@ -1,5 +1,6 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { isSessionResumabilityEmpty } from "./session-resumability";
 
 interface SessionRecency {
 	readonly path: string;
@@ -53,16 +54,25 @@ function inspectSessionFileSync(sessionFile: string): { created: Date; resumable
 				const timestamp = new Date(record.timestamp);
 				if (Number.isFinite(timestamp.getTime())) created = timestamp;
 			}
-			if (typeof record.title === "string" && record.title.trim()) return true;
-			if (record.type === "compaction" && typeof record.shortSummary === "string" && record.shortSummary.trim()) {
+			if (
+				!isSessionResumabilityEmpty({
+					assistantTurns: 0,
+					title:
+						typeof record.title === "string"
+							? record.title
+							: record.type === "compaction" && typeof record.shortSummary === "string"
+								? record.shortSummary
+								: undefined,
+				})
+			) {
 				return true;
 			}
 			if (record.type !== "message" || !record.message) return false;
-			if (record.message.role === "assistant") return true;
-			return (
-				(record.message.role === "user" || record.message.role === "developer") &&
-				hasDisplayText(record.message.content)
-			);
+			return !isSessionResumabilityEmpty({
+				assistantTurns: record.message.role === "assistant" ? 1 : 0,
+				firstMessage:
+					record.message.role === "user" && hasDisplayText(record.message.content) ? "user message" : undefined,
+			});
 		};
 
 		for (;;) {

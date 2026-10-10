@@ -158,6 +158,39 @@ describe("composer startup cache", () => {
 		cache.close();
 	});
 
+	it("refreshes zero-turn status while preserving resumable-session usage", () => {
+		const project = path.join(root, "project");
+		const sessionFile = path.join(root, "sessions", "resumable.jsonl");
+		const cached = statusFor(ThinkingLevel.Low);
+		const cachedWithUsage: ComposerStatusCache = {
+			...cached,
+			statusLine: {
+				...cached.statusLine,
+				contextPercent: 37.5,
+				tokenBreakdown: {
+					input: 25_000,
+					output: 500,
+					cacheWrite: 100,
+					orchestrationInput: 250,
+					orchestrationOutput: 50,
+				},
+			},
+		};
+		const refreshed = statusFor(ThinkingLevel.High);
+		const cache = ComposerCache.open(dbPath);
+		cache.writeUi(project, COMPOSER_DEFAULTS, {}, true);
+		cache.writeStatus(project, cachedWithUsage, sessionFile);
+
+		cache.writeStatusPreservingSessionUsage(project, refreshed);
+
+		expect(cache.cachedSessionFile(project)).toBe(sessionFile);
+		const resumed = cache.read(project, { allowSessionUsage: true, sessionFile }).status?.statusLine;
+		expect(resumed?.thinkingLevel).toBe(ThinkingLevel.High);
+		expect(resumed?.contextPercent).toBe(37.5);
+		expect(resumed?.tokenBreakdown).toEqual(cachedWithUsage.statusLine.tokenBreakdown);
+		cache.close();
+	});
+
 	it("skips write transactions for identical payloads", () => {
 		const project = path.join(root, "project");
 		const cache = ComposerCache.open(dbPath);

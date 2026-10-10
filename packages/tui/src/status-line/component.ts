@@ -3048,21 +3048,18 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		// handling, so the gauge must reserve enough room for both labels. Without
 		// this budget a long path/session title can leave a one-cell gap: the
 		// context segment is gone, and the gauge silently omits its labels too.
+		const embeddedContextPercent =
+			ctx.contextPercent ?? ctx.session.startupContextPercent ?? (embedCompactContext ? 100 : null);
 		const embeddedContextWidth = embedContext
 			? embeddedContextGaugeMinWidth(
-					ctx.contextPercent ?? ctx.session.startupContextPercent ?? null,
+					embeddedContextPercent,
 					ctx.contextWindow,
 					embedCompactContext,
 					showEmbeddedContextWindow,
 				)
 			: 0;
 		const embeddedContextPercentWidth = embedContext
-			? embeddedContextGaugeMinWidth(
-					ctx.contextPercent ?? ctx.session.startupContextPercent ?? null,
-					ctx.contextWindow,
-					embedCompactContext,
-					false,
-				)
+			? embeddedContextGaugeMinWidth(embeddedContextPercent, ctx.contextWindow, embedCompactContext, false)
 			: 0;
 		// A default (non-compact) gauge may fall back to its short percentage-only
 		// label when both context labels cannot coexist with the final ordinary

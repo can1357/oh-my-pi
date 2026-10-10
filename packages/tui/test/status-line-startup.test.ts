@@ -45,6 +45,41 @@ describe("status line startup layout", () => {
 		}
 	});
 
+	it("reserves a representative live compact width for a fresh embedded gauge", () => {
+		const model = {
+			id: "startup-model",
+			name: "Model",
+			provider: "test",
+			api: "test",
+			contextWindow: 100_000,
+		} as Model;
+		const line = createStartupStatusLine({
+			settings: {
+				preset: "custom",
+				leftSegments: ["model", "context_pct"],
+				rightSegments: [],
+				separator: "pipe",
+				contextLine: "embedded",
+				segmentOptions: { context_pct: { compact: true } },
+			},
+			gitEnabled: false,
+			model,
+			autoThinking: false,
+			fastMode: false,
+			usingSubscription: false,
+			autoCompactEnabled: false,
+			compactionBoundaries: null,
+		});
+
+		try {
+			const narrow = Bun.stripANSI(line.getTopBorder(14).content);
+			expect(narrow).toContain("ctx:?");
+			expect(narrow).not.toContain("Model");
+		} finally {
+			line.dispose();
+		}
+	});
+
 	it("reserves cached compact width for a standalone startup segment", () => {
 		const model = {
 			id: "startup-model",
