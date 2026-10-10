@@ -24,6 +24,7 @@ import {
 	sendLog,
 	sendProgress,
 } from "../subprocess/worker-runtime";
+import { downloadHubFile } from "../subprocess/hub-download";
 import { resolveTinyModelDevicePreference, type TinyModelDevice, tinyModelDeviceLoadOrder } from "../tiny/device";
 import { resolveTinyModelDtypeOverride, type TinyModelDtype } from "../tiny/dtype";
 import type { SttTransport, SttWorkerInbound } from "./asr-protocol";
@@ -46,11 +47,8 @@ const STRIDE_LENGTH_S = 5;
 // The client always resamples to 16 kHz mono float32 before sending; sherpa-onnx
 // is told the true input rate (it resamples internally to its feature config).
 const ASR_SAMPLE_RATE = 16_000;
-// Hub origin for raw sherpa-onnx model files (encoder/decoder/joiner/tokens).
-const HF_RESOLVE_BASE = "https://huggingface.co";
-// Coalesce download progress so streaming a multi-hundred-MB model file doesn't
-// flood the IPC channel with one event per chunk.
-const PROGRESS_EMIT_BYTES = 4_000_000;
+// Hub revision for raw sherpa-onnx model files (encoder/decoder/joiner/tokens).
+const SHERPA_HF_REVISION = "main";
 
 const sttModelDevicePreference = resolveTinyModelDevicePreference();
 const sttModelDtypeOverride = resolveTinyModelDtypeOverride();
@@ -253,11 +251,10 @@ async function loadTransformersModel(
 }
 
 /**
- * Stream a single sherpa-onnx model file from the Hub into the cache, writing to
- * a `.part` sidecar and renaming on completion so an interrupted fetch never
- * reads as cached. Emits coalesced per-file progress for the aggregating client.
+ * Stream a single sherpa-onnx model file from the Hub into the cache via the
+ * shared Hub downloader (`.part` + rename, coalesced per-file progress).
  */
-async function downloadSherpaFile(
+function downloadSherpaFile(
 	repo: string,
 	filename: string,
 	dest: string,
@@ -265,49 +262,15 @@ async function downloadSherpaFile(
 	transport: SttTransport,
 	requestId: string,
 ): Promise<void> {
-	const url = `${HF_RESOLVE_BASE}/${repo}/resolve/main/${filename}`;
-	const response = await fetch(url, { redirect: "follow" });
-	if (!response.ok || !response.body) {
-		throw new Error(`Failed to download ${filename} (${repo}): HTTP ${response.status}`);
-	}
-	const total = Number(response.headers.get("content-length") ?? 0);
-	transport.send({
-		type: "progress",
-		id: requestId,
-		event: { modelKey, status: "download", name: `${repo}/${filename}`, file: filename },
+	return downloadHubFile({
+		repo,
+		revision: SHERPA_HF_REVISION,
+		filename,
+		dest,
+		modelKey,
+		transport,
+		requestId,
 	});
-	const part = `${dest}.part`;
-	const handle = await fs.open(part, "w");
-	let loaded = 0;
-	let lastEmitted = 0;
-	const reader = response.body.getReader();
-	try {
-		for (;;) {
-			const { done, value } = await reader.read();
-			if (done) break;
-			if (!value) continue;
-			await handle.write(value);
-			loaded += value.byteLength;
-			if (loaded - lastEmitted >= PROGRESS_EMIT_BYTES || (total > 0 && loaded >= total)) {
-				lastEmitted = loaded;
-				transport.send({
-					type: "progress",
-					id: requestId,
-					event: {
-						modelKey,
-						status: "progress",
-						name: `${repo}/${filename}`,
-						file: filename,
-						loaded,
-						total: total || loaded,
-					},
-				});
-			}
-		}
-	} finally {
-		await handle.close();
-	}
-	await fs.rename(part, dest);
 }
 
 /**

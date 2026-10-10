@@ -3,6 +3,7 @@ import chalk from "@oh-my-pi/pi-utils/chalk";
 import {
 	DEFAULT_TINY_TITLE_LOCAL_MODEL_KEY,
 	getTinyLocalModelSpec,
+	isTinyJudgeLocalModelKey,
 	isTinyLocalModelKey,
 	TINY_LOCAL_MODELS,
 	type TinyLocalModelKey,
@@ -73,9 +74,13 @@ export function resolveModels(model: string | undefined, mlx = tinyWorkerUsesMlx
 	if (!model) return [DEFAULT_TINY_TITLE_LOCAL_MODEL_KEY];
 	// `all` is a prefetch convenience: skip models the active backend refuses before
 	// load, so the bulk download stays green when every *usable* model succeeds.
+	// Judge models are opt-in (role-scoped download on first judge use), not bulk
+	// prefetch: a title-only user never asked for the ~577MB judge weights.
 	if (model === "all")
 		return TINY_LOCAL_MODELS.filter(
-			spec => mlx || !("onnxUnsupportedReason" in spec) || !spec.onnxUnsupportedReason,
+			spec =>
+				!isTinyJudgeLocalModelKey(spec.key) &&
+				(mlx || !("onnxUnsupportedReason" in spec) || !spec.onnxUnsupportedReason),
 		).map(spec => spec.key);
 	if (!isTinyLocalModelKey(model)) {
 		const values = TINY_LOCAL_MODELS.map(spec => spec.key).join(", ");
@@ -100,7 +105,8 @@ async function listModels(json: boolean | undefined): Promise<void> {
 	writeLine(chalk.bold("Tiny local models"));
 	for (const spec of TINY_LOCAL_MODELS) {
 		const defaultMark = spec.key === DEFAULT_TINY_TITLE_LOCAL_MODEL_KEY ? chalk.cyan(" default") : "";
-		writeLine(`${chalk.cyan(spec.key)}${defaultMark}`);
+		const judgeMark = isTinyJudgeLocalModelKey(spec.key) ? chalk.yellow(" judge-only") : "";
+		writeLine(`${chalk.cyan(spec.key)}${defaultMark}${judgeMark}`);
 		writeLine(`  ${spec.label} — ${spec.description}`);
 	}
 	const status = wordCompletion.ready ? chalk.green("downloaded") : chalk.dim("not downloaded");

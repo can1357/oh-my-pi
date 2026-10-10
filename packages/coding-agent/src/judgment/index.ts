@@ -45,9 +45,10 @@ import { formatModelStringWithRouting, resolveRoleChain, type RoleChainCandidate
 import { roleCandidatePool } from "../config/model-roles";
 import type { Settings } from "../config/settings";
 import type { SessionManager } from "../session/session-manager";
-import { getTinyLocalModelSpec } from "../tiny/models";
+import { getTinyLocalModelSpec, isTinyJudgeLocalModelKey } from "../tiny/models";
 import localPromptTemplate from "../prompts/system/judgment-local.md" with { type: "text" };
 import { tinyModelClient } from "../tiny/title-client";
+import { LocalJudge } from "./local-judge";
 import type { JudgmentCache } from "./cache";
 
 export * from "./cache";
@@ -194,14 +195,21 @@ export function kindOf(value: RoleChainCandidate | Model): JudgeKind {
 /**
  * The `judge` role's candidates in attempt order, drawn from credentialed
  * judge-capable models. From the first native candidate on, only native
- * candidates remain: a prompted model never stands in for a failed native
- * judgment, whose calibrated probabilities it cannot reproduce.
+ * candidates and logits-based local decision models remain: a prompted or
+ * keyword-classified model never stands in for a failed native judgment,
+ * whose calibrated probabilities it cannot reproduce. A local decision model
+ * (native per-option probabilities) can.
  */
 function judgeRoleChain(settings: Settings, registry: ModelRegistry): RoleChainCandidate[] {
 	const chain = resolveRoleChain("judge", settings, roleCandidatePool("judge", settings, registry));
 	const firstNative = chain.findIndex(candidate => kindOf(candidate) === "native");
 	if (firstNative < 0) return chain;
-	return chain.filter((candidate, index) => index < firstNative || kindOf(candidate) === "native");
+	return chain.filter(
+		(candidate, index) =>
+			index < firstNative ||
+			kindOf(candidate) === "native" ||
+			(kindOf(candidate) === "local" && isTinyJudgeLocalModelKey(candidate.model.id)),
+	);
 }
 
 /**
@@ -333,7 +341,10 @@ export class ChainJudge implements Judge {
 
 	async #createJudge(candidate: RoleChainCandidate, signal: AbortSignal | undefined): Promise<Judge | undefined> {
 		const model = candidate.model;
-		if (model.api === "local-inference") return new TextJudge(new LocalTextBackend(model.id));
+		if (model.api === "local-inference") {
+			if (isTinyJudgeLocalModelKey(model.id)) return new LocalJudge(model.id);
+			return new TextJudge(new LocalTextBackend(model.id));
+		}
 		if (!(await this.#deps.registry.getApiKey(model, this.#deps.sessionId, { signal }))) return undefined;
 		const apiKey = this.#deps.registry.resolver(model, this.#deps.sessionId);
 		if (isJudgmentApi(model.api)) {

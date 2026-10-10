@@ -366,7 +366,7 @@ function cudaFailureHint(
 	return "check the host CUDA driver, device visibility, and ONNX Runtime CUDA compatibility";
 }
 
-function resolveOnnxRuntimePackageDir(metadata: TransformersRuntimeMetadata): string | null {
+export function resolveOnnxRuntimePackageDir(metadata: TransformersRuntimeMetadata): string | null {
 	const entry = metadata.__ompTransformersEntry;
 	if (entry) {
 		try {

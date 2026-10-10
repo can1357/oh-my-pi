@@ -96,6 +96,13 @@ provider "local" {
 			limits
 			supports-tools #false
 		}
+		model "julia-1" name="Julia-1 144M" {
+			reasoning #false
+			input "text"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits
+			supports-tools #false
+		}
 	}
 
 	models "kokoro" {
@@ -106,5 +113,8 @@ provider "local" {
 	}
 	models "lfm*" "falcon-*" "qwen*" "llama3.2:3b" "gemma-3-1b" {
 		kind "tiny"
+	}
+	models "julia-1" {
+		kind "judge"
 	}
 }
