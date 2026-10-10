@@ -312,7 +312,12 @@ import {
 	semanticToolResult,
 } from "./checkpoint-entries";
 import type { ClientBridge } from "./client-bridge";
-import { type ClaudeResetAction, type ClaudeResetPlan, planClaudeResetRedemptions } from "./claude-auto-reset";
+import {
+	type ClaudeResetAction,
+	type ClaudeResetPlan,
+	claudeResetStatusesFromReports,
+	planClaudeResetRedemptions,
+} from "./claude-auto-reset";
 import {
 	type CodexAutoRedeemCoordinator,
 	type CodexResetAction,
@@ -12919,8 +12924,9 @@ export class AgentSession implements SettingsScope {
 	/**
 	 * One process-wide salvage sweep handles both providers, but plans and asks
 	 * consent independently. Last-chance expiry checks remain active even with
-	 * the broader salvage horizon disabled. Every candidate is refreshed through
-	 * its live listing before spend; a failed listing cannot fall back to stale usage.
+	 * the broader salvage horizon disabled. Codex candidates are refreshed through
+	 * a live listing before spend; Claude plans from the reset inventory in the
+	 * usage reports, and redeem re-lists the chosen account live before spending.
 	 */
 	#maybeScheduleResetSweep(reports: UsageReport[]): void {
 		const coordinator = this.#resetCoordinator;
@@ -12957,7 +12963,8 @@ export class AgentSession implements SettingsScope {
 			}
 			if (claudeEnabled) {
 				try {
-					const statuses = await this.listResetCredits(AbortSignal.timeout(10_000), "anthropic");
+					const accounts = this.#modelRegistry.authStorage.oauth.accounts("anthropic", this.sessionId);
+					const statuses = claudeResetStatusesFromReports(accounts, reports);
 					const plan = this.#planClaudeResets("sweep", reports, statuses, coordinator);
 					if (
 						plan.actions.length > 0 &&
@@ -12967,7 +12974,7 @@ export class AgentSession implements SettingsScope {
 						await this.#executeResetActions("anthropic", plan.actions, coordinator);
 					}
 				} catch (error) {
-					logger.warn("claude-auto-reset: salvage listing failed", { error: String(error) });
+					logger.warn("claude-auto-reset: salvage failed", { error: String(error) });
 				}
 			}
 		})()

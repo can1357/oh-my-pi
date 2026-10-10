@@ -1,4 +1,5 @@
 import {
+	type OAuthAccountSummary,
 	type ResetCreditAccountStatus,
 	type ResetCreditTarget,
 	resolveUsedFraction,
@@ -65,7 +66,10 @@ export interface ClaudeResetPlanInput {
 	};
 	/** Fresh usage for every stored Claude account. */
 	reports: UsageReport[] | null;
-	/** Authoritative live Cedar/Juniper eligibility for every stored account. */
+	/**
+	 * Cedar/Juniper eligibility for every stored account: a live listing for a
+	 * blocked retry, the usage reports' inventory for background salvage.
+	 */
 	statuses: readonly ResetCreditAccountStatus[];
 	attemptedKeys: ReadonlySet<string>;
 	deferredUntilByKey: ReadonlyMap<string, number>;
@@ -133,6 +137,31 @@ function reportMatchesStatus(report: UsageReport, status: ResetCreditAccountStat
 	return !!email && email === reportEmail;
 }
 
+/**
+ * Background salvage reads each account's Cedar/Juniper inventory from the
+ * usage report it already holds, which the report fetch discovered; redeem
+ * re-lists the chosen account live before spending. An account whose report
+ * carries no inventory is unknown, never empty.
+ */
+export function claudeResetStatusesFromReports(
+	accounts: readonly OAuthAccountSummary[],
+	reports: readonly UsageReport[],
+): ResetCreditAccountStatus[] {
+	return accounts.map(account => {
+		const status: ResetCreditAccountStatus = {
+			...account,
+			provider: CLAUDE_PROVIDER,
+			availableCount: 0,
+			credits: [],
+		};
+		const report = reports.find(candidate => reportMatchesStatus(candidate, status));
+		const inventory = report?.resetCredits;
+		if (!report || !inventory) return { ...status, error: "Usage report has no saved-reset inventory" };
+		const credits = inventory.credits?.filter((credit): credit is UsageResetCredit => typeof credit.id === "string");
+		return { ...status, ...inventory, credits: credits ?? [], report };
+	});
+}
+
 function creditExpiryMs(credit: UsageResetCredit): number | undefined {
 	if (!credit.expiresAt) return undefined;
 	const parsed = Date.parse(credit.expiresAt);
@@ -190,9 +219,10 @@ function skipForEpisode(
 }
 
 /**
- * Pure Claude Cedar/Juniper auto-spend planner. The live listing is the sole
+ * Pure Claude Cedar/Juniper auto-spend planner. The statuses are the sole
  * authority for eligibility and grant selection: an absent/failed status never
- * falls back to a cached report or guesses a different grant.
+ * falls back to a cached report or guesses a different grant, and redeem
+ * re-checks the selected grant live before spending.
  */
 export function planClaudeResetRedemptions(input: ClaudeResetPlanInput): ClaudeResetPlan {
 	const skipped: ClaudeResetSkip[] = [];

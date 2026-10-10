@@ -83,6 +83,12 @@ function claudeStatus(requiresLimit: boolean): ResetCreditAccountStatus {
 	};
 }
 
+/** The usage report as the broker or local usage fetch hands it over, carrying the account's reset inventory. */
+function withInventory(report: UsageReport, status: ResetCreditAccountStatus): UsageReport {
+	const { availableCount, redeemableCount, eligible, nextCreditId, credits } = status;
+	return { ...report, resetCredits: { availableCount, redeemableCount, eligible, nextCreditId, credits } };
+}
+
 describe("Claude saved-reset trigger integration", () => {
 	let authStorage: AuthStorage;
 	let modelRegistry: ModelRegistry;
@@ -128,7 +134,12 @@ describe("Claude saved-reset trigger integration", () => {
 		autoRedeem?: "unset" | "yes" | "no";
 		salvageHorizonHours?: number;
 		keepCredits?: number;
-	}): { session: AgentSession; coordinator: CodexAutoRedeemCoordinator; targets: ResetCreditTarget[] } {
+	}): {
+		session: AgentSession;
+		coordinator: CodexAutoRedeemCoordinator;
+		targets: ResetCreditTarget[];
+		listCalls: () => number;
+	} {
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!model) throw new Error("Expected bundled anthropic/claude-sonnet-4-5 to exist");
 		authStorage.keys.setRuntime("anthropic", "test-key");
@@ -137,6 +148,9 @@ describe("Claude saved-reset trigger integration", () => {
 			email: EMAIL,
 			orgId: ORG_ID,
 		});
+		vi.spyOn(authStorage.oauth, "accounts").mockReturnValue([
+			{ position: 0, credentialId: CREDENTIAL_ID, accountId: ACCOUNT_ID, email: EMAIL, orgId: ORG_ID, active: true },
+		]);
 		vi.spyOn(authStorage.usage, "reports").mockImplementation(async () => options.report && [options.report]);
 		let listAttempts = 0;
 		vi.spyOn(authStorage.resets, "list").mockImplementation(async request => {
@@ -203,7 +217,7 @@ describe("Claude saved-reset trigger integration", () => {
 			codexResetCoordinator: coordinator,
 		});
 		sessions.push(session);
-		return { session, coordinator, targets };
+		return { session, coordinator, targets, listCalls: () => listAttempts };
 	}
 
 	it("redeems the exact live Cedar grant on a blocked retry and immediately recovers", async () => {
@@ -344,10 +358,11 @@ describe("Claude saved-reset trigger integration", () => {
 		expect(peer.session.agent.state.messages.at(-1)).toMatchObject({ role: "assistant", stopReason: "error" });
 	});
 
-	it("salvages an expiring early-use Cedar grant from the usage heartbeat exactly once", async () => {
-		const { session, coordinator, targets } = buildSession({
-			report: claudeReport(0.5),
-			status: claudeStatus(false),
+	it("salvages an expiring early-use Cedar grant from the usage heartbeat exactly once, without listing", async () => {
+		const status = claudeStatus(false);
+		const { session, coordinator, targets, listCalls } = buildSession({
+			report: withInventory(claudeReport(0.5), status),
+			status,
 		});
 
 		await session.fetchUsageReports();
@@ -359,18 +374,31 @@ describe("Claude saved-reset trigger integration", () => {
 		await session.fetchUsageReports();
 		await coordinator.sweepPromise;
 		expect(targets).toHaveLength(1);
+		expect(listCalls()).toBe(0);
+	});
+
+	it("leaves an account unsalvaged when its usage report carries no reset inventory", async () => {
+		const { session, coordinator, targets, listCalls } = buildSession({
+			report: claudeReport(0.5),
+			status: claudeStatus(false),
+		});
+
+		await session.fetchUsageReports();
+		await coordinator.sweepPromise;
+		expect(targets).toEqual([]);
+		expect(listCalls()).toBe(0);
 	});
 
 	it.each(["yes", "no", "unset"] as const)(
 		"only consumes an imminent reset with consent when auto-redeem is %s",
 		async autoRedeem => {
-			const report = claudeReport(0);
 			const status = claudeStatus(false);
-			status.report = report;
 			for (const credit of status.credits) {
 				credit.expiresAt = new Date(Date.now() + 4 * 60_000).toISOString();
 				credit.usedFractions = { "anthropic:7d": 0 };
 			}
+			const report = withInventory(claudeReport(0), status);
+			status.report = report;
 			const { session, coordinator, targets } = buildSession({
 				report,
 				status,
@@ -406,9 +434,10 @@ describe("Claude saved-reset trigger integration", () => {
 	it("does not spend headlessly before independent Claude consent", async () => {
 		// Codex being disabled does not enable Claude, and an unset headless
 		// session cannot spend silently.
+		const status = claudeStatus(false);
 		const { session, coordinator, targets } = buildSession({
-			report: claudeReport(0.5),
-			status: claudeStatus(false),
+			report: withInventory(claudeReport(0.5), status),
+			status,
 			autoRedeem: "unset",
 		});
 
