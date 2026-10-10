@@ -1,6 +1,6 @@
 /** Options shared by every native input helper. */
 interface ComputerInputOptions {
-	/** Omit for background input, or foreground takeover while control is acquired. Explicit false always stays background. */
+	/** Omit or false for background input; true takes over the target in the foreground, with or without acquired control. */
 	takeover?: boolean;
 }
 

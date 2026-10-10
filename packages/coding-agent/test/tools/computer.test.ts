@@ -111,7 +111,7 @@ class FakeNativeSession implements NativeDesktopSession {
 	controlActive = false;
 	acquireCount = 0;
 	readonly operations: string[] = [];
-	readonly inputModes: boolean[] = [];
+	readonly takeovers: (boolean | undefined)[] = [];
 	sourceWidth = 64;
 	sourceHeight = 32;
 
@@ -186,7 +186,7 @@ class FakeNativeSession implements NativeDesktopSession {
 	}
 	async click(_target: string, _x: number, _y: number, _opts?: PointerOptions | null): Promise<void> {
 		this.clickCount += 1;
-		this.inputModes.push(_opts?.takeover ?? this.controlActive);
+		this.takeovers.push(_opts?.takeover);
 	}
 	async moveMouse(_target: string, _x: number, _y: number, _opts?: PointerOptions | null): Promise<void> {}
 	async drag(_target: string, _points: DesktopPoint[], _opts?: PointerOptions | null): Promise<void> {}
@@ -1589,11 +1589,12 @@ describe("expanded computer APIs", () => {
 				).toEqual({ active: approved });
 				expect(native.acquireCount).toBe(approved ? 1 : 0);
 				await supervisor.run(
-					"const win = await desktop.window(42); await win.click(1, 2); await win.click(1, 2, { takeover: false });",
+					"const win = await desktop.window(42); await win.click(1, 2); await win.click(1, 2, { takeover: false }); await win.click(1, 2, { takeover: true });",
 					2000,
 					snapshot(),
 				);
-				expect(native.inputModes).toEqual([approved, false]);
+				// The grant never fills in an omitted takeover; only the call decides.
+				expect(native.takeovers).toEqual([undefined, false, true]);
 				await supervisor.revokeControl();
 				expect(native.controlActive).toBe(false);
 				expect(
