@@ -1199,6 +1199,7 @@
 - Fixed auto-compaction overflowing the context window every cycle when `compaction.thresholdTokens` or an `f<tokens>` model limit is at or past a window the provider caps lower (such as Factory's 196K Kimi K3); it now compacts at the window less the reserve, and `/models` shows the trigger as capped ([#15146](https://github.com/can1357/oh-my-pi/pull/15146) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed resumed xAI, Factory Droid and OpenAI sessions forgetting earlier reasoning on their first request, while a retry after a stale Responses item error still rebuilds history ([#15148](https://github.com/can1357/oh-my-pi/pull/15148) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed the startup default ignoring the model a provider's discovery names as the account's default: with no model chosen, Devin Pro now starts on SWE-2 at High instead of SWE-1.6 ([#15115](https://github.com/can1357/oh-my-pi/pull/15115) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed model-authored `omp://` documentation links in the transcript rendering as plain text: the first render now materializes each embedded doc into a content-addressed, read-only cache under `~/.omp/cache/docs/<hash>/` and hyperlinks that file, while `read`, `grep`, and attachment displays keep showing the `omp://` URL ([#15018](https://github.com/can1357/oh-my-pi/issues/15018))
 
 ## [18.8.7] - 2026-10-09
 
