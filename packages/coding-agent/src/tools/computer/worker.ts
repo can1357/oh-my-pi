@@ -111,7 +111,7 @@ type DragOptions = InputOptions & { modifiers?: string[]; keys?: string[] };
 type ScrollOptions = InputOptions & { dx?: number; dy?: number };
 type AxOptions = Pick<AxSnapshotOptions, "all" | "maxDepth">;
 type HoldOptions = Pick<NativeHoldOptions, "duration" | "takeover">;
-type HoldMouseOptions = NativeHoldOptions;
+type HoldMouseOptions = Pick<NativeHoldOptions, "duration" | "button" | "keys" | "takeover">;
 type ObservationResult = ScreenshotResult & { ax: string; nodeCount: number; truncated: boolean };
 
 type PendingTool = { resolve(value: unknown): void; reject(reason?: unknown): void };
@@ -609,7 +609,12 @@ class Win {
 			context,
 			"holdKeys",
 			options.takeover,
-			fallback => this.#session.holdKeys(this.id, keys, fallback ? { ...options, ...fallback } : options),
+			fallback =>
+				this.#session.holdKeys(this.id, keys, {
+					duration: options.duration,
+					takeover: options.takeover,
+					...fallback,
+				}),
 			this.pid,
 		);
 	}
@@ -624,7 +629,14 @@ class Win {
 			context,
 			"holdMouse",
 			options.takeover,
-			fallback => this.#session.holdMouse(this.id, x, y, fallback ? { ...options, ...fallback } : options),
+			fallback =>
+				this.#session.holdMouse(this.id, x, y, {
+					duration: options.duration,
+					button: options.button,
+					keys: options.keys,
+					takeover: options.takeover,
+					...fallback,
+				}),
 			this.pid,
 		);
 	}

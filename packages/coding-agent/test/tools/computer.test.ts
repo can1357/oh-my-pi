@@ -29,6 +29,7 @@ import type {
 	DesktopDisplay,
 	DesktopPoint,
 	DesktopWindow,
+	HoldOptions as NativeHoldOptions,
 	PointerOptions,
 } from "@oh-my-pi/pi-natives";
 
@@ -2003,6 +2004,25 @@ describe("computer background fallback", () => {
 		if (refused.ok) return;
 		expect(refused.error.message).toBe(`BackgroundUnavailable: ${reason}`);
 		expect(background.sent).toEqual([{ takeover: false }]);
+	});
+
+	it("never forwards a model-supplied returnFocus on holds; only the host's rerun sets it", async () => {
+		const native = new RefusingSession();
+		const holds: NativeHoldOptions[] = [];
+		native.holdKeys = async (_target: string, _keys: string[], options: NativeHoldOptions) => {
+			holds.push(options);
+			if (options.takeover !== true) throw new Error(native.refusal);
+		};
+		native.holdMouse = async (_target: string, _x: number, _y: number, options: NativeHoldOptions) => {
+			holds.push(options);
+		};
+		const code = [
+			'const win = await desktop.window("42");',
+			"await win.holdMouse(1, 2, { duration: 0, takeover: true, returnFocus: true });",
+			"await win.holdKeys(['a'], { duration: 0, returnFocus: true });",
+		].join("\n");
+		await run(native, code, "takeover");
+		expect(holds.map(options => options.returnFocus)).toEqual([undefined, undefined, true]);
 	});
 
 	it("reports where focus actually ended instead of assuming it returned", async () => {
