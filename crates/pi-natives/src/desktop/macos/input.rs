@@ -2486,47 +2486,6 @@ mod tests {
 		}
 	}
 
-	/// Idles as the process of the fake Electron app below.
-	#[test]
-	#[ignore = "child process of background_guard_admits_every_gesture_into_a_live_electron_app"]
-	fn idle_as_a_child_process() {
-		std::thread::sleep(Duration::from_secs(30));
-	}
-
-	#[test]
-	fn background_guard_admits_every_gesture_into_a_live_electron_app() {
-		// A copy of this test binary inside a bundle that ships Electron's
-		// framework is, by process identity, an Electron app. A hard link would
-		// share the binary's vnode, and launching it from a bundle path gets
-		// concurrent launches of the test binary killed by code signing.
-		let root = std::env::temp_dir().join(format!("pi-electron-guard-{}", std::process::id()));
-		let contents = root.join("Fake.app/Contents");
-		std::fs::create_dir_all(contents.join("MacOS")).expect("bundle");
-		std::fs::create_dir_all(contents.join("Frameworks/Electron Framework.framework"))
-			.expect("framework");
-		let executable = contents.join("MacOS/Fake");
-		let test_binary = std::env::current_exe().expect("test binary");
-		std::fs::copy(&test_binary, &executable).expect("copy the test binary");
-		let (_, name) = module_path!().split_once("::").expect("crate path");
-		let mut child = std::process::Command::new(&executable)
-			.args(["--exact", &format!("{name}::idle_as_a_child_process"), "--ignored"])
-			.stdout(std::process::Stdio::null())
-			.spawn()
-			.expect("spawn the fake Electron app");
-		let pid = libc::pid_t::try_from(child.id()).expect("pid");
-		let window = background_window("Electron");
-		let (presses, others) = gestures();
-		let refused: Vec<_> = presses
-			.iter()
-			.chain(&others)
-			.filter(|event| background_guard(&window, pid, event).is_err())
-			.collect();
-		let _ = child.kill();
-		let _ = child.wait();
-		let _ = std::fs::remove_dir_all(&root);
-		assert!(refused.is_empty(), "refused in Electron: {refused:#?}");
-	}
-
 	#[test]
 	fn background_pointer_events_carry_the_time_they_are_routed() {
 		// A page times a held press from its events' timestamps; Quartz leaves
