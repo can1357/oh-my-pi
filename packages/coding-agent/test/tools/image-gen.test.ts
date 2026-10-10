@@ -226,12 +226,25 @@ describe("imageGenTool catalog routing", () => {
 		collectPaths(result);
 		expect(result.details?.model).toBe("second-image");
 
-		const failingFetch: FetchImpl = async () =>
-			new Response(JSON.stringify({ error: { message: "failed" } }), { status: 503 });
+		let failedCalls = 0;
+		const failingFetch: FetchImpl = async () => {
+			failedCalls++;
+			return new Response(
+				JSON.stringify({ error: { message: failedCalls === 1 ? "Unsupported image_size" : "quota exceeded" } }),
+				{ status: failedCalls === 1 ? 400 : 503 },
+			);
+		};
 		const failingContext = createContext({ models: [first, second], settings, fetch: failingFetch });
-		await expect(
-			imageGenTool.execute("aggregate", { subject: "fails" }, undefined, failingContext),
-		).rejects.toBeInstanceOf(AggregateError);
+		try {
+			await imageGenTool.execute("aggregate", { subject: "fails" }, undefined, failingContext);
+			throw new Error("Expected exhausted image chain");
+		} catch (error) {
+			expect(error).toBeInstanceOf(AggregateError);
+			if (!(error instanceof AggregateError)) throw error;
+			expect(error.message).toContain("deepinfra/first-image image request failed (400): Unsupported image_size");
+			expect(error.message).toContain("openrouter/second-image image request failed (503): quota exceeded");
+			expect(error.errors).toHaveLength(2);
+		}
 	});
 
 	it("propagates transport I/O failures without trying the next model", async () => {
@@ -318,8 +331,12 @@ describe("imageGenTool catalog routing", () => {
 	it("uses the selected Gemini catalog id and base URL", async () => {
 		const model = catalogModel("google", "gemini-selected-image", "google-generative-ai");
 		let requestUrl: string | undefined;
-		const fetchMock: FetchImpl = async input => {
+		const fetchMock: FetchImpl = async (input, init) => {
 			requestUrl = input.toString();
+			const body = JSON.parse(String(init?.body));
+			if (body.generationConfig.imageConfig?.imageSize !== "1K") {
+				return Response.json({ error: { message: "Unsupported image_size" } }, { status: 400 });
+			}
 			return new Response(
 				JSON.stringify({
 					candidates: [{ content: { parts: [{ inlineData: { data: PNG_DATA, mimeType: "image/png" } }] } }],
@@ -330,7 +347,12 @@ describe("imageGenTool catalog routing", () => {
 		const settings = Settings.isolated({ modelRoles: { image: "google/gemini-selected-image" } });
 		const ctx = createContext({ models: [model], settings, fetch: fetchMock });
 
-		const result = await imageGenTool.execute("gemini", { subject: "gemini" }, undefined, ctx);
+		const result = await imageGenTool.execute(
+			"gemini",
+			{ subject: "gemini", image_size: "1024x1024" },
+			undefined,
+			ctx,
+		);
 		collectPaths(result);
 
 		expect(requestUrl).toBe("https://google.example/v1/models/gemini-selected-image:generateContent");

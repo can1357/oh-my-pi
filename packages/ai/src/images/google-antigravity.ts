@@ -8,6 +8,7 @@ import { getAntigravityUserAgent } from "@oh-my-pi/pi-catalog/wire/gemini-header
 import { readSseJson } from "@oh-my-pi/pi-utils";
 import { withAuth } from "../auth-retry";
 import * as AIError from "../error";
+import { geminiImageConfig } from "./gemini-image-config";
 import { errorMessage, ImageApiError, usageFromWire } from "./shared";
 import type { GeneratedImage, ImageGenerationOptions, ImageGenerationRequest, ImageGenerationResult } from "./types";
 
@@ -76,10 +77,7 @@ function buildRequest(request: ImageGenerationRequest, model: string, projectId:
 		inlineData: image,
 	}));
 	parts.push({ text: request.prompt });
-	const imageConfig =
-		request.aspectRatio || request.imageSize
-			? { aspectRatio: request.aspectRatio, imageSize: request.imageSize }
-			: undefined;
+	const imageConfig = request.aspectRatio || request.imageSize ? geminiImageConfig(request) : undefined;
 	return {
 		project: projectId,
 		model,

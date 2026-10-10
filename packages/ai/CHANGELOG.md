@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed Gemini image requests with pixel-based image sizes failing on Google and OpenRouter instead of using supported resolution tiers and aspect ratios ([#15139](https://github.com/can1357/oh-my-pi/issues/15139)).
+
 ## [18.8.7] - 2026-10-09
 
 ### Added
