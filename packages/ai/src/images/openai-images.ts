@@ -41,6 +41,7 @@ export async function generateOpenAIImage(
 				n: count,
 				response_format: "b64_json",
 				...(size ? { size } : {}),
+				...(request.background ? { background: request.background } : {}),
 			};
 	const inputImages = request.inputImages ?? [];
 	if (isXAI && inputImages.length > XAI_MAX_EDIT_IMAGES) {
@@ -84,6 +85,7 @@ export async function generateOpenAIImage(
 				form.set("n", String(count));
 				form.set("response_format", "b64_json");
 				if (size) form.set("size", size);
+				if (request.background) form.set("background", request.background);
 				for (const image of inputImages) {
 					form.append("image", new File([Buffer.from(image.data, "base64")], "image", { type: image.mimeType }));
 				}

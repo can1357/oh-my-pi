@@ -5,6 +5,7 @@
 ### Added
 
 - Added **Extra Context Files** to `/settings` → **Context** so custom instruction filenames can be configured without editing YAML ([#15252](https://github.com/can1357/oh-my-pi/pull/15252) by [@Shadorain](https://github.com/Shadorain)).
+- Added transparent, opaque, and automatic background preferences to `generate_image`, skipping image models that cannot honor explicit preferences ([#13047](https://github.com/can1357/oh-my-pi/issues/13047)).
 
 ## [18.8.9] - 2026-10-10
 

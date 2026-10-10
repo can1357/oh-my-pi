@@ -6,6 +6,7 @@ const imageJsonRequestSchema = type({
 	model: "string > 0",
 	prompt: "string > 0",
 	"n?": "unknown",
+	"background?": "'transparent' | 'opaque' | 'auto'",
 	"size?": "unknown",
 	"image_size?": "unknown",
 	"aspect_ratio?": "unknown",
@@ -45,6 +46,14 @@ function optionalCount(value: unknown): number | undefined {
 	return value;
 }
 
+function optionalBackground(value: unknown): ImageGenerationRequest["background"] {
+	if (value === undefined || value === null) return undefined;
+	if (value !== "transparent" && value !== "opaque" && value !== "auto") {
+		validation("background must be transparent, opaque, or auto");
+	}
+	return value;
+}
+
 function decodeInputReference(value: unknown): { data: string; mimeType: string } {
 	let raw: unknown = value;
 	if (value !== null && typeof value === "object") {
@@ -81,6 +90,7 @@ function parseJson(body: unknown, kind: ImageRequestKind): ImagesParsedRequest {
 		modelId: parsed.model,
 		request: {
 			prompt: parsed.prompt,
+			...(parsed.background ? { background: parsed.background } : {}),
 			...(values.length > 0 ? { inputImages: values.map(decodeInputReference) } : {}),
 			...(aspectRatio ? { aspectRatio } : {}),
 			...(imageSize ? { imageSize } : {}),
@@ -116,11 +126,13 @@ async function parseMultipart(form: FormData): Promise<ImagesParsedRequest> {
 	}
 	const size = form.get("size");
 	if (size !== null && typeof size !== "string") validation("size must be a string");
+	const background = optionalBackground(form.get("background"));
 	return {
 		modelId: model,
 		request: {
 			prompt,
 			inputImages,
+			...(background ? { background } : {}),
 			...(size ? { imageSize: size } : {}),
 			...(count ? { count } : {}),
 		},

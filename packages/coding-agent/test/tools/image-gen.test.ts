@@ -208,30 +208,172 @@ describe("imageGenTool catalog routing", () => {
 		expect(result.details?.model).toBe("fallback-image");
 	});
 
-	it("advances after provider HTTP failures and aggregates an exhausted chain", async () => {
-		const first = catalogModel("deepinfra", "first-image", "openai-images");
-		const second = catalogModel("openrouter", "second-image", "openrouter-images");
+	it("skips models that cannot honor a transparent background and uses a supporting fallback", async () => {
+		const unsupported = catalogModel("xai", "grok-imagine-image", "openai-images");
+		const fallback = catalogModel("deepinfra", "fallback-image", "openai-images");
 		const settings = Settings.isolated({
-			modelRoles: { image: "deepinfra/first-image" },
-			"retry.fallbackChains": { image: ["openrouter/second-image"] },
+			modelRoles: { image: "xai/grok-imagine-image" },
+			"retry.fallbackChains": { image: ["deepinfra/fallback-image"] },
 		});
-		let calls = 0;
-		const succeedingFetch: FetchImpl = async () => {
-			calls++;
-			if (calls === 1) return new Response(JSON.stringify({ error: { message: "first failed" } }), { status: 503 });
+		const urls: string[] = [];
+		let requestBody: Record<string, unknown> | undefined;
+		const fetchMock: FetchImpl = async (input, init) => {
+			urls.push(input.toString());
+			requestBody = JSON.parse(String(init?.body));
 			return imageResponse();
 		};
-		const successContext = createContext({ models: [first, second], settings, fetch: succeedingFetch });
-		const result = await imageGenTool.execute("http-fallback", { subject: "fallback" }, undefined, successContext);
-		collectPaths(result);
-		expect(result.details?.model).toBe("second-image");
+		const ctx = createContext({ models: [unsupported, fallback], settings, fetch: fetchMock });
 
-		const failingFetch: FetchImpl = async () =>
-			new Response(JSON.stringify({ error: { message: "failed" } }), { status: 503 });
-		const failingContext = createContext({ models: [first, second], settings, fetch: failingFetch });
+		const result = await imageGenTool.execute(
+			"background-fallback",
+			{ subject: "cutout", background: "transparent" },
+			undefined,
+			ctx,
+		);
+		collectPaths(result);
+
+		expect(urls).toEqual(["https://deepinfra.example/v1/images/generations"]);
+		expect(requestBody).toMatchObject({ model: "fallback-image", background: "transparent" });
+		expect(result.details?.model).toBe("fallback-image");
+	});
+
+	it("reports background capability before authentication or input resolution when no candidate supports it", async () => {
+		const xai = catalogModel("xai", "grok-imagine-image", "openai-images");
+		const openrouter = catalogModel("openrouter", "native-image", "openrouter-images");
+		let calls = 0;
+		const ctx = createContext({
+			models: [xai, openrouter],
+			settings: Settings.isolated({
+				modelRoles: { image: "xai/grok-imagine-image" },
+				"retry.fallbackChains": { image: ["openrouter/native-image"] },
+			}),
+			credentials: { xai: undefined, openrouter: undefined },
+			fetch: async () => {
+				calls++;
+				return imageResponse();
+			},
+		});
+
+		const error = await imageGenTool
+			.execute(
+				"background-unsupported",
+				{ subject: "cutout", background: "transparent", input: [{ data: PNG_DATA }] },
+				undefined,
+				ctx,
+			)
+			.catch((error: unknown) => error);
+
+		expect(error).toBeInstanceOf(Error);
+		expect(error).not.toBeInstanceOf(AggregateError);
+		expect(error).toHaveProperty("message", expect.stringContaining('supports background "transparent"'));
+		expect(error).toHaveProperty("message", expect.stringContaining("xai/grok-imagine-image"));
+		expect(error).toHaveProperty("message", expect.stringContaining("openrouter/native-image"));
+		expect(calls).toBe(0);
+	});
+
+	it("does not fall back from an explicit model that cannot honor the requested background", async () => {
+		const unsupported = catalogModel("xai", "grok-imagine-image", "openai-images");
+		const supporting = catalogModel("deepinfra", "configured-image", "openai-images");
+		let calls = 0;
+		const ctx = createContext({
+			models: [unsupported, supporting],
+			settings: Settings.isolated({ modelRoles: { image: "deepinfra/configured-image" } }),
+			fetch: async () => {
+				calls++;
+				return imageResponse();
+			},
+		});
+
 		await expect(
-			imageGenTool.execute("aggregate", { subject: "fails" }, undefined, failingContext),
-		).rejects.toBeInstanceOf(AggregateError);
+			imageGenTool.execute(
+				"background-explicit",
+				{ subject: "solid background", background: "opaque", model: "xai/grok-imagine-image" },
+				undefined,
+				ctx,
+			),
+		).rejects.toThrow('supports background "opaque"');
+		expect(calls).toBe(0);
+	});
+
+	it("keeps an auto background candidate even when that provider cannot honor explicit preferences", async () => {
+		const xai = catalogModel("xai", "grok-imagine-image", "openai-images");
+		const supporting = catalogModel("deepinfra", "fallback-image", "openai-images");
+		const urls: string[] = [];
+		const ctx = createContext({
+			models: [xai, supporting],
+			settings: Settings.isolated({
+				modelRoles: { image: "xai/grok-imagine-image" },
+				"retry.fallbackChains": { image: ["deepinfra/fallback-image"] },
+			}),
+			fetch: async input => {
+				urls.push(input.toString());
+				return imageResponse();
+			},
+		});
+
+		const result = await imageGenTool.execute(
+			"background-auto",
+			{ subject: "provider default", background: "auto" },
+			undefined,
+			ctx,
+		);
+		collectPaths(result);
+
+		expect(urls).toEqual(["https://xai.example/v1/images/generations"]);
+		expect(result.details?.provider).toBe("xai");
+	});
+
+	it("preserves an opaque background and edit inputs across HTTP fallback and exhausted supporting candidates", async () => {
+		const first = catalogModel("deepinfra", "first-image", "openai-images");
+		const unsupported = catalogModel("xai", "grok-imagine-image", "openai-images");
+		const second = catalogModel("image-proxy", "second-image", "openai-images");
+		const models = [first, unsupported, second];
+		const settings = Settings.isolated({
+			modelRoles: { image: "deepinfra/first-image" },
+			"retry.fallbackChains": { image: ["xai/grok-imagine-image", "image-proxy/second-image"] },
+		});
+		const params = {
+			subject: "edit reference",
+			background: "opaque" as const,
+			input: [{ data: ` data:image/png;base64,${PNG_DATA} ` }],
+		};
+		const originalParams = structuredClone(params);
+		const urls: string[] = [];
+		const bodies: Array<Record<string, unknown>> = [];
+		const succeedingFetch: FetchImpl = async (input, init) => {
+			urls.push(input.toString());
+			bodies.push(JSON.parse(String(init?.body)));
+			if (urls.length === 1)
+				return new Response(JSON.stringify({ error: { message: "first failed" } }), { status: 503 });
+			return imageResponse();
+		};
+		const successContext = createContext({ models, settings, fetch: succeedingFetch });
+		const result = await imageGenTool.execute("http-fallback", params, undefined, successContext);
+		collectPaths(result);
+		expect(urls).toEqual([
+			"https://deepinfra.example/v1/images/edits",
+			"https://image-proxy.example/v1/images/edits",
+		]);
+		for (const body of bodies) {
+			expect(body).toMatchObject({
+				background: "opaque",
+				input_references: [{ type: "image_url", url: `data:image/png;base64,${PNG_DATA}` }],
+			});
+		}
+		expect(result.details?.model).toBe("second-image");
+		expect(params).toEqual(originalParams);
+
+		let failedCalls = 0;
+		const failingFetch: FetchImpl = async () => {
+			failedCalls++;
+			return new Response(JSON.stringify({ error: { message: "failed" } }), { status: 503 });
+		};
+		const failingContext = createContext({ models, settings, fetch: failingFetch });
+		await expect(imageGenTool.execute("aggregate", params, undefined, failingContext)).rejects.toBeInstanceOf(
+			AggregateError,
+		);
+		expect(failedCalls).toBe(2);
+		expect(params).toEqual(originalParams);
 	});
 
 	it("propagates transport I/O failures without trying the next model", async () => {
@@ -269,6 +411,7 @@ describe("imageGenTool catalog routing", () => {
 			"openai-images",
 			{
 				subject: "edit reference",
+				background: "auto",
 				input: [{ data: PNG_DATA, mime_type: "image/png" }],
 			},
 			undefined,

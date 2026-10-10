@@ -21,12 +21,30 @@ export function isImageGenerationApi(api: Api): api is ImageGenerationApi {
 	return (IMAGE_GENERATION_APIS as readonly Api[]).includes(api);
 }
 
+/** Whether this model accepts an explicit image background preference. */
+export function supportsImageBackground(model: Model<Api>): boolean {
+	switch (model.api) {
+		case "openai-responses":
+		case "openai-codex-responses":
+			return true;
+		case "openai-images":
+			return model.provider !== "xai" && model.provider !== "xai-oauth";
+		default:
+			return false;
+	}
+}
+
 /** Generate (or edit, when `request.inputImages` is set) images through the transport selected by the model's `api`. */
 export async function generateImage(
 	model: Model<Api>,
 	request: ImageGenerationRequest,
 	options: ImageGenerationOptions,
 ): Promise<ImageGenerationResult> {
+	if (request.background && request.background !== "auto" && !supportsImageBackground(model)) {
+		throw new AIError.ValidationError(
+			`Image model ${model.provider}/${model.id} does not support ${request.background} backgrounds`,
+		);
+	}
 	switch (model.api) {
 		case "openai-images":
 			return generateOpenAIImage(model, request, options);

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added transparent, opaque, and automatic image background preferences for supported OpenAI image models ([#13047](https://github.com/can1357/oh-my-pi/issues/13047)).
+
 ## [18.8.9] - 2026-10-10
 
 ### Changed

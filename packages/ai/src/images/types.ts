@@ -8,6 +8,8 @@ export interface ImageInput {
 
 export interface ImageGenerationRequest {
 	prompt: string;
+	/** Preferred background; non-auto preferences require a supporting model. */
+	background?: "transparent" | "opaque" | "auto";
 	inputImages?: ImageInput[];
 	aspectRatio?: string;
 	imageSize?: string;

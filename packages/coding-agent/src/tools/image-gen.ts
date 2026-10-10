@@ -11,6 +11,7 @@ import {
 	isImageGenerationApi,
 	type Model,
 	parseAntigravityCredentials,
+	supportsImageBackground,
 } from "@oh-my-pi/pi-ai";
 import { ProviderHttpError } from "@oh-my-pi/pi-ai/error";
 import { isEnoent, logger, parseImageMetadata, prompt, ptree, Snowflake, untilAborted } from "@oh-my-pi/pi-utils";
@@ -45,6 +46,9 @@ export const imageGenSchema = type({
 	"changes?": type("string[]").describe("edits to make"),
 	"aspect_ratio?": aspectRatioSchema,
 	"image_size?": imageSizeSchema,
+	"background?": type('"transparent" | "opaque" | "auto"').describe(
+		"background preference; transparent and opaque require a supporting image model",
+	),
 	"input?": inputImageSchema.array().describe("input images"),
 	"model?": type("string").describe("image model selector for this request"),
 });
@@ -252,8 +256,15 @@ export const imageGenTool: CustomTool<typeof imageGenSchema, ImageGenToolDetails
 
 			const failures: ProviderHttpError[] = [];
 			const skipped: string[] = [];
+			const requiresBackground = params.background !== undefined && params.background !== "auto";
+			let hasBackgroundCandidate = false;
 			let inputImages: ImageGenerationRequest["inputImages"];
 			for (const model of candidates) {
+				if (requiresBackground && !supportsImageBackground(model)) {
+					skipped.push(`${model.provider}/${model.id} (unsupported background ${params.background})`);
+					continue;
+				}
+				hasBackgroundCandidate = true;
 				if (!isImageGenerationApi(model.api)) {
 					logger.warn("Skipping unsupported image model API", {
 						provider: model.provider,
@@ -301,6 +312,7 @@ export const imageGenTool: CustomTool<typeof imageGenSchema, ImageGenToolDetails
 					inputImages,
 					aspectRatio: params.aspect_ratio,
 					imageSize: params.image_size,
+					background: params.background,
 					count: 1,
 				};
 				const resolvedModel = {
@@ -332,6 +344,11 @@ export const imageGenTool: CustomTool<typeof imageGenSchema, ImageGenToolDetails
 
 			const attempted = candidates.map(model => `${model.provider}/${model.id}`).join(", ");
 			const suffix = skipped.length > 0 ? ` Skipped: ${skipped.join(", ")}.` : "";
+			if (requiresBackground && !hasBackgroundCandidate) {
+				throw new Error(
+					`No image model in the resolved image chain supports background "${params.background}".${suffix}`,
+				);
+			}
 			throw new AggregateError(
 				failures,
 				`Image generation exhausted the resolved image chain${attempted ? `: ${attempted}` : "."}${suffix}`,

@@ -1,5 +1,6 @@
 import { calculateCost } from "@oh-my-pi/pi-catalog/models";
 import { logger } from "@oh-my-pi/pi-utils";
+import * as AIError from "../../error";
 import { classifyGatewayError } from "../../error/gateway";
 import { generateImage } from "../../images";
 import * as imagesServer from "../../providers/images-server";
@@ -112,6 +113,9 @@ async function handleImages(
 		);
 	} catch (error) {
 		if (controller.signal.aborted) return aborted();
+		if (error instanceof AIError.ValidationError) {
+			return imagesServer.formatError(400, "invalid_request_error", error.message);
+		}
 		const classified = classifyGatewayError(error);
 		logger.warn("auth-gateway image generation failed", { format: "images", error: classified.message, peer });
 		return imagesServer.formatError(classified.status, classified.type, classified.message);
