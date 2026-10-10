@@ -4,7 +4,7 @@
 
 ### Changed
 
-- `/modelpreset` (picker and `list`) and the `/models` preset cycling now follow the order presets appear in `config.yml` instead of alphabetical order, so frequently used presets can be moved to the top; project and `--config` presets list before global ones
+- `/modelpreset` (picker and `list`) and the `/models` preset cycling now follow the order presets appear in `config.yml` instead of alphabetical order, so frequently used presets can be moved to the top; project and `--config` presets list before global ones ([#15242](https://github.com/can1357/oh-my-pi/pull/15242) by [@taffy-nya](https://github.com/taffy-nya))
 
 ## [18.8.9] - 2026-10-10
 
