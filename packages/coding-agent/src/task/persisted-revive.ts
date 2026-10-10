@@ -134,16 +134,16 @@ export function createPersistedSubagentReviverFactory(
 				...(init.readSummarize === false ? { "read.summarize.enabled": false } : undefined),
 				...(init.advisor
 					? {
-						"advisor.enabled": true,
-						...(init.advisor !== "on"
-							? {
-								modelRoles: {
-									...ctx.settings.getModelRoles(),
-									advisor: resolveAgentAdvisorRolePattern(init.advisor, ctx.settings),
-								},
-							}
-							: undefined),
-					}
+							"advisor.enabled": true,
+							...(init.advisor !== "on"
+								? {
+										modelRoles: {
+											...ctx.settings.getModelRoles(),
+											advisor: resolveAgentAdvisorRolePattern(init.advisor, ctx.settings),
+										},
+									}
+								: undefined),
+						}
 					: undefined),
 				...compactionThresholdSettings(init.compactionThreshold),
 			});
@@ -207,8 +207,8 @@ export function createPersistedSubagentReviverFactory(
 					// bucket.
 					agentName:
 						init.agent &&
-							init.agent.trim().toLowerCase() !== MAIN_AGENT_RULE_NAME &&
-							init.agent.trim().toLowerCase() !== SUB_AGENT_RULE_NAME
+						init.agent.trim().toLowerCase() !== MAIN_AGENT_RULE_NAME &&
+						init.agent.trim().toLowerCase() !== SUB_AGENT_RULE_NAME
 							? init.agent
 							: ref.displayName,
 					parentTaskPrefix: ref.id,
@@ -235,16 +235,16 @@ export function createPersistedSubagentReviverFactory(
 					enableLsp: restrictToolNames ? false : ctx.enableLsp,
 					...(restrictToolNames
 						? {
-							enableIrc: false,
-							enableMCP: false,
-							preloadedExtensionPaths: [],
-							preloadedCustomToolPaths: [],
-						}
+								enableIrc: false,
+								enableMCP: false,
+								preloadedExtensionPaths: [],
+								preloadedCustomToolPaths: [],
+							}
 						: {
-							enableMCP: !mcpManager,
-							mcpManager,
-							mcpTools: mcpProxyTools.length > 0 ? mcpProxyTools : undefined,
-						}),
+								enableMCP: !mcpManager,
+								mcpManager,
+								mcpTools: mcpProxyTools.length > 0 ? mcpProxyTools : undefined,
+							}),
 				}));
 			} catch (error) {
 				mcpFollower?.dispose();
