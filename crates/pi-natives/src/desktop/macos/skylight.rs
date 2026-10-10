@@ -29,14 +29,10 @@ const EVENT_RECORD_KIND: u8 = 0x0d;
 const WINDOW_ID_OFFSET: usize = 0x3c;
 const FOCUS_MARKER_OFFSET: usize = 0x8a;
 const FOCUS_MARKER: u8 = 0x01;
-const DEFOCUS_MARKER: u8 = 0x02;
 /// `kCPSUserGenerated`: lets `AppKit` install the requested native key window.
 const CPS_USER_GENERATED: u32 = 0x200;
 /// `kCPSNoWindows`: changes the front process without raising its windows.
 const CPS_NO_WINDOWS: u32 = 0x400;
-/// Lets `AppKit` update key-window routing after focus records, and lets the
-/// target consume queued input before its focus is handed back.
-const FOCUS_SETTLE: Duration = Duration::from_millis(50);
 /// Covers delayed AX/AppKit activation after the synchronous action returns.
 /// The lease is joined before returning; it never continues fighting the user.
 const BACKGROUND_SETTLE: Duration = Duration::from_millis(200);
@@ -101,10 +97,8 @@ struct RequiredSpi {
 	/// through both would then deliver every event twice.
 	public_post_to_pid:  Option<SLEventPostToPidFn>,
 	set_integer:         SLEventSetIntegerValueFieldFn,
-	post_record:         SLPSPostEventRecordToFn,
-	get_front:           SLPSGetFrontProcessFn,
 	set_window_location: CGEventSetWindowLocationFn,
-	psn:                 PsnLookup,
+	main_connection:     CGSMainConnectionIDFn,
 }
 
 #[derive(Clone, Copy)]
@@ -157,25 +151,14 @@ fn required() -> CoreResult<&'static RequiredSpi> {
 
 fn resolve_required() -> Option<RequiredSpi> {
 	ensure_skylight_loaded()?;
-	let psn = PsnLookup {
-		main_connection:     Some(symbol(c"CGSMainConnectionID")?),
-		get_window_owner:    symbol(c"SLSGetWindowOwner"),
-		get_connection_psn:  symbol(c"SLSGetConnectionPSN"),
-		get_process_for_pid: symbol(c"GetProcessForPID"),
-	};
-	if !psn.can_resolve() {
-		return None;
-	}
 	let post_to_pid: SLEventPostToPidFn = symbol(c"SLEventPostToPid")?;
 	Some(RequiredSpi {
 		post_to_pid,
 		public_post_to_pid: symbol::<SLEventPostToPidFn>(c"CGEventPostToPid")
 			.filter(|public| *public as usize != post_to_pid as usize),
 		set_integer: symbol(c"SLEventSetIntegerValueField")?,
-		post_record: symbol(c"SLPSPostEventRecordTo")?,
-		get_front: symbol(c"_SLPSGetFrontProcess")?,
 		set_window_location: symbol(c"CGEventSetWindowLocation")?,
-		psn,
+		main_connection: symbol(c"CGSMainConnectionID")?,
 	})
 }
 
@@ -294,14 +277,22 @@ pub(super) fn post_keyboard(pid: pid_t, event: &CGEvent) -> CoreResult<()> {
 	Ok(())
 }
 
-/// The 248-byte focus (`FOCUS_MARKER`) or defocus (`DEFOCUS_MARKER`) event
-/// record addressed to window `wid`.
-fn focus_record(wid: u32, marker: u8) -> [u8; EVENT_RECORD_LENGTH] {
+/// This process's `WindowServer` connection, which `AppKit` stamps on the
+/// window events it builds as their window context.
+pub(super) fn sender_connection() -> CoreResult<i64> {
+	let spi = required()?;
+	// SAFETY: The no-argument connection query was resolved with its exact
+	// signature.
+	Ok(i64::from(unsafe { (spi.main_connection)() }))
+}
+
+/// The 248-byte focus event record addressed to window `wid`.
+fn focus_record(wid: u32) -> [u8; EVENT_RECORD_LENGTH] {
 	let mut record = [0u8; EVENT_RECORD_LENGTH];
 	record[0x04] = EVENT_RECORD_LENGTH_BYTE;
 	record[0x08] = EVENT_RECORD_KIND;
 	record[WINDOW_ID_OFFSET..WINDOW_ID_OFFSET + 4].copy_from_slice(&wid.to_le_bytes());
-	record[FOCUS_MARKER_OFFSET] = marker;
+	record[FOCUS_MARKER_OFFSET] = FOCUS_MARKER;
 	record
 }
 
@@ -486,11 +477,8 @@ pub(super) fn with_background_guard<T>(
 							{
 								set_front(spi, previous.psn, previous_key)?;
 								restored = true;
-								if !post_record(
-									spi.post_record,
-									previous.psn,
-									&focus_record(previous_key, FOCUS_MARKER),
-								) {
+								if !post_record(spi.post_record, previous.psn, &focus_record(previous_key))
+								{
 									return Err(DesktopError::input_failed(
 										"background key-window restoration was rejected",
 									));
@@ -547,117 +535,6 @@ fn set_front(spi: &ForegroundSpi, psn: ProcessSerialNumber, wid: u32) -> CoreRes
 		return Err(DesktopError::input_failed(
 			"WindowServer rejected front-process restoration/activation",
 		));
-	}
-	Ok(())
-}
-
-/// Makes `wid` its process's key window without raising it or changing the
-/// front process, runs `action`, then hands keyboard focus back.
-///
-/// A background process has no key window, so it drops pid-routed keystrokes,
-/// and Chromium ignores clicks on a window that is not active. The focus
-/// records that fix this also defocus the key window of the front process,
-/// which would otherwise stop receiving the user's typing until they click it
-/// again. Nothing is posted when the target already is the key window of the
-/// front process.
-pub(super) fn with_focus_without_raise<T>(
-	pid: pid_t,
-	wid: u32,
-	action: impl FnOnce() -> CoreResult<T>,
-) -> CoreResult<T> {
-	control::check()?;
-	let activity = control::user_activity();
-	let spi = required()?;
-	let previous = front_process(spi.get_front).ok_or_else(|| {
-		DesktopError::background_unavailable(format!(
-			"window {wid} could not resolve the front process for background input; retry with \
-			 takeover:true or use ax actions",
-		))
-	})?;
-	let target = process_psn(spi.psn, pid, wid).ok_or_else(|| {
-		DesktopError::background_unavailable(format!(
-			"window {wid} could not resolve its process serial number for background input; retry \
-			 with takeover:true or use ax actions",
-		))
-	})?;
-	let previous_key = previous.pid.and_then(ax::key_window_id).ok_or_else(|| {
-		DesktopError::background_unavailable(
-			"cannot identify the previous key window to restore; retry with takeover:true or use ax \
-			 actions",
-		)
-	})?;
-	if previous.psn == target && previous_key == wid {
-		return action();
-	}
-	// The defocus record names the window losing key status; within one process
-	// that distinguishes it from the target.
-	control::check()?;
-	let defocus = focus_record(previous_key, DEFOCUS_MARKER);
-	let defocused = post_record(spi.post_record, previous.psn, &defocus);
-	let focused = post_record(spi.post_record, target, &focus_record(wid, FOCUS_MARKER));
-	if !defocused || !focused {
-		return after_cleanup(
-			Err(DesktopError::background_unavailable(format!(
-				"window {wid} rejected the 248-byte SkyLight focus-without-raise record; retry with \
-				 takeover:true or use ax actions",
-			))),
-			control::cleanup(|| {
-				restore_focus_after_without_raise(spi, previous, previous_key, target, wid, activity)
-			}),
-		);
-	}
-	let result = control::wait(FOCUS_SETTLE)
-		.and_then(|()| action())
-		.and_then(|value| control::wait(FOCUS_SETTLE).map(|()| value));
-	after_cleanup(
-		result,
-		control::cleanup(|| {
-			restore_focus_after_without_raise(spi, previous, previous_key, target, wid, activity)
-		}),
-	)
-}
-
-/// Reverses [`with_focus_without_raise`]: defocuses the target and hands key
-/// status back to `previous_key` in the previous front process. A target that
-/// activated itself in response to the input (a link opening in a browser) is
-/// first sent back behind the previous front process, without raising either;
-/// a third application that took focus meanwhile is left alone.
-fn restore_focus_after_without_raise(
-	spi: &RequiredSpi,
-	previous: FrontProcess,
-	previous_key: u32,
-	target: ProcessSerialNumber,
-	wid: u32,
-	activity: u64,
-) -> CoreResult<()> {
-	if control::user_activity() != activity {
-		return Ok(());
-	}
-	let front = front_process(spi.get_front).ok_or_else(|| {
-		DesktopError::input_failed("cannot establish current focus for background restoration")
-	})?;
-	// The asynchronous guard handles cross-process self-activation. Do not
-	// second-guess its hardware-activity veto or take focus from another app.
-	if front.psn != previous.psn {
-		return Ok(());
-	}
-	if previous
-		.pid
-		.and_then(ax::key_window_id)
-		.is_some_and(|key| key != previous_key && !(previous.psn == target && key == wid))
-	{
-		return Ok(());
-	}
-	if control::user_activity() != activity
-		|| !front_process(spi.get_front).is_some_and(|front| front.psn == previous.psn)
-	{
-		return Ok(());
-	}
-	let defocused = post_record(spi.post_record, target, &focus_record(wid, DEFOCUS_MARKER));
-	let focused =
-		post_record(spi.post_record, previous.psn, &focus_record(previous_key, FOCUS_MARKER));
-	if !defocused || !focused {
-		return Err(DesktopError::input_failed("background focus restoration records were rejected"));
 	}
 	Ok(())
 }
@@ -759,6 +636,11 @@ pub(super) fn is_front_window(pid: pid_t, wid: u32) -> bool {
 		front_process(spi.get_front).is_some_and(|front| front.pid == Some(pid))
 			&& ax::focused_window_id(pid) == Some(wid)
 	})
+}
+
+/// The front process as `WindowServer` reports it.
+pub(super) fn front_pid() -> Option<pid_t> {
+	front_process(FOREGROUND.as_ref()?.get_front)?.pid
 }
 
 /// Read-only focus identity used to verify non-activating Space operations.

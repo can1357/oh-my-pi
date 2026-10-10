@@ -10,8 +10,8 @@ use objc2_core_foundation::{
 };
 use objc2_core_graphics::{
 	CGRectMakeWithDictionaryRepresentation, CGWindowListCopyWindowInfo, CGWindowListOption,
-	kCGWindowBounds, kCGWindowIsOnscreen, kCGWindowName, kCGWindowNumber, kCGWindowOwnerName,
-	kCGWindowOwnerPID, kCGWindowSharingState,
+	kCGWindowBounds, kCGWindowIsOnscreen, kCGWindowLayer, kCGWindowName, kCGWindowNumber,
+	kCGWindowOwnerName, kCGWindowOwnerPID, kCGWindowSharingState,
 };
 use screen_capture_kit::{CaptureRequest, CaptureTarget};
 use xcap::Monitor;
@@ -317,6 +317,39 @@ fn window_snapshot(target: Option<u32>) -> CoreResult<Vec<DesktopWindow>> {
 		}
 	}
 	Ok(result)
+}
+
+/// `kCGPopUpMenuWindowLevel`, the window level of open menus, context menus
+/// included.
+const POP_UP_MENU_LAYER: i64 = 101;
+
+/// Ids of the on-screen menu windows `pid` shows, such as an open context
+/// menu, or `None` when the window list cannot be read. Owner and level need
+/// no Screen Recording permission.
+pub(super) fn menu_windows(pid: libc::pid_t) -> Option<Vec<u32>> {
+	let snapshot = CGWindowListCopyWindowInfo(CGWindowListOption::OptionOnScreenOnly, 0)?;
+	// SAFETY: CoreGraphics returns an immutable array of dictionaries whose
+	// documented window keys are CFStrings and whose values are CFTypes.
+	let snapshot = unsafe { CFRetained::cast_unchecked::<CFArray<WindowDictionary>>(snapshot) };
+	let mut menus = Vec::new();
+	// SAFETY: This copy-rule snapshot remains alive and is never mutated.
+	for dictionary in unsafe { snapshot.iter_unchecked() } {
+		// SAFETY: The CoreGraphics key constants are process-lived.
+		let (owner, layer, id) = unsafe {
+			(
+				window_number(dictionary, kCGWindowOwnerPID),
+				window_number(dictionary, kCGWindowLayer),
+				window_number(dictionary, kCGWindowNumber),
+			)
+		};
+		if owner == Some(i64::from(pid))
+			&& layer == Some(POP_UP_MENU_LAYER)
+			&& let Some(id) = id.and_then(|id| u32::try_from(id).ok())
+		{
+			menus.push(id);
+		}
+	}
+	Some(menus)
 }
 
 fn window_value<'a>(dictionary: &'a WindowDictionary, key: &CFString) -> Option<&'a CFType> {
