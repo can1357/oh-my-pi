@@ -1,11 +1,19 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import { Agent } from "@oh-my-pi/pi-agent-core";
-import type { ResetCreditAccountStatus, ResetCreditTarget, UsageReport } from "@oh-my-pi/pi-ai";
+import {
+	DEFAULT_USAGE_RESERVE_PCT,
+	type ResetCreditAccountStatus,
+	type ResetCreditTarget,
+	type UsageReport,
+} from "@oh-my-pi/pi-ai";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import * as envApiKey from "@oh-my-pi/pi-ai/env-api-key";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { ExtensionRuntime } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
+import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
+import { initializeExtensions } from "@oh-my-pi/pi-coding-agent/modes/runtime-init";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import {
@@ -22,6 +30,8 @@ const ACCOUNT_ID = "claude-account";
 const EMAIL = "claude@example.com";
 const ORG_ID = "11111111-1111-4111-8111-111111111111";
 const CREDENTIAL_ID = 7;
+const SIBLING_ORG_ID = "22222222-2222-4222-8222-222222222222";
+const SIBLING_CREDENTIAL_ID = 8;
 const HOUR = 3_600_000;
 const CLAUDE_USAGE_LIMIT_ERROR =
 	'429 {"type":"error","error":{"type":"rate_limit_error","message":"usage_limit_reached"}} retry-after-ms=259200000';
@@ -89,6 +99,37 @@ function withInventory(report: UsageReport, status: ResetCreditAccountStatus): U
 	return { ...report, resetCredits: { availableCount, redeemableCount, eligible, nextCreditId, credits } };
 }
 
+/** A second organization under the same login whose grant expires an hour after the primary's. */
+function siblingStatus(): ResetCreditAccountStatus {
+	const status = claudeStatus(false);
+	return {
+		...status,
+		credentialId: SIBLING_CREDENTIAL_ID,
+		orgId: SIBLING_ORG_ID,
+		active: false,
+		report: { ...claudeReport(0.5), metadata: { accountId: ACCOUNT_ID, email: EMAIL, orgId: SIBLING_ORG_ID } },
+		credits: status.credits.map(credit => ({
+			...credit,
+			expiresAt: new Date(Date.now() + 3 * HOUR).toISOString(),
+		})),
+	};
+}
+
+function accountPolicies(autoRedeem: boolean, orgId = ORG_ID) {
+	return {
+		accountPolicies: [{ provider: "anthropic", account: { email: EMAIL, orgId }, autoRedeem }],
+		defaultReservePct: DEFAULT_USAGE_RESERVE_PCT,
+	};
+}
+
+/** An extension host whose only capability is answering the consent prompt. */
+function promptRunner(select: (question: string) => Promise<string | undefined>): ExtensionRunner {
+	return {
+		hasUI: () => true,
+		getUIContext: () => ({ select }),
+		hasHandlers: () => false,
+	} as unknown as ExtensionRunner;
+}
 describe("Claude saved-reset trigger integration", () => {
 	let authStorage: AuthStorage;
 	let modelRegistry: ModelRegistry;
@@ -124,8 +165,10 @@ describe("Claude saved-reset trigger integration", () => {
 	});
 
 	function buildSession(options: {
+		withExtensionRunner?: boolean;
 		report: UsageReport | null;
 		status: ResetCreditAccountStatus;
+		siblings?: ResetCreditAccountStatus[];
 		streamErrorFirst?: boolean;
 		transientFailures?: number;
 		listFailures?: number;
@@ -134,6 +177,8 @@ describe("Claude saved-reset trigger integration", () => {
 		autoRedeem?: "unset" | "yes" | "no";
 		salvageHorizonHours?: number;
 		keepCredits?: number;
+		/** Answers the consent prompt; without it the session has no prompt UI. */
+		select?: (question: string) => Promise<string | undefined>;
 	}): {
 		session: AgentSession;
 		coordinator: CodexAutoRedeemCoordinator;
@@ -148,10 +193,22 @@ describe("Claude saved-reset trigger integration", () => {
 			email: EMAIL,
 			orgId: ORG_ID,
 		});
+		const siblings = options.siblings ?? [];
 		vi.spyOn(authStorage.oauth, "accounts").mockReturnValue([
 			{ position: 0, credentialId: CREDENTIAL_ID, accountId: ACCOUNT_ID, email: EMAIL, orgId: ORG_ID, active: true },
+			...siblings.map((sibling, index) => ({
+				position: index + 1,
+				credentialId: sibling.credentialId,
+				accountId: sibling.accountId,
+				email: sibling.email,
+				orgId: sibling.orgId,
+				active: false,
+			})),
 		]);
-		vi.spyOn(authStorage.usage, "reports").mockImplementation(async () => options.report && [options.report]);
+		vi.spyOn(authStorage.usage, "reports").mockImplementation(
+			async () =>
+				options.report && [options.report, ...siblings.map(sibling => withInventory(sibling.report!, sibling))],
+		);
 		let listAttempts = 0;
 		vi.spyOn(authStorage.resets, "list").mockImplementation(async request => {
 			if (request?.provider !== "anthropic") return [];
@@ -160,6 +217,7 @@ describe("Claude saved-reset trigger integration", () => {
 				listAttempts <= (options.listFailures ?? 0)
 					? { ...options.status, report: undefined, error: "Rate limited", retryAfterMs: 0 }
 					: options.status,
+				...(options.siblings ?? []),
 			];
 		});
 		const targets: ResetCreditTarget[] = [];
@@ -211,10 +269,14 @@ describe("Claude saved-reset trigger integration", () => {
 		coordinator.resetLockPath = `${tempDir.path()}/auth.db`;
 		const session = new AgentSession({
 			agent,
+			extensionRunner: options.withExtensionRunner
+				? new ExtensionRunner([], new ExtensionRuntime(), tempDir.path(), sessionManager, modelRegistry)
+				: undefined,
 			sessionManager,
 			settings,
 			modelRegistry,
 			codexResetCoordinator: coordinator,
+			...(options.select && { extensionRunner: promptRunner(options.select) }),
 		});
 		sessions.push(session);
 		return { session, coordinator, targets, listCalls: () => listAttempts };
@@ -305,6 +367,49 @@ describe("Claude saved-reset trigger integration", () => {
 		expect(session.agent.state.messages.at(-1)).toMatchObject({ role: "assistant", stopReason: "stop" });
 	});
 
+	it("neither spends nor re-reads throttled reset discovery for a blocked account whose policy turns auto-redeem off", async () => {
+		const { session, targets } = buildSession({
+			report: null,
+			status: claudeStatus(true),
+			streamErrorFirst: true,
+			listFailures: 1,
+			maxDelayMs: 2_500,
+		});
+		authStorage.setAccountPolicies(accountPolicies(false));
+		mockSchedulerWaitWithClock();
+		try {
+			await session.prompt("hit the limit on a borrowed account");
+			await session.waitForIdle();
+		} finally {
+			authStorage.setAccountPolicies({ accountPolicies: [], defaultReservePct: DEFAULT_USAGE_RESERVE_PCT });
+		}
+
+		expect(targets).toEqual([]);
+		expect(authStorage.resets.list).toHaveBeenCalledTimes(1);
+	});
+
+	it("waits for throttled discovery and restores a blocked account whose policy turns auto-redeem on while claudeResets.autoRedeem is no", async () => {
+		const { session, targets } = buildSession({
+			report: null,
+			status: claudeStatus(true),
+			streamErrorFirst: true,
+			listFailures: 1,
+			maxDelayMs: 2_500,
+			autoRedeem: "no",
+		});
+		authStorage.setAccountPolicies(accountPolicies(true));
+		mockSchedulerWaitWithClock();
+		try {
+			await session.prompt("hit the limit on the account allowed to spend");
+			await session.waitForIdle();
+		} finally {
+			authStorage.setAccountPolicies({ accountPolicies: [], defaultReservePct: DEFAULT_USAGE_RESERVE_PCT });
+		}
+
+		expect(targets.map(target => target.credentialId)).toEqual([CREDENTIAL_ID]);
+		expect(session.agent.state.messages.at(-1)).toMatchObject({ role: "assistant", stopReason: "stop" });
+	});
+
 	it("cancels reset discovery backoff without spending a credit or resuming the task", async () => {
 		const { session, targets } = buildSession({
 			report: null,
@@ -358,7 +463,7 @@ describe("Claude saved-reset trigger integration", () => {
 		expect(peer.session.agent.state.messages.at(-1)).toMatchObject({ role: "assistant", stopReason: "error" });
 	});
 
-	it("salvages an expiring early-use Cedar grant from the usage heartbeat exactly once, without listing", async () => {
+	it("salvages an expiring early-use Cedar grant from the usage heartbeat exactly once, listing only to confirm it", async () => {
 		const status = claudeStatus(false);
 		const { session, coordinator, targets, listCalls } = buildSession({
 			report: withInventory(claudeReport(0.5), status),
@@ -374,10 +479,10 @@ describe("Claude saved-reset trigger integration", () => {
 		await session.fetchUsageReports();
 		await coordinator.sweepPromise;
 		expect(targets).toHaveLength(1);
-		expect(listCalls()).toBe(0);
+		expect(listCalls()).toBe(1);
 	});
 
-	it("leaves an account unsalvaged when its usage report carries no reset inventory", async () => {
+	it("lists no Claude account and salvages nothing when its usage report carries no reset inventory", async () => {
 		const { session, coordinator, targets, listCalls } = buildSession({
 			report: claudeReport(0.5),
 			status: claudeStatus(false),
@@ -400,19 +505,197 @@ describe("Claude saved-reset trigger integration", () => {
 				report: withInventory(claudeReport(0.5), status),
 				status,
 			});
-			vi.spyOn(authStorage.resets, "brokerSweep").mockImplementation(provider =>
-				provider === brokerSweeps ? { provider, autoRedeem: "yes" } : undefined,
-			);
+			vi.spyOn(authStorage.resets, "brokerSweeps").mockImplementation(provider => provider === brokerSweeps);
 
 			await session.fetchUsageReports();
 			await coordinator.sweepPromise;
 			expect(targets).toHaveLength(spent);
-			expect(listCalls()).toBe(0);
+			// A candidate is confirmed by one live listing before it is spent.
+			expect(listCalls()).toBe(spent);
 		},
 	);
 
+	it("does not salvage on usage a carried-over inventory recorded before the window rolled over", async () => {
+		// A failed reset probe keeps the previous report's inventory, usage figures included.
+		const carried = claudeStatus(false);
+		carried.credits[0]!.usedFractions = { "anthropic:7d": 0.8 };
+		const live = claudeStatus(false);
+		live.report = claudeReport(0.01);
+		live.credits[0]!.usedFractions = { "anthropic:7d": 0.01 };
+		const { session, coordinator, targets, listCalls } = buildSession({
+			report: withInventory(claudeReport(0.01), carried),
+			status: live,
+		});
+
+		await session.fetchUsageReports();
+		await coordinator.sweepPromise;
+		expect(listCalls()).toBe(1);
+		expect(targets).toEqual([]);
+	});
+
+	it("spends for a credential stored without its organization under the organization its live listing resolves", async () => {
+		const status = claudeStatus(false);
+		const report = withInventory(claudeReport(0.5), status);
+		report.metadata = { accountId: ACCOUNT_ID, email: EMAIL };
+		const { session, coordinator, targets } = buildSession({ report, status });
+		vi.spyOn(authStorage.oauth, "accounts").mockReturnValue([
+			{ position: 0, credentialId: CREDENTIAL_ID, accountId: ACCOUNT_ID, email: EMAIL, active: true },
+		]);
+
+		await session.fetchUsageReports();
+		await coordinator.sweepPromise;
+		expect(targets).toEqual([
+			{
+				provider: "anthropic",
+				credentialId: CREDENTIAL_ID,
+				creditId: "cedar-grant-1",
+				accountId: ACCOUNT_ID,
+				email: EMAIL,
+				orgId: ORG_ID,
+			},
+		]);
+		expect([...coordinator.lastAttemptAtByAccount.keys()]).toEqual([`anthropic|${ORG_ID}|${CREDENTIAL_ID}`]);
+	});
+
+	it("leaves an account whose policy turns auto-redeem off out of the heartbeat salvage until the policy is removed", async () => {
+		const status = claudeStatus(false);
+		const { session, coordinator, targets } = buildSession({
+			report: withInventory(claudeReport(0.5), status),
+			status,
+		});
+		authStorage.setAccountPolicies(accountPolicies(false));
+		try {
+			await session.fetchUsageReports();
+			await coordinator.sweepPromise;
+			expect(targets).toEqual([]);
+			expect(coordinator.attemptedKeys.size).toBe(0);
+		} finally {
+			authStorage.setAccountPolicies({ accountPolicies: [], defaultReservePct: DEFAULT_USAGE_RESERVE_PCT });
+		}
+
+		coordinator.lastSweepAt = 0;
+		await session.fetchUsageReports();
+		await coordinator.sweepPromise;
+		expect(targets).toMatchObject([{ provider: "anthropic", credentialId: CREDENTIAL_ID }]);
+	});
+
+	it.each(["no", "unset"] as const)(
+		"spends without asking only the account whose policy turns auto-redeem on while claudeResets.autoRedeem is %s",
+		async autoRedeem => {
+			const status = claudeStatus(false);
+			const { session, coordinator, targets } = buildSession({
+				report: withInventory(claudeReport(0.5), status),
+				status,
+				siblings: [siblingStatus()],
+				autoRedeem,
+			});
+			authStorage.setAccountPolicies(accountPolicies(true));
+			try {
+				await session.fetchUsageReports();
+				await coordinator.sweepPromise;
+			} finally {
+				authStorage.setAccountPolicies({ accountPolicies: [], defaultReservePct: DEFAULT_USAGE_RESERVE_PCT });
+			}
+
+			expect(targets).toMatchObject([{ credentialId: CREDENTIAL_ID, orgId: ORG_ID }]);
+			expect([...coordinator.lastAttemptAtByAccount.keys()]).toEqual([`anthropic|${ORG_ID}|${CREDENTIAL_ID}`]);
+			expect(cfgClaudeResetsAutoRedeem.get(session.settings)).toBe(autoRedeem);
+		},
+	);
+
+	it("asks only about accounts following an unset claudeResets.autoRedeem, and a No still spends the account turned on", async () => {
+		const questions: string[] = [];
+		const status = claudeStatus(false);
+		const { session, coordinator, targets } = buildSession({
+			report: withInventory(claudeReport(0.5), status),
+			status,
+			siblings: [siblingStatus()],
+			autoRedeem: "unset",
+			select: async question => {
+				questions.push(question);
+				return "No";
+			},
+		});
+		authStorage.setAccountPolicies(accountPolicies(true));
+		try {
+			await session.fetchUsageReports();
+			await coordinator.sweepPromise;
+		} finally {
+			authStorage.setAccountPolicies({ accountPolicies: [], defaultReservePct: DEFAULT_USAGE_RESERVE_PCT });
+		}
+
+		expect(questions).toHaveLength(1);
+		expect(questions[0]).toStartWith("Spend a saved Claude rate-limit reset?");
+		expect(questions[0]).toContain(SIBLING_ORG_ID);
+		expect(questions[0]).not.toContain(ORG_ID);
+		expect(targets).toMatchObject([{ credentialId: CREDENTIAL_ID, orgId: ORG_ID }]);
+	});
+
+	it("does not spend a planned salvage when the account's policy turns auto-redeem off before execution", async () => {
+		const status = claudeStatus(false);
+		const { session, coordinator, targets } = buildSession({
+			report: withInventory(claudeReport(0.5), status),
+			status,
+		});
+		const planned = Promise.withResolvers<void>();
+		const policy = authStorage.oauth.policy.bind(authStorage.oauth);
+		vi.spyOn(authStorage.oauth, "policy").mockImplementation((provider, identity) => {
+			const result = policy(provider, identity);
+			planned.resolve();
+			return result;
+		});
+		try {
+			await session.fetchUsageReports();
+			await planned.promise;
+			authStorage.setAccountPolicies(accountPolicies(false));
+			await coordinator.sweepPromise;
+			expect(targets).toEqual([]);
+			expect(coordinator.attemptedKeys.size).toBe(0);
+			expect(coordinator.lastAttemptAtByAccount.size).toBe(0);
+		} finally {
+			authStorage.setAccountPolicies({ accountPolicies: [], defaultReservePct: DEFAULT_USAGE_RESERVE_PCT });
+		}
+
+		coordinator.lastSweepAt = 0;
+		await session.fetchUsageReports();
+		await coordinator.sweepPromise;
+		expect(targets).toMatchObject([{ credentialId: CREDENTIAL_ID }]);
+	});
+
+	it("does not spend a queued salvage whose account's policy turns auto-redeem off while an earlier spend runs", async () => {
+		const status = claudeStatus(false);
+		const { session, coordinator, targets } = buildSession({
+			report: withInventory(claudeReport(0.5), status),
+			status,
+			siblings: [siblingStatus()],
+		});
+		const spending = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		vi.spyOn(authStorage.resets, "redeem").mockImplementation(async request => {
+			targets.push(request.target);
+			spending.resolve();
+			await release.promise;
+			return { ok: true, code: "reset", provider: "anthropic", cleared: ["anthropic:7d"] };
+		});
+		try {
+			await session.fetchUsageReports();
+			await spending.promise;
+			authStorage.setAccountPolicies(accountPolicies(false, SIBLING_ORG_ID));
+			release.resolve();
+			await coordinator.sweepPromise;
+			expect(targets).toMatchObject([{ credentialId: CREDENTIAL_ID }]);
+			expect([...coordinator.lastAttemptAtByAccount.keys()]).toEqual([`anthropic|${ORG_ID}|${CREDENTIAL_ID}`]);
+		} finally {
+			authStorage.setAccountPolicies({ accountPolicies: [], defaultReservePct: DEFAULT_USAGE_RESERVE_PCT });
+		}
+
+		coordinator.lastSweepAt = 0;
+		await session.fetchUsageReports();
+		await coordinator.sweepPromise;
+		expect(targets).toMatchObject([{ credentialId: CREDENTIAL_ID }, { credentialId: SIBLING_CREDENTIAL_ID }]);
+	});
 	it.each(["yes", "no", "unset"] as const)(
-		"only consumes an imminent reset with consent when auto-redeem is %s",
+		"consumes an imminent reset without a prompt UI unless auto-redeem is no (%s)",
 		async autoRedeem => {
 			const status = claudeStatus(false);
 			for (const credit of status.credits) {
@@ -432,7 +715,7 @@ describe("Claude saved-reset trigger integration", () => {
 			await session.fetchUsageReports();
 			await coordinator.sweepPromise;
 			expect(targets).toEqual(
-				autoRedeem === "yes"
+				autoRedeem !== "no"
 					? [
 							{
 								provider: "anthropic",
@@ -449,12 +732,12 @@ describe("Claude saved-reset trigger integration", () => {
 			coordinator.lastSweepAt = 0;
 			await session.fetchUsageReports();
 			await coordinator.sweepPromise;
-			expect(targets).toHaveLength(autoRedeem === "yes" ? 1 : 0);
+			expect(targets).toHaveLength(autoRedeem !== "no" ? 1 : 0);
 		},
 	);
 
 	it("does not spend headlessly before independent Claude consent", async () => {
-		// Codex being disabled does not enable Claude, and an unset headless
+		// Codex being disabled does not enable Claude, and short of a reset about to expire an unset headless
 		// session cannot spend silently.
 		const status = claudeStatus(false);
 		const { session, coordinator, targets } = buildSession({
@@ -469,4 +752,43 @@ describe("Claude saved-reset trigger integration", () => {
 		expect(coordinator.attemptedKeys.size).toBe(0);
 		expect(cfgClaudeResetsAutoRedeem.get(session.settings)).toBe("unset");
 	});
+
+	it("still asks before spending an imminent reset when a prompt UI is available", async () => {
+		const status = claudeStatus(false);
+		for (const credit of status.credits) {
+			credit.expiresAt = new Date(Date.now() + 4 * 60_000).toISOString();
+		}
+		const { availableCount, redeemableCount, eligible, nextCreditId, credits } = status;
+		const report = {
+			...claudeReport(0.5),
+			resetCredits: { availableCount, redeemableCount, eligible, nextCreditId, credits },
+		};
+		status.report = report;
+		const { session, coordinator, targets } = buildSession({
+			withExtensionRunner: true,
+			report,
+			status,
+			autoRedeem: "unset",
+			salvageHorizonHours: 0,
+		});
+		const questions: string[] = [];
+		await initializeExtensions(session, {
+			reportSendError: () => {},
+			reportRuntimeError: () => {},
+			uiContext: Object.create(session.extensionRunner!.getUIContext(), {
+				select: {
+					value: async (question: string) => {
+						questions.push(question);
+						return "No";
+					},
+				},
+			}),
+		});
+
+		await session.fetchUsageReports();
+		await coordinator.sweepPromise;
+		expect(questions).toEqual([expect.stringContaining("Spend a saved Claude rate-limit reset?")]);
+		expect(targets).toEqual([]);
+	});
+
 });

@@ -58,6 +58,8 @@ export interface AuthAccountSelector {
 export interface AuthAccountPolicy {
 	readonly provider: string;
 	readonly account: AuthAccountSelector;
+	/** Overrides the provider's saved-reset auto-redeem mode for this account: `true` = yes, `false` = no. */
+	readonly autoRedeem?: boolean;
 	/** Higher values win after hard, plan, reserve, hot-window, and measured-usage safety checks. */
 	readonly priority?: number;
 	/** Protected remaining quota percentage for this account. */
@@ -1113,6 +1115,8 @@ export interface OAuthApi {
 	 * selector match as routing and never refreshes, ranks, or mutates credentials.
 	 */
 	policy(provider: string, identity: OAuthAccountIdentity): AuthAccountPolicy | undefined;
+	/** Whether an account policy for `provider` sets `autoRedeem: true`, overriding a provider-wide `no`. */
+	enablesAutoRedeem(provider: string): boolean;
 	/**
 	 * Refresh the OAuth credential with the given id through a per-credential
 	 * single-flight. Concurrent callers for the same row await the same upstream

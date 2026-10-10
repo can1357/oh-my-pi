@@ -82,6 +82,9 @@ export class AccountPolicies {
 					throw new AIError.ConfigurationError(`${path}.account.${field} must be a non-empty string`);
 				}
 			}
+			if (policy.autoRedeem !== undefined && typeof policy.autoRedeem !== "boolean") {
+				throw new AIError.ConfigurationError(`${path}.autoRedeem must be true or false`);
+			}
 			if (policy.priority !== undefined && !Number.isFinite(policy.priority)) {
 				throw new AIError.ConfigurationError(`${path}.priority must be a finite number`);
 			}
@@ -158,5 +161,10 @@ export class AccountPolicies {
 	/** Return the configured policy for a stored OAuth credential. */
 	forCredential(provider: string, credential: AuthCredential): AuthAccountPolicy | undefined {
 		return credential.type === "oauth" ? this.find(provider, credential) : undefined;
+	}
+
+	/** Whether any `provider` policy turns automatic saved-reset spending on (`autoRedeem: true`). */
+	enablesAutoRedeem(provider: string): boolean {
+		return this.#accountPolicies.some(policy => policy.provider === provider && policy.autoRedeem === true);
 	}
 }

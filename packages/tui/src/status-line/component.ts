@@ -56,6 +56,7 @@ import type {
 	StatusLineSegmentOptions,
 	StatusLineSeparatorStyle,
 	StatusLineSettings,
+	StatusResetExpiry,
 } from "./types";
 
 /** What a click on a native status segment asks omp to open. */
@@ -788,6 +789,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 			expiryHours?: number;
 			expired?: boolean;
 			unavailableReason?: string;
+			expiring?: StatusResetExpiry;
 		};
 	} | null = null;
 	#cachedUsageContextKey: string | null = null;
@@ -800,6 +802,9 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 	#latestAppliedUsageRefreshSequence = 0;
 	#codexResetSnapshots = new Map<string, CodexResetUsageSnapshot>();
 	#onCodexResetFireworks: ((event: CodexResetFireworksEvent) => void) | undefined;
+	#onResetExpiryNotice: ((notice: string) => void) | undefined;
+	/** One saved-reset expiry warning per status line: later refreshes stay quiet. */
+	#resetExpiryNoticed = false;
 	// Context-usage memo. The status line redraws on every agent event, so the
 	// hot path must not recompute context tokens unless an input changed.
 	// `getContextUsage()` anchors on the last assistant's real prompt-token
@@ -1203,6 +1208,11 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		this.#onCodexResetFireworks = handler;
 	}
 
+	/** Set the callback that presents the first pool-wide saved-reset expiry warning, or clear it with `undefined`. */
+	setResetExpiryNoticeHandler(handler: ((notice: string) => void) | undefined): void {
+		this.#onResetExpiryNotice = handler;
+	}
+
 	setHookStatus(key: string, text: string | undefined): void {
 		if (text === undefined) {
 			if (!this.#hookStatuses.delete(key)) return;
@@ -1272,6 +1282,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		this.#stopPricingTimer();
 		this.#clearUsageStartTimer();
 		this.#onCodexResetFireworks = undefined;
+		this.#onResetExpiryNotice = undefined;
 		this.#codexResetSnapshots.clear();
 		this.#retireGitWatcher();
 	}
@@ -2026,6 +2037,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 			this.#invalidateStatusLineRenderCache();
 			this.#onBranchChange?.();
 		}
+		this.#noticeResetExpiry(reports);
 		if (!resetSnapshot) return;
 		const contextKey = this.#formatUsageContextKey(activeProvider, activeIdentity);
 		const previous = this.#codexResetSnapshots.get(contextKey);
@@ -2033,6 +2045,30 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		if (!previous || !this.host.codexResetFireworksEnabled()) return;
 		const event = detectCodexResetFireworks(previous, resetSnapshot);
 		if (event) this.#onCodexResetFireworks?.(event);
+	}
+
+	#noticeResetExpiry(reports: unknown): void {
+		if (
+			this.#resetExpiryNoticed ||
+			!this.#onResetExpiryNotice ||
+			!this.host.resetExpiryNotice ||
+			!Array.isArray(reports)
+		) {
+			return;
+		}
+		// fetchUsageReports supplies normalized rows; keep only entries shaped like reports.
+		const usageReports = reports.filter(
+			(report): report is UsageReport =>
+				!!report &&
+				typeof report === "object" &&
+				"provider" in report &&
+				"limits" in report &&
+				Array.isArray(report.limits),
+		);
+		const notice = this.host.resetExpiryNotice(usageReports, Date.now());
+		if (!notice) return;
+		this.#resetExpiryNoticed = true;
+		this.#onResetExpiryNotice(notice);
 	}
 
 	#observeLateUsageRefresh(session: TSession, reportsPromise: Promise<unknown>, sequence: number): void {
@@ -2141,6 +2177,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 			expiryHours?: number;
 			expired?: boolean;
 			unavailableReason?: string;
+			expiring?: StatusResetExpiry;
 		};
 	} | null {
 		if (!Array.isArray(reports)) return null;
@@ -2270,6 +2307,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 								: undefined,
 						expired: resetExpiryMs !== undefined && resetExpiryMs <= 0,
 						unavailableReason: resetSummary.unavailableReason,
+						expiring: resetReport ? this.host.classifyResetExpiry?.(resetReport, now) : undefined,
 					}
 				: undefined;
 		if (!selectedGroup) return resetCredits ? { resetCredits } : null;

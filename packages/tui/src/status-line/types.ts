@@ -202,8 +202,16 @@ export interface SegmentContext {
 			expiryHours?: number;
 			expired?: boolean;
 			unavailableReason?: string;
+			expiring?: StatusResetExpiry;
 		};
 	} | null;
+}
+
+/** How close an account's saved resets are to expiring, when it is worth a warning. */
+export interface StatusResetExpiry {
+	/** `soon`: within 7 days; `imminent`: within 24 hours. */
+	tier: "soon" | "imminent";
+	count: number;
 }
 
 export interface RenderedSegment {

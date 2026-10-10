@@ -979,11 +979,13 @@ Provider credentials and custom model definitions are configured separately — 
 
 #### Saved reset auto-consumption
 
-`codexResets.autoRedeem` and `claudeResets.autoRedeem` independently control saved-reset consumption: `yes` enables automatic spending, `no` disables it, and `unset` requires consent before the first spend. Headless sessions never spend while consent is unset.
+`codexResets.autoRedeem` and `claudeResets.autoRedeem` independently control saved-reset consumption: `yes` enables automatic spending, `no` disables it, and `unset` requires consent before the first spend. A session with no prompt UI to ask (such as `omp -p`) spends a reset under `unset` only when that reset expires within 5 minutes and would otherwise be lost; everything else waits for consent, with a notice pointing at `/usage reset`.
 
 When a usage refresh detects an eligible banked reset expiring within the next **5 minutes**, auto-consumption attempts it even with little or no usage, a credit reserve, or `salvageHorizonHours: 0`. Provider eligibility, covered-limit requirements, cooldowns, and duplicate-spend protections still apply.
 
-`salvageHorizonHours` controls earlier, usage-based salvage; setting it to `0` leaves the five-minute last-chance rule active. Set the provider's `autoRedeem` to `no` to disable all automatic spending.
+`salvageHorizonHours` controls earlier, usage-based salvage; setting it to `0` leaves the five-minute last-chance rule active. Set the provider's `autoRedeem` to `no` to disable automatic spending on every account without its own override below.
+
+An `auth.accountPolicies` entry's `autoRedeem` overrides the provider's setting for that one account, in both directions: `true` spends its eligible resets (salvage, last-chance and blocked-turn restore) without asking even when the provider is `no` or `unset`, and `false` never spends them automatically, such as on an account borrowed through a shared auth broker. A change also applies to a spend already planned or waiting for consent. `/usage reset` still spends any account's resets on request.
 
 `omp auth-broker serve` runs the same sweep on the broker host's settings, so credits are salvaged while no session is open (see [Auth Broker](auth-broker-gateway.md#saved-reset-sweep)).
 

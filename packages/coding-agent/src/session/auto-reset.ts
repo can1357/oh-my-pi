@@ -10,6 +10,7 @@ import type {
 	OAuthAccountIdentity,
 	ResetCreditAccountStatus,
 	ResetCreditRedeemOutcome,
+	ResetCreditTarget,
 	UsageReport,
 } from "@oh-my-pi/pi-ai";
 import type { Model } from "@oh-my-pi/pi-catalog/types";
@@ -28,13 +29,14 @@ import {
 	type CodexResetAction,
 	type CodexResetPlan,
 	type CodexResetTrigger,
+	effectiveAutoRedeemMode,
+	headlessApprovedResetActions,
 	isTerminalRedeemOutcome,
 	overlayLiveResetCredits,
 	planCodexResetRedemptions,
 	REDEEM_RETRY_DEFER_MS,
 	resetAccountLockKey,
 	shouldEvaluateCodexAutoRedeem,
-	shouldPromptCodexAutoRedeem,
 } from "./codex-auto-reset";
 import { cfgClaudeResets, cfgClaudeResetsAutoRedeem, cfgCodexResets, cfgCodexResetsAutoRedeem } from "./settings";
 
@@ -53,7 +55,10 @@ export interface AutoResetHost {
 	notice: (level: "info" | "warning", message: string, source: string) => void;
 	/** Reset markers this host already adopted, so a peer's confirmed reset counts once. */
 	adoptedResetMarkers: Map<string, number>;
-	/** Consent while auto-redeem is unset: resolves with the planned actions that may be spent. */
+	/**
+	 * Consent: resolves with the planned actions that may be spent. Each action
+	 * carries its account's effective mode; `yes` needs no question.
+	 */
 	confirm: (
 		provider: ResetProvider,
 		actions: ResetAction[],
@@ -79,12 +84,13 @@ export function planCodexResets(
 		provider: model?.provider ?? "",
 		modelId: model?.id ?? "",
 		settings: {
-			enabled: shouldEvaluateCodexAutoRedeem(cfg.autoRedeem),
+			autoRedeem: cfg.autoRedeem,
 			minBlockedMinutes: Math.max(0, cfg.minBlockedMinutes),
 			keepCredits: Math.max(0, Math.trunc(cfg.keepCredits)),
 			salvageHorizonMs: Math.max(0, cfg.salvageHorizonHours) * 3_600_000,
 		},
 		identity,
+		accountPolicy: account => host.authStorage.oauth.policy("openai-codex", account),
 		reports,
 		attemptedKeys: coordinator.attemptedKeys,
 		deferredUntilByKey: coordinator.deferredUntilByKey,
@@ -113,11 +119,12 @@ export function planClaudeResets(
 		provider: model?.provider ?? "",
 		modelId: model?.provider === "anthropic" ? model.id : "",
 		settings: {
-			enabled: shouldEvaluateCodexAutoRedeem(cfg.autoRedeem),
+			autoRedeem: cfg.autoRedeem,
 			minBlockedMinutes: Math.max(0, cfg.minBlockedMinutes),
 			keepCredits: Math.max(0, Math.trunc(cfg.keepCredits)),
 			salvageHorizonMs: Math.max(0, cfg.salvageHorizonHours) * 3_600_000,
 		},
+		accountPolicy: account => host.authStorage.oauth.policy("anthropic", account),
 		reports,
 		statuses,
 		attemptedKeys: coordinator.attemptedKeys,
@@ -199,13 +206,22 @@ export async function executeResetActions(
 	const authStorage = host.authStorage;
 	const providerLabel = provider === "anthropic" ? "Claude" : "Codex";
 	const source = provider === "anthropic" ? "claude-auto-reset" : "codex-auto-reset";
+	const autoRedeemSetting = provider === "anthropic" ? cfgClaudeResetsAutoRedeem : cfgCodexResetsAutoRedeem;
+	// Consent, earlier actions, the fence and the live listing all wait after
+	// planning: a policy or setting that has since turned the account off wins.
+	const autoRedeemOff = (target: ResetCreditTarget): boolean => {
+		const policy = authStorage.oauth.policy(provider, target);
+		return effectiveAutoRedeemMode(autoRedeemSetting.get(host.settings), policy) === "no";
+	};
 	let redeemed = 0;
 	for (const action of actions) {
 		if (coordinator.attemptedKeys.has(action.attemptKey)) continue;
+		const previousAttemptAt = coordinator.lastAttemptAtByAccount.get(action.accountKey);
 		coordinator.attemptedKeys.add(action.attemptKey);
 		coordinator.lastAttemptAtByAccount.set(action.accountKey, Date.now());
 		let outcome: ResetCreditRedeemOutcome | undefined;
 		let sharedReset = false;
+		let turnedOff = false;
 		try {
 			const redeemOptions = {
 				target: action.target,
@@ -216,7 +232,8 @@ export async function executeResetActions(
 			const lockKey = resetAccountLockKey(action.target);
 			if (!lockKey) {
 				// An account without an upstream identity cannot share a cross-process fence.
-				outcome = await authStorage.resets.redeem(redeemOptions);
+				turnedOff = autoRedeemOff(action.target);
+				if (!turnedOff) outcome = await authStorage.resets.redeem(redeemOptions);
 			} else {
 				// The coordinator is process-local. Fence concurrent processes and
 				// remember a recent attempt so a late 429 cannot spend again.
@@ -257,6 +274,8 @@ export async function executeResetActions(
 								return { ok: false, code: "no_credit", provider } satisfies ResetCreditRedeemOutcome;
 							}
 						}
+						turnedOff = autoRedeemOff(action.target);
+						if (turnedOff) return undefined;
 						const attemptedAt = Date.now();
 						await Bun.write(lockPath, `pending:${attemptedAt}`);
 						const result = await authStorage.resets.redeem(redeemOptions);
@@ -282,6 +301,13 @@ export async function executeResetActions(
 		}
 		if (!outcome) {
 			if (sharedReset) redeemed++;
+			if (turnedOff) {
+				// Never attempted: the episode and cooldown stay free for when it is turned back on.
+				coordinator.attemptedKeys.delete(action.attemptKey);
+				if (previousAttemptAt === undefined) coordinator.lastAttemptAtByAccount.delete(action.accountKey);
+				else coordinator.lastAttemptAtByAccount.set(action.accountKey, previousAttemptAt);
+				logger.debug(`${source}: auto-redeem turned off before spending`, { account: action.accountKey });
+			}
 			continue;
 		}
 		if (!isTerminalRedeemOutcome(outcome.code)) {
@@ -347,22 +373,44 @@ export async function executeResetActions(
 	return redeemed;
 }
 
+/** Spend the planned actions the host consents to. */
+export async function redeemConsentedResets(
+	host: AutoResetHost,
+	provider: ResetProvider,
+	actions: ResetAction[],
+	coordinator: CodexAutoRedeemCoordinator,
+): Promise<number> {
+	return executeResetActions(host, provider, await host.confirm(provider, actions, coordinator), coordinator);
+}
+
+/**
+ * What a host with no prompt UI may spend: each action under its account's
+ * effective mode, so `yes` spends and `unset` spends only a credit about to expire.
+ */
+export function headlessConsentedActions(actions: readonly ResetAction[]): ResetAction[] {
+	return actions.flatMap(action => headlessApprovedResetActions(action.autoRedeem, [action]));
+}
+
 /**
  * Whether this host's background sweep covers `provider`'s saved resets: its
- * auto-redeem is not `no`, and no auth broker it uses sweeps them instead.
+ * auto-redeem is not `no` (or an account policy turns it on), and no auth
+ * broker it uses sweeps them instead.
  */
 export function sweepsResets(host: AutoResetHost, provider: ResetProvider): boolean {
 	const mode = (provider === "anthropic" ? cfgClaudeResetsAutoRedeem : cfgCodexResetsAutoRedeem).get(host.settings);
-	return shouldEvaluateCodexAutoRedeem(mode) && !host.authStorage.resets.brokerSweep(provider);
+	// A provider-wide `no` still leaves accounts whose policy sets `autoRedeem: true`.
+	const enabled = shouldEvaluateCodexAutoRedeem(mode) || host.authStorage.oauth.enablesAutoRedeem(provider);
+	return enabled && !host.authStorage.resets.brokerSweeps(provider);
 }
 
 /**
  * One salvage sweep over both providers, planned and consented independently.
  * Last-chance expiry checks remain active even with the broader salvage
- * horizon disabled. Codex candidates are refreshed through a live listing
- * before spend; Claude plans from the reset inventory in the usage reports,
- * and redeem re-lists the chosen account live before spending. Resolves with
- * the saved-reset inventory the sweep planned from.
+ * horizon disabled. Every candidate is refreshed through its live listing
+ * before spend; a failed listing cannot fall back to stale usage. Claude finds
+ * its candidates in the usage reports' reset inventory first, so a sweep with
+ * nothing to salvage lists no Claude account. Resolves with the saved-reset
+ * inventory the sweep screened.
  */
 export async function sweepResets(
 	host: AutoResetHost,
@@ -382,11 +430,7 @@ export async function sweepResets(
 			const effectiveReports = overlayLiveResetCredits(reports, statuses);
 			const identity = host.authStorage.oauth.identity("openai-codex", host.sessionId);
 			const plan = planCodexResets(host, "sweep", effectiveReports, identity, coordinator);
-			const approved =
-				plan.actions.length > 0 && shouldPromptCodexAutoRedeem(cfgCodexResetsAutoRedeem.get(host.settings))
-					? await host.confirm("openai-codex", plan.actions, coordinator)
-					: plan.actions;
-			if (approved.length > 0) await executeResetActions(host, "openai-codex", approved, coordinator);
+			await redeemConsentedResets(host, "openai-codex", plan.actions, coordinator);
 		} catch (error) {
 			logger.warn("codex-auto-reset: salvage listing failed", { error: String(error) });
 		}
@@ -394,16 +438,27 @@ export async function sweepResets(
 	if (sweepsResets(host, "anthropic") && reports.some(report => report.provider === "anthropic")) {
 		try {
 			const accounts = host.authStorage.oauth.accounts("anthropic", host.sessionId);
-			const statuses = claudeResetStatusesFromReports(accounts, reports);
-			inventory.push(...statuses);
-			const plan = planClaudeResets(host, "sweep", reports, statuses, coordinator);
-			const approved =
-				plan.actions.length > 0 && shouldPromptCodexAutoRedeem(cfgClaudeResetsAutoRedeem.get(host.settings))
-					? await host.confirm("anthropic", plan.actions, coordinator)
-					: plan.actions;
-			if (approved.length > 0) await executeResetActions(host, "anthropic", approved, coordinator);
+			const reported = claudeResetStatusesFromReports(accounts, reports);
+			inventory.push(...reported);
+			const candidates = planClaudeResets(host, "sweep", reports, reported, coordinator);
+			const plan =
+				candidates.actions.length > 0
+					? planClaudeResets(
+							host,
+							"sweep",
+							reports,
+							await host.authStorage.resets.list({
+								provider: "anthropic",
+								sessionId: host.sessionId,
+								baseUrlResolver: host.baseUrlResolver,
+								signal: AbortSignal.timeout(10_000),
+							}),
+							coordinator,
+						)
+					: candidates;
+			await redeemConsentedResets(host, "anthropic", plan.actions, coordinator);
 		} catch (error) {
-			logger.warn("claude-auto-reset: salvage failed", { error: String(error) });
+			logger.warn("claude-auto-reset: salvage listing failed", { error: String(error) });
 		}
 	}
 	return inventory;

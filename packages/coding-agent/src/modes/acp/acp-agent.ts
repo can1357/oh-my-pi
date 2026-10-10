@@ -2553,12 +2553,14 @@ export class AcpAgent implements Agent {
 			return;
 		}
 
-		const uiContext = createAcpExtensionUiContext(
-			this.#connection,
-			() => record.session.sessionId,
-			this.#clientCapabilities,
-		);
-		if (this.#clientCapabilities?.elicitation?.form != null) {
+		// Without form elicitation nothing can ask the user, so extensions and the
+		// session's own consent prompts get no UI context and take their headless
+		// paths, as tools and `ask` already do here.
+		const uiContext =
+			this.#clientCapabilities?.elicitation?.form != null
+				? createAcpExtensionUiContext(this.#connection, () => record.session.sessionId, this.#clientCapabilities)
+				: undefined;
+		if (uiContext) {
 			record.setToolUIContext?.(uiContext, true);
 			record.session.setUsageFallbackConfirmer((confirmation, signal) => {
 				const reserve =
