@@ -151,6 +151,8 @@ impl KeyFocus {
 	///
 	/// The focused window decides when the application reports one; a sheet
 	/// or panel it reports is another window, even when attached to `wid`.
+	/// When it reports `wid`'s parent while the focused element is in `wid`,
+	/// as Reminders does for a field in its details popover, keys reach `wid`.
 	/// When it reports none, as Finder does while its inline rename field (an
 	/// overlay window of its own) has focus, the focused element's window
 	/// decides: `wid` itself, or a window `parent_of` says is attached to it.
@@ -158,10 +160,13 @@ impl KeyFocus {
 		&self,
 		pid: libc::pid_t,
 		wid: u32,
-		parent_of: impl FnOnce(u32) -> Option<u32>,
+		parent_of: impl Fn(u32) -> Option<u32>,
 	) -> KeyDestination {
 		match self.window {
 			FocusedWindow::Id(id) if id == wid => KeyDestination::Target(pid),
+			FocusedWindow::Id(_) if self.holds_overlay_focus(wid, &parent_of) => {
+				KeyDestination::Target(pid)
+			},
 			FocusedWindow::Id(id) => KeyDestination::Other(Some(id)),
 			FocusedWindow::Unmapped => KeyDestination::Other(None),
 			FocusedWindow::Unreported => match self.element_window {
@@ -173,26 +178,35 @@ impl KeyFocus {
 		}
 	}
 
+	/// Whether `wid` is an overlay attached to the reported focused window
+	/// and the focused element is in it, such as a field in a popover.
+	fn holds_overlay_focus(&self, wid: u32, parent_of: impl Fn(u32) -> Option<u32>) -> bool {
+		let FocusedWindow::Id(focused) = self.window else {
+			return false;
+		};
+		focused != wid && self.element_window == Some(wid) && parent_of(wid) == Some(focused)
+	}
+
 	/// Whether text inserted into the focused element lands in `wid`: the
 	/// element is in `wid`, or keys for `wid` would reach it.
 	pub(super) fn holds_text_for(
 		&self,
 		pid: libc::pid_t,
 		wid: u32,
-		parent_of: impl FnOnce(u32) -> Option<u32>,
+		parent_of: impl Fn(u32) -> Option<u32>,
 	) -> bool {
 		self.element_window == Some(wid)
 			|| matches!(self.destination(pid, wid, parent_of), KeyDestination::Target(_))
 	}
 
-	/// Whether keyboard focus sits in an overlay window attached to `wid`,
-	/// such as Finder's inline rename field or a popover, while the
-	/// application reports `wid`, or nothing, as its focused window.
-	pub(super) fn in_overlay_of(
-		&self,
-		wid: u32,
-		parent_of: impl FnOnce(u32) -> Option<u32>,
-	) -> bool {
+	/// Whether keyboard focus sits in an overlay window, such as Finder's
+	/// inline rename field or a popover: one attached to `wid` while the
+	/// application reports `wid`, or nothing, as its focused window, or `wid`
+	/// itself while it reports the window `wid` is attached to.
+	pub(super) fn in_overlay_of(&self, wid: u32, parent_of: impl Fn(u32) -> Option<u32>) -> bool {
+		if self.holds_overlay_focus(wid, &parent_of) {
+			return true;
+		}
 		let reported = match self.window {
 			FocusedWindow::Unreported => true,
 			FocusedWindow::Id(id) => id == wid,
@@ -1439,6 +1453,28 @@ mod tests {
 			element_mapped: true,
 		};
 		assert!(!window.in_overlay_of(79, |_| None));
+	}
+
+	#[test]
+	fn a_popover_holding_focus_takes_its_own_keys() {
+		// Reminders reports its window 79 as focused while a date field in
+		// its details popover, window 90 attached to 79, has focus.
+		let focus = KeyFocus {
+			window:         FocusedWindow::Id(79),
+			element_window: Some(90),
+			element_mapped: true,
+		};
+		let attached = |id| (id == 90).then_some(79);
+		assert_eq!(focus.destination(7, 90, attached), KeyDestination::Target(7));
+		assert!(focus.in_overlay_of(90, attached));
+		assert_eq!(focus.destination(7, 79, attached), KeyDestination::Target(7));
+		// The popover does not take keys while focus is elsewhere in window 79,
+		// nor does a window that is not attached to the focused one.
+		let elsewhere = KeyFocus { element_window: Some(79), ..focus };
+		assert_eq!(elsewhere.destination(7, 90, attached), KeyDestination::Other(Some(79)));
+		assert!(!elsewhere.in_overlay_of(90, attached));
+		assert_eq!(focus.destination(7, 90, |_| None), KeyDestination::Other(Some(79)));
+		assert!(!focus.in_overlay_of(90, |_| None));
 	}
 
 	#[test]
