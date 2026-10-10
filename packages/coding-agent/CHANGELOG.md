@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed `omp commit` adding its one-shot commit conversation to the resumable session list ([#15247](https://github.com/can1357/oh-my-pi/issues/15247)).
+
 ## [18.8.9] - 2026-10-10
 
 ### Added

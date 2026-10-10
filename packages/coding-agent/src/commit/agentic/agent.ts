@@ -11,7 +11,7 @@ import { getMarkdownTheme } from "@oh-my-pi/pi-tui/theme";
 import { createAgentSession } from "../../sdk";
 import type { AgentSessionEvent } from "../../session/agent-session";
 import type { AuthStorage } from "../../session/auth-storage";
-import type { SessionManager } from "../../session/session-manager";
+import { SessionManager } from "../../session/session-manager";
 import agentUserPrompt from "./prompts/session-user.md" with { type: "text" };
 import agentSystemPrompt from "./prompts/system.md" with { type: "text" };
 import type { CommitAgentState } from "./state";
@@ -24,7 +24,6 @@ export interface CommitAgentInput {
 	settings: Settings;
 	modelRegistry: ModelRegistry;
 	authStorage: AuthStorage;
-	sessionManager?: SessionManager;
 	userContext?: string;
 	contextFiles?: Array<{ path: string; content: string }>;
 	changelogTargets: string[];
@@ -59,7 +58,7 @@ export async function runCommitAgentSession(input: CommitAgentInput): Promise<Co
 
 	const { session } = await createAgentSession({
 		cwd: input.cwd,
-		sessionManager: input.sessionManager,
+		sessionManager: SessionManager.inMemory(input.cwd),
 		authStorage: input.authStorage,
 		modelRegistry: input.modelRegistry,
 		cacheWarming: false,
