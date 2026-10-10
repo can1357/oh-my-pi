@@ -238,7 +238,7 @@ describe("RemoteAuthCredentialStore SSE integration", () => {
 			bind: "127.0.0.1:0",
 			bearerTokens: [token],
 			disableRefresher: true,
-			resetSweep: () => [{ provider: "anthropic", autoRedeem: "unset" }],
+			resetSweep: () => ["anthropic"],
 		});
 		const clientStorages: AuthStorage[] = [];
 		const connect = async (url: string): Promise<AuthStorage> => {
@@ -254,12 +254,12 @@ describe("RemoteAuthCredentialStore SSE integration", () => {
 		};
 		try {
 			const current = await connect(sweeping.url);
-			expect(current.resets.brokerSweep("anthropic")).toEqual({ provider: "anthropic", autoRedeem: "unset" });
-			expect(current.resets.brokerSweep("openai-codex")).toBeUndefined();
+			expect(current.resets.brokerSweeps("anthropic")).toBe(true);
+			expect(current.resets.brokerSweeps("openai-codex")).toBe(false);
 
 			// A broker without a sweep, every release before this one, leaves its clients sweeping.
 			const older = await connect(handle!.url);
-			expect(older.resets.brokerSweep("anthropic")).toBeUndefined();
+			expect(older.resets.brokerSweeps("anthropic")).toBe(false);
 
 			// Earlier clients reject unknown `/v1/usage` fields, so only clients that ask get it.
 			const legacy = await fetch(`${sweeping.url}/v1/usage`, { headers: { Authorization: `Bearer ${token}` } });

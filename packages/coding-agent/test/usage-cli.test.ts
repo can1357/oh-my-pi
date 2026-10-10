@@ -138,8 +138,11 @@ function claudeResetReport(nowMs: number, usage: Record<string, number>, expires
 	};
 }
 
-function resetExpiryOptions(overrides: Record<string, unknown> = {}): UsageResetExpiryOptions {
-	return { settings: Settings.isolated(overrides), accounts: () => [] };
+function resetExpiryOptions(
+	overrides: Record<string, unknown> = {},
+	brokerSweeps: (provider: string) => boolean = () => false,
+): UsageResetExpiryOptions {
+	return { settings: Settings.isolated(overrides), accounts: () => [], brokerSweeps };
 }
 
 describe("buildRedactionMap", () => {
@@ -667,6 +670,7 @@ describe("formatUsageBreakdown", () => {
 				formatUsageBreakdown(emails.map(expiringReport), [], Date.now(), undefined, [], policyOptions, {
 					settings: Settings.isolated({ "codexResets.autoRedeem": autoRedeem }),
 					accounts: () => [],
+					brokerSweeps: () => false,
 				}),
 			);
 			return text.slice(0, text.indexOf("Openai Codex"));
@@ -1371,6 +1375,24 @@ describe("formatUsageBreakdown", () => {
 		const text = stripVTControlCharacters(formatUsageBreakdown(reports, [], now, undefined, [], undefined, options));
 		expect(text).toContain("▲ 2 saved resets expire within 24h\n");
 		expect(text).toContain("(codexResets.autoRedeem: yes)");
+		expect(text).toContain("→ not spent automatically  (claudeResets.autoRedeem: no)");
+	});
+
+	it("names the auth broker for a provider whose saved resets it spends, whatever this machine's setting says", () => {
+		const now = Date.parse("2026-01-01T00:00:00.000Z");
+		const reports = [
+			codexResetReport({ nowMs: now, accountId: "ws-team", weeklyUsed: 1, expiresInMs: [6 * HOUR] }),
+			claudeResetReport(now, { "anthropic:5h": 0.1, "anthropic:7d": 0.6 }, 3 * HOUR),
+		];
+		const options = resetExpiryOptions(
+			{ "codexResets.autoRedeem": "no", "claudeResets.autoRedeem": "no" },
+			provider => provider === "openai-codex",
+		);
+		const text = stripVTControlCharacters(formatUsageBreakdown(reports, [], now, undefined, [], undefined, options));
+		expect(text).toContain("▲ 2 saved resets expire within 24h\n");
+		expect(text).toContain(
+			"→ the auth broker spends it before it expires, per its host's codexResets.autoRedeem and account policies",
+		);
 		expect(text).toContain("→ not spent automatically  (claudeResets.autoRedeem: no)");
 	});
 

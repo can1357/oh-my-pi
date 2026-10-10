@@ -5,17 +5,16 @@
  * `claudeResets.*` settings and account policies; with no one to ask, each
  * action spends only what {@link headlessConsentedActions} allows.
  */
-import type { AuthStorage, BrokerResetSweep, ResetCreditAccountStatus } from "@oh-my-pi/pi-ai";
+import type { AuthStorage, ResetCreditAccountStatus } from "@oh-my-pi/pi-ai";
 import { logger } from "@oh-my-pi/pi-utils";
 import type { Settings } from "../config/settings";
-import { type AutoResetHost, headlessConsentedActions, sweepResets } from "./auto-reset";
+import { type AutoResetHost, headlessConsentedActions, sweepResets, sweepsResets } from "./auto-reset";
 import {
 	type CodexAutoRedeemCoordinator,
 	createCodexAutoRedeemCoordinator,
 	IMMINENT_RESET_EXPIRY_MS,
 	SWEEP_MIN_INTERVAL_MS,
 } from "./codex-auto-reset";
-import { cfgClaudeResetsAutoRedeem, cfgCodexResetsAutoRedeem } from "./settings";
 
 /**
  * Longest wait between broker sweeps. Each sweep reads the broker's cached
@@ -69,14 +68,9 @@ export class BrokerResetSweeper {
 		return this.#sweep();
 	}
 
-	/** Providers this sweep covers, with the broker host's auto-redeem mode for each. */
-	sweeps(): BrokerResetSweep[] {
-		return (["openai-codex", "anthropic"] as const).flatMap(provider => {
-			const autoRedeem = (provider === "anthropic" ? cfgClaudeResetsAutoRedeem : cfgCodexResetsAutoRedeem).get(
-				this.#host.settings,
-			);
-			return autoRedeem === "no" ? [] : [{ provider, autoRedeem }];
-		});
+	/** Providers this sweep covers: not `no` on the broker host, or turned on by an account policy. */
+	sweeps(): string[] {
+		return (["openai-codex", "anthropic"] as const).filter(provider => sweepsResets(this.#host, provider));
 	}
 
 	close(): void {

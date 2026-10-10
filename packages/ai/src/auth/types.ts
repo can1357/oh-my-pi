@@ -1356,12 +1356,6 @@ export interface LimitsApi {
 	): Promise<boolean>;
 }
 
-/** A provider whose saved resets the auth broker spends itself, under its host's auto-redeem mode. */
-export interface BrokerResetSweep {
-	provider: string;
-	autoRedeem: "yes" | "unset";
-}
-
 /** Saved reset-credit listing and redemption. */
 export interface ResetsApi {
 	/** List live saved-reset balances and eligibility for stored OAuth accounts. */
@@ -1371,8 +1365,8 @@ export interface ResetsApi {
 	 * Business refusals return a code; transport errors may throw without losing Claude's request ID.
 	 */
 	redeem(options: RedeemResetCreditOptions): Promise<ResetCreditRedeemOutcome>;
-	/** How the auth broker sweeps `provider`'s saved resets itself, per its latest usage response; undefined when it does not. */
-	brokerSweep(provider: string): BrokerResetSweep | undefined;
+	/** Whether the auth broker spends `provider`'s saved resets itself, per its latest usage response. */
+	brokerSweeps(provider: string): boolean;
 }
 
 /** Persisted credential rate-limit block operations. */

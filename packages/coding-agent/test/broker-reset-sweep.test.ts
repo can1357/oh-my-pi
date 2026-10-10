@@ -307,4 +307,16 @@ describe("auth broker saved-reset sweep", () => {
 		expect(broker.redeemed).toEqual([]);
 		expect(broker.listed).toEqual([]);
 	});
+
+	it("tells clients it sweeps a provider unless its auto-redeem is no and no account policy turns it on", () => {
+		const settings = Settings.isolated({ "codexResets.autoRedeem": "unset", "claudeResets.autoRedeem": "no" });
+		const sweeper = new BrokerResetSweeper(authStorage, settings, createCodexAutoRedeemCoordinator());
+		expect(sweeper.sweeps()).toEqual(["openai-codex"]);
+
+		authStorage.setAccountPolicies({
+			accountPolicies: [autoRedeemPolicy("anthropic", CLAUDE.email, true)],
+			defaultReservePct: DEFAULT_USAGE_RESERVE_PCT,
+		});
+		expect(sweeper.sweeps()).toEqual(["openai-codex", "anthropic"]);
+	});
 });

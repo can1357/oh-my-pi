@@ -10,7 +10,6 @@ import type {
 	AuthCredential,
 	AuthCredentialSnapshot,
 	AuthCredentialSnapshotEntry,
-	BrokerResetSweep,
 	DisabledCredentialSummary,
 	StoredCredentialBlock,
 } from "../auth-storage";
@@ -48,11 +47,10 @@ export interface UsageResponse {
 	generatedAt: number;
 	reports: UsageReport[];
 	/**
-	 * Providers whose saved resets the broker spends itself, with its host's
-	 * auto-redeem mode. Sent only to clients advertising
-	 * {@link AUTH_BROKER_CAPABILITY_RESET_SWEEP}.
+	 * Providers whose saved resets the broker spends itself. Sent only to
+	 * clients advertising {@link AUTH_BROKER_CAPABILITY_RESET_SWEEP}.
 	 */
-	resetSweep?: BrokerResetSweep[];
+	resetSweep?: string[];
 }
 
 /**

@@ -12,12 +12,7 @@
 
 import { type Type, type } from "@oh-my-pi/omptype";
 import { logger } from "@oh-my-pi/pi-utils";
-import type {
-	AuthCredentialSnapshotEntry,
-	AuthStorage,
-	BrokerResetSweep,
-	StoredCredentialBlock,
-} from "../auth-storage";
+import type { AuthCredentialSnapshotEntry, AuthStorage, StoredCredentialBlock } from "../auth-storage";
 import { parseBind } from "../utils/parse-bind";
 import { resolvePeer } from "../utils/resolve-peer";
 import { AuthBrokerRefresher, type AuthBrokerRefresherSchedule } from "./refresher";
@@ -92,7 +87,7 @@ export interface AuthBrokerServerOptions {
 	 */
 	externalChangePollMs?: number;
 	/** Providers whose saved resets this broker spends itself; clients that ask skip their own sweep for them. */
-	resetSweep?: () => BrokerResetSweep[];
+	resetSweep?: () => string[];
 }
 
 export interface AuthBrokerServerHandle {

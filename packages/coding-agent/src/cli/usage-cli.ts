@@ -80,6 +80,8 @@ export interface UsageResetExpiryOptions {
 	settings: Settings;
 	/** Stored OAuth accounts, as `/usage reset <provider>/<credential id>` addresses them. */
 	accounts: (provider: string) => readonly OAuthAccountSummary[];
+	/** Whether the auth broker spends `provider`'s saved resets itself, which makes its host's settings decide. */
+	brokerSweeps: (provider: string) => boolean;
 }
 
 /**
@@ -722,7 +724,8 @@ function formatResetExpiryBanner(
 		),
 	);
 	const count = expiring.reduce((sum, { warning }) => sum + warning.count, 0);
-	const lost = verdicts.every(verdict => verdict.kind === "off");
+	const brokerSweeps = expiring.map(({ warning }) => options.brokerSweeps(warning.provider));
+	const lost = verdicts.every((verdict, index) => verdict.kind === "off" && !brokerSweeps[index]);
 	const lines = [
 		chalk.red.bold(
 			`▲ ${count} saved reset${count === 1 ? " expires" : "s expire"} within 24h${lost ? " and will be lost" : ""}`,
@@ -738,7 +741,10 @@ function formatResetExpiryBanner(
 			`  ${formatResetProviderName(warning.provider)} · ${identity} · ${formatExpiringResets(warning, nowMs)} (${expiresAt}) · ${used}`,
 		);
 		const verdict = verdicts[index]!;
-		lines.push(`    ${chalk.dim(formatResetSpendVerdict(verdict))}`);
+		const spender = brokerSweeps[index]
+			? `→ the auth broker spends it before it expires, per its host's ${verdict.setting} and account policies`
+			: formatResetSpendVerdict(verdict);
+		lines.push(`    ${chalk.dim(spender)}`);
 		// Codex usage reports carry no credential id; the stored account with the same identity has it.
 		const stored = options
 			.accounts(warning.provider)
@@ -746,7 +752,7 @@ function formatResetExpiryBanner(
 		const command =
 			stored.length === 1 ? `/usage reset ${warning.provider}/${stored[0]!.credentialId}` : "/usage reset";
 		lines.push(
-			`    ${verdict.kind === "off" ? "spend it" : "or now"}:  ${chalk.cyan(command)} ${chalk.dim("in omp")}`,
+			`    ${verdict.kind === "off" && !brokerSweeps[index] ? "spend it" : "or now"}:  ${chalk.cyan(command)} ${chalk.dim("in omp")}`,
 		);
 	});
 	return lines;
@@ -1474,6 +1480,7 @@ export async function runUsageCommand(cmd: UsageCommandArgs): Promise<void> {
 		const resetOptions: UsageResetExpiryOptions = {
 			settings,
 			accounts: provider => authStorage.oauth.accounts(provider),
+			brokerSweeps: provider => authStorage.resets.brokerSweeps(provider),
 		};
 		process.stdout.write(
 			`${formatUsageBreakdown(filteredReports, accounts, Date.now(), redaction, disabled, policyOptions, resetOptions)}\n`,

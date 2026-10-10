@@ -4,10 +4,7 @@
 
 ### Added
 
-- The auth broker's `/v1/usage` tells clients that send the `reset-sweep` capability which providers' saved resets it spends itself, and `AuthStorage.resets.brokerSweep()` exposes that to broker clients
-
-### Added
-
+- Added the `reset-sweep` auth broker capability: `/v1/usage` names the providers whose saved resets the broker spends itself, and `AuthStorage.resets.brokerSweeps()` reports it on broker clients
 - Added `autoRedeem: true|false` to `auth.accountPolicies` entries to override the provider's saved-reset auto-redeem setting for one account; non-boolean values are rejected as invalid config ([#15133](https://github.com/can1357/oh-my-pi/pull/15133) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.8.7] - 2026-10-09
