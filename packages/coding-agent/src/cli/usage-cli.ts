@@ -690,6 +690,8 @@ function formatResetSpendVerdict(verdict: ResetSpendVerdict): string {
 			return `→ an interactive omp session asks before spending it  ${setting}`;
 		case "off":
 			return `→ not spent automatically  ${setting}`;
+		case "account-off":
+			return "→ not spent automatically: auto-redeem is off for this account  (auth.accountPolicies)";
 	}
 }
 
@@ -703,10 +705,18 @@ function formatResetExpiryBanner(
 	nowMs: number,
 	redaction: Map<string, string> | undefined,
 	options: UsageResetExpiryOptions,
+	policyOptions: UsagePolicyDiagnosticsOptions | undefined,
 ): string[] {
-	const verdicts = expiring.map(({ warning }) => resetSpendVerdict(warning.provider, options.settings));
+	const verdicts = expiring.map(({ report, warning }) =>
+		resetSpendVerdict(
+			warning.provider,
+			options.settings,
+			policyOptions?.getAccountPolicy(report.provider, usageReportIdentity(report)),
+		),
+	);
+	const unspent = verdicts.map(verdict => verdict.kind === "off" || verdict.kind === "account-off");
 	const count = expiring.reduce((sum, { warning }) => sum + warning.count, 0);
-	const lost = verdicts.every(verdict => verdict.kind === "off");
+	const lost = unspent.every(Boolean);
 	const lines = [
 		chalk.red.bold(
 			`▲ ${count} saved reset${count === 1 ? " expires" : "s expire"} within 24h${lost ? " and will be lost" : ""}`,
@@ -734,9 +744,7 @@ function formatResetExpiryBanner(
 			.filter(account => reportMatchesStatus(report, { ...account, provider: warning.provider }));
 		const command =
 			stored.length === 1 ? `/usage reset ${warning.provider}/${stored[0]!.credentialId}` : "/usage reset";
-		lines.push(
-			`    ${verdict.kind === "off" ? "spend it" : "or now"}:  ${chalk.cyan(command)} ${chalk.dim("in omp")}`,
-		);
+		lines.push(`    ${unspent[index] ? "spend it" : "or now"}:  ${chalk.cyan(command)} ${chalk.dim("in omp")}`);
 	});
 	return lines;
 }
@@ -791,7 +799,10 @@ export function formatUsageBreakdown(
 		return warning?.tier === "imminent" ? [{ report, warning }] : [];
 	});
 	if (resetOptions && expiring.length > 0) {
-		lines.push("", ...formatResetExpiryBanner(expiring, reportsByProvider, nowMs, redaction, resetOptions));
+		lines.push(
+			"",
+			...formatResetExpiryBanner(expiring, reportsByProvider, nowMs, redaction, resetOptions, policyOptions),
+		);
 	}
 
 	for (const provider of providers) {

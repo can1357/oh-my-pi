@@ -890,11 +890,20 @@ describe("planCodexResetRedemptions: account opt-out", () => {
 			input([a, b], { trigger: "sweep", identity: undefined, accountPolicy: autoRedeemOffFor("acct-a") }),
 		);
 		expect(plan.actions).toMatchObject([{ reason: "expiring-credit", accountKey: "openai-codex|-|4" }]);
-		expect(plan.skipped).toContainEqual({ accountKey: "openai-codex|-|3", rule: "account", reason: "auto-redeem-off" });
+		expect(plan.skipped).toContainEqual({
+			accountKey: "openai-codex|-|3",
+			rule: "account",
+			reason: "auto-redeem-off",
+		});
 	});
 
 	it("lets the opted-out account's last-chance credit expire while the sibling's is spent", () => {
-		const lastChance = { weeklyUsed: 0, primaryUsed: 0, limitReached: false, creditExpiries: [IMMINENT_RESET_EXPIRY_MS] };
+		const lastChance = {
+			weeklyUsed: 0,
+			primaryUsed: 0,
+			limitReached: false,
+			creditExpiries: [IMMINENT_RESET_EXPIRY_MS],
+		};
 		const a = report({ accountId: "acct-a", email: "a@example.com", ...lastChance });
 		const b = report({ accountId: "acct-b", email: "b@example.com", ...lastChance });
 		const plan = planCodexResetRedemptions(
@@ -908,7 +917,11 @@ describe("planCodexResetRedemptions: account opt-out", () => {
 		expect(plan.actions).toMatchObject([
 			{ reason: "expiring-credit", accountKey: "openai-codex|-|4", expiresInMs: IMMINENT_RESET_EXPIRY_MS },
 		]);
-		expect(plan.skipped).toContainEqual({ accountKey: "openai-codex|-|3", rule: "account", reason: "auto-redeem-off" });
+		expect(plan.skipped).toContainEqual({
+			accountKey: "openai-codex|-|3",
+			rule: "account",
+			reason: "auto-redeem-off",
+		});
 	});
 });
 

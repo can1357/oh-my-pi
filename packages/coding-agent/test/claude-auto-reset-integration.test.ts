@@ -1,6 +1,11 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import { Agent } from "@oh-my-pi/pi-agent-core";
-import { DEFAULT_USAGE_RESERVE_PCT, type ResetCreditAccountStatus, type ResetCreditTarget, type UsageReport } from "@oh-my-pi/pi-ai";
+import {
+	DEFAULT_USAGE_RESERVE_PCT,
+	type ResetCreditAccountStatus,
+	type ResetCreditTarget,
+	type UsageReport,
+} from "@oh-my-pi/pi-ai";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import * as envApiKey from "@oh-my-pi/pi-ai/env-api-key";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";

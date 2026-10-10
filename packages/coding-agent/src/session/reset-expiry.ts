@@ -3,7 +3,7 @@
  * will spend them first. Shared by `omp usage` and the TUI status line so both
  * warn about the accounts the salvage planners would act on.
  */
-import type { UsageLimit, UsageReport, UsageResetCreditDetail } from "@oh-my-pi/pi-ai";
+import type { AuthAccountPolicy, UsageLimit, UsageReport, UsageResetCreditDetail } from "@oh-my-pi/pi-ai";
 import { formatDuration } from "@oh-my-pi/pi-utils";
 import type { Settings } from "../config/settings";
 import { formatActiveAccountLabel, usageReportIdentity } from "../slash-commands/helpers/active-oauth-account";
@@ -75,18 +75,29 @@ export function classifyResetExpiry(report: UsageReport, nowMs: number): ResetEx
 /**
  * Who spends an imminent saved reset under the session consent rules. `auto`
  * and `ask` both need an interactive omp session: its usage refresh runs the
- * salvage sweep. `off` means nothing spends it.
+ * salvage sweep. `off` (the provider setting) and `account-off` (the account's
+ * `autoRedeem: false` policy) mean nothing spends it.
  */
 export interface ResetSpendVerdict {
-	kind: "auto" | "ask" | "off";
+	kind: "auto" | "ask" | "off" | "account-off";
 	setting: "codexResets.autoRedeem" | "claudeResets.autoRedeem";
 	mode: ResetAutoRedeemMode;
 }
 
-export function resetSpendVerdict(provider: "openai-codex" | "anthropic", settings: Settings): ResetSpendVerdict {
+export function resetSpendVerdict(
+	provider: "openai-codex" | "anthropic",
+	settings: Settings,
+	policy: AuthAccountPolicy | undefined,
+): ResetSpendVerdict {
 	const setting = provider === "anthropic" ? cfgClaudeResetsAutoRedeem : cfgCodexResetsAutoRedeem;
 	const mode = setting.get(settings);
-	const kind = !shouldEvaluateCodexAutoRedeem(mode) ? "off" : shouldPromptCodexAutoRedeem(mode) ? "ask" : "auto";
+	const kind = !shouldEvaluateCodexAutoRedeem(mode)
+		? "off"
+		: policy?.autoRedeem === false
+			? "account-off"
+			: shouldPromptCodexAutoRedeem(mode)
+				? "ask"
+				: "auto";
 	return { kind, setting: setting.id, mode };
 }
 

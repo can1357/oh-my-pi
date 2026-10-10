@@ -591,7 +591,11 @@ describe("planClaudeResetRedemptions: account opt-out", () => {
 			input({ reports: [report({ orgId: "org-a" }), report({ orgId: "org-b" })], ...twoOrganizations() }),
 		);
 		expect(plan.actions).toMatchObject([{ reason: "blocked-account", target: { credentialId: 22 } }]);
-		expect(plan.skipped).toContainEqual({ accountKey: "anthropic|org-a|11", rule: "account", reason: "auto-redeem-off" });
+		expect(plan.skipped).toContainEqual({
+			accountKey: "anthropic|org-a|11",
+			rule: "account",
+			reason: "auto-redeem-off",
+		});
 	});
 
 	it("salvages only the sibling's expiring grant", () => {
@@ -603,7 +607,11 @@ describe("planClaudeResetRedemptions: account opt-out", () => {
 			}),
 		);
 		expect(plan.actions).toMatchObject([{ reason: "expiring-credit", target: { credentialId: 22 } }]);
-		expect(plan.skipped).toContainEqual({ accountKey: "anthropic|org-a|11", rule: "account", reason: "auto-redeem-off" });
+		expect(plan.skipped).toContainEqual({
+			accountKey: "anthropic|org-a|11",
+			rule: "account",
+			reason: "auto-redeem-off",
+		});
 	});
 
 	it("lets the opted-out account's last-chance grant expire while the sibling's is spent", () => {
@@ -624,6 +632,10 @@ describe("planClaudeResetRedemptions: account opt-out", () => {
 		expect(plan.actions).toMatchObject([
 			{ reason: "expiring-credit", target: { credentialId: 22 }, expiresInMs: 5 * 60_000 },
 		]);
-		expect(plan.skipped).toContainEqual({ accountKey: "anthropic|org-a|11", rule: "account", reason: "auto-redeem-off" });
+		expect(plan.skipped).toContainEqual({
+			accountKey: "anthropic|org-a|11",
+			rule: "account",
+			reason: "auto-redeem-off",
+		});
 	});
 });

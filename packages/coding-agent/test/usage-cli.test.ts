@@ -11,6 +11,7 @@ import {
 	formatUsageHistory,
 	runUsageCommand,
 	type UsagePolicyDiagnosticsOptions,
+	type UsageResetExpiryOptions,
 } from "@oh-my-pi/pi-coding-agent/cli/usage-cli";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import * as sdkModule from "@oh-my-pi/pi-coding-agent/sdk";
@@ -559,7 +560,13 @@ describe("formatUsageBreakdown", () => {
 	});
 
 	it("marks only the account whose policy turns auto-redeem off", () => {
-		const limit = makeLimit({ id: "5h", provider: "openai-codex", usedFraction: 0.2, durationMs: FIVE_HOURS, windowId: "5h" });
+		const limit = makeLimit({
+			id: "5h",
+			provider: "openai-codex",
+			usedFraction: 0.2,
+			durationMs: FIVE_HOURS,
+			windowId: "5h",
+		});
 		const reports = [
 			makeReport("openai-codex", "borrowed@example.test", [limit]),
 			makeReport("openai-codex", "own@example.test", [limit]),
@@ -580,6 +587,60 @@ describe("formatUsageBreakdown", () => {
 			"reserve 10% (global) · auto-redeem off · eligible",
 		);
 		expect(text.slice(ownAt)).toContain("reserve 10% (global) · eligible");
+	});
+
+	describe("saved reset expiring within 24h on an account whose policy turns auto-redeem off", () => {
+		const expiringReport = (email: string): UsageReport => ({
+			...makeReport("openai-codex", email, [
+				makeLimit({
+					id: "openai-codex:secondary",
+					provider: "openai-codex",
+					usedFraction: 0.6,
+					durationMs: SEVEN_DAYS,
+					windowId: "7d",
+				}),
+			]),
+			resetCredits: { availableCount: 1, credits: [{ expiresAt: new Date(Date.now() + 6 * HOUR).toISOString() }] },
+		});
+		const policyOptions: UsagePolicyDiagnosticsOptions = {
+			globalReservePct: 10,
+			getAccountPolicy: (_provider, identity) =>
+				identity.email === "borrowed@example.test"
+					? { provider: "openai-codex", account: { email: "borrowed@example.test" }, autoRedeem: false }
+					: undefined,
+		};
+		const resetOptions: UsageResetExpiryOptions = {
+			settings: Settings.isolated({ "codexResets.autoRedeem": "yes" }),
+			accounts: () => [],
+		};
+
+		it("says that account's reset is not spent while a sibling's still is", () => {
+			const reports = [expiringReport("borrowed@example.test"), expiringReport("own@example.test")];
+			const text = stripVTControlCharacters(
+				formatUsageBreakdown(reports, [], Date.now(), undefined, [], policyOptions, resetOptions),
+			);
+			const banner = text.slice(0, text.indexOf("Openai Codex"));
+			const ownAt = banner.indexOf("own@example.test");
+			expect(banner).toContain("▲ 2 saved resets expire within 24h\n");
+			expect(banner.slice(0, ownAt)).toContain("→ not spent automatically: auto-redeem is off for this account");
+			expect(banner.slice(0, ownAt)).toContain("spend it:  /usage reset");
+			expect(banner.slice(ownAt)).toContain("→ spent automatically before it expires");
+		});
+
+		it("titles the banner as lost when that account holds the only expiring reset", () => {
+			const text = stripVTControlCharacters(
+				formatUsageBreakdown(
+					[expiringReport("borrowed@example.test")],
+					[],
+					Date.now(),
+					undefined,
+					[],
+					policyOptions,
+					resetOptions,
+				),
+			);
+			expect(text).toContain("▲ 1 saved reset expires within 24h and will be lost");
+		});
 	});
 
 	it("reports an account sitting exactly on its reserve as inside reserve", () => {
