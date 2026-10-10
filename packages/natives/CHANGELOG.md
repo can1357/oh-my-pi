@@ -10,6 +10,7 @@
 
 - Fixed macOS background key presses, typing, held keys, left clicks and menu actions taking keyboard focus from the user's app, which then dropped pastes and shortcuts until clicked again
 - Fixed macOS background typing into Chrome pages and background shortcuts such as ⌘A in TextEdit doing nothing
+- Fixed macOS typing into Screen Sharing and iPhone Mirroring arriving as a run of `a`, and their background shortcuts and held keys being refused: typed text now uses the keyboard layout's keys, and iPhone Mirroring taps and scrolls land where aimed
 
 ## [18.8.7] - 2026-10-09
 
