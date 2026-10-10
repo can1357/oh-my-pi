@@ -27,7 +27,7 @@ use std::{
 	time::Duration,
 };
 
-pub use applications::{Application, ApplicationOpenOptions, ApplicationQuery};
+pub use applications::{Application, ApplicationOpenOptions, ApplicationQuery, OpenedApplication};
 use ax::{AxRegistry, register_node};
 use backend::{Backend, DeliveryMode, MouseButton, PointerEvent};
 use control::{CancellationSource, InputLease, OperationToken};
@@ -52,7 +52,7 @@ enum Response {
 	Capture(DesktopCapture),
 	Observation(DesktopObservation),
 	Applications(Vec<Application>),
-	Application(Application),
+	OpenedApplication(OpenedApplication),
 	MenuItems(Vec<DesktopMenuItem>),
 	Unit,
 	Snapshot(AxSnapshot),
@@ -221,6 +221,7 @@ enum Request {
 	AxPerform {
 		reference: String,
 		action:    String,
+		menu:      Option<Vec<String>>,
 		reply:     Reply,
 	},
 	AxSetValue {
@@ -323,21 +324,42 @@ struct ParsedPointerOptions {
 	modifiers: backend::Modifiers,
 	keys:      Vec<keys::KeyName>,
 	takeover:  Takeover,
+	menu:      Option<Vec<String>>,
 }
 impl ParsedPointerOptions {
 	fn parse(options: Option<PointerOptions>) -> CoreResult<Self> {
 		let options = options.unwrap_or_default();
+		if let Some(menu) = &options.menu {
+			menus::validate_path(menu, false)?;
+		}
 		Ok(Self {
 			button:    MouseButton::parse(options.button.as_deref())?,
 			count:     options.count.unwrap_or(1).max(1),
 			modifiers: parse_modifiers(options.modifiers.as_deref().unwrap_or_default())?,
 			keys:      parse_keys(options.keys.as_deref().unwrap_or_default())?,
 			takeover:  Takeover::new(options.takeover, options.return_focus),
+			menu:      options.menu,
 		})
 	}
 
 	fn mode(&self, token: &OperationToken) -> DeliveryMode {
 		delivery_mode(self.takeover, token)
+	}
+
+	/// Sends the click `event`, choosing [`Self::menu`] in the menu it opens
+	/// when that is set.
+	fn click(
+		&self,
+		backend: &mut dyn Backend,
+		target: &Target,
+		event: PointerEvent,
+		frame: &FrameGeometry,
+		token: &OperationToken,
+	) -> CoreResult<()> {
+		match &self.menu {
+			Some(path) => backend.pointer_menu(target, event, path, frame, self.mode(token), token),
+			None => backend.pointer(target, event, frame, self.mode(token), token),
+		}
 	}
 }
 
@@ -649,7 +671,7 @@ impl Worker {
 				Ok(Response::Applications(applications::list(options.clone())?))
 			},
 			Request::OpenApplication { id, options, .. } => {
-				Ok(Response::Application(applications::open(id, options.clone())?))
+				Ok(Response::OpenedApplication(applications::open(id, options.clone())?))
 			},
 			Request::MenuItems { target, path, .. } => {
 				let window = self.explicit_window(target)?;
@@ -747,7 +769,8 @@ impl Worker {
 					self.validate_keyboard_target(target)?;
 				}
 				let (x, y, frame) = self.map_point(target, *x, *y)?;
-				self.backend()?.pointer(
+				options.click(
+					self.backend()?.as_mut(),
 					target,
 					PointerEvent::Click {
 						x,
@@ -757,7 +780,6 @@ impl Worker {
 						modifiers: options.modifiers,
 					},
 					&frame,
-					options.mode(token),
 					token,
 				)?;
 				Ok(Response::Input(control::take_focus_return()))
@@ -916,12 +938,12 @@ impl Worker {
 				};
 				Ok(Response::Node(node))
 			},
-			Request::AxPerform { reference, action, .. } => {
+			Request::AxPerform { reference, action, menu, .. } => {
 				let h = self.registry.resolve(reference)?;
-				if action.eq_ignore_ascii_case("press") {
-					ax::ax_press(self.ax()?, &h)?;
-				} else {
-					self.ax()?.perform(&h, action)?;
+				match menu {
+					Some(path) => self.ax()?.perform_menu(&h, action, path)?,
+					None if action.eq_ignore_ascii_case("press") => ax::ax_press(self.ax()?, &h)?,
+					None => self.ax()?.perform(&h, action)?,
 				}
 				Ok(Response::Unit)
 			},
@@ -947,7 +969,8 @@ impl Worker {
 				// original window; only the live element can establish ownership.
 				let window_id = self.ax()?.window_id(&h, &windows)?;
 				let target = Target::Window(window_id);
-				self.backend()?.pointer(
+				options.click(
+					self.backend()?.as_mut(),
 					&target,
 					PointerEvent::Click {
 						x,
@@ -957,7 +980,6 @@ impl Worker {
 						modifiers: options.modifiers,
 					},
 					&FrameGeometry::identity_global(),
-					options.mode(token),
 					token,
 				)?;
 				Ok(Response::Input(control::take_focus_return()))
@@ -1219,7 +1241,7 @@ impl DesktopSession {
 		&self,
 		id: String,
 		options: Option<ApplicationOpenOptions>,
-	) -> Result<task::Promise<Application>> {
+	) -> Result<task::Promise<OpenedApplication>> {
 		let c = Arc::clone(&self.core);
 		let token = c.cancellation.token();
 		Ok(task::blocking("desktop.openApplication", (), move |_| {
@@ -1228,7 +1250,7 @@ impl DesktopSession {
 				options: options.unwrap_or_default(),
 				reply,
 			})? {
-				Response::Application(value) => Ok(value),
+				Response::OpenedApplication(value) => Ok(value),
 				_ => Err(DesktopError::internal("unexpected response")),
 			}
 			.map_err(Into::into)
@@ -1473,6 +1495,14 @@ impl DesktopSession {
 		opts: Option<PointerOptions>,
 	) -> Result<task::Promise<Option<DesktopFocusReturn>>> {
 		let o = ParsedPointerOptions::parse(opts).map_err(napi::Error::from)?;
+		if o.menu.is_some() {
+			return Err(
+				DesktopError::invalid_target(
+					"menu chooses an item of the menu a click opens; drags take no menu",
+				)
+				.into(),
+			);
+		}
 		let path = path.into_iter().map(|p| (p.x, p.y)).collect();
 		Ok(self.input("desktop.drag", move |reply| Request::Drag {
 			target: Target::parse(&target),
@@ -1637,11 +1667,22 @@ impl DesktopSession {
 		Ok(self.node("desktop.axParent", move |reply| Request::AxParent { reference, reply }))
 	}
 
+	/// Performs `action` on the element; with `menu`, chooses that item path
+	/// in the menu the action opens, which closes it.
 	#[napi]
-	pub fn ax_perform(&self, reference: String, action: String) -> Result<task::Promise<()>> {
+	pub fn ax_perform(
+		&self,
+		reference: String,
+		action: String,
+		menu: Option<Vec<String>>,
+	) -> Result<task::Promise<()>> {
+		if let Some(path) = &menu {
+			menus::validate_path(path, false).map_err(napi::Error::from)?;
+		}
 		Ok(self.unit("desktop.axPerform", move |reply| Request::AxPerform {
 			reference,
 			action,
+			menu,
 			reply,
 		}))
 	}
@@ -1868,8 +1909,17 @@ mod capture_tests {
 			unreachable!("tree traversal not exercised")
 		}
 
-		fn perform(&mut self, _: &AxHandle, _: &str) -> CoreResult<()> {
-			unreachable!("semantic actions not exercised")
+		fn perform(&mut self, _: &AxHandle, action: &str) -> CoreResult<()> {
+			self.clicks.lock().push(format!("perform {action}"));
+			Ok(())
+		}
+
+		fn perform_menu(&mut self, _: &AxHandle, action: &str, path: &[String]) -> CoreResult<()> {
+			self
+				.clicks
+				.lock()
+				.push(format!("perform {action} menu {}", path.join(" > ")));
+			Ok(())
 		}
 
 		fn set_value(&mut self, _: &AxHandle, _: &str) -> CoreResult<()> {
@@ -1969,6 +2019,22 @@ mod capture_tests {
 			_: &OperationToken,
 		) -> CoreResult<()> {
 			self.clicks.lock().push(target.key().to_string());
+			Ok(())
+		}
+
+		fn pointer_menu(
+			&mut self,
+			target: &Target,
+			_: PointerEvent,
+			path: &[String],
+			_: &FrameGeometry,
+			_: DeliveryMode,
+			_: &OperationToken,
+		) -> CoreResult<()> {
+			self
+				.clicks
+				.lock()
+				.push(format!("{} menu {}", target.key(), path.join(" > ")));
 			Ok(())
 		}
 
@@ -2083,6 +2149,47 @@ mod capture_tests {
 		};
 		assert_eq!(error.code, ErrorCode::WindowNotFound);
 		assert!(clicks.lock().is_empty(), "no input may reach the overlapping window");
+	}
+
+	#[test]
+	fn a_menu_path_reaches_the_backend_with_its_click_or_action() {
+		let backend = FakeWaylandBackend::new();
+		let calls = Arc::clone(&backend.clicks);
+		let mut worker = worker_with(backend);
+		let ax = worker.backend.as_mut().unwrap().ax().unwrap();
+		let reference = register_node(ax, &mut worker.registry, WAYLAND_ID, AxHandle::Test(1))
+			.unwrap()
+			.ref_;
+		let menu = Some(vec!["Add to".to_string(), "Bench Holdout".to_string()]);
+		let token = CancellationSource::default().token();
+		let options = ParsedPointerOptions::parse(Some(PointerOptions {
+			button: Some("right".to_string()),
+			menu: menu.clone(),
+			..PointerOptions::default()
+		}))
+		.unwrap();
+		let (reply, _rx) = flume::bounded(1);
+		let click = Request::AxClick { reference: reference.clone(), options, reply };
+		worker.process(&click, &token).expect("click");
+		for (action, menu) in [("press", None), ("press", menu.clone()), ("AXShowMenu", menu)] {
+			let (reply, _rx) = flume::bounded(1);
+			let perform = Request::AxPerform {
+				reference: reference.clone(),
+				action: action.to_string(),
+				menu,
+				reply,
+			};
+			worker.process(&perform, &token).expect("perform");
+		}
+		assert_eq!(*calls.lock(), [
+			format!("{WAYLAND_ID} menu Add to > Bench Holdout"),
+			"perform press".to_string(),
+			"perform press menu Add to > Bench Holdout".to_string(),
+			"perform AXShowMenu menu Add to > Bench Holdout".to_string(),
+		]);
+		// An empty path refuses before anything is sent.
+		let empty = PointerOptions { menu: Some(Vec::new()), ..PointerOptions::default() };
+		assert!(ParsedPointerOptions::parse(Some(empty)).is_err());
 	}
 
 	fn capture_request(target: Target) -> Request {

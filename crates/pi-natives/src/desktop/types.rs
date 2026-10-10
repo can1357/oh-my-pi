@@ -151,6 +151,10 @@ pub struct PointerOptions {
 	/// or clicked during the action; only a third app they switched to keeps
 	/// it. The host sets this when it reruns a refused background action.
 	pub return_focus: Option<bool>,
+	/// Item path to choose in the menu a click opens, matched like a menu-bar
+	/// path, e.g. a context menu's `["Add to", "Fonts"]`; the call opens the
+	/// menu, presses the item and returns with the menu closed.
+	pub menu:         Option<Vec<String>>,
 }
 
 #[napi(object)]

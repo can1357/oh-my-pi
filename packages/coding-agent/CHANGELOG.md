@@ -9,6 +9,7 @@
 - Added `/dump anon`, which writes the same anonymized session and subagent JSONL to a zip in the temp directory and copies its path ([#15077](https://github.com/can1357/oh-my-pi/pull/15077) by [@H4vC](https://github.com/H4vC))
 - Added message times to `/dump` transcripts (assistant turns also show request duration and time to first token), and live status, last activity, pending tool calls, and the partially streamed turn to `/dump all` files for subagents still running, so a stuck subagent can be diagnosed from the archive ([#15121](https://github.com/can1357/oh-my-pi/pull/15121) by [@H4vC](https://github.com/H4vC))
 - Added `computer.backgroundFallback` (`takeover` by default, or `refuse`). When a `computer` window input call's background route is unavailable, the tool reruns that one call in takeover, hands focus back to your app (on macOS even if you kept typing), and says so in its result (`click ran in takeover because …; the input was delivered, and focus returned to …`); `refuse` fails the call without taking over, and also refuses, before anything is sent, the model's own `takeover: true`, `raise()`, activating `apps.open`, `control.acquire`, desktop-root input and, off macOS, `el.focus()`, naming the background route instead. `/computer status` shows the setting ([#15191](https://github.com/can1357/oh-my-pi/pull/15191) by [@will-bogusz](https://github.com/will-bogusz))
+- Added a `menu` option to the computer tool's `win.click`, `el.click`, `el.press` and `el.perform`: on macOS the call that opens a context menu or menu button's menu chooses that item, e.g. `menu: ["Add to", "Fonts"]`, and leaves no menu open ([#15185](https://github.com/can1357/oh-my-pi/pull/15185) by [@will-bogusz](https://github.com/will-bogusz))
 
 ### Changed
 
@@ -21,6 +22,7 @@
 ### Fixed
 
 - Fixed the `computer` tool's takeover-rerun notice saying "nothing was sent" about a call it had just delivered; it now says the input was delivered, so the model stops repeating the call ([#15191](https://github.com/can1357/oh-my-pi/pull/15191) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed `computer.apps.open` returning before the app had a window, or never giving a hidden running app one; it now returns the app's frontmost window as `window`, waiting up to 3 s on macOS ([#15184](https://github.com/can1357/oh-my-pi/pull/15184) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed `/usage` (or clicking the status-line cost) while the usage dashboard was already open stacking a second dashboard on top; it now focuses the open one ([#15145](https://github.com/can1357/oh-my-pi/pull/15145) by [@H4vC](https://github.com/H4vC))
 - Fixed the custom-tool examples' full-documentation link opening a missing page ([#15076](https://github.com/can1357/oh-my-pi/pull/15076) by [@qingshungLI](https://github.com/qingshungLI))
 - Fixed the `/models` compaction limit preview and **Compacts at** row rounding fractional percentages (`12.5%` showed as `13%`) ([#15074](https://github.com/can1357/oh-my-pi/pull/15074) by [@H4vC](https://github.com/H4vC))

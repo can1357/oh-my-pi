@@ -4,8 +4,14 @@ interface ComputerInputOptions {
 	takeover?: boolean;
 }
 
+/** Item path in a menu that a call opens, matched like `win.menu.select`, e.g. `["Add to", "Fonts"]`. */
+interface ComputerMenuOptions {
+	/** The call opens the menu, presses this item and returns with the menu closed; without it, a macOS background menu is closed and the call throws `InputFailed` listing its items. */
+	menu?: string[];
+}
+
 /** Options for pointer clicks. */
-interface ComputerClickOptions extends ComputerInputOptions {
+interface ComputerClickOptions extends ComputerInputOptions, ComputerMenuOptions {
 	button?: "left" | "right" | "middle";
 	count?: number;
 	modifiers?: string[];
@@ -188,11 +194,11 @@ interface ComputerElement {
 	bounds(): Promise<ComputerBounds | null>;
 	attributes(): Promise<Record<string, string>>;
 	actions(): Promise<string[]>;
-	perform(action: string): Promise<void>;
+	perform(action: string, options?: ComputerMenuOptions): Promise<void>;
 	/** Perform the element's native press action; needs no screenshot. */
-	press(): Promise<void>;
+	press(options?: ComputerMenuOptions): Promise<void>;
 	/** Click the element's center with native input. */
-	click(options?: ComputerInputOptions): Promise<void>;
+	click(options?: ComputerClickOptions): Promise<void>;
 	/** Off macOS this moves the user's keyboard focus; refused there under the user's `refuse` setting. */
 	focus(): Promise<void>;
 	parent(): Promise<ComputerElement | null>;
@@ -238,7 +244,7 @@ interface ComputerWindow extends ComputerInputTarget {
 	/** Emit one full screenshot and AX snapshot without exposing a partial failed observation. */
 	observe(options?: ComputerScreenshotOptions & ComputerAxOptions): Promise<ComputerObservationResult>;
 	readonly menu: {
-		/** Inspect a menu path without activating the application. */
+		/** Inspect a menu path; on macOS the items validate in the window's menu context, as `select` sees them. */
 		items(path?: string | string[]): Promise<ComputerMenuItem[]>;
 		/** Select one unambiguous enabled command using the window's native menu context. */
 		select(path: string[]): Promise<void>;
@@ -257,8 +263,16 @@ interface ComputerDesktop extends ComputerInputTarget {
 	readonly apps: {
 		/** Discover native application identities without requiring capture permission. */
 		list(options?: ComputerApplicationQuery): Promise<ComputerApplication[]>;
-		/** Launch an exact identity/path or unique name; deliberate activation is opt-in and refused under the user's `refuse` setting. */
-		open(idOrNameOrNativeAppPath: string, options?: { activate?: boolean }): Promise<ComputerApplication>;
+		/**
+		 * Launch an exact identity/path or unique name; deliberate activation is opt-in and refused under the user's `refuse`
+		 * setting. Returns the app with
+		 * `window`, its frontmost window: on macOS a running app without one is shown in the background, and the
+		 * first window gets up to 3 s to appear; null if none did (always null elsewhere).
+		 */
+		open(
+			idOrNameOrNativeAppPath: string,
+			options?: { activate?: boolean },
+		): Promise<ComputerApplication & { window: ComputerWindow | null }>;
 	};
 	readonly control: {
 		/** Requires a live human UI confirmation; headless/refused requests never acquire, and the user's `refuse` setting refuses it. */

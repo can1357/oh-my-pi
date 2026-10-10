@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added a `menu` item path to `click` options and `axPerform`: a macOS click or action that opens a menu presses that item in it, submenus included, and returns with the menu closed ([#15185](https://github.com/can1357/oh-my-pi/pull/15185) by [@will-bogusz](https://github.com/will-bogusz))
+
 ### Changed
 
 - macOS window input with `takeover` and the new `returnFocus` option hands focus back to the user's app even when they typed or clicked during the action; only a third app they switched to keeps focus. Plain `takeover` is unchanged ([#15191](https://github.com/can1357/oh-my-pi/pull/15191) by [@will-bogusz](https://github.com/will-bogusz))
@@ -15,14 +19,23 @@
 ### Fixed
 
 - Fixed X11 background input refusing with `BackgroundUnavailable` and "no input was sent" after part of the call was already sent (a later click of a double-click, a later scroll detent, a pointer event after held keys); it now throws `InputFailed` saying input may already have landed ([#15191](https://github.com/can1357/oh-my-pi/pull/15191) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed a macOS background drag that picked up an item (a file, font tile, row or selected text) returning success while its drop landed elsewhere or nowhere; it now throws `InputFailed` saying the drop could not be confirmed ([#15185](https://github.com/can1357/oh-my-pi/pull/15185) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed macOS background and takeover input refusing with "cannot establish the user's key window" while the user's front app shows no window, as Finder does after a click on the desktop or an app after closing its last window; only the front app is handed back then ([#15184](https://github.com/can1357/oh-my-pi/pull/15184) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed macOS `openApplication` leaving a running app without a window, such as one AppleScript launched hidden, and bringing Notes or Contacts to the front; it now shows the app in the background and returns its first window ([#15184](https://github.com/can1357/oh-my-pi/pull/15184) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed macOS background key presses, typing, held keys, left clicks and menu actions taking keyboard focus from the user's app, which then dropped pastes and shortcuts until clicked again ([#15184](https://github.com/can1357/oh-my-pi/pull/15184) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed macOS background typing into Chrome pages and background shortcuts such as ⌘A in TextEdit doing nothing ([#15184](https://github.com/can1357/oh-my-pi/pull/15184) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed a macOS background right-click or Control-click that opened a context menu leaving the menu open, which kept the keyboard from the user's app; the menu now closes and the click throws `InputFailed`, since it was delivered ([#15185](https://github.com/can1357/oh-my-pi/pull/15185) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed a macOS background `press()`, `perform("AXShowMenu")` or click on a menu button or popup button leaving its menu open, which took every key from the user's app; the menu now closes and the call throws `InputFailed` listing its items ([#15185](https://github.com/can1357/oh-my-pi/pull/15185) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed macOS background keystrokes into Finder throwing `BackgroundUnavailable`, because its desktop is listed among its windows without a window id ([#15184](https://github.com/can1357/oh-my-pi/pull/15184) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed macOS background shortcuts with a modifier reporting success when the app stopped answering right after; they now throw `InputFailed` saying the outcome is unknown ([#15184](https://github.com/can1357/oh-my-pi/pull/15184) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed TextEdit and Script Editor freezing for good when a macOS background ⌘S followed a background edit of a just-opened document; background input now waits until the app reports the activation it was sent ([#15184](https://github.com/can1357/oh-my-pi/pull/15184) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed macOS takeover `InputFailed` naming only the target window when another held focus; it now names the app's focused window, such as an alert or sheet, or the app that stayed in front ([#15191](https://github.com/can1357/oh-my-pi/pull/15191) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed a macOS `takeover: true` click or key that opened a document or closed a sheet or panel leaving its app in front for good; focus now returns to your app unless you typed or clicked during the takeover ([#15191](https://github.com/can1357/oh-my-pi/pull/15191) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed macOS background typing and keys for a window landing in a sheet or panel attached to it, such as Finder's Go to Folder, with no error; they now throw `InvalidTarget` naming that window, and keys for a window whose application reports another focused window throw `BackgroundUnavailable` ([#15184](https://github.com/can1357/oh-my-pi/pull/15184) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed macOS background keys for a sheet or panel that its app leaves out of its accessibility windows, such as Finder's Go to Folder, throwing `BackgroundUnavailable` every time; they now go out in the background once it is the app's focused window ([#15184](https://github.com/can1357/oh-my-pi/pull/15184) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed macOS background typing into an inline editor, such as Finder's rename field, reporting success while the editor closed and the keys went to the file list; when keyboard focus sits in an overlay window attached to the target, the step that makes the window key no longer clicks, so the keys reach the editor ([#15184](https://github.com/can1357/oh-my-pi/pull/15184) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed macOS `win.menu.items` and `win.menu.select` treating commands such as Font Book's File ▸ New Collection as disabled while the app was in the background or had not yet caught up with an edit ([#15184](https://github.com/can1357/oh-my-pi/pull/15184) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed macOS background keys, typing, clicks and scrolls into a system Open or Save panel, or the Go to Folder sheet it opens, being dropped while the call reported success; they now go to `openAndSavePanelService`, which draws the panel, and throw `BackgroundUnavailable` while it does not report focus there ([#15184](https://github.com/can1357/oh-my-pi/pull/15184) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.8.7] - 2026-10-09
 

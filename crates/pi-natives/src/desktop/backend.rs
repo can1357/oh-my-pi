@@ -5,7 +5,7 @@ use image::RgbaImage;
 use super::{
 	ax::{AxHandle, AxProps},
 	control::OperationToken,
-	error::{CoreResult, DesktopError},
+	error::{CoreResult, DesktopError, ErrorCode},
 	frame::FrameGeometry,
 	keys::KeyName,
 	menus::DesktopMenuItem,
@@ -151,6 +151,22 @@ pub trait Backend: Send {
 		mode: DeliveryMode,
 		token: &OperationToken,
 	) -> CoreResult<()>;
+	/// [`Self::pointer`] for a click that opens a menu, then chooses the item
+	/// at `path` in that menu before returning.
+	fn pointer_menu(
+		&mut self,
+		_target: &Target,
+		_ev: PointerEvent,
+		_path: &[String],
+		_frame: &FrameGeometry,
+		_mode: DeliveryMode,
+		_token: &OperationToken,
+	) -> CoreResult<()> {
+		Err(DesktopError::new(
+			ErrorCode::Unsupported,
+			"choosing a menu item in the click that opens the menu is available only on macOS",
+		))
+	}
 	fn type_text(
 		&mut self,
 		target: &Target,
@@ -204,6 +220,14 @@ pub trait AxBackend {
 	fn children(&mut self, h: &AxHandle) -> CoreResult<Vec<AxHandle>>;
 	fn parent(&mut self, h: &AxHandle) -> CoreResult<Option<AxHandle>>;
 	fn perform(&mut self, h: &AxHandle, action: &str) -> CoreResult<()>;
+	/// [`Self::perform`] for an action that opens a menu, then chooses the item
+	/// at `path` in that menu before returning.
+	fn perform_menu(&mut self, _h: &AxHandle, _action: &str, _path: &[String]) -> CoreResult<()> {
+		Err(DesktopError::new(
+			ErrorCode::Unsupported,
+			"choosing a menu item in the action that opens the menu is available only on macOS",
+		))
+	}
 	fn set_value(&mut self, h: &AxHandle, value: &str) -> CoreResult<()>;
 	fn focus(&mut self, h: &AxHandle) -> CoreResult<()>;
 	fn element_at(&mut self, x: f64, y: f64) -> CoreResult<Option<AxHandle>>;

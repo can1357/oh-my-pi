@@ -1,4 +1,5 @@
 pub(crate) mod menus;
+pub(super) mod open_menu;
 mod popup;
 
 use std::{
@@ -24,7 +25,7 @@ use super::{
 		error::{CoreResult, DesktopError},
 		types::DesktopWindow,
 	},
-	date, process, skylight,
+	capture, date, input, process, skylight,
 };
 
 const AX_TIMEOUT_SECONDS: f32 = 2.0;
@@ -127,6 +128,203 @@ pub(super) fn focused_window_label(pid: libc::pid_t) -> Option<WindowLabel> {
 		title: nonempty(copy_string(&window, "AXTitle")),
 		kind,
 	})
+}
+
+/// An application's `AXFocusedWindow`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) enum FocusedWindow {
+	/// The application reports none.
+	#[default]
+	Unreported,
+	/// `_AXUIElementGetWindow` cannot map the window it reports.
+	Unmapped,
+	Id(u32),
+}
+
+/// Where an application sends keystrokes: its focused window and the element
+/// holding keyboard focus.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) struct KeyFocus {
+	pub(super) window:         FocusedWindow,
+	/// The window holding `AXFocusedUIElement`: the first id
+	/// `_AXUIElementGetWindow` maps on the element or its nearest ancestor, so
+	/// a field in a sheet maps to the sheet, not to the window it is attached
+	/// to.
+	pub(super) element_window: Option<u32>,
+	/// Whether that id is the focused element's own, not an ancestor's. The
+	/// fields of an Open panel's Go to Folder sheet map to no window: another
+	/// process draws them.
+	pub(super) element_mapped: bool,
+}
+
+/// Where keystrokes posted for window `wid` would go now.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum KeyDestination {
+	/// Into `wid`, posted to this process.
+	Target(libc::pid_t),
+	/// Into another window the application reports as focused; `None` when
+	/// that window cannot be mapped to an id.
+	Other(Option<u32>),
+	/// The application reports no focused window, and its focused element is
+	/// not in `wid` or in a window attached to it.
+	Unreported,
+}
+
+impl KeyFocus {
+	/// Where keystrokes for window `wid` of process `pid` would go.
+	///
+	/// The focused window decides when the application reports one; a sheet
+	/// or panel it reports is another window, even when attached to `wid`.
+	/// When it reports none, as Finder does while its inline rename field (an
+	/// overlay window of its own) has focus, the focused element's window
+	/// decides: `wid` itself, or a window `parent_of` says is attached to it.
+	pub(super) fn destination(
+		&self,
+		pid: libc::pid_t,
+		wid: u32,
+		parent_of: impl FnOnce(u32) -> Option<u32>,
+	) -> KeyDestination {
+		match self.window {
+			FocusedWindow::Id(id) if id == wid => KeyDestination::Target(pid),
+			FocusedWindow::Id(id) => KeyDestination::Other(Some(id)),
+			FocusedWindow::Unmapped => KeyDestination::Other(None),
+			FocusedWindow::Unreported => match self.element_window {
+				Some(id) if [Some(id), parent_of(id)].contains(&Some(wid)) => {
+					KeyDestination::Target(pid)
+				},
+				_ => KeyDestination::Unreported,
+			},
+		}
+	}
+
+	/// Whether text inserted into the focused element lands in `wid`: the
+	/// element is in `wid`, or keys for `wid` would reach it.
+	pub(super) fn holds_text_for(
+		&self,
+		pid: libc::pid_t,
+		wid: u32,
+		parent_of: impl FnOnce(u32) -> Option<u32>,
+	) -> bool {
+		self.element_window == Some(wid)
+			|| matches!(self.destination(pid, wid, parent_of), KeyDestination::Target(_))
+	}
+
+	/// Whether keyboard focus sits in an overlay window attached to `wid`,
+	/// such as Finder's inline rename field or a popover, while the
+	/// application reports `wid`, or nothing, as its focused window.
+	pub(super) fn in_overlay_of(
+		&self,
+		wid: u32,
+		parent_of: impl FnOnce(u32) -> Option<u32>,
+	) -> bool {
+		let reported = match self.window {
+			FocusedWindow::Unreported => true,
+			FocusedWindow::Id(id) => id == wid,
+			FocusedWindow::Unmapped => false,
+		};
+		let overlay = self.element_window.filter(|&id| id != wid);
+		reported && overlay.is_some_and(|id| parent_of(id) == Some(wid))
+	}
+
+	/// Whether the focused element itself maps to window `wid`, which proves
+	/// that `wid`'s own process holds the focus there.
+	pub(super) fn element_maps_to(&self, wid: u32) -> bool {
+		self.element_mapped && self.element_window == Some(wid)
+	}
+}
+
+/// Reads where `pid` sends keystrokes; every part it cannot read is `None`.
+pub(super) fn key_focus(pid: libc::pid_t) -> KeyFocus {
+	probe_application(pid).map_or_else(KeyFocus::default, |app| read_key_focus(&app).0)
+}
+
+fn read_key_focus(app: &AXUIElement) -> (KeyFocus, Option<CFRetained<AXUIElement>>) {
+	let window = copy_element(app, "AXFocusedWindow").map_or(FocusedWindow::Unreported, |window| {
+		window_id(&window).map_or(FocusedWindow::Unmapped, FocusedWindow::Id)
+	});
+	let element = copy_element(app, "AXFocusedUIElement");
+	let (element_window, element_mapped) = element
+		.as_deref()
+		.and_then(innermost_window_id)
+		.map_or((None, false), |(id, own)| (Some(id), own));
+	(KeyFocus { window, element_window, element_mapped }, element)
+}
+
+/// The first window id `_AXUIElementGetWindow` maps on `element` or, through
+/// a bounded `AXParent` ascent, its nearest ancestor, and whether it is the
+/// element's own.
+fn innermost_window_id(element: &AXUIElement) -> Option<(u32, bool)> {
+	let mut current = element.retain();
+	for depth in 0..MAX_ANCESTRY_DEPTH {
+		if let Some(id) = window_id(&current) {
+			return Some((id, depth == 0));
+		}
+		current = copy_element(&current, "AXParent")?;
+	}
+	None
+}
+
+/// Which process draws a window's content.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum WindowContent {
+	/// The window's own process, or nothing shows another one.
+	Own,
+	/// Another process: the window is a remote view of `window`, a window of
+	/// process `pid` that `WindowServer` keeps off its window list. System
+	/// Open and Save panels, and the sheets they open, are drawn this way by
+	/// `openAndSavePanelService`.
+	Remote { pid: libc::pid_t, window: u32 },
+}
+
+/// Who draws window `wid` of process `pid`, from the window ids its
+/// accessibility children map to (`None` for a child that maps to none) and
+/// `owner_of`, which reads a window's `WindowServer` owner.
+///
+/// A remote view's elements report the host's pid, but `_AXUIElementGetWindow`
+/// maps them to the drawing process's own window. The content counts as
+/// remote only while no child maps to a window of `pid`, so a window that
+/// embeds a remote view among controls of its own stays the host's.
+fn content_owner(
+	pid: libc::pid_t,
+	wid: u32,
+	children: impl IntoIterator<Item = Option<u32>>,
+	owner_of: impl Fn(u32) -> Option<libc::pid_t>,
+) -> WindowContent {
+	let mut remote = None;
+	for id in children.into_iter().flatten() {
+		if id == wid {
+			return WindowContent::Own;
+		}
+		if matches!(remote, Some(WindowContent::Remote { window, .. }) if window == id) {
+			continue;
+		}
+		match owner_of(id) {
+			Some(owner) if owner != pid => {
+				remote.get_or_insert(WindowContent::Remote { pid: owner, window: id });
+			},
+			_ => return WindowContent::Own,
+		}
+	}
+	remote.unwrap_or(WindowContent::Own)
+}
+
+/// Who draws `pid`'s focused window when that is `wid`; [`WindowContent::Own`]
+/// when it is another window or nothing can be read.
+pub(super) fn focused_window_content(pid: libc::pid_t, wid: u32) -> WindowContent {
+	let Some(window) = probe_application(pid).and_then(|app| copy_element(&app, "AXFocusedWindow"))
+	else {
+		return WindowContent::Own;
+	};
+	if window_id(&window) != Some(wid) {
+		return WindowContent::Own;
+	}
+	let children = copy_elements_optional(&window, "AXChildren").unwrap_or_default();
+	content_owner(
+		pid,
+		wid,
+		children.iter().map(|child| window_id(child)),
+		skylight::window_owner_pid,
+	)
 }
 
 /// The window that should regain key status when `pid` is handed keyboard
@@ -502,23 +700,11 @@ impl AxBackend for MacAx {
 	}
 
 	fn perform(&mut self, h: &AxHandle, action: &str) -> CoreResult<()> {
-		let element = mac_handle(h)?;
-		let native = action_name(action);
-		let actions = copy_strings_from_action_names(element)?;
-		if !actions.contains(&native) {
-			return Err(DesktopError::ax_failed(format!(
-				"AX action '{native}' is not supported by this element; available actions: {}",
-				actions.join(", "),
-			)));
-		}
-		let perform = || perform_action(element, &native);
-		// AXRaise is an explicit request to change stacking, including the
-		// takeover preparation path. Other semantic actions must stay background.
-		if native == "AXRaise" {
-			perform()
-		} else {
-			skylight::with_background_guard(element_pid(element)?, perform)
-		}
+		perform_choosing(mac_handle(h)?, action, None)
+	}
+
+	fn perform_menu(&mut self, h: &AxHandle, action: &str, path: &[String]) -> CoreResult<()> {
+		perform_choosing(mac_handle(h)?, action, Some(path))
 	}
 
 	fn set_value(&mut self, h: &AxHandle, value: &str) -> CoreResult<()> {
@@ -612,6 +798,89 @@ impl AxBackend for MacAx {
 		}
 		Ok(result)
 	}
+}
+
+/// Performs `action` on `element`; with `path`, chooses that item path in the
+/// menu the action opens.
+fn perform_choosing(
+	element: &AXUIElement,
+	action: &str,
+	path: Option<&[String]>,
+) -> CoreResult<()> {
+	let native = action_name(action);
+	let actions = copy_strings_from_action_names(element)?;
+	if !actions.contains(&native) {
+		return Err(DesktopError::ax_failed(format!(
+			"AX action '{native}' is not supported by this element; available actions: {}",
+			actions.join(", "),
+		)));
+	}
+	let perform = || perform_action(element, &native);
+	// AXRaise is an explicit request to change stacking, including the
+	// takeover preparation path. Other semantic actions must stay background.
+	if native == "AXRaise" {
+		if path.is_some() {
+			return Err(DesktopError::invalid_target("AXRaise opens no menu to choose an item from"));
+		}
+		return perform();
+	}
+	let pid = element_pid(element)?;
+	// A menu that a background application opens takes the keyboard from the
+	// user's app, so it is closed before the action returns; a frontmost
+	// application's menu stays open for the next call unless an item is asked
+	// for.
+	let entry_front = skylight::front_pid();
+	let background = entry_front != Some(pid);
+	let watch = path.is_some()
+		|| (background && open_menu::may_open(&native, || copy_string(element, "AXRole")));
+	skylight::with_background_guard(pid, || {
+		let before = if watch {
+			let before = capture::menu_windows(pid).ok_or_else(|| {
+				DesktopError::ax_failed(format!(
+					"cannot list the open menus of process {pid}, so a menu that {native} opens could \
+					 not be closed; nothing was performed"
+				))
+			})?;
+			if background {
+				activate_for_menu(element, pid, entry_front)?;
+			}
+			Some(before)
+		} else {
+			None
+		};
+		open_menu::guard(
+			open_menu::Press::Action(&native),
+			before.as_deref(),
+			path,
+			perform,
+			|before, path| open_menu::settle(pid, before, path, open_menu::CONTROL_MENU_TIMEOUT),
+		)
+	})
+}
+
+/// Makes the window holding `element` key within its background
+/// application, as a background click does, before an action that opens a
+/// menu: `AppKit` validates a menu's items when it opens, and an inactive
+/// Finder read every Action-menu command but three as disabled. An element
+/// whose window cannot be resolved is acted on as it is.
+fn activate_for_menu(
+	element: &AXUIElement,
+	pid: libc::pid_t,
+	entry_front: Option<libc::pid_t>,
+) -> CoreResult<()> {
+	let Some(wid) = element_window(element).as_deref().and_then(window_id) else {
+		return Ok(());
+	};
+	let Ok(window) = capture::window_by_id(&wid.to_string()) else {
+		return Ok(());
+	};
+	let prepared =
+		input::make_key_in_background(&input::source()?, pid, wid, &window, entry_front, false)?;
+	input::await_key_window(pid, wid)?;
+	if prepared {
+		input::still_behind_user(pid, wid)?;
+	}
+	Ok(())
 }
 
 fn element_pid(element: &AXUIElement) -> CoreResult<libc::pid_t> {
@@ -734,16 +1003,18 @@ fn set_date_value(element: &AXUIElement, text: &str, current: f64) -> CoreResult
 }
 
 /// Inserts into a native field only when its focused element belongs to this
-/// exact window. `false` means no write was attempted; an attempted write never
-/// falls through to keystrokes, including timeouts or partial delivery.
+/// exact window: a field in a sheet belongs to the sheet, not to the window
+/// the sheet is attached to. `false` means no write was attempted; an
+/// attempted write never falls through to keystrokes, including timeouts or
+/// partial delivery.
 pub(super) fn insert_native_text(pid: libc::pid_t, wid: u32, text: &str) -> CoreResult<bool> {
 	let Some(app) = probe_application(pid) else {
 		return Ok(false);
 	};
-	let Some(element) = copy_element(&app, "AXFocusedUIElement") else {
+	let (focus, Some(element)) = read_key_focus(&app) else {
 		return Ok(false);
 	};
-	if element_window(&element).as_deref().and_then(window_id) != Some(wid)
+	if !focus.holds_text_for(pid, wid, skylight::window_parent)
 		|| text_surface(&element) != TextSurface::Native
 		|| !matches!(
 			copy_string(&element, "AXRole").as_deref(),
@@ -1148,8 +1419,9 @@ mod tests {
 	use objc2_core_foundation::CFNumber;
 
 	use super::{
-		AttachedCandidate, AxWindowRecord, create_system_wide, replace_utf16_selection,
-		select_attached, stringify_value, window_records_of,
+		AttachedCandidate, AxWindowRecord, FocusedWindow, KeyDestination, KeyFocus, WindowContent,
+		content_owner, create_system_wide, replace_utf16_selection, select_attached, stringify_value,
+		window_records_of,
 	};
 
 	#[test]
@@ -1212,5 +1484,80 @@ mod tests {
 		// cannot map it; the system-wide element is unmappable the same way.
 		let records = window_records_of(&[create_system_wide()]);
 		assert!(matches!(records.as_slice(), [AxWindowRecord { id: None, .. }]));
+	}
+
+	#[test]
+	fn a_focused_sheet_is_not_the_window_it_is_attached_to() {
+		// Finder's Go to Folder sheet 41740 on window 41732: its path field
+		// reports 41732 as its AXWindow but lives in the sheet's own window.
+		let focus = KeyFocus {
+			window:         FocusedWindow::Id(41740),
+			element_window: Some(41740),
+			element_mapped: true,
+		};
+		let attached = |id| (id == 41740).then_some(41732);
+		assert_eq!(focus.destination(7, 41732, attached), KeyDestination::Other(Some(41740)));
+		assert!(!focus.holds_text_for(7, 41732, attached));
+		assert_eq!(focus.destination(7, 41740, attached), KeyDestination::Target(7));
+		assert!(focus.holds_text_for(7, 41740, attached));
+	}
+
+	#[test]
+	fn an_editor_overlay_attached_to_the_target_holds_its_focus() {
+		// Finder's inline rename field is overlay window 41743, attached to
+		// window 41732; while it has focus Finder reports no focused window.
+		let focus = KeyFocus {
+			window:         FocusedWindow::Unreported,
+			element_window: Some(41743),
+			element_mapped: true,
+		};
+		let attached = |id| (id == 41743).then_some(41732);
+		assert_eq!(focus.destination(7, 41732, attached), KeyDestination::Target(7));
+		assert!(focus.holds_text_for(7, 41732, attached));
+		assert!(focus.in_overlay_of(41732, attached));
+		// The same overlay in another Finder window is not this window's.
+		assert_eq!(focus.destination(7, 35240, attached), KeyDestination::Unreported);
+		assert!(!focus.holds_text_for(7, 35240, attached));
+		assert!(!focus.in_overlay_of(35240, attached));
+		// A popover attached to its focused window (Reminders' details popover
+		// is window 90 on window 79) is an overlay too; the window itself is not.
+		let popover = KeyFocus {
+			window:         FocusedWindow::Id(79),
+			element_window: Some(90),
+			element_mapped: true,
+		};
+		assert!(popover.in_overlay_of(79, |id| (id == 90).then_some(79)));
+		let window = KeyFocus {
+			window:         FocusedWindow::Id(79),
+			element_window: Some(79),
+			element_mapped: true,
+		};
+		assert!(!window.in_overlay_of(79, |_| None));
+	}
+
+	#[test]
+	fn a_system_panel_is_drawn_by_the_process_its_children_map_to() {
+		// TextEdit (pid 7581) shows its Open panel as window 554, whose one
+		// child maps to window 556 of openAndSavePanelService (pid 7592). Its
+		// Go to Folder sheet 561 has three children that map to no window and
+		// one in the service's window 559.
+		let owners = |id| match id {
+			556 | 559 => Some(7592),
+			543 | 554 | 561 => Some(7581),
+			_ => None,
+		};
+		let remote = |window| WindowContent::Remote { pid: 7592, window };
+		assert_eq!(content_owner(7581, 554, [Some(556)], owners), remote(556));
+		assert_eq!(content_owner(7581, 561, [None, None, None, Some(559)], owners), remote(559));
+		// A document window's children map to the window itself.
+		assert_eq!(content_owner(7581, 543, [Some(543), Some(543)], owners), WindowContent::Own);
+		// A remote view embedded beside the window's own controls is not the
+		// window's content.
+		assert_eq!(content_owner(7581, 543, [Some(556), Some(543)], owners), WindowContent::Own);
+		// A child in another window of the same process, an owner that cannot
+		// be read, or no mapped child at all shows no other process.
+		assert_eq!(content_owner(7581, 561, [Some(554), Some(559)], owners), WindowContent::Own);
+		assert_eq!(content_owner(7581, 554, [Some(999)], owners), WindowContent::Own);
+		assert_eq!(content_owner(7581, 554, [None, None], owners), WindowContent::Own);
 	}
 }

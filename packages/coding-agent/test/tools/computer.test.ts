@@ -152,7 +152,7 @@ class FakeNativeSession implements NativeDesktopSession {
 	}
 	async openApplication(id: string) {
 		this.operations.push(`open:${id}`);
-		return (await this.listApplications())[0]!;
+		return { application: (await this.listApplications())[0]!, window: windowFixture };
 	}
 	async menuItems(_target: string, path: string[] = []) {
 		return [{ title: "Save", path: [...path, "Save"], enabled: true, checked: false, hasSubmenu: false }];
@@ -1509,6 +1509,47 @@ describe("computer worker round trips", () => {
 		if (second.ok) expect(second.payload.returnValue).toEqual({ x: 7, y: 8, width: 9, height: 10 });
 	});
 
+	it("passes a menu item path to native with the click or action that opens the menu", async () => {
+		const calls: unknown[][] = [];
+		class MenuNativeSession extends FakeNativeSession {
+			override async click(target: string, x: number, y: number, opts?: PointerOptions | null): Promise<void> {
+				calls.push(["click", target, x, y, opts]);
+			}
+			override async axClick(ref: string, opts?: PointerOptions | null): Promise<void> {
+				calls.push(["axClick", ref, opts]);
+			}
+			override async axPerform(ref: string, action: string, menu?: string[] | null): Promise<void> {
+				calls.push(["axPerform", ref, action, menu]);
+			}
+		}
+		const transport = new MemoryTransport();
+		new ComputerWorkerCore(transport, () => new MenuNativeSession());
+		const result = await runWorker(
+			transport,
+			"menu-paths",
+			`const win = await desktop.window("42");
+			await win.screenshot({ silent: true });
+			const [el] = await win.find({ role: "button" });
+			await win.click(1, 2, { button: "right", menu: ["Add to", "Bench Holdout"] });
+			await el.click({ button: "right", menu: ["Add to", "Bench Holdout"] });
+			await el.press({ menu: ["New Folder"] });
+			await el.perform("AXShowMenu", { menu: ["List", "Errands"] });
+			await el.press();
+			return await el.press({ menu: [] }).then(() => "sent", error => error.message);`,
+		);
+		expect(result.ok).toBe(true);
+		if (result.ok)
+			expect(result.payload.returnValue).toBe("menu path requires a non-empty array of non-empty strings");
+		const add = ["Add to", "Bench Holdout"];
+		expect(calls).toEqual([
+			["click", "42", 1, 2, { button: "right", menu: add }],
+			["axClick", "e1", { button: "right", menu: add }],
+			["axPerform", "e1", "press", ["New Folder"]],
+			["axPerform", "e1", "AXShowMenu", ["List", "Errands"]],
+			["axPerform", "e1", "press", undefined],
+		]);
+	});
+
 	it("answers a direct capabilities request without a prior run", async () => {
 		const transport = new MemoryTransport();
 		new ComputerWorkerCore(transport, () => new FakeNativeSession());
@@ -1704,8 +1745,9 @@ describe("expanded computer APIs", () => {
 				await display.holdKeys(["space"], { duration: 0 });
 				await win.holdMouse(1, 2, { duration: 0, keys: ["space"] });
 				const apps = await computer.apps.list({ runningOnly: true });
-				await computer.apps.open(apps[0].id, { activate: false });
-				return { menu, observation, display: { ...display }, apps };
+				const opened = await computer.apps.open(apps[0].id, { activate: false });
+				await opened.window.click(7, 8);
+				return { menu, observation, display: { ...display }, apps, opened: { ...opened, window: String(opened.window) } };
 			})()`,
 				realm,
 			);
@@ -1718,9 +1760,11 @@ describe("expanded computer APIs", () => {
 				ax: "- button [ref=e1]",
 			});
 			expect(value.display).toEqual({ id: "display-1" });
+			expect(value.opened).toEqual({ ...value.apps[0], window: "<window 42 Code>" });
 			expect(native.clicks).toEqual([
 				{ target: "42", x: 60, y: 30 },
 				{ target: "display:display-1", x: 60, y: 30 },
+				{ target: "42", x: 7, y: 8 },
 			]);
 			expect(native.operations).toEqual([
 				"menu:42:File/Save",
@@ -1753,8 +1797,8 @@ describe("expanded computer APIs", () => {
 					"await monitor.holdKeys(['space'], duration=0)",
 					"await win.holdMouse(1, 2, duration=0)",
 					"apps = await computer.apps.list(runningOnly=True)",
-					"await computer.apps.open(apps[0]['id'], activate=False)",
-					"print(obs['nodeCount'], monitor.id, (await computer.control.state())['active'])",
+					"opened = await computer.apps.open(apps[0]['id'], activate=False)",
+					"print(obs['nodeCount'], monitor.id, (await computer.control.state())['active'], opened['name'], opened['window'])",
 				].join("\n"),
 				{
 					cwd: process.cwd(),
@@ -1764,7 +1808,7 @@ describe("expanded computer APIs", () => {
 				},
 			);
 			expect(result.exitCode).toBe(0);
-			expect(result.output).toContain("1 display-1 False");
+			expect(result.output).toContain("1 display-1 False Editor <computer.Window id='42' app='Code'>");
 			expect(native.controlActive).toBe(false);
 		} finally {
 			await prelude.invoke({ action: "close" }, { session, toolCallId: "expanded-py" });
@@ -2046,7 +2090,7 @@ describe("computer background fallback", () => {
 			}
 			override async openApplication(id: string, options?: { activate?: boolean }) {
 				this.calls.push(`open:${id}:${options?.activate ?? "-"}`);
-				return (await this.listApplications())[0]!;
+				return { application: (await this.listApplications())[0]!, window: windowFixture };
 			}
 		}
 
