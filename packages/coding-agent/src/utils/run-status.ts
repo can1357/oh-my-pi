@@ -61,13 +61,16 @@ const runtime: {
 };
 
 /**
- * The status every surface shows: the event flow's own `blocked` prompt is the
- * most specific (a tool approval renders through a dialog), else the newest
- * open dialog, else the event flow's status.
+ * The status every surface shows. The presented dialog (the newest hold) names
+ * what the user is looking at, so it supplies `msg`; while the event flow is
+ * `blocked` too, its `kind` wins, since it knows a dialog is a tool approval.
+ * Without a dialog, the event flow's status shows as is.
  */
 function shownStatus(): RunStatus {
-	if (runtime.status.state === "blocked") return runtime.status;
-	return runtime.dialogs.at(-1) ?? runtime.status;
+	const dialog = runtime.dialogs.at(-1);
+	if (!dialog) return runtime.status;
+	if (runtime.status.state !== "blocked") return dialog;
+	return { state: "blocked", kind: runtime.status.kind, msg: dialog.msg };
 }
 
 function titleState(status: RunStatus): TerminalTitleState {

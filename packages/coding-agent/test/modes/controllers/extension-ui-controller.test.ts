@@ -599,15 +599,27 @@ describe("ExtensionUiController OSC 7501 run status", () => {
 		expect(writes.slice(1)).toEqual([report("state=working:app=omp")]);
 	});
 
-	it("leaves a tool's own blocked record in place while the dialog that renders it is open", async () => {
-		setRunStatus({ state: "blocked", kind: "permission", msg: "Allow bash: rm -rf build" });
-		writes.length = 0;
+	it("reports the presented approval dialog's prompt, not the newest queued tool call's", async () => {
 		const harness = makeHarness();
 		const ui = await harness.init();
+		const permission = (msg: string) =>
+			report(`state=blocked:kind=permission:app=omp:msg=${Buffer.from(msg).toString("base64")}`);
 
-		const choice = ui.select("Approve bash?", ["Allow", "Deny"]);
+		// Two concurrent approvals: the event flow reports each call as it starts,
+		// while the dialogs present one at a time.
+		setRunStatus({ state: "blocked", kind: "permission", msg: "Allow tool: read a" });
+		const first = ui.select("Allow tool: read a", ["Approve", "Deny"]);
+		setRunStatus({ state: "blocked", kind: "permission", msg: "Allow tool: read b" });
+		const second = ui.select("Allow tool: read b", ["Approve", "Deny"]);
+		expect(writes).toEqual([permission("Allow tool: read a")]);
+
 		harness.handleInput("\r");
-		expect(await choice).toBe("Allow");
-		expect(writes).toEqual([]);
+		expect(await first).toBe("Approve");
+		expect(writes.slice(1)).toEqual([permission("Allow tool: read b")]);
+
+		harness.handleInput("\r");
+		expect(await second).toBe("Approve");
+		setRunStatus({ state: "working" });
+		expect(writes.slice(2)).toEqual([report("state=working:app=omp")]);
 	});
 });
