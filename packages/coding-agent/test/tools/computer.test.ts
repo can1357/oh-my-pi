@@ -1985,7 +1985,11 @@ describe("computer background fallback", () => {
 
 	it("passes an explicit takeover through under takeover; false never falls back", async () => {
 		const forced = new RefusingSession();
-		const result = await run(forced, 'await (await desktop.window("42")).click(1, 2, { takeover: true })', "takeover");
+		const result = await run(
+			forced,
+			'await (await desktop.window("42")).click(1, 2, { takeover: true })',
+			"takeover",
+		);
 		expect(texts(result)).toEqual([]);
 		expect(forced.sent).toEqual([{ takeover: true }]);
 
@@ -2049,8 +2053,16 @@ describe("computer background fallback", () => {
 				route: "Call it without takeover",
 			},
 			{ code: 'await (await desktop.window("42")).raise()', call: "raise:42", route: "no raise is needed" },
-			{ code: 'await (await desktop.ref("e1")).perform("AXRaise")', call: "perform:AXRaise", route: "no raise is needed" },
-			{ code: 'await (await desktop.ref("e1")).perform(" Raise ")', call: "perform: Raise ", route: "no raise is needed" },
+			{
+				code: 'await (await desktop.ref("e1")).perform("AXRaise")',
+				call: "perform:AXRaise",
+				route: "no raise is needed",
+			},
+			{
+				code: 'await (await desktop.ref("e1")).perform(" Raise ")',
+				call: "perform: Raise ",
+				route: "no raise is needed",
+			},
 			{
 				code: 'await desktop.apps.open("test.editor", { activate: true })',
 				call: "open:test.editor:true",
@@ -2110,7 +2122,12 @@ describe("computer background fallback", () => {
 			].join("\n");
 			const native = new ForegroundSession();
 			expect((await run(native, code, "refuse")).ok).toBe(true);
-			expect(native.calls).toEqual(["press:42:false", "axClick:false", "holdKeys:42:false", "open:test.editor:false"]);
+			expect(native.calls).toEqual([
+				"press:42:false",
+				"axClick:false",
+				"holdKeys:42:false",
+				"open:test.editor:false",
+			]);
 		});
 
 		it("refuses focus() off macOS, where it moves keyboard focus, and keeps macOS's background focus", async () => {
