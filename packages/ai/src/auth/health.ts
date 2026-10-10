@@ -174,6 +174,10 @@ export class CredentialHealth implements HealthApi {
 					if (options.signal?.aborted) throw error;
 					report = null;
 				}
+				if (report !== null && options.usageAfter !== undefined) {
+					const fetchedAt = report.fetchedAt;
+					if (!Number.isFinite(fetchedAt) || fetchedAt <= options.usageAfter) report = null;
+				}
 				if (planGate) {
 					planEligibilityByCredential.set(entry.id, planGate(report));
 				}

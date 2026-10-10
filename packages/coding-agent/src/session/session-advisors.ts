@@ -503,8 +503,13 @@ export interface SessionAdvisorsHost {
 		currentSelector: string,
 		currentModel?: Model | null,
 	): RetryFallbackSelector[];
-	isRetryFallbackSelectorSuppressed(selector: RetryFallbackSelector): boolean;
-	noteRetryFallbackCooldown(currentSelector: string, retryAfterMs: number | undefined, errorMessage: string): void;
+	isRetryFallbackSelectorSuppressed(selector: RetryFallbackSelector, signal?: AbortSignal): Promise<boolean>;
+	noteRetryFallbackCooldown(
+		currentSelector: string,
+		retryAfterMs: number | undefined,
+		errorMessage: string,
+		usageLimitFailureTime?: number,
+	): void;
 	createCodexCompactionContext(options: {
 		trigger: CodexCompactionContext["trigger"];
 		reason: CodexCompactionContext["reason"];
@@ -1999,13 +2004,17 @@ export class SessionAdvisors {
 		}
 		const currentSelector = formatRetryFallbackSelector(advisor.agent.state.model, advisor.thinkingLevel);
 		if (currentSelector === originalSelector.raw) {
-			if (!this.#host.isRetryFallbackSelectorSuppressed(originalSelector)) {
+			if (
+				!(await this.#host.isRetryFallbackSelectorSuppressed(originalSelector, signal)) &&
+				advisor.retryFallback === fallback
+			) {
 				advisor.retryFallback = undefined;
 				advisor.retryFallbackPendingSuccess = false;
 			}
 			return;
 		}
-		if (this.#host.isRetryFallbackSelectorSuppressed(originalSelector)) return;
+		if (await this.#host.isRetryFallbackSelectorSuppressed(originalSelector, signal)) return;
+		if (advisor.retryFallback !== fallback || advisor.runtime.disposed) return;
 
 		const resolvedPrimary = resolveModelOverride(
 			[originalSelector.raw],
@@ -2016,7 +2025,7 @@ export class SessionAdvisors {
 			resolvedPrimary.model ?? this.#host.modelRegistry.find(originalSelector.provider, originalSelector.id);
 		if (!primaryModel || !this.#canReplayAdvisorHistory(advisor, primaryModel)) return;
 		const apiKey = await this.#host.modelRegistry.getApiKey(primaryModel, advisor.providerSessionId, { signal });
-		if (!apiKey) return;
+		if (!apiKey || advisor.retryFallback !== fallback || advisor.runtime.disposed) return;
 		signal.throwIfAborted();
 
 		// An `auto` advisor skipped the retune while on the fallback: rejoin the
@@ -2152,10 +2161,10 @@ export class SessionAdvisors {
 			return declineUsageLimit();
 		}
 
-		this.#host.noteRetryFallbackCooldown(currentSelector, retryAfterMs, message);
+		this.#host.noteRetryFallbackCooldown(currentSelector, retryAfterMs, message, usageLimit ? Date.now() : undefined);
 		for (const role of chainKeys) {
 			for (const selector of this.#host.findRetryFallbackCandidates(role, currentSelector, currentModel)) {
-				if (this.#host.isRetryFallbackSelectorSuppressed(selector)) continue;
+				if (await this.#host.isRetryFallbackSelectorSuppressed(selector, signal)) continue;
 				const resolved = resolveModelOverride([selector.raw], this.#host.modelRegistry, this.#host.settings);
 				const candidate = resolved.model ?? this.#host.modelRegistry.find(selector.provider, selector.id);
 				if (!candidate || modelsAreEqual(candidate, currentModel)) continue;

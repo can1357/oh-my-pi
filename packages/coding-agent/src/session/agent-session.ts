@@ -2234,9 +2234,10 @@ export class AgentSession implements SettingsScope {
 				this.#recovery.retryFallbackChainKeys(selector, model, options),
 			findRetryFallbackCandidates: (role, selector, model) =>
 				this.#recovery.findRetryFallbackCandidates(role, selector, model),
-			isRetryFallbackSelectorSuppressed: selector => this.#recovery.isRetryFallbackSelectorSuppressed(selector),
-			noteRetryFallbackCooldown: (selector, retryAfterMs, errorMessage) =>
-				this.#recovery.noteRetryFallbackCooldown(selector, retryAfterMs, errorMessage),
+			isRetryFallbackSelectorSuppressed: (selector, signal) =>
+				this.#recovery.isRetryFallbackSelectorSuppressed(selector, signal),
+			noteRetryFallbackCooldown: (selector, retryAfterMs, errorMessage, usageLimitFailureTime) =>
+				this.#recovery.noteRetryFallbackCooldown(selector, retryAfterMs, errorMessage, usageLimitFailureTime),
 			createCodexCompactionContext: createMaintenanceCodexCompactionContext,
 			sessionId: () => this.sessionId,
 			restrictOAuthAccounts: providerSessionId => this.#accountPoolScope?.restrict(providerSessionId),

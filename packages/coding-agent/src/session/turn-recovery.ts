@@ -1723,19 +1723,28 @@ export class TurnRecovery {
 		this.#fallbackRoutedFor = undefined;
 	}
 
-	/** Checks whether a fallback selector remains in cooldown. */
-	isRetryFallbackSelectorSuppressed(selector: RetryFallbackSelector): boolean {
-		return this.#host.modelRegistry.isSelectorSuppressed(selector.raw);
+	/** Checks cooldowns against fresh usage evidence when the failure was quota-related. */
+	async isRetryFallbackSelectorSuppressed(selector: RetryFallbackSelector, signal?: AbortSignal): Promise<boolean> {
+		return this.#host.modelRegistry.isSelectorSuppressedWithRecovery(selector.raw, {
+			sessionId: this.#host.sessionId(),
+			reserveFraction: cfgRetryUsageReservePct.get(this.#host.settings) / 100,
+			signal,
+		});
 	}
 
 	/** Records the cooldown that should suppress a failing selector. */
-	noteRetryFallbackCooldown(currentSelector: string, retryAfterMs: number | undefined, errorMessage: string): void {
+	noteRetryFallbackCooldown(
+		currentSelector: string,
+		retryAfterMs: number | undefined,
+		errorMessage: string,
+		usageLimitFailureTime?: number,
+	): void {
 		let cooldownMs = retryAfterMs;
 		if (!cooldownMs || cooldownMs <= 0) {
 			const reason = parseRateLimitReason(errorMessage);
 			cooldownMs = reason === "UNKNOWN" ? 5 * 60 * 1000 : calculateRateLimitBackoffMs(reason);
 		}
-		this.#host.modelRegistry.suppressSelector(currentSelector, Date.now() + cooldownMs);
+		this.#host.modelRegistry.suppressSelector(currentSelector, Date.now() + cooldownMs, usageLimitFailureTime);
 	}
 
 	/**
@@ -1876,7 +1885,7 @@ export class TurnRecovery {
 		const chainKeys = this.retryFallbackChainKeys(currentSelector, currentModel);
 		for (const role of chainKeys) {
 			for (const candidate of this.findRetryFallbackCandidates(role, currentSelector, currentModel)) {
-				if (this.isRetryFallbackSelectorSuppressed(candidate)) continue;
+				if (await this.isRetryFallbackSelectorSuppressed(candidate, signal)) continue;
 				const resolved = resolveModelOverride([candidate.raw], this.#host.modelRegistry, this.#host.settings);
 				const candidateModel = resolved.model ?? this.#host.modelRegistry.find(candidate.provider, candidate.id);
 				if (!candidateModel || !this.#host.modelRegistry.hasConfiguredAuth(candidateModel)) continue;
@@ -2117,7 +2126,7 @@ export class TurnRecovery {
 		const creditTargets = failedModel ? fallbackCreditTargets(failedModel) : [];
 		for (const role of this.retryFallbackChainKeys(currentSelector)) {
 			for (const selector of this.findRetryFallbackCandidates(role, currentSelector, undefined, options)) {
-				if (this.isRetryFallbackSelectorSuppressed(selector)) continue;
+				if (await this.isRetryFallbackSelectorSuppressed(selector)) continue;
 				const resolved = resolveModelOverride([selector.raw], this.#host.modelRegistry, this.#host.settings);
 				const candidate = resolved.model ?? this.#host.modelRegistry.find(selector.provider, selector.id);
 				if (!candidate) continue;
@@ -2318,16 +2327,22 @@ export class TurnRecovery {
 			return false;
 		}
 
+		const activeFallback = this.#activeRetryFallback;
 		const currentModel = this.#host.model();
 		if (!currentModel) return false;
 		const currentSelector = formatRetryFallbackSelector(currentModel, this.#host.thinkingLevel());
 		if (currentSelector === originalSelector.raw) {
-			if (!this.isRetryFallbackSelectorSuppressed(originalSelector)) {
+			if (
+				!(await this.isRetryFallbackSelectorSuppressed(originalSelector)) &&
+				this.#activeRetryFallback === activeFallback
+			) {
 				this.clearActiveRetryFallback();
 			}
 			return false;
 		}
-		if (this.isRetryFallbackSelectorSuppressed(originalSelector)) return false;
+		if (await this.isRetryFallbackSelectorSuppressed(originalSelector)) return false;
+		if (this.#activeRetryFallback !== activeFallback || !modelsAreEqual(this.#host.model(), currentModel))
+			return false;
 
 		const resolvedPrimary = resolveModelOverride(
 			[originalSelector.raw],
@@ -2341,6 +2356,8 @@ export class TurnRecovery {
 		if (!apiKey) return false;
 
 		const currentThinkingLevel = this.#host.configuredThinkingLevel();
+		if (this.#activeRetryFallback !== activeFallback || !modelsAreEqual(this.#host.model(), currentModel))
+			return false;
 		const thinkingToApply =
 			currentThinkingLevel === lastAppliedFallbackThinkingLevel ? originalThinkingLevel : currentThinkingLevel;
 		const primarySelector = formatModelStringWithRouting(primaryModel);
@@ -2647,7 +2664,13 @@ export class TurnRecovery {
 					// to a still-exhausted primary. A switched credential means a
 					// sibling is free now, and that wait covers only the spent one.
 					const usageCooldownMs = recordedUsageLimitOutcome?.switchedCredential ? undefined : usageLimitWaitMs;
-					this.noteRetryFallbackCooldown(currentSelector, usageCooldownMs ?? parsedRetryAfterMs, errorMessage);
+					const quotaFailureTime = AIError.is(id, AIError.Flag.UsageLimit) ? Date.now() : undefined;
+					this.noteRetryFallbackCooldown(
+						currentSelector,
+						usageCooldownMs ?? parsedRetryAfterMs,
+						errorMessage,
+						quotaFailureTime,
+					);
 				}
 				switchedModel = await this.#tryRetryModelFallback(currentSelector, message, {
 					excludeProvider: longUsageLimitFallback ? currentModel.provider : undefined,

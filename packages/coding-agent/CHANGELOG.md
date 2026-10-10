@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed quota-triggered model cooldowns retaining a fallback after fresh usage confirms an Anthropic or Codex quota reset. Non-quota cooldowns and explicit model choices remain unchanged.
+
 ## [18.8.8] - 2026-10-10
 
 ### Added

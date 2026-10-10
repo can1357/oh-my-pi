@@ -401,6 +401,112 @@ describe("AuthStorage model usage health", () => {
 	});
 });
 
+describe("AuthStorage model usage health usageAfter cutoff", () => {
+	const storages: AuthStorage[] = [];
+	afterEach(() => {
+		for (const storage of storages) storage.close();
+		storages.length = 0;
+	});
+
+	async function createStorage(
+		rows: StoredAuthCredential[],
+		reports: Record<string, UsageReport | null>,
+		blocked?: Map<number, number>,
+	): Promise<AuthStorage> {
+		const storage = new AuthStorage(makeStore(rows, blocked), {
+			usageProviderResolver: provider => (provider === "anthropic" ? makeUsageProvider(reports) : undefined),
+			rankingStrategyResolver: provider => (provider === "anthropic" ? strategy : undefined),
+			configValueResolver: async value => value,
+		});
+		await storage.credentials.reload();
+		storages.push(storage);
+		return storage;
+	}
+
+	function reportFetchedAt(fetchedAt: number): UsageReport {
+		const stale = report("account-1", [limit("short", 0.2)]);
+		stale.fetchedAt = fetchedAt;
+		return stale;
+	}
+
+	it("counts a report newer than the cutoff", async () => {
+		const now = Date.now();
+		const fresh = report("account-1", [limit("short", 1)]);
+		fresh.fetchedAt = now;
+		const storage = await createStorage([oauthRow(1)], { "account-1": fresh });
+		const health = await storage.health.model("anthropic", {
+			modelId: "claude",
+			reserveFraction: 0.1,
+			usageAfter: now - 60_000,
+		});
+		expect(health.state).toBe("depleted");
+		expect(health.accounts[0]?.state).toBe("depleted");
+	});
+
+	it("ignores a report older than the cutoff as unknown", async () => {
+		const now = Date.now();
+		const storage = await createStorage([oauthRow(1)], { "account-1": reportFetchedAt(now - 120_000) });
+		const health = await storage.health.model("anthropic", {
+			modelId: "claude",
+			reserveFraction: 0.1,
+			usageAfter: now - 60_000,
+		});
+		expect(health.state).toBe("unknown");
+		expect(health.accounts[0]?.state).toBe("unknown");
+	});
+
+	it("ignores a report exactly at the cutoff as unknown", async () => {
+		const now = Date.now();
+		const storage = await createStorage([oauthRow(1)], { "account-1": reportFetchedAt(now - 60_000) });
+		const health = await storage.health.model("anthropic", {
+			modelId: "claude",
+			reserveFraction: 0.1,
+			usageAfter: now - 60_000,
+		});
+		expect(health.state).toBe("unknown");
+		expect(health.accounts[0]?.state).toBe("unknown");
+	});
+
+	it("ignores a report with a non-finite fetchedAt as unknown", async () => {
+		const now = Date.now();
+		const nonfinite = report("account-1", [limit("short", 0.2)]);
+		nonfinite.fetchedAt = Number.NaN;
+		const storage = await createStorage([oauthRow(1)], { "account-1": nonfinite });
+		const health = await storage.health.model("anthropic", {
+			modelId: "claude",
+			reserveFraction: 0.1,
+			usageAfter: now - 60_000,
+		});
+		expect(health.state).toBe("unknown");
+		expect(health.accounts[0]?.state).toBe("unknown");
+	});
+
+	it("keeps default semantics when no cutoff is supplied", async () => {
+		const now = Date.now();
+		const storage = await createStorage([oauthRow(1)], { "account-1": reportFetchedAt(now - 120_000) });
+		const health = await storage.health.model("anthropic", {
+			modelId: "claude",
+			reserveFraction: 0.1,
+		});
+		expect(health.state).toBe("healthy");
+		expect(health.accounts[0]?.state).toBe("healthy");
+	});
+
+	it("keeps a persisted block authoritative over a stale report", async () => {
+		const now = Date.now();
+		const resetAt = now + 60_000;
+		const blocked = new Map([[1, resetAt]]);
+		const storage = await createStorage([oauthRow(1)], { "account-1": reportFetchedAt(now - 120_000) }, blocked);
+		const health = await storage.health.model("anthropic", {
+			modelId: "claude",
+			reserveFraction: 0.1,
+			usageAfter: now - 60_000,
+		});
+		expect(health.accounts[0]).toMatchObject({ credentialId: 1, state: "depleted", resetsAt: resetAt });
+		expect(blocked.get(1)).toBe(resetAt);
+	});
+});
+
 function sqliteCorruptError(): Error & { code: string } {
 	const err = new Error("database disk image is malformed (11) (Rowid 77291 out of order)") as Error & {
 		code: string;

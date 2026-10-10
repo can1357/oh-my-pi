@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added a usage-report freshness cutoff to model health queries, so callers can require quota evidence newer than a failure.
+
 ## [18.8.8] - 2026-10-10
 
 ### Fixed

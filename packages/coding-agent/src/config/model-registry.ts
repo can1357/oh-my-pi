@@ -291,9 +291,12 @@ export type ResolvedRequestAuth =
 	  }
 	| { ok: false; error: string };
 
-/**
- * Model registry - loads and manages models, resolves API keys via AuthStorage.
- */
+interface SuppressedSelectorRecord {
+	untilMs: number;
+	usageLimitFailureTime?: number;
+}
+
+/** Loads models and resolves their credentials through AuthStorage. */
 export class ModelRegistry {
 	#models: Model<Api>[] = [];
 	#unprojectedModels: Model<Api>[] = [];
@@ -337,7 +340,7 @@ export class ModelRegistry {
 	#registeredProviderSources: Set<string> = new Set();
 	#providerDiscoveryStates: Map<string, ProviderDiscoveryState> = new Map();
 	#cacheDbPath?: string;
-	#suppressedSelectors: Map<string, number> = new Map();
+	#suppressedSelectors: Map<string, SuppressedSelectorRecord> = new Map();
 	#backgroundRefresh?: Promise<void>;
 	/** Whether the first background discovery has settled; latches once so a late-armed waiter still resolves. */
 	#initialRefreshSettled = false;
@@ -3616,13 +3619,11 @@ export class ModelRegistry {
 		}
 	}
 
-	/**
-	 * Suppress a specific model selector (e.g., "provider/id") until a specific timestamp.
-	 */
-	suppressSelector(selector: string, untilMs: number): void {
+	/** Quota failures may recover early from usage evidence newer than `usageLimitFailureTime`. */
+	suppressSelector(selector: string, untilMs: number, usageLimitFailureTime?: number): void {
 		this.#suppressedSelectors.set(
 			normalizeSuppressedSelector(selector, (provider, id) => this.find(provider, id) !== undefined),
-			untilMs,
+			{ untilMs, usageLimitFailureTime },
 		);
 	}
 
@@ -3634,13 +3635,61 @@ export class ModelRegistry {
 			selector,
 			(provider, id) => this.find(provider, id) !== undefined,
 		);
-		const suppressedUntil = this.#suppressedSelectors.get(normalizedSelector);
-		if (!suppressedUntil) return false;
-		if (suppressedUntil <= Date.now()) {
+		const record = this.#suppressedSelectors.get(normalizedSelector);
+		if (!record) return false;
+		if (record.untilMs <= Date.now()) {
 			this.#suppressedSelectors.delete(normalizedSelector);
 			return false;
 		}
 		return true;
+	}
+
+	/** Retires quota cooldowns only when fresh usage proves recovery; concurrent failures remain authoritative. */
+	async isSelectorSuppressedWithRecovery(
+		selector: string,
+		options: { sessionId?: string; reserveFraction: number; signal?: AbortSignal },
+	): Promise<boolean> {
+		const normalizedSelector = normalizeSuppressedSelector(
+			selector,
+			(provider, id) => this.find(provider, id) !== undefined,
+		);
+		const record = this.#suppressedSelectors.get(normalizedSelector);
+		if (!record) return false;
+		if (record.untilMs <= Date.now()) {
+			this.#suppressedSelectors.delete(normalizedSelector);
+			return false;
+		}
+		const failureTime = record.usageLimitFailureTime;
+		if (failureTime === undefined) return true;
+		const separatorIndex = normalizedSelector.indexOf("/");
+		if (separatorIndex <= 0) return true;
+		const provider = normalizedSelector.slice(0, separatorIndex);
+		const modelId = normalizedSelector.slice(separatorIndex + 1);
+		const model = this.find(provider, modelId);
+		if (!model) return true;
+		try {
+			const health = await this.authStorage.health.model(provider, {
+				modelId,
+				baseUrl: model.baseUrl,
+				sessionId: options.sessionId,
+				reserveFraction: options.reserveFraction,
+				usageAfter: Math.max(failureTime, Date.now() - 5 * 60_000),
+				signal: options.signal,
+			});
+			if (options.signal?.aborted) return true;
+			if (health.state !== "healthy") return true;
+			if (this.#suppressedSelectors.get(normalizedSelector) !== record) return true;
+			this.#suppressedSelectors.delete(normalizedSelector);
+			return false;
+		} catch (error) {
+			if (options.signal?.aborted) return true;
+			logger.debug("Quota-cooldown usage recovery check failed; keeping suppression", {
+				provider,
+				model: modelId,
+				error: String(error),
+			});
+			return true;
+		}
 	}
 
 	/**
