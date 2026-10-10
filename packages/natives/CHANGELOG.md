@@ -9,7 +9,8 @@
 
 ### Fixed
 
-- Fixed macOS typing into Screen Sharing and iPhone Mirroring: text now uses the keyboard layout's keys instead of arriving as a run of `a`; Screen Sharing types unmodified text in the background (text or shortcuts needing a modifier still need takeover), and iPhone Mirroring taps and scrolls land where aimed ([#15193](https://github.com/can1357/oh-my-pi/pull/15193) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed macOS typing into Screen Sharing and iPhone Mirroring: text, and characters in key presses and held keys, now use the keyboard layout's keys instead of arriving as a run of `a` or as the ANSI key's character; Screen Sharing types unmodified text in the background (text or shortcuts needing a modifier still need takeover), and iPhone Mirroring taps and scrolls land where aimed. Typing into other apps is unchanged ([#15193](https://github.com/can1357/oh-my-pi/pull/15193) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed macOS background keystrokes into an app with several windows continuing into another of its windows when that one became key mid-input; the rest now stop with `InputFailed` ([#15193](https://github.com/can1357/oh-my-pi/pull/15193) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed macOS background key presses, typing, held keys, left clicks and menu actions taking keyboard focus from the user's app, which then dropped pastes and shortcuts until clicked again ([#15184](https://github.com/can1357/oh-my-pi/pull/15184) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed macOS background typing into Chrome pages and background shortcuts such as ⌘A in TextEdit doing nothing ([#15184](https://github.com/can1357/oh-my-pi/pull/15184) by [@will-bogusz](https://github.com/will-bogusz))
 
