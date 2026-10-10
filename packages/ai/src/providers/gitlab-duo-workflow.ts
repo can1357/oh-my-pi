@@ -2311,8 +2311,15 @@ function emitGitLabDuoWorkflowCheckpoint(
 		const contentSignatures = state.checkpointAgentContentSignatures ?? {};
 		const previousContent = contentByKey[entry.messageKey];
 		// Keyed by a content hash: every frame is a full snapshot, so keying on the
-		// text itself kept two copies of each message prefix seen per stream.
-		const contentHash = Bun.hash(entry.content).toString(36);
+		// text itself kept two copies of each message prefix seen per stream. A frame
+		// that replays an entry byte-identically (previousContent defined and equal)
+		// already establishes an empty delta, and duplicate detection cannot fire for
+		// it (that path requires previousContent === undefined), so the full cumulative
+		// text is not hashed on the socket-event path. The placeholder hash only builds
+		// inert signature keys: every real lookup hashes its content, so it never
+		// matches a placeholder key.
+		const replayedIdentically = previousContent !== undefined && entry.content === previousContent;
+		const contentHash = replayedIdentically ? "" : Bun.hash(entry.content).toString(36);
 		const contentSignature = `${turnIndex}\u0000${entry.kind}\u0000${contentHash}`;
 		const contentOnlySignature = `${turnIndex}\u0000content\u0000${contentHash}`;
 		const duplicateContent =
