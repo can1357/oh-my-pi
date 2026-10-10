@@ -493,7 +493,7 @@ impl Worker {
 		self.frames.insert(target.key().to_string(), geometry);
 		// Refreshing here keeps the snapshot current for getter reads that
 		// land while a later operation holds the worker.
-		let capabilities = self.backend()?.capabilities();
+		let capabilities = self.read_capabilities(token)?;
 		*self.capabilities.lock() = Some(capabilities.clone());
 		Ok(DesktopCapture {
 			data: Uint8Array::from(png),
@@ -606,13 +606,20 @@ impl Worker {
 			.ok_or_else(DesktopError::ax_unsupported)
 	}
 
+	/// Backend capabilities, without global Escape once this session's input
+	/// has run without its monitor.
+	fn read_capabilities(&mut self, token: &OperationToken) -> CoreResult<DesktopCapabilities> {
+		let mut capabilities = self.backend()?.capabilities();
+		capabilities.global_escape &= !token.escape_unavailable();
+		Ok(capabilities)
+	}
+
 	fn process(&mut self, request: &Request, token: &OperationToken) -> CoreResult<Response> {
 		match request {
 			Request::Capabilities { .. } => {
-				let caps = match self.backend.as_mut() {
-					Ok(backend) => backend.capabilities(),
-					Err(_) => DesktopCapabilities::unavailable(),
-				};
+				let caps = self
+					.read_capabilities(token)
+					.unwrap_or_else(|_| DesktopCapabilities::unavailable());
 				*self.capabilities.lock() = Some(caps.clone());
 				Ok(Response::Capabilities(caps))
 			},
@@ -707,7 +714,7 @@ impl Worker {
 				let (coordinate_width, coordinate_height) = base.dimensions();
 				token.check()?;
 				let png = encode_png(image)?;
-				let capabilities = self.backend()?.capabilities();
+				let capabilities = self.read_capabilities(token)?;
 				*self.capabilities.lock() = Some(capabilities.clone());
 				Ok(Response::Capture(DesktopCapture {
 					data: Uint8Array::from(png),
@@ -1132,8 +1139,15 @@ impl DesktopSession {
 	/// behind it.
 	#[napi(getter)]
 	pub fn capabilities(&self) -> DesktopCapabilities {
+		// An in-flight takeover may have failed to start its stop after the
+		// snapshot was taken; the session's record is current.
+		let snapshot = || {
+			let mut snapshot = self.core.capabilities.lock().clone()?;
+			snapshot.global_escape &= !self.core.cancellation.escape_unavailable();
+			Some(snapshot)
+		};
 		if self.core.in_flight.load(Ordering::Acquire) > 0
-			&& let Some(snapshot) = self.core.capabilities.lock().clone()
+			&& let Some(snapshot) = snapshot()
 		{
 			return snapshot;
 		}
@@ -1142,12 +1156,7 @@ impl DesktopSession {
 			.call(self.core.cancellation.token(), |reply| Request::Capabilities { reply })
 		{
 			Ok(Response::Capabilities(c)) => c,
-			_ => self
-				.core
-				.capabilities
-				.lock()
-				.clone()
-				.unwrap_or_else(DesktopCapabilities::unavailable),
+			_ => snapshot().unwrap_or_else(DesktopCapabilities::unavailable),
 		}
 	}
 
@@ -2076,6 +2085,18 @@ mod capture_tests {
 			session.core.lifecycle.lock().tx.is_none(),
 			"a busy getter must return the snapshot without starting or querying a worker"
 		);
+	}
+
+	#[test]
+	fn busy_snapshot_reports_an_escape_stop_that_failed_after_it_was_taken() {
+		let core = SessionCore::new(DisplaySelector::Active);
+		let mut snapshot = DesktopCapabilities::unavailable();
+		snapshot.global_escape = true;
+		*core.capabilities.lock() = Some(snapshot);
+		core.cancellation.fail_escape_for_test();
+		core.in_flight.store(1, Ordering::Release);
+		let session = DesktopSession { core };
+		assert!(!session.capabilities().global_escape);
 	}
 
 	#[test]

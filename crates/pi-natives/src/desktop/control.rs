@@ -30,11 +30,14 @@ pub(crate) use macos::SYNTHETIC_EVENT_TAG;
 
 #[derive(Default)]
 struct CancellationState {
-	generation: AtomicU64,
-	state:      Mutex<Option<Arc<ControlLease>>>,
-	wake:       Condvar,
+	generation:    AtomicU64,
+	state:         Mutex<Option<Arc<ControlLease>>>,
+	wake:          Condvar,
+	/// Whether the latest control lease started without its physical-Escape
+	/// monitor; stays set until a later lease starts one.
+	escape_failed: AtomicBool,
 	#[cfg(target_os = "linux")]
-	async_wake: tokio::sync::Notify,
+	async_wake:    tokio::sync::Notify,
 }
 
 #[derive(Clone, Default)]
@@ -92,6 +95,17 @@ impl CancellationSource {
 	pub(crate) fn control_active(&self) -> bool {
 		self.0.state.lock().is_some()
 	}
+
+	/// Whether this session's latest input ran without its physical-Escape
+	/// monitor, held or one-shot.
+	pub(crate) fn escape_unavailable(&self) -> bool {
+		self.0.escape_failed.load(Ordering::Acquire)
+	}
+
+	#[cfg(test)]
+	pub(crate) fn fail_escape_for_test(&self) {
+		self.0.escape_failed.store(true, Ordering::Release);
+	}
 }
 
 /// Weak callback ownership avoids a lease -> monitor -> source -> lease cycle.
@@ -115,6 +129,10 @@ pub(crate) struct OperationToken {
 impl OperationToken {
 	pub(crate) fn control_active(&self) -> bool {
 		self.source.control_active()
+	}
+
+	pub(crate) fn escape_unavailable(&self) -> bool {
+		self.source.escape_unavailable()
 	}
 
 	pub(crate) fn enter(&self) -> OperationScope {
@@ -313,32 +331,62 @@ fn busy() -> DesktopError {
 /// another host thread. Closing/crashing the process releases the OS resource.
 struct ControlLease {
 	#[cfg(target_os = "macos")]
-	_escape: Option<macos::EscapeMonitor>,
+	escape:  Option<macos::EscapeMonitor>,
 	#[cfg(windows)]
-	_escape: Option<windows::EscapeMonitor>,
+	escape:  Option<windows::EscapeMonitor>,
 	#[cfg(target_os = "linux")]
-	_escape: Option<linux::EscapeMonitor>,
+	escape:  Option<linux::EscapeMonitor>,
 	_kernel: KernelOwner,
 	running: AtomicBool,
 }
 
 impl ControlLease {
+	#[cfg(target_os = "macos")]
+	fn acquire(source: &CancellationSource) -> CoreResult<Self> {
+		Self::acquire_with(source, macos::EscapeMonitor::start)
+	}
+
+	/// The physical-Escape stop never gates input: a monitor that cannot start
+	/// is recorded on the session, which then reports `globalEscape: false`, and
+	/// the lease runs without it.
+	///
+	/// The monitor is also what advances [`user_activity`], the veto foreground
+	/// restoration checks. Without it that veto sees no user keys or clicks, as
+	/// on a blind tap with Input Monitoring off; no other observer exists
+	/// without event-listening access.
+	#[cfg(target_os = "macos")]
+	fn acquire_with(
+		source: &CancellationSource,
+		start: impl FnOnce(EmergencyStop) -> CoreResult<macos::EscapeMonitor>,
+	) -> CoreResult<Self> {
+		let kernel = KernelOwner::acquire()?;
+		let escape = start(EmergencyStop(Arc::downgrade(&source.0))).ok();
+		Ok(Self::record(source, Self { escape, _kernel: kernel, running: AtomicBool::new(false) }))
+	}
+
+	#[cfg(not(target_os = "macos"))]
 	fn acquire(source: &CancellationSource) -> CoreResult<Self> {
 		let kernel = KernelOwner::acquire()?;
-		#[cfg(target_os = "macos")]
-		let escape = macos::EscapeMonitor::start(EmergencyStop(Arc::downgrade(&source.0)))?;
 		#[cfg(windows)]
 		let escape = windows::EscapeMonitor::start(EmergencyStop(Arc::downgrade(&source.0)))?;
 		#[cfg(target_os = "linux")]
 		let escape = linux::EscapeMonitor::start(EmergencyStop(Arc::downgrade(&source.0)))?;
-		Ok(Self {
-			#[cfg(any(target_os = "macos", windows))]
-			_escape: Some(escape),
+		Ok(Self::record(source, Self {
+			#[cfg(windows)]
+			escape: Some(escape),
 			#[cfg(target_os = "linux")]
-			_escape: escape,
+			escape,
 			_kernel: kernel,
 			running: AtomicBool::new(false),
-		})
+		}))
+	}
+
+	fn record(source: &CancellationSource, lease: Self) -> Self {
+		source
+			.0
+			.escape_failed
+			.store(lease.escape.is_none(), Ordering::Release);
+		lease
 	}
 }
 
@@ -565,7 +613,7 @@ mod tests {
 	/// not depend on an interactive desktop or Accessibility permissions.
 	fn grant_for_test(source: &CancellationSource) {
 		let owner = ControlLease {
-			_escape: None,
+			escape:  None,
 			_kernel: KernelOwner::acquire().expect("test kernel owner"),
 			running: AtomicBool::new(false),
 		};
@@ -630,6 +678,27 @@ mod tests {
 		assert!(!source.control_active());
 		assert!(fresh.check().is_err());
 		drop(KernelOwner::acquire().expect("idle Escape releases kernel ownership"));
+		remove_test_lock();
+	}
+
+	#[cfg(target_os = "macos")]
+	#[test]
+	fn input_proceeds_when_the_escape_monitor_cannot_start() {
+		let _serial = OWNERSHIP_TEST.lock();
+		let source = CancellationSource::default();
+		assert!(!source.escape_unavailable());
+		let lease = ControlLease::acquire_with(&source, |_| {
+			Err(DesktopError::permission_denied("event-listening access denied"))
+		})
+		.expect("a missing Escape monitor does not block control");
+		assert!(source.escape_unavailable());
+		*source.0.state.lock() = Some(Arc::new(lease));
+		drop(InputLease::acquire(&source.token()).expect("input runs without the monitor"));
+		source.release_control();
+		// One-shot input drops its lease when the operation ends; the failure
+		// must still be reported by later capabilities reads.
+		assert!(source.escape_unavailable());
+		drop(KernelOwner::acquire().expect("release frees kernel ownership"));
 		remove_test_lock();
 	}
 
