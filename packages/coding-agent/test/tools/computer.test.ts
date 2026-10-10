@@ -1498,6 +1498,46 @@ describe("computer worker round trips", () => {
 		if (second.ok) expect(second.payload.returnValue).toEqual({ x: 7, y: 8, width: 9, height: 10 });
 	});
 
+	it("passes a menu item path to native with the click or action that opens the menu", async () => {
+		const calls: unknown[][] = [];
+		class MenuNativeSession extends FakeNativeSession {
+			override async click(target: string, x: number, y: number, opts?: PointerOptions | null): Promise<void> {
+				calls.push(["click", target, x, y, opts]);
+			}
+			override async axClick(ref: string, opts?: PointerOptions | null): Promise<void> {
+				calls.push(["axClick", ref, opts]);
+			}
+			override async axPerform(ref: string, action: string, menu?: string[] | null): Promise<void> {
+				calls.push(["axPerform", ref, action, menu]);
+			}
+		}
+		const transport = new MemoryTransport();
+		new ComputerWorkerCore(transport, () => new MenuNativeSession());
+		const result = await runWorker(
+			transport,
+			"menu-paths",
+			`const win = await desktop.window("42");
+			await win.screenshot({ silent: true });
+			const [el] = await win.find({ role: "button" });
+			await win.click(1, 2, { button: "right", menu: ["Add to", "Bench Holdout"] });
+			await el.click({ button: "right", menu: ["Add to", "Bench Holdout"] });
+			await el.press({ menu: ["New Folder"] });
+			await el.perform("AXShowMenu", { menu: ["List", "Errands"] });
+			await el.press();
+			return await el.press({ menu: [] }).then(() => "sent", error => error.message);`,
+		);
+		expect(result.ok).toBe(true);
+		if (result.ok) expect(result.payload.returnValue).toBe("menu path requires a non-empty array of non-empty strings");
+		const add = ["Add to", "Bench Holdout"];
+		expect(calls).toEqual([
+			["click", "42", 1, 2, { button: "right", menu: add }],
+			["axClick", "e1", { button: "right", menu: add }],
+			["axPerform", "e1", "press", ["New Folder"]],
+			["axPerform", "e1", "AXShowMenu", ["List", "Errands"]],
+			["axPerform", "e1", "press", undefined],
+		]);
+	});
+
 	it("answers a direct capabilities request without a prior run", async () => {
 		const transport = new MemoryTransport();
 		new ComputerWorkerCore(transport, () => new FakeNativeSession());

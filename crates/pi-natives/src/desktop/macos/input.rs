@@ -46,6 +46,8 @@ impl MacInput {
 		Ok(Self { source: source()? })
 	}
 
+	/// Delivers `event`; with `menu`, a click that opens a menu chooses that
+	/// item path in it.
 	#[allow(
 		clippy::needless_pass_by_ref_mut,
 		reason = "`&mut self` exclusivity backs the `Send` safety argument for the CF event source"
@@ -54,10 +56,21 @@ impl MacInput {
 		&mut self,
 		target: &Target,
 		event: PointerEvent,
+		menu: Option<&[String]>,
 		mode: DeliveryMode,
 		capture: &MacCapture,
 	) -> CoreResult<()> {
+		if menu.is_some() && !matches!(event, PointerEvent::Click { .. }) {
+			return Err(DesktopError::invalid_target(
+				"menu chooses an item of the menu a click opens; it applies to clicks only",
+			));
+		}
 		match target {
+			Target::Desktop | Target::Display(_) if menu.is_some() => {
+				Err(DesktopError::invalid_target(
+					"menu needs a window target, whose application owns the menu the click opens",
+				))
+			},
 			Target::Desktop | Target::Display(_) => global_pointer(&self.source, event),
 			Target::Window(id) => {
 				let window = capture.window(id)?;
@@ -67,11 +80,11 @@ impl MacInput {
 						background_guard(&window, pid, &event)?;
 						let entry_front = skylight::front_pid();
 						skylight::with_background_guard(pid, || {
-							background_pointer(&self.source, pid, wid, &window, event, entry_front)
+							background_pointer(&self.source, pid, wid, &window, event, menu, entry_front)
 						})
 					},
 					DeliveryMode::Foreground => {
-						foreground_pointer(&self.source, &window, pid, wid, event)
+						foreground_pointer(&self.source, &window, pid, wid, event, menu)
 					},
 				}
 			},
@@ -830,13 +843,14 @@ fn background_pointer(
 	wid: u32,
 	window: &DesktopWindow,
 	event: PointerEvent,
+	menu: Option<&[String]>,
 	entry_front: Option<libc::pid_t>,
 ) -> CoreResult<()> {
 	// An open menu takes the keyboard from the user's app: a context menu, or
 	// the menu of a menu button or popup button that a left click lands on.
 	let timeout = if may_open_context_menu(&event) {
 		Some(ax::open_menu::CONTEXT_MENU_TIMEOUT)
-	} else if clicks_menu_control(&event, pid) {
+	} else if menu.is_some() || clicks_menu_control(&event, pid) {
 		Some(ax::open_menu::CONTROL_MENU_TIMEOUT)
 	} else {
 		None
@@ -856,8 +870,9 @@ fn background_pointer(
 	ax::open_menu::guard(
 		ax::open_menu::Press::Pointer { kind: pointer_kind(&event), window },
 		before.as_deref(),
+		menu,
 		|| background_gesture(source, pid, wid, window, event, entry_front),
-		|before| ax::open_menu::settle(pid, before, timeout.unwrap_or_default()),
+		|before, path| ax::open_menu::settle(pid, before, path, timeout.unwrap_or_default()),
 	)
 }
 
@@ -1730,27 +1745,52 @@ fn char_key_code(character: char) -> CoreResult<u16> {
 /// Delivers real HID pointer input to `window` while it is the frontmost key
 /// window, then restores focus, any known covering window, and the user's
 /// pointer. Raising a single covering window is not an exact z-order snapshot.
+/// With `menu`, the item path is chosen in the menu the click opens before
+/// focus goes back, which would close the menu.
 fn foreground_pointer(
 	source: &CGEventSource,
 	window: &DesktopWindow,
 	pid: libc::pid_t,
 	wid: u32,
 	event: PointerEvent,
+	menu: Option<&[String]>,
 ) -> CoreResult<()> {
+	let kind = pointer_kind(&event);
+	let timeout = if may_open_context_menu(&event) {
+		ax::open_menu::CONTEXT_MENU_TIMEOUT
+	} else {
+		ax::open_menu::CONTROL_MENU_TIMEOUT
+	};
 	preserving_cursor(source, || {
 		skylight::with_foreground(pid, wid, |_| {
 			let activity = control::user_activity();
 			let mut occluder = None;
 			let result = uncover(window, pid, wid, &event, &mut occluder)
 				.and_then(|()| skylight::require_front_window(pid, wid))
-				.and_then(|()| match event {
-					PointerEvent::Scroll { x, y, dx, dy } => {
+				.and_then(|()| match (event, menu) {
+					(PointerEvent::Scroll { x, y, dx, dy }, _) => {
 						let side = primer_side(window, x);
 						global_scroll(source, x, y, dx, dy, side, || {
 							skylight::require_front_window(pid, wid)
 						})
 					},
-					event => global_pointer(source, event),
+					(event, None) => global_pointer(source, event),
+					(event, Some(path)) => {
+						let before = capture::menu_windows(pid).ok_or_else(|| {
+							DesktopError::input_failed(format!(
+								"cannot list the open menus of window {} ({}), so no menu item could be \
+								 chosen; nothing was sent",
+								window.id, window.app,
+							))
+						})?;
+						ax::open_menu::guard(
+							ax::open_menu::Press::Pointer { kind, window },
+							Some(&before),
+							Some(path),
+							|| global_pointer(source, event),
+							|before, path| ax::open_menu::settle(pid, before, path, timeout),
+						)
+					},
 				});
 			// Capture before raising, so even a failed raise/re-hit-test retains
 			// the restoration token. Never reorder over a user-selected app.

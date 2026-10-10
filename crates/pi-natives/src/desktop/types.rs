@@ -147,6 +147,10 @@ pub struct PointerOptions {
 	/// Briefly activate the target window and post real input instead of the
 	/// default background delivery.
 	pub takeover:  Option<bool>,
+	/// Item path to choose in the menu a click opens, matched like a menu-bar
+	/// path, e.g. a context menu's `["Add to", "Fonts"]`; the call opens the
+	/// menu, presses the item and returns with the menu closed.
+	pub menu:      Option<Vec<String>>,
 }
 
 #[napi(object)]

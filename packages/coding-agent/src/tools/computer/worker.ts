@@ -87,7 +87,7 @@ export interface NativeDesktopSession {
 	axAttributes(ref: string): Promise<Array<[string, string]>>;
 	axChildren(ref: string): Promise<AxNode[]>;
 	axParent(ref: string): Promise<AxNode | null | undefined>;
-	axPerform(ref: string, action: string): Promise<void>;
+	axPerform(ref: string, action: string, menu?: string[] | null): Promise<void>;
 	axSetValue(ref: string, value: string): Promise<void>;
 	axFocus(ref: string): Promise<void>;
 	axClick(ref: string, opts?: PointerOptions | null): Promise<void>;
@@ -106,7 +106,8 @@ type ScreenshotResult = Pick<
 	ComputerScreenshot,
 	"path" | "width" | "height" | "coordinateWidth" | "coordinateHeight" | "region"
 >;
-type ClickOptions = InputOptions & { button?: string; count?: number; modifiers?: string[] };
+type MenuOptions = { menu?: string[] };
+type ClickOptions = InputOptions & MenuOptions & { button?: string; count?: number; modifiers?: string[] };
 type DragOptions = InputOptions & { modifiers?: string[]; keys?: string[] };
 type ScrollOptions = InputOptions & { dx?: number; dy?: number };
 type AxOptions = Pick<AxSnapshotOptions, "all" | "maxDepth">;
@@ -183,8 +184,16 @@ function pointerOptions(options?: ClickOptions | DragOptions | InputOptions): Po
 	if ("count" in options && options.count !== undefined) mapped.count = options.count;
 	if ("modifiers" in options && options.modifiers !== undefined) mapped.modifiers = options.modifiers;
 	if ("keys" in options && options.keys !== undefined) mapped.keys = options.keys;
+	if ("menu" in options && options.menu !== undefined) mapped.menu = menuPath(options);
 	if (options.takeover !== undefined) mapped.takeover = options.takeover;
 	return mapped;
+}
+
+/** The item path of a `menu` option, checked before anything is sent. */
+function menuPath(options?: MenuOptions): string[] | undefined {
+	if (options?.menu === undefined) return undefined;
+	validateKeys(options.menu, "menu path");
+	return options.menu;
 }
 
 function chordKeys(chord: string | string[]): string[] {
@@ -359,19 +368,21 @@ class El {
 		return (await nativeCall(signal, () => this.#session.axNode(this.ref))).actions ?? [];
 	}
 
-	async perform(action: string): Promise<void> {
+	async perform(action: string, options?: MenuOptions): Promise<void> {
 		const context = this.#getContext();
 		guardRun(context, "perform");
-		await nativeCall(context.signal, () => this.#session.axPerform(this.ref, action));
+		const menu = menuPath(options);
+		await nativeCall(context.signal, () => this.#session.axPerform(this.ref, action, menu));
 	}
 
-	async press(): Promise<void> {
+	async press(options?: MenuOptions): Promise<void> {
 		const context = this.#getContext();
 		guardRun(context, "press");
-		await nativeCall(context.signal, () => this.#session.axPerform(this.ref, "press"));
+		const menu = menuPath(options);
+		await nativeCall(context.signal, () => this.#session.axPerform(this.ref, "press", menu));
 	}
 
-	async click(options?: InputOptions): Promise<void> {
+	async click(options?: ClickOptions): Promise<void> {
 		const context = this.#getContext();
 		guardRun(context, "click");
 		await nativeCall(context.signal, () => this.#session.axClick(this.ref, pointerOptions(options)));

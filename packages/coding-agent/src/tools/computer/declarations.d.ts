@@ -4,8 +4,14 @@ interface ComputerInputOptions {
 	takeover?: boolean;
 }
 
+/** Item path in a menu that a call opens, matched like `win.menu.select`, e.g. `["Add to", "Fonts"]`. */
+interface ComputerMenuOptions {
+	/** The call opens the menu, presses this item and returns with the menu closed; without it, a macOS background menu is closed and the call throws `InputFailed` listing its items. */
+	menu?: string[];
+}
+
 /** Options for pointer clicks. */
-interface ComputerClickOptions extends ComputerInputOptions {
+interface ComputerClickOptions extends ComputerInputOptions, ComputerMenuOptions {
 	button?: "left" | "right" | "middle";
 	count?: number;
 	modifiers?: string[];
@@ -188,11 +194,11 @@ interface ComputerElement {
 	bounds(): Promise<ComputerBounds | null>;
 	attributes(): Promise<Record<string, string>>;
 	actions(): Promise<string[]>;
-	perform(action: string): Promise<void>;
+	perform(action: string, options?: ComputerMenuOptions): Promise<void>;
 	/** Perform the element's native press action; needs no screenshot. */
-	press(): Promise<void>;
+	press(options?: ComputerMenuOptions): Promise<void>;
 	/** Click the element's center with native input. */
-	click(options?: ComputerInputOptions): Promise<void>;
+	click(options?: ComputerClickOptions): Promise<void>;
 	focus(): Promise<void>;
 	parent(): Promise<ComputerElement | null>;
 	children(): Promise<ComputerElement[]>;

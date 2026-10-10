@@ -107,7 +107,23 @@ impl Backend for MacosBackend {
 	) -> CoreResult<()> {
 		token.check()?;
 		Self::require_input_permission()?;
-		self.input.pointer(target, event, mode, &self.capture)
+		self.input.pointer(target, event, None, mode, &self.capture)
+	}
+
+	fn pointer_menu(
+		&mut self,
+		target: &Target,
+		event: PointerEvent,
+		path: &[String],
+		_frame: &FrameGeometry,
+		mode: DeliveryMode,
+		token: &OperationToken,
+	) -> CoreResult<()> {
+		token.check()?;
+		Self::require_input_permission()?;
+		self
+			.input
+			.pointer(target, event, Some(path), mode, &self.capture)
 	}
 
 	fn type_text(
