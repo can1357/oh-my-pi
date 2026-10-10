@@ -3473,6 +3473,7 @@ describe("openai-codex streaming", () => {
 							model: "hooked-route-model",
 							service_tier: "flex",
 							input: hookAdjustedInput,
+							type: "proxy.fallback",
 						};
 					},
 				}).result();
@@ -3505,153 +3506,176 @@ describe("openai-codex streaming", () => {
 		if (!capturedHttpBody) throw new Error("expected captured fallback HTTP body");
 		expect(decodeCodexDebugRequestBody(debugDump)).toEqual(capturedHttpBody);
 	});
-	it("reuses a prepared hooked payload across retryable websocket pre-send connection loss during acquisition", async () => {
-		const tempDir = TempDir.createSync("@pi-codex-stream-");
-		setAgentDir(tempDir.path());
-		vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
-		const token = createCodexTestToken();
-		const sentRequests: Array<Record<string, unknown>> = [];
-		let failedAcquisitionCount = 0;
-		const routingHints: Array<string | undefined> = [];
-		const sockets: RetryableAcquisitionWebSocket[] = [];
-		const firstFailure = Promise.withResolvers<void>();
-		let hookCalls = 0;
-		let hookPreviousResponseId: unknown;
-		let retainedTextPart: Record<string, unknown> | undefined;
-		const fetchMock = vi.fn(async () => {
-			throw new Error("SSE fallback should not be called");
-		});
+	it.each(["custom", "deleted"] as const)(
+		"reuses a prepared hooked payload across retryable websocket pre-send connection loss during acquisition (%s)",
+		async envelopeMode => {
+			const tempDir = TempDir.createSync("@pi-codex-stream-");
+			setAgentDir(tempDir.path());
+			vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+			const token = createCodexTestToken();
+			const sentRequests: Array<Record<string, unknown>> = [];
+			let failedAcquisitionCount = 0;
+			const routingHints: Array<string | undefined> = [];
+			const sockets: RetryableAcquisitionWebSocket[] = [];
+			const firstFailure = Promise.withResolvers<void>();
+			let hookCalls = 0;
+			const hookPreviousResponseIds: unknown[] = [];
+			let retainedTextPart: Record<string, unknown> | undefined;
+			const fetchMock = vi.fn(async () => {
+				throw new Error("SSE fallback should not be called");
+			});
 
-		class RetryableAcquisitionWebSocket extends MockWebSocket {
-			sendCount = 0;
+			class RetryableAcquisitionWebSocket extends MockWebSocket {
+				sendCount = 0;
 
-			constructor(url: string, options?: { headers?: WsHeaders }) {
-				super(url, options);
-				sockets.push(this);
-				routingHints.push(options?.headers?.["x-codex-routing-hint"]);
-				if (sockets.indexOf(this) === 1) {
-					queueMicrotask(() => {
-						if (this.readyState !== MockWebSocket.CONNECTING) return;
-						this.readyState = MockWebSocket.OPEN;
-						this.emit("open", new Event("open"));
+				constructor(url: string, options?: { headers?: WsHeaders }) {
+					super(url, options);
+					sockets.push(this);
+					routingHints.push(options?.headers?.["x-codex-routing-hint"]);
+					if (sockets.indexOf(this) === 1) {
+						queueMicrotask(() => {
+							if (this.readyState !== MockWebSocket.CONNECTING) return;
+							this.readyState = MockWebSocket.OPEN;
+							this.emit("open", new Event("open"));
+						});
+						queueMicrotask(() => {
+							if (this.readyState !== MockWebSocket.OPEN) return;
+							failedAcquisitionCount += 1;
+							firstFailure.resolve();
+							this.readyState = MockWebSocket.CLOSED;
+							this.emit("close", { code: 1006 } as unknown as Event);
+						});
+					} else {
+						this.scheduleOpen();
+					}
+				}
+
+				override send(data: string): void {
+					this.sendCount += 1;
+					if (sockets.indexOf(this) === 1) {
+						throw new Error("pre-send acquisition-loss socket must not send");
+					}
+					const request = JSON.parse(data) as Record<string, unknown>;
+					sentRequests.push(request);
+					this.emitCodexResponse({
+						messageId: `msg_retryable_${sentRequests.length}`,
+						responseId: `resp_retryable_${sentRequests.length}`,
+						text: `Answer ${sentRequests.length}`,
+						terminalType: "response.completed",
+						includeCreated: true,
 					});
-					queueMicrotask(() => {
-						if (this.readyState !== MockWebSocket.OPEN) return;
-						failedAcquisitionCount += 1;
-						firstFailure.resolve();
-						this.readyState = MockWebSocket.CLOSED;
-						this.emit("close", { code: 1006 } as unknown as Event);
-					});
-				} else {
-					this.scheduleOpen();
 				}
 			}
 
-			override send(data: string): void {
-				this.sendCount += 1;
-				if (sockets.indexOf(this) === 1) {
-					throw new Error("pre-send acquisition-loss socket must not send");
-				}
-				const request = JSON.parse(data) as Record<string, unknown>;
-				sentRequests.push(request);
-				this.emitCodexResponse({
-					messageId: `msg_retryable_${sentRequests.length}`,
-					responseId: `resp_retryable_${sentRequests.length}`,
-					text: `Answer ${sentRequests.length}`,
-					terminalType: "response.completed",
-					includeCreated: true,
-				});
-			}
-		}
+			global.WebSocket = RetryableAcquisitionWebSocket as unknown as typeof WebSocket;
+			const model = buildModel({
+				...createCodexTestModel("https://chatgpt.com/backend-api"),
+				serviceTiers: ["flex"],
+			} as ModelSpec<"openai-codex-responses">);
+			const providerSessionState = new Map<string, ProviderSessionState>();
+			const firstContext: Context = {
+				systemPrompt: ["You are a helpful assistant."],
+				messages: [{ role: "user", content: "First question", timestamp: Date.now() }],
+			};
+			const firstResponse = await streamOpenAICodexResponses(model, firstContext, {
+				fetch: fetchMock as FetchImpl,
+				apiKey: token,
+				sessionId: "ws-hook-retry-session",
+				providerSessionState,
+			}).result();
+			const secondQuestion = { role: "user" as const, content: "Second question", timestamp: Date.now() + 1 };
+			const secondContext: Context = {
+				systemPrompt: firstContext.systemPrompt,
+				messages: [...firstContext.messages, firstResponse, secondQuestion],
+			};
+			const secondPromise = streamOpenAICodexResponses(model, secondContext, {
+				fetch: fetchMock as FetchImpl,
+				apiKey: token,
+				sessionId: "ws-hook-retry-session",
+				providerSessionState,
+				onPayload: async payload => {
+					hookCalls += 1;
+					const request = payload as Record<string, unknown>;
+					hookPreviousResponseIds.push(request.previous_response_id);
+					const input = request.input;
+					if (!Array.isArray(input)) throw new Error("expected the hooked input suffix");
+					const last = input.at(-1);
+					if (!isRecord(last) || !Array.isArray(last.content)) throw new Error("expected the hooked input item");
+					const textPart = last.content.find(part => isRecord(part) && part.type === "input_text");
+					if (!isRecord(textPart)) throw new Error("expected the hooked input text");
+					retainedTextPart = textPart;
+					textPart.text = "hooked second question";
+					const replacement: Record<string, unknown> = {
+						...request,
+						model: "hooked-retry-model",
+						service_tier: "flex",
+					};
+					if (envelopeMode === "custom") replacement.type = "proxy.retry";
+					else delete replacement.type;
+					return replacement;
+				},
+			}).result();
 
-		global.WebSocket = RetryableAcquisitionWebSocket as unknown as typeof WebSocket;
-		const model = buildModel({
-			...createCodexTestModel("https://chatgpt.com/backend-api"),
-			serviceTiers: ["flex"],
-		} as ModelSpec<"openai-codex-responses">);
-		const continuationModel = buildModel({
-			...createCodexTestModel("https://chatgpt.com/backend-api"),
-			requestModelId: "hooked-retry-model",
-			serviceTiers: ["flex"],
-		} as ModelSpec<"openai-codex-responses">);
-		const providerSessionState = new Map<string, ProviderSessionState>();
-		const firstContext: Context = {
-			systemPrompt: ["You are a helpful assistant."],
-			messages: [{ role: "user", content: "First question", timestamp: Date.now() }],
-		};
-		const firstResponse = await streamOpenAICodexResponses(model, firstContext, {
-			fetch: fetchMock as FetchImpl,
-			apiKey: token,
-			sessionId: "ws-hook-retry-session",
-			providerSessionState,
-		}).result();
-		const secondQuestion = { role: "user" as const, content: "Second question", timestamp: Date.now() + 1 };
-		const secondContext: Context = {
-			systemPrompt: firstContext.systemPrompt,
-			messages: [...firstContext.messages, firstResponse, secondQuestion],
-		};
-		const secondPromise = streamOpenAICodexResponses(model, secondContext, {
-			fetch: fetchMock as FetchImpl,
-			apiKey: token,
-			sessionId: "ws-hook-retry-session",
-			providerSessionState,
-			onPayload: async payload => {
-				hookCalls += 1;
-				const request = payload as Record<string, unknown>;
-				hookPreviousResponseId = request.previous_response_id;
-				const input = request.input;
-				if (!Array.isArray(input)) throw new Error("expected the hooked input suffix");
-				const last = input.at(-1);
-				if (!isRecord(last) || !Array.isArray(last.content)) throw new Error("expected the hooked input item");
-				const textPart = last.content.find(part => isRecord(part) && part.type === "input_text");
-				if (!isRecord(textPart)) throw new Error("expected the hooked input text");
-				retainedTextPart = textPart;
-				textPart.text = "hooked second question";
-				return { ...request, model: "hooked-retry-model", service_tier: "flex" };
-			},
-		}).result();
+			await firstFailure.promise;
+			expect(hookCalls).toBe(1);
+			expect(hookPreviousResponseIds).toEqual(["resp_retryable_1"]);
+			if (!retainedTextPart) throw new Error("expected the hook to retain a nested input reference");
+			retainedTextPart.text = "late mutation after failed acquisition";
+			const secondResponse = await secondPromise;
+			const thirdContext: Context = {
+				systemPrompt: secondContext.systemPrompt,
+				messages: [
+					...secondContext.messages.slice(0, -1),
+					{ ...secondQuestion, content: "hooked second question" },
+					secondResponse,
+					{ role: "user", content: "Third question", timestamp: Date.now() + 2 },
+				],
+			};
+			await streamOpenAICodexResponses(model, thirdContext, {
+				fetch: fetchMock as FetchImpl,
+				apiKey: token,
+				sessionId: "ws-hook-retry-session",
+				providerSessionState,
+				serviceTier: "flex",
+				onPayload: payload => {
+					hookCalls += 1;
+					const request = payload as Record<string, unknown>;
+					hookPreviousResponseIds.push(request.previous_response_id);
+					expect(request.previous_response_id).toBe("resp_retryable_2");
+					const replacement: Record<string, unknown> = {
+						...request,
+						model: "hooked-retry-model",
+						service_tier: "flex",
+					};
+					if (envelopeMode === "custom") replacement.type = "proxy.retry";
+					else delete replacement.type;
+					return replacement;
+				},
+			}).result();
 
-		await firstFailure.promise;
-		if (!retainedTextPart) throw new Error("expected the hook to retain a nested input reference");
-		retainedTextPart.text = "late mutation after failed acquisition";
-		const secondResponse = await secondPromise;
-		const thirdContext: Context = {
-			systemPrompt: secondContext.systemPrompt,
-			messages: [
-				...secondContext.messages.slice(0, -1),
-				{ ...secondQuestion, content: "hooked second question" },
-				secondResponse,
-				{ role: "user", content: "Third question", timestamp: Date.now() + 2 },
-			],
-		};
-		await streamOpenAICodexResponses(continuationModel, thirdContext, {
-			fetch: fetchMock as FetchImpl,
-			apiKey: token,
-			sessionId: "ws-hook-retry-session",
-			providerSessionState,
-			serviceTier: "flex",
-		}).result();
-
-		expect(secondResponse.stopReason).toBe("stop");
-		expect(fetchMock).not.toHaveBeenCalled();
-		expect(hookCalls).toBe(1);
-		expect(hookPreviousResponseId).toBe("resp_retryable_1");
-		expect(failedAcquisitionCount).toBe(1);
-		expect(sockets).toHaveLength(3);
-		expect(sockets[1]?.readyState).toBe(MockWebSocket.CLOSED);
-		expect(sockets[1]?.sendCount).toBe(0);
-		expect(routingHints[1]).toBe("model=hooked-retry-model;tier=flex");
-		expect(routingHints[2]).toBe("model=hooked-retry-model;tier=flex");
-		expect(sentRequests).toHaveLength(3);
-		expect(sentRequests[1]?.previous_response_id).toBeUndefined();
-		expect(sentRequests[1]?.model).toBe("hooked-retry-model");
-		expect(sentRequests[1]?.service_tier).toBe("flex");
-		expect(JSON.stringify(sentRequests[1]?.input)).toContain("First question");
-		expect(JSON.stringify(sentRequests[1]?.input)).toContain("hooked second question");
-		expect(JSON.stringify(sentRequests[1]?.input)).not.toContain("late mutation after failed acquisition");
-		expect(sentRequests[2]?.previous_response_id).toBe("resp_retryable_2");
-		expect(JSON.stringify(sentRequests[2]?.input)).toContain("Third question");
-	});
+			expect(secondResponse.stopReason).toBe("stop");
+			expect(fetchMock).not.toHaveBeenCalled();
+			expect(hookCalls).toBe(2);
+			expect(hookPreviousResponseIds).toEqual(["resp_retryable_1", "resp_retryable_2"]);
+			expect(failedAcquisitionCount).toBe(1);
+			expect(sockets).toHaveLength(3);
+			expect(sockets[1]?.readyState).toBe(MockWebSocket.CLOSED);
+			expect(sockets[1]?.sendCount).toBe(0);
+			expect(routingHints[1]).toBe("model=hooked-retry-model;tier=flex");
+			expect(routingHints[2]).toBe("model=hooked-retry-model;tier=flex");
+			expect(sentRequests).toHaveLength(3);
+			expect(sentRequests[1]?.previous_response_id).toBeUndefined();
+			expect(sentRequests[1]?.model).toBe("hooked-retry-model");
+			expect(sentRequests[1]?.type).toBe(envelopeMode === "custom" ? "proxy.retry" : undefined);
+			expect(sentRequests[1]?.service_tier).toBe("flex");
+			expect(JSON.stringify(sentRequests[1]?.input)).toContain("First question");
+			expect(JSON.stringify(sentRequests[1]?.input)).toContain("hooked second question");
+			expect(JSON.stringify(sentRequests[1]?.input)).not.toContain("late mutation after failed acquisition");
+			expect(sentRequests[2]?.previous_response_id).toBe("resp_retryable_2");
+			expect(sentRequests[2]?.type).toBe(envelopeMode === "custom" ? "proxy.retry" : undefined);
+			expect(JSON.stringify(sentRequests[2]?.input)).toContain("Third question");
+		},
+	);
 
 	it.each(["during handshake", "before request", "during request"] as const)(
 		"preserves timeout classification when compaction is aborted %s",
@@ -8304,244 +8328,266 @@ describe("openai-codex streaming", () => {
 		expect(thirdMetadata.ws_request_header_x_openai_internal_codex_responses_lite).toBe("true");
 	});
 
-	it("replays accepted steering after a late debug reset without an abandoned create", async () => {
-		const tempDir = TempDir.createSync("@pi-codex-late-debug-steering-");
-		const previousCwd = process.cwd();
-		const previousDebug = Bun.env.PI_REQ_DEBUG;
-		process.chdir(tempDir.path());
-		Bun.env.PI_REQ_DEBUG = "1";
+	it.each(["custom", "deleted"] as const)(
+		"replays accepted steering after a late debug reset without an abandoned create (%s)",
+		async envelopeMode => {
+			const tempDir = TempDir.createSync("@pi-codex-late-debug-steering-");
+			const previousCwd = process.cwd();
+			const previousDebug = Bun.env.PI_REQ_DEBUG;
+			process.chdir(tempDir.path());
+			Bun.env.PI_REQ_DEBUG = "1";
 
-		const fetchMock = vi.fn(async () => {
-			throw new Error("SSE fallback should not run after late debug steering reset");
-		});
-		const createFrames: Array<Record<string, unknown>> = [];
-		const steerFrames: Array<Record<string, unknown>> = [];
-		let createSendCount = 0;
-		let steerSendCount = 0;
-		const sockets: LateDebugSteeringWebSocket[] = [];
-		const steering = createOneShotCodexSteering("late debug steer");
-		let hookPreviousResponseId: unknown;
-		let hookCalls = 0;
-		const debugEntered = Promise.withResolvers<void>();
-		const releaseDebug = Promise.withResolvers<void>();
-		let responseLogCount = 0;
-		const originalOpen = fs.open.bind(fs);
-		const openSpy = vi.spyOn(fs, "open").mockImplementation(async (filePath, flags, mode) => {
-			if (String(filePath).endsWith(".res.log")) {
-				responseLogCount++;
-				if (responseLogCount === 2) {
-					debugEntered.resolve();
-					await releaseDebug.promise;
+			const fetchMock = vi.fn(async () => {
+				throw new Error("SSE fallback should not run after late debug steering reset");
+			});
+			const createFrames: Array<Record<string, unknown>> = [];
+			const steerFrames: Array<Record<string, unknown>> = [];
+			let createSendCount = 0;
+			let steerSendCount = 0;
+			const sockets: LateDebugSteeringWebSocket[] = [];
+			const steering = createOneShotCodexSteering("late debug steer");
+			let hookPreviousResponseId: unknown;
+			let hookCalls = 0;
+			let retainedEnvelopeType: Record<string, unknown> | undefined;
+			const debugEntered = Promise.withResolvers<void>();
+			const releaseDebug = Promise.withResolvers<void>();
+			let responseLogCount = 0;
+			const originalOpen = fs.open.bind(fs);
+			const openSpy = vi.spyOn(fs, "open").mockImplementation(async (filePath, flags, mode) => {
+				if (String(filePath).endsWith(".res.log")) {
+					responseLogCount++;
+					if (responseLogCount === 2) {
+						debugEntered.resolve();
+						await releaseDebug.promise;
+					}
+				}
+				return originalOpen(filePath, flags, mode);
+			});
+
+			class LateDebugSteeringWebSocket extends MockWebSocket {
+				constructor(url: string, options?: { headers?: WsHeaders }) {
+					super(url, options);
+					sockets.push(this);
+					queueMicrotask(() => {
+						this.readyState = MockWebSocket.OPEN;
+						this.emit("open", new Event("open"));
+					});
+				}
+
+				override send(data: string): void {
+					const frame = JSON.parse(data) as Record<string, unknown>;
+					if (frame.type === "response.steer") {
+						steerSendCount += 1;
+						steerFrames.push(frame);
+						this.sendJson({
+							type: "response.steer.accepted",
+							steer: { id: "steer_late_debug", previous_response_id: "resp_late_debug_1" },
+						});
+						this.sendJson({
+							type: "response.completed",
+							response: { id: "resp_late_debug_1", status: "completed", usage: DEFAULT_USAGE },
+						});
+						return;
+					}
+					createSendCount += 1;
+					createFrames.push(frame);
+					if (createFrames.length === 1) {
+						this.sendJson({ type: "response.created", response: { id: "resp_late_debug_1" } });
+						this.sendJson({
+							type: "response.output_item.added",
+							item: {
+								type: "function_call",
+								id: "fc_late_debug_1",
+								call_id: "call_late_debug_1",
+								name: "read",
+								arguments: "",
+							},
+						});
+						this.sendJson({
+							type: "response.output_item.done",
+							item: {
+								type: "function_call",
+								id: "fc_late_debug_1",
+								call_id: "call_late_debug_1",
+								name: "read",
+								arguments: '{"path":"README.md"}',
+							},
+						});
+						return;
+					}
+					this.emitCodexResponse({
+						messageId: "msg_late_debug_2",
+						responseId: "resp_late_debug_2",
+						text: "Late debug recovery",
+						includeCreated: true,
+					});
 				}
 			}
-			return originalOpen(filePath, flags, mode);
-		});
 
-		class LateDebugSteeringWebSocket extends MockWebSocket {
-			constructor(url: string, options?: { headers?: WsHeaders }) {
-				super(url, options);
-				sockets.push(this);
-				queueMicrotask(() => {
-					this.readyState = MockWebSocket.OPEN;
-					this.emit("open", new Event("open"));
-				});
-			}
-
-			override send(data: string): void {
-				const frame = JSON.parse(data) as Record<string, unknown>;
-				if (frame.type === "response.steer") {
-					steerSendCount += 1;
-					steerFrames.push(frame);
-					this.sendJson({
-						type: "response.steer.accepted",
-						steer: { id: "steer_late_debug", previous_response_id: "resp_late_debug_1" },
-					});
-					this.sendJson({
-						type: "response.completed",
-						response: { id: "resp_late_debug_1", status: "completed", usage: DEFAULT_USAGE },
-					});
-					return;
-				}
-				createSendCount += 1;
-				createFrames.push(frame);
-				if (createFrames.length === 1) {
-					this.sendJson({ type: "response.created", response: { id: "resp_late_debug_1" } });
-					this.sendJson({
-						type: "response.output_item.added",
-						item: {
-							type: "function_call",
-							id: "fc_late_debug_1",
-							call_id: "call_late_debug_1",
-							name: "read",
-							arguments: "",
-						},
-					});
-					this.sendJson({
-						type: "response.output_item.done",
-						item: {
-							type: "function_call",
-							id: "fc_late_debug_1",
-							call_id: "call_late_debug_1",
-							name: "read",
-							arguments: '{"path":"README.md"}',
-						},
-					});
-					return;
-				}
-				this.emitCodexResponse({
-					messageId: "msg_late_debug_2",
-					responseId: "resp_late_debug_2",
-					text: "Late debug recovery",
-					includeCreated: true,
-				});
-			}
-		}
-
-		try {
-			global.WebSocket = LateDebugSteeringWebSocket as unknown as typeof WebSocket;
-			const model = buildModel({
-				...createCodexSteeringTestModel("https://chatgpt.com/backend-api"),
-			} as ModelSpec<"openai-codex-responses">);
-			const providerSessionState = new Map<string, ProviderSessionState>();
-			const token = createCodexTestToken();
-			const user = { role: "user" as const, content: "Initial", timestamp: Date.now() };
-			const first = await streamOpenAICodexResponses(
-				model,
-				{ systemPrompt: ["You are a helpful assistant."], messages: [user] },
-				{
-					fetch: fetchMock as FetchImpl,
-					apiKey: token,
-					sessionId: "ws-late-debug-steering-session",
-					providerSessionState,
-					liveSteering: steering.source,
-				},
-			).result();
-			expect(steering.settled()).toBe("accepted");
-			const toolCall = first.content.find(
-				(block): block is Extract<(typeof first.content)[number], { type: "toolCall" }> =>
-					block.type === "toolCall",
-			);
-			if (!toolCall) throw new Error("expected a late-debug steering tool call");
-			const rawCallId = toolCall.id.split("|")[0] ?? toolCall.id;
-			expect(rawCallId).toBe("call_late_debug_1");
-			const nativeHistory = first.providerPayload;
-			if (nativeHistory?.type !== "openaiResponsesHistory") {
-				throw new Error("expected the first response to retain native Responses history");
-			}
-			const nativeCall = nativeHistory.items.find(item => item.type === "function_call");
-			expect(nativeCall?.call_id).toBe(rawCallId);
-			// Keep the native call carrier while omitting projected tool-call blocks so
-			// transformMessages does not synthesize a result before the native suffix.
-			const firstForReplay = { ...first, content: [] };
-
-			const secondPromise = streamOpenAICodexResponses(
-				model,
-				{
-					systemPrompt: ["You are a helpful assistant."],
-					// Native history carriers preserve the steer-before-output suffix ordering.
-					// Ordinary Context tool results are made adjacent to their call first.
-					messages: [
-						user,
-						firstForReplay,
-						{
-							role: "user",
-							content: "late debug steer",
-							providerPayload: createOpenAIResponsesHistoryPayload(model.provider, [
-								{
-									role: "user",
-									content: [{ type: "input_text", text: "late debug steer" }],
-								},
-								{ type: "function_call_output", call_id: rawCallId, output: "original output" },
-							]),
-							timestamp: Date.now(),
-						},
-					],
-				},
-				{
-					fetch: fetchMock as FetchImpl,
-					apiKey: token,
-					sessionId: "ws-late-debug-steering-session",
-					providerSessionState,
-					onPayload: async payload => {
-						hookCalls += 1;
-						const observed = payload as Record<string, unknown>;
-						hookPreviousResponseId = observed.previous_response_id;
-						const input = observed.input as Array<Record<string, unknown>>;
-						const output = input.find(item => item.type === "function_call_output");
-						if (!output) throw new Error("expected hooked late-debug tool output");
-						output.output = "modified late-debug output";
-						return undefined;
+			try {
+				global.WebSocket = LateDebugSteeringWebSocket as unknown as typeof WebSocket;
+				const model = buildModel({
+					...createCodexSteeringTestModel("https://chatgpt.com/backend-api"),
+				} as ModelSpec<"openai-codex-responses">);
+				const providerSessionState = new Map<string, ProviderSessionState>();
+				const token = createCodexTestToken();
+				const user = { role: "user" as const, content: "Initial", timestamp: Date.now() };
+				const first = await streamOpenAICodexResponses(
+					model,
+					{ systemPrompt: ["You are a helpful assistant."], messages: [user] },
+					{
+						fetch: fetchMock as FetchImpl,
+						apiKey: token,
+						sessionId: "ws-late-debug-steering-session",
+						providerSessionState,
+						liveSteering: steering.source,
 					},
-				},
-			).result();
+				).result();
+				expect(steering.settled()).toBe("accepted");
+				const toolCall = first.content.find(
+					(block): block is Extract<(typeof first.content)[number], { type: "toolCall" }> =>
+						block.type === "toolCall",
+				);
+				if (!toolCall) throw new Error("expected a late-debug steering tool call");
+				const rawCallId = toolCall.id.split("|")[0] ?? toolCall.id;
+				expect(rawCallId).toBe("call_late_debug_1");
+				const nativeHistory = first.providerPayload;
+				if (nativeHistory?.type !== "openaiResponsesHistory") {
+					throw new Error("expected the first response to retain native Responses history");
+				}
+				const nativeCall = nativeHistory.items.find(item => item.type === "function_call");
+				expect(nativeCall?.call_id).toBe(rawCallId);
+				// Keep the native call carrier while omitting projected tool-call blocks so
+				// transformMessages does not synthesize a result before the native suffix.
+				const firstForReplay = { ...first, content: [] };
 
-			await debugEntered.promise;
-			expect(hookPreviousResponseId).toBe("resp_late_debug_1");
-			expect(sockets).toHaveLength(1);
-			expect(sockets[0]?.readyState).toBe(MockWebSocket.OPEN);
-			resetOpenAICodexHistoryAfterCompaction({
-				providerSessionState,
-				sessionId: "ws-late-debug-steering-session",
-				compaction: {
-					operationId: "late-debug-reset",
-					trigger: "auto",
-					reason: "context_limit",
-					phase: "mid_turn",
-					strategy: "memento",
-				},
-			});
-			releaseDebug.resolve();
+				const secondPromise = streamOpenAICodexResponses(
+					model,
+					{
+						systemPrompt: ["You are a helpful assistant."],
+						// Native history carriers preserve the steer-before-output suffix ordering.
+						// Ordinary Context tool results are made adjacent to their call first.
+						messages: [
+							user,
+							firstForReplay,
+							{
+								role: "user",
+								content: "late debug steer",
+								providerPayload: createOpenAIResponsesHistoryPayload(model.provider, [
+									{
+										role: "user",
+										content: [{ type: "input_text", text: "late debug steer" }],
+									},
+									{ type: "function_call_output", call_id: rawCallId, output: "original output" },
+								]),
+								timestamp: Date.now(),
+							},
+						],
+					},
+					{
+						fetch: fetchMock as FetchImpl,
+						apiKey: token,
+						sessionId: "ws-late-debug-steering-session",
+						providerSessionState,
+						onPayload: async payload => {
+							hookCalls += 1;
+							const observed = payload as Record<string, unknown>;
+							hookPreviousResponseId = observed.previous_response_id;
+							const input = observed.input as Array<Record<string, unknown>>;
+							const output = input.find(item => item.type === "function_call_output");
+							if (!output) throw new Error("expected hooked late-debug tool output");
+							output.output = "modified late-debug output";
+							if (envelopeMode === "custom") {
+								const envelopeType = { kind: "late-debug", value: "captured" };
+								retainedEnvelopeType = envelopeType;
+								observed.type = envelopeType;
+							} else {
+								delete observed.type;
+							}
+							return undefined;
+						},
+					},
+				).result();
 
-			const second = await secondPromise;
-			expect(second.stopReason).toBe("stop");
-			expect(fetchMock).not.toHaveBeenCalled();
-			expect(hookCalls).toBe(1);
-			expect(steerFrames).toHaveLength(1);
-			expect(steerSendCount).toBe(1);
-			expect(createFrames).toHaveLength(2);
-			expect(createSendCount).toBe(2);
-			expect(sockets).toHaveLength(2);
-			expect(sockets[0]?.readyState).toBe(MockWebSocket.CLOSED);
-			expect(createFrames[0]?.previous_response_id).toBeUndefined();
-			expect(createFrames[1]?.previous_response_id).toBeUndefined();
-			const replayedInput = JSON.stringify(createFrames[1]?.input);
-			expect((replayedInput.match(/late debug steer/g) ?? []).length).toBe(1);
-			expect(replayedInput).toContain("modified late-debug output");
-
-			const stats = getOpenAICodexWebSocketDebugStats(model, {
-				sessionId: "ws-late-debug-steering-session",
-				providerSessionState,
-			});
-			expect(stats).toMatchObject({
-				fullContextRequests: 2,
-				deltaRequests: 0,
-				lastPreviousResponseId: undefined,
-			});
-
-			const requestDumpNames = (await fs.readdir(tempDir.path()))
-				.filter(name => name.endsWith(".json"))
-				.sort((left, right) => {
-					const leftId = Number.parseInt(left.match(/(\d+)\.json$/)?.[1] ?? "0", 10);
-					const rightId = Number.parseInt(right.match(/(\d+)\.json$/)?.[1] ?? "0", 10);
-					return leftId - rightId;
+				await debugEntered.promise;
+				if (retainedEnvelopeType) retainedEnvelopeType.value = "late";
+				if (envelopeMode === "custom") expect(retainedEnvelopeType?.value).toBe("late");
+				expect(hookPreviousResponseId).toBe("resp_late_debug_1");
+				expect(sockets).toHaveLength(1);
+				expect(sockets[0]?.readyState).toBe(MockWebSocket.OPEN);
+				resetOpenAICodexHistoryAfterCompaction({
+					providerSessionState,
+					sessionId: "ws-late-debug-steering-session",
+					compaction: {
+						operationId: "late-debug-reset",
+						trigger: "auto",
+						reason: "context_limit",
+						phase: "mid_turn",
+						strategy: "memento",
+					},
 				});
-			const requestDumps = await Promise.all(
-				requestDumpNames.map(async name => JSON.parse(await fs.readFile(name, "utf8")) as Record<string, unknown>),
-			);
-			expect(requestDumps).toHaveLength(3);
-			const abandonedBody = requestDumps[1]?.body as Record<string, unknown> | undefined;
-			expect(abandonedBody?.previous_response_id).toBe("resp_late_debug_1");
-			expect(requestDumps.at(-1)?.body).toEqual(createFrames.at(-1));
-			const responseLogs = (await fs.readdir(tempDir.path())).filter(name => name.endsWith(".res.log"));
-			const responseLogBodies = await Promise.all(responseLogs.map(name => fs.readFile(name, "utf8")));
-			expect(responseLogBodies.some(body => body.includes("request not sent: continuation invalidated"))).toBe(true);
-		} finally {
-			releaseDebug.resolve();
-			openSpy.mockRestore();
-			process.chdir(previousCwd);
-			restoreEnv("PI_REQ_DEBUG", previousDebug);
-		}
-	});
+				releaseDebug.resolve();
+
+				const second = await secondPromise;
+				expect(second.stopReason).toBe("stop");
+				expect(fetchMock).not.toHaveBeenCalled();
+				expect(hookCalls).toBe(1);
+				expect(steerFrames).toHaveLength(1);
+				expect(steerSendCount).toBe(1);
+				expect(createFrames).toHaveLength(2);
+				expect(createSendCount).toBe(2);
+				expect(sockets).toHaveLength(2);
+				expect(sockets[0]?.readyState).toBe(MockWebSocket.CLOSED);
+				expect(createFrames[0]?.previous_response_id).toBeUndefined();
+				if (envelopeMode === "custom") {
+					expect(createFrames[1]?.type).toEqual({ kind: "late-debug", value: "captured" });
+				} else {
+					expect(createFrames[1]?.type).toBeUndefined();
+				}
+				expect(createFrames[1]?.previous_response_id).toBeUndefined();
+				const replayedInput = JSON.stringify(createFrames[1]?.input);
+				expect((replayedInput.match(/late debug steer/g) ?? []).length).toBe(1);
+				expect(replayedInput).toContain("modified late-debug output");
+
+				const stats = getOpenAICodexWebSocketDebugStats(model, {
+					sessionId: "ws-late-debug-steering-session",
+					providerSessionState,
+				});
+				expect(stats).toMatchObject({
+					fullContextRequests: 2,
+					deltaRequests: 0,
+					lastPreviousResponseId: undefined,
+				});
+
+				const requestDumpNames = (await fs.readdir(tempDir.path()))
+					.filter(name => name.endsWith(".json"))
+					.sort((left, right) => {
+						const leftId = Number.parseInt(left.match(/(\d+)\.json$/)?.[1] ?? "0", 10);
+						const rightId = Number.parseInt(right.match(/(\d+)\.json$/)?.[1] ?? "0", 10);
+						return leftId - rightId;
+					});
+				const requestDumps = await Promise.all(
+					requestDumpNames.map(
+						async name => JSON.parse(await fs.readFile(name, "utf8")) as Record<string, unknown>,
+					),
+				);
+				expect(requestDumps).toHaveLength(3);
+				const abandonedBody = requestDumps[1]?.body as Record<string, unknown> | undefined;
+				expect(abandonedBody?.previous_response_id).toBe("resp_late_debug_1");
+				expect(requestDumps.at(-1)?.body).toEqual(createFrames.at(-1));
+				const responseLogs = (await fs.readdir(tempDir.path())).filter(name => name.endsWith(".res.log"));
+				const responseLogBodies = await Promise.all(responseLogs.map(name => fs.readFile(name, "utf8")));
+				expect(responseLogBodies.some(body => body.includes("request not sent: continuation invalidated"))).toBe(
+					true,
+				);
+			} finally {
+				releaseDebug.resolve();
+				openSpy.mockRestore();
+				process.chdir(previousCwd);
+				restoreEnv("PI_REQ_DEBUG", previousDebug);
+			}
+		},
+	);
 
 	it("reuses a hooked accepted-steering payload after pre-send acquisition loss", async () => {
 		const tempDir = TempDir.createSync("@pi-codex-steering-acquisition-");
@@ -9719,6 +9765,7 @@ describe("openai-codex streaming", () => {
 					) as Record<string, unknown> | undefined;
 					if (!text) throw new Error("expected a hooked input_text");
 					text.text = "Second after hook";
+					delete request.type;
 					return undefined;
 				},
 				onSseEvent: event => {
@@ -9763,6 +9810,13 @@ describe("openai-codex streaming", () => {
 				apiKey: token,
 				sessionId: "ws-observer-reset-session",
 				providerSessionState,
+				onPayload: payload => {
+					hookCalls += 1;
+					const request = payload as Record<string, unknown>;
+					expect(request.previous_response_id).toBe("resp_observer_reset_2");
+					request.type = "proxy.observer";
+					return undefined;
+				},
 				onSseEvent: event => {
 					if (event.raw[0]?.startsWith(": ws →")) {
 						observedOutbound.push(JSON.parse(event.data) as Record<string, unknown>);
@@ -9773,7 +9827,7 @@ describe("openai-codex streaming", () => {
 
 		expect(first.stopReason).toBe("stop");
 		expect(second.stopReason).toBe("stop");
-		expect(hookCalls).toBe(1);
+		expect(hookCalls).toBe(2);
 		expect(resetDone).toBe(true);
 		expect(observerSawOpen).toBe(true);
 		expect(fetchMock).not.toHaveBeenCalled();
@@ -9781,7 +9835,9 @@ describe("openai-codex streaming", () => {
 		expect(sentRequests[1]?.previous_response_id).toBeUndefined();
 		expect(JSON.stringify(sentRequests[1]?.input)).toContain("First");
 		expect(JSON.stringify(sentRequests[1]?.input)).toContain("Second after hook");
+		expect(sentRequests[1]?.type).toBeUndefined();
 		expect(sentRequests[2]?.previous_response_id).toBe("resp_observer_reset_2");
+		expect(sentRequests[2]?.type).toBe("proxy.observer");
 		expect(sentRequests[2]?.input).toEqual([
 			expect.objectContaining({
 				role: "user",
@@ -10522,5 +10578,726 @@ describe("openai-codex SSE statelessness", () => {
 			providerSessionState,
 		});
 		expect(stats).toMatchObject({ fullContextRequests: 2, deltaRequests: 0 });
+	});
+});
+
+describe("openai-codex hook-adjusted websocket state", () => {
+	it.each(["in-place mutation", "replacement object"] as const)(
+		"chains stable hook-selected options across three unchanged public turns (%s)",
+		async hookMode => {
+			const sentRequests: Array<Record<string, unknown>> = [];
+			const observedPreviousResponseIds: unknown[] = [];
+			let hookCalls = 0;
+
+			class StableHookWebSocket extends MockWebSocket {
+				static instances: StableHookWebSocket[] = [];
+
+				constructor(url: string, options?: { headers?: WsHeaders }) {
+					super(url, options);
+					StableHookWebSocket.instances.push(this);
+					this.scheduleOpen();
+				}
+
+				override send(data: string): void {
+					const request = JSON.parse(data) as Record<string, unknown>;
+					sentRequests.push(request);
+					const responseNumber = sentRequests.length;
+					this.emitCodexResponse({
+						messageId: `msg_stable_hook_${responseNumber}`,
+						responseId: `resp_stable_hook_${responseNumber}`,
+						text: `Stable answer ${responseNumber}`,
+						includeCreated: true,
+					});
+				}
+			}
+
+			global.WebSocket = StableHookWebSocket as unknown as typeof WebSocket;
+			const model = createCodexTestModel("https://chatgpt.com/backend-api");
+			const providerSessionState = new Map<string, ProviderSessionState>();
+			const token = createCodexTestToken();
+			const onPayload = (payload: unknown): unknown => {
+				hookCalls += 1;
+				const request = payload as Record<string, unknown>;
+				observedPreviousResponseIds.push(request.previous_response_id);
+				request.model = "stable-hook-model";
+				const reasoning = (isRecord(request.reasoning) ? request.reasoning : {}) as Record<string, unknown>;
+				reasoning.effort = "high";
+				reasoning.summary = { detail: "stable" };
+				request.reasoning = reasoning;
+				if (hookMode === "replacement object") {
+					return {
+						...request,
+						model: "stable-hook-model",
+						reasoning: { ...reasoning, summary: { detail: "stable" } },
+					};
+				}
+				return undefined;
+			};
+			const firstContext = {
+				...createCodexTestContext(),
+				messages: [{ role: "user" as const, content: "Stable first", timestamp: Date.now() }],
+			};
+			const first = await streamOpenAICodexResponses(model, firstContext, {
+				apiKey: token,
+				sessionId: `ws-stable-hook-${hookMode}`,
+				providerSessionState,
+				reasoning: Effort.Medium,
+				onPayload,
+			}).result();
+			const secondContext: Context = {
+				systemPrompt: firstContext.systemPrompt,
+				messages: [
+					...firstContext.messages,
+					first,
+					{ role: "user", content: "Stable second", timestamp: Date.now() + 1 },
+				],
+			};
+			const second = await streamOpenAICodexResponses(model, secondContext, {
+				apiKey: token,
+				sessionId: `ws-stable-hook-${hookMode}`,
+				providerSessionState,
+				reasoning: Effort.Medium,
+				onPayload,
+			}).result();
+			const thirdContext: Context = {
+				systemPrompt: secondContext.systemPrompt,
+				messages: [
+					...secondContext.messages,
+					second,
+					{ role: "user", content: "Stable third", timestamp: Date.now() + 2 },
+				],
+			};
+			const third = await streamOpenAICodexResponses(model, thirdContext, {
+				apiKey: token,
+				sessionId: `ws-stable-hook-${hookMode}`,
+				providerSessionState,
+				reasoning: Effort.Medium,
+				onPayload,
+			}).result();
+
+			expect(first.stopReason).toBe("stop");
+			expect(second.stopReason).toBe("stop");
+			expect(third.stopReason).toBe("stop");
+			expect(hookCalls).toBe(3);
+			expect(observedPreviousResponseIds).toEqual([undefined, "resp_stable_hook_1", "resp_stable_hook_2"]);
+			expect(StableHookWebSocket.instances).toHaveLength(1);
+			expect(sentRequests).toHaveLength(3);
+			expect(sentRequests.map(request => request.model)).toEqual([
+				"stable-hook-model",
+				"stable-hook-model",
+				"stable-hook-model",
+			]);
+			expect(sentRequests.map(request => request.previous_response_id)).toEqual([
+				undefined,
+				"resp_stable_hook_1",
+				"resp_stable_hook_2",
+			]);
+			expect(sentRequests.map(request => request.reasoning)).toEqual([
+				expect.objectContaining({ effort: "high", summary: { detail: "stable" } }),
+				expect.objectContaining({ effort: "high", summary: { detail: "stable" } }),
+				expect.objectContaining({ effort: "high", summary: { detail: "stable" } }),
+			]);
+			expect(sentRequests[0]?.input).toEqual([
+				expect.objectContaining({
+					role: "user",
+					content: [{ type: "input_text", text: "Stable first" }],
+				}),
+			]);
+			expect(sentRequests[1]?.input).toEqual([
+				expect.objectContaining({
+					role: "user",
+					content: [{ type: "input_text", text: "Stable second" }],
+				}),
+			]);
+			expect(sentRequests[2]?.input).toEqual([
+				expect.objectContaining({
+					role: "user",
+					content: [{ type: "input_text", text: "Stable third" }],
+				}),
+			]);
+		},
+	);
+	it("replays on effective reasoning, model, and ultrafast-class changes", async () => {
+		class EffectiveOptionsWebSocket extends MockWebSocket {
+			static sentRequests: Array<Record<string, unknown>> = [];
+			static instances: EffectiveOptionsWebSocket[] = [];
+
+			constructor(url: string, options?: { headers?: WsHeaders }) {
+				super(url, options);
+				EffectiveOptionsWebSocket.instances.push(this);
+				this.scheduleOpen();
+			}
+
+			override send(data: string): void {
+				const request = JSON.parse(data) as Record<string, unknown>;
+				EffectiveOptionsWebSocket.sentRequests.push(request);
+				const responseNumber = EffectiveOptionsWebSocket.sentRequests.length;
+				this.emitCodexResponse({
+					messageId: `msg_effective_${responseNumber}`,
+					responseId: `resp_effective_${responseNumber}`,
+					text: `Effective answer ${responseNumber}`,
+					includeCreated: true,
+				});
+			}
+		}
+
+		global.WebSocket = EffectiveOptionsWebSocket as unknown as typeof WebSocket;
+		const token = createCodexTestToken();
+		const append = (context: Context, response: Context["messages"][number], text: string): Context => ({
+			systemPrompt: context.systemPrompt,
+			messages: [...context.messages, response, { role: "user", content: text, timestamp: Date.now() }],
+		});
+		const inputSignature = (request: Record<string, unknown> | undefined) => {
+			if (!Array.isArray(request?.input)) throw new Error("expected a websocket input array");
+			return request.input.map(item => {
+				if (!isRecord(item)) throw new Error("expected a record input item");
+				const content = item.content;
+				const textPart = Array.isArray(content)
+					? content.find(part => isRecord(part) && (part.type === "input_text" || part.type === "output_text"))
+					: undefined;
+				return {
+					type: typeof item.type === "string" ? item.type : undefined,
+					role: typeof item.role === "string" ? item.role : undefined,
+					text: isRecord(textPart) && typeof textPart.text === "string" ? textPart.text : undefined,
+				};
+			});
+		};
+		const run = (
+			model: Model<"openai-codex-responses">,
+			context: Context,
+			sessionId: string,
+			providerSessionState: Map<string, ProviderSessionState>,
+			onPayload?: (payload: unknown) => unknown,
+			serviceTier?: "ultrafast" | "flex",
+		) =>
+			streamOpenAICodexResponses(model, context, {
+				apiKey: token,
+				sessionId,
+				providerSessionState,
+				reasoning: Effort.Medium,
+				...(serviceTier ? { serviceTier } : {}),
+				...(onPayload ? { onPayload } : {}),
+			}).result();
+
+		const model = createCodexTestModel("https://chatgpt.com/backend-api");
+		const state = new Map<string, ProviderSessionState>();
+		let reasoningHookCalls = 0;
+		const reasoningHook = (payload: unknown): unknown => {
+			reasoningHookCalls += 1;
+			const request = payload as Record<string, unknown>;
+			const reasoning = (isRecord(request.reasoning) ? request.reasoning : {}) as Record<string, unknown>;
+			reasoning.effort = reasoningHookCalls <= 2 ? "high" : "low";
+			request.reasoning = reasoning;
+			request.model = "stable-reasoning-route";
+			return undefined;
+		};
+		let context: Context = {
+			systemPrompt: ["You are a helpful assistant."],
+			messages: [{ role: "user", content: "Reasoning first", timestamp: Date.now() }],
+		};
+		let response = await run(model, context, "ws-effective-reasoning", state, reasoningHook);
+		context = append(context, response, "Reasoning second");
+		response = await run(model, context, "ws-effective-reasoning", state, reasoningHook);
+		context = append(context, response, "Reasoning changed");
+		response = await run(model, context, "ws-effective-reasoning", state, reasoningHook);
+		context = append(context, response, "Reasoning stable again");
+		response = await run(model, context, "ws-effective-reasoning", state, reasoningHook);
+		context = append(context, response, "No hook after changed effective options");
+		await run(model, context, "ws-effective-reasoning", state);
+
+		expect(reasoningHookCalls).toBe(4);
+		expect(EffectiveOptionsWebSocket.sentRequests.map(request => request.previous_response_id)).toEqual([
+			undefined,
+			"resp_effective_1",
+			undefined,
+			"resp_effective_3",
+			undefined,
+		]);
+		expect(inputSignature(EffectiveOptionsWebSocket.sentRequests[0])).toEqual([
+			{ type: undefined, role: "user", text: "Reasoning first" },
+		]);
+		expect(inputSignature(EffectiveOptionsWebSocket.sentRequests[1])).toEqual([
+			{ type: undefined, role: "user", text: "Reasoning second" },
+		]);
+		expect(inputSignature(EffectiveOptionsWebSocket.sentRequests[2])).toEqual([
+			{ type: undefined, role: "user", text: "Reasoning first" },
+			{ type: "message", role: "assistant", text: "Effective answer 1" },
+			{ type: undefined, role: "user", text: "Reasoning second" },
+			{ type: "message", role: "assistant", text: "Effective answer 2" },
+			{ type: undefined, role: "user", text: "Reasoning changed" },
+		]);
+		expect(inputSignature(EffectiveOptionsWebSocket.sentRequests[3])).toEqual([
+			{ type: undefined, role: "user", text: "Reasoning stable again" },
+		]);
+		expect(inputSignature(EffectiveOptionsWebSocket.sentRequests[4])).toEqual([
+			{ type: undefined, role: "user", text: "Reasoning first" },
+			{ type: "message", role: "assistant", text: "Effective answer 1" },
+			{ type: undefined, role: "user", text: "Reasoning second" },
+			{ type: "message", role: "assistant", text: "Effective answer 2" },
+			{ type: undefined, role: "user", text: "Reasoning changed" },
+			{ type: "message", role: "assistant", text: "Effective answer 3" },
+			{ type: undefined, role: "user", text: "Reasoning stable again" },
+			{ type: "message", role: "assistant", text: "Effective answer 4" },
+			{ type: undefined, role: "user", text: "No hook after changed effective options" },
+		]);
+		expect(EffectiveOptionsWebSocket.sentRequests[4]?.previous_response_id).toBeUndefined();
+
+		EffectiveOptionsWebSocket.sentRequests = [];
+		EffectiveOptionsWebSocket.instances = [];
+		const modelState = new Map<string, ProviderSessionState>();
+		let modelHookCalls = 0;
+		const modelHook = (payload: unknown): unknown => {
+			modelHookCalls += 1;
+			const request = payload as Record<string, unknown>;
+			request.model = modelHookCalls <= 2 ? "model-route-a" : "model-route-b";
+			return undefined;
+		};
+		context = {
+			systemPrompt: ["You are a helpful assistant."],
+			messages: [{ role: "user", content: "Model first", timestamp: Date.now() }],
+		};
+		response = await run(model, context, "ws-effective-model", modelState, modelHook);
+		context = append(context, response, "Model second");
+		response = await run(model, context, "ws-effective-model", modelState, modelHook);
+		context = append(context, response, "Model changed");
+		response = await run(model, context, "ws-effective-model", modelState, modelHook);
+		context = append(context, response, "Model stable again");
+		await run(model, context, "ws-effective-model", modelState, modelHook);
+
+		expect(modelHookCalls).toBe(4);
+		expect(EffectiveOptionsWebSocket.sentRequests.map(request => request.previous_response_id)).toEqual([
+			undefined,
+			"resp_effective_1",
+			undefined,
+			"resp_effective_3",
+		]);
+		expect(EffectiveOptionsWebSocket.sentRequests[2]?.model).toBe("model-route-b");
+		expect(inputSignature(EffectiveOptionsWebSocket.sentRequests[0])).toEqual([
+			{ type: undefined, role: "user", text: "Model first" },
+		]);
+		expect(inputSignature(EffectiveOptionsWebSocket.sentRequests[1])).toEqual([
+			{ type: undefined, role: "user", text: "Model second" },
+		]);
+		expect(inputSignature(EffectiveOptionsWebSocket.sentRequests[2])).toEqual([
+			{ type: undefined, role: "user", text: "Model first" },
+			{ type: "message", role: "assistant", text: "Effective answer 1" },
+			{ type: undefined, role: "user", text: "Model second" },
+			{ type: "message", role: "assistant", text: "Effective answer 2" },
+			{ type: undefined, role: "user", text: "Model changed" },
+		]);
+		expect(inputSignature(EffectiveOptionsWebSocket.sentRequests[3])).toEqual([
+			{ type: undefined, role: "user", text: "Model stable again" },
+		]);
+
+		EffectiveOptionsWebSocket.sentRequests = [];
+		EffectiveOptionsWebSocket.instances = [];
+		const tierState = new Map<string, ProviderSessionState>();
+		const tierModel = buildModel({
+			...createCodexTestModel("https://chatgpt.com/backend-api"),
+			serviceTiers: ["ultrafast", "flex"],
+		} as ModelSpec<"openai-codex-responses">);
+		let tierHookCalls = 0;
+		const tierHook = (payload: unknown): unknown => {
+			tierHookCalls += 1;
+			(payload as Record<string, unknown>).service_tier = tierHookCalls <= 2 ? "ultrafast" : "flex";
+			return undefined;
+		};
+		context = {
+			systemPrompt: ["You are a helpful assistant."],
+			messages: [{ role: "user", content: "Tier first", timestamp: Date.now() }],
+		};
+		response = await run(tierModel, context, "ws-effective-tier", tierState, tierHook);
+		context = append(context, response, "Tier second");
+		response = await run(tierModel, context, "ws-effective-tier", tierState, tierHook);
+		context = append(context, response, "Tier changed");
+		response = await run(tierModel, context, "ws-effective-tier", tierState, tierHook);
+		context = append(context, response, "Tier stable again");
+		await run(tierModel, context, "ws-effective-tier", tierState, tierHook);
+
+		expect(tierHookCalls).toBe(4);
+		expect(EffectiveOptionsWebSocket.sentRequests.map(request => request.previous_response_id)).toEqual([
+			undefined,
+			"resp_effective_1",
+			undefined,
+			"resp_effective_3",
+		]);
+		expect(EffectiveOptionsWebSocket.sentRequests[2]?.service_tier).toBe("flex");
+		expect(EffectiveOptionsWebSocket.sentRequests[0]?.service_tier).toBe("ultrafast");
+		expect(EffectiveOptionsWebSocket.sentRequests[1]?.service_tier).toBe("ultrafast");
+		expect(EffectiveOptionsWebSocket.sentRequests[3]?.service_tier).toBe("flex");
+		expect(inputSignature(EffectiveOptionsWebSocket.sentRequests[0])).toEqual([
+			{ type: undefined, role: "user", text: "Tier first" },
+		]);
+		expect(inputSignature(EffectiveOptionsWebSocket.sentRequests[1])).toEqual([
+			{ type: undefined, role: "user", text: "Tier second" },
+		]);
+		expect(inputSignature(EffectiveOptionsWebSocket.sentRequests[2])).toEqual([
+			{ type: undefined, role: "user", text: "Tier first" },
+			{ type: "message", role: "assistant", text: "Effective answer 1" },
+			{ type: undefined, role: "user", text: "Tier second" },
+			{ type: "message", role: "assistant", text: "Effective answer 2" },
+			{ type: undefined, role: "user", text: "Tier changed" },
+		]);
+		expect(inputSignature(EffectiveOptionsWebSocket.sentRequests[3])).toEqual([
+			{ type: undefined, role: "user", text: "Tier stable again" },
+		]);
+	});
+
+	it("keeps hook-owned websocket envelope types across full and chained sends", async () => {
+		const sentRequests: Array<Record<string, unknown>> = [];
+		const observedPreviousResponseIds: unknown[] = [];
+		let hookCalls = 0;
+
+		class EnvelopeTypeWebSocket extends MockWebSocket {
+			static instances: EnvelopeTypeWebSocket[] = [];
+
+			constructor(url: string, options?: { headers?: WsHeaders }) {
+				super(url, options);
+				EnvelopeTypeWebSocket.instances.push(this);
+				this.scheduleOpen();
+			}
+
+			override send(data: string): void {
+				const request = JSON.parse(data) as Record<string, unknown>;
+				sentRequests.push(request);
+				const responseNumber = sentRequests.length;
+				this.emitCodexResponse({
+					messageId: `msg_envelope_type_${responseNumber}`,
+					responseId: `resp_envelope_type_${responseNumber}`,
+					text: `Envelope answer ${responseNumber}`,
+					includeCreated: true,
+				});
+			}
+		}
+
+		global.WebSocket = EnvelopeTypeWebSocket as unknown as typeof WebSocket;
+		const model = createCodexTestModel("https://chatgpt.com/backend-api");
+		const providerSessionState = new Map<string, ProviderSessionState>();
+		const token = createCodexTestToken();
+		const onPayload = (payload: unknown): unknown => {
+			hookCalls += 1;
+			const request = payload as Record<string, unknown>;
+			observedPreviousResponseIds.push(request.previous_response_id);
+			switch (hookCalls) {
+				case 1:
+					request.type = "proxy.create";
+					return undefined;
+				case 2:
+					return { ...request, type: "proxy.create" };
+				case 3:
+					request.type = undefined;
+					return undefined;
+				case 4:
+					return { ...request, type: null };
+				case 5:
+					delete request.type;
+					return undefined;
+				default:
+					return { ...request, type: { kind: "nested", value: "captured" } };
+			}
+		};
+		const append = (context: Context, response: Context["messages"][number], text: string): Context => ({
+			systemPrompt: context.systemPrompt,
+			messages: [...context.messages, response, { role: "user", content: text, timestamp: Date.now() }],
+		});
+		let context: Context = {
+			systemPrompt: ["You are a helpful assistant."],
+			messages: [{ role: "user", content: "Envelope first", timestamp: Date.now() }],
+		};
+		let response = await streamOpenAICodexResponses(model, context, {
+			apiKey: token,
+			sessionId: "ws-envelope-type-session",
+			providerSessionState,
+			reasoning: Effort.Medium,
+			onPayload,
+		}).result();
+		for (const text of ["Envelope second", "Envelope third", "Envelope fourth", "Envelope fifth", "Envelope sixth"]) {
+			context = append(context, response, text);
+			response = await streamOpenAICodexResponses(model, context, {
+				apiKey: token,
+				sessionId: "ws-envelope-type-session",
+				providerSessionState,
+				reasoning: Effort.Medium,
+				onPayload,
+			}).result();
+		}
+
+		expect(response.stopReason).toBe("stop");
+		expect(hookCalls).toBe(6);
+		expect(EnvelopeTypeWebSocket.instances).toHaveLength(1);
+		expect(observedPreviousResponseIds).toEqual([
+			undefined,
+			"resp_envelope_type_1",
+			"resp_envelope_type_2",
+			"resp_envelope_type_3",
+			"resp_envelope_type_4",
+			"resp_envelope_type_5",
+		]);
+		expect(sentRequests).toHaveLength(6);
+		expect(sentRequests[0]?.type).toBe("proxy.create");
+		expect(sentRequests[1]?.type).toBe("proxy.create");
+		expect(sentRequests[2]?.type).toBeUndefined();
+		expect(sentRequests[3]?.type).toBeNull();
+		expect(sentRequests[4]?.type).toBeUndefined();
+		expect(sentRequests[5]?.type).toEqual({ kind: "nested", value: "captured" });
+		expect(sentRequests.map(request => request.previous_response_id)).toEqual([
+			undefined,
+			"resp_envelope_type_1",
+			"resp_envelope_type_2",
+			"resp_envelope_type_3",
+			"resp_envelope_type_4",
+			"resp_envelope_type_5",
+		]);
+		for (const request of sentRequests.slice(1)) expect(request.input).toHaveLength(1);
+		expect(JSON.stringify(sentRequests[1]?.input)).toContain("Envelope second");
+		expect(JSON.stringify(sentRequests[5]?.input)).toContain("Envelope sixth");
+	});
+
+	it("preserves a deleted hook envelope on full and chained sends", async () => {
+		const sentRequests: Array<Record<string, unknown>> = [];
+		let hookCalls = 0;
+
+		class DeletedEnvelopeWebSocket extends MockWebSocket {
+			static instances: DeletedEnvelopeWebSocket[] = [];
+
+			constructor(url: string, options?: { headers?: WsHeaders }) {
+				super(url, options);
+				DeletedEnvelopeWebSocket.instances.push(this);
+				this.scheduleOpen();
+			}
+
+			override send(data: string): void {
+				const request = JSON.parse(data) as Record<string, unknown>;
+				sentRequests.push(request);
+				const responseNumber = sentRequests.length;
+				this.emitCodexResponse({
+					messageId: `msg_deleted_envelope_${responseNumber}`,
+					responseId: `resp_deleted_envelope_${responseNumber}`,
+					text: `Deleted envelope answer ${responseNumber}`,
+					includeCreated: true,
+				});
+			}
+		}
+
+		global.WebSocket = DeletedEnvelopeWebSocket as unknown as typeof WebSocket;
+		const model = createCodexTestModel("https://chatgpt.com/backend-api");
+		const providerSessionState = new Map<string, ProviderSessionState>();
+		const token = createCodexTestToken();
+		const onPayload = (payload: unknown): unknown => {
+			hookCalls += 1;
+			const request = payload as Record<string, unknown>;
+			delete request.type;
+			return hookCalls === 2 ? { ...request } : undefined;
+		};
+		const firstContext: Context = {
+			systemPrompt: ["You are a helpful assistant."],
+			messages: [{ role: "user", content: "Deleted envelope first", timestamp: Date.now() }],
+		};
+		const first = await streamOpenAICodexResponses(model, firstContext, {
+			apiKey: token,
+			sessionId: "ws-deleted-envelope-session",
+			providerSessionState,
+			reasoning: Effort.Medium,
+			onPayload,
+		}).result();
+		const second = await streamOpenAICodexResponses(
+			model,
+			{
+				systemPrompt: firstContext.systemPrompt,
+				messages: [
+					...firstContext.messages,
+					first,
+					{ role: "user", content: "Deleted envelope second", timestamp: Date.now() + 1 },
+				],
+			},
+			{
+				apiKey: token,
+				sessionId: "ws-deleted-envelope-session",
+				providerSessionState,
+				reasoning: Effort.Medium,
+				onPayload,
+			},
+		).result();
+
+		expect(first.stopReason).toBe("stop");
+		expect(second.stopReason).toBe("stop");
+		expect(hookCalls).toBe(2);
+		expect(DeletedEnvelopeWebSocket.instances).toHaveLength(1);
+		expect(sentRequests).toHaveLength(2);
+		expect(sentRequests.map(request => request.type)).toEqual([undefined, undefined]);
+		expect(sentRequests.map(request => request.previous_response_id)).toEqual([undefined, "resp_deleted_envelope_1"]);
+		expect(sentRequests[0]?.input).toEqual([
+			expect.objectContaining({
+				role: "user",
+				content: [{ type: "input_text", text: "Deleted envelope first" }],
+			}),
+		]);
+		expect(sentRequests[1]?.input).toEqual([
+			expect.objectContaining({
+				role: "user",
+				content: [{ type: "input_text", text: "Deleted envelope second" }],
+			}),
+		]);
+	});
+
+	it("rejects hook-free steering attach when only the unhooked companion matches", async () => {
+		const createFrames: Array<Record<string, unknown>> = [];
+		const steerFrames: Array<Record<string, unknown>> = [];
+		const sockets: AttachBoundaryWebSocket[] = [];
+		const steering = createOneShotCodexSteering("continue automatically");
+		const hookPreviousResponseIds: unknown[] = [];
+		let hookCalls = 0;
+
+		class AttachBoundaryWebSocket extends MockWebSocket {
+			constructor(url: string, options?: { headers?: WsHeaders }) {
+				super(url, options);
+				sockets.push(this);
+				queueMicrotask(() => {
+					this.readyState = MockWebSocket.OPEN;
+					this.emit("open", new Event("open"));
+				});
+			}
+
+			override send(data: string): void {
+				const frame = JSON.parse(data) as Record<string, unknown>;
+				if (frame.type === "response.steer") {
+					steerFrames.push(frame);
+					this.sendJson({
+						type: "response.steer.accepted",
+						steer: { id: "steer_attach_boundary", previous_response_id: "resp_boundary_1" },
+					});
+					this.sendJson({
+						type: "response.incomplete",
+						response: {
+							id: "resp_boundary_1",
+							status: "incomplete",
+							incomplete_details: { reason: "steered" },
+							usage: DEFAULT_USAGE,
+						},
+					});
+					this.sendJson({ type: "response.created", response: { id: "resp_boundary_2" } });
+					this.sendJson({
+						type: "response.output_item.added",
+						item: {
+							type: "message",
+							id: "msg_boundary_2",
+							role: "assistant",
+							status: "in_progress",
+							content: [],
+						},
+					});
+					this.sendJson({ type: "response.content_part.added", part: { type: "output_text", text: "" } });
+					this.sendJson({ type: "response.output_text.delta", delta: "Steered successor" });
+					this.sendJson({
+						type: "response.output_item.done",
+						item: {
+							type: "message",
+							id: "msg_boundary_2",
+							role: "assistant",
+							status: "completed",
+							content: [{ type: "output_text", text: "Steered successor" }],
+						},
+					});
+					this.sendJson({
+						type: "response.completed",
+						response: { id: "resp_boundary_2", status: "completed", usage: DEFAULT_USAGE },
+					});
+					return;
+				}
+				createFrames.push(frame);
+				if (createFrames.length === 1) {
+					this.sendJson({ type: "response.created", response: { id: "resp_boundary_1" } });
+					this.sendJson({
+						type: "response.output_item.added",
+						item: {
+							type: "message",
+							id: "msg_boundary_1",
+							role: "assistant",
+							status: "in_progress",
+							content: [],
+						},
+					});
+					this.sendJson({ type: "response.content_part.added", part: { type: "output_text", text: "" } });
+					this.sendJson({ type: "response.output_text.delta", delta: "Initial" });
+					this.sendJson({
+						type: "response.output_item.done",
+						item: {
+							type: "message",
+							id: "msg_boundary_1",
+							role: "assistant",
+							status: "completed",
+							content: [{ type: "output_text", text: "Initial" }],
+						},
+					});
+					return;
+				}
+				this.emitCodexResponse({
+					messageId: "msg_boundary_3",
+					responseId: "resp_boundary_3",
+					text: "Full replay",
+					includeCreated: true,
+				});
+			}
+		}
+
+		global.WebSocket = AttachBoundaryWebSocket as unknown as typeof WebSocket;
+		const model = createCodexSteeringTestModel("https://chatgpt.com/backend-api");
+		const providerSessionState = new Map<string, ProviderSessionState>();
+		const token = createCodexTestToken();
+		const user = { role: "user" as const, content: "Boundary initial", timestamp: Date.now() };
+		const first = await streamOpenAICodexResponses(
+			model,
+			{ systemPrompt: ["You are a helpful assistant."], messages: [user] },
+			{
+				apiKey: token,
+				sessionId: "ws-steering-attach-boundary-session",
+				providerSessionState,
+				liveSteering: steering.source,
+				onPayload: payload => {
+					hookCalls += 1;
+					hookPreviousResponseIds.push((payload as Record<string, unknown>).previous_response_id);
+					(payload as Record<string, unknown>).model = "hooked-attach-boundary-model";
+					return undefined;
+				},
+			},
+		).result();
+		expect(steering.settled()).toBe("accepted");
+
+		const second = await streamOpenAICodexResponses(
+			model,
+			{
+				systemPrompt: ["You are a helpful assistant."],
+				messages: [user, first, { role: "user", content: "continue automatically", timestamp: Date.now() }],
+			},
+			{
+				apiKey: token,
+				sessionId: "ws-steering-attach-boundary-session",
+				providerSessionState,
+				onPayload: payload => {
+					hookCalls += 1;
+					const request = payload as Record<string, unknown>;
+					hookPreviousResponseIds.push(request.previous_response_id);
+					expect(request.previous_response_id).toBeUndefined();
+					request.model = "hooked-attach-boundary-model";
+					return undefined;
+				},
+			},
+		).result();
+
+		expect(second.responseId).toBe("resp_boundary_3");
+		expect(second.stopReason).toBe("stop");
+		expect(hookCalls).toBe(2);
+		expect(hookPreviousResponseIds).toEqual([undefined, undefined]);
+		expect(steerFrames).toHaveLength(1);
+		expect(createFrames).toHaveLength(2);
+		expect(createFrames[0]?.previous_response_id).toBeUndefined();
+		expect(createFrames[1]?.previous_response_id).toBeUndefined();
+		expect(createFrames[0]?.model).toBe("hooked-attach-boundary-model");
+		expect(createFrames[1]?.model).toBe("hooked-attach-boundary-model");
+		const replayedInput = JSON.stringify(createFrames[1]?.input);
+		expect((replayedInput.match(/continue automatically/g) ?? []).length).toBe(1);
+		expect(sockets).toHaveLength(2);
+		expect(sockets[0]?.readyState).toBe(MockWebSocket.CLOSED);
+		expect(sockets[1]?.readyState).toBe(MockWebSocket.OPEN);
 	});
 });

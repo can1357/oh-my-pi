@@ -438,6 +438,7 @@ type CodexWebSocketSessionState = {
 	sessionId: string;
 	disableWebsocket: boolean;
 	lastRequest?: RequestBody;
+	lastUnhookedRequest?: RequestBody;
 	/** Last completed response; an in-progress response cannot replace the retry baseline. */
 	lastResponseId?: string;
 	lastResponseItems?: InputItem[];
@@ -764,6 +765,8 @@ export function resetOpenAICodexHistoryAfterCompaction(options: OpenAICodexCompa
 
 interface CodexPendingWebSocketPayload {
 	readonly body: RequestBody;
+	readonly unhookedBody: RequestBody;
+	readonly websocketEnvelope: { readonly type?: unknown };
 	readonly hookMayRefreshTurnState: boolean;
 	readonly steeringOwner?: CodexWebSocketConnection;
 }
@@ -783,6 +786,7 @@ interface CodexRequestContext {
 	responsesLite: boolean;
 	requestMetadata?: CodexRequestMetadata;
 	transformedBody: RequestBody;
+	unhookedRequestBodyForState?: RequestBody;
 	pendingWebSocketPayload?: CodexPendingWebSocketPayload;
 	rawRequestDump: RawHttpRequestDump;
 }
@@ -1867,6 +1871,7 @@ async function openCodexWebSocketTransport(
 	const transformedBody = requestContext.transformedBody;
 	const fullInput = Array.isArray(transformedBody.input) ? transformedBody.input : undefined;
 	const pendingPayload = requestContext.pendingWebSocketPayload;
+	requestContext.unhookedRequestBodyForState = pendingPayload?.unhookedBody;
 	let pendingPayloadForRequest = pendingPayload;
 	if (pendingPayload?.steeringOwner && websocketState.connection === pendingPayload.steeringOwner) {
 		closeCodexSteeringOwner(websocketState, pendingPayload.steeringOwner);
@@ -1889,7 +1894,19 @@ async function openCodexWebSocketTransport(
 		return attestationHeader;
 	};
 
-	let chainedBody = pendingPayload?.body ?? buildCodexChainedRequestBody(transformedBody, websocketState);
+	let chainedBody: RequestBody;
+	const usedUnhookedPreview = !pendingPayload && hasPayloadHook && websocketState.lastUnhookedRequest !== undefined;
+	if (pendingPayload) {
+		chainedBody = pendingPayload.body;
+	} else if (hasPayloadHook) {
+		chainedBody = buildCodexChainedRequestBody(
+			transformedBody,
+			websocketState,
+			websocketState.lastUnhookedRequest ?? websocketState.lastRequest,
+		);
+	} else {
+		chainedBody = buildCodexChainedRequestBody(transformedBody, websocketState);
+	}
 	let candidateGeneration = websocketState.appendStateVersion;
 	let candidateConnection = websocketState.connection;
 	let candidateResponseId = websocketState.lastResponseId;
@@ -1913,6 +1930,14 @@ async function openCodexWebSocketTransport(
 		}
 	} else {
 		steeringSource = undefined;
+	}
+	if (steeringPlan?.kind === "attach" && steeringSource && usedUnhookedPreview) {
+		const effectiveChainedBody = buildCodexChainedRequestBody(transformedBody, websocketState);
+		if (effectiveChainedBody.previous_response_id) {
+			chainedBody = effectiveChainedBody;
+		} else {
+			steeringPlan = { kind: "discard" };
+		}
 	}
 
 	if (steeringPlan?.kind === "attach" && steeringSource) {
@@ -2035,7 +2060,7 @@ async function openCodexWebSocketTransport(
 	if (pendingPayload) {
 		websocketRequestCandidate = {
 			...pendingPayload.body,
-			type: "response.create",
+			...pendingPayload.websocketEnvelope,
 		};
 		const pendingClientMetadata = asRecord(websocketRequestCandidate.client_metadata);
 		if (pendingClientMetadata) {
@@ -2084,6 +2109,9 @@ async function openCodexWebSocketTransport(
 		const preHookHadTurnState =
 			preHookHadClientMetadata && Object.hasOwn(preHookClientMetadata, X_CODEX_TURN_STATE_HEADER);
 		const preHookTurnState = preHookClientMetadata?.[X_CODEX_TURN_STATE_HEADER];
+		const unhookedRequestBody = { ...transformedBody };
+		delete unhookedRequestBody.input;
+		const unhookedBody = cloneJsonTree(unhookedRequestBody) as RequestBody;
 		const hookRequest = cloneJsonTree(websocketRequestCandidate);
 		const replacementWebsocketRequest = await payloadHook(hookRequest, model);
 		const finalHookRequest =
@@ -2103,18 +2131,25 @@ async function openCodexWebSocketTransport(
 			typeof finalHookRequest.previous_response_id === "string" &&
 			finalHookRequest.previous_response_id.length > 0 &&
 			finalHookRequest.previous_response_id === approvedContinuationId;
+		const websocketEnvelope = Object.prototype.propertyIsEnumerable.call(finalHookRequest, "type")
+			? (cloneJsonTree({ type: finalHookRequest.type }) as { readonly type?: unknown })
+			: {};
 		const preparedBody = buildCodexEffectiveRequestBody(fullInput, prefixLength, finalHookRequest);
+		if (Object.hasOwn(preparedBody, "input")) unhookedBody.input = preparedBody.input;
 		effectiveRequestBody = preparedBody;
 		const pendingPayloadRecord: CodexPendingWebSocketPayload = {
 			body: preparedBody,
+			unhookedBody,
+			websocketEnvelope,
 			hookMayRefreshTurnState,
 			steeringOwner: steeringSource,
 		};
+		requestContext.unhookedRequestBodyForState = unhookedBody;
 		requestContext.pendingWebSocketPayload = pendingPayloadRecord;
 		pendingPayloadForRequest = pendingPayloadRecord;
 		websocketRequest = {
 			...effectiveRequestBody,
-			type: "response.create",
+			...websocketEnvelope,
 		};
 		const ownedInput = effectiveRequestBody.input;
 		websocketRequest.input =
@@ -2393,6 +2428,7 @@ async function openCodexSseTransport(
 	requestBodyForState: RequestBody;
 	transport: CodexTransport;
 }> {
+	requestContext.unhookedRequestBodyForState = undefined;
 	const open = async (wireBody: RequestBody) => {
 		// Keep the 400 dump honest: record the body actually sent on the wire.
 		requestContext.rawRequestDump.body = wireBody;
@@ -3125,6 +3161,7 @@ class CodexStreamProcessor {
 				// requestBodyForState is already a private copy and is not mutated after
 				// the request, so the append baseline takes ownership of it.
 				state.lastRequest = runtime.requestBodyForState;
+				state.lastUnhookedRequest = this.requestContext.unhookedRequestBodyForState;
 				const nativeOutputItems = runtime.finalizeNativeOutputItems();
 				const replayableResponseItems = sanitizeOpenAIResponsesAssistantHistoryItemsForReplay(
 					cloneJsonTree(nativeOutputItems),
@@ -3841,6 +3878,7 @@ function getCodexWebSocketSessionState(
 function resetCodexWebSocketAppendState(state: CodexWebSocketSessionState): void {
 	state.canAppend = false;
 	state.lastRequest = undefined;
+	state.lastUnhookedRequest = undefined;
 	state.lastResponseId = undefined;
 	state.lastResponseItems = undefined;
 	state.appendStateVersion += 1;
@@ -4207,13 +4245,14 @@ const CODEX_CHAIN_TOP_LEVEL_EXCLUDE_MAP = {
 function buildCodexChainedRequestBody(
 	requestBody: RequestBody,
 	state: CodexWebSocketSessionState | undefined,
+	comparisonRequest: RequestBody | undefined = state?.lastRequest,
 ): RequestBody {
 	const chainable =
 		state?.canAppend === true &&
-		(state.lastRequest?.service_tier === "ultrafast") === (requestBody.service_tier === "ultrafast");
+		(comparisonRequest?.service_tier === "ultrafast") === (requestBody.service_tier === "ultrafast");
 	const appendInput = chainable
 		? buildResponsesDeltaInput(
-				state.lastRequest,
+				comparisonRequest,
 				state.lastResponseItems,
 				requestBody,
 				CODEX_CHAIN_TOP_LEVEL_EXCLUDE_MAP,
