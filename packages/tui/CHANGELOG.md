@@ -49,6 +49,10 @@
 
 - Tern draws each bash run, eval cell and `!`/`$` run as one box: the command or code, its output, status lines and a foot with state, time and facts; images sit below the box and the bash head shows the intent instead of the command
 
+### Changed
+
+- Expanded tool output (Ctrl+O) now soft-wraps the full body of IRC cards - outgoing `agent://` messages and incoming IRC bubbles - instead of cutting every line at 100/110 columns, and a collapsed IRC card with hidden text now shows the `Ctrl+O: Expand` hint ([#15164](https://github.com/can1357/oh-my-pi/pull/15164) by [@yuzu-octopus](https://github.com/yuzu-octopus))
+
 ### Fixed
 
 - Fixed the Agents hub Time column rewinding and freezing for running subagents between progress updates ([#15140](https://github.com/can1357/oh-my-pi/pull/15140) by [@H4vC](https://github.com/H4vC))
