@@ -11,7 +11,6 @@ import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/typ
 import type { SessionTreeNode } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import { type KeyId, matchesKey } from "@oh-my-pi/pi-tui";
 import { TempDir } from "@oh-my-pi/pi-utils";
-import manualContinuePrompt from "../src/prompts/system/manual-continue.md" with { type: "text" };
 import { imageAttachmentSource } from "@oh-my-pi/pi-tui/prompt/image-source";
 import { beginSettingsTest, restoreSettingsTestState, type SettingsTestState } from "./helpers/settings-test-state";
 
@@ -700,26 +699,6 @@ describe("InputController keybinding setup", () => {
 		expect(spies.showError).toHaveBeenCalledWith("queue full");
 		expect(editor.getText()).toBe("queued during stream");
 		expect(ctx.locallySubmittedUserSignatures.has("queued during stream\u00000")).toBe(false);
-	});
-
-	it("continue shortcuts submit a hidden synthetic developer directive", async () => {
-		for (const shortcut of [".", "c"]) {
-			const { InputController, ctx, editor } = await createContext();
-			const onInput = vi.fn();
-			ctx.onInputCallback = onInput;
-			const controller = new InputController(ctx);
-
-			controller.setupEditorSubmitHandler();
-			await editor.onSubmit?.(shortcut);
-
-			expect(onInput, `shortcut ${shortcut}`).toHaveBeenCalledWith({
-				text: manualContinuePrompt,
-				cancelled: false,
-				started: true,
-				synthetic: true,
-				userInitiated: true,
-			});
-		}
 	});
 
 	it("sends a bare 'c' as a normal reply during a guided-goal interview", async () => {

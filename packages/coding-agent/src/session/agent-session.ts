@@ -3837,6 +3837,10 @@ export class AgentSession implements SettingsScope {
 				message.errorId = AIError.create(AIError.Flag.SilentAbort);
 				this.#planInternalAbortPending = false;
 			} else if (this.#pendingAbortErrorId) {
+				if (this.#pendingAbortErrorId === AIError.create(AIError.Flag.SilentAbort)) {
+					// Persist lifecycle provenance; the fallback error text alone is retryable.
+					message.errorMessage = SILENT_ABORT_MARKER;
+				}
 				message.errorId = this.#pendingAbortErrorId;
 				this.#pendingAbortErrorId = undefined;
 			} else if (this.#ttsr.abortPending) {
@@ -9611,7 +9615,11 @@ export class AgentSession implements SettingsScope {
 		preserveCompaction?: boolean;
 	}): Promise<void> {
 		const userInterrupt = options?.reason === USER_INTERRUPT_LABEL;
-		this.#pendingAbortErrorId = userInterrupt ? AIError.create(AIError.Flag.UserInterrupt) : undefined;
+		this.#pendingAbortErrorId = userInterrupt
+			? AIError.create(AIError.Flag.UserInterrupt)
+			: options?.reason === undefined
+				? AIError.create(AIError.Flag.SilentAbort)
+				: undefined;
 		if (userInterrupt) this.#advisors.autoResumeSuppressed = true;
 		// Pull advisor concerns out of the steer/follow-up queues before any await so
 		// the post-abort stranded-message drain can't auto-resume the run on them.
@@ -9696,6 +9704,7 @@ export class AgentSession implements SettingsScope {
 				this.#preserveAdvisorCard(card);
 			}
 		} finally {
+			this.#pendingAbortErrorId = undefined;
 			this.#abortInProgress = false;
 			this.#drainStrandedQueuedMessages();
 		}
@@ -10832,6 +10841,10 @@ export class AgentSession implements SettingsScope {
 	/** Whether the last turn ended aborted/failed on a tool call, so {@link retry} would re-attempt it. */
 	get hasAbortedToolCallTail(): boolean {
 		return this.#recovery.hasAbortedToolCallTail;
+	}
+	/** Whether the latest assistant turn ended with an error (not an ordinary abort). */
+	get hasFailedAssistantTurn(): boolean {
+		return this.#recovery.hasFailedAssistantTurn;
 	}
 
 	/** Retry the last failed assistant turn when the session is idle. */

@@ -28,6 +28,7 @@ import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { VibeSessionRegistry } from "@oh-my-pi/pi-coding-agent/vibe/runtime";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { createAssistantMessage, createInMemoryAuthStorage } from "./helpers/agent-session-setup";
+import { submitShortcut } from "./helpers/submit-shortcut";
 
 function stubTool(name: string): AgentTool {
 	return {
@@ -295,21 +296,45 @@ describe("InteractiveMode vibe mode toggle", () => {
 		expect(JSON.stringify(restoredMessages)).not.toContain("<vibe-mode>");
 	});
 
-	it("cancels an in-flight model turn before removing Vibe tools", async () => {
+	it("retains the empty Vibe abort boundary and continues synthetically after removing Vibe tools", async () => {
 		const started = Promise.withResolvers<void>();
-		streamFn = (_model, _context, options) => {
+		let continuationRequest: { syntheticContinuation: boolean; userMessages: number } | undefined;
+		let firstRequest = true;
+		streamFn = (_model, context, options) => {
+			const isFirstRequest = firstRequest;
+			firstRequest = false;
 			const stream = new AssistantMessageEventStream();
 			queueMicrotask(() => {
 				stream.push({ type: "start", partial: createAssistantMessage("") });
-				options?.signal?.addEventListener(
-					"abort",
-					() => stream.push({ type: "error", reason: "aborted", error: createAssistantMessage("Aborted") }),
-					{ once: true },
-				);
-				started.resolve();
+				if (isFirstRequest) {
+					options?.signal?.addEventListener(
+						"abort",
+						() => stream.push({ type: "error", reason: "aborted", error: createAssistantMessage("Aborted") }),
+						{ once: true },
+					);
+					started.resolve();
+				} else {
+					continuationRequest = {
+						syntheticContinuation: context.messages.some(
+							message =>
+								message.role === "developer" &&
+								"synthetic" in message &&
+								message.synthetic === true &&
+								"userInitiated" in message &&
+								message.userInitiated === true,
+						),
+						userMessages: context.messages.filter(message => message.role === "user").length,
+					};
+					stream.push({
+						type: "done",
+						reason: "stop",
+						message: createAssistantMessage("Continued after leaving Vibe mode"),
+					});
+				}
 			});
 			return stream;
 		};
+
 		await mode.handleVibeModeCommand();
 		const prompt = session.prompt("Delegate this");
 		await started.promise;
@@ -317,9 +342,24 @@ describe("InteractiveMode vibe mode toggle", () => {
 
 		await mode.handleVibeModeCommand();
 		await prompt;
+		await session.waitForIdle();
 
 		expect(session.isStreaming).toBe(false);
 		expect(session.getToolByName("vibe_spawn")).toBeUndefined();
+		const persistedAbort = session.sessionManager
+			.getEntries()
+			.filter(entry => entry.type === "message")
+			.map(entry => entry.message)
+			.findLast(message => message.role === "assistant");
+		expect(persistedAbort).toMatchObject({ stopReason: "aborted" });
+
+		await submitShortcut(session, session.sessionManager, "c");
+
+		expect(continuationRequest).toEqual({ syntheticContinuation: true, userMessages: 1 });
+		expect(session.agent.state.messages.at(-1)).toMatchObject({
+			stopReason: "stop",
+			content: [{ type: "text", text: "Continued after leaving Vibe mode" }],
+		});
 	});
 
 	it("holds a user steer queued during Vibe teardown until the tools are removed", async () => {

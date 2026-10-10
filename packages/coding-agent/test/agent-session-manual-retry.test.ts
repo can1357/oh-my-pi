@@ -3,14 +3,18 @@ import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
 import { Agent, type AgentTool } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
-import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
+import { createMockModel, type MockResponse } from "@oh-my-pi/pi-ai/providers/mock";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
+import type { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
+import type { CustomTool } from "@oh-my-pi/pi-coding-agent/extensibility/custom-tools/types";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { USER_INTERRUPT_LABEL } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TempDir } from "@oh-my-pi/pi-utils";
+import { submitShortcut } from "./helpers/submit-shortcut";
 
 function lastAgentMessage(session: AgentSession): AssistantMessage {
 	const message = session.agent.state.messages.at(-1);
@@ -43,6 +47,258 @@ describe("AgentSession manual retry", () => {
 	afterAll(() => {
 		authStorage.close();
 		tempDir.removeSync();
+	});
+
+	async function createManualRetrySession(
+		responses: MockResponse[],
+		options?: {
+			compactionKeepRecentTokens?: number;
+			extensionRunner?: ExtensionRunner;
+		},
+	): Promise<{ session: AgentSession; sessionManager: SessionManager }> {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!model) throw new Error("Expected bundled Anthropic test model to exist");
+		const mock = createMockModel({ responses });
+		const agent = new Agent({
+			getApiKey: model => `${model.provider}-test-key`,
+			initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: mock.stream,
+		});
+		const sessionManager = SessionManager.inMemory();
+		const manualSession = new AgentSession({
+			agent,
+			sessionManager,
+			settings: Settings.isolated({
+				"compaction.enabled": false,
+				"retry.enabled": false,
+				...(options?.compactionKeepRecentTokens === undefined
+					? {}
+					: { "compaction.keepRecentTokens": options.compactionKeepRecentTokens }),
+			}),
+			modelRegistry,
+			extensionRunner: options?.extensionRunner,
+		});
+		session = manualSession;
+		manualSession.subscribe(() => undefined);
+		return { session: manualSession, sessionManager };
+	}
+
+	const shorthandCases: {
+		name: string;
+		shortcut: "." | "c";
+		responses: MockResponse[];
+		output: string;
+		originalOutput?: string;
+		discardedOutput?: string;
+	}[] = [
+		{
+			name: "retries a plain provider error",
+			shortcut: ".",
+			responses: [
+				{ throw: "plain provider failure" },
+				{ content: ["recovered after plain failure"], stopReason: "stop" },
+			],
+			output: "recovered after plain failure",
+		},
+		{
+			name: "retries an errored tool-placeholder tail",
+			shortcut: "c",
+			responses: [
+				{
+					content: [{ type: "toolCall", name: "write", arguments: { path: "plan.md", content: "x" } }],
+					stopReason: "error",
+					errorMessage: "OpenAI completions stream stalled while waiting for the next event",
+				},
+				{ content: ["recovered after tool-call failure"], stopReason: "stop" },
+			],
+			output: "recovered after tool-call failure",
+		},
+		{
+			name: "retries a reasonless non-user abort",
+			shortcut: ".",
+			responses: [
+				{ content: [], stopReason: "aborted", errorMessage: "Request was aborted" },
+				{ content: ["recovered after reasonless abort"], stopReason: "stop" },
+			],
+			output: "recovered after reasonless abort",
+		},
+		{
+			name: "retries a partial generic provider abort",
+			shortcut: ".",
+			responses: [
+				{
+					content: ["partial output from failed attempt"],
+					stopReason: "aborted",
+					errorMessage: "Request was aborted",
+				},
+				{ content: ["recovered after partial abort"], stopReason: "stop" },
+			],
+			output: "recovered after partial abort",
+			discardedOutput: "partial output from failed attempt",
+		},
+		{
+			name: "continues after a successful stop",
+			shortcut: "c",
+			responses: [
+				{ content: ["the first task is complete"], stopReason: "stop" },
+				{ content: ["continued after success"], stopReason: "stop" },
+			],
+			output: "continued after success",
+			originalOutput: "the first task is complete",
+		},
+		{
+			name: "continues after a deliberate user interrupt",
+			shortcut: ".",
+			responses: [
+				{
+					content: ["the first response was interrupted"],
+					stopReason: "aborted",
+					errorMessage: USER_INTERRUPT_LABEL,
+				},
+				{ content: ["continued after user interrupt"], stopReason: "stop" },
+			],
+			output: "continued after user interrupt",
+			originalOutput: "the first response was interrupted",
+		},
+	];
+
+	for (const scenario of shorthandCases) {
+		it(`${scenario.shortcut} ${scenario.name}`, async () => {
+			const { session, sessionManager } = await createManualRetrySession(scenario.responses);
+			await session.prompt("start a task");
+			await session.waitForIdle();
+
+			await submitShortcut(session, sessionManager, scenario.shortcut);
+			const messages = session.agent.state.messages;
+			if (scenario.discardedOutput) {
+				expect(lastAgentMessage(session).content).not.toContainEqual({
+					type: "text",
+					text: scenario.discardedOutput,
+				});
+			}
+			if (scenario.originalOutput) {
+				expect(messages.map(message => message.role)).toEqual(["user", "assistant", "developer", "assistant"]);
+				const assistants = messages.filter((message): message is AssistantMessage => message.role === "assistant");
+				expect(assistants[0]?.content).toContainEqual({
+					type: "text",
+					text: scenario.originalOutput,
+				});
+				expect(messages.find(message => message.role === "developer")).toMatchObject({
+					synthetic: true,
+					userInitiated: true,
+				});
+			} else {
+				expect(messages.map(message => message.role)).toEqual(["user", "assistant"]);
+			}
+			expect(lastAgentMessage(session).stopReason).toBe("stop");
+			expect(lastAgentMessage(session).content).toContainEqual({ type: "text", text: scenario.output });
+		});
+	}
+
+	it("continues after cancelling a SessionTools custom tool without replaying it", async () => {
+		const toolName = "mcp__probe_cancel";
+		let executions = 0;
+		const { session, sessionManager } = await createManualRetrySession([
+			{
+				content: [{ type: "toolCall", id: "cancelled-tool", name: toolName, arguments: {} }],
+				stopReason: "toolUse",
+			},
+			{ content: ["Cancellation settled"], stopReason: "stop" },
+			{ content: ["continued after cancelled custom tool"], stopReason: "stop" },
+		]);
+		const customTool: CustomTool = {
+			name: toolName,
+			label: "probe/cancel",
+			description: "Cancel this operation",
+			parameters: type({}),
+			mcpServerName: "probe",
+			mcpToolName: "cancel",
+			async execute(_toolCallId, _params, _onUpdate, context) {
+				executions++;
+				context.abort();
+				return { content: [{ type: "text", text: "Cancellation requested" }], details: {} };
+			},
+		};
+		await session.refreshMCPTools([customTool]);
+
+		await session.prompt("Start the cancellable operation");
+		await session.waitForIdle();
+		expect(lastAgentMessage(session).stopReason).toBe("aborted");
+		expect(session.hasFailedAssistantTurn).toBe(false);
+		expect(executions).toBe(1);
+
+		await submitShortcut(session, sessionManager, "c");
+
+		expect(executions).toBe(1);
+		expect(lastAgentMessage(session).stopReason).toBe("stop");
+		expect(lastAgentMessage(session).content).toContainEqual({
+			type: "text",
+			text: "continued after cancelled custom tool",
+		});
+		expect(session.agent.state.messages.find(message => message.role === "developer")).toMatchObject({
+			synthetic: true,
+			userInitiated: true,
+		});
+	});
+
+	it("continues a failed-tail shortcut submitted during manual compaction", async () => {
+		const compactEntered = Promise.withResolvers<void>();
+		const releaseCompaction = Promise.withResolvers<void>();
+		const extensionRunner = {
+			hasHandlers: (eventType: string) => eventType === "session_before_compact",
+			emit: async (event: Parameters<ExtensionRunner["emit"]>[0]) => {
+				if (event.type !== "session_before_compact" || !("preparation" in event)) return undefined;
+				const preparation = event.preparation;
+				if (!preparation) return undefined;
+				compactEntered.resolve();
+				await releaseCompaction.promise;
+				return {
+					compaction: {
+						summary: "compacted",
+						shortSummary: undefined,
+						firstKeptEntryId: preparation.firstKeptEntryId,
+						tokensBefore: preparation.tokensBefore,
+						details: {},
+					},
+				};
+			},
+			emitBeforeAgentStart: async () => undefined,
+		} as unknown as ExtensionRunner;
+		const { session, sessionManager } = await createManualRetrySession(
+			[
+				{ content: ["the first task is underway"], stopReason: "stop" },
+				{ throw: "provider failed" },
+				{ content: ["continued after compaction"], stopReason: "stop" },
+			],
+			{ compactionKeepRecentTokens: 1, extensionRunner },
+		);
+		await session.prompt("start a task");
+		await session.waitForIdle();
+		await session.prompt("continue the task");
+		await session.waitForIdle();
+		expect(session.hasFailedAssistantTurn).toBe(true);
+
+		const compaction = session.compact();
+		let shortcut: Promise<void> | undefined;
+		try {
+			await compactEntered.promise;
+			expect(session.isCompacting).toBe(true);
+			shortcut = submitShortcut(session, sessionManager, ".");
+		} finally {
+			releaseCompaction.resolve();
+			await compaction;
+		}
+
+		await shortcut;
+
+		expect(session.agent.state.messages.find(message => message.role === "developer")).toMatchObject({
+			synthetic: true,
+			userInitiated: true,
+		});
+		expect(lastAgentMessage(session).content).toContainEqual({
+			type: "text",
+			text: "continued after compaction",
+		});
 	});
 
 	it("removes the failed assistant turn and continues with a fresh attempt", async () => {
@@ -430,9 +686,9 @@ describe("AgentSession manual retry", () => {
 		});
 		session.subscribe(() => {});
 
-		// Provider context dropped the failed turn, so the tail predicate must
-		// fall back to the persisted display transcript (mirrors retry()).
+		// Provider context dropped the failed turn, so both predicates use the persisted display transcript.
 		expect(session.hasAbortedToolCallTail).toBe(true);
+		expect(session.hasFailedAssistantTurn).toBe(true);
 		await expect(session.retry()).resolves.toBe(true);
 		await session.waitForIdle();
 		expect(session.agent.state.messages.map(message => message.role)).toEqual(["user", "assistant"]);

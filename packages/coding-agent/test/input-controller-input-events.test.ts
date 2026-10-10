@@ -54,9 +54,12 @@ async function createHarness(factory: ExtensionFactory) {
 	const session = {
 		extensionRunner: runner,
 		isStreaming: true,
+		hasFailedAssistantTurn: false,
 		isCompacting: false,
+		isRetrying: false,
 		queuedMessageCount: 0,
 		prompt,
+		retry: vi.fn(async () => true),
 		followUp: vi.fn(async (_text: string, _images?: ImageContent[]) => {}),
 		promptCustomMessage: vi.fn(async () => true),
 		abort: vi.fn(async () => {}),
@@ -640,9 +643,55 @@ describe("interactive native input ingress", () => {
 			await h.pressSubmit(ENTER);
 		}
 		expect(callback).toHaveBeenCalledTimes(2);
-		expect(callback.mock.calls[0][0]).toMatchObject({ synthetic: true, started: true, userInitiated: true });
 		expect(seen).toHaveLength(1);
 		expect(h.prompt).toHaveBeenCalledTimes(1);
+	});
+
+	it("delivers a synthetic continuation while a failed tail is retrying", async () => {
+		const h = await createHarness(() => undefined);
+		h.session.isStreaming = false;
+		h.session.isRetrying = true;
+		h.session.hasFailedAssistantTurn = true;
+		let continuation: Promise<boolean> | undefined;
+		h.ctx.onInputCallback = input => {
+			continuation = h.session.prompt(input.text, {
+				synthetic: input.synthetic,
+				userInitiated: input.userInitiated,
+			});
+		};
+		h.editor.setText("c");
+		await h.pressSubmit(ENTER);
+		await continuation;
+
+		expect(h.session.retry).not.toHaveBeenCalled();
+		expect(h.prompt).toHaveBeenCalledTimes(1);
+		expect(h.prompt.mock.calls[0]?.[1]).toMatchObject({
+			synthetic: true,
+			userInitiated: true,
+		});
+	});
+
+	it("preserves newer text and attachments while shorthand retry is pending", async () => {
+		const h = await createHarness(() => undefined);
+		h.session.isStreaming = false;
+		h.session.hasFailedAssistantTurn = true;
+		const retryEntered = Promise.withResolvers<void>();
+		const pendingRetry = Promise.withResolvers<boolean>();
+		h.session.retry.mockImplementation(() => {
+			retryEntered.resolve();
+			return pendingRetry.promise;
+		});
+		h.editor.setText(".");
+
+		const submission = h.pressSubmit(ENTER);
+		await retryEntered.promise;
+		h.draftWithImage("newer draft", newerImage, "local://newer.jpg");
+		pendingRetry.resolve(true);
+		await submission;
+
+		expect(h.editor.getText()).toBe("newer draft");
+		expect(h.editor.pendingImages).toEqual([newerImage]);
+		expect(h.editor.pendingImageLinks).toEqual(["local://newer.jpg"]);
 	});
 
 	it("Ctrl+Enter transforms before compacting a skill-shaped input without expanding it", async () => {

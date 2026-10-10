@@ -974,9 +974,20 @@ export class InputController {
 			// Continue shortcuts: "." or "c" resume the agent with a hidden agent-authored
 			// developer directive (no visible user message) instead of an empty turn, so the
 			// model continues the prior intent rather than second-guessing the interrupt.
+			// On a failed turn, these shortcuts retry instead.
 			// During a /guided-goal interview "c" is a plausible answer (e.g. option C),
 			// so it is sent as a normal reply there.
 			if (text === "." || (text === "c" && !this.ctx.isGuidedGoalInterviewActive())) {
+				if (
+					!this.ctx.session.isStreaming &&
+					!this.ctx.session.isRetrying &&
+					!this.ctx.session.isCompacting &&
+					this.ctx.session.hasFailedAssistantTurn &&
+					!this.ctx.collabGuest
+				) {
+					await this.handleRetry(false);
+					return;
+				}
 				if (this.ctx.onInputCallback) {
 					this.ctx.editor.clearDraft();
 					this.ctx.onInputCallback({
@@ -1689,14 +1700,14 @@ export class InputController {
 		}
 	}
 
-	async handleRetry(): Promise<void> {
+	async handleRetry(clearDraft = true): Promise<void> {
 		if (this.ctx.collabGuest) {
 			this.ctx.showStatus("/retry is host-only during a collab session");
 			return;
 		}
 		const didRetry = await this.ctx.viewSession.retry();
 		if (didRetry) {
-			this.ctx.editor.clearDraft();
+			if (clearDraft) this.ctx.editor.clearDraft();
 		} else {
 			this.ctx.showStatus("Nothing to retry");
 		}

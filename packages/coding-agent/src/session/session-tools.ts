@@ -47,7 +47,7 @@ import type { ClientBridge, ClientBridgePermissionOutcome } from "./client-bridg
 import { buildToolNamespacesInfo, resolveCodeMode, type ToolNamespacesInfo } from "./code-mode";
 import { toolReadsSkillUris } from "../system-prompt";
 
-import type { CustomMessage } from "./messages";
+import { USER_INTERRUPT_LABEL, type CustomMessage } from "./messages";
 import type { SessionEntry } from "./session-entries";
 import type { SessionManager } from "./session-manager";
 
@@ -404,7 +404,7 @@ export class SessionTools {
 		isIdle: () => !this.#host.isStreaming(),
 		hasQueuedMessages: () => this.#host.queuedMessageCount() > 0,
 		abort: () => {
-			this.#host.agent.abort();
+			this.#host.agent.abort(USER_INTERRUPT_LABEL);
 		},
 		settings: this.#host.settings,
 		localProtocolOptions: this.#host.localProtocolOptions(),
