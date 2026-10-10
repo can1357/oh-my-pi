@@ -53,6 +53,30 @@ export class DateCwdReminderInjector {
 	#injections = new Map<Message, Message>();
 	#controls: Array<{ anchor: Message; message: Message }> = [];
 	#seen = new WeakSet<object>();
+	/**
+	 * Bumped whenever `#injections`/`#controls` change shape, so the replay
+	 * memo below can't validate against state it has already outlived (an
+	 * in-place `push` into a shared array would otherwise look unchanged).
+	 */
+	#stateVersion = 0;
+	/**
+	 * Last output built, tagged with the inputs that produced it. A repeat of
+	 * that exact (message set, root, reminder, state) tuple — a provider retry
+	 * replaying the same request, or a chain step that keeps the array identity
+	 * — hands back the same array instead of re-copying the whole transcript.
+	 * `refs` is a snapshot, never the caller's live array: element identity is
+	 * what makes an in-place push/splice a miss, and the array reference alone
+	 * would survive it.
+	 */
+	#memo:
+		| {
+				refs: Message[];
+				root: UserMessage;
+				reminder: string;
+				version: number;
+				output: Message[];
+		  }
+		| undefined;
 
 	/** Apply the current reminder while preserving all earlier injected bytes. */
 	transform(context: Context, date: string, cwd: string): Context {
@@ -65,6 +89,22 @@ export class DateCwdReminderInjector {
 	#inject(messages: Message[], reminder: string): Message[] {
 		const firstUser = messages.find((message): message is UserMessage => message.role === "user");
 		if (!firstUser) return messages;
+		// Replay: identical message set, root, reminder and injector state as
+		// the last build — hand back the same array and skip the per-message
+		// work entirely.
+		const memo = this.#memo;
+		if (
+			memo !== undefined &&
+			memo.root === firstUser &&
+			memo.root === this.#root &&
+			memo.reminder === reminder &&
+			memo.reminder === this.#currentReminder &&
+			memo.version === this.#stateVersion &&
+			memo.refs.length === messages.length &&
+			memo.refs.every((message, index) => message === messages[index])
+		) {
+			return memo.output;
+		}
 		if (this.#root !== firstUser) {
 			// A new first user turn: a compaction summary or a different conversation.
 			// Turns kept from the earlier history must keep the reminders they were
@@ -77,8 +117,10 @@ export class DateCwdReminderInjector {
 			this.#controls = this.#controls.filter(control => present.has(control.anchor));
 			this.#root = firstUser;
 			this.#currentReminder = reminder;
+			this.#stateVersion++;
 			if (!this.#injections.has(firstUser) && !messageStartsWithReminder(firstUser, reminder)) {
 				this.#injections.set(firstUser, injectReminder(firstUser, reminder));
+				this.#stateVersion++;
 			}
 		} else if (this.#currentReminder !== reminder) {
 			let newUser: UserMessage | undefined;
@@ -91,6 +133,7 @@ export class DateCwdReminderInjector {
 			}
 			if (newUser) {
 				this.#injections.set(newUser, injectReminder(newUser, reminder));
+				this.#stateVersion++;
 			} else {
 				const anchor = messages.at(-1)!;
 				const control: Message = {
@@ -101,6 +144,7 @@ export class DateCwdReminderInjector {
 				};
 				reminderControls.add(control);
 				this.#controls.push({ anchor, message: control });
+				this.#stateVersion++;
 			}
 			this.#currentReminder = reminder;
 		}
@@ -123,8 +167,25 @@ export class DateCwdReminderInjector {
 				out.push(...controls);
 				changed = true;
 			}
-			this.#seen.add(message);
+			// Only user turns are ever scanned for un-seen ones, so the rest
+			// never needed a WeakSet entry — check before paying the add.
+			if (message.role === "user" && !this.#seen.has(message)) this.#seen.add(message);
 		}
-		return changed ? out : messages;
+		const output = changed ? out : messages;
+		// `refs` snapshots the caller's array by reference; `#root` is the live
+		// root (equals `firstUser` on every path that reaches here) and
+		// `#currentReminder` the reminder this output was built with.
+		const root = this.#root;
+		const currentReminder = this.#currentReminder;
+		if (root !== undefined && currentReminder !== undefined) {
+			this.#memo = {
+				refs: messages.slice(),
+				root,
+				reminder: currentReminder,
+				version: this.#stateVersion,
+				output,
+			};
+		}
+		return output;
 	}
 }
