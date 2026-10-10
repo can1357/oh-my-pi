@@ -193,6 +193,7 @@ interface ComputerElement {
 	press(): Promise<void>;
 	/** Click the element's center with native input. */
 	click(options?: ComputerInputOptions): Promise<void>;
+	/** Off macOS this moves the user's keyboard focus; refused there under the user's `refuse` setting. */
 	focus(): Promise<void>;
 	parent(): Promise<ComputerElement | null>;
 	children(): Promise<ComputerElement[]>;

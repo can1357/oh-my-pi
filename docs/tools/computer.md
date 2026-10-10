@@ -33,7 +33,7 @@ User setup, permissions, safety guidance, examples, and platform limitations: [S
 | `computer.display`   | string  | `active` | Capture the display with the largest focused-window overlap (primary fallback); use `all` or a native display ID explicitly. |
 | `computer.maxWidth`  | number  |   `3840` | Maximum screenshot width.                                                                                                    |
 | `computer.maxHeight` | number  |   `2400` | Maximum screenshot height.                                                                                                   |
-| `computer.backgroundFallback` | enum | `takeover` | When a window input call's background route is unavailable: `takeover` reruns that call once in takeover, returns focus to the user's app and reports it in the run output; `refuse` throws `BackgroundUnavailable` without taking over, and also refuses, before anything is sent, `takeover: true`, `raise()` and AX `raise`, `apps.open(…, { activate: true })`, `control.acquire` and input to the desktop or a display. |
+| `computer.backgroundFallback` | enum | `takeover` | When a window input call's background route is unavailable: `takeover` reruns that call once in takeover, returns focus to the user's app and reports it in the run output; `refuse` throws `BackgroundUnavailable` without taking over, and also refuses, before anything is sent, `takeover: true`, `raise()` and AX `raise`, `apps.open(…, { activate: true })`, `control.acquire`, input to the desktop or a display and, off macOS, `el.focus()`. |
 
 There is no `computer.backend` setting. The native addon selects the platform backend.
 

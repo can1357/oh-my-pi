@@ -2024,6 +2024,12 @@ describe("computer background fallback", () => {
 			override async axClick(_ref: string, opts?: PointerOptions | null): Promise<void> {
 				this.calls.push(`axClick:${opts?.takeover ?? "-"}`);
 			}
+			override async axFocus(ref: string): Promise<void> {
+				this.calls.push(`focus:${ref}`);
+			}
+			override async holdKeys(target: string, _keys: string[], options: NativeHoldOptions): Promise<void> {
+				this.calls.push(`holdKeys:${target}:${options.takeover ?? "-"}`);
+			}
 			override async openApplication(id: string, options?: { activate?: boolean }) {
 				this.calls.push(`open:${id}:${options?.activate ?? "-"}`);
 				return (await this.listApplications())[0]!;
@@ -2090,6 +2096,41 @@ describe("computer background fallback", () => {
 			].join("\n");
 			expect((await run(native, code, "refuse")).ok).toBe(true);
 			expect(native.calls).toEqual(["press:42:-", "press:42:false", "perform:press", "open:test.editor:-"]);
+		});
+
+		it("checks and sends the same option value when a getter changes between reads", async () => {
+			// Each getter answers false on its first read and true afterwards.
+			const flip = "(() => { let reads = 0; return () => reads++ > 0; })()";
+			const code = [
+				`const takeover = ${flip}, activate = ${flip}, held = ${flip}, element = ${flip};`,
+				'await (await desktop.window("42")).press("a", { get takeover() { return takeover(); } });',
+				'await (await desktop.ref("e1")).click({ get takeover() { return element(); } });',
+				'await (await desktop.window("42")).holdKeys(["a"], { duration: 0, get takeover() { return held(); } });',
+				'await desktop.apps.open("test.editor", { get activate() { return activate(); } });',
+			].join("\n");
+			const native = new ForegroundSession();
+			expect((await run(native, code, "refuse")).ok).toBe(true);
+			expect(native.calls).toEqual(["press:42:false", "axClick:false", "holdKeys:42:false", "open:test.editor:false"]);
+		});
+
+		it("refuses focus() off macOS, where it moves keyboard focus, and keeps macOS's background focus", async () => {
+			const elsewhere = new ForegroundSession();
+			const refused = await run(elsewhere, 'await (await desktop.ref("e1")).focus()', "refuse");
+			expect(refused.ok).toBe(false);
+			if (refused.ok) return;
+			expect(refused.error.message).toStartWith("BackgroundUnavailable: focus() would");
+			expect(refused.error.message).toContain("Use setValue(), press() or another AX action");
+			expect(elsewhere.calls).toEqual([]);
+
+			expect((await run(elsewhere, 'await (await desktop.ref("e1")).focus()', "takeover")).ok).toBe(true);
+			expect(elsewhere.calls).toEqual(["focus:e1"]);
+
+			class MacSession extends ForegroundSession {
+				override readonly capabilities = { ...capabilities, backend: "quartz" };
+			}
+			const mac = new MacSession();
+			expect((await run(mac, 'await (await desktop.ref("e1")).focus()', "refuse")).ok).toBe(true);
+			expect(mac.calls).toEqual(["focus:e1"]);
 		});
 
 		it("refuses control.acquire without asking the user", async () => {
