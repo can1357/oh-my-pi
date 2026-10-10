@@ -13,6 +13,135 @@ async function ownedDebuggerTabs(targets, probe) {
   return owned.filter((tabId) => tabId !== undefined);
 }
 
+// extension/safe-navigation.ts
+function parseFragmentedAboutBlank(rawUrl) {
+  if (typeof rawUrl !== "string")
+    return { isFragmented: false, hash: "" };
+  const trimmed = rawUrl.trim();
+  if (/^about:blank#/i.test(trimmed)) {
+    const hashIndex = trimmed.indexOf("#");
+    return { isFragmented: true, hash: hashIndex !== -1 ? trimmed.slice(hashIndex) : "" };
+  }
+  return { isFragmented: false, hash: "" };
+}
+function isAlreadyAboutBlank(url) {
+  if (url === undefined || url === "")
+    return true;
+  const lower = url.trim().toLowerCase();
+  return lower === "about:blank" || lower.startsWith("about:blank#") || lower.startsWith("about:blank?");
+}
+function findFrameInTree(node, targetId) {
+  if (node.frame.id === targetId)
+    return node.frame;
+  if (node.childFrames) {
+    for (const child of node.childFrames) {
+      const found = findFrameInTree(child, targetId);
+      if (found)
+        return found;
+    }
+  }
+  return;
+}
+async function waitForFrameCommit(sendCommand, frameId, expectedLoaderId, maxWaitMs = 2000) {
+  const start = Date.now();
+  while (Date.now() - start < maxWaitMs) {
+    const treeRes = await sendCommand("Page.getFrameTree", {});
+    if (treeRes?.frameTree) {
+      const frame = findFrameInTree(treeRes.frameTree, frameId);
+      if (frame) {
+        const hasBlankUrl = frame.url === "about:blank" || frame.url.startsWith("about:blank#");
+        const hasLoaderId = expectedLoaderId ? frame.loaderId === expectedLoaderId : true;
+        if (hasBlankUrl && hasLoaderId)
+          return;
+      }
+    }
+    const { promise, resolve } = Promise.withResolvers();
+    setTimeout(resolve, 15);
+    await promise;
+  }
+  throw new Error(`Timed out waiting for frame ${frameId} to commit navigation to about:blank`);
+}
+async function evaluateLocationHash(sendCommand, frameId, hash, expectedUrl) {
+  const worldRes = await sendCommand("Page.createIsolatedWorld", {
+    frameId,
+    worldName: "omp-relay-navigation"
+  });
+  const contextId = worldRes?.executionContextId;
+  if (typeof contextId !== "number") {
+    throw new Error("Page.createIsolatedWorld failed to return executionContextId");
+  }
+  const expression = `(() => {
+		const targetHash = ${JSON.stringify(hash)};
+		if (location.hash !== targetHash) {
+			location.hash = targetHash;
+		} else {
+			history.replaceState(null, "", location.href);
+		}
+		return location.href;
+	})()`;
+  const evalRes = await sendCommand("Runtime.evaluate", {
+    expression,
+    contextId,
+    returnByValue: true
+  });
+  if (!evalRes) {
+    throw new Error("Runtime.evaluate returned undefined response");
+  }
+  if (evalRes.exceptionDetails) {
+    const err = evalRes.exceptionDetails.exception?.description ?? evalRes.exceptionDetails.text ?? "Runtime.evaluate failed with exception";
+    throw new Error(err);
+  }
+  const resultingUrl = evalRes.result?.value;
+  if (typeof resultingUrl !== "string") {
+    throw new Error("Runtime.evaluate did not return resulting URL string");
+  }
+  if (expectedUrl && resultingUrl !== expectedUrl) {
+    throw new Error(`Navigation resulted in URL ${resultingUrl}, expected ${expectedUrl}`);
+  }
+  return resultingUrl;
+}
+async function handleSafePageNavigate(sendCommand, params) {
+  const rawUrl = typeof params.url === "string" ? params.url : "";
+  const { isFragmented, hash } = parseFragmentedAboutBlank(rawUrl);
+  if (!isFragmented) {
+    return await sendCommand("Page.navigate", params);
+  }
+  const requestedFrameId = typeof params.frameId === "string" && params.frameId.length > 0 ? params.frameId : undefined;
+  const treeRes = await sendCommand("Page.getFrameTree", {});
+  if (!treeRes?.frameTree) {
+    throw new Error("Page.getFrameTree did not return frameTree");
+  }
+  let targetFrame;
+  if (requestedFrameId) {
+    const found = findFrameInTree(treeRes.frameTree, requestedFrameId);
+    if (!found) {
+      throw new Error(`Frame with id ${requestedFrameId} not found`);
+    }
+    targetFrame = found;
+  } else {
+    targetFrame = treeRes.frameTree.frame;
+  }
+  const targetFrameId = targetFrame.id;
+  const currentUrl = targetFrame.url;
+  if (isAlreadyAboutBlank(currentUrl)) {
+    await evaluateLocationHash(sendCommand, targetFrameId, hash, rawUrl);
+    return { frameId: targetFrameId };
+  }
+  const cleanParams = {
+    ...params,
+    url: "about:blank"
+  };
+  const navRes = await sendCommand("Page.navigate", cleanParams);
+  const frameId = navRes?.frameId ?? targetFrameId;
+  const loaderId = navRes?.loaderId;
+  if (navRes?.errorText) {
+    return { frameId, loaderId, errorText: navRes.errorText };
+  }
+  await waitForFrameCommit(sendCommand, targetFrameId, loaderId);
+  await evaluateLocationHash(sendCommand, targetFrameId, hash, rawUrl);
+  return { frameId, loaderId };
+}
+
 // extension/background.ts
 var DEFAULT_PORT = 9224;
 var PING_INTERVAL_MS = 20000;
@@ -157,11 +286,51 @@ async function runRpc(msg) {
         relayInitiatedDetachTabs.delete(msg.tabId);
         throw error;
       }
-    case "send":
-      return await chrome.debugger.sendCommand(msg.sessionId ? { tabId: msg.tabId, sessionId: msg.sessionId } : { tabId: msg.tabId }, msg.method, msg.params);
+    case "send": {
+      const target = msg.sessionId ? { tabId: msg.tabId, sessionId: msg.sessionId } : { tabId: msg.tabId };
+      if (msg.method === "Page.navigate") {
+        const sendCmd = (method, params) => chrome.debugger.sendCommand(target, method, params);
+        return await handleSafePageNavigate(sendCmd, msg.params ?? {});
+      }
+      return await chrome.debugger.sendCommand(target, msg.method, msg.params);
+    }
     case "createTab": {
-      const tab = await chrome.tabs.create({ url: msg.url });
-      const snap = snapshot(tab);
+      const { isFragmented, hash } = parseFragmentedAboutBlank(msg.url);
+      if (!isFragmented) {
+        const tab2 = await chrome.tabs.create({ url: msg.url });
+        const snap2 = snapshot(tab2);
+        if (!snap2)
+          throw new Error("created tab has no id");
+        return { tab: snap2 };
+      }
+      const tab = await chrome.tabs.create({ url: "about:blank" });
+      if (tab.id === undefined)
+        throw new Error("created tab has no id");
+      const tabId = tab.id;
+      try {
+        await chrome.debugger.attach({ tabId }, "1.3");
+        try {
+          const target = { tabId };
+          const sendCmd = (method, params) => chrome.debugger.sendCommand(target, method, params);
+          const treeRes = await sendCmd("Page.getFrameTree", {});
+          const rootFrame = treeRes?.frameTree?.frame;
+          if (!rootFrame?.id)
+            throw new Error("Created tab has no root frame");
+          await evaluateLocationHash(sendCmd, rootFrame.id, hash, msg.url);
+        } finally {
+          relayInitiatedDetachTabs.add(tabId);
+          try {
+            await chrome.debugger.detach({ tabId });
+          } catch {
+            relayInitiatedDetachTabs.delete(tabId);
+          }
+        }
+      } catch (err) {
+        await chrome.tabs.remove(tabId).catch(() => {});
+        throw err;
+      }
+      const updated = await chrome.tabs.get(tabId);
+      const snap = snapshot(updated);
       if (!snap)
         throw new Error("created tab has no id");
       return { tab: snap };
