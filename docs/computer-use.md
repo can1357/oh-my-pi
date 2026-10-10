@@ -114,6 +114,8 @@ Window input defaults to background routes that do not move the user's pointer o
 
 Applications and window managers can react to background events by changing focus; background support is conditional, not an isolation boundary. macOS contains target self-activation during a bounded observation window. X11 detects focus changes and disables reuse of the affected virtual input pair rather than stealing focus back. A partial-delivery or restoration error means the action may already have happened: inspect its effects before retrying, including with takeover. A successful native enqueue alone does not prove an application acted.
 
+On macOS, background key presses, key-event typing (native text fields take AX insertion instead), held keys, left clicks and menu actions make the target window key only within its own application, which then considers itself active; the user's application stays frontmost and keeps keyboard focus. Keystrokes into an application with several windows are sent once it reports the target as its focused window, and otherwise throw `BackgroundUnavailable`; so does any of these actions on a non-key window of the frontmost application, or on a window whose application comes to the front before the input is sent.
+
 Wayland per-window native input and `raise()` remain unavailable without compositor-specific integration; use AX actions, or desktop input after focusing the target yourself.
 
 `await win.observe({ silent?, all?, maxDepth? })` captures a full screenshot and accessibility tree together. It returns screenshot metadata plus `ax`, `nodeCount`, and `truncated`, and normally emits both image and tree. A failed or canceled observation does not replace the previous delivered click frame.
