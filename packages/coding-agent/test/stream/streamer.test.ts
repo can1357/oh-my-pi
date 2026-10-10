@@ -1,11 +1,13 @@
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, spyOn } from "bun:test";
+import * as nodeFs from "node:fs";
 import * as fs from "node:fs/promises";
 import * as net from "node:net";
 import * as os from "node:os";
 import * as path from "node:path";
 import { STREAM_HISTORY_LIMIT, STREAM_PROTO, type StreamHostFrame, type StreamServerToHost } from "@oh-my-pi/pi-wire";
 import { STREAM_LOCAL_PROTO, type StreamStreamerFrame } from "../../src/stream/protocol";
-import { resolveStreamUrls, StreamMuxHost, type StreamConsoleEvent } from "../../src/stream/streamer";
+import { streamSocketEndpoint } from "../../src/stream/paths";
+import { resolveStreamUrls, runStreamConsole, StreamMuxHost, type StreamConsoleEvent } from "../../src/stream/streamer";
 
 type HostSocketData = Record<string, never>;
 
@@ -257,5 +259,194 @@ describe("StreamMuxHost", () => {
 			{ t: "viewport", pane: 1, rows: [] },
 			{ t: "paused", pane: 1, paused: true },
 		]);
+	});
+
+	it("delivers the bye frame to attached sessions on close", async () => {
+		const projectDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-stream-test-"));
+		projectDirs.push(projectDir);
+		const server = startFakeStreamServer();
+		const host = new StreamMuxHost({
+			projectDir,
+			title: "Bye test",
+			hostUrl: `ws://127.0.0.1:${server.port}/ws/host`,
+			token: () => Promise.resolve("contract-token"),
+			onEvent: () => {},
+			reconnectDelay: () => 10,
+		});
+		hosts.push(host);
+		const endpoint = await host.start();
+		await server.waitForFrame(frame => frame.t === "hello");
+		const session = await connectSession(endpoint);
+		session.send({ t: "hello", proto: STREAM_LOCAL_PROTO, sessionId: "session-1", title: "Pane", cols: 80, rows: 2 });
+		await server.waitForFrame(frame => frame.t === "pane-open");
+
+		await host.close("all done");
+		expect(await session.waitForFrame(frame => frame.t === "bye")).toEqual({ t: "bye", reason: "all done" });
+	});
+
+	it("delivers bye after a backlog the session reads late", async () => {
+		const projectDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-stream-test-"));
+		projectDirs.push(projectDir);
+		const server = startFakeStreamServer();
+		const host = new StreamMuxHost({
+			projectDir,
+			title: "Backlog",
+			hostUrl: `ws://127.0.0.1:${server.port}/ws/host`,
+			token: () => Promise.resolve("contract-token"),
+			onEvent: () => {},
+			reconnectDelay: () => 10,
+		});
+		hosts.push(host);
+		const endpoint = await host.start();
+		await server.waitForFrame(frame => frame.t === "hello");
+		const session = await connectSession(endpoint);
+		session.send({ t: "hello", proto: STREAM_LOCAL_PROTO, sessionId: "session-1", title: "Pane", cols: 80, rows: 2 });
+		await server.waitForFrame(frame => frame.t === "pane-open");
+
+		// Stop reading, then fill the host's send buffer so bye queues behind a backlog.
+		session.socket.pause();
+		const text = "x".repeat(32 * 1024);
+		for (let id = 1; id <= 200; id += 1) {
+			server
+				.hostSocket()
+				?.send(
+					JSON.stringify({ t: "chat", msg: { id, name: "viewer", text, ts: 1 } } satisfies StreamServerToHost),
+				);
+		}
+		await Bun.sleep(200);
+
+		const closing = host.close("late read");
+		await Bun.sleep(100);
+		session.socket.resume();
+		expect(await session.waitForFrame(frame => frame.t === "bye")).toEqual({ t: "bye", reason: "late read" });
+		await closing;
+	});
+
+	it("close() does not hang on a session that stopped reading with a backlog", async () => {
+		const projectDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-stream-test-"));
+		projectDirs.push(projectDir);
+		const server = startFakeStreamServer();
+		const host = new StreamMuxHost({
+			projectDir,
+			title: "Stuck peer",
+			hostUrl: `ws://127.0.0.1:${server.port}/ws/host`,
+			token: () => Promise.resolve("contract-token"),
+			onEvent: () => {},
+			reconnectDelay: () => 10,
+		});
+		hosts.push(host);
+		const endpoint = await host.start();
+		await server.waitForFrame(frame => frame.t === "hello");
+		const session = await connectSession(endpoint);
+		session.send({ t: "hello", proto: STREAM_LOCAL_PROTO, sessionId: "session-1", title: "Pane", cols: 80, rows: 2 });
+		await server.waitForFrame(frame => frame.t === "pane-open");
+		// The peer never consumes anything and never hangs up; unsent bytes stay queued in the host.
+		session.socket.pause();
+		const text = "x".repeat(32 * 1024);
+		for (let id = 1; id <= 200; id += 1) {
+			server
+				.hostSocket()
+				?.send(
+					JSON.stringify({ t: "chat", msg: { id, name: "viewer", text, ts: 1 } } satisfies StreamServerToHost),
+				);
+		}
+		await Bun.sleep(200);
+
+		const started = performance.now();
+		await host.close();
+		expect(performance.now() - started).toBeLessThan(4000);
+	});
+
+	it("ignores session frames that arrive once close() has started", async () => {
+		const projectDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-stream-test-"));
+		projectDirs.push(projectDir);
+		const server = startFakeStreamServer();
+		const events: StreamConsoleEvent[] = [];
+		const host = new StreamMuxHost({
+			projectDir,
+			title: "Late hello",
+			hostUrl: `ws://127.0.0.1:${server.port}/ws/host`,
+			token: () => Promise.resolve("contract-token"),
+			onEvent: event => events.push(event),
+			reconnectDelay: () => 10,
+		});
+		hosts.push(host);
+		const endpoint = await host.start();
+		await server.waitForFrame(frame => frame.t === "hello");
+		const session = await connectSession(endpoint);
+
+		const closing = host.close();
+		session.send({ t: "hello", proto: STREAM_LOCAL_PROTO, sessionId: "late", title: "Late", cols: 80, rows: 2 });
+		await closing;
+
+		expect(events.filter(event => event.t === "pane")).toEqual([]);
+	});
+
+	it.skipIf(process.platform === "win32")("reports a failed cleanup to every close() and wait() caller", async () => {
+		const projectDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-stream-test-"));
+		projectDirs.push(projectDir);
+		const server = startFakeStreamServer();
+		const host = new StreamMuxHost({
+			projectDir,
+			title: "Cleanup fails",
+			hostUrl: `ws://127.0.0.1:${server.port}/ws/host`,
+			token: () => Promise.resolve("contract-token"),
+			onEvent: () => {},
+			reconnectDelay: () => 10,
+		});
+		const endpoint = await host.start();
+		await server.waitForFrame(frame => frame.t === "hello");
+
+		const rm = spyOn(nodeFs.promises, "rm").mockRejectedValueOnce(new Error("cleanup failed"));
+		try {
+			await expect(host.close()).rejects.toThrow("cleanup failed");
+			await expect(host.wait()).rejects.toThrow("cleanup failed");
+			await expect(host.close()).rejects.toThrow("cleanup failed");
+		} finally {
+			rm.mockRestore();
+			await fs.rm(endpoint, { force: true });
+		}
+	});
+
+	it.skipIf(process.platform === "win32")("reports a failed cleanup once when the console is stopped", async () => {
+		const projectDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-stream-test-"));
+		projectDirs.push(projectDir);
+		const server = startFakeStreamServer();
+		const before = new Set(process.listeners("SIGINT"));
+		const beforeTerm = new Set(process.listeners("SIGTERM"));
+		const unhandled: unknown[] = [];
+		const onUnhandled = (reason: unknown): void => {
+			unhandled.push(reason);
+		};
+		process.on("unhandledRejection", onUnhandled);
+		const rm = spyOn(nodeFs.promises, "rm").mockRejectedValue(new Error("cleanup failed"));
+		try {
+			const running = runStreamConsole({
+				projectDir,
+				title: "Console stop",
+				hostUrl: `ws://127.0.0.1:${server.port}/ws/host`,
+				token: () => Promise.resolve("contract-token"),
+				reconnectDelay: () => 10,
+				noTui: true,
+			});
+			await server.waitForFrame(frame => frame.t === "hello");
+			// The console's SIGINT handler; emitting the signal itself would also reach the test runner.
+			const stop = process.listeners("SIGINT").find(listener => !before.has(listener));
+			if (!stop) throw new Error("expected the console to install a SIGINT handler");
+			stop("SIGINT");
+
+			await expect(running).rejects.toThrow("cleanup failed");
+			await Bun.sleep(50);
+			expect(unhandled).toEqual([]);
+		} finally {
+			rm.mockRestore();
+			process.off("unhandledRejection", onUnhandled);
+			// Calling the handler directly leaves the once() registrations behind.
+			for (const listener of process.listeners("SIGINT")) if (!before.has(listener)) process.off("SIGINT", listener);
+			for (const listener of process.listeners("SIGTERM")) {
+				if (!beforeTerm.has(listener)) process.off("SIGTERM", listener);
+			}
+			await fs.rm(await streamSocketEndpoint(projectDir), { force: true });
+		}
 	});
 });

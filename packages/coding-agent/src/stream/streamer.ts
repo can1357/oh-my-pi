@@ -95,6 +95,9 @@ export function resolveStreamUrls(baseUrl: string): StreamUrls {
 	return { hostUrl: `${socketBase}${STREAM_ROUTES.host}` };
 }
 
+/** How long close() waits for a peer to read the bye frame and hang up before destroying its socket. */
+const CLOSE_GRACE_MS = 1000;
+
 /** Local session multiplexer and materialized-state owner for one live channel. */
 export class StreamMuxHost {
 	readonly #options: StreamMuxHostOptions;
@@ -123,7 +126,8 @@ export class StreamMuxHost {
 			token: options.token,
 			replay: () => this.#replayFrames(),
 			onFrame: frame => this.#handleServerFrame(frame),
-			onFatal: error => void this.#handleFatal(error),
+			// A failed close() is reported through wait(); this caller only starts the shutdown.
+			onFatal: error => void this.#handleFatal(error).catch(() => {}),
 			onDisconnect: delayMs =>
 				this.#onEvent({
 					t: "link",
@@ -132,6 +136,7 @@ export class StreamMuxHost {
 				}),
 			reconnectDelay: options.reconnectDelay,
 		});
+		this.#finished.promise.catch(() => {});
 	}
 
 	async start(): Promise<string> {
@@ -195,30 +200,50 @@ export class StreamMuxHost {
 	}
 
 	async close(reason = "stream ended", exitCode = 0): Promise<void> {
-		if (this.#closing) return;
+		if (this.#closing) {
+			await this.#finished.promise;
+			return;
+		}
 		this.#closing = true;
 		process.off("exit", this.#removeSocketSync);
-		const bye: StreamStreamerFrame = { t: "bye", reason };
-		for (const connection of this.#connections) {
-			connection.socket.end(encodeStreamFrame(bye));
-			connection.socket.destroySoon();
-		}
-		this.#connections.clear();
-		this.#panes.clear();
-		this.#client.close();
-		this.#onEvent({ t: "link", state: "stopped", detail: reason });
+		try {
+			const byeLine = encodeStreamFrame({ t: "bye", reason });
+			const connections = [...this.#connections];
+			this.#connections.clear();
+			this.#panes.clear();
+			this.#client.close();
+			this.#onEvent({ t: "link", state: "stopped", detail: reason });
 
-		const server = this.#server;
-		this.#server = undefined;
-		if (server) {
-			const closed = Promise.withResolvers<void>();
-			server.close(() => closed.resolve());
-			await closed.promise;
+			const server = this.#server;
+			this.#server = undefined;
+			// end() flushes the bye frame before FIN, so peers that are reading see a
+			// clean shutdown (destroy() right after end() can drop unsent bytes). A peer
+			// that is gone or not reading would keep server.close() pending forever, so
+			// each socket is destroyed once CLOSE_GRACE_MS passes without it closing.
+			for (const connection of connections) {
+				const { socket } = connection;
+				if (socket.destroyed) continue;
+				if (server) {
+					socket.end(byeLine);
+					const timer = setTimeout(() => socket.destroy(), CLOSE_GRACE_MS);
+					socket.once("close", () => clearTimeout(timer));
+				} else {
+					socket.destroy();
+				}
+			}
+			if (server) {
+				const closed = Promise.withResolvers<void>();
+				server.close(() => closed.resolve());
+				await closed.promise;
+			}
+			if (process.platform !== "win32" && this.#endpoint) {
+				await fs.promises.rm(this.#endpoint, { force: true });
+			}
+			this.#finished.resolve(exitCode);
+		} catch (error) {
+			this.#finished.reject(error);
+			throw error;
 		}
-		if (process.platform !== "win32" && this.#endpoint) {
-			await fs.promises.rm(this.#endpoint, { force: true });
-		}
-		this.#finished.resolve(exitCode);
 	}
 
 	readonly #removeSocketSync = (): void => {
@@ -241,7 +266,7 @@ export class StreamMuxHost {
 	}
 
 	#consume(connection: LocalConnection, chunk: Buffer): void {
-		if (connection.socket.destroyed) return;
+		if (this.#closing || connection.socket.destroyed) return;
 		if (!connection.lines.push(chunk, line => this.#handleLocalLine(connection, line))) connection.socket.destroy();
 	}
 
@@ -327,7 +352,8 @@ export class StreamMuxHost {
 				if (frame.proto !== STREAM_PROTO) {
 					const message = `stream protocol mismatch (server ${frame.proto}, client ${STREAM_PROTO})`;
 					this.#onEvent({ t: "error", message });
-					void this.close(message, 1);
+					// A failed close() is reported through wait(); this caller only starts the shutdown.
+					void this.close(message, 1).catch(() => {});
 					return;
 				}
 				this.#channel = frame.channel;
@@ -429,7 +455,8 @@ export async function runStreamConsole(options: StreamConsoleOptions): Promise<n
 	await host.start();
 
 	const stop = (): void => {
-		void host.close("stream stopped");
+		// A failed close() is reported through wait(); this caller only starts the shutdown.
+		void host.close("stream stopped").catch(() => {});
 	};
 	process.once("SIGINT", stop);
 	process.once("SIGTERM", stop);
