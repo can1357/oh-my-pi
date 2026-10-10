@@ -457,6 +457,8 @@ describe("Claude saved-reset trigger integration", () => {
 			report: null,
 			status: claudeStatus(true),
 			streamErrorFirst: true,
+			// Only the restore may spend; salvage would spend the session's expiring reset anyway.
+			salvageHorizonHours: 0,
 		});
 		const pool = await poolToSessionAccount(session, 6 * 24 * HOUR);
 		mockSchedulerWaitWithClock();
@@ -594,6 +596,43 @@ describe("Claude saved-reset trigger integration", () => {
 		expect(spent).toEqual([pool.pooledId]);
 		for (const { session, modelCalls } of [open, pooled]) {
 			expect(modelCalls()).toBe(2);
+			expect(session.agent.state.messages.at(-1)).toMatchObject({ role: "assistant", stopReason: "stop" });
+		}
+	});
+
+	it("restores a pooled session's own account when the pass it joined restored a longer-blocked one outside its pool", async () => {
+		// No salvage: the shared account's expiring reset would otherwise be spent in the same pass.
+		const openQuota = { restored: false };
+		const pooledQuota = { restored: false };
+		const open = buildSession({
+			report: null,
+			status: claudeStatus(true),
+			streamErrorFirst: true,
+			salvageHorizonHours: 0,
+			quota: openQuota,
+		});
+		const pooled = buildSession({
+			report: null,
+			status: claudeStatus(true),
+			streamErrorFirst: true,
+			salvageHorizonHours: 0,
+			quota: pooledQuota,
+			coordinator: open.coordinator,
+		});
+		const pool = await poolToSessionAccount(pooled.session, 6 * 24 * HOUR);
+		const spent = recordSpends(credentialId => (credentialId === pool.pooledId ? pooledQuota : openQuota));
+		mockSchedulerWaitWithClock();
+
+		try {
+			await promptJoined(open.session, pooled.session, open.coordinator);
+		} finally {
+			await pool.release();
+		}
+
+		// The pooled session never retries its still-blocked account on the peer's restore.
+		expect(spent).toEqual([pool.outsideId, pool.pooledId]);
+		expect(pooled.modelCalls()).toBe(2);
+		for (const { session } of [open, pooled]) {
 			expect(session.agent.state.messages.at(-1)).toMatchObject({ role: "assistant", stopReason: "stop" });
 		}
 	});
