@@ -681,8 +681,10 @@ fn verify_text_value(
 /// `555-789-0123` as `(555) 789-0123` wrapped in directional marks. So a
 /// written phone number (at least seven digits, an optional `+`, and spaces,
 /// parentheses or hyphens) also matches a stored value with the same digits and
-/// `+` regrouped that way. Anything else must match exactly: other punctuation,
-/// or a leading `-`, can change a number's sign or scale.
+/// `+` regrouped that way. Anything else must match exactly: other punctuation
+/// can change a number's scale, and a `-` before the first digit or a `-` or
+/// `)` after the last (`-1234567`, `(-1234567)`, `1234567-`, `(1234567)`) its
+/// sign.
 fn same_phone_number(actual: &str, expected: &str) -> bool {
 	if actual == expected {
 		return true;
@@ -704,10 +706,16 @@ fn phone_symbols(text: &str) -> Option<impl Iterator<Item = char> + '_> {
 			|| matches!(ch, '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
 	};
 	let separator = move |ch: char| mark(ch) || matches!(ch, '(' | ')' | '-');
-	let phone = text
-		.chars()
-		.all(|ch| ch.is_ascii_digit() || ch == '+' || separator(ch))
-		&& text.chars().find(|&ch| !mark(ch)) != Some('-');
+	let (Some(first), Some(last)) =
+		(text.find(|ch: char| ch.is_ascii_digit()), text.rfind(|ch: char| ch.is_ascii_digit()))
+	else {
+		return None;
+	};
+	let signed = text[..first].contains('-') || text[last..].contains(['-', ')']);
+	let phone = !signed
+		&& text
+			.chars()
+			.all(|ch| ch.is_ascii_digit() || ch == '+' || separator(ch));
 	phone.then(|| text.chars().filter(move |&ch| !separator(ch)))
 }
 
@@ -1316,18 +1324,21 @@ mod tests {
 		assert!(!same_phone_number("", "555-789-0123"), "cleared");
 		assert!(!same_phone_number("5557890123", "+1 555 789 0123"), "country code dropped");
 		for (actual, expected) in [
-			("100", "-100"),
+			("1234567", "-1234567"),
 			("-1234567", "1234567"),
-			("10.00", "1000"),
-			("1,234", "1.234"),
-			("1,000", "1000"),
-			("15", "1.5"),
+			("1234567", "(-1234567)"),
+			("(-1234567)", "1234567"),
+			("1234567", "(1234567)"),
+			("(1234567)", "1234567"),
+			("1234567", "1234567-"),
+			("1234567-", "1234567"),
+			("1234567", "1234.567"),
+			("12345.67", "1234567"),
+			("1,234,567", "1234567"),
+			("1234567", "1.234.567"),
 			("555.789.0123", "555-789-0123"),
-			("cafe", "cafe\u{301}"),
-			("hello", "hello😀"),
-			("alert", "alert!"),
-			("abc", "\u{200b}abc"),
-			("senior developer", "Senior Developer"),
+			("5557890123x", "5557890123"),
+			("555\u{200b}7890123", "5557890123"),
 		] {
 			assert!(!same_phone_number(actual, expected), "{actual:?} confirmed {expected:?}");
 		}
