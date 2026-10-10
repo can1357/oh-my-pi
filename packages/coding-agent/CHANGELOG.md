@@ -63,6 +63,10 @@
 - Fixed browser tab recordings and video frame/contact-sheet extraction creating `omp-browser-recording-*` and `omp-video-*` scratch directories in your working directory instead of the system temp directory.
 - Fixed edit snapshots retaining excess history when metadata or displayed-line provenance grows; the 64 MiB snapshot budget now counts UTF-8 bytes, so CJK- and emoji-heavy files keep fewer versions ([#14975](https://github.com/can1357/oh-my-pi/pull/14975) by [@iliaal](https://github.com/iliaal)).
 
+### Fixed
+
+- Workpools now settle rejected batches and remain usable after background-job admission fails. ([#12286](https://github.com/can1357/oh-my-pi/pull/12286) by [@iliaal](https://github.com/iliaal))
+
 ## [18.8.6] - 2026-10-08
 
 ### Added
