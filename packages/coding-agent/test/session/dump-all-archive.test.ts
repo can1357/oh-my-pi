@@ -14,6 +14,7 @@ import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { readArchiveEntries } from "@oh-my-pi/pi-utils/ar";
+import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import { createInMemoryAuthStorage } from "../helpers/agent-session-setup";
 
 function subagentJsonl(id: string, userText: string | null): string {
@@ -46,18 +47,17 @@ describe("AgentSession.dumpSessionArchiveToTmpDir", () => {
 	let session: AgentSession;
 	const archives: string[] = [];
 
-	beforeEach(() => {
-		tempDir = TempDir.createSync("@omp-dump-all-");
+	function createSession(prompt: string): AgentSession {
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!model) throw new Error("Expected bundled anthropic model");
 		const authStorage = createInMemoryAuthStorage();
-		session = new AgentSession({
+		return new AgentSession({
 			agent: new Agent({
 				initialState: {
 					model,
 					systemPrompt: ["Test"],
 					tools: [],
-					messages: [{ role: "user", content: "main prompt", timestamp: 1 }],
+					messages: [{ role: "user", content: prompt, timestamp: 1 }],
 				},
 			}),
 			sessionManager: SessionManager.create(tempDir.path(), tempDir.path()),
@@ -65,6 +65,11 @@ describe("AgentSession.dumpSessionArchiveToTmpDir", () => {
 			modelRegistry: new ModelRegistry(authStorage),
 			advisorTools: [],
 		});
+	}
+
+	beforeEach(() => {
+		tempDir = TempDir.createSync("@omp-dump-all-");
+		session = createSession("main prompt");
 	});
 
 	afterEach(async () => {
@@ -101,6 +106,87 @@ describe("AgentSession.dumpSessionArchiveToTmpDir", () => {
 		expect(text("subagents/Scout.md")).not.toContain("helper task");
 		expect(text("subagents/Scout/Helper.md")).toContain("helper task");
 		expect(JSON.parse(text("llm-request.json")).messages).toHaveLength(1);
+	});
+
+	it("includes a live subagent's unpersisted in-flight turn and pending tools", async () => {
+		const sessionFile = session.sessionManager.getSessionFile();
+		if (!sessionFile) throw new Error("Expected a persistent session file");
+		const subDir = sessionFile.slice(0, -".jsonl".length);
+		const scoutFile = path.join(subDir, "Scout.jsonl");
+		const workerFile = path.join(subDir, "Worker.jsonl");
+		await Bun.write(scoutFile, subagentJsonl("scout", "scout task"));
+		await Bun.write(workerFile, subagentJsonl("worker", "worker task"));
+
+		const scout = createSession("scout task");
+		const startedAt = Date.now() - 90_000;
+		scout.agent.state.isStreaming = true;
+		scout.agent.state.streamMessage = {
+			role: "assistant",
+			content: [{ type: "thinking", thinking: "Mentally compiling block.rs" }],
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: "claude-sonnet-4-5",
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "stop",
+			timestamp: startedAt,
+		};
+		const worker = createSession("worker task");
+		worker.agent.state.isStreaming = true;
+		worker.agent.state.messages.push({
+			role: "assistant",
+			content: [{ type: "toolCall", id: "call-1", name: "bash", arguments: { command: "cargo build" } }],
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: "claude-sonnet-4-5",
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "toolUse",
+			timestamp: startedAt,
+		});
+		worker.agent.state.pendingToolCalls.add("call-1");
+
+		const registry = AgentRegistry.global();
+		registry.register({ id: "Scout", displayName: "Scout", kind: "sub", session: scout, sessionFile: scoutFile });
+		registry.register({ id: "Worker", displayName: "Worker", kind: "sub", session: worker, sessionFile: workerFile });
+		try {
+			const archive = await session.dumpSessionArchiveToTmpDir();
+			if (!archive) throw new Error("Expected an archive");
+			archives.push(archive.path);
+			const entries = await readArchiveEntries({ bytes: await Bun.file(archive.path).bytes(), format: "zip" });
+			const scoutText = new TextDecoder().decode(entries.get("subagents/Scout.md"));
+			const workerText = new TextDecoder().decode(entries.get("subagents/Worker.md"));
+
+			expect(scoutText).toContain("Live: running, request in flight");
+			expect(scoutText).toContain(
+				`## Assistant (in flight, not persisted) · started ${new Date(startedAt).toISOString()}`,
+			);
+			expect(scoutText).toContain("Mentally compiling block.rs");
+			expect(workerText).toContain("Pending tool calls: bash (call-1)");
+			// A running tool is not a stalled model request, even though the agent turn is busy.
+			expect(workerText).toContain("Live: running, running tools");
+			expect(workerText).not.toContain("request in flight");
+			expect(workerText).not.toContain("in flight, not persisted");
+		} finally {
+			registry.unregister("Scout");
+			registry.unregister("Worker");
+			scout.agent.state.isStreaming = false;
+			worker.agent.state.isStreaming = false;
+			await scout.dispose();
+			await worker.dispose();
+		}
 	});
 
 	it("writes anonymized JSONL for the session and each subagent, mapping agent ids consistently", async () => {
