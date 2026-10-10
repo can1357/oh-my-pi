@@ -389,6 +389,11 @@
 - Fixed `omp://` documentation links so they open the corresponding files in source checkouts.
 - Fixed bare model IDs in `models.yml` incorrectly resolving to auto-discovered Ollama, llama.cpp, or LM Studio providers.
 - Added warnings when configured Ollama, llama.cpp, or LM Studio endpoints cannot be reached, identifying the relevant environment variable.
+- `omp auth-gateway serve` now accepts OpenRouter routing-variant selectors such as `openrouter/<model>:floor` or `:nitro`, matching `--model`, instead of returning "Unknown model".
+- Fixed `computer` helpers given a missing or non-string text argument (`setValue`, `type`, `press`, `perform`, `ref`, `apps.open`, `clipboard.write`) failing with a native conversion error that named neither the helper nor the argument; they now say which, before any native call ([#15309](https://github.com/can1357/oh-my-pi/pull/15309) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed `/tan` forks that reset inherited spend still showing the parent's subagent costs: billing inside inherited task results is now cleared too, while token counts are kept ([#15039](https://github.com/can1357/oh-my-pi/pull/15039) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy))
+- Fixed `omp://` documentation links in chat, read cards and grep headers doing nothing when clicked in a source checkout; they now open the matching file under `docs/` ([#15086](https://github.com/can1357/oh-my-pi/pull/15086) by [@danzaio](https://github.com/danzaio))
+- Fixed the JTD-to-JSON-Schema converter emitting `$ref`s that cannot resolve: ref names are now escaped per JSON Pointer (`~` and `/`), and the JTD root `definitions` map is mapped to `$defs` so `#/$defs/` refs have a target ([#14826](https://github.com/can1357/oh-my-pi/pull/14826) by [@jchanghong023](https://github.com/jchanghong023)).
 
 ## [18.9.1] - 2026-10-11
 
@@ -675,8 +680,6 @@
 - Added account pools for task agents, allowing an agent and its related work—including advisors, title generation, subagents, and resumed sessions—to use only specified OAuth accounts and fail rather than fall back to another account or an API key.
 - Added `omp usage accounts` to list OAuth account provider and identity keys without exposing tokens, making account-pool configuration easier.
 
-- Fixed `ask` questions in Tern covering the end of the transcript with a sheet that blocked scrolling, hiding the explanation the question was about; the question now sits in the composer's place, framed like the composer, below a transcript you can read and scroll while deciding ([#14812](https://github.com/can1357/oh-my-pi/pull/14812) by [@H4vC](https://github.com/H4vC))
-- Fixed the JTD-to-JSON-Schema converter emitting `$ref`s that cannot resolve: ref names are now escaped per JSON Pointer (`~` and `/`), and the JTD root `definitions` map is mapped to `$defs` so `#/$defs/` refs have a target ([#14826](https://github.com/can1357/oh-my-pi/pull/14826) by [@jchanghong023](https://github.com/jchanghong023)).
 ### Changed
 
 - Generated session titles now include their card icon and short code, so the `/resume` picker and session listings show this context; `title.icons` applies to newly generated titles.
