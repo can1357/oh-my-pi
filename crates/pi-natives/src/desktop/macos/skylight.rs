@@ -703,6 +703,40 @@ pub(super) fn window_parent(wid: u32) -> Option<u32> {
 	None
 }
 
+type SLSConnectionGetPIDFn = unsafe extern "C" fn(u32, *mut pid_t) -> i32;
+
+#[derive(Clone, Copy)]
+struct WindowOwnerSpi {
+	connection: CGSMainConnectionIDFn,
+	owner:      SLSGetWindowOwnerFn,
+	pid:        SLSConnectionGetPIDFn,
+}
+
+static WINDOW_OWNER: LazyLock<Option<WindowOwnerSpi>> = LazyLock::new(|| {
+	ensure_skylight_loaded()?;
+	Some(WindowOwnerSpi {
+		connection: symbol(c"CGSMainConnectionID")?,
+		owner:      symbol(c"SLSGetWindowOwner")?,
+		pid:        symbol(c"SLSConnectionGetPID")?,
+	})
+});
+
+/// The process that owns window `wid` in `WindowServer`, including the
+/// windows a remote-view service keeps off the window list, such as the one
+/// `openAndSavePanelService` draws an application's Open panel in.
+pub(super) fn window_owner_pid(wid: u32) -> Option<pid_t> {
+	let spi = WINDOW_OWNER.as_ref()?;
+	let mut owner = 0u32;
+	// SAFETY: The connection query takes no arguments, and `owner` is writable
+	// for the exact window-owner signature.
+	if unsafe { (spi.owner)((spi.connection)(), wid, &mut owner) } != 0 || owner == 0 {
+		return None;
+	}
+	let mut pid: pid_t = 0;
+	// SAFETY: `pid` is writable for the exact connection-pid signature.
+	(unsafe { (spi.pid)(owner, &mut pid) } == 0 && pid > 0).then_some(pid)
+}
+
 /// Takes ownership of a create-rule `CFType` pointer, which may be null.
 fn retained(pointer: *mut CFType) -> Option<CFRetained<CFType>> {
 	// SAFETY: Every caller passes the +1 result of a copy or create call.

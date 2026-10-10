@@ -120,6 +120,8 @@ On macOS, background key presses, key-event typing (native text fields take AX i
 
 When keyboard focus sits in an overlay window attached to the target, such as Finder's inline rename field or a popover, background keys post only the activation, without the press that makes the target key, which would end that editing and send the keys elsewhere.
 
+A system Open or Save panel, and the Go to Folder sheet it opens, is a window of the app that showed it, but `openAndSavePanelService` draws its content and takes its input; keys and clicks posted to the app are dropped. On macOS, background keys, typing, clicks and scrolls for such a window go to that service once it reports focus in the panel, and throw `BackgroundUnavailable`, with nothing sent, while it does not.
+
 A macOS background shortcut with a modifier throws `InputFailed` when its application stops answering accessibility requests right after it: the shortcut was sent, but whether it took effect is unknown. Inspect the application before retrying.
 
 Wayland per-window native input and `raise()` remain unavailable without compositor-specific integration; use AX actions, or desktop input after focusing the target yourself.

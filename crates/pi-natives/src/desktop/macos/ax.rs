@@ -127,6 +127,10 @@ pub(super) struct KeyFocus {
 	/// a field in a sheet maps to the sheet, not to the window it is attached
 	/// to.
 	pub(super) element_window: Option<u32>,
+	/// Whether that id is the focused element's own, not an ancestor's. The
+	/// fields of an Open panel's Go to Folder sheet map to no window: another
+	/// process draws them.
+	pub(super) element_mapped: bool,
 }
 
 /// Where keystrokes posted for window `wid` would go now.
@@ -197,6 +201,12 @@ impl KeyFocus {
 		let overlay = self.element_window.filter(|&id| id != wid);
 		reported && overlay.is_some_and(|id| parent_of(id) == Some(wid))
 	}
+
+	/// Whether the focused element itself maps to window `wid`, which proves
+	/// that `wid`'s own process holds the focus there.
+	pub(super) fn element_maps_to(&self, wid: u32) -> bool {
+		self.element_mapped && self.element_window == Some(wid)
+	}
 }
 
 /// Reads where `pid` sends keystrokes; every part it cannot read is `None`.
@@ -209,22 +219,88 @@ fn read_key_focus(app: &AXUIElement) -> (KeyFocus, Option<CFRetained<AXUIElement
 		window_id(&window).map_or(FocusedWindow::Unmapped, FocusedWindow::Id)
 	});
 	let element = copy_element(app, "AXFocusedUIElement");
-	let focus =
-		KeyFocus { window, element_window: element.as_deref().and_then(innermost_window_id) };
-	(focus, element)
+	let (element_window, element_mapped) = element
+		.as_deref()
+		.and_then(innermost_window_id)
+		.map_or((None, false), |(id, own)| (Some(id), own));
+	(KeyFocus { window, element_window, element_mapped }, element)
 }
 
 /// The first window id `_AXUIElementGetWindow` maps on `element` or, through
-/// a bounded `AXParent` ascent, its nearest ancestor.
-fn innermost_window_id(element: &AXUIElement) -> Option<u32> {
+/// a bounded `AXParent` ascent, its nearest ancestor, and whether it is the
+/// element's own.
+fn innermost_window_id(element: &AXUIElement) -> Option<(u32, bool)> {
 	let mut current = element.retain();
-	for _ in 0..MAX_ANCESTRY_DEPTH {
+	for depth in 0..MAX_ANCESTRY_DEPTH {
 		if let Some(id) = window_id(&current) {
-			return Some(id);
+			return Some((id, depth == 0));
 		}
 		current = copy_element(&current, "AXParent")?;
 	}
 	None
+}
+
+/// Which process draws a window's content.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum WindowContent {
+	/// The window's own process, or nothing shows another one.
+	Own,
+	/// Another process: the window is a remote view of `window`, a window of
+	/// process `pid` that `WindowServer` keeps off its window list. System
+	/// Open and Save panels, and the sheets they open, are drawn this way by
+	/// `openAndSavePanelService`.
+	Remote { pid: libc::pid_t, window: u32 },
+}
+
+/// Who draws window `wid` of process `pid`, from the window ids its
+/// accessibility children map to (`None` for a child that maps to none) and
+/// `owner_of`, which reads a window's `WindowServer` owner.
+///
+/// A remote view's elements report the host's pid, but `_AXUIElementGetWindow`
+/// maps them to the drawing process's own window. The content counts as
+/// remote only while no child maps to a window of `pid`, so a window that
+/// embeds a remote view among controls of its own stays the host's.
+fn content_owner(
+	pid: libc::pid_t,
+	wid: u32,
+	children: impl IntoIterator<Item = Option<u32>>,
+	owner_of: impl Fn(u32) -> Option<libc::pid_t>,
+) -> WindowContent {
+	let mut remote = None;
+	for id in children.into_iter().flatten() {
+		if id == wid {
+			return WindowContent::Own;
+		}
+		if matches!(remote, Some(WindowContent::Remote { window, .. }) if window == id) {
+			continue;
+		}
+		match owner_of(id) {
+			Some(owner) if owner != pid => {
+				remote.get_or_insert(WindowContent::Remote { pid: owner, window: id });
+			},
+			_ => return WindowContent::Own,
+		}
+	}
+	remote.unwrap_or(WindowContent::Own)
+}
+
+/// Who draws `pid`'s focused window when that is `wid`; [`WindowContent::Own`]
+/// when it is another window or nothing can be read.
+pub(super) fn focused_window_content(pid: libc::pid_t, wid: u32) -> WindowContent {
+	let Some(window) = probe_application(pid).and_then(|app| copy_element(&app, "AXFocusedWindow"))
+	else {
+		return WindowContent::Own;
+	};
+	if window_id(&window) != Some(wid) {
+		return WindowContent::Own;
+	}
+	let children = copy_elements_optional(&window, "AXChildren").unwrap_or_default();
+	content_owner(
+		pid,
+		wid,
+		children.iter().map(|child| window_id(child)),
+		skylight::window_owner_pid,
+	)
 }
 
 /// The window that should regain key status when `pid` is handed keyboard
@@ -1249,8 +1325,8 @@ mod tests {
 	use objc2_core_foundation::CFNumber;
 
 	use super::{
-		AttachedCandidate, AxWindowRecord, FocusedWindow, KeyDestination, KeyFocus,
-		create_system_wide, replace_utf16_selection, select_attached, stringify_value,
+		AttachedCandidate, AxWindowRecord, FocusedWindow, KeyDestination, KeyFocus, WindowContent,
+		content_owner, create_system_wide, replace_utf16_selection, select_attached, stringify_value,
 		window_records_of,
 	};
 
@@ -1320,8 +1396,11 @@ mod tests {
 	fn a_focused_sheet_is_not_the_window_it_is_attached_to() {
 		// Finder's Go to Folder sheet 41740 on window 41732: its path field
 		// reports 41732 as its AXWindow but lives in the sheet's own window.
-		let focus =
-			KeyFocus { window: FocusedWindow::Id(41740), element_window: Some(41740) };
+		let focus = KeyFocus {
+			window:         FocusedWindow::Id(41740),
+			element_window: Some(41740),
+			element_mapped: true,
+		};
 		let attached = |id| (id == 41740).then_some(41732);
 		assert_eq!(focus.destination(7, 41732, attached), KeyDestination::Other(Some(41740)));
 		assert!(!focus.holds_text_for(7, 41732, attached));
@@ -1333,8 +1412,11 @@ mod tests {
 	fn an_editor_overlay_attached_to_the_target_holds_its_focus() {
 		// Finder's inline rename field is overlay window 41743, attached to
 		// window 41732; while it has focus Finder reports no focused window.
-		let focus =
-			KeyFocus { window: FocusedWindow::Unreported, element_window: Some(41743) };
+		let focus = KeyFocus {
+			window:         FocusedWindow::Unreported,
+			element_window: Some(41743),
+			element_mapped: true,
+		};
 		let attached = |id| (id == 41743).then_some(41732);
 		assert_eq!(focus.destination(7, 41732, attached), KeyDestination::Target(7));
 		assert!(focus.holds_text_for(7, 41732, attached));
@@ -1345,9 +1427,43 @@ mod tests {
 		assert!(!focus.in_overlay_of(35240, attached));
 		// A popover attached to its focused window (Reminders' details popover
 		// is window 90 on window 79) is an overlay too; the window itself is not.
-		let popover = KeyFocus { window: FocusedWindow::Id(79), element_window: Some(90) };
+		let popover = KeyFocus {
+			window:         FocusedWindow::Id(79),
+			element_window: Some(90),
+			element_mapped: true,
+		};
 		assert!(popover.in_overlay_of(79, |id| (id == 90).then_some(79)));
-		let window = KeyFocus { window: FocusedWindow::Id(79), element_window: Some(79) };
+		let window = KeyFocus {
+			window:         FocusedWindow::Id(79),
+			element_window: Some(79),
+			element_mapped: true,
+		};
 		assert!(!window.in_overlay_of(79, |_| None));
+	}
+
+	#[test]
+	fn a_system_panel_is_drawn_by_the_process_its_children_map_to() {
+		// TextEdit (pid 7581) shows its Open panel as window 554, whose one
+		// child maps to window 556 of openAndSavePanelService (pid 7592). Its
+		// Go to Folder sheet 561 has three children that map to no window and
+		// one in the service's window 559.
+		let owners = |id| match id {
+			556 | 559 => Some(7592),
+			543 | 554 | 561 => Some(7581),
+			_ => None,
+		};
+		let remote = |window| WindowContent::Remote { pid: 7592, window };
+		assert_eq!(content_owner(7581, 554, [Some(556)], owners), remote(556));
+		assert_eq!(content_owner(7581, 561, [None, None, None, Some(559)], owners), remote(559));
+		// A document window's children map to the window itself.
+		assert_eq!(content_owner(7581, 543, [Some(543), Some(543)], owners), WindowContent::Own);
+		// A remote view embedded beside the window's own controls is not the
+		// window's content.
+		assert_eq!(content_owner(7581, 543, [Some(556), Some(543)], owners), WindowContent::Own);
+		// A child in another window of the same process, an owner that cannot
+		// be read, or no mapped child at all shows no other process.
+		assert_eq!(content_owner(7581, 561, [Some(554), Some(559)], owners), WindowContent::Own);
+		assert_eq!(content_owner(7581, 554, [Some(999)], owners), WindowContent::Own);
+		assert_eq!(content_owner(7581, 554, [None, None], owners), WindowContent::Own);
 	}
 }
