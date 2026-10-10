@@ -317,6 +317,30 @@ describe("planClaudeResetRedemptions: blocked recovery", () => {
 			reason: "outside-account-pool",
 		});
 	});
+
+	it("never restores an account outside the session's account pool when its own account holds only the reserve", () => {
+		const excluded = status({
+			credentialId: 22,
+			orgId: "org-b",
+			active: false,
+			availableCount: 2,
+			credit: { id: "cedar-2", expiresAt: new Date(NOW + 20 * 24 * HOUR).toISOString() },
+		});
+		const plan = planClaudeResetRedemptions(
+			input({
+				settings: { enabled: true, minBlockedMinutes: 60, keepCredits: 1, salvageHorizonMs: 12 * HOUR },
+				reports: [report(), report({ orgId: "org-b" })],
+				statuses: [status(), excluded],
+				permitsCredential: credentialId => credentialId === 11,
+			}),
+		);
+		expect(plan.actions).toEqual([]);
+		expect(plan.skipped).toContainEqual({
+			accountKey: "anthropic|org-b|22",
+			rule: "blocked-account",
+			reason: "outside-account-pool",
+		});
+	});
 });
 
 describe("planClaudeResetRedemptions: expiry salvage", () => {
