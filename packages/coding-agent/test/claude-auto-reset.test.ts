@@ -102,6 +102,7 @@ function input(overrides: Partial<ClaudeResetPlanInput> = {}): ClaudeResetPlanIn
 		provider: "anthropic",
 		modelId: "claude-sonnet-4-6",
 		settings: { enabled: true, minBlockedMinutes: 60, keepCredits: 0, salvageHorizonMs: 12 * HOUR },
+		accountPolicy: () => undefined,
 		reports: [report()],
 		statuses: [status()],
 		attemptedKeys: new Set(),
@@ -569,5 +570,60 @@ describe("planClaudeResetRedemptions: expiry salvage", () => {
 		expect(plan.actions.map(action => action.accountKey)).toEqual(["anthropic|org-a|11", "anthropic|org-b|22"]);
 		expect(new Set(plan.actions.map(action => action.attemptKey)).size).toBe(2);
 		expect(plan.actions.map(action => action.target.credentialId)).toEqual([11, 22]);
+	});
+});
+
+describe("planClaudeResetRedemptions: account opt-out", () => {
+	/** Both organizations hold the same grant; org-a's policy turns automatic spending off. */
+	const twoOrganizations = (credit: Partial<UsageResetCredit> = {}): Partial<ClaudeResetPlanInput> => ({
+		statuses: [
+			status({ credentialId: 11, orgId: "org-a", active: true, credit }),
+			status({ credentialId: 22, orgId: "org-b", active: false, credit: { ...credit, id: "cedar-2" } }),
+		],
+		accountPolicy: identity =>
+			identity.orgId === "org-a"
+				? { provider: "anthropic", account: { email: "user@example.com", orgId: "org-a" }, autoRedeem: false }
+				: undefined,
+	});
+
+	it("restores the blocked sibling instead of the opted-out active account", () => {
+		const plan = planClaudeResetRedemptions(
+			input({ reports: [report({ orgId: "org-a" }), report({ orgId: "org-b" })], ...twoOrganizations() }),
+		);
+		expect(plan.actions).toMatchObject([{ reason: "blocked-account", target: { credentialId: 22 } }]);
+		expect(plan.skipped).toContainEqual({ accountKey: "anthropic|org-a|11", rule: "account", reason: "auto-redeem-off" });
+	});
+
+	it("salvages only the sibling's expiring grant", () => {
+		const plan = planClaudeResetRedemptions(
+			input({
+				trigger: "sweep",
+				reports: [report({ orgId: "org-a" }), report({ orgId: "org-b" })],
+				...twoOrganizations(),
+			}),
+		);
+		expect(plan.actions).toMatchObject([{ reason: "expiring-credit", target: { credentialId: 22 } }]);
+		expect(plan.skipped).toContainEqual({ accountKey: "anthropic|org-a|11", rule: "account", reason: "auto-redeem-off" });
+	});
+
+	it("lets the opted-out account's last-chance grant expire while the sibling's is spent", () => {
+		const idle = { fiveHourUsed: 0, weeklyUsed: 0, sonnetUsed: 0 };
+		const plan = planClaudeResetRedemptions(
+			input({
+				trigger: "sweep",
+				settings: { enabled: true, minBlockedMinutes: 60, keepCredits: 1, salvageHorizonMs: 0 },
+				reports: [report({ orgId: "org-a", ...idle }), report({ orgId: "org-b", ...idle })],
+				...twoOrganizations({
+					expiresAt: new Date(NOW + 5 * 60_000).toISOString(),
+					requiresLimit: false,
+					blocking: [],
+					usedFractions: {},
+				}),
+			}),
+		);
+		expect(plan.actions).toMatchObject([
+			{ reason: "expiring-credit", target: { credentialId: 22 }, expiresInMs: 5 * 60_000 },
+		]);
+		expect(plan.skipped).toContainEqual({ accountKey: "anthropic|org-a|11", rule: "account", reason: "auto-redeem-off" });
 	});
 });

@@ -1,4 +1,6 @@
 import {
+	type AuthAccountPolicy,
+	type OAuthAccountIdentity,
 	type ResetCreditAccountStatus,
 	type ResetCreditTarget,
 	resolveUsedFraction,
@@ -26,6 +28,7 @@ const MAX_PLAUSIBLE_WEEKLY_MS = 8 * 24 * 3_600_000;
 /** Why an account or grant is unsafe or unhelpful for automatic redemption. */
 export type ClaudeResetSkipReason =
 	| "disabled"
+	| "auto-redeem-off"
 	| "wrong-provider"
 	| "no-identity"
 	| "no-report"
@@ -63,6 +66,8 @@ export interface ClaudeResetPlanInput {
 		keepCredits: number;
 		salvageHorizonMs: number;
 	};
+	/** Account policy lookup; an account whose policy sets `autoRedeem: false` is never planned. */
+	accountPolicy: (identity: OAuthAccountIdentity) => AuthAccountPolicy | undefined;
 	/** Fresh usage for every stored Claude account. */
 	reports: UsageReport[] | null;
 	/** Authoritative live Cedar/Juniper eligibility for every stored account. */
@@ -214,6 +219,10 @@ export function planClaudeResetRedemptions(input: ClaudeResetPlanInput): ClaudeR
 			continue;
 		}
 		const skip = (reason: ClaudeResetSkipReason) => skipped.push({ accountKey, rule: "account", reason });
+		if (input.accountPolicy(status)?.autoRedeem === false) {
+			skip("auto-redeem-off");
+			continue;
+		}
 		if (status.error) {
 			skip("credits-unknown");
 			continue;

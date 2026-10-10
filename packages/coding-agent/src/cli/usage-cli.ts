@@ -648,6 +648,7 @@ function formatPolicyLine(
 ): string {
 	const policy = options.getAccountPolicy(provider, identity);
 	const priority = policy?.priority ?? 0;
+	const autoRedeemLabel = policy?.autoRedeem === false ? " · auto-redeem off" : "";
 	const configuredReservePct = policy?.reservePct;
 	const inherited = configuredReservePct === undefined;
 	const reservePct = Math.max(0, Math.min(100, configuredReservePct ?? options.globalReservePct));
@@ -663,13 +664,13 @@ function formatPolicyLine(
 		.filter((fraction): fraction is number => fraction !== undefined && Number.isFinite(fraction));
 	if (usedFractions.length === 0) {
 		const unmeasured = exhausted ? "exhausted" : "reserve unknown";
-		return `policy: priority ${priority} · reserve ${reserveLabel} · ${unmeasured}`;
+		return `policy: priority ${priority} · reserve ${reserveLabel}${autoRedeemLabel} · ${unmeasured}`;
 	}
 	const remainingFraction = Math.max(0, 1 - Math.max(...usedFractions));
 	let state = "eligible";
 	if (exhausted || remainingFraction <= 0) state = "exhausted";
 	else if (isWithinUsageReserve(remainingFraction, reservePct / 100)) state = "inside reserve";
-	return `policy: priority ${priority} · reserve ${reserveLabel} · ${state} · ${(remainingFraction * 100).toFixed(1)}% left`;
+	return `policy: priority ${priority} · reserve ${reserveLabel}${autoRedeemLabel} · ${state} · ${(remainingFraction * 100).toFixed(1)}% left`;
 }
 
 /**

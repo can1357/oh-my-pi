@@ -558,6 +558,30 @@ describe("formatUsageBreakdown", () => {
 		expect(text).toContain("policy: priority 10 · reserve 0% (override) · exhausted · 0.0% left");
 	});
 
+	it("marks only the account whose policy turns auto-redeem off", () => {
+		const limit = makeLimit({ id: "5h", provider: "openai-codex", usedFraction: 0.2, durationMs: FIVE_HOURS, windowId: "5h" });
+		const reports = [
+			makeReport("openai-codex", "borrowed@example.test", [limit]),
+			makeReport("openai-codex", "own@example.test", [limit]),
+		];
+		const policyOptions: UsagePolicyDiagnosticsOptions = {
+			globalReservePct: 10,
+			getAccountPolicy: (_provider, identity) =>
+				identity.email === "borrowed@example.test"
+					? { provider: "openai-codex", account: { email: "borrowed@example.test" }, autoRedeem: false }
+					: undefined,
+		};
+
+		const text = stripVTControlCharacters(
+			formatUsageBreakdown(reports, [], Date.now(), undefined, [], policyOptions),
+		);
+		const ownAt = text.indexOf("own@example.test");
+		expect(text.slice(text.indexOf("borrowed@example.test"), ownAt)).toContain(
+			"reserve 10% (global) · auto-redeem off · eligible",
+		);
+		expect(text.slice(ownAt)).toContain("reserve 10% (global) · eligible");
+	});
+
 	it("reports an account sitting exactly on its reserve as inside reserve", () => {
 		const reports = [
 			makeReport("openai-codex", "boundary@example.test", [

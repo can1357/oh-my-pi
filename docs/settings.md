@@ -985,6 +985,8 @@ When a usage refresh detects an eligible banked reset expiring within the next *
 
 `salvageHorizonHours` controls earlier, usage-based salvage; setting it to `0` leaves the five-minute last-chance rule active. Set the provider's `autoRedeem` to `no` to disable all automatic spending.
 
+An `auth.accountPolicies` entry with `autoRedeem: false` keeps automatic spending off that one account, such as an account borrowed through a shared auth broker: no salvage, last-chance or blocked-turn restore spends its resets, while its siblings follow the provider's `autoRedeem`. `/usage reset` still spends its resets on request.
+
 ### Other groups
 
 Every schema path not individually tabulated in this catalog is explicitly deferred to `omp config list`. Additional groups include:

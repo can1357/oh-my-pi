@@ -1,6 +1,6 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import { Agent } from "@oh-my-pi/pi-agent-core";
-import type { ResetCreditAccountStatus, ResetCreditTarget, UsageReport } from "@oh-my-pi/pi-ai";
+import { DEFAULT_USAGE_RESERVE_PCT, type ResetCreditAccountStatus, type ResetCreditTarget, type UsageReport } from "@oh-my-pi/pi-ai";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import * as envApiKey from "@oh-my-pi/pi-ai/env-api-key";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
@@ -359,6 +359,30 @@ describe("Claude saved-reset trigger integration", () => {
 		await session.fetchUsageReports();
 		await coordinator.sweepPromise;
 		expect(targets).toHaveLength(1);
+	});
+
+	it("leaves an account whose policy turns auto-redeem off out of the heartbeat salvage until the policy is removed", async () => {
+		const { session, coordinator, targets } = buildSession({
+			report: claudeReport(0.5),
+			status: claudeStatus(false),
+		});
+		authStorage.setAccountPolicies({
+			accountPolicies: [{ provider: "anthropic", account: { email: EMAIL, orgId: ORG_ID }, autoRedeem: false }],
+			defaultReservePct: DEFAULT_USAGE_RESERVE_PCT,
+		});
+		try {
+			await session.fetchUsageReports();
+			await coordinator.sweepPromise;
+			expect(targets).toEqual([]);
+			expect(coordinator.attemptedKeys.size).toBe(0);
+		} finally {
+			authStorage.setAccountPolicies({ accountPolicies: [], defaultReservePct: DEFAULT_USAGE_RESERVE_PCT });
+		}
+
+		coordinator.lastSweepAt = 0;
+		await session.fetchUsageReports();
+		await coordinator.sweepPromise;
+		expect(targets).toMatchObject([{ provider: "anthropic", credentialId: CREDENTIAL_ID }]);
 	});
 
 	it.each(["yes", "no", "unset"] as const)(

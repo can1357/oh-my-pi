@@ -82,6 +82,9 @@ export class AccountPolicies {
 					throw new AIError.ConfigurationError(`${path}.account.${field} must be a non-empty string`);
 				}
 			}
+			if (policy.autoRedeem !== undefined && typeof policy.autoRedeem !== "boolean") {
+				throw new AIError.ConfigurationError(`${path}.autoRedeem must be true or false`);
+			}
 			if (policy.priority !== undefined && !Number.isFinite(policy.priority)) {
 				throw new AIError.ConfigurationError(`${path}.priority must be a finite number`);
 			}

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `autoRedeem: false` to `auth.accountPolicies` entries to mark an account whose saved resets must not be spent automatically; any other value is rejected as invalid config
+
 ## [18.8.7] - 2026-10-09
 
 ### Added

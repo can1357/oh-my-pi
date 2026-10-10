@@ -58,6 +58,8 @@ export interface AuthAccountSelector {
 export interface AuthAccountPolicy {
 	readonly provider: string;
 	readonly account: AuthAccountSelector;
+	/** `false` keeps automatic saved-reset spending off this account; manual redeems still work. */
+	readonly autoRedeem?: boolean;
 	/** Higher values win after hard, plan, reserve, hot-window, and measured-usage safety checks. */
 	readonly priority?: number;
 	/** Protected remaining quota percentage for this account. */

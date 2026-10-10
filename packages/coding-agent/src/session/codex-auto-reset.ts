@@ -58,6 +58,7 @@
  * passed in so the planner itself stays deterministic.
  */
 import type {
+	AuthAccountPolicy,
 	OAuthAccountIdentity,
 	ResetCreditAccountStatus,
 	ResetCreditTarget,
@@ -104,6 +105,7 @@ export type CodexResetTrigger = "blocked" | "sweep";
 /** Why one account produced no action (or, with `accountKey: "*"`, a whole rule was off). */
 export type CodexResetSkipReason =
 	| "disabled"
+	| "auto-redeem-off"
 	| "wrong-provider"
 	| "spark-model"
 	| "no-identity"
@@ -140,6 +142,8 @@ export interface CodexResetPlanInput {
 	};
 	/** Active account (marks the preferred restore candidate); may be undefined. */
 	identity: OAuthAccountIdentity | undefined;
+	/** Account policy lookup; an account whose policy sets `autoRedeem: false` is never planned. */
+	accountPolicy: (identity: OAuthAccountIdentity) => AuthAccountPolicy | undefined;
 	/** Usage reports for ALL stored accounts (one per account for Codex). */
 	reports: UsageReport[] | null;
 	attemptedKeys: ReadonlySet<string>;
@@ -303,6 +307,10 @@ export function planCodexResetRedemptions(input: CodexResetPlanInput): CodexRese
 			continue;
 		}
 		const accountKey = `openai-codex|${orgId?.trim().toLowerCase() ?? "-"}|${credentialId}`;
+		if (input.accountPolicy({ accountId, email, orgId })?.autoRedeem === false) {
+			skipped.push({ accountKey, rule: "account", reason: "auto-redeem-off" });
+			continue;
+		}
 		const isActive =
 			report.metadata?.resetCreditActive === true || reportMatchesActiveAccount(report, input.identity);
 		if (nowMs - report.fetchedAt > REPORT_FRESHNESS_MS) {

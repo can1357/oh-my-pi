@@ -68,6 +68,7 @@ describe("resolveAuthBrokerConfig config discovery", () => {
 			{
 				provider: "anthropic",
 				account: { email: "policy@example.com" },
+				autoRedeem: false,
 				reservePct: 25,
 			},
 		] satisfies AuthAccountPolicies;
@@ -231,6 +232,18 @@ describe("resolveAuthBrokerConfig config discovery", () => {
 					"",
 				].join("\n"),
 				error: "auth.accountPolicies[0].account has unknown fields: tenantId",
+			},
+			{
+				yaml: [
+					"auth:",
+					"  accountPolicies:",
+					"    - provider: openai-codex",
+					"      account:",
+					"        email: preferred@example.com",
+					"      autoRedeem: no",
+					"",
+				].join("\n"),
+				error: "auth.accountPolicies[0].autoRedeem must be true or false",
 			},
 			{
 				yaml: [
