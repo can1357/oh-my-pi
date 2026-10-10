@@ -414,6 +414,15 @@ describe("model presets", () => {
 		expect(getModelPresetNames(settings)).toEqual(["zeta", "alpha", "mid"]);
 	});
 
+	it("keeps a project-null fallback in its global position", async () => {
+		const settings = await projectSettings({
+			project: `modelPresets:\n  deep: null\n  team:\n    modelRoles:\n      default: ${SONNET}\n`,
+		});
+		cfgModelPresets.setEntry(settings, "alpha", { modelRoles: { default: SONNET } });
+		cfgModelPresets.setEntry(settings, "deep", { modelRoles: { default: OPUS } });
+		expect(getModelPresetNames(settings)).toEqual(["team", "alpha", "deep"]);
+	});
+
 	it("holds the model-role mutation lock for the whole apply", async () => {
 		const settings = Settings.isolated();
 		settings.setModelRole("default", SONNET);

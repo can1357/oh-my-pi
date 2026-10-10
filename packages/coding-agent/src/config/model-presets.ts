@@ -65,12 +65,24 @@ export function getModelPreset(settings: Settings, name: string): PresetLookup {
 }
 
 /**
- * Saved preset names in config order: higher layers (runtime, `--config`, project) first, each in
- * file order, then the global config's own entries; names a `--config`/runtime `null` tombstone
- * hides are left out. Users rank presets by reordering them in `config.yml`.
+ * Saved preset names in config order: higher layers' presets first, then the global config's, each
+ * in file order. Names a `--config`/runtime `null` tombstone hides are left out.
  */
 export function getModelPresetNames(settings: Settings): string[] {
-	return Object.keys(cfgModelPresets.get(settings)).filter(name => settings.getOwnedModelPreset(name) !== undefined);
+	const names: string[] = [];
+	for (const name of Object.keys(cfgModelPresets.get(settings))) {
+		const source = settings.getOwnedModelPreset(name)?.source;
+		if (source !== undefined && source !== "global") names.push(name);
+	}
+	// Read global presets from the global layer: a project `null` falls through to the global preset
+	// but would otherwise take the project entry's position in the merged record.
+	const global = settings.getGlobalSettings().modelPresets;
+	if (isRecord(global)) {
+		for (const name of Object.keys(global)) {
+			if (settings.getOwnedModelPreset(name)?.source === "global") names.push(name);
+		}
+	}
+	return names;
 }
 
 /**
