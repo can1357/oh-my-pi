@@ -3484,6 +3484,8 @@ export function openrouterModelManagerOptions(config?: OpenRouterModelManagerCon
 		// Namespace the refreshed pseudo-API cache separately so those rows cannot
 		// override bundled `api: "openrouter"` models during online-if-uncached startup.
 		cacheProviderId: resolveModelCacheProviderId("openrouter"),
+		// Re-resolve Jev Router on upgrade so fresh cache entries cannot outrank its chat transport.
+		dropCachedModelIdsOnStaticMismatch: ["typesafe/jev-router"],
 		fetchDynamicModels: async () => {
 			const [chatModels, imageModels, decisionModels, rerankModels, videoModels, embeddingModels] =
 				await Promise.all([
