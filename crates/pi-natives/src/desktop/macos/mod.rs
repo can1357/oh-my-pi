@@ -50,7 +50,7 @@ impl MacosBackend {
 impl Backend for MacosBackend {
 	fn capabilities(&mut self) -> DesktopCapabilities {
 		let capture_permission = capture::capture_permission();
-		let input_permission = ax::is_trusted();
+		let ax_trusted = ax::is_trusted();
 		let display_count = if capture_permission {
 			self
 				.capture
@@ -63,18 +63,18 @@ impl Backend for MacosBackend {
 			backend: "quartz".to_string(),
 			display_server: Some("Quartz WindowServer".to_string()),
 			capture: capture::capture_available() && capture_permission && display_count > 0,
-			input: input_permission,
-			ax: input_permission,
-			background_window_input: input_permission && skylight::is_available(),
+			input: ax_trusted,
+			ax: ax_trusted,
+			background_window_input: ax_trusted && skylight::is_available(),
 			takeover: skylight::takeover_available(),
 			applications: super::applications::supported(),
-			menus: input_permission,
-			held_input: input_permission,
+			menus: ax_trusted,
+			held_input: ax_trusted,
 			spaces: spaces::supported(),
 			global_escape: permission::listen_events(),
 			capture_permission: permission_label(capture_permission),
 			input_permission: permission_label(permission::post_events()),
-			ax_permission: permission_label(input_permission),
+			ax_permission: permission_label(ax_trusted),
 			display_count,
 		}
 	}

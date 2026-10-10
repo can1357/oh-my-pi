@@ -606,11 +606,11 @@ impl Worker {
 			.ok_or_else(DesktopError::ax_unsupported)
 	}
 
-	/// Backend capabilities, without global Escape while held control runs
-	/// without its monitor.
+	/// Backend capabilities, without global Escape once this session's input
+	/// has run without its monitor.
 	fn read_capabilities(&mut self, token: &OperationToken) -> CoreResult<DesktopCapabilities> {
 		let mut capabilities = self.backend()?.capabilities();
-		capabilities.global_escape &= !token.control_lacks_escape();
+		capabilities.global_escape &= !token.escape_unavailable();
 		Ok(capabilities)
 	}
 

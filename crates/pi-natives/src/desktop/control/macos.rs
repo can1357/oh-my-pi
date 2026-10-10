@@ -117,10 +117,13 @@ pub(super) struct EscapeMonitor {
 
 impl EscapeMonitor {
 	/// Without event-listening access the tap is still created but never sees
-	/// a key, so that case fails here instead of starting a blind monitor.
+	/// a key, so that case fails here instead of starting a blind monitor. The
+	/// caller discards the error, so it skips the responsible-app lookup.
 	pub(super) fn start(emergency: EmergencyStop) -> CoreResult<Self> {
 		if !permission::listen_events() {
-			return Err(permission::denied("Input Monitoring"));
+			return Err(DesktopError::permission_denied(
+				"macOS event-listening access (Input Monitoring) is not granted",
+			));
 		}
 		let (ready, receive) = flume::bounded(1);
 		let worker = thread::Builder::new()
