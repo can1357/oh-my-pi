@@ -1,21 +1,26 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import type { ResetCreditAccountStatus, ResetCreditTarget, UsageReport } from "@oh-my-pi/pi-ai";
+import { resolveCredentialIdentityKey } from "@oh-my-pi/pi-ai/auth/sqlite-credential-store";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import * as envApiKey from "@oh-my-pi/pi-ai/env-api-key";
 import * as oauthUtils from "@oh-my-pi/pi-ai/registry/oauth";
 import { claudeUsageProvider } from "@oh-my-pi/pi-ai/usage/claude";
+import { __resetProxyCache } from "@oh-my-pi/pi-ai/utils/proxy";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import {
 	type CodexAutoRedeemCoordinator,
 	createCodexAutoRedeemCoordinator,
+	defaultCodexAutoRedeemCoordinator,
 } from "@oh-my-pi/pi-coding-agent/session/codex-auto-reset";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TempDir } from "@oh-my-pi/pi-utils";
+import { asGlobalFetch } from "./helpers/fetch-mock";
 import { mockSchedulerWaitWithClock } from "./helpers/mock-scheduler-clock";
 
 import { cfgClaudeResetsAutoRedeem } from "@oh-my-pi/pi-coding-agent/session/settings";
@@ -422,12 +427,18 @@ describe("Claude saved-reset trigger integration", () => {
 	});
 });
 
-describe("Claude saved reset before a reserve-protected sibling", () => {
-	const BACKUP = {
-		accountId: "claude-backup",
-		email: "backup@example.com",
-		orgId: "22222222-2222-4222-8222-222222222222",
-	};
+describe("saved reset before a reserve-protected sibling", () => {
+	interface Account {
+		accountId: string;
+		email: string;
+		orgId: string;
+		priority: number;
+		reservePct: number;
+		usedPct: number;
+		resets: number;
+		usageUnavailable?: boolean;
+	}
+	const previousProxy = Bun.env.PI_PROXY_ANTHROPIC;
 	let tempDir: TempDir;
 	const cleanups: (() => Promise<void> | void)[] = [];
 
@@ -435,172 +446,362 @@ describe("Claude saved reset before a reserve-protected sibling", () => {
 		vi.spyOn(envApiKey, "getEnvApiKey").mockReturnValue(undefined);
 		vi.spyOn(oauthUtils, "getOAuthApiKey").mockImplementation(async (provider, credentials) => {
 			const credential = credentials[provider];
-			return credential ? { apiKey: `key-${credential.email}`, newCredentials: credential } : null;
+			return credential ? { apiKey: `key-${credential.accountId}`, newCredentials: credential } : null;
 		});
-		tempDir = TempDir.createSync("@pi-claude-reserve-");
+		// A provider proxy moves first-party Anthropic requests onto globalThis.fetch.
+		Bun.env.PI_PROXY_ANTHROPIC = "http://proxy.example.test:8080";
+		__resetProxyCache();
+		tempDir = TempDir.createSync("@pi-reserve-takeover-");
+		// createAgentSession uses the process-wide coordinator: start it empty, locking in scratch.
+		Object.assign(defaultCodexAutoRedeemCoordinator, createCodexAutoRedeemCoordinator(), {
+			resetLockPath: tempDir.join("auth.db"),
+		});
 	});
 
 	afterEach(async () => {
 		for (const cleanup of cleanups.splice(0).reverse()) await cleanup();
+		Object.assign(defaultCodexAutoRedeemCoordinator, createCodexAutoRedeemCoordinator(), {
+			resetLockPath: undefined,
+		});
+		if (previousProxy === undefined) delete Bun.env.PI_PROXY_ANTHROPIC;
+		else Bun.env.PI_PROXY_ANTHROPIC = previousProxy;
+		__resetProxyCache();
 		tempDir.removeSync();
 		vi.restoreAllMocks();
 	});
 
-	/**
-	 * The preferred account spends the rest of its week while a lower-priority
-	 * backup still has 92% left. Selection, usage-limit marking, pool health,
-	 * reset discovery and the reset itself run on a real credential store; only
-	 * Anthropic's HTTP API and token minting are stubbed.
-	 */
-	async function hitWallWithBackup(options: { backupReservePct: number; restoreBeforeReserve: boolean }) {
-		const meters: Record<string, { weeklyPct: number; resets: number }> = {
-			"access-primary": { weeklyPct: 99, resets: 1 },
-			"access-backup": { weeklyPct: 8, resets: 0 },
-		};
-		const resetPosts: string[] = [];
-		const usageFetch = (async (input: string | URL | Request, init?: RequestInit) => {
-			const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url);
-			const token = new Headers(init?.headers).get("authorization")?.replace(/^Bearer /, "") ?? "";
-			const meter = meters[token];
-			if (!meter) return new Response("unknown token", { status: 401 });
-			if (init?.method === "POST" && url.pathname.endsWith("/reset_rate_limits")) {
-				resetPosts.push(token);
-				meter.weeklyPct = 0;
-				meter.resets -= 1;
-				return Response.json({ result: "reset", resets_left: meter.resets, cleared: ["seven_day"] });
-			}
-			const now = Date.now();
-			return Response.json({
-				five_hour: { utilization: 50, resets_at: new Date(now + 2 * HOUR).toISOString() },
-				seven_day: { utilization: meter.weeklyPct, resets_at: new Date(now + 72 * HOUR).toISOString() },
-				cedar_ember: url.searchParams.has("cedar_ember")
-					? {
-							eligible: true,
-							next_grant_id: meter.resets > 0 ? "saved-reset" : null,
-							grants:
-								meter.resets > 0
-									? [
-											{
-												id: "saved-reset",
-												resets_left: meter.resets,
-												ends_at: new Date(now + 7 * 24 * HOUR).toISOString(),
-												clears: ["five_hour", "seven_day"],
-												usable_now: true,
-												percent_used: { seven_day: meter.weeklyPct },
-												blocking: meter.weeklyPct >= 100 ? ["seven_day"] : [],
-											},
-										]
-									: [],
-						}
-					: null,
-				juniper_tide: null,
-			});
-		}) as unknown as typeof fetch;
-		const storage = await AuthStorage.create(":memory:", {
-			usageFetch,
-			usageProviderResolver: provider => (provider === "anthropic" ? claudeUsageProvider : undefined),
-			accountPolicies: [
-				{ provider: "anthropic", account: { email: EMAIL }, priority: 20, reservePct: 0 },
+	function sse(events: { type: string; [field: string]: unknown }[], named: boolean): Response {
+		const body = events
+			.map(event => `${named ? `event: ${event.type}\n` : ""}data: ${JSON.stringify(event)}\n\n`)
+			.join("");
+		return new Response(body, { headers: { "content-type": "text/event-stream" } });
+	}
+
+	function modelAnswer(provider: string, modelId: string): Response {
+		if (provider === "anthropic") {
+			return sse(
+				[
+					{
+						type: "message_start",
+						message: { id: "msg_1", type: "message", role: "assistant", model: modelId, content: [], usage: {} },
+					},
+					{ type: "content_block_start", index: 0, content_block: { type: "text", text: "" } },
+					{ type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "served" } },
+					{ type: "content_block_stop", index: 0 },
+					{ type: "message_delta", delta: { stop_reason: "end_turn" }, usage: { output_tokens: 1 } },
+					{ type: "message_stop" },
+				],
+				true,
+			);
+		}
+		const message = { type: "message", id: "msg_1", role: "assistant" };
+		return sse(
+			[
+				{ type: "response.created", response: { id: "resp_1" } },
+				{ type: "response.output_item.added", item: { ...message, status: "in_progress", content: [] } },
+				{ type: "response.content_part.added", part: { type: "output_text", text: "" } },
+				{ type: "response.output_text.delta", delta: "served" },
 				{
-					provider: "anthropic",
-					account: { email: BACKUP.email },
-					priority: 10,
-					reservePct: options.backupReservePct,
+					type: "response.output_item.done",
+					item: { ...message, status: "completed", content: [{ type: "output_text", text: "served" }] },
+				},
+				{
+					type: "response.completed",
+					response: { id: "resp_1", status: "completed", usage: { input_tokens: 1, output_tokens: 1 } },
 				},
 			],
+			false,
+		);
+	}
+
+	function claudeUsage(url: URL, account: Account): Response {
+		const now = Date.now();
+		return Response.json({
+			five_hour: { utilization: 50, resets_at: new Date(now + 2 * HOUR).toISOString() },
+			seven_day: { utilization: account.usedPct, resets_at: new Date(now + 72 * HOUR).toISOString() },
+			cedar_ember: url.searchParams.has("cedar_ember")
+				? {
+						eligible: true,
+						next_grant_id: account.resets > 0 ? "saved-reset" : null,
+						grants:
+							account.resets > 0
+								? [
+										{
+											id: "saved-reset",
+											resets_left: account.resets,
+											ends_at: new Date(now + 7 * 24 * HOUR).toISOString(),
+											clears: ["five_hour", "seven_day"],
+											usable_now: true,
+											percent_used: { seven_day: account.usedPct },
+											blocking: account.usedPct >= 100 ? ["seven_day"] : [],
+										},
+									]
+								: [],
+					}
+				: null,
+			juniper_tide: null,
+		});
+	}
+
+	function codexReport(account: Account): UsageReport {
+		const exhausted = account.usedPct >= 100;
+		return {
+			provider: "openai-codex",
+			fetchedAt: Date.now(),
+			limits: [
+				{
+					id: "openai-codex:primary",
+					label: "5 hours",
+					scope: { provider: "openai-codex", windowId: "5h", shared: true },
+					window: { id: "5h", label: "5 hours", durationMs: 5 * HOUR, resetsAt: Date.now() + 3 * HOUR },
+					amount: { usedFraction: account.usedPct / 100, unit: "percent" },
+					status: exhausted ? "exhausted" : "ok",
+				},
+			],
+			metadata: {
+				accountId: account.accountId,
+				email: account.email,
+				orgId: account.orgId,
+				allowed: !exhausted,
+				limitReached: exhausted,
+			},
+		};
+	}
+
+	/**
+	 * The preferred account spends the rest of its window on this request while
+	 * a lower-priority backup still has 92% left. A real `createAgentSession`
+	 * runs the stream's credential rotation, turn recovery, pool health, reset
+	 * discovery and the reset; only provider HTTP and token minting are stubbed.
+	 */
+	async function hitWall(
+		provider: "anthropic" | "openai-codex",
+		options: {
+			restoreBeforeReserve: boolean;
+			backupReservePct?: number;
+			primaryResets?: number;
+			/** A third stored account outside the session's account pool. */
+			excluded?: "healthy" | "unknown" | "blocked with a reset";
+			abortAtRecoveryHealthRead?: boolean;
+		},
+	) {
+		const accounts: Record<string, Account> = {
+			primary: {
+				accountId: "primary",
+				email: "primary@example.com",
+				orgId: "11111111-1111-4111-8111-111111111111",
+				priority: 20,
+				reservePct: 0,
+				usedPct: 99,
+				resets: options.primaryResets ?? 1,
+			},
+			backup: {
+				accountId: "backup",
+				email: "backup@example.com",
+				orgId: "22222222-2222-4222-8222-222222222222",
+				priority: 10,
+				reservePct: options.backupReservePct ?? 100,
+				usedPct: 8,
+				resets: 0,
+			},
+		};
+		if (options.excluded) {
+			const blocked = options.excluded === "blocked with a reset";
+			accounts.extra = {
+				accountId: "extra",
+				email: "extra@example.com",
+				orgId: "33333333-3333-4333-8333-333333333333",
+				priority: 30,
+				reservePct: 0,
+				usedPct: blocked ? 100 : 8,
+				resets: blocked ? 1 : 0,
+				usageUnavailable: options.excluded === "unknown",
+			};
+		}
+		const resetPosts: string[] = [];
+		const requests: string[] = [];
+		const model = getBundledModel(provider, provider === "anthropic" ? "claude-sonnet-4-5" : "gpt-5.6-sol");
+		if (!model) throw new Error(`Expected a bundled ${provider} model`);
+
+		const serve = async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+			const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url);
+			const headers = new Headers(init?.headers);
+			const token = headers.get("x-api-key") ?? headers.get("authorization")?.replace(/^Bearer /, "") ?? "";
+			if (url.pathname.endsWith("/v1/messages") || url.pathname.endsWith("/codex/responses")) {
+				const account = accounts[token.replace(/^key-/, "")];
+				if (!account) return new Response("unknown key", { status: 401 });
+				requests.push(account.accountId);
+				if (account.accountId !== "primary" || account.usedPct < 99) return modelAnswer(provider, model.id);
+				// The selection-time report read 99%; this request spends the rest of the window.
+				account.usedPct = 100;
+				const error =
+					provider === "anthropic"
+						? { type: "error", error: { type: "rate_limit_error", message: "usage_limit_reached" } }
+						: { error: { type: "usage_limit_reached", message: "The usage limit has been reached" } };
+				return Response.json(error, { status: 429, headers: { "retry-after": String(3 * 3600) } });
+			}
+			const account = accounts[token.replace(/^access-/, "")];
+			if (!account) return new Response("not found", { status: 404 });
+			if (account.usageUnavailable) return new Response("unavailable", { status: 500 });
+			const consume = url.pathname.endsWith("/reset_rate_limits") || url.pathname.endsWith("/consume");
+			if (init?.method === "POST" && consume) {
+				resetPosts.push(account.accountId);
+				account.usedPct = 0;
+				account.resets -= 1;
+				return provider === "anthropic"
+					? Response.json({ result: "reset", resets_left: account.resets, cleared: ["seven_day"] })
+					: Response.json({ code: "reset" });
+			}
+			if (url.pathname.endsWith("/wham/rate-limit-reset-credits")) {
+				return Response.json({
+					available_count: account.resets,
+					credits: Array.from({ length: account.resets }, (_, index) => ({
+						id: `credit-${account.accountId}-${index}`,
+						status: "available",
+						expires_at: new Date(Date.now() + 7 * 24 * HOUR).toISOString(),
+					})),
+				});
+			}
+			return claudeUsage(url, account);
+		};
+		vi.spyOn(globalThis, "fetch").mockImplementation(asGlobalFetch(serve));
+
+		const storage = await AuthStorage.create(":memory:", {
+			usageFetch: asGlobalFetch(serve),
+			usageProviderResolver: usageProvider => {
+				if (usageProvider === "anthropic") return claudeUsageProvider;
+				if (usageProvider !== "openai-codex") return undefined;
+				return {
+					id: "openai-codex",
+					fetchUsage: async params => {
+						const account = accounts[params.credential.accountId ?? ""];
+						return account && !account.usageUnavailable ? codexReport(account) : null;
+					},
+				};
+			},
+			accountPolicies: Object.values(accounts).map(account => ({
+				provider,
+				account: { email: account.email },
+				priority: account.priority,
+				reservePct: account.reservePct,
+			})),
 		});
 		cleanups.push(() => storage.close());
-		const expires = Date.now() + 7 * 24 * HOUR;
-		await storage.credentials.set("anthropic", [
-			{
-				type: "oauth",
-				access: "access-primary",
-				refresh: "refresh-primary",
-				expires,
-				accountId: ACCOUNT_ID,
-				email: EMAIL,
-				orgId: ORG_ID,
-			},
-			{ type: "oauth", access: "access-backup", refresh: "refresh-backup", expires, ...BACKUP },
-		]);
+		const credentials = Object.values(accounts).map(account => ({
+			type: "oauth" as const,
+			access: `access-${account.accountId}`,
+			refresh: `refresh-${account.accountId}`,
+			expires: Date.now() + 7 * 24 * HOUR,
+			accountId: account.accountId,
+			email: account.email,
+			orgId: account.orgId,
+		}));
+		await storage.credentials.set(provider, credentials);
 
-		const modelRegistry = new ModelRegistry(storage, undefined, { ignoreLocalModelConfig: true });
-		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
-		if (!model) throw new Error("Expected bundled anthropic/claude-sonnet-4-5 to exist");
-		const mock = createMockModel();
-		const requestKeys: string[] = [];
-		const agent = new Agent({
-			getApiKey: requestModel => modelRegistry.getApiKey(requestModel, session.sessionId),
-			initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
-			streamFn: (requestedModel, context, streamOptions) => {
-				const key = String(streamOptions?.apiKey);
-				requestKeys.push(key);
-				const primary = meters["access-primary"]!;
-				if (key === `key-${EMAIL}` && primary.weeklyPct >= 99) {
-					// The selection-time report read 99%; this request spends the rest of the week.
-					primary.weeklyPct = 100;
-					mock.push({ throw: CLAUDE_USAGE_LIMIT_ERROR });
-				} else {
-					mock.push({ content: [`served by ${key}`], stopReason: "stop" });
-				}
-				return mock.stream(requestedModel, context, streamOptions);
-			},
-		});
 		const settings = Settings.isolated({
 			"compaction.enabled": false,
 			"retry.baseDelayMs": 5,
 			"retry.maxDelayMs": 100,
-			"retry.maxRetries": 1,
-			"codexResets.autoRedeem": "no",
-			"claudeResets.autoRedeem": "yes",
+			"providers.openaiWebsockets": "off",
+			"codexResets.autoRedeem": provider === "openai-codex" ? "yes" : "no",
+			"claudeResets.autoRedeem": provider === "anthropic" ? "yes" : "no",
+			"codexResets.restoreBeforeReserve": options.restoreBeforeReserve,
 			"claudeResets.restoreBeforeReserve": options.restoreBeforeReserve,
 		});
-		settings.setModelRole("default", `${model.provider}/${model.id}`);
-		const sessionManager = SessionManager.inMemory();
-		cleanups.push(() => sessionManager.close());
-		const coordinator = createCodexAutoRedeemCoordinator();
-		coordinator.resetLockPath = `${tempDir.path()}/auth.db`;
-		const session = new AgentSession({
-			agent,
+		const sessionManager = SessionManager.inMemory(tempDir.path());
+		const { session } = await createAgentSession({
+			cwd: tempDir.path(),
+			agentDir: tempDir.path(),
 			sessionManager,
+			authStorage: storage,
+			modelRegistry: new ModelRegistry(storage, tempDir.join("models.yml")),
 			settings,
-			modelRegistry,
-			codexResetCoordinator: coordinator,
+			model,
+			disableExtensionDiscovery: true,
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableMCP: false,
+			enableLsp: false,
+			skipPythonPreflight: true,
 		});
 		cleanups.push(() => session.dispose());
+		if (options.excluded) {
+			const permitted = credentials.filter(credential => credential.accountId !== "extra");
+			storage.sessions.restrict(
+				provider,
+				session.sessionId,
+				permitted.map(credential => resolveCredentialIdentityKey(provider, credential) ?? ""),
+			);
+		}
+		const healthModel = storage.health.model.bind(storage.health);
+		let healthReads = 0;
+		vi.spyOn(storage.health, "model").mockImplementation(async (...args) => {
+			healthReads++;
+			// The stream's rotation reads pool health first; turn recovery reads it again before any reset.
+			if (options.abortAtRecoveryHealthRead && healthReads === 2) void session.abort();
+			return healthModel(...args);
+		});
 
-		await session.prompt("keep working through the weekly wall");
+		await session.prompt("keep working through the limit");
 		await session.waitForIdle();
-		return { resetPosts, requestKeys, last: session.agent.state.messages.at(-1) };
+		return { resetPosts, requests, healthReads, last: session.agent.state.messages.at(-1) };
 	}
 
-	it("spends the blocked account's reset instead of serving from a backup inside its reserve", async () => {
-		const { resetPosts, requestKeys, last } = await hitWallWithBackup({
-			backupReservePct: 100,
-			restoreBeforeReserve: true,
-		});
-		expect(resetPosts).toEqual(["access-primary"]);
-		expect(requestKeys).toEqual([`key-${EMAIL}`, `key-${EMAIL}`]);
-		expect(last).toMatchObject({ role: "assistant", stopReason: "stop" });
+	it("spends the blocked Claude account's reset before a backup inside its reserve serves", async () => {
+		const result = await hitWall("anthropic", { restoreBeforeReserve: true });
+		expect(result.resetPosts).toEqual(["primary"]);
+		expect(result.requests).toEqual(["primary", "primary"]);
+		expect(result.last).toMatchObject({ role: "assistant", stopReason: "stop" });
 	});
 
-	it("rotates to a backup inside its reserve without spending a reset when restoreBeforeReserve is off", async () => {
-		const { resetPosts, requestKeys, last } = await hitWallWithBackup({
-			backupReservePct: 100,
-			restoreBeforeReserve: false,
-		});
-		expect(resetPosts).toEqual([]);
-		expect(requestKeys).toEqual([`key-${EMAIL}`, `key-${BACKUP.email}`]);
-		expect(last).toMatchObject({ role: "assistant", stopReason: "stop" });
+	it("spends the blocked Codex account's reset before a backup inside its reserve serves", async () => {
+		const result = await hitWall("openai-codex", { restoreBeforeReserve: true });
+		expect(result.resetPosts).toEqual(["primary"]);
+		expect(result.requests).toEqual(["primary", "primary"]);
+		expect(result.last).toMatchObject({ role: "assistant", stopReason: "stop" });
 	});
+
+	it.each(["anthropic", "openai-codex"] as const)(
+		"rotates %s to the backup without reading pool health when restoreBeforeReserve is off",
+		async provider => {
+			const result = await hitWall(provider, { restoreBeforeReserve: false });
+			expect(result.resetPosts).toEqual([]);
+			expect(result.requests).toEqual(["primary", "backup"]);
+			expect(result.healthReads).toBe(0);
+			expect(result.last).toMatchObject({ role: "assistant", stopReason: "stop" });
+		},
+	);
 
 	it("rotates to a sibling outside its reserve without spending a reset", async () => {
-		const { resetPosts, requestKeys, last } = await hitWallWithBackup({
-			backupReservePct: 0,
+		const result = await hitWall("anthropic", { restoreBeforeReserve: true, backupReservePct: 0 });
+		expect(result.resetPosts).toEqual([]);
+		expect(result.requests).toEqual(["primary", "backup"]);
+	});
+
+	it.each(["healthy", "unknown"] as const)(
+		"ignores a %s account outside the session's account pool when judging the takeover",
+		async excluded => {
+			const result = await hitWall("anthropic", { restoreBeforeReserve: true, excluded });
+			expect(result.resetPosts).toEqual(["primary"]);
+			expect(result.requests).toEqual(["primary", "primary"]);
+		},
+	);
+
+	it("never spends the reset of an account outside the session's account pool", async () => {
+		const result = await hitWall("anthropic", {
 			restoreBeforeReserve: true,
+			primaryResets: 0,
+			excluded: "blocked with a reset",
 		});
-		expect(resetPosts).toEqual([]);
-		expect(requestKeys).toEqual([`key-${EMAIL}`, `key-${BACKUP.email}`]);
-		expect(last).toMatchObject({ role: "assistant", stopReason: "stop" });
+		expect(result.resetPosts).toEqual([]);
+		expect(result.requests).toEqual(["primary", "backup"]);
+	});
+
+	it("spends nothing when the turn is cancelled while recovery reads pool health", async () => {
+		const result = await hitWall("anthropic", { restoreBeforeReserve: true, abortAtRecoveryHealthRead: true });
+		expect(result.resetPosts).toEqual([]);
+		expect(result.requests).toEqual(["primary"]);
 	});
 });

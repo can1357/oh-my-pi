@@ -83,12 +83,14 @@ Flow (`#handleRetryableError`):
 2. Increment the retry attempt and create the shared retry lifecycle promise on the first attempt.
 3. Calculate whether the current model's retry budget is exhausted.
 4. Classify the error, parse retry timing, and compute capped jittered backoff: `min(retry.baseDelayMs * 2^(attempt-1), 8000ms) * (75–100% jitter)`. Stale OpenAI Responses replay errors reset the provider session and use delay `0`.
-5. For usage limits, apply a successful credential switch or banked Claude/Codex reset immediately when the corresponding reset policy permits it; with the provider's `restoreBeforeReserve` on and every sibling able to take over inside its usage reserve, the banked reset is tried first and the switch applies only if none is spent. Otherwise wait for the earlier of the provider hint and the next temporarily blocked sibling credential.
+5. For usage limits, apply a successful credential switch or banked Claude/Codex reset immediately when the corresponding reset policy permits it; otherwise wait for the earlier of the provider hint and the next temporarily blocked sibling credential.
 6. When allowed, consult configured model fallback chains. A switch uses delay `0`; classifier refusals and account-policy denials only continue when a credential or model switch succeeds. Thinking-loop redirects stay on the same model; a temporarily blocked sibling credential within the wait cap is preferred over model fallback.
 7. If the current model's retry budget is exhausted, stop unless a model switch or confirmed credential reset permits continuation. A fallback model receives a fresh retry budget; credential recovery keeps the cumulative count. Known thinking-only stream-close routes have a one-retry cap rather than the full configured budget.
 8. If the final delay exceeds `retry.maxDelayMs` and no credential/model switch happened, emit final failure without sleeping, except an authoritative usage-reset wait explicitly allowed by `retry.waitForUsageReset`.
 9. Record the recoverable error, emit `auto_retry_start`, and remove the failed assistant from active context unless preserving a resolved interrupted tool turn or proven-unexecuted tool-call/result pairs.
 10. Sleep with abort support, then schedule `agent.continue()` through the post-prompt task scheduler for the same prompt generation.
+
+With the provider's `codexResets.restoreBeforeReserve` or `claudeResets.restoreBeforeReserve` on, a usage limit that only a sibling inside its usage reserve could take over skips the in-stream credential rotation and reaches step 5, where the banked reset is tried first; the switch applies only if none is spent.
 
 ### What resets retry counters
 

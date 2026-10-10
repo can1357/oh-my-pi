@@ -24,9 +24,10 @@ import type {
 	ServiceTierByFamily,
 	SimpleStreamOptions,
 } from "@oh-my-pi/pi-ai";
-import { resolveApiKeyOnce } from "@oh-my-pi/pi-ai/auth-retry";
+import { type ApiKeyResolver, resolveApiKeyOnce } from "@oh-my-pi/pi-ai/auth-retry";
 import type { DiscoverAuthStorageOptions } from "@oh-my-pi/pi-ai/auth-broker/discover";
 import type { Dialect } from "@oh-my-pi/pi-ai/dialect";
+import * as AIError from "@oh-my-pi/pi-ai/error";
 import { prewarmOpenAICodexResponses } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
 import { isOpenAICodexWebSocketPreferred } from "@oh-my-pi/pi-ai/providers/openai-codex-transport";
 import { withCredentialRedaction } from "@oh-my-pi/pi-ai/providers/transform-messages";
@@ -2172,9 +2173,20 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 	let contextFiles = initialContextFiles;
 
 	let agent: Agent;
-	const effectiveGetApiKey =
-		options.getApiKey ?? (requestModel => modelRegistry.resolver(requestModel, agent.sessionId));
 	let session!: AgentSession;
+	const effectiveGetApiKey =
+		options.getApiKey ??
+		((requestModel: Model): ApiKeyResolver => {
+			const resolve = modelRegistry.resolver(requestModel, agent.sessionId);
+			// A usage limit only a sibling inside its reserve could take over skips
+			// the in-stream rotation, so turn recovery can spend a saved reset first.
+			return async context =>
+				context.lastChance &&
+				AIError.isUsageLimit(context.error, requestModel.api) &&
+				(await session.shouldRedeemBeforeTakeover(requestModel, context.signal))
+					? undefined
+					: resolve(context);
+		});
 	let hasSession = false;
 	let hasRegistered = false;
 	const restrictToolNames = options.restrictToolNames === true;

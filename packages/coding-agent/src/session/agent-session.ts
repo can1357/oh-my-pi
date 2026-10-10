@@ -62,6 +62,7 @@ import type {
 	Message,
 	MessageAttribution,
 	Model,
+	ModelUsageHealth,
 	OAuthAccountIdentity,
 	ProviderResponseMetadata,
 	ProviderSessionState,
@@ -1762,7 +1763,7 @@ export class AgentSession implements SettingsScope {
 			syncAfterModelChange: previousEditMode => this.#tools.syncAfterModelChange(previousEditMode),
 			resetCurrentResponsesProviderSession: reason => this.#resetCurrentResponsesProviderSession(reason),
 			maybeAutoRedeemReset: activeBlockUnblockAtMs => this.#maybeAutoRedeemReset(activeBlockUnblockAtMs),
-			shouldRedeemBeforeTakeover: () => this.#shouldRedeemBeforeTakeover(),
+			shouldRedeemBeforeTakeover: signal => this.shouldRedeemBeforeTakeover(this.model, signal),
 			runAutoCompaction: (reason, willRetry, options) =>
 				this.#maintenance.runAutoCompaction(reason, willRetry, options),
 			shakeForRequestBodyReadTimeout: generation => this.#maintenance.shakeForRequestBodyReadTimeout(generation),
@@ -12918,27 +12919,41 @@ export class AgentSession implements SettingsScope {
 		return run;
 	}
 
-	async #shouldRedeemBeforeTakeover(): Promise<boolean> {
-		const model = this.model;
+	/**
+	 * Whether a usage limit on `model` should try a saved reset before a sibling
+	 * takes over: the provider's `restoreBeforeReserve` and auto-redeem are on,
+	 * and every other account this session may use that could take over is
+	 * inside its usage reserve.
+	 */
+	async shouldRedeemBeforeTakeover(model: Model | undefined, signal?: AbortSignal): Promise<boolean> {
 		const provider = model?.provider;
 		if (!model || (provider !== "anthropic" && provider !== "openai-codex")) return false;
 		const cfg = (provider === "anthropic" ? cfgClaudeResets : cfgCodexResets).get(this.settings);
 		if (!cfg.restoreBeforeReserve || !shouldEvaluateCodexAutoRedeem(cfg.autoRedeem)) return false;
+		const authStorage = this.#modelRegistry.authStorage;
+		let health: ModelUsageHealth;
 		try {
-			// The blocked account reads depleted, so a "reserve" pool means every
-			// account able to take over would serve from its protected reserve.
-			const health = await this.#modelRegistry.authStorage.health.model(provider, {
+			health = await authStorage.health.model(provider, {
 				modelId: model.id,
 				sessionId: this.sessionId,
 				baseUrl: model.baseUrl,
 				reserveFraction: cfgRetryUsageReservePct.get(this.settings) / 100,
+				signal,
 			});
-			return health.state === "reserve";
 		} catch (error) {
+			if (signal?.aborted) throw error;
 			// Unknown pool health keeps the plain sibling rotation.
 			logger.debug("auto-reset: takeover health check failed", { provider, error: String(error) });
 			return false;
 		}
+		// The session's own account is the one at its limit.
+		const takeovers = health.accounts.filter(
+			account => !account.selected && authStorage.sessions.permits(provider, this.sessionId, account.credentialId),
+		);
+		return (
+			takeovers.some(account => account.state === "reserve") &&
+			takeovers.every(account => account.state === "reserve" || account.state === "depleted")
+		);
 	}
 
 	/**

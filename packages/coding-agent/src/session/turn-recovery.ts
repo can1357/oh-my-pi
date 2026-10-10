@@ -259,10 +259,10 @@ export interface TurnRecoveryHost {
 	/**
 	 * With a sibling credential able to take over a usage-limited turn, whether
 	 * to try {@link maybeAutoRedeemReset} first: the provider's reset policy
-	 * enables auto-redeem and `restoreBeforeReserve`, and every account that can
-	 * take over is inside its usage reserve.
+	 * enables auto-redeem and `restoreBeforeReserve`, and every other account the
+	 * session may use is inside its usage reserve.
 	 */
-	shouldRedeemBeforeTakeover(): Promise<boolean>;
+	shouldRedeemBeforeTakeover(signal: AbortSignal): Promise<boolean>;
 	runAutoCompaction(
 		reason: "overflow" | "threshold" | "idle" | "incomplete",
 		willRetry: boolean,
@@ -2469,16 +2469,17 @@ export class TurnRecovery {
 		if (!staleOpenAIResponsesReplayError && recordedUsageLimitOutcome) {
 			const rotated = recordedUsageLimitOutcome.switchedCredential && !retryBudgetExhausted;
 			let restored = false;
-			// With `restoreBeforeReserve`, a sibling that can serve only inside its
-			// usage reserve is a protected backup: spend the blocked account's saved
-			// reset first, and rotate onto the backup only when none is spent.
-			if (!rotated || (await this.#host.shouldRedeemBeforeTakeover())) {
-				const resetAbortController = new AbortController();
-				this.#retryAbortController?.abort();
-				this.#retryAbortController = resetAbortController;
-				const startedAtMs = Date.now();
-				const unblockAtMs = parsedRetryAfterMs === undefined ? undefined : startedAtMs + parsedRetryAfterMs;
-				try {
+			const resetAbortController = new AbortController();
+			this.#retryAbortController?.abort();
+			this.#retryAbortController = resetAbortController;
+			try {
+				// With `restoreBeforeReserve`, a sibling that can serve only inside its
+				// usage reserve is a protected backup: spend a saved reset first, and
+				// rotate onto the backup only when none is spent.
+				if (!rotated || (await this.#host.shouldRedeemBeforeTakeover(resetAbortController.signal))) {
+					resetAbortController.signal.throwIfAborted();
+					const startedAtMs = Date.now();
+					const unblockAtMs = parsedRetryAfterMs === undefined ? undefined : startedAtMs + parsedRetryAfterMs;
 					for (let attempt = 0; ; attempt++) {
 						const result = await this.#host.maybeAutoRedeemReset(unblockAtMs);
 						resetAbortController.signal.throwIfAborted();
@@ -2499,13 +2500,13 @@ export class TurnRecovery {
 							break;
 						await sleepLong(readDelayMs, resetAbortController.signal);
 					}
-				} catch (error) {
-					if (!resetAbortController.signal.aborted) throw error;
-					if (this.#retryAbortController !== resetAbortController) return false;
-					return this.#endCancelledRetry();
-				} finally {
-					if (this.#retryAbortController === resetAbortController) this.#retryAbortController = undefined;
 				}
+			} catch (error) {
+				if (!resetAbortController.signal.aborted) throw error;
+				if (this.#retryAbortController !== resetAbortController) return false;
+				return this.#endCancelledRetry();
+			} finally {
+				if (this.#retryAbortController === resetAbortController) this.#retryAbortController = undefined;
 			}
 			if (rotated || restored) {
 				switchedCredential = true;
