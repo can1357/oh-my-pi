@@ -81,6 +81,9 @@ provider "anthropic" {
 	on-api "anthropic-messages" {
 		inline-image-byte-budget 24000000
 	}
+	// Subscription OAuth requests may continue on the offered low-priority lane
+	// after the 5-hour wall. Runtime still requires /slow on and account eligibility.
+	subscription-slow-mode #true
 	class "anthropic" {
 		revision ">=3.7 <4.6" {
 			thinking-efforts "minimal" "low" "medium" "high" "xhigh"

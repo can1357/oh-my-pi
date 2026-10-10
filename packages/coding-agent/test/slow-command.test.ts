@@ -24,7 +24,12 @@ describe("/slow", () => {
 		anthropicSlowModeLanes.lane(LANE).reset();
 	});
 
-	function createSession(provider: string, api: Api, settings = Settings.isolated()): AgentSession {
+	function createSession(
+		provider: string,
+		api: Api,
+		settings = Settings.isolated(),
+		providerType?: string,
+	): AgentSession {
 		const tempDir = TempDir.createSync("@slow-command-");
 		const authStorage = createInMemoryAuthStorage();
 		cleanups.push(() => {
@@ -36,6 +41,7 @@ describe("/slow", () => {
 			name: "test-model",
 			api,
 			provider,
+			providerType,
 			baseUrl: "https://example.invalid",
 			reasoning: false,
 			input: ["text"],
@@ -111,6 +117,12 @@ describe("/slow", () => {
 		expect(cfgProvidersAnthropicSlowMode.get(session.settings)).toBe("off");
 		expect(lane.isActive()).toBe(false);
 		expect(session.serviceTierByFamily).toEqual({});
+	});
+
+	it("does not change default slow-mode support for a custom Anthropic provider alias", () => {
+		const session = createSession("custom-anthropic", "anthropic-messages", Settings.isolated(), "anthropic");
+		expect(session.setSlowMode(true)).toBe(false);
+		expect(cfgProvidersAnthropicSlowMode.get(session.settings)).toBe("off");
 	});
 
 	it("reports models without a slow mode and leaves settings untouched", async () => {

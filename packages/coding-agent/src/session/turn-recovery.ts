@@ -45,6 +45,7 @@ import {
 } from "@oh-my-pi/pi-tui/thinking";
 import type { EditMode } from "@oh-my-pi/pi-tui/tools/edit";
 import type { AgentSessionEvent } from "./agent-session-events";
+import { prefersSlowModeOverUsageFallback } from "./anthropic-slow-mode";
 import type { ResetRecoveryResult } from "./codex-auto-reset";
 import type {
 	InitialRetryFallbackState,
@@ -1860,6 +1861,12 @@ export class TurnRecovery {
 			throw new Error(
 				`${USAGE_PREFLIGHT_BLOCKED_PREFIX} ${condition} for ${currentSelector}; reserve policy is fail-closed.`,
 			);
+		}
+		// Keep same-model account rotation above, but let low priority serve past
+		// usage limits instead of switching models. Refused requests still fall back.
+		if (prefersSlowModeOverUsageFallback(currentModel, this.#host.settings)) {
+			this.#usageReserveApproval = undefined;
+			return false;
 		}
 		if (
 			reservePolicy === "confirm" &&

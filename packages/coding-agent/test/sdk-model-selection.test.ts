@@ -2,7 +2,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test, vi 
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { Effort, type FetchImpl } from "@oh-my-pi/pi-ai";
+import { Effort, type FetchImpl, type UsageLimit } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { writeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
@@ -1188,6 +1188,72 @@ describe("createAgentSession deferred model pattern resolution", () => {
 			}),
 		).rejects.toThrow("reserve policy is fail-closed");
 	});
+
+	test.each([
+		// Default: `/slow` on Claude leaves the startup preflight unchanged.
+		[false, "confirm", "runtime-provider/runtime-fallback-model"],
+		// Opted in: low priority serves past the 5-hour limit, so start on Claude.
+		[true, "confirm", "anthropic/claude-sonnet-4-5"],
+		// Fail closed never spends quota, even when the user prefers the slow lane.
+		[true, "fail-closed", undefined],
+	] as const)(
+		"with slow mode on, preferSlowMode %p and policy %s, a spent Claude limit yields %s",
+		async (preferSlowMode, reservePolicy, expected) => {
+			const authStorage = createInMemoryAuthStorage();
+			authStoragesToClose.push(authStorage);
+			await authStorage.credentials.set("anthropic", [
+				{
+					type: "oauth",
+					access: "claude-access",
+					refresh: "claude-refresh",
+					expires: Date.now() + 60 * 60_000,
+					accountId: "claude-account",
+				},
+			]);
+			const resetsAt = Date.now() + 60 * 60_000;
+			const claudeLimit = (windowId: "5h" | "7d", usedFraction: number): UsageLimit => ({
+				id: `anthropic:${windowId}`,
+				label: windowId,
+				scope: { provider: "anthropic", windowId, shared: true },
+				window: { id: windowId, label: windowId, resetsAt },
+				amount: { usedFraction, unit: "percent" },
+				status: usedFraction >= 1 ? "exhausted" : "ok",
+			});
+			authStorage.usage.setProvider("anthropic", {
+				id: "anthropic",
+				fetchUsage: async () => ({
+					provider: "anthropic",
+					fetchedAt: Date.now(),
+					limits: [claudeLimit("5h", 1), claudeLimit("7d", 0.6)],
+				}),
+			});
+			const settings = Settings.isolated({
+				"providers.anthropic.slowMode": "auto",
+				"retry.preferSlowMode": preferSlowMode,
+				"retry.usageAwareFallback": true,
+				"retry.usageReservePolicy": reservePolicy,
+			});
+			settings.setModelRole("task", "anthropic/claude-sonnet-4-5,runtime-provider/runtime-fallback-model");
+			const creating = createAgentSession({
+				...buildSessionOptions("task"),
+				authStorage,
+				modelRegistry: new ModelRegistry(authStorage, path.join(tempDir, "models.yml")),
+				modelPatternFallbackRole: "subagent:slow-mode",
+				settings,
+				hasUI: false,
+			});
+			if (expected === undefined) {
+				await expect(creating).rejects.toThrow("reserve policy is fail-closed");
+				return;
+			}
+			const { session } = await creating;
+			try {
+				expect(`${session.model?.provider}/${session.model?.id}`).toBe(expected);
+			} finally {
+				await session.dispose();
+			}
+		},
+	);
 
 	test("installs fallback chain for remaining deferred subagent modelPattern candidates", async () => {
 		const { session } = await createAgentSession({

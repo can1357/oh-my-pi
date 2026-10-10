@@ -804,6 +804,20 @@ export const cfgRetryUsageReservePolicy = register({
 	},
 });
 
+export const cfgRetryPreferSlowMode = register({
+	id: "retry.preferSlowMode",
+	type: "boolean",
+	default: false,
+	ui: {
+		tab: "model",
+		group: "Retry & Fallback",
+		label: "Prefer Slow Mode Over Fallback",
+		description:
+			"When /slow is on and the model has a low-priority lane (Claude subscriptions), keep the model past its usage limits instead of switching to a fallback; fall back only when the provider refuses the request (e.g. the weekly limit). Fail-closed reserve policy takes precedence.",
+		condition: "usageAwareFallbackEnabled",
+	},
+});
+
 export const cfgRetryFallbackChains = register({
 	id: "retry.fallbackChains",
 	type: "record",
@@ -849,6 +863,7 @@ export const cfgRetry = combine({
 	usageAwareFallback: cfgRetryUsageAwareFallback,
 	usageReservePct: cfgRetryUsageReservePct,
 	usageReservePolicy: cfgRetryUsageReservePolicy,
+	preferSlowMode: cfgRetryPreferSlowMode,
 });
 
 /** Retry/backoff policy ({@link cfgRetry}). */

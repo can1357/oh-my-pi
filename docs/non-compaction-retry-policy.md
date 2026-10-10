@@ -198,6 +198,7 @@ Defined in `packages/coding-agent/src/session/settings.ts`:
 - `retry.usageAwareFallback` (default `false`; runs a preflight for supported coding-plan usage reports)
 - `retry.usageReservePct` (default `10`; remaining-quota reserve threshold)
 - `retry.usageReservePolicy` (default `"confirm"`; `"auto"` and `"fail-closed"` are also supported)
+- `retry.preferSlowMode` (default `false`; with `/slow` on a Claude subscription model, suppresses usage-driven model switches so low priority serves past the 5-hour limit; healthy same-model account rotation is retained, refused requests still use error-driven fallback, and `retry.usageReservePolicy: fail-closed` always takes precedence)
 
 Programmatic toggles in session:
 

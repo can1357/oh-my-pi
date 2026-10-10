@@ -406,6 +406,9 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	 */
 	"prompt-cache-lookback": { key: "promptCacheLookback", set: "catalog", shape: "scalar" },
 	"long-usage-limit-fallback": { key: "longUsageLimitFallback", set: "catalog", shape: "scalar" },
+	// Deployment capability: subscription low priority can serve past usage limits;
+	// flex service tiers do not imply this capability.
+	"subscription-slow-mode": { key: "subscriptionSlowMode", set: "catalog", shape: "scalar", values: [true, false] },
 	"max-context-window": { key: "maxContextWindow", set: "catalog", shape: "scalar" },
 	"pricing-status": {
 		key: "pricingStatus",

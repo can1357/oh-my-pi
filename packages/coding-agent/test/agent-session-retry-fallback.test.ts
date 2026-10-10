@@ -15,6 +15,7 @@ import {
 	type ProviderSessionState,
 	type ToolCall,
 } from "@oh-my-pi/pi-ai";
+import { resolveApiKeyOnce } from "@oh-my-pi/pi-ai/auth-retry";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { buildParams } from "@oh-my-pi/pi-ai/providers/openai-responses";
@@ -992,55 +993,80 @@ describe("AgentSession retry fallback", () => {
 		expect(confirmFallback).toHaveBeenCalledTimes(1);
 		expect(usageHealth).toHaveBeenCalledTimes(3);
 	});
-	it("reselects a healthy same-provider account before considering a model fallback", async () => {
+	it("slow-mode preference retains healthy same-model account rotation", async () => {
 		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
 		const fallbackModel = getBundledModel("openai", "gpt-4o-mini");
 		if (!primaryModel || !fallbackModel) throw new Error("Expected bundled pooled fallback models");
+		authStorage.keys.removeRuntime("anthropic");
+		await authStorage.credentials.set("anthropic", [
+			{
+				type: "oauth",
+				access: "reserve-access",
+				refresh: "reserve-refresh",
+				expires: Date.now() + 60 * 60_000,
+				accountId: "reserve",
+			},
+			{
+				type: "oauth",
+				access: "healthy-access",
+				refresh: "healthy-refresh",
+				expires: Date.now() + 60 * 60_000,
+				accountId: "healthy",
+			},
+		]);
+		authStorage.usage.setProvider("anthropic", {
+			id: "anthropic",
+			fetchUsage: async params => ({
+				provider: "anthropic",
+				fetchedAt: Date.now(),
+				limits: [
+					{
+						id: "anthropic:7d",
+						label: "Claude 7 Day",
+						scope: { provider: "anthropic", windowId: "7d", shared: true },
+						window: { id: "7d", label: "7 Day", resetsAt: Date.now() + 24 * 60 * 60_000 },
+						amount: { usedFraction: params.credential.accountId === "reserve" ? 0.95 : 0.2, unit: "percent" },
+						status: "ok",
+					},
+				],
+			}),
+		});
 		const requestedModels: string[] = [];
+		const requestedKeys: (string | undefined)[] = [];
 		const mock = createMockModel({ responses: [{ content: ["same provider continued"] }] });
-		const agent = new Agent({
-			getApiKey: model => `${model.provider}-test-key`,
+		const agent: Agent = new Agent({
+			getApiKey: model => modelRegistry.resolver(model, agent.sessionId),
 			initialState: { model: primaryModel, systemPrompt: ["Test"], tools: [], messages: [] },
-			streamFn: (model, context, options) => {
+			streamFn: async (model, context, options) => {
 				requestedModels.push(`${model.provider}/${model.id}`);
+				requestedKeys.push(await resolveApiKeyOnce(options?.apiKey, options?.signal));
 				return mock.stream(model, context, options);
 			},
 		});
 		const settings = Settings.isolated({
 			"compaction.enabled": false,
 			"retry.usageAwareFallback": true,
-			"retry.fallbackChains": {
-				default: [`${fallbackModel.provider}/${fallbackModel.id}`],
-			},
+			"retry.preferSlowMode": true,
+			"providers.anthropic.slowMode": "auto",
+			"retry.fallbackChains": { default: [`${fallbackModel.provider}/${fallbackModel.id}`] },
 		});
 		settings.setModelRole("default", `${primaryModel.provider}/${primaryModel.id}`);
-		vi.spyOn(modelRegistry.authStorage.health, "model").mockResolvedValue({
-			state: "healthy",
-			accounts: [
-				{
-					credentialId: 1,
-					credentialType: "oauth",
-					selected: true,
-					state: "reserve",
-					remainingFraction: 0.05,
-				},
-				{ credentialId: 2, credentialType: "oauth", state: "healthy", remainingFraction: 0.8 },
-			],
-		});
-		const release = vi.spyOn(modelRegistry.authStorage.sessions, "release").mockReturnValue(true);
-		const confirmFallback = vi.fn(async () => true);
-		session = new AgentSession({
-			agent,
-			sessionManager: SessionManager.inMemory(),
-			settings,
-			modelRegistry,
-		});
-		session.setUsageFallbackConfirmer(confirmFallback);
-		await session.prompt("Stay on this provider");
-		await session.waitForIdle();
-		expect(release).toHaveBeenCalledWith(primaryModel.provider, session.sessionId);
-		expect(confirmFallback).not.toHaveBeenCalled();
-		expect(requestedModels).toEqual([`${primaryModel.provider}/${primaryModel.id}`]);
+		try {
+			session = new AgentSession({ agent, sessionManager: SessionManager.inMemory(), settings, modelRegistry });
+			const reserved = authStorage.credentials
+				.list("anthropic")
+				.find(entry => entry.credential.type === "oauth" && entry.credential.accountId === "reserve");
+			if (!reserved) throw new Error("Expected the stored reserve account");
+			expect(authStorage.sessions.pin("anthropic", session.sessionId, reserved.id)).toBe(true);
+			await session.prompt("Stay on Claude using the healthy sibling");
+			await session.waitForIdle();
+			expect(requestedModels).toEqual([`${primaryModel.provider}/${primaryModel.id}`]);
+			expect(requestedKeys).toEqual(["healthy-access"]);
+		} finally {
+			authStorage.usage.removeProvider("anthropic");
+			await authStorage.credentials.remove("anthropic");
+			authStorage.keys.setRuntime("anthropic", "anthropic-test-key");
+		}
 	});
 
 	it("reselects a healthy sibling before applying a same-provider model fallback", async () => {
@@ -1112,6 +1138,157 @@ describe("AgentSession retry fallback", () => {
 
 		expect(release).toHaveBeenCalledWith(primaryModel.provider, session.sessionId);
 		expect(requestedModels).toEqual([`${fallbackModel.provider}/${fallbackModel.id}`]);
+	});
+
+	it.each([
+		// Default: `/slow` on Claude leaves usage-aware fallback unchanged.
+		["anthropic", false, "auto", "openai", undefined],
+		// Opted in: low priority serves past the limit, so Claude keeps the turn.
+		["anthropic", true, "auto", "anthropic", undefined],
+		// Opted in, but `/slow` is off: nothing serves past the limit.
+		["anthropic", true, "off", "openai", undefined],
+		// Opted in with `/slow` on as the flex tier, which stops at the limit.
+		["openai-codex", true, "auto", "openai", undefined],
+		// A custom Anthropic endpoint cannot use the subscription slow lane.
+		["anthropic", true, "auto", "openai", "https://custom.example.com/anthropic"],
+		// A custom alias may inherit catalog metadata, but has no subscription hooks.
+		["anthropic-alias", true, "auto", "openai", undefined],
+	] as const)(
+		"preflight from a depleted %s model with preferSlowMode %p and Claude slow mode %s serves %s",
+		async (primaryProvider, preferSlowMode, slowMode, servedProvider, baseUrl) => {
+			const bundled =
+				primaryProvider === "openai-codex"
+					? getBundledModel("openai-codex", "gpt-5.6-sol")
+					: getBundledModel("anthropic", "claude-sonnet-4-5");
+			const fallbackModel = getBundledModel("openai", "gpt-4o-mini");
+			if (!bundled || !fallbackModel) throw new Error("Expected bundled slow-mode preflight models");
+			const primaryModel =
+				primaryProvider === "anthropic-alias"
+					? { ...bundled, provider: primaryProvider, providerType: "anthropic" }
+					: baseUrl
+						? { ...bundled, baseUrl }
+						: bundled;
+			const requestedModels: string[] = [];
+			const mock = createMockModel({ responses: [{ content: ["kept working"] }] });
+			const agent = new Agent({
+				getApiKey: model => `${model.provider}-test-key`,
+				initialState: { model: primaryModel, systemPrompt: ["Test"], tools: [], messages: [] },
+				streamFn: (model, context, options) => {
+					requestedModels.push(`${model.provider}/${model.id}`);
+					return mock.stream(model, context, options);
+				},
+			});
+			const settings = Settings.isolated({
+				"compaction.enabled": false,
+				"providers.anthropic.slowMode": slowMode,
+				"retry.preferSlowMode": preferSlowMode,
+				"retry.usageAwareFallback": true,
+				"retry.fallbackChains": { default: [`${fallbackModel.provider}/${fallbackModel.id}`] },
+			});
+			settings.setModelRole("default", `${primaryModel.provider}/${primaryModel.id}`);
+			vi.spyOn(modelRegistry.authStorage.health, "model").mockImplementation(async provider =>
+				provider === primaryModel.provider
+					? { state: "depleted", accounts: [{ credentialId: 1, credentialType: "oauth", state: "depleted" }] }
+					: { state: "healthy", accounts: [] },
+			);
+			session = new AgentSession({ agent, sessionManager: SessionManager.inMemory(), settings, modelRegistry });
+			// `/slow on` for the active model: low priority on Claude, the flex tier on
+			// Codex (where the persisted Claude setting still reads `auto`).
+			const slowSupported = primaryProvider !== "anthropic-alias";
+			if (slowMode === "auto") expect(session.setSlowMode(true)).toBe(slowSupported);
+			expect(session.isSlowModeEnabled()).toBe(slowMode === "auto" && slowSupported);
+
+			await session.prompt("Keep working through the usage limit");
+			await session.waitForIdle();
+
+			const served = servedProvider === "openai" ? fallbackModel : primaryModel;
+			expect(requestedModels).toEqual([`${served.provider}/${served.id}`]);
+		},
+	);
+
+	it("with preferSlowMode, a blocked Claude account still falls back on its usage-limit error", async () => {
+		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+		const fallbackModel = getBundledModel("openai", "gpt-4o-mini");
+		if (!primaryModel || !fallbackModel) throw new Error("Expected bundled weekly-limit fallback models");
+		// A prior weekly 429 left the stored Claude account blocked with its weekly
+		// limit spent. The skipped preflight sends the turn to Claude anyway; the
+		// refusal must fall back rather than fail or wait out the week.
+		authStorage.keys.removeRuntime("anthropic");
+		await authStorage.credentials.set("anthropic", [
+			{
+				type: "oauth",
+				access: "claude-access",
+				refresh: "claude-refresh",
+				expires: Date.now() + 60 * 60_000,
+				accountId: "prefer-slow-weekly",
+			},
+		]);
+		const credentialId = authStorage.credentials.list("anthropic")[0]?.id;
+		if (credentialId === undefined) throw new Error("Expected the stored Claude account");
+		const weeklyResetAt = Date.now() + 3 * 24 * 60 * 60_000;
+		authStorage.blocks.upsert({
+			credentialId,
+			providerKey: "anthropic:oauth",
+			blockScope: "",
+			blockedUntilMs: weeklyResetAt,
+		});
+		authStorage.usage.setProvider("anthropic", {
+			id: "anthropic",
+			fetchUsage: async () => ({
+				provider: "anthropic",
+				fetchedAt: Date.now(),
+				limits: [
+					{
+						id: "anthropic:7d",
+						label: "Claude 7 Day",
+						scope: { provider: "anthropic", windowId: "7d", shared: true },
+						window: { id: "7d", label: "7 Day", resetsAt: weeklyResetAt },
+						amount: { usedFraction: 1, unit: "percent" },
+						status: "exhausted",
+					},
+				],
+			}),
+		});
+		const requestedModels: string[] = [];
+		const mock = createMockModel();
+		const agent: Agent = new Agent({
+			getApiKey: model => modelRegistry.resolver(model, agent.sessionId),
+			initialState: { model: primaryModel, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: (model, context, options) => {
+				requestedModels.push(`${model.provider}/${model.id}`);
+				mock.push(
+					model.provider === primaryModel.provider
+						? { throw: "429 usage_limit_reached" }
+						: { content: [`ok:${model.provider}/${model.id}`] },
+				);
+				return mock.stream(model, context, options);
+			},
+		});
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"providers.anthropic.slowMode": "auto",
+			"retry.preferSlowMode": true,
+			"retry.usageAwareFallback": true,
+			"retry.baseDelayMs": 5,
+			"retry.fallbackChains": { default: [`${fallbackModel.provider}/${fallbackModel.id}`] },
+		});
+		settings.setModelRole("default", `${primaryModel.provider}/${primaryModel.id}`);
+		try {
+			session = new AgentSession({ agent, sessionManager: SessionManager.inMemory(), settings, modelRegistry });
+			await session.prompt("Keep working past the weekly limit");
+			await session.waitForIdle();
+
+			expect(requestedModels).toEqual([
+				`${primaryModel.provider}/${primaryModel.id}`,
+				`${fallbackModel.provider}/${fallbackModel.id}`,
+			]);
+			expect(session.model?.provider).toBe(fallbackModel.provider);
+			expect(getLastAssistantMessage(session).stopReason).toBe("stop");
+		} finally {
+			authStorage.usage.removeProvider("anthropic");
+			await authStorage.credentials.remove("anthropic");
+			authStorage.keys.setRuntime("anthropic", "anthropic-test-key");
+		}
 	});
 
 	it("does not dispatch a prompt after its usage preflight is cancelled", async () => {
@@ -1395,7 +1572,7 @@ describe("AgentSession retry fallback", () => {
 		expect(requestedModels).toEqual([]);
 	});
 
-	it("enforces fail-closed usage health when model fallback is disabled", async () => {
+	it("fail-closed overrides slow-mode preference even when model fallback is disabled", async () => {
 		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!primaryModel) throw new Error("Expected bundled fail-closed model");
 		const agent = new Agent({
@@ -1408,6 +1585,8 @@ describe("AgentSession retry fallback", () => {
 			"retry.modelFallback": false,
 			"retry.usageAwareFallback": true,
 			"retry.usageReservePolicy": "fail-closed",
+			"retry.preferSlowMode": true,
+			"providers.anthropic.slowMode": "auto",
 		});
 		vi.spyOn(modelRegistry.authStorage.health, "model").mockResolvedValue({
 			state: "reserve",
@@ -1536,6 +1715,8 @@ describe("AgentSession retry fallback", () => {
 			"compaction.enabled": false,
 			"retry.usageAwareFallback": true,
 			"retry.usageReservePolicy": "fail-closed",
+			"retry.preferSlowMode": true,
+			"providers.anthropic.slowMode": "auto",
 		});
 		settings.setModelRole("default", `${primaryModel.provider}/${primaryModel.id}`);
 		const usageHealth = vi.spyOn(modelRegistry.authStorage.health, "model").mockImplementation(async () =>
