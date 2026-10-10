@@ -38,6 +38,22 @@ function buildFullPaint(lines: number, lineLength: number): string {
 	return buf;
 }
 
+/**
+ * Mirrors the `diffable` branch of `TUI#renderProviderFrame`: each changed row
+ * is addressed with `CSI row;1H`, painted, and closed with a bare `\r`. The
+ * frame carries no `\n`, so it is the one paint shape a newline-only chunker
+ * has no boundary in.
+ */
+function buildDiffPaint(rows: number, lineLength: number): string {
+	let buf = "";
+	for (let i = 0; i < rows; i++) {
+		const content = `${ESC}[38;5;${i % 256}mrow-${i.toString().padStart(4, "0")}: ${"x".repeat(lineLength)}${ESC}[0m`;
+		buf += `${ESC}[${i + 1};1H${content}\r`;
+	}
+	buf += `${ESC}[?25h`;
+	return buf;
+}
+
 describe("issue #2034: chunk large terminal writes on Windows ConPTY", () => {
 	describe("chunkForConPTY()", () => {
 		it("returns the original buffer untouched when its UTF-8 byte length is under the chunk size", () => {
@@ -95,6 +111,32 @@ describe("issue #2034: chunk large terminal writes on Windows ConPTY", () => {
 			const data = `${giantLine}\nshort\n`;
 			const chunks = chunkForConPTY(data, 4 * 1024);
 			expect(chunks.length).toBeGreaterThanOrEqual(2);
+			expect(chunks.join("")).toBe(data);
+		});
+
+		it("cuts a row-diff paint at row boundaries instead of inside a row", () => {
+			// A diff paint is not newline-delimited. `TUI#renderProviderFrame`'s
+			// `diffable` branch addresses every changed row with `CSI row;1H` and
+			// closes it with a bare `\r`, so the frame contains no `\n` at all. A
+			// newline-only chunker finds no boundary in such a frame and falls
+			// back to a hard cut through row text. Each cut is a separate
+			// `process.stdout.write`, so a hard cut is a point where unrelated
+			// output can land *inside* a row rather than between rows.
+			const data = buildDiffPaint(400, 80);
+			const max = 4 * 1024;
+			expect(Buffer.byteLength(data, "utf8")).toBeGreaterThan(max);
+			expect(data).not.toContain("\n");
+
+			const chunks = chunkForConPTY(data, max);
+			expect(chunks.length).toBeGreaterThan(1);
+			for (const chunk of chunks.slice(1)) {
+				// Every chunk after the first must begin a row: a CSI cursor
+				// address, never row plaintext.
+				expect(chunk.startsWith(`${ESC}[`)).toBe(true);
+			}
+			for (const chunk of chunks) {
+				expect(Buffer.byteLength(chunk, "utf8")).toBeLessThanOrEqual(max);
+			}
 			expect(chunks.join("")).toBe(data);
 		});
 
