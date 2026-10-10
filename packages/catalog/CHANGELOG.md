@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added ClinePass free model Step 5 Preview with multimodal input and reasoning effort levels.
+
 ## [18.8.7] - 2026-10-09
 
 ### Added
