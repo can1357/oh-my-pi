@@ -17,6 +17,13 @@ fn main() {
 			&["AppKit", "ScreenCaptureKit", "CoreGraphics"],
 			"14.0",
 		);
+		build_rust_helper(
+			"src/desktop/macos/release_helper.rs",
+			&["src/desktop/macos/release.rs", "src/desktop/macos/route.rs"],
+			"omp_input_release",
+			"omp-input-release",
+			"OMP_INPUT_RELEASE_HELPER",
+		);
 		build_applefm_bridge();
 	}
 }
@@ -141,20 +148,39 @@ fn build_oauth_callback_helper() {
 }
 
 fn build_oauth_callback_relay(target_os: &str) {
+	let mut name = String::from("omp-oauth-callback-relay");
+	if target_os == "windows" {
+		name.push_str(".exe");
+	}
+	build_rust_helper(
+		"src/oauth_callback/relay.rs",
+		&["src/oauth_callback/publication.rs"],
+		"omp_oauth_callback_relay",
+		&name,
+		"OMP_OAUTH_RELAY_BINARY",
+	);
+}
+
+/// Compiles the standalone binary rooted at `root` (with the modules it
+/// includes, `sources`) for the target with rustc directly, and exposes it to
+/// the crate as `embed_variable` for embedding.
+fn build_rust_helper(
+	root: &str,
+	sources: &[&str],
+	crate_name: &str,
+	name: &str,
+	embed_variable: &str,
+) {
 	let manifest_dir =
 		PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR should be set"));
-	let relay_source = manifest_dir.join("src/oauth_callback/relay.rs");
-	let publication_source = manifest_dir.join("src/oauth_callback/publication.rs");
+	let target_os = env::var("CARGO_CFG_TARGET_OS").expect("CARGO_CFG_TARGET_OS should be set");
 	let target = env::var("TARGET").expect("TARGET should be set");
 	let rustc = env::var_os("RUSTC").unwrap_or_else(|| OsString::from("rustc"));
-	let mut output = PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR should be set"))
-		.join("omp-oauth-callback-relay");
-	if target_os == "windows" {
-		output.set_extension("exe");
-	}
+	let output = PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR should be set")).join(name);
 
-	println!("cargo:rerun-if-changed={}", relay_source.display());
-	println!("cargo:rerun-if-changed={}", publication_source.display());
+	for source in std::iter::once(root).chain(sources.iter().copied()) {
+		println!("cargo:rerun-if-changed={}", manifest_dir.join(source).display());
+	}
 	println!("cargo:rerun-if-env-changed=RUSTC_LINKER");
 	let target_linker_variable =
 		format!("CARGO_TARGET_{}_LINKER", target.replace(['-', '.'], "_").to_ascii_uppercase());
@@ -164,7 +190,7 @@ fn build_oauth_callback_relay(target_os: &str) {
 	command
 		.current_dir(&manifest_dir)
 		.arg("--crate-name")
-		.arg("omp_oauth_callback_relay")
+		.arg(crate_name)
 		.arg("--crate-type=bin")
 		.arg("--edition=2024")
 		.arg("--target")
@@ -173,7 +199,7 @@ fn build_oauth_callback_relay(target_os: &str) {
 		.arg("-Ccodegen-units=1")
 		.arg("-Cpanic=abort")
 		.arg("-Cstrip=symbols")
-		.arg(&relay_source)
+		.arg(manifest_dir.join(root))
 		.arg("-o")
 		.arg(&output);
 
@@ -194,18 +220,22 @@ fn build_oauth_callback_relay(target_os: &str) {
 	if target_os == "windows" {
 		command.arg("-Ctarget-feature=+crt-static");
 	}
+	if target_os == "macos" {
+		// Linkers sign arm64 ad hoc by default but not x86_64.
+		command.arg("-Clink-arg=-Wl,-adhoc_codesign");
+	}
 
 	let result = command
 		.output()
-		.unwrap_or_else(|error| panic!("failed to invoke rustc for OAuth callback relay: {error}"));
+		.unwrap_or_else(|error| panic!("failed to invoke rustc for {name}: {error}"));
 	assert!(
 		result.status.success(),
-		"failed to build OAuth callback relay for {target} ({}):\nstdout:\n{}\nstderr:\n{}",
+		"failed to build {name} for {target} ({}):\nstdout:\n{}\nstderr:\n{}",
 		result.status,
 		String::from_utf8_lossy(&result.stdout),
 		String::from_utf8_lossy(&result.stderr)
 	);
-	println!("cargo:rustc-env=OMP_OAUTH_RELAY_BINARY={}", output.display());
+	println!("cargo:rustc-env={embed_variable}={}", output.display());
 }
 
 #[path = "src/oauth_callback/darwin_compiler.rs"]
