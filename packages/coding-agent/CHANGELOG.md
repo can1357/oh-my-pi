@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Bench detects local OpenAI-compatible backends (llama.cpp, Ollama, LM Studio, vLLM, plus loopback/private-baseUrl endpoints) and runs benches that are entirely on them at `--par 1` — `--detailed` included, whose headers and summary now report the measured concurrency — when `--par` is not explicitly provided, since a single local server thrashes its KV cache under parallel load; mixed runs keep the requested `--par` with a note on stderr, and an explicit `--par` is respected as given. ([#13614](https://github.com/can1357/oh-my-pi/pull/13614) by [@yomgui1](https://github.com/yomgui1))
+
 ### Changed
 
 - In terminals that speak the Tern Surface Protocol (Tern), the composer's bottom bar shows the git branch and its status beside the model chip when the status line has the `git` segment; it outlasts the other facts as the bar narrows, and clicking it opens `/git` ([#15220](https://github.com/can1357/oh-my-pi/pull/15220) by [@H4vC](https://github.com/H4vC))
