@@ -158,6 +158,16 @@ interface FormattedDisplayJson {
 }
 
 /**
+ * Matches the serialised form because the separator is the escape `\n`, not a newline, so the line-based helper cannot see it.
+ */
+const SERIALIZED_OUTPUT_NOTICE =
+	/\[(?:Showing |Some lines truncated to |\d+ matches limit reached\. Use limit=\d+ for more|\d+ results limit reached)[^\]\\]*\]/g;
+
+function collectSerializedNotices(fullText: string): string[] {
+	return fullText.match(SERIALIZED_OUTPUT_NOTICE) ?? [];
+}
+
+/**
  * Format one structured `display()` value for the model text and the tool
  * `details`. The model-visible preview is always capped at
  * {@link MAX_DISPLAY_TEXT_BYTES}. When the value exceeds that cap, the full
@@ -177,8 +187,43 @@ function formatDisplayJson(value: unknown, canSpill: boolean): FormattedDisplayJ
 		return { fullText, previewText: fullText, detailsValue: value, spillFullValue: false };
 	}
 
-	const head = truncateHeadBytes(fullText, MAX_DISPLAY_TEXT_BYTES - DISPLAY_ELISION_RESERVE_BYTES);
-	const previewText = `${head.text}\n[…${fullText.length - head.text.length}ch elided…]`;
+	// The notice is a tail line of one field, so head truncation drops it.
+	const allNotices = collectSerializedNotices(fullText);
+	// Missing occurrences are determined against the final head: shrinking it
+	// to reserve space can drop a notice the first pass counted as kept.
+	// Occurrences are consumed one by one, so identical hints from different
+	// fields are not de-duplicated by string value.
+	let reserve = DISPLAY_ELISION_RESERVE_BYTES;
+	let head = truncateHeadBytes(fullText, Math.max(MAX_DISPLAY_TEXT_BYTES - reserve, 0));
+	let lost: string[] = [];
+	for (let pass = 0; pass < 3; pass++) {
+		const keptCounts = new Map<string, number>();
+		for (const notice of collectSerializedNotices(head.text)) {
+			keptCounts.set(notice, (keptCounts.get(notice) ?? 0) + 1);
+		}
+		lost = [];
+		for (const notice of allNotices) {
+			const remaining = keptCounts.get(notice) ?? 0;
+			if (remaining > 0) keptCounts.set(notice, remaining - 1);
+			else lost.push(notice);
+		}
+		const lostBytes = lost.reduce((sum, notice) => sum + Buffer.byteLength(notice, "utf-8") + 1, 0);
+		const nextReserve = DISPLAY_ELISION_RESERVE_BYTES + lostBytes;
+		if (nextReserve === reserve) break;
+		reserve = nextReserve;
+		head = truncateHeadBytes(fullText, Math.max(MAX_DISPLAY_TEXT_BYTES - reserve, 0));
+	}
+	const elided = `${head.text}\n[…${fullText.length - head.text.length}ch elided…]`;
+	// The reattached notices are part of the model-visible preview, so they
+	// share its cap: keep the leading ones that fit.
+	let previewText = elided;
+	let previewBytes = Buffer.byteLength(previewText, "utf-8");
+	for (const notice of lost) {
+		const cost = Buffer.byteLength(notice, "utf-8") + 1;
+		if (previewBytes + cost > MAX_DISPLAY_TEXT_BYTES) break;
+		previewText += `\n${notice}`;
+		previewBytes += cost;
+	}
 	// Without an artifact to mirror into, keep the full value in details: there
 	// is no session JSONL to bloat, and discarding it would strand large
 	// displays from SDK consumers that read `details.jsonOutputs`.

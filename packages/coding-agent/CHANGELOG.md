@@ -415,6 +415,7 @@
 - Fixed long `/btw` answers in Tern being clipped with no way to scroll: `/btw` now answers in the scrollable BTW history sheet ([#14331](https://github.com/can1357/oh-my-pi/pull/14331) by [@H4vC](https://github.com/H4vC))
 - Fixed `/btw` answers longer than 4 KiB being cut off with `[…truncated]` once they finished ([#14331](https://github.com/can1357/oh-my-pi/pull/14331) by [@H4vC](https://github.com/H4vC))
 - In Tern, Esc puts the BTW history sheet away while an answer keeps streaming (`/btw` reopens it); `x` cancels the answer ([#14331](https://github.com/can1357/oh-my-pi/pull/14331) by [@H4vC](https://github.com/H4vC))
+- Fixed a Code Mode `display()` preview dropping the read continuation notice when the value exceeded the 8 KB model-visible cap, leaving the model truncated content and no way to reach the rest. Generated notices are now re-attached after the elision marker, within the same cap ([#12700](https://github.com/can1357/oh-my-pi/issues/12700)).
 
 ## [18.6.0] - 2026-10-03
 
