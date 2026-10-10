@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Sped up external commands in the embedded shell on Linux (glibc 2.29+) by spawning them without copying the host's memory (~9 ms → ~0.8 ms per launch at ~450 MB RSS) ([#14847](https://github.com/can1357/oh-my-pi/issues/14847), [#14858](https://github.com/can1357/oh-my-pi/pull/14858) by [@farnoy](https://github.com/farnoy))
+
 ## [18.8.8] - 2026-10-10
 
 ### Changed
