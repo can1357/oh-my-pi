@@ -10,7 +10,7 @@
 ### Added
 
 - Added an `inline` option to `HookSelectorComponent` that keeps a selector in the composer slot in Tern instead of opening it as a sheet over the screen ([#15058](https://github.com/can1357/oh-my-pi/pull/15058) by [@H4vC](https://github.com/H4vC))
-- Added a `hotkeys` option to `HookSelectorComponent` so a dialog can answer on a single keypress (for example `y` / `n` on a Yes/No prompt)
+- Added a `hotkeys` option to `HookSelectorComponent` so a dialog can answer on a single keypress (for example `y` / `n` on a Yes/No prompt) ([#15153](https://github.com/can1357/oh-my-pi/pull/15153) by [](https://github.com/Shadorain))
 - Added `ModelHubCallbacks.previewCompactionPoint`, whose line the compaction limit field shows while you type instead of the input syntax ([#15065](https://github.com/can1357/oh-my-pi/pull/15065) by [@H4vC](https://github.com/H4vC))
 - Added Vim find and till motions (`f`, `F`, `t`, `T`) in the prompt editor, with `;` and `,` to repeat them ([#15100](https://github.com/can1357/oh-my-pi/pull/15100) by [@Shadorain](https://github.com/Shadorain))
 - Added Vim replace (`r`, `R`) in the prompt editor ([#15100](https://github.com/can1357/oh-my-pi/pull/15100) by [@Shadorain](https://github.com/Shadorain))
