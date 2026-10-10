@@ -2124,6 +2124,62 @@ describe("ACP agent", () => {
 		});
 	});
 
+	it("reports an agent message that reaches the root while a cancelled prompt is still aborting", async () => {
+		const harness = await createHarness({ clientCapabilities: { subagents: {} }, subagentEventBus: new EventBus() });
+		vi.useFakeTimers();
+		const { sessionId } = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		await advanceBootstrapGuard();
+		vi.useRealTimers();
+		const session = harness.findSession(sessionId)!;
+		const abortStarted = Promise.withResolvers<void>();
+		const releaseAbort = Promise.withResolvers<void>();
+		session.abort = async () => {
+			session.isStreaming = false;
+			abortStarted.resolve();
+			await releaseAbort.promise;
+		};
+		const finishPrompt = holdPromptStreaming(session);
+		const promptStarted = Promise.withResolvers<void>();
+		const holdingPrompt = session.prompt;
+		session.prompt = text => {
+			promptStarted.resolve();
+			return holdingPrompt(text);
+		};
+		const prompt = harness.agent.prompt({
+			sessionId,
+			messageId: "00000000-0000-4000-8000-000000000141",
+			prompt: [{ type: "text", text: "cancel me" }],
+		} as PromptRequest);
+		await promptStarted.promise;
+		const cancel = harness.agent.cancel({ sessionId });
+		await abortStarted.promise;
+		expect((await prompt).stopReason).toBe("cancelled");
+
+		// The prompt listener is already detached while the abort is still settling.
+		for (const listener of session.listeners()) {
+			listener({
+				type: "irc_message",
+				message: {
+					role: "custom",
+					customType: "irc:incoming",
+					content: "<rendered IRC envelope>",
+					display: true,
+					details: { id: "m-cancel", from: "Scout", message: "still here" },
+					attribution: "agent",
+					timestamp: 1,
+				},
+			} as AgentSessionEvent);
+		}
+		await Promise.resolve();
+		expect(
+			harness.updates.flatMap(n => (n.update.sessionUpdate === "session_message" ? [n.update.messageId] : [])),
+		).toEqual(["irc-in:m-cancel"]);
+
+		releaseAbort.resolve();
+		finishPrompt();
+		await cancel;
+	});
+
 	it("replays todo tool results as ACP plan updates", async () => {
 		const harness = await createHarness();
 		const stored = new FakeAgentSession(harness.cwdA);

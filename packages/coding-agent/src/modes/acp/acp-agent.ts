@@ -1359,12 +1359,14 @@ export class AcpAgent implements Agent {
 		const record = this.#createManagedSessionRecord(session, setToolUIContext);
 		if (this.#clientCapabilities?.subagents != null && subagentEventBus) {
 			const subagents = new AcpSubagentStreams(this.#connection, session, subagentEventBus);
-			// Root IRC outside an ACP prompt turn (e.g. a detached child writing to the
-			// root, even from a `session_start` spawn) shares the child stream, so it is
-			// held back with that traffic until bootstrap and never precedes it.
+			// Root IRC the prompt handler does not map (no live prompt turn, or one that
+			// is settled or being cancelled; e.g. a detached child writing to the root,
+			// even from a `session_start` spawn) shares the child stream, so it is held
+			// back with that traffic until bootstrap and never precedes it.
 			subagents.track(
 				session.subscribe(event => {
-					if (event.type === "irc_message" && !isPromptTurnInFlight(record.promptTurn)) {
+					const turn = record.promptTurn;
+					if (event.type === "irc_message" && (!turn || turn.settled || turn.cancelRequested)) {
 						subagents.reportRootIncoming(event.message);
 					}
 				}),
