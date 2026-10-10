@@ -78,6 +78,7 @@ function makeTarget(id: string, page: Page | null = null, pageDelayMs = 0) {
 	const target = {
 		_targetId: id,
 		type: () => "page",
+		url: () => page?.url() ?? "",
 		page: pageSpy,
 	} as unknown as Target & { _targetId: string };
 	return { target, pageSpy };
@@ -300,6 +301,37 @@ describe("pickElectronTarget", () => {
 		await expect(pickElectronTarget(browser, { matcher: "missing" })).rejects.toThrow(
 			'No page target matched "missing". Available pages:\n- Example  https://example.com/',
 		);
+	});
+
+	test("does not probe a bound unreadable target before matching a free connected page", async () => {
+		const held = makeTarget("HELD");
+		const free = fakePage({ url: "https://example.org/code", title: "Code" });
+		const available = makeTarget("FREE", free);
+		Object.assign(free, { target: () => available.target });
+		const browser = makeBrowser([held.target, available.target]);
+
+		await expect(
+			pickElectronTarget(browser, { matcher: "example.org/code", bound: new Map([["HELD", "login"]]) }),
+		).resolves.toBe(free);
+		expect(held.pageSpy).not.toHaveBeenCalled();
+	});
+
+	test("reports the holder when a connected matcher selects a bound page beside a free page", async () => {
+		const held = makeTarget("HELD");
+		Object.assign(held.target, { url: () => "https://example.com/login" });
+		const free = fakePage({ url: "https://example.org/code", title: "Code" });
+		const available = makeTarget("FREE", free);
+		Object.assign(free, { target: () => available.target });
+
+		const error = await rejectionOf(
+			pickElectronTarget(makeBrowser([held.target, available.target]), {
+				matcher: "example.com/login",
+				bound: new Map([["HELD", "login"]]),
+			}),
+		);
+		expect(error).toBeInstanceOf(Error);
+		expect((error as Error).message).toContain('already driven by tab "login"');
+		expect(held.pageSpy).not.toHaveBeenCalled();
 	});
 
 	test("prefers the foreground tab when asked to, without disturbing default order", async () => {
@@ -623,7 +655,8 @@ describe("pickElectronTarget", () => {
 		const session = makeSession();
 		const prelude = createBrowserPrelude(session);
 		const invoke = (parameters: unknown) => prelude.invoke(parameters, { session, toolCallId: label });
-		const open = (name: string, url: string) => invoke({ action: "open", name, url, app: { cdp_url: cdpUrl } });
+		const open = (name: string, url: string, endpoint = cdpUrl) =>
+			invoke({ action: "open", name, url, app: { cdp_url: endpoint } });
 		const pageOf = async (name: string) => {
 			const result = await invoke({
 				action: "run",
@@ -651,7 +684,7 @@ describe("pickElectronTarget", () => {
 			await fs.rm(root, { recursive: true, force: true });
 		};
 		await waitForCdp(cdpUrl, 15_000);
-		return { open, pageOf, newPage, dispose };
+		return { cdpUrl, open, pageOf, newPage, dispose };
 	}
 
 	test.skipIf(!CHROMIUM_AVAILABLE)(
@@ -696,6 +729,31 @@ describe("pickElectronTarget", () => {
 			try {
 				await chromium.newPage();
 				await Promise.all([chromium.open(first, firstUrl), chromium.open(second, secondUrl)]);
+
+				const firstPage = await chromium.pageOf(first);
+				const secondPage = await chromium.pageOf(second);
+				expect(firstPage).toMatchObject({ url: firstUrl });
+				expect(secondPage).toMatchObject({ url: secondUrl });
+				expect(secondPage).not.toEqual(firstPage);
+			} finally {
+				await chromium.dispose([second, first]);
+			}
+		},
+		30_000,
+	);
+
+	test.skipIf(!CHROMIUM_AVAILABLE)(
+		"keeps concurrent opens on equivalent connected endpoints on separate pages",
+		async () => {
+			const chromium = await connectedChromium("connected-aliased-tabs");
+			const first = `aliased-first-${crypto.randomUUID()}`;
+			const second = `aliased-second-${crypto.randomUUID()}`;
+			const firstUrl = "data:text/html,<title>First alias</title>";
+			const secondUrl = "data:text/html,<title>Second alias</title>";
+			try {
+				await chromium.newPage();
+				const endpoint = chromium.cdpUrl.replace("127.0.0.1", "localhost");
+				await Promise.all([chromium.open(first, firstUrl), chromium.open(second, secondUrl, endpoint)]);
 
 				const firstPage = await chromium.pageOf(first);
 				const secondPage = await chromium.pageOf(second);

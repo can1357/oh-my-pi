@@ -221,9 +221,10 @@ const acquireChains = new Map<string, Promise<void>>();
 // `acquireChains` keeps one acquisition per name in flight, so an entry is
 // dropped by name once that acquisition settles.
 const reservedTargets = new Map<string, string>();
-// Per-browser pick chain: serializes attached-target selection and its
-// reservation so two picks never read the same snapshot.
-const targetPicks = new Map<string, Promise<void>>();
+// CDP discovery URLs can alias the same browser (localhost vs 127.0.0.1, or
+// different DNS names). Serialize only picking/reservation globally, not worker
+// startup; the raw registry key cannot safely identify a distinct browser.
+let targetPick: Promise<void> = Promise.resolve();
 const GRACE_MS = 750;
 // Cold-start guard for the worker's `setup` handshake (realm usable: puppeteer
 // loaded, browser connected, page acquired). On hosts where the worker's cold
@@ -1542,9 +1543,9 @@ async function buildInitPayload(
 	// target may be backgrounded, so retain activation for target-correct pixels.
 	const userDriven = browser.kind.kind === "connected" || browser.kind.kind === "relay";
 	const activateForScreenshot = !userDriven || !shouldPreserveConnectedBrowserFocus(opts.target);
-	const prior = targetPicks.get(browser.key) ?? Promise.resolve();
+	const prior = targetPick;
 	const { promise: picked, resolve: pickDone } = Promise.withResolvers<void>();
-	targetPicks.set(browser.key, picked);
+	targetPick = picked;
 	let targetId: string;
 	try {
 		await prior;
@@ -1566,7 +1567,6 @@ async function buildInitPayload(
 		reservedTargets.set(targetId, name);
 	} finally {
 		pickDone();
-		if (targetPicks.get(browser.key) === picked) targetPicks.delete(browser.key);
 	}
 	return {
 		mode: "attach",

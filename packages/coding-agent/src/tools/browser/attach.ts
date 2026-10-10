@@ -745,10 +745,21 @@ export async function pickElectronTarget(browser: Browser, options: PickTargetOp
 		}
 		targets = browser.targets();
 	}
+	const heldTargets: Array<{ name: string; url: string }> = [];
 	let hasUnreadablePage = false;
 	const discoveredPages = await Promise.all(
 		targets.map(async target => {
 			if (String(target.type()) !== "page") return null;
+			// A managed tab already holds this target. Do not let its readiness
+			// failure veto a different, readable page requested by this open.
+			if (options.bound?.size) {
+				const id = await targetIdForTarget(target).catch(() => "");
+				const name = options.bound.get(id);
+				if (name !== undefined) {
+					heldTargets.push({ name, url: target.url() });
+					return null;
+				}
+			}
 			const page = await attachPageWithTimeout(target, PAGE_ATTACH_TIMEOUT_MS, options.signal);
 			if (!page || !(await waitForMainFrame(page, FRAME_READY_TIMEOUT_MS, options.signal))) {
 				hasUnreadablePage = true;
@@ -769,13 +780,18 @@ export async function pickElectronTarget(browser: Browser, options: PickTargetOp
 		}
 		throw new ToolError("A browser tab is not ready; retry after it loads to avoid selecting a different tab");
 	}
-	if (usablePages.length > 0) return pickPageFromList(usablePages, options);
+	if (usablePages.length > 0) return pickPageFromList(usablePages, options, heldTargets);
 
 	const fallbackPages = await abortable(options.signal, () => browser.pages());
 	if (!fallbackPages.length) {
+		if (!options.matcher && heldTargets.length > 0)
+			throw boundTabError(
+				heldTargets.map(target => target.name),
+				undefined,
+			);
 		throw new ToolError("No page targets available on the attached browser");
 	}
-	return pickPageFromList(fallbackPages, options);
+	return pickPageFromList(fallbackPages, options, heldTargets);
 }
 
 async function enrichPages(
@@ -813,7 +829,11 @@ async function firstVisiblePage(pages: Page[], signal?: AbortSignal): Promise<Pa
 	return foreground >= 0 ? pages[foreground]! : null;
 }
 
-async function pickPageFromList(pages: Page[], options: PickTargetOptions): Promise<Page> {
+async function pickPageFromList(
+	pages: Page[],
+	options: PickTargetOptions,
+	heldTargets: readonly { name: string; url: string }[] = [],
+): Promise<Page> {
 	const enriched = await enrichPages(pages, options.signal);
 	const holders = await Promise.all(enriched.map(p => boundTabName(p.page, options.bound)));
 	const free = enriched.filter((_, index) => holders[index] === undefined);
@@ -828,6 +848,12 @@ async function pickPageFromList(pages: Page[], options: PickTargetOptions): Prom
 			return holder && matches(p) ? [holder] : [];
 		});
 		if (held.length > 0) throw boundTabError(held, options.matcher);
+		const heldByUrl = heldTargets.filter(target => target.url.toLowerCase().includes(needle));
+		if (heldByUrl.length > 0)
+			throw boundTabError(
+				heldByUrl.map(target => target.name),
+				options.matcher,
+			);
 		const summary = enriched.map(p => `- ${p.title || "(untitled)"}  ${p.url}`).join("\n");
 		throw new ToolError(`No page target matched ${JSON.stringify(options.matcher)}. Available pages:\n${summary}`);
 	}
