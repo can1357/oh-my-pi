@@ -245,9 +245,10 @@ export function resolveAgentSkills(
 /**
  * Resolve the agent's `autoloadSkills` names against the full unfiltered skill
  * list. A skill hidden from the `<skills>` listing can still be preloaded —
- * except a `disableModelInvocation: true` opt-out, which is never injectable
- * (mirroring the `unhideSkills` rule in {@link resolveAgentSkills}). Unknown
- * names are ignored. Returns copies, never parent session identities.
+ * `autoloadSkills` is the agent author's explicit choice, not a model
+ * invocation, so it loads any named skill (including a
+ * `disableModelInvocation: true` opt-out) exactly as before. Unknown names
+ * are ignored. Returns copies, never parent session identities.
  */
 export function resolveAgentAutoloadSkills(
 	sessionSkills: readonly Skill[],
@@ -256,7 +257,7 @@ export function resolveAgentAutoloadSkills(
 	if (!autoloadSkills?.length) return [];
 	return autoloadSkills
 		.map(name => sessionSkills.find(skill => skill.name === name))
-		.filter(skill => skill !== undefined && skill.modelInvocationDisabled !== true)
+		.filter((skill): skill is Skill => skill !== undefined)
 		.map(skill => ({ ...skill }));
 }
 

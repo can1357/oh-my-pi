@@ -633,11 +633,10 @@ describe("structured subagent primitive", () => {
 		expect(dispatched[0]?.autoloadSkills?.map(s => s.name)).toEqual(["secret"]);
 	});
 
-	it("refuses to autoload a model-invocation opt-out", async () => {
-		// Autoload injects skill content into the child context, so a
-		// `disableModelInvocation: true` opt-out must be a no-op here — mirroring
-		// the `unhideSkills` rule. Otherwise autoload would resurrect the same
-		// opt-out the listing filter refuses to resurrect.
+	it("preloads any named skill via autoloadSkills, even a model-invocation opt-out", async () => {
+		// `autoloadSkills` is the agent author's explicit choice — not a model
+		// invocation — so it resolves against the full list and preloads any
+		// named skill, including one the `<skills>` listing hides.
 		const skills = [
 			{ name: "alpha", description: "a", filePath: "/skills/alpha/SKILL.md", baseDir: "/skills", source: "user" },
 			{
@@ -660,7 +659,7 @@ describe("structured subagent primitive", () => {
 
 		await runStructuredSubagent(request({ session: childSession, retainArtifacts: true }));
 
-		expect(dispatched[0]?.autoloadSkills?.map(s => s.name)).toEqual(["alpha"]);
+		expect(dispatched[0]?.autoloadSkills?.map(s => s.name)).toEqual(["revoked", "alpha"]);
 	});
 
 	it("retains temporary artifacts when the run failed but yielded schema-valid structured output", async () => {

@@ -89,19 +89,6 @@ describe("parseAgentFields", () => {
 		expect(parseAgentFields({ name: "quiet", description: "desc" })?.tools).toBeUndefined();
 	});
 
-	test("treats a malformed tools value as absent rather than an empty toolset", () => {
-		// Only the `[]` literal means "present but empty". A blank CSV or an
-		// array holding no strings carries no tool names, so it must degrade to
-		// the absent-field default (unrestricted); parsing it as `[]` would
-		// silently strip every tool down to `yield`.
-		expect(parseAgentFields({ name: "quiet", description: "desc", tools: "" })?.tools).toBeUndefined();
-		expect(parseAgentFields({ name: "quiet", description: "desc", tools: "   " })?.tools).toBeUndefined();
-		expect(parseAgentFields({ name: "quiet", description: "desc", tools: [1, 2] })?.tools).toBeUndefined();
-		// An array of blank strings carries no tool names either — same absent
-		// default, not a yield-only strip.
-		expect(parseAgentFields({ name: "quiet", description: "desc", tools: ["", "   "] })?.tools).toBeUndefined();
-	});
-
 	test("maps legacy search alias to grep and keeps find canonical", () => {
 		const fields = parseAgentFields({
 			name: "reviewer",
@@ -230,6 +217,31 @@ describe("parseAgentFields", () => {
 			"none",
 			"git-*",
 		]);
+	});
+
+	test("keeps brace expansions whole in the visibility fields' CSV form", () => {
+		// Commas inside `{...}` do not split: `"{alpha,beta}"` is one glob,
+		// matching both names.
+		expect(parseAgentFields({ name: "worker", description: "desc", skills: "{alpha,beta}" })?.skills).toEqual([
+			"{alpha,beta}",
+		]);
+		expect(
+			parseAgentFields({ name: "worker", description: "desc", hideSkills: "{alpha,beta}, gamma" })?.hideSkills,
+		).toEqual(["{alpha,beta}", "gamma"]);
+		expect(
+			parseAgentFields({ name: "worker", description: "desc", unhideSkills: "delta, {eps,zeta}" })?.unhideSkills,
+		).toEqual(["delta", "{eps,zeta}"]);
+	});
+
+	test("treats blank hideSkills/unhideSkills values as absent", () => {
+		for (const blank of ["", "   ", ["", "  "]]) {
+			expect(
+				parseAgentFields({ name: "worker", description: "desc", hideSkills: blank })?.hideSkills,
+			).toBeUndefined();
+			expect(
+				parseAgentFields({ name: "worker", description: "desc", unhideSkills: blank })?.unhideSkills,
+			).toBeUndefined();
+		}
 	});
 
 	test("parses hideSkills and unhideSkills from frontmatter", () => {

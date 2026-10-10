@@ -434,6 +434,35 @@ enabled: false
 			}
 		});
 
+		it("should tag load-time provenance for hide vs model-invocation opt-outs", async () => {
+			// `capSkillToSkill` must set `modelInvocationDisabled` only for the
+			// `disableModelInvocation` opt-out: deleting that line keeps every
+			// hand-built-flag test green while letting `unhideSkills: ["*"]`
+			// re-list opt-out skills, so this dir-loader test pins the mapping.
+			const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-hide-provenance-"));
+			const writeSkill = async (dir: string, frontmatter: string) => {
+				await fs.mkdir(path.join(tempDir, dir), { recursive: true });
+				await fs.writeFile(
+					path.join(tempDir, dir, "SKILL.md"),
+					`---\nname: ${dir}\ndescription: Provenance fixture.\n${frontmatter}---\n\n# Skill\n`,
+				);
+			};
+			await writeSkill("opt-out-skill", "disable-model-invocation: true\n");
+			await writeSkill("plain-hidden-skill", "hide: true\n");
+
+			try {
+				const { skills } = await loadSkillsFromDir({ dir: tempDir, source: "test" });
+				const optOut = skills.find(s => s.name === "opt-out-skill");
+				expect(optOut?.hide).toBe(true);
+				expect(optOut?.modelInvocationDisabled).toBe(true);
+				const plainHidden = skills.find(s => s.name === "plain-hidden-skill");
+				expect(plainHidden?.hide).toBe(true);
+				expect(plainHidden?.modelInvocationDisabled).toBeFalsy();
+			} finally {
+				await removeWithRetries(tempDir);
+			}
+		});
+
 		it("should let ignoredSkills override includeSkills", async () => {
 			const { skills } = await loadSkills({
 				...DISABLE_ALL_BUILTIN_SKILLS,

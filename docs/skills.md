@@ -56,7 +56,7 @@ Supported frontmatter fields on the skill type:
 - `globs?: string[]`
 - `alwaysApply?: boolean`
 - `hide?: boolean`
-- `disableModelInvocation?: boolean` (Agent Skills equivalent of `hide`; normalized from kebab-case `disable-model-invocation`)
+- `disableModelInvocation?: boolean` (Agent Skills opt-out of model invocation; normalized from kebab-case `disable-model-invocation`). Like `hide` it excludes the skill from the system-prompt `<skills>` listing, but unlike a presentation-only `hide: true` it is sticky: per-role `unhideSkills` re-exposes `hide: true` skills yet never resurrects a `disableModelInvocation` opt-out (see `docs/task-agent-discovery.md`). Loader provenance is tracked on `Skill.modelInvocationDisabled`.
 - additional keys are preserved as unknown metadata by conventional scanners
 - `enabled: false` skips a skill in conventional scanners and Skillshare discovery
 

@@ -16,7 +16,9 @@ function skill(name: string, hide?: boolean): Skill {
 	};
 }
 
-function agent(overrides: Partial<Pick<AgentDefinition, "skills" | "hideSkills" | "unhideSkills">> = {}) {
+type Visibility = Pick<AgentDefinition, "skills" | "hideSkills" | "unhideSkills">;
+
+function agent(overrides: Partial<Visibility> = {}): Visibility {
 	return overrides;
 }
 
@@ -99,6 +101,22 @@ describe("resolveAgentSkills", () => {
 		expect(listed(resolveAgentSkills(skills, agent({ hideSkills: ["**"] })))).toEqual([]);
 		expect(listed(resolveAgentSkills(skills, agent({ skills: ["*"] })))).toEqual(["alpha"]);
 		expect(listed(resolveAgentSkills(skills, agent({ skills: ["**"] })))).toEqual(["alpha", "ns/secret"]);
+	});
+
+	test("brace expansions match as one pattern", () => {
+		const skills = [skill("alpha"), skill("beta"), skill("gamma")];
+		expect(listed(resolveAgentSkills(skills, agent({ skills: ["{alpha,beta}"] })))).toEqual(["alpha", "beta"]);
+		expect(listed(resolveAgentSkills(skills, agent({ hideSkills: ["{alpha,beta}"] })))).toEqual(["gamma"]);
+	});
+
+	test("an explicit allowlist hit keeps source hide until unhideSkills clears it", () => {
+		const skills = [skill("alpha", true)];
+		const allowed = resolveAgentSkills(skills, agent({ skills: ["alpha"] }));
+		expect(listed(allowed)).toEqual([]);
+		expect(allowed[0]?.hide).toBe(true);
+		const unhidden = resolveAgentSkills(skills, agent({ skills: ["alpha"], unhideSkills: ["alpha"] }));
+		expect(listed(unhidden)).toEqual(["alpha"]);
+		expect(unhidden[0]?.hide).toBe(false);
 	});
 
 	test("never lists a model-invocation opt-out, even with hide falsy or unhide present", () => {
