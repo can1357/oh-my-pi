@@ -162,4 +162,9 @@ export class AccountPolicies {
 	forCredential(provider: string, credential: AuthCredential): AuthAccountPolicy | undefined {
 		return credential.type === "oauth" ? this.find(provider, credential) : undefined;
 	}
+
+	/** Whether any `provider` policy turns automatic saved-reset spending on (`autoRedeem: true`). */
+	enablesAutoRedeem(provider: string): boolean {
+		return this.#accountPolicies.some(policy => policy.provider === provider && policy.autoRedeem === true);
+	}
 }

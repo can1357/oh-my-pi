@@ -362,6 +362,11 @@ export class OAuthAccounts implements OAuthApi {
 		return this.#deps.policies.find(provider, identity);
 	}
 
+	/** Whether an account policy for `provider` sets `autoRedeem: true`, overriding a provider-wide `no`. */
+	enablesAutoRedeem(provider: string): boolean {
+		return this.#deps.policies.enablesAutoRedeem(provider);
+	}
+
 	/** Force-refresh one stored credential by its durable row id. */
 	refresh(id: number, signal?: AbortSignal, options?: OAuthRefreshByIdOptions): Promise<AuthCredentialSnapshotEntry> {
 		return this.#deps.refresher.refreshById(id, signal, options);

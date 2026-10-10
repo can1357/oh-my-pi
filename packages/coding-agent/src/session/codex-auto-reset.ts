@@ -99,12 +99,20 @@ export function shouldPromptCodexAutoRedeem(mode: ResetAutoRedeemMode): boolean 
 	return mode === "unset";
 }
 
+/** An account policy's `autoRedeem` overrides the provider's mode for that account, in both directions. */
+export function effectiveAutoRedeemMode(
+	mode: ResetAutoRedeemMode,
+	policy: AuthAccountPolicy | undefined,
+): ResetAutoRedeemMode {
+	if (policy?.autoRedeem === undefined) return mode;
+	return policy.autoRedeem ? "yes" : "no";
+}
+
 /** What woke the planner. `sweep` may only salvage; `blocked` may also restore. */
 export type CodexResetTrigger = "blocked" | "sweep";
 
 /** Why one account produced no action (or, with `accountKey: "*"`, a whole rule was off). */
 export type CodexResetSkipReason =
-	| "disabled"
 	| "auto-redeem-off"
 	| "wrong-provider"
 	| "spark-model"
@@ -132,7 +140,8 @@ export interface CodexResetPlanInput {
 	/** `this.model.id` — gates the `blocked-account` rule only. */
 	modelId: string;
 	settings: {
-		enabled: boolean;
+		/** Provider-wide consent; an account policy's `autoRedeem` overrides it for that account. */
+		autoRedeem: ResetAutoRedeemMode;
 		/** `blocked-account`: skip when the natural unblock is closer than this. */
 		minBlockedMinutes: number;
 		/** `blocked-account`: never spend below this many remaining credits. */
@@ -142,7 +151,7 @@ export interface CodexResetPlanInput {
 	};
 	/** Active account (marks the preferred restore candidate); may be undefined. */
 	identity: OAuthAccountIdentity | undefined;
-	/** Account policy lookup; an account whose policy sets `autoRedeem: false` is never planned. */
+	/** Account policy lookup; a policy's `autoRedeem` overrides `settings.autoRedeem` for that account. */
 	accountPolicy: (identity: OAuthAccountIdentity) => AuthAccountPolicy | undefined;
 	/** Usage reports for ALL stored accounts (one per account for Codex). */
 	reports: UsageReport[] | null;
@@ -168,6 +177,8 @@ export interface CodexResetAction {
 	attemptKey: string;
 	/** Human label for notices/prompts (email preferred). */
 	label: string;
+	/** The account's effective consent: `yes` spends without asking, `unset` asks first. */
+	autoRedeem: Exclude<ResetAutoRedeemMode, "no">;
 	/** Redeemable credits in the authoritative live status. */
 	availableCount?: number;
 	weeklyUsedFraction?: number;
@@ -230,6 +241,7 @@ interface AccountSnapshot {
 	target: ResetCreditTarget;
 	label: string;
 	active: boolean;
+	autoRedeem: Exclude<ResetAutoRedeemMode, "no">;
 	availableCount: number;
 	windows: CodexChatWindowSnapshot[];
 	limitReached: boolean;
@@ -307,7 +319,6 @@ function usedFractionForWindow(snapshot: AccountSnapshot, window: CodexChatWindo
 export function planCodexResetRedemptions(input: CodexResetPlanInput): CodexResetPlan {
 	const { nowMs, settings } = input;
 	const skipped: CodexResetSkip[] = [];
-	if (!settings.enabled) return { actions: [], skipped: [{ accountKey: "*", rule: "account", reason: "disabled" }] };
 
 	// Rule-wide gates for `blocked-account`: a redeem can only unblock the turn
 	// when the turn is actually on Codex, and it is unknown whether a credit
@@ -339,7 +350,8 @@ export function planCodexResetRedemptions(input: CodexResetPlanInput): CodexRese
 			continue;
 		}
 		const accountKey = `openai-codex|${orgId?.trim().toLowerCase() ?? "-"}|${credentialId}`;
-		if (input.accountPolicy({ accountId, email, orgId })?.autoRedeem === false) {
+		const autoRedeem = effectiveAutoRedeemMode(settings.autoRedeem, input.accountPolicy({ accountId, email, orgId }));
+		if (autoRedeem === "no") {
 			skipped.push({ accountKey, rule: "account", reason: "auto-redeem-off" });
 			continue;
 		}
@@ -373,6 +385,7 @@ export function planCodexResetRedemptions(input: CodexResetPlanInput): CodexRese
 			},
 			label,
 			active: isActive,
+			autoRedeem,
 			availableCount: available,
 			windows,
 			limitReached: report.metadata?.limitReached === true,
@@ -505,6 +518,7 @@ export function planCodexResetRedemptions(input: CodexResetPlanInput): CodexRese
 				accountKey: best.snapshot.accountKey,
 				attemptKey: blockedAttemptKey(best.snapshot.accountKey, best.unblockAtMs),
 				label: best.snapshot.label,
+				autoRedeem: best.snapshot.autoRedeem,
 				availableCount: best.snapshot.availableCount,
 				weeklyUsedFraction: usedFractionForWindow(best.snapshot, "weekly"),
 				remainingMs: best.remainingMs,
@@ -561,6 +575,7 @@ export function planCodexResetRedemptions(input: CodexResetPlanInput): CodexRese
 			accountKey: snapshot.accountKey,
 			attemptKey,
 			label: snapshot.label,
+			autoRedeem: snapshot.autoRedeem,
 			availableCount: snapshot.availableCount,
 			weeklyUsedFraction: usedFractionForWindow(snapshot, "weekly"),
 			salvageWindow: fullestWindow?.window,

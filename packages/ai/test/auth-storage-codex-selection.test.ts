@@ -830,7 +830,7 @@ describe("AuthStorage codex oauth ranking", () => {
 		).toThrow("without surrounding whitespace");
 	});
 
-	test("rejects an autoRedeem opt-out that is not a boolean", () => {
+	test("rejects an autoRedeem override that is not a boolean", () => {
 		if (!store) throw new Error("test setup failed");
 		const activeStore = store;
 		const autoRedeem = "no" as unknown as boolean;

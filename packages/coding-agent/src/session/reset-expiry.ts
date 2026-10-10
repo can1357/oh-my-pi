@@ -10,6 +10,7 @@ import { formatActiveAccountLabel, usageReportIdentity } from "../slash-commands
 import { formatResetProviderName } from "../slash-commands/helpers/reset-usage";
 import { claudeCoveredLimits, fullestClaudeLimit } from "./claude-auto-reset";
 import {
+	effectiveAutoRedeemMode,
 	fullestCodexChatWindow,
 	SALVAGE_MIN_USED_FRACTION,
 	shouldEvaluateCodexAutoRedeem,
@@ -75,13 +76,14 @@ export function classifyResetExpiry(report: UsageReport, nowMs: number): ResetEx
 /**
  * Who spends an imminent saved reset under the session consent rules. `auto`
  * and `ask` both need an interactive omp session: its usage refresh runs the
- * salvage sweep. `off` (the provider setting) and `account-off` (the account's
- * `autoRedeem: false` policy) mean nothing spends it.
+ * salvage sweep. `off` means nothing spends it.
  */
 export interface ResetSpendVerdict {
-	kind: "auto" | "ask" | "off" | "account-off";
+	kind: "auto" | "ask" | "off";
 	setting: "codexResets.autoRedeem" | "claudeResets.autoRedeem";
 	mode: ResetAutoRedeemMode;
+	/** The account policy's `autoRedeem`, which overrides `mode` when set. */
+	accountAutoRedeem: boolean | undefined;
 }
 
 export function resetSpendVerdict(
@@ -91,14 +93,13 @@ export function resetSpendVerdict(
 ): ResetSpendVerdict {
 	const setting = provider === "anthropic" ? cfgClaudeResetsAutoRedeem : cfgCodexResetsAutoRedeem;
 	const mode = setting.get(settings);
-	const kind = !shouldEvaluateCodexAutoRedeem(mode)
+	const effective = effectiveAutoRedeemMode(mode, policy);
+	const kind = !shouldEvaluateCodexAutoRedeem(effective)
 		? "off"
-		: policy?.autoRedeem === false
-			? "account-off"
-			: shouldPromptCodexAutoRedeem(mode)
-				? "ask"
-				: "auto";
-	return { kind, setting: setting.id, mode };
+		: shouldPromptCodexAutoRedeem(effective)
+			? "ask"
+			: "auto";
+	return { kind, setting: setting.id, mode, accountAutoRedeem: policy?.autoRedeem };
 }
 
 /** One-line TUI warning for the soonest saved reset expiring within 24 hours across the pool. */

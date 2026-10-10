@@ -13,11 +13,13 @@ import { claudeRankingStrategy } from "@oh-my-pi/pi-ai/usage/claude";
 import {
 	ATTEMPT_COOLDOWN_MS,
 	DEBOUNCE_BUCKET_MS,
+	effectiveAutoRedeemMode,
 	IMMINENT_RESET_EXPIRY_MS,
 	REPORT_FRESHNESS_MS,
 	SALVAGE_MIN_USED_FRACTION,
 	type CodexResetTrigger,
 } from "./codex-auto-reset";
+import type { ResetAutoRedeemMode } from "./settings";
 
 const CLAUDE_PROVIDER = "anthropic";
 const JUNIPER_PROGRAM = "juniper_tide";
@@ -28,7 +30,6 @@ const MAX_PLAUSIBLE_WEEKLY_MS = 8 * 24 * 3_600_000;
 
 /** Why an account or grant is unsafe or unhelpful for automatic redemption. */
 export type ClaudeResetSkipReason =
-	| "disabled"
 	| "auto-redeem-off"
 	| "wrong-provider"
 	| "no-identity"
@@ -62,12 +63,13 @@ export interface ClaudeResetPlanInput {
 	provider: string;
 	modelId: string;
 	settings: {
-		enabled: boolean;
+		/** Provider-wide consent; an account policy's `autoRedeem` overrides it for that account. */
+		autoRedeem: ResetAutoRedeemMode;
 		minBlockedMinutes: number;
 		keepCredits: number;
 		salvageHorizonMs: number;
 	};
-	/** Account policy lookup; an account whose policy sets `autoRedeem: false` is never planned. */
+	/** Account policy lookup; a policy's `autoRedeem` overrides `settings.autoRedeem` for that account. */
 	accountPolicy: (identity: OAuthAccountIdentity) => AuthAccountPolicy | undefined;
 	/** Fresh usage for every stored Claude account. */
 	reports: UsageReport[] | null;
@@ -87,6 +89,8 @@ export interface ClaudeResetAction {
 	accountKey: string;
 	attemptKey: string;
 	label: string;
+	/** The account's effective consent: `yes` spends without asking, `unset` asks first. */
+	autoRedeem: Exclude<ResetAutoRedeemMode, "no">;
 	availableCount: number;
 	remainingMs?: number;
 	blockedWindows?: string[];
@@ -117,6 +121,7 @@ interface ClaudeAccountSnapshot {
 	target: ResetCreditTarget;
 	label: string;
 	active: boolean;
+	autoRedeem: Exclude<ResetAutoRedeemMode, "no">;
 	availableCount: number;
 	credit: UsageResetCredit;
 	limits: UsageLimit[];
@@ -230,9 +235,6 @@ function skipForEpisode(
  */
 export function planClaudeResetRedemptions(input: ClaudeResetPlanInput): ClaudeResetPlan {
 	const skipped: ClaudeResetSkip[] = [];
-	if (!input.settings.enabled) {
-		return { actions: [], skipped: [{ accountKey: "*", rule: "account", reason: "disabled" }] };
-	}
 	if (input.trigger === "blocked" && input.provider !== CLAUDE_PROVIDER) {
 		return { actions: [], skipped: [{ accountKey: "*", rule: "blocked-account", reason: "wrong-provider" }] };
 	}
@@ -248,7 +250,8 @@ export function planClaudeResetRedemptions(input: ClaudeResetPlanInput): ClaudeR
 			continue;
 		}
 		const skip = (reason: ClaudeResetSkipReason) => skipped.push({ accountKey, rule: "account", reason });
-		if (input.accountPolicy(status)?.autoRedeem === false) {
+		const autoRedeem = effectiveAutoRedeemMode(input.settings.autoRedeem, input.accountPolicy(status));
+		if (autoRedeem === "no") {
 			skip("auto-redeem-off");
 			continue;
 		}
@@ -335,6 +338,7 @@ export function planClaudeResetRedemptions(input: ClaudeResetPlanInput): ClaudeR
 			},
 			label,
 			active: status.active,
+			autoRedeem,
 			availableCount: status.availableCount,
 			credit,
 			limits,
@@ -450,6 +454,7 @@ export function planClaudeResetRedemptions(input: ClaudeResetPlanInput): ClaudeR
 					best.unblockAtMs,
 				),
 				label: best.snapshot.label,
+				autoRedeem: best.snapshot.autoRedeem,
 				availableCount: best.snapshot.availableCount,
 				remainingMs: best.remainingMs,
 				blockedWindows: best.blockers,
@@ -535,6 +540,7 @@ export function planClaudeResetRedemptions(input: ClaudeResetPlanInput): ClaudeR
 			accountKey: snapshot.accountKey,
 			attemptKey,
 			label: snapshot.label,
+			autoRedeem: snapshot.autoRedeem,
 			availableCount: snapshot.availableCount,
 			expiresInMs: expiresAtMs - input.nowMs,
 			salvageWindow: fullest.limit.id,

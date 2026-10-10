@@ -656,7 +656,7 @@ function formatPolicyLine(
 ): string {
 	const policy = options.getAccountPolicy(provider, identity);
 	const priority = policy?.priority ?? 0;
-	const autoRedeemLabel = policy?.autoRedeem === false ? " · auto-redeem off" : "";
+	const autoRedeemLabel = policy?.autoRedeem === undefined ? "" : ` · auto-redeem ${policy.autoRedeem ? "on" : "off"}`;
 	const configuredReservePct = policy?.reservePct;
 	const inherited = configuredReservePct === undefined;
 	const reservePct = Math.max(0, Math.min(100, configuredReservePct ?? options.globalReservePct));
@@ -688,7 +688,10 @@ function formatExpiringResets(warning: ResetExpiryWarning, nowMs: number): strin
 }
 
 function formatResetSpendVerdict(verdict: ResetSpendVerdict): string {
-	const setting = `(${verdict.setting}: ${verdict.mode})`;
+	const setting =
+		verdict.accountAutoRedeem === undefined
+			? `(${verdict.setting}: ${verdict.mode})`
+			: `(auth.accountPolicies autoRedeem: ${verdict.accountAutoRedeem})`;
 	switch (verdict.kind) {
 		case "auto":
 			return `→ spent automatically before it expires while an interactive omp session is open  ${setting}`;
@@ -696,8 +699,6 @@ function formatResetSpendVerdict(verdict: ResetSpendVerdict): string {
 			return `→ an interactive omp session asks before spending it  ${setting}`;
 		case "off":
 			return `→ not spent automatically  ${setting}`;
-		case "account-off":
-			return "→ not spent automatically: auto-redeem is off for this account  (auth.accountPolicies)";
 	}
 }
 
@@ -720,9 +721,8 @@ function formatResetExpiryBanner(
 			policyOptions?.getAccountPolicy(report.provider, usageReportIdentity(report)),
 		),
 	);
-	const unspent = verdicts.map(verdict => verdict.kind === "off" || verdict.kind === "account-off");
 	const count = expiring.reduce((sum, { warning }) => sum + warning.count, 0);
-	const lost = unspent.every(Boolean);
+	const lost = verdicts.every(verdict => verdict.kind === "off");
 	const lines = [
 		chalk.red.bold(
 			`▲ ${count} saved reset${count === 1 ? " expires" : "s expire"} within 24h${lost ? " and will be lost" : ""}`,
@@ -745,7 +745,9 @@ function formatResetExpiryBanner(
 			.filter(account => reportMatchesStatus(report, { ...account, provider: warning.provider }));
 		const command =
 			stored.length === 1 ? `/usage reset ${warning.provider}/${stored[0]!.credentialId}` : "/usage reset";
-		lines.push(`    ${unspent[index] ? "spend it" : "or now"}:  ${chalk.cyan(command)} ${chalk.dim("in omp")}`);
+		lines.push(
+			`    ${verdict.kind === "off" ? "spend it" : "or now"}:  ${chalk.cyan(command)} ${chalk.dim("in omp")}`,
+		);
 	});
 	return lines;
 }
