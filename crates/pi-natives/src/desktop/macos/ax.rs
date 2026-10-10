@@ -118,6 +118,20 @@ pub(super) fn key_window_id(pid: libc::pid_t) -> Option<u32> {
 		})
 }
 
+/// Whether `pid` stopped answering: an accessibility request got no reply
+/// within `timeout` seconds while the process still exists. Other AX errors,
+/// such as missing trust, prove nothing about the application and do not count.
+pub(super) fn stopped_answering(pid: libc::pid_t, timeout: f32) -> bool {
+	let Ok(app) = create_application(pid) else {
+		return false;
+	};
+	// SAFETY: The retained application element is valid for the timeout update.
+	let _ = unsafe { app.set_messaging_timeout(timeout) };
+	matches!(copy_attribute_result(&app, "AXFocusedWindow"), Err(AXError::CannotComplete))
+		// SAFETY: Signal 0 only checks that the process exists.
+		&& unsafe { libc::kill(pid, 0) } == 0
+}
+
 /// The application's `AXWindows`, mapped through `_AXUIElementGetWindow`.
 ///
 /// Unlike `WindowServer`'s window list, this omits the extra layer-0

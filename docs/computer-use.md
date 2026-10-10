@@ -116,6 +116,8 @@ Applications and window managers can react to background events by changing focu
 
 On macOS, background key presses, key-event typing (native text fields take AX insertion instead), held keys, left clicks and menu actions make the target window key only within its own application, which then considers itself active; the user's application stays frontmost and keeps keyboard focus. Keystrokes into an application with several windows are sent once it reports the target as its focused window, and otherwise throw `BackgroundUnavailable`; so does any of these actions on a non-key window of the frontmost application, or on a window whose application comes to the front before the input is sent.
 
+A macOS background shortcut with a modifier throws `InputFailed` when its application stops answering accessibility requests right after it, as TextEdit can on a document's first ⌘S: the shortcut was sent, but whether it took effect is unknown. Inspect the application before retrying.
+
 Wayland per-window native input and `raise()` remain unavailable without compositor-specific integration; use AX actions, or desktop input after focusing the target yourself.
 
 `await win.observe({ silent?, all?, maxDepth? })` captures a full screenshot and accessibility tree together. It returns screenshot metadata plus `ax`, `nodeCount`, and `truncated`, and normally emits both image and tree. A failed or canceled observation does not replace the previous delivered click frame.

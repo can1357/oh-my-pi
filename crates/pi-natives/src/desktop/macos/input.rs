@@ -161,6 +161,10 @@ impl MacInput {
 						}
 						with_background_keyboard(&self.source, pid, wid, &window, || {
 							background_chord(&self.source, pid, keys)
+						})?;
+						confirm_shortcut_answered(&window, keys, || {
+							control::wait(SHORTCUT_REPLY_DELAY)?;
+							Ok(ax::stopped_answering(pid, SHORTCUT_REPLY_TIMEOUT_SECONDS))
 						})
 					},
 					DeliveryMode::Foreground => skylight::with_foreground(pid, wid, |activated| {
@@ -307,6 +311,28 @@ fn keyboard_conflict(wid: u32, records: &[ax::AxWindowRecord]) -> Option<Keyboar
 		.filter(|record| record.id != Some(wid) && record.minimized != Some(true))
 		.count();
 	(siblings > 0).then_some(KeyboardConflict::Siblings(siblings))
+}
+
+/// After a background shortcut with a modifier, fails when `stopped_answering`
+/// reports that the application no longer answers accessibility requests.
+///
+/// A shortcut can start work that never returns: `TextEdit`'s first background
+/// ⌘S on a document has blocked in `NSDocument`'s save serialization. Posting
+/// succeeded, but only the application's reply shows the command ran.
+fn confirm_shortcut_answered(
+	window: &DesktopWindow,
+	keys: &[KeyName],
+	stopped_answering: impl FnOnce() -> CoreResult<bool>,
+) -> CoreResult<()> {
+	if !keys.iter().copied().any(KeyName::is_modifier) || !stopped_answering()? {
+		return Ok(());
+	}
+	Err(DesktopError::input_failed(format!(
+		"the shortcut was posted to window {} ({}), but the application stopped answering \
+		 accessibility requests right after, so whether the shortcut took effect is unknown; it may \
+		 be busy or hung. Inspect it before retrying or reporting success",
+		window.id, window.app,
+	)))
 }
 
 const fn pointer_kind(event: &PointerEvent) -> &'static str {
@@ -587,6 +613,11 @@ const POINTER_SETTLE: Duration = Duration::from_millis(40);
 const PRESS_GAP: Duration = Duration::from_millis(28);
 const MULTI_CLICK_GAP: Duration = Duration::from_millis(80);
 const KEY_GAP: Duration = Duration::from_millis(8);
+/// Wait after a background shortcut before asking its application for a
+/// reply. A save that blocks `TextEdit` already does so at this point.
+const SHORTCUT_REPLY_DELAY: Duration = Duration::from_millis(100);
+/// How long that application has to reply before it counts as not answering.
+const SHORTCUT_REPLY_TIMEOUT_SECONDS: f32 = 1.5;
 /// How long raising an occluded target may take to become visible to
 /// hit-testing.
 const UNCOVER_TIMEOUT: Duration = Duration::from_millis(300);
@@ -1987,6 +2018,34 @@ mod tests {
 			keyboard_conflict(10, &[record(10, Some(false)), desktop]),
 			Some(KeyboardConflict::Siblings(1)),
 		);
+	}
+
+	#[test]
+	fn shortcut_into_an_application_that_stops_answering_fails() {
+		let window = DesktopWindow {
+			id:      "42".to_string(),
+			title:   "visitor-form.txt".to_string(),
+			app:     "TextEdit".to_string(),
+			pid:     Some(7),
+			x:       0,
+			y:       0,
+			width:   300,
+			height:  200,
+			focused: false,
+		};
+		let save = [KeyName::Meta, KeyName::Char('s')];
+		let error = confirm_shortcut_answered(&window, &save, || Ok(true))
+			.expect_err("a hung application must not report the shortcut as done");
+		assert_eq!(error.code, crate::desktop::error::ErrorCode::InputFailed);
+		assert!(
+			error
+				.message
+				.contains("whether the shortcut took effect is unknown")
+		);
+		assert!(confirm_shortcut_answered(&window, &save, || Ok(false)).is_ok());
+		let unchecked =
+			|| -> CoreResult<bool> { panic!("a chord without a modifier is not checked") };
+		assert!(confirm_shortcut_answered(&window, &[KeyName::Enter], unchecked).is_ok());
 	}
 
 	#[test]
