@@ -124,11 +124,15 @@ export async function collectBundledPiEntries(): Promise<BundledPiEntry[]> {
 	for (const pkg of BUNDLED_PACKAGES) {
 		let packageRoot = path.join(repoRoot, "packages", pkg.dir);
 		let manifestPath = path.join(packageRoot, "package.json");
-		if (!(await Bun.file(manifestPath).exists())) {
+		let manifest: unknown;
+		try {
+			manifest = await Bun.file(manifestPath).json();
+		} catch (error) {
+			if (!isEnoent(error)) throw error;
 			packageRoot = path.join(packageDir, "..", pkg.npmDir);
 			manifestPath = path.join(packageRoot, "package.json");
+			manifest = await Bun.file(manifestPath).json();
 		}
-		const manifest: unknown = await Bun.file(manifestPath).json();
 		if (!isRecord(manifest) || typeof manifest.name !== "string") {
 			throw new Error(`Bundled Pi package manifest has no name: ${manifestPath}`);
 		}
