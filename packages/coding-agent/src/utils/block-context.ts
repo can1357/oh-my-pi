@@ -332,11 +332,20 @@ export function buildLineEntriesWithBlockContext(
 	source: BlockContextSource = {},
 	options: {
 		lineText?: (lineNumber: number, sourceText: string, context: boolean) => string;
+		/**
+		 * 1-based line numbers the caller deliberately withheld (e.g. an
+		 * over-budget leading context line): never resurrect them as
+		 * off-window block-boundary context.
+		 */
+		excludeFromContext?: ReadonlySet<number>;
 	} = {},
 ): LineEntry[] {
 	const spans = normalizeLineSpans(visibleSpans, fullLines.length);
 	const visible = visibleLineNumbers(spans);
 	const context = findBlockContextLines(fullLines, visible, source);
+	if (options.excludeFromContext !== undefined) {
+		for (const lineNumber of options.excludeFromContext) context.delete(lineNumber);
+	}
 	const allLines = new Set<number>(visible);
 	for (const lineNumber of context.keys()) allLines.add(lineNumber);
 

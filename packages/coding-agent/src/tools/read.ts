@@ -181,6 +181,15 @@ import { cfgImagesAutoResize } from "../modes/settings";
 const MAX_PROFILE_SUMMARY_BYTES = 32 * 1024 * 1024;
 /** Largest URL-located file a bare `:raw` read inlines; bigger ones must page with bounded ranges. */
 const MAX_URL_RAW_INLINE_BYTES = DEFAULT_MAX_BYTES;
+/**
+ * Total source bytes one artifact read call may deliver across every range it
+ * selects. Per-range budgets scale with the requested line count, so a
+ * multi-range page would otherwise stack several of them and return hundreds of
+ * KB from session storage that only spilled because it was too big. Raw chunks
+ * cut at the same line boundary; only a first line wider than the budget keeps
+ * its existing byte-capped preview instead of a page.
+ */
+const ARTIFACT_TOTAL_READ_BUDGET_BYTES = DEFAULT_MAX_BYTES;
 /** Largest file buffered whole for the local read path and speculative snapshots. */
 export const SNAPSHOT_MAX_BYTES = 4 * 1024 * 1024;
 /** LF byte, scanned natively to find line boundaries in a buffered file. */
@@ -297,11 +306,22 @@ function omittedRequestedLine(
 	return line.index === requestedStart && collectedLineCount === leadingContext ? line : undefined;
 }
 
+/** One `start-end` (or open-ended `start-`) range part for a continuation hint. */
+function formatRangePart(startLine: number, endLine: number | undefined): string {
+	return endLine !== undefined ? `${startLine}-${endLine}` : `${startLine}-`;
+}
+
 function formatOmittedRequestedLineNotice(
 	line: NonNullable<ReadLineWindow["byteLimitLine"]>,
 	maxBytes: number,
 	rawTarget: string,
+	fixedBudget: boolean,
 ): string {
+	if (fixedBudget) {
+		return `[Line ${line.index + 1} is ${formatBytes(
+			line.byteLength,
+		)} and could not fit after preceding context in the ${formatBytes(maxBytes)} read budget. The budget is fixed per call for artifact reads, so widening cannot raise it; use ${rawTarget} to read that line without context (byte-capped if it exceeds the budget).]`;
+	}
 	return `[Line ${line.index + 1} is ${formatBytes(
 		line.byteLength,
 	)} and could not fit after preceding context in the ${formatBytes(maxBytes)} read budget. Use ${rawTarget} to read that line without context (byte-capped if it exceeds the budget), or widen the requested range to increase the budget.]`;
@@ -1465,6 +1485,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		suffixResolution: { from: string; to: string } | undefined,
 		signal: AbortSignal | undefined,
 		allowBridge = true,
+		located?: LocatedRead,
 	): Promise<{
 		outputText: string;
 		columnTruncated: number;
@@ -1472,6 +1493,14 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		bridgeResult?: AgentToolResult<ReadToolDetails>;
 	}> {
 		const rawSelector = isRawSelector(parsed);
+
+		// Session artifact storage is the spill target, so a page read back out of
+		// it has to stay bounded by one per-call budget. Without it, per-range
+		// budgets stack: two 150 KB ranges return 300 KB from the very store that
+		// spilled because the result was too large.
+		const artifactBudget = located?.spec.artifactStore
+			? { remaining: ARTIFACT_TOTAL_READ_BUDGET_BYTES, url: located.url }
+			: undefined;
 
 		// ACP bridge first — the editor's in-memory buffer is source of truth.
 		const bridgePromise = allowBridge ? routeReadThroughBridge(this.session, absolutePath) : undefined;
@@ -1510,8 +1539,11 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		const fullLines = rawSelector ? undefined : buffered?.addressableLines;
 		let columnTruncated = 0;
 		let displayContent: { text: string; startLine: number; lineNumbers?: Array<number | null> } | undefined;
+		/** Set once the per-call budget ran out, so the ranges after it stay silent. */
+		let budgetSpent = false;
 
-		for (const range of ranges) {
+		for (let rangeIndex = 0; rangeIndex < ranges.length; rangeIndex++) {
+			const range = ranges[rangeIndex]!;
 			const rangeStart = range.startLine - 1; // 0-indexed
 			const requestedLength = range.endLine !== undefined ? range.endLine - range.startLine + 1 : this.#defaultLimit;
 			const maxLines = Math.min(requestedLength, DEFAULT_MAX_LINES);
@@ -1522,10 +1554,14 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			// terminal newline sentinel) but still slices the same buffer.
 			let collectedLines: string[];
 			let totalFileLines: number;
+			let byteLimitLine: ReadLineWindow["byteLimitLine"];
+			let windowStoppedByByteLimit = false;
+			let windowReachedEof = false;
 			const maxBytesForRead = Math.max(DEFAULT_MAX_BYTES, maxLines * 512);
 			if (fullLines) {
 				totalFileLines = fullLines.length;
 				collectedLines = fullLines.slice(rangeStart, rangeStart + maxLines);
+				windowReachedEof = true;
 			} else {
 				const window = buffered
 					? collectLineWindowFromBuffer(buffered, rangeStart, maxLines, maxBytesForRead, maxLines, rawSelector)
@@ -1535,12 +1571,180 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 						});
 				totalFileLines = window.totalFileLines;
 				collectedLines = window.lines;
+				byteLimitLine = window.byteLimitLine;
+				windowStoppedByByteLimit = window.stoppedByByteLimit;
+				windowReachedEof = window.reachedEof;
 			}
 
 			if (rangeStart >= totalFileLines) {
 				const bound = range.endLine !== undefined ? `${range.startLine}-${range.endLine}` : `${range.startLine}`;
 				notices.push(`[Range ${bound} is beyond end of file (${totalFileLines} lines total); skipped]`);
 				continue;
+			}
+
+			const budget = artifactBudget;
+			/**
+			 * Exact line count when the collector reached EOF: the whole file in
+			 * memory, a buffered window, or a streamed window that scanned to the
+			 * end. Anything else is a lower bound, so hints stay as requested
+			 * rather than risk dropping real lines.
+			 */
+			const knownTotal =
+				fullLines !== undefined || buffered !== undefined || windowReachedEof ? totalFileLines : undefined;
+			/**
+			 * Drop suffixes past the known EOF and clamp bounded ends to it.
+			 */
+			const clampRangePartsToKnownEof = (
+				parts: Array<{ startLine: number; endLine: number | undefined }>,
+			): string[] => {
+				if (knownTotal === undefined) return parts.map(part => formatRangePart(part.startLine, part.endLine));
+				const out: string[] = [];
+				for (const part of parts) {
+					if (part.startLine > knownTotal) continue;
+					const end = part.endLine !== undefined ? Math.min(part.endLine, knownTotal) : undefined;
+					if (end !== undefined && end < part.startLine) continue;
+					out.push(formatRangePart(part.startLine, end));
+				}
+				return out;
+			};
+			/**
+			 * Name a line the budget cannot show and point at its byte-capped raw
+			 * form plus the unattempted remainder, so no requested line goes
+			 * unmentioned and no hint repeats an identical selector. Returns the
+			 * remainder so callers can end the page on it.
+			 */
+			const pushUnshowableLineNotice = (lineNumber: number, lineBytes: number, resumeFrom: number): string[] => {
+				if (budget === undefined) return [];
+				const remainder = clampRangePartsToKnownEof([
+					...(range.endLine === undefined || resumeFrom <= range.endLine
+						? [{ startLine: resumeFrom, endLine: range.endLine }]
+						: []),
+					...ranges.slice(rangeIndex + 1).map(later => ({ startLine: later.startLine, endLine: later.endLine })),
+				]);
+				notices.push(
+					`[Line ${lineNumber} is ${formatBytes(lineBytes)}, exceeds the ${formatBytes(
+						ARTIFACT_TOTAL_READ_BUDGET_BYTES,
+					)} per-read budget and was not shown. Use ${budget.url}:raw:${lineNumber}-${lineNumber} for a byte-capped preview${
+						remainder.length > 0
+							? `, or ${budget.url}:${rawSelector ? "raw:" : ""}${remainder.join(",")} for the rest`
+							: ""
+					}.]`,
+				);
+				return remainder;
+			};
+			/**
+			 * End the page after an incomplete range whose hint already carries
+			 * every later range. Visiting them now would either duplicate them on
+			 * the follow-up or append a second hint whose continuation skips this
+			 * range's suffix. Later ranges past the known EOF still get their
+			 * out-of-bounds notice here, since the clamped hint no longer names
+			 * them.
+			 */
+			const endPageAfterIncompleteRange = (): void => {
+				if (knownTotal !== undefined) {
+					for (const later of ranges.slice(rangeIndex + 1)) {
+						if (later.startLine > knownTotal) {
+							const bound =
+								later.endLine !== undefined ? `${later.startLine}-${later.endLine}` : `${later.startLine}`;
+							notices.push(`[Range ${bound} is beyond end of file (${knownTotal} lines total); skipped]`);
+						}
+					}
+				}
+			};
+
+			if (budget !== undefined && collectedLines.length === 0 && byteLimitLine !== undefined) {
+				// The range's first line alone exceeds the per-range cap, so the
+				// window collected nothing and the lines after it were never
+				// attempted.
+				const remainder = pushUnshowableLineNotice(
+					byteLimitLine.index + 1,
+					byteLimitLine.byteLength,
+					byteLimitLine.index + 2,
+				);
+				if (remainder.length > 0) {
+					endPageAfterIncompleteRange();
+					break;
+				}
+				continue;
+			}
+
+			// Cut at a line boundary once the per-call budget is spent. The hint
+			// carries the rest of this range plus every later range, so following
+			// it skips nothing the call asked for. Applied to both collection
+			// paths: the buffered slice and the streamed window feed the same
+			// blocks.
+			if (budget !== undefined && !budgetSpent && collectedLines.length > 0) {
+				const joined = collectedLines.join("\n");
+				const head = truncateHead(joined, {
+					maxLines: collectedLines.length,
+					maxBytes: budget.remaining,
+				});
+				const kept = head.truncated ? (head.outputLines ?? 0) : collectedLines.length;
+				if (kept === 0) {
+					const firstLineBytes = Buffer.byteLength(collectedLines[0] ?? "", "utf8");
+					if (firstLineBytes > ARTIFACT_TOTAL_READ_BUDGET_BYTES) {
+						// Genuinely oversized: no fresh budget could show it inline.
+						// Hinting the identical selector would loop forever, so name
+						// the line and resume after it instead.
+						const unshowableRemainder = pushUnshowableLineNotice(
+							range.startLine,
+							firstLineBytes,
+							range.startLine + 1,
+						);
+						if (unshowableRemainder.length > 0) {
+							endPageAfterIncompleteRange();
+							break;
+						}
+						continue;
+					}
+					// Fits a full budget, just not what's left of this call: fall
+					// through to the normal cut below, which resumes at the same
+					// line. The follow-up starts with a fresh budget and shows it,
+					// so this cannot loop.
+				}
+				if (kept < collectedLines.length) {
+					const cutLine = range.startLine + kept;
+					const rest = clampRangePartsToKnownEof([
+						{ startLine: cutLine, endLine: range.endLine },
+						...ranges
+							.slice(rangeIndex + 1)
+							.map(later => ({ startLine: later.startLine, endLine: later.endLine })),
+					]);
+					notices.push(
+						`[Read budget of ${formatBytes(ARTIFACT_TOTAL_READ_BUDGET_BYTES)} for this read reached at line ${cutLine}; the rest of the requested ranges was not shown. Use ${budget.url}:${rawSelector ? "raw:" : ""}${rest.join(",")} to continue]`,
+					);
+					collectedLines = collectedLines.slice(0, kept);
+					// The ranges after this one could only add a notice each, so the
+					// loop stops once this range has been rendered.
+					budgetSpent = true;
+				}
+				budget.remaining -= head.truncated ? (head.outputBytes ?? 0) : Buffer.byteLength(joined, "utf8");
+			}
+			if (
+				budget !== undefined &&
+				!budgetSpent &&
+				windowStoppedByByteLimit &&
+				byteLimitLine !== undefined &&
+				collectedLines.length > 0
+			) {
+				// The per-range cap stopped the window while the shared budget
+				// still had room, so lines this range asked for were never
+				// collected. Name the stuck line and carry the remainder instead
+				// of leaving a silent hole.
+				const stuckLine = byteLimitLine.index + 1;
+				const rest = clampRangePartsToKnownEof([
+					{ startLine: range.startLine + collectedLines.length, endLine: range.endLine },
+					...ranges.slice(rangeIndex + 1).map(later => ({ startLine: later.startLine, endLine: later.endLine })),
+				]);
+				notices.push(
+					`[Range collection stopped at line ${stuckLine} (${formatBytes(byteLimitLine.byteLength)} exceeds the per-range window); lines were left unread. Use ${budget.url}:${rawSelector ? "raw:" : ""}${rest.join(",")} to continue]`,
+				);
+				// The current range is incomplete and its hint already carries
+				// every later range: visiting them now would either duplicate
+				// them on the follow-up or, with less than a line of shared
+				// budget left, append a second hint whose continuation skips the
+				// first suffix. End the page like the budget cut does.
+				budgetSpent = true;
 			}
 
 			// Column truncation is display-only; clone before stamping ellipsis so
@@ -1569,6 +1773,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 					blocks.push(formatTextWithMode(blockText, range.startLine, shouldAddHashLines, shouldAddLineNumbers));
 				}
 			}
+			if (budgetSpent) break;
 		}
 
 		let outputText: string;
@@ -1593,13 +1798,19 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 					},
 				},
 			);
-			const firstLine = entries.find(entry => entry.kind === "line");
+			const budgetedEntries =
+				located?.spec.artifactStore === true &&
+				Buffer.byteLength(lineEntriesToPlainText(entries, BRACKET_CONTEXT_ELLIPSIS), "utf8") >
+					ARTIFACT_TOTAL_READ_BUDGET_BYTES
+					? entries.filter(entry => entry.kind !== "line" || entry.context === false)
+					: entries;
+			const firstLine = budgetedEntries.find(entry => entry.kind === "line");
 			displayContent = {
-				text: lineEntriesToPlainText(entries, BRACKET_CONTEXT_ELLIPSIS),
+				text: lineEntriesToPlainText(budgetedEntries, BRACKET_CONTEXT_ELLIPSIS),
 				startLine: firstLine?.kind === "line" ? firstLine.lineNumber : (visibleSpans[0]?.startLine ?? 1),
-				lineNumbers: entries.map(entry => (entry.kind === "line" ? entry.lineNumber : null)),
+				lineNumbers: budgetedEntries.map(entry => (entry.kind === "line" ? entry.lineNumber : null)),
 			};
-			outputText = formatLineEntriesWithMode(entries, shouldAddHashLines, shouldAddLineNumbers);
+			outputText = formatLineEntriesWithMode(budgetedEntries, shouldAddHashLines, shouldAddLineNumbers);
 		} else {
 			outputText = blocks.join("\n\n…\n\n");
 		}
@@ -2212,6 +2423,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 						suffixResolution,
 						undefined, // plain-file read: deterministic and fast, never abort mid-read
 						!located, // located URLs read their backing file directly, as their handlers do
+						located,
 					);
 					if (multiResult.bridgeResult) return multiResult.bridgeResult;
 					content = [{ type: "text", text: multiResult.outputText }];
@@ -2260,41 +2472,103 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 					const requestedStart = offset ? Math.max(0, offset - 1) : 0;
 					const expandStart = !rawSelector && offset !== undefined && offset > 1;
 					const expandEnd = !rawSelector && limit !== undefined;
-					const leadingContext = expandStart ? Math.min(requestedStart, RANGE_LEADING_CONTEXT_LINES) : 0;
+					let leadingContext = expandStart ? Math.min(requestedStart, RANGE_LEADING_CONTEXT_LINES) : 0;
 					const trailingContext = expandEnd ? RANGE_TRAILING_CONTEXT_LINES : 0;
-					const startLine = requestedStart - leadingContext;
-					const startLineDisplay = startLine + 1;
+					let startLine = requestedStart - leadingContext;
+					let startLineDisplay = startLine + 1;
 
 					const DEFAULT_LIMIT = this.#defaultLimit;
 					const effectiveLimit = limit ?? DEFAULT_LIMIT;
-					const maxLinesToCollect = Math.min(effectiveLimit + leadingContext + trailingContext, DEFAULT_MAX_LINES);
-					const selectedLineLimit = effectiveLimit + leadingContext + trailingContext;
+					let maxLinesToCollect = Math.min(effectiveLimit + leadingContext + trailingContext, DEFAULT_MAX_LINES);
+					let selectedLineLimit = effectiveLimit + leadingContext + trailingContext;
 					// Scale byte budget with line limit so the configured line count actually fits.
 					// Assume ~512 bytes/line average; never go below the shared default.
-					const maxBytesForRead = Math.max(DEFAULT_MAX_BYTES, maxLinesToCollect * 512);
+					const scaledByteBudget = Math.max(DEFAULT_MAX_BYTES, maxLinesToCollect * 512);
+					// A page of session artifact storage shares one budget per call with the
+					// multi-range path, so a wide selector cannot scale past it.
+					const maxBytesForRead = located?.spec.artifactStore
+						? Math.min(scaledByteBudget, ARTIFACT_TOTAL_READ_BUDGET_BYTES)
+						: scaledByteBudget;
 
-					const lineWindow = buffered
-						? collectLineWindowFromBuffer(
-								buffered,
-								startLine,
-								maxLinesToCollect,
-								maxBytesForRead,
-								selectedLineLimit,
-								rawSelector,
-							)
-						: await streamLinesFromFile(
-								absolutePath,
-								startLine,
-								maxLinesToCollect,
-								maxBytesForRead,
-								selectedLineLimit,
-								undefined, // plain-file read: deterministic and fast, never abort mid-read
-								{
-									includeTerminalNewline: rawSelector,
-									stopScanAfterCollect: fileSize > SNAPSHOT_MAX_BYTES,
-									seek: tailSeekTo?.(startLine),
-								},
+					const collectWindow = (fromLine: number) =>
+						buffered
+							? collectLineWindowFromBuffer(
+									buffered,
+									fromLine,
+									maxLinesToCollect,
+									maxBytesForRead,
+									selectedLineLimit,
+									rawSelector,
+								)
+							: streamLinesFromFile(
+									absolutePath,
+									fromLine,
+									maxLinesToCollect,
+									maxBytesForRead,
+									selectedLineLimit,
+									undefined, // plain-file read: deterministic and fast, never abort mid-read
+									{
+										includeTerminalNewline: rawSelector,
+										stopScanAfterCollect: fileSize > SNAPSHOT_MAX_BYTES,
+										seek: tailSeekTo?.(fromLine),
+									},
+								);
+					let lineWindow = await collectWindow(startLine);
+					let skippedContextNotice: string | undefined;
+					/** 1-based numbers of leading context lines deliberately dropped below. */
+					const skippedContextLines: number[] = [];
+					/**
+					 * Restart collection at the requested start without the leading
+					 * context line(s). Collection limits were sized with the context
+					 * included; without recomputing, the window would over-collect
+					 * by one line and hint at unrequested lines.
+					 */
+					const dropLeadingContext = async (notice: string): Promise<void> => {
+						skippedContextNotice = notice;
+						for (let line = startLine + 1; line <= requestedStart; line++) skippedContextLines.push(line);
+						leadingContext = 0;
+						startLine = requestedStart;
+						startLineDisplay = requestedStart + 1;
+						maxLinesToCollect = Math.min(effectiveLimit + trailingContext, DEFAULT_MAX_LINES);
+						selectedLineLimit = effectiveLimit + trailingContext;
+						lineWindow = await collectWindow(startLine);
+					};
+					if (
+						startLine < requestedStart &&
+						lineWindow.firstLineByteLength !== undefined &&
+						lineWindow.firstLineByteLength > maxBytesForRead
+					) {
+						// The over-budget line is leading context, not requested
+						// content: drop it and spend the budget on the requested
+						// start instead of rendering a context preview.
+						await dropLeadingContext(
+							`[Leading context line ${startLineDisplay} is ${formatBytes(lineWindow.firstLineByteLength)}, exceeds the ${formatBytes(maxBytesForRead)} read budget and was skipped.]`,
+						);
+					}
+					if (
+						skippedContextNotice === undefined &&
+						located?.spec.artifactStore === true &&
+						leadingContext > 0 &&
+						lineWindow.byteLimitLine?.index === requestedStart &&
+						lineWindow.lines.length === leadingContext
+					) {
+						// The context fit but left no room for the first requested
+						// line, so nothing requested was collected. Widening cannot
+						// raise a fixed per-call budget; retry without the context,
+						// keeping the original page when the retry also collects
+						// nothing (an oversized requested line keeps its own notice).
+						// Decided from the stuck line's size instead of a probe scan:
+						// when it alone exceeds the per-range cap the retry could
+						// only collect nothing, so the extra O(prefix) pass over a
+						// potentially multi-gigabyte artifact is pure waste.
+						const stuckBytes = lineWindow.byteLimitLine?.byteLength ?? 0;
+						if (stuckBytes <= maxBytesForRead) {
+							const startDisplay = startLineDisplay;
+							await dropLeadingContext(
+								`[Leading context line ${startDisplay} left no room in the ${formatBytes(maxBytesForRead)} per-read budget and was skipped to show the requested lines.]`,
 							);
+						}
+					}
 
 					const {
 						lines: collectedLines,
@@ -2456,15 +2730,31 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 									}
 									return truncated.text;
 								},
+								excludeFromContext: skippedContextLines.length > 0 ? new Set(skippedContextLines) : undefined,
 							},
 						);
-						const firstLine = entries.find(entry => entry.kind === "line");
+						// Block context is best-effort readability aid: when an
+						// off-window opener alone exceeds the fixed artifact budget
+						// (e.g. a 60 KB `{`-opener with `outputMaxColumns=0`), drop
+						// the context lines rather than delivering an over-budget
+						// page `pagedSource` cannot spill downstream.
+						const budgetedEntries =
+							located?.spec.artifactStore === true &&
+							Buffer.byteLength(lineEntriesToPlainText(entries, BRACKET_CONTEXT_ELLIPSIS), "utf8") >
+								ARTIFACT_TOTAL_READ_BUDGET_BYTES
+								? entries.filter(entry => entry.kind !== "line" || entry.context === false)
+								: entries;
+						const firstLine = budgetedEntries.find(entry => entry.kind === "line");
 						capturedDisplayContent = {
-							text: lineEntriesToPlainText(entries, BRACKET_CONTEXT_ELLIPSIS),
+							text: lineEntriesToPlainText(budgetedEntries, BRACKET_CONTEXT_ELLIPSIS),
 							startLine: firstLine?.kind === "line" ? firstLine.lineNumber : startLineDisplay,
-							lineNumbers: entries.map(entry => (entry.kind === "line" ? entry.lineNumber : null)),
+							lineNumbers: budgetedEntries.map(entry => (entry.kind === "line" ? entry.lineNumber : null)),
 						};
-						const formatted = formatLineEntriesWithMode(entries, shouldAddHashLines, shouldAddLineNumbers);
+						const formatted = formatLineEntriesWithMode(
+							budgetedEntries,
+							shouldAddHashLines,
+							shouldAddLineNumbers,
+						);
 						if (!hashContext || emittedHashlineHeader) return formatted;
 						emittedHashlineHeader = true;
 						return prependHashlineHeader(formatted, hashContext);
@@ -2488,6 +2778,18 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 								firstLineBytes,
 							)}, exceeds ${formatBytes(maxBytesForRead)} limit. Unable to display a valid UTF-8 snippet.]`;
 						}
+						if (located?.spec.artifactStore === true && totalFileLines > startLineDisplay) {
+							// A capped first line ends the page at line 1: without an
+							// explicit hint the remaining selected lines would have
+							// no continuation (the partial-line metadata carries none).
+							// No hint when nothing remains selected (e.g. `raw:2-2`).
+							const resumeFrom = startLineDisplay + 1;
+							const resumeEnd = limit !== undefined ? startLine + effectiveLimit : undefined;
+							if (resumeEnd === undefined || resumeEnd >= resumeFrom) {
+								const resumePart = resumeEnd !== undefined ? `${resumeFrom}-${resumeEnd}` : `${resumeFrom}-`;
+								outputText += `\n\n[More lines in file. Use ${selectorBase}:${rawSelector ? `raw:${resumePart}` : resumePart} to continue]`;
+							}
+						}
 						sourcePath = renderAbsolutePath;
 						if (truncation) {
 							details = { truncation: toReadTruncationStats(truncation) };
@@ -2510,6 +2812,22 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 						}
 					} else if (!reachedEof) {
 						const nextOffset = startLine + userLimitedLines + 1;
+						// Artifact pages keep their bound so paging cannot read past
+						// the requested end; other reads keep the existing open
+						// offset. A bare `:N` means "from N onward", so a bounded
+						// numbered request must carry its end too.
+						const artifactBoundedEnd =
+							located?.spec.artifactStore === true && limit !== undefined
+								? requestedStart + effectiveLimit
+								: undefined;
+						const continueFrom =
+							rawSelector && artifactBoundedEnd !== undefined
+								? `${selectorBase}:raw:${nextOffset}-${artifactBoundedEnd}`
+								: rawSelector
+									? `${selectorBase}:raw:${nextOffset}-`
+									: artifactBoundedEnd !== undefined
+										? `${selectorBase}:${nextOffset}-${artifactBoundedEnd}`
+										: `${selectorBase}:${nextOffset}`;
 						outputText = formatBracketAwareText() ?? formatText(selectedContent, startLineDisplay);
 						if (omittedSelectedLine) {
 							const lineNumber = omittedSelectedLine.index + 1;
@@ -2517,11 +2835,24 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 								omittedSelectedLine,
 								maxBytesForRead,
 								`${selectorBase}:raw:${lineNumber}-${lineNumber}`,
+								located?.spec.artifactStore === true,
 							)}`;
+							// The omitted line is not the whole story: lines after it
+							// were requested too, and the suppressed `nextOffset`
+							// leaves them without any continuation. Name the bounded
+							// remainder so following it skips nothing requested.
+							if (located?.spec.artifactStore === true) {
+								const resumeFrom = lineNumber + 1;
+								const resumeEnd = limit !== undefined ? requestedStart + effectiveLimit : undefined;
+								if (resumeEnd === undefined || resumeEnd >= resumeFrom) {
+									const resumePart = resumeEnd !== undefined ? `${resumeFrom}-${resumeEnd}` : `${resumeFrom}-`;
+									outputText += `\n\n[More lines in file. Use ${selectorBase}:${resumePart} to continue]`;
+								}
+							}
 						} else {
 							outputText += `\n\n[More lines in file (${formatBytes(
 								fileSize,
-							)} total; not scanned to EOF). Use ${selectorBase}:${nextOffset} to continue]`;
+							)} total; not scanned to EOF). Use ${continueFrom} to continue]`;
 						}
 						details = {};
 						sourcePath = renderAbsolutePath;
@@ -2533,7 +2864,39 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 								omittedSelectedLine,
 								maxBytesForRead,
 								`${selectorBase}:raw:${lineNumber}-${lineNumber}`,
+								located?.spec.artifactStore === true,
 							)}`;
+							// Same orphaned-remainder as the unscanned branch above:
+							// the omitted line's raw hint covers one line, so carry
+							// the rest of the requested window explicitly.
+							if (located?.spec.artifactStore === true) {
+								const resumeFrom = lineNumber + 1;
+								// `totalFileLines` is exact here (reached EOF): never
+								// advertise lines past it. A two-line file read as
+								// `2-142` must not promise a `3-142` follow-up.
+								if (resumeFrom <= totalFileLines) {
+									const requestedEnd = limit !== undefined ? requestedStart + effectiveLimit : undefined;
+									const resumeEnd =
+										requestedEnd !== undefined ? Math.min(requestedEnd, totalFileLines) : undefined;
+									if (resumeEnd === undefined || resumeEnd >= resumeFrom) {
+										const resumePart =
+											resumeEnd !== undefined ? `${resumeFrom}-${resumeEnd}` : `${resumeFrom}-`;
+										outputText += `\n\n[More lines in file. Use ${selectorBase}:${resumePart} to continue]`;
+									}
+								}
+							}
+						} else if (
+							rawSelector &&
+							located?.spec.artifactStore === true &&
+							collectedLines.length > 0 &&
+							truncation.truncatedBy === "bytes"
+						) {
+							// A byte-capped raw page must continue raw and bounded: the
+							// shared meta notice only renders a bare `Use :N`.
+							const nextLine = startLineDisplay + collectedLines.length;
+							const hintEnd = limit !== undefined ? startLine + effectiveLimit : undefined;
+							const bounded = hintEnd !== undefined && hintEnd >= nextLine ? `-${hintEnd}` : "-";
+							outputText += `\n\n[More lines in file. Use ${selectorBase}:raw:${nextLine}${bounded} to continue]`;
 						}
 						details = { truncation: toReadTruncationStats(truncation) };
 						sourcePath = renderAbsolutePath;
@@ -2543,17 +2906,30 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 								direction: "head",
 								startLine: startLineDisplay,
 								totalFileLines,
-								nextOffset: omittedSelectedLine ? null : undefined,
+								// A custom raw continuation above already names the
+								// next page: suppress the generic bare `Use :N`
+								// meta hint that would lose raw mode and the bound.
+								nextOffset:
+									omittedSelectedLine ||
+									(rawSelector &&
+										located?.spec.artifactStore === true &&
+										collectedLines.length > 0 &&
+										truncation.truncatedBy === "bytes")
+										? null
+										: undefined,
 								maxBytes: maxBytesForRead,
 							},
 						};
 					} else if (startLine + userLimitedLines < totalFileLines) {
 						const nextOffset = startLine + userLimitedLines + 1;
+						const continueFrom = rawSelector
+							? `${selectorBase}:raw:${nextOffset}-`
+							: `${selectorBase}:${nextOffset}`;
 
 						outputText = formatBracketAwareText() ?? formatText(selectedContent, startLineDisplay);
 						outputText += `\n\n[${
 							totalFileLines - (startLine + userLimitedLines)
-						} more lines in file. Use ${selectorBase}:${nextOffset} to continue]`;
+						} more lines in file. Use ${continueFrom} to continue]`;
 						details = {};
 						sourcePath = renderAbsolutePath;
 					} else {
@@ -2616,7 +2992,12 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 						}
 					}
 
-					content = [{ type: "text", text: outputText }];
+					content = [
+						{
+							type: "text",
+							text: skippedContextNotice ? `${outputText}\n\n${skippedContextNotice}` : outputText,
+						},
+					];
 				}
 			}
 			// A page of artifact storage is re-readable with selectors: spilling it would only
