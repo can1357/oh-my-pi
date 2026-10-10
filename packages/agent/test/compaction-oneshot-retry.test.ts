@@ -68,7 +68,12 @@ function summary(text: string): AssistantMessage {
 }
 
 describe("SummaryOptions.oneshotRetry", () => {
-	it("retries a transient failure by default, so manual /compact survives a blip", async () => {
+	it("journals a billed transient failure before retrying a successful summary", async () => {
+		const billed: number[] = [];
+		const failed = overloaded();
+		failed.usage = { ...failed.usage, input: 12, cost: { ...failed.usage.cost, total: 2 } };
+		const recovered = summary("recovered summary");
+		recovered.usage = { ...recovered.usage, input: 40, cost: { ...recovered.usage.cost, total: 4 } };
 		let calls = 0;
 		const text = await generateSummary(messages, model, 10_000, apiKey, undefined, undefined, undefined, {
 			// No `oneshotRetry`: the manual `/compact` shape. The one real backoff
@@ -76,27 +81,34 @@ describe("SummaryOptions.oneshotRetry", () => {
 			// a value this test picked for itself.
 			completeImpl: () => {
 				calls += 1;
-				return Promise.resolve(calls === 1 ? overloaded() : summary("recovered summary"));
+				return Promise.resolve(calls === 1 ? failed : recovered);
 			},
+			onUsage: response => billed.push(response.usage.cost.total),
 		});
 
 		expect(calls).toBe(2);
 		expect(text).toContain("recovered summary");
+		expect(billed).toEqual([2, 4]);
 	});
 
-	it("makes exactly one attempt when the caller owns the retry loop", async () => {
+	it("journals a billed terminal summary failure even when compaction rejects", async () => {
+		const billed: number[] = [];
+		const failed = overloaded();
+		failed.usage = { ...failed.usage, input: 12, cost: { ...failed.usage.cost, total: 2 } };
 		let calls = 0;
 		const attempt = generateSummary(messages, model, 10_000, apiKey, undefined, undefined, undefined, {
 			// What auto-compaction passes: its own loop re-runs the whole attempt.
 			oneshotRetry: false,
 			completeImpl: () => {
 				calls += 1;
-				return Promise.resolve(overloaded());
+				return Promise.resolve(failed);
 			},
+			onUsage: response => billed.push(response.usage.cost.total),
 		});
 
 		// The failure must surface for the outer loop to classify and retry.
 		await expect(attempt).rejects.toThrow();
 		expect(calls).toBe(1);
+		expect(billed).toEqual([2]);
 	});
 });

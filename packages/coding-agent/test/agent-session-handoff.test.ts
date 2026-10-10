@@ -252,12 +252,12 @@ describe("AgentSession handoff", () => {
 					model: requestModel.id,
 					stopReason: "stop",
 					usage: {
-						input: 1,
-						output: 1,
-						cacheRead: 0,
+						input: 80,
+						output: 20,
+						cacheRead: 30,
 						cacheWrite: 0,
-						totalTokens: 2,
-						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+						totalTokens: 130,
+						cost: { input: 1, output: 2, cacheRead: 3, cacheWrite: 0, total: 6 },
 					},
 					timestamp: Date.now(),
 				};
@@ -291,23 +291,22 @@ describe("AgentSession handoff", () => {
 		});
 		const preHandoffSessionId = session.sessionId;
 
-		const generateHandoffSpy = vi
-			.spyOn(compactionModule, "generateHandoffFromContext")
-			.mockImplementation(async (context, requestModel, options) => {
-				expect(options.completeImpl).toBeDefined();
-				const message = await options.completeImpl!(requestModel, context, options.streamOptions);
-				return message.content
-					.filter(block => block.type === "text")
-					.map(block => block.text)
-					.join("\n");
-			});
-
+		const before = session.getSessionStats();
 		const result = await session.handoff();
 
-		expect(generateHandoffSpy).toHaveBeenCalledTimes(1);
 		expect(result?.document).toBe(handoffText);
 		expect(sideStreamCalls).toBe(1);
 		expect(capturedSideSessionId).toStartWith(`${preHandoffSessionId}:side:`);
+		const usageEntry = sessionManager.getBranch().find(entry => entry.type === "model_usage");
+		expect(usageEntry).toMatchObject({
+			type: "model_usage",
+			purpose: "compaction:handoff",
+			usage: { input: 80, output: 20, cacheRead: 30, cost: { total: 6 } },
+		});
+		expect(session.getSessionStats().tokens.cacheRead - before.tokens.cacheRead).toBe(30);
+		expect(session.getSessionStats().cost - before.cost).toBe(6);
+		const recorded = await Bun.file(sessionFile).text();
+		expect(recorded).toContain(`"purpose":"compaction:handoff"`);
 	});
 
 	it("obfuscates custom instructions before generating a handoff", async () => {

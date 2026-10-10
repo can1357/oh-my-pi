@@ -200,15 +200,22 @@ describe("handoff helpers", () => {
 	});
 
 	test("generateHandoffFromContext retries auto-only tool_choice rejection with live tools", async () => {
+		const billed: number[] = [];
+		const toolChoiceRejection = createAssistantError(
+			400,
+			"400 Bad Request: Only a tool_choice of 'auto' is supported for this model; param=tool_choice",
+		);
+		toolChoiceRejection.usage = {
+			...toolChoiceRejection.usage,
+			input: 18,
+			cost: { ...toolChoiceRejection.usage.cost, total: 2 },
+		};
+		const recovered = createAssistantMessage([{ type: "text", text: "## Goal\nRecovered on retry" }]);
+		recovered.usage = { ...recovered.usage, input: 28, cost: { ...recovered.usage.cost, total: 3 } };
 		const completeSimpleSpy = vi
 			.spyOn(ai, "completeSimple")
-			.mockResolvedValueOnce(
-				createAssistantError(
-					400,
-					"400 Bad Request: Only a tool_choice of 'auto' is supported for this model; param=tool_choice",
-				),
-			)
-			.mockResolvedValueOnce(createAssistantMessage([{ type: "text", text: "## Goal\nRecovered on retry" }]));
+			.mockResolvedValueOnce(toolChoiceRejection)
+			.mockResolvedValueOnce(recovered);
 		const model = getTestModel();
 		const tools = [createHandoffTool()];
 		const context = {
@@ -224,10 +231,12 @@ describe("handoff helpers", () => {
 				promptCacheKey: "sess-auto-only",
 			},
 			thinkingLevel: ThinkingLevel.Medium,
+			onUsage: response => billed.push(response.usage.cost.total),
 		});
 
 		expect(document).toBe("## Goal\nRecovered on retry");
 		expect(completeSimpleSpy).toHaveBeenCalledTimes(2);
+		expect(billed).toEqual([2, 3]);
 		const firstCall = completeSimpleSpy.mock.calls[0];
 		const secondCall = completeSimpleSpy.mock.calls[1];
 		if (!firstCall) throw new Error("Expected initial completeSimple call");

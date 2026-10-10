@@ -20,6 +20,7 @@ import {
 	type CompactionResult,
 	calculateContextTokens,
 	collectShakeRegions,
+	compactionRequestUsage,
 	compact,
 	compactionContextTokens,
 	computeFileLists,
@@ -1455,6 +1456,7 @@ export class SessionMaintenance {
 							remoteSystemPrompt: this.#host.agent.state.systemPrompt,
 							convertToLlm: messages => this.#host.convertToLlmForSideRequest(messages),
 							codexCompaction,
+							onUsage: this.#compactionUsageRecorder(),
 						},
 						compactionCandidates,
 					);
@@ -2270,6 +2272,7 @@ export class SessionMaintenance {
 					// overlapping the live stream must never interleave with it.
 					sessionId: `${this.#host.sessionId()}:spec:${Snowflake.next()}`,
 					preferWebsockets: false,
+					onUsage: this.#compactionUsageRecorder(snapshotLeafId),
 				},
 				candidates,
 			);
@@ -2393,6 +2396,16 @@ export class SessionMaintenance {
 			return undefined;
 		}
 		return run.armed;
+	}
+	/** Bill each completed side request before retries, cancellation, or speculation can discard its summary. */
+	#compactionUsageRecorder(
+		parentId = this.#host.sessionManager.getLeafId(),
+	): (response: AssistantMessage, purpose: string) => void {
+		const manager = this.#host.sessionManager;
+		const owner = { sessionId: manager.getSessionId(), parentId };
+		return (response, purpose) => {
+			manager.appendModelUsage(compactionRequestUsage(response, purpose), owner, { followCurrentBranch: true });
+		};
 	}
 
 	/**
@@ -4926,6 +4939,7 @@ export class SessionMaintenance {
 										this.#host.buildLiveProviderContext(summarized, retained, signal),
 									isUserAuthored: isUserAuthoredMessage,
 									telemetry,
+									onUsage: this.#compactionUsageRecorder(),
 									// Honor the user's /model thinking selection on the
 									// auto-compaction path — the most-fired compaction
 									// site. Clamped per-model inside compact() via

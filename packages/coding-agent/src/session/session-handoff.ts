@@ -8,7 +8,11 @@ import {
 	type StreamFn,
 	type ThinkingLevel,
 } from "@oh-my-pi/pi-agent-core";
-import { generateHandoffFromContext, renderHandoffPrompt } from "@oh-my-pi/pi-agent-core/compaction";
+import {
+	compactionRequestUsage,
+	generateHandoffFromContext,
+	renderHandoffPrompt,
+} from "@oh-my-pi/pi-agent-core/compaction";
 import type { Message, Model, ServiceTier, SimpleStreamOptions } from "@oh-my-pi/pi-ai";
 import { logger, Snowflake } from "@oh-my-pi/pi-utils";
 import type { ModelRegistry } from "../config/model-registry";
@@ -96,6 +100,8 @@ export class SessionHandoff {
 		options?: SessionHandoffOptions,
 	): Promise<HandoffResult | undefined> {
 		this.#host.setSkipPostTurnMaintenance(undefined);
+		const manager = this.#host.sessionManager;
+		const usageOwner = { sessionId: manager.getSessionId(), parentId: manager.getLeafId() };
 
 		this.#handoffAbortController = new AbortController();
 		const handoffAbortController = this.#handoffAbortController;
@@ -185,6 +191,11 @@ export class SessionHandoff {
 					// resolveCompactionEffort so unsupported-effort models don't trip
 					// requireSupportedEffort.
 					thinkingLevel: this.#host.thinkingLevel(),
+					onUsage: response => {
+						manager.appendModelUsage(compactionRequestUsage(response, "compaction:handoff"), usageOwner, {
+							followCurrentBranch: true,
+						});
+					},
 				},
 			);
 			const handoffText = this.#host.deobfuscateFromProvider(rawHandoffText);

@@ -1807,6 +1807,8 @@ export interface InstrumentedChatSpanOptions {
 		ctx: Context,
 		options: SimpleStreamOptions,
 	) => Promise<AssistantMessage>;
+	/** Observe each resolved provider attempt before retry can discard its usage, even when it reports an error. */
+	readonly onAttemptCompleted?: (response: AssistantMessage) => void;
 	/**
 	 * Opt in to transient-failure retry for this oneshot (Anthropic
 	 * `overloaded_error`, `rate_limit_error`, 429/500/502/503/529). Omitted or
@@ -1889,11 +1891,17 @@ export async function instrumentedCompleteSimple<TApi extends Api>(
 			// oneshots. `getResponseHeaders` hands the failed attempt's headers to
 			// the retry layer — an AssistantMessage carries none, so this is what
 			// makes `retry-after` on a real 429/529 actually honored.
+			const onAttemptCompleted = span.onAttemptCompleted;
 			const runOnce = () => {
 				// Clear first so a previous attempt's `retry-after` can never be
 				// reused for a later failure that arrived without headers.
 				capturedHeaders = undefined;
-				return complete(model, ctx, { ...options, onResponse: captureOnResponse });
+				const attempt = complete(model, ctx, { ...options, onResponse: captureOnResponse });
+				if (!onAttemptCompleted) return attempt;
+				return attempt.then(response => {
+					onAttemptCompleted(response);
+					return response;
+				});
 			};
 			const message = span.retry
 				? await retryTransientCompletion(runOnce, {

@@ -3384,27 +3384,33 @@ export class SessionManager {
 		return entry.id;
 	}
 
-	/** Record usage on its initiating branch without moving a successor branch or session. */
+	/** Record usage on its initiating branch; optionally follow that branch's current tip through concurrent turns. */
 	appendModelUsage(
 		usage: Pick<
 			ModelUsageEntry,
 			"purpose" | "role" | "api" | "provider" | "model" | "usage" | "stopReason" | "errorMessage"
 		>,
 		owner: { sessionId: string; parentId: string | null },
+		options?: { followCurrentBranch?: boolean },
 	): string | undefined {
 		if (this.#sessionId !== owner.sessionId || (owner.parentId !== null && !this.#index.has(owner.parentId))) {
 			return undefined;
 		}
 		const activeLeafId = this.#index.leafId();
+		const parentId =
+			options?.followCurrentBranch &&
+			(owner.parentId === null || this.#index.branchView().some(entry => entry.id === owner.parentId))
+				? activeLeafId
+				: owner.parentId;
 		const entry: ModelUsageEntry = {
 			type: "model_usage",
 			id: generateId(this.#index),
-			parentId: owner.parentId,
+			parentId,
 			timestamp: nowIso(),
 			...usage,
 		};
 		this.#recordEntry(entry);
-		if (activeLeafId !== owner.parentId) this.#index.setLeaf(activeLeafId);
+		if (activeLeafId !== parentId) this.#index.setLeaf(activeLeafId);
 		return entry.id;
 	}
 

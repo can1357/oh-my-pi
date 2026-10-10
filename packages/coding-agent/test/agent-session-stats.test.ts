@@ -17,10 +17,16 @@ describe("AgentSession session stats", () => {
 		if (!found) throw new Error("Expected a bundled model");
 		return found;
 	};
-	const appendUsage = (manager: SessionManager, target: Model, input: number, overrides: Partial<Usage> = {}) =>
+	const appendUsage = (
+		manager: SessionManager,
+		target: Model,
+		input: number,
+		overrides: Partial<Usage> = {},
+		purpose = "auto-thinking",
+	) =>
 		manager.appendModelUsage(
 			{
-				purpose: "auto-thinking",
+				purpose,
 				role: "smol",
 				api: target.api,
 				provider: target.provider,
@@ -177,6 +183,20 @@ describe("AgentSession session stats", () => {
 		session = createStatsSession(manager, target);
 
 		expect(session.getSessionStats()).toMatchObject({ tokens: { total: 7 }, cost: 7 });
+	});
+
+	it("counts compaction requests without a retained entry until a later reset", () => {
+		const target = model();
+		const manager = SessionManager.inMemory();
+		manager.appendMessage({ role: "user", content: "old history", timestamp: 1 });
+		appendUsage(manager, target, 100);
+		appendUsage(manager, target, 13, { cacheRead: 5, totalTokens: 18 }, "compaction:summary");
+		manager.appendCompaction("summary", undefined, "missing-retained-entry", 100);
+		session = createStatsSession(manager, target);
+
+		expect(session.getSessionStats()).toMatchObject({ tokens: { input: 13, cacheRead: 5 }, cost: 13 });
+		manager.appendResetBoundary();
+		expect(session.getSessionStats()).toMatchObject({ tokens: { input: 0, cacheRead: 0 }, cost: 0 });
 	});
 
 	it("preserves authoritative provider occupancy above the local transcript estimate", () => {

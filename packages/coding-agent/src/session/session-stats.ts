@@ -75,8 +75,19 @@ function forEachActiveModelUsage(branch: readonly SessionEntry[], visit: (usage:
 		startIndex = resetIndex + 1;
 	} else if (latestCompaction) {
 		const firstKeptIndex = branch.findIndex(entry => entry.id === latestCompaction.firstKeptEntryId);
-		startIndex = firstKeptIndex >= 0 ? firstKeptIndex : compactionIndex + 1;
-		while (startIndex > 0 && !isUsageWindowBoundary(branch[startIndex - 1])) startIndex--;
+		startIndex = firstKeptIndex >= 0 ? firstKeptIndex : compactionIndex;
+		// When the kept entry is gone, include the summary requests immediately
+		// before this compaction; a reset after the compaction still wins above.
+		if (firstKeptIndex < 0) {
+			while (startIndex > 0) {
+				const preceding = branch[startIndex - 1];
+				if (preceding.type !== "model_usage" || !preceding.purpose.startsWith("compaction:")) break;
+				startIndex--;
+			}
+		}
+		if (firstKeptIndex >= 0) {
+			while (startIndex > 0 && !isUsageWindowBoundary(branch[startIndex - 1])) startIndex--;
+		}
 	}
 	for (let index = startIndex; index < branch.length; index++) {
 		const entry = branch[index];

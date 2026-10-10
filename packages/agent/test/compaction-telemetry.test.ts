@@ -164,6 +164,55 @@ describe("compaction oneshot telemetry", () => {
 		expect(spansByOneshotKind(chats, "compaction_short_summary")).toHaveLength(1);
 	});
 
+	it("reports the cost of a rejected short-summary request", async () => {
+		const denied: AssistantMessage = {
+			...makeAssistantMessage(""),
+			stopReason: "error",
+			errorStatus: 403,
+			errorMessage: "content filtered",
+			usage: makeUsage(19, 3, 2),
+		};
+		vi.spyOn(ai, "completeSimple")
+			.mockResolvedValueOnce(makeAssistantMessage("history summary"))
+			.mockResolvedValueOnce(denied);
+		const billed = new Map<string, number>();
+
+		await expect(
+			compact(makePreparation(), MODEL, "test-api-key", undefined, undefined, {
+				oneshotRetry: false,
+				onUsage: (response, purpose) => billed.set(purpose, response.usage.input + response.usage.cacheRead),
+			}),
+		).rejects.toThrow("Short summary failed");
+		expect(billed.get("compaction:short-summary")).toBe(21);
+	});
+
+	it("reports the cost of a rejected turn-prefix request despite parallel summarization", async () => {
+		const denied: AssistantMessage = {
+			...makeAssistantMessage(""),
+			stopReason: "error",
+			errorStatus: 403,
+			errorMessage: "content filtered",
+			usage: makeUsage(29, 4, 5),
+		};
+		vi.spyOn(ai, "completeSimple")
+			.mockResolvedValueOnce(makeAssistantMessage("history summary"))
+			.mockResolvedValueOnce(denied);
+		const billed = new Map<string, number>();
+		const preparation = makePreparation({
+			isSplitTurn: true,
+			turnPrefixMessages: [makeUserMessage("Inline mid-turn instruction")],
+		});
+
+		await expect(
+			compact(preparation, MODEL, "test-api-key", undefined, undefined, {
+				oneshotRetry: false,
+				onUsage: (response, purpose) => billed.set(purpose, response.usage.input + response.usage.cacheRead),
+			}),
+		).rejects.toThrow("Turn prefix summarization failed");
+		expect(billed.get("compaction:turn-prefix")).toBe(34);
+		expect(billed.get("compaction:summary")).toBe(120);
+	});
+
 	it("emits no spans when telemetry is undefined", async () => {
 		vi.spyOn(ai, "completeSimple")
 			.mockResolvedValueOnce(makeAssistantMessage("history"))

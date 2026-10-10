@@ -829,12 +829,26 @@ describe("async speculative compaction", () => {
 
 	it("discards an armed summary when post-snapshot branch growth prevents recovery headroom", async () => {
 		let invocation = 0;
-		const compactSpy = vi.spyOn(compactionModule, "compact").mockImplementation(async preparation => ({
-			summary: `summary ${++invocation}`,
-			firstKeptEntryId: preparation.firstKeptEntryId,
-			tokensBefore: preparation.tokensBefore,
-			details: {},
-		}));
+		const compactSpy = vi
+			.spyOn(compactionModule, "compact")
+			.mockImplementation(async (preparation, _model, _key, _focus, _signal, options) => {
+				const request = ++invocation;
+				const response = assistantMessage("summary", model);
+				response.usage = {
+					...response.usage,
+					input: request,
+					cacheRead: 30,
+					totalTokens: request + 130,
+					cost: { ...response.usage.cost, total: request },
+				};
+				options?.onUsage?.(response, "compaction:summary");
+				return {
+					summary: `summary ${request}`,
+					firstKeptEntryId: preparation.firstKeptEntryId,
+					tokensBefore: preparation.tokensBefore,
+					details: {},
+				};
+			});
 		maintenance.maybeStartSpeculativeCompaction(SPECULATION_BAND_START, CONTEXT_WINDOW);
 		await waitForState("armed");
 		expect(compactSpy).toHaveBeenCalledTimes(1);
@@ -851,6 +865,12 @@ describe("async speculative compaction", () => {
 		expect(compactSpy).toHaveBeenCalledTimes(2);
 		const entry = sessionManager.getEntries().findLast(item => item.type === "compaction");
 		expect(entry?.type === "compaction" ? entry.summary : undefined).toBe("summary 2");
+		expect(
+			sessionManager
+				.getBranch()
+				.filter(item => item.type === "model_usage")
+				.map(item => item.usage.input),
+		).toEqual([1, 2]);
 	});
 
 	it("discards an armed summary when a persisted custom message prevents recovery headroom", async () => {

@@ -141,6 +141,24 @@ function extractFileOperations(
 	return fileOps;
 }
 
+/** Billing metadata for one local compaction model request. */
+export type CompactionRequestUsage = Pick<
+	AssistantMessage,
+	"api" | "provider" | "model" | "usage" | "stopReason" | "errorMessage"
+> & { purpose: string };
+/** Extracts the billing fields of a successful compaction completion for its session ledger. */
+export function compactionRequestUsage(response: AssistantMessage, purpose: string): CompactionRequestUsage {
+	return {
+		purpose,
+		api: response.api,
+		provider: response.provider,
+		model: response.model,
+		usage: response.usage,
+		stopReason: response.stopReason,
+		errorMessage: response.errorMessage,
+	};
+}
+
 /** Result from compact() - SessionManager adds uuid/parentUuid when saving */
 export interface CompactionResult<T = unknown> {
 	summary: string;
@@ -686,6 +704,8 @@ export interface SummaryOptions {
 	 * or `compaction_turn_prefix`). `undefined` keeps the call paths zero-cost.
 	 */
 	telemetry?: AgentTelemetry;
+	/** Observe every completed local summary attempt for session billing, including errors and retries. */
+	onUsage?: (response: AssistantMessage, purpose: string) => void;
 	/**
 	 * Active session thinking level. Threaded from `agent-session.ts` so
 	 * compaction honors the user's `/model` thinking selection instead of
@@ -994,6 +1014,7 @@ async function summarizeConversationWindow(
 		return remote.summary;
 	}
 
+	const onUsage = options?.onUsage;
 	const response = await instrumentedCompleteSimple(
 		model,
 		{ systemPrompt: [SUMMARIZATION_SYSTEM_PROMPT], messages: summarizationMessages },
@@ -1015,6 +1036,7 @@ async function summarizeConversationWindow(
 			oneshotKind: "compaction_summary",
 			completeImpl: options?.completeImpl,
 			retry: summaryOneshotRetry(options),
+			onAttemptCompleted: onUsage && (response => onUsage(response, "compaction:summary")),
 		},
 	);
 
@@ -1085,6 +1107,8 @@ export interface HandoffFromContextOptions {
 	telemetry?: AgentTelemetry;
 	/** See {@link HandoffOptions.thinkingLevel}. */
 	thinkingLevel?: ThinkingLevel;
+	/** Observe each completed handoff attempt for session billing, including errors and retries. */
+	onUsage?: (response: AssistantMessage) => void;
 }
 
 /**
@@ -1115,13 +1139,20 @@ export async function generateHandoffFromContext(
 		oneshotKind: "handoff",
 		completeImpl: options.completeImpl,
 		retry: {},
+		onAttemptCompleted: options.onUsage,
 	});
 	if (response.stopReason === "error" && shouldRetryHandoffWithAutoToolChoice(response)) {
 		response = await instrumentedCompleteSimple(
 			model,
 			context,
 			{ ...requestOptions, toolChoice: "auto" },
-			{ telemetry: options.telemetry, oneshotKind: "handoff", completeImpl: options.completeImpl, retry: {} },
+			{
+				telemetry: options.telemetry,
+				oneshotKind: "handoff",
+				completeImpl: options.completeImpl,
+				retry: {},
+				onAttemptCompleted: options.onUsage,
+			},
 		);
 	}
 
@@ -1205,6 +1236,7 @@ async function generateShortSummary(
 		return remote.summary;
 	}
 
+	const onUsage = options?.onUsage;
 	const response = await instrumentedCompleteSimple(
 		model,
 		{
@@ -1229,6 +1261,7 @@ async function generateShortSummary(
 			oneshotKind: "compaction_short_summary",
 			completeImpl: options?.completeImpl,
 			retry: summaryOneshotRetry(options),
+			onAttemptCompleted: onUsage && (response => onUsage(response, "compaction:short-summary")),
 		},
 	);
 
@@ -1618,6 +1651,7 @@ export async function compact(
 		buildProviderContext: options?.buildProviderContext,
 		isUserAuthored: options?.isUserAuthored,
 		telemetry: options?.telemetry,
+		onUsage: options?.onUsage,
 		// Honor /model thinking selection on every fan-out summarizer.
 		// Without this propagation, generateSummary / generateTurnPrefixSummary
 		// see options?.thinkingLevel === undefined and resolveCompactionEffort
@@ -2157,6 +2191,7 @@ async function generateTurnPrefixSummary(
 		},
 	];
 
+	const onUsage = options?.onUsage;
 	const response = await instrumentedCompleteSimple(
 		model,
 		{ systemPrompt: [SUMMARIZATION_SYSTEM_PROMPT], messages: summarizationMessages },
@@ -2178,6 +2213,7 @@ async function generateTurnPrefixSummary(
 			oneshotKind: "compaction_turn_prefix",
 			completeImpl: options?.completeImpl,
 			retry: summaryOneshotRetry(options),
+			onAttemptCompleted: onUsage && (response => onUsage(response, "compaction:turn-prefix")),
 		},
 	);
 
