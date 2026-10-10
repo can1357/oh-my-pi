@@ -15,7 +15,7 @@ interface TestTurn {
 let manager: AsyncJobManager;
 let session: ToolSession;
 
-function startTurn(options?: { onDelivery?: (jobId: string, text: string) => void }): TestTurn {
+function startTurn(options?: { id?: string; onDelivery?: (jobId: string, text: string) => void }): TestTurn {
 	const completion = Promise.withResolvers<string>();
 	if (options?.onDelivery) {
 		manager.registerDeliverySink(OWNER, options.onDelivery);
@@ -36,7 +36,7 @@ function startTurn(options?: { onDelivery?: (jobId: string, text: string) => voi
 		},
 		{ ownerId: OWNER },
 	);
-	VibeSessionRegistry.global().registerRecordForTests({ id: WORKER, ownerId: OWNER, jobId });
+	VibeSessionRegistry.global().registerRecordForTests({ id: options?.id ?? WORKER, ownerId: OWNER, jobId });
 	return { jobId, complete: completion.resolve };
 }
 
@@ -84,6 +84,34 @@ describe("vibe wait completion classification", () => {
 		expect(manager.isJobResultConsumed(turn.jobId)).toBe(true);
 	});
 
+	it("does not deliver a settled result before the foreground wait acknowledges it", async () => {
+		const deliveries: string[] = [];
+		const turn = startTurn({ onDelivery: (_jobId, text) => deliveries.push(text) });
+		const pending = VibeSessionRegistry.global().wait(session, { timeoutMs: 1_000 });
+		turn.complete("worker result");
+		const outcome = await pending;
+		await manager.drainDeliveries({ timeoutMs: 1_000 });
+		expect(outcome.settled.map(entry => entry.jobId)).toEqual([turn.jobId]);
+		expect(deliveries).toEqual([]);
+	});
+
+	it("releases still-running jobs for later delivery after another watched job settles", async () => {
+		const deliveries: string[] = [];
+		const first = startTurn({ onDelivery: (_jobId, text) => deliveries.push(text) });
+		const second = startTurn({ id: "other-worker" });
+		const pending = VibeSessionRegistry.global().wait(session, {
+			sessions: [WORKER, "other-worker"],
+			timeoutMs: 1_000,
+		});
+		first.complete("first result");
+		const outcome = await pending;
+		expect(outcome.settled.map(entry => entry.jobId)).toEqual([first.jobId]);
+		second.complete("second result");
+		await manager.getJob(second.jobId)?.promise;
+		await manager.drainDeliveries({ timeoutMs: 1_000 });
+		expect(deliveries).toEqual(["second result"]);
+	});
+
 	it("does not render an abort as an elapsed wait window, even with a long timeout", async () => {
 		startTurn();
 		const controller = new AbortController();
@@ -126,5 +154,24 @@ describe("vibe wait completion classification", () => {
 
 		expect(outcome.timedOut).toBe(false);
 		expect(outcome.settled[0]).toMatchObject({ id: WORKER, jobId: turn.jobId, status: "cancelled" });
+	});
+
+	it("does not auto-deliver a result returned during an overlapping wait", async () => {
+		const deliveries: Array<{ jobId: string; text: string }> = [];
+		const turn = startTurn({ onDelivery: (jobId, text) => deliveries.push({ jobId, text }) });
+		const pending = VibeSessionRegistry.global().wait(session, { timeoutMs: 1_000 });
+		manager.watchJobs([turn.jobId]);
+		turn.complete("worker result");
+
+		const outcome = await pending;
+		manager.acknowledgeDeliveries([turn.jobId]);
+		manager.unwatchJobs([turn.jobId]);
+		await manager.drainDeliveries({ timeoutMs: 1_000 });
+
+		expect(outcome.settled).toEqual([
+			{ id: WORKER, jobId: turn.jobId, status: "completed", resultText: "worker result" },
+		]);
+		expect(manager.isJobResultConsumed(turn.jobId)).toBe(true);
+		expect(deliveries).toEqual([]);
 	});
 });

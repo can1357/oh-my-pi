@@ -978,9 +978,10 @@ export class VibeSessionRegistry {
 		}
 
 		let waitEndedByTimeout = false;
+		let watchedJobIds: string[] = [];
 		if (runningJobs.length > 0 && collectSettled().length === 0) {
 			const timeoutMs = Math.max(1, Math.trunc(args.timeoutMs ?? DEFAULT_WAIT_TIMEOUT_MS));
-			const watchedJobIds = runningJobs.map(job => job.id);
+			watchedJobIds = runningJobs.map(job => job.id);
 			manager.watchJobs(watchedJobIds);
 			const { promise: timeoutPromise, resolve: timeoutResolve } = Promise.withResolvers<"timeout">();
 			const timeoutHandle = setTimeout(() => timeoutResolve("timeout"), timeoutMs);
@@ -1002,19 +1003,27 @@ export class VibeSessionRegistry {
 			}
 			try {
 				waitEndedByTimeout = (await Promise.race(racePromises)) === "timeout";
-			} finally {
+			} catch (error) {
 				manager.unwatchJobs(watchedJobIds);
+				throw error;
+			} finally {
 				clearTimeout(timeoutHandle);
 				abortCleanup?.();
 			}
 		}
 
-		const settled = collectSettled();
-		manager.consumeJobResults(settled.map(entry => entry.jobId));
-		// Current in-flight state, independent of the snapshot: a session whose
-		// watched turn settled may already be mid queued follow-up.
-		const stillRunning = watched.filter(record => record.turn !== undefined).map(record => record.id);
-		return { settled, stillRunning, timedOut: waitEndedByTimeout && settled.length === 0 };
+		try {
+			const settled = collectSettled();
+			manager.consumeJobResults(settled.map(entry => entry.jobId));
+			// Current in-flight state, independent of the snapshot: a session whose
+			// watched turn settled may already be mid queued follow-up.
+			const stillRunning = watched.filter(record => record.turn !== undefined).map(record => record.id);
+			return { settled, stillRunning, timedOut: waitEndedByTimeout && settled.length === 0 };
+		} finally {
+			// A reported result is consumed before its watch is lifted; a still-running
+			// job is released so its later completion can follow normal async delivery.
+			manager.unwatchJobs(watchedJobIds);
+		}
 	}
 
 	/** Detach one parent's process-local workers without tombstoning their persisted conversations. */
