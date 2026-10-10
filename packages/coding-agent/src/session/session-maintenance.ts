@@ -9,6 +9,7 @@ import {
 	resolveTelemetry,
 	type StreamFn,
 	type ThinkingLevel,
+	Tokenizer,
 } from "@oh-my-pi/pi-agent-core";
 import {
 	AGGRESSIVE_SHAKE_CONFIG,
@@ -2490,7 +2491,7 @@ export class SessionMaintenance {
 	 * floor the compaction decision respects so on-wire compression can never
 	 * suppress it.
 	 */
-	#estimateStoredContextTokens(pendingMessages: AgentMessage[] = []): number {
+	#estimateStoredContextTokens(pendingMessages: AgentMessage[] = [], tokenizer: Tokenizer = this.#tokenizer): number {
 		// Local counting is the whole point of this arm: provider usage is
 		// exactly what it must not trust. Exclude encrypted reasoning
 		// (thinkingSignature / redactedThinking) too — its local byte size
@@ -2499,9 +2500,9 @@ export class SessionMaintenance {
 		// other arm of compactionContextTokens) already accounts for it.
 		const opts = { excludeEncryptedReasoning: true } as const;
 		return (
-			computeNonMessageTokens(this.#host.nonMessageTokenSource(), this.#tokenizer, this.#host.settings.revision) +
-			this.#tokenizer.countMessages(this.#host.messages(), opts) +
-			this.#tokenizer.countMessages(pendingMessages, opts)
+			computeNonMessageTokens(this.#host.nonMessageTokenSource(), tokenizer, this.#host.settings.revision) +
+			tokenizer.countMessages(this.#host.messages(), opts) +
+			tokenizer.countMessages(pendingMessages, opts)
 		);
 	}
 
@@ -2564,7 +2565,15 @@ export class SessionMaintenance {
 			const primaryWindow = primary.contextWindow ?? 0;
 			if (primaryWindow <= 0) return true;
 			const primarySettings = resolveModelCompactionSettings(this.#host.settings, primary);
-			const tokens = estimate();
+			// The shared estimate counts in the fallback's tokenizer; a primary
+			// that tokenizes differently is also counted in its own domain.
+			const primaryTokenizer = new Tokenizer(primary);
+			const sameDomain =
+				primaryTokenizer.encoding === this.#tokenizer.encoding &&
+				primaryTokenizer.frameBillingKey === this.#tokenizer.frameBillingKey;
+			const tokens = sameDomain
+				? estimate()
+				: Math.max(estimate(), this.#estimateStoredContextTokens(messages, primaryTokenizer));
 			const fitBudget = Math.max(0, primaryWindow - resolveBudgetReserveTokens(primaryWindow, primarySettings));
 			return tokens <= fitBudget && !shouldCompact(tokens, primaryWindow, primarySettings);
 		}, signal);

@@ -6946,6 +6946,28 @@ describe("AgentSession retry fallback", () => {
 			expect(session!.autoResolvedThinkingLevel()).toBe(Effort.Low);
 		});
 
+		it("releases a selected account still inside the margin so a sibling with headroom serves the return", async () => {
+			const requestedModels = startSession({}, () => "healthy", undefined, {
+				role: "default",
+				originalSelector: primarySelector,
+				originalThinkingLevel: undefined,
+				pinned: true,
+			});
+			vi.spyOn(modelRegistry.authStorage.health, "model").mockResolvedValue({
+				state: "healthy",
+				accounts: [
+					{ credentialId: 1, credentialType: "oauth", state: "reserve", remainingFraction: 0.15, selected: true },
+					{ credentialId: 2, credentialType: "oauth", state: "healthy", remainingFraction: 0.8 },
+				],
+			});
+			const release = vi.spyOn(modelRegistry.authStorage.sessions, "release");
+
+			await session!.prompt("Primary pool is healthy, the selected account is not");
+			await session!.waitForIdle();
+			expect(requestedModels).toEqual([primarySelector]);
+			expect(release).toHaveBeenCalledWith(primaryModel!.provider, session!.sessionId);
+		});
+
 		it.each([
 			["a reply grew the stored context", "reply"],
 			["the incoming prompt", "prompt"],
