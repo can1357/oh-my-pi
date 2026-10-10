@@ -1,4 +1,5 @@
 import { describe, expect, it } from "bun:test";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { resolveProviderModels } from "@oh-my-pi/pi-catalog/model-manager";
 import { openrouterModelManagerOptions } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
 
@@ -9,6 +10,12 @@ const CHAT_PAYLOAD = {
 			name: "OpenRouter Auto",
 			supported_parameters: ["tools"],
 			architecture: { input_modalities: ["text"], modality: "text+image" },
+		},
+		{
+			id: "typesafe/jev-router",
+			name: "TypeSafe: Jev Router",
+			supported_parameters: ["tools"],
+			architecture: { input_modalities: ["text"], output_modalities: ["text"] },
 		},
 		{
 			id: "google/gemini-3-pro-image",
@@ -135,6 +142,13 @@ describe("OpenRouter chat, image, decisions, rerank, video, and embedding discov
 			"https://openrouter.ai/api/v1/models?output_modalities=rerank",
 			"https://openrouter.ai/api/v1/videos/models",
 		]);
+		const router = models?.find(model => model.id === "typesafe/jev-router");
+		if (!router) throw new Error("OpenRouter chat roster omitted Jev Router");
+		expect(buildModel(router)).toMatchObject({
+			api: "openrouter",
+			kind: "chat",
+			baseUrl: "https://openrouter.ai/api/v1",
+		});
 		// Decision rows answer only through `/api/alpha/decisions`; they are judge-kind, tool-less, input-priced.
 		expect(models?.find(model => model.id === "~typesafe/jev-latest")).toEqual(
 			expect.objectContaining({

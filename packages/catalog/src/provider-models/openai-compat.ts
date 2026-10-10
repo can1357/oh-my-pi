@@ -3520,6 +3520,7 @@ export function openrouterModelManagerOptions(config?: OpenRouterModelManagerCon
 
 							return {
 								...baseModel,
+								kind: "chat",
 								reasoning: params.includes("reasoning"),
 								...(thinking !== undefined ? { thinking } : {}),
 								input,
