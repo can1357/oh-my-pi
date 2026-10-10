@@ -17,6 +17,7 @@ import type {
 	DesktopCapabilities,
 	DesktopCapture,
 	DesktopDisplay,
+	DesktopFocusReturn,
 	DesktopPoint,
 	DesktopSessionOptions,
 	DesktopWindow,
@@ -44,6 +45,9 @@ import type {
 	ToolReply,
 } from "./protocol";
 
+/** A native input call; resolves to its takeover focus report when it took over. */
+type InputCall = Promise<DesktopFocusReturn | null | void>;
+
 /** Native desktop operations consumed by the script runtime. */
 export interface NativeDesktopSession {
 	readonly capabilities: DesktopCapabilities;
@@ -66,18 +70,18 @@ export interface NativeDesktopSession {
 		caps?: { maxWidth?: number; maxHeight?: number },
 		options?: AxOptions,
 	): Promise<NativeObservation>;
-	holdKeys(target: string, keys: string[], options: NativeHoldOptions): Promise<void>;
-	holdMouse(target: string, x: number, y: number, options: NativeHoldOptions): Promise<void>;
+	holdKeys(target: string, keys: string[], options: NativeHoldOptions): InputCall;
+	holdMouse(target: string, x: number, y: number, options: NativeHoldOptions): InputCall;
 	acquireControl(): Promise<DesktopControlState>;
 	releaseControl(): void;
 	controlState(): DesktopControlState;
 	bringToCurrentSpace(windowId: string): Promise<void>;
-	click(target: string, x: number, y: number, opts?: PointerOptions | null): Promise<void>;
-	moveMouse(target: string, x: number, y: number, opts?: PointerOptions | null): Promise<void>;
-	drag(target: string, points: DesktopPoint[], opts?: PointerOptions | null): Promise<void>;
-	scroll(target: string, x: number, y: number, dx: number, dy: number, opts?: PointerOptions | null): Promise<void>;
-	typeText(target: string, text: string, opts?: PointerOptions | null): Promise<void>;
-	keyChord(target: string, keys: string[], opts?: PointerOptions | null): Promise<void>;
+	click(target: string, x: number, y: number, opts?: PointerOptions | null): InputCall;
+	moveMouse(target: string, x: number, y: number, opts?: PointerOptions | null): InputCall;
+	drag(target: string, points: DesktopPoint[], opts?: PointerOptions | null): InputCall;
+	scroll(target: string, x: number, y: number, dx: number, dy: number, opts?: PointerOptions | null): InputCall;
+	typeText(target: string, text: string, opts?: PointerOptions | null): InputCall;
+	keyChord(target: string, keys: string[], opts?: PointerOptions | null): InputCall;
 	raiseWindow(windowId: string): Promise<void>;
 	axSnapshot(target: string, opts?: AxSnapshotOptions | null): Promise<{ text: string }>;
 	axQuery(target: string, query: AxQuery): Promise<AxNode[]>;
@@ -90,7 +94,7 @@ export interface NativeDesktopSession {
 	axPerform(ref: string, action: string): Promise<void>;
 	axSetValue(ref: string, value: string): Promise<void>;
 	axFocus(ref: string): Promise<void>;
-	axClick(ref: string, opts?: PointerOptions | null): Promise<void>;
+	axClick(ref: string, opts?: PointerOptions | null): InputCall;
 	close(): Promise<void>;
 }
 
@@ -251,25 +255,38 @@ type Fallback = { takeover: true; returnFocus: true };
 const FALLBACK: Fallback = { takeover: true, returnFocus: true };
 const BACKGROUND_UNAVAILABLE = "BackgroundUnavailable: ";
 
-/** The focused window, or undefined when none is known or the listing fails. */
-async function focusedWindow(session: NativeDesktopSession, signal: AbortSignal): Promise<DesktopWindow | undefined> {
+/** App names by pid from the window list, empty when the listing fails. */
+async function appNames(session: NativeDesktopSession, signal: AbortSignal): Promise<Map<number, string>> {
 	try {
-		return (await nativeCall(signal, () => session.listWindows())).find(window => window.focused);
+		const windows = await nativeCall(signal, () => session.listWindows());
+		return new Map(windows.flatMap(window => (window.pid === undefined ? [] : [[window.pid, window.app]])));
 	} catch (error) {
 		if (error instanceof ToolAbortError) throw error;
-		return undefined;
+		return new Map();
 	}
 }
 
-/** Says where focus ended after a fallback takeover, measured rather than assumed. */
-function focusReport(user: DesktopWindow | undefined, after: DesktopWindow | undefined, target?: number): string {
-	if (!after) return "focus could not be read afterwards";
-	if (!user) return `focus is on ${after.app}`;
-	if (user.pid !== undefined && after.pid !== undefined ? user.pid === after.pid : user.app === after.app)
-		return `focus returned to ${user.app}`;
-	if (target !== undefined && after.pid === target)
-		return `focus stayed on ${after.app}; it did not return to ${user.app}`;
-	return `focus is on ${after.app}, which became active during the action; it was left there`;
+/**
+ * Says where focus ended after a fallback takeover, from native's
+ * WindowServer reading taken when the takeover finished.
+ */
+async function focusReport(
+	session: NativeDesktopSession,
+	signal: AbortSignal,
+	report: DesktopFocusReturn | null | void,
+	target?: number,
+): Promise<string> {
+	if (!report || report.frontPid == null) return "focus was not confirmed afterwards";
+	const { frontPid, previousPid, handedBack } = report;
+	const names = await appNames(session, signal);
+	const name = (pid: number) => names.get(pid) ?? `pid ${pid}`;
+	const front = name(frontPid);
+	if (previousPid == null) return `focus is on ${front}`;
+	if (frontPid === previousPid) return handedBack ? `focus returned to ${front}` : `focus is on ${front}`;
+	const user = name(previousPid);
+	if (handedBack) return `focus was handed back to ${user}, but ${front} is now front`;
+	if (frontPid === target) return `focus stayed on ${front}; it did not return to ${user}`;
+	return `focus is on ${front}; it did not return to ${user}`;
 }
 
 /**
@@ -284,7 +301,7 @@ async function sendInput(
 	context: ComputerRunContext,
 	method: string,
 	takeover: boolean | undefined,
-	send: (fallback?: Fallback) => Promise<void>,
+	send: (fallback?: Fallback) => InputCall,
 	target?: number,
 ): Promise<void> {
 	try {
@@ -300,18 +317,17 @@ async function sendInput(
 		if (!session.capabilities.takeover) {
 			throw new ToolError(`${error.message}; this desktop backend has no takeover, so no takeover happened`);
 		}
-		const user = await focusedWindow(session, context.signal);
+		let report: DesktopFocusReturn | null | void;
 		try {
-			await nativeCall(context.signal, () => send(FALLBACK));
+			report = await nativeCall(context.signal, () => send(FALLBACK));
 		} catch (rerun) {
 			if (rerun instanceof ToolAbortError) throw rerun;
 			const message = rerun instanceof Error ? rerun.message : String(rerun);
 			throw new ToolError(`${method} fell back to takeover because ${reason}, and the takeover failed: ${message}`);
 		}
-		const after = await focusedWindow(session, context.signal);
 		context.output.push({
 			type: "text",
-			text: `${method} ran in takeover because ${reason}; ${focusReport(user, after, target)}`,
+			text: `${method} ran in takeover because ${reason}; ${await focusReport(session, context.signal, report, target)}`,
 		});
 	}
 }

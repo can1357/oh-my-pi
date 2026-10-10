@@ -17,7 +17,10 @@ use std::{
 
 use parking_lot::{Condvar, Mutex};
 
-use super::error::{CoreResult, DesktopError};
+use super::{
+	error::{CoreResult, DesktopError},
+	types::DesktopFocusReturn,
+};
 
 #[cfg(target_os = "linux")]
 mod linux;
@@ -162,6 +165,19 @@ impl OperationToken {
 thread_local! {
 	static CURRENT: RefCell<Option<OperationToken>> = const { RefCell::new(None) };
 	static CLEANUP: Cell<bool> = const { Cell::new(false) };
+	static FOCUS_RETURN: Cell<Option<DesktopFocusReturn>> = const { Cell::new(None) };
+}
+
+/// Records where the current operation's takeover left focus.
+#[cfg(target_os = "macos")]
+pub(crate) fn report_focus_return(report: DesktopFocusReturn) {
+	FOCUS_RETURN.set(Some(report));
+}
+
+/// Takes the focus report of the operation running on this thread, leaving
+/// none for the next.
+pub(crate) fn take_focus_return() -> Option<DesktopFocusReturn> {
+	FOCUS_RETURN.take()
 }
 
 pub(crate) struct OperationScope {

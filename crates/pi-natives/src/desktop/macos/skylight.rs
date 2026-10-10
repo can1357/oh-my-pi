@@ -1,4 +1,5 @@
 use std::{
+	cell::Cell,
 	ffi::{CStr, c_void},
 	mem,
 	os::raw::{c_char, c_int, c_uint},
@@ -19,6 +20,7 @@ use super::{
 	super::{
 		control,
 		error::{CoreResult, DesktopError},
+		types::DesktopFocusReturn,
 	},
 	ax,
 };
@@ -567,7 +569,9 @@ pub(super) fn with_foreground<T>(
 	})?;
 	let focused = ax::focused_window_id(pid);
 	if preserves_exact_existing_focus(Some(previous.psn), target, focused, wid) {
-		return action(false).and_then(|value| control::wait(FOREGROUND_SETTLE).map(|()| value));
+		let result = action(false).and_then(|value| control::wait(FOREGROUND_SETTLE).map(|()| value));
+		report_focus_return(false, previous.pid);
+		return result;
 	}
 	let previous_pid = previous.pid.ok_or_else(|| {
 		DesktopError::input_failed(
@@ -579,6 +583,7 @@ pub(super) fn with_foreground<T>(
 			"cannot identify the previous key window for takeover restoration; no input was sent",
 		)
 	})?;
+	let handed_back = Cell::new(false);
 	let restore = |preparation_failed: bool| {
 		if !return_focus && user_acted() {
 			return Ok(());
@@ -610,16 +615,32 @@ pub(super) fn with_foreground<T>(
 		if ax::focused_window_id(previous_pid) != Some(previous_key) {
 			make_exact_window_key(spi, previous.psn, previous_key)?;
 		}
-		await_window_focused(spi, previous_pid, previous_key, previous.psn)
+		await_window_focused(spi, previous_pid, previous_key, previous.psn)?;
+		handed_back.set(true);
+		Ok(())
 	};
 	let prepare = set_front(spi, target, wid)
 		.and_then(|()| make_exact_window_key(spi, target, wid))
 		.and_then(|()| await_window_focused(spi, pid, wid, target));
-	if let Err(error) = prepare {
-		return after_cleanup(Err(error), control::cleanup(|| restore(true)));
-	}
-	let result = action(true).and_then(|value| control::wait(FOREGROUND_SETTLE).map(|()| value));
-	after_cleanup(result, control::cleanup(|| restore(false)))
+	let result = if let Err(error) = prepare {
+		after_cleanup(Err(error), control::cleanup(|| restore(true)))
+	} else {
+		let result = action(true).and_then(|value| control::wait(FOREGROUND_SETTLE).map(|()| value));
+		after_cleanup(result, control::cleanup(|| restore(false)))
+	};
+	report_focus_return(handed_back.get(), previous.pid);
+	result
+}
+
+/// Records for the host where a takeover left focus, read from `WindowServer`
+/// after restoration.
+fn report_focus_return(handed_back: bool, previous: Option<pid_t>) {
+	let pid = |pid: pid_t| u32::try_from(pid).ok();
+	control::report_focus_return(DesktopFocusReturn {
+		handed_back,
+		previous_pid: previous.and_then(pid),
+		front_pid: front_pid().and_then(pid),
+	});
 }
 
 /// Where focus sits when a takeover ends.

@@ -166,6 +166,20 @@ pub struct HoldOptions {
 	pub return_focus: Option<bool>,
 }
 
+/// Where focus ended after a takeover input call, as `WindowServer` reports
+/// it. Input calls resolve to it on macOS when they took over; other
+/// backends and background delivery resolve to `null`.
+#[napi(object)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DesktopFocusReturn {
+	/// Whether the takeover handed focus back to the app front before it.
+	pub handed_back:  bool,
+	/// The process front before the takeover.
+	pub previous_pid: Option<u32>,
+	/// The process front once the takeover ended; absent when unreadable.
+	pub front_pid:    Option<u32>,
+}
+
 #[napi(object)]
 #[derive(Debug, Clone, Copy)]
 pub struct DesktopControlState {
