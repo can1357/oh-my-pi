@@ -10,6 +10,7 @@
 
 ### Fixed
 
+- Fixed Wayland input hanging during libei device discovery ([#13210](https://github.com/can1357/oh-my-pi/pull/13210) by [@Komzpa](https://github.com/Komzpa))
 - Fixed macOS computer use reporting `AxFailed` instead of `StaleRef` for a ref whose element the app had removed ([#15156](https://github.com/can1357/oh-my-pi/pull/15156) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed macOS `el.press()` and `el.perform()` reporting `AxFailed` when the app did not answer in time, such as a press that opens a modal dialog; they now report `AxUnconfirmed` ([#15156](https://github.com/can1357/oh-my-pi/pull/15156) by [@will-bogusz](https://github.com/will-bogusz))
 
