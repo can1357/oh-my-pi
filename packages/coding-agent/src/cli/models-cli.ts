@@ -13,6 +13,7 @@
  */
 import type { Api, Effort, Model } from "@oh-my-pi/pi-ai";
 import { sendsImageInputOnWire } from "@oh-my-pi/pi-ai/providers/vision-guard";
+import { catalogMetricsOf } from "@oh-my-pi/pi-catalog/identity/metrics";
 import { getModelPricingStatus } from "@oh-my-pi/pi-catalog/models";
 import { getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
 import { type ModelKind, type ModelPricingStatus, modelKind } from "@oh-my-pi/pi-catalog/types";
@@ -84,6 +85,10 @@ interface ModelJson {
 	thinking: readonly Effort[] | null;
 	input: ("text" | "image")[];
 	cost: Model<Api>["cost"];
+	/** Catalog intelligence score, as shown in the model browser; null when the catalog has not scored the model. */
+	int: number | null;
+	/** Catalog-estimated output speed in tokens per second; null when unmeasured (a zero speed is not a score). */
+	tps: number | null;
 	pricingStatus: ModelPricingStatus;
 }
 
@@ -114,6 +119,7 @@ function byProviderThenId(left: Model<Api>, right: Model<Api>): number {
 }
 
 function toModelJson(model: Model<Api>): ModelJson {
+	const metrics = catalogMetricsOf(model);
 	return {
 		provider: model.provider,
 		kind: modelKind(model),
@@ -126,6 +132,8 @@ function toModelJson(model: Model<Api>): ModelJson {
 		thinking: model.thinking ? getSupportedEfforts(model) : null,
 		input: model.input,
 		cost: model.cost,
+		int: metrics?.int ?? null,
+		tps: metrics?.tps ?? null,
 		pricingStatus: getModelPricingStatus(model),
 	};
 }
