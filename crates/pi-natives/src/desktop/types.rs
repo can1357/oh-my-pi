@@ -139,24 +139,31 @@ pub struct CaptureRegion {
 #[napi(object)]
 #[derive(Debug, Clone, Default)]
 pub struct PointerOptions {
-	pub button:    Option<String>,
-	pub count:     Option<u32>,
-	pub modifiers: Option<Vec<String>>,
+	pub button:       Option<String>,
+	pub count:        Option<u32>,
+	pub modifiers:    Option<Vec<String>>,
 	/// Arbitrary keys held for the duration of a drag.
-	pub keys:      Option<Vec<String>>,
+	pub keys:         Option<Vec<String>>,
 	/// Briefly activate the target window and post real input instead of the
 	/// default background delivery.
-	pub takeover:  Option<bool>,
+	pub takeover:     Option<bool>,
+	/// With `takeover`, hand focus back to the user's app even if they typed
+	/// or clicked during the action; only a third app they switched to keeps
+	/// it. The host sets this when it reruns a refused background action.
+	pub return_focus: Option<bool>,
 }
 
 #[napi(object)]
 #[derive(Debug, Clone)]
 pub struct HoldOptions {
 	/// Duration in seconds, from zero through 100.
-	pub duration: f64,
-	pub button:   Option<String>,
-	pub keys:     Option<Vec<String>>,
-	pub takeover: Option<bool>,
+	pub duration:     f64,
+	pub button:       Option<String>,
+	pub keys:         Option<Vec<String>>,
+	pub takeover:     Option<bool>,
+	/// With `takeover`, hand focus back to the user's app even after their
+	/// input during the hold; see `PointerOptions.returnFocus`.
+	pub return_focus: Option<bool>,
 }
 
 #[napi(object)]

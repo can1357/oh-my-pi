@@ -143,8 +143,7 @@ pub(super) fn takeover_available() -> bool {
 fn required() -> CoreResult<&'static RequiredSpi> {
 	REQUIRED.as_ref().ok_or_else(|| {
 		DesktopError::background_unavailable(
-			"skylight-spi-missing: required SkyLight background input symbols are unavailable; retry \
-			 with takeover:true or use ax actions",
+			"skylight-spi-missing: required SkyLight background input symbols are unavailable",
 		)
 	})
 }
@@ -417,14 +416,13 @@ pub(super) fn with_background_guard<T>(
 	control::check()?;
 	let spi = FOREGROUND.as_ref().ok_or_else(|| {
 		DesktopError::background_unavailable(
-			"focus-restoration SPI is unavailable; use ax actions that do not activate the app or \
-			 takeover:true",
+			"the focus-restoration SPI is unavailable, so background input could not keep the user's \
+			 focus; nothing was sent",
 		)
 	})?;
 	let previous = front_process(spi.get_front).ok_or_else(|| {
 		DesktopError::background_unavailable(
-			"cannot establish the current front process before background input; retry with \
-			 takeover:true",
+			"cannot establish the current front process before background input; nothing was sent",
 		)
 	})?;
 	if previous.pid == Some(pid) {
@@ -432,13 +430,13 @@ pub(super) fn with_background_guard<T>(
 	}
 	let target = process_psn(spi.psn, pid, 0).ok_or_else(|| {
 		DesktopError::background_unavailable(
-			"cannot resolve the background target process; retry with takeover:true or use ax actions",
+			"cannot resolve the background target process; nothing was sent",
 		)
 	})?;
 	let previous_key = previous.pid.and_then(ax::key_window_id).ok_or_else(|| {
 		DesktopError::background_unavailable(
-			"cannot establish the user's key window for background focus restoration; retry with \
-			 takeover:true or use ax actions",
+			"cannot establish the user's key window for background focus restoration; nothing was \
+			 sent",
 		)
 	})?;
 	let mut lease = BackgroundFocusLease {
@@ -492,8 +490,7 @@ pub(super) fn with_background_guard<T>(
 						{
 							return Err(DesktopError::input_failed(
 								"the background target reactivated after focus restoration; input may \
-								 already have landed; inspect the desktop and use takeover:true or ax \
-								 actions",
+								 already have landed; inspect the desktop before sending more",
 							));
 						}
 						return Ok(());
@@ -503,8 +500,7 @@ pub(super) fn with_background_guard<T>(
 			})
 			.map_err(|error| {
 				DesktopError::background_unavailable(format!(
-					"could not start the background focus guard: {error}; retry with takeover:true or \
-					 use ax actions"
+					"could not start the background focus guard: {error}; nothing was sent"
 				))
 			})?;
 		struct StopObserver<'a> {
@@ -547,13 +543,17 @@ fn set_front(spi: &ForegroundSpi, psn: ProcessSerialNumber, wid: u32) -> CoreRes
 /// already is the key window of the front process is not re-activated:
 /// re-activating it can clear Chromium's renderer focus. The window is made
 /// key without being raised; callers that need it unobstructed raise it.
+/// `return_focus` restores even after user input during the action; see
+/// [`hands_focus_back`].
 pub(super) fn with_foreground<T>(
 	pid: pid_t,
 	wid: u32,
+	return_focus: bool,
 	action: impl FnOnce(bool) -> CoreResult<T>,
 ) -> CoreResult<T> {
 	control::check()?;
 	let activity = control::user_activity();
+	let user_acted = || control::user_activity() != activity;
 	let spi = FOREGROUND.as_ref().ok_or_else(|| {
 		DesktopError::input_failed("exact-window takeover SPI is unavailable; no input was sent")
 	})?;
@@ -580,22 +580,25 @@ pub(super) fn with_foreground<T>(
 		)
 	})?;
 	let restore = |preparation_failed: bool| {
-		if control::user_activity() != activity {
+		if !return_focus && user_acted() {
 			return Ok(());
 		}
 		let front = front_process(spi.get_front).ok_or_else(|| {
 			DesktopError::input_failed("cannot establish current focus for takeover restoration")
 		})?;
-		// A user-selected third app or sibling window must not be overwritten.
-		if front.psn != target {
-			return Ok(());
-		}
-		if ax::focused_window_id(pid)
+		let now = if front.psn != target {
+			FocusAfterTakeover::Elsewhere
+		} else if ax::focused_window_id(pid)
 			.is_some_and(|key| key != wid && (!preparation_failed || Some(key) != focused))
 		{
+			FocusAfterTakeover::TargetSibling
+		} else {
+			FocusAfterTakeover::Target
+		};
+		if !hands_focus_back(return_focus, user_acted(), now) {
 			return Ok(());
 		}
-		if control::user_activity() != activity
+		if (!return_focus && user_acted())
 			|| !front_process(spi.get_front).is_some_and(|front| front.psn == target)
 		{
 			return Ok(());
@@ -617,6 +620,34 @@ pub(super) fn with_foreground<T>(
 	}
 	let result = action(true).and_then(|value| control::wait(FOREGROUND_SETTLE).map(|()| value));
 	after_cleanup(result, control::cleanup(|| restore(false)))
+}
+
+/// Where focus sits when a takeover ends.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FocusAfterTakeover {
+	/// The target process is front with the target (or its starting) key window.
+	Target,
+	/// The target process is front, but another of its windows became key.
+	TargetSibling,
+	/// Another process is front: the user's own app again, or a third app.
+	Elsewhere,
+}
+
+/// Whether a takeover hands focus back to the app the user was in.
+///
+/// An explicit takeover yields to any user input during the action, so a key
+/// the user typed or a window they picked keeps focus where it went. A
+/// returning takeover (the host's rerun of a refused background action) hands
+/// focus back even then: input the user typed while the target was front was
+/// meant for their own app. Neither overwrites a process the user switched
+/// to, which is either their own app already or a deliberately chosen third
+/// app.
+const fn hands_focus_back(return_focus: bool, user_acted: bool, now: FocusAfterTakeover) -> bool {
+	match now {
+		FocusAfterTakeover::Elsewhere => false,
+		FocusAfterTakeover::TargetSibling => return_focus,
+		FocusAfterTakeover::Target => return_focus || !user_acted,
+	}
 }
 
 pub(super) fn require_front_window(pid: pid_t, wid: u32) -> CoreResult<()> {
@@ -847,5 +878,25 @@ mod tests {
 		assert!(!preserves_exact_existing_focus(Some(target), target, Some(41), 42));
 		assert!(!preserves_exact_existing_focus(Some(target), target, None, 42));
 		assert!(!preserves_exact_existing_focus(None, target, Some(42), 42));
+	}
+
+	#[test]
+	fn a_returning_takeover_hands_focus_back_after_typing_but_not_over_a_third_app() {
+		use FocusAfterTakeover::{Elsewhere, Target, TargetSibling};
+		// The user typed (or clicked) while the target was front.
+		assert!(hands_focus_back(true, true, Target));
+		assert!(hands_focus_back(true, true, TargetSibling));
+		// Negative control: an explicit takeover yields to that input.
+		assert!(!hands_focus_back(false, true, Target));
+		assert!(!hands_focus_back(false, true, TargetSibling));
+		// With no user input both restore, and an explicit takeover still keeps a
+		// sibling window the user chose.
+		assert!(hands_focus_back(true, false, Target));
+		assert!(hands_focus_back(false, false, Target));
+		assert!(!hands_focus_back(false, false, TargetSibling));
+		// A process the user switched to keeps focus either way.
+		for (return_focus, user_acted) in [(true, true), (true, false), (false, false)] {
+			assert!(!hands_focus_back(return_focus, user_acted, Elsewhere));
+		}
 	}
 }

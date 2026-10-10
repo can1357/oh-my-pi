@@ -7,6 +7,8 @@
 - macOS background keystrokes into an app with several windows now reach the target window instead of throwing `BackgroundUnavailable`
 - macOS background drags, mouse holds, clicks with modifiers, right-clicks and scrolls in Electron apps now run without bringing the app forward, instead of throwing `BackgroundUnavailable`
 - macOS background clicks into apps built on macOS's own Tk 8.5 now run; Tk 8.6 and later still throw `BackgroundUnavailable`
+- macOS window input with `takeover` and the new `returnFocus` option hands focus back to the user's app even when they typed or clicked during the action; only a third app they switched to keeps focus. Plain `takeover` is unchanged
+- `BackgroundUnavailable` and partial-delivery errors no longer tell the caller to retry with `takeover:true`; they say whether any input was sent
 
 ### Fixed
 

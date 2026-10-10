@@ -69,8 +69,8 @@ impl MacInput {
 							background_pointer(&self.source, pid, wid, &window, event)
 						})
 					},
-					DeliveryMode::Foreground => {
-						foreground_pointer(&self.source, &window, pid, wid, event)
+					DeliveryMode::Foreground | DeliveryMode::ForegroundReturnFocus => {
+						foreground_pointer(&self.source, &window, pid, wid, event, returns_focus(mode))
 					},
 				}
 			},
@@ -105,7 +105,7 @@ impl MacInput {
 							background_type(&self.source, pid, text)
 						})
 					},
-					DeliveryMode::Foreground => {
+					DeliveryMode::Foreground | DeliveryMode::ForegroundReturnFocus => {
 						// Screen Sharing relays physical key transitions only; map
 						// the whole text before activating so a gap
 						// refuses cleanly.
@@ -114,7 +114,7 @@ impl MacInput {
 						} else {
 							None
 						};
-						skylight::with_foreground(pid, wid, |activated| {
+						skylight::with_foreground(pid, wid, returns_focus(mode), |activated| {
 							control::wait(first_key_settle(activated))?;
 							match &physical {
 								Some(transitions) => {
@@ -162,10 +162,12 @@ impl MacInput {
 							background_chord(&self.source, pid, keys)
 						})
 					},
-					DeliveryMode::Foreground => skylight::with_foreground(pid, wid, |activated| {
-						control::wait(first_key_settle(activated))?;
-						key_chord(&self.source, keys, |event| post_takeover_key(pid, wid, event))
-					}),
+					DeliveryMode::Foreground | DeliveryMode::ForegroundReturnFocus => {
+						skylight::with_foreground(pid, wid, returns_focus(mode), |activated| {
+							control::wait(first_key_settle(activated))?;
+							key_chord(&self.source, keys, |event| post_takeover_key(pid, wid, event))
+						})
+					},
 				}
 			},
 		}
@@ -205,19 +207,27 @@ impl MacInput {
 							)
 						})
 					},
-					DeliveryMode::Foreground => skylight::with_foreground(pid, wid, |activated| {
-						control::wait(first_key_settle(activated))?;
-						with_held_keys(
-							&self.source,
-							keys,
-							|event| post_takeover_key(pid, wid, event),
-							|| control::wait(duration),
-						)
-					}),
+					DeliveryMode::Foreground | DeliveryMode::ForegroundReturnFocus => {
+						skylight::with_foreground(pid, wid, returns_focus(mode), |activated| {
+							control::wait(first_key_settle(activated))?;
+							with_held_keys(
+								&self.source,
+								keys,
+								|event| post_takeover_key(pid, wid, event),
+								|| control::wait(duration),
+							)
+						})
+					},
 				}
 			},
 		}
 	}
+}
+
+/// Whether a takeover hands focus back even after user input (see
+/// [`DeliveryMode::ForegroundReturnFocus`]).
+const fn returns_focus(mode: DeliveryMode) -> bool {
+	matches!(mode, DeliveryMode::ForegroundReturnFocus)
 }
 
 fn window_identity(window: &DesktopWindow) -> CoreResult<(libc::pid_t, u32)> {
@@ -236,7 +246,7 @@ fn window_identity(window: &DesktopWindow) -> CoreResult<(libc::pid_t, u32)> {
 fn screen_sharing_refusal(window: &DesktopWindow, dropped: &str) -> DesktopError {
 	DesktopError::background_unavailable(format!(
 		"window {} ({}) forwards only physical key transitions to the remote host and drops \
-		 background {dropped}; retry with takeover:true or use ax actions",
+		 background {dropped}; nothing was sent",
 		window.id, window.app,
 	))
 }
@@ -287,15 +297,14 @@ fn with_background_keyboard<T>(
 fn unmapped_keyboard_refusal(wid: u32) -> DesktopError {
 	DesktopError::background_unavailable(format!(
 		"window {wid} is not among its application's accessibility windows, so background \
-		 keystrokes cannot be proven to reach it; retry with takeover:true or use ax actions",
+		 keystrokes cannot be proven to reach it; nothing was sent",
 	))
 }
 
 fn sibling_keyboard_refusal(wid: u32, siblings: usize) -> DesktopError {
 	DesktopError::background_unavailable(format!(
 		"window {wid} shares its application with {siblings} other window(s) and did not become its \
-		 key window, so background keystrokes could reach another window; retry with takeover:true \
-		 or use ax actions",
+		 key window, so background keystrokes could reach another window; nothing was sent",
 	))
 }
 
@@ -340,7 +349,7 @@ fn refuse_pointer(
 ) -> CoreResult<()> {
 	let refuse = |reason: &str| {
 		Err(DesktopError::background_unavailable(format!(
-			"window {} ({}) {reason}; retry with takeover:true or use ax actions",
+			"window {} ({}) {reason}; nothing was sent",
 			window.id, window.app,
 		)))
 	};
@@ -460,8 +469,7 @@ pub(super) fn make_key_in_background(
 		FrontTarget::UserSibling => {
 			return Err(DesktopError::background_unavailable(format!(
 				"window {wid} belongs to the frontmost application but is not its key window; making \
-				 it key would move the user's typing there, so nothing was sent; retry with \
-				 takeover:true or use ax actions",
+				 it key would move the user's typing there, so nothing was sent",
 			)));
 		},
 	}
@@ -673,7 +681,7 @@ fn background_pointer(
 		Some(capture::menu_windows(pid).ok_or_else(|| {
 			DesktopError::background_unavailable(format!(
 				"cannot list the open menus of window {} ({}), so a context menu this {} opens could \
-				 not be closed; nothing was sent; retry with takeover:true or use ax actions",
+				 not be closed; nothing was sent",
 				window.id,
 				window.app,
 				pointer_kind(&event),
@@ -775,8 +783,7 @@ fn with_menu_dismissal(
 		))),
 		(Ok(()), Ok(Some(true))) => Err(DesktopError::background_unavailable(format!(
 			"the input reached window {} ({}) and opened a context menu, which takes the keyboard \
-			 from the user's app while it is open; it was closed with Escape, with nothing chosen. \
-			 To use the menu, retry with takeover:true",
+			 from the user's app while it is open; it was closed with Escape, with nothing chosen",
 			window.id, window.app,
 		))),
 		(delivered, Ok(_)) => delivered,
@@ -1613,15 +1620,18 @@ fn char_key_code(character: char) -> CoreResult<u16> {
 /// Delivers real HID pointer input to `window` while it is the frontmost key
 /// window, then restores focus, any known covering window, and the user's
 /// pointer. Raising a single covering window is not an exact z-order snapshot.
+/// With `return_focus`, user input during the action does not cancel the
+/// restoration.
 fn foreground_pointer(
 	source: &CGEventSource,
 	window: &DesktopWindow,
 	pid: libc::pid_t,
 	wid: u32,
 	event: PointerEvent,
+	return_focus: bool,
 ) -> CoreResult<()> {
 	preserving_cursor(source, || {
-		skylight::with_foreground(pid, wid, |_| {
+		skylight::with_foreground(pid, wid, return_focus, |_| {
 			let activity = control::user_activity();
 			let mut occluder = None;
 			let result = uncover(window, pid, wid, &event, &mut occluder)
@@ -1637,16 +1647,17 @@ fn foreground_pointer(
 				});
 			// Capture before raising, so even a failed raise/re-hit-test retains
 			// the restoration token. Never reorder over a user-selected app.
-			let cleanup =
-				if control::user_activity() == activity && skylight::is_front_window(pid, wid) {
-					control::cleanup(|| {
-						occluder.map_or(Ok(()), |occluder: Occluder| {
-							ax::raise_window_id(occluder.pid, occluder.window)
-						})
+			let cleanup = if (return_focus || control::user_activity() == activity)
+				&& skylight::is_front_window(pid, wid)
+			{
+				control::cleanup(|| {
+					occluder.map_or(Ok(()), |occluder: Occluder| {
+						ax::raise_window_id(occluder.pid, occluder.window)
 					})
-				} else {
-					Ok(())
-				};
+				})
+			} else {
+				Ok(())
+			};
 			skylight::after_cleanup(result, cleanup)
 		})
 	})

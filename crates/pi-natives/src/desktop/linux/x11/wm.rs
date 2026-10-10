@@ -388,7 +388,7 @@ impl Wm<'_> {
 			.map_err(wm_failed)?;
 		if attributes.map_state != MapState::VIEWABLE {
 			return Err(DesktopError::background_unavailable(format!(
-				"window {window} is not viewable; use ax actions or takeover:true"
+				"window {window} is not viewable; no input was sent"
 			)));
 		}
 		let geometry = self
@@ -418,13 +418,12 @@ impl Wm<'_> {
 		}
 		let under = self.root_child_at(x, y).ok_or_else(|| {
 			DesktopError::background_unavailable(format!(
-				"no input window covers ({x}, {y}); use ax actions or takeover:true"
+				"no input window covers ({x}, {y}); no input was sent"
 			))
 		})?;
 		let frame = self.root_child_of(window).ok_or_else(|| {
 			DesktopError::background_unavailable(format!(
-				"window {window} is not mapped on this screen; retry with takeover:true or use ax \
-				 actions"
+				"window {window} is not mapped on this screen; no input was sent"
 			))
 		})?;
 		if under == frame {
@@ -435,8 +434,7 @@ impl Wm<'_> {
 		let title = self.title(client);
 		Err(DesktopError::background_unavailable(format!(
 			"window {window}: screen point ({x}, {y}) is covered by window {client}{}{}, so a real \
-			 pointer event would land there; no input was sent; retry with takeover:true or use ax \
-			 actions",
+			 pointer event would land there; no input was sent",
 			if title.is_empty() {
 				String::new()
 			} else {
@@ -513,8 +511,7 @@ impl FocusSnapshot {
 				return if moved_to_target {
 					Err(DesktopError::input_failed(format!(
 						"window {target} changed the desktop focus during background input; the action \
-						 may already have landed, so do not retry blindly; use ax actions or \
-						 takeover:true for subsequent input"
+						 may already have landed, so do not retry blindly; inspect the desktop first"
 					)))
 				} else {
 					Ok(())

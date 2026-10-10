@@ -402,7 +402,7 @@ impl Mpx {
 			},
 			Ok(false) => Err(DesktopError::input_failed(
 				"the X server did not confirm virtual input or key release; delivery is uncertain, so \
-				 do not retry blindly; use ax actions or takeover:true for subsequent input",
+				 do not retry blindly; inspect the desktop first",
 			)),
 			Err(error) => Err(error),
 		}
@@ -531,8 +531,7 @@ impl Mpx {
 			}
 		}
 		Err(DesktopError::background_unavailable(format!(
-			"window {window} cannot take the virtual keyboard focus (not viewable); retry with \
-			 takeover:true or use ax actions"
+			"window {window} cannot take the virtual keyboard focus (not viewable); no input was sent"
 		)))
 	}
 
@@ -545,7 +544,7 @@ impl Mpx {
 		if self.uncertain {
 			return Err(DesktopError::background_unavailable(
 				"the virtual input device could not confirm isolated delivery of a prior action and \
-				 cannot be retargeted; use ax actions or takeover:true",
+				 cannot be retargeted; no input was sent",
 			));
 		}
 		Ok(())

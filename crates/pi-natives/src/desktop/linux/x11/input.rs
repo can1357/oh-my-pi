@@ -142,13 +142,13 @@ impl X11Input {
 		event: PointerEvent,
 		mode: DeliveryMode,
 	) -> CoreResult<()> {
-		if matches!(target, Target::Desktop | Target::Display(_)) || mode == DeliveryMode::Foreground
+		if matches!(target, Target::Desktop | Target::Display(_)) || mode != DeliveryMode::Background
 		{
 			self.keymap = Keymap::core(&self.conn)?;
 		}
 		match (target, mode) {
 			(Target::Desktop | Target::Display(_), _) => self.pointer_xtest(&event),
-			(Target::Window(id), DeliveryMode::Foreground) => {
+			(Target::Window(id), DeliveryMode::Foreground | DeliveryMode::ForegroundReturnFocus) => {
 				let window = parse_window(id)?;
 				pointer_endpoint(&event)?;
 				self.with_foreground(window, FOREGROUND_POINTER_SETTLE, |this| {
@@ -244,7 +244,7 @@ impl X11Input {
 				let steps = keys.plan(&self.keymap)?;
 				self.xtest_steps(&steps, keys.duration())
 			},
-			(Target::Window(id), DeliveryMode::Foreground) => {
+			(Target::Window(id), DeliveryMode::Foreground | DeliveryMode::ForegroundReturnFocus) => {
 				let window = parse_window(id)?;
 				let steps = keys.plan(&self.keymap)?;
 				self.with_foreground(window, FOREGROUND_KEYBOARD_SETTLE, |this| {
@@ -1128,8 +1128,7 @@ fn input_failed(error: impl std::fmt::Display) -> DesktopError {
 
 fn background_unavailable(window: &str, kind: &str, reason: &str) -> DesktopError {
 	DesktopError::background_unavailable(format!(
-		"window {window} drops background {kind} events: {reason}; retry with takeover:true or use \
-		 ax actions"
+		"window {window} drops background {kind} events: {reason}; no input was sent"
 	))
 }
 
