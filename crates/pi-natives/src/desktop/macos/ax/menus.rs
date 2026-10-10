@@ -2,7 +2,7 @@ use objc2_application_services::{AXError, AXUIElement};
 use objc2_core_foundation::{CFArray, CFNumber, CFRetained, CFType};
 
 use super::{
-	super::input::{await_key_window, make_key_in_background, source},
+	super::input::{await_key_window, make_key_in_background, source, still_behind_user},
 	MacAx, copy_attribute, copy_attribute_result, copy_bool, copy_element, copy_required_string,
 	copy_string, copy_strings_from_action_names, create_application, element_pid, mac_handle,
 	perform_action, set_timeout, skylight, window_id,
@@ -82,8 +82,12 @@ fn with_window_menu<T>(
 	let (app, pid, wid) = window_menu_context(window)?;
 	// Application menus dispatch through the key window, not their AX parent.
 	skylight::with_background_guard(pid, || {
-		make_key_in_background(&source()?, pid, wid, window)?;
+		let prepared = make_key_in_background(&source()?, pid, wid, window)?;
 		require_key_context(pid, wid)?;
+		// The user may have brought the app forward while its key window settled.
+		if prepared {
+			still_behind_user(pid, wid)?;
+		}
 		action(&app, pid, wid)
 	})
 }
